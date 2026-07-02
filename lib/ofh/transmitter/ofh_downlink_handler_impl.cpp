@@ -83,6 +83,8 @@ void downlink_handler_impl::handle_dl_data(const resource_grid_context& context,
     return;
   }
 
+  logger.debug("Sector#{}: received resource grid from the PHY for slot {}", sector_id, context.slot);
+
   if (window_checker.is_late(context.slot)) {
     log_conditional_warning(
         logger,
@@ -109,8 +111,9 @@ void downlink_handler_impl::handle_dl_data(const resource_grid_context& context,
   uplane_context.symbol_range = cplane_context.symbol_range;
 
   for (unsigned cell_port_id = 0, e = reader.get_nof_ports(); cell_port_id != e; ++cell_port_id) {
-    cplane_context.eaxc = dl_eaxc[cell_port_id];
     // Control-Plane data flow.
+    cplane_context.port = cell_port_id;
+    cplane_context.eaxc = dl_eaxc[cell_port_id];
     data_flow_cplane->enqueue_section_type_1_message(cplane_context);
 
     // User-Plane data flow.

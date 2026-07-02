@@ -5,27 +5,38 @@
 
 #include "ofh_uplink_request_handler_impl.h"
 #include "ocudu/ofh/ofh_controller.h"
+#include "ocudu/support/executors/strand_executor.h"
 #include "ocudu/support/executors/task_executor.h"
 #include "ocudu/support/synchronization/stop_event.h"
+#include <memory>
 
 namespace ocudu {
 namespace ofh {
 
-/// Uplink request handler task dispatcher.
+/// \brief Uplink request handler task dispatcher.
+///
+/// Uplink data and PRACH Control-Plane requests are serialized through a single strand, so that per-eAxC eCPRI sequence
+/// identifiers are generated in transmission (slot) order.
 class uplink_request_handler_task_dispatcher : public uplink_request_handler, operation_controller
 {
-  const unsigned          sector_id;
-  ocudulog::basic_logger& logger;
-  uplink_request_handler& uplink_handler;
-  task_executor&          executor;
-  rt_stop_event_source    stop_manager;
+  /// Size of the strand task queue. Limit it to 8 pending slots.
+  static constexpr unsigned strand_queue_size = 8u;
+
+  const unsigned                 sector_id;
+  ocudulog::basic_logger&        logger;
+  uplink_request_handler&        uplink_handler;
+  std::unique_ptr<task_executor> strand;
+  rt_stop_event_source           stop_manager;
 
 public:
   uplink_request_handler_task_dispatcher(unsigned                sector_id_,
                                          ocudulog::basic_logger& logger_,
                                          uplink_request_handler& uplink_handler_,
                                          task_executor&          executor_) :
-    sector_id(sector_id_), logger(logger_), uplink_handler(uplink_handler_), executor(executor_)
+    sector_id(sector_id_),
+    logger(logger_),
+    uplink_handler(uplink_handler_),
+    strand(make_task_strand_ptr<concurrent_queue_policy::lockfree_mpmc>(executor_, strand_queue_size))
   {
   }
 

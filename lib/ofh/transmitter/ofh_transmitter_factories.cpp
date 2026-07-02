@@ -192,6 +192,7 @@ resolve_transmitter_dependencies(const transmitter_config&                      
                                     ul_cp_context_repo,
                                     prach_cp_context_repo),
       downlink_executor,
+      tx_config.dl_eaxc.size(),
       tx_config.sector);
 
   dependencies.frame_pool_dl_up =
@@ -201,6 +202,7 @@ resolve_transmitter_dependencies(const transmitter_config&                      
       logger,
       create_data_flow_uplane_data(tx_config, logger, dependencies.frame_pool_dl_up),
       downlink_executor,
+      tx_config.dl_eaxc.size(),
       tx_config.sector);
 
   dependencies.frame_pool_ul_cp =
