@@ -15,6 +15,8 @@
 #include "ocudu/ofh/transmitter/ofh_transmitter_configuration.h"
 #include "ocudu/ran/tdd/tdd_ul_dl_config.h"
 #include "ocudu/support/synchronization/stop_event.h"
+#include <atomic>
+#include <limits>
 
 namespace ocudu {
 namespace ofh {
@@ -79,6 +81,9 @@ public:
   downlink_handler_metrics_collector& get_metrics_collector() { return metrics_collector; }
 
 private:
+  /// A value indicating that no downlink resource grid has been processed yet.
+  static constexpr uint32_t invalid_slot_count = std::numeric_limits<uint32_t>::max();
+
   const unsigned                                        sector_id;
   ocudulog::basic_logger&                               logger;
   const cyclic_prefix                                   cp;
@@ -93,6 +98,8 @@ private:
   downlink_handler_metrics_collector                    metrics_collector;
   bool                                                  enable_log_warnings_for_lates;
   rt_stop_event_source                                  stop_control;
+  /// Keeps track of the slot of the last downlink resource grid delivered by the PHY.
+  std::atomic<uint32_t> last_processed_slot{invalid_slot_count};
 };
 
 } // namespace ofh
