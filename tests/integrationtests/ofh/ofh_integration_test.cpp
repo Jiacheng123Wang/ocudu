@@ -17,6 +17,7 @@
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/phy/support/shared_resource_grid.h"
 #include "ocudu/phy/support/support_factories.h"
+#include "ocudu/ru/ofh/ru_ofh_executor_mapper_factory.h"
 #include "ocudu/ru/ofh/ru_ofh_factory.h"
 #include "ocudu/ru/ru_controller.h"
 #include "ocudu/ru/ru_downlink_plane.h"
@@ -968,13 +969,14 @@ struct worker_manager {
     }
   }
 
-  task_execution_manager exec_mng;
-  task_executor*         ru_timing_exec = nullptr;
-  task_executor*         ru_dl_exec;
-  task_executor*         ru_tx_exec;
-  task_executor*         ru_rx_exec;
-  task_executor*         test_du_sim_exec;
-  task_executor*         test_ru_sim_exec;
+  task_execution_manager                  exec_mng;
+  task_executor*                          ru_timing_exec = nullptr;
+  task_executor*                          ru_dl_exec;
+  task_executor*                          ru_tx_exec;
+  task_executor*                          ru_rx_exec;
+  task_executor*                          test_du_sim_exec;
+  task_executor*                          test_ru_sim_exec;
+  std::unique_ptr<ru_ofh_executor_mapper> ofh_exec_mapper;
 };
 } // namespace
 
@@ -1057,22 +1059,29 @@ static ru_ofh_dependencies generate_ru_dependencies(ocudulog::basic_logger&     
   dependencies.rt_timing_executor = workers.ru_timing_exec;
   dependencies.error_notifier     = &error_notifier;
 
-  dependencies.sector_dependencies.emplace_back();
-  auto& sector_deps             = dependencies.sector_dependencies.back();
-  sector_deps.logger            = &logger;
-  sector_deps.downlink_executor = workers.ru_dl_exec;
-  sector_deps.uplink_executor   = workers.ru_rx_exec;
-  sector_deps.txrx_executor     = workers.ru_tx_exec;
+  // Build the sector executor mapper that owns the per-eAxC serialization strands.
+  ru_ofh_executor_mapper_config exec_mapper_cfg;
+  exec_mapper_cfg.dl_eaxc_per_sector = {test_params.dl_port_id};
+  exec_mapper_cfg.downlink_executor  = workers.ru_dl_exec;
+  exec_mapper_cfg.uplink_executor    = workers.ru_rx_exec;
+  exec_mapper_cfg.txrx_executors     = {workers.ru_tx_exec};
+  exec_mapper_cfg.timing_executor    = workers.ru_timing_exec;
+  workers.ofh_exec_mapper            = create_ofh_ru_executor_mapper(exec_mapper_cfg);
 
   // Configure Ethernet gateway.
-  auto gateway                = std::make_unique<test_gateway>();
-  tx_gateway                  = gateway.get();
-  sector_deps.eth_transmitter = std::move(gateway);
+  auto gateway = std::make_unique<test_gateway>();
+  tx_gateway   = gateway.get();
 
   // Configure Ethernet receiver.
-  auto dummy_receiver      = std::make_unique<dummy_eth_receiver>(logger, buffer_pool);
-  eth_receiver             = dummy_receiver.get();
-  sector_deps.eth_receiver = std::move(dummy_receiver);
+  auto dummy_receiver = std::make_unique<dummy_eth_receiver>(logger, buffer_pool);
+  eth_receiver        = dummy_receiver.get();
+
+  dependencies.sector_dependencies.emplace_back(ofh::sector_dependencies{
+      .logger          = &logger,
+      .exec_mapper     = workers.ofh_exec_mapper->get_sector_mapper(0),
+      .eth_transmitter = std::move(gateway),
+      .eth_receiver    = std::move(dummy_receiver),
+  });
 
   return dependencies;
 }

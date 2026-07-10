@@ -492,7 +492,7 @@ void worker_manager::create_ofh_executors(const worker_manager_config::ru_ofh_co
     }
   }
 
-  exec_mapper_config.nof_sectors = config.nof_cells;
+  exec_mapper_config.dl_eaxc_per_sector = config.dl_eaxc_per_sector;
 
   // Create executor mapper.
   ofh_exec_mapper = create_ofh_ru_executor_mapper(exec_mapper_config);

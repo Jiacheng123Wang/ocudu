@@ -25,6 +25,7 @@ class task_executor;
 namespace ofh {
 
 class error_notifier;
+class ofh_sector_executor_mapper;
 
 /// Open Fronthaul sector configuration.
 struct sector_configuration {
@@ -121,12 +122,8 @@ struct sector_dependencies {
   ocudulog::basic_logger* logger = nullptr;
   /// Error notifier.
   error_notifier* err_notifier = nullptr;
-  /// Downlink task executor.
-  task_executor* downlink_executor = nullptr;
-  /// Message transmitter and receiver task executor.
-  task_executor* txrx_executor = nullptr;
-  /// Uplink task executor.
-  task_executor* uplink_executor = nullptr;
+  /// Sector executor mapper providing the txrx, downlink and uplink processing executors.
+  ofh_sector_executor_mapper& exec_mapper;
   /// User-Plane received symbol notifier.
   uplane_rx_symbol_notifier* notifier = nullptr;
   /// Optional Ethernet transmitter.

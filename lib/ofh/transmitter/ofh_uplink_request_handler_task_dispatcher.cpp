@@ -29,10 +29,10 @@ void uplink_request_handler_task_dispatcher::handle_prach_occasion(const prach_b
     return;
   }
 
-  if (!strand->defer([context,
-                      prach_buff = std::move(buffer),
-                      this,
-                      tk = std::move(token)]() mutable noexcept OCUDU_RTSAN_NONBLOCKING {
+  if (!executor.defer([context,
+                       prach_buff = std::move(buffer),
+                       this,
+                       tk = std::move(token)]() mutable noexcept OCUDU_RTSAN_NONBLOCKING {
         uplink_handler.handle_prach_occasion(context, std::move(prach_buff));
       })) {
     logger.warning(
@@ -49,7 +49,7 @@ void uplink_request_handler_task_dispatcher::handle_new_uplink_slot(const resour
     return;
   }
 
-  if (!strand->defer([context, rg = grid.copy(), this, tk = std::move(token)]() noexcept OCUDU_RTSAN_NONBLOCKING {
+  if (!executor.defer([context, rg = grid.copy(), this, tk = std::move(token)]() noexcept OCUDU_RTSAN_NONBLOCKING {
         uplink_handler.handle_new_uplink_slot(context, rg);
       })) {
     logger.warning(

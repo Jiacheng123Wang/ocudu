@@ -21,6 +21,8 @@ struct worker_manager_config {
     os_sched_affinity_bitmask ru_timing_cpu;
     /// Vector of affinities for the txrx workers.
     std::vector<os_sched_affinity_bitmask> txrx_affinities;
+    /// Downlink eAxC (RU DL port) identifiers configured for each cell.
+    std::vector<std::vector<unsigned>> dl_eaxc_per_sector;
   };
 
   /// RU SDR worker configuration.

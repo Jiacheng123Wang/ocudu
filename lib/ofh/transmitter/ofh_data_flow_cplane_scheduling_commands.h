@@ -43,8 +43,6 @@ struct data_flow_cplane_scheduling_prach_context {
 struct data_flow_cplane_type_1_context {
   /// Slot point.
   slot_point slot;
-  /// Provides the port identifier.
-  unsigned port;
   /// eAxC.
   unsigned eaxc;
   /// Filter type.
