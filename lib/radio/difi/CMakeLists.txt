@@ -3,7 +3,8 @@
 
 set(SOURCES_DIFI
         radio_difi_context_packet.cpp
-        radio_difi_data_packet.cpp)
+        radio_difi_data_packet.cpp
+        radio_difi_udp_socket.cpp)
 
 add_library(ocudu_radio_difi STATIC ${SOURCES_DIFI})
 
