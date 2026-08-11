@@ -185,7 +185,8 @@ std::optional<std::chrono::system_clock::time_point> rrc_du_impl::get_ref_time_r
                    (static_cast<int64_t>(rrc_ref_time.ref_milli_seconds_r16) * 1'000'000LL) +
                    (static_cast<int64_t>(rrc_ref_time.ref_ten_nano_seconds_r16) * 10LL);
   int64_t unix_ns = is_local_clock ? raw_ns : (raw_ns + GPS_EPOCH_OFFSET_NS);
-  return std::chrono::system_clock::time_point{std::chrono::nanoseconds{unix_ns}};
+  using system_tp = std::chrono::system_clock::time_point;
+  return system_tp{std::chrono::duration_cast<system_tp::duration>(std::chrono::nanoseconds{unix_ns})};
 }
 
 byte_buffer rrc_du_impl::get_rrc_reject()
