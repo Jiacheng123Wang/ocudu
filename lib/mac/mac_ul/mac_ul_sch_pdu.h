@@ -3,6 +3,23 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #pragma once
+#if defined(__APPLE__)
+#include <libkern/OSByteOrder.h>
+#ifndef le16toh
+#define le16toh(x) OSSwapLittleToHostInt16(x)
+#endif
+#ifndef htole16
+#define htole16(x) OSSwapHostToLittleInt16(x)
+#endif
+#ifndef le32toh
+#define le32toh(x) OSSwapLittleToHostInt32(x)
+#endif
+#ifndef htole32
+#define htole32(x) OSSwapHostToLittleInt32(x)
+#endif
+#else
+#include <endian.h>
+#endif
 
 #include "lcid_ul_sch.h"
 #include "ul_bsr.h"

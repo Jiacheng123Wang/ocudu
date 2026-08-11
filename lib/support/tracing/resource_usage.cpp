@@ -4,6 +4,10 @@
 #include "ocudu/support/tracing/resource_usage.h"
 #include <sys/resource.h>
 
+#ifndef RUSAGE_THREAD
+#define RUSAGE_THREAD RUSAGE_SELF
+#endif
+
 using namespace ocudu;
 using namespace resource_usage;
 

@@ -144,7 +144,11 @@ public:
   /// \brief Retrieves the segment and object index of a free object in the pool.
   std::pair<unsigned, unsigned> get()
   {
-    const unsigned cpuid      = std::max(::sched_getcpu(), 0);
+#if defined(__APPLE__)
+    const unsigned cpuid = 0;
+#else
+    const unsigned cpuid = std::max(::sched_getcpu(), 0);
+#endif
     unsigned       seg_offset = 0;
     if (segments.size() > 1) {
       seg_offset = (cpuid * cpu_seg_offset_dist_coeff) % segments.size();

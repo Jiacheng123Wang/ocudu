@@ -12,12 +12,15 @@
 #include <set>
 #include <string>
 #include <sys/stat.h>
+#include <thread> // 引入 std::thread，用于 macOS 获取核心数
+
 #ifdef NUMA_SUPPORT
 #include <numa.h>
 #endif
 
 using namespace ocudu;
 
+#if !defined(__APPLE__)
 /// Converts the string containing a CPU index to an unsigned integer number.
 static unsigned parse_one_cpu(const std::string& value)
 {
@@ -38,10 +41,38 @@ static interval<unsigned, true> parse_cpu_range(const std::string& value)
   }
   return {range[0], range[1]};
 }
+#endif // !defined(__APPLE__)
 
 cpu_architecture_info::cpu_description cpu_architecture_info::discover_cpu_architecture()
 {
   cpu_description cpuinfo;
+
+#if defined(__APPLE__)
+  // macOS / Apple Silicon 兼容逻辑
+  // Apple M系列芯片为统一内存架构，没有超线程，直接按获取到的硬件并发线程数映射
+  cpuinfo.nof_cpus = std::thread::hardware_concurrency();
+  if (cpuinfo.nof_cpus == 0) {
+    cpuinfo.nof_cpus = 1; // 极少数情况下的 fallback
+  }
+  
+  cpuinfo.nof_available_cpus = cpuinfo.nof_cpus;
+  cpuinfo.max_cpu_id         = cpuinfo.nof_cpus - 1;
+  
+  cpuinfo.allowed_cpus.resize(cpuinfo.nof_cpus);
+  cpuinfo.allowed_cpus.fill(0, cpuinfo.nof_cpus); // 允许在所有核上运行
+
+  // Apple Silicon物理核与逻辑核 1:1，建立基础映射
+  for (unsigned i = 0; i < cpuinfo.nof_cpus; ++i) {
+    cpuinfo.logical_cpu_lists.emplace_back();
+    auto& bitmask = cpuinfo.logical_cpu_lists.back();
+    bitmask.resize(cpuinfo.nof_cpus);
+    bitmask.set(i);
+  }
+
+  cpuinfo.nof_numa_nodes = 1;
+
+#else
+  // 原生 Linux 逻辑
   ::cpu_set_t&    cpuset = cpuinfo.cpuset;
 
   // Discover host CPU architecture.
@@ -178,6 +209,7 @@ cpu_architecture_info::cpu_description cpu_architecture_info::discover_cpu_archi
     ::closedir(dir);
   }
 #endif // NUMA_SUPPORT
+#endif // defined(__APPLE__)
 
   return cpuinfo;
 }

@@ -86,7 +86,7 @@ void trace_duration_begin(const std::string& category, const std::string& name)
 
   char fmt_time[24];
   format_time(fmt_time, sizeof(fmt_time));
-  (*tracer)("[{}] [TID:{}] Entering \"{}\": {}", fmt_time, (unsigned)::pthread_self(), category, name);
+  (*tracer)("[{}] [TID:{}] Entering \"{}\": {}", fmt_time, (uintptr_t)::pthread_self(), category, name);
 }
 
 void trace_duration_end(const std::string& category, const std::string& name)
@@ -97,7 +97,7 @@ void trace_duration_end(const std::string& category, const std::string& name)
 
   char fmt_time[24];
   format_time(fmt_time, sizeof(fmt_time));
-  (*tracer)("[{}] [TID:{}] Leaving \"{}\": {}", fmt_time, (unsigned)::pthread_self(), category, name);
+  (*tracer)("[{}] [TID:{}] Leaving \"{}\": {}", fmt_time, (uintptr_t)::pthread_self(), category, name);
 }
 
 } // namespace ocudulog

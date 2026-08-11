@@ -578,16 +578,19 @@ public:
   static const uint32_t nof_types = EnumType::nulltype, nof_exts = M;
   static const bool     has_ext = E;
 
-  enumerated() { EnumType::value = EnumType::nulltype; }
-  enumerated(typename EnumType::options enumerated_option_val) { EnumType::value = enumerated_option_val; }
+  constexpr enumerated() : EnumType{EnumType::nulltype} {}
+  constexpr enumerated(typename EnumType::options enumerated_option_val) : EnumType{enumerated_option_val} {}
+
   OCUDUASN_CODE pack(bit_ref& bref) const { return pack_enum(bref, *this); }
   OCUDUASN_CODE unpack(cbit_ref& bref) { return unpack_enum(*this, bref); }
-  EnumType&     operator=(EnumType v)
+
+  EnumType& operator=(EnumType v)
   {
-    EnumType::value = v;
+    EnumType::value = v.value;
     return *this;
   }
-  operator typename EnumType::options() const { return EnumType::value; }
+
+  constexpr operator typename EnumType::options() const { return EnumType::value; }
 };
 
 /************************
@@ -1716,15 +1719,24 @@ struct setup_release_c {
   OCUDUASN_CODE pack(bit_ref& bref) const
   {
     type_.pack(bref);
-    switch (type_) {
-      case types::release:
-        break;
-      case types::setup:
-        HANDLE_CODE(c.pack(bref));
-        break;
-      default:
-        log_invalid_choice_id(type_, "setup_release_c");
-        return OCUDUASN_ERROR_ENCODE_FAIL;
+    // switch (type_) {
+    //   case setup_release_opts::release:
+    //     break;
+    //   case setup_release_opts::setup:
+    //     HANDLE_CODE(c.pack(bref));
+    //     break;
+    //   default:
+    //     log_invalid_choice_id(type_, "setup_release_c");
+    //     return OCUDUASN_ERROR_ENCODE_FAIL;
+    // }
+    if (type_ == setup_release_opts::setup)
+    {
+      HANDLE_CODE(c.pack(bref));
+    }
+    else
+    {
+      log_invalid_choice_id(type_, "setup_release_c");
+      return OCUDUASN_ERROR_ENCODE_FAIL;
     }
     return OCUDUASN_SUCCESS;
   }
@@ -1733,29 +1745,46 @@ struct setup_release_c {
     types e;
     e.unpack(bref);
     set(e);
-    switch (type_) {
-      case types::release:
-        break;
-      case types::setup:
-        HANDLE_CODE(c.unpack(bref));
-        break;
-      default:
-        log_invalid_choice_id(type_, "setup_release_c");
-        return OCUDUASN_ERROR_DECODE_FAIL;
+    // switch (type_) {
+    //   case setup_release_opts::release:
+    //     break;
+    //   case setup_release_opts::setup:
+    //     HANDLE_CODE(c.unpack(bref));
+    //     break;
+    //   default:
+    //     log_invalid_choice_id(type_, "setup_release_c");
+    //     return OCUDUASN_ERROR_DECODE_FAIL;
+    // }
+    if (type_ == setup_release_opts::setup)
+    {
+      HANDLE_CODE(c.unpack(bref));
+    }
+    else
+    {
+      log_invalid_choice_id(type_, "setup_release_c");
+      return OCUDUASN_ERROR_DECODE_FAIL;
     }
     return OCUDUASN_SUCCESS;
   }
   void to_json(json_writer& j) const
   {
     j.start_obj();
-    switch (type_) {
-      case types::release:
-        break;
-      case types::setup:
-        asn1::to_json(j, setup());
-        break;
-      default:
-        log_invalid_choice_id(type_, "setup_release_c");
+    // switch (type_) {
+    //   case setup_release_opts::release:
+    //     break;
+    //   case setup_release_opts::setup:
+    //     asn1::to_json(j, setup());
+    //     break;
+    //   default:
+    //     log_invalid_choice_id(type_, "setup_release_c");
+    // }
+    if (type_ == setup_release_opts::setup)
+    {
+      asn1::to_json(j, setup());
+    }
+    else
+    {
+      log_invalid_choice_id(type_, "setup_release_c");
     }
     j.end_obj();
   }
@@ -1763,24 +1792,24 @@ struct setup_release_c {
   bool is_setup() const { return type_.value == setup_release_opts::setup; }
   T&   setup()
   {
-    assert_choice_type(types::setup, type_, "SetupRelease");
+    assert_choice_type(setup_release_opts::setup, type_, "SetupRelease");
     return c;
   }
   const T& setup() const
   {
-    assert_choice_type(types::setup, type_, "SetupRelease");
+    assert_choice_type(setup_release_opts::setup, type_, "SetupRelease");
     return c;
   }
-  void set_release() { set(types::release); }
+  void set_release() { set(setup_release_opts::release); }
   T&   set_setup()
   {
-    set(types::setup);
+    set(setup_release_opts::setup);
     return c;
   }
 
   bool operator==(const setup_release_c<T>& other) const
   {
-    return type_ == other.type_ and (type_ != types::setup or (c == other.c));
+    return type_ == other.type_ and (type_ != setup_release_opts::setup or (c == other.c));
   }
 
 private:
@@ -1800,15 +1829,24 @@ struct setup_release_c<std::array<T, N>> {
   OCUDUASN_CODE pack(bit_ref& bref) const
   {
     type_.pack(bref);
-    switch (type_) {
-      case types::release:
-        break;
-      case types::setup:
-        HANDLE_CODE(pack_fixed_seq_of(bref, c, N));
-        break;
-      default:
-        log_invalid_choice_id(type_, "setup_release_c");
-        return OCUDUASN_ERROR_ENCODE_FAIL;
+    // switch (type_) {
+    //   case setup_release_opts::release:
+    //     break;
+    //   case setup_release_opts::setup:
+    //     HANDLE_CODE(pack_fixed_seq_of(bref, c, N));
+    //     break;
+    //   default:
+    //     log_invalid_choice_id(type_, "setup_release_c");
+    //     return OCUDUASN_ERROR_ENCODE_FAIL;
+    // }
+    if (type_ == setup_release_opts::setup)
+    {
+      HANDLE_CODE(pack_fixed_seq_of(bref, c, N));
+    }
+    else
+    {
+      log_invalid_choice_id(type_, "setup_release_c");
+      return OCUDUASN_ERROR_ENCODE_FAIL;
     }
     return OCUDUASN_SUCCESS;
   }
@@ -1817,29 +1855,46 @@ struct setup_release_c<std::array<T, N>> {
     types e;
     e.unpack(bref);
     set(e);
-    switch (type_) {
-      case types::release:
-        break;
-      case types::setup:
-        HANDLE_CODE(unpack_fixed_seq_of(c, bref, N));
-        break;
-      default:
-        log_invalid_choice_id(type_, "setup_release_c");
-        return OCUDUASN_ERROR_DECODE_FAIL;
+    // switch (type_) {
+    //   case setup_release_opts::release:
+    //     break;
+    //   case setup_release_opts::setup:
+    //     HANDLE_CODE(unpack_fixed_seq_of(c, bref, N));
+    //     break;
+    //   default:
+    //     log_invalid_choice_id(type_, "setup_release_c");
+    //     return OCUDUASN_ERROR_DECODE_FAIL;
+    // }
+    if (type_ == setup_release_opts::setup)
+    {
+      HANDLE_CODE(unpack_fixed_seq_of(c, bref, N));
+    }
+    else
+    {
+      log_invalid_choice_id(type_, "setup_release_c");
+      return OCUDUASN_ERROR_DECODE_FAIL;
     }
     return OCUDUASN_SUCCESS;
   }
   void to_json(json_writer& j) const
   {
     j.start_obj();
-    switch (type_) {
-      case types::release:
-        break;
-      case types::setup:
-        asn1::to_json(j, setup());
-        break;
-      default:
-        log_invalid_choice_id(type_, "setup_release_c");
+    // switch (type_) {
+    //   case setup_release_opts::release:
+    //     break;
+    //   case setup_release_opts::setup:
+    //     asn1::to_json(j, setup());
+    //     break;
+    //   default:
+    //     log_invalid_choice_id(type_, "setup_release_c");
+    // }
+    if (type_ == setup_release_opts::setup)
+    {
+      asn1::to_json(j, setup());
+    }
+    else
+    {
+      log_invalid_choice_id(type_, "setup_release_c");
     }
     j.end_obj();
   }

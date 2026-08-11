@@ -3,7 +3,11 @@
 
 #include "backend_pcap_writer.h"
 #include "ocudu/support/executors/sync_task_executor.h"
+#if defined(__APPLE__)
+#include <netinet/udp.h>
+#else
 #include <linux/udp.h>
+#endif
 #include <netinet/in.h>
 #include <thread>
 
@@ -17,16 +21,27 @@ pcap_pdu_data::pcap_pdu_data(uint16_t            src,
 {
   const size_t layer_str_len = strlen(layer_str);
 
-  // Add dummy UDP header, start with src and dest port
+  // Add dummy UDP header
   udphdr udp_header;
-  udp_header.source = htons(src);
-  udp_header.dest   = htons(dest);
+#if defined(__APPLE__)
+  udp_header.uh_sport = htons(src);
+  udp_header.uh_dport = htons(dest);
+#else
+  udp_header.source   = htons(src);
+  udp_header.dest     = htons(dest);
+#endif
+
   // length
   unsigned length = sizeof(udphdr) + layer_str_len + context_header.size() + payload_.length();
   ocudu_assert(length < std::numeric_limits<uint16_t>::max(), "PDU length is too large");
-  udp_header.len = htons(length);
-  // dummy CRC
-  udp_header.check = 0x0;
+
+#if defined(__APPLE__)
+  udp_header.uh_ulen  = htons(length);
+  udp_header.uh_sum   = 0x0;
+#else
+  udp_header.len      = htons(length);
+  udp_header.check    = 0x0;
+#endif
 
   if (not header_buf.append(span<const uint8_t>{(const uint8_t*)&udp_header, sizeof(udphdr)}) or
       not header_buf.append(span<const uint8_t>{(const uint8_t*)layer_str, layer_str_len}) or

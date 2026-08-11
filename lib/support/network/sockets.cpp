@@ -5,8 +5,10 @@
 #include "ocudu/support/io/unique_fd.h"
 #include "ocudu/support/ocudu_assert.h"
 #include <arpa/inet.h>
+#include <cstring>
 #include <fcntl.h>
 #include <net/if.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -56,16 +58,31 @@ bool ocudu::bind_to_interface(const unique_fd& fd, const std::string& interface,
   }
 
   ifreq ifr{};
-  std::strncpy(ifr.ifr_ifrn.ifrn_name, interface.c_str(), IFNAMSIZ - 1);
-  ifr.ifr_ifrn.ifrn_name[IFNAMSIZ - 1] = 0; // ensure null termination in case input exceeds maximum length
+  std::strncpy(ifr.ifr_name, interface.c_str(), IFNAMSIZ - 1);
+  ifr.ifr_name[IFNAMSIZ - 1] = 0; // ensure null termination in case input exceeds maximum length
 
+#if defined(SO_BINDTODEVICE)
   if (::setsockopt(fd.value(), SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof(ifr)) < 0) {
     logger.error("fd={}: Could not bind socket to interface \"{}\". errno=\"{}\"",
                  fd.value(),
-                 ifr.ifr_ifrn.ifrn_name,
+                 ifr.ifr_name,
                  ::strerror(errno));
     return false;
   }
+#elif defined(IP_BOUND_IF)
+  unsigned int ifindex = ::if_nametoindex(interface.c_str());
+  if (ifindex == 0 || ::setsockopt(fd.value(), IPPROTO_IP, IP_BOUND_IF, &ifindex, sizeof(ifindex)) < 0) {
+    logger.error("fd={}: Could not bind socket to interface \"{}\". errno=\"{}\"",
+                 fd.value(),
+                 ifr.ifr_name,
+                 ::strerror(errno));
+    return false;
+  }
+#else
+  logger.error("fd={}: Binding socket to device is not supported on this platform", fd.value());
+  return false;
+#endif
+
   return true;
 }
 
@@ -151,10 +168,14 @@ std::string ocudu::sock_type_to_str(int type)
       return "SOCK_RDM";
     case SOCK_SEQPACKET:
       return "SOCK_SEQPACKET";
+#if defined(SOCK_DCCP)
     case SOCK_DCCP:
       return "SOCK_DCCP";
+#endif
+#if defined(SOCK_PACKET)
     case SOCK_PACKET:
       return "SOCK_PACKET";
+#endif
   }
   return "unknown type";
 }

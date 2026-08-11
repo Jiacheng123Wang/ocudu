@@ -24,9 +24,9 @@ private:
   uint64_t read_raw_uj(const unique_fd& fd, double scale) const;
 
   unique_fd pkg_fd;
-  double    pkg_scale;
+  [[maybe_unused]] double    pkg_scale;
   unique_fd core_fd;
-  double    core_scale;
+  [[maybe_unused]] double    core_scale;
 };
 
 /// Creates a perf_event RAPL reader if supported by the system (requires CAP_PERFMON, kernel >= 5.8).

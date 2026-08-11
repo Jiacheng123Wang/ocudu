@@ -9,6 +9,7 @@
 #include <mutex>
 #include <pthread.h>
 #include <sys/types.h>
+#include <thread>
 
 using namespace ocudu;
 
@@ -30,6 +31,7 @@ static bool thread_set_param(::pthread_t t, os_thread_realtime_priority prio)
 
 static bool thread_set_affinity(::pthread_t t, const os_sched_affinity_bitmask& bitmap, const std::string& name)
 {
+#if !defined(__APPLE__)
   auto invalid_ids = bitmap.subtract(os_sched_affinity_bitmask::available_cpus());
   if (!invalid_ids.empty()) {
     fmt::println("Warning: The CPU affinity of thread \"{}\" contains the following invalid CPU ids: {}",
@@ -56,6 +58,12 @@ static bool thread_set_affinity(::pthread_t t, const os_sched_affinity_bitmask& 
 
   CPU_FREE(cpusetp);
   return true;
+#else
+  (void)t;
+  (void)bitmap;
+  (void)name;
+  return true;
+#endif
 }
 
 static std::string compute_this_thread_name()
@@ -78,11 +86,10 @@ static void print_thread_priority(::pthread_t t, const char* tname, std::thread:
     return;
   }
 
+#if !defined(__APPLE__)
   ::cpu_set_t cpuset;
 
-  int s;
-
-  s = ::pthread_getaffinity_np(t, sizeof(::cpu_set_t), &cpuset);
+  int s = ::pthread_getaffinity_np(t, sizeof(::cpu_set_t), &cpuset);
   if (s != 0) {
     fmt::println("error pthread_getaffinity_np: {}", ::strerror(s));
   }
@@ -93,12 +100,15 @@ static void print_thread_priority(::pthread_t t, const char* tname, std::thread:
       fmt::println("    CPU {}", j);
     }
   }
+#else
+  fmt::println("Thread affinity query is not supported on macOS.");
+#endif
 
   int           policy;
   ::sched_param param;
-  s = ::pthread_getschedparam(t, &policy, &param);
+  int s = ::pthread_getschedparam(t, &policy, &param);
   if (s != 0) {
-    fmt::println("error pthread_getaffinity_np: {}", ::strerror(s));
+    fmt::println("error pthread_getschedparam: {}", ::strerror(s));
   }
 
   const char* p;
@@ -224,12 +234,19 @@ const os_sched_affinity_bitmask& os_sched_affinity_bitmask::available_cpus()
 {
   static os_sched_affinity_bitmask available_cpus_mask = []() {
     os_sched_affinity_bitmask bitmask;
-    ::cpu_set_t               cpuset = cpu_architecture_info::get().get_available_cpuset();
+#if !defined(__APPLE__)
+    ::cpu_set_t cpuset = cpu_architecture_info::get().get_available_cpuset();
     for (size_t i = 0, e = bitmask.size(); i != e; ++i) {
       if (CPU_ISSET(i, &cpuset)) {
         bitmask.cpu_bitset.set(i);
       }
     }
+#else
+    unsigned n = std::thread::hardware_concurrency();
+    for (size_t i = 0; i < n && i < bitmask.size(); ++i) {
+      bitmask.cpu_bitset.set(i);
+    }
+#endif
     return bitmask;
   }();
 
@@ -265,20 +282,27 @@ std::thread unique_thread::make_thread(const std::string&               name,
                    fixed_name);
     }
 
+#if defined(__APPLE__)
+    if (::pthread_setname_np(fixed_name.c_str()) != 0) {
+      ::perror("pthread_setname_np");
+      fmt::println("Thread [{}]: Error while setting thread name to {}.", std::this_thread::get_id(), name);
+    }
+#else
     ::pthread_t tself = ::pthread_self();
     if (::pthread_setname_np(tself, fixed_name.c_str()) != 0) {
       ::perror("pthread_setname_np");
       fmt::println("Thread [{}]: Error while setting thread name to {}.", std::this_thread::get_id(), name);
     }
+#endif
 
     // Set thread OS priority and affinity.
     // Note: TSAN seems to have issues with thread attributes when running as normal user, disable them in that case.
 #ifndef HAVE_TSAN
     if (prio != os_thread_realtime_priority::no_realtime()) {
-      thread_set_param(tself, prio);
+      thread_set_param(::pthread_self(), prio);
     }
     if (cpu_mask.any()) {
-      thread_set_affinity(tself, cpu_mask, name);
+      thread_set_affinity(::pthread_self(), cpu_mask, name);
     }
 #endif
 

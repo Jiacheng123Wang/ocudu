@@ -34,7 +34,7 @@ public:
 
       remote_address            = {};
       remote_address.sin_family = AF_INET;
-      remote_address.sin_port   = ::htons(port);
+      remote_address.sin_port   = htons(port);
 
       // First treat remote_ip as an ip address.
       if (::inet_pton(AF_INET, remote_ip.c_str(), &remote_address.sin_addr) == 1) {

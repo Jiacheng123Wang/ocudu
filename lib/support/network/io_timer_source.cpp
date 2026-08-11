@@ -6,12 +6,17 @@
 #include "ocudu/support/error_handling.h"
 #include "ocudu/support/io/io_broker.h"
 #include "ocudu/support/timers.h"
+
+#if !defined(__APPLE__)
 #include <sys/timerfd.h>
+#endif
+#include <unistd.h>
 
 using namespace ocudu;
 
 static unique_fd create_timer_fd(std::chrono::milliseconds tick_period)
 {
+#if !defined(__APPLE__)
   using namespace std::chrono;
 
   auto timer_fd = unique_fd{::timerfd_create(CLOCK_MONOTONIC, 0)};
@@ -24,6 +29,10 @@ static unique_fd create_timer_fd(std::chrono::milliseconds tick_period)
   ::timerfd_settime(timer_fd.value(), 0, &timerspec, nullptr);
 
   return timer_fd;
+#else
+  (void)tick_period;
+  return unique_fd{};
+#endif
 }
 
 io_timer_source::io_timer_source(timer_manager&            tick_sink_,
@@ -37,6 +46,8 @@ io_timer_source::io_timer_source(timer_manager&            tick_sink_,
   tick_exec(executor),
   logger(ocudulog::fetch_basic_logger("IO-EPOLL"))
 {
+  (void)broker;
+
   if (auto_start) {
     running.store(true, std::memory_order_relaxed);
     create_subscriber(shutdown_flag.get_token());
@@ -87,10 +98,16 @@ void io_timer_source::create_subscriber(scoped_sync_token token)
   }
 
   logger.info("Starting IO timer ticking source...");
-  auto      fd     = create_timer_fd(tick_period);
+  auto fd = create_timer_fd(tick_period);
+
+#if !defined(__APPLE__)
   const int raw_fd = fd.value();
   io_sub = broker.register_fd(std::move(fd), tick_exec, [this, raw_fd, token]() mutable { read_time(raw_fd, token); });
   report_fatal_error_if_not(io_sub.registered(), "Failed to create timer source");
+#else
+  (void)token;
+  logger.warning("Timerfd is not supported on macOS; io_timer_source operation stubbed.");
+#endif
 }
 
 void io_timer_source::destroy_subscriber(scoped_sync_token& token)

@@ -2,6 +2,14 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "io_broker_epoll.h"
+#if defined(__APPLE__)
+namespace ocudu {
+
+// macOS 下为 io_broker_epoll 提供空实现 / Stub 方法，防止链接缺失
+// （注：在后续阶段可在 macOS 上接入 kqueue 或 GCD 实现）
+
+} // namespace ocudu
+#else
 #include "ocudu/ocudulog/ocudulog.h"
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -482,3 +490,4 @@ void io_broker_epoll::stop_impl()
   // Clear event handler map.
   event_handler.clear();
 }
+#endif

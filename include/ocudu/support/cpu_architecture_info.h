@@ -5,6 +5,11 @@
 
 #include "ocudu/adt/bounded_bitset.h"
 #include "ocudu/ocudulog/logger.h"
+#if defined(__APPLE__)
+#include <cstdint>
+// macOS 无 cpu_set_t，定义存根类型以满足编译
+using cpu_set_t = uint64_t;
+#endif
 
 namespace ocudu {
 

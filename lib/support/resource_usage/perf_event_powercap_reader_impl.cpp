@@ -4,13 +4,18 @@
 #include "perf_event_powercap_reader_impl.h"
 #include <charconv>
 #include <fstream>
-#include <linux/perf_event.h>
 #include <sstream>
+
+#if !defined(__APPLE__)
+#include <linux/perf_event.h>
 #include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 using namespace ocudu;
 using namespace resource_usage_utils;
 
+#if !defined(__APPLE__)
 static constexpr auto powercap_pmu_type_path   = "/sys/bus/event_source/devices/power/type";
 static constexpr auto powercap_pkg_event_path  = "/sys/bus/event_source/devices/power/events/energy-pkg";
 static constexpr auto powercap_pkg_scale_path  = "/sys/bus/event_source/devices/power/events/energy-pkg.scale";
@@ -67,6 +72,7 @@ static int open_rapl_perf_fd(uint32_t pmu_type, uint64_t event_config)
   // pid=-1 (all tasks), cpu=0 (package 0), group_fd=-1, flags=0.
   return perf_event_open_syscall(&attr, -1, 0, -1, 0);
 }
+#endif // !defined(__APPLE__)
 
 perf_event_powercap_reader::perf_event_powercap_reader(unique_fd pkg_fd_,
                                                        double    pkg_scale_,
@@ -79,26 +85,37 @@ perf_event_powercap_reader::perf_event_powercap_reader(unique_fd pkg_fd_,
 /// Reads a raw perf counter value from fd and converts it to micro Joules using scale. Returns 0 on failure.
 uint64_t perf_event_powercap_reader::read_raw_uj(const unique_fd& fd, double scale) const
 {
+#if !defined(__APPLE__)
   uint64_t raw = 0;
   if (!fd.is_open() || ::read(fd.value(), &raw, sizeof(raw)) != static_cast<ssize_t>(sizeof(raw))) {
     return 0;
   }
   // scale is in Joules per raw unit — convert to micro Joules.
   return static_cast<uint64_t>(static_cast<double>(raw) * scale * 1e6);
+#else
+  return 0;
+#endif
 }
 
 /// Reads the package and core energy counters. Returns an energy_consumption with values in micro Joules.
 energy_consumption perf_event_powercap_reader::read_consumed_energy() const
 {
   energy_consumption probe   = {};
+#if !defined(__APPLE__)
   probe.package_consumed_uj  = read_raw_uj(pkg_fd, pkg_scale);
   probe.cpu_core_consumed_uj = core_fd.is_open() ? read_raw_uj(core_fd, core_scale) : 0;
+#endif
   return probe;
 }
 
 /// Creates a perf_event RAPL reader. Returns a valid reader on success, nullptr if the system does not support it.
 std::unique_ptr<energy_consumption_reader> resource_usage_utils::build_perf_event_reader(ocudulog::basic_logger& logger)
 {
+#if defined(__APPLE__)
+  // macOS (Apple Silicon) does not support Linux perf_events or sysfs.
+  logger.debug("Energy consumption utils: perf RAPL PMU not available on macOS.");
+  return nullptr;
+#else
   // Read RAPL PMU type.
   const std::string pmu_type_str = read_sysfs_line(powercap_pmu_type_path);
   if (pmu_type_str.empty()) {
@@ -148,4 +165,5 @@ std::unique_ptr<energy_consumption_reader> resource_usage_utils::build_perf_even
   }
 
   return std::make_unique<perf_event_powercap_reader>(std::move(pkg_fd), pkg_scale, std::move(core_fd), core_scale);
+#endif // defined(__APPLE__)
 }

@@ -7,6 +7,7 @@
 #include "ocudu/scheduler/scheduler_factory.h"
 #include "ocudu/support/async/async_timer.h"
 #include "ocudu/support/executors/execute_until_success.h"
+#include <type_traits>
 
 using namespace ocudu;
 
@@ -216,15 +217,24 @@ void ocudu_scheduler_adapter::handle_dl_mac_ce_indication(const mac_ce_schedulin
   sched_impl->handle_dl_mac_ce_indication(dl_mac_ce_indication{mac_ce.ue_index, mac_ce.ce_lcid});
 }
 
-static slot_point chrono_to_slot_point(std::chrono::high_resolution_clock::time_point hol_toa,
+template <typename Clock, typename Duration>
+static slot_point chrono_to_slot_point(std::chrono::time_point<Clock, Duration> hol_toa,
                                        std::chrono::high_resolution_clock::time_point last_slot_tp,
                                        slot_point                                     last_slot_p)
 {
   using namespace std::chrono;
   static constexpr microseconds half_system_frame_dur = milliseconds{10240 / 2};
 
-  // Get delay between last slot indication time point and HOL ToA.
-  microseconds hol_delay = duration_cast<microseconds>(last_slot_tp - hol_toa);
+  // 跨平台时钟转换：处理 macOS 下 Clock (system_clock) 与 high_resolution_clock (steady_clock) 不一致的问题
+  microseconds hol_delay;
+  if constexpr (std::is_same_v<Clock, high_resolution_clock>) {
+    hol_delay = duration_cast<microseconds>(last_slot_tp - hol_toa);
+  } else {
+    auto clock_now                  = Clock::now();
+    auto last_slot_now             = high_resolution_clock::now();
+    auto hol_toa_in_last_slot_clock = last_slot_now + duration_cast<microseconds>(hol_toa - clock_now);
+    hol_delay                      = duration_cast<microseconds>(last_slot_tp - hol_toa_in_last_slot_clock);
+  }
 
   // Bound delay to avoid negative values and slot wrap around ambiguity.
   hol_delay = std::min(std::max(hol_delay, microseconds{0}), half_system_frame_dur);

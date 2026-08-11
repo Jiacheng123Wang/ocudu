@@ -17,6 +17,15 @@ using namespace std::chrono;
 
 namespace {
 
+static inline unsigned get_current_cpu()
+{
+#if defined(__APPLE__)
+  return 0;
+#else
+  return ::sched_getcpu();
+#endif
+}
+
 struct instant_trace_event_extended;
 
 /// Helper class to write trace events to a file.
@@ -164,7 +173,7 @@ struct trace_event_extended : public trace_event {
   trace_duration duration;
 
   trace_event_extended(const trace_event& event, trace_duration duration_) :
-    trace_event(event), cpu(::sched_getcpu()), thread_name(this_thread_name()), duration(duration_)
+    trace_event(event), cpu(get_current_cpu()), thread_name(this_thread_name()), duration(duration_)
   {
   }
 };
@@ -175,7 +184,7 @@ struct instant_trace_event_extended : public instant_trace_event {
   trace_point tp;
 
   instant_trace_event_extended(const instant_trace_event& event) :
-    instant_trace_event(event), cpu(::sched_getcpu()), thread_name(this_thread_name()), tp(trace_point::clock::now())
+    instant_trace_event(event), cpu(get_current_cpu()), thread_name(this_thread_name()), tp(trace_point::clock::now())
   {
   }
 };
@@ -215,26 +224,50 @@ bool ocudu::is_trace_file_open()
 }
 
 /// Helper to get an approximation of the system clock timestamp.
-static auto formatted_date(trace_point start_tp)
+namespace {
+/// 1. 定义一个简单的包装体，替代原先的 make_formattable
+struct trace_date_wrapper {
+  trace_point tp;
+};
+
+/// 辅助函数：返回包装体
+inline trace_date_wrapper formatted_date(trace_point start_tp)
 {
-  /// Caching and mapping of system_clock with trace points for %H:%M:%S formatting.
-  static system_clock::time_point cached_sys_tp   = system_clock::now();
-  static trace_point              cached_trace_tp = trace_clock::now();
-
-  if (start_tp - cached_trace_tp > seconds{1}) {
-    // Recompute the mapping of system clock to trace points to compensate for drifts.
-    cached_sys_tp   = system_clock::now();
-    cached_trace_tp = trace_clock::now();
-  }
-
-  return make_formattable([start_tp](auto& ctx) {
-    // Retrieve system clock approximation
-    auto    systp        = cached_sys_tp + (start_tp - cached_trace_tp);
-    std::tm current_time = fmt::gmtime(high_resolution_clock::to_time_t(systp));
-    auto    us_fraction  = std::chrono::duration_cast<microseconds>(systp.time_since_epoch()).count() % 1000000u;
-    return fmt::format_to(ctx.out(), "{:%H:%M:%S}.{:06}", current_time, us_fraction);
-  });
+  return {start_tp};
 }
+} // namespace
+
+namespace fmt {
+/// 2. 为该包装体特化标准的 fmt::formatter
+template <>
+struct formatter<trace_date_wrapper> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+
+  template <typename FormatContext>
+  auto format(const trace_date_wrapper& wrapper, FormatContext& ctx) const
+  {
+    static system_clock::time_point cached_sys_tp   = system_clock::now();
+    static trace_point              cached_trace_tp = trace_clock::now();
+
+    if (wrapper.tp - cached_trace_tp > seconds{1}) {
+      // Recompute the mapping of system clock to trace points to compensate for drifts.
+      cached_sys_tp   = system_clock::now();
+      cached_trace_tp = trace_clock::now();
+    }
+
+    // Retrieve system clock approximation
+    auto systp = cached_sys_tp + (wrapper.tp - cached_trace_tp);
+    
+    // 3. 显式转换为 system_clock 的 duration，修复 macOS 下的编译报错
+    auto systp_cast = std::chrono::time_point_cast<system_clock::duration>(systp);
+    
+    std::tm current_time = fmt::gmtime(system_clock::to_time_t(systp_cast));
+    auto    us_fraction  = std::chrono::duration_cast<microseconds>(systp.time_since_epoch()).count() % 1000000u;
+    
+    return fmt::format_to(ctx.out(), "{:%H:%M:%S}.{:06}", current_time, us_fraction);
+  }
+};
+} // namespace fmt
 
 namespace fmt {
 
