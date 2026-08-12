@@ -6,6 +6,8 @@
 
 #include "fmt/chrono.h"
 #include <cmath>
+#include <type_traits>
+#include <chrono>
 
 namespace ocudu {
 namespace app_helpers {
@@ -14,7 +16,19 @@ namespace app_helpers {
 inline std::string get_time_stamp()
 {
   auto    tp           = std::chrono::high_resolution_clock::now();
-  std::tm current_time = fmt::gmtime(tp);
+  std::time_t tt;
+  using ClockType = typename std::decay_t<decltype(tp)>::clock;
+
+  if constexpr (std::is_same_v<ClockType, std::chrono::system_clock>) {
+    tt = std::chrono::system_clock::to_time_t(tp);
+  } else {
+    auto sys_tp = std::chrono::system_clock::now() +
+                  std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                      tp - ClockType::now());
+    tt = std::chrono::system_clock::to_time_t(sys_tp);
+  }
+
+  std::tm current_time = fmt::gmtime(tt);
   auto    ms_fraction  = std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count() % 1000u;
   return fmt::format("{:%F}T{:%H:%M:%S}.{:03}", current_time, current_time, ms_fraction);
 }

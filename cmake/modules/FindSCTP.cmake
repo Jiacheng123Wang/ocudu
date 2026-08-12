@@ -14,20 +14,23 @@ PKG_CHECK_MODULES(PC_SCTP sctp)
 
 FIND_PATH(
     SCTP_INCLUDE_DIRS
-    NAMES netinet/sctp.h
-    HINTS ${PC_SCTP_INCLUDEDIR}
+    NAMES netinet/sctp.h usrsctp.h
+    HINTS /opt/homebrew/include ${PC_SCTP_INCLUDEDIR}
           ${CMAKE_INSTALL_PREFIX}/include
-    PATHS /usr/local/include
+    PATHS /opt/homebrew/include
+          /usr/local/include
           /usr/include
 )
 
 FIND_LIBRARY(
     SCTP_LIBRARIES
-    NAMES sctp
-    HINTS ${PC_SCTP_LIBDIR}
+    NAMES sctp usrsctp
+    HINTS /opt/homebrew/include
+          ${PC_SCTP_LIBDIR}
           ${CMAKE_INSTALL_PREFIX}/lib
           ${CMAKE_INSTALL_PREFIX}/lib64
-    PATHS /usr/local/lib
+    PATHS /opt/homebrew/lib
+          /usr/local/lib
           /usr/local/lib64
           /usr/lib
           /usr/lib64

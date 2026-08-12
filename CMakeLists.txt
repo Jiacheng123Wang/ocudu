@@ -15,6 +15,10 @@ endif (${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
 cmake_minimum_required(VERSION 3.14)
 project(ocudu)
 
+if(APPLE)
+    list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
@@ -61,9 +65,9 @@ option(ENABLE_UBSAN_MIN      "Enable clang sanitizer minimal runtime"       OFF)
 option(ENABLE_RTSAN          "Enable clang real-time sanitizer"             OFF)
 option(ENABLE_GCOV           "Enable code coverage"                         OFF)
 option(ENABLE_BACKWARD       "Enable backward"                              ON)
-option(ENABLE_UHD            "Enable UHD"                                   OFF)
-option(ENABLE_SIDEKIQ        "Enable Sidekiq"                               OFF)
-option(ENABLE_ZEROMQ         "Enable ZeroMQ"                                OFF)
+option(ENABLE_UHD            "Enable UHD"                                   ON)
+option(ENABLE_SIDEKIQ        "Enable Sidekiq"                               ON)
+option(ENABLE_ZEROMQ         "Enable ZeroMQ"                                ON)
 option(ENABLE_FFTW           "Enable FFTW"                                  ON)
 option(ENABLE_MKL            "Enable Intel MKL"                             ON)
 option(ENABLE_FFTZ           "Enable AMD Optimized FFT for Zen"             ON)
@@ -72,10 +76,10 @@ option(ENABLE_DPDK           "Enable DPDK"                                  OFF)
 option(ENABLE_LIBNUMA        "Enable LibNUMA"                               OFF)
 option(ENABLE_EXPORT         "Enable PIC and export libraries"              OFF)
 option(ENABLE_TRX_DRIVER     "Enable Amarisoft TRX driver library"          OFF)
-option(ENABLE_PLUGINS        "Compile plugins in the plugin folder"         OFF)
+option(ENABLE_PLUGINS        "Compile plugins in the plugin folder"         ON)
 option(DISABLE_MBEDTLS       "Disable MBEDTLS library and related apps"     OFF)
 option(DISABLE_SCTP          "Disable SCTP library and related apps"        OFF)
-option(BUILD_TESTING         "Compile tests"                                OFF)
+option(BUILD_TESTING         "Compile tests"                                ON)
 option(ENABLE_GPROF          "Enable gprof"                                 OFF)
 option(FORCE_DEBUG_INFO      "Add debug information to Release build"       OFF)
 option(ENABLE_OCUDU_TRACY   "Enable using the tracy profiler if available" OFF)
@@ -267,21 +271,17 @@ if(ENABLE_OCUDU_TRACY)
 endif()
 
 if(NOT LINKER STREQUAL "default")
-    if (APPLE)
-        message(WARNING "Custom linkers (-fuse-ld) are not supported on macOS. Falling back to default system linker.")
+    if (LINKER STREQUAL "bfd")
+        add_link_options(-fuse-ld=bfd)
+        message(STATUS "Linker set to BFD")
+    elseif (LINKER STREQUAL "lld")
+        add_link_options(-fuse-ld=lld)
+        message(STATUS "Linker set to LLD")
+    elseif (LINKER STREQUAL "mold")
+        add_link_options(-fuse-ld=mold)
+        message(STATUS "Linker set to Mold")
     else ()
-        if (LINKER STREQUAL "bfd")
-            add_link_options(-fuse-ld=bfd)
-            message(STATUS "Linker set to BFD")
-        elseif (LINKER STREQUAL "lld")
-            add_link_options(-fuse-ld=lld)
-            message(STATUS "Linker set to LLD")
-        elseif (LINKER STREQUAL "mold")
-            add_link_options(-fuse-ld=mold)
-            message(STATUS "Linker set to Mold")
-        else ()
-            message(FATAL_ERROR "Unsupported linker ${LINKER} for compiler ${CMAKE_CXX_COMPILER_ID}")
-        endif ()
+        message(FATAL_ERROR "Unsupported linker ${LINKER} for compiler ${CMAKE_CXX_COMPILER_ID}")
     endif ()
 endif ()
 
@@ -319,18 +319,6 @@ sbom_generate(
 ########################################################################
 # Find dependencies
 ########################################################################
-if (APPLE)
-    # 优先将 Homebrew 与 /usr/local 添加到 CMake 搜索前缀
-    list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew" "/usr/local")
-    include_directories(SYSTEM /opt/homebrew/include /usr/local/include)
-    link_directories(/opt/homebrew/lib /usr/local/lib)
-    
-    # 强制禁用 macOS 不支持的 Linux 依赖库
-    set(ENABLE_ARMPL OFF CACHE BOOL "ARMPL is Linux-only" FORCE)
-    set(ENABLE_LIBNUMA OFF CACHE BOOL "NUMA is Linux-only" FORCE)
-    set(ENABLE_DPDK OFF CACHE BOOL "DPDK disabled on macOS" FORCE)
-    set(ENABLE_BACKWARD OFF CACHE BOOL "backward-cpp disabled on macOS" FORCE)
-endif ()
 
 # Backward-cpp
 if (ENABLE_BACKWARD)
@@ -585,30 +573,26 @@ else (ENABLE_DPDK)
     unset(DPDK_FOUND CACHE)
 endif (ENABLE_DPDK)
 
-if(SCTP_FOUND OR USRSCTP_FOUND)
+if(SCTP_FOUND)
     sbom_add(
         PACKAGE            "SCTP"
-        DOWNLOAD_LOCATION  "https://github.com/sctplab/usrsctp"
-        SUPPLIER           "usrsctp project"
+        DOWNLOAD_LOCATION  "https://www.sctp.org/"
+        SUPPLIER           "SCTP project"
         LICENSE            "BSD-3-Clause"
-        VERSION            "0.9.5"
+        VERSION            ${PC_SCTP_VERSION}
     )
-endif ()
+endif (SCTP_FOUND)
 
 ########################################################################
 # Instruction Set Architecture setup
 ########################################################################
-if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64" OR ${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm64")
-    message(STATUS "Detected ARM64/aarch64 processor")
+if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+    set(MCPU "native" CACHE STRING "Compiler -mcpu flag. Default value is 'native' for aarch64.")
 
-    if (APPLE)
-        # Apple Clang 在 macOS 上不需要硬性指定 -mcpu=native，默认即优化当前架构
-        message(STATUS "Building for Apple Silicon (macOS arm64)")
-    else ()
-        set(MCPU "native" CACHE STRING "Compiler -mcpu flag. Default value is 'native' for aarch64.")
-        message(STATUS "CPU value is ${MCPU}")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=${MCPU}")
-    endif ()
+    message(STATUS "Detected aarch64 processor, using -mcpu instead of -march")
+    message(STATUS "CPU value is ${MCPU}")
+
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=${MCPU}")
 else (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
     set(MTUNE "generic" CACHE STRING "Compiler -mtune flag. Default value is 'generic'")
     set(MARCH "native" CACHE STRING "Compiler -march flag. Default value is 'native' for x86-64.")
@@ -625,7 +609,7 @@ else (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
     if (NOT HAVE_MTUNE)
         message(SEND_ERROR "The compiler does not support -mtune=${MTUNE}, try setting a different value.")
     endif (NOT HAVE_MTUNE)
-endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64" OR ${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm64")
+endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
 
 ########################################################################
 # Compiler launcher setup
@@ -644,17 +628,9 @@ if (CCACHE_EXECUTABLE)
 endif ()
 
 include(CTest)
-if (APPLE)
-    execute_process(COMMAND sed -i "" "s|MemoryCheckCommandOptions: |MemoryCheckCommandOptions: --verbose --trace-children=yes --time-stamp=yes --leak-check=full --show-leak-kinds=all --show-reachable=yes --exit-on-first-error=yes --error-exitcode=22 --suppressions=${CMAKE_SOURCE_DIR}/.memcheck-suppressions|" DartConfiguration.tcl
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-else ()
-    execute_process(COMMAND sed -i "s|MemoryCheckCommandOptions: |MemoryCheckCommandOptions: --verbose --trace-children=yes --time-stamp=yes --leak-check=full --show-leak-kinds=all --show-reachable=yes --exit-on-first-error=yes --error-exitcode=22 --suppressions=${CMAKE_SOURCE_DIR}/.memcheck-suppressions|" DartConfiguration.tcl
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-endif ()
+execute_process(COMMAND sed -i "s|MemoryCheckCommandOptions: |MemoryCheckCommandOptions: --verbose --trace-children=yes --time-stamp=yes --leak-check=full --show-leak-kinds=all --show-reachable=yes --exit-on-first-error=yes --error-exitcode=22 --suppressions=${CMAKE_SOURCE_DIR}/.memcheck-suppressions|" DartConfiguration.tcl
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
-if (APPLE)
-    include_directories(SYSTEM /opt/homebrew/include /usr/local/include)
-endif ()
 include_directories(include)
 include_directories(external/fmt/include)
 include_directories(external)
@@ -694,12 +670,12 @@ endfunction()
 # Add the subdirectories
 ########################################################################
 
-# add_subdirectory(apps)
-# add_subdirectory(configs)
-# add_subdirectory(docs/doxygen)
+add_subdirectory(apps)
+add_subdirectory(configs)
+add_subdirectory(docs/doxygen)
 add_subdirectory(external)
 add_subdirectory(lib)
-# add_subdirectory(utils)
+add_subdirectory(utils)
 
 if (BUILD_TESTING)
     if (DISABLE_MBEDTLS OR DISABLE_SCTP)
