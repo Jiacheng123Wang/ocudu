@@ -5,7 +5,12 @@
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/io/sockets.h"
 #include <algorithm>
+#include "ocudu/gateways/sctp_socket.h"
+#if defined(__APPLE__)
+//#include <usrsctp.h>
+#else
 #include <netinet/sctp.h>
+#endif
 
 using namespace ocudu;
 
@@ -358,7 +363,8 @@ sctp_network_client_impl::connect(std::unique_ptr<sctp_association_sdu_notifier>
 
 void sctp_network_client_impl::receive()
 {
-  struct sctp_sndrcvinfo                            sri       = {};
+  struct sctp_rcvinfo                            sri       = {};
+  socklen_t                                      sri_len   = sizeof(sri);
   int                                               msg_flags = 0;
   std::array<uint8_t, network_gateway_sctp_max_len> temp_recv_buffer;
 
@@ -372,6 +378,7 @@ void sctp_network_client_impl::receive()
                                 reinterpret_cast<sockaddr*>(&msg_src_addr),
                                 &msg_src_addrlen,
                                 &sri,
+                                &sri_len,
                                 &msg_flags);
 
   // Handle error.
@@ -436,7 +443,7 @@ void sctp_network_client_impl::handle_data(span<const uint8_t> payload)
 }
 
 void sctp_network_client_impl::handle_notification(span<const uint8_t>           payload,
-                                                   const struct sctp_sndrcvinfo& sri,
+                                                   const struct sctp_rcvinfo&    sri,
                                                    const sockaddr&               src_addr,
                                                    socklen_t                     src_addr_len)
 {

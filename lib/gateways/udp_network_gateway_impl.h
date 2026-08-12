@@ -11,6 +11,13 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#if defined(__APPLE__)
+#include <sys/socket.h>
+struct mmsghdr {
+  struct msghdr msg_hdr;
+  unsigned int   msg_len;
+};
+#endif
 
 namespace ocudu {
 

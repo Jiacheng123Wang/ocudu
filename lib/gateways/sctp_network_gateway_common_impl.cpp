@@ -6,11 +6,17 @@
 #include "ocudu/support/io/sockets.h"
 #include <algorithm>
 #include <netdb.h>
+#include "ocudu/gateways/sctp_socket.h"
+#if defined(__APPLE__)
+//#include <usrsctp.h>
+#else
 #include <netinet/sctp.h>
+#endif
 #include <sys/socket.h>
 
 using namespace ocudu;
 
+#ifndef __APPLE__
 template <>
 struct fmt::formatter<sctp_sac_state> : fmt::formatter<std::string_view> {
   auto format(sctp_sac_state v, fmt::format_context& ctx) const
@@ -121,6 +127,7 @@ struct fmt::formatter<sctp_sn_type> : fmt::formatter<std::string_view> {
     return fmt::formatter<std::string_view>::format(name, ctx);
   }
 };
+#endif
 
 sockaddr_searcher::sockaddr_searcher(const std::string& address, int port, ocudulog::basic_logger& logger)
 {
@@ -271,6 +278,7 @@ bool sctp_network_gateway_common_impl::validate_and_log_sctp_notification(span<c
 
   switch (notif->sn_header.sn_type) {
     case SCTP_ASSOC_CHANGE: {
+#ifndef __APPLE__
       if (sizeof(struct sctp_assoc_change) > payload.size_bytes()) {
         logger.error("{}: Received SCTP notification SCTP_ASSOC_CHANGE size ({} B) is smaller than required struct "
                      "sctp_assoc_change size ({} B)",
@@ -284,15 +292,16 @@ bool sctp_network_gateway_common_impl::validate_and_log_sctp_notification(span<c
       if (n->sac_state == SCTP_COMM_LOST || n->sac_state == SCTP_CANT_STR_ASSOC) {
         logger.debug("{}: Rx SCTP_ASSOC_CHANGE: sac_state={} sac_error={} sac_assoc_id={}",
                      node_cfg.if_name,
-                     static_cast<sctp_sac_state>(n->sac_state),
-                     static_cast<sctp_sn_error>(n->sac_error),
+                     n->sac_state,
+                     n->sac_error,
                      n->sac_assoc_id);
       } else {
         logger.debug("{}: Rx SCTP_ASSOC_CHANGE: sac_state={} sac_assoc_id={}",
                      node_cfg.if_name,
-                     static_cast<sctp_sac_state>(n->sac_state),
+                     n->sac_state,
                      n->sac_assoc_id);
       }
+#endif
     } break;
     case SCTP_SHUTDOWN_EVENT: {
       if (sizeof(struct sctp_shutdown_event) > payload.size_bytes()) {
@@ -309,7 +318,7 @@ bool sctp_network_gateway_common_impl::validate_and_log_sctp_notification(span<c
     default:
       logger.warning("{}: Received SCTP notification of type {} was not handled, ignoring",
                      node_cfg.if_name,
-                     static_cast<sctp_sn_type>(notif->sn_header.sn_type));
+                     notif->sn_header.sn_type);
       return false;
   }
 

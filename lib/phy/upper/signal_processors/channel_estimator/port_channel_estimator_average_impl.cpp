@@ -861,7 +861,8 @@ static float estimate_noise(const dmrs_symbol_list&                   pilots,
   return std::isnormal(noise_energy) ? noise_energy : 0;
 }
 
-__attribute_noinline__ static void
+__attribute__((noinline))
+static void
 simd_vector_interpolate(span<cbf16_t> out, span<const cf_t> first, span<const cf_t> second, float weight)
 {
   unsigned size = out.size();

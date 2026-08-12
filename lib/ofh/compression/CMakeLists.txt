@@ -25,10 +25,10 @@ if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
             COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512vl;-mavx512dq;-mavx512vbmi")
 endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
 
-if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
     list(APPEND SOURCES iq_compression_bfp_neon.cpp)
     list(APPEND SOURCES iq_compression_none_neon.cpp)
-endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
 
 add_library(ocudu_ofh_compression STATIC ${SOURCES})
 target_link_libraries(ocudu_ofh_compression ocuduvec)

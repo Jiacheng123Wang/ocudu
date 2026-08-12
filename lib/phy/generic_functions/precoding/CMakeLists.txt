@@ -16,9 +16,9 @@ if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
     set_source_files_properties(channel_precoder_avx512.cpp PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw")
 endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
 
-if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
     list(APPEND channel_precoder_sources channel_precoder_neon.cpp)
-endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
 
 
 add_library(ocudu_channel_precoder STATIC ${channel_precoder_sources})

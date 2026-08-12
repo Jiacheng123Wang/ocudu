@@ -77,7 +77,7 @@ private:
 
   void handle_data(int assoc_id, span<const uint8_t> payload);
   void handle_notification(span<const uint8_t>           payload,
-                           const struct sctp_sndrcvinfo& sri,
+                           const struct sctp_rcvinfo&    sri,
                            const sockaddr&               src_addr,
                            socklen_t                     src_addr_len);
   void handle_association_shutdown(int assoc_id, const char* cause);

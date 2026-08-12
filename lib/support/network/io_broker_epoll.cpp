@@ -2,11 +2,41 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "io_broker_epoll.h"
+#include "ocudu/ocudulog/ocudulog.h"
 #if defined(__APPLE__)
 namespace ocudu {
 
-// macOS 下为 io_broker_epoll 提供空实现 / Stub 方法，防止链接缺失
-// （注：在后续阶段可在 macOS 上接入 kqueue 或 GCD 实现）
+io_broker_epoll::io_broker_epoll(const io_broker_config& config) :
+  logger(ocudulog::fetch_basic_logger("IO-EPOLL")), event_queue(32)
+{
+  (void)config;
+  // TODO: replace with kqueue-based implementation when needed.
+}
+
+io_broker_epoll::~io_broker_epoll() = default;
+
+io_broker::subscriber io_broker_epoll::register_fd(unique_fd fd,
+                                                   task_executor& executor,
+                                                   recv_callback_t handler,
+                                                   error_callback_t err_handler)
+{
+  (void)fd;
+  (void)executor;
+  (void)handler;
+  (void)err_handler;
+  logger.warning("io_broker_epoll: register_fd is not supported on macOS");
+  return subscriber{};
+}
+
+bool io_broker_epoll::unregister_fd(int fd, std::promise<bool>* complete_notifier)
+{
+  (void)fd;
+  logger.warning("io_broker_epoll: unregister_fd is not supported on macOS");
+  if (complete_notifier != nullptr) {
+    complete_notifier->set_value(false);
+  }
+  return false;
+}
 
 } // namespace ocudu
 #else

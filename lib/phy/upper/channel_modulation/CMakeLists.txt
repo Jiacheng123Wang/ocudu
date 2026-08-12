@@ -21,9 +21,9 @@ if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
     set_source_files_properties(modulation_mapper_avx2_impl.cpp PROPERTIES
             COMPILE_OPTIONS "-mavx2;")
 endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
-if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
     list(APPEND SOURCES modulation_mapper_neon_impl.cpp)
-endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
 
 add_library(ocudu_channel_modulation STATIC ${SOURCES})
 target_link_libraries(ocudu_channel_modulation ocudu_support log_likelihood_ratio)

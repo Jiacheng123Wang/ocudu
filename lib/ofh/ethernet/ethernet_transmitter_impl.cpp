@@ -7,7 +7,12 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <net/if.h>
+#if defined(__APPLE__)
+#include <net/ethernet.h>
+#include <netinet/if_ether.h>
+#else
 #include <netinet/ether.h>
+#endif
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -15,8 +20,9 @@ using namespace ocudu;
 using namespace ether;
 
 transmitter_impl::transmitter_impl(const transmitter_config& config, ocudulog::basic_logger& logger_) :
-  logger(logger_), metrics_collector(config.are_metrics_enabled)
+  metrics_collector(config.are_metrics_enabled)
 {
+#ifdef __linux__
   socket_fd = ::socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_RAW);
   if (socket_fd < 0) {
     report_error("Unable to open raw socket for Ethernet transmitter: {}", ::strerror(errno));
@@ -61,15 +67,22 @@ transmitter_impl::transmitter_impl(const transmitter_config& config, ocudulog::b
   logger.info("Opened successfully the NIC interface '{}' (fd = '{}') used by the Ethernet transmitter",
               config.interface,
               socket_fd);
+#else
+  report_error("Raw sockets (AF_PACKET) are only supported on Linux. macOS is not supported for OFH raw ethernet.");
+  throw std::runtime_error("Ethernet transmitter not supported on this platform");
+#endif
 }
 
 transmitter_impl::~transmitter_impl()
 {
+#ifdef __linux__
   ::close(socket_fd);
+#endif
 }
 
 void transmitter_impl::send(span<span<const uint8_t>> frames)
 {
+#ifdef __linux__
   for (auto frame : frames) {
     auto meas = metrics_collector.create_time_execution_measurer();
 
@@ -91,6 +104,7 @@ void transmitter_impl::send(span<span<const uint8_t>> frames)
     }
     metrics_collector.update_stats(meas.stop(), frame.size());
   }
+#endif
 }
 
 transmitter_metrics_collector* transmitter_impl::get_metrics_collector()

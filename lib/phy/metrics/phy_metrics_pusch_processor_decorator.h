@@ -54,7 +54,7 @@ public:
     }
     cpu_time_usage_ns.store(measurements.duration.count(), std::memory_order_relaxed);
     elapsed_data_and_return_ns |=
-        std::min(std::chrono::nanoseconds(std::chrono::steady_clock::now() - time_start).count(), 0xffffffffL);
+        std::min(std::chrono::nanoseconds(std::chrono::steady_clock::now() - time_start).count(), 0xffffffffLL);
 
     // Notify metrics.
     notify_metrics();
@@ -84,7 +84,7 @@ private:
 
     // Save data reporting time.
     elapsed_data_and_return_ns |=
-        std::min(std::chrono::nanoseconds(std::chrono::steady_clock::now() - time_start).count(), 0xffffffffL) << 32;
+        std::min(std::chrono::nanoseconds(std::chrono::steady_clock::now() - time_start).count(), 0xffffffffLL) << 32;
 
     // Notify metrics.
     notify_metrics();

@@ -52,13 +52,13 @@ void to_json(nlohmann::json& json, const scheduler_ue_metrics& metrics)
   json["dl_nof_ok"]  = metrics.dl_nof_ok;
   json["dl_nof_nok"] = metrics.dl_nof_nok;
   json["dl_bs"]      = metrics.dl_bs;
-  if (!std::isnan(metrics.pusch_snr_db) && !iszero(metrics.pusch_snr_db)) {
+  if (!std::isnan(metrics.pusch_snr_db) && metrics.pusch_snr_db != 0.0) {
     json["pusch_snr_db"] = std::clamp(metrics.pusch_snr_db, -99.9f, 99.9f);
   }
-  if (!std::isnan(metrics.pusch_rsrp_db) && !iszero(metrics.pusch_rsrp_db)) {
+  if (!std::isnan(metrics.pusch_rsrp_db) && metrics.pusch_rsrp_db != 0.0) {
     json["pusch_rsrp_db"] = std::clamp(metrics.pusch_rsrp_db, -99.9f, 0.0f);
   }
-  if (!std::isnan(metrics.pucch_snr_db) && !iszero(metrics.pucch_snr_db)) {
+  if (!std::isnan(metrics.pucch_snr_db) && metrics.pucch_snr_db != 0.0) {
     json["pucch_snr_db"] = std::clamp(metrics.pucch_snr_db, -99.9f, 99.9f);
   }
 

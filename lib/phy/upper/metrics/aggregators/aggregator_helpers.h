@@ -20,10 +20,10 @@ inline void update_minmax(uint64_t new_value, std::atomic<uint64_t>& max, std::a
   }
 }
 
-constexpr uint64_t pack_slot_and_duration(slot_point slot, uint64_t duration_ns)
+constexpr inline uint64_t pack_slot_and_duration(slot_point slot, uint64_t duration_ns)
 {
   // Pack duration as 32 bits, maximum of approximately 4.29 seconds.
-  uint64_t packed = std::min(duration_ns, 0xffffffffUL);
+  uint64_t packed = std::min(duration_ns, static_cast<uint64_t>(0xffffffffUL));
 
   // Pack slot index which takes no more than 20 bits.
   packed |= (slot.to_uint() & 0xfffffUL) << 32UL;

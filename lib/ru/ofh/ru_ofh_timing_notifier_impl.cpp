@@ -35,6 +35,8 @@ void ru_ofh_timing_notifier_impl::on_new_symbol(const ofh::slot_symbol_point_con
     timing_notifier.on_tti_boundary(tti_boundary_context{
         .slot = slot_point_extended(symbol_point_context.symbol_point.get_slot(), symbol_point_context.hfn) +
                 nof_slot_offset_du_ru,
-        .time_point = symbol_point_context.time_point + nof_slots_offset_du_ru_ns});
+        .time_point =
+            std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                symbol_point_context.time_point + nof_slots_offset_du_ru_ns)});
   }
 }

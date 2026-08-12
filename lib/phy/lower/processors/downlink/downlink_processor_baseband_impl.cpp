@@ -132,7 +132,8 @@ downlink_processor_baseband_impl::process(baseband_gateway_timestamp timestamp)
     trace_point tp = ru_tracer.now();
     notifier->on_tti_boundary(
         lower_phy_timing_context{.slot       = slot + nof_slot_tti_in_advance,
-                                 .time_point = std::chrono::system_clock::now() + nof_slot_tti_in_advance_ns});
+                                 .time_point = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                                     std::chrono::system_clock::now() + nof_slot_tti_in_advance_ns)});
     previous_slot = slot;
     ru_tracer << trace_event("on_tti_boundary", tp);
 

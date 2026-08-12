@@ -30,12 +30,16 @@ if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
     set_source_files_properties(ldpc_decoder_avx512.cpp PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;")
 endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
 
-if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
     list(APPEND ldpc_sources ldpc_encoder_neon.cpp)
     list(APPEND ldpc_sources ldpc_decoder_neon.cpp)
     list(APPEND ldpc_sources ldpc_rate_dematcher_neon_impl.cpp)
-endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
 
 add_library(ocudu_ldpc STATIC ${ldpc_sources})
+
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    target_compile_definitions(ocudu_ldpc PRIVATE "__always_inline=__attribute__((always_inline))")
+endif()
 
 target_link_libraries(ocudu_ldpc log_likelihood_ratio)

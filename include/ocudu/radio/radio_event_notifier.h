@@ -6,6 +6,12 @@
 #include "ocudu/radio/radio_base.h"
 #include <cstdint>
 #include <optional>
+#ifdef OVERFLOW
+#undef OVERFLOW
+#endif
+#ifdef UNDERFLOW
+#undef UNDERFLOW
+#endif
 
 namespace ocudu {
 

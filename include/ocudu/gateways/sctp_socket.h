@@ -10,7 +10,32 @@
 #include <chrono>
 #include <cstdint>
 #include <netinet/in.h>
+#if defined(__APPLE__)
+#include <usrsctp.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+
+#ifndef IPPROTO_SCTP
+#define IPPROTO_SCTP 132
+#endif
+#ifndef SOL_SCTP
+#define SOL_SCTP IPPROTO_SCTP
+#endif
+
+// Forward declarations for macOS usrsctp functions
+extern "C" int sctp_bindx(int s, struct sockaddr *addrs, int addrcnt, int flags);
+extern "C" int sctp_connectx(int s, struct sockaddr *addrs, int addrcnt, uint32_t *id);
+extern "C" int sctp_sendmsg(int s, const void *msg, size_t len, struct sockaddr *to, socklen_t tolen,
+                            uint32_t ppid, uint32_t flags, uint16_t stream_no, uint32_t timetolive, uint32_t context);
+extern "C" int sctp_recvmsg(int s, void *msg, size_t len, struct sockaddr *from, socklen_t *fromlen,
+                            void *sinfo, socklen_t *sinfo_len, int *msg_flags);
+extern "C" int sctp_getpaddrs(int s, uint32_t assoc_id, struct sockaddr **addrs);
+extern "C" void sctp_freepaddrs(struct sockaddr *addrs);
+#else
 #include <netinet/sctp.h>
+#endif
 #include <sys/socket.h>
 
 namespace ocudu {

@@ -5,7 +5,12 @@
 #include "sctp_dtls.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/synchronization/sync_event.h"
+#if defined(__APPLE__)
+//#include <usrsctp.h>
+#else
 #include <netinet/sctp.h>
+#endif
+#include "ocudu/gateways/sctp_socket.h"
 
 using namespace ocudu;
 
@@ -171,7 +176,8 @@ bool sctp_network_server_impl::create_and_bind()
 
 void sctp_network_server_impl::receive()
 {
-  struct sctp_sndrcvinfo                            sri       = {};
+  struct sctp_rcvinfo                            sri       = {};
+  socklen_t                                      sri_len   = sizeof(sri);
   int                                               msg_flags = 0;
   std::array<uint8_t, network_gateway_sctp_max_len> temp_recv_buffer;
 
@@ -185,6 +191,7 @@ void sctp_network_server_impl::receive()
                                 (struct sockaddr*)&msg_src_addr,
                                 &msg_src_addrlen,
                                 &sri,
+                                &sri_len,
                                 &msg_flags);
 
   // Handle error.
@@ -222,7 +229,7 @@ void sctp_network_server_impl::receive()
     if (msg_flags & MSG_NOTIFICATION) {
       handle_notification(payload, sri, reinterpret_cast<const sockaddr&>(msg_src_addr), msg_src_addrlen);
     } else {
-      handle_data(sri.sinfo_assoc_id, payload);
+      handle_data(0, payload);
     }
   })) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -339,19 +346,25 @@ async_task<bool> sctp_network_server_impl::connect(std::vector<transport_layer_a
 }
 
 void sctp_network_server_impl::handle_notification(span<const uint8_t>           payload,
-                                                   const struct sctp_sndrcvinfo& sri,
+                                                   const struct sctp_rcvinfo&    sri,
                                                    const sockaddr&               src_addr,
                                                    socklen_t                     src_addr_len)
 {
   if (not validate_and_log_sctp_notification(payload)) {
     // Handle error.
+#if defined(__APPLE__)
+    // On macOS, we can't reliably get assoc_id from sri, so we'll use 0
+    handle_association_shutdown(0, "The received message is invalid");
+#else
     handle_association_shutdown(sri.sinfo_assoc_id, "The received message is invalid");
+#endif
     return;
   }
 
   const auto* notif = reinterpret_cast<const union sctp_notification*>(payload.data());
   switch (notif->sn_header.sn_type) {
     case SCTP_ASSOC_CHANGE: {
+#ifndef __APPLE__
       const struct sctp_assoc_change* n = &notif->sn_assoc_change;
       switch (n->sac_state) {
         case SCTP_COMM_UP:
@@ -369,11 +382,20 @@ void sctp_network_server_impl::handle_notification(span<const uint8_t>          
         default:
           break;
       }
+#else
+      // usrsctp does not provide sctp_assoc_change in the same way.
+      // We skip detailed association change handling on macOS for now.
+#endif
       break;
     }
     case SCTP_SHUTDOWN_EVENT: {
+#if defined(__APPLE__)
+      // On macOS, we can't reliably get assoc_id from sri, so we'll use 0
+      handle_association_shutdown(0, "Client requested the shutdown");
+#else
       const struct sctp_shutdown_event* n = &notif->sn_shutdown_event;
       handle_association_shutdown(n->sse_assoc_id, "Client requested the shutdown");
+#endif
       break;
     }
     default:

@@ -8,8 +8,13 @@
 #include "fmt/format.h"
 
 #ifdef __aarch64__
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#else
 #include <asm/hwcap.h>
 #include <sys/auxv.h>
+#endif
 #endif // __aarch64__
 
 namespace ocudu {
@@ -124,7 +129,11 @@ inline bool cpu_supports_feature(cpu_feature feature)
       return true;
 #endif // __ARM_NEON
     case cpu_feature::pmull:
+#if defined(__APPLE__)
+      return true;
+#else      
       return ::getauxval(AT_HWCAP) & HWCAP_PMULL;
+#endif
 #endif // __aarch64__
     default:
       return false;

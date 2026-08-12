@@ -13,6 +13,30 @@
 #include <unistd.h>
 #include <utility>
 
+#if defined(__APPLE__)
+#ifndef MSG_WAITFORONE
+#define MSG_WAITFORONE 0
+#endif
+
+inline int sendmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int vlen, int flags) {
+  for (unsigned int i = 0; i < vlen; ++i) {
+    ssize_t res = ::sendmsg(sockfd, &msgvec[i].msg_hdr, flags);
+    if (res < 0) return i > 0 ? static_cast<int>(i) : -1;
+    msgvec[i].msg_len = static_cast<unsigned int>(res);
+  }
+  return static_cast<int>(vlen);
+}
+
+inline int recvmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int vlen, int flags, struct timespec *timeout) {
+  for (unsigned int i = 0; i < vlen; ++i) {
+    ssize_t res = ::recvmsg(sockfd, &msgvec[i].msg_hdr, flags);
+    if (res < 0) return i > 0 ? static_cast<int>(i) : -1;
+    msgvec[i].msg_len = static_cast<unsigned int>(res);
+  }
+  return static_cast<int>(vlen);
+}
+#endif
+
 using namespace ocudu;
 
 udp_network_gateway_impl::udp_network_gateway_impl(udp_network_gateway_config                   config_,

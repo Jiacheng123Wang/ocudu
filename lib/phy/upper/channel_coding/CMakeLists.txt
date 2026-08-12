@@ -10,10 +10,17 @@ if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
     list(APPEND CRC_CALCULATOR_SOURCES crc_calculator_clmul_impl.cpp)
     set_source_files_properties(crc_calculator_clmul_impl.cpp PROPERTIES COMPILE_OPTIONS "-mpclmul;-msse4.1")
 endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
-if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
     # Add NEON CRC calculator source.
     list(APPEND CRC_CALCULATOR_SOURCES crc_calculator_neon_impl.cpp)
 
+    # Apple Silicon mandates the ARMv8 crypto extensions in its arm64 ABI, so no feature
+    # check is needed. The global -march=native flag resolves to a plain armv8.x target on
+    # AppleClang, which drops the 'aes' feature that vmull_p64 requires, so re-enable it
+    # for this file only.
+    if (APPLE)
+        set_source_files_properties(crc_calculator_neon_impl.cpp PROPERTIES COMPILE_OPTIONS "-march=native+crypto")
+    else (APPLE)
     # Check if polynomial multiplication is available with the current compiler flags.
     include(CheckCXXCompilerFlag)
     set(CHECK_ARM_CRYPTO_CODE "
@@ -34,7 +41,7 @@ if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
     # If the compiler does not support the crypto features with the default compiler flags, try to append +crypto to -march.
     if (NOT HAVE_ARM_CRYPTO)
         message(STATUS "Current compile options do not support crypto features.")
-        set(MARCH "native" CACHE STRING "Compiler -march flag. Default value is 'native' for aarch64.")
+        set(MARCH "native" CACHE STRING "Compiler -march flag. Default value is 'native' for aarch64/arm64.")
         message(STATUS "Current CPU value is ${MCPU}")
         message(STATUS "Current MARCH value is ${MARCH}")
 
@@ -50,7 +57,8 @@ if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
         # Append the +crypto to the NEON CRC calculator source file only.
         set_source_files_properties(crc_calculator_neon_impl.cpp PROPERTIES COMPILE_OPTIONS "${CMAKE_REQUIRED_FLAGS}")
     endif (NOT HAVE_ARM_CRYPTO)
-endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+    endif (APPLE)
+endif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
 
 
 add_library(ocudu_crc_calculator STATIC ${CRC_CALCULATOR_SOURCES})

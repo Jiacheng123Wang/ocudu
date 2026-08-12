@@ -278,7 +278,7 @@ bool radio_zmq_tx_channel::align(uint64_t timestamp, std::chrono::milliseconds t
   std::array<cf_t, 1024> zero_buffer = {};
   // Transmit zeros until the sample count reaches the timestamp.
   while (sample_count < timestamp && state_fsm.is_running()) {
-    unsigned   to_send = std::min(zero_buffer.size(), timestamp - sample_count);
+    unsigned to_send = std::min<uint64_t>(zero_buffer.size(), timestamp - sample_count);
     span<cf_t> zeros   = span<cf_t>(zero_buffer.begin(), to_send);
     transmit_samples(zeros);
     count += zeros.size();

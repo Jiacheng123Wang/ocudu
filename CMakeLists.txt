@@ -15,8 +15,18 @@ endif (${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
 cmake_minimum_required(VERSION 3.14)
 project(ocudu)
 
+if(APPLE AND NOT TARGET atomic)
+    # macOS does not provide a separate libatomic. Some targets link the
+    # interface library named "atomic"; add an empty one so CMake treats it
+    # as a target instead of passing "-latomic" to the linker.
+    add_library(atomic INTERFACE)
+endif()
+
 if(APPLE)
     list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
+    include_directories(SYSTEM /opt/homebrew/include)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=deprecated-declarations")
+    add_definitions(-DRTLD_DEEPBIND=0)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -475,7 +485,7 @@ find_package(Threads REQUIRED)
 if (ENABLE_UHD)
     find_package(UHD)
     if (UHD_FOUND)
-        include_directories(${UHD_INCLUDE_DIRS})
+        include_directories(SYSTEM ${UHD_INCLUDE_DIRS})
         link_directories(${UHD_LIBRARY_DIRS})
         sbom_add(
             PACKAGE            "UHD"

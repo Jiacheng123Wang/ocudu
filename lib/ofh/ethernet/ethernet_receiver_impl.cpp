@@ -40,7 +40,14 @@ receiver_impl::receiver_impl(const receiver_config& config, task_executor& execu
   buffer_pool(BUFFER_SIZE),
   metrics_collector(config.are_metrics_enabled)
 {
+#ifdef __linux__
   socket_fd = ::socket(AF_PACKET, SOCK_RAW, htons(ECPRI_ETH_TYPE));
+#else
+  // For macOS, we need to use a different approach
+  socket_fd = -1;
+  logger.error("Raw sockets (AF_PACKET) are only supported on Linux. macOS is not supported for OFH raw ethernet.");
+  return;
+#endif
   if (socket_fd < 0) {
     report_error("Unable to open raw socket for Ethernet receiver: {}", ::strerror(errno));
   }
@@ -124,7 +131,7 @@ static bool wait_for_data(int socket, std::chrono::microseconds timeout)
   fd_set read_fs;
   FD_ZERO(&read_fs);
   FD_SET(socket, &read_fs);
-  timeval tv = {0, static_cast<__suseconds_t>(timeout.count())};
+  timeval tv = {0, static_cast<suseconds_t>(timeout.count())};
 
   return (::select(socket + 1, &read_fs, nullptr, nullptr, &tv) > 0);
 }
