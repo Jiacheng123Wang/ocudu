@@ -11,11 +11,46 @@
 #include <cstdint>
 #include <netinet/in.h>
 #if defined(__APPLE__)
+// usrsctp names the fields of sctp_rcvinfo/sctp_sndinfo rcv_*/snd_* instead of the Linux kernel header names
+// (sinfo_*) that the gateway code uses. Rename the usrsctp structures during the include and re-expose
+// Linux-compatible, layout-identical definitions.
+#define sctp_rcvinfo usrsctp_sctp_rcvinfo
+#define sctp_sndinfo usrsctp_sctp_sndinfo
 #include <usrsctp.h>
+#undef sctp_rcvinfo
+#undef sctp_sndinfo
+
+#include <cstddef>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+
+/// Linux-compatible sctp_rcvinfo (same layout as usrsctp's structure with rcv_* field names).
+struct sctp_rcvinfo {
+  uint16_t     sinfo_stream;
+  uint16_t     sinfo_ssn;
+  uint16_t     sinfo_flags;
+  uint32_t     sinfo_ppid;
+  uint32_t     sinfo_tsn;
+  uint32_t     sinfo_cumtsn;
+  uint32_t     sinfo_context;
+  sctp_assoc_t sinfo_assoc_id;
+};
+
+/// Linux-compatible sctp_sndinfo (same layout as usrsctp's structure with snd_* field names).
+struct sctp_sndinfo {
+  uint16_t     sinfo_stream;
+  uint16_t     sinfo_flags;
+  uint32_t     sinfo_ppid;
+  uint32_t     sinfo_context;
+  sctp_assoc_t sinfo_assoc_id;
+};
+
+static_assert(sizeof(sctp_rcvinfo) == sizeof(usrsctp_sctp_rcvinfo));
+static_assert(offsetof(sctp_rcvinfo, sinfo_assoc_id) == offsetof(usrsctp_sctp_rcvinfo, rcv_assoc_id));
+static_assert(sizeof(sctp_sndinfo) == sizeof(usrsctp_sctp_sndinfo));
+static_assert(offsetof(sctp_sndinfo, sinfo_ppid) == offsetof(usrsctp_sctp_sndinfo, snd_ppid));
 
 #ifndef IPPROTO_SCTP
 #define IPPROTO_SCTP 132

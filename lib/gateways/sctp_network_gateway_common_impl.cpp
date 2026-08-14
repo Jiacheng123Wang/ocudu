@@ -278,7 +278,6 @@ bool sctp_network_gateway_common_impl::validate_and_log_sctp_notification(span<c
 
   switch (notif->sn_header.sn_type) {
     case SCTP_ASSOC_CHANGE: {
-#ifndef __APPLE__
       if (sizeof(struct sctp_assoc_change) > payload.size_bytes()) {
         logger.error("{}: Received SCTP notification SCTP_ASSOC_CHANGE size ({} B) is smaller than required struct "
                      "sctp_assoc_change size ({} B)",
@@ -301,7 +300,6 @@ bool sctp_network_gateway_common_impl::validate_and_log_sctp_notification(span<c
                      n->sac_state,
                      n->sac_assoc_id);
       }
-#endif
     } break;
     case SCTP_SHUTDOWN_EVENT: {
       if (sizeof(struct sctp_shutdown_event) > payload.size_bytes()) {
