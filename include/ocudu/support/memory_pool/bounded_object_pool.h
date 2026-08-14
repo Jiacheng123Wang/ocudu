@@ -101,6 +101,7 @@ public:
     static size_t max_size() { return 64; }
   };
 
+
   template <typename Factory, typename OnClearFunc = OnClear>
   bounded_object_pool_impl(unsigned nof_objects, const Factory& factory, OnClearFunc&& on_clear_) :
     nof_objs(nof_objects), on_clear(std::forward<OnClearFunc>(on_clear_))
@@ -169,7 +170,14 @@ public:
       // Find the first free object.
       while (true) {
         // Convert the busy bitmap into an available bitmap, but circularly rotated by the bit_shift amount.
-        uint64_t available_rotated = ~((busy_bitmap >> bit_shift) | (busy_bitmap << (64 - bit_shift)));
+        // Note: bit_shift can be zero, in which case shifting by 64 would be undefined behavior.
+        uint64_t rotated_busy;
+        if (bit_shift == 0) {
+          rotated_busy = busy_bitmap;
+        } else {
+          rotated_busy = (busy_bitmap >> bit_shift) | (busy_bitmap << (64 - bit_shift));
+        }
+        uint64_t available_rotated = ~rotated_busy;
 
         // Find the first bit set to one in the available bitmap.
         uint64_t obj_idx = find_first_lsb_one(available_rotated);

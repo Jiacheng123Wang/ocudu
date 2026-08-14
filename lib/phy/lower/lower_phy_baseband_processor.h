@@ -136,11 +136,23 @@ private:
         // Increment the process count before considering stopped.
         uint32_t current_state = state.fetch_add(1) + 1;
         if (current_state >= state_stopped) {
-          stop_control.set_value();
+          // The processing chain ends here: no more tasks will be enqueued. The stop completes when this task
+          // finishes (see on_process_end()).
           return false;
         }
       }
       return true;
+    }
+
+    /// \brief Call when the processing task finishes.
+    void on_process_end()
+    {
+      // Only the task that ended the processing chain (the one that incremented the process count to state_stopped)
+      // reaches this point with the state at or past the stop threshold: signal the completion of the stop. This
+      // guarantees that stop() waits until all processing tasks have finished, not merely started.
+      if (((state.load() & state_wait_stop) != 0) and (state.load() >= state_stopped)) {
+        stop_control.set_value();
+      }
     }
 
   private:

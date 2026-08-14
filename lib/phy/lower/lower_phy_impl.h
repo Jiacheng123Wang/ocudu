@@ -88,9 +88,13 @@ public:
   // See lower_phy_controller interface for documentation.
   void stop() override
   {
+    // Stop the baseband processing loop first: it drains the in-flight downlink/uplink processing tasks. The
+    // baseband loop calls into the DU-facing processors (e.g., the PDSCH processor), which must remain alive
+    // until the drain completes; stopping them first would leave the running tasks accessing stopped/freed
+    // processors.
+    controller->stop();
     downlink_proc->stop();
     uplink_proc->stop();
-    controller->stop();
   }
 
 private:

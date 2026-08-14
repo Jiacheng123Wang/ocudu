@@ -65,12 +65,32 @@ void lower_phy_baseband_processor::stop()
   tx_state.request_stop();
   rx_state.wait_stop();
   tx_state.wait_stop();
+
+  // Flush the processing executors: the FSM counters only track the self-deferred processing chains, while tasks
+  // deferred right before the stop was requested are not covered by them. Deferring a sentinel task and waiting for
+  // its completion guarantees that every previously enqueued task has finished when stop() returns, so that the
+  // processor can be safely destroyed.
+  std::promise<void> rx_flush;
+  report_fatal_error_if_not(rx_executor.defer([&rx_flush]() { rx_flush.set_value(); }),
+                            "Failed to execute downlink flush task.");
+  rx_flush.get_future().wait();
+
+  std::promise<void> tx_flush;
+  report_fatal_error_if_not(tx_executor.defer([&tx_flush]() { tx_flush.set_value(); }),
+                            "Failed to execute downlink flush task.");
+  tx_flush.get_future().wait();
+
+  std::promise<void> ul_flush;
+  report_fatal_error_if_not(uplink_executor.defer([&ul_flush]() { ul_flush.set_value(); }),
+                            "Failed to execute uplink processing flush task.");
+  ul_flush.get_future().wait();
 }
 
 void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timestamp)
 {
   // Check if it is running, notify stop and return without enqueueing more tasks.
   if (!tx_state.on_process()) {
+    tx_state.on_process_end();
     return;
   }
 
@@ -134,12 +154,15 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
   report_fatal_error_if_not(
       tx_executor.defer([this, new_timestamp = timestamp + last_tx_buffer_size]() { dl_process(new_timestamp); }),
       "Failed to execute downlink processing task");
+
+  tx_state.on_process_end();
 }
 
 void lower_phy_baseband_processor::ul_process()
 {
   // Check if it is running, notify stop and return without enqueueing more tasks.
   if (!rx_state.on_process()) {
+    rx_state.on_process_end();
     return;
   }
 
@@ -170,4 +193,6 @@ void lower_phy_baseband_processor::ul_process()
 
   // Enqueue next iteration if it is running.
   report_fatal_error_if_not(rx_executor.defer([this]() { ul_process(); }), "Failed to execute receive task.");
+
+  rx_state.on_process_end();
 }

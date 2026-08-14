@@ -139,6 +139,12 @@ int sctp_sendmsg(int s, const void* msg, size_t len, struct sockaddr* to, sockle
   // kernel's sctp_sendmsg(). The PPID is passed in network byte order by the callers (matching the Linux API).
   // Note: timetolive has no sctp_sndinfo field; the callers always pass 0 for it.
   (void)timetolive;
+  // usrsctp cannot send from a null data pointer (it fails with EFAULT): use a dummy payload for zero-length
+  // messages (e.g., the SCTP_EOF messages sent during association shutdown).
+  static const uint8_t dummy_payload = 0;
+  if (msg == nullptr && len == 0) {
+    msg = &dummy_payload;
+  }
   struct sctp_sndinfo sinfo = {};
   sinfo.sinfo_ppid           = ppid;
   sinfo.sinfo_flags          = flags;
