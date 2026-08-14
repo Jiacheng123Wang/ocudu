@@ -1719,24 +1719,15 @@ struct setup_release_c {
   OCUDUASN_CODE pack(bit_ref& bref) const
   {
     type_.pack(bref);
-    // switch (type_) {
-    //   case setup_release_opts::release:
-    //     break;
-    //   case setup_release_opts::setup:
-    //     HANDLE_CODE(c.pack(bref));
-    //     break;
-    //   default:
-    //     log_invalid_choice_id(type_, "setup_release_c");
-    //     return OCUDUASN_ERROR_ENCODE_FAIL;
-    // }
-    if (type_ == setup_release_opts::setup)
-    {
-      HANDLE_CODE(c.pack(bref));
-    }
-    else
-    {
-      log_invalid_choice_id(type_, "setup_release_c");
-      return OCUDUASN_ERROR_ENCODE_FAIL;
+    switch (static_cast<types_opts::options>(type_)) {
+      case types::release:
+        break;
+      case types::setup:
+        HANDLE_CODE(c.pack(bref));
+        break;
+      default:
+        log_invalid_choice_id(type_, "setup_release_c");
+        return OCUDUASN_ERROR_ENCODE_FAIL;
     }
     return OCUDUASN_SUCCESS;
   }
@@ -1745,46 +1736,29 @@ struct setup_release_c {
     types e;
     e.unpack(bref);
     set(e);
-    // switch (type_) {
-    //   case setup_release_opts::release:
-    //     break;
-    //   case setup_release_opts::setup:
-    //     HANDLE_CODE(c.unpack(bref));
-    //     break;
-    //   default:
-    //     log_invalid_choice_id(type_, "setup_release_c");
-    //     return OCUDUASN_ERROR_DECODE_FAIL;
-    // }
-    if (type_ == setup_release_opts::setup)
-    {
-      HANDLE_CODE(c.unpack(bref));
-    }
-    else
-    {
-      log_invalid_choice_id(type_, "setup_release_c");
-      return OCUDUASN_ERROR_DECODE_FAIL;
+    switch (static_cast<types_opts::options>(type_)) {
+      case types::release:
+        break;
+      case types::setup:
+        HANDLE_CODE(c.unpack(bref));
+        break;
+      default:
+        log_invalid_choice_id(type_, "setup_release_c");
+        return OCUDUASN_ERROR_DECODE_FAIL;
     }
     return OCUDUASN_SUCCESS;
   }
   void to_json(json_writer& j) const
   {
     j.start_obj();
-    // switch (type_) {
-    //   case setup_release_opts::release:
-    //     break;
-    //   case setup_release_opts::setup:
-    //     asn1::to_json(j, setup());
-    //     break;
-    //   default:
-    //     log_invalid_choice_id(type_, "setup_release_c");
-    // }
-    if (type_ == setup_release_opts::setup)
-    {
-      asn1::to_json(j, setup());
-    }
-    else
-    {
-      log_invalid_choice_id(type_, "setup_release_c");
+    switch (static_cast<types_opts::options>(type_)) {
+      case types::release:
+        break;
+      case types::setup:
+        asn1::to_json(j, setup());
+        break;
+      default:
+        log_invalid_choice_id(type_, "setup_release_c");
     }
     j.end_obj();
   }
@@ -1829,24 +1803,15 @@ struct setup_release_c<std::array<T, N>> {
   OCUDUASN_CODE pack(bit_ref& bref) const
   {
     type_.pack(bref);
-    // switch (type_) {
-    //   case setup_release_opts::release:
-    //     break;
-    //   case setup_release_opts::setup:
-    //     HANDLE_CODE(pack_fixed_seq_of(bref, c, N));
-    //     break;
-    //   default:
-    //     log_invalid_choice_id(type_, "setup_release_c");
-    //     return OCUDUASN_ERROR_ENCODE_FAIL;
-    // }
-    if (type_ == setup_release_opts::setup)
-    {
-      HANDLE_CODE(pack_fixed_seq_of(bref, c, N));
-    }
-    else
-    {
-      log_invalid_choice_id(type_, "setup_release_c");
-      return OCUDUASN_ERROR_ENCODE_FAIL;
+    switch (static_cast<types_opts::options>(type_)) {
+      case types::release:
+        break;
+      case types::setup:
+        HANDLE_CODE(pack_fixed_seq_of(bref, c, N));
+        break;
+      default:
+        log_invalid_choice_id(type_, "setup_release_c");
+        return OCUDUASN_ERROR_ENCODE_FAIL;
     }
     return OCUDUASN_SUCCESS;
   }
@@ -1855,46 +1820,29 @@ struct setup_release_c<std::array<T, N>> {
     types e;
     e.unpack(bref);
     set(e);
-    // switch (type_) {
-    //   case setup_release_opts::release:
-    //     break;
-    //   case setup_release_opts::setup:
-    //     HANDLE_CODE(unpack_fixed_seq_of(c, bref, N));
-    //     break;
-    //   default:
-    //     log_invalid_choice_id(type_, "setup_release_c");
-    //     return OCUDUASN_ERROR_DECODE_FAIL;
-    // }
-    if (type_ == setup_release_opts::setup)
-    {
-      HANDLE_CODE(unpack_fixed_seq_of(c, bref, N));
-    }
-    else
-    {
-      log_invalid_choice_id(type_, "setup_release_c");
-      return OCUDUASN_ERROR_DECODE_FAIL;
+    switch (static_cast<types_opts::options>(type_)) {
+      case types::release:
+        break;
+      case types::setup:
+        HANDLE_CODE(unpack_fixed_seq_of(c, bref, N));
+        break;
+      default:
+        log_invalid_choice_id(type_, "setup_release_c");
+        return OCUDUASN_ERROR_DECODE_FAIL;
     }
     return OCUDUASN_SUCCESS;
   }
   void to_json(json_writer& j) const
   {
     j.start_obj();
-    // switch (type_) {
-    //   case setup_release_opts::release:
-    //     break;
-    //   case setup_release_opts::setup:
-    //     asn1::to_json(j, setup());
-    //     break;
-    //   default:
-    //     log_invalid_choice_id(type_, "setup_release_c");
-    // }
-    if (type_ == setup_release_opts::setup)
-    {
-      asn1::to_json(j, setup());
-    }
-    else
-    {
-      log_invalid_choice_id(type_, "setup_release_c");
+    switch (static_cast<types_opts::options>(type_)) {
+      case types::release:
+        break;
+      case types::setup:
+        asn1::to_json(j, setup());
+        break;
+      default:
+        log_invalid_choice_id(type_, "setup_release_c");
     }
     j.end_obj();
   }
