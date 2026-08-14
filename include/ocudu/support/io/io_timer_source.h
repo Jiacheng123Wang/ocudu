@@ -34,6 +34,19 @@ private:
 
   void read_time(int raw_fd, scoped_sync_token& token);
 
+#if defined(__APPLE__)
+  // macOS has no timerfd. The timer is emulated with a non-blocking pipe: a dedicated thread waits on absolute
+  // Mach time and writes one byte per tick to the write end. The read end is registered with the broker like any
+  // other readable fd. See the implementation in io_timer_source.cpp.
+  unique_fd         macos_create_timer_fd();
+  void              macos_timer_tick_loop();
+  void              macos_stop_timer_thread();
+
+  unique_fd         timer_write_fd;
+  unique_thread     timer_thread;
+  std::atomic<bool> timer_stop{false};
+#endif
+
   const std::chrono::milliseconds tick_period;
   timer_manager&                  tick_sink;
   io_broker&                      broker;

@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
-#include "io_broker_epoll.h"
+#include "io_broker_kqueue.h"
 #include "ocudu/ocudulog/ocudulog.h"
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
+#include <fcntl.h>
+#include <sys/event.h>
 #include <unistd.h>
 
 using namespace ocudu;
@@ -18,33 +18,42 @@ thread_local int fd_read_in_callback = -1;
 /// Sentinel value used by \c fd_read_in_callback to signal that the FD should not be rearmed.
 static constexpr int AVOID_FD_REARMING = -2;
 
-io_broker_epoll::io_broker_epoll(const io_broker_config& config) :
+io_broker_kqueue::io_broker_kqueue(const io_broker_config& config) :
   logger(ocudulog::fetch_basic_logger("IO-EPOLL")), event_queue(event_queue_size)
 {
   pending_fds_to_remove.reserve(16);
 
-  // Init epoll socket
-  epoll_fd = unique_fd{::epoll_create1(0)};
-  if (not epoll_fd.is_open()) {
-    report_fatal_error("IO broker: failed to create epoll file descriptor. error={}", ::strerror(errno));
+  // Init kqueue.
+  kqueue_fd = unique_fd{::kqueue()};
+  if (not kqueue_fd.is_open()) {
+    report_fatal_error("IO broker: failed to create kqueue. error={}", ::strerror(errno));
   }
 
-  // Register fd and event_handler to handle stops, fd registrations and fd deregistrations.
-  auto ctrl_event_fd = unique_fd{::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)};
-  if (not ctrl_event_fd.is_open()) {
-    report_fatal_error("IO broker: failed to create control event file descriptor. error={}", ::strerror(errno));
+  // Create the control pipe: the read end is watched by the kqueue, the write end is used to interrupt the blocking
+  // kevent() call when a stop, fd registration, or fd deregistration is requested.
+  int ctrl_pipe_fds[2];
+  if (::pipe(ctrl_pipe_fds) != 0) {
+    report_fatal_error("IO broker: failed to create control pipe. error={}", ::strerror(errno));
   }
+  for (int fd : {ctrl_pipe_fds[0], ctrl_pipe_fds[1]}) {
+    int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags == -1 or ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+      report_fatal_error("IO broker: failed to set control pipe to non-blocking. error={}", ::strerror(errno));
+    }
+  }
+  ctrl_event_read_fd  = unique_fd{ctrl_pipe_fds[0]};
+  ctrl_event_write_fd = unique_fd{ctrl_pipe_fds[1]};
+
   auto data_handler  = [this]() { handle_enqueued_events(); };
   auto error_handler = [this](error_code code) {
-    logger.error("Error on control event file descriptor. Error code: {}", (int)code);
+    logger.error("Error on control pipe. Error code: {}", (int)code);
   };
-  ctrl_event_raw_fd = ctrl_event_fd.value();
-  if (not handle_fd_registration(std::move(ctrl_event_fd), data_handler, error_handler, nullptr, nullptr)) {
-    report_fatal_error("IO broker: failed to register control event file descriptor. ctrl_event_fd={}",
-                       ctrl_event_raw_fd);
+  ctrl_event_raw_fd = ctrl_event_read_fd.value();
+  if (not handle_fd_registration(std::move(ctrl_event_read_fd), data_handler, error_handler, nullptr, nullptr)) {
+    report_fatal_error("IO broker: failed to register control pipe. ctrl_event_fd={}", ctrl_event_raw_fd);
   }
 
-  // start thread to handle epoll events.
+  // start thread to handle kqueue events.
   std::promise<void> p;
   std::future<void>  fut = p.get_future();
   thread                 = unique_thread(config.thread_name, config.thread_prio, [this, &p]() {
@@ -57,7 +66,7 @@ io_broker_epoll::io_broker_epoll(const io_broker_config& config) :
   fut.wait();
 }
 
-io_broker_epoll::~io_broker_epoll()
+io_broker_kqueue::~io_broker_kqueue()
 {
   // Wait for completion.
   if (thread.running()) {
@@ -67,27 +76,30 @@ io_broker_epoll::~io_broker_epoll()
 
   stop_impl();
 
-  // Close epoll socket.
-  if (not epoll_fd.close()) {
-    logger.error("Failed to close io epoll broker file descriptor: {}", ::strerror(errno));
+  // Close the kqueue and the control pipe.
+  if (not kqueue_fd.close()) {
+    logger.error("Failed to close io kqueue: {}", ::strerror(errno));
+  }
+  if (ctrl_event_write_fd.is_open() and not ctrl_event_write_fd.close()) {
+    logger.error("Failed to close io broker control pipe write end: {}", ::strerror(errno));
   }
 
   logger.info("Closed io_broker");
 }
 
-void io_broker_epoll::rearm_fd(int fd)
+void io_broker_kqueue::rearm_fd(int fd)
 {
-  ::epoll_event epoll_ev;
-  epoll_ev.events  = EPOLLIN | EPOLLONESHOT;
-  epoll_ev.data.fd = fd;
+  struct kevent ev;
+  // EV_DISPATCH mirrors the EPOLLONESHOT semantics: the event is delivered once and the filter gets disabled.
+  EV_SET(&ev, fd, EVFILT_READ, EV_ENABLE | EV_DISPATCH, 0, 0, nullptr);
 
-  if (::epoll_ctl(epoll_fd.value(), EPOLL_CTL_MOD, fd, &epoll_ev) == -1) {
-    logger.error("Failed to rearm file descriptor: {}", fd);
+  if (::kevent(kqueue_fd.value(), &ev, 1, nullptr, 0, nullptr) == -1) {
+    logger.error("Failed to rearm file descriptor: {} (errno={})", fd, ::strerror(errno));
   }
 }
 
 // Function is executed in a loop until the destructor is called.
-void io_broker_epoll::thread_loop()
+void io_broker_kqueue::thread_loop()
 {
   logger.debug("io_broker thread started...");
 
@@ -96,7 +108,7 @@ void io_broker_epoll::thread_loop()
     for (auto it = pending_fds_to_remove.begin(); it != pending_fds_to_remove.end();) {
       if (auto event_it = event_handler.find(it->first); event_it != event_handler.end()) {
         if (event_it->second.job_count.load(std::memory_order_acquire) == 0) {
-          handle_fd_epoll_removal(it->first, true, std::nullopt, it->second);
+          handle_fd_removal(it->first, true, std::nullopt, it->second);
           it = pending_fds_to_remove.erase(it);
           continue;
         }
@@ -104,50 +116,41 @@ void io_broker_epoll::thread_loop()
       ++it;
     }
 
-    // wait for event
-    const int32_t      epoll_timeout_ms   = -1;
-    const uint32_t     MAX_EVENTS         = 8;
-    struct epoll_event events[MAX_EVENTS] = {};
-    int                nof_events         = ::epoll_wait(epoll_fd.value(), events, MAX_EVENTS, epoll_timeout_ms);
+    // Wait for events (null timeout: block indefinitely).
+    const uint32_t MAX_EVENTS         = 8;
+    struct kevent  events[MAX_EVENTS] = {};
+    int            nof_events         = ::kevent(kqueue_fd.value(), nullptr, 0, events, MAX_EVENTS, nullptr);
 
     // handle event
     if (nof_events == -1) {
       // Note: "Interrupted system call" can happen while debugging.
       if (errno != EINTR) {
-        logger.error("epoll_wait(): {}", ::strerror(errno));
+        logger.error("kevent(): {}", ::strerror(errno));
       }
-      continue;
-    }
-    if (nof_events == 0) {
-      logger.error("epoll time out {} sec expired", epoll_timeout_ms / 1000.0);
       continue;
     }
 
     for (int i = 0; i < nof_events; ++i) {
-      int      fd           = events[i].data.fd;
-      uint32_t epoll_events = events[i].events;
+      int      fd    = static_cast<int>(events[i].ident);
+      uint16_t flags = events[i].flags;
+      int64_t  data  = events[i].data;
 
-      if ((epoll_events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) or not(epoll_events & EPOLLIN)) {
-        error_code code = io_broker::error_code::other;
-        // An error or hang up happened on this file descriptor, or the socket is not ready for reading
-        if (epoll_events & (EPOLLHUP | EPOLLRDHUP)) {
-          // Note: some container environments hang up stdin (fd=0) in case of non-interactive sessions
-          logger.warning("fd={}: Hang up on file descriptor. Events: {:#x}", fd, epoll_events);
-          code = io_broker::error_code::hang_up;
-        } else if (epoll_events & EPOLLERR) {
-          logger.error("fd={}: Error on file descriptor. Events={:#x}", fd, epoll_events);
-          code = io_broker::error_code::error;
-        } else {
-          logger.error("fd={}: Unhandled epoll event. Events={:#x}", fd, epoll_events);
-        }
+      if (flags & EV_ERROR) {
+        logger.error("fd={}: Error on file descriptor. Error code: {}", fd, data);
+        handle_fd_removal(fd, false, io_broker::error_code::error, nullptr);
+        continue;
+      }
 
-        // Deregister the faulty file descriptor from epoll
-        handle_fd_epoll_removal(fd, false, code, nullptr);
+      if ((flags & EV_EOF) and data == 0) {
+        // Hang up (e.g., peer closed the connection). Note: some container environments hang up stdin (fd=0) in
+        // case of non-interactive sessions.
+        logger.warning("fd={}: Hang up on file descriptor.", fd);
+        handle_fd_removal(fd, false, io_broker::error_code::hang_up, nullptr);
         continue;
       }
 
       const auto it = event_handler.find(fd);
-      if (it == event_handler.end() or not it->second.registed_in_epoll()) {
+      if (it == event_handler.end() or not it->second.registered_in_kqueue()) {
         logger.info("fd={}: Ignoring event. Cause: File descriptor handler not found", fd);
         continue;
       }
@@ -211,26 +214,26 @@ void io_broker_epoll::thread_loop()
   }
 }
 
-bool io_broker_epoll::enqueue_event(control_event&& event)
+bool io_broker_kqueue::enqueue_event(control_event&& event)
 {
   // Push of an event
   event_queue.push_blocking(std::move(event));
 
-  // trigger epoll event to interrupt possible epoll_wait()
-  uint64_t tmp = 1;
-  ssize_t  ret = ::write(ctrl_event_raw_fd, &tmp, sizeof(tmp));
+  // Trigger a kqueue event to interrupt the possible kevent() call.
+  uint8_t tmp = 1;
+  ssize_t ret = ::write(ctrl_event_write_fd.value(), &tmp, sizeof(tmp));
   if (ret == -1) {
-    logger.error("Error notifying io CTRL event_fd");
+    logger.error("Error notifying IO control pipe (errno={})", ::strerror(errno));
   }
   return ret >= 0;
 }
 
-void io_broker_epoll::handle_enqueued_events()
+void io_broker_kqueue::handle_enqueued_events()
 {
-  // Read from the FD to avoid keep triggering the epoll.
-  uint64_t ignore_counter;
-  int      ignore = ::read(ctrl_event_raw_fd, &ignore_counter, sizeof(ignore_counter));
-  (void)ignore;
+  // Drain the control pipe to avoid re-triggering the kqueue.
+  uint8_t ignore_buf[64];
+  while (::read(ctrl_event_raw_fd, ignore_buf, sizeof(ignore_buf)) > 0) {
+  }
 
   // Keep popping from the event queue.
   control_event ev;
@@ -245,7 +248,7 @@ void io_broker_epoll::handle_enqueued_events()
         if (auto it = event_handler.find(ev.raw_fd); it != event_handler.end()) {
           // It is safe to directly deregister the FD if there are no tasks reading from it.
           if (it->second.job_count.load(std::memory_order_acquire) == 0) {
-            handle_fd_epoll_removal(ev.raw_fd, false, std::nullopt, ev.completed);
+            handle_fd_removal(ev.raw_fd, false, std::nullopt, ev.completed);
             break;
           }
           // Enqueue fd deregistration.
@@ -265,11 +268,11 @@ void io_broker_epoll::handle_enqueued_events()
   }
 }
 
-bool io_broker_epoll::handle_fd_registration(unique_fd               fd,
-                                             const recv_callback_t&  handler,
-                                             const error_callback_t& err_handler,
-                                             task_executor*          executor,
-                                             std::promise<bool>*     complete_notifier)
+bool io_broker_kqueue::handle_fd_registration(unique_fd               fd,
+                                              const recv_callback_t&  handler,
+                                              const error_callback_t& err_handler,
+                                              task_executor*          executor,
+                                              std::promise<bool>*     complete_notifier)
 {
   if (event_handler.count(fd.value()) > 0) {
     logger.error("fd={}: Failed to register file descriptor. Cause: File descriptor already registered", fd.value());
@@ -281,13 +284,13 @@ bool io_broker_epoll::handle_fd_registration(unique_fd               fd,
 
   int raw_fd = fd.value();
 
-  // Add fd to epoll handler.
-  struct epoll_event epoll_ev = {};
-  epoll_ev.data.fd            = raw_fd;
-  epoll_ev.events             = EPOLLIN | EPOLLONESHOT;
-  if (::epoll_ctl(epoll_fd.value(), EPOLL_CTL_ADD, raw_fd, &epoll_ev) == -1) {
+  // Add fd to the kqueue. EV_DISPATCH mirrors the EPOLLONESHOT semantics: the event is delivered once and the
+  // filter is disabled until rearm_fd() re-enables it.
+  struct kevent ev;
+  EV_SET(&ev, raw_fd, EVFILT_READ, EV_ADD | EV_ENABLE | EV_DISPATCH, 0, 0, nullptr);
+  if (::kevent(kqueue_fd.value(), &ev, 1, nullptr, 0, nullptr) == -1) {
     logger.error(
-        "fd={}: Failed to register file descriptor. Cause: epoll_ctl failed with \"{}\"", raw_fd, ::strerror(errno));
+        "fd={}: Failed to register file descriptor. Cause: kevent() failed with \"{}\"", raw_fd, ::strerror(errno));
     if (complete_notifier != nullptr) {
       complete_notifier->set_value(false);
     }
@@ -305,17 +308,17 @@ bool io_broker_epoll::handle_fd_registration(unique_fd               fd,
   return true;
 }
 
-bool io_broker_epoll::handle_fd_epoll_removal(int                       fd,
-                                              bool                      io_broker_deregistration_required,
-                                              std::optional<error_code> epoll_error,
-                                              std::promise<bool>*       complete_notifier)
+bool io_broker_kqueue::handle_fd_removal(int                       fd,
+                                         bool                      io_broker_deregistration_required,
+                                         std::optional<error_code> kqueue_error,
+                                         std::promise<bool>*       complete_notifier)
 {
   // The file descriptor must be already registered.
   auto ev_it = event_handler.find(fd);
   if (ev_it == event_handler.end()) {
     // File descriptor not found.
-    // Note: It could have been automatically deregistered by the io broker and the subscriber could trigger the removal
-    // on its destruction.
+    // Note: It could have been automatically deregistered by the io broker and the subscriber could trigger the
+    // removal on its destruction.
     logger.error("fd={}: Failed to deregister file descriptor. Cause: File descriptor not found", fd);
     if (complete_notifier != nullptr) {
       complete_notifier->set_value(false);
@@ -323,28 +326,20 @@ bool io_broker_epoll::handle_fd_epoll_removal(int                       fd,
     return false;
   }
 
-  // In case the cause for the FD removal was an epoll error, forward the error to the event handler.
+  // In case the cause for the FD removal was a kqueue error, forward the error to the event handler.
   // Note: We avoid calling the error handling callback in case the FD removal was due to the subscriber
   // close/destruction or due to the io_broker being destroyed.
-  if (epoll_error.has_value()) {
-    ev_it->second.error_callback(*epoll_error);
+  if (kqueue_error.has_value()) {
+    ev_it->second.error_callback(*kqueue_error);
   }
 
-  // Remove FD from the epoll.
-  struct epoll_event epoll_ev = {};
-  epoll_ev.data.fd            = fd;
-  epoll_ev.events             = EPOLLIN;
-  if (::epoll_ctl(epoll_fd.value(), EPOLL_CTL_DEL, fd, &epoll_ev) == -1) {
-    logger.error(
-        "fd={}: Failed to deregister file descriptor. Cause: epoll_ctl failed with \"{}\"", fd, ::strerror(errno));
-    event_handler.erase(ev_it);
-    if (complete_notifier != nullptr) {
-      complete_notifier->set_value(false);
-    }
-    return false;
-  }
+  // Remove FD from the kqueue. Note: if the file descriptor was already closed, the kernel removed the filter
+  // automatically and EV_DELETE is a harmless no-op.
+  struct kevent ev;
+  EV_SET(&ev, fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
+  ::kevent(kqueue_fd.value(), &ev, 1, nullptr, 0, nullptr);
 
-  logger.debug("fd={}: File descriptor deregistered from epoll interest list", fd);
+  logger.debug("fd={}: File descriptor deregistered from kqueue interest list", fd);
   event_handler.erase(ev_it);
 
   // Notify completion of asynchronous task.
@@ -354,12 +349,12 @@ bool io_broker_epoll::handle_fd_epoll_removal(int                       fd,
   return true;
 }
 
-/// Adds a new file descriptor to the epoll-handler. The call is thread-safe and new
-/// file descriptors can be added while the epoll_wait() is blocking.
-io_broker::subscriber io_broker_epoll::register_fd(unique_fd        fd,
-                                                   task_executor&   executor,
-                                                   recv_callback_t  handler,
-                                                   error_callback_t err_handler)
+/// Adds a new file descriptor to the kqueue handler. The call is thread-safe and new file descriptors can be added
+/// while the kevent() is blocking.
+io_broker::subscriber io_broker_kqueue::register_fd(unique_fd        fd,
+                                                    task_executor&   executor,
+                                                    recv_callback_t  handler,
+                                                    error_callback_t err_handler)
 {
   if (not fd.is_open()) {
     logger.error("File descriptor registration failed. Cause: Invalid file descriptor value");
@@ -374,7 +369,7 @@ io_broker::subscriber io_broker_epoll::register_fd(unique_fd        fd,
   int raw_fd = fd.value();
 
   if (std::this_thread::get_id() == thread.get_id()) {
-    // Registration from within the epoll thread.
+    // Registration from within the kqueue thread.
     if (handle_fd_registration(std::move(fd), handler, err_handler, nullptr, nullptr)) {
       return subscriber{*this, raw_fd};
     }
@@ -397,8 +392,8 @@ io_broker::subscriber io_broker_epoll::register_fd(unique_fd        fd,
   return subscriber{};
 }
 
-/// \brief Remove fd from epoll handler.
-bool io_broker_epoll::unregister_fd(int fd, std::promise<bool>* complete_notifier)
+/// \brief Remove fd from the kqueue handler.
+bool io_broker_kqueue::unregister_fd(int fd, std::promise<bool>* complete_notifier)
 {
   if (fd < 0) {
     logger.error("fd={}: File descriptor deregistration failed. Cause: Invalid file descriptor value", fd);
@@ -414,11 +409,11 @@ bool io_broker_epoll::unregister_fd(int fd, std::promise<bool>* complete_notifie
     }
     return false;
   }
-  logger.debug("fd={}: Deregistering file descriptor...", fd);
-
-  report_error_if_not(not(fd_read_in_callback >= 0 and fd_read_in_callback != fd),
-                      "Cannot deregister an unrelated file descriptor inside the read callback");
-
+  if (std::this_thread::get_id() == thread.get_id()) {
+    // Deregistration from within the kqueue thread.
+    handle_fd_removal(fd, false, std::nullopt, complete_notifier);
+    return true;
+  }
   // Handle the case of calling unregister from the read callback.
   if (fd_read_in_callback == fd) {
     // No rearming is needed as the FD is going to be being removed and no more callbacks should be called for it.
@@ -440,7 +435,7 @@ bool io_broker_epoll::unregister_fd(int fd, std::promise<bool>* complete_notifie
   return true;
 }
 
-void io_broker_epoll::stop_impl()
+void io_broker_kqueue::stop_impl()
 {
   // Process any pending file descriptor removals.
   for (auto it = pending_fds_to_remove.begin(); it != pending_fds_to_remove.end();) {
@@ -449,7 +444,7 @@ void io_broker_epoll::stop_impl()
         // Postpone file descriptor removal until all tasks using it finish.
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
-      handle_fd_epoll_removal(it->first, true, std::nullopt, it->second);
+      handle_fd_removal(it->first, true, std::nullopt, it->second);
       it = pending_fds_to_remove.erase(it);
       continue;
     }
@@ -466,14 +461,9 @@ void io_broker_epoll::stop_impl()
     while (it->second.job_count.load(std::memory_order_acquire) != 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    struct epoll_event epoll_ev = {};
-    epoll_ev.data.fd            = it->first;
-    epoll_ev.events             = EPOLLIN;
-    if (::epoll_ctl(epoll_fd.value(), EPOLL_CTL_DEL, it->first, &epoll_ev) == -1) {
-      logger.error("fd={}: Failed to deregister file descriptor. Cause: epoll_ctl failed with \"{}\"",
-                   it->first,
-                   ::strerror(errno));
-    }
+    struct kevent ev;
+    EV_SET(&ev, it->first, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
+    ::kevent(kqueue_fd.value(), &ev, 1, nullptr, 0, nullptr);
     it = event_handler.erase(it);
   }
 

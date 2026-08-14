@@ -3,6 +3,9 @@
 
 #include "ocudu/support/io/io_broker_factory.h"
 #include "io_broker_epoll.h"
+#if defined(__APPLE__)
+#include "io_broker_kqueue.h"
+#endif
 
 using namespace ocudu;
 
@@ -10,7 +13,12 @@ std::unique_ptr<io_broker> ocudu::create_io_broker(io_broker_type type, const io
 {
   switch (type) {
     case io_broker_type::epoll:
+#if defined(__APPLE__)
+      // macOS has no epoll: use the kqueue-based implementation.
+      return std::make_unique<io_broker_kqueue>(config);
+#else
       return std::make_unique<io_broker_epoll>(config);
+#endif
     default:
       ocudu_terminate("IO broker type not supported");
   }

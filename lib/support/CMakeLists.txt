@@ -19,7 +19,6 @@ set(SOURCES
         executors/unique_thread.cpp
         executors/execution_context_description.cpp
         executors/executor_decoration_factory.cpp
-        network/io_broker_epoll.cpp
         network/io_broker_factory.cpp
         network/io_timer_source.cpp
         network/sockets.cpp
@@ -43,6 +42,13 @@ set(SOURCES
         sysinfo.cpp
         timers.cpp
 )
+
+if (APPLE)
+    # macOS has no epoll: use the kqueue-based broker instead.
+    list(APPEND SOURCES network/io_broker_kqueue.cpp)
+else()
+    list(APPEND SOURCES network/io_broker_epoll.cpp)
+endif()
 
 add_library(ocudu_support STATIC ${SOURCES})
 target_link_libraries(ocudu_support
