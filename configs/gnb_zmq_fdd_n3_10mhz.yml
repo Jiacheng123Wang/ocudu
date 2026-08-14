@@ -38,7 +38,7 @@ ru_sdr:
   # tx_port: gNB transmits baseband samples from this socket (a UE/simulator may connect to it).
   # rx_port: gNB receives baseband samples from this socket. For control-plane-only tests nothing needs to
   #          connect to these ports; the gNB will simply idle in its slot loop.
-  device_args: tx_port=tcp://*:2000,rx_port=tcp://localhost:2001,base_srate=11.52e6
+  device_args: tx_port=tcp://*:2000,rx_port=tcp://192.168.100.153:2001,base_srate=11.52e6
   srate: 11.52
   # The ZMQ backend only accepts gains <= 0.0 dB (see the ZMQ radio config validator).
   tx_gain: 0
