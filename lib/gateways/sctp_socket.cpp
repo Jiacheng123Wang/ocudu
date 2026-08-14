@@ -159,7 +159,9 @@ int sctp_recvmsg(int s, void* msg, size_t len, struct sockaddr* from, socklen_t*
   }
   struct sctp_rcvinfo rsinfo     = {};
   socklen_t           rsinfo_len = sizeof(rsinfo);
-  int                 result = usrsctp_recvv(it->second, msg, len, from, fromlen, &rsinfo, &rsinfo_len, nullptr, msg_flags);
+  unsigned int        infotype   = 0;
+  // Note: infotype must not be null: usrsctp_recvv() writes it on the data path.
+  int                 result = usrsctp_recvv(it->second, msg, len, from, fromlen, &rsinfo, &rsinfo_len, &infotype, msg_flags);
 
   // Provide the per-message info (association id, PPID, stream, ...) to the caller.
   if (sinfo != nullptr && sinfo_len != nullptr && *sinfo_len >= sizeof(struct sctp_rcvinfo)) {

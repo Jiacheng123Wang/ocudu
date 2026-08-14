@@ -133,10 +133,18 @@ sockaddr_searcher::sockaddr_searcher(const std::string& address, int port, ocudu
 {
   struct addrinfo hints = {};
   // support ipv4, ipv6 and hostnames
-  hints.ai_family    = AF_UNSPEC;
-  hints.ai_socktype  = SOCK_SEQPACKET;
+  hints.ai_family = AF_UNSPEC;
+#if defined(__APPLE__)
+  // macOS has no native SCTP support: getaddrinfo() rejects the IPPROTO_SCTP protocol hint (EAI_BADFLAGS).
+  // Resolve the address without transport protocol constraints; the resulting sockaddr is protocol-agnostic and
+  // is only used to configure the usrsctp stack.
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = 0;
+#else
+  hints.ai_socktype = SOCK_SEQPACKET;
+  hints.ai_protocol = IPPROTO_SCTP;
+#endif
   hints.ai_flags     = 0;
-  hints.ai_protocol  = IPPROTO_SCTP;
   hints.ai_canonname = nullptr;
   hints.ai_addr      = nullptr;
   hints.ai_next      = nullptr;
