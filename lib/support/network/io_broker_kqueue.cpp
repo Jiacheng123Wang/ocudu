@@ -368,7 +368,7 @@ io_broker::subscriber io_broker_kqueue::register_fd(unique_fd        fd,
 
   int raw_fd = fd.value();
 
-  if (std::this_thread::get_id() == thread.get_id()) {
+  if (thread.is_this_thread()) {
     // Registration from within the kqueue thread.
     if (handle_fd_registration(std::move(fd), handler, err_handler, nullptr, nullptr)) {
       return subscriber{*this, raw_fd};
@@ -409,7 +409,7 @@ bool io_broker_kqueue::unregister_fd(int fd, std::promise<bool>* complete_notifi
     }
     return false;
   }
-  if (std::this_thread::get_id() == thread.get_id()) {
+  if (thread.is_this_thread()) {
     // Deregistration from within the kqueue thread.
     handle_fd_removal(fd, false, std::nullopt, complete_notifier);
     return true;

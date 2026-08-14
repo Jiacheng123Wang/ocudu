@@ -79,7 +79,7 @@ static std::string compute_this_thread_name()
   return name;
 }
 
-static void print_thread_priority(::pthread_t t, const char* tname, std::thread::id tid)
+static void print_thread_priority(::pthread_t t, const char* tname)
 {
   if (t == 0) {
     fmt::println("Error: Trying to print priority of invalid thread handle");
@@ -124,7 +124,7 @@ static void print_thread_priority(::pthread_t t, const char* tname, std::thread:
       break;
   }
 
-  fmt::println("Thread [{}:{}]: Sched policy is \"{}\". Priority is {}.", tname, tid, p, param.sched_priority);
+  fmt::println("Thread [{}]: Sched policy is \"{}\". Priority is {}.", tname, p, param.sched_priority);
 }
 
 namespace {
@@ -262,13 +262,32 @@ os_sched_affinity_bitmask::subtract(const os_sched_affinity_bitmask& rhs) const
 
 ///////////////////////////////////////
 
-std::thread unique_thread::make_thread(const std::string&               name,
-                                       unique_function<void()>          callable,
-                                       os_thread_realtime_priority      prio,
-                                       const os_sched_affinity_bitmask& cpu_mask)
+namespace {
+/// pthread trampoline: runs the unique_function and releases it.
+void* unique_thread_trampoline(void* arg)
 {
-  // Launch thread.
-  return std::thread([name, prio, cpu_mask, callable = std::move(callable)]() {
+  auto* callable = static_cast<unique_function<void()>*>(arg);
+  (*callable)();
+  delete callable;
+  return nullptr;
+}
+} // namespace
+
+unique_thread::thread_handle_impl unique_thread::make_thread(const std::string&               name,
+                                                             unique_function<void()>          callable,
+                                                             os_thread_realtime_priority      prio,
+                                                             const os_sched_affinity_bitmask& cpu_mask)
+{
+  ::pthread_attr_t attr;
+  ::pthread_attr_init(&attr);
+#if defined(__APPLE__)
+  // The macOS default pthread stack (512 KiB) is too small for the gNB's deep call chains: the FAPI fastpath
+  // translators keep large TTI structures on the stack, which overflow the default stack. Use a stack size similar
+  // to the Linux default (8 MiB), with margin.
+  ::pthread_attr_setstacksize(&attr, 16u * 1024u * 1024u);
+#endif
+
+  auto* thread_callable = new unique_function<void()>([name, prio, cpu_mask, callable = std::move(callable)]() {
     std::string fixed_name = name;
 
     // Truncate the thread name if it exceeds the maximum length.
@@ -320,6 +339,16 @@ std::thread unique_thread::make_thread(const std::string&               name,
     // Trigger observers.
     thread_observers.on_thread_destruction();
   });
+
+  thread_handle_impl handle;
+  int                ret = ::pthread_create(&handle.tid, &attr, &unique_thread_trampoline, thread_callable);
+  ::pthread_attr_destroy(&attr);
+  if (ret != 0) {
+    delete thread_callable;
+    report_fatal_error("Failed to create thread '{}': {}", name, ::strerror(ret));
+  }
+  handle.running = true;
+  return handle;
 }
 
 unsigned ocudu::get_thread_index()
@@ -336,12 +365,12 @@ const char* ocudu::this_thread_name()
 
 void ocudu::print_this_thread_priority()
 {
-  print_thread_priority(::pthread_self(), this_thread_name(), std::this_thread::get_id());
+  print_thread_priority(::pthread_self(), this_thread_name());
 }
 
 void unique_thread::print_priority()
 {
-  print_thread_priority(thread_handle.native_handle(), name.c_str(), thread_handle.get_id());
+  print_thread_priority(thread_handle.tid, name.c_str());
 }
 
 void unique_thread::add_observer(std::unique_ptr<observer> observer)

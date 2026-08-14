@@ -41,10 +41,9 @@ public:
     return task_queue.try_push(prio, std::move(task));
   }
 
-  /// Get worker thread id.
-  std::thread::id get_id() const { return t_handle.get_id(); }
-
   /// Get worker thread name.
+  bool is_this_thread() const { return t_handle.is_this_thread(); }
+
   const char* worker_name() const { return t_handle.get_name(); }
 
   /// \brief Get specified priority task queue capacity.
@@ -89,10 +88,7 @@ public:
   [[nodiscard]] bool defer(unique_task task) override { return worker.push_task(prio, std::move(task)); }
 
   // Check whether task can be run inline or it needs to be dispatched to a queue.
-  bool can_run_task_inline() const
-  {
-    return prio == task_priority::max and worker.get_id() == std::this_thread::get_id();
-  }
+  bool can_run_task_inline() const { return prio == task_priority::max and worker.is_this_thread(); }
 
 private:
   /// Enqueuer interface with the provided Priority.

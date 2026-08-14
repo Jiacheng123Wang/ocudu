@@ -59,9 +59,9 @@ detail::base_worker_pool::base_worker_pool(unsigned                             
 
 bool detail::base_worker_pool::is_in_thread_pool() const
 {
-  return std::any_of(worker_threads.begin(),
-                     worker_threads.end(),
-                     [id = std::this_thread::get_id()](const unique_thread& t) { return t.get_id() == id; });
+  return std::any_of(worker_threads.begin(), worker_threads.end(), [self = ::pthread_self()](const unique_thread& t) {
+    return ::pthread_equal(self, t.native_handle()) != 0;
+  });
 }
 
 // //////////////////////////

@@ -89,10 +89,9 @@ public:
   /// Maximum number of pending tasks the task FIFO can hold.
   unsigned max_pending_tasks() const { return pending_tasks.capacity(); }
 
-  /// Get worker thread id.
-  std::thread::id get_id() const { return t_handle.get_id(); }
-
   /// Get worker thread name.
+  bool is_this_thread() const { return t_handle.is_this_thread(); }
+
   const char* worker_name() const { return t_handle.get_name(); }
 
 private:
@@ -138,7 +137,7 @@ public:
   [[nodiscard]] bool defer(unique_task task) override { return worker->push_task(std::move(task)); }
 
   /// Determine whether the caller is in the same thread as the worker this executor adapts.
-  bool can_run_task_inline() const { return worker->get_id() == std::this_thread::get_id(); }
+  bool can_run_task_inline() const { return worker->is_this_thread(); }
 
 private:
   general_task_worker<QueuePolicy, WaitPolicy>* worker = nullptr;

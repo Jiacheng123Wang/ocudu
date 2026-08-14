@@ -8,6 +8,7 @@
 #include "ocudu/adt/unique_function.h"
 #include "ocudu/support/cpu_architecture_info.h"
 #include "ocudu/support/executors/thread_utils.h"
+#include <pthread.h>
 #include <string>
 #include <thread>
 
@@ -210,18 +211,16 @@ public:
   unique_thread& operator=(unique_thread&& other) noexcept = default;
 
   /// Joins thread if it is running.
-  void join()
-  {
-    if (thread_handle.joinable()) {
-      thread_handle.join();
-    }
-  }
+  void join() { thread_handle.join(); }
 
   /// Gets thread name.
   const char* get_name() const { return name.c_str(); }
 
-  /// Gets C++ thread id.
-  std::thread::id get_id() const { return thread_handle.get_id(); }
+  /// Checks whether the calling thread is the thread wrapped by this object.
+  bool is_this_thread() const { return thread_handle.is_this_thread(); }
+
+  /// Gets the native pthread handle (0 if the thread is not running).
+  ::pthread_t native_handle() const { return thread_handle.tid; }
 
   /// Checks whether thread is running.
   bool running() const { return thread_handle.joinable(); }
@@ -236,16 +235,65 @@ public:
   static void add_observer(std::unique_ptr<observer> observer);
 
 private:
+  /// RAII wrapper of a pthread handle with std::thread-like semantics (joinable/join/move). It is used instead of
+  /// std::thread so that a custom stack size can be set at thread creation (the macOS default pthread stack of
+  /// 512 KiB is too small for the gNB's deep call chains).
+  class thread_handle_impl
+  {
+  public:
+    thread_handle_impl() = default;
+    thread_handle_impl(const thread_handle_impl&)            = delete;
+    thread_handle_impl& operator=(const thread_handle_impl&) = delete;
+
+    thread_handle_impl(thread_handle_impl&& other) noexcept : tid(other.tid), running(other.running)
+    {
+      other.tid     = 0;
+      other.running = false;
+    }
+
+    thread_handle_impl& operator=(thread_handle_impl&& other) noexcept
+    {
+      if (this != &other) {
+        join();
+        tid     = other.tid;
+        running = other.running;
+        other.tid     = 0;
+        other.running = false;
+      }
+      return *this;
+    }
+
+    ~thread_handle_impl() { join(); }
+
+    bool joinable() const { return running; }
+
+    void join()
+    {
+      if (running) {
+        ::pthread_join(tid, nullptr);
+        running = false;
+      }
+    }
+
+    /// Checks whether the calling thread is the thread wrapped by this object.
+    bool is_this_thread() const { return running and (::pthread_equal(::pthread_self(), tid) != 0); }
+
+  private:
+    friend class unique_thread;
+    ::pthread_t tid     = 0;
+    bool        running = false;
+  };
+
   /// Starts thread with provided name and attributes.
-  static std::thread make_thread(const std::string&               name,
-                                 unique_function<void()>          callable,
-                                 os_thread_realtime_priority      prio     = os_thread_realtime_priority::no_realtime(),
-                                 const os_sched_affinity_bitmask& cpu_mask = {});
+  static thread_handle_impl make_thread(const std::string&               name,
+                                        unique_function<void()>          callable,
+                                        os_thread_realtime_priority      prio     = os_thread_realtime_priority::no_realtime(),
+                                        const os_sched_affinity_bitmask& cpu_mask = {});
 
   /// Thread name.
   std::string name;
 
-  std::thread thread_handle;
+  thread_handle_impl thread_handle;
 };
 
 /// Print caller thread priority.
