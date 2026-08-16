@@ -258,6 +258,25 @@ decode(output, input, crc, cfg):
 | 7 | 328MB .bin 污染 git | .gitignore 排除 *.bin；Python 生成工具 + bg*.txt 进 git，可重建 |
 | 8 | 实时性回退（GPU 竞争/功耗） | 探针 + ping 双指标把关，任何回退即可回退到 CPU 基线（工厂开关） |
 
+## 4.5 BLER 性能基准（2026-08-16，已入库）
+
+**工具**：
+- `test/ldpc_metal_bler_test`：纯 LDPC 解码 BLER 基准（CPU vs GPU 同一 LLR 输入）。
+  参数：`--bg/--z/--rates/--snrs/--trials/--max-iter`；每 (BG, Z, rate, SNR) 点输出
+  pass 计数 CSV（`test/bler_results/bler_bg*_z*_r*.csv`）。
+  传输模型：RV0 顺序截断到 K/rate 位（与真实速率匹配的擦除/缩短语义一致）。
+- `test/plot_bler.py`：SNR vs BLER 曲线族（每个 (BG, Z) 一张图，颜色=码率、
+  实线=CPU、虚线=GPU），生成 PNG。
+
+**基线数据**（-6..10 dB，每点 200 块，max_iter=6）：
+- CPU 瀑布：低码率 -2..0 dB；高码率（R=3/4）6..10 dB。
+- GPU（LLS）瀑布：+6..+10 dB（低码率），高码率 10 dB 以上。
+- 差距示例（BG1 Z64）：R=1/2 时 CPU@0dB=197/200 vs GPU@8dB=114/200（~8 dB）；
+  R=1/3 时 GPU 4→44→91→100%（@4..10 dB）。
+- 小码块（Z16）LLS 表现略好于 Z64（R=1/3 @6dB：164/200 vs 89/200）。
+- 结论：GPU 与 CPU 的瀑布差距随码率升高而加大（高码率 >10 dB），
+  NMS 内核重写是弥合差距的必由之路；本基线与工具作为后续打磨的参照系。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`
