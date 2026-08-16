@@ -17,6 +17,7 @@
 
 #include "ocudu/phy/upper/channel_coding/channel_coding_factories.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc_encoder_buffer.h"
+#include "ldpc_decoder_metal.h"
 #include "ocudu/adt/bit_buffer.h"
 
 #include <cstdio>
@@ -34,6 +35,8 @@ namespace {
 struct params {
   std::string outdir    = ".";
   std::string gpu_type  = "metal";
+  float       norm      = -1.0F;
+  float       sat       = -1.0F;
   unsigned    bg        = 1;
   unsigned    z         = 64;
   std::vector<double> rates = {1.0 / 3.0, 0.5, 2.0 / 3.0};
@@ -86,6 +89,10 @@ params parse_args(int argc, char** argv)
       p.outdir = next(a.c_str());
     } else if (a == "--gpu-type") {
       p.gpu_type = next(a.c_str());
+    } else if (a == "--norm") {
+      p.norm = std::stof(next(a.c_str()));
+    } else if (a == "--sat") {
+      p.sat = std::stof(next(a.c_str()));
     } else if (a == "--bg") {
       p.bg = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else if (a == "--z") {
@@ -200,7 +207,20 @@ int main(int argc, char** argv)
       .early_stop_syndrome = true,
   };
   auto cpu_dec = create_ldpc_decoder_factory_sw("generic", dec_factory_cfg)->create();
-  auto gpu_dec = create_ldpc_decoder_factory_sw(p.gpu_type, dec_factory_cfg)->create();
+  std::unique_ptr<ldpc_decoder> gpu_dec;
+  if (p.gpu_type == "metal_nms_layered") {
+    gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
+                                                   dec_factory_cfg.early_stop_syndrome,
+                                                   ocudu::metal::decoder_engine::algo::nms_layered,
+                                                   (p.norm >= 0.0F) ? p.norm : 1.0F, p.sat);
+  } else if ((p.gpu_type == "metal_nms") && (p.norm >= 0.0F)) {
+    // Norm-factor experiments bypass the factory defaults.
+    gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
+                                                   dec_factory_cfg.early_stop_syndrome,
+                                                   ocudu::metal::decoder_engine::algo::nms, p.norm, p.sat);
+  } else {
+    gpu_dec = create_ldpc_decoder_factory_sw(p.gpu_type, dec_factory_cfg)->create();
+  }
   auto encoder = create_ldpc_encoder_factory_sw("generic")->create();
   auto crc16   = create_crc_calculator_factory_sw("lut")->create(crc_generator_poly::CRC16);
   if (!cpu_dec || !gpu_dec || !encoder || !crc16) {

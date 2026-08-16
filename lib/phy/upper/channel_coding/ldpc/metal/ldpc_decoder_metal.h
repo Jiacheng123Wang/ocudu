@@ -26,7 +26,8 @@ public:
   /// \param[in] early_stop_syndrome Early stop on syndrome convergence (no-CRC path only).
   /// \param[in] mode                GPU algorithm (LLS heuristic or normalized min-sum).
   ldpc_decoder_metal(bool force_decoding, bool early_stop_syndrome,
-                     metal::decoder_engine::algo mode = metal::decoder_engine::algo::lls);
+                     metal::decoder_engine::algo mode = metal::decoder_engine::algo::lls,
+                     float factor_override = -1.0F, float sat_override = -1.0F);
 
   // Out-of-line: the engine slots are defined in the implementation file only.
   ~ldpc_decoder_metal() override;
@@ -46,6 +47,8 @@ private:
   bool force_decoding;
   bool early_stop_syndrome;
   metal::decoder_engine::algo mode;
+  float factor_override;
+  float sat_override;
 
   /// Key: (base graph index, lifting size). Owns the engine slots.
   std::map<std::pair<unsigned, unsigned>, std::unique_ptr<engine_slot>> slots;

@@ -25,8 +25,26 @@ public:
   enum class algo {
     /// SynchroPlus LLS bit-flipping heuristic (see PLAN.md 4.6).
     lls,
-    /// Normalized min-sum (ocudu-side kernel, same architecture).
+    /// Normalized min-sum, flooding schedule (ocudu-side kernel).
     nms,
+    /// Normalized min-sum, layered schedule mirroring the CPU decoder.
+    nms_layered,
+  };
+
+  /// CSR edge layout + layer tables for the layered NMS mode (built by the adapter).
+  struct layered_info {
+    /// Offsets into edge_vn / c2v, M_aligned + 1 entries (4KB-aligned, engine lifetime).
+    const uint32_t* row_start = nullptr;
+    /// VN index of each edge, no_edges entries (4KB-aligned, engine lifetime).
+    const uint32_t* edge_vn = nullptr;
+    /// Total number of H set bits.
+    uint32_t no_edges = 0;
+    /// Number of layers (base-graph check rows): 46 (BG1) / 42 (BG2).
+    uint32_t n_layers = 0;
+    /// Lifting size (rows per layer).
+    uint32_t z = 0;
+    /// Flat array of n_layers fixed-size layer descriptors (4+4+20 uint32s each).
+    const uint32_t* layer_descs = nullptr;
   };
 
   decoder_engine()  = default;
@@ -47,9 +65,13 @@ public:
   /// \param[out] col_weights_out Column weights (N_aligned entries); the engine computes them
   ///                           (LLS mode only, may be null in NMS mode).
   /// \param[in] mode           Decoder algorithm.
+  /// \param[in] sat            NMS soft-bit saturation magnitude (0 = disabled; mirrors the CPU's
+  ///                           promotion_sum, |soft| > 63 -> fixed bit).
+  /// \param[in] layered        CSR edge layout and layer tables (nms_layered mode only, may be null).
   /// \return True on success.
   bool init(uint32_t n_logical, uint32_t m_logical, float factor, const uint32_t* h, const uint32_t* ht,
-            uint32_t* col_weights_out, algo mode = algo::lls);
+            uint32_t* col_weights_out, algo mode = algo::lls, float sat = 0.0F,
+            const layered_info* layered = nullptr);
 
   /// \brief Synchronous decode of one codeblock.
   ///

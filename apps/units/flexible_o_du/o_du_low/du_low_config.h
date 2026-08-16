@@ -48,6 +48,7 @@ struct du_low_unit_expert_upper_phy_config {
   /// - \c metal: for using the Apple GPU implementation with the LLS heuristic (only available on
   ///   builds with ENABLE_METAL_LDPC), or
   /// - \c metal_nms: for using the Apple GPU implementation with normalized min-sum decoding.
+  /// - \c metal_nms_layered: as \c metal_nms, with the layered schedule mirroring the CPU decoder.
   std::string ldpc_decoder_type = "auto";
   /// \brief PUSCH channel estimator frequency-domain smoothing strategy.
   ///

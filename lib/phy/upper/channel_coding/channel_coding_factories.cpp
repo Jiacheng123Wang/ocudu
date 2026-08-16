@@ -125,6 +125,10 @@ public:
       return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome,
                                                   ocudu::metal::decoder_engine::algo::nms);
     }
+    if (dec_type == "metal_nms_layered") {
+      return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome,
+                                                  ocudu::metal::decoder_engine::algo::nms_layered);
+    }
 #endif // OCUDU_METAL_LDPC
     if ((dec_type == "auto") || (dec_type == "generic")) {
       return std::make_unique<ldpc_decoder_generic>(cfg.force_decoding, cfg.early_stop_syndrome);

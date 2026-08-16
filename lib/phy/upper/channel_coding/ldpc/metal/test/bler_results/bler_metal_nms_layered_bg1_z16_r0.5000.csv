@@ -1,10 +1,10 @@
-# gpu=metal_nms bg=1 z=16 k=352 rate=0.5 e=704 max_iter=10 trials=200
+# gpu=metal_nms_layered bg=1 z=16 k=352 rate=0.5 e=704 max_iter=10 trials=200
 snr_db,cpu_pass,gpu_pass,total
 -6,0,0,200
 -4,0,0,200
 -2,0,0,200
-0,196,9,200
-2,200,196,200
+0,196,198,200
+2,200,200,200
 4,200,200,200
 6,200,200,200
 8,200,200,200

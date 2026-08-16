@@ -50,8 +50,9 @@ def load_series(path):
 
 
 # GPU type -> line style. CPU is always solid.
-GPU_STYLE = {"metal": "--", "metal_nms": "-."}
-GPU_LABEL = {"metal": "GPU LLS", "metal_nms": "GPU NMS"}
+GPU_STYLE = {"metal": "--", "metal_nms": "-.", "metal_nms_layered": (0, (1, 1))}
+GPU_MARKER = {"metal": "^", "metal_nms": "v", "metal_nms_layered": "s"}
+GPU_LABEL = {"metal": "GPU LLS", "metal_nms": "GPU NMS", "metal_nms_layered": "GPU NMS-L"}
 
 
 def plot_group(bg, z, files, outdir, show):
@@ -75,7 +76,7 @@ def plot_group(bg, z, files, outdir, show):
             (l_cpu,) = ax.plot(snrs, cpu, color=color, lw=2, ls="-", marker="o", ms=8,
                                mfc=color, mec=SURFACE, mew=1, label=f"R={rate:.3g} CPU", zorder=3)
             (l_gpu,) = ax.plot(snrs, gpu, color=color, lw=2, ls=GPU_STYLE.get(gpu_type, "--"),
-                               marker="^", ms=9, mfc=SURFACE, mec=color, mew=1.5,
+                               marker=GPU_MARKER.get(gpu_type, "^"), ms=9, mfc=SURFACE, mec=color, mew=1.5,
                                label=f"R={rate:.3g} {GPU_LABEL.get(gpu_type, gpu_type)}", zorder=3)
             legend_handles.extend([l_cpu, l_gpu])
 
@@ -83,14 +84,14 @@ def plot_group(bg, z, files, outdir, show):
     ax.set_ylim(3e-3, 1.5)
     ax.set_xlabel("SNR (Es/N0, dB)", color=INK)
     ax.set_ylabel("BLER", color=INK)
-    ax.set_title(f"LDPC BLER — BG{bg} Z{z} — CPU vs Metal GPU (LLS/NMS)", color=INK, fontsize=12)
+    ax.set_title(f"LDPC BLER — BG{bg} Z{z} — CPU vs Metal GPU (LLS/NMS/NMS-L)", color=INK, fontsize=12)
 
     for spine in ax.spines.values():
         spine.set_color(GRID)
     ax.tick_params(colors=INK, labelsize=9)
     ax.grid(True, which="major", color=GRID, lw=0.8)
     ax.grid(True, which="minor", color=GRID, lw=0.4, ls=":")
-    ax.legend(handles=legend_handles, loc="lower left", fontsize=8, ncol=2,
+    ax.legend(handles=legend_handles, loc="lower left", fontsize=8, ncol=3,
               frameon=True, facecolor=SURFACE, edgecolor=GRID, labelcolor=INK)
 
     out_path = os.path.join(outdir, f"bler_bg{bg}_z{z}.png")

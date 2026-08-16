@@ -128,6 +128,7 @@ kernel void nms_vn_update(
     constant uint32_t& n_ht_chunks [[buffer(7)]],
     constant float& norm [[buffer(8)]],
     device DecodeCtrl* ctrl [[buffer(9)]],
+    constant float& sat [[buffer(10)]],
     uint vn_idx [[thread_position_in_grid]],
     uint lane_id [[thread_index_in_simdgroup]])
 {
@@ -161,6 +162,10 @@ kernel void nms_vn_update(
         }
     }
 
+    // Optional saturation (mirrors the CPU's promotion_sum: |soft| > 63 -> fixed bit).
+    if (sat > 0.0f) {
+        sum = clamp(sum, -sat, sat);
+    }
     llr[vn_idx] = (half)sum;
 
     // Round housekeeping (vn 0): count the round and clear the error count for
