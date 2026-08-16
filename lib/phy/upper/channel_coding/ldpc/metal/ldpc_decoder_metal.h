@@ -7,6 +7,7 @@
 #pragma once
 
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc_decoder.h"
+#include "ocudu_metal_decoder_engine.h"
 
 #include <map>
 #include <memory>
@@ -23,7 +24,9 @@ class ldpc_decoder_metal : public ldpc_decoder
 public:
   /// \param[in] force_decoding      Force decoding even if the codeblock appears too short.
   /// \param[in] early_stop_syndrome Early stop on syndrome convergence (no-CRC path only).
-  ldpc_decoder_metal(bool force_decoding, bool early_stop_syndrome);
+  /// \param[in] mode                GPU algorithm (LLS heuristic or normalized min-sum).
+  ldpc_decoder_metal(bool force_decoding, bool early_stop_syndrome,
+                     metal::decoder_engine::algo mode = metal::decoder_engine::algo::lls);
 
   // Out-of-line: the engine slots are defined in the implementation file only.
   ~ldpc_decoder_metal() override;
@@ -42,6 +45,7 @@ private:
 
   bool force_decoding;
   bool early_stop_syndrome;
+  metal::decoder_engine::algo mode;
 
   /// Key: (base graph index, lifting size). Owns the engine slots.
   std::map<std::pair<unsigned, unsigned>, std::unique_ptr<engine_slot>> slots;

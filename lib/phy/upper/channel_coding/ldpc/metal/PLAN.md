@@ -372,6 +372,43 @@ parity，打包成 h_pred。全量 syndrome 只算初始一次，此后增量维
 增量 syndrome 五件套），只需替换 scan/update 两个 kernel 的算术内容——这正是后续 NMS
 打磨的最短路径。
 
+## 4.7 NMS Metal 内核（2026-08-16，已实现并验证）
+
+**实现**（`ocudu_nms_decoder.metal`，ocudu 侧新文件，SynchroPlus 文件未动）：
+- 按 4.6 的评估路径实施：架构五件套全部复用（单命令缓冲展开迭代 + GPU 内早停、
+  零拷贝矩阵、每行线程组 dispatch、Shared/Private 分层），纯算术替换。
+- **syndrome 处理进一步简化**：CN 内核在扫 H 行求 min1/min2/idx 的同一遍里从 llr 符号
+  直接算出该行 parity（每行一个 uint32，无打包竞争），VN 内核读的是 kernel 边界保证的
+  一致快照——LLS 的增量 HT-XOR 维护被整个移除，且消除了 VN 读 h_pred 与并发写之间的竞态。
+- VN 更新：`c2v = norm × (v == idx_min1 ? min2 : min1)`，符号 = 外推奇偶
+  （h_pred_bits[r] ⊕ 自身硬判），`sum = llr_chan + Σ c2v`；norm = 0.8。
+- 工厂新类型 **`metal_nms`**（config: `expert_phy --pusch_ldpc_decoder_type metal_nms`）。
+- 引擎 `decoder_engine::algo {lls, nms}` 双模式；"metal"（LLS）路径保持不变。
+
+**排障记录（两个真实 bug）**：
+1. VN 内核的 HT 遍历沿用了 LLS 的 32 车道条带循环——LLS 是全组协作处理一个 VN 的翻转，
+   NMS 是每线程一个 VN，条带导致每个 VN 只处理自己行的 1 个 chunk，VN 23-31（chunk 越界）
+   永远收不到消息、擦除位冻结。改串行遍历后无噪声一轮收敛。
+2. 单元测试的 NMS 解码块一次静默替换失败（锚串不匹配），`gpu_nms_ok` 恒 false——
+   修复后 ALL OK。
+
+**验证结果（3-way BLER：CPU vs LLS vs NMS，-6..10dB，200 块/点）**：
+
+| 配置 | CPU 瀑布 | LLS 瀑布 | NMS 瀑布 |
+|---|---|---|---|
+| BG1 Z16 R=1/3 | <-6 dB | 4-8 dB | 0-2 dB（0dB 159/200） |
+| BG1 Z16 R=1/2 | ~0 dB | 6-10 dB | 2-4 dB |
+| BG1 Z16 R=2/3 | 2-6 dB | >10 dB | 4-6 dB |
+| BG1 Z64 R=1/2 | -2-0 dB | 6-10 dB | 2-4 dB（33@2, 200@4） |
+| BG2 Z64 R=1/2 | -2-0 dB | 8-10+ dB | 2-4 dB |
+| BG1 Z256 R=1/3 | <-6 dB | 8-10 dB | 2-4 dB |
+
+- **NMS 与 CPU 的差距缩至 ~2dB**（LLS 的 ~8dB → NMS 的 ~2dB），3dB 点 NMS 已 100%
+  与 CPU 一致（单元测试 BG1 Z16/Z32、BG2 Z16/Z32 全部 100/100）。
+- 单元测试无噪声三配置（BG1 Z16/BG2 Z16/BG1 Z256）NMS 全部位精确、1 轮收敛。
+- 剩余 ~2dB 的改进空间：norm 调优（0.8 待扫）、int8 量化损失、更多迭代。
+- 图：`test/bler_results/bler_bg*.png`（实线 CPU / 虚线 LLS / 点划线 NMS）。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`

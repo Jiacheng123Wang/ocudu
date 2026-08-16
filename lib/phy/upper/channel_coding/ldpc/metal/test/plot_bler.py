@@ -23,7 +23,7 @@ INK = "#0b0b0b"
 INK_MUTED = "#52514e"
 GRID = "#e8e8e6"
 
-FILE_RE = re.compile(r"bler_bg(\d)_z(\d+)_r(\d+\.\d+)\.csv")
+FILE_RE = re.compile(r"bler_(\w+)_bg(\d)_z(\d+)_r(\d+\.\d+)\.csv")
 
 
 def load_series(path):
@@ -49,35 +49,41 @@ def load_series(path):
     return header, snrs, cpu, gpu
 
 
+# GPU type -> line style. CPU is always solid.
+GPU_STYLE = {"metal": "--", "metal_nms": "-."}
+GPU_LABEL = {"metal": "GPU LLS", "metal_nms": "GPU NMS"}
+
+
 def plot_group(bg, z, files, outdir, show):
     fig, ax = plt.subplots(figsize=(8, 5.5), dpi=150)
     fig.patch.set_facecolor(SURFACE)
     ax.set_facecolor(SURFACE)
 
     # One rate per color slot (ascending rate = slot order); decoder = line style.
-    rates = []
+    # Files may cover several GPU types (metal / metal_nms); each becomes a curve set.
+    by_rate = {}
     for f in sorted(files):
         m = FILE_RE.match(os.path.basename(f))
         header, snrs, cpu, gpu = load_series(f)
-        rates.append((float(m.group(3)), header, snrs, cpu, gpu))
-    rates.sort(key=lambda t: t[0])
+        gpu_type = m.group(1)
+        by_rate.setdefault(float(m.group(4)), []).append((gpu_type, header, snrs, cpu, gpu))
 
     legend_handles = []
-    for slot, (rate, header, snrs, cpu, gpu) in enumerate(rates):
+    for slot, rate in enumerate(sorted(by_rate)):
         color = RATE_COLORS[slot % len(RATE_COLORS)]
-        label_cpu = f"R={rate:.3g} CPU"
-        label_gpu = f"R={rate:.3g} GPU"
-        (l_cpu,) = ax.plot(snrs, cpu, color=color, lw=2, ls="-", marker="o", ms=8,
-                           mfc=color, mec=SURFACE, mew=1, label=label_cpu, zorder=3)
-        (l_gpu,) = ax.plot(snrs, gpu, color=color, lw=2, ls="--", marker="^", ms=9,
-                           mfc=SURFACE, mec=color, mew=1.5, label=label_gpu, zorder=3)
-        legend_handles.extend([l_cpu, l_gpu])
+        for gpu_type, header, snrs, cpu, gpu in sorted(by_rate[rate]):
+            (l_cpu,) = ax.plot(snrs, cpu, color=color, lw=2, ls="-", marker="o", ms=8,
+                               mfc=color, mec=SURFACE, mew=1, label=f"R={rate:.3g} CPU", zorder=3)
+            (l_gpu,) = ax.plot(snrs, gpu, color=color, lw=2, ls=GPU_STYLE.get(gpu_type, "--"),
+                               marker="^", ms=9, mfc=SURFACE, mec=color, mew=1.5,
+                               label=f"R={rate:.3g} {GPU_LABEL.get(gpu_type, gpu_type)}", zorder=3)
+            legend_handles.extend([l_cpu, l_gpu])
 
     ax.set_yscale("log")
     ax.set_ylim(3e-3, 1.5)
     ax.set_xlabel("SNR (Es/N0, dB)", color=INK)
     ax.set_ylabel("BLER", color=INK)
-    ax.set_title(f"LDPC BLER — BG{bg} Z{z} — ocudu CPU vs Metal GPU", color=INK, fontsize=12)
+    ax.set_title(f"LDPC BLER — BG{bg} Z{z} — CPU vs Metal GPU (LLS/NMS)", color=INK, fontsize=12)
 
     for spine in ax.spines.values():
         spine.set_color(GRID)
@@ -104,11 +110,11 @@ def main():
     args = ap.parse_args()
 
     groups = {}
-    for path in sorted(glob.glob(os.path.join(args.results, "bler_bg*.csv"))):
+    for path in sorted(glob.glob(os.path.join(args.results, "bler_*_bg*.csv"))):
         m = FILE_RE.match(os.path.basename(path))
         if not m:
             continue
-        groups.setdefault((int(m.group(1)), int(m.group(2))), []).append(path)
+        groups.setdefault((int(m.group(2)), int(m.group(3))), []).append(path)
 
     if not groups:
         print(f"no bler_*.csv found in {args.results}")

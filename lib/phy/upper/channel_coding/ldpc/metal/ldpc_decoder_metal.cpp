@@ -114,8 +114,9 @@ struct ldpc_decoder_metal::engine_slot
   std::vector<uint8_t>                   hard_bits;
 };
 
-ldpc_decoder_metal::ldpc_decoder_metal(bool force_decoding_, bool early_stop_syndrome_) :
-  force_decoding(force_decoding_), early_stop_syndrome(early_stop_syndrome_)
+ldpc_decoder_metal::ldpc_decoder_metal(bool force_decoding_, bool early_stop_syndrome_,
+                                       metal::decoder_engine::algo mode_) :
+  force_decoding(force_decoding_), early_stop_syndrome(early_stop_syndrome_), mode(mode_)
 {
 }
 
@@ -178,10 +179,11 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
   }
 
   slot->engine = std::make_unique<metal::decoder_engine>();
-  // LLS update step size. Tuned on the BLER sweeps (0.45 is the SynchroPlus reference;
-  // 0.8 measured slightly better on ocudu-quantized int8 LLRs).
-  constexpr float alpha = 0.8F;
-  if (!slot->engine->init(n, m, alpha, slot->h.get(), slot->ht.get(), slot->col_weights.get())) {
+  // LLS step size (0.45 is the SynchroPlus reference; 0.8 measured slightly better on
+  // ocudu-quantized int8 LLRs) / NMS normalization factor (aligned with the CPU scale).
+  constexpr float factor = 0.8F;
+  uint32_t*       col_weights = (mode == metal::decoder_engine::algo::lls) ? slot->col_weights.get() : nullptr;
+  if (!slot->engine->init(n, m, factor, slot->h.get(), slot->ht.get(), col_weights, mode)) {
     ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
   }
 

@@ -45,7 +45,9 @@ struct du_low_unit_expert_upper_phy_config {
   /// - \c auto: selects the fastest available CPU implementation (default), or
   /// - \c generic: for using the unoptimized generic implementation, or
   /// - \c neon: for using the NEON implementation, or
-  /// - \c metal: for using the Apple GPU implementation (only available on builds with ENABLE_METAL_LDPC).
+  /// - \c metal: for using the Apple GPU implementation with the LLS heuristic (only available on
+  ///   builds with ENABLE_METAL_LDPC), or
+  /// - \c metal_nms: for using the Apple GPU implementation with normalized min-sum decoding.
   std::string ldpc_decoder_type = "auto";
   /// \brief PUSCH channel estimator frequency-domain smoothing strategy.
   ///

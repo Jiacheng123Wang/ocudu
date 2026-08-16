@@ -21,6 +21,14 @@ namespace metal {
 class decoder_engine
 {
 public:
+  /// Decoder algorithm selection.
+  enum class algo {
+    /// SynchroPlus LLS bit-flipping heuristic (see PLAN.md 4.6).
+    lls,
+    /// Normalized min-sum (ocudu-side kernel, same architecture).
+    nms,
+  };
+
   decoder_engine()  = default;
   ~decoder_engine();
 
@@ -31,15 +39,17 @@ public:
   ///
   /// \param[in] n_logical      Codeblock length N (BG1: 68Z, BG2: 52Z).
   /// \param[in] m_logical      Number of parity checks M (BG1: 46Z, BG2: 42Z).
-  /// \param[in] alpha          LLS update step size (reference value 0.45).
+  /// \param[in] factor         LLS step size (alpha) or NMS normalization factor, per \c mode.
   /// \param[in] h              Packed parity-check matrix, M_aligned rows x ceil(N/32) words,
   ///                           little-endian bit order; must be 4KB-aligned and outlive this object.
   /// \param[in] ht             Packed transpose, N_aligned rows x ceil(M/32) words; same lifetime
   ///                           requirements as \c h.
-  /// \param[out] col_weights_out Column weights (N_aligned entries); the engine computes them.
+  /// \param[out] col_weights_out Column weights (N_aligned entries); the engine computes them
+  ///                           (LLS mode only, may be null in NMS mode).
+  /// \param[in] mode           Decoder algorithm.
   /// \return True on success.
-  bool init(uint32_t n_logical, uint32_t m_logical, float alpha, const uint32_t* h, const uint32_t* ht,
-            uint32_t* col_weights_out);
+  bool init(uint32_t n_logical, uint32_t m_logical, float factor, const uint32_t* h, const uint32_t* ht,
+            uint32_t* col_weights_out, algo mode = algo::lls);
 
   /// \brief Synchronous decode of one codeblock.
   ///

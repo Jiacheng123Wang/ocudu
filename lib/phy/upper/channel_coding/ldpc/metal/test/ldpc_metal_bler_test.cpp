@@ -12,8 +12,8 @@
 //   - decode the same LLRs with the CPU (generic) and the GPU (metal) decoder,
 //   - record the per-point pass counts into a CSV for the plotting script.
 //
-// Usage: ldpc_metal_bler_test [--outdir DIR] [--bg 1|2] [--z Z] [--rates 0.333,0.5,...]
-//        [--snrs 0:2:10] [--trials N] [--max-iter N]
+// Usage: ldpc_metal_bler_test [--outdir DIR] [--gpu-type metal|metal_nms] [--bg 1|2] [--z Z]
+//        [--rates 0.333,0.5,...] [--snrs 0:2:10] [--trials N] [--max-iter N]
 
 #include "ocudu/phy/upper/channel_coding/channel_coding_factories.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc_encoder_buffer.h"
@@ -33,6 +33,7 @@ namespace {
 
 struct params {
   std::string outdir    = ".";
+  std::string gpu_type  = "metal";
   unsigned    bg        = 1;
   unsigned    z         = 64;
   std::vector<double> rates = {1.0 / 3.0, 0.5, 2.0 / 3.0};
@@ -83,6 +84,8 @@ params parse_args(int argc, char** argv)
     };
     if (a == "--outdir") {
       p.outdir = next(a.c_str());
+    } else if (a == "--gpu-type") {
+      p.gpu_type = next(a.c_str());
     } else if (a == "--bg") {
       p.bg = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else if (a == "--z") {
@@ -189,15 +192,15 @@ int main(int argc, char** argv)
   const unsigned n_short = n_full - 2;
   const unsigned k       = (n_full - ((p.bg == 1) ? 46 : 42)) * p.z;
 
-  std::fprintf(stderr, "BLER benchmark: BG%d Z%u K=%u codeblock=%u rates=%zu snrs=%zu trials=%u max_iter=%u\n",
-               p.bg, p.z, k, n_short * p.z, p.rates.size(), p.snrs.size(), p.trials, p.max_iter);
+  std::fprintf(stderr, "BLER benchmark: GPU=%s BG%d Z%u K=%u codeblock=%u rates=%zu snrs=%zu trials=%u max_iter=%u\n",
+               p.gpu_type.c_str(), p.bg, p.z, k, n_short * p.z, p.rates.size(), p.snrs.size(), p.trials, p.max_iter);
 
   const ldpc_decoder_factory::ldpc_decoder_factory_configuration dec_factory_cfg = {
       .force_decoding      = false,
       .early_stop_syndrome = true,
   };
   auto cpu_dec = create_ldpc_decoder_factory_sw("generic", dec_factory_cfg)->create();
-  auto gpu_dec = create_ldpc_decoder_factory_sw("metal", dec_factory_cfg)->create();
+  auto gpu_dec = create_ldpc_decoder_factory_sw(p.gpu_type, dec_factory_cfg)->create();
   auto encoder = create_ldpc_encoder_factory_sw("generic")->create();
   auto crc16   = create_crc_calculator_factory_sw("lut")->create(crc_generator_poly::CRC16);
   if (!cpu_dec || !gpu_dec || !encoder || !crc16) {
@@ -213,9 +216,9 @@ int main(int argc, char** argv)
     const unsigned e = std::min(static_cast<unsigned>(std::lround(k / rate)), n_short * p.z);
 
     char fname[256];
-    std::snprintf(fname, sizeof(fname), "%s/bler_bg%u_z%u_r%.4f.csv", p.outdir.c_str(), p.bg, p.z, rate);
+    std::snprintf(fname, sizeof(fname), "%s/bler_%s_bg%u_z%u_r%.4f.csv", p.outdir.c_str(), p.gpu_type.c_str(), p.bg, p.z, rate);
     std::ofstream csv(fname);
-    csv << "# bg=" << p.bg << " z=" << p.z << " k=" << k << " rate=" << rate << " e=" << e
+    csv << "# gpu=" << p.gpu_type << " bg=" << p.bg << " z=" << p.z << " k=" << k << " rate=" << rate << " e=" << e
         << " max_iter=" << p.max_iter << " trials=" << p.trials << "\n";
     csv << "snr_db,cpu_pass,gpu_pass,total\n";
     std::fprintf(stderr, "rate %.4f (e=%u):", rate, e);
