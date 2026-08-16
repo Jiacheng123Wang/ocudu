@@ -210,6 +210,15 @@ decode(output, input, crc, cfg):
   - 记录 gNB 侧 [ul_pipeline] 统计、ping RTT 分布、UE BLER/重传。
 - 验收：BLER 无回退（CRC 通过率一致），pipeline 延迟改善；分流开关三态均可用。
 
+**实施进度（2026-08-16）**：
+
+- ✅ 配置贯通：`pusch_ldpc_decoder_type` 选项（CLI `--pusch_ldpc_decoder_type` / yml
+  `pusch_ldpc_decoder_type`）→ schema 检查 + 验证器 + yaml writer + 工厂配置。
+  取值：auto / generic / neon / avx2 / avx512 / **metal**。已提交（a390d3d81c）。
+- ⏳ E2E A/B 待跑：真实链路的操作 SNR 未知——若链路为高 SNR（有线/近距），LLS 在
+  该点可用；A/B 数据将给出答案。分流开关（split 态）待 A/B 数据后再定策略
+  （按码块大小分流 vs 按 SNR/MCS 分流）。
+
 ### Step 4 —— 编码器适配器（低优先级，按需启动）
 
 - `encode/` 的 GF(2) uint4 核 + G 矩阵（K×M 位，同样由 ldpc_graph 生成或复用 .bin）。
