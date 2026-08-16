@@ -68,6 +68,7 @@ static void fill_du_low_expert_section(YAML::Node node, const du_low_unit_expert
   node["pusch_dec_enable_early_stop"]              = config.pusch_decoder_early_stop;
   node["pusch_decoder_force_decoding"]             = config.pusch_decoder_force_decoding;
   node["pusch_sinr_calc_method"]                   = config.pusch_sinr_calc_method;
+  node["pusch_ldpc_decoder_type"]                  = config.ldpc_decoder_type;
   node["pusch_channel_estimator_fd_strategy"]      = config.pusch_channel_estimator_fd_strategy;
   node["pusch_channel_estimator_td_strategy"]      = config.pusch_channel_estimator_td_strategy;
   node["pusch_channel_estimator_cfo_compensation"] = config.pusch_channel_estimator_cfo_compensation;

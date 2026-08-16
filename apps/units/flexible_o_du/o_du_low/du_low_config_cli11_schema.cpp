@@ -164,6 +164,13 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
     }
     return "Invalid PUSCH SINR calculation method. Accepted values [channel_estimator,post_equalization,evm]";
   };
+  auto ldpc_decoder_type_check = [](const std::string& value) -> std::string {
+    if ((value == "auto") || (value == "generic") || (value == "neon") || (value == "avx2") ||
+        (value == "avx512") || (value == "metal")) {
+      return {};
+    }
+    return "Invalid PUSCH LDPC decoder type. Accepted values [auto,generic,neon,avx2,avx512,metal]";
+  };
   auto pusch_channel_estimator_fd_strategy_method_check = [](const std::string& value) -> std::string {
     if ((value == "filter") || (value == "mean") || (value == "none")) {
       return {};
@@ -217,6 +224,12 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "PUSCH SINR calculation method: channel_estimator, post_equalization and evm.")
       ->capture_default_str()
       ->check(pusch_sinr_method_check);
+  add_option(app,
+             "--pusch_ldpc_decoder_type",
+             expert_phy_params.ldpc_decoder_type,
+             "PUSCH LDPC decoder type: auto, generic, neon, avx2, avx512 and metal.")
+      ->capture_default_str()
+      ->check(ldpc_decoder_type_check);
   add_option(app,
              "--pusch_channel_estimator_fd_strategy",
              expert_phy_params.pusch_channel_estimator_fd_strategy,

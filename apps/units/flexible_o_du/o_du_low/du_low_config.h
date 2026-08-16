@@ -39,6 +39,14 @@ struct du_low_unit_expert_upper_phy_config {
   /// -\c post_equalization: SINR is calculated using the post-equalization noise variances of the equalized RE.
   /// -\c evm: SINR is obtained from the EVM of the PUSCH symbols.
   std::string pusch_sinr_calc_method = "post_equalization";
+  /// \brief PUSCH LDPC decoder type.
+  ///
+  /// Use one of these options:
+  /// - \c auto: selects the fastest available CPU implementation (default), or
+  /// - \c generic: for using the unoptimized generic implementation, or
+  /// - \c neon: for using the NEON implementation, or
+  /// - \c metal: for using the Apple GPU implementation (only available on builds with ENABLE_METAL_LDPC).
+  std::string ldpc_decoder_type = "auto";
   /// \brief PUSCH channel estimator frequency-domain smoothing strategy.
   ///
   /// Use one of these options:
