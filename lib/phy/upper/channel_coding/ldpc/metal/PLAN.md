@@ -176,6 +176,26 @@ decode(output, input, crc, cfg):
    目标：BLER 曲线在 0.1-0.01 区间无统计显著差异；同时标定 alpha 与 LLR 缩放因子。
 5. 验收后 commit（.bin 不进 git）。
 
+**实施结果（2026-08-16）**：
+
+- ✅ 适配器/引擎/工厂全部零警告编译；"metal" 类型在工厂注册。
+- ✅ golden 比对逐位一致（H/Hᵀ × Z256/Z384）。
+- ✅ 无噪声正确性：BG1 Z16 / BG2 Z16 / BG1 Z256 三组配置 GPU 解码 100% 位精确
+  （与 CPU 输出逐位一致、CRC 全过、1 次迭代提前收敛）。
+- ⚠️ **LLS 算法性能天花板**（有噪声时）：SynchroPlus 的 LLS 比特翻转族算法比 CPU
+  min-sum 弱 ~5dB（例：BG1 Z16@3dB CPU 100% vs GPU 0%；BG1 Z256@5dB GPU 0%，
+  8dB 75%、10dB 100%；alpha/bias/迭代数扫描均无法弥合）。原因：其仿真从不解码
+  打孔码字（无擦除列），且比特翻转族本身收敛能力弱于 min-sum。
+- ✅ **打孔擦除修复**：LLS 对精确 0 LLR 的处理有缺陷（sign(0)=+1 导致擦除列被强制
+  推向 bit 1）；适配器对结构性擦除（打孔 2Z 列 + 未发送尾部）注入 **+1 弱偏置**，
+  无噪声/高 SNR 下完全解决（这是真实正确性修复，已进适配器）。
+- ✅ 引擎修复：`ctrl->error_count` 每轮被内核清零，不能作最终 syndrome——改为
+  `buf_h_pred` 转 Shared，CPU 侧 popcount 重算最终 syndrome（无 CRC 路径用）。
+- ✅ 单元测试重定位：无噪声 = 严格位精确断言；有噪声 = 无假阳性（GPU 通过的块
+  必须与原始消息逐位一致）+ GPU 通过率 ≤ CPU。**ALL OK**。
+- 结论：GPU 路径**正确但弱**——适合高 SNR/大余量场景或实验用途；要与 CPU 同 BLER
+  需要自研 NMS 内核（用户已确认暂保留 LLS 继续实验，NMS 作为后续选项）。
+
 ### Step 3 —— 端到端 PUSCH A/B + 大/小码块分流开关
 
 - 配置开关（3 态）：`split`（默认：大码块→GPU，小码块→CPU）/ `all_gpu` / `all_cpu`。

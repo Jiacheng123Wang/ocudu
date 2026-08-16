@@ -56,13 +56,24 @@ endif()
 
 # ---- Static library with the SynchroPlus GPU decoder implementation ----
 enable_language(OBJCXX)
-add_library(ocudu_ldpc_metal STATIC decode/ldpc_gpu_decoder.mm)
+add_library(ocudu_ldpc_metal STATIC
+    decode/ldpc_gpu_decoder.mm          # SynchroPlus copy (verbatim, manual reference counting)
+    ocudu_metal_decoder_engine.mm       # ocudu-side engine driver (ARC)
+    ldpc_decoder_metal.cpp)             # ocudu ldpc_decoder adapter
 set_source_files_properties(decode/ldpc_gpu_decoder.mm PROPERTIES LANGUAGE OBJCXX)
+set_source_files_properties(ocudu_metal_decoder_engine.mm PROPERTIES LANGUAGE OBJCXX COMPILE_OPTIONS "-fobjc-arc")
 set_property(TARGET ocudu_ldpc_metal PROPERTY OBJCXX_STANDARD 17)
 target_compile_options(ocudu_ldpc_metal PRIVATE -Wno-deprecated-declarations)
 target_include_directories(ocudu_ldpc_metal PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/decode
+    ${CMAKE_CURRENT_SOURCE_DIR}/..   # ldpc_graph_impl.h (H-matrix generation from the protograph)
     ${CMAKE_CURRENT_BINARY_DIR})
 target_compile_definitions(ocudu_ldpc_metal PUBLIC
     OCUDU_METAL_DECODER_METALLIB_PATH="${METAL_DECODER_METALLIB}")
+# The adapter generates the packed H matrix from the ocudu ldpc_graph implementation.
+target_link_libraries(ocudu_ldpc_metal PUBLIC ocudu_ldpc)
 target_link_libraries(ocudu_ldpc_metal PRIVATE "-framework Metal" "-framework Foundation")
+
+# ---- Unit-level validation binary (golden H check + decode parity vs the CPU decoder) ----
+add_executable(ldpc_metal_unit_test test/ldpc_metal_unit_test.cpp)
+target_link_libraries(ldpc_metal_unit_test PRIVATE ocudu_channel_coding ocudu_ldpc_metal)

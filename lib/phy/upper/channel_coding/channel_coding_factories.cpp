@@ -38,6 +38,10 @@
 #include "ldpc/ldpc_rate_dematcher_neon_impl.h"
 #endif // __ARM_NEON
 
+#if defined(OCUDU_METAL_LDPC)
+#include "ldpc/metal/ldpc_decoder_metal.h"
+#endif // OCUDU_METAL_LDPC
+
 using namespace ocudu;
 
 namespace {
@@ -113,6 +117,11 @@ public:
       return std::make_unique<ldpc_decoder_neon>(cfg.force_decoding, cfg.early_stop_syndrome);
     }
 #endif // __aarch64__
+#if defined(OCUDU_METAL_LDPC)
+    if (dec_type == "metal") {
+      return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome);
+    }
+#endif // OCUDU_METAL_LDPC
     if ((dec_type == "auto") || (dec_type == "generic")) {
       return std::make_unique<ldpc_decoder_generic>(cfg.force_decoding, cfg.early_stop_syndrome);
     }

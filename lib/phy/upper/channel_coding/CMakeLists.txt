@@ -71,6 +71,7 @@ add_library(ocudu_channel_coding STATIC channel_coding_factories.cpp)
 
 if(ENABLE_METAL_LDPC)
     target_compile_definitions(ocudu_channel_coding PUBLIC OCUDU_METAL_LDPC)
+    target_link_libraries(ocudu_channel_coding ocudu_ldpc_metal)
 endif()
 
 target_link_libraries(ocudu_channel_coding
