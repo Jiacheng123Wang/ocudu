@@ -215,9 +215,26 @@ decode(output, input, crc, cfg):
 - ✅ 配置贯通：`pusch_ldpc_decoder_type` 选项（CLI `--pusch_ldpc_decoder_type` / yml
   `pusch_ldpc_decoder_type`）→ schema 检查 + 验证器 + yaml writer + 工厂配置。
   取值：auto / generic / neon / avx2 / avx512 / **metal**。已提交（a390d3d81c）。
-- ⏳ E2E A/B 待跑：真实链路的操作 SNR 未知——若链路为高 SNR（有线/近距），LLS 在
-  该点可用；A/B 数据将给出答案。分流开关（split 态）待 A/B 数据后再定策略
-  （按码块大小分流 vs 按 SNR/MCS 分流）。
+  注意：该选项注册在 gnb CLI 的 **`expert_phy` 子命令**下，调用形式为
+  `gnb -c <yml> expert_phy --pusch_ldpc_decoder_type metal`。
+- ✅ **E2E A/B 完成（2026-08-16，真实 UE↔gNB 链路，ping 500 包）**：
+
+  | 指标 | CPU（auto） | GPU（metal） | 变化 |
+  |---|---|---|---|
+  | [ul_pipeline] samples | 157 | 162 | +3%（无 BLER 回退） |
+  | mean | 279.3 µs | 265.0 µs | **-5.1%** |
+  | median | 271.0 µs | 261.0 µs | **-3.7%** |
+  | p95 | 404.0 µs | 371.0 µs | **-8.2%** |
+  | p99 | 546.0 µs | 422.0 µs | **-22.7%** |
+  | ping 丢包 | 0.6% | 1.2% | 噪声范围内 |
+  | ping rtt avg | 10857 ms | 11575 ms | +6.6%（RTT 由闭环锁步主导，与计算管线无关） |
+
+  - GPU 路径在真实系统（高 SNR 测试台）中**无错误运行**，pipeline 全指标改善，
+    尾部延迟（p99）改善最显著（-23%）。
+  - 收益幅度受限于 ping 流量 = 小码块（BG2 小 Z）：GPU 固定开销
+    （命令缓冲提交 + waitUntilCompleted）吃掉了大块理论收益；大码块场景
+    （吞吐测试）预期收益更大——分流开关（split 态）待做：大码块→GPU、
+    小码块→CPU。
 
 ### Step 4 —— 编码器适配器（低优先级，按需启动）
 
