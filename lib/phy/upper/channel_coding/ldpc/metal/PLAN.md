@@ -277,6 +277,101 @@ decode(output, input, crc, cfg):
 - 结论：GPU 与 CPU 的瀑布差距随码率升高而加大（高码率 >10 dB），
   NMS 内核重写是弥合差距的必由之路；本基线与工具作为后续打磨的参照系。
 
+## 4.6 算法参考（当前使用的 LLS 内核）
+
+### 版本确认
+
+SynchroPlus 的多套实现中，ocudu 当前只使用一套（其余全部不编译，保留作参考）：
+
+| 文件 | 角色 |
+|---|---|
+| `decode/ldpc_gpu_decoder.metal` | ★ 使用中——4 kernel 的 LLS 着色器 |
+| `ocudu_metal_decoder_engine.mm` | ★ 使用中——ocudu 侧引擎，驱动这 4 个 kernel |
+| `ldpc_decoder_metal.cpp` | ★ 使用中——ocudu `ldpc_decoder` 适配器 |
+| `decode/ldpc_gpu_decoder.mm/.h` | 编译但从不实例化（verbatim 编译验证/参考） |
+| `cn_scan_vn_lls_update.metal`、`update_llr.metal`、`Metal*Updater.mm`、`DecoderContextMetal.mm`、`CollaborationDecoder.cpp`、全部 `main_*.cpp` | 不编译不调用，参考 |
+
+调用链：`ldpc_decoder_metal::decode()` → `decoder_engine::decode()`（单命令缓冲录制
+init_hard_decisions + compute_syndrome + [cn_centric_scan; update_llr_hpred]×max_iter →
+commit + waitUntilCompleted）→ CPU 读回符号位硬判、ctrl 块、重算最终 syndrome。
+
+### LLS 算法细节
+
+**思想**：不是 min-sum 消息传递，而是**加权比特翻转 + 置信度侵蚀**——每个 VN 的 LLR 是
+当前置信度，被不满意校验方程反复侵蚀至穿过零点（比特翻转），翻转后证据强度成为新置信度。
+
+**数据结构**：LLR（fp16 × N，零拷贝、原地更新）；s_hard（N/32 字硬判）；h_pred（M/32 字
+打包 syndrome，**增量维护**，Shared）；err_eq_cnt / suspect_cnt / evidence_sum（每 VN 统计，
+Private、原子）；vn_total_cn（列权，CPU 算）；DecodeCtrl（error_count / early_terminate /
+actual_iters，Shared）。
+
+**阶段 A** `init_hard_decisions`（每 VN 一线程）：清零 ctrl 与统计；硬判 bit = (fp16 < 0)，
+每 32 线程 simd_sum 打包一字进 s_hard。
+
+**阶段 B** `compute_syndrome`（每 32 行一线程组）：逐行 XOR-popcount(H 行 & s_hard) 得
+parity，打包成 h_pred。全量 syndrome 只算初始一次，此后增量维护。
+
+**迭代循环**（单命令缓冲内展开录制，GPU 内部早停）：
+
+- `cn_centric_scan`（每校验行一线程组，组内 32 车道扫 H 分块）：
+  1. early_terminate 置位 → 整个 kernel 空转（后续迭代全部 no-op）
+  2. 错误计数：`error_count += popcount(h_pred[word])`（每 32 行字）
+  3. 满意行跳过；对**不满意**行遍历其 H 行的置位 VN：
+     - `err_eq_cnt[vn]++`；跟踪该行 |LLR| 的两个最小值 m1 ≤ m2 及下标
+  4. shuffle_xor 蝶形归约 (m1, i1, m2, i2)
+  5. 两个最弱 VN 成为嫌疑人：`suspect_cnt[i1]++`、`evidence_sum[i1] += m2`；
+     `suspect_cnt[i2]++`、`evidence_sum[i2] += m1`（给最弱的证据 = 次弱的置信度）
+- `update_llr_hpred`（每 VN 一线程）：
+  1. **收敛判定**：error_count == 0 → vn 0 置 early_terminate，全体返回
+  2. 读统计，若 s_cnt > 0 执行 LLS 更新：
+
+     ```
+     ratio = e_cnt / total_cnt                // 本 VN 不满意方程占比
+     delta = alpha × ratio² × (e_sum / s_cnt) // alpha = 0.8（ocudu 调参）
+     new_llr = old_llr − sign(old_llr) × delta
+     ```
+
+     delta 把 LLR 拉向零；delta > |old| 时符号翻转，新幅度 = delta − |old|。
+  3. **syndrome 增量维护**：simd_ballot 收集翻转位，对每个翻转 VN 原子 XOR 其 HT 行
+     进 h_pred（幂等，无冲突风险）
+  4. 清零本 VN 统计；vn 0：actual_iters++、error_count = 0（注意：此清零使
+     error_count 不能作终态 syndrome——CPU 侧 popcount(h_pred) 重算，已修复）
+
+**已知缺陷**：sign(0)=+1 使精确 0 LLR（打孔擦除列）首轮被推向 bit 1（适配器用 +1 弱偏置
+修复）；只用每行两个最弱 VN，信息利用不充分；delta 公式为经验启发式。全部 SynchroPlus
+变体同属 LLS 比特翻转族，无 min-sum——BLER 基线的 ~8dB 差距由此而来。
+
+### 对 NMS Metal 内核设计的借鉴评估
+
+**可直接复用（架构层面）**：
+
+1. **单命令缓冲展开迭代 + GPU 内早停**：CPU-GPU 零逐轮往返；NMS 沿用同一模式
+   （每轮 CN/VN kernel + syndrome 检查 kernel，early_terminate 空转后续迭代）。
+2. **增量 syndrome（h_pred + HT 原子 XOR）**：NMS 的 GPU 内早停需要每轮 syndrome，
+   沿用"初始全量 + 翻转增量"结构可省去每轮全量重算。
+3. **零拷贝缓冲池 + Private/Shared 分层**：H/HT 常驻零拷贝共享、LLR 原地更新、
+   中间量 Private——NMS 直接照搬；h_pred 保持 Shared 供 CPU 读终态。
+4. **dispatch 形状**：每校验行一线程组、组内 32 车道扫 H 分块 + shuffle_xor 蝶形归约——
+   正是 NMS CN 更新求 min1/min2/符号积的理想布局，`cn_centric_scan` 的骨架可原样改造成
+   NMS 的 CN kernel（改为处理**所有**行、统计换成 min1/min2/idx/sign_prod）。
+5. **simd 原语示范**：simd_sum 打包、shuffle_xor 归约、simd_ballot 聚位——NMS 全部需要。
+6. **每 VN 多行并发的原子聚合模式**（err/suspect/evidence）——NMS 的 VN 更新同样要聚合
+   多个 CN 贡献；注意 Metal 无原生 float 原子加法（CAS 循环，竞争度 = 列权 3-19，可用）。
+
+**必须重新设计（算法层面）**：
+
+- 嫌疑人机制与证据公式 → NMS 标准更新：CN 求 min1/min2/sign_prod/idx；
+  VN 侧 **on-the-fly 重构边消息**（不存 v2c/c2v 大数组）：对 VN v 遍历其 HT 行，
+  `c2v = norm × sign_prod[row] × sign(v2c) × (v == idx_min1 ? min2 : min1)`，
+  其中 sign(v2c) = sign(llr_v) ⊕ h_pred[row]——只需 llr、min1/min2/idx/sign_prod、
+  h_pred、HT 五组数据，**与 LLS 的数据布局完全一致**，替换纯算术即可。
+- 归一化因子 ~0.8（对齐 srsRAN 的 scale），LLR 尺度沿用 int8→fp16。
+- 早停条件保持 syndrome 检查（可复用 compute_syndrome + error_count 结构）。
+
+结论：LLS 的**架构骨架是 NMS 的直接模板**（数据布局、dispatch、缓冲分层、单缓冲循环、
+增量 syndrome 五件套），只需替换 scan/update 两个 kernel 的算术内容——这正是后续 NMS
+打磨的最短路径。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`
