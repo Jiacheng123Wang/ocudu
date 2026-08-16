@@ -43,3 +43,8 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
 endif()
 
 target_link_libraries(ocudu_ldpc log_likelihood_ratio)
+
+if(ENABLE_METAL_LDPC)
+    target_compile_definitions(ocudu_ldpc PUBLIC OCUDU_METAL_LDPC)
+    add_subdirectory(metal)
+endif()

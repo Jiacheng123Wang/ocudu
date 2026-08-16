@@ -69,6 +69,10 @@ add_subdirectory(short)
 
 add_library(ocudu_channel_coding STATIC channel_coding_factories.cpp)
 
+if(ENABLE_METAL_LDPC)
+    target_compile_definitions(ocudu_channel_coding PUBLIC OCUDU_METAL_LDPC)
+endif()
+
 target_link_libraries(ocudu_channel_coding
         ocudu_crc_calculator
         ocudu_polar

@@ -20,6 +20,16 @@ if(ENABLE_FLOW_PROBES)
     add_definitions(-DOCUDU_FLOW_PROBES)
 endif()
 
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    set(METAL_LDPC_DEFAULT ON)
+else()
+    set(METAL_LDPC_DEFAULT OFF)
+endif()
+option(ENABLE_METAL_LDPC "Enable the Metal GPU LDPC codec (Apple Silicon only)" ${METAL_LDPC_DEFAULT})
+# Note: OCUDU_METAL_LDPC is defined per-target (see ldpc/CMakeLists.txt and
+# channel_coding/CMakeLists.txt) so toggling the option only rebuilds the PHY
+# coding libraries, not the whole project.
+
 if(APPLE AND NOT TARGET atomic)
     # macOS does not provide a separate libatomic. Some targets link the
     # interface library named "atomic"; add an empty one so CMake treats it

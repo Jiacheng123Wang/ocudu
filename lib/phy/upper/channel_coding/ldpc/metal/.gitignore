@@ -1,0 +1,11 @@
+# Pre-generated matrices (328MB, regenerable with the Python tools in g_f_matrix/
+# from bg1_LSindex*.txt; runtime H/HT are generated in-memory from the ocudu ldpc_graph).
+*.bin
+
+# SynchroPlus build artifacts (copied in by mistake during the source import).
+*.air
+*.metallib
+*.png
+debug_llr_in.txt
+input_z256.txt
+input_z384.txt
