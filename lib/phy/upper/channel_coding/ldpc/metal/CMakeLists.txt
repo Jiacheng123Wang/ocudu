@@ -77,3 +77,7 @@ target_link_libraries(ocudu_ldpc_metal PRIVATE "-framework Metal" "-framework Fo
 # ---- Unit-level validation binary (golden H check + decode parity vs the CPU decoder) ----
 add_executable(ldpc_metal_unit_test test/ldpc_metal_unit_test.cpp)
 target_link_libraries(ldpc_metal_unit_test PRIVATE ocudu_channel_coding ocudu_ldpc_metal)
+
+# ---- Pure LDPC BLER benchmark (CPU vs GPU across SNRs and code rates) ----
+add_executable(ldpc_metal_bler_test test/ldpc_metal_bler_test.cpp)
+target_link_libraries(ldpc_metal_bler_test PRIVATE ocudu_channel_coding ocudu_ldpc_metal)

@@ -6,6 +6,8 @@
 *.air
 *.metallib
 *.png
+# The BLER baseline plots are ocudu-side deliverables (regenerable with plot_bler.py).
+!test/bler_results/*.png
 debug_llr_in.txt
 input_z256.txt
 input_z384.txt
