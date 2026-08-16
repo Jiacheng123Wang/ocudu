@@ -10,7 +10,9 @@
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_decoder_result.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_demodulator_notifier.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_processor_result_notifier.h"
+#include "ocudu/ran/slot_point.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
+#include <optional>
 
 namespace ocudu {
 
@@ -62,6 +64,9 @@ public:
     csi_part_2_notifier(*this)
   {
   }
+
+  /// \brief Sets the slot of the current PUSCH transmission (used by the UL pipeline probe for slot-keyed matching).
+  void set_slot(slot_point slot_) { current_slot = slot_; }
 
   /// \brief Configures the notifier for a new transmission.
   /// \param[in] notifier_            PUSCH processor result notifier.
@@ -227,8 +232,8 @@ private:
   void on_sch_data(const pusch_decoder_result& result) override
   {
     // T_end of the UL compute pipeline measurement: the LDPC decoding finished and the transport block CRC passed.
-    if (result.tb_crc_ok) {
-      ul_pipeline_probe::get().record_end_crc_ok();
+    if (result.tb_crc_ok && current_slot.has_value()) {
+      ul_pipeline_probe::get().record_end_crc_ok(current_slot->count());
     }
 
     pusch_processor_result_data result_data;
@@ -309,6 +314,8 @@ private:
   pusch_processor_result_control uci_payload;
   /// Reference to PUSCH processor notifier.
   pusch_processor_result_notifier* notifier;
+  /// Slot of the current transmission (set by the processor per PUSCH; used by the UL pipeline probe).
+  std::optional<slot_point> current_slot;
   /// CSI Part 1 feedback.
   pusch_processor_csi_part1_feedback* csi_part_1_feedback;
   /// Channel state information notifier.

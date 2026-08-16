@@ -276,6 +276,7 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
 
   // Prepare notifiers.
   notifier_adaptor.new_transmission(notifier, csi_part1_feedback, csi);
+  notifier_adaptor.set_slot(pdu.slot);
   csi_part1_feedback.connect_notifier(notifier_adaptor);
 
   if (has_sch_data) {
