@@ -4,6 +4,7 @@
 #include "ocudu/support/executors/unique_thread.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/adt/static_vector.h"
+#include "ocudu/support/scheduling/darwin_thread_scheduling.h"
 #include "fmt/std.h"
 #include <cstdio>
 #include <mutex>
@@ -106,9 +107,9 @@ static void print_thread_priority(::pthread_t t, const char* tname)
 
   int           policy;
   ::sched_param param;
-  int s = ::pthread_getschedparam(t, &policy, &param);
-  if (s != 0) {
-    fmt::println("error pthread_getschedparam: {}", ::strerror(s));
+  int sched_err = ::pthread_getschedparam(t, &policy, &param);
+  if (sched_err != 0) {
+    fmt::println("error pthread_getschedparam: {}", ::strerror(sched_err));
   }
 
   const char* p;
@@ -312,6 +313,18 @@ unique_thread::thread_handle_impl unique_thread::make_thread(const std::string& 
       ::perror("pthread_setname_np");
       fmt::println("Thread [{}]: Error while setting thread name to {}.", std::this_thread::get_id(), name);
     }
+#endif
+
+#if defined(__APPLE__)
+    // Darwin scheduling: POSIX SCHED_FIFO and CPU pinning are not enforceable on macOS. Instead, elevate the QoS
+    // class and set the Mach affinity tag of the thread:
+    // - QoS: real-time intent -> QOS_CLASS_USER_INTERACTIVE, otherwise QOS_CLASS_USER_INITIATED (both keep the
+    //   thread on the performance cores);
+    // - affinity tag: derived from the configured CPU mask when present, otherwise from the worker pool name, so
+    //   threads sharing a pipeline are co-located on one L2 cluster.
+    set_this_thread_qos_class(darwin_qos_class_for_prio(prio));
+    set_this_thread_affinity_tag(cpu_mask.any() ? affinity_tag_from_cpu_mask(cpu_mask)
+                                                : affinity_tag_from_thread_name(name));
 #endif
 
     // Set thread OS priority and affinity.

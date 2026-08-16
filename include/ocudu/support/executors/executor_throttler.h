@@ -5,6 +5,7 @@
 
 #include "ocudu/support/executors/detail/task_executor_utils.h"
 #include "ocudu/support/executors/task_executor.h"
+#include "ocudu/support/executors/thread_utils.h"
 #include <thread>
 
 namespace ocudu {
@@ -37,7 +38,7 @@ private:
   bool dispatch_impl(unique_task task)
   {
     if (count.fetch_add(1, std::memory_order_relaxed) >= thres_throttle) {
-      std::this_thread::yield(); // Yield to allow other tasks to execute.
+      cpu_relax(); // Yield to allow other tasks to execute.
     }
 
     auto wrapped_task = [c = &count, t = std::move(task)]() {

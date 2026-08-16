@@ -18,6 +18,7 @@ set(SOURCES
         executors/task_worker_pool.cpp
         executors/unique_thread.cpp
         executors/execution_context_description.cpp
+        scheduling/darwin_thread_scheduling.cpp
         executors/executor_decoration_factory.cpp
         network/io_broker_factory.cpp
         network/io_timer_source.cpp

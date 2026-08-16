@@ -8,6 +8,7 @@
 #include "ocudu/adt/complex.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/radio/radio_event_notifier.h"
+#include "ocudu/support/executors/flow_probe.h"
 #include "ocudu/support/executors/task_executor.h"
 #include "ocudu/support/synchronization/stop_event.h"
 #include <atomic>
@@ -48,6 +49,11 @@ class radio_zmq_tx_channel
   /// Stop control.
   rt_stop_event_source stop_control;
   std::atomic<bool>    is_tx_enabled = {false};
+  /// Flow instrumentation probes (debug aid for cross-platform comparison).
+  flow_probe tx_request_probe{"zmq_tx_request"};
+  flow_probe tx_reply_probe{"zmq_tx_reply"};
+  /// Timestamp of the pending request, for the reply latency measurement.
+  std::chrono::steady_clock::time_point pending_request_since;
 
 public:
   /// Describes the necessary parameters to create a ZMQ Tx channel.

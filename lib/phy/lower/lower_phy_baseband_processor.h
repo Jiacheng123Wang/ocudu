@@ -13,6 +13,7 @@
 #include "ocudu/phy/lower/processors/downlink/downlink_processor_baseband.h"
 #include "ocudu/phy/lower/processors/uplink/uplink_processor_baseband.h"
 #include "ocudu/phy/lower/sampling_rate.h"
+#include "ocudu/support/executors/flow_probe.h"
 #include "ocudu/support/executors/task_executor.h"
 #include <future>
 
@@ -214,5 +215,9 @@ private:
   std::atomic<baseband_gateway_timestamp>                                    last_rx_timestamp;
   std::optional<std::chrono::time_point<std::chrono::high_resolution_clock>> last_tx_time;
   unsigned                                                                   last_tx_buffer_size = 0;
+  /// Flow instrumentation probe for the DL production rate (debug aid for cross-platform comparison).
+  flow_probe dl_probe{"dl_proc"};
+  /// Inter-slot gap jitter statistics for the DL production (debug aid for cross-platform comparison).
+  flow_interval_probe dl_jitter_probe{"dl_proc"};
 };
 } // namespace ocudu

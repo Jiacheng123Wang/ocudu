@@ -3,13 +3,12 @@
 
 #include "radio_zmq_tx_channel.h"
 #include "ocudu/support/synchronization/sync_event.h"
+#include "radio_zmq_backoff.h"
 #include <set>
 
 using namespace ocudu;
 
 static const std::set<int> VALID_SOCKET_TYPES = {ZMQ_REP};
-/// Wait time after a buffer try push failed.
-static constexpr std::chrono::microseconds circ_buffer_try_push_sleep{1};
 /// Maximum number of trials for binding.
 static constexpr unsigned BIND_MAX_TRIALS = 10;
 /// Sleep time after a bind failure in seconds.
@@ -124,6 +123,8 @@ void radio_zmq_tx_channel::receive_request()
     // Request received.
     if (n > 0) {
       logger.debug("Socket received request.");
+      tx_request_probe.event();
+      pending_request_since = std::chrono::steady_clock::now();
       state_fsm.request_received();
       return;
     }
@@ -133,7 +134,11 @@ void radio_zmq_tx_channel::receive_request()
       // Error happened.
       int err = ::zmq_errno();
       if (err == EFSM || err == EAGAIN) {
-        // Ignore timeout and FSM error.
+        // Ignore timeout and FSM error. When no request is pending, block briefly on the socket instead of
+        // spinning: see zmq_wait_for_socket().
+        if (err == EAGAIN) {
+          zmq_wait_for_socket(sock);
+        }
       } else {
         // This error cannot be ignored.
         logger.error("Socket failed to receive request. {}.", ::zmq_strerror(::zmq_errno()));
@@ -157,8 +162,10 @@ void radio_zmq_tx_channel::send_response()
     return;
   }
 
-  // If no samples are available return without transitioning state.
+  // If no samples are available return without transitioning state. Avoid spinning: the circular buffer is filled
+  // by the baseband processor at slot rate (~1 ms), so a short sleep is sufficient. See radio_zmq_backoff.h.
   if (count == 0) {
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
     return;
   }
 
@@ -181,6 +188,11 @@ void radio_zmq_tx_channel::send_response()
   }
 
   logger.debug("Socket sent {} samples.", count);
+
+  auto reply_wait_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                             pending_request_since)
+                           .count();
+  tx_reply_probe.event(count, static_cast<uint64_t>(reply_wait_us));
 
   // If successful transition to wait for data.
   state_fsm.data_sent();
@@ -205,6 +217,9 @@ void radio_zmq_tx_channel::run_async()
     logger.info("Waiting for {}.", state_fsm.has_pending_request() ? "data" : "request");
   }
 
+  tx_request_probe.tick();
+  tx_reply_probe.tick();
+
   // Feedback task if not stopped.
   if (state_fsm.is_running()) {
     if (not async_executor.defer([this, tk = std::move(token)]() { run_async(); })) {
@@ -218,7 +233,8 @@ void radio_zmq_tx_channel::run_async()
 
 void radio_zmq_tx_channel::transmit_samples(span<const cf_t> data)
 {
-  unsigned count = 0;
+  unsigned count     = 0;
+  unsigned nof_spins = 0;
   while (state_fsm.is_running() && (count != data.size())) {
     // Try to write data into the circular buffer.
     unsigned pushed = circular_buffer.try_push(data.begin() + count, data.end());
@@ -234,7 +250,7 @@ void radio_zmq_tx_channel::transmit_samples(span<const cf_t> data)
       notification_handler.on_radio_rt_event(event);
 
       // Wait some time before trying again.
-      std::this_thread::sleep_for(circ_buffer_try_push_sleep);
+      zmq_circ_buffer_backoff(nof_spins);
     }
 
     // Increment sample count.

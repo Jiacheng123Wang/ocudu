@@ -993,7 +993,9 @@ void octet_string_helper::to_octet_string(ocudu::byte_buffer& buf, uint64_t numb
 
 static void to_hex(char* cstr, uint8_t val)
 {
-  std::snprintf(cstr, sizeof(cstr), "%02x", val);
+  // The callers provide a 3-byte buffer ("%02x" + null terminator). sizeof(cstr) here would be the pointer size,
+  // which GCC rejects with -Werror=sizeof-pointer-memaccess.
+  std::snprintf(cstr, 3, "%02x", val);
 }
 
 std::string octet_string_helper::to_hex_string(ocudu::span<const uint8_t> buf)

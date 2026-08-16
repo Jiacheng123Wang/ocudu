@@ -543,7 +543,14 @@ void worker_manager::create_lower_phy_executors(const worker_manager_config::ru_
                      task_worker_queue_size,
                      concurrent_queue_policy::lockfree_mpmc,
                      std::chrono::microseconds{50},
-                     affinity_mng.front().calcute_affinity_mask(sched_affinity_mask_types::ru));
+                     affinity_mng.front().calcute_affinity_mask(sched_affinity_mask_types::ru),
+#if defined(__APPLE__)
+                     // On macOS, the radio channel loop moves the RF samples in/out of the baseband (ZMQ or OFH):
+                     // treat it as real-time so that it is elevated to QOS_CLASS_USER_INTERACTIVE.
+                     os_thread_realtime_priority::max() - 1);
+#else
+                     os_thread_realtime_priority::no_realtime());
+#endif
 
   switch (config.profile) {
     case worker_manager_config::ru_sdr_config::lower_phy_thread_profile::sequential: {

@@ -6,6 +6,8 @@
 #include "ocudu/adt/interval.h"
 #include "ocudu/instrumentation/traces/ru_traces.h"
 #include "ocudu/ran/slot_point_extended.h"
+#include "ocudu/support/executors/thread_utils.h" // cpu_relax()
+#include <ctime>
 
 using namespace ocudu;
 
@@ -108,7 +110,15 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
     // - The lower PHY was stopped.
     while ((timestamp > (last_rx_timestamp.load(std::memory_order_acquire) + rx_to_tx_max_delay)) &&
            (std::chrono::steady_clock::now() < wait_until_tp)) {
+#if defined(__APPLE__)
+      // Do not use sleep_for here: macOS coalesces short sleeps under load, so a 100µs request can actually sleep
+      // several milliseconds and overshoot the 2 ms wall-clock deadline by a large margin, slowing the DL
+      // production. Spin with the YIELD hint instead: the exit precision is exact and the spin is bounded by the
+      // 2 ms deadline.
+      cpu_relax();
+#else
       std::this_thread::sleep_for(std::chrono::microseconds(10));
+#endif
     }
   }
 
@@ -149,6 +159,25 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
 
   // Update last buffer size.
   last_tx_buffer_size = result.buffer->get_nof_samples();
+
+  dl_probe.event(last_tx_buffer_size);
+  dl_probe.tick();
+  dl_jitter_probe.event();
+  dl_jitter_probe.tick();
+
+  // Per-slot timestamp log for the internal chain latency correlation (slot indication -> DL production).
+  // Compiled in only with ENABLE_FLOW_PROBES; reported through the asynchronous logging system.
+#if defined(OCUDU_FLOW_PROBES)
+  {
+    static auto& slot_logger = ocudulog::fetch_basic_logger("ALL");
+    struct timespec ts;
+    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    slot_logger.debug("[dl_slot] {}.{:09} {}",
+                      static_cast<long long>(ts.tv_sec),
+                      ts.tv_nsec,
+                      timestamp / srate.to_kHz());
+  }
+#endif
 
   // Enqueue DL process task.
   report_fatal_error_if_not(

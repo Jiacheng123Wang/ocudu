@@ -176,8 +176,13 @@ bool sctp_network_server_impl::create_and_bind()
 
 void sctp_network_server_impl::receive()
 {
-  struct sctp_rcvinfo                            sri       = {};
-  socklen_t                                      sri_len   = sizeof(sri);
+#if defined(__APPLE__)
+  // usrsctp shim: sctp_rcvinfo + explicit length argument (see sctp_socket.h).
+  struct sctp_rcvinfo sri     = {};
+  socklen_t           sri_len = sizeof(sri);
+#else
+  struct sctp_sndrcvinfo sri = {};
+#endif
   int                                               msg_flags = 0;
   std::array<uint8_t, network_gateway_sctp_max_len> temp_recv_buffer;
 
@@ -191,7 +196,9 @@ void sctp_network_server_impl::receive()
                                 (struct sockaddr*)&msg_src_addr,
                                 &msg_src_addrlen,
                                 &sri,
+#if defined(__APPLE__)
                                 &sri_len,
+#endif
                                 &msg_flags);
 
   // Handle error.
@@ -346,7 +353,11 @@ async_task<bool> sctp_network_server_impl::connect(std::vector<transport_layer_a
 }
 
 void sctp_network_server_impl::handle_notification(span<const uint8_t>           payload,
+#if defined(__APPLE__)
                                                    const struct sctp_rcvinfo&    sri,
+#else
+                                                   const struct sctp_sndrcvinfo& sri,
+#endif
                                                    const sockaddr&               src_addr,
                                                    socklen_t                     src_addr_len)
 {

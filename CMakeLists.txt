@@ -15,6 +15,11 @@ endif (${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
 cmake_minimum_required(VERSION 3.14)
 project(ocudu)
 
+option(ENABLE_FLOW_PROBES "Enable the data-path flow instrumentation probes (debug aid, off by default)" OFF)
+if(ENABLE_FLOW_PROBES)
+    add_definitions(-DOCUDU_FLOW_PROBES)
+endif()
+
 if(APPLE AND NOT TARGET atomic)
     # macOS does not provide a separate libatomic. Some targets link the
     # interface library named "atomic"; add an empty one so CMake treats it

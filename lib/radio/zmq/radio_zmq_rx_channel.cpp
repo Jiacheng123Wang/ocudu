@@ -4,16 +4,13 @@
 #include "radio_zmq_rx_channel.h"
 #include "ocudu/ocuduvec/zero.h"
 #include "ocudu/support/synchronization/sync_event.h"
+#include "radio_zmq_backoff.h"
 #include <set>
 
 using namespace ocudu;
 
 /// Lists the supported socket types.
 static const std::set<int> VALID_SOCKET_TYPES = {ZMQ_REQ};
-/// Wait time after a buffer try push failed.
-static constexpr std::chrono::microseconds circ_buffer_try_push_sleep{1};
-/// Wait time after a buffer try pop failed.
-static constexpr std::chrono::microseconds circ_buffer_try_pop_sleep{1};
 
 radio_zmq_rx_channel::radio_zmq_rx_channel(void*                      zmq_context,
                                            const channel_description& config,
@@ -142,7 +139,11 @@ void radio_zmq_rx_channel::receive_response()
     // Error happened.
     int err = ::zmq_errno();
     if (err == EFSM || err == EAGAIN) {
-      // Ignore timeout and FSM error.
+      // Ignore timeout and FSM error. When the reply is still pending, block briefly on the socket instead of
+      // spinning: see zmq_wait_for_socket().
+      if (err == EAGAIN) {
+        zmq_wait_for_socket(sock);
+      }
       return;
     }
 
@@ -163,13 +164,16 @@ void radio_zmq_rx_channel::receive_response()
   unsigned nsamples = n / sample_size;
   logger.debug("Socket received {} samples.", nsamples);
 
+  rx_probe.event(nsamples);
+
   // Make sure the buffer size has not been exceeded.
   report_fatal_error_if_not(nsamples <= buffer.size(),
                             "Buffer overflow. Buffer size ({}) is not enough for the received number of samples ({})",
                             buffer.size(),
                             nsamples);
 
-  unsigned count = 0;
+  unsigned count      = 0;
+  unsigned nof_spins  = 0;
   while (state_fsm.is_running() && (count != nsamples)) {
     // Try to write samples into the buffer.
     unsigned pushed = circular_buffer.try_push(buffer.begin() + count, buffer.begin() + nsamples);
@@ -185,7 +189,7 @@ void radio_zmq_rx_channel::receive_response()
       notification_handler.on_radio_rt_event(event);
 
       // Wait some time before trying again.
-      std::this_thread::sleep_for(circ_buffer_try_push_sleep);
+      zmq_circ_buffer_backoff(nof_spins);
     }
 
     // Increment sample count.
@@ -215,6 +219,8 @@ void radio_zmq_rx_channel::run_async()
     logger.info("Waiting for {}.", state_fsm.has_pending_response() ? "data" : "request");
   }
 
+  rx_probe.tick();
+
   // Feedback task if not stopped.
   if (state_fsm.is_running()) {
     if (not async_executor.defer([this, tk = std::move(token)]() { run_async(); })) {
@@ -240,14 +246,15 @@ void radio_zmq_rx_channel::receive(span<cf_t> data)
   radio_zmq_timer timer(true);
 
   // Try to read samples from circular buffer.
-  unsigned count = 0;
+  unsigned count     = 0;
+  unsigned nof_spins = 0;
   while (state_fsm.is_running() && (count != data.size())) {
     // Try to pop samples.
     unsigned popped = circular_buffer.try_pop(data.begin() + count, data.end());
 
     // Wait some time before trying again.
     if (popped == 0) {
-      std::this_thread::sleep_for(circ_buffer_try_pop_sleep);
+      zmq_circ_buffer_backoff(nof_spins);
     }
 
     // Check if an excess of time passed while trying to read samples.

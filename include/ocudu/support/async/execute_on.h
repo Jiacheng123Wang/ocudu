@@ -5,6 +5,7 @@
 
 #include "ocudu/support/async/async_task.h"
 #include "ocudu/support/async/detail/function_signature.h"
+#include "ocudu/support/executors/thread_utils.h"
 #include <thread>
 
 namespace ocudu {
@@ -52,7 +53,7 @@ struct blocking_execute_on_awaiter {
 
     while (not(UseExecute ? exec.execute(task) : exec.defer(task))) {
       // Keep trying until it succeeds.
-      std::this_thread::yield();
+      cpu_relax();
     }
   }
 

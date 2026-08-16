@@ -5,9 +5,11 @@
 #include "ocudu/adt/noop_functor.h"
 #include "ocudu/du/du_high/du_high_clock_controller.h"
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/support/executors/flow_probe.h"
 #include "ocudu/support/executors/task_executor.h"
 #include "ocudu/support/io/io_timer_source.h"
 #include "ocudu/support/timers.h"
+#include <ctime>
 
 using namespace ocudu;
 using namespace odu;
@@ -160,6 +162,23 @@ private:
   slot_point_extended handle_slot_indication(du_cell_index_t cell_index, slot_point_extended sl_tx)
   {
     static constexpr int MAX_SKIPPED = 128;
+
+    // Debug aid for cross-platform comparison: reports the rate of the cell-driven virtual clock (the DU protocol
+    // time advances at the slot indication rate, which follows the receive stream).
+    static flow_probe clock_probe{"du_clock"};
+    clock_probe.event();
+    clock_probe.tick();
+
+    // Per-slot timestamp log for the internal chain latency correlation (slot indication -> DL production).
+    // Compiled in only with ENABLE_FLOW_PROBES; reported through the asynchronous logging system.
+#if defined(OCUDU_FLOW_PROBES)
+    {
+      static auto& slot_logger = ocudulog::fetch_basic_logger("ALL");
+      struct timespec ts;
+      ::clock_gettime(CLOCK_MONOTONIC, &ts);
+      slot_logger.debug("[du_slot] {}.{:09} {}", static_cast<long long>(ts.tv_sec), ts.tv_nsec, sl_tx.count());
+    }
+#endif
 
     // Update cell slot counter.
     slot_point_extended& cell_sl_counter = cells[cell_index].last_counter;

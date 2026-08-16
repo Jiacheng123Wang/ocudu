@@ -250,10 +250,12 @@ void ocudu::fill_sdr_worker_manager_config(worker_manager_config& config, const 
   auto& sdr_cfg = config.ru_sdr_cfg.emplace();
 
   sdr_cfg.nof_cells = ru_cfg.expert_execution_cfg.cell_affinities.size();
-  sdr_cfg.profile   = (ru_cfg.device_driver != "zmq")
-                          ? static_cast<worker_manager_config::ru_sdr_config::lower_phy_thread_profile>(
-                              ru_cfg.expert_execution_cfg.threads.execution_profile)
-                          : worker_manager_config::ru_sdr_config::lower_phy_thread_profile::sequential;
+  // The sequential profile serializes receive and transmit processing on a single worker: the receive task blocks
+  // waiting for UL samples and stalls the DL production behind it. With the ZMQ transport (no real RF pacing), the
+  // pull loop collapses to the UL arrival rate (measured ~18-35 slots/s instead of 1000). Use the configured
+  // profile (dual: dedicated RX and TX workers) so the DL production is not throttled by the receive blocking.
+  sdr_cfg.profile = static_cast<worker_manager_config::ru_sdr_config::lower_phy_thread_profile>(
+      ru_cfg.expert_execution_cfg.threads.execution_profile);
 
   ocudu_assert(config.config_affinities.size() == ru_cfg.expert_execution_cfg.cell_affinities.size(),
                "Invalid number of cell affinities");

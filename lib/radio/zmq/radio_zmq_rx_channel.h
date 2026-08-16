@@ -8,6 +8,7 @@
 #include "ocudu/adt/complex.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/radio/radio_event_notifier.h"
+#include "ocudu/support/executors/flow_probe.h"
 #include "ocudu/support/executors/task_executor.h"
 #include "ocudu/support/synchronization/stop_event.h"
 #include <zmq.h>
@@ -25,6 +26,8 @@ class radio_zmq_rx_channel
   radio_zmq_rx_channel_fsm state_fsm;
   /// Stop control.
   rt_stop_event_source stop_control;
+  /// Flow instrumentation probe (debug aid for cross-platform comparison).
+  flow_probe rx_probe{"zmq_rx"};
   /// ZMQ socket.
   void* sock = nullptr;
   /// ZMQ socket type.

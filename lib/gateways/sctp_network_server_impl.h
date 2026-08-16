@@ -77,7 +77,11 @@ private:
 
   void handle_data(int assoc_id, span<const uint8_t> payload);
   void handle_notification(span<const uint8_t>           payload,
+#if defined(__APPLE__)
                            const struct sctp_rcvinfo&    sri,
+#else
+                           const struct sctp_sndrcvinfo& sri,
+#endif
                            const sockaddr&               src_addr,
                            socklen_t                     src_addr_len);
   void handle_association_shutdown(int assoc_id, const char* cause);

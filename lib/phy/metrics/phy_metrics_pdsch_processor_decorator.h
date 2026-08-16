@@ -49,7 +49,7 @@ public:
     }
     self_cpu_usage_ns.store(measurements.duration.count(), std::memory_order_relaxed);
     elapsed_completion_and_return_ns |=
-        std::min(std::chrono::nanoseconds(std::chrono::high_resolution_clock::now() - start_time).count(), 0xffffffffLL);
+        std::min<std::chrono::nanoseconds::rep>(std::chrono::nanoseconds(std::chrono::high_resolution_clock::now() - start_time).count(), 0xffffffff);
 
     report_metrics();
   }
@@ -60,7 +60,7 @@ private:
   {
     // Update elapsed time.
     elapsed_completion_and_return_ns |=
-        std::min(std::chrono::nanoseconds(std::chrono::high_resolution_clock::now() - start_time).count(), 0xffffffffLL)
+        std::min<std::chrono::nanoseconds::rep>(std::chrono::nanoseconds(std::chrono::high_resolution_clock::now() - start_time).count(), 0xffffffff)
         << 32;
 
     // Report metrics.

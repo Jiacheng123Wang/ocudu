@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ocudu/adt/ring_buffer.h"
+#include "ocudu/support/executors/thread_utils.h"
 #include <condition_variable>
 #include <mutex>
 #include <optional>
@@ -60,7 +61,7 @@ public:
           lock.unlock();
           cvar_empty.notify_all();
           cvar_full.notify_all();
-          std::this_thread::yield();
+          cpu_relax();
           lock.lock();
         } while (nof_waiting > 0);
       }

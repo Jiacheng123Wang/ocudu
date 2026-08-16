@@ -20,6 +20,9 @@ using namespace ocudu;
 using namespace ether;
 
 transmitter_impl::transmitter_impl(const transmitter_config& config, ocudulog::basic_logger& logger_) :
+#ifdef __linux__
+  logger(logger_),
+#endif
   metrics_collector(config.are_metrics_enabled)
 {
 #ifdef __linux__
