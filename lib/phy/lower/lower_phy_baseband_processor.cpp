@@ -7,6 +7,7 @@
 #include "ocudu/instrumentation/traces/ru_traces.h"
 #include "ocudu/ran/slot_point_extended.h"
 #include "ocudu/support/executors/thread_utils.h" // cpu_relax()
+#include "ocudu/support/executors/ul_pipeline_probe.h"
 #include <ctime>
 
 using namespace ocudu;
@@ -202,6 +203,9 @@ void lower_phy_baseband_processor::ul_process()
   trace_point                         tp          = ru_tracer.now();
   baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_buffer->get_writer());
   ru_tracer << trace_event("receive_baseband", tp);
+
+  // T_start of the UL compute pipeline measurement (IQ samples just received, UL processing about to start).
+  ul_pipeline_probe::get().record_start();
 
   // Update last timestamp.
   last_rx_timestamp.store(rx_metadata.ts + rx_buffer->get_nof_samples(), std::memory_order_release);

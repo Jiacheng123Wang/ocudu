@@ -10,6 +10,7 @@
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_decoder_result.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_demodulator_notifier.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_processor_result_notifier.h"
+#include "ocudu/support/executors/ul_pipeline_probe.h"
 
 namespace ocudu {
 
@@ -225,6 +226,11 @@ private:
 
   void on_sch_data(const pusch_decoder_result& result) override
   {
+    // T_end of the UL compute pipeline measurement: the LDPC decoding finished and the transport block CRC passed.
+    if (result.tb_crc_ok) {
+      ul_pipeline_probe::get().record_end_crc_ok();
+    }
+
     pusch_processor_result_data result_data;
     result_data.data = result;
     result_data.csi  = uci_payload.csi;

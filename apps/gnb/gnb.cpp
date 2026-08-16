@@ -45,6 +45,7 @@
 #include "ocudu/support/config_parsers.h"
 #include "ocudu/support/cpu_features.h"
 #include "ocudu/support/io/io_broker_factory.h"
+#include "ocudu/support/executors/ul_pipeline_probe.h"
 #include "ocudu/support/scheduling/darwin_thread_scheduling.h"
 #include "ocudu/support/signal_handling.h"
 #include "ocudu/support/signal_observer.h"
@@ -662,6 +663,9 @@ int main(int argc, char** argv)
   f1c_gw->stop();
   e1_gw->stop();
   // Xn-C gateway is stopped by Xn-C connection manager.
+
+  // Report the UL compute pipeline statistics (compiled in only with ENABLE_FLOW_PROBES).
+  ocudu::ul_pipeline_probe::get().report();
 
   return 0;
 }
