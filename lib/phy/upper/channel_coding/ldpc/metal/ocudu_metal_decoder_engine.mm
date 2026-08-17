@@ -77,6 +77,7 @@ struct engine_impl_t {
   id<MTLComputePipelineState> p_nmsl_init = nil;
   id<MTLComputePipelineState> p_nmsl_cn = nil;
   id<MTLComputePipelineState> p_nmsl_vn = nil;
+  id<MTLComputePipelineState> p_nmsl_et_gate = nil;
 
   // NMS-only state.
   id<MTLBuffer> buf_llr_chan   = nil; // private (channel LLR copy)
@@ -101,6 +102,7 @@ struct engine_impl_t {
   uint32_t z           = 0;
   float    factor      = 0.0f;
   float    sat         = 0.0f;
+  bool     et_enabled  = true;
 };
 
 namespace {
@@ -138,16 +140,17 @@ decoder_engine::~decoder_engine()
 
 bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, const uint32_t* h,
                           const uint32_t* ht, uint32_t* col_weights_out, algo mode, float sat,
-                          const layered_info* layered)
+                          const layered_info* layered, bool et_enabled)
 {
   engine_impl_t* engine = new engine_impl_t();
   impl                  = engine;
 
-  engine->n_info = n_logical - m_logical;
-  engine->factor = factor;
-  engine->mode   = mode;
-  engine->sat    = sat;
-  engine->z      = 1;
+  engine->n_info      = n_logical - m_logical;
+  engine->factor      = factor;
+  engine->mode        = mode;
+  engine->sat         = sat;
+  engine->et_enabled  = et_enabled;
+  engine->z           = 1;
   if (layered != nullptr) {
     engine->layered_info = *layered;
     engine->z            = layered->z;
@@ -217,7 +220,8 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
     if (!make_pipeline(&engine->p_nmsl_init, "nmsl_init") ||
         !make_pipeline(&engine->p_nmsl_cn, "nmsl_cn_update") ||
         !make_pipeline(&engine->p_nmsl_vn, "nmsl_vn_update") ||
-        !make_pipeline(&engine->p_nms_cn, "nmsl_final_syndrome")) {
+        !make_pipeline(&engine->p_nms_cn, "nmsl_final_syndrome") ||
+        !make_pipeline(&engine->p_nmsl_et_gate, "nmsl_et_gate")) {
       return false;
     }
   } else {
@@ -372,6 +376,7 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
         [enc setBuffer:engine->buf_h_pred_bits offset:0 atIndex:5];
         [enc setBytes:&layer_start length:sizeof(uint32_t) atIndex:6];
         [enc setBytes:&engine->factor length:sizeof(float) atIndex:7];
+        [enc setBuffer:engine->buf_ctrl offset:0 atIndex:9];
         [enc dispatchThreadgroups:MTLSizeMake(engine->z, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
@@ -383,17 +388,27 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
         [enc setBytes:desc length:sizeof(layer_desc_t) atIndex:2];
         [enc setBytes:&engine->z length:sizeof(uint32_t) atIndex:3];
         [enc setBytes:&engine->sat length:sizeof(float) atIndex:4];
+        [enc setBuffer:engine->buf_ctrl offset:0 atIndex:5];
         [enc dispatchThreadgroups:MTLSizeMake(desc->nof_cols, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(engine->z, 1, 1)];
       }
-      // Final syndrome refresh from the final soft bits (per-round, cheap).
+      // Final syndrome refresh from the final soft bits (per-round, cheap); it
+      // also accumulates the unsatisfied-row count for the ET gate.
       [enc setComputePipelineState:engine->p_nms_cn];
       [enc setBuffer:engine->buf_h offset:0 atIndex:0];
       [enc setBuffer:mtl_llr offset:0 atIndex:1];
       [enc setBuffer:engine->buf_h_pred_bits offset:0 atIndex:2];
       [enc setBytes:&engine->n_h_chunks length:sizeof(uint32_t) atIndex:3];
+      [enc setBuffer:engine->buf_ctrl offset:0 atIndex:4];
       [enc dispatchThreadgroups:MTLSizeMake(engine->m_aligned, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+      // ET gate: raise early_terminate on a clean syndrome so the remaining
+      // rounds' kernels return immediately (GPU-internal, no CPU polling).
+      if (engine->et_enabled) {
+        [enc setComputePipelineState:engine->p_nmsl_et_gate];
+        [enc setBuffer:engine->buf_ctrl offset:0 atIndex:0];
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      }
     } else if (is_nms) {
       [enc setComputePipelineState:engine->p_nms_cn];
       [enc setBuffer:engine->buf_h offset:0 atIndex:0];
@@ -485,7 +500,10 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
     }
     *error_count_out = errors;
   }
-  return is_layered ? max_iter : static_cast<int>(ctrl->actual_iters);
+  // NMS modes report the executed rounds (with ET enabled, the layered gate
+  // counts only rounds whose kernels actually ran); without ET the layered
+  // mode keeps reporting max_iter for backward compatibility.
+  return (is_layered && !engine->et_enabled) ? max_iter : static_cast<int>(ctrl->actual_iters);
 }
 
 uint32_t decoder_engine::get_n_info() const

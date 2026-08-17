@@ -116,12 +116,16 @@ int golden_check(const std::string& matrix_dir)
 /// One full encode -> AWGN -> decode round trip; returns CRC results for both decoders
 /// and whether the decoded bits agree (when both succeed).
 struct round_trip_result {
-  bool cpu_ok         = false;
-  bool gpu_ok         = false;
-  bool gpu_nms_ok     = false;
-  bool gpu_layered_ok = false;
-  bool bits_eq        = false;
-  int  gpu_iters      = -1;
+  bool cpu_ok              = false;
+  bool gpu_ok              = false;
+  bool gpu_nms_ok          = false;
+  bool gpu_layered_ok      = false;
+  bool gpu_layered_et_off_ok = false;
+  bool bits_eq             = false;
+  bool layered_et_ab_eq    = true; // ET on/off must decode identically
+  int  gpu_iters           = -1;
+  int  gpu_layered_iters      = -1;
+  int  gpu_layered_et_off_iters = -1;
 };
 
 round_trip_result run_round_trip(std::mt19937&                         rng,
@@ -131,6 +135,7 @@ round_trip_result run_round_trip(std::mt19937&                         rng,
                                  ldpc_decoder&                        gpu_decoder,
                                  ldpc_decoder*                       gpu_nms_decoder,
                                  ldpc_decoder*                       gpu_layered_decoder,
+                                 ldpc_decoder*                       gpu_layered_et_off_decoder,
                                  const test_case&                     tc,
                                  double                               sigma)
 {
@@ -218,10 +223,12 @@ round_trip_result run_round_trip(std::mt19937&                         rng,
     }();
   }
 
+  std::vector<uint8_t> gpu_layered_out_bytes((K + 7) / 8);
+  bit_buffer           gpu_layered_out = bit_buffer::from_bytes(gpu_layered_out_bytes);
   if (gpu_layered_decoder != nullptr) {
-    std::vector<uint8_t> gpu_layered_out_bytes((K + 7) / 8);
-    bit_buffer           gpu_layered_out = bit_buffer::from_bytes(gpu_layered_out_bytes);
-    res.gpu_layered_ok = gpu_layered_decoder->decode(gpu_layered_out, llrs, &crc16, dec_cfg).has_value();
+    auto layered_iters = gpu_layered_decoder->decode(gpu_layered_out, llrs, &crc16, dec_cfg);
+    res.gpu_layered_ok      = layered_iters.has_value();
+    res.gpu_layered_iters   = layered_iters.has_value() ? static_cast<int>(*layered_iters) : -1;
     if (res.gpu_layered_ok) {
       res.bits_eq = res.bits_eq && [&]() {
         for (unsigned i = 0; i != K; ++i) {
@@ -231,6 +238,27 @@ round_trip_result run_round_trip(std::mt19937&                         rng,
         }
         return true;
       }();
+    }
+  }
+
+  // ET on/off A/B: both layered decoders must agree exactly (same pass/fail and,
+  // on pass, the same decoded bits) - the ET gate may only skip converged rounds.
+  if (gpu_layered_et_off_decoder != nullptr && gpu_layered_decoder != nullptr) {
+    std::vector<uint8_t> gpu_layered_et_off_bytes((K + 7) / 8);
+    bit_buffer           gpu_layered_et_off_out = bit_buffer::from_bytes(gpu_layered_et_off_bytes);
+    auto                 et_off_iters =
+        gpu_layered_et_off_decoder->decode(gpu_layered_et_off_out, llrs, &crc16, dec_cfg);
+    res.gpu_layered_et_off_ok      = et_off_iters.has_value();
+    res.gpu_layered_et_off_iters   = et_off_iters.has_value() ? static_cast<int>(*et_off_iters) : -1;
+    if (res.gpu_layered_et_off_ok != res.gpu_layered_ok) {
+      res.layered_et_ab_eq = false;
+    } else if (res.gpu_layered_ok) {
+      for (unsigned i = 0; i != K; ++i) {
+        if ((gpu_layered_et_off_out.extract(i, 1) & 1U) != (gpu_layered_out.extract(i, 1) & 1U)) {
+          res.layered_et_ab_eq = false;
+          break;
+        }
+      }
     }
   }
 
@@ -276,7 +304,11 @@ int main(int argc, char** argv)
                                                               dec_factory_cfg.early_stop_syndrome,
                                                               ocudu::metal::decoder_engine::algo::nms_layered,
                                                               0.6F);
-  if (!cpu_dec || !gpu_dec || !gpu_nms_dec || !gpu_layered_dec) {
+  // ET off twin for the A/B: same algorithm, no per-round gate dispatch.
+  auto gpu_layered_et_off_dec = std::make_unique<ldpc_decoder_metal>(
+      dec_factory_cfg.force_decoding, dec_factory_cfg.early_stop_syndrome,
+      ocudu::metal::decoder_engine::algo::nms_layered, 0.6F, -1.0F, false);
+  if (!cpu_dec || !gpu_dec || !gpu_nms_dec || !gpu_layered_dec || !gpu_layered_et_off_dec) {
     std::printf("FAIL: factory did not create the decoders (metal/metal_nms types registered?)\n");
     return 1;
   }
@@ -307,12 +339,14 @@ int main(int argc, char** argv)
 
     const unsigned nof_trials = (tc.ls >= ldpc::LS256) ? 20 : 100;
     unsigned       cpu_pass = 0, gpu_pass = 0, gpu_nms_pass = 0, gpu_layered_pass = 0, both_pass_same = 0,
-                   disagreements = 0;
+                   disagreements = 0, et_ab_mismatches = 0;
     int            iters_min = 999, iters_max = 0;
+    int            layered_iters_min = 999, layered_iters_max = 0, et_off_iters_min = 999, et_off_iters_max = 0;
 
     for (unsigned t = 0; t != nof_trials; ++t) {
       const round_trip_result r = run_round_trip(rng, *encoder, *crc16, *cpu_dec, *gpu_dec,
-                                                  gpu_nms_dec.get(), gpu_layered_dec.get(), tc, sigma);
+                                                  gpu_nms_dec.get(), gpu_layered_dec.get(),
+                                                  gpu_layered_et_off_dec.get(), tc, sigma);
       if (r.gpu_nms_ok) {
         gpu_nms_pass++;
       }
@@ -325,6 +359,19 @@ int main(int argc, char** argv)
         iters_min = std::min(iters_min, r.gpu_iters);
         iters_max = std::max(iters_max, r.gpu_iters);
       }
+      if (r.gpu_layered_iters >= 0) {
+        layered_iters_min = std::min(layered_iters_min, r.gpu_layered_iters);
+        layered_iters_max = std::max(layered_iters_max, r.gpu_layered_iters);
+      }
+      if (r.gpu_layered_et_off_iters >= 0) {
+        et_off_iters_min = std::min(et_off_iters_min, r.gpu_layered_et_off_iters);
+        et_off_iters_max = std::max(et_off_iters_max, r.gpu_layered_et_off_iters);
+      }
+      if (!r.layered_et_ab_eq) {
+        et_ab_mismatches++;
+        std::printf("  [%s] trial %u: layered ET on/off mismatch (et_on=%d et_off=%d)\n", tc.name, t,
+                    r.gpu_layered_ok, r.gpu_layered_et_off_ok);
+      }
       if (r.cpu_ok && r.gpu_ok) {
         both_pass_same++;
         if (!r.bits_eq) {
@@ -336,16 +383,21 @@ int main(int argc, char** argv)
       }
     }
 
-    // Noiseless: strict bit-exactness (both decoders must pass every block identically).
-    // Noisy: no false GPU passes and the GPU rate never exceeds the CPU rate.
+    // Noiseless: strict bit-exactness (every decoder passes every block), and the ET
+    // gate must stop after exactly one round (et-off reports the full max_iter=6).
+    // Noisy: no false GPU passes, the GPU rate never exceeds the CPU rate, and the
+    // ET on/off A/B must be identical (same pass/fail, same bits).
     const bool ok =
         noiseless ? ((cpu_pass == nof_trials) && (gpu_pass == nof_trials) && (gpu_nms_pass == nof_trials) &&
-                     (gpu_layered_pass == nof_trials) && (disagreements == 0))
-                  : ((disagreements == 0) && (gpu_pass <= cpu_pass));
-    std::printf("[parity] %-9s SNR %.1f dB: cpu %u/%u, gpu %u/%u, nms %u/%u, layered %u/%u, same %u, disagreements %u, gpu iters [%d,%d] -> %s\n",
+                     (gpu_layered_pass == nof_trials) && (disagreements == 0) && (et_ab_mismatches == 0) &&
+                     (layered_iters_min == 1) && (layered_iters_max == 1) &&
+                     (et_off_iters_min == 6) && (et_off_iters_max == 6))
+                  : ((disagreements == 0) && (et_ab_mismatches == 0) && (gpu_pass <= cpu_pass));
+    std::printf("[parity] %-9s SNR %.1f dB: cpu %u/%u, gpu %u/%u, nms %u/%u, layered %u/%u, same %u, disagreements %u, gpu iters [%d,%d], layered iters [%d,%d] (et-off [%d,%d]) -> %s\n",
                 tc.name, tc.snr_db, cpu_pass, nof_trials, gpu_pass, nof_trials, gpu_nms_pass, nof_trials,
                 gpu_layered_pass, nof_trials, both_pass_same, disagreements,
-                (gpu_pass != 0) ? iters_min : -1, (gpu_pass != 0) ? iters_max : -1, ok ? "OK" : "FAIL");
+                (gpu_pass != 0) ? iters_min : -1, (gpu_pass != 0) ? iters_max : -1,
+                layered_iters_min, layered_iters_max, et_off_iters_min, et_off_iters_max, ok ? "OK" : "FAIL");
     if (!ok) {
       failures++;
     }

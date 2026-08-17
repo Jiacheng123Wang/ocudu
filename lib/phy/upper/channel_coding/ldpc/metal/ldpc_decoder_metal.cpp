@@ -121,12 +121,13 @@ struct ldpc_decoder_metal::engine_slot
 
 ldpc_decoder_metal::ldpc_decoder_metal(bool force_decoding_, bool early_stop_syndrome_,
                                        metal::decoder_engine::algo mode_, float factor_override_,
-                                       float sat_override_) :
+                                       float sat_override_, bool enable_et_) :
   force_decoding(force_decoding_),
   early_stop_syndrome(early_stop_syndrome_),
   mode(mode_),
   factor_override(factor_override_),
-  sat_override(sat_override_)
+  sat_override(sat_override_),
+  enable_et(enable_et_)
 {
 }
 
@@ -252,7 +253,8 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
   const float     sat = (sat_override >= 0.0F) ? sat_override : 0.0F;
   const metal::decoder_engine::layered_info* layered =
       (mode == metal::decoder_engine::algo::nms_layered) ? &slot->layered_info : nullptr;
-  if (!slot->engine->init(n, m, factor, slot->h.get(), slot->ht.get(), col_weights, mode, sat, layered)) {
+  if (!slot->engine->init(n, m, factor, slot->h.get(), slot->ht.get(), col_weights, mode, sat, layered,
+                          enable_et)) {
     ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
   }
 

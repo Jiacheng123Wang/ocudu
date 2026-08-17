@@ -25,9 +25,13 @@ public:
   /// \param[in] force_decoding      Force decoding even if the codeblock appears too short.
   /// \param[in] early_stop_syndrome Early stop on syndrome convergence (no-CRC path only).
   /// \param[in] mode                GPU algorithm (LLS heuristic or normalized min-sum).
+  /// \param[in] factor_override     NMS normalization factor override (-1 = per-mode default).
+  /// \param[in] sat_override        Soft-bit saturation magnitude override (-1 = 0, disabled).
+  /// \param[in] enable_et           nms_layered only: GPU-internal early termination (false for A/B).
   ldpc_decoder_metal(bool force_decoding, bool early_stop_syndrome,
                      metal::decoder_engine::algo mode = metal::decoder_engine::algo::lls,
-                     float factor_override = -1.0F, float sat_override = -1.0F);
+                     float factor_override = -1.0F, float sat_override = -1.0F,
+                     bool enable_et = true);
 
   // Out-of-line: the engine slots are defined in the implementation file only.
   ~ldpc_decoder_metal() override;
@@ -49,6 +53,7 @@ private:
   metal::decoder_engine::algo mode;
   float factor_override;
   float sat_override;
+  bool enable_et;
 
   /// Key: (base graph index, lifting size). Owns the engine slots.
   std::map<std::pair<unsigned, unsigned>, std::unique_ptr<engine_slot>> slots;

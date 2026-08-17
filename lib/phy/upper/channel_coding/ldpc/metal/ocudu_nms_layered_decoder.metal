@@ -15,9 +15,12 @@
 // touched by exactly one row of a layer, so the per-VN slot is collision-free);
 // the VN kernel adds the delta to the soft bits.
 //
-// v1 runs max_iter full rounds without GPU-internal early termination; the
-// engine dispatches a final flooding CN pass so the CPU can recompute the final
-// syndrome from the soft-bit hard decisions.
+// GPU-internal early termination: each round ends with a full syndrome refresh
+// (nmsl_final_syndrome) whose unsatisfied-row count feeds the ET gate
+// (nmsl_et_gate); once a round's syndrome is clean, every kernel of the
+// following rounds returns immediately (single command buffer, no CPU polling).
+// The engine dispatches the final syndrome refresh so the CPU can recompute
+// the final syndrome from the soft-bit hard decisions.
 //
 // Convention: negative LLR -> bit 1 (fp16 sign bit is the hard decision).
 
@@ -66,9 +69,15 @@ kernel void nmsl_cn_update(
     device uint32_t* h_pred_bits [[buffer(5)]],
     constant uint32_t& layer_start [[buffer(6)]],
     constant float& norm [[buffer(7)]],
+    device DecodeCtrl* ctrl [[buffer(9)]],
     uint tid [[thread_index_in_threadgroup]],
     uint wid [[threadgroup_position_in_grid]])
 {
+    // Rounds after the ET gate fired are skipped entirely.
+    if (atomic_load_explicit(&ctrl->early_terminate, memory_order_relaxed)) {
+        return;
+    }
+
     const uint row = layer_start + wid;
     const uint e0 = row_start[row];
     const uint e1 = row_start[row + 1];
@@ -132,15 +141,21 @@ kernel void nmsl_cn_update(
 }
 
 // Final syndrome refresh: recomputes the per-row parities from the final soft
-// bits (one threadgroup per check row) so the CPU-side readback is exact.
+// bits (one threadgroup per check row) so the CPU-side readback is exact, and
+// accumulates the unsatisfied-row count for the ET gate.
 kernel void nmsl_final_syndrome(
     device const uint32_t* h_matrix [[buffer(0)]],
     device const half* llr [[buffer(1)]],
     device uint32_t* h_pred_bits [[buffer(2)]],
     constant uint32_t& n_h_chunks [[buffer(3)]],
+    device DecodeCtrl* ctrl [[buffer(4)]],
     uint tid [[thread_index_in_threadgroup]],
     uint wid [[threadgroup_position_in_grid]])
 {
+    if (atomic_load_explicit(&ctrl->early_terminate, memory_order_relaxed)) {
+        return;
+    }
+
     const uint row = wid;
     uint parity = 0;
     const uint row_base = row * n_h_chunks;
@@ -157,7 +172,31 @@ kernel void nmsl_final_syndrome(
     }
     if (tid == 0) {
         h_pred_bits[row] = parity & 1u;
+        if ((parity & 1u) != 0u) {
+            atomic_fetch_add_explicit(&ctrl->error_count, 1, memory_order_relaxed);
+        }
     }
+}
+
+// ET gate: runs once per round, after the final syndrome refresh. If the whole
+// syndrome was clean, raise early_terminate (all kernels of the following
+// rounds then return immediately). actual_iters counts executed rounds only.
+kernel void nmsl_et_gate(
+    device DecodeCtrl* ctrl [[buffer(0)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0) {
+        return;
+    }
+    if (atomic_load_explicit(&ctrl->early_terminate, memory_order_relaxed)) {
+        return;
+    }
+    if (atomic_load_explicit(&ctrl->error_count, memory_order_relaxed) == 0) {
+        atomic_store_explicit(&ctrl->early_terminate, 1, memory_order_relaxed);
+    }
+    // Reset for the next round (when ET did not fire).
+    atomic_store_explicit(&ctrl->error_count, 0, memory_order_relaxed);
+    atomic_fetch_add_explicit(&ctrl->actual_iters, 1, memory_order_relaxed);
 }
 
 // VN update for one layer: nof_cols threadgroups x Z threads, one per touched
@@ -169,9 +208,14 @@ kernel void nmsl_vn_update(
     constant LayerDesc& desc [[buffer(2)]],
     constant uint32_t& z [[buffer(3)]],
     constant float& sat [[buffer(4)]],
+    device DecodeCtrl* ctrl [[buffer(5)]],
     uint k [[thread_position_in_threadgroup]],
     uint col_slot [[threadgroup_position_in_grid]])
 {
+    // Rounds after the ET gate fired are skipped entirely.
+    if (atomic_load_explicit(&ctrl->early_terminate, memory_order_relaxed)) {
+        return;
+    }
     if (col_slot >= desc.nof_cols || k >= z) {
         return;
     }

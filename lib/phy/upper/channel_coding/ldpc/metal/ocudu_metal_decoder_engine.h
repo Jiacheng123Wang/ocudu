@@ -68,10 +68,12 @@ public:
   /// \param[in] sat            NMS soft-bit saturation magnitude (0 = disabled; mirrors the CPU's
   ///                           promotion_sum, |soft| > 63 -> fixed bit).
   /// \param[in] layered        CSR edge layout and layer tables (nms_layered mode only, may be null).
+  /// \param[in] et_enabled     nms_layered only: dispatch the per-round ET gate (GPU-internal
+  ///                           early termination, single command buffer; disable for A/B).
   /// \return True on success.
   bool init(uint32_t n_logical, uint32_t m_logical, float factor, const uint32_t* h, const uint32_t* ht,
             uint32_t* col_weights_out, algo mode = algo::lls, float sat = 0.0F,
-            const layered_info* layered = nullptr);
+            const layered_info* layered = nullptr, bool et_enabled = true);
 
   /// \brief Synchronous decode of one codeblock.
   ///
@@ -80,7 +82,8 @@ public:
   /// \param[out] out_bits n_info bytes (0/1 hard decisions of the information bits).
   /// \param[in]  max_iter Maximum number of iterations (GPU-internal syndrome early stop applies).
   /// \param[out] error_count_out Final number of unsatisfied check equations (0 = clean syndrome).
-  /// \return The number of iterations actually executed, or a negative value on failure.
+  /// \return The number of iterations actually executed (NMS modes), or a negative value on
+  ///         failure. With ET disabled the layered mode reports max_iter instead.
   int decode(const void* in_fp16, uint8_t* out_bits, int max_iter, uint32_t* error_count_out);
 
   /// Returns the number of information bits of the code (N - M).
