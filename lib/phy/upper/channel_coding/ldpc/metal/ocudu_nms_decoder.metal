@@ -129,6 +129,7 @@ kernel void nms_vn_update(
     constant float& norm [[buffer(8)]],
     device DecodeCtrl* ctrl [[buffer(9)]],
     constant float& sat [[buffer(10)]],
+    constant float& beta [[buffer(11)]],
     uint vn_idx [[thread_position_in_grid]],
     uint lane_id [[thread_index_in_simdgroup]])
 {
@@ -155,6 +156,8 @@ kernel void nms_vn_update(
             const uint bit = ctz(mask);
             const uint r = i * 32 + bit;
             float mag = (vn_idx == idx_min1[r]) ? min2[r] : min1[r];
+            // Offset min-sum: max(|v| - beta, 0) * norm (beta = 0 is plain NMS).
+            mag = max(mag - beta, 0.0f);
             mag *= norm;
             const bool extrinsic = ((h_pred_bits[r] & 1u) != 0u) != old_neg;
             sum += extrinsic ? -mag : mag;

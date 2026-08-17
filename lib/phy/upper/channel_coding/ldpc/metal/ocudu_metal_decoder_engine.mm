@@ -101,8 +101,12 @@ struct engine_impl_t {
   uint32_t n_info      = 0;
   uint32_t z           = 0;
   float    factor      = 0.0f;
+  float    beta        = 0.0f;
   float    sat         = 0.0f;
   bool     et_enabled  = true;
+  // GPU-side duration of the last decode (0 when unavailable), for the
+  // latency-benchmark breakdown: wall - gpu = CPU-side fixed overhead.
+  double   last_gpu_us = 0.0;
 };
 
 namespace {
@@ -138,15 +142,16 @@ decoder_engine::~decoder_engine()
   }
 }
 
-bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, const uint32_t* h,
-                          const uint32_t* ht, uint32_t* col_weights_out, algo mode, float sat,
-                          const layered_info* layered, bool et_enabled)
+bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, float beta,
+                          const uint32_t* h, const uint32_t* ht, uint32_t* col_weights_out, algo mode,
+                          float sat, const layered_info* layered, bool et_enabled)
 {
   engine_impl_t* engine = new engine_impl_t();
   impl                  = engine;
 
   engine->n_info      = n_logical - m_logical;
   engine->factor      = factor;
+  engine->beta        = beta;
   engine->mode        = mode;
   engine->sat         = sat;
   engine->et_enabled  = et_enabled;
@@ -376,6 +381,7 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
         [enc setBuffer:engine->buf_h_pred_bits offset:0 atIndex:5];
         [enc setBytes:&layer_start length:sizeof(uint32_t) atIndex:6];
         [enc setBytes:&engine->factor length:sizeof(float) atIndex:7];
+        [enc setBytes:&engine->beta length:sizeof(float) atIndex:8];
         [enc setBuffer:engine->buf_ctrl offset:0 atIndex:9];
         [enc dispatchThreadgroups:MTLSizeMake(engine->z, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -434,6 +440,7 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
       [enc setBytes:&engine->factor length:sizeof(float) atIndex:8];
       [enc setBuffer:engine->buf_ctrl offset:0 atIndex:9];
       [enc setBytes:&engine->sat length:sizeof(float) atIndex:10];
+      [enc setBytes:&engine->beta length:sizeof(float) atIndex:11];
       [enc dispatchThreads:MTLSizeMake(engine->n_aligned, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     } else {
@@ -474,6 +481,12 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
           static_cast<unsigned long>(cmd_buf.status));
     return -1;
   }
+  // GPU-side duration (Apple Silicon: valid for compute command buffers; 0 when unavailable).
+  if (cmd_buf.GPUStartTime > 0.0 && cmd_buf.GPUEndTime > 0.0) {
+    engine->last_gpu_us = (cmd_buf.GPUEndTime - cmd_buf.GPUStartTime) * 1e6;
+  } else {
+    engine->last_gpu_us = 0.0;
+  }
 
   // Extract the results: hard decisions from the final fp16 LLR sign bits.
   const decode_ctrl_t* ctrl = static_cast<const decode_ctrl_t*>(engine->buf_ctrl.contents);
@@ -510,6 +523,12 @@ uint32_t decoder_engine::get_n_info() const
 {
   const engine_impl_t* engine = static_cast<const engine_impl_t*>(impl);
   return engine != nullptr ? engine->n_info : 0;
+}
+
+double decoder_engine::last_gpu_wait_us() const
+{
+  const engine_impl_t* engine = static_cast<const engine_impl_t*>(impl);
+  return engine != nullptr ? engine->last_gpu_us : 0.0;
 }
 
 } // namespace metal

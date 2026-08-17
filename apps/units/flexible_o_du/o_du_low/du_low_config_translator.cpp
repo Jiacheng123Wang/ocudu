@@ -43,6 +43,7 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   upper_phy_factory_config.rx_symbol_printer_prach    = du_low.loggers.phy_rx_symbols_prach;
   upper_phy_factory_config.ldpc_encoder_type          = "auto";
   upper_phy_factory_config.ldpc_decoder_type          = du_low.expert_phy_cfg.ldpc_decoder_type;
+  upper_phy_factory_config.ldpc_decoder_offset        = du_low.expert_phy_cfg.ldpc_decoder_offset;
   upper_phy_factory_config.ldpc_rate_dematcher_type   = "auto";
   upper_phy_factory_config.crc_calculator_type        = "auto";
   upper_phy_factory_config.prach_th_correction_factor = du_low.expert_phy_cfg.prach_th_correction_factor;

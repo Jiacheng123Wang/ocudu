@@ -121,12 +121,13 @@ struct ldpc_decoder_metal::engine_slot
 
 ldpc_decoder_metal::ldpc_decoder_metal(bool force_decoding_, bool early_stop_syndrome_,
                                        metal::decoder_engine::algo mode_, float factor_override_,
-                                       float sat_override_, bool enable_et_) :
+                                       float sat_override_, float beta_override_, bool enable_et_) :
   force_decoding(force_decoding_),
   early_stop_syndrome(early_stop_syndrome_),
   mode(mode_),
   factor_override(factor_override_),
   sat_override(sat_override_),
+  beta_override(beta_override_),
   enable_et(enable_et_)
 {
 }
@@ -240,21 +241,24 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
 
   slot->engine = std::make_unique<metal::decoder_engine>();
   // LLS step size (0.45 is the SynchroPlus reference; 0.8 measured slightly better on
-  // ocudu-quantized int8 LLRs). NMS normalization (BLER benchmark, see PLAN.md 4.8):
-  // flooding optimum 0.45; the layered schedule's inherent damping allows 0.6, which
-  // closes the residual waterfall gap to the CPU (the CPU generic uses 1.0, which
-  // oscillates on fp16 GPU arithmetic).
+  // ocudu-quantized int8 LLRs). NMS normalization (BLER benchmark, see PLAN.md 4.8/4.9):
+  // flooding optimum 0.45; the layered schedule's inherent damping allows a higher norm
+  // (0.6 pure NMS), and the offset min-sum pair (0.7, beta 0.5) closes the last residual
+  // waterfall points to CPU parity (grid sweep on the 10k harness).
   const float factor = (factor_override >= 0.0F)
                            ? factor_override
                            : ((mode == metal::decoder_engine::algo::lls)          ? 0.8F
-                              : (mode == metal::decoder_engine::algo::nms_layered) ? 0.6F
+                              : (mode == metal::decoder_engine::algo::nms_layered) ? 0.7F
                                                                                    : 0.45F);
-  uint32_t*       col_weights = (mode == metal::decoder_engine::algo::lls) ? slot->col_weights.get() : nullptr;
-  const float     sat = (sat_override >= 0.0F) ? sat_override : 0.0F;
+  uint32_t*   col_weights = (mode == metal::decoder_engine::algo::lls) ? slot->col_weights.get() : nullptr;
+  const float sat         = (sat_override >= 0.0F) ? sat_override : 0.0F;
+  const float beta        = (beta_override >= 0.0F)
+                                ? beta_override
+                                : (mode == metal::decoder_engine::algo::nms_layered) ? 0.5F : 0.0F;
   const metal::decoder_engine::layered_info* layered =
       (mode == metal::decoder_engine::algo::nms_layered) ? &slot->layered_info : nullptr;
-  if (!slot->engine->init(n, m, factor, slot->h.get(), slot->ht.get(), col_weights, mode, sat, layered,
-                          enable_et)) {
+  if (!slot->engine->init(n, m, factor, beta, slot->h.get(), slot->ht.get(), col_weights, mode, sat,
+                          layered, enable_et)) {
     ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
   }
 
@@ -269,6 +273,11 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
                                                    const configuration&           cfg)
 {
   ocudu_assert(cfg.max_iterations != 0, "Max iterations must be different to 0");
+
+  // Single-client guard: covers the lazy slot-map insertion (get_slot), the per-slot
+  // scratch buffers and the zero-copy wrapper cache. Contention is nil in the gNB
+  // (the codeblock-decoder pool hands out one instance per task).
+  std::lock_guard<std::mutex> lock(decode_mtx);
 
   const bool     is_bg1 = cfg.base_graph == ldpc_base_graph_type::BG1;
   const unsigned n_full = is_bg1 ? 68 : 52;
@@ -324,6 +333,7 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
   if (iters < 0) {
     return std::nullopt;
   }
+  last_gpu_wait_us_ = slot.engine->last_gpu_wait_us();
 
   // Repack the K message bits (filler bits included; the segmenter strips them).
   for (unsigned i = 0; i != message_length; ++i) {

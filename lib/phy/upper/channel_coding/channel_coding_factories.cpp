@@ -119,15 +119,19 @@ public:
 #endif // __aarch64__
 #if defined(OCUDU_METAL_LDPC)
     if (dec_type == "metal") {
-      return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome);
+      return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome,
+                                                  ocudu::metal::decoder_engine::algo::lls, -1.0F, -1.0F,
+                                                  cfg.ldpc_decoder_offset);
     }
     if (dec_type == "metal_nms") {
       return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome,
-                                                  ocudu::metal::decoder_engine::algo::nms);
+                                                  ocudu::metal::decoder_engine::algo::nms, -1.0F, -1.0F,
+                                                  cfg.ldpc_decoder_offset);
     }
     if (dec_type == "metal_nms_layered") {
       return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome,
-                                                  ocudu::metal::decoder_engine::algo::nms_layered);
+                                                  ocudu::metal::decoder_engine::algo::nms_layered, -1.0F,
+                                                  -1.0F, cfg.ldpc_decoder_offset);
     }
 #endif // OCUDU_METAL_LDPC
     if ((dec_type == "auto") || (dec_type == "generic")) {

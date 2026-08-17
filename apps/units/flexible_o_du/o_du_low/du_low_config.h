@@ -50,6 +50,8 @@ struct du_low_unit_expert_upper_phy_config {
   /// - \c metal_nms: for using the Apple GPU implementation with normalized min-sum decoding.
   /// - \c metal_nms_layered: as \c metal_nms, with the layered schedule mirroring the CPU decoder.
   std::string ldpc_decoder_type = "auto";
+  /// \brief Offset min-sum parameter (beta) for the Metal NMS decoders (0 = plain NMS).
+  float ldpc_decoder_offset = 0.0F;
   /// \brief PUSCH channel estimator frequency-domain smoothing strategy.
   ///
   /// Use one of these options:

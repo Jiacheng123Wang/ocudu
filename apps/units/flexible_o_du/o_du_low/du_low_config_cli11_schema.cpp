@@ -230,6 +230,13 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "PUSCH LDPC decoder type: auto, generic, neon, avx2, avx512, metal, metal_nms and metal_nms_layered.")
       ->capture_default_str()
       ->check(ldpc_decoder_type_check);
+
+  add_option(app,
+             "--pusch_ldpc_decoder_offset",
+             expert_phy_params.ldpc_decoder_offset,
+             "Offset min-sum parameter (beta) for the Metal NMS decoders (0 = plain NMS)")
+      ->capture_default_str()
+      ->check(CLI::NonNegativeNumber);
   add_option(app,
              "--pusch_channel_estimator_fd_strategy",
              expert_phy_params.pusch_channel_estimator_fd_strategy,

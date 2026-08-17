@@ -69,6 +69,7 @@ kernel void nmsl_cn_update(
     device uint32_t* h_pred_bits [[buffer(5)]],
     constant uint32_t& layer_start [[buffer(6)]],
     constant float& norm [[buffer(7)]],
+    constant float& beta [[buffer(8)]],
     device DecodeCtrl* ctrl [[buffer(9)]],
     uint tid [[thread_index_in_threadgroup]],
     uint wid [[threadgroup_position_in_grid]])
@@ -126,12 +127,14 @@ kernel void nmsl_cn_update(
         h_pred_bits[row] = parity & 1u;
     }
 
-    // Second pass: write c2v_new and the per-VN deltas.
+    // Second pass: write c2v_new and the per-VN deltas. Offset min-sum:
+    // mag = max(|v| - beta, 0) * norm (beta = 0 is plain normalized min-sum).
     for (uint e = e0 + tid; e < e1; e += 32) {
         const uint vn = edge_vn[e];
         const float old_c2v = (float)c2v[e];
         const float v2c = (float)llr[vn] - old_c2v;
         float mag = (vn == i1) ? m2 : m1;
+        mag = max(mag - beta, 0.0f);
         mag *= norm;
         const bool neg = ((sign ^ ((v2c < 0.0f) ? 1u : 0u)) != 0u);
         const float c2v_new = neg ? -mag : mag;

@@ -58,6 +58,7 @@ public:
   /// \param[in] n_logical      Codeblock length N (BG1: 68Z, BG2: 52Z).
   /// \param[in] m_logical      Number of parity checks M (BG1: 46Z, BG2: 42Z).
   /// \param[in] factor         LLS step size (alpha) or NMS normalization factor, per \c mode.
+  /// \param[in] beta           NMS offset min-sum parameter (0 = plain normalized min-sum).
   /// \param[in] h              Packed parity-check matrix, M_aligned rows x ceil(N/32) words,
   ///                           little-endian bit order; must be 4KB-aligned and outlive this object.
   /// \param[in] ht             Packed transpose, N_aligned rows x ceil(M/32) words; same lifetime
@@ -71,8 +72,8 @@ public:
   /// \param[in] et_enabled     nms_layered only: dispatch the per-round ET gate (GPU-internal
   ///                           early termination, single command buffer; disable for A/B).
   /// \return True on success.
-  bool init(uint32_t n_logical, uint32_t m_logical, float factor, const uint32_t* h, const uint32_t* ht,
-            uint32_t* col_weights_out, algo mode = algo::lls, float sat = 0.0F,
+  bool init(uint32_t n_logical, uint32_t m_logical, float factor, float beta, const uint32_t* h,
+            const uint32_t* ht, uint32_t* col_weights_out, algo mode = algo::lls, float sat = 0.0F,
             const layered_info* layered = nullptr, bool et_enabled = true);
 
   /// \brief Synchronous decode of one codeblock.
@@ -88,6 +89,11 @@ public:
 
   /// Returns the number of information bits of the code (N - M).
   uint32_t get_n_info() const;
+
+  /// GPU-side duration of the last decode in microseconds (0 when unavailable).
+  /// Wall time minus this is the CPU-side fixed overhead (LLR pack, zero-copy
+  /// wrap, command recording, readback).
+  double last_gpu_wait_us() const;
 
 private:
   void* impl = nullptr;

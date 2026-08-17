@@ -303,6 +303,8 @@ struct upper_phy_factory_configuration {
   /// - \c avx512: for using AVX512 instructions (x86_64 CPUs only), or
   /// - \c neon: for using NEON instructions (ARM CPUs only).
   std::string ldpc_decoder_type;
+  /// \brief Offset min-sum parameter (beta) for the Metal NMS decoders (0 = plain NMS).
+  float ldpc_decoder_offset = 0.0F;
   /// \brief LDPC rate dematcher type.
   ///
   /// Use one of these options:

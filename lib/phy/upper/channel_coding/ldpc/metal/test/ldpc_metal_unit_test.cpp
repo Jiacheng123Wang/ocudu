@@ -14,10 +14,12 @@
 #include "ldpc_decoder_metal.h"
 #include "ocudu/adt/bit_buffer.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace ocudu;
@@ -280,6 +282,49 @@ round_trip_result run_round_trip(std::mt19937&                         rng,
   return res;
 }
 
+/// Builds one noiseless codeblock (message + CRC16 + encode + hard LLRs) for the
+/// multi-threaded shared-instance stress test. Deterministic per seed.
+void build_noiseless_block(std::mt19937&                        rng,
+                           ldpc_encoder&                       encoder,
+                           crc_calculator&                     crc16,
+                           ldpc_base_graph_type                bg,
+                           ldpc::lifting_size_t                ls,
+                           std::vector<log_likelihood_ratio>&  llrs_out,
+                           std::vector<uint8_t>&               ref_bits_out)
+{
+  const unsigned z      = static_cast<unsigned>(ls);
+  const unsigned n_full = bg == ldpc_base_graph_type::BG1 ? 68 : 52;
+  const unsigned bg_k   = n_full - (bg == ldpc_base_graph_type::BG1 ? 46 : 42);
+  const unsigned K      = bg_k * z;
+  const unsigned nof_tx = (n_full - 2) * z;
+
+  std::vector<uint8_t> msg_bytes((K + 7) / 8);
+  bit_buffer           msg = bit_buffer::from_bytes(msg_bytes);
+  std::uniform_int_distribution<int> bit_dist(0, 1);
+  for (unsigned i = 0; i != K - 16; ++i) {
+    msg.insert(static_cast<uint8_t>(bit_dist(rng)), i, 1);
+  }
+  const unsigned crc = crc16.calculate(msg.first(K - 16));
+  for (unsigned i = 0; i != 16; ++i) {
+    msg.insert(static_cast<uint8_t>((crc >> (15 - i)) & 1U), K - 16 + i, 1);
+  }
+
+  const ldpc_encoder::configuration enc_cfg = {.base_graph = bg, .lifting_size = ls, .Nref = 0};
+  const ldpc_encoder_buffer&        codeblock = encoder.encode(msg, enc_cfg);
+  std::vector<uint8_t>              packed(nof_tx);
+  codeblock.write_codeblock(packed, 0);
+
+  llrs_out.resize(nof_tx);
+  for (unsigned i = 0; i != nof_tx; ++i) {
+    llrs_out[i] = (packed[i] & 1U) == 0 ? 64 : -64;
+  }
+  ref_bits_out.assign((K + 7) / 8, 0);
+  bit_buffer ref = bit_buffer::from_bytes(ref_bits_out);
+  for (unsigned i = 0; i != K; ++i) {
+    ref.insert(msg.extract(i, 1), i, 1);
+  }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -303,11 +348,11 @@ int main(int argc, char** argv)
   auto gpu_layered_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
                                                               dec_factory_cfg.early_stop_syndrome,
                                                               ocudu::metal::decoder_engine::algo::nms_layered,
-                                                              0.6F);
+                                                              0.7F, -1.0F, 0.5F);
   // ET off twin for the A/B: same algorithm, no per-round gate dispatch.
   auto gpu_layered_et_off_dec = std::make_unique<ldpc_decoder_metal>(
       dec_factory_cfg.force_decoding, dec_factory_cfg.early_stop_syndrome,
-      ocudu::metal::decoder_engine::algo::nms_layered, 0.6F, -1.0F, false);
+      ocudu::metal::decoder_engine::algo::nms_layered, 0.7F, -1.0F, 0.5F, false);
   if (!cpu_dec || !gpu_dec || !gpu_nms_dec || !gpu_layered_dec || !gpu_layered_et_off_dec) {
     std::printf("FAIL: factory did not create the decoders (metal/metal_nms types registered?)\n");
     return 1;
@@ -399,6 +444,59 @@ int main(int argc, char** argv)
                 (gpu_pass != 0) ? iters_min : -1, (gpu_pass != 0) ? iters_max : -1,
                 layered_iters_min, layered_iters_max, et_off_iters_min, et_off_iters_max, ok ? "OK" : "FAIL");
     if (!ok) {
+      failures++;
+    }
+  }
+
+  // 3. Multi-threaded shared-instance stress: one layered decoder, 4 threads x 100
+  // decodes of distinct noiseless blocks; every output must match the serial reference.
+  // Deterministic (same LLRs every repeat), so any scratch/buffer-cache race shows up
+  // as a mismatch or a failed CRC.
+  {
+    const unsigned      n_threads = 4, reps = 100;
+    std::atomic<bool>   all_ok{true};
+    std::vector<std::thread> threads;
+    for (unsigned i = 0; i != n_threads; ++i) {
+      threads.emplace_back([&, i]() {
+        std::mt19937                    rng(1000 + i);
+        std::vector<log_likelihood_ratio> llrs;
+        std::vector<uint8_t>            ref_bytes;
+        // The generic encoder is NOT thread-safe (encode() returns a reference to an
+        // internal buffer), so each thread builds its block with its own encoder.
+        auto thread_encoder = create_ldpc_encoder_factory_sw("generic")->create();
+        build_noiseless_block(rng, *thread_encoder, *crc16, ldpc_base_graph_type::BG2, ldpc::LS16, llrs, ref_bytes);
+        const bit_buffer ref = bit_buffer::from_bytes(ref_bytes);
+        const unsigned   K   = 10 * 16; // BG2 Z16
+        const ldpc_decoder::configuration dec_cfg = {
+            .base_graph = ldpc_base_graph_type::BG2, .lifting_size = ldpc::LS16,
+            .nof_filler_bits = 0, .nof_crc_bits = 16, .max_iterations = 6};
+        for (unsigned r = 0; r != reps && all_ok.load(); ++r) {
+          std::vector<uint8_t> out_bytes((K + 7) / 8);
+          bit_buffer           out = bit_buffer::from_bytes(out_bytes);
+          const auto           iters = gpu_layered_dec->decode(out, llrs, &*crc16, dec_cfg);
+          if (!iters.has_value()) {
+            std::printf("  [mt] thread %u rep %u: CRC FAIL (iters=%d)\n", i, r,
+                        iters.has_value() ? static_cast<int>(*iters) : -1);
+            all_ok.store(false);
+            break;
+          }
+          for (unsigned b = 0; b != K; ++b) {
+            if ((out.extract(b, 1) & 1U) != (ref.extract(b, 1) & 1U)) {
+              std::printf("  [mt] thread %u rep %u: bit %u mismatch (dec=%u ref=%u)\n", i, r, b,
+                          (out.extract(b, 1) & 1U), (ref.extract(b, 1) & 1U));
+              all_ok.store(false);
+              break;
+            }
+          }
+        }
+      });
+    }
+    for (auto& t : threads) {
+      t.join();
+    }
+    std::printf("[mt-stress] shared layered decoder, %u threads x %u decodes -> %s\n", n_threads, reps,
+                all_ok.load() ? "OK" : "FAIL");
+    if (!all_ok.load()) {
       failures++;
     }
   }

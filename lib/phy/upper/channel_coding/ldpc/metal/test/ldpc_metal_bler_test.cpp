@@ -20,6 +20,9 @@
 #include "ldpc_decoder_metal.h"
 #include "ocudu/adt/bit_buffer.h"
 
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -37,12 +40,14 @@ struct params {
   std::string gpu_type  = "metal";
   float       norm      = -1.0F;
   float       sat       = -1.0F;
+  float       beta      = -1.0F;
   unsigned    bg        = 1;
   unsigned    z         = 64;
   std::vector<double> rates = {1.0 / 3.0, 0.5, 2.0 / 3.0};
   std::vector<double> snrs  = {0.0, 2.0, 4.0, 6.0, 8.0, 10.0};
   unsigned    trials   = 200;
   unsigned    max_iter = 6;
+  unsigned    latency  = 0; // >0: decode-latency mode, N timed decodes per decoder
 };
 
 /// Parses "a:b:c" into a sequence, or a single value.
@@ -93,6 +98,8 @@ params parse_args(int argc, char** argv)
       p.norm = std::stof(next(a.c_str()));
     } else if (a == "--sat") {
       p.sat = std::stof(next(a.c_str()));
+    } else if (a == "--beta") {
+      p.beta = std::stof(next(a.c_str()));
     } else if (a == "--bg") {
       p.bg = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else if (a == "--z") {
@@ -105,6 +112,8 @@ params parse_args(int argc, char** argv)
       p.trials = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else if (a == "--max-iter") {
       p.max_iter = static_cast<unsigned>(std::stoul(next(a.c_str())));
+    } else if (a == "--latency") {
+      p.latency = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else {
       std::fprintf(stderr, "unknown argument '%s'\n", a.c_str());
       std::exit(1);
@@ -131,7 +140,9 @@ round_trip run_once(std::mt19937&          rng,
                     double                sigma,
                     unsigned              max_iter,
                     ldpc_base_graph_type  bg,
-                    ldpc::lifting_size_t  ls)
+                    ldpc::lifting_size_t  ls,
+                    double*               cpu_us = nullptr,
+                    double*               gpu_us = nullptr)
 {
   // Message: K-16 random bits + CRC16 (MSB-first, segmenter convention).
   std::vector<uint8_t> msg_bytes((k + 7) / 8);
@@ -176,12 +187,22 @@ round_trip run_once(std::mt19937&          rng,
   {
     std::vector<uint8_t> out_bytes((k + 7) / 8);
     bit_buffer           out = bit_buffer::from_bytes(out_bytes);
+    const auto           t0  = std::chrono::steady_clock::now();
     res.cpu_ok              = cpu_dec.decode(out, llrs, &crc16, dec_cfg).has_value();
+    const auto t1 = std::chrono::steady_clock::now();
+    if (cpu_us != nullptr) {
+      *cpu_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+    }
   }
   {
     std::vector<uint8_t> out_bytes((k + 7) / 8);
     bit_buffer           out = bit_buffer::from_bytes(out_bytes);
+    const auto           t0  = std::chrono::steady_clock::now();
     res.gpu_ok              = gpu_dec.decode(out, llrs, &crc16, dec_cfg).has_value();
+    const auto t1 = std::chrono::steady_clock::now();
+    if (gpu_us != nullptr) {
+      *gpu_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+    }
   }
   return res;
 }
@@ -209,15 +230,17 @@ int main(int argc, char** argv)
   auto cpu_dec = create_ldpc_decoder_factory_sw("generic", dec_factory_cfg)->create();
   std::unique_ptr<ldpc_decoder> gpu_dec;
   if (p.gpu_type == "metal_nms_layered") {
+    // A bare run uses the factory defaults (layered norm 0.6); --norm/--sat/--beta override.
     gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
                                                    dec_factory_cfg.early_stop_syndrome,
                                                    ocudu::metal::decoder_engine::algo::nms_layered,
-                                                   (p.norm >= 0.0F) ? p.norm : 1.0F, p.sat);
-  } else if ((p.gpu_type == "metal_nms") && (p.norm >= 0.0F)) {
-    // Norm-factor experiments bypass the factory defaults.
+                                                   p.norm, p.sat, p.beta);
+  } else if ((p.gpu_type == "metal_nms") && ((p.norm >= 0.0F) || (p.sat >= 0.0F) || (p.beta >= 0.0F))) {
+    // Norm/offset experiments bypass the factory defaults.
     gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
                                                    dec_factory_cfg.early_stop_syndrome,
-                                                   ocudu::metal::decoder_engine::algo::nms, p.norm, p.sat);
+                                                   ocudu::metal::decoder_engine::algo::nms, p.norm, p.sat,
+                                                   p.beta);
   } else {
     gpu_dec = create_ldpc_decoder_factory_sw(p.gpu_type, dec_factory_cfg)->create();
   }
@@ -229,6 +252,54 @@ int main(int argc, char** argv)
   }
 
   std::mt19937 rng(20260816);
+
+  if (p.latency > 0) {
+    const double rate  = p.rates.front();
+    const double snr   = p.snrs.front();
+    const unsigned e   = std::min(static_cast<unsigned>(std::lround(k / rate)), n_short * p.z);
+    const double sigma = std::sqrt(std::pow(10.0, -snr / 10.0) / 2.0);
+
+    // Warm-up: the first GPU decode builds the engine slot and compiles the shaders.
+    for (unsigned w = 0; w != 3; ++w) {
+      run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma, p.max_iter, bg, ls);
+    }
+
+    std::vector<double> cpu_us, gpu_us, gpu_wait_us;
+    cpu_us.reserve(p.latency);
+    gpu_us.reserve(p.latency);
+    for (unsigned t = 0; t != p.latency; ++t) {
+      double c_us = 0.0, g_us = 0.0;
+      run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma, p.max_iter, bg, ls,
+               &c_us, &g_us);
+      cpu_us.push_back(c_us);
+      gpu_us.push_back(g_us);
+      if (p.gpu_type.rfind("metal", 0) == 0) {
+        gpu_wait_us.push_back(static_cast<ldpc_decoder_metal&>(*gpu_dec).last_gpu_wait_us());
+      }
+    }
+    auto stats = [](std::vector<double>& v) {
+      std::sort(v.begin(), v.end());
+      auto pct = [&v](double p) { return v[static_cast<size_t>((v.size() - 1) * p)]; };
+      double sum = 0;
+      for (double x : v) {
+        sum += x;
+      }
+      return std::array<double, 4>{sum / static_cast<double>(v.size()), pct(0.5), pct(0.95), pct(0.99)};
+    };
+    const auto cs = stats(cpu_us);
+    const auto gs = stats(gpu_us);
+    std::fprintf(stderr,
+                 "[latency] %s BG%d Z%u rate=%.4f snr=%.1f n=%u: cpu mean=%.1fus p50=%.1fus p95=%.1fus p99=%.1fus | "
+                 "gpu mean=%.1fus p50=%.1fus p95=%.1fus p99=%.1fus",
+                 p.gpu_type.c_str(), p.bg, p.z, rate, snr, p.latency, cs[0], cs[1], cs[2], cs[3], gs[0], gs[1], gs[2],
+                 gs[3]);
+    if (!gpu_wait_us.empty()) {
+      const auto gws = stats(gpu_wait_us);
+      std::fprintf(stderr, " | gpu_wait mean=%.1fus (cpu-side overhead mean=%.1fus)", gws[0], gs[0] - gws[0]);
+    }
+    std::fprintf(stderr, "\n");
+    return 0;
+  }
 
   for (double rate : p.rates) {
     // Clamp the rate-matched length to the codeblock (the rounding of k/rate can

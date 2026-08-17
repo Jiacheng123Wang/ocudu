@@ -534,6 +534,29 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
 - 已知边角:LLR 恰为 0.0 的 VN 在零综合后理论可分叉(概率极小,640 块 + 全瀑布未现);
   如未来 10k 扫频出现失配,备选 = 连续两轮零综合才 ET。
 
+### P3:OMS(Offset Min-Sum)+ 分层默认参数收口(α=0.7, β=0.5)
+
+- 内核:`mag = max(mag - beta, 0) * norm`(分层 CN 第二遍 beta@8;洪泛 VN beta@11);
+  引擎 init 加 `beta`、适配器构造加 `beta_override`、基准加 `--beta`;gnb 运行时开关
+  `--pusch_ldpc_decoder_offset`(复刻 prach_th_correction_factor float 链:
+  工厂配置 `ldpc_decoder_offset` → upper_phy 配置 → du_low CLI/yml/translator)。
+- **β 网格(2000 块/点,两个残余点)**:α ∈ {0.5,0.6,0.7} × β ∈ {0.25,0.5,0.75}——
+  **α=0.7 β=0.5 全面占优**:bg2 z64 r1/2 @0dB 1997/2000(α0.6/β0 时 1941,纯 NMS 时
+  187)、bg1 z16 r2/3 @2dB 1985/2000 vs CPU 1986。β≥1 过冲(107/200),β≤0.25 欠效。
+- 分层默认改为 **α=0.7, β=0.5**(洪泛保持 0.45/β0);200 块全套 13 点复验:两个残余
+  点关闭(187→200、185→195/199),其余点全部保持平齐/反超——无回归。
+- 基准顺带修 quirk:分层分支裸跑默认 `: 1.0F` → `: -1.0F`(用工厂默认)。
+
+### P4/P5:延迟基准与并发(进行中)
+
+- 基准 `--latency N` 模式:固定 SNR 下 N 次 decode 墙钟统计(mean/p50/p95/p99)+
+  引擎 `last_gpu_wait_us()`(GPUStartTime/GPUEndTime,Apple Silicon)——wall−gpu =
+  CPU 侧固定开销。首测 BG1 Z64 mi=6:CPU 319µs vs GPU 1299µs(gpu_wait 1013µs +
+  CPU 侧 287µs)→ 单轮 92 次 dispatch 的固定开销在大块上主导,交叉点测量进行中。
+- 并发:解码器 `decode()` 全程持 `decode_mtx`(覆盖 get_slot 惰性插入 UB + scratch);
+  多线程压力测试(4 线程 × 100 次共享实例)**通过**——过程还抓到通用编码器非线程
+  安全(内部缓冲引用),测试改用每线程独立 encoder,解码器本身无竞态。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`
