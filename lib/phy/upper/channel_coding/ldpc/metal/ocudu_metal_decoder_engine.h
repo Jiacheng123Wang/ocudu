@@ -21,6 +21,14 @@ namespace metal {
 class decoder_engine
 {
 public:
+  /// Decoder algorithm selection.
+  enum class algo {
+    /// Layered normalized min-sum (fused CN+VN kernel, ~46 dispatches/round).
+    layered,
+    /// Flooding normalized min-sum (2 dispatches/round, more iterations).
+    flooding,
+  };
+
   /// CSR edge layout for the layered schedule (built by the adapter). The fused
   /// CN+VN kernel needs no per-layer column tables: within one layer no two
   /// lifted rows share a variable node (3GPP base-graph property).
@@ -51,12 +59,16 @@ public:
   /// \param[in] beta           Offset min-sum parameter (0 = plain NMS).
   /// \param[in] h              Packed parity-check matrix, M_aligned rows x ceil(N/32) words,
   ///                           little-endian bit order; must be 4KB-aligned and outlive this object.
-  /// \param[in] layered        CSR edge layout and layer tables (required).
-  /// \param[in] et_enabled     Dispatch the per-round ET gate (GPU-internal early termination,
-  ///                           single command buffer; disable for A/B).
+  /// \param[in] ht             Packed transpose, N_aligned rows x ceil(M/32) words (flooding
+  ///                           mode only, may be null in layered mode).
+  /// \param[in] layered        CSR edge layout and layer tables (layered mode only).
+  /// \param[in] mode           Decoder algorithm.
+  /// \param[in] et_enabled     Dispatch the per-round ET gate (layered mode only; the flooding
+  ///                           kernels always run their fused convergence check).
   /// \return True on success.
   bool init(uint32_t n_logical, uint32_t m_logical, float factor, float beta, const uint32_t* h,
-            const layered_info& layered, bool et_enabled = true);
+            const uint32_t* ht, const layered_info& layered, algo mode = algo::layered,
+            bool et_enabled = true);
 
   /// \brief Synchronous decode of one codeblock.
   ///

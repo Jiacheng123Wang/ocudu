@@ -13,7 +13,7 @@
 //   - record the per-point pass counts into a CSV for the plotting script.
 //
 // Usage: ldpc_metal_bler_test [--outdir DIR] [--gpu-type metal] [--bg 1|2] [--z Z]
-//        [--rates 0.333,0.5,...] [--snrs 0:2:10] [--trials N] [--max-iter N]
+//        [--rates 0.333,0.5,...] [--snrs 0:2:10] [--trials N] [--max-iter N] [--cpu-max-iter N]
 //        [--norm A] [--beta B] [--latency N]
 
 #include "ocudu/phy/upper/channel_coding/channel_coding_factories.h"
@@ -47,6 +47,7 @@ struct params {
   std::vector<double> snrs  = {0.0, 2.0, 4.0, 6.0, 8.0, 10.0};
   unsigned    trials   = 200;
   unsigned    max_iter = 6;
+  unsigned    cpu_max_iter = 0; // 0 = same as max_iter (decoupled for the flooding evaluation)
   unsigned    latency  = 0; // >0: decode-latency mode, N timed decodes per decoder
 };
 
@@ -71,6 +72,10 @@ std::vector<double> parse_seq(const std::string& s)
     const double a = std::stod(tok.substr(0, c1));
     const double b = std::stod(tok.substr(c1 + 1, c2 - c1 - 1));
     const double c = std::stod(tok.substr(c2 + 1));
+    if (b <= 0.0) {
+      std::fprintf(stderr, "bad range '%s': step must be positive (a zero step loops forever)\n", tok.c_str());
+      std::exit(1);
+    }
     for (double v = a; v <= c + 1e-9; v += b) {
       out.push_back(v);
     }
@@ -110,6 +115,8 @@ params parse_args(int argc, char** argv)
       p.trials = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else if (a == "--max-iter") {
       p.max_iter = static_cast<unsigned>(std::stoul(next(a.c_str())));
+    } else if (a == "--cpu-max-iter") {
+      p.cpu_max_iter = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else if (a == "--latency") {
       p.latency = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else {
@@ -137,6 +144,7 @@ round_trip run_once(std::mt19937&          rng,
                     unsigned              e,
                     double                sigma,
                     unsigned              max_iter,
+                    unsigned              cpu_max_iter,
                     ldpc_base_graph_type  bg,
                     ldpc::lifting_size_t  ls,
                     double*               cpu_us = nullptr,
@@ -180,13 +188,22 @@ round_trip run_once(std::mt19937&          rng,
       .nof_crc_bits    = 16,
       .max_iterations  = max_iter,
   };
+  // Decoupled CPU iterations (the flooding evaluation runs the CPU at its
+  // production 6 iterations while the GPU sweeps higher counts).
+  const ldpc_decoder::configuration cpu_dec_cfg = {
+      .base_graph      = bg,
+      .lifting_size    = ls,
+      .nof_filler_bits = 0,
+      .nof_crc_bits    = 16,
+      .max_iterations  = cpu_max_iter != 0 ? cpu_max_iter : max_iter,
+  };
 
   round_trip res;
   {
     std::vector<uint8_t> out_bytes((k + 7) / 8);
     bit_buffer           out = bit_buffer::from_bytes(out_bytes);
     const auto           t0  = std::chrono::steady_clock::now();
-    res.cpu_ok              = cpu_dec.decode(out, llrs, &crc16, dec_cfg).has_value();
+    res.cpu_ok              = cpu_dec.decode(out, llrs, &crc16, cpu_dec_cfg).has_value();
     const auto t1 = std::chrono::steady_clock::now();
     if (cpu_us != nullptr) {
       *cpu_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
@@ -230,7 +247,13 @@ int main(int argc, char** argv)
   if ((p.gpu_type == "metal") && ((p.norm >= 0.0F) || (p.beta >= 0.0F))) {
     // Norm/offset experiments bypass the factory defaults (layered norm 0.7, beta 0.5).
     gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
-                                                   dec_factory_cfg.early_stop_syndrome, p.norm, p.beta);
+                                                   dec_factory_cfg.early_stop_syndrome,
+                                                   ocudu::metal::decoder_engine::algo::layered, p.norm, p.beta);
+  } else if ((p.gpu_type == "metal_flooding") && ((p.norm >= 0.0F) || (p.beta >= 0.0F))) {
+    // Flooding experiments bypass the factory defaults (flooding norm 0.45, beta 0).
+    gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
+                                                   dec_factory_cfg.early_stop_syndrome,
+                                                   ocudu::metal::decoder_engine::algo::flooding, p.norm, p.beta);
   } else {
     gpu_dec = create_ldpc_decoder_factory_sw(p.gpu_type, dec_factory_cfg)->create();
   }
@@ -251,7 +274,8 @@ int main(int argc, char** argv)
 
     // Warm-up: the first GPU decode builds the engine slot and compiles the shaders.
     for (unsigned w = 0; w != 3; ++w) {
-      run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma, p.max_iter, bg, ls);
+      run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma, p.max_iter,
+               p.cpu_max_iter, bg, ls);
     }
 
     std::vector<double> cpu_us, gpu_us, gpu_wait_us;
@@ -259,8 +283,8 @@ int main(int argc, char** argv)
     gpu_us.reserve(p.latency);
     for (unsigned t = 0; t != p.latency; ++t) {
       double c_us = 0.0, g_us = 0.0;
-      run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma, p.max_iter, bg, ls,
-               &c_us, &g_us);
+      run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma, p.max_iter,
+               p.cpu_max_iter, bg, ls, &c_us, &g_us);
       cpu_us.push_back(c_us);
       gpu_us.push_back(g_us);
       if (p.gpu_type.rfind("metal", 0) == 0) {
@@ -308,7 +332,8 @@ int main(int argc, char** argv)
       const double sigma = std::sqrt(std::pow(10.0, -snr / 10.0) / 2.0);
       unsigned     cpu_pass = 0, gpu_pass = 0;
       for (unsigned t = 0; t != p.trials; ++t) {
-        const round_trip r = run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma, p.max_iter, bg, ls);
+        const round_trip r = run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma,
+                                      p.max_iter, p.cpu_max_iter, bg, ls);
         cpu_pass += r.cpu_ok ? 1 : 0;
         gpu_pass += r.gpu_ok ? 1 : 0;
       }

@@ -120,6 +120,7 @@ int golden_check(const std::string& matrix_dir)
 struct round_trip_result {
   bool cpu_ok              = false;
   bool gpu_ok              = false;
+  bool gpu_flood_ok        = false;
   bool gpu_layered_ok      = false;
   bool gpu_layered_et_off_ok = false;
   bool bits_eq             = false;
@@ -134,6 +135,7 @@ round_trip_result run_round_trip(std::mt19937&                         rng,
                                  crc_calculator&                      crc16,
                                  ldpc_decoder&                        cpu_decoder,
                                  ldpc_decoder&                        gpu_decoder,
+                                 ldpc_decoder*                       gpu_flood_decoder,
                                  ldpc_decoder*                       gpu_layered_decoder,
                                  ldpc_decoder*                       gpu_layered_et_off_decoder,
                                  const test_case&                     tc,
@@ -221,6 +223,22 @@ round_trip_result run_round_trip(std::mt19937&                         rng,
       }
       return true;
     }();
+  }
+
+  if (gpu_flood_decoder != nullptr) {
+    std::vector<uint8_t> flood_out_bytes((K + 7) / 8);
+    bit_buffer           flood_out = bit_buffer::from_bytes(flood_out_bytes);
+    res.gpu_flood_ok = gpu_flood_decoder->decode(flood_out, llrs, &crc16, dec_cfg).has_value();
+    if (res.gpu_flood_ok) {
+      res.bits_eq = res.bits_eq && [&]() {
+        for (unsigned i = 0; i != K; ++i) {
+          if ((flood_out.extract(i, 1) & 1U) != (message.extract(i, 1) & 1U)) {
+            return false;
+          }
+        }
+        return true;
+      }();
+    }
   }
 
   std::vector<uint8_t> gpu_layered_out_bytes((K + 7) / 8);
@@ -326,16 +344,18 @@ int main(int argc, char** argv)
       .early_stop_syndrome = true,
   };
   auto cpu_dec = create_ldpc_decoder_factory_sw("generic", dec_factory_cfg)->create();
-  // The factory type "metal" IS the layered NMS decoder.
+  // The factory type "metal" IS the layered NMS decoder; "metal_flooding" is
+  // the flooding variant (2 dispatches per round).
   auto gpu_dec         = create_ldpc_decoder_factory_sw("metal", dec_factory_cfg)->create();
-  auto gpu_layered_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
-                                                              dec_factory_cfg.early_stop_syndrome,
-                                                              0.7F, 0.5F);
+  auto gpu_flood_dec   = create_ldpc_decoder_factory_sw("metal_flooding", dec_factory_cfg)->create();
+  auto gpu_layered_dec = std::make_unique<ldpc_decoder_metal>(
+      dec_factory_cfg.force_decoding, dec_factory_cfg.early_stop_syndrome,
+      ocudu::metal::decoder_engine::algo::layered, 0.7F, 0.5F);
   // ET off twin for the A/B: same algorithm, no per-round gate dispatch.
   auto gpu_layered_et_off_dec =
       std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding, dec_factory_cfg.early_stop_syndrome,
-                                           0.7F, 0.5F, false);
-  if (!cpu_dec || !gpu_dec || !gpu_layered_dec || !gpu_layered_et_off_dec) {
+                                           ocudu::metal::decoder_engine::algo::layered, 0.7F, 0.5F, false);
+  if (!cpu_dec || !gpu_dec || !gpu_flood_dec || !gpu_layered_dec || !gpu_layered_et_off_dec) {
     std::printf("FAIL: factory did not create the decoders (metal type registered?)\n");
     return 1;
   }
@@ -365,15 +385,18 @@ int main(int argc, char** argv)
     std::mt19937 rng(42 + tc.ls);
 
     const unsigned nof_trials = (tc.ls >= ldpc::LS256) ? 20 : 100;
-    unsigned       cpu_pass = 0, gpu_pass = 0, gpu_layered_pass = 0, both_pass_same = 0,
+    unsigned       cpu_pass = 0, gpu_pass = 0, gpu_flood_pass = 0, gpu_layered_pass = 0, both_pass_same = 0,
                    disagreements = 0, et_ab_mismatches = 0;
     int            iters_min = 999, iters_max = 0;
     int            layered_iters_min = 999, layered_iters_max = 0, et_off_iters_min = 999, et_off_iters_max = 0;
 
     for (unsigned t = 0; t != nof_trials; ++t) {
       const round_trip_result r = run_round_trip(rng, *encoder, *crc16, *cpu_dec, *gpu_dec,
-                                                  gpu_layered_dec.get(), gpu_layered_et_off_dec.get(), tc,
-                                                  sigma);
+                                                  gpu_flood_dec.get(), gpu_layered_dec.get(),
+                                                  gpu_layered_et_off_dec.get(), tc, sigma);
+      if (r.gpu_flood_ok) {
+        gpu_flood_pass++;
+      }
       if (r.gpu_layered_ok) {
         gpu_layered_pass++;
       }
@@ -417,9 +440,9 @@ int main(int argc, char** argv)
                      (layered_iters_min == 1) && (layered_iters_max == 1) &&
                      (et_off_iters_min == 6) && (et_off_iters_max == 6))
                   : ((disagreements == 0) && (et_ab_mismatches == 0) && (gpu_pass <= cpu_pass));
-    std::printf("[parity] %-9s SNR %.1f dB: cpu %u/%u, gpu %u/%u, layered %u/%u, same %u, disagreements %u, gpu iters [%d,%d], layered iters [%d,%d] (et-off [%d,%d]) -> %s\n",
-                tc.name, tc.snr_db, cpu_pass, nof_trials, gpu_pass, nof_trials, gpu_layered_pass, nof_trials,
-                both_pass_same, disagreements,
+    std::printf("[parity] %-9s SNR %.1f dB: cpu %u/%u, gpu %u/%u, flood %u/%u, layered %u/%u, same %u, disagreements %u, gpu iters [%d,%d], layered iters [%d,%d] (et-off [%d,%d]) -> %s\n",
+                tc.name, tc.snr_db, cpu_pass, nof_trials, gpu_pass, nof_trials, gpu_flood_pass, nof_trials,
+                gpu_layered_pass, nof_trials, both_pass_same, disagreements,
                 (gpu_pass != 0) ? iters_min : -1, (gpu_pass != 0) ? iters_max : -1,
                 layered_iters_min, layered_iters_max, et_off_iters_min, et_off_iters_max, ok ? "OK" : "FAIL");
     if (!ok) {

@@ -120,7 +120,15 @@ public:
 #if defined(OCUDU_METAL_LDPC)
     if (dec_type == "metal") {
       // Layered normalized min-sum on the Apple GPU (see ldpc/metal/PLAN.md).
-      return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome, -1.0F,
+      return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome,
+                                                  ocudu::metal::decoder_engine::algo::layered, -1.0F,
+                                                  cfg.ldpc_decoder_offset);
+    }
+    if (dec_type == "metal_flooding") {
+      // Flooding normalized min-sum on the Apple GPU: 2 dispatches per round,
+      // more iterations (tradeoff evaluated in PLAN.md 4.9 P10).
+      return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome,
+                                                  ocudu::metal::decoder_engine::algo::flooding, -1.0F,
                                                   cfg.ldpc_decoder_offset);
     }
 #endif // OCUDU_METAL_LDPC

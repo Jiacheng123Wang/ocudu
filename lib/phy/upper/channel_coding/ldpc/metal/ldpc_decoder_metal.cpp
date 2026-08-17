@@ -54,6 +54,7 @@ struct ldpc_decoder_metal::engine_slot
 
   std::unique_ptr<metal::decoder_engine> engine;
   std::unique_ptr<uint32_t, free_deleter> h;
+  std::unique_ptr<uint32_t, free_deleter> ht; // flooding only (packed H^T)
   std::unique_ptr<int8_t, free_deleter> llr_i8;
   std::vector<uint8_t>                   hard_bits;
   // CSR edge layout (built once per slot). The fused CN+VN kernel needs no
@@ -64,9 +65,11 @@ struct ldpc_decoder_metal::engine_slot
 };
 
 ldpc_decoder_metal::ldpc_decoder_metal(bool force_decoding_, bool early_stop_syndrome_,
-                                       float factor_override_, float beta_override_, bool enable_et_) :
+                                       metal::decoder_engine::algo mode_, float factor_override_,
+                                       float beta_override_, bool enable_et_) :
   force_decoding(force_decoding_),
   early_stop_syndrome(early_stop_syndrome_),
+  mode(mode_),
   factor_override(factor_override_),
   beta_override(beta_override_),
   enable_et(enable_et_)
@@ -104,11 +107,18 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
   slot->hard_bits.resize(n_full * z - m);
   ocudu_assert(slot->h && slot->llr_i8, "Metal LDPC: aligned allocation failed.");
 
-  // Build the packed parity-check matrix from the 3GPP protograph.
+  // Build the packed parity-check matrix (and its transpose in flooding mode)
+  // from the 3GPP protograph.
   const ldpc_graph_impl graph(bg, ls);
   {
     const size_t h_size = static_cast<size_t>(m_aligned) * slot->n_h_chunks;
     std::memset(slot->h.get(), 0, h_size * sizeof(uint32_t));
+    if (mode == metal::decoder_engine::algo::flooding) {
+      const unsigned h_pred_len = m_aligned / 32;
+      slot->ht = aligned_alloc<uint32_t>(static_cast<size_t>(n_aligned) * h_pred_len);
+      ocudu_assert(slot->ht, "Metal LDPC: H^T allocation failed.");
+      std::memset(slot->ht.get(), 0, static_cast<size_t>(n_aligned) * h_pred_len * sizeof(uint32_t));
+    }
 
     for (unsigned row = 0; row != graph.get_nof_BG_check_nodes(); ++row) {
       for (unsigned col = 0; col != graph.get_nof_BG_var_nodes_full(); ++col) {
@@ -120,13 +130,36 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
           const unsigned lifted_row = row * z + k;
           const unsigned lifted_col = col * z + ((k + shift) % z);
           slot->h.get()[lifted_row * slot->n_h_chunks + lifted_col / 32] |= 1u << (lifted_col % 32);
+          if (mode == metal::decoder_engine::algo::flooding) {
+            const unsigned h_pred_len = m_aligned / 32;
+            slot->ht.get()[lifted_col * h_pred_len + lifted_row / 32] |= 1u << (lifted_row % 32);
+          }
         }
       }
     }
   }
 
-  // CSR edge layout (row offsets + edge VN indices).
+  // CSR edge layout (row offsets + edge VN indices), layered mode only.
   const unsigned n_layers = graph.get_nof_BG_check_nodes();
+  if (mode == metal::decoder_engine::algo::flooding) {
+    slot->layered_info.n_layers = n_layers;
+    slot->layered_info.z        = z;
+    slot->layered_info.row_start = nullptr;
+    slot->layered_info.edge_vn   = nullptr;
+    slot->layered_info.no_edges  = 0;
+    slot->engine = std::make_unique<metal::decoder_engine>();
+    // Flooding defaults: norm 0.45 (fp16-era flooding optimum; the layered
+    // damping does not apply to the parallel schedule).
+    const float factor = (factor_override >= 0.0F) ? factor_override : 0.45F;
+    const float beta   = (beta_override >= 0.0F) ? beta_override : 0.0F;
+    if (!slot->engine->init(n, m, factor, beta, slot->h.get(), slot->ht.get(), slot->layered_info,
+                            metal::decoder_engine::algo::flooding, enable_et)) {
+      ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
+    }
+    engine_slot& ref = *slot;
+    slots.emplace(std::move(key), std::move(slot));
+    return ref;
+  }
   uint32_t       no_edges = 0;
   for (unsigned r = 0; r != m_aligned; ++r) {
     for (unsigned c = 0; c != slot->n_h_chunks; ++c) {
@@ -163,7 +196,8 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
   // (0.7, beta 0.5) closes the residual waterfall points to CPU parity.
   const float factor = (factor_override >= 0.0F) ? factor_override : 0.7F;
   const float beta   = (beta_override >= 0.0F) ? beta_override : 0.5F;
-  if (!slot->engine->init(n, m, factor, beta, slot->h.get(), slot->layered_info, enable_et)) {
+  if (!slot->engine->init(n, m, factor, beta, slot->h.get(), nullptr, slot->layered_info,
+                          metal::decoder_engine::algo::layered, enable_et)) {
     ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
   }
 

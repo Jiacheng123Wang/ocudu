@@ -733,6 +733,51 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
 - 保留:分层核 + ET 门 + OMS、CSR/层表生成、擦除偏置、互斥、延迟基准工具、
   golden H 比对(读外部 SynchroPlus 路径)。
 
+## 4.11 P10:洪泛 NMS 回溯与裁决(2026-08-18,对齐点不存在,保留为可选类型)
+
+- 动机:Apple Silicon 逐层 dispatch 驱动开销无法压缩,恢复纯并行洪泛(2 dispatch/轮),
+  用"迭代数换调度时间"验证能否用 GPU 并发替代 CPU 调度。实现:从 4.10 清理前的历史
+  洪泛形态重建为 `metal_flooding` 工厂类型 + `ocudu_nms_flooding_decoder.metal`
+  (CN 整行 butterfly 归约 min1/min2/idx/parity + 原子 error_count,VN 单线程串行重建
+  c2v 并融合 ET 收敛检查与轮计数);移植全部后期优化:零转换 int8 进 + 一次性
+  i8→fp16 双写(工作 LLR + 信道副本)、静态绑定提升(热循环 = 仅 setPipelineState
+  + dispatch)、H^T 生成恢复、`--cpu-max-iter` 迭代解耦(CPU 固定 mi=6,GPU 扫高迭代)。
+
+### BLER 对齐点扫描:不存在(mi∈{10,16,20,24,30} × 2000 块/点,CPU 固定 mi=6)
+
+| 工作点 | CPU mi=6 | 洪泛 mi10 | mi16 | mi20 | mi24 | mi30 |
+|---|---|---|---|---|---|---|
+| BG2 Z64 R1/2 @0dB | 1986/2000 | 0 | 0 | 0 | 0 | 0 |
+| BG1 Z64 R1/2 @0dB | 1950/2000 | 0 | 0 | 0 | 0 | 0 |
+| BG1 Z16 R2/3 @2dB | 1914/2000 | 6 | 7 | 6 | 5 | 5 |
+
+- 补测 BG2 Z64 R1/2 @0dB **mi=50:0/1000** ——迭代数从 10 到 50 零改善,0dB 处是
+  错误地板而非迭代受限;对齐点在任何合理 mi 范围内不存在。
+- 健康性交叉验证(排除移植回归):历史归档 `archive/metal-lls-flooding` 中
+  `bler_metal_nms_bg1_z16_r0.6667.csv`(mi=10,200 块/点):0dB 0/200、2dB 0/200、
+  4dB 112/200、6dB 198/200、8dB 200/200;当前实现同点 2dB 6/2000,且 BG2 Z64
+  4dB/6dB 全过(200/200)——瀑布落在 2-4dB 之间,与历史完全一致,解码器健康,
+  差距是洪泛调度固有的瀑布右移(~2dB+),不是 bug。
+
+### Dispatch 与时间裁决
+
+- dispatch/解码:洪泛 = 2 + 2×mi(62 @ mi=30);分层 = 2 + mi×(L+2)
+  (BG2 L=42 → 266 @ mi=6,BG1 → 290)。调度优势真实存在,但无对齐点可兑现。
+- 延迟(BG2 Z64 R1/2 @0dB,n=200,同进程背靠背):
+  CPU mi=6 mean 222-403µs;**分层 GPU mi=6 mean 870µs**(gpu_wait 663µs);
+  **洪泛 GPU mi=30 mean 1538µs**(gpu_wait 1335µs)——洪泛 30 轮全矩阵扫描的 GPU
+  工作量远超分层 6 轮增量,Gauss-Seidel 信息复用优势无法用迭代数赎回。
+- **裁决:三个维度全负。**(1) BLER 对齐点不存在(mi≤50 扫不到,瀑布差 ~2dB+);
+  (2) dispatch 数优势(62 vs 266)无从兑现;(3) 时间 1538µs > 870µs(分层)> 222-403µs
+  (CPU)。洪泛出局,生产路径维持 CPU/分层;代码作为 `metal_flooding` 可选类型保留
+  (工厂默认不变,零生产风险),供高 SNR 定长延迟场景或未来"星形修复"分组方案参考。
+
+### 工具链教训:`--snrs 0:0:0` 步长 0 = 无限循环
+
+- 裁决测试期间 3 个基准进程被 memorystatus 击杀(压缩内存 ~381GB,峰值 RSS 31GiB),
+  追查为 `parse_seq` 的 `for (v=a; v<=c; v+=b)` 在步长 b=0 时无限 push_back
+  (采样栈定位 ldpc_metal_bler_test.cpp:76)。已加 b<=0 校验,单值 SNR 请用 `--snrs 0`。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`
