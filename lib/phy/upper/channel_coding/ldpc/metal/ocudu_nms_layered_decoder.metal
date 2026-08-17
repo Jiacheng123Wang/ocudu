@@ -203,15 +203,13 @@ kernel void nmsl_et_gate(
 }
 
 // VN update for one layer: nof_cols threadgroups x Z threads, one per touched
-// VN. Adds the layer's message delta to the soft bits, with the optional
-// saturation mirroring the CPU's promotion_sum (|soft| > 63 -> fixed bit).
+// VN. Adds the layer's message delta to the soft bits.
 kernel void nmsl_vn_update(
     device half* llr [[buffer(0)]],
     device const half* vn_delta [[buffer(1)]],
     constant LayerDesc& desc [[buffer(2)]],
     constant uint32_t& z [[buffer(3)]],
-    constant float& sat [[buffer(4)]],
-    device DecodeCtrl* ctrl [[buffer(5)]],
+    device DecodeCtrl* ctrl [[buffer(4)]],
     uint k [[thread_position_in_threadgroup]],
     uint col_slot [[threadgroup_position_in_grid]])
 {
@@ -223,9 +221,5 @@ kernel void nmsl_vn_update(
         return;
     }
     const uint vn = desc.cols[col_slot] * z + k;
-    float soft = (float)llr[vn] + (float)vn_delta[vn];
-    if (sat > 0.0f) {
-        soft = clamp(soft, -sat, sat);
-    }
-    llr[vn] = (half)soft;
+    llr[vn] = (half)((float)llr[vn] + (float)vn_delta[vn]);
 }

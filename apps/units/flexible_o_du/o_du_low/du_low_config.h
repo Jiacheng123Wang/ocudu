@@ -45,10 +45,8 @@ struct du_low_unit_expert_upper_phy_config {
   /// - \c auto: selects the fastest available CPU implementation (default), or
   /// - \c generic: for using the unoptimized generic implementation, or
   /// - \c neon: for using the NEON implementation, or
-  /// - \c metal: for using the Apple GPU implementation with the LLS heuristic (only available on
-  ///   builds with ENABLE_METAL_LDPC), or
-  /// - \c metal_nms: for using the Apple GPU implementation with normalized min-sum decoding.
-  /// - \c metal_nms_layered: as \c metal_nms, with the layered schedule mirroring the CPU decoder.
+  /// - \c metal: for using the Apple GPU implementation with the layered normalized min-sum
+  ///   algorithm (only available on builds with ENABLE_METAL_LDPC).
   std::string ldpc_decoder_type = "auto";
   /// \brief Offset min-sum parameter (beta) for the Metal NMS decoders (0 = plain NMS).
   float ldpc_decoder_offset = 0.0F;

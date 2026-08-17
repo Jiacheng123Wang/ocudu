@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 /// \file
-/// \brief Metal GPU LDPC decoder: ocudu ldpc_decoder interface over the SynchroPlus
-/// LLS kernels. The packed H / H^T matrices are generated in-memory from the ocudu
-/// ldpc_graph (the same 3GPP protograph the CPU decoder runs), covering BG1, BG2 and
-/// every lifting size without relying on the SynchroPlus .bin matrix files.
+/// \brief Metal GPU LDPC decoder: ocudu ldpc_decoder interface over the layered
+/// normalized min-sum kernel. The packed H matrix and the CSR edge layout are
+/// generated in-memory from the ocudu ldpc_graph (the same 3GPP protograph the
+/// CPU decoder runs), covering BG1, BG2 and every lifting size.
 
 #include "ldpc_decoder_metal.h"
 #include "ldpc_graph_impl.h"
@@ -104,15 +104,12 @@ struct ldpc_decoder_metal::engine_slot
   unsigned n_aligned     = 0;
   unsigned m_aligned     = 0;
   unsigned n_h_chunks    = 0;
-  unsigned h_pred_len    = 0;
 
   std::unique_ptr<metal::decoder_engine> engine;
   std::unique_ptr<uint32_t, free_deleter> h;
-  std::unique_ptr<uint32_t, free_deleter> ht;
-  std::unique_ptr<uint32_t, free_deleter> col_weights;
   std::unique_ptr<uint16_t, free_deleter> llr_fp16;
   std::vector<uint8_t>                   hard_bits;
-  // Layered-NMS CSR edge layout and per-layer column tables (built once per slot).
+  // CSR edge layout and per-layer column tables (built once per slot).
   std::unique_ptr<uint32_t, free_deleter> row_start;
   std::unique_ptr<uint32_t, free_deleter> edge_vn;
   std::unique_ptr<uint32_t, free_deleter> layer_descs; // n_layers x 22 uint32
@@ -120,13 +117,10 @@ struct ldpc_decoder_metal::engine_slot
 };
 
 ldpc_decoder_metal::ldpc_decoder_metal(bool force_decoding_, bool early_stop_syndrome_,
-                                       metal::decoder_engine::algo mode_, float factor_override_,
-                                       float sat_override_, float beta_override_, bool enable_et_) :
+                                       float factor_override_, float beta_override_, bool enable_et_) :
   force_decoding(force_decoding_),
   early_stop_syndrome(early_stop_syndrome_),
-  mode(mode_),
   factor_override(factor_override_),
-  sat_override(sat_override_),
   beta_override(beta_override_),
   enable_et(enable_et_)
 {
@@ -144,35 +138,30 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
     return *it->second;
   }
 
-  const bool     is_bg1  = bg == ldpc_base_graph_type::BG1;
-  const unsigned n_full  = is_bg1 ? 68 : 52;
-  const unsigned bg_m    = is_bg1 ? 46 : 42;
-  const unsigned n       = n_full * z;
-  const unsigned m       = bg_m * z;
+  const bool     is_bg1    = bg == ldpc_base_graph_type::BG1;
+  const unsigned n_full    = is_bg1 ? 68 : 52;
+  const unsigned bg_m      = is_bg1 ? 46 : 42;
+  const unsigned n         = n_full * z;
+  const unsigned m         = bg_m * z;
   const unsigned n_aligned = ((n + 31) / 32) * 32;
   const unsigned m_aligned = ((m + 31) / 32) * 32;
 
-  auto slot       = std::make_unique<engine_slot>();
-  slot->z         = z;
-  slot->n_aligned = n_aligned;
-  slot->m_aligned = m_aligned;
+  auto slot        = std::make_unique<engine_slot>();
+  slot->z          = z;
+  slot->n_aligned  = n_aligned;
+  slot->m_aligned  = m_aligned;
   slot->n_h_chunks = n_aligned / 32;
-  slot->h_pred_len = m_aligned / 32;
 
-  slot->h          = aligned_alloc<uint32_t>(static_cast<size_t>(m_aligned) * slot->n_h_chunks);
-  slot->ht         = aligned_alloc<uint32_t>(static_cast<size_t>(n_aligned) * slot->h_pred_len);
-  slot->col_weights = aligned_alloc<uint32_t>(n_aligned);
-  slot->llr_fp16   = aligned_alloc<uint16_t>(n_aligned);
+  slot->h        = aligned_alloc<uint32_t>(static_cast<size_t>(m_aligned) * slot->n_h_chunks);
+  slot->llr_fp16 = aligned_alloc<uint16_t>(n_aligned);
   slot->hard_bits.resize(n_full * z - m);
-  ocudu_assert(slot->h && slot->ht && slot->col_weights && slot->llr_fp16, "Metal LDPC: aligned allocation failed.");
+  ocudu_assert(slot->h && slot->llr_fp16, "Metal LDPC: aligned allocation failed.");
 
-  // Build the packed parity-check matrix and its transpose from the 3GPP protograph.
+  // Build the packed parity-check matrix from the 3GPP protograph.
   const ldpc_graph_impl graph(bg, ls);
   {
-    const size_t          h_size  = static_cast<size_t>(m_aligned) * slot->n_h_chunks;
-    const size_t          ht_size = static_cast<size_t>(n_aligned) * slot->h_pred_len;
+    const size_t h_size = static_cast<size_t>(m_aligned) * slot->n_h_chunks;
     std::memset(slot->h.get(), 0, h_size * sizeof(uint32_t));
-    std::memset(slot->ht.get(), 0, ht_size * sizeof(uint32_t));
 
     for (unsigned row = 0; row != graph.get_nof_BG_check_nodes(); ++row) {
       for (unsigned col = 0; col != graph.get_nof_BG_var_nodes_full(); ++col) {
@@ -184,81 +173,65 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
           const unsigned lifted_row = row * z + k;
           const unsigned lifted_col = col * z + ((k + shift) % z);
           slot->h.get()[lifted_row * slot->n_h_chunks + lifted_col / 32] |= 1u << (lifted_col % 32);
-          slot->ht.get()[lifted_col * slot->h_pred_len + lifted_row / 32] |= 1u << (lifted_row % 32);
         }
       }
     }
   }
 
-  // Layered-NMS CSR edge layout and per-layer tables.
-  if (mode == metal::decoder_engine::algo::nms_layered) {
-    const unsigned n_layers = graph.get_nof_BG_check_nodes();
-    uint32_t       no_edges = 0;
-    for (unsigned r = 0; r != m_aligned; ++r) {
-      for (unsigned c = 0; c != slot->n_h_chunks; ++c) {
-        no_edges += static_cast<uint32_t>(__builtin_popcount(slot->h.get()[r * slot->n_h_chunks + c]));
-      }
+  // CSR edge layout (row offsets + edge VN indices) and per-layer column tables.
+  const unsigned n_layers = graph.get_nof_BG_check_nodes();
+  uint32_t       no_edges = 0;
+  for (unsigned r = 0; r != m_aligned; ++r) {
+    for (unsigned c = 0; c != slot->n_h_chunks; ++c) {
+      no_edges += static_cast<uint32_t>(__builtin_popcount(slot->h.get()[r * slot->n_h_chunks + c]));
     }
-    slot->row_start = aligned_alloc<uint32_t>(static_cast<size_t>(m_aligned) + 1);
-    slot->edge_vn   = aligned_alloc<uint32_t>(no_edges);
-    slot->layer_descs = aligned_alloc<uint32_t>(static_cast<size_t>(n_layers) * 22);
-    ocudu_assert(slot->row_start && slot->edge_vn && slot->layer_descs, "Metal LDPC: CSR allocation failed.");
-
-    uint32_t cursor = 0;
-    slot->row_start.get()[0] = 0;
-    for (unsigned r = 0; r != m_aligned; ++r) {
-      for (unsigned c = 0; c != slot->n_h_chunks; ++c) {
-        uint32_t mask = slot->h.get()[r * slot->n_h_chunks + c];
-        while (mask != 0) {
-          const uint32_t bit = static_cast<uint32_t>(__builtin_ctz(mask));
-          slot->edge_vn.get()[cursor++] = c * 32 + bit;
-          mask &= (mask - 1);
-        }
-      }
-      slot->row_start.get()[r + 1] = cursor;
-    }
-
-    for (unsigned l = 0; l != n_layers; ++l) {
-      uint32_t* desc = slot->layer_descs.get() + static_cast<size_t>(l) * 22;
-      desc[0] = l;
-      unsigned nof_cols = 0;
-      for (uint16_t k : graph.get_adjacency_row(l)) {
-        if (k == ldpc::NO_EDGE) {
-          break;
-        }
-        desc[2 + nof_cols++] = k;
-      }
-      desc[1] = nof_cols;
-    }
-
-    slot->layered_info.row_start   = slot->row_start.get();
-    slot->layered_info.edge_vn     = slot->edge_vn.get();
-    slot->layered_info.no_edges    = no_edges;
-    slot->layered_info.n_layers    = n_layers;
-    slot->layered_info.z           = z;
-    slot->layered_info.layer_descs = slot->layer_descs.get();
   }
+  slot->row_start   = aligned_alloc<uint32_t>(static_cast<size_t>(m_aligned) + 1);
+  slot->edge_vn     = aligned_alloc<uint32_t>(no_edges);
+  slot->layer_descs = aligned_alloc<uint32_t>(static_cast<size_t>(n_layers) * 22);
+  ocudu_assert(slot->row_start && slot->edge_vn && slot->layer_descs, "Metal LDPC: CSR allocation failed.");
+
+  uint32_t cursor = 0;
+  slot->row_start.get()[0] = 0;
+  for (unsigned r = 0; r != m_aligned; ++r) {
+    for (unsigned c = 0; c != slot->n_h_chunks; ++c) {
+      uint32_t mask = slot->h.get()[r * slot->n_h_chunks + c];
+      while (mask != 0) {
+        const uint32_t bit = static_cast<uint32_t>(__builtin_ctz(mask));
+        slot->edge_vn.get()[cursor++] = c * 32 + bit;
+        mask &= (mask - 1);
+      }
+    }
+    slot->row_start.get()[r + 1] = cursor;
+  }
+
+  for (unsigned l = 0; l != n_layers; ++l) {
+    uint32_t* desc = slot->layer_descs.get() + static_cast<size_t>(l) * 22;
+    desc[0]        = l;
+    unsigned nof_cols = 0;
+    for (uint16_t k : graph.get_adjacency_row(l)) {
+      if (k == ldpc::NO_EDGE) {
+        break;
+      }
+      desc[2 + nof_cols++] = k;
+    }
+    desc[1] = nof_cols;
+  }
+
+  slot->layered_info.row_start   = slot->row_start.get();
+  slot->layered_info.edge_vn     = slot->edge_vn.get();
+  slot->layered_info.no_edges    = no_edges;
+  slot->layered_info.n_layers    = n_layers;
+  slot->layered_info.z           = z;
+  slot->layered_info.layer_descs = slot->layer_descs.get();
 
   slot->engine = std::make_unique<metal::decoder_engine>();
-  // LLS step size (0.45 is the SynchroPlus reference; 0.8 measured slightly better on
-  // ocudu-quantized int8 LLRs). NMS normalization (BLER benchmark, see PLAN.md 4.8/4.9):
-  // flooding optimum 0.45; the layered schedule's inherent damping allows a higher norm
-  // (0.6 pure NMS), and the offset min-sum pair (0.7, beta 0.5) closes the last residual
-  // waterfall points to CPU parity (grid sweep on the 10k harness).
-  const float factor = (factor_override >= 0.0F)
-                           ? factor_override
-                           : ((mode == metal::decoder_engine::algo::lls)          ? 0.8F
-                              : (mode == metal::decoder_engine::algo::nms_layered) ? 0.7F
-                                                                                   : 0.45F);
-  uint32_t*   col_weights = (mode == metal::decoder_engine::algo::lls) ? slot->col_weights.get() : nullptr;
-  const float sat         = (sat_override >= 0.0F) ? sat_override : 0.0F;
-  const float beta        = (beta_override >= 0.0F)
-                                ? beta_override
-                                : (mode == metal::decoder_engine::algo::nms_layered) ? 0.5F : 0.0F;
-  const metal::decoder_engine::layered_info* layered =
-      (mode == metal::decoder_engine::algo::nms_layered) ? &slot->layered_info : nullptr;
-  if (!slot->engine->init(n, m, factor, beta, slot->h.get(), slot->ht.get(), col_weights, mode, sat,
-                          layered, enable_et)) {
+  // Defaults from the BLER benchmark sweeps (see PLAN.md 4.8/4.9): the layered
+  // schedule's inherent damping allows a high norm, and the offset min-sum pair
+  // (0.7, beta 0.5) closes the residual waterfall points to CPU parity.
+  const float factor = (factor_override >= 0.0F) ? factor_override : 0.7F;
+  const float beta   = (beta_override >= 0.0F) ? beta_override : 0.5F;
+  if (!slot->engine->init(n, m, factor, beta, slot->h.get(), slot->layered_info, enable_et)) {
     ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
   }
 
@@ -316,8 +289,8 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
   // Lay out the full codeblock in fp16: [2Z punctured][input][tail].
   // The GPU kernels update the LLRs in place, so the whole buffer is refilled every call.
   // The structural erasures (punctured 2Z columns and the un-transmitted tail) get a weak
-  // positive bias (+1): the LLS update treats an exact 0 as "bit 0 with sign +", which
-  // corrupts the erasure handling (the SynchroPlus sims never exercised puncturing).
+  // positive bias (+1): an exact 0 would read as a confident hard bit, corrupting the
+  // erasure handling (the same convention the decoder's update math expects).
   std::memset(slot.llr_fp16.get(), 0, static_cast<size_t>(slot.n_aligned) * sizeof(uint16_t));
   const uint16_t erasure_bias = llr_to_fp16(1);
   std::fill(slot.llr_fp16.get(), slot.llr_fp16.get() + 2 * z, erasure_bias);

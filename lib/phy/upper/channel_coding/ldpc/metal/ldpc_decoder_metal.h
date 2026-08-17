@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 /// \file
-/// \brief Metal GPU LDPC decoder (ocudu ldpc_decoder interface).
+/// \brief Metal GPU LDPC decoder (ocudu ldpc_decoder interface) running the
+/// layered normalized min-sum algorithm with GPU-internal early termination.
 
 #pragma once
 
@@ -15,24 +16,20 @@
 
 namespace ocudu {
 
-/// \brief LDPC decoder running on the Apple GPU (SynchroPlus LLS kernels).
+/// \brief Layered-NMS LDPC decoder running on the Apple GPU.
 ///
 /// One instance serves any (base graph, lifting size) combination; a GPU engine with the
-/// packed H and H^T matrices is created lazily per combination and cached for the lifetime
-/// of the decoder.
+/// packed H matrix and the CSR edge layout is created lazily per combination and cached
+/// for the lifetime of the decoder.
 class ldpc_decoder_metal : public ldpc_decoder
 {
 public:
   /// \param[in] force_decoding      Force decoding even if the codeblock appears too short.
   /// \param[in] early_stop_syndrome Early stop on syndrome convergence (no-CRC path only).
-  /// \param[in] mode                GPU algorithm (LLS heuristic or normalized min-sum).
-  /// \param[in] factor_override     NMS normalization factor override (-1 = per-mode default).
-  /// \param[in] sat_override        Soft-bit saturation magnitude override (-1 = 0, disabled).
-  /// \param[in] beta_override       Offset min-sum parameter override (-1 = 0, plain NMS).
-  /// \param[in] enable_et           nms_layered only: GPU-internal early termination (false for A/B).
-  ldpc_decoder_metal(bool force_decoding, bool early_stop_syndrome,
-                     metal::decoder_engine::algo mode = metal::decoder_engine::algo::lls,
-                     float factor_override = -1.0F, float sat_override = -1.0F,
+  /// \param[in] factor_override     Normalization factor override (-1 = default 0.7).
+  /// \param[in] beta_override       Offset min-sum parameter override (-1 = default 0.5).
+  /// \param[in] enable_et           GPU-internal early termination (false for A/B).
+  ldpc_decoder_metal(bool force_decoding, bool early_stop_syndrome, float factor_override = -1.0F,
                      float beta_override = -1.0F, bool enable_et = true);
 
   // Out-of-line: the engine slots are defined in the implementation file only.
@@ -55,9 +52,7 @@ private:
 
   bool force_decoding;
   bool early_stop_syndrome;
-  metal::decoder_engine::algo mode;
   float factor_override;
-  float sat_override;
   float beta_override;
   bool enable_et;
 

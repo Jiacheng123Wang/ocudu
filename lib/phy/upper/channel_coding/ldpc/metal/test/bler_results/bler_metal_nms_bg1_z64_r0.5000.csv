@@ -1,3 +1,0 @@
-# gpu=metal_nms bg=1 z=64 k=1408 rate=0.5 e=2816 max_iter=20 trials=200
-snr_db,cpu_pass,gpu_pass,total
-0,200,0,200

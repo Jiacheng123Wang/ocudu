@@ -560,6 +560,20 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
   多线程压力测试(4 线程 × 100 次共享实例)**通过**——过程还抓到通用编码器非线程
   安全(内部缓冲引用),测试改用每线程独立 encoder,解码器本身无竞态。
 
+## 4.10 目录清理:只保留分层 NMS(2026-08-17)
+
+- 决策:分层 NMS(α=0.7 β=0.5 + ET)已双维收敛,删除 LLS 与洪泛 NMS 两条历史路径;
+  **"metal" 工厂类型重指向分层 NMS**;bler_results 删 LLS/洪泛 CSV、分层 CSV 改名
+  `bler_metal_*`、图重绘为 CPU vs GPU 双曲线。
+- 删除:SynchroPlus 逐字拷贝 `decode/`(LLS shader/引擎/测试)、`encode/`(编码器)、
+  `g_f_matrix/`(328MB .bin + 生成器)、`ocudu_nms_decoder.metal`(洪泛)、LLS/洪泛
+  基准 CSV 与旧图。**完整可找回**:`archive/metal-lls-flooding` tag + git 历史。
+- 简化:引擎收敛为分层单模式(删 algo 枚举、metallib 离线编译链、LLS 4 核与洪泛
+  3 核、sat clamp、HT 生成——HT 仅洪泛用,省 ~6MB/槽);适配器 ctor 简化;
+  工厂与 gnb CLI 白名单只留 `metal`(分层);CMake 只嵌分层 shader。
+- 保留:分层核 + ET 门 + OMS、CSR/层表生成、擦除偏置、互斥、延迟基准工具、
+  golden H 比对(读外部 SynchroPlus 路径)。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`

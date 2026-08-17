@@ -12,8 +12,9 @@
 //   - decode the same LLRs with the CPU (generic) and the GPU (metal) decoder,
 //   - record the per-point pass counts into a CSV for the plotting script.
 //
-// Usage: ldpc_metal_bler_test [--outdir DIR] [--gpu-type metal|metal_nms] [--bg 1|2] [--z Z]
+// Usage: ldpc_metal_bler_test [--outdir DIR] [--gpu-type metal] [--bg 1|2] [--z Z]
 //        [--rates 0.333,0.5,...] [--snrs 0:2:10] [--trials N] [--max-iter N]
+//        [--norm A] [--beta B] [--latency N]
 
 #include "ocudu/phy/upper/channel_coding/channel_coding_factories.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc_encoder_buffer.h"
@@ -37,9 +38,8 @@ namespace {
 
 struct params {
   std::string outdir    = ".";
-  std::string gpu_type  = "metal";
+  std::string gpu_type  = "metal"; // the layered NMS decoder
   float       norm      = -1.0F;
-  float       sat       = -1.0F;
   float       beta      = -1.0F;
   unsigned    bg        = 1;
   unsigned    z         = 64;
@@ -96,8 +96,6 @@ params parse_args(int argc, char** argv)
       p.gpu_type = next(a.c_str());
     } else if (a == "--norm") {
       p.norm = std::stof(next(a.c_str()));
-    } else if (a == "--sat") {
-      p.sat = std::stof(next(a.c_str()));
     } else if (a == "--beta") {
       p.beta = std::stof(next(a.c_str()));
     } else if (a == "--bg") {
@@ -229,18 +227,10 @@ int main(int argc, char** argv)
   };
   auto cpu_dec = create_ldpc_decoder_factory_sw("generic", dec_factory_cfg)->create();
   std::unique_ptr<ldpc_decoder> gpu_dec;
-  if (p.gpu_type == "metal_nms_layered") {
-    // A bare run uses the factory defaults (layered norm 0.6); --norm/--sat/--beta override.
+  if ((p.gpu_type == "metal") && ((p.norm >= 0.0F) || (p.beta >= 0.0F))) {
+    // Norm/offset experiments bypass the factory defaults (layered norm 0.7, beta 0.5).
     gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
-                                                   dec_factory_cfg.early_stop_syndrome,
-                                                   ocudu::metal::decoder_engine::algo::nms_layered,
-                                                   p.norm, p.sat, p.beta);
-  } else if ((p.gpu_type == "metal_nms") && ((p.norm >= 0.0F) || (p.sat >= 0.0F) || (p.beta >= 0.0F))) {
-    // Norm/offset experiments bypass the factory defaults.
-    gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
-                                                   dec_factory_cfg.early_stop_syndrome,
-                                                   ocudu::metal::decoder_engine::algo::nms, p.norm, p.sat,
-                                                   p.beta);
+                                                   dec_factory_cfg.early_stop_syndrome, p.norm, p.beta);
   } else {
     gpu_dec = create_ldpc_decoder_factory_sw(p.gpu_type, dec_factory_cfg)->create();
   }
