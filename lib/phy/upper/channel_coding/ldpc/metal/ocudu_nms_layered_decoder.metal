@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 //
-// Layered normalized min-sum LDPC decoder (fused CN+VN kernel). Layer =
-// base-graph check row (BG1: 46, BG2: 42); each layer = Z lifted check rows,
-// which are independent and fully parallel.
+// Layered normalized min-sum LDPC decoder (fused CN+VN kernel), pure INT8
+// data path. Layer = base-graph check row (BG1: 46, BG2: 42); each layer =
+// Z lifted check rows, which are independent and fully parallel.
 //
 // The CN and VN updates are fused into one kernel: within one layer no two
 // lifted rows connect to the same variable node (3GPP base-graph property),
@@ -11,16 +11,28 @@
 // write. One dispatch per layer (instead of two) halves the serialized
 // dispatch chain, and the per-VN delta buffer is gone entirely.
 //
+// INT8 semantics (must match the CPU decoder's int8 soft bits):
+//   - LLRs and c2v messages are int8_t, strictly clamped to [-127, 127]
+//     (-128 never appears, avoiding the abs(-128) trap; the host input is
+//     already in [-64, 64]).
+//   - All intermediate sums use int16_t (or int32_t for the fixed-point
+//     products) and saturate on write-back - no 8-bit wrap-around can flip
+//     a soft-bit sign.
+//   - The normalization alpha and the offset beta are fixed-point integers:
+//     c2v = max(|v| * 64 - beta_q, 0) * norm_mul >> norm_shift >> 6, with
+//     alpha = norm_mul / 2^norm_shift (e.g. 0.7 = 45/64) and beta_q =
+//     round(beta * 64) (0.5 -> 32). No float ALU anywhere.
+//
 // GPU-internal early termination: each round ends with a full syndrome refresh
 // (nmsl_final_syndrome) whose unsatisfied-row count feeds the ET gate
 // (nmsl_et_gate); once a round's syndrome is clean, every kernel of the
 // following rounds returns immediately (single command buffer, no CPU polling).
 //
-// Buffer indices are disjoint per kernel (CN 0-8, syndrome 10-14, gate 15) so
+// Buffer indices are disjoint per kernel (CN 0-9, syndrome 10-14, gate 15) so
 // the host encoder binds every static argument once for the whole decode and
 // only setBytes(layer_start) + dispatch remain inside the per-layer loop.
 //
-// Convention: negative LLR -> bit 1 (fp16 sign bit is the hard decision).
+// Convention: negative LLR -> bit 1 (the int8 sign bit is the hard decision).
 
 #include <metal_stdlib>
 using namespace metal;
@@ -35,7 +47,7 @@ struct DecodeCtrl {
 // Phase A: reset the control block and zero the c2v messages (dispatch
 // no_edges threads over the flat c2v array).
 kernel void nmsl_init(
-    device half* c2v [[buffer(0)]],
+    device int8_t* c2v [[buffer(0)]],
     device DecodeCtrl* ctrl [[buffer(1)]],
     uint e [[thread_position_in_grid]])
 {
@@ -44,24 +56,26 @@ kernel void nmsl_init(
         atomic_store_explicit(&ctrl->early_terminate, 0, memory_order_relaxed);
         atomic_store_explicit(&ctrl->actual_iters, 0, memory_order_relaxed);
     }
-    c2v[e] = (half)0.0f;
+    c2v[e] = 0;
 }
 
 // Fused CN+VN update for one layer: Z threadgroups, one per lifted check row
 // (row = layer_start + wid). Pass 1 reduces min1/min2/idx/sign over the row's
-// edges (v2c = soft - c2v_old); pass 2 writes c2v_new and applies the VN
-// update to the soft bits in place (race-free, see the header comment), and
-// records the row parity for the final syndrome readback.
+// edges (v2c = soft - c2v_old, int16); pass 2 writes c2v_new (int8 fixed-point)
+// and applies the VN update to the soft bits in place (int16 sum, saturating
+// write-back; race-free, see the header comment), and records the row parity
+// for the final syndrome readback.
 kernel void nmsl_cn_update(
     device const uint32_t* row_start [[buffer(0)]],
     device const uint32_t* edge_vn [[buffer(1)]],
-    device half* c2v [[buffer(2)]],
-    device half* llr [[buffer(3)]],
+    device int8_t* c2v [[buffer(2)]],
+    device int8_t* llr [[buffer(3)]],
     device uint32_t* h_pred_bits [[buffer(4)]],
     constant uint32_t& layer_start [[buffer(5)]],
-    constant float& norm [[buffer(6)]],
-    constant float& beta [[buffer(7)]],
-    device DecodeCtrl* ctrl [[buffer(8)]],
+    constant uint32_t& norm_mul [[buffer(6)]],
+    constant uint32_t& norm_shift [[buffer(7)]],
+    constant uint32_t& beta_q [[buffer(8)]],
+    device DecodeCtrl* ctrl [[buffer(9)]],
     uint tid [[thread_index_in_threadgroup]],
     uint wid [[threadgroup_position_in_grid]])
 {
@@ -74,19 +88,19 @@ kernel void nmsl_cn_update(
     const uint e0 = row_start[row];
     const uint e1 = row_start[row + 1];
 
-    float m1 = 65504.0f;
-    float m2 = 65504.0f;
+    int32_t m1 = 32767;
+    int32_t m2 = 32767;
     uint i1 = 0;
     uint sign = 0;
     uint parity = 0;
 
     for (uint e = e0 + tid; e < e1; e += 32) {
         const uint vn = edge_vn[e];
-        const float v = (float)llr[vn];
-        const float v2c = v - (float)c2v[e];
-        const float val = abs(v2c);
-        sign ^= (v2c < 0.0f) ? 1u : 0u;
-        parity ^= (v < 0.0f) ? 1u : 0u;
+        const int16_t v = (int16_t)llr[vn];
+        const int16_t v2c = v - (int16_t)c2v[e];
+        const int16_t val = abs(v2c); // int16: never overflows (-254..254)
+        sign ^= (v2c < 0) ? 1u : 0u;
+        parity ^= (v < 0) ? 1u : 0u;
         if (val < m1) {
             m2 = m1;
             m1 = val;
@@ -96,11 +110,12 @@ kernel void nmsl_cn_update(
         }
     }
 
-    // Butterfly reduction across the 32 lanes. Ties keep the current winner.
+    // Butterfly reduction across the 32 lanes (int32: native lane width).
+    // Ties keep the current winner.
     for (uint offset = 16; offset > 0; offset >>= 1) {
-        const float om1 = simd_shuffle_xor(m1, offset);
+        const int32_t om1 = simd_shuffle_xor(m1, offset);
         const uint oi1 = simd_shuffle_xor(i1, offset);
-        const float om2 = simd_shuffle_xor(m2, offset);
+        const int32_t om2 = simd_shuffle_xor(m2, offset);
         const uint osign = simd_shuffle_xor(sign, offset);
         const uint oparity = simd_shuffle_xor(parity, offset);
         sign ^= osign;
@@ -118,21 +133,26 @@ kernel void nmsl_cn_update(
         h_pred_bits[row] = parity & 1u;
     }
 
-    // Second pass: write c2v_new and apply the VN update in place. Offset
-    // min-sum: mag = max(|v| - beta, 0) * norm (beta = 0 is plain NMS).
+    // Second pass: write c2v_new (int8 fixed-point) and apply the VN update
+    // in place. c2v = max(|v| * 64 - beta_q, 0) * norm_mul >> norm_shift >> 6.
     for (uint e = e0 + tid; e < e1; e += 32) {
         const uint vn = edge_vn[e];
-        const float old_c2v = (float)c2v[e];
-        const float v2c = (float)llr[vn] - old_c2v;
-        float mag = (vn == i1) ? m2 : m1;
-        mag = max(mag - beta, 0.0f);
-        mag *= norm;
-        const bool neg = ((sign ^ ((v2c < 0.0f) ? 1u : 0u)) != 0u);
-        const float c2v_new = neg ? -mag : mag;
-        c2v[e] = (half)c2v_new;
+        const int8_t old_c2v = c2v[e];
+        const int16_t v2c = (int16_t)llr[vn] - (int16_t)old_c2v;
+        int32_t mag = (vn == i1) ? m2 : m1;
+        int32_t mag_q = max(mag * 64 - (int32_t)beta_q, 0);
+        int32_t c2v_new_i = clamp((mag_q * (int32_t)norm_mul) >> ((int32_t)norm_shift + 6), -127, 127);
+        int8_t c2v_new = (int8_t)c2v_new_i;
+        const bool neg = ((sign ^ ((v2c < 0) ? 1u : 0u)) != 0u);
+        if (neg) {
+            c2v_new = (int8_t)(-(int16_t)c2v_new);
+        }
+        c2v[e] = c2v_new;
         // Fused VN update: no two lifted rows of a layer share a VN, so this
-        // bare read-modify-write is race-free within the dispatch.
-        llr[vn] = (half)((float)llr[vn] + c2v_new - old_c2v);
+        // bare read-modify-write is race-free within the dispatch. The sum is
+        // int16 and the write-back saturates - no sign-flipping wrap-around.
+        const int16_t llr_tmp = (int16_t)llr[vn] + (int16_t)c2v_new - (int16_t)old_c2v;
+        llr[vn] = (int8_t)clamp((int)llr_tmp, -127, 127);
     }
 }
 
@@ -141,7 +161,7 @@ kernel void nmsl_cn_update(
 // accumulates the unsatisfied-row count for the ET gate.
 kernel void nmsl_final_syndrome(
     device const uint32_t* h_matrix [[buffer(10)]],
-    device const half* llr [[buffer(11)]],
+    device const int8_t* llr [[buffer(11)]],
     device uint32_t* h_pred_bits [[buffer(12)]],
     constant uint32_t& n_h_chunks [[buffer(13)]],
     device DecodeCtrl* ctrl [[buffer(14)]],
@@ -159,7 +179,7 @@ kernel void nmsl_final_syndrome(
         uint32_t mask = h_matrix[row_base + i];
         while (mask != 0) {
             const uint bit = ctz(mask);
-            parity ^= ((float)llr[i * 32 + bit] < 0.0f) ? 1u : 0u;
+            parity ^= (llr[i * 32 + bit] < 0) ? 1u : 0u;
             mask &= (mask - 1);
         }
     }

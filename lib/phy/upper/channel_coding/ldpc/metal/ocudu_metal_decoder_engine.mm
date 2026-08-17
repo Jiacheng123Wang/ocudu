@@ -50,8 +50,11 @@ struct engine_impl_t {
   uint32_t n_h_chunks = 0;
   uint32_t n_info     = 0;
   uint32_t z          = 0;
-  float    factor     = 0.0f;
-  float    beta       = 0.0f;
+  // Fixed-point alpha/beta (pure integer ALU in the shaders):
+  // alpha = norm_mul / 2^norm_shift, beta_q = round(beta * 64).
+  uint32_t norm_mul   = 0;
+  uint32_t norm_shift = 0;
+  uint32_t beta_q     = 0;
   bool     et_enabled = true;
   // GPU-side duration of the last decode (0 when unavailable), for the
   // latency-benchmark breakdown: wall - gpu = CPU-side fixed overhead.
@@ -98,11 +101,13 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
   impl                  = engine;
 
   engine->n_info     = n_logical - m_logical;
-  engine->factor     = factor;
-  engine->beta       = beta;
   engine->et_enabled = et_enabled;
   engine->layered_info = layered;
   engine->z          = layered.z;
+  // Fixed-point alpha/beta (6 fractional bits): alpha 0.7 -> 45/64, beta 0.5 -> 32.
+  engine->norm_mul   = static_cast<uint32_t>(llroundf(factor * 64.0F));
+  engine->norm_shift = 6;
+  engine->beta_q     = static_cast<uint32_t>(llroundf(beta * 64.0F));
 
   engine->n_aligned  = ((n_logical + 31) / 32) * 32;
   engine->m_aligned  = ((m_logical + 31) / 32) * 32;
@@ -158,7 +163,7 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
   engine->buf_edge_vn = zero_copy_buffer(
       engine, engine->layered_info.edge_vn,
       static_cast<size_t>(engine->layered_info.no_edges) * sizeof(uint32_t));
-  engine->buf_c2v = [engine->device newBufferWithLength:engine->layered_info.no_edges * sizeof(uint16_t)
+  engine->buf_c2v = [engine->device newBufferWithLength:engine->layered_info.no_edges * sizeof(int8_t)
                                                 options:MTLResourceStorageModePrivate];
 
   // Zero-copy wrap the host-side packed H matrix (4KB-aligned, owned by the caller).
@@ -175,7 +180,7 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
     return -1;
   }
   id<MTLBuffer> mtl_llr =
-      zero_copy_buffer(engine, in_fp16, static_cast<size_t>(engine->n_aligned) * sizeof(uint16_t));
+      zero_copy_buffer(engine, in_fp16, static_cast<size_t>(engine->n_aligned) * sizeof(int8_t));
   id<MTLCommandBuffer>        cmd_buf = [engine->queue commandBuffer];
   id<MTLComputeCommandEncoder> enc    = [cmd_buf computeCommandEncoder];
 
@@ -190,15 +195,16 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
   // argument index ranges (CN 0-8, final syndrome 10-14, ET gate 15) and the
   // encoder's binding table is stateful across setComputePipelineState calls,
   // so only the per-layer setBytes + dispatch remain inside the loops.
-  // CN (fused CN+VN): 0-8.
+  // CN (fused CN+VN): 0-9.
   [enc setBuffer:engine->buf_row_start offset:0 atIndex:0];
   [enc setBuffer:engine->buf_edge_vn offset:0 atIndex:1];
   [enc setBuffer:engine->buf_c2v offset:0 atIndex:2];
   [enc setBuffer:mtl_llr offset:0 atIndex:3];
   [enc setBuffer:engine->buf_h_pred_bits offset:0 atIndex:4];
-  [enc setBytes:&engine->factor length:sizeof(float) atIndex:6];
-  [enc setBytes:&engine->beta length:sizeof(float) atIndex:7];
-  [enc setBuffer:engine->buf_ctrl offset:0 atIndex:8];
+  [enc setBytes:&engine->norm_mul length:sizeof(uint32_t) atIndex:6];
+  [enc setBytes:&engine->norm_shift length:sizeof(uint32_t) atIndex:7];
+  [enc setBytes:&engine->beta_q length:sizeof(uint32_t) atIndex:8];
+  [enc setBuffer:engine->buf_ctrl offset:0 atIndex:9];
   // Final syndrome: 10-14.
   [enc setBuffer:engine->buf_h offset:0 atIndex:10];
   [enc setBuffer:mtl_llr offset:0 atIndex:11];
@@ -246,12 +252,12 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
     engine->last_gpu_us = 0.0;
   }
 
-  // Extract the results: hard decisions from the final fp16 LLR sign bits.
+  // Extract the results: hard decisions from the final int8 LLR sign bits.
   const decode_ctrl_t* ctrl      = static_cast<const decode_ctrl_t*>(engine->buf_ctrl.contents);
-  const uint16_t*      final_llr = static_cast<const uint16_t*>(mtl_llr.contents);
+  const int8_t*        final_llr = static_cast<const int8_t*>(mtl_llr.contents);
   if (out_bits != nullptr) {
     for (uint32_t i = 0; i != engine->n_info; ++i) {
-      out_bits[i] = static_cast<uint8_t>((final_llr[i] >> 15) & 1U);
+      out_bits[i] = static_cast<uint8_t>((static_cast<uint8_t>(final_llr[i]) >> 7) & 1U);
     }
   }
   if (error_count_out != nullptr) {
