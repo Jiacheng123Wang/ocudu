@@ -20,9 +20,8 @@ using namespace ocudu;
 
 namespace {
 
-// The decoder consumes the native int8 log_likelihood_ratio storage directly
-// (pure INT8 pipeline, see ocudu_nms_layered_decoder.metal); no host-side
-// format conversion exists.
+// The adapter fills a native int8 buffer with a plain memcpy; the int8->fp16
+// conversion happens inside the GPU (one preprocessing dispatch per decode).
 
 /// Free deleter (a functor, so that unique_ptr stays default-constructible).
 struct free_deleter {
@@ -159,13 +158,11 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
   slot->layered_info.z         = z;
 
   slot->engine = std::make_unique<metal::decoder_engine>();
-  // Defaults from the BLER benchmark sweeps (see PLAN.md 4.8/4.9): the INT8
-  // fixed-point pipeline's optimum is (0.8, beta 0.0) - the quantization itself
-  // provides the offset effect, so a nonzero beta only hurts (integer-space
-  // grid sweep on the residual points). The fp16-era pair (0.7, 0.5) does not
-  // carry over.
-  const float factor = (factor_override >= 0.0F) ? factor_override : 0.8F;
-  const float beta   = (beta_override >= 0.0F) ? beta_override : 0.0F;
+  // Defaults from the BLER benchmark sweeps (see PLAN.md 4.8/4.9): the layered
+  // schedule's inherent damping allows a high norm, and the offset min-sum pair
+  // (0.7, beta 0.5) closes the residual waterfall points to CPU parity.
+  const float factor = (factor_override >= 0.0F) ? factor_override : 0.7F;
+  const float beta   = (beta_override >= 0.0F) ? beta_override : 0.5F;
   if (!slot->engine->init(n, m, factor, beta, slot->h.get(), slot->layered_info, enable_et)) {
     ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
   }
@@ -221,13 +218,9 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
 
   engine_slot& slot = get_slot(cfg.base_graph, cfg.lifting_size);
 
-  // Lay out the full codeblock in native int8: [2Z punctured][input][tail].
-  // The GPU kernels update the LLRs in place, so the whole buffer is refilled every call.
-  // The structural erasures (punctured 2Z columns and the un-transmitted tail) get a weak
-  // positive bias (+1): an exact 0 would read as a confident hard bit, corrupting the
-  // erasure handling (the same convention the decoder's update math expects).
-  // log_likelihood_ratio wraps a single int8, so the input span is contiguous int8
-  // storage and can be copied with a single memcpy - no per-element conversion.
+  // Lay out the full codeblock in native int8: [2Z punctured][input][tail] with
+  // a single memcpy (the int8->fp16 conversion runs inside the GPU). The
+  // structural erasures get a weak +1 bias as before.
   static_assert(sizeof(log_likelihood_ratio) == 1, "LLR storage must be a single byte");
   std::memset(slot.llr_i8.get(), 0, static_cast<size_t>(slot.n_aligned) * sizeof(int8_t));
   std::fill(slot.llr_i8.get(), slot.llr_i8.get() + 2 * z, int8_t{1});

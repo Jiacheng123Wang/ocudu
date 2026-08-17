@@ -58,11 +58,11 @@ public:
   bool init(uint32_t n_logical, uint32_t m_logical, float factor, float beta, const uint32_t* h,
             const layered_info& layered, bool et_enabled = true);
 
-  /// \brief Synchronous decode of one codeblock (pure INT8 data path).
+  /// \brief Synchronous decode of one codeblock.
   ///
-  /// \param[in]  in_fp16  N_aligned int8 LLRs (native log_likelihood_ratio storage), 4KB-aligned.
-  ///                      Mutated in place: the kernels update the LLRs in int8 (saturating
-  ///                      [-127, 127]); the final values hold the hard decisions in their sign bits.
+  /// \param[in]  in_fp16  N_aligned fp16 LLRs, 4KB-aligned. Mutated in place (the kernels update
+  ///                      the LLRs; the final values hold the hard decisions in their sign bits).
+  /// \param[out] out_bits n_info bytes (0/1 hard decisions of the information bits).
   /// \param[in]  max_iter Maximum number of iterations (the GPU-internal ET gate applies).
   /// \param[out] error_count_out Final number of unsatisfied check equations (0 = clean syndrome).
   /// \return The number of iterations actually executed (ET enabled), max_iter when ET is
