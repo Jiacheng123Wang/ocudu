@@ -109,10 +109,10 @@ struct ldpc_decoder_metal::engine_slot
   std::unique_ptr<uint32_t, free_deleter> h;
   std::unique_ptr<uint16_t, free_deleter> llr_fp16;
   std::vector<uint8_t>                   hard_bits;
-  // CSR edge layout and per-layer column tables (built once per slot).
+  // CSR edge layout (built once per slot). The fused CN+VN kernel needs no
+  // per-layer column tables (see ocudu_nms_layered_decoder.metal).
   std::unique_ptr<uint32_t, free_deleter> row_start;
   std::unique_ptr<uint32_t, free_deleter> edge_vn;
-  std::unique_ptr<uint32_t, free_deleter> layer_descs; // n_layers x 22 uint32
   metal::decoder_engine::layered_info   layered_info;
 };
 
@@ -178,7 +178,7 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
     }
   }
 
-  // CSR edge layout (row offsets + edge VN indices) and per-layer column tables.
+  // CSR edge layout (row offsets + edge VN indices).
   const unsigned n_layers = graph.get_nof_BG_check_nodes();
   uint32_t       no_edges = 0;
   for (unsigned r = 0; r != m_aligned; ++r) {
@@ -186,10 +186,9 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
       no_edges += static_cast<uint32_t>(__builtin_popcount(slot->h.get()[r * slot->n_h_chunks + c]));
     }
   }
-  slot->row_start   = aligned_alloc<uint32_t>(static_cast<size_t>(m_aligned) + 1);
-  slot->edge_vn     = aligned_alloc<uint32_t>(no_edges);
-  slot->layer_descs = aligned_alloc<uint32_t>(static_cast<size_t>(n_layers) * 22);
-  ocudu_assert(slot->row_start && slot->edge_vn && slot->layer_descs, "Metal LDPC: CSR allocation failed.");
+  slot->row_start = aligned_alloc<uint32_t>(static_cast<size_t>(m_aligned) + 1);
+  slot->edge_vn   = aligned_alloc<uint32_t>(no_edges);
+  ocudu_assert(slot->row_start && slot->edge_vn, "Metal LDPC: CSR allocation failed.");
 
   uint32_t cursor = 0;
   slot->row_start.get()[0] = 0;
@@ -205,25 +204,11 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
     slot->row_start.get()[r + 1] = cursor;
   }
 
-  for (unsigned l = 0; l != n_layers; ++l) {
-    uint32_t* desc = slot->layer_descs.get() + static_cast<size_t>(l) * 22;
-    desc[0]        = l;
-    unsigned nof_cols = 0;
-    for (uint16_t k : graph.get_adjacency_row(l)) {
-      if (k == ldpc::NO_EDGE) {
-        break;
-      }
-      desc[2 + nof_cols++] = k;
-    }
-    desc[1] = nof_cols;
-  }
-
-  slot->layered_info.row_start   = slot->row_start.get();
-  slot->layered_info.edge_vn     = slot->edge_vn.get();
-  slot->layered_info.no_edges    = no_edges;
-  slot->layered_info.n_layers    = n_layers;
-  slot->layered_info.z           = z;
-  slot->layered_info.layer_descs = slot->layer_descs.get();
+  slot->layered_info.row_start = slot->row_start.get();
+  slot->layered_info.edge_vn   = slot->edge_vn.get();
+  slot->layered_info.no_edges  = no_edges;
+  slot->layered_info.n_layers  = n_layers;
+  slot->layered_info.z         = z;
 
   slot->engine = std::make_unique<metal::decoder_engine>();
   // Defaults from the BLER benchmark sweeps (see PLAN.md 4.8/4.9): the layered

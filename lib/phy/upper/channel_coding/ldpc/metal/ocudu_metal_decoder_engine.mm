@@ -25,19 +25,11 @@ struct decode_ctrl_t {
   uint32_t actual_iters;    // rounds actually executed
 };
 
-// Must match the LayerDesc struct in ocudu_nms_layered_decoder.metal (shader ABI).
-struct layer_desc_t {
-  uint32_t layer;
-  uint32_t nof_cols;
-  uint32_t cols[20];
-};
-
 struct engine_impl_t {
   id<MTLDevice>              device = nil;
   id<MTLCommandQueue>        queue  = nil;
   id<MTLComputePipelineState> p_nmsl_init = nil;
   id<MTLComputePipelineState> p_nmsl_cn = nil;
-  id<MTLComputePipelineState> p_nmsl_vn = nil;
   id<MTLComputePipelineState> p_nmsl_final_syndrome = nil;
   id<MTLComputePipelineState> p_nmsl_et_gate = nil;
 
@@ -50,7 +42,6 @@ struct engine_impl_t {
   id<MTLBuffer> buf_row_start  = nil; // zero-copy CSR offsets (M_aligned + 1)
   id<MTLBuffer> buf_edge_vn    = nil; // zero-copy CSR edge VN indices
   id<MTLBuffer> buf_c2v        = nil; // private (per-edge messages, no_edges fp16)
-  id<MTLBuffer> buf_vn_delta   = nil; // private (per-VN layer deltas, N_aligned fp16)
 
   decoder_engine::layered_info layered_info{};
 
@@ -147,7 +138,6 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
   };
   if (!make_pipeline(&engine->p_nmsl_init, "nmsl_init") ||
       !make_pipeline(&engine->p_nmsl_cn, "nmsl_cn_update") ||
-      !make_pipeline(&engine->p_nmsl_vn, "nmsl_vn_update") ||
       !make_pipeline(&engine->p_nmsl_final_syndrome, "nmsl_final_syndrome") ||
       !make_pipeline(&engine->p_nmsl_et_gate, "nmsl_et_gate")) {
     return false;
@@ -170,8 +160,6 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
       static_cast<size_t>(engine->layered_info.no_edges) * sizeof(uint32_t));
   engine->buf_c2v = [engine->device newBufferWithLength:engine->layered_info.no_edges * sizeof(uint16_t)
                                                 options:MTLResourceStorageModePrivate];
-  engine->buf_vn_delta = [engine->device newBufferWithLength:engine->n_aligned * sizeof(uint16_t)
-                                                     options:MTLResourceStorageModePrivate];
 
   // Zero-copy wrap the host-side packed H matrix (4KB-aligned, owned by the caller).
   engine->buf_h = zero_copy_buffer(engine, h, static_cast<size_t>(engine->m_aligned) *
@@ -198,53 +186,47 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
   [enc dispatchThreadgroups:MTLSizeMake((engine->layered_info.no_edges + 31) / 32, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
-  // Unrolled round loop, fully consumed by the GPU: per-layer CN/VN pairs
-  // (Gauss-Seidel chaining via the sequential command stream), a per-round
-  // final syndrome refresh (also accumulates the unsatisfied-row count), and
-  // the ET gate that stops the remaining rounds on a clean syndrome.
+  // Static bindings, bound ONCE for the whole decode: the kernels use disjoint
+  // argument index ranges (CN 0-8, final syndrome 10-14, ET gate 15) and the
+  // encoder's binding table is stateful across setComputePipelineState calls,
+  // so only the per-layer setBytes + dispatch remain inside the loops.
+  // CN (fused CN+VN): 0-8.
+  [enc setBuffer:engine->buf_row_start offset:0 atIndex:0];
+  [enc setBuffer:engine->buf_edge_vn offset:0 atIndex:1];
+  [enc setBuffer:engine->buf_c2v offset:0 atIndex:2];
+  [enc setBuffer:mtl_llr offset:0 atIndex:3];
+  [enc setBuffer:engine->buf_h_pred_bits offset:0 atIndex:4];
+  [enc setBytes:&engine->factor length:sizeof(float) atIndex:6];
+  [enc setBytes:&engine->beta length:sizeof(float) atIndex:7];
+  [enc setBuffer:engine->buf_ctrl offset:0 atIndex:8];
+  // Final syndrome: 10-14.
+  [enc setBuffer:engine->buf_h offset:0 atIndex:10];
+  [enc setBuffer:mtl_llr offset:0 atIndex:11];
+  [enc setBuffer:engine->buf_h_pred_bits offset:0 atIndex:12];
+  [enc setBytes:&engine->n_h_chunks length:sizeof(uint32_t) atIndex:13];
+  [enc setBuffer:engine->buf_ctrl offset:0 atIndex:14];
+  // ET gate: 15.
+  [enc setBuffer:engine->buf_ctrl offset:0 atIndex:15];
+
+  // Unrolled round loop, fully consumed by the GPU: per-layer fused CN+VN
+  // dispatches (Gauss-Seidel chaining via the sequential command stream), a
+  // per-round final syndrome refresh (also accumulates the unsatisfied-row
+  // count), and the ET gate that stops the remaining rounds on a clean
+  // syndrome. The pipeline is set once per round; per layer only the
+  // layer_start setBytes and the dispatch remain.
   for (int it = 0; it < max_iter; ++it) {
+    [enc setComputePipelineState:engine->p_nmsl_cn];
     for (uint32_t l = 0; l != engine->layered_info.n_layers; ++l) {
       const uint32_t layer_start = l * engine->z;
-      [enc setComputePipelineState:engine->p_nmsl_cn];
-      [enc setBuffer:engine->buf_row_start offset:0 atIndex:0];
-      [enc setBuffer:engine->buf_edge_vn offset:0 atIndex:1];
-      [enc setBuffer:engine->buf_c2v offset:0 atIndex:2];
-      [enc setBuffer:engine->buf_vn_delta offset:0 atIndex:3];
-      [enc setBuffer:mtl_llr offset:0 atIndex:4];
-      [enc setBuffer:engine->buf_h_pred_bits offset:0 atIndex:5];
-      [enc setBytes:&layer_start length:sizeof(uint32_t) atIndex:6];
-      [enc setBytes:&engine->factor length:sizeof(float) atIndex:7];
-      [enc setBytes:&engine->beta length:sizeof(float) atIndex:8];
-      [enc setBuffer:engine->buf_ctrl offset:0 atIndex:9];
+      [enc setBytes:&layer_start length:sizeof(uint32_t) atIndex:5];
       [enc dispatchThreadgroups:MTLSizeMake(engine->z, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-
-      const layer_desc_t* desc =
-          reinterpret_cast<const layer_desc_t*>(engine->layered_info.layer_descs + l * 22);
-      [enc setComputePipelineState:engine->p_nmsl_vn];
-      [enc setBuffer:mtl_llr offset:0 atIndex:0];
-      [enc setBuffer:engine->buf_vn_delta offset:0 atIndex:1];
-      [enc setBytes:desc length:sizeof(layer_desc_t) atIndex:2];
-      [enc setBytes:&engine->z length:sizeof(uint32_t) atIndex:3];
-      [enc setBuffer:engine->buf_ctrl offset:0 atIndex:4];
-      [enc dispatchThreadgroups:MTLSizeMake(desc->nof_cols, 1, 1)
-          threadsPerThreadgroup:MTLSizeMake(engine->z, 1, 1)];
     }
-    // Final syndrome refresh from the final soft bits (per-round, cheap); it
-    // also accumulates the unsatisfied-row count for the ET gate.
     [enc setComputePipelineState:engine->p_nmsl_final_syndrome];
-    [enc setBuffer:engine->buf_h offset:0 atIndex:0];
-    [enc setBuffer:mtl_llr offset:0 atIndex:1];
-    [enc setBuffer:engine->buf_h_pred_bits offset:0 atIndex:2];
-    [enc setBytes:&engine->n_h_chunks length:sizeof(uint32_t) atIndex:3];
-    [enc setBuffer:engine->buf_ctrl offset:0 atIndex:4];
     [enc dispatchThreadgroups:MTLSizeMake(engine->m_aligned, 1, 1)
         threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-    // ET gate: raise early_terminate on a clean syndrome so the remaining
-    // rounds' kernels return immediately (GPU-internal, no CPU polling).
     if (engine->et_enabled) {
       [enc setComputePipelineState:engine->p_nmsl_et_gate];
-      [enc setBuffer:engine->buf_ctrl offset:0 atIndex:0];
       [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
     }
   }

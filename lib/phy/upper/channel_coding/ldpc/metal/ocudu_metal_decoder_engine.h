@@ -21,7 +21,9 @@ namespace metal {
 class decoder_engine
 {
 public:
-  /// CSR edge layout + layer tables for the layered schedule (built by the adapter).
+  /// CSR edge layout for the layered schedule (built by the adapter). The fused
+  /// CN+VN kernel needs no per-layer column tables: within one layer no two
+  /// lifted rows share a variable node (3GPP base-graph property).
   struct layered_info {
     /// Offsets into edge_vn / c2v, M_aligned + 1 entries (4KB-aligned, engine lifetime).
     const uint32_t* row_start = nullptr;
@@ -33,8 +35,6 @@ public:
     uint32_t n_layers = 0;
     /// Lifting size (rows per layer).
     uint32_t z = 0;
-    /// Flat array of n_layers fixed-size layer descriptors (4+4+20 uint32s each).
-    const uint32_t* layer_descs = nullptr;
   };
 
   decoder_engine()  = default;

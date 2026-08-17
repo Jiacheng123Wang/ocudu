@@ -1,26 +1,24 @@
 // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 //
-// Layered normalized min-sum LDPC decoder (ocudu-side), mirroring the ocudu CPU
-// decoder's layer order: layer = base-graph check row (BG1: 46, BG2: 42); each
-// layer = Z lifted check rows, which are independent and fully parallel.
-// Within one layer the CN update runs first, then the soft-bit update of the
-// touched VNs; the sequential kernels in one command buffer give the
-// Gauss-Seidel layer chaining (the CPU's convergence advantage over flooding).
+// Layered normalized min-sum LDPC decoder (fused CN+VN kernel). Layer =
+// base-graph check row (BG1: 46, BG2: 42); each layer = Z lifted check rows,
+// which are independent and fully parallel.
 //
-// Per-edge check messages use a CSR layout built on the CPU next to the H
-// matrix: row_start[M+1] offsets and edge_vn[no_edges] VN indices; c2v[no_edges]
-// holds the current message per edge. The CN kernel computes c2v_new from
-// v2c = soft - c2v_old and writes vn_delta[vn] = c2v_new - c2v_old (each VN is
-// touched by exactly one row of a layer, so the per-VN slot is collision-free);
-// the VN kernel adds the delta to the soft bits.
+// The CN and VN updates are fused into one kernel: within one layer no two
+// lifted rows connect to the same variable node (3GPP base-graph property),
+// so the VN soft-bit update llr[vn] += c2v_new - c2v_old is a race-free bare
+// write. One dispatch per layer (instead of two) halves the serialized
+// dispatch chain, and the per-VN delta buffer is gone entirely.
 //
 // GPU-internal early termination: each round ends with a full syndrome refresh
 // (nmsl_final_syndrome) whose unsatisfied-row count feeds the ET gate
 // (nmsl_et_gate); once a round's syndrome is clean, every kernel of the
 // following rounds returns immediately (single command buffer, no CPU polling).
-// The engine dispatches the final syndrome refresh so the CPU can recompute
-// the final syndrome from the soft-bit hard decisions.
+//
+// Buffer indices are disjoint per kernel (CN 0-8, syndrome 10-14, gate 15) so
+// the host encoder binds every static argument once for the whole decode and
+// only setBytes(layer_start) + dispatch remain inside the per-layer loop.
 //
 // Convention: negative LLR -> bit 1 (fp16 sign bit is the hard decision).
 
@@ -32,13 +30,6 @@ struct DecodeCtrl {
     atomic_uint error_count;
     atomic_uint early_terminate;
     atomic_uint actual_iters;
-};
-
-// Layer descriptor for the VN kernel (the base-graph row's column list).
-struct LayerDesc {
-    uint layer;      // base-graph row index
-    uint nof_cols;   // number of connected columns
-    uint cols[20];   // column indices (NO_EDGE padding sentinel not needed)
 };
 
 // Phase A: reset the control block and zero the c2v messages (dispatch
@@ -56,21 +47,21 @@ kernel void nmsl_init(
     c2v[e] = (half)0.0f;
 }
 
-// CN update for one layer: Z threadgroups, one per lifted check row
-// (row = layer_start + wid). Reduces min1/min2/idx/sign over the row's edges
-// (v2c = soft - c2v_old), writes c2v_new and the per-VN delta, and records the
-// row parity for the final syndrome readback.
+// Fused CN+VN update for one layer: Z threadgroups, one per lifted check row
+// (row = layer_start + wid). Pass 1 reduces min1/min2/idx/sign over the row's
+// edges (v2c = soft - c2v_old); pass 2 writes c2v_new and applies the VN
+// update to the soft bits in place (race-free, see the header comment), and
+// records the row parity for the final syndrome readback.
 kernel void nmsl_cn_update(
     device const uint32_t* row_start [[buffer(0)]],
     device const uint32_t* edge_vn [[buffer(1)]],
     device half* c2v [[buffer(2)]],
-    device half* vn_delta [[buffer(3)]],
-    device const half* llr [[buffer(4)]],
-    device uint32_t* h_pred_bits [[buffer(5)]],
-    constant uint32_t& layer_start [[buffer(6)]],
-    constant float& norm [[buffer(7)]],
-    constant float& beta [[buffer(8)]],
-    device DecodeCtrl* ctrl [[buffer(9)]],
+    device half* llr [[buffer(3)]],
+    device uint32_t* h_pred_bits [[buffer(4)]],
+    constant uint32_t& layer_start [[buffer(5)]],
+    constant float& norm [[buffer(6)]],
+    constant float& beta [[buffer(7)]],
+    device DecodeCtrl* ctrl [[buffer(8)]],
     uint tid [[thread_index_in_threadgroup]],
     uint wid [[threadgroup_position_in_grid]])
 {
@@ -127,8 +118,8 @@ kernel void nmsl_cn_update(
         h_pred_bits[row] = parity & 1u;
     }
 
-    // Second pass: write c2v_new and the per-VN deltas. Offset min-sum:
-    // mag = max(|v| - beta, 0) * norm (beta = 0 is plain normalized min-sum).
+    // Second pass: write c2v_new and apply the VN update in place. Offset
+    // min-sum: mag = max(|v| - beta, 0) * norm (beta = 0 is plain NMS).
     for (uint e = e0 + tid; e < e1; e += 32) {
         const uint vn = edge_vn[e];
         const float old_c2v = (float)c2v[e];
@@ -139,7 +130,9 @@ kernel void nmsl_cn_update(
         const bool neg = ((sign ^ ((v2c < 0.0f) ? 1u : 0u)) != 0u);
         const float c2v_new = neg ? -mag : mag;
         c2v[e] = (half)c2v_new;
-        vn_delta[vn] = (half)(c2v_new - old_c2v);
+        // Fused VN update: no two lifted rows of a layer share a VN, so this
+        // bare read-modify-write is race-free within the dispatch.
+        llr[vn] = (half)((float)llr[vn] + c2v_new - old_c2v);
     }
 }
 
@@ -147,11 +140,11 @@ kernel void nmsl_cn_update(
 // bits (one threadgroup per check row) so the CPU-side readback is exact, and
 // accumulates the unsatisfied-row count for the ET gate.
 kernel void nmsl_final_syndrome(
-    device const uint32_t* h_matrix [[buffer(0)]],
-    device const half* llr [[buffer(1)]],
-    device uint32_t* h_pred_bits [[buffer(2)]],
-    constant uint32_t& n_h_chunks [[buffer(3)]],
-    device DecodeCtrl* ctrl [[buffer(4)]],
+    device const uint32_t* h_matrix [[buffer(10)]],
+    device const half* llr [[buffer(11)]],
+    device uint32_t* h_pred_bits [[buffer(12)]],
+    constant uint32_t& n_h_chunks [[buffer(13)]],
+    device DecodeCtrl* ctrl [[buffer(14)]],
     uint tid [[thread_index_in_threadgroup]],
     uint wid [[threadgroup_position_in_grid]])
 {
@@ -185,7 +178,7 @@ kernel void nmsl_final_syndrome(
 // syndrome was clean, raise early_terminate (all kernels of the following
 // rounds then return immediately). actual_iters counts executed rounds only.
 kernel void nmsl_et_gate(
-    device DecodeCtrl* ctrl [[buffer(0)]],
+    device DecodeCtrl* ctrl [[buffer(15)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid != 0) {
@@ -200,26 +193,4 @@ kernel void nmsl_et_gate(
     // Reset for the next round (when ET did not fire).
     atomic_store_explicit(&ctrl->error_count, 0, memory_order_relaxed);
     atomic_fetch_add_explicit(&ctrl->actual_iters, 1, memory_order_relaxed);
-}
-
-// VN update for one layer: nof_cols threadgroups x Z threads, one per touched
-// VN. Adds the layer's message delta to the soft bits.
-kernel void nmsl_vn_update(
-    device half* llr [[buffer(0)]],
-    device const half* vn_delta [[buffer(1)]],
-    constant LayerDesc& desc [[buffer(2)]],
-    constant uint32_t& z [[buffer(3)]],
-    device DecodeCtrl* ctrl [[buffer(4)]],
-    uint k [[thread_position_in_threadgroup]],
-    uint col_slot [[threadgroup_position_in_grid]])
-{
-    // Rounds after the ET gate fired are skipped entirely.
-    if (atomic_load_explicit(&ctrl->early_terminate, memory_order_relaxed)) {
-        return;
-    }
-    if (col_slot >= desc.nof_cols || k >= z) {
-        return;
-    }
-    const uint vn = desc.cols[col_slot] * z + k;
-    llr[vn] = (half)((float)llr[vn] + (float)vn_delta[vn]);
 }
