@@ -48,8 +48,9 @@ struct du_low_unit_expert_upper_phy_config {
   /// - \c metal: for using the Apple GPU implementation with the layered normalized min-sum
   ///   algorithm (only available on builds with ENABLE_METAL_LDPC).
   std::string ldpc_decoder_type = "auto";
-  /// \brief Offset min-sum parameter (beta) for the Metal NMS decoders (0 = plain NMS).
-  float ldpc_decoder_offset = 0.0F;
+  /// \brief Offset min-sum parameter (beta) override for the Metal NMS decoders
+  /// (-1 = unset: the decoder's tuned default applies, currently 0.5).
+  float ldpc_decoder_offset = -1.0F;
   /// \brief PUSCH channel estimator frequency-domain smoothing strategy.
   ///
   /// Use one of these options:

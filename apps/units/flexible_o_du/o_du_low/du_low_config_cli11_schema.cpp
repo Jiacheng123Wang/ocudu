@@ -234,9 +234,10 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
   add_option(app,
              "--pusch_ldpc_decoder_offset",
              expert_phy_params.ldpc_decoder_offset,
-             "Offset min-sum parameter (beta) for the Metal NMS decoders (0 = plain NMS)")
+             "Offset min-sum parameter (beta) override for the Metal NMS decoders "
+             "(-1 = unset: the tuned default applies)")
       ->capture_default_str()
-      ->check(CLI::NonNegativeNumber);
+      ->check(CLI::Range(-1.0, 64.0));
   add_option(app,
              "--pusch_channel_estimator_fd_strategy",
              expert_phy_params.pusch_channel_estimator_fd_strategy,

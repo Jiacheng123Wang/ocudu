@@ -571,8 +571,46 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
   1.9× 是 Z384 的极限——**GPU 解码延迟在全尺寸落后 CPU,交叉点不存在**。
 - **决策(用户确认)**:废弃大小阈值 split 计划,#30 关闭;`metal` 保持为显式卸载
   选项(默认 auto→NEON 不变)。GPU 定位 = BLER 平齐 + CPU 卸载。
-- 后续可选方向(未排期):每层 CN+VN 融合单核(46 次/轮)、预编码命令缓冲模板
-  (砍 CPU 侧 240µs)——两者叠加才有望在 Z≥256 翻盘。
+- 后续可选方向(未排期):预编码命令缓冲模板(砍 CPU 侧 ~220µs)。
+
+### P6:核融合 + 静态绑定提升(2026-08-17,bb30c13d69)
+
+- 融合 CN+VN 单核(3GPP 分层无共享 VN 性质保证裸写无竞争)、删 vn_delta/LayerDesc/
+  layer_descs、静态绑定一次提起(3 核错开索引 0-8/10-14/15)。
+- **延迟结果**(空闲机器,300 样本/点,mi=6,4dB;对比融合前基线):
+
+  | 配置 | GPU mean | GPU p99 | 改善 | 配置 | GPU mean | GPU p99 | 改善 |
+  |---|---|---|---|---|---|---|---|
+  | BG1 Z8 | 1082→933 | 3140→1817 | -14%/-42% | BG2 Z16 | 975→628 | 1078→1323 | -36%/- |
+  | BG1 Z16 | 1056→712 | 1203→831 | -33%/-31% | BG2 Z64 | 1101→772 | 1190→862 | -30%/-28% |
+  | BG1 Z64 | 1211→794 | 1352→1162 | -34%/-14% | BG2 Z256 | 1595→1161 | 2479→2179 | -27%/-12% |
+  | BG1 Z256 | 1835→1321 | 2514→2245 | -28%/-11% | BG2 Z384 | 2064→1528 | 2414→1683 | -26%/-30% |
+  | BG1 Z384 | 2948→2381 | 4058→3694 | -19%/-9% | | | | |
+
+  mean 全线 -19%~-36%,gpu_wait 同步下降(Z64:955→589µs);CPU 侧 256→205µs(适配器
+  打包/读回主导)。交叉点仍不存在:Z384 GPU 仍 1.7× CPU——差距收窄但 GPU 尚未翻盘。
+
+### P7:ICB 间接命令缓冲(2026-08-17,平台阻断,已回滚)
+
+- 目标:init 录制全部管线+绑定+46 层派发,decode 只 executeCommandsInBuffer。
+- **实测结论(最小可复现实验逐项验证)**:本机(darwin 25/AGX G16X)上 CPU 编码的 ICB
+  只有**裸 dispatch 命令可靠**;ICB 内 `setComputePipelineState` 导致 GPU Address
+  Fault(即使 pipeline 已按文档设 `supportIndirectCommandBuffers = YES`),
+  `setKernelBuffer` 被静默忽略。与 rlx-metal 项目报告的 Apple Silicon 同类故障一致
+  (必要但非充分,存在未文档的平台要求)。分层 Gauss-Seidel 调度每层必须变 layer_start
+  (ICB 不支持 setBytes 常量,唯一通道是逐命令 buffer offset = 被忽略的 setKernelBuffer),
+  因此"录一次、执行一次"的 ICB 形态在此驱动上不可实现。软件 grid-sync 变体因占用率
+  限制(46×Z 线程组无法常驻)对大 Z 不可行。
+- 处置:ICB 代码已回滚到 bb30c13d69(融合+静态绑定,已提交);验证层(MTL_DEBUG_LAYER=1)
+  顺带揪出并修复两个真实问题:pipeline 需 ICB 支持标志、newBufferWithBytes 不得用 Private。
+- 若未来平台修复:恢复方案 = ICB dispatch-only + 每命令 offset 绑定 layer_starts 缓冲,
+  decode 侧一次 executeCommandsInBuffer(设计已在本节上方代码演练完整)。
+
+### 生产路径修正:β 默认值语义(2026-08-17)
+
+- 10k 重跑与 OMS 终验数据不一致,追查发现:`ldpc_decoder_offset` 全链默认 0 → 工厂把
+  0 当显式 override 传入,**压掉适配器调优默认 β=0.5**——gnb 实链此前跑的是 β=0。
+  语义改为 **-1 = 未设置(用调优默认 0.5)**,CLI Range(-1, 64)。
 
 ### P5:并发(已并入 d3c43f617c)
 

@@ -38,8 +38,9 @@ public:
   struct ldpc_decoder_factory_configuration {
     bool force_decoding;
     bool early_stop_syndrome;
-    /// Offset min-sum parameter (beta) for the Metal NMS decoders (0 = plain NMS).
-    float ldpc_decoder_offset = 0.0F;
+    /// Offset min-sum parameter (beta) override for the Metal NMS decoders
+    /// (-1 = unset: the decoder's tuned default applies, currently 0.5).
+    float ldpc_decoder_offset = -1.0F;
   };
   virtual ~ldpc_decoder_factory()                = default;
   virtual std::unique_ptr<ldpc_decoder> create() = 0;
