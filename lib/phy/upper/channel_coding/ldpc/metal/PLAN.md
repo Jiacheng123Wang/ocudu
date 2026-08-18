@@ -801,6 +801,17 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
   2dB+ 余量。生产路径维持 CPU/分层;metal_flooding 保留为可选类型,现有实链
   功能记录。
 
+### E2E 测量增强:纯 LDPC decoder 耗时探针(2026-08-18)
+
+- 现有 `[ul_pipeline]` 起点是 IQ 采样收到(RX 链总耗时),解码差异被前置阶段淹没。
+  新增第二序列 `[ul_ldpc_decode]`:**起点 = PUSCH 首码块 `decoder->decode()` 调用前
+  (pusch_decoder_impl CB 任务内, cb_id==0),终点 = 原 CRC-OK 点不变**——同一终点
+  事件同时结算两个序列,运行结束每种 case 输出两行统计。
+- 匹配设计:起点为单槽 last-write-wins(单 UE 单 PUSCH 在途,CRC 失败 TB 留下的
+  旧起点会被下一 TB 覆盖);终点处 2ms 新鲜度护栏丢弃残留起点(重传无需解码等
+  边角),避免跨 TB 错配。OCUDU_FLOW_PROBES 门控与现有探针一致,关闭时零开销。
+- 下一轮 E2E 三腿(auto/metal/metal_flooding)即可直接对比纯解码耗时。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`

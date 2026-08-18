@@ -11,6 +11,7 @@
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_decoder_result.h"
 #include "ocudu/phy/upper/rx_buffer.h"
 #include "ocudu/ran/sch/sch_segmentation.h"
+#include "ocudu/support/executors/ul_pipeline_probe.h"
 
 using namespace ocudu;
 
@@ -341,6 +342,12 @@ void pusch_decoder_impl::fork_codeblock_task(unsigned cb_id)
     std::optional<unsigned> nof_iters;
     auto                    decoder_ptr = decoder_pool->get();
     if (decoder_ptr) {
+      // T_start of the pure LDPC decode measurement: the first codeblock's decode
+      // invocation (the light link uses single-CB TBs, where this is exact; the
+      // probe's staleness guard drops leftover starts of the corner cases).
+      if (cb_id == 0) {
+        ul_pipeline_probe::get().record_ldpc_start();
+      }
       nof_iters = decoder_ptr->decode(message,
                                       rm_buffer,
                                       cb_llrs,
