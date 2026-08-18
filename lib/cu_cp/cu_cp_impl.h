@@ -59,7 +59,9 @@ class cu_cp_impl final : public cu_cp,
                          public cu_cp_ng_handler,
                          public cu_cp_command_handler,
                          public cu_cp_ue_release_command_handler,
-                         public cu_cp_ntn_meas_update_handler
+                         public cu_cp_ntn_meas_update_handler,
+                         public cu_cp_mobility_config_handler,
+                         public cu_cp_mobility_command_handler
 {
 public:
   explicit cu_cp_impl(const cu_cp_configuration& config_);
@@ -203,13 +205,35 @@ public:
   void update_ntn_neighbour_info(nr_cell_identity                              serving_nci,
                                  std::vector<rrc_ntn_neighbour_cell_info_item> ncells) override;
 
-  cu_cp_mobility_command_handler&   get_mobility_command_handler() override { return mobility_mng; }
+  cu_cp_mobility_command_handler&   get_mobility_command_handler() override { return *this; }
   cu_cp_ue_release_command_handler& get_ue_release_command_handler() override { return *this; }
   cu_cp_ntn_meas_update_handler&    get_ntn_meas_update_handler() override { return *this; }
   cu_cp_cell_command_handler&       get_cell_command_handler() override { return cell_ctrl; }
+  cu_cp_mobility_config_handler&    get_mobility_config_handler() override { return *this; }
   metrics_handler&                  get_metrics_handler() override { return metrics_hdlr; }
 
-  /// Run a cell command's validation+scheduling on the CU-CP executor, blocking for the validation result.
+  // cu_cp_mobility_command_handler.
+  bool trigger_handover(pci_t         source_pci,
+                        rnti_t        rnti,
+                        pci_t         target_pci,
+                        plmn_identity target_plmn,
+                        tac_t         target_tac) override;
+  bool trigger_conditional_handover(pci_t                                                source_pci,
+                                    rnti_t                                               rnti,
+                                    span<const pci_t>                                    target_pcis,
+                                    std::chrono::milliseconds                            timeout,
+                                    std::optional<std::chrono::system_clock::time_point> t1_thres_override) override;
+
+  // cu_cp_mobility_config_handler.
+  bool update_mobility_cell(const serving_cell_meas_config& cell_cfg) override;
+  bool remove_mobility_cell(nr_cell_identity nci) override;
+  bool update_neighbor(nr_cell_identity             serving_nci,
+                       nr_cell_identity             neighbor_nci,
+                       std::vector<report_cfg_id_t> report_cfg_ids) override;
+  bool remove_neighbor(nr_cell_identity serving_nci, nr_cell_identity neighbor_nci) override;
+  bool update_report_config(report_cfg_id_t report_cfg_id, const rrc_report_cfg_nr& report_cfg) override;
+  bool remove_report_config(report_cfg_id_t report_cfg_id) override;
+  bool set_periodic_report(nr_cell_identity nci, std::optional<report_cfg_id_t> report_cfg_id) override;
 
   // cu_cp_amf_reconnection_handler.
   void handle_amf_reconnection(cu_cp_amf_index_t amf_index) override;

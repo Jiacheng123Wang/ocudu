@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "cu_cp_impl.h"
+#include "bounded_executor_dispatch.h"
 #include "du_processor/du_processor_repository.h"
 #include "metrics_handler/metrics_handler_impl.h"
 #include "routines/amf_connection_loss_routine.h"
@@ -2253,4 +2254,119 @@ std::vector<nr_cell_identity> cu_cp_impl::handle_du_cells_reported(cu_cp_du_inde
 void cu_cp_impl::handle_du_removed(cu_cp_du_index_t du_index)
 {
   cell_ctrl.handle_du_removed(du_index);
+}
+
+bool cu_cp_impl::trigger_handover(pci_t         source_pci,
+                                  rnti_t        rnti,
+                                  pci_t         target_pci,
+                                  plmn_identity target_plmn,
+                                  tac_t         target_tac)
+{
+  // The mobility manager walks the UE manager and the cell measurement configuration, so the trigger runs on the
+  // CU-CP executor like every other command, whether it comes from the console or from a remote command.
+  return dispatch_bounded<bool>(*cfg.services.cu_cp_executor,
+                                logger,
+                                "trigger_handover",
+                                [this, source_pci, rnti, target_pci, target_plmn, target_tac]() {
+                                  return mobility_mng.trigger_handover(
+                                      source_pci, rnti, target_pci, target_plmn, target_tac);
+                                })
+      .value_or(false);
+}
+
+bool cu_cp_impl::trigger_conditional_handover(pci_t                                                source_pci,
+                                              rnti_t                                               rnti,
+                                              span<const pci_t>                                    target_pcis,
+                                              std::chrono::milliseconds                            timeout,
+                                              std::optional<std::chrono::system_clock::time_point> t1_thres_override)
+{
+  // Captured by value: see update_mobility_cell. The candidate list is copied for the same reason.
+  return dispatch_bounded<bool>(*cfg.services.cu_cp_executor,
+                                logger,
+                                "trigger_conditional_handover",
+                                [this,
+                                 source_pci,
+                                 rnti,
+                                 candidates = std::vector<pci_t>(target_pcis.begin(), target_pcis.end()),
+                                 timeout,
+                                 t1_thres_override]() {
+                                  return mobility_mng.trigger_conditional_handover(
+                                      source_pci, rnti, candidates, timeout, t1_thres_override);
+                                })
+      .value_or(false);
+}
+
+bool cu_cp_impl::update_mobility_cell(const serving_cell_meas_config& cell_cfg)
+{
+  // Captured by value: the dispatch wait is bounded, so a task that runs after a timed-out dispatch must not
+  // reference the caller's frame.
+  return dispatch_bounded<bool>(*cfg.services.cu_cp_executor,
+                                logger,
+                                "update_mobility_cell",
+                                [this, cell_cfg]() { return cell_meas_mng.update_cell_config(cell_cfg.nci, cell_cfg); })
+      .value_or(false);
+}
+
+bool cu_cp_impl::remove_mobility_cell(nr_cell_identity nci)
+{
+  return dispatch_bounded<bool>(*cfg.services.cu_cp_executor,
+                                logger,
+                                "remove_mobility_cell",
+                                [this, nci]() { return cell_meas_mng.remove_cell_config(nci); })
+      .value_or(false);
+}
+
+bool cu_cp_impl::update_neighbor(nr_cell_identity             serving_nci,
+                                 nr_cell_identity             neighbor_nci,
+                                 std::vector<report_cfg_id_t> report_cfg_ids)
+{
+  return dispatch_bounded<bool>(*cfg.services.cu_cp_executor,
+                                logger,
+                                "update_neighbor",
+                                [this, serving_nci, neighbor_nci, ids = std::move(report_cfg_ids)]() mutable {
+                                  return cell_meas_mng.add_or_update_neighbor(
+                                      serving_nci, neighbor_nci, std::move(ids));
+                                })
+      .value_or(false);
+}
+
+bool cu_cp_impl::remove_neighbor(nr_cell_identity serving_nci, nr_cell_identity neighbor_nci)
+{
+  return dispatch_bounded<bool>(
+             *cfg.services.cu_cp_executor,
+             logger,
+             "remove_neighbor",
+             [this, serving_nci, neighbor_nci]() { return cell_meas_mng.remove_neighbor(serving_nci, neighbor_nci); })
+      .value_or(false);
+}
+
+bool cu_cp_impl::update_report_config(report_cfg_id_t report_cfg_id, const rrc_report_cfg_nr& report_cfg)
+{
+  // Captured by value: see update_mobility_cell.
+  return dispatch_bounded<bool>(*cfg.services.cu_cp_executor,
+                                logger,
+                                "update_report_config",
+                                [this, report_cfg_id, report_cfg]() {
+                                  return cell_meas_mng.add_or_update_report_config(report_cfg_id, report_cfg);
+                                })
+      .value_or(false);
+}
+
+bool cu_cp_impl::remove_report_config(report_cfg_id_t report_cfg_id)
+{
+  return dispatch_bounded<bool>(*cfg.services.cu_cp_executor,
+                                logger,
+                                "remove_report_config",
+                                [this, report_cfg_id]() { return cell_meas_mng.remove_report_config(report_cfg_id); })
+      .value_or(false);
+}
+
+bool cu_cp_impl::set_periodic_report(nr_cell_identity nci, std::optional<report_cfg_id_t> report_cfg_id)
+{
+  return dispatch_bounded<bool>(
+             *cfg.services.cu_cp_executor,
+             logger,
+             "set_periodic_report",
+             [this, nci, report_cfg_id]() { return cell_meas_mng.set_periodic_report_config(nci, report_cfg_id); })
+      .value_or(false);
 }

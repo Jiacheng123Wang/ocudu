@@ -86,11 +86,16 @@ public:
       return;
     }
 
-    cu_cp.get_mobility_command_handler().trigger_handover(static_cast<pci_t>(serving_pci.value()),
-                                                          static_cast<rnti_t>(rnti.value()),
-                                                          static_cast<pci_t>(target_pci.value()),
-                                                          target_plmn.value(),
-                                                          static_cast<tac_t>(target_tac.value()));
+    if (not cu_cp.get_mobility_command_handler().trigger_handover(static_cast<pci_t>(serving_pci.value()),
+                                                                  static_cast<rnti_t>(rnti.value()),
+                                                                  static_cast<pci_t>(target_pci.value()),
+                                                                  target_plmn.value(),
+                                                                  static_cast<tac_t>(target_tac.value()))) {
+      fmt::print("Handover not triggered for UE with pci={} rnti={} (see CU-CP log for the cause).\n",
+                 serving_pci.value(),
+                 static_cast<rnti_t>(rnti.value()));
+      return;
+    }
     fmt::print("Handover triggered for UE with pci={} rnti={} to pci={} plmn={} tac={}.\n",
                serving_pci.value(),
                static_cast<rnti_t>(rnti.value()),
@@ -211,11 +216,16 @@ public:
       return;
     }
 
-    cu_cp.get_mobility_command_handler().trigger_conditional_handover(static_cast<pci_t>(serving_pci.value()),
-                                                                      static_cast<rnti_t>(rnti.value()),
-                                                                      target_pcis,
-                                                                      timeout,
-                                                                      t1_thres_override);
+    if (not cu_cp.get_mobility_command_handler().trigger_conditional_handover(static_cast<pci_t>(serving_pci.value()),
+                                                                              static_cast<rnti_t>(rnti.value()),
+                                                                              target_pcis,
+                                                                              timeout,
+                                                                              t1_thres_override)) {
+      fmt::print("CHO not triggered for UE with pci={} rnti={} (see CU-CP log for the cause).\n",
+                 serving_pci.value(),
+                 static_cast<rnti_t>(rnti.value()));
+      return;
+    }
     fmt::print("CHO triggered for UE with pci={} rnti={} to {} target(s) with timeout={}s.\n",
                serving_pci.value(),
                static_cast<rnti_t>(rnti.value()),

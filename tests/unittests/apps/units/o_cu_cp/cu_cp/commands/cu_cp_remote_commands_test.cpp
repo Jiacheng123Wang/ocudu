@@ -97,6 +97,8 @@ public:
   ocucp::cu_cp_ntn_meas_update_handler& get_ntn_meas_update_handler() override { std::abort(); }
 
   ocucp::cu_cp_cell_command_handler& get_cell_command_handler() override { return cell_cmd; }
+
+  ocucp::cu_cp_mobility_config_handler& get_mobility_config_handler() override { std::abort(); }
 };
 
 /// Build the canonical {cgi: {plmn, nci}} payload accepted by cell_lock and cell_unlock.
