@@ -778,6 +778,29 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
   追查为 `parse_seq` 的 `for (v=a; v<=c; v+=b)` 在步长 b=0 时无限 push_back
   (采样栈定位 ldpc_metal_bler_test.cpp:76)。已加 b<=0 校验,单值 SNR 请用 `--snrs 0`。
 
+### E2E 第五轮:metal_flooding 实链功能确认(2026-08-18)
+
+- 三腿对比(CPU=auto→neon、metal=分层,8/17;metal_flooding,8/18,二进制为 P10
+  工作区构建,版本戳 a0ddfc86d1):
+
+| 腿 | 样本 | pipeline mean/median | p95/p99 | ping 丢包 | ping avg/mdev |
+|---|---|---|---|---|---|
+| CPU mi=6 | 165 | 267/262 µs | 390/449 µs | 0% | 13803/7447 ms |
+| metal 分层 | 156 | 271/266 µs | 396/443 µs | 0.6% | 7312/3664 ms |
+| metal_flooding | 194 | 221/207 µs | 306/341 µs | 0.4% | 14121/7458 ms |
+
+- 管线统计三腿同噪声带([ul_pipeline] 由非解码阶段主导的既有结论不变;跨日对比
+  受热漂移限制,flooding 腿样本最多 194)。零错误行——**flooding 在实链工作 SNR 下
+  功能正确**:链路实际 SNR 高于洪泛瀑布(与基准一致:≥4dB 全过)。
+- ping 侧最有趣的信号:**flooding ≈ CPU 剖面**(14121/7458 vs 13803/7447,pipe
+  260/278 几乎重合),而分层腿 7312/3664。flooding 的 GPU 解码最慢(0dB 基准
+  1538µs),RTT 却落在 CPU 剖面上——反向印证分层腿的 7.3s 是锁步相位伪影,
+  RTT 与解码延迟无关(既有"闭环锁步主导,仅参考"结论)。
+- **结论:功能确认,不改裁决**。flooding 在信道好时可用(本轮实链即证据),但在
+  0-2dB 工作点(CPU mi=6 通过 96-99%)其通过率 0-0.3%——CPU/分层对同一流量持有
+  2dB+ 余量。生产路径维持 CPU/分层;metal_flooding 保留为可选类型,现有实链
+  功能记录。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`
