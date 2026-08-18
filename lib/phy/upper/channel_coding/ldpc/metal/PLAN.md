@@ -915,6 +915,28 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
     度受限,慢 ~13%。实链(E2E)是小 Z 高 SNR ET 早停形态——持久版的目标场景。
 - 待用户跑 E2E:`--pusch_ldpc_decoder_type metal_persistent` 腿,对比 [ul_ldpc_decode]。
 
+### E2E 第七轮:metal_persistent 实链(2026-08-18,三腿仍同噪声带)
+
+| 腿 | 样本 | pipeline mean/median | ldpc_decode mean/median | ldpc p95/p99 |
+|---|---|---|---|---|
+| auto(neon) | 209 | 229.0/226.0 µs | 41.8/38.0 µs | 80/95 µs |
+| metal 分层 | 260 | 215.2/207.0 µs | **34.5/29.0 µs** | 64/116 µs |
+| metal_persistent | 193 | 236.6/229.0 µs | 43.3/39.0 µs | 81/109 µs |
+
+- **持久版基准优势未传导到实链**:基准 4dB Z16 处 persist 505µs vs metal 1165µs
+  (2.3×),但实链 [ul_ldpc_decode] 三腿 29-39µs 中位,persist 反比 metal 慢 ~10µs。
+- 原因:实链 TB 比基准 Z16 点更小/更快(dispatch 链在链上只值 ~35µs,290 次
+  dispatch 已极廉价);持久版的单 TG 固定成本(1024 线程启动 + prologue +
+  每轮 ~46 个 threadgroup_barrier)约 40µs,与省下的 dispatch 相抵,32 行/层的
+  并行度上限在小 Z 上开始显现。持久版优势在 Z16 级 ET 场景成立,链上工作在
+  该尺度之下——固定成本主导区。
+- **生产裁决不变:实链工作点三腿统计无分离,metal(分层)仍是默认 GPU 选择**
+  (大 Z 也最优)。metal_persistent 保留为可选类型,价值 = 平台负结果记录 +
+  单 dispatch 形态(ICB 等未来路线的基础)。
+- 旁注:18:56 用户重跑的 flooding 腿 ldpc 样本 1111 vs pipeline 622——slot
+  匹配窗在突发到达下漏采样,ldpc 序列的 last-write-wins 匹配更稳,两条序列
+  分叉 = 交付成簇的又一签名。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`
