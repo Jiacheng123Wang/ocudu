@@ -67,12 +67,92 @@ TEST_P(cu_cp_example_config_test, roundtrip)
   assert_roundtrip(read_file(CONFIGS + "/" + name), &load_and_emit, name);
 }
 
-INSTANTIATE_TEST_SUITE_P(, cu_cp_example_config_test, ::testing::Values("cu_cp.yml"));
+INSTANTIATE_TEST_SUITE_P(, cu_cp_example_config_test, ::testing::Values("cu_cp.yml", "mobility.yml"));
 
 TEST(cu_cp_default_config_test, roundtrip)
 {
   YAML::Node a = emit_defaults();
   assert_roundtrip(YAML::Dump(a), &load_and_emit, "cu_cp defaults");
+}
+
+/// Mobility configuration exercising the list-valued and optional keys of the mobility writer: several neighbor
+/// relations per cell, several report config ids per relation, T312 and the periodic handover offset.
+const std::string MOBILITY_LISTS_CONFIG = R"(cu_cp:
+  mobility:
+    trigger_handover_from_measurements: true
+    cells:
+      - nr_cell_id: 0x66c000
+        periodic_report_cfg_id: 1
+        ncells:
+          - nr_cell_id: 0x20
+            report_configs: [2, 3]
+          - nr_cell_id: 0x21
+            report_configs: [2]
+      - nr_cell_id: 0x20
+        ncells:
+          - nr_cell_id: 0x66c000
+            report_configs: [2]
+        gnb_id_bit_length: 32
+        pci: 1
+        plmn: "00101"
+        tac: 7
+        ssb_arfcn: 632628
+        band: 78
+        ssb_scs: 30
+        ssb_period: 20
+        ssb_offset: 0
+        ssb_duration: 5
+      - nr_cell_id: 0x21
+        gnb_id_bit_length: 32
+        pci: 2
+        plmn: "00101"
+        tac: 7
+        ssb_arfcn: 632628
+        band: 78
+        ssb_scs: 30
+        ssb_period: 20
+        ssb_offset: 0
+        ssb_duration: 5
+    report_configs:
+      - report_cfg_id: 1
+        report_type: periodical
+        report_interval_ms: 1024
+        periodic_ho_rsrp_offset_db: 5
+      - report_cfg_id: 2
+        report_type: event_triggered
+        event_triggered_report_type: a3
+        meas_trigger_quantity: rsrp
+        meas_trigger_quantity_offset_db: 3
+        hysteresis_db: 0
+        time_to_trigger_ms: 100
+        report_interval_ms: 1024
+        t312: 200
+      - report_cfg_id: 3
+        report_type: event_triggered
+        event_triggered_report_type: a5
+        meas_trigger_quantity: rsrp
+        meas_trigger_quantity_threshold_db: -110
+        meas_trigger_quantity_threshold_2_db: -100
+        hysteresis_db: 2
+        time_to_trigger_ms: 256
+        report_interval_ms: 1024
+)";
+
+TEST(cu_cp_mobility_lists_config_test, roundtrip)
+{
+  // The writer must append list entries (every neighbor of a cell, every report config id of a relation), emit
+  // T312 under the key the parser accepts and emit the periodic handover offset when it is set.
+  assert_roundtrip(MOBILITY_LISTS_CONFIG, &load_and_emit, "mobility lists");
+
+  YAML::Node       emitted = load_and_emit(MOBILITY_LISTS_CONFIG);
+  const YAML::Node cells   = emitted["cu_cp"]["mobility"]["cells"];
+  ASSERT_TRUE(cells);
+  ASSERT_EQ(cells[0]["ncells"].size(), 2U);
+  EXPECT_EQ(cells[0]["ncells"][0]["report_configs"].size(), 2U);
+  const YAML::Node report_cfgs = emitted["cu_cp"]["mobility"]["report_configs"];
+  ASSERT_EQ(report_cfgs.size(), 3U);
+  EXPECT_EQ(report_cfgs[0]["periodic_ho_rsrp_offset_db"].as<int>(), 5);
+  EXPECT_EQ(report_cfgs[1]["t312"].as<unsigned>(), 200U);
 }
 
 /// Return the example config with its commented-out logical_cells block replaced by a real one carrying the

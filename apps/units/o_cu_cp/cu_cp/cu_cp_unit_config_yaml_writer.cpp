@@ -137,7 +137,7 @@ static YAML::Node build_cu_cp_mobility_ncells_section(const cu_cp_unit_neighbor_
 
   node["nr_cell_id"] = config.nr_cell_id;
   for (auto report_id : config.report_cfg_ids) {
-    node["report_configs"] = report_id;
+    node["report_configs"].push_back(report_id);
   }
   node["report_configs"].SetStyle(YAML::EmitterStyle::Flow);
 
@@ -194,7 +194,7 @@ static YAML::Node build_cu_cp_mobility_cells_section(const cu_cp_unit_cell_confi
   }
 
   for (const auto& ncell : config.ncells) {
-    node["ncells"] = build_cu_cp_mobility_ncells_section(ncell);
+    node["ncells"].push_back(build_cu_cp_mobility_ncells_section(ncell));
   }
 
   return node;
@@ -231,6 +231,11 @@ static YAML::Node build_cu_cp_mobility_report_section(const cu_cp_unit_report_co
     node["coarse_location_request"] = config.coarse_location_request;
   }
 
+  // Emit only when handover from periodic measurements is enabled (non-default).
+  if (config.report_type == "periodical" && config.periodic_ho_rsrp_offset != -1) {
+    node["periodic_ho_rsrp_offset_db"] = config.periodic_ho_rsrp_offset;
+  }
+
   if (!config.event_triggered_report_type) {
     return node;
   }
@@ -249,7 +254,7 @@ static YAML::Node build_cu_cp_mobility_report_section(const cu_cp_unit_report_co
   add_opt("meas_trigger_quantity", config.meas_trigger_quantity);
   add_opt("hysteresis_db", config.hysteresis_db);
   add_opt("time_to_trigger_ms", config.time_to_trigger_ms);
-  add_opt("t312_ms", config.t312_ms);
+  add_opt("t312", config.t312_ms);
 
   // A1, A2, A4, A5 - absolute threshold on one measurement quantity.
   if (ev == ocucp::rrc_event_id::event_id_t::a1 or ev == ocucp::rrc_event_id::event_id_t::a2 or
