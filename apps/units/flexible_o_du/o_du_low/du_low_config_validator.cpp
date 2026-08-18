@@ -87,9 +87,10 @@ static bool validate_expert_phy_unit_config(const du_low_unit_expert_upper_phy_c
   if ((config.ldpc_decoder_type != "auto") && (config.ldpc_decoder_type != "generic") &&
       (config.ldpc_decoder_type != "neon") && (config.ldpc_decoder_type != "avx2") &&
       (config.ldpc_decoder_type != "avx512") && (config.ldpc_decoder_type != "metal") &&
-      (config.ldpc_decoder_type != "metal_flooding")) {
+      (config.ldpc_decoder_type != "metal_flooding") && (config.ldpc_decoder_type != "metal_persistent")) {
     fmt::print(
-        "Invalid PUSCH LDPC decoder type. Valid types are: auto, generic, neon, avx2, avx512, metal and metal_flooding.\n");
+        "Invalid PUSCH LDPC decoder type. Valid types are: auto, generic, neon, avx2, avx512, metal, metal_flooding "
+        "and metal_persistent.\n");
     valid = false;
   }
 

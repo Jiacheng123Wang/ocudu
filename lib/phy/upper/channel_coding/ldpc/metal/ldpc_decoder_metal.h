@@ -26,7 +26,8 @@ class ldpc_decoder_metal : public ldpc_decoder
 public:
   /// \param[in] force_decoding      Force decoding even if the codeblock appears too short.
   /// \param[in] early_stop_syndrome Early stop on syndrome convergence (no-CRC path only).
-  /// \param[in] mode                GPU algorithm (layered = default, flooding = 2 dispatches/round).
+  /// \param[in] mode                GPU algorithm (layered = default, flooding = 2 dispatches/round,
+  ///                                 layered_persistent = 1 resident dispatch per decode).
   /// \param[in] factor_override     Normalization factor override (-1 = per-mode default:
   ///                                 layered 0.7, flooding 0.45).
   /// \param[in] beta_override       Offset min-sum parameter override (-1 = per-mode default).

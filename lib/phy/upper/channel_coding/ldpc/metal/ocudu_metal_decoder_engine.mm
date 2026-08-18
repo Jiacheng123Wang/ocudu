@@ -34,6 +34,7 @@ struct engine_impl_t {
   id<MTLComputePipelineState> p_nmsl_cn = nil;
   id<MTLComputePipelineState> p_nmsl_final_syndrome = nil;
   id<MTLComputePipelineState> p_nmsl_et_gate = nil;
+  id<MTLComputePipelineState> p_nmsl_persistent = nil; // layered_persistent: one dispatch per decode
   // Flooding pipelines (ocudu kernels).
   id<MTLComputePipelineState> p_nmsf_init = nil;
   id<MTLComputePipelineState> p_nmsf_convert = nil;
@@ -164,6 +165,14 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
         !make_pipeline(&engine->p_nmsf_vn, "nmsf_vn_update")) {
       return false;
     }
+  } else if (mode == algo::layered_persistent) {
+    if (!make_pipeline(&engine->p_nmsl_persistent, "nmsl_persistent_decode")) {
+      return false;
+    }
+    // One resident threadgroup of 1024 threads runs the whole decode (the
+    // only cross-thread synchronization this platform guarantees is
+    // threadgroup_barrier; cross-threadgroup software barriers cannot be
+    // made correct with the relaxed-only atomics this MSL exposes).
   } else {
     if (!make_pipeline(&engine->p_nmsl_init, "nmsl_init") ||
         !make_pipeline(&engine->p_nmsl_convert, "nmsl_i8_to_fp16") ||
@@ -218,8 +227,11 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
 int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter, uint32_t* error_count_out)
 {
   engine_impl_t* engine = static_cast<engine_impl_t*>(impl);
+  const bool     is_persistent = engine != nullptr && engine->mode == decoder_engine::algo::layered_persistent;
   if (engine == nullptr ||
-      (engine->mode == decoder_engine::algo::flooding ? engine->p_nmsf_init == nil : engine->p_nmsl_init == nil)) {
+      (is_persistent ? engine->p_nmsl_persistent == nil
+                     : (engine->mode == decoder_engine::algo::flooding ? engine->p_nmsf_init == nil
+                                                                       : engine->p_nmsl_init == nil))) {
     return -1;
   }
   const bool is_flooding = engine->mode == decoder_engine::algo::flooding;
@@ -275,6 +287,35 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
       [enc dispatchThreads:MTLSizeMake(engine->n_aligned, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     }
+  } else if (is_persistent) {
+  // Persistent layered decode: ONE resident threadgroup of 1024 threads runs
+  // the kernel's prologue (ctrl reset, c2v zeroing, int8->fp16 conversion),
+  // the (iteration, layer) loops, the syndrome refresh and the ET gate, all
+  // serialized by threadgroup_barrier inside the kernel - the whole decode
+  // is exactly ONE dispatch.
+  [enc setComputePipelineState:engine->p_nmsl_persistent];
+  [enc setBuffer:engine->buf_row_start offset:0 atIndex:0];
+  [enc setBuffer:engine->buf_edge_vn offset:0 atIndex:1];
+  [enc setBuffer:engine->buf_c2v offset:0 atIndex:2];
+  [enc setBuffer:engine->buf_llr_fp16 offset:0 atIndex:3];
+  [enc setBuffer:engine->buf_h_pred_bits offset:0 atIndex:4];
+  [enc setBytes:&engine->z length:sizeof(uint32_t) atIndex:5];
+  [enc setBytes:&engine->factor length:sizeof(float) atIndex:6];
+  [enc setBytes:&engine->beta length:sizeof(float) atIndex:7];
+  [enc setBuffer:engine->buf_ctrl offset:0 atIndex:8];
+  const uint32_t n_layers = engine->layered_info.n_layers;
+  [enc setBytes:&n_layers length:sizeof(uint32_t) atIndex:9];
+  const uint32_t max_iter_u = static_cast<uint32_t>(max_iter);
+  [enc setBytes:&max_iter_u length:sizeof(uint32_t) atIndex:10];
+  const uint32_t no_edges = engine->layered_info.no_edges;
+  [enc setBytes:&no_edges length:sizeof(uint32_t) atIndex:11];
+  [enc setBytes:&engine->n_aligned length:sizeof(uint32_t) atIndex:12];
+  [enc setBytes:&engine->m_aligned length:sizeof(uint32_t) atIndex:13];
+  [enc setBytes:&engine->n_h_chunks length:sizeof(uint32_t) atIndex:14];
+  [enc setBuffer:engine->buf_h offset:0 atIndex:15];
+  [enc setBuffer:mtl_llr_i8 offset:0 atIndex:16];
+  [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
   } else {
   // Stage A: reset the control block and zero the per-edge messages.
   [enc setComputePipelineState:engine->p_nmsl_init];
@@ -372,7 +413,7 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
   }
   // The gate counts only rounds whose kernels actually ran; without ET the
   // layered mode keeps reporting max_iter for backward compatibility.
-  if (is_flooding) {
+  if (is_flooding || is_persistent) {
     return static_cast<int>(ctrl->actual_iters);
   }
   return engine->et_enabled ? static_cast<int>(ctrl->actual_iters) : max_iter;

@@ -193,11 +193,16 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
   slot->engine = std::make_unique<metal::decoder_engine>();
   // Defaults from the BLER benchmark sweeps (see PLAN.md 4.8/4.9): the layered
   // schedule's inherent damping allows a high norm, and the offset min-sum pair
-  // (0.7, beta 0.5) closes the residual waterfall points to CPU parity.
+  // (0.7, beta 0.5) closes the residual waterfall points to CPU parity. The
+  // persistent variant (metal_persistent) runs the same schedule as one GPU
+  // resident dispatch and shares the CSR layout, defaults and buffers.
   const float factor = (factor_override >= 0.0F) ? factor_override : 0.7F;
   const float beta   = (beta_override >= 0.0F) ? beta_override : 0.5F;
-  if (!slot->engine->init(n, m, factor, beta, slot->h.get(), nullptr, slot->layered_info,
-                          metal::decoder_engine::algo::layered, enable_et)) {
+  const metal::decoder_engine::algo init_mode =
+      (mode == metal::decoder_engine::algo::layered_persistent) ? metal::decoder_engine::algo::layered_persistent
+                                                                : metal::decoder_engine::algo::layered;
+  if (!slot->engine->init(n, m, factor, beta, slot->h.get(), nullptr, slot->layered_info, init_mode,
+                          enable_et)) {
     ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
   }
 

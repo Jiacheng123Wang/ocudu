@@ -254,6 +254,12 @@ int main(int argc, char** argv)
     gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
                                                    dec_factory_cfg.early_stop_syndrome,
                                                    ocudu::metal::decoder_engine::algo::flooding, p.norm, p.beta);
+  } else if ((p.gpu_type == "metal_persistent") && ((p.norm >= 0.0F) || (p.beta >= 0.0F))) {
+    // Persistent experiments bypass the factory defaults (layered norm 0.7, beta 0.5).
+    gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
+                                                   dec_factory_cfg.early_stop_syndrome,
+                                                   ocudu::metal::decoder_engine::algo::layered_persistent, p.norm,
+                                                   p.beta);
   } else {
     gpu_dec = create_ldpc_decoder_factory_sw(p.gpu_type, dec_factory_cfg)->create();
   }

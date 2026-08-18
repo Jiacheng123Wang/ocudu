@@ -27,6 +27,10 @@ public:
     layered,
     /// Flooding normalized min-sum (2 dispatches/round, more iterations).
     flooding,
+    /// Layered NMS as ONE persistent dispatch: W = min(Z, 128) resident
+    /// threadgroups run the (iteration, layer) loops inside the kernel with a
+    /// software grid barrier between layers (metal_persistent).
+    layered_persistent,
   };
 
   /// CSR edge layout for the layered schedule (built by the adapter). The fused

@@ -131,6 +131,13 @@ public:
                                                   ocudu::metal::decoder_engine::algo::flooding, -1.0F,
                                                   cfg.ldpc_decoder_offset);
     }
+    if (dec_type == "metal_persistent") {
+      // Layered normalized min-sum as ONE resident GPU dispatch (P11): the
+      // (iteration, layer) loops and the ET gate run inside the kernel.
+      return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome,
+                                                  ocudu::metal::decoder_engine::algo::layered_persistent, -1.0F,
+                                                  cfg.ldpc_decoder_offset);
+    }
 #endif // OCUDU_METAL_LDPC
     if ((dec_type == "auto") || (dec_type == "generic")) {
       return std::make_unique<ldpc_decoder_generic>(cfg.force_decoding, cfg.early_stop_syndrome);

@@ -885,6 +885,36 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
   33.7% 大半空闲、io_broker µs 级唤醒。但真 RF 路径从未被实测,上线前
   需 UHD 冒烟验证每 slot 实时性。
 
+## 4.12 P11:metal_persistent 持久内核(2026-08-18,单 dispatch 分层 NMS)
+
+- 目标:消除 CPU 侧 it×l 双层循环的 dispatch 编码开销,把整轮解码折叠为**一次
+  dispatch**。保留 metal/metal_flooding 不动作基线。
+- **平台负结果(重要)**:先实现的多 threadgroup 软件网格栅栏方案(W=min(z,128)
+  常驻 TG + 原子 ticket/epoch)被证伪——本 Apple MSL 目标**只暴露 relaxed 原子**
+  (metal_atomic 模板显式禁用 acquire/release/seq_cst,无 atomic_fence,
+  `memory_order` 枚举仅 relaxed),即平台不提供任何设备级内存序原语;threadgroup_barrier
+  的 mem_device 组合实测不足以保证跨 TG 可见性(单 TG 100% 通过、多 TG 100% 失败
+  的二分定位)。跨 TG 栅栏在此平台无法正确实现——与 Apple"Metal 不支持 grid barrier"
+  的官方立场一致。
+- **落地设计(正确性由构造保证)**:单 TG × 1024 线程(32 simdgroup)常驻,层间用
+  `threadgroup_barrier(mem_threadgroup | mem_device)`(TG 内跨 simdgroup 可见性是
+  保证语义);层内每 simdgroup 串行处理 ⌈z/32⌉ 行;prologue 折叠 ctrl 复位 + c2v
+  清零 + i8→fp16 转换;syndrome + ET gate 均在核内,ET 触发后**直接 break**(dispatch
+  版仍需提交剩余轮次的全部 dispatch)。decode() = 1 次 dispatchThreadgroups。
+- 验证:
+  - 单测 ALL OK:persist 全 case 100%(无噪位精确 + 3dB/5dB 有噪 + Z16-256)。
+  - **BLER 与 metal 完全平齐**(1000 块/点,同种子逐块同解):bg2 z64 @0dB
+    901/1000 = 901/1000;bg1 z16 r2/3 @2dB 971/1000 = 971/1000。
+  - 延迟(背靠背,n=200):
+    | 点 | metal(gpu_wait/CPU侧) | **persist(gpu_wait/CPU侧)** |
+    |---|---|---|
+    | 0dB Z64 满迭代 | 1708µs(1497/211) | **1933µs(1794/139)** |
+    | 4dB Z16 ET 早停 | 1165µs(1008/158) | **505µs(379/127)** |
+  - CPU 侧编码开销两处各省 ~72/31µs;**ET 早停场景 2.3× 总延迟优势**(dispatch 版
+    290 次 dispatch 无条件提交,持久版 break 即停);满迭代大 Z 场景持久版单 TG 并行
+    度受限,慢 ~13%。实链(E2E)是小 Z 高 SNR ET 早停形态——持久版的目标场景。
+- 待用户跑 E2E:`--pusch_ldpc_decoder_type metal_persistent` 腿,对比 [ul_ldpc_decode]。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`
