@@ -937,6 +937,25 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
   匹配窗在突发到达下漏采样,ldpc 序列的 last-write-wins 匹配更稳,两条序列
   分叉 = 交付成簇的又一签名。
 
+### E2E 第八轮:iperf3 大码块(2026-08-18,结构性结论 + 两腿数据)
+
+- **iperf3 结构问题(重要)**:DL 腿(唯一完整跑完的方向)不经过 PUSCH 解码器
+  ——解码器类型只影响 UL;UL 腿被锁步饥饿压死(33-40 Kbps 或 idle timeout,
+  cwnd 卡在 14-62KB、分钟级零字节、256KB 单窗爆发=UL grant 成簇签名)。
+  即 **iperf3 在本链路上测不到解码器差异**,吞吐差异(483/954/666 Kbps)
+  是链路均衡噪声。
+- 有效对比仍是探针(大 TBS,iperf3 饱和期):
+  | 腿 | 样本 | pipeline mean/median | ldpc_decode mean/median | ldpc p95/p99 |
+  |---|---|---|---|---|
+  | auto | 879 | 303.7/295.0 µs | 63.7/60.0 µs | 95/125 µs |
+  | metal | 290 | 317.4/311.0 µs | 60.9/60.0 µs | 106/140 µs |
+  | persistent | 待 shutdown | | | |
+  - 大 TB 使解码 29-39→60µs、管线 207-229→295-311µs(量级正确),但 auto/metal
+    仍统计无分离(60.0 vs 60.0µs 中位)。样本数 879 vs 290 直接镜像 UL 吞吐
+    差异(39.4 Kbps vs idle timeout)——是链路成簇,不是解码器。
+  - 样本量:879/290 比 ping 轮(193-260)大得多——大 TBS 饱和期探针工作正常。
+- 待用户提供 persistent 腿 shutdown 的 probe 两行后补表。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`
