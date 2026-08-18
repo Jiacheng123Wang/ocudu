@@ -820,3 +820,88 @@ TEST_F(cell_meas_manager_test, when_new_meas_config_is_smaller_then_the_dropped_
   ASSERT_EQ(new_cfg.report_cfg_to_rem_list, std::vector<report_cfg_id_t>{uint_to_report_cfg_id(2)});
   ASSERT_EQ(new_cfg.meas_id_to_rem_list, std::vector<meas_id_t>{uint_to_meas_id(2)});
 }
+
+TEST_F(cell_meas_manager_test, when_measurement_report_references_unknown_cell_then_report_is_ignored)
+{
+  create_default_manager();
+
+  cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
+  ASSERT_NE(ue_index, cu_cp_ue_index_t::invalid);
+  ASSERT_TRUE(ue_mng.set_plmn(ue_index, plmn_identity::test_value()));
+
+  // Forge a measurement context referencing a cell absent from the configuration, as left behind by a
+  // configuration change racing an in-flight measurement report.
+  meas_context_t stale_ctxt;
+  stale_ctxt.report_cfg_id     = uint_to_report_cfg_id(2);
+  stale_ctxt.gnb_id_bit_length = 32;
+  stale_ctxt.nci               = nr_cell_identity::create(gnb_id_t{0x19b, 32}, 5).value();
+  stale_ctxt.pci               = 1;
+
+  auto&     ue_meas_ctxt  = ue_mng.get_measurement_context(ue_index);
+  meas_id_t stale_meas_id = ue_meas_ctxt.allocate_meas_id();
+  ue_meas_ctxt.meas_id_to_meas_context.emplace(stale_meas_id, stale_ctxt);
+
+  rrc_meas_results results;
+  results.meas_id = stale_meas_id;
+
+  // The report must be dropped without notifying the mobility manager (and without terminating the process).
+  manager->report_measurement(ue_index, results);
+  EXPECT_EQ(mobility_manager.nof_notifications, 0U);
+}
+
+TEST_F(cell_meas_manager_test, when_neighbor_relation_references_unknown_cell_then_it_is_skipped)
+{
+  // Build a config whose serving cell lists a neighbor with no cell entry of its own (a dangling relation,
+  // which construction-time validation does not reject).
+  cell_meas_manager_config cfg;
+  gnb_id_t                 gnb_id{0x19b, 32};
+  nr_cell_identity         serving_nci = nr_cell_identity::create(gnb_id, 0).value();
+  nr_cell_identity         unknown_nci = nr_cell_identity::create(gnb_id, 9).value();
+
+  cell_meas_config cell_cfg;
+  cell_cfg.serving_cell_cfg.gnb_id_bit_length   = gnb_id.bit_length;
+  cell_cfg.serving_cell_cfg.nci                 = serving_nci;
+  cell_cfg.serving_cell_cfg.pci                 = 1;
+  cell_cfg.periodic_report_cfg_id               = uint_to_report_cfg_id(1);
+  cell_cfg.serving_cell_cfg.band.emplace()      = nr_band::n78;
+  cell_cfg.serving_cell_cfg.ssb_arfcn.emplace() = 632628;
+  cell_cfg.serving_cell_cfg.ssb_scs.emplace()   = subcarrier_spacing::kHz30;
+  {
+    rrc_ssb_mtc ssb_mtc;
+    ssb_mtc.dur                                 = 1;
+    ssb_mtc.periodicity_and_offset.periodicity  = rrc_periodicity_and_offset::periodicity_t::sf5;
+    ssb_mtc.periodicity_and_offset.offset       = 0;
+    cell_cfg.serving_cell_cfg.ssb_mtc.emplace() = ssb_mtc;
+  }
+  neighbor_cell_meas_config dangling_ncell;
+  dangling_ncell.nci = unknown_nci;
+  dangling_ncell.report_cfg_ids.push_back(uint_to_report_cfg_id(1));
+  cell_cfg.ncells.push_back(dangling_ncell);
+  cfg.cells.emplace(serving_nci, cell_cfg);
+
+  rrc_periodical_report_cfg periodical_cfg;
+  periodical_cfg.rs_type                = ocucp::rrc_nr_rs_type::ssb;
+  periodical_cfg.report_interv          = 1024;
+  periodical_cfg.report_amount          = -1;
+  periodical_cfg.report_quant_cell.rsrp = true;
+  periodical_cfg.report_quant_cell.rsrq = true;
+  periodical_cfg.report_quant_cell.sinr = true;
+  periodical_cfg.max_report_cells       = 4;
+  cfg.report_config_ids.emplace(uint_to_report_cfg_id(1), rrc_report_cfg_nr{periodical_cfg});
+
+  manager = std::make_unique<cell_meas_manager>(
+      cfg,
+      cell_meas_manager_dependencies{.mobility_mng_notifier = mobility_manager,
+                                     .ue_mng                = ue_mng,
+                                     .logger                = ocudulog::fetch_basic_logger("CU-CP")});
+  ASSERT_NE(manager, nullptr);
+
+  cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
+  ASSERT_NE(ue_index, cu_cp_ue_index_t::invalid);
+  ASSERT_TRUE(ue_mng.set_plmn(ue_index, plmn_identity::test_value()));
+
+  // Measurement config generation must skip the dangling neighbor and still produce the serving-cell part.
+  std::optional<rrc_meas_cfg> meas_cfg = manager->get_measurement_config(ue_index, serving_nci);
+  ASSERT_TRUE(meas_cfg.has_value());
+  ASSERT_FALSE(meas_cfg.value().meas_obj_to_add_mod_list.empty());
+}

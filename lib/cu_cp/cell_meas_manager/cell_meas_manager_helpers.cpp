@@ -223,8 +223,12 @@ std::vector<ssb_frequency_t> ocudu::ocucp::generate_measurement_object_list(cons
   }
   // Add neighbor cells measurement objects if a non-conditional report is configured.
   for (const auto& ncell : serving_cell.ncells) {
-    ocudu_assert(cfg.cells.find(ncell.nci) != cfg.cells.end(), "No cell config for nci={:#x}", ncell.nci);
-    const auto& cell_cfg               = cfg.cells.at(ncell.nci);
+    auto ncell_it = cfg.cells.find(ncell.nci);
+    if (ncell_it == cfg.cells.end()) {
+      ocudulog::fetch_basic_logger(LOG_CHAN).warning("No cell config for nci={:#x}, skipping", ncell.nci);
+      continue;
+    }
+    const auto& cell_cfg               = ncell_it->second;
     const bool  has_regular_report_cfg = std::any_of(
         ncell.report_cfg_ids.begin(), ncell.report_cfg_ids.end(), [&cfg](const report_cfg_id_t report_cfg_id) {
           return !is_cond_trigger_report_config(cfg, report_cfg_id);

@@ -91,12 +91,18 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_
 
   // Add measurement object (MO).
   for (const auto& ssb_freq : ssb_freqs) {
+    auto meas_obj_it  = ssb_freq_to_meas_object.find(ssb_freq);
+    auto freq_ncis_it = ssb_freq_to_ncis.find(ssb_freq);
+    if (meas_obj_it == ssb_freq_to_meas_object.end() or freq_ncis_it == ssb_freq_to_ncis.end()) {
+      logger.warning("ue={}: No measurement object for ssb_freq={}, skipping", ue_index, ssb_freq);
+      continue;
+    }
     rrc_meas_obj_to_add_mod meas_obj_to_add;
     meas_obj_to_add.meas_obj_id = ue_meas_context.allocate_meas_obj_id();
-    meas_obj_to_add.meas_obj_nr = ssb_freq_to_meas_object.at(ssb_freq);
+    meas_obj_to_add.meas_obj_nr = meas_obj_it->second;
 
     // Add meas obj id to lookup.
-    for (const auto& nci : ssb_freq_to_ncis.at(ssb_freq)) {
+    for (const auto& nci : freq_ncis_it->second) {
       if (cond_meas && nci == serving_nci) {
         // Skip the serving cell as is not a CHO candidate target.
         continue;
@@ -108,8 +114,13 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_
                                          cell_config.ncells.end(),
                                          [nci](const neighbor_cell_meas_config& nc) { return nc.nci == nci; });
 
+      auto nci_cfg_it = cfg.cells.find(nci);
+      if (nci_cfg_it == cfg.cells.end()) {
+        logger.warning("ue={}: No cell config for nci={:#x}, skipping", ue_index, nci.value());
+        continue;
+      }
       if (cond_meas) {
-        const auto&          ncell_cfg = cfg.cells.at(nci);
+        const auto&          ncell_cfg = nci_cfg_it->second;
         rrc_cells_to_add_mod cell_to_add;
         cell_to_add.pci = ncell_cfg.serving_cell_cfg.pci.value();
         if (ncell_it != cell_config.ncells.end()) {
@@ -121,7 +132,7 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_
                  (ncell_it->ntn_neighbour_info.has_value() || ncell_it->ntn_polarization.has_value())) {
         // For non-CHO: add cell to cells_to_add_mod_list only when NTN info is present (needed for
         // cells_to_add_mod_list_ext_v1800/v1710 in MeasObjectNR).
-        const auto& ncell_cfg = cfg.cells.at(nci);
+        const auto& ncell_cfg = nci_cfg_it->second;
         if (ncell_cfg.serving_cell_cfg.pci.has_value()) {
           rrc_cells_to_add_mod cell_to_add;
           cell_to_add.pci                = ncell_cfg.serving_cell_cfg.pci.value();
@@ -144,8 +155,13 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_
       }
 
       for (const auto& ncell : cell_config.ncells) {
-        if (is_complete(cfg.cells.at(ncell.nci).serving_cell_cfg) &&
-            cfg.cells.at(ncell.nci).serving_cell_cfg.ssb_arfcn.value() == ssb_freq) {
+        auto ncell_it = cfg.cells.find(ncell.nci);
+        if (ncell_it == cfg.cells.end()) {
+          logger.warning("ue={}: No cell config for neighbor nci={:#x}, skipping", ue_index, ncell.nci.value());
+          continue;
+        }
+        if (is_complete(ncell_it->second.serving_cell_cfg) &&
+            ncell_it->second.serving_cell_cfg.ssb_arfcn.value() == ssb_freq) {
           logger.debug("ue={}: Adding neighbor cell nci={:#x} to measurement config", ue_index, ncell.nci);
           for (const auto& report_cfg_id : ncell.report_cfg_ids) {
             // Skip conditional triggers.
@@ -386,12 +402,31 @@ void cell_meas_manager::report_measurement(cu_cp_ue_index_t ue_index, const rrc_
 
   auto& meas_ctxt = ue_meas_context.meas_id_to_meas_context.at(meas_results.meas_id);
 
+  // The measurement context references the cell configuration by NCI: look it up guarded, so a measurement
+  // report racing a configuration change cannot dereference an erased entry.
+  auto serving_cell_it = cfg.cells.find(meas_ctxt.nci);
+  if (serving_cell_it == cfg.cells.end()) {
+    logger.warning("ue={}: Ignoring measurement result for meas_id={}. Cause: No cell config for nci={:#x}",
+                   ue_index,
+                   fmt::underlying(meas_results.meas_id),
+                   meas_ctxt.nci.value());
+    return;
+  }
+  const cell_meas_config& serving_cell = serving_cell_it->second;
+
   // Handle periodic measurement results.
-  if (cfg.cells.at(meas_ctxt.nci).periodic_report_cfg_id.has_value() &&
-      cfg.cells.at(meas_ctxt.nci).periodic_report_cfg_id.value() == meas_ctxt.report_cfg_id) {
+  if (serving_cell.periodic_report_cfg_id.has_value() &&
+      serving_cell.periodic_report_cfg_id.value() == meas_ctxt.report_cfg_id) {
     uint8_t periodic_ho_rsrp_offset = 0;
-    if (const auto* periodical = std::get_if<rrc_periodical_report_cfg>(
-            &cfg.report_config_ids.at(cfg.cells.at(meas_ctxt.nci).periodic_report_cfg_id.value()));
+    auto    report_cfg_it           = cfg.report_config_ids.find(serving_cell.periodic_report_cfg_id.value());
+    if (report_cfg_it == cfg.report_config_ids.end()) {
+      logger.warning("ue={}: Ignoring measurement result for meas_id={}. Cause: No report config with id={}",
+                     ue_index,
+                     fmt::underlying(meas_results.meas_id),
+                     to_underlying(serving_cell.periodic_report_cfg_id.value()));
+      return;
+    }
+    if (const auto* periodical = std::get_if<rrc_periodical_report_cfg>(&report_cfg_it->second);
         periodical != nullptr) {
       if (periodical->periodic_ho_rsrp_offset == -1) {
         logger.debug("ue={}: Handover from periodic measurements is disabled", ue_index);
@@ -404,8 +439,13 @@ void cell_meas_manager::report_measurement(cu_cp_ue_index_t ue_index, const rrc_
     std::optional<pci_t> strongest_neighbor =
         find_strongest_neighbor(ue_index, meas_results, logger, periodic_ho_rsrp_offset);
     if (strongest_neighbor.has_value()) {
-      for (const auto& ncell : cfg.cells.at(meas_ctxt.nci).ncells) {
-        const cell_meas_config& ncell_cfg = cfg.cells.at(ncell.nci);
+      for (const auto& ncell : serving_cell.ncells) {
+        auto ncell_it = cfg.cells.find(ncell.nci);
+        if (ncell_it == cfg.cells.end()) {
+          logger.warning("ue={}: No cell config for neighbor nci={:#x}, skipping", ue_index, ncell.nci.value());
+          continue;
+        }
+        const cell_meas_config& ncell_cfg = ncell_it->second;
         if (ncell_cfg.serving_cell_cfg.pci.has_value() &&
             ncell_cfg.serving_cell_cfg.pci.value() == strongest_neighbor.value()) {
           // Report cell.
@@ -428,14 +468,13 @@ void cell_meas_manager::report_measurement(cu_cp_ue_index_t ue_index, const rrc_
       if (serv_cell.meas_result_best_neigh_cell.has_value()) {
         // Report this cell.
         if (serv_cell.meas_result_best_neigh_cell.value().pci.has_value()) {
-          const cell_meas_config& cell_cfg = cfg.cells.at(meas_ctxt.nci);
           mobility_mng_notifier.on_neighbor_better_than_spcell(
               ue_index,
               meas_ctxt.nci.gnb_id(meas_ctxt.gnb_id_bit_length),
               meas_ctxt.nci,
               serv_cell.meas_result_best_neigh_cell.value().pci.value(),
-              cell_cfg.serving_cell_cfg.plmn,
-              cell_cfg.serving_cell_cfg.tac);
+              serving_cell.serving_cell_cfg.plmn,
+              serving_cell.serving_cell_cfg.tac);
           return;
         }
       }
@@ -445,13 +484,12 @@ void cell_meas_manager::report_measurement(cu_cp_ue_index_t ue_index, const rrc_
     std::optional<pci_t> strongest_neighbor = find_strongest_neighbor(ue_index, meas_results, logger);
     if (strongest_neighbor.has_value()) {
       // Report cell.
-      const cell_meas_config& cell_cfg = cfg.cells.at(meas_ctxt.nci);
       mobility_mng_notifier.on_neighbor_better_than_spcell(ue_index,
                                                            meas_ctxt.nci.gnb_id(meas_ctxt.gnb_id_bit_length),
                                                            meas_ctxt.nci,
                                                            strongest_neighbor.value(),
-                                                           cell_cfg.serving_cell_cfg.plmn,
-                                                           cell_cfg.serving_cell_cfg.tac);
+                                                           serving_cell.serving_cell_cfg.plmn,
+                                                           serving_cell.serving_cell_cfg.tac);
       return;
     }
   }
