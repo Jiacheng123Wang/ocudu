@@ -905,3 +905,37 @@ TEST_F(cell_meas_manager_test, when_neighbor_relation_references_unknown_cell_th
   ASSERT_TRUE(meas_cfg.has_value());
   ASSERT_FALSE(meas_cfg.value().meas_obj_to_add_mod_list.empty());
 }
+
+TEST_F(cell_meas_manager_test, when_cell_config_is_updated_again_then_cho_config_has_no_duplicate_cells)
+{
+  create_cho_manager_single_frequency();
+
+  cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
+  ASSERT_NE(ue_index, cu_cp_ue_index_t::invalid);
+  ASSERT_TRUE(ue_mng.set_plmn(ue_index, plmn_identity::test_value()));
+  attach_rrc_ue(ue_index);
+
+  gnb_id_t         gnb_id{0x19b, 32};
+  nr_cell_identity nci_serving = nr_cell_identity::create(gnb_id, 0).value();
+  nr_cell_identity nci_target  = nr_cell_identity::create(gnb_id, 1).value();
+
+  // Re-apply the target cell's own configuration, as a DU re-attach does.
+  std::optional<cell_meas_config> target_cfg = manager->get_cell_config(nci_target);
+  ASSERT_TRUE(target_cfg.has_value());
+  ASSERT_TRUE(manager->update_cell_config(nci_target, target_cfg.value().serving_cell_cfg));
+
+  // The CHO measurement config must list each candidate cell exactly once.
+  std::vector<pci_t> candidate_pcis = {2, 3};
+  auto cho_result = manager->get_measurement_config(ue_index, nci_serving, std::nullopt, true, candidate_pcis);
+  ASSERT_TRUE(cho_result.has_value());
+
+  std::map<pci_t, unsigned> pci_counts;
+  for (const auto& meas_obj : cho_result->meas_obj_to_add_mod_list) {
+    for (const auto& cell : meas_obj.meas_obj_nr->cells_to_add_mod_list) {
+      pci_counts[cell.pci]++;
+    }
+  }
+  for (const auto& [pci, count] : pci_counts) {
+    EXPECT_EQ(count, 1U) << "pci=" << pci << " listed " << count << " times after a repeated cell update";
+  }
+}

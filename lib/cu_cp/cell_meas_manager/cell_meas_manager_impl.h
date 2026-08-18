@@ -62,6 +62,10 @@ private:
 
   void update_measurement_object(nr_cell_identity nci, const serving_cell_meas_config& serving_cell_cfg);
 
+  /// \brief Detach a cell from the measurement object lookups, dropping the frequency's measurement object
+  /// when the cell was the last one attached to it. No-op for an unknown cell.
+  void remove_measurement_object(nr_cell_identity nci);
+
   void store_measurement_results(cu_cp_ue_index_t ue_index, const rrc_meas_results& meas_results);
 
   cell_meas_manager_config             cfg;

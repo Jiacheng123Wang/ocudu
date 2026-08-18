@@ -511,15 +511,18 @@ void cell_meas_manager::update_measurement_object(nr_cell_identity              
 {
   ocudu_assert(is_complete(serving_cell_cfg), "Incomplete measurement object update for nci={:#x}", nci);
 
+  // Detach the cell from the frequency of any previous configuration first, so a repeated update (e.g. a DU
+  // re-attach) does not append a duplicate lookup entry and a frequency change does not leave a stale one.
+  remove_measurement_object(nci);
+
   ssb_frequency_t ssb_freq = serving_cell_cfg.ssb_arfcn.value().value();
 
   // Add to lookup.
-  if (ssb_freq_to_ncis.find(ssb_freq) != ssb_freq_to_ncis.end()) {
-    ssb_freq_to_ncis.at(ssb_freq).push_back(nci);
-  } else {
-    ssb_freq_to_ncis.emplace(ssb_freq, std::vector<nr_cell_identity>{nci});
+  auto& freq_ncis = ssb_freq_to_ncis[ssb_freq];
+  if (std::find(freq_ncis.begin(), freq_ncis.end(), nci) == freq_ncis.end()) {
+    freq_ncis.push_back(nci);
   }
-  nci_to_serving_cell_meas_config.emplace(serving_cell_cfg.nci, serving_cell_cfg);
+  nci_to_serving_cell_meas_config[serving_cell_cfg.nci] = serving_cell_cfg;
 
   if (ssb_freq_to_meas_object.find(ssb_freq) != ssb_freq_to_meas_object.end()) {
     // If the measurement object is already present, we ignore the duplicate.
@@ -527,6 +530,29 @@ void cell_meas_manager::update_measurement_object(nr_cell_identity              
     return;
   }
   ssb_freq_to_meas_object.emplace(ssb_freq, generate_measurement_object(serving_cell_cfg));
+}
+
+void cell_meas_manager::remove_measurement_object(nr_cell_identity nci)
+{
+  // The stored serving-cell config remembers the frequency the cell was last attached to.
+  auto old_cfg_it = nci_to_serving_cell_meas_config.find(nci);
+  if (old_cfg_it == nci_to_serving_cell_meas_config.end()) {
+    return;
+  }
+  ssb_frequency_t old_ssb_freq = old_cfg_it->second.ssb_arfcn.value().value();
+
+  auto freq_ncis_it = ssb_freq_to_ncis.find(old_ssb_freq);
+  if (freq_ncis_it != ssb_freq_to_ncis.end()) {
+    auto& freq_ncis = freq_ncis_it->second;
+    freq_ncis.erase(std::remove(freq_ncis.begin(), freq_ncis.end(), nci), freq_ncis.end());
+    if (freq_ncis.empty()) {
+      // Last cell on this frequency: drop the measurement object with it.
+      ssb_freq_to_ncis.erase(freq_ncis_it);
+      ssb_freq_to_meas_object.erase(old_ssb_freq);
+    }
+  }
+
+  nci_to_serving_cell_meas_config.erase(old_cfg_it);
 }
 
 expected<std::pair<unsigned, nr_cell_identity>> cell_meas_manager::find_neighbour_nci(pci_t pci)
