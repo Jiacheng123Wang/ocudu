@@ -16,6 +16,23 @@
 using namespace ocudu;
 using namespace ocucp;
 
+/// Builds a config that only removes the measurement ids, objects and report configs of \c current, so a
+/// UE whose measurements no longer apply can be told to drop them. Returns nullopt when there is nothing to
+/// remove.
+static std::optional<rrc_meas_cfg> make_removal_only_meas_config(const std::optional<rrc_meas_cfg>& current)
+{
+  if (!current.has_value()) {
+    return std::nullopt;
+  }
+  rrc_meas_cfg rem_cfg;
+  add_old_meas_config_to_rem_list(current.value(), rem_cfg);
+  if (rem_cfg.meas_obj_to_rem_list.empty() && rem_cfg.meas_id_to_rem_list.empty() &&
+      rem_cfg.report_cfg_to_rem_list.empty()) {
+    return std::nullopt;
+  }
+  return rem_cfg;
+}
+
 cell_meas_manager::cell_meas_manager(const cell_meas_manager_config&       cfg_,
                                      const cell_meas_manager_dependencies& dependencies) :
   cfg(cfg_),
@@ -40,6 +57,9 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_
   // Find cell.
   if (cfg.cells.find(serving_nci) == cfg.cells.end()) {
     logger.debug("Couldn't find cell config for nci={:#x}", serving_nci);
+    if (!cond_meas) {
+      return remove_current_meas_config(ue_index, current_meas_config);
+    }
     return meas_cfg;
   }
   const auto& cell_config = cfg.cells.at(serving_nci);
@@ -47,6 +67,9 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_
   // Measurement config is only generated if serving cell config is complete.
   if (!is_complete(cell_config.serving_cell_cfg)) {
     logger.debug("ue={}: Serving cell config is incomplete for nci={:#x}", ue_index, serving_nci);
+    if (!cond_meas) {
+      return remove_current_meas_config(ue_index, current_meas_config);
+    }
     return meas_cfg;
   }
 
@@ -55,7 +78,7 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_
     logger.debug("ue={}: No neighbor cells configured and periodic serving cell reports disabled for nci={:#x}",
                  ue_index,
                  serving_nci);
-    return meas_cfg;
+    return remove_current_meas_config(ue_index, current_meas_config);
   }
 
   auto& ue_meas_context = ue_mng.get_measurement_context(ue_index);
@@ -228,6 +251,20 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_
   }
 
   return meas_cfg;
+}
+
+std::optional<rrc_meas_cfg>
+cell_meas_manager::remove_current_meas_config(cu_cp_ue_index_t                   ue_index,
+                                              const std::optional<rrc_meas_cfg>& current_meas_config)
+{
+  std::optional<rrc_meas_cfg> rem_cfg = make_removal_only_meas_config(current_meas_config);
+  if (rem_cfg.has_value()) {
+    // The UE is left without measurements: drop its measurement id bookkeeping.
+    auto& ue_meas_context = ue_mng.get_measurement_context(ue_index);
+    ue_meas_context.clear_meas_obj_ids();
+    ue_meas_context.clear_meas_ids();
+  }
+  return rem_cfg;
 }
 
 std::optional<cell_meas_config> cell_meas_manager::get_cell_config(nr_cell_identity nci)

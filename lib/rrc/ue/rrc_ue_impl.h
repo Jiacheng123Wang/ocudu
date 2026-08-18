@@ -86,17 +86,18 @@ public:
                                                      std::optional<cu_cp_release_redirect_nr_info> redirect_nr_info = std::nullopt) override;
   rrc_ue_transfer_context get_transfer_context() override;
   std::optional<rrc_meas_cfg>
-                         generate_meas_config(const std::optional<rrc_meas_cfg>& current_meas_config = std::nullopt,
-                                              bool                               cond_meas           = false,
-                                              span<const pci_t>                  candidate_pcis      = {}) override;
-  byte_buffer            get_packed_meas_config(span<const pci_t> candidate_pcis = {}) override;
-  void                   update_meas_config(const rrc_meas_cfg& cfg) override;
-  std::optional<uint8_t> get_serving_cell_mo() override;
-  byte_buffer            get_rrc_handover_command(const rrc_reconfiguration_procedure_request& request,
-                                                  unsigned                                     transaction_id) override;
-  byte_buffer            handle_rrc_handover_command(byte_buffer cmd) override;
-  bool                   handle_rrc_handover_preparation_info(byte_buffer pdu) override;
-  void                   create_srb(const srb_creation_message& msg) override;
+              generate_meas_config(const std::optional<rrc_meas_cfg>& current_meas_config = std::nullopt,
+                                   bool                               cond_meas           = false,
+                                   span<const pci_t>                  candidate_pcis      = {}) override;
+  byte_buffer get_packed_meas_config(span<const pci_t> candidate_pcis = {}) override;
+  void        update_meas_config(const rrc_meas_cfg& cfg) override;
+  std::optional<rrc_meas_cfg>           get_meas_config() override { return context.meas_cfg; }
+  std::optional<uint8_t>                get_serving_cell_mo() override;
+  byte_buffer                           get_rrc_handover_command(const rrc_reconfiguration_procedure_request& request,
+                                                                 unsigned                                     transaction_id) override;
+  byte_buffer                           handle_rrc_handover_command(byte_buffer cmd) override;
+  bool                                  handle_rrc_handover_preparation_info(byte_buffer pdu) override;
+  void                                  create_srb(const srb_creation_message& msg) override;
   static_vector<srb_id_t, MAX_NOF_SRBS> get_srbs() override;
   void                                  set_rrc_state(rrc_state state) override { context.state = state; }
   rrc_state                             get_rrc_state() const override;

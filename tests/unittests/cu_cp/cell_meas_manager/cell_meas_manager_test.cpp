@@ -377,8 +377,12 @@ TEST_F(cell_meas_manager_test, when_invalid_cell_config_update_received_then_con
             serving_cell_cfg.ssb_arfcn);
   ASSERT_TRUE(initial_meas_cfg.value().report_cfg_to_add_mod_list.empty());
 
+  // The target cell's config is incomplete, so nothing can be measured from it: the UE's current
+  // measurements are removed instead of being silently kept.
   std::optional<rrc_meas_cfg> target_meas_cfg = manager->get_measurement_config(ue_index, target_nci, initial_meas_cfg);
-  ASSERT_FALSE(target_meas_cfg.has_value());
+  ASSERT_TRUE(target_meas_cfg.has_value());
+  ASSERT_TRUE(target_meas_cfg.value().meas_obj_to_add_mod_list.empty());
+  ASSERT_FALSE(target_meas_cfg.value().meas_obj_to_rem_list.empty());
 }
 
 TEST_F(cell_meas_manager_test, when_t312_is_configured_then_meas_obj_has_t312_and_report_cfg_has_t312)
@@ -1232,4 +1236,57 @@ TEST_F(cell_meas_manager_test, when_report_config_type_conflicts_with_references
   // A fresh id is accepted.
   EXPECT_TRUE(manager->add_or_update_report_config(uint_to_report_cfg_id(10), rrc_report_cfg_nr{periodical_cfg}));
   EXPECT_TRUE(manager->set_periodic_report_config(nci_a, uint_to_report_cfg_id(10)));
+}
+
+TEST_F(cell_meas_manager_test, when_nothing_remains_to_measure_then_removal_only_config_is_generated)
+{
+  create_default_manager();
+
+  cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
+  ASSERT_NE(ue_index, cu_cp_ue_index_t::invalid);
+  ASSERT_TRUE(ue_mng.set_plmn(ue_index, plmn_identity::test_value()));
+
+  gnb_id_t         gnb_id{0x19b, 32};
+  nr_cell_identity nci_a = nr_cell_identity::create(gnb_id, 0).value();
+  nr_cell_identity nci_b = nr_cell_identity::create(gnb_id, 1).value();
+
+  std::optional<rrc_meas_cfg> current = manager->get_measurement_config(ue_index, nci_a);
+  ASSERT_TRUE(current.has_value());
+
+  // Strip the serving cell of everything it could measure or report.
+  ASSERT_TRUE(manager->remove_neighbor(nci_a, nci_b));
+  ASSERT_TRUE(manager->set_periodic_report_config(nci_a, std::nullopt));
+
+  // With the UE's current config provided, a removal-only config is generated.
+  std::optional<rrc_meas_cfg> rem_cfg = manager->get_measurement_config(ue_index, nci_a, current);
+  ASSERT_TRUE(rem_cfg.has_value());
+  EXPECT_TRUE(rem_cfg.value().meas_obj_to_add_mod_list.empty());
+  EXPECT_TRUE(rem_cfg.value().meas_id_to_add_mod_list.empty());
+  EXPECT_EQ(rem_cfg.value().meas_obj_to_rem_list.size(), current.value().meas_obj_to_add_mod_list.size());
+  EXPECT_EQ(rem_cfg.value().meas_id_to_rem_list.size(), current.value().meas_id_to_add_mod_list.size());
+
+  // Without a current config there is nothing to remove.
+  EXPECT_FALSE(manager->get_measurement_config(ue_index, nci_a).has_value());
+}
+
+TEST_F(cell_meas_manager_test, when_serving_cell_is_removed_then_removal_only_config_is_generated)
+{
+  create_default_manager();
+
+  cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
+  ASSERT_NE(ue_index, cu_cp_ue_index_t::invalid);
+  ASSERT_TRUE(ue_mng.set_plmn(ue_index, plmn_identity::test_value()));
+
+  gnb_id_t         gnb_id{0x19b, 32};
+  nr_cell_identity nci_a = nr_cell_identity::create(gnb_id, 0).value();
+
+  std::optional<rrc_meas_cfg> current = manager->get_measurement_config(ue_index, nci_a);
+  ASSERT_TRUE(current.has_value());
+
+  ASSERT_TRUE(manager->remove_cell_config(nci_a));
+
+  std::optional<rrc_meas_cfg> rem_cfg = manager->get_measurement_config(ue_index, nci_a, current);
+  ASSERT_TRUE(rem_cfg.has_value());
+  EXPECT_TRUE(rem_cfg.value().meas_obj_to_add_mod_list.empty());
+  EXPECT_FALSE(rem_cfg.value().meas_obj_to_rem_list.empty());
 }

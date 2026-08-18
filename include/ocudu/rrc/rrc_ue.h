@@ -356,6 +356,9 @@ public:
   /// outer CHO RRCReconfiguration), so that context.meas_cfg stays in sync with VarMeasConfig.
   virtual void update_meas_config(const rrc_meas_cfg& cfg) = 0;
 
+  /// \brief Get the measurement config currently stored for the UE, if any.
+  virtual std::optional<rrc_meas_cfg> get_meas_config() = 0;
+
   /// \brief Get the serving cell measurement object for the current serving cell of the UE.
   virtual std::optional<uint8_t> get_serving_cell_mo() = 0;
 

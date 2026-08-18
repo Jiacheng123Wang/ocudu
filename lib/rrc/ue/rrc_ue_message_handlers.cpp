@@ -1034,8 +1034,15 @@ std::optional<rrc_meas_cfg> rrc_ue_impl::generate_meas_config(const std::optiona
       context.cell.cgi.nci, current_meas_config, cond_meas, candidate_pcis);
 
   if (!cond_meas) {
+    // A config carrying only removals leaves the UE without measurement configuration once applied.
+    const bool removal_only = result.has_value() && result.value().meas_obj_to_add_mod_list.empty() &&
+                              result.value().meas_id_to_add_mod_list.empty() &&
+                              result.value().report_cfg_to_add_mod_list.empty();
     // Store regular meas config and derive serving cell MO.
-    context.meas_cfg = result;
+    context.meas_cfg = removal_only ? std::nullopt : result;
+    if (removal_only) {
+      context.serving_cell_mo = std::nullopt;
+    }
     if (context.meas_cfg.has_value()) {
       for (const auto& meas_obj : context.meas_cfg.value().meas_obj_to_add_mod_list) {
         if (meas_obj.meas_obj_nr.has_value() && meas_obj.meas_obj_nr.value().ssb_freq == context.cell.ssb_arfcn) {

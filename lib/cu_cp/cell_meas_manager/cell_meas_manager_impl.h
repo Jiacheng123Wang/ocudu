@@ -107,6 +107,11 @@ private:
   /// when the cell was the last one attached to it. No-op for an unknown cell.
   void remove_measurement_object(nr_cell_identity nci);
 
+  /// \brief Build a config that only removes the UE's current measurement config and drop the UE's
+  /// measurement id bookkeeping. Returns nullopt when the UE has nothing to remove.
+  std::optional<rrc_meas_cfg> remove_current_meas_config(cu_cp_ue_index_t                   ue_index,
+                                                         const std::optional<rrc_meas_cfg>& current_meas_config);
+
   void store_measurement_results(cu_cp_ue_index_t ue_index, const rrc_meas_results& meas_results);
 
   cell_meas_manager_config             cfg;

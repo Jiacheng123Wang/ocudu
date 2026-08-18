@@ -803,6 +803,8 @@ public:
 
   void update_meas_config(const rrc_meas_cfg& /* cfg */) override {}
 
+  std::optional<rrc_meas_cfg> get_meas_config() override { return std::nullopt; }
+
   std::optional<uint8_t> get_serving_cell_mo() override
   {
     logger.info("Received a new request to get serving cell measurement object");
