@@ -287,6 +287,9 @@ bool cell_meas_manager::update_cell_config(nr_cell_identity nci, const serving_c
   }
 
   if (!is_complete(serv_cell_cfg)) {
+    // The parameters are replaced as a whole: a cell that stops being complete must not stay attached to its
+    // measurement object with the parameters it had before.
+    remove_measurement_object(nci);
     logger.debug("Added/Updated incomplete cell measurement configuration for nci={:#x}", nci);
   } else {
     // Only update measurement object if the configuration is complete.
@@ -295,6 +298,200 @@ bool cell_meas_manager::update_cell_config(nr_cell_identity nci, const serving_c
   }
 
   log_cells(logger, cfg);
+
+  return true;
+}
+
+bool cell_meas_manager::remove_cell_config(nr_cell_identity nci)
+{
+  auto cell_it = cfg.cells.find(nci);
+  if (cell_it == cfg.cells.end()) {
+    logger.warning("Cannot remove cell nci={:#x}. Cause: No cell config for this NCI", nci.value());
+    return false;
+  }
+
+  // Detach the cell from the measurement object lookups.
+  remove_measurement_object(nci);
+
+  cfg.cells.erase(cell_it);
+
+  // Cascade: drop the neighbor relations of other cells pointing at the removed cell.
+  for (auto& [other_nci, other_cell] : cfg.cells) {
+    auto removed_from = std::remove_if(other_cell.ncells.begin(),
+                                       other_cell.ncells.end(),
+                                       [nci](const neighbor_cell_meas_config& ncell) { return ncell.nci == nci; });
+    if (removed_from != other_cell.ncells.end()) {
+      other_cell.ncells.erase(removed_from, other_cell.ncells.end());
+      logger.info("Removed neighbor relation from nci={:#x} to removed cell nci={:#x}", other_nci.value(), nci.value());
+    }
+  }
+
+  logger.info("Removed cell nci={:#x}", nci.value());
+  log_cells(logger, cfg);
+
+  return true;
+}
+
+bool cell_meas_manager::add_or_update_neighbor(nr_cell_identity             serving_nci,
+                                               nr_cell_identity             neighbor_nci,
+                                               std::vector<report_cfg_id_t> report_cfg_ids)
+{
+  if (serving_nci == neighbor_nci) {
+    logger.warning("Cannot add neighbor relation for nci={:#x}. Cause: A cell cannot neighbor itself",
+                   serving_nci.value());
+    return false;
+  }
+  auto serving_it = cfg.cells.find(serving_nci);
+  if (serving_it == cfg.cells.end()) {
+    logger.warning("Cannot add neighbor relation. Cause: No cell config for serving nci={:#x}", serving_nci.value());
+    return false;
+  }
+  if (cfg.cells.find(neighbor_nci) == cfg.cells.end()) {
+    logger.warning("Cannot add neighbor relation. Cause: No cell config for neighbor nci={:#x}", neighbor_nci.value());
+    return false;
+  }
+  for (report_cfg_id_t report_cfg_id : report_cfg_ids) {
+    auto report_cfg_it = cfg.report_config_ids.find(report_cfg_id);
+    if (report_cfg_it == cfg.report_config_ids.end()) {
+      logger.warning("Cannot add neighbor relation. Cause: No report config with id={}", to_underlying(report_cfg_id));
+      return false;
+    }
+    if (std::holds_alternative<rrc_periodical_report_cfg>(report_cfg_it->second)) {
+      logger.warning("Cannot add neighbor relation. Cause: Report config id={} is periodical (serving cell only)",
+                     to_underlying(report_cfg_id));
+      return false;
+    }
+  }
+
+  auto ncell_it = std::find_if(serving_it->second.ncells.begin(),
+                               serving_it->second.ncells.end(),
+                               [neighbor_nci](const neighbor_cell_meas_config& nc) { return nc.nci == neighbor_nci; });
+  if (ncell_it != serving_it->second.ncells.end()) {
+    ncell_it->report_cfg_ids = std::move(report_cfg_ids);
+    logger.info("Updated neighbor relation from nci={:#x} to nci={:#x}", serving_nci.value(), neighbor_nci.value());
+  } else {
+    neighbor_cell_meas_config& ncell = serving_it->second.ncells.emplace_back();
+    ncell.nci                        = neighbor_nci;
+    ncell.report_cfg_ids             = std::move(report_cfg_ids);
+    logger.info("Added neighbor relation from nci={:#x} to nci={:#x}", serving_nci.value(), neighbor_nci.value());
+  }
+  log_cells(logger, cfg);
+
+  return true;
+}
+
+bool cell_meas_manager::remove_neighbor(nr_cell_identity serving_nci, nr_cell_identity neighbor_nci)
+{
+  auto serving_it = cfg.cells.find(serving_nci);
+  if (serving_it == cfg.cells.end()) {
+    logger.warning("Cannot remove neighbor relation. Cause: No cell config for serving nci={:#x}", serving_nci.value());
+    return false;
+  }
+  auto ncell_it = std::find_if(serving_it->second.ncells.begin(),
+                               serving_it->second.ncells.end(),
+                               [neighbor_nci](const neighbor_cell_meas_config& nc) { return nc.nci == neighbor_nci; });
+  if (ncell_it == serving_it->second.ncells.end()) {
+    logger.warning("Cannot remove neighbor relation. Cause: nci={:#x} is not a neighbor of nci={:#x}",
+                   neighbor_nci.value(),
+                   serving_nci.value());
+    return false;
+  }
+  serving_it->second.ncells.erase(ncell_it);
+  logger.info("Removed neighbor relation from nci={:#x} to nci={:#x}", serving_nci.value(), neighbor_nci.value());
+  log_cells(logger, cfg);
+
+  return true;
+}
+
+bool cell_meas_manager::add_or_update_report_config(report_cfg_id_t report_cfg_id, const rrc_report_cfg_nr& report_cfg)
+{
+  const bool is_periodical = std::holds_alternative<rrc_periodical_report_cfg>(report_cfg);
+
+  // A referenced report config must keep the report-type class its references rely on.
+  for (const auto& [nci, cell] : cfg.cells) {
+    if (is_periodical) {
+      for (const auto& ncell : cell.ncells) {
+        if (std::find(ncell.report_cfg_ids.begin(), ncell.report_cfg_ids.end(), report_cfg_id) !=
+            ncell.report_cfg_ids.end()) {
+          logger.warning("Cannot update report config id={} to periodical. Cause: Referenced by a neighbor "
+                         "relation of nci={:#x}",
+                         to_underlying(report_cfg_id),
+                         nci.value());
+          return false;
+        }
+      }
+    } else if (cell.periodic_report_cfg_id == report_cfg_id) {
+      logger.warning("Cannot update report config id={} to non-periodical. Cause: Used as periodic report of nci={:#x}",
+                     to_underlying(report_cfg_id),
+                     nci.value());
+      return false;
+    }
+  }
+
+  const bool existed                   = cfg.report_config_ids.count(report_cfg_id) > 0;
+  cfg.report_config_ids[report_cfg_id] = report_cfg;
+  logger.info("{} report config id={}", existed ? "Updated" : "Added", to_underlying(report_cfg_id));
+
+  return true;
+}
+
+bool cell_meas_manager::remove_report_config(report_cfg_id_t report_cfg_id)
+{
+  auto report_cfg_it = cfg.report_config_ids.find(report_cfg_id);
+  if (report_cfg_it == cfg.report_config_ids.end()) {
+    logger.warning("Cannot remove report config id={}. Cause: No report config with this id",
+                   to_underlying(report_cfg_id));
+    return false;
+  }
+  for (const auto& [nci, cell] : cfg.cells) {
+    if (cell.periodic_report_cfg_id == report_cfg_id) {
+      logger.warning("Cannot remove report config id={}. Cause: Used as periodic report of nci={:#x}",
+                     to_underlying(report_cfg_id),
+                     nci.value());
+      return false;
+    }
+    for (const auto& ncell : cell.ncells) {
+      if (std::find(ncell.report_cfg_ids.begin(), ncell.report_cfg_ids.end(), report_cfg_id) !=
+          ncell.report_cfg_ids.end()) {
+        logger.warning("Cannot remove report config id={}. Cause: Referenced by a neighbor relation of nci={:#x}",
+                       to_underlying(report_cfg_id),
+                       nci.value());
+        return false;
+      }
+    }
+  }
+  cfg.report_config_ids.erase(report_cfg_it);
+  logger.info("Removed report config id={}", to_underlying(report_cfg_id));
+
+  return true;
+}
+
+bool cell_meas_manager::set_periodic_report_config(nr_cell_identity nci, std::optional<report_cfg_id_t> report_cfg_id)
+{
+  auto cell_it = cfg.cells.find(nci);
+  if (cell_it == cfg.cells.end()) {
+    logger.warning("Cannot set periodic report. Cause: No cell config for nci={:#x}", nci.value());
+    return false;
+  }
+  if (report_cfg_id.has_value()) {
+    auto report_cfg_it = cfg.report_config_ids.find(report_cfg_id.value());
+    if (report_cfg_it == cfg.report_config_ids.end()) {
+      logger.warning("Cannot set periodic report for nci={:#x}. Cause: No report config with id={}",
+                     nci.value(),
+                     to_underlying(report_cfg_id.value()));
+      return false;
+    }
+    if (!std::holds_alternative<rrc_periodical_report_cfg>(report_cfg_it->second)) {
+      logger.warning("Cannot set periodic report for nci={:#x}. Cause: Report config id={} is not periodical",
+                     nci.value(),
+                     to_underlying(report_cfg_id.value()));
+      return false;
+    }
+  }
+  cell_it->second.periodic_report_cfg_id = report_cfg_id;
+  logger.info("Set periodic report of nci={:#x} to id={}",
+              nci.value(),
+              report_cfg_id.has_value() ? std::to_string(to_underlying(report_cfg_id.value())) : "none");
 
   return true;
 }
