@@ -336,23 +336,29 @@ int main(int argc, char** argv)
     std::ofstream csv(fname);
     csv << "# gpu=" << p.gpu_type << " bg=" << p.bg << " z=" << p.z << " k=" << k << " rate=" << rate << " e=" << e
         << " max_iter=" << p.max_iter << " trials=" << p.trials << "\n";
-    csv << "snr_db,cpu_pass,gpu_pass,total,time_s\n";
+    csv << "snr_db,cpu_pass,gpu_pass,total,time_cpu_s,time_gpu_s\n";
     std::fprintf(stderr, "rate %.4f (e=%u):", rate, e);
 
     for (double snr : p.snrs) {
       const double sigma = std::sqrt(std::pow(10.0, -snr / 10.0) / 2.0);
       unsigned     cpu_pass = 0, gpu_pass = 0;
-      const auto   t0       = std::chrono::steady_clock::now();
+      // Per-decoder wall time accumulated over the point's trials (run_once
+      // times each decode separately, so the CPU and GPU curves carry their
+      // own run times).
+      double cpu_us_sum = 0.0, gpu_us_sum = 0.0;
       for (unsigned t = 0; t != p.trials; ++t) {
+        double c_us = 0.0, g_us = 0.0;
         const round_trip r = run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma,
-                                      p.max_iter, p.cpu_max_iter, bg, ls);
+                                      p.max_iter, p.cpu_max_iter, bg, ls, &c_us, &g_us);
         cpu_pass += r.cpu_ok ? 1 : 0;
         gpu_pass += r.gpu_ok ? 1 : 0;
+        cpu_us_sum += c_us;
+        gpu_us_sum += g_us;
       }
-      const auto   t1     = std::chrono::steady_clock::now();
-      const double time_s = std::chrono::duration<double>(t1 - t0).count();
-      csv << snr << "," << cpu_pass << "," << gpu_pass << "," << p.trials << "," << time_s << "\n";
-      std::fprintf(stderr, " %gdB:%u/%u (%.1fs)", snr, gpu_pass, p.trials, time_s);
+      csv << snr << "," << cpu_pass << "," << gpu_pass << "," << p.trials << ","
+          << cpu_us_sum / 1e6 << "," << gpu_us_sum / 1e6 << "\n";
+      std::fprintf(stderr, " %gdB:%u/%u (cpu %.1fs gpu %.1fs)", snr, gpu_pass, p.trials, cpu_us_sum / 1e6,
+                   gpu_us_sum / 1e6);
     }
     csv.close();
     std::fprintf(stderr, " -> %s\n", fname);

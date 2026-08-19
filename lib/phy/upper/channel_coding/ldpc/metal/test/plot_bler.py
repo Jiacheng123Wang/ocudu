@@ -43,8 +43,8 @@ def wilson_bler_bounds(pass_count, total):
 
 
 def load_series(path):
-    """Returns (snrs, bler_cpu, bler_gpu, cpu_ci, gpu_ci, times)."""
-    snrs, cpu, gpu, cpu_ci, gpu_ci, times = [], [], [], [], [], []
+    """Returns (snrs, bler_cpu, bler_gpu, cpu_ci, gpu_ci, cpu_times, gpu_times)."""
+    snrs, cpu, gpu, cpu_ci, gpu_ci, cpu_times, gpu_times = [], [], [], [], [], [], []
     with open(path) as f:
         for line in f:
             line = line.strip()
@@ -57,10 +57,15 @@ def load_series(path):
             gpu.append(1.0 - gpu_pass / total)
             cpu_ci.append(wilson_bler_bounds(cpu_pass, total))
             gpu_ci.append(wilson_bler_bounds(gpu_pass, total))
-            # Optional per-SNR wall-clock column (seconds, added for the timing
-            # annotation; absent in older CSVs).
-            times.append(float(parts[4]) if len(parts) > 4 and parts[4] else None)
-    return snrs, cpu, gpu, cpu_ci, gpu_ci, times
+            # Optional per-decoder per-SNR wall-clock columns (seconds, added for
+            # the timing annotation; absent in older CSVs).
+            if len(parts) >= 6 and parts[4] and parts[5]:
+                cpu_times.append(float(parts[4]))
+                gpu_times.append(float(parts[5]))
+            else:
+                cpu_times.append(None)
+                gpu_times.append(None)
+    return snrs, cpu, gpu, cpu_ci, gpu_ci, cpu_times, gpu_times
 
 
 def plot_group(bg, z, files, outdir, show, with_ci):
@@ -72,13 +77,13 @@ def plot_group(bg, z, files, outdir, show, with_ci):
     by_rate = {}
     for f in sorted(files):
         m = FILE_RE.match(os.path.basename(f))
-        snrs, cpu, gpu, cpu_ci, gpu_ci, times = load_series(f)
-        by_rate.setdefault(float(m.group(4)), (snrs, cpu, gpu, cpu_ci, gpu_ci, times))
+        snrs, cpu, gpu, cpu_ci, gpu_ci, cpu_times, gpu_times = load_series(f)
+        by_rate.setdefault(float(m.group(4)), (snrs, cpu, gpu, cpu_ci, gpu_ci, cpu_times, gpu_times))
 
     legend_handles = []
     for slot, rate in enumerate(sorted(by_rate)):
         color = RATE_COLORS[slot % len(RATE_COLORS)]
-        snrs, cpu, gpu, cpu_ci, gpu_ci, times = by_rate[rate]
+        snrs, cpu, gpu, cpu_ci, gpu_ci, cpu_times, gpu_times = by_rate[rate]
         (l_cpu,) = ax.plot(snrs, cpu, color=color, lw=2, ls="-", marker="o", ms=8,
                            mfc=color, mec=SURFACE, mew=1, label=f"R={rate:.3g} CPU", zorder=3)
         (l_gpu,) = ax.plot(snrs, gpu, color=color, lw=2, ls="--", marker="^", ms=9,
@@ -93,16 +98,26 @@ def plot_group(bg, z, files, outdir, show, with_ci):
                                          [h - b for (_, h), b in zip(gpu_ci, gpu)]),
                         fmt="none", ecolor=color, elinewidth=1, capsize=3, zorder=2)
 
-        # Timing annotation at the curve end: total wall time of the rate's run
-        # and the average per-SNR-point time (one run per CSV covers both
-        # decoders, so the annotation belongs to the curve pair).
-        if any(t is not None for t in times):
-            valid = [t for t in times if t is not None]
+        # Per-decoder timing annotations at each curve's end: the CPU and GPU
+        # curves carry their own total wall time and average per-SNR-point time
+        # (absent in older CSVs: skipped).
+        if any(t is not None for t in cpu_times):
+            valid = [t for t in cpu_times if t is not None]
             total_s = sum(valid)
             avg_s = total_s / len(valid)
-            ax.annotate(f"R={rate:.3g}: total {total_s:.0f}s · avg {avg_s:.1f}s/pt",
-                        xy=(snrs[-1], max(cpu[-1], gpu[-1])),
-                        xytext=(6, 6 + 12 * slot), textcoords="offset points",
+            ax.annotate(f"R={rate:.3g} CPU: total {total_s:.0f}s · avg {avg_s:.1f}s/pt",
+                        xy=(snrs[-1], cpu[-1]),
+                        xytext=(8, 10 + 14 * slot), textcoords="offset points",
+                        fontsize=7, color=INK_MUTED,
+                        bbox=dict(boxstyle="round,pad=0.25", fc=SURFACE, ec=color, lw=0.7, alpha=0.9),
+                        zorder=5)
+        if any(t is not None for t in gpu_times):
+            valid = [t for t in gpu_times if t is not None]
+            total_s = sum(valid)
+            avg_s = total_s / len(valid)
+            ax.annotate(f"R={rate:.3g} GPU: total {total_s:.0f}s · avg {avg_s:.1f}s/pt",
+                        xy=(snrs[-1], gpu[-1]),
+                        xytext=(8, -12 - 14 * slot), textcoords="offset points",
                         fontsize=7, color=color,
                         bbox=dict(boxstyle="round,pad=0.25", fc=SURFACE, ec=color, lw=0.7, alpha=0.9),
                         zorder=5)
