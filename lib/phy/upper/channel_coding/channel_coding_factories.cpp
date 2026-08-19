@@ -138,6 +138,13 @@ public:
                                                   ocudu::metal::decoder_engine::algo::layered_persistent, -1.0F,
                                                   cfg.ldpc_decoder_offset);
     }
+    if (dec_type == "metal_async") {
+      // Asynchronous residual (delta) belief propagation (P12): a barrier-free
+      // persistent grid injects per-edge deltas into a fixed-point atomic pool.
+      return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome,
+                                                  ocudu::metal::decoder_engine::algo::async_delta, -1.0F,
+                                                  cfg.ldpc_decoder_offset);
+    }
 #endif // OCUDU_METAL_LDPC
     if ((dec_type == "auto") || (dec_type == "generic")) {
       return std::make_unique<ldpc_decoder_generic>(cfg.force_decoding, cfg.early_stop_syndrome);

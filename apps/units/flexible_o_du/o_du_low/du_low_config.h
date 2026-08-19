@@ -50,6 +50,8 @@ struct du_low_unit_expert_upper_phy_config {
   /// - \c metal_flooding: as \c metal, with the flooding schedule (2 dispatches per round).
   /// - \c metal_persistent: as \c metal, with the whole (iteration, layer) loop as one
   ///   resident GPU dispatch (persistent threadgroups + in-kernel grid barriers).
+  /// - \c metal_async: asynchronous residual (delta) belief propagation - a barrier-free
+  ///   persistent grid injecting per-edge deltas into a fixed-point atomic posterior pool.
   std::string ldpc_decoder_type = "auto";
   /// \brief Offset min-sum parameter (beta) override for the Metal NMS decoders
   /// (-1 = unset: the decoder's tuned default applies, currently 0.5).

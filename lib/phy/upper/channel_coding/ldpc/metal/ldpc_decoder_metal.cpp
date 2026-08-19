@@ -195,12 +195,16 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
   // schedule's inherent damping allows a high norm, and the offset min-sum pair
   // (0.7, beta 0.5) closes the residual waterfall points to CPU parity. The
   // persistent variant (metal_persistent) runs the same schedule as one GPU
-  // resident dispatch and shares the CSR layout, defaults and buffers.
-  const float factor = (factor_override >= 0.0F) ? factor_override : 0.7F;
-  const float beta   = (beta_override >= 0.0F) ? beta_override : 0.5F;
+  // resident dispatch and shares the CSR layout, defaults and buffers. The
+  // asynchronous delta-BP variant (metal_async) is flooding-family and uses
+  // the flooding-tuned defaults (norm 0.45, beta 0).
+  const bool is_async = mode == metal::decoder_engine::algo::async_delta;
+  const float factor = (factor_override >= 0.0F) ? factor_override : (is_async ? 0.45F : 0.7F);
+  const float beta   = (beta_override >= 0.0F) ? beta_override : (is_async ? 0.0F : 0.5F);
   const metal::decoder_engine::algo init_mode =
-      (mode == metal::decoder_engine::algo::layered_persistent) ? metal::decoder_engine::algo::layered_persistent
-                                                                : metal::decoder_engine::algo::layered;
+      (mode == metal::decoder_engine::algo::async_delta)        ? metal::decoder_engine::algo::async_delta
+      : (mode == metal::decoder_engine::algo::layered_persistent) ? metal::decoder_engine::algo::layered_persistent
+                                                                  : metal::decoder_engine::algo::layered;
   if (!slot->engine->init(n, m, factor, beta, slot->h.get(), nullptr, slot->layered_info, init_mode,
                           enable_et)) {
     ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");

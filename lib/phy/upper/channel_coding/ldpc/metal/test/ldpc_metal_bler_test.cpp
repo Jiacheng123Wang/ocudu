@@ -260,6 +260,11 @@ int main(int argc, char** argv)
                                                    dec_factory_cfg.early_stop_syndrome,
                                                    ocudu::metal::decoder_engine::algo::layered_persistent, p.norm,
                                                    p.beta);
+  } else if ((p.gpu_type == "metal_async") && ((p.norm >= 0.0F) || (p.beta >= 0.0F))) {
+    // Async delta-BP experiments bypass the factory defaults (flooding-family norm 0.45, beta 0).
+    gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
+                                                   dec_factory_cfg.early_stop_syndrome,
+                                                   ocudu::metal::decoder_engine::algo::async_delta, p.norm, p.beta);
   } else {
     gpu_dec = create_ldpc_decoder_factory_sw(p.gpu_type, dec_factory_cfg)->create();
   }

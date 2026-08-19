@@ -31,6 +31,11 @@ public:
     /// threadgroups run the (iteration, layer) loops inside the kernel with a
     /// software grid barrier between layers (metal_persistent).
     layered_persistent,
+    /// Asynchronous residual (delta) belief propagation: a BARRIER-FREE
+    /// persistent grid (one threadgroup per check row plus a syndrome
+    /// poller) injects per-edge residual deltas into a fixed-point atomic
+    /// posterior pool (metal_async).
+    async_delta,
   };
 
   /// CSR edge layout for the layered schedule (built by the adapter). The fused
