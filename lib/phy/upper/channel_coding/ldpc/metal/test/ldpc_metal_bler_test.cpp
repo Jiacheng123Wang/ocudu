@@ -242,7 +242,7 @@ int main(int argc, char** argv)
       .force_decoding      = false,
       .early_stop_syndrome = true,
   };
-  auto cpu_dec = create_ldpc_decoder_factory_sw("generic", dec_factory_cfg)->create();
+  auto cpu_dec = create_ldpc_decoder_factory_sw("auto", dec_factory_cfg)->create();
   std::unique_ptr<ldpc_decoder> gpu_dec;
   if ((p.gpu_type == "metal") && ((p.norm >= 0.0F) || (p.beta >= 0.0F))) {
     // Norm/offset experiments bypass the factory defaults (layered norm 0.7, beta 0.5).
@@ -336,20 +336,23 @@ int main(int argc, char** argv)
     std::ofstream csv(fname);
     csv << "# gpu=" << p.gpu_type << " bg=" << p.bg << " z=" << p.z << " k=" << k << " rate=" << rate << " e=" << e
         << " max_iter=" << p.max_iter << " trials=" << p.trials << "\n";
-    csv << "snr_db,cpu_pass,gpu_pass,total\n";
+    csv << "snr_db,cpu_pass,gpu_pass,total,time_s\n";
     std::fprintf(stderr, "rate %.4f (e=%u):", rate, e);
 
     for (double snr : p.snrs) {
       const double sigma = std::sqrt(std::pow(10.0, -snr / 10.0) / 2.0);
       unsigned     cpu_pass = 0, gpu_pass = 0;
+      const auto   t0       = std::chrono::steady_clock::now();
       for (unsigned t = 0; t != p.trials; ++t) {
         const round_trip r = run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma,
                                       p.max_iter, p.cpu_max_iter, bg, ls);
         cpu_pass += r.cpu_ok ? 1 : 0;
         gpu_pass += r.gpu_ok ? 1 : 0;
       }
-      csv << snr << "," << cpu_pass << "," << gpu_pass << "," << p.trials << "\n";
-      std::fprintf(stderr, " %gdB:%u/%u", snr, gpu_pass, p.trials);
+      const auto   t1     = std::chrono::steady_clock::now();
+      const double time_s = std::chrono::duration<double>(t1 - t0).count();
+      csv << snr << "," << cpu_pass << "," << gpu_pass << "," << p.trials << "," << time_s << "\n";
+      std::fprintf(stderr, " %gdB:%u/%u (%.1fs)", snr, gpu_pass, p.trials, time_s);
     }
     csv.close();
     std::fprintf(stderr, " -> %s\n", fname);
