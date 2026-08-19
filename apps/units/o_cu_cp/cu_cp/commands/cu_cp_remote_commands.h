@@ -132,4 +132,161 @@ public:
   expected<nlohmann::json, std::string> execute(const nlohmann::json& json) override;
 };
 
+/// \brief Remote command that adds a cell to the mobility measurement configuration or replaces its
+/// measurement parameters.
+///
+/// The parameters are replaced as a whole: optional keys left out of the payload are cleared, which is also
+/// how a parameter is unset. The neighbor relations and the periodic report of the cell are kept. For cells
+/// served by a DU of this CU-CP the parameters provided over F1 take precedence on (re)attach, so the command
+/// is mainly used to declare external cells (and their radio parameters) at runtime.
+class mobility_cell_set_remote_command : public app_services::remote_command
+{
+  ocucp::cu_cp_command_handler& cu_cp;
+
+public:
+  explicit mobility_cell_set_remote_command(ocucp::cu_cp_command_handler& cu_cp_) : cu_cp(cu_cp_) {}
+
+  // See interface for documentation.
+  std::string_view get_name() const override { return "mobility_cell_set"; }
+
+  // See interface for documentation.
+  std::string_view get_description() const override
+  {
+    return "Add a cell to the mobility measurement configuration or replace its parameters: {nci, "
+           "gnb_id_bit_length, [pci], "
+           "[plmn], [tac], [band], [ssb_arfcn], [ssb_scs], [ssb_period], [ssb_offset], [ssb_duration]}";
+  }
+
+  // See interface for documentation.
+  expected<nlohmann::json, std::string> execute(const nlohmann::json& json) override;
+};
+
+/// \brief Remote command that removes a cell from the mobility measurement configuration, including the
+/// neighbor relations of other cells pointing at it.
+class mobility_cell_remove_remote_command : public app_services::remote_command
+{
+  ocucp::cu_cp_command_handler& cu_cp;
+
+public:
+  explicit mobility_cell_remove_remote_command(ocucp::cu_cp_command_handler& cu_cp_) : cu_cp(cu_cp_) {}
+
+  // See interface for documentation.
+  std::string_view get_name() const override { return "mobility_cell_remove"; }
+
+  // See interface for documentation.
+  std::string_view get_description() const override
+  {
+    return "Remove a cell from the mobility measurement configuration: {nci}";
+  }
+
+  // See interface for documentation.
+  expected<nlohmann::json, std::string> execute(const nlohmann::json& json) override;
+};
+
+/// \brief Remote command that adds a neighbor relation between two configured cells, or replaces the
+/// report config ids of an existing one. Directional: the reverse relation must be added separately.
+class neighbor_add_remote_command : public app_services::remote_command
+{
+  ocucp::cu_cp_command_handler& cu_cp;
+
+public:
+  explicit neighbor_add_remote_command(ocucp::cu_cp_command_handler& cu_cp_) : cu_cp(cu_cp_) {}
+
+  // See interface for documentation.
+  std::string_view get_name() const override { return "mobility_neighbor_add"; }
+
+  // See interface for documentation.
+  std::string_view get_description() const override
+  {
+    return "Add or update a neighbor relation: {nci, neighbor_nci, report_configs: [ids]}";
+  }
+
+  // See interface for documentation.
+  expected<nlohmann::json, std::string> execute(const nlohmann::json& json) override;
+};
+
+/// \brief Remote command that removes the neighbor relation between two cells.
+class neighbor_remove_remote_command : public app_services::remote_command
+{
+  ocucp::cu_cp_command_handler& cu_cp;
+
+public:
+  explicit neighbor_remove_remote_command(ocucp::cu_cp_command_handler& cu_cp_) : cu_cp(cu_cp_) {}
+
+  // See interface for documentation.
+  std::string_view get_name() const override { return "mobility_neighbor_remove"; }
+
+  // See interface for documentation.
+  std::string_view get_description() const override { return "Remove a neighbor relation: {nci, neighbor_nci}"; }
+
+  // See interface for documentation.
+  expected<nlohmann::json, std::string> execute(const nlohmann::json& json) override;
+};
+
+/// \brief Remote command that adds a new report configuration or replaces an existing one.
+///
+/// Distance and time based conditional events (d1, d2, t1) are not supported through this command.
+class report_config_set_remote_command : public app_services::remote_command
+{
+  ocucp::cu_cp_command_handler& cu_cp;
+
+public:
+  explicit report_config_set_remote_command(ocucp::cu_cp_command_handler& cu_cp_) : cu_cp(cu_cp_) {}
+
+  // See interface for documentation.
+  std::string_view get_name() const override { return "mobility_report_config_set"; }
+
+  // See interface for documentation.
+  std::string_view get_description() const override
+  {
+    return "Add or update a report configuration: {report_cfg_id, report_type, [report_interval_ms], "
+           "[event_triggered_report_type], [meas_trigger_quantity], [meas_trigger_quantity_threshold_db], "
+           "[meas_trigger_quantity_threshold_2_db], [meas_trigger_quantity_offset_db], [hysteresis_db], "
+           "[time_to_trigger_ms], [t312], [periodic_ho_rsrp_offset_db]}";
+  }
+
+  // See interface for documentation.
+  expected<nlohmann::json, std::string> execute(const nlohmann::json& json) override;
+};
+
+/// \brief Remote command that removes a report configuration. Refused while any neighbor relation or
+/// serving-cell periodic report references it.
+class report_config_remove_remote_command : public app_services::remote_command
+{
+  ocucp::cu_cp_command_handler& cu_cp;
+
+public:
+  explicit report_config_remove_remote_command(ocucp::cu_cp_command_handler& cu_cp_) : cu_cp(cu_cp_) {}
+
+  // See interface for documentation.
+  std::string_view get_name() const override { return "mobility_report_config_remove"; }
+
+  // See interface for documentation.
+  std::string_view get_description() const override { return "Remove a report configuration: {report_cfg_id}"; }
+
+  // See interface for documentation.
+  expected<nlohmann::json, std::string> execute(const nlohmann::json& json) override;
+};
+
+/// \brief Remote command that sets or clears the serving-cell periodical report config of a cell.
+class periodic_report_set_remote_command : public app_services::remote_command
+{
+  ocucp::cu_cp_command_handler& cu_cp;
+
+public:
+  explicit periodic_report_set_remote_command(ocucp::cu_cp_command_handler& cu_cp_) : cu_cp(cu_cp_) {}
+
+  // See interface for documentation.
+  std::string_view get_name() const override { return "mobility_periodic_report_set"; }
+
+  // See interface for documentation.
+  std::string_view get_description() const override
+  {
+    return "Set or clear the periodical report of a cell: {nci, [report_cfg_id]} (omit report_cfg_id to clear)";
+  }
+
+  // See interface for documentation.
+  expected<nlohmann::json, std::string> execute(const nlohmann::json& json) override;
+};
+
 } // namespace ocudu

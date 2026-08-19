@@ -28,13 +28,13 @@ static constexpr double MAX_HYSTERESIS_LOCATION_KM = 327.68;
 
 /// Validates field presence and physical range for event-triggered measurement parameters.
 /// Used by both event_triggered and cond_trigger report types.
-/// Returns true on success, prints a diagnostic and returns false on error.
-static bool validate_event_trigger_params(const cu_cp_unit_report_config& cfg)
+/// Returns the reason when the parameters are invalid.
+static error_type<std::string> validate_event_trigger_params(const cu_cp_unit_report_config& cfg)
 {
   if (!cfg.event_triggered_report_type.has_value()) {
-    fmt::print("report_cfg_id={}: event_triggered_report_type must be set for event-triggered/cond_trigger report\n",
-               cfg.report_cfg_id);
-    return false;
+    return make_unexpected(
+        fmt::format("report_cfg_id={}: event_triggered_report_type must be set for event-triggered/cond_trigger report",
+                    cfg.report_cfg_id));
   }
 
   const ocucp::rrc_event_id::event_id_t ev = *cfg.event_triggered_report_type;
@@ -44,9 +44,8 @@ static bool validate_event_trigger_params(const cu_cp_unit_report_config& cfg)
   if (cfg.report_type == "cond_trigger" &&
       (ev == ocucp::rrc_event_id::event_id_t::a1 || ev == ocucp::rrc_event_id::event_id_t::a2 ||
        ev == ocucp::rrc_event_id::event_id_t::a6)) {
-    fmt::print(
-        "report_cfg_id={}: event '{}' is not valid for report_type=cond_trigger\n", cfg.report_cfg_id, to_string(ev));
-    return false;
+    return make_unexpected(fmt::format(
+        "report_cfg_id={}: event '{}' is not valid for report_type=cond_trigger", cfg.report_cfg_id, to_string(ev)));
   }
 
   // D/T distance- and time-based events carry no measurement quantity, so they share the checks below. TS 38.331
@@ -55,27 +54,24 @@ static bool validate_event_trigger_params(const cu_cp_unit_report_config& cfg)
   if (ev == ocucp::rrc_event_id::event_id_t::d1 || ev == ocucp::rrc_event_id::event_id_t::t1 ||
       ev == ocucp::rrc_event_id::event_id_t::d2) {
     if (cfg.report_type != "cond_trigger" && ev != ocucp::rrc_event_id::event_id_t::d1) {
-      fmt::print("report_cfg_id={}: event '{}' is only valid for report_type=cond_trigger\n",
-                 cfg.report_cfg_id,
-                 to_string(ev));
-      return false;
+      return make_unexpected(fmt::format(
+          "report_cfg_id={}: event '{}' is only valid for report_type=cond_trigger", cfg.report_cfg_id, to_string(ev)));
     }
     if (ev == ocucp::rrc_event_id::event_id_t::d1 || ev == ocucp::rrc_event_id::event_id_t::d2) {
       // Common D1/D2: distance thresholds, hysteresis, and time-to-trigger are mandatory.
       if (!cfg.distance_thresh_from_ref1_km.has_value() || !cfg.distance_thresh_from_ref2_km.has_value()) {
-        fmt::print(
-            "report_cfg_id={}: {} event requires distance_thresh_from_ref1_km and distance_thresh_from_ref2_km\n",
+        return make_unexpected(fmt::format(
+            "report_cfg_id={}: {} event requires distance_thresh_from_ref1_km and distance_thresh_from_ref2_km",
             cfg.report_cfg_id,
-            to_string(ev));
-        return false;
+            to_string(ev)));
       }
       if (!cfg.hysteresis_location_km.has_value()) {
-        fmt::print("report_cfg_id={}: {} event requires hysteresis_location_km\n", cfg.report_cfg_id, to_string(ev));
-        return false;
+        return make_unexpected(fmt::format(
+            "report_cfg_id={}: {} event requires hysteresis_location_km", cfg.report_cfg_id, to_string(ev)));
       }
       if (!cfg.time_to_trigger_ms.has_value()) {
-        fmt::print("report_cfg_id={}: {} event requires time_to_trigger_ms\n", cfg.report_cfg_id, to_string(ev));
-        return false;
+        return make_unexpected(
+            fmt::format("report_cfg_id={}: {} event requires time_to_trigger_ms", cfg.report_cfg_id, to_string(ev)));
       }
       // TS 38.331 sec. 6.3.2 counts the distance thresholds in 50 m steps. A conditional trigger encodes them from
       // step 0, a measurement report from step 1, and the last step is 65525 for D1 and 65535 for D2.
@@ -85,117 +81,134 @@ static bool validate_event_trigger_params(const cu_cp_unit_report_config& cfg)
           ev == ocucp::rrc_event_id::event_id_t::d1 ? MAX_D1_DISTANCE_THRESH_KM : MAX_D2_DISTANCE_THRESH_KM;
       if (*cfg.distance_thresh_from_ref1_km < min_distance_km || *cfg.distance_thresh_from_ref1_km > max_distance_km ||
           *cfg.distance_thresh_from_ref2_km < min_distance_km || *cfg.distance_thresh_from_ref2_km > max_distance_km) {
-        fmt::print("report_cfg_id={}: {} distance thresholds must be in [{}..{}] km\n",
-                   cfg.report_cfg_id,
-                   to_string(ev),
-                   min_distance_km,
-                   max_distance_km);
-        return false;
+        return make_unexpected(fmt::format("report_cfg_id={}: {} distance thresholds must be in [{}..{}] km",
+                                           cfg.report_cfg_id,
+                                           to_string(ev),
+                                           min_distance_km,
+                                           max_distance_km));
       }
 
       if (*cfg.hysteresis_location_km > MAX_HYSTERESIS_LOCATION_KM) {
-        fmt::print("report_cfg_id={}: {} hysteresis_location_km must be at most {} km\n",
-                   cfg.report_cfg_id,
-                   to_string(ev),
-                   MAX_HYSTERESIS_LOCATION_KM);
-        return false;
+        return make_unexpected(fmt::format("report_cfg_id={}: {} hysteresis_location_km must be at most {} km",
+                                           cfg.report_cfg_id,
+                                           to_string(ev),
+                                           MAX_HYSTERESIS_LOCATION_KM));
       }
 
       // D1-only: the two reference locations.
       if (ev == ocucp::rrc_event_id::event_id_t::d1) {
         if (!cfg.ref_location1.has_value() || !cfg.ref_location2.has_value()) {
-          fmt::print("report_cfg_id={}: D1 event requires ref_location1 and ref_location2\n", cfg.report_cfg_id);
-          return false;
+          return make_unexpected(
+              fmt::format("report_cfg_id={}: D1 event requires ref_location1 and ref_location2", cfg.report_cfg_id));
         }
       }
     } else if (ev == ocucp::rrc_event_id::event_id_t::t1) {
       if (!cfg.t1_thres.has_value()) {
-        fmt::print("report_cfg_id={}: T1 event requires t1_thres\n", cfg.report_cfg_id);
-        return false;
+        return make_unexpected(fmt::format("report_cfg_id={}: T1 event requires t1_thres", cfg.report_cfg_id));
       }
       if (!cfg.duration.has_value() || cfg.duration->count() < 0.1 || cfg.duration->count() > 600.0) {
-        fmt::print("report_cfg_id={}: T1 event requires duration_s in [0.1..600]\n", cfg.report_cfg_id);
-        return false;
+        return make_unexpected(
+            fmt::format("report_cfg_id={}: T1 event requires duration_s in [0.1..600]", cfg.report_cfg_id));
       }
     }
-    return true;
+    return {};
   }
 
   // A-family events (a1-a6): require meas_trigger_quantity, hysteresis_db, time_to_trigger_ms.
   if (!cfg.meas_trigger_quantity.has_value() || !cfg.hysteresis_db.has_value() || !cfg.time_to_trigger_ms.has_value()) {
-    fmt::print("report_cfg_id={}: meas_trigger_quantity, hysteresis_db, and time_to_trigger_ms are required\n",
-               cfg.report_cfg_id);
-    return false;
+    return make_unexpected(
+        fmt::format("report_cfg_id={}: meas_trigger_quantity, hysteresis_db, and time_to_trigger_ms are required",
+                    cfg.report_cfg_id));
   }
 
   // Hysteresis range: [0..15] dB (ASN.1 encodes as value × 2, so [0..30] in 0.5 dB steps).
   if (*cfg.hysteresis_db > 15) {
-    fmt::print("report_cfg_id={}: hysteresis_db={} out of range [0..15] dB\n", cfg.report_cfg_id, *cfg.hysteresis_db);
-    return false;
+    return make_unexpected(fmt::format(
+        "report_cfg_id={}: hysteresis_db={} out of range [0..15] dB", cfg.report_cfg_id, *cfg.hysteresis_db));
   }
 
   const std::string& qty = *cfg.meas_trigger_quantity;
 
   if (ev == ocucp::rrc_event_id::event_id_t::a3 || ev == ocucp::rrc_event_id::event_id_t::a6) {
     if (!cfg.meas_trigger_quantity_offset_db.has_value()) {
-      fmt::print("report_cfg_id={}: A3/A6 event requires meas_trigger_quantity_offset_db\n", cfg.report_cfg_id);
-      return false;
+      return make_unexpected(
+          fmt::format("report_cfg_id={}: A3/A6 event requires meas_trigger_quantity_offset_db", cfg.report_cfg_id));
     }
     // Offset range: [-15..+15] dB (ASN.1 encodes as value × 2, giving [-30..+30] in 0.5 dB steps).
     int offset = *cfg.meas_trigger_quantity_offset_db;
     if (offset < -15 || offset > 15) {
-      fmt::print("report_cfg_id={}: meas_trigger_quantity_offset_db={} out of range [-15..15] dB\n",
-                 cfg.report_cfg_id,
-                 offset);
-      return false;
+      return make_unexpected(fmt::format(
+          "report_cfg_id={}: meas_trigger_quantity_offset_db={} out of range [-15..15] dB", cfg.report_cfg_id, offset));
     }
   } else {
     // A1, A2, A4, A5: absolute threshold required.
     if (!cfg.meas_trigger_quantity_threshold_db.has_value()) {
-      fmt::print("report_cfg_id={}: A1/A2/A4/A5 event requires meas_trigger_quantity_threshold_db\n",
-                 cfg.report_cfg_id);
-      return false;
+      return make_unexpected(fmt::format(
+          "report_cfg_id={}: A1/A2/A4/A5 event requires meas_trigger_quantity_threshold_db", cfg.report_cfg_id));
     }
     if (ev == ocucp::rrc_event_id::event_id_t::a5 && !cfg.meas_trigger_quantity_threshold_2_db.has_value()) {
-      fmt::print("report_cfg_id={}: A5 event requires meas_trigger_quantity_threshold_2_db\n", cfg.report_cfg_id);
-      return false;
+      return make_unexpected(
+          fmt::format("report_cfg_id={}: A5 event requires meas_trigger_quantity_threshold_2_db", cfg.report_cfg_id));
     }
 
     // Validate threshold range(s) per measurement quantity.
-    auto check_threshold = [&](int val, const char* label) -> bool {
+    auto check_threshold = [&](int val, const char* label) -> error_type<std::string> {
       if (qty == "rsrp") {
         if (val < -156 || val > -31) {
-          fmt::print("report_cfg_id={}: RSRP {} = {} dBm out of range [-156..-31]\n", cfg.report_cfg_id, label, val);
-          return false;
+          return make_unexpected(fmt::format(
+              "report_cfg_id={}: RSRP {} = {} dBm out of range [-156..-31]", cfg.report_cfg_id, label, val));
         }
       } else if (qty == "rsrq") {
         if (val < -43 || val > 20) {
-          fmt::print("report_cfg_id={}: RSRQ {} = {} dB out of range [-43..20]\n", cfg.report_cfg_id, label, val);
-          return false;
+          return make_unexpected(
+              fmt::format("report_cfg_id={}: RSRQ {} = {} dB out of range [-43..20]", cfg.report_cfg_id, label, val));
         }
       } else if (qty == "sinr") {
         if (val < -23 || val > 40) {
-          fmt::print("report_cfg_id={}: SINR {} = {} dB out of range [-23..40]\n", cfg.report_cfg_id, label, val);
-          return false;
+          return make_unexpected(
+              fmt::format("report_cfg_id={}: SINR {} = {} dB out of range [-23..40]", cfg.report_cfg_id, label, val));
         }
       } else {
-        fmt::print("report_cfg_id={}: invalid meas_trigger_quantity={}\n", cfg.report_cfg_id, qty);
-        return false;
+        return make_unexpected(
+            fmt::format("report_cfg_id={}: invalid meas_trigger_quantity={}", cfg.report_cfg_id, qty));
       }
-      return true;
+      return {};
     };
 
-    if (!check_threshold(*cfg.meas_trigger_quantity_threshold_db, "threshold1")) {
-      return false;
+    if (error_type<std::string> res = check_threshold(*cfg.meas_trigger_quantity_threshold_db, "threshold1");
+        not res.has_value()) {
+      return res;
     }
     if (ev == ocucp::rrc_event_id::event_id_t::a5) {
-      if (!check_threshold(*cfg.meas_trigger_quantity_threshold_2_db, "threshold2")) {
-        return false;
+      if (error_type<std::string> res = check_threshold(*cfg.meas_trigger_quantity_threshold_2_db, "threshold2");
+          not res.has_value()) {
+        return res;
       }
     }
   }
 
-  return true;
+  return {};
+}
+
+error_type<std::string> ocudu::validate_report_config(const cu_cp_unit_report_config& config)
+{
+  if (config.report_type != "periodical" && config.report_type != "event_triggered" &&
+      config.report_type != "cond_trigger") {
+    return make_unexpected(fmt::format("Invalid report type: {}", config.report_type));
+  }
+
+  if (config.report_type == "event_triggered" || config.report_type == "cond_trigger") {
+    if (error_type<std::string> res = validate_event_trigger_params(config); not res.has_value()) {
+      return res;
+    }
+  }
+
+  // T312 is only valid for event-triggered reports.
+  if (config.t312_ms.has_value() && config.report_type != "event_triggered") {
+    return make_unexpected(fmt::format("T312 is only valid for event-triggered report configurations."));
+  }
+
+  return {};
 }
 
 static bool validate_mobility_appconfig(gnb_id_t gnb_id, const cu_cp_unit_mobility_config& config)
@@ -209,16 +222,8 @@ static bool validate_mobility_appconfig(gnb_id_t gnb_id, const cu_cp_unit_mobili
     }
     report_cfg_ids_to_report_type.emplace(report_cfg.report_cfg_id, report_cfg.report_type);
 
-    // Check that report configs are valid.
-    if (report_cfg.report_type == "event_triggered" || report_cfg.report_type == "cond_trigger") {
-      if (!validate_event_trigger_params(report_cfg)) {
-        return false;
-      }
-    }
-
-    // T312 is only valid for event-triggered reports.
-    if (report_cfg.t312_ms.has_value() && report_cfg.report_type != "event_triggered") {
-      fmt::print("T312 is only valid for event-triggered report configurations.\n");
+    if (error_type<std::string> res = validate_report_config(report_cfg); not res.has_value()) {
+      fmt::print("{}\n", res.error());
       return false;
     }
   }

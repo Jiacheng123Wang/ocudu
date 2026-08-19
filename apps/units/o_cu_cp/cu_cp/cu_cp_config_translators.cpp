@@ -614,6 +614,14 @@ static std::map<nr_cell_identity, ocucp::cell_meas_config> ge_cell_meas_config(c
 }
 
 /// Gets the RRC report configuration NR.
+ocucp::rrc_report_cfg_nr ocudu::generate_cu_cp_report_config(const cu_cp_unit_report_config& report_cfg_item)
+{
+  if (report_cfg_item.report_type == "periodical") {
+    return generate_cu_cp_periodical_report_config(report_cfg_item);
+  }
+  return generate_cu_cp_trigger_report_config(report_cfg_item);
+}
+
 static std::map<ocucp::report_cfg_id_t, ocucp::rrc_report_cfg_nr>
 get_rrc_report_config_nr(const cu_cp_unit_config& cu_cfg)
 {
@@ -621,15 +629,8 @@ get_rrc_report_config_nr(const cu_cp_unit_config& cu_cfg)
 
   // Convert report config.
   for (const auto& report_cfg_item : cu_cfg.mobility_config.report_configs) {
-    ocucp::rrc_report_cfg_nr report_cfg;
-
-    if (report_cfg_item.report_type == "periodical") {
-      report_cfg = generate_cu_cp_periodical_report_config(report_cfg_item);
-    } else {
-      report_cfg = generate_cu_cp_trigger_report_config(report_cfg_item);
-    }
-
-    report_config_ids[ocucp::uint_to_report_cfg_id(report_cfg_item.report_cfg_id)] = report_cfg;
+    report_config_ids[ocucp::uint_to_report_cfg_id(report_cfg_item.report_cfg_id)] =
+        generate_cu_cp_report_config(report_cfg_item);
   }
   return report_config_ids;
 }
