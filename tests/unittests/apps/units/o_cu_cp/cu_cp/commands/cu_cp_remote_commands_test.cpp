@@ -90,7 +90,54 @@ class fake_cu_cp_command_handler : public ocucp::cu_cp_command_handler
 public:
   capturing_cell_command_handler cell_cmd;
 
-  ocucp::cu_cp_mobility_command_handler& get_mobility_command_handler() override { std::abort(); }
+  ocucp::cu_cp_mobility_command_handler& get_mobility_command_handler() override { return mobility_cmd; }
+
+  /// Fake cu_cp_mobility_command_handler recording the last trigger arguments.
+  class capturing_mobility_command_handler : public ocucp::cu_cp_mobility_command_handler
+  {
+  public:
+    struct ho_args {
+      pci_t         serving_pci;
+      rnti_t        rnti;
+      pci_t         target_pci;
+      plmn_identity plmn = plmn_identity::test_value();
+      tac_t         tac;
+    };
+    struct cho_args {
+      pci_t                                                serving_pci;
+      rnti_t                                               rnti;
+      std::vector<pci_t>                                   target_pcis;
+      std::chrono::milliseconds                            timeout;
+      std::optional<std::chrono::system_clock::time_point> t1_thres_override;
+    };
+    std::optional<ho_args>  last_ho;
+    std::optional<cho_args> last_cho;
+    /// What the CU-CP answers to a trigger.
+    bool accept = true;
+
+    bool trigger_handover(pci_t         source_pci,
+                          rnti_t        rnti,
+                          pci_t         target_pci,
+                          plmn_identity target_plmn,
+                          tac_t         target_tac) override
+    {
+      last_ho = ho_args{source_pci, rnti, target_pci, target_plmn, target_tac};
+      return accept;
+    }
+
+    bool trigger_conditional_handover(
+        pci_t                                                source_pci,
+        rnti_t                                               rnti,
+        span<const pci_t>                                    target_pcis,
+        std::chrono::milliseconds                            timeout,
+        std::optional<std::chrono::system_clock::time_point> t1_thres_override = std::nullopt) override
+    {
+      last_cho = cho_args{source_pci, rnti, {target_pcis.begin(), target_pcis.end()}, timeout, t1_thres_override};
+      return accept;
+    }
+  };
+
+  capturing_mobility_command_handler mobility_cmd;
 
   ocucp::cu_cp_ue_release_command_handler& get_ue_release_command_handler() override { std::abort(); }
 
@@ -606,6 +653,146 @@ TEST(periodic_report_set_remote_command_test, payload_with_and_without_id_is_par
   EXPECT_FALSE(cu_cp.mobility_cfg.last_periodic_report->second.has_value());
 
   EXPECT_FALSE(command.execute(nlohmann::json::object()).has_value());
+}
+
+TEST(trigger_handover_remote_command_test, payload_is_parsed_into_trigger_arguments)
+{
+  fake_cu_cp_command_handler      cu_cp;
+  trigger_handover_remote_command command(cu_cp);
+
+  // Canonical payload of the trigger_handover command.
+  const nlohmann::json req =
+      nlohmann::json::parse(R"({"serving_pci": 1, "rnti": 17921, "target_pci": 2, "plmn": "00101", "tac": 7})");
+
+  ASSERT_TRUE(command.execute(req).has_value());
+  ASSERT_TRUE(cu_cp.mobility_cmd.last_ho.has_value());
+  EXPECT_EQ(cu_cp.mobility_cmd.last_ho->serving_pci, 1);
+  EXPECT_EQ(cu_cp.mobility_cmd.last_ho->rnti, to_rnti(17921));
+  EXPECT_EQ(cu_cp.mobility_cmd.last_ho->target_pci, 2);
+  EXPECT_EQ(cu_cp.mobility_cmd.last_ho->plmn, plmn_identity::parse("00101").value());
+  EXPECT_EQ(cu_cp.mobility_cmd.last_ho->tac, 7);
+}
+
+TEST(trigger_handover_remote_command_test, cu_cp_rejects_trigger_returns_error)
+{
+  fake_cu_cp_command_handler      cu_cp;
+  trigger_handover_remote_command command(cu_cp);
+  cu_cp.mobility_cmd.accept = false;
+
+  auto result = command.execute(
+      nlohmann::json::parse(R"({"serving_pci": 1, "rnti": 17921, "target_pci": 2, "plmn": "00101", "tac": 7})"));
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().find("rejected"), std::string::npos);
+  // The trigger reached the CU-CP; the refusal is the CU-CP's own.
+  EXPECT_TRUE(cu_cp.mobility_cmd.last_ho.has_value());
+}
+
+TEST(trigger_handover_remote_command_test, invalid_payloads_are_rejected)
+{
+  fake_cu_cp_command_handler      cu_cp;
+  trigger_handover_remote_command command(cu_cp);
+
+  // Missing target_pci.
+  EXPECT_FALSE(command.execute(nlohmann::json::parse(R"({"serving_pci": 1, "rnti": 17921, "plmn": "00101", "tac": 7})"))
+                   .has_value());
+  // PCI out of range.
+  EXPECT_FALSE(command
+                   .execute(nlohmann::json::parse(
+                       R"({"serving_pci": 1, "rnti": 17921, "target_pci": 1100, "plmn": "00101", "tac": 7})"))
+                   .has_value());
+  // Reserved TAC.
+  EXPECT_FALSE(command
+                   .execute(nlohmann::json::parse(
+                       R"({"serving_pci": 1, "rnti": 17921, "target_pci": 2, "plmn": "00101", "tac": 0})"))
+                   .has_value());
+  EXPECT_FALSE(cu_cp.mobility_cmd.last_ho.has_value());
+}
+
+TEST(trigger_conditional_handover_remote_command_test, payload_is_parsed_into_trigger_arguments)
+{
+  fake_cu_cp_command_handler                  cu_cp;
+  trigger_conditional_handover_remote_command command(cu_cp, std::chrono::milliseconds{10000});
+
+  // Canonical payload of the trigger_conditional_handover command.
+  const nlohmann::json req = nlohmann::json::parse(
+      R"({"serving_pci": 1, "rnti": 17921, "target_pcis": [2, 3], "timeout_ms": 30000,
+          "t1_thres": "2026-03-01T10:00:00"})");
+
+  ASSERT_TRUE(command.execute(req).has_value());
+  ASSERT_TRUE(cu_cp.mobility_cmd.last_cho.has_value());
+  EXPECT_EQ(cu_cp.mobility_cmd.last_cho->serving_pci, 1);
+  EXPECT_EQ(cu_cp.mobility_cmd.last_cho->rnti, to_rnti(17921));
+  ASSERT_EQ(cu_cp.mobility_cmd.last_cho->target_pcis.size(), 2U);
+  EXPECT_EQ(cu_cp.mobility_cmd.last_cho->target_pcis[0], 2);
+  EXPECT_EQ(cu_cp.mobility_cmd.last_cho->target_pcis[1], 3);
+  EXPECT_EQ(cu_cp.mobility_cmd.last_cho->timeout, std::chrono::milliseconds{30000});
+  EXPECT_TRUE(cu_cp.mobility_cmd.last_cho->t1_thres_override.has_value());
+
+  // Omitting timeout_ms falls back to the configured default.
+  ASSERT_TRUE(
+      command.execute(nlohmann::json::parse(R"({"serving_pci": 1, "rnti": 17921, "target_pcis": [2]})")).has_value());
+  EXPECT_EQ(cu_cp.mobility_cmd.last_cho->timeout, std::chrono::milliseconds{10000});
+  EXPECT_FALSE(cu_cp.mobility_cmd.last_cho->t1_thres_override.has_value());
+}
+
+TEST(trigger_conditional_handover_remote_command_test, t1_thres_accepts_unix_ms_as_number_or_string)
+{
+  fake_cu_cp_command_handler                  cu_cp;
+  trigger_conditional_handover_remote_command command(cu_cp, std::chrono::milliseconds{10000});
+
+  ASSERT_TRUE(command
+                  .execute(nlohmann::json::parse(
+                      R"({"serving_pci": 1, "rnti": 17921, "target_pcis": [2], "t1_thres": 1756382400000})"))
+                  .has_value());
+  ASSERT_TRUE(cu_cp.mobility_cmd.last_cho->t1_thres_override.has_value());
+  const auto from_number = cu_cp.mobility_cmd.last_cho->t1_thres_override.value();
+  EXPECT_EQ(from_number, std::chrono::system_clock::time_point{std::chrono::milliseconds{1756382400000}});
+
+  ASSERT_TRUE(command
+                  .execute(nlohmann::json::parse(
+                      R"({"serving_pci": 1, "rnti": 17921, "target_pcis": [2], "t1_thres": "1756382400000"})"))
+                  .has_value());
+  ASSERT_TRUE(cu_cp.mobility_cmd.last_cho->t1_thres_override.has_value());
+  EXPECT_EQ(cu_cp.mobility_cmd.last_cho->t1_thres_override.value(), from_number);
+}
+
+TEST(trigger_conditional_handover_remote_command_test, cu_cp_rejects_trigger_returns_error)
+{
+  fake_cu_cp_command_handler                  cu_cp;
+  trigger_conditional_handover_remote_command command(cu_cp, std::chrono::milliseconds{10000});
+  cu_cp.mobility_cmd.accept = false;
+
+  auto result = command.execute(nlohmann::json::parse(R"({"serving_pci": 1, "rnti": 17921, "target_pcis": [2]})"));
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().find("rejected"), std::string::npos);
+  EXPECT_TRUE(cu_cp.mobility_cmd.last_cho.has_value());
+}
+
+TEST(trigger_conditional_handover_remote_command_test, invalid_payloads_are_rejected)
+{
+  fake_cu_cp_command_handler                  cu_cp;
+  trigger_conditional_handover_remote_command command(cu_cp, std::chrono::milliseconds{10000});
+
+  // Missing target_pcis.
+  EXPECT_FALSE(command.execute(nlohmann::json::parse(R"({"serving_pci": 1, "rnti": 17921})")).has_value());
+  // Empty target list.
+  EXPECT_FALSE(
+      command.execute(nlohmann::json::parse(R"({"serving_pci": 1, "rnti": 17921, "target_pcis": []})")).has_value());
+  // More than 8 candidates.
+  EXPECT_FALSE(
+      command.execute(nlohmann::json::parse(R"({"serving_pci": 1, "rnti": 17921, "target_pcis": [1,2,3,4,5,6,7,8,9]})"))
+          .has_value());
+  // Invalid t1_thres string.
+  EXPECT_FALSE(command
+                   .execute(nlohmann::json::parse(
+                       R"({"serving_pci": 1, "rnti": 17921, "target_pcis": [2], "t1_thres": "not-a-date"})"))
+                   .has_value());
+  // t1_thres of a type that is neither an integer nor a string.
+  EXPECT_FALSE(
+      command
+          .execute(nlohmann::json::parse(R"({"serving_pci": 1, "rnti": 17921, "target_pcis": [2], "t1_thres": 1.5})"))
+          .has_value());
+  EXPECT_FALSE(cu_cp.mobility_cmd.last_cho.has_value());
 }
 
 // ── cell_status query ──

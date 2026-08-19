@@ -5,6 +5,7 @@
 #include "apps/units/o_cu_cp/cu_cp/commands/cu_cp_remote_commands.h"
 #include "apps/units/o_cu_cp/cu_cp/cu_cp_config_translators.h"
 #include "apps/units/o_cu_cp/cu_cp/cu_cp_unit_config.h"
+#include "apps/units/o_cu_cp/cu_cp/cu_cp_unit_config_helpers.h"
 #include "apps/units/o_cu_cp/cu_cp/cu_cp_unit_config_validator.h"
 #include "nlohmann/json.hpp"
 #include "ocudu/cu_cp/cu_cp_cell_command_handler.h"
@@ -588,6 +589,135 @@ expected<nlohmann::json, std::string> periodic_report_set_remote_command::execut
 
   if (not cu_cp.get_mobility_config_handler().set_periodic_report(nci, report_cfg_id)) {
     return make_unexpected("CU-CP rejected mobility_periodic_report_set: unknown cell or non-periodical report config");
+  }
+  return {};
+}
+
+expected<nlohmann::json, std::string> trigger_handover_remote_command::execute(const nlohmann::json& json)
+{
+  uint64_t                serving_pci = 0;
+  error_type<std::string> result      = parse_unsigned(json, "serving_pci", serving_pci);
+  if (not result.has_value()) {
+    return make_unexpected(result.error());
+  }
+  if (serving_pci > MAX_PCI) {
+    return make_unexpected("'serving_pci' must be in range [0, 1007]");
+  }
+
+  uint64_t rnti = 0;
+  if (result = parse_unsigned(json, "rnti", rnti); not result.has_value()) {
+    return make_unexpected(result.error());
+  }
+  if (rnti > 0xffff) {
+    return make_unexpected("'rnti' must be in range [0, 65535]");
+  }
+
+  uint64_t target_pci = 0;
+  if (result = parse_unsigned(json, "target_pci", target_pci); not result.has_value()) {
+    return make_unexpected(result.error());
+  }
+  if (target_pci > MAX_PCI) {
+    return make_unexpected("'target_pci' must be in range [0, 1007]");
+  }
+
+  auto plmn_key = json.find("plmn");
+  if (plmn_key == json.end()) {
+    return make_unexpected("'plmn' object is missing and it is mandatory");
+  }
+  if (!plmn_key->is_string()) {
+    return make_unexpected("'plmn' object value type should be a string");
+  }
+  auto plmn = plmn_identity::parse(plmn_key->get_ref<const nlohmann::json::string_t&>());
+  if (!plmn) {
+    return make_unexpected("Invalid PLMN identity value");
+  }
+
+  uint64_t tac = 0;
+  if (result = parse_unsigned(json, "tac", tac); not result.has_value()) {
+    return make_unexpected(result.error());
+  }
+  if (!is_acceptable_tac(tac)) {
+    return make_unexpected("'tac' must be in range [1, 0xffffff] and not the reserved 0xfffffe");
+  }
+
+  if (not cu_cp.get_mobility_command_handler().trigger_handover(static_cast<pci_t>(serving_pci),
+                                                                static_cast<rnti_t>(rnti),
+                                                                static_cast<pci_t>(target_pci),
+                                                                plmn.value(),
+                                                                static_cast<tac_t>(tac))) {
+    return make_unexpected("CU-CP rejected trigger_handover: unknown UE or target cell, or the trigger could not be "
+                           "dispatched (see CU-CP log for the cause)");
+  }
+  return {};
+}
+
+expected<nlohmann::json, std::string> trigger_conditional_handover_remote_command::execute(const nlohmann::json& json)
+{
+  uint64_t                serving_pci = 0;
+  error_type<std::string> result      = parse_unsigned(json, "serving_pci", serving_pci);
+  if (not result.has_value()) {
+    return make_unexpected(result.error());
+  }
+  if (serving_pci > MAX_PCI) {
+    return make_unexpected("'serving_pci' must be in range [0, 1007]");
+  }
+
+  uint64_t rnti = 0;
+  if (result = parse_unsigned(json, "rnti", rnti); not result.has_value()) {
+    return make_unexpected(result.error());
+  }
+  if (rnti > 0xffff) {
+    return make_unexpected("'rnti' must be in range [0, 65535]");
+  }
+
+  auto target_pcis_key = json.find("target_pcis");
+  if (target_pcis_key == json.end()) {
+    return make_unexpected("'target_pcis' object is missing and it is mandatory");
+  }
+  if (!target_pcis_key->is_array() || target_pcis_key->empty() || target_pcis_key->size() > 8) {
+    return make_unexpected("'target_pcis' object value type should be an array of 1 to 8 PCIs");
+  }
+  std::vector<pci_t> target_pcis;
+  for (const auto& item : *target_pcis_key) {
+    if (!item.is_number_unsigned() || item.get<uint64_t>() > MAX_PCI) {
+      return make_unexpected("'target_pcis' entries must be unsigned integers in range [0, 1007]");
+    }
+    target_pcis.push_back(static_cast<pci_t>(item.get<uint64_t>()));
+  }
+
+  std::chrono::milliseconds timeout = default_timeout;
+  std::optional<uint64_t>   timeout_ms;
+  if (result = parse_optional_unsigned(json, "timeout_ms", timeout_ms); not result.has_value()) {
+    return make_unexpected(result.error());
+  }
+  if (timeout_ms.has_value()) {
+    if (timeout_ms.value() < 1 || timeout_ms.value() > 600000) {
+      return make_unexpected("'timeout_ms' must be in range [1, 600000]");
+    }
+    timeout = std::chrono::milliseconds{timeout_ms.value()};
+  }
+
+  std::optional<std::chrono::system_clock::time_point> t1_thres_override;
+  if (auto t1_key = json.find("t1_thres"); t1_key != json.end()) {
+    if (t1_key->is_number_integer()) {
+      // Unix milliseconds as a number.
+      t1_thres_override = std::chrono::system_clock::time_point{std::chrono::milliseconds{t1_key->get<int64_t>()}};
+    } else if (t1_key->is_string()) {
+      // Unix milliseconds or YYYY-MM-DDTHH:MM:SS[.mmm] as a string.
+      auto t1 = parse_timestamp_ms(t1_key->get<std::string>());
+      if (!t1.has_value()) {
+        return make_unexpected(fmt::format("Invalid 't1_thres' value: {}", t1.error()));
+      }
+      t1_thres_override = t1.value();
+    } else {
+      return make_unexpected("'t1_thres' object value type should be an integer (unix ms) or a string");
+    }
+  }
+
+  if (not cu_cp.get_mobility_command_handler().trigger_conditional_handover(
+          static_cast<pci_t>(serving_pci), static_cast<rnti_t>(rnti), target_pcis, timeout, t1_thres_override)) {
+    return make_unexpected("CU-CP rejected trigger_conditional_handover: the trigger could not be dispatched (see "
+                           "CU-CP log for the cause)");
   }
   return {};
 }

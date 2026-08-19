@@ -222,6 +222,11 @@ o_cu_cp_unit ocudu::build_o_cu_cp(const o_cu_cp_unit_config& unit_cfg, const o_c
       std::make_unique<report_config_remove_remote_command>(ocucp.unit->get_cu_cp().get_command_handler()));
   ocucp.commands.remote.push_back(
       std::make_unique<periodic_report_set_remote_command>(ocucp.unit->get_cu_cp().get_command_handler()));
+  ocucp.commands.remote.push_back(
+      std::make_unique<trigger_handover_remote_command>(ocucp.unit->get_cu_cp().get_command_handler()));
+  ocucp.commands.remote.push_back(std::make_unique<trigger_conditional_handover_remote_command>(
+      ocucp.unit->get_cu_cp().get_command_handler(),
+      std::chrono::milliseconds{cucp_unit_cfg.mobility_config.cho_timeout_ms}));
 
   return ocucp;
 }

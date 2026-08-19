@@ -6,6 +6,7 @@
 
 #include "apps/services/remote_control/remote_command.h"
 #include "ocudu/cu_cp/cu_cp_command_handler.h"
+#include <chrono>
 
 namespace ocudu {
 
@@ -283,6 +284,61 @@ public:
   std::string_view get_description() const override
   {
     return "Set or clear the periodical report of a cell: {nci, [report_cfg_id]} (omit report_cfg_id to clear)";
+  }
+
+  // See interface for documentation.
+  expected<nlohmann::json, std::string> execute(const nlohmann::json& json) override;
+};
+
+/// \brief Remote command that triggers the handover of a UE to a target cell.
+///
+/// The UE is identified by its serving cell PCI and RNTI; the target by PCI, PLMN and TAC. The command
+/// reports whether the CU-CP accepted the trigger (UE and target cell known, trigger dispatched on the CU-CP
+/// executor); the handover outcome is asynchronous.
+class trigger_handover_remote_command : public app_services::remote_command
+{
+  ocucp::cu_cp_command_handler& cu_cp;
+
+public:
+  explicit trigger_handover_remote_command(ocucp::cu_cp_command_handler& cu_cp_) : cu_cp(cu_cp_) {}
+
+  // See interface for documentation.
+  std::string_view get_name() const override { return "trigger_handover"; }
+
+  // See interface for documentation.
+  std::string_view get_description() const override
+  {
+    return "Trigger handover of a UE to a target cell: {serving_pci, rnti, target_pci, plmn, tac}";
+  }
+
+  // See interface for documentation.
+  expected<nlohmann::json, std::string> execute(const nlohmann::json& json) override;
+};
+
+/// \brief Remote command that triggers a Conditional Handover (CHO) with one or more target cells.
+///
+/// The command reports whether the CU-CP accepted the trigger; the outcome of the conditional handover is
+/// asynchronous.
+class trigger_conditional_handover_remote_command : public app_services::remote_command
+{
+  ocucp::cu_cp_command_handler& cu_cp;
+  std::chrono::milliseconds     default_timeout;
+
+public:
+  explicit trigger_conditional_handover_remote_command(ocucp::cu_cp_command_handler& cu_cp_,
+                                                       std::chrono::milliseconds     default_timeout_) :
+    cu_cp(cu_cp_), default_timeout(default_timeout_)
+  {
+  }
+
+  // See interface for documentation.
+  std::string_view get_name() const override { return "trigger_conditional_handover"; }
+
+  // See interface for documentation.
+  std::string_view get_description() const override
+  {
+    return "Trigger conditional handover of a UE: {serving_pci, rnti, target_pcis: [1..8 pcis], [timeout_ms], "
+           "[t1_thres]} (t1_thres as unix ms integer, or a unix ms / YYYY-MM-DDTHH:MM:SS[.mmm] string)";
   }
 
   // See interface for documentation.
