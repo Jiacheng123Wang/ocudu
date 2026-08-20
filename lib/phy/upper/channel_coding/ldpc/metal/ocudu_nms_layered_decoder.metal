@@ -80,11 +80,12 @@ kernel void nmsl_cn_update(
     uint sign = 0;
     uint parity = 0;
 
+    // Pass 1: Reduction
     for (uint e = e0 + tid; e < e1; e += 32) {
         const uint vn = edge_vn[e];
-        const float v = (float)llr[vn];
-        const float v2c = v - (float)c2v[e];
-        const float val = abs(v2c);
+        const half v = llr[vn];
+        const half v2c = v - c2v[e];
+        const float val = abs((float)v2c);
         sign ^= (v2c < 0.0f) ? 1u : 0u;
         parity ^= (v < 0.0f) ? 1u : 0u;
         if (val < m1) {
@@ -96,7 +97,7 @@ kernel void nmsl_cn_update(
         }
     }
 
-    // Butterfly reduction across the 32 lanes. Ties keep the current winner.
+    // Butterfly reduction across the 32 lanes.
     for (uint offset = 16; offset > 0; offset >>= 1) {
         const float om1 = simd_shuffle_xor(m1, offset);
         const uint oi1 = simd_shuffle_xor(i1, offset);
@@ -118,21 +119,26 @@ kernel void nmsl_cn_update(
         h_pred_bits[row] = parity & 1u;
     }
 
-    // Second pass: write c2v_new and apply the VN update in place. Offset
-    // min-sum: mag = max(|v| - beta, 0) * norm (beta = 0 is plain NMS).
+    // Pass 2: Update (c2v_new and VN LLR)
+    // Optimization: Cache LLR and c2v to minimize redundant global memory loads
     for (uint e = e0 + tid; e < e1; e += 32) {
         const uint vn = edge_vn[e];
-        const float old_c2v = (float)c2v[e];
-        const float v2c = (float)llr[vn] - old_c2v;
+        const half old_c2v = c2v[e];
+        const half current_llr = llr[vn];
+
+        // Compute magnitude using float for precision, then scale
         float mag = (vn == i1) ? m2 : m1;
-        mag = max(mag - beta, 0.0f);
-        mag *= norm;
-        const bool neg = ((sign ^ ((v2c < 0.0f) ? 1u : 0u)) != 0u);
-        const float c2v_new = neg ? -mag : mag;
-        c2v[e] = (half)c2v_new;
-        // Fused VN update: no two lifted rows of a layer share a VN, so this
-        // bare read-modify-write is race-free within the dispatch.
-        llr[vn] = (half)((float)llr[vn] + c2v_new - old_c2v);
+        mag = max(mag - beta, 0.0f) * norm;
+
+        // Determine sign of new c2v based on reduction result and current edge sign
+        // The sign of the new message is (global_sign XOR current_edge_sign)
+        const bool edge_neg = (current_llr - old_c2v < 0.0f);
+        const bool msg_neg = (sign ^ (edge_neg ? 1u : 0u)) != 0u;
+        const half c2v_new = msg_neg ? -(half)mag : (half)mag;
+
+        c2v[e] = c2v_new;
+        // Fused VN update: LLR_new = LLR_old + (c2v_new - c2v_old)
+        llr[vn] = current_llr + (c2v_new - old_c2v);
     }
 }
 

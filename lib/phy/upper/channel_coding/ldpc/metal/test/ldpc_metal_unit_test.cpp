@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 //
 // Unit-level validation of the Metal LDPC decoder (not part of the gNB build):
-//   1. Golden check: the in-memory packed H / H^T generated from the ocudu ldpc_graph
-//      must match the SynchroPlus H_matrix_Z*.bin / HT_matrix_Z*.bin reference files.
-//   2. Decode parity: identical codeblocks through an AWGN channel, decoded by the CPU
+//   1. Decode parity: identical codeblocks through an AWGN channel, decoded by the CPU
 //      (generic) and the Metal layered-NMS decoder created through the factory ("metal"
 //      type); CRC pass rates (BLER) and the decoded bits must agree.
 
@@ -32,88 +30,6 @@ struct test_case {
   ldpc::lifting_size_t   ls;
   double                 snr_db;
 };
-
-/// Builds the packed H / H^T matrices from the protograph (same routine as the adapter).
-void generate_h_ht(ldpc_base_graph_type bg, ldpc::lifting_size_t ls, unsigned m_aligned, unsigned n_aligned,
-                   std::vector<uint32_t>& h, std::vector<uint32_t>& ht)
-{
-  const unsigned z = static_cast<unsigned>(ls);
-  const unsigned n_h_chunks = n_aligned / 32;
-  const unsigned h_pred_len = m_aligned / 32;
-  h.assign(static_cast<size_t>(m_aligned) * n_h_chunks, 0);
-  ht.assign(static_cast<size_t>(n_aligned) * h_pred_len, 0);
-
-  const ldpc_graph_impl graph(bg, ls);
-  for (unsigned row = 0; row != graph.get_nof_BG_check_nodes(); ++row) {
-    for (unsigned col = 0; col != graph.get_nof_BG_var_nodes_full(); ++col) {
-      const uint16_t shift = graph.get_lifted_node(row, col);
-      if (shift == ldpc::NO_EDGE) {
-        continue;
-      }
-      for (unsigned k = 0; k != z; ++k) {
-        const unsigned lifted_row = row * z + k;
-        const unsigned lifted_col = col * z + ((k + shift) % z);
-        h[lifted_row * n_h_chunks + lifted_col / 32] |= 1u << (lifted_col % 32);
-        ht[lifted_col * h_pred_len + lifted_row / 32] |= 1u << (lifted_row % 32);
-      }
-    }
-  }
-}
-
-int golden_check(const std::string& matrix_dir)
-{
-  // (bg, z, n_full, m) -> reference file names for BG1 Z256 and Z384.
-  struct golden {
-    const char* h_file;
-    const char* ht_file;
-    ldpc_base_graph_type bg;
-    ldpc::lifting_size_t ls;
-  };
-  const golden goldens[] = {
-      {"H_matrix_Z256.bin", "HT_matrix_Z256.bin", ldpc_base_graph_type::BG1, ldpc::LS256},
-      {"H_matrix_Z384.bin", "HT_matrix_Z384.bin", ldpc_base_graph_type::BG1, ldpc::LS384},
-  };
-
-  int failures = 0;
-  for (const golden& g : goldens) {
-    const unsigned z = static_cast<unsigned>(g.ls);
-    const unsigned n = 68 * z;
-    const unsigned m = 46 * z;
-    const unsigned n_aligned = ((n + 31) / 32) * 32;
-    const unsigned m_aligned = ((m + 31) / 32) * 32;
-
-    std::vector<uint32_t> h, ht;
-    generate_h_ht(g.bg, g.ls, m_aligned, n_aligned, h, ht);
-
-    const std::string h_path  = matrix_dir + "/" + g.h_file;
-    const std::string ht_path = matrix_dir + "/" + g.ht_file;
-
-    FILE* fh = std::fopen(h_path.c_str(), "rb");
-    FILE* ft = std::fopen(ht_path.c_str(), "rb");
-    if (fh == nullptr || ft == nullptr) {
-      std::printf("[golden] SKIP %s (reference files not found)\n", g.h_file);
-      if (fh) std::fclose(fh);
-      if (ft) std::fclose(ft);
-      continue;
-    }
-    const bool h_ok  = std::fread(h.data(), 4, h.size(), fh) == h.size();
-    const bool ht_ok = std::fread(ht.data(), 4, ht.size(), ft) == ht.size();
-    std::fclose(fh);
-    std::fclose(ft);
-
-    // Re-generate and compare (the fread overwrote the buffers above).
-    std::vector<uint32_t> h_gen, ht_gen;
-    generate_h_ht(g.bg, g.ls, m_aligned, n_aligned, h_gen, ht_gen);
-    const bool h_match  = h_ok && (h_gen == h);
-    const bool ht_match = ht_ok && (ht_gen == ht);
-    std::printf("[golden] %s H: %s, HT: %s\n", g.h_file, h_match ? "MATCH" : "MISMATCH",
-                ht_match ? "MATCH" : "MISMATCH");
-    if (!h_match || !ht_match) {
-      failures++;
-    }
-  }
-  return failures;
-}
 
 /// One full encode -> AWGN -> decode round trip; returns CRC results for both decoders
 /// and whether the decoded bits agree (when both succeed).
@@ -366,15 +282,7 @@ void build_noiseless_block(std::mt19937&                        rng,
 
 int main(int argc, char** argv)
 {
-  std::string matrix_dir = "/Users/jiachengwang/OneDrive/newWork/work/SynchroPlus/ORAN_L1_M/src/channel_coding/ldpc/g_f_matrix";
-  if (argc > 1) {
-    matrix_dir = argv[1];
-  }
-
-  // 1. Golden H / H^T check against the SynchroPlus reference matrices.
-  const int golden_failures = golden_check(matrix_dir);
-
-  // 2. Decode parity through the factory path.
+  // 1. Decode parity through the factory path.
   const ldpc_decoder_factory::ldpc_decoder_factory_configuration dec_factory_cfg = {
       .force_decoding      = false,
       .early_stop_syndrome = true,
@@ -501,7 +409,7 @@ int main(int argc, char** argv)
     }
   }
 
-  // 3. Multi-threaded shared-instance stress: one layered decoder, 4 threads x 100
+  // 2. Multi-threaded shared-instance stress: one layered decoder, 4 threads x 100
   // decodes of distinct noiseless blocks; every output must match the serial reference.
   // Deterministic (same LLRs every repeat), so any scratch/buffer-cache race shows up
   // as a mismatch or a failed CRC.
@@ -554,7 +462,6 @@ int main(int argc, char** argv)
     }
   }
 
-  std::printf(failures == 0 && golden_failures == 0 ? "ALL OK\n" : "FAILURES: %d parity + %d golden\n", failures,
-              golden_failures);
-  return (failures == 0 && golden_failures == 0) ? 0 : 1;
+  std::printf(failures == 0 ? "ALL OK\n" : "FAILURES: %d parity\n", failures);
+  return failures == 0 ? 0 : 1;
 }

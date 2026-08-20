@@ -4,11 +4,12 @@
 /// \file
 /// \brief ocudu-side Metal engine for the layered NMS LDPC GPU decoder.
 ///
-/// Thin Objective-C++ implementation (see ocudu_metal_decoder_engine.mm) that compiles the
-/// shader at runtime from the .metal source embedded at configure time (no Xcode needed)
-/// and executes the layered normalized min-sum schedule: per-layer CN/VN kernels chained
-/// inside one command buffer, a per-round final syndrome refresh, and a GPU-internal
-/// early-termination gate.
+/// Thin Objective-C++ implementation (see ocudu_metal_decoder_engine.mm) that loads the
+/// pre-compiled .metallib shader libraries (offline xcrun metal/metallib) via
+/// newLibraryWithURL and executes the layered normalized min-sum schedule: per-layer CN/VN
+/// kernels chained inside one command buffer, a per-round final syndrome refresh, and a
+/// GPU-internal early-termination gate. The flooding and asynchronous delta-BP variants
+/// load their own pre-compiled libraries.
 
 #pragma once
 
