@@ -27,6 +27,9 @@ variables:
     GRYPE_SKIP: "false"
     COSIGN_YES: "true" # Used by Cosign to skip confirmation prompts for non-destructive operations
     REGISTRY_URI: ${CI_REGISTRY_IMAGE}
+    REGISTRY_AUTH_SERVER: ${CI_REGISTRY}
+    REGISTRY_AUTH_USERNAME: ${CI_REGISTRY_USER}
+    REGISTRY_AUTH_PASSWORD: ${CI_REGISTRY_PASSWORD}
   id_tokens:
     SIGSTORE_ID_TOKEN: # Used by Cosign to get certificate from Fulcio
       aud: sigstore
@@ -64,9 +67,28 @@ variables:
       fi
       BUILD_ARGS="${BUILD_ARGS} ${BUILD_SECRETS} --opt build-arg:PIP_EXTRA_INDEX_URL=https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/api/v4/projects/${CI_PROJECT_ID}/packages/pypi/simple"
 
+    # Prepare detached SPDX signing for protected publish pipelines
+    - |
+      COSIGN_KEY_FILE=""
+      COSIGN_PUBLIC_KEY_FILE=""
+      if [ "${MODE}" = "publish" ] && [ "${CI_COMMIT_REF_PROTECTED}" = "true" ]; then
+        [ -z "${COSIGN_PRIVATE_KEY_B64}" ] && echo "COSIGN_PRIVATE_KEY_B64 is mandatory on protected publish pipelines" && exit 1
+        [ -z "${COSIGN_PASSWORD}" ] && echo "COSIGN_PASSWORD is mandatory on protected publish pipelines" && exit 1
+
+        COSIGN_KEY_FILE=/tmp/cosign.key
+        COSIGN_PUBLIC_KEY_FILE=/tmp/cosign.pub
+        install -m 600 /dev/null "${COSIGN_KEY_FILE}"
+        trap 'rm -f "${COSIGN_KEY_FILE}" "${COSIGN_PUBLIC_KEY_FILE}"' EXIT
+        printf '%s' "${COSIGN_PRIVATE_KEY_B64}" | base64 --decode > "${COSIGN_KEY_FILE}"
+        cosign public-key --key "${COSIGN_KEY_FILE}" > "${COSIGN_PUBLIC_KEY_FILE}"
+      fi
+
     # Add docker config
     - &docker_login |
-      echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+      [ -z "${REGISTRY_AUTH_SERVER}" ] && echo "REGISTRY_AUTH_SERVER is mandatory" && exit 1
+      [ -z "${REGISTRY_AUTH_USERNAME}" ] && echo "REGISTRY_AUTH_USERNAME is mandatory" && exit 1
+      [ -z "${REGISTRY_AUTH_PASSWORD}" ] && echo "REGISTRY_AUTH_PASSWORD is mandatory" && exit 1
+      echo "${REGISTRY_AUTH_PASSWORD}" | docker login "${REGISTRY_AUTH_SERVER}" -u "${REGISTRY_AUTH_USERNAME}" --password-stdin
 
     # check if exists
     - |
@@ -120,9 +142,9 @@ variables:
         #   grep 1: removes evident-by RelationshipComment lines paired with file refs
         #   grep 2: removes CONTAINS/OTHER Relationship lines pointing to SPDXRef-File-
 
-        SYFT_REGISTRY_AUTH_USERNAME="${CI_REGISTRY_USER}" \
-          SYFT_REGISTRY_AUTH_PASSWORD="${CI_REGISTRY_PASSWORD}" \
-          SYFT_REGISTRY_AUTH_AUTHORITY="${CI_REGISTRY}" \
+        SYFT_REGISTRY_AUTH_USERNAME="${REGISTRY_AUTH_USERNAME}" \
+          SYFT_REGISTRY_AUTH_PASSWORD="${REGISTRY_AUTH_PASSWORD}" \
+          SYFT_REGISTRY_AUTH_AUTHORITY="${REGISTRY_AUTH_SERVER}" \
           syft registry:${IMAGE_NAME_VERSION} -o spdx \
           --select-catalogers "os,-file-metadata-cataloger,-file-executable-cataloger" \
           | awk '/^FileName:/{skip=1;next} /^$/{if(skip){skip=0;next}} !skip' \
@@ -138,21 +160,20 @@ variables:
         echo "Attesting ${predicate} ($(wc -c < ${predicate}) bytes)"
         cosign attest --predicate "${predicate}" --type spdx ${IMAGE_DIGEST}
 
-        if [ -n "${COSIGN_PRIVATE_KEY_B64}" ]; then
-          echo "${COSIGN_PRIVATE_KEY_B64}" | base64 -d > /tmp/cosign.key
-
+        if [ -n "${COSIGN_KEY_FILE}" ]; then
           echo "Signing ${predicate} as detached blob signature"
-          cosign sign-blob --key /tmp/cosign.key \
+          cosign sign-blob --key "${COSIGN_KEY_FILE}" \
             --output-signature "${predicate}.sig" "${predicate}"
 
           echo "Publishing ${predicate}, ${predicate}.sig and cosign.pub to package registry (${base_url})"
-          cosign public-key --key /tmp/cosign.key > cosign.pub
           curl --fail --silent --show-error --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
             --upload-file "${predicate}" "${base_url}/${predicate}"
           curl --fail --silent --show-error --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
             --upload-file "${predicate}.sig" "${base_url}/${predicate}.sig"
           curl --fail --silent --show-error --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-            --upload-file cosign.pub "${base_url}/cosign.pub"
+            --upload-file "${COSIGN_PUBLIC_KEY_FILE}" "${base_url}/cosign.pub"
+        else
+          echo "Skipping detached blob signature on unprotected pipeline"
         fi
       }
 
@@ -202,6 +223,9 @@ variables:
     NAME: none
     VERSION: none
     REGISTRY_URI: ${CI_REGISTRY_IMAGE}
+    REGISTRY_AUTH_SERVER: ${CI_REGISTRY}
+    REGISTRY_AUTH_USERNAME: ${CI_REGISTRY_USER}
+    REGISTRY_AUTH_PASSWORD: ${CI_REGISTRY_PASSWORD}
   before_script:
     - *docker_login
   script:
@@ -222,6 +246,9 @@ variables:
     GIT_STRATEGY: none
     SOURCE_IMAGE: ""
     DESTINATION_IMAGE: ""
+    REGISTRY_AUTH_SERVER: ${CI_REGISTRY}
+    REGISTRY_AUTH_USERNAME: ${CI_REGISTRY_USER}
+    REGISTRY_AUTH_PASSWORD: ${CI_REGISTRY_PASSWORD}
   before_script:
     - *docker_login
   script:

@@ -13,6 +13,7 @@
 #include "rx_buffer_pool_test_doubles.h"
 #include "signal_processors/srs/srs_estimator_test_doubles.h"
 #include "upper_phy_rx_results_notifier_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc.h"
 #include <gtest/gtest.h>
 

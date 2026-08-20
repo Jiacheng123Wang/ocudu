@@ -25,6 +25,8 @@ struct cg_builder_params {
   unsigned nof_harq_processes = 4;
   /// Number of RBs that are available for configured grants at cell-level. Values: {1,...,275}.
   unsigned max_nof_cell_cg_rbs = 10;
+  /// UCI beta offsets (semi-static) for Configured Grant.
+  std::optional<uci_on_pusch::beta_offsets_semi_static> uci_beta_offsets;
 };
 
 } // namespace ocudu

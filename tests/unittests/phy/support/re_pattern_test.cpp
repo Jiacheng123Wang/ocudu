@@ -7,6 +7,7 @@
 #pragma message "GCC versions greater than 10 give a likely false array-bounds alarm."
 #endif // defined(__GNUC__) && defined(__GNUC_MINOR__)
 
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/support/re_pattern.h"
 #include "ocudu/ran/cyclic_prefix.h"
 #include "ocudu/support/ocudu_test.h"

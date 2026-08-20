@@ -5,6 +5,7 @@
 #include "srs_resource_manager_periodic.h"
 #include "srs_resource_generator.h"
 #include "srs_resource_manager_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/scheduler/config/pucch_guardbands.h"
 #include "ocudu/scheduler/config/serving_cell_config_factory.h"
 
@@ -236,7 +237,7 @@ srs_resource_manager_periodic::cell_context::find_optimal_ue_srs_resource()
   static constexpr unsigned partial_symb_interval_discount = symbol_weight_base / 2U;
 
   const auto weight_function = [&](const pair_res_id_offset& srs_res) {
-    if (cell_cfg.tdd_cfg.has_value() and is_partially_ul_slot(srs_res.second, cell_cfg.tdd_cfg.value())) {
+    if (cell_cfg.tdd_cfg.has_value() and is_partially_ul_slot(srs_res.second, cell_cfg.tdd_cfg)) {
       return 0U;
     }
 

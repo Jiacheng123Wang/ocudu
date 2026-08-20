@@ -5,6 +5,7 @@
 #include "lib/du/du_high/du_manager/ran_resource_management/du_pdsch_resource_manager.h"
 #include "lib/du/du_high/du_manager/ran_resource_management/du_pusch_resource_manager.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_cell_config_helpers.h"
 #include "ocudu/scheduler/config/serving_cell_config_factory.h"
 #include <gtest/gtest.h>

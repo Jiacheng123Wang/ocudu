@@ -26,26 +26,12 @@ private:
   std::string prefix;
 };
 
+inline const char* format_as(const cu_up_log_prefix& o)
+{
+  return o.to_c_str();
+}
+
 using cu_up_ue_logger = prefixed_logger<cu_up_log_prefix>;
 
 } // namespace ocuup
 } // namespace ocudu
-
-namespace fmt {
-
-template <>
-struct formatter<ocudu::ocuup::cu_up_log_prefix> {
-  template <typename ParseContext>
-  auto parse(ParseContext& ctx)
-  {
-    return ctx.begin();
-  }
-
-  template <typename FormatContext>
-  auto format(const ocudu::ocuup::cu_up_log_prefix& o, FormatContext& ctx) const
-  {
-    return format_to(ctx.out(), "{}", o.to_c_str());
-  }
-};
-
-} // namespace fmt

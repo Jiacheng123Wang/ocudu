@@ -103,7 +103,7 @@ public:
   void handle_ue_config_applied(du_ue_index_t ue_index) override {}
   void handle_ue_deactivation_request(du_ue_index_t ue_index) override {}
   void handle_si_update_request(const si_scheduling_update_request& req) override {}
-  void handle_pws_broadcast_indication(const pws_broadcast_request& req) override {}
+  void handle_pws_si_update_request(const pws_si_scheduling_update_request& req) override {}
   void handle_ul_bsr_indication(const ul_bsr_indication_message& bsr) override {}
   void handle_crc_indication(const ul_crc_indication& crc) override {}
   void handle_uci_indication(const uci_indication& uci) override {}
@@ -121,6 +121,7 @@ public:
   void handle_positioning_measurement_request(const positioning_measurement_request& req) override {}
   void handle_positioning_measurement_stop(const positioning_measurement_stop_request& req) override {}
   void handle_slice_reconfiguration_request(const du_cell_slice_reconfig_request& req) override {}
+  void handle_ntn_ul_ta_update(const sched_cell_ntn_ul_ta_update& req) override {}
 };
 
 class dummy_mac_sfn_time_mapper : public mac_subframe_time_mapper
@@ -185,23 +186,25 @@ public:
 
   void handle_si_change_indication(const si_scheduling_update_request& request) override {}
 
-  unsigned                nof_pws_broadcast_indications = 0;
-  unsigned                last_pws_si_msg_idx           = 0;
-  std::optional<unsigned> last_pws_nof_segments;
-  units::bytes            last_pws_msg_len{0};
+  unsigned                                        nof_pws_broadcast_indications = 0;
+  std::optional<pws_si_scheduling_update_request> last_pws_si_change;
 
-  void handle_pws_broadcast_indication(du_cell_index_t         cell_idx,
-                                       unsigned                si_msg_idx,
-                                       std::optional<unsigned> nof_segments,
-                                       units::bytes            msg_len) override
+  void handle_pws_si_change_indication(const pws_si_scheduling_update_request& request) override
   {
-    ++nof_pws_broadcast_indications;
-    last_pws_si_msg_idx   = si_msg_idx;
-    last_pws_nof_segments = nof_segments;
-    last_pws_msg_len      = msg_len;
+    last_pws_si_change = request;
+    // A warning stamped with the version of the epoch carrying it is starting one more broadcast.
+    const bool new_broadcast =
+        std::any_of(request.broadcasting.begin(), request.broadcasting.end(), [&request](const auto& warning) {
+          return warning.version == request.version;
+        });
+    if (new_broadcast) {
+      ++nof_pws_broadcast_indications;
+    }
   }
 
   void handle_slice_reconfiguration_request(const du_cell_slice_reconfig_request& req) override {}
+
+  void handle_ntn_ul_ta_update(const sched_cell_ntn_ul_ta_update& req) override {}
 
   mac_cell_rach_handler& get_cell_rach_handler(du_cell_index_t cell_index) override { return rach_handler; }
 };

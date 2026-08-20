@@ -5,6 +5,7 @@
 #include "lib/rrc/ue/rrc_measurement_types_asn1_converters.h"
 #include "rrc_ue_test_helpers.h"
 #include "rrc_ue_test_messages.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/ul_dcch_msg_ies.h"
 #include <gtest/gtest.h>
 

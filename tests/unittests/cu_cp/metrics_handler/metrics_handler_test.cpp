@@ -5,6 +5,7 @@
 #include "lib/cu_cp/metrics_handler/metrics_handler_impl.h"
 #include "lib/cu_cp/mobility_manager/mobility_manager_impl.h"
 #include "lib/cu_cp/ngap_repository.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/cause/ngap_cause.h"
 #include "ocudu/support/executors/manual_task_worker.h"
 #include <gtest/gtest.h>

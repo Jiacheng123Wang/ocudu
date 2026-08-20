@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ocudu/scheduler/config/serving_cell_config_factory.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/du_types.h"
 #include "ocudu/ran/pusch/pusch_antenna_ports_mapping.h"
 #include "ocudu/ran/ssb/ssb_mapping.h"
@@ -115,7 +116,7 @@ static std::optional<radio_link_monitoring_config> make_default_rlm_config(const
   return rlm_cfg;
 }
 
-static beta_offsets make_default_uci_on_pusch()
+static beta_offsets make_default_beta_uci_on_pusch()
 {
   return beta_offsets{.beta_offset_ack_idx_1    = 9,
                       .beta_offset_ack_idx_2    = 9,
@@ -153,10 +154,11 @@ static pusch_config make_default_pusch_config(const ran_cell_config& cell_cfg, c
   // > UCI on PUSCH config.
   auto& uci_cfg = cfg.uci_cfg.emplace();
   if (cell_pusch_cfg.uci_beta_offsets.has_value()) {
+    uci_cfg.scaling          = alpha_scaling_opt::f1;
     uci_cfg.beta_offsets_cfg = uci_on_pusch::beta_offsets_semi_static{cell_pusch_cfg.uci_beta_offsets.value()};
   } else {
     uci_cfg.scaling          = alpha_scaling_opt::f1;
-    uci_cfg.beta_offsets_cfg = make_default_uci_on_pusch();
+    uci_cfg.beta_offsets_cfg = make_default_beta_uci_on_pusch();
   }
 
   // > PUSCH power control config.
@@ -275,7 +277,7 @@ static cg_configuration make_default_cg_config(const cg_builder_params& cg_param
   // > UCI on PUSCH config.
   auto& uci_cfg            = cfg.uci_on_pusch_cfg;
   uci_cfg.scaling          = alpha_scaling_opt::f1;
-  uci_cfg.beta_offsets_cfg = make_default_uci_on_pusch();
+  uci_cfg.beta_offsets_cfg = make_default_beta_uci_on_pusch();
 
   // > RRC-configured uplink grant (Type 1 CG).
   cg_configuration::rrc_configured_ul_grant grant{};

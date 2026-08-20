@@ -5,6 +5,7 @@
 #include "ru_sdr_config_translator.h"
 #include "apps/services/worker_manager/worker_manager_config.h"
 #include "ru_sdr_config.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/band_helper.h"
 
 using namespace ocudu;

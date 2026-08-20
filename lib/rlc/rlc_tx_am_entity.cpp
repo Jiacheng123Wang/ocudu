@@ -706,7 +706,7 @@ void rlc_tx_am_entity::handle_status_pdu(rlc_am_status_pdu status) noexcept OCUD
 
   if (tx_mod_base(status.ack_sn) > tx_mod_base(st.tx_next + 1)) {
     logger.log_error("Ignoring status report with ack_sn={} > tx_next. {}", status.ack_sn, st);
-    if (not ue_executor.defer([this]() { upper_cn.on_protocol_failure(); })) {
+    if (not ue_executor.defer([this]() { upper_cn.on_protocol_failure(rb_id); })) {
       logger.log_error("Could not trigger protocol failure on invalid ACK_SN");
     }
     return;
@@ -926,22 +926,22 @@ bool rlc_tx_am_entity::handle_nack(rlc_am_status_nack nack)
   if (nack.so_start > nack.so_end) {
     logger.log_warning("Invalid NACK with so_start > so_end. nack={}, sdu_length={}", nack, sdu_length);
     nack.so_start = 0;
-    if (ue_executor.defer([this]() { upper_cn.on_protocol_failure(); })) {
+    if (ue_executor.defer([this]() { upper_cn.on_protocol_failure(rb_id); })) {
       logger.log_error("Could not trigger protocol failure on invalid NACK");
     }
   }
   if (nack.so_start >= sdu_length) {
     logger.log_warning("Invalid NACK with so_start >= sdu_length. nack={} sdu_length={}.", nack, sdu_length);
     nack.so_start = 0;
-    if (ue_executor.defer([this]() { upper_cn.on_protocol_failure(); })) {
+    if (ue_executor.defer([this]() { upper_cn.on_protocol_failure(rb_id); })) {
       logger.log_error("Could not trigger protocol failure on invalid NACK");
     }
   }
   if (nack.so_end >= sdu_length) {
     logger.log_warning("Invalid NACK: so_end >= sdu_length. nack={}, sdu_length={}.", nack, sdu_length);
     nack.so_end = sdu_length - 1;
-    upper_cn.on_protocol_failure();
-    if (ue_executor.defer([this]() { upper_cn.on_protocol_failure(); })) {
+    upper_cn.on_protocol_failure(rb_id);
+    if (ue_executor.defer([this]() { upper_cn.on_protocol_failure(rb_id); })) {
       logger.log_error("Could not trigger protocol failure on invalid NACK");
     }
   }
@@ -993,7 +993,7 @@ void rlc_tx_am_entity::check_sn_reached_max_retx(uint32_t sn)
 {
   if (tx_window[sn].retx_count == cfg.max_retx_thresh) {
     logger.log_info("Reached maximum number of RETX. sn={} retx_count={}", sn, tx_window[sn].retx_count);
-    upper_cn.on_max_retx();
+    upper_cn.on_max_retx(rb_id);
   }
 }
 
@@ -1004,6 +1004,7 @@ void rlc_tx_am_entity::handle_changed_buffer_state()
     // Redirect handling of status to pcell_executor
     if (not pcell_executor.defer([this]() { update_mac_buffer_state(/* force_notify */ false); })) {
       logger.log_error("Failed to enqueue buffer state update");
+      pending_buffer_state.clear(std::memory_order_seq_cst);
     }
   } else {
     logger.log_debug("Avoiding redundant buffer state update to lower layer");
@@ -1285,7 +1286,7 @@ bool rlc_tx_am_entity::valid_nack(uint32_t ack_sn, const rlc_am_status_nack& nac
   // NACK_SN >= tx_next
   if (tx_mod_base(nack.nack_sn) > tx_mod_base(st.tx_next)) {
     logger.log_error("Ignoring status report with nack_sn={} >= tx_next. {}", nack.nack_sn, st);
-    if (ue_executor.defer([this]() { upper_cn.on_protocol_failure(); })) {
+    if (ue_executor.defer([this]() { upper_cn.on_protocol_failure(rb_id); })) {
       logger.log_error("Could not trigger protocol failure on invalid NACK");
     }
     return false;
@@ -1297,7 +1298,7 @@ bool rlc_tx_am_entity::valid_nack(uint32_t ack_sn, const rlc_am_status_nack& nac
                        nack.nack_sn,
                        nack.nack_range,
                        st);
-      if (ue_executor.defer([this]() { upper_cn.on_protocol_failure(); })) {
+      if (ue_executor.defer([this]() { upper_cn.on_protocol_failure(rb_id); })) {
         logger.log_error("Could not trigger protocol failure on invalid NACK");
       }
       return false;

@@ -5,6 +5,7 @@
 #include "du_low_config_translator.h"
 #include "apps/services/worker_manager/worker_manager_config.h"
 #include "du_low_config.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc.h"
 #include "ocudu/phy/upper/upper_phy_factories.h"
 #include "ocudu/ran/duplex_mode.h"

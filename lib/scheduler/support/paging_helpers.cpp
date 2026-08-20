@@ -4,6 +4,7 @@
 
 #include "paging_helpers.h"
 #include "pdcch/pdcch_type0_helpers.h"
+#include "ocudu/adt/format.h"
 
 using namespace ocudu;
 

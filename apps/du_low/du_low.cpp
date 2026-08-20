@@ -19,6 +19,7 @@
 #include "du_low_appconfig_translators.h"
 #include "du_low_appconfig_validators.h"
 #include "du_low_appconfig_yaml_writer.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/support/backtrace.h"
 #include "ocudu/support/config_parsers.h"

@@ -4,6 +4,7 @@
 
 #include "cu_up_processor_test_helpers.h"
 #include "tests/unittests/e1ap/common/e1ap_cu_up_test_messages.h"
+#include "ocudu/adt/format.h"
 #include <gtest/gtest.h>
 
 using namespace ocudu;

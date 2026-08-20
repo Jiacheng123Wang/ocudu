@@ -19,13 +19,13 @@ static void fill_ru_ofh_expert_execution_section(YAML::Node node, const ru_ofh_u
   YAML::Node affinities_node = node["affinities"];
   YAML::Node ofh_node        = affinities_node["ofh"];
   if (!config.ru_timing_cpu.get_cpu_ids().empty()) {
-    ofh_node["timing_cpu"] = fmt::format("{:,}", span<const size_t>(config.ru_timing_cpu.get_cpu_ids()));
+    ofh_node["timing_cpu"] = fmt::format("{:n}", span<const size_t>(config.ru_timing_cpu.get_cpu_ids()));
   }
 
   if (config.txrx_affinities.size() > 0) {
     YAML::Node txrx_node = ofh_node["txrx_cpus"];
     for (const auto& affinity : config.txrx_affinities) {
-      txrx_node.push_back(fmt::format("{:,}", span<const size_t>(affinity.get_cpu_ids())));
+      txrx_node.push_back(fmt::format("{:n}", span<const size_t>(affinity.get_cpu_ids())));
     }
   }
 
@@ -39,7 +39,7 @@ static void fill_ru_ofh_expert_execution_section(YAML::Node node, const ru_ofh_u
     const auto& expert = config.cell_affinities[index];
 
     if (expert.ru_cpu_cfg.mask.any()) {
-      cell["ru_cpus"] = fmt::format("{:,}", span<const size_t>(expert.ru_cpu_cfg.mask.get_cpu_ids()));
+      cell["ru_cpus"] = fmt::format("{:n}", span<const size_t>(expert.ru_cpu_cfg.mask.get_cpu_ids()));
     }
     cell["ru_pinning"] = to_string(expert.ru_cpu_cfg.pinning_policy);
 

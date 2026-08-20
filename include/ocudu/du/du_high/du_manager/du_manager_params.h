@@ -14,18 +14,24 @@
 #include "ocudu/f1u/du/f1u_gateway.h"
 #include "ocudu/mac/mac_manager.h"
 #include "ocudu/mac/mac_ue_control_information_handler.h"
+#include "ocudu/ntn/ntn_configuration_manager_config.h"
 #include "ocudu/pcap/rlc_pcap.h"
 #include "ocudu/ran/gnb_du_id.h"
 #include "ocudu/rlc/rlc_metrics.h"
 #include "ocudu/rlc/rlc_window_seg_pools.h"
 #include "ocudu/scheduler/config/scheduler_expert_config.h"
 #include <map>
+#include <optional>
 
 namespace ocudu {
 
 class timer_manager;
 class mac_metrics_notifier;
 class scheduler_metrics_notifier;
+
+namespace ocudu_ntn {
+class ntn_doppler_compensation_handler;
+}
 
 namespace odu {
 
@@ -66,9 +72,13 @@ struct du_manager_params {
     f1ap_rrc_message_transfer_procedure_handler& f1ap_rx_proc_handler;
     rlc_pcap&                                    pcap_writer;
     rlc_metrics_notifier*                        rlc_metrics_notif           = nullptr;
+    std::size_t                                  drb_rx_window_seg_size      = rlc_drb_rx_window_seg_size;
     std::size_t                                  drb_rx_window_seg_pool_size = rlc_drb_rx_window_seg_pool_size;
+    std::size_t                                  drb_tx_window_seg_size      = rlc_drb_tx_window_seg_size;
     std::size_t                                  drb_tx_window_seg_pool_size = rlc_drb_tx_window_seg_pool_size;
+    std::size_t                                  srb_rx_window_seg_size      = rlc_srb_rx_window_seg_size;
     std::size_t                                  srb_rx_window_seg_pool_size = rlc_srb_rx_window_seg_pool_size;
+    std::size_t                                  srb_tx_window_seg_size      = rlc_srb_tx_window_seg_size;
     std::size_t                                  srb_tx_window_seg_pool_size = rlc_srb_tx_window_seg_pool_size;
   };
 
@@ -87,6 +97,15 @@ struct du_manager_params {
     bool                      proc_enabled  = false;
   };
 
+  struct ntn_config_params {
+    /// NTN configuration. When present with at least one cell, the DU manager creates an NTN configuration manager
+    /// that periodically refreshes SIB19 and the feeder link Doppler pre- and post-compensation.
+    std::optional<ocudu_ntn::ntn_configuration_manager_config> cfg;
+    /// Handler applying the feeder link Doppler compensation. Left unset by deployments that apply no Doppler
+    /// compensation, in which case the computed values are simply not applied. It must outlive the DU manager.
+    ocudu_ntn::ntn_doppler_compensation_handler* doppler_handler = nullptr;
+  };
+
   ran_params            ran;
   service_params        services;
   f1ap_config_params    f1ap;
@@ -95,6 +114,7 @@ struct du_manager_params {
   mac_config_params     mac;
   metrics_config_params metrics;
   du_test_mode_config   test_cfg;
+  ntn_config_params     ntn;
 };
 
 } // namespace odu

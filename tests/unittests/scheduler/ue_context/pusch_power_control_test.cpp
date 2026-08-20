@@ -72,6 +72,7 @@ protected:
     // Code here will be called immediately after the constructor (right
     // before each test).
     auto* test_ue = ues.find(to_du_ue_index(0));
+    ue_rnti       = test_ue->crnti;
     ocudu_assert(test_ue != nullptr, "UE not found in the UE repository");
     ch_state_manager   = &(test_ue->get_pcell().channel_state_manager());
     ul_pw_ctrl_manager = &(test_ue->get_pcell().get_pusch_power_controller());
@@ -93,6 +94,8 @@ protected:
 
   ue_channel_state_manager* ch_state_manager   = nullptr;
   pusch_power_controller*   ul_pw_ctrl_manager = nullptr;
+
+  rnti_t ue_rnti = rnti_t::INVALID_RNTI;
 
   // Struct to save the latest PHR report.
   struct ue_phr_report {
@@ -224,7 +227,7 @@ TEST_P(phr_ul_power_control_test_bench, pw_control_reduces_prbs_when_estimated_p
         test_logger.debug("Slot={}: Recomputed PH value={}dBm", sl, ph_value);
       }
       const auto phr_to_handle = make_phr_report(ph_value);
-      ul_pw_ctrl_manager->handle_phr(phr_to_handle, sl_phr.value());
+      ul_pw_ctrl_manager->handle_phr(phr_to_handle, sl_phr.value(), ue_rnti);
       test_logger.debug("Slot={}: Handle PHR [PHR={} slot_rx={}]", sl, phr_to_handle.ph, sl_phr.value());
 
       // Save the PHR and the derived parameters. This step is necessary to assess the correctness of the function
@@ -413,6 +416,7 @@ protected:
   void SetUp() override
   {
     auto* test_ue = ues.find(to_du_ue_index(0));
+    ue_rnti       = test_ue->crnti;
     ocudu_assert(test_ue != nullptr, "UE not found in the UE repository");
     ch_state_manager   = &(test_ue->get_pcell().channel_state_manager());
     ul_pw_ctrl_manager = &(test_ue->get_pcell().get_pusch_power_controller());
@@ -420,6 +424,8 @@ protected:
 
   // Object that keeps track of the average SINR reported by the UE.
   exp_average_fast_start<float> average_reported_sinr_dB;
+
+  rnti_t ue_rnti = rnti_t::INVALID_RNTI;
 
   // Reference path-loss, in dB, for which the UE would achieve the target SINR \c pusch_sinr_target_dB through
   // closed-loop power control.
@@ -506,7 +512,7 @@ TEST_P(pusch_closed_loop_power_control_test_bench, with_cl_pw_control_pusch_reac
           p_cmax_dbm.start() - pusch_prb_it->f_cl_pw_control -
           static_cast<int>(std::round(pw_per_prb + convert_power_to_dB(static_cast<float>(pusch_prb_it->nof_prbs)) +
                                       alpha_fractional_pl * actual_path_loss_dB));
-      ul_pw_ctrl_manager->handle_phr(make_phr_report(ph_value), sl_phr.value());
+      ul_pw_ctrl_manager->handle_phr(make_phr_report(ph_value), sl_phr.value(), ue_rnti);
 
       // Reset the slot and value for PHR. This will be set again in the next opportunity
       sl_phr.reset();
@@ -596,9 +602,12 @@ protected:
   static constexpr alpha              pusch_pw_ctrl_alpha       = alpha::alpha1;
   static constexpr float              actual_path_loss_dB_fixed = 90.0f;
 
+  rnti_t ue_rnti = rnti_t::INVALID_RNTI;
+
   void SetUp() override
   {
     auto* test_ue = ues.find(to_du_ue_index(0));
+    ue_rnti       = test_ue->crnti;
     ocudu_assert(test_ue != nullptr, "UE not found in the UE repository");
     ch_state_manager   = &(test_ue->get_pcell().channel_state_manager());
     ul_pw_ctrl_manager = &(test_ue->get_pcell().get_pusch_power_controller());
@@ -677,7 +686,7 @@ TEST_F(pusch_cl_pw_control_bounds_test_bench, when_phr_is_non_positive_cl_stops_
           p_cmax_dbm.start() - pusch_prb_it->f_cl_pw_control -
           static_cast<int>(std::round(pw_per_prb + convert_power_to_dB(static_cast<float>(pusch_prb_it->nof_prbs)) +
                                       alpha_fractional_pl * actual_path_loss_dB));
-      ul_pw_ctrl_manager->handle_phr(make_phr_report(ph_value), sl_phr.value());
+      ul_pw_ctrl_manager->handle_phr(make_phr_report(ph_value), sl_phr.value(), ue_rnti);
       ASSERT_GE(ph_value, 0);
 
       // Reset the slot and value for PHR. This will be set again in the next opportunity

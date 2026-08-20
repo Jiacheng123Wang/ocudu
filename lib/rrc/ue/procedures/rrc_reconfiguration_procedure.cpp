@@ -4,6 +4,7 @@
 
 #include "rrc_reconfiguration_procedure.h"
 #include "../rrc_asn1_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/cause/ngap_cause.h"
 
 using namespace ocudu;

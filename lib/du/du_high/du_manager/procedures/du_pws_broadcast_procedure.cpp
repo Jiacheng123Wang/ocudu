@@ -4,6 +4,7 @@
 
 #include "du_pws_broadcast_procedure.h"
 #include "../du_cell_manager.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/bcch_dl_sch_msg.h"
 #include "ocudu/asn1/rrc_nr/sys_info.h"
 #include "ocudu/ocudulog/ocudulog.h"

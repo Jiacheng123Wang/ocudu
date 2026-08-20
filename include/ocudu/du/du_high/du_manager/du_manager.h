@@ -18,6 +18,10 @@ struct ul_crnti_ce_indication_message;
 struct mac_metric_report;
 struct scheduler_cell_metrics;
 
+namespace ocudu_ntn {
+class ntn_configuration_manager;
+}
+
 namespace odu {
 
 /// Interface used to handle external events (e.g. UL CCCH).
@@ -142,6 +146,9 @@ public:
 
   /// Get configuration interface with the procedures that are triggered externally to the DU.
   virtual du_configurator& get_operation_configurator() = 0;
+
+  /// Returns the NTN configuration manager of this DU, or nullptr when no NTN cell is configured.
+  virtual ocudu_ntn::ntn_configuration_manager* get_ntn_configuration_manager() = 0;
 };
 
 } // namespace odu

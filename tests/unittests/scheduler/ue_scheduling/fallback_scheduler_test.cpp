@@ -11,6 +11,7 @@
 #include "lib/scheduler/pucch_scheduling/pucch_allocator_impl.h"
 #include "lib/scheduler/support/csi_rs_helpers.h"
 #include "lib/scheduler/uci_scheduling/uci_allocator_impl.h"
+#include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "lib/scheduler/ue_scheduling/ue_cell_grid_allocator.h"
 #include "lib/scheduler/ue_scheduling/ue_fallback_scheduler.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
@@ -46,8 +47,8 @@ struct test_bench {
   pdcch_resource_allocator_impl pdcch_sch{cell_cfg};
   pucch_allocator_impl          pucch_alloc{cell_cfg, 31U, 32U};
   uci_allocator_impl            uci_alloc{cell_cfg, pucch_alloc};
+  ue_cell_repository            ue_cell_db{cell_cfg, nullptr};
   ue_repository                 ue_db;
-  ue_cell_repository&           ue_cell_db;
   cell_metrics_handler          metrics_hdlr{cell_cfg, std::nullopt};
   ra_ue_repository              ra_ue_repo{cell_cfg, ocudulog::fetch_basic_logger("SCHED")};
   ue_fallback_scheduler         fallback_sched;
@@ -60,10 +61,10 @@ struct test_bench {
     builder_params{builder_params_},
     cell_cfg{*[&]() { return cfg_mng.add_cell(cell_req); }()},
     ue_db(cell_cfg.expert_cfg.ue),
-    ue_cell_db(ue_db.add_cell(cell_cfg, nullptr)),
     fallback_sched(expert_cfg, cell_cfg, pdcch_sch, pucch_alloc, uci_alloc, ue_db, ra_ue_repo, metrics_hdlr),
     csi_rs_sched(cell_cfg)
   {
+    ue_db.register_cell(ue_cell_db);
     ocudulog::fetch_basic_logger("SCHED", true).set_level(ocudulog::basic_levels::debug);
     ocudulog::fetch_basic_logger("TEST").set_level(ocudulog::basic_levels::info);
     ocudulog::init();

@@ -30,6 +30,7 @@
 #include "ocudu/adt/static_vector.h"
 #include "ocudu/ran/rnti.h"
 #include "ocudu/support/ocudu_assert.h"
+#include "fmt/ranges.h"
 #include "fmt/std.h"
 
 namespace ocudu {

@@ -200,13 +200,13 @@ get_fdd_pusch_td_resource_indices(span<const pusch_time_domain_resource_allocati
   return result;
 }
 
-static bool is_dl_enabled_slot(slot_point slot, const std::optional<tdd_ul_dl_config_common>& tdd_cfg_common)
+static bool is_dl_enabled_slot(slot_point slot, const tdd_ul_dl_config_common* tdd_cfg_common)
 {
-  if (not tdd_cfg_common.has_value()) {
+  if (tdd_cfg_common == nullptr) {
     return true;
   }
 
-  return has_active_tdd_dl_symbols(tdd_cfg_common.value(), slot.count());
+  return has_active_tdd_dl_symbols(*tdd_cfg_common, slot.count());
 }
 
 pusch_index_list ocudu::get_pusch_td_resource_indices(slot_point                                        pdcch_slot,
@@ -276,7 +276,7 @@ get_pusch_td_res_idx_per_slot_full_list(subcarrier_spacing                      
   // Populate the initial list of applicable PUSCH time domain resources per slot.
   for (unsigned slot_idx = 0, e = nof_slots; slot_idx != e; ++slot_idx) {
     slot_point pdcch_slot{to_numerology_value(scs), slot_idx};
-    if (is_dl_enabled_slot(pdcch_slot, tdd_cfg_common)) {
+    if (is_dl_enabled_slot(pdcch_slot, &tdd_cfg_common)) {
       pusch_td_list_per_slot[slot_idx] =
           get_pusch_td_resource_indices(pdcch_slot, tdd_cfg_common, pusch_td_list, min_k1);
     }

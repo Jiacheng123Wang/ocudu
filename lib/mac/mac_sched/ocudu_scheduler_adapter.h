@@ -90,15 +90,13 @@ public:
                                mac_cell_slot_handler::error_event event) override;
 
   void handle_si_change_indication(const si_scheduling_update_request& request) override;
-
-  void handle_pws_broadcast_indication(du_cell_index_t         cell_idx,
-                                       unsigned                si_msg_idx,
-                                       std::optional<unsigned> nof_segments,
-                                       units::bytes            msg_len) override;
+  void handle_pws_si_change_indication(const pws_si_scheduling_update_request& request) override;
 
   mac_positioning_measurement_handler& get_positioning_handler() override { return *pos_handler; }
 
   void handle_slice_reconfiguration_request(const du_cell_slice_reconfig_request& req) override;
+
+  void handle_ntn_ul_ta_update(const sched_cell_ntn_ul_ta_update& req) override;
 
   mac_cell_rach_handler& get_cell_rach_handler(du_cell_index_t cell_index) override
   {

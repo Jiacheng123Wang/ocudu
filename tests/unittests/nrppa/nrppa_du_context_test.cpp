@@ -4,6 +4,7 @@
 
 #include "lib/nrppa/du_context/nrppa_du_context.h"
 #include "tests/test_doubles/utils/test_rng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/support/async/async_no_op_task.h"
 #include <gtest/gtest.h>
 

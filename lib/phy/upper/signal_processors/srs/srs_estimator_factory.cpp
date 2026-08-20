@@ -7,6 +7,7 @@
 #include "srs_estimator_generic_impl.h"
 #include "srs_estimator_pool.h"
 #include "srs_validator_generic_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/support/time_alignment_estimator/time_alignment_estimator_factories.h"
 
 using namespace ocudu;

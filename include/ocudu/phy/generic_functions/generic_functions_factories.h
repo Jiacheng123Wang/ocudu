@@ -6,6 +6,7 @@
 
 #include "ocudu/phy/generic_functions/dft_processor.h"
 #include "ocudu/phy/generic_functions/dft_processor_ci16.h"
+#include <memory>
 
 namespace ocudu {
 

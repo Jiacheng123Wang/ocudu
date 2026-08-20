@@ -4,8 +4,8 @@
 
 # Build args
 ################
-# OS                    Base image name, e.g. ubuntu, debian, or fedora
-# OS_VERSION            Image tag, e.g. 24.04, bookworm, or 43 (must match OS)
+# OS                    Base image name, e.g. ubuntu, debian, fedora, or quay.io/centos/centos
+# OS_VERSION            Image tag, e.g. 24.04, bookworm, 43, or stream10 (must match OS)
 # UHD_VERSION           UHD version number
 # DPDK_VERSION          DPDK version number
 # ROHC_VERSION          ROHC version number
@@ -14,6 +14,8 @@
 # EXTRA_CMAKE_ARGS      Extra flags for OCUDU
 # COMPONENT             Which component to build: gnb | du | cu | cu-cp | cu-up | ru-emulator
 #                       Controls which single binary is compiled and installed.
+# STRIP_BIN             1 to strip OCUDU (and UHD, when present) executables in
+#                       builder / builder-lean / builder-component-uhd (default 0)
 
 ARG OS=ubuntu
 ARG OS_VERSION=26.04
@@ -23,6 +25,7 @@ ARG ROHC_VERSION=2.3.1
 ARG MARCH=native
 ARG NUM_JOBS=""
 ARG TARGETARCH
+ARG STRIP_BIN=0
 
 ################################
 # Stage 0: Common build base   #
@@ -151,6 +154,7 @@ ARG EXTRA_CMAKE_ARGS=""
 ARG COMPONENT="ocu ocucp ocuup odu odu_low odu_split_8 odu_split_7_2 gnb gnb_split_8 gnb_split_7_2 ru_emulator"
 ARG ENABLE_UHD=On
 ARG ENABLE_DPDK=On
+ARG STRIP_BIN=0
 
 ENV ROHC_DIR=/opt/rohc
 ENV UHD_DIR=/opt/uhd/${UHD_VERSION}
@@ -189,6 +193,16 @@ RUN if [ -z "$NUM_JOBS" ]; then NUM_JOBS=$(nproc); fi \
          cp /src/build/apps/du_split_7_2/odu  /opt/ocudu/bin/odu_split_7_2; \
        fi \
     && rm -rf /src
+RUN if [ "${STRIP_BIN}" = "1" ]; then \
+        command -v readelf >/dev/null 2>&1 || { echo "STRIP_BIN=1 requires readelf" >&2; exit 1; }; \
+        command -v strip >/dev/null 2>&1 || { echo "STRIP_BIN=1 requires strip" >&2; exit 1; }; \
+        for dir in /opt/ocudu/bin "/opt/uhd/${UHD_VERSION}/bin"; do \
+            [ -d "$dir" ] || continue; \
+            for f in "$dir"/*; do \
+                if [ -f "$f" ] && readelf -h "$f" >/dev/null 2>&1; then strip "$f"; fi; \
+            done; \
+        done; \
+    fi
 
 ################################
 # Stage 2b: Build OCUDU lean   #
@@ -203,6 +217,7 @@ ARG TARGETARCH
 ARG COMPILER=gcc
 ARG EXTRA_CMAKE_ARGS=""
 ARG COMPONENT
+ARG STRIP_BIN=0
 
 ENV ROHC_DIR=/opt/rohc
 
@@ -222,6 +237,14 @@ RUN if [ -z "$NUM_JOBS" ]; then NUM_JOBS=$(nproc); fi \
        ${ARCH_FLAG} -DCMAKE_INSTALL_PREFIX=/opt/ocudu ${EXTRA_CMAKE_ARGS} /src \
     && cp /src/build/${SRC} /opt/ocudu/bin/${BIN} \
     && rm -rf /src
+# Strip OCUDU binaries so runtime-lean receives stripped executables when STRIP_BIN=1.
+RUN if [ "${STRIP_BIN}" = "1" ]; then \
+        command -v readelf >/dev/null 2>&1 || { echo "STRIP_BIN=1 requires readelf" >&2; exit 1; }; \
+        command -v strip >/dev/null 2>&1 || { echo "STRIP_BIN=1 requires strip" >&2; exit 1; }; \
+        for f in /opt/ocudu/bin/*; do \
+            if [ -f "$f" ] && readelf -h "$f" >/dev/null 2>&1; then strip "$f"; fi; \
+        done; \
+    fi
 
 ######################################
 # Stage 2c: Build OCUDU with UHD     #
@@ -239,6 +262,7 @@ ARG TARGETARCH
 ARG COMPILER=gcc
 ARG EXTRA_CMAKE_ARGS=""
 ARG COMPONENT
+ARG STRIP_BIN=0
 
 ENV ROHC_DIR=/opt/rohc
 ENV UHD_DIR=/opt/uhd/${UHD_VERSION}
@@ -258,6 +282,17 @@ RUN if [ -z "$NUM_JOBS" ]; then NUM_JOBS=$(nproc); fi \
        ${ARCH_FLAG} -DCMAKE_INSTALL_PREFIX=/opt/ocudu ${EXTRA_CMAKE_ARGS} /src \
     && cp /src/build/${SRC} /opt/ocudu/bin/${BIN} \
     && rm -rf /src
+# Strip OCUDU and UHD binaries so runtime-uhd receives stripped executables when STRIP_BIN=1.
+RUN if [ "${STRIP_BIN}" = "1" ]; then \
+        command -v readelf >/dev/null 2>&1 || { echo "STRIP_BIN=1 requires readelf" >&2; exit 1; }; \
+        command -v strip >/dev/null 2>&1 || { echo "STRIP_BIN=1 requires strip" >&2; exit 1; }; \
+        for dir in /opt/ocudu/bin "/opt/uhd/${UHD_VERSION}/bin"; do \
+            [ -d "$dir" ] || continue; \
+            for f in "$dir"/*; do \
+                if [ -f "$f" ] && readelf -h "$f" >/dev/null 2>&1; then strip "$f"; fi; \
+            done; \
+        done; \
+    fi
 
 #######################################
 # Stage 2d: Build OCUDU with DPDK     #
@@ -306,6 +341,7 @@ ARG UHD_VERSION
 ARG DPDK_VERSION
 ARG OCUDU_IMAGE_VERSION=dev
 ARG OCUDU_IMAGE_RELEASE=1
+ARG STRIP_BIN=0
 
 LABEL name="OCUDU" \
       vendor="Software Radio Systems Limited" \

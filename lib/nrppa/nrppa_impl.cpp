@@ -11,6 +11,7 @@
 #include "procedures/positioning_activation_procedure.h"
 #include "procedures/positioning_information_exchange_procedure.h"
 #include "procedures/trp_information_exchange_procedure.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/nrppa/common.h"
 #include "ocudu/ran/cu_cp_types.h"
 #include "ocudu/support/async/coroutine.h"

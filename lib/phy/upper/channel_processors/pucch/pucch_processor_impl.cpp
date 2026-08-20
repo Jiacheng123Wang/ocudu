@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pucch_processor_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/phy/upper/pucch_formats3_4_helpers.h"
 #include "ocudu/ran/pucch/pucch_constants.h"

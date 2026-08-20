@@ -585,6 +585,8 @@ struct du_high_configured_grants {
   unsigned nof_harq_processes = 4;
   /// Number of RBs that are available for configured grants at cell-level. Values: {1,...,275}.
   unsigned max_nof_cell_cg_rbs = 20;
+  /// SINR threshold required for the Configured Grant PUSCH to be detected as transmitted. Range: [-30.0, 30.0].
+  float sinr_threshold_dB = -8.0;
 };
 
 struct du_high_unit_srs_config {
@@ -1152,6 +1154,9 @@ struct du_high_unit_rach_config {
   /// \brief Whether to enable contention-free random access (CFRA) or not. If enabled, the number of RA preambles
   /// used for CBRA (see \c nof_cb_preambles_per_ssb) must be less than \c total_nof_ra_preambles.
   bool cfra_enabled = false;
+  /// \brief Whether a CFRA UE's pending UCI may be multiplexed into its Msg3 PUSCH, rather than restricting the Msg3
+  /// to slots where the UE has no PUCCH.
+  bool multiplex_uci_on_cf_rar_ul_grant = true;
   /// Offset of lowest PRACH transmission occasion in frequency domain respective to PRB 0. To minimize interference
   /// with the PUCCH, the user should leave some guardband between the PUCCH CRBs and the PRACH PRBs.
   /// Possible values: {0,...,MAX_NOF_PRB - 1}.
@@ -1533,9 +1538,13 @@ struct du_high_unit_custom_band_config {
 
 /// RLC configuration.
 struct du_high_unit_rlc_config {
+  std::size_t drb_rx_window_seg_size      = 256;
   std::size_t drb_rx_window_seg_pool_size = 2048;
+  std::size_t drb_tx_window_seg_size      = 256;
   std::size_t drb_tx_window_seg_pool_size = 2048;
+  std::size_t srb_rx_window_seg_size      = 8;
   std::size_t srb_rx_window_seg_pool_size = 2048;
+  std::size_t srb_tx_window_seg_size      = 8;
   std::size_t srb_tx_window_seg_pool_size = 2048;
 };
 

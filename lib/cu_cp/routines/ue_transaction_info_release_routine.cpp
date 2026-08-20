@@ -4,6 +4,7 @@
 
 #include "ue_transaction_info_release_routine.h"
 #include "../ngap_repository.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/ran/cause/e1ap_cause.h"
 #include "ocudu/support/async/coroutine.h"

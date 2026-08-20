@@ -65,6 +65,26 @@ public:
   /// \param req NTN configuration update request containing one or more cell configurations.
   /// \return Result containing lists of successfully updated and failed cells.
   virtual ntn_config_update_result handle_ntn_config_update(const ntn_config_update_info& req) = 0;
+
+  /// \brief Starts the periodic NTN configuration updates.
+  ///
+  /// Runs one update immediately and then arms the per-cell periodic timers, so that the SIB19 refresh and the feeder
+  /// link Doppler compensation do not wait a whole update period. Until this is called the manager is idle: it must
+  /// not run before the node accepts configuration updates, or the updates are simply discarded. Idempotent, and may
+  /// be called again after \c stop().
+  ///
+  /// \remark Must not be called from the execution context handed to the manager, as it blocks waiting on it.
+  virtual void start() = 0;
+
+  /// \brief Stops the periodic NTN configuration updates.
+  ///
+  /// Cancels the per-cell update timers and only returns once no further update can be running or pending. This must
+  /// be called before tearing down the entities the manager holds references to - the SIB19 update handler, the time
+  /// provider and the Doppler compensation handler - none of which is guaranteed to outlive it. Idempotent, and a
+  /// no-op if the manager was never started.
+  ///
+  /// \remark Must not be called from the execution context handed to the manager, as it blocks waiting on it.
+  virtual void stop() = 0;
 };
 
 } // namespace ocudu_ntn

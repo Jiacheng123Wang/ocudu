@@ -5,7 +5,7 @@
 #pragma once
 
 #include "ocudu/ran/logical_channel/lcid.h"
-#include "fmt/format.h"
+#include "fmt/base.h"
 
 namespace ocudu {
 

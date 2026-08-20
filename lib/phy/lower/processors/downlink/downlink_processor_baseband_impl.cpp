@@ -153,9 +153,9 @@ downlink_processor_baseband_impl::process(baseband_gateway_timestamp timestamp)
       span<ci16_t> channel_buffer = pdxch_baseband_result.buffer->get_writer().get_channel_buffer(i_port);
       span<cf_t>   cf_buf         = cf_buffer.get_view({i_port}).first(channel_buffer.size());
 
-      ocuduvec::convert(cf_buf, channel_buffer, scaling_factor_ci16_to_cf);
+      ocuduvec::convert(cf_buf, channel_buffer, ocuduvec::scaling_factor_ci16_to_cf);
       cfo_processor.process(cf_buf);
-      ocuduvec::convert(channel_buffer, cf_buf, scaling_factor_cf_to_ci16);
+      ocuduvec::convert(channel_buffer, cf_buf, ocuduvec::scaling_factor_cf_to_ci16);
     }
 
     // Notify metrics.

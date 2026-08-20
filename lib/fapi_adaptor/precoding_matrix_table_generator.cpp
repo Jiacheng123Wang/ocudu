@@ -132,10 +132,10 @@ static unsigned generate_pdsch_sp_type1(unsigned                              of
   unsigned nof_i_1_3 = param_ranges.i_1_3;
   unsigned nof_i_2   = param_ranges.i_2;
 
-  for (unsigned i_1_1 = 0; i_1_1 != nof_i_1_1; ++i_1_1) {
-    for (unsigned i_1_2 = 0; i_1_2 != nof_i_1_2; ++i_1_2) {
-      for (unsigned i_1_3 = 0; i_1_3 != nof_i_1_3; ++i_1_3) {
-        for (unsigned i_2 = 0; i_2 != nof_i_2; ++i_2) {
+  for (uint8_t i_1_1 = 0; i_1_1 != nof_i_1_1; ++i_1_1) {
+    for (uint8_t i_1_2 = 0; i_1_2 != nof_i_1_2; ++i_1_2) {
+      for (uint8_t i_1_3 = 0; i_1_3 != nof_i_1_3; ++i_1_3) {
+        for (uint8_t i_2 = 0; i_2 != nof_i_2; ++i_2) {
           pmi_typeI_single_panel pmi = {.panel_config = panel,
                                         .i_1_1        = i_1_1,
                                         .i_1_2        = (param_ranges.i_1_2 > 0) ? std::optional(i_1_2) : std::nullopt,

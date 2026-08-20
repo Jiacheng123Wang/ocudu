@@ -46,7 +46,7 @@ struct mac_cell_sys_info_pdu_update {
   /// SI period in nof slots, required if more than one are SI PDU passed.
   std::optional<unsigned> si_slot_period;
   /// Packed content of SIB messages.
-  span<byte_buffer> si_messages;
+  span<const byte_buffer> si_messages;
   /// If not empty, requests a repeated PWS short-message broadcast indication for this SI PDU update.
   std::optional<pws_broadcast_indication> pws_broadcast;
 };
@@ -59,6 +59,13 @@ struct mac_cell_reconfig_request {
   std::optional<mac_cell_sys_info_pdu_update> new_si_pdu_info;
   /// If not empty, contains the updates to be applied to the RRM policies.
   std::optional<du_cell_slice_reconfig_request> slice_reconf_req;
+  /// If not empty, contains a new reference location uplink timing advance for an NTN cell.
+  std::optional<sched_cell_ntn_ul_ta_update> ntn_ul_ta_update;
+  /// If set, contains the new value for the MIB cellBarred flag (TS 38.331). Takes effect on the next SSB build.
+  std::optional<bool> cell_barred_mod;
+  /// If set, contains the new value for the MIB intraFreqReselection flag (TS 38.331). Takes effect on the next SSB
+  /// build.
+  std::optional<bool> intra_freq_reselection_mod;
 };
 
 struct mac_cell_reconfig_response {

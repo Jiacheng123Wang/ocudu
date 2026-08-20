@@ -4,6 +4,7 @@
 
 #include "lib/scheduler/support/pdcch_aggregation_level_calculator.h"
 #include "ocudu/ran/csi_rs/csi_report_config.h"
+#include "fmt/ranges.h"
 #include <gtest/gtest.h>
 
 using namespace ocudu;

@@ -11,9 +11,11 @@
 #include "ocudu/ngap/ngap.h"
 #include "ocudu/ngap/ngap_pdu_session.h"
 #include "ocudu/nrppa/nrppa.h"
+#include "ocudu/ran/cu_cp_cell_configuration.h"
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/rrc/rrc_ue.h"
 #include "ocudu/xnap/xnap_handover.h"
+#include "ocudu/xnap/xnap_ue_context_retrieval.h"
 
 namespace ocudu::ocucp {
 
@@ -228,6 +230,9 @@ public:
 
   /// \brief Handle transaction information loss in the F1AP.
   virtual async_task<void> handle_transaction_info_loss(const ue_transaction_info_loss_event& ev) = 0;
+
+  /// \brief Handle a change of the NR cells the connected DUs serve.
+  virtual void handle_served_cells_updated() = 0;
 };
 
 /// Interface for an RRC UE entity to communicate with the CU-CP.
@@ -250,9 +255,22 @@ public:
   virtual rrc_ue_reestablishment_context_response
   handle_rrc_reestablishment_request(pci_t old_pci, rnti_t old_c_rnti, cu_cp_ue_index_t ue_index) = 0;
 
+  /// \brief Handle a required UE context retrieval from a peer NG-RAN node over Xn (TS 38.423 section 8.2.4).
+  /// \param[in] ue_index The index of the UE the context is retrieved for.
+  /// \param[in] request The retrieval request.
+  /// \returns The retrieved context, or a failure if no peer serves the cell or the peer rejected the retrieval.
+  virtual async_task<rrc_ue_context_retrieval_response>
+  handle_ue_context_retrieval_required(cu_cp_ue_index_t ue_index, const rrc_ue_context_retrieval_request& request) = 0;
+
   /// \brief Handle a required reestablishment context modification.
   /// \param[in] ue_index The index of the UE that needs the context modification.
   virtual async_task<bool> handle_rrc_reestablishment_context_modification_required(cu_cp_ue_index_t ue_index) = 0;
+
+  /// \brief Move the user plane of a UE whose context was retrieved from a peer over to this node and release the
+  /// context at the peer.
+  /// \param[in] ue_index Index of the UE.
+  /// \return True if the path was switched, false otherwise.
+  virtual async_task<bool> handle_retrieved_context_path_switch_required(cu_cp_ue_index_t ue_index) = 0;
 
   /// \brief Handle reestablishment failure by releasing the old UE.
   /// \param[in] request The release request.
@@ -482,6 +500,21 @@ public:
   /// \brief Handle the reception of an XNAP UE Context Release message.
   /// \param[in] ue_index The index of the UE to be released.
   virtual void handle_xnap_ue_context_release_received(cu_cp_ue_index_t ue_index) = 0;
+
+  /// \brief Handle a request for the NR cells this node serves, to be advertised to a peer NG-RAN node.
+  /// \returns The cells served by the connected DUs.
+  virtual std::vector<cu_cp_served_cell_info> handle_served_cells_required() = 0;
+  /// \brief Resolve the UE identified by a UE Context ID received in a Retrieve UE Context Request.
+  /// See TS 38.423 section 8.2.4.
+  /// \param[in] ue_context_id The received UE Context ID.
+  /// \returns The index of the UE holding the context, or cu_cp_ue_index_t::invalid if it is not known.
+  virtual cu_cp_ue_index_t handle_xnap_ue_context_id_lookup(const xnap_ue_context_id& ue_context_id) = 0;
+
+  /// \brief Handle the received Retrieve UE Context Request. See TS 38.423 section 8.2.4.
+  /// \param[in] request The received request, with the UE index already resolved.
+  /// \returns The UE context to transfer, or a failed response carrying the rejection cause.
+  virtual async_task<xnap_retrieve_ue_context_response>
+  handle_xnap_retrieve_ue_context_request(const xnap_retrieve_ue_context_request& request) = 0;
 };
 
 class cu_cp_impl_interface : public cu_cp_e1ap_event_handler,

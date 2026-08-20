@@ -117,8 +117,9 @@ std::optional<uci_allocation> ue_cell_grid_allocator::alloc_uci(const ue_cell&  
   span<const uint8_t> k1_list =
       cell_alloc.cfg.init_bwp.ul.td_mapper().k1_candidates(ss_info.get_dl_dci_format(), last_pdsch_slot.count());
 
-  std::optional<uci_allocation> uci =
-      uci_alloc.alloc_harq_ack(cell_alloc, ue_cc.cfg(), pdsch_td_cfg.k0 + last_occasion_offset, k1_list);
+  const pucch_repetition_factor max_rep_factor = ue_cc.link_adaptation_controller().get_recommended_pucch_rep_factor();
+  std::optional<uci_allocation> uci            = uci_alloc.alloc_harq_ack(
+      cell_alloc, ue_cc.cfg(), pdsch_td_cfg.k0 + last_occasion_offset, k1_list, max_rep_factor);
   if (not uci.has_value()) {
     logger.debug("ue={} rnti={}: Failed to allocate PDSCH. Cause: UCI allocation failed.",
                  fmt::underlying(ue_cc.ue_index),
@@ -284,11 +285,18 @@ ue_cell_grid_allocator::setup_dl_grant_builder(const slice_ue&                  
   } else {
     // Note: k1 needed for PDSCH-to-HARQ timing-indicator, but UE sends no feedback.
     // The values (4, 0) are arbitrary since they will not be used by the UE.
-    uci_result = uci_allocation{.k1 = 4U, .harq_bit_idx = 0};
+    uci_result = uci_allocation{.k1 = 4U, .k1_last_rep = 4U, .harq_bit_idx = 0};
   }
   uci_allocation& uci                     = uci_result.value();
   unsigned        k1                      = uci.k1;
   pdcch->ctx.context.harq_feedback_timing = k1;
+
+  // Both delays are counted from \c pdsch_alloc.slot, the first PDSCH occasion. With PDSCH repetitions, the UE counts
+  // k1 from the last repetition occasion, so \c last_occasion_offset must be added on top.
+  // In the case of a multi-slot PUCCH repetition burst, the HARQ-ACK feedback can only be considered lost once the
+  // last repetition has been transmitted.
+  const unsigned ack_delay      = last_occasion_offset + k1 + ue_cell_cfg.cell_cfg_common.ntn_cs_koffset;
+  const unsigned last_ack_delay = last_occasion_offset + uci.k1_last_rep + ue_cell_cfg.cell_cfg_common.ntn_cs_koffset;
 
   // Allocate UE DL HARQ.
   // NOTE: With PDSCH repetitions, the HARQ-ACK is expected k1 slots after the last repetition occasion.
@@ -296,19 +304,17 @@ ue_cell_grid_allocator::setup_dl_grant_builder(const slice_ue&                  
     // It is a new tx.
     h_dl = ue_cc.harqs
                .alloc_dl_harq(pdsch_alloc.slot,
-                              last_occasion_offset + k1 + ue_cell_cfg.cell_cfg_common.ntn_cs_koffset,
+                              ack_delay,
                               expert_cfg.max_nof_dl_harq_retxs,
                               uci.harq_bit_idx,
                               user.ran_slice_id() == SRB_RAN_SLICE_ID,
-                              nof_repetitions)
+                              nof_repetitions,
+                              last_ack_delay)
                .value();
     ocudu_assert(h_dl.has_value(), "Failed to allocate DL HARQ");
   } else {
     // It is a retx.
-    bool result = h_dl->new_retx(pdsch_alloc.slot,
-                                 last_occasion_offset + k1 + ue_cell_cfg.cell_cfg_common.ntn_cs_koffset,
-                                 uci.harq_bit_idx,
-                                 nof_repetitions);
+    bool result = h_dl->new_retx(pdsch_alloc.slot, ack_delay, uci.harq_bit_idx, nof_repetitions, last_ack_delay);
     ocudu_assert(result, "Harq is in invalid state");
   }
 
@@ -710,6 +716,19 @@ ue_cell_grid_allocator::setup_ul_grant_builder(const slice_ue&                  
     return make_unexpected(alloc_status::skip_ue);
   }
 
+  // As per TS 38.213, Section 9.2.6, if a PUCCH transmission with repetitions overlaps a PUSCH, the UE transmits the
+  // PUCCH and does not transmit the PUSCH in the overlapping slots. The UCI cannot be moved to the PUSCH either, as
+  // Section 9.2.5 scopes UCI multiplexing on PUSCH to PUCCHs "over a single slot without repetitions". So the PUSCH
+  // must not be scheduled in any slot of an in-flight repetition burst, or the UE would drop it.
+  if (uci_alloc.has_pucch_repetition(u.crnti, pusch_alloc.slot)) {
+    logger.debug("ue={} rnti={}: Failed to allocate PUSCH in slot={}. Cause: slot is part of a PUCCH repetition burst "
+                 "of this UE",
+                 fmt::underlying(u.ue_index),
+                 u.crnti,
+                 pusch_alloc.slot);
+    return make_unexpected(alloc_status::skip_ue);
+  }
+
   // Allocate PDCCH position.
   const aggregation_level aggr_lvl =
       ue_cc.get_aggregation_level(ue_cc.link_adaptation_controller().get_effective_cqi(), ss_info, false);
@@ -734,12 +753,10 @@ ue_cell_grid_allocator::setup_ul_grant_builder(const slice_ue&                  
   if (not is_retx) {
     // It is a new tx.
     // NOTE: in this scheduler, we do not request a specific HARQ-ID process.
-    h_ul = ue_cc.harqs
-               .alloc_ul_harq(pusch_alloc.slot,
-                              expert_cfg.max_nof_ul_harq_retxs,
-                              /* harq_id */ std::nullopt,
-                              user.ran_slice_id() == SRB_RAN_SLICE_ID)
-               .value();
+    h_ul = ue_cc.harqs.alloc_ul_harq(pusch_alloc.slot,
+                                     expert_cfg.max_nof_ul_harq_retxs,
+                                     /* cg_params */ std::nullopt,
+                                     user.ran_slice_id() == SRB_RAN_SLICE_ID);
     ocudu_assert(h_ul.has_value(), "Failed to allocate UL HARQ");
   } else {
     // It is a retx.

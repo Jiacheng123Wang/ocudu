@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "csi_rs_helpers.h"
+#include "ocudu/adt/format.h"
 
 bool ocudu::csi_helper::is_csi_rs_slot(const cell_configuration& cell_cfg, slot_point sl_tx)
 {

@@ -7,6 +7,7 @@
 #include "ocudu/ntn/orbit_propagator_type.h"
 #include "ocudu/ran/nr_cgi.h"
 #include "ocudu/ran/ntn.h"
+#include "ocudu/ran/subcarrier_spacing.h"
 
 namespace ocudu {
 namespace ocudu_ntn {
@@ -113,6 +114,10 @@ struct ntn_si_scheduling_info {
 struct ntn_cell_config {
   /// NR-CGI.
   nr_cell_global_id_t nr_cgi;
+  /// Common subcarrier spacing of the cell. Drives the numerology (slots per frame and slot duration) used to derive
+  /// the SIB19 epoch wall-clock time. Left invalid by default so a caller that forgets to set it fails loudly instead
+  /// of silently assuming 15 kHz.
+  subcarrier_spacing common_scs = subcarrier_spacing::invalid;
   /// Sector Id (4-14 bits).
   std::optional<unsigned> sector_id;
   /// SIB19 scheduling information. Present when the manager broadcasts SIB19 for this cell (DU); the update period and

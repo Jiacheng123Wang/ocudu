@@ -414,6 +414,12 @@ void worker_manager::create_du_low_executors(const worker_manager_config::du_low
   } else {
     // RF case.
 
+    // A concurrency larger than the pool size is not achievable. Note that a zero value means unlimited concurrency.
+    unsigned max_pusch_and_srs_concurrency = du_low.max_pusch_and_srs_concurrency;
+    if (max_pusch_and_srs_concurrency != 0) {
+      max_pusch_and_srs_concurrency = std::min(max_pusch_and_srs_concurrency, nof_workers_general_pool);
+    }
+
     // Fill the task executors for each cell.
     du_low_exec_mapper_config.executors = odu::du_low_executor_mapper_flexible_exec_config{
         .rt_hi_prio_exec               = {rt_hi_prio_exec, nof_workers_general_pool},
@@ -421,7 +427,7 @@ void worker_manager::create_du_low_executors(const worker_manager_config::du_low
         .non_rt_medium_prio_exec       = {non_rt_medium_prio_exec, nof_workers_general_pool},
         .non_rt_low_prio_exec          = {non_rt_low_prio_exec, nof_workers_general_pool},
         .max_pucch_concurrency         = du_low.max_pucch_concurrency,
-        .max_pusch_and_srs_concurrency = du_low.max_pusch_and_srs_concurrency,
+        .max_pusch_and_srs_concurrency = max_pusch_and_srs_concurrency,
         .max_pdsch_concurrency         = du_low.max_pdsch_concurrency};
 
     // Propagate metrics channel registry.

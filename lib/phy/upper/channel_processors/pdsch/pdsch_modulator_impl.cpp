@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pdsch_modulator_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/support/resource_grid_mapper.h"
 #include "ocudu/phy/upper/dmrs_mapping.h"
 #include "ocudu/ran/precoding/precoding_weight_matrix_formatters.h"

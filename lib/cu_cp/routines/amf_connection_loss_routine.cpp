@@ -5,6 +5,7 @@
 #include "amf_connection_loss_routine.h"
 #include "cell_deactivation_routine.h"
 #include "cell_lifecycle_target.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/cause/ngap_cause.h"
 #include "ocudu/support/async/coroutine.h"
 
@@ -43,13 +44,15 @@ void amf_connection_loss_routine::operator()(coro_context<async_task<void>>& ctx
   ue_mng.add_blocked_plmns(plmns);
 
   // Deactivate the cells served by the disconnected AMF, releasing their UEs from the CU-CP first (the core is
-  // gone, so they are dropped with a transport cause).
+  // gone, so they are dropped with a transport cause). No barring stage here: this is a fault path, not an
+  // operator-driven graceful stop, and the pre-existing AMF-loss behaviour is kept unchanged.
   CORO_AWAIT_VALUE(
       bool cells_deactivated,
       launch_async<cell_deactivation_routine>(cu_cp_cfg,
                                               resolve_deactivation_targets(du_db, plmns),
                                               collect_ues_for_plmns(ue_mng, plmns),
                                               ngap_cause_t{ngap_cause_transport_t::transport_res_unavailable},
+                                              /* bar_cells_first = */ false,
                                               du_db,
                                               ue_release_handler,
                                               ue_mng,

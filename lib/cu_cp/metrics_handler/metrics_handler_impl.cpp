@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "metrics_handler_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/support/executors/sync_task_executor.h"
 #include "ocudu/support/ocudu_assert.h"
 #include <thread>

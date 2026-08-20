@@ -45,7 +45,7 @@ struct srs_info {
   uint8_t freq_position;
   /// Frequency domain shift \c freqDomainShift, \c SRS-Resource, in \c SRS-Config, TS 38.331.
   /// Values {0,...,268}.
-  unsigned freq_shift;
+  uint16_t freq_shift;
   /// Frequency hopping \c b_hop, as per \c freqHopping, \c SRS-Resource, in \c SRS-Config, TS 38.331.
   /// Values {0,...,3}.
   uint8_t                       freq_hopping;
@@ -57,7 +57,7 @@ struct srs_info {
   /// SRS offset in slots, as per \c SRS-PeriodicityAndOffset, in \c SRS-Config, TS 38.331.
   /// Values { 0,...,t_srs_period - 1}.
   /// \remark Only applies if resource_type == periodic or resource_type == semi_persistent.
-  unsigned t_offset;
+  uint16_t t_offset;
   /// Whether the SRS should be used to obtain a normalized channel I/Q matrix.
   bool normalized_channel_iq_matrix_requested;
   /// Whether the SRS should be used to generate a positioning report.

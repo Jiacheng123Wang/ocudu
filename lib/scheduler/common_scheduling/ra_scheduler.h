@@ -21,6 +21,9 @@ namespace ocudu {
 class scheduler_event_logger;
 class cell_metrics_handler;
 class pucch_allocator;
+class uci_allocator;
+class ue_cell_repository;
+class ue_cell_configuration;
 struct ul_crc_indication;
 
 /// Scheduler for RAR PDSCHs and Msg3 PUSCH grants and handler of RACH indications.
@@ -30,7 +33,9 @@ public:
   explicit ra_scheduler(const cell_configuration& cfg_,
                         pdcch_resource_allocator& pdcch_sched_,
                         pucch_allocator&          pucch_alloc_,
+                        uci_allocator&            uci_alloc_,
                         ra_ue_repository&         ra_ue_repo_,
+                        ue_cell_repository&       ue_cell_db_,
                         scheduler_event_logger&   ev_logger_,
                         cell_metrics_handler&     metrics_handler_);
   ~ra_scheduler();
@@ -177,6 +182,13 @@ private:
   /// Returns true if an RAR UL grant can be scheduled for the given UE in the given slot.
   bool can_allocate_rar_ul_grant(rnti_t crnti, const cell_slot_resource_allocator& slot_alloc) const;
 
+  /// \brief Returns the dedicated config of a CFRA UE whose pending UCI may be multiplexed into its Msg3 PUSCH.
+  /// \return \c nullptr if UCI-on-Msg3 is disabled, the RNTI is not a CFRA UE, or the UE has no dedicated config.
+  const ue_cell_configuration* find_uci_on_msg3_ue_cfg(rnti_t crnti) const;
+
+  /// Move the UCI the UE has pending in the Msg3 slot from its PUCCH onto the Msg3 PUSCH, if enabled for this UE.
+  void try_multiplex_uci_on_msg3(ul_sched_info& msg3, cell_slot_resource_allocator& msg3_alloc, rnti_t crnti) const;
+
   /// Schedule RAR grant and associated Msg3 grants in the provided scheduling resources.
   /// \param res_alloc Cell Resource Allocator.
   /// \param pdcch_slot Slot where the PDCCH is going to be scheduled.
@@ -231,6 +243,7 @@ private:
   const cell_configuration&         cell_cfg;
   pdcch_resource_allocator&         pdcch_sch;
   pucch_allocator&                  pucch_alloc;
+  uci_allocator&                    uci_alloc;
   scheduler_event_logger&           ev_logger;
   cell_metrics_handler&             metrics_hdlr;
   ocudulog::basic_logger&           logger = ocudulog::fetch_basic_logger("SCHED");
@@ -289,6 +302,9 @@ private:
   // HARQ-ACK, plus 2-step RACH contention-resolution outcome), keyed by TC-RNTI. Owned by the cell scheduler,
   // read by the UE-dedicated scheduler.
   ra_ue_repository& ra_ue_repo;
+
+  // UEs configured in this cell, used to retrieve the dedicated config of a CFRA UE.
+  ue_cell_repository& ue_cell_db;
 
   // List of pending MsgBs (2-step RACH responses) to be scheduled.
   std::vector<pending_msgb_alloc> pending_msgbs;

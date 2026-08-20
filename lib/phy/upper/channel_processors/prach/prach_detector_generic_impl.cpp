@@ -4,6 +4,7 @@
 
 #include "prach_detector_generic_impl.h"
 #include "prach_detector_generic_thresholds.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/interval.h"
 #include "ocudu/ocuduvec/accumulate.h"
 #include "ocudu/ocuduvec/add.h"

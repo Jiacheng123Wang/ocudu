@@ -276,12 +276,45 @@ public:
     wait_manual_event_tester<void>           wait_start;
     wait_manual_event_tester<void>           wait_stop;
     std::optional<mac_cell_reconfig_request> last_cell_recfg_req;
+    /// Deep copies of the SI PDU buffers, taken while reconfigure() runs. The request only carries a non-owning span,
+    /// so a test must copy the bytes here to inspect them after the async update completes; reading each buffer also
+    /// exercises the SI message path under ASan.
+    std::vector<byte_buffer> last_si_msg_bytes;
+    unsigned                 start_count = 0;
+    unsigned                 stop_count  = 0;
+    // Latest MIB cellBarred value applied by a reconfigure, and a snapshot of it taken at the moment start()
+    // was last called. Together these let a test assert that a cellBarred restore is applied *before* the cell
+    // is started (so no stale barred SSB is built after reactivation).
+    std::optional<bool> current_cell_barred;
+    std::optional<bool> cell_barred_at_last_start;
 
-    async_task<void>                       start() override { return wait_start.launch(); }
-    async_task<void>                       stop() override { return wait_stop.launch(); }
+    async_task<void> start() override
+    {
+      ++start_count;
+      cell_barred_at_last_start = current_cell_barred;
+      return wait_start.launch();
+    }
+    async_task<void> stop() override
+    {
+      ++stop_count;
+      return wait_stop.launch();
+    }
     async_task<mac_cell_reconfig_response> reconfigure(const mac_cell_reconfig_request& request) override
     {
       last_cell_recfg_req = request;
+      last_si_msg_bytes.clear();
+      if (request.new_si_pdu_info.has_value()) {
+        for (const byte_buffer& si_msg : request.new_si_pdu_info->si_messages) {
+          last_si_msg_bytes.push_back(si_msg.deep_copy().value());
+        }
+        // The stored request keeps a shallow copy of new_si_pdu_info->si_messages, a non-owning span into the caller's
+        // storage that dangles once the update procedure returns. Drop it so a later test cannot dereference the stale
+        // span; tests should read the deep copies in last_si_msg_bytes instead.
+        last_cell_recfg_req->new_si_pdu_info->si_messages = {};
+      }
+      if (request.cell_barred_mod.has_value()) {
+        current_cell_barred = request.cell_barred_mod;
+      }
       return launch_no_op_task(mac_cell_reconfig_response{true, true});
     }
   };
@@ -362,6 +395,8 @@ public:
 
 class dummy_ue_resource_configurator_factory : public du_ran_resource_manager
 {
+  static constexpr unsigned max_nof_rejected_ue_ctxts = 64;
+
 public:
   class dummy_resource_updater : public ue_ran_resource_configurator::resource_updater
   {
@@ -395,7 +430,15 @@ public:
   expected<ue_ran_resource_configurator, std::string>
   create_ue_resource_configurator(du_ue_index_t ue_index, du_cell_index_t pcell_index, bool has_tc_rnti) override;
 
-  unsigned get_max_nof_setup_ues(du_cell_index_t cell_index) const override { return MAX_NOF_DU_UES_PER_CELL; }
+  unsigned get_max_nof_established_ue_contexts(du_cell_index_t cell_index) const override
+  {
+    return MAX_NOF_DU_UES_PER_CELL - max_nof_rejected_ue_ctxts;
+  }
+
+  unsigned get_max_nof_rejected_ue_contexts(du_cell_index_t cell_index) const override
+  {
+    return max_nof_rejected_ue_ctxts;
+  }
 };
 
 f1ap_ue_context_update_request create_f1ap_ue_context_update_request(du_ue_index_t                   ue_idx,

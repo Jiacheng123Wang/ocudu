@@ -22,6 +22,11 @@
 #include "routines/mobility/intra_cu_handover_routine.h"
 #include "routines/mobility/intra_cu_handover_target_routine.h"
 #include "routines/mobility/mobility_helpers.h"
+#include "routines/mobility/retrieved_context_path_switch_routine.h"
+#include "routines/mobility/retrieved_context_resume_routine.h"
+#include "routines/mobility/retrieved_context_setup_routine.h"
+#include "routines/mobility/ue_context_retrieval_helpers.h"
+#include "routines/mobility/ue_context_retrieval_new_node_routine.h"
 #include "routines/pdu_session_resource_modification_routine.h"
 #include "routines/pdu_session_resource_release_routine.h"
 #include "routines/pdu_session_resource_setup_routine.h"
@@ -34,6 +39,7 @@
 #include "routines/ue_suspend_routine.h"
 #include "routines/ue_transaction_info_release_routine.h"
 #include "routines/write_replace_warning_routine.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_ntn_ref_time_store.h"
 #include "ocudu/f1ap/cu_cp/f1ap_cu.h"
 #include "ocudu/nrppa/nrppa.h"
@@ -61,8 +67,8 @@ static void assert_cu_cp_configuration_valid(const cu_cp_configuration& cfg)
 {
   ocudu_assert(cfg.services.cu_cp_executor != nullptr, "Invalid CU-CP executor");
   ocudu_assert(!cfg.ngap.ngaps.empty(), "No NGAPs configured");
-  for (const auto& ngap : cfg.ngap.ngaps) {
-    ocudu_assert(ngap.n2_gw != nullptr, "Invalid N2 GW client handler");
+  for (const auto* n2_gw : cfg.ngap.n2_gws) {
+    ocudu_assert(n2_gw != nullptr, "Invalid N2 GW client handler");
   }
   if (!cfg.xnap.xnaps.empty()) {
     ocudu_assert(!cfg.xnap.xnc_gws.empty(), "No XN-C gateways configured for XNAP peers");
@@ -85,6 +91,23 @@ extract_supported_tas(const std::vector<cu_cp_configuration::ngap_config>& ngap_
   return supported_tas;
 }
 
+static std::vector<nr_cell_identity>
+create_nr_cell_identities(const std::optional<ocudu_ntn::ntn_configuration_manager_config>& cfg)
+{
+  if (!cfg.has_value() || cfg->cells.empty()) {
+    return {};
+  }
+
+  std::vector<nr_cell_identity> ntn_cell_ids;
+
+  ntn_cell_ids.reserve(cfg->cells.size());
+  for (const ocudu_ntn::ntn_cell_config& ntn_cell : cfg->cells) {
+    ntn_cell_ids.push_back(ntn_cell.nr_cgi.nci);
+  }
+
+  return ntn_cell_ids;
+}
+
 cu_cp_impl::cu_cp_impl(const cu_cp_configuration& config_) :
   cfg(config_),
   cu_cp_executor(*cfg.services.cu_cp_executor),
@@ -104,18 +127,47 @@ cu_cp_impl::cu_cp_impl(const cu_cp_configuration& config_) :
                 cell_meas_manager_dependencies{.mobility_mng_notifier = cell_meas_mobility_notifier,
                                                .ue_mng                = ue_mng,
                                                .logger                = logger}),
-  du_db(du_repository_config{cfg,
-                             *this,
-                             get_cu_cp_measurement_config_handler(),
-                             get_cu_cp_ue_removal_handler(),
-                             get_cu_cp_ue_context_handler(),
-                             common_task_sched,
-                             ue_mng,
-                             conn_notifier,
-                             ocudulog::fetch_basic_logger("CU-CP")}),
+  ntn_ref_time_store(create_nr_cell_identities(cfg.ntn)),
+  du_db(du_repository_config{.gnb_id                         = cfg.node.gnb_id,
+                             .ran_node_name                  = cfg.node.ran_node_name,
+                             .ngaps                          = cfg.ngap.ngaps,
+                             .max_nof_dus                    = cfg.admission.max_nof_dus,
+                             .srb2_cfg                       = cfg.bearers.srb2_cfg,
+                             .drb_config                     = cfg.bearers.drb_config,
+                             .int_algo_pref_list             = cfg.security.int_algo_pref_list,
+                             .enc_algo_pref_list             = cfg.security.enc_algo_pref_list,
+                             .force_reestablishment_fallback = cfg.rrc.force_reestablishment_fallback,
+                             .force_resume_fallback          = cfg.rrc.force_resume_fallback,
+                             .rrc_procedure_guard_time_ms    = cfg.rrc.rrc_procedure_guard_time_ms,
+                             .rrc_reject_wait_time           = cfg.rrc.rrc_reject_wait_time,
+                             .rrc_version                    = cfg.rrc.rrc_version,
+                             .enable_rrc_metrics             = cfg.metrics.layers_cfg.enable_rrc_metrics,
+                             .f1ap                           = cfg.f1ap},
+        du_repository_dependencies{.cu_cp_executor           = *cfg.services.cu_cp_executor,
+                                   .timers                   = *cfg.services.timers,
+                                   .cu_cp_du_handler         = *this,
+                                   .meas_config_handler      = get_cu_cp_measurement_config_handler(),
+                                   .ue_removal_handler       = get_cu_cp_ue_removal_handler(),
+                                   .ue_context_handler       = get_cu_cp_ue_context_handler(),
+                                   .common_task_sched        = common_task_sched,
+                                   .ue_mng                   = ue_mng,
+                                   .du_conn_notif            = conn_notifier,
+                                   .ref_time_report_notifier = ntn_ref_time_store,
+                                   .logger                   = logger}),
   cu_up_db(cu_up_repository_config{cfg, e1ap_ev_notifier, common_task_sched, ocudulog::fetch_basic_logger("CU-CP")}),
-  paging_handler(du_db),
-  ngap_db(ngap_repository_config{cfg, get_cu_cp_ngap_handler(), paging_handler, ocudulog::fetch_basic_logger("CU-CP")}),
+  paging_handler(paging_message_handler_dependencies{.dus = du_db, .logger = logger}),
+  ngap_db(ngap_repository_config{.gnb_id                      = cfg.node.gnb_id,
+                                 .ran_node_name               = cfg.node.ran_node_name,
+                                 .procedure_timeout           = cfg.ngap.procedure_timeout,
+                                 .request_pdu_session_timeout = cfg.ue.request_pdu_session_timeout,
+                                 .ngaps                       = cfg.ngap.ngaps,
+                                 .enable_ngap_metrics         = cfg.metrics.layers_cfg.enable_ngap_metrics},
+          ngap_repository_dependencies{.cu_cp_executor = cu_cp_executor,
+                                       .timers         = timers,
+                                       .n2_gws         = cfg.ngap.n2_gws,
+                                       .logger         = logger,
+                                       .cu_cp_notifier = get_cu_cp_ngap_handler(),
+                                       .paging_handler = paging_handler}),
   xnap_db(xnap_repository_config{cfg, get_cu_cp_xnap_handler(), ocudulog::fetch_basic_logger("CU-CP")}),
   mobility_mng(cfg.mobility.mobility_mgr_config,
                mobility_manager_dependencies{.cu_cp_notifier = mobility_manager_ev_notifier,
@@ -167,11 +219,9 @@ cu_cp_impl::cu_cp_impl(const cu_cp_configuration& config_) :
     for (const ocudu_ntn::ntn_cell_config& ntn_cell : cfg.ntn->cells) {
       ntn_cell_ids.push_back(ntn_cell.nr_cgi.nci);
     }
-    ntn_ref_time_store           = std::make_unique<cu_cp_ntn_ref_time_store>(ntn_cell_ids);
-    cfg.ref_time_report_notifier = ntn_ref_time_store.get();
 
     ntn_config_manager = create_cu_cp_ntn_configuration_manager(
-        *cfg.ntn, *ntn_ref_time_store, get_ntn_meas_update_handler(), timers, cu_cp_executor);
+        *cfg.ntn, ntn_ref_time_store, get_ntn_meas_update_handler(), timers, cu_cp_executor);
   }
 }
 
@@ -204,6 +254,12 @@ bool cu_cp_impl::start()
   // Block waiting for CU-CP setup to complete.
   if (not fut.get()) {
     return false; // Could not connect to AMF.
+  }
+
+  // Start the NTN periodic updates. Dispatched from this thread on purpose: the manager blocks waiting on the CU-CP
+  // executor, so calling it from within a task running on it would deadlock.
+  if (ntn_config_manager != nullptr) {
+    ntn_config_manager->start();
   }
 
   // Setup succeeded, add XNAPs and try to connect to peers.
@@ -247,6 +303,12 @@ void cu_cp_impl::stop()
     return;
   }
   logger.info("Stopping CU-CP...");
+
+  // Stop the NTN periodic updates before anything else. Dispatched from this thread on purpose: the manager blocks
+  // waiting on the CU-CP executor, so calling it from within the task below would deadlock.
+  if (ntn_config_manager != nullptr) {
+    ntn_config_manager->stop();
+  }
 
   // Shut down components from within CU-CP executor.
   sync_event ev;
@@ -501,10 +563,47 @@ cu_cp_impl::handle_rrc_reestablishment_request(pci_t old_pci, rnti_t old_c_rnti,
   return reest_context;
 }
 
+async_task<rrc_ue_context_retrieval_response>
+cu_cp_impl::handle_ue_context_retrieval_required(cu_cp_ue_index_t                        ue_index,
+                                                 const rrc_ue_context_retrieval_request& request)
+{
+  return launch_async<ue_context_retrieval_new_node_routine>(request, ue_index, xnap_db, ue_mng, logger);
+}
+
 async_task<bool> cu_cp_impl::handle_rrc_reestablishment_context_modification_required(cu_cp_ue_index_t ue_index)
 {
   cu_cp_ue* ue = ue_mng.find_du_ue(ue_index);
   ocudu_assert(ue != nullptr, "ue={}: Could not find DU UE", ue_index);
+
+  // A context retrieved from a peer is established at the CU-UP from the retrieved PDU sessions, and the user plane
+  // is moved over to this node (TS 38.423 section 8.2.4).
+  if (ue->get_context_retrieval_context().has_value()) {
+    // A CU-UP is selected on the first bearer setup for this UE.
+    if (ue->get_cu_up_index() == cu_cp_cu_up_index_t::invalid) {
+      ue->set_cu_up_index(cu_up_db.select_cu_up());
+    }
+    if (ue->get_cu_up_index() == cu_cp_cu_up_index_t::invalid) {
+      logger.warning("ue={}: Could not find a CU-UP to serve the UE", ue_index);
+      return launch_no_op_task(false);
+    }
+
+    ngap_interface* ngap = ngap_db.find_ngap(ue->get_ue_context().plmn);
+    if (ngap == nullptr) {
+      logger.warning("ue={}: Could not find NGAP for the UE's PLMN", ue_index);
+      return launch_no_op_task(false);
+    }
+
+    return launch_async<retrieved_context_setup_routine>(
+        *ue,
+        cu_up_db.find_cu_up_processor(ue->get_cu_up_index())->get_e1ap_bearer_context_manager(),
+        du_db.get_du_processor(ue->get_du_index()).get_f1ap_handler(),
+        *ngap,
+        xnap_db.find_xnap(ue->get_xnc_peer_index()),
+        ue_mng.get_ue_config(),
+        cfg.security.default_security_indication,
+        logger);
+  }
+
   ocudu_assert(
       ue->get_cu_up_index() != cu_cp_cu_up_index_t::invalid, "ue={}: could not find CU-UP of the UE", ue_index);
 
@@ -807,6 +906,31 @@ async_task<rrc_resume_request_response> cu_cp_impl::handle_rrc_resume_request(co
     rna_update_timer.stop();
   }
 
+  // A context retrieved from a peer is established at the CU-UP and the DU from the retrieved PDU sessions
+  // (TS 38.423 section 8.2.4).
+  if (ue->get_context_retrieval_context().has_value()) {
+    // A CU-UP is selected on the first bearer setup for this UE.
+    if (ue->get_cu_up_index() == cu_cp_cu_up_index_t::invalid) {
+      ue->set_cu_up_index(cu_up_db.select_cu_up());
+    }
+    if (ue->get_cu_up_index() == cu_cp_cu_up_index_t::invalid) {
+      logger.warning("ue={}: Could not find a CU-UP to serve the UE", request.ue_index);
+      return launch_no_op_task(rrc_resume_request_response{});
+    }
+
+    return launch_async<retrieved_context_resume_routine>(
+        request,
+        *ue,
+        cu_up_db.find_cu_up_processor(ue->get_cu_up_index())->get_e1ap_bearer_context_manager(),
+        du_db.get_du_processor(ue->get_du_index()),
+        cfg.ue,
+        cfg.security.default_security_indication,
+        logger);
+  }
+
+  ocudu_assert(
+      ue->get_cu_up_index() != cu_cp_cu_up_index_t::invalid, "ue={}: could not find CU-UP of the UE", request.ue_index);
+
   return launch_async<ue_resume_routine>(request,
                                          cfg.ue,
                                          du_db.get_du_processor(ue->get_du_index()),
@@ -815,6 +939,35 @@ async_task<rrc_resume_request_response> cu_cp_impl::handle_rrc_resume_request(co
                                          ue_mng,
                                          get_cu_cp_location_manager_handler(),
                                          logger);
+}
+
+async_task<bool> cu_cp_impl::handle_retrieved_context_path_switch_required(cu_cp_ue_index_t ue_index)
+{
+  cu_cp_ue* ue = ue_mng.find_du_ue(ue_index);
+  ocudu_assert(ue != nullptr, "ue={}: Could not find DU UE", ue_index);
+
+  if (!ue->get_context_retrieval_context().has_value() ||
+      !ue->get_context_retrieval_context()->path_switch_request.has_value()) {
+    logger.warning("ue={}: No retrieved context to switch the path for", ue_index);
+    return launch_no_op_task(false);
+  }
+
+  ngap_interface* ngap = ngap_db.find_ngap(ue->get_ue_context().plmn);
+  if (ngap == nullptr) {
+    logger.warning("ue={}: Could not find NGAP for the UE's PLMN", ue_index);
+    return launch_no_op_task(false);
+  }
+
+  ocudu_assert(
+      ue->get_cu_up_index() != cu_cp_cu_up_index_t::invalid, "ue={}: could not find CU-UP of the UE", ue_index);
+
+  return launch_async<retrieved_context_path_switch_routine>(
+      *ue,
+      ue->get_context_retrieval_context()->path_switch_request.value(),
+      cu_up_db.find_cu_up_processor(ue->get_cu_up_index())->get_e1ap_bearer_context_manager(),
+      *ngap,
+      xnap_db.find_xnap(ue->get_xnc_peer_index()),
+      logger);
 }
 
 void cu_cp_impl::handle_ran_paging_required(cu_cp_ue_index_t ue_index)
@@ -1234,6 +1387,11 @@ void cu_cp_impl::handle_xnap_handover_success_received(cu_cp_ue_index_t  source_
       source_ue_index, winner_peer_xnap_ue_id, ue_mng, cu_up_db, winner_xnap, &xnap_db, *this, logger));
 }
 
+std::vector<cu_cp_served_cell_info> cu_cp_impl::handle_served_cells_required()
+{
+  return du_db.get_served_cells();
+}
+
 void cu_cp_impl::handle_xnap_ue_context_release_received(cu_cp_ue_index_t ue_index)
 {
   cu_cp_ue* ue = ue_mng.find_ue(ue_index);
@@ -1253,6 +1411,67 @@ void cu_cp_impl::handle_xnap_ue_context_release_received(cu_cp_ue_index_t ue_ind
     CORO_AWAIT(handle_ue_context_release_command(command));
     CORO_RETURN();
   }));
+}
+
+cu_cp_ue_index_t cu_cp_impl::handle_xnap_ue_context_id_lookup(const xnap_ue_context_id& ue_context_id)
+{
+  if (std::holds_alternative<xnap_ue_context_id_for_rrc_reest>(ue_context_id)) {
+    const auto& reest_id = std::get<xnap_ue_context_id_for_rrc_reest>(ue_context_id);
+    return ue_mng.get_ue_index(reest_id.fail_cell_pci, reest_id.c_rnti);
+  }
+
+  // The RRC Resume UE Context ID identifies the UE by the I-RNTI this node allocated when it suspended the UE, so it
+  // resolves through the same lookup as a local resume.
+  const auto& resume_id = std::get<xnap_ue_context_id_for_rrc_resume>(ue_context_id);
+  return std::visit([this](const auto& i_rnti) { return ue_mng.get_ue_index(i_rnti); }, resume_id.i_rnti);
+}
+
+async_task<xnap_retrieve_ue_context_response>
+cu_cp_impl::handle_xnap_retrieve_ue_context_request(const xnap_retrieve_ue_context_request& request)
+{
+  auto reject = [](xnap_cause_t cause) {
+    xnap_retrieve_ue_context_response response;
+    response.cause = cause;
+    return launch_no_op_task(response);
+  };
+
+  cu_cp_ue* ue = ue_mng.find_du_ue(request.ue_index);
+  if (ue == nullptr) {
+    logger.warning("ue={}: UE not found for UE context retrieval", request.ue_index);
+    return reject(xnap_cause_radio_network_t::unknown_local_ng_ran_node_ue_xn_ap_id);
+  }
+
+  auto* ngap = ngap_db.find_ngap(ue->get_ue_context().plmn);
+  if (ngap == nullptr) {
+    logger.warning("ue={}: Couldn't find NGAP for UE context retrieval", request.ue_index);
+    return reject(xnap_cause_radio_network_t::non_relocation_of_context);
+  }
+
+  std::optional<guami_t> served_guami;
+  for (const auto& guami : ngap->get_ngap_context().served_guami_list) {
+    if (guami.plmn == ue->get_ue_context().plmn) {
+      served_guami = guami;
+      break;
+    }
+  }
+  if (!served_guami.has_value()) {
+    logger.warning("ue={}: Couldn't find GUAMI for {}", request.ue_index, ue->get_ue_context().plmn);
+    return reject(xnap_cause_radio_network_t::unknown_guami_id);
+  }
+
+  // The SSB ARFCN of the target cell is only available PER-encoded in the MeasurementTimingConfiguration the peer
+  // advertised for it, so it is decoded by the RRC. Without a target cell there is nothing to decode, and the retrieval
+  // is rejected for the missing cell further down.
+  std::optional<arfcn_t> target_ssb_arfcn;
+  if (request.target_cell.has_value()) {
+    target_ssb_arfcn = du_db.get_du_processor(ue->get_du_index())
+                           .get_rrc_du_handler()
+                           .get_rrc_du_cell_manager()
+                           .get_ssb_arfcn(request.target_cell->meas_timing_cfg);
+  }
+
+  return launch_no_op_task(collect_ue_context_for_retrieval(
+      request, *ue, served_guami.value(), ngap->get_amf_ue_id(request.ue_index), target_ssb_arfcn, logger));
 }
 
 cu_cp_ue_index_t cu_cp_impl::handle_ue_index_allocation_request(const nr_cell_global_id_t& cgi,
@@ -1775,6 +1994,11 @@ async_task<void> cu_cp_impl::handle_transaction_info_loss(const ue_transaction_i
   return launch_async<ue_transaction_info_release_routine>(ev, ue_mng, ngap_db, cu_up_db, *this, logger);
 }
 
+void cu_cp_impl::handle_served_cells_updated()
+{
+  xnap_db.update_served_cells();
+}
+
 ngap_cu_cp_ue_notifier* cu_cp_impl::handle_new_ngap_ue(cu_cp_ue_index_t ue_index)
 {
   auto* ue = ue_mng.find_ue(ue_index);
@@ -1973,8 +2197,9 @@ async_task<cu_cp_cell_command_response> cu_cp_impl::deactivate_cell(const nr_cel
   }
 
   std::vector<cell_lifecycle_target> targets = {cell_lifecycle_target{du_index, cgi, std::nullopt, {}}};
-  // The CU-CP releases the UEs on the cell itself, rather than relying on the DU to autonomously drain them, so
-  // that the behaviour does not depend on DU-specific cell-stop handling (which is not mandated by F1AP).
+  // The CU-CP drives the full graceful stop (bar, then release the cell's UEs, then deactivate), rather than
+  // relying on the DU to autonomously bar/drain, so that the behaviour does not depend on DU-specific cell-stop
+  // handling (which is not mandated by F1AP).
   std::vector<cu_cp_ue_index_t> ues_to_release = collect_ues_on_cell(du_db, ue_mng, du_index, cgi);
 
   return launch_async([this, targets = std::move(targets), ues_to_release = std::move(ues_to_release)](
@@ -1986,6 +2211,7 @@ async_task<cu_cp_cell_command_response> cu_cp_impl::deactivate_cell(const nr_cel
                                                 std::move(targets),
                                                 std::move(ues_to_release),
                                                 ngap_cause_t{ngap_cause_radio_network_t::cell_not_available},
+                                                /* bar_cells_first = */ true,
                                                 du_db,
                                                 *this,
                                                 ue_mng,

@@ -11,6 +11,7 @@
 #include "upper_phy_impl.h"
 #include "upper_phy_pdu_validators.h"
 #include "upper_phy_rx_symbol_handler_printer_decorator.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/metrics/phy_metrics_factories.h"
 #include "ocudu/phy/support/support_factories.h"
 #include "ocudu/phy/upper/channel_estimation.h"

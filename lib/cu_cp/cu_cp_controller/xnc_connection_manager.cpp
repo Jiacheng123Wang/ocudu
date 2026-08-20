@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "xnc_connection_manager.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/support/async/async_task_scheduler.h"
 #include "ocudu/support/async/async_timer.h"
 #include "ocudu/xnap/xnap_message.h"

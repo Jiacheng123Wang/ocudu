@@ -24,7 +24,7 @@ public:
                      const sctp_network_server_impl::sctp_associaton_context& assoc,
                      ocudulog::basic_logger&                                  logger_) :
     ppid(parent.node_cfg.ppid),
-    fd(parent.socket.fd().value()),
+    fd(assoc.fd),
     if_name(parent.node_cfg.if_name),
     assoc_id(assoc.assoc_id),
     client_addr(assoc.addr),
@@ -84,17 +84,37 @@ private:
     }
 
     // Send EOF to SCTP client.
-    transport_layer_address::native_type dest_addr  = client_addr.native();
-    int                                  bytes_sent = ::sctp_sendmsg(fd,
-                                    nullptr,
-                                    0,
-                                    const_cast<struct sockaddr*>(dest_addr.addr),
-                                    dest_addr.addrlen,
-                                    htonl(ppid),
-                                    SCTP_EOF,
-                                    stream_no,
-                                    0,
-                                    0);
+    transport_layer_address::native_type dest_addr = client_addr.native();
+    struct sctp_sndinfo                  sndinfo{};
+    sndinfo.snd_sid   = stream_no;
+    sndinfo.snd_ppid  = htonl(ppid);
+    sndinfo.snd_flags = SCTP_EOF;
+
+    char control[CMSG_SPACE(sizeof(sndinfo))];
+
+    struct iovec iov{};
+    iov.iov_base = nullptr;
+    iov.iov_len  = 0;
+
+    struct msghdr msg{};
+    msg.msg_name    = dest_addr.addr;
+    msg.msg_namelen = dest_addr.addrlen;
+    msg.msg_iov     = &iov;
+    msg.msg_iovlen  = 1;
+
+    msg.msg_control    = control;
+    msg.msg_controllen = sizeof(control);
+
+    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level     = IPPROTO_SCTP;
+    cmsg->cmsg_type      = SCTP_SNDINFO;
+    cmsg->cmsg_len       = CMSG_LEN(sizeof(sndinfo));
+
+    memcpy(CMSG_DATA(cmsg), &sndinfo, sizeof(sndinfo));
+
+    msg.msg_controllen = cmsg->cmsg_len;
+
+    ssize_t bytes_sent = sendmsg(fd, &msg, MSG_NOSIGNAL);
 
     if (bytes_sent == -1) {
       // Failed to send EOF.
@@ -125,7 +145,53 @@ private:
   std::array<uint8_t, network_gateway_sctp_max_len> send_buffer;
 };
 
-sctp_network_server_impl::sctp_associaton_context::sctp_associaton_context(int assoc_id_) : assoc_id(assoc_id_) {}
+sctp_network_server_impl::sctp_associaton_context::sctp_associaton_context(int                       assoc_id_,
+                                                                           int                       fd_,
+                                                                           sctp_network_server_impl& parent_) :
+  assoc_id(assoc_id_), fd(fd_), parent(parent_)
+{
+}
+
+void sctp_network_server_impl::sctp_associaton_context::receive()
+{
+  struct sctp_sndrcvinfo                            sri       = {};
+  int                                               msg_flags = 0;
+  std::array<uint8_t, network_gateway_sctp_max_len> temp_recv_buffer;
+
+  // fromlen is an in/out variable in sctp_recvmsg.
+  sockaddr_storage msg_src_addr;
+  socklen_t        msg_src_addrlen = sizeof(msg_src_addr);
+
+  int rx_bytes = ::sctp_recvmsg(fd,
+                                temp_recv_buffer.data(),
+                                temp_recv_buffer.size(),
+                                (struct sockaddr*)&msg_src_addr,
+                                &msg_src_addrlen,
+                                &sri,
+                                &msg_flags);
+
+  if (rx_bytes == -1) {
+    if (errno != EAGAIN) {
+      parent.logger.error("Error reading from SCTP socket: {}", ::strerror(errno));
+      while (not parent.app_exec.defer([this, keepalive = parent.keepalive_token]() {
+        if (*keepalive) {
+          parent.handle_sctp_comm_lost(assoc_id);
+        }
+      })) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    } else {
+      if (!parent.node_cfg.non_blocking_mode) {
+        parent.logger.debug("Socket timeout reached");
+      }
+    }
+    return;
+  }
+
+  /// We pass the actual data and association handling back to the parent, to avoid code duplication.
+  auto payload = std::vector<uint8_t>(temp_recv_buffer.begin(), temp_recv_buffer.begin() + rx_bytes);
+  parent.receive_impl(std::move(payload), sri, msg_flags, msg_src_addr, msg_src_addrlen);
+}
 
 sctp_network_server_impl::sctp_network_server_impl(const ocudu::sctp_network_gateway_config& sctp_cfg_,
                                                    io_broker&                                broker_,
@@ -150,22 +216,15 @@ sctp_network_server_impl::sctp_network_server_impl(const ocudu::sctp_network_gat
 sctp_network_server_impl::~sctp_network_server_impl()
 {
   if (*keepalive_token) {
-    logger.error("stop() must be called before destroying the SCTP server");
-    report_error("stop() must be called before destroying the SCTP server");
+    logger.error("{}: stop() must be called before destroying the SCTP server", node_cfg.if_name);
+    report_error("{}: stop() must be called before destroying the SCTP server", node_cfg.if_name);
   }
 }
 
 void sctp_network_server_impl::stop()
 {
   sync_event ev;
-  while (not app_exec.defer([this, keepalive = keepalive_token, token = ev.get_token()]() {
-    if (*keepalive) {
-      *keepalive = false;
-      handle_socket_shutdown(nullptr);
-    }
-  })) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
+  defer_socket_shutdown(nullptr, ev.get_token());
   ev.wait();
 }
 
@@ -205,14 +264,7 @@ void sctp_network_server_impl::receive()
   if (rx_bytes == -1) {
     if (errno != EAGAIN) {
       logger.error("Error reading from SCTP socket: {}", ::strerror(errno));
-      while (not app_exec.defer([this, keepalive = keepalive_token]() {
-        if (*keepalive) {
-          *keepalive = false;
-          handle_socket_shutdown(nullptr);
-        }
-      })) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      }
+      defer_socket_shutdown(nullptr);
     } else {
       if (!node_cfg.non_blocking_mode) {
         logger.debug("Socket timeout reached");
@@ -223,6 +275,15 @@ void sctp_network_server_impl::receive()
 
   // Defer all processing after sctp_recvmsg to app_exec.
   auto payload = std::vector<uint8_t>(temp_recv_buffer.begin(), temp_recv_buffer.begin() + rx_bytes);
+  receive_impl(std::move(payload), sri, msg_flags, msg_src_addr, msg_src_addrlen);
+}
+
+void sctp_network_server_impl::receive_impl(std::vector<uint8_t>   payload,
+                                            struct sctp_sndrcvinfo sri,
+                                            int                    msg_flags,
+                                            sockaddr_storage       msg_src_addr,
+                                            socklen_t              msg_src_addrlen)
+{
   while (not app_exec.defer([this,
                              keepalive = keepalive_token,
                              payload   = std::move(payload),
@@ -256,6 +317,18 @@ void sctp_network_server_impl::handle_socket_shutdown(const char* cause)
   io_sub.reset();
 }
 
+void sctp_network_server_impl::defer_socket_shutdown(const char* cause, std::optional<scoped_sync_token> token)
+{
+  while (not app_exec.defer([this, keepalive = keepalive_token, token = std::move(token)]() {
+    if (*keepalive) {
+      *keepalive = false;
+      handle_socket_shutdown(nullptr);
+    }
+  })) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+}
+
 void sctp_network_server_impl::handle_data(int assoc_id, span<const uint8_t> payload)
 {
   auto assoc_it = associations.find(assoc_id);
@@ -284,7 +357,8 @@ async_task<bool> sctp_network_server_impl::connect(std::vector<transport_layer_a
       CORO_EARLY_RETURN(false);
     }
 
-    // fmt::format of fmt::join view is required before passing to the logger, otherwise TSAN may report use-after-free.
+    // fmt::format of fmt::join view is required before passing to the logger, otherwise TSAN may report
+    // use-after-free.
     logger.info(
         "{}: Initiating SCTP connection to [{}]", node_cfg.if_name, fmt::format("{}", fmt::join(dest_addrs, ", ")));
 
@@ -410,8 +484,26 @@ void sctp_network_server_impl::handle_sctp_comm_up(const struct sctp_assoc_chang
     return;
   }
 
+  /// Peel-off a socket. This is done for easier DTLS support.
+  int assoc_fd_raw = sctp_peeloff(socket.fd().value(), assoc_id);
+  if (assoc_fd_raw == -1) {
+    logger.error(
+        "{} assoc={}: Could not peel off new association. err={}", node_cfg.if_name, assoc_id, ::strerror(errno));
+    /// Remove association as if it was lost. Do it directly, as we are running in the app excutor already.
+    handle_association_shutdown(assoc_id, "Peel-off error");
+    remove_association(assoc_id);
+    return;
+  }
+  auto assoc_fd = unique_fd(assoc_fd_raw);
+
+  /// Make sure peeled-off socket follows the blocking mode of the parent.
+  if (node_cfg.non_blocking_mode) {
+    ::set_non_blocking(assoc_fd, logger);
+  }
+
   // Add an entry for the association in the lookup
-  auto result = associations.emplace(assoc_id, assoc_id);
+  auto result = associations.emplace(
+      std::piecewise_construct, std::forward_as_tuple(assoc_id), std::forward_as_tuple(assoc_id, assoc_fd_raw, *this));
   if (not result.second) {
     logger.error("{} assoc={}: Unable to create new SCTP association", node_cfg.if_name, assoc_id);
     return;
@@ -439,12 +531,19 @@ void sctp_network_server_impl::handle_sctp_comm_up(const struct sctp_assoc_chang
   // assoc_factory.create() callback can run before the awaiting coroutine resumes.
   // Signaling inline here would resume the coroutine within this task, before the enqueued tasks that connect the
   // notifiers have a chance to finish.
-  while (not app_exec.defer([this, addr = assoc_ctxt.addr]() {
+  while (not app_exec.defer([this, addr = assoc_ctxt.addr, assoc_fd = std::move(assoc_fd), &assoc_ctxt]() mutable {
     auto pending_it = std::find_if(pending_connects.begin(),
                                    pending_connects.end(),
                                    [&addr](const pending_connect& pending) { return pending.contains(addr); });
     if (pending_it != pending_connects.end()) {
       pending_it->event.set(true);
+    }
+    /// Register peeled-off socket in IO broker.
+    if (not subscribe_association_to_broker(std::move(assoc_fd), assoc_ctxt)) {
+      logger.error("Connection loss due to IO broker subscription failure");
+      handle_association_shutdown(assoc_ctxt.assoc_id, "IO broker error");
+      remove_association(assoc_ctxt.assoc_id);
+      return;
     }
   })) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -554,16 +653,22 @@ bool sctp_network_server_impl::subscribe_to_broker()
       [this]() { receive(); },
       [this](io_broker::error_code code) {
         logger.info("Connection loss due to IO error code={}.", (int)code);
-        while (not app_exec.defer([this, keepalive = keepalive_token]() {
-          if (*keepalive) {
-            *keepalive = false;
-            handle_socket_shutdown(nullptr);
-          }
-        })) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
+        defer_socket_shutdown(nullptr);
       });
   return io_sub.registered();
+}
+
+bool sctp_network_server_impl::subscribe_association_to_broker(unique_fd assoc_fd, sctp_associaton_context& assoc_ctxt)
+{
+  assoc_ctxt.io_sub = broker.register_fd(
+      std::move(assoc_fd),
+      io_rx_executor,
+      [&assoc_ctxt]() { assoc_ctxt.receive(); },
+      [this](io_broker::error_code code) {
+        logger.info("Connection loss due to IO error code={}.", (int)code);
+        defer_socket_shutdown(nullptr);
+      });
+  return assoc_ctxt.io_sub.registered();
 }
 
 std::unique_ptr<sctp_network_server> sctp_network_server_impl::create(const sctp_network_gateway_config& sctp_cfg,

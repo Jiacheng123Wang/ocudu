@@ -208,6 +208,8 @@ struct scheduler_ue_expert_config {
   /// \brief SINR threshold, in dB, below which PUCCH PDUs are always considered invalid.
   /// If not set, no SINR-based filtering of PUCCH UCI indications is applied.
   std::optional<float> pucch_sinr_threshold_dB;
+  /// \brief SINR threshold, in dB, below which CG PUSCH PDUs are always considered DTX (i.e., not transmitted).
+  float cg_pusch_sinr_threshold_dB = -8.0;
   /// Configuration of the scheduler policy. Currently, time-domain round-robin and time-domain QoS-aware are supported.
   scheduler_policy_config policy_cfg = time_qos_scheduler_config{};
   /// \brief Size of the group of UEs that is considered for newTx allocation in a given slot. The groups of UEs
@@ -257,6 +259,11 @@ struct scheduler_ra_expert_config {
   /// \brief Requested Backoff Indicator duration signalled in the RAR when congestion control is triggered. Mapped
   /// by the RA scheduler to the closest value in TS38.321, Table 7.2-1.
   std::chrono::milliseconds backoff_indicator_duration{40};
+  /// \brief Whether pending UCI may be multiplexed into Contention-free (CF) RAR UL grants, rather than restricting
+  /// the CF RAR UL grants to slots where the UE has no pending PUCCH.
+  /// \remark The TS 38.321 and TS 38.213 are very unclear on whether UCI should be multiplexed in RAR UL grants for
+  /// CFRA (are CFRA RAR UL grants even Msg3s?), so we decided to support both options.
+  bool multiplex_uci_on_cf_rar_ul_grant = true;
 };
 
 /// \brief Paging scheduling statically configurable expert parameters.

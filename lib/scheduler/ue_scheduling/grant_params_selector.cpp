@@ -415,6 +415,11 @@ static std::optional<ul_sched_context> get_ul_sched_context(const slice_ue&     
     return std::nullopt;
   }
 
+  // If there is a CG configured and this is a CG slot, then we skip the PUSCH dynamic grant allocation.
+  if (ue_cc.cfg().is_cg_slot(pusch_slot)) {
+    return std::nullopt;
+  }
+
   const ue_cell_configuration& ue_cell_cfg = ue_cc.cfg();
   const cell_configuration&    cell_cfg    = ue_cell_cfg.cell_cfg_common;
   const sched_bwp_config&      bwp_cfg     = ue_cc.active_bwp();

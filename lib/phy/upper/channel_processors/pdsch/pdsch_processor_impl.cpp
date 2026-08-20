@@ -5,6 +5,7 @@
 #include "pdsch_processor_impl.h"
 #include "pdsch_processor_helpers.h"
 #include "pdsch_processor_validator_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/bit.h"
 #include "ocudu/ran/sch/sch_segmentation.h"
 

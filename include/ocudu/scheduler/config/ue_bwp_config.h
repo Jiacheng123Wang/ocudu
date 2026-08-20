@@ -19,10 +19,15 @@ struct ue_pucch_config {
   pucch_sr_resource_id         sr_res_id;
   unsigned                     sr_offset;
   unsigned                     max_pucch_payload;
+  /// Whether the UE supports dynamic PUCCH repetition (slotBasedDynamicPUCCH-Rep-r17) for Format 1/3/4 resources.
+  bool rep_f1_3_4_enabled = false;
+  /// Whether the UE supports dynamic PUCCH repetition (slotBasedDynamicPUCCH-Rep-r17) for Format 0/2 resources.
+  bool rep_f0_2_enabled = false;
 
   bool operator==(const ue_pucch_config& other) const
   {
-    return res_set_cfg_id == other.res_set_cfg_id and sr_res_id == other.sr_res_id and sr_offset == other.sr_offset;
+    return res_set_cfg_id == other.res_set_cfg_id and sr_res_id == other.sr_res_id and sr_offset == other.sr_offset and
+           rep_f1_3_4_enabled == other.rep_f1_3_4_enabled and rep_f0_2_enabled == other.rep_f0_2_enabled;
   }
 };
 

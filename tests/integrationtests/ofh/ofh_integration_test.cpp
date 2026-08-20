@@ -5,6 +5,7 @@
 #include "helpers.h"
 #include "ocudu/adt/bounded_bitset.h"
 #include "ocudu/adt/circular_map.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ofh/ecpri/ecpri_constants.h"
 #include "ocudu/ofh/ethernet/ethernet_controller.h"
 #include "ocudu/ofh/ethernet/ethernet_frame_notifier.h"

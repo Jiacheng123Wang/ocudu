@@ -22,6 +22,7 @@
 #include "ocudu/rrc/rrc_ue_config.h"
 #include "ocudu/security/security.h"
 #include "ocudu/support/async/async_task.h"
+#include <chrono>
 #include <variant>
 
 namespace asn1::rrc_nr {
@@ -223,7 +224,7 @@ struct rrc_ue_cond_reconfiguration_context {
 struct rrc_inactivity_context {
   i_rntis_t                        i_rntis;
   uint8_t                          next_hop_chaining_count;
-  uint8_t                          ran_paging_cycle;
+  uint16_t                         ran_paging_cycle;
   rrc_ran_notification_area_info_t ran_notification_area_info;
   std::chrono::minutes             t380 = std::chrono::minutes(5);
 };
@@ -246,6 +247,28 @@ public:
   /// \brief Get the packed UE Capability RAT Container List.
   /// \returns The packed UE Capability RAT Container List.
   virtual byte_buffer get_packed_ue_capability_rat_container_list() const = 0;
+
+  /// \brief Verify a ShortMAC-I this UE computed for a reestablishment attempt at another NG-RAN node.
+  /// The token is computed with the AS keys of this UE, so only this node can verify it
+  /// (TS 38.331 section 5.3.7.4, TS 33.501 section 6.11).
+  /// \param[in] short_mac_i The ShortMAC-I received from the peer NG-RAN node.
+  /// \param[in] source_pci PCI of the cell the UE declared a failure on.
+  /// \param[in] source_c_rnti C-RNTI the UE had in that cell.
+  /// \param[in] target_nci Identity of the cell the UE is reestablishing on.
+  /// \returns True if the ShortMAC-I matches, false otherwise.
+  virtual bool verify_reestablishment_short_mac_i(const security::sec_short_mac_i& short_mac_i,
+                                                  pci_t                            source_pci,
+                                                  rnti_t                           source_c_rnti,
+                                                  nr_cell_identity                 target_nci) = 0;
+
+  /// \brief Verify a ResumeMAC-I this UE computed for a resume attempt at another NG-RAN node.
+  /// The token is computed with the AS keys of this UE, so only this node can verify it
+  /// (TS 38.331 section 5.3.13.3, TS 33.501 section 6.11). The peer identifies the UE by its I-RNTI, so the source
+  /// cell and C-RNTI are taken from the context of the cell this UE was suspended in.
+  /// \param[in] resume_mac_i The ResumeMAC-I received from the peer NG-RAN node.
+  /// \param[in] target_nci Identity of the cell the UE is resuming on.
+  /// \returns True if the ResumeMAC-I matches, false otherwise.
+  virtual bool verify_resume_mac_i(const security::sec_short_mac_i& resume_mac_i, nr_cell_identity target_nci) = 0;
 
   /// \brief Handle an RRC Reconfiguration Request.
   /// \param[in] msg The new RRC Reconfiguration Request.
@@ -394,6 +417,14 @@ public:
   /// \param[in] sec_ctxt The new security context
   virtual void update_security_context(const security::security_context& sec_ctxt) = 0;
 
+  /// \brief Initialize the security context from one retrieved from a peer NG-RAN node. A context coming from a peer
+  /// carries KgNB*, so this takes over the algorithms the peer selected and derives the AS keys below it.
+  /// \param[in] sec_ctxt The security context retrieved from the peer.
+  /// \param[in] algos The AS algorithms the peer signalled, or std::nullopt to select them locally.
+  /// \return True on success, false if no algorithm could be selected.
+  virtual bool init_retrieved_security_context(const security::security_context&                  sec_ctxt,
+                                               const std::optional<security::sec_selected_algos>& algos) = 0;
+
   /// \brief Perform horizontal key derivation
   virtual void perform_horizontal_key_derivation(pci_t target_pci, unsigned target_ssb_arfcn) = 0;
 };
@@ -406,6 +437,59 @@ struct rrc_ue_reestablishment_context_response {
   up_context                                     up_ctx;
   bool                                           old_ue_fully_attached   = false;
   bool                                           reestablishment_ongoing = false;
+};
+
+/// \brief Identity of a UE that reestablished at this node, as it appeared in the RRCReestablishmentRequest. The peer
+/// holding the context resolves the UE from it.
+struct rrc_ue_context_retrieval_id_for_reest {
+  /// PCI of the cell the UE declared the failure on, i.e. a cell served by the peer holding the context.
+  pci_t old_pci = INVALID_PCI;
+  /// C-RNTI the UE had in that cell.
+  rnti_t old_c_rnti = rnti_t::INVALID_RNTI;
+};
+
+/// \brief Identity of a UE that resumed at this node, as it appeared in the RRCResumeRequest. The peer holding the
+/// context resolves the UE from the I-RNTI it allocated when it suspended the UE.
+struct rrc_ue_context_retrieval_id_for_resume {
+  /// I-RNTI the UE included in the RRCResumeRequest. The I-RNTI types have no default constructor, so the variant is
+  /// explicitly initialized to keep the identity default-constructible.
+  std::variant<short_i_rnti_t, full_i_rnti_t> i_rnti = short_i_rnti_t{short_i_rnti_profile::profile_0, 0, 0};
+  /// C-RNTI this node allocated for the resuming UE.
+  rnti_t allocated_c_rnti = rnti_t::INVALID_RNTI;
+  /// PCI of the cell the UE accessed at this node.
+  pci_t access_pci = INVALID_PCI;
+};
+
+/// \brief Identity the peer resolves the UE by, following the procedure the UE used to reach this node.
+using rrc_ue_context_retrieval_id =
+    std::variant<rrc_ue_context_retrieval_id_for_reest, rrc_ue_context_retrieval_id_for_resume>;
+
+/// \brief Request to retrieve a UE context from the peer NG-RAN node that still holds it (TS 38.423 section 8.2.4),
+/// for a UE that reestablished or resumed at this node after leaving a cell served by that peer.
+struct rrc_ue_context_retrieval_request {
+  /// Identity of the UE at the peer.
+  rrc_ue_context_retrieval_id ue_id;
+  /// ShortMAC-I (reestablishment, TS 38.331 section 5.3.7.4) or ResumeMAC-I (resume, section 5.3.13.3) the UE computed
+  /// with the AS keys it had at the peer. Only the peer can verify it, as only the peer holds those keys.
+  security::sec_short_mac_i mac_i = {};
+  /// Identity of the cell the UE accessed at this node, as the UE used it in VarShortMAC-Input/VarResumeMAC-Input. The
+  /// peer verifies the MAC-I against exactly this value and derives KgNB* for this cell.
+  nr_cell_identity target_nci = nr_cell_identity::min();
+  /// How long to wait for the peer before giving up. The wait happens before anything is sent to the UE, so it is
+  /// spent out of the timer the UE runs until Msg4 -- T301 for a reestablishment, T319 for a resume -- and must leave
+  /// room for the RRC Setup fallback to still reach the UE. Defaults to the guard the Handover Preparation procedure
+  /// uses, for the case where that timer is not known.
+  std::chrono::milliseconds max_response_time{1000};
+};
+
+/// \brief Result of a UE context retrieval from a peer NG-RAN node.
+struct rrc_ue_context_retrieval_response {
+  bool success = false;
+  /// Security context the peer derived for the cell the UE accessed here (KgNB*, TS 33.501 section 6.11). This is
+  /// already the key for this node's cell, so no further horizontal key derivation must be performed on it.
+  security::security_context sec_context;
+  /// Packed RRC HandoverPreparationInformation, carrying the UE capabilities and the source AS configuration.
+  byte_buffer rrc_context;
 };
 
 /// Interface to notify about UE context updates.
@@ -430,8 +514,21 @@ public:
   /// \returns The RRC Reestablishment UE context for the old UE.
   virtual rrc_ue_reestablishment_context_response on_rrc_reestablishment_request(pci_t old_pci, rnti_t old_c_rnti) = 0;
 
+  /// \brief Notify the CU-CP to retrieve the UE context from the peer NG-RAN node that still holds it, over Xn
+  /// (TS 38.423 section 8.2.4). Used when no local UE context matches the reestablishment identity, but a peer serves
+  /// the cell the UE declared the failure on.
+  /// \param[in] request The retrieval request.
+  /// \returns The retrieved context, or a failure if no peer serves that cell or the peer rejected the retrieval.
+  virtual async_task<rrc_ue_context_retrieval_response>
+  on_ue_context_retrieval_required(const rrc_ue_context_retrieval_request& request) = 0;
+
   /// \brief Notify about a required reestablishment context modification.
   virtual async_task<bool> on_rrc_reestablishment_context_modification_required() = 0;
+
+  /// \brief Notify that a UE whose context was retrieved from a peer has confirmed Msg4, so the user plane can be
+  /// moved to this node and the context released at the peer.
+  /// \return True if the path was switched, false otherwise.
+  virtual async_task<bool> on_retrieved_context_path_switch_required() = 0;
 
   /// \brief Notify the CU-CP to release the old UE after a reestablishment failure.
   /// \param[in] request The release request.

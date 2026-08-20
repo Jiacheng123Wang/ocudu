@@ -4,6 +4,7 @@
 
 #include "pdu_session_resource_release_routine.h"
 #include "pdu_session_routine_helpers.h"
+#include "ocudu/adt/format.h"
 
 using namespace ocudu;
 using namespace ocudu::ocucp;

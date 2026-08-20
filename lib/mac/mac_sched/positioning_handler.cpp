@@ -4,6 +4,7 @@
 
 #include "positioning_handler.h"
 #include "../mac_ctrl/spsc_metric_report_channel.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/slotted_array.h"
 #include "ocudu/mac/mac_positioning_measurement_handler.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -140,7 +141,7 @@ pos_handler_impl::handle_positioning_measurement_request(const mac_positioning_m
       if (c.free_dummy_rnti_list.empty()) {
         logger.warning("cell={}: Received positioning measurement request for a neighbor UE, but no more reserved RNTIs"
                        " are available in the cell",
-                       fmt::underlying(cell_req.cell_index));
+                       cell_req.cell_index);
         // Cleanup previously allocated pos-RNTIs.
         clean_last_req_resources();
         return launch_no_op_task(mac_positioning_measurement_response{});

@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "precoding_matrix_test_fixture.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/static_vector.h"
 #include "ocudu/phy/generic_functions/precoding/precoding_factories.h"
 #include "ocudu/phy/support/precoding_configuration.h"

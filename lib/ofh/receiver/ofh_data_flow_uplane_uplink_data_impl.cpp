@@ -3,6 +3,7 @@
 
 #include "ofh_data_flow_uplane_uplink_data_impl.h"
 #include "../support/uplane_bound_check_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/instrumentation/traces/ofh_traces.h"
 #include "ocudu/ofh/serdes/ofh_message_decoder_properties.h"
 

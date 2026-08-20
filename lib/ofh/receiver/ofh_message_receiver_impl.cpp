@@ -4,6 +4,7 @@
 #include "ofh_message_receiver_impl.h"
 #include "../support/logger_utils.h"
 #include "ofh_rx_window_checker.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/instrumentation/traces/ofh_traces.h"
 
 using namespace ocudu;
@@ -155,8 +156,8 @@ bool message_receiver_impl::should_ethernet_frame_be_filtered(const ether::vlan_
     logger.debug("Sector#{}: dropped received Ethernet frame as source MAC addresses do not match (detected={:02X}, "
                  "expected={:02X})",
                  sector_id,
-                 span<const uint8_t>(eth_params.mac_src_address),
-                 span<const uint8_t>(vlan_params.mac_src_address));
+                 fmt::join(eth_params.mac_src_address, ":"),
+                 fmt::join(vlan_params.mac_src_address, ":"));
 
     return true;
   }
@@ -166,8 +167,8 @@ bool message_receiver_impl::should_ethernet_frame_be_filtered(const ether::vlan_
         "Sector#{}: dropped received Ethernet frame as destination MAC addresses do not match match (detected={:02X}, "
         "expected={:02X})",
         sector_id,
-        span<const uint8_t>(eth_params.mac_dst_address),
-        span<const uint8_t>(vlan_params.mac_dst_address));
+        fmt::join(eth_params.mac_dst_address, ":"),
+        fmt::join(vlan_params.mac_dst_address, ":"));
 
     return true;
   }

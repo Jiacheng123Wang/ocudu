@@ -5,10 +5,10 @@
 #pragma once
 
 #include "du_ue_resource_config.h"
-#include "ue_capability_summary.h"
 #include "ocudu/du/du_cell_config.h"
 #include "ocudu/du/du_high/du_test_mode_config.h"
 #include "ocudu/ran/harq_id.h"
+#include "ocudu/scheduler/rrm/ue_capability_summary.h"
 #include <optional>
 
 namespace ocudu {

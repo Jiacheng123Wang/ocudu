@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ue_manager_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/security_manager_config.h"
 
 using namespace ocudu;
@@ -14,9 +15,12 @@ void cu_cp_ue::stop()
 }
 
 ue_manager::ue_manager(const ue_manager_config& cfg, const ue_manager_dependencies& dependencies) :
-  next_i_rntis({short_i_rnti_t{cfg.gnb_id.id, 0, cfg.ue.nof_i_rnti_ue_bits},
-                full_i_rnti_t{cfg.gnb_id.id, 0, cfg.ue.nof_i_rnti_ue_bits}}),
-  gnb_id(cfg.gnb_id),
+  next_i_rntis({short_i_rnti_t{cfg.ue.short_i_rnti_prof,
+                               short_i_rnti_t::to_local_node_id(cfg.ue.short_i_rnti_prof, cfg.gnb_id.id),
+                               0},
+                full_i_rnti_t{cfg.ue.full_i_rnti_prof,
+                              full_i_rnti_t::to_local_node_id(cfg.ue.full_i_rnti_prof, cfg.gnb_id.id),
+                              0}}),
   enable_rrc_metrics(cfg.enable_rrc_metrics),
   ue_config(cfg.ue),
   up_config(up_resource_manager_cfg{cfg.drb_config, cfg.max_nof_drbs_per_ue}),
@@ -98,7 +102,7 @@ bool ue_manager::update_ue_context(cu_cp_ue_index_t ue_index,
   }
 
   if (pcell_index == INVALID_DU_CELL_INDEX) {
-    logger.warning("Invalid pcell_index={}", fmt::underlying(pcell_index));
+    logger.warning("Invalid pcell_index={}", pcell_index);
     return false;
   }
 
@@ -119,7 +123,7 @@ bool ue_manager::update_ue_context(cu_cp_ue_index_t ue_index,
                fmt::underlying(du_id),
                pci,
                rnti,
-               fmt::underlying(pcell_index));
+               pcell_index);
 
   return true;
 }

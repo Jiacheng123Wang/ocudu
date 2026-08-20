@@ -39,7 +39,7 @@ gnb docker compose:
     - sh -c "docker compose -f docker/docker-compose.yml run --no-deps --entrypoint sh gnb -c 'command -v gnb_split_8'"
     - sh -c "docker compose -f docker/docker-compose.yml run --no-deps --entrypoint sh gnb -c 'command -v gnb_split_7_2'"
     - sh -c "docker compose -f docker/docker-compose.yml run --no-deps --entrypoint sh gnb -c 'command -v ru_emulator'"
-    - sh -c "docker compose -f docker/docker-compose.yml run --no-deps gnb gnb cu_cp amf --no_core=true ru_sdr --device_driver uhd | grep 'Failed to open device with address'"
+    - sh -c "docker compose -f docker/docker-compose.yml run --no-deps gnb gnb cu_cp amf --no_core=true ru_sdr --device_driver uhd expert_execution threads upper_phy --max_pusch_and_srs_concurrency 1 | grep 'Failed to open device with address'"
     - sh -c "docker compose -f docker/docker-compose.yml run --no-deps gnb gnb cu_cp amf --no_core=true hal --eal_args='--help'"
   needs: []
 
@@ -49,6 +49,25 @@ gnb docker compose fedora 44:
   variables:
     OS: fedora
     OS_VERSION: "44"
+  rules:
+    - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-docker/
+      when: never
+    - if: $ON_MR
+      changes:
+        paths:
+          - docker/scripts/**/*
+          - docker/Dockerfile
+          - docker/docker-compose.yml
+      when: manual
+      allow_failure: true
+    - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
+
+# Manual only: validates gNB image on quay.io/centos/centos:stream10 (dnf, EPEL/CRB). Run from the child pipeline when docker CI is included.
+gnb docker compose centos stream10 manual:
+  extends: gnb docker compose
+  variables:
+    OS: quay.io/centos/centos
+    OS_VERSION: "stream10"
   rules:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-docker/
       when: never

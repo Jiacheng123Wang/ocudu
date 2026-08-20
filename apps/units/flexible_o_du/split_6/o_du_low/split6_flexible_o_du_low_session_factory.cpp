@@ -14,6 +14,7 @@
 #include "external/fmt/include/fmt/chrono.h"
 #include "split6_constants.h"
 #include "split6_flexible_o_du_low_session.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_low/o_du_low_config.h"
 #include "ocudu/fapi/cell_config.h"
 #include "ocudu/fapi_adaptor/phy/p7/phy_fapi_p7_sector_fastpath_adaptor.h"

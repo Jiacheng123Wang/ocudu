@@ -7,6 +7,7 @@
 
 #include "pucch_detector_format1.h"
 #include "ocudu/adt/bounded_bitset.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/tensor.h"
 #include "ocudu/ocuduvec/add.h"
 #include "ocudu/ocuduvec/compare.h"

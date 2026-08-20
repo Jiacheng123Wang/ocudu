@@ -62,6 +62,9 @@ public:
 /// mirroring the 10 ticks that elapse between successive periodic-task timer firings (si_period_rf == 1 -> 10ms
 /// period). The time/slot are advanced before being returned so that the Nth call reflects N*10ms of elapsed real
 /// timer_manager ticks, matching when the per-cell timer actually fires.
+///
+/// \remark start() runs one immediate update, which consumes the first call. Seed \c start_time one step earlier so
+/// that the Nth timer firing still reports start_time + N*10ms.
 class fake_ntn_time_provider : public ntn_time_provider
 {
 public:
@@ -234,14 +237,20 @@ TEST(sat_switch_apply_integration_test, promotes_switch_target_at_t_service_not_
   auto  sib19_handler = std::make_unique<fake_sib19_update_handler>();
   auto* sib19_ptr     = sib19_handler.get();
 
+  // Seeded one step earlier, so that start()'s immediate update reports t0 and the Nth timer firing t0 + N*10ms.
+  auto time_provider = std::make_unique<fake_ntn_time_provider>(t0 - std::chrono::milliseconds(10));
+
   ntn_configuration_manager_dependencies deps{std::move(sib19_handler),
-                                              std::make_unique<fake_ntn_time_provider>(t0),
-                                              /*doppler_handler=*/nullptr,
+                                              std::move(time_provider),
                                               /*meas_info_update_handler=*/nullptr,
+                                              /*doppler_handler=*/nullptr,
                                               timers,
                                               executor};
 
   ntn_configuration_manager_impl manager(cfg, std::move(deps));
+
+  // The periodic update timers are only armed by start().
+  manager.start();
 
   // First firing (10 ticks == 10ms): inside the overlap window (past t_service_start at 5ms, before t_service at
   // 15ms) -- per TS 38.331 clause 5.7.19 the switch executes at t-Service, so the source satellite must still be
@@ -310,14 +319,20 @@ TEST(sat_switch_apply_integration_test, does_not_promote_when_promote_to_serving
   auto  sib19_handler = std::make_unique<fake_sib19_update_handler>();
   auto* sib19_ptr     = sib19_handler.get();
 
+  // Seeded one step earlier, so that start()'s immediate update reports t0 and the Nth timer firing t0 + N*10ms.
+  auto time_provider = std::make_unique<fake_ntn_time_provider>(t0 - std::chrono::milliseconds(10));
+
   ntn_configuration_manager_dependencies deps{std::move(sib19_handler),
-                                              std::make_unique<fake_ntn_time_provider>(t0),
-                                              /*doppler_handler=*/nullptr,
+                                              std::move(time_provider),
                                               /*meas_info_update_handler=*/nullptr,
+                                              /*doppler_handler=*/nullptr,
                                               timers,
                                               executor};
 
   ntn_configuration_manager_impl manager(cfg, std::move(deps));
+
+  // The periodic update timers are only armed by start().
+  manager.start();
 
   for (int i = 0; i != 10; ++i) {
     timers.tick();

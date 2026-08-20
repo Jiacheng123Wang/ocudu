@@ -119,7 +119,7 @@ establishment_cause_t asn1_resume_cause_to_establishment_cause(const asn1::rrc_n
 /// \brief Converts type \c ran_paging_cycle to an RRC NR ASN.1 type.
 /// \param[in] ran_paging_cycle ran paging cycle object.
 /// \return asn1_ran_paging_cycle The RRC NR ASN.1 object where the result of the conversion is stored.
-asn1::enumerated<asn1::rrc_nr::paging_cycle_opts> ran_paging_cycle_to_asn1(uint8_t ran_paging_cycle);
+asn1::enumerated<asn1::rrc_nr::paging_cycle_opts> ran_paging_cycle_to_asn1(uint16_t ran_paging_cycle);
 
 /// \brief Converts type \c plmn_identity to an RRC NR ASN.1 type.
 /// \param[in] plmn plmn identity object.

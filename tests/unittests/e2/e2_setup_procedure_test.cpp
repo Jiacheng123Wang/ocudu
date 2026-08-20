@@ -53,13 +53,14 @@ TEST_F(e2_entity_test, e2ap_setup_request_du_global_node_id_is_correct)
   auto owned_collector = std::make_unique<e2_node_component_config_collector>(task_worker, 1);
   owned_collector->deliver(e2_node_component_interface_type::f1, byte_buffer{}, byte_buffer{});
   e2agent = create_e2_du_agent(cfg,
-                               *e2_client,
-                               &(*du_metrics),
-                               &(*f1ap_ue_id_mapper),
-                               &(*du_rc_param_configurator),
-                               factory,
-                               task_worker,
-                               std::move(owned_collector));
+                               e2ap_dependencies{.e2_client                      = *e2_client,
+                                                 .e2_metrics_var                 = &(*du_metrics),
+                                                 .f1ap_ue_id_translator          = &(*f1ap_ue_id_mapper),
+                                                 .du_configurator                = &(*du_rc_param_configurator),
+                                                 .timers                         = factory,
+                                                 .e2_exec                        = task_worker,
+                                                 .node_component_config_provider = std::move(owned_collector),
+                                                 .logger = ocudulog::fetch_basic_logger("TEST")});
   task_worker.run_pending_tasks();
   e2agent->start();
 
@@ -84,7 +85,7 @@ TEST_F(e2_entity_test, e2ap_setup_request_cu_cp_global_node_id_is_correct)
   auto cu_configurator_ = std::make_unique<dummy_cu_configurator>();
   owned_collector->deliver(e2_node_component_interface_type::ng, byte_buffer{}, byte_buffer{});
   e2agent = create_e2_cu_cp_agent(
-      cfg, *e2_client, cu_metrics.get(), cu_configurator_.get(), factory, task_worker, std::move(owned_collector));
+      cfg, *e2_client, cu_metrics.get(), *cu_configurator_, factory, task_worker, std::move(owned_collector));
   task_worker.run_pending_tasks();
   e2agent->start();
 
@@ -108,8 +109,7 @@ TEST_F(e2_entity_test, e2ap_setup_request_cu_up_global_node_id_is_correct)
   auto cu_metrics       = std::make_unique<dummy_e2_cu_metrics>();
   auto cu_configurator_ = std::make_unique<dummy_cu_configurator>();
   owned_collector->deliver(e2_node_component_interface_type::e1, byte_buffer{}, byte_buffer{});
-  e2agent = create_e2_cu_up_agent(
-      cfg, *e2_client, cu_metrics.get(), cu_configurator_.get(), factory, task_worker, std::move(owned_collector));
+  e2agent = create_e2_cu_up_agent(cfg, *e2_client, cu_metrics.get(), factory, task_worker, std::move(owned_collector));
   task_worker.run_pending_tasks();
   e2agent->start();
 

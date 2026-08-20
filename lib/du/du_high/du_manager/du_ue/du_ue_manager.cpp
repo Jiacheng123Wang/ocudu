@@ -8,6 +8,7 @@
 #include "../procedures/ue_configuration_procedure.h"
 #include "../procedures/ue_creation_procedure.h"
 #include "../procedures/ue_deletion_procedure.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/mac/mac_pdu_handler.h"
 #include "ocudu/support/async/async_no_op_task.h"
 

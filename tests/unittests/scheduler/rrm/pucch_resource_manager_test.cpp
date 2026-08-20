@@ -5,9 +5,13 @@
 #include "lib/scheduler/config/cell_configuration.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/unittests/scheduler/test_utils/config_generators.h"
+#include "ocudu/adt/format.h"
+#include "ocudu/ran/pucch/pucch_configuration.h"
+#include "ocudu/scheduler/config/pucch_resource_generator.h"
 #include "ocudu/scheduler/config/scheduler_expert_config_factory.h"
 #include "ocudu/scheduler/config/serving_cell_config_factory.h"
 #include "ocudu/scheduler/rrm/pucch_resource_manager.h"
+#include "ocudu/scheduler/rrm/ue_capability_summary.h"
 #include "ocudu/scheduler/scheduler_configurator.h"
 #include <gtest/gtest.h>
 
@@ -91,4 +95,90 @@ TEST_F(pucch_resource_manager_tester, when_ues_are_added_their_cfg_have_differen
   }
 
   ASSERT_TRUE(true);
+}
+
+TEST_F(pucch_resource_manager_tester, repetition_disabled_until_capabilities_confirm_support)
+{
+  // Configure PUCCH HARQ-ACK repetition at cell level, so that the HARQ-ACK resources are generated with a repetition
+  // factor greater than n1.
+  ran_cell_config cell_params_rep  = cell_cfg.params;
+  auto&           pucch_res_params = cell_params_rep.init_bwp.pucch.resources;
+  pucch_res_params.harq_ack_rep =
+      pucch_harq_ack_rep_params{.sinr_thresholds = {-5.0F, 0.0F},
+                                .factors_per_res = std::vector<pucch_repetition_factor>(
+                                    pucch_res_params.res_set_size.value(), pucch_repetition_factor::n4)};
+
+  // Sanity check: with this configuration, the cell PUCCH resources of both F1 (Resource Set 0) and F2 (Resource Set 1)
+  // do have a repetition factor other than n1.
+  const unsigned bwp_size_rbs  = cell_params_rep.ul_cfg_common.init_ul_bwp.generic_params.crbs.length();
+  const auto     cell_res_list = config_helpers::generate_cell_pucch_res_list(pucch_res_params, bwp_size_rbs);
+  ASSERT_TRUE(std::any_of(cell_res_list.begin(), cell_res_list.end(), [](const pucch_resource& res) {
+    return res.format() == pucch_format::FORMAT_1 and res.rep_factor != pucch_repetition_factor::n1;
+  }));
+  ASSERT_TRUE(std::any_of(cell_res_list.begin(), cell_res_list.end(), [](const pucch_resource& res) {
+    return res.format() == pucch_format::FORMAT_2 and res.rep_factor != pucch_repetition_factor::n1;
+  }));
+
+  const du_cell_index_t rep_cell_idx = to_du_cell_index(1);
+  pucch_res_mng.add_cell(rep_cell_idx, cell_params_rep);
+
+  ue_cell_config ue_cfg = ocudu::config_helpers::make_default_ue_cell_config(cell_params_rep, rep_cell_idx);
+  ASSERT_TRUE(pucch_res_mng.alloc_resources(ue_cfg));
+
+  const auto& res_list = ue_cfg.serv_cell_cfg.ul_config->init_ul_bwp.pucch_cfg->pucch_res_list;
+  ASSERT_FALSE(res_list.empty());
+
+  // Repetition must start disabled, as the UE capabilities are not yet known.
+  for (const pucch_resource& res : res_list) {
+    ASSERT_EQ(res.rep_factor, pucch_repetition_factor::n1);
+  }
+
+  const nr_band band = cell_params_rep.ul_carrier.band;
+
+  // A UE that does not indicate support for dynamic PUCCH repetition must keep repetition disabled.
+  ue_capability_summary no_rep_caps;
+  pucch_res_mng.update_resources(ue_cfg, no_rep_caps);
+  for (const pucch_resource& res : res_list) {
+    ASSERT_EQ(res.rep_factor, pucch_repetition_factor::n1);
+  }
+
+  // A UE that indicates full support for dynamic PUCCH repetition must have it enabled for every format.
+  ue_capability_summary full_rep_caps;
+  full_rep_caps.pucch_repeat_f1_3_4_supported          = true;
+  full_rep_caps.slot_based_dyn_pucch_rep_r17_supported = true;
+  full_rep_caps.bands.emplace(band, ue_capability_summary::supported_band{.pucch_repeat_f0_2_r17_supported = true});
+  pucch_res_mng.update_resources(ue_cfg, full_rep_caps);
+  for (const pucch_resource& res : res_list) {
+    const auto cell_res_it = std::find_if(
+        cell_res_list.begin(), cell_res_list.end(), [&](const pucch_resource& r) { return r.res_id == res.res_id; });
+    ASSERT_NE(cell_res_it, cell_res_list.end());
+    ASSERT_EQ(res.rep_factor, cell_res_it->rep_factor);
+  }
+
+  // A UE that supports repetition for F1/3/4, but not for F0/2, must keep repetition disabled for F0/2.
+  ue_capability_summary f1_3_4_only_caps;
+  f1_3_4_only_caps.pucch_repeat_f1_3_4_supported          = true;
+  f1_3_4_only_caps.slot_based_dyn_pucch_rep_r17_supported = true;
+  pucch_res_mng.update_resources(ue_cfg, f1_3_4_only_caps);
+  for (const pucch_resource& res : res_list) {
+    const bool is_f0_or_f2 = res.format() == pucch_format::FORMAT_0 or res.format() == pucch_format::FORMAT_2;
+    if (is_f0_or_f2) {
+      // Repetition for F0/2 is not supported by this UE, so it must remain disabled.
+      ASSERT_EQ(res.rep_factor, pucch_repetition_factor::n1);
+    } else {
+      const auto cell_res_it = std::find_if(
+          cell_res_list.begin(), cell_res_list.end(), [&](const pucch_resource& r) { return r.res_id == res.res_id; });
+      ASSERT_NE(cell_res_it, cell_res_list.end());
+      ASSERT_EQ(res.rep_factor, cell_res_it->rep_factor);
+    }
+  }
+
+  // A UE that supports repetition, but not the dynamic indication, must keep repetition disabled.
+  ue_capability_summary format_only_caps;
+  format_only_caps.pucch_repeat_f1_3_4_supported = true;
+  format_only_caps.bands.emplace(band, ue_capability_summary::supported_band{.pucch_repeat_f0_2_r17_supported = true});
+  pucch_res_mng.update_resources(ue_cfg, format_only_caps);
+  for (const pucch_resource& res : res_list) {
+    ASSERT_EQ(res.rep_factor, pucch_repetition_factor::n1);
+  }
 }

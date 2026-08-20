@@ -5,6 +5,7 @@
 #include "lib/nrppa/nrppa_impl.h"
 #include "tests/test_doubles/nrppa/nrppa_test_message_validators.h"
 #include "tests/test_doubles/nrppa/nrppa_test_messages.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/support/async/async_no_op_task.h"
 #include "ocudu/support/async/fifo_async_task_scheduler.h"
 #include "ocudu/support/executors/manual_task_worker.h"

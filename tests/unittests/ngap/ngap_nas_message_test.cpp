@@ -4,6 +4,7 @@
 
 #include "ngap_test_helpers.h"
 #include "tests/test_doubles/utils/test_rng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/ngap/ngap_pdu_contents.h"
 #include "ocudu/ran/cause/ngap_cause.h"
 #include "ocudu/support/async/async_test_utils.h"

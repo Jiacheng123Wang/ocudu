@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/csi_report/csi_report_configuration.h"
 #include "ocudu/ran/csi_report/csi_report_formatters.h"
 #include "ocudu/ran/csi_report/csi_report_on_pusch_helpers.h"
 #include "ocudu/ran/precoding/precoding_codebook_helpers.h"
 #include "ocudu/ran/uci/uci_part2_size_calculator.h"
-#include <fmt/ostream.h>
+#include "fmt/ostream.h"
 #include <gtest/gtest.h>
 #include <random>
 
@@ -384,10 +385,10 @@ private:
       const pmi_codebook_single_panel_info& panel_info = get_single_panel_info(codebook.n1_n2);
       const pmi_typeI_single_panel_param_sizes sizes   = get_pmi_sizes_typeI_single_panel(panel_info, ri);
 
-      unsigned i_1_1 = rgen() & mask_lsb_ones<unsigned>(sizes.i_1_1);
-      unsigned i_1_2 = rgen() & mask_lsb_ones<unsigned>(sizes.i_1_2);
-      unsigned i_1_3 = rgen() & mask_lsb_ones<unsigned>(sizes.i_1_3);
-      unsigned i_2   = rgen() & mask_lsb_ones<unsigned>(sizes.i_2);
+      uint8_t i_1_1 = rgen() & mask_lsb_ones<unsigned>(sizes.i_1_1);
+      uint8_t i_1_2 = rgen() & mask_lsb_ones<unsigned>(sizes.i_1_2);
+      uint8_t i_1_3 = rgen() & mask_lsb_ones<unsigned>(sizes.i_1_3);
+      uint8_t i_2   = rgen() & mask_lsb_ones<unsigned>(sizes.i_2);
 
       // Set PMI values.
       pmi_typeI_single_panel type{codebook,

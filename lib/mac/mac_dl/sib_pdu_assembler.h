@@ -4,15 +4,9 @@
 
 #pragma once
 
-#include "mac_scheduler_cell_info_handler.h"
-#include "ocudu/adt/byte_buffer.h"
+#include "bcch_dl_sch_encoder.h"
 #include "ocudu/adt/lockfree_triple_buffer.h"
-#include "ocudu/mac/cell_configuration.h"
-#include "ocudu/mac/mac_cell_manager.h"
 #include "ocudu/ocudulog/logger.h"
-#include "ocudu/ran/slot_point_extended.h"
-#include "ocudu/scheduler/result/pdsch_info.h"
-#include "ocudu/support/timers.h"
 
 namespace ocudu {
 
@@ -20,129 +14,61 @@ namespace ocudu {
 class sib_pdu_assembler
 {
 public:
-  /// Encoder of BCCH-DL-SCH messages that require dynamic fields to be updated at each transmission (e.g., HyperSFN,
-  /// segment cycling, or PWS content).
-  class bcch_dl_sch_msg_encoder
-  {
-  public:
-    virtual ~bcch_dl_sch_msg_encoder() = default;
+  sib_pdu_assembler();
 
-    /// \brief Get an encoded BCCH-DL-SCH message buffer for a given slot point and SI scheduling occasion.
-    /// \param[in] sl_tx   Transmission slot point.
-    /// \param[in] si_info Scheduling occasion information (TBS, repetition/transmission count, etc.).
-    /// \return The encoded BCCH-DL-SCH message buffer on success, otherwise an error containing the minimum TBS that
-    /// should have been scheduled.
-    virtual expected<span<const uint8_t>, units::bytes> encode(slot_point_extended    sl_tx,
-                                                               const sib_information& si_info) = 0;
-  };
+  /// \brief Starts the broadcast of the cell System Information.
+  /// \param[in] ext_handler Handler used to serve SI PDU updates that bypass the SI modification window.
+  /// \param[in] first_cmd First SI epoch of the cell.
+  /// \param[in] pws_end_notifier Notified once the grants go back to the SI epoch of the normal operation.
+  void start_broadcast(std::shared_ptr<si_message_extension_handler> ext_handler,
+                       const si_update_command&                      first_cmd,
+                       std::unique_ptr<pws_broadcast_end_notifier>   pws_end_notifier);
 
-  class message_handler
-  {
-  public:
-    virtual ~message_handler() = default;
+  /// Applies a new SI epoch, to be used for the SI grants stamped with its version.
+  void handle_si_update(const si_update_command& cmd);
 
-    virtual si_version_type update(si_version_type si_version, const byte_buffer& pdu) = 0;
-
-    /// \brief Enqueue encodes SI messages at proper Tx slots.
-    virtual bool enqueue_si_pdu_updates(const mac_cell_sys_info_pdu_update& pdu_update_req) = 0;
-
-    /// Retrieve encoded SI bytes for a given SI scheduling opportunity.
-    virtual span<const uint8_t> get_pdu(slot_point_extended sl_tx, const sib_information& si_info) = 0;
-  };
-
-  sib_pdu_assembler(du_cell_index_t                  cell_index,
-                    const mac_cell_sys_info_config&  req,
-                    timer_factory                    timers,
-                    mac_scheduler_cell_info_handler& sched);
-  ~sib_pdu_assembler();
-
-  /// Update the SIB1 and SI messages.
-  void handle_si_change_request(const mac_cell_sys_info_config& req);
+  /// \brief Applies a new ETWS/CMAS SI epoch, to be used for the SI grants stamped with its version.
+  ///
+  /// It coexists with the SI epoch of the normal operation, which the scheduler goes back to once the warning stops
+  /// being broadcast.
+  void handle_pws_si_update(const si_update_command& cmd);
 
   /// \brief Retrieve the encoded SI message.
+  /// \note Called from RT path, so it must be lock-free and non-blocking.
   span<const uint8_t> encode_si_pdu(slot_point_extended sl_tx, const sib_information& si_info);
 
-  /// \brief Handles an SI message PDU update. If \c pdu_update_req.pws_broadcast is set, this is routed to the PWS
-  /// (Write-Replace Warning) broadcast content push and repetition sequence; otherwise it is a plain SI PDU update
-  /// enqueued at its proper Tx slots.
-  bool handle_si_message_pdu_updates(const mac_cell_sys_info_pdu_update& pdu_update_req);
-
 private:
-  using bcch_dl_sch_buffer = std::shared_ptr<const std::vector<uint8_t>>;
-
-  /// A single BCCH-DL-SCH segment: its linearized (over-allocated) buffer, and its true byte length. Segments of the
-  /// same SI-message are not guaranteed to have equal length (e.g. the last segment of a PWS warning message).
-  struct bcch_segment {
-    bcch_dl_sch_buffer buffer;
-    units::bytes       len;
+  /// A snapshot of the SIB1 and SI message encoders within a given SI change window.
+  struct si_encoder_snapshot {
+    si_version_type                                                          version = 0;
+    std::shared_ptr<bcch_dl_sch_msg_encoder>                                 sib1;
+    static_vector<std::shared_ptr<bcch_dl_sch_msg_encoder>, MAX_SI_MESSAGES> si_msgs;
   };
-
-  /// A snapshot of a SIB1 and SI messages within a given SI change window.
-  struct si_buffer_snapshot {
-    unsigned version;
-    /// Encoder used to generate BCCH-DL-SCH SIB1 messages.
-    std::shared_ptr<bcch_dl_sch_msg_encoder> sib1;
-    /// Encoders used to generate each SI-message, indexed by SI-message index. An entry is null if the corresponding
-    /// index does not exist.
-    std::vector<std::shared_ptr<bcch_dl_sch_msg_encoder>> si_msg_encoders;
-  };
-
-  class sib1_assembler;
-
-  /// \brief Encoder for a static (non-PWS) SI-message, replaced wholesale whenever its content changes.
-  class static_si_msg_encoder;
-
-  /// \brief Encoder owning the repeat/count timing and content of an on-going PWS (Write-Replace Warning) broadcast
-  /// sequence for a single SI-message index.
-  ///
-  /// Unlike \c static_si_msg_encoder, this object is created once and persists across unrelated SI reconfigurations.
-  /// It is mutated in place by \c handle_pws_broadcast rather than being replaced, since it owns a live repeat timer
-  /// that must survive across CU-driven Write-Replace Warning content pushes.
-  class pws_si_msg_encoder;
-
-  void save_buffers(si_version_type si_version, const mac_cell_sys_info_config& req);
-
-  /// \brief Enqueue encodes SI messages at proper Tx slots.
-  bool enqueue_si_message_pdu_updates(const mac_cell_sys_info_pdu_update& pdu_update_req);
-
-  /// \brief Handles a new PWS (Write-Replace Warning) broadcast content push and repetition sequence.
-  bool handle_pws_broadcast(const mac_cell_sys_info_pdu_update& pdu_update_req);
 
   ocudulog::basic_logger& logger;
 
-  du_cell_index_t                  cell_index;
-  timer_factory                    timers;
-  mac_scheduler_cell_info_handler& sched;
+  std::shared_ptr<si_message_extension_handler> ext_handler;
+  std::unique_ptr<pws_broadcast_end_notifier>   pws_end_notifier;
 
-  // Last SI messages received by the assembler.
-  static_vector<bcch_dl_sch_payload_type, MAX_SI_MESSAGES> last_si_messages;
+  /// Selects the encoders that a given SI grant was scheduled with, refreshing them if they are not held yet.
+  const si_encoder_snapshot& select_snapshot(si_version_type version);
 
-  // SI buffers of last SI message update request.
-  // Note: This member is only accessed from the control executor.
-  si_buffer_snapshot last_cfg_buffers;
+  /// Notifies the end of the warning broadcast, if the grants went back to the epoch of the normal operation.
+  void handle_pws_broadcast_end();
 
-  // Buffers being transferred from configuration plane to assembler RT path.
-  lockfree_triple_buffer<si_buffer_snapshot> pending;
+  // Encoders being transferred from the configuration plane to the assembler RT path, one per SI epoch channel.
+  lockfree_triple_buffer<si_encoder_snapshot> pending;
+  lockfree_triple_buffer<si_encoder_snapshot> pending_pws;
 
-  // SI buffers that are being currently encoded and sent to lower layers.
-  // Note: This member is only accessed from the RT path.
-  si_buffer_snapshot current_buffers;
+  // Encoders that are being currently used to generate the PDUs sent to lower layers. Both channels are kept, given
+  // that the scheduler alternates between them for as long as a warning is being broadcast.
+  // Note: These members are only accessed from the RT path.
+  si_encoder_snapshot current;
+  si_encoder_snapshot current_pws;
 
-  // Handler of SIB1s with extended functionality for eDRX.
-  std::unique_ptr<sib1_assembler> sib1_hdlr;
-
-  std::unique_ptr<message_handler> message_ext_handler;
-
-  // PWS encoders, one entry per SI-message index. Only indices that require activation (see
-  // si_message_scheduling_config::requires_activation) have a non-null entry. This is decided once at
-  // construction time, so checking for null is safe from the real-time path without further synchronization.
-  std::vector<std::shared_ptr<pws_si_msg_encoder>> pws_encoders;
+  // Version of the ETWS/CMAS SI epoch the grants are being served from. std::nullopt if the epoch of the normal
+  // operation is the one in use.
+  std::optional<si_version_type> pws_version_in_use;
 };
-
-/// \brief Instantiates an SI message extension handler.
-/// \param[in] req    Request containing System Information signalled by the cell.
-/// \return A pointer to the SI message extension handler on success, otherwise \c nullptr.
-std::unique_ptr<sib_pdu_assembler::message_handler>
-create_si_message_extension_handler(const mac_cell_sys_info_config& req);
 
 } // namespace ocudu

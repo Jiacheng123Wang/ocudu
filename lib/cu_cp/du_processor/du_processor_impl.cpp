@@ -4,6 +4,7 @@
 
 #include "du_processor_impl.h"
 #include "ocudu/adt/expected.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_ref_time_report_notifier.h"
 #include "ocudu/f1ap/cu_cp/f1ap_cu_factory.h"
 #include "ocudu/ran/cause/f1ap_cause.h"
@@ -12,26 +13,9 @@
 #include "ocudu/rrc/rrc_du_factory.h"
 #include "ocudu/support/async/coroutine.h"
 #include "ocudu/support/cpu_architecture_info.h"
-#include "fmt/chrono.h"
 
 using namespace ocudu;
 using namespace ocucp;
-
-static rrc_cfg_t create_rrc_config(const cu_cp_configuration& cu_cp_cfg)
-{
-  rrc_cfg_t rrc_cfg;
-  rrc_cfg.gnb_id                         = cu_cp_cfg.node.gnb_id;
-  rrc_cfg.force_reestablishment_fallback = cu_cp_cfg.rrc.force_reestablishment_fallback;
-  rrc_cfg.force_resume_fallback          = cu_cp_cfg.rrc.force_resume_fallback;
-  rrc_cfg.rrc_procedure_guard_time_ms    = cu_cp_cfg.rrc.rrc_procedure_guard_time_ms;
-  rrc_cfg.int_algo_pref_list             = cu_cp_cfg.security.int_algo_pref_list;
-  rrc_cfg.enc_algo_pref_list             = cu_cp_cfg.security.enc_algo_pref_list;
-  rrc_cfg.srb2_cfg                       = cu_cp_cfg.bearers.srb2_cfg;
-  rrc_cfg.drb_config                     = cu_cp_cfg.bearers.drb_config;
-  /// Pass the value through layers.
-  rrc_cfg.rrc_reject_wait_time = cu_cp_cfg.rrc.rrc_reject_wait_time;
-  return rrc_cfg;
-}
 
 class du_processor_impl::f1ap_du_processor_adapter : public f1ap_du_processor_notifier
 {
@@ -83,11 +67,8 @@ public:
                         *time_point,
                         info.is_local_clock);
 
-    cu_cp_ref_time_report_notifier* notifier = parent.cfg.cu_cp_cfg.ref_time_report_notifier;
-    if (notifier == nullptr) {
-      return;
-    }
-    const du_configuration_context* du_ctx = parent.get_context();
+    cu_cp_ref_time_report_notifier& notifier = parent.ref_time_report_notifier;
+    const du_configuration_context* du_ctx   = parent.get_context();
     if (du_ctx == nullptr) {
       return;
     }
@@ -96,7 +77,7 @@ public:
     for (const du_cell_configuration& cell : du_ctx->served_cells) {
       served_cells.push_back(cell.cgi);
     }
-    notifier->on_ref_time_info_report(
+    notifier.on_ref_time_info_report(
         served_cells, cu_cp_ref_time_report{info.ref_slot, *time_point, info.uncertainty, info.is_local_clock});
   }
 
@@ -107,26 +88,30 @@ private:
 
 // du_processor_impl
 
-du_processor_impl::du_processor_impl(du_processor_config_t        du_processor_config_,
-                                     du_processor_cu_cp_notifier& cu_cp_notifier_,
-                                     f1ap_message_notifier&       f1ap_pdu_notifier_,
-                                     async_task_scheduler&        common_task_sched_,
-                                     ue_manager&                  ue_mng_) :
-  cfg(std::move(du_processor_config_)),
-  cu_cp_notifier(cu_cp_notifier_),
-  f1ap_pdu_notifier(f1ap_pdu_notifier_),
-  ue_mng(ue_mng_),
-  f1ap_ev_notifier(std::make_unique<f1ap_du_processor_adapter>(*this, common_task_sched_))
+du_processor_impl::du_processor_impl(const du_processor_config& cfg_, du_processor_dependencies dependencies) :
+  cfg(cfg_),
+  du_setup_notif(dependencies.du_setup_notif),
+  du_cfg_hdlr(std::move(dependencies.du_cfg_hdlr)),
+  cu_cp_notifier(dependencies.cu_cp_notifier),
+  f1ap_pdu_notifier(dependencies.f1ap_pdu_notifier),
+  ue_mng(dependencies.ue_mng),
+  ref_time_report_notifier(dependencies.ref_time_report_notifier),
+  logger(dependencies.logger),
+  f1ap_ev_notifier(std::make_unique<f1ap_du_processor_adapter>(*this, dependencies.common_task_sched))
 {
   // Create F1AP.
-  f1ap = create_f1ap(cfg.cu_cp_cfg.f1ap,
-                     f1ap_pdu_notifier,
-                     *f1ap_ev_notifier,
-                     *cfg.cu_cp_cfg.services.timers,
-                     *cfg.cu_cp_cfg.services.cu_cp_executor);
+  f1ap = create_f1ap(cfg.f1ap, f1ap_pdu_notifier, *f1ap_ev_notifier, dependencies.timers, dependencies.cu_cp_executor);
 
   // Create RRC DU.
-  rrc = create_rrc_du(create_rrc_config(cfg.cu_cp_cfg));
+  rrc = create_rrc_du(rrc_cfg_t{.gnb_id                         = cfg.gnb_id,
+                                .srb2_cfg                       = cfg.srb2_cfg,
+                                .drb_config                     = cfg.drb_config,
+                                .int_algo_pref_list             = cfg.int_algo_pref_list,
+                                .enc_algo_pref_list             = cfg.enc_algo_pref_list,
+                                .force_reestablishment_fallback = cfg.force_reestablishment_fallback,
+                                .force_resume_fallback          = cfg.force_resume_fallback,
+                                .rrc_procedure_guard_time_ms    = cfg.rrc_procedure_guard_time_ms,
+                                .rrc_reject_wait_time           = cfg.rrc_reject_wait_time});
 }
 
 du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_request& request)
@@ -152,7 +137,7 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
     // Fill cell meas config.
     serving_cell_meas_config meas_cfg;
     meas_cfg.nci               = cgi.nci;
-    meas_cfg.gnb_id_bit_length = cfg.cu_cp_cfg.node.gnb_id.bit_length;
+    meas_cfg.gnb_id_bit_length = cfg.gnb_id.bit_length;
     meas_cfg.plmn              = cgi.plmn_id;
     meas_cfg.pci               = cell_info.nr_pci;
     meas_cfg.band              = cell_info.band;
@@ -168,22 +153,22 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
   }
 
   // Check if CU-CP can accept a new DU connection.
-  if (not cfg.du_setup_notif->on_du_setup_request(cfg.du_index, plmn_ids)) {
+  if (!du_setup_notif.on_du_setup_request(cfg.du_index, plmn_ids)) {
     res.result = du_setup_result::rejected{f1ap_cause_radio_network_t::plmn_not_served_by_the_gnb_cu,
                                            "One or more PLMNs are not served by the GNB CU-CP"};
     return res;
   }
 
   // Validate and update DU configuration.
-  auto cfg_res = cfg.du_cfg_hdlr->handle_new_du_config(request);
-  if (not cfg_res.has_value()) {
+  auto cfg_res = du_cfg_hdlr->handle_new_du_config(request);
+  if (!cfg_res.has_value()) {
     res.result = cfg_res.error();
     return res;
   }
 
   // Update cell config in cell measurement manager.
   for (const auto& [nci, meas_config] : meas_config_db) {
-    if (not cu_cp_notifier.on_cell_config_update_request(nci, meas_config)) {
+    if (!cu_cp_notifier.on_cell_config_update_request(nci, meas_config)) {
       res.result =
           du_setup_result::rejected{f1ap_cause_transport_t::unspecified, "Could not update cell measurement config"};
       return res;
@@ -193,10 +178,13 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
   // Store cell info in RRC DU.
   rrc->store_cell_info_db(cell_info_db);
 
+  // Notify the CU-CP that the cells served by this DU changed.
+  cu_cp_notifier.on_served_cells_updated();
+
   // Prepare DU response with accepted setup.
   auto& accepted              = res.result.emplace<du_setup_result::accepted>();
-  accepted.gnb_cu_name        = cfg.cu_cp_cfg.node.ran_node_name;
-  accepted.gnb_cu_rrc_version = cfg.cu_cp_cfg.rrc.rrc_version;
+  accepted.gnb_cu_name        = cfg.ran_node_name;
+  accepted.gnb_cu_rrc_version = cfg.rrc_version;
 
   // Accept all cells.
   accepted.cells_to_be_activ_list.resize(request.gnb_du_served_cells_list.size());
@@ -212,7 +200,8 @@ bool du_processor_impl::create_rrc_ue(cu_cp_ue&                              ue,
                                       rnti_t                                 c_rnti,
                                       const nr_cell_global_id_t&             cgi,
                                       byte_buffer                            du_to_cu_rrc_container,
-                                      std::optional<rrc_ue_transfer_context> rrc_context)
+                                      std::optional<rrc_ue_transfer_context> rrc_context,
+                                      std::optional<rrc_resume_context_t>    remote_resume_context)
 {
   const cu_cp_ue_index_t ue_index = ue.get_ue_index();
 
@@ -230,7 +219,7 @@ bool du_processor_impl::create_rrc_ue(cu_cp_ue&                              ue,
                                                   ue.get_rrc_ue_cu_cp_ue_notifier().get_executor(),
                                                   nof_cores));
 
-  const du_cell_configuration& cell = *cfg.du_cfg_hdlr->get_context().find_cell(cgi);
+  const du_cell_configuration& cell = *du_cfg_hdlr->get_context().find_cell(cgi);
 
   // Create new RRC UE entity.
   rrc_ue_creation_message rrc_ue_create_msg{};
@@ -248,6 +237,7 @@ bool du_processor_impl::create_rrc_ue(cu_cp_ue&                              ue,
   rrc_ue_create_msg.pdcp_manager          = &srb_pdcp_contexts.at(ue_index);
   rrc_ue_create_msg.du_to_cu_container    = std::move(du_to_cu_rrc_container);
   rrc_ue_create_msg.rrc_context           = std::move(rrc_context);
+  rrc_ue_create_msg.remote_resume_context = std::move(remote_resume_context);
   auto* rrc_ue                            = rrc->add_ue(rrc_ue_create_msg);
   if (rrc_ue == nullptr) {
     logger.warning("Could not create RRC UE");
@@ -303,10 +293,13 @@ du_processor_impl::handle_ue_rrc_context_creation_request(const ue_rrc_context_c
 
   cu_cp_ue* ue = nullptr;
 
+  // Resume identity whose I-RNTI matched no local UE. Handed to the RRC UE, which asks the peer that allocated it
+  // for the context.
+  std::optional<rrc_resume_context_t> remote_resume_context;
+
   // Check if this is a RRC Resume request for an existing UE.
   if (not req.rrc_container.empty()) {
-    std::optional<rrc_resume_context_t> resume_context =
-        rrc->get_rrc_resume_context(req.rrc_container.copy(), cfg.cu_cp_cfg.ue.nof_i_rnti_ue_bits);
+    std::optional<rrc_resume_context_t> resume_context = rrc->get_rrc_resume_context(req.rrc_container.copy());
     if (!resume_context.has_value()) {
       logger.warning("ue={}: Could not extract RRC Resume context from UL CCCH Message", req.ue_index);
       // Schedule UE context release and return error response.
@@ -315,7 +308,7 @@ du_processor_impl::handle_ue_rrc_context_creation_request(const ue_rrc_context_c
     }
 
     if (resume_context->is_resume && resume_context->rrc_resume_id.has_value()) {
-      cu_cp_ue_index_t resume_ue_index = cu_cp_ue_index_t::invalid;
+      cu_cp_ue_index_t resume_ue_index;
       if (std::holds_alternative<short_i_rnti_t>(resume_context->rrc_resume_id.value())) {
         resume_ue_index = ue_mng.get_ue_index(std::get<short_i_rnti_t>(resume_context->rrc_resume_id.value()));
         logger.debug("ue={}: RRC Resume Request with {}",
@@ -328,8 +321,11 @@ du_processor_impl::handle_ue_rrc_context_creation_request(const ue_rrc_context_c
                      std::get<full_i_rnti_t>(resume_context->rrc_resume_id.value()));
       }
 
-      if (resume_ue_index != cu_cp_ue_index_t::invalid) {
-        if (cfg.cu_cp_cfg.rrc.force_resume_fallback) {
+      if (resume_ue_index == cu_cp_ue_index_t::invalid) {
+        // The I-RNTI matched no local UE, so the node that suspended it holds the context.
+        remote_resume_context = resume_context;
+      } else {
+        if (cfg.force_resume_fallback) {
           // RRC Resume fallback forced - do not resume. The DU doesn't have a F1AP UE context, so we also remove it
           // here.
           logger.info("ue={}: RRC Resume fallback forced. Removing F1AP UE context", resume_ue_index);
@@ -339,8 +335,8 @@ du_processor_impl::handle_ue_rrc_context_creation_request(const ue_rrc_context_c
           ue_mng.set_active(resume_ue_index);
           is_resume_request = true;
 
-          // Remove the new UE context that was created for this request since it's a resume request and we should reuse
-          // the existing context.
+          // Remove the new UE context that was created for this request since it's a resume request, and we should
+          // reuse the existing context.
           logger.debug("ue={}: RRC Resume detected, removing newly created UE context", req.ue_index);
           ue_mng.remove_ue(req.ue_index);
           f1ap->get_f1ap_ue_context_removal_handler().remove_ue_context(req.ue_index);
@@ -366,7 +362,7 @@ du_processor_impl::handle_ue_rrc_context_creation_request(const ue_rrc_context_c
     }
 
     // Check that creation message is valid.
-    const du_cell_configuration* pcell = cfg.du_cfg_hdlr->get_context().find_cell(req.cgi);
+    const du_cell_configuration* pcell = du_cfg_hdlr->get_context().find_cell(req.cgi);
     if (pcell == nullptr) {
       logger.warning("ue={} c-rnti={}: Could not find cell with nci={}", req.ue_index, req.c_rnti, req.cgi.nci);
       // Schedule UE context release and return error response.
@@ -375,8 +371,7 @@ du_processor_impl::handle_ue_rrc_context_creation_request(const ue_rrc_context_c
     }
     const pci_t pci = pcell->pci;
 
-    if (!ue_mng.update_ue_context(
-            req.ue_index, cfg.du_cfg_hdlr->get_context().id, pci, req.c_rnti, pcell->cell_index)) {
+    if (!ue_mng.update_ue_context(req.ue_index, du_cfg_hdlr->get_context().id, pci, req.c_rnti, pcell->cell_index)) {
       logger.warning("ue={}: Could not update UE context", req.ue_index);
       // Schedule UE context release and return error response.
       release_ue(req.ue_index);
@@ -393,7 +388,8 @@ du_processor_impl::handle_ue_rrc_context_creation_request(const ue_rrc_context_c
       return make_unexpected(default_error_t{});
     }
 
-    if (not create_rrc_ue(*ue, req.c_rnti, req.cgi, req.du_to_cu_rrc_container.copy(), req.prev_context)) {
+    if (not create_rrc_ue(
+            *ue, req.c_rnti, req.cgi, req.du_to_cu_rrc_container.copy(), req.prev_context, remote_resume_context)) {
       logger.warning("ue={}: Could not create RRC UE object", ue->get_ue_index());
       // Schedule UE context release and return error response.
       release_ue(ue->get_ue_index());
@@ -488,31 +484,34 @@ void du_processor_impl::handle_access_success(const f1ap_access_success& msg)
 
 bool du_processor_impl::has_cell(pci_t pci)
 {
-  return cfg.du_cfg_hdlr->get_context().find_cell(pci) != nullptr;
+  return du_cfg_hdlr->get_context().find_cell(pci) != nullptr;
 }
 
 bool du_processor_impl::has_cell(nr_cell_global_id_t cgi)
 {
-  return cfg.du_cfg_hdlr->get_context().find_cell(cgi) != nullptr;
+  return du_cfg_hdlr->get_context().find_cell(cgi) != nullptr;
 }
 
 bool du_processor_impl::has_cell_any_state(nr_cell_global_id_t cgi)
 {
-  return cfg.du_cfg_hdlr->get_context().find_cell_any_state(cgi) != nullptr;
+  return du_cfg_hdlr->get_context().find_cell_any_state(cgi) != nullptr;
 }
 
 async_task<f1ap_gnb_cu_configuration_update_response>
 du_processor_impl::handle_configuration_update(const f1ap_gnb_cu_configuration_update& request)
 {
   // Update the DU configuration.
-  cfg.du_cfg_hdlr->handle_gnb_cu_configuration_update(request);
+  du_cfg_hdlr->handle_gnb_cu_configuration_update(request);
+
+  // Notify the CU-CP that the cells served by this DU changed.
+  cu_cp_notifier.on_served_cells_updated();
 
   return f1ap->handle_gnb_cu_configuration_update(request);
 }
 
 std::optional<nr_cell_global_id_t> du_processor_impl::get_cgi(pci_t pci)
 {
-  const du_cell_configuration* cell = cfg.du_cfg_hdlr->get_context().find_cell(pci);
+  const du_cell_configuration* cell = du_cfg_hdlr->get_context().find_cell(pci);
   if (cell != nullptr) {
     return cell->cgi;
   }
@@ -521,7 +520,7 @@ std::optional<nr_cell_global_id_t> du_processor_impl::get_cgi(pci_t pci)
 
 byte_buffer du_processor_impl::get_packed_sib1(nr_cell_global_id_t cgi)
 {
-  const auto& cells = cfg.du_cfg_hdlr->get_context().served_cells;
+  const auto& cells = du_cfg_hdlr->get_context().served_cells;
   for (const auto& cell : cells) {
     if (cell.cgi == cgi) {
       return cell.sys_info.packed_sib1.copy();
@@ -546,9 +545,9 @@ cu_cp_metrics_report::du_info du_processor_impl::handle_du_metrics_report_reques
 {
   cu_cp_metrics_report::du_info report;
   report.id = gnb_du_id_t::invalid;
-  if (cfg.du_cfg_hdlr->has_context()) {
-    report.id         = cfg.du_cfg_hdlr->get_context().id;
-    const auto& cells = cfg.du_cfg_hdlr->get_context().served_cells;
+  if (du_cfg_hdlr->has_context()) {
+    report.id         = du_cfg_hdlr->get_context().id;
+    const auto& cells = du_cfg_hdlr->get_context().served_cells;
     for (const auto& cell : cells) {
       report.cells.emplace_back();
       report.cells.back().cgi = cell.cgi;

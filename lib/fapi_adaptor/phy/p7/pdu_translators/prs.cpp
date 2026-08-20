@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "prs.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/fapi_adaptor/precoding_matrix_repository.h"
 #include "ocudu/phy/upper/signal_processors/prs/prs_generator_configuration.h"
 

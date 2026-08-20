@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pucch_processor_test_fixture.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/upper/channel_processors/prach/formatters.h"
 #include "ocudu/phy/upper/channel_processors/pucch/formatters.h"
 #include "ocudu/ran/pucch/pucch_constants.h"

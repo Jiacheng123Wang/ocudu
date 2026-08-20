@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
-#include "lib/du/du_high/du_high_ntn_sib19_update_handler_impl.h"
+#include "lib/du/du_high/du_manager/du_high_ntn_sib19_update_handler_impl.h"
 #include "ocudu/du/du_high/du_manager/du_configurator.h"
 #include "ocudu/ntn/ntn_sib19_update_handler.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -12,6 +12,7 @@
 #include "ocudu/support/async/async_no_op_task.h"
 #include <gtest/gtest.h>
 #include <optional>
+#include <utility>
 
 using namespace ocudu;
 using namespace ocudu_ntn;
@@ -39,7 +40,7 @@ public:
     return launch_no_op_task(du_param_config_response{true});
   }
 
-  void handle_ntn_param_update(const du_ntn_param_update_request& req) override { last_ntn_req = req; }
+  void handle_ntn_param_update(du_ntn_param_update_request req) override { last_ntn_req = std::move(req); }
 };
 
 // ---------------------------------------------------------------------------

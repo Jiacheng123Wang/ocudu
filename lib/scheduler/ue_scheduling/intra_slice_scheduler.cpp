@@ -4,6 +4,7 @@
 
 #include "intra_slice_scheduler.h"
 #include "../logging/cell_metrics_handler.h"
+#include "../ue_context/ue_cell_repository.h"
 #include "ocudu/ran/pdcch/search_space.h"
 #include "ocudu/support/math/mod_math_utils.h"
 
@@ -122,6 +123,7 @@ void intra_slice_scheduler::slice_ue_group_scheduler::fill_ue_candidate_group(
 
 intra_slice_scheduler::intra_slice_scheduler(const scheduler_ue_expert_config& expert_cfg_,
                                              ue_repository&                    ues_,
+                                             ue_cell_repository&               cell_ues,
                                              pdcch_resource_allocator&         pdcch_alloc,
                                              uci_allocator&                    uci_alloc_,
                                              srs_allocator&                    srs_alloc_,
@@ -131,7 +133,7 @@ intra_slice_scheduler::intra_slice_scheduler(const scheduler_ue_expert_config& e
   expert_cfg(expert_cfg_),
   cell_alloc(cell_alloc_),
   cell_metrics(cell_metrics_),
-  cell_harqs(ues_.cell(cell_alloc_.cell_index()).get_cell_harqs()),
+  cell_harqs(cell_ues.get_cell_harqs()),
   uci_alloc(uci_alloc_),
   srs_alloc(srs_alloc_),
   ues(ues_),

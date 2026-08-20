@@ -104,8 +104,8 @@ public:
   void on_delivered_retransmitted_sdu(uint32_t max_deliv_retx_pdcp_sn) override {}
 
   // rlc_tx_upper_layer_control_notifier interface
-  void on_protocol_failure() override {}
-  void on_max_retx() override {}
+  void on_protocol_failure(rb_id_t rb_id) override {}
+  void on_max_retx(rb_id_t rb_id) override {}
 
   // rlc_tx_buffer_state_update_notifier interface
   void on_buffer_state_update(const rlc_buffer_state& bs) override {}
@@ -145,8 +145,8 @@ public:
   void on_delivered_retransmitted_sdu(uint32_t max_deliv_retx_pdcp_sn) override {}
 
   // rlc_tx_upper_layer_control_notifier interface
-  void on_protocol_failure() override {}
-  void on_max_retx() override {}
+  void on_protocol_failure(rb_id_t rb_id) override {}
+  void on_max_retx(rb_id_t rb_id) override {}
 
   // rlc_tx_buffer_state_update_notifier interface
   void on_buffer_state_update(const rlc_buffer_state& bs) override {}
@@ -339,8 +339,8 @@ void rlc_instances(const bench_params& params)
 
   null_rlc_pcap pcap;
 
-  rlc_drb_rx_window_seg_pool drb_rx_pool{rlc_drb_rx_window_seg_pool_size};
-  rlc_drb_tx_window_seg_pool drb_tx_pool{rlc_drb_tx_window_seg_pool_size};
+  rlc_drb_rx_window_seg_pool drb_rx_pool{rlc_drb_rx_window_seg_pool_size, rlc_drb_rx_window_seg_size};
+  rlc_drb_tx_window_seg_pool drb_tx_pool{rlc_drb_tx_window_seg_pool_size, rlc_drb_tx_window_seg_size};
 
   auto                                           rx_am_12_tester = std::make_unique<rlc_rx_am_test_frame>(ue_worker);
   std::vector<std::unique_ptr<rlc_rx_am_entity>> rx_am_12_instances;

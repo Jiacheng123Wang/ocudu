@@ -9,6 +9,7 @@
 #include "ocudu/ran/five_g_s_tmsi.h"
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/rrc/rrc_cell_context.h"
+#include "ocudu/rrc/rrc_du.h"
 #include "ocudu/rrc/rrc_ue.h"
 #include "ocudu/rrc/rrc_ue_capabilities.h"
 #include "ocudu/rrc/rrc_ue_config.h"
@@ -25,6 +26,7 @@ public:
                    const rrc_cell_context&                cell_,
                    const rrc_ue_cfg_t&                    cfg_,
                    std::optional<rrc_ue_transfer_context> rrc_context_,
+                   std::optional<rrc_resume_context_t>    remote_resume_context_,
                    rrc_ue_srb_pdcp_manager&               pdcp_manager_,
                    rrc_ue_logger&                         logger_);
 
@@ -51,8 +53,11 @@ public:
   std::optional<asn1::rrc_nr::ue_cap_rat_container_list_l> capabilities_list;
   rrc_ue_capabilities_t                                    capabilities;
   std::optional<rrc_ue_transfer_context> transfer_context; // Context of old UE when created through mobility.
-  byte_buffer                            cell_group_config;
-  bool                                   reestablishment_ongoing = false;
+  // Resume identity of a UE that resumed here without this node holding its context, so the context has to be
+  // retrieved from the peer NG-RAN node that allocated the I-RNTI.
+  std::optional<rrc_resume_context_t> remote_resume_context;
+  byte_buffer                         cell_group_config;
+  bool                                reestablishment_ongoing = false;
   // NAS messages received while UE is in RRC Inactive, to be sent after successful resume.
   std::vector<byte_buffer> pending_dl_nas_transport_messages;
   rrc_ue_logger&           logger;

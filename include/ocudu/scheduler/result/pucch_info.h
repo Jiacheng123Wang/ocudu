@@ -10,6 +10,7 @@
 #include "ocudu/ran/pucch/pucch_mapping.h"
 #include "ocudu/ran/pucch/pucch_uci_bits.h"
 #include "ocudu/ran/rnti.h"
+#include "ocudu/ran/slot_point.h"
 
 namespace ocudu {
 
@@ -19,8 +20,8 @@ struct pucch_info {
   struct f0_config {
     /// \c pucch-GroupHopping, as per TS 38.331.
     pucch_group_hopping group_hopping;
-    /// \f$n_{ID}\f$ as per Section 6.3.2.2.1, TS 38.211.
-    unsigned n_id_hopping;
+    /// \f$n_{ID}\f$ as per Section 6.3.2.2.1, TS 38.211. Values: {0,...,1023}.
+    uint16_t n_id_hopping;
 
     bool operator==(const f0_config& rhs) const
     {
@@ -32,14 +33,12 @@ struct pucch_info {
   struct f1_config {
     /// \c pucch-GroupHopping, as per TS 38.331.
     pucch_group_hopping group_hopping;
-    /// \f$n_{ID}\f$ as per Section 6.3.2.2.1, TS 38.211.
-    unsigned                 n_id_hopping;
-    pucch_repetition_tx_slot slot_repetition;
+    /// \f$n_{ID}\f$ as per Section 6.3.2.2.1, TS 38.211. Values: {0,...,1023}.
+    uint16_t n_id_hopping;
 
     bool operator==(const f1_config& rhs) const
     {
-      return group_hopping == rhs.group_hopping && n_id_hopping == rhs.n_id_hopping &&
-             slot_repetition == rhs.slot_repetition;
+      return group_hopping == rhs.group_hopping && n_id_hopping == rhs.n_id_hopping;
     }
   };
 
@@ -62,18 +61,17 @@ struct pucch_info {
   struct f3_config {
     /// \c pucch-GroupHopping, as per TS 38.331
     pucch_group_hopping group_hopping;
-    /// \f$n_{ID}\f$ as per Section 6.3.2.2.1, TS 38.211.
-    unsigned                 n_id_hopping;
-    pucch_repetition_tx_slot slot_repetition;
-    uint16_t                 n_id_scrambling;
-    uint16_t                 n_id_0_scrambling;
-    uint8_t                  nof_prbs;
+    /// \f$n_{ID}\f$ as per Section 6.3.2.2.1, TS 38.211. Values: {0,...,1023}.
+    uint16_t n_id_hopping;
+    uint16_t n_id_scrambling;
+    uint16_t n_id_0_scrambling;
+    uint8_t  nof_prbs;
 
     bool operator==(const f3_config& rhs) const
     {
       return group_hopping == rhs.group_hopping && n_id_hopping == rhs.n_id_hopping &&
-             slot_repetition == rhs.slot_repetition && n_id_scrambling == rhs.n_id_scrambling &&
-             n_id_0_scrambling == rhs.n_id_0_scrambling && nof_prbs == rhs.nof_prbs;
+             n_id_scrambling == rhs.n_id_scrambling && n_id_0_scrambling == rhs.n_id_0_scrambling &&
+             nof_prbs == rhs.nof_prbs;
     }
   };
 
@@ -81,17 +79,15 @@ struct pucch_info {
   struct f4_config {
     /// \c pucch-GroupHopping, as per TS 38.331
     pucch_group_hopping group_hopping;
-    /// \f$n_{ID}\f$ as per Section 6.3.2.2.1, TS 38.211.
-    unsigned                 n_id_hopping;
-    pucch_repetition_tx_slot slot_repetition;
-    uint16_t                 n_id_scrambling;
-    uint16_t                 n_id_0_scrambling;
+    /// \f$n_{ID}\f$ as per Section 6.3.2.2.1, TS 38.211. Values: {0,...,1023}.
+    uint16_t n_id_hopping;
+    uint16_t n_id_scrambling;
+    uint16_t n_id_0_scrambling;
 
     bool operator==(const f4_config& rhs) const
     {
       return group_hopping == rhs.group_hopping && n_id_hopping == rhs.n_id_hopping &&
-             slot_repetition == rhs.slot_repetition && n_id_scrambling == rhs.n_id_scrambling &&
-             n_id_0_scrambling == rhs.n_id_0_scrambling;
+             n_id_scrambling == rhs.n_id_scrambling && n_id_0_scrambling == rhs.n_id_0_scrambling;
     }
   };
 
@@ -102,6 +98,25 @@ struct pucch_info {
   pucch_uci_bits                                                      uci_bits;
   /// In case the PUCCH will contain CSI bits, this struct contains information how those bits are to be decoded.
   std::optional<csi_report_configuration> csi_rep_cfg;
+
+  /// \brief Identifies a PUCCH transmission as part of a multi-slot PUCCH repetition burst.
+  struct repetition_info {
+    /// \brief Slot of the first transmission of the burst.
+    ///
+    /// All the repetitions of a burst carry the same UCI, and this slot, the one that the UCI reporting timing
+    /// points at, identifies the UCI grant they belong to.
+    slot_point anchor_slot;
+    /// Position of this transmission within the burst. Never \c pucch_repetition_tx_slot::no_multi_slot.
+    pucch_repetition_tx_slot position;
+
+    bool operator==(const repetition_info& rhs) const
+    {
+      return anchor_slot == rhs.anchor_slot && position == rhs.position;
+    }
+  };
+  /// Set when this PUCCH transmission is part of a multi-slot PUCCH repetition burst. Applicable to all PUCCH
+  /// formats.
+  std::optional<repetition_info> repetition;
 
   /// Returns the format of the PUCCH.
   constexpr pucch_format format() const

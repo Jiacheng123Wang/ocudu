@@ -6,6 +6,7 @@
 #include "e1ap_cu_cp_test_helpers.h"
 #include "lib/e1ap/common/e1ap_asn1_utils.h"
 #include "tests/unittests/e1ap/common/e1ap_cu_cp_test_messages.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/e1ap/cu_cp/e1ap_cu_cp.h"
 #include "ocudu/e1ap/cu_cp/e1ap_cu_cp_factory.h"
 #include "ocudu/support/async/async_test_utils.h"

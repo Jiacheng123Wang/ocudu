@@ -500,6 +500,7 @@ void ocudu::build_pusch_f0_0_tc_rnti(pusch_information&                   pusch,
   // TODO.
   pusch.intra_slot_freq_hopping = false;
   pusch.pusch_second_hop_prb    = 0;
+  pusch.is_cg                   = false;
   pusch.tx_direct_current_location =
       dc_offset_helper::pack(cell_cfg.expert_cfg.ue.initial_ul_dc_offset, cell_cfg.nof_ul_prbs);
   pusch.ul_freq_shift_7p5khz = false;
@@ -534,7 +535,7 @@ void ocudu::build_pusch_f0_0_tc_rnti(pusch_information&                   pusch,
 
   pusch.tb_size_bytes = tbs_bytes;
   // Set number of CB to zero if no CBs are being used.
-  pusch.num_cb = 0;
+  pusch.nof_cb = 0;
 }
 
 void ocudu::build_pusch_f0_0_c_rnti(pusch_information&                  pusch,
@@ -549,6 +550,7 @@ void ocudu::build_pusch_f0_0_c_rnti(pusch_information&                  pusch,
 {
   // TODO.
   pusch.intra_slot_freq_hopping = false;
+  pusch.is_cg                   = false;
   pusch.pusch_second_hop_prb    = 0;
   pusch.tx_direct_current_location =
       dc_offset_helper::pack(cell_cfg.expert_cfg.ue.initial_ul_dc_offset, cell_cfg.nof_ul_prbs);
@@ -579,7 +581,7 @@ void ocudu::build_pusch_f0_0_c_rnti(pusch_information&                  pusch,
   // TBS.
   pusch.nof_layers    = pusch_cfg.nof_layers;
   pusch.tb_size_bytes = tbs_bytes;
-  pusch.num_cb        = 0;
+  pusch.nof_cb        = 0;
 
   // HARQ.
   pusch.rv_index = dci_cfg.redundancy_version;
@@ -607,6 +609,7 @@ void ocudu::build_pusch_f0_1_c_rnti(pusch_information&           pusch,
 
   // TODO: Populate based on config.
   pusch.intra_slot_freq_hopping = false;
+  pusch.is_cg                   = false;
   pusch.pusch_second_hop_prb    = 0;
   pusch.tx_direct_current_location =
       dc_offset_helper::pack(cell_cfg.expert_cfg.ue.initial_ul_dc_offset, cell_cfg.nof_ul_prbs);
@@ -652,10 +655,67 @@ void ocudu::build_pusch_f0_1_c_rnti(pusch_information&           pusch,
   pusch.nof_layers    = pusch_cfg.nof_layers;
   pusch.tb_size_bytes = mcs_tbs_info.tbs;
   // TODO: Set based on CobeBook config.
-  pusch.num_cb = 0;
+  pusch.nof_cb = 0;
 
   // HARQ.
   pusch.rv_index = dci_cfg.redundancy_version;
   pusch.harq_id  = to_harq_id(dci_cfg.harq_process_number);
   pusch.new_data = is_new_data;
+}
+
+void ocudu::build_pusch_cs_rnti(pusch_information&           pusch,
+                                rnti_t                       cs_rnti,
+                                const pusch_config_params&   pusch_cfg,
+                                sch_mcs_tbs                  mcs_tbs_info,
+                                const ue_cell_configuration& ue_cell_cfg,
+                                const sched_bwp_config&      bwp_info,
+                                const vrb_interval&          vrbs,
+                                uint8_t                      rv_index,
+                                harq_id_t                    harq_id)
+{
+  const cell_configuration& cell_cfg = ue_cell_cfg.cell_cfg_common;
+  ocudu_assert(bwp_info.ul.ded() != nullptr and bwp_info.ul.ded()->cg_cfg.has_value(),
+               "Configured Grant configuration doesn't exist");
+  const cg_configuration& cg_cfg = bwp_info.ul.ded()->cg_cfg.value();
+  ocudu_assert(cg_cfg.rrc_configured_ul_grant_cfg.has_value(), "RRC-ConfiguredUplinkGrant for CG type 1 not set");
+
+  pusch.intra_slot_freq_hopping = false;
+  pusch.is_cg                   = true;
+  pusch.pusch_second_hop_prb    = 0;
+  pusch.tx_direct_current_location =
+      dc_offset_helper::pack(cell_cfg.expert_cfg.ue.initial_ul_dc_offset, cell_cfg.nof_ul_prbs);
+  pusch.ul_freq_shift_7p5khz = false;
+  pusch.dmrs_hopping_mode    = pusch_information::dmrs_hopping_mode::no_hopping;
+  pusch.rnti                 = cs_rnti;
+  pusch.bwp_cfg              = &bwp_info.ul.cfg();
+  pusch.rbs                  = vrbs;
+  pusch.symbols              = pusch_cfg.symbols;
+  pusch.mcs_table            = pusch_cfg.mcs_table;
+
+  // Backup to MSG3 transform precode in RACH-ConfigCommon if CG transform precoding is not set.
+  pusch.transform_precoding = cg_cfg.trans_precoder.value_or(ue_cell_cfg.cell_cfg_common.use_msg3_transform_precoder());
+  pusch.mcs_table           = pusch.transform_precoding ? cg_cfg.mcs_table_transform_precoder : cg_cfg.mcs_table;
+  pusch.mcs_index           = mcs_tbs_info.mcs.value();
+  // tp_pi2bpsk is only set with dynamic grants;
+  constexpr bool tp_pi2bpsk_present = false;
+  pusch.mcs_descr =
+      pusch_mcs_get_config(pusch.mcs_table, pusch.mcs_index, pusch.transform_precoding, tp_pi2bpsk_present);
+
+  // As per TS 38.211, Section 6.3.1.1, for Configured Grant (which do not have any \c dataScramblingIdentityPUSCH
+  // field), n_ID defaults to the Physical Cell ID.
+  pusch.n_id = cell_cfg.params.pci;
+  // This is the only value we support, as \c nPUSCH-Identity in \c cg-DMRS-Configuration is not set at the moment (ref.
+  // to Section 6.4.1.1.1.2, TS 38.211).
+  pusch.pusch_dmrs_id = cell_cfg.params.pci;
+  pusch.dmrs          = pusch_cfg.dmrs;
+  pusch.nof_layers    = pusch_cfg.nof_layers;
+  pusch.tb_size_bytes = mcs_tbs_info.tbs;
+  // Only 1 Codeword supported.
+  pusch.nof_cb = 1U;
+
+  // HARQ.
+  pusch.rv_index = rv_index;
+  pusch.harq_id  = harq_id;
+  // In CG, the periodic grants are always new transmissions.
+  pusch.new_data = true;
 }

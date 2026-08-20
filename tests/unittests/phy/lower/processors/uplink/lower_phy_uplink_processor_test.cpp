@@ -8,6 +8,7 @@
 #include "puxch/puxch_processor_test_doubles.h"
 #include "support/compare_sequences.h"
 #include "uplink_processor_notifier_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_dynamic.h"
 #include "ocudu/phy/lower/processors/uplink/uplink_processor_baseband.h"
 #include "ocudu/phy/lower/processors/uplink/uplink_processor_factories.h"

@@ -6,6 +6,7 @@
 #include "../../../../lib/ofh/transmitter/ofh_downlink_handler_impl.h"
 #include "../../phy/support/resource_grid_test_doubles.h"
 #include "ofh_data_flow_cplane_scheduling_commands_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ofh/ofh_error_notifier.h"
 #include "ocudu/phy/support/resource_grid_context.h"
 #include "ocudu/phy/support/shared_resource_grid.h"

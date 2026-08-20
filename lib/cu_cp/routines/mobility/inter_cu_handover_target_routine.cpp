@@ -5,6 +5,8 @@
 #include "inter_cu_handover_target_routine.h"
 #include "../../cell_meas_manager/cell_meas_manager_impl.h"
 #include "../pdu_session_routine_helpers.h"
+#include "mobility_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/rrc_nr.h"
 #include "ocudu/f1ap/cu_cp/f1ap_cu_ue_context_update.h"
 #include "ocudu/ran/cause/e1ap_cause_converters.h"
@@ -45,69 +47,6 @@ build_old_drb_association(const std::vector<cu_cp_pdu_session_res_info_item>& pd
     }
   }
   return old_drb_association;
-}
-
-// Decodes the source's AS-Config, embedded in the RRC HandoverPreparationInformation, and merges its DRB-to-QoS-flow
-// mapping into \c old_drb_association. AS-Config carries the UE's full current radio bearer configuration (TS 38.331
-// Section 11.2.3), so this is a source of the same DRB-numbering hint as \c build_old_drb_association, used when the
-// XNAP-level DRB-to-QoS-flow hint is not available (e.g. Xn-based handover).
-static void merge_old_drb_association_from_as_config(up_old_drb_association&       old_drb_association,
-                                                     const byte_buffer&            rrc_handover_preparation_information,
-                                                     const ocudulog::basic_logger& logger)
-{
-  if (rrc_handover_preparation_information.empty()) {
-    logger.debug("No RRC container received. Cannot derive the source's DRB-to-QoS-flow mapping from AS-Config");
-    return;
-  }
-
-  asn1::rrc_nr::ho_prep_info_s ho_prep_info;
-  asn1::cbit_ref bref({rrc_handover_preparation_information.begin(), rrc_handover_preparation_information.end()});
-  if (ho_prep_info.unpack(bref) != asn1::OCUDUASN_SUCCESS) {
-    logger.warning("Couldn't unpack HandoverPreparationInformation");
-    return;
-  }
-  if (ho_prep_info.crit_exts.type() != asn1::rrc_nr::ho_prep_info_s::crit_exts_c_::types::c1 or
-      ho_prep_info.crit_exts.c1().type() != asn1::rrc_nr::ho_prep_info_s::crit_exts_c_::c1_c_::types::ho_prep_info) {
-    logger.warning("Unsupported HandoverPreparationInformation critical extension");
-    return;
-  }
-
-  const auto& ies = ho_prep_info.crit_exts.c1().ho_prep_info();
-  if (!ies.source_cfg_present) {
-    // The source may report the mapping through the XnAP-native IE instead, so this is not an error.
-    logger.debug("AS-Config not present in HandoverPreparationInformation");
-    return;
-  }
-
-  asn1::rrc_nr::rrc_recfg_s source_recfg;
-  asn1::cbit_ref            recfg_bref({ies.source_cfg.rrc_recfg.begin(), ies.source_cfg.rrc_recfg.end()});
-  if (source_recfg.unpack(recfg_bref) != asn1::OCUDUASN_SUCCESS) {
-    logger.warning("Couldn't unpack RRCReconfiguration in AS-Config");
-    return;
-  }
-  if (source_recfg.crit_exts.type() != asn1::rrc_nr::rrc_recfg_s::crit_exts_c_::types::rrc_recfg) {
-    logger.warning("Unsupported RRCReconfiguration critical extension in AS-Config");
-    return;
-  }
-
-  const auto& recfg_ies = source_recfg.crit_exts.rrc_recfg();
-  if (!recfg_ies.radio_bearer_cfg_present) {
-    logger.debug("No radio bearer configuration in AS-Config");
-    return;
-  }
-
-  for (const auto& drb : recfg_ies.radio_bearer_cfg.drb_to_add_mod_list) {
-    if (!drb.cn_assoc_present ||
-        drb.cn_assoc.type() != asn1::rrc_nr::drb_to_add_mod_s::cn_assoc_c_::types_opts::sdap_cfg) {
-      continue;
-    }
-    const auto&      sdap_cfg = drb.cn_assoc.sdap_cfg();
-    pdu_session_id_t psi      = uint_to_pdu_session_id(sdap_cfg.pdu_session);
-    drb_id_t         drb_id   = uint_to_drb_id(drb.drb_id);
-    for (uint8_t qfi : sdap_cfg.mapped_qos_flows_to_add) {
-      old_drb_association[psi][uint_to_qos_flow_id(qfi)] = drb_id;
-    }
-  }
 }
 
 inter_cu_handover_target_routine::inter_cu_handover_target_routine(
@@ -363,111 +302,6 @@ void inter_cu_handover_target_routine::operator()(
   CORO_RETURN(generate_handover_resource_allocation_response(true));
 }
 
-/// \brief Processes the response of a Bearer Context Setup Request.
-/// \param[out] srb_setup_mod_list Reference to the successful SRB setup list.
-/// \param[out] drb_setup_mod_list Reference to the successful DRB setup list.
-/// \param[out] next_config Const reference to the calculated config update.
-/// \param[out] ngap_setup_list Const reference to the original NGAP request.
-/// \param[in] bearer_context_setup_resp Const reference to the the Bearer Context Setup Response.
-/// \param[in] up_resource_mng Reference to the UP resource manager.
-/// \param[in] logger Reference to the logger.
-/// \return True on success, false otherwise.
-static bool update_setup_list_with_bearer_ctxt_setup_response(
-    std::vector<f1ap_srb_to_setup>&                                              srb_setup_mod_list,
-    std::vector<f1ap_drb_to_setup>&                                              drb_setup_mod_list,
-    up_config_update&                                                            next_config,
-    const slotted_id_vector<pdu_session_id_t, cu_cp_pdu_session_res_setup_item>& ngap_setup_list,
-    const e1ap_bearer_context_setup_response&                                    bearer_context_setup_resp,
-    up_resource_manager&                                                         up_resource_mng,
-    const security_indication_t&                                                 default_sec_ind,
-    const ocudulog::basic_logger&                                                logger)
-{
-  // Set up SRB1 and SRB2 (this is for inter CU handover, so no SRBs are setup yet).
-  for (unsigned srb_id = 1; srb_id < 3; ++srb_id) {
-    f1ap_srb_to_setup srb_item;
-    srb_item.srb_id = int_to_srb_id(srb_id);
-    srb_setup_mod_list.push_back(srb_item);
-  }
-
-  for (const auto& e1ap_item : bearer_context_setup_resp.pdu_session_resource_setup_list) {
-    const auto& psi = e1ap_item.pdu_session_id;
-
-    // Sanity check - make sure this session ID is present in the original setup message.
-    if (!ngap_setup_list.contains(e1ap_item.pdu_session_id)) {
-      logger.warning("PduSessionResourceSetupRequest doesn't include setup for {}", e1ap_item.pdu_session_id);
-      return false;
-    }
-    // Also check if PDU session is included in expected next configuration.
-    if (next_config.pdu_sessions_to_setup_list.find(e1ap_item.pdu_session_id) ==
-        next_config.pdu_sessions_to_setup_list.end()) {
-      logger.warning("Didn't expect setup for {}", e1ap_item.pdu_session_id);
-      return false;
-    }
-
-    // Determine the security settings applied to this PDU session. The Handover Request carries the Security
-    // Indication in the PDU Session Resource Setup Request Transfer, so the result is derived the same way as during
-    // PDU session setup.
-    const security_indication_t& sec_ind =
-        ngap_setup_list[psi].security_ind.has_value() ? ngap_setup_list[psi].security_ind.value() : default_sec_ind;
-    bool integrity_enabled = sec_ind.integrity_protection_ind == integrity_protection_indication_t::required;
-    bool ciphering_enabled =
-        sec_ind.confidentiality_protection_ind == confidentiality_protection_indication_t::required;
-    if (security_result_required(sec_ind)) {
-      // Apply the security settings decided by the CU-UP.
-      if (!e1ap_item.security_result.has_value()) {
-        logger.warning("Missing security result in E1AP response for {}", psi);
-        return false;
-      }
-      const auto& sec_res = e1ap_item.security_result.value();
-      integrity_enabled   = sec_res.integrity_protection_result == integrity_protection_result_t::performed;
-      ciphering_enabled   = sec_res.confidentiality_protection_result == confidentiality_protection_result_t::performed;
-    }
-
-    up_pdu_session_context_update& next_cfg_pdu_session = next_config.pdu_sessions_to_setup_list.at(psi);
-    next_cfg_pdu_session.integrity_protection_result =
-        integrity_enabled ? integrity_protection_result_t::performed : integrity_protection_result_t::not_performed;
-    next_cfg_pdu_session.confidentiality_protection_result = ciphering_enabled
-                                                                 ? confidentiality_protection_result_t::performed
-                                                                 : confidentiality_protection_result_t::not_performed;
-
-    for (const auto& e1ap_drb_item : e1ap_item.drb_setup_list_ng_ran) {
-      const auto& drb_id = e1ap_drb_item.drb_id;
-      if (next_cfg_pdu_session.drb_to_add.find(drb_id) == next_cfg_pdu_session.drb_to_add.end()) {
-        logger.warning("{} not part of next configuration", drb_id);
-        return false;
-      }
-
-      // Update security settings of each DRB.
-      up_drb_context& drb_ctxt                        = next_cfg_pdu_session.drb_to_add.at(drb_id);
-      drb_ctxt.pdcp_cfg.integrity_protection_required = integrity_enabled;
-      drb_ctxt.pdcp_cfg.ciphering_required            = ciphering_enabled;
-
-      // Prepare DRB item for DU.
-      f1ap_drb_to_setup drb_setup_mod_item;
-      if (!fill_f1ap_drb_setup_mod_item(drb_setup_mod_item,
-                                        {},
-                                        e1ap_item.pdu_session_id,
-                                        drb_id,
-                                        drb_ctxt,
-                                        e1ap_drb_item,
-                                        ngap_setup_list[e1ap_item.pdu_session_id].qos_flow_setup_request_items,
-                                        logger)) {
-        logger.warning("Couldn't populate DRB setup/mod item {}", e1ap_drb_item.drb_id);
-        return false;
-      }
-      drb_setup_mod_list.push_back(drb_setup_mod_item);
-    }
-
-    // Fail on any DRB that fails to be setup.
-    if (!e1ap_item.drb_failed_list_ng_ran.empty()) {
-      logger.warning("Non-empty DRB failed list not supported");
-      return false;
-    }
-  }
-
-  return true;
-}
-
 // Same as above but taking the result from E1AP Bearer Context Setup message.
 bool handle_bearer_context_setup_response(
     f1ap_ue_context_setup_request&                                               ue_context_setup_req,
@@ -478,9 +312,15 @@ bool handle_bearer_context_setup_response(
     const security_indication_t&                                                 default_sec_ind,
     ocudulog::basic_logger&                                                      logger)
 {
+  // Set up SRB1 and SRB2 (this is for inter CU handover, so no SRBs are setup yet).
+  for (unsigned srb_id = 1; srb_id < 3; ++srb_id) {
+    f1ap_srb_to_setup srb_item;
+    srb_item.srb_id = int_to_srb_id(srb_id);
+    ue_context_setup_req.srbs_to_be_setup_list.push_back(srb_item);
+  }
+
   // Traverse setup list.
-  if (!update_setup_list_with_bearer_ctxt_setup_response(ue_context_setup_req.srbs_to_be_setup_list,
-                                                         ue_context_setup_req.drbs_to_be_setup_list,
+  if (!update_setup_list_with_bearer_ctxt_setup_response(ue_context_setup_req.drbs_to_be_setup_list,
                                                          next_config,
                                                          setup_list,
                                                          bearer_context_setup_resp,

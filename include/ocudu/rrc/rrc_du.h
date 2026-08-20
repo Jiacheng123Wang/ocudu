@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "ocudu/ran/arfcn.h"
 #include "ocudu/ran/cause/common.h"
 #include "ocudu/ran/cu_cp_cell_configuration.h"
 #include "ocudu/ran/plmn_identity.h"
@@ -50,6 +51,15 @@ public:
   /// \return The decoded time point, or \c std::nullopt if \c encoded is not a valid ReferenceTime-r16 encoding.
   virtual std::optional<std::chrono::system_clock::time_point> get_ref_time_r16(const byte_buffer& encoded,
                                                                                 bool               is_local_clock) = 0;
+
+  /// \brief Decodes the SSB ARFCN of a cell from a PER-encoded MeasurementTimingConfiguration (TS 38.331 section
+  /// 6.2.2), as carried opaquely in the Measurement Timing Configuration IE of the XnAP Served Cell Information
+  /// (TS 38.423 section 9.2.2.11).
+  ///
+  /// \param[in] encoded The packed MeasurementTimingConfiguration advertised by an XN-C peer for one of its cells.
+  /// \return The SSB ARFCN, or \c std::nullopt if \c encoded is not a valid MeasurementTimingConfiguration or carries
+  /// no frequency and timing information.
+  virtual std::optional<arfcn_t> get_ssb_arfcn(const byte_buffer& encoded) = 0;
 };
 
 struct rrc_resume_context_t {
@@ -70,6 +80,9 @@ struct rrc_ue_creation_message {
   rrc_ue_srb_pdcp_manager*               pdcp_manager;
   byte_buffer                            du_to_cu_container;
   std::optional<rrc_ue_transfer_context> rrc_context;
+  /// Resume identity the UE presented, when the UL CCCH message was an RRCResumeRequest whose I-RNTI matched no local
+  /// UE. The RRC UE asks the peer that allocated the I-RNTI for the context.
+  std::optional<rrc_resume_context_t> remote_resume_context;
 };
 
 /// \brief Interface class to the main RRC DU object to manage RRC UEs.
@@ -91,11 +104,9 @@ public:
 
   /// \brief Get the RRC Resume context containing the resume ID and resume cause from a RRC container.
   /// \param[in] rrc_container The RRC container from the DU.
-  /// \param[in] nof_i_rnti_ue_bits Number of bits used for the I-RNTI UE.
   /// \returns The RRC Resume context if the container contains a valid UL CCCH Message, std::nullopt if an error
   /// occured e.g. during unpacking.
-  virtual std::optional<rrc_resume_context_t> get_rrc_resume_context(byte_buffer rrc_container,
-                                                                     uint8_t     nof_i_rnti_ue_bits) = 0;
+  virtual std::optional<rrc_resume_context_t> get_rrc_resume_context(byte_buffer rrc_container) = 0;
 
   /// Creates a new RRC UE object and returns a handle to it.
   virtual rrc_ue_interface* add_ue(const rrc_ue_creation_message& msg) = 0;

@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pdcch_modulator_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/bit.h"
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/phy/support/re_pattern.h"

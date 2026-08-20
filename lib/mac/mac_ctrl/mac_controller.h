@@ -6,6 +6,7 @@
 
 #include "../mac_config_interfaces.h"
 #include "../mac_dl/mac_dl_metric_handler.h"
+#include "mac_cell_controller_impl.h"
 #include "mac_config.h"
 #include "mac_metrics_aggregator.h"
 #include "mac_scheduler_configurator.h"
@@ -40,10 +41,7 @@ public:
   /// Removes cell configuration from MAC. The cell is also removed from the scheduler.
   void remove_cell(du_cell_index_t cell_index) override;
 
-  mac_cell_controller& get_cell_controller(du_cell_index_t cell_index) override
-  {
-    return dl_unit.get_cell_controller(cell_index);
-  }
+  mac_cell_controller& get_cell_controller(du_cell_index_t cell_index) override;
 
   mac_subframe_time_mapper& get_subframe_time_mapper() override;
 
@@ -86,6 +84,9 @@ private:
 
   // Metrics aggregator.
   mac_metrics_aggregator metrics;
+
+  // Cell database
+  slotted_array<mac_cell_controller_impl, MAX_NOF_DU_CELLS> cells;
 
   // UE database
   du_ue_list<mac_ue_context> ue_db;

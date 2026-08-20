@@ -4,6 +4,7 @@
 
 #include "cell_meas_manager_test_helpers.h"
 #include "lib/cu_cp/cell_meas_manager/cell_meas_manager_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_configuration_helpers.h"
 
 using namespace ocudu;

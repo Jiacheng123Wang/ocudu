@@ -18,6 +18,7 @@ add_subdirectory(config)
 add_subdirectory(slicing)
 add_subdirectory(srs_scheduling)
 add_subdirectory(rrm)
+add_subdirectory(cg_scheduler)
 
 add_executable(pdcch_resource_allocator_test pdcch/pdcch_resource_allocator_test.cpp)
 target_link_libraries(pdcch_resource_allocator_test

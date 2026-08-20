@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "du_pusch_resource_manager.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/band_helper.h"
 #include "ocudu/ran/cyclic_prefix.h"
 #include "ocudu/ran/pusch/tx_scheme_configuration.h"

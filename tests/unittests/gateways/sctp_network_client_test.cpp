@@ -195,8 +195,8 @@ public:
       std::atomic<bool> finished{false};
       // Handle SCTP SHUTDOWN
       unique_thread t("io_broker", [this, &finished]() {
-        while (not finished and broker.handle_receive) {
-          broker.handle_receive();
+        while (not finished and broker.nof_registered_sockets() != 0) {
+          broker.handle_receive(client_fd);
           std::this_thread::sleep_for(std::chrono::microseconds{10});
         }
       });
@@ -207,13 +207,14 @@ public:
     }
   }
 
-  void trigger_broker() { broker.handle_receive(); }
+  void trigger_broker() { broker.handle_receive(client->get_socket_fd()); }
 
   bool connect_to_server()
   {
     auto sender = client->connect(recv_notifier_factory.create());
     if (sender != nullptr) {
       client_sender = std::move(sender);
+      client_fd     = client->get_socket_fd();
       return true;
     }
     return false;
@@ -225,6 +226,7 @@ public:
   }
 
 protected:
+  int                        client_fd = -1;
   inline_task_executor       io_rx_executor;
   dummy_io_broker            broker;
   sctp_network_client_config client_cfg{sctp_network_connector_config{}, broker, io_rx_executor};
@@ -268,9 +270,9 @@ TEST_F(sctp_network_client_test, when_server_does_not_exist_then_connection_fail
   client                            = create_sctp_network_client(client_cfg);
 
   ASSERT_FALSE(connect_to_server());
-  ASSERT_EQ(broker.last_registered_fd.value(), -1);
+  ASSERT_EQ(broker.nof_registered_sockets(), 0);
   ASSERT_EQ(client_sender, nullptr);
-  ASSERT_EQ(broker.last_unregistered_fd, -1);
+  ASSERT_EQ(broker.get_nof_deregistrations(), 0);
 }
 
 TEST_F(sctp_network_client_test, when_broker_rejects_subscriber_then_connect_fails)
@@ -282,8 +284,8 @@ TEST_F(sctp_network_client_test, when_broker_rejects_subscriber_then_connect_fai
   client                            = create_sctp_network_client(client_cfg);
 
   ASSERT_FALSE(connect_to_server());
-  ASSERT_GE(broker.last_registered_fd.value(), 0);
-  ASSERT_EQ(broker.last_unregistered_fd, -1) << "If the subscription fails, no deregister should be called";
+  ASSERT_GE(broker.nof_registered_sockets(), 0);
+  ASSERT_EQ(broker.get_nof_deregistrations(), 0) << "If the subscription fails, no deregister should be called";
 }
 
 TEST_F(sctp_network_client_test, when_server_exists_then_connection_succeeds)
@@ -294,9 +296,9 @@ TEST_F(sctp_network_client_test, when_server_exists_then_connection_succeeds)
   client                            = create_sctp_network_client(client_cfg);
 
   ASSERT_TRUE(connect_to_server());
-  ASSERT_EQ(broker.last_registered_fd.value(), client->get_socket_fd());
+  ASSERT_TRUE(broker.is_socket_registered(client->get_socket_fd()));
   ASSERT_NE(client_sender, nullptr);
-  ASSERT_EQ(broker.last_unregistered_fd, -1);
+  ASSERT_EQ(broker.nof_registered_sockets(), 1);
 
   // Server receives SCTP COMM UP
   auto server_recv = server.receive();

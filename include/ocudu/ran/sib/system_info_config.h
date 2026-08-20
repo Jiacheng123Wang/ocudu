@@ -8,6 +8,9 @@
 #include "ocudu/ran/ntn.h"
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/ran/sib/cell_reselection.h"
+#include "ocudu/ran/sib/sib_constants.h"
+#include "ocudu/ran/sib/sib_type.h"
+#include <algorithm>
 #include <variant>
 #include <vector>
 
@@ -25,20 +28,6 @@ struct cell_selection_info {
 struct cell_access_related_info {
   /// Additional PLMNs that the UE can use to access the cell besides the cell primary PLMN. See TS 38.331, \c SIB1.
   std::vector<plmn_identity> additional_plmns;
-};
-
-enum class sib_type : uint8_t {
-  sib1        = 1,
-  sib2        = 2,
-  sib3        = 3,
-  sib4        = 4,
-  sib5        = 5,
-  sib6        = 6,
-  sib7        = 7,
-  sib8        = 8,
-  sib16       = 16,
-  sib19       = 19,
-  sib_invalid = 255
 };
 
 /// Cell reselection information common to all cell reselection types.
@@ -68,16 +57,18 @@ struct sib2_info {
 /// Intra-frequency cell reselection information SIB contents (see TS38.331 Section 6.3.2, Information Element \e
 /// SIB3).
 struct sib3_info {
-  /// List of intra-frequency neighbouring cells with specific cell reselection parameters.
+  /// List of intra-frequency neighbouring cells with specific cell reselection parameters. Max size
+  /// \c MAX_NOF_SIB3_INTRA_FREQ_CELLS.
   std::vector<intra_freq_neigh_cell_info> intra_freq_neigh_cell_list;
-  /// List of excluded intra-frequency neighbouring cells.
+  /// List of excluded intra-frequency neighbouring cells. Max size \c MAX_NOF_SIB3_INTRA_FREQ_CELLS.
   std::vector<pci_range_t> intra_freq_excluded_cell_list;
 };
 
 /// Inter-frequency cell reselection information SIB contents (see TS38.331 Section 6.3.2, Information Element \e
 /// SIB4).
 struct sib4_info {
-  /// List of neighbouring carrier frequencies and frequency specific cell reselection information.
+  /// List of neighbouring carrier frequencies and frequency specific cell reselection information. Max size
+  /// \c MAX_NOF_SIB4_INTER_FREQ_CARRIERS.
   std::vector<inter_freq_carrier_freq_info> inter_freq_carrier_freq_list;
 };
 
@@ -269,14 +260,18 @@ struct si_message_sched_info {
   /// entry of schedulingInfoList2. See TS 38.331, \c SchedulingInfo2-r17. Values: {1,...,256}.
   /// \remark This field is only applicable for release 17 \c SI-SchedulingInfo.
   std::optional<unsigned> si_window_position;
-  /// \brief Whether this SI-message exclusively carries SIB6/7/8 and therefore requires explicit activation before
-  /// it is actually scheduled. Such an SI-message keeps a reserved occasion in schedulingInfoList, but does not need
-  /// real ASN.1-encoded content until it is activated.
-  bool requires_activation = false;
   /// \brief Whether this SI-message (carrying SIB6/7/8) should be broadcast right away, indefinitely, instead of
-  /// staying dormant until an actual F1AP Write-Replace Warning activates it. Only meaningful when
-  /// \c requires_activation is true.
+  /// staying dormant until an actual F1AP Write-Replace Warning activates it. Only meaningful for SI-messages
+  /// carrying PWS SIBs.
   bool auto_broadcast = false;
+
+  /// \brief Whether this SI-message carries SIB6/7/8 and therefore requires explicit activation before it is
+  /// actually scheduled. Such an SI-message keeps a reserved occasion in schedulingInfoList, but does not need real
+  /// ASN.1-encoded content until it is activated.
+  bool requires_activation() const
+  {
+    return std::any_of(sib_mapping_info.begin(), sib_mapping_info.end(), [](sib_type sib) { return is_pws_sib(sib); });
+  }
 };
 
 /// This struct contains the information required for the generation of the SI messages sent by the network and the

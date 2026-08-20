@@ -1458,26 +1458,40 @@ void pdcp_entity_tx::crypto_reordering_timeout()
 
   // Advance the TX_TRANS_CRYPTO to TX_REORD_CRYPTO.
   // Deliver all processed PDUs up until TX_REORD_CRYPTO.
-  while (st.tx_trans_crypto != st.tx_reord_crypto) {
-    if (tx_window.has_sn(st.tx_trans_crypto) && not tx_window[st.tx_trans_crypto].pdu.empty()) {
+  // Skip any PDUs that were already discarded.
+  while (st.tx_trans_crypto < st.tx_reord_crypto) {
+    if (!tx_window.has_sn(st.tx_trans_crypto) || tx_window[st.tx_trans_crypto].pdu.empty()) {
+      logger.log_debug("Dropping SDU. count={}", st.tx_trans_crypto);
+    } else {
+      // Deliver the PDU.
       pdcp_tx_pdu_info pdu_info{.pdu     = std::move(tx_window[st.tx_trans_crypto].pdu),
                                 .count   = st.tx_trans_crypto,
                                 .sdu_toa = tx_window[st.tx_trans_crypto].sdu_info.time_of_arrival};
       write_data_pdu_to_lower_layers(std::move(pdu_info), false);
-    } else {
-      logger.log_debug("Dropping SDU. count={}", st.tx_trans_crypto);
     }
-    // Update RX_DELIV
     st.tx_trans_crypto = st.tx_trans_crypto + 1;
   }
 
-  // Deliver in order PDUs. Break and update TX_TRANS_CRYPTO when we find a missing PDU.
-  for (uint32_t count = st.tx_trans_crypto; count < st.tx_next && not tx_window[count].pdu.empty(); count++) {
+  // Deliver in order PDUs and break at first missing PDU. Skip any discarded PDUs.
+  for (uint32_t count = st.tx_trans_crypto; count < st.tx_next; count++) {
+    // Skip any PDUs that were already discarded.
+    if (!tx_window.has_sn(count)) {
+      st.tx_trans_crypto = count + 1;
+      continue;
+    }
+
+    // Break at first missing PDU.
+    if (tx_window[count].pdu.empty()) {
+      break;
+    }
+
+    // Deliver the PDU.
     pdcp_tx_pdu_info pdu_info{
         .pdu = std::move(tx_window[count].pdu), .count = count, .sdu_toa = tx_window[count].sdu_info.time_of_arrival};
     write_data_pdu_to_lower_layers(std::move(pdu_info), false);
     st.tx_trans_crypto = count + 1;
-    // Automatically trigger delivery notifications when using test mode
+
+    // Automatically trigger delivery notifications when using test mode.
     if (cfg.custom.test_mode) {
       handle_transmit_notification(SN(count));
     }

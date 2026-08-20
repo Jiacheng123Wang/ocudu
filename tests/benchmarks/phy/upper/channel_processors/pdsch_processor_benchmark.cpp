@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "../../../../unittests/phy/upper/channel_processors/pdsch/pdsch_processor_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/antenna_ports.h"
 #include "ocudu/phy/support/support_factories.h"
 #include "ocudu/phy/upper/channel_processors/pdsch/factories.h"

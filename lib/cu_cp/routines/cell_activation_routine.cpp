@@ -4,6 +4,7 @@
 
 #include "cell_activation_routine.h"
 #include "../du_processor/du_processor_repository.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/f1ap/cu_cp/f1ap_cu_configuration_update.h"
 #include "ocudu/support/async/coroutine.h"
 #include "fmt/ranges.h"

@@ -19,6 +19,7 @@
 #include "ocudu/ran/sch/modulation_scheme.h"
 #include "ocudu/ran/sch/sch_mcs.h"
 #include "ocudu/ran/subcarrier_spacing.h"
+#include <optional>
 #include <variant>
 
 namespace ocudu {

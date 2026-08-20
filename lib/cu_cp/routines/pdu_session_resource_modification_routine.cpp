@@ -4,6 +4,7 @@
 
 #include "pdu_session_resource_modification_routine.h"
 #include "pdu_session_routine_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/ue_task_scheduler.h"
 #include "ocudu/ran/cause/e1ap_cause_converters.h"
 

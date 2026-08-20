@@ -13,6 +13,7 @@
 #include "ocudu/ran/srs/srs_channel_matrix.h"
 #include "ocudu/ran/uci/uci_constants.h"
 #include "ocudu/ran/uci/uci_mapping.h"
+#include <optional>
 #include <variant>
 
 namespace ocudu {

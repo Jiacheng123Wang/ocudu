@@ -5,6 +5,7 @@
 #include "f1ap_cu_test_helpers.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
 #include "tests/test_doubles/utils/test_rng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/support/async/async_test_utils.h"
 #include <gtest/gtest.h>
 

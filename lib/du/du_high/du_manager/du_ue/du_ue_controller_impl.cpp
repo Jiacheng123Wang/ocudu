@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "du_ue_controller_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_high/du_manager/du_manager_params.h"
 #include "ocudu/mac/mac_ue_configurator.h"
 #include "ocudu/support/async/async_no_op_task.h"
@@ -59,7 +60,7 @@ public:
     if (u == nullptr) {
       return;
     }
-    u->handle_rlf_detection(to_rlf_cause(cause));
+    u->handle_rlf_detection(to_rlf_cause(cause), std::nullopt);
   }
 
   void on_crnti_ce_received() override
@@ -85,11 +86,11 @@ public:
   {
   }
 
-  void on_protocol_failure() override { dispatch_impl(rlf_cause::rlc_protocol_failure); }
-  void on_max_retx() override { dispatch_impl(rlf_cause::max_rlc_retxs_reached); }
+  void on_protocol_failure(rb_id_t rb_id) override { dispatch_impl(rlf_cause::rlc_protocol_failure, rb_id); }
+  void on_max_retx(rb_id_t rb_id) override { dispatch_impl(rlf_cause::max_rlc_retxs_reached, rb_id); }
 
 private:
-  void dispatch_impl(rlf_cause cause)
+  void dispatch_impl(rlf_cause cause, std::optional<rb_id_t> rb_id = std::nullopt)
   {
     bool prev_value = rlf_triggered.exchange(true, std::memory_order_relaxed);
     if (prev_value) {
@@ -97,17 +98,21 @@ private:
       return;
     }
     // Dispatch RLF handling to DU manager execution context.
-    bool dispatched = ctrl_exec.execute([ue_idx = ue_index, ue_db_ptr = &ue_db, cause]() {
+    bool dispatched = ctrl_exec.execute([ue_idx = ue_index, rb_id = rb_id, ue_db_ptr = &ue_db, cause]() {
       // Note: The UE might have already been deleted by the time this method is called, so we need to check if it still
       // exists.
       du_ue* u = ue_db_ptr->find_ue(ue_idx);
       if (u == nullptr) {
         return;
       }
-      u->handle_rlf_detection(cause);
+      u->handle_rlf_detection(cause, rb_id);
     });
     if (not dispatched) {
-      logger.warning("ue={}: Failed to dispatch RLF detection handling", fmt::underlying(ue_index));
+      if (rb_id.has_value()) {
+        logger.warning("ue={} {}: Failed to dispatch RLF detection handling", fmt::underlying(ue_index), *rb_id);
+      } else {
+        logger.warning("ue={}: Failed to dispatch RLF detection handling", fmt::underlying(ue_index));
+      }
       rlf_triggered.store(false, std::memory_order_relaxed);
     }
   }
@@ -131,7 +136,7 @@ public:
   {
   }
 
-  void handle_rlf_detection(rlf_cause cause)
+  void handle_rlf_detection(rlf_cause cause, std::optional<rb_id_t> rb_id)
   {
     if (not is_handling_new_rlfs()) {
       // Either the RLF has been triggered or the UE is already being destroyed.
@@ -162,11 +167,21 @@ public:
     // The release timer is not running yet. We need to store the cause and start the timer.
     current_cause    = cause;
     auto timeout_val = get_release_timeout();
-    logger.warning("ue={} rnti={}: RLF detected with cause \"{}\". Timer of {} msec to release UE started...",
-                   ue_ctx.ue_index,
-                   ue_ctx.rnti,
-                   get_rlf_cause_str(cause),
-                   timeout_val.count());
+    if (rb_id.has_value()) {
+      logger.warning(
+          "ue={} rnti={}: RLF detected with cause \"{}\", from {}. Timer of {} msec to release UE started...",
+          ue_ctx.ue_index,
+          ue_ctx.rnti,
+          get_rlf_cause_str(cause),
+          *rb_id,
+          timeout_val.count());
+    } else {
+      logger.warning("ue={} rnti={}: RLF detected with cause \"{}\". Timer of {} msec to release UE started...",
+                     ue_ctx.ue_index,
+                     ue_ctx.rnti,
+                     get_rlf_cause_str(cause),
+                     timeout_val.count());
+    }
 
     // Start timer.
     release_timer.set(timeout_val, [this]() { trigger_ue_release(); });
@@ -335,9 +350,9 @@ async_task<void> du_ue_controller_impl::handle_drb_stop_request(span<const drb_i
   });
 }
 
-void du_ue_controller_impl::handle_rlf_detection(rlf_cause cause)
+void du_ue_controller_impl::handle_rlf_detection(rlf_cause cause, std::optional<rb_id_t> rb_id)
 {
-  rlf_handler->handle_rlf_detection(cause);
+  rlf_handler->handle_rlf_detection(cause, rb_id);
 }
 
 void du_ue_controller_impl::handle_crnti_ce_detection()

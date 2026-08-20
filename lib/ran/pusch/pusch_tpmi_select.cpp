@@ -4,6 +4,7 @@
 
 #include "ocudu/ran/pusch/pusch_tpmi_select.h"
 #include "ocudu/adt/complex.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/span.h"
 #include "ocudu/adt/static_vector.h"
 #include "ocudu/ocuduvec/mean.h"
@@ -663,12 +664,12 @@ pusch_tpmi_select_info ocudu::get_tpmi_select_info(const srs_channel_matrix& cha
   }
 
   // Calculate TPMI select information for 3 layer.
-  if ((max_nof_layers >= 3) && (nof_tx_ports == 4) && (nof_rx_ports == 4)) {
+  if ((max_nof_layers >= 3) && (nof_tx_ports == 4) && (nof_rx_ports >= 4)) {
     info.emplace_back(get_tpmi_select_info_3layer(channel, noise_variance, codebook_subset));
   }
 
   // Calculate TPMI select information for 4 layer.
-  if ((max_nof_layers >= 4) && (nof_tx_ports == 4) && (nof_rx_ports == 4)) {
+  if ((max_nof_layers >= 4) && (nof_tx_ports == 4) && (nof_rx_ports >= 4)) {
     info.emplace_back(get_tpmi_select_info_4layer(channel, noise_variance, codebook_subset));
   }
 

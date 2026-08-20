@@ -15,6 +15,7 @@
 #include "ocudu/gtpu/gtpu_teid_pool.h"
 #include "ocudu/mac/mac_cell_result.h"
 #include "ocudu/mac/mac_config.h"
+#include "ocudu/ntn/ntn_configuration_manager_config.h"
 #include "ocudu/pcap/dlt_pcap.h"
 #include "ocudu/pcap/rlc_pcap.h"
 #include "ocudu/ran/gnb_du_id.h"
@@ -23,10 +24,15 @@
 #include "ocudu/scheduler/config/scheduler_expert_config.h"
 #include "ocudu/scheduler/scheduler_metrics.h"
 #include <map>
+#include <optional>
 
 namespace ocudu {
 
 class timer_manager;
+
+namespace ocudu_ntn {
+class ntn_doppler_compensation_handler;
+}
 
 namespace odu {
 
@@ -47,9 +53,13 @@ struct du_high_ran_config {
 /// Configuration passed to DU-High.
 struct du_high_configuration {
   struct rlc_config {
+    std::size_t drb_rx_window_seg_size      = rlc_drb_rx_window_seg_size;
     std::size_t drb_rx_window_seg_pool_size = rlc_drb_rx_window_seg_pool_size;
+    std::size_t drb_tx_window_seg_size      = rlc_drb_tx_window_seg_size;
     std::size_t drb_tx_window_seg_pool_size = rlc_drb_tx_window_seg_pool_size;
+    std::size_t srb_rx_window_seg_size      = rlc_srb_rx_window_seg_size;
     std::size_t srb_rx_window_seg_pool_size = rlc_srb_rx_window_seg_pool_size;
+    std::size_t srb_tx_window_seg_size      = rlc_srb_tx_window_seg_size;
     std::size_t srb_tx_window_seg_pool_size = rlc_srb_tx_window_seg_pool_size;
   };
 
@@ -68,6 +78,9 @@ struct du_high_configuration {
   du_high_ran_config  ran;
   metrics_config      metrics;
   du_test_mode_config test_cfg;
+  /// Optional NTN configuration. When present with at least one cell, the DU-high creates an NTN configuration
+  /// manager that periodically refreshes SIB19 and the feeder link Doppler pre- and post-compensation.
+  std::optional<ocudu_ntn::ntn_configuration_manager_config> ntn;
 };
 
 /// DU high dependencies
@@ -84,6 +97,10 @@ struct du_high_dependencies {
   rlc_pcap*                rlc_p              = nullptr;
   /// Optional notifier invoked once after a successful F1 Setup.
   du_f1_setup_complete_notifier* f1_setup_notifier = nullptr;
+  /// Handler applying the feeder link Doppler compensation computed by the NTN configuration manager. Left unset by
+  /// deployments that apply no Doppler compensation, in which case the computed values are simply not applied. It
+  /// must outlive the DU-high.
+  ocudu_ntn::ntn_doppler_compensation_handler* ntn_doppler_handler = nullptr;
 };
 
 } // namespace odu

@@ -49,7 +49,21 @@ struct ntn_orbital_state {
   ntn_ephemeris_info_t ephemeris_info;
   /// TA-info, present when gateway location or TA override is available. Valid only when success is true.
   std::optional<ta_info_t> ta_info;
+  /// Satellite ECEF state at \c epoch_time.
+  state_vector sat_ecef;
 };
+
+/// \brief Computes the round-trip delay between the satellite and a ground location at \c state.epoch_time, i.e.
+/// N_TA_adj_UE (TS 38.213, Section 4.2).
+///
+/// Unlike ta-Info this is not broadcast: it is the gNB's estimate of the term each UE derives for itself from the
+/// broadcast ephemeris and its own position.
+///
+/// \param state        Propagated orbital state.
+/// \param ref_location Ground location in geodetic coordinates.
+/// \return Round-trip delay, or std::nullopt if \p state does not hold a successful propagation.
+std::optional<std::chrono::microseconds> compute_service_link_rtt(const ntn_orbital_state&      state,
+                                                                  const geodetic_coordinates_t& ref_location);
 
 /// Computes satellite orbital propagation, ephemeris, and TA-info for a given epoch time.
 class ntn_orbital_compute_module

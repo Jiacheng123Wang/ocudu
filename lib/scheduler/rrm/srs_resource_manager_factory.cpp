@@ -5,6 +5,7 @@
 #include "ocudu/scheduler/rrm/srs_resource_manager_factory.h"
 #include "srs_resource_manager_aperiodic.h"
 #include "srs_resource_manager_periodic.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/scheduler/config/ran_cell_config.h"
 
 using namespace ocudu;

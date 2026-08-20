@@ -5,6 +5,7 @@
 #include "f1ap_cu_test_helpers.h"
 #include "lib/f1ap/cu_cp/ue_context/f1ap_cu_ue_context.h"
 #include "tests/test_doubles/utils/test_rng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/f1ap/f1ap_ue_id_types.h"
 #include "ocudu/support/executors/manual_task_worker.h"
 #include <cstdint>

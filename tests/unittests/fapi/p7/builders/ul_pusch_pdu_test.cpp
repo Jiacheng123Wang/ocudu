@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/to_array.h"
 #include "ocudu/fapi/p7/builders/ul_pusch_pdu_builder.h"
 #include <gtest/gtest.h>

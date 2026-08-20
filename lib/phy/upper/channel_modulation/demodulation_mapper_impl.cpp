@@ -9,9 +9,7 @@
 #include "demodulation_mapper_qpsk.h"
 #include "ocudu/support/math/math_utils.h"
 #include "ocudu/support/ocudu_assert.h"
-#ifndef M_SQRT2f32
-#define M_SQRT2f32 1.41421356237309504880f
-#endif
+#include <cmath>
 
 using namespace ocudu;
 

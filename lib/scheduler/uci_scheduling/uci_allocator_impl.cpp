@@ -46,7 +46,8 @@ static void update_uci_on_pusch_harq_offsets(uci_info::harq_info& uci_harq, cons
   }
 }
 
-static void add_csi_to_uci_on_pusch(uci_info::csi_info& uci_csi, const ue_cell_configuration& ue_cell_cfg)
+static void
+add_csi_to_uci_on_pusch(uci_info::csi_info& uci_csi, const ue_cell_configuration& ue_cell_cfg, bool configured_grant)
 {
   uci_csi.csi_rep_cfg = create_csi_report_configuration(*ue_cell_cfg.csi_meas_cfg());
 
@@ -57,6 +58,7 @@ static void add_csi_to_uci_on_pusch(uci_info::csi_info& uci_csi, const ue_cell_c
     csi_report_size csi_size   = get_csi_report_pusch_size(uci_csi.csi_rep_cfg);
     uci_csi.csi_part1_nof_bits = csi_size.part1_size.value();
 
+    ocudu_assert(not configured_grant, "Aperiodic CSI not supported with Configured Grant");
     const auto& uci_cfg = ue_cell_cfg.init_bwp().ul.ded()->pusch_cfg.value().uci_cfg.value();
 
     // We assume the configuration contains the values for beta_offsets.
@@ -78,7 +80,10 @@ static void add_csi_to_uci_on_pusch(uci_info::csi_info& uci_csi, const ue_cell_c
     uci_csi.csi_part1_nof_bits = get_csi_report_pucch_size(uci_csi.csi_rep_cfg).part1_size.value();
     // NOTE: with PUCCH-configured CSI report, CSI patrt 2 is not supported.
 
-    const auto& uci_cfg = ue_cell_cfg.init_bwp().ul.ded()->pusch_cfg.value().uci_cfg.value();
+    ocudu_assert(not configured_grant or ue_cell_cfg.init_bwp().ul.ded()->cg_cfg.has_value(),
+                 "Missing configuration for Configured Grant");
+    const auto& uci_cfg = configured_grant ? ue_cell_cfg.init_bwp().ul.ded()->cg_cfg.value().uci_on_pusch_cfg
+                                           : ue_cell_cfg.init_bwp().ul.ded()->pusch_cfg.value().uci_cfg.value();
 
     // We assume the configuration contains the values for beta_offsets.
     const auto& beta_offsets = std::get<uci_on_pusch::beta_offsets_semi_static>(uci_cfg.beta_offsets_cfg.value());
@@ -134,7 +139,8 @@ void uci_allocator_impl::stop()
 std::optional<uci_allocation> uci_allocator_impl::alloc_harq_ack(cell_resource_allocator&     res_alloc,
                                                                  const ue_cell_configuration& ue_cell_cfg,
                                                                  unsigned                     k0,
-                                                                 span<const uint8_t>          k1_list)
+                                                                 span<const uint8_t>          k1_list,
+                                                                 pucch_repetition_factor      max_rep_factor)
 {
   // [Implementation-defined] We restrict the number of HARQ bits per PUCCH that are expected to carry CSI reporting to
   // 2 , until the PUCCH allocator supports more than this.
@@ -219,7 +225,7 @@ std::optional<uci_allocation> uci_allocator_impl::alloc_harq_ack(cell_resource_a
     }
 
     // Step 2: Try to allocate UCI HARQ ACK for UE.
-    auto d_pri = pucch_alloc.alloc_ded_harq_ack(res_alloc, ue_cell_cfg, k0, k1_candidate);
+    auto d_pri = pucch_alloc.alloc_ded_harq_ack(res_alloc, ue_cell_cfg, k0, k1_candidate, max_rep_factor);
 
     // Register new UCI allocation in the respective grid slot entry and derive DAI.
     if (d_pri.has_value()) {
@@ -229,7 +235,12 @@ std::optional<uci_allocation> uci_allocator_impl::alloc_harq_ack(cell_resource_a
         uci->rnti                       = ue_cell_cfg.crnti;
         uci->scheduled_dl_pdcch_counter = 0;
       }
+      // If the HARQ-ACK ended up in a PUCCH repetition burst, the report is only complete after its last repetition.
+      const span<const slot_point> burst_slots = pucch_alloc.get_pucch_repetition_slots(ue_cell_cfg.crnti, uci_slot);
+      const unsigned k1_last_rep = burst_slots.empty() ? k1_candidate : k1_candidate + (burst_slots.back() - uci_slot);
+
       uci_allocation res{.k1                  = k1_candidate,
+                         .k1_last_rep         = k1_last_rep,
                          .harq_bit_idx        = static_cast<uint8_t>(uci->scheduled_dl_pdcch_counter),
                          .pucch_res_indicator = d_pri};
       ++uci->scheduled_dl_pdcch_counter;
@@ -282,7 +293,11 @@ bool uci_allocator_impl::alloc_csi_opportunity(cell_slot_resource_allocator& slo
     existing_pusch->uci.emplace();
     existing_pusch->uci.value().alpha = ue_cell_cfg.init_bwp().ul.ded()->pusch_cfg.value().uci_cfg.value().scaling;
 
-    add_csi_to_uci_on_pusch(existing_pusch->uci.value().csi.emplace(uci_info::csi_info()), ue_cell_cfg);
+    // The UCI scheduler should always start before the Configured Grant scheduler; therefore, when this function is
+    // called, there should never be a Configured Grant PUSCH present.
+    constexpr bool configured_grant = false;
+    add_csi_to_uci_on_pusch(
+        existing_pusch->uci.value().csi.emplace(uci_info::csi_info()), ue_cell_cfg, configured_grant);
     return false;
   }
 
@@ -293,7 +308,9 @@ bool uci_allocator_impl::alloc_csi_opportunity(cell_slot_resource_allocator& slo
 void uci_allocator_impl::multiplex_uci_on_pusch(ul_sched_info&                pusch_grant,
                                                 cell_slot_resource_allocator& slot_alloc,
                                                 const ue_cell_configuration&  ue_cell_cfg,
-                                                bool                          include_aperiodic_csi)
+                                                bool                          include_aperiodic_csi,
+                                                bool                          configured_grant)
+
 {
   // Move the bits that are carried by the PUCCH into the PUSCH.
   const pucch_uci_bits pucch_uci = pucch_alloc.remove_ue_uci_from_pucch(slot_alloc, ue_cell_cfg);
@@ -305,11 +322,13 @@ void uci_allocator_impl::multiplex_uci_on_pusch(ul_sched_info&                pu
 
   // We assume that at this point, there are no existing UCI grants in the PUSCH; allocate a new one.
   uci_info& uci = pusch_grant.uci.emplace();
-  uci.alpha     = ue_cell_cfg.init_bwp().ul.ded()->pusch_cfg.value().uci_cfg.value().scaling;
+  // NOTE: As per TS 38.214, Section 6.1 (Second paragraph in Rel. 15.14.0), with Configured Grant, "scaling of
+  // UCI-OnPUSCH" is provided by PUSCH-Config.
+  uci.alpha = ue_cell_cfg.init_bwp().ul.ded()->pusch_cfg.value().uci_cfg.value().scaling;
 
   if (pucch_uci.csi_part1_nof_bits != 0 or include_aperiodic_csi) {
     // The number of bits is computed based on the CSI report configuration.
-    add_csi_to_uci_on_pusch(uci.csi.emplace(uci_info::csi_info()), ue_cell_cfg);
+    add_csi_to_uci_on_pusch(uci.csi.emplace(uci_info::csi_info()), ue_cell_cfg, configured_grant);
   }
 
   if (pucch_uci.harq_ack_nof_bits != 0) {
@@ -331,4 +350,9 @@ uint8_t uci_allocator_impl::get_scheduled_pdsch_counter_in_ue_uci(slot_point uci
 bool uci_allocator_impl::has_harq_ack_on_common_pucch_res(rnti_t rnti, slot_point sl_tx)
 {
   return pucch_alloc.has_common_pucch_grant(rnti, sl_tx);
+}
+
+bool uci_allocator_impl::has_pucch_repetition(rnti_t rnti, slot_point sl_tx)
+{
+  return not pucch_alloc.get_pucch_repetition_slots(rnti, sl_tx).empty();
 }

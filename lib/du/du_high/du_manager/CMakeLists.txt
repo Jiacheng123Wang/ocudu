@@ -10,6 +10,8 @@ add_subdirectory(ran_resource_management)
 
 set(SOURCES
         du_cell_manager.cpp
+        du_high_ntn_sib19_update_handler_impl.cpp
+        du_high_ntn_time_provider_impl.cpp
         du_manager_factory.cpp
         du_manager_impl.cpp
         du_manager_mem_resources_factory.cpp
@@ -28,4 +30,5 @@ target_link_libraries(ocudu_du_manager
         mac_configuration_helpers
         ocudu_rlc
         ocudu_f1u_du
-        ocudu_gtpu)
+        ocudu_gtpu
+        ocudu_ntn_lib)

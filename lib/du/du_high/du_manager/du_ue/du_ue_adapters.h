@@ -198,20 +198,6 @@ private:
   std::atomic<f1u_tx_delivery_handler*> handler = nullptr;
 };
 
-class rlc_tx_control_notifier : public rlc_tx_upper_layer_control_notifier
-{
-public:
-  void on_protocol_failure() override
-  {
-    // TODO
-  }
-
-  void on_max_retx() override
-  {
-    // TODO
-  }
-};
-
 class rlc_tx_mac_buffer_state_updater : public rlc_tx_lower_layer_notifier
 {
 public:

@@ -122,6 +122,8 @@ void to_json(nlohmann::json& json, const scheduler_cell_metrics& metrics)
   cell_json["msg3_nof_nok"]               = metrics.nof_msg3_nok;
   cell_json["nof_conres_timer_expired"]   = metrics.nof_conres_timer_expired;
   cell_json["nof_conres_ce_never_acked"]  = metrics.nof_conres_ce_never_acked;
+  cell_json["total_prach_preambles"]      = metrics.total_prach_preambles;
+  cell_json["two_step_prachs_detected"]   = metrics.two_step_prachs_detected;
   cell_json["avg_prach_delay"] = metrics.avg_prach_delay_slots.has_value() ? metrics.avg_prach_delay_slots : 0.0f;
   cell_json["late_dl_harqs"]   = metrics.nof_failed_pdsch_allocs_late_harqs;
   cell_json["late_ul_harqs"]   = metrics.nof_failed_pusch_allocs_late_harqs;

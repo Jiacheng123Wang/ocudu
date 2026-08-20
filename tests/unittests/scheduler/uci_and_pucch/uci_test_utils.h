@@ -9,11 +9,13 @@
 #include "lib/scheduler/uci_scheduling/uci_allocator_impl.h"
 #include "lib/scheduler/uci_scheduling/uci_scheduler_impl.h"
 #include "lib/scheduler/ue_context/ue.h"
+#include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "lib/scheduler/ue_context/ue_repository.h"
 #include "ocudu/ran/csi_rs/csi_meas_config.h"
 #include "ocudu/ran/pucch/pucch_configuration.h"
 #include "ocudu/scheduler/config/pucch_resource_builder_params.h"
 #include "ocudu/scheduler/rrm/pucch_resource_manager.h"
+#include "ocudu/scheduler/rrm/ue_capability_summary.h"
 
 namespace ocudu {
 
@@ -36,18 +38,25 @@ bool find_pucch_pdu(const span<const pucch_info> pucch_pdus, const F& func)
 bool pucch_info_match(const pucch_info& expected, const pucch_info& test);
 
 struct test_bench_params {
-  pucch_resource_builder_params           pucch_ded_params{};
-  max_pucch_code_rate                     max_code_rate = max_pucch_code_rate::dot_25;
-  std::optional<unsigned>                 pucch_res_common;
-  unsigned                                n_cces                 = 0;
-  unsigned                                max_pucchs_per_slot    = 32U;
-  unsigned                                max_ul_grants_per_slot = 32U;
-  unsigned                                nof_ul_dl_ports        = 1U;
-  bool                                    tdd                    = false;
-  sr_periodicity                          sr_period              = sr_periodicity::sl_40;
-  unsigned                                sr_offset              = 0;
-  std::optional<csi_resource_periodicity> csi_period             = csi_resource_periodicity::slots320;
-  unsigned                                csi_offset             = 9;
+  pucch_resource_builder_params pucch_ded_params{};
+  max_pucch_code_rate           max_code_rate = max_pucch_code_rate::dot_25;
+  std::optional<unsigned>       pucch_res_common;
+  unsigned                      n_cces                 = 0;
+  unsigned                      max_pucchs_per_slot    = 32U;
+  unsigned                      max_ul_grants_per_slot = 32U;
+  unsigned                      nof_ul_dl_ports        = 1U;
+  bool                          tdd                    = false;
+  // Number of UL symbols of the TDD pattern's special slot. Only used if \c tdd is set; if 0, the special slot has no
+  // UL symbols at all and is therefore not UL-enabled.
+  unsigned                                tdd_nof_ul_symbols = 0;
+  sr_periodicity                          sr_period          = sr_periodicity::sl_40;
+  unsigned                                sr_offset          = 0;
+  std::optional<csi_resource_periodicity> csi_period         = csi_resource_periodicity::slots320;
+  unsigned                                csi_offset         = 9;
+  // If set, applied via pucch_resource_manager::update_resources() to every UE added, mirroring the point at which
+  // the DU learns the UE's reported capabilities in production (i.e. after the initial, capability-agnostic
+  // pucch_resource_manager::alloc_resources()).
+  std::optional<ue_capability_summary> ue_caps;
 };
 
 class test_bench
@@ -76,8 +85,8 @@ public:
   const scheduler_expert_config           expert_cfg;
   test_helpers::test_sched_config_manager cfg_mng;
   const cell_configuration&               cell_cfg;
+  ue_cell_repository                      cell_ues;
   ue_repository                           ues;
-  ue_cell_repository&                     cell_ues;
 
   // Other dependencies.
   pucch_resource_manager  pucch_builder;

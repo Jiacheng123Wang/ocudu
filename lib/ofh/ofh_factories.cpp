@@ -7,6 +7,7 @@
 #include "receiver/ofh_sequence_id_checker_impl.h"
 #include "timing/ofh_timing_manager_impl.h"
 #include "transmitter/ofh_transmitter_factories.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ofh/ethernet/ethernet_factories.h"
 
 #ifdef DPDK_FOUND

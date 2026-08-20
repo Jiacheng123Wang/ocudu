@@ -28,6 +28,8 @@ struct rrc_timers_t {
   /// T311: RRC Connection Re-establishment procedure timer in ms. The timer starts upon initiating the RRC connection
   /// re-establishment procedure.
   std::chrono::milliseconds t311;
+  /// T319: RRC Connection Resume timer in ms. The timer starts upon transmission of RRCResumeRequest.
+  std::chrono::milliseconds t319;
   /// T304: RRC Reconfiguration timer in ms. The UE starts this timer upon receiving the RRC Reconfiguration including
   /// reconfigurationWithSync.
   std::optional<std::chrono::milliseconds> t304;

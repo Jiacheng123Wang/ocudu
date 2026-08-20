@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ocudu/du/du_update_config_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/scheduler/config/pucch_resource_generator.h"
 #include "ocudu/scheduler/config/sched_cell_config_helpers.h"
 #include "ocudu/scheduler/config/srs_builder_params.h"
@@ -24,8 +25,8 @@ static prb_interval find_pucch_inner_prbs(const pucch_resource& res, unsigned bw
   // NOTE: for odd bwp_size and the for central PRB, both is_on_bwp_right_side() and is_on_bwp_left_side() are false.
   auto is_on_bwp_right_side = [bwp_size](unsigned prb) { return prb >= bwp_size - bwp_size / 2; };
 
-  unsigned max_rb_idx_on_left_side  = 0;
-  unsigned min_rb_idx_on_right_side = bwp_size;
+  uint16_t max_rb_idx_on_left_side  = 0;
+  uint16_t min_rb_idx_on_right_side = bwp_size;
 
   auto update_limits = [&](prb_interval hop) {
     if (is_on_bwp_left_side(hop.stop())) {

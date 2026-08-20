@@ -17,6 +17,16 @@ using namespace ocudu_ntn;
 /// Speed of light in vacuum [km/s]
 static constexpr double SPEED_OF_LIGHT_KM_S = 299792.458;
 
+/// \brief Computes the round-trip propagation delay between two ECEF positions.
+///
+/// \return Round-trip delay. Positions are in meters, hence the 1e3 factor.
+static std::chrono::duration<double, std::micro> compute_link_rtt(const state_vector& sat_ecef,
+                                                                  const state_vector& ground_ecef)
+{
+  const state_vector rho = ground_ecef - sat_ecef;
+  return std::chrono::duration<double, std::micro>{2.0 * norm(rho.position) / SPEED_OF_LIGHT_KM_S * 1e3};
+}
+
 /// \brief Computes timing advance (TA) information parameters: TA-common, TA-drift, and TA-drift-variant.
 ///
 /// \param init_ephemeris_info Initial satellite orbit ephemeris information.
@@ -42,11 +52,8 @@ static ta_info_t compute_ta_info(const orbit_ephemeris_info& init_ephemeris_info
     if (i != 0) {
       ephemeris_info.propagate(delta_t, true);
     }
-    state_vector rho = ntn_gateway_ecef - ephemeris_info.ecef_rv();
-    double       r   = norm(rho.position);
-    double       rtt = 2.0 * r / SPEED_OF_LIGHT_KM_S * 1e3;
-    t[i]             = i * delta_t.count();
-    y[i]             = rtt;
+    t[i] = i * delta_t.count();
+    y[i] = compute_link_rtt(ephemeris_info.ecef_rv(), ntn_gateway_ecef).count();
   }
   auto [c0, c1, c2] = fit_quadratic(t, y, y[0]);
 
@@ -186,8 +193,10 @@ ntn_orbital_state ntn_orbital_compute_module::compute_orbital_state(time_point e
   // Align ECI with ECEF reference frame at epoch time.
   ephemeris_info->align_reference_frames();
 
+  state.sat_ecef = ephemeris_info->ecef_rv();
+
   if (use_state_vector) {
-    const state_vector& ecef_rv = ephemeris_info->ecef_rv();
+    const state_vector& ecef_rv = state.sat_ecef;
     ecef_coordinates_t  ecef_ephemeris_info;
     ecef_ephemeris_info.position_x  = ecef_rv.position.x;
     ecef_ephemeris_info.position_y  = ecef_rv.position.y;
@@ -224,4 +233,16 @@ ntn_orbital_state ntn_orbital_compute_module::compute_orbital_state(time_point e
 
   state.success = true;
   return state;
+}
+
+std::optional<std::chrono::microseconds> ocudu_ntn::compute_service_link_rtt(const ntn_orbital_state&      state,
+                                                                             const geodetic_coordinates_t& ref_location)
+{
+  if (not state.success) {
+    return std::nullopt;
+  }
+
+  const state_vector ref_ecef =
+      coordinate_converter::geodetic_to_ecef(ref_location.latitude, ref_location.longitude, ref_location.altitude);
+  return std::chrono::round<std::chrono::microseconds>(compute_link_rtt(state.sat_ecef, ref_ecef));
 }

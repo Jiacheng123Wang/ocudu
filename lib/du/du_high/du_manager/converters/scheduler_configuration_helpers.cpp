@@ -4,6 +4,7 @@
 
 #include "scheduler_configuration_helpers.h"
 #include "../du_ue/du_ue.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_cell_config.h"
 #include "ocudu/du/du_cell_config_helpers.h"
 #include "ocudu/ran/csi_report/csi_report_config_helpers.h"
@@ -32,15 +33,13 @@ si_scheduling_config ocudu::odu::make_si_scheduling_info_config(const du_cell_co
     for (unsigned i = 0, sz = du_cfg.si.si_config->si_sched_info.size(); i != sz; ++i) {
       const auto& si_sched = du_cfg.si.si_config->si_sched_info[i];
 
+      for (sib_type sib : si_sched.sib_mapping_info) {
+        sched_req.si_messages[i].sibs.add(sib);
+      }
       sched_req.si_messages[i].period_radio_frames      = si_sched.si_period_radio_frames;
       sched_req.si_messages[i].msg_len                  = si_message_lens[i];
       sched_req.si_messages[i].si_window_position       = si_sched.si_window_position;
-      sched_req.si_messages[i].requires_activation      = si_sched.requires_activation;
       sched_req.si_messages[i].test_mode_auto_broadcast = si_sched.auto_broadcast;
-      // SIB19 (NTN) content is pushed immediately, bypassing the SI change modification window.
-      sched_req.si_messages[i].exempt_from_si_mod_window =
-          std::find(si_sched.sib_mapping_info.begin(), si_sched.sib_mapping_info.end(), sib_type::sib19) !=
-          si_sched.sib_mapping_info.end();
     }
   }
 
@@ -51,7 +50,8 @@ si_scheduling_config ocudu::odu::make_si_scheduling_info_config(const du_cell_co
 sched_cell_configuration_request_message
 ocudu::odu::make_sched_cell_config_req(du_cell_index_t             cell_index,
                                        const odu::du_cell_config&  du_cfg,
-                                       const si_scheduling_config& si_sched_cfg)
+                                       const si_scheduling_config& si_sched_cfg,
+                                       unsigned                    max_nof_ue_contexts)
 {
   ocudu_assert(si_sched_cfg.sib1_payload_size.value() > 0, "SIB1 payload size needs to be set");
   ocudu_assert(si_sched_cfg.si_messages.size() ==
@@ -66,7 +66,8 @@ ocudu::odu::make_sched_cell_config_req(du_cell_index_t             cell_index,
   // Convert SIB1 and SI message info scheduling config.
   sched_req.si_scheduling = si_sched_cfg;
 
-  sched_req.rrm_policy_members = du_cfg.rrm_policy_members;
+  sched_req.rrm_policy_members  = du_cfg.rrm_policy_members;
+  sched_req.max_nof_ue_contexts = max_nof_ue_contexts;
 
   return sched_req;
 }

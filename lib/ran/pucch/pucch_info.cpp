@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ocudu/ran/pucch/pucch_info.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/to_array.h"
 #include "ocudu/ran/pucch/pucch_constants.h"
 

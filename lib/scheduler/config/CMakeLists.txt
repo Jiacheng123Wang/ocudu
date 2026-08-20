@@ -5,6 +5,7 @@
 add_library(sched_config STATIC
         builder/pucch_config.cpp
         builder/csi_meas_config.cpp
+        cell_config_builder_params.cpp
         ran_cell_config_helper.cpp
         serving_cell_config_factory.cpp
         sched_cell_config_helpers.cpp

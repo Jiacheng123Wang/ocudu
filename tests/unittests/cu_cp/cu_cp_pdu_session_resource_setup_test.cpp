@@ -11,6 +11,7 @@
 #include "tests/unittests/cu_cp/test_helpers.h"
 #include "tests/unittests/e1ap/common/e1ap_cu_cp_test_messages.h"
 #include "tests/unittests/ngap/ngap_test_messages.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents_ue.h"
 #include "ocudu/e1ap/common/e1ap_types.h"
 #include "ocudu/f1ap/f1ap_message.h"
@@ -46,7 +47,7 @@ public:
     // Connect UE 0x4601.
     EXPECT_TRUE(connect_new_ue(du_idx, du_ue_id, crnti));
     EXPECT_TRUE(authenticate_ue(du_idx, du_ue_id, amf_ue_id));
-    EXPECT_TRUE(setup_ue_security_and_ue_capabilies(du_idx, du_ue_id));
+    EXPECT_TRUE(setup_ue_security_and_ue_capabilities(du_idx, du_ue_id));
     ue_ctx = this->find_ue_context(du_idx, du_ue_id);
 
     EXPECT_TRUE(finish_ue_registration(du_idx, cu_up_idx, du_ue_id));
@@ -707,7 +708,7 @@ TEST_F(cu_cp_pdu_session_resource_setup_test,
   // Setup and fully complete first PDU session; this establishes SRB2 (and DRB1) for the UE.
   ASSERT_TRUE(setup_pdu_session(psi, drb_id_t::drb1, qfi));
 
-  // Release the only PDU session. As no PDU session remains afterwards, this triggers a full E1AP Bearer Context
+  // Release the only PDU session. As no PDU session remains afterward, this triggers a full E1AP Bearer Context
   // Release rather than a modification.
   get_amf().push_tx_pdu(generate_valid_pdu_session_resource_release_command(amf_ue_id, ue_ctx->ran_ue_id.value(), psi));
   ASSERT_TRUE(this->wait_for_e1ap_tx_pdu(cu_up_idx, e1ap_pdu));

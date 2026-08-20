@@ -69,6 +69,13 @@ static std::optional<csi_report_configuration> get_csi_report_cfg(const ran_cell
       config_helpers::make_default_ue_cell_config(cell_cfg).serv_cell_cfg.csi_meas_cfg.value());
 }
 
+// As per Section 9.2.1, TS 38.213, Resource Set ID 1 is used once more than 2 UCI bits need to be carried on the
+// HARQ-ACK resource.
+static bool uci_bits_need_res_set_1(const pucch_uci_bits& bits)
+{
+  return bits.harq_ack_nof_bits + bits.csi_part1_nof_bits > 2U;
+}
+
 //////////////    Public functions       //////////////
 
 pucch_allocator_impl::pucch_allocator_impl(const cell_configuration& cell_cfg_,
@@ -236,13 +243,15 @@ std::optional<unsigned> pucch_allocator_impl::alloc_common_and_ded_harq_ack(cell
 std::optional<unsigned> pucch_allocator_impl::alloc_ded_harq_ack(cell_resource_allocator&     res_alloc,
                                                                  const ue_cell_configuration& ue_cell_cfg,
                                                                  unsigned                     k0,
-                                                                 unsigned                     k1)
+                                                                 unsigned                     k1,
+                                                                 pucch_repetition_factor      max_rep_factor)
 {
   // NOTE: This function does not check whether there are PUSCH grants allocated for the same UE. The check needs to
   // be performed by the caller.
 
   // Get the slot allocation grid considering the PDSCH delay (k0) and the PUCCH delay wrt PDSCH (k1).
-  cell_slot_resource_allocator& pucch_slot_alloc = res_alloc[k0 + k1 + res_alloc.cfg.ntn_cs_koffset];
+  const unsigned                anchor_delay     = k0 + k1 + res_alloc.cfg.ntn_cs_koffset;
+  cell_slot_resource_allocator& pucch_slot_alloc = res_alloc[anchor_delay];
   auto&                         slot_ctx         = slots_ctx[pucch_slot_alloc.slot.to_uint()];
   alloc_context alloc_ctx{alloc_context::alloc_type::ded_harq_ack, ue_cell_cfg.crnti, pucch_slot_alloc.slot};
 
@@ -264,34 +273,94 @@ std::optional<unsigned> pucch_allocator_impl::alloc_ded_harq_ack(cell_resource_a
     old_grants = *existing_grants;
   }
 
-  pucch_uci_bits new_bits = old_grants.uci_bits(pucch_slot_alloc.result.ul.pucchs);
+  const pucch_uci_bits old_bits = old_grants.uci_bits(pucch_slot_alloc.result.ul.pucchs);
+  pucch_uci_bits       new_bits = old_bits;
   ++new_bits.harq_ack_nof_bits;
+
+  if (existing_grants == nullptr and max_rep_factor != pucch_repetition_factor::n1) {
+    // Try to allocate a multi-slot PUCCH repetition burst first. If unavailable at any factor, fall back to the
+    // regular single-slot allocation below.
+    const std::optional<unsigned> rep_pri =
+        try_alloc_harq_ack_burst(res_alloc, ue_cell_cfg, new_bits, anchor_delay, max_rep_factor, {}, alloc_ctx);
+    if (rep_pri.has_value()) {
+      return rep_pri;
+    }
+  }
 
   // From TS 38.213, Section 9.2.1:
   // > "If the UE transmits O_UCI UCI information bits, that include HARQ-ACK information bits, the UE determines a
   //    PUCCH resource set to be ..."
-  // We can infer that we only need to run the multiplexing algorithm in the following cases:
-  // - the first allocated HARQ-ACK bit (to multiplex the new HARQ-ACK resource with the existing grants)
-  // - the third allocated HARQ-ACK bit (to promote from Resource Set ID 0 to Resource Set ID 1)
-  // In all other cases, the multiplexing algorithm would yield the same result as in the previous allocation of this
-  // UE, so we skip it.
-  if (existing_grants != nullptr and new_bits.harq_ack_nof_bits != 1U and new_bits.harq_ack_nof_bits != 3U) {
+  // We only need to (re-)run the multiplexing algorithm, including PRI selection, if this is the UE's first
+  // HARQ-ACK grant in this slot, or if the additional bit changes which Resource Set applies (e.g. 3rd bit promoting
+  // from Resource Set ID 0 to 1; note this promotion may have already happened on an earlier bit, if CSI bits were
+  // already present). In all other cases, the multiplexing algorithm would yield the same result as in the previous
+  // allocation of this UE, so we skip it.
+  const bool res_set_unchanged = existing_grants != nullptr and existing_grants->harq_ack.has_value() and
+                                 uci_bits_need_res_set_1(old_bits) == uci_bits_need_res_set_1(new_bits);
+
+  if (existing_grants != nullptr and existing_grants->harq_ack_is_repetition()) {
+    // Guaranteed by \c can_allocate_pucch above, which rejects a dedicated HARQ-ACK grant landing on any burst slot
+    // other than the anchor.
+    ocudu_assert(pucch_slot_alloc.slot == existing_grants->burst_slots.front(),
+                 "PUCCH repetition burst of rnti={} updated from slot={} instead of its anchor slot={}",
+                 alloc_ctx.rnti,
+                 pucch_slot_alloc.slot,
+                 existing_grants->burst_slots.front());
+
+    if (res_set_unchanged) {
+      // Propagate the extra HARQ-ACK bit to every slot of the burst, so that all repetitions keep carrying the same
+      // (updated) payload.
+      std::optional<unsigned> d_pri;
+      for (const slot_point& burst_slot : existing_grants->burst_slots) {
+        cell_slot_resource_allocator& sl          = res_alloc[burst_slot];
+        ue_grants*                    slot_grants = slots_ctx[sl.slot.to_uint()].find_ue_grants(ue_cell_cfg.crnti);
+        ocudu_assert(slot_grants != nullptr, "Missing PUCCH repetition burst grant for slot={}", burst_slot);
+        d_pri = update_harq_ack_bits(sl, *slot_grants, new_bits.harq_ack_nof_bits, alloc_ctx);
+      }
+      return d_pri;
+    }
+
+    // The extra bit needs promotion to Resource Set 1, and the resource in use cannot change the number of bits it
+    // carries, so the whole burst has to move over to a Resource Set 1 resource. Note that the burst's grants (and
+    // therefore \c existing_grants) don't survive that, so the slot list must be copied beforehand.
+    const burst_slot_list burst_slots = existing_grants->burst_slots;
+
+    // First, try to keep the repetition.
+    const std::optional<unsigned> promoted_pri = try_alloc_harq_ack_burst(
+        res_alloc, ue_cell_cfg, new_bits, anchor_delay, max_rep_factor, burst_slots, alloc_ctx);
+    if (promoted_pri.has_value()) {
+      return promoted_pri;
+    }
+
+    // No Resource Set 1 resource can carry the burst with repetitions; fall back to a single-slot grant on the anchor
+    // slot, allocated through the regular path below. The PRI availability is checked here, before the burst is
+    // released, so that a failure leaves the ongoing burst (and the bits already allocated to it) untouched. Note
+    // that re-selecting a resource currently held by this UE is not treated as a collision, so the outcome of the
+    // check doesn't depend on the burst having been released or not.
+    if (not select_pri(pucch_slot_alloc, ue_cell_cfg, new_bits, nullptr).has_value()) {
+      alloc_ctx.log_skipped_alloc(logger.debug,
+                                  "no PUCCH Resource Set 1 resource available for the ongoing repetition burst");
+      return std::nullopt;
+    }
+
+    release_harq_ack_burst(res_alloc, burst_slots, alloc_ctx.rnti);
+    // The UE has no PUCCH grants left in this slot, so the regular path below allocates a brand new one.
+    existing_grants = nullptr;
+    old_grants      = ue_grants{};
+  }
+
+  if (res_set_unchanged) {
     return update_harq_ack_bits(pucch_slot_alloc, old_grants, new_bits.harq_ack_nof_bits, alloc_ctx);
   }
 
-  std::optional<unsigned> d_pri;
-  if (new_bits.harq_ack_nof_bits == 1U) {
-    // First HARQ-ACK allocation for this UE in this slot, find an available PRI to use for the HARQ-ACK bits.
-    d_pri = select_pri(pucch_slot_alloc, ue_cell_cfg, new_bits, nullptr);
-
-    if (not d_pri.has_value()) {
-      alloc_ctx.log_skipped_alloc(logger.debug, "no resource indicator available for dedicated PUCCH resource");
-      return std::nullopt;
-    }
+  const std::optional<unsigned> d_pri = select_pri(pucch_slot_alloc, ue_cell_cfg, new_bits, nullptr);
+  if (not d_pri.has_value()) {
+    alloc_ctx.log_skipped_alloc(logger.debug, "no resource indicator available for dedicated PUCCH resource");
+    return std::nullopt;
   }
 
-  auto new_grants = multiplex_and_allocate_pucch(
-      pucch_slot_alloc, new_bits, old_grants, ue_cell_cfg, d_pri.has_value() ? *d_pri : old_grants.d_pri, alloc_ctx);
+  auto new_grants =
+      multiplex_and_allocate_pucch(pucch_slot_alloc, new_bits, old_grants, ue_cell_cfg, *d_pri, alloc_ctx);
 
   if (not new_grants.has_value()) {
     return std::nullopt;
@@ -393,6 +462,14 @@ pucch_uci_bits pucch_allocator_impl::remove_ue_uci_from_pucch(cell_slot_resource
   }
   ocudu_assert(
       not existing_ue_grants->common.has_value(), "Unexpected common PUCCH grant found for rnti={}", ue_cell_cfg.crnti);
+  // As per TS 38.213, Section 9.2.6, the UCI of a PUCCH with repetitions is never moved to an overlapping PUSCH: the UE
+  // transmits the PUCCH and drops the PUSCH instead. Removing one slot's grant out of a burst would also leave the
+  // remaining repetitions inconsistent, and hand the freed resource to another UE while this one still transmits on it.
+  // The UL scheduler is expected to never place a PUSCH in a burst slot (see ue_cell_grid_allocator).
+  ocudu_assert(not existing_ue_grants->harq_ack_is_repetition(),
+               "Attempted to move the UCI of a PUCCH repetition burst of rnti={} to a PUSCH in slot={}",
+               ue_cell_cfg.crnti,
+               slot_alloc.slot);
 
   // Get the UCI bits that were allocated for the UE in this slot.
   pucch_uci_bits removed_uci_info = existing_ue_grants->uci_bits(slot_alloc.result.ul.pucchs);
@@ -426,6 +503,16 @@ bool pucch_allocator_impl::has_common_pucch_grant(rnti_t rnti, slot_point sl_tx)
   const auto& slot_ctx = slots_ctx[sl_tx.to_uint()];
   auto        it       = slot_ctx.ue_grants_map.find(rnti);
   return it != slot_ctx.ue_grants_map.end() and it->second.common.has_value();
+}
+
+span<const slot_point> pucch_allocator_impl::get_pucch_repetition_slots(rnti_t rnti, slot_point sl_tx) const
+{
+  const auto& slot_ctx = slots_ctx[sl_tx.to_uint()];
+  auto        it       = slot_ctx.ue_grants_map.find(rnti);
+  if (it == slot_ctx.ue_grants_map.end()) {
+    return {};
+  }
+  return it->second.burst_slots;
 }
 
 //////////////     Sub-class definitions       //////////////
@@ -502,6 +589,11 @@ std::optional<unsigned> pucch_allocator_impl::select_pri(const cell_slot_resourc
                                                          const pucch_uci_bits&               bits,
                                                          const dci_context_information*      dci_info)
 {
+  const bool use_res_set_1 = uci_bits_need_res_set_1(bits);
+
+  // Returns the HARQ-ACK resource of the resource set being reserved.
+  auto get_res = use_res_set_1 ? pucch_helper::get_harq_resource<1> : pucch_helper::get_harq_resource<0>;
+
   if (cell_cfg.is_pucch_f0_and_f2() and (bits.csi_part1_nof_bits != 0U or bits.sr_bits != sr_nof_bits::no_sr)) {
     // In the F0+F2 case, the PRI used for the HARQ-ACK is restricted if CSI or SR is multiplexed with it.
     unsigned d_pri =
@@ -512,12 +604,7 @@ std::optional<unsigned> pucch_allocator_impl::select_pri(const cell_slot_resourc
         return std::nullopt;
       }
     }
-    const auto& res0 = pucch_helper::get_harq_resource<0>(ue_cell_cfg, d_pri);
-    if (not col_manager.can_alloc(pucch_slot_alloc, res0, ue_cell_cfg.crnti)) {
-      return std::nullopt;
-    }
-    const auto& res1 = pucch_helper::get_harq_resource<1>(ue_cell_cfg, d_pri);
-    if (not col_manager.can_alloc(pucch_slot_alloc, res1, ue_cell_cfg.crnti)) {
+    if (not col_manager.can_alloc(pucch_slot_alloc, get_res(ue_cell_cfg, d_pri), ue_cell_cfg.crnti)) {
       return std::nullopt;
     }
     return d_pri;
@@ -530,17 +617,194 @@ std::optional<unsigned> pucch_allocator_impl::select_pri(const cell_slot_resourc
         continue;
       }
     }
-    const auto& res0 = pucch_helper::get_harq_resource<0>(ue_cell_cfg, d_pri);
-    if (not col_manager.can_alloc(pucch_slot_alloc, res0, ue_cell_cfg.crnti)) {
-      continue;
-    }
-    const auto& res1 = pucch_helper::get_harq_resource<1>(ue_cell_cfg, d_pri);
-    if (not col_manager.can_alloc(pucch_slot_alloc, res1, ue_cell_cfg.crnti)) {
+    if (not col_manager.can_alloc(pucch_slot_alloc, get_res(ue_cell_cfg, d_pri), ue_cell_cfg.crnti)) {
       continue;
     }
     return d_pri;
   }
   return std::nullopt;
+}
+
+std::optional<pucch_allocator_impl::harq_ack_burst_candidate>
+pucch_allocator_impl::find_harq_ack_burst_candidate(cell_resource_allocator&     res_alloc,
+                                                    const ue_cell_configuration& ue_cell_cfg,
+                                                    const pucch_uci_bits&        bits,
+                                                    pucch_repetition_factor      max_rep_factor,
+                                                    unsigned                     anchor_delay,
+                                                    span<const slot_point>       released_slots)
+{
+  // Repetition factors are static, per-PRI, cell-configured values. n1 is not searched here: a single-slot
+  // transmission is not a repetition burst, and is allocated through the regular path instead, which also takes care
+  // of multiplexing it with the UE's other UCI in the slot, if any.
+  static constexpr std::array<pucch_repetition_factor, 3> descending_factors = {
+      pucch_repetition_factor::n8, pucch_repetition_factor::n4, pucch_repetition_factor::n2};
+
+  // The UE's support for dynamic PUCCH repetition is tracked on its ue_pucch_config (in ue_bwp_config), set by
+  // pucch_resource_manager::apply_rep_factor_capabilities, since the cell-wide resource pool (read via
+  // pucch_helper::get_harq_resource) is shared across all UEs and cannot reflect per-UE capability on its own.
+  const ue_pucch_config& ue_pucch_cfg = ue_cell_cfg.init_bwp().ul.ue_cfg()->pucch;
+
+  const auto get_res =
+      uci_bits_need_res_set_1(bits) ? pucch_helper::get_harq_resource<1> : pucch_helper::get_harq_resource<0>;
+
+  for (const pucch_repetition_factor factor : descending_factors) {
+    if (factor > max_rep_factor) {
+      continue;
+    }
+
+    for (unsigned pri = 0; pri != res_params.res_set_size.value(); ++pri) {
+      const pucch_resource& res = get_res(ue_cell_cfg, pri);
+      // The number of repetitions is derived by the UE from the indicated resource's pucch-RepetitionNrofSlots, so
+      // only the resources configured with the factor being searched can be used.
+      if (res.rep_factor != factor) {
+        continue;
+      }
+      const bool is_f0_or_f2 = res.format() == pucch_format::FORMAT_0 or res.format() == pucch_format::FORMAT_2;
+      if (is_f0_or_f2 ? not ue_pucch_cfg.rep_f0_2_enabled : not ue_pucch_cfg.rep_f1_3_4_enabled) {
+        continue;
+      }
+
+      std::optional<burst_slot_list> slots = find_burst_slots(
+          res_alloc, res, static_cast<unsigned>(factor), anchor_delay, released_slots, ue_cell_cfg.crnti);
+      if (slots.has_value()) {
+        return harq_ack_burst_candidate{.pri = pri, .slots = *slots};
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<pucch_allocator_impl::burst_slot_list>
+pucch_allocator_impl::find_burst_slots(cell_resource_allocator& res_alloc,
+                                       const pucch_resource&    res,
+                                       unsigned                 nof_slots,
+                                       unsigned                 anchor_delay,
+                                       span<const slot_point>   released_slots,
+                                       rnti_t                   rnti)
+{
+  burst_slot_list slots;
+  for (unsigned delay = anchor_delay; slots.size() != nof_slots and delay <= res_alloc.max_ul_slot_alloc_delay;
+       ++delay) {
+    cell_slot_resource_allocator& sl = res_alloc[delay];
+    // The first slot is the PUCCH occasion determined by the HARQ-ACK feedback timing and cannot be moved; the others
+    // are only the slots where the UE actually transmits a repetition.
+    const bool is_anchor = slots.empty();
+
+    if (not cell_cfg.is_ul_enabled(sl.slot)) {
+      if (is_anchor) {
+        return std::nullopt;
+      }
+      continue;
+    }
+
+    const auto res_available = col_manager.can_alloc(sl, res, rnti);
+    if (not res_available.has_value()) {
+      // As per TS 38.213, Section 9.2.6, a slot that doesn't have enough consecutive UL symbols for the resource is
+      // not one of the N_PUCCH_repeat slots: the UE skips it and transmits the repetition in a later slot instead.
+      // Any other failure means that this resource cannot be used for this burst at all.
+      if (res_available.error() == pucch_alloc_failure::INCOMPATIBLE_SLOT and not is_anchor) {
+        continue;
+      }
+      return std::nullopt;
+    }
+
+    // Slots whose grants are about to be released are, from here on, as good as free for this UE.
+    if (std::find(released_slots.begin(), released_slots.end(), sl.slot) == released_slots.end()) {
+      // A PUCCH with repetitions can carry neither SR/CSI nor PUSCH-multiplexed UCI, so the slot must not hold any
+      // other grant of this UE.
+      if (slots_ctx[sl.slot.to_uint()].find_ue_grants(rnti) != nullptr) {
+        return std::nullopt;
+      }
+      const bool ue_has_pusch =
+          std::any_of(sl.result.ul.puschs.begin(), sl.result.ul.puschs.end(), [rnti](const ul_sched_info& pusch) {
+            return pusch.pusch_cfg.rnti == rnti;
+          });
+      if (ue_has_pusch or not is_there_space_for_new_pucch_grants(sl.result, 1)) {
+        return std::nullopt;
+      }
+    }
+
+    slots.push_back(sl.slot);
+  }
+
+  if (slots.size() != nof_slots) {
+    // Not enough look-ahead room for this number of slots.
+    return std::nullopt;
+  }
+  return slots;
+}
+
+void pucch_allocator_impl::commit_harq_ack_burst(cell_resource_allocator&        res_alloc,
+                                                 const ue_cell_configuration&    ue_cell_cfg,
+                                                 const harq_ack_burst_candidate& candidate,
+                                                 const pucch_uci_bits&           bits,
+                                                 const alloc_context&            alloc_ctx)
+{
+  const unsigned nof_slots = candidate.slots.size();
+  ocudu_assert(nof_slots > 1, "A PUCCH repetition burst must span more than one slot");
+
+  for (unsigned idx = 0; idx != nof_slots; ++idx) {
+    cell_slot_resource_allocator& sl = res_alloc[candidate.slots[idx]];
+    const alloc_context           slot_alloc_ctx{alloc_ctx.type, alloc_ctx.rnti, sl.slot};
+
+    pucch_repetition_tx_slot rep_state = pucch_repetition_tx_slot::continues;
+    if (idx == 0) {
+      rep_state = pucch_repetition_tx_slot::starts;
+    } else if (idx + 1 == nof_slots) {
+      rep_state = pucch_repetition_tx_slot::ends;
+    }
+
+    std::optional<ue_grants> new_grants = multiplex_and_allocate_pucch(
+        sl, bits, ue_grants{}, ue_cell_cfg, candidate.pri, slot_alloc_ctx, rep_state, candidate.slots.front());
+    ocudu_assert(new_grants.has_value(), "PUCCH commit unexpectedly failed after a successful check phase");
+    // Track every slot in the burst, so that later HARQ-ACK bits (still barred from SR/CSI multiplexing) can be
+    // propagated to all of them and keep the repeated payload in sync.
+    new_grants->burst_slots = candidate.slots;
+
+    slots_ctx[sl.slot.to_uint()].ue_grants_map[alloc_ctx.rnti] = *new_grants;
+  }
+}
+
+void pucch_allocator_impl::release_harq_ack_burst(cell_resource_allocator& res_alloc,
+                                                  span<const slot_point>   burst_slots,
+                                                  rnti_t                   rnti)
+{
+  for (slot_point burst_slot : burst_slots) {
+    cell_slot_resource_allocator& sl       = res_alloc[burst_slot];
+    auto&                         slot_ctx = slots_ctx[sl.slot.to_uint()];
+    ue_grants*                    grants   = slot_ctx.find_ue_grants(rnti);
+    ocudu_assert(grants != nullptr and grants->harq_ack.has_value() and not grants->common.has_value() and
+                     not grants->sr.has_value() and not grants->csi.has_value(),
+                 "Unexpected PUCCH grants in the repetition burst slot={} of rnti={}",
+                 burst_slot,
+                 rnti);
+
+    const pucch_info&           pdu   = sl.result.ul.pucchs[*grants->harq_ack];
+    [[maybe_unused]] const bool freed = col_manager.free(sl, *pdu.res, rnti);
+    ocudu_assert(freed, "Failed to free the PUCCH resource of the repetition burst slot={}", burst_slot);
+    sl.result.ul.pucchs.erase(*grants->harq_ack);
+    slot_ctx.ue_grants_map.erase(rnti);
+  }
+}
+
+std::optional<unsigned> pucch_allocator_impl::try_alloc_harq_ack_burst(cell_resource_allocator&     res_alloc,
+                                                                       const ue_cell_configuration& ue_cell_cfg,
+                                                                       const pucch_uci_bits&        bits,
+                                                                       unsigned                     anchor_delay,
+                                                                       pucch_repetition_factor      max_rep_factor,
+                                                                       span<const slot_point>       released_slots,
+                                                                       const alloc_context&         alloc_ctx)
+{
+  const std::optional<harq_ack_burst_candidate> candidate =
+      find_harq_ack_burst_candidate(res_alloc, ue_cell_cfg, bits, max_rep_factor, anchor_delay, released_slots);
+  if (not candidate.has_value()) {
+    return std::nullopt;
+  }
+
+  // No-op unless this is a re-selection, in which case the old burst is only torn down once a replacement is certain.
+  release_harq_ack_burst(res_alloc, released_slots, alloc_ctx.rnti);
+  commit_harq_ack_burst(res_alloc, ue_cell_cfg, *candidate, bits, alloc_ctx);
+  return candidate->pri;
 }
 
 void pucch_allocator_impl::commit_dedicated_grant_diff(cell_slot_resource_allocator& pucch_slot_alloc,
@@ -596,7 +860,9 @@ pucch_allocator_impl::multiplex_and_allocate_pucch(cell_slot_resource_allocator&
                                                    const ue_grants&              old_grants,
                                                    const ue_cell_configuration&  ue_cell_cfg,
                                                    std::optional<unsigned>       d_pri,
-                                                   const alloc_context&          alloc_ctx)
+                                                   const alloc_context&          alloc_ctx,
+                                                   pucch_repetition_tx_slot      rep_state,
+                                                   slot_point                    rep_anchor_slot)
 {
   // NOTE: In this function, the \c candidate_grants report the data about the grants BEFORE the multiplexing is
   // applied. Each grant contains only one UCI type (HARQ grant contains HARQ bits, SR grant contains SR bits and so
@@ -654,17 +920,27 @@ pucch_allocator_impl::multiplex_and_allocate_pucch(cell_slot_resource_allocator&
   }
 
   unsigned nof_used_pdus = 0;
-  auto     alloc_grant   = [&](const pucch_grant& grant) -> stable_id_t {
+  auto     alloc_grant   = [&](const pucch_grant&       grant,
+                         pucch_repetition_tx_slot grant_rep_state       = pucch_repetition_tx_slot::no_multi_slot,
+                         slot_point               grant_rep_anchor_slot = {}) -> stable_id_t {
     const stable_id_t pdu_idx = pdu_indices[nof_used_pdus++];
     auto&             pdu     = pucch_pdus[pdu_idx];
-    pucch_helper::fill_ded_pdu(
-        pdu, cell_cfg, *grant.res, grant.bits, csi_report_cfg.has_value() ? &*csi_report_cfg : nullptr, alloc_ctx.rnti);
+    pucch_helper::fill_ded_pdu(pdu,
+                               cell_cfg,
+                               *grant.res,
+                               grant.bits,
+                               csi_report_cfg.has_value() ? &*csi_report_cfg : nullptr,
+                               alloc_ctx.rnti,
+                               grant_rep_state,
+                               grant_rep_anchor_slot);
     return pdu_idx;
   };
 
   ue_grants result{.common = old_grants.common, .d_pri = old_grants.d_pri};
   if (new_grants.harq_ack.has_value()) {
-    result.harq_ack = alloc_grant(*new_grants.harq_ack);
+    // Note: the repetition state only reaches the PUCCH PDU here. Whether the resulting grant belongs to a repetition
+    // burst is recorded by the caller (\c commit_harq_ack_burst), which is the one that knows the burst's slots.
+    result.harq_ack = alloc_grant(*new_grants.harq_ack, rep_state, rep_anchor_slot);
     result.d_pri    = new_grants.d_pri;
   }
   if (new_grants.sr.has_value()) {
@@ -911,8 +1187,19 @@ std::optional<unsigned> pucch_allocator_impl::update_harq_ack_bits(cell_slot_res
       return std::nullopt;
     }
 
-    pucch_helper::fill_ded_pdu(
-        pdu, cell_cfg, *pdu.res, bits, csi_report_cfg.has_value() ? &*csi_report_cfg : nullptr, alloc_ctx.rnti);
+    // Preserve the PUCCH repetition state of the PDU (if this is part of a repetition burst), since fill_ded_pdu
+    // otherwise resets it.
+    const pucch_repetition_tx_slot rep_state =
+        pdu.repetition.has_value() ? pdu.repetition->position : pucch_repetition_tx_slot::no_multi_slot;
+    const slot_point rep_anchor_slot = pdu.repetition.has_value() ? pdu.repetition->anchor_slot : slot_point{};
+    pucch_helper::fill_ded_pdu(pdu,
+                               cell_cfg,
+                               *pdu.res,
+                               bits,
+                               csi_report_cfg.has_value() ? &*csi_report_cfg : nullptr,
+                               alloc_ctx.rnti,
+                               rep_state,
+                               rep_anchor_slot);
   }
 
   return grants.d_pri;
@@ -925,6 +1212,19 @@ bool pucch_allocator_impl::can_allocate_pucch(const cell_slot_resource_allocator
                                               const alloc_context&                alloc_ctx) const
 {
   if (not cell_cfg.is_ul_enabled(pucch_slot_alloc.slot)) {
+    return false;
+  }
+
+  // Repetition PUCCH cannot be multiplexed with SR or CSI; the UE must not transmit more than one PUCCH per slot, so
+  // no SR/CSI grant can be added to a slot already claimed by a repetition burst. An additional HARQ-ACK bit is only
+  // allowed if it lands on the burst's anchor slot (i.e. it shares the same feedback timing as the bit that started
+  // the burst, so it belongs to the same PUCCH occasion); one landing on a later repetition slot of the burst is a
+  // separate, unrelated PUCCH occasion that happens to collide physically, and must be rejected like any other
+  // grant (see \c alloc_ded_harq_ack, which then propagates an accepted bit to every slot of the burst).
+  if (existing_ue_grants != nullptr and existing_ue_grants->harq_ack_is_repetition() and
+      (alloc_ctx.type != alloc_context::alloc_type::ded_harq_ack or
+       pucch_slot_alloc.slot != existing_ue_grants->burst_slots.front())) {
+    alloc_ctx.log_skipped_alloc(logger.debug, "slot reserved for PUCCH repetition for the same UE");
     return false;
   }
 

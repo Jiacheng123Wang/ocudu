@@ -4,6 +4,7 @@
 
 #include "../message_builder_helpers.h"
 #include "pucch.h"
+#include "ocudu/adt/format.h"
 #include <gtest/gtest.h>
 
 using namespace ocudu;

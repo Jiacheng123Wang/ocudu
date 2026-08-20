@@ -88,11 +88,13 @@ void ocudu::build_dci_f1_0_p_rnti(dci_dl_info& dci, const bwp_downlink_common& i
   p_dci.short_messages           = short_messages;
 }
 
-void ocudu::build_dci_f1_0_ra_rnti(dci_dl_info&               dci,
-                                   const bwp_downlink_common& init_dl_bwp,
-                                   crb_interval               crbs,
-                                   unsigned                   time_resource,
-                                   sch_mcs_index              mcs_index)
+/// Builds DCI f1_0 shared by RA-RNTI and MsgB-RNTI, as per TS38.212, clause 7.3.1.2.1.
+static void build_dci_f1_0_ra_or_msgb_rnti(dci_dl_info&               dci,
+                                           const bwp_downlink_common& init_dl_bwp,
+                                           crb_interval               crbs,
+                                           unsigned                   time_resource,
+                                           sch_mcs_index              mcs_index,
+                                           unsigned                   lsb_sfn)
 {
   dci_1_0_ra_rnti_configuration& ra_dci = dci.set_ra_rnti_f1_0();
   // as per TS38.212, clause 7.3.1.2.1 - N^{DL,BWP}_RB.
@@ -107,6 +109,30 @@ void ocudu::build_dci_f1_0_ra_rnti(dci_dl_info&               dci,
   ra_dci.time_resource               = time_resource;
   ra_dci.modulation_coding_scheme    = mcs_index.value();
   ra_dci.tb_scaling                  = 0; // TODO.
+  ra_dci.lsb_sfn                     = lsb_sfn;
+}
+
+void ocudu::build_dci_f1_0_ra_rnti(dci_dl_info&               dci,
+                                   const bwp_downlink_common& init_dl_bwp,
+                                   crb_interval               crbs,
+                                   unsigned                   time_resource,
+                                   sch_mcs_index              mcs_index)
+{
+  build_dci_f1_0_ra_or_msgb_rnti(dci, init_dl_bwp, crbs, time_resource, mcs_index, 0);
+}
+
+void ocudu::build_dci_f1_0_msgb_rnti(dci_dl_info&               dci,
+                                     const bwp_downlink_common& init_dl_bwp,
+                                     crb_interval               crbs,
+                                     unsigned                   time_resource,
+                                     sch_mcs_index              mcs_index,
+                                     unsigned                   msgb_resp_window_ms,
+                                     unsigned                   prach_sfn)
+{
+  // TS38.213, Section 8.2A: the LSBs of SFN field is only present if msgB-ResponseWindow is configured larger than
+  // 10 msec; otherwise these bits are reserved.
+  const unsigned lsb_sfn = msgb_resp_window_ms > 10 ? prach_sfn & 0b11U : 0U;
+  build_dci_f1_0_ra_or_msgb_rnti(dci, init_dl_bwp, crbs, time_resource, mcs_index, lsb_sfn);
 }
 
 void ocudu::build_dci_f1_0_tc_rnti(dci_dl_info&                  dci,

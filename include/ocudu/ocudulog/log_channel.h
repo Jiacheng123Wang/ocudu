@@ -3,20 +3,13 @@
 
 #pragma once
 
+#include "ocudu/ocudulog/copy_loggable_traits.h"
 #include "ocudu/ocudulog/detail/log_backend.h"
 #include "ocudu/ocudulog/detail/log_entry.h"
 #include "ocudu/ocudulog/sink.h"
 #include <atomic>
 
 namespace ocudulog {
-
-/// Type trait to indicate if a type that is going to be passed through a log channel is unsafe to be copied with the
-/// default implementation and requires a user defined copy implementation.
-template <typename T>
-struct copy_loggable_type {
-  static constexpr bool is_copyable = true;
-  // static void copy (fmt::dynamic_format_arg_store<fmt::format_context>* store, <user-defined-type> a)
-};
 
 /// Log channel configuration settings.
 struct log_channel_config {

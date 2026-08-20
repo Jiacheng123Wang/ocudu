@@ -78,6 +78,8 @@ protected:
   // 0b00, 0b01 and 0b10 bit words are mapped to scaling factor values.
   uniform_distribution tb_scaling_dist{0, pow2(1)};
 
+  uniform_distribution lsb_sfn_dist{0, pow2(2) - 1};
+
   void SetUp() override
   {
     // Set the Bandwidth of the UL and DL, active and initial BWP.
@@ -239,6 +241,7 @@ protected:
     config.interleaved_vrb_prb_mapping   = vrb_to_prb_mapping_dist(rgen) > 0;
     config.modulation_coding_scheme      = modulation_coding_scheme_dist(rgen);
     config.tb_scaling                    = tb_scaling_dist(rgen);
+    config.lsb_sfn                       = lsb_sfn_dist(rgen);
 
     return config;
   }
@@ -1002,8 +1005,11 @@ static dci_payload build_dci_1_0_ra_rnti_expected(const dci_1_0_ra_rnti_configur
   // Transport Block scaling - 2 bits.
   expected_pack(expected, config.tb_scaling, 2);
 
-  // Reserved bits - 16 bits.
-  std::fill_n(std::back_inserter(expected), 16, 0);
+  // LSBs of SFN - 2 bits.
+  expected_pack(expected, config.lsb_sfn, 2);
+
+  // Reserved bits - 14 bits.
+  std::fill_n(std::back_inserter(expected), 14, 0);
 
   // No padding, since DCI Format 1_0 scrambled by RA-RNTI is used in common search space.
 

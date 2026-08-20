@@ -57,7 +57,45 @@ install_rohc_dependencies_fedora() {
             ;;
     esac
 
-    install_fedora_pkgs "${pkgs[@]}"
+    install_rpm_pkgs "${pkgs[@]}"
+
+    if [[ "$mode" != "run" ]]; then
+        local tool ver
+        for tool in aclocal automake; do
+            if ! command -v "${tool}" >/dev/null 2>&1; then
+                ver=$(compgen -G "/usr/bin/${tool}-*" | head -1)
+                if [[ -n "$ver" ]]; then
+                    ln -sf "${ver}" "/usr/bin/${tool}"
+                fi
+            fi
+        done
+    fi
+}
+
+install_rohc_dependencies_centos() {
+    local mode="${1:?}"
+    local -a pkgs=()
+
+    local -a build_pkgs=(
+        curl ca-certificates gcc gcc-c++ make which xz
+        autoconf automake libtool libpcap-devel libcmocka-devel
+    )
+    local -a run_pkgs=()
+
+    case "$mode" in
+        all|build)
+            pkgs+=( "${build_pkgs[@]}" )
+            ;;
+        run)
+            pkgs+=( "${run_pkgs[@]}" )
+            ;;
+        *)
+            echo >&2 "Unsupported mode: $mode"
+            exit 1
+            ;;
+    esac
+
+    install_rpm_pkgs "${pkgs[@]}"
 
     if [[ "$mode" != "run" ]]; then
         local tool ver
@@ -160,6 +198,9 @@ main() {
             ;;
         rhel)
             install_rohc_dependencies_rhel "$mode"
+            ;;
+        centos)
+            install_rohc_dependencies_centos "$mode"
             ;;
         arch)
             install_rohc_dependencies_arch "$mode"

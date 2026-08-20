@@ -115,6 +115,12 @@ public:
 
   void update_cell(const sched_cell_reconfiguration_request_message& msg);
 
+  /// \brief Updates the uplink timing advance at the cell reference location.
+  ///
+  /// Kept apart from \c update_cell: this runs on the cell executor, so it must not pull in the pending UE removals
+  /// that \c update_cell flushes off the critical path.
+  void update_ntn_ul_ta(const sched_cell_ntn_ul_ta_update& req);
+
   void rem_cell(du_cell_index_t cell_index);
 
   ue_config_update_event add_ue(const sched_ue_creation_request_message& cfg_req);

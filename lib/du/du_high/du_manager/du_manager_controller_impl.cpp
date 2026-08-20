@@ -6,6 +6,8 @@
 #include "du_manager_context.h"
 #include "procedures/du_setup_procedure.h"
 #include "procedures/du_stop_procedure.h"
+#include "ocudu/adt/format.h"
+#include "ocudu/ntn/ntn_configuration_manager.h"
 #include "ocudu/support/async/fifo_async_task_scheduler.h"
 #include "ocudu/support/executors/task_executor.h"
 #include "ocudu/support/ocudu_assert.h"
@@ -13,9 +15,10 @@
 using namespace ocudu;
 using namespace odu;
 
-du_manager_controller_impl::du_manager_controller_impl(const du_proc_context_view& proc_ctxt_,
-                                                       fifo_async_task_scheduler&  task_sched_) :
-  main_task_sched(task_sched_), proc_ctxt(proc_ctxt_)
+du_manager_controller_impl::du_manager_controller_impl(const du_proc_context_view&           proc_ctxt_,
+                                                       fifo_async_task_scheduler&            task_sched_,
+                                                       ocudu_ntn::ntn_configuration_manager* ntn_mng_) :
+  main_task_sched(task_sched_), proc_ctxt(proc_ctxt_), ntn_mng(ntn_mng_)
 {
 }
 
@@ -49,6 +52,12 @@ void du_manager_controller_impl::start()
   // Block waiting for DU setup to complete.
   ev.wait();
   ocudu_sanity_check(running_guard_flag, "DU manager start()/stop() being used in an non-sequential manner");
+
+  // Start the NTN periodic updates only now: before the DU is running, handle_ntn_param_update() discards everything
+  // it would produce.
+  if (ntn_mng != nullptr) {
+    ntn_mng->start();
+  }
 }
 
 void du_manager_controller_impl::stop()
@@ -58,6 +67,12 @@ void du_manager_controller_impl::stop()
     return;
   }
   running_guard_flag = false;
+
+  // Stop the NTN periodic updates before tearing down the layers below: the manager holds references to this DU
+  // manager and to the MAC subframe time mapper, and the MAC is destroyed before the DU manager owning it.
+  if (ntn_mng != nullptr) {
+    ntn_mng->stop();
+  }
 
   sync_event ev;
   while (not proc_ctxt.params.services.du_mng_exec.execute(
@@ -97,7 +112,9 @@ void du_manager_controller_impl::handle_du_stop_request(scoped_sync_token tk)
     // DU stop successfully finished.
     // Dispatch main async task loop destruction via defer so that the current coroutine ends successfully before
     // we start destroying the DU manager (in case stop is called from dtor).
-    while (not proc_ctxt.params.services.du_mng_exec.defer([this, tk = std::move(tk)]() {
+    // Note: tk is captured by copy so that a failed defer (which destroys the passed task and its token copy) does
+    // not prematurely signal the sync_event nor leave tk in a moved-from state for the retries.
+    while (not proc_ctxt.params.services.du_mng_exec.defer([this, tk]() {
       // Let main loop go out of scope and be destroyed.
       auto main_loop = main_task_sched.request_stop();
 

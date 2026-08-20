@@ -22,10 +22,11 @@ cell_scheduler::cell_scheduler(const scheduler_expert_config&                  s
   si_sch(cell_cfg, pdcch_sch, msg),
   csi_sch(cell_cfg),
   pucch_alloc(cell_cfg, sched_cfg.ue.max_pucchs_per_slot, sched_cfg.ue.max_ul_grants_per_slot),
-  ra_ue_repo(cell_cfg, logger),
-  ra_sch(cell_cfg, pdcch_sch, pucch_alloc, ra_ue_repo, event_logger, metrics),
-  prach_sch(cell_cfg),
   uci_alloc(cell_cfg, pucch_alloc),
+  ra_ue_repo(cell_cfg, logger),
+  ue_cell_db(cell_cfg, &metrics),
+  ra_sch(cell_cfg, pdcch_sch, pucch_alloc, uci_alloc, ra_ue_repo, ue_cell_db, event_logger, metrics),
+  prach_sch(cell_cfg),
   // The SRS allocator is only used if srs_prohibit_time is set.
   srs_alloc(cell_cfg, sched_cfg.ue.srs_prohibit_time),
   pg_sch(cell_cfg, pdcch_sch)
@@ -40,17 +41,18 @@ cell_scheduler::cell_scheduler(const scheduler_expert_config&                  s
                                                                    &metrics,
                                                                    &event_logger,
                                                                    cell_tracer.get(),
-                                                                   &ra_ue_repo});
+                                                                   &ra_ue_repo,
+                                                                   &ue_cell_db});
+}
+
+void cell_scheduler::handle_pws_si_update_request(const pws_si_scheduling_update_request& msg)
+{
+  si_sch.handle_pws_si_update_request(msg);
 }
 
 void cell_scheduler::handle_si_update_request(const si_scheduling_update_request& msg)
 {
   si_sch.handle_si_update_request(msg);
-}
-
-void cell_scheduler::handle_pws_broadcast_indication(const pws_broadcast_request& req)
-{
-  si_sch.handle_pws_broadcast_indication(req);
 }
 
 void cell_scheduler::handle_slice_reconfiguration_request(const du_cell_slice_reconfig_request& slice_reconf_req)
@@ -154,7 +156,7 @@ void cell_scheduler::start()
     return;
   }
   active = true;
-  logger.info("cell={}: Cell scheduling was activated.", fmt::underlying(cell_cfg.cell_index));
+  logger.info("cell={}: Cell scheduling was activated.", cell_cfg.cell_index);
 
   ue_sched->start();
 }
@@ -168,7 +170,7 @@ void cell_scheduler::stop()
     return;
   }
   active = false;
-  logger.info("cell={}: Cell scheduling was deactivated.", fmt::underlying(cell_cfg.cell_index));
+  logger.info("cell={}: Cell scheduling was deactivated.", cell_cfg.cell_index);
 
   // Stop sub-schedulers.
   ssb_sch.stop();

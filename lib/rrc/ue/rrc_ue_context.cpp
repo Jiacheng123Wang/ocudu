@@ -4,6 +4,7 @@
 
 #include "rrc_ue_context.h"
 #include "rrc_ue_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/rrc_nr.h"
 
 using namespace ocudu;
@@ -14,6 +15,7 @@ rrc_ue_context_t::rrc_ue_context_t(const cu_cp_ue_index_t                 ue_ind
                                    const rrc_cell_context&                cell_,
                                    const rrc_ue_cfg_t&                    cfg_,
                                    std::optional<rrc_ue_transfer_context> rrc_context_,
+                                   std::optional<rrc_resume_context_t>    remote_resume_context_,
                                    rrc_ue_srb_pdcp_manager&               pdcp_manager_,
                                    rrc_ue_logger&                         logger_) :
   ue_index(ue_index_),
@@ -22,6 +24,7 @@ rrc_ue_context_t::rrc_ue_context_t(const cu_cp_ue_index_t                 ue_ind
   cfg(cfg_),
   pdcp_manager(pdcp_manager_),
   transfer_context(rrc_context_),
+  remote_resume_context(remote_resume_context_),
   logger(logger_)
 {
   if (transfer_context.has_value()) {

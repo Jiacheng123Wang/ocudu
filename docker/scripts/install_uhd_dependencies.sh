@@ -103,7 +103,8 @@ install_uhd_dependencies_arch() {
     fi
 }
 
-install_uhd_dependencies_fedora() {
+# Shared package lists for Fedora and CentOS Stream.
+install_uhd_dependencies_rpm() {
     local mode="${1:?}"
     local -a pkgs=()
 
@@ -136,10 +137,12 @@ install_uhd_dependencies_fedora() {
             ;;
     esac
 
-    install_fedora_pkgs "${pkgs[@]}"
+    install_rpm_pkgs "${pkgs[@]}"
 
     if [[ "$mode" == "all" || "$mode" == "run" ]]; then
-        uhd_images_downloader
+        if command -v uhd_images_downloader >/dev/null 2>&1; then
+            uhd_images_downloader
+        fi
     fi
 }
 
@@ -201,8 +204,8 @@ main() {
         debian|ubuntu)
             install_uhd_dependencies_debian_ubuntu "$mode"
             ;;
-        fedora)
-            install_uhd_dependencies_fedora "$mode"
+        fedora|centos)
+            install_uhd_dependencies_rpm "$mode"
             ;;
         rhel)
             install_uhd_dependencies_rhel "$mode"

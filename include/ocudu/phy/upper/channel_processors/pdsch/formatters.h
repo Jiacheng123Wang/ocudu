@@ -8,6 +8,7 @@
 #include "ocudu/phy/support/re_pattern_formatters.h"
 #include "ocudu/phy/upper/channel_processors/pdsch/pdsch_processor.h"
 #include "ocudu/ran/pdsch/pdsch_context_formatter.h"
+#include "fmt/ranges.h"
 
 namespace fmt {
 
@@ -63,7 +64,7 @@ struct formatter<ocudu::pdsch_processor::pdu_t> {
     helper.format_if_verbose(ctx, "bwp=[{}, {})", pdu.bwp_start_rb, pdu.bwp_start_rb + pdu.bwp_size_rb);
     helper.format_always(ctx, "prb={}", pdu.freq_alloc);
     helper.format_always(ctx, "symb=[{}, {})", pdu.start_symbol_index, pdu.start_symbol_index + pdu.nof_symbols);
-    helper.format_always(ctx, ocudu::span<const ocudu::pdsch_processor::codeword_description>(pdu.codewords));
+    helper.format_always(ctx, fmt::join(pdu.codewords, " "));
 
     helper.format_if_verbose(ctx, "n_id={}", pdu.n_id);
     helper.format_if_verbose(
@@ -80,7 +81,7 @@ struct formatter<ocudu::pdsch_processor::pdu_t> {
     helper.format_if_verbose(ctx, "cp={}", pdu.cp.to_string());
     helper.format_if_verbose(ctx, "precoding={}", pdu.precoding);
     if (pdu.reserved.get_nof_entries() > 0) {
-      helper.format_if_verbose(ctx, "reserved=[{:,}]", pdu.reserved.get_re_patterns());
+      helper.format_if_verbose(ctx, "reserved={}", pdu.reserved.get_re_patterns());
     }
     return ctx.out();
   }

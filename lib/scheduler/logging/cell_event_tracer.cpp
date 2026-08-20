@@ -6,6 +6,7 @@
 
 #include "cell_event_tracer.h"
 #include "../config/cell_configuration.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/instrumentation/traces/scheduler_event_tracer.h"
 #include "ocudu/ocudulog/ocudulog.h"
 

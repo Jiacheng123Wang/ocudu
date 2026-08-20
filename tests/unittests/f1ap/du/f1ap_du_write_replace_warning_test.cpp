@@ -4,6 +4,7 @@
 
 #include "f1ap_du_test_helpers.h"
 #include "lib/f1ap/asn1_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/common.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents.h"
 #include "ocudu/du/du_cell_config_helpers.h"

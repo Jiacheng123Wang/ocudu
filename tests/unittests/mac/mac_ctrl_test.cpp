@@ -159,6 +159,43 @@ TEST_F(mac_controller_test, when_cg_cs_rnti_deallocated_then_nof_crnti_counter_i
   ASSERT_EQ(rejected_rnti, rnti_t::INVALID_RNTI);
 }
 
+TEST_F(mac_controller_test, when_cell_is_added_then_returned_controller_matches_the_one_later_fetched)
+{
+  mac_cell_creation_request cell_req = test_helpers::make_default_mac_cell_config();
+  cell_req.cell_index                = to_du_cell_index(0);
+
+  mac_cell_controller& added = mac_ctrl.add_cell(cell_req);
+
+  ASSERT_EQ(&added, &mac_ctrl.get_cell_controller(cell_req.cell_index));
+}
+
+TEST_F(mac_controller_test, when_cell_is_added_then_initial_system_information_is_forwarded_to_the_mac_dl_cell)
+{
+  mac_cell_creation_request cell_req = test_helpers::make_default_mac_cell_config();
+  cell_req.cell_index                = to_du_cell_index(0);
+
+  mac_ctrl.add_cell(cell_req);
+
+  ASSERT_EQ(dl_unit.cell_ctrls.size(), 1);
+  ASSERT_EQ(dl_unit.cell_ctrls[0]->last_si_version, 0);
+}
+
+TEST_F(mac_controller_test, when_cell_is_removed_and_readded_then_controller_points_to_the_new_mac_dl_cell)
+{
+  mac_cell_creation_request cell_req = test_helpers::make_default_mac_cell_config();
+  cell_req.cell_index                = to_du_cell_index(0);
+
+  mac_ctrl.add_cell(cell_req);
+  mac_ctrl.remove_cell(cell_req.cell_index);
+  mac_ctrl.add_cell(cell_req);
+
+  // The re-added cell must not forward to the MAC DL cell created for the previous incarnation.
+  ASSERT_EQ(dl_unit.cell_ctrls.size(), 2);
+  async_task<void> start_task = mac_ctrl.get_cell_controller(cell_req.cell_index).start();
+  ASSERT_EQ(dl_unit.cell_ctrls[0]->nof_starts, 0);
+  ASSERT_EQ(dl_unit.cell_ctrls[1]->nof_starts, 1);
+}
+
 TEST_F(mac_controller_test, ue_procedures)
 {
   // Action 1: Create UE

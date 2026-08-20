@@ -8,6 +8,7 @@
 #include "pdsch_encoder_test_doubles.h"
 #include "pdsch_modulator_test_doubles.h"
 #include "pdsch_processor_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/compare.h"
 #include "ocudu/phy/upper/channel_processors/pdsch/factories.h"
 #include "ocudu/phy/upper/channel_processors/pdsch/pdsch_processor.h"

@@ -6,6 +6,7 @@
 #include "tests/test_doubles/ngap/ngap_test_message_validators.h"
 #include "tests/unittests/cu_cp/test_helpers.h"
 #include "tests/unittests/e1ap/common/e1ap_cu_cp_test_messages.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/e1ap/common/e1ap_message.h"
 #include "ocudu/ngap/ngap_message.h"
 #include <gtest/gtest.h>

@@ -47,6 +47,28 @@ struct cu_cp_ue_handover_context {
   uint8_t          rrc_reconfig_transaction_id;
 };
 
+/// \brief Context of a UE whose context was retrieved from a peer NG-RAN node over Xn (TS 38.423 section 8.2.4).
+/// Present on a UE that reestablished or resumed here while the peer still held its context. It carries what the
+/// bearer setup, the NGAP Path Switch and the release towards the peer take from the retrieval.
+struct cu_cp_ue_context_retrieval_context {
+  /// XNAP UE ID the peer allocated for this UE, needed to release the context there once the path is switched.
+  peer_xnap_ue_id_t peer_xnap_ue_id = peer_xnap_ue_id_t::invalid;
+  /// AMF UE NGAP ID the UE has at the AMF, reported by the peer. Needed as the source AMF UE NGAP ID in the Path
+  /// Switch Request. The AMF UE NGAP ID is 40 bits wide (TS 38.413 section 9.3.3.1), so it does not fit an unsigned.
+  uint64_t amf_ue_id = 0;
+  /// GUAMI of the AMF serving the UE, reported by the peer.
+  guami_t guami;
+  /// PDU sessions to be established locally, as reported by the peer.
+  slotted_id_vector<pdu_session_id_t, cu_cp_pdu_session_res_setup_item> pdu_session_res_to_be_setup_list;
+  /// Packed RRC HandoverPreparationInformation, whose AS-Config carries the source's DRB-to-QoS-flow mapping.
+  byte_buffer rrc_context;
+  /// Request that moves the DL path to this node, filled once the bearers are up. Set by the resume trigger, where the
+  /// bearers are established before Msg4 but the path is only switched after the UE confirms it.
+  std::optional<cu_cp_path_switch_request> path_switch_request;
+  /// Location reporting the peer asks this node to run for the UE (TS 38.423 section 8.2.4.2).
+  std::optional<location_report_request> location_report_info;
+};
+
 /// \brief Single CHO candidate cell context.
 struct cu_cp_cho_candidate {
   cond_recfg_id_t cond_recfg_id{
@@ -267,6 +289,13 @@ public:
   /// \brief Get the Conditional Handover context of the UE.
   std::optional<cu_cp_ue_cho_context>& get_cho_context() { return cho_context; }
 
+  /// \brief Get the UE context retrieval context of the UE. Set while this UE's context was retrieved from an Xn
+  /// peer, which is what selects the bearer setup driven by the retrieved PDU sessions.
+  std::optional<cu_cp_ue_context_retrieval_context>& get_context_retrieval_context()
+  {
+    return context_retrieval_context;
+  }
+
 private:
   // Common context.
   cu_cp_ue_index_t       ue_index = cu_cp_ue_index_t::invalid;
@@ -300,6 +329,8 @@ private:
   unique_timer                             rna_update_timer;
   std::optional<cu_cp_ue_handover_context> ho_context;
   std::optional<cu_cp_ue_cho_context>      cho_context; ///< Conditional Handover context.
+  /// Context retrieved from an Xn peer; empty unless this UE arrived through a UE context retrieval.
+  std::optional<cu_cp_ue_context_retrieval_context> context_retrieval_context;
 };
 
 } // namespace ocudu::ocucp

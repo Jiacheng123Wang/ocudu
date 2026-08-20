@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ocudu/ran/csi_report/csi_report_config_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/csi_rs/csi_meas_config.h"
 #include "ocudu/ran/csi_rs/csi_report_config.h"
 #include "ocudu/ran/csi_rs/csi_resource_config.h"

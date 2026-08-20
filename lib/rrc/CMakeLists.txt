@@ -15,6 +15,7 @@ set(SOURCES
         ue/rrc_ue_message_handlers.cpp
         ue/rrc_ue_message_senders.cpp
         ue/rrc_ue_helpers.cpp
+        ue/rrc_ue_security_helpers.cpp
         ue/procedures/rrc_setup_procedure.cpp
         ue/procedures/rrc_reconfiguration_procedure.cpp
         ue/procedures/rrc_ue_capability_transfer_procedure.cpp

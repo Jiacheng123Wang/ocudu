@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ocudu/adt/span.h"
+#include "ocudu/ocudulog/log_channel.h"
 #include "ocudu/support/compiler.h"
 #include "ocudu/support/tracing/resource_usage.h"
 #include <chrono>

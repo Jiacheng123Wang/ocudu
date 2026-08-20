@@ -13,12 +13,21 @@ find_path(FFTZ_INCLUDE_DIR
         HINTS $ENV{FFTZ_DIR}/include/
         PATHS /usr/local/include/)
 
-find_library(FFTZ_LIBRARY
+find_library(FFTZ_LIBRARY_STATIC
+        NAMES libaocl_fftz.a
+        HINTS $ENV{FFTZ_DIR}/lib/
+        PATHS /usr/local/lib/)
+
+find_library(FFTZ_LIBRARY_SHARED
         NAMES libaocl_fftz.so
         HINTS $ENV{FFTZ_DIR}/lib/
         PATHS /usr/local/lib/)
 
-set(FFTZ_LIBRARIES ${FFTZ_LIBRARY})
+if (FFTZ_LIBRARY_STATIC)
+    set(FFTZ_LIBRARIES ${FFTZ_LIBRARY_STATIC})
+elseif (FFTZ_LIBRARY_SHARED)
+    set(FFTZ_LIBRARIES ${FFTZ_LIBRARY_SHARED})
+endif()
 set(FFTZ_INCLUDE_DIRS ${FFTZ_INCLUDE_DIR})
 
 include(FindPackageHandleStandardArgs)

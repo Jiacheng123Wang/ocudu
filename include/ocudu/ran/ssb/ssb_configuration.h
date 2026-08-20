@@ -56,6 +56,11 @@ public:
   }
 };
 
+/// Bounds of ss-PBCH-BlockPower (average SSS EPRE, in dBm) as per ServingCellConfigCommonSIB, TS 38.331:
+/// INTEGER (-60..50).
+constexpr int MIN_SS_PBCH_BLOCK_POWER = -60;
+constexpr int MAX_SS_PBCH_BLOCK_POWER = 50;
+
 /// SSB Configuration.
 struct ssb_configuration {
   /// SSB subcarrier spacing.

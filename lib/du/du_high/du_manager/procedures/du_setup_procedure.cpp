@@ -9,6 +9,7 @@
 #include "../du_cell_manager.h"
 #include "../du_manager_context.h"
 #include "../ran_resource_management/du_ran_resource_manager.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/mac/config/mac_config_helpers.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/scheduler/config/scheduler_cell_config_validator.h"
@@ -26,7 +27,8 @@ static mac_cell_creation_request make_mac_cell_config(du_cell_index_t           
                                                       const du_cell_config&                           du_cfg,
                                                       const mac_cell_sys_info_config&                 sys_info,
                                                       const sched_cell_configuration_request_message& sched_cell_cfg,
-                                                      unsigned                                        max_nof_setup_ues)
+                                                      unsigned max_nof_established_ue_ctxts,
+                                                      unsigned max_nof_rejected_ue_ctxts)
 {
   mac_cell_creation_request mac_cfg{};
   mac_cfg.cell_index = cell_index;
@@ -52,13 +54,11 @@ static mac_cell_creation_request make_mac_cell_config(du_cell_index_t           
   mac_cfg.cell_barred                     = du_cfg.cell_barred;
   mac_cfg.intra_freq_reselection          = du_cfg.intra_freq_reselection;
 
-  // (Implementation-defined) Number of HARQs needed to account for UEs that the cell cannot support but still require
-  // HARQs for sending an RRC Reject. We consider that UEs to be RRC Rejected only need one HARQ.
-  static constexpr unsigned harqs_for_rrc_rejects = 64;
-
   // Dimension the MAC DL HARQ buffer pool based on the number of UEs the cell can actually support (each using the
-  // configured number of DL HARQ processes) plus a margin for UEs that only need a single HARQ to be RRC Rejected.
-  mac_cfg.max_harq_buffers = du_cfg.ran.init_bwp.pdsch.max_harq_procs * max_nof_setup_ues + harqs_for_rrc_rejects;
+  // configured number of DL HARQ processes) plus the UE contexts that only need a single HARQ to be RRC Rejected.
+  mac_cfg.max_harq_buffers =
+      du_cfg.ran.init_bwp.pdsch.max_harq_procs * max_nof_established_ue_ctxts + max_nof_rejected_ue_ctxts;
+  mac_cfg.max_nof_ue_contexts = max_nof_established_ue_ctxts + max_nof_rejected_ue_ctxts;
 
   return mac_cfg;
 }
@@ -91,7 +91,7 @@ static void log_cell_si_messages(ocudulog::log_channel&                    info_
                 packed_si_msgs[msg_idx].end(),
                 "SI message #{} cell={}: si_msg_idx={} len={}B sib_mapping=[{}]: {}",
                 msg_idx + 1,
-                fmt::underlying(cell_index),
+                cell_index,
                 msg_idx,
                 packed_si_msgs[msg_idx].length(),
                 sib_mapping,
@@ -172,16 +172,20 @@ void du_setup_procedure::configure_du_cells()
     const du_cell_config&           du_cfg     = ctxt.cell_mng.get_cell_cfg(cell_index);
     const mac_cell_sys_info_config& sys_info   = ctxt.cell_mng.get_sys_info(cell_index);
 
-    auto sched_cfg = make_sched_cell_config_req(cell_index, du_cfg, sys_info.si_sched_cfg.si_sched_cfg);
+    const unsigned max_nof_established_ue_ctxts = ctxt.res_mng.get_max_nof_established_ue_contexts(cell_index);
+    const unsigned max_nof_rejected_ue_ctxts    = ctxt.res_mng.get_max_nof_rejected_ue_contexts(cell_index);
+
+    auto sched_cfg = make_sched_cell_config_req(
+        cell_index, du_cfg, sys_info.si_sched_cfg, max_nof_established_ue_ctxts + max_nof_rejected_ue_ctxts);
     error_type<std::string> result =
         config_validators::validate_sched_cell_configuration_request_message(sched_cfg, ctxt.params.mac.sched_cfg);
     if (not result.has_value()) {
-      report_error("Invalid cell={} configuration. Cause: {}", fmt::underlying(cell_index), result.error());
+      report_error("Invalid cell={} configuration. Cause: {}", cell_index, result.error());
     }
 
     // Forward config to MAC.
-    ctxt.params.mac.mgr.get_cell_manager().add_cell(
-        make_mac_cell_config(cell_index, du_cfg, sys_info, sched_cfg, ctxt.res_mng.get_max_nof_setup_ues(cell_index)));
+    ctxt.params.mac.mgr.get_cell_manager().add_cell(make_mac_cell_config(
+        cell_index, du_cfg, sys_info, sched_cfg, max_nof_established_ue_ctxts, max_nof_rejected_ue_ctxts));
   }
 }
 

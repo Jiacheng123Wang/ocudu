@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "../../../support/resource_grid_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/phys_cell_id.h"
 #include "ocudu/phy/upper/signal_processors/ssb/factories.h"
 #include "ocudu/ran/ssb/ssb_properties.h"

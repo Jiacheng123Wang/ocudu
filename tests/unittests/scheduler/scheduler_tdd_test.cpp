@@ -428,6 +428,8 @@ protected:
     conres_window_slots = cell_cfg().params.ul_cfg_common.init_ul_bwp.rach_cfg_common->ra_con_res_timer.count() *
                           get_nof_slots_per_subframe(cell_cfg().scs_common());
     wave_period_slots = test_params.wave_period_in_slots;
+    // \note This timeout is different than the ConRes CE timeout, as the Msg4 might be sent separately.
+    msg4_window_slots = 4 * conres_window_slots;
 
     // Each wave launches ues_per_wave transient UEs; derive the wave count so the whole transient pool is exercised.
     wave_size = std::max(1U, test_params.ues_per_wave);
@@ -694,6 +696,7 @@ protected:
 
   unsigned tdd_period_slots    = 0;
   unsigned conres_window_slots = 0;
+  unsigned msg4_window_slots   = 0;
   unsigned wave_period_slots   = 0;
   unsigned wave_size           = 0;
   unsigned nof_waves           = 0;
@@ -731,7 +734,7 @@ protected:
   {
     return launch_async([this, rnti, msg4_ok = false](coro_context<async_task<void>>& ctx) mutable {
       CORO_BEGIN(ctx);
-      CORO_AWAIT_VALUE(msg4_ok, launch_run_until(srb0_scheduled(rnti), conres_window_slots));
+      CORO_AWAIT_VALUE(msg4_ok, launch_run_until(srb0_scheduled(rnti), msg4_window_slots));
       EXPECT_TRUE(msg4_ok) << fmt::format("UE rnti={} did not get its Msg4 scheduled", rnti);
       CORO_RETURN();
     });

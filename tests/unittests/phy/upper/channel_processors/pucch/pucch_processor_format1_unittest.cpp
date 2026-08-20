@@ -6,6 +6,7 @@
 #include "../../signal_processors/pucch/dmrs_pucch_estimator_test_doubles.h"
 #include "../uci/uci_decoder_test_doubles.h"
 #include "pucch_detector_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/upper/channel_processors/pucch/pucch_processor.h"
 #include "ocudu/ran/pucch/pucch_constants.h"
 #include <gtest/gtest.h>

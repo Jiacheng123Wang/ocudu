@@ -12,12 +12,12 @@
 #include "du_configuration_handler.h"
 #include "du_processor.h"
 #include "du_processor_config.h"
+#include "ocudu/cu_cp/cu_cp_ref_time_report_notifier.h"
 #include "ocudu/f1ap/cu_cp/f1ap_cu.h"
 #include "ocudu/f1ap/cu_cp/f1ap_cu_configuration_update.h"
 #include "ocudu/f1ap/f1ap_message_notifier.h"
 #include "ocudu/ran/cu_cp_types.h"
 #include "ocudu/ran/nr_cgi.h"
-#include <string>
 
 namespace ocudu::ocucp {
 
@@ -27,11 +27,7 @@ class du_processor_impl : public du_processor,
                           public du_processor_mobility_handler
 {
 public:
-  du_processor_impl(du_processor_config_t        du_processor_config_,
-                    du_processor_cu_cp_notifier& cu_cp_notifier_,
-                    f1ap_message_notifier&       f1ap_pdu_notifier_,
-                    async_task_scheduler&        common_task_sched_,
-                    ue_manager&                  ue_mng_);
+  du_processor_impl(const du_processor_config& cfg_, du_processor_dependencies dependencies);
   ~du_processor_impl() override = default;
 
   // Getter functions.
@@ -52,7 +48,7 @@ public:
   bool                            has_cell_any_state(nr_cell_global_id_t cgi) override;
   const du_configuration_context* get_context() const override
   {
-    return cfg.du_cfg_hdlr->has_context() ? &cfg.du_cfg_hdlr->get_context() : nullptr;
+    return du_cfg_hdlr->has_context() ? &du_cfg_hdlr->get_context() : nullptr;
   }
 
   // du_processor_configuration_update_interface
@@ -88,10 +84,15 @@ private:
   /// \return Response to whether the request was successful or failed.
   ue_rrc_context_creation_outcome handle_ue_rrc_context_creation_request(const ue_rrc_context_creation_request& req);
 
+  /// \brief Request to create a new UE RRC context.
+  ///
+  /// This method should be called when a C-RNTI and PCell are assigned to a UE.
+  /// \param req Request to setup a new UE RRC context.
+  /// \return Response to whether the request was successful or failed.
   du_setup_result handle_du_setup_request(const du_setup_request& req);
 
   /// \brief Handle the reception of a F1AP UE Context Release Request and notify NGAP.
-  /// \param[in] req The F1AP UE Context Release Request.
+  /// \param[in] request The F1AP UE Context Release Request.
   void handle_du_initiated_ue_context_release_request(const f1ap_ue_context_release_request& request);
 
   /// \brief Handle the reception of an F1AP Access Success notification from the DU.
@@ -104,17 +105,21 @@ private:
                      rnti_t                                 c_rnti,
                      const nr_cell_global_id_t&             cgi,
                      byte_buffer                            du_to_cu_rrc_container,
-                     std::optional<rrc_ue_transfer_context> rrc_context);
+                     std::optional<rrc_ue_transfer_context> rrc_context,
+                     std::optional<rrc_resume_context_t>    remote_resume_context = std::nullopt);
 
   // du_processor_ue_context_removal_handler
   void remove_ue_context(cu_cp_ue_index_t ue_index) override;
 
-  ocudulog::basic_logger& logger = ocudulog::fetch_basic_logger("CU-CP");
-  du_processor_config_t   cfg;
+  du_processor_config cfg;
 
-  du_processor_cu_cp_notifier& cu_cp_notifier;
-  f1ap_message_notifier&       f1ap_pdu_notifier;
-  ue_manager&                  ue_mng;
+  du_connection_notifier&                   du_setup_notif;
+  std::unique_ptr<du_configuration_handler> du_cfg_hdlr;
+  du_processor_cu_cp_notifier&              cu_cp_notifier;
+  f1ap_message_notifier&                    f1ap_pdu_notifier;
+  ue_manager&                               ue_mng;
+  cu_cp_ref_time_report_notifier&           ref_time_report_notifier;
+  ocudulog::basic_logger&                   logger;
 
   pdcp_removal_handler_impl pdcp_removal{*this};
 

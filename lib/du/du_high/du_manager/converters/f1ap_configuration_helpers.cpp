@@ -5,6 +5,7 @@
 #include "f1ap_configuration_helpers.h"
 #include "asn1_rrc_config_helpers.h"
 #include "asn1_sys_info_packer.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/bcch_dl_sch_msg.h"
 #include "ocudu/asn1/rrc_nr/rrc_nr.h"
 #include "ocudu/ran/band_helper.h"

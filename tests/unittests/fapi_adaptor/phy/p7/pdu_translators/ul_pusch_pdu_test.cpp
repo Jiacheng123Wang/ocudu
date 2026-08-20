@@ -4,6 +4,7 @@
 
 #include "../message_builder_helpers.h"
 #include "pusch.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/fapi_adaptor/uci_part2_correspondence_generator.h"
 #include <gtest/gtest.h>
 #include <random>

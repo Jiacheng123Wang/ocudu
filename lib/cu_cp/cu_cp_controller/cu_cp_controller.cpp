@@ -5,6 +5,7 @@
 #include "cu_cp_controller.h"
 #include "../cu_up_processor/cu_up_processor_repository.h"
 #include "../du_processor/du_processor_repository.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/plmn_identity.h"
 
 using namespace ocudu;

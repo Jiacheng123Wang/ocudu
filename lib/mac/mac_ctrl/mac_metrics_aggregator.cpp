@@ -4,6 +4,7 @@
 
 #include "mac_metrics_aggregator.h"
 #include "spsc_metric_report_channel.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/mac/mac_metrics_notifier.h"
 #include "ocudu/scheduler/scheduler_metrics.h"

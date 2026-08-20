@@ -4,7 +4,7 @@
 
 #include "du_meas_config_manager.h"
 #include "du_ue_resource_config.h"
-#include "ue_capability_summary.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/dl_dcch_msg_ies.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ran/csi_rs/csi_meas_config.h"
@@ -12,6 +12,7 @@
 #include "ocudu/ran/sr_configuration.h"
 #include "ocudu/ran/ssb/ssb_properties.h"
 #include "ocudu/ran/subcarrier_spacing.h"
+#include "ocudu/scheduler/rrm/ue_capability_summary.h"
 #include <array>
 #include <numeric>
 #include <optional>
@@ -70,10 +71,11 @@ std::pair<ssb_periodicity, unsigned> extract_smtc_period_offset(const ssb_mtc_s&
 
 enum class collision_check { strict, loose };
 
-bool meas_gap_collides(const meas_gap_config&          gap,
-                       subcarrier_spacing              scs,
-                       span<const periodic_uci_config> ul_occasions,
-                       collision_check                 mode)
+bool meas_gap_collides(const meas_gap_config&                   gap,
+                       subcarrier_spacing                       scs,
+                       span<const periodic_uci_config>          ul_occasions,
+                       std::optional<std::chrono::microseconds> ul_ta,
+                       collision_check                          mode)
 {
   const unsigned mgrp_slots = static_cast<unsigned>(gap.mgrp) * get_nof_slots_per_subframe(scs);
   for (const auto& occ : ul_occasions) {
@@ -83,7 +85,7 @@ bool meas_gap_collides(const meas_gap_config&          gap,
     if (mode == collision_check::strict) {
       // `strict` check collides when any periodic UL occasion repetition overlaps the measurement gap.
       for (unsigned slot = occ.offset_slots; slot < check_span_slots; slot += occ.period_slots) {
-        if (is_inside_meas_gap(gap, slot_point(scs, slot))) {
+        if (is_inside_ul_meas_gap(gap, slot_point(scs, slot), ul_ta)) {
           return true;
         }
       }
@@ -91,7 +93,7 @@ bool meas_gap_collides(const meas_gap_config&          gap,
       // `loose` check collides when all periodic UL resource repetitions overlap the measurement gap.
       bool all_inside_meas_gap = true;
       for (unsigned slot = occ.offset_slots; slot < check_span_slots; slot += occ.period_slots) {
-        if (!is_inside_meas_gap(gap, slot_point(scs, slot))) {
+        if (!is_inside_ul_meas_gap(gap, slot_point(scs, slot), ul_ta)) {
           all_inside_meas_gap = false;
           break;
         }
@@ -106,10 +108,11 @@ bool meas_gap_collides(const meas_gap_config&          gap,
 
 } // namespace
 
-meas_gap_config odu::create_meas_gap(subcarrier_spacing                 scs,
-                                     const ssb_mtc_s&                   smtc1,
-                                     span<const periodic_uci_config>    ul_occasions,
-                                     const supported_meas_gap_patterns& supported_patterns)
+meas_gap_config odu::create_meas_gap(subcarrier_spacing                       scs,
+                                     const ssb_mtc_s&                         smtc1,
+                                     span<const periodic_uci_config>          ul_occasions,
+                                     std::optional<std::chrono::microseconds> ul_ta,
+                                     const supported_meas_gap_patterns&       supported_patterns)
 {
   // Shortest MGL that still encloses the SMTC window. Longer MGLs are only used if no supported gap pattern is found
   // with this one.
@@ -165,7 +168,7 @@ meas_gap_config odu::create_meas_gap(subcarrier_spacing                 scs,
         for (int shift_ms = 0; shift_ms <= offset_slack_ms; ++shift_ms) {
           const unsigned        gap_offset_ms = (smtc_start_ms + mgrp_ms - shift_ms) % mgrp_ms;
           const meas_gap_config candidate{gap_offset_ms, mgl, mgrp};
-          if (!meas_gap_collides(candidate, scs, ul_occasions, mode)) {
+          if (!meas_gap_collides(candidate, scs, ul_occasions, ul_ta, mode)) {
             return candidate;
           }
         }
@@ -288,6 +291,21 @@ void du_meas_config_manager::update(du_ue_resource_config&       ue_cfg,
 
   const auto ul_occasions = collect_ul_occasions(pcell_ue_cfg);
 
+  // The periodic UL occasions are expressed in the slot numbering the gNB receives them in, while the gap is
+  // anchored to the UE downlink timing, so the UEs' uplink timing advance is needed to compare the two.
+  const std::optional<std::chrono::microseconds> ul_ta = get_ref_location_ul_ta(pcell_common.ran.ntn_params);
+  if (not ul_ta.has_value() and pcell_common.ran.ntn_params.has_value() and pcell_common.ran.ntn_params->is_enabled()) {
+    // With no T_TA the offset is placed as if it were zero, i.e. against the gNB receive timeline rather than the UE
+    // transmit one. Correctness holds - is_ul_enabled() re-tests the window per slot - but in GEO, where T_TA barely
+    // moves, a gap landing on an SR or CSI occasion shadows it for the whole connection.
+    //
+    // TODO: place the offset against the range of T_TA the cell will see, sourced from the NTN configuration manager.
+    // Where no offset clears the occasions, the SR or CSI periodicity has to be picked alongside the gap. Reached on
+    // every NTN cell today: ref_location_ul_ta only updates the du_cell_manager copy, not the one spanned here.
+    logger.debug("cell={}: Choosing a measurement gap offset with no uplink timing advance estimate",
+                 pcell_ue_cfg.serv_cell_cfg.cell_index);
+  }
+
   for (const auto& asn1measobj : meas_cfg.meas_obj_to_add_mod_list) {
     if (asn1measobj.meas_obj.type().value != meas_obj_to_add_mod_s::meas_obj_c_::types_opts::meas_obj_nr) {
       logger.warning("Ignoring measObject of type {}. Cause: Unsupported", asn1measobj.meas_obj.type().to_string());
@@ -306,7 +324,10 @@ void du_meas_config_manager::update(du_ue_resource_config&       ue_cfg,
       continue;
     }
 
-    ue_cfg.meas_gap = create_meas_gap(
-        pcell_common.ran.dl_cfg_common.init_dl_bwp.generic_params.scs, asn1nr.smtc1, ul_occasions, supported_patterns);
+    ue_cfg.meas_gap = create_meas_gap(pcell_common.ran.dl_cfg_common.init_dl_bwp.generic_params.scs,
+                                      asn1nr.smtc1,
+                                      ul_occasions,
+                                      ul_ta,
+                                      supported_patterns);
   }
 }

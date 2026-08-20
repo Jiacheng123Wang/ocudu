@@ -16,11 +16,14 @@
 
 namespace ocudu::ocucp {
 
-/// \brief Releases a caller-selected set of UEs and deactivates a caller-selected set of cells.
+/// \brief Deactivates a caller-selected set of cells, optionally barring them first and releasing their UEs.
 ///
-/// The CU-CP releases the UEs (so the operation does not rely on the DU autonomously draining them) before sending
-/// the per-DU gNB-CU Configuration Updates that deactivate the cells. Pass an empty UE list to leave UE handling to
-/// the DU.
+/// The full graceful stop is a CU-driven, three-stage sequence: (1) bar the cells via a gNB-CU Configuration
+/// Update carrying the Cells to be Barred List (TS 38.473), so idle UEs reselect away and released UEs do not
+/// re-camp; (2) release the caller-selected UEs from the CU-CP (so the operation does not rely on the DU
+/// autonomously draining them); (3) deactivate the cells via a gNB-CU Configuration Update carrying the Cells
+/// to be Deactivated List. Stages (1) and (2) are optional: pass bar_cells_first=false to skip the bar (e.g.
+/// when cells go down because their AMF is unreachable) and an empty UE list to leave UE handling to the DU.
 class cell_deactivation_routine
 {
 public:
@@ -28,6 +31,7 @@ public:
                             std::vector<cell_lifecycle_target> targets,
                             std::vector<cu_cp_ue_index_t>      ues_to_release_,
                             ngap_cause_t                       release_cause_,
+                            bool                               bar_cells_first_,
                             du_processor_repository&           du_db_,
                             cu_cp_ue_context_release_handler&  ue_release_handler_,
                             ue_manager&                        ue_mng_,
@@ -49,7 +53,10 @@ private:
   std::vector<cu_cp_ue_index_t> ues_to_release;
   const ngap_cause_t            release_cause;
 
-  // One gNB-CU Configuration Update per DU, built from the caller-provided targets.
+  // One gNB-CU Configuration Update per DU, built from the caller-provided targets. bar_updates carries the
+  // cells in the Cells to be Barred List (stage 1, empty when barring is disabled), du_updates carries them in
+  // the Cells to be Deactivated List (stage 3).
+  std::vector<std::pair<cu_cp_du_index_t, f1ap_gnb_cu_configuration_update>>           bar_updates;
   std::vector<std::pair<cu_cp_du_index_t, f1ap_gnb_cu_configuration_update>>           du_updates;
   std::vector<std::pair<cu_cp_du_index_t, f1ap_gnb_cu_configuration_update>>::iterator du_update_it;
 

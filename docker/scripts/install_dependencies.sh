@@ -92,7 +92,6 @@ install_dependencies_debian_ubuntu() {
         fi
     fi
 
-    _ubuntu_apt_cleanup
 }
 
 install_dependencies_fedora() {
@@ -130,7 +129,44 @@ install_dependencies_fedora() {
             ;;
     esac
 
-    install_fedora_pkgs "${pkgs[@]}"
+    install_rpm_pkgs "${pkgs[@]}"
+}
+
+install_dependencies_centos() {
+    local mode="${1:?}"
+    local -a pkgs=()
+
+    local -a build_pkgs=(
+        cmake make libatomic fftw-devel lksctp-tools-devel yaml-cpp-devel mbedtls-devel gtest-devel
+    )
+    local -a run_pkgs=(
+        fftw-libs-single lksctp-tools yaml-cpp mbedtls
+    )
+    local -a extra_pkgs=(
+        boost-devel capnproto capnproto-devel cppzmq-devel dpdk-devel elfutils-devel elfutils-libelf-devel
+        libdwarf-devel libusb1-devel numactl-devel zeromq-devel
+    )
+
+    case "$mode" in
+        all)
+            pkgs+=( "${build_pkgs[@]}" "${extra_pkgs[@]}" )
+            ;;
+        build)
+            pkgs+=( "${build_pkgs[@]}" )
+            ;;
+        run)
+            pkgs+=( "${run_pkgs[@]}" )
+            ;;
+        extra)
+            pkgs+=( "${extra_pkgs[@]}" )
+            ;;
+        *)
+            echo >&2 "Unsupported mode: $mode"
+            exit 1
+            ;;
+    esac
+
+    install_rpm_pkgs "${pkgs[@]}"
 }
 
 install_dependencies_arch() {
@@ -243,6 +279,9 @@ main() {
             ;;
         fedora)
             install_dependencies_fedora "$mode"
+            ;;
+        centos)
+            install_dependencies_centos "$mode"
             ;;
         *)
             echo "OS $ID not supported"

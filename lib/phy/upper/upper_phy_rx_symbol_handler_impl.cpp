@@ -4,6 +4,7 @@
 
 #include "upper_phy_rx_symbol_handler_impl.h"
 #include "upper_phy_rx_results_notifier_wrapper.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/support/prach_buffer_context.h"
 #include "ocudu/phy/support/shared_resource_grid.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc.h"

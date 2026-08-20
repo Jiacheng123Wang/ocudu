@@ -8,6 +8,7 @@
 #include "ngap_test_messages.h"
 #include "test_helpers.h"
 #include "tests/unittests/gateways/test_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/ngap/common.h"
 #include "ocudu/ngap/ngap_message.h"
 #include <gtest/gtest.h>

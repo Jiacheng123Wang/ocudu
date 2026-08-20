@@ -5,6 +5,7 @@
 #include "cu_cp_test_environment.h"
 #include "tests/test_doubles/ngap/ngap_test_message_validators.h"
 #include "tests/unittests/ngap/ngap_test_messages.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/ngap/ngap_ies.h"
 #include "ocudu/asn1/ngap/ngap_pdu_contents.h"
 #include "ocudu/ngap/ngap_message.h"
@@ -58,7 +59,7 @@ public:
     if (ue_ctx == nullptr) {
       return false;
     }
-    if (!setup_ue_security_and_ue_capabilies(du_idx, du_ue_id, std::nullopt, true, loc_req)) {
+    if (!setup_ue_security_and_ue_capabilities(du_idx, du_ue_id, std::nullopt, true, loc_req)) {
       return false;
     }
 

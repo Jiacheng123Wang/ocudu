@@ -24,6 +24,7 @@
 #include "ocudu/cu_cp/cu_cp_cell_command_handler.h"
 #include "ocudu/cu_cp/cu_cp_command_handler.h"
 #include "ocudu/cu_cp/cu_cp_configuration.h"
+#include "ocudu/cu_cp/cu_cp_ntn_ref_time_store.h"
 #include "ocudu/nrppa/nrppa.h"
 #include "ocudu/ran/inter_cu_handover_messages.h"
 #include "ocudu/ran/plmn_identity.h"
@@ -82,7 +83,11 @@ public:
   bool handle_ue_plmn_selected(cu_cp_ue_index_t ue_index, const plmn_identity& plmn) override;
   rrc_ue_reestablishment_context_response
   handle_rrc_reestablishment_request(pci_t old_pci, rnti_t old_c_rnti, cu_cp_ue_index_t ue_index) override;
+  async_task<rrc_ue_context_retrieval_response>
+                   handle_ue_context_retrieval_required(cu_cp_ue_index_t                        ue_index,
+                                                        const rrc_ue_context_retrieval_request& request) override;
   async_task<bool> handle_rrc_reestablishment_context_modification_required(cu_cp_ue_index_t ue_index) override;
+  async_task<bool> handle_retrieved_context_path_switch_required(cu_cp_ue_index_t ue_index) override;
 
   void             handle_rrc_reestablishment_failure(const cu_cp_ue_context_release_request& request) override;
   void             handle_rrc_reestablishment_complete(cu_cp_ue_index_t old_ue_index) override;
@@ -146,11 +151,15 @@ public:
 
   // cu_cp_xnap_handler.
   async_task<cu_cp_handover_resource_allocation_response>
-       handle_xnap_handover_request(const xnap_handover_request& request) override;
-  void handle_handover_cancel_received(cu_cp_ue_index_t ue_index) override;
-  void handle_xnap_handover_success_received(cu_cp_ue_index_t  source_ue_index,
-                                             peer_xnap_ue_id_t winner_peer_xnap_ue_id) override;
-  void handle_xnap_ue_context_release_received(cu_cp_ue_index_t ue_index) override;
+                                      handle_xnap_handover_request(const xnap_handover_request& request) override;
+  void                                handle_handover_cancel_received(cu_cp_ue_index_t ue_index) override;
+  void                                handle_xnap_handover_success_received(cu_cp_ue_index_t  source_ue_index,
+                                                                            peer_xnap_ue_id_t winner_peer_xnap_ue_id) override;
+  void                                handle_xnap_ue_context_release_received(cu_cp_ue_index_t ue_index) override;
+  std::vector<cu_cp_served_cell_info> handle_served_cells_required() override;
+  cu_cp_ue_index_t handle_xnap_ue_context_id_lookup(const xnap_ue_context_id& ue_context_id) override;
+  async_task<xnap_retrieve_ue_context_response>
+  handle_xnap_retrieve_ue_context_request(const xnap_retrieve_ue_context_request& request) override;
 
   // cu_cp_nrppa_handler.
   nrppa_cu_cp_ue_notifier* handle_new_nrppa_ue(cu_cp_ue_index_t ue_index) override;
@@ -236,6 +245,8 @@ private:
 
   async_task<void> handle_transaction_info_loss(const ue_transaction_info_loss_event& ev) override;
 
+  void handle_served_cells_updated() override;
+
   // NGAP UE creation handler.
   ngap_cu_cp_ue_notifier* handle_new_ngap_ue(cu_cp_ue_index_t ue_index) override;
 
@@ -292,6 +303,9 @@ private:
   // Mobility manager to CU-CP adapter.
   mobility_manager_adapter mobility_manager_ev_notifier;
 
+  // NTN neighbour cell measurement info handling.
+  cu_cp_ntn_ref_time_store ntn_ref_time_store;
+
   // DU connections being managed by the CU-CP.
   du_processor_repository du_db;
 
@@ -334,9 +348,6 @@ private:
   // Used, e.g., for logging metrics and JSON metrics.
   std::unique_ptr<metrics_report_session> metrics_session;
 
-  // NTN neighbour cell measurement info handling. Created only when the configuration carries NTN cells.
-  // Store of the DU reference time reports; wired as the CU-CP reference time notifier and read by the manager.
-  std::unique_ptr<cu_cp_ntn_ref_time_store> ntn_ref_time_store;
   // Periodically refreshes the NTN neighbour cell info of the measurement configuration. References this CU-CP's
   // command handler and the reference time store, so it is declared last and destroyed first.
   std::unique_ptr<ocudu_ntn::ntn_configuration_manager> ntn_config_manager;

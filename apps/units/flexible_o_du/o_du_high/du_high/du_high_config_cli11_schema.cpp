@@ -8,6 +8,7 @@
 #include "apps/helpers/ntn/ntn_config_cli11_schema.h"
 #include "du_high_config.h"
 #include "ntn/du_high_ntn_config_cli11_schema.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/ranges/transform.h"
 #include "ocudu/ran/csi_report/csi_report_configuration.h"
 #include "ocudu/ran/drx_config.h"
@@ -471,14 +472,25 @@ static void configure_cli11_pdsch_args(CLI::App& app, du_high_unit_pdsch_config&
 
 static void configure_cli11_du_rlc_args(CLI::App& app, du_high_unit_rlc_config& rlc_cfg)
 {
+  add_option(app, "--drb_rx_window_seg_size", rlc_cfg.drb_rx_window_seg_size, "DRB RX window segment size")
+      ->capture_default_str();
   add_option(
       app, "--drb_rx_window_seg_pool_size", rlc_cfg.drb_rx_window_seg_pool_size, "DRB RX window segment pool size")
+      ->capture_default_str();
+
+  add_option(app, "--drb_tx_window_seg_size", rlc_cfg.drb_tx_window_seg_size, "DRB TX window segment size")
       ->capture_default_str();
   add_option(
       app, "--drb_tx_window_seg_pool_size", rlc_cfg.drb_tx_window_seg_pool_size, "DRB TX window segment pool size")
       ->capture_default_str();
+
+  add_option(app, "--srb_rx_window_seg_size", rlc_cfg.srb_rx_window_seg_size, "SRB RX window segment size")
+      ->capture_default_str();
   add_option(
       app, "--srb_rx_window_seg_pool_size", rlc_cfg.srb_rx_window_seg_pool_size, "SRB RX window segment pool size")
+      ->capture_default_str();
+
+  add_option(app, "--srb_tx_window_seg_size", rlc_cfg.srb_tx_window_seg_size, "SRB TX window segment size")
       ->capture_default_str();
   add_option(
       app, "--srb_tx_window_seg_pool_size", rlc_cfg.srb_tx_window_seg_pool_size, "SRB TX window segment pool size")
@@ -1682,6 +1694,12 @@ static void configure_cli11_prach_args(CLI::App& app, du_high_unit_rach_config& 
              prach_params.cfra_enabled,
              "Whether to enable Contention-free Random Access (CFRA). If enabled, the total_nof_ra_preambles must be "
              "lower than 64")
+      ->capture_default_str();
+  add_option(app,
+             "--multiplex_uci_on_cf_rar_ul_grant",
+             prach_params.multiplex_uci_on_cf_rar_ul_grant,
+             "Whether to allow multiplexing pending UCI into Contention-free (CF) RAR UL grants, instead of "
+             "restricting the CF RAR UL grants to slots where the UE has no PUCCH.")
       ->capture_default_str();
   add_option(app,
              "--prach_frequency_start",

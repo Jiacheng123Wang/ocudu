@@ -4,6 +4,7 @@
 
 #include "tests/unittests/cu_cp/test_helpers.h"
 #include "ue_manager_test_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/plmn_identity.h"
 #include <gtest/gtest.h>
 
@@ -341,8 +342,8 @@ TEST_F(ue_manager_test, when_ue_is_set_inactive_then_its_found_by_i_rnti)
 
   std::optional<i_rntis_t> i_rntis = ue_mng.set_inactive(ue->get_ue_index());
   ASSERT_TRUE(i_rntis.has_value());
-  ASSERT_TRUE(i_rntis->short_i_rnti.value() < i_rntis->short_i_rnti.max());
-  ASSERT_TRUE(i_rntis->full_i_rnti.value() < i_rntis->full_i_rnti.max());
+  ASSERT_TRUE(i_rntis->short_i_rnti.ue_ref() < short_i_rnti_t::max_ue_ref(i_rntis->short_i_rnti.profile()));
+  ASSERT_TRUE(i_rntis->full_i_rnti.ue_ref() < full_i_rnti_t::max_ue_ref(i_rntis->full_i_rnti.profile()));
 
   // Find by full-i-rnti.
   ASSERT_NE(ue_mng.get_ue_index(i_rntis->full_i_rnti), cu_cp_ue_index_t::invalid);
@@ -378,4 +379,43 @@ TEST_F(ue_manager_test, when_inactive_ue_is_removed_then_i_rnti_lookups_are_clea
   // The I-RNTI lookup entries must not outlive the UE they pointed to.
   ASSERT_EQ(ue_mng.get_ue_index(i_rntis->full_i_rnti), cu_cp_ue_index_t::invalid);
   ASSERT_EQ(ue_mng.get_ue_index(i_rntis->short_i_rnti), cu_cp_ue_index_t::invalid);
+}
+
+/// Fixture with a gNB ID whose value is wider than the UE reference of a Short-I-RNTI, so that the node identifier and
+/// the UE reference cover distinct parts of the value.
+class ue_manager_wide_gnb_id_test : public ue_manager_test
+{
+protected:
+  ue_manager_wide_gnb_id_test() : ue_manager_test(gnb_id_t{0x1abcde, 22}) {}
+};
+
+TEST_F(ue_manager_wide_gnb_id_test, when_several_ues_are_suspended_then_each_gets_its_own_i_rnti)
+{
+  dummy_rrc_ue rrc_ue;
+
+  std::vector<i_rntis_t> allocated;
+  for (unsigned i = 0; i != 3; ++i) {
+    const cu_cp_ue_index_t ue_index = ue_mng.add_ue(uint_to_cu_cp_du_index(0));
+    ASSERT_NE(ue_index, cu_cp_ue_index_t::invalid);
+    ASSERT_TRUE(ue_mng.update_ue_context(ue_index, gnb_du_id_t::min, MIN_PCI, to_rnti(0x4601 + i), MIN_DU_CELL_INDEX));
+    ASSERT_TRUE(ue_mng.set_plmn(ue_index, plmn_identity::test_value()));
+    ue_mng.find_ue(ue_index)->set_rrc_ue(rrc_ue);
+
+    std::optional<i_rntis_t> i_rntis = ue_mng.set_inactive(ue_index);
+    ASSERT_TRUE(i_rntis.has_value());
+    allocated.push_back(i_rntis.value());
+  }
+
+  // The node identifier stays put while the UE reference counts up, so each UE is addressable on its own.
+  for (unsigned i = 0; i != allocated.size(); ++i) {
+    ASSERT_EQ(allocated[i].full_i_rnti.node_id(),
+              full_i_rnti_t::to_local_node_id(allocated[i].full_i_rnti.profile(), 0x1abcde));
+    ASSERT_EQ(allocated[i].short_i_rnti.node_id(),
+              short_i_rnti_t::to_local_node_id(allocated[i].short_i_rnti.profile(), 0x1abcde));
+    ASSERT_EQ(allocated[i].full_i_rnti.ue_ref(), i);
+    ASSERT_EQ(allocated[i].short_i_rnti.ue_ref(), i);
+
+    ASSERT_NE(ue_mng.get_ue_index(allocated[i].full_i_rnti), cu_cp_ue_index_t::invalid);
+    ASSERT_NE(ue_mng.get_ue_index(allocated[i].short_i_rnti), cu_cp_ue_index_t::invalid);
+  }
 }

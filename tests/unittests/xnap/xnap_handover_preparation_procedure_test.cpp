@@ -5,6 +5,7 @@
 #include "tests/unittests/rrc/rrc_ue_test_helpers.h"
 #include "tests/unittests/xnap/xnap_test_messages.h"
 #include "xnap_test_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/security/security.h"
 #include "ocudu/support/async/async_test_utils.h"
 #include "ocudu/xnap/xnap_handover.h"

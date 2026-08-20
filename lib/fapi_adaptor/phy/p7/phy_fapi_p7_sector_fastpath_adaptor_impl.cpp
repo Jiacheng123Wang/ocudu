@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "phy_fapi_p7_sector_fastpath_adaptor_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/fapi/p7/p7_last_request_notifier.h"
 
 using namespace ocudu;

@@ -7,6 +7,7 @@
 #include "ocudu/adt/slotted_array.h"
 #include "ocudu/scheduler/config/cell_bwp_res_config.h"
 #include "ocudu/scheduler/config/serving_cell_config.h"
+#include "ocudu/scheduler/rrm/ue_capability_summary.h"
 #include "ocudu/scheduler/scheduler_configurator.h"
 #include <optional>
 #include <set>
@@ -32,11 +33,18 @@ public:
   void rem_cell(du_cell_index_t cell_idx);
 
   /// \brief Allocate PUCCH resources for a given UE. The resources are stored in the UE's cell configuration.
+  ///
+  /// \remark PUCCH repetition is disabled until \c update_resources is called with the UE's reported capabilities.
   /// \return true if allocation was successful.
   bool alloc_resources(ue_cell_config& ue_cell_cfg);
 
   /// \brief Deallocate PUCCH resources previously given to a UE. The resources are returned back to a pool.
   void dealloc_resources(ue_cell_config& ue_cell_cfg);
+
+  /// \brief Update the UE's PUCCH resources based on its reported capabilities.
+  ///
+  /// Enables PUCCH repetition for the resources the UE has indicated support for.
+  void update_resources(ue_cell_config& ue_cell_cfg, const ue_capability_summary& ue_caps);
 
   /// Gets the current number of free SR configurations for a given cell.
   unsigned get_nof_free_sr_configs(du_cell_index_t cell_idx) const { return cells[cell_idx].free_sr_configs.size(); }
@@ -103,6 +111,11 @@ private:
 
   /// Called when PUCCH allocation fails for a given UE.
   static void disable_pucch_cfg(serving_cell_config& serv_cell_cfg, const cell_resource_context& cell_ctx);
+
+  /// \brief Enable PUCCH repetition conditionally based on the UE's reported capabilities.
+  ///
+  /// \remark If \c ue_caps is not provided, repetition is disabled for all resources.
+  void apply_rep_factor_capabilities(ue_cell_config& cell_cfg, const std::optional<ue_capability_summary>& ue_caps);
 };
 
 } // namespace ocudu

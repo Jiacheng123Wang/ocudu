@@ -7,10 +7,12 @@
 #include "../pdcp/pdcp_pdu_generator.h"
 #include "../rrc/rrc_packed_test_messages.h"
 #include "tests/test_doubles/utils/test_rng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/common.h"
 #include "ocudu/asn1/f1ap/f1ap_ies.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents_ue.h"
+#include "ocudu/f1ap/common/interface_management.h"
 #include "ocudu/f1ap/f1ap_message.h"
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/ran/positioning/positioning_ids.h"
@@ -197,7 +199,8 @@ f1ap_message ocudu::test_helpers::generate_gnb_du_configuration_update_failure(c
 f1ap_message
 ocudu::test_helpers::generate_gnb_cu_configuration_update_request(unsigned                        transaction_id,
                                                                   span<const nr_cell_global_id_t> cgis_to_activate,
-                                                                  span<const nr_cell_global_id_t> cgis_to_deactivate)
+                                                                  span<const nr_cell_global_id_t> cgis_to_deactivate,
+                                                                  span<const f1ap_cell_to_bar>    cells_to_bar)
 {
   f1ap_message msg;
 
@@ -217,6 +220,14 @@ ocudu::test_helpers::generate_gnb_cu_configuration_update_request(unsigned      
     req->cells_to_be_deactiv_list[i].load_info_obj(ASN1_F1AP_ID_CELLS_TO_BE_DEACTIV_LIST_ITEM);
     req->cells_to_be_deactiv_list[i].value().cells_to_be_deactiv_list_item().nr_cgi =
         cgi_to_asn1(cgis_to_deactivate[i]);
+  }
+  req->cells_to_be_barred_list_present = not cells_to_bar.empty();
+  req->cells_to_be_barred_list.resize(cells_to_bar.size());
+  for (unsigned i = 0, e = cells_to_bar.size(); i != e; ++i) {
+    req->cells_to_be_barred_list[i].load_info_obj(ASN1_F1AP_ID_CELLS_TO_BE_BARRED_ITEM);
+    auto& asn1_item             = req->cells_to_be_barred_list[i].value().cells_to_be_barred_item();
+    asn1_item.nr_cgi            = cgi_to_asn1(cells_to_bar[i].cgi);
+    asn1_item.cell_barred.value = cells_to_bar[i].barred ? cell_barred_opts::barred : cell_barred_opts::not_barred;
   }
 
   return msg;

@@ -4,18 +4,19 @@
 
 #include "paging_message_handler.h"
 #include "../du_processor/du_processor_repository.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/cu_cp_types.h"
 #include "ocudu/ran/tac.h"
 
 using namespace ocudu;
 using namespace ocucp;
 
-paging_message_handler::paging_message_handler(du_processor_repository& dus_) :
-  dus(dus_), logger(ocudulog::fetch_basic_logger("CU-CP"))
+paging_message_handler::paging_message_handler(const paging_message_handler_dependencies& dependencies) :
+  dus(dependencies.dus), logger(dependencies.logger)
 {
 }
 
-void paging_message_handler::handle_paging_message(const cu_cp_paging_message& msg)
+void paging_message_handler::handle_paging_message(const cu_cp_paging_message& msg) const
 {
   // Forward paging message to all DU processors
   bool paging_sent = false;
@@ -55,7 +56,8 @@ static void remove_non_applicable_recommended_cells(cu_cp_paging_message& msg, c
                           recommended_cells.end());
 }
 
-bool paging_message_handler::handle_du_paging_message(cu_cp_du_index_t du_index, const cu_cp_paging_message& msg_before)
+bool paging_message_handler::handle_du_paging_message(cu_cp_du_index_t            du_index,
+                                                      const cu_cp_paging_message& msg_before) const
 {
   du_processor&                   du     = dus.get_du_processor(du_index);
   const du_configuration_context* du_cfg = du.get_context();

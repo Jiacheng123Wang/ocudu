@@ -12,6 +12,7 @@
 #include "ocudu/support/error_handling.h"
 #include "ocudu/support/memory_pool/memory_block_list.h"
 #include "ocudu/support/ocudu_assert.h"
+#include <cmath>
 #include <mutex>
 #include <thread>
 #include <unordered_map>

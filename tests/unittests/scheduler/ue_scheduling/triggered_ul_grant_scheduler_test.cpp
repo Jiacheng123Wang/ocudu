@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "lib/scheduler/ue_context/ue.h"
+#include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "lib/scheduler/ue_context/ue_repository.h"
 #include "lib/scheduler/ue_scheduling/triggered_ul_grant_scheduler.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
@@ -264,7 +265,8 @@ protected:
   trig_ul_grant_unit_test()
   {
     cfg_mgr.add_cell(sched_config_helper::make_default_sched_cell_configuration_request());
-    ue_repo.add_cell(cfg_mgr.get_cell(CELL_IDX), nullptr);
+    cell_ues.emplace(cfg_mgr.get_cell(CELL_IDX), nullptr);
+    ue_repo.register_cell(*cell_ues);
   }
 
   ue& add_ue_to_repo(du_ue_index_t ue_idx, rnti_t crnti, bool with_trigger)
@@ -310,6 +312,7 @@ protected:
   }
 
   test_helpers::test_sched_config_manager cfg_mgr{cell_config_builder_params{}};
+  std::optional<ue_cell_repository>       cell_ues;
   ue_repository                           ue_repo{scheduler_ue_expert_config{}};
   triggered_ul_grant_scheduler            ul_trig_sched{ue_repo, CELL_IDX, subcarrier_spacing::kHz15};
   const slot_point                        sl{subcarrier_spacing::kHz15, 0};

@@ -4,6 +4,7 @@
 
 #include "du_cg_res_mng.h"
 #include "du_ue_resource_config.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ran/prach/prach_time_mapping.h"
 #include "ocudu/ran/resource_allocation/resource_allocation_frequency.h"
@@ -190,6 +191,11 @@ bool du_cg_type1_res_mng::alloc_resources(cell_group_config& cell_grp_cfg)
       cg_td_res_idx = n;
       break;
     }
+  }
+
+  // Set Beta_offset for UCI-on-CG.
+  if (cell_cfg.ran.init_bwp.cg_cfg->uci_beta_offsets.has_value()) {
+    ue_cg_cfg.uci_on_pusch_cfg.beta_offsets_cfg.emplace(cell_cfg.ran.init_bwp.cg_cfg->uci_beta_offsets.value());
   }
 
   // Set the per-UE parameters.

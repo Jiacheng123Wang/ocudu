@@ -9,6 +9,7 @@
 #include "apps/units/flexible_o_du/split_7_2/helpers/ru_ofh_config_translator.h"
 #include "apps/units/flexible_o_du/split_8/helpers/ru_sdr_config_translator.h"
 #include "dynamic_o_du_unit_config.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/bs_channel_bandwidth.h"
 
 using namespace ocudu;

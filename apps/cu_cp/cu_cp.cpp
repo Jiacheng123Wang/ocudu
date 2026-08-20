@@ -23,6 +23,7 @@
 #include "apps/units/o_cu_cp/pcap_factory.h"
 #include "cu_cp_appconfig.h"
 #include "cu_cp_appconfig_yaml_writer.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/cu_cp/cu_cp_operation_controller.h"
 #include "ocudu/e1ap/gateways/e1_network_server_factory.h"

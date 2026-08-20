@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "sr_helper.h"
+#include "ocudu/adt/format.h"
 
 bool ocudu::sr_helper::is_sr_opportunity_slot(const ue_uplink_bwp_config& ue_ul_cfg,
                                               sr_periodicity              sr_period,

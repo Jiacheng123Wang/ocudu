@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pdcch.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/fapi_adaptor/precoding_matrix_mapper.h"
 #include "ocudu/scheduler/config/bwp_configuration.h"
 

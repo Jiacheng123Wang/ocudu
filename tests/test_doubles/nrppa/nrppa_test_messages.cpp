@@ -5,6 +5,7 @@
 #include "nrppa_test_messages.h"
 #include "lib/nrppa/nrppa_asn1_converters.h"
 #include "ocudu/adt/byte_buffer.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/nrppa/common.h"
 #include "ocudu/asn1/nrppa/nrppa.h"
 #include "ocudu/asn1/nrppa/nrppa_pdu_contents.h"

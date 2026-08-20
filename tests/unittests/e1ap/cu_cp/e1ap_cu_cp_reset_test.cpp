@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "e1ap_cu_cp_test_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/cause/e1ap_cause.h"
 #include "ocudu/support/async/async_test_utils.h"
 #include <gtest/gtest.h>

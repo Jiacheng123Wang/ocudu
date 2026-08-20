@@ -3,13 +3,16 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "cu_cp_unit_config_validator.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/span.h"
+#include "ocudu/ran/i_rnti.h"
 #include "ocudu/ran/nr_cgi.h"
 #include "ocudu/ran/pdcp/pdcp_t_reordering.h"
 #include "ocudu/rlc/rlc_config.h"
 #include <map>
 #include <set>
 #include <sstream>
+#include <vector>
 
 using namespace ocudu;
 
@@ -24,48 +27,51 @@ static bool validate_event_trigger_params(const cu_cp_unit_report_config& cfg)
     return false;
   }
 
-  const std::string& ev = cfg.event_triggered_report_type.value();
+  const ocucp::rrc_event_id::event_id_t ev = *cfg.event_triggered_report_type;
 
   // D/T distance- and time-based events are only valid for cond_trigger report type.
-  if (ev == "d1" or ev == "t1" or ev == "d2") {
+  if (ev == ocucp::rrc_event_id::event_id_t::d1 || ev == ocucp::rrc_event_id::event_id_t::t1 ||
+      ev == ocucp::rrc_event_id::event_id_t::d2) {
     if (cfg.report_type != "cond_trigger") {
-      fmt::print("report_cfg_id={}: event '{}' is only valid for report_type=cond_trigger\n", cfg.report_cfg_id, ev);
+      fmt::print("report_cfg_id={}: event '{}' is only valid for report_type=cond_trigger\n",
+                 cfg.report_cfg_id,
+                 to_string(ev));
       return false;
     }
-    if (ev == "d1" or ev == "d2") {
+    if (ev == ocucp::rrc_event_id::event_id_t::d1 || ev == ocucp::rrc_event_id::event_id_t::d2) {
       // Common D1/D2: distance thresholds, hysteresis, and time-to-trigger are mandatory.
-      if (!cfg.distance_thresh_from_ref1_km.has_value() or !cfg.distance_thresh_from_ref2_km.has_value()) {
+      if (!cfg.distance_thresh_from_ref1_km.has_value() || !cfg.distance_thresh_from_ref2_km.has_value()) {
         fmt::print(
             "report_cfg_id={}: {} event requires distance_thresh_from_ref1_km and distance_thresh_from_ref2_km\n",
             cfg.report_cfg_id,
-            ev);
+            to_string(ev));
         return false;
       }
       if (!cfg.hysteresis_location_km.has_value()) {
-        fmt::print("report_cfg_id={}: {} event requires hysteresis_location_km\n", cfg.report_cfg_id, ev);
+        fmt::print("report_cfg_id={}: {} event requires hysteresis_location_km\n", cfg.report_cfg_id, to_string(ev));
         return false;
       }
       if (!cfg.time_to_trigger_ms.has_value()) {
-        fmt::print("report_cfg_id={}: {} event requires time_to_trigger_ms\n", cfg.report_cfg_id, ev);
+        fmt::print("report_cfg_id={}: {} event requires time_to_trigger_ms\n", cfg.report_cfg_id, to_string(ev));
         return false;
       }
       // D1-only: range check (ASN.1 uses 50 m steps, upper bound 65535 -> 3276.75 km) and ref locations.
-      if (ev == "d1") {
-        if (cfg.distance_thresh_from_ref1_km.value() > 3276.75 or cfg.distance_thresh_from_ref2_km.value() > 3276.75) {
+      if (ev == ocucp::rrc_event_id::event_id_t::d1) {
+        if (*cfg.distance_thresh_from_ref1_km > 3276.75 || *cfg.distance_thresh_from_ref2_km > 3276.75) {
           fmt::print("report_cfg_id={}: D1 distance thresholds must be in [0..3276.75] km\n", cfg.report_cfg_id);
           return false;
         }
-        if (!cfg.ref_location1.has_value() or !cfg.ref_location2.has_value()) {
+        if (!cfg.ref_location1.has_value() || !cfg.ref_location2.has_value()) {
           fmt::print("report_cfg_id={}: D1 event requires ref_location1 and ref_location2\n", cfg.report_cfg_id);
           return false;
         }
       }
-    } else if (ev == "t1") {
+    } else if (ev == ocucp::rrc_event_id::event_id_t::t1) {
       if (!cfg.t1_thres.has_value()) {
         fmt::print("report_cfg_id={}: T1 event requires t1_thres\n", cfg.report_cfg_id);
         return false;
       }
-      if (!cfg.duration.has_value() or cfg.duration->count() < 0.1 or cfg.duration->count() > 600.0) {
+      if (!cfg.duration.has_value() || cfg.duration->count() < 0.1 || cfg.duration->count() > 600.0) {
         fmt::print("report_cfg_id={}: T1 event requires duration_s in [0.1..600]\n", cfg.report_cfg_id);
         return false;
       }
@@ -74,29 +80,28 @@ static bool validate_event_trigger_params(const cu_cp_unit_report_config& cfg)
   }
 
   // A-family events (a1-a6): require meas_trigger_quantity, hysteresis_db, time_to_trigger_ms.
-  if (!cfg.meas_trigger_quantity.has_value() or !cfg.hysteresis_db.has_value() or !cfg.time_to_trigger_ms.has_value()) {
+  if (!cfg.meas_trigger_quantity.has_value() || !cfg.hysteresis_db.has_value() || !cfg.time_to_trigger_ms.has_value()) {
     fmt::print("report_cfg_id={}: meas_trigger_quantity, hysteresis_db, and time_to_trigger_ms are required\n",
                cfg.report_cfg_id);
     return false;
   }
 
   // Hysteresis range: [0..15] dB (ASN.1 encodes as value × 2, so [0..30] in 0.5 dB steps).
-  if (cfg.hysteresis_db.value() > 15) {
-    fmt::print(
-        "report_cfg_id={}: hysteresis_db={} out of range [0..15] dB\n", cfg.report_cfg_id, cfg.hysteresis_db.value());
+  if (*cfg.hysteresis_db > 15) {
+    fmt::print("report_cfg_id={}: hysteresis_db={} out of range [0..15] dB\n", cfg.report_cfg_id, *cfg.hysteresis_db);
     return false;
   }
 
-  const std::string& qty = cfg.meas_trigger_quantity.value();
+  const std::string& qty = *cfg.meas_trigger_quantity;
 
-  if (ev == "a3" or ev == "a6") {
+  if (ev == ocucp::rrc_event_id::event_id_t::a3 || ev == ocucp::rrc_event_id::event_id_t::a6) {
     if (!cfg.meas_trigger_quantity_offset_db.has_value()) {
       fmt::print("report_cfg_id={}: A3/A6 event requires meas_trigger_quantity_offset_db\n", cfg.report_cfg_id);
       return false;
     }
     // Offset range: [-15..+15] dB (ASN.1 encodes as value × 2, giving [-30..+30] in 0.5 dB steps).
-    int offset = cfg.meas_trigger_quantity_offset_db.value();
-    if (offset < -15 or offset > 15) {
+    int offset = *cfg.meas_trigger_quantity_offset_db;
+    if (offset < -15 || offset > 15) {
       fmt::print("report_cfg_id={}: meas_trigger_quantity_offset_db={} out of range [-15..15] dB\n",
                  cfg.report_cfg_id,
                  offset);
@@ -109,7 +114,7 @@ static bool validate_event_trigger_params(const cu_cp_unit_report_config& cfg)
                  cfg.report_cfg_id);
       return false;
     }
-    if (ev == "a5" and !cfg.meas_trigger_quantity_threshold_2_db.has_value()) {
+    if (ev == ocucp::rrc_event_id::event_id_t::a5 && !cfg.meas_trigger_quantity_threshold_2_db.has_value()) {
       fmt::print("report_cfg_id={}: A5 event requires meas_trigger_quantity_threshold_2_db\n", cfg.report_cfg_id);
       return false;
     }
@@ -117,17 +122,17 @@ static bool validate_event_trigger_params(const cu_cp_unit_report_config& cfg)
     // Validate threshold range(s) per measurement quantity.
     auto check_threshold = [&](int val, const char* label) -> bool {
       if (qty == "rsrp") {
-        if (val < -156 or val > -31) {
+        if (val < -156 || val > -31) {
           fmt::print("report_cfg_id={}: RSRP {} = {} dBm out of range [-156..-31]\n", cfg.report_cfg_id, label, val);
           return false;
         }
       } else if (qty == "rsrq") {
-        if (val < -43 or val > 20) {
+        if (val < -43 || val > 20) {
           fmt::print("report_cfg_id={}: RSRQ {} = {} dB out of range [-43..20]\n", cfg.report_cfg_id, label, val);
           return false;
         }
       } else if (qty == "sinr") {
-        if (val < -23 or val > 40) {
+        if (val < -23 || val > 40) {
           fmt::print("report_cfg_id={}: SINR {} = {} dB out of range [-23..40]\n", cfg.report_cfg_id, label, val);
           return false;
         }
@@ -138,11 +143,11 @@ static bool validate_event_trigger_params(const cu_cp_unit_report_config& cfg)
       return true;
     };
 
-    if (!check_threshold(cfg.meas_trigger_quantity_threshold_db.value(), "threshold1")) {
+    if (!check_threshold(*cfg.meas_trigger_quantity_threshold_db, "threshold1")) {
       return false;
     }
-    if (ev == "a5") {
-      if (!check_threshold(cfg.meas_trigger_quantity_threshold_2_db.value(), "threshold2")) {
+    if (ev == ocucp::rrc_event_id::event_id_t::a5) {
+      if (!check_threshold(*cfg.meas_trigger_quantity_threshold_2_db, "threshold2")) {
         return false;
       }
     }
@@ -163,14 +168,14 @@ static bool validate_mobility_appconfig(gnb_id_t gnb_id, const cu_cp_unit_mobili
     report_cfg_ids_to_report_type.emplace(report_cfg.report_cfg_id, report_cfg.report_type);
 
     // Check that report configs are valid.
-    if (report_cfg.report_type == "event_triggered" or report_cfg.report_type == "cond_trigger") {
+    if (report_cfg.report_type == "event_triggered" || report_cfg.report_type == "cond_trigger") {
       if (!validate_event_trigger_params(report_cfg)) {
         return false;
       }
     }
 
     // T312 is only valid for event-triggered reports.
-    if (report_cfg.t312_ms.has_value() and report_cfg.report_type != "event_triggered") {
+    if (report_cfg.t312_ms.has_value() && report_cfg.report_type != "event_triggered") {
       fmt::print("T312 is only valid for event-triggered report configurations.\n");
       return false;
     }
@@ -181,14 +186,13 @@ static bool validate_mobility_appconfig(gnb_id_t gnb_id, const cu_cp_unit_mobili
   // Check cu_cp_cell_config.
   std::set<nr_cell_identity> ncis;
   for (const auto& cell : config.cells) {
-    nr_cell_identity nci = nr_cell_identity::create(cell.nr_cell_id).value();
+    nr_cell_identity nci = *nr_cell_identity::create(cell.nr_cell_id);
     if (!ncis.emplace(nci).second) {
       fmt::print("Cells must be unique ({:#x} already present)\n", cell.nr_cell_id);
       return false;
     }
 
-    if (cell.ssb_period.has_value() && cell.ssb_offset.has_value() &&
-        cell.ssb_offset.value() >= cell.ssb_period.value()) {
+    if (cell.ssb_period.has_value() && cell.ssb_offset.has_value() && *cell.ssb_offset >= *cell.ssb_period) {
       fmt::print("ssb_offset must be smaller than ssb_period\n");
       return false;
     }
@@ -197,10 +201,10 @@ static bool validate_mobility_appconfig(gnb_id_t gnb_id, const cu_cp_unit_mobili
       // Try to add report config id to cell_to_report_cfg_id map.
       cell_to_report_cfg_id.emplace(nci, std::set<unsigned>());
       auto& report_cfg_ids = cell_to_report_cfg_id.at(nci);
-      if (!report_cfg_ids.emplace(cell.periodic_report_cfg_id.value()).second) {
+      if (!report_cfg_ids.emplace(*cell.periodic_report_cfg_id).second) {
         fmt::print("cell={:#x}: report_config_id={} already configured for this cell)\n",
                    cell.nr_cell_id,
-                   cell.periodic_report_cfg_id.value());
+                   *cell.periodic_report_cfg_id);
         return false;
       }
     }
@@ -214,7 +218,7 @@ static bool validate_mobility_appconfig(gnb_id_t gnb_id, const cu_cp_unit_mobili
         std::vector<std::string> internal_cells;
         std::vector<std::string> external_cells;
         for (const auto& c : config.cells) {
-          nr_cell_identity c_nci = nr_cell_identity::create(c.nr_cell_id).value();
+          nr_cell_identity c_nci = *nr_cell_identity::create(c.nr_cell_id);
           if (c_nci.gnb_id(gnb_id.bit_length) == gnb_id) {
             internal_cells.push_back(fmt::format("{:#x}", c.nr_cell_id));
           } else {
@@ -248,16 +252,16 @@ static bool validate_mobility_appconfig(gnb_id_t gnb_id, const cu_cp_unit_mobili
                    "  - External cells (in other CU-CPs): {}\n",
                    cell.nr_cell_id,
                    gnb_id.id,
-                   cell.gnb_id_bit_length.has_value() ? fmt::format("{}", cell.gnb_id_bit_length.value()) : "[MISSING]",
-                   cell.pci.has_value() ? fmt::format("{}", cell.pci.value()) : "[MISSING]",
-                   cell.plmn_id.has_value() ? fmt::format("{}", cell.plmn_id.value()) : "[MISSING]",
-                   cell.tac.has_value() ? fmt::format("{}", cell.tac.value()) : "[MISSING]",
-                   cell.band.has_value() ? fmt::format("n{}", static_cast<unsigned>(cell.band.value())) : "[MISSING]",
-                   cell.ssb_arfcn.has_value() ? fmt::format("{}", cell.ssb_arfcn.value()) : "[MISSING]",
-                   cell.ssb_scs.has_value() ? fmt::format("{}", cell.ssb_scs.value()) : "[MISSING]",
-                   cell.ssb_period.has_value() ? fmt::format("{}", cell.ssb_period.value()) : "[MISSING]",
-                   cell.ssb_offset.has_value() ? fmt::format("{}", cell.ssb_offset.value()) : "[MISSING]",
-                   cell.ssb_duration.has_value() ? fmt::format("{}", cell.ssb_duration.value()) : "[MISSING]",
+                   cell.gnb_id_bit_length.has_value() ? fmt::format("{}", *cell.gnb_id_bit_length) : "[MISSING]",
+                   cell.pci.has_value() ? fmt::format("{}", *cell.pci) : "[MISSING]",
+                   cell.plmn_id.has_value() ? fmt::format("{}", *cell.plmn_id) : "[MISSING]",
+                   cell.tac.has_value() ? fmt::format("{}", *cell.tac) : "[MISSING]",
+                   cell.band.has_value() ? fmt::format("n{}", static_cast<unsigned>(*cell.band)) : "[MISSING]",
+                   cell.ssb_arfcn.has_value() ? fmt::format("{}", *cell.ssb_arfcn) : "[MISSING]",
+                   cell.ssb_scs.has_value() ? fmt::format("{}", *cell.ssb_scs) : "[MISSING]",
+                   cell.ssb_period.has_value() ? fmt::format("{}", *cell.ssb_period) : "[MISSING]",
+                   cell.ssb_offset.has_value() ? fmt::format("{}", *cell.ssb_offset) : "[MISSING]",
+                   cell.ssb_duration.has_value() ? fmt::format("{}", *cell.ssb_duration) : "[MISSING]",
                    gnb_id.id,
                    gnb_id.bit_length,
                    valid_nci_str,
@@ -271,7 +275,7 @@ static bool validate_mobility_appconfig(gnb_id_t gnb_id, const cu_cp_unit_mobili
         std::vector<std::string> internal_cells;
         std::vector<std::string> external_cells;
         for (const auto& c : config.cells) {
-          nr_cell_identity c_nci = nr_cell_identity::create(c.nr_cell_id).value();
+          nr_cell_identity c_nci = *nr_cell_identity::create(c.nr_cell_id);
           if (c_nci.gnb_id(gnb_id.bit_length) == gnb_id) {
             internal_cells.push_back(fmt::format("{:#x}", c.nr_cell_id));
           } else {
@@ -296,16 +300,15 @@ static bool validate_mobility_appconfig(gnb_id_t gnb_id, const cu_cp_unit_mobili
                    "  - External cells (in other CU-CPs): {}\n",
                    cell.nr_cell_id,
                    gnb_id.id,
-                   cell.pci.has_value() ? fmt::format("{} [REMOVE]", cell.pci.value()) : "not set",
-                   cell.plmn_id.has_value() ? fmt::format("{} [REMOVE]", cell.plmn_id.value()) : "not set",
-                   cell.tac.has_value() ? fmt::format("{} [REMOVE]", cell.tac.value()) : "not set",
-                   cell.band.has_value() ? fmt::format("n{} [REMOVE]", static_cast<unsigned>(cell.band.value()))
-                                         : "not set",
-                   cell.ssb_arfcn.has_value() ? fmt::format("{} [REMOVE]", cell.ssb_arfcn.value()) : "not set",
-                   cell.ssb_scs.has_value() ? fmt::format("{} [REMOVE]", cell.ssb_scs.value()) : "not set",
-                   cell.ssb_period.has_value() ? fmt::format("{} [REMOVE]", cell.ssb_period.value()) : "not set",
-                   cell.ssb_offset.has_value() ? fmt::format("{} [REMOVE]", cell.ssb_offset.value()) : "not set",
-                   cell.ssb_duration.has_value() ? fmt::format("{} [REMOVE]", cell.ssb_duration.value()) : "not set",
+                   cell.pci.has_value() ? fmt::format("{} [REMOVE]", *cell.pci) : "not set",
+                   cell.plmn_id.has_value() ? fmt::format("{} [REMOVE]", *cell.plmn_id) : "not set",
+                   cell.tac.has_value() ? fmt::format("{} [REMOVE]", *cell.tac) : "not set",
+                   cell.band.has_value() ? fmt::format("n{} [REMOVE]", static_cast<unsigned>(*cell.band)) : "not set",
+                   cell.ssb_arfcn.has_value() ? fmt::format("{} [REMOVE]", *cell.ssb_arfcn) : "not set",
+                   cell.ssb_scs.has_value() ? fmt::format("{} [REMOVE]", *cell.ssb_scs) : "not set",
+                   cell.ssb_period.has_value() ? fmt::format("{} [REMOVE]", *cell.ssb_period) : "not set",
+                   cell.ssb_offset.has_value() ? fmt::format("{} [REMOVE]", *cell.ssb_offset) : "not set",
+                   cell.ssb_duration.has_value() ? fmt::format("{} [REMOVE]", *cell.ssb_duration) : "not set",
                    gnb_id.id,
                    gnb_id.bit_length,
                    fmt::join(internal_cells, ", "),
@@ -336,7 +339,7 @@ static bool validate_mobility_appconfig(gnb_id_t gnb_id, const cu_cp_unit_mobili
   // Verify that each configured neighbor cell is present.
   for (const auto& cell : config.cells) {
     for (const auto& ncell : cell.ncells) {
-      nr_cell_identity nci = nr_cell_identity::create(ncell.nr_cell_id).value();
+      nr_cell_identity nci = *nr_cell_identity::create(ncell.nr_cell_id);
       if (ncis.find(nci) == ncis.end()) {
         fmt::print("Neighbor cell config for nci={:#x} incomplete. No valid configuration for cell nci={:#x} found.\n",
                    cell.nr_cell_id,
@@ -349,71 +352,11 @@ static bool validate_mobility_appconfig(gnb_id_t gnb_id, const cu_cp_unit_mobili
   return true;
 }
 
-/// Validates the given security configuration. Returns true on success, otherwise false.
-static bool validate_security_appconfig(const cu_cp_unit_security_config& config)
-{
-  // String splitter helper
-  auto split = [](const std::string& s, char delim) -> std::vector<std::string> {
-    std::vector<std::string> result;
-    std::stringstream        ss(s);
-    std::string              item;
-
-    while (getline(ss, item, delim)) {
-      result.push_back(item);
-    }
-
-    return result;
-  };
-
-  // > Remove spaces, convert to lower case and split on comma
-  std::string nea_preference_list = config.nea_preference_list;
-  nea_preference_list.erase(std::remove_if(nea_preference_list.begin(), nea_preference_list.end(), ::isspace),
-                            nea_preference_list.end());
-  std::transform(nea_preference_list.begin(),
-                 nea_preference_list.end(),
-                 nea_preference_list.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
-  std::vector<std::string> nea_v = split(nea_preference_list, ',');
-
-  // > Check valid ciphering algos
-  for (const std::string& algo : nea_v) {
-    if (algo != "nea0" and algo != "nea1" and algo != "nea2" and algo != "nea3") {
-      fmt::print("Invalid ciphering algorithm. Valid values are \"nea0\", \"nia1\", \"nia2\" and \"nia3\". algo={}\n",
-                 algo);
-      return false;
-    }
-  }
-
-  // > Remove spaces, convert to lower case and split on comma
-  std::string nia_preference_list = config.nia_preference_list;
-  nia_preference_list.erase(std::remove_if(nia_preference_list.begin(), nia_preference_list.end(), ::isspace),
-                            nia_preference_list.end());
-  std::transform(nia_preference_list.begin(),
-                 nia_preference_list.end(),
-                 nia_preference_list.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
-  std::vector<std::string> nia_v = split(nia_preference_list, ',');
-
-  // > Check valid integrity algos
-  for (const std::string& algo : nia_v) {
-    if (algo == "nia0") {
-      fmt::print("NIA0 cannot be selected in the algorithm preferences.\n");
-      return false;
-    }
-    if (algo != "nia1" and algo != "nia2" and algo != "nia3") {
-      fmt::print("Invalid integrity algorithm. Valid values are \"nia1\", \"nia2\" and \"nia3\". algo={}\n", algo);
-      return false;
-    }
-  }
-
-  return true;
-}
-
 /// Validates the given PDCP configuration. Returns true on success, otherwise false.
 static bool validate_pdcp_appconfig(five_qi_t five_qi, const cu_cp_unit_pdcp_config& config)
 {
   // Check TX.
-  if (config.tx.sn_field_length != 12 && config.tx.sn_field_length != 18) {
+  if (config.tx.sn_field_length != pdcp_sn_size::size12bits && config.tx.sn_field_length != pdcp_sn_size::size18bits) {
     fmt::print("PDCP TX SN length is neither 12 or 18 bits. {} SN={}\n", five_qi, config.tx.sn_field_length);
     return false;
   }
@@ -423,21 +366,12 @@ static bool validate_pdcp_appconfig(five_qi_t five_qi, const cu_cp_unit_pdcp_con
   }
 
   // Check RX.
-  if (config.rx.sn_field_length != 12 && config.rx.sn_field_length != 18) {
+  if (config.rx.sn_field_length != pdcp_sn_size::size12bits && config.rx.sn_field_length != pdcp_sn_size::size18bits) {
     fmt::print("PDCP RX SN length is neither 12 or 18 bits. {} SN={}\n", five_qi, config.rx.sn_field_length);
     return false;
   }
 
-  pdcp_t_reordering t_reordering = {};
-  if (!pdcp_t_reordering_from_int(t_reordering, config.rx.t_reordering)) {
-    fmt::print("PDCP RX t-Reordering is not a valid value. {}, t-Reordering={}\n", five_qi, config.rx.t_reordering);
-    fmt::print("Valid values: "
-               "\"infinity, ms0, ms1, ms2, ms4, ms5, ms8, ms10, ms15, ms20, ms30, ms40,ms50, ms60, ms80, "
-               "ms100, ms120, ms140, ms160, ms180, ms200, ms220,ms240, ms260, ms280, ms300, ms500, ms750, ms1000, "
-               "ms1250, ms1500, ms1750, ms2000, ms2250, ms2500, ms2750\"\n");
-    return false;
-  }
-  if (t_reordering == pdcp_t_reordering::infinity) {
+  if (config.rx.t_reordering == pdcp_t_reordering::infinity) {
     fmt::print("PDCP t-Reordering=infinity on DRBs is not advised. It can cause data stalls. {}\n", five_qi);
   }
 
@@ -593,19 +527,19 @@ static bool validate_rlc_am_appconfig(id_type id, const cu_cp_unit_rlc_am_config
 static bool validate_rlc_appconfig(five_qi_t five_qi, const cu_cp_unit_rlc_config& config)
 {
   // Check mode.
-  if (config.mode != "am" && config.mode != "um-bidir") {
-    fmt::print("RLC mode is neither \"am\" or \"um-bidir\". {} mode={}\n", five_qi, config.mode);
+  if (config.mode != rlc_mode::am && config.mode != rlc_mode::um_bidir) {
+    fmt::print("RLC mode is neither \"am\" or \"um-bidir\". {} mode={}\n", five_qi, format_as(config.mode));
     return false;
   }
 
   // Check AM.
-  if (config.mode == "am" && !validate_rlc_am_appconfig(five_qi, config.am)) {
+  if (config.mode == rlc_mode::am && !validate_rlc_am_appconfig(five_qi, config.am)) {
     fmt::print("RLC AM config is invalid. {}\n", five_qi);
     return false;
   }
 
   // Check UM.
-  if (config.mode == "um-bidir" && !validate_rlc_um_appconfig(five_qi, config.um)) {
+  if (config.mode == rlc_mode::um_bidir && !validate_rlc_um_appconfig(five_qi, config.um)) {
     fmt::print("RLC UM config is invalid. {}\n", five_qi);
     return false;
   }
@@ -772,6 +706,66 @@ static bool validate_ntn_appconfig(const cu_cp_unit_config& config)
   return true;
 }
 
+/// Reports the Local NG-RAN Node Identifier that the I-RNTIs of this node carry, and which gNB IDs a neighbour can be
+/// given while staying distinguishable from it.
+///
+/// The I-RNTI identifies the allocating node by a Local NG-RAN Node Identifier (TS 38.300 Annex F) that is narrower
+/// than a gNB ID. [Implementation-defined] The CU-CP takes it from the least significant bits of its gNB ID
+/// (TS 38.300 Annex C). Peers resolve an I-RNTI at RRC Resume by matching that identifier against the gNB IDs they are
+/// connected to, so gNB IDs sharing those bits address the same node.
+static void
+report_i_rnti_node_identifiers(gnb_id_t gnb_id, full_i_rnti_profile full_profile, short_i_rnti_profile short_profile)
+{
+  const uint32_t full_mask  = (1U << full_i_rnti_t::nof_node_id_bits(full_profile)) - 1;
+  const uint32_t short_mask = (1U << short_i_rnti_t::nof_node_id_bits(short_profile)) - 1;
+  const uint32_t full_id    = full_i_rnti_t::to_local_node_id(full_profile, gnb_id.id);
+  const uint32_t short_id   = short_i_rnti_t::to_local_node_id(short_profile, gnb_id.id);
+
+  // A gNB ID that fits in the node identifier is carried whole, and the I-RNTIs of this node address it alone.
+  const bool full_truncates  = gnb_id.id > full_mask;
+  const bool short_truncates = gnb_id.id > short_mask;
+  if (!full_truncates && !short_truncates) {
+    return;
+  }
+
+  auto is_available = [&](uint32_t candidate) {
+    return (!full_truncates || (candidate & full_mask) != full_id) &&
+           (!short_truncates || (candidate & short_mask) != short_id);
+  };
+
+  // Walk up from the configured gNB ID, which shows that adjacent gNB IDs are usable while those a whole node
+  // identifier apart are not.
+  std::vector<std::string> available;
+  std::vector<std::string> unavailable;
+  const uint64_t           gnb_id_range = uint64_t{1} << gnb_id.bit_length;
+  for (uint64_t candidate = gnb_id.id + 1; candidate < gnb_id_range && (available.size() < 3 || unavailable.size() < 3);
+       ++candidate) {
+    std::vector<std::string>& examples = is_available(candidate) ? available : unavailable;
+    if (examples.size() < 3) {
+      examples.push_back(fmt::format("{:#x}", candidate));
+    }
+  }
+
+  std::vector<std::string> conditions;
+  if (full_truncates) {
+    conditions.push_back(fmt::format("gnb_id & {:#x} != {:#x}", full_mask, full_id));
+  }
+  if (short_truncates) {
+    conditions.push_back(fmt::format("gnb_id & {:#x} != {:#x}", short_mask, short_id));
+  }
+
+  fmt::print("I-RNTI node identifiers for gnb_id={:#x}: full={:#x}, short={:#x}.\n"
+             "A neighbour gNB is told apart from this node only if {}:\n"
+             "  - available gnb_ids: {}\n"
+             "  - unavailable gnb_ids: {}\n",
+             gnb_id.id,
+             full_id,
+             short_id,
+             fmt::join(conditions, " and "),
+             fmt::join(available, ", "),
+             fmt::join(unavailable, ", "));
+}
+
 static bool validate_cu_cp_appconfig(const gnb_id_t gnb_id, const cu_cp_unit_config& config)
 {
   // validate AMF config
@@ -789,16 +783,27 @@ static bool validate_cu_cp_appconfig(const gnb_id_t gnb_id, const cu_cp_unit_con
     return false;
   }
 
-  if (!validate_security_appconfig(config.security_config)) {
-    return false;
-  }
-
   if (!validate_qos_appconfig(config.qos_cfg)) {
     return false;
   }
 
   if (!validate_xnap_appconfig(config.xnap_config)) {
     return false;
+  }
+
+  // Only a peer over Xn resolves the I-RNTIs this node allocates.
+  if (!config.xnap_config.gateways.empty()) {
+    full_i_rnti_profile  full_profile  = full_i_rnti_profile::profile_0;
+    short_i_rnti_profile short_profile = short_i_rnti_profile::profile_0;
+    if (!from_string(full_profile, config.full_i_rnti_profile)) {
+      fmt::print("Invalid full_i_rnti_profile={}.\n", config.full_i_rnti_profile);
+      return false;
+    }
+    if (!from_string(short_profile, config.short_i_rnti_profile)) {
+      fmt::print("Invalid short_i_rnti_profile={}.\n", config.short_i_rnti_profile);
+      return false;
+    }
+    report_i_rnti_node_identifiers(gnb_id, full_profile, short_profile);
   }
 
   return true;

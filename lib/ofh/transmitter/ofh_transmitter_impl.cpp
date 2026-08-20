@@ -3,6 +3,7 @@
 
 #include "ofh_transmitter_impl.h"
 #include "ofh_uplane_fragment_size_calculator.h"
+#include "ocudu/adt/format.h"
 
 using namespace ocudu;
 using namespace ofh;

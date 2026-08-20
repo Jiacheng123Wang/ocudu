@@ -4,6 +4,7 @@
 
 #include "du_cell_group_config_pool.h"
 #include "cell_configuration.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/bwp/bwp_id.h"
 #include "ocudu/scheduler/config/time_domain_resource_helper.h"
 #include "ocudu/scheduler/config/ue_bwp_config.h"

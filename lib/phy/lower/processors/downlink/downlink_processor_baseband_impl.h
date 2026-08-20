@@ -188,12 +188,6 @@ public:
   void set_tx_time_offset(phy_time_unit tx_time_offset) override;
 
 private:
-  /// Scaling factor for converting from complex float to 16-bit complex integer.
-  static constexpr float scaling_factor_cf_to_ci16 = std::numeric_limits<int16_t>::max();
-
-  /// Scaling factor for converting from 16-bit complex integer to complex float.
-  static constexpr float scaling_factor_ci16_to_cf = std::numeric_limits<int16_t>::max();
-
   /// Transmit time offset in samples.
   std::atomic<int> tx_time_offset = 0;
   /// PDxCH baseband processor.

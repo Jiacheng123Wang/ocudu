@@ -13,6 +13,7 @@
 ///   2. Feeds those LLRs through the real dematcher.
 ///   3. Compares against golden_rate_dematch output.
 
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/to_array.h"
 #include "ocudu/ocuduvec/compare.h"
 #include "ocudu/ocuduvec/fill.h"

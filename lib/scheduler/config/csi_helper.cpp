@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ocudu/scheduler/config/csi_helper.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/csi_rs/csi_meas_config.h"
 #include "ocudu/ran/slot_point.h"
 #include "ocudu/scheduler/config/pucch_resource_builder_params.h"

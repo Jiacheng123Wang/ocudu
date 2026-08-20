@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ofh_uplink_request_handler_task_dispatcher.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/support/resource_grid_context.h"
 #include "ocudu/phy/support/shared_resource_grid.h"
 #include "ocudu/support/rtsan.h"

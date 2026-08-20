@@ -53,7 +53,7 @@ public:
               "CRC.indication slot={} rnti={} harq_id={} tb_status={}",
               msg.slot,
               msg.pdu.rnti,
-              underlying(msg.pdu.harq_id),
+              msg.pdu.harq_id,
               msg.pdu.tb_crc_status_ok ? "OK" : "KO");
 
     ocudu::fapi::append_time_advance(ctx, msg.pdu.timing_advance_offset, msg.slot.scs());

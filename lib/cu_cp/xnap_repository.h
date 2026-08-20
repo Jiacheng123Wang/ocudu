@@ -52,6 +52,19 @@ public:
   /// \return A pointer to the interface of the added XNAP object if it was successfully found, a nullptr otherwise.
   xnap_interface* find_xnap(const gnb_id_t& peer_gnb_id);
 
+  /// \brief Find the index of an XNAP object in the repository by the PCI of one of the cells the peer serves.
+  /// \param[in] peer_pci PCI of a cell the XN-C peer advertised in its served cell list at XN setup.
+  /// \return The index of the XN-C peer serving that cell if found, std::nullopt otherwise.
+  /// \remark PCIs are only unique within a neighbourhood, so the first peer advertising the PCI is returned. Picking
+  /// the wrong one makes the retrieval fail and leaves the caller to fall back.
+  std::optional<xnc_peer_index_t> find_xnap_index_by_served_pci(pci_t peer_pci);
+
+  /// \brief Find the index of an XNAP object in the repository by the Local NG-RAN Node Identifier its gNB ID carries.
+  /// \param[in] node_id Local NG-RAN Node Identifier read out of an I-RNTI.
+  /// \param[in] nof_node_id_bits Width the I-RNTI profile gives the identifier.
+  /// \return The index of the XN-C peer if found, std::nullopt otherwise.
+  std::optional<xnc_peer_index_t> find_xnap_index_by_local_node_id(uint32_t node_id, unsigned nof_node_id_bits);
+
   /// \brief Find the index of an XNAP object in the repository by gNB ID.
   /// \param[in] peer_gnb_id GNB ID of the XN-C peer to which the XNAP object is connected.
   /// \return The index of the XN-C peer if found, std::nullopt otherwise.
@@ -66,6 +79,9 @@ public:
   std::map<xnc_peer_index_t, xnap_interface*> get_xnaps();
 
   xnap_task_scheduler& get_xnap_task_scheduler() { return xnc_task_sched; }
+
+  /// \brief Report the cells this node serves to all connected XN-C peers (TS 38.423 section 8.4.1).
+  void update_served_cells();
 
   /// Number of XNAPs managed by the CU-CP.
   size_t get_nof_xnaps() const { return xnap_db.size(); }

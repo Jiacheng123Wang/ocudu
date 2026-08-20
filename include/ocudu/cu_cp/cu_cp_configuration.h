@@ -23,15 +23,15 @@
 
 namespace ocudu {
 
-class pdcp_metrics_notifier;
-
 namespace ocucp {
 class n2_connection_client;
-class ngap_repository;
 class xnc_connection_gateway;
 class cu_cp_ref_time_report_notifier;
 
-/// Parameters of the CU-CP that will reported to the 5G core.
+/// Defines the RRC version.
+constexpr unsigned RRC_VERSION = 2U;
+
+/// Parameters of the CU-CP that will report to the 5G core.
 struct ran_node_configuration {
   /// The gNodeB identifier.
   gnb_id_t    gnb_id{411, 22};
@@ -63,7 +63,6 @@ struct cu_cp_configuration {
   };
 
   struct ngap_config {
-    n2_connection_client* n2_gw = nullptr;
     // Supported TAs for each AMF.
     std::vector<supported_tracking_area> supported_tas;
   };
@@ -71,6 +70,8 @@ struct cu_cp_configuration {
   struct ngap_params {
     /// NGAP configurations.
     std::vector<ngap_config> ngaps;
+    /// N2 connection clients.
+    std::vector<n2_connection_client*> n2_gws;
     /// Time to wait after a failed AMF reconnection attempt in ms.
     std::chrono::milliseconds amf_reconnection_retry_time = std::chrono::milliseconds{1000};
     /// Time that the NGAP waits for a response from the AMF in milliseconds.
@@ -109,7 +110,7 @@ struct cu_cp_configuration {
     /// Guard time for RRC procedures.
     std::chrono::milliseconds rrc_procedure_guard_time_ms{1000};
     /// Version of the RRC.
-    unsigned rrc_version = 2;
+    unsigned rrc_version = RRC_VERSION;
     /// Optional: rrc_reject_wait_time
     std::optional<std::chrono::seconds> rrc_reject_wait_time;
   };
@@ -184,9 +185,6 @@ struct cu_cp_configuration {
   /// that periodically refreshes the NTN neighbour cell info of the measurement configuration, fed by DU reference
   /// time reports.
   std::optional<ocudu_ntn::ntn_configuration_manager_config> ntn;
-  /// Notifier invoked when a DU reports Reference Time Information (used e.g. for NTN). Wired internally by the CU-CP
-  /// to its NTN reference time store when \c ntn is configured; left unset otherwise.
-  cu_cp_ref_time_report_notifier* ref_time_report_notifier = nullptr;
 };
 
 } // namespace ocucp

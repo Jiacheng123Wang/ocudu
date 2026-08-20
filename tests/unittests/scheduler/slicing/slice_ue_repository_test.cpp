@@ -4,6 +4,7 @@
 
 #include "lib/scheduler/config/sched_config_manager.h"
 #include "lib/scheduler/slicing/slice_ue_repository.h"
+#include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "lib/scheduler/ue_context/ue_repository.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/unittests/scheduler/test_utils/config_generators.h"
@@ -51,7 +52,8 @@ protected:
 
     next_slot = {to_numerology_value(req.ran.dl_cfg_common.init_dl_bwp.generic_params.scs), 0};
 
-    ue_db.add_cell(test_cfg.get_cell(to_du_cell_index(0)), nullptr);
+    cell_ues.emplace(test_cfg.get_cell(to_du_cell_index(0)), nullptr);
+    ue_db.register_cell(*cell_ues);
 
     slices.push_back(std::make_unique<slice_ue_repository>(SRB_RAN_SLICE_ID, du_cell_index_t(0), ue_db));
     slices.push_back(std::make_unique<slice_ue_repository>(DEFAULT_DRB_RAN_SLICE_ID, du_cell_index_t(0), ue_db));
@@ -92,6 +94,7 @@ protected:
   ocudulog::basic_logger&                           logger = ocudulog::fetch_basic_logger("TEST");
   const scheduler_expert_config                     expert_cfg;
   test_helpers::test_sched_config_manager           test_cfg;
+  std::optional<ue_cell_repository>                 cell_ues;
   ue_repository                                     ue_db;
   std::vector<std::unique_ptr<slice_ue_repository>> slices;
 

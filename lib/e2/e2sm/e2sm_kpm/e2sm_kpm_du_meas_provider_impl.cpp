@@ -136,7 +136,7 @@ void e2sm_kpm_du_meas_provider_impl::report_metrics(const scheduler_cell_metrics
   nof_cell_prbs          = cell_metrics.nof_prbs;
   nof_dl_slots           = cell_metrics.nof_dl_slots;
   nof_ul_slots           = cell_metrics.nof_ul_slots;
-  nof_ded_cell_preambles = cell_metrics.nof_prach_preambles;
+  nof_ded_cell_preambles = cell_metrics.total_prach_preambles;
   for (auto& ue_metric : cell_metrics.ue_metrics) {
     last_ue_metrics.push_back(ue_metric);
   }

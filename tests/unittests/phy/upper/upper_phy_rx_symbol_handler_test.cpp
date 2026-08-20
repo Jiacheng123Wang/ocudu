@@ -6,6 +6,7 @@
 #include "../support/prach_buffer_test_doubles.h"
 #include "../support/resource_grid_test_doubles.h"
 #include "uplink_processor_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/support/prach_buffer_context.h"
 #include "ocudu/phy/upper/upper_phy_factories.h"

@@ -4,7 +4,7 @@
 #pragma once
 
 #include "ocudu/adt/strong_type.h"
-#include "fmt/format.h"
+#include "fmt/base.h"
 
 namespace ocudu {
 namespace fapi {

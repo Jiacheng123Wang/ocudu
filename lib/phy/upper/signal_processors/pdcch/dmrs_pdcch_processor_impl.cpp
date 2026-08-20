@@ -4,6 +4,7 @@
 
 #include "dmrs_pdcch_processor_impl.h"
 #include "../dmrs_helper.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/support/mask_types.h"
 #include "ocudu/phy/support/re_pattern.h"
 #include "ocudu/phy/support/resource_grid_mapper.h"

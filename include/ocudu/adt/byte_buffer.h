@@ -7,7 +7,6 @@
 #include "ocudu/adt/detail/byte_buffer_memory_resource.h"
 #include "ocudu/adt/detail/intrusive_ptr.h"
 #include "ocudu/adt/expected.h"
-#include "fmt/format.h"
 
 namespace ocudu {
 
@@ -574,45 +573,3 @@ inline size_t copy_segments(const ByteBufferType& src, span<uint8_t> dst)
 span<const uint8_t> to_span(const byte_buffer& src, span<uint8_t> tmp_mem);
 
 } // namespace ocudu
-
-namespace fmt {
-
-/// \brief Custom formatter for byte_buffer.
-template <>
-struct formatter<ocudu::byte_buffer> {
-  enum { hexadecimal, binary } mode = hexadecimal;
-
-  template <typename ParseContext>
-  auto parse(ParseContext& ctx)
-  {
-    auto it = ctx.begin();
-    while (it != ctx.end() and *it != '}') {
-      if (*it == 'b') {
-        mode = binary;
-      }
-      ++it;
-    }
-    return it;
-  }
-
-  template <typename FormatContext>
-  auto format(const ocudu::byte_buffer& buf, FormatContext& ctx) const
-  {
-    if (mode == hexadecimal) {
-      return format_to(ctx.out(), "{:0>2x}", fmt::join(buf.begin(), buf.end(), " "));
-    }
-    return format_to(ctx.out(), "{:0>8b}", fmt::join(buf.begin(), buf.end(), " "));
-  }
-};
-
-/// \brief Custom formatter for byte_buffer_slice.
-template <>
-struct formatter<ocudu::byte_buffer_slice> : public formatter<ocudu::byte_buffer_view> {
-  template <typename FormatContext>
-  auto format(const ocudu::byte_buffer_slice& buf, FormatContext& ctx) const
-  {
-    return formatter<ocudu::byte_buffer_view>::format(buf.view(), ctx);
-  }
-};
-
-} // namespace fmt

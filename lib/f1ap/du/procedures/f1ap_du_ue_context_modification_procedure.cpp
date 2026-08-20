@@ -6,6 +6,7 @@
 #include "../../asn1_helpers.h"
 #include "../f1ap_du_context.h"
 #include "proc_logger.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/common.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents_ue.h"
 #include "ocudu/f1ap/f1ap_message.h"

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu/fapi_adaptor/precoding_matrix_repository.h"
+#include "ocudu/adt/format.h"
 
 using namespace ocudu;
 using namespace fapi_adaptor;

@@ -4,6 +4,7 @@
 
 #include "scheduler_event_logger.h"
 #include "ocudu/adt/byte_buffer.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/type_list_buffer.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ran/csi_report/csi_report_formatters.h"
@@ -42,6 +43,20 @@ using slot_event_buffer = type_list_buffer_stream<cell_creation_event,
                                                   sel::srs_indication_event,
                                                   sel::slice_reconfiguration_event>;
 
+const char* to_string(sel::crc_event::crc_res_t r)
+{
+  switch (r) {
+    case sel::crc_event::crc_res_t::ok:
+      return "ok";
+    case sel::crc_event::crc_res_t::ko:
+      return "ko";
+    case sel::crc_event::crc_res_t::dtx:
+      return "dtx";
+    default:
+      return "unknown";
+  }
+}
+
 /// Sentinel return type used by format_info_level to signal that an event has no info-level formatter.
 struct no_info_formatter {};
 
@@ -51,7 +66,7 @@ auto format_info_level(FormatContext& ctx, const Event& ev, bool first)
 {
   const char* separator = first ? " " : ", ";
   if constexpr (std::is_same_v<Event, cell_creation_event>) {
-    fmt::format_to(ctx.out(), "{}Cell creation idx={}", separator, fmt::underlying(ev.cell_index));
+    fmt::format_to(ctx.out(), "{}Cell creation idx={}", separator, ev.cell_index);
   } else if constexpr (std::is_same_v<Event, sel::prach_event>) {
     fmt::format_to(ctx.out(),
                    "{}prach({}={} preamble={} tc-rnti={})",
@@ -84,7 +99,7 @@ template <typename FormatContext, typename Event>
 void format_debug_level(FormatContext& ctx, const Event& ev)
 {
   if constexpr (std::is_same_v<Event, cell_creation_event>) {
-    fmt::format_to(ctx.out(), "\n- Cell creation: idx={}", fmt::underlying(ev.cell_index));
+    fmt::format_to(ctx.out(), "\n- Cell creation: idx={}", ev.cell_index);
   } else if constexpr (std::is_same_v<Event, sel::prach_event>) {
     fmt::format_to(ctx.out(),
                    "\n- PRACH: slot={} preamble={} {}={} temp_crnti={} ta_cmd={}",
@@ -195,7 +210,7 @@ void format_debug_level(FormatContext& ctx, const Event& ev)
                      ev.rnti,
                      ev.sl_rx,
                      fmt::underlying(ev.h_id),
-                     ev.crc,
+                     to_string(ev.crc),
                      ev.ul_sinr_db.value());
     } else {
       fmt::format_to(ctx.out(),
@@ -204,7 +219,7 @@ void format_debug_level(FormatContext& ctx, const Event& ev)
                      ev.rnti,
                      ev.sl_rx,
                      fmt::underlying(ev.h_id),
-                     ev.crc);
+                     to_string(ev.crc));
     }
   } else if constexpr (std::is_same_v<Event, dl_mac_ce_indication>) {
     fmt::format_to(ctx.out(), "\n- MAC CE: ue={} lcid={}", fmt::underlying(ev.ue_index), ev.ce_lcid.value());
@@ -212,7 +227,7 @@ void format_debug_level(FormatContext& ctx, const Event& ev)
     fmt::format_to(ctx.out(),
                    "\n- RLC Buffer State: ue={} lcid={} pending_bytes={}",
                    fmt::underlying(ev.ue_index),
-                   fmt::underlying(ev.lcid),
+                   ev.lcid,
                    ev.bs);
   } else if constexpr (std::is_same_v<Event, sel::phr_event>) {
     fmt::format_to(ctx.out(), "\n- PHR: ue={} rnti={} ph={}dB", fmt::underlying(ev.ue_index), ev.rnti, ev.ph);
@@ -225,7 +240,7 @@ void format_debug_level(FormatContext& ctx, const Event& ev)
       fmt::format_to(ctx.out(), " tpmi_info=[{:;}]", ev.tpmi_info.value());
     }
   } else if constexpr (std::is_same_v<Event, sel::slice_reconfiguration_event>) {
-    fmt::format_to(ctx.out(), "\n- Slice Reconfig: cell={}", fmt::underlying(ev.cell_index));
+    fmt::format_to(ctx.out(), "\n- Slice Reconfig: cell={}", ev.cell_index);
   } else {
     report_fatal_error("Detected event with no formatter");
   }

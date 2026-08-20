@@ -12,6 +12,7 @@
 #include "lib/scheduler/srs/srs_allocator_impl.h"
 #include "lib/scheduler/uci_scheduling/uci_allocator_impl.h"
 #include "lib/scheduler/ue_context/ue.h"
+#include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "lib/scheduler/ue_scheduling/ue_cell_grid_allocator.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
@@ -53,12 +54,13 @@ protected:
       ocudu_assert(cfg != nullptr, "Cell configuration failed");
       return cfg;
     }()),
+    cell_ues(cell_cfg, nullptr),
     ues(sched_cfg.ue),
-    cell_ues(ues.add_cell(cell_cfg, nullptr)),
     slice_ues(ran_slice_id_t{0}, to_du_cell_index(0), ues),
     alloc(expert_cfg, ues, pdcch_alloc, uci_alloc, srs_alloc, res_grid, logger),
     current_slot(cfg_builder_params.scs_common, 0)
   {
+    ues.register_cell(cell_ues);
     logger.set_level(ocudulog::basic_levels::debug);
     ocudulog::init();
 
@@ -241,8 +243,8 @@ protected:
   ocudulog::basic_logger& logger{ocudulog::fetch_basic_logger("SCHED")};
   scheduler_result_logger res_logger{false, cell_cfg.params.pci};
 
+  ue_cell_repository      cell_ues;
   ue_repository           ues;
-  ue_cell_repository&     cell_ues;
   slice_ue_repository     slice_ues;
   slice_rrm_policy_config rrm_policy;
   ran_slice_instance      slice_inst{ran_slice_id_t{0}, cell_cfg, rrm_policy, ues};

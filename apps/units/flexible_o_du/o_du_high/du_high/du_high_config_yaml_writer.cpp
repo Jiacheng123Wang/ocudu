@@ -7,6 +7,7 @@
 #include "apps/helpers/ntn/ntn_config_yaml_writer.h"
 #include "du_high_config.h"
 #include "ntn/du_high_ntn_config_yaml_writer.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/span.h"
 #include "ocudu/adt/static_vector.h"
 
@@ -83,9 +84,13 @@ static YAML::Node build_du_section(const du_high_unit_config& config)
   node["warn_on_drop"] = config.warn_on_drop;
 
   YAML::Node rlc_node;
+  rlc_node["drb_rx_window_seg_size"]      = config.rlc_cfg.drb_rx_window_seg_size;
   rlc_node["drb_rx_window_seg_pool_size"] = config.rlc_cfg.drb_rx_window_seg_pool_size;
+  rlc_node["drb_tx_window_seg_size"]      = config.rlc_cfg.drb_tx_window_seg_size;
   rlc_node["drb_tx_window_seg_pool_size"] = config.rlc_cfg.drb_tx_window_seg_pool_size;
+  rlc_node["srb_rx_window_seg_size"]      = config.rlc_cfg.srb_rx_window_seg_size;
   rlc_node["srb_rx_window_seg_pool_size"] = config.rlc_cfg.srb_rx_window_seg_pool_size;
+  rlc_node["srb_tx_window_seg_size"]      = config.rlc_cfg.srb_tx_window_seg_size;
   rlc_node["srb_tx_window_seg_pool_size"] = config.rlc_cfg.srb_tx_window_seg_pool_size;
   node["rlc"]                             = rlc_node;
 
@@ -470,7 +475,9 @@ static YAML::Node build_du_high_prach_section(const du_high_unit_rach_config& co
   if (config.prach_config_index.has_value()) {
     node["prach_config_index"] = config.prach_config_index.value();
   }
-  node["total_nof_ra_preambles"] = config.total_nof_ra_preambles;
+  node["total_nof_ra_preambles"]           = config.total_nof_ra_preambles;
+  node["cfra_enabled"]                     = config.cfra_enabled;
+  node["multiplex_uci_on_cf_rar_ul_grant"] = config.multiplex_uci_on_cf_rar_ul_grant;
   if (config.prach_frequency_start.has_value()) {
     node["prach_frequency_start"] = config.prach_frequency_start.value();
   }

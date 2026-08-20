@@ -5,6 +5,7 @@
 #include "srs_resource_manager_aperiodic.h"
 #include "srs_resource_generator.h"
 #include "srs_resource_manager_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/srs/srs_configuration.h"
 #include "ocudu/ran/srs/srs_constants.h"
 #include "ocudu/scheduler/config/pusch_td_resource_indices.h"

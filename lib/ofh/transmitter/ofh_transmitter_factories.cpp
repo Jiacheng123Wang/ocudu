@@ -10,6 +10,7 @@
 #include "ofh_data_flow_uplane_downlink_task_dispatcher.h"
 #include "ofh_transmitter_impl.h"
 #include "ofh_uplane_fragment_size_calculator.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ofh/compression/compression_factory.h"
 #include "ocudu/ofh/compression/iq_compressor.h"
 #include "ocudu/ofh/ecpri/ecpri_factories.h"

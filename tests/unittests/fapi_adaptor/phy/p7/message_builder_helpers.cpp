@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "message_builder_helpers.h"
+#include "ocudu/adt/format.h"
 #include <random>
 
 static std::mt19937 gen(0);

@@ -6,6 +6,7 @@
 #include "lib/e1ap/common/e1ap_asn1_packer.h"
 #include "test_helpers.h"
 #include "tests/unittests/gateways/test_helpers.h"
+#include "ocudu/adt/format.h"
 #include <gtest/gtest.h>
 
 using namespace ocudu;

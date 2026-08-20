@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pdsch.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/fapi_adaptor/precoding_matrix_repository.h"
 #include "ocudu/ocudulog/logger.h"
 #include "ocudu/ran/resource_allocation/vrb_to_prb.h"

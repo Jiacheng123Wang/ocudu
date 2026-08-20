@@ -104,6 +104,7 @@ protected:
     rrc_ue_create_msg.cu_cp_ue_notifier     = &ue_mng.find_ue(allocated_ue_index)->get_rrc_ue_cu_cp_ue_notifier();
     rrc_ue_create_msg.cell.bands.push_back(nr_band::n78);
     rrc_ue_create_msg.cell.plmn_identity_list.push_back(plmn_identity::test_value());
+    rrc_ue_create_msg.cell.timers.t301 = test_t301;
 
     rrc_ue_cfg_t rrc_ue_cfg;
     // Add meas timing.
@@ -362,6 +363,15 @@ protected:
     pdcp_ctx->handle_ul_dcch_pdu(srb_id_t::srb1, byte_buffer::create(rrc_reconfig_complete_pdu).value());
   }
 
+  /// Makes the CU-CP answer a UE context retrieval with a context retrieved from a peer NG-RAN node, as if no local UE
+  /// context had matched the reestablishment identity.
+  void add_retrievable_ue_context()
+  {
+    rrc_ue_cu_cp_notifier.context_retrieval_succeeds = true;
+    rrc_ue_cu_cp_notifier.retrieved_sec_context =
+        generate_security_context(ue_mng.find_ue(allocated_ue_index)->get_security_manager());
+  }
+
   void add_ue_reestablishment_context(cu_cp_ue_index_t ue_index)
   {
     rrc_ue_reestablishment_context_response reest_context = {};
@@ -445,6 +455,9 @@ protected:
                   .sinr.value(),
               92);
   }
+
+  /// T301 the test cell advertises, as the RRC DU would derive it from SIB1.
+  static constexpr std::chrono::milliseconds test_t301{2000};
 
   cu_cp_ue_index_t allocated_ue_index;
 

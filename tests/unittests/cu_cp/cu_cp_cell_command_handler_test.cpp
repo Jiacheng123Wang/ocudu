@@ -6,6 +6,7 @@
 #include "test_helpers.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_messages.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/common.h"
 #include "ocudu/asn1/f1ap/f1ap.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents.h"
@@ -60,22 +61,52 @@ public:
     return ack;
   }
 
+  /// Pop the stage-1 gNB-CU Configuration Update of the graceful stop, validate that it bars (and only bars) the
+  /// given cell, and return it so the caller can ack/reject it. Fails the test if it does not arrive.
+  void expect_bar_upd(const nr_cell_global_id_t& cgi, f1ap_message& bar_upd)
+  {
+    ASSERT_TRUE(pop_cu_cfg_upd(bar_upd)) << "CU-CP did not emit the bar-carrying gNB-CU Configuration Update";
+    const auto& bar_ies = bar_upd.pdu.init_msg().value.gnb_cu_cfg_upd();
+    ASSERT_TRUE(bar_ies->cells_to_be_barred_list_present) << "stage 1 must carry the Cells to be Barred List";
+    ASSERT_FALSE(bar_ies->cells_to_be_deactiv_list_present) << "the bar and the deactivation are separate stages";
+    ASSERT_EQ(bar_ies->cells_to_be_barred_list.size(), 1U);
+    const auto& bar_item = bar_ies->cells_to_be_barred_list[0].value().cells_to_be_barred_item();
+    ASSERT_EQ(bar_item.nr_cgi.nr_cell_id.to_number(), cgi.nci.value());
+    ASSERT_EQ(bar_item.cell_barred.value, asn1::f1ap::cell_barred_opts::barred);
+  }
+
+  /// Pop the stage-1 bar update and ack it, unblocking the following stages of the graceful stop.
+  void expect_and_ack_bar_upd(const nr_cell_global_id_t& cgi)
+  {
+    f1ap_message bar_upd;
+    expect_bar_upd(cgi, bar_upd);
+    if (::testing::Test::HasFatalFailure()) {
+      return;
+    }
+    get_du(du_idx).push_ul_pdu(make_ack_for(bar_upd));
+  }
+
   unsigned            du_idx{0};
   nr_cell_global_id_t served_cgi;
 };
 
-TEST_F(cu_cp_cell_command_handler_test, when_deactivate_cell_then_cfg_upd_carries_cgi_and_completes_on_du_ack)
+TEST_F(cu_cp_cell_command_handler_test, when_deactivate_cell_then_bar_precedes_deactivation_and_completes_on_du_ack)
 {
   cu_cp_cell_command_handler& cell_cmd = get_cu_cp().get_command_handler().get_cell_command_handler();
 
   async_task<cu_cp_cell_command_response>         resp_task = cell_cmd.deactivate_cell(served_cgi);
   lazy_task_launcher<cu_cp_cell_command_response> launcher(resp_task);
 
-  // CU-CP emits a gNB-CU Configuration Update carrying the served CGI in the deactivate list.
+  // Stage 1: the CU-CP first bars the cell via a gNB-CU Configuration Update carrying the Cells to be Barred List.
+  ASSERT_NO_FATAL_FAILURE(expect_and_ack_bar_upd(served_cgi));
+
+  // Stage 3: only then does the CU-CP emit the gNB-CU Configuration Update carrying the served CGI in the
+  // deactivate list.
   f1ap_message cu_cfg_upd;
-  ASSERT_TRUE(pop_cu_cfg_upd(cu_cfg_upd)) << "CU-CP did not emit gNB-CU Configuration Update";
+  ASSERT_TRUE(pop_cu_cfg_upd(cu_cfg_upd)) << "CU-CP did not emit the deactivation gNB-CU Configuration Update";
   const auto& upd_ies = cu_cfg_upd.pdu.init_msg().value.gnb_cu_cfg_upd();
   ASSERT_TRUE(upd_ies->cells_to_be_deactiv_list_present);
+  ASSERT_FALSE(upd_ies->cells_to_be_barred_list_present) << "the bar and the deactivation are separate stages";
   ASSERT_EQ(upd_ies->cells_to_be_deactiv_list.size(), 1U);
   const auto& deactiv_item = upd_ies->cells_to_be_deactiv_list[0].value().cells_to_be_deactiv_list_item();
   // NCI uniquely identifies the served cell; the ASN.1 3-octet PLMN round-trip is not load-bearing here.
@@ -132,10 +163,13 @@ TEST_F(cu_cp_cell_command_handler_test, when_du_rejects_cfg_upd_then_command_fai
   async_task<cu_cp_cell_command_response>         resp_task = cell_cmd.deactivate_cell(served_cgi);
   lazy_task_launcher<cu_cp_cell_command_response> launcher(resp_task);
 
+  // The bar stage succeeds.
+  ASSERT_NO_FATAL_FAILURE(expect_and_ack_bar_upd(served_cgi));
+
   f1ap_message cu_cfg_upd;
   ASSERT_TRUE(pop_cu_cfg_upd(cu_cfg_upd));
 
-  // DU rejects the configuration update. Echo the request's transaction id so the failure matches
+  // DU rejects the deactivation configuration update. Echo the request's transaction id so the failure matches
   // the pending procedure.
   f1ap_message fail = test_helpers::generate_gnb_cu_configuration_update_failure();
   fail.pdu.unsuccessful_outcome().value.gnb_cu_cfg_upd_fail()->transaction_id =
@@ -146,14 +180,42 @@ TEST_F(cu_cp_cell_command_handler_test, when_du_rejects_cfg_upd_then_command_fai
   EXPECT_FALSE(wait_for_task_result(launcher).success);
 }
 
+TEST_F(cu_cp_cell_command_handler_test, when_du_rejects_bar_upd_then_deactivation_still_proceeds_and_command_fails)
+{
+  cu_cp_cell_command_handler& cell_cmd = get_cu_cp().get_command_handler().get_cell_command_handler();
+
+  async_task<cu_cp_cell_command_response>         resp_task = cell_cmd.deactivate_cell(served_cgi);
+  lazy_task_launcher<cu_cp_cell_command_response> launcher(resp_task);
+
+  // DU rejects the stage-1 bar update.
+  f1ap_message bar_upd;
+  ASSERT_NO_FATAL_FAILURE(expect_bar_upd(served_cgi, bar_upd));
+  f1ap_message fail = test_helpers::generate_gnb_cu_configuration_update_failure();
+  fail.pdu.unsuccessful_outcome().value.gnb_cu_cfg_upd_fail()->transaction_id =
+      bar_upd.pdu.init_msg().value.gnb_cu_cfg_upd()->transaction_id;
+  get_du(du_idx).push_ul_pdu(fail);
+
+  // A failed bar does not abort the graceful stop: deactivation is the operator's intent, so the deactivation
+  // update still goes out (and the DU bars autonomously as a fallback during the cell stop).
+  f1ap_message cu_cfg_upd;
+  ASSERT_TRUE(pop_cu_cfg_upd(cu_cfg_upd)) << "deactivation should still proceed after a failed bar";
+  ASSERT_TRUE(cu_cfg_upd.pdu.init_msg().value.gnb_cu_cfg_upd()->cells_to_be_deactiv_list_present);
+  get_du(du_idx).push_ul_pdu(make_ack_for(cu_cfg_upd));
+
+  // The command result reflects the failed bar stage.
+  EXPECT_FALSE(wait_for_task_result(launcher).success);
+}
+
 TEST_F(cu_cp_cell_command_handler_test, when_activate_follows_deactivate_then_deactivated_cell_is_found)
 {
   cu_cp_cell_command_handler& cell_cmd = get_cu_cp().get_command_handler().get_cell_command_handler();
 
-  // Lock the cell first. On the deactivate ack the cell leaves the DU's served-cell view.
+  // Lock the cell first (bar, then deactivate). On the deactivate ack the cell leaves the DU's served-cell view.
   {
     async_task<cu_cp_cell_command_response>         deact_task = cell_cmd.deactivate_cell(served_cgi);
     lazy_task_launcher<cu_cp_cell_command_response> deact_launcher(deact_task);
+
+    ASSERT_NO_FATAL_FAILURE(expect_and_ack_bar_upd(served_cgi));
 
     f1ap_message deact_upd;
     ASSERT_TRUE(pop_cu_cfg_upd(deact_upd));
@@ -192,16 +254,25 @@ TEST_F(cu_cp_cell_command_handler_test, when_deactivate_cell_with_attached_ue_th
   async_task<cu_cp_cell_command_response>         resp_task = cell_cmd.deactivate_cell(served_cgi);
   lazy_task_launcher<cu_cp_cell_command_response> launcher(resp_task);
 
-  // The CU-CP releases the cell's UE itself (rather than relying on the DU to drain it): an F1AP UE Context Release
-  // Command goes out first, and no gNB-CU Configuration Update is emitted until the release completes.
+  // Stage 1: the cell is barred before any UE is touched, so the released UE does not re-camp on it.
+  ASSERT_NO_FATAL_FAILURE(expect_and_ack_bar_upd(served_cgi));
+
+  // Stage 2: the CU-CP releases the cell's UE itself (rather than relying on the DU to drain it): an F1AP UE
+  // Context Release Command goes out, and no deactivation cfg update is emitted until the release completes.
   f1ap_message release_cmd;
   ASSERT_TRUE(wait_for_f1ap_tx_pdu(du_idx, release_cmd));
   ASSERT_TRUE(test_helpers::is_valid_ue_context_release_command(release_cmd))
-      << "CU-CP should release the cell's UE before deactivating the cell";
+      << "CU-CP should release the cell's UE after barring and before deactivating the cell";
+
+  // While the release is pending, no deactivation cfg update may be emitted: stage 3 is gated on stage 2.
+  f1ap_message premature;
+  ASSERT_FALSE(wait_for_f1ap_tx_pdu(du_idx, premature, std::chrono::milliseconds{50}))
+      << "deactivation cfg update was emitted before the UE release completed";
 
   // The DU acknowledges the UE release; only then should the deactivation cfg update be emitted.
   get_du(du_idx).push_ul_pdu(test_helpers::generate_ue_context_release_complete(release_cmd));
 
+  // Stage 3: the deactivation cfg update follows the UE release.
   f1ap_message cu_cfg_upd;
   ASSERT_TRUE(pop_cu_cfg_upd(cu_cfg_upd)) << "Deactivation cfg update should follow the UE release";
   const auto& upd_ies = cu_cfg_upd.pdu.init_msg().value.gnb_cu_cfg_upd();
@@ -230,18 +301,27 @@ TEST_F(cu_cp_cell_command_handler_test,
   async_task<cu_cp_cell_command_response>         resp_task = cell_cmd.deactivate_cell(served_cgi);
   lazy_task_launcher<cu_cp_cell_command_response> launcher(resp_task);
 
-  // The CU-CP releases every UE on the cell (one F1AP UE Context Release Command each) before deactivating.
+  // Stage 1: the cell is barred before the UE drain begins.
+  ASSERT_NO_FATAL_FAILURE(expect_and_ack_bar_upd(served_cgi));
+
+  // Stage 2: the CU-CP releases every UE on the cell (one F1AP UE Context Release Command each) before deactivating.
   std::vector<f1ap_message> release_cmds(nof_ues);
   for (unsigned i = 0; i != nof_ues; ++i) {
     ASSERT_TRUE(wait_for_f1ap_tx_pdu(du_idx, release_cmds[i]))
         << "expected a UE Context Release Command for UE " << i << " before deactivation";
     ASSERT_TRUE(test_helpers::is_valid_ue_context_release_command(release_cmds[i]));
   }
+
+  // While the releases are pending, no deactivation cfg update may be emitted: stage 3 is gated on stage 2.
+  f1ap_message premature;
+  ASSERT_FALSE(wait_for_f1ap_tx_pdu(du_idx, premature, std::chrono::milliseconds{50}))
+      << "deactivation cfg update was emitted before the UE releases completed";
+
   for (unsigned i = 0; i != nof_ues; ++i) {
     get_du(du_idx).push_ul_pdu(test_helpers::generate_ue_context_release_complete(release_cmds[i]));
   }
 
-  // Only once all UEs are released does the deactivation cfg update go out.
+  // Stage 3: only once all UEs are released does the deactivation cfg update go out.
   f1ap_message cu_cfg_upd;
   ASSERT_TRUE(pop_cu_cfg_upd(cu_cfg_upd)) << "deactivation cfg update should follow all UE releases";
 
@@ -297,6 +377,19 @@ public:
     return ack;
   }
 
+  /// Pop the stage-1 bar update of the graceful stop, validate that it bars only the given cell, and ack it.
+  void expect_and_ack_bar_upd(const nr_cell_global_id_t& cgi)
+  {
+    f1ap_message bar_upd;
+    ASSERT_TRUE(pop_cu_cfg_upd(bar_upd)) << "CU-CP did not emit the bar-carrying gNB-CU Configuration Update";
+    const auto& bar_ies = bar_upd.pdu.init_msg().value.gnb_cu_cfg_upd();
+    ASSERT_TRUE(bar_ies->cells_to_be_barred_list_present);
+    ASSERT_EQ(bar_ies->cells_to_be_barred_list.size(), 1U) << "only the locked cell may be barred";
+    const auto& bar_item = bar_ies->cells_to_be_barred_list[0].value().cells_to_be_barred_item();
+    ASSERT_EQ(bar_item.nr_cgi.nr_cell_id.to_number(), cgi.nci.value());
+    get_du(du_idx).push_ul_pdu(make_ack_for(bar_upd));
+  }
+
   unsigned            du_idx{0};
   nr_cell_global_id_t camped_cgi;
   nr_cell_global_id_t other_cgi;
@@ -313,7 +406,10 @@ TEST_F(cu_cp_cell_command_multicell_test, when_deactivate_cell_then_ues_on_other
   async_task<cu_cp_cell_command_response>         resp_task = cell_cmd.deactivate_cell(other_cgi);
   lazy_task_launcher<cu_cp_cell_command_response> launcher(resp_task);
 
-  // No UE is released, so the very first F1AP PDU is the deactivation cfg update, carrying the locked cell only.
+  // Stage 1: the very first F1AP PDU is the bar update, and it bars the locked cell only.
+  ASSERT_NO_FATAL_FAILURE(expect_and_ack_bar_upd(other_cgi));
+
+  // No UE is released, so the next F1AP PDU is the deactivation cfg update, carrying the locked cell only.
   f1ap_message cu_cfg_upd;
   ASSERT_TRUE(pop_cu_cfg_upd(cu_cfg_upd)) << "a UE was released when locking a different cell";
   const auto& upd_ies = cu_cfg_upd.pdu.init_msg().value.gnb_cu_cfg_upd();

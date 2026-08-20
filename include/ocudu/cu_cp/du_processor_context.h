@@ -5,6 +5,7 @@
 #pragma once
 
 #include "ocudu/adt/byte_buffer.h"
+#include "ocudu/ran/cu_cp_cell_configuration.h"
 #include "ocudu/ran/du_cell_index.h"
 #include "ocudu/ran/nr_band.h"
 #include "ocudu/ran/nr_cgi.h"
@@ -32,6 +33,10 @@ struct du_cell_configuration {
   std::vector<plmn_identity> served_plmns;
   /// NR bands provided/supported by the cell.
   std::vector<nr_band> bands;
+  /// Duplex mode and carrier frequencies of the cell.
+  cu_cp_nr_mode_info nr_mode_info;
+  /// MeasurementTimingConfiguration of the cell, as defined in TS 38.331 section 6.2.2.
+  byte_buffer meas_timing_cfg;
   /// System Information provided by the DU for this cell.
   du_sys_info sys_info;
   /// Deactivated PLMN identitys initially served by the cell.

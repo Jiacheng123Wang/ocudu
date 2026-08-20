@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pxsch_bler_test_channel_emulator.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/span.h"
 #include "ocudu/ocuduvec/add.h"
 #include "ocudu/ocuduvec/prod.h"

@@ -8,6 +8,7 @@
 #include "ofdm_modulator_impl.h"
 #include "ofdm_modulator_pool.h"
 #include "ofdm_prach_demodulator_impl.h"
+#include "ocudu/adt/format.h"
 
 using namespace ocudu;
 

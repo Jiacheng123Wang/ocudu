@@ -11,7 +11,10 @@
 #include "ocudu/ntn/ntn_sib19_update_handler.h"
 #include "ocudu/ran/sib/system_info_config.h"
 #include "ocudu/support/ocudu_assert.h"
+#include "ocudu/support/synchronization/sync_event.h"
 #include "fmt/chrono.h"
+#include <cmath>
+#include <thread>
 
 using namespace ocudu;
 using namespace ocudu_ntn;
@@ -32,6 +35,61 @@ static double compute_doppler_hz(double ta_common_drift_us_per_s, double carrier
 static double compute_doppler_shift_rate_hz_per_s(double ta_common_drift_variant_us_per_s2, double carrier_freq_hz)
 {
   return ta_common_drift_variant_us_per_s2 * 1e-6 * carrier_freq_hz;
+}
+
+/// \brief Computes the uplink timing advance T_TA of a UE at the cell reference location.
+///
+/// Per TS 38.211, Section 4.3.1, uplink frame i starts T_TA before downlink frame i at the UE, where
+///
+///   T_TA = (N_TA + N_TA_offset + N_TA_adj_common + N_TA_adj_UE) * Tc
+///
+/// The NTN-specific terms are N_TA_adj_common and N_TA_adj_UE (TS 38.213, Section 4.2):
+///   - N_TA_adj_common is the feeder link round trip, i.e. ta-Common including ta-CommonOffset, which this gNB computes
+///     and broadcasts. Zero without a feeder link (regenerative payload).
+///   - N_TA_adj_UE is the service link round trip. Each UE derives it from the broadcast ephemeris and its own
+///     position, so the gNB can only approximate it at the cell reference location; the error is the differential delay
+///     across the cell footprint.
+///
+/// The two are not treated alike. Without a feeder link nothing broadcasts ta-Info and N_TA_adj_common is genuinely
+/// zero, so it contributes nothing. An absent service link round trip means the opposite: the gNB could not estimate a
+/// term the UE does apply, so reporting the partial sum would claim a T_TA that is wrong by the whole service link.
+///
+/// N_TA and N_TA_offset are left out. An NTN UE pre-compensates the propagation delay through the two terms above, so
+/// the closed-loop N_TA only corrects residual error and stays at a few tens of microseconds; N_TA_offset is at most
+/// 39936 Tc, i.e. ~20us. Both are well inside the one-slot margin that \c is_inside_ul_meas_gap applies anyway.
+///
+/// \return The reference location T_TA, or std::nullopt when the service link round trip is unavailable (no reference
+/// location).
+static std::optional<std::chrono::microseconds> compute_ref_location_ul_ta(const ntn_orbital_state& state,
+                                                                           const ntn_cell_config&   cell_cfg)
+{
+  if (not cell_cfg.ntn_cfg) {
+    return std::nullopt;
+  }
+  // A cell carries only the location matching its type: referenceLocation for a (quasi-)Earth fixed cell,
+  // movingReferenceLocation for an Earth-moving one (TS 38.331, SIB19 field descriptions).
+  const std::optional<geodetic_coordinates_t>& ref_location = cell_cfg.ntn_cfg->reference_location.has_value()
+                                                                  ? cell_cfg.ntn_cfg->reference_location
+                                                                  : cell_cfg.ntn_cfg->moving_reference_location;
+  if (not ref_location.has_value()) {
+    return std::nullopt;
+  }
+  const std::optional<std::chrono::microseconds> service_link_rtt = compute_service_link_rtt(state, *ref_location);
+  if (not service_link_rtt.has_value()) {
+    return std::nullopt;
+  }
+
+  std::chrono::microseconds ul_ta = *service_link_rtt;
+  // Only add N_TA_adj_common where SIB19 actually broadcasts ta-Info, and with the offset it folds into taCommon-r17:
+  // the cell-level one, falling back to the satellite TA-info override. The OCM computes ta-Info per satellite, so it
+  // is also present for a cell without a feeder link, whose UE applies no N_TA_adj_common at all.
+  if (cell_cfg.ntn_cfg->feeder_link_info.has_value() and state.ta_info.has_value()) {
+    const double ta_common_offset_us =
+        cell_cfg.ntn_cfg->ta_common_offset.value_or(state.ta_info->ta_common_offset.value_or(0.0));
+    const double ta_common_us = state.ta_info->ta_common + ta_common_offset_us;
+    ul_ta += std::chrono::microseconds{static_cast<int64_t>(std::lround(ta_common_us))};
+  }
+  return ul_ta;
 }
 
 /// \brief Merges a sparse cell config update into a full cell config snapshot.
@@ -103,32 +161,23 @@ static void merge_cell_config_update(ntn_cell_config& cfg, const ntn_cell_config
 /// Returns the start slot of the next SI window for the given SI scheduling info, strictly after cur_sl.
 static slot_point get_next_si_win_start(const ntn_si_scheduling_info& si_sched, slot_point cur_sl)
 {
-  // 2> The concerned SI message is configured in the schedulingInfoList2.
-  // 3> Determine the integer value x = (si-WindowPosition -1) * w, where w is
-  // the si-WindowLength. See TS 38 331 V17.0.0.
-  unsigned x = (si_sched.si_window_position - 1) * si_sched.si_window_len_slots;
+  // TS 38.331 (schedulingInfoList2): the SI window starts at slot a = x mod N in the radio frame for which
+  // SFN mod T = floor(x/N), i.e. at offset x within the T-frame SI period, where x = (si-WindowPosition - 1) *
+  // si-WindowLength, N is the number of slots per radio frame and T the si-Periodicity. Compute the gap to that
+  // offset in a single T*N-slot period so a window later in the current frame is not pushed a whole period ahead.
+  const unsigned N            = cur_sl.nof_slots_per_frame();
+  const unsigned T            = si_sched.si_period_rf;
+  const unsigned period_slots = T * N;
 
-  // 3> The SI-window starts at the slot #a, where a = x mod N, in the radio
-  // frame for which SFN mod T = FLOOR(x/N), where T is the si-Periodicity of
-  // the concerned SI message and N is the number of slots in a radio frame as
-  // specified in TS 38.213.
-  const unsigned N = cur_sl.nof_slots_per_frame();
-  const unsigned T = si_sched.si_period_rf;
-  const unsigned a = x % N;
+  const unsigned target_offset  = ((si_sched.si_window_position - 1) * si_sched.si_window_len_slots) % period_slots;
+  const unsigned current_offset = (cur_sl.sfn() % T) * N + cur_sl.slot_index();
 
-  // Compute the difference (delta) needed to reach the target slot reminders.
-  unsigned sfn_delta  = (T + (x / N) - (cur_sl.sfn() % T)) % T;
-  unsigned slot_delta = (N + a - cur_sl.slot_index()) % N;
-
-  // If delta is zero, it means current_sfn already has the desired remainder.
-  // Since we need new_sfn > current_sfn, we add one full period (T).
-  if (sfn_delta == 0) {
-    sfn_delta = T;
+  // Strictly after cur_sl: a zero gap means the window is at the current slot, so advance one full period.
+  unsigned delta = (period_slots + target_offset - current_offset) % period_slots;
+  if (delta == 0) {
+    delta = period_slots;
   }
-  if (slot_delta) {
-    sfn_delta -= 1;
-  }
-  return cur_sl + sfn_delta * N + slot_delta;
+  return cur_sl + delta;
 }
 
 ntn_configuration_manager_impl::ntn_configuration_manager_impl(const ntn_configuration_manager_config& config,
@@ -136,8 +185,8 @@ ntn_configuration_manager_impl::ntn_configuration_manager_impl(const ntn_configu
   logger(ocudulog::fetch_basic_logger("NTN")),
   sib19_pdu_update_handler(std::move(dependencies.sib19_msg_update_handler)),
   time_provider(std::move(dependencies.time_provider)),
-  doppler_handler(std::move(dependencies.doppler_handler)),
   meas_info_update_handler(std::move(dependencies.meas_info_update_handler)),
+  doppler_handler(dependencies.doppler_handler),
   timers(dependencies.timers),
   executor(dependencies.executor)
 {
@@ -197,6 +246,7 @@ ntn_configuration_manager_impl::ntn_configuration_manager_impl(const ntn_configu
     // Create per-cell timer for the periodic update task, aligned to the SI period when SIB19 is scheduled.
     auto period_ms = cell_config.si_sched ? std::chrono::milliseconds(cell_config.si_sched->si_period_rf * 10)
                                           : *cell_config.update_period;
+    ctx.common_scs = cell_config.common_scs;
     ctx.timer      = timers.create_unique_timer(executor);
     ctx.timer.set(period_ms, [this, nr_cgi = cell_config.nr_cgi]() {
       // Check if cell context still exists before processing.
@@ -206,22 +256,25 @@ ntn_configuration_manager_impl::ntn_configuration_manager_impl(const ntn_configu
         return;
       }
 
-      auto cur_tp_sl = time_provider->get_last_mapping(nr_cgi, subcarrier_spacing::kHz15);
-      if (cur_tp_sl and cur_tp_sl->slot_tx.valid()) {
-        logger.debug("Run periodic config update task cell={:#x} slot={} time={:%T}",
-                     nr_cgi.nci,
-                     cur_tp_sl->slot_tx,
-                     cur_tp_sl->time_point);
-        periodic_ntn_config_update_task(nr_cgi, cur_tp_sl->time_point, cur_tp_sl->slot_tx);
-      }
+      run_cell_update(nr_cgi, ctx_it->second);
 
       ctx_it->second.timer.run();
     });
   }
 
-  // Start all timers.
-  for (auto& [cgi, ctx] : cells) {
-    ctx.timer.run();
+  // The timers are armed by start(), not here: until the node accepts configuration updates they would only produce
+  // work that is discarded.
+}
+
+void ntn_configuration_manager_impl::run_cell_update(const nr_cell_global_id_t& nr_cgi, per_cell_context& ctx)
+{
+  const auto cur_tp_sl = time_provider->get_last_mapping(nr_cgi, ctx.common_scs);
+  if (cur_tp_sl and cur_tp_sl->slot_tx.valid()) {
+    logger.debug("Run periodic config update task cell={:#x} slot={} time={:%T}",
+                 nr_cgi.nci,
+                 cur_tp_sl->slot_tx,
+                 cur_tp_sl->time_point);
+    periodic_ntn_config_update_task(nr_cgi, cur_tp_sl->time_point, cur_tp_sl->slot_tx);
   }
 }
 
@@ -247,6 +300,55 @@ ntn_configuration_manager_impl::find_satellite_context(unsigned satellite_index)
 {
   auto it = satellite_contexts.find(satellite_index);
   return it != satellite_contexts.end() ? &it->second : nullptr;
+}
+
+void ntn_configuration_manager_impl::start()
+{
+  if (std::exchange(running, true)) {
+    return;
+  }
+
+  // Same contract as stop(): the timers are used from the manager execution context, so arm them from there and block
+  // until it is done.
+  sync_event ev;
+  while (not executor.execute([this, tk = ev.get_token()]() mutable {
+    for (auto& [cgi, ctx] : cells) {
+      // Run one update before arming the timer so the first SIB19 refresh and Doppler compensation do not wait a
+      // whole update period. It is a no-op until the node timeline produces its first slot mapping.
+      run_cell_update(cgi, ctx);
+      ctx.timer.run();
+    }
+  })) {
+    logger.warning("Unable to dispatch NTN configuration manager start. Retrying...");
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ev.wait();
+
+  logger.info("NTN configuration manager started");
+}
+
+void ntn_configuration_manager_impl::stop()
+{
+  if (not std::exchange(running, false)) {
+    // Never started, or already stopped: no timer can be armed.
+    return;
+  }
+
+  // The timers are used from the manager execution context and, per the timer_manager contract, must not be touched
+  // concurrently from another thread. Stop them from that context and block until it is done, so that once this
+  // returns no update task is running or pending and no reference held by this manager is dereferenced again.
+  sync_event ev;
+  while (not executor.execute([this, tk = ev.get_token()]() mutable {
+    for (auto& [cgi, ctx] : cells) {
+      ctx.timer.stop();
+    }
+  })) {
+    logger.warning("Unable to dispatch NTN configuration manager stop. Retrying...");
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ev.wait();
+
+  logger.info("NTN configuration manager stopped");
 }
 
 ntn_config_update_result ntn_configuration_manager_impl::handle_ntn_config_update(const ntn_config_update_info& req)
@@ -371,7 +473,7 @@ bool ntn_configuration_manager_impl::send_cfo_compensation_request(const ntn_cel
     return false;
   }
 
-  if (not doppler_handler) {
+  if (doppler_handler == nullptr) {
     return false;
   }
 
@@ -437,6 +539,16 @@ ntn_orbital_state ntn_configuration_manager_impl::compute_orbital_state(per_sate
   return result;
 }
 
+// Wall-clock offset from the current slot to the start of epoch_slot's subframe: a slot lasts
+// 1 ms / nof_slots_per_subframe() and the SIB19 EpochTime is subframe-granular, so drop the part of slot_delta below
+// a subframe. slot_delta can be negative (the current-slot epoch when SIB19 is not scheduled).
+static std::chrono::nanoseconds subframe_aligned_epoch_offset(slot_point epoch_slot, int64_t slot_delta)
+{
+  const int64_t slot_duration_ns   = 1'000'000LL / static_cast<int64_t>(epoch_slot.nof_slots_per_subframe());
+  const int64_t slot_within_subfrm = static_cast<int64_t>(epoch_slot.subframe_slot_index());
+  return std::chrono::nanoseconds{(slot_delta - slot_within_subfrm) * slot_duration_ns};
+}
+
 void ntn_configuration_manager_impl::periodic_ntn_config_update_task(const nr_cell_global_id_t& nr_cgi,
                                                                      time_point                 tp,
                                                                      slot_point                 sl)
@@ -469,7 +581,7 @@ void ntn_configuration_manager_impl::periodic_ntn_config_update_task(const nr_ce
     epoch_slot = sl;
   }
   const auto       slot_diff  = epoch_slot - sl;
-  const time_point epoch_time = tp + std::chrono::milliseconds(slot_diff);
+  const time_point epoch_time = tp + subframe_aligned_epoch_offset(epoch_slot, slot_diff);
 
   // Propagate each serving cell satellite using its own OCM.
   ntn_orbital_state serving_ntn_info;
@@ -567,12 +679,13 @@ void ntn_configuration_manager_impl::periodic_ntn_config_update_task(const nr_ce
     }
 
     ntn_sib19_update_request ntn_req;
-    ntn_req.nr_cgi         = cell_cfg.nr_cgi;
-    ntn_req.si_msg_idx     = cell_cfg.si_sched->si_msg_idx;
-    ntn_req.sib_idx        = 19;
-    ntn_req.slot           = next_si_win_start;
-    ntn_req.si_slot_period = cell_cfg.si_sched->si_period_rf * next_si_win_start.nof_slots_per_frame();
-    ntn_req.epoch_time     = epoch_time;
+    ntn_req.nr_cgi             = cell_cfg.nr_cgi;
+    ntn_req.si_msg_idx         = cell_cfg.si_sched->si_msg_idx;
+    ntn_req.sib_idx            = 19;
+    ntn_req.slot               = next_si_win_start;
+    ntn_req.si_slot_period     = cell_cfg.si_sched->si_period_rf * next_si_win_start.nof_slots_per_frame();
+    ntn_req.epoch_time         = epoch_time;
+    ntn_req.ref_location_ul_ta = compute_ref_location_ul_ta(serving_ntn_info, cell_cfg);
 
     ntn_req.sib19 = generate_sib19_info(cell_cfg,
                                         epoch_slot,
@@ -590,7 +703,7 @@ void ntn_configuration_manager_impl::periodic_ntn_config_update_task(const nr_ce
   }
 
   // Send CFO compensation request to PHY.
-  if (doppler_handler and serving_ntn_info.ta_info) {
+  if (doppler_handler != nullptr and serving_ntn_info.ta_info) {
     send_cfo_compensation_request(cell_cfg, epoch_time, *serving_ntn_info.ta_info);
   }
 

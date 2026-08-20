@@ -323,18 +323,21 @@ void ocudu_scheduler_adapter::handle_si_change_indication(const si_scheduling_up
   sched_impl->handle_si_update_request(request);
 }
 
-void ocudu_scheduler_adapter::handle_pws_broadcast_indication(du_cell_index_t         cell_idx,
-                                                              unsigned                si_msg_idx,
-                                                              std::optional<unsigned> nof_segments,
-                                                              units::bytes            msg_len)
+void ocudu_scheduler_adapter::handle_pws_si_change_indication(const pws_si_scheduling_update_request& request)
 {
-  sched_impl->handle_pws_broadcast_indication({cell_idx, si_msg_idx, nof_segments, msg_len});
+  sched_impl->handle_pws_si_update_request(request);
 }
 
 void ocudu_scheduler_adapter::handle_slice_reconfiguration_request(const du_cell_slice_reconfig_request& req)
 {
   // Update RRM policies in the scheduler.
   sched_impl->handle_slice_reconfiguration_request(req);
+}
+
+void ocudu_scheduler_adapter::handle_ntn_ul_ta_update(const sched_cell_ntn_ul_ta_update& req)
+{
+  // Update the reference location uplink timing advance in the scheduler cell configuration.
+  sched_impl->handle_ntn_ul_ta_update(req);
 }
 
 void ocudu_scheduler_adapter::sched_config_notif_adapter::on_ue_config_complete(du_ue_index_t ue_index,

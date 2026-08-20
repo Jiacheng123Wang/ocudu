@@ -4,6 +4,7 @@
 
 #include "ocudu/ran/band_helper.h"
 #include "ssb/ssb_freq_position_generator.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/interval.h"
 #include "ocudu/adt/span.h"
 #include "ocudu/ran/bs_channel_bandwidth.h"

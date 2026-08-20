@@ -7,6 +7,7 @@
 #include "ocudu/ran/harq_id.h"
 #include "ocudu/ran/rnti.h"
 #include "ocudu/ran/slot_point.h"
+#include <optional>
 
 namespace ocudu {
 namespace fapi {
@@ -45,7 +46,7 @@ struct formatter<ocudu::fapi::rx_data_indication> {
                      "Rx_Data.indication slot={} rnti={} harq_id={} tbs={}",
                      msg.slot,
                      msg.pdu.rnti,
-                     underlying(msg.pdu.harq_id),
+                     msg.pdu.harq_id,
                      msg.pdu.transport_block.size());
   }
 };

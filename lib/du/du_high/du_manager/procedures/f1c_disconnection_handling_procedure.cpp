@@ -6,6 +6,7 @@
 #include "../du_cell_manager.h"
 #include "du_cell_stop_procedure.h"
 #include "du_setup_procedure.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/support/async/async_timer.h"
 
 using namespace ocudu;

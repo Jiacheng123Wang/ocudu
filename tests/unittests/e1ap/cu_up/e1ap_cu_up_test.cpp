@@ -5,6 +5,7 @@
 #include "../common/test_helpers.h"
 #include "e1ap_cu_up_test_helpers.h"
 #include "lib/e1ap/common/e1ap_asn1_utils.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/e1ap/e1ap_pdu_contents.h"
 #include "ocudu/ran/bcd_helper.h"
 #include "ocudu/support/async/async_test_utils.h"

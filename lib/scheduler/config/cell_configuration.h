@@ -37,6 +37,8 @@ public:
   const du_cell_group_index_t cell_group_index;
   /// List of RRM Policy members configured for this cell.
   std::vector<slice_rrm_policy_config> rrm_policy_members;
+  /// Number of UE contexts that the cell is expected to hold, including the UEs to be RRC Rejected.
+  const unsigned max_nof_ue_contexts;
 
   /// @name Derived parameters.
   /// Parameters derived from \ref ran_cell_config.
@@ -58,6 +60,13 @@ public:
 
   /// Cell-specific K-offset in slots defined by the cell subcarrier spacing.
   unsigned ntn_cs_koffset;
+
+  /// \brief Uplink timing advance T_TA of a UE at the cell reference location, see
+  /// \c ntn_cell_params::ref_location_ul_ta. Absent in a terrestrial cell, and in an NTN cell that configures no
+  /// reference location or whose first value has not been computed yet.
+  ///
+  /// Used to place the uplink measurement gap window, see \ref is_inside_ul_meas_gap. Refreshed as the satellite moves.
+  std::optional<std::chrono::microseconds> ntn_ref_location_ul_ta;
 
   subcarrier_spacing scs_common() const { return params.dl_cfg_common.init_dl_bwp.generic_params.scs; }
 

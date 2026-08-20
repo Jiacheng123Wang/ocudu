@@ -8,6 +8,7 @@
 #include "../../signal_processors/ssb/sss_processor_doubles.h"
 #include "pbch_encoder_doubles.h"
 #include "pbch_modulator_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/to_array.h"
 #include "ocudu/ocuduvec/compare.h"
 #include "ocudu/phy/phys_cell_id.h"

@@ -6,6 +6,7 @@
 #include "apps/services/worker_manager/worker_manager.h"
 #include "apps/units/flexible_o_du/split_helpers/flexible_o_du_configs.h"
 #include "ru_ofh_config_translator.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ru/ofh/ru_ofh_factory.h"
 
 using namespace ocudu;

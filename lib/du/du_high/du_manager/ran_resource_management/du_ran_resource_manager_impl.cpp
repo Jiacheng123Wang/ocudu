@@ -4,6 +4,7 @@
 
 #include "du_ran_resource_manager_impl.h"
 #include "du_cg_res_mng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/mac/config/mac_cell_group_config_factory.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ran/csi_report/csi_report_config_helpers.h"
@@ -85,7 +86,8 @@ du_ran_resource_manager_impl::du_ran_resource_manager_impl(span<const du_cell_co
   srs_res_mng(create_srs_resource_manager(cell_cfg_list_[0].ran)),
   meas_cfg_mng(cell_cfg_list),
   drx_res_mng(cell_cfg_list),
-  ra_res_alloc(cell_cfg_list)
+  ra_res_alloc(cell_cfg_list),
+  cell_ue_ctxts(cell_cfg_list_.size())
 {
   for (unsigned cell_idx_uint = 0; cell_idx_uint != cell_cfg_list.size(); ++cell_idx_uint) {
     const auto&           cell     = cell_cfg_list[cell_idx_uint];
@@ -96,6 +98,10 @@ du_ran_resource_manager_impl::du_ran_resource_manager_impl(span<const du_cell_co
       cg_res_mng.add_cell(cell_idx, cell);
     }
 
+    // The resource pools of a cell do not change during the lifetime of this class, so the capacity of the cell can be
+    // determined once, while all its resources are still free.
+    cell_ue_ctxts[cell_idx].max_nof_established = compute_max_nof_established_ue_ctxts(cell_idx);
+
     const bool is_periodic_csi_report =
         cell.ran.init_bwp.csi.has_value() and cell.ran.init_bwp.csi->csi_report_slot_offset.has_value();
     const bool is_periodic_srs = cell.ran.init_bwp.srs_cfg.srs_type_enabled == srs_type::periodic;
@@ -104,17 +110,30 @@ du_ran_resource_manager_impl::du_ran_resource_manager_impl(span<const du_cell_co
     config_logger.info(
         "The upper-bound on the number of UEs supported by cell {{pci={}, du_cell_index={}}} is {} (the actual "
         "number might be lower than that). This is determined by the lowest of the following limits: SR ({}), "
-        "CSI ({}) and SRS ({}).",
+        "CSI ({}), SRS ({}) and UE contexts per cell ({}). Up to {} UE contexts can be created in the cell, the extra "
+        "ones being used to RRC Reject UEs.",
         cell.ran.pci,
-        fmt::underlying(cell_idx),
-        get_max_nof_setup_ues(cell_idx),
+        cell_idx,
+        cell_ue_ctxts[cell_idx].max_nof_established,
         pucch_res_mng.get_nof_free_sr_configs(cell_idx),
         is_periodic_csi_report ? fmt::to_string(pucch_res_mng.get_nof_free_csi_configs(cell_idx)) : "n/a",
-        is_periodic_srs ? fmt::to_string(srs_res_mng->get_nof_srs_free_res_offsets(cell_idx)) : "n/a");
+        is_periodic_srs ? fmt::to_string(srs_res_mng->get_nof_srs_free_res_offsets(cell_idx)) : "n/a",
+        max_nof_ue_ctxts_per_cell - max_nof_rejected_ue_ctxts,
+        cell_ue_ctxts[cell_idx].max_nof_ue_ctxts());
   }
 }
 
-unsigned du_ran_resource_manager_impl::get_max_nof_setup_ues(du_cell_index_t cell_index) const
+unsigned du_ran_resource_manager_impl::get_max_nof_established_ue_contexts(du_cell_index_t cell_index) const
+{
+  return cell_ue_ctxts[cell_index].max_nof_established;
+}
+
+unsigned du_ran_resource_manager_impl::get_max_nof_rejected_ue_contexts(du_cell_index_t /* unused */) const
+{
+  return max_nof_rejected_ue_ctxts;
+}
+
+unsigned du_ran_resource_manager_impl::compute_max_nof_established_ue_ctxts(du_cell_index_t cell_index) const
 {
   const auto& cell = cell_cfg_list[cell_index];
 
@@ -126,7 +145,19 @@ unsigned du_ran_resource_manager_impl::get_max_nof_setup_ues(du_cell_index_t cel
   if (cell.ran.init_bwp.srs_cfg.srs_type_enabled == srs_type::periodic) {
     max_nof_ues = std::min(max_nof_ues, srs_res_mng->get_nof_srs_free_res_offsets(cell_index));
   }
-  return max_nof_ues;
+
+  // The UE contexts reserved for RRC Rejects have to fit within the maximum number of UE contexts of a cell.
+  return std::min(max_nof_ues, max_nof_ue_ctxts_per_cell - max_nof_rejected_ue_ctxts);
+}
+
+void du_ran_resource_manager_impl::move_ue_ctxt_count(du_cell_index_t old_pcell_index, du_cell_index_t new_pcell_index)
+{
+  if (old_pcell_index != INVALID_DU_CELL_INDEX) {
+    --cell_ue_ctxts[old_pcell_index].nof_allocated;
+  }
+  if (new_pcell_index != INVALID_DU_CELL_INDEX) {
+    ++cell_ue_ctxts[new_pcell_index].nof_allocated;
+  }
 }
 
 expected<ue_ran_resource_configurator, std::string>
@@ -137,6 +168,18 @@ du_ran_resource_manager_impl::create_ue_resource_configurator(du_ue_index_t   ue
   if (ue_res_pool.contains(ue_index)) {
     return make_unexpected(std::string("Double allocation of same UE not supported"));
   }
+
+  cell_ue_context_count& cell_ctxts = cell_ue_ctxts[pcell_index];
+  if (cell_ctxts.full()) {
+    logger.warning("cell={}: Refused new UE context. Cause: Reached the maximum number of UE contexts ({} for "
+                   "established UEs and {} for UEs to be RRC Rejected)",
+                   pcell_index,
+                   cell_ctxts.max_nof_established,
+                   max_nof_rejected_ue_ctxts);
+    return make_unexpected(fmt::format("No UE contexts left in cell={}", pcell_index));
+  }
+  ++cell_ctxts.nof_allocated;
+
   ue_res_pool.emplace(ue_index, *this);
   auto& ue_res = ue_res_pool[ue_index];
   auto& mcg    = ue_res.cg_cfg;
@@ -176,7 +219,15 @@ du_ran_resource_manager_impl::update_context(du_ue_index_t                      
   // > Deallocate resources for previously configured cells that have now been removed or changed.
   if (ue_mcg.cell_group.cells.contains(SERVING_PCELL_IDX) and
       ue_mcg.cell_group.cells.at(SERVING_PCELL_IDX).serv_cell_cfg.cell_index != pcell_idx) {
-    // >> PCell changed. Deallocate PCell resources.
+    // >> PCell changed. The new cell needs to have room for the UE context, and it is checked before any resource is
+    // released, so that the UE is left untouched if the update cannot proceed.
+    if (cell_ue_ctxts[pcell_idx].full()) {
+      resp.procedure_error = make_unexpected(fmt::format("No UE contexts left in cell={}", pcell_idx));
+      return resp;
+    }
+
+    // >> Deallocate PCell resources.
+    move_ue_ctxt_count(ue_mcg.cell_group.cells.at(SERVING_PCELL_IDX).serv_cell_cfg.cell_index, pcell_idx);
     deallocate_cell_resources(ue_index, SERVING_PCELL_IDX);
   }
   for (serv_cell_index_t scell_idx : upd_req.scells_to_rem) {
@@ -230,6 +281,9 @@ du_ran_resource_manager_impl::update_context(du_ue_index_t                      
     pdsch_res_mng.update_resources(ue_mcg.cell_group, *u.ue_cap_manager.summary());
     pusch_res_mng.update_resources(ue_mcg.cell_group, *u.ue_cap_manager.summary());
     drx_res_mng.handle_ue_cap_update(ue_mcg.cell_group, u.ue_cap_manager.summary());
+    if (ue_mcg.cell_group.cells.contains(SERVING_PCELL_IDX)) {
+      pucch_res_mng.update_resources(ue_mcg.cell_group.cells.at(SERVING_PCELL_IDX), *u.ue_cap_manager.summary());
+    }
   }
 
   // > Update UE SRBs and DRBs.
@@ -264,9 +318,8 @@ du_ran_resource_manager_impl::update_context(du_ue_index_t                      
             deallocate_cell_resources(ue_index, sc.serv_cell_index);
           }
         }
-        resp.procedure_error = make_unexpected(fmt::format("Unable to allocate CG resources for ue={} at cell={}",
-                                                           fmt::underlying(ue_index),
-                                                           fmt::underlying(pcell_idx)));
+        resp.procedure_error = make_unexpected(
+            fmt::format("Unable to allocate CG resources for ue={} at cell={}", fmt::underlying(ue_index), pcell_idx));
       }
       // After this point, allocation succeeded (either CG resources were allocated or allocation was skipped due to CG
       // config not requested).
@@ -292,6 +345,11 @@ void du_ran_resource_manager_impl::deallocate_context(du_ue_index_t ue_index)
   ue_resource_context&   ue_res = ue_res_pool[ue_index];
   du_ue_resource_config& ue_mcg = ue_res.cg_cfg;
 
+  // The PCell resources are deallocated below, which clears the DU cell index of the UE.
+  const du_cell_index_t pcell_index = ue_mcg.cell_group.cells.contains(SERVING_PCELL_IDX)
+                                          ? ue_mcg.cell_group.cells.at(SERVING_PCELL_IDX).serv_cell_cfg.cell_index
+                                          : INVALID_DU_CELL_INDEX;
+
   ra_res_alloc.deallocate_cfra_resources(ue_mcg);
   drx_res_mng.handle_ue_removal(ue_mcg.cell_group);
 
@@ -300,6 +358,10 @@ void du_ran_resource_manager_impl::deallocate_context(du_ue_index_t ue_index)
   }
 
   ue_res_pool.erase(ue_index);
+
+  if (pcell_index != INVALID_DU_CELL_INDEX) {
+    --cell_ue_ctxts[pcell_index].nof_allocated;
+  }
 }
 
 void du_ran_resource_manager_impl::ue_config_applied(du_ue_index_t ue_index)
@@ -339,15 +401,14 @@ error_type<std::string> du_ran_resource_manager_impl::allocate_cell_resources(du
     if (not srs_res_mng->alloc_resources(ue_res.cell_group.cells.at(SERVING_PCELL_IDX))) {
       // Clear dedicated PDCCH config so the UE falls back to common search spaces only.
       ue_res.cell_group.cells.at(SERVING_PCELL_IDX).serv_cell_cfg.init_dl_bwp.pdcch_cfg.reset();
-      return make_unexpected(fmt::format("Unable to allocate SRS resources for cell={}", fmt::underlying(cell_index)));
+      return make_unexpected(fmt::format("Unable to allocate SRS resources for cell={}", cell_index));
     }
 
     if (not pucch_res_mng.alloc_resources(ue_res.cell_group.cells.at(SERVING_PCELL_IDX))) {
       // Deallocate previously allocated SRS resources and clear dedicated PDCCH config.
       srs_res_mng->dealloc_resources(ue_res.cell_group.cells.at(SERVING_PCELL_IDX));
       ue_res.cell_group.cells.at(SERVING_PCELL_IDX).serv_cell_cfg.init_dl_bwp.pdcch_cfg.reset();
-      return make_unexpected(
-          fmt::format("Unable to allocate dedicated PUCCH resources for cell={}", fmt::underlying(cell_index)));
+      return make_unexpected(fmt::format("Unable to allocate dedicated PUCCH resources for cell={}", cell_index));
     }
 
     pdsch_res_mng.alloc_resources(ue_res.cell_group);

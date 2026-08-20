@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "xnap_test_messages.h"
+#include "lib/xnap/procedures/xn_setup_procedure_asn1_helpers.h"
 #include "lib/xnap/xnap_asn1_converters.h"
 #include "ocudu/asn1/asn1_utils.h"
 #include "ocudu/asn1/rrc_nr/rrc_nr.h"
@@ -56,6 +57,34 @@ static byte_buffer add_as_config_drb_mapping(const byte_buffer& packed_ho_prep)
   report_fatal_error_if_not(ho_prep_info.pack(packer) == asn1::OCUDUASN_SUCCESS,
                             "Failed to pack HandoverPreparationInformation");
   return repacked;
+}
+
+cu_cp_served_cell_info ocudu::ocucp::generate_served_cell_info(pci_t pci, const nr_cell_global_id_t& cgi, tac_t tac)
+{
+  cu_cp_served_cell_info served_cell;
+  served_cell.nr_cgi       = cgi;
+  served_cell.nr_pci       = pci;
+  served_cell.five_gs_tac  = tac;
+  served_cell.served_plmns = {cgi.plmn_id};
+
+  cu_cp_tdd_info tdd_info;
+  tdd_info.nr_freq_info.nr_arfcn = 632628;
+  tdd_info.nr_freq_info.freq_band_list_nr.push_back(cu_cp_freq_band_nr_item{.freq_band_ind_nr = 78});
+  tdd_info.tx_bw.nr_scs    = subcarrier_spacing::kHz30;
+  tdd_info.tx_bw.nr_nrb    = 51;
+  served_cell.nr_mode_info = tdd_info;
+
+  return served_cell;
+}
+
+xnap_message ocudu::ocucp::generate_xn_setup_response_with_served_cell(const xnap_configuration&  peer_cfg,
+                                                                       pci_t                      served_pci,
+                                                                       const nr_cell_global_id_t& served_cgi)
+{
+  const cu_cp_served_cell_info served_cell =
+      generate_served_cell_info(served_pci, served_cgi, peer_cfg.tai_support_list.front().tac);
+
+  return generate_asn1_xn_setup_response(peer_cfg, {&served_cell, 1});
 }
 
 xnap_message ocudu::ocucp::generate_handover_request(local_xnap_ue_id_t local_xnap_ue_id,
@@ -234,6 +263,133 @@ xnap_message ocudu::ocucp::generate_ue_context_release(local_xnap_ue_id_t local_
 
   ue_context_release->source_ng_ra_nnode_ue_xn_ap_id = peer_xnap_ue_id_to_uint(peer_xnap_ue_id);
   ue_context_release->target_ng_ra_nnode_ue_xn_ap_id = local_xnap_ue_id_to_uint(local_xnap_ue_id);
+
+  return xnap_msg;
+}
+
+xnap_message ocudu::ocucp::generate_retrieve_ue_context_request(peer_xnap_ue_id_t peer_xnap_ue_id,
+                                                                pci_t             fail_cell_pci,
+                                                                nr_cell_identity  target_nci)
+{
+  xnap_message xnap_msg;
+  xnap_msg.pdu.set_init_msg();
+  xnap_msg.pdu.init_msg().load_info_obj(ASN1_XNAP_ID_RETRIEVE_UE_CONTEXT);
+
+  auto& request = xnap_msg.pdu.init_msg().value.retrieve_ue_context_request();
+
+  // This is sent from the target to the source, so the new NG-RAN node UE XnAP ID is the peer XNAP UE ID.
+  request->new_ng_ra_nnode_ue_xn_ap_id = peer_xnap_ue_id_to_uint(peer_xnap_ue_id);
+
+  auto& reest_id = request->ue_context_id.set_rrrc_reest();
+  reest_id.c_rnti.from_number(to_value(rnti_t::MIN_CRNTI));
+  reest_id.fail_cell_pci.set_nr() = fail_cell_pci;
+
+  request->mac_i.from_number(0xabcd);
+  request->new_ng_ran_cell_id.set_nr().from_number(target_nci.value());
+
+  return xnap_msg;
+}
+
+xnap_message ocudu::ocucp::generate_retrieve_ue_context_request_for_resume(peer_xnap_ue_id_t peer_xnap_ue_id,
+                                                                           short_i_rnti_t    i_rnti,
+                                                                           nr_cell_identity  target_nci,
+                                                                           uint16_t          resume_mac_i)
+{
+  xnap_message xnap_msg;
+  xnap_msg.pdu.set_init_msg();
+  xnap_msg.pdu.init_msg().load_info_obj(ASN1_XNAP_ID_RETRIEVE_UE_CONTEXT);
+
+  auto& request = xnap_msg.pdu.init_msg().value.retrieve_ue_context_request();
+
+  // This is sent from the target to the source, so the new NG-RAN node UE XnAP ID is the peer XNAP UE ID.
+  request->new_ng_ra_nnode_ue_xn_ap_id = peer_xnap_ue_id_to_uint(peer_xnap_ue_id);
+
+  auto& resume_id = request->ue_context_id.set_rrc_resume();
+  resume_id.i_rnti.set_i_rnti_short().from_number(i_rnti.value());
+  resume_id.allocated_c_rnti.from_number(to_value(rnti_t::MIN_CRNTI));
+  resume_id.access_pci.set_nr() = 0;
+
+  request->mac_i.from_number(resume_mac_i);
+  request->new_ng_ran_cell_id.set_nr().from_number(target_nci.value());
+
+  return xnap_msg;
+}
+
+xnap_message ocudu::ocucp::generate_retrieve_ue_context_response(local_xnap_ue_id_t local_xnap_ue_id,
+                                                                 peer_xnap_ue_id_t  peer_xnap_ue_id)
+{
+  xnap_message xnap_msg;
+  xnap_msg.pdu.set_successful_outcome();
+  xnap_msg.pdu.successful_outcome().load_info_obj(ASN1_XNAP_ID_RETRIEVE_UE_CONTEXT);
+
+  auto& response = xnap_msg.pdu.successful_outcome().value.retrieve_ue_context_resp();
+
+  // This is sent from the source to the target, so the new NG-RAN node UE XnAP ID is the local XNAP UE ID and the old
+  // NG-RAN node UE XnAP ID is the peer XNAP UE ID.
+  response->new_ng_ra_nnode_ue_xn_ap_id = local_xnap_ue_id_to_uint(local_xnap_ue_id);
+  response->old_ng_ra_nnode_ue_xn_ap_id = peer_xnap_ue_id_to_uint(peer_xnap_ue_id);
+
+  response->guami = guami_to_asn1(
+      guami_t{.plmn = plmn_identity::test_value(), .amf_set_id = 1, .amf_pointer = 1, .amf_region_id = 1});
+
+  auto& ue_context_info           = response->ue_context_info_retr_ue_ctxt_resp;
+  ue_context_info.ng_c_ue_sig_ref = 1;
+  ue_context_info.sig_tnl_at_source.set_endpoint_ip_address();
+  tla_to_asn1_bitstring(ue_context_info.sig_tnl_at_source.endpoint_ip_address(),
+                        transport_layer_address::create_from_string("127.0.0.1"));
+  ue_context_info.ue_security_cap.nr_encyption_algorithms.from_number(49152);
+  ue_context_info.ue_security_cap.nr_integrity_protection_algorithms.from_number(49152);
+  ue_context_info.security_info.key_ng_ran_star.from_string(
+      "1111111000001101100111110001011010001110110010111010001100110111100111011000110110011010000110000011000010111000"
+      "0010001100001010000001111111100000100111101011000011110000110101110010001010001010101000101100101100100000001110"
+      "00010001000110001101110101100110");
+  ue_context_info.ue_ambr.dl_ue_ambr = 1000000000;
+  ue_context_info.ue_ambr.ul_ue_ambr = 1000000000;
+
+  pdu_session_res_to_be_setup_item_s pdu_session_item;
+  pdu_session_item.pdu_session_id = 1;
+  pdu_session_item.s_nssai =
+      s_nssai_to_asn1(s_nssai_t{.sst = slice_service_type{1}, .sd = slice_differentiator::create(1).value()});
+  up_transport_layer_info_to_asn1(
+      pdu_session_item.ul_ng_u_tnl_at_up_f,
+      up_transport_layer_info{transport_layer_address::create_from_string("127.0.0.1"), gtpu_teid_t{12345}});
+  pdu_session_item.pdu_session_type = pdu_session_type_e::ipv4;
+
+  qos_flows_to_be_setup_item_s qos_flow_item;
+  qos_flow_item.qfi = 1;
+  qos_flow_item.qos_flow_level_qos_params.qos_characteristics.set_non_dyn();
+  qos_flow_item.qos_flow_level_qos_params.qos_characteristics.non_dyn().five_qi = 9;
+  qos_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.pre_emption_cap =
+      asn1::xnap::allocand_retention_prio_s::pre_emption_cap_opts::options::shall_not_trigger_preemption;
+  qos_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.pre_emption_vulnerability =
+      asn1::xnap::allocand_retention_prio_s::pre_emption_vulnerability_opts::options::not_preemptable;
+  qos_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.prio_level = 1;
+  pdu_session_item.qos_flows_to_be_setup_list.push_back(qos_flow_item);
+
+  ue_context_info.pdu_session_res_to_be_setup_list.push_back(pdu_session_item);
+
+  // A real HandoverPreparationInformation, so that the target can recover the UE capabilities and the source's
+  // AS-Config from it, as it does for a handover.
+  ue_context_info.rrc_context =
+      make_byte_buffer(
+          "00217b8680ce811d1960097e360e1317000183f1300098a09a00000020400f13400389a00000000e268208010010134a0f0040000000"
+          "00000040000000247001040000259650100400002596500052388008404008010100200400200801052050")
+          .value();
+
+  return xnap_msg;
+}
+
+xnap_message ocudu::ocucp::generate_retrieve_ue_context_failure(local_xnap_ue_id_t local_xnap_ue_id)
+{
+  xnap_message xnap_msg;
+  xnap_msg.pdu.set_unsuccessful_outcome();
+  xnap_msg.pdu.unsuccessful_outcome().load_info_obj(ASN1_XNAP_ID_RETRIEVE_UE_CONTEXT);
+
+  auto& failure = xnap_msg.pdu.unsuccessful_outcome().value.retrieve_ue_context_fail();
+
+  // This is sent from the source to the target, so the new NG-RAN node UE XnAP ID is the local XNAP UE ID.
+  failure->new_ng_ra_nnode_ue_xn_ap_id = local_xnap_ue_id_to_uint(local_xnap_ue_id);
+  failure->cause.set_radio_network()   = cause_radio_network_layer_opts::ue_context_id_not_known;
 
   return xnap_msg;
 }

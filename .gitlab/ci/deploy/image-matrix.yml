@@ -45,7 +45,7 @@
       else
         IMAGE_COMPONENT="${COMPONENT}"
       fi
-    - DATE=$(date +%Y%m%d)
+    - DATE=$(date -u -d "${CI_PIPELINE_CREATED_AT}" +%Y%m%d)
     - export NAME="${IMAGE_COMPONENT}"
     - |
       TAG_OS="${IMAGE_TAG_OS:-${OS}}"
@@ -316,8 +316,6 @@
         MARCH: neoverse-n1+crc+crypto+ssbs
 
 .matrix-image-rh-gnb:
-  rules:
-    - when: never
   parallel:
     matrix:
       - COMPONENT: gnb
@@ -346,8 +344,6 @@
         MARCH: neoverse-n1+crc+crypto+ssbs
 
 .matrix-image-rh-du:
-  rules:
-    - when: never
   parallel:
     matrix:
       - COMPONENT: du
@@ -376,8 +372,6 @@
         MARCH: neoverse-n1+crc+crypto+ssbs
 
 .matrix-image-rh-cu:
-  rules:
-    - when: never
   parallel:
     matrix:
       - COMPONENT: cu
@@ -391,8 +385,6 @@
         MARCH: neoverse-n1+crc+crypto+ssbs
 
 .matrix-image-rh-cu-cp:
-  rules:
-    - when: never
   parallel:
     matrix:
       - COMPONENT: cu-cp
@@ -406,8 +398,6 @@
         MARCH: neoverse-n1+crc+crypto+ssbs
 
 .matrix-image-rh-cu-up:
-  rules:
-    - when: never
   parallel:
     matrix:
       - COMPONENT: cu-up
@@ -421,8 +411,6 @@
         MARCH: neoverse-n1+crc+crypto+ssbs
 
 .matrix-image-rh-ru-emulator:
-  rules:
-    - when: never
   parallel:
     matrix:
       - COMPONENT: ru-emulator

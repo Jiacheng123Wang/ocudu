@@ -5,6 +5,7 @@
 #include "cu_up_processor_repository.h"
 #include "cu_up_processor_config.h"
 #include "cu_up_processor_factory.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_configuration.h"
 #include "ocudu/ran/cu_cp_types.h"
 

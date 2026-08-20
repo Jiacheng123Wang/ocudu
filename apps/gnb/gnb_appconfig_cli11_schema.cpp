@@ -15,6 +15,7 @@
 #include "apps/units/flexible_o_du/o_du_high/du_high/du_high_config.h"
 #include "apps/units/o_cu_cp/cu_cp/cu_cp_unit_config.h"
 #include "gnb_appconfig.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/cli11_utils.h"
 #include "CLI/CLI11.hpp"

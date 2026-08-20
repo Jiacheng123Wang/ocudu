@@ -6,6 +6,7 @@
 #include "apps/services/worker_manager/worker_manager_config.h"
 #include "du_high_config.h"
 #include "ntn/du_high_ntn_config_translators.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_cell_config_helpers.h"
 #include "ocudu/du/du_cell_config_validation.h"
 #include "ocudu/du/du_high/du_high_configuration.h"
@@ -287,10 +288,16 @@ static sib19_info create_sib19_info(const du_high_unit_cell_ntn_config& config)
     sib19.moving_ref_location = serving.moving_ref_location;
 
     sib19.ntn_cfg.emplace();
-    sib19.ntn_cfg->cell_specific_koffset    = serving.cell_specific_koffset;
-    sib19.ntn_cfg->ephemeris_info           = serving.sat_ref.ephemeris_info;
-    sib19.ntn_cfg->k_mac                    = serving.k_mac;
-    sib19.ntn_cfg->ta_info                  = serving.sat_ref.ta_info;
+    // Placeholder: this SIB19 sizes the SI-message PDSCH grant, and the live one always carries epochTime.
+    sib19.ntn_cfg->epoch_time            = epoch_time_t{0, 0};
+    sib19.ntn_cfg->cell_specific_koffset = serving.cell_specific_koffset;
+    sib19.ntn_cfg->ephemeris_info        = serving.sat_ref.ephemeris_info;
+    sib19.ntn_cfg->k_mac                 = serving.k_mac;
+    sib19.ntn_cfg->ta_info               = serving.sat_ref.ta_info;
+    if (serving.feeder_link_info and not sib19.ntn_cfg->ta_info) {
+      // Same, for a feeder link: the live SIB19 always carries ta-Info.
+      sib19.ntn_cfg->ta_info = ta_info_t{0.0, 0.0, 0.0, std::nullopt};
+    }
     sib19.ntn_cfg->ntn_ul_sync_validity_dur = serving.ntn_ul_sync_validity_dur;
     sib19.ntn_cfg->polarization             = serving.polarization;
     sib19.ntn_cfg->ta_report                = serving.ta_report;
@@ -460,7 +467,7 @@ static std::optional<si_scheduling_info_config> make_si_sched_info_config(const 
   // Set SIB mapping info.
   out.si_sched_info.resize(sib_cfg.si_sched_info.size());
   std::vector<uint8_t> sibs_included;
-  auto                 is_pws_sib = [](uint8_t t) { return t >= 6 && t <= 8; };
+  auto                 is_pws_sib = [](uint8_t sib_id) { return ocudu::is_pws_sib(static_cast<sib_type>(sib_id)); };
   for (unsigned i = 0; i != sib_cfg.si_sched_info.size(); ++i) {
     auto& out_si                  = out.si_sched_info[i];
     out_si.si_period_radio_frames = sib_cfg.si_sched_info[i].si_period_rf;
@@ -472,10 +479,9 @@ static std::optional<si_scheduling_info_config> make_si_sched_info_config(const 
     // occasion in schedulingInfoList, but has no real content until an F1AP Write-Replace Warning activates it.
     // Unless its (testing-only) content is explicitly configured, in which case it is broadcast right away,
     // indefinitely.
-    out_si.requires_activation = std::any_of(sib_mapping_info.begin(), sib_mapping_info.end(), is_pws_sib);
-    if (out_si.requires_activation) {
-      out_si.auto_broadcast = std::any_of(sib_mapping_info.begin(), sib_mapping_info.end(), [&sib_cfg](uint8_t t) {
-        return t == 8 ? sib_cfg.cmas_cfg.has_value() : sib_cfg.etws_cfg.has_value();
+    if (std::any_of(sib_mapping_info.begin(), sib_mapping_info.end(), is_pws_sib)) {
+      out_si.auto_broadcast = std::any_of(sib_mapping_info.begin(), sib_mapping_info.end(), [&sib_cfg](uint8_t sib_id) {
+        return sib_id == 8 ? sib_cfg.cmas_cfg.has_value() : sib_cfg.etws_cfg.has_value();
       });
     }
 
@@ -1062,6 +1068,15 @@ std::vector<odu::du_cell_config> ocudu::generate_du_cell_config(const du_high_un
       du_cg_params.mcs         = user_cg_cfg.mcs;
       du_cg_params.nof_harq_processes  = user_cg_cfg.nof_harq_processes;
       du_cg_params.max_nof_cell_cg_rbs = user_cg_cfg.max_nof_cell_cg_rbs;
+      beta_offsets cg_b_offsets{};
+      cg_b_offsets.beta_offset_ack_idx_1    = base_cell.pusch_cfg.beta_offset_ack_idx_1;
+      cg_b_offsets.beta_offset_ack_idx_2    = base_cell.pusch_cfg.beta_offset_ack_idx_2;
+      cg_b_offsets.beta_offset_ack_idx_3    = base_cell.pusch_cfg.beta_offset_ack_idx_3;
+      cg_b_offsets.beta_offset_csi_p1_idx_1 = base_cell.pusch_cfg.beta_offset_csi_p1_idx_1;
+      cg_b_offsets.beta_offset_csi_p1_idx_2 = base_cell.pusch_cfg.beta_offset_csi_p1_idx_2;
+      cg_b_offsets.beta_offset_csi_p2_idx_1 = base_cell.pusch_cfg.beta_offset_csi_p2_idx_1;
+      cg_b_offsets.beta_offset_csi_p2_idx_2 = base_cell.pusch_cfg.beta_offset_csi_p2_idx_2;
+      du_cg_params.uci_beta_offsets.emplace(cg_b_offsets);
       out_cell.ran.init_bwp.cg_cfg.emplace(du_cg_params);
     }
 
@@ -1337,6 +1352,7 @@ static scheduler_expert_config generate_scheduler_expert_config(const du_high_un
   out_cfg.ue.min_pucch_pusch_prb_distance                     = cell.ul_common_cfg.min_pucch_pusch_prb_distance;
   const du_high_unit_pucch_config& pucch                      = cell.pucch_cfg;
   out_cfg.ue.pucch_sinr_threshold_dB                          = pucch.sinr_threshold_dB;
+  out_cfg.ue.cg_pusch_sinr_threshold_dB                       = cell.cg_cfg.sinr_threshold_dB;
   out_cfg.ue.ul_power_ctrl.enable_pucch_cl_pw_control         = pucch.enable_closed_loop_pw_control;
   out_cfg.ue.ul_power_ctrl.pucch_f0_sinr_target_dB            = pucch.pucch_f0_sinr_target_dB;
   out_cfg.ue.ul_power_ctrl.pucch_f2_sinr_target_dB            = pucch.pucch_f2_sinr_target_dB;
@@ -1353,6 +1369,7 @@ static scheduler_expert_config generate_scheduler_expert_config(const du_high_un
   out_cfg.ra.backoff_indicator_snr_threshold_dB = prach.backoff_indicator_snr_threshold;
   out_cfg.ra.backoff_indicator_max_preambles    = prach.backoff_indicator_max_preambles;
   out_cfg.ra.backoff_indicator_duration         = std::chrono::milliseconds{prach.backoff_indicator_duration_ms};
+  out_cfg.ra.multiplex_uci_on_cf_rar_ul_grant   = prach.multiplex_uci_on_cf_rar_ul_grant;
 
   // SI parameters.
   out_cfg.si.sib1_mcs_index    = pdsch.fixed_sib1_mcs;
@@ -1445,13 +1462,25 @@ void ocudu::generate_du_high_config(odu::du_high_configuration& du_hi_cfg, const
   du_hi_cfg.ran.mac_cfg.initial_crnti = to_rnti(0x4601);
   du_hi_cfg.ran.sched_cfg             = generate_scheduler_expert_config(du_high_unit_cfg);
 
+  du_hi_cfg.rlc.drb_rx_window_seg_size      = du_high_unit_cfg.rlc_cfg.drb_rx_window_seg_size;
   du_hi_cfg.rlc.drb_rx_window_seg_pool_size = du_high_unit_cfg.rlc_cfg.drb_rx_window_seg_pool_size;
+  du_hi_cfg.rlc.drb_tx_window_seg_size      = du_high_unit_cfg.rlc_cfg.drb_tx_window_seg_size;
   du_hi_cfg.rlc.drb_tx_window_seg_pool_size = du_high_unit_cfg.rlc_cfg.drb_tx_window_seg_pool_size;
+  du_hi_cfg.rlc.srb_rx_window_seg_size      = du_high_unit_cfg.rlc_cfg.srb_rx_window_seg_size;
   du_hi_cfg.rlc.srb_rx_window_seg_pool_size = du_high_unit_cfg.rlc_cfg.srb_rx_window_seg_pool_size;
+  du_hi_cfg.rlc.srb_tx_window_seg_size      = du_high_unit_cfg.rlc_cfg.srb_tx_window_seg_size;
   du_hi_cfg.rlc.srb_tx_window_seg_pool_size = du_high_unit_cfg.rlc_cfg.srb_tx_window_seg_pool_size;
 
   // Configure test mode
   du_hi_cfg.test_cfg = generate_test_mode_config(du_high_unit_cfg);
+
+  // Populate the NTN configuration manager config only when at least one cell configures NTN, so that the optional
+  // reflects whether NTN is actually configured.
+  if (auto ntn_cfg = generate_ntn_configuration_manager_config(
+          du_high_unit_cfg.gnb_id, du_high_unit_cfg.cells_cfg, du_high_unit_cfg.ntn_satellites);
+      not ntn_cfg.cells.empty()) {
+    du_hi_cfg.ntn = std::move(ntn_cfg);
+  }
 }
 
 void ocudu::fill_du_high_worker_manager_config(worker_manager_config&     config,

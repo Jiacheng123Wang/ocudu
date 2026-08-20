@@ -51,12 +51,13 @@ public:
     rnti_t        rnti;
   };
   struct crc_event {
+    enum class crc_res_t { ok, ko, dtx };
     du_ue_index_t        ue_index;
     rnti_t               rnti;
     du_cell_index_t      cell_index;
     slot_point           sl_rx;
     harq_id_t            h_id;
-    bool                 crc;
+    crc_res_t            crc;
     std::optional<float> ul_sinr_db;
   };
   struct bsr_event {

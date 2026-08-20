@@ -6,6 +6,7 @@
 
 #include "ocudu/phy/upper/signal_processors/prs/prs_generator_configuration.h"
 #include "ocudu/phy/upper/signal_processors/prs/prs_generator_validator.h"
+#include "fmt/format.h"
 
 namespace ocudu {
 

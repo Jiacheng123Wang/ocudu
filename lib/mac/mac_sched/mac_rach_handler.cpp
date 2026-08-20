@@ -4,6 +4,7 @@
 
 #include "mac_rach_handler.h"
 #include "../rnti_manager.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/band_helper.h"
 #include "ocudu/ran/prach/prach_configuration.h"
 #include "ocudu/ran/prach/ra_helper.h"

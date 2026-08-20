@@ -4,6 +4,7 @@
 
 #include "pusch_processor_validator_impl.h"
 #include "pusch_processor_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/transform_precoding/transform_precoding_helpers.h"
 #include "ocudu/ran/uci/uci_constants.h"
 #include "ocudu/ran/uci/uci_formatters.h"

@@ -9,6 +9,7 @@
 
 #include "ocudu/adt/detail/slotted_array_detail.h"
 #include "ocudu/adt/span.h"
+#include <limits>
 #include <vector>
 
 namespace ocudu {
@@ -144,11 +145,16 @@ public:
   }
 
   /// Increase capacity of slotted_vector to avoid reallocations.
-  /// \param[in] sz New capacity.
-  void reserve(size_t sz)
+  /// \param[in] sz New capacity, both in number of stored objects and in range of indexes.
+  void reserve(size_t sz) { reserve(sz, sz); }
+
+  /// Increase capacity of slotted_vector to avoid reallocations.
+  /// \param[in] nof_objects Number of objects that the container can store without reallocating.
+  /// \param[in] index_range Range of indexes that the container can address without reallocating.
+  void reserve(size_t nof_objects, size_t index_range)
   {
-    objects.reserve(sz);
-    index_mapper.reserve(sz);
+    objects.reserve(nof_objects);
+    index_mapper.reserve(index_range);
   }
 
   /// Determines whether the container is empty.
@@ -326,8 +332,13 @@ public:
   const_iterator end() const { return sl_vec.end(); }
 
   /// Increase capacity of slotted_id_vector to avoid reallocations.
-  /// \param[in] sz New capacity.
+  /// \param[in] sz New capacity, both in number of stored objects and in range of IDs.
   void reserve(size_t sz) { sl_vec.reserve(sz); }
+
+  /// Increase capacity of slotted_id_vector to avoid reallocations.
+  /// \param[in] nof_objects Number of objects that the container can store without reallocating.
+  /// \param[in] id_range Range of IDs that the container can address without reallocating.
+  void reserve(size_t nof_objects, size_t id_range) { sl_vec.reserve(nof_objects, id_range); }
 
   /// Insert element into the container if an element with the same ID does not exist yet.
   /// \param id ID the constructed element in the table.

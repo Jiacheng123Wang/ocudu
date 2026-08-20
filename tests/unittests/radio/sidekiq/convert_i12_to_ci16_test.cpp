@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "sidekiq_helper_functions.h"
+#include "support/compare_sequences.h"
+#include "ocudu/adt/format.h"
 #include <gtest/gtest.h>
 #include <random>
 
@@ -10,9 +12,6 @@ static std::mt19937 rgen(0);
 using namespace ocudu;
 
 namespace {
-
-// Error function used to compare two ci16_t samples: returns 0 if they are exactly equal, 1 otherwise.
-auto compare_ci16 = [](ci16_t left, ci16_t right) { return (left == right) ? 0 : 1; };
 
 // Number of bits of the packed signed integer samples.
 constexpr unsigned I12_NOF_BITS = 12;
@@ -76,10 +75,12 @@ TEST_P(SidekiqConvertI12Fixture, ConvertI12ToCi16)
     gold[i] = gold_extract_sample(in, i);
   }
 
-  for (unsigned i = 0; i != N_samples; ++i) {
-    ASSERT_EQ(out[i].real(), gold[i].real()) << "Sample index " << i << " real part mismatch.";
-    ASSERT_EQ(out[i].imag(), gold[i].imag()) << "Sample index " << i << " imaginary part mismatch.";
-  }
+  error_type<std::string> compare_result = compare_sequences(
+      span<const ci16_t>(out),
+      span<const ci16_t>(gold),
+      [](const ci16_t& actual, const ci16_t& expected) { return (actual == expected) ? 0 : 1; },
+      0);
+  ASSERT_TRUE(compare_result.has_value()) << compare_result.error();
 }
 
 TEST_P(SidekiqConvertI12Fixture, ConvertCi16ToI12)
@@ -99,17 +100,17 @@ TEST_P(SidekiqConvertI12Fixture, ConvertCi16ToI12)
   std::vector<uint32_t> out(N_words);
 
   convert_ci16_to_i12(out, in);
-  fmt::println("in=[{:016b}];", span<const uint16_t>(reinterpret_cast<const uint16_t*>(in.data()), 2 * in.size()));
-  fmt::println("out=[{:032b}];", out);
 
   // Round-trip through convert_i12_to_ci16 and verify we recover the original samples.
   std::vector<ci16_t> roundtrip(N_samples);
   convert_i12_to_ci16(roundtrip, out);
 
-  for (unsigned i = 0; i != N_samples; ++i) {
-    ASSERT_EQ(in[i].real(), roundtrip[i].real()) << "Sample index " << i << " real part mismatch.";
-    ASSERT_EQ(in[i].imag(), roundtrip[i].imag()) << "Sample index " << i << " imaginary part mismatch.";
-  }
+  error_type<std::string> compare_result = compare_sequences(
+      span<const ci16_t>(in),
+      span<const ci16_t>(roundtrip),
+      [](const ci16_t& actual, const ci16_t& expected) { return (actual == expected) ? 0 : 1; },
+      0);
+  ASSERT_TRUE(compare_result.has_value()) << compare_result.error();
 }
 
 INSTANTIATE_TEST_SUITE_P(sidekiq, SidekiqConvertI12Fixture, ::testing::Values(3, 6, 12, 30, 300));

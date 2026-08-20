@@ -9,6 +9,7 @@
 #include "ocudu/adt/span.h"
 #include "ocudu/du/du_cell_config.h"
 #include "ocudu/ocudulog/logger.h"
+#include <chrono>
 
 namespace asn1::rrc_nr {
 
@@ -16,9 +17,11 @@ struct ssb_mtc_s;
 
 } // namespace asn1::rrc_nr
 
-namespace ocudu::odu {
+namespace ocudu {
 
 struct ue_capability_summary;
+
+namespace odu {
 
 /// Single UL periodic resource occasion (SR or periodic CSI). Period and offset in PCell slots.
 struct periodic_uci_config {
@@ -35,10 +38,18 @@ struct periodic_uci_config {
 /// does not collide with the measurement gap after MGRP is increased (doubled). As a last resort it returns a
 /// best-effort gap at the largest supported MGRP aligned with the SMTC offset. When \c supported_patterns is left
 /// default-constructed, only the mandatory gap patterns 0 and 1 are assumed to be supported.
-meas_gap_config create_meas_gap(subcarrier_spacing                 scs,
-                                const asn1::rrc_nr::ssb_mtc_s&     smtc1,
-                                span<const periodic_uci_config>    ul_occasions,
-                                const supported_meas_gap_patterns& supported_patterns = {});
+/// \param ul_ta Uplink timing advance T_TA applied by the UEs of the cell, used to place the periodic UL occasions
+/// on the timing grid the gap is anchored to (TS 38.211, Section 4.3.1). Absent for terrestrial cells.
+///
+/// \remark Known limitation: the offset is chosen for the \c ul_ta of the moment and never revisited, while in an
+/// NTN cell T_TA sweeps several slots over a pass. A UL occasion left clear here can therefore drift into the gap
+/// later in the pass. Only occasion availability suffers, never correctness, as \ref is_inside_ul_meas_gap
+/// re-evaluates the window against the current T_TA on every scheduling decision.
+meas_gap_config create_meas_gap(subcarrier_spacing                       scs,
+                                const asn1::rrc_nr::ssb_mtc_s&           smtc1,
+                                span<const periodic_uci_config>          ul_occasions,
+                                std::optional<std::chrono::microseconds> ul_ta,
+                                const supported_meas_gap_patterns&       supported_patterns = {});
 
 /// Class that handles the measConfig of the UE.
 ///
@@ -61,4 +72,5 @@ private:
   ocudulog::basic_logger&    logger;
 };
 
-} // namespace ocudu::odu
+} // namespace odu
+} // namespace ocudu

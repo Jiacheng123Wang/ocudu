@@ -18,6 +18,8 @@ class ue_manager_test : public ::testing::Test
 {
 protected:
   ue_manager_test();
+  /// Creates the fixture with a specific gNB ID, which the I-RNTIs of suspended UEs are derived from.
+  explicit ue_manager_test(gnb_id_t gnb_id_);
   ~ue_manager_test() override;
 
   ocudulog::basic_logger& test_logger   = ocudulog::fetch_basic_logger("TEST");

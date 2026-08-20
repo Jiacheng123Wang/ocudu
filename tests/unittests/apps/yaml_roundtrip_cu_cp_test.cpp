@@ -6,6 +6,7 @@
 #include "apps/cu_cp/cu_cp_appconfig_yaml_writer.h"
 #include "apps/units/o_cu_cp/o_cu_cp_application_unit.h"
 #include "yaml_roundtrip_test_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/support/config_parsers.h"
 #include "CLI/CLI11.hpp"
 

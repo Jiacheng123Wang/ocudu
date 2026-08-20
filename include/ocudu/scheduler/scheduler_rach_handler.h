@@ -20,7 +20,8 @@ struct rach_indication_message {
   slot_point      slot_rx;
 
   struct preamble {
-    unsigned preamble_id;
+    /// Preamble logical index. Values: {0,...,63}.
+    uint8_t preamble_id;
     /// Allocated TC-RNTI, for Contention-based RACH, or C-RNTI, for Contention-free RACH.
     rnti_t        tc_rnti;
     phy_time_unit time_advance;
@@ -29,9 +30,10 @@ struct rach_indication_message {
   };
 
   struct occasion {
-    /// Index of the first OFDM Symbol where RACH was detected.
-    unsigned                                                  start_symbol;
-    unsigned                                                  frequency_index;
+    /// Index of the first OFDM Symbol where RACH was detected. Values: {0,...,13}.
+    uint8_t start_symbol;
+    /// Frequency domain occasion index. Values: {0,...,7}.
+    uint8_t                                                   frequency_index;
     static_vector<preamble, MAX_PREAMBLES_PER_PRACH_OCCASION> preambles;
   };
 

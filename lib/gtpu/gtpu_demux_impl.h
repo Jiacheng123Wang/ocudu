@@ -12,7 +12,7 @@
 #include "ocudu/pcap/dlt_pcap.h"
 #include "ocudu/support/executors/task_executor.h"
 #include "ocudu/support/rate_limiting/lockfree_token_bucket.h"
-#include "fmt/format.h"
+#include "fmt/base.h"
 #include <mutex>
 #include <random>
 #include <unordered_map>

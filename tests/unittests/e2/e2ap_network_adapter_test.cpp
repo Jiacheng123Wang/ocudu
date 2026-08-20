@@ -12,7 +12,6 @@
 #include "ocudu/e2/e2sm/e2sm_manager.h"
 #include "ocudu/e2/gateways/e2_connection_client.h"
 #include "ocudu/e2/gateways/e2_network_client_factory.h"
-#include "ocudu/gateways/sctp_network_server_factory.h"
 #include "ocudu/support/async/async_test_utils.h"
 #include "ocudu/support/executors/inline_task_executor.h"
 #include "ocudu/support/executors/manual_task_worker.h"
@@ -87,13 +86,13 @@ protected:
     e2_subscription_mngr = std::make_unique<e2_subscription_manager_impl>(*e2sm_mngr);
     factory              = timer_factory{timers, task_exec};
     e2agent_notifier     = std::make_unique<dummy_e2_agent_mng>();
-    e2ap                 = std::make_unique<e2_impl>(ocudulog::fetch_basic_logger("E2"),
-                                     *e2agent_notifier,
-                                     factory,
-                                     *e2_client,
-                                     *e2_subscription_mngr,
-                                     *e2sm_mngr,
-                                     task_exec);
+    e2ap                 = std::make_unique<e2_impl>(e2_impl_dependencies{.logger            = ocudulog::fetch_basic_logger("E2"),
+                                                                          .agent_notifier    = *e2agent_notifier,
+                                                                          .timers            = factory,
+                                                                          .e2_client         = *e2_client,
+                                                                          .subscription_mngr = *e2_subscription_mngr,
+                                                                          .e2sm_mngr         = *e2sm_mngr,
+                                                                          .task_exec         = task_exec});
   }
 
   void TearDown() override
@@ -140,7 +139,7 @@ protected:
   std::unique_ptr<e2_sniffer>           ric_rx_e2_sniffer;
 
   // E2 agent
-  e2ap_configuration                       cfg;
+  e2ap_config                              cfg;
   timer_factory                            factory;
   timer_manager                            timers;
   std::unique_ptr<e2ap_e2agent_notifier>   e2agent_notifier;

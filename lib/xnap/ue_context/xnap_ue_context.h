@@ -27,6 +27,10 @@ struct xnap_ue_context {
   /// XN Status Transfer Event Source.
   protocol_transaction_event_source<asn1::xnap::sn_status_transfer_s> sn_status_transfer_outcome;
 
+  /// Retrieve UE Context Response/Failure Event Source.
+  protocol_transaction_event_source<asn1::xnap::retrieve_ue_context_resp_s, asn1::xnap::retrieve_ue_context_fail_s>
+      retrieve_ue_context_outcome;
+
   xnap_ue_context(cu_cp_ue_index_t        ue_index_,
                   local_xnap_ue_id_t      local_xnap_ue_id_,
                   timer_factory           timer_db,
@@ -34,7 +38,8 @@ struct xnap_ue_context {
     ue_ids({ue_index_, local_xnap_ue_id_}),
     logger("XNAP", {ue_index_, local_xnap_ue_id_}),
     xn_handover_outcome(timer_db),
-    sn_status_transfer_outcome(timer_db)
+    sn_status_transfer_outcome(timer_db),
+    retrieve_ue_context_outcome(timer_db)
   {
   }
 
@@ -43,6 +48,7 @@ struct xnap_ue_context {
   {
     xn_handover_outcome.stop();
     sn_status_transfer_outcome.stop();
+    retrieve_ue_context_outcome.stop();
   }
 };
 

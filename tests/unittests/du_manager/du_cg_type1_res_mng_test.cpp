@@ -10,6 +10,7 @@
 #include "lib/du/du_high/du_manager/ran_resource_management/du_ue_resource_config.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/utils/test_rng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_cell_config_helpers.h"
 #include "ocudu/ran/prach/prach_time_mapping.h"
 #include "ocudu/ran/tdd/tdd_ul_dl_config.h"

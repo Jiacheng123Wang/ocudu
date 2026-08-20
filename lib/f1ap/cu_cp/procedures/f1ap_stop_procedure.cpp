@@ -5,6 +5,7 @@
 #include "f1ap_stop_procedure.h"
 #include "../ue_context/f1ap_cu_ue_context.h"
 #include "f1ap_cu_event_manager.h"
+#include "ocudu/adt/format.h"
 
 using namespace ocudu;
 using namespace ocucp;

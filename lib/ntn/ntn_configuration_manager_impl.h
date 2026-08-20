@@ -45,6 +45,12 @@ public:
   /// \return Result containing lists of successfully updated and failed cells.
   ntn_config_update_result handle_ntn_config_update(const ntn_config_update_info& req) override;
 
+  // See interface for documentation.
+  void start() override;
+
+  // See interface for documentation.
+  void stop() override;
+
 private:
   /// \brief Handle NTN configuration update for a single cell.
   ///
@@ -77,7 +83,9 @@ private:
 
   /// Per-cell context holding cell-specific NTN assistance info.
   struct per_cell_context {
-    unique_timer              timer;
+    unique_timer timer;
+    /// Common subcarrier spacing of the cell, used to resolve the mapping on the node timeline.
+    subcarrier_spacing        common_scs = subcarrier_spacing::kHz15;
     std::optional<sib19_info> last_sib19;
     /// Queue of full cell config snapshots ordered by epoch_time. Always non-empty (seeded at construction).
     static_ring_buffer<cell_config_snapshot, 8> cell_cfg_queue;
@@ -90,6 +98,9 @@ private:
   /// \param ctx Per-cell context.
   /// \param t   SIB19 epoch time.
   const ntn_cell_config& get_cell_config(per_cell_context& ctx, time_point t) const;
+
+  /// \brief Runs one update for the given cell, if the node timeline already provides a slot mapping.
+  void run_cell_update(const nr_cell_global_id_t& nr_cgi, per_cell_context& ctx);
 
   /// \brief Looks up the per-satellite context for a given satellite index.
   /// \return Pointer to the context, or nullptr if no satellite with this index is configured.
@@ -123,15 +134,19 @@ private:
   /// \param sl Current slot
   void periodic_ntn_config_update_task(const nr_cell_global_id_t& nr_cgi, time_point tp, slot_point sl);
 
-  ocudulog::basic_logger&                           logger;
-  std::unique_ptr<ntn_sib19_update_handler>         sib19_pdu_update_handler;
-  std::unique_ptr<ntn_time_provider>                time_provider;
-  std::unique_ptr<ntn_doppler_compensation_handler> doppler_handler;
-  std::unique_ptr<ntn_meas_info_update_handler>     meas_info_update_handler;
-  timer_manager&                                    timers;
-  task_executor&                                    executor;
-  std::map<unsigned, per_satellite_context>         satellite_contexts;
-  std::map<nr_cell_global_id_t, per_cell_context>   cells;
+  ocudulog::basic_logger&                       logger;
+  std::unique_ptr<ntn_sib19_update_handler>     sib19_pdu_update_handler;
+  std::unique_ptr<ntn_time_provider>            time_provider;
+  std::unique_ptr<ntn_meas_info_update_handler> meas_info_update_handler;
+  /// Handler applying the feeder link Doppler compensation, owned above this manager. May be null.
+  ntn_doppler_compensation_handler*               doppler_handler;
+  timer_manager&                                  timers;
+  task_executor&                                  executor;
+  std::map<unsigned, per_satellite_context>       satellite_contexts;
+  std::map<nr_cell_global_id_t, per_cell_context> cells;
+  /// Whether the periodic updates are currently armed. Makes \c start() and \c stop() idempotent and lets the manager
+  /// be restarted. Only touched from the thread driving the manager lifecycle.
+  bool running = false;
 };
 
 } // namespace ocudu_ntn

@@ -11,12 +11,13 @@
 #include "pusch_processor_result_test_doubles.h"
 #include "support/compare_sequences.h"
 #include "ulsch_demultiplex_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/upper/channel_processors/pusch/factories.h"
 #include "ocudu/ran/pusch/ulsch_info.h"
 #include "ocudu/ran/resource_block.h"
 #include "ocudu/ran/sch/sch_dmrs_power.h"
-#include <fmt/ostream.h>
+#include "fmt/ostream.h"
 #include <gtest/gtest.h>
 #include <random>
 

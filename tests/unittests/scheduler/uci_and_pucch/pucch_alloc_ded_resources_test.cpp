@@ -359,22 +359,23 @@ TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_with_existing_csi_and_
   ASSERT_FALSE(pri.has_value());
 }
 
-TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_with_existing_csi_res_set_promotion_preserves_res_indicator)
+TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_with_existing_csi_selects_free_res_set_1_indicator)
 {
-  // This makes PUCCH resource indicator 0 busy for PUCCH Resource Set ID 0.
+  // This makes PUCCH resource indicator 0 busy for PUCCH Resource Set ID 0 (irrelevant here, since the HARQ-ACK
+  // grant ends up using a Resource Set ID 1 resource to be able to carry the CSI bits).
   t_bench.add_ue();
   alloc_ded_harq_ack(t_bench.get_ue(t_bench.last_added_ue_idx));
 
   alloc_csi_opportunity(t_bench.get_main_ue());
   auto pri = alloc_ded_harq_ack(t_bench.get_main_ue());
   ASSERT_TRUE(pri.has_value());
-  ASSERT_EQ(1U, pri.value());
+  ASSERT_EQ(0U, pri.value());
 }
 
-TEST_P(pucch_alloc_ded_resources_test,
-       alloc_ded_harq_ack_with_existing_csi_and_sr_res_set_promotion_preserves_res_indicator)
+TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_with_existing_csi_and_sr_selects_free_res_set_1_indicator)
 {
-  // This makes PUCCH resource indicator 0 busy for PUCCH Resource Set ID 0.
+  // This makes PUCCH resource indicator 0 busy for PUCCH Resource Set ID 0 (irrelevant here, since the HARQ-ACK
+  // grant ends up using a Resource Set ID 1 resource to be able to carry the CSI bits).
   t_bench.add_ue();
   alloc_ded_harq_ack(t_bench.get_ue(t_bench.last_added_ue_idx));
 
@@ -382,10 +383,10 @@ TEST_P(pucch_alloc_ded_resources_test,
   ASSERT_TRUE(alloc_csi_opportunity(t_bench.get_main_ue()));
   auto pri = alloc_ded_harq_ack(t_bench.get_main_ue());
   ASSERT_TRUE(pri.has_value());
-  ASSERT_EQ(1U, pri.value());
+  ASSERT_EQ(0U, pri.value());
 }
 
-TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_res_set_1_adding_extra_bit_preserves_res_indicator)
+TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_res_set_1_adding_extra_bit_promotion_selects_free_pri)
 {
   // This makes PUCCH resource indicator 0 busy for PUCCH Resource Set ID 0.
   t_bench.add_ue();
@@ -399,10 +400,11 @@ TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_res_set_1_adding_extra
   ASSERT_TRUE(pri_new.has_value());
   ASSERT_EQ(pri.value(), pri_new.value());
 
-  // With 3 HARQ-ACK bits, the PUCCH resource will be promoted to Resource Set ID 1, but the PRI should remain the same.
+  // With 3 HARQ-ACK bits, the PUCCH resource is promoted to Resource Set ID 1; the PRI is selected independently of
+  // the Resource Set ID 0 PRI, so it is the first available PRI in Resource Set ID 1 (PRI 0, still unused there).
   pri_new = alloc_ded_harq_ack(t_bench.get_main_ue());
   ASSERT_TRUE(pri_new.has_value());
-  ASSERT_EQ(pri.value(), pri_new.value());
+  ASSERT_EQ(0U, pri_new.value());
 }
 
 ///////   Test allocation of common + dedicated resources.    ///////
@@ -584,28 +586,6 @@ TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_fails_when_existing_co
 
 ///////  Test HARQ-ACK allocation on ded. resources - Resource Set ID 1  - Multi UEs ///////
 
-TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_succeeds_until_no_free_res_set_1_resources)
-{
-  // Fill all resources in Resource Set ID 1 with UEs having their own HARQ grants.
-  const unsigned res_set_size = t_bench.params.pucch_ded_params.res_set_size.value();
-  for (unsigned i = 0; i != res_set_size; ++i) {
-    t_bench.add_ue();
-    alloc_ded_harq_ack(t_bench.get_ue(t_bench.last_added_ue_idx));
-    alloc_ded_harq_ack(t_bench.get_ue(t_bench.last_added_ue_idx));
-    auto pri = alloc_ded_harq_ack(t_bench.get_ue(t_bench.last_added_ue_idx));
-    ASSERT_TRUE(pri.has_value());
-    ASSERT_EQ(i, pri.value());
-    ASSERT_EQ(i + 1, default_slot_grid.result.ul.pucchs.size());
-    ASSERT_EQ(
-        1,
-        test_helpers::find_ue_pucchs(default_slot_grid.result.ul.pucchs.unsorted(), t_bench.last_added_ue_rnti).size());
-  }
-
-  // Try to allocate HARQ for the main UE, which should fail as there are no more free resources in Resource Set ID 1.
-  auto pri = alloc_ded_harq_ack(t_bench.get_main_ue());
-  ASSERT_FALSE(pri.has_value());
-}
-
 TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_res_set_1_over_csi_from_other_ue_succeeds)
 {
   // Allocate a CSI grant for UE 0x4601.
@@ -627,7 +607,7 @@ TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_res_set_1_over_csi_fro
   ASSERT_EQ(res_set_size + 1, default_slot_grid.result.ul.pucchs.size());
 }
 
-TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_res_set_1_succeeds_until_no_free_res_set_1_resources)
+TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_res_set_1_promotion_fails_if_no_free_res_set_1_resources)
 {
   const unsigned res_set_size = t_bench.params.pucch_ded_params.res_set_size.value();
   for (unsigned i = 0; i != res_set_size; ++i) {
@@ -645,9 +625,16 @@ TEST_P(pucch_alloc_ded_resources_test, alloc_ded_harq_ack_res_set_1_succeeds_unt
   }
   ASSERT_EQ(res_set_size, default_slot_grid.result.ul.pucchs.size());
 
+  // A new UE's initial HARQ-ACK allocation only checks Resource Set ID 0, which is entirely free, so it succeeds
+  // (using a Resource Set ID 0 grant, hence no extra PUCCH PDU is added on top of the res_set_size Set ID 1 grants).
   t_bench.add_ue();
+  ASSERT_TRUE(alloc_ded_harq_ack(t_bench.get_ue(t_bench.last_added_ue_idx)).has_value());
+  ASSERT_TRUE(alloc_ded_harq_ack(t_bench.get_ue(t_bench.last_added_ue_idx)).has_value());
+  ASSERT_EQ(res_set_size + 1, default_slot_grid.result.ul.pucchs.size());
+
+  // Promoting to Resource Set ID 1 on the 3rd HARQ-ACK bit fails, as there are no more free resources there.
   ASSERT_FALSE(alloc_ded_harq_ack(t_bench.get_ue(t_bench.last_added_ue_idx)));
-  ASSERT_EQ(res_set_size, default_slot_grid.result.ul.pucchs.size());
+  ASSERT_EQ(res_set_size + 1, default_slot_grid.result.ul.pucchs.size());
 }
 
 ///////   Test removal of dedicated PUCCH resources    ///////

@@ -24,4 +24,27 @@ inline uint8_t get_repetition_rv(uint8_t dci_rv, unsigned occasion_idx)
   return rv_cycle[(std::distance(rv_cycle.begin(), it) + occasion_idx) % rv_cycle.size()];
 }
 
+/// \brief Retrieve the RV to be used for a Configured Grant transmission for a specific repetition index and sequence.
+///
+/// \param[in] reps repetition RV sequence and length specified for the CG.
+/// \param[in] rep_idx Repetition index.
+/// \return The RV corresponding to the repetition index and sequence.
+inline uint8_t get_cg_repetition_rv(const cg_configuration::repetitions_t& reps, unsigned rep_idx)
+{
+  ocudu_assert(rep_idx < static_cast<unsigned>(reps.rep_k), "Invalid RV index={}", rep_idx);
+  // As per \c ConfiguredGrantConfig, TS 38.331, the Repetition RV sequence maximum length is 4; if the \ref rep_idx is
+  // larger than 4, the mod operation is performed w.r.t. 4.
+  constexpr unsigned max_cg_rv_rep_length = 4U;
+  // RV index for the first repetition is always 0.
+  if (reps.rep_k == cg_configuration::rep_k_t::n1 or reps.rv_seq == cg_configuration::rep_k_rv::s3_0000) {
+    return 0U;
+  }
+  if (reps.rv_seq == cg_configuration::rep_k_rv::s1_0231) {
+    static constexpr std::array<uint8_t, 4> rv_0231 = {0, 2, 3, 1};
+    return rv_0231[rep_idx % max_cg_rv_rep_length];
+  }
+  static constexpr std::array<uint8_t, 4> rv_0303 = {0, 3, 0, 3};
+  return rv_0303[rep_idx % max_cg_rv_rep_length];
+}
+
 } // namespace ocudu

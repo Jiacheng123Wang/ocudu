@@ -7,10 +7,11 @@
 #include "../routines/amf_connection_removal_routine.h"
 #include "../routines/amf_connection_setup_routine.h"
 #include "../routines/amf_reconnection_routine.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_configuration.h"
 #include "ocudu/ngap/ngap.h"
 #include "ocudu/ran/plmn_identity.h"
-#include "ocudu/support/synchronization/baton.h"
+#include "ocudu/support/synchronization/sync_event.h"
 #include <chrono>
 #include <thread>
 
@@ -110,33 +111,41 @@ void amf_connection_manager::stop()
     return;
   }
 
-  baton               stop_baton;
-  scoped_baton_sender signal_stop{stop_baton};
+  // Stop event used to block while AMF disconnection routine is on-going.
+  // We pass the token to the routines by value, to make sure that there is no use after-move within
+  // the defer retry loops.
+  sync_event stop_control;
+  auto       stop_token = stop_control.get_token();
 
   // Stop and delete AMF connections.
-  while (not cu_cp_exec.defer([this, signal_stop = std::move(signal_stop)]() mutable {
-    common_task_sched.schedule(
-        launch_async([this, signal_stop = std::move(signal_stop)](coro_context<async_task<void>>& ctx) mutable {
-          CORO_BEGIN(ctx);
-          // Disconnect AMF connection.
-          CORO_AWAIT(disconnect_amf());
+  while (not cu_cp_exec.defer([this, stop_token]() mutable {
+    bool err = common_task_sched.schedule(launch_async([this, stop_token](coro_context<async_task<void>>& ctx) mutable {
+      CORO_BEGIN(ctx);
+      // Disconnect AMF connection.
+      CORO_AWAIT(disconnect_amf());
 
-          // AMF disconnection successfully finished.
-          // Dispatch main async task loop destruction via defer so that the current coroutine ends successfully.
-          while (not cu_cp_exec.defer([signal_stop = std::move(signal_stop)]() mutable { signal_stop.post(); })) {
-            logger.warning("Unable to stop AMF Manager. Retrying...");
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-          }
+      // AMF disconnection successfully finished.
+      // Dispatch main async task loop destruction via defer so that the current coroutine ends
+      // successfully.
+      // We capture the token, so that the observer is blocked until the callback is run.
+      while (not cu_cp_exec.defer([stop_token]() mutable {})) {
+        logger.warning("Unable to stop AMF Manager. Retrying...");
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
 
-          CORO_RETURN();
-        }));
+      CORO_RETURN();
+    }));
+    if (not err) {
+      logger.warning("Failed start AMF disconnection routine");
+    }
   })) {
     logger.warning("Failed to dispatch AMF stop task. Retrying...");
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
   // Wait for AMF stop to complete.
-  stop_baton.wait();
+  stop_token.reset();
+  stop_control.wait();
 
   stopped = true;
 }

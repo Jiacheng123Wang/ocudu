@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ru_dummy_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/subcarrier_spacing.h"
 #include "ocudu/ru/dummy/ru_dummy_configuration.h"
 #include "ocudu/support/error_handling.h"

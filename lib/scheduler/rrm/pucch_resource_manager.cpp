@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ocudu/scheduler/rrm/pucch_resource_manager.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/csi_report/csi_report_config_helpers.h"
 #include "ocudu/ran/csi_report/csi_report_on_pucch_helpers.h"
 #include "ocudu/ran/csi_rs/csi_meas_config.h"
@@ -195,6 +196,9 @@ bool pucch_resource_manager::alloc_resources(ue_cell_config& cell_cfg)
   serv_cell_cfg.csi_meas_cfg =
       config_helpers::build_csi_meas_config(cell_ctx.cell_params, cell_ctx.cell_bwp_cfg.ul, cell_cfg.init_bwp());
 
+  // Disable PUCCH repetition until \c update_resources is called with the UE's reported capabilities.
+  apply_rep_factor_capabilities(cell_cfg, std::nullopt);
+
   ++cell_ctx.ue_idx;
   return true;
 }
@@ -236,6 +240,51 @@ void pucch_resource_manager::dealloc_resources(ue_cell_config& cell_cfg)
   // Disable the PUCCH configuration in this UE. This makes sure the DU will exit this function immediately when it
   // gets called again for the same UE (upon destructor's call).
   disable_pucch_cfg(serv_cell_cfg, cell_ctx);
+}
+
+void pucch_resource_manager::update_resources(ue_cell_config& cell_cfg, const ue_capability_summary& ue_caps)
+{
+  apply_rep_factor_capabilities(cell_cfg, ue_caps);
+}
+
+void pucch_resource_manager::apply_rep_factor_capabilities(ue_cell_config&                             cell_cfg,
+                                                           const std::optional<ue_capability_summary>& ue_caps)
+{
+  serving_cell_config& serv_cell_cfg = cell_cfg.serv_cell_cfg;
+  if (not serv_cell_cfg.ul_config.has_value() or not serv_cell_cfg.ul_config->init_ul_bwp.pucch_cfg.has_value()) {
+    return;
+  }
+
+  const cell_resource_context& cell_ctx = cells[serv_cell_cfg.cell_index];
+
+  bool f1_3_4_supported      = false;
+  bool f0_2_supported        = false;
+  bool dynamic_rep_supported = false;
+  if (ue_caps.has_value()) {
+    const nr_band band = cell_ctx.cell_params.ul_carrier.band;
+
+    f1_3_4_supported   = ue_caps->pucch_repeat_f1_3_4_supported;
+    const auto band_it = ue_caps->bands.find(band);
+    f0_2_supported     = band_it != ue_caps->bands.end() and band_it->second.pucch_repeat_f0_2_r17_supported;
+    // The UE must indicate slotBasedDynamicPUCCH-Rep-r17 to support the dynamic PUCCH repetition indicated via
+    // pucch-RepetitionNrofSlots-r17, in addition to the format-specific repetition capability.
+    dynamic_rep_supported = ue_caps->slot_based_dyn_pucch_rep_r17_supported;
+  }
+
+  for (pucch_resource& res : serv_cell_cfg.ul_config->init_ul_bwp.pucch_cfg->pucch_res_list) {
+    const bool format_supported = (res.format() == pucch_format::FORMAT_0 or res.format() == pucch_format::FORMAT_2)
+                                      ? f0_2_supported
+                                      : f1_3_4_supported;
+    if (dynamic_rep_supported and format_supported) {
+      res.rep_factor = cell_ctx.cell_bwp_cfg.ul.pucch.get_ded(res.res_id).rep_factor;
+    } else {
+      res.rep_factor = pucch_repetition_factor::n1;
+    }
+  }
+
+  // Also record the UE's dynamic PUCCH repetition support directly on the UE's scheduler-facing PUCCH config.
+  cell_cfg.init_bwp().ul.pucch.rep_f1_3_4_enabled = dynamic_rep_supported and f1_3_4_supported;
+  cell_cfg.init_bwp().ul.pucch.rep_f0_2_enabled   = dynamic_rep_supported and f0_2_supported;
 }
 
 std::vector<pucch_resource_manager::periodic_pucch_config>::const_iterator

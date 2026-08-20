@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "mac_scheduler_cell_configurator.h"
 #include "ocudu/mac/mac_cell_manager.h"
 #include "ocudu/mac/mac_cell_rach_handler.h"
 #include "ocudu/mac/mac_cell_slot_handler.h"
@@ -15,11 +16,11 @@
 
 namespace ocudu {
 
-struct si_scheduling_update_request;
 struct sched_result;
 
 /// \brief Interface used by MAC Cell Processor to interact with the MAC scheduler.
-class mac_scheduler_cell_info_handler : public mac_ue_control_information_handler
+class mac_scheduler_cell_info_handler : public mac_ue_control_information_handler,
+                                        public mac_scheduler_cell_configurator
 {
 public:
   ~mac_scheduler_cell_info_handler() override = default;
@@ -46,27 +47,6 @@ public:
   /// \param event Effect that the errors in the lower layers had on the result provided by the scheduler.
   virtual void
   handle_error_indication(slot_point slot_tx, du_cell_index_t cell_idx, mac_cell_slot_handler::error_event event) = 0;
-
-  /// \brief Update SIB1 and SI scheduling information in scheduler.
-  /// \param[in] request Request to change SI sched info and messages.
-  virtual void handle_si_change_indication(const si_scheduling_update_request& request) = 0;
-
-  /// \brief Request the scheduler to broadcast a PWS (ETWS/CMAS) short-message notification and activate the target
-  /// SI-message.
-  /// \param[in] cell_idx DU-specific index of the cell for which the indication is directed.
-  /// \param[in] si_msg_idx Index of the SI-message carrying the SIB6/7/8 to activate.
-  /// \param[in] nof_segments Number of segments composing the warning message, or \c std::nullopt for indefinite.
-  /// \param[in] msg_len Length, in bytes, of the largest segment of the warning message being activated. Used to
-  /// size the PDSCH grant for this SI-message while active.
-  virtual void handle_pws_broadcast_indication(du_cell_index_t         cell_idx,
-                                               unsigned                si_msg_idx,
-                                               std::optional<unsigned> nof_segments,
-                                               units::bytes            msg_len) = 0;
-
-  /// \brief Handle request to update the slice configuration of a cell.
-  /// \param[in] cell_index Index of the cell for which the measurement is directed.
-  /// \param[in] req Request to update the RRM policies.
-  virtual void handle_slice_reconfiguration_request(const du_cell_slice_reconfig_request& req) = 0;
 
   /// \brief Gets the RACH handler for a given cell.
   /// \param cell_index DU-specific index of the cell for which a RACH handler is being retrieved.

@@ -42,7 +42,8 @@ public:
     slot_alloc.result.dl.dl_pdcchs.back().ctx.bwp_cfg = &slot_alloc.cfg.params.dl_cfg_common.init_dl_bwp.generic_params;
     slot_alloc.result.dl.dl_pdcchs.back().ctx.coreset_cfg =
         &*slot_alloc.cfg.params.dl_cfg_common.init_dl_bwp.pdcch_common.coreset0;
-    slot_alloc.result.dl.dl_pdcchs.back().ctx.cces          = {get_ncce(slot_alloc.slot), ocudu::aggregation_level::n4};
+    slot_alloc.result.dl.dl_pdcchs.back().ctx.cces          = {static_cast<uint8_t>(get_ncce(slot_alloc.slot)),
+                                                               ocudu::aggregation_level::n4};
     slot_alloc.result.dl.dl_pdcchs.back().ctx.context.ss_id = ss_id;
     return &slot_alloc.result.dl.dl_pdcchs.back();
   }
@@ -105,10 +106,12 @@ public:
 
   void slot_indication(slot_point sl_tx) override { next_uci_allocation.reset(); }
 
-  std::optional<uci_allocation> alloc_harq_ack(cell_resource_allocator&     res_alloc,
-                                               const ue_cell_configuration& ue_cell_cfg,
-                                               unsigned                     k0,
-                                               span<const uint8_t>          k1_list) override
+  std::optional<uci_allocation>
+  alloc_harq_ack(cell_resource_allocator&     res_alloc,
+                 const ue_cell_configuration& ue_cell_cfg,
+                 unsigned                     k0,
+                 span<const uint8_t>          k1_list,
+                 pucch_repetition_factor      max_rep_factor = pucch_repetition_factor::n1) override
   {
     return next_uci_allocation;
   }
@@ -116,7 +119,8 @@ public:
   void multiplex_uci_on_pusch(ul_sched_info&                pusch_grant,
                               cell_slot_resource_allocator& slot_alloc,
                               const ue_cell_configuration&  ue_cell_cfg,
-                              bool                          aperiodic_csi_request) override
+                              bool                          aperiodic_csi_request,
+                              bool                          configured_grant = false) override
   {
   }
 
@@ -134,6 +138,8 @@ public:
   uint8_t get_scheduled_pdsch_counter_in_ue_uci(slot_point uci_slot, rnti_t crnti) override { return 0; }
 
   bool has_harq_ack_on_common_pucch_res(rnti_t crnti, slot_point sl_tx) override { return false; }
+
+  bool has_pucch_repetition(rnti_t crnti, slot_point sl_tx) override { return false; }
 };
 
 class sched_cfg_dummy_notifier : public sched_configuration_notifier

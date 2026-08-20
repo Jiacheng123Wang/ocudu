@@ -20,6 +20,7 @@
 #include "pucch_scheduling/pucch_allocator_impl.h"
 #include "srs/srs_allocator_impl.h"
 #include "uci_scheduling/uci_allocator_impl.h"
+#include "ue_context/ue_cell_repository.h"
 #include "ue_scheduling/ue_scheduler.h"
 
 namespace ocudu {
@@ -50,7 +51,7 @@ public:
 
   void handle_si_update_request(const si_scheduling_update_request& msg);
 
-  void handle_pws_broadcast_indication(const pws_broadcast_request& req);
+  void handle_pws_si_update_request(const pws_si_scheduling_update_request& msg);
 
   void handle_slice_reconfiguration_request(const du_cell_slice_reconfig_request& slice_reconf_req);
 
@@ -90,12 +91,16 @@ private:
   si_scheduler                  si_sch;
   csi_rs_scheduler              csi_sch;
   pucch_allocator_impl          pucch_alloc;
-  ra_ue_repository              ra_ue_repo;
-  ra_scheduler                  ra_sch;
-  prach_scheduler               prach_sch;
   uci_allocator_impl            uci_alloc;
-  srs_allocator_impl            srs_alloc;
-  paging_scheduler              pg_sch;
+  ra_ue_repository              ra_ue_repo;
+
+  /// UEs configured in this cell.
+  ue_cell_repository ue_cell_db;
+
+  ra_scheduler       ra_sch;
+  prach_scheduler    prach_sch;
+  srs_allocator_impl srs_alloc;
+  paging_scheduler   pg_sch;
 
   /// Reference to UE scheduler whose DU cell group contains this cell.
   ue_scheduler::unique_cell_ptr ue_sched;

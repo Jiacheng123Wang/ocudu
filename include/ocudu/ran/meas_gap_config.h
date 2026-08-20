@@ -6,7 +6,10 @@
 
 #include "ocudu/adt/bounded_bitset.h"
 #include "ocudu/ran/slot_point.h"
+#include "ocudu/support/math/math_utils.h"
 #include <array>
+#include <chrono>
+#include <optional>
 
 namespace ocudu {
 
@@ -148,14 +151,47 @@ private:
   pattern_bitset supported;
 };
 
-/// Determines whether a slot is inside the measurement gap.
+/// Determines whether a slot of the UE downlink timing grid is inside the measurement gap.
+/// \note mgta is not modelled, as the DU always signals mgta=ms0; otherwise the window would start mgta earlier.
 inline bool is_inside_meas_gap(const meas_gap_config& gap, slot_point sl)
 {
   const unsigned slot_per_sf  = sl.nof_slots_per_subframe();
-  unsigned       period_slots = static_cast<uint8_t>(gap.mgrp) * slot_per_sf;
-  unsigned       length_slots = std::ceil(meas_gap_length_to_msec(gap.mgl) * slot_per_sf);
-  unsigned       slot_mod     = (sl - gap.offset * slot_per_sf).to_uint() % period_slots;
-  return slot_mod <= length_slots;
+  const unsigned period_slots = static_cast<uint8_t>(gap.mgrp) * slot_per_sf;
+  const unsigned length_slots = std::ceil(meas_gap_length_to_msec(gap.mgl) * slot_per_sf);
+  const unsigned slot_mod     = (sl - gap.offset * slot_per_sf).to_uint() % period_slots;
+  // The gap starts at the gap offset and spans MGL, hence slot_mod in [0, length_slots).
+  return slot_mod < length_slots;
+}
+
+/// \brief Determines whether an uplink transmission the gNB receives in \c ul_slot falls inside the UE measurement gap.
+///
+/// The gap is anchored to the UE downlink timing (see \ref is_inside_meas_gap), while its uplink runs T_TA ahead of it
+/// (TS 38.211, Section 4.3.1), so the position to test is <tt>ul_slot - T_TA</tt>. T_TA is negligible in a terrestrial
+/// cell but reaches tens of slots in an NTN one.
+///
+/// \param ul_ta T_TA applied by the UE. Absent when not tracked, in which case the window is neither shifted nor
+/// guarded.
+inline bool
+is_inside_ul_meas_gap(const meas_gap_config& gap, slot_point ul_slot, std::optional<std::chrono::microseconds> ul_ta)
+{
+  const unsigned slot_per_sf  = ul_slot.nof_slots_per_subframe();
+  const unsigned period_slots = static_cast<uint8_t>(gap.mgrp) * slot_per_sf;
+  // Only T_TA modulo the gap period matters, so a multi-period T_TA (e.g. GEO cell) does not widen the window.
+  const unsigned ta_slots =
+      ul_ta.has_value() ? static_cast<unsigned>(ul_ta->count() * slot_per_sf / 1000) % period_slots : 0;
+  // [Implementation-defined] One 15kHz slot: exactly bounds a UE-reported T_TA, rounded up to a whole 15kHz slot
+  // (TS 38.321, Section 6.1.3.56), but covers only 150km from the reference location at 0 deg elevation (and more at
+  // higher elevations).
+  constexpr std::chrono::microseconds ul_meas_gap_guard{1000};
+  const unsigned                      guard_slots =
+      ul_ta.has_value() ? divide_ceil(static_cast<unsigned>(ul_meas_gap_guard.count()) * slot_per_sf, 1000U) : 0;
+  // The trailing slot covers the true edge reaching into the next UL slot, which partially overlaps and is interrupted
+  // too (TS 38.133, Section 9.1C.2). Unconditional: where T_TA is not tracked it is the only margin, so it holds only
+  // while N_TA stays below one slot, i.e. up to a 75km cell radius at 30kHz.
+  const unsigned length_slots = std::ceil(meas_gap_length_to_msec(gap.mgl) * slot_per_sf) + 2 * guard_slots + 1;
+  // A whole period is added so that the start stays non-negative when the guard reaches below the gap offset.
+  const unsigned window_start = gap.offset * slot_per_sf + period_slots + ta_slots - guard_slots;
+  return (ul_slot - window_start).to_uint() % period_slots < length_slots;
 }
 
 } // namespace ocudu

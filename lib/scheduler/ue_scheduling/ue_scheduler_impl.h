@@ -8,6 +8,7 @@
 #include "../srs/srs_scheduler_impl.h"
 #include "../uci_scheduling/uci_indication_selector.h"
 #include "../uci_scheduling/uci_scheduler_impl.h"
+#include "../ue_context/ue_cell_repository.h"
 #include "../ue_context/ue_repository.h"
 #include "intra_slice_scheduler.h"
 #include "triggered_ul_grant_scheduler.h"
@@ -19,6 +20,8 @@
 #include <mutex>
 
 namespace ocudu {
+
+class configured_grant_scheduler_impl;
 
 /// \brief Interface of data scheduler that is used to allocate UE DL and UL grants in a given slot.
 /// The data_scheduler object will be common to all cells and slots.
@@ -62,6 +65,9 @@ private:
     /// SRS scheduler
     srs_scheduler_impl srs_sched;
 
+    /// Configured Grant scheduler.
+    std::unique_ptr<configured_grant_scheduler_impl> cg_sched;
+
     /// Triggered UL grant sub-scheduler.
     triggered_ul_grant_scheduler trig_ul_sched;
 
@@ -100,7 +106,6 @@ private:
       ev_mng->handle_uci_indication_timeout(sl_rx, crnti, action);
     }
   };
-
   const scheduler_ue_expert_config& expert_cfg;
   ocudulog::basic_logger&           logger;
 

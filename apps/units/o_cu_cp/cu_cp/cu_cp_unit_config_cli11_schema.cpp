@@ -13,6 +13,7 @@
 #include "ocudu/support/cli11_utils.h"
 #include "ocudu/support/config_parsers.h"
 #include <algorithm>
+#include <istream>
 
 using namespace ocudu;
 
@@ -23,6 +24,7 @@ static void configure_cli11_reference_location(CLI::App& app, reference_location
   add_option(app, "--longitude", loc.longitude, "Longitude [degrees, -180..180]")->check(CLI::Range(-180.0, 180.0));
 }
 
+/// Configures the CLI11 logging arguments.
 static void configure_cli11_log_args(CLI::App& app, cu_cp_unit_logger_config& log_params)
 {
   app_helpers::add_log_option(app, log_params.pdcp_level, "--pdcp_level", "PDCP log level");
@@ -48,6 +50,7 @@ static void configure_cli11_log_args(CLI::App& app, cu_cp_unit_logger_config& lo
       ->always_capture_default();
 }
 
+/// Configures the CLI11 PCAP arguments.
 static void configure_cli11_pcap_args(CLI::App& app, cu_cp_unit_pcap_config& pcap_params)
 {
   add_option(app, "--ngap_filename", pcap_params.ngap.filename, "N3 GTP-U PCAP file output path")
@@ -62,12 +65,14 @@ static void configure_cli11_pcap_args(CLI::App& app, cu_cp_unit_pcap_config& pca
   add_option(app, "--e1ap_enable", pcap_params.e1ap.enabled, "Enable E1AP packet capture")->always_capture_default();
 }
 
+/// Configures the TAI slice support arguments.
 static void configure_cli11_tai_slice_support_args(CLI::App& app, cu_cp_unit_plmn_item::tai_slice_t& config)
 {
   add_option(app, "--sst", config.sst, "Slice Service Type")->capture_default_str()->check(CLI::Range(0, 255));
   add_option(app, "--sd", config.sd, "Service Differentiator")->capture_default_str()->check(CLI::Range(0, 0xffffff));
 }
 
+/// Configures the CLI11 PLMD item arguments.
 static void configure_cli11_plmn_item_args(CLI::App& app, cu_cp_unit_plmn_item& config)
 {
   add_option(app, "--plmn", config.plmn_id, "PLMN to be configured");
@@ -90,6 +95,7 @@ static void configure_cli11_plmn_item_args(CLI::App& app, cu_cp_unit_plmn_item& 
       "Sets the list of TAI slices for this PLMN");
 }
 
+/// Configures the CLI11 supported tracking areas arguments.
 static void configure_cli11_supported_ta_args(CLI::App& app, cu_cp_unit_supported_ta_item& config)
 {
   add_option(app, "--tac", config.tac, "TAC to be configured")->check([](const std::string& value) {
@@ -123,6 +129,7 @@ static void configure_cli11_supported_ta_args(CLI::App& app, cu_cp_unit_supporte
       "Sets the list of PLMN items for this tracking area");
 }
 
+/// Configures the CLI11 AMF item arguments.
 static void configure_cli11_amf_item_args(CLI::App& app, cu_cp_unit_amf_config_item& config)
 {
   add_option(app,
@@ -161,6 +168,7 @@ static void configure_cli11_amf_item_args(CLI::App& app, cu_cp_unit_amf_config_i
       "Sets the list of tracking areas supported by this AMF");
 }
 
+/// Configures the CLI11 AMF arguments.
 static void configure_cli11_amf_args(CLI::App& app, cu_cp_unit_amf_config& config)
 {
   add_option(app, "--no_core", config.no_core, "Allow CU-CP to run without a core")->capture_default_str();
@@ -179,6 +187,7 @@ static void configure_cli11_amf_args(CLI::App& app, cu_cp_unit_amf_config& confi
   configure_cli11_amf_item_args(app, config.amf);
 }
 
+/// Configures the XNAP peer arguments.
 static void configure_cli11_xnap_peer_args(CLI::App& app, cu_cp_unit_xnap_peer_config& config)
 {
   add_option(
@@ -188,6 +197,7 @@ static void configure_cli11_xnap_peer_args(CLI::App& app, cu_cp_unit_xnap_peer_c
       "Peer gNB IP addresses to connect for XnAP interface. Multiple addresses can be specified for SCTP multi-homing");
 }
 
+/// Configures the CLI11 XNAP gateway arguments.
 static void configure_cli11_xnap_gateway_args(CLI::App& app, cu_cp_unit_xnap_gateway_config& config)
 {
   add_option(app,
@@ -216,6 +226,7 @@ static void configure_cli11_xnap_gateway_args(CLI::App& app, cu_cp_unit_xnap_gat
       "Sets the list of Xn-C peer connections reachable via this gateway");
 }
 
+/// Configures the CLI11 XNAP arguments.
 static void configure_cli11_xnap_args(CLI::App& app, cu_cp_unit_xnap_config& config)
 {
   add_option(
@@ -249,16 +260,22 @@ static void configure_cli11_xnap_args(CLI::App& app, cu_cp_unit_xnap_config& con
       "Sets the list of XnAP gateways, each with its own bind addresses, SCTP options, and Xn-C peer connections");
 }
 
+/// Configures the CLI11 report arguments.
 static void configure_cli11_report_args(CLI::App& app, cu_cp_unit_report_config& report_params)
 {
   add_option(app, "--report_cfg_id", report_params.report_cfg_id, "Report configuration id to be configured")
       ->check(CLI::Range(1, 64));
   add_option(app, "--report_type", report_params.report_type, "Type of the report configuration")
       ->check(CLI::IsMember({"periodical", "event_triggered", "cond_trigger"}));
-  add_option(app,
-             "--event_triggered_report_type",
-             report_params.event_triggered_report_type,
-             "Type of the event triggered report")
+  add_option_function<std::string>(
+      app,
+      "--event_triggered_report_type",
+      [&report_params](const std::string& value) {
+        std::optional<ocucp::rrc_event_id::event_id_t> id = ocucp::from_string(value);
+        report_error_if_not(id.has_value(), "Invalid --event_triggered_report_type argument.");
+        report_params.event_triggered_report_type = *id;
+      },
+      "Type of the event triggered report")
       ->check(CLI::IsMember({"a1", "a2", "a3", "a4", "a5", "a6", "d1", "t1", "d2"}));
   add_option(app, "--report_interval_ms", report_params.report_interval_ms, "Report interval in ms")
       ->check(
@@ -369,6 +386,7 @@ static void configure_cli11_report_args(CLI::App& app, cu_cp_unit_report_config&
       ->check(CLI::Range(0.1, 600.0));
 }
 
+/// Configures the CLI11 neighbor cell arguments.
 static void configure_cli11_ncell_args(CLI::App& app, cu_cp_unit_neighbor_cell_config_item& config)
 {
   add_option(app, "--nr_cell_id", config.nr_cell_id, "Neighbor cell id")
@@ -377,6 +395,7 @@ static void configure_cli11_ncell_args(CLI::App& app, cu_cp_unit_neighbor_cell_c
       app, "--report_configs", config.report_cfg_ids, "Report configurations to configure for this neighbor cell");
 }
 
+/// Configues the CLI11 cells arguments.
 static void configure_cli11_cells_args(CLI::App& app, cu_cp_unit_cell_config_item& config)
 {
   add_option(app, "--nr_cell_id", config.nr_cell_id, "Cell id to be configured")
@@ -449,6 +468,7 @@ static void configure_cli11_cells_args(CLI::App& app, cu_cp_unit_cell_config_ite
       "Sets the list of neighbor cells known to the CU-CP");
 }
 
+/// Configures the CLI11 mobility arguments.
 static void configure_cli11_mobility_args(CLI::App& app, cu_cp_unit_mobility_config& config)
 {
   add_option(app,
@@ -509,6 +529,7 @@ static void configure_cli11_mobility_args(CLI::App& app, cu_cp_unit_mobility_con
       "Sets report configurations");
 }
 
+/// Configures the CLI11 RRC arguments.
 static void configure_cli11_rrc_args(CLI::App& app, cu_cp_unit_rrc_config& config)
 {
   add_option(app,
@@ -533,6 +554,25 @@ static void configure_cli11_rrc_args(CLI::App& app, cu_cp_unit_rrc_config& confi
       ->check(CLI::Range(1, 16));
 }
 
+/// Strips whitespace and lower-cases an algorithm preference list, e.g. "NEA0, NEA2" -> "nea0,nea2".
+static std::string normalize_algo_pref_list(std::string value)
+{
+  value.erase(std::remove_if(value.begin(), value.end(), ::isspace), value.end());
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+  return value;
+}
+
+/// Splits teh given string into a vector of strings splitting the items with ",".
+static std::vector<std::string> split_algo_pref_list(const std::string& value)
+{
+  std::vector<std::string> tokens;
+  std::istringstream       ss(value);
+  for (std::string token; std::getline(ss, token, ','); tokens.push_back(token)) {
+  }
+  return tokens;
+}
+
+/// Configures the CLI11 security arguments.
 static void configure_cli11_security_args(CLI::App& app, cu_cp_unit_security_config& config)
 {
   auto sec_check = [](const std::string& value) -> std::string {
@@ -542,29 +582,105 @@ static void configure_cli11_security_args(CLI::App& app, cu_cp_unit_security_con
     return "Security indication value not supported. Accepted values [required,preferred,not_needed]";
   };
 
-  add_option(app, "--integrity", config.integrity_protection, "Default integrity protection indication for DRBs")
-      ->capture_default_str()
+  add_option_function<std::string>(
+      app,
+      "--integrity",
+      [&config](const std::string& value) {
+        report_error_if_not(from_string(config.integrity_protection, value), "Invalid --integrity argument.");
+      },
+      "Default integrity protection indication for DRBs")
+      ->default_str(to_string(config.integrity_protection))
       ->check(sec_check);
 
-  add_option(app,
-             "--confidentiality",
-             config.confidentiality_protection,
-             "Default confidentiality protection indication for DRBs")
-      ->capture_default_str()
+  add_option_function<std::string>(
+      app,
+      "--confidentiality",
+      [&config](const std::string& value) {
+        std::optional<confidentiality_protection_indication_t> confidentiality_protection = from_string(value);
+        report_error_if_not(confidentiality_protection, "Invalid --confidenciality argument.");
+        config.confidentiality_protection = *confidentiality_protection;
+      },
+      "Default confidentiality protection indication for DRBs")
+      ->default_str(to_string(config.confidentiality_protection))
       ->check(sec_check);
 
-  add_option(app,
-             "--nea_pref_list",
-             config.nea_preference_list,
-             "Ordered preference list for the selection of encryption algorithm (NEA) (default: NEA0, NEA2, NEA1)");
+  add_option_function<std::string>(
+      app,
+      "--nea_pref_list",
+      [&config](const std::string& value) {
+        config.nea_preference_list = {};
+        unsigned idx               = 0;
+        for (const std::string& algo : split_algo_pref_list(value)) {
+          if (algo == "nea0") {
+            config.nea_preference_list[idx] = security::ciphering_algorithm::nea0;
+          } else if (algo == "nea1") {
+            config.nea_preference_list[idx] = security::ciphering_algorithm::nea1;
+          } else if (algo == "nea2") {
+            config.nea_preference_list[idx] = security::ciphering_algorithm::nea2;
+          } else if (algo == "nea3") {
+            config.nea_preference_list[idx] = security::ciphering_algorithm::nea3;
+          }
+          ++idx;
+        }
+      },
+      "Ordered preference list for the selection of encryption algorithm (NEA) (default: NEA0, NEA2, NEA1)")
+      ->default_str(to_string(config.nea_preference_list))
+      ->transform(normalize_algo_pref_list)
+      ->check([](const std::string& value) -> std::string {
+        std::vector<std::string> tokens = split_algo_pref_list(value);
+        if (tokens.size() > 4) {
+          return fmt::format("Too many ciphering algorithms specified ({}); at most 4 are allowed.", tokens.size());
+        }
+        for (const std::string& algo : tokens) {
+          if (algo != "nea0" && algo != "nea1" && algo != "nea2" && algo != "nea3") {
+            return fmt::format(
+                "Invalid ciphering algorithm. Valid values are \"nea0\", \"nea1\", \"nea2\" and \"nea3\". algo={}",
+                algo);
+          }
+        }
+        return {};
+      });
 
-  add_option(app,
-             "--nia_pref_list",
-             config.nia_preference_list,
-             "Ordered preference list for the selection of encryption algorithm (NIA) (default: NIA2, NIA1)")
-      ->capture_default_str();
+  add_option_function<std::string>(
+      app,
+      "--nia_pref_list",
+      [&config](const std::string& value) {
+        config.nia_preference_list = {};
+        unsigned idx               = 0;
+        for (const std::string& algo : split_algo_pref_list(value)) {
+          if (algo == "nia1") {
+            config.nia_preference_list[idx] = security::integrity_algorithm::nia1;
+          } else if (algo == "nia2") {
+            config.nia_preference_list[idx] = security::integrity_algorithm::nia2;
+          } else if (algo == "nia3") {
+            config.nia_preference_list[idx] = security::integrity_algorithm::nia3;
+          }
+          ++idx;
+        }
+      },
+      "Ordered preference list for the selection of encryption algorithm (NIA) (default: NIA2, NIA1)")
+      ->default_str(to_string(config.nia_preference_list))
+      ->transform(normalize_algo_pref_list)
+      ->check([](const std::string& value) -> std::string {
+        std::vector<std::string> tokens = split_algo_pref_list(value);
+        if (tokens.size() > 3) {
+          return fmt::format("Too many integrity algorithms specified ({}); at most 3 are allowed (NIA0 is implicit).",
+                             tokens.size());
+        }
+        for (const std::string& algo : tokens) {
+          if (algo == "nia0") {
+            return "NIA0 cannot be selected in the algorithm preferences.";
+          }
+          if (algo != "nia1" && algo != "nia2" && algo != "nia3") {
+            return fmt::format("Invalid integrity algorithm. Valid values are \"nia1\", \"nia2\" and \"nia3\". algo={}",
+                               algo);
+          }
+        }
+        return {};
+      });
 }
 
+/// Configures the CLI11 reference time reporting arguments.
 static void configure_cli11_ref_time_reporting_args(CLI::App& app, cu_cp_unit_f1ap_config& f1ap_params)
 {
   add_option(app,
@@ -586,6 +702,7 @@ static void configure_cli11_ref_time_reporting_args(CLI::App& app, cu_cp_unit_f1
       ->check(CLI::Range(1, 512));
 }
 
+/// Configures the CLI11 F1AP arguments.
 static void configure_cli11_f1ap_args(CLI::App& app, cu_cp_unit_f1ap_config& f1ap_params)
 {
   add_option(app,
@@ -619,6 +736,7 @@ static void configure_cli11_e1ap_args(CLI::App& app, cu_cp_unit_e1ap_config& e1a
       ->capture_default_str();
 }
 
+/// Configues the CLI11 CU-CP arguments.
 static void configure_cli11_cu_cp_args(CLI::App& app, cu_cp_unit_config& cu_cp_params)
 {
   add_option(
@@ -656,17 +774,24 @@ static void configure_cli11_cu_cp_args(CLI::App& app, cu_cp_unit_config& cu_cp_p
   add_option(app,
              "--t380",
              cu_cp_params.t380,
-             "RRC inactivity timer T380 in minutes. The timer is started when the UE recveives a RRC Release message "
+             "RRC inactivity timer T380 in minutes. The timer is started when the UE receives a RRC Release message "
              "including a suspend config and is stopped on the reception of RRCResume.")
       ->capture_default_str()
       ->check(CLI::IsMember({5, 10, 20, 30, 60, 120, 360, 720}));
 
   add_option(app,
-             "--nof_i_rnti_ue_bits",
-             cu_cp_params.nof_i_rnti_ue_bits,
-             "Number of bits used for the UE id in short and full I-RNTI")
+             "--full_i_rnti_profile",
+             cu_cp_params.full_i_rnti_profile,
+             "I-RNTI profile of the Full-I-RNTI, which sets the width of the Local NG-RAN Node Identifier it carries")
       ->capture_default_str()
-      ->check(CLI::Range(1, 18));
+      ->check(CLI::IsMember({"profile0", "profile1", "profile2", "profile3"}));
+
+  add_option(app,
+             "--short_i_rnti_profile",
+             cu_cp_params.short_i_rnti_profile,
+             "I-RNTI profile of the Short-I-RNTI, which sets the width of the Local NG-RAN Node Identifier it carries")
+      ->capture_default_str()
+      ->check(CLI::IsMember({"profile0", "profile1"}));
 
   add_option(app,
              "--request_pdu_session_timeout",
@@ -718,6 +843,7 @@ static void configure_cli11_cu_cp_args(CLI::App& app, cu_cp_unit_config& cu_cp_p
   configure_cli11_pws_args(*pws_subcmd, cu_cp_params.pws_config);
 }
 
+/// Configures the CLI11 RLC-UM arguments.
 static void configure_cli11_rlc_um_args(CLI::App& app, cu_cp_unit_rlc_um_config& rlc_um_params)
 {
   CLI::App* rlc_tx_um_subcmd = app.add_subcommand("tx", "UM TX parameters");
@@ -730,6 +856,7 @@ static void configure_cli11_rlc_um_args(CLI::App& app, cu_cp_unit_rlc_um_config&
       ->capture_default_str();
 }
 
+/// Configures the CLI11 RLC-AM arguments.
 static void configure_cli11_rlc_am_args(CLI::App& app, cu_cp_unit_rlc_am_config& rlc_am_params)
 {
   CLI::App* tx_subcmd = app.add_subcommand("tx", "AM TX parameters");
@@ -758,9 +885,18 @@ static void configure_cli11_rlc_am_args(CLI::App& app, cu_cp_unit_rlc_am_config&
       ->capture_default_str();
 }
 
+/// Configures the CLI11 RLC arguments.
 static void configure_cli11_rlc_args(CLI::App& app, cu_cp_unit_rlc_config& rlc_params)
 {
-  add_option(app, "--mode", rlc_params.mode, "RLC mode")->capture_default_str();
+  add_option_function<std::string>(
+      app,
+      "--mode",
+      [&rlc_params](const std::string& value) {
+        report_error_if_not(from_string(rlc_params.mode, value), "Invalid --mode argument.");
+      },
+      "RLC mode")
+      ->default_str(format_as(rlc_params.mode))
+      ->check(CLI::IsMember({"tm", "um-bidir", "um-unidir-ul", "um-unidir-dl", "am"}));
 
   // UM section.
   CLI::App* rlc_um_subcmd = app.add_subcommand("um-bidir", "UM parameters");
@@ -771,6 +907,7 @@ static void configure_cli11_rlc_args(CLI::App& app, cu_cp_unit_rlc_config& rlc_p
   configure_cli11_rlc_am_args(*rlc_am_subcmd, rlc_params.am);
 }
 
+/// Configures the CLI11 PDCP ROHC arguments.
 static void configure_cli11_pdcp_rohc_args(CLI::App& app, cu_cp_unit_pdcp_rohc_config& pdcp_rohc_params)
 {
   add_option_function<std::string>(
@@ -809,23 +946,58 @@ static void configure_cli11_pdcp_rohc_args(CLI::App& app, cu_cp_unit_pdcp_rohc_c
       ->always_capture_default();
 }
 
+/// Configures the CLI11 PDCP transmission arguments.
 static void configure_cli11_pdcp_tx_args(CLI::App& app, cu_cp_unit_pdcp_tx_config& pdcp_tx_params)
 {
-  add_option(app, "--sn", pdcp_tx_params.sn_field_length, "PDCP TX SN size")->capture_default_str();
-  add_option(app, "--discard_timer", pdcp_tx_params.discard_timer, "PDCP TX discard timer (ms)")->capture_default_str();
+  add_option(app, "--sn", pdcp_tx_params.sn_field_length, "PDCP TX SN size")
+      ->default_str(std::to_string(pdcp_sn_size_to_uint(pdcp_tx_params.sn_field_length)))
+      ->check(CLI::IsMember({"12", "18"}));
+  add_option(app, "--discard_timer", pdcp_tx_params.discard_timer, "PDCP TX discard timer (ms)")
+      ->default_str(std::to_string(pdcp_discard_timer_to_int(pdcp_tx_params.discard_timer)))
+      ->check([](const std::string& value) -> std::string {
+        int number = 0;
+        try {
+          number = std::stoi(value);
+        } catch (const std::exception&) {
+          return fmt::format("Invalid PDCP discard timer value \"{}\"", value);
+        }
+        pdcp_discard_timer discard_timer;
+        if (!pdcp_discard_timer_from_int(discard_timer, number)) {
+          return fmt::format("Invalid PDCP discard timer value \"{}\"", value);
+        }
+        return {};
+      });
   add_option(app, "--status_report_required", pdcp_tx_params.status_report_required, "PDCP TX status report required")
       ->capture_default_str();
 }
 
+/// Configures the CLI11 PDCP reception arguments.
 static void configure_cli11_pdcp_rx_args(CLI::App& app, cu_cp_unit_pdcp_rx_config& pdcp_rx_params)
 {
-  add_option(app, "--sn", pdcp_rx_params.sn_field_length, "PDCP RX SN size")->capture_default_str();
-  add_option(app, "--t_reordering", pdcp_rx_params.t_reordering, "PDCP RX t-Reordering (ms)")->capture_default_str();
+  add_option(app, "--sn", pdcp_rx_params.sn_field_length, "PDCP RX SN size")
+      ->default_str(std::to_string(pdcp_sn_size_to_uint(pdcp_rx_params.sn_field_length)))
+      ->check(CLI::IsMember({"12", "18"}));
+  add_option(app, "--t_reordering", pdcp_rx_params.t_reordering, "PDCP RX t-Reordering (ms)")
+      ->default_str(std::to_string(pdcp_t_reordering_to_int(pdcp_rx_params.t_reordering)))
+      ->check([](const std::string& value) -> std::string {
+        int number = 0;
+        try {
+          number = std::stoi(value);
+        } catch (const std::exception&) {
+          return fmt::format("Invalid PDCP t-Reordering value \"{}\"", value);
+        }
+        pdcp_t_reordering t_reordering;
+        if (!pdcp_t_reordering_from_int(t_reordering, number)) {
+          return fmt::format("Invalid PDCP t-Reordering value \"{}\"", value);
+        }
+        return {};
+      });
   add_option(
       app, "--out_of_order_delivery", pdcp_rx_params.out_of_order_delivery, "PDCP RX enable out-of-order delivery")
       ->capture_default_str();
 }
 
+/// Configures the CLI11 PDCP arguments.
 static void configure_cli11_pdcp_args(CLI::App& app, cu_cp_unit_pdcp_config& pdcp_params)
 {
   // Header compression section.
@@ -841,6 +1013,7 @@ static void configure_cli11_pdcp_args(CLI::App& app, cu_cp_unit_pdcp_config& pdc
   configure_cli11_pdcp_rx_args(*pdcp_rx_subcmd, pdcp_params.rx);
 }
 
+/// Configures the CLI11 Quality of Service arguments.
 static void configure_cli11_qos_args(CLI::App& app, cu_cp_unit_qos_config& qos_params)
 {
   add_option(app, "--five_qi", qos_params.five_qi, "5QI")->capture_default_str()->check(CLI::Range(0, 255));
@@ -858,6 +1031,7 @@ static void configure_cli11_qos_args(CLI::App& app, cu_cp_unit_qos_config& qos_p
   app.needs(pdcp_subcmd);
 }
 
+/// Configures the CLI11 metrics layers arguments.
 static void configure_cli11_metrics_layers_args(CLI::App& app, cu_cp_unit_metrics_layer_config& metrics_params)
 {
   add_option(app, "--enable_ngap", metrics_params.enable_ngap_metrics, "Enable NGAP metrics")->capture_default_str();
@@ -865,6 +1039,7 @@ static void configure_cli11_metrics_layers_args(CLI::App& app, cu_cp_unit_metric
   add_option(app, "--enable_rrc", metrics_params.enable_rrc_metrics, "Enable CU-CP RRC metrics")->capture_default_str();
 }
 
+/// Configures the CLI11 metrics arguments.
 static void configure_cli11_metrics_args(CLI::App& app, cu_cp_unit_metrics_config& metrics_params)
 {
   auto* periodicity_subcmd = add_subcommand(app, "periodicity", "Metrics periodicity configuration")->configurable();
@@ -926,7 +1101,7 @@ void ocudu::configure_cli11_with_cu_cp_unit_config_schema(CLI::App& app, cu_cp_u
   configure_cli11_ntn_satellites_args(*global_ntn_subcmd, unit_cfg.ntn_satellites);
 }
 
-void ocudu::autoderive_cu_cp_parameters_after_parsing(CLI::App& app, cu_cp_unit_config& unit_cfg)
+void ocudu::autoderive_cu_cp_parameters_after_parsing(const CLI::App& app, cu_cp_unit_config& unit_cfg)
 {
   auto cu_cp_app = app.get_subcommand_ptr("cu_cp");
   for (auto& cell : unit_cfg.mobility_config.cells) {

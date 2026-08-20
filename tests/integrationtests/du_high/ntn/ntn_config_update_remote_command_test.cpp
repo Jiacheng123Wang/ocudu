@@ -21,6 +21,11 @@ public:
     return result_to_return;
   }
 
+  // The remote command does not drive the manager lifecycle, so these are no-ops.
+  void start() override {}
+
+  void stop() override {}
+
   ntn_config_update_info   last_request;
   ntn_config_update_result result_to_return;
 };

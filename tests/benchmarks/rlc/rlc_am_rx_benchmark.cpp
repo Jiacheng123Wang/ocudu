@@ -46,8 +46,8 @@ public:
   void on_delivered_retransmitted_sdu(uint32_t max_deliv_retx_pdcp_sn) override {}
 
   // rlc_tx_upper_layer_control_notifier interface
-  void on_protocol_failure() override {}
-  void on_max_retx() override {}
+  void on_protocol_failure(rb_id_t rb_id) override {}
+  void on_max_retx(rb_id_t rb_id) override {}
 
   // rlc_tx_buffer_state_update_notifier interface
   void on_buffer_state_update(const rlc_buffer_state& bs) override {}
@@ -146,7 +146,7 @@ static std::vector<byte_buffer> generate_pdus(bench_params params, rx_order orde
   manual_task_worker ue_worker{128};
 
   std::unique_ptr<rlc_drb_tx_window_seg_pool, rlc_pool_deleter> drb_tx_pool =
-      make_rlc_drb_tx_window_seg_pool(rlc_drb_tx_window_seg_pool_size);
+      make_rlc_drb_tx_window_seg_pool(rlc_drb_tx_window_seg_pool_size, rlc_drb_tx_window_seg_size);
 
   null_rlc_pcap pcap;
 
@@ -248,7 +248,7 @@ static void benchmark_rx_pdu(const bench_params& params, rx_order order, timer_m
       gnb_du_id_t{}, du_ue_index_t{}, rb_id_t{}, timer_duration{0}, tester.get(), ue_worker);
 
   std::unique_ptr<rlc_drb_rx_window_seg_pool, rlc_pool_deleter> drb_rx_pool =
-      make_rlc_drb_rx_window_seg_pool(rlc_drb_rx_window_seg_pool_size);
+      make_rlc_drb_rx_window_seg_pool(rlc_drb_rx_window_seg_pool_size, rlc_drb_rx_window_seg_size);
 
   // Create RLC AM RX entity
   std::unique_ptr<rlc_rx_am_entity> rlc_rx =

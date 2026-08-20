@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ue_scheduler_impl.h"
+#include "../configured_grant/configured_grant_scheduler_impl.h"
 #include "../logging/cell_metrics_handler.h"
 
 using namespace ocudu;
@@ -14,6 +15,9 @@ ue_scheduler_impl::ue_scheduler_impl(const scheduler_ue_expert_config& expert_cf
 
 ue_cell_scheduler* ue_scheduler_impl::do_add_cell(const ue_cell_scheduler_creation_request& params)
 {
+  // Register the cell UE repository first, so the cell can accept UEs as soon as it exists.
+  ue_db.register_cell(*params.ue_cell_db);
+
   cells.emplace(params.cell_index, *this, params);
   auto& cell = cells[params.cell_index];
 
@@ -24,6 +28,7 @@ ue_cell_scheduler* ue_scheduler_impl::do_add_cell(const ue_cell_scheduler_creati
                                                        cell.uci_sched,
                                                        cell.slice_sched,
                                                        cell.srs_sched,
+                                                       cell.cg_sched.get(),
                                                        cell.uci_selector,
                                                        *params.cell_metrics,
                                                        *params.ev_logger,
@@ -53,6 +58,9 @@ void ue_scheduler_impl::do_stop_cell(du_cell_index_t cell_index)
   c.fallback_sched.stop();
   c.srs_sched.stop();
   c.uci_sched.stop();
+  if (c.cg_sched != nullptr) {
+    c.cg_sched->stop();
+  }
 
   // Remove UEs from the UE repository associated with this cell.
   ue_db.handle_cell_deactivation(cell_index);
@@ -66,6 +74,8 @@ void ue_scheduler_impl::do_rem_cell(du_cell_index_t cell_index)
 
   // Remove cell from UE scheduler.
   cells.erase(cell_index);
+
+  ue_db.deregister_cell(cell_index);
 }
 
 void ue_scheduler_impl::run_sched_strategy(du_cell_index_t cell_index)
@@ -141,6 +151,11 @@ void ue_scheduler_impl::run_slot_impl(slot_point sl_tx)
     // Schedule periodic SRS before any UE grants.
     group_cell.srs_sched.run_slot(*group_cell.cell_res_alloc);
 
+    // Schedule configured grant PUSCH opportunities.
+    if (group_cell.cg_sched != nullptr) {
+      group_cell.cg_sched->run_slot(*group_cell.cell_res_alloc);
+    }
+
     // Run cell-specific SRB0 scheduler.
     group_cell.fallback_sched.run_slot(*group_cell.cell_res_alloc);
 
@@ -174,7 +189,7 @@ ue_scheduler_impl::cell_context::cell_context(ue_scheduler_impl&                
                                               const ue_cell_scheduler_creation_request& params) :
   parent(parent_),
   cell_res_alloc(params.cell_res_alloc),
-  ue_cell_db(parent.ue_db.add_cell(params.cell_res_alloc->cfg, params.cell_metrics)),
+  ue_cell_db(*params.ue_cell_db),
   uci_sched(params.cell_res_alloc->cfg, *params.uci_alloc, parent.ue_db),
   fallback_sched(parent.expert_cfg,
                  params.cell_res_alloc->cfg,
@@ -187,6 +202,7 @@ ue_scheduler_impl::cell_context::cell_context(ue_scheduler_impl&                
   slice_sched(params.cell_res_alloc->cfg, parent.ue_db),
   intra_slice_sched(parent.expert_cfg,
                     parent.ue_db,
+                    *params.ue_cell_db,
                     *params.pdcch_sched,
                     *params.uci_alloc,
                     *params.srs_alloc,
@@ -194,15 +210,18 @@ ue_scheduler_impl::cell_context::cell_context(ue_scheduler_impl&                
                     *params.cell_metrics,
                     ocudulog::fetch_basic_logger("SCHED")),
   srs_sched(params.cell_res_alloc->cfg, parent.ue_db),
+  cg_sched(params.cell_res_alloc->cfg.params.init_bwp.cg_cfg.has_value()
+               ? std::make_unique<configured_grant_scheduler_impl>(params.cell_res_alloc->cfg,
+                                                                   *params.uci_alloc,
+                                                                   parent.ue_db)
+               : nullptr),
   trig_ul_sched(parent.ue_db, params.cell_res_alloc->cfg.cell_index, params.cell_res_alloc->cfg.scs_common()),
   uci_selector(*this,
                uci_indication_selector::DEFAULT_ACK_TIMEOUT_SLOTS,
                MAX_PUCCH_PDUS_PER_SLOT,
+               params.cell_res_alloc->cfg.max_nof_ue_contexts,
                parent.expert_cfg.pucch_sinr_threshold_dB)
 {
 }
 
-ue_scheduler_impl::cell_context::~cell_context()
-{
-  parent.ue_db.rem_cell(ue_cell_db.cell_index());
-}
+ue_scheduler_impl::cell_context::~cell_context() = default;

@@ -4,6 +4,7 @@
 
 #include "lib/cu_cp/ue_manager/ue_manager_impl.h"
 #include "ngap_test_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/cause/ngap_cause.h"
 #include "ocudu/ran/cu_types.h"
 #include "ocudu/ran/inter_cu_handover_messages.h"

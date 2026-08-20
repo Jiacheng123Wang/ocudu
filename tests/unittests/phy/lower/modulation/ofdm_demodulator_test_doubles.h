@@ -15,7 +15,7 @@ class ofdm_symbol_demodulator_spy : public ofdm_symbol_demodulator
 {
 public:
   struct demodulate_entry {
-    std::vector<cf_t>           input;
+    std::vector<ci16_t>         input;
     const resource_grid_writer* grid;
     unsigned                    port_index;
     unsigned                    symbol_index;
@@ -38,7 +38,7 @@ public:
   }
 
   void
-  demodulate(resource_grid_writer& grid, span<const cf_t> input, unsigned port_index, unsigned symbol_index) override
+  demodulate(resource_grid_writer& grid, span<const ci16_t> input, unsigned port_index, unsigned symbol_index) override
   {
     TESTASSERT_EQ(input.size(), get_symbol_size(symbol_index));
 

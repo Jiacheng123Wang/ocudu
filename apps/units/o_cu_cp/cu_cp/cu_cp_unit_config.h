@@ -10,14 +10,20 @@
 #include "apps/units/o_cu_cp/cu_cp/cu_cp_unit_pcap_config.h"
 #include "cu_cp_unit_logger_config.h"
 #include "ocudu/ran/arfcn.h"
+#include "ocudu/ran/cu_types.h"
 #include "ocudu/ran/gnb_id.h"
 #include "ocudu/ran/meas_types.h"
 #include "ocudu/ran/nr_band.h"
 #include "ocudu/ran/ntn.h"
 #include "ocudu/ran/pci.h"
+#include "ocudu/ran/pdcp/pdcp_discard_timer.h"
+#include "ocudu/ran/pdcp/pdcp_sn_size.h"
+#include "ocudu/ran/pdcp/pdcp_t_reordering.h"
 #include "ocudu/ran/qos/five_qi.h"
+#include "ocudu/ran/rlc_mode.h"
 #include "ocudu/ran/s_nssai.h"
 #include "ocudu/ran/tac.h"
+#include "ocudu/security/security.h"
 #include <chrono>
 #include <optional>
 #include <vector>
@@ -69,31 +75,40 @@ struct cu_cp_unit_report_config {
   std::string report_type;
   unsigned    report_interval_ms;
 
-  std::optional<std::string> event_triggered_report_type;
-  std::optional<std::string> meas_trigger_quantity;              ///< "rsrp", "rsrq", "sinr"
-  std::optional<int>         meas_trigger_quantity_threshold_db; ///< Threshold for A5: RSRP[-156..-31],
-                                                                 ///< RSRQ[-43..20], SINR[-23..40]
-  std::optional<int> meas_trigger_quantity_threshold_2_db;       ///< Threshold 2 for A5: RSRP[-156..-31],
-                                                                 /// <RSRQ[-43..20], SINR[-23..40]
-  std::optional<int>      meas_trigger_quantity_offset_db;       ///< [-15..15] dB
-  std::optional<unsigned> hysteresis_db;                         ///< [0..15] dB (0.5 dB steps in ASN.1)
-  std::optional<unsigned> time_to_trigger_ms;                    ///< Enumerated values
+  std::optional<ocucp::rrc_event_id::event_id_t> event_triggered_report_type;
+  /// "rsrp", "rsrq", "sinr".
+  std::optional<std::string> meas_trigger_quantity;
+  /// Threshold for A5: RSRP[-156..-31], RSRQ[-43..20], SINR[-23..40].
+  std::optional<int> meas_trigger_quantity_threshold_db;
+  /// Threshold 2 for A5: RSRP[-156..-31], RSRQ[-43..20], SINR[-23..40].
+  std::optional<int> meas_trigger_quantity_threshold_2_db;
+  /// [-15..15] dB-
+  std::optional<int> meas_trigger_quantity_offset_db;
+  /// [0..15] dB (0.5 dB steps in ASN.1).
+  std::optional<unsigned> hysteresis_db;
+  std::optional<unsigned> time_to_trigger_ms;
   std::optional<unsigned> t312_ms;
-  int                     periodic_ho_rsrp_offset =
-      -1; ///< -1 disables handovers from periodic measurements. [0..30] Note the actual value is field value * 0.5 dB.
-          ///< E.g. putting a value of -6 here results in -3dB offset.
+  /// -1 disables handovers from periodic measurements. [0..30] Note the actual value is field value * 0.5 dB. E.g.
+  /// putting a value of -6 here results in -3dB offset.
+  int periodic_ho_rsrp_offset = -1;
 
-  // D1/D2 conditional event fields
-  std::optional<double>             distance_thresh_from_ref1_km; ///< D1/D2: distance threshold 1 in km [0..3276.75]
-  std::optional<double>             distance_thresh_from_ref2_km; ///< D1/D2: distance threshold 2 in km [0..3276.75]
-  std::optional<reference_location> ref_location1;                ///< D1: reference location for serving cell
-  std::optional<reference_location> ref_location2;                ///< D1: reference location for target cell
-  std::optional<double>             hysteresis_location_km;       ///< D1/D2: hysteresis in km (10m steps, max 327.68)
+  /// D1/D2 conditional event fields.
+  /// D1/D2: distance threshold 1 in km [0..3276.75].
+  std::optional<double> distance_thresh_from_ref1_km;
+  /// D1/D2: distance threshold 2 in km [0..3276.75].
+  std::optional<double> distance_thresh_from_ref2_km;
+  /// D1: reference location for serving cell.
+  std::optional<reference_location> ref_location1;
+  /// D1: reference location for target cell.
+  std::optional<reference_location> ref_location2;
+  /// D1/D2: hysteresis in km (10m steps, max 327.68).
+  std::optional<double> hysteresis_location_km;
 
-  // T1 conditional event fields
-  std::optional<std::chrono::system_clock::time_point> t1_thres; ///< T1: UTC time threshold
-  std::optional<std::chrono::duration<double>>
-      duration; ///< T1: duration in seconds (each step=100ms, range [0.1..600])
+  /// T1 conditional event fields.
+  /// T1: UTC time threshold.
+  std::optional<std::chrono::system_clock::time_point> t1_thres;
+  /// T1: duration in seconds (each step=100ms, range [0.1..600]).
+  std::optional<std::chrono::duration<double>> duration;
 };
 
 /// NTN configuration of a cell. When this cell is listed as a neighbour of another cell, it is used to periodically
@@ -170,7 +185,7 @@ struct cu_cp_unit_rrc_config {
   bool force_reestablishment_fallback = false;
   bool force_resume_fallback          = false;
   /// Guard time in ms that is added to the RRC procedure timeout.
-  /// NOTE: Guard time needs to be larger then SRB max retx thres * t-PollRetransmit.
+  /// NOTE: Guard time needs to be larger than SRB max retx thres * t-PollRetransmit.
   /// (2 * default SRB maxRetxThreshold * t-PollRetransmit = 2 * 8 * 45ms = 720ms, see TS 38.331 Sec 9.2.1)
   unsigned rrc_procedure_guard_time_ms = 1000;
   /// waitTime [s] (1..16) for the RRC Reject waitTime IE.
@@ -181,11 +196,40 @@ struct cu_cp_unit_rrc_config {
 
 /// Security configuration parameters.
 struct cu_cp_unit_security_config {
-  std::string integrity_protection       = "not_needed";
-  std::string confidentiality_protection = "required";
-  std::string nea_preference_list        = "nea0,nea2,nea1,nea3";
-  std::string nia_preference_list        = "nia2,nia1,nia3";
+  integrity_protection_indication_t       integrity_protection = integrity_protection_indication_t::not_needed;
+  confidentiality_protection_indication_t confidentiality_protection =
+      confidentiality_protection_indication_t::required;
+  security::preferred_ciphering_algorithms nea_preference_list = {security::ciphering_algorithm::nea0,
+                                                                  security::ciphering_algorithm::nea2,
+                                                                  security::ciphering_algorithm::nea1,
+                                                                  security::ciphering_algorithm::nea3};
+  security::preferred_integrity_algorithms nia_preference_list = {security::integrity_algorithm::nia2,
+                                                                  security::integrity_algorithm::nia1,
+                                                                  security::integrity_algorithm::nia3};
 };
+
+/// Converts a ciphering algorithm preference list to its "nea0,nea1,..." string representation.
+inline std::string to_string(const security::preferred_ciphering_algorithms& algos)
+{
+  std::string out;
+  for (unsigned i = 0; i != algos.size(); ++i) {
+    out += fmt::format("{}nea{}", i == 0 ? "" : ",", security::to_number(algos[i]));
+  }
+  return out;
+}
+
+/// Converts an integrity algorithm preference list to its "nia1,nia2,..." string representation.
+///
+/// NIA0 is implicit/mandatory and is used by the parser to pad any unspecified trailing slots, so it is never
+/// written back explicitly: the string stops at the first NIA0 slot, wherever it occurs.
+inline std::string to_string(const security::preferred_integrity_algorithms& algos)
+{
+  std::string out;
+  for (unsigned i = 0; i != algos.size() && algos[i] != security::integrity_algorithm::nia0; ++i) {
+    out += fmt::format("{}nia{}", i == 0 ? "" : ",", security::to_number(algos[i]));
+  }
+  return out;
+}
 
 /// F1AP-CU configuration parameters.
 struct cu_cp_unit_f1ap_config {
@@ -259,7 +303,7 @@ struct cu_cp_unit_rlc_rx_um_config {
   int32_t t_reassembly;
 };
 
-/// RLC UM configuration
+/// RLC UM configuration.
 struct cu_cp_unit_rlc_um_config {
   cu_cp_unit_rlc_tx_um_config tx;
   cu_cp_unit_rlc_rx_um_config rx;
@@ -283,7 +327,7 @@ struct cu_cp_unit_rlc_tx_am_config {
   uint32_t queue_size = 4096;
 };
 
-/// RLC UM RX configuration
+/// RLC UM RX configuration.
 struct cu_cp_unit_rlc_rx_am_config {
   /// Number of bits used for sequence number.
   uint16_t sn_field_length;
@@ -292,21 +336,21 @@ struct cu_cp_unit_rlc_rx_am_config {
   /// Timer used by rx to prohibit tx of status PDU (ms).
   int32_t t_status_prohibit;
 
-  /// Implementation-specific parameters that are not specified by 3GPP
+  /// Implementation-specific parameters that are not specified by 3GPP.
 
   /// Maximum number of visited SNs in the RX window when building a status report. 0 means no limit.
   uint32_t max_sn_per_status = 0;
 };
 
-/// RLC AM configuration
+/// RLC AM configuration.
 struct cu_cp_unit_rlc_am_config {
   cu_cp_unit_rlc_tx_am_config tx;
   cu_cp_unit_rlc_rx_am_config rx;
 };
 
-/// RLC configuration
+/// RLC configuration.
 struct cu_cp_unit_rlc_config {
-  std::string              mode = "am";
+  rlc_mode                 mode = rlc_mode::am;
   cu_cp_unit_rlc_um_config um;
   cu_cp_unit_rlc_am_config am;
 };
@@ -332,44 +376,45 @@ struct cu_cp_unit_pdcp_rohc_config {
   cu_cp_unit_pdcp_rohc_type rohc_type = cu_cp_unit_pdcp_rohc_type::none;
   /// Maximum CID.
   uint16_t max_cid = 15;
-  /// Configure profile0x0001 (ROHCv1 RTP/UDP/IP)
+  /// Configure profile0x0001 (ROHCv1 RTP/UDP/IP).
   bool profile0x0001 = false;
-  /// Configure profile0x0002 (ROHCv1 UDP/IP)
+  /// Configure profile0x0002 (ROHCv1 UDP/IP).
   bool profile0x0002 = false;
-  /// Configure profile0x0003 (ROHCv1 ESP/IP)
+  /// Configure profile0x0003 (ROHCv1 ESP/IP).
   bool profile0x0003 = false;
-  /// Configure profile0x0004 (ROHCv1 IP)
+  /// Configure profile0x0004 (ROHCv1 IP).
   bool profile0x0004 = false;
-  /// Configure profile0x0006 (ROHCv1 TCP/IP)
+  /// Configure profile0x0006 (ROHCv1 TCP/IP).
   bool profile0x0006 = false;
-  /// Configure profile0x0101 (ROHCv2 RTP/UDP/IP)
+  /// Configure profile0x0101 (ROHCv2 RTP/UDP/IP).
   bool profile0x0101 = false;
-  /// Configure profile0x0102 (ROHCv2 UDP/IP)
+  /// Configure profile0x0102 (ROHCv2 UDP/IP).
   bool profile0x0102 = false;
-  /// Configure profile0x0103 (ROHCv2 ESP/IP)
+  /// Configure profile0x0103 (ROHCv2 ESP/IP).
   bool profile0x0103 = false;
-  /// Configure profile0x0104 (ROHCv2 IP)
+  /// Configure profile0x0104 (ROHCv2 IP).
   bool profile0x0104 = false;
 };
 
 struct cu_cp_unit_pdcp_rx_config {
   /// Number of bits used for sequence number.
-  uint16_t sn_field_length;
+  pdcp_sn_size sn_field_length;
   /// Timer used to detect PDUs losses (ms).
-  int32_t t_reordering;
+  pdcp_t_reordering t_reordering;
   /// Whether out-of-order delivery to upper layers is enabled.
   bool out_of_order_delivery;
 };
 
 struct cu_cp_unit_pdcp_tx_config {
   /// Number of bits used for sequence number.
-  uint16_t sn_field_length;
+  pdcp_sn_size sn_field_length;
   /// Timer used to notify lower layers to discard PDUs (ms).
-  int32_t discard_timer;
+  pdcp_discard_timer discard_timer;
   /// Whether PDCP status report is required.
   bool status_report_required;
 };
 
+/// CU-CP unit PDCP configuration.
 struct cu_cp_unit_pdcp_config {
   cu_cp_unit_pdcp_rohc_config rohc;
   cu_cp_unit_pdcp_tx_config   tx;
@@ -421,11 +466,13 @@ struct cu_cp_unit_config {
   /// Enable RRC inactive state.
   bool enable_rrc_inactive = false;
   /// RAN Paging cycle for RRC inactive UEs in number of radio frames.
-  uint8_t ran_paging_cycle = 32;
+  uint16_t ran_paging_cycle = 32;
+  /// I-RNTI profile used to compose the Full-I-RNTI of a suspended UE (TS 38.300 table F-1).
+  std::string full_i_rnti_profile = "profile0";
+  /// I-RNTI profile used to compose the Short-I-RNTI of a suspended UE (TS 38.300 table F-2).
+  std::string short_i_rnti_profile = "profile0";
   /// T380 timer value in minutes.
   int t380 = 10;
-  /// Number of bits used for the UE id in short and full I-RNTI.
-  uint8_t nof_i_rnti_ue_bits = 13;
   /// PDU session request timeout in seconds (must be larger than T310).
   unsigned request_pdu_session_timeout = 3;
   /// Loggers configuration.

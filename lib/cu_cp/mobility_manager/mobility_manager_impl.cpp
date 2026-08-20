@@ -5,6 +5,7 @@
 #include "mobility_manager_impl.h"
 #include "../du_processor/du_processor_repository.h"
 #include "mobility_manager_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/nr_cgi.h"
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/ran/tac.h"
@@ -349,7 +350,7 @@ void mobility_manager::handle_intra_cu_handover(cu_cp_ue_index_t source_ue_index
   }
 
   // Trigger Intra CU handover routine on the DU processor of the source DU.
-  auto ho_trigger = [this, request, response = cu_cp_intra_cu_handover_response{}, &source_du_index, &target_du_index](
+  auto ho_trigger = [this, request, response = cu_cp_intra_cu_handover_response{}, source_du_index, target_du_index](
                         coro_context<async_task<void>>& ctx) mutable {
     CORO_BEGIN(ctx);
     CORO_AWAIT_VALUE(response, cu_cp_notifier.on_intra_cu_handover_required(request, source_du_index, target_du_index));

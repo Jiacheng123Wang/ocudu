@@ -4,7 +4,6 @@
 
 #include "flexible_o_du_factory.h"
 #include "apps/helpers/e2/e2_metric_connector_manager.h"
-#include "apps/helpers/ntn/ntn_config_translators.h"
 #include "apps/services/worker_manager/worker_manager.h"
 #include "apps/units/flexible_o_du/flexible_o_du_commands.h"
 #include "apps/units/flexible_o_du/o_du_high/du_high/du_high_config_translators.h"
@@ -12,8 +11,8 @@
 #include "apps/units/flexible_o_du/o_du_low/o_du_low_unit_factory.h"
 #include "commands/ntn_config_update_remote_command.h"
 #include "flexible_o_du_impl.h"
-#include "flexible_o_du_ntn_configuration_manager_factory.h"
 #include "metrics/flexible_o_du_metrics_builder.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_high/du_high.h"
 #include "ocudu/du/du_high/du_high_clock_controller.h"
 #include "ocudu/du/o_du_factory.h"
@@ -26,8 +25,7 @@
 #include "ocudu/fapi_adaptor/phy/p7/phy_fapi_p7_sector_fastpath_adaptor.h"
 #include "ocudu/fapi_adaptor/phy/phy_fapi_fastpath_adaptor.h"
 #include "ocudu/fapi_adaptor/phy/phy_fapi_sector_fastpath_adaptor.h"
-#include "ocudu/ntn/ntn_configuration_manager_config.h"
-#include "fmt/format.h"
+#include "ocudu/ntn/ntn_configuration_manager.h"
 #include <algorithm>
 
 using namespace ocudu;
@@ -131,179 +129,6 @@ generate_o_du_ru_config(span<const odu::du_cell_config> cells, unsigned max_proc
   return out_cfg;
 }
 
-/// Converts app-level ntn_config to library-level ntn_serving_cell_config. Returns std::nullopt for a TN-band cell
-/// that only reports NTN neighbor cells. \p resolved_satellites must already contain an entry for the cell's
-/// satellite_idx (resolved, including any inline satellite definitions, before this is called).
-static std::optional<ocudu_ntn::ntn_serving_cell_config>
-convert_ntn_config_to_serving_cell_config(const du_high_unit_cell_ntn_config&         cfg,
-                                          span<const ocudu_ntn::ntn_satellite_config> resolved_satellites)
-{
-  if (!cfg.serving) {
-    return std::nullopt;
-  }
-  const auto& serving = *cfg.serving;
-
-  ocudu_ntn::ntn_serving_cell_config info = {};
-
-  info.satellite_index = *serving.sat_ref.satellite_idx;
-
-  // SIB19 fields exempt from valuetag.
-  info.moving_reference_location = serving.moving_ref_location;
-  if (serving.sat_ref.ta_info) {
-    info.ta_common_offset = serving.sat_ref.ta_info->ta_common_offset;
-  }
-  info.ntn_ul_sync_validity_dur = serving.ntn_ul_sync_validity_dur;
-
-  // SIB19 fields tracked by valuetag.
-  info.reference_location    = serving.reference_location;
-  info.distance_threshold    = serving.distance_threshold;
-  info.t_service             = serving.t_service;
-  info.cell_specific_koffset = serving.cell_specific_koffset;
-  info.k_mac                 = serving.k_mac;
-  info.polarization          = serving.polarization;
-  info.ta_report             = serving.ta_report;
-
-  // Metadata fields.
-  info.feeder_link_info = serving.feeder_link_info;
-
-  info.use_state_vector = derive_use_state_vector(
-      serving.use_state_vector, serving.sat_ref.ephemeris_info, info.satellite_index, resolved_satellites);
-
-  return info;
-}
-
-static ocudu_ntn::ntn_configuration_manager_config
-generate_ntn_configuration_manager_config(const gnb_id_t&                          gnb_id,
-                                          span<const du_high_unit_cell_config>     du_hi_cells,
-                                          const std::vector<ntn_satellite_config>& ntn_satellites)
-{
-  ocudu_ntn::ntn_configuration_manager_config out_cfg = {};
-
-  // Add globally-defined satellites first. Use user-defined satellite_idx as internal satellite_index.
-  unsigned next_satellite_idx = add_global_ntn_satellites(ntn_satellites, out_cfg.satellites);
-
-  // Resolve satellite_idx for every serving cell, sat-switch target and neighbor cell: reuse the global satellite
-  // if satellite_idx is set, else create one inline (1-to-1). After this loop, satellite_idx is guaranteed set
-  // wherever a satellite reference is present. Neighbor cells are resolved regardless of whether this is an
-  // NTN serving cell or a TN-band cell that only reports NTN neighbor cells.
-  std::vector<std::optional<du_high_unit_cell_ntn_config>> resolved_ntn_cfgs(du_hi_cells.size());
-  for (unsigned phy_sector_idx = 0; phy_sector_idx != du_hi_cells.size(); ++phy_sector_idx) {
-    const auto& cell_cfg = du_hi_cells[phy_sector_idx].cell;
-    if (!cell_cfg.ntn_cfg) {
-      continue;
-    }
-    du_high_unit_cell_ntn_config ntn_cfg = *cell_cfg.ntn_cfg;
-
-    if (ntn_cfg.serving) {
-      auto& serving = *ntn_cfg.serving;
-      resolve_ntn_satellite_ref(serving.sat_ref,
-                                out_cfg.satellites,
-                                next_satellite_idx,
-                                serving.sat_ref.ta_info,
-                                fmt::format("cells[{}].ntn", phy_sector_idx));
-
-      if (serving.sat_switch_with_resync) {
-        auto& sat_sw = *serving.sat_switch_with_resync;
-        resolve_ntn_satellite_ref(sat_sw.sat_ref,
-                                  out_cfg.satellites,
-                                  next_satellite_idx,
-                                  std::nullopt,
-                                  fmt::format("cells[{}].ntn.sat_switch_with_resync", phy_sector_idx));
-      }
-    }
-
-    for (auto& ncell : ntn_cfg.ncells) {
-      resolve_ntn_satellite_ref(ncell.sat_ref,
-                                out_cfg.satellites,
-                                next_satellite_idx,
-                                ncell.sat_ref.ta_info,
-                                fmt::format("cells[{}].ntn.ncells[pci={}]",
-                                            phy_sector_idx,
-                                            ncell.phys_cell_id ? static_cast<unsigned>(*ncell.phys_cell_id) : 0U));
-    }
-
-    resolved_ntn_cfgs[phy_sector_idx] = std::move(ntn_cfg);
-  }
-
-  // Build the cell configs from the resolved NTN configs (satellite_idx guaranteed set).
-  for (unsigned phy_sector_idx = 0; phy_sector_idx != du_hi_cells.size(); ++phy_sector_idx) {
-    if (!resolved_ntn_cfgs[phy_sector_idx]) {
-      continue;
-    }
-    const auto& cell_cfg = du_hi_cells[phy_sector_idx].cell;
-    const auto& ntn_cfg  = *resolved_ntn_cfgs[phy_sector_idx];
-
-    // Build cell config.
-    auto&                      out_cell = out_cfg.cells.emplace_back();
-    expected<plmn_identity>    plmn     = plmn_identity::parse(cell_cfg.plmn);
-    expected<nr_cell_identity> nci      = nr_cell_identity::create(gnb_id, cell_cfg.sector_id.value());
-    if (not plmn) {
-      report_error("Invalid PLMN: {}", cell_cfg.plmn);
-    }
-    if (not nci) {
-      report_error("Invalid NR-NCI");
-    }
-    out_cell.sector_id      = phy_sector_idx;
-    out_cell.nr_cgi.plmn_id = plmn.value();
-    out_cell.nr_cgi.nci     = nci.value();
-    out_cell.ntn_cfg        = convert_ntn_config_to_serving_cell_config(ntn_cfg, out_cfg.satellites);
-
-    // Build sat-switch target satellite (if configured).
-    if (ntn_cfg.serving && ntn_cfg.serving->sat_switch_with_resync) {
-      const auto& sat_sw  = *ntn_cfg.serving->sat_switch_with_resync;
-      out_cell.sat_switch = {*sat_sw.sat_ref.satellite_idx,
-                             sat_sw.t_service_start,
-                             sat_sw.ssb_time_offset_sf,
-                             sat_sw.ntn_ul_sync_validity_dur,
-                             sat_sw.cell_specific_koffset,
-                             sat_sw.k_mac,
-                             sat_sw.polarization,
-                             sat_sw.ta_report,
-                             derive_use_state_vector(sat_sw.use_state_vector,
-                                                     sat_sw.sat_ref.ephemeris_info,
-                                                     *sat_sw.sat_ref.satellite_idx,
-                                                     out_cfg.satellites),
-                             sat_sw.promote_to_serving,
-                             sat_sw.promote_neighbors};
-    }
-
-    // Build neighbors' cell configs.
-    for (const auto& ncell : ntn_cfg.ncells) {
-      auto& nc_cfg                    = out_cell.ncells.emplace_back();
-      nc_cfg.satellite_index          = *ncell.sat_ref.satellite_idx;
-      nc_cfg.carrier_freq             = ncell.carrier_freq;
-      nc_cfg.phys_cell_id             = ncell.phys_cell_id;
-      nc_cfg.cell_specific_koffset    = ncell.cell_specific_koffset;
-      nc_cfg.ntn_ul_sync_validity_dur = ncell.ntn_ul_sync_validity_dur;
-      nc_cfg.k_mac                    = ncell.k_mac;
-      nc_cfg.polarization             = ncell.polarization;
-      nc_cfg.ta_report                = ncell.ta_report;
-      nc_cfg.has_feeder_link          = ncell.has_feeder_link;
-      nc_cfg.use_state_vector         = derive_use_state_vector(
-          ncell.use_state_vector, ncell.sat_ref.ephemeris_info, nc_cfg.satellite_index, out_cfg.satellites);
-    }
-
-    // SIB19 Scheduling info.
-    const auto& sib_cfg = cell_cfg.sib_cfg;
-    for (unsigned i = 0, ie = sib_cfg.si_sched_info.size(); i != ie; ++i) {
-      const auto& si_msg = sib_cfg.si_sched_info[i];
-      for (unsigned j = 0, je = si_msg.sib_mapping_info.size(); j != je; ++j) {
-        if (si_msg.sib_mapping_info[j] == 19) {
-          out_cell.si_sched = ocudu_ntn::ntn_si_scheduling_info{
-              i, si_msg.si_period_rf, sib_cfg.si_window_len_slots, si_msg.si_window_position.value()};
-        }
-      }
-    }
-
-    // Each NTN cell must configure exactly one of SIB19 scheduling info or an explicit update period.
-    if (out_cell.si_sched.has_value() == out_cell.update_period.has_value()) {
-      report_error("NTN cell={:#x} must configure exactly one of SIB19 scheduling info or an explicit update period",
-                   out_cell.nr_cgi.nci);
-    }
-  }
-  return out_cfg;
-}
-
 o_du_unit flexible_o_du_factory::create_flexible_o_du(const o_du_unit_dependencies& dependencies)
 {
   o_du_unit      o_du;
@@ -367,6 +192,10 @@ o_du_unit flexible_o_du_factory::create_flexible_o_du(const o_du_unit_dependenci
                                                           *dependencies.metrics_notifier,
                                                           dependencies.remote_metrics_gateway,
                                                           {}};
+
+  // Bridge the NTN configuration manager of the DU-high to the RU, which is created further below. The adapter is
+  // owned by the flexible O-DU, so it outlives both.
+  odu_hi_unit_dependencies.o_du_hi_dependencies.du_hi.ntn_doppler_handler = &du_impl->get_ru_doppler_adapter();
 
   // Adjust the dependencies.
   for (unsigned i = 0, e = du_cells.size(); i != e; ++i) {
@@ -465,20 +294,10 @@ o_du_unit flexible_o_du_factory::create_flexible_o_du(const o_du_unit_dependenci
     o_du.commands.cmdline.commands.push_back(std::make_unique<tx_time_offset_app_command>(*controller));
   }
 
-  // Create the NTN Configuration Manager if at least one NTN cell is present.
-  ocudu_ntn::ntn_configuration_manager_config ntn_manager_config =
-      generate_ntn_configuration_manager_config(du_hi.gnb_id, du_hi.cells_cfg, du_hi.ntn_satellites);
-
-  if (not ntn_manager_config.cells.empty()) {
-    o_du.ntn_configurator_manager =
-        create_ntn_configuration_manager(ntn_manager_config,
-                                         odu_instance->get_o_du_high().get_du_high().get_du_configurator(),
-                                         odu_instance->get_o_du_high().get_du_high().get_subframe_time_mapper(),
-                                         ru->get_controller(),
-                                         dependencies.timer_ctrl->get_timer_manager(),
-                                         dependencies.workers->get_du_high_executor_mapper().du_control_executor());
-    o_du.commands.remote.push_back(
-        std::make_unique<ocudu_ntn::ntn_config_update_remote_command>(*o_du.ntn_configurator_manager));
+  // The DU-high creates the NTN configuration manager only when at least one NTN cell is configured.
+  if (auto* ntn_manager = odu_instance->get_o_du_high().get_du_high().get_ntn_configuration_manager();
+      ntn_manager != nullptr) {
+    o_du.commands.remote.push_back(std::make_unique<ocudu_ntn::ntn_config_update_remote_command>(*ntn_manager));
   }
 
   // Configure the RU and DU in the dynamic DU.

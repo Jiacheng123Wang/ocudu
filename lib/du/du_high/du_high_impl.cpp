@@ -102,9 +102,13 @@ du_high_impl::du_high_impl(const du_high_configuration& config_, const du_high_d
                          *f1ap,
                          *dependencies.rlc_p,
                          dependencies.rlc_metrics_notif,
+                         cfg.rlc.drb_rx_window_seg_size,
                          cfg.rlc.drb_rx_window_seg_pool_size,
+                         cfg.rlc.drb_tx_window_seg_size,
                          cfg.rlc.drb_tx_window_seg_pool_size,
+                         cfg.rlc.srb_rx_window_seg_size,
                          cfg.rlc.srb_rx_window_seg_pool_size,
+                         cfg.rlc.srb_tx_window_seg_size,
                          cfg.rlc.srb_tx_window_seg_pool_size},
                         {*mac, cfg.ran.sched_cfg},
                         {cfg.metrics.period,
@@ -113,7 +117,8 @@ du_high_impl::du_high_impl(const du_high_configuration& config_, const du_high_d
                          cfg.metrics.enable_mac,
                          cfg.metrics.enable_sched,
                          cfg.metrics.enable_du_proc},
-                        cfg.test_cfg});
+                        cfg.test_cfg,
+                        {cfg.ntn, dependencies.ntn_doppler_handler}});
 
   // Connect Layer<->DU manager adapters.
   adapters->connect(*du_mng, *mac);
@@ -185,4 +190,9 @@ du_configurator& du_high_impl::get_du_configurator()
 mac_subframe_time_mapper& du_high_impl::get_subframe_time_mapper()
 {
   return mac->get_subframe_time_mapper();
+}
+
+ocudu_ntn::ntn_configuration_manager* du_high_impl::get_ntn_configuration_manager()
+{
+  return du_mng->get_ntn_configuration_manager();
 }

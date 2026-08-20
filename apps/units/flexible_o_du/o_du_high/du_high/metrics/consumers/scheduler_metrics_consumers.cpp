@@ -34,13 +34,9 @@ static const char* event_to_string(scheduler_cell_event::event_type ev)
   return "invalid";
 }
 
-void scheduler_cell_metrics_consumer_stdout::handle_metric(const std::optional<scheduler_metrics_report>& report)
+void scheduler_cell_metrics_consumer_stdout::handle_metric(const scheduler_metrics_report& report)
 {
-  if (!report) {
-    return;
-  }
-
-  for (const auto& cell : report->cells) {
+  for (const auto& cell : report.cells) {
     if (not cell.report_ue_metrics or cell.ue_metrics.empty()) {
       continue;
     }
@@ -150,13 +146,9 @@ static ResultType to_percentage(unsigned numerator, unsigned denominator)
   return static_cast<ResultType>(100.0 * static_cast<double>(numerator) / static_cast<double>(denominator));
 }
 
-void scheduler_cell_metrics_consumer_log::handle_metric(const std::optional<scheduler_metrics_report>& report)
+void scheduler_cell_metrics_consumer_log::handle_metric(const scheduler_metrics_report& report)
 {
-  if (!report) {
-    return;
-  }
-
-  for (const auto& cell : report->cells) {
+  for (const auto& cell : report.cells) {
     fmt::memory_buffer buffer;
 
     unsigned sum_dl_bitrate_kbps   = 0;
@@ -195,7 +187,9 @@ void scheduler_cell_metrics_consumer_log::handle_metric(const std::optional<sche
     fmt::format_to(
         std::back_inserter(buffer),
         "Scheduler cell pci={} metrics:"
-        " total_dl_brate={}bps total_ul_brate={}bps nof_prbs={} nof_dl_slots={} nof_ul_slots={} nof_prach_preambles={} "
+        " total_dl_brate={}bps total_ul_brate={}bps nof_prbs={} nof_dl_slots={} nof_ul_slots={} "
+        "total_prach_preambles={} "
+        "two_step_prachs_detected={} "
         "error_indications={} pdsch_rbs_per_slot={} pusch_rbs_per_slot={} pdschs_per_slot={:.3} puschs_per_slot={:.3} "
         "failed_dl_pdcch={} failed_common_dl_pdcch={} failed_ul_pdcch={} failed_common_ul_pdcch={} failed_uci={} "
         "failed_fallback_uci_allocs={} "
@@ -209,7 +203,8 @@ void scheduler_cell_metrics_consumer_log::handle_metric(const std::optional<sche
         cell.nof_prbs,
         cell.nof_dl_slots,
         cell.nof_ul_slots,
-        cell.nof_prach_preambles,
+        cell.total_prach_preambles,
+        cell.two_step_prachs_detected,
         cell.nof_error_indications,
         cell.nof_dl_slots > 0 ? sum_pdsch_rbs / cell.nof_dl_slots : 0,
         cell.nof_ul_slots > 0 ? sum_pusch_rbs / cell.nof_ul_slots : 0,
@@ -407,13 +402,9 @@ void scheduler_cell_metrics_consumer_log::handle_metric(const std::optional<sche
   }
 }
 
-void scheduler_cell_metrics_consumer_e2::handle_metric(const std::optional<scheduler_metrics_report>& report)
+void scheduler_cell_metrics_consumer_e2::handle_metric(const scheduler_metrics_report& report)
 {
-  if (!report) {
-    return;
-  }
-
-  for (const auto& cell : report->cells) {
+  for (const auto& cell : report.cells) {
     notifier.report_metrics(cell);
   }
 }

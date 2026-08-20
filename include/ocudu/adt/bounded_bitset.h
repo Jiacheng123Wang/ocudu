@@ -10,7 +10,6 @@
 #include "ocudu/support/math/bit_ops.h"
 #include "ocudu/support/math/math_utils.h"
 #include "ocudu/support/ocudu_assert.h"
-#include "fmt/format.h"
 #include <algorithm>
 #include <cinttypes>
 #include <functional>
@@ -192,9 +191,8 @@ protected:
 template <size_t N, bool LowestInfoBitIsMSB = false, typename Tag = detail::default_bounded_bitset_tag>
 class bounded_bitset : public bounded_bitset_detail::base_bounded_bitset<LowestInfoBitIsMSB>
 {
-  using word_t                          = uint64_t;
-  static constexpr size_t bits_per_word = bounded_bitset_detail::bits_per_word;
-  using base_t                          = bounded_bitset_detail::base_bounded_bitset<LowestInfoBitIsMSB>;
+  using word_t = uint64_t;
+  using base_t = bounded_bitset_detail::base_bounded_bitset<LowestInfoBitIsMSB>;
 
 public:
   using base_t::bit_order;
@@ -258,6 +256,9 @@ public:
   /// Capacity of the bounded_bitset in bits.
   static constexpr size_t max_size() noexcept { return N; }
 
+  /// Number of bits held by a single word of the bounded_bitset.
+  static constexpr size_t bits_per_word = bounded_bitset_detail::bits_per_word;
+
   /// \brief Resize of the bounded_bitset. If <tt> new_size > max_size() </tt>, an assertion is triggered. The newly
   /// created are set to zero.
   constexpr void resize(size_t new_size) noexcept
@@ -272,9 +273,10 @@ public:
     if (new_size < prev_size) {
       // Shrinking case. Need to sanitize removed bits.
       sanitize_();
-      const size_t prev_nof_words = divide_ceil(prev_size, bits_per_word);
+      // Note: the clamping to the buffer capacity is redundant (prev_size <= max_size() always holds), but it lets the
+      // compiler statically bound the loop and avoid a spurious -Warray-bounds.
+      const size_t prev_nof_words = std::min(divide_ceil(prev_size, bits_per_word), max_nof_words_());
       const size_t new_nof_words  = divide_ceil(new_size, bits_per_word);
-      ocudu_assume(prev_nof_words <= buffer.size());
       for (size_t i = new_nof_words; i < prev_nof_words; ++i) {
         buffer[i] = static_cast<word_t>(0);
       }
@@ -462,6 +464,9 @@ public:
     assert_within_bounds_(pos, true);
     return test_(pos);
   }
+
+  /// Gets a pointer to the underlying array of raw words (i.e. \c bounded_bitset_detail::bits_per_word bits each).
+  [[nodiscard]] constexpr const uint64_t* data() const noexcept { return buffer.data(); }
 
   /// \brief Toggle the value at position pos. Assertion is triggered if pos >= N.
   /// \param[in] pos Position in bitset.
@@ -1069,7 +1074,6 @@ public:
 private:
   template <size_t N2, bool reversed2, typename Tag2>
   friend class bounded_bitset;
-  friend struct fmt::formatter<bounded_bitset<N, LowestInfoBitIsMSB, Tag>>;
 
   using base_t::assert_range_bounds_;
   using base_t::assert_within_bounds_;
@@ -1125,87 +1129,6 @@ private:
     const size_t word_idx = bitpos / bits_per_word;
     ocudu_assume(word_idx < buffer.size());
     buffer[word_idx] &= ~maskbit(bitpos);
-  }
-
-  /// \brief Formatting helper to convert bitset to string of bits.
-  /// \tparam OutputIt Output fmt memory buffer type.
-  /// \param[out] mem_buffer Fmt memory buffer.
-  /// \return The memory buffer passed as argument.
-  template <typename OutputIt>
-  OutputIt to_string_of_bits(OutputIt&& mem_buffer, bool reverse) const
-  {
-    if (size() == 0) {
-      return mem_buffer;
-    }
-
-    reverse = reverse ^ LowestInfoBitIsMSB;
-
-    if (!reverse) {
-      for (size_t i = size(); i != 0; --i) {
-        fmt::format_to(mem_buffer, "{}", test(i - 1) ? '1' : '0');
-      }
-    } else {
-      for (size_t i = 0; i != size(); ++i) {
-        fmt::format_to(mem_buffer, "{}", test(i) ? '1' : '0');
-      }
-    }
-    return mem_buffer;
-  }
-
-  /// \brief Formatting helper to convert bitset to hexadecimal digits.
-  /// \tparam OutputIt Output fmt memory buffer type.
-  /// \param[out] mem_buffer Fmt memory buffer.
-  /// \param[in] reverse In which bit order to represent this bitset.
-  /// \return The memory buffer passed as argument.
-  template <typename OutputIt>
-  OutputIt to_string_of_hex(OutputIt&& mem_buffer, bool reverse) const
-  {
-    const size_t sz = size();
-    if (sz == 0) {
-      return mem_buffer;
-    }
-    const size_t rem_bits   = sz % bits_per_word;
-    const size_t rem_digits = divide_ceil(rem_bits, 4U);
-    const size_t nwords     = nof_words_();
-
-    if (not reverse) {
-      if constexpr (LowestInfoBitIsMSB) {
-        unsigned i = 0;
-        for (; i != nwords - 1; ++i) {
-          uint64_t w = buffer[i];
-          fmt::format_to(mem_buffer, "{:0>16x}", w);
-        }
-        word_t w = buffer[i] >> (bits_per_word - rem_bits);
-        fmt::format_to(mem_buffer, "{:0>{}x}", w, rem_digits);
-      } else {
-        int    i = nwords - 1;
-        word_t w = buffer[i];
-        fmt::format_to(mem_buffer, "{:0>{}x}", w, rem_digits);
-        // remaining words will occupy 16 hex digits each (4 bits per hex digit).
-        for (--i; i >= 0; --i) {
-          fmt::format_to(mem_buffer, "{:0>16x}", buffer[i]);
-        }
-      }
-    } else {
-      if constexpr (LowestInfoBitIsMSB) {
-        // first, potentially incomplete, word
-        int    i = nwords - 1;
-        word_t w = bit_reverse(buffer[i]);
-        fmt::format_to(mem_buffer, "{:0>{}x}", w, rem_digits);
-        for (--i; i >= 0; --i) {
-          fmt::format_to(mem_buffer, "{:0>16x}", bit_reverse(buffer[i]));
-        }
-      } else {
-        unsigned i = 0;
-        for (; i != nwords - 1; ++i) {
-          uint64_t w = bit_reverse(buffer[i]);
-          fmt::format_to(mem_buffer, "{:0>16x}", w);
-        }
-        word_t w = bit_reverse(buffer[i]) >> (bits_per_word - rem_bits);
-        fmt::format_to(mem_buffer, "{:0>{}x}", w, rem_digits);
-      }
-    }
-    return mem_buffer;
   }
 };
 
@@ -1379,93 +1302,3 @@ bounded_bitset<N, LowestInfoBitIsMSB, Tag> bit_positions_to_bitset(const RangeTy
 }
 
 } // namespace ocudu
-
-namespace fmt {
-
-/// \brief Custom formatter for bounded_bitset<N, LowestInfoBitIsMSB, Tag>
-template <size_t N, bool LowestInfoBitIsMSB, typename Tag>
-struct formatter<ocudu::bounded_bitset<N, LowestInfoBitIsMSB, Tag>> {
-  enum { hexadecimal, binary, bit_positions, intervals } mode = binary;
-  enum { forward, reverse } order                             = forward;
-  template <typename ParseContext>
-  auto parse(ParseContext& ctx)
-  {
-    auto it = ctx.begin();
-    while (it != ctx.end() and *it != '}') {
-      if (*it == 'x') {
-        mode = hexadecimal;
-      }
-      if (*it == 'r') {
-        order = reverse;
-      }
-      if (*it == 'n') {
-        mode = bit_positions;
-      }
-      if (*it == 'i') {
-        mode = intervals;
-      }
-      ++it;
-    }
-
-    return it;
-  }
-
-  template <typename FormatContext>
-  auto format(const ocudu::bounded_bitset<N, LowestInfoBitIsMSB, Tag>& s, FormatContext& ctx) const
-  {
-    if (mode == hexadecimal) {
-      return s.template to_string_of_hex<decltype(std::declval<FormatContext>().out())>(ctx.out(), order == reverse);
-    }
-
-    if (mode == intervals) {
-      bool first = true;
-      fmt::format_to(ctx.out(), "{{");
-      for_each_interval(s, [&first, &ctx](size_t start_interval, size_t end_interval) {
-        // Append a comma if the interval is not the first.
-        if (first) {
-          first = false;
-        } else {
-          fmt::format_to(ctx.out(), ", ");
-        }
-
-        // Print interval if it is more than one bit, otherwise a single value.
-        if (end_interval - start_interval > 1) {
-          fmt::format_to(ctx.out(), "[{}, {})", start_interval, end_interval);
-        } else {
-          fmt::format_to(ctx.out(), "{}", start_interval);
-        }
-      });
-      fmt::format_to(ctx.out(), "}}");
-      return ctx.out();
-    }
-
-    if (mode == bit_positions) {
-      if (s.empty()) {
-        fmt::format_to(ctx.out(), "empty");
-      } else if (s.count() == 0) {
-        fmt::format_to(ctx.out(), "none");
-      } else if (s.is_contiguous()) {
-        unsigned lowest  = s.find_lowest();
-        unsigned highest = s.find_highest();
-        if (lowest == highest) {
-          // Single value.
-          fmt::format_to(ctx.out(), "{}", lowest);
-        } else {
-          // Format as a range.
-          fmt::format_to(ctx.out(), "[{}, {})", lowest, highest + 1);
-        }
-
-      } else {
-        // Format as a list of bit positions.
-        ocudu::static_vector<size_t, N> bit_pos = s.get_bit_positions();
-
-        fmt::format_to(ctx.out(), "{}", ocudu::span<size_t>(bit_pos));
-      }
-      return ctx.out();
-    }
-
-    return s.template to_string_of_bits<decltype(std::declval<FormatContext>().out())>(ctx.out(), order == reverse);
-  }
-};
-
-} // namespace fmt

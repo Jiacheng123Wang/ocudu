@@ -138,8 +138,10 @@ struct cu_cp_pdu_session_res_to_be_switched_dl_item {
 };
 
 struct cu_cp_path_switch_request {
-  cu_cp_ue_index_t                                          ue_index = cu_cp_ue_index_t::invalid;
-  unsigned                                                  source_amf_ue_ngap_id;
+  cu_cp_ue_index_t ue_index = cu_cp_ue_index_t::invalid;
+  /// AMF UE NGAP ID the UE has on the old NG-C connection. It is 40 bits wide (TS 38.413 section 9.3.3.1), so it does
+  /// not fit an unsigned.
+  uint64_t                                                  source_amf_ue_ngap_id = 0;
   cu_cp_user_location_info_nr                               user_location_info;
   security::supported_algorithms                            supported_enc_algos;
   security::supported_algorithms                            supported_int_algos;

@@ -8,7 +8,7 @@
 #include "ocudu/rlc/rlc_window_seg_pool_factory.h"
 #include "ocudu/support/executors/manual_task_worker.h"
 #include "ocudu/support/test_utils.h"
-#include <fmt/ostream.h>
+#include "fmt/ostream.h"
 #include <gtest/gtest.h>
 #include <list>
 #include <queue>
@@ -48,8 +48,8 @@ public:
   void on_delivered_retransmitted_sdu(uint32_t max_deliv_retx_pdcp_sn) override {}
 
   // rlc_tx_upper_layer_control_notifier interface
-  void on_protocol_failure() override {}
-  void on_max_retx() override {}
+  void on_protocol_failure(rb_id_t rb_id) override {}
+  void on_max_retx(rb_id_t rb_id) override {}
 
   // rlc_tx_buffer_state_update_notifier interface
   void on_buffer_state_update(const rlc_buffer_state& bs) override
@@ -272,7 +272,7 @@ protected:
   virtual rlc_drb_um_rx_window_seg_pool& get_window_pool() { return pool->get_pool_of_type<rlc_rx_um_sdu_info>(); }
 
   std::unique_ptr<rlc_drb_rx_window_seg_pool, rlc_pool_deleter> pool =
-      make_rlc_drb_rx_window_seg_pool(rlc_drb_rx_window_seg_pool_size);
+      make_rlc_drb_rx_window_seg_pool(rlc_drb_rx_window_seg_pool_size, rlc_drb_rx_window_seg_size);
 
   ocudulog::basic_logger&            logger  = ocudulog::fetch_basic_logger("TEST", false);
   rlc_um_sn_size                     sn_size = GetParam();
@@ -300,8 +300,9 @@ private:
   class rlc_rx_um_window_seg_pool_dummy : public rlc_drb_um_rx_window_seg_pool
   {
   public:
-    map_segment<uint32_t, rlc_rx_um_sdu_info, rlc_drb_rx_window_seg_size>* get_segment() override { return nullptr; }
-    void return_segment(map_segment<uint32_t, rlc_rx_um_sdu_info, rlc_drb_rx_window_seg_size>* seg) override {}
+    ocudu::span<std::optional<detail::kv_obj<uint32_t, rlc_rx_um_sdu_info>>> get_segment() override { return {}; }
+    void   return_segment(ocudu::span<std::optional<detail::kv_obj<uint32_t, rlc_rx_um_sdu_info>>>) override {}
+    size_t segment_size() const override { return rlc_drb_rx_window_seg_size; }
   };
 
   rlc_rx_um_window_seg_pool_dummy dummy_pool = {};

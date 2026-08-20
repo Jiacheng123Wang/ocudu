@@ -7,6 +7,7 @@
 
 #include "du_manager_procedure_test_helpers.h"
 #include "lib/du/du_high/du_manager/procedures/await_all_ues.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_cell_config_helpers.h"
 #include "ocudu/support/async/async_no_op_task.h"
 #include <gtest/gtest.h>

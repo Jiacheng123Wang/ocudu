@@ -4,6 +4,7 @@
 
 #include "pucch_power_controller.h"
 #include "../config/ue_configuration.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/power_control/tpc_mapping.h"
 #include "ocudu/ran/pucch/pucch_info.h"
 #include "ocudu/support/format/fmt_to_c_str.h"

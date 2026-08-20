@@ -4,6 +4,7 @@
 
 #include "lib/f1ap/asn1_helpers.h"
 #include "tests/test_doubles/utils/test_rng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/f1ap.h"
 #include "ocudu/ran/nr_cgi.h"
 #include "ocudu/ran/up_transport_layer_info.h"

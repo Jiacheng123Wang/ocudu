@@ -165,7 +165,7 @@ public:
                                                      cf_buf.size()};
 
           // Convert complex floating-point buffer to complex integer-based.
-          ocuduvec::convert(ci16_buf, cf_buf, scaling_factor_cf_to_ci16);
+          ocuduvec::convert(ci16_buf, cf_buf, ocuduvec::scaling_factor_cf_to_ci16);
 
           ru_tracer << trace_event("PDxCH modulation", tp);
 
@@ -246,8 +246,6 @@ private:
       MAX_NSYMB_PER_SLOT * pow2(to_numerology_value(subcarrier_spacing::kHz240));
   /// Maximum number of tasks. Used for keeping record of the metrics per symbol basis.
   static constexpr unsigned max_nof_tasks = MAX_NSYMB_PER_SLOT * MAX_PORTS;
-  /// Scaling factor for converting from complex float to 16-bit complex integer.
-  static constexpr float scaling_factor_cf_to_ci16 = std::numeric_limits<int16_t>::max();
 
   /// Physical layer logger. Used for logging when the executor cannot defer the modulation task..
   ocudulog::basic_logger& logger;

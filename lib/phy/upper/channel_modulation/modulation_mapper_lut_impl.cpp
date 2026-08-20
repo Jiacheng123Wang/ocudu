@@ -6,6 +6,7 @@
 #include "ocudu/ocuduvec/bit.h"
 #include "ocudu/ocuduvec/dot_prod.h"
 #include "ocudu/ocuduvec/sc_prod.h"
+#include "fmt/format.h"
 
 using namespace ocudu;
 

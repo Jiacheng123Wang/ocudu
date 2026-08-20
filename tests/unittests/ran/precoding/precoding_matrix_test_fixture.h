@@ -130,10 +130,10 @@ inline std::vector<test_case_t> generate_precoding_matrix_test_cases(span<const 
       const pmi_codebook_typeI_single_panel&    panel  = panels[i_panel];
       const pmi_typeI_single_panel_param_ranges ranges = get_pmi_ranges_typeI_single_panel(panel, nof_layers);
 
-      for (unsigned i_1_1 = 0; i_1_1 != ranges.i_1_1; ++i_1_1) {
-        for (unsigned i_1_2 = 0; i_1_2 != ranges.i_1_2; ++i_1_2) {
-          for (unsigned i_1_3 = 0; i_1_3 != ranges.i_1_3; ++i_1_3) {
-            for (unsigned i_2 = 0; i_2 != ranges.i_2; ++i_2) {
+      for (uint8_t i_1_1 = 0; i_1_1 != ranges.i_1_1; ++i_1_1) {
+        for (uint8_t i_1_2 = 0; i_1_2 != ranges.i_1_2; ++i_1_2) {
+          for (uint8_t i_1_3 = 0; i_1_3 != ranges.i_1_3; ++i_1_3) {
+            for (uint8_t i_2 = 0; i_2 != ranges.i_2; ++i_2) {
               pmi_typeI_single_panel pmi = {
                   .panel_config = panel,
                   .i_1_1        = i_1_1,

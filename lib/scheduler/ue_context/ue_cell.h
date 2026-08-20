@@ -14,6 +14,7 @@
 #include "ue_link_adaptation_controller.h"
 #include "ocudu/scheduler/config/scheduler_expert_config.h"
 #include "ocudu/scheduler/scheduler_feedback_handler.h"
+#include "ocudu/support/memory_pool/free_list_memory_pool.h"
 
 namespace ocudu {
 
@@ -48,11 +49,11 @@ struct ue_pcell_state {
 
 struct ue_cell_components {
   /// State relative to the PCell of the UE, if applicable.
-  ue_pcell_state*                pcell_state          = nullptr;
-  ue_channel_state_manager*      channel_state        = nullptr;
-  ue_link_adaptation_controller* ue_mcs_calculator    = nullptr;
-  pusch_power_controller*        pusch_pwr_controller = nullptr;
-  pucch_power_controller*        pucch_pwr_controller = nullptr;
+  ue_pcell_state*                                           pcell_state = nullptr;
+  free_list_object_pool<ue_channel_state_manager>::ptr      channel_state;
+  free_list_object_pool<ue_link_adaptation_controller>::ptr ue_mcs_calculator;
+  free_list_object_pool<pusch_power_controller>::ptr        pusch_pwr_controller;
+  free_list_object_pool<pucch_power_controller>::ptr        pucch_pwr_controller;
 };
 
 /// \brief Context respective to a UE serving cell.
@@ -64,7 +65,7 @@ public:
           const ue_cell_configuration& ue_cell_cfg_,
           cell_harq_manager&           cell_harq_pool,
           ue_shared_context            shared_ctx,
-          const ue_cell_components&    components,
+          ue_cell_components&&         components,
           ocudulog::basic_logger&      logger_);
 
   const du_ue_index_t   ue_index;
@@ -141,7 +142,13 @@ public:
   }
 
   /// \brief Handle CRC PDU indication.
-  expected<units::bytes> handle_crc_pdu(slot_point pusch_slot, const ul_crc_pdu_indication& crc_pdu);
+  ///
+  /// Dynamic PUSCH CRC always yields a "detected" outcome (i.e., ACK or NACK); whereas, the Configured Grant PUSCH CRC
+  /// can yield a not-detected outcome, e.g., when the SINR associated with its PUSCH is below the detection threshold.
+  ///
+  /// \return A pair with the TBS that was (N)ACKed or not detected (DTX) and boolean indicating whether the PDU was
+  /// detected as transmitted (True if detected, false if not detected).
+  expected<std::pair<units::bytes, bool>> handle_crc_pdu(slot_point pusch_slot, const ul_crc_pdu_indication& crc_pdu);
 
   /// \brief Handle Sounding Reference Signal (SRS) channel matrix.
   void handle_srs_channel_matrix(const srs_channel_matrix& channel_matrix);

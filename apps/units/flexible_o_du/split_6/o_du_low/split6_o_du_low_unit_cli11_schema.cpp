@@ -9,6 +9,7 @@
 #include "apps/units/flexible_o_du/split_8/helpers/ru_sdr_config_cli11_schema.h"
 #include "split6_constants.h"
 #include "split6_o_du_low_unit_config.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/band_helper.h"
 #include "ocudu/ran/slot_point_extended.h"
 #include "ocudu/support/cli11_utils.h"

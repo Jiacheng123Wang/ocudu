@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pucch_detector_format0.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/dot_prod.h"
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include <algorithm>

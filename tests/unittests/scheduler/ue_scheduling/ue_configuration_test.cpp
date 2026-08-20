@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "lib/scheduler/ue_context/ue_repository.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/test_doubles/utils/test_rng.h"
@@ -30,6 +31,7 @@ protected:
   du_cell_group_config_pool                      cfg_pool;
   cell_common_configuration_list                 cell_cfg_db;
   std::vector<std::unique_ptr<ue_configuration>> ue_cfg_pool;
+  std::optional<ue_cell_repository>              cell_ues;
   ue_repository                                  ue_db{sched_cfg.ue};
 
   ue& add_ue(const sched_ue_creation_request_message& ue_req)
@@ -146,7 +148,8 @@ TEST_F(ue_configuration_test, when_reconfiguration_is_received_then_ue_updates_l
 {
   // Test Preamble.
   const cell_configuration& cell_cfg = add_cell();
-  ue_db.add_cell(cell_cfg, nullptr);
+  cell_ues.emplace(cell_cfg, nullptr);
+  ue_db.register_cell(*cell_ues);
   auto& u = add_ue(ue_create_msg);
 
   // Pass Reconfiguration to UE with an new Logical Channel.

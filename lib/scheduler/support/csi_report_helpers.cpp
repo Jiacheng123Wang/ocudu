@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "csi_report_helpers.h"
+#include "ocudu/adt/format.h"
 
 bool ocudu::csi_helper::is_csi_reporting_slot(const ue_periodic_csi_config& periodic_csi,
                                               csi_resource_periodicity      csi_period,

@@ -10,6 +10,7 @@
 #include "../srs/srs_scheduler.h"
 #include "../uci_scheduling/uci_indication_selector.h"
 #include "../uci_scheduling/uci_scheduler_impl.h"
+#include "../ue_context/ue_cell_repository.h"
 #include "ocudu/scheduler/scheduler_feedback_handler.h"
 #include "ocudu/support/memory_pool/bounded_object_pool.h"
 #include <memory>
@@ -50,7 +51,7 @@ public:
     if (not pending_evs.try_push(key)) {
       parent.logger.warning("ue={} lcid={}: Discarding DL buffer occupancy update. Cause: Event queue is full",
                             rlc_dl_bo.ue_index,
-                            fmt::underlying(rlc_dl_bo.lcid));
+                            rlc_dl_bo.lcid);
     }
   }
 
@@ -66,15 +67,13 @@ public:
       dl_bo.lcid     = get_lcid(key);
       int hol_toa    = ue_dl_bo_table[key].second.load(std::memory_order_relaxed);
       if (hol_toa >= 0) {
-        dl_bo.hol_toa = std::min(sl, slot_point{sl.numerology(), (unsigned)hol_toa});
+        dl_bo.hol_toa = std::min(sl, slot_point{sl.numerology(), static_cast<unsigned>(hol_toa)});
       }
       // > Extract last DL BO value for the respective bearer and reset BO table position.
       dl_bo.bs = ue_dl_bo_table[key].first.exchange(-1, std::memory_order_release);
       if (dl_bo.bs < 0) {
-        parent.logger.warning("ue={} lcid={}: Invalid DL buffer occupancy value: {}",
-                              dl_bo.ue_index,
-                              fmt::underlying(dl_bo.lcid),
-                              dl_bo.bs);
+        parent.logger.warning(
+            "ue={} lcid={}: Invalid DL buffer occupancy value: {}", dl_bo.ue_index, dl_bo.lcid, dl_bo.bs);
         continue;
       }
 
@@ -228,6 +227,7 @@ ue_cell_event_manager::ue_cell_event_manager(ue_event_manager&          parent_,
   uci_sched(cell_ev.uci_sched),
   slice_sched(cell_ev.slice_sched),
   srs_sched(cell_ev.srs_sched),
+  cg_sched(cell_ev.cg_sched),
   uci_selector(cell_ev.uci_selector),
   metrics(cell_ev.metrics),
   ev_logger(cell_ev.ev_logger),
@@ -380,6 +380,9 @@ void ue_cell_event_manager::handle_ue_reconfiguration(ue_config_update_event ev)
     if (ue_cc.get_pcell_state().conres_st != ue_conres_state::pending_conres_crnti_ce) {
       uci_sched.reconf_ue(ev.next_config().ue_cell_cfg(ue_cc.cell_index), ue_cc.cfg());
       srs_sched.reconf_ue(ev.next_config().ue_cell_cfg(ue_cc.cell_index), ue_cc.cfg());
+      if (cg_sched != nullptr) {
+        cg_sched->add_reconf_ue(ev.next_config().ue_cell_cfg(ue_cc.cell_index), ue_cc.cfg());
+      }
     }
 
     // Configure existing UE.
@@ -423,6 +426,9 @@ void ue_cell_event_manager::handle_ue_deletion(ue_config_delete_event ev)
       // it must not be removed either. All other UEs (including CFRA) were added at creation.
       uci_sched.rem_ue(u.get_pcell().cfg());
       srs_sched.rem_ue(u.get_pcell().cfg());
+      if (cg_sched != nullptr) {
+        cg_sched->rem_ue(u.get_pcell().cfg());
+      }
     }
     // Schedule removal of UE from slice scheduler.
     slice_sched.rem_ue(ue_idx);
@@ -549,14 +555,29 @@ void ue_cell_event_manager::handle_crc_indication(const ul_crc_indication& crc_i
 
       // Update HARQ.
       const bool was_pending_cfra = ue_cc->get_pcell_state().conres_st == ue_conres_state::pending_cfra;
-      const auto tbs              = ue_cc->handle_crc_pdu(sl_rx, *crc_ptr);
-      if (not tbs.has_value()) {
+      const auto crc_process_res  = ue_cc->handle_crc_pdu(sl_rx, *crc_ptr);
+      if (not crc_process_res.has_value()) {
         if (was_pending_cfra and crc_ptr->tb_crc_success and ue_db.cfra_msg3_acked(crc_ptr->ue_index)) {
           // CFRA Msg3 ACKed. UE is directly added to slice scheduling. It doesn't need to be in fallback mode.
           if (not ue_cc->is_in_fallback_mode()) {
             slice_sched.config_applied(crc_ptr->ue_index);
           }
         }
+
+        return event_result::processed;
+      }
+
+      // \ref pusch_transmitted is true if the gnb detected that the PUSCH was transmitted, false if it was DTX.
+      auto [tbs, pusch_transmitted] = crc_process_res.value();
+      if (not pusch_transmitted) {
+        // Log event.
+        ev_logger.enqueue(scheduler_event_logger::crc_event{crc_ptr->ue_index,
+                                                            crc_ptr->rnti,
+                                                            cfg.cell_index,
+                                                            sl_rx,
+                                                            crc_ptr->harq_id,
+                                                            scheduler_event_logger::crc_event::crc_res_t::dtx,
+                                                            crc_ptr->ul_sinr_dB});
         return event_result::processed;
       }
 
@@ -572,11 +593,13 @@ void ue_cell_event_manager::handle_crc_indication(const ul_crc_indication& crc_i
                                                           cfg.cell_index,
                                                           sl_rx,
                                                           crc_ptr->harq_id,
-                                                          crc_ptr->tb_crc_success,
+                                                          crc_ptr->tb_crc_success
+                                                              ? scheduler_event_logger::crc_event::crc_res_t::ok
+                                                              : scheduler_event_logger::crc_event::crc_res_t::ko,
                                                           crc_ptr->ul_sinr_dB});
 
       // Notify metrics handler.
-      metrics.handle_crc_indication(sl_rx, *crc_ptr, tbs.value());
+      metrics.handle_crc_indication(sl_rx, *crc_ptr, tbs);
 
       return event_result::processed;
     };
@@ -609,8 +632,10 @@ ue_cell_event_manager::event_result ue_cell_event_manager::handle_uci_pdu(slot_p
   }
 
   // Process DL HARQ-ACK bits.
+  // Note: the slot of the UCI grant is used, rather than the slot in which the PDU was received, as they differ in the
+  // case of a multi-slot PUCCH repetition burst, and it is the former that the DL HARQ processes are keyed on.
   if (not action->harq_ack_bits.empty()) {
-    handle_harq_ind(*ue_cc, uci_sl, action->uci_valid, action->harq_ack_bits, action->ul_sinr_dB);
+    handle_harq_ind(*ue_cc, action->uci_slot, action->uci_valid, action->harq_ack_bits, action->ul_sinr_dB);
   }
 
   // Process SRs.
@@ -750,7 +775,7 @@ void ue_cell_event_manager::handle_ul_phr_indication(const ul_phr_indication_mes
                          fmt::underlying(cell_phr.serv_cell_id));
       auto& ue_cc = u.get_cell(cell_phr.serv_cell_id);
 
-      ue_cc.get_pusch_power_controller().handle_phr(cell_phr, phr_ind->slot_rx);
+      ue_cc.get_pusch_power_controller().handle_phr(cell_phr, phr_ind->slot_rx, phr_ind->rnti);
 
       // Log event.
       scheduler_event_logger::phr_event event{};
@@ -908,7 +933,7 @@ void ue_cell_event_manager::handle_error_indication(slot_point sl_tx, scheduler_
     if (prev_slot_result == nullptr) {
       logger.warning("cell={}, slot={}: Discarding error indication. Cause: Scheduler results associated with the slot "
                      "of the error indication have already been erased (current slot={})",
-                     fmt::underlying(cfg.cell_index),
+                     cfg.cell_index,
                      sl_tx,
                      last_sl_tx);
       return event_result::processed;
@@ -1090,11 +1115,10 @@ void ue_cell_event_manager::push_event(du_cell_index_t cell_index, event_t event
   if (OCUDU_UNLIKELY(not active.load(std::memory_order_acquire))) {
     // Note: PHY events should not arrive after the cell has been stopped.
     if (event.ue_index == INVALID_DU_UE_INDEX) {
-      logger.warning(
-          "cell={}: Discarding {} event. Cause: Cell is not active", fmt::underlying(cell_index), event.ev_name);
+      logger.warning("cell={}: Discarding {} event. Cause: Cell is not active", cell_index, event.ev_name);
     } else {
       logger.warning("cell={} ue={}: Discarding {} event. Cause: Cell is not active",
-                     fmt::underlying(cell_index),
+                     cell_index,
                      fmt::underlying(event.ue_index),
                      event.ev_name);
     }
@@ -1105,10 +1129,10 @@ void ue_cell_event_manager::push_event(du_cell_index_t cell_index, event_t event
   const char*         ev_name = event.ev_name;
   if (not pending_events.try_push(std::move(event))) {
     if (ue_idx == INVALID_DU_UE_INDEX) {
-      logger.warning("cell={}: Discarding {} event. Cause: Event queue is full", fmt::underlying(cell_index), ev_name);
+      logger.warning("cell={}: Discarding {} event. Cause: Event queue is full", cell_index, ev_name);
     } else {
       logger.warning("cell={} ue={}: Discarding {} event. Cause: Event queue is full",
-                     fmt::underlying(cell_index),
+                     cell_index,
                      fmt::underlying(ue_idx),
                      ev_name);
     }
@@ -1121,7 +1145,7 @@ void ue_cell_event_manager::log_invalid_ue_index(du_ue_index_t ue_index,
 {
   ocudulog::log_channel& log_channel = warn_if_ignored ? logger.warning : logger.info;
   log_channel("cell={} ue={}: Discarding {} event. Cause: UE with provided Id does not exist",
-              fmt::underlying(cfg.cell_index),
+              cfg.cell_index,
               ue_index,
               event_name);
 }
@@ -1130,7 +1154,7 @@ void ue_cell_event_manager::log_invalid_cc(du_ue_index_t ue_idx, const char* eve
 {
   ocudulog::log_channel& log_channel = warn_if_ignored ? logger.warning : logger.info;
   log_channel("cell={} ue={}: Discarding {} event. Cause: UE is not configured in this cell",
-              fmt::underlying(cfg.cell_index),
+              cfg.cell_index,
               ue_idx,
               event_name);
 }

@@ -4,6 +4,7 @@
 
 #include "cell_configuration.h"
 #include "time_domain_mapper.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/band_helper.h"
 #include "ocudu/ran/resource_block.h"
 #include "ocudu/scheduler/config/csi_helper.h"
@@ -40,6 +41,7 @@ cell_configuration::cell_configuration(const scheduler_expert_config&           
   cell_index(msg.cell_index),
   cell_group_index(msg.cell_group_index),
   rrm_policy_members(msg.rrm_policy_members),
+  max_nof_ue_contexts(msg.max_nof_ue_contexts),
   // Derived parameters.
   nof_dl_prbs(
       get_max_Nprb(params.dl_carrier.carrier_bw, scs_common(), band_helper::get_freq_range(params.dl_carrier.band))),
@@ -53,7 +55,8 @@ cell_configuration::cell_configuration(const scheduler_expert_config&           
   ntn_cs_koffset(params.ntn_params.has_value()
                      ? params.ntn_params->ntn_cfg.cell_specific_koffset.value_or(std::chrono::milliseconds{0}).count() *
                            get_nof_slots_per_subframe(scs_common())
-                     : 0)
+                     : 0),
+  ntn_ref_location_ul_ta(get_ref_location_ul_ta(params.ntn_params))
 {
   // Initialize BWP resources.
   bwp_res.emplace(to_bwp_id(0), params, to_bwp_id(0));

@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "du_high_config_validator.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/duplex_mode.h"
 #include "ocudu/ran/nr_cell_identity.h"
 #include "ocudu/ran/pdcch/pdcch_type0_css_coreset_config.h"
@@ -2089,16 +2090,32 @@ static bool validate_custom_freq_bands(const std::vector<du_high_unit_custom_ban
 /// Validates the given RLC configuration. Returns true on success, otherwise false.
 static bool validate_rlc_config(const du_high_unit_rlc_config& config)
 {
+  if (config.drb_rx_window_seg_size == 0) {
+    fmt::print("Invalid RLC configuration: drb_rx_window_seg_size must be greater than 0\n");
+    return false;
+  }
   if (config.drb_rx_window_seg_pool_size == 0) {
     fmt::print("Invalid RLC configuration: drb_rx_window_seg_pool_size must be greater than 0\n");
+    return false;
+  }
+  if (config.drb_tx_window_seg_size == 0) {
+    fmt::print("Invalid RLC configuration: drb_tx_window_seg_size must be greater than 0\n");
     return false;
   }
   if (config.drb_tx_window_seg_pool_size == 0) {
     fmt::print("Invalid RLC configuration: drb_tx_window_seg_pool_size must be greater than 0\n");
     return false;
   }
+  if (config.srb_rx_window_seg_size == 0) {
+    fmt::print("Invalid RLC configuration: srb_rx_window_seg_size must be greater than 0\n");
+    return false;
+  }
   if (config.srb_rx_window_seg_pool_size == 0) {
     fmt::print("Invalid RLC configuration: srb_rx_window_seg_pool_size must be greater than 0\n");
+    return false;
+  }
+  if (config.srb_tx_window_seg_size == 0) {
+    fmt::print("Invalid RLC configuration: srb_tx_window_seg_size must be greater than 0\n");
     return false;
   }
   if (config.srb_tx_window_seg_pool_size == 0) {

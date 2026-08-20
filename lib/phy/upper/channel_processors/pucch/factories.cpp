@@ -10,6 +10,7 @@
 #include "pucch_detector_impl.h"
 #include "pucch_processor_impl.h"
 #include "pucch_processor_pool.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/generic_functions/generic_functions_factories.h"
 #include "ocudu/phy/generic_functions/transform_precoding/transform_precoding_factories.h"
 #include "ocudu/phy/upper/channel_processors/pucch/formatters.h"

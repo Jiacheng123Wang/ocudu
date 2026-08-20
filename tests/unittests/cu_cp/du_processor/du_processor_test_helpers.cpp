@@ -3,7 +3,9 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "du_processor_test_helpers.h"
+#include "lib/cu_cp/du_processor/du_processor_factory.h"
 #include "tests/unittests/cu_cp/test_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_configuration_helpers.h"
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/support/async/async_task_scheduler.h"
@@ -52,7 +54,17 @@ struct dummy_cu_cp_rrc_ue_interface : public cu_cp_rrc_ue_interface {
   {
     return {};
   }
+  async_task<rrc_ue_context_retrieval_response>
+  handle_ue_context_retrieval_required(cu_cp_ue_index_t                        ue_index,
+                                       const rrc_ue_context_retrieval_request& request) override
+  {
+    return launch_no_op_task(rrc_ue_context_retrieval_response{});
+  }
   async_task<bool> handle_rrc_reestablishment_context_modification_required(cu_cp_ue_index_t ue_index) override
+  {
+    return launch_no_op_task(true);
+  }
+  async_task<bool> handle_retrieved_context_path_switch_required(cu_cp_ue_index_t ue_index) override
   {
     return launch_no_op_task(true);
   }
@@ -94,6 +106,8 @@ public:
     return launch_no_op_task();
   }
 
+  void handle_served_cells_updated() override {}
+
 private:
   ue_manager&                         ue_mng;
   dummy_cu_cp_ue_admission_controller ue_admission_handler;
@@ -110,7 +124,7 @@ du_processor_test::du_processor_test() :
     cucfg.services.timers         = &timers;
     cucfg.services.cu_cp_executor = &ctrl_worker;
     cucfg.ngap.ngaps.push_back(
-        cu_cp_configuration::ngap_config{nullptr, {{7, {{plmn_identity::test_value(), {{slice_service_type{1}}}}}}}});
+        cu_cp_configuration::ngap_config{{{7, {{plmn_identity::test_value(), {{slice_service_type{1}}}}}}}});
     return cucfg;
   }()),
   ue_cfg([this]() {
@@ -136,13 +150,29 @@ du_processor_test::du_processor_test() :
   ocudulog::init();
 
   // Create and start DU processor.
-  du_processor_config_t du_cfg = {uint_to_cu_cp_du_index(0),
-                                  cu_cp_cfg,
-                                  ocudulog::fetch_basic_logger("CU-CP"),
-                                  &du_conn_notifier,
-                                  du_cfg_mgr.create_du_handler()};
-  du_processor_obj =
-      create_du_processor(std::move(du_cfg), cu_cp_notifier, f1ap_pdu_notifier, *common_task_sched, ue_mng);
+  du_processor_obj = create_du_processor(
+      du_processor_config{.du_index                       = uint_to_cu_cp_du_index(0),
+                          .gnb_id                         = cu_cp_cfg.node.gnb_id,
+                          .ran_node_name                  = cu_cp_cfg.node.ran_node_name,
+                          .srb2_cfg                       = cu_cp_cfg.bearers.srb2_cfg,
+                          .drb_config                     = cu_cp_cfg.bearers.drb_config,
+                          .int_algo_pref_list             = cu_cp_cfg.security.int_algo_pref_list,
+                          .enc_algo_pref_list             = cu_cp_cfg.security.enc_algo_pref_list,
+                          .force_reestablishment_fallback = cu_cp_cfg.rrc.force_reestablishment_fallback,
+                          .force_resume_fallback          = cu_cp_cfg.rrc.force_resume_fallback,
+                          .rrc_procedure_guard_time_ms    = cu_cp_cfg.rrc.rrc_procedure_guard_time_ms,
+                          .rrc_version                    = cu_cp_cfg.rrc.rrc_version,
+                          .f1ap                           = cu_cp_cfg.f1ap},
+      du_processor_dependencies{.cu_cp_executor           = ctrl_worker,
+                                .timers                   = timers,
+                                .du_setup_notif           = du_conn_notifier,
+                                .du_cfg_hdlr              = du_cfg_mgr.create_du_handler(),
+                                .cu_cp_notifier           = cu_cp_notifier,
+                                .f1ap_pdu_notifier        = f1ap_pdu_notifier,
+                                .common_task_sched        = *common_task_sched,
+                                .ue_mng                   = ue_mng,
+                                .ref_time_report_notifier = ref_time_report_notifier,
+                                .logger                   = cu_cp_logger});
 
   cu_cp_event_handler = std::make_unique<dummy_cu_cp_du_event_handler>(ue_mng);
   cu_cp_notifier.attach_handler(&*cu_cp_event_handler, nullptr, du_processor_obj.get());

@@ -4,6 +4,7 @@
 
 #include "inter_cu_conditional_handover_source_completion_routine.h"
 #include "mobility_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/cause/ngap_cause.h"
 
 using namespace ocudu;

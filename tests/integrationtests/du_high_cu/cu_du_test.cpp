@@ -8,6 +8,7 @@
 #include "tests/unittests/cu_cp/test_doubles/mock_amf.h"
 #include "tests/unittests/ngap/ngap_test_messages.h"
 #include "tests/unittests/ngap/test_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp.h"
 #include "ocudu/cu_cp/cu_cp_configuration_helpers.h"
 #include "ocudu/cu_cp/cu_cp_factory.h"
@@ -48,8 +49,9 @@ protected:
     ocucp::cu_cp_configuration cu_cfg = config_helpers::make_default_cu_cp_config();
     cu_cfg.services.cu_cp_executor    = &workers.exec_mapper->du_control_executor(); // reuse du-high ctrl exec
     cu_cfg.services.timers            = &timers;
-    cu_cfg.ngap.ngaps.push_back(ocucp::cu_cp_configuration::ngap_config{
-        &*amf, {{7, {{plmn_identity::test_value(), {{slice_service_type{1}}}}}}}});
+    cu_cfg.ngap.n2_gws.push_back(&*amf);
+    cu_cfg.ngap.ngaps.push_back(
+        ocucp::cu_cp_configuration::ngap_config{{{7, {{plmn_identity::test_value(), {{slice_service_type{1}}}}}}}});
     cu_cfg.metrics.layers_cfg.enable_ngap_metrics = true;
     cu_cfg.metrics.layers_cfg.enable_rrc_metrics  = true;
 
@@ -82,7 +84,7 @@ protected:
     du_dependencies.timer_ctrl         = timer_ctrl.get();
 
     // create DU object
-    du_obj = make_du_high(std::move(du_cfg), du_dependencies);
+    du_obj = make_du_high(du_cfg, du_dependencies);
 
     // start CU and DU
     du_obj->start();
@@ -101,7 +103,7 @@ public:
   std::unique_ptr<mac_clock_controller> timer_ctrl{
       odu::create_du_high_clock_controller(timers, *broker, *workers.time_exec)};
   ocudulog::basic_logger& test_logger = ocudulog::fetch_basic_logger("TEST");
-  f1c_test_local_gateway  f1c_gw{};
+  f1c_test_local_gateway  f1c_gw;
   gtpu_teid_pool_impl f1u_teid_allocator{MAX_NOF_DU_UES * MAX_NOF_DRBS, GTPU_DEFAULT_TEID_RELEASE_LINGER_TIME, timers};
   f1u_test_local_gateway f1u_gw{};
 

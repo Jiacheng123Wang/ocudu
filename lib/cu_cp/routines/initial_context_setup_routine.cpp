@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "initial_context_setup_routine.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/cause/common.h"
 #include "ocudu/ran/cause/f1ap_cause_converters.h"
 #include "ocudu/ran/cause/ngap_cause.h"

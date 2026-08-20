@@ -13,6 +13,7 @@
 #include "pdu_translators/srs.h"
 #include "pdu_translators/ssb.h"
 #include "ocudu/adt/expected.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/fapi/common/error_indication_builder.h"
 #include "ocudu/instrumentation/traces/critical_traces.h"
 #include "ocudu/instrumentation/traces/du_traces.h"

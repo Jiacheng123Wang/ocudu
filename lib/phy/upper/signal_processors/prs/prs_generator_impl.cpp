@@ -4,6 +4,7 @@
 
 #include "prs_generator_impl.h"
 #include "prs_generator_validator_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/phy/upper/signal_processors/prs/prs_generator_configuration.h"
 

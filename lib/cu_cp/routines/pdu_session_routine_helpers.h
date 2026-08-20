@@ -11,6 +11,7 @@
 #include "ocudu/f1ap/cu_cp/f1ap_cu_ue_context_update.h"
 #include "ocudu/pdcp/pdcp_config.h"
 #include "ocudu/ran/cu_cp_pdu_session.h"
+#include "ocudu/rrc/rrc_resume.h"
 #include "ocudu/rrc/rrc_types.h"
 
 namespace ocudu::ocucp {
@@ -88,6 +89,54 @@ bool fill_rrc_reconfig_args(rrc_reconfiguration_procedure_request&              
                             byte_buffer                                                      sib1,
                             std::optional<security::sec_selected_algos>                      selected_algos,
                             const ocudulog::basic_logger&                                    logger);
+
+/// \brief Fill the RRCResume the UE is answered with, from the bearers that were set up for it.
+///
+/// Shared by a local resume and by a resume whose UE context was retrieved from a peer NG-RAN node, which only differ
+/// in how the bearers got established beforehand.
+///
+/// \param[out] response_msg Response the RRC puts into the RRCResume.
+/// \param[in] srbs_to_be_setup_mod_list SRBs that were set up at the DU.
+/// \param[in] pdu_sessions PDU sessions of the next configuration.
+/// \param[in] drb_to_remove DRBs that are no longer associated with any PDU session.
+/// \param[in] du_to_cu_rrc_info Information the DU reported, carrying the cell group and measurement gap config.
+/// \param[in] rrc_meas_cfg Measurement configuration to send to the UE.
+/// \param[in] reestablish_srbs Whether the UE has to re-establish PDCP for the SRBs.
+/// \param[in] reestablish_drbs Whether the UE has to re-establish PDCP for the DRBs.
+/// \param[in] selected_algos Security algorithms to signal, if the UE has to apply new ones.
+/// \param[in] logger Reference to the logger.
+/// \return True on success, false otherwise.
+bool fill_rrc_resume_request_response(rrc_resume_request_response&          response_msg,
+                                      const std::vector<f1ap_srb_to_setup>& srbs_to_be_setup_mod_list,
+                                      const std::map<pdu_session_id_t, up_pdu_session_context_update>& pdu_sessions,
+                                      const std::vector<drb_id_t>&                                     drb_to_remove,
+                                      const f1ap_du_to_cu_rrc_info&               du_to_cu_rrc_info,
+                                      const std::optional<rrc_meas_cfg>&          rrc_meas_cfg,
+                                      bool                                        reestablish_srbs,
+                                      bool                                        reestablish_drbs,
+                                      std::optional<security::sec_selected_algos> selected_algos,
+                                      const ocudulog::basic_logger&               logger);
+
+/// \brief Processes the response of an E1AP Bearer Context Setup Request and prefills the DRBs of the subsequent F1AP
+/// UE Context Setup or Modification Request. The SRBs are not touched, as they depend on which of them the UE already
+/// has established at the DU.
+/// \param[out] drb_setup_mod_list Reference to the DRB list of the F1AP request to fill.
+/// \param[out] next_config Reference to the calculated config update, whose security settings are updated with the
+/// ones the CU-UP applied.
+/// \param[in] ngap_setup_list Const reference to the PDU sessions that were requested to be set up.
+/// \param[in] bearer_context_setup_resp Const reference to the Bearer Context Setup Response.
+/// \param[in] up_resource_mng Reference to the UP resource manager.
+/// \param[in] default_sec_ind Security indication to apply to PDU sessions that don't carry their own.
+/// \param[in] logger Reference to the logger.
+/// \return True on success, false otherwise.
+bool update_setup_list_with_bearer_ctxt_setup_response(
+    std::vector<f1ap_drb_to_setup>&                                              drb_setup_mod_list,
+    up_config_update&                                                            next_config,
+    const slotted_id_vector<pdu_session_id_t, cu_cp_pdu_session_res_setup_item>& ngap_setup_list,
+    const e1ap_bearer_context_setup_response&                                    bearer_context_setup_resp,
+    up_resource_manager&                                                         up_resource_mng,
+    const security_indication_t&                                                 default_sec_ind,
+    const ocudulog::basic_logger&                                                logger);
 
 /// \brief Processes the response of a UE Context Setup Request.
 /// \param[out] bearer_ctxt_mod_request Reference to the resulting Bearer Context Modification Request response.

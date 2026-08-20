@@ -5,6 +5,7 @@
 #include "ocudu/ran/ssb/ssb_gscn.h"
 #include "ocudu/ran/band_helper_constants.h"
 #include "ocudu/ran/nr_band.h"
+#include "fmt/format.h"
 
 using namespace ocudu;
 using namespace band_helper;

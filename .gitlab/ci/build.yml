@@ -307,6 +307,9 @@ smoke relwithdeb cached:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: never
     - if: $ON_MR
+  variables: &mr_build
+    OCUDU_TARGET: "all"
+    CMAKE_GENERATOR: "Ninja"
   cache:
     - *cache_build_get
 
@@ -318,6 +321,8 @@ smoke tsan cached:
     - if: $ON_MR
       when: manual
       allow_failure: true
+  variables:
+    <<: *mr_build
   cache:
     - *cache_build_get
 
@@ -329,6 +334,8 @@ smoke asan cached:
     - if: $ON_MR
       when: manual
       allow_failure: true
+  variables:
+    <<: *mr_build
   cache:
     - *cache_build_get
 
@@ -340,6 +347,8 @@ smoke rtsan cached:
     - if: $ON_MR
       when: manual
       allow_failure: true
+  variables:
+    <<: *mr_build
   cache:
     - *cache_build_get
 
@@ -349,6 +358,8 @@ smoke archlinux cached:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: never
     - if: $ON_MR
+  variables:
+    <<: *mr_build
   cache:
     - *cache_build_get
 
@@ -413,6 +424,8 @@ intermediate commits cached:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: never
     - if: $ON_MR
+  variables:
+    <<: *mr_build
   script:
     - *script_functions
     - &fetch_branches |
@@ -426,24 +439,27 @@ intermediate commits cached:
       if [ "$CI_PROJECT_PATH" = "$CI_MERGE_REQUEST_PROJECT_PATH" ]; then
         # job on target
         git fetch $(unshallow_flag) origin \
-          "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" \
-          "$CI_MERGE_REQUEST_REF_PATH:refs/mr-source-head"
-        git branch -f "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
-        git branch -f "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" refs/mr-source-head
+          "+refs/heads/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME:refs/ci/mr-target" \
+          "$CI_MERGE_REQUEST_REF_PATH:refs/ci/mr-source"
       else
         # job on the fork
-        git fetch $(unshallow_flag) origin "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"
-        git branch -f "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" "origin/$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"
+        git fetch $(unshallow_flag) origin \
+          "+refs/heads/$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:refs/ci/mr-source"
         git remote get-url upstream >/dev/null 2>&1 || \
           git remote add upstream "$CI_MERGE_REQUEST_PROJECT_URL"
-        git fetch $(unshallow_flag) upstream "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
-        git branch -f "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" "upstream/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+        git fetch $(unshallow_flag) upstream \
+          "+refs/heads/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME:refs/ci/mr-target"
       fi
 
-      SOURCE_SHA=$(git rev-parse "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME")
-      FORK_POINT=$(git merge-base "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME")
+      SOURCE_SHA=$(git rev-parse refs/ci/mr-source)
+      FORK_POINT=$(git merge-base refs/ci/mr-source refs/ci/mr-target)
     - |
-      for rev in $(git rev-list --reverse $FORK_POINT..$SOURCE_SHA)
+      revs=$(git rev-list --reverse $FORK_POINT..$SOURCE_SHA)
+      if [ -z "$revs" ]; then
+        echo "ERROR: no commits in $FORK_POINT..$SOURCE_SHA, nothing to build"
+        exit 1
+      fi
+      for rev in $revs
       do
         echo "##################################################"
         echo "#### $rev ####"
@@ -459,6 +475,9 @@ intermediate commits clean:
   extends: intermediate commits cached
   rules:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
+  variables:
+    OCUDU_TARGET: ""
+    CMAKE_GENERATOR: "Unix Makefiles"
 
 valgrind changed tests:
   extends: .smoke valgrind
@@ -904,6 +923,7 @@ sanitizers avx2:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly/
       when: delayed
       start_in: 1 hour
+  timeout: 4 hours
   variables:
     MARCH: x86-64-v3
   tags:
@@ -976,6 +996,7 @@ sanitizers arm neon:
   extends: .weekly sanitizers
   tags:
     - ${OCUDU_RUNNER_TAG}-arm64
+  timeout: 4 hours
   variables:
     MCPU: neoverse-n1+crc+crypto+ssbs
   parallel:

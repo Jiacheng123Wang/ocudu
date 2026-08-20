@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "csi_report_on_puxch_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/interval.h"
 #include "ocudu/ran/precoding/precoding_codebook_helpers.h"
 #include "ocudu/ran/precoding/precoding_constants.h"
@@ -169,22 +170,22 @@ struct pmi_unpacker {
     const pmi_codebook_single_panel_info panel_info = get_single_panel_info(codebook.n1_n2);
     pmi_typeI_single_panel_param_sizes   sizes      = get_pmi_sizes_typeI_single_panel(panel_info, ri.value());
 
-    unsigned i_1_1 = packed.extract(count, sizes.i_1_1);
+    uint8_t i_1_1 = packed.extract(count, sizes.i_1_1);
     count += sizes.i_1_1;
 
-    std::optional<unsigned> i_1_2;
+    std::optional<uint8_t> i_1_2;
     if (sizes.i_1_2 > 0) {
       i_1_2 = packed.extract(count, sizes.i_1_2);
       count += sizes.i_1_2;
     }
 
-    std::optional<unsigned> i_1_3;
+    std::optional<uint8_t> i_1_3;
     if (sizes.i_1_3 > 0) {
       i_1_3 = packed.extract(count, sizes.i_1_3);
       count += sizes.i_1_3;
     }
 
-    unsigned i_2 = packed.extract(count, sizes.i_2);
+    uint8_t i_2 = packed.extract(count, sizes.i_2);
     count += sizes.i_2;
 
     ocudu_assert(packed.size() == count,

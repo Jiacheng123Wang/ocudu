@@ -6,6 +6,7 @@
 #include "mac_config.h"
 #include "mac_scheduler_configurator.h"
 #include "proc_logger.h"
+#include "ocudu/adt/format.h"
 
 using namespace ocudu;
 

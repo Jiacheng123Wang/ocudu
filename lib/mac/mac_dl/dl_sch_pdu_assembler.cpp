@@ -219,7 +219,7 @@ public:
         fmt::format_to(std::back_inserter(fmtbuf),
                        "{}SDU: lcid={} nof_sdus={} total_size={}",
                        separator(),
-                       fmt::underlying(current_sdu_lcid),
+                       current_sdu_lcid,
                        nof_sdus,
                        sum_bytes);
       }
@@ -263,7 +263,7 @@ public:
       fmt::format_to(std::back_inserter(fmtbuf),
                      "{}SDU: lcid={} nof_sdus={} total_size={}",
                      separator(),
-                     fmt::underlying(current_sdu_lcid),
+                     current_sdu_lcid,
                      nof_sdus,
                      sum_bytes);
     }
@@ -377,7 +377,7 @@ void dl_sch_pdu_assembler::assemble_sdus(dl_sch_pdu&           ue_pdu,
       logger.info("ue={} rnti={} lcid={}: Insufficient MAC opportunity size={}. Remaining space in PDU={}",
                   fmt::underlying(ue_mng.get_ue_index(rnti)),
                   rnti,
-                  fmt::underlying(lcid),
+                  lcid,
                   mac_opportunity_size,
                   rem_bytes);
       break;
@@ -390,7 +390,7 @@ void dl_sch_pdu_assembler::assemble_sdus(dl_sch_pdu&           ue_pdu,
       logger.debug("ue={} rnti={} lcid={}: Unable to encode MAC SDU in MAC opportunity of size={}.",
                    fmt::underlying(ue_mng.get_ue_index(rnti)),
                    rnti,
-                   fmt::underlying(lcid),
+                   lcid,
                    mac_opportunity_size);
       break;
     }
@@ -401,7 +401,7 @@ void dl_sch_pdu_assembler::assemble_sdus(dl_sch_pdu&           ue_pdu,
       logger.error("ue={} rnti={} lcid={}: Scheduled SDU with size={} cannot fit in scheduled DL grant",
                    fmt::underlying(ue_mng.get_ue_index(rnti)),
                    rnti,
-                   fmt::underlying(lc_grant_info.lcid.to_lcid()),
+                   lc_grant_info.lcid.to_lcid(),
                    lc_grant_info.sched_bytes);
       break;
     }
@@ -422,7 +422,7 @@ void dl_sch_pdu_assembler::assemble_sdus(dl_sch_pdu&           ue_pdu,
                      "Allocated SDU size={} is too small.",
                      fmt::underlying(ue_mng.get_ue_index(rnti)),
                      rnti,
-                     fmt::underlying(lc_grant_info.lcid.to_lcid()),
+                     lc_grant_info.lcid.to_lcid(),
                      ue_pdu.capacity(),
                      ue_pdu.nof_empty_bytes(),
                      lc_grant_info.sched_bytes);
@@ -430,7 +430,7 @@ void dl_sch_pdu_assembler::assemble_sdus(dl_sch_pdu&           ue_pdu,
       logger.info("ue={} rnti={} lcid={}: Skipping MAC SDU encoding. Cause: RLC could not encode any SDU",
                   fmt::underlying(ue_mng.get_ue_index(rnti)),
                   rnti,
-                  fmt::underlying(lc_grant_info.lcid.to_lcid()));
+                  lc_grant_info.lcid.to_lcid());
     }
   }
 }

@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "support/compare_sequences.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/zero.h"
 #include "ocudu/phy/generic_functions/precoding/precoding_factories.h"
 #include "ocudu/phy/support/re_pattern.h"
@@ -557,8 +558,8 @@ TEST_F(ResourceGridMapperFixture, OneLayerFourPorts)
   // Create resource grid.
   std::unique_ptr<resource_grid> grid = rg_factory->create(nof_ports, MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS);
 
-  for (unsigned i_beam = 0; i_beam != 8; ++i_beam) {
-    for (unsigned i_pol_phase = 0; i_pol_phase != 4; ++i_pol_phase) {
+  for (uint8_t i_beam = 0; i_beam != 8; ++i_beam) {
+    for (uint8_t i_pol_phase = 0; i_pol_phase != 4; ++i_pol_phase) {
       // Initialize grid to zero.
       grid->set_all_zero();
 
@@ -606,9 +607,9 @@ TEST_F(ResourceGridMapperFixture, TwoLayerFourPorts)
   // Create resource grid.
   std::unique_ptr<resource_grid> grid = rg_factory->create(nof_ports, MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS);
 
-  for (unsigned i_beam = 0; i_beam != 8; ++i_beam) {
-    for (unsigned i_beam_offset = 0; i_beam_offset != 1; ++i_beam_offset) {
-      for (unsigned i_pol_phase = 0; i_pol_phase != 2; ++i_pol_phase) {
+  for (uint8_t i_beam = 0; i_beam != 8; ++i_beam) {
+    for (uint8_t i_beam_offset = 0; i_beam_offset != 1; ++i_beam_offset) {
+      for (uint8_t i_pol_phase = 0; i_pol_phase != 2; ++i_pol_phase) {
         // Initialize grid to zero.
         grid->set_all_zero();
 
@@ -657,8 +658,8 @@ TEST_F(ResourceGridMapperFixture, ThreeLayerFourPorts)
   // Create resource grid.
   std::unique_ptr<resource_grid> grid = rg_factory->create(nof_ports, MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS);
 
-  for (unsigned i_beam = 0; i_beam != 8; ++i_beam) {
-    for (unsigned i_pol_phase = 0; i_pol_phase != 2; ++i_pol_phase) {
+  for (uint8_t i_beam = 0; i_beam != 8; ++i_beam) {
+    for (uint8_t i_pol_phase = 0; i_pol_phase != 2; ++i_pol_phase) {
       // Initialize grid to zero.
       grid->set_all_zero();
 
@@ -706,8 +707,8 @@ TEST_F(ResourceGridMapperFixture, FourLayerFourPorts)
   // Create resource grid.
   std::unique_ptr<resource_grid> grid = rg_factory->create(nof_ports, MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS);
 
-  for (unsigned i_beam = 0; i_beam != 8; ++i_beam) {
-    for (unsigned i_pol_phase = 0; i_pol_phase != 2; ++i_pol_phase) {
+  for (uint8_t i_beam = 0; i_beam != 8; ++i_beam) {
+    for (uint8_t i_pol_phase = 0; i_pol_phase != 2; ++i_pol_phase) {
       // Initialize grid to zero.
       grid->set_all_zero();
 

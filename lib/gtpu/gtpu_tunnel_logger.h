@@ -31,25 +31,11 @@ private:
   std::string prefix;
 };
 
+inline const char* format_as(const gtpu_tunnel_log_prefix& o)
+{
+  return o.to_c_str();
+}
+
 using gtpu_tunnel_logger = prefixed_logger<gtpu_tunnel_log_prefix>;
 
 } // namespace ocudu
-
-namespace fmt {
-
-// associated formatter
-template <>
-struct formatter<ocudu::gtpu_tunnel_log_prefix> {
-  template <typename ParseContext>
-  auto parse(ParseContext& ctx)
-  {
-    return ctx.begin();
-  }
-
-  template <typename FormatContext>
-  auto format(ocudu::gtpu_tunnel_log_prefix o, FormatContext& ctx) const
-  {
-    return format_to(ctx.out(), "{}", o.to_c_str());
-  }
-};
-} // namespace fmt

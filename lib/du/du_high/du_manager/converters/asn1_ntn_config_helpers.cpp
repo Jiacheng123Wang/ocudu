@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "asn1_ntn_config_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/lpp/reference_location.h"
 #include "ocudu/support/error_handling.h"
 #include <cmath>

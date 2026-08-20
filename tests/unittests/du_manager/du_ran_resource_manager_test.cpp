@@ -4,6 +4,7 @@
 
 #include "lib/du/du_high/du_manager/ran_resource_management/du_ran_resource_manager_impl.h"
 #include "tests/test_doubles/utils/test_rng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_cell_config_helpers.h"
 #include "ocudu/du/du_high/du_qos_config_helpers.h"
 #include "ocudu/scheduler/config/serving_cell_config_factory.h"
@@ -46,6 +47,24 @@ protected:
     }
     ues.emplace(ue_index, std::move(result.value()));
     return &ues[ue_index];
+  }
+
+  // Creates UE contexts until the cell runs out of them. Returns the number of created UE contexts.
+  unsigned fill_cell_ue_contexts()
+  {
+    const unsigned max_nof_ue_ctxts = get_max_nof_ue_contexts();
+    for (unsigned i = 0; i != max_nof_ue_ctxts; ++i) {
+      if (create_ue(to_du_ue_index(i)) == nullptr) {
+        return i;
+      }
+    }
+    return max_nof_ue_ctxts;
+  }
+
+  unsigned get_max_nof_ue_contexts() const
+  {
+    return res_mng->get_max_nof_established_ue_contexts(to_du_cell_index(0)) +
+           res_mng->get_max_nof_rejected_ue_contexts(to_du_cell_index(0));
   }
 
   static f1ap_ue_context_update_request srb1_creation_req(du_ue_index_t ue_index)
@@ -294,6 +313,47 @@ TEST_P(du_ran_resource_manager_tester, when_multiple_ues_are_created_then_they_u
                 .cell_group.cells.at(SERVING_PCELL_IDX)
                 .serv_cell_cfg.ul_config->init_ul_bwp.pucch_cfg->sr_res_list[0]
                 .offset);
+}
+
+TEST_P(du_ran_resource_manager_tester, max_nof_ue_contexts_of_a_cell_fits_the_du_limit)
+{
+  ASSERT_LE(get_max_nof_ue_contexts(), static_cast<unsigned>(MAX_NOF_DU_UES_PER_CELL));
+}
+
+TEST_P(du_ran_resource_manager_tester, when_ues_are_created_then_max_nof_ue_contexts_does_not_change)
+{
+  const unsigned max_nof_established = res_mng->get_max_nof_established_ue_contexts(to_du_cell_index(0));
+  const unsigned max_nof_rejected    = res_mng->get_max_nof_rejected_ue_contexts(to_du_cell_index(0));
+  ASSERT_GT(max_nof_established, 0);
+
+  for (unsigned i = 0; i != 4; ++i) {
+    ASSERT_NE(create_ue(to_du_ue_index(i)), nullptr);
+    ASSERT_EQ(res_mng->get_max_nof_established_ue_contexts(to_du_cell_index(0)), max_nof_established);
+    ASSERT_EQ(res_mng->get_max_nof_rejected_ue_contexts(to_du_cell_index(0)), max_nof_rejected);
+  }
+}
+
+TEST_P(du_ran_resource_manager_tester, when_cell_runs_out_of_ue_contexts_then_ue_resource_creation_fails)
+{
+  const unsigned max_nof_ue_ctxts = get_max_nof_ue_contexts();
+  ASSERT_EQ(fill_cell_ue_contexts(), max_nof_ue_ctxts);
+
+  // The number of established UEs cannot exceed its upper-bound, so the last UE contexts of the cell can only be used
+  // to RRC Reject UEs.
+  ASSERT_TRUE(ues[to_du_ue_index(max_nof_ue_ctxts - 1)].resource_alloc_failed());
+
+  ASSERT_EQ(create_ue(to_du_ue_index(max_nof_ue_ctxts)), nullptr);
+}
+
+TEST_P(du_ran_resource_manager_tester, when_ue_context_is_released_then_cell_accepts_a_new_ue)
+{
+  const unsigned max_nof_ue_ctxts = get_max_nof_ue_contexts();
+  ASSERT_EQ(fill_cell_ue_contexts(), max_nof_ue_ctxts);
+  ASSERT_EQ(create_ue(to_du_ue_index(max_nof_ue_ctxts)), nullptr);
+
+  ues.erase(to_du_ue_index(0));
+
+  ASSERT_NE(create_ue(to_du_ue_index(max_nof_ue_ctxts)), nullptr);
 }
 
 INSTANTIATE_TEST_SUITE_P(du_ran_resource_manager_tester,

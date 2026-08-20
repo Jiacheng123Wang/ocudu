@@ -5,6 +5,7 @@
 #include "ocudu/du/du_high/o_du_high_factory.h"
 #include "adapters/f1_setup_e2_adapter.h"
 #include "o_du_high_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_high/du_high_clock_controller.h"
 #include "ocudu/du/du_high/du_high_factory.h"
 #include "ocudu/du/du_high/o_du_high_config.h"
@@ -173,15 +174,17 @@ std::unique_ptr<o_du_high> ocudu::odu::make_o_du_high(const o_du_high_config&  c
 
   auto du_hi = make_du_high(du_hi_cfg, odu_dependencies.du_hi);
 
-  auto e2agent = create_e2_du_agent(config.e2ap_config,
-                                    *odu_dependencies.e2_client,
-                                    odu_dependencies.e2_du_metric_iface,
-                                    &du_hi->get_f1ap_ue_id_translator(),
-                                    &du_hi->get_du_configurator(),
-                                    timer_factory{odu_dependencies.du_hi.timer_ctrl->get_timer_manager(),
-                                                  odu_dependencies.du_hi.exec_mapper->du_e2_executor()},
-                                    odu_dependencies.du_hi.exec_mapper->du_e2_executor(),
-                                    std::move(collector));
+  auto e2agent = create_e2_du_agent(
+      config.e2ap_cfg,
+      e2ap_dependencies{.e2_client             = *odu_dependencies.e2_client,
+                        .e2_metrics_var        = odu_dependencies.e2_du_metric_iface,
+                        .f1ap_ue_id_translator = &du_hi->get_f1ap_ue_id_translator(),
+                        .du_configurator       = &du_hi->get_du_configurator(),
+                        .timers                = timer_factory{odu_dependencies.du_hi.timer_ctrl->get_timer_manager(),
+                                                odu_dependencies.du_hi.exec_mapper->du_e2_executor()},
+                        .e2_exec               = odu_dependencies.du_hi.exec_mapper->du_e2_executor(),
+                        .node_component_config_provider = std::move(collector),
+                        .logger                         = ocudulog::fetch_basic_logger("E2-DU")});
 
   odu->set_e2_components(std::move(e2agent), std::move(adapter));
   odu->set_du_high(std::move(du_hi));

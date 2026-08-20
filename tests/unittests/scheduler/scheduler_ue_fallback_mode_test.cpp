@@ -174,8 +174,7 @@ struct conres_test_params {
 /// Formatter for test params.
 void PrintTo(const conres_test_params& value, ::std::ostream* os)
 {
-  *os << fmt::format(
-      "LCID={}, mode={}", fmt::underlying(value.msg4_lcid), value.duplx_mode == duplex_mode::TDD ? "TDD" : "FDD");
+  *os << fmt::format("LCID={}, mode={}", value.msg4_lcid, value.duplx_mode == duplex_mode::TDD ? "TDD" : "FDD");
 }
 
 /// \brief Test to verify the correct scheduling of the ConRes CE and Msg4 LCID0/1 PDU even when multiple PRACH
@@ -191,7 +190,7 @@ public:
   {
     rach_indication_message rach_ind{to_du_cell_index(0), next_slot_rx(), {{0, 0, {}}}};
     auto                    nof_preambles = test_rng::uniform_int<unsigned>(1, 10);
-    for (unsigned i = 0; i != nof_preambles; ++i) {
+    for (uint8_t i = 0; i != nof_preambles; ++i) {
       rach_ind.occasions[0].preambles.push_back({i, to_rnti(static_cast<uint16_t>(rnti) + 1 + i), phy_time_unit{}});
     }
     this->sched->handle_rach_indication(rach_ind);
@@ -682,6 +681,15 @@ TEST_F(cfra_scheduler_test, scheduler_is_stable_after_msg3_ack)
   }
 }
 
+/// Expert config with the CFRA UCI-on-Msg3 multiplexing disabled, so that the Msg3 PUCCH avoidance is exercised
+/// deterministically regardless of the default.
+static scheduler_expert_config make_no_uci_on_msg3_sched_cfg()
+{
+  auto cfg                                = config_helpers::make_default_scheduler_expert_config();
+  cfg.ra.multiplex_uci_on_cf_rar_ul_grant = false;
+  return cfg;
+}
+
 /// Fixture identical to \ref cfra_scheduler_test but with a dense periodic-CSI period, so that — once the RACH
 /// trigger is swept across the CSI grid — a CSI report occasion reliably lands on a Msg3 candidate slot. This
 /// exercises the RA-scheduler avoidance: Msg3 must never share a slot with the UE's CSI PUCCH.
@@ -690,7 +698,7 @@ class cfra_csi_collision_test : public scheduler_test_simulator, public ::testin
   static constexpr unsigned NOF_CB_PREAMBLES = 60;
 
 public:
-  cfra_csi_collision_test()
+  cfra_csi_collision_test() : scheduler_test_simulator(make_no_uci_on_msg3_sched_cfg())
   {
     cell_config_builder_params bparams;
     auto                       cell_req = sched_config_helper::make_default_sched_cell_configuration_request(bparams);
@@ -821,7 +829,7 @@ public:
   // CFRA UE's PUCCH skip did not block the CBRA UE. Checked once for the whole sweep in TearDownTestSuite.
   static bool saw_cbra_msg3_with_cfra_pucch;
 
-  cfra_multi_ue_rar_test()
+  cfra_multi_ue_rar_test() : scheduler_test_simulator(make_no_uci_on_msg3_sched_cfg())
   {
     cell_config_builder_params bparams;
     auto                       cell_req = sched_config_helper::make_default_sched_cell_configuration_request(bparams);

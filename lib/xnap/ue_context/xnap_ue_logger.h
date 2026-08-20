@@ -37,25 +37,11 @@ private:
   std::string prefix;
 };
 
+inline const char* format_as(const xnap_ue_log_prefix& o)
+{
+  return o.to_c_str();
+}
+
 using xnap_ue_logger = prefixed_logger<xnap_ue_log_prefix>;
 
 } // namespace ocudu::ocucp
-
-namespace fmt {
-
-// associated formatter
-template <>
-struct formatter<ocudu::ocucp::xnap_ue_log_prefix> {
-  template <typename ParseContext>
-  auto parse(ParseContext& ctx)
-  {
-    return ctx.begin();
-  }
-
-  template <typename FormatContext>
-  auto format(const ocudu::ocucp::xnap_ue_log_prefix& o, FormatContext& ctx) const
-  {
-    return format_to(ctx.out(), "{}", o.to_c_str());
-  }
-};
-} // namespace fmt

@@ -67,8 +67,8 @@ public:
   }
 
   // rlc_tx_upper_layer_control_notifier interface
-  void on_protocol_failure() override { proto_err_count++; }
-  void on_max_retx() override { max_retx_count++; }
+  void on_protocol_failure(rb_id_t rb_id) override { proto_err_count++; }
+  void on_max_retx(rb_id_t rb_id) override { max_retx_count++; }
 
   // rlc_tx_buffer_state_update_notifier interface
   void on_buffer_state_update(const rlc_buffer_state& bs) override
@@ -370,7 +370,7 @@ protected:
 
   virtual rlc_drb_am_tx_window_seg_pool& get_window_pool() { return pool.get_pool_of_type<rlc_tx_am_sdu_info>(); }
 
-  rlc_drb_tx_window_seg_pool pool{rlc_drb_tx_window_seg_pool_size};
+  rlc_drb_tx_window_seg_pool pool{rlc_drb_tx_window_seg_pool_size, rlc_drb_tx_window_seg_size};
 
   ocudulog::basic_logger&                       logger  = ocudulog::fetch_basic_logger("TEST", false);
   rlc_am_sn_size                                sn_size = GetParam();
@@ -393,8 +393,9 @@ private:
   class rlc_tx_am_window_seg_pool_dummy : public rlc_drb_am_tx_window_seg_pool
   {
   public:
-    map_segment<uint32_t, rlc_tx_am_sdu_info, rlc_drb_tx_window_seg_size>* get_segment() override { return nullptr; }
-    void return_segment(map_segment<uint32_t, rlc_tx_am_sdu_info, rlc_drb_tx_window_seg_size>* seg) override {}
+    ocudu::span<std::optional<detail::kv_obj<uint32_t, rlc_tx_am_sdu_info>>> get_segment() override { return {}; }
+    void   return_segment(ocudu::span<std::optional<detail::kv_obj<uint32_t, rlc_tx_am_sdu_info>>>) override {}
+    size_t segment_size() const override { return rlc_drb_tx_window_seg_size; }
   };
 
   rlc_tx_am_window_seg_pool_dummy dummy_pool = {};

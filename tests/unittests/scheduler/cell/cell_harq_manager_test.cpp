@@ -110,6 +110,7 @@ protected:
   base_harq_manager_test(unsigned nof_ues, unsigned ntn_cs_koffset = 0, bool ul_harq_mode_b = false) :
     max_harqs_per_ue(ntn_cs_koffset > 0 ? MAX_NOF_HARQS : MAX_NOF_HARQS_NON_NTN),
     cell_harqs(nof_ues,
+               nof_ues,
                max_harqs_per_ue,
                timeout_handler.make_notifier(),
                timeout_handler.make_notifier(),
@@ -626,6 +627,24 @@ TEST_F(single_ue_harq_entity_test, when_ue_harq_entity_is_deallocated_then_harq_
   }
 }
 
+TEST_F(single_ue_harq_entity_test, when_harq_entity_is_recycled_then_configured_grant_reservation_is_not_inherited)
+{
+  // Reserve HARQs of the UE for Configured Grant use.
+  constexpr unsigned             nof_cg_reserved_harqs = 4;
+  harq_dl_feedback_disabled_mask dl_feedback_disabled;
+  harq_ul_mode_mask              ul_harq_mode_mask;
+  harq_ent.reconfigure(nof_harqs, nof_harqs, dl_feedback_disabled, ul_harq_mode_mask, nof_cg_reserved_harqs);
+
+  // The next UE takes the HARQ entity of the removed one, and must not inherit its reservation.
+  harq_ent.reset();
+  harq_ent = cell_harqs.add_ue(ue_index, rnti, nof_harqs, nof_harqs);
+
+  for (unsigned i = 0; i != nof_harqs; ++i) {
+    ASSERT_TRUE(harq_ent.alloc_ul_harq(current_slot + k2, max_retxs).has_value())
+        << "UL HARQ " << i << " is not available to the new UE";
+  }
+}
+
 TEST_F(single_ue_harq_entity_test, when_max_retxs_reached_then_harq_entity_does_not_find_pending_retx)
 {
   auto h_dl = harq_ent.alloc_dl_harq(current_slot, k1, max_retxs, 0);
@@ -690,6 +709,34 @@ TEST_F(single_ue_harq_entity_test, after_max_ack_wait_timeout_dl_harqs_are_avail
     ASSERT_TRUE(h_ul.has_value());
   }
   ASSERT_EQ(timeout_handler.last_event, dummy_harq_timeout_handler::last_event_t::feedback_timeout);
+}
+
+TEST_F(single_ue_harq_entity_test, dl_harq_feedback_timeout_is_counted_from_the_last_pucch_repetition)
+{
+  // As per TS 38.213, Section 9.2.6, the HARQ-ACK of a PUCCH with repetitions is transmitted over several slots, the
+  // last of which is the earliest point at which the feedback can be considered lost.
+  const unsigned nof_rep_slots  = 4;
+  const unsigned last_ack_delay = k1 + nof_rep_slots - 1;
+  auto           h_dl           = harq_ent.alloc_dl_harq(current_slot, k1, max_retxs, 0, true, 1, last_ack_delay);
+  ASSERT_TRUE(h_dl.has_value());
+  ASSERT_EQ(h_dl->uci_slot(), current_slot + k1);
+  ASSERT_EQ(h_dl->last_uci_slot(), current_slot + last_ack_delay);
+
+  // Test: The HARQ process is still waiting for the feedback after the timeout of a single-slot HARQ-ACK report.
+  for (unsigned i = 0; i != max_ack_wait_timeout + k1 + 1; ++i) {
+    run_slot();
+  }
+  ASSERT_NE(harq_ent.find_dl_harq_waiting_ack(), std::nullopt);
+  ASSERT_EQ(timeout_handler.last_event, dummy_harq_timeout_handler::last_event_t::none);
+
+  // Test: The timeout is reached once the wait has elapsed since the last repetition.
+  for (unsigned i = 0; i != nof_rep_slots - 1; ++i) {
+    run_slot();
+  }
+  ASSERT_EQ(harq_ent.find_dl_harq_waiting_ack(), std::nullopt);
+  ASSERT_EQ(timeout_handler.last_event, dummy_harq_timeout_handler::last_event_t::feedback_timeout);
+  ASSERT_TRUE(timeout_handler.last_dir_is_dl);
+  ASSERT_FALSE(timeout_handler.last_was_ack);
 }
 
 TEST_F(single_ue_harq_entity_test, when_pending_retx_harq_is_never_rescheduled_then_on_retx_timeout_is_notified)
@@ -1307,6 +1354,7 @@ protected:
   const unsigned        nof_cg_reserved = 4;
   const unsigned        k2              = 6;
   const unsigned        max_retxs       = 4;
+  const unsigned        cg_harq_timeout = 160;
   slot_point            pusch_slot;
   unique_ue_harq_entity harq_ent = cell_harqs.add_ue(ue_index, rnti, nof_harqs, nof_harqs);
 };
@@ -1315,7 +1363,7 @@ TEST_F(cg_harq_reservation_test, when_cg_harq_id_requested_then_returns_process_
 {
   // Request a specific HARQ-ID from the CG-reserved range [0, nof_cg_reserved).
   constexpr harq_id_t requested_id = to_harq_id(2);
-  auto                h_ul         = harq_ent.alloc_ul_harq(pusch_slot, max_retxs, requested_id);
+  auto h_ul = harq_ent.alloc_ul_harq(pusch_slot, max_retxs, cg_harq_alloc_params{requested_id, cg_harq_timeout});
 
   ASSERT_TRUE(h_ul.has_value());
   ASSERT_EQ(h_ul->id(), requested_id);
@@ -1325,7 +1373,8 @@ TEST_F(cg_harq_reservation_test, when_cg_harq_id_outside_reserved_range_then_all
 {
   // Request a HARQ-ID that falls in the non-reserved range (>= nof_cg_reserved). This should be rejected.
   const harq_id_t non_reserved_id = to_harq_id(nof_cg_reserved);
-  const auto      h_ul            = harq_ent.alloc_ul_harq(pusch_slot, max_retxs, non_reserved_id);
+  const auto      h_ul =
+      harq_ent.alloc_ul_harq(pusch_slot, max_retxs, cg_harq_alloc_params{non_reserved_id, cg_harq_timeout});
 
   ASSERT_FALSE(h_ul.has_value());
 }
@@ -1354,7 +1403,7 @@ TEST_F(cg_harq_reservation_test, when_no_harq_id_specified_then_reserved_ids_are
 
   // Reserved IDs are still free and can be allocated individually.
   for (unsigned id = 0; id != nof_cg_reserved; ++id) {
-    auto h_ul = harq_ent.alloc_ul_harq(pusch_slot, max_retxs, to_harq_id(id));
+    auto h_ul = harq_ent.alloc_ul_harq(pusch_slot, max_retxs, cg_harq_alloc_params{to_harq_id(id), cg_harq_timeout});
     ASSERT_TRUE(h_ul.has_value());
     ASSERT_EQ(h_ul->id(), to_harq_id(id));
   }

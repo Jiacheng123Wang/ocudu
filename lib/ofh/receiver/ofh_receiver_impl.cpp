@@ -3,6 +3,7 @@
 
 #include "ofh_receiver_impl.h"
 #include "ofh_message_receiver_task_dispatcher.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ofh/ethernet/ethernet_properties.h"
 
 using namespace ocudu;

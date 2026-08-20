@@ -34,6 +34,7 @@ target_link_libraries(cu_cp_test_helpers
         f1ap_test_doubles
         ngap_test_helpers
         ngap_test_doubles
+        xnap_test_helpers
         xnap_test_doubles
         nrppa_test_doubles
         rrc_ue_test_helpers
@@ -72,6 +73,7 @@ add_executable(cu_cp_test
                cu_cp_inactivity_notification_test.cpp
                cu_cp_initial_context_setup_test.cpp
                cu_cp_inter_cu_ng_handover_test.cpp
+               cu_cp_inter_cu_ue_context_retrieval_test.cpp
                cu_cp_inter_cu_xn_handover_test.cpp
                cu_cp_inter_du_handover_test.cpp
                cu_cp_intra_du_handover_test.cpp
@@ -87,6 +89,8 @@ add_executable(cu_cp_test
                cu_cp_rrc_inactive_test.cpp
                cu_cp_setup_test.cpp
                cu_cp_ue_context_release_test.cpp
+               cu_cp_xn_served_cells_test.cpp
+               cu_cp_ue_context_retrieval_test.cpp
                cu_cp_xnap_test.cpp
                )
 set_target_properties(cu_cp_test PROPERTIES UNITY_BUILD ON)

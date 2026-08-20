@@ -4,6 +4,7 @@
 #include "ofh_downlink_handler_impl.h"
 #include "../support/logger_utils.h"
 #include "helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/instrumentation/traces/ofh_traces.h"
 #include "ocudu/ofh/ofh_error_notifier.h"
 #include "ocudu/phy/support/resource_grid_context.h"

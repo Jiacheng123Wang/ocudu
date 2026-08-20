@@ -7,6 +7,7 @@
 #include "../converters/rlc_config_helpers.h"
 #include "../converters/scheduler_configuration_helpers.h"
 #include "../metrics/du_procedure_metrics_collector.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_high/du_manager/du_manager_params.h"
 #include "ocudu/rlc/rlc_factory.h"
 #include "ocudu/rlc/rlc_srb_config_factory.h"

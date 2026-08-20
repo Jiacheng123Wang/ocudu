@@ -8,12 +8,13 @@
 #include "logical_channel_system.h"
 #include "ta_management_system.h"
 #include "ue.h"
-#include "ue_cell_repository.h"
 #include "ue_drx_controller.h"
 #include "ue_fsm_states.h"
 #include "ocudu/adt/ring_buffer.h"
 
 namespace ocudu {
+
+class ue_cell_repository;
 
 /// \brief Context describing how a UE is being created, passed to \c ue_repository::add_ue.
 struct ue_creation_context {
@@ -48,12 +49,11 @@ public:
   ue&       operator[](du_ue_index_t ue_index) { return ues[ue_index]; }
   const ue& operator[](du_ue_index_t ue_index) const { return ues[ue_index]; }
 
-  ue_cell_repository& add_cell(const cell_configuration& cell_cfg, cell_metrics_handler* cell_metrics);
-  void                rem_cell(du_cell_index_t cell_index);
+  /// Register the UE repository of a cell. The repository must outlive this registration.
+  void register_cell(ue_cell_repository& cell_ue_repo);
 
-  // Access UEs per cell.
-  ue_cell_repository&       cell(du_cell_index_t cell_index) { return *cell_ues[cell_index]; }
-  const ue_cell_repository& cell(du_cell_index_t cell_index) const { return *cell_ues[cell_index]; }
+  /// Deregister the UE repository of a cell. The cell must have no UEs left.
+  void deregister_cell(du_cell_index_t cell_index);
 
   /// \brief Search UE context based on TC-RNTI/C-RNTI.
   ue*       find_by_rnti(rnti_t rnti);
@@ -108,8 +108,8 @@ private:
 
   ocudulog::basic_logger& logger;
 
-  // List of UEs per cell.
-  slotted_id_table<du_cell_index_t, std::unique_ptr<ue_cell_repository>, MAX_NOF_DU_CELLS> cell_ues;
+  // Non-owning pointers to the UE repositories of the registered cells.
+  slotted_id_table<du_cell_index_t, ue_cell_repository*, MAX_NOF_DU_CELLS> cell_ues;
 
   /// FSM of the UE configuration stages.
   slotted_id_table<du_ue_index_t, ue_pcell_state, MAX_NOF_DU_UES> ue_fsms;

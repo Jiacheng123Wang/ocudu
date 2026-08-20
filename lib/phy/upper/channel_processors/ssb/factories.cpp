@@ -8,6 +8,7 @@
 #include "pbch_modulator_impl.h"
 #include "ssb_processor_impl.h"
 #include "ssb_processor_pool.h"
+#include "ocudu/adt/format.h"
 
 using namespace ocudu;
 

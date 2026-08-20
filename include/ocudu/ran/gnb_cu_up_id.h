@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include "fmt/format.h"
 #include <cstdint>
 
 namespace ocudu {
@@ -25,24 +24,9 @@ constexpr uint64_t gnb_cu_up_id_to_uint(gnb_cu_up_id_t gnb_cu_up_id)
   return static_cast<uint64_t>(gnb_cu_up_id);
 }
 
+constexpr uint64_t format_as(gnb_cu_up_id_t o)
+{
+  return gnb_cu_up_id_to_uint(o);
+}
+
 } // namespace ocudu
-
-namespace fmt {
-
-// gnb_cu_up_id_t formatter
-template <>
-struct formatter<ocudu::gnb_cu_up_id_t> {
-  template <typename ParseContext>
-  auto parse(ParseContext& ctx)
-  {
-    return ctx.begin();
-  }
-
-  template <typename FormatContext>
-  auto format(ocudu::gnb_cu_up_id_t o, FormatContext& ctx) const
-  {
-    return format_to(ctx.out(), "{}", ocudu::gnb_cu_up_id_to_uint(o));
-  }
-};
-
-} // namespace fmt

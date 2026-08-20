@@ -55,12 +55,12 @@ namespace detail {
 ///         interval is returned.
 /// Note: This function should not be used directly. Use \c find_empty_interval_of_length instead.
 template <typename Tag>
-interval<unsigned, false, Tag> find_next_empty_interval(const bounded_bitset<MAX_NOF_PRBS, false, Tag>& used_rb_bitmap,
-                                                        interval<unsigned, false, Tag> search_limits = {0,
+interval<uint16_t, false, Tag> find_next_empty_interval(const bounded_bitset<MAX_NOF_PRBS, false, Tag>& used_rb_bitmap,
+                                                        interval<uint16_t, false, Tag> search_limits = {0,
                                                                                                         MAX_NOF_PRBS})
 {
   // Restrict the search to the bitmap dimensions.
-  const interval<unsigned, false, Tag> bitset_limits = {0, used_rb_bitmap.size()};
+  const interval<uint16_t, false, Tag> bitset_limits = {0, used_rb_bitmap.size()};
   search_limits.intersect(bitset_limits);
 
   int rb_start = used_rb_bitmap.find_lowest(search_limits.start(), search_limits.stop(), false);
@@ -82,18 +82,18 @@ interval<unsigned, false, Tag> find_next_empty_interval(const bounded_bitset<MAX
 /// \param search_limits Minimum and maximum RB indices where the search is carried out.
 /// \return An interval of RBs with maximum length equal to "nof_rbs".
 template <typename Tag>
-interval<unsigned, false, Tag>
+interval<uint16_t, false, Tag>
 find_empty_interval_of_length(const bounded_bitset<MAX_NOF_PRBS, false, Tag>& used_rb_bitmap,
                               unsigned                                        nof_rbs,
-                              interval<unsigned, false, Tag>                  search_limits = {0, MAX_NOF_PRBS})
+                              interval<uint16_t, false, Tag>                  search_limits = {0, MAX_NOF_PRBS})
 {
   // Restrict the search to the bitmap dimensions.
-  const interval<unsigned, false, Tag> bitset_limits = {0, used_rb_bitmap.size()};
+  const interval<uint16_t, false, Tag> bitset_limits = {0, used_rb_bitmap.size()};
   search_limits.intersect(bitset_limits);
 
-  interval<unsigned, false, Tag> max_interv;
+  interval<uint16_t, false, Tag> max_interv;
   do {
-    interval<unsigned, false, Tag> interv = detail::find_next_empty_interval(used_rb_bitmap, search_limits);
+    interval<uint16_t, false, Tag> interv = detail::find_next_empty_interval(used_rb_bitmap, search_limits);
     if (interv.empty()) {
       break;
     }

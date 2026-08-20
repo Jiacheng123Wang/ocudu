@@ -54,9 +54,11 @@ ue_fallback_scheduler::ue_fallback_scheduler(const scheduler_ue_expert_config& e
   logger(ocudulog::fetch_basic_logger("SCHED"))
 {
   // Pre-reserve memory to avoid allocations in RT.
-  pending_dl_ues_new_tx.reserve(MAX_NOF_DU_UES);
-  ongoing_ues_ack_retxs.reserve(MAX_NOF_DU_UES);
-  pending_ul_ues.reserve(MAX_NOF_DU_UES);
+  // Note: The number of tracked HARQs can exceed the number of UE contexts, but UEs in fallback mode generally have a
+  // single active HARQ, and only a fraction of the cell UEs are in fallback mode at any given time.
+  pending_dl_ues_new_tx.reserve(cell_cfg.max_nof_ue_contexts);
+  ongoing_ues_ack_retxs.reserve(cell_cfg.max_nof_ue_contexts);
+  pending_ul_ues.reserve(cell_cfg.max_nof_ue_contexts);
 
   // NOTE 1: We use a std::vector instead of a std::array because we can later on initialize the vector with the minimum
   // value of k1, passed through the expert config.
@@ -525,8 +527,17 @@ static std::optional<uci_allocation> allocate_ue_fallback_pucch(ue&             
 
   if (not common_alloc and ded_alloc) {
     // UE dedicated-only PUCCH allocation.
+    // Skip k1 candidates whose HARQ-ACK would fall on a CG slot (see CG note in the loop below): during the RRC
+    // Reconfiguration we cannot be sure the UE has already applied the CG config and multiplexes the UCI on the CG
+    // PUSCH, as the gNB would expect.
+    static_vector<uint8_t, pucch_td_helper::MAX_K1_CANDIDATES> filtered_k1;
+    for (const uint8_t k1_candidate : k1_values) {
+      if (not u.get_pcell().cfg().is_cg_slot(pdsch_slot + k1_candidate)) {
+        filtered_k1.push_back(k1_candidate);
+      }
+    }
     std::optional<uci_allocation> uci =
-        uci_alloc.alloc_harq_ack(res_alloc, u.get_pcell().cfg(), pdsch_delay, k1_values);
+        uci_alloc.alloc_harq_ack(res_alloc, u.get_pcell().cfg(), pdsch_delay, filtered_k1);
     return uci;
   }
 
@@ -541,6 +552,14 @@ static std::optional<uci_allocation> allocate_ue_fallback_pucch(ue&             
       // If it is not UL-enabled slot.
       continue;
     }
+    if (u.get_pcell().cfg().is_cg_slot(uci_slot)) {
+      // TODO: This is only valid for CG type1, remove for type 2.
+      // We do not allocate PUCCHs on slots that are for Configured Grant; if that were the case, we would need to
+      // multiplex the UCI on the CG PUSCH. The problem with this is that we can't be sure that the UE decodes the PDSCH
+      // with the RRC Reconfiguration message. If it doesn't, it wouldn't multiplex the UCI on the CG PUSCH, whereas in
+      // the GNB we would expect it in the CG PUSCH.
+      continue;
+    }
     last_valid_k1 = k1_candidate;
 
     std::optional<unsigned> pucch_res_indicator;
@@ -552,11 +571,18 @@ static std::optional<uci_allocation> allocate_ue_fallback_pucch(ue&             
           pucch_alloc.alloc_common_harq_ack(res_alloc, u.crnti, pdsch_delay, k1_candidate, pdcch_info);
     }
     if (pucch_res_indicator.has_value()) {
-      return uci_allocation{k1_candidate, 0, pucch_res_indicator};
+      // Note: the PUCCH grants used during fallback are never repeated over multiple slots.
+      return uci_allocation{.k1                  = k1_candidate,
+                            .k1_last_rep         = k1_candidate,
+                            .harq_bit_idx        = 0,
+                            .pucch_res_indicator = pucch_res_indicator};
     }
   }
   if (last_valid_k1.has_value()) {
-    return uci_allocation{last_valid_k1.value(), 0, std::nullopt};
+    return uci_allocation{.k1                  = last_valid_k1.value(),
+                          .k1_last_rep         = last_valid_k1.value(),
+                          .harq_bit_idx        = 0,
+                          .pucch_res_indicator = std::nullopt};
   }
   return std::nullopt;
 }
@@ -1030,6 +1056,11 @@ ue_fallback_scheduler::ul_srb_sched_outcome ue_fallback_scheduler::schedule_ul_u
     cell_slot_resource_allocator& pusch_alloc = res_alloc[pusch_td.k2 + cell_cfg.ntn_cs_koffset];
     const slot_point              pusch_slot  = pusch_alloc.slot;
 
+    // Skip PUSCH allocation if this is a Configured Grant slot, to avoid collision with CG PUSCH.
+    if (u.get_pcell().cfg().is_cg_slot(pusch_slot)) {
+      continue;
+    }
+
     // If it is a retx, we need to ensure we use a time_domain_resource with the same number of symbols as used for
     // the first transmission.
     if (is_retx and pusch_td.symbols.length() != h_ul_retx->get_grant_params().nof_symbols) {
@@ -1145,8 +1176,8 @@ ue_fallback_scheduler::schedule_ul_srb(ue&                                      
   }
 
   // In fallback, we do not multiplex any HARQ-ACK or CSI within the PUSCH.
-  const unsigned      uci_bits_overallocation = 0U;
-  const bool          is_csi_report_slot      = false;
+  constexpr unsigned  uci_bits_overallocation = 0U;
+  constexpr bool      is_csi_report_slot      = false;
   pusch_config_params pusch_cfg               = get_pusch_config_f0_0_c_rnti(cell_cfg,
                                                                nullptr,
                                                                cell_cfg.params.ul_cfg_common.init_ul_bwp,
@@ -1191,8 +1222,8 @@ ue_fallback_scheduler::schedule_ul_srb(ue&                                      
     // [Implementation-defined] In our tests, we have seen that MCS 5 with 1 PRB can lead (depending on the
     // configuration) to a non-valid MCS-PRB allocation; therefore, we set 6 as minimum value for 1 PRB.
     // TODO: Remove this part and handle the problem with a loop that is general for any configuration.
-    const sch_mcs_index min_mcs_for_1_prb  = static_cast<sch_mcs_index>(6U);
-    const unsigned      min_allocable_prbs = 1U;
+    constexpr sch_mcs_index min_mcs_for_1_prb  = static_cast<sch_mcs_index>(6U);
+    constexpr unsigned      min_allocable_prbs = 1U;
     if (mcs < min_mcs_for_1_prb and prbs_tbs.nof_prbs <= min_allocable_prbs) {
       ++prbs_tbs.nof_prbs;
     }

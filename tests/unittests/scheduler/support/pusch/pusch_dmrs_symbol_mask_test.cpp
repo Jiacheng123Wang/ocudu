@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "lib/scheduler/support/pusch/pusch_dmrs_symbol_mask.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/static_vector.h"
 #include "fmt/ostream.h"
 #include <gtest/gtest.h>

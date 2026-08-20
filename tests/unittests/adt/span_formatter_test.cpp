@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu/adt/complex.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/span.h"
 #include "ocudu/support/ocudu_test.h"
 #include <array>
@@ -12,7 +13,7 @@ static void test_int_comma()
 {
   std::array<int, 5> data = {0, 1, 2, 3, 4};
   fmt::memory_buffer buffer;
-  fmt::format_to(std::back_inserter(buffer), "{:,}", span<int>(data));
+  fmt::format_to(std::back_inserter(buffer), "{:n}", span<int>(data));
 
   std::string formatted_string = to_string(buffer);
   std::string expected_string  = "0, 1, 2, 3, 4";
@@ -27,7 +28,7 @@ static void test_u8_dec()
   fmt::format_to(std::back_inserter(buffer), "{}", span<uint8_t>(data));
 
   std::string formatted_string = to_string(buffer);
-  std::string expected_string  = "0 1 2 3 4";
+  std::string expected_string  = "[0, 1, 2, 3, 4]";
   TESTASSERT_EQ(formatted_string, expected_string);
   TESTASSERT_EQ(span<uint8_t>(data), span<uint8_t>(data));
 }
@@ -36,10 +37,10 @@ static void test_u8_hex()
 {
   std::array<uint8_t, 5> data = {0, 1, 2, 3, 4};
   fmt::memory_buffer     buffer;
-  fmt::format_to(std::back_inserter(buffer), "[{:0>2x}]", span<uint8_t>(data));
+  fmt::format_to(std::back_inserter(buffer), "{::0>2x}", span<uint8_t>(data));
 
   std::string formatted_string = to_string(buffer);
-  std::string expected_string  = "[00 01 02 03 04]";
+  std::string expected_string  = "[00, 01, 02, 03, 04]";
   TESTASSERT_EQ(formatted_string, expected_string);
   TESTASSERT_EQ(span<uint8_t>(data), span<uint8_t>(data));
 }
@@ -53,8 +54,8 @@ static void test_cf_long()
   fmt::format_to(std::back_inserter(buffer), "{}", span<cf_t>(data));
 
   std::string formatted_string = to_string(buffer);
-  std::string expected_string =
-      "+0.000000+0.000000j +0.000000+1.000000j +0.000000+2.000000j +0.000000+3.000000j +0.000000+4.000000j";
+  std::string expected_string  = "[+0.000000+0.000000j, +0.000000+1.000000j, +0.000000+2.000000j, "
+                                 "+0.000000+3.000000j, +0.000000+4.000000j]";
   TESTASSERT_EQ(formatted_string, expected_string);
   TESTASSERT_EQ(span<cf_t>(data), span<cf_t>(data));
 }
@@ -65,10 +66,10 @@ static void test_cf_short()
 
   std::array<cf_t, 5> data = {0.0if, 1.0if, 2.0if, 3.0if, 4.0if};
   fmt::memory_buffer  buffer;
-  fmt::format_to(std::back_inserter(buffer), "{:+.1f}", span<cf_t>(data));
+  fmt::format_to(std::back_inserter(buffer), "{::+.1f}", span<cf_t>(data));
 
   std::string formatted_string = to_string(buffer);
-  std::string expected_string  = "+0.0+0.0j +0.0+1.0j +0.0+2.0j +0.0+3.0j +0.0+4.0j";
+  std::string expected_string  = "[+0.0+0.0j, +0.0+1.0j, +0.0+2.0j, +0.0+3.0j, +0.0+4.0j]";
   TESTASSERT_EQ(formatted_string, expected_string);
   TESTASSERT_EQ(span<cf_t>(data), span<cf_t>(data));
 }

@@ -45,11 +45,16 @@ void fill_common_pdu(pucch_info&               pucch_pdu,
 /// \param[in] uci_bits UCI bits to be sent in the PUCCH.
 /// \param[in] csi_cfg Optional CSI report configuration if CSI bits are present in the UCI.
 /// \param[in] rnti RNTI of the UE.
+/// \param[in] rep_state PUCCH repetition state for this slot. Defaults to \c no_multi_slot.
+/// \param[in] rep_anchor_slot Slot of the first transmission of the repetition burst this PUCCH belongs to. Only used
+/// if \c rep_state is not \c no_multi_slot.
 void fill_ded_pdu(pucch_info&                     pucch_pdu,
                   const cell_configuration&       cell_cfg,
                   const pucch_resource&           pucch_res,
                   const pucch_uci_bits&           uci_bits,
                   const csi_report_configuration* csi_cfg,
-                  rnti_t                          rnti);
+                  rnti_t                          rnti,
+                  pucch_repetition_tx_slot        rep_state       = pucch_repetition_tx_slot::no_multi_slot,
+                  slot_point                      rep_anchor_slot = {});
 
 } // namespace ocudu::pucch_helper

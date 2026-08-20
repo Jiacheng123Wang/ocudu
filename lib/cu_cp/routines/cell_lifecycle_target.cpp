@@ -6,6 +6,7 @@
 #include "../du_processor/du_processor.h"
 #include "../du_processor/du_processor_repository.h"
 #include "../ue_manager/ue_manager_impl.h"
+#include "ocudu/adt/format.h"
 #include <algorithm>
 #include <set>
 

@@ -5,6 +5,7 @@
 
 #include "ocudu/support/ocudu_assert.h"
 #include "fmt/format.h"
+#include <string>
 
 namespace ocudu {
 

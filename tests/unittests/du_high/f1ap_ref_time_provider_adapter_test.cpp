@@ -4,6 +4,7 @@
 
 #include "lib/du/du_high/adapters/f1ap_adapters.h"
 #include "lib/du/du_high/du_manager/converters/asn1_ref_time_r16_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/sys_info.h"
 #include <gtest/gtest.h>
 

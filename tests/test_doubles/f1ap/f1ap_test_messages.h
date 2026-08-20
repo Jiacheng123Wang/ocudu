@@ -26,6 +26,7 @@
 
 namespace ocudu {
 struct f1ap_cell_failed_to_activate;
+struct f1ap_cell_to_bar;
 struct nr_cell_global_id_t;
 
 struct f1ap_message;
@@ -80,7 +81,8 @@ f1ap_message generate_gnb_du_configuration_update_failure(const f1ap_message& gn
 /// TS 38.473, 8.2.5.1.
 f1ap_message generate_gnb_cu_configuration_update_request(unsigned                        transaction_id,
                                                           span<const nr_cell_global_id_t> cgis_to_activate,
-                                                          span<const nr_cell_global_id_t> cgis_to_deactivate = {});
+                                                          span<const nr_cell_global_id_t> cgis_to_deactivate = {},
+                                                          span<const f1ap_cell_to_bar>    cells_to_bar       = {});
 
 /// \brief Generate a dummy GNB-CU CONFIGURATION ACKNOWLEDGEMENT message, sent by the DU to the CU, as per
 /// TS 38.473, 8.2.5.2.

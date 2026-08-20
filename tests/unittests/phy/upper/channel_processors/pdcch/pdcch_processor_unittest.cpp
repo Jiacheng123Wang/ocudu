@@ -6,6 +6,7 @@
 #include "pdcch_encoder_test_doubles.h"
 #include "pdcch_modulator_test_doubles.h"
 #include "resource_grid_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/support/precoding_formatters.h"
 #include "ocudu/phy/support/resource_grid_mapper.h"
 #include "ocudu/phy/upper/channel_processors/pdcch/pdcch_processor.h"

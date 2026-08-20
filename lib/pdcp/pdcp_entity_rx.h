@@ -20,7 +20,7 @@
 #include "ocudu/security/security_engine.h"
 #include "ocudu/support/sdu_window.h"
 #include "ocudu/support/timers.h"
-#include "fmt/format.h"
+#include "fmt/base.h"
 
 namespace ocudu {
 

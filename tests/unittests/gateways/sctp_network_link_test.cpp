@@ -6,6 +6,7 @@
 #include "ocudu/gateways/sctp_network_server_factory.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/executors/inline_task_executor.h"
+#include "ocudu/support/executors/task_worker.h"
 #include "ocudu/support/io/io_broker_factory.h"
 #include <condition_variable>
 #include <gtest/gtest.h>

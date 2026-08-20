@@ -5,8 +5,8 @@
 #pragma once
 
 #include "du_ue_resource_config.h"
-#include "ue_capability_summary.h"
 #include "ocudu/f1ap/du/f1ap_du_ue_context_update.h"
+#include "ocudu/scheduler/rrm/ue_capability_summary.h"
 
 namespace ocudu {
 namespace odu {
@@ -120,12 +120,13 @@ public:
   virtual expected<ue_ran_resource_configurator, std::string>
   create_ue_resource_configurator(du_ue_index_t ue_index, du_cell_index_t pcell_index, bool has_tc_rnti) = 0;
 
-  /// \brief Returns the upper-bound on the number of UEs that the given cell can support without RRC Rejecting them,
+  /// \brief Returns the upper-bound on the number of UEs that the given cell can support with dedicated resources,
   /// based on the available SR, CSI and SRS resources.
   /// \note The actual number of supported UEs might be lower than this.
-  /// \note There might be more UE contexts in a given cell than the value returned by this function. The extra UE
-  /// contexts correspond to UEs for which a RRC Reject needs to be sent.
-  virtual unsigned get_max_nof_setup_ues(du_cell_index_t cell_index) const = 0;
+  virtual unsigned get_max_nof_established_ue_contexts(du_cell_index_t cell_index) const = 0;
+
+  /// Returns the number of extra UE contexts that the given cell can hold for UEs pending an RRC Reject.
+  virtual unsigned get_max_nof_rejected_ue_contexts(du_cell_index_t cell_index) const = 0;
 };
 
 } // namespace odu

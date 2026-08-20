@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ocudu/du/du_cell_config_validation.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/sys_info.h"
 #include "ocudu/du/du_update_config_helpers.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -792,6 +793,26 @@ static check_outcome check_srs_config(const du_cell_config& cell_cfg)
   return {};
 }
 
+/// Validates the mapping of SIBs to SI messages.
+static check_outcome check_si_sched_config(const du_cell_config& cell_cfg)
+{
+  if (not cell_cfg.si.si_config.has_value()) {
+    return {};
+  }
+
+  for (const si_message_sched_info& si_msg : cell_cfg.si.si_config->si_sched_info) {
+    // A PWS SI-message is only broadcast while a warning is active, and si-BroadcastStatus applies to the whole SI
+    // message. Appending a non-PWS SIB to it would take that SIB off the air while no warning is on-going.
+    const bool has_pws     = std::any_of(si_msg.sib_mapping_info.begin(), si_msg.sib_mapping_info.end(), is_pws_sib);
+    const bool has_non_pws = std::any_of(si_msg.sib_mapping_info.begin(),
+                                         si_msg.sib_mapping_info.end(),
+                                         [](sib_type sib) { return not is_pws_sib(sib); });
+    CHECK_TRUE(not(has_pws and has_non_pws), "SIB6/7/8 cannot share an SI message with other SIBs");
+  }
+
+  return {};
+}
+
 /// Validates NTN cell configuration parameters.
 static check_outcome check_ntn_config(const du_cell_config& cell_cfg)
 {
@@ -855,6 +876,7 @@ check_outcome odu::is_du_cell_config_valid(const du_cell_config& cell_cfg)
       config_validators::validate_csi_meas_cfg(ue_serv_cell_cfg, cell_cfg.ran.tdd_cfg, cell_cfg.ran.ul_cfg_common));
   HANDLE_ERROR(check_dl_config_dedicated(cell_cfg));
   HANDLE_ERROR(check_ul_config_dedicated(cell_cfg));
+  HANDLE_ERROR(check_si_sched_config(cell_cfg));
   HANDLE_ERROR(check_ntn_config(cell_cfg));
   // TODO: Remaining.
   return {};

@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "resource_grid_reader_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/conversion.h"
 #include "ocudu/ocuduvec/copy.h"
 

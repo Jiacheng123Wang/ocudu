@@ -14,6 +14,8 @@
 #include "../support/pdsch/pdsch_default_time_allocation.h"
 #include "../support/pdsch/pdsch_resource_allocation.h"
 #include "../support/sch_pdu_builder.h"
+#include "../uci_scheduling/uci_allocator.h"
+#include "../ue_context/ue_cell_repository.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/ran/band_helper.h"
 #include "ocudu/ran/pdcch/dci_format.h"
@@ -153,13 +155,16 @@ private:
 ra_scheduler::ra_scheduler(const cell_configuration& cellcfg_,
                            pdcch_resource_allocator& pdcch_sch_,
                            pucch_allocator&          pucch_alloc_,
+                           uci_allocator&            uci_alloc_,
                            ra_ue_repository&         ra_ue_repo_,
+                           ue_cell_repository&       ue_cell_db_,
                            scheduler_event_logger&   ev_logger_,
                            cell_metrics_handler&     metrics_hdlr_) :
   sched_cfg(cellcfg_.expert_cfg.ra),
   cell_cfg(cellcfg_),
   pdcch_sch(pdcch_sch_),
   pucch_alloc(pucch_alloc_),
+  uci_alloc(uci_alloc_),
   ev_logger(ev_logger_),
   metrics_hdlr(metrics_hdlr_),
   ra_win_nof_slots(cell_cfg.params.ul_cfg_common.init_ul_bwp.rach_cfg_common->rach_cfg_generic.ra_resp_window),
@@ -181,6 +186,7 @@ ra_scheduler::ra_scheduler(const cell_configuration& cellcfg_,
   pending_rachs(RACH_IND_QUEUE_SIZE),
   pending_crcs(CRC_IND_QUEUE_SIZE),
   ra_ue_repo(ra_ue_repo_),
+  ue_cell_db(ue_cell_db_),
   pending_cfra_ues(
       ra_helper::get_msg1_cfra_preambles_per_ssb(*cell_cfg.params.ul_cfg_common.init_ul_bwp.rach_cfg_common) > 0
           ? MAX_NOF_DU_UES
@@ -653,7 +659,7 @@ void ra_scheduler::handle_msga_occasion(const rach_indication_message::occasion&
     pusch.new_data                = true;
     pusch.harq_id                 = to_harq_id(0);
     pusch.tb_size_bytes           = tbs;
-    pusch.num_cb                  = 0;
+    pusch.nof_cb                  = 0;
     pusch.transform_precoding     = cell_cfg.use_msg3_transform_precoder();
     pusch.intra_slot_freq_hopping = false;
     pusch.tx_direct_current_location =
@@ -709,15 +715,62 @@ bool ra_scheduler::can_allocate_rar_ul_grant(rnti_t crnti, const cell_slot_resou
   if (msg3_it == ra_ue_repo.end()) {
     return false;
   }
+  // A UE cannot be granted two PUSCHs in the same slot, so a new Msg3 must land after the last one allocated.
+  const slot_point last_pusch_slot = msg3_it->harq_ent.last_pusch_slot();
+  if (last_pusch_slot.valid() and slot_alloc.slot <= last_pusch_slot) {
+    return false;
+  }
+
   const rach_config_common& rach_cfg = *cell_cfg.params.ul_cfg_common.init_ul_bwp.rach_cfg_common;
   if (not ra_helper::is_msg1_cf_preamble(rach_cfg, msg3_it->preamble.preamble_id)) {
     // If it is a CBRA, RAR UL grant can be allocated.
     return true;
   }
-  // If it is a CFRA UE that already has a PUCCH in this slot, the UE would multiplex its UCI onto the Msg3 PUSCH;
-  // since the RA scheduler builds a UCI-free Msg3 grant, avoid such slots.
+  if (find_uci_on_msg3_ue_cfg(crnti) != nullptr) {
+    // The UE's UCI will be moved from the PUCCH onto the Msg3 PUSCH, so a PUCCH in this slot is not an obstacle.
+    return true;
+  }
+
+  // Multiplexing of UCI into RAR UL grant has been disabled or the beta offset config could not be fetched.
+  // Check if there aren't any other PUCCHs falling in the same slot as the RAR UL grant.
   span<const pucch_info> pucchs = slot_alloc.result.ul.pucchs.unsorted();
   return std::none_of(pucchs.begin(), pucchs.end(), [crnti](const pucch_info& pucch) { return pucch.crnti == crnti; });
+}
+
+const ue_cell_configuration* ra_scheduler::find_uci_on_msg3_ue_cfg(rnti_t crnti) const
+{
+  if (not sched_cfg.multiplex_uci_on_cf_rar_ul_grant) {
+    return nullptr;
+  }
+  // For CFRA the RA scheduler is given the UE's real C-RNTI, so the UE cell lookup is keyed by it.
+  const ue_cell* ue_cc = ue_cell_db.find_by_rnti(crnti);
+  if (ue_cc == nullptr) {
+    return nullptr;
+  }
+  // Semi-static beta offsets are required to size the UCI on the PUSCH, and only come with the dedicated config.
+  const ue_cell_configuration& ue_cfg = ue_cc->cfg();
+  const auto*                  ul_ded = ue_cfg.init_bwp().ul.ded();
+  if (ul_ded == nullptr or not ul_ded->pusch_cfg.has_value() or not ul_ded->pusch_cfg->uci_cfg.has_value()) {
+    return nullptr;
+  }
+  const auto& beta_offsets_cfg = ul_ded->pusch_cfg->uci_cfg->beta_offsets_cfg;
+  if (not beta_offsets_cfg.has_value() or
+      not std::holds_alternative<uci_on_pusch::beta_offsets_semi_static>(beta_offsets_cfg.value())) {
+    return nullptr;
+  }
+  return &ue_cfg;
+}
+
+void ra_scheduler::try_multiplex_uci_on_msg3(ul_sched_info&                msg3,
+                                             cell_slot_resource_allocator& msg3_alloc,
+                                             rnti_t                        crnti) const
+{
+  const ue_cell_configuration* ue_cfg = find_uci_on_msg3_ue_cfg(crnti);
+  if (ue_cfg == nullptr) {
+    return;
+  }
+  static constexpr bool include_aperiodic_csi = false;
+  uci_alloc.multiplex_uci_on_pusch(msg3, msg3_alloc, *ue_cfg, include_aperiodic_csi);
 }
 
 bool ra_scheduler::handle_msga_crc(rnti_t ra_rnti, uint8_t rapid, bool success)
@@ -1364,6 +1417,8 @@ void ra_scheduler::fill_rar_grant(cell_resource_allocator&         res_alloc,
     pusch.pusch_cfg.rv_index = 0;
     pusch.pusch_cfg.new_data = true;
 
+    try_multiplex_uci_on_msg3(pusch, msg3_alloc, pending_msg3.preamble.tc_rnti);
+
     // Store parameters used in HARQ.
     h_ul->save_grant_params(ul_harq_alloc_context{dci_ul_rnti_config_type::tc_rnti_f0_0}, pusch.pusch_cfg);
   }
@@ -1449,8 +1504,6 @@ void ra_scheduler::schedule_msg3_retx(cell_resource_allocator& res_alloc, ra_ue_
       continue;
     }
 
-    // For a CFRA UE, avoid slots where it already has a PUCCH: it would multiplex its UCI onto the RAR UL grant,
-    // which the RA scheduler builds without UCI.
     if (not can_allocate_rar_ul_grant(msg3_ctx.preamble.tc_rnti, pusch_alloc)) {
       continue;
     }
@@ -1527,6 +1580,8 @@ void ra_scheduler::schedule_msg3_retx(cell_resource_allocator& res_alloc, ra_ue_
     ul_info.pusch_cfg.rbs      = msg3_vrbs;
     ul_info.pusch_cfg.rv_index = pdcch->dci.as_tc_rnti_f0_0().redundancy_version;
     ul_info.pusch_cfg.new_data = false;
+
+    try_multiplex_uci_on_msg3(ul_info, pusch_alloc, msg3_ctx.preamble.tc_rnti);
 
     // Store parameters used in HARQ.
     h_ul.save_grant_params(ul_harq_alloc_context{dci_ul_rnti_config_type::tc_rnti_f0_0}, ul_info.pusch_cfg);
@@ -1805,7 +1860,16 @@ void ra_scheduler::schedule_pending_msgbs(cell_resource_allocator& res_alloc, sl
     const auto msgb_prbs_tbs = get_nof_msgb_pdsch_prbs_required(pdsch_time_res_index, nof_fallback, nof_success);
     msgb_crbs.resize(msgb_prbs_tbs.nof_prbs);
 
-    build_dci_f1_0_ra_rnti(pdcch->dci, init_dl_bwp, msgb_crbs, pdsch_time_res_index, sched_cfg.rar_mcs_index);
+    const unsigned msgb_resp_window_ms =
+        cell_cfg.init_bwp.ul.rach_common()->two_step_rach_cfg->msgB_response_window_slots >>
+        to_numerology_value(dl_scs);
+    build_dci_f1_0_msgb_rnti(pdcch->dci,
+                             init_dl_bwp,
+                             msgb_crbs,
+                             pdsch_time_res_index,
+                             sched_cfg.rar_mcs_index,
+                             msgb_resp_window_ms,
+                             msgb.prach_slot_rx.sfn());
     pdsch_alloc.dl_res_grid.fill(grant_info{dl_scs, pdsch_td_list[pdsch_time_res_index].symbols, msgb_crbs});
 
     rar_information& msgb_rar = pdsch_alloc.result.dl.rar_grants.emplace_back();

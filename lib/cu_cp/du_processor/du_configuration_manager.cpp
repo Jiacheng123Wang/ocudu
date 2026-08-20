@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "du_configuration_manager.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ran/band_helper.h"
 #include "ocudu/ran/plmn_identity.h"
@@ -98,12 +99,13 @@ static du_cell_configuration create_du_cell_config(du_cell_index_t              
   cell.cell_index = cell_idx;
   cell.cgi        = cell_req.nr_cgi;
   if (cell_req.five_gs_tac.has_value()) {
-    // TODO: How to handle missing TAC?
     cell.tac = cell_req.five_gs_tac.value();
   }
   cell.pci               = cell_req.nr_pci;
   cell.served_plmns      = cell_req.served_plmns;
   cell.deactivated_plmns = {};
+  cell.nr_mode_info      = cell_req.nr_mode_info;
+  cell.meas_timing_cfg   = cell_req.meas_timing_cfg.copy();
   // Add band information.
   if (std::holds_alternative<cu_cp_fdd_info>(cell_req.nr_mode_info)) {
     for (const auto& band : std::get<cu_cp_fdd_info>(cell_req.nr_mode_info).dl_nr_freq_info.freq_band_list_nr) {

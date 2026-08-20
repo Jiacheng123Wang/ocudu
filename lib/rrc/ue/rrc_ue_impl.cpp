@@ -4,6 +4,7 @@
 
 #include "rrc_ue_impl.h"
 #include "rrc_asn1_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/rrc_nr.h"
 #include "ocudu/support/ocudu_assert.h"
 
@@ -23,9 +24,10 @@ rrc_ue_impl::rrc_ue_impl(rrc_pdu_f1ap_notifier&                 f1ap_pdu_notifie
                          const rrc_cell_context&                cell_,
                          const rrc_ue_cfg_t&                    cfg_,
                          const byte_buffer&                     du_to_cu_container_,
-                         std::optional<rrc_ue_transfer_context> rrc_context) :
+                         std::optional<rrc_ue_transfer_context> rrc_context,
+                         std::optional<rrc_resume_context_t>    remote_resume_context) :
   logger("RRC", {ue_index_, c_rnti_}),
-  context(ue_index_, c_rnti_, cell_, cfg_, rrc_context, pdcp_manager_, logger),
+  context(ue_index_, c_rnti_, cell_, cfg_, rrc_context, remote_resume_context, pdcp_manager_, logger),
   f1ap_pdu_notifier(f1ap_pdu_notifier_),
   ngap_notifier(ngap_notifier_),
   cu_cp_notifier(cu_cp_notifier_),

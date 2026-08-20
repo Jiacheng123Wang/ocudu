@@ -4,6 +4,7 @@
 #include "ocudu/hal/dpdk/dpdk_eal_factory.h"
 #include "dpdk.h"
 #include <sstream>
+#include <vector>
 
 using namespace ocudu;
 using namespace dpdk;

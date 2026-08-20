@@ -4,6 +4,7 @@
 
 #include "../test_utils/config_generators.h"
 #include "lib/scheduler/srs/srs_scheduler_impl.h"
+#include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/test_doubles/utils/test_rng.h"
@@ -136,11 +137,12 @@ public:
     expert_cfg{config_helpers::make_default_scheduler_expert_config()},
     cfg_mng{cell_config_builder_profiles::create(params.is_tdd ? duplex_mode::TDD : duplex_mode::FDD), expert_cfg},
     cell_cfg(*cfg_mng.add_cell(cfg_mng.get_default_cell_config_request())),
+    cell_ues(cell_cfg, nullptr),
     ues(expert_cfg.ue),
-    cell_ues(ues.add_cell(cell_cfg, nullptr)),
     srs_sched(cell_cfg, ues),
     current_sl_tx{to_numerology_value(cell_cfg.params.dl_cfg_common.init_dl_bwp.generic_params.scs), 0}
   {
+    ues.register_cell(cell_ues);
     slot_indication(current_sl_tx);
     mac_logger.set_level(ocudulog::basic_levels::debug);
 
@@ -151,8 +153,8 @@ public:
   scheduler_expert_config                 expert_cfg;
   test_helpers::test_sched_config_manager cfg_mng;
   const cell_configuration&               cell_cfg;
+  ue_cell_repository                      cell_ues;
   ue_repository                           ues;
-  ue_cell_repository&                     cell_ues;
   std::vector<const ue_configuration*>    ue_ded_cfgs;
   cell_resource_allocator                 res_grid{cell_cfg};
   srs_scheduler_impl                      srs_sched;

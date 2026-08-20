@@ -29,10 +29,6 @@ _pip_ver() {
     echo "$name"
 }
 
-_ubuntu_apt_cleanup() {
-    apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
-}
-
 install_ubuntu_pkgs() {
     if ((${#@} == 0)); then
         return 0
@@ -46,22 +42,7 @@ install_ubuntu_pkgs() {
 
     apt-get update
     apt-get install -y --no-install-recommends "${versioned_pkgs[@]}"
-    _ubuntu_apt_cleanup
-}
-
-install_fedora_pkgs() {
-    if ((${#@} == 0)); then
-        return 0
-    fi
-
-    local -a versioned_pkgs=()
-    local pkg
-    for pkg in "$@"; do
-        versioned_pkgs+=("$(_pkg_ver "$pkg")")
-    done
-
-    dnf -y install "${versioned_pkgs[@]}"
-    dnf clean all
+    apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
 }
 
 install_arch_pkgs() {
@@ -89,6 +70,57 @@ install_rhel_pkgs() {
     for pkg in "$@"; do
         versioned_pkgs+=("$(_pkg_ver "$pkg")")
     done
+
+    dnf -y install "${versioned_pkgs[@]}"
+    dnf clean all
+}
+
+_enable_centos_repos() {
+    if ! rpm -q epel-release >/dev/null 2>&1; then
+        dnf install -y dnf-plugins-core epel-release
+        dnf config-manager --set-enabled crb >/dev/null 2>&1 || crb enable >/dev/null 2>&1 || true
+    fi
+}
+
+# Refresh installed RPMs so base-image CVEs are picked up when newer packages
+# are available in enabled repos. Callers must source /etc/os-release so ${ID}
+# is set.
+update_rpm_pkgs() {
+    dnf -y update
+}
+
+# Install packages via dnf on Fedora and CentOS Stream.
+# Optional leading --no-repos skips CentOS repo enablement (base repos only).
+install_rpm_pkgs() {
+    local enable_repos=1
+    if [[ "${1:-}" == "--no-repos" ]]; then
+        enable_repos=0
+        shift
+    fi
+
+    if ((${#@} == 0)); then
+        return 0
+    fi
+
+    local -a versioned_pkgs=()
+    local pkg
+    for pkg in "$@"; do
+        versioned_pkgs+=("$(_pkg_ver "$pkg")")
+    done
+
+    if ((enable_repos)); then
+        case "$ID" in
+            centos)
+                _enable_centos_repos
+                ;;
+            fedora)
+                ;;
+            *)
+                echo >&2 "OS $ID not supported by install_rpm_pkgs"
+                exit 1
+                ;;
+        esac
+    fi
 
     dnf -y install "${versioned_pkgs[@]}"
     dnf clean all

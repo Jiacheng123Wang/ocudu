@@ -119,8 +119,10 @@ class cell_metrics_handler final : public sched_metrics_ue_configurator
 
   /// Counters for scheduler cell metrics that get reset on every report.
   struct non_persistent_data {
-    // Counter for detected PRACH preambles
-    unsigned nof_prach_preambles = 0;
+    // Counter for detected PRACH preambles.
+    unsigned total_prach_preambles = 0;
+    // Counter for detected PRACH preambles for 2-step RACH (MsgA). Subset of total_prach_preambles.
+    unsigned two_step_prachs_detected = 0;
     // Counter of error indications.
     unsigned error_indication_counter = 0;
     // Tracks the sum of scheduler decision latencies.

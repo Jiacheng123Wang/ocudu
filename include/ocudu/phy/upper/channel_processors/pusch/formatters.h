@@ -226,21 +226,24 @@ struct formatter<ocudu::pusch_processor_result_control> {
       if (result.harq_ack.status == ocudu::uci_status::valid) {
         helper.format_always(ctx, "ack={:br}", result.harq_ack.payload);
       } else {
-        helper.format_always(ctx, "ack={:#}", ocudu::detail::uci_bad_payload(result.harq_ack.payload.size()).get());
+        helper.format_always(
+            ctx, "ack={}", fmt::join(ocudu::detail::uci_bad_payload(result.harq_ack.payload.size()).get(), ""));
       }
     }
     if ((!result.csi_part1.payload.empty())) {
       if (result.csi_part1.status == ocudu::uci_status::valid) {
         helper.format_always(ctx, "csi1={:br}", result.csi_part1.payload);
       } else {
-        helper.format_always(ctx, "csi1={:#}", ocudu::detail::uci_bad_payload(result.csi_part1.payload.size()).get());
+        helper.format_always(
+            ctx, "csi1={}", fmt::join(ocudu::detail::uci_bad_payload(result.csi_part1.payload.size()).get(), ""));
       }
     }
     if ((!result.csi_part2.payload.empty())) {
       if (result.csi_part2.status == ocudu::uci_status::valid) {
         helper.format_always(ctx, "csi2={:br}", result.csi_part2.payload);
       } else {
-        helper.format_always(ctx, "csi2={:#}", ocudu::detail::uci_bad_payload(result.csi_part2.payload.size()).get());
+        helper.format_always(
+            ctx, "csi2={}", fmt::join(ocudu::detail::uci_bad_payload(result.csi_part2.payload.size()).get(), ""));
       }
     }
     return ctx.out();

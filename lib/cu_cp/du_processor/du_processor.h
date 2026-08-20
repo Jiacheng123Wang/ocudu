@@ -122,6 +122,9 @@ public:
 
   /// \brief Notify that the F1 transaction information was lost for some UEs.
   virtual async_task<void> on_transaction_info_loss(const ue_transaction_info_loss_event& ev) = 0;
+
+  /// \brief Notify the CU-CP that the NR cells served by this DU changed.
+  virtual void on_served_cells_updated() = 0;
 };
 
 class du_processor_configuration_update_interface

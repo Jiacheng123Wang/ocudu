@@ -6,7 +6,6 @@
 
 #include "ocudu/ran/logical_channel/lcid.h"
 #include "ocudu/support/ocudu_assert.h"
-#include "fmt/format.h"
 
 namespace ocudu {
 
@@ -43,7 +42,13 @@ public:
     PADDING         = 0b111111
   };
 
-  lcid_ul_sch_t(underlying_type lcid_ = PADDING) : lcid_val(lcid_) { ocudu_assert(lcid_ <= PADDING, "Invalid LCID"); }
+  lcid_ul_sch_t() : lcid_val(PADDING) {}
+  explicit lcid_ul_sch_t(underlying_type lcid_) : lcid_val(lcid_) { ocudu_assert(lcid_ <= PADDING, "Invalid LCID"); }
+  lcid_ul_sch_t(lcid_t lcid_) : lcid_val(static_cast<underlying_type>(lcid_))
+  {
+    ocudu_assert(lcid_val <= PADDING, "Invalid LCID");
+  }
+  lcid_ul_sch_t(options lcid_) : lcid_val(lcid_) {}
   lcid_ul_sch_t& operator=(underlying_type lcid)
   {
     ocudu_assert(lcid <= PADDING, "Invalid LCID");
@@ -122,18 +127,9 @@ private:
   underlying_type lcid_val;
 };
 
+inline uint16_t format_as(lcid_ul_sch_t lcid)
+{
+  return static_cast<uint16_t>(lcid.value());
+}
+
 } // namespace ocudu
-
-namespace fmt {
-
-/// FMT formatter of slot_point type.
-template <>
-struct formatter<ocudu::lcid_ul_sch_t> : public formatter<uint32_t> {
-  template <typename FormatContext>
-  auto format(ocudu::lcid_ul_sch_t lcid, FormatContext& ctx) const
-  {
-    return format_to(ctx.out(), "{}", (uint16_t)lcid);
-  }
-};
-
-} // namespace fmt

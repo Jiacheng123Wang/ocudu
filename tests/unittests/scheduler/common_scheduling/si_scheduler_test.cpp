@@ -54,9 +54,10 @@ TEST(no_si_scheduler_test, when_no_si_is_provided_then_nothing_is_scheduled)
 }
 
 constexpr units::bytes     DEFAULT_SIB1_PAYLOAD_SIZE{128};
-const si_scheduling_config DEFAULT_SI_SCHED_CFG{DEFAULT_SIB1_PAYLOAD_SIZE,
-                                                {{si_message_scheduling_config{units::bytes{64}, 16}}},
-                                                10};
+const si_scheduling_config DEFAULT_SI_SCHED_CFG{
+    DEFAULT_SIB1_PAYLOAD_SIZE,
+    {{si_message_scheduling_config{sib_type_set{sib_type::sib2}, units::bytes{64}, 16}}},
+    10};
 
 class si_scheduler_test : public si_scheduler_test_environment, public testing::Test
 {
@@ -157,7 +158,7 @@ TEST_F(si_scheduler_test, when_si_is_updated_then_new_msg_len_is_applied_right_a
   si_scheduling_config new_si_sched_cfg = DEFAULT_SI_SCHED_CFG;
   new_si_sched_cfg.si_messages[0].msg_len += units::bytes{64U};
   // Immediate content (e.g. NTN SIB19): grant sizing is expected to update right after the request.
-  new_si_sched_cfg.si_messages[0].exempt_from_si_mod_window = true;
+  new_si_sched_cfg.si_messages[0].sibs = sib_type_set{sib_type::sib19};
 
   {
     bool           found_before = false;
@@ -223,7 +224,7 @@ TEST_F(si_scheduler_test, when_non_exempt_si_message_is_updated_then_new_msg_len
 {
   si_scheduling_config new_si_sched_cfg = DEFAULT_SI_SCHED_CFG;
   new_si_sched_cfg.si_messages[0].msg_len += units::bytes{64U};
-  ASSERT_FALSE(new_si_sched_cfg.si_messages[0].exempt_from_si_mod_window) << "This SI-message must be non-exempt";
+  ASSERT_FALSE(new_si_sched_cfg.si_messages[0].is_ntn()) << "This SI-message must be non-exempt";
 
   const unsigned si_ch_wind_len_rfs =
       static_cast<unsigned>(cell_cfg.params.dl_cfg_common.bcch_cfg.mod_period_coeff) *
@@ -335,9 +336,26 @@ TEST_F(si_scheduler_test, when_si_is_updated_all_ues_in_rrc_idle_get_notified_ex
   ASSERT_TRUE(notified_ue_ids.all());
 }
 
+/// \brief Puts an ETWS/CMAS SI epoch in effect and signals one broadcast of it.
+///
+/// What is broadcast, and for how long each broadcast lasts, is stated by the epoch. Every warning is stamped with the
+/// version of the epoch, so all of them start one more broadcast.
+static void broadcast_warning(si_scheduler&                                      si_sched,
+                              const si_scheduling_config&                        cfg,
+                              si_version_type                                    version,
+                              std::initializer_list<pws_broadcasting_si_message> broadcasting)
+{
+  pws_si_scheduling_update_request req{to_du_cell_index(0), version, cfg, {}};
+  for (pws_broadcasting_si_message entry : broadcasting) {
+    entry.version = version;
+    req.broadcasting.push_back(entry);
+  }
+  si_sched.handle_pws_si_update_request(req);
+}
+
 const si_scheduling_config ACTIVATION_REQUIRED_SI_SCHED_CFG{
     DEFAULT_SIB1_PAYLOAD_SIZE,
-    {{si_message_scheduling_config{units::bytes{64}, 16, std::nullopt, true}}},
+    {{si_message_scheduling_config{sib_type_set{sib_type::sib7}, units::bytes{64}, 16}}},
     10};
 
 class si_msg_scheduler_activation_test : public si_scheduler_test_environment, public testing::Test
@@ -356,8 +374,10 @@ TEST_F(si_msg_scheduler_activation_test,
   // only in their own paging occasion, once per DRX cycle. Since the network does not know a UE's UE_ID (hence its
   // exact paging occasion), the notification must be repeated across a full default paging cycle -- not sent once.
   const paging_slot_helper slot_helper(cell_cfg);
-  si_sched.handle_pws_broadcast_indication(
-      pws_broadcast_request{to_du_cell_index(0), 0, 1, ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].msg_len});
+  broadcast_warning(si_sched,
+                    ACTIVATION_REQUIRED_SI_SCHED_CFG,
+                    1,
+                    {{sib_type_set{sib_type::sib7}, 1, ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].msg_len}});
 
   const unsigned drx_cycle_rfs  = static_cast<unsigned>(cell_cfg.params.dl_cfg_common.pcch_cfg.default_paging_cycle);
   const unsigned nof_test_slots = 2 * drx_cycle_rfs * next_slot.nof_slots_per_frame();
@@ -417,8 +437,8 @@ TEST_F(si_msg_scheduler_activation_test, when_new_pws_broadcast_indication_recei
   const unsigned     default_paging_cycle_rfs =
       static_cast<unsigned>(cell_cfg.params.dl_cfg_common.pcch_cfg.default_paging_cycle);
 
-  si_sched.handle_pws_broadcast_indication(pws_broadcast_request{to_du_cell_index(0), 0, 10, msg_len});
-  si_sched.handle_pws_broadcast_indication(pws_broadcast_request{to_du_cell_index(0), 0, 1, msg_len});
+  broadcast_warning(si_sched, ACTIVATION_REQUIRED_SI_SCHED_CFG, 1, {{sib_type_set{sib_type::sib7}, 10, msg_len}});
+  broadcast_warning(si_sched, ACTIVATION_REQUIRED_SI_SCHED_CFG, 2, {{sib_type_set{sib_type::sib7}, 1, msg_len}});
 
   // Run long enough to cover even the FIRST (superseded) request's full active window (default paging cycle plus
   // one full segment cycle), so that if it had incorrectly taken effect instead of the second, its much larger
@@ -470,8 +490,11 @@ TEST_F(si_msg_scheduler_activation_test,
       static_cast<unsigned>(cell_cfg.params.dl_cfg_common.pcch_cfg.default_paging_cycle);
   const unsigned active_duration_rfs = default_paging_cycle_rfs + nof_segments * period_radio_frames;
 
-  si_sched.handle_pws_broadcast_indication(pws_broadcast_request{
-      to_du_cell_index(0), 0, nof_segments, ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].msg_len});
+  broadcast_warning(
+      si_sched,
+      ACTIVATION_REQUIRED_SI_SCHED_CFG,
+      1,
+      {{sib_type_set{sib_type::sib7}, nof_segments, ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].msg_len}});
 
   // Run long enough to observe the full active window plus a margin, so we can confirm the message eventually
   // goes back to dormant instead of just capturing however many transmissions fit in an arbitrarily-sized window.
@@ -493,6 +516,47 @@ TEST_F(si_msg_scheduler_activation_test,
   ASSERT_LE(nof_tx, expected_max_nof_tx);
 }
 
+TEST_F(si_msg_scheduler_activation_test, when_si_change_takes_effect_then_ongoing_pws_broadcast_is_not_stopped)
+{
+  // Regression test: a warning is exempt from the SI change modification window and must keep being broadcast for
+  // the duration it was activated for. An unrelated SI change (e.g. an SSB power update) reaching its modification
+  // window used to reset every SI-message context, silently aborting the warning mid-flight.
+  const units::bytes activated_msg_len = ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].msg_len + units::bytes{64U};
+  // Activated indefinitely, so that anything that stops it can only be the SI change itself, rather than the
+  // activation's own deadline elapsing before the modification window is reached.
+  broadcast_warning(
+      si_sched, ACTIVATION_REQUIRED_SI_SCHED_CFG, 1, {{sib_type_set{sib_type::sib7}, std::nullopt, activated_msg_len}});
+
+  // An unrelated SI change is pushed and left to reach its modification window.
+  si_scheduling_config new_si_sched_cfg = ACTIVATION_REQUIRED_SI_SCHED_CFG;
+  new_si_sched_cfg.sib1_payload_size += units::bytes{8U};
+  si_sched.handle_si_update_request(si_scheduling_update_request{to_du_cell_index(0), 1, new_si_sched_cfg});
+
+  const unsigned si_ch_wind_len_rfs =
+      static_cast<unsigned>(cell_cfg.params.dl_cfg_common.bcch_cfg.mod_period_coeff) *
+      static_cast<unsigned>(cell_cfg.params.dl_cfg_common.pcch_cfg.default_paging_cycle);
+  const unsigned nof_test_slots = 3 * si_ch_wind_len_rfs * next_slot.nof_slots_per_frame();
+
+  unsigned nof_tx_after_si_change = 0;
+  bool     si_change_applied      = false;
+  for (unsigned i = 0; i != nof_test_slots; ++i) {
+    run_slot();
+    for (const auto& sib : res_grid[0].result.dl.bc.sibs) {
+      if (sib.si_indicator == sib_information::sib1 and sib.version == 1) {
+        si_change_applied = true;
+      }
+      if (si_change_applied and sib.si_indicator == sib_information::other_si) {
+        ++nof_tx_after_si_change;
+        // The activation-time content length must survive the SI change too.
+        ASSERT_GE(sib.pdsch_cfg.codewords[0].tb_size_bytes, activated_msg_len);
+      }
+    }
+  }
+
+  ASSERT_TRUE(si_change_applied) << "The SI change never reached its modification window";
+  ASSERT_GT(nof_tx_after_si_change, 0U) << "The on-going PWS broadcast was stopped by an unrelated SI change";
+}
+
 TEST_F(si_msg_scheduler_activation_test, when_activation_msg_len_exceeds_static_config_then_pdsch_grant_is_sized_for_it)
 {
   // Regression test: real PWS content is only known at activation time and can be much larger than whatever
@@ -500,7 +564,8 @@ TEST_F(si_msg_scheduler_activation_test, when_activation_msg_len_exceeds_static_
   // size the PDSCH grant off the activation-time msg_len, not the static si_message_scheduling_config::msg_len.
   const units::bytes static_msg_len    = ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].msg_len;
   const units::bytes activated_msg_len = static_msg_len + units::bytes{64U};
-  si_sched.handle_pws_broadcast_indication(pws_broadcast_request{to_du_cell_index(0), 0, 1, activated_msg_len});
+  broadcast_warning(
+      si_sched, ACTIVATION_REQUIRED_SI_SCHED_CFG, 1, {{sib_type_set{sib_type::sib7}, 1, activated_msg_len}});
 
   const unsigned nof_test_slots =
       2 * ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].period_radio_frames * next_slot.nof_slots_per_frame();
@@ -522,8 +587,8 @@ TEST_F(si_msg_scheduler_activation_test, when_activation_msg_len_exceeds_static_
 // SI-message 0's occasion parity.
 const si_scheduling_config MULTI_ACTIVATION_REQUIRED_SI_SCHED_CFG{
     DEFAULT_SIB1_PAYLOAD_SIZE,
-    {si_message_scheduling_config{units::bytes{64}, 16, std::nullopt, true},
-     si_message_scheduling_config{units::bytes{64}, 16, 3, true}},
+    {si_message_scheduling_config{sib_type_set{sib_type::sib7}, units::bytes{64}, 16},
+     si_message_scheduling_config{sib_type_set{sib_type::sib8}, units::bytes{64}, 16, 3}},
     10};
 
 class si_msg_scheduler_multi_activation_test : public si_scheduler_test_environment, public testing::Test
@@ -547,8 +612,11 @@ TEST_F(si_msg_scheduler_multi_activation_test,
       static_cast<unsigned>(cell_cfg.params.dl_cfg_common.pcch_cfg.default_paging_cycle);
   const unsigned active_duration_rfs = default_paging_cycle_rfs + nof_segments * period_radio_frames;
 
-  si_sched.handle_pws_broadcast_indication(pws_broadcast_request{to_du_cell_index(0), 0, nof_segments, msg_len});
-  si_sched.handle_pws_broadcast_indication(pws_broadcast_request{to_du_cell_index(0), 1, nof_segments, msg_len});
+  broadcast_warning(
+      si_sched,
+      MULTI_ACTIVATION_REQUIRED_SI_SCHED_CFG,
+      1,
+      {{sib_type_set{sib_type::sib7}, nof_segments, msg_len}, {sib_type_set{sib_type::sib8}, nof_segments, msg_len}});
 
   // Run long enough to observe the full active window (default paging cycle plus one segment cycle) for both
   // SI-messages, not just however many transmissions fit in an arbitrarily-sized window.
@@ -610,3 +678,142 @@ TEST_F(si_msg_scheduler_tdra_test, when_custom_pdsch_td_alloc_list_configured_th
 }
 
 } // namespace
+
+TEST_F(si_msg_scheduler_activation_test, when_pws_epoch_is_applied_then_grants_use_it_until_the_warning_ends)
+{
+  // The ETWS/CMAS epoch is stamped on the grants for as long as a warning is on air, so that the SIB PDU assembler
+  // serves the SIB1 that lists it as broadcasting. Once the warning ends, the grants go back to the normal operation
+  // epoch on their own, without the MAC having to push anything.
+  const unsigned     nof_segments        = 2;
+  const unsigned     period_radio_frames = ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].period_radio_frames;
+  const units::bytes msg_len             = ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].msg_len;
+
+  const si_version_type baseline_version = 0;
+  const si_version_type pws_version      = 1;
+
+  broadcast_warning(
+      si_sched, ACTIVATION_REQUIRED_SI_SCHED_CFG, pws_version, {{sib_type_set{sib_type::sib7}, nof_segments, msg_len}});
+
+  const unsigned default_paging_cycle_rfs =
+      static_cast<unsigned>(cell_cfg.params.dl_cfg_common.pcch_cfg.default_paging_cycle);
+  const unsigned active_duration_rfs = default_paging_cycle_rfs + nof_segments * period_radio_frames;
+  const unsigned nof_test_slots      = 2 * active_duration_rfs * next_slot.nof_slots_per_frame();
+
+  unsigned nof_etws_grants     = 0;
+  unsigned nof_baseline_grants = 0;
+  bool     reverted            = false;
+  for (unsigned i = 0; i != nof_test_slots; ++i) {
+    run_slot();
+    for (const auto& sib : res_grid[0].result.dl.bc.sibs) {
+      if (sib.version == pws_version) {
+        ++nof_etws_grants;
+        ASSERT_FALSE(reverted) << "The ETWS/CMAS epoch came back after the warning had ended";
+      } else {
+        ASSERT_EQ(sib.version, baseline_version);
+        if (nof_etws_grants > 0) {
+          reverted = true;
+          ++nof_baseline_grants;
+        }
+      }
+    }
+  }
+
+  ASSERT_GT(nof_etws_grants, 0U) << "No grant was stamped with the ETWS/CMAS epoch";
+  ASSERT_TRUE(reverted) << "The grants never went back to the normal operation epoch";
+  ASSERT_GT(nof_baseline_grants, 0U);
+}
+
+/// Whether the slot carries the etwsAndCmasIndication short message, as per TS 38.331 Table 6.5-1.
+static bool has_pws_short_message(const dl_sched_result& result)
+{
+  return std::any_of(result.dl_pdcchs.begin(), result.dl_pdcchs.end(), [](const pdcch_dl_information& pdcch) {
+    if (pdcch.dci.type() != dci_dl_rnti_config_type::p_rnti_f1_0) {
+      return false;
+    }
+    const auto& dci = pdcch.dci.as_p_rnti_f1_0();
+    return dci.short_messages_indicator == dci_1_0_p_rnti_configuration::payload_info::short_messages and
+           (dci.short_messages & 0x40U) != 0;
+  });
+}
+
+TEST_F(si_msg_scheduler_activation_test, when_two_epochs_coalesce_then_the_warning_is_still_notified)
+{
+  // Regression test: an unrelated System Information change pushes a second epoch before the scheduler read the one
+  // that started the warning, so only the latter survives in the pending epoch slot. Since each warning carries the
+  // version that started its broadcast, the scheduler must still notify it, rather than wait for a trigger that is
+  // never pushed again.
+  const units::bytes    msg_len           = ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].msg_len;
+  const si_version_type warning_version   = 1;
+  const si_version_type si_change_version = 2;
+
+  broadcast_warning(
+      si_sched, ACTIVATION_REQUIRED_SI_SCHED_CFG, warning_version, {{sib_type_set{sib_type::sib7}, 1, msg_len}});
+
+  // The System Information change lists the warning it found on air, still stamped with the epoch that started it.
+  pws_si_scheduling_update_request si_change{
+      to_du_cell_index(0), si_change_version, ACTIVATION_REQUIRED_SI_SCHED_CFG, {}};
+  si_change.broadcasting.push_back(
+      pws_broadcasting_si_message{sib_type_set{sib_type::sib7}, 1, msg_len, warning_version});
+  si_sched.handle_pws_si_update_request(si_change);
+
+  const unsigned drx_cycle_rfs  = static_cast<unsigned>(cell_cfg.params.dl_cfg_common.pcch_cfg.default_paging_cycle);
+  const unsigned nof_test_slots = drx_cycle_rfs * next_slot.nof_slots_per_frame();
+
+  bool notified = false;
+  for (unsigned i = 0; i != nof_test_slots and not notified; ++i) {
+    run_slot();
+    notified = has_pws_short_message(res_grid[0].result.dl);
+  }
+
+  ASSERT_TRUE(notified) << "The warning was never notified after both epochs coalesced";
+}
+
+TEST_F(si_msg_scheduler_multi_activation_test, when_a_second_warning_starts_then_it_does_not_extend_the_first_one)
+{
+  // Each warning is timed from its own broadcast, so a warning starting late must not keep the ones already on air --
+  // hence the SIB1 that lists them as broadcasting -- in effect for its own duration counted from the newcomer.
+  const units::bytes msg_len      = MULTI_ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].msg_len;
+  const unsigned     period_rfs   = MULTI_ACTIVATION_REQUIRED_SI_SCHED_CFG.si_messages[0].period_radio_frames;
+  const unsigned paging_cycle_rfs = static_cast<unsigned>(cell_cfg.params.dl_cfg_common.pcch_cfg.default_paging_cycle);
+  const unsigned slots_per_frame  = next_slot.nof_slots_per_frame();
+
+  static constexpr unsigned long_nof_segments  = 4;
+  static constexpr unsigned short_nof_segments = 1;
+
+  // A long warning starts on the SIB7 SI message. Run until shortly before its broadcast completes.
+  broadcast_warning(si_sched,
+                    MULTI_ACTIVATION_REQUIRED_SI_SCHED_CFG,
+                    1,
+                    {{sib_type_set{sib_type::sib7}, long_nof_segments, msg_len}});
+  const unsigned first_duration_rfs = paging_cycle_rfs + long_nof_segments * period_rfs;
+  for (unsigned i = 0, e = (first_duration_rfs - period_rfs / 2) * slots_per_frame; i != e; ++i) {
+    run_slot();
+  }
+
+  // A short warning starts on the SIB8 SI message. Only it is stamped with the new epoch.
+  pws_si_scheduling_update_request req{to_du_cell_index(0), 2, MULTI_ACTIVATION_REQUIRED_SI_SCHED_CFG, {}};
+  req.broadcasting.push_back(pws_broadcasting_si_message{sib_type_set{sib_type::sib7}, long_nof_segments, msg_len, 1});
+  req.broadcasting.push_back(pws_broadcasting_si_message{sib_type_set{sib_type::sib8}, short_nof_segments, msg_len, 2});
+  si_sched.handle_pws_si_update_request(req);
+
+  // Run past both broadcasts and note when the grants went back to the epoch of the normal operation. The epoch is
+  // reverted once its last warning ends, which is the newcomer, so it stays in effect for the newcomer's own duration
+  // counted from here, plus however long it takes for the next SIB1 to be scheduled.
+  const unsigned        second_duration_rfs = paging_cycle_rfs + short_nof_segments * period_rfs;
+  const si_version_type baseline_version    = 0;
+
+  std::optional<unsigned> revert_rfs;
+  for (unsigned i = 0, e = 2 * (first_duration_rfs + second_duration_rfs) * slots_per_frame; i != e; ++i) {
+    run_slot();
+    for (const auto& sib : res_grid[0].result.dl.bc.sibs) {
+      if (sib.version == baseline_version and not revert_rfs.has_value()) {
+        revert_rfs = i / slots_per_frame;
+      }
+    }
+  }
+  ASSERT_TRUE(revert_rfs.has_value()) << "The ETWS/CMAS SI epoch was never reverted";
+
+  // Timing the first warning from the newcomer's broadcast, rather than from its own, would hold the epoch in effect
+  // for the whole duration of the first warning counted from here.
+  ASSERT_LT(revert_rfs.value(), first_duration_rfs) << "The first warning was kept on air by the second one starting";
+}

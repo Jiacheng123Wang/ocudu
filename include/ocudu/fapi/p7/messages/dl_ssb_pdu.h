@@ -5,6 +5,7 @@
 
 #include "ocudu/ran/pci.h"
 #include "ocudu/ran/ssb/ssb_configuration.h"
+#include <type_traits>
 #include <variant>
 
 namespace ocudu {
@@ -64,7 +65,9 @@ struct formatter<ocudu::fapi::dl_ssb_pdu> {
               pdu.L_max);
 
     if (const auto* profile_nr = std::get_if<ocudu::fapi::dl_ssb_pdu::power_profile_nr>(&pdu.power_config)) {
-      format_to(ctx.out(), " Power configuration profile NR: beta_pss={}", underlying(profile_nr->beta_pss));
+      format_to(ctx.out(),
+                " Power configuration profile NR: beta_pss={}",
+                static_cast<std::underlying_type_t<ocudu::ssb_pss_to_sss_epre>>(profile_nr->beta_pss));
     } else if (const auto* profile_sss = std::get_if<ocudu::fapi::dl_ssb_pdu::power_profile_sss>(&pdu.power_config)) {
       format_to(ctx.out(), " Power configuration profile SSS: beta_pss_db={}", profile_sss->beta_pss_db);
     }

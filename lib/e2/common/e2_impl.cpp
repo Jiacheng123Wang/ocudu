@@ -5,6 +5,7 @@
 #include "e2_impl.h"
 #include "procedures/e2ap_connection_update_procedure.h"
 #include "procedures/e2ap_removal_procedure.h"
+#include "procedures/e2ap_setup_procedure.h"
 #include "ocudu/asn1/e2ap/e2ap.h"
 #include "ocudu/e2/e2.h"
 #include <memory>
@@ -13,22 +14,16 @@ using namespace ocudu;
 using namespace asn1::e2ap;
 using namespace asn1;
 
-e2_impl::e2_impl(ocudulog::basic_logger&  logger_,
-                 e2ap_e2agent_notifier&   agent_notifier_,
-                 timer_factory            timers_,
-                 e2_connection_client&    e2_client_,
-                 e2_subscription_manager& subscription_mngr_,
-                 e2sm_manager&            e2sm_mngr_,
-                 task_executor&           task_exec_) :
-  logger(logger_),
-  timers(timers_),
-  ctrl_exec(task_exec_),
-  cancel_event(timers_),
-  subscription_proc(subscription_mngr_),
-  e2sm_mngr(e2sm_mngr_),
+e2_impl::e2_impl(const e2_impl_dependencies& dependencies) :
+  logger(dependencies.logger),
+  timers(dependencies.timers),
+  ctrl_exec(dependencies.task_exec),
+  cancel_event(dependencies.timers),
+  subscription_proc(dependencies.subscription_mngr),
+  e2sm_mngr(dependencies.e2sm_mngr),
   events(std::make_unique<e2_event_manager>(timers)),
   async_tasks(10),
-  connection_handler(e2_client_, *this, agent_notifier_, task_exec_)
+  connection_handler(dependencies.e2_client, *this, dependencies.agent_notifier, dependencies.task_exec)
 {
 }
 

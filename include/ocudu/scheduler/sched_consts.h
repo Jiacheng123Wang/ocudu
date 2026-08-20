@@ -10,8 +10,8 @@ namespace ocudu {
 
 /// SSB constants.
 /// FR1 = [ 410 MHz – 7125 MHz] (TS 38.101, Section 5.1) and ARFCN corresponding to 7.125GHz is 875000.
-const unsigned FR1_MAX_FREQUENCY_ARFCN = 875000;
-const unsigned NOF_SSB_OFDM_SYMBOLS    = 4;
+constexpr unsigned FR1_MAX_FREQUENCY_ARFCN = 875000;
+constexpr unsigned NOF_SSB_OFDM_SYMBOLS    = 4;
 
 /// SIB1 constants.
 /// SIB1 periodicity, see TS 38.331, Section 5.2.1.

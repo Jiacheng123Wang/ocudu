@@ -78,6 +78,7 @@ void sub_scheduler_test_environment::run_slot()
 
   // pucch allocator slot indication.
   pucch_alloc.slot_indication(next_slot.without_hyper_sfn());
+  uci_alloc.slot_indication(next_slot.without_hyper_sfn());
 
   // Run slot for the derived class.
   do_run_slot();

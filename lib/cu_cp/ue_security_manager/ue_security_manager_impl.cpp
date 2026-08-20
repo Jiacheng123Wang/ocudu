@@ -62,6 +62,31 @@ bool ue_security_manager::init_security_context(const security::security_context
   return true;
 }
 
+bool ue_security_manager::init_retrieved_security_context(const security::security_context&                  sec_ctxt,
+                                                          const std::optional<security::sec_selected_algos>& algos)
+{
+  sec_context = sec_ctxt;
+
+  // The UE keeps ciphering and integrity protecting with the algorithms it was given, so the ones the peer signalled
+  // are taken over. Without them, they are selected from the UE capabilities the peer reported.
+  if (algos.has_value()) {
+    sec_context.sel_algos = algos.value();
+  } else if (not sec_context.select_algorithms(cfg.int_algo_pref_list, cfg.enc_algo_pref_list)) {
+    logger.error("Could not select security algorithm for the retrieved security context");
+    return false;
+  }
+  logger.debug("Selected security algorithms integrity=NIA{} ciphering=NEA{}",
+               fmt::underlying(sec_context.sel_algos.integ_algo),
+               fmt::underlying(sec_context.sel_algos.cipher_algo));
+
+  // Derive the AS keys from the KgNB* the peer transferred.
+  sec_context.generate_as_keys();
+
+  sec_context.state = security::security_state::fully_enabled;
+
+  return true;
+}
+
 bool ue_security_manager::finalize_security_context()
 {
   if (sec_context.state != security::security_state::partially_enabled) {

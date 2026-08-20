@@ -661,7 +661,7 @@ static auto make_pusch_debug_log_entry(const ul_sched_info& ul_info)
 {
   return make_formattable([ul_info](auto& ctx) {
     fmt::format_to(ctx.out(),
-                   "\n- UE PUSCH: ue={} {}c-rnti={} h_id={} rb={} symb={} tbs={} rv={} nrtx={} nof_layers={}",
+                   "\n- UE PUSCH: ue={} {}c-rnti={} h_id={} rb={} symb={} tbs={} rv={} nrtx={} nof_layers={} cg={}",
                    fmt::underlying(ul_info.context.ue_index),
                    ul_info.context.ue_index == INVALID_DU_UE_INDEX ? "t" : "",
                    ul_info.pusch_cfg.rnti,
@@ -671,7 +671,8 @@ static auto make_pusch_debug_log_entry(const ul_sched_info& ul_info)
                    ul_info.pusch_cfg.tb_size_bytes,
                    ul_info.pusch_cfg.rv_index,
                    ul_info.context.nof_retxs,
-                   ul_info.pusch_cfg.nof_layers);
+                   ul_info.pusch_cfg.nof_layers,
+                   ul_info.pusch_cfg.is_cg ? "Yes" : "No");
     if (ul_info.context.olla_offset.has_value()) {
       fmt::format_to(ctx.out(), " olla={:.3}", ul_info.context.olla_offset.value());
     }

@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "e_cid_measurement_termination_procedure.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/support/async/coroutine.h"
 
 using namespace ocudu;

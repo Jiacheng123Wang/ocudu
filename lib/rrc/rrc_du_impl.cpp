@@ -7,6 +7,7 @@
 #include "ue/rrc_asn1_helpers.h"
 #include "ue/rrc_measurement_types_asn1_converters.h"
 #include "ocudu/adt/expected.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/cell_group_config.h"
 #include "ocudu/asn1/rrc_nr/dl_ccch_msg.h"
 #include "ocudu/asn1/rrc_nr/rrc_nr.h"
@@ -96,6 +97,7 @@ rrc_du_impl::get_cell_info(const std::vector<cu_cp_du_served_cells_item>& served
     cell_info.timers.t301 = std::chrono::milliseconds{sib1_msg.ue_timers_and_consts.t301.to_number()};
     cell_info.timers.t310 = std::chrono::milliseconds{sib1_msg.ue_timers_and_consts.t310.to_number()};
     cell_info.timers.t311 = std::chrono::milliseconds{sib1_msg.ue_timers_and_consts.t311.to_number()};
+    cell_info.timers.t319 = std::chrono::milliseconds{sib1_msg.ue_timers_and_consts.t319.to_number()};
 
     // Store selectedPLMN-Identities. Iterate over all PLMN identities in SIB1 and store them in the cell info.
     // TS 38.331 section 6.3.2:
@@ -189,6 +191,34 @@ std::optional<std::chrono::system_clock::time_point> rrc_du_impl::get_ref_time_r
   return system_tp{std::chrono::duration_cast<system_tp::duration>(std::chrono::nanoseconds{unix_ns})};
 }
 
+std::optional<arfcn_t> rrc_du_impl::get_ssb_arfcn(const byte_buffer& encoded)
+{
+  if (encoded.empty()) {
+    return std::nullopt;
+  }
+
+  meas_timing_cfg_s meas_timing_cfg;
+  asn1::cbit_ref    bref{encoded};
+  if (meas_timing_cfg.unpack(bref) != asn1::OCUDUASN_SUCCESS) {
+    logger.warning("Failed to unpack MeasurementTimingConfiguration container");
+    return std::nullopt;
+  }
+
+  if (meas_timing_cfg.crit_exts.type() != meas_timing_cfg_s::crit_exts_c_::types_opts::c1 ||
+      meas_timing_cfg.crit_exts.c1().type() != meas_timing_cfg_s::crit_exts_c_::c1_c_::types_opts::meas_timing_conf) {
+    logger.warning("Unsupported MeasurementTimingConfiguration critical extension");
+    return std::nullopt;
+  }
+
+  for (const auto& meas_timing : meas_timing_cfg.crit_exts.c1().meas_timing_conf().meas_timing) {
+    if (meas_timing.freq_and_timing_present) {
+      return meas_timing.freq_and_timing.carrier_freq;
+    }
+  }
+
+  return std::nullopt;
+}
+
 byte_buffer rrc_du_impl::get_rrc_reject()
 {
   // Pack RRC Reconfig.
@@ -211,8 +241,7 @@ byte_buffer rrc_du_impl::pack_meas_config(const rrc_meas_cfg& meas_cfg)
   return pack_into_pdu(meas_config_to_rrc_asn1(meas_cfg), "RRCMeasConfig");
 }
 
-std::optional<rrc_resume_context_t> rrc_du_impl::get_rrc_resume_context(byte_buffer rrc_container,
-                                                                        uint8_t     nof_i_rnti_ue_bits)
+std::optional<rrc_resume_context_t> rrc_du_impl::get_rrc_resume_context(byte_buffer rrc_container)
 {
   if (rrc_container.empty()) {
     return std::nullopt;
@@ -242,8 +271,7 @@ std::optional<rrc_resume_context_t> rrc_du_impl::get_rrc_resume_context(byte_buf
 
     // Extract Short-I-RNTI.
     expected<short_i_rnti_t> resume_id = short_i_rnti_t::from_uint(
-        static_cast<uint32_t>(ul_ccch_msg.msg.c1().rrc_resume_request().rrc_resume_request.resume_id.to_number()),
-        nof_i_rnti_ue_bits);
+        static_cast<uint32_t>(ul_ccch_msg.msg.c1().rrc_resume_request().rrc_resume_request.resume_id.to_number()));
     if (!resume_id.has_value()) {
       logger.error("Invalid Resume ID in RRC Resume Request (ASN.1 short-i-rnti=0x{:x})",
                    ul_ccch_msg.msg.c1().rrc_resume_request().rrc_resume_request.resume_id.to_number());
@@ -274,8 +302,8 @@ std::optional<rrc_resume_context_t> rrc_du_impl::get_rrc_resume_context(byte_buf
   }
 
   // Extract Full-I-RNTI.
-  expected<full_i_rnti_t> resume_id = full_i_rnti_t::from_uint(
-      ul_ccch1_msg.msg.c1().rrc_resume_request1().rrc_resume_request1.resume_id.to_number(), nof_i_rnti_ue_bits);
+  expected<full_i_rnti_t> resume_id =
+      full_i_rnti_t::from_uint(ul_ccch1_msg.msg.c1().rrc_resume_request1().rrc_resume_request1.resume_id.to_number());
   if (!resume_id.has_value()) {
     logger.error("Invalid Resume ID in RRC Resume Request (ASN.1 full-i-rnti=0x{:x})",
                  ul_ccch1_msg.msg.c1().rrc_resume_request1().rrc_resume_request1.resume_id.to_number());
@@ -346,7 +374,8 @@ rrc_ue_interface* rrc_du_impl::add_ue(const rrc_ue_creation_message& msg)
                                                          rrc_cell,
                                                          ue_cfg,
                                                          msg.du_to_cu_container.copy(),
-                                                         msg.rrc_context));
+                                                         msg.rrc_context,
+                                                         msg.remote_resume_context));
 
   if (res.second) {
     auto& u = ue_db.at(ue_index);

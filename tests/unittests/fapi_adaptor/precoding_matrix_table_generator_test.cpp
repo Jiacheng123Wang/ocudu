@@ -55,7 +55,7 @@ TEST(precoding_matrix_table_generator, two_port_one_layer)
   std::tie(mapper, repository) = generate_precoding_matrix_tables(pmi_codebook_two_port{}, 0);
 
   // Iterate over all possible PMI.
-  for (unsigned pmi = 0; pmi != 4; ++pmi) {
+  for (uint8_t pmi = 0; pmi != 4; ++pmi) {
     mac_pdsch_precoding_info info;
     info.report.emplace(precoding_matrix_indicator{pmi_two_antenna_port{pmi}});
 
@@ -76,7 +76,7 @@ TEST(precoding_matrix_table_generator, two_port_two_layer)
   std::tie(mapper, repository) = generate_precoding_matrix_tables(pmi_codebook_two_port{}, 0);
 
   // Iterate over all possible PMI.
-  for (unsigned pmi = 0; pmi != 2; ++pmi) {
+  for (uint8_t pmi = 0; pmi != 2; ++pmi) {
     mac_pdsch_precoding_info info;
     info.report.emplace(precoding_matrix_indicator{pmi_two_antenna_port{pmi}});
 
@@ -111,13 +111,13 @@ TEST_P(typeI_single_panel_fixture, TypeI_single_panel)
     unsigned nof_i_1_3 = param_ranges.i_1_3;
     unsigned nof_i_2   = param_ranges.i_2;
 
-    for (unsigned i_1_1 = 0; i_1_1 != nof_i_1_1; ++i_1_1) {
-      for (unsigned i_1_2 = 0; i_1_2 != nof_i_1_2; ++i_1_2) {
-        for (unsigned i_1_3 = 0; i_1_3 != nof_i_1_3; ++i_1_3) {
-          for (unsigned i_2 = 0; i_2 != nof_i_2; ++i_2) {
+    for (uint8_t i_1_1 = 0; i_1_1 != nof_i_1_1; ++i_1_1) {
+      for (uint8_t i_1_2 = 0; i_1_2 != nof_i_1_2; ++i_1_2) {
+        for (uint8_t i_1_3 = 0; i_1_3 != nof_i_1_3; ++i_1_3) {
+          for (uint8_t i_2 = 0; i_2 != nof_i_2; ++i_2) {
             mac_pdsch_precoding_info info;
-            std::optional<unsigned>  i_1_2_opt = (param_ranges.i_1_2 > 0) ? std::optional(i_1_2) : std::nullopt;
-            std::optional<unsigned>  i_1_3_opt = (param_ranges.i_1_3 > 0) ? std::optional(i_1_3) : std::nullopt;
+            std::optional<uint8_t>   i_1_2_opt = (param_ranges.i_1_2 > 0) ? std::optional(i_1_2) : std::nullopt;
+            std::optional<uint8_t>   i_1_3_opt = (param_ranges.i_1_3 > 0) ? std::optional(i_1_3) : std::nullopt;
             pmi_typeI_single_panel   pmi       = {
                         .panel_config = codebook_config, .i_1_1 = i_1_1, .i_1_2 = i_1_2_opt, .i_1_3 = i_1_3_opt, .i_2 = i_2};
             info.report.emplace(pmi);

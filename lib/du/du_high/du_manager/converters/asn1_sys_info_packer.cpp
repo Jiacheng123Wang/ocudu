@@ -6,6 +6,7 @@
 #include "asn1_ntn_config_helpers.h"
 #include "asn1_rrc_config_helpers.h"
 #include "asn1_sys_info_packer_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/bcch_bch_msg.h"
 #include "ocudu/asn1/rrc_nr/bcch_dl_sch_msg.h"
 #include "ocudu/asn1/rrc_nr/sys_info.h"
@@ -386,8 +387,13 @@ static asn1::rrc_nr::sib1_s make_asn1_rrc_cell_sib1(const du_cell_config& du_cfg
       // For each SI message in the configuration...
       for (const auto& cfg_si : du_cfg.si.si_config->si_sched_info) {
         // Prepare a SchedulingInfo element. This holds information for an SI message carrying SIBs 2, 6, 7 or 8.
+        // Note: a PWS SI message is only broadcast while a warning is on air, which the MAC signals by repacking this
+        // payload with its si-BroadcastStatus set to broadcasting. Listing it as broadcasting here would advertise a
+        // warning that is not being transmitted.
         sched_info_s asn1_si;
-        asn1_si.si_broadcast_status.value = sched_info_s::si_broadcast_status_opts::broadcasting;
+        asn1_si.si_broadcast_status.value = cfg_si.requires_activation()
+                                                ? sched_info_s::si_broadcast_status_opts::not_broadcasting
+                                                : sched_info_s::si_broadcast_status_opts::broadcasting;
         ret                               = asn1::number_to_enum(asn1_si.si_periodicity, cfg_si.si_period_radio_frames);
         ocudu_assert(ret, "Invalid SI period");
 
@@ -407,9 +413,7 @@ static asn1::rrc_nr::sib1_s make_asn1_rrc_cell_sib1(const du_cell_config& du_cfg
               du_cfg.si.si_config->sibs.begin(),
               du_cfg.si.si_config->sibs.end(),
               [mapping_info](const sib_type_info& sib) { return get_sib_info_type(sib.content) == mapping_info; });
-          const bool is_pws_sib =
-              mapping_info == sib_type::sib6 or mapping_info == sib_type::sib7 or mapping_info == sib_type::sib8;
-          if (matching_sib == du_cfg.si.si_config->sibs.end() and not is_pws_sib) {
+          if (matching_sib == du_cfg.si.si_config->sibs.end() and not is_pws_sib(mapping_info)) {
             // No content configured for this SIB and is not a dormant SIB (e.g. PWS).
             continue;
           }
@@ -1062,7 +1066,7 @@ asn1_packer::pack_all_bcch_dl_sch_msgs(const du_cell_config& du_cfg, std::vector
         if (it == sibs.end()) {
           // Dormant SIB6/7/8 SI-message with no explicitly configured (testing-only) content.
           // Use a trivial placeholder instead of ASN.1/CBS-encoding anything.
-          ocudu_assert(si_sched.requires_activation and not si_sched.auto_broadcast,
+          ocudu_assert(is_pws_sib(sib_id) and not si_sched.auto_broadcast,
                        "SIB{} in SIB mapping info has no defined config",
                        static_cast<unsigned>(sib_id));
 

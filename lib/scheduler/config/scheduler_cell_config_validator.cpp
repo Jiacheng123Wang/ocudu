@@ -6,6 +6,7 @@
 #include "../support/dmrs_helpers.h"
 #include "../support/pdsch/pdsch_default_time_allocation.h"
 #include "../support/prbs_calculator.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/band_helper.h"
 #include "ocudu/ran/duplex_mode.h"
 #include "ocudu/ran/prach/prach_configuration.h"
@@ -277,7 +278,12 @@ error_type<std::string> config_validators::validate_sched_cell_configuration_req
     const sched_cell_configuration_request_message& msg,
     const scheduler_expert_config&                  expert_cfg)
 {
-  VERIFY(msg.cell_index < MAX_NOF_DU_CELLS, "cell index={} is not valid", fmt::underlying(msg.cell_index));
+  VERIFY(msg.cell_index < MAX_NOF_DU_CELLS, "cell index={} is not valid", msg.cell_index);
+
+  VERIFY(msg.max_nof_ue_contexts > 0 and msg.max_nof_ue_contexts <= MAX_NOF_DU_UES_PER_CELL,
+         "Number of UE contexts={} of cell={} is not valid",
+         msg.max_nof_ue_contexts,
+         msg.cell_index);
 
   const auto& dl_lst = msg.ran.dl_cfg_common.init_dl_bwp.pdsch_common.pdsch_td_alloc_list;
   for (const auto& pdsch : dl_lst) {

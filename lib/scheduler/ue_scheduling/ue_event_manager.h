@@ -5,6 +5,7 @@
 #pragma once
 
 #include "../config/sched_config_manager.h"
+#include "../configured_grant/configured_grant_scheduler.h"
 #include "../logging/cell_event_tracer.h"
 #include "../slicing/inter_slice_scheduler.h"
 #include "ue_fallback_scheduler.h"
@@ -23,15 +24,18 @@ class srs_scheduler;
 class pdu_indication_pool;
 class uci_indication_selector;
 class ra_ue_repository;
+class ue_cell_repository;
 struct uci_action;
 
 struct cell_creation_event {
-  cell_resource_allocator&       cell_res_grid;
-  ue_cell_repository&            ue_cell_db;
-  ue_fallback_scheduler&         fallback_sched;
-  uci_scheduler_impl&            uci_sched;
-  inter_slice_scheduler&         slice_sched;
-  srs_scheduler&                 srs_sched;
+  cell_resource_allocator& cell_res_grid;
+  ue_cell_repository&      ue_cell_db;
+  ue_fallback_scheduler&   fallback_sched;
+  uci_scheduler_impl&      uci_sched;
+  inter_slice_scheduler&   slice_sched;
+  srs_scheduler&           srs_sched;
+  /// Configured Grant scheduler. Nullptr if CG is not configured for the cell.
+  configured_grant_scheduler*    cg_sched;
   uci_indication_selector&       uci_selector;
   cell_metrics_handler&          metrics;
   scheduler_event_logger&        ev_logger;
@@ -158,13 +162,15 @@ private:
   ue_repository&          ue_db;
   ocudulog::basic_logger& logger;
   // cell parameters.
-  const cell_configuration&      cfg;
-  cell_resource_allocator&       res_grid;
-  cell_harq_manager&             cell_harqs;
-  ue_fallback_scheduler&         fallback_sched;
-  uci_scheduler_impl&            uci_sched;
-  inter_slice_scheduler&         slice_sched;
-  srs_scheduler&                 srs_sched;
+  const cell_configuration& cfg;
+  cell_resource_allocator&  res_grid;
+  cell_harq_manager&        cell_harqs;
+  ue_fallback_scheduler&    fallback_sched;
+  uci_scheduler_impl&       uci_sched;
+  inter_slice_scheduler&    slice_sched;
+  srs_scheduler&            srs_sched;
+  /// Configured Grant scheduler. Nullptr if CG is not configured for the cell.
+  configured_grant_scheduler*    cg_sched;
   uci_indication_selector&       uci_selector;
   cell_metrics_handler&          metrics;
   scheduler_event_logger&        ev_logger;

@@ -5,6 +5,7 @@
 #include "rrc_setup_procedure.h"
 #include "../rrc_asn1_helpers.h"
 #include "ue/rrc_asn1_converters.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/dl_ccch_msg.h"
 #include "ocudu/ran/cause/common.h"
 #include <variant>

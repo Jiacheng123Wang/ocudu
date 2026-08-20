@@ -3,11 +3,12 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "lib/du/du_high/du_manager/ran_resource_management/ue_capability_manager.h"
-#include "lib/du/du_high/du_manager/ran_resource_management/ue_capability_summary_formatter.h"
+#include "lib/scheduler/rrm/ue_capability_summary_formatter.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/to_array.h"
 #include "ocudu/asn1/rrc_nr/ue_cap.h"
 #include "ocudu/support/error_handling.h"
-#include <fmt/ostream.h>
+#include "fmt/ostream.h"
 #include <gtest/gtest.h>
 
 using namespace ocudu;
@@ -24,15 +25,13 @@ struct decode_ue_nr_cap_container_params {
 };
 
 namespace ocudu {
-namespace odu {
 
-std::ostream& operator<<(std::ostream& os, const ocudu::odu::ue_capability_summary& params)
+std::ostream& operator<<(std::ostream& os, const ocudu::ue_capability_summary& params)
 {
   fmt::print(os, "{:n}", params);
   return os;
 }
 
-} // namespace odu
 } // namespace ocudu
 
 std::ostream& operator<<(std::ostream& os, const decode_ue_nr_cap_container_params& params)
@@ -173,8 +172,8 @@ const auto test_cases = to_array<decode_ue_nr_cap_container_params>(
                                    .disabled_dl_harq_feedback_supported     = false,
                                    .ul_harq_mode_b_supported                = false,
                                    // Supports gap patterns 0..11 (TS 38.133 Table 9.1.2-1); 0 and 1 are mandatory.
-                                   .supported_meas_gaps =
-                                       make_supported_gap_patterns({2, 3, 4, 5, 6, 7, 8, 9, 10, 11})}},
+                                   .supported_meas_gaps = make_supported_gap_patterns({2, 3, 4, 5, 6, 7, 8, 9, 10, 11}),
+                                   .pucch_repeat_f1_3_4_supported = true}},
      {.model = "Motorola Edge 30 Pro",
       .message =
           {0xe1, 0xa2, 0x53, 0x80, 0x57, 0x4f, 0x7a, 0x03, 0x56, 0x08, 0x03, 0x04, 0x40, 0x0b, 0x04, 0x00, 0x40, 0x60,

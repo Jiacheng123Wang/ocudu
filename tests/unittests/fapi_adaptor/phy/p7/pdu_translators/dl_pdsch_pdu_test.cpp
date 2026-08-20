@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pdsch.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/fapi/p7/builders/dl_pdsch_pdu_builder.h"
 #include "ocudu/fapi_adaptor/precoding_matrix_table_generator.h"
 #include "ocudu/ran/pdcch/dci_format.h"

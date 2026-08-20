@@ -23,6 +23,20 @@ public:
 
   // ngap_ue_security_manager
   [[nodiscard]] bool init_security_context(const security::security_context& sec_ctxt);
+
+  /// \brief Initialize the security context from one retrieved from a peer NG-RAN node (TS 38.423 section
+  /// 8.2.5).
+  ///
+  /// The peer already derived KgNB* for the cell the UE accessed here (TS 33.501 section 6.11), so the key is taken as
+  /// it is and only the AS keys below it are generated. The UE arrives with security already active, so the context is
+  /// enabled directly.
+  ///
+  /// \param[in] sec_ctxt The security context retrieved from the peer.
+  /// \param[in] algos The AS algorithms the peer signalled in the RRC Context. When empty, they are selected from the
+  /// UE capabilities the peer reported, which leaves the UE unable to decipher what this node sends if the peer had
+  /// chosen differently.
+  [[nodiscard]] bool init_retrieved_security_context(const security::security_context&                  sec_ctxt,
+                                                     const std::optional<security::sec_selected_algos>& algos);
   [[nodiscard]] bool finalize_security_context();
   [[nodiscard]] bool is_security_enabled() const;
 

@@ -5,6 +5,7 @@
 #include "ru_ofh_config_translator.h"
 #include "apps/services/worker_manager/worker_manager_config.h"
 #include "ru_ofh_config.h"
+#include "ocudu/adt/format.h"
 
 using namespace ocudu;
 

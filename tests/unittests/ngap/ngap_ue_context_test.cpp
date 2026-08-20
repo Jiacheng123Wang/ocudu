@@ -4,6 +4,7 @@
 
 #include "lib/ngap/ue_context/ngap_ue_context.h"
 #include "tests/test_doubles/utils/test_rng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/support/executors/manual_task_worker.h"
 #include <cstdint>
 #include <gtest/gtest.h>

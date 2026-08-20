@@ -4,6 +4,7 @@
 
 #include "rrc_ue_capability_transfer_procedure.h"
 #include "ue/rrc_ue_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/rrc_nr/dl_dcch_msg.h"
 
 using namespace ocudu;

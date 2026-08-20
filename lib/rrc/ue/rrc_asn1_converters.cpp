@@ -390,7 +390,7 @@ ocudu::ocucp::asn1_resume_cause_to_establishment_cause(const asn1::rrc_nr::resum
   }
 }
 
-asn1::enumerated<asn1::rrc_nr::paging_cycle_opts> ocudu::ocucp::ran_paging_cycle_to_asn1(uint8_t ran_paging_cycle)
+asn1::enumerated<asn1::rrc_nr::paging_cycle_opts> ocudu::ocucp::ran_paging_cycle_to_asn1(uint16_t ran_paging_cycle)
 {
   if (ran_paging_cycle == 32) {
     return asn1::rrc_nr::paging_cycle_opts::options::rf32;

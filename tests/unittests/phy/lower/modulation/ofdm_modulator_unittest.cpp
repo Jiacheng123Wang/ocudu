@@ -4,6 +4,7 @@
 
 #include "../../generic_functions/dft_processor_test_doubles.h"
 #include "../../support/resource_grid_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/compare.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/sc_prod.h"

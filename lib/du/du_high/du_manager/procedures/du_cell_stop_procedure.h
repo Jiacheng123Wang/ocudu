@@ -45,9 +45,11 @@ public:
   static constexpr std::chrono::milliseconds cu_release_timeout{500};
 
 private:
-  async_task<void> rem_ues_with_matching_pcell();
-  async_task<void> await_cu_to_release_ues();
-  async_task<void> force_ue_removal();
+  /// Build the tasks run concurrently on the graceful drain path: bar-and-settle plus the UE drain.
+  std::vector<async_task<void>> create_bar_and_drain_tasks();
+  async_task<void>              rem_ues_with_matching_pcell();
+  async_task<void>              await_cu_to_release_ues();
+  async_task<void>              force_ue_removal();
 
   du_ue_manager&           ue_mng;
   du_cell_manager&         cell_mng;

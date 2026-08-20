@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "precoding_matrix_test_fixture.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/support/precoding_configuration.h"
 #include "ocudu/ran/beamforming/beam_weights_codebook.h"
 #include "ocudu/ran/beamforming/beam_weights_codebook_generator.h"

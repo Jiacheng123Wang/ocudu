@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "fmt/format.h"
+#include "fmt/base.h"
 #include <cstdint>
 #include <type_traits>
 

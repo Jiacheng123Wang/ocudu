@@ -4,6 +4,7 @@
 
 #include "du_manager_test_helpers.h"
 #include "lib/du/du_high/du_manager/du_manager_mem_resources_factory.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_high/du_qos_config_helpers.h"
 #include "ocudu/mac/config/mac_cell_group_config_factory.h"
 #include "ocudu/mac/config/mac_config_helpers.h"
@@ -128,9 +129,13 @@ du_manager_test_bench::du_manager_test_bench(span<const du_cell_config> cells) :
           f1ap,
           rlc_pcap,
           nullptr,
+          rlc_drb_rx_window_seg_size,
           rlc_drb_rx_window_seg_pool_size,
+          rlc_drb_tx_window_seg_size,
           rlc_drb_tx_window_seg_pool_size,
+          rlc_srb_rx_window_seg_size,
           rlc_srb_rx_window_seg_pool_size,
+          rlc_srb_tx_window_seg_size,
           rlc_srb_tx_window_seg_pool_size},
          {mac}},
   mem_resources(create_du_manager_mem_resources(params)),

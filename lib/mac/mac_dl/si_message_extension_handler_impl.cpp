@@ -2,36 +2,23 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
-#include "sib_pdu_assembler.h"
+#include "bcch_dl_sch_encoder.h"
 #include "ocudu/adt/spsc_queue.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/units.h"
 
 using namespace ocudu;
 
-/// Max SI Message PDU size. This value is implementation-defined.
-static constexpr unsigned MAX_BCCH_DL_SCH_PDU_SIZE = 2048;
-
 /// Payload of zeros sent to when an error occurs.
 static const std::vector<uint8_t> zeros_payload(MAX_BCCH_DL_SCH_PDU_SIZE, 0);
-
-static std::shared_ptr<const std::vector<uint8_t>> make_linear_buffer(const byte_buffer& pdu)
-{
-  // Note: We overallocate the SI message buffer to account for padding.
-  // Note: resizing after this point invalidates the spans passed to lower layers.
-  auto vec = std::make_shared<std::vector<uint8_t>>(MAX_BCCH_DL_SCH_PDU_SIZE, 0);
-  copy_segments(pdu, span<uint8_t>(vec->data(), vec->size()));
-  return vec;
-}
 
 namespace {
 
 /// Handles slot-aligned PDU updates for a single SI message, queuing incoming updates and applying them at the
 /// correct slot boundary.
-class si_message_extension_handler_impl : public sib_pdu_assembler::message_handler
+class si_message_extension_handler_impl : public si_message_extension_handler
 {
-  using time_point         = std::chrono::system_clock::time_point;
-  using bcch_dl_sch_buffer = std::shared_ptr<const std::vector<uint8_t>>;
+  using time_point = std::chrono::system_clock::time_point;
   struct si_pdu_update {
     /// Slot at which this update becomes active. If std::nullopt, it becomes active immediately.
     std::optional<slot_point> slot;
@@ -52,9 +39,6 @@ public:
       si_msg_queues.emplace_back(std::make_unique<si_msg_queue_type>(max_nof_msgs));
     }
   }
-
-  // See interface for documentation.
-  si_version_type update(si_version_type si_version, const byte_buffer& pdu) override { return 0; }
 
   // See interface for documentation.
   span<const uint8_t> get_pdu(slot_point_extended sl_tx_ext, const sib_information& si_info) override
@@ -115,13 +99,14 @@ public:
       if (req.slot.has_value()) {
         tx_slot = *req.slot + idx * req.si_slot_period.value_or(0);
       }
-      byte_buffer& pdu = req.si_messages[idx];
+      const byte_buffer& pdu = req.si_messages[idx];
       logger.debug("New SIB{} PDU enqueued for tx_slot: {}, si_msg_idx: {} size: {}",
                    req.sib_idx,
                    tx_slot.has_value() ? fmt::to_string(*tx_slot) : "asap",
                    req.si_msg_idx,
                    static_cast<unsigned>(pdu.length()));
-      si_pdu_update sib_pdu_update{tx_slot, units::bytes{static_cast<unsigned>(pdu.length())}, make_linear_buffer(pdu)};
+      si_pdu_update sib_pdu_update{
+          tx_slot, units::bytes{static_cast<unsigned>(pdu.length())}, make_linear_bcch_dl_sch_buffer(pdu)};
       if (!si_msg_queues[req.si_msg_idx]->try_push(sib_pdu_update)) {
         return false;
       }
@@ -141,7 +126,7 @@ private:
 };
 } // namespace
 
-std::unique_ptr<sib_pdu_assembler::message_handler>
+std::unique_ptr<si_message_extension_handler>
 ocudu::create_si_message_extension_handler(const mac_cell_sys_info_config& req)
 {
   return std::make_unique<si_message_extension_handler_impl>(req);

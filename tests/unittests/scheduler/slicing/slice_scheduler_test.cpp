@@ -4,6 +4,7 @@
 
 #include "lib/scheduler/config/time_domain_mapper.h"
 #include "lib/scheduler/slicing/inter_slice_scheduler.h"
+#include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/unittests/scheduler/test_utils/config_generators.h"
 #include "tests/unittests/scheduler/test_utils/dummy_test_components.h"
@@ -44,7 +45,7 @@ protected:
     logger.set_level(ocudulog::basic_levels::debug);
     ocudulog::init();
 
-    ues.add_cell(cell_cfg, nullptr);
+    ues.register_cell(cell_ues);
   }
 
   ~slice_scheduler_test() { ocudulog::flush(); }
@@ -68,7 +69,8 @@ protected:
   test_helpers::test_sched_config_manager test_cfg;
   const cell_configuration&               cell_cfg;
 
-  ue_repository ues;
+  ue_cell_repository cell_ues{cell_cfg, nullptr};
+  ue_repository      ues;
 
   cell_resource_allocator dummy_alloc{cell_cfg};
   inter_slice_scheduler   slice_sched{cell_cfg, ues};

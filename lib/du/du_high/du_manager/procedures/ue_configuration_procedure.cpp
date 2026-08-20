@@ -6,6 +6,7 @@
 #include "../converters/asn1_rrc_config_helpers.h"
 #include "../converters/rlc_config_helpers.h"
 #include "../converters/scheduler_configuration_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/mac/mac_ue_configurator.h"
 #include "ocudu/rlc/rlc_factory.h"
 #include <algorithm>

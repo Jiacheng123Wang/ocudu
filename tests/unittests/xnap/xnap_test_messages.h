@@ -4,13 +4,25 @@
 
 #pragma once
 
+#include "ocudu/ran/nr_cgi.h"
+#include "ocudu/ran/pci.h"
 #include "ocudu/ran/rb_id.h"
 #include "ocudu/xnap/xnap.h"
+#include "ocudu/xnap/xnap_configuration.h"
 #include "ocudu/xnap/xnap_message.h"
 #include "ocudu/xnap/xnap_types.h"
 #include <vector>
 
 namespace ocudu::ocucp {
+
+/// \brief Generate the information of an NR cell an NG-RAN node serves, as advertised at XN setup.
+cu_cp_served_cell_info generate_served_cell_info(pci_t pci, const nr_cell_global_id_t& cgi, tac_t tac = 7);
+
+/// \brief Generate an XN Setup Response that advertises a single served NR cell, so that the peer context stores a
+/// served cell list. Used to test lookups of the XN-C peer by served cell PCI.
+xnap_message generate_xn_setup_response_with_served_cell(const xnap_configuration&  peer_cfg,
+                                                         pci_t                      served_pci,
+                                                         const nr_cell_global_id_t& served_cgi);
 
 /// \brief Generate a dummy Handover Request message. \c include_drb_to_qos_flow_mapping controls whether the
 /// source's DRB-to-QoS-flow mapping (DRB1 <-> QFI1, matching the admitted PDU session) is included via the Data
@@ -36,5 +48,23 @@ xnap_message generate_sn_status_transfer(local_xnap_ue_id_t           local_xnap
 
 /// \brief Generate a dummy UE Context Release message.
 xnap_message generate_ue_context_release(local_xnap_ue_id_t local_xnap_ue_id, peer_xnap_ue_id_t peer_xnap_ue_id);
+
+/// \brief Generate a dummy Retrieve UE Context Request message carrying an RRC Reestablishment UE Context ID.
+xnap_message generate_retrieve_ue_context_request(peer_xnap_ue_id_t peer_xnap_ue_id,
+                                                  pci_t             fail_cell_pci,
+                                                  nr_cell_identity  target_nci);
+
+/// \brief Generate a dummy Retrieve UE Context Request message carrying an RRC Resume UE Context ID.
+xnap_message generate_retrieve_ue_context_request_for_resume(peer_xnap_ue_id_t peer_xnap_ue_id,
+                                                             short_i_rnti_t    i_rnti,
+                                                             nr_cell_identity  target_nci,
+                                                             uint16_t          resume_mac_i = 0xabcd);
+
+/// \brief Generate a dummy Retrieve UE Context Response message.
+xnap_message generate_retrieve_ue_context_response(local_xnap_ue_id_t local_xnap_ue_id,
+                                                   peer_xnap_ue_id_t  peer_xnap_ue_id);
+
+/// \brief Generate a dummy Retrieve UE Context Failure message.
+xnap_message generate_retrieve_ue_context_failure(local_xnap_ue_id_t local_xnap_ue_id);
 
 } // namespace ocudu::ocucp

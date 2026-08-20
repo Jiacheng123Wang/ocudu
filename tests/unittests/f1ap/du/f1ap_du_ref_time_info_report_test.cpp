@@ -4,6 +4,7 @@
 
 #include "f1ap_du_test_helpers.h"
 #include "lib/du/du_high/du_manager/converters/asn1_ref_time_r16_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/common.h"
 #include "ocudu/asn1/f1ap/f1ap.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents.h"

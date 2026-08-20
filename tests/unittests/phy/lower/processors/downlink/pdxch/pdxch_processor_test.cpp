@@ -6,6 +6,7 @@
 #include "../../../amplitude_control/amplitude_controller_test_doubles.h"
 #include "../../../modulation/ofdm_modulator_test_doubles.h"
 #include "pdxch_processor_notifier_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_dynamic.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/antenna_ports.h"

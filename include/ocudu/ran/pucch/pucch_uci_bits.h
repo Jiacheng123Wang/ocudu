@@ -5,6 +5,7 @@
 #pragma once
 
 #include "fmt/format.h"
+#include <cstdint>
 
 namespace ocudu {
 
@@ -29,11 +30,11 @@ inline sr_nof_bits operator+(sr_nof_bits x, sr_nof_bits y)
 /// Contains the number of UCI bits (HARQ-ACK, SR and CSI) of a PUCCH grant.
 struct pucch_uci_bits {
   /// Number of HARQ-ACK info bits that should have been reported in the removed PUCCH grant.
-  unsigned harq_ack_nof_bits{0};
+  uint16_t harq_ack_nof_bits{0};
   /// Number of SR info bits that should have been reported in the removed PUCCH grant.
   sr_nof_bits sr_bits{sr_nof_bits::no_sr};
   /// Number of CSI Part 1 info bits that should have been reported in the removed PUCCH grant.
-  unsigned csi_part1_nof_bits{0};
+  uint16_t csi_part1_nof_bits{0};
   // TODO: add extra bits for CSI Part 2.
 
   [[nodiscard]] unsigned get_total_bits() const

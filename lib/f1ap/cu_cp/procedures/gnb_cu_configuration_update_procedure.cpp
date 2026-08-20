@@ -5,6 +5,7 @@
 #include "gnb_cu_configuration_update_procedure.h"
 #include "asn1_helpers.h"
 #include "f1ap_asn1_utils.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/common.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents.h"
 #include "ocudu/f1ap/f1ap_message.h"
@@ -164,6 +165,21 @@ static void fill_asn1_gnb_cu_configuration_update(asn1::f1ap::gnb_cu_cfg_upd_s& 
       asn1_cell.nr_cgi = cgi_to_asn1(cell.cgi);
 
       asn1_cfg_update->cells_to_be_deactiv_list.push_back(asn1_cell_container);
+    }
+  }
+
+  // Fill cells to be barred list.
+  if (!cfg_update.cells_to_be_barred_list.empty()) {
+    asn1_cfg_update->cells_to_be_barred_list_present = true;
+
+    for (const auto& cell : cfg_update.cells_to_be_barred_list) {
+      asn1::protocol_ie_single_container_s<asn1::f1ap::cells_to_be_barred_item_ies_o> asn1_cell_container;
+      cells_to_be_barred_item_s& asn1_cell = asn1_cell_container->cells_to_be_barred_item();
+
+      asn1_cell.nr_cgi            = cgi_to_asn1(cell.cgi);
+      asn1_cell.cell_barred.value = cell.barred ? cell_barred_opts::barred : cell_barred_opts::not_barred;
+
+      asn1_cfg_update->cells_to_be_barred_list.push_back(asn1_cell_container);
     }
   }
 

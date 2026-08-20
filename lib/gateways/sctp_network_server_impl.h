@@ -7,6 +7,7 @@
 #include "sctp_network_gateway_common_impl.h"
 #include "ocudu/gateways/sctp_network_server.h"
 #include "ocudu/support/async/manual_event.h"
+#include "ocudu/support/synchronization/sync_event.h"
 #include <algorithm>
 #include <list>
 #include <unordered_map>
@@ -43,6 +44,11 @@ public:
   int get_socket_fd() const override { return socket.fd().value(); }
 
   void receive();
+  void receive_impl(std::vector<uint8_t>   payload,
+                    struct sctp_sndrcvinfo sri,
+                    int                    msg_flags,
+                    sockaddr_storage       msg_src_addr,
+                    socklen_t              msg_src_addrlen);
 
   bool listen() override;
 
@@ -54,13 +60,18 @@ private:
   class sctp_send_notifier;
 
   struct sctp_associaton_context {
-    const int                          assoc_id;
+    const int assoc_id;
+    const int fd;
+
     transport_layer_address            addr;
     std::shared_ptr<std::atomic<bool>> association_shutdown_received;
+    io_broker::subscriber              io_sub;
 
     std::unique_ptr<sctp_association_sdu_notifier> sctp_data_recv_notifier;
 
-    sctp_associaton_context(int assoc_id);
+    sctp_associaton_context(int assoc_id, int fd_, sctp_network_server_impl& parent_);
+    void                      receive();
+    sctp_network_server_impl& parent;
   };
 
   // We use unique_ptr to maintain address stability.
@@ -72,8 +83,10 @@ private:
 
   // Subscribe to IO broker to listen for incoming SCTP messages/events.
   bool subscribe_to_broker();
+  bool subscribe_association_to_broker(unique_fd assoc_fd, sctp_associaton_context& assoc_ctxt);
 
   void handle_socket_shutdown(const char* cause);
+  void defer_socket_shutdown(const char* cause, std::optional<scoped_sync_token> token = std::nullopt);
 
   void handle_data(int assoc_id, span<const uint8_t> payload);
   void handle_notification(span<const uint8_t>           payload,

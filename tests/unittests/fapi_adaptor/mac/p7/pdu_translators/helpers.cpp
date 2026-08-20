@@ -541,7 +541,7 @@ ul_sched_info_test_helper unittests::build_valid_pusch_pdu()
   pusch.harq_id                    = to_harq_id(2);
   pusch.new_data                   = true;
   pusch.tb_size_bytes              = units::bytes{11};
-  pusch.num_cb                     = 0;
+  pusch.nof_cb                     = 0;
 
   // UCI.
   uci_info& uci             = info.uci.emplace();
@@ -615,10 +615,9 @@ pucch_info_test_helper unittests::build_valid_pucch_format_1_pdu()
   res_f1.time_domain_occ      = 3;
   res_f1.initial_cyclic_shift = 9;
 
-  auto& f1           = pucch.format_params.emplace<pucch_info::f1_config>();
-  f1.n_id_hopping    = 2;
-  f1.group_hopping   = ocudu::pucch_group_hopping::NEITHER;
-  f1.slot_repetition = ocudu::pucch_repetition_tx_slot::no_multi_slot;
+  auto& f1         = pucch.format_params.emplace<pucch_info::f1_config>();
+  f1.n_id_hopping  = 2;
+  f1.group_hopping = ocudu::pucch_group_hopping::NEITHER;
 
   pucch.uci_bits.harq_ack_nof_bits = 2;
   pucch.uci_bits.sr_bits           = sr_nof_bits::no_sr;

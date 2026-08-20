@@ -5,6 +5,7 @@
 #include "lib/e2/e2sm/e2sm_kpm/e2sm_kpm_cu_meas_provider_impl.h"
 #include "lib/e2/e2sm/e2sm_kpm/e2sm_kpm_du_meas_provider_impl.h"
 #include "tests/unittests/e2/common/e2_test_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/du_types.h"
 #include <algorithm>
 #include <gtest/gtest.h>
@@ -73,10 +74,10 @@ static rlc_metrics generate_non_zero_rlc_metrics(uint32_t ue_idx, uint32_t beare
 static scheduler_cell_metrics generate_non_zero_sched_metrics()
 {
   scheduler_cell_metrics sched_metric;
-  sched_metric.nof_prbs            = 52;
-  sched_metric.nof_dl_slots        = 14;
-  sched_metric.nof_ul_slots        = 14;
-  sched_metric.nof_prach_preambles = 10;
+  sched_metric.nof_prbs              = 52;
+  sched_metric.nof_dl_slots          = 14;
+  sched_metric.nof_ul_slots          = 14;
+  sched_metric.total_prach_preambles = 10;
 
   scheduler_ue_metrics ue_metrics;
   ue_metrics.ue_index            = to_du_ue_index(0);

@@ -10,8 +10,10 @@
 #include "rrc_asn1_helpers.h"
 #include "rrc_ue_helpers.h"
 #include "rrc_ue_impl.h"
+#include "rrc_ue_security_helpers.h"
 #include "ue/rrc_asn1_converters.h"
 #include "ue/rrc_measurement_types_asn1_converters.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/asn1_utils.h"
 #include "ocudu/asn1/rrc_nr/dl_ccch_msg.h"
 #include "ocudu/asn1/rrc_nr/dl_dcch_msg_ies.h"
@@ -167,8 +169,22 @@ void rrc_ue_impl::handle_rrc_resume_request(const asn1::rrc_nr::rrc_resume_reque
     return;
   }
 
+  // An I-RNTI that matches no local UE was allocated by a peer, which is asked for the context over Xn
+  // (TS 38.300 section 9.2.2.4.1).
+  //
+  // An RNA update is excluded: it does not move the UE to RRC_CONNECTED, so retrieving the context would have to be
+  // followed by a path switch and an RRCRelease with suspend indication to keep the UE in RRC_INACTIVE at this node
+  // (TS 38.300 section 9.2.2.5). Until that anchor relocation exists, an RNA update from a peer's I-RNTI falls back to
+  // RRC Setup, which TS 38.300 section 9.2.2.5 leaves open to the node.
+  // TODO: Relocate the anchor on an RNA update instead of falling back, and signal the RRC Resume Cause IE
+  // (TS 38.423 section 9.2.3.61) so the peer can decide whether it wants to hand the context over.
+  const bool context_retrieval_required =
+      context.state == rrc_state::idle and not context.cfg.force_resume_fallback and
+      context.remote_resume_context.has_value() and context.remote_resume_context->rrc_resume_id.has_value() and
+      asn1_to_resume_cause(msg.rrc_resume_request.resume_cause) != resume_cause_t::rna_upd;
+
   // If UE context wasn't found (UE is in IDLE) or forced by configuration, fallback to RRC Setup.
-  if (context.state == rrc_state::idle or context.cfg.force_resume_fallback) {
+  if ((context.state == rrc_state::idle and not context_retrieval_required) or context.cfg.force_resume_fallback) {
     logger.log_info("Received RRC Resume Request, but falling back to RRC Setup. Cause: {}",
                     context.cfg.force_resume_fallback ? "RRC Resumes are disabled" : "UE context wasn't found");
     // Fallback to RRC Setup
@@ -193,8 +209,20 @@ void rrc_ue_impl::handle_rrc_resume_request(const asn1::rrc_nr::rrc_resume_reque
   }
 
   // Launch RRC resume procedure.
-  cu_cp_ue_notifier.schedule_async_task(launch_async<rrc_resume_procedure>(
-      msg, context, c_rnti, *this, cu_cp_notifier, cu_cp_ue_notifier, metrics_notifier, *event_mng, logger));
+  cu_cp_ue_notifier.schedule_async_task(launch_async<rrc_resume_procedure>(msg,
+                                                                           context,
+                                                                           c_rnti,
+                                                                           du_to_cu_container,
+                                                                           *this,
+                                                                           *this,
+                                                                           get_rrc_ue_control_message_handler(),
+                                                                           cu_cp_notifier,
+                                                                           cu_cp_ue_notifier,
+                                                                           metrics_notifier,
+                                                                           ngap_notifier,
+                                                                           *event_mng,
+                                                                           logger,
+                                                                           context_retrieval_required));
 }
 
 void rrc_ue_impl::stop()
@@ -472,6 +500,21 @@ async_task<bool> rrc_ue_impl::handle_security_mode_complete_expected(uint8_t tra
 
     CORO_RETURN(true);
   });
+}
+
+bool rrc_ue_impl::verify_reestablishment_short_mac_i(const security::sec_short_mac_i& short_mac_i,
+                                                     pci_t                            source_pci,
+                                                     rnti_t                           source_c_rnti,
+                                                     nr_cell_identity                 target_nci)
+{
+  return ocucp::verify_short_mac_i(
+      short_mac_i, source_pci, source_c_rnti, target_nci, cu_cp_ue_notifier.get_security_context(), logger);
+}
+
+bool rrc_ue_impl::verify_resume_mac_i(const security::sec_short_mac_i& resume_mac_i, nr_cell_identity target_nci)
+{
+  return ocucp::verify_resume_mac_i(
+      resume_mac_i, context.cell.pci, context.c_rnti, target_nci, cu_cp_ue_notifier.get_security_context(), logger);
 }
 
 byte_buffer rrc_ue_impl::get_packed_ue_capability_rat_container_list() const

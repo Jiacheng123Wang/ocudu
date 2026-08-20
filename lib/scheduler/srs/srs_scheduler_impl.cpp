@@ -56,7 +56,7 @@ srs_scheduler_impl::srs_scheduler_impl(const cell_configuration& cell_cfg_, ue_r
   periodic_srs_slot_wheel.resize(static_cast<unsigned>(srs_periodicity::sl2560));
 
   // Pre-reserve space for the UEs that will be added.
-  updated_ues.reserve(MAX_NOF_DU_UES);
+  updated_ues.reserve(cell_cfg.max_nof_ue_contexts);
 }
 
 srs_scheduler_impl::~srs_scheduler_impl() = default;
@@ -206,8 +206,8 @@ void srs_scheduler_impl::handle_positioning_measurement_request(
 {
   ocudu_assert(cell_req.cell_index == cell_cfg.cell_index,
                "Received positioning request for wrong cell: expected {}, got {}",
-               fmt::underlying(cell_cfg.cell_index),
-               fmt::underlying(cell_req.cell_index));
+               cell_cfg.cell_index,
+               cell_req.cell_index);
 
   // Ensure uniqueness of RNTI in the \c pending_pos_requests.
   if (std::any_of(pending_pos_requests.begin(),
@@ -371,7 +371,7 @@ bool srs_scheduler_impl::allocate_srs_opportunity(cell_slot_resource_allocator& 
 
   if (slot_alloc.result.ul.srss.full()) {
     logger.warning("cell={} c-rnti={}: SRS resource id={} cannot be allocated for slot={}. Cause: SRS list is full",
-                   fmt::underlying(cell_cfg.cell_index),
+                   cell_cfg.cell_index,
                    srs_opportunity.rnti,
                    fmt::underlying(srs_opportunity.srs_res_id),
                    sl_srs);
@@ -395,14 +395,14 @@ bool srs_scheduler_impl::allocate_srs_opportunity(cell_slot_resource_allocator& 
     const ue_cell_configuration* ue_cfg = get_ue_cfg(srs_opportunity.rnti);
     if (ue_cfg == nullptr) {
       logger.error("cell={} c-rnti={}: UE for which SRS is being scheduled was not found",
-                   fmt::underlying(cell_cfg.cell_index),
+                   cell_cfg.cell_index,
                    srs_opportunity.rnti);
       return false;
     }
 
     if (not ue_cfg->is_ul_enabled(sl_srs)) {
       logger.warning("cell={} c-rnti={}: slot={} for SRS resource id={} is being scheduled is not UL enabled",
-                     fmt::underlying(cell_cfg.cell_index),
+                     cell_cfg.cell_index,
                      srs_opportunity.rnti,
                      sl_srs,
                      fmt::underlying(srs_opportunity.srs_res_id));
@@ -426,7 +426,7 @@ bool srs_scheduler_impl::allocate_srs_opportunity(cell_slot_resource_allocator& 
   if (srs_res == srs_res_list.end()) {
     logger.warning("cell={} c-rnti={}: SRS resource id={} cannot be allocated for slot={}. Cause: SRS resource not "
                    "found in UE ded. config",
-                   fmt::underlying(cell_cfg.cell_index),
+                   cell_cfg.cell_index,
                    srs_opportunity.rnti,
                    fmt::underlying(srs_opportunity.srs_res_id),
                    sl_srs);

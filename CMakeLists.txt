@@ -94,6 +94,7 @@ option(ENABLE_UHD            "Enable UHD"                                   ON)
 option(ENABLE_SIDEKIQ        "Enable Sidekiq"                               ON)
 option(ENABLE_ZEROMQ         "Enable ZeroMQ"                                ON)
 option(ENABLE_FFTW           "Enable FFTW"                                  ON)
+option(ENABLE_CUDA           "Enable NVIDIA CUDA acceleration"              OFF)
 option(ENABLE_MKL            "Enable Intel MKL"                             ON)
 option(ENABLE_FFTZ           "Enable AMD Optimized FFT for Zen"             ON)
 option(ENABLE_ARMPL          "Enable ARM performance library"               ON)
@@ -415,6 +416,39 @@ if(OPENSSL_HAS_DTLS_SCTP)
         VERSION            ${OPENSSL_VERSION}
     )
 endif()
+
+# CUDA
+if (ENABLE_CUDA)
+    # The CUDA architecture cannot be guessed: nvcc needs it to emit device code for the
+    # target GPU, and a wrong value only fails at run time with "no kernel image is
+    # available for execution on the device".
+    if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        message(FATAL_ERROR "ENABLE_CUDA requires an explicit -DCMAKE_CUDA_ARCHITECTURES=<arch>. "
+                            "Query the target GPU with: "
+                            "nvidia-smi --query-gpu=gpu_name,compute_cap --format=csv")
+    endif()
+
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    sbom_add(
+        PACKAGE            "CUDA Toolkit"
+        DOWNLOAD_LOCATION  "https://developer.nvidia.com/cuda-toolkit"
+        SUPPLIER           "NVIDIA"
+        LICENSE            "LicenseRef-NVIDIA-CUDA-Toolkit-EULA"
+        VERSION            ${CUDAToolkit_VERSION}
+    )
+
+    # VkFFT is header-only and is not packaged by the distributions, so it is installed
+    # manually and located through VKFFT_ROOT. See docs/nvidia_cuda_build.md.
+    find_package(VkFFT REQUIRED)
+    sbom_add(
+        PACKAGE            "VkFFT"
+        DOWNLOAD_LOCATION  "https://github.com/DTolm/VkFFT"
+        SUPPLIER           "Dmitrii Tolmachev"
+        LICENSE            "MIT"
+        VERSION            ${VkFFT_VERSION}
+    )
+endif (ENABLE_CUDA)
 
 # FFTW
 if (ENABLE_FFTW)

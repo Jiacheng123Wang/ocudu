@@ -11,7 +11,7 @@
 #include "ocudu/asn1/asn1_utils.h"
 #include "ocudu/e2/e2.h"
 #include "ocudu/e2/e2_node_component_config.h"
-#include "ocudu/e2/e2ap_configuration.h"
+#include "ocudu/e2/e2ap_config.h"
 #include "ocudu/e2/e2sm/e2sm_manager.h"
 #include "ocudu/ran/bcd_helper.h"
 #include "ocudu/ran/gnb_du_id.h"
@@ -70,7 +70,7 @@ inline asn1::e2ap::e2node_component_interface_type_e map_interface_type(e2_node_
 
 inline void fill_asn1_e2ap_setup_request(ocudulog::basic_logger&                      logger,
                                          asn1::e2ap::e2setup_request_s&               setup,
-                                         const e2ap_configuration&                    e2ap_config,
+                                         const e2ap_config&                           e2ap_config,
                                          e2sm_manager&                                e2sm_mngr,
                                          const std::vector<e2_node_component_config>& node_cfgs)
 {

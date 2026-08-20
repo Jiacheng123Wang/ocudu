@@ -71,7 +71,7 @@ srs_allocator_impl::srs_allocator_impl(const cell_configuration&      cell_cfg_,
   srs_prohibit_time(prohibit_window.has_value()
                         ? std::optional<unsigned>(static_cast<unsigned>(prohibit_window.value()))
                         : std::nullopt),
-  srs_allocation_ring(slot_srs_allocation(MAX_NOF_DU_UES))
+  srs_allocation_ring(RES_MANAGER_RING_BUFFER_SIZE, slot_srs_allocation(MAX_NOF_DU_UES))
 {
   for (auto& srs_slot_alloc : srs_allocation_ring) {
     srs_slot_alloc.reset();

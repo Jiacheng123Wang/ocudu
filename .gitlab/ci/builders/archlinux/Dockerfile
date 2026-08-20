@@ -17,7 +17,7 @@ RUN install_dependencies.sh && pacman -Syu --noconfirm \
   base-devel \
   which \
   clang \
-  ccache valgrind \
+  ccache valgrind ninja \
   python-pip
 RUN pip install --break-system-packages gcovr==5.0
 

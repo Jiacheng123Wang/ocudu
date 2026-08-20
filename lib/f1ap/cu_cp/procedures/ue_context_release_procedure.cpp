@@ -4,6 +4,7 @@
 
 #include "ue_context_release_procedure.h"
 #include "asn1_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/common.h"
 #include "ocudu/f1ap/f1ap_message.h"
 #include "ocudu/ran/rb_id.h"

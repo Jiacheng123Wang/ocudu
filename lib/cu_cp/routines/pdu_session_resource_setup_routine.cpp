@@ -4,6 +4,7 @@
 
 #include "pdu_session_resource_setup_routine.h"
 #include "pdu_session_routine_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/cause/common.h"
 #include "ocudu/ran/cause/e1ap_cause.h"
 #include "ocudu/ran/cause/e1ap_cause_converters.h"

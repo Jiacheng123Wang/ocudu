@@ -4,6 +4,7 @@
 
 #include "lib/mac/mac_sched/positioning_handler.h"
 #include "tests/test_doubles/utils/test_rng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/mac/mac_positioning_measurement_handler.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/scheduler/scheduler_positioning_handler.h"

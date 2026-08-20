@@ -258,7 +258,7 @@ ue* inter_slice_scheduler::fetch_ue_to_update(du_ue_index_t ue_idx) const
   if (ue_cc == nullptr) {
     logger.warning("ue={}: Not adding UE to slice scheduler. Cause: No UE context found in cell {}",
                    fmt::underlying(ue_cfg.ue_index),
-                   fmt::underlying(cell_cfg.cell_index));
+                   cell_cfg.cell_index);
     return nullptr;
   }
   if (ue_cc->is_in_fallback_mode()) {
@@ -364,8 +364,7 @@ void inter_slice_scheduler::handle_slice_reconfiguration_request(const du_cell_s
     }
 
     if (not found) {
-      logger.warning(
-          "No slice RRM policy found for {} in cell {}.", rrm.rrc_member, fmt::underlying(cell_cfg.cell_index));
+      logger.warning("No slice RRM policy found for {} in cell {}.", rrm.rrc_member, cell_cfg.cell_index);
     }
   }
 }

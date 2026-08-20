@@ -5,6 +5,7 @@
 #include "lib/ngap/ngap_asn1_helpers.h"
 #include "lib/ngap/ngap_validators/ngap_validators.h"
 #include "ngap_test_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_configuration_helpers.h"
 #include "ocudu/ngap/ngap_types.h"
 #include "ocudu/ran/cu_cp_types.h"

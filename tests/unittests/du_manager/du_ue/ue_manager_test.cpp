@@ -8,6 +8,7 @@
 #include "lib/du/du_high/du_manager/metrics/du_procedure_metrics_collector.h"
 #include "tests/test_doubles/utils/test_rng.h"
 #include "tests/unittests/du_manager/du_manager_test_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_cell_config_helpers.h"
 #include "ocudu/mac/mac_pdu_handler.h"
 #include "ocudu/support/executors/manual_task_worker.h"
@@ -110,9 +111,13 @@ protected:
                             f1ap_dummy,
                             rlc_pcap,
                             nullptr,
+                            rlc_drb_rx_window_seg_size,
                             rlc_drb_rx_window_seg_pool_size,
+                            rlc_drb_tx_window_seg_size,
                             rlc_drb_tx_window_seg_pool_size,
+                            rlc_srb_rx_window_seg_size,
                             rlc_srb_rx_window_seg_pool_size,
+                            rlc_srb_tx_window_seg_size,
                             rlc_srb_tx_window_seg_pool_size},
                            {mac_dummy}};
 
@@ -353,9 +358,9 @@ public:
     if (is_mac_rlf_cause(cause)) {
       mac_rlf_notifier.on_rlf_detected(to_mac_rlf_cause(cause));
     } else if (cause == rlf_cause::max_rlc_retxs_reached) {
-      rlc_rlf_notifier.on_max_retx();
+      rlc_rlf_notifier.on_max_retx(drb_id_t::drb1);
     } else {
-      rlc_rlf_notifier.on_protocol_failure();
+      rlc_rlf_notifier.on_protocol_failure(drb_id_t::drb1);
     }
   }
 

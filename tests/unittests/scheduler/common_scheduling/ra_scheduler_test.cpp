@@ -5,6 +5,8 @@
 #include "lib/scheduler/common_scheduling/csi_rs_scheduler.h"
 #include "lib/scheduler/common_scheduling/ra_scheduler.h"
 #include "lib/scheduler/common_scheduling/sib1_scheduler.h"
+#include "lib/scheduler/ue_context/ue_cell_repository.h"
+#include "lib/scheduler/ue_context/ue_repository.h"
 #include "sub_scheduler_test_environment.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
@@ -161,8 +163,9 @@ public:
     }
   }
 
-  ra_ue_repository                  ra_ue_repo{cell_cfg, mac_logger};
-  ra_scheduler                      ra_sch{cell_cfg, *pdcch_alloc, pucch_alloc, ra_ue_repo, ev_logger, metrics_hdlr};
+  ra_ue_repository   ra_ue_repo{cell_cfg, mac_logger};
+  ue_cell_repository ue_cell_db{cell_cfg, nullptr};
+  ra_scheduler ra_sch{cell_cfg, *pdcch_alloc, pucch_alloc, uci_alloc, ra_ue_repo, ue_cell_db, ev_logger, metrics_hdlr};
   std::optional<csi_rs_scheduler>   csi_rs_sch;
   std::optional<sib1_scheduler>     sib1_sch;
   test_helper::ra_scheduler_tracker tracker{cell_cfg};
@@ -888,6 +891,40 @@ TEST_P(ra_scheduler_two_step_rach_test, when_mixed_crc_outcomes_both_rar_types_s
   ASSERT_EQ(tracker.nof_msg3_newtxs(), 1) << "FallbackRAR preamble must have a Msg3 PUSCH";
 }
 
+/// TS38.213, Section 8.2A: the successRAR/fallbackRAR PDCCH (MsgB-RNTI DCI format 1_0) must carry the 2 LSBs of the
+/// SFN where the UE transmitted PRACH whenever msgB-ResponseWindow is configured larger than 10 msec, or a
+/// MsgB-conformant UE discards the DCI/PDSCH. Otherwise, these bits are just reserved (0).
+TEST_P(ra_scheduler_two_step_rach_test, msgb_dci_carries_prach_sfn_lsbs_per_response_window_applicability)
+{
+  const rnti_t tc_rnti = to_rnti(to_value(rnti_t::MIN_CRNTI));
+  send_msga_rach({make_msga_preamble(0, tc_rnti)});
+
+  ASSERT_TRUE(run_slot_until([this]() { return not res_grid[0].result.ul.puschs.empty(); }));
+  send_msga_crc(0, true);
+
+  const pdcch_dl_information* msgb_pdcch = nullptr;
+  ASSERT_TRUE(run_slot_until([this, &msgb_pdcch]() {
+    auto it = std::find_if(res_grid[0].result.dl.dl_pdcchs.begin(),
+                           res_grid[0].result.dl.dl_pdcchs.end(),
+                           [](const pdcch_dl_information& p) {
+                             return p.dci.type() == dci_dl_rnti_config_type::ra_f1_0 and
+                                    ra_helper::is_valid_msgb_rnti(p.ctx.rnti);
+                           });
+    if (it != res_grid[0].result.dl.dl_pdcchs.end()) {
+      msgb_pdcch = &*it;
+      return true;
+    }
+    return false;
+  }));
+  ASSERT_NE(msgb_pdcch, nullptr);
+
+  const auto&    rach_cfg       = *cell_cfg.params.ul_cfg_common.init_ul_bwp.rach_cfg_common;
+  const unsigned resp_window_ms = rach_cfg.two_step_rach_cfg->msgB_response_window_slots >>
+                                  to_numerology_value(cell_cfg.params.dl_cfg_common.init_dl_bwp.generic_params.scs);
+  const unsigned expected_lsb_sfn = resp_window_ms > 10 ? (last_prach_slot_rx.sfn() & 0b11U) : 0U;
+  EXPECT_EQ(msgb_pdcch->dci.as_ra_rnti_f1_0().lsb_sfn, expected_lsb_sfn);
+}
+
 /// The MsgA PUSCH resources must be blocked in the UL resource grid before any PRACH preamble is detected,
 /// so that the UE PUSCH scheduler cannot steal them.
 TEST_P(ra_scheduler_two_step_rach_test, msga_pusch_rbs_are_pre_reserved_before_preamble_detection)
@@ -947,6 +984,111 @@ public:
 
   const du_ue_index_t cfra_ue_index = to_du_ue_index(5);
 };
+
+/// \brief Test fixture for a CFRA UE that holds a PUCCH in every UL slot, so that every candidate Msg3 slot
+/// collides with its UCI.
+///
+/// Parameterized on \c scheduler_ra_expert_config::multiplex_uci_on_cfra_msg3.
+class ra_scheduler_cfra_uci_on_msg3_test : public ra_scheduler_setup, public ::testing::TestWithParam<bool>
+{
+  static constexpr unsigned NOF_CB_PREAMBLES = 60;
+
+public:
+  ra_scheduler_cfra_uci_on_msg3_test() :
+    ra_scheduler_setup(make_expert_cfg(GetParam()), make_cfra_sched_req(), false, false)
+  {
+    ue_db.register_cell(ue_cell_db);
+
+    auto ue_req                    = sched_config_helper::create_default_sched_ue_creation_request(cell_cfg.params);
+    ue_req.ue_index                = cfra_ue_index;
+    ue_req.crnti                   = cfra_crnti;
+    ue_req.cfra_enabled            = true;
+    ue_req.ul_ccch_slot_rx         = std::nullopt;
+    const ue_configuration* ue_cfg = cfg_mng.add_ue(ue_req);
+    report_error_if_not(ue_cfg != nullptr, "Failed to create the CFRA UE configuration");
+    ue_db.add_ue(*ue_cfg, {sched_config_helper::to_ue_creation_mode(ue_req)});
+  }
+
+  static scheduler_expert_config make_expert_cfg(bool multiplex_uci_on_cfra_msg3)
+  {
+    auto cfg                                = config_helpers::make_default_scheduler_expert_config();
+    cfg.ra.multiplex_uci_on_cf_rar_ul_grant = multiplex_uci_on_cfra_msg3;
+    return cfg;
+  }
+
+  static sched_cell_configuration_request_message make_cfra_sched_req()
+  {
+    cell_config_builder_params bparams;
+    auto                       req = sched_config_helper::make_default_sched_cell_configuration_request(bparams);
+    req.ran.ul_cfg_common.init_ul_bwp.rach_cfg_common->nof_cb_preambles_per_ssb = NOF_CB_PREAMBLES;
+    return req;
+  }
+
+  rach_indication_message create_cfra_rach_indication() const
+  {
+    const unsigned cfra_preamble_id =
+        cell_cfg.params.ul_cfg_common.init_ul_bwp.rach_cfg_common->nof_cb_preambles_per_ssb;
+    auto preamble = test_helper::create_preamble(cfra_preamble_id, cfra_crnti);
+    return test_helper::create_rach_indication(next_slot_rx(), {preamble});
+  }
+
+  void do_run_slot() override
+  {
+    // Reserve a CSI PUCCH for the CFRA UE in every UL slot the RA scheduler could pick for its Msg3. CSI is used
+    // rather than SR because only HARQ-ACK and CSI bits are carried over to the PUSCH (SR is dropped instead).
+    const ue_cell_configuration& ue_cc_cfg = ue_cell_db[cfra_ue_index].cfg();
+    for (unsigned i = 0; i <= res_grid.max_ul_slot_alloc_delay; ++i) {
+      cell_slot_resource_allocator& slot_alloc = res_grid[i];
+      if (not cell_cfg.is_ul_enabled(slot_alloc.slot)) {
+        continue;
+      }
+      // Skip slots that already hold a grant for the UE: re-adding a PUCCH next to its Msg3 PUSCH would recreate
+      // the very overlap the UCI multiplexing is meant to resolve.
+      span<const pucch_info> pucchs = slot_alloc.result.ul.pucchs.unsorted();
+      const auto&            puschs = slot_alloc.result.ul.puschs;
+      const bool             has_grant =
+          std::any_of(pucchs.begin(), pucchs.end(), [this](const pucch_info& p) { return p.crnti == cfra_crnti; }) or
+          std::any_of(
+              puschs.begin(), puschs.end(), [this](const ul_sched_info& p) { return p.pusch_cfg.rnti == cfra_crnti; });
+      if (not has_grant) {
+        pucch_alloc.alloc_csi_opportunity(slot_alloc, ue_cc_cfg);
+      }
+    }
+    ra_scheduler_setup::do_run_slot();
+  }
+
+  const du_ue_index_t cfra_ue_index = to_du_ue_index(5);
+  const rnti_t        cfra_crnti    = to_rnti(0x4601);
+  ue_repository       ue_db{sched_cfg.ue};
+};
+
+TEST_P(ra_scheduler_cfra_uci_on_msg3_test, msg3_is_only_scheduled_over_a_pucch_when_uci_multiplexing_is_enabled)
+{
+  ra_sch.handle_cfra_mapping_update(cfra_ue_index, cfra_crnti);
+  handle_rach_indication(create_cfra_rach_indication());
+
+  bool msg3_seen     = false;
+  bool msg3_with_uci = false;
+  for (unsigned slot_count = 0, max_slots = 200; slot_count != max_slots; ++slot_count) {
+    run_slot();
+    for (const ul_sched_info& pusch : res_grid[0].result.ul.puschs) {
+      if (pusch.pusch_cfg.rnti != cfra_crnti) {
+        continue;
+      }
+      msg3_seen     = true;
+      msg3_with_uci = msg3_with_uci or pusch.uci.has_value();
+    }
+  }
+
+  if (GetParam()) {
+    ASSERT_TRUE(msg3_seen) << "Msg3 should be placed over the UE PUCCH when UCI multiplexing is enabled";
+    ASSERT_TRUE(msg3_with_uci) << "Msg3 should carry the UCI moved off the PUCCH";
+  } else {
+    ASSERT_FALSE(msg3_seen) << "Msg3 should avoid slots where the CFRA UE has a PUCCH";
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(uci_on_msg3, ra_scheduler_cfra_uci_on_msg3_test, ::testing::Bool());
 
 /// Verify that a Msg3 CRC with a valid UE index (CFRA path) is accepted by the RA scheduler.
 TEST_F(ra_scheduler_cfra_test, cfra_msg3_crc_with_valid_ue_index_is_accepted)

@@ -5,6 +5,10 @@
 #include "lib/cu_cp/xnap_repository.h"
 #include "tests/unittests/cu_cp/cu_cp_test_environment.h"
 #include "tests/unittests/cu_cp/test_helpers.h"
+#include "tests/unittests/xnap/xnap_test_helpers.h"
+#include "tests/unittests/xnap/xnap_test_messages.h"
+#include "ocudu/adt/format.h"
+#include "ocudu/support/async/async_test_utils.h"
 #include "ocudu/support/executors/manual_task_worker.h"
 #include <gtest/gtest.h>
 
@@ -39,7 +43,15 @@ public:
           .timers = timers, .cu_cp_executor = ctrl_worker, .logger = ocudulog::fetch_basic_logger("CU-CP")};
     }()),
     ue_mng(ue_cfg, ue_dependencies),
-    xnap_db(xnap_repository_config{get_cu_cp_cfg(), cu_cp_xnap_handler, test_logger})
+    // Drive the XNAPs from the fixture's own manual worker, so that procedures run inline and can be stepped
+    // deterministically from the test.
+    local_cu_cp_cfg([this]() {
+      cu_cp_configuration cfg     = get_cu_cp_cfg();
+      cfg.services.timers         = &timers;
+      cfg.services.cu_cp_executor = &ctrl_worker;
+      return cfg;
+    }()),
+    xnap_db(xnap_repository_config{local_cu_cp_cfg, cu_cp_xnap_handler, test_logger})
   {
   }
 
@@ -49,6 +61,7 @@ public:
   ue_manager_dependencies  ue_dependencies;
   ue_manager               ue_mng;
   dummy_cu_cp_xnap_handler cu_cp_xnap_handler{ue_mng};
+  cu_cp_configuration      local_cu_cp_cfg;
   xnap_repository          xnap_db;
 
   gnb_id_t                default_gnb_id{.id = 411, .bit_length = 22};
@@ -57,6 +70,29 @@ public:
   xnap_configuration xnap_cfg{.gnb_id           = default_gnb_id,
                               .tai_support_list = {default_supported_tracking_area},
                               .guami_list       = {default_guami}};
+
+  gnb_id_t           peer_gnb_id{.id = 412, .bit_length = 22};
+  xnap_configuration xnap_peer_cfg{.gnb_id           = peer_gnb_id,
+                                   .tai_support_list = {default_supported_tracking_area},
+                                   .guami_list       = {default_guami}};
+
+  /// Runs the XN setup procedure against \c xnap, with the peer advertising a single served cell.
+  void complete_xn_setup_with_served_cell(xnc_peer_index_t xnc_index, xnap_interface& xnap, pci_t served_pci)
+  {
+    xnap_db.connect_association(xnc_index, std::make_unique<dummy_xnap_message_notifier>(last_xnap_msg));
+
+    async_task<bool>         t = xnap.handle_xn_setup_request_required();
+    lazy_task_launcher<bool> t_launcher(t);
+
+    const nr_cell_global_id_t served_cgi{plmn_identity::test_value(), nr_cell_identity::create(0x19b0).value()};
+    xnap_message setup_resp = generate_xn_setup_response_with_served_cell(xnap_peer_cfg, served_pci, served_cgi);
+    xnap.handle_message(setup_resp);
+
+    ASSERT_TRUE(t.ready());
+    ASSERT_TRUE(t.get()) << "XN setup procedure failed";
+  }
+
+  xnap_message last_xnap_msg;
 };
 
 //----------------------------------------------------------------------------------//
@@ -99,4 +135,24 @@ TEST_F(cu_cp_xnap_repository_test, when_multihomed_peer_added_then_find_xnap_mat
   // An unrelated address must not match.
   const transport_layer_address unrelated = transport_layer_address::create_from_string("127.0.0.99");
   ASSERT_EQ(xnc_peer_index_t::invalid, xnap_db.find_xnap(unrelated)) << "Unexpected match for unrelated address";
+}
+
+TEST_F(cu_cp_xnap_repository_test, when_peer_serves_a_cell_then_xnap_is_found_by_its_pci)
+{
+  const pci_t served_pci = 42;
+
+  xnap_interface* xnap = xnap_db.add_xnap(xnc_peer_index_t::min, {default_peer_addr}, xnap_cfg);
+  ASSERT_TRUE(xnap != nullptr) << "Failed to add XNAP to repository";
+
+  // Served cells are only known once the peer advertised them at XN setup.
+  ASSERT_FALSE(xnap_db.find_xnap_index_by_served_pci(served_pci).has_value())
+      << "Unexpected match before the XN setup completed";
+
+  ASSERT_NO_FATAL_FAILURE(complete_xn_setup_with_served_cell(xnc_peer_index_t::min, *xnap, served_pci));
+
+  // A UE reestablishing on this PCI must resolve to the peer holding its context (TS 38.423 section 8.2.4).
+  ASSERT_EQ(xnc_peer_index_t::min, xnap_db.find_xnap_index_by_served_pci(served_pci))
+      << "Failed to retrieve XNAP index by served cell PCI";
+  ASSERT_FALSE(xnap_db.find_xnap_index_by_served_pci(static_cast<pci_t>(served_pci + 1)).has_value())
+      << "Unexpected match for a PCI no peer serves";
 }

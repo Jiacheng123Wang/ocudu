@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ru_ofh_config_validator.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/cyclic_prefix.h"
 
 using namespace ocudu;

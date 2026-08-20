@@ -4,6 +4,7 @@
 
 #include "pdsch_config_params.h"
 #include "../dmrs_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/pdsch/pdsch_constants.h"
 
 using namespace ocudu;

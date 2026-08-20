@@ -22,29 +22,33 @@ void rlc_pool_deleter::operator()<rlc_drb_tx_window_seg_pool>(rlc_drb_tx_window_
 }
 
 std::unique_ptr<rlc_drb_rx_window_seg_pool, rlc_pool_deleter>
-ocudu::make_rlc_drb_rx_window_seg_pool(size_t nof_segments)
+ocudu::make_rlc_drb_rx_window_seg_pool(size_t nof_segments, size_t segment_size)
 {
-  std::unique_ptr<rlc_drb_rx_window_seg_pool, rlc_pool_deleter> pool(new rlc_drb_rx_window_seg_pool(nof_segments));
+  std::unique_ptr<rlc_drb_rx_window_seg_pool, rlc_pool_deleter> pool(
+      new rlc_drb_rx_window_seg_pool(nof_segments, segment_size));
   return pool;
 }
 
 std::unique_ptr<rlc_drb_tx_window_seg_pool, rlc_pool_deleter>
-ocudu::make_rlc_drb_tx_window_seg_pool(size_t nof_segments)
+ocudu::make_rlc_drb_tx_window_seg_pool(size_t nof_segments, size_t segment_size)
 {
-  std::unique_ptr<rlc_drb_tx_window_seg_pool, rlc_pool_deleter> pool(new rlc_drb_tx_window_seg_pool(nof_segments));
+  std::unique_ptr<rlc_drb_tx_window_seg_pool, rlc_pool_deleter> pool(
+      new rlc_drb_tx_window_seg_pool(nof_segments, segment_size));
   return pool;
 }
 
 std::unique_ptr<rlc_srb_rx_window_seg_pool, rlc_pool_deleter>
-ocudu::make_rlc_srb_rx_window_seg_pool(size_t nof_segments)
+ocudu::make_rlc_srb_rx_window_seg_pool(size_t nof_segments, size_t segment_size)
 {
-  std::unique_ptr<rlc_srb_rx_window_seg_pool, rlc_pool_deleter> pool(new rlc_srb_rx_window_seg_pool(nof_segments));
+  std::unique_ptr<rlc_srb_rx_window_seg_pool, rlc_pool_deleter> pool(
+      new rlc_srb_rx_window_seg_pool(nof_segments, segment_size));
   return pool;
 }
 
 std::unique_ptr<rlc_srb_tx_window_seg_pool, rlc_pool_deleter>
-ocudu::make_rlc_srb_tx_window_seg_pool(size_t nof_segments)
+ocudu::make_rlc_srb_tx_window_seg_pool(size_t nof_segments, size_t segment_size)
 {
-  std::unique_ptr<rlc_srb_tx_window_seg_pool, rlc_pool_deleter> pool(new rlc_srb_tx_window_seg_pool(nof_segments));
+  std::unique_ptr<rlc_srb_tx_window_seg_pool, rlc_pool_deleter> pool(
+      new rlc_srb_tx_window_seg_pool(nof_segments, segment_size));
   return pool;
 }

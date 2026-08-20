@@ -124,12 +124,12 @@ struct dl_msg_alloc {
   struct decision_context {
     /// UE index of allocated UE.
     du_ue_index_t ue_index;
-    /// Chosen k1 delay to receive UCI HARQ-ACK.
-    unsigned k1;
+    /// Chosen k1 delay to receive UCI HARQ-ACK. Values: {0,...,15}.
+    uint8_t k1;
     /// Chosen search space id
     search_space_id ss_id;
     /// Number of times the HARQ process has been retransmitted.
-    unsigned nof_retxs;
+    uint8_t nof_retxs;
     /// Number of Rel-16 PDSCH repetitions selected for this grant, as per the TDRA row. Value 1 means no repetition.
     /// Shared by all occasions of the same bundle, including the PDCCH-less ones.
     uint8_t nof_repetitions{1};
@@ -148,7 +148,8 @@ struct dl_msg_alloc {
 /// with UL grant as per TS 38.213, Table 8.2-1.
 struct rar_ul_grant {
   // MAC subheader.
-  uint16_t rapid;
+  /// Random Access Preamble ID, as per TS 38.321, Section 6.2.2. Values: {0,...,63}.
+  uint8_t rapid;
 
   // RAR payload.
   uint16_t ta;
@@ -188,7 +189,8 @@ struct rar_information {
 
 /// Stores the information associated with an SSB.
 struct ssb_information {
-  unsigned          ssb_index;
+  /// SSB index, as per TS 38.213, Section 4.1. Values: {0,...,63}.
+  uint8_t           ssb_index;
   crb_interval      crbs;
   ofdm_symbol_range symbols;
 };

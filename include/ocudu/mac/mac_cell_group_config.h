@@ -10,6 +10,7 @@
 #include "ocudu/ran/drx_config.h"
 #include "ocudu/ran/sr_configuration.h"
 #include "ocudu/ran/time_alignment_config.h"
+#include <vector>
 
 namespace ocudu {
 

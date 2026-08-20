@@ -8,6 +8,7 @@
 #include "tests/test_doubles/nrppa/nrppa_test_message_validators.h"
 #include "tests/test_doubles/nrppa/nrppa_test_messages.h"
 #include "tests/unittests/cu_cp/cu_cp_test_environment.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents.h"
 #include "ocudu/asn1/ngap/common.h"
 #include "ocudu/asn1/ngap/ngap_pdu_contents.h"

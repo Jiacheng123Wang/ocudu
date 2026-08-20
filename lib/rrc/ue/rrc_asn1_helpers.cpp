@@ -311,6 +311,9 @@ void ocudu::ocucp::fill_asn1_rrc_resume_msg(asn1::rrc_nr::rrc_resume_s&        a
 
   rrc_resume_ies_s& asn1_resume_ies = asn1_rrc_resume.crit_exts.set_rrc_resume();
 
+  // Fill full configuration.
+  asn1_resume_ies.full_cfg_present = rrc_resume.full_cfg;
+
   // Fill radio bearer config.
   if (rrc_resume.radio_bearer_cfg.has_value()) {
     asn1_resume_ies.radio_bearer_cfg_present = true;

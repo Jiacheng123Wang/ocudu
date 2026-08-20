@@ -44,9 +44,11 @@ protected:
         t_bench.res_grid, ue.crnti, t_bench.k0, default_k1, t_bench.dci_info);
   }
 
-  std::optional<unsigned> alloc_ded_harq_ack(const ue& ue)
+  std::optional<unsigned> alloc_ded_harq_ack(const ue&               ue,
+                                             pucch_repetition_factor max_rep_factor = pucch_repetition_factor::n1)
   {
-    return t_bench.pucch_alloc.alloc_ded_harq_ack(t_bench.res_grid, ue.get_pcell().cfg(), t_bench.k0, default_k1);
+    return t_bench.pucch_alloc.alloc_ded_harq_ack(
+        t_bench.res_grid, ue.get_pcell().cfg(), t_bench.k0, default_k1, max_rep_factor);
   }
 
   std::optional<unsigned> alloc_common_and_ded_harq_ack(const ue& ue)

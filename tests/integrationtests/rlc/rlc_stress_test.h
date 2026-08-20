@@ -122,13 +122,13 @@ private:
 
   // Window segment pools
   std::unique_ptr<rlc_drb_rx_window_seg_pool, rlc_pool_deleter> drb_rx_seg_pool =
-      make_rlc_drb_rx_window_seg_pool(rlc_drb_rx_window_seg_pool_size);
+      make_rlc_drb_rx_window_seg_pool(rlc_drb_rx_window_seg_pool_size, rlc_drb_rx_window_seg_size);
   std::unique_ptr<rlc_drb_tx_window_seg_pool, rlc_pool_deleter> drb_tx_seg_pool =
-      make_rlc_drb_tx_window_seg_pool(rlc_drb_tx_window_seg_pool_size);
+      make_rlc_drb_tx_window_seg_pool(rlc_drb_tx_window_seg_pool_size, rlc_drb_tx_window_seg_size);
   std::unique_ptr<rlc_srb_rx_window_seg_pool, rlc_pool_deleter> srb_rx_seg_pool =
-      make_rlc_srb_rx_window_seg_pool(rlc_srb_rx_window_seg_pool_size);
+      make_rlc_srb_rx_window_seg_pool(rlc_srb_rx_window_seg_pool_size, rlc_srb_rx_window_seg_size);
   std::unique_ptr<rlc_srb_tx_window_seg_pool, rlc_pool_deleter> srb_tx_seg_pool =
-      make_rlc_srb_tx_window_seg_pool(rlc_srb_tx_window_seg_pool_size);
+      make_rlc_srb_tx_window_seg_pool(rlc_srb_tx_window_seg_pool_size, rlc_srb_tx_window_seg_size);
 };
 
 } // namespace ocudu

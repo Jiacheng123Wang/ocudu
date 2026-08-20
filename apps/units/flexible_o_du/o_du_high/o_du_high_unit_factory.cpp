@@ -16,6 +16,7 @@
 #include "du_high/metrics/du_metrics_producer.h"
 #include "e2/o_du_high_e2_config_translators.h"
 #include "o_du_high_unit_config.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/du/du_high/du_high.h"
 #include "ocudu/du/du_high/du_high_configuration.h"
 #include "ocudu/du/du_high/o_du_high_config.h"
@@ -110,13 +111,14 @@ static rlc_metrics_notifier* build_rlc_du_metrics(std::vector<app_services::metr
                                                   const o_du_high_unit_config&                 o_du_high_unit_cfg,
                                                   e2_du_metrics_notifier&                      e2_notifier)
 {
-  rlc_metrics_notifier*      out       = nullptr;
   const du_high_unit_config& du_hi_cfg = o_du_high_unit_cfg.du_high_cfg.config;
 
   // RLC metrics not enabled, do not add metrics configuration.
   if (!du_hi_cfg.metrics.layers_cfg.enable_rlc) {
-    return out;
+    return nullptr;
   }
+
+  rlc_metrics_notifier* out = nullptr;
 
   app_services::metrics_config& rlc_metrics_cfg = metrics.emplace_back();
   rlc_metrics_cfg.metric_name                   = rlc_metrics_properties_impl().name();
@@ -225,10 +227,10 @@ o_du_high_unit ocudu::make_o_du_high_unit(const o_du_high_unit_config&  o_du_hig
   if (o_du_high_unit_cfg.e2_cfg.base_cfg.enable_unit_e2) {
     // Connect E2 agent to RLC metric source.
     dependencies.o_du_hi_dependencies.e2_client = &dependencies.e2_client_handler;
-    o_du_high_cfg.e2ap_config                   = generate_e2_config(o_du_high_unit_cfg.e2_cfg,
-                                                   du_high_unit_cfg.gnb_id,
-                                                   du_high_unit_cfg.cells_cfg.front().cell.plmn,
-                                                   du_hi_cfg.ran.gnb_du_id);
+    o_du_high_cfg.e2ap_cfg                      = generate_e2_config(o_du_high_unit_cfg.e2_cfg,
+                                                du_high_unit_cfg.gnb_id,
+                                                du_high_unit_cfg.cells_cfg.front().cell.plmn,
+                                                du_hi_cfg.ran.gnb_du_id);
     dependencies.o_du_hi_dependencies.e2_du_metric_iface =
         &(dependencies.e2_metric_connectors.get_e2_metrics_interface(0));
   }

@@ -12,7 +12,7 @@ RUN TZ=Europe/Madrid && \
     dnf install -y \
     which git \
     clang llvm \
-    ccache gcovr valgrind \
+    ccache gcovr valgrind ninja-build \
     python3-devel python3-virtualenv && \
     dnf install -y libstdc++-static && \
     dnf autoremove -y && dnf clean all && rm -rf /var/cache/dnf

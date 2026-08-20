@@ -6,6 +6,7 @@
 #include "../f1ap_asn1_converters.h"
 #include "asn1_helpers.h"
 #include "ocudu/adt/expected.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/common.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents.h"
 #include "ocudu/f1ap/cu_cp/du_setup_notifier.h"

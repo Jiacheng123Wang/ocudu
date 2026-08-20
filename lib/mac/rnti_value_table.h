@@ -6,6 +6,7 @@
 
 #include "ocudu/ran/rnti.h"
 #include "ocudu/support/ocudu_assert.h"
+#include "fmt/format.h"
 #include <atomic>
 #include <limits>
 #include <memory>

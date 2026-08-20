@@ -6,6 +6,7 @@
 #include "../../asn1_helpers.h"
 #include "../ue_context/f1ap_du_ue_manager.h"
 #include "proc_logger.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/common.h"
 #include "ocudu/f1ap/f1ap_message.h"
 #include "ocudu/support/async/async_no_op_task.h"

@@ -6,7 +6,7 @@
 
 #include "ocudu/ran/gtpu/gtpu_teid.h"
 #include "ocudu/support/rate_limiting/token_bucket.h"
-#include "fmt/format.h"
+#include "fmt/base.h"
 #include <chrono>
 #include <cstdint>
 #include <string>

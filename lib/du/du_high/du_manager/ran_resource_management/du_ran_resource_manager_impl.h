@@ -16,6 +16,7 @@
 #include "ocudu/ran/qos/five_qi.h"
 #include "ocudu/scheduler/rrm/pucch_resource_manager.h"
 #include "ocudu/scheduler/rrm/srs_resource_manager.h"
+#include <vector>
 
 namespace ocudu {
 namespace odu {
@@ -59,6 +60,12 @@ private:
 
 class du_ran_resource_manager_impl : public du_ran_resource_manager
 {
+  /// Maximum number of UE contexts that a single cell can hold.
+  static constexpr unsigned max_nof_ue_ctxts_per_cell = MAX_NOF_DU_UES_PER_CELL;
+
+  /// Number of UE contexts per cell reserved for UEs that need to be RRC Rejected.
+  static constexpr unsigned max_nof_rejected_ue_ctxts = 64;
+
 public:
   du_ran_resource_manager_impl(span<const du_cell_config>                cell_cfg_list_,
                                const scheduler_expert_config&            scheduler_cfg,
@@ -73,7 +80,9 @@ public:
   expected<ue_ran_resource_configurator, std::string>
   create_ue_resource_configurator(du_ue_index_t ue_index, du_cell_index_t pcell_index, bool has_tc_rnti) override;
 
-  unsigned get_max_nof_setup_ues(du_cell_index_t cell_index) const override;
+  unsigned get_max_nof_established_ue_contexts(du_cell_index_t cell_index) const override;
+
+  unsigned get_max_nof_rejected_ue_contexts(du_cell_index_t cell_index) const override;
 
   /// \brief Updates a UE's cell configuration context based on the F1 UE Context Update request.
   ///
@@ -101,9 +110,28 @@ public:
   void ue_config_applied(du_ue_index_t ue_index);
 
 private:
+  // Tracks the UE context capacity and usage of a cell.
+  struct cell_ue_context_count {
+    /// Upper-bound on the number of UEs that the cell can support with dedicated resources.
+    unsigned max_nof_established = 0;
+
+    /// Number of UE contexts currently allocated in the cell.
+    unsigned nof_allocated = 0;
+
+    unsigned max_nof_ue_ctxts() const { return max_nof_established + max_nof_rejected_ue_ctxts; }
+
+    bool full() const { return nof_allocated >= max_nof_ue_ctxts(); }
+  };
+
   error_type<std::string>
        allocate_cell_resources(du_ue_index_t ue_index, du_cell_index_t cell_index, serv_cell_index_t serv_cell_index);
   void deallocate_cell_resources(du_ue_index_t ue_index, serv_cell_index_t serv_cell_index);
+
+  // Computes the upper-bound on the number of UEs that a cell can support with dedicated resources.
+  unsigned compute_max_nof_established_ue_ctxts(du_cell_index_t cell_index) const;
+
+  // Reattributes an allocated UE context from one cell to another, on PCell change.
+  void move_ue_ctxt_count(du_cell_index_t old_pcell_index, du_cell_index_t new_pcell_index);
 
   span<const du_cell_config> cell_cfg_list;
   ocudulog::basic_logger&    logger;
@@ -146,6 +174,9 @@ private:
 
   // Allocator of RA resources.
   ra_resource_manager ra_res_alloc;
+
+  // UE context capacity and usage of each cell of the DU.
+  std::vector<cell_ue_context_count> cell_ue_ctxts;
 };
 
 } // namespace odu

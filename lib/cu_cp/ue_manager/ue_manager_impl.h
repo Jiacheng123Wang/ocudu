@@ -221,29 +221,20 @@ private:
 
   void increase_full_i_rnti(full_i_rnti_t& full_i_rnti) const
   {
-    if (full_i_rnti.value() == full_i_rnti.max()) {
-      // Reset Full-I-RNTI counter.
-      full_i_rnti = full_i_rnti_t{gnb_id.id, 0, ue_config.nof_i_rnti_ue_bits};
-    } else {
-      // Increase Full-I-RNTI counter.
-      uint32_t next_ue_id = (full_i_rnti.value() - (gnb_id.id >> ue_config.nof_i_rnti_ue_bits)) + 1;
-      full_i_rnti         = full_i_rnti_t{gnb_id.id, next_ue_id, ue_config.nof_i_rnti_ue_bits};
-    }
+    // Count the UE reference up, wrapping around at the width the I-RNTI profile leaves for it and keeping the node
+    // identifier.
+    const uint32_t next_ue_ref =
+        full_i_rnti.ue_ref() == full_i_rnti_t::max_ue_ref(full_i_rnti.profile()) ? 0 : full_i_rnti.ue_ref() + 1;
+    full_i_rnti = full_i_rnti_t{full_i_rnti.profile(), full_i_rnti.node_id(), next_ue_ref};
   }
 
   void increase_short_i_rnti(short_i_rnti_t& short_i_rnti) const
   {
-    if (short_i_rnti.value() == short_i_rnti.max()) {
-      // Reset Short-I-RNTI counter.
-      short_i_rnti = short_i_rnti_t{gnb_id.id, 0, ue_config.nof_i_rnti_ue_bits};
-    } else {
-      // Increase Short-I-RNTI counter.
-      uint32_t next_ue_id = (short_i_rnti.value() - (gnb_id.id >> ue_config.nof_i_rnti_ue_bits)) + 1;
-      short_i_rnti        = short_i_rnti_t{gnb_id.id, next_ue_id, ue_config.nof_i_rnti_ue_bits};
-    }
+    const uint32_t next_ue_ref =
+        short_i_rnti.ue_ref() == short_i_rnti_t::max_ue_ref(short_i_rnti.profile()) ? 0 : short_i_rnti.ue_ref() + 1;
+    short_i_rnti = short_i_rnti_t{short_i_rnti.profile(), short_i_rnti.node_id(), next_ue_ref};
   }
 
-  const gnb_id_t                gnb_id;
   const bool                    enable_rrc_metrics;
   const ue_configuration        ue_config;
   const up_resource_manager_cfg up_config;

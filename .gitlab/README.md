@@ -88,17 +88,17 @@ Different pipeline types use different runner tags:
 | Tag | When Used | Runner Type | Requirements |
 | ----- | ----------- | ------------- | -------------- |
 | (no tag) | All pipelines | Free GitLab Shared Runners | Small tasks, minimal resources |
-| `saas-linux-medium-amd64` | MR pipelines & Scheduled pipelines* | Free GitLab Shared Runners | Available to all GitLab users |
-| `saas-linux-medium-arm64` | MR pipelines & Scheduled pipelines* | Free GitLab Shared Runners | Available to all GitLab users |
-| `avx512` | Scheduled pipelines | Custom Runner | AVX512 instruction set support (typically combined with `saas-linux-large-amd64`) |
-| `sctp` | Scheduled pipelines | Custom Runner | SCTP kernel module active (typically combined with `saas-linux-large-amd64` or `saas-linux-large-arm64`) |
+| `saas-linux-medium-amd64` | MR pipelines & Scheduled pipelines | Free GitLab Shared Runners | Available to all GitLab users |
+| `saas-linux-medium-arm64` | Scheduled pipelines | GitLab Shared Runners / Custom Runners | Available to Premium / Ultimate GitLab users |
+| `avx512` | Scheduled pipelines | Custom Runner | AVX512 instruction set support (combined with `saas-linux-medium-amd64`) |
+| `sctp` | Scheduled pipelines | Custom Runner | SCTP kernel module active (combined with `saas-linux-medium-amd64` or `saas-linux-medium-arm64`) |
 
-> The CI is using `OCUDU_RUNNER_TAG` variable with value `saas-linux-medium` to define the default runner type for OCUDU builds. You can change that variable at group / project level and select other runners in your forked repo. For example, setting `OCUDU_RUNNER_TAG` to `saas-linux-large` will use `saas-linux-large-amd64` / `saas-linux-large-arm64` in all OCUDU build jobs.
+> The CI is using `OCUDU_RUNNER_TAG` variable with value `saas-linux-medium` to define the default runner type for OCUDU builds. You can change that variable at group / project level and select other runners in your forked repo. For example, setting `OCUDU_RUNNER_TAG` to `saas-linux-large` will use `saas-linux-large-amd64` / `saas-linux-large-arm64` in all OCUDU build jobs. `saas-linux-large` are available in Premium / Ultimate GitLab tiers.
 
 #### Default Behavior
 
 - **MR Pipelines**: Work out-of-the-box for all GitLab users using free shared runners
-- **Scheduled Pipelines**: Require Premium/Ultimate subscription for most jobs, plus custom runners for specialized features (AVX512, SCTP)
+- **Scheduled Pipelines**: Require custom runners for specialized features (AVX512, SCTP)
 
 #### Custom Runner Options
 
@@ -107,15 +107,13 @@ You have several options for configuring runners:
 **Option 1 - GitLab Shared Runners Only (Default)**
 
 - Enable shared runners in **Settings → CI/CD → Runners**
-- Requires Premium/Ultimate for scheduled pipelines
-- Some features (AVX512, SCTP) won't be tested because they require custom runners
+- Scheduled pipeline: Some features (AVX512, SCTP) won't be tested because they require custom runners
 
 **Option 2 - Custom Runners Only**
 
 - Disable GitLab shared runners
 - Set up your own on-premise or cloud runners with matching tags:
-  - `saas-linux-medium-amd64` and/or `saas-linux-medium-arm64` for MR pipelines
-  - `saas-linux-large-amd64` and/or `saas-linux-large-arm64` for scheduled pipelines
+  - `saas-linux-medium-amd64` and/or `saas-linux-medium-arm64` for build jobs. These tags should match `${OCUDU_RUNNER_TAG}-amd64` / `${OCUDU_RUNNER_TAG}-arm64` in case you want to modify that variable.
   - `avx512` for jobs requiring AVX512 instruction set
   - `sctp` for jobs requiring SCTP protocol support
 - See [GitLab Runner installation guide](https://docs.gitlab.com/runner/install/)

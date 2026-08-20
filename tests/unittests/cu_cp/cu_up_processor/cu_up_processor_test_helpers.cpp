@@ -5,6 +5,7 @@
 #include "cu_up_processor_test_helpers.h"
 #include "lib/cu_cp/cu_up_processor/cu_up_processor_config.h"
 #include "lib/cu_cp/cu_up_processor/cu_up_processor_factory.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/cu_cp/cu_cp_configuration_helpers.h"
 
 using namespace ocudu;

@@ -14,13 +14,12 @@ namespace ocudu {
 /// Numbers (SN).
 ///
 /// \tparam T Storage Type.
-/// \tparam L Number of slots per segment.
 /// \tparam PREFIXED_LOGGER An implementation of a prefixed_logger<type> for logging.
-template <typename T, size_t L, typename PREFIXED_LOGGER>
+template <typename T, typename PREFIXED_LOGGER>
 class segmented_sdu_window
 {
 public:
-  segmented_sdu_window(PREFIXED_LOGGER& logger_, size_t size, map_segment_pool_interface<uint32_t, T, L>& pool) :
+  segmented_sdu_window(PREFIXED_LOGGER& logger_, size_t size, map_segment_pool_interface<uint32_t, T>& pool) :
     logger(logger_), window(size, pool)
   {
   }
@@ -67,8 +66,8 @@ public:
   bool has_sn(uint32_t sn) const { return window.contains(sn); }
 
 private:
-  PREFIXED_LOGGER&                       logger;
-  segmented_circular_map<uint32_t, T, L> window;
+  PREFIXED_LOGGER&                    logger;
+  segmented_circular_map<uint32_t, T> window;
 };
 
 } // namespace ocudu

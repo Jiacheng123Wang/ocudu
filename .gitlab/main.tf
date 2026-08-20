@@ -183,6 +183,20 @@ module "settings" {
       allowed_to_merge = [{ access_level = "no one" }]
       allowed_to_push  = [{ access_level = "maintainer" }]
     }
+    srs_rf = {
+      allow_force_push             = false
+      code_owner_approval_required = false
+
+      allowed_to_merge = [{ access_level = "no one" }]
+      allowed_to_push  = [{ access_level = "maintainer" }]
+    }
+    srs_interop = {
+      allow_force_push             = false
+      code_owner_approval_required = false
+
+      allowed_to_merge = [{ access_level = "no one" }]
+      allowed_to_push  = [{ access_level = "maintainer" }]
+    }
   }
 
   # =============================================================================

@@ -68,6 +68,12 @@ public:
     return cu_cp_handler->handle_transaction_info_loss(ev);
   }
 
+  void on_served_cells_updated() override
+  {
+    ocudu_assert(cu_cp_handler != nullptr, "CU-CP handler must not be nullptr");
+    cu_cp_handler->handle_served_cells_updated();
+  }
+
 private:
   cu_cp_du_event_handler*                cu_cp_handler       = nullptr;
   cu_cp_measurement_config_handler*      meas_config_handler = nullptr;

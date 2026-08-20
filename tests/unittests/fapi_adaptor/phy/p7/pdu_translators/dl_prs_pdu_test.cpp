@@ -4,6 +4,7 @@
 
 #include "../message_builder_helpers.h"
 #include "prs.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/fapi_adaptor/precoding_matrix_table_generator.h"
 #include "ocudu/phy/upper/signal_processors/prs/prs_generator_configuration.h"
 #include <gtest/gtest.h>

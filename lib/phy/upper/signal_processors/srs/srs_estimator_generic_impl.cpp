@@ -6,6 +6,7 @@
 #include "srs_validator_generic_impl.h"
 #include "ocudu/adt/complex.h"
 #include "ocudu/adt/expected.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/static_vector.h"
 #include "ocudu/adt/tensor.h"
 #include "ocudu/ocuduvec/add.h"

@@ -5,6 +5,7 @@
 #pragma once
 
 #include "ocudu/adt/byte_buffer.h"
+#include "ocudu/ran/rb_id.h"
 #include "ocudu/rlc/rlc_buffer_state.h"
 #include <optional>
 
@@ -131,8 +132,8 @@ public:
   rlc_tx_upper_layer_control_notifier(rlc_tx_upper_layer_control_notifier&&)                 = delete;
   rlc_tx_upper_layer_control_notifier& operator=(rlc_tx_upper_layer_control_notifier&&)      = delete;
 
-  virtual void on_protocol_failure() = 0;
-  virtual void on_max_retx()         = 0;
+  virtual void on_protocol_failure(rb_id_t rb_id) = 0;
+  virtual void on_max_retx(rb_id_t rb_id)         = 0;
 };
 
 /***************************************

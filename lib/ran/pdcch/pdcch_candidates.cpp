@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ocudu/ran/pdcch/pdcch_candidates.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/pdcch/aggregation_level.h"
 #include "ocudu/ran/rnti.h"
 

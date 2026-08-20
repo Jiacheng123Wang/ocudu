@@ -7,6 +7,7 @@
 #include "lib/scheduler/config/du_cell_group_config_pool.h"
 #include "lib/scheduler/logging/cell_metrics_handler.h"
 #include "lib/scheduler/ue_context/ue.h"
+#include "lib/scheduler/ue_context/ue_cell_repository.h"
 #include "lib/scheduler/ue_context/ue_repository.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "ocudu/scheduler/config/logical_channel_config_factory.h"
@@ -34,7 +35,8 @@ protected:
     // Create cell.
     const sched_cell_configuration_request_message sched_cell_cfg_req = cfg_mng.get_default_cell_config_request();
     cell_cfg                                                          = cfg_mng.add_cell(sched_cell_cfg_req);
-    ues.add_cell(*cell_cfg, nullptr);
+    cell_ues.emplace(*cell_cfg, nullptr);
+    ues.register_cell(*cell_ues);
     next_slot = test_helper::generate_random_slot_point(cell_cfg->params.dl_cfg_common.init_dl_bwp.generic_params.scs);
 
     // Create UE.
@@ -101,9 +103,10 @@ protected:
 
   ocudulog::basic_logger& logger;
 
-  ue_repository ues;
-  ue*           ue_ptr = nullptr;
-  ue_cell*      ue_cc  = nullptr;
+  std::optional<ue_cell_repository> cell_ues;
+  ue_repository                     ues;
+  ue*                               ue_ptr = nullptr;
+  ue_cell*                          ue_cc  = nullptr;
 
   slot_point next_slot;
 };

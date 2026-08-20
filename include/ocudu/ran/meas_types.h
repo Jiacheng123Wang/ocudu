@@ -18,7 +18,7 @@
 namespace ocudu::ocucp {
 
 /// Maximum number of measurements.
-const uint8_t MAX_NOF_MEAS = 64;
+constexpr uint8_t MAX_NOF_MEAS = 64;
 
 /// Meas index.
 enum class meas_id_t : uint8_t { min = 1, max = MAX_NOF_MEAS, invalid = MAX_NOF_MEAS + 1 };
@@ -36,7 +36,7 @@ inline meas_id_t uint_to_meas_id(uint8_t id)
 }
 
 /// Maximum number of measurement objects.
-const uint8_t MAX_NOF_MEAS_OBJ = 64;
+constexpr uint8_t MAX_NOF_MEAS_OBJ = 64;
 
 /// Meas object index.
 enum class meas_obj_id_t : uint8_t { min = 1, max = MAX_NOF_MEAS_OBJ, invalid = MAX_NOF_MEAS_OBJ + 1 };
@@ -54,7 +54,7 @@ inline meas_obj_id_t uint_to_meas_obj_id(uint8_t id)
 }
 
 /// Maximum number of report configs.
-const uint8_t MAX_NOF_REPORT_CFG = 64;
+constexpr uint8_t MAX_NOF_REPORT_CFG = 64;
 
 /// Report config index.
 enum class report_cfg_id_t : uint8_t { min = 0, max = MAX_NOF_REPORT_CFG - 1, invalid = MAX_NOF_REPORT_CFG };
@@ -393,33 +393,98 @@ using rrc_meas_trigger_quant_offset = rrc_meas_trigger_quant;
 
 struct rrc_event_id {
   enum class event_id_t : uint8_t { a1, a2, a3, a4, a5, a6, d1, t1, d2 };
-  // common parameters
+
+  /// Common parameters.
   event_id_t id;
+  bool       report_on_leave;
+  uint8_t    hysteresis;
+  uint16_t   time_to_trigger;
 
-  bool     report_on_leave;
-  uint8_t  hysteresis;
-  uint16_t time_to_trigger;
+  // Event A1/A2/A4/A5.
+  /// Threshold for the measurement trigger quantity of event A1/A2/A4/A5 or offset for event A3/A6.
+  std::optional<rrc_meas_trigger_quant> meas_trigger_quant_thres_or_offset;
+  /// Threshold 2 for the measurement trigger quantity of event A5.
+  std::optional<rrc_meas_trigger_quant> meas_trigger_quant_thres_2;
 
-  // event A1/A2/A4/A5
-  std::optional<rrc_meas_trigger_quant>
-      meas_trigger_quant_thres_or_offset; ///< Threshold for the measurement trigger quantity of event A1/A2/A4/A5 or
-                                          ///< offset for event A3/A6
-  std::optional<rrc_meas_trigger_quant>
-      meas_trigger_quant_thres_2; ///< Threshold 2 for the measurement trigger quantity of event A5
+  /// For event A3/A4/A5/A6.
+  std::optional<bool> use_allowed_cell_list;
 
-  std::optional<bool> use_allowed_cell_list; ///< For event A3/A4/A5/A6
+  /// D1/D2: distance-based fields.
+  /// In meters (D1:[0..65535*50] D2:[0..65535*50]).
+  std::optional<uint32_t> distance_thresh_from_ref1;
+  /// In meters.
+  std::optional<uint32_t> distance_thresh_from_ref2;
+  /// D1: reference location for serving cell.
+  std::optional<reference_location> ref_location1;
+  /// D1: reference location for target cell.
+  std::optional<reference_location> ref_location2;
+  /// D1/D2: in meters [0..327680] (ASN.1 encodes in 10m steps).
+  std::optional<uint32_t> hysteresis_location;
 
-  // D1/D2: distance-based fields
-  std::optional<uint32_t>           distance_thresh_from_ref1; ///< in meters (D1:[0..65535*50] D2:[0..65535*50])
-  std::optional<uint32_t>           distance_thresh_from_ref2; ///< in meters
-  std::optional<reference_location> ref_location1;             ///< D1: reference location for serving cell
-  std::optional<reference_location> ref_location2;             ///< D1: reference location for target cell
-  std::optional<uint32_t>           hysteresis_location; ///< D1/D2: in meters [0..327680] (ASN.1 encodes in 10m steps)
-
-  // T1: time-based fields
-  std::optional<std::chrono::system_clock::time_point> t1_thres; ///< UTC time threshold
-  std::optional<unsigned>                              duration; ///< milliseconds [100..600000]
+  /// T1: time-based fields.
+  /// UTC time threshold.
+  std::optional<std::chrono::system_clock::time_point> t1_thres;
+  /// Milliseconds [100..600000].
+  std::optional<unsigned> duration;
 };
+
+inline std::optional<rrc_event_id::event_id_t> from_string(const std::string& str)
+{
+  if (str == "a1") {
+    return rrc_event_id::event_id_t::a1;
+  }
+  if (str == "a2") {
+    return rrc_event_id::event_id_t::a2;
+  }
+  if (str == "a3") {
+    return rrc_event_id::event_id_t::a3;
+  }
+  if (str == "a4") {
+    return rrc_event_id::event_id_t::a4;
+  }
+  if (str == "a5") {
+    return rrc_event_id::event_id_t::a5;
+  }
+  if (str == "a6") {
+    return rrc_event_id::event_id_t::a6;
+  }
+  if (str == "d1") {
+    return rrc_event_id::event_id_t::d1;
+  }
+  if (str == "t1") {
+    return rrc_event_id::event_id_t::t1;
+  }
+  if (str == "d2") {
+    return rrc_event_id::event_id_t::d2;
+  }
+  return std::nullopt;
+}
+
+inline const char* to_string(rrc_event_id::event_id_t id)
+{
+  switch (id) {
+    case rrc_event_id::event_id_t::a1:
+      return "a1";
+    case rrc_event_id::event_id_t::a2:
+      return "a2";
+    case rrc_event_id::event_id_t::a3:
+      return "a3";
+    case rrc_event_id::event_id_t::a4:
+      return "a4";
+    case rrc_event_id::event_id_t::a5:
+      return "a5";
+    case rrc_event_id::event_id_t::a6:
+      return "a6";
+    case rrc_event_id::event_id_t::d1:
+      return "d1";
+    case rrc_event_id::event_id_t::t1:
+      return "t1";
+    case rrc_event_id::event_id_t::d2:
+      return "d2";
+    default:
+      return "invalid";
+  }
+}
 
 struct rrc_event_trigger_cfg {
   bool                                 report_add_neigh_meas_present;

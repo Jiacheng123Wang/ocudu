@@ -128,8 +128,9 @@ public:
       cell_strands[i].mac_cell_exec =
           &decorator.decorate(execs[0], is_sync, trace_enabled, std::nullopt, metric_channel_registry, exec_name);
       exec_name = trace_enabled or metric_channel_registry ? fmt::format("rlc_lower_exec#{}", i) : "";
+      // always async, avoid backpressure in upper layers that would interfere with the PDCP-RLC flow control loop.
       cell_strands[i].rlc_lower_exec =
-          &decorator.decorate(execs[1], is_sync, trace_enabled, std::nullopt, metric_channel_registry, exec_name);
+          &decorator.decorate(execs[1], false, trace_enabled, std::nullopt, metric_channel_registry, exec_name);
     }
   }
 

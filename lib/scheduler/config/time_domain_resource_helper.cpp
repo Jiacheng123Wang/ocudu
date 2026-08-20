@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ocudu/scheduler/config/time_domain_resource_helper.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/pusch/pusch_constants.h"
 #include "ocudu/ran/tdd/tdd_ul_dl_config.h"
 #include "ocudu/scheduler/config/bwp_configuration.h"

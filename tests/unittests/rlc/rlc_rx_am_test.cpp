@@ -433,7 +433,7 @@ protected:
   virtual rlc_drb_am_rx_window_seg_pool& get_window_pool() { return pool->get_pool_of_type<rlc_rx_am_sdu_info>(); }
 
   std::unique_ptr<rlc_drb_rx_window_seg_pool, rlc_pool_deleter> pool =
-      make_rlc_drb_rx_window_seg_pool(rlc_drb_rx_window_seg_pool_size);
+      make_rlc_drb_rx_window_seg_pool(rlc_drb_rx_window_seg_pool_size, rlc_drb_rx_window_seg_size);
 
   ocudulog::basic_logger&                       logger  = ocudulog::fetch_basic_logger("TEST", false);
   rlc_rx_am_config                              config  = GetParam();
@@ -458,8 +458,9 @@ private:
   class rlc_rx_am_window_seg_pool_dummy : public rlc_drb_am_rx_window_seg_pool
   {
   public:
-    map_segment<uint32_t, rlc_rx_am_sdu_info, rlc_drb_rx_window_seg_size>* get_segment() override { return nullptr; }
-    void return_segment(map_segment<uint32_t, rlc_rx_am_sdu_info, rlc_drb_rx_window_seg_size>* seg) override {}
+    ocudu::span<std::optional<detail::kv_obj<uint32_t, rlc_rx_am_sdu_info>>> get_segment() override { return {}; }
+    void   return_segment(ocudu::span<std::optional<detail::kv_obj<uint32_t, rlc_rx_am_sdu_info>>>) override {}
+    size_t segment_size() const override { return rlc_drb_rx_window_seg_size; }
   };
 
   rlc_rx_am_window_seg_pool_dummy dummy_pool = {};

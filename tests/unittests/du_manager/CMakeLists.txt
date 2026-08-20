@@ -62,6 +62,7 @@ add_executable(du_manager_procedure_test
         procedures/await_all_ues_test.cpp
         procedures/du_param_config_procedure_test.cpp
         procedures/du_pws_broadcast_procedure_test.cpp
+        procedures/du_cell_stop_procedure_test.cpp
 )
 target_include_directories(du_manager_procedure_test PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(du_manager_procedure_test du_manager_test_helpers gtest ocudu_gtest_main)
@@ -96,6 +97,11 @@ add_executable(sib19_value_tag_test sib19_value_tag_test.cpp)
 target_include_directories(sib19_value_tag_test PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(sib19_value_tag_test ocudu_du_high du_manager_converters ocudu_du_manager ocudu_support ocudulog gtest gtest_main)
 gtest_discover_tests(sib19_value_tag_test)
+
+add_executable(du_ntn_sib19_update_test du_ntn_sib19_update_test.cpp)
+target_include_directories(du_ntn_sib19_update_test PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(du_ntn_sib19_update_test du_manager_test_helpers ocudu_du_high du_manager_converters ocudu_du_manager ocudu_support ocudulog gtest gtest_main)
+gtest_discover_tests(du_ntn_sib19_update_test)
 
 add_executable(asn1_sib1_sched_info_test asn1_sib1_sched_info_test.cpp)
 target_include_directories(asn1_sib1_sched_info_test PRIVATE ${CMAKE_SOURCE_DIR})

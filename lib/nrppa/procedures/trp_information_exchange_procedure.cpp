@@ -5,6 +5,7 @@
 #include "trp_information_exchange_procedure.h"
 #include "../nrppa_asn1_converters.h"
 #include "../nrppa_helper.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/nrppa/common.h"
 #include "ocudu/asn1/nrppa/nrppa_pdu_contents.h"
 #include "ocudu/support/async/coroutine.h"

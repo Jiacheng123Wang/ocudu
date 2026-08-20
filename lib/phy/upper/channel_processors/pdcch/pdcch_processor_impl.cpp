@@ -4,6 +4,7 @@
 
 #include "pdcch_processor_impl.h"
 #include "pdcch_processor_validator_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/pdcch/cce_to_prb_mapping.h"
 #include "ocudu/ran/resource_allocation/rb_bitmap.h"
 #include "ocudu/support/math/math_utils.h"

@@ -3,9 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "demodulation_mapper_qpsk.h"
-#ifndef M_SQRT2f32
-#define M_SQRT2f32 1.41421356237309504880f
-#endif
+#include <cmath>
 
 #ifdef __AVX2__
 #include "avx2_helpers.h"

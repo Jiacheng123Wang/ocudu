@@ -5,6 +5,7 @@
 #include "lib/mac/mac_ul/mac_ul_sch_pdu.h"
 #include "lib/mac/mac_ul/ul_phr.h"
 #include "tests/test_doubles/utils/test_rng.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/bit_encoding.h"
 #include <gtest/gtest.h>

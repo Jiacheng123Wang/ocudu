@@ -5,6 +5,7 @@
 #include "pdsch_processor_flexible_impl.h"
 #include "pdsch_processor_helpers.h"
 #include "pdsch_processor_validator_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/instrumentation/traces/du_traces.h"
 #include "ocudu/ran/sch/sch_segmentation.h"

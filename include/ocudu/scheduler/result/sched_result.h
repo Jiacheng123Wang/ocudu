@@ -52,17 +52,17 @@ struct ul_sched_result {
 /// Failed allocation attempts in a given slot.
 struct failed_alloc_attempts {
   /// Number of failed DL PDCCH allocation attempts (common and UE-dedicated SearchSpaces).
-  unsigned dl_pdcch = 0;
+  uint16_t dl_pdcch = 0;
   /// Number of failed UL PDCCH allocation attempts (common and UE-dedicated SearchSpaces).
-  unsigned ul_pdcch = 0;
+  uint16_t ul_pdcch = 0;
   /// Number of failed DL PDCCH allocation attempts in common SearchSpaces. Subset of \c dl_pdcch.
-  unsigned common_dl_pdcch = 0;
+  uint16_t common_dl_pdcch = 0;
   /// Number of failed UL PDCCH allocation attempts in common SearchSpaces. Subset of \c ul_pdcch.
-  unsigned common_ul_pdcch = 0;
+  uint16_t common_ul_pdcch = 0;
   /// Number of failed UCI allocation attempts.
-  unsigned uci = 0;
+  uint16_t uci = 0;
   /// Number of fallback DL grants dropped because the common HARQ-ACK PUCCH collided on every candidate k1.
-  unsigned fallback_uci_allocs = 0;
+  uint16_t fallback_uci_allocs = 0;
 };
 
 /// Scheduler decision made for DL and UL in a given slot.

@@ -7,6 +7,7 @@
 #include "ocudu/fapi/p7/messages/uci_pucch_pdu_format_0_1.h"
 #include "ocudu/ran/pucch/pucch_mapping.h"
 #include "ocudu/ran/rnti.h"
+#include "fmt/format.h"
 
 namespace ocudu {
 namespace fapi {

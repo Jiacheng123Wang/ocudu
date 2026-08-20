@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "lib/scheduler/support/dmrs_helpers.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/pci.h"
 #include "ocudu/scheduler/config/bwp_configuration.h"
 #include "ocudu/support/ocudu_test.h"

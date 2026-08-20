@@ -21,7 +21,7 @@ uci_scheduler_impl::uci_scheduler_impl(const cell_configuration& cell_cfg_,
   periodic_uci_slot_wheel.resize(std::max(MAX_SR_PERIOD, MAX_CSI_REPORT_PERIOD));
 
   // Pre-reserve space for the UEs that will be added.
-  updated_ues.reserve(MAX_NOF_DU_UES);
+  updated_ues.reserve(cell_cfg.max_nof_ue_contexts);
 }
 
 void uci_scheduler_impl::run_slot(cell_resource_allocator& res_alloc)
@@ -69,7 +69,7 @@ void uci_scheduler_impl::rem_resource(rnti_t crnti, unsigned res_offset, unsigne
 {
   auto log_error = [&]() {
     logger.error("cell={} c-rnti={}: Unable to remove {} PUCCH resource for period={} offset={}",
-                 fmt::underlying(cell_cfg.cell_index),
+                 cell_cfg.cell_index,
                  crnti,
                  is_sr ? "SR" : "CSI",
                  res_period,
@@ -194,7 +194,7 @@ void uci_scheduler_impl::schedule_slot_ucis(cell_slot_resource_allocator& slot_a
 
     if (ue_cfg == nullptr) {
       logger.error("cell={} c-rnti={}: UE for which {} is being scheduled was not found (slot={})",
-                   fmt::underlying(cell_cfg.cell_index),
+                   cell_cfg.cell_index,
                    uci_info.rnti,
                    it->sr_counter > 0 ? "SR" : (it->csi_counter > 0 ? "CSI" : "invalid UCI"),
                    slot_alloc.slot);
@@ -208,7 +208,7 @@ void uci_scheduler_impl::schedule_slot_ucis(cell_slot_resource_allocator& slot_a
     if (uci_info.sr_counter > 0) {
       if (not uci_alloc.alloc_sr_opportunity(slot_alloc, *ue_cfg)) {
         logger.warning("cell={} c-rnti={}: Failed to allocate SR PUCCH for slot={}",
-                       fmt::underlying(cell_cfg.cell_index),
+                       cell_cfg.cell_index,
                        uci_info.rnti,
                        slot_alloc.slot);
       }
@@ -218,7 +218,7 @@ void uci_scheduler_impl::schedule_slot_ucis(cell_slot_resource_allocator& slot_a
     if (uci_info.csi_counter > 0) {
       if (not uci_alloc.alloc_csi_opportunity(slot_alloc, *ue_cfg)) {
         logger.warning("cell={} c-rnti={}: Failed to allocate CSI PUCCH for slot={}",
-                       fmt::underlying(cell_cfg.cell_index),
+                       cell_cfg.cell_index,
                        uci_info.rnti,
                        slot_alloc.slot);
       }
@@ -235,9 +235,7 @@ void uci_scheduler_impl::schedule_updated_ues_ucis(cell_resource_allocator& res_
   for (rnti_t rnti : updated_ues) {
     const ue_cell_configuration* ue_cfg = get_ue_cfg(rnti);
     if (ue_cfg == nullptr) {
-      logger.error("cell={} c-rnti={}: UE for which UCI is being scheduled was not found.",
-                   fmt::underlying(cell_cfg.cell_index),
-                   rnti);
+      logger.error("cell={} c-rnti={}: UE for which UCI is being scheduled was not found.", cell_cfg.cell_index, rnti);
       continue;
     }
 
@@ -252,7 +250,7 @@ void uci_scheduler_impl::schedule_updated_ues_ucis(cell_resource_allocator& res_
           for (const periodic_uci_info& uci_info : slot_ucis) {
             if (uci_info.rnti == rnti) {
               logger.debug("cell={} c-rnti={}: Skipped UCI scheduling for slot={}. Cause: Max PUCCHs has been reached",
-                           fmt::underlying(cell_cfg.cell_index),
+                           cell_cfg.cell_index,
                            rnti,
                            res_alloc[n].slot);
             }

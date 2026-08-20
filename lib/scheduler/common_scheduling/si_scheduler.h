@@ -30,30 +30,11 @@ public:
 
   void handle_si_update_request(const si_scheduling_update_request& req);
 
-  void handle_pws_broadcast_indication(const pws_broadcast_request& req);
+  void handle_pws_si_update_request(const pws_si_scheduling_update_request& req);
 
   void stop();
 
 private:
-  /// Request written into a \c pending_pws_reqs slot, tagged with a locally-generated version for newness detection.
-  struct pws_pending_request {
-    si_version_type         version = 0;
-    std::optional<unsigned> nof_segments;
-    units::bytes            msg_len{0};
-  };
-
-  /// \brief Per-SI-message pending-request slot, keyed by SI-message index.
-  /// \remark \c buffer is stored as \c unique_ptr because \c lockfree_triple_buffer is non-movable, and slot values
-  /// must be movable to live inside a \c slotted_vector.
-  struct pws_pending_entry {
-    unsigned                                                     si_msg_idx        = 0;
-    si_version_type                                              last_seen_version = 0;
-    std::unique_ptr<lockfree_triple_buffer<pws_pending_request>> buffer =
-        std::make_unique<lockfree_triple_buffer<pws_pending_request>>();
-
-    explicit pws_pending_entry(unsigned si_msg_idx_) : si_msg_idx(si_msg_idx_) {}
-  };
-
   void try_handle_pending_request(cell_resource_allocator& res_alloc, slot_point_extended sl_tx_ext);
 
   /// \param slot_sched Slot at which the SI change, if any, would take effect (already offset by
@@ -61,8 +42,10 @@ private:
   /// \return Returns true if a short message is due for transmission.
   bool try_handle_si_mod_request(slot_point_extended slot_sched);
 
-  /// \brief Checks for a new PWS broadcast request and, if found, activates the target SI-message for one broadcast.
-  /// \param slot_sched Slot at which the SI-message activation, if any, is being processed (already offset by
+  /// \brief Applies any pending ETWS/CMAS SI change requests
+  /// \note The SI scheduler reverts to the normal operation one once every warning finished being
+  /// broadcast.
+  /// \param slot_sched Slot at which the epoch, if any, is being processed (already offset by
   /// max_dl_slot_alloc_delay).
   /// \return Returns true if a short message is due for transmission.
   bool try_handle_pending_pws_request(slot_point_extended slot_sched);
@@ -93,9 +76,46 @@ private:
   /// value.
   slot_point_extended si_change_start_slot;
 
-  si_version_type next_pws_version = 1;
-  /// One pending-request slot per SI-message that requires activation, keyed by SI-message index.
-  slotted_vector<pws_pending_entry> pending_pws_reqs;
+  /// Applies a pending ETWS/CMAS SI epoch, and reverts to the normal operation one once no warning is being broadcast.
+  void handle_pws_epoch(slot_point_extended slot_sched);
+
+  /// \brief Rearms the deadline of every warning that the given epoch (re)started the broadcast of.
+  /// \return Whether any warning started one more broadcast.
+  bool refresh_pws_deadlines(const pws_si_scheduling_update_request& epoch, slot_point_extended slot_sched);
+
+  /// \brief Number of radio frames a warning must keep being broadcast for, counted from the start of its broadcast.
+  /// \return \c std::nullopt if it must be broadcast indefinitely.
+  std::optional<unsigned> compute_pws_broadcast_duration(const pws_broadcasting_si_message& warning,
+                                                         const si_scheduling_config&        si_sched_cfg) const;
+
+  /// Whether every warning of the ETWS/CMAS SI epoch in effect finished being broadcast.
+  bool all_pws_broadcasts_ended(slot_point_extended slot_sched) const;
+
+  /// Pending ETWS/CMAS SI epoch, tagged with a locally-generated version for newness detection.
+  struct pws_pending_epoch {
+    si_version_type                  version = 0;
+    pws_si_scheduling_update_request req;
+  };
+  lockfree_triple_buffer<pws_pending_epoch> pending_pws_epoch;
+  si_version_type                           last_seen_pws_epoch = 0;
+  si_version_type                           next_pws_epoch      = 1;
+
+  /// Deadline of the broadcast of one warning, held so that each warning is timed from its own broadcast.
+  struct pws_broadcast_deadline {
+    /// SI message carrying the warning.
+    sib_type_set sib_set;
+    /// Epoch version that last started a broadcast of this warning.
+    si_version_type version = 0;
+    /// Slot until which it must keep being broadcast. \c std::nullopt if indefinitely.
+    std::optional<slot_point_extended> until;
+  };
+
+  /// \brief Deadline of each warning being broadcast in the ETWS/CMAS SI epoch.
+  ///
+  /// The epoch is only reverted once every warning elapsed, so a warning whose own broadcast completed keeps being
+  /// broadcast until the last one does. That way the set of SI messages listed as broadcasting in SIB1 only ever grows
+  /// while the epoch is in effect, and can never claim a warning that is no longer on air.
+  static_vector<pws_broadcast_deadline, MAX_PWS_SI_MESSAGES> pws_deadlines;
   /// \brief Slot up to which the PWS (ETWS/CMAS) short-message notification must keep being transmitted at every
   /// paging occasion. \c std::nullopt if no notification is currently pending.
   std::optional<slot_point_extended> pws_notif_until_slot;

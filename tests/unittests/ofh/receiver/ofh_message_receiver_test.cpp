@@ -8,6 +8,7 @@
 #include "../../../../lib/ofh/receiver/ofh_sequence_id_checker_dummy_impl.h"
 #include "../../support/task_executor_test_doubles.h"
 #include "../compression/ofh_iq_decompressor_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ofh/ethernet/ethernet_controller.h"
 #include "ocudu/ofh/ethernet/ethernet_receiver_metrics_collector.h"
 #include "ocudu/ofh/ethernet/ethernet_unique_buffer.h"

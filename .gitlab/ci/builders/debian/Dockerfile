@@ -13,7 +13,7 @@ RUN TZ=Europe/Madrid && \
     apt-get install -y --no-install-recommends \
     git gdb \
     clang llvm lld mold \
-    ccache gcovr valgrind \
+    ccache gcovr valgrind ninja-build \
     python3-dev python3-venv && \
     (apt-get install -y --no-install-recommends libclang-rt-dev || true) && \
     apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*

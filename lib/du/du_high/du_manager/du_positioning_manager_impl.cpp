@@ -6,6 +6,7 @@
 #include "du_positioning_handler_factory.h"
 #include "procedures/du_positioning_measurement_procedure.h"
 #include "procedures/du_ue_positioning_info_procedure.h"
+#include "ocudu/adt/format.h"
 
 using namespace ocudu;
 using namespace odu;

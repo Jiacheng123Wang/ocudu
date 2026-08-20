@@ -14,7 +14,7 @@
 #include "ocudu/ran/nr_cgi.h"
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/ran/tai.h"
-#include "fmt/format.h"
+#include "fmt/base.h"
 #include <cstdint>
 #include <optional>
 #include <type_traits>

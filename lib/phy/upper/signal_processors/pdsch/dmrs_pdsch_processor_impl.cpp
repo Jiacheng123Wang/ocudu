@@ -4,6 +4,7 @@
 
 #include "dmrs_pdsch_processor_impl.h"
 #include "../dmrs_helper.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/phy/support/re_pattern.h"

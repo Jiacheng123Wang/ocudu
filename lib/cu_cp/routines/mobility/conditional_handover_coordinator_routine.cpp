@@ -8,6 +8,7 @@
 #include "../../ue_manager/ue_manager_impl.h"
 #include "conditional_handover_reconfiguration_routine.h"
 #include "intra_cu_handover_routine.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/xnap/xnap_handover.h"
 
 using namespace ocudu;

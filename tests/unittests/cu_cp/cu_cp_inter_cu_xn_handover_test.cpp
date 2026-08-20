@@ -12,6 +12,7 @@
 #include "tests/unittests/e1ap/common/e1ap_cu_cp_test_messages.h"
 #include "tests/unittests/ngap/ngap_test_messages.h"
 #include "tests/unittests/xnap/xnap_test_messages.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/asn1/f1ap/f1ap_pdu_contents_ue.h"
 #include "ocudu/asn1/xnap/xnap_pdu_contents.h"
 #include "ocudu/e1ap/common/e1ap_types.h"
@@ -22,7 +23,6 @@
 #include "ocudu/ran/cu_types.h"
 #include "ocudu/xnap/xnap_types.h"
 #include <gtest/gtest.h>
-#include <unistd.h>
 
 using namespace ocudu;
 using namespace ocucp;
@@ -42,9 +42,6 @@ public:
   {
     // Run NG setup to completion.
     run_ng_setup();
-
-    // Wait for the XN-C gateway to be attached to the CU-CP.
-    sleep(1);
 
     // Run XN setup to completion.
     run_xn_setup();

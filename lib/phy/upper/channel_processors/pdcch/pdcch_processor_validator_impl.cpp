@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pdcch_processor_validator_impl.h"
+#include "ocudu/adt/format.h"
 
 using namespace ocudu;
 

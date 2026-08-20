@@ -7,9 +7,7 @@
 #include "ocudu/adt/bounded_integer.h"
 #include "ocudu/ran/resource_block.h"
 #include "ocudu/ran/subcarrier_spacing.h"
-#ifndef M_SQRT2f32
-#define M_SQRT2f32 1.41421356237309504880f
-#endif
+#include <cmath>
 
 namespace ocudu {
 

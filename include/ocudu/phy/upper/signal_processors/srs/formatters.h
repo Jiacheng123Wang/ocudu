@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "ocudu/adt/bounded_bitset.h"
 #include "ocudu/phy/upper/signal_processors/srs/srs_estimator_configuration.h"
 #include "ocudu/phy/upper/signal_processors/srs/srs_estimator_result.h"
 #include "ocudu/ran/resource_allocation/rb_interval.h"
@@ -12,6 +13,7 @@
 #include "ocudu/ran/srs/srs_context_formatter.h"
 #include "ocudu/ran/srs/srs_information.h"
 #include "ocudu/ran/srs/srs_resource_formatter.h"
+#include "ocudu/support/math/math_utils.h"
 #include <limits>
 
 namespace fmt {
@@ -67,7 +69,7 @@ struct formatter<ocudu::srs_estimator_configuration> {
       helper.format_always(ctx, "re=invalid");
     }
 
-    helper.format_if_verbose(ctx, "ports=[{}]", ocudu::span<const uint8_t>(config.ports));
+    helper.format_if_verbose(ctx, "ports={}", ocudu::span<const uint8_t>(config.ports));
 
     return ctx.out();
   }

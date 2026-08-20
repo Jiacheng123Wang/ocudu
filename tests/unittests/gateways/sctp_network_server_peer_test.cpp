@@ -93,8 +93,11 @@ TEST_F(sctp_network_server_peer_test, when_association_requested_association_ini
   ASSERT_NE(server3, nullptr);
 
   server1->listen();
+  int server1_listen_fd = broker1.get_last_registered_fd();
   server2->listen();
+  int server2_listen_fd = broker2.get_last_registered_fd();
   server3->listen();
+  int server3_listen_fd = broker3.get_last_registered_fd();
 
   transport_layer_address addr1 = transport_layer_address::create_from_string(server1_addr_str);
   std::optional<uint16_t> port1 = server1->get_listen_port();
@@ -118,8 +121,10 @@ TEST_F(sctp_network_server_peer_test, when_association_requested_association_ini
   ASSERT_EQ(0, assoc_factory1.association_count());
   ASSERT_EQ(0, assoc_factory2.association_count());
   ASSERT_EQ(0, assoc_factory3.association_count());
-  broker1.handle_receive(); // CONN_UP
-  broker2.handle_receive(); // CONN_UP
+  broker1.handle_receive(server1_listen_fd); // COMM_UP
+  int server_1_2_assoc_fd = broker1.get_last_registered_fd();
+  broker2.handle_receive(server2_listen_fd); // COMM_UP
+  int server_2_1_assoc_fd = broker2.get_last_registered_fd();
   ASSERT_EQ(1, assoc_factory1.association_count());
   ASSERT_EQ(1, assoc_factory2.association_count());
   ASSERT_EQ(0, assoc_factory3.association_count());
@@ -128,8 +133,10 @@ TEST_F(sctp_network_server_peer_test, when_association_requested_association_ini
   async_task<bool>         connect2 = server1->connect({addr3});
   lazy_task_launcher<bool> l2(connect2);
 
-  broker1.handle_receive(); // CONN_UP
-  broker3.handle_receive(); // CONN_UP
+  broker1.handle_receive(server1_listen_fd); // COMM_UP
+  // int server_1_3_assoc_fd = broker1.get_last_registered_fd();
+  broker3.handle_receive(server3_listen_fd); // COMM_UP
+  // int server_3_1_assoc_fd = broker1.get_last_registered_fd();
   ASSERT_EQ(2, assoc_factory1.association_count());
   ASSERT_EQ(1, assoc_factory2.association_count());
   ASSERT_EQ(1, assoc_factory3.association_count());
@@ -138,8 +145,10 @@ TEST_F(sctp_network_server_peer_test, when_association_requested_association_ini
   async_task<bool>         connect3 = server2->connect({addr3});
   lazy_task_launcher<bool> l3(connect3);
 
-  broker2.handle_receive(); // CONN_UP
-  broker3.handle_receive(); // CONN_UP
+  broker2.handle_receive(server2_listen_fd); // COMM_UP
+  // int server_2_3_assoc_fd = broker1.get_last_registered_fd();
+  broker3.handle_receive(server3_listen_fd); // COMM_UP
+  // int server_3_2_assoc_fd = broker1.get_last_registered_fd();
   ASSERT_EQ(2, assoc_factory1.association_count());
   ASSERT_EQ(2, assoc_factory2.association_count());
   ASSERT_EQ(2, assoc_factory3.association_count());
@@ -149,7 +158,7 @@ TEST_F(sctp_network_server_peer_test, when_association_requested_association_ini
   byte_buffer            tx_sdu;
   ASSERT_TRUE(tx_sdu.append(data1));
   ASSERT_TRUE(assoc_factory1.association_senders[0]->on_new_sdu(tx_sdu.copy()));
-  broker2.handle_receive(); // RX DATA
+  broker2.handle_receive(server_2_1_assoc_fd); // RX DATA
   ASSERT_EQ(assoc_factory2.last_sdu, tx_sdu);
 
   // Send data from S2 to S1.
@@ -157,7 +166,7 @@ TEST_F(sctp_network_server_peer_test, when_association_requested_association_ini
   byte_buffer            tx_sdu2;
   ASSERT_TRUE(tx_sdu2.append(data2));
   ASSERT_TRUE(assoc_factory2.association_senders[0]->on_new_sdu(tx_sdu2.copy()));
-  broker1.handle_receive(); // RX DATA
+  broker1.handle_receive(server_1_2_assoc_fd); // RX DATA
   ASSERT_EQ(assoc_factory1.last_sdu, tx_sdu2);
 }
 
@@ -185,7 +194,9 @@ TEST_F(sctp_network_server_peer_test, when_connect_uses_multiple_destination_add
   ASSERT_NE(server2, nullptr);
 
   server1->listen();
+  int server1_listen_fd = broker1.get_last_registered_fd();
   server2->listen();
+  int server2_listen_fd = broker2.get_last_registered_fd();
 
   std::optional<uint16_t> port2 = server2->get_listen_port();
   ASSERT_TRUE(port2);
@@ -199,8 +210,8 @@ TEST_F(sctp_network_server_peer_test, when_connect_uses_multiple_destination_add
   async_task<bool>         connect_task = server1->connect({primary_addr, secondary_addr});
   lazy_task_launcher<bool> launcher(connect_task);
 
-  broker1.handle_receive(); // CONN_UP completes the connect task on server1
-  broker2.handle_receive(); // CONN_UP arrives on server2 and creates the association handler
+  broker1.handle_receive(server1_listen_fd); // COMM_UP completes the connect task on server1
+  broker2.handle_receive(server2_listen_fd); // COMM_UP arrives on server2 and creates the association handler
   ASSERT_TRUE(connect_task.ready());
   ASSERT_TRUE(connect_task.get());
   ASSERT_EQ(1, assoc_factory1.association_count());
@@ -211,7 +222,8 @@ TEST_F(sctp_network_server_peer_test, when_connect_uses_multiple_destination_add
   byte_buffer            tx_sdu;
   ASSERT_TRUE(tx_sdu.append(data));
   ASSERT_TRUE(assoc_factory1.association_senders[0]->on_new_sdu(tx_sdu.copy()));
-  broker2.handle_receive();
+  int server2_association_fd = broker2.get_last_registered_fd();
+  broker2.handle_receive(server2_association_fd);
   ASSERT_EQ(assoc_factory2.last_sdu, tx_sdu);
 }
 
@@ -226,7 +238,9 @@ TEST_F(sctp_network_server_peer_test, when_pending_connects_overlap_then_second_
   ASSERT_NE(server2, nullptr);
 
   server1->listen();
+  int server1_listen_fd = broker1.get_last_registered_fd();
   server2->listen();
+  int server2_listen_fd = broker2.get_last_registered_fd();
 
   std::optional<uint16_t> port2 = server2->get_listen_port();
   ASSERT_TRUE(port2);
@@ -248,8 +262,8 @@ TEST_F(sctp_network_server_peer_test, when_pending_connects_overlap_then_second_
   ASSERT_FALSE(connect2.get());
 
   // Completing the first connect leaves only one association on server1.
-  broker1.handle_receive();
-  broker2.handle_receive();
+  broker1.handle_receive(server1_listen_fd);
+  broker2.handle_receive(server2_listen_fd);
   ASSERT_TRUE(connect1.ready());
   ASSERT_TRUE(connect1.get());
   ASSERT_EQ(1, assoc_factory1.association_count());
@@ -263,7 +277,9 @@ TEST_F(sctp_network_server_peer_test, when_server_is_destroyed_then_associations
   ASSERT_NE(server2, nullptr);
 
   server1->listen();
+  int server1_listen_fd = broker1.get_last_registered_fd();
   server2->listen();
+  int server2_listen_fd = broker2.get_last_registered_fd();
 
   transport_layer_address addr2 = transport_layer_address::create_from_string(server2_addr_str);
   std::optional<uint16_t> port2 = server2->get_listen_port();
@@ -273,8 +289,8 @@ TEST_F(sctp_network_server_peer_test, when_server_is_destroyed_then_associations
   // Create association S1 <-> S2.
   async_task<bool>         connect_task = server1->connect({addr2});
   lazy_task_launcher<bool> launcher(connect_task);
-  broker1.handle_receive(); // CONN_UP notification completes the connect task
-  broker2.handle_receive(); // CONN_UP
+  broker1.handle_receive(server1_listen_fd); // CONN_UP notification completes the connect task
+  broker2.handle_receive(server2_listen_fd); // CONN_UP
   ASSERT_EQ(1, assoc_factory1.association_count());
   ASSERT_EQ(1, assoc_factory2.association_count());
   ASSERT_FALSE(assoc_factory1.association_destroyed);

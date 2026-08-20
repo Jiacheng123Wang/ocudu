@@ -9,6 +9,7 @@
 #include "../support/pusch/pusch_resource_allocation.h"
 #include "sched_config_params.h"
 #include "time_domain_mapper.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ran/pdcch/dci_format.h"
 #include "ocudu/ran/resource_allocation/vrb_to_prb.h"
 #include "ocudu/support/math/math_utils.h"
@@ -721,11 +722,30 @@ bool ue_cell_configuration::is_ul_enabled(slot_point ul_slot) const
     return false;
   }
   if (meas_gap_cfg.has_value()) {
-    if (is_inside_meas_gap(meas_gap_cfg.value(), ul_slot)) {
+    // The UE uplink is advanced by T_TA with respect to the downlink timing the gap is anchored to, so the gap has to
+    // be tested at the shifted position. In an NTN cell the shift is tens of slots; ignoring it makes us grant in
+    // slots where the UE drops the transmission (TS 38.321, Sections 5.4.2.2 and 5.4.4).
+    if (is_inside_ul_meas_gap(meas_gap_cfg.value(), ul_slot, cell_cfg_common.ntn_ref_location_ul_ta)) {
       return false;
     }
   }
   return true;
+}
+
+bool ue_cell_configuration::is_cg_slot(slot_point slot) const
+{
+  // TODO: support type 2.
+  if (init_bwp().ul.cg_cfg() != nullptr) {
+    const auto& cg_cfg = init_bwp().ul.cg_cfg();
+    if (cg_cfg->rrc_configured_ul_grant_cfg.has_value()) {
+      const auto& rrc_cg_cfg = cg_cfg->rrc_configured_ul_grant_cfg.value();
+      if (slot.count() % static_cast<unsigned>(cg_cfg->periodicity) == rrc_cg_cfg.time_domain_offset) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 //

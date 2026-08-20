@@ -17,6 +17,7 @@
 #include "ocudu/ran/cu_cp_location_reporting_types.h"
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/support/async/async_test_utils.h"
+#include "ocudu/xnap/xnap_message.h"
 #include <optional>
 #include <unordered_map>
 
@@ -99,6 +100,21 @@ public:
   mock_cu_up&     get_cu_up(size_t cu_up_index) { return *cu_ups.at(cu_up_index); }
   mock_xnc_cu_cp& get_xnc_cu_cp(size_t xnc_index = 0) { return *xnc_peers.at(xnc_index); }
 
+  /// PCI of the cell each XN-C peer advertises at XN setup. A UE reporting this PCI as its failure cell resolves to
+  /// the peer, which is what a UE context retrieval relies on.
+  static constexpr pci_t xnc_peer_served_pci = 42;
+
+  /// Identity of that same cell. A peer retrieving one of our UEs reports it as the cell the UE accessed, and this
+  /// node has to resolve it to derive KgNB* for the target.
+  static nr_cell_identity xnc_peer_served_nci() { return nr_cell_identity::create(0x19b0).value(); }
+
+  /// gNB ID each XN-C peer reports at XN setup. A resuming UE's I-RNTI has to encode it for the peer holding the
+  /// context to be resolvable.
+  gnb_id_t get_xnc_peer_gnb_id() const
+  {
+    return gnb_id_t{cu_cp_cfg.node.gnb_id.id + 2, cu_cp_cfg.node.gnb_id.bit_length};
+  }
+
   /// Enqueue PDUs to automatically respond to NG/XN setup procedures and starts the CU-CP.
   void enqueue_procedure_outcome_pdus_and_start_cu_cp();
 
@@ -112,6 +128,10 @@ public:
 
   /// Start CU-CP connection to XN-C peer CU-CP and run XN setup procedure to completion.
   void run_xn_setup();
+
+  /// Run to completion the NG-RAN Node Configuration Update the CU-CP sends to each XN-C peer when the cells it serves
+  /// change, checking that it reports the given cells as added.
+  void run_ngran_node_cfg_update(span<const test_helpers::served_cell_item_info> added_cells);
 
   /// Establish a TNL connection between a DU and the CU-CP.
   std::optional<unsigned> connect_new_du();
@@ -140,7 +160,7 @@ public:
   /// Runs the NAS Authentication for a given UE.
   [[nodiscard]] bool authenticate_ue(unsigned du_idx, gnb_du_ue_f1ap_id_t du_ue_id, amf_ue_id_t amf_ue_id);
   /// Runs the Security Mode procedure for a given UE.
-  [[nodiscard]] bool setup_ue_security_and_ue_capabilies(
+  [[nodiscard]] bool setup_ue_security_and_ue_capabilities(
       unsigned                                                   du_idx,
       gnb_du_ue_f1ap_id_t                                        du_ue_id,
       std::optional<cu_cp_core_network_assist_info_for_inactive> cn_assist_info_for_inactive = std::nullopt,
@@ -148,7 +168,7 @@ public:
       std::optional<location_report_request>                     location_reporting_request  = std::nullopt);
   /// Get a Location Report, if one is awaited for.
   std::optional<ngap_message>
-  get_location_report_if_required(std::optional<location_report_request> location_reporting_request);
+  get_location_report_if_required(const std::optional<location_report_request>& location_reporting_request);
   /// Finishes the registration for a given UE.
   [[nodiscard]] bool finish_ue_registration(unsigned du_idx, unsigned cu_up_idx, gnb_du_ue_f1ap_id_t du_ue_id);
   /// Requests PDU Session Resource Setup
@@ -302,6 +322,9 @@ public:
       const std::vector<pdu_session_id_t>& expected_pdu_sessions_failed_to_setup);
 
   rrc_timers_t rrc_test_timer_values;
+
+  /// Last NG-RAN Node Configuration Update the CU-CP sent to an XN-C peer.
+  xnap_message last_ngran_node_cfg_update;
 
 private:
   class worker_manager;

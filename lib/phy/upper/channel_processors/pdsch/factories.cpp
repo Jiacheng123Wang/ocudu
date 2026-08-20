@@ -13,6 +13,7 @@
 #include "pdsch_processor_impl.h"
 #include "pdsch_processor_pool.h"
 #include "pdsch_processor_validator_impl.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/phy/support/support_factories.h"
 #include <memory>
 

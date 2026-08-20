@@ -4,7 +4,9 @@
 
 #include "../../generic_functions/dft_processor_test_doubles.h"
 #include "../../support/resource_grid_test_doubles.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/compare.h"
+#include "ocudu/ocuduvec/conversion.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/phy/antenna_ports.h"
@@ -88,8 +90,8 @@ int main()
           unsigned port_idx = dist_port(rgen);
 
           // Generate random time domain data.
-          unsigned          nsymb = get_nsymb_per_slot(cp);
-          std::vector<cf_t> time_data;
+          unsigned            nsymb = get_nsymb_per_slot(cp);
+          std::vector<ci16_t> time_data;
           // Iterate all symbols in the slot.
           for (unsigned symbol_idx = 0; symbol_idx != nsymb; ++symbol_idx) {
             // Get the size of the current time-domain symbol.
@@ -97,7 +99,7 @@ int main()
                 cp.get_length(nsymb * slot_idx + symbol_idx, scs).to_samples(sampling_rate_Hz) + dft_size;
             for (unsigned sample_idx = 0; sample_idx != nsamples; ++sample_idx) {
               cf_t random_value = {dist_rg(rgen), dist_rg(rgen)};
-              time_data.push_back(random_value);
+              time_data.push_back(to_ci16(random_value * ocuduvec::scaling_factor_ci16_to_cf));
             }
           }
 
@@ -121,13 +123,15 @@ int main()
                 cp.get_length(nsymb * slot_idx + symbol_idx, scs).to_samples(sampling_rate_Hz) + dft_size;
 
             // Get input time data.
-            span<cf_t> time_data_symbol(&time_data[offset], symb_size);
+            span<const ci16_t> time_data_symbol(&time_data[offset], symb_size);
 
             // Get DFT input.
             span<const cf_t> dft_input = dft_entries[symbol_idx].input;
 
             // Verify DFT input.
-            TESTASSERT(ocuduvec::equal(time_data_symbol.last(dft_size), dft_input.first(dft_size)));
+            std::vector<cf_t> expected_dft_input(dft_size);
+            ocuduvec::convert(expected_dft_input, time_data_symbol.last(dft_size), ocuduvec::scaling_factor_ci16_to_cf);
+            TESTASSERT(ocuduvec::equal(expected_dft_input, dft_input.first(dft_size)));
 
             // Generate ideal frequency domain outputs.
             for (unsigned subc_idx = 0; subc_idx != nsubc; ++subc_idx) {

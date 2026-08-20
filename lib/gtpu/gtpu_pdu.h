@@ -7,7 +7,7 @@
 #include "gtpu_tunnel_logger.h"
 #include "ocudu/adt/byte_buffer.h"
 #include "ocudu/adt/static_vector.h"
-#include "fmt/format.h"
+#include "fmt/base.h"
 #include <cstdint>
 
 namespace ocudu {
@@ -99,6 +99,11 @@ inline const char* to_string(gtpu_extension_header_type type)
     default:
       return "invalid";
   }
+}
+
+inline const char* format_as(gtpu_extension_header_type ext_type)
+{
+  return to_string(ext_type);
 }
 
 // 00 Comprehension of this extension header is not required. An Intermediate Node shall forward it to any Receiver
@@ -352,21 +357,6 @@ struct formatter<ocudu::gtpu_header> {
   auto format(const ocudu::gtpu_header& hdr, FormatContext& ctx) const
   {
     return format_to(ctx.out(), "{} len={} teid={:#x}", hdr.flags, hdr.length, hdr.teid);
-  }
-};
-
-template <>
-struct formatter<ocudu::gtpu_extension_header_type> {
-  template <typename ParseContext>
-  auto parse(ParseContext& ctx)
-  {
-    return ctx.begin();
-  }
-
-  template <typename FormatContext>
-  auto format(const ocudu::gtpu_extension_header_type& ext_type, FormatContext& ctx) const
-  {
-    return format_to(ctx.out(), "{}", to_string(ext_type));
   }
 };
 

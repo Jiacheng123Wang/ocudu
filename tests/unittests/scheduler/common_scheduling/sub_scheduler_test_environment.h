@@ -11,6 +11,7 @@
 #include "lib/scheduler/logging/scheduler_result_logger.h"
 #include "lib/scheduler/pdcch_scheduling/pdcch_resource_allocator.h"
 #include "lib/scheduler/pucch_scheduling/pucch_allocator_impl.h"
+#include "lib/scheduler/uci_scheduling/uci_allocator_impl.h"
 #include "tests/test_doubles/utils/test_rng.h"
 #include "tests/unittests/scheduler/test_utils/config_generators.h"
 #include "tests/unittests/scheduler/test_utils/sched_random_utils.h"
@@ -106,6 +107,7 @@ public:
   scheduler_result_logger                   result_logger{true, cell_cfg.params.pci};
   std::unique_ptr<pdcch_resource_allocator> pdcch_alloc;
   pucch_allocator_impl                      pucch_alloc;
+  uci_allocator_impl                        uci_alloc{cell_cfg, pucch_alloc};
   const unsigned                            delay_tx_rx_slots;
 
   // -- Derived

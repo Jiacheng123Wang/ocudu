@@ -92,8 +92,41 @@ install_dpdk_dependencies_fedora() {
             ;;
     esac
 
-    install_fedora_pkgs "${pkgs[@]}"
+    install_rpm_pkgs "${pkgs[@]}"
     install_pip_pkgs --break-system-packages "${pip_pkgs[@]}"
+}
+
+install_dpdk_dependencies_centos() {
+    local mode="${1:?}"
+    local -a pkgs=()
+
+    local -a build_pkgs=(
+        curl ca-certificates xz ninja-build make numactl-devel libfdt-devel pciutils python3-pyelftools meson
+    )
+    local -a extra_pkgs=(
+        libatomic iproute
+    )
+    local -a run_pkgs=(
+        numactl-libs pciutils libfdt libatomic iproute libibverbs
+    )
+
+    case "$mode" in
+        all)
+            pkgs+=( "${build_pkgs[@]}" "${extra_pkgs[@]}" )
+            ;;
+        build)
+            pkgs+=( "${build_pkgs[@]}" )
+            ;;
+        run)
+            pkgs+=( "${run_pkgs[@]}" )
+            ;;
+        *)
+            echo >&2 "Unsupported mode: $mode"
+            exit 1
+            ;;
+    esac
+
+    install_rpm_pkgs "${pkgs[@]}"
 }
 
 install_dpdk_dependencies_arch() {
@@ -210,6 +243,9 @@ main() {
             ;;
         rhel)
             install_dpdk_dependencies_rhel "$mode"
+            ;;
+        centos)
+            install_dpdk_dependencies_centos "$mode"
             ;;
         arch)
             install_dpdk_dependencies_arch "$mode"

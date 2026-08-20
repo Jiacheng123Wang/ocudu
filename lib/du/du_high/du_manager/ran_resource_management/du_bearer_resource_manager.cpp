@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "du_bearer_resource_manager.h"
+#include "ocudu/adt/format.h"
 #include "ocudu/mac/config/mac_config_helpers.h"
 #include "ocudu/rlc/rlc_srb_config_factory.h"
 

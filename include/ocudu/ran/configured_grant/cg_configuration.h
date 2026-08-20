@@ -24,9 +24,9 @@ struct cg_configuration {
   /// \remark See TS 38.331, "ConfiguredGrantConfig" field \c resourceAllocation.
   enum class res_allocation { type_0, type_1, dynamic_switch };
 
-  /// \brief Number of PUSCH repetitions (repK) for CG transmissions.
+  /// \brief Number of PUSCH repetitions (repK) for CG transmissions. The enum value encodes the repetition count.
   /// \remark See TS 38.331, "ConfiguredGrantConfig" field \c repK.
-  enum class rep_k_t { n1, n2, n4, n8 };
+  enum class rep_k_t { n1 = 1, n2 = 2, n4 = 4, n8 = 8 };
 
   /// \brief RV sequence for CG PUSCH repetitions.
   ///
@@ -169,7 +169,8 @@ struct cg_configuration {
   /// RRC-level resource grant (Type 1 CG). When absent, the grant is activated via DCI (Type 2 CG).
   /// \remark Type 2 CG is not currently supported.
   std::optional<rrc_configured_ul_grant> rrc_configured_ul_grant_cfg;
-  bool                                   operator==(const cg_configuration& rhs) const
+
+  bool operator==(const cg_configuration& rhs) const
   {
     return cg_dmrs_cfg == rhs.cg_dmrs_cfg && mcs_table == rhs.mcs_table && trans_precoder == rhs.trans_precoder &&
            uci_on_pusch_cfg == rhs.uci_on_pusch_cfg && nof_harq_processes == rhs.nof_harq_processes &&

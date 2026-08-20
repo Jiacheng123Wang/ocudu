@@ -176,10 +176,38 @@ public:
     logger.info("Received a UE context release for UE index {}", ue_index);
   }
 
+  std::vector<cu_cp_served_cell_info> on_served_cells_required() override { return served_cells; }
+
+  void set_served_cells(std::vector<cu_cp_served_cell_info> served_cells_) { served_cells = std::move(served_cells_); }
+  cu_cp_ue_index_t on_xnap_ue_context_id_lookup(const xnap_ue_context_id& ue_context_id) override
+  {
+    logger.info("Received a UE Context ID lookup request");
+    return ue_context_id_lookup_result;
+  }
+
+  async_task<xnap_retrieve_ue_context_response>
+  on_xnap_retrieve_ue_context_request(const xnap_retrieve_ue_context_request& request) override
+  {
+    logger.info("Received a Retrieve UE Context Request for UE index {}", request.ue_index);
+    last_retrieve_ue_context_request = request;
+    return launch_async([res = xnap_retrieve_ue_context_response{retrieve_ue_context_response}](
+                            coro_context<async_task<xnap_retrieve_ue_context_response>>& ctx) mutable {
+      CORO_BEGIN(ctx);
+      CORO_RETURN(std::move(res));
+    });
+  }
+
   byte_buffer last_handover_command;
 
+  /// UE index the dummy resolves a UE Context ID to.
+  cu_cp_ue_index_t ue_context_id_lookup_result = cu_cp_ue_index_t::invalid;
+  /// Response the dummy reports for a Retrieve UE Context Request.
+  xnap_retrieve_ue_context_response               retrieve_ue_context_response;
+  std::optional<xnap_retrieve_ue_context_request> last_retrieve_ue_context_request;
+
 private:
-  bool ho_request_outcome = false;
+  bool                                ho_request_outcome = false;
+  std::vector<cu_cp_served_cell_info> served_cells;
 
   ue_manager&             ue_mng;
   ocudulog::basic_logger& logger;
@@ -194,7 +222,7 @@ protected:
   void TearDown() override;
 
   /// \brief Helper method to successfully run XN setup in XNAP.
-  bool run_xn_setup(const xnap_configuration& peer_cfg);
+  bool run_xn_setup(const xnap_configuration& peer_cfg, span<const cu_cp_served_cell_info> peer_cells = {});
 
   /// \brief Helper method to successfully create UE instance in ue manager.
   cu_cp_ue_index_t create_ue(rnti_t rnti = rnti_t::MIN_CRNTI);
