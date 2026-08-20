@@ -137,14 +137,20 @@ private:
         // Increment the process count before considering stopped.
         uint32_t current_state = state.fetch_add(1) + 1;
         if (current_state >= state_stopped) {
+#if defined(__APPLE__)
           // The processing chain ends here: no more tasks will be enqueued. The stop completes when this task
           // finishes (see on_process_end()).
           return false;
+#else
+          stop_control.set_value();
+          return false;
+#endif
         }
       }
       return true;
     }
 
+#if defined(__APPLE__)
     /// \brief Call when the processing task finishes.
     void on_process_end()
     {
@@ -155,6 +161,7 @@ private:
         stop_control.set_value();
       }
     }
+#endif
 
   private:
     /// State value in idle.
