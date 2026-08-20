@@ -42,6 +42,10 @@ if(APPLE)
     include_directories(SYSTEM /opt/homebrew/include)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=deprecated-declarations")
     add_definitions(-DRTLD_DEEPBIND=0)
+    # Apple's ld warns (unlike GNU ld) when the same static library appears more than once on the link
+    # line, which happens naturally with the transitive CMake dependencies of the app targets. The
+    # duplicates are harmless (ld ignores them), so silence the noise.
+    add_link_options(-Wl,-no_warn_duplicate_libraries)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -691,8 +695,8 @@ execute_process(COMMAND sed -i "s|MemoryCheckCommandOptions: |MemoryCheckCommand
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 include_directories(include)
-include_directories(external/fmt/include)
-include_directories(external)
+include_directories(SYSTEM external/fmt/include)
+include_directories(SYSTEM external)
 
 ########################################################################
 # Add headers to cmake project (useful for IDEs)
