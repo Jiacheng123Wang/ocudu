@@ -9,6 +9,10 @@
 #include "ocudu/ran/subcarrier_spacing.h"
 #include <cmath>
 
+#ifndef M_SQRT2f32
+#define M_SQRT2f32 1.41421356237309504880f
+#endif
+
 namespace ocudu {
 
 /// Defines the SSB bandwidth in Resource Blocks (RBs).

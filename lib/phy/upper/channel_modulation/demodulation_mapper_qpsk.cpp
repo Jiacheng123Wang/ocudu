@@ -4,6 +4,9 @@
 
 #include "demodulation_mapper_qpsk.h"
 #include <cmath>
+#ifndef M_SQRT2f32
+#define M_SQRT2f32 1.41421356237309504880f
+#endif
 
 #ifdef __AVX2__
 #include "avx2_helpers.h"

@@ -24,7 +24,11 @@ public:
                      const sctp_network_server_impl::sctp_associaton_context& assoc,
                      ocudulog::basic_logger&                                  logger_) :
     ppid(parent.node_cfg.ppid),
+#if defined(__APPLE__)
+    fd(parent.socket.fd().value()),
+#else
     fd(assoc.fd),
+#endif
     if_name(parent.node_cfg.if_name),
     assoc_id(assoc.assoc_id),
     client_addr(assoc.addr),
@@ -84,6 +88,19 @@ private:
     }
 
     // Send EOF to SCTP client.
+#if defined(__APPLE__)
+    transport_layer_address::native_type dest_addr  = client_addr.native();
+    int                                  bytes_sent = ::sctp_sendmsg(fd,
+                                    nullptr,
+                                    0,
+                                    const_cast<struct sockaddr*>(dest_addr.addr),
+                                    dest_addr.addrlen,
+                                    htonl(ppid),
+                                    SCTP_EOF,
+                                    stream_no,
+                                    0,
+                                    0);
+#else
     transport_layer_address::native_type dest_addr = client_addr.native();
     struct sctp_sndinfo                  sndinfo{};
     sndinfo.snd_sid   = stream_no;
@@ -115,6 +132,7 @@ private:
     msg.msg_controllen = cmsg->cmsg_len;
 
     ssize_t bytes_sent = sendmsg(fd, &msg, MSG_NOSIGNAL);
+#endif
 
     if (bytes_sent == -1) {
       // Failed to send EOF.
@@ -145,6 +163,9 @@ private:
   std::array<uint8_t, network_gateway_sctp_max_len> send_buffer;
 };
 
+#if defined(__APPLE__)
+sctp_network_server_impl::sctp_associaton_context::sctp_associaton_context(int assoc_id_) : assoc_id(assoc_id_) {}
+#else
 sctp_network_server_impl::sctp_associaton_context::sctp_associaton_context(int                       assoc_id_,
                                                                            int                       fd_,
                                                                            sctp_network_server_impl& parent_) :
@@ -192,6 +213,7 @@ void sctp_network_server_impl::sctp_associaton_context::receive()
   auto payload = std::vector<uint8_t>(temp_recv_buffer.begin(), temp_recv_buffer.begin() + rx_bytes);
   parent.receive_impl(std::move(payload), sri, msg_flags, msg_src_addr, msg_src_addrlen);
 }
+#endif
 
 sctp_network_server_impl::sctp_network_server_impl(const ocudu::sctp_network_gateway_config& sctp_cfg_,
                                                    io_broker&                                broker_,
@@ -279,7 +301,11 @@ void sctp_network_server_impl::receive()
 }
 
 void sctp_network_server_impl::receive_impl(std::vector<uint8_t>   payload,
+#if defined(__APPLE__)
+                                            struct sctp_rcvinfo    sri,
+#else
                                             struct sctp_sndrcvinfo sri,
+#endif
                                             int                    msg_flags,
                                             sockaddr_storage       msg_src_addr,
                                             socklen_t              msg_src_addrlen)
@@ -484,6 +510,7 @@ void sctp_network_server_impl::handle_sctp_comm_up(const struct sctp_assoc_chang
     return;
   }
 
+#if !defined(__APPLE__)
   /// Peel-off a socket. This is done for easier DTLS support.
   int assoc_fd_raw = sctp_peeloff(socket.fd().value(), assoc_id);
   if (assoc_fd_raw == -1) {
@@ -500,10 +527,15 @@ void sctp_network_server_impl::handle_sctp_comm_up(const struct sctp_assoc_chang
   if (node_cfg.non_blocking_mode) {
     ::set_non_blocking(assoc_fd, logger);
   }
+#endif
 
   // Add an entry for the association in the lookup
+#if defined(__APPLE__)
+  auto result = associations.emplace(assoc_id, assoc_id);
+#else
   auto result = associations.emplace(
       std::piecewise_construct, std::forward_as_tuple(assoc_id), std::forward_as_tuple(assoc_id, assoc_fd_raw, *this));
+#endif
   if (not result.second) {
     logger.error("{} assoc={}: Unable to create new SCTP association", node_cfg.if_name, assoc_id);
     return;
@@ -531,21 +563,29 @@ void sctp_network_server_impl::handle_sctp_comm_up(const struct sctp_assoc_chang
   // assoc_factory.create() callback can run before the awaiting coroutine resumes.
   // Signaling inline here would resume the coroutine within this task, before the enqueued tasks that connect the
   // notifiers have a chance to finish.
-  while (not app_exec.defer([this, addr = assoc_ctxt.addr, assoc_fd = std::move(assoc_fd), &assoc_ctxt]() mutable {
-    auto pending_it = std::find_if(pending_connects.begin(),
-                                   pending_connects.end(),
-                                   [&addr](const pending_connect& pending) { return pending.contains(addr); });
-    if (pending_it != pending_connects.end()) {
-      pending_it->event.set(true);
-    }
-    /// Register peeled-off socket in IO broker.
-    if (not subscribe_association_to_broker(std::move(assoc_fd), assoc_ctxt)) {
-      logger.error("Connection loss due to IO broker subscription failure");
-      handle_association_shutdown(assoc_ctxt.assoc_id, "IO broker error");
-      remove_association(assoc_ctxt.assoc_id);
-      return;
-    }
-  })) {
+  while (not app_exec.defer(
+             [this, addr = assoc_ctxt.addr
+#if !defined(__APPLE__)
+              ,
+              assoc_fd = std::move(assoc_fd), &assoc_ctxt
+#endif
+             ]() mutable {
+               auto pending_it = std::find_if(pending_connects.begin(),
+                                              pending_connects.end(),
+                                              [&addr](const pending_connect& pending) { return pending.contains(addr); });
+               if (pending_it != pending_connects.end()) {
+                 pending_it->event.set(true);
+               }
+#if !defined(__APPLE__)
+               /// Register peeled-off socket in IO broker.
+               if (not subscribe_association_to_broker(std::move(assoc_fd), assoc_ctxt)) {
+                 logger.error("Connection loss due to IO broker subscription failure");
+                 handle_association_shutdown(assoc_ctxt.assoc_id, "IO broker error");
+                 remove_association(assoc_ctxt.assoc_id);
+                 return;
+               }
+#endif
+             })) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 }
@@ -658,6 +698,7 @@ bool sctp_network_server_impl::subscribe_to_broker()
   return io_sub.registered();
 }
 
+#if !defined(__APPLE__)
 bool sctp_network_server_impl::subscribe_association_to_broker(unique_fd assoc_fd, sctp_associaton_context& assoc_ctxt)
 {
   assoc_ctxt.io_sub = broker.register_fd(
@@ -670,6 +711,7 @@ bool sctp_network_server_impl::subscribe_association_to_broker(unique_fd assoc_f
       });
   return assoc_ctxt.io_sub.registered();
 }
+#endif
 
 std::unique_ptr<sctp_network_server> sctp_network_server_impl::create(const sctp_network_gateway_config& sctp_cfg,
                                                                       io_broker&                         broker_,

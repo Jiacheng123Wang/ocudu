@@ -45,7 +45,11 @@ public:
 
   void receive();
   void receive_impl(std::vector<uint8_t>   payload,
+#if defined(__APPLE__)
+                    struct sctp_rcvinfo    sri,
+#else
                     struct sctp_sndrcvinfo sri,
+#endif
                     int                    msg_flags,
                     sockaddr_storage       msg_src_addr,
                     socklen_t              msg_src_addrlen);
@@ -61,17 +65,25 @@ private:
 
   struct sctp_associaton_context {
     const int assoc_id;
+#if !defined(__APPLE__)
     const int fd;
+#endif
 
     transport_layer_address            addr;
     std::shared_ptr<std::atomic<bool>> association_shutdown_received;
+#if !defined(__APPLE__)
     io_broker::subscriber              io_sub;
+#endif
 
     std::unique_ptr<sctp_association_sdu_notifier> sctp_data_recv_notifier;
 
+#if defined(__APPLE__)
+    sctp_associaton_context(int assoc_id);
+#else
     sctp_associaton_context(int assoc_id, int fd_, sctp_network_server_impl& parent_);
     void                      receive();
     sctp_network_server_impl& parent;
+#endif
   };
 
   // We use unique_ptr to maintain address stability.
@@ -83,7 +95,9 @@ private:
 
   // Subscribe to IO broker to listen for incoming SCTP messages/events.
   bool subscribe_to_broker();
+#if !defined(__APPLE__)
   bool subscribe_association_to_broker(unique_fd assoc_fd, sctp_associaton_context& assoc_ctxt);
+#endif
 
   void handle_socket_shutdown(const char* cause);
   void defer_socket_shutdown(const char* cause, std::optional<scoped_sync_token> token = std::nullopt);
