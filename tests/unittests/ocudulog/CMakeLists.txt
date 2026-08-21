@@ -6,9 +6,13 @@ add_executable(ocudulog_backend_throughput benchmarks/backend_throughput.cpp)
 target_include_directories(ocudulog_backend_throughput PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(ocudulog_backend_throughput ocudulog)
 
-add_executable(ocudulog_frontend_latency benchmarks/frontend_latency.cpp)
-target_include_directories(ocudulog_frontend_latency PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(ocudulog_frontend_latency ocudulog)
+# The frontend latency benchmark relies on RUSAGE_THREAD to count per-thread context switches, which is not
+# available on macOS.
+if (NOT APPLE)
+    add_executable(ocudulog_frontend_latency benchmarks/frontend_latency.cpp)
+    target_include_directories(ocudulog_frontend_latency PRIVATE ${CMAKE_SOURCE_DIR})
+    target_link_libraries(ocudulog_frontend_latency ocudulog)
+endif ()
 
 add_executable(ocudulog_test ocudulog_test.cpp)
 target_include_directories(ocudulog_test PRIVATE ${CMAKE_SOURCE_DIR})

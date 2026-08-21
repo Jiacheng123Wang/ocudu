@@ -27,7 +27,7 @@ protected:
 
     sockaddr_in tx_addr = {};
     tx_addr.sin_family  = AF_INET;
-    tx_addr.sin_port    = ::htons(0);
+    tx_addr.sin_port    = htons(0);
 
     ASSERT_EQ(::inet_pton(AF_INET, client_address_v4.data(), &tx_addr.sin_addr), 1);
     ASSERT_EQ(::bind(tx_sock_fd.value(), (sockaddr*)&tx_addr, sizeof(tx_addr)), 0);

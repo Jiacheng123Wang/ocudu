@@ -42,9 +42,11 @@ protected:
 
   rnti_t add_ue(const std::vector<std::pair<lcid_t, s_nssai_t>>& lcid_to_cfg)
   {
-    auto                get_lcid  = [](const auto& e) { return e.first; };
-    auto                only_lcid = views::transform(lcid_to_cfg, get_lcid);
-    std::vector<lcid_t> lcid_list(only_lcid.begin(), only_lcid.end());
+    std::vector<lcid_t> lcid_list;
+    lcid_list.reserve(lcid_to_cfg.size());
+    for (const auto& e : lcid_to_cfg) {
+      lcid_list.push_back(e.first);
+    }
     auto                ue_cfg =
         sched_config_helper::create_default_sched_ue_creation_request(cell_cfg(to_du_cell_index(0)).params, lcid_list);
     for (unsigned i = 0; i < lcid_list.size(); i++) {

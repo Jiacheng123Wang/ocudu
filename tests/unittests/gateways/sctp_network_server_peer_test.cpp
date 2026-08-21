@@ -75,6 +75,8 @@ protected:
 
 TEST_F(sctp_network_server_peer_test, when_config_is_valid_then_server_is_created_successfully)
 {
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   server1 = create_sctp_network_server(server_cfg1);
   server2 = create_sctp_network_server(server_cfg2);
   server3 = create_sctp_network_server(server_cfg3);
@@ -85,6 +87,8 @@ TEST_F(sctp_network_server_peer_test, when_config_is_valid_then_server_is_create
 
 TEST_F(sctp_network_server_peer_test, when_association_requested_association_initiates_successfully)
 {
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   server1 = create_sctp_network_server(server_cfg1);
   server2 = create_sctp_network_server(server_cfg2);
   server3 = create_sctp_network_server(server_cfg3);
@@ -172,6 +176,8 @@ TEST_F(sctp_network_server_peer_test, when_association_requested_association_ini
 
 TEST_F(sctp_network_server_peer_test, when_connect_called_with_empty_address_list_then_returns_false)
 {
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   server1 = create_sctp_network_server(server_cfg1);
   ASSERT_NE(server1, nullptr);
   server1->listen();
@@ -185,6 +191,8 @@ TEST_F(sctp_network_server_peer_test, when_connect_called_with_empty_address_lis
 
 TEST_F(sctp_network_server_peer_test, when_connect_uses_multiple_destination_addresses_then_association_succeeds)
 {
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   server_cfg1.sctp.bind_addresses = {server1_addr_str, server1_multihomed_addr_str};
   server_cfg2.sctp.bind_addresses = {server2_addr_str, server2_multihomed_addr_str};
 
@@ -229,6 +237,8 @@ TEST_F(sctp_network_server_peer_test, when_connect_uses_multiple_destination_add
 
 TEST_F(sctp_network_server_peer_test, when_pending_connects_overlap_then_second_connect_is_rejected)
 {
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   server_cfg1.sctp.bind_addresses = {server1_addr_str, server1_multihomed_addr_str};
   server_cfg2.sctp.bind_addresses = {server2_addr_str, server2_multihomed_addr_str};
 
@@ -271,6 +281,8 @@ TEST_F(sctp_network_server_peer_test, when_pending_connects_overlap_then_second_
 
 TEST_F(sctp_network_server_peer_test, when_server_is_destroyed_then_associations_are_cleaned_up)
 {
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   server1 = create_sctp_network_server(server_cfg1);
   server2 = create_sctp_network_server(server_cfg2);
   ASSERT_NE(server1, nullptr);

@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
+#include "sctp_test_helpers.h"
 #include "ocudu/gateways/sctp_socket.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include <arpa/inet.h>
 #include <cstring>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
-#include <netinet/sctp.h>
 #include <optional>
 #include <sys/socket.h>
 
@@ -502,6 +502,8 @@ TEST_F(sctp_socket_test, bindx_with_multiple_ipv4_addresses)
 /// Test bindx with mixed IPv4 and IPv6 addresses.
 TEST_F(sctp_socket_test, bindx_with_mixed_ipv4_and_ipv6_addresses)
 {
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   sctp_socket_params params = create_default_params();
   params.ai_family          = AF_INET6;
   params.reuse_addr         = true;
@@ -532,6 +534,8 @@ TEST_F(sctp_socket_test, bindx_with_mixed_ipv4_and_ipv6_addresses)
 /// Test connectx with multiple IPv4 loopback addresses.
 TEST_F(sctp_socket_test, connectx_with_multiple_ipv4_addresses)
 {
+  OCUDU_SKIP_IF_NO_SCTP_CONNECTX();
+
   // Create and bind server socket
   sctp_socket_params server_params = create_default_params();
   server_params.reuse_addr         = true;
@@ -584,6 +588,8 @@ TEST_F(sctp_socket_test, connectx_with_multiple_ipv4_addresses)
 /// Test connectx with mixed IPv4 and IPv6 addresses.
 TEST_F(sctp_socket_test, connectx_with_mixed_ipv4_and_ipv6_addresses)
 {
+  OCUDU_SKIP_IF_NO_SCTP_CONNECTX();
+
   // Create and bind server socket
   sctp_socket_params server_params = create_default_params();
   server_params.ai_family          = AF_INET6;
@@ -645,6 +651,8 @@ TEST_F(sctp_socket_test, connectx_with_mixed_ipv4_and_ipv6_addresses)
 /// Test connectx with different number of addresses on server and client.
 TEST_F(sctp_socket_test, connectx_with_different_address_counts)
 {
+  OCUDU_SKIP_IF_NO_SCTP_CONNECTX();
+
   // Create and bind server socket with 2 addresses
   sctp_socket_params server_params = create_default_params();
   server_params.reuse_addr         = true;

@@ -202,7 +202,7 @@ static void set_static_header_params(span<uint8_t> frame, header_parameters para
   std::memcpy(&frame[14], &net_bytes, sizeof(net_bytes));
 
   // Set correct payload size.
-  uint16_t payload_size = ::htons(params.payload_size);
+  uint16_t payload_size = htons(params.payload_size);
   std::memcpy(&frame[20], &payload_size, sizeof(uint16_t));
 
   // Set port ID.

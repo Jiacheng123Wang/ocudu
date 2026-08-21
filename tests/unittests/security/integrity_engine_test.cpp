@@ -136,9 +136,15 @@ TEST_P(fxt_nia1, integrity_engine_generic_nia1)
   }
 }
 
-#ifdef MBEDTLS_CMAC_C
 TEST_P(fxt_nia2, integrity_engine_nia2_cmac)
 {
+#ifndef MBEDTLS_CMAC_C
+  // integrity_engine_nia2_cmac only exists when mbedTLS is built with MBEDTLS_CMAC_C. The Homebrew
+  // mbedtls@2 bottle used on macOS ships that option disabled (see mbedtls/config.h), so the engine is not
+  // compiled in. Skip at runtime instead of dropping the case from the test list, so that the missing coverage
+  // is visible in "make test" output. Rebuilding mbedTLS with MBEDTLS_CMAC_C enabled restores it.
+  GTEST_SKIP() << "mbedTLS built without MBEDTLS_CMAC_C: integrity_engine_nia2_cmac is not available";
+#else
   nia_test_set param = GetParam();
 
   // Pack hex strings into ocudu types
@@ -171,8 +177,8 @@ TEST_P(fxt_nia2, integrity_engine_nia2_cmac)
     logger.info(message.begin(), message.end(), "exp:");
     EXPECT_EQ(buf, message);
   }
-}
 #endif // MBEDTLS_CMAC_C
+}
 
 TEST_P(fxt_nia2, integrity_engine_nia2_non_cmac)
 {

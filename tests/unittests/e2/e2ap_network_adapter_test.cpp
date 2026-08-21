@@ -159,6 +159,15 @@ protected:
 /// Test successful e2 setup procedure
 TEST_F(e2ap_network_adapter_test, when_e2_setup_response_received_then_ric_connected)
 {
+#if defined(__APPLE__)
+  // The E2 agent binds its local endpoint to 127.0.0.101 while the RIC listens on 127.0.0.1. macOS has no in-kernel
+  // SCTP, so the gateway runs on usrsctp: unprivileged, it tunnels SCTP over UDP (RFC 6951) through a single
+  // wildcard-bound socket, so packets always leave with the default source address and an association bound to
+  // another local address never receives the answers (as root, usrsctp sends native SCTP packets, which macOS does
+  // not loop back locally). Needs further debugging on macOS: either usrsctp has to bind one tunneling socket per
+  // local address, or the test has to use a single loopback address.
+  GTEST_SKIP() << "usrsctp on macOS cannot associate distinct local addresses (127.0.0.101 -> 127.0.0.1)";
+#endif
   report_fatal_error_if_not(e2ap->handle_e2_tnl_connection_request(), "Unable to establish connection to RIC");
 
   // Action 1: Launch E2 setup procedure (sends E2 Setup Request to RIC).

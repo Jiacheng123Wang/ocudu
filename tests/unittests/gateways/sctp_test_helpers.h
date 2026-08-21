@@ -8,10 +8,43 @@
 #include "ocudu/support/io/io_broker.h"
 #include <arpa/inet.h>
 #include <map>
+#include <chrono>
+#include <gtest/gtest.h>
 #include <netdb.h>
-#include <netinet/sctp.h>
+#include <thread>
 
 namespace ocudu {
+
+/// \brief Skips the test when the SCTP stack cannot associate two distinct local addresses.
+///
+/// macOS has no in-kernel SCTP, so the gateway runs on usrsctp. An unprivileged process cannot open the raw socket
+/// usrsctp needs for native SCTP packets, so the shim tunnels SCTP over UDP (RFC 6951) through a single
+/// wildcard-bound UDP socket: outgoing packets always leave with the default source address, therefore an
+/// association bound to another local address - or a multihomed one - never receives the peer's answers. Running as
+/// root does not help: usrsctp then emits native SCTP packets, which macOS does not loop back to a local raw socket.
+#if defined(__APPLE__)
+#define OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS()                                                                    \
+  GTEST_SKIP() << "usrsctp on macOS cannot associate distinct local addresses (SCTP-over-UDP encapsulation uses one "  \
+                  "wildcard socket)"
+#else
+#define OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS()                                                                    \
+  do {                                                                                                                 \
+  } while (0)
+#endif
+
+/// \brief Skips the test when the SCTP stack has no sctp_connectx() with more than one peer address.
+///
+/// usrsctp only provides usrsctp_connect(): the shim connects to the first address of the list, so tests that check
+/// the multi-address behaviour of sctp_connectx() cannot pass on macOS.
+#if defined(__APPLE__)
+#define OCUDU_SKIP_IF_NO_SCTP_CONNECTX()                                                                               \
+  GTEST_SKIP() << "usrsctp has no sctp_connectx(): only the first peer address is used"
+#else
+#define OCUDU_SKIP_IF_NO_SCTP_CONNECTX()                                                                               \
+  do {                                                                                                                 \
+  } while (0)
+#endif
+
 
 /// Dummy IO broker where the registered callbacks have to be called manually.
 class dummy_io_broker : public io_broker
@@ -70,7 +103,12 @@ private:
 };
 
 struct test_recv_data {
+#if defined(__APPLE__)
+  struct sctp_rcvinfo sri       = {};
+  socklen_t           sri_len   = sizeof(sri);
+#else
   struct sctp_sndrcvinfo sri       = {};
+#endif
   int                    msg_flags = 0;
   sockaddr_storage       msg_src_addr;
   // fromlen is an in/out variable in sctp_recvmsg.
@@ -112,7 +150,24 @@ public:
     return false;
   }
 
-  std::optional<test_recv_data> receive()
+  /// \brief Receives one SCTP message or notification.
+  ///
+  /// The socket is non-blocking, so poll it until the peer message shows up (or the deadline expires). A single
+  /// attempt is not enough with a user-space SCTP stack (macOS/usrsctp), where the peer's message is delivered
+  /// asynchronously by the stack's receive thread instead of being queued by the kernel before send() returns.
+  std::optional<test_recv_data> receive(std::chrono::milliseconds timeout = std::chrono::milliseconds{500})
+  {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+      std::optional<test_recv_data> result = try_receive();
+      if (result.has_value() or last_recv_errno != EAGAIN or std::chrono::steady_clock::now() >= deadline) {
+        return result;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+
+  std::optional<test_recv_data> try_receive()
   {
     static constexpr uint32_t network_gateway_sctp_max_len = 9100;
 
@@ -125,13 +180,18 @@ public:
                                   (struct sockaddr*)&data.msg_src_addr,
                                   &data.msg_src_addrlen,
                                   &data.sri,
+#if defined(__APPLE__)
+                                  &data.sri_len,
+#endif
                                   &data.msg_flags);
     if (rx_bytes < 0) {
+      last_recv_errno = errno;
       if (errno != EAGAIN) {
         logger.error("Recv error: {}", ::strerror(errno));
       }
       return std::nullopt;
     }
+    last_recv_errno = 0;
 
     data.data.assign(temp_buf.begin(), temp_buf.begin() + rx_bytes);
     return data;
@@ -180,6 +240,8 @@ public:
   sctp_socket             socket;
   std::string             name;
   ocudulog::basic_logger& logger;
+  /// errno of the last try_receive() call, used by receive() to decide whether to retry.
+  int last_recv_errno = 0;
 };
 
 } // namespace ocudu

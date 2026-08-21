@@ -86,6 +86,13 @@ struct sort_iter {
 
   sort_iter operator+(difference_type n) const { return sort_iter{first + n, second + n}; }
 
+  sort_iter& operator+=(difference_type n)
+  {
+    first += n;
+    second += n;
+    return *this;
+  }
+
   difference_type operator-(const sort_iter& other) const { return first - other.first; }
   sort_iter&      operator--()
   {
@@ -109,6 +116,9 @@ struct sort_iter {
   bool operator==(const sort_iter& other) const { return first == other.first; }
   bool operator!=(const sort_iter& other) const { return first != other.first; }
   bool operator<(const sort_iter& other) const { return first < other.first; }
+  bool operator>(const sort_iter& other) const { return first > other.first; }
+  bool operator<=(const sort_iter& other) const { return first <= other.first; }
+  bool operator>=(const sort_iter& other) const { return first >= other.first; }
 
   friend void iter_swap(sort_iter it1, sort_iter it2) noexcept
   {

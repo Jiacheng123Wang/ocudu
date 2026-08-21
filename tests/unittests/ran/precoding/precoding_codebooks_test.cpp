@@ -7,6 +7,10 @@
 #include "ocudu/ran/precoding/precoding_codebooks.h"
 #include <gtest/gtest.h>
 
+#ifndef M_SQRT1_2f
+#define M_SQRT1_2f 0.70710678118654752440f
+#endif
+
 using namespace ocudu;
 
 /// Tolerance for floating-point arithmetics equality comparisons.

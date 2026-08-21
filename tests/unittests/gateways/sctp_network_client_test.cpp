@@ -323,6 +323,8 @@ TEST_F(sctp_network_client_test, when_server_exists_then_connection_succeeds)
 
 TEST_F(sctp_network_client_test, when_client_binds_address_then_connection_succeeds)
 {
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   client_cfg.sctp.bind_addresses    = {"127.0.0.2"};
   client_cfg.sctp.connect_addresses = {server.address};
   client_cfg.sctp.connect_port      = server.bind_port;
@@ -406,7 +408,15 @@ TEST_F(sctp_network_client_test, when_client_sender_is_destroyed_then_client_sen
   ASSERT_EQ(server_recv.value().sctp_assoc_change().sac_state, SCTP_SHUTDOWN_COMP);
 
   // Client receives an SCTP SHUTDOWN COMP
+#if defined(__APPLE__)
+  // The user-space stack may need more than one wake-up (and possibly a retransmission) to deliver the shutdown
+  // notifications: drive the broker until the association is gone.
+  for (unsigned i = 0; i != 10 and not recv_notifier_factory.destroyed; ++i) {
+    trigger_broker();
+  }
+#else
   trigger_broker();
+#endif
   ASSERT_TRUE(recv_notifier_factory.destroyed);
 }
 
@@ -454,7 +464,15 @@ TEST_F(sctp_network_client_test, when_server_is_destroyed_then_client_receives_s
   ASSERT_FALSE(recv_notifier_factory.destroyed);
 
   // Client receives an SCTP SHUTDOWN COMP
+#if defined(__APPLE__)
+  // The user-space stack may need more than one wake-up (and possibly a retransmission) to deliver the shutdown
+  // notifications: drive the broker until the association is gone.
+  for (unsigned i = 0; i != 10 and not recv_notifier_factory.destroyed; ++i) {
+    trigger_broker();
+  }
+#else
   trigger_broker();
+#endif
   ASSERT_TRUE(recv_notifier_factory.destroyed);
 }
 
@@ -475,12 +493,20 @@ TEST_F(sctp_network_client_test, when_server_sends_eof_then_client_receives_sctp
   ASSERT_TRUE(server.send_eof(
       client_cfg.sctp.ppid, (const struct sockaddr&)server_recv->msg_src_addr, server_recv->msg_src_addrlen));
 
+#if defined(__APPLE__)
+  // The user-space stack (usrsctp) may need a retransmission before the SHUTDOWN / SHUTDOWN-COMP pair is delivered,
+  // so the number of broker wake-ups needed is not deterministic: drive the broker until the association is gone.
+  for (unsigned i = 0; i != 10 and not recv_notifier_factory.destroyed; ++i) {
+    trigger_broker();
+  }
+#else
   // Client receives an SCTP SHUTDOWN EVENT
   trigger_broker();
   ASSERT_FALSE(recv_notifier_factory.destroyed);
 
   // Client receives an SCTP SHUTDOWN COMP
   trigger_broker();
+#endif
   ASSERT_TRUE(recv_notifier_factory.destroyed);
 
   // Server receives SCTP SHUTDOWN COMP
@@ -510,10 +536,24 @@ TEST_F(sctp_network_client_test, when_client_sends_eof_before_processing_incomin
 
   // Client receives an SCTP SHUTDOWN EVENT
   trigger_broker();
+#if !defined(__APPLE__)
+  // usrsctp (macOS) collapses the notifications of a simultaneous shutdown: the client is already in SHUTDOWN-SENT
+  // when the peer's SHUTDOWN arrives, so the stack reports SCTP_SHUTDOWN_COMP right away instead of first reporting
+  // SCTP_SHUTDOWN_EVENT and the association may already be gone at this point. The final outcome checked below is
+  // identical on both stacks.
   ASSERT_FALSE(recv_notifier_factory.destroyed);
+#endif
 
   // Client receives an SCTP SHUTDOWN COMP
+#if defined(__APPLE__)
+  // The user-space stack may need more than one wake-up (and possibly a retransmission) to deliver the shutdown
+  // notifications: drive the broker until the association is gone.
+  for (unsigned i = 0; i != 10 and not recv_notifier_factory.destroyed; ++i) {
+    trigger_broker();
+  }
+#else
   trigger_broker();
+#endif
   ASSERT_TRUE(recv_notifier_factory.destroyed);
 
   // Server receives SCTP SHUTDOWN COMP
@@ -569,6 +609,8 @@ TEST_F(sctp_network_client_test, when_server_is_ipv6_and_connection_succeeds_the
 
 TEST_F(sctp_network_client_test, when_server_has_multihomed_ipv4_addresses_then_data_exchange_works)
 {
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   dummy_sctp_server_multihomed_ipv4 server_multihomed;
 
   client_cfg.sctp.connect_addresses = server_multihomed.addresses;
@@ -615,6 +657,8 @@ TEST_F(sctp_network_client_test, when_server_has_multihomed_ipv4_addresses_then_
 
 TEST_F(sctp_network_client_test, when_server_has_multihomed_mixed_ipv4_and_ipv6_addresses_then_data_exchange_works)
 {
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   dummy_sctp_server_mixed server_mixed;
 
   client_cfg.sctp.connect_addresses = server_mixed.addresses;
@@ -665,6 +709,8 @@ TEST_F(sctp_network_client_test, when_server_has_multihomed_mixed_ipv4_and_ipv6_
 TEST_F(sctp_network_client_test,
        ipv4_bind_and_ipv4_and_ipv6_connect_addresses_filters_ipv6_and_connects_successfully_over_ipv4_socket)
 {
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   // Server is IPv4 only
   dummy_sctp_server server_ipv4;
   client_cfg.sctp.bind_addresses    = {"127.0.0.2"};

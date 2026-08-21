@@ -40,6 +40,9 @@ endif()
 if(APPLE)
     list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
     include_directories(SYSTEM /opt/homebrew/include)
+    # Homebrew libraries (e.g., gtest) are installed under /opt/homebrew/lib, which is not part of the
+    # default linker search path. Add it so raw library names such as "gtest" resolve.
+    add_link_options(-L/opt/homebrew/lib)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=deprecated-declarations")
     add_definitions(-DRTLD_DEEPBIND=0)
     # Apple's ld warns (unlike GNU ld) when the same static library appears more than once on the link

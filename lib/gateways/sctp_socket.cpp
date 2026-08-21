@@ -6,8 +6,13 @@
 #include "ocudu/support/error_handling.h"
 #include "ocudu/support/io/sockets.h"
 #include "ocudu/support/ocudu_assert.h"
+#include <algorithm>
+#include <chrono>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <thread>
+#include <vector>
 #include <unordered_map>
 #include <mutex>
 #if defined(__APPLE__)
@@ -31,14 +36,106 @@ using namespace ocudu;
 //   - sctp_recvmsg() consumes one byte after every usrsctp_recvv() call.
 static std::unordered_map<int, struct socket*> g_sctp_map;
 static std::unordered_map<int, int>            g_write_fd_map;
+/// Receive timeout requested through SO_RCVTIMEO, per bridge fd (0 = block until a message arrives).
+static std::unordered_map<int, std::chrono::milliseconds> g_rx_timeout_map;
 static std::mutex                              g_sctp_mutex;
+
+/// SCTP-over-UDP encapsulation port in use, or 0 when SCTP packets are sent natively over IP (raw sockets).
+static uint16_t g_udp_encaps_port = 0;
+
+/// Default SCTP-over-UDP tunneling port (IANA-assigned for SCTP encapsulation, RFC 6951).
+static constexpr uint16_t default_udp_tunneling_port = 9899;
+
+/// \brief Returns true if this process may open a raw SCTP socket.
+///
+/// usrsctp sends SCTP packets natively over IP through a raw socket, which macOS only allows to root. Without it the
+/// INIT chunks never leave the process, every association attempt ends in SCTP_CANT_STR_ASSOC and any code waiting
+/// for an association blocks until the INIT retransmissions give up.
+static bool raw_sctp_socket_available()
+{
+  int fd = ::socket(AF_INET, SOCK_RAW, IPPROTO_SCTP);
+  if (fd < 0) {
+    return false;
+  }
+  ::close(fd);
+  return true;
+}
+
+/// Returns a free UDP port for SCTP-over-UDP encapsulation, starting at the IANA-assigned one.
+static uint16_t pick_udp_tunneling_port()
+{
+  for (uint16_t port = default_udp_tunneling_port; port < default_udp_tunneling_port + 16; ++port) {
+    int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+      return default_udp_tunneling_port;
+    }
+    sockaddr_in addr = {};
+    addr.sin_len     = sizeof(addr);
+    addr.sin_family  = AF_INET;
+    addr.sin_port    = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bool free_port       = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+    ::close(fd);
+    if (free_port) {
+      return port;
+    }
+  }
+  return default_udp_tunneling_port;
+}
 
 /// Initializes the usrsctp library once per process (creates its internal timer and worker threads).
 static void usrsctp_once_init()
 {
   static std::once_flag init_flag;
-  std::call_once(init_flag, []() { usrsctp_init(0, nullptr, nullptr); });
+  std::call_once(init_flag, []() {
+    ocudulog::basic_logger& logger = ocudulog::fetch_basic_logger("SCTP-GW");
+
+    // usrsctp inherits the FreeBSD defaults (initial RTO 3 s, min 1 s), which are far too slow for the local links
+    // this stack is used on: a single lost chunk stalls an association setup or shutdown for seconds. Use defaults in
+    // the same range as the ocudu SCTP configuration (rto_initial=120 ms, rto_max=500 ms in the shipped configs); an
+    // explicit per-socket configuration still overrides them through SCTP_RTOINFO.
+    usrsctp_sysctl_set_sctp_rto_initial_default(500);
+    usrsctp_sysctl_set_sctp_rto_min_default(100);
+    usrsctp_sysctl_set_sctp_rto_max_default(6000);
+    usrsctp_sysctl_set_sctp_init_rto_max_default(6000);
+
+    if (raw_sctp_socket_available()) {
+      // Root: keep the wire format of a kernel SCTP stack (plain SCTP over IP).
+      usrsctp_init(0, nullptr, nullptr);
+      logger.info("usrsctp initialized with native SCTP packets (raw sockets available)");
+    } else {
+      // Unprivileged process: raw sockets are not permitted, so tunnel SCTP over UDP (RFC 6951). This is what makes
+      // loopback associations - and therefore the SCTP unit tests - work without root. A remote peer must use the
+      // same encapsulation port (Linux: sysctl net.sctp.udp_port, or SCTP_REMOTE_UDP_ENCAPS_PORT).
+      g_udp_encaps_port = pick_udp_tunneling_port();
+      usrsctp_init(g_udp_encaps_port, nullptr, nullptr);
+      logger.info("usrsctp initialized with SCTP-over-UDP encapsulation on port {} (no permission to open a raw "
+                  "socket; run as root for native SCTP packets)",
+                  g_udp_encaps_port);
+    }
+  });
 }
+
+uint16_t sctp_udp_encapsulation_port(void)
+{
+  return g_udp_encaps_port;
+}
+
+/// \brief Fills the BSD sockaddr length field of every address of a packed address array.
+///
+/// macOS sockaddr structures carry an sa_len field and usrsctp (built with HAVE_SA_LEN) validates it: usrsctp_bindx()
+/// fails with EINVAL when it is left at 0, which is how the shared (Linux-oriented) code fills its addresses.
+static void fill_sockaddr_lengths(struct sockaddr* addrs, int addrcnt)
+{
+  auto* ptr = reinterpret_cast<uint8_t*>(addrs);
+  for (int i = 0; i != addrcnt; ++i) {
+    auto*     sa   = reinterpret_cast<struct sockaddr*>(ptr);
+    socklen_t size = (sa->sa_family == AF_INET6) ? sizeof(sockaddr_in6) : sizeof(sockaddr_in);
+    sa->sa_len     = size;
+    ptr += size;
+  }
+}
+
 
 /// Returns the usrsctp socket associated to the bridge fd, or nullptr if the fd is unknown.
 static struct socket* get_usr_socket(const unique_fd& fd)
@@ -91,6 +188,58 @@ static void my_upcall_func(struct socket* sock, void* addr, int flags)
   (void)::write(write_fd, &dummy, sizeof(dummy));
 }
 
+/// \brief Shuts every association of a usrsctp socket down gracefully.
+///
+/// Closing a kernel SCTP socket makes the peer observe SCTP_SHUTDOWN_EVENT followed by SCTP_SHUTDOWN_COMP, whereas
+/// usrsctp_close() alone sends an ABORT and the peer observes SCTP_COMM_LOST. Emulate the kernel behaviour by sending
+/// a zero-length message with the SCTP_EOF flag on each association and waiting (briefly) for the SHUTDOWN handshake
+/// to complete, because usrsctp drops the association state as soon as the socket is closed.
+static void
+shutdown_associations_gracefully(struct socket* so, const std::string& if_name, ocudulog::basic_logger& logger)
+{
+  uint32_t  nof_assocs = 0;
+  socklen_t opt_len    = sizeof(nof_assocs);
+  if (usrsctp_getsockopt(so, IPPROTO_SCTP, SCTP_GET_ASSOC_NUMBER, &nof_assocs, &opt_len) != 0 or nof_assocs == 0) {
+    return;
+  }
+
+  std::vector<uint8_t> id_buffer(sizeof(struct sctp_assoc_ids) + nof_assocs * sizeof(sctp_assoc_t));
+  auto*                assoc_ids = reinterpret_cast<struct sctp_assoc_ids*>(id_buffer.data());
+  socklen_t            ids_len   = id_buffer.size();
+  if (usrsctp_getsockopt(so, IPPROTO_SCTP, SCTP_GET_ASSOC_ID_LIST, assoc_ids, &ids_len) != 0) {
+    logger.debug(
+        "{}: Could not list the SCTP associations to shut them down gracefully: {}", if_name, ::strerror(errno));
+    return;
+  }
+
+  for (uint32_t i = 0; i != assoc_ids->gaids_number_of_ids; ++i) {
+    struct sctp_sndinfo sndinfo = {};
+    sndinfo.sinfo_assoc_id      = assoc_ids->gaids_assoc_id[i];
+    sndinfo.sinfo_flags         = SCTP_EOF;
+    // usrsctp rejects a null data pointer, so send a zero-length message from a dummy buffer.
+    const uint8_t eof_payload = 0;
+    if (usrsctp_sendv(so, &eof_payload, 0, nullptr, 0, &sndinfo, sizeof(sndinfo), SCTP_SENDV_SNDINFO, 0) < 0) {
+      logger.debug("{}: Failed to send SCTP EOF for assoc={}: {}",
+                   if_name,
+                   assoc_ids->gaids_assoc_id[i],
+                   ::strerror(errno));
+    }
+  }
+
+  // Wait for the associations to disappear, i.e. for the SHUTDOWN handshake to complete. Over a local link this takes
+  // well under a millisecond; the cap only protects against an unresponsive peer.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+  while (std::chrono::steady_clock::now() < deadline) {
+    uint32_t  remaining = 0;
+    socklen_t len       = sizeof(remaining);
+    if (usrsctp_getsockopt(so, IPPROTO_SCTP, SCTP_GET_ASSOC_NUMBER, &remaining, &len) != 0 or remaining == 0) {
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  logger.debug("{}: Timed out waiting for the SCTP associations to shut down gracefully", if_name);
+}
+
 int sctp_bindx(int s, struct sockaddr* addrs, int addrcnt, int flags)
 {
   std::lock_guard<std::mutex> lock(g_sctp_mutex);
@@ -100,7 +249,8 @@ int sctp_bindx(int s, struct sockaddr* addrs, int addrcnt, int flags)
     return -1;
   }
   // One-to-one mapping: usrsctp_bindx() iterates over the packed addresses based on their address family,
-  // mirroring the kernel's sctp_bindx().
+  // mirroring the kernel's sctp_bindx(). It requires the BSD sa_len field, which the shared code does not set.
+  fill_sockaddr_lengths(addrs, addrcnt);
   return usrsctp_bindx(it->second, addrs, addrcnt, flags);
 }
 
@@ -115,6 +265,7 @@ int sctp_connectx(int s, struct sockaddr* addrs, int addrcnt, uint32_t* id)
   // usrsctp has no connectx(): connect to the first address (connecting to multiple peer addresses is not
   // supported by usrsctp) and report the association id via usrsctp_getassocid().
   (void)addrcnt;
+  fill_sockaddr_lengths(addrs, 1);
   int ret = usrsctp_connect(it->second, addrs, sockaddr_actual_size(addrs));
   if (ret < 0) {
     return -1;
@@ -150,6 +301,9 @@ int sctp_sendmsg(int s, const void* msg, size_t len, struct sockaddr* to, sockle
   sinfo.sinfo_flags          = flags;
   sinfo.sinfo_stream         = stream_no;
   sinfo.sinfo_context        = context;
+  if (to != nullptr) {
+    fill_sockaddr_lengths(to, 1);
+  }
   return usrsctp_sendv(
       it->second, msg, len, to, (to != nullptr) ? 1 : 0, &sinfo, sizeof(sinfo), SCTP_SENDV_SNDINFO, 0);
 }
@@ -157,29 +311,89 @@ int sctp_sendmsg(int s, const void* msg, size_t len, struct sockaddr* to, sockle
 int sctp_recvmsg(int s, void* msg, size_t len, struct sockaddr* from, socklen_t* fromlen, void* sinfo,
                  socklen_t* sinfo_len, int* msg_flags)
 {
-  std::lock_guard<std::mutex> lock(g_sctp_mutex);
-  auto                        it = g_sctp_map.find(s);
-  if (it == g_sctp_map.end()) {
-    errno = EBADF;
-    return -1;
+  // usrsctp ignores SO_RCVTIMEO (its internal sbwait() is a plain condition wait), so a blocking usrsctp_recvv()
+  // would never return when the peer sends nothing. Emulate the Linux SO_RCVTIMEO semantics: poll the socket with
+  // MSG_DONTWAIT - which usrsctp does honour even on a blocking socket - and wait on the bridge socketpair (written
+  // by the upcall) in between. A configured rx_timeout that expires reports EAGAIN, exactly like a kernel SCTP
+  // socket with SO_RCVTIMEO, and a socket set to non-blocking mode never waits at all.
+  std::chrono::milliseconds timeout{0};
+  {
+    std::lock_guard<std::mutex> lock(g_sctp_mutex);
+    auto                        it_to = g_rx_timeout_map.find(s);
+    if (it_to != g_rx_timeout_map.end()) {
+      timeout = it_to->second;
+    }
   }
-  struct sctp_rcvinfo rsinfo     = {};
-  socklen_t           rsinfo_len = sizeof(rsinfo);
-  unsigned int        infotype   = 0;
-  // Note: infotype must not be null: usrsctp_recvv() writes it on the data path.
-  int                 result = usrsctp_recvv(it->second, msg, len, from, fromlen, &rsinfo, &rsinfo_len, &infotype, msg_flags);
+  const auto deadline    = std::chrono::steady_clock::now() + timeout;
+  const bool has_timeout = timeout.count() > 0;
 
-  // Provide the per-message info (association id, PPID, stream, ...) to the caller.
-  if (sinfo != nullptr && sinfo_len != nullptr && *sinfo_len >= sizeof(struct sctp_rcvinfo)) {
-    ::memcpy(sinfo, &rsinfo, sizeof(struct sctp_rcvinfo));
-  }
+  for (;;) {
+    bool non_blocking = false;
+    {
+      std::lock_guard<std::mutex> lock(g_sctp_mutex);
+      auto                        it = g_sctp_map.find(s);
+      if (it == g_sctp_map.end()) {
+        errno = EBADF;
+        return -1;
+      }
+      non_blocking = usrsctp_get_non_blocking(it->second) != 0;
 
-  // Consume one wake-up byte. The read end is non-blocking: if no byte is pending (e.g., several messages were
-  // delivered in one broker wake-up), the read simply returns EAGAIN.
-  uint8_t dummy;
-  while (::read(s, &dummy, sizeof(dummy)) < 0 and errno == EINTR) {
+      struct sctp_rcvinfo rsinfo     = {};
+      socklen_t           rsinfo_len = sizeof(rsinfo);
+      unsigned int        infotype   = 0;
+      // Note: infotype must not be null: usrsctp_recvv() writes it on the data path. MSG_DONTWAIT guarantees that
+      // the call returns immediately, so the shim lock is never held while waiting.
+      int flags  = MSG_DONTWAIT;
+      int result = usrsctp_recvv(it->second, msg, len, from, fromlen, &rsinfo, &rsinfo_len, &infotype, &flags);
+      if (result >= 0) {
+        if (msg_flags != nullptr) {
+          *msg_flags = flags & ~MSG_DONTWAIT;
+        }
+        // Provide the per-message info (association id, PPID, stream, ...) to the caller.
+        if (sinfo != nullptr && sinfo_len != nullptr && *sinfo_len >= sizeof(struct sctp_rcvinfo)) {
+          ::memcpy(sinfo, &rsinfo, sizeof(struct sctp_rcvinfo));
+        }
+        // Consume one wake-up byte. The read end is non-blocking: if no byte is pending (e.g., several messages were
+        // delivered in one broker wake-up), the read simply returns EAGAIN.
+        uint8_t dummy;
+        while (::read(s, &dummy, sizeof(dummy)) < 0 and errno == EINTR) {
+        }
+        return result;
+      }
+      if (errno != EAGAIN and errno != EWOULDBLOCK and errno != EINTR) {
+        return -1;
+      }
+    }
+
+    if (non_blocking) {
+      errno = EAGAIN;
+      return -1;
+    }
+
+    // Nothing to read yet: wait on the bridge socketpair, which the usrsctp upcall writes to. The wait is capped so
+    // that a lost wake-up byte (the write end is non-blocking) only delays the next read attempt.
+    int wait_ms = 50;
+    if (has_timeout) {
+      auto remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+      if (remaining.count() <= 0) {
+        errno = EAGAIN;
+        return -1;
+      }
+      wait_ms = static_cast<int>(std::min<int64_t>(remaining.count(), wait_ms));
+    }
+    struct pollfd pfd = {};
+    pfd.fd            = s;
+    pfd.events        = POLLIN;
+    int poll_ret      = ::poll(&pfd, 1, wait_ms);
+    if (poll_ret < 0 and errno != EINTR) {
+      return -1;
+    }
+    if (poll_ret > 0 and (pfd.revents & (POLLERR | POLLNVAL)) != 0) {
+      errno = EBADF;
+      return -1;
+    }
   }
-  return result;
 }
 
 int sctp_getpaddrs(int s, uint32_t assoc_id, struct sockaddr** addrs)
@@ -199,6 +413,44 @@ void sctp_freepaddrs(struct sockaddr* addrs)
 {
   // usrsctp_freepaddrs() unwinds the hidden sctp_getaddresses header.
   usrsctp_freepaddrs(addrs);
+}
+
+int sctp_getladdrs(int s, uint32_t assoc_id, struct sockaddr** addrs)
+{
+  std::lock_guard<std::mutex> lock(g_sctp_mutex);
+  auto                        it = g_sctp_map.find(s);
+  if (it == g_sctp_map.end()) {
+    errno = EBADF;
+    return -1;
+  }
+  return usrsctp_getladdrs(it->second, assoc_id, addrs);
+}
+
+void sctp_freeladdrs(struct sockaddr* addrs)
+{
+  usrsctp_freeladdrs(addrs);
+}
+
+int sctp_getsockopt(int s, int level, int optname, void* optval, socklen_t* optlen)
+{
+  std::lock_guard<std::mutex> lock(g_sctp_mutex);
+  auto                        it = g_sctp_map.find(s);
+  if (it == g_sctp_map.end()) {
+    errno = EBADF;
+    return -1;
+  }
+  return usrsctp_getsockopt(it->second, level, optname, optval, optlen);
+}
+
+int sctp_setsockopt(int s, int level, int optname, const void* optval, socklen_t optlen)
+{
+  std::lock_guard<std::mutex> lock(g_sctp_mutex);
+  auto                        it = g_sctp_map.find(s);
+  if (it == g_sctp_map.end()) {
+    errno = EBADF;
+    return -1;
+  }
+  return usrsctp_setsockopt(it->second, level, optname, optval, optlen);
 }
 #else
 // On Linux, SCTP options go directly to the kernel socket.
@@ -235,9 +487,16 @@ static bool sctp_subscribe_to_events(const unique_fd& fd)
   ocudu_sanity_check(fd.is_open(), "Invalid FD");
 
   // Subscribe to each event individually using SCTP_EVENT socket option.
-#if !defined(__APPLE__)
-  // SCTP_DATA_IO_EVENT is Linux-specific (delivers sctp_sndrcvinfo on receive); the usrsctp shim always provides
-  // the sctp_rcvinfo, so this subscription is skipped on macOS.
+#if defined(__APPLE__)
+  // SCTP_DATA_IO_EVENT is Linux-specific (it makes the kernel deliver a sctp_sndrcvinfo with every message). The
+  // usrsctp equivalent is the SCTP_RECVRCVINFO socket option: without it usrsctp_recvv() reports SCTP_RECVV_NOINFO
+  // and leaves the sctp_rcvinfo - and therefore rcv_assoc_id - untouched, so the receiver cannot tell which
+  // association a message belongs to ("Received data on unknown SCTP association").
+  int recvrcvinfo_on = 1;
+  if (sctp_setsockopt_shim(fd, IPPROTO_SCTP, SCTP_RECVRCVINFO, &recvrcvinfo_on, sizeof(recvrcvinfo_on)) != 0) {
+    return false;
+  }
+#else
   if (!sctp_subscribe_to_event(fd, SCTP_DATA_IO_EVENT)) {
     return false;
   }
@@ -286,6 +545,30 @@ static bool sctp_set_rto_opts(const unique_fd&                         fd,
     rto_opts.srto_max = rto_max.value().count();
   }
 
+#if defined(__APPLE__)
+  // usrsctp inherits the FreeBSD validation of SCTP_RTOINFO and rejects the whole option (EINVAL) unless
+  // srto_min <= srto_initial <= srto_max, while the Linux kernel accepts any combination. Clamp the initial RTO into
+  // the requested window so that a Linux-tuned configuration still applies on macOS.
+  if (rto_opts.srto_min > rto_opts.srto_max) {
+    logger.warning("{}: SCTP rto_min={} is larger than rto_max={}; swapping them for usrsctp",
+                   if_name,
+                   rto_opts.srto_min,
+                   rto_opts.srto_max);
+    std::swap(rto_opts.srto_min, rto_opts.srto_max);
+  }
+  uint32_t clamped_initial = std::min(std::max(rto_opts.srto_initial, rto_opts.srto_min), rto_opts.srto_max);
+  if (clamped_initial != rto_opts.srto_initial) {
+    logger.warning("{}: SCTP rto_initial={} is outside [rto_min={}, rto_max={}]; using {} (usrsctp requires "
+                   "rto_min <= rto_initial <= rto_max)",
+                   if_name,
+                   rto_opts.srto_initial,
+                   rto_opts.srto_min,
+                   rto_opts.srto_max,
+                   clamped_initial);
+    rto_opts.srto_initial = clamped_initial;
+  }
+#endif
+
   logger.debug(
       "{}: Setting RTO_INFO options on SCTP socket. Association {}, Initial RTO {}, Minimum RTO {}, Maximum RTO {}",
       if_name,
@@ -318,10 +601,13 @@ static bool sctp_set_init_msg_opts(const unique_fd&                         fd,
   }
 
 #if defined(__APPLE__)
-  // usrsctp does not implement SCTP_INITMSG and its connect() path is non-blocking, so the init timeout options
-  // are not applicable.
-  logger.debug("{}: SCTP_INITMSG is not supported by usrsctp, skipping", if_name);
-  return true;
+  // usrsctp implements SCTP_INITMSG, but the option must be routed to the usrsctp socket instead of the bridge fd.
+  sctp_initmsg init_opts = {};
+  socklen_t    init_sz   = sizeof(sctp_initmsg);
+  if (sctp_getsockopt_shim(fd, IPPROTO_SCTP, SCTP_INITMSG, &init_opts, &init_sz) < 0) {
+    logger.error("{}: Error getting SCTP_INITMSG sockopts. errno={}", if_name, ::strerror(errno));
+    return false;
+  }
 #else
   // Set SCTP INITMSG options to reduce blocking timeout of connect()
   sctp_initmsg init_opts = {};
@@ -330,6 +616,7 @@ static bool sctp_set_init_msg_opts(const unique_fd&                         fd,
     logger.error("{}: Error getting sockopts. errno={}", if_name, ::strerror(errno));
     return false; // Responsibility of closing the socket is on the caller
   }
+#endif
 
   if (init_max_attempts.has_value()) {
     init_opts.sinit_max_attempts = init_max_attempts.value();
@@ -347,7 +634,6 @@ static bool sctp_set_init_msg_opts(const unique_fd&                         fd,
     return false; // Responsibility of closing the socket is on the caller
   }
   return true;
-#endif
 }
 
 /// \brief Modify SCTP default Peer Address parameters for quicker detection of broken links.
@@ -440,13 +726,7 @@ static bool sctp_set_nodelay(const unique_fd& fd, std::optional<bool> nodelay)
   }
 
   int optval = nodelay.value() ? 1 : 0;
-#if defined(__APPLE__)
-  // usrsctp does not implement SCTP_NODELAY; messages are always sent without Nagle-style delays.
-  (void)optval;
-  return true;
-#else
   return sctp_setsockopt_shim(fd, IPPROTO_SCTP, SCTP_NODELAY, &optval, sizeof(optval)) == 0;
-#endif
 }
 
 /// \brief Pack addresses into contiguous buffer with correct sizes for each address family.
@@ -542,11 +822,23 @@ expected<sctp_socket> sctp_socket::create(const sctp_socket_params& params)
     return make_unexpected(default_error_t{});
   }
   // Both ends non-blocking: the read end so that sctp_recvmsg() never blocks on the wake-up byte, the write end so
-  // that the upcall never blocks the usrsctp stack.
+  // that the upcall never blocks the usrsctp stack. SO_NOSIGPIPE is also needed: when the read end is closed while
+  // the stack still has events pending, the upcall's write() would otherwise raise SIGPIPE and kill the process
+  // (macOS has no MSG_NOSIGNAL).
   for (int fd : {sv[0], sv[1]}) {
     int flags = ::fcntl(fd, F_GETFL, 0);
     if (flags == -1 or ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
       socket.logger.error("{}: Failed to set bridge socketpair non-blocking: {}", socket.if_name, ::strerror(errno));
+      ::close(sv[0]);
+      ::close(sv[1]);
+      usrsctp_close(usr_sock);
+      return make_unexpected(default_error_t{});
+    }
+    int nosigpipe = 1;
+    if (::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe)) < 0) {
+      socket.logger.error("{}: Failed to set SO_NOSIGPIPE on the bridge socketpair: {}",
+                          socket.if_name,
+                          ::strerror(errno));
       ::close(sv[0]);
       ::close(sv[1]);
       usrsctp_close(usr_sock);
@@ -560,6 +852,22 @@ expected<sctp_socket> sctp_socket::create(const sctp_socket_params& params)
     std::lock_guard<std::mutex> lock(g_sctp_mutex);
     g_sctp_map[sv[0]]    = usr_sock;
     g_write_fd_map[sv[0]] = sv[1];
+    // usrsctp does not honour SO_RCVTIMEO, so sctp_recvmsg() emulates it (see there).
+    g_rx_timeout_map[sv[0]] = std::chrono::duration_cast<std::chrono::milliseconds>(params.rx_timeout);
+  }
+
+  if (g_udp_encaps_port != 0) {
+    // Tunnel the outgoing SCTP packets of every future association over UDP. Incoming associations do not need this:
+    // the stack learns the peer encapsulation port from the received packets.
+    struct sctp_udpencaps encaps = {};
+    encaps.sue_assoc_id          = SCTP_FUTURE_ASSOC;
+    encaps.sue_port              = htons(g_udp_encaps_port);
+    if (usrsctp_setsockopt(usr_sock, IPPROTO_SCTP, SCTP_REMOTE_UDP_ENCAPS_PORT, &encaps, sizeof(encaps)) < 0) {
+      socket.logger.warning("{}: Failed to enable SCTP-over-UDP encapsulation on port {}: {}",
+                            socket.if_name,
+                            g_udp_encaps_port,
+                            ::strerror(errno));
+    }
   }
 
   socket.sock_fd = unique_fd{sv[0]};
@@ -609,24 +917,33 @@ bool sctp_socket::close()
   }
 
 #if defined(__APPLE__)
-  int fd = sock_fd.value();
+  int            fd       = sock_fd.value();
+  struct socket* usr_sock = nullptr;
   {
     std::lock_guard<std::mutex> lock(g_sctp_mutex);
-    auto it = g_sctp_map.find(fd);
+    auto                        it = g_sctp_map.find(fd);
     if (it != g_sctp_map.end()) {
-      struct socket* usr_sock = it->second;
-      // Remove the entry first so concurrent shim calls fail fast, then close the usrsctp socket. Any upcall
-      // firing after this point only writes to a stale pipe (the write end is closed afterwards).
-      g_sctp_map.erase(it);
-      auto it_w = g_write_fd_map.find(fd);
-      int  wfd  = (it_w != g_write_fd_map.end()) ? it_w->second : -1;
-      if (it_w != g_write_fd_map.end()) {
-        g_write_fd_map.erase(it_w);
-      }
-      usrsctp_close(usr_sock);
-      if (wfd > 0) {
-        ::close(wfd);
-      }
+      usr_sock = it->second;
+    }
+  }
+  if (usr_sock != nullptr) {
+    // Mirror the kernel: closing the socket shuts the associations down gracefully. Done outside the shim lock, as
+    // it waits for the SHUTDOWN handshake.
+    shutdown_associations_gracefully(usr_sock, if_name, logger);
+
+    std::lock_guard<std::mutex> lock(g_sctp_mutex);
+    // Remove the entries first so concurrent shim calls fail fast, then close the usrsctp socket. Any upcall firing
+    // after this point only writes to a stale pipe (the write end is closed afterwards).
+    g_sctp_map.erase(fd);
+    g_rx_timeout_map.erase(fd);
+    auto it_w = g_write_fd_map.find(fd);
+    int  wfd  = (it_w != g_write_fd_map.end()) ? it_w->second : -1;
+    if (it_w != g_write_fd_map.end()) {
+      g_write_fd_map.erase(it_w);
+    }
+    usrsctp_close(usr_sock);
+    if (wfd > 0) {
+      ::close(wfd);
     }
   }
 #endif
@@ -805,8 +1122,14 @@ bool sctp_socket::set_sockopts(const sctp_socket_params& params)
     return false;
   }
 
-#if !defined(__APPLE__)
-  // SO_RCVTIMEO does not apply to the user-space stack (its recv path is non-blocking); skip on macOS.
+#if defined(__APPLE__)
+  // The receive timeout is emulated by sctp_recvmsg() (usrsctp ignores SO_RCVTIMEO) and was registered for this fd
+  // when the socket was created, so there is nothing to set here.
+  if (params.rx_timeout.count() > 0) {
+    logger.debug(
+        "{}: SCTP receive timeout of {} s is emulated by the usrsctp shim", if_name, params.rx_timeout.count());
+  }
+#else
   if (params.rx_timeout.count() > 0) {
     if (not set_receive_timeout(sock_fd, params.rx_timeout, logger)) {
       return false;
@@ -872,6 +1195,12 @@ std::optional<uint16_t> sctp_socket::get_bound_port() const
   struct sockaddr* laddrs = nullptr;
   int              cnt    = usrsctp_getladdrs(so, 0, &laddrs);
   if (cnt <= 0 or laddrs == nullptr) {
+    if (errno == ENOTCONN or errno == EINVAL) {
+      // Socket is open but not bound yet. The kernel SCTP stack answers getsockname() with port 0 in this case, so
+      // report the same to the shared code instead of an error.
+      logger.debug("{}: SCTP socket with sock_fd={} is not bound yet, reporting port 0", if_name, sock_fd.value());
+      return 0;
+    }
     logger.error("{}: Failed `usrsctp_getladdrs` in SCTP network gateway with sock_fd={}: {}",
                  if_name,
                  sock_fd.value(),

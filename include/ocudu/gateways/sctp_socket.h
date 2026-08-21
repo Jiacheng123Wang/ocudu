@@ -68,6 +68,15 @@ extern "C" int sctp_recvmsg(int s, void *msg, size_t len, struct sockaddr *from,
                             void *sinfo, socklen_t *sinfo_len, int *msg_flags);
 extern "C" int sctp_getpaddrs(int s, uint32_t assoc_id, struct sockaddr **addrs);
 extern "C" void sctp_freepaddrs(struct sockaddr *addrs);
+extern "C" int  sctp_getladdrs(int s, uint32_t assoc_id, struct sockaddr **addrs);
+extern "C" void sctp_freeladdrs(struct sockaddr *addrs);
+/// SCTP-level get/setsockopt for the usrsctp-backed sockets. The fd handed out by sctp_socket is only a bridge
+/// socketpair used to wake the io_broker, so SCTP options must be routed to the usrsctp socket instead of being
+/// passed to ::getsockopt()/::setsockopt() (which would silently act on the AF_UNIX socketpair).
+extern "C" int sctp_getsockopt(int s, int level, int optname, void *optval, socklen_t *optlen);
+extern "C" int sctp_setsockopt(int s, int level, int optname, const void *optval, socklen_t optlen);
+/// Returns the SCTP-over-UDP encapsulation port in use (0 when packets are sent as plain SCTP).
+extern "C" uint16_t sctp_udp_encapsulation_port(void);
 #else
 #include <netinet/sctp.h>
 #endif

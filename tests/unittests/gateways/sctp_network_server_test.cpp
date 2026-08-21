@@ -138,6 +138,21 @@ protected:
   dummy_sctp_client                    client;
 };
 
+namespace {
+
+/// Reads an SCTP-level socket option. On macOS the fd returned by get_socket_fd() is only the bridge socketpair used
+/// to wake the io_broker, so the option has to be read from the usrsctp socket through the shim.
+int get_sctp_sockopt(int fd, int level, int optname, void* optval, socklen_t* optlen)
+{
+#if defined(__APPLE__)
+  return sctp_getsockopt(fd, level, optname, optval, optlen);
+#else
+  return ::getsockopt(fd, level, optname, optval, optlen);
+#endif
+}
+
+} // namespace
+
 TEST_F(sctp_network_server_test, when_config_is_valid_then_server_is_created_successfully)
 {
   server = create_sctp_network_server(server_cfg);
@@ -254,7 +269,15 @@ TEST_F(sctp_network_server_test, when_client_sends_sctp_message_then_message_is_
   std::vector<uint8_t> bytes = {0x01, 0x02, 0x03, 0x04};
   ASSERT_TRUE(send_data(bytes, false));
 
+#if defined(__APPLE__)
+  // The user-space stack delivers the message asynchronously, so one broker wake-up is not guaranteed to carry it:
+  // drive the broker until the SDU shows up.
+  for (unsigned i = 0; i != 10 and assoc_factory.last_sdu.empty(); ++i) {
+    trigger_broker(assoc_fd);
+  }
+#else
   trigger_broker(assoc_fd); // Should handle packet receive
+#endif
 
   // Ensure SCTP server forwarded the message to the association handler.
   ASSERT_EQ(assoc_factory.last_sdu, bytes);
@@ -331,13 +354,27 @@ TEST_F(sctp_network_server_test, when_multiple_clients_connect_then_multiple_ass
   client2.close();
 
   // SCTP shutdown client 1
+#if defined(__APPLE__)
+  // The user-space stack (usrsctp) can interleave the SHUTDOWN notifications of the two associations, so the number
+  // of broker wake-ups needed per client is not deterministic: drive the broker until the handler is destroyed.
+  for (unsigned i = 0; i != 10 and not assoc_factory.association_destroyed; ++i) {
+    trigger_broker(assoc_fd1);
+  }
+#else
   trigger_broker(assoc_fd1); // < Client 1: SCTP SHUTDOWN EVENT
   trigger_broker(assoc_fd1); // < Client 1: SCTP SHUTDOWN COMP
+#endif
   ASSERT_TRUE(assoc_factory.association_destroyed) << "Client 1 shutdown was not processed";
   assoc_factory.association_destroyed = false;
   // SCTP shutdown client 2
+#if defined(__APPLE__)
+  for (unsigned i = 0; i != 10 and not assoc_factory.association_destroyed; ++i) {
+    trigger_broker(assoc_fd2);
+  }
+#else
   trigger_broker(assoc_fd2); // < Client2: SCTP SHUTDOWN EVENT
   trigger_broker(assoc_fd2); // < Client2: SCTP SHUTDOWN COMP
+#endif
   ASSERT_TRUE(assoc_factory.association_destroyed) << "Client 2 shutdown was not processed";
 }
 
@@ -382,7 +419,7 @@ TEST_F(sctp_network_server_test, when_rto_is_set_then_rto_changes)
   sctp_rtoinfo rto_opts  = {};
   socklen_t    rto_sz    = sizeof(sctp_rtoinfo);
   rto_opts.srto_assoc_id = 0;
-  ASSERT_EQ(getsockopt(fd, SOL_SCTP, SCTP_RTOINFO, &rto_opts, &rto_sz), 0) << ::strerror(errno);
+  ASSERT_EQ(get_sctp_sockopt(fd, SOL_SCTP, SCTP_RTOINFO, &rto_opts, &rto_sz), 0) << ::strerror(errno);
   ASSERT_EQ(rto_opts.srto_initial, rto_init.count());
   ASSERT_EQ(rto_opts.srto_min, rto_min.count());
   ASSERT_EQ(rto_opts.srto_max, rto_max.count());
@@ -404,7 +441,7 @@ TEST_F(sctp_network_server_test, when_init_msg_is_set_then_init_msg_changes)
   // Check used SCTP_INITMSG values.
   sctp_initmsg init_opts = {};
   socklen_t    init_sz   = sizeof(sctp_initmsg);
-  ASSERT_EQ(getsockopt(fd, SOL_SCTP, SCTP_INITMSG, &init_opts, &init_sz), 0);
+  ASSERT_EQ(get_sctp_sockopt(fd, SOL_SCTP, SCTP_INITMSG, &init_opts, &init_sz), 0);
 
   ASSERT_EQ(init_opts.sinit_max_attempts, init_max_attempts);
   ASSERT_EQ(init_opts.sinit_max_init_timeo, max_init_timeo.count());
@@ -424,7 +461,7 @@ TEST_F(sctp_network_server_test, when_assoc_is_set_then_assoc_changes)
   // Check used SCTP_ASSOCINFO values.
   sctp_assocparams assoc_opts = {};
   socklen_t        assoc_sz   = sizeof(sctp_assocparams);
-  ASSERT_EQ(getsockopt(fd, SOL_SCTP, SCTP_ASSOCINFO, &assoc_opts, &assoc_sz), 0);
+  ASSERT_EQ(get_sctp_sockopt(fd, SOL_SCTP, SCTP_ASSOCINFO, &assoc_opts, &assoc_sz), 0);
 
   ASSERT_EQ(assoc_opts.sasoc_asocmaxrxt, assoc_max_rxt);
 }
@@ -443,7 +480,7 @@ TEST_F(sctp_network_server_test, when_paddr_is_set_then_paddr_changes)
   // Check used SCTP_PEER_ADDR_PARAMS values.
   sctp_paddrparams paddr_opts = {};
   socklen_t        paddr_sz   = sizeof(sctp_paddrparams);
-  ASSERT_EQ(getsockopt(fd, SOL_SCTP, SCTP_PEER_ADDR_PARAMS, &paddr_opts, &paddr_sz), 0);
+  ASSERT_EQ(get_sctp_sockopt(fd, SOL_SCTP, SCTP_PEER_ADDR_PARAMS, &paddr_opts, &paddr_sz), 0);
 
   ASSERT_EQ(paddr_opts.spp_hbinterval, hb_interval.count());
 }

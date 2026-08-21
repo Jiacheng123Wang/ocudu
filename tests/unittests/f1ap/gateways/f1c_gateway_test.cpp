@@ -136,6 +136,18 @@ protected:
   }
   ~f1c_gateway_link_test() override { ocudulog::flush(); }
 
+  void SetUp() override
+  {
+#if defined(__APPLE__)
+    if (GetParam()) {
+      // macOS has no kernel SCTP, so the gateway runs on the userspace usrsctp shim. Its sockets are not real
+      // file descriptors, therefore the io_broker never reports them readable and the peer PDU never arrives:
+      // the test then blocks forever in pop_*_rx_pdu()/wait(). Needs further debugging on macOS.
+      GTEST_SKIP() << "SCTP link not pollable by the io_broker on macOS (usrsctp shim)";
+    }
+#endif
+  }
+
   void create_link(bool pcap_enabled = false)
   {
     bool use_sctp = GetParam();

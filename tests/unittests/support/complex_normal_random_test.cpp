@@ -67,7 +67,7 @@ TYPED_TEST(ComplexNormalFixture, CheckGeneration)
   std::normal_distribution<r_type>     rnd = {};
 
   for (unsigned i = 0, i_max = 10; i != i_max; ++i) {
-    cx_type expected = cx_type(rnd(rgen_r), rnd(rgen_r)) / std::sqrt<r_type>(2);
+    cx_type expected = cx_type(rnd(rgen_r), rnd(rgen_r)) / std::sqrt(r_type{2});
     cx_type obtained = cnd(rgen_cx);
     // Looks like gtest doesn't work well with complex numbers and we must split real and imaginary parts.
     ASSERT_NEAR(expected.real(), obtained.real(), tolerance) << "Real part generation failed.";
@@ -77,7 +77,7 @@ TYPED_TEST(ComplexNormalFixture, CheckGeneration)
   // Try with ad-hoc parameters.
   typename complex_normal_distribution<cx_type>::param_type new_param(cx_type(2.0, 3.0), 2.33);
   for (unsigned i = 0, i_max = 10; i != i_max; ++i) {
-    cx_type expected = cx_type(rnd(rgen_r), rnd(rgen_r)) * new_param.stddev() / std::sqrt<r_type>(2) + new_param.mean();
+    cx_type expected = cx_type(rnd(rgen_r), rnd(rgen_r)) * new_param.stddev() / std::sqrt(r_type{2}) + new_param.mean();
     cx_type obtained = cnd(rgen_cx, new_param);
     // Looks like gtest doesn't work well with complex numbers and we must split real and imaginary parts.
     ASSERT_NEAR(expected.real(), obtained.real(), tolerance) << "Real part generation failed.";
@@ -87,7 +87,7 @@ TYPED_TEST(ComplexNormalFixture, CheckGeneration)
   // And now after changing the internal parameters.
   cnd.param(new_param);
   for (unsigned i = 0, i_max = 10; i != i_max; ++i) {
-    cx_type expected = cx_type(rnd(rgen_r), rnd(rgen_r)) * new_param.stddev() / std::sqrt<r_type>(2) + new_param.mean();
+    cx_type expected = cx_type(rnd(rgen_r), rnd(rgen_r)) * new_param.stddev() / std::sqrt(r_type{2}) + new_param.mean();
     cx_type obtained = cnd(rgen_cx);
     // Looks like gtest doesn't work well with complex numbers and we must split real and imaginary parts.
     ASSERT_NEAR(expected.real(), obtained.real(), tolerance) << "Real part generation failed.";

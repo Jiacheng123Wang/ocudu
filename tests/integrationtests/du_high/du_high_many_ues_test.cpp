@@ -55,8 +55,10 @@ struct test_params {
 
 void PrintTo(const test_params& value, ::std::ostream* os)
 {
+  // Note: no '#' in the printed value. CMake's gtest test discovery delimits its discovery output with '#', so a
+  // '#' inside a parameter name makes the discovered case silently disappear from the ctest list.
   *os << fmt::format(
-      "period_per_ue_creation={}slots, #ues={}", value.slots_between_ue_creations, value.expected_max_ues);
+      "period_per_ue_creation={}slots, nof_ues={}", value.slots_between_ue_creations, value.expected_max_ues);
 }
 
 class du_high_many_ues_tester : public du_high_env_simulator, public testing::TestWithParam<test_params>

@@ -78,7 +78,7 @@ class benchmarker
   unsigned get_percentile_width_throughput(double scaling) const
   {
     std::pair<uint64_t, uint64_t> max_meas = get_max_meas_time_ns();
-    max_meas.first                         = std::max(max_meas.first, 1UL);
+    max_meas.first                         = std::max(max_meas.first, uint64_t{1});
     double throughput_max                  = convert_to_throughput(max_meas.first, max_meas.second);
 
     unsigned percentile_width = static_cast<unsigned>(std::ceil(std::log10(throughput_max * scaling))) + 2U;
@@ -134,7 +134,7 @@ class benchmarker
   /// \return The calculated throughput.
   static double convert_to_throughput(uint64_t time_ns, size_t size)
   {
-    time_ns = std::max(time_ns, 1UL);
+    time_ns = std::max(time_ns, uint64_t{1});
 
     // To get a more precise result with one decimal place, the throughput is calculated in hundreds of thousands of
     // elements per second and then divided by ten when it is converted to a floating point number.

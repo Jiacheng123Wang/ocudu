@@ -45,7 +45,7 @@ public:
   {
     std::string utf8_message;
     // Random distribution that can generate all possible UCS-2 characters.
-    std::uniform_int_distribution<char16_t> dist(0x0000, 0xffff);
+    std::uniform_int_distribution<uint16_t> dist(0x0000, 0xffff);
 
     // Generate random UCS-2 characters (UCS-2 is equivalent to UTF-16 for unicode characters in the basic
     // multilingual plane).

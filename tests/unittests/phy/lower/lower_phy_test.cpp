@@ -334,16 +334,33 @@ protected:
 
     // Request stop streaming asynchronously. As executors run in the main thread, it avoids deadlock.
     std::atomic<bool> stop_thread_started = false;
-    std::thread       stop_thread([&lphy_controller = lphy->get_controller(), &stop_thread_started]() {
-      stop_thread_started = true;
-      lphy_controller.stop();
-          });
+    std::atomic<bool> stop_thread_done    = false;
+    std::thread       stop_thread(
+        [&lphy_controller = lphy->get_controller(), &stop_thread_started, &stop_thread_done]() {
+          stop_thread_started = true;
+          lphy_controller.stop();
+          stop_thread_done = true;
+        });
 
     //  Wait for stop thread to start.
     while (!stop_thread_started) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
+#if defined(__APPLE__)
+    // On macOS, lower_phy_baseband_processor::stop() additionally flushes the downlink and uplink processing
+    // executors with sentinel tasks (see the __APPLE__ guards in lib/phy/lower/lower_phy_baseband_processor.cpp).
+    // The manual executors used by this fixture only run tasks when the main thread drains them, and the Linux
+    // flush loop below never drains dl_task_executor, so the downlink sentinel would never run and stop() would
+    // block forever. Drain every executor until stop() has returned instead.
+    while (!stop_thread_done) {
+      rx_task_executor.try_run_next();
+      tx_task_executor.try_run_next();
+      dl_task_executor.run_pending_tasks();
+      ul_task_executor.run_pending_tasks();
+      std::this_thread::yield();
+    }
+#else
     // Flush pending tasks until no task is left.
     do {
       rx_task = rx_task_executor.try_run_next();
@@ -353,9 +370,18 @@ protected:
       // Let the stop thread run after running the pending tasks.
       std::this_thread::yield();
     } while (rx_task || tx_task);
+#endif
 
     // Join asynchronous thread.
     stop_thread.join();
+
+#if defined(__APPLE__)
+    // Run anything that was enqueued while stop() was returning.
+    rx_task_executor.try_run_next();
+    tx_task_executor.try_run_next();
+    dl_task_executor.run_pending_tasks();
+    ul_task_executor.run_pending_tasks();
+#endif
 
     // No task should be pending.
     ASSERT_FALSE(tx_task_executor.has_pending_tasks());

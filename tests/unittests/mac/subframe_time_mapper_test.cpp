@@ -324,7 +324,7 @@ TEST_P(atomic_subframe_time_mapper_test, multi_threaded_race_condition)
       }
 
       // Each thread tries to store the same slot with a different timestamp.
-      time_point thread_time = base_time + std::chrono::nanoseconds(i * 100);
+      time_point thread_time = base_time + time_point::duration(i * 100);
       bool       result      = atomic_mapper.store(target_slot, thread_time);
 
       if (result) {
