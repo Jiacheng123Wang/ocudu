@@ -7,4 +7,7 @@
 # one user's workflow (e.g., build folders). See also https://git-scm.com/docs/gitignore).
 
 /utils/gdb/python/ocudu/__pycache__
-.aider*
+tests/ci/macos_triage/__pycache__/
+
+# CMake build directory (regenerable)
+/build/
