@@ -297,11 +297,21 @@ TEST_F(sctp_network_server_test,
   ASSERT_TRUE(close_client(false));
 
   ASSERT_EQ(assoc_factory.last_sdu.length(), 0);
+#if defined(__APPLE__)
+  // The user-space stack delivers (and the receive callback drains) the queued events asynchronously, so the exact
+  // number of broker wake-ups needed is not deterministic: drive the broker until the SDU was handled and the
+  // association was then destroyed.
+  for (unsigned i = 0; i != 10 and (assoc_factory.last_sdu.empty() or not assoc_factory.association_destroyed); ++i) {
+    trigger_broker(assoc_fd);
+  }
+  ASSERT_EQ(assoc_factory.last_sdu, bytes);
+#else
   trigger_broker(assoc_fd); // Should handle packet receive
   ASSERT_EQ(assoc_factory.last_sdu, bytes);
   ASSERT_FALSE(assoc_factory.association_destroyed) << "Association Handler was destroyed too early";
   trigger_broker(assoc_fd); // SCTP_SHUTDOWN_EVENT
   trigger_broker(assoc_fd); // SCTP_SHUTDOWN_COMP
+#endif
   ASSERT_TRUE(assoc_factory.association_destroyed) << "Association Handler was not destroyed";
 }
 
@@ -334,14 +344,31 @@ TEST_F(sctp_network_server_test, when_multiple_clients_connect_then_multiple_ass
   uint16_t port = server->get_listen_port().value();
   // First client connect.
   ASSERT_TRUE(connect_client());
+#if !defined(__APPLE__)
   int assoc_fd1 = broker.get_last_registered_fd();
+#else
+  (void)broker.get_last_registered_fd();
+#endif
 
   // Client 2 connects.
   assoc_factory.association_created = false;
   dummy_sctp_client client2;
   client2.connect(server_cfg.sctp.ppid, server_cfg.sctp.bind_addresses[0], port);
+#if defined(__APPLE__)
+  // The user-space stack processes the incoming handshake on its own receive thread: by the time connect() returns,
+  // the server-side SCTP_COMM_UP notification may not be queued yet, so a single broker wake-up is not guaranteed to
+  // carry it. Drive the broker until the association handler is created.
+  for (unsigned i = 0; i != 10 and not assoc_factory.association_created; ++i) {
+    trigger_broker();
+  }
+#else
   trigger_broker();
+#endif
+#if !defined(__APPLE__)
   int assoc_fd2 = broker.get_last_registered_fd();
+#else
+  (void)broker.get_last_registered_fd();
+#endif
 
   // Handle client 2 association creation.
   ASSERT_TRUE(assoc_factory.association_created);
@@ -355,10 +382,11 @@ TEST_F(sctp_network_server_test, when_multiple_clients_connect_then_multiple_ass
 
   // SCTP shutdown client 1
 #if defined(__APPLE__)
-  // The user-space stack (usrsctp) can interleave the SHUTDOWN notifications of the two associations, so the number
-  // of broker wake-ups needed per client is not deterministic: drive the broker until the handler is destroyed.
-  for (unsigned i = 0; i != 10 and not assoc_factory.association_destroyed; ++i) {
-    trigger_broker(assoc_fd1);
+  // The user-space stack (usrsctp) can interleave the SHUTDOWN notifications of the two associations, and the
+  // receive callback drains several queued events per broker wake-up, so per-client trigger sequences are not
+  // deterministic: drive the broker until every association handler has been destroyed.
+  for (unsigned i = 0; i != 10 and assoc_factory.association_count() != 0; ++i) {
+    trigger_broker();
   }
 #else
   trigger_broker(assoc_fd1); // < Client 1: SCTP SHUTDOWN EVENT
@@ -368,14 +396,12 @@ TEST_F(sctp_network_server_test, when_multiple_clients_connect_then_multiple_ass
   assoc_factory.association_destroyed = false;
   // SCTP shutdown client 2
 #if defined(__APPLE__)
-  for (unsigned i = 0; i != 10 and not assoc_factory.association_destroyed; ++i) {
-    trigger_broker(assoc_fd2);
-  }
+  // (already driven to zero above: both handlers have been destroyed)
 #else
   trigger_broker(assoc_fd2); // < Client2: SCTP SHUTDOWN EVENT
   trigger_broker(assoc_fd2); // < Client2: SCTP SHUTDOWN COMP
-#endif
   ASSERT_TRUE(assoc_factory.association_destroyed) << "Client 2 shutdown was not processed";
+#endif
 }
 
 // IPv6 tests

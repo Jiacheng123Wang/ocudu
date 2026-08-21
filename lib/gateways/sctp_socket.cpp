@@ -177,7 +177,6 @@ static socklen_t sockaddr_actual_size(const sockaddr* addr)
 /// writing a byte to the bridge socketpair.
 static void my_upcall_func(struct socket* sock, void* addr, int flags)
 {
-  (void)sock;
   (void)flags;
   int write_fd = static_cast<int>(reinterpret_cast<intptr_t>(addr));
   if (write_fd <= 0) {
@@ -227,15 +226,17 @@ shutdown_associations_gracefully(struct socket* so, const std::string& if_name, 
   }
 
   // Wait for the associations to disappear, i.e. for the SHUTDOWN handshake to complete. Over a local link this takes
-  // well under a millisecond; the cap only protects against an unresponsive peer.
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+  // a few milliseconds; poll with a short interval so that the wait returns as soon as the last association is gone
+  // instead of always burning the whole budget (important when many sockets are closed back to back, e.g. the
+  // 32-client multi-client tests). The cap only protects against an unresponsive peer.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
   while (std::chrono::steady_clock::now() < deadline) {
     uint32_t  remaining = 0;
     socklen_t len       = sizeof(remaining);
     if (usrsctp_getsockopt(so, IPPROTO_SCTP, SCTP_GET_ASSOC_NUMBER, &remaining, &len) != 0 or remaining == 0) {
       return;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::microseconds(500));
   }
   logger.debug("{}: Timed out waiting for the SCTP associations to shut down gracefully", if_name);
 }
@@ -290,8 +291,10 @@ int sctp_sendmsg(int s, const void* msg, size_t len, struct sockaddr* to, sockle
   // kernel's sctp_sendmsg(). The PPID is passed in network byte order by the callers (matching the Linux API).
   // Note: timetolive has no sctp_sndinfo field; the callers always pass 0 for it.
   (void)timetolive;
-  // usrsctp cannot send from a null data pointer (it fails with EFAULT): use a dummy payload for zero-length
-  // messages (e.g., the SCTP_EOF messages sent during association shutdown).
+  // usrsctp rejects a null data pointer (it fails with EFAULT), but the length must stay 0: sending a 1-byte dummy
+  // payload would put data on the wire, and in the SCTP_EOF case the peer would deliver a bogus 1-byte SDU instead of
+  // a clean SHUTDOWN_EVENT + SHUTDOWN_COMP sequence (this happened with the shim's previous behaviour). A dummy
+  // pointer with length 0 produces a true zero-length message.
   static const uint8_t dummy_payload = 0;
   if (msg == nullptr && len == 0) {
     msg = &dummy_payload;
@@ -394,6 +397,35 @@ int sctp_recvmsg(int s, void* msg, size_t len, struct sockaddr* from, socklen_t*
       return -1;
     }
   }
+}
+
+int sctp_recvmsg_nowait(int s, void* msg, size_t len, struct sockaddr* from, socklen_t* fromlen, void* sinfo,
+                        socklen_t* sinfo_len, int* msg_flags)
+{
+  std::lock_guard<std::mutex> lock(g_sctp_mutex);
+  auto                        it = g_sctp_map.find(s);
+  if (it == g_sctp_map.end()) {
+    errno = EBADF;
+    return -1;
+  }
+  struct sctp_rcvinfo rsinfo     = {};
+  socklen_t           rsinfo_len = sizeof(rsinfo);
+  unsigned int        infotype   = 0;
+  int                 flags      = MSG_DONTWAIT;
+  int result = usrsctp_recvv(it->second, msg, len, from, fromlen, &rsinfo, &rsinfo_len, &infotype, &flags);
+  if (result < 0) {
+    return -1;
+  }
+  if (msg_flags != nullptr) {
+    *msg_flags = flags & ~MSG_DONTWAIT;
+  }
+  if (sinfo != nullptr && sinfo_len != nullptr && *sinfo_len >= sizeof(struct sctp_rcvinfo)) {
+    ::memcpy(sinfo, &rsinfo, sizeof(struct sctp_rcvinfo));
+  }
+  uint8_t dummy;
+  while (::read(s, &dummy, sizeof(dummy)) < 0 and errno == EINTR) {
+  }
+  return result;
 }
 
 int sctp_getpaddrs(int s, uint32_t assoc_id, struct sockaddr** addrs)

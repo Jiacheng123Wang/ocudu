@@ -118,7 +118,11 @@ private:
 sctp_network_client_impl::sctp_network_client_impl(const sctp_network_connector_config& sctp_cfg,
                                                    io_broker&                           broker_,
                                                    task_executor&                       io_rx_executor_) :
-  sctp_network_gateway_common_impl(sctp_cfg), client_cfg(sctp_cfg), broker(broker_), io_rx_executor(io_rx_executor_)
+  sctp_network_gateway_common_impl(sctp_cfg),
+  client_cfg(sctp_cfg),
+  broker(broker_),
+  io_rx_executor(io_rx_executor_),
+  keepalive_token(std::make_shared<bool>(false))
 {
 }
 
@@ -139,6 +143,9 @@ sctp_network_client_impl::~sctp_network_client_impl()
     server_addr_cpy = server_addr;
   }
 
+  // No subscription is on-going after this point: stop the broker from invoking the receive callback again.
+  io_sub.reset();
+
   // Signal that the upper layer sender should stop sending new SCTP data (including the EOF).
   if (eof_needed) {
     ::sctp_sendmsg(socket.fd().value(),
@@ -153,9 +160,19 @@ sctp_network_client_impl::~sctp_network_client_impl()
                    0);
   }
 
-  // No subscription is on-going. It is now safe to close the socket.
-  std::unique_lock<std::mutex> lock(connection_mutex);
-  connection_cvar.wait(lock, [this]() { return server_addr.empty(); });
+  // Clear the keepalive token so that any in-flight receive callback that runs after this point exits without
+  // touching any member, then wait - bounded - for it to finish. The SHUTDOWN handshake normally completes in
+  // milliseconds, but on a user-space SCTP stack a single lost SHUTDOWN chunk can mean that SCTP_SHUTDOWN_COMP is
+  // never delivered at all, in which case the association state is left as is (the base class closes the socket
+  // right after this destructor returns).
+  keepalive_token.reset();
+  {
+    std::unique_lock<std::mutex> lock(connection_mutex);
+    if (not connection_cvar.wait_for(lock, std::chrono::seconds{2}, [this]() { return server_addr.empty(); })) {
+      logger.warning("{}: Timeout waiting for the SCTP association to shut down; closing the socket anyway",
+                     node_cfg.if_name);
+    }
+  }
 }
 
 std::unique_ptr<sctp_association_sdu_notifier>
@@ -334,6 +351,9 @@ sctp_network_client_impl::connect(std::unique_ptr<sctp_association_sdu_notifier>
                 fmt::format("{}", fmt::join(established_addrs, ", ")));
   }
 
+  // Arm the keepalive token: the receive callback only runs while it is set (see the destructor).
+  *keepalive_token = true;
+
   // Register the socket in the IO broker.
   socket.release();
   io_sub = broker.register_fd(
@@ -363,6 +383,12 @@ sctp_network_client_impl::connect(std::unique_ptr<sctp_association_sdu_notifier>
 
 void sctp_network_client_impl::receive()
 {
+  // If the destructor already cancelled the keepalive token, the object is going away: do not touch any member.
+  std::shared_ptr<bool> keepalive = keepalive_token;
+  if (keepalive == nullptr or not *keepalive) {
+    return;
+  }
+
 #if defined(__APPLE__)
   // usrsctp shim: sctp_rcvinfo + explicit length argument (see sctp_socket.h).
   struct sctp_rcvinfo sri     = {};
@@ -407,6 +433,30 @@ void sctp_network_client_impl::receive()
   } else {
     handle_data(payload);
   }
+
+#if defined(__APPLE__)
+  // Drain the socket: the usrsctp shim may queue several notifications/messages behind a single broker wake-up
+  // byte, and reading only one message per callback would leave the rest (e.g. the SCTP_SHUTDOWN_COMP that follows
+  // an SCTP_SHUTDOWN_EVENT) waiting indefinitely for another event.
+  while ((rx_bytes = ::sctp_recvmsg_nowait(socket.fd().value(),
+                                            temp_recv_buffer.data(),
+                                            temp_recv_buffer.size(),
+                                            reinterpret_cast<sockaddr*>(&msg_src_addr),
+                                            &msg_src_addrlen,
+                                            &sri,
+                                            &sri_len,
+                                            &msg_flags)) != -1) {
+    span<const uint8_t> drained_payload(temp_recv_buffer.data(), rx_bytes);
+    if (msg_flags & MSG_NOTIFICATION) {
+      handle_notification(drained_payload, sri, *reinterpret_cast<const sockaddr*>(&msg_src_addr), msg_src_addrlen);
+    } else {
+      handle_data(drained_payload);
+    }
+  }
+  if (errno != EAGAIN) {
+    handle_connection_terminated(fmt::format("Error reading from SCTP socket: {}", ::strerror(errno)));
+  }
+#endif
 }
 
 void sctp_network_client_impl::handle_connection_shutdown(const char* cause)

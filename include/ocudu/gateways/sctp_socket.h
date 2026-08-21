@@ -70,6 +70,11 @@ extern "C" int sctp_getpaddrs(int s, uint32_t assoc_id, struct sockaddr **addrs)
 extern "C" void sctp_freepaddrs(struct sockaddr *addrs);
 extern "C" int  sctp_getladdrs(int s, uint32_t assoc_id, struct sockaddr **addrs);
 extern "C" void sctp_freeladdrs(struct sockaddr *addrs);
+/// Non-waiting receive: performs a single non-blocking read and returns EAGAIN when nothing is queued, without the
+/// emulated SO_RCVTIMEO wait of sctp_recvmsg(). Used by the gateway receive callbacks to drain every message queued
+/// behind one broker wake-up without stalling the io thread on an empty queue.
+extern "C" int sctp_recvmsg_nowait(int s, void* msg, size_t len, struct sockaddr* from, socklen_t* fromlen,
+                                   void* sinfo, socklen_t* sinfo_len, int* msg_flags);
 /// SCTP-level get/setsockopt for the usrsctp-backed sockets. The fd handed out by sctp_socket is only a bridge
 /// socketpair used to wake the io_broker, so SCTP options must be routed to the usrsctp socket instead of being
 /// passed to ::getsockopt()/::setsockopt() (which would silently act on the AF_UNIX socketpair).

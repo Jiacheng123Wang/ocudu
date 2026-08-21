@@ -298,6 +298,26 @@ void sctp_network_server_impl::receive()
   // Defer all processing after sctp_recvmsg to app_exec.
   auto payload = std::vector<uint8_t>(temp_recv_buffer.begin(), temp_recv_buffer.begin() + rx_bytes);
   receive_impl(std::move(payload), sri, msg_flags, msg_src_addr, msg_src_addrlen);
+
+#if defined(__APPLE__)
+  // Drain the socket: the usrsctp shim may queue several notifications/messages behind a single broker wake-up
+  // byte, and reading only one message per callback would leave the rest waiting indefinitely for another event.
+  while ((rx_bytes = ::sctp_recvmsg_nowait(socket.fd().value(),
+                                            temp_recv_buffer.data(),
+                                            temp_recv_buffer.size(),
+                                            (struct sockaddr*)&msg_src_addr,
+                                            &msg_src_addrlen,
+                                            &sri,
+                                            &sri_len,
+                                            &msg_flags)) != -1) {
+    auto drained_payload = std::vector<uint8_t>(temp_recv_buffer.begin(), temp_recv_buffer.begin() + rx_bytes);
+    receive_impl(std::move(drained_payload), sri, msg_flags, msg_src_addr, msg_src_addrlen);
+  }
+  if (errno != EAGAIN) {
+    logger.error("Error reading from SCTP socket: {}", ::strerror(errno));
+    defer_socket_shutdown(nullptr);
+  }
+#endif
 }
 
 void sctp_network_server_impl::receive_impl(std::vector<uint8_t>   payload,

@@ -60,6 +60,12 @@ private:
   // Handler of IO events. It is only accessed by the backend (io_broker), once the connection is set up.
   std::unique_ptr<sctp_association_sdu_notifier> recv_handler;
 
+  // Set once connect() succeeds; cleared by the destructor, which then waits (bounded) for any in-flight receive
+  // callback to finish. The receive callback checks it and exits without touching any member afterwards, so the
+  // destructor can never block forever on a SHUTDOWN_COMP notification that is never delivered (e.g. when a SHUTDOWN
+  // chunk is lost on the user-space SCTP stack) and can never race with the callback it is waiting for.
+  std::shared_ptr<bool> keepalive_token;
+
   // The value of std::atomic<bool> is shared between client and sender notifier.
   // The value of the shared_ptr is shared between client frontend (public interface) and backend (io_broker), and
   // needs to be mutexed on creation/reset.
