@@ -108,6 +108,8 @@ void radio_zmq_rx_channel::send_request()
     // Request received.
     if (n > 0) {
       logger.debug("Socket sent request.");
+      // [zmq-probe] temporary instrumentation.
+      pending_request_since = std::chrono::steady_clock::now();
       state_fsm.request_sent();
       return;
     }
@@ -175,6 +177,31 @@ void radio_zmq_rx_channel::receive_response()
   // Convert number of bytes to samples.
   unsigned nsamples = n / sample_size;
   logger.debug("Socket received {} samples.", nsamples);
+
+  // [zmq-probe] temporary instrumentation: how long the UL request waited for the UE's reply, plus a
+  // per-64-replies mean summary (rounds/s and UL-leg latency at a glance).
+  if (pending_request_since.time_since_epoch().count() != 0) {
+    auto reply_wait_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - pending_request_since)
+            .count();
+    logger.info("[zmq-probe] rx={} reply-age={}us samples={}", channel_id, reply_wait_us, nsamples);
+    static unsigned probe_reply_count  = 0;
+    static int64_t  probe_wait_total_us = 0;
+    static auto     probe_last         = std::chrono::steady_clock::now();
+    probe_reply_count++;
+    probe_wait_total_us += reply_wait_us;
+    if ((probe_reply_count & 63) == 0) {
+      auto now        = std::chrono::steady_clock::now();
+      auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - probe_last).count();
+      logger.info("[zmq-probe] rx={} reply-rate: 64 replies in {}ms = {:.1f} replies/s, mean reply-age={:.1f}us",
+                  channel_id,
+                  elapsed_ms,
+                  elapsed_ms > 0 ? 64000.0 / elapsed_ms : 0.0,
+                  probe_wait_total_us / 64.0);
+      probe_last         = now;
+      probe_wait_total_us = 0;
+    }
+  }
 
   rx_probe.event(nsamples);
 

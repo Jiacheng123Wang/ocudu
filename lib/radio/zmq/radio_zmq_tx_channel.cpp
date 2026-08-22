@@ -135,6 +135,8 @@ void radio_zmq_tx_channel::receive_request()
     // Request received.
     if (n > 0) {
       logger.debug("Socket received request.");
+      // [zmq-probe] temporary instrumentation.
+      logger.info("[zmq-probe] tx={} request-received", channel_id_str);
       tx_request_probe.event();
       pending_request_since = std::chrono::steady_clock::now();
       state_fsm.request_received();
@@ -177,13 +179,29 @@ void radio_zmq_tx_channel::send_response()
   // If no samples are available return without transitioning state. Avoid spinning: the circular buffer is filled
   // by the baseband processor at slot rate (~1 ms), so a short sleep is sufficient. See radio_zmq_backoff.h.
   if (count == 0) {
+    // [zmq-probe] temporary instrumentation: remember when the buffer became empty.
+    if (!buffer_was_empty) {
+      empty_since       = std::chrono::steady_clock::now();
+      buffer_was_empty  = true;
+      pending_request_since = std::chrono::steady_clock::now();
+    }
     std::this_thread::sleep_for(std::chrono::microseconds(100));
     return;
   }
 
+  // [zmq-probe] temporary instrumentation: report how long the pending request waited for data.
+  if (buffer_was_empty) {
+    auto empty_wait_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - empty_since).count();
+    logger.info("[zmq-probe] tx={} buffer-empty-wait={}us reply={}samples", channel_id_str, empty_wait_us, count);
+    buffer_was_empty = false;
+  }
+
   // Otherwise, send samples over socket.
   int nbytes = count * sizeof(cf_t);
-  int n      = ::zmq_send(sock, (void*)buffer.data(), nbytes, 0);
+  // [zmq-probe] temporary instrumentation: how long does the blocking zmq_send take?
+  const auto t_before_send = std::chrono::steady_clock::now();
+  int        n             = ::zmq_send(sock, (void*)buffer.data(), nbytes, 0);
 
   // Check if an error occurred.
   if (n < 0) {
@@ -200,6 +218,32 @@ void radio_zmq_tx_channel::send_response()
   }
 
   logger.debug("Socket sent {} samples.", count);
+
+  // [zmq-probe] temporary instrumentation: zmq_send blocking time (anomalies) and a per-64-replies round-rate
+  // summary (replies/s == lockstep rounds/s).
+  {
+    auto send_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t_before_send).count();
+    if (send_us > 2000) {
+      logger.info("[zmq-probe] tx={} zmq-send-block={}us bytes={}", channel_id_str, send_us, nbytes);
+    }
+    static unsigned probe_reply_count   = 0;
+    static int64_t  probe_send_total_us = 0;
+    static auto     probe_last          = std::chrono::steady_clock::now();
+    probe_reply_count++;
+    probe_send_total_us += send_us;
+    if ((probe_reply_count & 63) == 0) {
+      auto now        = std::chrono::steady_clock::now();
+      auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - probe_last).count();
+      logger.info("[zmq-probe] tx={} reply-rate: 64 replies in {}ms = {:.1f} replies/s, mean zmq-send={:.1f}us",
+                  channel_id_str,
+                  elapsed_ms,
+                  elapsed_ms > 0 ? 64000.0 / elapsed_ms : 0.0,
+                  probe_send_total_us / 64.0);
+      probe_last          = now;
+      probe_send_total_us = 0;
+    }
+  }
 
   auto reply_wait_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
                                                                              pending_request_since)
@@ -253,6 +297,11 @@ void radio_zmq_tx_channel::transmit_samples(span<const cf_t> data)
 
     // Check if the push was successful.
     if (pushed == 0) {
+      // [zmq-probe] temporary instrumentation: remember when the buffer became full.
+      if (!buffer_was_full) {
+        full_since      = std::chrono::steady_clock::now();
+        buffer_was_full = true;
+      }
       // Notify buffer overflow.
       radio_event_notifier::event_description event = {.stream_id  = stream_id,
                                                        .channel_id = channel_id,
@@ -263,6 +312,12 @@ void radio_zmq_tx_channel::transmit_samples(span<const cf_t> data)
 
       // Wait some time before trying again.
       zmq_circ_buffer_backoff(nof_spins);
+    } else if (buffer_was_full) {
+      // [zmq-probe] temporary instrumentation: report how long the producer was blocked on the full buffer.
+      auto full_wait_us =
+          std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - full_since).count();
+      logger.info("[zmq-probe] tx={} buffer-full-block={}us pushed={}samples", channel_id_str, full_wait_us, pushed);
+      buffer_was_full = false;
     }
 
     // Increment sample count.
