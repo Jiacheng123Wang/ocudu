@@ -106,9 +106,24 @@ In rough priority order:
      buffer larger than a baseband block, the blocking `zmq_send` hands the whole block to the kernel and returns
      immediately even while the UE's small TCP window makes the wire delivery trickle - the REP channel loop no
      longer freezes and the request-latency compounding disappears. The matching srsUE-side change
-     (`ue_zmq_sockbuf.patch` in this directory) was applied once during the analysis to prove the TCP-window
-     bottleneck and then reverted on the 153 machine; it is kept only as a documented analysis artifact (DO NOT
-     APPLY).
+     (`ue_zmq_sockbuf.patch` in this directory) was applied twice during the analysis (to prove the TCP-window
+     bottleneck, and for the final A/B comparison) and reverted on the 153 machine both times - the UE stays
+     upstream (DO NOT APPLY).
+   - Final E2E state (gnb-only fix + upstream srsUE, 7 ping rounds): avg 710-1372 ms (mean ~918 ms), max
+     1.5-3.5 s, min ~300-500 ms, 0-1% loss - stable across rounds (previously: bursts to 10 s, avg 2-6 s,
+     good/bad alternation). The A/B comparison with the UE-side socket buffers applied as well: avg 740-897 ms
+     (mean ~817 ms), max 1.6-2.8 s - an ~11% improvement, negligible compared with the Ubuntu gnb reference
+     (300-400 ms), so the UE patch was reverted. min RTT ~400 ms equals the Ubuntu baseline: the gnb's own data
+     path is fine; the remaining avg-vs-min gap comes from the lockstep quantization (the round rate is set by
+     srsUE's processing, 15-26 rounds/s) plus the gnb scheduler's UL grant cycle (~250-400 ms wall time).
+   - Ubuntu gnb difference (same UE): plausible causes, ranked - (a) the Ubuntu gnb's per-slot DL production is
+     faster (x86, no macOS thread-QoS overhead), so its DL stream stays ahead of the UE and the UE's PHY pipeline
+     is never starved, keeping the lockstep at the fast equilibrium; the macOS gnb's slower production makes the
+     lockstep settle lower and every UE hiccup is amplified by the feedback loops above. (b) The macOS gnb's
+     scheduling quanta (~30-70 ms/slot) add directly to the RTT while the Ubuntu gnb's are ~ms. (c) Host-level
+     differences (Apple Silicon thread scheduling, QoS classes) rather than code logic. To discriminate: run the
+     same dual-end tcpdump + [zmq-probe] methodology against the Ubuntu gnb (131) for a reference rounds/s and
+     per-stage latency profile, and compare dl_process per-slot cost on both hosts.
 3. **usrsctp multihoming / `connectx()` support in the shim** (unblocks the 10 multihomed/bindx/connectx cases and
    the E2 agent case in section 2b). Requires the from-source usrsctp work of item 1 (custom per-association UDP
    sockets), or an alternative userspace transport.
