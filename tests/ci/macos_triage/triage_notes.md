@@ -159,3 +159,24 @@ the same defect caused the two `f1u_*_split_connector_test.destroy_bearer_discon
 
 Still open: the slow-motion zmq radio (~2.6 slots/s, smooth - not bursty; the zmq code uses ZMQ_DONTWAIT, so it is
 a different mechanism, likely the tx_time pacing between the two hosts), and the udp v6 dual-stack case (#3033).
+
+## SCTP multi-client link tests: the N x 2 s teardown and the burst-setup retransmissions (2026-08-22)
+
+The `sctp_network_link_test` multi-client cases used to take 2.02 s / 11.4 s / 20.4 s / 75.5 s on macOS versus
+0.04 s on Ubuntu. Two independent causes:
+
+1. **Client destructor dead wait (fixed).** `sctp_network_client_impl::~` reset the keepalive token and dropped the
+   io_broker subscription *before* waiting for SCTP_SHUTDOWN_COMP, so the receive callback could never deliver the
+   notification and every connected teardown burned the full 2 s cap. Fixed by waiting first (the handshake
+   normally completes in milliseconds) and only then cancelling the token and deregistering (the deregistration
+   completes once an in-flight callback finished, so members stay safe). The link-test fixture now also destroys
+   the clients while the server is still running. Result: 1/4-client cases 2.02 s / 11.4 s -> 0.02 s, and the
+   whole client test suite drops to ~10 ms per case. Ubuntu unchanged (78/78, 4.45 s total).
+
+2. **Burst-setup INIT retransmissions (remaining, test-duration only).** With 32 clients connecting at once, a few
+   associations' INIT (and in the send case, DATA) chunks are lost on the usrsctp UDP-encapsulation loopback and
+   recover through the RTO backoff: the COMM_UP events arrive in batches ~1.0 s, ~3.4 s and ~6.6 s apart, so the
+   32-client setup takes ~11 s (recv) and the send-data case ~40-50 s (data chunks retransmit too). The kernel
+   SCTP stack on Linux does not lose anything on loopback (0.04 s). Correctness is unaffected (retransmissions
+   succeed; 78/78 pass), so this is a test-duration optimization: candidate follow-ups are enlarging the usrsctp
+   UDP socket receive buffer and tracing where the burst chunks are dropped.

@@ -185,6 +185,11 @@ public:
   sctp_network_link_test() : base_sctp_network_link_test(GetParam().nof_clients) {}
   ~sctp_network_link_test() override
   {
+    // Destroy the clients while the server is still running: each client destructor sends an EOF and waits for
+    // SCTP_SHUTDOWN_COMP (bounded to 2 s on the user-space stack), and the server must still be alive to answer
+    // it. Stopping the server first left every EOF unanswered and made each client burn the full 2 s cap, which is
+    // why the multi-client cases used to take nof_clients x 2 s on macOS.
+    client_associations.clear();
     if (server) {
       server->stop();
     }

@@ -143,9 +143,6 @@ sctp_network_client_impl::~sctp_network_client_impl()
     server_addr_cpy = server_addr;
   }
 
-  // No subscription is on-going after this point: stop the broker from invoking the receive callback again.
-  io_sub.reset();
-
   // Signal that the upper layer sender should stop sending new SCTP data (including the EOF).
   if (eof_needed) {
     ::sctp_sendmsg(socket.fd().value(),
@@ -160,12 +157,12 @@ sctp_network_client_impl::~sctp_network_client_impl()
                    0);
   }
 
-  // Clear the keepalive token so that any in-flight receive callback that runs after this point exits without
-  // touching any member, then wait - bounded - for it to finish. The SHUTDOWN handshake normally completes in
-  // milliseconds, but on a user-space SCTP stack a single lost SHUTDOWN chunk can mean that SCTP_SHUTDOWN_COMP is
-  // never delivered at all, in which case the association state is left as is (the base class closes the socket
-  // right after this destructor returns).
-  keepalive_token.reset();
+  // Wait - bounded - for the shutdown handshake while the receive path is still subscribed: SCTP_SHUTDOWN_COMP
+  // clears server_addr and wakes this wait. The handshake normally completes in milliseconds; on a user-space SCTP
+  // stack a single lost SHUTDOWN chunk can mean that it is never delivered at all, in which case the association
+  // state is left as is and the base class closes the socket right after this destructor returns. Note that the
+  // wait must run BEFORE unsubscribing: deregistering the fd or cancelling the keepalive token first guarantees
+  // that the receive callback can never deliver SHUTDOWN_COMP and every connected teardown burns the full cap.
   {
     std::unique_lock<std::mutex> lock(connection_mutex);
     if (not connection_cvar.wait_for(lock, std::chrono::seconds{2}, [this]() { return server_addr.empty(); })) {
@@ -173,6 +170,12 @@ sctp_network_client_impl::~sctp_network_client_impl()
                      node_cfg.if_name);
     }
   }
+
+  // No receive callback may touch members after this point: cancel the keepalive token (an in-flight callback
+  // exits without touching any member), then drop the broker subscription - the deregistration only completes
+  // once any in-flight callback has finished, so the members are safe to destroy when it returns.
+  keepalive_token.reset();
+  io_sub.reset();
 }
 
 std::unique_ptr<sctp_association_sdu_notifier>
