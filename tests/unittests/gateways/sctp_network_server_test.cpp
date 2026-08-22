@@ -273,9 +273,11 @@ TEST_F(sctp_network_server_test, when_client_sends_sctp_message_then_message_is_
 
 #if defined(__APPLE__)
   // The user-space stack delivers the message asynchronously, so one broker wake-up is not guaranteed to carry it:
-  // drive the broker until the SDU shows up.
-  for (unsigned i = 0; i != 10 and assoc_factory.last_sdu.empty(); ++i) {
+  // drive the broker until the SDU shows up or a generous deadline expires.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (assoc_factory.last_sdu.empty() and std::chrono::steady_clock::now() < deadline) {
     trigger_broker(assoc_fd);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 #else
   trigger_broker(assoc_fd); // Should handle packet receive
@@ -362,9 +364,12 @@ TEST_F(sctp_network_server_test, when_multiple_clients_connect_then_multiple_ass
 #if defined(__APPLE__)
   // The user-space stack processes the incoming handshake on its own receive thread: by the time connect() returns,
   // the server-side SCTP_COMM_UP notification may not be queued yet, so a single broker wake-up is not guaranteed to
-  // carry it. Drive the broker until the association handler is created.
-  for (unsigned i = 0; i != 10 and not assoc_factory.association_created; ++i) {
+  // carry it. Drive the broker until the association handler is created or a generous deadline expires (a chunk lost
+  // during the handshake is recovered by the retransmission timers, which takes up to a few seconds under load).
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (not assoc_factory.association_created and std::chrono::steady_clock::now() < deadline) {
     trigger_broker();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 #else
   trigger_broker();
@@ -389,9 +394,12 @@ TEST_F(sctp_network_server_test, when_multiple_clients_connect_then_multiple_ass
 #if defined(__APPLE__)
   // The user-space stack (usrsctp) can interleave the SHUTDOWN notifications of the two associations, and the
   // receive callback drains several queued events per broker wake-up, so per-client trigger sequences are not
-  // deterministic: drive the broker until every association handler has been destroyed.
-  for (unsigned i = 0; i != 10 and assoc_factory.association_count() != 0; ++i) {
+  // deterministic: drive the broker until every association handler has been destroyed or a generous deadline
+  // expires (a lost SHUTDOWN chunk is recovered by the retransmission timers).
+  const auto deadline_shutdown = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (assoc_factory.association_count() != 0 and std::chrono::steady_clock::now() < deadline_shutdown) {
     trigger_broker();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 #else
   trigger_broker(assoc_fd1); // < Client 1: SCTP SHUTDOWN EVENT

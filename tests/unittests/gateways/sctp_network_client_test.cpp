@@ -453,9 +453,11 @@ TEST_F(sctp_network_client_test, when_client_sender_is_destroyed_then_client_sen
   // Client receives an SCTP SHUTDOWN COMP
 #if defined(__APPLE__)
   // The user-space stack may need more than one wake-up (and possibly a retransmission) to deliver the shutdown
-  // notifications: drive the broker until the association is gone.
-  for (unsigned i = 0; i != 10 and not recv_notifier_factory.destroyed; ++i) {
+  // notifications: drive the broker until the association is gone or a generous deadline expires.
+  const auto deadline_shutdown = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (not recv_notifier_factory.destroyed and std::chrono::steady_clock::now() < deadline_shutdown) {
     trigger_broker();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 #else
   trigger_broker();
@@ -511,9 +513,11 @@ TEST_F(sctp_network_client_test, when_server_is_destroyed_then_client_receives_s
   // Client receives an SCTP SHUTDOWN COMP
 #if defined(__APPLE__)
   // The user-space stack may need more than one wake-up (and possibly a retransmission) to deliver the shutdown
-  // notifications: drive the broker until the association is gone.
-  for (unsigned i = 0; i != 10 and not recv_notifier_factory.destroyed; ++i) {
+  // notifications: drive the broker until the association is gone or a generous deadline expires.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (not recv_notifier_factory.destroyed and std::chrono::steady_clock::now() < deadline) {
     trigger_broker();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 #else
   trigger_broker();
@@ -540,9 +544,12 @@ TEST_F(sctp_network_client_test, when_server_sends_eof_then_client_receives_sctp
 
 #if defined(__APPLE__)
   // The user-space stack (usrsctp) may need a retransmission before the SHUTDOWN / SHUTDOWN-COMP pair is delivered,
-  // so the number of broker wake-ups needed is not deterministic: drive the broker until the association is gone.
-  for (unsigned i = 0; i != 10 and not recv_notifier_factory.destroyed; ++i) {
+  // so the number of broker wake-ups needed is not deterministic: drive the broker until the association is gone or
+  // a generous deadline expires.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (not recv_notifier_factory.destroyed and std::chrono::steady_clock::now() < deadline) {
     trigger_broker();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 #else
   // Client receives an SCTP SHUTDOWN EVENT
@@ -592,9 +599,11 @@ TEST_F(sctp_network_client_test, when_client_sends_eof_before_processing_incomin
   // Client receives an SCTP SHUTDOWN COMP
 #if defined(__APPLE__)
   // The user-space stack may need more than one wake-up (and possibly a retransmission) to deliver the shutdown
-  // notifications: drive the broker until the association is gone.
-  for (unsigned i = 0; i != 10 and not recv_notifier_factory.destroyed; ++i) {
+  // notifications: drive the broker until the association is gone or a generous deadline expires.
+  const auto deadline_shutdown = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (not recv_notifier_factory.destroyed and std::chrono::steady_clock::now() < deadline_shutdown) {
     trigger_broker();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 #else
   trigger_broker();
