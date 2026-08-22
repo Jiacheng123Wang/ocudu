@@ -59,6 +59,10 @@ class radio_zmq_tx_channel
   bool                                    buffer_was_empty = false;
   std::chrono::steady_clock::time_point full_since;
   bool                                  buffer_was_full = false;
+  /// Number of samples in the last transmit() call (one slot): replies are capped at this size so that a backlog
+  /// is drained one slot per request instead of one giant message. Written by the baseband thread, read by the
+  /// channel loop.
+  std::atomic<unsigned> last_pushed_size = {0};
 
 public:
   /// Describes the necessary parameters to create a ZMQ Tx channel.
