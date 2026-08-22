@@ -102,6 +102,9 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
     return;
   }
 
+  // [zmq-probe] temporary instrumentation.
+  const auto t_entry = std::chrono::steady_clock::now();
+
   // Throttling mechanism to keep a maximum latency of one millisecond in the transmit buffer based on the latest
   // received timestamp.
   {
@@ -127,6 +130,9 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
 #endif
     }
   }
+
+  // [zmq-probe] temporary instrumentation.
+  const auto t_after_rx_wait = std::chrono::steady_clock::now();
 
   // Throttling mechanism to slow down the baseband processing.
   if ((system_time_throttling_ratio > 0.0) && (last_tx_time.has_value()) && (last_tx_buffer_size != 0)) {
@@ -156,10 +162,41 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
   result.metadata.ts = timestamp + tx_time_offset;
 
   // Enqueue transmission.
-  trace_point tx_tp = ru_tracer.now();
+  const auto t_after_process = std::chrono::steady_clock::now();
+  trace_point tx_tp          = ru_tracer.now();
 
   // Transmit buffer.
   transmitter.transmit(result.buffer->get_reader(), result.metadata);
+
+  // [zmq-probe] temporary instrumentation.
+  {
+    const auto t_done = std::chrono::steady_clock::now();
+    auto       wait_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(t_after_rx_wait - t_entry).count();
+    auto proc_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(t_after_process - t_after_rx_wait).count();
+    auto tx_us = std::chrono::duration_cast<std::chrono::microseconds>(t_done - t_after_process).count();
+    if (wait_us > 2000 || proc_us > 5000 || tx_us > 5000) {
+      static auto& probe_log = ocudulog::fetch_basic_logger("ALL");
+      probe_log.info("[zmq-probe] dl slot={} rx-wait={}us process={}us transmit={}us",
+                     timestamp / srate.to_kHz(),
+                     wait_us,
+                     proc_us,
+                     tx_us);
+    }
+    static unsigned probe_slot_count = 0;
+    static auto     probe_last       = std::chrono::steady_clock::now();
+    if ((++probe_slot_count & 63) == 0) {
+      static auto& probe_log = ocudulog::fetch_basic_logger("ALL");
+      auto         now       = std::chrono::steady_clock::now();
+      auto         elapsed_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(now - probe_last).count();
+      probe_log.info("[zmq-probe] dl rate: 64 slots in {}ms = {:.1f} slots/s",
+                     elapsed_ms,
+                     elapsed_ms > 0 ? 64000.0 / elapsed_ms : 0.0);
+      probe_last = now;
+    }
+  }
 
   ru_tracer << trace_event("transmit_baseband", tx_tp);
 
@@ -210,7 +247,17 @@ void lower_phy_baseband_processor::ul_process()
 
   // Receive baseband.
   trace_point                         tp          = ru_tracer.now();
+  const auto                          t_recv_begin = std::chrono::steady_clock::now();
   baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_buffer->get_writer());
+  // [zmq-probe] temporary instrumentation.
+  {
+    auto recv_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t_recv_begin).count();
+    if (recv_us > 20000) {
+      static auto& probe_log = ocudulog::fetch_basic_logger("ALL");
+      probe_log.info("[zmq-probe] ul recv-wait={}us", recv_us);
+    }
+  }
   ru_tracer << trace_event("receive_baseband", tp);
 
   // T_start of the UL compute pipeline measurement (IQ samples just received, UL processing about to start).

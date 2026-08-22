@@ -54,6 +54,11 @@ class radio_zmq_tx_channel
   flow_probe tx_reply_probe{"zmq_tx_reply"};
   /// Timestamp of the pending request, for the reply latency measurement.
   std::chrono::steady_clock::time_point pending_request_since;
+  /// [zmq-probe] temporary instrumentation: when the circular buffer became empty (request unanswered) / full.
+  std::chrono::steady_clock::time_point empty_since;
+  bool                                    buffer_was_empty = false;
+  std::chrono::steady_clock::time_point full_since;
+  bool                                  buffer_was_full = false;
 
 public:
   /// Describes the necessary parameters to create a ZMQ Tx channel.
