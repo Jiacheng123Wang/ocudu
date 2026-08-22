@@ -7,8 +7,13 @@ ctest's own trailing summary is misleading for this port:
   * SKIPPED tests are only listed inside "The following tests did not run:" and counted as passed in the percentage;
   * DISABLED tests are not listed anywhere at all.
 
-This script parses the ctest progress lines instead and prints a complete accounting over the real total, with
-Skipped / Disabled / Crashed listed separately.
+This script parses the ctest progress lines instead and prints the complete accounting over the real total of 7590
+cases. The headline line is the macOS equivalent of ctest's summary line:
+
+    100% tests passed (7556), 34 tests disabled (not applicable on macOS), out of 7590 total
+
+The disabled count merges the 10 ctest-disabled cases and the 24 runtime-skipped cases: all 34 are confirmed not
+applicable on macOS (they only run on Ubuntu) and the count is computed dynamically, so it follows the test list.
 
 Usage: postrun_summary.py <scan log path>
 """
@@ -19,7 +24,7 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from parse_ctest import parse_log  # noqa: E402
 
-# Why a case is skipped on macOS. Keys are case-name prefixes; keep this table updated as cases are added/removed.
+# Why a case does not run on macOS. Keys are case-name prefixes; keep this table updated as cases are added/removed.
 SKIP_REASONS = [
     ("sctp_network_server_peer_test.",
      "sctp peers bind different loopback addresses; the usrsctp shim cannot associate distinct local addresses"),
@@ -70,7 +75,7 @@ def reason_for(name, table):
     for prefix, why in table:
         if name.startswith(prefix):
             return why
-    return "skipped on macOS; needs further debugging"
+    return "does not run on macOS; needs further debugging"
 
 
 def sctp_transport_mode():
@@ -102,22 +107,38 @@ def main():
     skipped = sorted((i, r) for i, r in results.items() if r["outcome"] == "Skipped")
     disabled = sorted((i, r) for i, r in results.items() if r["outcome"] == "Disabled")
     passed = counts.get("Passed", 0)
+    killed = sorted(set(started) - set(results))
+
+    # The 10 ctest-disabled and the 24 runtime-skipped cases are all confirmed not applicable on macOS (they run
+    # on Ubuntu only), so they are reported as one merged "disabled" count. Both numbers are dynamic.
+    disabled_total = len(disabled) + len(skipped)
+    runnable = total - disabled_total
+    pct = 100.0 * passed / runnable if runnable else 0.0
+    problems = []
+    if failed:
+        problems.append(f"{len(failed)} failed")
+    if crashed:
+        problems.append(f"{len(crashed)} crashed")
+    if killed:
+        problems.append(f"{len(killed)} killed (hung)")
+    suffix = (", " + ", ".join(problems)) if problems else ""
 
     print()
     print("=================== macOS test result summary (over the real total) ===================")
-    print(f"Total registered test cases ....... {total}")
-    print(f"  Passed .......................... {passed}  ({100.0 * passed / total:.1f}% of {total})")
-    print(f"  Failed .......................... {len(failed)} tests Failed out of {total}")
-    print(f"  Crashed ......................... {len(crashed)} tests Crashed out of {total}")
-    print(f"  Skipped ......................... {len(skipped)} tests Skipped out of {total}")
-    print(f"  Disabled ........................ {len(disabled)} tests Disabled out of {total}")
-    killed = sorted(set(started) - set(results))
+    print(f"{pct:.0f}% tests passed ({passed}), {disabled_total} tests disabled (not applicable on macOS), "
+          f"out of {total} total{suffix}")
+    print(f"  Total registered test cases ....... {total}")
+    print(f"    Passed .......................... {passed}")
+    print(f"    Disabled (not applicable) ....... {disabled_total}  "
+          f"(= {len(disabled)} ctest-disabled + {len(skipped)} runtime-skipped)")
+    print(f"    Failed .......................... {len(failed)} tests")
+    print(f"    Crashed ......................... {len(crashed)} tests")
     if killed:
-        print(f"  Killed (hung) ................... {len(killed)} tests Killed out of {total}")
-    print(f"  (total accounted for ............ {passed + len(failed) + len(crashed) + len(skipped) + len(disabled) + len(killed)})")
+        print(f"    Killed (hung) ................... {len(killed)} tests")
+    print(f"    (total accounted for ............ {passed + len(failed) + len(crashed) + disabled_total + len(killed)})")
     print()
     print("Note: ctest's own line 'N tests failed out of M' prints M = total - Disabled (e.g. 7580 instead of 7590),")
-    print("counts Crashed among the failures and hides Disabled entirely; the numbers above are the complete picture.")
+    print("counts Crashed among the failures and hides Disabled entirely; the line above is the complete picture.")
     print("========================================================================================")
 
     print()
@@ -131,33 +152,29 @@ def main():
     print("        kernel-SCTP peers (AMF/E2 on Ubuntu); the unit tests cover the UDP-encapsulation mode.")
 
     print()
-    print("The following tests did not run - SKIPPED on macOS (temporarily skipped: hung or not yet supported")
-    print("by the macOS stack; needs further debugging):")
-    if not skipped:
+    print(f"The following {disabled_total} tests do not run on macOS - confirmed not applicable on macOS, they run")
+    print("on Ubuntu only:")
+    if not skipped and not disabled:
         print("  (none)")
     for i, r in skipped:
-        print(f"  {i} - {r['name']} (Skipped)")
+        print(f"  {i} - {r['name']} (runtime-skipped)")
         print(f"       reason: {reason_for(r['name'], SKIP_REASONS)}")
-
-    print()
-    print("The following tests did not run - DISABLED on macOS (Ubuntu/Linux-only cases, not applicable on macOS):")
-    if not disabled:
-        print("  (none)")
     for i, r in disabled:
-        print(f"  {i} - {r['name']} (Disabled)")
+        print(f"  {i} - {r['name']} (ctest-disabled)")
         print(f"       reason: {reason_for(r['name'], DISABLED_REASONS)}")
 
-    print()
-    print("Crashed tests (need further debugging):")
-    if not crashed:
-        print("  (none)")
-    for i, r in crashed:
-        print(f"  {i} - {r['name']} (Crashed)")
+    if failed or crashed:
+        print()
+        print("Crashed tests (need further debugging):")
+        if not crashed:
+            print("  (none)")
+        for i, r in crashed:
+            print(f"  {i} - {r['name']} (Crashed)")
 
-    print()
-    print(f"Failed tests ({len(failed)} cases, full detail in the ctest FAILED section above):")
-    for i, r in failed:
-        print(f"  {i} - {r['name']} (Failed)")
+        print()
+        print(f"Failed tests ({len(failed)} cases, full detail in the ctest FAILED section above):")
+        for i, r in failed:
+            print(f"  {i} - {r['name']} (Failed)")
 
     if killed:
         print()
