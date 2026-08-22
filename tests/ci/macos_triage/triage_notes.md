@@ -88,15 +88,15 @@ In rough priority order:
    - meanwhile `dl_process` keeps filling the 614400-sample TX queue and `send_response()` drained it ALL into one
      reply, so a stalled period produced a 385 KB (4+ slot) mega-message whose trickle was proportionally longer -
      the feedback that degraded the lockstep and piled up multi-second latencies.
-   - the earlier "UE 2 s RCVTIMEO" hypothesis was disproven by the probes (gnb-side buffer-empty waits were ms-scale).
-   Fix (macOS-only): `send_response()` now drains at most ONE slot per request (the size of the last `transmit()`
-   call), so replies stay ~92 KB, the channel loop stays responsive and the feedback is broken. Validation with the
-   fix (5 ping rounds, same setup): lockstep back to a STABLE 15.2 rounds/s (no decay), UE UL production median
-   55 ms, ping rtt avg 0.89/0.92/1.42/1.37 s (round 1 right after attach: 2.6 s) vs 2.0-6.2 s before the fix.
-   - Remaining latency (not a macOS defect): the gnb's UL grant cycle (~250-400 ms at 15 slots/s) + DL scheduling
-     (~80 ms median) + batch phase - scheduling costs in slot time on the zmq testbed; the residual difference to
-     the best sessions is srsUE's worker pace on the 153 machine. Further tuning belongs to the UE side or the
-     gnb scheduler (SR periodicity / grant frequency), not the port.
+   - Fix attempt 2 (reverted): cap each DL reply at one slot (macOS) to bound the per-reply trickle. Validation: the
+     lockstep recovered to a stable 15.2 rounds/s and the ping bursts shrank (avg 0.9-1.4 s vs 2-6 s), BUT the UE
+     attach became unreliable: during attach the UE pulls DL blocks much slower (cell-search/SIB processing), and
+     with the one-slot cap the DL delivery is exactly slaved to that slow pull, so the NAS/auth exchange crawls
+     (~0.4 slots/s, 10-20 s per round trip) and the AMF's ~6 s retransmission/registration timers give up -> RRC
+     Release, no IP. Without the cap the DL production runs ahead of the UE during attach and the NAS messages get
+     through. The cap was reverted: attach reliability wins over the steady-state burst. A fix that bounds the
+     reply without slaving the delivery (e.g. a cap that only applies once the UE is in connected state, or a
+     per-association backlog limit enforced in dl_process instead of the channel) remains open.
    - Constraint learned from a reverted fix attempt (zero-filled reply for empty buffers): the wire sample stream
      must stay exactly 1:1 with the gnb's slot production - extra zero blocks advance the UE's sample clock and
      break the RACH timing ("tx time ... in the past"). The usrsctp TODO is NOT involved (the user plane never
