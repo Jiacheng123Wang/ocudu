@@ -79,22 +79,22 @@ In rough priority order:
    few seconds. Building usrsctp from source would allow either a retry-on-EAGAIN patch in
    `sctp_userspace_ip_output` or switching the shim to the AF_CONN/`conn_output` transport. The tests mitigate with
    single-homing, pacing and bounded waits, so this is test-duration only, not correctness.
-2. **zmq radio slow motion (the residual E2E burst).** The cell slot counter advances at only ~2.5 slots/s
-   (should be 1000/s) - measured again in the 2026-08-22 E2E run (`/tmp/gnb.log`): slot rate 2.51 slots/s over a
-   144 s window. This quantizes every over-the-air opportunity to a ~400 ms slot period and is the cause of the
-   residual ping bursts (500 pings, 0 % loss, rtt min/avg/max = 248/779/2459 ms, mdev 408 ms; Ubuntu gnb: uniform
-   300-400 ms). Per-packet analysis of `/tmp/gnb.log`:
-   - UL requests wait a median 333 ms (PUSCH -> GTPU egress), ~2.8 requests per PUSCH (PUSCH RX at ~3.5/s), so the
-     requests reach the UPF in mini-batches;
-   - the replies come back in the same batch pattern (7-8 datagrams per GTP-U ingress batch, ~1.3-1.9 s apart);
-   - DL replies wait a median 386 ms in the MAC queue (RLC TX SDU -> PDSCH TX);
-   - the UE-side sawtooth (RTT descending ~100 ms per packet) is the flush signature of these batches: replies
-     accumulated at the 10 pps request rate are flushed together, so each reply's RTT drops by the request
-     interval per step. Between sawtooths the RTT approaches ~250-300 ms, at or below the Ubuntu baseline - the
-     gnb's own processing is fast; all the excess latency is the slot quantization. The usrsctp TODO is NOT
-     involved: the user plane never touches SCTP.
-   Suspects for the slow slot clock: clock drift between the two hosts and the zmq `tx_time` pacing; needs its own
-   investigation with zmq timestamps on both sides.
+2. **zmq radio slow motion (the residual E2E burst).** Captures at both ends of the zmq link (2026-08-22) showed
+   the gnb/UE zmq link is a REQ/REP lockstep: the UE pulls each DL block (request every ~30-38 ms), the gnb answers
+   within ~1.6 ms, and the lockstep runs at ~26-31 slots/s (the zmq testbed's inherent pace, same on Ubuntu; the
+   earlier "2.5 slots/s" reading was the frame counter - x10 = 25 slots/s). In the good equilibrium the gnb-internal
+   lags are small (DL ingress -> PDSCH median ~29 ms, ping rtt avg ~418 ms vs Ubuntu 300-400 ms). The sawtooth burst
+   appears in bad-equilibrium runs where the UL path batches the ping requests (~7-8 per GTP-U ingress batch,
+   ~1.3-1.9 s apart) and the DL scheduling lag grows to ~386 ms median; the trigger that switches the lockstep
+   between the good and the bad equilibrium is still unknown. The usrsctp TODO is NOT involved: the user plane never
+   touches SCTP.
+   - Reverted fix attempt: answering an idle DL request with a zero-filled block (to avoid the UE's 2 s REQ receive
+     timeout). It broke the UE attach: the zmq DL stream doubles as the UE's sample clock, so extra zero blocks that
+     the gnb's slot production never made advance the UE's sample counter ahead of the real timeline and the UE's UL
+     tx_time drifts ("tx time is 0.013 ms in the past") - the RACH retransmissions never attach. Constraint learned:
+     the wire sample stream must stay exactly 1:1 with the gnb's slot production.
+   - Next step: instrument `dl_process` and the zmq TX channel (buffer-empty events, stall durations, per-slot
+     timestamps) and re-capture the next bad-equilibrium run to find the trigger.
 3. **usrsctp multihoming / `connectx()` support in the shim** (unblocks the 10 multihomed/bindx/connectx cases and
    the E2 agent case in section 2b). Requires the from-source usrsctp work of item 1 (custom per-association UDP
    sockets), or an alternative userspace transport.
