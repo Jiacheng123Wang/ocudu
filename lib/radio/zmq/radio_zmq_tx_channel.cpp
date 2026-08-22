@@ -154,19 +154,8 @@ void radio_zmq_tx_channel::receive_request()
 
 void radio_zmq_tx_channel::send_response()
 {
-  // Cap the reply at one slot (the size of the last transmit() call): popping the whole queue turns a backlog
-  // into a giant multi-slot message that takes proportionally longer to cross the peer's TCP window, which in turn
-  // freezes this channel (REP alternation) and grows the backlog further - the positive feedback that degraded
-  // the E2E into multi-second bursts. Draining one slot per request keeps the reply bounded and the loop moving.
-#if defined(__APPLE__)
-  const unsigned max_reply_samples = (last_pushed_size != 0) ? std::min<unsigned>(last_pushed_size, buffer.size())
-                                                             : buffer.size();
-#else
-  const unsigned max_reply_samples = buffer.size();
-#endif
-
-  // Try popping samples until the circular buffer is empty (up to one slot).
-  unsigned count = circular_buffer.try_pop(buffer.begin(), buffer.begin() + max_reply_samples);
+  // Try popping samples until the circular buffer is empty.
+  unsigned count = circular_buffer.try_pop(buffer.begin(), buffer.end());
 
   // Check if it is still running.
   if (!state_fsm.is_running()) {
@@ -325,11 +314,6 @@ void radio_zmq_tx_channel::transmit(span<const cf_t> data)
   }
 
   logger.debug("Requested to transmit {} samples.", data.size());
-
-  // Remember the slot size: replies are capped at one slot per request.
-  if (data.size() != 0) {
-    last_pushed_size = data.size();
-  }
 
   // Protect concurrent alignment and transmit.
   std::scoped_lock lock(transmit_alignment_mutex);

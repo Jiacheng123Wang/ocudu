@@ -54,10 +54,6 @@ class radio_zmq_tx_channel
   flow_probe tx_reply_probe{"zmq_tx_reply"};
   /// Timestamp of the pending request, for the reply latency measurement.
   std::chrono::steady_clock::time_point pending_request_since;
-  /// Number of samples in the last transmit() call (one slot): replies are capped at this size so that a backlog
-  /// is drained one slot per request instead of one giant message. Written by the baseband thread, read by the
-  /// channel loop.
-  std::atomic<unsigned> last_pushed_size = {0};
 
 public:
   /// Describes the necessary parameters to create a ZMQ Tx channel.
