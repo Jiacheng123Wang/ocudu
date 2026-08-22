@@ -5,8 +5,25 @@
 #include "testing_helpers.h"
 #include "ocudu/ocudulog/detail/log_entry_metadata.h"
 #include <numeric>
+#include <regex>
 
 using namespace ocudulog;
+
+/// The formatter maps the entry's time point onto the wall clock as
+/// tp - high_resolution_clock::now() + system_clock::now(). On Linux the high_resolution_clock epoch coincides with
+/// the system clock epoch, so the fixed 50000 us test time point prints as 1970-01-01T00:00:00.050000. On macOS
+/// high_resolution_clock is steady_clock (epoch = system boot), so the printed wall-clock time depends on the
+/// machine's uptime. Verify the timestamp shape, and compare the rest of the line verbatim.
+static std::string strip_timestamp(const std::string& line)
+{
+  static const std::regex ts_regex(R"(^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6} )");
+  std::smatch            m;
+  if (std::regex_search(line, m, ts_regex)) {
+    return line.substr(m.length());
+  }
+  // No timestamp prefix: return the line unchanged so that the assertion below reports the full difference.
+  return line;
+}
 
 /// Helper to build a log entry.
 static detail::log_entry_metadata build_log_entry_metadata(fmt::dynamic_format_arg_store<fmt::format_context>* store)
@@ -29,9 +46,9 @@ static bool when_fully_filled_log_entry_then_everything_is_formatted()
   fmt::dynamic_format_arg_store<fmt::format_context> store;
   contextual_text_formatter{}.format(build_log_entry_metadata(&store), buffer);
   std::string result   = fmt::to_string(buffer);
-  std::string expected = "1970-01-01T00:00:00.050000 [ABC     ] [Z] [   99.99] Text 88\n";
+  std::string expected = "[ABC     ] [Z] [   99.99] Text 88\n";
 
-  ASSERT_EQ(result, expected);
+  ASSERT_EQ(strip_timestamp(result), expected);
 
   return true;
 }
@@ -45,9 +62,9 @@ static bool when_log_entry_without_name_is_passed_then_name_is_not_formatted()
   fmt::memory_buffer buffer;
   contextual_text_formatter{}.format(std::move(entry), buffer);
   std::string result   = fmt::to_string(buffer);
-  std::string expected = "1970-01-01T00:00:00.050000 [Z] [   99.99] Text 88\n";
+  std::string expected = "[Z] [   99.99] Text 88\n";
 
-  ASSERT_EQ(result, expected);
+  ASSERT_EQ(strip_timestamp(result), expected);
 
   return true;
 }
@@ -61,9 +78,9 @@ static bool when_log_entry_without_tag_is_passed_then_tag_is_not_formatted()
   fmt::memory_buffer buffer;
   contextual_text_formatter{}.format(std::move(entry), buffer);
   std::string result   = fmt::to_string(buffer);
-  std::string expected = "1970-01-01T00:00:00.050000 [ABC     ] [   99.99] Text 88\n";
+  std::string expected = "[ABC     ] [   99.99] Text 88\n";
 
-  ASSERT_EQ(result, expected);
+  ASSERT_EQ(strip_timestamp(result), expected);
 
   return true;
 }
@@ -77,9 +94,9 @@ static bool when_log_entry_without_context_is_passed_then_context_is_not_formatt
   fmt::memory_buffer buffer;
   contextual_text_formatter{}.format(std::move(entry), buffer);
   std::string result   = fmt::to_string(buffer);
-  std::string expected = "1970-01-01T00:00:00.050000 [ABC     ] [Z] Text 88\n";
+  std::string expected = "[ABC     ] [Z] Text 88\n";
 
-  ASSERT_EQ(result, expected);
+  ASSERT_EQ(strip_timestamp(result), expected);
 
   return true;
 }
@@ -94,11 +111,11 @@ static bool when_log_entry_with_hex_dump_is_passed_then_hex_dump_is_formatted()
   fmt::memory_buffer buffer;
   contextual_text_formatter{}.format(std::move(entry), buffer);
   std::string result   = fmt::to_string(buffer);
-  std::string expected = "1970-01-01T00:00:00.050000 [ABC     ] [Z] [   99.99] Text 88\n"
+  std::string expected = "[ABC     ] [Z] [   99.99] Text 88\n"
                          "    0000: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f\n"
                          "    0010: 10 11 12 13\n";
 
-  ASSERT_EQ(result, expected);
+  ASSERT_EQ(strip_timestamp(result), expected);
 
   return true;
 }
@@ -172,7 +189,7 @@ static bool when_log_entry_with_only_context_is_passed_then_context_is_formatted
   fmt::memory_buffer buffer;
   contextual_text_formatter{}.format_ctx(ctx, std::move(entry), buffer);
   std::string result   = fmt::to_string(buffer);
-  std::string expected = "1970-01-01T00:00:00.050000 [ABC     ] [Z] [   99.99] Context dump for "
+  std::string expected = "[ABC     ] [Z] [   99.99] Context dump for "
                          "\"Complex Context\"\n"
                          "  > List: sector_list\n"
                          "    > Set: sector_metrics\n"
@@ -202,7 +219,7 @@ static bool when_log_entry_with_only_context_is_passed_then_context_is_formatted
                          "              SNR: 30.1 dB\n"
                          "              PWR: -40 dBm\n";
 
-  ASSERT_EQ(result, expected);
+  ASSERT_EQ(strip_timestamp(result), expected);
 
   return true;
 }
@@ -216,7 +233,7 @@ static bool when_log_entry_with_context_and_message_is_passed_then_context_is_fo
   fmt::memory_buffer buffer;
   contextual_text_formatter{}.format_ctx(ctx, std::move(entry), buffer);
   std::string result   = fmt::to_string(buffer);
-  std::string expected = "1970-01-01T00:00:00.050000 [ABC     ] [Z] [   99.99] [[sector_metrics_type: event, "
+  std::string expected = "[ABC     ] [Z] [   99.99] [[sector_metrics_type: event, "
                          "sector_metrics_sector_id: 1, sector_metrics_Value_Array: [1, 2, 3, 4], "
                          "sector_metrics_Value_Optional: null, [ue_container_Throughput: 1.2 MB/s, "
                          "ue_container_Address: 10.20.30.40, [RF_SNR: 5.1 dB, RF_PWR: -11 "
@@ -224,7 +241,7 @@ static bool when_log_entry_with_context_and_message_is_passed_then_context_is_fo
                          "MB/s, ue_container_Address: 10.20.30.41, [RF_SNR: 20.1 dB, RF_PWR: -30 "
                          "dBm][RF_SNR: 30.1 dB, RF_PWR: -40 dBm]]]]: Text 88\n";
 
-  ASSERT_EQ(result, expected);
+  ASSERT_EQ(strip_timestamp(result), expected);
 
   return true;
 }
