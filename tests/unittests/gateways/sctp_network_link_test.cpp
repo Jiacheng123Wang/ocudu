@@ -9,8 +9,10 @@
 #include "ocudu/support/executors/task_worker.h"
 #include "ocudu/support/io/io_broker_factory.h"
 #include <condition_variable>
+#include <chrono>
 #include <gtest/gtest.h>
 #include <mutex>
+#include <thread>
 
 using namespace ocudu;
 
@@ -55,14 +57,25 @@ public:
       client_cfg.sctp.dest_name         = "server";
       client_cfg.sctp.connect_addresses = {server_cfg.sctp.bind_addresses[0]};
       client_cfg.sctp.connect_port      = server_port;
+      // Bind each client to the loopback address: an unbound usrsctp socket advertises every local address of the
+      // host in its INIT (all the lo0 aliases plus the LAN address), so each association becomes multi-homed and
+      // every COOKIE_ECHO processing emits one HEARTBEAT per peer address, multiplying the burst traffic of the
+      // 32-client setup through the single shared UDP socket of the user-space stack.
+      client_cfg.sctp.bind_addresses = {"127.0.0.1"};
       ret.first->second->client         = create_sctp_network_client(client_cfg);
       report_fatal_error_if_not(ret.first->second->client != nullptr, "Failed to create Client");
     }
 
-    // Connect Clients.
+    // Connect Clients. The 1 ms pacing dilutes the burst of INITs: usrsctp's built-in UDP transport sends every
+    // datagram of every socket through one shared UDP socket with sendmsg(MSG_DONTWAIT), and a chunk whose send
+    // fails with EAGAIN is dropped (usrsctp 0.9.5.0 does not retry it). The lost chunk is only recovered by the
+    // SCTP retransmission timers (T1-INIT 3 s / T1-cookie 1 s), which is what made the 32-client cases take
+    // 13-50 s. The pacing plus the single-homed bind above reduce the collisions so a run typically takes ~60 ms
+    // and at worst ~1.3 s (one lost chunk recovered by the 1 s T1-cookie timer).
     for (auto& assoc : client_associations) {
       assoc.second->client_sender = assoc.second->client->connect(create_client_receiver(assoc.first));
       report_fatal_error_if_not(assoc.second->client_sender != nullptr, "Failed to connect Client");
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     // Wait for associations to be made to the server.

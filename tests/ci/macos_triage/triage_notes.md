@@ -173,10 +173,23 @@ The `sctp_network_link_test` multi-client cases used to take 2.02 s / 11.4 s / 2
    the clients while the server is still running. Result: 1/4-client cases 2.02 s / 11.4 s -> 0.02 s, and the
    whole client test suite drops to ~10 ms per case. Ubuntu unchanged (78/78, 4.45 s total).
 
-2. **Burst-setup INIT retransmissions (remaining, test-duration only).** With 32 clients connecting at once, a few
-   associations' INIT (and in the send case, DATA) chunks are lost on the usrsctp UDP-encapsulation loopback and
-   recover through the RTO backoff: the COMM_UP events arrive in batches ~1.0 s, ~3.4 s and ~6.6 s apart, so the
-   32-client setup takes ~11 s (recv) and the send-data case ~40-50 s (data chunks retransmit too). The kernel
-   SCTP stack on Linux does not lose anything on loopback (0.04 s). Correctness is unaffected (retransmissions
-   succeed; 78/78 pass), so this is a test-duration optimization: candidate follow-ups are enlarging the usrsctp
-   UDP socket receive buffer and tracing where the burst chunks are dropped.
+2. **Burst-setup chunk drops: root cause found (usrsctp 0.9.5.0 send path), mitigated in the test.** With 32
+   clients connecting at once, a few associations' INIT/INIT_ACK/COOKIE_ACK (and in the send case, DATA) chunks
+   were lost on the usrsctp UDP-encapsulation loopback and recovered through the SCTP retransmission timers
+   (T1-INIT 3 s / T1-cookie 1 s), which produced the ~1.0/3.4/6.6 s COMM_UP batches and the 13-50 s setup times.
+   The kernel SCTP stack on Linux does not lose anything on loopback (0.04 s).
+
+   Root cause (proven with usrsctp's own SCTP_DEBUG chunk trace enabled through a temporary debug_printf hook):
+   usrsctp's built-in UDP transport funnels every datagram of every socket of the process through ONE shared UDP
+   socket, and sends it with `sendmsg(MSG_DONTWAIT)` (user_socket.c `sctp_userspace_ip_output`). On macOS
+   loopback-to-self a send during the connect burst transiently fails with EAGAIN (errno 35, "IP output returns
+   35"), and usrsctp DROPS the chunk ("Gak send error 35") without a send-layer retry - the packet accounting in
+   the trace shows e.g. 32 INITs sent / 31 received. Two amplifiers: (a) unbound client sockets advertise every
+   local address of the host in the INIT (all the lo0 aliases + the LAN address), so every association becomes
+   multi-homed and each COOKIE_ECHO processing emits one HEARTBEAT per peer address, multiplying the burst; (b) the
+   32 connects run in a tight loop. Mitigation in the link-test fixture (macOS test-duration only, correctness is
+   unaffected): bind each client to 127.0.0.1 (single-homed) and pace the connects by 1 ms. Result: the 32-client
+   cases take ~60 ms typically and ~1.3 s at worst (one lost chunk recovered by the 1 s T1-cookie timer), down from
+   13-50 s. A complete fix would require patching usrsctp's send path (retry on EAGAIN or blocking sends) or
+   switching the shim to the AF_CONN/conn_output transport, both of which mean building usrsctp from source - left
+   as a follow-up.
