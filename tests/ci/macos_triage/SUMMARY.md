@@ -47,45 +47,35 @@ now register **7590** cases and nothing is dropped silently:
 ## Run statistics
 
 - ctest entries with a recorded outcome: **7590** (complete coverage of all registered cases)
-  - Crashed: 1
+  - Crashed: 0
   - Disabled: 10
-  - Failed: 52
-  - Passed: 7503
+  - Failed: 0
+  - Passed: 7556
   - Skipped: 24
+
+(After the final fixes of 2026-08-22: the 50 failures and the 1 crash are all fixed - see the
+`50 failures + 1 crash` section in `triage_notes.md`. 7556 = 7503 previously passing + 50 failures + 1 crash
++ the 2 f1u split-connector cases recovered by the recvmmsg fix.)
 
 ## 1. Passed cases
 
-**7503 of 7590** ctest cases pass. Full list: `results.tsv` (3rd column `Passed`).
+**7556 of 7590** ctest cases pass (24 skipped, 10 disabled, 0 failed). Full list: `results.tsv`.
 Note: `e1_gateway_test`, `f1c_gateway_test`, `network_test` and `f1ap_ref_time_provider_adapter_test` count as
 passed although they contain 14 gtest cases that are skipped on macOS (section 2b).
 
-Groups that are **not** 100 % green (every other group passes completely):
+All groups are 100 % green; the groups that used to have failures/crashes (all fixed on 2026-08-22, see section 2d):
 
-| test group | passed | not passed |
+| test group | passed | not passed (before the fixes) |
 |---|---|---|
-| `EthFramePoolTestSuite/EthFramePoolFixture` | 304 | Failed=32 |
-| `cu_cp_rrc_inactive_test` | 6 | Failed=16 |
-| `dft_processor_ci16_test` | 0 | Disabled=1 |
-| `du_high_benchmark` | 0 | Disabled=1 |
-| `e2ap_network_adapter_test` | 0 | Skipped=1 |
-| `f1u_cu_split_connector_test` | 6 | Failed=1 |
-| `f1u_du_split_connector_test` | 4 | Failed=1 |
-| `nia2/fxt_nia2` | 16 | Skipped=8 |
-| `ofh_integration_test` | 0 | Disabled=1 |
-| `rlc_am12_eia2_eea2_stress_test` | 0 | Disabled=1 |
-| `rlc_am18_eia2_eea2_stress_test` | 0 | Disabled=1 |
-| `rlc_um12_eia1_eea1_stress_test` | 0 | Disabled=1 |
-| `rlc_um12_eia2_eea0_stress_test` | 0 | Disabled=1 |
-| `rlc_um12_eia2_eea2_stress_test` | 0 | Disabled=1 |
-| `rlc_um12_eia3_eea3_stress_test` | 0 | Disabled=1 |
-| `rlc_um6_eia2_eea2_stress_test` | 0 | Disabled=1 |
-| `rrc_du_ref_time_r16_test` | 2 | Skipped=1 |
-| `sctp_network_client_test` | 14 | Skipped=4 |
-| `sctp_network_server_peer_test` | 0 | Skipped=6 |
-| `sctp_socket_test` | 19 | Skipped=4 |
-| `text_formatter_test` | 0 | Failed=1 |
-| `udp_network_gateway_tester` | 6 | Failed=1 |
-| `unique_thread_test` | 0 | Crashed=1 |
+| `EthFramePoolTestSuite/EthFramePoolFixture` | 336 | Failed=32 (now 0) |
+| `cu_cp_rrc_inactive_test` | 22 | Failed=16 (now 0) |
+| `f1u_cu_split_connector_test` | 7 | Failed=1 (now 0) |
+| `f1u_du_split_connector_test` | 5 | Failed=1 (now 0) |
+| `text_formatter_test` | 1 | Failed=1 (now 0) |
+| `udp_network_gateway_tester` | 7 | Failed=1 (now 0) |
+| `unique_thread_test` | 1 | Crashed=1 (now 0) |
+
+Skipped/disabled placeholders (structural, see sections 2a/3) remain exactly as before.
 
 ## 2. Skipped on macOS - need further debugging
 
@@ -146,20 +136,22 @@ only) are registered as DISABLED placeholders so they stay visible and counted.
 None left: the two clock-resolution cases that the port had removed with `#if !defined(__APPLE__)` are compiled
 in again and skipped at runtime instead, so they appear in the test list (see the parity table).
 
-### 2d. Failing/crashing, not hanging (they do not block `make test`) - 53 cases
+### 2d. Failing/crashing, not hanging - all fixed (was 53 cases, now 0)
 
-| cases | ctest case pattern | indices | observed cause | first failing assertion |
+| cases | ctest case pattern | indices | root cause | fix (2026-08-22) |
 |---|---|---|---|---|
-| 32 | `EthFramePoolTestSuite/EthFramePoolFixture.read_after_write_should_return_correct_data/*` | 3776-3807 | frame data/size mismatch (`std::equal` false, e.g. 2104 vs 557 bytes) in the OFH Ethernet frame pool | `tests/unittests/ofh/ethernet/ethernet_frame_pool_test.cpp:176` |
-| 16 | `cu_cp_rrc_inactive_test.*` | 656-673 | `mean_nof_inactive_rrc_connections` stays 0 - RRC-inactive metrics never reported | `tests/unittests/cu_cp/cu_cp_rrc_inactive_test.cpp:700` |
-| 2 | `f1u_cu_split_connector_test.destroy_bearer_disconnects_and_stops_rx, f1u_du_split_connector_test.destroy_bearer_disconnects_and_stops_rx` | 2722, 2727 | the RX path still delivers after the bearer is destroyed (the other 10 f1u split-connector cases pass now) | `tests/unittests/f1u/common/f1u_cu_split_connector_test.cpp` |
-| 1 | `udp_network_gateway_tester.when_v6_config_valid_then_trx_succeeds` | 3033 | IPv6 dual-stack UDP trx: the `::1` client/server pair does not exchange the datagram on macOS | `tests/unittests/gateways/udp_network_gateway_test.cpp:179` |
-| 1 | `text_formatter_test` | 7361 | formatted log line differs from the expected golden text | `tests/unittests/ocudulog/text_formatter_test.cpp:34` |
-| 1 | `unique_thread_test (crash: Subprocess aborted)` | 7398 | `this_thread_name()` returns an empty string on macOS, so the assertion `this_thread_name() != t.get_name()` aborts | `tests/unittests/support/unique_thread_test.cpp:19` |
+| 32 | `EthFramePoolTestSuite/EthFramePoolFixture.read_after_write_should_return_correct_data/*` | 3776-3807 | the pool's pending order follows the release order of the scoped buffers; a destroyed `std::vector` releases in reverse order under libc++ (macOS) but forward under libstdc++, so the read burst came back reversed | the test matches every written frame against the set of read frames instead of comparing positionally |
+| 16 | `cu_cp_rrc_inactive_test.*` | 656-673 | `rrc_du_metrics_aggregator::get_mean_nof_rrc_connections()` dereferenced the map's `end()` iterator (UB): libstdc++ happened to read the last value, libc++ reads 0 | `rbegin()->second` (production fix) |
+| 2 | `f1u_cu/du_split_connector_test.destroy_bearer_disconnects_and_stops_rx` | 2722, 2727 | macOS recvmmsg emulation held the receive callback for one inter-packet gap per datagram | fixed by the recvmmsg drain fix (commit 4f9e4f2688) |
+| 1 | `udp_network_gateway_tester.when_v6_config_valid_then_trx_succeeds` | 3033 | `sendmsg()` with `msg_namelen = sizeof(sockaddr_storage)` (128) fails with EINVAL on macOS for IPv6 destinations | `sockaddr_length()` derives `msg_namelen` from the address family (production fix) |
+| 1 | `text_formatter_test` | 7361 | macOS `high_resolution_clock` is `steady_clock` (epoch = boot), so the fixed test time point does not print as 1970-01-01 | the test validates the timestamp shape and compares the rest of the golden line verbatim |
+| 1 | `unique_thread_test` (crash: Subprocess aborted) | 7398 | `pthread_getname_np` reports an empty name for the macOS main thread until it names itself | the test names the main thread at the start of `main()` |
 
-Two cross-cutting causes dominate: the **usrsctp** shim (63 cases) and the fact that macOS `lo0` only carries
-`127.0.0.1` while Linux routes the whole `127.0.0.0/8` (18 cases bind `127.0.0.2` / `127.0.1.1`).
-The loopback ones can be unblocked locally with `sudo ifconfig lo0 alias 127.0.0.2 up` (plus `.3`, `127.0.1.1`, `127.0.0.101`).
+Additional load-induced flake fixes (found with `ctest -j 8` stress runs): fixed-iteration broker-drive loops became
+deadline-driven; the link-test association/data waits are bounded; the usrsctp UDP encapsulation port is seeded with
+the PID so parallel test processes stop racing on port 9899; the multi-client DATA sends are paced; the RLC
+`hol_toa` window assertions use inclusive bounds (macOS steady_clock ticks at ~41 ns and the fast write paths can
+record the same tick as the captured start time). Details in `triage_notes.md`.
 
 Full per-case list: `results.tsv`; verbose output: `logs/rerun_failed.log`.
 

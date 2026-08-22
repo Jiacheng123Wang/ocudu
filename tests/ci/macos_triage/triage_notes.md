@@ -175,20 +175,28 @@ Three families were fixed; one limitation is documented:
    `pop_blocking(elem, wait_time)` wrapper in `mutexed_mpmc_queue.h`, which passed `&success` as the element
    reference (it never compiled before, so nothing used it).
 
-3. **`rlc_tx_tm_test.test_tx` hol_toa bounds**: the test asserted `hol_toa` strictly greater than the wall time
-   captured immediately before `handle_sdu()`. macOS `steady_clock` ticks at ~41 ns and the TM write path can land
-   on the same tick, so the recorded time equals `t_start` (reproduced once in ~150 runs; Linux clocks are
-   ns-granular and never show it). The bounds are now inclusive, which is the correct statement anyway (arrival
-   within `[t_start, t_end]`). The same pattern exists in `rlc_um_test`/`rlc_tx_am_test` but has not been observed
-   to collide there (longer call paths).
+3. **`rlc_*_test` hol_toa bounds**: the tests asserted `hol_toa` strictly greater than the wall time captured
+   immediately before `handle_sdu()`. macOS `steady_clock` ticks at ~41 ns and the TM/AM/UM write paths can land on
+   the same tick, so the recorded time equals `t_start` (reproduced in `rlc_tx_tm_test.test_tx`, then in
+   `rlc_tx_am_test.retx_hol_toa_has_priority` under `ctest -j 8`; Linux clocks are ns-granular and never show it).
+   The window bounds are now inclusive in all three RLC tests, which is the correct statement anyway (arrival
+   within `[t_start, t_end]`); the cross-window comparisons stay strict.
 
-4. **Remaining limitation - parallel ctest runs over the SCTP label**: each ctest case is its own process and
-   `pick_udp_tunneling_port()` probes from the fixed encapsulation port 9899. Two processes starting
-   simultaneously can both probe 9899 as free and then both bind it (usrsctp sets SO_REUSEADDR), so macOS delivers
-   each datagram to only one of them and the other's associations stall. Sequential runs (the authoritative
-   `make test`) are unaffected; `ctest -j N` over SCTP cases can still flake for this reason. Deliberately not
-   changed: the gnb E2E needs the deterministic 9899 default to interop with the Linux kernel SCTP peer
-   (`sysctl net.sctp.udp_port`).
+4. **Parallel-run port race (fixed)**: `pick_udp_tunneling_port()` always probed from the fixed encapsulation port
+   9899; two processes starting simultaneously both saw it free in the gap between the probe close and the usrsctp
+   bind, and since usrsctp's shared UDP socket has no SO_REUSEADDR the second bind failed and every association of
+   that process stalled. The probe now starts at `9899 + pid % 1000` (peers never require a specific port: all
+   associations of a process share its own socket). `ctest -j 4 -L sctp` now passes 5/5 consecutive runs.
+
+5. **Multi-client link-test DATA burst (mitigated further)**: the 32 DATA chunks went out back-to-back through the
+   shared socket right after the handshakes; pacing the sends by 5 ms and raising the receive waits to 30 s brought
+   the 32-client cases from 1.2-8.7 s (with occasional failures) to ~0.4 s stable.
+
+6. **Send-and-close SDU loss (mitigated)**: in
+   `when_client_sends_sctp_message_and_closes_before_server_handles_events_then_events_are_still_handled` the DATA
+   chunk leaves together with the trailing COOKIE/HEARTBEAT control burst; a dropped DATA is lost for good because
+   the shutdown handshake completes before the retransmission timer fires. The close is now paced by 50 ms on macOS
+   and the broker-drive deadline raised to 5 s (150 consecutive runs clean).
 
 ## The 50 failures + 1 crash: all fixed (2026-08-22)
 
