@@ -57,15 +57,18 @@ public:
       client_cfg.sctp.dest_name         = "server";
       client_cfg.sctp.connect_addresses = {server_cfg.sctp.bind_addresses[0]};
       client_cfg.sctp.connect_port      = server_port;
+#if defined(__APPLE__)
       // Bind each client to the loopback address: an unbound usrsctp socket advertises every local address of the
       // host in its INIT (all the lo0 aliases plus the LAN address), so each association becomes multi-homed and
       // every COOKIE_ECHO processing emits one HEARTBEAT per peer address, multiplying the burst traffic of the
       // 32-client setup through the single shared UDP socket of the user-space stack.
       client_cfg.sctp.bind_addresses = {"127.0.0.1"};
+#endif
       ret.first->second->client         = create_sctp_network_client(client_cfg);
       report_fatal_error_if_not(ret.first->second->client != nullptr, "Failed to create Client");
     }
 
+#if defined(__APPLE__)
     // Connect Clients. The pacing dilutes the burst of INITs: usrsctp's built-in UDP transport sends every datagram
     // of every socket through one shared UDP socket with sendmsg(MSG_DONTWAIT), and a chunk whose send fails with
     // EAGAIN is dropped (usrsctp 0.9.5.0 does not retry it). The lost chunk is only recovered by the SCTP
@@ -77,7 +80,15 @@ public:
       report_fatal_error_if_not(assoc.second->client_sender != nullptr, "Failed to connect Client");
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+#else
+    // Connect Clients.
+    for (auto& assoc : client_associations) {
+      assoc.second->client_sender = assoc.second->client->connect(create_client_receiver(assoc.first));
+      report_fatal_error_if_not(assoc.second->client_sender != nullptr, "Failed to connect Client");
+    }
+#endif
 
+#if defined(__APPLE__)
     // Wait for associations to be made to the server. Bounded: on the user-space stack a burst of connects can
     // lose a chunk to the shared-socket EAGAIN drop, which the retransmission timers recover in a few seconds;
     // without a bound a pathological loss would hang the case until the ctest timeout.
@@ -88,6 +99,11 @@ public:
         }),
         "Timed out waiting for all {} client associations to be established on the server",
         nof_clients);
+#else
+    // Wait for associations to be made to the server.
+    std::unique_lock<std::mutex> lock(assoc_creation_mutex);
+    assoc_created_cvar.wait(lock, [this, nof_clients]() { return server_associations.size() == nof_clients; });
+#endif
 
     logger.info("All UEs connected");
   }
@@ -242,12 +258,16 @@ TEST_P(sctp_network_link_test, multi_client_recv_data)
 #endif
   }
 
-  // Check data received by client. Bounded wait: a lost DATA chunk is recovered by the retransmission timers (up to
-  // a few seconds per loss), but the wait itself must not hang the case until the ctest timeout if the association
-  // is lost.
+  // Check data received by client. On the user-space stack a lost DATA chunk is recovered by the retransmission
+  // timers (up to a few seconds per loss), so the wait is bounded so that a lost association cannot hang the case
+  // until the ctest timeout.
   for (auto& assoc : client_associations) {
     byte_buffer pdu;
+#if defined(__APPLE__)
     ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu, std::chrono::seconds(30)));
+#else
+    ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu));
+#endif
     EXPECT_EQ(pdu.length(), pdu_len);
   }
 }
@@ -269,7 +289,11 @@ TEST_P(sctp_network_link_test, multi_client_send_data)
   // Check data received by each server association. Bounded wait, see multi_client_recv_data.
   for (auto& assoc : server_associations) {
     byte_buffer pdu;
+#if defined(__APPLE__)
     ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu, std::chrono::seconds(30)));
+#else
+    ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu));
+#endif
     EXPECT_EQ(pdu.length(), pdu_len);
   }
 }

@@ -171,6 +171,7 @@ TEST_P(EthFramePoolFixture, read_after_write_should_return_correct_data)
 
         ASSERT_TRUE(frame_burst.size() == num_frames) << "Reading from the pool returned incorrect number of buffers";
 
+#if defined(__APPLE__)
         // The pool does not guarantee any particular order of the pending frames: it depends on the destruction
         // order of the releasing scope, which is implementation-defined for std::vector (libc++ destroys in reverse
         // order, libstdc++ in forward order). Match every written frame against the set of read frames instead of
@@ -196,6 +197,17 @@ TEST_P(EthFramePoolFixture, read_after_write_should_return_correct_data)
           }
           EXPECT_TRUE(found) << "Written frame " << i << " was not read back correctly";
         }
+#else
+        for (unsigned i = 0, e = frame_burst.size(); i != e; ++i) {
+          // Size and data should match the randomly generated ones.
+          EXPECT_EQ(test_data[i].size(), frame_burst[i]->size())
+              << "Size of read packet doesn't match the size of written vector";
+          if (!test_data[i].empty()) {
+            ASSERT_TRUE(std::equal(frame_burst[i]->data().begin(), frame_burst[i]->data().end(), test_data[i].begin()))
+                << "Data mismatch";
+          }
+        }
+#endif
       }
     }
     ++slot;

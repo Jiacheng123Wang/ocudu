@@ -108,7 +108,12 @@ private:
 
       if (rrc_connections_with_time.size() == 2 && rrc_connections_with_time.begin()->second == 0) {
         // Only one measurement has been made (the map is initialized with a zero value).
+#if defined(__APPLE__)
+        // Dereferencing end() is undefined behaviour: libc++ (macOS) reads 0 here, which zeroes the mean metric.
         return rrc_connections_with_time.rbegin()->second;
+#else
+        return rrc_connections_with_time.end()->second;
+#endif
       }
 
       // Add current value to the map to count all actual measurements (the last value of the map will be ignored).

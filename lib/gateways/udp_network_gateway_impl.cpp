@@ -143,7 +143,13 @@ void udp_network_gateway_impl::handle_pdu_impl(span<udp_tx_pdu_t> pdus)
     tx_ctx.mmsg[msg_index].msg_hdr.msg_iov        = tx_ctx.msgs[msg_index].data();
     tx_ctx.mmsg[msg_index].msg_hdr.msg_iovlen     = segment_index;
     tx_ctx.mmsg[msg_index].msg_hdr.msg_name       = (void*)&pdu.dst_addr;
-    tx_ctx.mmsg[msg_index].msg_hdr.msg_namelen    = sockaddr_length(pdu.dst_addr);
+#if defined(__APPLE__)
+    // macOS rejects sendmsg() with the full sockaddr_storage size as msg_namelen for IPv6 destinations (EINVAL);
+    // only the exact family-specific length is accepted.
+    tx_ctx.mmsg[msg_index].msg_hdr.msg_namelen = sockaddr_length(pdu.dst_addr);
+#else
+    tx_ctx.mmsg[msg_index].msg_hdr.msg_namelen = sizeof(pdu.dst_addr);
+#endif
     tx_ctx.mmsg[msg_index].msg_hdr.msg_control    = nullptr;
     tx_ctx.mmsg[msg_index].msg_hdr.msg_controllen = 0;
     tx_ctx.mmsg[msg_index].msg_hdr.msg_flags      = 0;

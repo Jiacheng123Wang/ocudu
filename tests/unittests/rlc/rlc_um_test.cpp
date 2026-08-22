@@ -12,6 +12,17 @@
 #include <gtest/gtest.h>
 #include <list>
 #include <queue>
+// macOS steady_clock ticks at ~41 ns and the fast RLC write paths can record the same tick as the start time
+// captured immediately before the call, so the arrival window bounds must be inclusive there. Linux clocks are
+// ns-granular and the strict bounds of the original test hold.
+#if defined(__APPLE__)
+#define RLC_TEST_HOL_TOA_GE EXPECT_GE
+#define RLC_TEST_HOL_TOA_LE EXPECT_LE
+#else
+#define RLC_TEST_HOL_TOA_GE EXPECT_GT
+#define RLC_TEST_HOL_TOA_LE EXPECT_LT
+#endif
+
 
 using namespace ocudu;
 
@@ -396,13 +407,13 @@ TEST_P(rlc_um_test, tx_without_segmentation)
   pcell_worker.run_pending_tasks();
   rlc_buffer_state bs1 = rlc1_tx_lower->get_buffer_state();
   EXPECT_TRUE(bs1.hol_toa.has_value());
-  EXPECT_GE(bs1.hol_toa.value(), t_start);
-  EXPECT_LE(bs1.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(bs1.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(bs1.hol_toa.value(), t_end);
   EXPECT_EQ(bs1.pending_bytes, num_sdus * (sdu_size + 1));
   EXPECT_EQ(tester1.bsr.pending_bytes, num_sdus * (sdu_size + 1));
   EXPECT_TRUE(tester1.bsr.hol_toa.has_value());
-  EXPECT_GE(tester1.bsr.hol_toa.value(), t_start);
-  EXPECT_LE(tester1.bsr.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(tester1.bsr.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(tester1.bsr.hol_toa.value(), t_end);
   EXPECT_EQ(tester1.bsr_count, 1);
 
   // Read PDUs from RLC1
@@ -480,13 +491,13 @@ TEST_P(rlc_um_test, tx_with_segmentation)
   pcell_worker.run_pending_tasks();
   rlc_buffer_state bs1 = rlc1_tx_lower->get_buffer_state();
   EXPECT_TRUE(bs1.hol_toa.has_value());
-  EXPECT_GE(bs1.hol_toa.value(), t_start);
-  EXPECT_LE(bs1.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(bs1.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(bs1.hol_toa.value(), t_end);
   EXPECT_EQ(bs1.pending_bytes, num_sdus * (sdu_size + 1));
   EXPECT_EQ(tester1.bsr.pending_bytes, num_sdus * (sdu_size + 1));
   EXPECT_TRUE(tester1.bsr.hol_toa.has_value());
-  EXPECT_GE(tester1.bsr.hol_toa.value(), t_start);
-  EXPECT_LE(tester1.bsr.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(tester1.bsr.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(tester1.bsr.hol_toa.value(), t_end);
   EXPECT_EQ(tester1.bsr_count, 1);
 
   // Read PDUs from RLC1 with grant of 25 Bytes each
@@ -593,13 +604,13 @@ TEST_P(rlc_um_test, sdu_discard)
   pcell_worker.run_pending_tasks();
   rlc_buffer_state bs1 = rlc1_tx_lower->get_buffer_state();
   EXPECT_TRUE(bs1.hol_toa.has_value());
-  EXPECT_GE(bs1.hol_toa.value(), t_start);
-  EXPECT_LE(bs1.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(bs1.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(bs1.hol_toa.value(), t_end);
   EXPECT_EQ(bs1.pending_bytes, expect_buffer_state);
   EXPECT_EQ(tester1.bsr.pending_bytes, expect_buffer_state);
   EXPECT_TRUE(tester1.bsr.hol_toa.has_value());
-  EXPECT_GE(tester1.bsr.hol_toa.value(), t_start);
-  EXPECT_LE(tester1.bsr.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(tester1.bsr.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(tester1.bsr.hol_toa.value(), t_end);
   EXPECT_EQ(tester1.bsr_count, 1);
   EXPECT_EQ(rlc1->get_metrics().tx.tx_high.num_discarded_sdus, 3);
   EXPECT_EQ(rlc1->get_metrics().tx.tx_high.num_discard_failures, 0);
@@ -633,12 +644,12 @@ TEST_P(rlc_um_test, sdu_discard)
   pcell_worker.run_pending_tasks();
   bs1 = rlc1_tx_lower->get_buffer_state();
   EXPECT_TRUE(bs1.hol_toa.has_value());
-  EXPECT_GE(bs1.hol_toa.value(), t_start);
-  EXPECT_LE(bs1.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(bs1.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(bs1.hol_toa.value(), t_end);
   EXPECT_EQ(bs1.pending_bytes, expect_buffer_state);
   EXPECT_TRUE(tester1.bsr.hol_toa.has_value());
-  EXPECT_GE(tester1.bsr.hol_toa.value(), t_start);
-  EXPECT_LE(tester1.bsr.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(tester1.bsr.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(tester1.bsr.hol_toa.value(), t_end);
   EXPECT_EQ(tester1.bsr_count, 1);
   EXPECT_EQ(rlc1->get_metrics().tx.tx_high.num_discarded_sdus, 3);
   EXPECT_EQ(rlc1->get_metrics().tx.tx_high.num_discard_failures, 2);
@@ -648,12 +659,12 @@ TEST_P(rlc_um_test, sdu_discard)
   pcell_worker.run_pending_tasks();
   bs1 = rlc1_tx_lower->get_buffer_state();
   EXPECT_TRUE(bs1.hol_toa.has_value());
-  EXPECT_GE(bs1.hol_toa.value(), t_start);
-  EXPECT_LE(bs1.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(bs1.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(bs1.hol_toa.value(), t_end);
   EXPECT_EQ(bs1.pending_bytes, expect_buffer_state);
   EXPECT_TRUE(tester1.bsr.hol_toa.has_value());
-  EXPECT_GE(tester1.bsr.hol_toa.value(), t_start);
-  EXPECT_LE(tester1.bsr.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(tester1.bsr.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(tester1.bsr.hol_toa.value(), t_end);
   EXPECT_EQ(tester1.bsr_count, 1);
   EXPECT_EQ(rlc1->get_metrics().tx.tx_high.num_discarded_sdus, 3);
   EXPECT_EQ(rlc1->get_metrics().tx.tx_high.num_discard_failures, 3);
@@ -670,12 +681,12 @@ TEST_P(rlc_um_test, sdu_discard)
   pcell_worker.run_pending_tasks();
   bs1 = rlc1_tx_lower->get_buffer_state();
   EXPECT_TRUE(bs1.hol_toa.has_value());
-  EXPECT_GE(bs1.hol_toa.value(), t_start);
-  EXPECT_LE(bs1.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(bs1.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(bs1.hol_toa.value(), t_end);
   EXPECT_EQ(bs1.pending_bytes, expect_buffer_state);
   EXPECT_TRUE(tester1.bsr.hol_toa.has_value());
-  EXPECT_GE(tester1.bsr.hol_toa.value(), t_start);
-  EXPECT_LE(tester1.bsr.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(tester1.bsr.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(tester1.bsr.hol_toa.value(), t_end);
   EXPECT_EQ(tester1.bsr_count, 1);
   EXPECT_EQ(rlc1->get_metrics().tx.tx_high.num_discarded_sdus, 3);
   EXPECT_EQ(rlc1->get_metrics().tx.tx_high.num_discard_failures, 3);

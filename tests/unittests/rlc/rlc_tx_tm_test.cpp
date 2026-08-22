@@ -8,6 +8,17 @@
 #include "ocudu/support/executors/manual_task_worker.h"
 #include <gtest/gtest.h>
 #include <queue>
+// macOS steady_clock ticks at ~41 ns and the fast RLC write paths can record the same tick as the start time
+// captured immediately before the call, so the arrival window bounds must be inclusive there. Linux clocks are
+// ns-granular and the strict bounds of the original test hold.
+#if defined(__APPLE__)
+#define RLC_TEST_HOL_TOA_GE EXPECT_GE
+#define RLC_TEST_HOL_TOA_LE EXPECT_LE
+#else
+#define RLC_TEST_HOL_TOA_GE EXPECT_GT
+#define RLC_TEST_HOL_TOA_LE EXPECT_LT
+#endif
+
 
 using namespace ocudu;
 
@@ -133,13 +144,13 @@ TEST_F(rlc_tx_tm_test, test_tx)
   pcell_worker.run_pending_tasks();
   rlc_buffer_state bs = rlc->get_buffer_state();
   EXPECT_TRUE(bs.hol_toa.has_value());
-  EXPECT_GE(bs.hol_toa.value(), t_start);
-  EXPECT_LE(bs.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(bs.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(bs.hol_toa.value(), t_end);
   EXPECT_EQ(bs.pending_bytes, sdu_size);
   EXPECT_EQ(tester->bsr.pending_bytes, sdu_size);
   EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-  EXPECT_GE(tester->bsr.hol_toa.value(), t_start);
-  EXPECT_LE(tester->bsr.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);
   EXPECT_EQ(tester->bsr_count, 1);
 
   // read PDU from lower end
@@ -156,8 +167,8 @@ TEST_F(rlc_tx_tm_test, test_tx)
   EXPECT_FALSE(bs.hol_toa.has_value());
   EXPECT_EQ(tester->bsr.pending_bytes, sdu_size);
   EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-  EXPECT_GE(tester->bsr.hol_toa.value(), t_start);
-  EXPECT_LE(tester->bsr.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);
   EXPECT_EQ(tester->bsr_count, 1);
 
   // read another PDU from lower end but there is nothing to read
@@ -172,8 +183,8 @@ TEST_F(rlc_tx_tm_test, test_tx)
   EXPECT_FALSE(bs.hol_toa.has_value());
   EXPECT_EQ(tester->bsr.pending_bytes, sdu_size);
   EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-  EXPECT_GE(tester->bsr.hol_toa.value(), t_start);
-  EXPECT_LE(tester->bsr.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);
   EXPECT_EQ(tester->bsr_count, 1); // unchanged
 
   // write another SDU into upper end
@@ -186,13 +197,13 @@ TEST_F(rlc_tx_tm_test, test_tx)
   pcell_worker.run_pending_tasks();
   bs = rlc->get_buffer_state();
   EXPECT_TRUE(bs.hol_toa.has_value());
-  EXPECT_GE(bs.hol_toa.value(), t_start);
-  EXPECT_LE(bs.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(bs.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(bs.hol_toa.value(), t_end);
   EXPECT_EQ(bs.pending_bytes, sdu_size);
   EXPECT_EQ(tester->bsr.pending_bytes, sdu_size);
   EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-  EXPECT_GE(tester->bsr.hol_toa.value(), t_start);
-  EXPECT_LE(tester->bsr.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);
   EXPECT_EQ(tester->bsr_count, 2);
 
   // read PDU from lower end with insufficient space for the whole SDU
@@ -204,13 +215,13 @@ TEST_F(rlc_tx_tm_test, test_tx)
   pcell_worker.run_pending_tasks();
   bs = rlc->get_buffer_state();
   EXPECT_TRUE(bs.hol_toa.has_value());
-  EXPECT_GE(bs.hol_toa.value(), t_start);
-  EXPECT_LE(bs.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(bs.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(bs.hol_toa.value(), t_end);
   EXPECT_EQ(bs.pending_bytes, sdu_size);
   EXPECT_EQ(tester->bsr.pending_bytes, sdu_size);
   EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-  EXPECT_GE(tester->bsr.hol_toa.value(), t_start);
-  EXPECT_LE(tester->bsr.hol_toa.value(), t_end);
+  RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start);
+  RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);
   EXPECT_EQ(tester->bsr_count, 2); // unchanged
 
   // write another SDU into upper end
@@ -222,13 +233,13 @@ TEST_F(rlc_tx_tm_test, test_tx)
   pcell_worker.run_pending_tasks();
   bs = rlc->get_buffer_state();
   EXPECT_TRUE(bs.hol_toa.has_value());
-  EXPECT_GE(bs.hol_toa.value(), t_start); // these are the times from the older SDU
-  EXPECT_LE(bs.hol_toa.value(), t_end);   // these are the times from the older SDU
+  RLC_TEST_HOL_TOA_GE(bs.hol_toa.value(), t_start); // these are the times from the older SDU
+  RLC_TEST_HOL_TOA_LE(bs.hol_toa.value(), t_end);   // these are the times from the older SDU
   EXPECT_EQ(bs.pending_bytes, 2 * sdu_size);
   EXPECT_EQ(tester->bsr.pending_bytes, 2 * sdu_size);
   EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-  EXPECT_GE(tester->bsr.hol_toa.value(), t_start); // these are the times from the older SDU
-  EXPECT_LE(tester->bsr.hol_toa.value(), t_end);   // these are the times from the older SDU
+  RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start); // these are the times from the older SDU
+  RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);   // these are the times from the older SDU
   EXPECT_EQ(tester->bsr_count, 3);
 
   // read first PDU from lower end with oversized space
@@ -241,13 +252,13 @@ TEST_F(rlc_tx_tm_test, test_tx)
   pcell_worker.run_pending_tasks();
   bs = rlc->get_buffer_state();
   EXPECT_TRUE(bs.hol_toa.has_value());
-  EXPECT_GE(bs.hol_toa.value(), t_start); // these are the times from the older SDU
+  RLC_TEST_HOL_TOA_GE(bs.hol_toa.value(), t_start); // these are the times from the older SDU
   EXPECT_GT(bs.hol_toa.value(), t_end);   // these are the times from the older SDU - new SDU must be younger
   EXPECT_EQ(bs.pending_bytes, sdu_size);
   EXPECT_EQ(tester->bsr.pending_bytes, 2 * sdu_size);
   EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-  EXPECT_GE(tester->bsr.hol_toa.value(), t_start); // these are the times from the older SDU
-  EXPECT_LE(tester->bsr.hol_toa.value(), t_end);   // these are the times from the older SDU
+  RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start); // these are the times from the older SDU
+  RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);   // these are the times from the older SDU
   EXPECT_EQ(tester->bsr_count, 3);
 
   // read second PDU from lower end with oversized space
@@ -263,8 +274,8 @@ TEST_F(rlc_tx_tm_test, test_tx)
   EXPECT_EQ(bs.pending_bytes, 0);
   EXPECT_EQ(tester->bsr.pending_bytes, 2 * sdu_size);
   EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-  EXPECT_GE(tester->bsr.hol_toa.value(), t_start); // these are the times from the older SDU
-  EXPECT_LE(tester->bsr.hol_toa.value(), t_end);   // these are the times from the older SDU
+  RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start); // these are the times from the older SDU
+  RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);   // these are the times from the older SDU
   EXPECT_EQ(tester->bsr_count, 3);
 }
 

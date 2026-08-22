@@ -10,6 +10,17 @@
 #include "ocudu/support/test_utils.h"
 #include <gtest/gtest.h>
 #include <list>
+// macOS steady_clock ticks at ~41 ns and the fast RLC write paths can record the same tick as the start time
+// captured immediately before the call, so the arrival window bounds must be inclusive there. Linux clocks are
+// ns-granular and the strict bounds of the original test hold.
+#if defined(__APPLE__)
+#define RLC_TEST_HOL_TOA_GE EXPECT_GE
+#define RLC_TEST_HOL_TOA_LE EXPECT_LE
+#else
+#define RLC_TEST_HOL_TOA_GE EXPECT_GT
+#define RLC_TEST_HOL_TOA_LE EXPECT_LT
+#endif
+
 
 using namespace ocudu;
 
@@ -196,12 +207,12 @@ protected:
       EXPECT_EQ(bs.pending_bytes,
                 expect_buffer_state - i * data_pdu_size); // actual buffer state changes
       EXPECT_TRUE(bs.hol_toa.has_value());
-      EXPECT_GE(bs.hol_toa.value(), t_start);
-      EXPECT_LE(bs.hol_toa.value(), t_end);
+      RLC_TEST_HOL_TOA_GE(bs.hol_toa.value(), t_start);
+      RLC_TEST_HOL_TOA_LE(bs.hol_toa.value(), t_end);
       EXPECT_EQ(tester->bsr.pending_bytes, expect_buffer_state); // pull_pdu does not push BSR to lower layer
       EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-      EXPECT_GE(tester->bsr.hol_toa.value(), t_start);
-      EXPECT_LE(tester->bsr.hol_toa.value(), t_end);
+      RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start);
+      RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);
       std::vector<uint8_t> pdu_buf;
       pdu_buf.resize(data_pdu_size);
       size_t pdu_len = rlc->pull_pdu(pdu_buf);
@@ -227,8 +238,8 @@ protected:
     EXPECT_FALSE(bs.hol_toa.has_value());
     EXPECT_EQ(tester->bsr.pending_bytes, expect_buffer_state); // pull_pdu does not push BSR to lower layer
     EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-    EXPECT_GE(tester->bsr.hol_toa.value(), t_start);
-    EXPECT_LE(tester->bsr.hol_toa.value(), t_end);
+    RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start);
+    RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);
     EXPECT_EQ(tester->bsr_count, n_bsr);
 
     return out_pdus;
@@ -307,13 +318,13 @@ protected:
         EXPECT_FALSE(bs.hol_toa.has_value());
       } else {
         EXPECT_TRUE(bs.hol_toa.has_value());
-        EXPECT_GE(bs.hol_toa.value(), t_start);
-        EXPECT_LE(bs.hol_toa.value(), t_end);
+        RLC_TEST_HOL_TOA_GE(bs.hol_toa.value(), t_start);
+        RLC_TEST_HOL_TOA_LE(bs.hol_toa.value(), t_end);
       }
       EXPECT_EQ(tester->bsr.pending_bytes, expect_buffer_state); // pull_pdu does not push BSR to lower layer
       EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-      EXPECT_GE(tester->bsr.hol_toa.value(), t_start);
-      EXPECT_LE(tester->bsr.hol_toa.value(), t_end);
+      RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start);
+      RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);
       EXPECT_EQ(tester->bsr_count, n_bsr);
 
       // Check SI
@@ -350,13 +361,13 @@ protected:
       EXPECT_FALSE(bs.hol_toa.has_value());
     } else {
       EXPECT_TRUE(bs.hol_toa.has_value());
-      EXPECT_GE(bs.hol_toa.value(), t_start);
-      EXPECT_LE(bs.hol_toa.value(), t_end);
+      RLC_TEST_HOL_TOA_GE(bs.hol_toa.value(), t_start);
+      RLC_TEST_HOL_TOA_LE(bs.hol_toa.value(), t_end);
     }
     EXPECT_EQ(tester->bsr.pending_bytes, expect_buffer_state); // pull_pdu does not push BSR to lower layer
     EXPECT_TRUE(tester->bsr.hol_toa.has_value());
-    EXPECT_GE(tester->bsr.hol_toa.value(), t_start);
-    EXPECT_LE(tester->bsr.hol_toa.value(), t_end);
+    RLC_TEST_HOL_TOA_GE(tester->bsr.hol_toa.value(), t_start);
+    RLC_TEST_HOL_TOA_LE(tester->bsr.hol_toa.value(), t_end);
     EXPECT_EQ(tester->bsr_count, n_bsr);
 
     return out_pdus;
@@ -1438,8 +1449,8 @@ TEST_P(rlc_tx_am_test, retx_hol_toa_has_priority)
   rlc_buffer_state bs = rlc->get_buffer_state();
   EXPECT_EQ(bs.pending_bytes, pdu_size);
   EXPECT_TRUE(bs.hol_toa.has_value());
-  EXPECT_GE(bs.hol_toa.value(), t_tx_start);
-  EXPECT_LE(bs.hol_toa.value(), t_tx_end);
+  RLC_TEST_HOL_TOA_GE(bs.hol_toa.value(), t_tx_start);
+  RLC_TEST_HOL_TOA_LE(bs.hol_toa.value(), t_tx_end);
   EXPECT_EQ(tester->bsr.pending_bytes, pdu_size);
   EXPECT_EQ(tester->bsr_count, 2);
 
@@ -1457,8 +1468,8 @@ TEST_P(rlc_tx_am_test, retx_hol_toa_has_priority)
   EXPECT_EQ(bs.pending_bytes, 2 * pdu_size);
   EXPECT_TRUE(bs.hol_toa.has_value());
   // TOA must be within ReTx interval
-  EXPECT_GE(bs.hol_toa.value(), t_retx_start);
-  EXPECT_LE(bs.hol_toa.value(), t_retx_end);
+  RLC_TEST_HOL_TOA_GE(bs.hol_toa.value(), t_retx_start);
+  RLC_TEST_HOL_TOA_LE(bs.hol_toa.value(), t_retx_end);
   // TOA must be smaller than Tx interval
   EXPECT_LT(bs.hol_toa.value(), t_tx_start);
   EXPECT_LT(bs.hol_toa.value(), t_tx_end);
@@ -1483,8 +1494,8 @@ TEST_P(rlc_tx_am_test, retx_hol_toa_has_priority)
   EXPECT_GT(bs.hol_toa.value(), t_retx_start);
   EXPECT_GT(bs.hol_toa.value(), t_retx_end);
   // TOA must be within Tx interval
-  EXPECT_GE(bs.hol_toa.value(), t_tx_start);
-  EXPECT_LE(bs.hol_toa.value(), t_tx_end);
+  RLC_TEST_HOL_TOA_GE(bs.hol_toa.value(), t_tx_start);
+  RLC_TEST_HOL_TOA_LE(bs.hol_toa.value(), t_tx_end);
 
   EXPECT_EQ(tester->bsr.pending_bytes, 2 * pdu_size);
   EXPECT_EQ(tester->bsr_count, n_bsr);
