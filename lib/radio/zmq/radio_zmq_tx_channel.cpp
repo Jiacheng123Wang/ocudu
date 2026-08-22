@@ -4,6 +4,7 @@
 #include "radio_zmq_tx_channel.h"
 #include "ocudu/support/synchronization/sync_event.h"
 #include "radio_zmq_backoff.h"
+#include <algorithm>
 #include <set>
 
 using namespace ocudu;
@@ -162,11 +163,31 @@ void radio_zmq_tx_channel::send_response()
     return;
   }
 
-  // If no samples are available return without transitioning state. Avoid spinning: the circular buffer is filled
-  // by the baseband processor at slot rate (~1 ms), so a short sleep is sufficient. See radio_zmq_backoff.h.
+  // If no samples are available...
   if (count == 0) {
+#if defined(__APPLE__)
+    // ...answer the pending request with a zero-filled block of the size of the last transmission instead of
+    // leaving it unanswered. The peer's REQ socket has a receive timeout (srsUE: 2 s by default) and an unanswered
+    // request stalls the request/response lockstep until that timeout expires, which is what periodically bunched
+    // the DL production into ~2 s bursts (the "ping sawtooth" of the macOS E2E). Zero samples represent idle air
+    // and keep the sample stream - and the lockstep - moving.
+    if (last_sent_nof_samples == 0) {
+      // Nothing has ever been transmitted: the stream is not up yet. Keep the short backoff; there is no peer
+      // sample stream to keep alive yet.
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+      return;
+    }
+    std::fill(buffer.begin(), buffer.begin() + last_sent_nof_samples, cf_t{});
+    count = last_sent_nof_samples;
+    logger.debug("Socket buffer empty. Replying with {} zero samples to keep the lockstep alive.", count);
+#else
+    // Avoid spinning: the circular buffer is filled by the baseband processor at slot rate (~1 ms), so a short
+    // sleep is sufficient. See radio_zmq_backoff.h.
     std::this_thread::sleep_for(std::chrono::microseconds(100));
     return;
+#endif
+  } else {
+    last_sent_nof_samples = count;
   }
 
   // Otherwise, send samples over socket.
