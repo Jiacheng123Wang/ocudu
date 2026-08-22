@@ -160,6 +160,36 @@ the same defect caused the two `f1u_*_split_connector_test.destroy_bearer_discon
 Still open: the slow-motion zmq radio (~2.6 slots/s, smooth - not bursty; the zmq code uses ZMQ_DONTWAIT, so it is
 a different mechanism, likely the tx_time pacing between the two hosts), and the udp v6 dual-stack case (#3033).
 
+## Load-induced flakes found by parallel stress runs (2026-08-22)
+
+`ctest -j 8` (and even `-j 4` over the SCTP label) surfaced flakes that the sequential `make test` never shows.
+Three families were fixed; one limitation is documented:
+
+1. **Fixed 10-iteration broker-drive loops** (`sctp_network_server_test`, `sctp_network_client_test`): when the
+   user-space stack delivers slowly under CPU load (a lost chunk is recovered by the retransmission timers, taking
+   seconds), 10 wake-ups were not enough and the cases failed. All drive loops now poll until the expected state or
+   a generous deadline (2-5 s) expires.
+
+2. **Unbounded waits in the link-test fixture**: waiting for all server associations and the multi-client data pops
+   now use bounded waits (20 s cvar deadline, 10 s timed `pop_blocking`). This also fixed the timed
+   `pop_blocking(elem, wait_time)` wrapper in `mutexed_mpmc_queue.h`, which passed `&success` as the element
+   reference (it never compiled before, so nothing used it).
+
+3. **`rlc_tx_tm_test.test_tx` hol_toa bounds**: the test asserted `hol_toa` strictly greater than the wall time
+   captured immediately before `handle_sdu()`. macOS `steady_clock` ticks at ~41 ns and the TM write path can land
+   on the same tick, so the recorded time equals `t_start` (reproduced once in ~150 runs; Linux clocks are
+   ns-granular and never show it). The bounds are now inclusive, which is the correct statement anyway (arrival
+   within `[t_start, t_end]`). The same pattern exists in `rlc_um_test`/`rlc_tx_am_test` but has not been observed
+   to collide there (longer call paths).
+
+4. **Remaining limitation - parallel ctest runs over the SCTP label**: each ctest case is its own process and
+   `pick_udp_tunneling_port()` probes from the fixed encapsulation port 9899. Two processes starting
+   simultaneously can both probe 9899 as free and then both bind it (usrsctp sets SO_REUSEADDR), so macOS delivers
+   each datagram to only one of them and the other's associations stall. Sequential runs (the authoritative
+   `make test`) are unaffected; `ctest -j N` over SCTP cases can still flake for this reason. Deliberately not
+   changed: the gnb E2E needs the deterministic 9899 default to interop with the Linux kernel SCTP peer
+   (`sysctl net.sctp.udp_port`).
+
 ## The 50 failures + 1 crash: all fixed (2026-08-22)
 
 The remaining 50 failures and the crash were grouped by root cause and fixed one group at a time:
