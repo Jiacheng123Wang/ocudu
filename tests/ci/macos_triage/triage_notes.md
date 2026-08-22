@@ -101,6 +101,14 @@ In rough priority order:
      must stay exactly 1:1 with the gnb's slot production - extra zero blocks advance the UE's sample clock and
      break the RACH timing ("tx time ... in the past"). The usrsctp TODO is NOT involved (the user plane never
      touches SCTP).
+   - Current fix (gnb-only, per the project decision that the UE side stays upstream): enlarge the zmq socket
+     buffers on the gnb (`ZMQ_SNDBUF`/`ZMQ_RCVBUF` = 8 MB, macOS-only, in the TX/RX channels). With the send
+     buffer larger than a baseband block, the blocking `zmq_send` hands the whole block to the kernel and returns
+     immediately even while the UE's small TCP window makes the wire delivery trickle - the REP channel loop no
+     longer freezes and the request-latency compounding disappears. The matching srsUE-side change
+     (`ue_zmq_sockbuf.patch` in this directory) was applied once during the analysis to prove the TCP-window
+     bottleneck and then reverted on the 153 machine; it is kept only as a documented analysis artifact (DO NOT
+     APPLY).
 3. **usrsctp multihoming / `connectx()` support in the shim** (unblocks the 10 multihomed/bindx/connectx cases and
    the E2 agent case in section 2b). Requires the from-source usrsctp work of item 1 (custom per-association UDP
    sockets), or an alternative userspace transport.
