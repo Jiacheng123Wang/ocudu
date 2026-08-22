@@ -96,8 +96,6 @@ void radio_zmq_rx_channel::send_request()
     // Request received.
     if (n > 0) {
       logger.debug("Socket sent request.");
-      // [zmq-probe] temporary instrumentation.
-      pending_request_since = std::chrono::steady_clock::now();
       state_fsm.request_sent();
       return;
     }
@@ -165,14 +163,6 @@ void radio_zmq_rx_channel::receive_response()
   // Convert number of bytes to samples.
   unsigned nsamples = n / sample_size;
   logger.debug("Socket received {} samples.", nsamples);
-
-  // [zmq-probe] temporary instrumentation: how long the UL request waited for the UE's reply.
-  if (pending_request_since.time_since_epoch().count() != 0) {
-    auto reply_wait_us =
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - pending_request_since)
-            .count();
-    logger.info("[zmq-probe] rx={} reply-age={}us samples={}", channel_id, reply_wait_us, nsamples);
-  }
 
   rx_probe.event(nsamples);
 

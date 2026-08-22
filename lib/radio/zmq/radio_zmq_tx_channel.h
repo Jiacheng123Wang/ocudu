@@ -54,11 +54,6 @@ class radio_zmq_tx_channel
   flow_probe tx_reply_probe{"zmq_tx_reply"};
   /// Timestamp of the pending request, for the reply latency measurement.
   std::chrono::steady_clock::time_point pending_request_since;
-  /// [zmq-probe] temporary instrumentation: when the circular buffer became empty (request unanswered) / full.
-  std::chrono::steady_clock::time_point empty_since;
-  bool                                    buffer_was_empty = false;
-  std::chrono::steady_clock::time_point full_since;
-  bool                                  buffer_was_full = false;
   /// Number of samples in the last transmit() call (one slot): replies are capped at this size so that a backlog
   /// is drained one slot per request instead of one giant message. Written by the baseband thread, read by the
   /// channel loop.
