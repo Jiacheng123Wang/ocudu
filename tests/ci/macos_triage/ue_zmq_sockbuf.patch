@@ -1,7 +1,7 @@
 diff --git a/lib/src/phy/rf/rf_zmq_imp_rx.c b/lib/src/phy/rf/rf_zmq_imp_rx.c
 --- a/lib/src/phy/rf/rf_zmq_imp_rx.c
 +++ b/lib/src/phy/rf/rf_zmq_imp_rx.c
-@@ -112,6 +112,15 @@ int rf_zmq_rx_open(rf_zmq_rx_t* q, rf_zmq_opts_t opts, void* zmq_ctx, char* soc
+@@ -124,6 +124,14 @@
      q->trx_timeout_ms     = opts.trx_timeout_ms;
      q->log_trx_timeout    = opts.log_trx_timeout;
  
@@ -19,7 +19,7 @@ diff --git a/lib/src/phy/rf/rf_zmq_imp_rx.c b/lib/src/phy/rf/rf_zmq_imp_rx.c
 diff --git a/lib/src/phy/rf/rf_zmq_imp_tx.c b/lib/src/phy/rf/rf_zmq_imp_tx.c
 --- a/lib/src/phy/rf/rf_zmq_imp_tx.c
 +++ b/lib/src/phy/rf/rf_zmq_imp_tx.c
-@@ -43,6 +43,15 @@ int rf_zmq_tx_open(rf_zmq_tx_t* q, rf_zmq_opts_t opts, void* zmq_ctx, char* soc
+@@ -48,8 +48,15 @@
      q->socket_type   = opts.socket_type;
      q->sample_format = opts.sample_format;
      q->frequency_mhz = opts.frequency_mhz;
