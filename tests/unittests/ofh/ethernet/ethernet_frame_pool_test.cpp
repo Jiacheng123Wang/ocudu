@@ -171,14 +171,30 @@ TEST_P(EthFramePoolFixture, read_after_write_should_return_correct_data)
 
         ASSERT_TRUE(frame_burst.size() == num_frames) << "Reading from the pool returned incorrect number of buffers";
 
-        for (unsigned i = 0, e = frame_burst.size(); i != e; ++i) {
-          // Size and data should match the randomly generated ones.
-          EXPECT_EQ(test_data[i].size(), frame_burst[i]->size())
-              << "Size of read packet doesn't match the size of written vector";
-          if (!test_data[i].empty()) {
-            ASSERT_TRUE(std::equal(frame_burst[i]->data().begin(), frame_burst[i]->data().end(), test_data[i].begin()))
-                << "Data mismatch";
+        // The pool does not guarantee any particular order of the pending frames: it depends on the destruction
+        // order of the releasing scope, which is implementation-defined for std::vector (libc++ destroys in reverse
+        // order, libstdc++ in forward order). Match every written frame against the set of read frames instead of
+        // comparing positionally.
+        std::vector<bool> matched(num_frames, false);
+        for (unsigned i = 0, e = test_data.size(); i != e; ++i) {
+          bool found = false;
+          for (unsigned j = 0; j != num_frames; ++j) {
+            if (matched[j]) {
+              continue;
+            }
+            // Size and data should match one of the randomly generated frames.
+            if (frame_burst[j]->size() != test_data[i].size()) {
+              continue;
+            }
+            if (!test_data[i].empty() &&
+                !std::equal(frame_burst[j]->data().begin(), frame_burst[j]->data().end(), test_data[i].begin())) {
+              continue;
+            }
+            matched[j] = true;
+            found      = true;
+            break;
           }
+          EXPECT_TRUE(found) << "Written frame " << i << " was not read back correctly";
         }
       }
     }
