@@ -43,8 +43,6 @@ class radio_zmq_tx_channel
   task_executor& async_executor;
   /// Indicates the number of transmitted samples. Protected for concurrent read-write.
   std::atomic<uint64_t> sample_count = {0};
-  /// Number of samples in the last reply sent to the peer, used to pad idle replies with zeros.
-  unsigned last_sent_nof_samples = 0;
   /// Protects concurrent transmit alignment operations from the receiver thread.
   std::mutex              transmit_alignment_mutex;
   std::condition_variable transmit_alignment_cvar;
