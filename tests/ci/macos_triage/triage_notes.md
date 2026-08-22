@@ -107,3 +107,28 @@ so the gateway receive callback must drain the socket (read until EAGAIN). Added
 - ctest TIMEOUT 300 for the SCTP gateway tests (the 32-client cases take 90-300 s on the user-space stack).
 
 Result: the SCTP suite (78 cases) passes 100% repeatedly on macOS and on the Ubuntu reference machine.
+
+## SCTP transport mode override + E2E ping stall localization (2026-08-22)
+
+`usrsctp_once_init()` now honours `OCUDU_USRSCTP_MODE=auto|udp|raw` (default auto). `sudo ctest -L sctp` without an
+override switches the suite to raw mode, which hangs on macOS loopback (the kernel does not loop native SCTP
+packets back to a local raw socket), so the documented invocation is `sudo OCUDU_USRSCTP_MODE=udp ctest -L sctp`.
+`postrun_summary.py` prints the mode of a scan plus the raw-mode validation caveat (raw mode is validated by the
+gnb end-to-end against Linux kernel-SCTP peers, not on macOS loopback).
+
+E2E analysis of `/tmp/gnb.log` (gnb on macOS, srsUE + Open5GS on the Ubuntu host at 192.168.100.153, zmq radio;
+the ping run happened at 00:08:33.9-00:09:26):
+
+* The UL ping requests cross the gnb at a continuous 10 pps (PUSCH -> RLC -> GTPU egress, 00:08:34-00:09:24); the
+  UL path does not stall.
+* The DL replies enter the gnb GTPU ingress in exactly two bursts, 256 at 00:08:59.27 and 240 at 00:09:25.27
+  (26 s apart) - the same two bursts the ping output shows (RTT ramps 27.5s->1.0s and 26.7s->2.1s are the
+  single-flush artifact of those two bursts). The RLC DL TX SDUs mirror the GTPU ingress 1:1, and each burst goes
+  over the air in ~1-2 s, so the stall sits strictly between the gnb N3 egress (continuous) and the gnb N3 ingress
+  (bursty): either the Open5GS UPF stalls ~26 s per cycle or the gnb NGU receive path (kqueue io_broker wake-up)
+  stalls. 256 is exactly the NGU demux `batch_size=256`. The SCTP fixes are unrelated to this stall (the user
+  plane never touches SCTP); tcpdump on both N3 ends is the planned discriminator.
+* Separate defect: the zmq radio runs in slow motion - the cell slot counter advances at only ~0.2-2 slots/s
+  (should be 1000/s) and degrades over the 54-minute run (at the end the zmq RX receives 12 samples per ~58 s).
+  10 pps still works because each slot packs many packets; this caps E2E throughput and needs its own
+  investigation (suspects: clock drift between the two hosts, the zmq tx_time pacing).

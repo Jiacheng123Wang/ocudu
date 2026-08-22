@@ -8,9 +8,11 @@
 #include "ocudu/support/ocudu_assert.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <string>
 #include <thread>
 #include <vector>
 #include <unordered_map>
@@ -99,19 +101,43 @@ static void usrsctp_once_init()
     usrsctp_sysctl_set_sctp_rto_max_default(6000);
     usrsctp_sysctl_set_sctp_init_rto_max_default(6000);
 
-    if (raw_sctp_socket_available()) {
+    // OCUDU_USRSCTP_MODE overrides the automatic transport selection:
+    //   auto (default): native SCTP over IP when the process may open a raw socket (root), otherwise
+    //                   SCTP-over-UDP encapsulation (RFC 6951), which works unprivileged;
+    //   udp: force SCTP-over-UDP encapsulation (e.g. for `sudo ctest -L sctp`, because macOS does not
+    //        loop native SCTP packets back to a local raw socket);
+    //   raw: force native SCTP over IP (requires root; associations fail without it).
+    const char* mode_override = ::getenv("OCUDU_USRSCTP_MODE");
+    const std::string mode    = (mode_override == nullptr) ? "auto" : std::string(mode_override);
+    const bool        raw_permitted = raw_sctp_socket_available();
+    bool              use_raw       = raw_permitted;
+    if (mode == "udp") {
+      use_raw = false;
+    } else if (mode == "raw") {
+      use_raw = true;
+    } else if (mode != "auto") {
+      logger.warning("OCUDU_USRSCTP_MODE='{}' is unknown (expected 'auto', 'udp' or 'raw'); using automatic "
+                     "selection",
+                     mode);
+      use_raw = raw_permitted;
+    }
+
+    if (use_raw) {
+      if (not raw_permitted) {
+        logger.warning("OCUDU_USRSCTP_MODE=raw was requested but this process may not open a raw socket; "
+                       "association attempts will fail. Run as root, or use mode 'auto'/'udp'.");
+      }
       // Root: keep the wire format of a kernel SCTP stack (plain SCTP over IP).
       usrsctp_init(0, nullptr, nullptr);
-      logger.info("usrsctp initialized with native SCTP packets (raw sockets available)");
+      logger.info("usrsctp initialized with native SCTP packets (raw sockets; mode='{}')", mode);
     } else {
       // Unprivileged process: raw sockets are not permitted, so tunnel SCTP over UDP (RFC 6951). This is what makes
       // loopback associations - and therefore the SCTP unit tests - work without root. A remote peer must use the
       // same encapsulation port (Linux: sysctl net.sctp.udp_port, or SCTP_REMOTE_UDP_ENCAPS_PORT).
       g_udp_encaps_port = pick_udp_tunneling_port();
       usrsctp_init(g_udp_encaps_port, nullptr, nullptr);
-      logger.info("usrsctp initialized with SCTP-over-UDP encapsulation on port {} (no permission to open a raw "
-                  "socket; run as root for native SCTP packets)",
-                  g_udp_encaps_port);
+      logger.info("usrsctp initialized with SCTP-over-UDP encapsulation on port {} (mode='{}'; no root needed)",
+                  g_udp_encaps_port, mode);
     }
   });
 }

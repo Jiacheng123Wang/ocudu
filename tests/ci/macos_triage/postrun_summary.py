@@ -39,8 +39,6 @@ SKIP_REASONS = [
      "the Homebrew mbedTLS bottle is built with MBEDTLS_CMAC_C disabled"),
     ("rrc_du_ref_time_r16_test.subsecond_component_is_preserved",
      "macOS system_clock has microsecond resolution; sub-microsecond precision is not preserved"),
-    ("sctp_network_server_test.",
-     "temporarily skipped during the hang scan; needs further debugging (usrsctp)"),
 ]
 
 # Ubuntu/Linux-only test targets, registered on macOS with the ctest DISABLED property so they stay in the list.
@@ -75,6 +73,24 @@ def reason_for(name, table):
     return "skipped on macOS; needs further debugging"
 
 
+def sctp_transport_mode():
+    """The SCTP transport mode the tests ran in.
+
+    Mirrors the selection in lib/gateways/sctp_socket.cpp (usrsctp_once_init): the OCUDU_USRSCTP_MODE
+    environment variable wins, otherwise the automatic selection depends on whether the process may open
+    a raw socket (root). This post-run script sees its own environment, so it reports the mode of a run
+    started the same way (e.g. `sudo make test` runs both ctest and this script as root).
+    """
+    override = os.environ.get("OCUDU_USRSCTP_MODE", "").strip().lower()
+    if override == "udp":
+        return "SCTP-over-UDP encapsulation (OCUDU_USRSCTP_MODE=udp)"
+    if override == "raw":
+        return "native SCTP over IP (OCUDU_USRSCTP_MODE=raw)"
+    if os.geteuid() == 0:
+        return "native SCTP over IP (auto: running as root)"
+    return "SCTP-over-UDP encapsulation (auto: unprivileged process)"
+
+
 def main():
     log = sys.argv[1]
     results, started = parse_log(log)
@@ -103,6 +119,16 @@ def main():
     print("Note: ctest's own line 'N tests failed out of M' prints M = total - Disabled (e.g. 7580 instead of 7590),")
     print("counts Crashed among the failures and hides Disabled entirely; the numbers above are the complete picture.")
     print("========================================================================================")
+
+    print()
+    print("SCTP transport mode (the `sctp` ctest label, 78 cases; `ctest -L sctp` runs only these):")
+    print(f"  mode used by this run ......... {sctp_transport_mode()}")
+    print("  force UDP encapsulation ...... OCUDU_USRSCTP_MODE=udp (recommended for `sudo ctest -L sctp`)")
+    print("  force native SCTP over IP .... OCUDU_USRSCTP_MODE=raw (requires root)")
+    print("  note: native SCTP over IP cannot be validated on macOS loopback - the kernel does not loop native")
+    print("        SCTP packets back to a local raw socket, so `sudo ctest -L sctp` with the default 'auto' mode")
+    print("        hangs on the first case. The raw mode is validated end to end by the gnb against Linux")
+    print("        kernel-SCTP peers (AMF/E2 on Ubuntu); the unit tests cover the UDP-encapsulation mode.")
 
     print()
     print("The following tests did not run - SKIPPED on macOS (temporarily skipped: hung or not yet supported")

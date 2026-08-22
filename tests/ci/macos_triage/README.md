@@ -46,4 +46,24 @@ sudo ifconfig lo0 alias 127.0.1.1 up
 sudo ifconfig lo0 alias 127.0.0.101 up
 ```
 
+## SCTP transport mode (`OCUDU_USRSCTP_MODE`)
+
+The usrsctp shim (`lib/gateways/sctp_socket.cpp`) selects the SCTP transport automatically per process:
+
+* **auto** (default): native SCTP over IP when the process may open a raw socket (root), otherwise SCTP-over-UDP
+  encapsulation (RFC 6951, port 9899+), which works unprivileged.
+* **udp**: force SCTP-over-UDP encapsulation.
+* **raw**: force native SCTP over IP (needs root; without it association attempts fail).
+
+`sudo ctest -L sctp` without an override switches the suite to raw mode, and macOS does not loop native SCTP
+packets back to a local raw socket, so the cases hang on the first association. Keep the unit tests in UDP mode:
+
+```sh
+sudo OCUDU_USRSCTP_MODE=udp ctest -L sctp
+```
+
+The raw (native SCTP over IP) mode is what the gnb uses to talk to Linux kernel-SCTP peers (AMF, RIC); it cannot
+be validated on macOS loopback and is covered by the end-to-end setup instead. `postrun_summary.py` reports which
+mode a scan ran in and prints the same guidance after every `make test`.
+
 See `triage_notes.md` in the run-artefact directory for the full port history.
