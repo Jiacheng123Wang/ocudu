@@ -64,12 +64,19 @@ static bool raw_sctp_socket_available()
 }
 
 /// Returns a free UDP port for SCTP-over-UDP encapsulation, starting at the IANA-assigned one.
+///
+/// The first candidate is offset by the PID: concurrently starting processes (e.g. a parallel ctest run) each probe
+/// 9899 as free in the gap between the probe close and the usrsctp bind, and the shared UDP socket has no
+/// SO_REUSEADDR, so one of them ends up with a failed bind and all its associations stall. Every association of a
+/// process runs over that process's single shared socket, so peers never require a specific port (the fixed IANA
+/// port only matters for cross-machine interop with kernel-SCTP peers, which is not wired up yet).
 static uint16_t pick_udp_tunneling_port()
 {
-  for (uint16_t port = default_udp_tunneling_port; port < default_udp_tunneling_port + 16; ++port) {
+  const uint16_t start = default_udp_tunneling_port + static_cast<uint16_t>(::getpid() % 1000);
+  for (uint16_t port = start; port < start + 32; ++port) {
     int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
-      return default_udp_tunneling_port;
+      return start;
     }
     sockaddr_in addr = {};
     addr.sin_len     = sizeof(addr);
@@ -82,7 +89,7 @@ static uint16_t pick_udp_tunneling_port()
       return port;
     }
   }
-  return default_udp_tunneling_port;
+  return start;
 }
 
 /// Initializes the usrsctp library once per process (creates its internal timer and worker threads).

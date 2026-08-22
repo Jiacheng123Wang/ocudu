@@ -66,16 +66,16 @@ public:
       report_fatal_error_if_not(ret.first->second->client != nullptr, "Failed to create Client");
     }
 
-    // Connect Clients. The 1 ms pacing dilutes the burst of INITs: usrsctp's built-in UDP transport sends every
-    // datagram of every socket through one shared UDP socket with sendmsg(MSG_DONTWAIT), and a chunk whose send
-    // fails with EAGAIN is dropped (usrsctp 0.9.5.0 does not retry it). The lost chunk is only recovered by the
-    // SCTP retransmission timers (T1-INIT 3 s / T1-cookie 1 s), which is what made the 32-client cases take
-    // 13-50 s. The pacing plus the single-homed bind above reduce the collisions so a run typically takes ~60 ms
-    // and at worst ~1.3 s (one lost chunk recovered by the 1 s T1-cookie timer).
+    // Connect Clients. The pacing dilutes the burst of INITs: usrsctp's built-in UDP transport sends every datagram
+    // of every socket through one shared UDP socket with sendmsg(MSG_DONTWAIT), and a chunk whose send fails with
+    // EAGAIN is dropped (usrsctp 0.9.5.0 does not retry it). The lost chunk is only recovered by the SCTP
+    // retransmission timers (T1-INIT 3 s / T1-cookie 1 s), which is what made the 32-client cases take 13-50 s. The
+    // pacing plus the single-homed bind above reduce the collisions; 5 ms is enough for the shared socket's send
+    // buffer to drain between INITs even on a loaded machine.
     for (auto& assoc : client_associations) {
       assoc.second->client_sender = assoc.second->client->connect(create_client_receiver(assoc.first));
       report_fatal_error_if_not(assoc.second->client_sender != nullptr, "Failed to connect Client");
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     // Wait for associations to be made to the server. Bounded: on the user-space stack a burst of connects can
@@ -230,18 +230,24 @@ TEST_P(sctp_network_link_test, multi_client_recv_data)
 {
   unsigned pdu_len = 10;
 
-  // Send data from each server association sender.
+  // Send data from each server association sender. Pace the sends on the user-space stack: all datagrams leave
+  // through one shared UDP socket, and a burst of back-to-back DATA chunks makes sends fail with EAGAIN (the stack
+  // drops such chunks; see the connect-phase comment above).
   unsigned i = 0;
   for (auto& assoc : server_associations) {
     byte_buffer pdu = create_data(i * pdu_len, pdu_len);
     ASSERT_TRUE(assoc.second->server_sender->on_new_sdu(std::move(pdu)));
+#if defined(__APPLE__)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+#endif
   }
 
-  // Check data received by client. Bounded wait: a lost DATA chunk is recovered by the retransmission timers, but
-  // the wait itself must not hang the case until the ctest timeout if the association is lost.
+  // Check data received by client. Bounded wait: a lost DATA chunk is recovered by the retransmission timers (up to
+  // a few seconds per loss), but the wait itself must not hang the case until the ctest timeout if the association
+  // is lost.
   for (auto& assoc : client_associations) {
     byte_buffer pdu;
-    ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu, std::chrono::seconds(10)));
+    ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu, std::chrono::seconds(30)));
     EXPECT_EQ(pdu.length(), pdu_len);
   }
 }
@@ -250,17 +256,20 @@ TEST_P(sctp_network_link_test, multi_client_send_data)
 {
   unsigned pdu_len = 10;
 
-  // Send data from each client association.
+  // Send data from each client association. See the pacing note in multi_client_recv_data.
   unsigned i = 0;
   for (auto& assoc : client_associations) {
     byte_buffer pdu = create_data(i * pdu_len, pdu_len);
     ASSERT_TRUE(assoc.second->client_sender->on_new_sdu(std::move(pdu)));
+#if defined(__APPLE__)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+#endif
   }
 
   // Check data received by each server association. Bounded wait, see multi_client_recv_data.
   for (auto& assoc : server_associations) {
     byte_buffer pdu;
-    ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu, std::chrono::seconds(10)));
+    ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu, std::chrono::seconds(30)));
     EXPECT_EQ(pdu.length(), pdu_len);
   }
 }
