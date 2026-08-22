@@ -62,6 +62,11 @@ void test_init_unique_thread_prio()
 
 int main()
 {
+#if defined(__APPLE__)
+  // On Linux, pthread_getname_np reports the process name for the main thread; on macOS it reports an empty string
+  // until the thread names itself. Give the main thread a name so the assertions below are meaningful on both.
+  ::pthread_setname_np("main");
+#endif
   test_uninit_unique_thread();
   test_init_unique_thread();
   test_init_unique_thread_prio();
