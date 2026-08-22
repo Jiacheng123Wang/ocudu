@@ -41,6 +41,18 @@ radio_zmq_rx_channel::radio_zmq_rx_channel(void*                      zmq_contex
     return;
   }
 
+#if defined(__APPLE__)
+  // Enlarge the receive buffer so a full baseband block (up to ~385 KB) fits the advertised TCP window. With the
+  // default buffer the peer's send stalls on the small window and each UL block trickles over tens of
+  // milliseconds, which freezes the request/response lockstep and compounds into multi-second E2E bursts.
+  {
+    int rcvbuf = 8 * 1024 * 1024;
+    if (::zmq_setsockopt(sock, ZMQ_RCVBUF, &rcvbuf, sizeof(rcvbuf)) == -1) {
+      logger.warning("Failed to enlarge the receiver socket buffer ({}). {}", config.address, ::zmq_strerror(::zmq_errno()));
+    }
+  }
+#endif
+
   // Bind socket.
   logger.info("Connecting to address {}.", config.address);
   if (::zmq_connect(sock, config.address.c_str()) == -1) {

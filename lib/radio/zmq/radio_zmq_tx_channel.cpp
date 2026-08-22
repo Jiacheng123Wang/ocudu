@@ -44,6 +44,18 @@ radio_zmq_tx_channel::radio_zmq_tx_channel(void*                      zmq_contex
     return;
   }
 
+#if defined(__APPLE__)
+  // Enlarge the send buffer so a full baseband block (up to ~385 KB) is handed to the kernel in one go. The
+  // blocking zmq_send otherwise stalls the REP channel loop for the whole duration of the peer's receive (see
+  // radio_zmq_rx_channel for the receive side).
+  {
+    int sndbuf = 8 * 1024 * 1024;
+    if (::zmq_setsockopt(sock, ZMQ_SNDBUF, &sndbuf, sizeof(sndbuf)) == -1) {
+      logger.warning("Failed to enlarge the transmitter socket buffer ({}). {}", config.address, ::zmq_strerror(::zmq_errno()));
+    }
+  }
+#endif
+
   // Bind socket.
   logger.info("Binding to address {}.", config.address);
   bool     bind_success     = false;

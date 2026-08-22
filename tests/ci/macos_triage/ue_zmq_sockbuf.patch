@@ -1,0 +1,37 @@
+diff --git a/lib/src/phy/rf/rf_zmq_imp_rx.c b/lib/src/phy/rf/rf_zmq_imp_rx.c
+--- a/lib/src/phy/rf/rf_zmq_imp_rx.c
++++ b/lib/src/phy/rf/rf_zmq_imp_rx.c
+@@ -112,6 +112,15 @@ int rf_zmq_rx_open(rf_zmq_rx_t* q, rf_zmq_opts_t opts, void* zmq_ctx, char* soc
+     q->trx_timeout_ms     = opts.trx_timeout_ms;
+     q->log_trx_timeout    = opts.log_trx_timeout;
+ 
++    // Enlarge the socket receive buffer so a full DL block (~92 KB) fits the advertised TCP window. With the
++    // default buffer the gnb's send stalls on the small window and every block trickles over tens of
++    // milliseconds, freezing the request/response lockstep (E2E ping bursts, multi-second tail latencies).
++    {
++      int rcvbuf = 8 * 1024 * 1024;
++      zmq_setsockopt(q->sock, ZMQ_RCVBUF, &rcvbuf, sizeof(rcvbuf));
++    }
++
+     if (opts.socket_type == ZMQ_SUB) {
+       zmq_setsockopt(q->sock, ZMQ_SUBSCRIBE, "", 0);
+     }
+diff --git a/lib/src/phy/rf/rf_zmq_imp_tx.c b/lib/src/phy/rf/rf_zmq_imp_tx.c
+--- a/lib/src/phy/rf/rf_zmq_imp_tx.c
++++ b/lib/src/phy/rf/rf_zmq_imp_tx.c
+@@ -43,6 +43,15 @@ int rf_zmq_tx_open(rf_zmq_tx_t* q, rf_zmq_opts_t opts, void* zmq_ctx, char* soc
+     q->socket_type   = opts.socket_type;
+     q->sample_format = opts.sample_format;
+     q->frequency_mhz = opts.frequency_mhz;
+     q->sample_offset = opts.sample_offset;
+ 
++    // Enlarge the socket send buffer so a full UL block (~92 KB) is handed to the kernel in one go (mirror of
++    // the receive-side change in rf_zmq_imp_rx.c).
++    {
++      int sndbuf = 8 * 1024 * 1024;
++      zmq_setsockopt(q->sock, ZMQ_SNDBUF, &sndbuf, sizeof(sndbuf));
++    }
++
+     rf_zmq_info(q->id, "Binding transmitter: %s\n", sock_args);
+ 
+     ret = zmq_bind(q->sock, sock_args);
