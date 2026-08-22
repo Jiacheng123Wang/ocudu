@@ -160,6 +160,38 @@ the same defect caused the two `f1u_*_split_connector_test.destroy_bearer_discon
 Still open: the slow-motion zmq radio (~2.6 slots/s, smooth - not bursty; the zmq code uses ZMQ_DONTWAIT, so it is
 a different mechanism, likely the tx_time pacing between the two hosts), and the udp v6 dual-stack case (#3033).
 
+## The 50 failures + 1 crash: all fixed (2026-08-22)
+
+The remaining 50 failures and the crash were grouped by root cause and fixed one group at a time:
+
+1. **`unique_thread_test` crash (fixed).** `pthread_getname_np` reports the process name for the main thread on Linux
+   but an empty string on macOS until the thread names itself, so `this_thread_name() != t.get_name()` aborted. The
+   test names the main thread at the start of `main()` (macOS-only), matching the Linux behaviour.
+
+2. **`EthFramePoolTestSuite.read_after_write_should_return_correct_data` (32 cases, fixed in the test).** The frame
+   pool's pending order follows the release order of the scoped buffers, which for a destroyed `std::vector` is
+   implementation-defined: libc++ (macOS) destroys the elements in reverse order, libstdc++ in forward order, so the
+   read burst came back reversed on macOS and the positional size/data comparison failed for every multi-frame case
+   (MTU 5000/1500; MTU 9000 always writes a single frame and was unaffected). The test now matches every written
+   frame against the set of read frames instead of comparing positionally. The pool itself makes no ordering
+   guarantee, so production is unaffected (frames are independent).
+
+3. **`cu_cp_rrc_inactive_test` (16 cases, production bug fixed).** `rrc_du_metrics_aggregator::get_mean_nof_rrc_connections()`
+   dereferenced the map's `end()` iterator in its single-measurement branch - undefined behaviour that happens to
+   read the last value under libstdc++ but reads 0 under libc++ (macOS), so `mean_nof_inactive_rrc_connections` was
+   0 instead of 1. Fixed with `rbegin()->second`. All 404 cu_cp-labelled cases pass.
+
+4. **`udp_network_gateway_tester.when_v6_config_valid_then_trx_succeeds` (production bug fixed).** `sendmsg()` with
+   `msg_namelen = sizeof(sockaddr_storage)` (128) fails with EINVAL on macOS for IPv6 destinations (verified with a
+   standalone probe: only the exact `sizeof(sockaddr_in6)` is accepted), so the ::1 dual-stack test never delivered
+   a datagram. New `sockaddr_length()` helper derives `msg_namelen` from the address family; Linux accepts both.
+
+5. **`text_formatter_test` (fixed in the test).** The formatter maps the entry time point to wall clock via
+   `tp - high_resolution_clock::now() + system_clock::now()`. On Linux the `high_resolution_clock` epoch coincides
+   with the system clock epoch, so the fixed 50000 us test time point prints as `1970-01-01T00:00:00.050000`; on
+   macOS `high_resolution_clock` is `steady_clock` (epoch = system boot), so the printed time depends on the
+   machine's uptime. The test now validates the timestamp shape and compares the rest of the golden line verbatim.
+
 ## SCTP multi-client link tests: the N x 2 s teardown and the burst-setup retransmissions (2026-08-22)
 
 The `sctp_network_link_test` multi-client cases used to take 2.02 s / 11.4 s / 20.4 s / 75.5 s on macOS versus
