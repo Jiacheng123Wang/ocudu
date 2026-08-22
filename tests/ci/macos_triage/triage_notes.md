@@ -198,6 +198,25 @@ Three families were fixed; one limitation is documented:
    the shutdown handshake completes before the retransmission timer fires. The close is now paced by 50 ms on macOS
    and the broker-drive deadline raised to 5 s (150 consecutive runs clean).
 
+## Platform-confinement audit (2026-08-22)
+
+Porting policy: Linux keeps the upstream logic byte-for-byte; every fix that touched a shared code path is
+confined to macOS with `#if defined(__APPLE__)` (verified by rebuilding and re-running the affected suites on the
+Ubuntu reference machine, 538/538 there):
+
+| file | macOS-only change | Linux keeps |
+|---|---|---|
+| `ethernet_frame_pool_test.cpp` | order-independent frame matching (libc++ reverses vector destruction) | positional comparison |
+| `rrc_du_metrics_aggregator.h` | `rbegin()` instead of the `end()` UB dereference (libc++ reads 0) | original `end()->second` expression |
+| `udp_network_gateway_impl.cpp` | family-sized `msg_namelen` (macOS EINVAL on 128) | `sizeof(sockaddr_storage)` |
+| `mutexed_mpmc_queue.h` | working timed `pop_blocking` wrapper | original latent wrapper (nothing instantiates it on Linux) |
+| `sctp_network_link_test.cpp` | 127.0.0.1 client bind, connect pacing, bounded association/data waits | unbound/unpaced/unbounded flow |
+| `rlc_tx_*_test.cpp` (TM/AM/UM) | inclusive hol_toa window bounds (`RLC_TEST_HOL_TOA_GE/LE` macros; ~41 ns steady_clock ticks) | original `EXPECT_GT`/`EXPECT_LT` |
+| `text_formatter_test.cpp` | timestamp-shape comparison (steady_clock epoch = boot) | original full golden line |
+
+`sctp_socket.cpp` was already confined: the whole usrsctp shim (including the PID-seeded encapsulation port) sits
+inside its `#if defined(__APPLE__)` section; Linux compiles the kernel-SCTP implementation.
+
 ## The 50 failures + 1 crash: all fixed (2026-08-22)
 
 The remaining 50 failures and the crash were grouped by root cause and fixed one group at a time:
