@@ -33,6 +33,11 @@ bool sockaddr_to_ip_str(const sockaddr* addr, std::string& ip_address, ocudulog:
 
 uint16_t sockaddr_to_port(const sockaddr* addr, ocudulog::basic_logger& logger);
 
+/// Returns the length in bytes of the address held by a sockaddr_storage, based on its address family.
+/// macOS rejects sendmsg() calls whose msg_namelen is the full sockaddr_storage size, so the exact
+/// family-specific size is required there; Linux accepts both.
+[[gnu::pure]] socklen_t sockaddr_length(const sockaddr_storage& addr);
+
 bool sockaddr_storage_equal(const sockaddr_storage& a, const sockaddr_storage& b);
 
 struct sockaddr_storage_less {

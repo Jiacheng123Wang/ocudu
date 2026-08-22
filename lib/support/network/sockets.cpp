@@ -120,6 +120,18 @@ uint16_t ocudu::sockaddr_to_port(const sockaddr* addr, ocudulog::basic_logger& l
   return 0;
 }
 
+socklen_t ocudu::sockaddr_length(const sockaddr_storage& addr)
+{
+  switch (addr.ss_family) {
+    case AF_INET:
+      return sizeof(sockaddr_in);
+    case AF_INET6:
+      return sizeof(sockaddr_in6);
+    default:
+      return sizeof(sockaddr_storage);
+  }
+}
+
 bool ocudu::set_receive_timeout(const unique_fd& fd, std::chrono::seconds rx_timeout, ocudulog::basic_logger& logger)
 {
   ocudu_sanity_check(fd.is_open(), "Invalid FD");
