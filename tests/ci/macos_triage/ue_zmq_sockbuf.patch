@@ -1,3 +1,9 @@
+# ANALYSIS-ONLY ARTIFACT - DO NOT APPLY.
+# The E2E problem is established to be in the gnb (the same srsUE works against the Ubuntu gnb), so the UE side
+# stays untouched. This patch was applied once during the analysis (to prove the TCP-window bottleneck) and has
+# been reverted on the 153 machine; the gnb-side equivalent lives in lib/radio/zmq (ZMQ_SNDBUF/ZMQ_RCVBUF).
+# Kept here only to document the finding.
+#
 diff --git a/lib/src/phy/rf/rf_zmq_imp_rx.c b/lib/src/phy/rf/rf_zmq_imp_rx.c
 --- a/lib/src/phy/rf/rf_zmq_imp_rx.c
 +++ b/lib/src/phy/rf/rf_zmq_imp_rx.c
