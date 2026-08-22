@@ -298,14 +298,22 @@ TEST_F(sctp_network_server_test,
   std::vector<uint8_t> bytes = {0x01, 0x02, 0x03, 0x04};
 
   ASSERT_TRUE(send_data(bytes, false));
+#if defined(__APPLE__)
+  // The DATA chunk leaves right after the association came up, together with the trailing COOKIE/HEARTBEAT control
+  // burst, through the single shared UDP socket of the user-space stack. Give the control traffic a moment to
+  // drain before the close, so the DATA send does not hit the shared socket's EAGAIN drop: once the shutdown
+  // handshake has completed the stack gives up on the unacked DATA, so a dropped chunk here is lost for good.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+#endif
   ASSERT_TRUE(close_client(false));
 
   ASSERT_EQ(assoc_factory.last_sdu.length(), 0);
 #if defined(__APPLE__)
   // The user-space stack delivers (and the receive callback drains) the queued events asynchronously, so the exact
   // number of broker wake-ups needed is not deterministic: drive the broker until the SDU was handled and the
-  // association was then destroyed (or a generous deadline expires, so a lost chunk cannot hang the case).
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  // association was then destroyed (or a generous deadline expires, so a lost chunk cannot hang the case; a lost
+  // DATA chunk is retransmitted with the lowered 500 ms initial RTO).
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while ((assoc_factory.last_sdu.empty() or not assoc_factory.association_destroyed) and
          std::chrono::steady_clock::now() < deadline) {
     trigger_broker(assoc_fd);
