@@ -96,9 +96,8 @@ public:
   }
   bool pop_blocking(T& elem, std::chrono::microseconds wait_time)
   {
-    bool success = false;
-    elem         = this->queue.pop_wait_for(&success, wait_time);
-    return success;
+    auto res = this->queue.pop_wait_for(elem, wait_time);
+    return res == decltype(res)::success;
   }
 
   /// Pops an element from the queue. If the queue is empty, the call blocks, waiting for a new element to be pushed.

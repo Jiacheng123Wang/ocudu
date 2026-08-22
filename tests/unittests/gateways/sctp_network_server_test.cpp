@@ -6,7 +6,9 @@
 #include "ocudu/gateways/sctp_socket.h"
 #include "ocudu/support/executors/inline_task_executor.h"
 #include <arpa/inet.h>
+#include <chrono>
 #include <gtest/gtest.h>
+#include <thread>
 
 using namespace ocudu;
 
@@ -300,9 +302,12 @@ TEST_F(sctp_network_server_test,
 #if defined(__APPLE__)
   // The user-space stack delivers (and the receive callback drains) the queued events asynchronously, so the exact
   // number of broker wake-ups needed is not deterministic: drive the broker until the SDU was handled and the
-  // association was then destroyed.
-  for (unsigned i = 0; i != 10 and (assoc_factory.last_sdu.empty() or not assoc_factory.association_destroyed); ++i) {
+  // association was then destroyed (or a generous deadline expires, so a lost chunk cannot hang the case).
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while ((assoc_factory.last_sdu.empty() or not assoc_factory.association_destroyed) and
+         std::chrono::steady_clock::now() < deadline) {
     trigger_broker(assoc_fd);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   ASSERT_EQ(assoc_factory.last_sdu, bytes);
 #else

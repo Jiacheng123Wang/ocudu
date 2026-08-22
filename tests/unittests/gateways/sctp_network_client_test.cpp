@@ -6,9 +6,11 @@
 #include "ocudu/gateways/sctp_socket.h"
 #include "ocudu/support/executors/inline_task_executor.h"
 #include "ocudu/support/executors/unique_thread.h"
+#include <chrono>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <thread>
 
 using namespace ocudu;
 
@@ -377,7 +379,17 @@ TEST_F(sctp_network_client_test, when_server_sends_data_then_client_receives_it)
 
   // Client receives data.
   ASSERT_TRUE(recv_notifier_factory.last_sdu.empty());
+#if defined(__APPLE__)
+  // The user-space stack delivers the message asynchronously: a single broker wake-up may run before the DATA chunk
+  // has arrived, so drive the broker until the SDU is delivered (or a generous deadline expires).
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (recv_notifier_factory.last_sdu.empty() and std::chrono::steady_clock::now() < deadline) {
+    trigger_broker();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+#else
   trigger_broker();
+#endif
   ASSERT_EQ(recv_notifier_factory.last_sdu, sent_data);
 }
 

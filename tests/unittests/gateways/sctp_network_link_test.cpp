@@ -78,9 +78,16 @@ public:
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    // Wait for associations to be made to the server.
+    // Wait for associations to be made to the server. Bounded: on the user-space stack a burst of connects can
+    // lose a chunk to the shared-socket EAGAIN drop, which the retransmission timers recover in a few seconds;
+    // without a bound a pathological loss would hang the case until the ctest timeout.
     std::unique_lock<std::mutex> lock(assoc_creation_mutex);
-    assoc_created_cvar.wait(lock, [this, nof_clients]() { return server_associations.size() == nof_clients; });
+    report_fatal_error_if_not(
+        assoc_created_cvar.wait_for(lock, std::chrono::seconds(20), [this, nof_clients]() {
+          return server_associations.size() == nof_clients;
+        }),
+        "Timed out waiting for all {} client associations to be established on the server",
+        nof_clients);
 
     logger.info("All UEs connected");
   }
@@ -230,10 +237,11 @@ TEST_P(sctp_network_link_test, multi_client_recv_data)
     ASSERT_TRUE(assoc.second->server_sender->on_new_sdu(std::move(pdu)));
   }
 
-  // Check data received by client.
+  // Check data received by client. Bounded wait: a lost DATA chunk is recovered by the retransmission timers, but
+  // the wait itself must not hang the case until the ctest timeout if the association is lost.
   for (auto& assoc : client_associations) {
     byte_buffer pdu;
-    ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu));
+    ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu, std::chrono::seconds(10)));
     EXPECT_EQ(pdu.length(), pdu_len);
   }
 }
@@ -249,10 +257,10 @@ TEST_P(sctp_network_link_test, multi_client_send_data)
     ASSERT_TRUE(assoc.second->client_sender->on_new_sdu(std::move(pdu)));
   }
 
-  // Check data received by each server association.
+  // Check data received by each server association. Bounded wait, see multi_client_recv_data.
   for (auto& assoc : server_associations) {
     byte_buffer pdu;
-    ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu));
+    ASSERT_TRUE(assoc.second->recv_data.pop_blocking(pdu, std::chrono::seconds(10)));
     EXPECT_EQ(pdu.length(), pdu_len);
   }
 }
