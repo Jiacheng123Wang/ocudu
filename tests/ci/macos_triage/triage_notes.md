@@ -79,22 +79,28 @@ In rough priority order:
    few seconds. Building usrsctp from source would allow either a retry-on-EAGAIN patch in
    `sctp_userspace_ip_output` or switching the shim to the AF_CONN/`conn_output` transport. The tests mitigate with
    single-homing, pacing and bounded waits, so this is test-duration only, not correctness.
-2. **zmq radio slow motion (the residual E2E burst).** Captures at both ends of the zmq link (2026-08-22) showed
-   the gnb/UE zmq link is a REQ/REP lockstep: the UE pulls each DL block (request every ~30-38 ms), the gnb answers
-   within ~1.6 ms, and the lockstep runs at ~26-31 slots/s (the zmq testbed's inherent pace, same on Ubuntu; the
-   earlier "2.5 slots/s" reading was the frame counter - x10 = 25 slots/s). In the good equilibrium the gnb-internal
-   lags are small (DL ingress -> PDSCH median ~29 ms, ping rtt avg ~418 ms vs Ubuntu 300-400 ms). The sawtooth burst
-   appears in bad-equilibrium runs where the UL path batches the ping requests (~7-8 per GTP-U ingress batch,
-   ~1.3-1.9 s apart) and the DL scheduling lag grows to ~386 ms median; the trigger that switches the lockstep
-   between the good and the bad equilibrium is still unknown. The usrsctp TODO is NOT involved: the user plane never
-   touches SCTP.
-   - Reverted fix attempt: answering an idle DL request with a zero-filled block (to avoid the UE's 2 s REQ receive
-     timeout). It broke the UE attach: the zmq DL stream doubles as the UE's sample clock, so extra zero blocks that
-     the gnb's slot production never made advance the UE's sample counter ahead of the real timeline and the UE's UL
-     tx_time drifts ("tx time is 0.013 ms in the past") - the RACH retransmissions never attach. Constraint learned:
-     the wire sample stream must stay exactly 1:1 with the gnb's slot production.
-   - Next step: instrument `dl_process` and the zmq TX channel (buffer-empty events, stall durations, per-slot
-     timestamps) and re-capture the next bad-equilibrium run to find the trigger.
+2. **zmq radio E2E bursts - root cause found and fixed (2026-08-22).** The gnb/UE zmq link is a REQ/REP lockstep
+   whose pace is set by srsUE's processing (good equilibrium ~26 rounds/s, ping rtt avg ~418 ms, close to Ubuntu's
+   300-400 ms). The bad equilibrium (ping avg 2-6 s, max 10 s, lockstep decaying 9->1 rounds/s) is a positive
+   feedback loop proven with tcpdumps on both ends + temporary [zmq-probe] logs:
+   - the UE's receive pace slows -> the gnb's blocking `zmq_send` trickles each 92 KB block through the UE's TCP
+     window (median 85 ms, max 3.2 s) -> the REP channel loop freezes (request handling p50 1.16 s DL / 1.8 s UL);
+   - meanwhile `dl_process` keeps filling the 614400-sample TX queue and `send_response()` drained it ALL into one
+     reply, so a stalled period produced a 385 KB (4+ slot) mega-message whose trickle was proportionally longer -
+     the feedback that degraded the lockstep and piled up multi-second latencies.
+   - the earlier "UE 2 s RCVTIMEO" hypothesis was disproven by the probes (gnb-side buffer-empty waits were ms-scale).
+   Fix (macOS-only): `send_response()` now drains at most ONE slot per request (the size of the last `transmit()`
+   call), so replies stay ~92 KB, the channel loop stays responsive and the feedback is broken. Validation with the
+   fix (5 ping rounds, same setup): lockstep back to a STABLE 15.2 rounds/s (no decay), UE UL production median
+   55 ms, ping rtt avg 0.89/0.92/1.42/1.37 s (round 1 right after attach: 2.6 s) vs 2.0-6.2 s before the fix.
+   - Remaining latency (not a macOS defect): the gnb's UL grant cycle (~250-400 ms at 15 slots/s) + DL scheduling
+     (~80 ms median) + batch phase - scheduling costs in slot time on the zmq testbed; the residual difference to
+     the best sessions is srsUE's worker pace on the 153 machine. Further tuning belongs to the UE side or the
+     gnb scheduler (SR periodicity / grant frequency), not the port.
+   - Constraint learned from a reverted fix attempt (zero-filled reply for empty buffers): the wire sample stream
+     must stay exactly 1:1 with the gnb's slot production - extra zero blocks advance the UE's sample clock and
+     break the RACH timing ("tx time ... in the past"). The usrsctp TODO is NOT involved (the user plane never
+     touches SCTP).
 3. **usrsctp multihoming / `connectx()` support in the shim** (unblocks the 10 multihomed/bindx/connectx cases and
    the E2 agent case in section 2b). Requires the from-source usrsctp work of item 1 (custom per-association UDP
    sockets), or an alternative userspace transport.
