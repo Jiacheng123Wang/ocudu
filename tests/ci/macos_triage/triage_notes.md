@@ -132,3 +132,30 @@ the ping run happened at 00:08:33.9-00:09:26):
   (should be 1000/s) and degrades over the 54-minute run (at the end the zmq RX receives 12 samples per ~58 s).
   10 pps still works because each slot packs many packets; this caps E2E throughput and needs its own
   investigation (suspects: clock drift between the two hosts, the zmq tx_time pacing).
+
+## E2E 27 s ping stall: root cause found and fixed (2026-08-22, capture correlation)
+
+Four-way captures (UE tun, N3 on the CN host, N3 on the macOS NIC, plus `/tmp/gnb.log`) of a fresh 500-ping run
+were aligned per packet. With the Ubuntu gnb (192.168.100.131) against the same UE/CN the ping is uniform
+300-400 ms, so the stall is macOS-gnb-side. The captures show:
+
+* the requests cross the gnb continuously (10 pps at every hop);
+* the UPF answers immediately and its replies arrive at the macOS NIC **continuously** (~10-18 pps);
+* but the gnb GTP-U ingress logs them in bursts of 256/118/69/53 (27.4 s, 12.2 s, 8.8 s, 4.1 s apart), and the UE
+  receives exactly those same bursts - each reply waits in the gnb kernel socket buffer until its batch is
+  released.
+
+Root cause: the macOS `recvmmsg()` emulation in `lib/gateways/udp_network_gateway_impl.cpp` (macOS has no
+recvmmsg; `MSG_WAITFORONE` was #defined to 0). The emulation looped `recvmsg` up to `rx_max_mmsg` (=256) times
+on the blocking N3 socket, so after the first datagram every further `recvmsg` blocked for one inter-packet gap
+(~100 ms at 10 pps). Collecting a full batch therefore held the receive callback - and the whole io_rx_executor -
+for ~25 s, and every datagram's delivery waited until its batch completed (the ~1 s SO_RCVTIMEO lull ended the
+last partial batches). That is exactly the ping's two decreasing RTT ramps: a batch flush artifact.
+
+Fix: the emulation now waits for the first datagram (MSG_WAITFORONE semantics) and then drains with MSG_DONTWAIT
+until EAGAIN. The io_broker level-triggered rearm then drives successive short callbacks, like Linux. Bonus:
+the same defect caused the two `f1u_*_split_connector_test.destroy_bearer_disconnects_and_stops_rx` failures
+(destroy blocked behind a 256-deep batch), which now pass - the failed count drops from 52 to 50.
+
+Still open: the slow-motion zmq radio (~2.6 slots/s, smooth - not bursty; the zmq code uses ZMQ_DONTWAIT, so it is
+a different mechanism, likely the tx_time pacing between the two hosts), and the udp v6 dual-stack case (#3033).

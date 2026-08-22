@@ -28,12 +28,30 @@ inline int sendmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int vlen, int f
 }
 
 inline int recvmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int vlen, int flags, struct timespec *timeout) {
-  for (unsigned int i = 0; i < vlen; ++i) {
-    ssize_t res = ::recvmsg(sockfd, &msgvec[i].msg_hdr, flags);
-    if (res < 0) return i > 0 ? static_cast<int>(i) : -1;
+  (void)timeout;
+  // macOS has no recvmmsg(): emulate the Linux MSG_WAITFORONE semantics the caller relies on - wait for at least
+  // one datagram, then return everything already buffered (up to vlen). Block on the first recvmsg, then drain
+  // with MSG_DONTWAIT until EAGAIN. Keeping the callback short is essential: the io_broker re-arms the fd after
+  // every callback and the level-triggered EVFILT_READ fires again while data is pending, so a busy socket is
+  // drained by successive short callbacks. The previous emulation looped blocking recvmsg calls up to vlen times,
+  // so a slow trickle of datagrams held the callback for one inter-packet gap per packet - with vlen=256 and a
+  // 10 pps flow the receive path stalled for tens of seconds and delivered the E2E ping replies in ~26 s bursts.
+  unsigned int i    = 0;
+  ssize_t      res  = ::recvmsg(sockfd, &msgvec[0].msg_hdr, flags & ~MSG_DONTWAIT);
+  if (res < 0) {
+    return -1;
+  }
+  msgvec[0].msg_len = static_cast<unsigned int>(res);
+  i                 = 1;
+  for (; i < vlen; ++i) {
+    res = ::recvmsg(sockfd, &msgvec[i].msg_hdr, flags | MSG_DONTWAIT);
+    if (res < 0) {
+      // Nothing left to read (EAGAIN/EWOULDBLOCK) or a real error: report the datagrams received so far.
+      break;
+    }
     msgvec[i].msg_len = static_cast<unsigned int>(res);
   }
-  return static_cast<int>(vlen);
+  return static_cast<int>(i);
 }
 #endif
 
