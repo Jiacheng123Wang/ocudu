@@ -211,3 +211,21 @@ same gnb commit f42e5b981b and same UE. Results (full data in `../e2e_compare/RE
   capture the N3/GTP-U interface during a ping run to decompose that floor.
 - Close-out: keep the 8MB socket-buffer fix and tag `macos_e2e_stable`; revert the probe
   commit f42e5b981b when no further rounds are planned.
+
+### 5c. Probe instrumentation is now permanent, gated by ENABLE_FLOW_PROBES
+
+The `[zmq-probe]` instrumentation (tx request-received / buffer-empty-wait / buffer-full-block /
+zmq-send-block + per-64 reply-rate, rx reply-age + reply-rate, lower-PHY dl rx-wait/process/transmit +
+dl 64-slot rate, ul recv-wait) is kept in the tree for future E2E analysis (ping and iperf3), compiled
+only when the existing CMake option `ENABLE_FLOW_PROBES` is ON (`-DOCUDU_FLOW_PROBES`, off by default):
+
+```sh
+cmake -S . -B build_probes -DENABLE_FLOW_PROBES=ON   # analysis build
+make -C build_probes gnb
+```
+
+With the flag OFF no probe code is compiled (zero impact, the gnb binary contains no `[zmq-probe]`
+strings). The zmq/PHY logs go to the normal log file; remember to set `log: lib_level: info` in
+`configs/gnb_zmq.yaml` so the "ALL"-logger probes (dl/ul lower-PHY) are not dropped. The wired ZMQ
+setup (gnb=198.19.0.1, UE=198.19.0.2, Ubuntu gnb=198.19.0.3, direct cable) is the reference transport
+for future E2E runs.
