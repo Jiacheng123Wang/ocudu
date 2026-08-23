@@ -187,3 +187,27 @@ Next steps:
    dl production-rate probes (they were dropped before because lib_level defaults to warning).
 4. Keep the 8MB socket-buffer fix (keeps the channel loop healthy on slow links); revert only the probe
    commit f42e5b981b when the comparison is done. Tag `macos_e2e_stable` stays at 383dc4eae8.
+
+### 5b. Wired re-run confirms the Wi-Fi diagnosis (2026-08-23)
+
+ZMQ moved to a direct Ethernet cable (mac=198.19.0.1, UE=198.19.0.2, Ubuntu gnb=198.19.0.3),
+same gnb commit f42e5b981b and same UE. Results (full data in `../e2e_compare/REPORT.md`):
+
+| metric | mac Wi-Fi | Ubuntu Wi-Fi | mac wired | Ubuntu wired |
+|---|---|---|---|---|
+| ping avg (UE->UPF) | ~840-1350ms | ~530ms | **~100ms** | ~137ms |
+| ping min | ~400ms | ~155-254ms | **~27-36ms** | ~45-52ms |
+| lockstep rounds/s | 13-19 | 52-56 | **711** | 444 |
+| dl production slots/s | (not logged) | (not logged) | **719** | 444 |
+| rx reply-age | 46.7ms | 17.0ms | 1.32ms | 1.19ms |
+| DL wire transfer (92KB) | 55-65ms | 6ms | 0.2ms | 1.4ms |
+
+- The Wi-Fi TX path was the whole story: wired, the mac gnb is 10x faster than its Wi-Fi
+  self and now BEATS the Ubuntu gnb (711 vs 444 rounds/s; the Apple Silicon slot production
+  outruns the NUC, which only shows once the link stops dominating).
+- One-way link latency on the wire: ~0.2-0.4ms both directions.
+- The remaining ~100ms ping floor is the gnb scheduling path + GTP-U round trip to the UPF
+  on 153 (still Wi-Fi), not the ZMQ lockstep (~2-3ms per round now). Optional follow-up:
+  capture the N3/GTP-U interface during a ping run to decompose that floor.
+- Close-out: keep the 8MB socket-buffer fix and tag `macos_e2e_stable`; revert the probe
+  commit f42e5b981b when no further rounds are planned.
