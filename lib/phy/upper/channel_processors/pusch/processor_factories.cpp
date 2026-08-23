@@ -50,7 +50,8 @@ public:
     segmenter_factory(std::move(config.segmenter_factory)),
     executor(config.executor),
     nof_prb(config.nof_prb),
-    nof_layers(config.nof_layers)
+    nof_layers(config.nof_layers),
+    ldpc_decoder_type(std::move(config.ldpc_decoder_type))
   {
     ocudu_assert(crc_factory, "Invalid CRC calculator factory.");
     ocudu_assert(config.decoder_factory, "Invalid LDPC decoder factory.");
@@ -79,8 +80,13 @@ public:
     crcs.crc24A = crc_factory->create(crc_generator_poly::CRC24A);
     crcs.crc24B = crc_factory->create(crc_generator_poly::CRC24B);
 
-    return std::make_unique<pusch_decoder_impl>(
-        segmenter_factory->create(), decoder_pool, std::move(crcs), executor, nof_prb, nof_layers);
+    return std::make_unique<pusch_decoder_impl>(segmenter_factory->create(),
+                                                decoder_pool,
+                                                std::move(crcs),
+                                                executor,
+                                                nof_prb,
+                                                nof_layers,
+                                                ldpc_decoder_type);
   }
 
 private:
@@ -90,6 +96,7 @@ private:
   task_executor*                                              executor;
   unsigned                                                    nof_prb;
   unsigned                                                    nof_layers;
+  std::string                                                 ldpc_decoder_type;
 };
 
 /// HW-accelerated PUSCH decoder factory.

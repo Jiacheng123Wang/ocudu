@@ -5,6 +5,8 @@
 #pragma once
 
 #include "ocudu/support/math/stats.h"
+#include <chrono>
+#include <string>
 
 namespace ocudu {
 
@@ -20,6 +22,18 @@ struct pusch_decoder_result {
   /// <tt>ldpc_stats->get_nof_observations()</tt>) or the average number of iterations for correctly decoded
   /// codeblocks (via <tt>ldpc_stats->get_mean()</tt>).
   sample_statistics<unsigned> ldpc_decoder_stats;
+  /// \brief LDPC decoder implementation type, as configured (e.g. "auto", "neon", "metal").
+  ///
+  /// Empty when the decoding statistics do not carry a type (e.g. empty or hardware-accelerated decoders).
+  std::string ldpc_decoder_type;
+  /// \brief Wall-clock time spent in the LDPC decode block.
+  ///
+  /// Measured from the first codeblock decode invocation to the completion of the last one. It covers the whole
+  /// decoding attempt, whether it converged to a valid CRC or ran until the maximum number of iterations.
+  std::chrono::nanoseconds ldpc_decode_elapsed{0};
+  /// \brief Size in bytes of the uncoded payload of the decoded code block(s), i.e. the MAC PDU (transport block)
+  /// size.
+  unsigned mac_pdu_bytes = 0;
 };
 
 } // namespace ocudu

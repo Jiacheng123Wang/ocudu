@@ -736,6 +736,7 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
   if (!dependencies.hw_decoder_factory) {
     pusch_decoder_factory_sw_configuration decoder_config;
     decoder_config.crc_factory     = pusch_crc_calc_factory;
+    decoder_config.ldpc_decoder_type = config.ldpc_decoder_type;
     decoder_config.decoder_factory = create_ldpc_decoder_factory_sw(
         config.ldpc_decoder_type,
         {.force_decoding         = config.ldpc_decoder_force_decoding,

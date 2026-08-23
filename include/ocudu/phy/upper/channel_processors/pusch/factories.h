@@ -17,6 +17,7 @@
 #include "ocudu/phy/upper/equalization/equalization_factories.h"
 #include "ocudu/phy/upper/signal_processors/pusch/factories.h"
 #include <memory>
+#include <string>
 
 namespace ocudu {
 
@@ -48,6 +49,10 @@ struct pusch_decoder_factory_sw_configuration {
   task_executor*                               executor                  = nullptr;
   unsigned                                     nof_prb;
   unsigned                                     nof_layers;
+  /// \brief LDPC decoder implementation type, as configured (e.g. "auto", "neon", "metal").
+  ///
+  /// Reported by the PUSCH decoder statistics for observability of the selected decoder in the logs.
+  std::string ldpc_decoder_type = "generic";
 };
 
 std::shared_ptr<pusch_decoder_factory> create_pusch_decoder_factory_sw(pusch_decoder_factory_sw_configuration config);

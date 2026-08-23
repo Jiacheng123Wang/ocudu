@@ -177,6 +177,15 @@ struct formatter<ocudu::pusch_decoder_result> {
     helper.format_if_verbose(ctx, "min_iter={}", result.ldpc_decoder_stats.get_min());
     helper.format_if_verbose(ctx, "nof_cb={}", result.nof_codeblocks_total);
 
+    // LDPC decoder performance fields (debug log only): the decoder implementation type as configured, the
+    // wall-clock time spent in the LDPC decode block (whole decoding attempt, CRC OK or not) and the uncoded
+    // payload (MAC PDU) size in bytes. The decode time is printed in microseconds, consistently with the t=/uci_t=/
+    // ret_t= pipeline latencies of the enclosing log entry.
+    helper.format_if_verbose(ctx, "ldpc={}", result.ldpc_decoder_type.empty() ? "na" : result.ldpc_decoder_type);
+    helper.format_if_verbose(
+        ctx, "dec_t={:.1f}us", static_cast<float>(result.ldpc_decode_elapsed.count()) * 1e-3F);
+    helper.format_if_verbose(ctx, "mac_pdu={}B", result.mac_pdu_bytes);
+
     return ctx.out();
   }
 };

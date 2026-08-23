@@ -14,6 +14,8 @@
 #include "ocudu/support/executors/task_executor.h"
 #include "ocudu/support/memory_pool/bounded_object_pool.h"
 #include <atomic>
+#include <chrono>
+#include <string>
 
 namespace ocudu {
 
@@ -46,19 +48,23 @@ public:
   /// \param[in] executor_     Task executor for asynchronous PUSCH code block decoding.
   /// \param[in] nof_prb       Number of PRBs.
   /// \param[in] nof_layers    Number of layers.
+  /// \param[in] ldpc_decoder_type_  LDPC decoder implementation type, as configured (e.g. "auto", "neon", "metal").
+  ///                                Reported in the decoder statistics for log observability.
 
   pusch_decoder_impl(std::unique_ptr<ldpc_segmenter_rx>      segmenter_,
                      std::shared_ptr<codeblock_decoder_pool> decoder_pool_,
                      sch_crc                                 crc_set_,
                      task_executor*                          executor_,
                      unsigned                                nof_prb,
-                     unsigned                                nof_layers) :
+                     unsigned                                nof_layers,
+                     std::string                             ldpc_decoder_type_ = "generic") :
     logger(ocudulog::fetch_basic_logger("PHY")),
     segmenter(std::move(segmenter_)),
     decoder_pool(std::move(decoder_pool_)),
     crc_set(std::move(crc_set_)),
     executor(executor_),
-    softbits_buffer(pusch_constants::get_max_codeword_size(nof_prb, nof_layers).value())
+    softbits_buffer(pusch_constants::get_max_codeword_size(nof_prb, nof_layers).value()),
+    ldpc_decoder_type(std::move(ldpc_decoder_type_))
   {
     ocudu_assert(segmenter, "Invalid segmenter.");
     ocudu_assert(decoder_pool, "Invalid codeblock decoder pool.");
@@ -166,6 +172,15 @@ private:
   unsigned nof_codeblocks;
   /// CRC calculator for inner codeblock checks.
   crc_calculator* block_crc;
+  /// \brief LDPC decoder implementation type, as configured (e.g. "auto", "neon", "metal").
+  ///
+  /// Copied into the decoder statistics for log observability.
+  std::string ldpc_decoder_type;
+  /// \brief Wall-clock timestamp of the first codeblock decode invocation of the current transport block.
+  ///
+  /// Used to measure the time spent in the LDPC decode block, whether the decoding converged or ran until the
+  /// maximum number of iterations. Reset on every new transmission.
+  std::chrono::time_point<std::chrono::steady_clock> decode_start_time;
 
   // See interface for the documentation.
   span<log_likelihood_ratio> get_next_block_view(unsigned block_size) override;

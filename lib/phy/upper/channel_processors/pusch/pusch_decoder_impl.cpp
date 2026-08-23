@@ -94,6 +94,9 @@ pusch_decoder_buffer& pusch_decoder_impl::new_data(span<uint8_t>                
   softbits_count   = 0;
   codeblock_llrs.clear();
 
+  // Reset the LDPC decode block timestamp: it is set again when the first codeblock decode starts.
+  decode_start_time = {};
+
   // Unset the expected number of UL-SCH softbits.
   nof_ulsch_softbits.reset();
 
@@ -347,6 +350,7 @@ void pusch_decoder_impl::fork_codeblock_task(unsigned cb_id)
       // slot-keyed pairing in the probe drops leftover starts of the corner cases).
       if (cb_id == 0) {
         ul_pipeline_probe::get().record_ldpc_start(current_config.slot.count());
+        decode_start_time = std::chrono::steady_clock::now();
       }
       nof_iters = decoder_ptr->decode(message,
                                       rm_buffer,
@@ -403,6 +407,17 @@ void pusch_decoder_impl::join_and_notify()
   stats.tb_crc_ok            = false;
   stats.nof_codeblocks_total = nof_cbs;
   stats.ldpc_decoder_stats.reset();
+
+  // Record the LDPC decoder implementation type and the uncoded payload (MAC PDU) size for every decoding attempt,
+  // regardless of the CRC outcome.
+  stats.ldpc_decoder_type = ldpc_decoder_type;
+  stats.mac_pdu_bytes     = transport_block.size();
+
+  // Record the wall-clock time spent in the LDPC decode block, from the first codeblock decode invocation to the
+  // completion of the last one (whether the decoding converged or ran until the maximum number of iterations).
+  if (decode_start_time != std::chrono::time_point<std::chrono::steady_clock>()) {
+    stats.ldpc_decode_elapsed = std::chrono::steady_clock::now() - decode_start_time;
+  }
 
   // Calculate statistics.
   std::for_each_n(cb_stats.begin(), nof_cbs, [&stats](unsigned element) { stats.ldpc_decoder_stats.update(element); });
