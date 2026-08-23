@@ -62,7 +62,13 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   upper_phy_factory_config.ul_bw_rb                          = max_ul_bw_rb;
   upper_phy_factory_config.pusch_max_nof_layers              = pusch_max_nof_layers;
   upper_phy_factory_config.enable_metrics                    = du_low.metrics_cfg.enable_du_low;
+#if defined(__APPLE__)
+  // macOS: honor the expert knob (expert_phy --pusch_ldpc_decoder_type, assigned above). Upstream
+  // leaves an unconditional "auto" override here (see 3f227a41fb) that silently discards the
+  // configured decoder type; keep Linux byte-for-byte with upstream per the port policy.
+#else
   upper_phy_factory_config.ldpc_decoder_type                 = "auto";
+#endif
   if (du_low.expert_phy_cfg.enable_phy_tap) {
     upper_phy_factory_config.phy_tap_arguments = du_low.expert_phy_cfg.phy_tap_arguments;
     if (cells[0].tdd_pattern) {

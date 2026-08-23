@@ -743,6 +743,12 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
          .ldpc_decoder_offset    = config.ldpc_decoder_offset});
     report_fatal_error_if_not(
         decoder_config.decoder_factory, "Invalid LDPC decoder factory of type {}.", config.crc_calculator_type);
+#if defined(__APPLE__)
+    // macOS: log the effective PUSCH LDPC decoder type so the expert knob
+    // (expert_phy --pusch_ldpc_decoder_type) A/B runs are verifiable at startup
+    // (Linux keeps the upstream silent path).
+    ocudulog::fetch_basic_logger("GNB").info("PUSCH LDPC decoder type: {}", config.ldpc_decoder_type);
+#endif
     decoder_config.dematcher_factory = create_ldpc_rate_dematcher_factory_sw(config.ldpc_rate_dematcher_type);
     report_fatal_error_if_not(decoder_config.dematcher_factory,
                               "Invalid LDPC Rate Dematcher factory of type {}.",
