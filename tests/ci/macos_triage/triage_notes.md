@@ -228,4 +228,5 @@ With the flag OFF no probe code is compiled (zero impact, the gnb binary contain
 strings). The zmq/PHY logs go to the normal log file; remember to set `log: lib_level: info` in
 `configs/gnb_zmq.yaml` so the "ALL"-logger probes (dl/ul lower-PHY) are not dropped. The wired ZMQ
 setup (gnb=198.19.0.1, UE=198.19.0.2, Ubuntu gnb=198.19.0.3, direct cable) is the reference transport
-for future E2E runs.
+for future E2E runs. The reusable analysis scripts, the capture protocol and the full comparison
+report live in `tests/ci/macos_e2e/` (REPORT.md, README.md and the pcap/probe parsers).
