@@ -666,6 +666,7 @@ int main(int argc, char** argv)
   // Xn-C gateway is stopped by Xn-C connection manager.
 
   // Report the UL compute pipeline statistics (compiled in only with ENABLE_FLOW_PROBES).
+  // cmake -S . -B build -DENABLE_FLOW_PROBES=ON && make -C build gnb
   ocudu::ul_pipeline_probe::get().report();
 
   return 0;
