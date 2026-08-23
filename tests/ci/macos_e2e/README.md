@@ -1,8 +1,8 @@
 # macOS E2E analysis toolkit
 
 Tools and report for the gnb E2E latency analysis (macOS vs Ubuntu gnb, ZMQ transport, srsUE +
-Open5GS core). This directory is the reusable part of the analysis; the multi-GB raw captures
-stay in the local workspace `../e2e_compare/` next to the repo checkout.
+Open5GS core). This directory is the reusable part of the analysis; the multi-GB raw captures were kept in a
+local workspace during the analysis and discarded once the report was committed.
 
 ## Reference transport (wired ZMQ)
 

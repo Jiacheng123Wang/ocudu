@@ -99,8 +99,8 @@ to 13-19 rounds/s, which multiplies into ~1s ping RTT.
 
 ## Files
 
-Raw captures and probe logs (hundreds of MB to GB) stay in the local analysis
-workspace `../e2e_compare/` next to the repo checkout; the reusable scripts and
+Raw captures and probe logs (hundreds of MB to GB) were kept in a local analysis
+workspace during the analysis and discarded afterwards; the reusable scripts and
 this report live in `tests/ci/macos_e2e/` in the repository.
 
 mac_A/ (v1), mac_A2/ (v2: zmq_mac_gnb.pcap 155MB, gnb.log.v2), ubuntu_B/,

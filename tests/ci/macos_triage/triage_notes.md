@@ -153,8 +153,8 @@ sudo OCUDU_USRSCTP_MODE=udp ctest -L sctp               # the SCTP label alone (
 ## 5. macOS-vs-Ubuntu gnb E2E comparison (2026-08-23, probe commit f42e5b981b)
 
 Same UE (upstream srsUE, 192.168.100.153), same core, same probe-instrumented gnb commit on both hosts;
-ping from the UE to UPF 10.45.0.1, dual-end tcpdumps + `[zmq-probe]` logs. Full numbers in the local
-analysis workspace `../e2e_compare/REPORT.md` (pcaps, logs, and the parse scripts).
+ping from the UE to UPF 10.45.0.1, dual-end tcpdumps + `[zmq-probe]` logs. Full numbers and the
+parse scripts in `tests/ci/macos_e2e/` (REPORT.md; the raw captures were discarded after the analysis).
 
 Result: Ubuntu gnb ping avg ~530ms (min ~155-254ms) vs mac gnb avg ~840-1350ms (min ~400ms). Lockstep
 rounds/s: Ubuntu ~52-56/s, mac 13-19/s. Root cause found - see below.
@@ -191,7 +191,7 @@ Next steps:
 ### 5b. Wired re-run confirms the Wi-Fi diagnosis (2026-08-23)
 
 ZMQ moved to a direct Ethernet cable (mac=198.19.0.1, UE=198.19.0.2, Ubuntu gnb=198.19.0.3),
-same gnb commit f42e5b981b and same UE. Results (full data in `../e2e_compare/REPORT.md`):
+same gnb commit f42e5b981b and same UE. Results (full data in `tests/ci/macos_e2e/REPORT.md`):
 
 | metric | mac Wi-Fi | Ubuntu Wi-Fi | mac wired | Ubuntu wired |
 |---|---|---|---|---|
