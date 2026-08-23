@@ -54,7 +54,8 @@ date -u; ssh jwang@192.168.100.153 'date -u'; ssh jwang@192.168.100.131 'date -u
 `ul_pipeline_probe` prints to stderr at gnb shutdown: `[ul_pipeline]` (IQ received -> CRC-OK decoded),
 `[ul_ldpc_decode]` (pure LDPC decode latency) and `[ul_mac_pdu_size]` (size distribution of the CRC-OK
 MAC PDUs / data bursts, plus a `total=` line with the summed bytes; sample count matches
-`[ul_ldpc_decode]`).
+`[ul_ldpc_decode]`). The LDPC start/completion pairs are matched by PUSCH slot number (no time-based
+staleness threshold), so slow decoders (e.g. Metal at ~2 ms/decode) are measured without truncation.
 
 ## Scripts
 

@@ -344,9 +344,9 @@ void pusch_decoder_impl::fork_codeblock_task(unsigned cb_id)
     if (decoder_ptr) {
       // T_start of the pure LDPC decode measurement: the first codeblock's decode
       // invocation (the light link uses single-CB TBs, where this is exact; the
-      // probe's staleness guard drops leftover starts of the corner cases).
+      // slot-keyed pairing in the probe drops leftover starts of the corner cases).
       if (cb_id == 0) {
-        ul_pipeline_probe::get().record_ldpc_start();
+        ul_pipeline_probe::get().record_ldpc_start(current_config.slot.count());
       }
       nof_iters = decoder_ptr->decode(message,
                                       rm_buffer,

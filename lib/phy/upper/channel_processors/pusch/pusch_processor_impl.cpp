@@ -295,6 +295,7 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
     decoder_config.nof_ldpc_iterations = dec_nof_iterations;
     decoder_config.use_early_stop      = dec_enable_early_stop;
     decoder_config.new_data            = pdu.codeword->new_data;
+    decoder_config.slot                = pdu.slot;
 
     // Setup decoder.
     decoder_buffer =

@@ -30,10 +30,10 @@ namespace ocudu {
 ///
 /// A second series measures the pure LDPC decoder latency (first codeblock decode invocation -> the same CRC-OK
 /// completion as above): record_ldpc_start() is called by the PUSCH codeblock task right before the LDPC decoder is
-/// invoked. The start is a single last-write-wins timestamp: with the light traffic of a single UE there is one TB
-/// in flight at a time, so a start left behind by a CRC-failed TB is overwritten by the next TB's decode before its
-/// completion. A staleness guard (2 ms) drops leftover starts that predate the current TB (e.g. a retransmission
-/// that needs no decode), so stale starts are never paired with a foreign completion.
+/// invoked. Starts and ends are matched by slot number (with the same small-offset tolerance as the pipeline
+/// series), so a start left behind by a CRC-failed TB or a retransmission that needed no decode is simply left
+/// unmatched (and eventually evicted) - there is no time-based staleness threshold, which would otherwise truncate
+/// the series whenever the decoder latency grows (e.g. the Metal decoder at ~2 ms).
 ///
 /// A third series records the size in bytes of each CRC-OK MAC PDU (the data burst), in lockstep with the LDPC
 /// latency series, so its sample count always matches [ul_ldpc_decode]; report() prints its distribution and the
@@ -60,10 +60,16 @@ public:
   }
 
   /// Records the start of the LDPC decoder (call right before the first codeblock decode of a transport block).
-  void record_ldpc_start()
+  /// \param[in] slot Slot number of the PUSCH (same reference as record_end_crc_ok).
+  void record_ldpc_start(uint64_t slot)
   {
     std::lock_guard<std::mutex> lock(mutex);
-    pending_ldpc_start = std::chrono::high_resolution_clock::now();
+    pending_ldpc_starts[slot] = std::chrono::high_resolution_clock::now();
+    // Bound the registry: unmatched entries belong to TBs that ended without a CRC-OK completion
+    // (or with one in a shifted slot), drop the oldest.
+    if (pending_ldpc_starts.size() > 256) {
+      pending_ldpc_starts.erase(pending_ldpc_starts.begin());
+    }
   }
 
   /// Records the completion of the UL processing of a transport block whose CRC check passed.
@@ -89,17 +95,22 @@ public:
       pending_starts.erase(it);
       latencies_us.push_back(latency_us);
     }
-    // LDPC decoder latency: the pending start belongs to this TB only if it is fresh (a decode-to-completion
-    // cannot exceed the ~300 us pipeline, so 2 ms also covers multi-CB TBs; stale starts are leftovers of
-    // CRC-failed TBs or retransmissions that needed no decode and are dropped).
-    if (pending_ldpc_start.has_value()) {
+    // LDPC decoder latency: match the start recorded for this TB by slot (same tolerance as above). No time-based
+    // staleness check: a decode can legitimately take several milliseconds with a slow decoder, and a hard
+    // threshold would silently truncate the series (and the MAC-PDU-size series with it).
+    auto ldpc_it = pending_ldpc_starts.find(slot);
+    if (ldpc_it == pending_ldpc_starts.end() && slot > 0) {
+      ldpc_it = pending_ldpc_starts.find(slot - 1);
+    }
+    if (ldpc_it == pending_ldpc_starts.end() && slot > 1) {
+      ldpc_it = pending_ldpc_starts.find(slot - 2);
+    }
+    if (ldpc_it != pending_ldpc_starts.end()) {
       const auto ldpc_us =
-          std::chrono::duration_cast<std::chrono::microseconds>(now - *pending_ldpc_start);
-      pending_ldpc_start.reset();
-      if (ldpc_us.count() <= 2000) {
-        ldpc_latencies_us.push_back(static_cast<double>(ldpc_us.count()));
-        mac_pdu_sizes_bytes.push_back(static_cast<double>(mac_pdu_bytes));
-      }
+          std::chrono::duration_cast<std::chrono::microseconds>(now - ldpc_it->second);
+      pending_ldpc_starts.erase(ldpc_it);
+      ldpc_latencies_us.push_back(static_cast<double>(ldpc_us.count()));
+      mac_pdu_sizes_bytes.push_back(static_cast<double>(mac_pdu_bytes));
     }
   }
 
@@ -184,8 +195,8 @@ private:
   std::mutex mutex;
   std::map<uint64_t, std::chrono::time_point<std::chrono::high_resolution_clock>> pending_starts;
   std::vector<double> latencies_us;
-  /// Last-write-wins timestamp of the current TB's LDPC decoder start (see record_ldpc_start()).
-  std::optional<std::chrono::time_point<std::chrono::high_resolution_clock>> pending_ldpc_start;
+  /// Slot-keyed timestamps of the current TBs' LDPC decoder starts (see record_ldpc_start()).
+  std::map<uint64_t, std::chrono::time_point<std::chrono::high_resolution_clock>> pending_ldpc_starts;
   std::vector<double> ldpc_latencies_us;
   /// Sizes in bytes of the CRC-OK MAC PDUs (data bursts), recorded together with the LDPC latency samples.
   std::vector<double> mac_pdu_sizes_bytes;
@@ -202,7 +213,7 @@ public:
     return instance;
   }
   void record_start(uint64_t /*slot*/) {}
-  void record_ldpc_start() {}
+  void record_ldpc_start(uint64_t /*slot*/) {}
   void record_end_crc_ok(uint64_t /*slot*/, size_t /*mac_pdu_bytes*/) {}
   void report() {}
 

@@ -11,6 +11,7 @@
 #include "ocudu/phy/upper/log_likelihood_ratio.h"
 #include "ocudu/ran/sch/ldpc_base_graph.h"
 #include "ocudu/ran/sch/modulation_scheme.h"
+#include "ocudu/ran/slot_point.h"
 
 namespace ocudu {
 
@@ -55,6 +56,8 @@ public:
     bool use_early_stop = true;
     /// Flag to denote new data (first HARQ transmission).
     bool new_data = true;
+    /// Slot of the PUSCH transmission (used by the UL pipeline probe for slot-keyed matching).
+    slot_point slot;
   };
 
   /// Default destructor.
