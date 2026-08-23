@@ -149,3 +149,41 @@ sudo OCUDU_USRSCTP_MODE=udp ctest -L sctp               # the SCTP label alone (
 
 `SUMMARY.md` is regenerated from the scan logs with `tests/ci/macos_triage/aggregate.py` +
 `tests/ci/macos_triage/make_summary.py`; this file is hand-written - update it after every new finding.
+
+## 5. macOS-vs-Ubuntu gnb E2E comparison (2026-08-23, probe commit f42e5b981b)
+
+Same UE (upstream srsUE, 192.168.100.153), same core, same probe-instrumented gnb commit on both hosts;
+ping from the UE to UPF 10.45.0.1, dual-end tcpdumps + `[zmq-probe]` logs. Full numbers in the local
+analysis workspace `../e2e_compare/REPORT.md` (pcaps, logs, and the parse scripts).
+
+Result: Ubuntu gnb ping avg ~530ms (min ~155-254ms) vs mac gnb avg ~840-1350ms (min ~400ms). Lockstep
+rounds/s: Ubuntu ~52-56/s, mac 13-19/s. Root cause found - see below.
+
+Evidence chain (all measured):
+
+1. gnb probe logs: `tx buffer-empty-wait` p50 ~1.5ms on BOTH hosts -> the DL producer keeps up with the
+   UE pulls on the mac too. The earlier hypothesis "Ubuntu produces DL slots faster per slot" is REFUTED.
+   `zmq-send-block` = 0 events on both (the macOS 8MB socket-buffer fix works; Ubuntu never blocks).
+2. pcap (DL stream): Ubuntu replies = 1 slot (92KB) delivered in 3 TSO super-segments, wire time med 6ms;
+   mac replies = 2 slots (184KB) in 128 MSS segments, wire time med 55ms, 1520 retransmissions.
+3. UE-side pcaps: UE arrival->ACK delay med 0.0ms on BOTH rounds -> the UE TCP stack is exonerated
+   (its 64KB receive window only shapes the burst count, it never stalls the stream).
+4. Both-end one-way matching: mac->UE DL data one-way ~70ms per burst vs UE->mac ~4ms; 131<->153 both
+   directions are single-digit ms. Per-reply timeline: the mac's kernel queues a 64KB burst, the burst
+   reaches the UE ~70ms later, the UE ACKs instantly, and only then does the next burst go out; a 184KB
+   reply costs 3 x ~70ms = 210ms and collapses the lockstep to 13-19 rounds/s, which multiplies into
+   ~1s ping RTT (UE waits for UL requests ~47ms + DL cycles + gnb scheduling quanta).
+5. All three hosts are on Wi-Fi (mac en1, 131 wlo1, 153 wlo1). Idle mac->153 ping right now:
+   9.9/51.3/93.8 ms; RSSI -67dBm (5GHz ch149); awdl0 UP (AWDL causes periodic macOS TX stalls).
+
+Conclusion: the E2E gap is NOT in the gnb code, the UE, or the ZMQ/TCP logic. It is the mac's Wi-Fi
+transmit path adding ~70ms per 64KB TX burst (weak signal + AWDL); Ubuntu's good Wi-Fi link + TSO bursts
+deliver each 92KB reply in ~6ms and keep the lockstep at ~55 rounds/s.
+
+Next steps:
+1. Re-run Round A with the mac on Ethernet (definitive confirmation; expect ~Ubuntu-level ping).
+2. If stuck on Wi-Fi: `sudo ifconfig awdl0 down` before the run, improve RSSI/channel.
+3. Optional re-run with `lib_level: info` (already added to both `configs/gnb_zmq.yaml`) to capture the
+   dl production-rate probes (they were dropped before because lib_level defaults to warning).
+4. Keep the 8MB socket-buffer fix (keeps the channel loop healthy on slow links); revert only the probe
+   commit f42e5b981b when the comparison is done. Tag `macos_e2e_stable` stays at 383dc4eae8.
