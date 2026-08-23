@@ -72,14 +72,18 @@ public:
   /// \param[in] notifier_            PUSCH processor result notifier.
   /// \param[in] csi_part_1_feedback_ Uplink control information field CSI Part 1 feedback notifier.
   /// \param[in] csi                  Channel state information.
+  /// \param[in] sch_data_bytes_      Size in bytes of the UL-SCH (MAC PDU) buffer of this transmission, recorded by
+  ///                                 the UL pipeline probe when the CRC passes (0 when the PUSCH carries no SCH data).
   /// \return A PUSCH processor notifier adaptor.
   void new_transmission(pusch_processor_result_notifier&    notifier_,
                         pusch_processor_csi_part1_feedback& csi_part_1_feedback_,
-                        const channel_state_information&    csi)
+                        const channel_state_information&    csi,
+                        size_t                              sch_data_bytes_ = 0)
   {
     notifier            = &notifier_;
     csi_part_1_feedback = &csi_part_1_feedback_;
     uci_payload.csi     = csi;
+    sch_data_bytes      = sch_data_bytes_;
 
     uci_payload.harq_ack.clear();
     uci_payload.csi_part1.clear();
@@ -233,7 +237,7 @@ private:
   {
     // T_end of the UL compute pipeline measurement: the LDPC decoding finished and the transport block CRC passed.
     if (result.tb_crc_ok && current_slot.has_value()) {
-      ul_pipeline_probe::get().record_end_crc_ok(current_slot->count());
+      ul_pipeline_probe::get().record_end_crc_ok(current_slot->count(), sch_data_bytes);
     }
 
     pusch_processor_result_data result_data;
@@ -316,6 +320,9 @@ private:
   pusch_processor_result_notifier* notifier;
   /// Slot of the current transmission (set by the processor per PUSCH; used by the UL pipeline probe).
   std::optional<slot_point> current_slot;
+  /// Size in bytes of the UL-SCH (MAC PDU) buffer of the current transmission (recorded by the UL pipeline probe
+  /// when the CRC passes; 0 when the PUSCH carries no SCH data).
+  size_t sch_data_bytes = 0;
   /// CSI Part 1 feedback.
   pusch_processor_csi_part1_feedback* csi_part_1_feedback;
   /// Channel state information notifier.

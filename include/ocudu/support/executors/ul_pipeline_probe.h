@@ -34,6 +34,10 @@ namespace ocudu {
 /// in flight at a time, so a start left behind by a CRC-failed TB is overwritten by the next TB's decode before its
 /// completion. A staleness guard (2 ms) drops leftover starts that predate the current TB (e.g. a retransmission
 /// that needs no decode), so stale starts are never paired with a foreign completion.
+///
+/// A third series records the size in bytes of each CRC-OK MAC PDU (the data burst), in lockstep with the LDPC
+/// latency series, so its sample count always matches [ul_ldpc_decode]; report() prints its distribution and the
+/// total number of bytes on separate lines.
 class ul_pipeline_probe
 {
 public:
@@ -64,7 +68,10 @@ public:
 
   /// Records the completion of the UL processing of a transport block whose CRC check passed.
   /// \param[in] slot Slot number of the PUSCH (same reference as record_start; a small offset is tolerated).
-  void record_end_crc_ok(uint64_t slot)
+  /// \param[in] mac_pdu_bytes Size of the decoded MAC PDU in bytes (8-bit-granular); recorded only when the LDPC
+  ///            latency sample is recorded, so the MAC-PDU-size series has the same sample count as the
+  ///            [ul_ldpc_decode] series.
+  void record_end_crc_ok(uint64_t slot, size_t mac_pdu_bytes)
   {
     std::chrono::time_point<std::chrono::high_resolution_clock> now = std::chrono::high_resolution_clock::now();
 
@@ -91,6 +98,7 @@ public:
       pending_ldpc_start.reset();
       if (ldpc_us.count() <= 2000) {
         ldpc_latencies_us.push_back(static_cast<double>(ldpc_us.count()));
+        mac_pdu_sizes_bytes.push_back(static_cast<double>(mac_pdu_bytes));
       }
     }
   }
@@ -100,10 +108,12 @@ public:
   {
     std::vector<double> sorted_pipeline;
     std::vector<double> sorted_ldpc;
+    std::vector<double> sorted_pdu_sizes;
     {
       std::lock_guard<std::mutex> lock(mutex);
-      sorted_pipeline = latencies_us;
+      sorted_pipeline  = latencies_us;
       sorted_ldpc      = ldpc_latencies_us;
+      sorted_pdu_sizes = mac_pdu_sizes_bytes;
     }
     if (sorted_pipeline.empty()) {
       std::fprintf(stderr, "[ul_pipeline] no CRC-OK samples recorded\n");
@@ -145,6 +155,27 @@ public:
                  sorted_ldpc.back(),
                  pct(sorted_ldpc, 0.95),
                  pct(sorted_ldpc, 0.99));
+    // MAC PDU size (CRC-OK data bursts): recorded in the same branch as the LDPC latency samples, so the sample
+    // count matches [ul_ldpc_decode]. Printed after it, plus a second line with the total number of bytes.
+    if (sorted_pdu_sizes.empty()) {
+      std::fprintf(stderr, "[ul_mac_pdu_size] no samples recorded\n");
+      return;
+    }
+    std::sort(sorted_pdu_sizes.begin(), sorted_pdu_sizes.end());
+    sum = 0;
+    for (double v : sorted_pdu_sizes) {
+      sum += v;
+    }
+    std::fprintf(stderr,
+                 "[ul_mac_pdu_size] samples=%zu mean=%.1fB median=%.1fB min=%.1fB max=%.1fB p95=%.1fB p99=%.1fB\n",
+                 sorted_pdu_sizes.size(),
+                 sum / static_cast<double>(sorted_pdu_sizes.size()),
+                 pct(sorted_pdu_sizes, 0.5),
+                 sorted_pdu_sizes.front(),
+                 sorted_pdu_sizes.back(),
+                 pct(sorted_pdu_sizes, 0.95),
+                 pct(sorted_pdu_sizes, 0.99));
+    std::fprintf(stderr, "[ul_mac_pdu_size] total=%.1fB\n", sum);
   }
 
 private:
@@ -156,6 +187,8 @@ private:
   /// Last-write-wins timestamp of the current TB's LDPC decoder start (see record_ldpc_start()).
   std::optional<std::chrono::time_point<std::chrono::high_resolution_clock>> pending_ldpc_start;
   std::vector<double> ldpc_latencies_us;
+  /// Sizes in bytes of the CRC-OK MAC PDUs (data bursts), recorded together with the LDPC latency samples.
+  std::vector<double> mac_pdu_sizes_bytes;
 };
 
 #else // not OCUDU_FLOW_PROBES: no-op implementation with zero overhead.
@@ -170,7 +203,7 @@ public:
   }
   void record_start(uint64_t /*slot*/) {}
   void record_ldpc_start() {}
-  void record_end_crc_ok(uint64_t /*slot*/) {}
+  void record_end_crc_ok(uint64_t /*slot*/, size_t /*mac_pdu_bytes*/) {}
   void report() {}
 
 private:
