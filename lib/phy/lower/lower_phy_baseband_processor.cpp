@@ -276,8 +276,15 @@ void lower_phy_baseband_processor::ul_process()
   ru_tracer << trace_event("receive_baseband", tp);
 
   // T_start of the UL compute pipeline measurement (IQ samples just received, UL processing about to start).
-  // The slot number uses the same reference as the FAPI slot indications (SFN0-referenced slot count).
-  ul_pipeline_probe::get().record_start(apply_timestamp_sfn0_ref(rx_metadata.ts) / srate.to_kHz());
+  // Use the same slot reference the FAPI slot_point carries to the PUSCH completion (the sample-timestamp-derived
+  // count modulo the SFN cycle, as computed by the uplink processor): with the plain absolute count the pairing
+  // only matched during the first SFN cycle of the run.
+  {
+    const uint64_t samples_per_slot        = srate.to_kHz() * static_cast<uint64_t>(slot_duration.count()) / 1000;
+    const uint64_t nof_slots_per_sfn_cycle = (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / samples_per_slot;
+    ul_pipeline_probe::get().record_start((apply_timestamp_sfn0_ref(rx_metadata.ts) / samples_per_slot) %
+                                          nof_slots_per_sfn_cycle);
+  }
 
   // Update last timestamp.
   last_rx_timestamp.store(rx_metadata.ts + rx_buffer->get_nof_samples(), std::memory_order_release);
