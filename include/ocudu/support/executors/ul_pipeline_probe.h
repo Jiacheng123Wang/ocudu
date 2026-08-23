@@ -52,11 +52,10 @@ public:
   void record_start(uint64_t slot)
   {
     std::lock_guard<std::mutex> lock(mutex);
-    pending_starts[slot] = std::chrono::high_resolution_clock::now();
-    // Bound the registry: unmatched entries belong to idle slots (no PUSCH), drop the oldest.
-    if (pending_starts.size() > 256) {
-      pending_starts.erase(pending_starts.begin());
-    }
+    pending_starts[slot] = {std::chrono::high_resolution_clock::now(), next_start_seq++};
+    // Bound the registry by INSERTION ORDER (the slot count wraps every SFN cycle, so the key order is not a
+    // valid age order): unmatched entries belong to idle slots (no PUSCH), drop the oldest insertion.
+    evict_oldest(pending_starts);
   }
 
   /// Records the start of the LDPC decoder (call right before the first codeblock decode of a transport block).
@@ -64,12 +63,10 @@ public:
   void record_ldpc_start(uint64_t slot)
   {
     std::lock_guard<std::mutex> lock(mutex);
-    pending_ldpc_starts[slot] = std::chrono::high_resolution_clock::now();
-    // Bound the registry: unmatched entries belong to TBs that ended without a CRC-OK completion
-    // (or with one in a shifted slot), drop the oldest.
-    if (pending_ldpc_starts.size() > 256) {
-      pending_ldpc_starts.erase(pending_ldpc_starts.begin());
-    }
+    pending_ldpc_starts[slot] = {std::chrono::high_resolution_clock::now(), next_start_seq++};
+    // Bound the registry by insertion order (see record_start): unmatched entries belong to TBs that ended
+    // without a CRC-OK completion (or with one in a shifted slot).
+    evict_oldest(pending_ldpc_starts);
   }
 
   /// Records the completion of the UL processing of a transport block whose CRC check passed.
@@ -91,7 +88,7 @@ public:
     }
     if (it != pending_starts.end()) {
       double latency_us =
-          static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(now - it->second).count());
+          static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(now - it->second.tp).count());
       pending_starts.erase(it);
       latencies_us.push_back(latency_us);
     }
@@ -107,7 +104,7 @@ public:
     }
     if (ldpc_it != pending_ldpc_starts.end()) {
       const auto ldpc_us =
-          std::chrono::duration_cast<std::chrono::microseconds>(now - ldpc_it->second);
+          std::chrono::duration_cast<std::chrono::microseconds>(now - ldpc_it->second.tp);
       pending_ldpc_starts.erase(ldpc_it);
       ldpc_latencies_us.push_back(static_cast<double>(ldpc_us.count()));
       mac_pdu_sizes_bytes.push_back(static_cast<double>(mac_pdu_bytes));
@@ -192,11 +189,33 @@ public:
 private:
   ul_pipeline_probe() = default;
 
-  std::mutex mutex;
-  std::map<uint64_t, std::chrono::time_point<std::chrono::high_resolution_clock>> pending_starts;
+  /// Registry entry: start timestamp plus a monotonic insertion sequence (the slot key wraps every SFN cycle,
+  /// so it cannot serve as the age order for the bounded-registry eviction).
+  struct start_entry {
+    std::chrono::time_point<std::chrono::high_resolution_clock> tp;
+    uint64_t                                                     seq;
+  };
+
+  using start_registry = std::map<uint64_t, start_entry>;
+
+  /// Keeps the registry bounded by evicting the entry with the lowest insertion sequence (FIFO by insertion,
+  /// safe against the periodic slot-count wrap).
+  static void evict_oldest(start_registry& registry)
+  {
+    if (registry.size() <= 256) {
+      return;
+    }
+    auto oldest = std::min_element(
+        registry.begin(), registry.end(), [](const auto& lhs, const auto& rhs) { return lhs.second.seq < rhs.second.seq; });
+    registry.erase(oldest);
+  }
+
+  std::mutex       mutex;
+  start_registry   pending_starts;
+  uint64_t         next_start_seq = 0;
   std::vector<double> latencies_us;
   /// Slot-keyed timestamps of the current TBs' LDPC decoder starts (see record_ldpc_start()).
-  std::map<uint64_t, std::chrono::time_point<std::chrono::high_resolution_clock>> pending_ldpc_starts;
+  start_registry   pending_ldpc_starts;
   std::vector<double> ldpc_latencies_us;
   /// Sizes in bytes of the CRC-OK MAC PDUs (data bursts), recorded together with the LDPC latency samples.
   std::vector<double> mac_pdu_sizes_bytes;
