@@ -10,11 +10,17 @@
 //     erasure/shortening semantics the decoders receive from the real rate dematcher),
 //   - BPSK + AWGN at Es/N0 = SNR, quantized to int8 LLRs (clamped +/-64),
 //   - decode the same LLRs with the CPU (generic) and the GPU (metal) decoder,
-//   - record the per-point pass counts into a CSV for the plotting script.
+//   - record the per-point pass counts and, for the CRC-OK decodes only, the per-decoder
+//     latency distribution (mean/median/min/max/p95/p99) into a CSV for the plotting script.
+//
+// The first GPU decode builds the engine slot and compiles the shaders, so it is not
+// representative: --warmup N (default 3) rounds run before the SNR sweep and are excluded
+// from every statistic. Each packet has a fixed size (K bits), so the correctly received
+// data per point is simply the CRC-OK count times the packet size.
 //
 // Usage: ldpc_metal_bler_test [--outdir DIR] [--gpu-type metal] [--bg 1|2] [--z Z]
 //        [--rates 0.333,0.5,...] [--snrs 0:2:10] [--trials N] [--max-iter N] [--cpu-max-iter N]
-//        [--norm A] [--beta B] [--latency N]
+//        [--norm A] [--beta B] [--latency N] [--warmup N]
 
 #include "ocudu/phy/upper/channel_coding/channel_coding_factories.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc_encoder_buffer.h"
@@ -49,6 +55,7 @@ struct params {
   unsigned    max_iter = 6;
   unsigned    cpu_max_iter = 0; // 0 = same as max_iter (decoupled for the flooding evaluation)
   unsigned    latency  = 0; // >0: decode-latency mode, N timed decodes per decoder
+  unsigned    warmup   = 3; // BLER mode: warm-up rounds before the SNR sweep (GPU init excluded)
 };
 
 /// Parses "a:b:c" into a sequence, or a single value.
@@ -119,6 +126,8 @@ params parse_args(int argc, char** argv)
       p.cpu_max_iter = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else if (a == "--latency") {
       p.latency = static_cast<unsigned>(std::stoul(next(a.c_str())));
+    } else if (a == "--warmup") {
+      p.warmup = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else {
       std::fprintf(stderr, "unknown argument '%s'\n", a.c_str());
       std::exit(1);
@@ -220,6 +229,34 @@ round_trip run_once(std::mt19937&          rng,
     }
   }
   return res;
+}
+
+/// Latency distribution of one decoder over one SNR point (CRC-OK decodes only).
+struct latency_stats {
+  double mean   = 0.0;
+  double median = 0.0;
+  double min    = 0.0;
+  double max    = 0.0;
+  double p95    = 0.0;
+  double p99    = 0.0;
+};
+
+/// Sorts the sample vector in place and returns its distribution (requires a non-empty vector).
+latency_stats compute_stats(std::vector<double>& v)
+{
+  ocudu_assert(!v.empty(), "Empty latency vector.");
+  std::sort(v.begin(), v.end());
+  auto pct = [&v](double p) { return v[static_cast<size_t>((v.size() - 1) * p)]; };
+  double sum = 0;
+  for (double x : v) {
+    sum += x;
+  }
+  return {.mean   = sum / static_cast<double>(v.size()),
+          .median = pct(0.5),
+          .min    = v.front(),
+          .max    = v.back(),
+          .p95    = pct(0.95),
+          .p99    = pct(0.99)};
 }
 
 } // namespace
@@ -326,6 +363,21 @@ int main(int argc, char** argv)
     return 0;
   }
 
+  // Warm-up: the first GPU decode builds the engine slot and compiles the shaders,
+  // so it is orders of magnitude slower than the steady state and must not leak
+  // into the per-point latency statistics. Discarded (--warmup 0 to disable).
+  if (p.warmup > 0) {
+    const double   warm_rate  = p.rates.front();
+    const double   warm_snr   = p.snrs.front();
+    const unsigned warm_e     = std::min(static_cast<unsigned>(std::lround(k / warm_rate)), n_short * p.z);
+    const double   warm_sigma = std::sqrt(std::pow(10.0, -warm_snr / 10.0) / 2.0);
+    std::fprintf(stderr, "warm-up: %u decode(s) at rate %.4f snr %.1f dB (discarded)\n", p.warmup, warm_rate, warm_snr);
+    for (unsigned w = 0; w != p.warmup; ++w) {
+      run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, warm_e, warm_sigma, p.max_iter,
+               p.cpu_max_iter, bg, ls);
+    }
+  }
+
   for (double rate : p.rates) {
     // Clamp the rate-matched length to the codeblock (the rounding of k/rate can
     // overshoot the shortened codeblock by one bit at low rates).
@@ -335,8 +387,10 @@ int main(int argc, char** argv)
     std::snprintf(fname, sizeof(fname), "%s/bler_%s_bg%u_z%u_r%.4f.csv", p.outdir.c_str(), p.gpu_type.c_str(), p.bg, p.z, rate);
     std::ofstream csv(fname);
     csv << "# gpu=" << p.gpu_type << " bg=" << p.bg << " z=" << p.z << " k=" << k << " rate=" << rate << " e=" << e
-        << " max_iter=" << p.max_iter << " trials=" << p.trials << "\n";
-    csv << "snr_db,cpu_pass,gpu_pass,total,time_cpu_s,time_gpu_s\n";
+        << " max_iter=" << p.max_iter << " trials=" << p.trials << " warmup=" << p.warmup << "\n";
+    csv << "snr_db,cpu_pass,gpu_pass,total,time_cpu_s,time_gpu_s,"
+           "cpu_mean_us,cpu_median_us,cpu_min_us,cpu_max_us,cpu_p95_us,cpu_p99_us,"
+           "gpu_mean_us,gpu_median_us,gpu_min_us,gpu_max_us,gpu_p95_us,gpu_p99_us\n";
     std::fprintf(stderr, "rate %.4f (e=%u):", rate, e);
 
     for (double snr : p.snrs) {
@@ -346,6 +400,13 @@ int main(int argc, char** argv)
       // times each decode separately, so the CPU and GPU curves carry their
       // own run times).
       double cpu_us_sum = 0.0, gpu_us_sum = 0.0;
+      // Per-decoder latency samples of the CRC-OK decodes only: the data burst
+      // size is fixed (K bits), so cpu_pass/gpu_pass times the packet size is
+      // the correctly received data of the point.
+      std::vector<double> cpu_ok_us;
+      std::vector<double> gpu_ok_us;
+      cpu_ok_us.reserve(p.trials);
+      gpu_ok_us.reserve(p.trials);
       for (unsigned t = 0; t != p.trials; ++t) {
         double c_us = 0.0, g_us = 0.0;
         const round_trip r = run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma,
@@ -354,11 +415,36 @@ int main(int argc, char** argv)
         gpu_pass += r.gpu_ok ? 1 : 0;
         cpu_us_sum += c_us;
         gpu_us_sum += g_us;
+        if (r.cpu_ok) {
+          cpu_ok_us.push_back(c_us);
+        }
+        if (r.gpu_ok) {
+          gpu_ok_us.push_back(g_us);
+        }
       }
       csv << snr << "," << cpu_pass << "," << gpu_pass << "," << p.trials << ","
-          << cpu_us_sum / 1e6 << "," << gpu_us_sum / 1e6 << "\n";
-      std::fprintf(stderr, " %gdB:%u/%u (cpu %.1fs gpu %.1fs)", snr, gpu_pass, p.trials, cpu_us_sum / 1e6,
+          << cpu_us_sum / 1e6 << "," << gpu_us_sum / 1e6;
+      std::fprintf(stderr, " %gdB:%u/%u (cpu %.1fs gpu %.1fs", snr, gpu_pass, p.trials, cpu_us_sum / 1e6,
                    gpu_us_sum / 1e6);
+      // CRC-OK-only latency statistics, one column block per decoder; empty when a decoder has no CRC-OK sample.
+      if (!cpu_ok_us.empty()) {
+        const latency_stats cs = compute_stats(cpu_ok_us);
+        csv << "," << cs.mean << "," << cs.median << "," << cs.min << "," << cs.max << "," << cs.p95 << ","
+            << cs.p99;
+        std::fprintf(stderr, " cpu mean=%.1fus p50=%.1fus max=%.1fus", cs.mean, cs.median, cs.max);
+      } else {
+        csv << ",,,,,,";
+      }
+      if (!gpu_ok_us.empty()) {
+        const latency_stats gs = compute_stats(gpu_ok_us);
+        csv << "," << gs.mean << "," << gs.median << "," << gs.min << "," << gs.max << "," << gs.p95 << ","
+            << gs.p99;
+        std::fprintf(stderr, " gpu mean=%.1fus p50=%.1fus max=%.1fus", gs.mean, gs.median, gs.max);
+      } else {
+        csv << ",,,,,,";
+      }
+      csv << "\n";
+      std::fprintf(stderr, ")");
     }
     csv.close();
     std::fprintf(stderr, " -> %s\n", fname);
