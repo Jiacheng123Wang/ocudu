@@ -11,6 +11,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <cstring>
+#include <mutex>
 #include <unordered_map>
 
 #include "ocudu_metal_decoder_engine.h"
@@ -129,6 +130,135 @@ id<MTLBuffer> zero_copy_buffer(engine_impl_t* engine, const void* ptr, size_t le
   return buf;
 }
 
+/// Per-algorithm-family resources shared by every engine of that family: the Metal device, one command
+/// queue and the compiled pipeline states. They are size-independent (the kernels receive their
+/// dimensions via setBytes at dispatch time), so creating them per (BG, Z) slot - as the first version
+/// did - reloaded the same .metallib and rebuilt the same pipelines for every new lifting size, paying
+/// a several-ms stall on each new TB size during the run.
+struct algo_resources_t {
+  id<MTLDevice>                device                 = nil;
+  id<MTLCommandQueue>          queue                  = nil;
+  id<MTLComputePipelineState> p_nmsl_init            = nil;
+  id<MTLComputePipelineState> p_nmsl_convert         = nil;
+  id<MTLComputePipelineState> p_nmsl_cn              = nil;
+  id<MTLComputePipelineState> p_nmsl_final_syndrome  = nil;
+  id<MTLComputePipelineState> p_nmsl_et_gate         = nil;
+  id<MTLComputePipelineState> p_nmsl_persistent      = nil;
+  id<MTLComputePipelineState> p_nmsf_init            = nil;
+  id<MTLComputePipelineState> p_nmsf_convert         = nil;
+  id<MTLComputePipelineState> p_nmsf_cn              = nil;
+  id<MTLComputePipelineState> p_nmsf_vn              = nil;
+  id<MTLComputePipelineState> p_nmsa_init            = nil;
+  id<MTLComputePipelineState> p_nmsa_delta_bp        = nil;
+};
+
+std::unordered_map<int, algo_resources_t>& algo_resources_cache()
+{
+  static std::unordered_map<int, algo_resources_t> cache;
+  return cache;
+}
+
+std::mutex& algo_resources_mutex()
+{
+  static std::mutex m;
+  return m;
+}
+
+/// Returns the shared resources of one algorithm family, creating them on first use (the .metallib is
+/// loaded and the pipelines are compiled exactly once per family, logged once).
+algo_resources_t* get_algo_resources(decoder_engine::algo mode)
+{
+  std::lock_guard<std::mutex> lock(algo_resources_mutex());
+  auto&                      cache = algo_resources_cache();
+  auto                       it    = cache.find(static_cast<int>(mode));
+  if (it != cache.end()) {
+    return &it->second;
+  }
+
+  algo_resources_t res;
+  res.device = MTLCreateSystemDefaultDevice();
+  if (res.device == nil) {
+    NSLog(@"ocudu Metal LDPC: no Metal device available");
+    return nullptr;
+  }
+  res.queue = [res.device newCommandQueue];
+
+  // Pre-compiled shader library per algorithm family (offline xcrun
+  // metal/metallib, one .metallib per .metal source): loaded directly, so
+  // engine init no longer pays the runtime shader compilation.
+  const char* lib_name       = "ocudu_nms_layered_decoder.metallib";
+  const char* lib_path_macro = nullptr;
+#ifdef OCUDU_METAL_LAYERED_LIB_PATH
+  lib_path_macro = OCUDU_METAL_LAYERED_LIB_PATH;
+#endif
+  if (mode == decoder_engine::algo::flooding) {
+    lib_name       = "ocudu_nms_flooding_decoder.metallib";
+    lib_path_macro = nullptr;
+#ifdef OCUDU_METAL_FLOODING_LIB_PATH
+    lib_path_macro = OCUDU_METAL_FLOODING_LIB_PATH;
+#endif
+  } else if (mode == decoder_engine::algo::async_delta) {
+    lib_name       = "ocudu_nms_async_decoder.metallib";
+    lib_path_macro = nullptr;
+#ifdef OCUDU_METAL_ASYNC_LIB_PATH
+    lib_path_macro = OCUDU_METAL_ASYNC_LIB_PATH;
+#endif
+  }
+  NSString* lib_path = resolve_metallib_path(lib_path_macro, lib_name);
+  if (lib_path == nil) {
+    NSLog(@"ocudu Metal LDPC: pre-compiled shader library '%s' not found (searched the configure-time "
+          @"path, next to the executable, and the working directory)",
+          lib_name);
+    return nullptr;
+  }
+  NSError*       error   = nil;
+  id<MTLLibrary> library = [res.device newLibraryWithURL:[NSURL fileURLWithPath:lib_path] error:&error];
+  if (library == nil) {
+    NSLog(@"ocudu Metal LDPC: failed to load the pre-compiled shader library %@: %@", lib_path, error);
+    return nullptr;
+  }
+  NSLog(@"ocudu Metal LDPC: loaded pre-compiled shader library %@", lib_path);
+
+  auto make_pipeline = [&](id<MTLComputePipelineState> __strong* out, const char* name) -> bool {
+    id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:name]];
+    if (fn == nil) {
+      NSLog(@"ocudu Metal LDPC: kernel '%s' not found in the shader library", name);
+      return false;
+    }
+    *out = [res.device newComputePipelineStateWithFunction:fn error:&error];
+    if (*out == nil) {
+      NSLog(@"ocudu Metal LDPC: pipeline '%s' failed: %@", name, error);
+      return false;
+    }
+    return true;
+  };
+  if (mode == decoder_engine::algo::flooding) {
+    if (!make_pipeline(&res.p_nmsf_init, "nmsf_init") ||
+        !make_pipeline(&res.p_nmsf_convert, "nmsf_i8_to_fp16") ||
+        !make_pipeline(&res.p_nmsf_cn, "nmsf_cn_update") || !make_pipeline(&res.p_nmsf_vn, "nmsf_vn_update")) {
+      return nullptr;
+    }
+  } else if (mode == decoder_engine::algo::layered_persistent) {
+    if (!make_pipeline(&res.p_nmsl_persistent, "nmsl_persistent_decode")) {
+      return nullptr;
+    }
+  } else if (mode == decoder_engine::algo::async_delta) {
+    if (!make_pipeline(&res.p_nmsa_init, "nmsa_init") || !make_pipeline(&res.p_nmsa_delta_bp, "nmsa_delta_bp")) {
+      return nullptr;
+    }
+  } else {
+    if (!make_pipeline(&res.p_nmsl_init, "nmsl_init") || !make_pipeline(&res.p_nmsl_convert, "nmsl_i8_to_fp16") ||
+        !make_pipeline(&res.p_nmsl_cn, "nmsl_cn_update") ||
+        !make_pipeline(&res.p_nmsl_final_syndrome, "nmsl_final_syndrome") ||
+        !make_pipeline(&res.p_nmsl_et_gate, "nmsl_et_gate")) {
+      return nullptr;
+    }
+  }
+
+  auto [inserted, ok] = cache.emplace(static_cast<int>(mode), std::move(res));
+  return ok ? &inserted->second : nullptr;
+}
+
 } // namespace
 
 decoder_engine::~decoder_engine()
@@ -161,92 +291,26 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
   engine->n_h_chunks = engine->n_aligned / 32;
   engine->h_pred_len = engine->m_aligned / 32;
 
-  engine->device = MTLCreateSystemDefaultDevice();
-  if (engine->device == nil) {
-    NSLog(@"ocudu Metal LDPC: no Metal device available");
+  // Device, command queue, shader library and pipeline states are shared across every engine of the
+  // same algorithm family (they are size-independent); the per-(BG, Z) part below is only the buffers.
+  const algo_resources_t* res = get_algo_resources(mode);
+  if (res == nullptr) {
     return false;
   }
-  engine->queue = [engine->device newCommandQueue];
-
-  NSError* error = nil;
-
-  // Pre-compiled shader library per algorithm family (offline xcrun
-  // metal/metallib, one .metallib per .metal source): loaded directly, so
-  // engine init no longer pays the runtime shader compilation.
-  const char* lib_name       = "ocudu_nms_layered_decoder.metallib";
-  const char* lib_path_macro = nullptr;
-#ifdef OCUDU_METAL_LAYERED_LIB_PATH
-  lib_path_macro = OCUDU_METAL_LAYERED_LIB_PATH;
-#endif
-  if (mode == algo::flooding) {
-    lib_name       = "ocudu_nms_flooding_decoder.metallib";
-    lib_path_macro = nullptr;
-#ifdef OCUDU_METAL_FLOODING_LIB_PATH
-    lib_path_macro = OCUDU_METAL_FLOODING_LIB_PATH;
-#endif
-  } else if (mode == algo::async_delta) {
-    lib_name       = "ocudu_nms_async_decoder.metallib";
-    lib_path_macro = nullptr;
-#ifdef OCUDU_METAL_ASYNC_LIB_PATH
-    lib_path_macro = OCUDU_METAL_ASYNC_LIB_PATH;
-#endif
-  }
-  NSString* lib_path = resolve_metallib_path(lib_path_macro, lib_name);
-  if (lib_path == nil) {
-    NSLog(@"ocudu Metal LDPC: pre-compiled shader library '%s' not found (searched the configure-time "
-          @"path, next to the executable, and the working directory)",
-          lib_name);
-    return false;
-  }
-  id<MTLLibrary> library = [engine->device newLibraryWithURL:[NSURL fileURLWithPath:lib_path] error:&error];
-  if (library == nil) {
-    NSLog(@"ocudu Metal LDPC: failed to load the pre-compiled shader library %@: %@", lib_path, error);
-    return false;
-  }
-  NSLog(@"ocudu Metal LDPC: loaded pre-compiled shader library %@", lib_path);
-
-  auto make_pipeline = [&](id<MTLComputePipelineState> __strong* out, const char* name) -> bool {
-    id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:name]];
-    if (fn == nil) {
-      NSLog(@"ocudu Metal LDPC: kernel '%s' not found in the shader library", name);
-      return false;
-    }
-    *out = [engine->device newComputePipelineStateWithFunction:fn error:&error];
-    if (*out == nil) {
-      NSLog(@"ocudu Metal LDPC: pipeline '%s' failed: %@", name, error);
-      return false;
-    }
-    return true;
-  };
-  if (mode == algo::flooding) {
-    if (!make_pipeline(&engine->p_nmsf_init, "nmsf_init") ||
-        !make_pipeline(&engine->p_nmsf_convert, "nmsf_i8_to_fp16") ||
-        !make_pipeline(&engine->p_nmsf_cn, "nmsf_cn_update") ||
-        !make_pipeline(&engine->p_nmsf_vn, "nmsf_vn_update")) {
-      return false;
-    }
-  } else if (mode == algo::layered_persistent) {
-    if (!make_pipeline(&engine->p_nmsl_persistent, "nmsl_persistent_decode")) {
-      return false;
-    }
-    // One resident threadgroup of 1024 threads runs the whole decode (the
-    // only cross-thread synchronization this platform guarantees is
-    // threadgroup_barrier; cross-threadgroup software barriers cannot be
-    // made correct with the relaxed-only atomics this MSL exposes).
-  } else if (mode == algo::async_delta) {
-    if (!make_pipeline(&engine->p_nmsa_init, "nmsa_init") ||
-        !make_pipeline(&engine->p_nmsa_delta_bp, "nmsa_delta_bp")) {
-      return false;
-    }
-  } else {
-    if (!make_pipeline(&engine->p_nmsl_init, "nmsl_init") ||
-        !make_pipeline(&engine->p_nmsl_convert, "nmsl_i8_to_fp16") ||
-        !make_pipeline(&engine->p_nmsl_cn, "nmsl_cn_update") ||
-        !make_pipeline(&engine->p_nmsl_final_syndrome, "nmsl_final_syndrome") ||
-        !make_pipeline(&engine->p_nmsl_et_gate, "nmsl_et_gate")) {
-      return false;
-    }
-  }
+  engine->device                = res->device;
+  engine->queue                 = res->queue;
+  engine->p_nmsl_init           = res->p_nmsl_init;
+  engine->p_nmsl_convert        = res->p_nmsl_convert;
+  engine->p_nmsl_cn             = res->p_nmsl_cn;
+  engine->p_nmsl_final_syndrome = res->p_nmsl_final_syndrome;
+  engine->p_nmsl_et_gate        = res->p_nmsl_et_gate;
+  engine->p_nmsl_persistent     = res->p_nmsl_persistent;
+  engine->p_nmsf_init           = res->p_nmsf_init;
+  engine->p_nmsf_convert        = res->p_nmsf_convert;
+  engine->p_nmsf_cn             = res->p_nmsf_cn;
+  engine->p_nmsf_vn             = res->p_nmsf_vn;
+  engine->p_nmsa_init           = res->p_nmsa_init;
+  engine->p_nmsa_delta_bp       = res->p_nmsa_delta_bp;
 
   engine->buf_ctrl = [engine->device newBufferWithLength:sizeof(decode_ctrl_t)
                                                  options:MTLResourceStorageModeShared];
