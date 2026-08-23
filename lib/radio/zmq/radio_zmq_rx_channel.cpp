@@ -108,8 +108,10 @@ void radio_zmq_rx_channel::send_request()
     // Request received.
     if (n > 0) {
       logger.debug("Socket sent request.");
-      // [zmq-probe] temporary instrumentation.
+#if defined(OCUDU_FLOW_PROBES)
+      // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES).
       pending_request_since = std::chrono::steady_clock::now();
+#endif
       state_fsm.request_sent();
       return;
     }
@@ -178,7 +180,8 @@ void radio_zmq_rx_channel::receive_response()
   unsigned nsamples = n / sample_size;
   logger.debug("Socket received {} samples.", nsamples);
 
-  // [zmq-probe] temporary instrumentation: how long the UL request waited for the UE's reply, plus a
+#if defined(OCUDU_FLOW_PROBES)
+  // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES): how long the UL request waited for the UE's reply, plus a
   // per-64-replies mean summary (rounds/s and UL-leg latency at a glance).
   if (pending_request_since.time_since_epoch().count() != 0) {
     auto reply_wait_us =
@@ -202,6 +205,9 @@ void radio_zmq_rx_channel::receive_response()
       probe_wait_total_us = 0;
     }
   }
+#endif
+
+  rx_probe.event(nsamples);
 
   rx_probe.event(nsamples);
 

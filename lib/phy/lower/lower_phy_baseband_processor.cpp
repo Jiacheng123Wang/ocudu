@@ -6,7 +6,9 @@
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/interval.h"
 #include "ocudu/instrumentation/traces/ru_traces.h"
+#if defined(OCUDU_FLOW_PROBES)
 #include "ocudu/ocudulog/ocudulog.h" // [zmq-probe] temporary: fetch_basic_logger
+#endif
 #include "ocudu/ran/slot_point_extended.h"
 #include "ocudu/support/executors/thread_utils.h" // cpu_relax()
 #include "ocudu/support/executors/ul_pipeline_probe.h"
@@ -103,8 +105,10 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
     return;
   }
 
-  // [zmq-probe] temporary instrumentation.
+#if defined(OCUDU_FLOW_PROBES)
+  // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES).
   const auto t_entry = std::chrono::steady_clock::now();
+#endif
 
   // Throttling mechanism to keep a maximum latency of one millisecond in the transmit buffer based on the latest
   // received timestamp.
@@ -132,8 +136,10 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
     }
   }
 
-  // [zmq-probe] temporary instrumentation.
+#if defined(OCUDU_FLOW_PROBES)
+  // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES).
   const auto t_after_rx_wait = std::chrono::steady_clock::now();
+#endif
 
   // Throttling mechanism to slow down the baseband processing.
   if ((system_time_throttling_ratio > 0.0) && (last_tx_time.has_value()) && (last_tx_buffer_size != 0)) {
@@ -163,13 +169,16 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
   result.metadata.ts = timestamp + tx_time_offset;
 
   // Enqueue transmission.
+#if defined(OCUDU_FLOW_PROBES)
   const auto t_after_process = std::chrono::steady_clock::now();
+#endif
   trace_point tx_tp          = ru_tracer.now();
 
   // Transmit buffer.
   transmitter.transmit(result.buffer->get_reader(), result.metadata);
 
-  // [zmq-probe] temporary instrumentation.
+#if defined(OCUDU_FLOW_PROBES)
+  // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES).
   {
     const auto t_done = std::chrono::steady_clock::now();
     auto       wait_us =
@@ -198,6 +207,7 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
       probe_last = now;
     }
   }
+#endif
 
   ru_tracer << trace_event("transmit_baseband", tx_tp);
 
@@ -247,10 +257,13 @@ void lower_phy_baseband_processor::ul_process()
   std::unique_ptr<baseband_gateway_buffer_dynamic> rx_buffer = rx_buffers.pop_blocking();
 
   // Receive baseband.
-  trace_point                         tp          = ru_tracer.now();
-  const auto                          t_recv_begin = std::chrono::steady_clock::now();
+  trace_point tp = ru_tracer.now();
+#if defined(OCUDU_FLOW_PROBES)
+  const auto t_recv_begin = std::chrono::steady_clock::now();
+#endif
   baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_buffer->get_writer());
-  // [zmq-probe] temporary instrumentation.
+#if defined(OCUDU_FLOW_PROBES)
+  // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES).
   {
     auto recv_us =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t_recv_begin).count();
@@ -259,6 +272,7 @@ void lower_phy_baseband_processor::ul_process()
       probe_log.info("[zmq-probe] ul recv-wait={}us", recv_us);
     }
   }
+#endif
   ru_tracer << trace_event("receive_baseband", tp);
 
   // T_start of the UL compute pipeline measurement (IQ samples just received, UL processing about to start).

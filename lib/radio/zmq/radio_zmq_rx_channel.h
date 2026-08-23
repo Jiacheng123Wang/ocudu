@@ -42,8 +42,10 @@ class radio_zmq_rx_channel
   radio_event_notifier& notification_handler;
   /// Asynchronous task executor.
   task_executor& async_executor;
-  /// [zmq-probe] temporary instrumentation: timestamp of the pending request, for the reply latency measurement.
+#if defined(OCUDU_FLOW_PROBES)
+  /// [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES): timestamp of the pending request, for the reply latency measurement.
   std::chrono::steady_clock::time_point pending_request_since;
+#endif
 
 public:
   /// Describes the necessary parameters to create a ZMQ Tx channel.
