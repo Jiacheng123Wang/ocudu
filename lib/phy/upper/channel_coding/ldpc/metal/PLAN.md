@@ -1296,6 +1296,15 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
     与 NMS 的 ~8dB 差距是算法族的(无软消息传递/逐边信念),Phase 3
     (擦除 C2/C3)面向的高码率 floor 已被 γ0 修复,E2E 失败点又是低码率
     (擦除尾极小)——预期收益有限,是否继续等用户拍板。
+- **metal_flooding E2E(2026-08-24 22:01,用户跑,commit 4de1d309f6)**:
+  **180/199 crc=OK(90.5%)、0 RLF、attach 成功**——同一脏 UL(sinr 2.3-2.4dB
+  的 tbs=528 大量通过,iter 7-12)。对比:layered 198/200(99%)、metal_lls
+  1/168(0.6%)。洪泛在 E2E 工作点的 ~1-2dB 结构性差距与 4.9/4.11 历史结论
+  一致。19 个 KO 中多数 iter 跑满 12 轮(预算受限)——**提高
+  pusch_dec_max_iterations(20-30)是下一个廉价实验**,有望追近 layered。
+  metal_flooding 就是选项 3(LLS 骨架上的 min-sum)的现成实现:同 2 dispatch/
+  轮骨架,但用每行 2-min 压缩代替逐边消息、用信道 LLR 锚点+外推和代替
+  侵蚀更新,详见 ocudu_nms_flooding_decoder.metal 头注释。
 
 ## 5. 交付物清单
 
