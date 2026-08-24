@@ -41,11 +41,13 @@ struct round_trip_result {
   bool gpu_async_ok        = false;
   bool gpu_layered_ok      = false;
   bool gpu_layered_et_off_ok = false;
+  bool gpu_lls_ok          = false;
   bool bits_eq             = false;
   bool layered_et_ab_eq    = true; // ET on/off must decode identically
   int  gpu_iters           = -1;
   int  gpu_layered_iters      = -1;
   int  gpu_layered_et_off_iters = -1;
+  int  gpu_lls_iters        = -1;
 };
 
 round_trip_result run_round_trip(std::mt19937&                         rng,
@@ -58,6 +60,7 @@ round_trip_result run_round_trip(std::mt19937&                         rng,
                                  ldpc_decoder*                       gpu_async_decoder,
                                  ldpc_decoder*                       gpu_layered_decoder,
                                  ldpc_decoder*                       gpu_layered_et_off_decoder,
+                                 ldpc_decoder*                       gpu_lls_decoder,
                                  const test_case&                     tc,
                                  double                               sigma)
 {
@@ -232,6 +235,26 @@ round_trip_result run_round_trip(std::mt19937&                         rng,
     }
   }
 
+  // LLS decoder (restored from the git history, PLAN.md 4.12): bit-flipping family, ~5-8 dB
+  // weaker than the layered NMS - asserted only for no false passes and bit-exact CRC passes.
+  if (gpu_lls_decoder != nullptr) {
+    std::vector<uint8_t> lls_out_bytes((K + 7) / 8);
+    bit_buffer           lls_out = bit_buffer::from_bytes(lls_out_bytes);
+    auto                 lls_iters = gpu_lls_decoder->decode(lls_out, llrs, &crc16, dec_cfg);
+    res.gpu_lls_ok      = lls_iters.has_value();
+    res.gpu_lls_iters   = lls_iters.has_value() ? static_cast<int>(*lls_iters) : -1;
+    if (res.gpu_lls_ok) {
+      res.bits_eq = res.bits_eq && [&]() {
+        for (unsigned i = 0; i != K; ++i) {
+          if ((lls_out.extract(i, 1) & 1U) != (message.extract(i, 1) & 1U)) {
+            return false;
+          }
+        }
+        return true;
+      }();
+    }
+  }
+
   return res;
 }
 
@@ -289,12 +312,14 @@ int main(int argc, char** argv)
   };
   auto cpu_dec = create_ldpc_decoder_factory_sw("generic", dec_factory_cfg)->create();
   // The factory type "metal" IS the layered NMS decoder; "metal_flooding" is
-  // the flooding variant (2 dispatches per round) and "metal_persistent" the
-  // single-dispatch persistent layered variant.
+  // the flooding variant (2 dispatches per round), "metal_persistent" the
+  // single-dispatch persistent layered variant and "metal_lls" the restored
+  // LLS bit-flipping decoder (see PLAN.md 4.12).
   auto gpu_dec         = create_ldpc_decoder_factory_sw("metal", dec_factory_cfg)->create();
   auto gpu_flood_dec   = create_ldpc_decoder_factory_sw("metal_flooding", dec_factory_cfg)->create();
   auto gpu_persist_dec = create_ldpc_decoder_factory_sw("metal_persistent", dec_factory_cfg)->create();
   auto gpu_async_dec   = create_ldpc_decoder_factory_sw("metal_async", dec_factory_cfg)->create();
+  auto gpu_lls_dec     = create_ldpc_decoder_factory_sw("metal_lls", dec_factory_cfg)->create();
   auto gpu_layered_dec = std::make_unique<ldpc_decoder_metal>(
       dec_factory_cfg.force_decoding, dec_factory_cfg.early_stop_syndrome,
       ocudu::metal::decoder_engine::algo::layered, 0.7F, 0.5F);
@@ -302,8 +327,8 @@ int main(int argc, char** argv)
   auto gpu_layered_et_off_dec =
       std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding, dec_factory_cfg.early_stop_syndrome,
                                            ocudu::metal::decoder_engine::algo::layered, 0.7F, 0.5F, false);
-  if (!cpu_dec || !gpu_dec || !gpu_flood_dec || !gpu_persist_dec || !gpu_async_dec || !gpu_layered_dec ||
-      !gpu_layered_et_off_dec) {
+  if (!cpu_dec || !gpu_dec || !gpu_flood_dec || !gpu_persist_dec || !gpu_async_dec || !gpu_lls_dec ||
+      !gpu_layered_dec || !gpu_layered_et_off_dec) {
     std::printf("FAIL: factory did not create the decoders (metal type registered?)\n");
     return 1;
   }
@@ -334,17 +359,18 @@ int main(int argc, char** argv)
 
     const unsigned nof_trials = (tc.ls >= ldpc::LS256) ? 20 : 100;
     unsigned       cpu_pass = 0, gpu_pass = 0, gpu_flood_pass = 0, gpu_persist_pass = 0, gpu_async_pass = 0,
-                   gpu_layered_pass = 0,
+                   gpu_layered_pass = 0, gpu_lls_pass = 0,
                    both_pass_same = 0, disagreements = 0, et_ab_mismatches = 0;
     int            iters_min = 999, iters_max = 0;
     int            layered_iters_min = 999, layered_iters_max = 0, et_off_iters_min = 999, et_off_iters_max = 0;
+    int            lls_iters_min = 999, lls_iters_max = 0;
 
     for (unsigned t = 0; t != nof_trials; ++t) {
       const round_trip_result r = run_round_trip(rng, *encoder, *crc16, *cpu_dec, *gpu_dec,
                                                   gpu_flood_dec.get(), gpu_persist_dec.get(),
                                                   gpu_async_dec.get(),
                                                   gpu_layered_dec.get(),
-                                                  gpu_layered_et_off_dec.get(), tc, sigma);
+                                                  gpu_layered_et_off_dec.get(), gpu_lls_dec.get(), tc, sigma);
       if (r.gpu_flood_ok) {
         gpu_flood_pass++;
       }
@@ -356,6 +382,11 @@ int main(int argc, char** argv)
       }
       if (r.gpu_layered_ok) {
         gpu_layered_pass++;
+      }
+      if (r.gpu_lls_ok) {
+        gpu_lls_pass++;
+        lls_iters_min = std::min(lls_iters_min, r.gpu_lls_iters);
+        lls_iters_max = std::max(lls_iters_max, r.gpu_lls_iters);
       }
       if (r.cpu_ok) cpu_pass++;
       if (r.gpu_ok) {
@@ -389,21 +420,25 @@ int main(int argc, char** argv)
 
     // Noiseless: strict bit-exactness (every decoder passes every block), and the ET
     // gate must stop after exactly one round (et-off reports the full max_iter=6).
-    // Noisy: no false GPU passes, the GPU rate never exceeds the CPU rate, and the
-    // ET on/off A/B must be identical (same pass/fail, same bits).
+    // Noisy: no false GPU passes, the GPU and LLS rates never exceed the CPU rate, and
+    // the ET on/off A/B must be identical (same pass/fail, same bits). The LLS decoder
+    // is ~5-8 dB weaker than the layered NMS on BLER (bit-flipping family, PLAN.md 4.12).
     const bool ok =
         noiseless ? ((cpu_pass == nof_trials) && (gpu_pass == nof_trials) && (gpu_layered_pass == nof_trials) &&
-                     (gpu_persist_pass == nof_trials) &&
+                     (gpu_persist_pass == nof_trials) && (gpu_lls_pass == nof_trials) &&
                      (disagreements == 0) && (et_ab_mismatches == 0) &&
                      (layered_iters_min == 1) && (layered_iters_max == 1) &&
                      (et_off_iters_min == 6) && (et_off_iters_max == 6))
-                  : ((disagreements == 0) && (et_ab_mismatches == 0) && (gpu_pass <= cpu_pass));
-    std::printf("[parity] %-9s SNR %.1f dB: cpu %u/%u, gpu %u/%u, flood %u/%u, persist %u/%u, async %u/%u, layered %u/%u, same %u, disagreements %u, gpu iters [%d,%d], layered iters [%d,%d] (et-off [%d,%d]) -> %s\n",
+                  : ((disagreements == 0) && (et_ab_mismatches == 0) && (gpu_pass <= cpu_pass) &&
+                     (gpu_lls_pass <= cpu_pass));
+    std::printf("[parity] %-9s SNR %.1f dB: cpu %u/%u, gpu %u/%u, flood %u/%u, persist %u/%u, async %u/%u, layered %u/%u, lls %u/%u, same %u, disagreements %u, gpu iters [%d,%d], layered iters [%d,%d] (et-off [%d,%d]), lls iters [%d,%d] -> %s\n",
                 tc.name, tc.snr_db, cpu_pass, nof_trials, gpu_pass, nof_trials, gpu_flood_pass, nof_trials,
                 gpu_persist_pass, nof_trials, gpu_async_pass, nof_trials,
-                gpu_layered_pass, nof_trials, both_pass_same, disagreements,
+                gpu_layered_pass, nof_trials, gpu_lls_pass, nof_trials, both_pass_same, disagreements,
                 (gpu_pass != 0) ? iters_min : -1, (gpu_pass != 0) ? iters_max : -1,
-                layered_iters_min, layered_iters_max, et_off_iters_min, et_off_iters_max, ok ? "OK" : "FAIL");
+                layered_iters_min, layered_iters_max, et_off_iters_min, et_off_iters_max,
+                (gpu_lls_pass != 0) ? lls_iters_min : -1, (gpu_lls_pass != 0) ? lls_iters_max : -1,
+                ok ? "OK" : "FAIL");
     if (!ok) {
       failures++;
     }

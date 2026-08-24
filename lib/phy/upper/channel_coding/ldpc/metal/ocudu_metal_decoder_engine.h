@@ -37,6 +37,11 @@ public:
     /// poller) injects per-edge residual deltas into a fixed-point atomic
     /// posterior pool (metal_async).
     async_delta,
+    /// LLS (likelihood-erosion bit-flipping) decoder, restored from the git
+    /// history (SynchroPlus 4-kernel shader, see PLAN.md 4.6/4.12): 2
+    /// dispatches per round, extreme parallelism, ~5-8 dB weaker than the
+    /// layered NMS on BLER.
+    lls,
   };
 
   /// CSR edge layout for the layered schedule (built by the adapter). The fused
@@ -65,12 +70,12 @@ public:
   ///
   /// \param[in] n_logical      Codeblock length N (BG1: 68Z, BG2: 52Z).
   /// \param[in] m_logical      Number of parity checks M (BG1: 46Z, BG2: 42Z).
-  /// \param[in] factor         NMS normalization factor (alpha).
+  /// \param[in] factor         NMS normalization factor (alpha) / LLS step size, per \c mode.
   /// \param[in] beta           Offset min-sum parameter (0 = plain NMS).
   /// \param[in] h              Packed parity-check matrix, M_aligned rows x ceil(N/32) words,
   ///                           little-endian bit order; must be 4KB-aligned and outlive this object.
   /// \param[in] ht             Packed transpose, N_aligned rows x ceil(M/32) words (flooding
-  ///                           mode only, may be null in layered mode).
+  ///                           and LLS modes; may be null in layered mode).
   /// \param[in] layered        CSR edge layout and layer tables (layered mode only).
   /// \param[in] mode           Decoder algorithm.
   /// \param[in] et_enabled     Dispatch the per-round ET gate (layered mode only; the flooding
@@ -82,8 +87,9 @@ public:
 
   /// \brief Synchronous decode of one codeblock.
   ///
-  /// \param[in]  in_fp16  N_aligned fp16 LLRs, 4KB-aligned. Mutated in place (the kernels update
-  ///                      the LLRs; the final values hold the hard decisions in their sign bits).
+  /// \param[in]  in_fp16  Codeblock LLRs, 4KB-aligned: N_aligned fp16 LLRs in LLS mode (updated in
+  ///                      place; the final values hold the hard decisions in their sign bits) or
+  ///                      N_aligned int8 LLRs for the NMS modes (converted to fp16 on the GPU).
   /// \param[out] out_bits n_info bytes (0/1 hard decisions of the information bits).
   /// \param[in]  max_iter Maximum number of iterations (the GPU-internal ET gate applies).
   /// \param[out] error_count_out Final number of unsatisfied check equations (0 = clean syndrome).

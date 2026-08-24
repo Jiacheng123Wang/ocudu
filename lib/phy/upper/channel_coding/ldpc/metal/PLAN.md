@@ -1000,6 +1000,38 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
 - 工具增强:基准每 SNR 点墙钟时间入 CSV 第 5 列 `time_s`;plot_bler.py 在
   每条曲线末端标注该 rate 的总运行时间与每点均值(旧 CSV 无时间列时自动跳过)。
 
+## 4.14 LLS 内核恢复:metal_lls 工厂类型(2026-08-24,并行度优先的可选解码器)
+
+- 动机:LLS 比特翻转族的优势是**极致并行**(每轮仅 2 个 dispatch,无消息传递、
+  无逐边存储),作为 NMS 之外的并行度研究基线。从 git 历史恢复 4.10 删除的
+  LLS 路径(commit `c823a1eb7d` 之前的形态,`archive/metal-lls-flooding` tag
+  亦完整保留)。
+- 恢复内容:
+  - `ocudu_lls_decoder.metal`:SynchroPlus 4-kernel LLS 着色器逐字恢复
+    (`init_hard_decisions` / `compute_syndrome` / `cn_centric_scan` /
+    `update_llr_hpred`),重新离线编译 `ocudu_lls_decoder.metallib`;
+  - 引擎 `decoder_engine::algo::lls`:LLS 独立算法族(自己的 metallib +
+    pipeline 缓存);LLS 缓冲(s_hard / h_pred / err_eq_cnt / suspect_cnt /
+    evidence_sum / vn_total_cn / debug)+ CPU 侧列权计算;fp16 零拷贝输入;
+    单命令缓冲录制 init + 全量 syndrome + [scan; update]×max_iter;
+    终态 syndrome 由 CPU popcount(h_pred) 重算;
+  - 适配器:LLS 槽位恢复 fp16 宿主填充(int8→fp16、±64 钳制、擦除 +1 偏置)、
+    H^T 生成、alpha 默认 0.8;
+  - 工厂/CLI 新类型 **`metal_lls`**(`expert_phy --pusch_ldpc_decoder_type
+    metal_lls`);单元测试与 BLER 基准支持 `--gpu-type metal_lls`。
+- **验证(2026-08-24)**:
+  - 单元测试无噪声三配置(BG1 Z16/BG2 Z16/BG1 Z256)LLS **100% 位精确、
+    1 轮收敛**,与 4.6 历史记录一致;有噪声断言(无假阳性 + LLS ≤ CPU 通过率)
+    全过;
+  - BLER 冒烟复现历史瀑布:BG2 Z16 R=1/3 @6dB 77/100、@8dB 97/100、
+    @10dB 100/100(CPU 全程 100% → 差距 ~6-8dB);R=2/3 @0..8dB 0/100
+    (高码率差距 >10dB)——**LLS 比分层 NMS 差 5-8dB 符合预期**;
+  - GPU 延迟 ~300-430us/块(Z16,6 轮上限),与历史 LLS 测量(median 261us、
+    p99 422us)同量级。
+- 已知缺陷(4.6 全文):sign(0)=+1 擦除缺陷(适配器 +1 偏置已修)、每行仅取
+  两个最弱 VN、delta 公式为经验启发式——**下一步是 BLER 性能优化**(候选:
+  多嫌疑人扩展、证据公式改进、与打孔感知的擦除处理),并行度优势不变。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`

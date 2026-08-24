@@ -6,7 +6,8 @@
 # baked-in absolute paths stay current):
 #   xcrun -sdk macosx metal -c ocudu_nms_layered_decoder.metal -o ocudu_nms_layered_decoder.air
 #   xcrun -sdk macosx metallib ocudu_nms_layered_decoder.air -o ocudu_nms_layered_decoder.metallib
-#   (same for ocudu_nms_flooding_decoder.metal and ocudu_nms_async_decoder.metal)
+#   (same for ocudu_nms_flooding_decoder.metal, ocudu_nms_async_decoder.metal and
+#    ocudu_lls_decoder.metal)
 
 # ---- Static library: engine driver + ldpc_decoder adapter ----
 enable_language(OBJCXX)
@@ -24,7 +25,8 @@ target_include_directories(ocudu_ldpc_metal PUBLIC
 target_compile_definitions(ocudu_ldpc_metal PRIVATE
     OCUDU_METAL_LAYERED_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_nms_layered_decoder.metallib"
     OCUDU_METAL_FLOODING_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_nms_flooding_decoder.metallib"
-    OCUDU_METAL_ASYNC_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_nms_async_decoder.metallib")
+    OCUDU_METAL_ASYNC_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_nms_async_decoder.metallib"
+    OCUDU_METAL_LLS_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_lls_decoder.metallib")
 # The adapter generates the packed H matrix from the ocudu ldpc_graph implementation.
 target_link_libraries(ocudu_ldpc_metal PUBLIC ocudu_ldpc)
 target_link_libraries(ocudu_ldpc_metal PRIVATE "-framework Metal" "-framework Foundation")

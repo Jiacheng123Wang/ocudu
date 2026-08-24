@@ -20,8 +20,65 @@ using namespace ocudu;
 
 namespace {
 
-// The adapter fills a native int8 buffer with a plain memcpy; the int8->fp16
-// conversion happens inside the GPU (one preprocessing dispatch per decode).
+// The NMS kernels consume a native int8 buffer with a plain memcpy; the int8->fp16
+// conversion happens inside the GPU (one preprocessing dispatch per decode). The LLS
+// kernels consume fp16 directly, so the adapter converts on the host (LLS mode only).
+
+#if !defined(__arm64__)
+/// Generic float -> IEEE 754 half conversion fallback (non-arm64 builds).
+static uint16_t float_to_fp16_soft(float value)
+{
+  uint32_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  const uint32_t sign = (bits >> 16) & 0x8000u;
+  uint32_t       exp  = (bits >> 23) & 0xffu;
+  uint32_t       mant = bits & 0x7fffffu;
+
+  if (exp == 0xffu) { // NaN / Inf
+    return static_cast<uint16_t>(sign | 0x7c00u | (mant != 0 ? 0x200u : 0u));
+  }
+  int32_t e = static_cast<int32_t>(exp) - 127 + 15;
+  if (e >= 31) { // overflow
+    return static_cast<uint16_t>(sign | 0x7c00u);
+  }
+  if (e <= 0) { // subnormal / zero
+    if (e < -10) {
+      return static_cast<uint16_t>(sign);
+    }
+    mant |= 0x800000u;
+    const uint32_t shift = static_cast<uint32_t>(14 - e);
+    uint16_t       out   = static_cast<uint16_t>(mant >> shift);
+    if ((mant >> (shift - 1)) & 1u) {
+      out++;
+    }
+    return static_cast<uint16_t>(sign | out);
+  }
+  // Normal: round to nearest even.
+  const uint32_t round_bit = 1u << 12;
+  mant += round_bit - 1u + ((mant >> 13) & 1u);
+  if (mant & 0x800000u) { // mantissa overflow
+    e++;
+    if (e >= 31) {
+      return static_cast<uint16_t>(sign | 0x7c00u);
+    }
+  }
+  return static_cast<uint16_t>(sign | (static_cast<uint32_t>(e) << 10) | ((mant >> 13) & 0x3ffu));
+}
+#endif // !defined(__arm64__)
+
+/// int8 LLR -> fp16 bit pattern, clamped to the same range as the CPU soft bits.
+static uint16_t llr_to_fp16(int8_t llr)
+{
+  const float value = static_cast<float>(std::clamp<int>(llr, -64, 64));
+#if defined(__arm64__)
+  __fp16    half = static_cast<__fp16>(value);
+  uint16_t  out;
+  std::memcpy(&out, &half, sizeof(out));
+  return out;
+#else
+  return float_to_fp16_soft(value);
+#endif
+}
 
 /// Free deleter (a functor, so that unique_ptr stays default-constructible).
 struct free_deleter {
@@ -54,8 +111,9 @@ struct ldpc_decoder_metal::engine_slot
 
   std::unique_ptr<metal::decoder_engine> engine;
   std::unique_ptr<uint32_t, free_deleter> h;
-  std::unique_ptr<uint32_t, free_deleter> ht; // flooding only (packed H^T)
+  std::unique_ptr<uint32_t, free_deleter> ht; // flooding / LLS (packed H^T)
   std::unique_ptr<int8_t, free_deleter> llr_i8;
+  std::unique_ptr<uint16_t, free_deleter> llr_fp16; // LLS only (host-filled fp16)
   std::vector<uint8_t>                   hard_bits;
   // CSR edge layout (built once per slot). The fused CN+VN kernel needs no
   // per-layer column tables (see ocudu_nms_layered_decoder.metal).
@@ -105,15 +163,21 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
   slot->h        = aligned_alloc<uint32_t>(static_cast<size_t>(m_aligned) * slot->n_h_chunks);
   slot->llr_i8 = aligned_alloc<int8_t>(n_aligned);
   slot->hard_bits.resize(n_full * z - m);
-  ocudu_assert(slot->h && slot->llr_i8, "Metal LDPC: aligned allocation failed.");
+  if (mode == metal::decoder_engine::algo::lls) {
+    slot->llr_fp16 = aligned_alloc<uint16_t>(n_aligned);
+  }
+  ocudu_assert(slot->h && slot->llr_i8 && (mode != metal::decoder_engine::algo::lls || slot->llr_fp16),
+               "Metal LDPC: aligned allocation failed.");
 
-  // Build the packed parity-check matrix (and its transpose in flooding mode)
+  // Build the packed parity-check matrix (and its transpose in flooding/LLS mode)
   // from the 3GPP protograph.
   const ldpc_graph_impl graph(bg, ls);
   {
     const size_t h_size = static_cast<size_t>(m_aligned) * slot->n_h_chunks;
     std::memset(slot->h.get(), 0, h_size * sizeof(uint32_t));
-    if (mode == metal::decoder_engine::algo::flooding) {
+    const bool build_ht =
+        (mode == metal::decoder_engine::algo::flooding) || (mode == metal::decoder_engine::algo::lls);
+    if (build_ht) {
       const unsigned h_pred_len = m_aligned / 32;
       slot->ht = aligned_alloc<uint32_t>(static_cast<size_t>(n_aligned) * h_pred_len);
       ocudu_assert(slot->ht, "Metal LDPC: H^T allocation failed.");
@@ -130,7 +194,7 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
           const unsigned lifted_row = row * z + k;
           const unsigned lifted_col = col * z + ((k + shift) % z);
           slot->h.get()[lifted_row * slot->n_h_chunks + lifted_col / 32] |= 1u << (lifted_col % 32);
-          if (mode == metal::decoder_engine::algo::flooding) {
+          if (build_ht) {
             const unsigned h_pred_len = m_aligned / 32;
             slot->ht.get()[lifted_col * h_pred_len + lifted_row / 32] |= 1u << (lifted_row % 32);
           }
@@ -154,6 +218,25 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
     const float beta   = (beta_override >= 0.0F) ? beta_override : 0.0F;
     if (!slot->engine->init(n, m, factor, beta, slot->h.get(), slot->ht.get(), slot->layered_info,
                             metal::decoder_engine::algo::flooding, enable_et)) {
+      ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
+    }
+    engine_slot& ref = *slot;
+    slots.emplace(std::move(key), std::move(slot));
+    return ref;
+  }
+
+  // LLS mode (restored from the git history, PLAN.md 4.6/4.12): no CSR layout - the kernels walk
+  // the packed H / H^T rows directly. The column weights are computed inside the engine.
+  if (mode == metal::decoder_engine::algo::lls) {
+    slot->layered_info.n_layers = n_layers;
+    slot->layered_info.z        = z;
+    slot->engine = std::make_unique<metal::decoder_engine>();
+    // LLS step size (alpha): 0.8 measured best on the ocudu-quantized int8 LLRs
+    // (the SynchroPlus reference is 0.45 for unquantized float sims).
+    const float factor = (factor_override >= 0.0F) ? factor_override : 0.8F;
+    const float beta   = (beta_override >= 0.0F) ? beta_override : 0.0F;
+    if (!slot->engine->init(n, m, factor, beta, slot->h.get(), slot->ht.get(), slot->layered_info,
+                            metal::decoder_engine::algo::lls, enable_et)) {
       ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
     }
     engine_slot& ref = *slot;
@@ -266,18 +349,37 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
 
   engine_slot& slot = get_slot(cfg.base_graph, cfg.lifting_size);
 
-  // Lay out the full codeblock in native int8: [2Z punctured][input][tail] with
-  // a single memcpy (the int8->fp16 conversion runs inside the GPU). The
-  // structural erasures get a weak +1 bias as before.
-  static_assert(sizeof(log_likelihood_ratio) == 1, "LLR storage must be a single byte");
-  std::memset(slot.llr_i8.get(), 0, static_cast<size_t>(slot.n_aligned) * sizeof(int8_t));
-  std::fill(slot.llr_i8.get(), slot.llr_i8.get() + 2 * z, int8_t{1});
-  std::fill(slot.llr_i8.get() + 2 * z + input.size(), slot.llr_i8.get() + slot.n_aligned, int8_t{1});
-  std::memcpy(slot.llr_i8.get() + 2 * z, input.data(), input.size() * sizeof(int8_t));
-
   uint32_t error_count = 0;
-  const int iters = slot.engine->decode(slot.llr_i8.get(), slot.hard_bits.data(),
-                                        static_cast<int>(cfg.max_iterations), &error_count);
+  int      iters       = -1;
+  if (mode == metal::decoder_engine::algo::lls) {
+    // LLS: lay out the full codeblock in fp16: [2Z punctured][input][tail]. The GPU kernels
+    // update the LLRs in place, so the whole buffer is refilled every call. The structural
+    // erasures (punctured 2Z columns and the un-transmitted tail) get a weak +1 bias: the LLS
+    // update treats an exact 0 as "bit 0 with sign +", which corrupts the erasure handling
+    // (see PLAN.md 4.6).
+    std::memset(slot.llr_fp16.get(), 0, static_cast<size_t>(slot.n_aligned) * sizeof(uint16_t));
+    const uint16_t erasure_bias = llr_to_fp16(1);
+    std::fill(slot.llr_fp16.get(), slot.llr_fp16.get() + 2 * z, erasure_bias);
+    std::fill(slot.llr_fp16.get() + 2 * z + input.size(), slot.llr_fp16.get() + slot.n_aligned, erasure_bias);
+    uint16_t* fp16 = slot.llr_fp16.get() + 2 * z;
+    for (const log_likelihood_ratio llr : input) {
+      *fp16++ = llr_to_fp16(llr.to_int());
+    }
+    iters = slot.engine->decode(slot.llr_fp16.get(), slot.hard_bits.data(),
+                                static_cast<int>(cfg.max_iterations), &error_count);
+  } else {
+    // NMS: lay out the full codeblock in native int8: [2Z punctured][input][tail] with
+    // a single memcpy (the int8->fp16 conversion runs inside the GPU). The
+    // structural erasures get a weak +1 bias as before.
+    static_assert(sizeof(log_likelihood_ratio) == 1, "LLR storage must be a single byte");
+    std::memset(slot.llr_i8.get(), 0, static_cast<size_t>(slot.n_aligned) * sizeof(int8_t));
+    std::fill(slot.llr_i8.get(), slot.llr_i8.get() + 2 * z, int8_t{1});
+    std::fill(slot.llr_i8.get() + 2 * z + input.size(), slot.llr_i8.get() + slot.n_aligned, int8_t{1});
+    std::memcpy(slot.llr_i8.get() + 2 * z, input.data(), input.size() * sizeof(int8_t));
+
+    iters = slot.engine->decode(slot.llr_i8.get(), slot.hard_bits.data(),
+                                static_cast<int>(cfg.max_iterations), &error_count);
+  }
   if (iters < 0) {
     return std::nullopt;
   }

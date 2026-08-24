@@ -145,6 +145,13 @@ public:
                                                   ocudu::metal::decoder_engine::algo::async_delta, -1.0F,
                                                   cfg.ldpc_decoder_offset);
     }
+    if (dec_type == "metal_lls") {
+      // LLS likelihood-erosion bit-flipping decoder, restored from the git history (PLAN.md 4.12):
+      // extreme parallelism (2 dispatches per round), ~5-8 dB weaker than the layered NMS on BLER.
+      return std::make_unique<ldpc_decoder_metal>(cfg.force_decoding, cfg.early_stop_syndrome,
+                                                  ocudu::metal::decoder_engine::algo::lls, -1.0F,
+                                                  cfg.ldpc_decoder_offset);
+    }
 #endif // OCUDU_METAL_LDPC
     if ((dec_type == "auto") || (dec_type == "generic")) {
       return std::make_unique<ldpc_decoder_generic>(cfg.force_decoding, cfg.early_stop_syndrome);

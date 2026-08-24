@@ -167,11 +167,11 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
   auto ldpc_decoder_type_check = [](const std::string& value) -> std::string {
     if ((value == "auto") || (value == "generic") || (value == "neon") || (value == "avx2") ||
         (value == "avx512") || (value == "metal") || (value == "metal_flooding") || (value == "metal_persistent") ||
-        (value == "metal_async")) {
+        (value == "metal_async") || (value == "metal_lls")) {
       return {};
     }
     return "Invalid PUSCH LDPC decoder type. Accepted values "
-           "[auto,generic,neon,avx2,avx512,metal,metal_flooding,metal_persistent,metal_async]";
+           "[auto,generic,neon,avx2,avx512,metal,metal_flooding,metal_persistent,metal_async,metal_lls]";
   };
   auto pusch_channel_estimator_fd_strategy_method_check = [](const std::string& value) -> std::string {
     if ((value == "filter") || (value == "mean") || (value == "none")) {
@@ -229,8 +229,8 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
   add_option(app,
              "--pusch_ldpc_decoder_type",
              expert_phy_params.ldpc_decoder_type,
-             "PUSCH LDPC decoder type: auto, generic, neon, avx2, avx512, metal, metal_flooding, metal_persistent "
-             "and metal_async.")
+             "PUSCH LDPC decoder type: auto, generic, neon, avx2, avx512, metal, metal_flooding, metal_persistent, "
+             "metal_async and metal_lls.")
       ->capture_default_str()
       ->check(ldpc_decoder_type_check);
 

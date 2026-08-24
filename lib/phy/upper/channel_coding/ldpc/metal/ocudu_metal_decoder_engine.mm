@@ -28,6 +28,16 @@ struct decode_ctrl_t {
   uint32_t actual_iters;    // rounds actually executed / async: actual_gens
 };
 
+// Must match the VNStats struct in ocudu_lls_decoder.metal (debug buffer layout).
+struct vn_stats_t {
+  uint32_t err_eq_cnt;
+  uint32_t suspect_cnt;
+  float    evid_sum;
+  float    vn_total_cn;
+  float    last_delta;
+  float    current_llr;
+};
+
 struct engine_impl_t {
   id<MTLDevice>              device = nil;
   id<MTLCommandQueue>        queue  = nil;
@@ -45,6 +55,11 @@ struct engine_impl_t {
   // Asynchronous delta-BP pipelines (ocudu kernels).
   id<MTLComputePipelineState> p_nmsa_init = nil;
   id<MTLComputePipelineState> p_nmsa_delta_bp = nil;
+  // LLS pipelines (SynchroPlus kernels, restored from the git history).
+  id<MTLComputePipelineState> p_lls_init = nil;
+  id<MTLComputePipelineState> p_lls_syndrome = nil;
+  id<MTLComputePipelineState> p_lls_scan = nil;
+  id<MTLComputePipelineState> p_lls_update = nil;
 
   // Zero-copy wrappers, cached by host pointer (the host buffers outlive the engine).
   std::unordered_map<const void*, id<MTLBuffer>> buffer_cache;
@@ -65,6 +80,14 @@ struct engine_impl_t {
   // Async-only state.
   id<MTLBuffer> buf_p         = nil; // shared (uint32 Q16.16 posterior pool, atomic RMW + CPU readback)
   id<MTLBuffer> buf_r_old     = nil; // private (per-edge old messages, lane-owned)
+  // LLS-only state (see PLAN.md 4.6: the fp16 LLRs are the zero-copy host buffer).
+  id<MTLBuffer> buf_s_hard    = nil; // private (packed hard decisions, N/32 words)
+  id<MTLBuffer> buf_h_pred    = nil; // shared (packed syndrome, M/32 words; CPU recomputes the final syndrome)
+  id<MTLBuffer> buf_err_eq    = nil; // private (per-VN unsatisfied-row counters)
+  id<MTLBuffer> buf_suspect   = nil; // private (per-VN suspect counters)
+  id<MTLBuffer> buf_evidence  = nil; // private (per-VN evidence sums)
+  id<MTLBuffer> buf_vn_total  = nil; // shared (per-VN column weights, CPU-computed, GPU read-only)
+  id<MTLBuffer> buf_debug     = nil; // shared (VNStats debug layout)
 
   decoder_engine::layered_info layered_info{};
 
@@ -150,6 +173,11 @@ struct algo_resources_t {
   id<MTLComputePipelineState> p_nmsf_vn              = nil;
   id<MTLComputePipelineState> p_nmsa_init            = nil;
   id<MTLComputePipelineState> p_nmsa_delta_bp        = nil;
+  // LLS family (SynchroPlus 4-kernel shader, ocudu_lls_decoder.metallib).
+  id<MTLComputePipelineState> p_lls_init             = nil;
+  id<MTLComputePipelineState> p_lls_syndrome         = nil;
+  id<MTLComputePipelineState> p_lls_scan             = nil;
+  id<MTLComputePipelineState> p_lls_update           = nil;
 };
 
 std::unordered_map<int, algo_resources_t>& algo_resources_cache()
@@ -203,6 +231,12 @@ algo_resources_t* get_algo_resources(decoder_engine::algo mode)
 #ifdef OCUDU_METAL_ASYNC_LIB_PATH
     lib_path_macro = OCUDU_METAL_ASYNC_LIB_PATH;
 #endif
+  } else if (mode == decoder_engine::algo::lls) {
+    lib_name       = "ocudu_lls_decoder.metallib";
+    lib_path_macro = nullptr;
+#ifdef OCUDU_METAL_LLS_LIB_PATH
+    lib_path_macro = OCUDU_METAL_LLS_LIB_PATH;
+#endif
   }
   NSString* lib_path = resolve_metallib_path(lib_path_macro, lib_name);
   if (lib_path == nil) {
@@ -244,6 +278,13 @@ algo_resources_t* get_algo_resources(decoder_engine::algo mode)
     }
   } else if (mode == decoder_engine::algo::async_delta) {
     if (!make_pipeline(&res.p_nmsa_init, "nmsa_init") || !make_pipeline(&res.p_nmsa_delta_bp, "nmsa_delta_bp")) {
+      return nullptr;
+    }
+  } else if (mode == decoder_engine::algo::lls) {
+    if (!make_pipeline(&res.p_lls_init, "init_hard_decisions") ||
+        !make_pipeline(&res.p_lls_syndrome, "compute_syndrome") ||
+        !make_pipeline(&res.p_lls_scan, "cn_centric_scan") ||
+        !make_pipeline(&res.p_lls_update, "update_llr_hpred")) {
       return nullptr;
     }
   } else {
@@ -311,6 +352,10 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
   engine->p_nmsf_vn             = res->p_nmsf_vn;
   engine->p_nmsa_init           = res->p_nmsa_init;
   engine->p_nmsa_delta_bp       = res->p_nmsa_delta_bp;
+  engine->p_lls_init            = res->p_lls_init;
+  engine->p_lls_syndrome        = res->p_lls_syndrome;
+  engine->p_lls_scan            = res->p_lls_scan;
+  engine->p_lls_update          = res->p_lls_update;
 
   engine->buf_ctrl = [engine->device newBufferWithLength:sizeof(decode_ctrl_t)
                                                  options:MTLResourceStorageModeShared];
@@ -334,7 +379,46 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
   engine->buf_h = zero_copy_buffer(engine, h, static_cast<size_t>(engine->m_aligned) *
                                                  engine->n_h_chunks * sizeof(uint32_t));
 
-  if (mode == algo::flooding) {
+  if (mode == algo::lls) {
+    // LLS buffers (see PLAN.md 4.6): the fp16 LLRs live in the zero-copy host buffer, s_hard packs
+    // the hard decisions, h_pred holds the incrementally-maintained packed syndrome (shared, so the
+    // CPU can recompute the final syndrome), the per-VN statistics are private, and vn_total_cn
+    // holds the CPU-computed column weights (GPU read-only).
+    engine->buf_ht = zero_copy_buffer(engine, ht, static_cast<size_t>(engine->n_aligned) *
+                                                      engine->h_pred_len * sizeof(uint32_t));
+    engine->buf_s_hard = [engine->device newBufferWithLength:engine->n_h_chunks * sizeof(uint32_t)
+                                                     options:MTLResourceStorageModePrivate];
+    engine->buf_h_pred = [engine->device newBufferWithLength:engine->h_pred_len * sizeof(uint32_t)
+                                                     options:MTLResourceStorageModeShared];
+    engine->buf_err_eq = [engine->device newBufferWithLength:engine->n_aligned * sizeof(uint32_t)
+                                                     options:MTLResourceStorageModePrivate];
+    engine->buf_suspect = [engine->device newBufferWithLength:engine->n_aligned * sizeof(uint32_t)
+                                                      options:MTLResourceStorageModePrivate];
+    engine->buf_evidence = [engine->device newBufferWithLength:engine->n_aligned * sizeof(float)
+                                                       options:MTLResourceStorageModePrivate];
+    engine->buf_vn_total = [engine->device newBufferWithLength:engine->n_aligned * sizeof(uint32_t)
+                                                       options:MTLResourceStorageModeShared];
+    engine->buf_debug = [engine->device newBufferWithLength:engine->n_aligned * sizeof(vn_stats_t)
+                                                    options:MTLResourceStorageModeShared];
+
+    // Compute the column weights on the CPU (once per engine; the GPU reads them read-only).
+    uint32_t* col_weights = static_cast<uint32_t*>(engine->buf_vn_total.contents);
+    std::memset(col_weights, 0, static_cast<size_t>(engine->n_aligned) * sizeof(uint32_t));
+    for (uint32_t r = 0; r != engine->m_aligned; ++r) {
+      const uint32_t* row_base = h + r * engine->n_h_chunks;
+      for (uint32_t c = 0; c != engine->n_h_chunks; ++c) {
+        uint32_t mask     = row_base[c];
+        uint32_t col_base = c * 32;
+        while (mask != 0) {
+          const uint32_t bit = static_cast<uint32_t>(__builtin_ctz(mask));
+          if (col_base + bit < engine->n_aligned) {
+            col_weights[col_base + bit]++;
+          }
+          mask &= (mask - 1);
+        }
+      }
+    }
+  } else if (mode == algo::flooding) {
     engine->buf_ht = zero_copy_buffer(engine, ht, static_cast<size_t>(engine->n_aligned) *
                                                       engine->h_pred_len * sizeof(uint32_t));
     engine->buf_llr_chan = [engine->device newBufferWithLength:engine->n_aligned * sizeof(uint16_t)
@@ -363,20 +447,77 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
   engine_impl_t* engine = static_cast<engine_impl_t*>(impl);
   const bool     is_persistent = engine != nullptr && engine->mode == decoder_engine::algo::layered_persistent;
   const bool     is_async      = engine != nullptr && engine->mode == decoder_engine::algo::async_delta;
+  const bool     is_lls        = engine != nullptr && engine->mode == decoder_engine::algo::lls;
   if (engine == nullptr ||
-      (is_persistent ? engine->p_nmsl_persistent == nil
-       : is_async    ? engine->p_nmsa_delta_bp == nil
-                     : (engine->mode == decoder_engine::algo::flooding ? engine->p_nmsf_init == nil
-                                                                       : engine->p_nmsl_init == nil))) {
+      (is_lls       ? engine->p_lls_init == nil
+       : is_persistent ? engine->p_nmsl_persistent == nil
+        : is_async    ? engine->p_nmsa_delta_bp == nil
+                      : (engine->mode == decoder_engine::algo::flooding ? engine->p_nmsf_init == nil
+                                                                        : engine->p_nmsl_init == nil))) {
     return -1;
   }
   const bool is_flooding = engine->mode == decoder_engine::algo::flooding;
+  // The LLS kernels consume fp16 LLRs in place (host-filled, zero-copy); the NMS kernels consume the
+  // int8 buffer and convert to fp16 on the GPU.
   id<MTLBuffer> mtl_llr_i8 =
-      zero_copy_buffer(engine, in_fp16, static_cast<size_t>(engine->n_aligned) * sizeof(int8_t));
+      zero_copy_buffer(engine, in_fp16, static_cast<size_t>(engine->n_aligned) *
+                                            (is_lls ? sizeof(uint16_t) : sizeof(int8_t)));
   id<MTLCommandBuffer>        cmd_buf = [engine->queue commandBuffer];
   id<MTLComputeCommandEncoder> enc    = [cmd_buf computeCommandEncoder];
 
-  if (is_flooding) {
+  if (is_lls) {
+    // Stage A: hard-decision init + control-block and per-VN statistics reset.
+    [enc setComputePipelineState:engine->p_lls_init];
+    [enc setBuffer:mtl_llr_i8 offset:0 atIndex:0];
+    [enc setBuffer:engine->buf_s_hard offset:0 atIndex:1];
+    [enc setBuffer:engine->buf_ctrl offset:0 atIndex:2];
+    [enc setBuffer:engine->buf_err_eq offset:0 atIndex:3];
+    [enc setBuffer:engine->buf_suspect offset:0 atIndex:4];
+    [enc setBuffer:engine->buf_evidence offset:0 atIndex:5];
+    [enc dispatchThreads:MTLSizeMake(engine->n_aligned, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+    // Stage B: initial full syndrome computation (once; maintained incrementally afterwards).
+    [enc setComputePipelineState:engine->p_lls_syndrome];
+    [enc setBuffer:engine->buf_h offset:0 atIndex:0];
+    [enc setBuffer:engine->buf_s_hard offset:0 atIndex:1];
+    [enc setBuffer:engine->buf_h_pred offset:0 atIndex:2];
+    [enc setBuffer:engine->buf_ctrl offset:0 atIndex:3];
+    [enc setBytes:&engine->n_h_chunks length:sizeof(uint32_t) atIndex:4];
+    [enc dispatchThreadgroups:MTLSizeMake(engine->h_pred_len, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+    // Unrolled round loop, fully consumed by the GPU: exactly two dispatches per round (CN-centric
+    // scan + VN update with the incremental HT-XOR syndrome maintenance), with the GPU-internal
+    // early termination (DecodeCtrl flags; the remaining rounds' kernels return immediately).
+    for (int it = 0; it < max_iter; ++it) {
+      [enc setComputePipelineState:engine->p_lls_scan];
+      [enc setBuffer:engine->buf_h offset:0 atIndex:0];
+      [enc setBuffer:mtl_llr_i8 offset:0 atIndex:1];
+      [enc setBuffer:engine->buf_h_pred offset:0 atIndex:2];
+      [enc setBuffer:engine->buf_err_eq offset:0 atIndex:3];
+      [enc setBuffer:engine->buf_suspect offset:0 atIndex:4];
+      [enc setBuffer:engine->buf_evidence offset:0 atIndex:5];
+      [enc setBytes:&engine->n_h_chunks length:sizeof(uint32_t) atIndex:6];
+      [enc setBuffer:engine->buf_ctrl offset:0 atIndex:7];
+      [enc dispatchThreadgroups:MTLSizeMake(engine->m_aligned, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+      [enc setComputePipelineState:engine->p_lls_update];
+      [enc setBuffer:mtl_llr_i8 offset:0 atIndex:0];
+      [enc setBuffer:engine->buf_err_eq offset:0 atIndex:1];
+      [enc setBuffer:engine->buf_suspect offset:0 atIndex:2];
+      [enc setBuffer:engine->buf_evidence offset:0 atIndex:3];
+      [enc setBuffer:engine->buf_vn_total offset:0 atIndex:4];
+      [enc setBuffer:engine->buf_h_pred offset:0 atIndex:5];
+      [enc setBuffer:engine->buf_ht offset:0 atIndex:6];
+      [enc setBytes:&engine->h_pred_len length:sizeof(uint32_t) atIndex:7];
+      [enc setBytes:&engine->factor length:sizeof(float) atIndex:8];
+      [enc setBuffer:engine->buf_ctrl offset:0 atIndex:9];
+      [enc setBuffer:engine->buf_debug offset:0 atIndex:10];
+      [enc dispatchThreads:MTLSizeMake(engine->n_aligned, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
+  } else if (is_flooding) {
     // Stage A: reset the control block (the conversion prepares the LLRs).
     [enc setComputePipelineState:engine->p_nmsf_init];
     [enc setBuffer:engine->buf_ctrl offset:0 atIndex:0];
@@ -563,11 +704,13 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
     engine->last_gpu_us = 0.0;
   }
 
-  // Extract the results: hard decisions from the final LLR sign bits (fp16
-  // for the layered/flooding paths, the Q16.16 pool bit 31 for the async
-  // path).
-  const decode_ctrl_t* ctrl      = static_cast<const decode_ctrl_t*>(engine->buf_ctrl.contents);
-  const uint16_t*      final_llr = static_cast<const uint16_t*>(engine->buf_llr_fp16.contents);
+  // Extract the results: hard decisions from the final LLR sign bits (fp16: the zero-copy host
+  // buffer for LLS, the GPU fp16 working buffer for the layered/flooding paths, the Q16.16 pool
+  // bit 31 for the async path).
+  const decode_ctrl_t* ctrl = static_cast<const decode_ctrl_t*>(engine->buf_ctrl.contents);
+  const uint16_t*      final_llr =
+      is_lls ? static_cast<const uint16_t*>(mtl_llr_i8.contents)
+             : static_cast<const uint16_t*>(engine->buf_llr_fp16.contents);
   if (out_bits != nullptr) {
     if (is_async) {
       const uint32_t* pool = static_cast<const uint32_t*>(engine->buf_p.contents);
@@ -581,18 +724,27 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
     }
   }
   if (error_count_out != nullptr) {
-    // Recompute the final syndrome on the CPU: the gate clears ctrl->error_count
-    // at the end of every round, so it does not reflect the final state.
-    const uint32_t* h_pred_bits = static_cast<const uint32_t*>(engine->buf_h_pred_bits.contents);
-    uint32_t        errors      = 0;
-    for (uint32_t w = 0; w != engine->m_aligned; ++w) {
-      errors += h_pred_bits[w] & 1u;
+    // Recompute the final syndrome on the CPU: the kernels clear ctrl->error_count
+    // at the end of every round, so it does not reflect the final state. LLS packs
+    // one syndrome bit per check row (popcount over the packed words).
+    uint32_t errors = 0;
+    if (is_lls) {
+      const uint32_t* h_pred = static_cast<const uint32_t*>(engine->buf_h_pred.contents);
+      for (uint32_t w = 0; w != engine->h_pred_len; ++w) {
+        errors += static_cast<uint32_t>(__builtin_popcount(h_pred[w]));
+      }
+    } else {
+      const uint32_t* h_pred_bits = static_cast<const uint32_t*>(engine->buf_h_pred_bits.contents);
+      for (uint32_t w = 0; w != engine->m_aligned; ++w) {
+        errors += h_pred_bits[w] & 1u;
+      }
     }
     *error_count_out = errors;
   }
   // The gate counts only rounds whose kernels actually ran; without ET the
-  // layered mode keeps reporting max_iter for backward compatibility.
-  if (is_flooding || is_persistent || is_async) {
+  // layered mode keeps reporting max_iter for backward compatibility. LLS
+  // always reports the rounds actually executed (its ET is GPU-internal).
+  if (is_flooding || is_persistent || is_async || is_lls) {
     return static_cast<int>(ctrl->actual_iters);
   }
   return engine->et_enabled ? static_cast<int>(ctrl->actual_iters) : max_iter;

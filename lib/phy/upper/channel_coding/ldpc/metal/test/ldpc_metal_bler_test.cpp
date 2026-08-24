@@ -21,6 +21,10 @@
 // Usage: ldpc_metal_bler_test [--outdir DIR] [--gpu-type metal] [--bg 1|2] [--z Z]
 //        [--rates 0.333,0.5,...] [--snrs 0:2:10] [--trials N] [--max-iter N] [--cpu-max-iter N]
 //        [--norm A] [--beta B] [--latency N] [--warmup N]
+//
+// --gpu-type selects the decoder through the factory: metal (layered NMS), metal_flooding,
+// metal_persistent, metal_async or metal_lls (LLS bit-flipping, restored from the git history,
+// ~5-8 dB weaker on BLER - its waterfall lies well above the NMS curves).
 
 #include "ocudu/phy/upper/channel_coding/channel_coding_factories.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc_encoder_buffer.h"
@@ -302,6 +306,11 @@ int main(int argc, char** argv)
     gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
                                                    dec_factory_cfg.early_stop_syndrome,
                                                    ocudu::metal::decoder_engine::algo::async_delta, p.norm, p.beta);
+  } else if ((p.gpu_type == "metal_lls") && ((p.norm >= 0.0F) || (p.beta >= 0.0F))) {
+    // LLS experiments bypass the factory defaults (LLS step size 0.8, beta 0).
+    gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
+                                                   dec_factory_cfg.early_stop_syndrome,
+                                                   ocudu::metal::decoder_engine::algo::lls, p.norm, p.beta);
   } else {
     gpu_dec = create_ldpc_decoder_factory_sw(p.gpu_type, dec_factory_cfg)->create();
   }
