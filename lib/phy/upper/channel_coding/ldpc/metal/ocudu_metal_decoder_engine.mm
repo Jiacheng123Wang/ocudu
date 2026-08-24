@@ -26,6 +26,10 @@ struct decode_ctrl_t {
   uint32_t error_count;     // unsatisfied check equations (current round) / async: stop_flag
   uint32_t early_terminate; // set by the ET gate when the syndrome converges / async: row_updates
   uint32_t actual_iters;    // rounds actually executed / async: actual_gens
+  // LLS-only (the NMS shaders' DecodeCtrl stops after the first 3 words):
+  uint32_t prev_error_count; // previous round's error_count (stall detection)
+  uint32_t stall_counter;    // consecutive stall rounds
+  uint32_t stall_flag;       // 1 = next round's update performs the hard multi-flip escape
 };
 
 // Must match the VNStats struct in ocudu_lls_decoder.metal (debug buffer layout).
@@ -88,6 +92,7 @@ struct engine_impl_t {
   id<MTLBuffer> buf_evidence  = nil; // private (per-VN evidence sums)
   id<MTLBuffer> buf_vn_total  = nil; // shared (per-VN column weights, CPU-computed, GPU read-only)
   id<MTLBuffer> buf_debug     = nil; // shared (VNStats debug layout)
+  id<MTLBuffer> buf_cooldown  = nil; // private (per-VN 1-round flip-immunity flag, Phase 2)
 
   decoder_engine::layered_info layered_info{};
 
@@ -408,6 +413,8 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
                                                        options:MTLResourceStorageModeShared];
     engine->buf_debug = [engine->device newBufferWithLength:engine->n_aligned * sizeof(vn_stats_t)
                                                     options:MTLResourceStorageModeShared];
+    engine->buf_cooldown = [engine->device newBufferWithLength:engine->n_aligned * sizeof(uint32_t)
+                                                           options:MTLResourceStorageModePrivate];
 
     // Compute the column weights on the CPU (once per engine; the GPU reads them read-only).
     uint32_t* col_weights = static_cast<uint32_t*>(engine->buf_vn_total.contents);
@@ -482,6 +489,7 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
     [enc setBuffer:engine->buf_err_eq offset:0 atIndex:3];
     [enc setBuffer:engine->buf_suspect offset:0 atIndex:4];
     [enc setBuffer:engine->buf_evidence offset:0 atIndex:5];
+    [enc setBuffer:engine->buf_cooldown offset:0 atIndex:6];
     [enc dispatchThreads:MTLSizeMake(engine->n_aligned, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
     // Stage B: initial full syndrome computation (once; maintained incrementally afterwards).
@@ -507,6 +515,8 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
       [enc setBuffer:engine->buf_evidence offset:0 atIndex:5];
       [enc setBytes:&engine->n_h_chunks length:sizeof(uint32_t) atIndex:6];
       [enc setBuffer:engine->buf_ctrl offset:0 atIndex:7];
+      [enc setBytes:&engine->lls_params length:sizeof(decoder_engine::lls_params) atIndex:8];
+      [enc setBuffer:engine->buf_cooldown offset:0 atIndex:9];
       [enc dispatchThreadgroups:MTLSizeMake(engine->m_aligned, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
@@ -522,6 +532,7 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
       [enc setBytes:&engine->lls_params length:sizeof(decoder_engine::lls_params) atIndex:8];
       [enc setBuffer:engine->buf_ctrl offset:0 atIndex:9];
       [enc setBuffer:engine->buf_debug offset:0 atIndex:10];
+      [enc setBuffer:engine->buf_cooldown offset:0 atIndex:11];
       [enc dispatchThreads:MTLSizeMake(engine->n_aligned, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     }

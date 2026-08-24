@@ -28,7 +28,12 @@
 //   --lls-gamma X   post-flip magnitude: 1 overshoot (legacy), 0 reset to the evidence
 //   --lls-eps X     post-update magnitude floor (default 0)
 //   --lls-norm N    evidence normalization: 0 /s_cnt (legacy), 1 /e_cnt, 2 /tc
-//   --lls-k N       suspects per unsatisfied row (2 only; 3/4 = Phase 2)
+//   --lls-k N       suspects per unsatisfied row (2-4; 3/4 = Phase 2)
+//   --lls-evidence M evidence assignment: 0 E-self, 1 E-peel, 2 E-uniform, 3 rank-damped E-peel
+//   --lls-cooldown 1 enable the 1-round flip-immunity oscillation guard
+//   --lls-stall-escape 1 enable the stall-escape hard multi-flip (C4)
+//   --lls-stall-theta X hard-flip threshold: e_cnt >= X * column weight (default 0.75)
+//   --lls-stall-rounds N consecutive stall rounds before the escape (default 3)
 //
 // --snrs selects the GPU decoder's SNR sweep; --snrs-cpu overrides the CPU decoder's sweep
 // (default: the CPU shares --snrs). The sweeps may differ (e.g. the GPU needs higher SNRs
@@ -86,7 +91,12 @@ struct params {
   float       lls_gamma = -1.0F;
   float       lls_eps   = -1.0F;
   int         lls_norm  = -1; // 0: /s_cnt (legacy), 1: /e_cnt, 2: /tc
-  unsigned    lls_k     = 2;
+  unsigned    lls_k     = 2; // suspects per unsatisfied row (2-4, Phase 2)
+  int         lls_evidence = -1; // 0: E-self (legacy k=2), 1: E-peel, 2: E-uniform, 3: rank-damped E-peel
+  int         lls_cooldown  = -1; // 1: 1-round flip-immunity guard
+  int         lls_stall_escape = -1; // 1: stall-escape hard multi-flip (C4)
+  float       lls_stall_theta  = -1.0F; // hard-flip threshold (default 0.75)
+  unsigned    lls_stall_rounds = 0;  // consecutive stall rounds (default 3)
 };
 
 /// Parses "a:b:c" into a sequence, or a single value.
@@ -173,6 +183,16 @@ params parse_args(int argc, char** argv)
       p.lls_norm = std::stoi(next(a.c_str()));
     } else if (a == "--lls-k") {
       p.lls_k = static_cast<unsigned>(std::stoul(next(a.c_str())));
+    } else if (a == "--lls-evidence") {
+      p.lls_evidence = std::stoi(next(a.c_str()));
+    } else if (a == "--lls-cooldown") {
+      p.lls_cooldown = std::stoi(next(a.c_str()));
+    } else if (a == "--lls-stall-escape") {
+      p.lls_stall_escape = std::stoi(next(a.c_str()));
+    } else if (a == "--lls-stall-theta") {
+      p.lls_stall_theta = std::stof(next(a.c_str()));
+    } else if (a == "--lls-stall-rounds") {
+      p.lls_stall_rounds = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else {
       std::fprintf(stderr, "unknown argument '%s'\n", a.c_str());
       std::exit(1);
@@ -376,14 +396,20 @@ int main(int argc, char** argv)
     gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
                                                    dec_factory_cfg.early_stop_syndrome,
                                                    ocudu::metal::decoder_engine::algo::lls, p.norm, p.beta);
-    if (p.lls_k != 2) {
-      std::fprintf(stderr, "--lls-k %u: only 2 is implemented so far (PLAN.md 4.15 Phase 2 pending)\n", p.lls_k);
+    if (p.lls_k > 4) {
+      std::fprintf(stderr, "--lls-k %u: 2-4 supported (PLAN.md 4.15 Phase 2)\n", p.lls_k);
       return 1;
     }
-    // PLAN.md 4.15 Phase 1 tuning knobs: any of them switches the engine to the
-    // full parameter struct (alpha defaults to --norm or the legacy 0.8).
+    if (p.lls_evidence > 3) {
+      std::fprintf(stderr, "--lls-evidence %d: 0 (E-self), 1 (E-peel) or 2 (E-uniform)\n", p.lls_evidence);
+      return 1;
+    }
+    // PLAN.md 4.15 Phase 1/2 tuning knobs: any of them switches the engine to
+    // the full parameter struct (alpha defaults to --norm or the champion 1.5).
     const bool lls_flags = (p.lls_beta >= 0.0F) || (p.lls_p >= 0.0F) || (p.lls_gamma >= 0.0F) ||
-                           (p.lls_eps >= 0.0F) || (p.lls_norm >= 0);
+                           (p.lls_eps >= 0.0F) || (p.lls_norm >= 0) || (p.lls_k != 2) ||
+                           (p.lls_evidence >= 0) || (p.lls_cooldown >= 0) ||
+                           (p.lls_stall_escape >= 0) || (p.lls_stall_theta >= 0.0F) || (p.lls_stall_rounds != 0);
     if (lls_flags) {
       ocudu::metal::decoder_engine::lls_params lp;
       lp.alpha = (p.norm >= 0.0F) ? p.norm : 1.5F;
@@ -392,6 +418,12 @@ int main(int argc, char** argv)
       if (p.lls_gamma >= 0.0F) lp.gamma = p.lls_gamma;
       if (p.lls_eps >= 0.0F) lp.eps = p.lls_eps;
       if (p.lls_norm >= 0) lp.norm_mode = static_cast<uint32_t>(p.lls_norm);
+      lp.k_suspects    = p.lls_k;
+      lp.evidence_mode = (p.lls_evidence >= 0) ? static_cast<uint32_t>(p.lls_evidence) : 0;
+      lp.cooldown      = (p.lls_cooldown >= 1) ? 1u : 0u;
+      lp.stall_escape  = (p.lls_stall_escape >= 1) ? 1u : 0u;
+      if (p.lls_stall_theta >= 0.0F) lp.theta = p.lls_stall_theta;
+      if (p.lls_stall_rounds != 0) lp.stall_rounds = p.lls_stall_rounds;
       static_cast<ldpc_decoder_metal&>(*gpu_dec).set_lls_params(lp);
     }
   } else {
@@ -509,7 +541,12 @@ int main(int argc, char** argv)
           << ",p=" << ((p.lls_p >= 0.0F) ? p.lls_p : 2.0F)
           << ",gamma=" << ((p.lls_gamma >= 0.0F) ? p.lls_gamma : 0.0F)
           << ",eps=" << ((p.lls_eps >= 0.0F) ? p.lls_eps : 0.0F)
-          << ",norm=" << ((p.lls_norm >= 0) ? p.lls_norm : 0) << ",k=" << p.lls_k;
+          << ",norm=" << ((p.lls_norm >= 0) ? p.lls_norm : 0) << ",k=" << p.lls_k
+          << ",evidence=" << ((p.lls_evidence >= 0) ? p.lls_evidence : 0)
+          << ",cooldown=" << ((p.lls_cooldown >= 1) ? 1 : 0)
+          << ",stall_escape=" << ((p.lls_stall_escape >= 1) ? 1 : 0)
+          << ",stall_theta=" << ((p.lls_stall_theta >= 0.0F) ? p.lls_stall_theta : 0.75F)
+          << ",stall_rounds=" << ((p.lls_stall_rounds != 0) ? p.lls_stall_rounds : 3);
     }
     csv << "\n";
     csv << "snr_db,cpu_pass,gpu_pass,total,time_cpu_s,time_gpu_s,"
