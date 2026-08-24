@@ -53,6 +53,11 @@ public:
   /// GPU-side duration of the last decode in microseconds (0 when unavailable).
   double last_gpu_wait_us() const { return last_gpu_wait_us_; }
 
+  /// LLS tuning parameters (PLAN.md 4.15; LLS mode only, ignored otherwise).
+  /// Call before the first decode: the per-(BG, Z) LLS engine slots are dropped
+  /// so they get rebuilt with the new parameters on the next use.
+  void set_lls_params(const metal::decoder_engine::lls_params& p);
+
 private:
   /// Per-(base graph, lifting size) GPU engine and its host-side buffers.
   struct engine_slot;
@@ -65,6 +70,10 @@ private:
   float factor_override;
   float beta_override;
   bool enable_et;
+
+  /// LLS tuning overrides (PLAN.md 4.15); inactive until set_lls_params() is called.
+  metal::decoder_engine::lls_params lls_params_;
+  bool                              lls_params_set_ = false;
 
   /// GPU-side duration of the last decode (set by decode(); see last_gpu_wait_us()).
   double last_gpu_wait_us_ = 0.0;

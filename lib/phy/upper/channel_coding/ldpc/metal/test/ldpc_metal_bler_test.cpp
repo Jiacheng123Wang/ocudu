@@ -22,6 +22,14 @@
 //        [--rates 0.333,0.5,...] [--snrs 0:2:10] [--snrs-cpu 0:2:8] [--trials N]
 //        [--max-iter N] [--cpu-max-iter N] [--norm A] [--beta B] [--latency N] [--warmup N]
 //
+// metal_lls tuning knobs (PLAN.md 4.15, Phase 1; --norm doubles as alpha):
+//   --lls-beta X    self-prior damping delta -= X*|LLR| (default 0)
+//   --lls-p X       unsatisfied-ratio exponent (default 2)
+//   --lls-gamma X   post-flip magnitude: 1 overshoot (legacy), 0 reset to the evidence
+//   --lls-eps X     post-update magnitude floor (default 0)
+//   --lls-norm N    evidence normalization: 0 /s_cnt (legacy), 1 /e_cnt, 2 /tc
+//   --lls-k N       suspects per unsatisfied row (2 only; 3/4 = Phase 2)
+//
 // --snrs selects the GPU decoder's SNR sweep; --snrs-cpu overrides the CPU decoder's sweep
 // (default: the CPU shares --snrs). The sweeps may differ (e.g. the GPU needs higher SNRs
 // than the CPU): the CSV contains one row per point of the merged sweep, and the cells of
@@ -72,6 +80,13 @@ struct params {
   unsigned    cpu_max_iter = 0; // 0 = same as --max-iter (the GPU and the CPU share the value)
   unsigned    latency  = 0; // >0: decode-latency mode, N timed decodes per decoder
   unsigned    warmup   = 3; // BLER mode: warm-up rounds before the SNR sweep (GPU init excluded)
+  // LLS tuning overrides (PLAN.md 4.15); -1 = legacy default. metal_lls only.
+  float       lls_beta  = -1.0F;
+  float       lls_p     = -1.0F;
+  float       lls_gamma = -1.0F;
+  float       lls_eps   = -1.0F;
+  int         lls_norm  = -1; // 0: /s_cnt (legacy), 1: /e_cnt, 2: /tc
+  unsigned    lls_k     = 2;
 };
 
 /// Parses "a:b:c" into a sequence, or a single value.
@@ -146,6 +161,18 @@ params parse_args(int argc, char** argv)
       p.latency = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else if (a == "--warmup") {
       p.warmup = static_cast<unsigned>(std::stoul(next(a.c_str())));
+    } else if (a == "--lls-beta") {
+      p.lls_beta = std::stof(next(a.c_str()));
+    } else if (a == "--lls-p") {
+      p.lls_p = std::stof(next(a.c_str()));
+    } else if (a == "--lls-gamma") {
+      p.lls_gamma = std::stof(next(a.c_str()));
+    } else if (a == "--lls-eps") {
+      p.lls_eps = std::stof(next(a.c_str()));
+    } else if (a == "--lls-norm") {
+      p.lls_norm = std::stoi(next(a.c_str()));
+    } else if (a == "--lls-k") {
+      p.lls_k = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else {
       std::fprintf(stderr, "unknown argument '%s'\n", a.c_str());
       std::exit(1);
@@ -159,6 +186,7 @@ params parse_args(int argc, char** argv)
 struct round_trip {
   bool cpu_ok = false;
   bool gpu_ok = false;
+  int  gpu_iters = -1; // GPU rounds actually executed (-1 = not run / failed before the GPU)
 };
 
 round_trip run_once(std::mt19937&          rng,
@@ -245,7 +273,9 @@ round_trip run_once(std::mt19937&          rng,
     std::vector<uint8_t> out_bytes((k + 7) / 8);
     bit_buffer           out = bit_buffer::from_bytes(out_bytes);
     const auto           t0  = std::chrono::steady_clock::now();
-    res.gpu_ok              = gpu_dec.decode(out, llrs, &crc16, dec_cfg).has_value();
+    const auto           it  = gpu_dec.decode(out, llrs, &crc16, dec_cfg);
+    res.gpu_ok              = it.has_value();
+    res.gpu_iters           = it.has_value() ? static_cast<int>(*it) : -1;
     const auto t1 = std::chrono::steady_clock::now();
     if (gpu_us != nullptr) {
       *gpu_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
@@ -341,11 +371,29 @@ int main(int argc, char** argv)
     gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
                                                    dec_factory_cfg.early_stop_syndrome,
                                                    ocudu::metal::decoder_engine::algo::async_delta, p.norm, p.beta);
-  } else if ((p.gpu_type == "metal_lls") && ((p.norm >= 0.0F) || (p.beta >= 0.0F))) {
+  } else if (p.gpu_type == "metal_lls") {
     // LLS experiments bypass the factory defaults (LLS step size 0.8, beta 0).
     gpu_dec = std::make_unique<ldpc_decoder_metal>(dec_factory_cfg.force_decoding,
                                                    dec_factory_cfg.early_stop_syndrome,
                                                    ocudu::metal::decoder_engine::algo::lls, p.norm, p.beta);
+    if (p.lls_k != 2) {
+      std::fprintf(stderr, "--lls-k %u: only 2 is implemented so far (PLAN.md 4.15 Phase 2 pending)\n", p.lls_k);
+      return 1;
+    }
+    // PLAN.md 4.15 Phase 1 tuning knobs: any of them switches the engine to the
+    // full parameter struct (alpha defaults to --norm or the legacy 0.8).
+    const bool lls_flags = (p.lls_beta >= 0.0F) || (p.lls_p >= 0.0F) || (p.lls_gamma >= 0.0F) ||
+                           (p.lls_eps >= 0.0F) || (p.lls_norm >= 0);
+    if (lls_flags) {
+      ocudu::metal::decoder_engine::lls_params lp;
+      lp.alpha = (p.norm >= 0.0F) ? p.norm : 1.5F;
+      if (p.lls_beta >= 0.0F) lp.beta = p.lls_beta;
+      if (p.lls_p >= 0.0F) lp.p = p.lls_p;
+      if (p.lls_gamma >= 0.0F) lp.gamma = p.lls_gamma;
+      if (p.lls_eps >= 0.0F) lp.eps = p.lls_eps;
+      if (p.lls_norm >= 0) lp.norm_mode = static_cast<uint32_t>(p.lls_norm);
+      static_cast<ldpc_decoder_metal&>(*gpu_dec).set_lls_params(lp);
+    }
   } else {
     gpu_dec = create_ldpc_decoder_factory_sw(p.gpu_type, dec_factory_cfg)->create();
   }
@@ -452,10 +500,22 @@ int main(int argc, char** argv)
     }
     csv << "# gpu=" << p.gpu_type << " bg=" << p.bg << " z=" << p.z << " k=" << k << " rate=" << rate << " e=" << e
         << " max_iter=" << p.max_iter << " cpu_max_iter=" << p.cpu_max_iter << " trials=" << p.trials
-        << " warmup=" << p.warmup << " snrs_cpu_split=" << (p.snrs_cpu.empty() ? 0 : 1) << "\n";
+        << " warmup=" << p.warmup << " snrs_cpu_split=" << (p.snrs_cpu.empty() ? 0 : 1);
+    if (p.gpu_type == "metal_lls") {
+      // Effective LLS parameters (PLAN.md 4.15): the engine uses these unless all
+      // the --lls-* knobs are at their legacy defaults.
+      csv << " lls_params=alpha=" << ((p.norm >= 0.0F) ? p.norm : 1.5F)
+          << ",beta=" << ((p.lls_beta >= 0.0F) ? p.lls_beta : 0.0F)
+          << ",p=" << ((p.lls_p >= 0.0F) ? p.lls_p : 2.0F)
+          << ",gamma=" << ((p.lls_gamma >= 0.0F) ? p.lls_gamma : 0.0F)
+          << ",eps=" << ((p.lls_eps >= 0.0F) ? p.lls_eps : 0.0F)
+          << ",norm=" << ((p.lls_norm >= 0) ? p.lls_norm : 0) << ",k=" << p.lls_k;
+    }
+    csv << "\n";
     csv << "snr_db,cpu_pass,gpu_pass,total,time_cpu_s,time_gpu_s,"
            "cpu_mean_us,cpu_median_us,cpu_min_us,cpu_max_us,cpu_p95_us,cpu_p99_us,"
-           "gpu_mean_us,gpu_median_us,gpu_min_us,gpu_max_us,gpu_p95_us,gpu_p99_us\n";
+           "gpu_mean_us,gpu_median_us,gpu_min_us,gpu_max_us,gpu_p95_us,gpu_p99_us,"
+           "gpu_mean_iters_ok,gpu_mean_iters_fail\n";
     std::fprintf(stderr, "rate %.4f (e=%u):", rate, e);
 
     for (double snr : all_snrs) {
@@ -463,6 +523,11 @@ int main(int argc, char** argv)
       const bool run_gpu = contains(p.snrs, snr);
       const double sigma = std::sqrt(std::pow(10.0, -snr / 10.0) / 2.0);
       unsigned     cpu_pass = 0, gpu_pass = 0;
+      // GPU rounds executed (CRC-OK vs CRC-fail), averaged per point: the
+      // stall distribution shows whether a decoder fails by hitting max_iter
+      // or by converging to a wrong codeword.
+      unsigned gpu_iters_ok_sum = 0, gpu_iters_fail_sum = 0;
+      unsigned gpu_iters_ok_n = 0, gpu_iters_fail_n = 0;
       // Per-decoder wall time accumulated over the point's trials (run_once
       // times each decode separately, so the CPU and GPU curves carry their
       // own run times).
@@ -488,8 +553,15 @@ int main(int argc, char** argv)
         if (run_gpu) {
           gpu_pass += r.gpu_ok ? 1 : 0;
           gpu_us_sum += g_us;
-          if (r.gpu_ok) {
-            gpu_ok_us.push_back(g_us);
+          if (r.gpu_iters >= 0) {
+            if (r.gpu_ok) {
+              gpu_ok_us.push_back(g_us);
+              gpu_iters_ok_sum += static_cast<unsigned>(r.gpu_iters);
+              ++gpu_iters_ok_n;
+            } else {
+              gpu_iters_fail_sum += static_cast<unsigned>(r.gpu_iters);
+              ++gpu_iters_fail_n;
+            }
           }
         }
       }
@@ -515,6 +587,14 @@ int main(int argc, char** argv)
         std::fprintf(stderr, " gpu mean=%.1fus p50=%.1fus max=%.1fus", gs.mean, gs.median, gs.max);
       } else {
         csv << ",,,,,,";
+      }
+      // Mean GPU rounds for CRC-OK vs CRC-fail decodes (empty when not run / no samples).
+      csv << "," << (run_gpu && gpu_iters_ok_n ? std::to_string(static_cast<double>(gpu_iters_ok_sum) / gpu_iters_ok_n) : "")
+          << "," << (run_gpu && gpu_iters_fail_n ? std::to_string(static_cast<double>(gpu_iters_fail_sum) / gpu_iters_fail_n) : "");
+      if (run_gpu && (gpu_iters_ok_n || gpu_iters_fail_n)) {
+        std::fprintf(stderr, " iters ok=%.2f fail=%.2f",
+                     gpu_iters_ok_n ? static_cast<double>(gpu_iters_ok_sum) / gpu_iters_ok_n : 0.0,
+                     gpu_iters_fail_n ? static_cast<double>(gpu_iters_fail_sum) / gpu_iters_fail_n : 0.0);
       }
       csv << "\n";
       std::fprintf(stderr, ")");

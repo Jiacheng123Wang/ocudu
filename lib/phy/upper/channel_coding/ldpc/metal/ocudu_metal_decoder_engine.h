@@ -44,6 +44,23 @@ public:
     lls,
   };
 
+  /// LLS tuning parameters (see PLAN.md 4.15). The layout matches the LLSParams
+  /// constant struct in ocudu_lls_decoder.metal exactly: the engine passes it to
+  /// the shader with one setBytes per dispatch. The defaults are the Phase 1
+  /// champion (PLAN.md 4.15): gamma 0 = the post-flip magnitude resets to the
+  /// evidence (the legacy overshoot delta - |old| oscillates on erasure/trap
+  /// structures), with the alpha carried by the adapter default (1.5).
+  struct lls_params {
+    float    alpha      = 1.5F; ///< erosion step size.
+    float    beta       = 0.0F; ///< self-prior damping: delta -= beta * |LLR| (0 = off).
+    float    p          = 2.0F; ///< unsatisfied-ratio exponent (1 or 2).
+    float    gamma      = 0.0F; ///< post-flip magnitude: 0 = reset to the evidence (Phase 1 champion), 1 = legacy overshoot.
+    float    eps        = 0.0F; ///< post-update magnitude floor (0 = off; 1 fixes the round-level sign(0) trap).
+    uint32_t k_suspects = 2;    ///< suspects per unsatisfied row (2 = legacy; 3/4 = PLAN.md 4.15 Phase 2).
+    uint32_t norm_mode  = 0;    ///< evidence normalization: 0 = /s_cnt (legacy), 1 = /e_cnt, 2 = /tc ("total erosion").
+    uint32_t reserved   = 0;
+  };
+
   /// CSR edge layout for the layered schedule (built by the adapter). The fused
   /// CN+VN kernel needs no per-layer column tables: within one layer no two
   /// lifted rows share a variable node (3GPP base-graph property).
@@ -80,10 +97,12 @@ public:
   /// \param[in] mode           Decoder algorithm.
   /// \param[in] et_enabled     Dispatch the per-round ET gate (layered mode only; the flooding
   ///                           kernels always run their fused convergence check).
+  /// \param[in] lls            LLS tuning parameters (LLS mode only; null = the defaults with
+  ///                           \c factor as alpha, the legacy behavior).
   /// \return True on success.
   bool init(uint32_t n_logical, uint32_t m_logical, float factor, float beta, const uint32_t* h,
             const uint32_t* ht, const layered_info& layered, algo mode = algo::layered,
-            bool et_enabled = true);
+            bool et_enabled = true, const lls_params* lls = nullptr);
 
   /// \brief Synchronous decode of one codeblock.
   ///

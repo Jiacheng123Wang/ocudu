@@ -33,6 +33,20 @@ struct VNStats
     float current_llr;
 };
 
+// LLS tuning parameters (PLAN.md 4.15). The layout matches
+// decoder_engine::lls_params on the host exactly (one setBytes per dispatch).
+struct LLSParams
+{
+    float alpha;       // erosion step size
+    float beta;        // self-prior damping: delta -= beta * |old_llr|
+    float p;           // unsatisfied-ratio exponent (1 or 2)
+    float gamma;       // post-flip magnitude: 1 = legacy overshoot (delta - |old|), 0 = reset to the evidence
+    float eps;         // post-update magnitude floor (0 = legacy; 1 fixes the round-level sign(0) trap)
+    uint32_t k_suspects; // suspects per unsatisfied row (2 = legacy; 3/4 = Phase 2)
+    uint32_t norm_mode;  // evidence normalization: 0 = /s_cnt (legacy), 1 = /e_cnt, 2 = /tc ("total erosion")
+    uint32_t reserved;
+};
+
 // 辅助函数：浮点数原子加法
 void atomic_float_add(device atomic_uint *addr, float delta)
 {
@@ -232,7 +246,7 @@ kernel void update_llr_hpred(
     device atomic_uint *h_pred [[buffer(5)]],
     device const uint32_t *ht_matrix [[buffer(6)]],
     constant uint32_t &n_ht_chunks [[buffer(7)]],
-    constant float &alpha [[buffer(8)]],
+    constant LLSParams &params [[buffer(8)]],
     device DecodeCtrl *ctrl [[buffer(9)]],
     device VNStats *debug_out [[buffer(10)]],
     uint vn_idx [[thread_position_in_grid]],
@@ -269,29 +283,56 @@ kernel void update_llr_hpred(
     stats.current_llr = old_llr;
     stats.last_delta = 0.0f;
 
-    bool sign_flipped = false;
+    bool flipped = false;
 
-    // 2. 执行 LLR 更新逻辑
+    // 2. 执行 LLR 更新逻辑 (PLAN.md 4.15, 参数化: 归一化 / 自先验 / 后更新幅值策略)
     if (s_cnt > 0)
     {
-        float ratio = (float)e_cnt / (float)total_cnt;
-        float delta = alpha * (ratio * ratio) * (e_sum / (float)s_cnt);
+        const float ratio = (float)e_cnt / (float)total_cnt;
+        float delta;
+        if (params.norm_mode == 2u)
+        {
+            // "Total erosion": normalize the evidence sum by the full column weight,
+            // dropping the ratio term (the vote count already encodes how wrong the VN is).
+            delta = params.alpha * (e_sum / (float)total_cnt);
+        }
+        else
+        {
+            const float ratio_p = (params.p > 1.5f) ? (ratio * ratio) : ratio;
+            const float denom   = (params.norm_mode == 1u) ? (float)e_cnt : (float)s_cnt;
+            delta = params.alpha * ratio_p * (e_sum / denom);
+        }
+        delta -= params.beta * fabs(old_llr); // self-prior damping (IMWBF-style)
 
-        float new_llr = old_llr - sign(old_llr) * delta;
+        float new_llr = old_llr;
+        if (delta > 0.0f)
+        {
+            const float abs_old = fabs(old_llr);
+            if (delta < abs_old)
+            {
+                // Plain erosion toward zero (the legacy path).
+                new_llr = old_llr - sign(old_llr) * delta;
+            }
+            else
+            {
+                // Flip: the post-flip magnitude is max(eps, delta - gamma * |old|).
+                // gamma = 1 keeps the legacy overshoot (delta - |old|); gamma = 0 resets
+                // the confidence to the evidence. The flip decision is taken from the
+                // arithmetic branch itself, so it stays consistent with the LLR write even
+                // when the result is a signed zero.
+                const float m = delta - params.gamma * abs_old;
+                new_llr = -sign(old_llr) * max(params.eps, m);
+                flipped = true;
+            }
+        }
         llr_array[vn_idx] = (half)new_llr;
         
         stats.last_delta = delta;
         stats.current_llr = new_llr;
-
-        // 判定符号是否翻转
-        if ((old_llr < 0.0f) != (new_llr < 0.0f))
-        {
-            sign_flipped = true;
-        }
     }
 
     // 3. SIMD 组协作增量更新 h_pred
-    uint flip_mask = (uint)(simd_vote::vote_t)simd_ballot(sign_flipped);
+    uint flip_mask = (uint)(simd_vote::vote_t)simd_ballot(flipped);
     while (flip_mask != 0)
     {
         uint leader_lane = ctz(flip_mask);

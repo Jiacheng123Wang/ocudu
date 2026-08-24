@@ -136,6 +136,22 @@ ldpc_decoder_metal::ldpc_decoder_metal(bool force_decoding_, bool early_stop_syn
 
 ldpc_decoder_metal::~ldpc_decoder_metal() = default;
 
+void ldpc_decoder_metal::set_lls_params(const metal::decoder_engine::lls_params& p)
+{
+  std::lock_guard<std::mutex> lock(decode_mtx);
+  lls_params_     = p;
+  lls_params_set_ = true;
+  // Drop the LLS engine slots so the next decode rebuilds them with the new
+  // parameters (the NMS-mode slots are unaffected).
+  for (auto it = slots.begin(); it != slots.end();) {
+    if (mode == metal::decoder_engine::algo::lls) {
+      it = slots.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_type bg, ldpc::lifting_size_t ls)
 {
   const unsigned z = static_cast<unsigned>(ls);
@@ -231,12 +247,17 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
     slot->layered_info.n_layers = n_layers;
     slot->layered_info.z        = z;
     slot->engine = std::make_unique<metal::decoder_engine>();
-    // LLS step size (alpha): 0.8 measured best on the ocudu-quantized int8 LLRs
-    // (the SynchroPlus reference is 0.45 for unquantized float sims).
-    const float factor = (factor_override >= 0.0F) ? factor_override : 0.8F;
+    // LLS step size (alpha): 1.5 is the Phase 1 champion (PLAN.md 4.15, paired
+    // with the reset post-flip magnitude gamma = 0); the legacy 0.8 with the
+    // overshoot policy measured 1.5-2.5 dB weaker and left a ~5% high-SNR floor
+    // at high code rates. The full parameter struct takes over once
+    // set_lls_params() is used.
+    const float factor = lls_params_set_ ? lls_params_.alpha
+                                         : (factor_override >= 0.0F ? factor_override : 1.5F);
     const float beta   = (beta_override >= 0.0F) ? beta_override : 0.0F;
     if (!slot->engine->init(n, m, factor, beta, slot->h.get(), slot->ht.get(), slot->layered_info,
-                            metal::decoder_engine::algo::lls, enable_et)) {
+                            metal::decoder_engine::algo::lls, enable_et,
+                            lls_params_set_ ? &lls_params_ : nullptr)) {
       ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
     }
     engine_slot& ref = *slot;

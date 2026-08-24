@@ -1093,6 +1093,170 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
   PUSCH 调制/加窗/CFO 预补偿);TX 样本干净则是 gnb UL RX 链(ZMQ 定界/
   同步/FFT/信道估计)。修 UL 质量与 LLS BLER 优化是两个独立方向。
 
+## 4.15 LLS BLER 优化方案(2026-08-24:多嫌疑人 / 证据公式 / 打孔感知擦除)
+
+### 目标与硬约束
+
+- 目标:保持 LLS 的并行度优势(每轮 2 dispatch、无消息传递、无逐边存储、
+  GPU 内早停)不变,把与分层 NMS 的 BLER 差距从 5-8 dB 压到 2-4 dB,并消除
+  高码率/大擦除尾的高 SNR 残余失败(当前 ~5%)。
+- 硬约束:单命令缓冲 + 2 dispatch/轮不变;h_pred/HT-XOR 增量 syndrome 维护
+  不变(纯算术替换);无噪声单元测试 100% 位精确、1 轮收敛不变;ET 语义不变;
+  新增状态仍是 per-VN / per-row 原子缓冲,不引入逐边结构。
+
+### 度量协议与基线冻结
+
+- 基线 = 现有代码(α=0.8、k=2、公式 F1、+1 擦除偏置、max_iter=6),基线 CSV
+  冻结归档。
+- 评测配置组(A-D,覆盖块大小×码率):A = BG2 Z16 R1/3(小块低码率,已知
+  瀑布 6→10dB)、B = BG2 Z48 R1/2(中块)、C = BG2 Z11 R2/3(高码率,差距
+  >10dB 的最痛点)、D = BG1 Z256 R1/3(大块,贴近 E2E 的 z=160-208/QPSK)。
+- 指标:90%/99% 通过率的 ΔSNR(瀑布位移);最高 SNR 点残余失败数(floor,
+  目标 0);CRC-OK/FAIL 平均轮数;GPU 解码耗时(mean/p95,回归护栏 ≤ +10%)。
+- 等延迟预算对照:先实测 NMS 与 LLS 的单轮成本(已有数据:6 轮总耗时两者
+  接近——LLS 每轮 dispatch 少,但扫描同样遍历全部边),按实测给 LLS 一个
+  等延迟的轮数预算(max_iter ∈ {6,12,20,40} 扫一遍)——5-8 dB 差距里可能含
+  一部分"同 max_iter、不同延迟"的预算伪差距,先量化、后优化。
+
+### 方向一:证据公式与后更新幅值策略(纯 update_llr_hpred 改动)
+
+- 现状 F1:δ = α·(e_cnt/tc)²·(e_sum/s_cnt);new = old − sign(old)·δ,穿越零
+  即翻转,翻转后 |new| = δ − |old|("过冲")。
+- 三个已知缺陷:(a) 分子只含嫌疑行而分母用得票数 s_cnt,量纲不干净;
+  (b) 无自先验项——|old| 大的正确 VN 也会被弱票侵蚀/翻转(IMWBF 文献的
+  核心修正);(c) 过冲使翻转后 |new| 可趋近 0 → 振荡;|old| 极小 VN 更新后
+  可能落 0,轮内重新触发 sign(0)=+1 缺陷。
+- 设计空间(逐轴 A/B,先单轴后联合):
+  - 归一化:N1 /s_cnt(现状)、N2 /e_cnt、N3 /tc(全列权"总侵蚀",配合去掉
+    ratio 项);
+  - 比率指数:p ∈ {1, 2}(现状 2);
+  - 聚合:mean(现状)、max(需 per-VN float-max 原子缓冲)、min(保守);
+  - 自先验:δ' = δ − β·|old|,β ∈ {0, 0.1, 0.25}(β>0 时翻转判据变为
+    "票强 > (1+β)·自置信",IMWBF 式);
+  - 后更新幅值统一策略:new = −sign(old)·max(ε, δ − γ·|old|)——γ=1 现状
+    过冲、γ=0 重置(翻转后置信 = 证据)、γ=0.5 混合;ε=1 幅值地板,顺带修复
+    轮内 sign(0) 陷阱;
+  - 参考点 F7:δ = Σ_{不满意行} m1_row / tc(经典并行 WBF 度量,k=∞)。
+
+### 方向二:多嫌疑人扩展(scan 的 k-min 归约 + 投票)
+
+- 现状 k=2、证据分配 E-self(i1←m2、i2←m1)。E-self 在 k≥3 退化:所有
+  j≥2 的嫌疑人都拿 m1,必须换分配。
+- 设计:每行取 k ∈ {3,4} 个最弱 VN;证据分配 A/B:E-peel(嫌疑人 i_j ←
+  m_{j+1},k=2 时 = {m2, m3},比现状给次嫌疑人更大证据;语义 = "最强 k 个
+  翻完后,行内剩余的最小支撑")vs E-uniform(全部 ← m_{k+1})。
+- 实现:per-lane 维护 (k+1) 个最小值 + 蝶形归并(k=4 时 5 个);寄存器压力
+  可控,占用率下降则退回 k=3;evidence_sum 原子流量 ×k/2,实测护栏。
+- k 调度:静态 per-round 表 k_sched[max_iter](如 {2,2,3,3,4,4}),按
+  actual_iters 索引(常数缓冲);Phase 2b 可选停滞自适应(error_count 连续
+  2 轮不降 → k++)。
+- 振荡护栏(cooldown):per-VN 1-bit 标志(独立原子缓冲);init 清零;scan 对
+  cooling VN 不投票(err_eq_cnt 仍计数);update 翻转者置位、未翻转者清零 →
+  翻转后 1 轮免疫,确定性无死锁;与 E-peel 配合抑制"正确弱 VN 反复翻转"。
+
+### 方向三:打孔感知擦除处理(adapter → 引擎新输入 + 陷集逃逸)
+
+- 新增擦除掩码:adapter 已知布局([0,2Z) 打孔 + tail 未传),打包 n_h_chunks
+  字、零拷贝缓冲传入,init/update 只读;+1 偏置保留为基线 C1。
+- 策略:C2 擦除首翻锁(掩码 VN 首翻需 s_cnt ≥ 2 且 δ > τ_e,防单弱票就翻;
+  擦除 VN 冷却 2 轮);C3 擦除证据增益 δ *= η_e(η_e ∈ {1.25, 1.5},擦除位
+  无信道先验,证据不应被折扣);C4 停滞逃逸:error_count 连续 T=3 轮不降 →
+  硬多翻(所有 e_cnt ≥ θ·tc、θ=0.75 的 VN 同时翻转,LLR = −sign·max(ε,
+  α·mean_vote),照常 HT-XOR)。实现:ctrl 扩为 5 字(error_count /
+  early_terminate / actual_iters / prev_error_count / stall_flag,新字段仅 LLS
+  使用);由 update 的 vn0 在上一轮末置 stall_flag,下一轮 update 起始执行硬
+  翻(滞后一轮、无核内竞态)。
+- 目标:C 类(高码率/大擦除尾)高 SNR floor 5% → 0。
+- 不做:LLS+NMS 混合后处理(破坏单解码器纯度,记入未来工作)。
+
+### 参数流水线与工具改动
+
+- 引擎:lls_params_t{alpha, beta, p, gamma, eps, erasure_boost, k_suspects,
+  k_sched[8], cooldown, stall_escape} 取代单个 factor setBytes;init 存储、
+  decode 一次 setBytes 传常数结构(scan/update 共用)。
+- 适配器:构造签名兼容保留,新增 set_lls_params() 供测试注入;工厂 metal_lls
+  默认参数 = 冠军值(收尾时改),此前默认 α=0.8 不变。
+- BLER CLI:--lls-k/--lls-beta/--lls-p/--lls-gamma/--lls-eps/--lls-cooldown/
+  --lls-erase-boost/--lls-stall-escape(--norm 已映射 α);CSV 头加
+  lls_params= 行;CSV 加 gpu_mean_iters_ok/fail 两列,plot_bler.py 画停滞分布。
+- 调试:VNStats 缓冲已就位;加 --dump-fail PATH(每 SNR 点首个失败块的终态
+  LLR/syndrome/末轮统计/擦除掩码落盘),按列聚合翻转计数定位失败列(打孔列?
+  尾列?)。
+
+### 分阶段实施与验证门
+
+- Phase 0(工具+基线):lls_params_t 流水线、CLI、dump-fail、基线 CSV 冻结、
+  等延迟预算测量(真实算法差距量化)。
+- Phase 1(公式轴,纯 update 改动):归一化/β/γ/ε 单轴 → 联合;门:无噪声
+  1 轮收敛 + A-D 上 ΔSNR ≥ 1dB 或 floor 下降,延迟无回退。
+- Phase 2(多嫌疑人+cooldown):k-min 归约、E-peel、k 调度、cooldown;门:
+  同上 + 占用率/原子争用护栏。
+- Phase 3(擦除+陷集逃逸):掩码、首翻锁、η_e、停滞硬多翻;门:高 SNR
+  floor → 0。
+- Phase 4(冠军+回归+E2E):联合网格(粗→细)定冠军;单元测试与
+  metal/metal_flooding/metal_persistent/metal_async 回归不变;工厂默认 =
+  冠军;E2E 重跑 gnb metal_lls,预期 UL CRC-OK 大幅回升(与 srsue UL 质量
+  修复两个方向并行)。
+- 每 Phase 的 A/B 都用现有 BLER 基准(200 块/点,秒级),CSV+图归档
+  bler_results。
+
+### 预期收益与风险
+
+- 预期(假设,逐门验证):β 自先验 + γ/ε 策略:1-2 dB;多嫌疑人 + cooldown:
+  0.5-1.5 dB;擦除策略 + 停滞逃逸:floor → 0;等延迟预算修正:剥离"预算伪
+  差距"。合计目标:差距 5-8 dB → 2-4 dB、高 SNR floor 归零、并行度不变。
+- 风险:k-min 寄存器压力(k=4 退 k=3);evidence 原子争用(护栏实测);
+  cooldown/首翻锁交互(设计上无条件清零,已规避死锁);fp16 量化(ε 地板兜
+  底);冠军在真实脏 UL(evm≈0.5)上增益打折——BLER 基准是 AWGN,需 E2E
+  复核。
+
+### Phase 0/1 实施记录(2026-08-24,参数流水线 + 证据公式扫描)
+
+- **Phase 0 已落地**:`decoder_engine::lls_params`(alpha/beta/p/gamma/eps/
+  k_suspects/norm_mode,与着色器 `LLSParams` 逐字段对齐,一次 setBytes 传入);
+  引擎 init 新增可选 `lls` 参数(缺省 = 旧行为,alpha 取 factor);适配器
+  `set_lls_params()`(丢弃 LLS 槽位,下次解码重建);BLER CLI 新增
+  `--lls-beta/--lls-p/--lls-gamma/--lls-eps/--lls-norm/--lls-k`(`--norm`
+  兼作 alpha);CSV 头加 `lls_params=` 行、数据行加
+  `gpu_mean_iters_ok,gpu_mean_iters_fail` 两列(plot_bler.py 无需改,多列忽略)。
+- **回归**:单元测试全过(无噪声 100%/1 轮收敛不变);基线复现成功——
+  A:6dB 74/100 ≈ 历史 77;8dB 97/100 ✓;B:8dB 27/100 ✓;C:14-22dB 92-95/100
+  的 5% floor 复现 ✓。
+- **Phase 1 单轴扫描(A = BG2 Z16 R1/3,4/6/8dB,100 块/点)**:
+  | 变体 | 4dB | 6dB | 8dB | 结论 |
+  |---|---|---|---|---|
+  | baseline(α0.8, γ1 过冲) | 26 | 74 | 97 | 基线 |
+  | β=0.1 / 0.25(自先验) | 22/17 | 70/73 | 97 | **有害**,淘汰 |
+  | γ=0(翻转后重置为证据) | 39 | 84 | 97 | ★ 冠军机制 |
+  | γ=0.5 | 35 | 83 | 97 | 次优 |
+  | ε=1(幅值地板) | 39 | 84 | 97 | 等效 γ0 |
+  | norm=1/2、p=1 | 19-23 | 75-83 | 97 | 中性偏弱 |
+- **α 精细扫描(γ=0 下)**:A@4dB 随 α 单调升 39(0.8)→46(1.25)→51(1.5)→
+  56(1.75);B@6dB 2(0.8)→22(1.25)→37(1.5);C 在 α1.25 下 200/200 全过。
+  ⚠️ norm=2 在 B 上 α1.25 出现 25% 高 SNR floor(发散)——norm2 淘汰。
+- **高 SNR floor 归零**:C(BG2 Z11 R2/3, 200 块/点)baseline 92-95/200 →
+  γ=0 后 14-22dB **200/200**——"过冲"(|new|=δ−|old|)正是高码率擦除位
+  振荡/陷集的主因,Phase 3 的 C4(停滞逃逸)可能已不再必需。
+- **max_iter/α 扩展扫描**:A 在 α2.0+20 轮达 56/91(4/6dB),但更高轮数
+  收益边际化(B@6dB 饱和 ~53-56,OK 轮数=满额 → 剩余失败是陷阱非预算);
+  ⚠️ α≥2.0 让 C 的 floor 回归(187-192/200)→ **α 必须在瀑布与 floor 间
+  平衡**。
+- **Phase 1 冠军 = γ0 + α1.5**(已写入工厂默认:引擎 lls_params γ 默认 0、
+  适配器 LLS α 默认 1.5,Bler CLI 默认显示同步):
+  | 配置 | baseline | 冠军 | 收益 |
+  |---|---|---|---|
+  | A BG2 Z16 R1/3 | 26/74/97 @4/6/8dB | 52/87/97 | +1.5-2dB 瀑布 |
+  | B BG2 Z48 R1/2 | 0/27 @6/8dB | 49/95(+12 轮) | +2-3dB |
+  | C BG2 Z11 R2/3 | 92-95/100 floor | **200/200** | floor→0 |
+  | D BG1 Z256 R1/3 | 74 @8dB | 74 | 不动(Phase 2 目标) |
+  与 NMS 差距仍 ~8-10dB(D 最大)——符合预期,留给 Phase 2 多嫌疑人 +
+  cooldown、Phase 3 擦除处理。
+- **E2E 待办(用户执行)**:gnb 需 sudo;命令
+  `sudo ./gnb -c configs/gnb_zmq.yaml --pusch_ldpc_decoder_type metal_lls
+  --pusch_dec_max_iterations 12`(迭代 12 轮:冠军在瀑布区常用 6-12 轮,
+  LLS 每轮 ~50-75us@Z160-208,总预算仍 ~1ms);验证 UE attach + 拿 IP +
+  ping,gnb 日志 crc=OK 比例应大幅高于 metal_lls 旧默认(1/172)。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`

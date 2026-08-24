@@ -101,6 +101,8 @@ struct engine_impl_t {
   float    factor     = 0.0f;
   float    beta       = 0.0f;
   bool     et_enabled = true;
+  // LLS tuning parameters (PLAN.md 4.15); passed to the update kernel as one constant struct.
+  decoder_engine::lls_params lls_params;
   // GPU-side duration of the last decode (0 when unavailable), for the
   // latency-benchmark breakdown: wall - gpu = CPU-side fixed overhead.
   double   last_gpu_us = 0.0;
@@ -314,7 +316,7 @@ decoder_engine::~decoder_engine()
 
 bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, float beta,
                           const uint32_t* h, const uint32_t* ht, const layered_info& layered,
-                          algo mode, bool et_enabled)
+                          algo mode, bool et_enabled, const lls_params* lls)
 {
   engine_impl_t* engine = new engine_impl_t();
   impl                  = engine;
@@ -326,6 +328,12 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
   engine->et_enabled = et_enabled;
   engine->layered_info = layered;
   engine->z          = layered.z;
+  // LLS: the parameter struct replaces the bare alpha; without one the legacy
+  // behavior is reproduced exactly (alpha = factor, everything else at default).
+  engine->lls_params = lls != nullptr ? *lls : lls_params{};
+  if (lls == nullptr) {
+    engine->lls_params.alpha = factor;
+  }
 
   engine->n_aligned  = ((n_logical + 31) / 32) * 32;
   engine->m_aligned  = ((m_logical + 31) / 32) * 32;
@@ -511,7 +519,7 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
       [enc setBuffer:engine->buf_h_pred offset:0 atIndex:5];
       [enc setBuffer:engine->buf_ht offset:0 atIndex:6];
       [enc setBytes:&engine->h_pred_len length:sizeof(uint32_t) atIndex:7];
-      [enc setBytes:&engine->factor length:sizeof(float) atIndex:8];
+      [enc setBytes:&engine->lls_params length:sizeof(decoder_engine::lls_params) atIndex:8];
       [enc setBuffer:engine->buf_ctrl offset:0 atIndex:9];
       [enc setBuffer:engine->buf_debug offset:0 atIndex:10];
       [enc dispatchThreads:MTLSizeMake(engine->n_aligned, 1, 1)
