@@ -1035,24 +1035,33 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
 ### E2E 排查:metal_lls 实链 attach 后立即 RRC Release(2026-08-24,不是状态 bug)
 
 - 现象:UE RRC Connected 后立即收到 RRC Release;gnb 全程只有 1 个 CRC-OK
-  UL 解码(11B msg5),之后所有 UL PUSCH 都失败。
-- 排查结论:**LLS 的 BLER 差距,不是解码器状态损坏**。链路 UL SINR ~3dB
-  (gnb 日志 sinr=+3.0dB),BLER 复现(速率匹配输入,100 块/点):
-  - BG2 Z11 R=2/3 @3dB:LLS 0/100(msg5 尺寸量级——实链首个解码成功属于
-    低码率/小块的幸运通过);
-  - BG2 Z16 R=1/2 @3dB:LLS 0/100(单测全块输入时 Z16@3dB 32/100,速率
-    匹配+擦除尾部后更差);
-  - BG2 Z48 R=1/2 @3dB:LLS 0/100 vs **CPU(auto)100/100**(后续 NAS 消息
-    尺寸量级);
-  - BG2 Z11 R=2/3 @20dB:LLS 95/100(高 SNR 下解码器持续正常工作,首解码
-    后无状态残留;非 100% 也印证高码率 + 大擦除尾部时 LLS 的固有短板)。
-- "第一次成功后出问题"是消息尺寸巧合(msg5 最小、后续消息 z 增大 + LLS
-  随 z 变差),与单测多轮复用同实例 100% 通过相印证。
-- 实链确认方法:gnb debug 日志 grep `PUSCH:` —— 后续每次 UL 尝试都会出现
-  `crc=KO` 行且 `dec_t`/`metal_t` 正常(~0.3-0.5ms),解码在跑、只是不收敛;
-  若无任何后续 PUSCH 行才是挂起/崩溃,需另行排查。
-- 与 metal(分层 NMS)对照:分层 NMS 在同条件单测 3dB 全过(100/100),所以
-  E2E 正常。LLS 要实链可用需先把 BLER 差距关掉(下步优化方向不变)。
+  UL 解码(tbs=11 msg5 的重传),之后所有 UL PUSCH 都失败。
+- 日志复核(172 次 PHY 解码尝试,4 个 TB 尺寸 = 4 个 z:tbs=11/528/512/437 →
+  z≈12/208/192/160):
+  - **无 crash**:H/H^T 按 (bg,z) 首次使用惰性生成(无需预生成)——tbs=528
+    首次尝试 t=6.6ms 即槽位构建,之后 ~1.9ms/次;4 个 z 槽位全部构建成功并
+    反复解码;gnb 全程存活至手动关机("Workers stopped successfully"),
+    崩溃假设被日志排除;
+  - 失败模式:每次解码跑满 6 轮不收敛(iter=6.0/min=6/max=6,GPU 内 syndrome
+    从未清零),11:02:22.3 RLF "MAC max consecutive CRC KOs reached" → release;
+    唯一 OK 是 tbs=11 的**重传**(new_data=false 软合并后过,tcr=0.117 极低码率)。
+- **信号质量根因(修正初版"3dB 噪声"结论)**:ZMQ 传输确实无损,但信号在进
+  ZMQ 之前就已经失真——gnb 测量 evm≈0.5(=-6dB)、sinr_ch_est=6.5dB、
+  sinr_eq=3dB、epre=+10.2dB、rsrp=9.4dB。epre +10dB 说明 srsue 的 UL 时域
+  基带幅度约 3.2 倍过热,而线上格式是 int16(srsue 端 float→int16 @32767
+  饱和)→ **UE 侧硬削波**,时域 OFDM 峰被削 → 频域 EVM≈50% 的确定性失真。
+  之前 metal 跑的样本(evm=0.5/epre=10.2/sinr=3dB)与本次完全一致——min-sum
+  3-6 轮能扛住,LSS 比特翻转启发式扛不住。DL 方向(gnb 基带 ≤1)不削波,
+  所以 UE 收 DL 正常。
+- BLER 复现(速率匹配输入,100 块/点):BG2 Z48 R=1/2 @3dB LLS 0/100 vs
+  CPU 100/100;BG2 Z11 R=2/3 @20dB LLS 95/100(高 SNR 下同实例持续正常解码,
+  排除状态残留)。
+- **让 LLS 跑通 E2E 的办法**:修掉 UL 削波(本身就是应修的链路问题)——srsue
+  配置加 `[phy] force_ul_amplitude = 0.5`(FORCE_AMPLITUDE 模式,时域峰 ≤1.0);
+  验证:重跑后 gnb 日志 evm→0、sinr_ch_est 跳至 20-30dB,届时 LLS 应全部
+  解码。LLS 的 BLER 优化(多嫌疑人/证据公式/擦除处理)仍是下一优先级。
+- 注意:日志里"crc=OK 2 次"实为 1 次——每条 debug 条目中 crc=OK 出现两行
+  (摘要行 + verbose 块)。
 
 ## 5. 交付物清单
 
