@@ -1063,6 +1063,27 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
 - 注意:日志里"crc=OK 2 次"实为 1 次——每条 debug 条目中 crc=OK 出现两行
   (摘要行 + verbose 块)。
 
+### 双日志对比 + 信号质量定位修正(2026-08-24,metal 50-ping 正常跑 vs LLS)
+
+- 对照数据(同一 UE/链路,只换解码器):
+  | 运行 | 解码尝试 | crc=OK | 会话 |
+  |---|---|---|---|
+  | metal_lls (`/tmp/gnb_lls.log`) | 172 | **1** | ~3s 后 RLF → RRC Release |
+  | metal (`/tmp/gnb.log`) | 196 | **191**(含 14 个 16QAM) | 50 ping 全程存活,手动关机 |
+  两 run 的 evm≈0.5 / epre / sinr 完全一致 → 信号质量与解码器无关。
+- **修正"UE 侧 int16 削波"的判断**:查 srsue 源码——`phy.force_ul_amplitude`
+  旋钮只接入 LTE UL 路径(`phy_common.cc`),NR PHY(`srsue/src/phy/nr`)不读它;
+  而 NR PUSCH TX 内部已把时域峰归一化到 0.99(`ue_ul_nr.c` "Normalise to
+  peak")→ 线上 int16 不会饱和,削波不成立,该旋钮对 NR 无效。
+- **DL 方向完美**:UE 侧小区搜索日志 `snr=+118.9dB`(SSB)——ZMQ 链路无损、
+  gnb TX/UE RX 全正常。UL 的 evm≈0.5(有效 ~3-11dB)是 srsue NR TX 或 gnb
+  UL RX 链内部的确定性退化,两 run 一致。min-sum 家族容忍它(97.5% 通过),
+  LLS 在 z=160-208/QPSK 需要 ~10dB+ → 171/172 失败。
+- **下一步定位实验**:153 上 `zmq_remote_rx` 抓 UE 发往 gnb 的原始样本,对
+  已知 PUSCH 算 EVM——原始 TX 样本就 ~50% EVM 则是 srsue NR TX 缺陷(查
+  PUSCH 调制/加窗/CFO 预补偿);TX 样本干净则是 gnb UL RX 链(ZMQ 定界/
+  同步/FFT/信道估计)。修 UL 质量与 LLS BLER 优化是两个独立方向。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`
