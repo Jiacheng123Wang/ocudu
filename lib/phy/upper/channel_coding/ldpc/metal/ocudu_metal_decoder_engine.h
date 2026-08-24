@@ -56,9 +56,13 @@ public:
     float    p          = 2.0F; ///< unsatisfied-ratio exponent (1 or 2).
     float    gamma      = 0.0F; ///< post-flip magnitude: 0 = reset to the evidence (Phase 1 champion), 1 = legacy overshoot.
     float    eps        = 0.0F; ///< post-update magnitude floor (0 = off; 1 fixes the round-level sign(0) trap).
-    uint32_t k_suspects = 2;    ///< suspects per unsatisfied row (2 = legacy; 3/4 = PLAN.md 4.15 Phase 2).
-    uint32_t norm_mode  = 0;    ///< evidence normalization: 0 = /s_cnt (legacy), 1 = /e_cnt, 2 = /tc ("total erosion").
-    uint32_t reserved   = 0;
+    uint32_t k_suspects    = 2; ///< suspects per unsatisfied row (2 = legacy; 3/4 = PLAN.md 4.15 Phase 2).
+    uint32_t norm_mode     = 0; ///< evidence normalization: 0 = /s_cnt (legacy), 1 = /e_cnt, 2 = /tc ("total erosion").
+    uint32_t evidence_mode = 0; ///< suspect evidence: 0 = E-self (legacy k=2 {m2,m1}), 1 = E-peel ({m_{j+1}}), 2 = E-uniform ({m_{k+1}}), 3 = rank-damped E-peel.
+    uint32_t cooldown      = 0; ///< 1 = 1-round flip-immunity oscillation guard (Phase 2).
+    uint32_t stall_escape  = 0; ///< 1 = the stall-escape hard multi-flip (Phase 3 C4).
+    float    theta         = 0.75F; ///< hard-flip threshold: VNs with e_cnt >= theta * column weight flip.
+    uint32_t stall_rounds  = 3;  ///< consecutive stall rounds before the escape fires.
   };
 
   /// CSR edge layout for the layered schedule (built by the adapter). The fused
