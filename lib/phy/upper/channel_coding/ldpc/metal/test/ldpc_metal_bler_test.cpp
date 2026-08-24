@@ -44,6 +44,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <random>
 #include <sstream>
@@ -289,6 +290,17 @@ int main(int argc, char** argv)
 {
   const params p = parse_args(argc, argv);
 
+  // The CSVs go to --outdir; create it when missing so the benchmark never fails
+  // silently later (std::ofstream does not report a missing directory).
+  {
+    std::error_code ec;
+    std::filesystem::create_directories(p.outdir, ec);
+    if (ec) {
+      std::fprintf(stderr, "cannot create outdir '%s': %s\n", p.outdir.c_str(), ec.message().c_str());
+      return 1;
+    }
+  }
+
   const ldpc_base_graph_type bg = (p.bg == 1) ? ldpc_base_graph_type::BG1 : ldpc_base_graph_type::BG2;
   ldpc::lifting_size_t ls = static_cast<ldpc::lifting_size_t>(p.z);
 
@@ -434,6 +446,10 @@ int main(int argc, char** argv)
     char fname[256];
     std::snprintf(fname, sizeof(fname), "%s/bler_%s_bg%u_z%u_r%.4f.csv", p.outdir.c_str(), p.gpu_type.c_str(), p.bg, p.z, rate);
     std::ofstream csv(fname);
+    if (!csv) {
+      std::fprintf(stderr, "cannot open '%s' for writing\n", fname);
+      return 1;
+    }
     csv << "# gpu=" << p.gpu_type << " bg=" << p.bg << " z=" << p.z << " k=" << k << " rate=" << rate << " e=" << e
         << " max_iter=" << p.max_iter << " cpu_max_iter=" << p.cpu_max_iter << " trials=" << p.trials
         << " warmup=" << p.warmup << " snrs_cpu_split=" << (p.snrs_cpu.empty() ? 0 : 1) << "\n";
