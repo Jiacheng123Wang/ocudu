@@ -1251,11 +1251,22 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
   | D BG1 Z256 R1/3 | 74 @8dB | 74 | 不动(Phase 2 目标) |
   与 NMS 差距仍 ~8-10dB(D 最大)——符合预期,留给 Phase 2 多嫌疑人 +
   cooldown、Phase 3 擦除处理。
-- **E2E 待办(用户执行)**:gnb 需 sudo;命令
-  `sudo ./gnb -c configs/gnb_zmq.yaml --pusch_ldpc_decoder_type metal_lls
-  --pusch_dec_max_iterations 12`(迭代 12 轮:冠军在瀑布区常用 6-12 轮,
-  LLS 每轮 ~50-75us@Z160-208,总预算仍 ~1ms);验证 UE attach + 拿 IP +
-  ping,gnb 日志 crc=OK 比例应大幅高于 metal_lls 旧默认(1/172)。
+- **E2E 第一轮结果(2026-08-24 21:39,修复 ABI 后重跑,e976e6428f)**:
+  - 先前的"无法 attach、卡在 PRACH 循环"确认是**我的 ABI 错配事故**(Phase 2
+    着色器被 gnb 运行时按路径加载,主机结构未同步)——Phase 2 已冻结到
+    `wip-lls-phase2` 分支,工作区/二进制/metallib 全部恢复并字节级复验
+    Phase 1 状态,单元测试 + BLER 复验(A 51/89/97、C 199-200/200)通过。
+  - 修复后 E2E:**无退步,但 attach 未成功**。PRACH→RAR→msg3(tbs=11)
+    crc=OK **iter=5.0 sinr=3.7dB**(旧默认在 sinr=4.5dB 才过)→ RRC Setup
+    Procedure 启动;随后 msg5 连败 → 100 连 CRC KO → RLF,与旧默认同一失败
+    阶段。解码统计:168 次尝试,tbs=437×480/512×16/528×32 全部 KO,均在
+    **sinr=1.5-3.4dB**、iter 跑满 12 轮;无崩溃、正常关机。
+  - **结论**:失败的 TB(z≈160-208、有效 sinr 1.5-3.4dB)落在 D 族工作点
+    (D@6dB 只有 3%、@8dB 74%)——LLS 与 NMS 在这里的差距仍 ~5-7dB。
+    Phase 2/3 的预期总收益(2-4dB)不足以让这些 TB 在 1.5-3.4dB 通过;
+    **E2E attach 必须修 UL 信号质量(evm≈0.5 的根因)**——PLAN.md 已定
+    的并行方向:153 上 `zmq_remote_rx` 抓原始 TX 样本对已知 PUSCH 算 EVM,
+    区分 srsue NR TX 缺陷 vs gnb UL RX 链。等用户拍板方向。
 
 ## 5. 交付物清单
 
