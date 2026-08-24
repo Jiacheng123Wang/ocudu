@@ -11,6 +11,7 @@
 #include "ocudu/phy/upper/channel_coding/crc_calculator.h"
 #include "ocudu/phy/upper/codeblock_metadata.h"
 #include "ocudu/phy/upper/log_likelihood_ratio.h"
+#include <chrono>
 #include <optional>
 
 namespace ocudu {
@@ -56,6 +57,14 @@ public:
   /// CRC) and set all the output bits to one.
   virtual std::optional<unsigned>
   decode(bit_buffer& output, span<const log_likelihood_ratio> input, crc_calculator* crc, const configuration& cfg) = 0;
+
+  /// \brief Metal GPU-side duration of the last \c decode call, when the decoder runs on a Metal GPU.
+  ///
+  /// The Metal decoder records the time of each Metal library invocation (one command buffer carrying all the
+  /// decoding iterations) at every \c decode call; the PUSCH decoder sums these per-codeblock durations to obtain
+  /// the total Metal library time of a transport block. Returns \c std::nullopt for decoders without a Metal
+  /// backend (e.g. auto/neon/generic), meaning the measurement is not applicable.
+  virtual std::optional<std::chrono::nanoseconds> get_last_decode_metal_elapsed() const { return std::nullopt; }
 };
 
 } // namespace ocudu

@@ -10,7 +10,9 @@
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc_segmenter_rx.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_decoder.h"
 #include "ocudu/ran/pusch/pusch_constants.h"
+#include <chrono>
 #include <memory>
+#include <optional>
 
 namespace ocudu {
 
@@ -104,6 +106,15 @@ public:
                                  bool                             use_early_stop,
                                  unsigned                         nof_ldpc_iterations,
                                  const codeblock_metadata&        metadata);
+
+  /// \brief Metal GPU-side duration of the last LDPC decode call.
+  ///
+  /// Forwards the measurement of the wrapped LDPC decoder (see \c ldpc_decoder::get_last_decode_metal_elapsed).
+  /// Returns \c std::nullopt for decoders without a Metal backend.
+  std::optional<std::chrono::nanoseconds> get_last_decode_metal_elapsed() const
+  {
+    return decoder->get_last_decode_metal_elapsed();
+  }
 
 private:
   /// Pointer to an LDPC rate-dematcher.

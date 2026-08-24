@@ -46,6 +46,12 @@ public:
     return ret;
   }
 
+  // See interface for documentation.
+  std::optional<std::chrono::nanoseconds> get_last_decode_metal_elapsed() const override
+  {
+    return base_decoder->get_last_decode_metal_elapsed();
+  }
+
 private:
   std::unique_ptr<ldpc_decoder> base_decoder;
   ldpc_decoder_metric_notifier& notifier;

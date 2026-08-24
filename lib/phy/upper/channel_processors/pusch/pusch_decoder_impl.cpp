@@ -97,6 +97,10 @@ pusch_decoder_buffer& pusch_decoder_impl::new_data(span<uint8_t>                
   // Reset the LDPC decode block timestamp: it is set again when the first codeblock decode starts.
   decode_start_time = {};
 
+  // Reset the Metal library total call duration accumulator: the codeblock tasks add to it when the decoder
+  // reports a Metal GPU-side duration for the current transport block.
+  metal_decode_elapsed_ns.store(0, std::memory_order_relaxed);
+
   // Unset the expected number of UL-SCH softbits.
   nof_ulsch_softbits.reset();
 
@@ -360,6 +364,12 @@ void pusch_decoder_impl::fork_codeblock_task(unsigned cb_id)
                                       current_config.use_early_stop,
                                       current_config.nof_ldpc_iterations,
                                       cb_meta);
+
+      // Sum the Metal library call durations of the individual codeblock decodes (one Metal command buffer per
+      // codeblock, regardless of the CRC outcome); CPU decoders report no value and contribute nothing.
+      if (auto metal_elapsed = decoder_ptr->get_last_decode_metal_elapsed(); metal_elapsed.has_value()) {
+        metal_decode_elapsed_ns.fetch_add(static_cast<uint64_t>(metal_elapsed->count()), std::memory_order_relaxed);
+      }
     } else {
       logger.error("Not enough codeblock decoder instances.");
     }
@@ -417,6 +427,13 @@ void pusch_decoder_impl::join_and_notify()
   // completion of the last one (whether the decoding converged or ran until the maximum number of iterations).
   if (decode_start_time != std::chrono::time_point<std::chrono::steady_clock>()) {
     stats.ldpc_decode_elapsed = std::chrono::steady_clock::now() - decode_start_time;
+  }
+
+  // Record the Metal library total call duration, summed over the codeblock decode calls. A zero total means no
+  // codeblock invoked the Metal GPU (CPU decoder or a decode that was skipped): report it as not applicable.
+  const uint64_t metal_elapsed_ns = metal_decode_elapsed_ns.load(std::memory_order_relaxed);
+  if (metal_elapsed_ns != 0) {
+    stats.ldpc_metal_elapsed = std::chrono::nanoseconds(metal_elapsed_ns);
   }
 
   // Calculate statistics.

@@ -10,6 +10,7 @@
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc_decoder.h"
 #include "ocudu_metal_decoder_engine.h"
 
+#include <chrono>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -44,6 +45,10 @@ public:
                                  span<const log_likelihood_ratio> input,
                                  crc_calculator*                crc,
                                  const configuration&           cfg) override;
+
+  /// See interface for documentation. Returns \c std::nullopt when the last decode did not invoke the GPU (e.g. a
+  /// short input that bypassed the decoding) or when the GPU timestamps were unavailable.
+  std::optional<std::chrono::nanoseconds> get_last_decode_metal_elapsed() const override;
 
   /// GPU-side duration of the last decode in microseconds (0 when unavailable).
   double last_gpu_wait_us() const { return last_gpu_wait_us_; }

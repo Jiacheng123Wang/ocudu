@@ -181,6 +181,12 @@ private:
   /// Used to measure the time spent in the LDPC decode block, whether the decoding converged or ran until the
   /// maximum number of iterations. Reset on every new transmission.
   std::chrono::time_point<std::chrono::steady_clock> decode_start_time;
+  /// \brief Accumulated Metal library total call duration of the current transport block, in nanoseconds.
+  ///
+  /// Each codeblock decode task adds the Metal GPU-side duration of its decode call (the Metal decoder reports one
+  /// value per codeblock; CPU decoders contribute nothing). Reset on every new transmission. Atomic because the
+  /// codeblock tasks may run concurrently on the decoder executor.
+  std::atomic<uint64_t> metal_decode_elapsed_ns{0};
 
   // See interface for the documentation.
   span<log_likelihood_ratio> get_next_block_view(unsigned block_size) override;

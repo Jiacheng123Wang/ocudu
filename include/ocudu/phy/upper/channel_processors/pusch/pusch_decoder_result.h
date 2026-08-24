@@ -6,6 +6,7 @@
 
 #include "ocudu/support/math/stats.h"
 #include <chrono>
+#include <optional>
 #include <string>
 
 namespace ocudu {
@@ -31,6 +32,12 @@ struct pusch_decoder_result {
   /// Measured from the first codeblock decode invocation to the completion of the last one. It covers the whole
   /// decoding attempt, whether it converged to a valid CRC or ran until the maximum number of iterations.
   std::chrono::nanoseconds ldpc_decode_elapsed{0};
+  /// \brief Metal library total call duration of the LDPC decode block, when the decoder runs on a Metal GPU.
+  ///
+  /// Sum of the Metal GPU-side durations reported by each codeblock decode call (each call is one Metal command
+  /// buffer carrying all the decoding iterations). Nullopt for decoders without a Metal backend (auto/neon/
+  /// generic/...): the measurement is not applicable and the log prints "na".
+  std::optional<std::chrono::nanoseconds> ldpc_metal_elapsed;
   /// \brief Size in bytes of the uncoded payload of the decoded code block(s), i.e. the MAC PDU (transport block)
   /// size.
   unsigned mac_pdu_bytes = 0;

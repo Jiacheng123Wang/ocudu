@@ -227,6 +227,11 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
   // (the codeblock-decoder pool hands out one instance per task).
   std::lock_guard<std::mutex> lock(decode_mtx);
 
+  // Reset the per-call Metal library duration: it is set again only when the decode
+  // actually dispatches to the GPU, so early returns (e.g. a too-short input) do not
+  // leak the previous decode's measurement through get_last_decode_metal_elapsed().
+  last_gpu_wait_us_ = 0.0;
+
   const bool     is_bg1 = cfg.base_graph == ldpc_base_graph_type::BG1;
   const unsigned n_full = is_bg1 ? 68 : 52;
   const unsigned bg_k   = is_bg1 ? 22 : 10;
@@ -297,4 +302,14 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
     return early_stop_syndrome ? static_cast<unsigned>(iters) : cfg.max_iterations;
   }
   return std::nullopt;
+}
+
+std::optional<std::chrono::nanoseconds> ldpc_decoder_metal::get_last_decode_metal_elapsed() const
+{
+  // 0 means the last decode did not invoke the GPU (reset at the start of decode()) or that the
+  // GPU timestamps were unavailable.
+  if (last_gpu_wait_us_ <= 0.0) {
+    return std::nullopt;
+  }
+  return std::chrono::nanoseconds(static_cast<long long>(last_gpu_wait_us_ * 1e3));
 }
