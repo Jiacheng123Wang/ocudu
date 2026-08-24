@@ -19,8 +19,15 @@
 // data per point is simply the CRC-OK count times the packet size.
 //
 // Usage: ldpc_metal_bler_test [--outdir DIR] [--gpu-type metal] [--bg 1|2] [--z Z]
-//        [--rates 0.333,0.5,...] [--snrs 0:2:10] [--trials N] [--max-iter N] [--cpu-max-iter N]
-//        [--norm A] [--beta B] [--latency N] [--warmup N]
+//        [--rates 0.333,0.5,...] [--snrs 0:2:10] [--snrs-cpu 0:2:8] [--trials N]
+//        [--max-iter N] [--cpu-max-iter N] [--norm A] [--beta B] [--latency N] [--warmup N]
+//
+// --snrs selects the GPU decoder's SNR sweep; --snrs-cpu overrides the CPU decoder's sweep
+// (default: the CPU shares --snrs). The sweeps may differ (e.g. the GPU needs higher SNRs
+// than the CPU): the CSV contains one row per point of the merged sweep, and the cells of
+// the decoder that was not evaluated at a point stay empty.
+// --max-iter sets the GPU iteration cap; --cpu-max-iter overrides the CPU cap (default 0 =
+// the CPU shares --max-iter).
 //
 // --gpu-type selects the decoder through the factory: metal (layered NMS), metal_flooding,
 // metal_persistent, metal_async or metal_lls (LLS bit-flipping, restored from the git history,
@@ -34,6 +41,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -54,10 +62,13 @@ struct params {
   unsigned    bg        = 1;
   unsigned    z         = 64;
   std::vector<double> rates = {1.0 / 3.0, 0.5, 2.0 / 3.0};
+  /// GPU decoder SNR sweep (--snrs). The CPU shares it unless --snrs-cpu is given.
   std::vector<double> snrs  = {0.0, 2.0, 4.0, 6.0, 8.0, 10.0};
+  /// CPU decoder SNR sweep (--snrs-cpu); empty = reuse --snrs.
+  std::vector<double> snrs_cpu;
   unsigned    trials   = 200;
   unsigned    max_iter = 6;
-  unsigned    cpu_max_iter = 0; // 0 = same as max_iter (decoupled for the flooding evaluation)
+  unsigned    cpu_max_iter = 0; // 0 = same as --max-iter (the GPU and the CPU share the value)
   unsigned    latency  = 0; // >0: decode-latency mode, N timed decodes per decoder
   unsigned    warmup   = 3; // BLER mode: warm-up rounds before the SNR sweep (GPU init excluded)
 };
@@ -122,6 +133,8 @@ params parse_args(int argc, char** argv)
       p.rates = parse_seq(next(a.c_str()));
     } else if (a == "--snrs") {
       p.snrs = parse_seq(next(a.c_str()));
+    } else if (a == "--snrs-cpu") {
+      p.snrs_cpu = parse_seq(next(a.c_str()));
     } else if (a == "--trials") {
       p.trials = static_cast<unsigned>(std::stoul(next(a.c_str())));
     } else if (a == "--max-iter") {
@@ -140,7 +153,8 @@ params parse_args(int argc, char** argv)
   return p;
 }
 
-/// One encode -> channel -> decode round trip for both decoders.
+/// One encode -> channel -> decode round trip. With the split SNR sweeps (--snrs vs --snrs-cpu)
+/// each decoder can be skipped at a point via \c do_cpu / \c do_gpu.
 struct round_trip {
   bool cpu_ok = false;
   bool gpu_ok = false;
@@ -161,7 +175,9 @@ round_trip run_once(std::mt19937&          rng,
                     ldpc_base_graph_type  bg,
                     ldpc::lifting_size_t  ls,
                     double*               cpu_us = nullptr,
-                    double*               gpu_us = nullptr)
+                    double*               gpu_us = nullptr,
+                    bool                  do_cpu = true,
+                    bool                  do_gpu = true)
 {
   // Message: K-16 random bits + CRC16 (MSB-first, segmenter convention).
   std::vector<uint8_t> msg_bytes((k + 7) / 8);
@@ -212,7 +228,7 @@ round_trip run_once(std::mt19937&          rng,
   };
 
   round_trip res;
-  {
+  if (do_cpu) {
     std::vector<uint8_t> out_bytes((k + 7) / 8);
     bit_buffer           out = bit_buffer::from_bytes(out_bytes);
     const auto           t0  = std::chrono::steady_clock::now();
@@ -221,8 +237,10 @@ round_trip run_once(std::mt19937&          rng,
     if (cpu_us != nullptr) {
       *cpu_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
     }
+  } else if (cpu_us != nullptr) {
+    *cpu_us = 0.0;
   }
-  {
+  if (do_gpu) {
     std::vector<uint8_t> out_bytes((k + 7) / 8);
     bit_buffer           out = bit_buffer::from_bytes(out_bytes);
     const auto           t0  = std::chrono::steady_clock::now();
@@ -231,6 +249,8 @@ round_trip run_once(std::mt19937&          rng,
     if (gpu_us != nullptr) {
       *gpu_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
     }
+  } else if (gpu_us != nullptr) {
+    *gpu_us = 0.0;
   }
   return res;
 }
@@ -276,8 +296,11 @@ int main(int argc, char** argv)
   const unsigned n_short = n_full - 2;
   const unsigned k       = (n_full - ((p.bg == 1) ? 46 : 42)) * p.z;
 
-  std::fprintf(stderr, "BLER benchmark: GPU=%s BG%d Z%u K=%u codeblock=%u rates=%zu snrs=%zu trials=%u max_iter=%u\n",
-               p.gpu_type.c_str(), p.bg, p.z, k, n_short * p.z, p.rates.size(), p.snrs.size(), p.trials, p.max_iter);
+  std::fprintf(stderr,
+               "BLER benchmark: GPU=%s BG%d Z%u K=%u codeblock=%u rates=%zu snrs=%zu snrs_cpu=%zu trials=%u "
+               "max_iter=%u cpu_max_iter=%u\n",
+               p.gpu_type.c_str(), p.bg, p.z, k, n_short * p.z, p.rates.size(), p.snrs.size(), p.snrs_cpu.size(),
+               p.trials, p.max_iter, p.cpu_max_iter);
 
   const ldpc_decoder_factory::ldpc_decoder_factory_configuration dec_factory_cfg = {
       .force_decoding      = false,
@@ -387,6 +410,22 @@ int main(int argc, char** argv)
     }
   }
 
+  // The CPU shares the GPU sweep unless --snrs-cpu overrides it; the CSV covers the merged sweep,
+  // with empty cells for the decoder that was not evaluated at a given point.
+  const std::vector<double>& cpu_snrs = p.snrs_cpu.empty() ? p.snrs : p.snrs_cpu;
+  std::vector<double>        all_snrs;
+  for (const std::vector<double>* list : {&p.snrs, &cpu_snrs}) {
+    for (double snr : *list) {
+      if (std::none_of(all_snrs.begin(), all_snrs.end(), [&](double v) { return std::abs(v - snr) < 1e-9; })) {
+        all_snrs.push_back(snr);
+      }
+    }
+  }
+  std::sort(all_snrs.begin(), all_snrs.end());
+  const auto contains = [](const std::vector<double>& list, double v) {
+    return std::any_of(list.begin(), list.end(), [&](double x) { return std::abs(x - v) < 1e-9; });
+  };
+
   for (double rate : p.rates) {
     // Clamp the rate-matched length to the codeblock (the rounding of k/rate can
     // overshoot the shortened codeblock by one bit at low rates).
@@ -396,13 +435,16 @@ int main(int argc, char** argv)
     std::snprintf(fname, sizeof(fname), "%s/bler_%s_bg%u_z%u_r%.4f.csv", p.outdir.c_str(), p.gpu_type.c_str(), p.bg, p.z, rate);
     std::ofstream csv(fname);
     csv << "# gpu=" << p.gpu_type << " bg=" << p.bg << " z=" << p.z << " k=" << k << " rate=" << rate << " e=" << e
-        << " max_iter=" << p.max_iter << " trials=" << p.trials << " warmup=" << p.warmup << "\n";
+        << " max_iter=" << p.max_iter << " cpu_max_iter=" << p.cpu_max_iter << " trials=" << p.trials
+        << " warmup=" << p.warmup << " snrs_cpu_split=" << (p.snrs_cpu.empty() ? 0 : 1) << "\n";
     csv << "snr_db,cpu_pass,gpu_pass,total,time_cpu_s,time_gpu_s,"
            "cpu_mean_us,cpu_median_us,cpu_min_us,cpu_max_us,cpu_p95_us,cpu_p99_us,"
            "gpu_mean_us,gpu_median_us,gpu_min_us,gpu_max_us,gpu_p95_us,gpu_p99_us\n";
     std::fprintf(stderr, "rate %.4f (e=%u):", rate, e);
 
-    for (double snr : p.snrs) {
+    for (double snr : all_snrs) {
+      const bool run_cpu = contains(cpu_snrs, snr);
+      const bool run_gpu = contains(p.snrs, snr);
       const double sigma = std::sqrt(std::pow(10.0, -snr / 10.0) / 2.0);
       unsigned     cpu_pass = 0, gpu_pass = 0;
       // Per-decoder wall time accumulated over the point's trials (run_once
@@ -419,22 +461,28 @@ int main(int argc, char** argv)
       for (unsigned t = 0; t != p.trials; ++t) {
         double c_us = 0.0, g_us = 0.0;
         const round_trip r = run_once(rng, *encoder, *crc16, *cpu_dec, *gpu_dec, p.z, k, n_short, e, sigma,
-                                      p.max_iter, p.cpu_max_iter, bg, ls, &c_us, &g_us);
-        cpu_pass += r.cpu_ok ? 1 : 0;
-        gpu_pass += r.gpu_ok ? 1 : 0;
-        cpu_us_sum += c_us;
-        gpu_us_sum += g_us;
-        if (r.cpu_ok) {
-          cpu_ok_us.push_back(c_us);
+                                      p.max_iter, p.cpu_max_iter, bg, ls, &c_us, &g_us, run_cpu, run_gpu);
+        if (run_cpu) {
+          cpu_pass += r.cpu_ok ? 1 : 0;
+          cpu_us_sum += c_us;
+          if (r.cpu_ok) {
+            cpu_ok_us.push_back(c_us);
+          }
         }
-        if (r.gpu_ok) {
-          gpu_ok_us.push_back(g_us);
+        if (run_gpu) {
+          gpu_pass += r.gpu_ok ? 1 : 0;
+          gpu_us_sum += g_us;
+          if (r.gpu_ok) {
+            gpu_ok_us.push_back(g_us);
+          }
         }
       }
-      csv << snr << "," << cpu_pass << "," << gpu_pass << "," << p.trials << ","
-          << cpu_us_sum / 1e6 << "," << gpu_us_sum / 1e6;
-      std::fprintf(stderr, " %gdB:%u/%u (cpu %.1fs gpu %.1fs", snr, gpu_pass, p.trials, cpu_us_sum / 1e6,
-                   gpu_us_sum / 1e6);
+      csv << snr << "," << (run_cpu ? std::to_string(cpu_pass) : "") << "," << (run_gpu ? std::to_string(gpu_pass) : "")
+          << "," << p.trials << "," << (run_cpu ? std::to_string(cpu_us_sum / 1e6) : "")
+          << "," << (run_gpu ? std::to_string(gpu_us_sum / 1e6) : "");
+      std::fprintf(stderr, " %gdB:%s%s", snr, run_gpu ? std::to_string(gpu_pass).c_str() : "-",
+                   run_cpu ? std::to_string(cpu_pass).c_str() : "-");
+      std::fprintf(stderr, " (cpu %.1fs gpu %.1fs", cpu_us_sum / 1e6, gpu_us_sum / 1e6);
       // CRC-OK-only latency statistics, one column block per decoder; empty when a decoder has no CRC-OK sample.
       if (!cpu_ok_us.empty()) {
         const latency_stats cs = compute_stats(cpu_ok_us);

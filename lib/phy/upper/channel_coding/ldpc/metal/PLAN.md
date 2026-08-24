@@ -1032,6 +1032,15 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
   两个最弱 VN、delta 公式为经验启发式——**下一步是 BLER 性能优化**(候选:
   多嫌疑人扩展、证据公式改进、与打孔感知的擦除处理),并行度优势不变。
 
+### BLER 基准工具增强(2026-08-24,分离 SNR 扫描 + 解码耗时图)
+
+- CLI:`--snrs` 定给 GPU,`--snrs-cpu` 覆盖 CPU 的扫描(缺省共用 `--snrs`);
+  `--cpu-max-iter 0`(缺省)= CPU 共用 `--max-iter`。CSV 覆盖两者合并后的
+  SNR 点,未评估一方的 pass/time/延迟列留空,头部 `snrs_cpu_split=` 标记。
+- plot_bler.py:兼容空单元格(分离扫描);新增每 (bg,z) 的
+  `bler_bg*_z*_latency.png` 解码耗时图(对数轴,CPU mean 实线 / GPU mean
+  虚线 / GPU p95 点线,仅 CRC-OK 样本),`--no-latency` 可关闭。
+
 ### E2E 排查:metal_lls 实链 attach 后立即 RRC Release(2026-08-24,不是状态 bug)
 
 - 现象:UE RRC Connected 后立即收到 RRC Release;gnb 全程只有 1 个 CRC-OK
