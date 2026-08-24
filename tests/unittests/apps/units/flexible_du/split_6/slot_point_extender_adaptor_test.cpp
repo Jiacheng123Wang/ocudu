@@ -29,7 +29,7 @@ protected:
   static constexpr subcarrier_spacing scs = subcarrier_spacing::kHz30;
 
   slot_indication_recorder    recorder;
-  slot_point_extender_adaptor adaptor{std::chrono::microseconds{500}, recorder};
+  slot_point_extender_adaptor adaptor{recorder};
 
   static uint32_t slots_per_hyper_frame() { return slot_point(scs, 0).nof_slots_per_hyper_system_frame(); }
 
@@ -90,7 +90,7 @@ TEST_F(slot_point_extender_adaptor_test, ten_seconds_of_slots_produces_ten_metri
   const uint32_t     first_raw_slot  = slots_per_hyper - 3;
 
   slot_indication_recorder    last_only;
-  slot_point_extender_adaptor under_test{std::chrono::microseconds{500}, last_only};
+  slot_point_extender_adaptor under_test{last_only};
 
   slot_point_extended next_report_end;
   unsigned            nof_reports = 0;
@@ -113,4 +113,38 @@ TEST_F(slot_point_extender_adaptor_test, ten_seconds_of_slots_produces_ten_metri
 
   EXPECT_EQ(nof_reports, 10) << "10 s at a 1 s metrics period should print 10 UE rows; a hyper-frame wrap jump "
                                 "silences the aggregator for ~10.24 s instead";
+}
+
+/// Hyper-SFN taken from the host clock alone, at 30 kHz.
+unsigned hyper_sfn_from_clock_alone(std::chrono::system_clock::time_point now)
+{
+  constexpr auto     slot_duration    = std::chrono::microseconds{500};
+  constexpr uint64_t slots_per_hyper  = 20U * NOF_SFNS;
+  const auto         time_since_epoch = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+  return static_cast<unsigned>(((time_since_epoch / slot_duration) / slots_per_hyper) % NOF_HYPER_SFNS);
+}
+
+std::chrono::system_clock::time_point at_unix_ms(int64_t ms)
+{
+  return std::chrono::system_clock::time_point{std::chrono::milliseconds{ms}};
+}
+
+// One millisecond before hyperframe 5 (clock SFN 1023) and the first millisecond of hyperframe 5 (clock SFN 0).
+constexpr int64_t k_unix_hyperframe_ms = 1024 * 10;
+const auto        k_just_before_hfn5   = at_unix_ms(5 * k_unix_hyperframe_ms - 1);
+const auto        k_start_of_hfn5      = at_unix_ms(5 * k_unix_hyperframe_ms);
+
+TEST(get_hyper_sfn_test, sfn_zero_while_clock_is_still_in_previous_hyperframe_uses_the_next_cycle)
+{
+  EXPECT_EQ(get_hyper_sfn(0, k_just_before_hfn5), 5U);
+  EXPECT_EQ(get_hyper_sfn(0, k_start_of_hfn5), 5U);
+  EXPECT_NE(hyper_sfn_from_clock_alone(k_just_before_hfn5), hyper_sfn_from_clock_alone(k_start_of_hfn5));
+}
+
+TEST(get_hyper_sfn_test, two_cells_reporting_the_same_sfn_agree_across_a_unix_hyperframe_boundary)
+{
+  constexpr uint32_t sfn = 100;
+
+  EXPECT_EQ(get_hyper_sfn(sfn, k_just_before_hfn5), get_hyper_sfn(sfn, k_start_of_hfn5));
+  EXPECT_NE(hyper_sfn_from_clock_alone(k_just_before_hfn5), hyper_sfn_from_clock_alone(k_start_of_hfn5));
 }
