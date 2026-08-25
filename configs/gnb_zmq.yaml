@@ -66,7 +66,11 @@ log:
   hex_max_size: 0
 
 pcap:
-  mac_enable: true                  # Set to true to enable MAC-layer PCAPs.
+  mac_enable: false                  # Set to true to enable MAC-layer PCAPs.
   mac_filename: /tmp/gnb_mac.pcap   # Path where the MAC PCAP is stored.
-  ngap_enable: true                 # Set to true to enable NGAP PCAPs.
+  ngap_enable: false                 # Set to true to enable NGAP PCAPs.
   ngap_filename: /tmp/gnb_ngap.pcap # Path where the NGAP PCAP is stored.
+
+expert_phy:
+  pusch_ldpc_decoder_type:  auto
+  pusch_dec_max_iterations: 6 

@@ -1,6 +1,0 @@
-# gpu=metal_lls bg=2 z=16 k=160 rate=0.3333 e=480 max_iter=6 cpu_max_iter=0 trials=100 warmup=3 snrs_cpu_split=0 lls_params=alpha=1.5,beta=0,p=2,gamma=0,eps=0,norm=0,k=2,evidence=3,cooldown=1,stall_escape=0,stall_theta=0.75,stall_rounds=3
-snr_db,cpu_pass,gpu_pass,total,time_cpu_s,time_gpu_s,cpu_mean_us,cpu_median_us,cpu_min_us,cpu_max_us,cpu_p95_us,cpu_p99_us,gpu_mean_us,gpu_median_us,gpu_min_us,gpu_max_us,gpu_p95_us,gpu_p99_us,gpu_mean_iters_ok,gpu_mean_iters_fail
-4,100,53,100,0.000326,0.021159,3.25504,2.625,2.5,5.708,5.125,5.625,212.875,206.958,183.625,301.333,253.333,297.542,5.754717,
-6,100,90,100,0.000266,0.019148,2.66498,2.583,2.458,5.041,3.333,4.958,191.353,190.459,170.708,265.291,206.75,256.833,4.677778,
-8,100,97,100,0.000257,0.018649,2.57414,2.542,2.417,3.417,2.708,3.291,186.473,185.166,169.542,287.25,196.667,205.583,4.134021,
-10,100,100,100,0.000261,0.018716,2.60747,2.583,2.458,3.5,2.958,3.458,187.157,185,170.667,241.25,202.917,216.542,4.140000,
