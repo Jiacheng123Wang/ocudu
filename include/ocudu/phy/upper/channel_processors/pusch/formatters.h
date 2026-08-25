@@ -192,6 +192,24 @@ struct formatter<ocudu::pusch_decoder_result> {
       helper.format_if_verbose(ctx, "metal_t=na");
     }
     helper.format_if_verbose(ctx, "mac_pdu={}B", result.mac_pdu_bytes);
+    // RX phase-segment elapsed times (debug log, one record per PUSCH regardless of the CRC outcome):
+    // time-frequency transform (t2f), channel estimation (ce) and equalization+demodulation (eqdem).
+    // Printed in microseconds, consistently with the other *_t fields of the enclosing log entry.
+    if (result.t2f_elapsed.has_value()) {
+      helper.format_if_verbose(ctx, "t2f_t={:.1f}us", static_cast<float>(result.t2f_elapsed->count()) * 1e-3F);
+    } else {
+      helper.format_if_verbose(ctx, "t2f_t=na");
+    }
+    if (result.ce_elapsed.has_value()) {
+      helper.format_if_verbose(ctx, "ce_t={:.1f}us", static_cast<float>(result.ce_elapsed->count()) * 1e-3F);
+    } else {
+      helper.format_if_verbose(ctx, "ce_t=na");
+    }
+    if (result.eqdem_elapsed.has_value()) {
+      helper.format_if_verbose(ctx, "eqdem_t={:.1f}us", static_cast<float>(result.eqdem_elapsed->count()) * 1e-3F);
+    } else {
+      helper.format_if_verbose(ctx, "eqdem_t=na");
+    }
 
     return ctx.out();
   }

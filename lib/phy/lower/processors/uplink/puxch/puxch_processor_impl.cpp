@@ -7,6 +7,7 @@
 #include "ocudu/phy/lower/lower_phy_rx_symbol_context.h"
 #include "ocudu/phy/support/resource_grid_context.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
+#include "ocudu/support/executors/ul_pipeline_probe.h"
 
 using namespace ocudu;
 
@@ -57,6 +58,9 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
 
   // Release current grid if the slot is completed.
   if (context.nof_symbols == nof_symbols_per_slot - 1) {
+    // The whole-slot OFDM demodulation (FFT) has just finished: the frequency-domain symbols of the slot are
+    // ready for the upper PHY. End timestamp of the time-frequency phase segment.
+    ul_pipeline_probe::get().record_t2f_end(context.slot.count());
     current_grid.release();
   }
 

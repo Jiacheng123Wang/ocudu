@@ -52,10 +52,14 @@ date -u; ssh jwang@192.168.100.153 'date -u'; ssh jwang@192.168.100.131 'date -u
 ## Shutdown statistics (ENABLE_FLOW_PROBES builds)
 
 `ul_pipeline_probe` prints to stderr at gnb shutdown: `[ul_pipeline]` (IQ received -> CRC-OK decoded),
+`[ul_time_frequency]` (IQ received -> whole-slot FFT done), `[ul_channel_estimation]` (FFT done -> data-symbol
+channel estimates ready), `[ul_equalization_demod]` (channel estimates ready -> per-bit LLRs ready),
 `[ul_ldpc_decode]` (pure LDPC decode latency) and `[ul_mac_pdu_size]` (size distribution of the CRC-OK
 MAC PDUs / data bursts, plus a `total=` line with the summed bytes; sample count matches
-`[ul_ldpc_decode]`). The LDPC start/completion pairs are matched by PUSCH slot number (no time-based
-staleness threshold), so slow decoders (e.g. Metal at ~2 ms/decode) are measured without truncation.
+`[ul_ldpc_decode]`, and so do the three phase-segment series). The LDPC start/completion pairs are matched by
+PUSCH slot number (no time-based staleness threshold), so slow decoders (e.g. Metal at ~2 ms/decode) are
+measured without truncation. The per-PUSCH debug log additionally carries `t2f_t` / `ce_t` / `eqdem_t` (µs)
+next to `dec_t` / `metal_t` for every decoding attempt, regardless of the CRC outcome.
 
 ## Scripts
 

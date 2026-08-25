@@ -423,6 +423,16 @@ void pusch_decoder_impl::join_and_notify()
   stats.ldpc_decoder_type = ldpc_decoder_type;
   stats.mac_pdu_bytes     = transport_block.size();
 
+  // RX phase-segment elapsed times (time-frequency transform, channel estimation, equalization+demodulation),
+  // as assembled by the pipeline probe from the per-slot timestamps. Recorded for every decoding attempt,
+  // regardless of the CRC outcome; absent when the phase timestamps were not assembled for this TB (e.g. the
+  // decode was skipped because the codeblock CRC was already OK).
+  if (const auto phases = ul_pipeline_probe::get().get_phase_durations(current_config.slot.count())) {
+    stats.t2f_elapsed   = phases->time_frequency;
+    stats.ce_elapsed    = phases->channel_estimation;
+    stats.eqdem_elapsed = phases->equalization_demod;
+  }
+
   // Record the wall-clock time spent in the LDPC decode block, from the first codeblock decode invocation to the
   // completion of the last one (whether the decoding converged or ran until the maximum number of iterations).
   if (decode_start_time != std::chrono::time_point<std::chrono::steady_clock>()) {

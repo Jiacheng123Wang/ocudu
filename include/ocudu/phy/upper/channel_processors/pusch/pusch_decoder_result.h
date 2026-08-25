@@ -41,6 +41,18 @@ struct pusch_decoder_result {
   /// \brief Size in bytes of the uncoded payload of the decoded code block(s), i.e. the MAC PDU (transport block)
   /// size.
   unsigned mac_pdu_bytes = 0;
+  /// \brief RX phase segment: time-frequency transform (FFT) elapsed time of this PUSCH, from the IQ samples
+  /// received to the whole-slot frequency-domain symbols ready.
+  ///
+  /// Assembled by the UL pipeline probe from the per-slot timestamps; nullopt when not available (e.g. the decode
+  /// was skipped because the codeblock CRC was already OK from a previous transmission).
+  std::optional<std::chrono::nanoseconds> t2f_elapsed;
+  /// \brief RX phase segment: channel estimation elapsed time, from the whole-slot frequency-domain symbols to
+  /// the channel estimates of all the data symbols ready. Nullopt semantics as t2f_elapsed.
+  std::optional<std::chrono::nanoseconds> ce_elapsed;
+  /// \brief RX phase segment: equalization + demodulation elapsed time, from the data-symbol channel estimates
+  /// ready to the per-bit LLRs ready (start of the LDPC decode). Nullopt semantics as t2f_elapsed.
+  std::optional<std::chrono::nanoseconds> eqdem_elapsed;
 };
 
 } // namespace ocudu

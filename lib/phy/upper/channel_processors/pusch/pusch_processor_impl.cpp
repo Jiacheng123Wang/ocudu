@@ -17,6 +17,7 @@
 #include "ocudu/ran/sch/sch_dmrs_power.h"
 #include "ocudu/ran/uci/uci_formatters.h"
 #include "ocudu/ran/uci/uci_part2_size_calculator.h"
+#include "ocudu/support/executors/ul_pipeline_probe.h"
 
 using namespace ocudu;
 
@@ -204,6 +205,10 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
                                         unsigned                               nof_cdm_groups_without_data)
 {
   using namespace units::literals;
+
+  // The channel estimator has finished: the channel estimates of all the data symbols of the slot are ready.
+  // End timestamp of the channel estimation phase segment (and start of the equalization+demodulation one).
+  ul_pipeline_probe::get().record_ce_end(pdu.slot.count());
 
   // Get RB mask relative to Point A. According to TS38.211 Section 6.3.1.7, the VRB-to-PRB mapping for PUSCH is never
   // interleaved.

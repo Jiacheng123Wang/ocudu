@@ -17,6 +17,17 @@
 
 namespace ocudu {
 
+/// Per-PUSCH RX phase-segment durations, assembled by the UL pipeline probe once all the per-slot timestamps
+/// (IQ reception, FFT completion, channel estimation completion and LDPC decode start) are available.
+struct ul_phase_durations {
+  /// Time-frequency transform: IQ samples received -> whole-slot frequency-domain symbols ready.
+  std::chrono::nanoseconds time_frequency;
+  /// Channel estimation: frequency-domain symbols ready -> data-symbol channel estimates ready.
+  std::chrono::nanoseconds channel_estimation;
+  /// Equalization + demodulation: channel estimates ready -> per-bit LLRs ready (start of the LDPC decode).
+  std::chrono::nanoseconds equalization_demod;
+};
+
 #if defined(OCUDU_FLOW_PROBES)
 
 /// \brief Measures the UL compute pipeline latency (IQ samples received -> LDPC decoded with CRC OK).
@@ -63,10 +74,80 @@ public:
   void record_ldpc_start(uint64_t slot)
   {
     std::lock_guard<std::mutex> lock(mutex);
-    pending_ldpc_starts[slot] = {std::chrono::high_resolution_clock::now(), next_start_seq++};
+    const auto now = std::chrono::high_resolution_clock::now();
+    pending_ldpc_starts[slot] = {now, next_start_seq++};
     // Bound the registry by insertion order (see record_start): unmatched entries belong to TBs that ended
     // without a CRC-OK completion (or with one in a shifted slot).
     evict_oldest(pending_ldpc_starts);
+
+    // Assemble the per-slot phase durations now that all the timestamps of this PUSCH are available (the
+    // equalization+demodulation segment ends right here, at the first codeblock decode invocation). The slot
+    // references are matched with the same small offset tolerance used at completion time.
+    auto find_tol = [](start_registry& registry, uint64_t s) {
+      auto it = registry.find(s);
+      if (it == registry.end() && s > 0) {
+        it = registry.find(s - 1);
+      }
+      if (it == registry.end() && s > 1) {
+        it = registry.find(s - 2);
+      }
+      return it;
+    };
+    const auto start_it = find_tol(pending_starts, slot);
+    const auto t2f_it   = find_tol(pending_t2f_ends, slot);
+    const auto ce_it    = find_tol(pending_ce_ends, slot);
+    if (start_it != pending_starts.end() && t2f_it != pending_t2f_ends.end() && ce_it != pending_ce_ends.end()) {
+      const int64_t t2f_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(t2f_it->second.tp - start_it->second.tp).count();
+      const int64_t ce_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(ce_it->second.tp - t2f_it->second.tp).count();
+      const int64_t eqdem_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - ce_it->second.tp).count();
+      // Negative durations can only come from a mismatched (shifted-slot) pairing: drop the entry.
+      if (t2f_ns >= 0 && ce_ns >= 0 && eqdem_ns >= 0) {
+        pending_phases[slot] = {t2f_ns, ce_ns, eqdem_ns, next_start_seq++};
+        evict_oldest(pending_phases);
+      }
+    }
+  }
+
+  /// Records the completion of the OFDM demodulation (FFT) of the whole slot: the frequency-domain symbols of
+  /// the slot are ready (call from the lower PHY PUxCH processor after the last symbol of the slot).
+  /// \param[in] slot Slot number (same reference as record_start).
+  void record_t2f_end(uint64_t slot)
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    pending_t2f_ends[slot] = {std::chrono::high_resolution_clock::now(), next_start_seq++};
+    evict_oldest(pending_t2f_ends);
+  }
+
+  /// Records the completion of the PUSCH channel estimation: the channel estimates of all the data symbols of
+  /// the slot are ready (call from the PUSCH processor at the start of the data processing).
+  /// \param[in] slot Slot number of the PUSCH (same reference as record_end_crc_ok).
+  void record_ce_end(uint64_t slot)
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    pending_ce_ends[slot] = {std::chrono::high_resolution_clock::now(), next_start_seq++};
+    evict_oldest(pending_ce_ends);
+  }
+
+  /// Returns the phase-segment durations assembled for a PUSCH (see record_ldpc_start()), if any.
+  /// \param[in] slot Slot number of the PUSCH (same reference as record_ldpc_start()).
+  std::optional<ul_phase_durations> get_phase_durations(uint64_t slot)
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = pending_phases.find(slot);
+    if (it == pending_phases.end() && slot > 0) {
+      it = pending_phases.find(slot - 1);
+    }
+    if (it == pending_phases.end() && slot > 1) {
+      it = pending_phases.find(slot - 2);
+    }
+    if (it == pending_phases.end()) {
+      return std::nullopt;
+    }
+    return ul_phase_durations{std::chrono::nanoseconds(it->second.t2f_ns),
+                              std::chrono::nanoseconds(it->second.ce_ns),
+                              std::chrono::nanoseconds(it->second.eqdem_ns)};
   }
 
   /// Records the completion of the UL processing of a transport block whose CRC check passed.
@@ -108,6 +189,23 @@ public:
       pending_ldpc_starts.erase(ldpc_it);
       ldpc_latencies_us.push_back(static_cast<double>(ldpc_us.count()));
       mac_pdu_sizes_bytes.push_back(static_cast<double>(mac_pdu_bytes));
+
+      // Phase-segment durations (time-frequency / channel estimation / equalization+demodulation), recorded
+      // only together with an LDPC latency sample, so the sample counts of the series always match
+      // [ul_ldpc_decode].
+      auto phases_it = pending_phases.find(slot);
+      if (phases_it == pending_phases.end() && slot > 0) {
+        phases_it = pending_phases.find(slot - 1);
+      }
+      if (phases_it == pending_phases.end() && slot > 1) {
+        phases_it = pending_phases.find(slot - 2);
+      }
+      if (phases_it != pending_phases.end()) {
+        t2f_latencies_us.push_back(static_cast<double>(phases_it->second.t2f_ns) / 1e3);
+        ce_latencies_us.push_back(static_cast<double>(phases_it->second.ce_ns) / 1e3);
+        eqdem_latencies_us.push_back(static_cast<double>(phases_it->second.eqdem_ns) / 1e3);
+        pending_phases.erase(phases_it);
+      }
     }
   }
 
@@ -117,11 +215,17 @@ public:
     std::vector<double> sorted_pipeline;
     std::vector<double> sorted_ldpc;
     std::vector<double> sorted_pdu_sizes;
+    std::vector<double> sorted_t2f;
+    std::vector<double> sorted_ce;
+    std::vector<double> sorted_eqdem;
     {
       std::lock_guard<std::mutex> lock(mutex);
       sorted_pipeline  = latencies_us;
       sorted_ldpc      = ldpc_latencies_us;
       sorted_pdu_sizes = mac_pdu_sizes_bytes;
+      sorted_t2f       = t2f_latencies_us;
+      sorted_ce        = ce_latencies_us;
+      sorted_eqdem     = eqdem_latencies_us;
     }
     if (sorted_pipeline.empty()) {
       std::fprintf(stderr, "[ul_pipeline] no CRC-OK samples recorded\n");
@@ -145,6 +249,34 @@ public:
                  sorted_pipeline.back(),
                  pct(sorted_pipeline, 0.95),
                  pct(sorted_pipeline, 0.99));
+
+    // Phase-segment series, printed in pipeline order. Recorded in lockstep with the [ul_ldpc_decode] series
+    // (CRC-OK completions only), so their sample counts always match it.
+    auto print_series = [&pct](const char* name, std::vector<double>& sorted) {
+      if (sorted.empty()) {
+        std::fprintf(stderr, "[%s] no samples recorded\n", name);
+        return;
+      }
+      std::sort(sorted.begin(), sorted.end());
+      double sum = 0;
+      for (double v : sorted) {
+        sum += v;
+      }
+      std::fprintf(stderr,
+                   "[%s] samples=%zu mean=%.1fus median=%.1fus min=%.1fus max=%.1fus p95=%.1fus p99=%.1fus\n",
+                   name,
+                   sorted.size(),
+                   sum / static_cast<double>(sorted.size()),
+                   pct(sorted, 0.5),
+                   sorted.front(),
+                   sorted.back(),
+                   pct(sorted, 0.95),
+                   pct(sorted, 0.99));
+    };
+    print_series("ul_time_frequency", sorted_t2f);
+    print_series("ul_channel_estimation", sorted_ce);
+    print_series("ul_equalization_demod", sorted_eqdem);
+
     if (sorted_ldpc.empty()) {
       std::fprintf(stderr, "[ul_ldpc_decode] no samples recorded\n");
       return;
@@ -198,9 +330,20 @@ private:
 
   using start_registry = std::map<uint64_t, start_entry>;
 
-  /// Keeps the registry bounded by evicting the entry with the lowest insertion sequence (FIFO by insertion,
+  /// Registry entry: the three phase-segment durations of one PUSCH, plus the same insertion sequence as above.
+  struct phases_entry {
+    int64_t  t2f_ns;
+    int64_t  ce_ns;
+    int64_t  eqdem_ns;
+    uint64_t seq;
+  };
+
+  using phases_registry = std::map<uint64_t, phases_entry>;
+
+  /// Keeps a registry bounded by evicting the entry with the lowest insertion sequence (FIFO by insertion,
   /// safe against the periodic slot-count wrap).
-  static void evict_oldest(start_registry& registry)
+  template <typename Registry>
+  static void evict_oldest(Registry& registry)
   {
     if (registry.size() <= 256) {
       return;
@@ -219,6 +362,17 @@ private:
   std::vector<double> ldpc_latencies_us;
   /// Sizes in bytes of the CRC-OK MAC PDUs (data bursts), recorded together with the LDPC latency samples.
   std::vector<double> mac_pdu_sizes_bytes;
+  /// Slot-keyed timestamps of the whole-slot FFT completions (see record_t2f_end()).
+  start_registry   pending_t2f_ends;
+  /// Slot-keyed timestamps of the PUSCH channel estimation completions (see record_ce_end()).
+  start_registry   pending_ce_ends;
+  /// Slot-keyed phase-segment durations assembled at the LDPC decode start (see record_ldpc_start()); erased
+  /// when the matching CRC-OK completion records them into the summary series.
+  phases_registry  pending_phases;
+  /// Phase-segment latencies of the CRC-OK PUSCH completions (µs), in lockstep with [ul_ldpc_decode].
+  std::vector<double> t2f_latencies_us;
+  std::vector<double> ce_latencies_us;
+  std::vector<double> eqdem_latencies_us;
 };
 
 #else // not OCUDU_FLOW_PROBES: no-op implementation with zero overhead.
@@ -233,7 +387,10 @@ public:
   }
   void record_start(uint64_t /*slot*/) {}
   void record_ldpc_start(uint64_t /*slot*/) {}
+  void record_t2f_end(uint64_t /*slot*/) {}
+  void record_ce_end(uint64_t /*slot*/) {}
   void record_end_crc_ok(uint64_t /*slot*/, size_t /*mac_pdu_bytes*/) {}
+  std::optional<ul_phase_durations> get_phase_durations(uint64_t /*slot*/) { return std::nullopt; }
   void report() {}
 
 private:
