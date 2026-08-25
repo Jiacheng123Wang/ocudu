@@ -61,8 +61,8 @@ cell_cfg:
 
 log:
   filename: /tmp/gnb.log            # Path of the log file.
-  all_level: info                   # Logging level applied to all layers.
-  lib_level: info                   # Enables the [zmq-probe] dl/ul lower-PHY logs (temporary, for the E2E comparison).
+  all_level: debug                   # Logging level applied to all layers.
+  lib_level: debug                   # Enables the [zmq-probe] dl/ul lower-PHY logs (temporary, for the E2E comparison).
   hex_max_size: 0
 
 pcap:
