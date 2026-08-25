@@ -605,7 +605,7 @@ int main(int argc, char** argv)
       csv << snr << "," << (run_cpu ? std::to_string(cpu_pass) : "") << "," << (run_gpu ? std::to_string(gpu_pass) : "")
           << "," << p.trials << "," << (run_cpu ? std::to_string(cpu_us_sum / 1e6) : "")
           << "," << (run_gpu ? std::to_string(gpu_us_sum / 1e6) : "");
-      std::fprintf(stderr, " %gdB:%s%s", snr, run_gpu ? std::to_string(gpu_pass).c_str() : "-",
+      std::fprintf(stderr, " %gdB: gpu_pass=%s cpu_pass=%s", snr, run_gpu ? std::to_string(gpu_pass).c_str() : "-",
                    run_cpu ? std::to_string(cpu_pass).c_str() : "-");
       std::fprintf(stderr, " (cpu %.1fs gpu %.1fs", cpu_us_sum / 1e6, gpu_us_sum / 1e6);
       // CRC-OK-only latency statistics, one column block per decoder; empty when a decoder has no CRC-OK sample.

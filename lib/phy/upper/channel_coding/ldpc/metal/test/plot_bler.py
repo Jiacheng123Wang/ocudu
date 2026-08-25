@@ -43,7 +43,15 @@ def wilson_bler_bounds(pass_count, total):
     center = (p + Z95 * Z95 / (2.0 * n)) / denom
     half = Z95 * np.sqrt(p * (1.0 - p) / n + Z95 * Z95 / (4.0 * n * n)) / denom
     lo_pass, hi_pass = max(0.0, center - half), min(1.0, center + half)
-    # BLER bounds: the pass-interval flips.
+    # BLER bounds: the pass-interval flips. Snap the saturated endpoints to
+    # exact 0/1: at pass_count 0 or total the fp residue of center +/- half
+    # otherwise lands a few ulps inside the interval, so the plotted point
+    # estimate (exactly 1.0 or 0.0) falls outside the band and the errorbar
+    # half-length goes negative (matplotlib rejects negative yerr).
+    if pass_count == 0:
+        return 1.0 - hi_pass, 1.0
+    if pass_count == total:
+        return 0.0, 1.0 - lo_pass
     return 1.0 - hi_pass, 1.0 - lo_pass
 
 
@@ -153,13 +161,13 @@ def plot_group(bg, z, files, outdir, show, with_ci, with_latency):
                 if c is None or ci is None:
                     continue
                 lo, hi = ci
-                ax.errorbar([snr], [c], yerr=[[c - lo], [hi - c]], fmt="none",
+                ax.errorbar([snr], [c], yerr=[[max(0.0, c - lo)], [max(0.0, hi - c)]], fmt="none",
                             ecolor=color, elinewidth=1, capsize=3, zorder=2)
             for snr, g, ci in zip(snrs, gpu, gpu_ci):
                 if g is None or ci is None:
                     continue
                 lo, hi = ci
-                ax.errorbar([snr], [g], yerr=[[g - lo], [hi - g]], fmt="none",
+                ax.errorbar([snr], [g], yerr=[[max(0.0, g - lo)], [max(0.0, hi - g)]], fmt="none",
                             ecolor=color, elinewidth=1, capsize=3, zorder=2)
 
         # Per-decoder timing annotations at each curve's end: the CPU and GPU
