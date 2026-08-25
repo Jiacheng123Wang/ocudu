@@ -258,15 +258,15 @@ public:
         return;
       }
       std::sort(sorted.begin(), sorted.end());
-      double sum = 0;
+      double series_sum = 0;
       for (double v : sorted) {
-        sum += v;
+        series_sum += v;
       }
       std::fprintf(stderr,
                    "[%s] samples=%zu mean=%.1fus median=%.1fus min=%.1fus max=%.1fus p95=%.1fus p99=%.1fus\n",
                    name,
                    sorted.size(),
-                   sum / static_cast<double>(sorted.size()),
+                   series_sum / static_cast<double>(sorted.size()),
                    pct(sorted, 0.5),
                    sorted.front(),
                    sorted.back(),
