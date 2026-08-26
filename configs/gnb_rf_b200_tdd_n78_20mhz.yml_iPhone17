@@ -1,0 +1,85 @@
+# This example configuration outlines how to configure the srsRAN Project gNB to create a single TDD cell
+# transmitting in band 78, with 20 MHz bandwidth and 30 kHz sub-carrier-spacing. A USRP B200 is configured
+# as the RF frontend using split 8. Note in this example an external clock source is not used, so the sync
+# is not defined and the default is used.
+#
+# =============================================================================
+# n78 frequency selection notes (China, 3300-3600 MHz is the licensed range)
+# -----------------------------------------------------------------------------
+# Band plan (China):
+#   3300-3400 MHz  indoor/室分 band (multiple operators, low-power indoor cells possible)
+#   3400-3500 MHz  China Telecom
+#   3500-3600 MHz  China Unicom
+#   3600-3800 MHz  part of 3GPP n78 but NOT licensed for public mobile in China - avoid.
+#
+# Spectrum scan at this location on 2026-08-26 (gNB off, B210, 23.04 Msps, 1 MHz bins):
+#   3300-3345 MHz  occupied (-25..-29 dB)            - indoor band in use
+#   3346-3396 MHz  quietish (-26..-31 dB)            - usable, but indoor-band cells may appear
+#   3415-3485 MHz  STRONG carrier (-22..-26 dB)      - China Telecom 100 MHz carrier, AVOID
+#   3484-3498 MHz  elevated (-23..-26 dB)            - avoid
+#   3507-3528 MHz  clean (-28..-29 dB)               - usable
+#   3530-3551 MHz  slightly elevated (-25..-30 dB)   - avoid
+#   3550-3600 MHz  CLEANEST (-27..-31 dB, lowest mean power)   <-- current choice
+#
+# How to change frequency:
+#   - Edit ONLY cell_cfg.dl_arfcn below, then restart the gNB.
+#   - The SSB ARFCN (dl_ssb_arfcn) is derived automatically and printed at startup
+#     (look for "dl_ssb_arfcn=" in the console). With the carriers listed below it
+#     comes out as: ssb_freq = dl_freq - 4.32 MHz.
+#   - ARFCN formula for n78:  dl_arfcn = 600000 + (f_MHz - 3000) / 0.015
+#   - Constraints to keep the auto-derived SSB on the 1.44 MHz sync raster and the
+#     carrier on the 300 kHz channel raster: choose f_MHz = 3000 + 7.2*n (n integer),
+#     i.e. the candidates below.
+#
+# Candidate carriers (all satisfy the grids above; status from the 2026-08-26 scan):
+#   dl_arfcn  freq_MHz    status / notes
+#   639360    3590.4      cleanest by scan, but iPhone does NOT react (scan range likely ends ~3500)
+#   638880    3583.2      clean (-27..-31 dB), same region as above
+#   639840    3597.6      clean, but touches 3600 MHz band edge
+#   634560    3518.4      clean (-28..-29 dB), second-best region
+#   627264    3408.96     current choice: the frequency the iPhone reacts to (attaches,
+#                         DL degraded by nearby commercial carrier; CQI 2, 100x HARQ-ACK KO).
+#   (3300-3400 MHz indoor-band carriers also work but may collide with indoor cells.)
+# =============================================================================
+
+cu_cp:
+  amf:
+    addr: 192.168.100.153
+    port: 38412
+    bind_addr: 192.168.100.125
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+
+ru_sdr:
+  device_driver: uhd
+  device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
+    # device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo
+  srate: 23.04
+  otw_format: sc12
+  tx_gain: 80
+  rx_gain: 60
+  clock: gpsdo
+  sync: internal
+
+cell_cfg:
+  dl_arfcn: 627264
+  band: 78
+  channel_bandwidth_MHz: 20
+  common_scs: 30
+  plmn: "00101"
+  tac: 7
+  pci: 1
+
+log:
+  filename: /tmp/gnb.log
+  all_level: debug
+
+pcap:
+  mac_enable: false
+  mac_filename: /tmp/gnb_mac.pcap
+  ngap_enable: false
+  ngap_filename: /tmp/gnb_ngap.pcap
