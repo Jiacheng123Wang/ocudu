@@ -1,0 +1,54 @@
+# OCUDU gNB, FDD cell in band n1, 5 MHz bandwidth, 15 kHz SCS - commercial UE / srsUE bridge test.
+#
+# Band n1 (FDD): UL 1920-1980 MHz, DL 2110-2170 MHz (UL = DL - 190 MHz, auto-derived).
+# OnePlus 8T hardware supports n1; this is a quick bridge check before deciding on SIM reprogramming.
+#
+# Frequency: DL 2152.5 MHz (ARFCN 430500), inside the only measured gap (2150-2155 MHz)
+# of the otherwise busy n1 block at this location (scan 2026-08-26).
+# SSB is derived automatically (printed at startup).
+# Change frequency: edit cell_cfg.dl_arfcn only (ARFCN = f_Hz / 5000 below 3 GHz).
+#
+# Antenna wiring (FDD - BOTH ports required):
+#   - TX antenna on the "TX/RX" SMA port.
+#   - RX antenna on the "RX2" SMA port.
+
+cu_cp:
+  amf:
+    addr: 192.168.100.153
+    port: 38412
+    bind_addr: 192.168.100.125
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+
+ru_sdr:
+  device_driver: uhd
+  device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
+  srate: 7.68
+  otw_format: sc12
+  tx_gain: 80
+  rx_gain: 60
+  clock: gpsdo
+  sync: internal
+
+cell_cfg:
+  dl_arfcn: 430500
+  band: 1
+  channel_bandwidth_MHz: 5
+  common_scs: 15
+  plmn: "00101"
+  tac: 7
+  pci: 1
+
+log:
+  filename: /tmp/gnb.log
+  all_level: info
+
+pcap:
+  mac_enable: false
+  mac_filename: /tmp/gnb_mac.pcap
+  ngap_enable: false
+  ngap_filename: /tmp/gnb_ngap.pcap
