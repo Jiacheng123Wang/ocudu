@@ -43,8 +43,12 @@ struct ul_phase_durations {
 /// completion as above): record_ldpc_start() is called by the PUSCH codeblock task right before the LDPC decoder is
 /// invoked. Starts and ends are matched by slot number (with the same small-offset tolerance as the pipeline
 /// series), so a start left behind by a CRC-failed TB or a retransmission that needed no decode is simply left
-/// unmatched (and eventually evicted) - there is no time-based staleness threshold, which would otherwise truncate
-/// the series whenever the decoder latency grows (e.g. the Metal decoder at ~2 ms).
+/// unmatched (and eventually evicted). A generous time-based staleness gate (max_entry_age, two seconds) rejects
+/// entries that survived a quiet stretch: without it, a stale entry from a previous slot-count wrap cycle (the
+/// count wraps every 10.24 s for any numerology) could match a fresh completion carrying the same slot key and
+/// produce bogus latencies of one or more whole wrap cycles (observed in a long run: 92.16 s = 9 cycles plus the
+/// genuine 386 us decode time). The gate is orders of magnitude above any legitimate start -> completion span
+/// (the slowest decoders observed are tens of milliseconds), so it never truncates the series.
 ///
 /// A third series records the size in bytes of each CRC-OK MAC PDU (the data burst), in lockstep with the LDPC
 /// latency series, so its sample count always matches [ul_ldpc_decode]; report() prints its distribution and the
@@ -82,20 +86,11 @@ public:
 
     // Assemble the per-slot phase durations now that all the timestamps of this PUSCH are available (the
     // equalization+demodulation segment ends right here, at the first codeblock decode invocation). The slot
-    // references are matched with the same small offset tolerance used at completion time.
-    auto find_tol = [](start_registry& registry, uint64_t s) {
-      auto it = registry.find(s);
-      if (it == registry.end() && s > 0) {
-        it = registry.find(s - 1);
-      }
-      if (it == registry.end() && s > 1) {
-        it = registry.find(s - 2);
-      }
-      return it;
-    };
-    const auto start_it = find_tol(pending_starts, slot);
-    const auto t2f_it   = find_tol(pending_t2f_ends, slot);
-    const auto ce_it    = find_tol(pending_ce_ends, slot);
+    // references are matched with the same small offset tolerance used at completion time, skipping stale
+    // entries from previous slot-count wrap cycles (see max_entry_age).
+    const auto start_it = find_fresh(pending_starts, slot, now);
+    const auto t2f_it   = find_fresh(pending_t2f_ends, slot, now);
+    const auto ce_it    = find_fresh(pending_ce_ends, slot, now);
     if (start_it != pending_starts.end() && t2f_it != pending_t2f_ends.end() && ce_it != pending_ce_ends.end()) {
       const int64_t t2f_ns =
           std::chrono::duration_cast<std::chrono::nanoseconds>(t2f_it->second.tp - start_it->second.tp).count();
@@ -104,7 +99,7 @@ public:
       const int64_t eqdem_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - ce_it->second.tp).count();
       // Negative durations can only come from a mismatched (shifted-slot) pairing: drop the entry.
       if (t2f_ns >= 0 && ce_ns >= 0 && eqdem_ns >= 0) {
-        pending_phases[slot] = {t2f_ns, ce_ns, eqdem_ns, next_start_seq++};
+        pending_phases[slot] = {now, t2f_ns, ce_ns, eqdem_ns, next_start_seq++};
         evict_oldest(pending_phases);
       }
     }
@@ -135,14 +130,16 @@ public:
   std::optional<ul_phase_durations> get_phase_durations(uint64_t slot)
   {
     std::lock_guard<std::mutex> lock(mutex);
-    auto it = pending_phases.find(slot);
+    const auto now = std::chrono::high_resolution_clock::now();
+    auto       it  = pending_phases.find(slot);
     if (it == pending_phases.end() && slot > 0) {
       it = pending_phases.find(slot - 1);
     }
     if (it == pending_phases.end() && slot > 1) {
       it = pending_phases.find(slot - 2);
     }
-    if (it == pending_phases.end()) {
+    if (it == pending_phases.end() || now - it->second.tp > max_entry_age) {
+      // No entry, or a stale one left over from a previous slot-count wrap cycle (see max_entry_age).
       return std::nullopt;
     }
     return ul_phase_durations{std::chrono::nanoseconds(it->second.t2f_ns),
@@ -160,29 +157,18 @@ public:
     std::chrono::time_point<std::chrono::high_resolution_clock> now = std::chrono::high_resolution_clock::now();
 
     std::lock_guard<std::mutex> lock(mutex);
-    auto it = pending_starts.find(slot);
-    if (it == pending_starts.end() && slot > 0) {
-      it = pending_starts.find(slot - 1);
-    }
-    if (it == pending_starts.end() && slot > 1) {
-      it = pending_starts.find(slot - 2);
-    }
+    auto it = find_fresh(pending_starts, slot, now);
     if (it != pending_starts.end()) {
       double latency_us =
           static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(now - it->second.tp).count());
       pending_starts.erase(it);
       latencies_us.push_back(latency_us);
     }
-    // LDPC decoder latency: match the start recorded for this TB by slot (same tolerance as above). No time-based
-    // staleness check: a decode can legitimately take several milliseconds with a slow decoder, and a hard
-    // threshold would silently truncate the series (and the MAC-PDU-size series with it).
-    auto ldpc_it = pending_ldpc_starts.find(slot);
-    if (ldpc_it == pending_ldpc_starts.end() && slot > 0) {
-      ldpc_it = pending_ldpc_starts.find(slot - 1);
-    }
-    if (ldpc_it == pending_ldpc_starts.end() && slot > 1) {
-      ldpc_it = pending_ldpc_starts.find(slot - 2);
-    }
+    // LDPC decoder latency: match the start recorded for this TB by slot (same tolerance as above), skipping
+    // stale entries from previous slot-count wrap cycles (see max_entry_age): a completion whose decode was
+    // skipped (codeblock CRC already OK) has no fresh start of its own, so without the gate it would match the
+    // leftover entry of a TB from one or more whole wrap cycles earlier.
+    auto ldpc_it = find_fresh(pending_ldpc_starts, slot, now);
     if (ldpc_it != pending_ldpc_starts.end()) {
       const auto ldpc_us =
           std::chrono::duration_cast<std::chrono::microseconds>(now - ldpc_it->second.tp);
@@ -199,6 +185,12 @@ public:
       }
       if (phases_it == pending_phases.end() && slot > 1) {
         phases_it = pending_phases.find(slot - 2);
+      }
+      if (phases_it != pending_phases.end() && now - phases_it->second.tp > max_entry_age) {
+        // Stale entry from a previous slot-count wrap cycle: drop it instead of recording its (plausible-looking
+        // but wrong-slot) durations.
+        pending_phases.erase(phases_it);
+        phases_it = pending_phases.end();
       }
       if (phases_it != pending_phases.end()) {
         t2f_latencies_us.push_back(static_cast<double>(phases_it->second.t2f_ns) / 1e3);
@@ -330,8 +322,10 @@ private:
 
   using start_registry = std::map<uint64_t, start_entry>;
 
-  /// Registry entry: the three phase-segment durations of one PUSCH, plus the same insertion sequence as above.
+  /// Registry entry: the three phase-segment durations of one PUSCH, the assembly timestamp (for the staleness
+  /// gate) and the same insertion sequence as above.
   struct phases_entry {
+    std::chrono::time_point<std::chrono::high_resolution_clock> tp;
     int64_t  t2f_ns;
     int64_t  ce_ns;
     int64_t  eqdem_ns;
@@ -339,6 +333,38 @@ private:
   };
 
   using phases_registry = std::map<uint64_t, phases_entry>;
+
+  /// Maximum age of a pending registry entry to remain eligible for matching. Any legitimate start ->
+  /// completion span (pipeline or decode) stays orders of magnitude below this (the slowest decoders observed
+  /// are tens of milliseconds), while the slot-count pairing key wraps every 10.24 s for any numerology, so a
+  /// wrap collision is at least that old. Without the gate, an entry that survived a quiet stretch (the
+  /// registries are bounded by insertion count, not by time) would match a fresh completion with the same slot
+  /// key and produce bogus latencies of one or more whole wrap cycles.
+  static constexpr std::chrono::seconds max_entry_age{2};
+
+  /// Finds the entry of \c registry for \c slot with the completion-time tolerance (slot, slot-1, slot-2),
+  /// skipping entries older than max_entry_age (stale entries from previous slot-count wrap cycles).
+  static start_registry::iterator
+  find_fresh(start_registry&                                        registry,
+             uint64_t                                               slot,
+             const std::chrono::high_resolution_clock::time_point& now)
+  {
+    auto consider = [&](uint64_t s) {
+      auto it = registry.find(s);
+      if (it != registry.end() && now - it->second.tp > max_entry_age) {
+        return registry.end();
+      }
+      return it;
+    };
+    auto it = consider(slot);
+    if (it == registry.end() && slot > 0) {
+      it = consider(slot - 1);
+    }
+    if (it == registry.end() && slot > 1) {
+      it = consider(slot - 2);
+    }
+    return it;
+  }
 
   /// Keeps a registry bounded by evicting the entry with the lowest insertion sequence (FIFO by insertion,
   /// safe against the periodic slot-count wrap).
