@@ -41,9 +41,11 @@ struct ul_phase_durations {
 ///
 /// A second series measures the pure LDPC decoder latency (first codeblock decode invocation -> the same CRC-OK
 /// completion as above): record_ldpc_start() is called by the PUSCH codeblock task right before the LDPC decoder is
-/// invoked. Starts and ends are matched by slot number (with the same small-offset tolerance as the pipeline
-/// series), so a start left behind by a CRC-failed TB or a retransmission that needed no decode is simply left
-/// unmatched (and eventually evicted). A generous time-based staleness gate (max_entry_age, two seconds) rejects
+/// invoked. Starts and ends are matched by exact slot number: both ends carry the same FAPI slot reference
+/// (pdu.slot), so no offset tolerance is needed - unlike the pipeline series, whose start key is derived from
+/// the lower-PHY sample timestamp and may be offset by a slot or two. A start left behind by a CRC-failed TB or
+/// a retransmission that needed no decode is simply left unmatched (and eventually evicted). A generous
+/// time-based staleness gate (max_entry_age, two seconds) rejects
 /// entries that survived a quiet stretch: without it, a stale entry from a previous slot-count wrap cycle (the
 /// count wraps every 10.24 s for any numerology) could match a fresh completion carrying the same slot key and
 /// produce bogus latencies of one or more whole wrap cycles (observed in a long run: 92.16 s = 9 cycles plus the
@@ -85,12 +87,13 @@ public:
     evict_oldest(pending_ldpc_starts);
 
     // Assemble the per-slot phase durations now that all the timestamps of this PUSCH are available (the
-    // equalization+demodulation segment ends right here, at the first codeblock decode invocation). The slot
-    // references are matched with the same small offset tolerance used at completion time, skipping stale
-    // entries from previous slot-count wrap cycles (see max_entry_age).
+    // equalization+demodulation segment ends right here, at the first codeblock decode invocation). The lower
+    // PHY-derived keys (start, t2f) are matched with the same small offset tolerance used at completion time;
+    // the channel-estimation key carries the same FAPI slot reference as this call and is matched exactly.
+    // Stale entries from previous slot-count wrap cycles are skipped (see max_entry_age).
     const auto start_it = find_fresh(pending_starts, slot, now);
     const auto t2f_it   = find_fresh(pending_t2f_ends, slot, now);
-    const auto ce_it    = find_fresh(pending_ce_ends, slot, now);
+    const auto ce_it    = find_fresh_exact(pending_ce_ends, slot, now);
     if (start_it != pending_starts.end() && t2f_it != pending_t2f_ends.end() && ce_it != pending_ce_ends.end()) {
       const int64_t t2f_ns =
           std::chrono::duration_cast<std::chrono::nanoseconds>(t2f_it->second.tp - start_it->second.tp).count();
@@ -131,13 +134,8 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex);
     const auto now = std::chrono::high_resolution_clock::now();
-    auto       it  = pending_phases.find(slot);
-    if (it == pending_phases.end() && slot > 0) {
-      it = pending_phases.find(slot - 1);
-    }
-    if (it == pending_phases.end() && slot > 1) {
-      it = pending_phases.find(slot - 2);
-    }
+    // Exact key: the phases entry was assembled for the same FAPI slot reference the caller carries.
+    auto it = pending_phases.find(slot);
     if (it == pending_phases.end() || now - it->second.tp > max_entry_age) {
       // No entry, or a stale one left over from a previous slot-count wrap cycle (see max_entry_age).
       return std::nullopt;
@@ -164,11 +162,12 @@ public:
       pending_starts.erase(it);
       latencies_us.push_back(latency_us);
     }
-    // LDPC decoder latency: match the start recorded for this TB by slot (same tolerance as above), skipping
-    // stale entries from previous slot-count wrap cycles (see max_entry_age): a completion whose decode was
-    // skipped (codeblock CRC already OK) has no fresh start of its own, so without the gate it would match the
-    // leftover entry of a TB from one or more whole wrap cycles earlier.
-    auto ldpc_it = find_fresh(pending_ldpc_starts, slot, now);
+    // LDPC decoder latency: match the start recorded for this TB by EXACT slot number - both ends of this
+    // series carry the same FAPI slot reference (pdu.slot), so the offset tolerance of the pipeline series is
+    // unnecessary here. It would only mis-pair a completion whose decode was skipped (codeblock CRC already OK)
+    // with the orphan start of a failed attempt a few milliseconds earlier in a neighbouring slot (HARQ-RTT
+    // scale, well inside max_entry_age). The staleness gate still rejects previous-cycle leftovers.
+    auto ldpc_it = find_fresh_exact(pending_ldpc_starts, slot, now);
     if (ldpc_it != pending_ldpc_starts.end()) {
       const auto ldpc_us =
           std::chrono::duration_cast<std::chrono::microseconds>(now - ldpc_it->second.tp);
@@ -179,13 +178,8 @@ public:
       // Phase-segment durations (time-frequency / channel estimation / equalization+demodulation), recorded
       // only together with an LDPC latency sample, so the sample counts of the series always match
       // [ul_ldpc_decode].
+      // Exact key, same FAPI slot reference as the assembly (see the LDPC comment above).
       auto phases_it = pending_phases.find(slot);
-      if (phases_it == pending_phases.end() && slot > 0) {
-        phases_it = pending_phases.find(slot - 1);
-      }
-      if (phases_it == pending_phases.end() && slot > 1) {
-        phases_it = pending_phases.find(slot - 2);
-      }
       if (phases_it != pending_phases.end() && now - phases_it->second.tp > max_entry_age) {
         // Stale entry from a previous slot-count wrap cycle: drop it instead of recording its (plausible-looking
         // but wrong-slot) durations.
@@ -362,6 +356,21 @@ private:
     }
     if (it == registry.end() && slot > 1) {
       it = consider(slot - 2);
+    }
+    return it;
+  }
+
+  /// Finds the entry of \c registry whose key equals \c slot exactly, skipping entries older than
+  /// max_entry_age. Used for the series whose start and completion both carry the same slot reference (the FAPI
+  /// pdu.slot), where the offset tolerance of find_fresh() would only enable same-cycle mis-pairings.
+  static start_registry::iterator
+  find_fresh_exact(start_registry&                                        registry,
+                   uint64_t                                               slot,
+                   const std::chrono::high_resolution_clock::time_point& now)
+  {
+    auto it = registry.find(slot);
+    if (it != registry.end() && now - it->second.tp > max_entry_age) {
+      return registry.end();
     }
     return it;
   }
