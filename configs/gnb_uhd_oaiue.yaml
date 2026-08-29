@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+# SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+
+# OCUDU gNB over-the-air config for the OAI UE - based on the official OAI-UE tutorial
+# cell parameters (https://docs.ocudu.org/tutorials/oaiue/) and the in-tree
+# B200 TDD n78 20 MHz template (configs/gnb_rf_b200_tdd_n78_20mhz.yml).
+#
+# gNB runs on macOS with a USRP B210 (UHD 4.10, USB3), OAI UE runs on
+# Ubuntu (192.168.100.153) with a second B210. Open5GS core: 192.168.100.127.
+#
+# To run:
+#   sudo ./gnb -c gnb_uhd_oaiue.yaml
+
+cu_cp:
+  amf:
+    addrs: 192.168.100.127               # Open5GS core network (separate VM, verified working)
+    port: 38412
+    bind_addrs: 192.168.100.125          # Local IP of this Mac (en1, same subnet as the AMF)
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+  inactivity_timer: 7200
+
+ru_sdr:
+  device_driver: uhd
+  device_args: type=b200,num_recv_frames=64,num_send_frames=64   # B210 is type=b200
+  srate: 23.04                          # 20 MHz @ 30 kHz SCS
+  otw_format: sc12
+  tx_gain: 85                           # B210 TX range 0-89.8 dB: compensate the -27.9 dB DFT
+                                        # normalization (612 subcarriers) applied by the amplitude
+                                        # controller, otherwise the RF output is below the noise floor
+  rx_gain: 40                           # B210 RX range 0-76 dB
+  amplitude_control:
+    tx_gain_backoff: 0                  # Remove the default 12 dB back-off to maximize TX power
+
+cell_cfg:
+  dl_arfcn: 632628                      # n78, 20 MHz (matches OAI UE: r=51, numerology=1, band=78, C=3489420000)
+  band: 78
+  channel_bandwidth_MHz: 20
+  common_scs: 30
+  plmn: "00101"                         # Must match Open5GS (MCC=001, MNC=01)
+  tac: 7                                # Must match Open5GS AMF TAI
+  pci: 1
+  tdd_ul_dl_cfg:                        # TDD pattern: DDDSU, 10 DL symbols + 2 UL symbols in the S slot
+    dl_ul_tx_period: 5
+    nof_dl_slots: 3
+    nof_dl_symbols: 10
+    nof_ul_slots: 1
+    nof_ul_symbols: 2
+  csi:
+    csi_rs_enabled: true
+  pucch:
+    nof_cell_csi_res: 1
+
+# Both B210s free-run (no external clock): enable CFO compensation on PUSCH.
+expert_phy:
+  pusch_channel_estimator_cfo_compensation: true
+  pusch_ldpc_decoder_type:  auto
+  pusch_dec_max_iterations: 6
+
+log:
+  filename: /tmp/gnb.log
+  all_level: debug
+
+pcap:
+  mac_enable: false
+  mac_filename: /tmp/gnb_mac.pcap
+  ngap_enable: false
+  ngap_filename: /tmp/gnb_ngap.pcap
