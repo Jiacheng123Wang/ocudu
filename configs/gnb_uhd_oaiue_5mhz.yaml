@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+# SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+
+# OCUDU gNB, FDD cell in band n1, 5 MHz bandwidth, 15 kHz SCS - OAI UE over-the-air.
+# Based on configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml (verified with a commercial phone),
+# with the TX power fixes required for the OAI UE on the remote B210:
+#   - amplitude_control.tx_gain_backoff: 0  (the default 12 dB back-off plus the DFT normalization
+#     would put the RF output below the remote receiver's noise floor, see OAI_UE_ZMQ_UHD_E2E_memo.md)
+#   - tx_gain raised to the B210 maximum
+#
+# Frequency: DL 2152.5 MHz (ARFCN 430500). UL auto-derived (UL = DL - 190 MHz for n1).
+# To run:
+#   sudo ./gnb -c gnb_uhd_oaiue_5mhz.yaml
+
+cu_cp:
+  amf:
+    addr: 192.168.100.127
+    port: 38412
+    bind_addr: 192.168.100.125
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+
+ru_sdr:
+  device_driver: uhd
+  device_args: type=b200,num_recv_frames=256,num_send_frames=256,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
+  srate: 7.68
+  otw_format: sc12
+  tx_gain: 85                           # max TX: the 2.15 GHz band has strong ambient interference (-56 dBm at RX),
+                                        # the gNB signal must stay well above it; back-off (below) avoids UE ADC saturation
+                                        # applied by the amplitude controller (25 PRB -> -24.8 dB)
+  rx_gain: 70
+  clock: gpsdo
+  sync: internal
+  amplitude_control:
+    tx_gain_backoff: 0                  # full power to stay above the 2.15 GHz ambient interference
+
+cell_cfg:
+  dl_arfcn: 430500
+  band: 1
+  channel_bandwidth_MHz: 5
+  common_scs: 15
+  plmn: "00101"
+  tac: 7
+  pci: 1
+
+log:
+  filename: /tmp/gnb.log
+  all_level: info                        # debug logs cost ~1.5 cores of formatting I/O on macOS and
+                                         # cause SSB frame drops (late/underflow) that break the OAI UE PBCH
+
+pcap:
+  mac_enable: false
+  mac_filename: /tmp/gnb_mac.pcap
+  ngap_enable: false
+  ngap_filename: /tmp/gnb_ngap.pcap

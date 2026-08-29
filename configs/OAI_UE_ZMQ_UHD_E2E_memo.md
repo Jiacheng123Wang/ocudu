@@ -135,6 +135,26 @@ initial-fo = 10000; // 预补偿 UE B210 时钟偏差（实测 ~2.8ppm -> ~9.8kH
 - 同步失败排查顺序：先 `rsrp`/`PSS Corr` 确认信号到达（收不到 → 查 TX 功率/天线），再查 CFO（`Measured Carrier Frequency offset`），再查实时性（大量 `L` 字符 = deadline missed）。
 - **天线**：两台 B210 的 SMA 天线需覆盖 3.5GHz；1.8GHz（FDD 时代）天线在 n78 严重失谐，会显著压缩链路余量（0.5m 近距离仍可工作）。
 
+
+### 3.4 5 MHz n1 (FDD) 尝试与结论（未完全打通）
+
+5MHz 配置：`configs/gnb_uhd_oaiue_5mhz.yaml`（gNB）+ `configs/oaiue_b210_5mhz.conf`（UE）。
+
+**最好状态**（配置当前存档值）：
+- gNB：`tx_gain 85` + `tx_gain_backoff 0`（2.15GHz 频段有强环境干扰 ~-56dBm，必须全功率）
+- UE：`initial-fo 6000`（B210 时钟偏差 ~2.4ppm × 2.15GHz ≈ 5.2kHz 预补偿）+ `ue-rxgain 110` + `ue-txgain 0` + `E=0`
+- 结果：初始同步成功（PSS corr ~96dB）→ **PBCH/MIB 解码成功 → SIB1 解码成功** → PRACH 发射
+
+**两个未解决的问题**（OAI UE 实现层面，非配置）：
+1. **FDD UL 频率缺陷**：初始同步后 UL 载波保持 = DL 载波；`handle_sync_req_from_mac` 只在新的 synch_request 时重调 RF，而 SIB1 后 MAC 不重发 synch_request → **第一轮 PRACH 发射在 DL 频率（2152.5MHz）**，gNB 的 FDD RX（1962.5MHz）收不到 → RAR 失败 7 次 → IDLE。补丁（`fapi_nr_ue_l1.c` 的 `nr_ue_phy_config_request` 中检测 UL 频率变化并调用 `nrue_ru_set_freq`）已实现并编译验证过，但按用户决定撤回（保持代码上游干净）。
+2. **重同步后 PBCH 间歇失败**：第一轮失败进入 IDLE 后，第二轮重新同步（此时 UL 频率已正确）但同步后 PBCH 解码间歇失败（部分帧成功），无法重新获取 SIB1，形成死循环。15kHz case A 特有（30kHz case C 的 20MHz 无此问题）。
+
+**其他 5MHz 采坑记录**：
+- `E=1`（3/4 采样率）在 5MHz 下得到 5.76 Msps（FFT 384），与 gNB 的标准 7.68 Msps（FFT 512）不匹配 → 必须 `E=0`（20MHz 时 E=1 恰好匹配 gNB 的 23.04）。
+- B210 在 2.15GHz 的 TX 增益 60-85 区间输出已饱和（输出功率不随增益变化）；UE 的 `ue-rxgain 110`（实际 53dB）使 ADC 饱和，但 cell search（PSS 恒模鲁棒）仍成功而 PBCH/PDSCH 失败。
+- OAI UE 的 `ue-txgain` 映射是反向的（`UHD增益 = 89.75 - tx_gain`），0 = 最大发射功率。
+- 2.15GHz 频段的环境干扰（~-56dBm 天线口，疑似运营商 n1/B1 基站）使"gNB 信号弱于干扰时"cell search 完全失败；抓包验证方法需注意区分干扰与 gNB 信号（gNB 关闭对照抓包）。
+
 ### 3.3 OTA E2E 结果（153 + macOS，真无线）
 
 - UE 完成同步 → SIB1 解码 → PRACH → RAR → RRC 建立 → **IP 10.45.0.11**。
