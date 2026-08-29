@@ -116,6 +116,13 @@ void ta_management_system::handle_ue_ta_cmds(ue_ta_context& u)
       // Send Timing Advance Command to UE.
       const time_alignment_group::id_t tag_id = ta_meas.tag_id;
       const unsigned                   ta_cmd = std::max(0, ta_meas.last_t_a);
+      // [Instrumentation] Log the TA control-loop decision: the averaged N_TA difference measured over the window and
+      // the resulting TA command, for UE attach failure analysis (TA instability tracking).
+      logger.debug("TAG {}: Sending TA CMD. ta_cmd={} avg_n_ta_diff={} samples={}",
+                   tag_id.value(),
+                   ta_cmd,
+                   compute_avg_n_ta_difference(ta_meas),
+                   ta_meas.window_count_samples);
       u.lc_ch_mgr.handle_mac_ce_indication(
           {.ce_lcid = lcid_dl_sch_t::TA_CMD, .ce_payload = ta_cmd_ce_payload{tag_id, ta_cmd}});
       ta_cmd_sent = true;
@@ -188,6 +195,12 @@ void ta_management_system::handle_ul_n_ta_update_indication(soa::row_id         
     // [Implementation-defined] Discard measurement due to low UL SINR.
     // NOTE: From the testing with COTS UE its observed that N_TA update measurements with UL SINR less than 10 dB were
     // majorly outliers.
+    // [Instrumentation] Log the discarded measurement, so that UE attach failure analysis can tell whether TA
+    // measurements were being dropped because the UE went silent / the link degraded.
+    logger.debug("Discarding TA measurement. Cause: UL SINR {:.1f}dB <= threshold {:.1f}dB. n_ta_diff={}",
+                 ul_sinr,
+                 ta_cfg.update_measurement_ul_sinr_threshold,
+                 n_ta_diff_);
     return;
   }
 

@@ -10,7 +10,10 @@ using namespace ocudu;
 
 ue_link_adaptation_controller::ue_link_adaptation_controller(const cell_configuration&       cell_cfg_,
                                                              const ue_channel_state_manager& ue_channel_state) :
-  cell_cfg(cell_cfg_), ue_ch_st(ue_channel_state)
+  cell_cfg(cell_cfg_),
+  ue_ch_st(ue_channel_state),
+  // [Instrumentation] Reuse the SCHED logger for link-adaptation decision tracing.
+  logger(&ocudulog::fetch_basic_logger("SCHED"))
 {
   if (cell_cfg.expert_cfg.ue.olla_cqi_inc > 0) {
     dl_olla.emplace(cell_cfg.expert_cfg.ue.olla_dl_target_bler,
@@ -114,6 +117,11 @@ std::optional<sch_mcs_index> ue_link_adaptation_controller::calculate_dl_mcs(pds
   const float eff_cqi = get_effective_cqi();
   if (eff_cqi <= 0.0F) {
     // Special case, where reported CQI==0.
+    // [Instrumentation] Log the DL MCS selection giving up due to CQI <= 0.
+    logger->debug("LA DL MCS: no MCS. Cause: effective CQI {:.1f} <= 0. wideband_cqi={} olla={:+.1f}dB",
+                  eff_cqi,
+                  ue_ch_st.get_wideband_cqi().value(),
+                  dl_cqi_offset());
     return std::nullopt;
   }
 
@@ -126,6 +134,14 @@ std::optional<sch_mcs_index> ue_link_adaptation_controller::calculate_dl_mcs(pds
 
   // Ensures that the MCS is within the configured range.
   mcs = std::min(std::max(mcs, cell_cfg.expert_cfg.ue.dl_mcs.start()), cell_cfg.expert_cfg.ue.dl_mcs.stop());
+  // [Instrumentation] Log the DL MCS decision inputs: wideband CQI (which may be stale if the UE stopped reporting
+  // valid CSI), OLLA offset and the resulting MCS.
+  logger->debug("LA DL MCS: mcs={} wideband_cqi={} eff_cqi={:.1f} olla={:+.1f}dB table={}",
+                mcs.value(),
+                ue_ch_st.get_wideband_cqi().value(),
+                eff_cqi,
+                dl_cqi_offset(),
+                static_cast<unsigned>(mcs_table));
   return mcs;
 }
 
@@ -140,6 +156,16 @@ sch_mcs_index ue_link_adaptation_controller::calculate_ul_mcs(pusch_mcs_table mc
   // Derive MCS using the combination of estimated UL SNR + outer loop link adaptation.
   sch_mcs_index mcs = map_snr_to_mcs_ul(get_effective_snr(), mcs_table, use_transform_precoder);
   mcs               = std::min(std::max(mcs, ul_mcs_lims.start()), ul_mcs_lims.stop());
+
+  // [Instrumentation] Log the UL MCS decision inputs: last measured PUSCH SNR (which may be stale if the UE stopped
+  // transmitting), OLLA offset and the resulting MCS. This explains aggressive grants (e.g., 64QAM) after a UE goes
+  // silent.
+  logger->debug("LA UL MCS: mcs={} pusch_snr={:.1f}dB olla={:+.1f}dB table={} tp={}",
+                mcs.value(),
+                ue_ch_st.get_pusch_snr(),
+                ul_snr_offset_db(),
+                static_cast<unsigned>(mcs_table),
+                use_transform_precoder ? "on" : "off");
 
   return mcs;
 }

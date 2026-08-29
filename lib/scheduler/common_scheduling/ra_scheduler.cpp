@@ -1532,6 +1532,21 @@ void ra_scheduler::schedule_msg3_retx(cell_resource_allocator& res_alloc, ra_ue_
       // Find available symbol x RB resources.
       log_failed_msg3_retx(
           logger, cell_cfg.params.pci, msg3_ctx.preamble.tc_rnti, pusch_alloc.slot, "Not enough available RBs");
+      // [Instrumentation] Dump the UL grid occupancy for the Msg3 symbol range, so that Msg3 reTx deferrals can be
+      // traced back to the allocations (PRACH/PUCCH/SRS/other PUSCH) blocking the grant in this slot.
+      const crb_bitmap used_crbs = pusch_alloc.ul_res_grid.used_crbs(bwp_ul_cmn, grant.symbols);
+      const unsigned   nof_crbs  = bwp_ul_cmn.crbs.length();
+      logger.debug("pci={} tc-rnti={}: Msg3 reTx grant crbs={} symb=[{}, {}) blocked in slot {}. UL grid: {}/{} CRBs "
+                   "used, bitmap=0x{:08x}",
+                   cell_cfg.params.pci,
+                   msg3_ctx.preamble.tc_rnti,
+                   grant.crbs,
+                   grant.symbols.start(),
+                   grant.symbols.stop(),
+                   pusch_alloc.slot,
+                   used_crbs.count(),
+                   nof_crbs,
+                   used_crbs.extract<unsigned>(0, std::min<unsigned>(nof_crbs, 32)));
       continue;
     }
 

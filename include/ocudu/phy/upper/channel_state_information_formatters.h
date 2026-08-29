@@ -137,13 +137,29 @@ struct formatter<ocudu::channel_state_information> {
         helper.format_if_verbose(ctx, "cfo=na");
       }
     } else {
-      // Short representation only prints the SINR selected for CSI reporting to higher layers.
+      // Short representation prints the SINR selected for CSI reporting to higher layers. It is extended with the
+      // DMRS-based EPRE, RSRP and time alignment so that a single-line log entry is self-sufficient to distinguish
+      // (a) a UE that is not transmitting at all (EPRE/RSRP at noise level) from (b) a UE that is transmitting but
+      // buried in interference (EPRE/RSRP high while SINR is low). This instrumentation supports UE attach failure
+      // analysis (e.g., co-channel interference investigations).
       std::optional<float> sinr_dB = csi.get_sinr_dB();
       if (sinr_dB.has_value()) {
         helper.format_always(ctx, "sinr={:.1f}dB", *sinr_dB);
       } else {
         // SINR is not available.
         helper.format_always(ctx, "sinr=na");
+      }
+      std::optional<float> epre_dB = csi.get_epre_dB();
+      if (epre_dB.has_value()) {
+        helper.format_always(ctx, "epre={:+.1f}dB", *epre_dB);
+      }
+      std::optional<float> rsrp_dB = csi.get_rsrp_dB();
+      if (rsrp_dB.has_value()) {
+        helper.format_always(ctx, "rsrp={:.1f}dB", *rsrp_dB);
+      }
+      std::optional<ocudu::phy_time_unit> time_alignment = csi.get_time_alignment();
+      if (time_alignment.has_value()) {
+        helper.format_always(ctx, "t_align={:.2f}us", time_alignment->to_seconds() * 1e6);
       }
     }
     return ctx.out();

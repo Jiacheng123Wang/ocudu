@@ -8,6 +8,7 @@
 #include "../config/ue_configuration.h"
 #include "../support/outer_loop_link_adaptation.h"
 #include "ue_channel_state_manager.h"
+#include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ran/pucch/pucch_configuration.h"
 
 namespace ocudu {
@@ -76,6 +77,9 @@ private:
 
   const cell_configuration&       cell_cfg;
   const ue_channel_state_manager& ue_ch_st;
+  // [Instrumentation] Logger used to record the link-adaptation decisions (MCS inputs and outputs) for UE attach
+  // failure analysis. A raw pointer keeps the class movable for the object pool.
+  ocudulog::basic_logger* logger;
 
   // Limits for the MCS selection.
   pdsch_mcs_table               last_dl_mcs_table;
