@@ -16,6 +16,14 @@ enable_language(OBJCXX)
 #   xcrun -sdk macosx metallib /tmp/ocudu_mmse_{inv,apply,weights}.air -o ocudu_mmse.metallib
 set(MMSE_METALLIB ${CMAKE_CURRENT_SOURCE_DIR}/ocudu_mmse.metallib)
 
+# Keep a fresh copy of the .metallib next to the unit-test executable: the engine's
+# NSBundle fallback looks there first, and copy_if_different guarantees it never goes
+# stale relative to the source-tree file (which is the authoritative load source).
+add_custom_target(ocudu_mmse_metallib ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${MMSE_METALLIB} ${CMAKE_CURRENT_BINARY_DIR}/ocudu_mmse.metallib
+    COMMENT "Syncing ocudu_mmse.metallib to the build directory")
+
 # ---- Static library: engine driver + 2D MMSE adapter + statistics provider ----
 add_library(ocudu_channel_estimator_metal STATIC
     channel_statistics_estimator.h

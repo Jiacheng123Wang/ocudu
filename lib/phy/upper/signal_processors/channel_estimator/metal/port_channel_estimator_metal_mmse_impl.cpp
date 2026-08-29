@@ -77,6 +77,16 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   gpu_w        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_OUT * MAX_BLOCK_PILOTS);
   gpu_y        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * max_blocks * 2 * MAX_BLOCK_PILOTS);
   gpu_h        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * max_blocks * 2 * MAX_BLOCK_OUT);
+
+  // Warm-up dispatch: Metal JIT-compiles the kernels and pays the first command-buffer
+  // commit on first use (~3 ms on Apple Silicon, see PLAN.md 7.0.11/7.0.12). Running it
+  // here, with the FULL staging-buffer capacities, moves that cost off the slot critical
+  // path AND populates the zero-copy buffer cache with entries large enough for every
+  // later call (the cache is keyed by pointer). Buffers are zero-initialized.
+  if (engine_ready) {
+    (void)engine->run_weights_only(
+        gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, MAX_BLOCK_OUT, MAX_BLOCK_PILOTS, MAX_LAYERS, max_blocks);
+  }
 }
 
 port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl()

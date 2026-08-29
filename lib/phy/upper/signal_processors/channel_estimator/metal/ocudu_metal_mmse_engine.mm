@@ -55,14 +55,20 @@ struct mmse_engine_impl {
   bool load_library(const char* path)
   {
     NSError* err = nil;
-    if (path != nullptr && path[0] != '\0') {
-      NSURL* url = [NSURL fileURLWithPath:@(path)];
+    // The baked-in absolute source-tree path (OCUDU_MMSE_METALLIB_PATH) is the authoritative
+    // load source; the NSBundle / cwd lookups below are only fallbacks (e.g. relocated builds).
+    const char* primary = (path != nullptr && path[0] != '\0') ? path : OCUDU_MMSE_METALLIB_PATH;
+    const char* loaded  = nullptr;
+    {
+      NSURL* url = [NSURL fileURLWithPath:@(primary)];
       if (url != nil) {
         library = [device newLibraryWithURL:url error:&err];
-      }
-      if (library == nil) {
-        std::fprintf(stderr, "[mmse_engine] primary metallib load failed (%s): %s\n", path,
-                     err != nil ? err.localizedDescription.UTF8String : "nil error");
+        if (library != nil) {
+          loaded = primary;
+        } else {
+          std::fprintf(stderr, "[mmse_engine] primary metallib load failed (%s): %s\n", primary,
+                       err != nil ? err.localizedDescription.UTF8String : "nil error");
+        }
       }
     }
     if (library == nil) {
@@ -71,10 +77,19 @@ struct mmse_engine_impl {
       NSURL*    res  = [[NSBundle mainBundle] URLForResource:name withExtension:nil];
       if (res != nil) {
         library = [device newLibraryWithURL:res error:&err];
+        if (library != nil) {
+          loaded = res.fileSystemRepresentation;
+        }
       }
       if (library == nil) {
-        library = [device newLibraryWithFile:@(OCUDU_MMSE_METALLIB_PATH) error:&err];
+        library = [device newLibraryWithFile:@"ocudu_mmse.metallib" error:&err];
+        if (library != nil) {
+          loaded = "ocudu_mmse.metallib (cwd)";
+        }
       }
+    }
+    if (library != nil && std::getenv("OCUDU_MMSE_DBG") != nullptr) {
+      std::fprintf(stderr, "[mmse_engine] metallib loaded from %s\n", loaded != nullptr ? loaded : "?");
     }
     return library != nil;
   }
@@ -262,7 +277,11 @@ bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, flo
   [enc setBuffer:a_buf offset:0 atIndex:1];
   [enc setBuffer:w_buf offset:0 atIndex:2];
   [enc setBytes:&wparams length:sizeof(wparams) atIndex:3];
-  [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+  // One thread per output element: nof_systems * ceil(nout * L / 128) threadgroups.
+  {
+    const NSUInteger w_tgs = (static_cast<NSUInteger>(nout) * static_cast<NSUInteger>(L) + 127) / 128;
+    [enc dispatchThreadgroups:MTLSizeMake(nof_systems * w_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+  }
 
   [enc setComputePipelineState:e->apply_pipe];
   [enc setBuffer:w_buf offset:0 atIndex:0];
@@ -322,7 +341,11 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
   [enc setBuffer:ai_buf offset:0 atIndex:1];
   [enc setBuffer:w_buf offset:0 atIndex:2];
   [enc setBytes:&wparams length:sizeof(wparams) atIndex:3];
-  [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+  // One thread per output element: nof_systems * ceil(nout * L / 128) threadgroups.
+  {
+    const NSUInteger w_tgs = (static_cast<NSUInteger>(nout) * static_cast<NSUInteger>(L) + 127) / 128;
+    [enc dispatchThreadgroups:MTLSizeMake(nof_systems * w_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+  }
 
   [enc setComputePipelineState:e->apply_pipe];
   [enc setBuffer:w_buf offset:0 atIndex:0];

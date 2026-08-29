@@ -662,6 +662,58 @@ Metal LDPC 路径存在同类时延问题（用户确认），计划一起优化
 - (D) 引擎单例共享（多端口/多实例共用队列与 pipeline，摊薄首提税）——与 LDPC 时延
   优化同批。
 
+### 7.0.12 实链分相复测：GPU 路径已生效，瓶颈=K1b 权重 kernel + 首槽首提税（2026-08-29）
+
+`OCUDU_MMSE_DBG=1 OCUDU_MMSE_TIME=1` 实链复跑（ZMQ 10 MHz n3）：
+
+- **10 个引擎实例全部 `engine READY - GPU hot path active`** → 实链走 GPU 路径，此前
+  "CPU 回退"假设被证伪。
+- **实链配置 = 3 DMRS 符号 {2,7,11}（L=54）**，PUSCH 分配 3/24/36 PRB（非 52 PRB/2 符号）。
+- **稳态每槽 CE ≈ 0.90–0.95 ms**（36 PRB，12 标准块）：sigma2 ~4–7 µs、corr 构建 ~10–14 µs、
+  gpu_path ~890–950 µs（其中 **GPU 等待 ~765 µs = 总耗时 82%**）、finish ~1–2 µs。
+  CPU 侧（GJ 54×54 求逆 + 打包/解包）≈ 125 µs ≈ **14%**。
+- **首槽 3.87 ms**：prb=3 首行 gpu_path=3839.7 µs 而 gpu_wait 仅 769.6 µs → 每实例首次
+  GPU 提交的 pipeline 惰性编译/首提税 ~3 ms（单测口径 2.6 ms，同源）。实链探针
+  `[ul_channel_estimation] samples=1 mean=3947.5us` 取的正是这个首槽。
+- `rsrp ovl` 持续：稳态 0.93 ms CE + 0.07 ms TF + 0.03 ms 均衡 + 0.04 ms LDPC ≈ 1.07 ms
+  > 1 ms 槽长（15 kHz），抖动即过载 → UE release。
+
+**结论**：K1b `mmse_weights`（1 threadgroup × 128 线程，L=54 时每线程 4×54×54 ≈ 11.7k
+串行 FMA）是唯一主热点；CPU 占比仅 ~14%，不满足"CPU 过半才上 NEON"的触发条件。
+优先级：**(A) K1b 并行化**（预计 765 µs → <40 µs，总 ~175 µs）+ **(B) 首提交 warm-up**
+（首槽 −3 ms）；NEON（C）降级为 30 kHz SCS 预算收紧时的储备项。
+
+### 7.0.13 A+B 实施完成：K1b 并行化 + 首提交 warm-up（2026-08-30）
+
+**(A) `mmse_weights` 并行化**：原 kernel 每系统 1 threadgroup × 128 线程（每线程 4×L×L
+串行 FMA）。改为**每输出元素一线程**（flat 1D grid = `nof_systems × ceil(nout·L/128)`
+个 threadgroup；gtid→(row, col) 映射 col=gtid%L 使 warp 内 A⁻¹ 加载 coalesce、R_hp 加载
+broadcast）。累加顺序（k 升序）与 CPU 参考一致 → **逐位一致**（NMSE 与 golden maxerr
+与改动前完全相同：−12.68/−14.45/−17.61/−12.93 dB，dbgL54 maxerr 8.873e+01）。
+
+**(B) 构造时 warm-up**：引擎 init 后立即用**全容量** staging buffer 跑一次哑
+`run_weights_only`（MAX_BLOCK_OUT×MAX_BLOCK_PILOTS×MAX_LAYERS×max_blocks，缓冲区零初始化），
+消化 Metal 首提交惰性编译（~3 ms）并预热按指针索引的 buffer 缓存（全容量保证后续任意
+真实尺寸命中）。
+
+**根因修复**：build 目录残留旧 `ocudu_mmse.metallib`（紧邻单测可执行文件），引擎的
+`NSBundle mainBundle` 回退路径**先**命中旧文件，遮蔽源树新编译产物——新 kernel 一度
+"无效果"。修复：烘焙绝对路径 `OCUDU_MMSE_METALLIB_PATH` 改为**首选**加载源（mainBundle/
+cwd 仅作回退）+ CMake custom target `copy_if_different` 让 build 目录副本永远同步 +
+`OCUDU_MMSE_DBG=1` 打印实际加载路径。
+
+**实测（单测口径）**：
+
+| 配置 | gpu_wait 前 | gpu_wait 后 | compute() 总量 前 | 后 |
+|---|---|---|---|---|
+| 52 PRB / 2 DMRS (L=36) | 351 µs | **19.5 µs** | ~475 µs | **~137 µs** |
+| Msg3 4 PRB / 3 DMRS (L=54) | 765 µs | **25.3 µs** | ~957 µs | **~176 µs** |
+| 首槽首提税 | +2.6 ms | **0（移入构造期）** | – | – |
+
+52 PRB 稳态 CE 从 ~475 µs 降至 ~137 µs（≈2× cpu 基线 63.6 µs）；预计实链（3 DMRS 符号、
+36 PRB）从 ~930 µs 降至 **~180–220 µs**，管线总量 ~310 µs，15 kHz 预算余量 ~3×，
+30 kHz（0.5 ms）也可过。待实链复测确认（`OCUDU_MMSE_DBG=1 OCUDU_MMSE_TIME=1`）。
+
 ### 7.0.8 剩余工作（实验室依赖，列入收尾清单）
 
 - 实链三腿 A/B（ZMQ → RF B200）：`expert_phy --pusch_channel_estimator_algo cpu|metal_mmse`
