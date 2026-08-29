@@ -103,6 +103,71 @@ private:
   /// Actual implementation of the \c compute public method.
   void do_compute(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots);
 
+protected:
+  /// \brief Arguments passed to the FD+TD estimation stage virtual hook.
+  ///
+  /// The stage is responsible for producing, from the LSE pilots, the filtered pilot estimates
+  /// (stored in \c filtered_pilots_lse_view, used downstream for RSrp, noise variance and time
+  /// alignment) and the frequency-domain channel response (\c freq_response, consumed by the
+  /// time-domain strategy of the default implementation). Implementations may also produce and
+  /// store their own full time-frequency grid and override \c get_symbol_ch_estimate instead of
+  /// relying on the time-domain strategy.
+  struct fd_td_estimation_stage_args {
+    /// Transmitted pilots (per layer, per DM-RS symbol).
+    const dmrs_symbol_list& pilots;
+    /// Received pilots (per CDM group, per DM-RS symbol).
+    const dmrs_symbol_list& rx_pilots;
+    /// DM-RS patterns, one per transmission layer.
+    span<const layer_dmrs_pattern> dmrs_patterns;
+    /// Boolean mask of the OFDM symbols carrying DM-RS in the slot.
+    const bounded_bitset<MAX_NSYMB_PER_SLOT>& pattern_symbols;
+    /// Index of the first OFDM symbol of the current hop, within the slot.
+    unsigned first_symbol;
+    /// Index of the last OFDM symbol of the current hop (not included), within the slot.
+    unsigned last_symbol;
+    /// Number of OFDM symbols carrying DM-RS in the current hop.
+    unsigned nof_dmrs_symbols;
+    /// Number of pilots in a single OFDM symbol carrying DM-RS.
+    unsigned nof_symbol_pilots;
+    /// Current hop index (0 or 1).
+    unsigned hop;
+    /// Number of OFDM symbols carrying DM-RS in the previous hop.
+    unsigned hop_offset;
+    /// DM-RS to data amplitude scaling.
+    float beta_scaling;
+    /// Estimated CFO of the current hop (empty when unavailable).
+    std::optional<float> cfo_hop;
+    /// Starting time of the symbols inside the slot, in units of OFDM symbol duration.
+    span<const float> symbol_start_epochs;
+    /// Whether CFO compensation is active.
+    bool compensate_cfo_flag;
+    /// Subcarrier spacing of the current transmission.
+    subcarrier_spacing scs;
+    /// View over the LSE pilots buffer (per symbol per layer).
+    modular_re_measurement<cf_t, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS>& pilots_lse_view;
+    /// View over the filtered-pilots buffer — the stage MUST fill it with the filtered
+    /// channel estimates at the pilot REs, scaled by the same factor the FD processing
+    /// applies (see \ref apply_fd_td_estimation_stage); used for RSrp, noise variance and TA.
+    modular_re_measurement<cf_t, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS>& filtered_pilots_lse_view;
+    /// Enlarged filtered-pilots buffer (per LSE symbol per layer; includes virtual-pilot
+    /// headroom, see the default stage implementation).
+    static_re_measurement<cf_t, MAX_NOF_PILOTS_SYMBOL, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS>&
+        enlarged_filtered_pilots_lse;
+    /// Frequency-response output buffer (per LSE symbol per layer).
+    re_measurement<cf_t>& freq_response;
+  };
+
+  /// \brief FD+TD estimation stage of one hop.
+  ///
+  /// The default implementation performs the existing frequency-domain smoothing and
+  /// interpolation (producing \c freq_response and \c filtered_pilots_lse_view); the time-domain
+  /// strategy is then applied on demand by \c get_symbol_ch_estimate. Derived estimators
+  /// (e.g., the Metal 2D MMSE estimator) may override this stage to produce the complete
+  /// time-frequency grid in one shot and override \c get_symbol_ch_estimate accordingly.
+  virtual void apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args);
+
+private:
+
   /// Specializes \ref compute for one hop.
   void compute_hop(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots, unsigned hop);
 

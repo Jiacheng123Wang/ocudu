@@ -181,7 +181,8 @@ ocudu::create_sw_pusch_processor_factory(task_executor&                         
                                          bool                                             dec_enable_early_stop,
                                          const std::string&                               pxsch_type,
                                          port_channel_estimator_td_interpolation_strategy td_interpolation_strategy,
-                                         channel_equalizer_algorithm_type                 equalizer_algorithm_type)
+                                         channel_equalizer_algorithm_type                 equalizer_algorithm_type,
+                                         const std::string&                               channel_estimator_algo)
 {
   std::shared_ptr<dft_processor_factory> dft_proc_factory = create_dft_processor_factory_fftw_slow();
   report_fatal_error_if_not(dft_proc_factory, "Failed to create factory.");
@@ -240,8 +241,11 @@ ocudu::create_sw_pusch_processor_factory(task_executor&                         
       create_time_alignment_estimator_dft_factory(dft_proc_factory);
   report_fatal_error_if_not(ta_est_factory, "Failed to create factory.");
 
+  const port_channel_estimator_algorithm ce_algo =
+      (channel_estimator_algo == "metal_mmse") ? port_channel_estimator_algorithm::metal_mmse
+                                               : port_channel_estimator_algorithm::cpu;
   std::shared_ptr<port_channel_estimator_factory> chan_estimator_factory =
-      create_port_channel_estimator_factory_sw(ta_est_factory);
+      create_port_channel_estimator_factory_sw(ta_est_factory, ce_algo);
   report_fatal_error_if_not(chan_estimator_factory, "Failed to create factory.");
 
   // CFO compensation is not necessary if time domain interpolation is enabled.

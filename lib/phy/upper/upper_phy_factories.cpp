@@ -624,10 +624,19 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
   report_error_if_not(prg_factory, "Invalid pseudo-random sequence generator factory.");
 
   // Create port channel estimator for PUSCH and PUCCH.
-  std::shared_ptr<port_channel_estimator_factory> pusch_ch_estimator_factory =
+  const port_channel_estimator_algorithm ce_algo =
+      (config.pusch_channel_estimator_algo == "metal_mmse") ? port_channel_estimator_algorithm::metal_mmse
+                                                            : port_channel_estimator_algorithm::cpu;
+  std::shared_ptr<port_channel_estimator_factory> pusch_ch_estimator_factory = create_port_channel_estimator_factory_sw(
+      ta_est_factory,
+      ce_algo,
+      config.pusch_channel_estimator_mmse_tau_rms_us * 1e-6F,
+      config.pusch_channel_estimator_mmse_fd_hz,
+      config.pusch_channel_estimator_mmse_block_prb);
+  report_error_if_not(pusch_ch_estimator_factory, "Invalid channel estimator factory.");
+  // PUCCH keeps the classical estimator for now (the MMSE path is PUSCH-only in v1).
+  std::shared_ptr<port_channel_estimator_factory> pucch_ch_estimator_factory =
       create_port_channel_estimator_factory_sw(ta_est_factory);
-  report_error_if_not(prg_factory, "Invalid channel estimator factory.");
-  std::shared_ptr<port_channel_estimator_factory> pucch_ch_estimator_factory = pusch_ch_estimator_factory;
 
   // Wrap PUSCH port channel estimator with metric if necessary.
   if (metric_notifier) {
@@ -638,7 +647,12 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
     report_fatal_error_if_not(metric_ta_est_factory, "Failed to create TA estimator factory.");
 
     // Create a different factory containing the new TA estimator factory.
-    pusch_ch_estimator_factory = create_port_channel_estimator_factory_sw(metric_ta_est_factory);
+    pusch_ch_estimator_factory = create_port_channel_estimator_factory_sw(
+        metric_ta_est_factory,
+        ce_algo,
+        config.pusch_channel_estimator_mmse_tau_rms_us * 1e-6F,
+        config.pusch_channel_estimator_mmse_fd_hz,
+        config.pusch_channel_estimator_mmse_block_prb);
     report_error_if_not(pusch_ch_estimator_factory, "Invalid channel estimator factory.");
 
     // Finally, wrap the factory with the metric decorator.

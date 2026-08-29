@@ -8,6 +8,10 @@
 #include "ocudu/ocuduvec/conversion.h"
 #include "ocudu/ocuduvec/convolution.h"
 #include "ocudu/ocuduvec/dot_prod.h"
+#include "ocudu/ocuduvec/add.h"
+#include "ocudu/ocuduvec/prod.h"
+#include "ocudu/ocuduvec/subtract.h"
+#include "ocudu/support/math/math_utils.h"
 #include "ocudu/ocuduvec/mean.h"
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/ocuduvec/unwrap.h"
@@ -502,4 +506,105 @@ extract_re_prb(span<cf_t> out, const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_
   });
 
   return out;
+}
+
+float ocudu::estimate_noise(const dmrs_symbol_list&                   pilots,
+                            const dmrs_symbol_list&                   rx_pilots,
+                            const re_measurement<cf_t>&               estimates,
+                            float                                     beta,
+                            const bounded_bitset<MAX_NSYMB_PER_SLOT>& dmrs_mask,
+                            std::optional<float>                      cfo,
+                            span<const float>                         symbol_start_epochs,
+                            bool                                      compensate_cfo,
+                            unsigned                                  first_hop_symbol,
+                            unsigned                                  last_hop_symbol,
+                            unsigned                                  hop_offset,
+                            unsigned                                  start_layer,
+                            unsigned                                  stop_layer)
+{
+  constexpr unsigned max_layers = 2;
+
+  ocudu_assert((stop_layer == start_layer + 1) || (stop_layer == start_layer + max_layers),
+               "Layers must be processed either independently on in pairs, required {{{}, ..., {}}}.",
+               start_layer,
+               stop_layer - 1);
+
+  // Deduce the number of RE to process.
+  unsigned nof_re = estimates.size().nof_subc;
+
+  // Deduce the number of LSE symbols.
+  unsigned nof_lse_symbols = estimates.size().nof_symbols;
+
+  // Scale channel estimates and average in time domain.
+  float scaling_factor = beta / static_cast<float>(nof_lse_symbols);
+
+  static_re_buffer<max_layers, MAX_NOF_SUBCARRIERS> scaled_estimates(estimates.size().nof_slices, nof_re);
+
+  for (unsigned i_layer = start_layer; i_layer != stop_layer; ++i_layer) {
+    unsigned i_helper = i_layer - start_layer;
+    ocuduvec::sc_prod(scaled_estimates.get_slice(i_helper), estimates.get_symbol(0, i_layer), scaling_factor);
+    for (unsigned i_symbol = 1; i_symbol != nof_lse_symbols; ++i_symbol) {
+      span<cf_t>       scaled           = scaled_estimates.get_slice(i_helper);
+      span<const cf_t> estimates_symbol = estimates.get_symbol(i_symbol, i_layer);
+      std::transform(estimates_symbol.begin(),
+                     estimates_symbol.end(),
+                     scaled.begin(),
+                     scaled.begin(),
+                     [scaling_factor](cf_t ce, cf_t acc) { return ce * scaling_factor + acc; });
+    }
+  }
+
+  // Temporary data buffers.
+  static_re_buffer<1, MAX_NOF_SUBCARRIERS> predicted_obs_buffer(1, nof_re);
+  static_re_buffer<1, MAX_NOF_SUBCARRIERS> noise_samples_buffer(1, nof_re);
+
+  // Noise energy accumulator for each OFDM symbol containing DM-RS.
+  float noise_energy = 0.0F;
+
+  auto estimate_noise_symbol = [&, i_dmrs = 0](size_t i_symbol) mutable {
+    span<cf_t> noise_samples = noise_samples_buffer.get_slice(0);
+    for (unsigned i_layer = start_layer; i_layer != stop_layer; ++i_layer) {
+      unsigned i_helper = i_layer - start_layer;
+
+      // Select temporary buffer for the pilot symbols and channel estimates product.
+      span<cf_t> predicted_obs = predicted_obs_buffer.get_slice(0);
+
+      // Skip intermediate buffer for the first process layer.
+      if (i_layer == start_layer) {
+        predicted_obs = noise_samples;
+      }
+
+      // Get original symbol pilots.
+      span<const cf_t> symbol_pilots = pilots.get_symbol(hop_offset + i_dmrs, i_layer);
+
+      // Apply estimated channel response to the original symbol pilots.
+      ocuduvec::prod(predicted_obs, scaled_estimates.get_slice(i_helper), symbol_pilots);
+
+      // Compensate for CFO only if present.
+      if (compensate_cfo && cfo.has_value()) {
+        ocuduvec::sc_prod(
+            predicted_obs, predicted_obs, std::polar(1.0F, TWOPI * symbol_start_epochs[i_symbol] * cfo.value()));
+      }
+
+      // Skip addition if the intermediate buffer is skipped.
+      if (predicted_obs.data() != noise_samples.data()) {
+        ocuduvec::add(noise_samples, predicted_obs, noise_samples);
+      }
+    }
+
+    // Estimate receiver error as the difference between the received pilots and the regenerated ones.
+    unsigned         i_cdm            = start_layer / 2;
+    span<const cf_t> symbol_rx_pilots = rx_pilots.get_symbol(i_dmrs, i_cdm);
+    ocuduvec::subtract(noise_samples, symbol_rx_pilots, noise_samples);
+
+    // Accumulate received power.
+    noise_energy += ocuduvec::average_power(noise_samples) * noise_samples.size();
+    ++i_dmrs;
+  };
+
+  // Process each OFDM containing DM-RS.
+  dmrs_mask.for_each(first_hop_symbol, last_hop_symbol, estimate_noise_symbol);
+
+  // Return 0 if the resultant noise is NaN or infinity.
+  return std::isnormal(noise_energy) ? noise_energy : 0;
 }

@@ -12,6 +12,12 @@ add_library(ocudu_channel_estimator STATIC
 )
 target_link_libraries(ocudu_channel_estimator ocuduvec ocudu_phy_support)
 
+if(ENABLE_METAL_CHEST)
+    add_subdirectory(channel_estimator/metal)
+    target_compile_definitions(ocudu_channel_estimator PUBLIC OCUDU_METAL_CHEST)
+    target_link_libraries(ocudu_channel_estimator ocudu_channel_estimator_metal)
+endif()
+
 add_library(ocudu_nzp_csi_rs_generator STATIC
     nzp_csi_rs/factories.cpp
     nzp_csi_rs/nzp_csi_rs_generator_impl.cpp

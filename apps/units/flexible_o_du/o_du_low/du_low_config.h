@@ -74,6 +74,19 @@ struct du_low_unit_expert_upper_phy_config {
   std::string pusch_channel_estimator_td_strategy = "interpolate";
   /// PUSCH channel estimator CFO compensation.
   bool pusch_channel_estimator_cfo_compensation = false;
+  /// \brief PUSCH channel estimator algorithm.
+  ///
+  /// Use one of these options:
+  /// - \c cpu: classical LS + FD smoothing + TD strategy (default, all platforms), or
+  /// - \c metal_mmse: 2D time-frequency block MMSE, Metal-accelerated (Apple Silicon only;
+  ///   the MMSE estimator ignores the fd/td strategies above).
+  std::string pusch_channel_estimator_algo = "cpu";
+  /// \brief MMSE estimator: fixed RMS delay spread (in microseconds) - v1 constant.
+  float pusch_channel_estimator_mmse_tau_rms_us = 0.37F;
+  /// \brief MMSE estimator: fixed maximum Doppler shift (in hertz) - v1 constant.
+  float pusch_channel_estimator_mmse_fd_hz = 0.0F;
+  /// \brief MMSE estimator: time-frequency block size (in PRBs, 1..3).
+  unsigned pusch_channel_estimator_mmse_block_prb = 3;
   /// \brief PUSCH channel equalizer algorithm.
   ///
   /// Use one of these options:

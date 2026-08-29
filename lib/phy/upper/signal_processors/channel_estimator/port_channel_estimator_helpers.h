@@ -59,6 +59,39 @@ float estimate_time_alignment(const re_measurement<cf_t>&                       
                               subcarrier_spacing                                scs,
                               time_alignment_estimator&                         ta_estimator);
 
+/// \brief Estimates the noise energy of one hop and a given range of layers.
+///
+/// The receiver error is estimated as the difference between the received pilots and the pilots regenerated from the
+/// channel estimates. The channel estimates are expected to be scaled by the same factor the FD processing applies
+/// (i.e., \c 1/beta for the interpolate TD strategy), see \ref port_channel_estimator_average_impl.
+/// \param[in]  pilots               Transmitted pilots.
+/// \param[in]  rx_pilots            Received pilots.
+/// \param[in]  estimates            Channel estimates for the pilot REs (scaled, see above).
+/// \param[in]  beta                 DM-RS to data amplitude scaling.
+/// \param[in]  dmrs_mask            Boolean mask identifying the OFDM symbols carrying DM-RS within the slot.
+/// \param[in]  cfo                  Estimated CFO (empty when unavailable).
+/// \param[in]  symbol_start_epochs  Starting time of the symbols inside the slot, in units of OFDM symbol duration.
+/// \param[in]  compensate_cfo       Whether the CFO is compensated in the channel estimates.
+/// \param[in]  first_hop_symbol     Index of the first OFDM symbol of the current hop.
+/// \param[in]  last_hop_symbol      Index of the last OFDM symbol of the current hop (not included).
+/// \param[in]  hop_offset           Number of OFDM symbols carrying DM-RS in the previous hop.
+/// \param[in]  start_layer          Index of the first transmission layer to be processed.
+/// \param[in]  stop_layer           Index of the last transmission layer (not included) to be processed.
+/// \return The noise energy for the current hop and the given range of layers.
+float estimate_noise(const dmrs_symbol_list&                   pilots,
+                     const dmrs_symbol_list&                   rx_pilots,
+                     const re_measurement<cf_t>&               estimates,
+                     float                                     beta,
+                     const bounded_bitset<MAX_NSYMB_PER_SLOT>& dmrs_mask,
+                     std::optional<float>                      cfo,
+                     span<const float>                         symbol_start_epochs,
+                     bool                                      compensate_cfo,
+                     unsigned                                  first_hop_symbol,
+                     unsigned                                  last_hop_symbol,
+                     unsigned                                  hop_offset,
+                     unsigned                                  start_layer,
+                     unsigned                                  stop_layer);
+
 // Returns the interpolator configuration for the given RE pattern.
 interpolator::configuration configure_interpolator(const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_mask);
 

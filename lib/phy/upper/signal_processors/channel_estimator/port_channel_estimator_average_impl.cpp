@@ -41,38 +41,6 @@ extract_common_pattern(const port_channel_estimator::configuration& cfg, unsigne
 /// the channel is assumed constant over the two averaged REs.)
 static void average_pairs(re_measurement<cf_t>& values);
 
-/// \brief Estimates the noise energy of one hop and a given range of layers.
-///
-/// The layers in the given range are assumed to transmit DM-RS on the same resources.
-/// \param[in] pilots                DM-RS pilots.
-/// \param[in] rx_pilots             Received samples corresponding to DM-RS pilots.
-/// \param[in] estimates             Estimated channel frequency response.
-/// \param[in] beta                  DM-RS-to-data amplitude gain (linear scale).
-/// \param[in] dmrs_mask             Boolean mask identifying the OFDM symbols carrying DM-RS within the slot.
-/// \param[in] cfo                   Carrier frequency offset.
-/// \param[in] symbol_start_epochs   Cumulative duration of all CPs in the slot.
-/// \param[in] compensate_cfo        Boolean flag to activate the CFO compensation.
-/// \param[in] first_hop_symbol      Index of the first OFDM symbol of the current hop, within the slot.
-/// \param[in] last_hop_symbol       Index of the last OFDM symbol of the current hop (not included), within the slot.
-/// \param[in] hop_offset            Number of OFDM symbols containing DM-RS pilots in the previous hop (set to 0 if the
-///                                  current hop is the first/only one).
-/// \param[in] start_layer           First layer in the considered range.
-/// \param[in] stop_layer            Last layer (excluded) in the considered range.
-/// \return The noise energy for the current hop.
-static float estimate_noise(const dmrs_symbol_list&                   pilots,
-                            const dmrs_symbol_list&                   rx_pilots,
-                            const re_measurement<cf_t>&               estimates,
-                            float                                     beta,
-                            const bounded_bitset<MAX_NSYMB_PER_SLOT>& dmrs_mask,
-                            std::optional<float>                      cfo,
-                            span<const float>                         symbol_start_epochs,
-                            bool                                      compensate_cfo,
-                            unsigned                                  first_hop_symbol,
-                            unsigned                                  last_hop_symbol,
-                            unsigned                                  hop_offset,
-                            unsigned                                  start_layer,
-                            unsigned                                  stop_layer);
-
 /// \brief Prepares auxiliary buffers.
 ///
 /// Resizes the static buffers and assigns slices to the modular buffers based on the smoothing strategy, the number of
@@ -380,59 +348,48 @@ void port_channel_estimator_average_impl::compute_hop(const ocudu::resource_grid
   // Compensate the CFO. Recall that this method updates pilot_products and pilots_lse.
   compensate_cfo_and_accumulate(pilots, pattern_symbols, first_symbol, last_symbol, cfo_hop);
 
-  // Select and resize the storage for the estimated frequency-domain channel coefficients.
+  // Select the storage for the estimated frequency-domain channel coefficients.
   re_measurement<cf_t>& freq_response = (hop == 0) ? dynamic_cast<re_measurement<cf_t>&>(freq_response_hop0)
-                                                   : dynamic_cast<re_measurement<cf_t>&>(freq_response_hop1);
-  freq_response.resize(
-      {.nof_subc    = static_cast<unsigned>(cfg_local.dmrs_pattern.front().rb_mask.count() * NOF_SUBCARRIERS_PER_RB),
-       .nof_symbols = nof_lse_symbols,
-       .nof_slices  = nof_tx_layers});
+                                                    : dynamic_cast<re_measurement<cf_t>&>(freq_response_hop1);
 
-  // Process pilot estimates in frequency and time domain for each layer.
+  // FD+TD estimation stage (default: FD smoothing + interpolation; the Metal 2D MMSE estimator overrides it).
+  // The stage fills freq_response and filtered_pilots_lse.
+  unsigned stage_hop_offset = 0;
+  if (hop == 1) {
+    stage_hop_offset = pilots.size().nof_symbols - nof_dmrs_symbols;
+  }
+
+  fd_td_estimation_stage_args stage_args{
+      .pilots                    = pilots,
+      .rx_pilots                 = rx_pilots,
+      .dmrs_patterns             = cfg_local.dmrs_pattern,
+      .pattern_symbols           = pattern_symbols,
+      .first_symbol              = first_symbol,
+      .last_symbol               = last_symbol,
+      .nof_dmrs_symbols          = nof_dmrs_symbols,
+      .nof_symbol_pilots         = nof_symbol_pilots,
+      .hop                       = hop,
+      .hop_offset                = stage_hop_offset,
+      .beta_scaling              = beta_scaling,
+      .cfo_hop                   = cfo_hop,
+      .symbol_start_epochs       = symbol_start_epochs,
+      .compensate_cfo_flag       = compensate_cfo,
+      .scs                       = cfg_local.scs,
+      .pilots_lse_view           = pilots_lse,
+      .filtered_pilots_lse_view  = filtered_pilots_lse,
+      .enlarged_filtered_pilots_lse = enlarged_filtered_pilots_lse,
+      .freq_response             = freq_response,
+  };
+  apply_fd_td_estimation_stage(stage_args);
+
+  // RSrp accumulation from the filtered pilot estimates (identical for all estimation paths).
+  float power_normalization_factor =
+      beta_scaling * beta_scaling * static_cast<float>(nof_dmrs_symbols) / static_cast<float>(nof_lse_symbols);
   for (unsigned i_layer = 0; i_layer != nof_tx_layers; ++i_layer) {
-    const layer_dmrs_pattern& pattern = cfg_local.dmrs_pattern[i_layer];
-
-    // Select hop resource block mask.
-    const auto& hop_rb_mask = (hop == 0) ? pattern.rb_mask : pattern.rb_mask2;
-
-    // Prepare frequency domain interpolation.
-    interpolator::configuration interpolator_cfg = configure_interpolator(pattern.re_pattern);
-
-    // Calculate total scaling accounting for the symbol accumulation and the DM-RS-to-data gain.
-    float total_scaling = 1.0F / beta_scaling;
-    if (td_interpolation_strategy == port_channel_estimator_td_interpolation_strategy::average) {
-      total_scaling /= static_cast<float>(nof_dmrs_symbols);
-    }
-
-    // Apply frequency domain processing.
     for (unsigned i_symbol = 0; i_symbol != nof_lse_symbols; ++i_symbol) {
-      ocuduvec::sc_prod(
-          pilots_lse.get_symbol(i_symbol, i_layer), pilots_lse.get_symbol(i_symbol, i_layer), total_scaling);
-
-      // Apply a smoothing strategy to remove some noise ("high-time" components). Note that pilots_lse and
-      // filtered_pilots_lse have some empty space at both sides, which we include with the enlarged version.
-      apply_fd_smoothing(enlarged_filtered_pilots_lse.get_symbol(i_symbol, i_layer),
-                         enlarged_pilots_lse.get_symbol(i_symbol, i_layer),
-                         hop_rb_mask.count(),
-                         interpolator_cfg.stride,
-                         fd_smoothing_strategy);
-
-      // Energy of the DM-RS in the current symbol and layer.
       float avg = ocuduvec::average_power(filtered_pilots_lse.get_symbol(i_symbol, i_layer)) *
                   filtered_pilots_lse.get_symbol(i_symbol, i_layer).size();
-
-      // Normalization factor: the factor nof_dmrs_symbols / nof_lse_symbols accounts for whether the
-      // symbols carrying DM-RS have been combined or not (i.e., td_interpolation_strategy is average or interpolate,
-      // respectively), while beta_scaling^2 accounts for the data-to-DM-RS scaling.
-      float power_normalization_factor =
-          beta_scaling * beta_scaling * static_cast<float>(nof_dmrs_symbols) / static_cast<float>(nof_lse_symbols);
-      avg *= power_normalization_factor;
-      rsrp[i_layer] += avg;
-
-      // Interpolate frequency response for this symbol.
-      freq_interpolator->interpolate(freq_response.get_symbol(i_symbol, i_layer),
-                                     filtered_pilots_lse.get_symbol(i_symbol, i_layer),
-                                     interpolator_cfg);
+      rsrp[i_layer] += avg * power_normalization_factor;
     }
   }
 
@@ -442,24 +399,19 @@ void port_channel_estimator_average_impl::compute_hop(const ocudu::resource_grid
 
     unsigned stop_layer = (i_layer < nof_tx_layers - 1) ? i_layer + 2 : i_layer + 1;
 
-    unsigned hop_offset = 0;
-    if (hop == 1) {
-      hop_offset = pilots.size().nof_symbols - nof_dmrs_symbols;
-    }
-
-    noise_var += estimate_noise(pilots,
-                                rx_pilots,
-                                filtered_pilots_lse,
-                                beta_scaling,
-                                pattern.symbols,
-                                cfo_hop,
-                                symbol_start_epochs,
-                                compensate_cfo,
-                                first_symbol,
-                                last_symbol,
-                                hop_offset,
-                                i_layer,
-                                stop_layer);
+    noise_var += ocudu::estimate_noise(pilots,
+                                       rx_pilots,
+                                       filtered_pilots_lse,
+                                       beta_scaling,
+                                       pattern.symbols,
+                                       cfo_hop,
+                                       symbol_start_epochs,
+                                       compensate_cfo,
+                                       first_symbol,
+                                       last_symbol,
+                                       stage_hop_offset,
+                                       i_layer,
+                                       stop_layer);
   }
 
   time_alignment_s +=
@@ -761,106 +713,6 @@ static void average_pairs(re_measurement<cf_t>& values)
   }
 }
 
-static float estimate_noise(const dmrs_symbol_list&                   pilots,
-                            const dmrs_symbol_list&                   rx_pilots,
-                            const re_measurement<cf_t>&               estimates,
-                            float                                     beta,
-                            const bounded_bitset<MAX_NSYMB_PER_SLOT>& dmrs_mask,
-                            std::optional<float>                      cfo,
-                            span<const float>                         symbol_start_epochs,
-                            bool                                      compensate_cfo,
-                            unsigned                                  first_hop_symbol,
-                            unsigned                                  last_hop_symbol,
-                            unsigned                                  hop_offset,
-                            unsigned                                  start_layer,
-                            unsigned                                  stop_layer)
-{
-  constexpr unsigned max_layers = 2;
-
-  ocudu_assert((stop_layer == start_layer + 1) || (stop_layer == start_layer + max_layers),
-               "Layers must be processed either independently on in pairs, required {{{}, ..., {}}}.",
-               start_layer,
-               stop_layer - 1);
-
-  // Deduce the number of RE to process.
-  unsigned nof_re = estimates.size().nof_subc;
-
-  // Deduce the number of LSE symbols.
-  unsigned nof_lse_symbols = estimates.size().nof_symbols;
-
-  // Scale channel estimates and average in time domain.
-  float scaling_factor = beta / static_cast<float>(nof_lse_symbols);
-
-  static_re_buffer<max_layers, MAX_NOF_SUBCARRIERS> scaled_estimates(estimates.size().nof_slices, nof_re);
-
-  for (unsigned i_layer = start_layer; i_layer != stop_layer; ++i_layer) {
-    unsigned i_helper = i_layer - start_layer;
-    ocuduvec::sc_prod(scaled_estimates.get_slice(i_helper), estimates.get_symbol(0, i_layer), scaling_factor);
-    for (unsigned i_symbol = 1; i_symbol != nof_lse_symbols; ++i_symbol) {
-      span<cf_t>       scaled           = scaled_estimates.get_slice(i_helper);
-      span<const cf_t> estimates_symbol = estimates.get_symbol(i_symbol, i_layer);
-      std::transform(estimates_symbol.begin(),
-                     estimates_symbol.end(),
-                     scaled.begin(),
-                     scaled.begin(),
-                     [scaling_factor](cf_t ce, cf_t acc) { return ce * scaling_factor + acc; });
-    }
-  }
-
-  // Temporary data buffers.
-  static_re_buffer<1, MAX_NOF_SUBCARRIERS> predicted_obs_buffer(1, nof_re);
-  static_re_buffer<1, MAX_NOF_SUBCARRIERS> noise_samples_buffer(1, nof_re);
-
-  // Noise energy accumulator for each OFDM symbol containing DM-RS.
-  float noise_energy = 0.0F;
-
-  auto estimate_noise_symbol = [&, i_dmrs = 0](size_t i_symbol) mutable {
-    span<cf_t> noise_samples = noise_samples_buffer.get_slice(0);
-    for (unsigned i_layer = start_layer; i_layer != stop_layer; ++i_layer) {
-      unsigned i_helper = i_layer - start_layer;
-
-      // Select temporary buffer for the pilot symbols and channel estimates product.
-      span<cf_t> predicted_obs = predicted_obs_buffer.get_slice(0);
-
-      // Skip intermediate buffer for the first process layer.
-      if (i_layer == start_layer) {
-        predicted_obs = noise_samples;
-      }
-
-      // Get original symbol pilots.
-      span<const cf_t> symbol_pilots = pilots.get_symbol(hop_offset + i_dmrs, i_layer);
-
-      // Apply estimated channel response to the original symbol pilots.
-      ocuduvec::prod(predicted_obs, scaled_estimates.get_slice(i_helper), symbol_pilots);
-
-      // Compensate for CFO only if present.
-      if (compensate_cfo && cfo.has_value()) {
-        ocuduvec::sc_prod(
-            predicted_obs, predicted_obs, std::polar(1.0F, TWOPI * symbol_start_epochs[i_symbol] * cfo.value()));
-      }
-
-      // Skip addition if the intermediate buffer is skipped.
-      if (predicted_obs.data() != noise_samples.data()) {
-        ocuduvec::add(noise_samples, predicted_obs, noise_samples);
-      }
-    }
-
-    // Estimate receiver error as the difference between the received pilots and the regenerated ones.
-    unsigned         i_cdm            = start_layer / 2;
-    span<const cf_t> symbol_rx_pilots = rx_pilots.get_symbol(i_dmrs, i_cdm);
-    ocuduvec::subtract(noise_samples, symbol_rx_pilots, noise_samples);
-
-    // Accumulate received power.
-    noise_energy += ocuduvec::average_power(noise_samples) * noise_samples.size();
-    ++i_dmrs;
-  };
-
-  // Process each OFDM containing DM-RS.
-  dmrs_mask.for_each(first_hop_symbol, last_hop_symbol, estimate_noise_symbol);
-
-  // Return 0 if the resultant noise is NaN or infinity.
-  return std::isnormal(noise_energy) ? noise_energy : 0;
-}
 
 __attribute__((noinline))
 static void
@@ -892,3 +744,56 @@ simd_vector_interpolate(span<cbf16_t> out, span<const cf_t> first, span<const cf
     out[i] = to_cbf16(first[i] + (second[i] - first[i]) * weight);
   }
 }
+
+
+void port_channel_estimator_average_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
+{
+  unsigned nof_tx_layers = args.dmrs_patterns.size();
+  unsigned nof_lse_symbols = 1;
+  if (td_interpolation_strategy != port_channel_estimator_td_interpolation_strategy::average) {
+    nof_lse_symbols = args.nof_dmrs_symbols;
+  }
+
+  args.freq_response.resize(
+      {.nof_subc    = static_cast<unsigned>(args.dmrs_patterns.front().rb_mask.count() * NOF_SUBCARRIERS_PER_RB),
+       .nof_symbols = nof_lse_symbols,
+       .nof_slices  = nof_tx_layers});
+
+  // Process pilot estimates in the frequency domain for each layer.
+  for (unsigned i_layer = 0; i_layer != nof_tx_layers; ++i_layer) {
+    const layer_dmrs_pattern& pattern = args.dmrs_patterns[i_layer];
+
+    // Select hop resource block mask.
+    const auto& hop_rb_mask = (args.hop == 0) ? pattern.rb_mask : pattern.rb_mask2;
+
+    // Prepare frequency domain interpolation.
+    interpolator::configuration interpolator_cfg = configure_interpolator(pattern.re_pattern);
+
+    // Calculate total scaling accounting for the symbol accumulation and the DM-RS-to-data gain.
+    float total_scaling = 1.0F / args.beta_scaling;
+    if (td_interpolation_strategy == port_channel_estimator_td_interpolation_strategy::average) {
+      total_scaling /= static_cast<float>(args.nof_dmrs_symbols);
+    }
+
+    // Apply frequency domain processing.
+    for (unsigned i_symbol = 0; i_symbol != nof_lse_symbols; ++i_symbol) {
+      ocuduvec::sc_prod(args.pilots_lse_view.get_symbol(i_symbol, i_layer),
+                        args.pilots_lse_view.get_symbol(i_symbol, i_layer),
+                        total_scaling);
+
+      // Apply a smoothing strategy to remove some noise ("high-time" components). Note that pilots_lse and
+      // filtered_pilots_lse have some empty space at both sides, which we include with the enlarged version.
+      apply_fd_smoothing(args.enlarged_filtered_pilots_lse.get_symbol(i_symbol, i_layer),
+                         enlarged_pilots_lse.get_symbol(i_symbol, i_layer),
+                         hop_rb_mask.count(),
+                         interpolator_cfg.stride,
+                         fd_smoothing_strategy);
+
+      // Interpolate frequency response for this symbol.
+      freq_interpolator->interpolate(args.freq_response.get_symbol(i_symbol, i_layer),
+                                     args.filtered_pilots_lse_view.get_symbol(i_symbol, i_layer),
+                                     interpolator_cfg);
+    }
+  }
+}
+

@@ -106,6 +106,7 @@ static uint64_t                           nof_threads                 = max_nof_
 static uint64_t                           batch_size_per_thread       = 100;
 static std::string                        selected_profile_name       = "default";
 static std::string                        ldpc_decoder_type           = "auto";
+static std::string                        channel_estimator_algo      = "cpu";
 static std::string                        rate_dematcher_type         = "auto";
 static bool                               enable_evm                  = false;
 static benchmark_modes                    benchmark_mode              = benchmark_modes::throughput_total;
@@ -217,6 +218,7 @@ static void usage(const char* prog)
              to_string(benchmark_modes::throughput_thread));
   fmt::print("\t\t {:<20}Prints all the previous modes.\n", to_string(benchmark_modes::all));
   fmt::print("\t-R Repetitions [Default {}]\n", nof_repetitions);
+  fmt::print("\t-c PUSCH channel estimator algorithm [Default {}]\n", channel_estimator_algo);
   fmt::print("\t-B Batch size [Default {}]\n", batch_size_per_thread);
   fmt::print("\t-T Number of threads [Default {}, max. {}]\n", nof_threads, max_nof_threads);
   fmt::print("\t-t Number of concurrent PUSCH decoder threads. Set to zero for no concurrency. [Default {}, max. {}]\n",
@@ -277,10 +279,13 @@ static std::string capture_eal_args(int* argc, char*** argv)
 static int parse_args(int argc, char** argv)
 {
   int opt = 0;
-  while ((opt = getopt(argc, argv, "R:T:t:B:D:M:EP:m:wxyz:h")) != -1) {
+  while ((opt = getopt(argc, argv, "R:T:t:B:D:M:EP:m:wxyz:c:h")) != -1) {
     switch (opt) {
       case 'R':
         nof_repetitions = std::strtol(optarg, nullptr, 10);
+        break;
+      case 'c':
+        channel_estimator_algo = std::string(optarg);
         break;
       case 'T':
         nof_threads = std::min(max_nof_threads, static_cast<unsigned>(std::strtol(optarg, nullptr, 10)));
@@ -546,9 +551,13 @@ static std::shared_ptr<pusch_processor_factory> create_pusch_processor_factory()
       create_time_alignment_estimator_dft_factory(dft_factory);
   TESTASSERT(ta_estimator_factory, "Cannot create TA estimator factory.");
 
-  // Create port channel estimator factory.
+  // Create port channel estimator factory (metal_mmse uses the v1 fixed statistics:
+  // tau_rms = 0.37 us, f_d = 0 Hz, 3-PRB blocks).
+  const port_channel_estimator_algorithm ce_algo =
+      (channel_estimator_algo == "metal_mmse") ? port_channel_estimator_algorithm::metal_mmse
+                                               : port_channel_estimator_algorithm::cpu;
   std::shared_ptr<port_channel_estimator_factory> port_chan_estimator_factory =
-      create_port_channel_estimator_factory_sw(ta_estimator_factory);
+      create_port_channel_estimator_factory_sw(ta_estimator_factory, ce_algo);
   TESTASSERT(port_chan_estimator_factory);
 
   // Create DM-RS for PUSCH channel estimator.

@@ -24,4 +24,12 @@ enum class port_channel_estimator_td_interpolation_strategy {
   average
 };
 
+/// Port channel estimator algorithm.
+enum class port_channel_estimator_algorithm {
+  /// Classical estimator: LS + FD smoothing + TD strategy (default, all platforms).
+  cpu = 0,
+  /// 2D time-frequency block MMSE estimator, Metal-accelerated (Apple Silicon).
+  metal_mmse
+};
+
 } // namespace ocudu

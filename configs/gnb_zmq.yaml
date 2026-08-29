@@ -21,7 +21,7 @@ cu_cp:
 
 ru_sdr:
   device_driver: zmq                # The RF driver name.
-  device_args: tx_port=tcp://*:2000,rx_port=tcp://192.168.64.2:2001,base_srate=11.52e6 # Optionally pass arguments to the selected RF driver.
+  device_args: tx_port=tcp://*:2000,rx_port=tcp://198.19.0.2:2001,base_srate=11.52e6 # Optionally pass arguments to the selected RF driver.
   srate: 11.52                      # RF sample rate might need to be adjusted according to selected bandwidth.
   tx_gain: 0                        # Transmit gain of the RF might need to adjusted to the given situation.
   rx_gain: 0                        # Receive gain of the RF might need to adjusted to the given situation.
@@ -73,4 +73,5 @@ pcap:
 
 expert_phy:
   pusch_ldpc_decoder_type:  auto
-  pusch_dec_max_iterations: 6 
+  pusch_dec_max_iterations: 6
+  pusch_channel_estimator_algo: cpu

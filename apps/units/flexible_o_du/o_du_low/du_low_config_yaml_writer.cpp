@@ -73,6 +73,10 @@ static void fill_du_low_expert_section(YAML::Node node, const du_low_unit_expert
   node["pusch_channel_estimator_fd_strategy"]      = config.pusch_channel_estimator_fd_strategy;
   node["pusch_channel_estimator_td_strategy"]      = config.pusch_channel_estimator_td_strategy;
   node["pusch_channel_estimator_cfo_compensation"] = config.pusch_channel_estimator_cfo_compensation;
+  node["pusch_channel_estimator_algo"]              = config.pusch_channel_estimator_algo;
+  node["pusch_channel_estimator_mmse_tau_rms_us"]   = config.pusch_channel_estimator_mmse_tau_rms_us;
+  node["pusch_channel_estimator_mmse_fd_hz"]        = config.pusch_channel_estimator_mmse_fd_hz;
+  node["pusch_channel_estimator_mmse_block_prb"]    = config.pusch_channel_estimator_mmse_block_prb;
   node["pusch_channel_equalizer_algorithm"]        = config.pusch_channel_equalizer_algorithm;
   node["max_request_headroom_slots"]               = config.nof_slots_request_headroom;
   node["allow_request_on_empty_uplink_slot"]       = config.allow_request_on_empty_uplink_slot;

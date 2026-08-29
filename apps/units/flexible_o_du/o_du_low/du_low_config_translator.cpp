@@ -54,6 +54,18 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
       du_low.expert_phy_cfg.pusch_channel_estimator_td_strategy;
   upper_phy_factory_config.pusch_channel_estimator_compensate_cfo =
       du_low.expert_phy_cfg.pusch_channel_estimator_cfo_compensation;
+  upper_phy_factory_config.pusch_channel_estimator_algo = du_low.expert_phy_cfg.pusch_channel_estimator_algo;
+  upper_phy_factory_config.pusch_channel_estimator_mmse_tau_rms_us =
+      du_low.expert_phy_cfg.pusch_channel_estimator_mmse_tau_rms_us;
+  upper_phy_factory_config.pusch_channel_estimator_mmse_fd_hz =
+      du_low.expert_phy_cfg.pusch_channel_estimator_mmse_fd_hz;
+  upper_phy_factory_config.pusch_channel_estimator_mmse_block_prb =
+      du_low.expert_phy_cfg.pusch_channel_estimator_mmse_block_prb;
+#if !defined(__APPLE__)
+  // The Metal MMSE estimator is Apple Silicon only: on other platforms the expert knob is
+  // forced back to the classical estimator (same policy as the LDPC decoder type).
+  upper_phy_factory_config.pusch_channel_estimator_algo = "cpu";
+#endif
   upper_phy_factory_config.pusch_channel_equalizer_algorithm = du_low.expert_phy_cfg.pusch_channel_equalizer_algorithm;
   upper_phy_factory_config.ldpc_decoder_iterations           = du_low.expert_phy_cfg.pusch_decoder_max_iterations;
   upper_phy_factory_config.ldpc_decoder_early_stop           = du_low.expert_phy_cfg.pusch_decoder_early_stop;

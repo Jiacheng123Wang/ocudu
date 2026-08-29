@@ -56,6 +56,7 @@ static pusch_mcs_table              mcs_table                        = pusch_mcs
 static sch_mcs_index                mcs_index                        = 20;
 static bool                         enable_dc_position               = false;
 static std::string                  pxsch_type                       = "auto";
+static std::string                  channel_estimator_algo           = "cpu";
 static std::string                  eal_arguments                    = "pxsch_bler_test";
 
 namespace {
@@ -237,7 +238,8 @@ private:
                                           use_early_stop,
                                           pxsch_type,
                                           port_channel_estimator_td_interpolation_strategy::average,
-                                          channel_equalizer_algorithm_type::zf);
+                                          channel_equalizer_algorithm_type::zf,
+                                          channel_estimator_algo);
     report_fatal_error_if_not(pusch_proc_factory, "Failed to create PUSCH processor factory.");
 
     // Create resource grid factory.
@@ -501,13 +503,14 @@ static void usage(std::string_view prog)
   fmt::print("\t-T       PxSCH implementation type [auto,acc100][Default {}]\n", pxsch_type);
   fmt::print("\teal_args EAL arguments\n");
   fmt::print("\t-v       Toggle preliminary stats. [Default {}]\n", show_stats);
+  fmt::print("\t-c       PUSCH channel estimator algorithm [Default {}]\n", channel_estimator_algo);
   fmt::print("\t-h       Print this message.\n");
 }
 
 static void parse_args(int argc, char** argv)
 {
   int opt = 0;
-  while ((opt = getopt(argc, argv, "C:F:S:N:P:L:R:B:M:m:DT:vh")) != -1) {
+  while ((opt = getopt(argc, argv, "C:F:S:N:P:L:R:B:M:m:DT:vch")) != -1) {
     switch (opt) {
       case 'C':
         if (optarg != nullptr) {
@@ -521,6 +524,11 @@ static void parse_args(int argc, char** argv)
         break;
       case 'D':
         enable_dc_position = !enable_dc_position;
+        break;
+      case 'c':
+        if (optarg != nullptr) {
+          channel_estimator_algo = std::string(optarg);
+        }
         break;
       case 'S':
         sinr_dB = std::strtof(optarg, nullptr);

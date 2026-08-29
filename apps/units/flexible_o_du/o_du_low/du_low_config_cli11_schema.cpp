@@ -185,6 +185,12 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
     }
     return "Invalid PUSCH channel estimator time-domain strategy. Accepted values [average,interpolate]";
   };
+  auto pusch_channel_estimator_algo_method_check = [](const std::string& value) -> std::string {
+    if ((value == "cpu") || (value == "metal_mmse")) {
+      return {};
+    }
+    return "Invalid PUSCH channel estimator algorithm. Accepted values [cpu,metal_mmse]";
+  };
   auto pusch_channel_equalizer_algorithm_method_check = [](const std::string& value) -> std::string {
     if ((value == "zf") || (value == "mmse")) {
       return {};
@@ -258,6 +264,30 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              expert_phy_params.pusch_channel_estimator_cfo_compensation,
              "PUSCH channel estimator CFO compensation.")
       ->capture_default_str();
+  add_option(app,
+             "--pusch_channel_estimator_algo",
+             expert_phy_params.pusch_channel_estimator_algo,
+             "PUSCH channel estimator algorithm: cpu and metal_mmse (Apple Silicon only).")
+      ->capture_default_str()
+      ->check(pusch_channel_estimator_algo_method_check);
+  add_option(app,
+             "--pusch_channel_estimator_mmse_tau_rms_us",
+             expert_phy_params.pusch_channel_estimator_mmse_tau_rms_us,
+             "MMSE channel estimator: fixed RMS delay spread in microseconds (v1 constant).")
+      ->capture_default_str()
+      ->check(CLI::NonNegativeNumber);
+  add_option(app,
+             "--pusch_channel_estimator_mmse_fd_hz",
+             expert_phy_params.pusch_channel_estimator_mmse_fd_hz,
+             "MMSE channel estimator: fixed maximum Doppler shift in hertz (v1 constant).")
+      ->capture_default_str()
+      ->check(CLI::NonNegativeNumber);
+  add_option(app,
+             "--pusch_channel_estimator_mmse_block_prb",
+             expert_phy_params.pusch_channel_estimator_mmse_block_prb,
+             "MMSE channel estimator: time-frequency block size in PRBs (1..3).")
+      ->capture_default_str()
+      ->check(CLI::Range(1, 3));
   add_option(app,
              "--pusch_channel_equalizer_algorithm",
              expert_phy_params.pusch_channel_equalizer_algorithm,

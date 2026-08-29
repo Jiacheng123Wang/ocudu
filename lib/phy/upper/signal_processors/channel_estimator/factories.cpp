@@ -7,6 +7,11 @@
 #include "ocudu/adt/format.h"
 #include "ocudu/phy/support/support_factories.h"
 
+#if defined(OCUDU_METAL_CHEST)
+#include "metal/channel_statistics_estimator.h"
+#include "metal/port_channel_estimator_metal_mmse_impl.h"
+#endif // OCUDU_METAL_CHEST
+
 using namespace ocudu;
 
 namespace {
@@ -14,10 +19,23 @@ namespace {
 class port_channel_estimator_factory_sw : public port_channel_estimator_factory
 {
 public:
-  explicit port_channel_estimator_factory_sw(std::shared_ptr<time_alignment_estimator_factory> ta_estimator_factory_) :
-    ta_estimator_factory(std::move(ta_estimator_factory_))
+  explicit port_channel_estimator_factory_sw(std::shared_ptr<time_alignment_estimator_factory> ta_estimator_factory_,
+                                             port_channel_estimator_algorithm algo_,
+                                             float                            mmse_tau_rms_s_,
+                                             float                            mmse_fd_hz_,
+                                             unsigned                         mmse_block_prb_) :
+    ta_estimator_factory(std::move(ta_estimator_factory_)),
+    algo(algo_),
+    mmse_tau_rms_s(mmse_tau_rms_s_),
+    mmse_fd_hz(mmse_fd_hz_),
+    mmse_block_prb(mmse_block_prb_)
   {
     ocudu_assert(ta_estimator_factory, "Invalid TA estimator factory.");
+#if !defined(OCUDU_METAL_CHEST)
+    if (algo == port_channel_estimator_algorithm::metal_mmse) {
+      report_error("The 'metal_mmse' channel estimator is only available on Apple Silicon macOS builds.");
+    }
+#endif
   }
 
   std::unique_ptr<port_channel_estimator>
@@ -26,6 +44,19 @@ public:
          bool                                             compensate_cfo) override
   {
     std::unique_ptr<interpolator> interp = create_interpolator();
+
+    if (algo == port_channel_estimator_algorithm::metal_mmse) {
+#if defined(OCUDU_METAL_CHEST)
+      return std::make_unique<port_channel_estimator_metal_mmse_impl>(
+          std::move(interp),
+          ta_estimator_factory->create(),
+          std::make_shared<channel_statistics_estimator_fixed>(mmse_tau_rms_s, mmse_fd_hz),
+          mmse_block_prb,
+          compensate_cfo);
+#else
+      return nullptr;
+#endif
+    }
 
     return std::make_unique<port_channel_estimator_average_impl>(std::move(interp),
                                                                  ta_estimator_factory->create(),
@@ -36,12 +67,21 @@ public:
 
 private:
   std::shared_ptr<time_alignment_estimator_factory> ta_estimator_factory;
+  port_channel_estimator_algorithm                  algo;
+  float                                             mmse_tau_rms_s;
+  float                                             mmse_fd_hz;
+  unsigned                                          mmse_block_prb;
 };
 
 } // namespace
 
 std::shared_ptr<port_channel_estimator_factory>
-ocudu::create_port_channel_estimator_factory_sw(std::shared_ptr<time_alignment_estimator_factory> ta_estimator_factory)
+ocudu::create_port_channel_estimator_factory_sw(std::shared_ptr<time_alignment_estimator_factory> ta_estimator_factory,
+                                                port_channel_estimator_algorithm algo,
+                                                float                            mmse_tau_rms_s,
+                                                float                            mmse_fd_hz,
+                                                unsigned                         mmse_block_prb)
 {
-  return std::make_shared<port_channel_estimator_factory_sw>(std::move(ta_estimator_factory));
+  return std::make_shared<port_channel_estimator_factory_sw>(
+      std::move(ta_estimator_factory), algo, mmse_tau_rms_s, mmse_fd_hz, mmse_block_prb);
 }

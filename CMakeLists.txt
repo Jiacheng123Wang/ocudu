@@ -30,6 +30,15 @@ option(ENABLE_METAL_LDPC "Enable the Metal GPU LDPC codec (Apple Silicon only)" 
 # channel_coding/CMakeLists.txt) so toggling the option only rebuilds the PHY
 # coding libraries, not the whole project.
 
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    set(METAL_CHEST_DEFAULT ON)
+else()
+    set(METAL_CHEST_DEFAULT OFF)
+endif()
+option(ENABLE_METAL_CHEST "Enable the Metal MMSE channel estimator (Apple Silicon only)" ${METAL_CHEST_DEFAULT})
+# Note: OCUDU_METAL_CHEST is defined per-target (see signal_processors/CMakeLists.txt).
+
+
 if(APPLE AND NOT TARGET atomic)
     # macOS does not provide a separate libatomic. Some targets link the
     # interface library named "atomic"; add an empty one so CMake treats it
