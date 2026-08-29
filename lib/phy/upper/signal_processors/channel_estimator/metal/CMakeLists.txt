@@ -38,7 +38,7 @@ target_compile_definitions(ocudu_channel_estimator_metal PUBLIC
     OCUDU_METAL_CHEST
     OCUDU_MMSE_METALLIB_PATH="${MMSE_METALLIB}")
 add_dependencies(ocudu_channel_estimator_metal ocudu_mmse_metallib)
-target_link_libraries(ocudu_channel_estimator_metal PUBLIC ocuduvec ocudu_phy_support)
+target_link_libraries(ocudu_channel_estimator_metal PUBLIC ocuduvec ocudu_phy_support ocudulog)
 target_link_libraries(ocudu_channel_estimator_metal PRIVATE "-framework Metal" "-framework Foundation")
 
 # ---- Unit-level validation (inversion golden + GPU/CPU seam + NMSE vs the cpu estimator) ----

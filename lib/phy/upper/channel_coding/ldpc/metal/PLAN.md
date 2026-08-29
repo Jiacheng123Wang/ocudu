@@ -1306,6 +1306,33 @@ norm ∈ {0.45, 0.5, 0.6, 0.7, 1.0} × sat ∈ {0, 64, 127}：
   轮骨架,但用每行 2-min 压缩代替逐边消息、用信道 LLR 锚点+外推和代替
   侵蚀更新,详见 ocudu_nms_flooding_decoder.metal 头注释。
 
+## 4.16 MMSE-CE 经验回灌:引擎审计与修复(2026-08-30)
+
+信道估计 metal_mmse 腿 E2E 全通后(CE PLAN §7.0.10-7.0.14),按同一套方法审计
+LDPC 引擎的 GPU 等待问题:
+
+**已具备的好实践(无需改)**:
+- per-family 共享 device/queue/pipeline(`algo_resources_t` 单例)——CE 的 (D) 项这里已落地;
+- `.metallib` 预编译 + `resolve_metallib_path` **宏路径优先**(exe 旁/cwd 仅回退)——CE 踩过的
+  "build 目录旧副本遮蔽源树" 坑这里天然免疫;
+- 静态绑定一次性 setBuffer,热循环仅 setBytes+dispatch;单 command buffer 单次 wait。
+
+**发现并修复**:
+1. **无首提交 warm-up**(同 CE 的 B 缺陷):pipeline 创建 ≠ 首次 dispatch 的惰性编译;
+   首个真实 decode(实链=Msg3)会在槽内付 ~ms 级 CPU 侧首提税。修复:`init()` 末尾用
+   引擎生命周期的 4KB 对齐哑 LLR 缓冲跑一次 `max_iter=1` 的哑解码(输出参数置空),
+   把税移到(按 TB 尺寸惰性的)槽构造期。单测 decode 对拍(disagreements 0)不受影响。
+2. **NSLog 直打 console** → `ocudulog` PHY 通道(加载路径降 debug,失败类升 error),
+   与 gnb 日志系统统一。
+
+**审计结论(不改,记录在案)**:
+- layered CN kernel 并行度 = z 个 threadgroup × 32 线程,小 z(如 Msg3 z=2)时单层仅
+  64 线程——但每线程只处理 ~3 条边,瓶颈是 dispatch 链而非 CE weights kernel 那类
+  长串行 FMA;实链实测 9-71 µs 无异常。若未来小 TB 密集场景出现预算压力,
+  `layered_persistent`(单 dispatch 常驻)是现成的缓解路径。
+- 首个 decode 的**槽构造**(H 矩阵/CSR 构建,CPU 侧)仍按 (BG,Z) 惰性发生——一次性
+  成本,当前可接受;预留:启动期预构建常用 (BG,Z) 槽。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`

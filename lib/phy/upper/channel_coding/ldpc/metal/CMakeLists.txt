@@ -28,7 +28,7 @@ target_compile_definitions(ocudu_ldpc_metal PRIVATE
     OCUDU_METAL_ASYNC_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_nms_async_decoder.metallib"
     OCUDU_METAL_LLS_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_lls_decoder.metallib")
 # The adapter generates the packed H matrix from the ocudu ldpc_graph implementation.
-target_link_libraries(ocudu_ldpc_metal PUBLIC ocudu_ldpc)
+target_link_libraries(ocudu_ldpc_metal PUBLIC ocudu_ldpc ocudulog)
 target_link_libraries(ocudu_ldpc_metal PRIVATE "-framework Metal" "-framework Foundation")
 
 # ---- Unit-level validation binary (golden H check + decode parity vs the CPU decoder) ----

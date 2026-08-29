@@ -5,10 +5,10 @@
 #include "../port_channel_estimator_helpers.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/sc_prod.h"
+#include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/math/math_utils.h"
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -68,9 +68,9 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   engine       = std::make_unique<metal::mmse_engine>();
   engine_ready = (std::getenv("OCUDU_MMSE_NOGPU") == nullptr) && engine->init();
   if (std::getenv("OCUDU_MMSE_DBG") != nullptr) {
-    std::fprintf(stderr, "[mmse_ce] engine %s (NOGPU=%s)\n",
+    logger.debug("[mmse_ce] engine {} (NOGPU={})",
                  engine_ready ? "READY - GPU hot path active" : "UNAVAILABLE - CPU fallback path",
-                 std::getenv("OCUDU_MMSE_NOGPU") != nullptr ? "1" : "0");
+                 std::getenv("OCUDU_MMSE_NOGPU") != nullptr ? 1 : 0);
   }
   gpu_a        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS);
   gpu_r_hp     = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_OUT * MAX_BLOCK_PILOTS);
@@ -459,8 +459,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         float py = 0.0F, pw = 0.0F;
         for (unsigned j = 0; j != 2 * L; ++j) py += y_block[j] * y_block[j];
         for (unsigned i = 0; i != nout * L; ++i) pw += w_mat[i] * w_mat[i];
-        std::fprintf(stderr, "[dbgblk] b=%u nout=%u L=%u sigma2=%.4f |y|2=%.3f |W|2=%.3f\n",
-                     b, nout, L, sigma2, py, pw);
+        logger.debug("[dbgblk] b={} nout={} L={} sigma2={:.4f} |y|2={:.3f} |W|2={:.3f}", b, nout, L, sigma2, py, pw);
       }
       // h = W . y (real weights, complex vector): two real matrix-vector products.
       std::fill(h_block.begin(), h_block.begin() + 2 * nout, 0.0F);
@@ -514,9 +513,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   if (time_en) {
     const auto t_finish = steady_clock::now();
     const auto us       = [](auto d) { return std::chrono::duration<double, std::micro>(d).count(); };
-    std::fprintf(stderr,
-                 "[mmse_time] prb=%u npt=%u L=%u n_std=%u gpu=%d | sigma2=%.1fus corr_std=%.1fus "
-                 "gpu_path=%.1fus (gpu_wait=%.1fus) cpu_blocks=%.1fus finish=%.1fus | total=%.1fus\n",
+    logger.debug("[mmse_time] prb={} npt={} L={} n_std={} gpu={} | sigma2={:.1f}us corr_std={:.1f}us "
+                 "gpu_path={:.1f}us (gpu_wait={:.1f}us) cpu_blocks={:.1f}us finish={:.1f}us | total={:.1f}us",
                  nof_prb,
                  npt,
                  L_std,

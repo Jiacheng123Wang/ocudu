@@ -10,11 +10,13 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
 
 #include "ocudu_metal_decoder_engine.h"
+#include "ocudu/ocudulog/ocudulog.h"
 
 namespace ocudu {
 namespace metal {
@@ -111,6 +113,9 @@ struct engine_impl_t {
   // GPU-side duration of the last decode (0 when unavailable), for the
   // latency-benchmark breakdown: wall - gpu = CPU-side fixed overhead.
   double   last_gpu_us = 0.0;
+  // 4KB-aligned dummy LLR buffer used by the init-time warm-up decode (engine lifetime;
+  // the zero-copy wrapper cache keeps a valid entry for it).
+  void* warmup_llr = nullptr;
 };
 
 namespace {
@@ -213,7 +218,7 @@ algo_resources_t* get_algo_resources(decoder_engine::algo mode)
   algo_resources_t res;
   res.device = MTLCreateSystemDefaultDevice();
   if (res.device == nil) {
-    NSLog(@"ocudu Metal LDPC: no Metal device available");
+    ocudulog::fetch_basic_logger("PHY").error("Metal LDPC: no Metal device available");
     return nullptr;
   }
   res.queue = [res.device newCommandQueue];
@@ -247,28 +252,34 @@ algo_resources_t* get_algo_resources(decoder_engine::algo mode)
   }
   NSString* lib_path = resolve_metallib_path(lib_path_macro, lib_name);
   if (lib_path == nil) {
-    NSLog(@"ocudu Metal LDPC: pre-compiled shader library '%s' not found (searched the configure-time "
-          @"path, next to the executable, and the working directory)",
-          lib_name);
+    ocudulog::fetch_basic_logger("PHY").error(
+        "Metal LDPC: pre-compiled shader library '{}' not found (searched the configure-time path, next "
+        "to the executable, and the working directory)",
+        lib_name);
     return nullptr;
   }
   NSError*       error   = nil;
   id<MTLLibrary> library = [res.device newLibraryWithURL:[NSURL fileURLWithPath:lib_path] error:&error];
   if (library == nil) {
-    NSLog(@"ocudu Metal LDPC: failed to load the pre-compiled shader library %@: %@", lib_path, error);
+    ocudulog::fetch_basic_logger("PHY").error("Metal LDPC: failed to load the pre-compiled shader library {}: {}",
+                                              lib_path.UTF8String,
+                                              error != nil ? error.localizedDescription.UTF8String : "nil error");
     return nullptr;
   }
-  NSLog(@"ocudu Metal LDPC: loaded pre-compiled shader library %@", lib_path);
+  ocudulog::fetch_basic_logger("PHY").debug("Metal LDPC: loaded pre-compiled shader library {}",
+                                            lib_path.UTF8String);
 
   auto make_pipeline = [&](id<MTLComputePipelineState> __strong* out, const char* name) -> bool {
     id<MTLFunction> fn = [library newFunctionWithName:[NSString stringWithUTF8String:name]];
     if (fn == nil) {
-      NSLog(@"ocudu Metal LDPC: kernel '%s' not found in the shader library", name);
+      ocudulog::fetch_basic_logger("PHY").error("Metal LDPC: kernel '{}' not found in the shader library", name);
       return false;
     }
     *out = [res.device newComputePipelineStateWithFunction:fn error:&error];
     if (*out == nil) {
-      NSLog(@"ocudu Metal LDPC: pipeline '%s' failed: %@", name, error);
+      ocudulog::fetch_basic_logger("PHY").error("Metal LDPC: pipeline '{}' failed: {}",
+                                                name,
+                                                error != nil ? error.localizedDescription.UTF8String : "nil error");
       return false;
     }
     return true;
@@ -313,7 +324,9 @@ decoder_engine::~decoder_engine()
 {
   engine_impl_t* engine = static_cast<engine_impl_t*>(impl);
   if (engine != nullptr) {
+    // Release the zero-copy wrappers BEFORE freeing the warm-up buffer they reference.
     engine->buffer_cache.clear();
+    std::free(engine->warmup_llr);
     delete engine;
     impl = nullptr;
   }
@@ -452,6 +465,17 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
   } else {
     engine->buf_c2v = [engine->device newBufferWithLength:engine->layered_info.no_edges * sizeof(uint16_t)
                                                   options:MTLResourceStorageModePrivate];
+  }
+
+  // Warm-up dispatch: the first dispatch of each pipeline pays the Metal driver's lazy
+  // compile / first command-buffer commit (~ms, CPU-side - inside the slot if left to the
+  // first real decode). A 1-iteration dummy decode here moves that cost to the (lazy,
+  // per-TB-size) slot construction. Same pattern as the MMSE channel-estimator engine.
+  if (::posix_memalign(&engine->warmup_llr, 4096,
+                       static_cast<size_t>(engine->n_aligned) * sizeof(uint16_t)) == 0) {
+    std::memset(engine->warmup_llr, 0, static_cast<size_t>(engine->n_aligned) * sizeof(uint16_t));
+    // Outputs are skipped (nullptr hard-bits / error-count arguments).
+    (void)decode(engine->warmup_llr, nullptr, /*max_iter=*/1, nullptr);
   }
 
   return true;
@@ -712,8 +736,8 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
   [cmd_buf commit];
   [cmd_buf waitUntilCompleted];
   if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
-    NSLog(@"ocudu Metal LDPC: command buffer failed with status %lu",
-          static_cast<unsigned long>(cmd_buf.status));
+    ocudulog::fetch_basic_logger("PHY").error("Metal LDPC: command buffer failed with status {}",
+                                              static_cast<unsigned long>(cmd_buf.status));
     return -1;
   }
   // GPU-side duration (Apple Silicon: valid for compute command buffers; 0 when unavailable).

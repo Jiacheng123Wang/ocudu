@@ -714,6 +714,52 @@ cwd 仅作回退）+ CMake custom target `copy_if_different` 让 build 目录副
 36 PRB）从 ~930 µs 降至 **~180–220 µs**，管线总量 ~310 µs，15 kHz 预算余量 ~3×，
 30 kHz（0.5 ms）也可过。待实链复测确认（`OCUDU_MMSE_DBG=1 OCUDU_MMSE_TIME=1`）。
 
+### 7.0.14 E2E 第三轮:UE 成功接入并取得 IP(2026-08-30)
+
+**结果**:metal_mmse 腿端到端全通——UE attach → RRC Connected → **PDU Session
+Establishment successful, IP 10.45.0.31** → NR reconfiguration。gnb 侧 PUSCH
+**MCS 7、28.5k brate、14 ok / 0 nok(0%)**,`rsrp ovl` 仅出现在首个表格行。
+
+**探针(15 样本)**:
+
+| 阶段 | mean | median | min | max |
+|---|---|---|---|---|
+| ul_pipeline | 612.8 µs | **407.0 µs** | 164.0 | 3392.0 |
+| ul_channel_estimation | 496.3 µs | **293.2 µs** | 96.2 | 3249.4(首槽) |
+| ul_equalization_demod | 23.2 µs | 22.7 µs | 4.9 | 32.4 |
+| ul_ldpc_decode | 33.6 µs | 27.0 µs | 9.0 | 71.0 |
+
+CE 稳态 ~200 µs/槽(3 DMRS 符号、36 PRB,`[mmse_time]` 行 total 180-255 µs),
+median 293 µs 含小分配/边缘块差异;管线 median 407 µs < 1 ms 预算,余量 ~2.5×。
+与修复前(5.85 ms 稳态、100% ovl)相比**~20× 改善**;与 cpu 基线(63.6 µs)仍差 ~4.6×,
+为算法代价(2D MMSE 全网格权重 + GPU 往返),30 kHz SCS 前需再做 (C)/(D)。
+
+**遗留观察(不阻塞)**:首槽一次性 ~3.1 ms CPU 侧开销(sudo/执行器线程首个 GPU 提交,
+`gpu_wait` 仅 24 µs,即非 kernel 时间;构造期 warm-up 已覆盖单测进程内场景)。
+仅发生在 attach 首槽,nok=0,不影响业务——列入 (D) 引擎单例与启动期预热议题。
+
+### 7.0.15 经验教训整理(MMSE CE 全周期,供后续 Metal 组件复用)
+
+1. **GPU 等待 ≈ occupancy 问题,不是算力问题**。同数据规模下 128 线程串行链
+   (765 µs)与 27k 线程(25 µs)差 30×;任何 kernel 先问"线程数撑不撑得起",
+   再问 FLOP。warp 内访存布局(coalesce/broadcast)同样重要。
+2. **首次 dispatch 有 ~ms 级惰性编译税**,pipeline 创建≠编译;每个引擎实例构造期
+   用真实缓冲区跑一次哑提交(warm-up),把税移出槽内路径。
+3. **metallib 加载路径必须权威化**:build 目录旧副本曾通过 mainBundle 回退遮蔽源树
+   新产物(A 修复一度"无效")。对策:烘焙绝对路径为首选 + copy_if_different 同步
+   build 副本 + 加载路径日志(debug 级)。
+4. **诊断输出走 ocudulog,不走 console**:`[mmse_*]`/`[dbgblk]` 全部迁入 PHY 通道
+   debug 级(env 开关保留作重负载诊断的二次闸门);引擎错误走 error 级。gnb console
+   从此只显示业务输出。
+5. **探针 samples=1 会误导**:单样本恰采首槽(含一次性税)曾把 5.85 ms 误读为稳态;
+   分相计时(`OCUDU_MMSE_TIME`)与中位数口径缺一不可。
+6. **改变 kernel 并行化时保持累加顺序** → 与 CPU 参考逐位一致(bit-exact),NMSE 与
+   golden 对拍零漂移,回归零成本。
+7. **单测夹具必须匹配真实索引空间**(CRB 偏移 → 栅格宽度 §7.0.9);假栅格过窄的
+   越界读曾以"算法 NaN"的面目出现,浪费多轮排查。
+8. 同方法已回灌 LDPC 引擎(LDPC PLAN §4.16):warm-up 补上、NSLog 迁日志;layered
+   内核小 z 的 dispatch 链特征记录在案,必要时走 persistent 变体。
+
 ### 7.0.8 剩余工作（实验室依赖，列入收尾清单）
 
 - 实链三腿 A/B（ZMQ → RF B200）：`expert_phy --pusch_channel_estimator_algo cpu|metal_mmse`

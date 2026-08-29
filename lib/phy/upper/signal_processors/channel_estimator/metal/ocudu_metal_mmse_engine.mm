@@ -6,6 +6,8 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include "ocudu/ocudulog/ocudulog.h"
+
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -66,8 +68,9 @@ struct mmse_engine_impl {
         if (library != nil) {
           loaded = primary;
         } else {
-          std::fprintf(stderr, "[mmse_engine] primary metallib load failed (%s): %s\n", primary,
-                       err != nil ? err.localizedDescription.UTF8String : "nil error");
+          ocudulog::fetch_basic_logger("PHY").error("MMSE engine: primary metallib load failed ({}): {}",
+                                                    primary,
+                                                    err != nil ? err.localizedDescription.UTF8String : "nil error");
         }
       }
     }
@@ -88,8 +91,8 @@ struct mmse_engine_impl {
         }
       }
     }
-    if (library != nil && std::getenv("OCUDU_MMSE_DBG") != nullptr) {
-      std::fprintf(stderr, "[mmse_engine] metallib loaded from %s\n", loaded != nullptr ? loaded : "?");
+    if (library != nil && loaded != nullptr) {
+      ocudulog::fetch_basic_logger("PHY").debug("MMSE engine: metallib loaded from {}", loaded);
     }
     return library != nil;
   }

@@ -19,6 +19,7 @@
 #include "../port_channel_estimator_average_impl.h"
 #include "channel_statistics_estimator.h"
 #include "ocudu_metal_mmse_engine.h"
+#include "ocudu/ocudulog/ocudulog.h"
 
 namespace ocudu {
 
@@ -130,6 +131,9 @@ private:
   /// Block pilot vector (real/imag interleaved) and block output vector.
   std::array<float, 2 * MAX_BLOCK_PILOTS> y_block;
   std::array<float, 2 * MAX_BLOCK_OUT>    h_block;
+
+  /// PHY log channel (debug-level diagnostics: engine status, per-phase timing).
+  ocudulog::basic_logger& logger = ocudulog::fetch_basic_logger("PHY");
 };
 
 } // namespace ocudu
