@@ -14,7 +14,7 @@
 
 cu_cp:
   amf:
-    addr: 192.168.100.153
+    addr: 192.168.100.127
     port: 38412
     bind_addr: 192.168.100.125
     supported_tracking_areas:
@@ -30,7 +30,7 @@ ru_sdr:
   srate: 7.68
   otw_format: sc12
   tx_gain: 80
-  rx_gain: 60
+  rx_gain: 70
   clock: gpsdo
   sync: internal
 
@@ -45,7 +45,7 @@ cell_cfg:
 
 log:
   filename: /tmp/gnb.log
-  all_level: info
+  all_level: debug
 
 pcap:
   mac_enable: false

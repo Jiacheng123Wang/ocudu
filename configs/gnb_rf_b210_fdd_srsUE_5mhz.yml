@@ -2,7 +2,7 @@
 # Everything else mirrors the ZMQ srsUE config (gnb_zmq.yaml), transport swapped to UHD B210.
 cu_cp:
   amf:
-    addrs: 192.168.100.153
+    addrs: 192.168.100.127
     port: 38412
     bind_addrs: 192.168.100.125
     supported_tracking_areas:
@@ -18,7 +18,7 @@ ru_sdr:
   clock: external
   srate: 7.68
   tx_gain: 80
-  rx_gain: 40
+  rx_gain: 70
 
 cell_cfg:
   dl_arfcn: 361500
@@ -45,8 +45,8 @@ cell_cfg:
     mcs_table: qam64
 
 log:
-  filename: /tmp/gnb_5m.log
-  all_level: info
+  filename: /tmp/gnb.log
+  all_level: debug
 
 pcap:
   mac_enable: false

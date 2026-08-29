@@ -9,9 +9,9 @@
 
 cu_cp:
   amf:
-    addrs: 127.0.1.100
+    addrs: 192.168.100.127
     port: 38412
-    bind_addrs: 127.0.0.1
+    bind_addrs: 192.168.100.125
     supported_tracking_areas:
       - tac: 7
         plmn_list:
@@ -28,7 +28,12 @@ ru_sdr:
   rx_gain: 40
 
 cell_cfg:
-  dl_arfcn: 632628
+#  dl_arfcn: 632628         # 20M BW, onePlus8T only
+#  dl_arfcn: 625920         # 10M BW, iPhone17 only
+#  dl_arfcn: 624000         # 20M BW
+#  dl_arfcn: 621600         # 20M BW 
+  dl_arfcn: 627264         # 20M BW
+
   band: 78
   channel_bandwidth_MHz: 20
   common_scs: 30
@@ -39,12 +44,14 @@ cell_cfg:
 # The USRP clock may introduce some CFO: configure the channel estimator to compensate for it.
 # With good clocks (e.g., external ones), the default setup may provide better performance.
 expert_phy:
-  pusch_channel_estimator_td_strategy: average
-  pusch_channel_estimator_cfo_compensation: true
+#  pusch_channel_estimator_td_strategy: average
+#  pusch_channel_estimator_cfo_compensation: true
+  pusch_ldpc_decoder_type:  auto
+  pusch_dec_max_iterations: 6 
 
 log:
   filename: /tmp/gnb.log
-  all_level: warning
+  all_level: info
 
 pcap:
   mac_enable: false
