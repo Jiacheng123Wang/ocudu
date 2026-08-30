@@ -15,10 +15,12 @@
 #include "ocudu/support/math/math_utils.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace ocudu;
@@ -196,9 +198,13 @@ int main(int argc, char** argv)
   const std::string y_path = argv[2];
   const bool        nogpu  = (argc > 3 && std::string(argv[3]) == "--nogpu");
   std::string       dump_prefix;
+  unsigned          idle_s = 0;
   for (int a = 3; a < argc; ++a) {
     if (std::string(argv[a]) == "--dump" && a + 1 < argc) {
       dump_prefix = argv[a + 1];
+    }
+    if (std::string(argv[a]) == "--idle" && a + 1 < argc) {
+      idle_s = static_cast<unsigned>(std::atoi(argv[a + 1]));
     }
   }
   const bool dump_mode = !dump_prefix.empty();
@@ -266,6 +272,13 @@ int main(int argc, char** argv)
     dump_y.reserve(static_cast<size_t>(n) * nff * 14 * 2);
   }
 
+  // Idle-eviction probe: the worker keep-alive must keep the compiled ANE
+  // program resident, so the first predict after a long idle is NOT the ~13.6 ms
+  // recompile tax (the original E2E first-slot spike).
+  if (idle_s > 0) {
+    std::fprintf(stderr, "idling %u s before the first prediction (keep-alive probe)...\n", idle_s);
+    std::this_thread::sleep_for(std::chrono::seconds(idle_s));
+  }
   for (unsigned i = 0; i != n; ++i) {
     grid_fake grid(nff);
     for (unsigned s = 0; s != 3; ++s) {
@@ -330,6 +343,9 @@ int main(int argc, char** argv)
     (void)sum;
     std::printf("helena predict (n=%zu): p50=%.1fus p95=%.1fus max=%.1fus mean=%.1fus\n",
                 helena_us.size(), p50, p95, mx, acc / helena_us.size());
+  }
+  if (idle_s > 0 && !helena_us.empty()) {
+    std::printf("first predict after %u s idle: %.1f us\n", idle_s, helena_us.front());
   }
   return 0;
 }
