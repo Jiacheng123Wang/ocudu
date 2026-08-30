@@ -6,6 +6,7 @@
 #include "pusch_decoder_buffer_dummy.h"
 #include "pusch_processor_notifier_adaptor.h"
 #include "pusch_processor_validator_impl.h"
+#include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc.h"
@@ -347,6 +348,38 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
   demod_config.enable_transform_precoding  = enable_transform_precoding;
   demod_config.rx_ports                    = pdu.rx_ports;
   demod_config.n_rapid                     = pdu.n_rapid;
+  // G-5 DD-label data hook: dump the received (pre-equalization) resource grid REs
+  // of this PUSCH allocation, ordered [port][symbol][re] as float32 (re,im) pairs.
+  if (const char* dump_dir = std::getenv("OCUDU_HELENA_DUMP_DIR"); dump_dir != nullptr) {
+    static std::atomic<unsigned> rx_idx{0};
+    const unsigned               idx  = rx_idx.fetch_add(1, std::memory_order_relaxed);
+    const auto                   t_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now().time_since_epoch())
+                                           .count();
+    const unsigned               n_prb = rb_mask.count();
+    const unsigned               k0    = rb_mask.find_lowest() * NOF_SUBCARRIERS_PER_RB;
+    char                         path[512];
+    std::snprintf(path, sizeof(path), "%s/rx_%08u_prb%u.f32", dump_dir, idx, n_prb);
+    FILE* f = std::fopen(path, "wb");
+    if (f != nullptr) {
+      std::vector<cf_t> sym(n_prb * NOF_SUBCARRIERS_PER_RB);
+      for (unsigned l = pdu.start_symbol_index; l != pdu.start_symbol_index + pdu.nof_symbols; ++l) {
+        for (unsigned port : pdu.rx_ports) {
+          grid.get(sym, port, l, k0, 1);
+          std::fwrite(sym.data(), sizeof(cf_t), sym.size(), f);
+        }
+      }
+      std::fclose(f);
+    }
+    std::snprintf(path, sizeof(path), "%s/rx_meta.csv", dump_dir);
+    f = std::fopen(path, "a");
+    if (f != nullptr) {
+      std::fprintf(f, "%u,%lld,%u,%u,%u,%u\n", idx, static_cast<long long>(t_us), n_prb,
+                   pdu.nof_symbols, static_cast<unsigned>(pdu.rx_ports.size()), k0);
+      std::fclose(f);
+    }
+  }
+
   dependencies->get_demodulator().demodulate(
       demodulator_buffer, notifier_adaptor.get_demodulator_notifier(), grid, est_results, demod_config);
 }

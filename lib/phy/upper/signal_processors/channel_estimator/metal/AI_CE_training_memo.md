@@ -161,6 +161,13 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
   **下一步**：UL-SCH 的 CRC-OK 决策导向标签钩子（重编码→重调制→H=Y/X̂），
   与 dump 配对成真实信道训练集。
 - **首批真实采集（site1_0831，2026-08-31）**：55,064 个 NN 活跃槽。宽度 25 PRB(18,077)/51 PRB(18,261)/43(7,099)/46(6,267)/50(3,676) + 6-24 PRB 长尾；SNR -2.1~33.9 dB（中位 24.7）；alpha 0.65~1.00（32,299 槽 α=1.00）；全部 52 桶。格式校验通过（prb×12×14×2 float32，幅值 0.10-0.25）。等待 CRC-OK 标签钩子配对。
+- **标签侧钩子（已入库）**：同目录追加三组文件，以 steady-clock 微秒时间戳为
+  配对键：`rx_<idx>_prb<N>.f32`（接收网格，[port][symbol][re] float32 re,im 对，
+  解调前）+ `rx_meta.csv`（idx,t_us,n_prb,n_syms,n_ports,k0）；
+  `tb_<idx>_tbs<N>.bits`（CRC-OK 槽的解码 TB 字节）+ `dd_meta.csv`
+  （idx,t_us,tb_bits,nof_cbs）；CE 侧 meta.csv 新增第 6 列 t_us。
+  离线 sidecar（下一步）：按 t_us 配对 → 重编码/重调制 → H=Y/X̂ → 平滑 →
+  与 CE 输入网格组成真实信道训练集。
 
 ## 9. 坑与教训（持续更新）
 

@@ -213,7 +213,13 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
         std::snprintf(path, sizeof(path), "%s/meta.csv", dump_dir);
         f = std::fopen(path, "a");
         if (f != nullptr) {
-          std::fprintf(f, "%u,%u,%.2f,%.2f,%u\n", idx, nof_prb, snr_db, alpha, engine_nsc);
+          // Last column: steady-clock microseconds - the pairing key with the
+          // decoder-side rx/tb dumps of the same slot.
+          const auto t_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+          std::fprintf(f, "%u,%u,%.2f,%.2f,%u,%lld\n", idx, nof_prb, snr_db, alpha, engine_nsc,
+                       static_cast<long long>(t_us));
           std::fclose(f);
         }
       }

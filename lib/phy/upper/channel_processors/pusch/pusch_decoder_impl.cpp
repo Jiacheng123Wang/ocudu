@@ -489,6 +489,34 @@ void pusch_decoder_impl::join_and_notify()
                to_string(internal_states::decoded),
                to_string(previous_state));
 
+  // G-5 DD-label data hook: dump the decoded TB of CRC-OK slots. Paired with the
+  // CE input dump (meta.csv) and the rx grid dump (rx_*.f32) by the steady-clock
+  // microsecond timestamp.
+  if (stats.tb_crc_ok) {
+    if (const char* dump_dir = std::getenv("OCUDU_HELENA_DUMP_DIR"); dump_dir != nullptr) {
+      static std::atomic<unsigned> dd_idx{0};
+      const unsigned               idx  = dd_idx.fetch_add(1, std::memory_order_relaxed);
+      const auto                   t_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                             std::chrono::steady_clock::now().time_since_epoch())
+                                             .count();
+      char                         path[512];
+      const unsigned tb_bits = transport_block.size() * BITS_PER_BYTE;
+      std::snprintf(path, sizeof(path), "%s/tb_%08u_tbs%u.bits", dump_dir, idx, tb_bits);
+      FILE* f = std::fopen(path, "wb");
+      if (f != nullptr) {
+        std::fwrite(transport_block.data(), 1, transport_block.size(), f);
+        std::fclose(f);
+      }
+      std::snprintf(path, sizeof(path), "%s/dd_meta.csv", dump_dir);
+      f = std::fopen(path, "a");
+      if (f != nullptr) {
+        std::fprintf(f, "%u,%lld,%u,%u\n", idx, static_cast<long long>(t_us), tb_bits,
+                     stats.nof_codeblocks_total);
+        std::fclose(f);
+      }
+    }
+  }
+
   // Finally report decoding result.
   result_notifier->on_sch_data(stats);
 }
