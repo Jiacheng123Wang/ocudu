@@ -83,14 +83,16 @@ def subblock_interleave(bits):
                 continue
             y[idx - nd] = bits[k]
             k += 1
-    return list(y)
+    return [int(v) for v in y]
 
-def rate_match(codeblock_bits, K, Zc, E, rv):
+def rate_match(codeblock_bits, K_transmitted, K_b, Zc, E, rv):
     """codeblock_bits: the full N-bit codeword from the LDPC encoder (punctured
-    prefix first). K: the information bit count (incl. fillers). Returns E bits."""
+    prefix first). K_b: the FULL information bit count incl. the fillers (the
+    parity starts after them); K_transmitted: the info bits without the fillers
+    (the systematic window excludes the trailing fillers). Returns E bits."""
     N = len(codeblock_bits)
-    sys_bits  = codeblock_bits[2 * Zc:2 * Zc + K]
-    par_total = codeblock_bits[2 * Zc + K:]
+    sys_bits  = codeblock_bits[2 * Zc:2 * Zc + K_transmitted]
+    par_total = codeblock_bits[2 * Zc + K_b:]
     half      = len(par_total) // 2
     p0, p1    = par_total[:half], par_total[half:]
     s_i = subblock_interleave(sys_bits)
@@ -128,14 +130,15 @@ def scramble(bits, c_init):
 
 # ---------------- Modulation (38.211 5.1) ----------------
 def modulate(bits, mod):
-    """mod: 1=QPSK 2=16QAM 3=64QAM 4=256QAM (srsRAN modulation_scheme enum order)."""
-    if mod == 1:  # QPSK
+    """mod = the srsRAN modulation_scheme enum value = BITS PER SYMBOL
+    (QPSK=2, QAM16=4, QAM64=6, QAM256=8)."""
+    if mod == 2:  # QPSK
         syms = []
         for i in range(0, len(bits), 2):
             b0, b1 = bits[i], bits[i + 1]
             syms.append(((1 - 2 * b0) + 1j * (1 - 2 * b1)) / np.sqrt(2))
         return syms
-    if mod == 2:  # 16QAM
+    if mod == 4:  # 16QAM
         syms = []
         for i in range(0, len(bits), 4):
             b0, b1, b2, b3 = bits[i:i + 4]
@@ -143,7 +146,7 @@ def modulate(bits, mod):
             im = (1 - 2 * b1) * (2 - (1 - 2 * b3))
             syms.append((re + 1j * im) / np.sqrt(10))
         return syms
-    if mod == 3:  # 64QAM
+    if mod == 6:  # 64QAM
         syms = []
         for i in range(0, len(bits), 6):
             b0, b1, b2, b3, b4, b5 = bits[i:i + 6]
@@ -151,7 +154,7 @@ def modulate(bits, mod):
             im = (1 - 2 * b1) * (4 - (1 - 2 * b3) * (2 - (1 - 2 * b5)))
             syms.append((re + 1j * im) / np.sqrt(42))
         return syms
-    if mod == 4:  # 256QAM
+    if mod == 8:  # 256QAM
         syms = []
         for i in range(0, len(bits), 8):
             b = bits[i:i + 8]
@@ -163,35 +166,18 @@ def modulate(bits, mod):
 
 # ---------------- FD/TD smoothing (reuse the dataset-generator semantics) ----------------
 def smooth_dense(H, n_sc, n_sym, dmrs_mask, prb):
-    """H: [n_sc, 14] complex, valid at the DATA REs (odd subcarriers everywhere +
-    all subcarriers on non-DMRS symbols). Fills the DMRS REs by FD interp, then TD."""
-    H = H.copy()
-    # FD: fill the even (DMRS) subcarriers at the DMRS symbols by linear interp.
-    xs_even = np.arange(0, n_sc, 2)
-    xs_odd  = np.arange(1, n_sc, 2)
+    """H: [n_sc, n_sym] complex, valid at ALL the subcarriers of the NON-DMRS
+    symbols (the direct DD estimates); the DMRS symbols carry no data and are
+    filled by the temporal interpolation of their neighbouring symbols."""
+    out = H.copy()
     for sym in range(n_sym):
         if not dmrs_mask[sym]:
             continue
-        vals = H[xs_odd, sym]
-        if xs_odd.size < 2:
-            continue
-        filled = np.interp(xs_even, xs_odd, vals.real) + 1j * np.interp(xs_even, xs_odd, vals.imag)
-        H[xs_even, sym] = filled
-    # TD: interpolate every symbol from the DMRS-symbol estimates.
-    dmrs_syms = [s for s in range(n_sym) if dmrs_mask[s]]
-    out = H.copy()
-    for sym in range(n_sym):
-        if sym in dmrs_syms:
-            continue
-        los = [s for s in dmrs_syms if s <= sym]
-        his = [s for s in dmrs_syms if s >= sym]
-        lo = max(los) if los else min(dmrs_syms)
-        hi = min(his) if his else max(dmrs_syms)
-        if lo == hi:
-            out[:, sym] = H[:, lo]
-        else:
-            w = (sym - lo) / (hi - lo)
-            out[:, sym] = (1 - w) * H[:, lo] + w * H[:, hi]
+        lo = sym - 1 if sym - 1 >= 0 else sym + 2
+        hi = sym + 1 if sym + 1 < n_sym else sym - 2
+        if hi >= n_sym:
+            hi = lo
+        out[:, sym] = 0.5 * (out[:, lo] + out[:, hi])
     return out
 
 if __name__ == '__main__':
@@ -206,7 +192,7 @@ if __name__ == '__main__':
     print('scramble differs:', a != b)
     # Modulation energy (random bits -> the average symbol energy must be ~1).
     rng = np.random.default_rng(0)
-    for mod in (1, 2, 3, 4):
+    for mod in (2, 4, 6, 8):
         s = modulate(list(rng.integers(0, 2, 1536)), mod)
         e = np.mean(np.abs(np.array(s))**2)
         print(f'mod {mod} energy: {e:.3f} (expect ~1)')
