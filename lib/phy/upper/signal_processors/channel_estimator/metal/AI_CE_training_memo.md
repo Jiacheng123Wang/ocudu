@@ -208,3 +208,17 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
 | `train_pad.py` | pad-aware 微调（元素级损失掩码、`--transfer/--init`） |
 | `eval_pad.py` | pad-aware 测试集分宽度段 pooled NMSE |
 | `probe106.py` | 52→106 零训练宽度迁移探针（SavedModel 重建 + 保存） |
+
+## 11. 高信噪比 OOD 教训（2026-08-30，20 MHz E2E attach 失败的根因）
+
+18. **模型会系统性破坏近乎完美的输入**：HELENA 训练 SNR 包络 −5..25 dB；ZMQ
+    E2E 的信道 ~45 dB（近乎无噪）。实测（SNR 45 dB 合成探针）：输入网格本身
+    −45 dB NMSE，模型输出把 6/18/24/52 PRB 分别破坏到 −22/−27/−29/−33 dB
+    （去噪偏差在包络外反向作用，窄授权最严重）。后果：SRB1 的 6-PRB PUSCH 与
+    PUCCH 解调失败（CRC KO @ 40+ dB SINR）→ RLC max RETX → RRC IDLE → attach
+    死循环（33+ 次 UE Context Release）。10 MHz E2E 侥幸存活是因为全宽 52 PRB
+    只被破坏到 −33 dB，仍在 64QAM 门限内。
+    修复：**SNR 门控**（>25 dB 直接 classical bypass，`kHelenaMaxSnrDb`），
+    并给 harness 加 `OCUDU_HELENA_FORCE_NN` 旁路（合成集的噪声估计退化到 100 dB
+    上限会误触门控）。教训：**部署模型必须定义输入分布包络并在包络外设安全
+    兜底**——干净信道是 classical 的主场，NN 的价值区在低/中信噪比。
