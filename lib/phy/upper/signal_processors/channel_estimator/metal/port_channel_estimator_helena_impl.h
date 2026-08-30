@@ -51,6 +51,11 @@ public:
   /// NN was not used on the last slot).
   double last_predict_us() const { return last_predict_us_; }
 
+  /// The NN input grid of the last slot (the exact classical-interpolated LS grid the
+  /// network consumed; [612, 14, 2] subcarrier-major). Used by the Phase C dump mode
+  /// to build the input-aligned fine-tuning set. Valid until the next compute().
+  const float* last_nn_input() const { return nn_in.data(); }
+
 private:
   // See the base class documentation.
   void apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args) override;

@@ -118,30 +118,29 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
 - **已完成**：G1（ANE 141 µs 定案）；G2-A（作者集 35ep 重训 −15.03 dB）；Phase B
   微调（PUSCH 10ep）→ **HELENA −20.91 dB**（输入 −11.42 dB，+9.5 dB）；
   C++ 头对头工具已入库并**修复两处 harness bug**（见 §9 第 13/14 条）。
-- **G2 对拍定案（2026-08-30 重启后，同一 4000 样本测试集）**：
+- **G2 对拍定案（修正版：统一 pooled 聚合，2026-08-30）**：
 
-| 估计器 | 总 NMSE |
+| 估计器 | NMSE（pooled，同一 4000 样本测试集） |
 |---|---|
-| 线性插值输入 | −11.32 dB |
+| C++ 输入（srsRAN 插值）/ numpy 输入 | −4.61 / −5.59 dB |
 | cpu-average | −10.95 dB |
 | metal_mmse（GPU 与 CPU 回退逐位一致） | −12.62 dB |
-| **HELENA（重训+微调，ANE 141 µs）** | **−20.86 dB** |
+| **HELENA（C++ 集成路径，Phase C 再微调）** | **−15.20 dB** |
+| HELENA（numpy 输入参考上限） | −17.11 dB |
 
-  **HELENA 超 metal_mmse +8.2 dB**——G2 精度门禁决定性通过（"≥ MMSE"达成且
-  大幅超出；metal_mmse 的 −12.6 dB 与单测 veha 口径 −12.7 dB 一致，交叉验证 ✓；
-  三方数字均在同一份再生数据集上重算对齐）。
-- **系统集成里程碑（2026-08-30）**：`ocudu_coreml_nn_engine`（Core ML/ANE，
-  零拷贝 MLMultiArray + outputBackings）+ `port_channel_estimator_helena_impl`
-  （经典前级 → NN 网格 → 回退）已入库并入 gnb 路径；C++ 三方对拍：
-  cpu-average −10.95 / metal_mmse −12.62 / **helena-ane −13.57 dB**。
-- **输入语义失配（发现）**：C++ 集成 −13.57 dB vs Python 参考 −20.86 dB——
-  差距来自 srsRAN 经典插值（边界/虚拟导频语义）与训练用 numpy 插值的差异；
-  fd=filter 与 none 差异不大。**解法 = Phase C：用 C++ 链的真实输入网格
-  （bench 加 dump 模式导出 nn_in+truth）再微调**，由构造保证对齐，同时顺带
-  获得 srsRAN 输入统计的自适应。
-- **下一步**：Phase C（dump 训练集 → 再微调 → 转 Core ML → 复测 ≥ −18 dB 目标）
-  → 工厂/配置贯通（`pusch_channel_estimator_algorithm: helena`）→ A/B 阴影
-  模式与探针 → E2E 三腿门禁。
+  **HELENA 超 metal_mmse +2.6 dB（pooled）**——G2 精度门禁通过。⚠️ 修正说明：
+  早前"−20.86 vs −12.62 = +8.2 dB"是**聚合口径混用**（Python eval 用逐样本
+  dB 的均值，C++ bench 用合并误差功率的 dB；SNR 跨 30 dB 时两者差 ~6 dB）。
+  统一 pooled 口径后真实增益为 +2.6 dB；Phase C 已把 C++/numpy 输入语义差
+  压缩到 1.9 dB（−15.20 vs −17.11 上限）。metal_mmse −12.6 与单测 veha
+  口径 −12.7 交叉验证 ✓。
+- **系统集成里程碑（2026-08-30，Phase C 完成）**：`ocudu_coreml_nn_engine`
+  （Core ML/ANE，零拷贝 MLMultiArray + outputBackings）+ `port_channel_estimator_helena_impl`
+  （经典前级 → NN 网格 → 回退 + 热重载 API）已入库入链；bench 带 `--dump`
+  模式（导出 C++ 链真实输入网格）用于输入对齐再微调。Phase C（40k C++ 输入
+  再微调 10ep）后 C++ 路径 **−15.20 dB**（pooled），超 metal_mmse +2.6 dB。
+- **下一步**：工厂/配置贯通（`pusch_channel_estimator_algorithm: helena`）→
+  A/B 阴影模式与探针 → E2E 三腿门禁（G3-G5）。
 
 ## 9. 坑与教训（持续更新）
 
@@ -177,6 +176,10 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
     **教训：npy 与 C++ 互操作先写清布局契约**（生成器注释 + harness 注释双写）。
 14. **无 CFO 的合成数据必须关 compensate_cfo**：低 SNR 下噪声主导的 CFO 相位随机
     旋转 DMRS 符号，破坏 TD 平均/MMSE 相干性（本次修复后数字未变说明是次因）。
+15. **NMSE 聚合口径必须统一（重大教训）**："逐样本 dB 的均值"（mean-of-dB）与
+    "合并误差功率的 dB"（dB-of-mean）在 SNR 跨 30 dB 时相差 ~6 dB——跨工具对比
+    （Python eval vs C++ bench）曾因此产生虚假的 7 dB"失配"与错误的 +8.2 dB
+    结论。**所有跨实现对比一律用 pooled（Σerr/Σsig 取 dB）口径**。
 
 ## 10. 脚本清单（本仓库 `lib/phy/upper/signal_processors/channel_estimator/metal/ai_train/`）
 

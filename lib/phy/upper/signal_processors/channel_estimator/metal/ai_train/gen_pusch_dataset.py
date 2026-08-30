@@ -101,7 +101,7 @@ def main(n_train, n_test, out):
         return X, R, H, snr_db
     Xtr, Rtr, Ytr, str_ = make(n_train, rng)
     Xte, Rte, Yte, ste = make(n_test, rng)
-    np.savez_compressed(out, X_train=Xtr, Y_train=Ytr, snr_train=str_,
+    np.savez_compressed(out, X_train=Xtr, Y_train=Ytr, snr_train=str_, R_train=Rtr,
                         X_test=Xte, Y_test=Yte, snr_test=ste, R_test=Rte)
     print(f'saved {out}: train {Xtr.shape} test {Xte.shape}; '
           f'X range [{Xtr.min():.2f},{Xtr.max():.2f}] mean|X|={np.abs(Xtr).mean():.3f}')

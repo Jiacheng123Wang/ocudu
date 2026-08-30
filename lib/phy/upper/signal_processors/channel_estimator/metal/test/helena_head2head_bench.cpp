@@ -73,6 +73,26 @@ std::vector<float> load_npy(const std::string& path, std::vector<unsigned>& shap
   return data;
 }
 
+// Minimal NPY writer (v1.0, C-order, float32) - the Phase C dump format.
+void save_npy(const std::string& path, const std::vector<float>& data, const std::vector<unsigned>& shape)
+{
+  std::ofstream f(path, std::ios::binary);
+  std::string   header = "{'descr': '<f4', 'fortran_order': False, 'shape': (";
+  for (size_t i = 0; i != shape.size(); ++i) {
+    header += std::to_string(shape[i]) + (i + 1 == shape.size() ? "" : ", ");
+  }
+  header += "), }";
+  header.append(63 - (header.size() + 10) % 64, ' ');
+  header += "\n";
+  f.write("\x93NUMPY", 6);
+  unsigned char ver[2] = {1, 0};
+  f.write(reinterpret_cast<char*>(ver), 2);
+  unsigned short hlen = static_cast<unsigned short>(header.size());
+  f.write(reinterpret_cast<char*>(&hlen), 2);
+  f.write(header.data(), header.size());
+  f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size() * sizeof(float)));
+}
+
 class grid_fake : public resource_grid_reader
 {
 public:
@@ -164,12 +184,23 @@ dmrs_symbol_list make_pilots(unsigned n_prb, unsigned nof_symbols)
 int main(int argc, char** argv)
 {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: %s <R_test.npy> <Y_test.npy> [--nogpu]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <R.npy> <Y.npy> [--nogpu] [--dump <prefix>]\n"
+                         "  --dump: run ONLY the HELENA estimator and export its exact NN input\n"
+                         "          grids + the truth as <prefix>_X.npy / <prefix>_Y.npy (Phase C\n"
+                         "          input-aligned fine-tuning set).\n",
+                 argv[0]);
     return 1;
   }
   const std::string r_path = argv[1];
   const std::string y_path = argv[2];
   const bool        nogpu  = (argc > 3 && std::string(argv[3]) == "--nogpu");
+  std::string       dump_prefix;
+  for (int a = 3; a < argc; ++a) {
+    if (std::string(argv[a]) == "--dump" && a + 1 < argc) {
+      dump_prefix = argv[a + 1];
+    }
+  }
+  const bool dump_mode = !dump_prefix.empty();
   if (nogpu) {
     setenv("OCUDU_MMSE_NOGPU", "1", 1);
   }
@@ -187,26 +218,39 @@ int main(int argc, char** argv)
   auto pilots = make_pilots(nff / 12, 3);
 
   std::vector<std::unique_ptr<port_channel_estimator>> ests;
+  port_channel_estimator_helena_impl*                  helena_ptr = nullptr;
   {
     // compensate_cfo = false: the synthetic set has NO CFO, so the noise-derived
     // CFO phase at low SNR would randomly rotate the DMRS symbols and destroy the
     // TD average / MMSE coherence (the original +0.6 dB harness bug).
-    auto cpu = std::make_unique<port_channel_estimator_average_impl>(
-        create_interpolator(), make_ta_estimator(),
-        port_channel_estimator_fd_smoothing_strategy::filter,
-        port_channel_estimator_td_interpolation_strategy::average, false);
-    ests.push_back(std::move(cpu));
-    auto mmse = std::make_unique<port_channel_estimator_metal_mmse_impl>(
-        create_interpolator(), make_ta_estimator(),
-        std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F), 3, false);
-    ests.push_back(std::move(mmse));
-    auto helena = std::make_unique<port_channel_estimator_helena_impl>(
-        create_interpolator(), make_ta_estimator(), OCUDU_HELENA_MODEL_PATH, false);
-    ests.push_back(std::move(helena));
+    if (dump_mode) {
+      auto helena = std::make_unique<port_channel_estimator_helena_impl>(
+          create_interpolator(), make_ta_estimator(), OCUDU_HELENA_MODEL_PATH, false);
+      helena_ptr = helena.get();
+      ests.push_back(std::move(helena));
+    } else {
+      auto cpu = std::make_unique<port_channel_estimator_average_impl>(
+          create_interpolator(), make_ta_estimator(),
+          port_channel_estimator_fd_smoothing_strategy::filter,
+          port_channel_estimator_td_interpolation_strategy::average, false);
+      ests.push_back(std::move(cpu));
+      auto mmse = std::make_unique<port_channel_estimator_metal_mmse_impl>(
+          create_interpolator(), make_ta_estimator(),
+          std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F), 3, false);
+      ests.push_back(std::move(mmse));
+      auto helena = std::make_unique<port_channel_estimator_helena_impl>(
+          create_interpolator(), make_ta_estimator(), OCUDU_HELENA_MODEL_PATH, false);
+      ests.push_back(std::move(helena));
+    }
   }
-  const char*          names[3] = {"cpu-average", "metal_mmse", "helena-ane"};
-  std::vector<double>  err(3, 0.0);
+  const char*         names[3] = {"cpu-average", "metal_mmse", "helena-ane"};
+  std::vector<double> err(3, 0.0);
   double              sig = 0.0;
+  std::vector<float>  dump_x, dump_y;
+  if (dump_mode) {
+    dump_x.reserve(static_cast<size_t>(n) * nff * 14 * 2);
+    dump_y.reserve(static_cast<size_t>(n) * nff * 14 * 2);
+  }
 
   for (unsigned i = 0; i != n; ++i) {
     grid_fake grid(nff);
@@ -218,8 +262,15 @@ int main(int argc, char** argv)
       grid.set_symbol(sym);
     }
     const float* yb = &y[static_cast<size_t>(i) * nff * 14 * 2];
-    for (unsigned e = 0; e != 3; ++e) {
+    for (unsigned e = 0; e != ests.size(); ++e) {
       const auto& res = ests[e]->compute(grid, 0, pilots, cfg);
+      if (dump_mode) {
+        // Export the exact NN input grid + the truth for this sample.
+        const float* xin = helena_ptr->last_nn_input();
+        dump_x.insert(dump_x.end(), xin, xin + static_cast<size_t>(nff) * 14 * 2);
+        dump_y.insert(dump_y.end(), yb, yb + static_cast<size_t>(nff) * 14 * 2);
+        continue;
+      }
       for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
         std::vector<cbf16_t> est(nff);
         res.get_symbol_ch_estimate(est, l, 0);
@@ -237,6 +288,14 @@ int main(int argc, char** argv)
     for (size_t j = 0; j != static_cast<size_t>(nff) * 14 * 2; ++j) {
       sig += static_cast<double>(yb[j]) * yb[j];
     }
+  }
+
+  if (dump_mode) {
+    const std::vector<unsigned> shape = {n, nff, 14, 2};
+    save_npy(dump_prefix + "_X.npy", dump_x, shape);
+    save_npy(dump_prefix + "_Y.npy", dump_y, shape);
+    std::fprintf(stderr, "dumped %u samples to %s_{X,Y}.npy\n", n, dump_prefix.c_str());
+    return 0;
   }
   for (unsigned e = 0; e != 3; ++e) {
     std::printf("%-12s NMSE %8.2f dB\n", names[e], 10.0 * std::log10(err[e] / sig));

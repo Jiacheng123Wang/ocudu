@@ -68,7 +68,7 @@
         "type" : "MultiArray"
       }
     ],
-    "generatedClassName" : "helena_pusch_ml",
+    "generatedClassName" : "helena_phasec_ml",
     "method" : "predict"
   }
 ]
