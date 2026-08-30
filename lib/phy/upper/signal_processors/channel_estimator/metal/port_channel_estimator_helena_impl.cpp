@@ -5,6 +5,7 @@
 #include "../port_channel_estimator_helpers.h"
 #include "ocudu/ocudulog/ocudulog.h"
 
+#include <chrono>
 #include <cstring>
 
 using namespace ocudu;
@@ -70,8 +71,11 @@ bool port_channel_estimator_helena_impl::reload(const std::string& modelc_path_)
 
 void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
 {
+  const bool time_en = std::getenv("OCUDU_MMSE_TIME") != nullptr;
+  const auto t_begin = std::chrono::steady_clock::now();
   // Classical pre-stage: fills freq_response and the filtered pilots (RSrp / noise / TA).
   apply_fd_td_estimation_stage_classical(args);
+  const auto t_classical = std::chrono::steady_clock::now();
 
   const unsigned nof_layers = args.dmrs_patterns.size();
   const unsigned nof_prb    = args.dmrs_patterns.front().rb_mask.count();
@@ -118,10 +122,22 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
       }
     }
 
+    const auto t_nn_begin = std::chrono::steady_clock::now();
     if (!active_engine->predict(nn_in.data(), nn_out.data(), nof_subc)) {
       return; // classical fallback for this slot
     }
     last_predict_us_ = active_engine->last_predict_us();
+    if (time_en) {
+      const auto us = [](auto d) { return std::chrono::duration<double, std::micro>(d).count(); };
+      ocudulog::fetch_basic_logger("PHY").debug(
+          "[helena_time] prb={} subc={} layer={} | classical={:.1f}us predict={:.1f}us (worker engine last={:.1f}us)",
+          nof_prb,
+          nof_subc,
+          i_layer,
+          us(t_classical - t_begin),
+          us(std::chrono::steady_clock::now() - t_nn_begin),
+          last_predict_us_);
+    }
 
     for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
       span<cf_t> dst = grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + sym);
