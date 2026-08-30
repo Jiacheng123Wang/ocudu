@@ -25,6 +25,7 @@ create_port_channel_estimator_factory_sw(std::shared_ptr<time_alignment_estimato
                                          port_channel_estimator_algorithm               algo = port_channel_estimator_algorithm::cpu,
                                          float mmse_tau_rms_s                          = 370e-9F,
                                          float mmse_fd_hz                              = 0.0F,
-                                         unsigned mmse_block_prb                       = 3);
+                                         unsigned mmse_block_prb                       = 3,
+                                         const std::string& helena_model_path          = "");
 
 } // namespace ocudu

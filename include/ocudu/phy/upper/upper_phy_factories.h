@@ -356,6 +356,9 @@ struct upper_phy_factory_configuration {
   float pusch_channel_estimator_mmse_fd_hz = 0.0F;
   /// \brief MMSE estimator: time-frequency block size (in PRBs, 1..3).
   unsigned pusch_channel_estimator_mmse_block_prb = 3;
+  /// Compiled Core ML model path for the HELENA AI channel estimator (empty = the
+  /// baked-in default from ai_assets/).
+  std::string pusch_channel_estimator_helena_model_path;
   /// PUSCH channel estimator CFO compensation.
   bool pusch_channel_estimator_compensate_cfo;
   /// \brief PUSCH channel equalizer algorithm.

@@ -29,7 +29,9 @@ enum class port_channel_estimator_algorithm {
   /// Classical estimator: LS + FD smoothing + TD strategy (default, all platforms).
   cpu = 0,
   /// 2D time-frequency block MMSE estimator, Metal-accelerated (Apple Silicon).
-  metal_mmse
+  metal_mmse,
+  /// HELENA AI estimator, Core ML (Apple Neural Engine) accelerated (Apple Silicon).
+  helena
 };
 
 } // namespace ocudu

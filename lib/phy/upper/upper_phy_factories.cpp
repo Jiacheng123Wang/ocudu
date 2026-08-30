@@ -626,13 +626,15 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
   // Create port channel estimator for PUSCH and PUCCH.
   const port_channel_estimator_algorithm ce_algo =
       (config.pusch_channel_estimator_algo == "metal_mmse") ? port_channel_estimator_algorithm::metal_mmse
-                                                            : port_channel_estimator_algorithm::cpu;
+      : (config.pusch_channel_estimator_algo == "helena")     ? port_channel_estimator_algorithm::helena
+                                                              : port_channel_estimator_algorithm::cpu;
   std::shared_ptr<port_channel_estimator_factory> pusch_ch_estimator_factory = create_port_channel_estimator_factory_sw(
       ta_est_factory,
       ce_algo,
       config.pusch_channel_estimator_mmse_tau_rms_us * 1e-6F,
       config.pusch_channel_estimator_mmse_fd_hz,
-      config.pusch_channel_estimator_mmse_block_prb);
+      config.pusch_channel_estimator_mmse_block_prb,
+      config.pusch_channel_estimator_helena_model_path);
   report_error_if_not(pusch_ch_estimator_factory, "Invalid channel estimator factory.");
   // PUCCH keeps the classical estimator for now (the MMSE path is PUSCH-only in v1).
   std::shared_ptr<port_channel_estimator_factory> pucch_ch_estimator_factory =
@@ -652,7 +654,8 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
         ce_algo,
         config.pusch_channel_estimator_mmse_tau_rms_us * 1e-6F,
         config.pusch_channel_estimator_mmse_fd_hz,
-        config.pusch_channel_estimator_mmse_block_prb);
+        config.pusch_channel_estimator_mmse_block_prb,
+        config.pusch_channel_estimator_helena_model_path);
     report_error_if_not(pusch_ch_estimator_factory, "Invalid channel estimator factory.");
 
     // Finally, wrap the factory with the metric decorator.

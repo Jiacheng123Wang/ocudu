@@ -87,6 +87,8 @@ struct du_low_unit_expert_upper_phy_config {
   float pusch_channel_estimator_mmse_fd_hz = 0.0F;
   /// \brief MMSE estimator: time-frequency block size (in PRBs, 1..3).
   unsigned pusch_channel_estimator_mmse_block_prb = 3;
+  /// Compiled Core ML model path for the HELENA channel estimator (empty = baked-in default).
+  std::string pusch_channel_estimator_helena_model_path;
   /// \brief PUSCH channel equalizer algorithm.
   ///
   /// Use one of these options:
