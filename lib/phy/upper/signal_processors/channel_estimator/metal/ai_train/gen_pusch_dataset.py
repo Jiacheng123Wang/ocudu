@@ -88,13 +88,13 @@ def ls_and_interp(H, noise_std, rng, nfft, prb):
             X[:, :, sym] = (1 - w) * ls[:, :, DMRS_SC.index(lo)] + w * ls[:, :, DMRS_SC.index(hi)]
     return X
 
-def make(count, rng, grid_prb, pad_aware, min_prb, max_prb):
+def make(count, rng, grid_prb, pad_aware, min_prb, max_prb, snr_min, snr_max):
     nfft = grid_prb * 12
     H = np.zeros((count, nfft, NSYM, 2), dtype=np.float32)
     X = np.zeros_like(H)
     R = np.zeros((count, len(DMRS_SC), nfft, 2), dtype=np.float32)
     width = np.full(count, grid_prb, dtype=np.int32)
-    snr_db = rng.uniform(-5, 25, count)
+    snr_db = rng.uniform(snr_min, snr_max, count)
     ns = np.sqrt(10.0 ** (-snr_db / 10.0))
     if pad_aware:
         width = rng.integers(min_prb, max_prb + 1, count)
@@ -115,11 +115,11 @@ def make(count, rng, grid_prb, pad_aware, min_prb, max_prb):
                 R[i, si, :wsc, 1] = rxc.imag
     return X, R, H, snr_db, width
 
-def main(n_train, n_test, out, nfft_override=0, pad_aware=False, min_prb=0, max_prb=0):
+def main(n_train, n_test, out, nfft_override=0, pad_aware=False, min_prb=0, max_prb=0, snr_min=-5.0, snr_max=25.0):
     grid_prb = (nfft_override or 612) // 12
     rng = np.random.default_rng(0)
-    Xtr, Rtr, Ytr, str_, wtr = make(n_train, rng, grid_prb, pad_aware, min_prb, max_prb)
-    Xte, Rte, Yte, ste, wte = make(n_test, rng, grid_prb, pad_aware, min_prb, max_prb)
+    Xtr, Rtr, Ytr, str_, wtr = make(n_train, rng, grid_prb, pad_aware, min_prb, max_prb, snr_min, snr_max)
+    Xte, Rte, Yte, ste, wte = make(n_test, rng, grid_prb, pad_aware, min_prb, max_prb, snr_min, snr_max)
     np.savez_compressed(out, X_train=Xtr, Y_train=Ytr, snr_train=str_, width_train=wtr, R_train=Rtr,
                         X_test=Xte, Y_test=Yte, snr_test=ste, width_test=wte, R_test=Rte)
     wmsg = f'width range [{wtr.min()},{wtr.max()}] PRB; ' if wtr.size else ''
@@ -134,4 +134,6 @@ if __name__ == '__main__':
     pad     = '--pad-aware' in sys.argv
     min_prb = int(sys.argv[sys.argv.index('--min-prb') + 1]) if '--min-prb' in sys.argv else 0
     max_prb = int(sys.argv[sys.argv.index('--max-prb') + 1]) if '--max-prb' in sys.argv else 0
-    main(n_train, n_test, out, nfft, pad, min_prb, max_prb)
+    snr_min = float(sys.argv[sys.argv.index('--snr-min') + 1]) if '--snr-min' in sys.argv else -5.0
+    snr_max = float(sys.argv[sys.argv.index('--snr-max') + 1]) if '--snr-max' in sys.argv else 25.0
+    main(n_train, n_test, out, nfft, pad, min_prb, max_prb, snr_min, snr_max)
