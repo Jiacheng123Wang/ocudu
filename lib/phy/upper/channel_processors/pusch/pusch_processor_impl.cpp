@@ -388,12 +388,14 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
         scr_id               = dmrs_cfg.scrambling_id;
         n_scid_v             = dmrs_cfg.n_scid;
       }
-      std::fprintf(f, "%u,%lld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", idx,
+      const unsigned rv       = pdu.codeword.has_value() ? pdu.codeword->rv : 0;
+      const unsigned new_data = pdu.codeword.has_value() ? (pdu.codeword->new_data ? 1U : 0U) : 1U;
+      std::fprintf(f, "%u,%lld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", idx,
                    static_cast<long long>(t_us), n_prb, pdu.nof_symbols,
                    static_cast<unsigned>(pdu.rx_ports.size()), k0,
                    static_cast<unsigned>(pdu.mcs_descr.modulation), dmrs_mask, pdu.n_id,
                    n_scid_v, scr_id,
-                   static_cast<unsigned>(pdu.rnti), pdu.nof_tx_layers);
+                   static_cast<unsigned>(pdu.rnti), pdu.nof_tx_layers, rv, new_data);
       std::fclose(f);
     }
   }
