@@ -78,7 +78,12 @@ v1 两桶 + classical 兜底：
   提交 ai_assets（commit `0658b4bb6e`）。全宽 head2head 终值：52 → −13.69，
   106 → −13.77 dB（vs metal_mmse −12.5，增益 ~1.2 dB 维持）。
 - **G-3 20 MHz ZMQ E2E**：接线完成（分桶分发 + 路径四件套 + `gnb_zmq_oaiue.yaml`
-  已加 expert_phy helena）；待跑：OAI UE 侧 `r=106` 确认 → E2E（无尖峰 + 预算内）。
+  已加 expert_phy helena）。**C++ 零填充路径已验证**（窄授权→桶宽填充的运行时
+  语义：30 PRB→52 桶 cpu −10.45 / metal_mmse −12.32 / helena −13.25；60 PRB→106 桶
+  −10.18 / −12.05 / −13.04——helena 窄带仍领先 ~+1 dB）。20 MHz 小区校验通过
+  （bw=20 MHz, dl_arfcn=632628）。剩余：OAI UE 侧 `r=106`（见
+  `configs/oaiue_zmq_20m.conf`；注意 r=51 的旧配置只走 52 桶，从未触发 106 桶）
+  → 联合 E2E（无尖峰 + 预算内）。
 - **G-4 实机 A/B**：helena vs metal_mmse 双跑 shadow；真信道无 ground truth →
   用 BLER / HARQ 重传 / CQI-MCS / 吞吐 / ping 间接指标 + 保存 IQ/LS 网格离线
   分析（两估计器一致性 + TD 功率剖面合理性）。
