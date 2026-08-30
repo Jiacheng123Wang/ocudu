@@ -232,6 +232,7 @@ std::shared_ptr<ldpc_decoder_metal::slot_matrices> get_shared_matrices(metal::de
   }
 
   const auto t_build_end = std::chrono::steady_clock::now();
+  std::size_t cache_size = 0;
   {
     std::lock_guard<std::mutex> lock(slot_matrices_mtx);
     auto [it, inserted] = slot_matrices_cache.emplace(key, m);
@@ -239,6 +240,7 @@ std::shared_ptr<ldpc_decoder_metal::slot_matrices> get_shared_matrices(metal::de
       // Another thread built it first; keep its entry (ours is discarded).
       m = it->second;
     }
+    cache_size = slot_matrices_cache.size();
   }
   ocudulog::fetch_basic_logger("PHY").debug(
       "Metal LDPC: built matrices bg={} z={} in {:.1f}us (m={} n={}, edges={}, cache={})",
@@ -248,7 +250,7 @@ std::shared_ptr<ldpc_decoder_metal::slot_matrices> get_shared_matrices(metal::de
       m->m_aligned,
       m->n_aligned,
       m->no_edges,
-      slot_matrices_cache.size());
+      cache_size);
   return m;
 }
 
