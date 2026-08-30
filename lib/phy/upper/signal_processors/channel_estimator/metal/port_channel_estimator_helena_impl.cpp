@@ -6,6 +6,7 @@
 #include "ocudu/ocudulog/ocudulog.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstring>
 
 using namespace ocudu;
@@ -111,6 +112,25 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
   const unsigned nof_subc   = nof_prb * NOF_SUBCARRIERS_PER_RB;
   nn_grid_valid             = false;
   last_predict_us_          = 0.0;
+
+  // High-SNR bypass (2026-08-30 E2E root cause): the network was trained at
+  // SNR -5..25 dB. On much cleaner channels (the ZMQ E2E runs at ~45 dB) the
+  // interpolated-LS input is already near-perfect (measured -45 dB NMSE) and the
+  // NN's denoising bias actively CORRUPTS it (-22 dB at 6 PRB, -33 dB at 52 PRB),
+  // breaking 64QAM/256QAM demod and the attach (SRB1 PUSCH/PUCCH CRC KO at
+  // 40+ dB SINR). Beyond the training envelope the classical grid is near-optimal,
+  // so serve it unchanged (the NN's value zone is low/mid SNR).
+  constexpr float kHelenaMaxSnrDb = 25.0F;
+  if (10.0F * std::log10(get_snr()) > kHelenaMaxSnrDb) {
+    if (time_en) {
+      ocudulog::fetch_basic_logger("PHY").debug(
+          "[helena_gate] prb={} snr={:.1f}dB > {:.0f}dB -> classical bypass",
+          nof_prb,
+          10.0F * std::log10(get_snr()),
+          kHelenaMaxSnrDb);
+    }
+    return;
+  }
 
   // Bucket dispatch (v1): <=52 PRB -> 52-model, 53..106 PRB -> 106-model,
   // below kHelenaMinPrb PRB or frequency hopping -> classical. The NN grid is

@@ -76,16 +76,18 @@ protected:
                               unsigned                                   tx_layer,
                               const bounded_bitset<MAX_NOF_SUBCARRIERS>& re_mask) const override;
 
-private:
-
   // See the port_channel_estimator_results interface for documentation.
-  float get_epre() const override { return epre; }
-
-  // See the port_channel_estimator_results interface for documentation.
+  // (protected so the HELENA impl can gate the NN on the estimated SNR: beyond the
+  // training envelope the classical grid is near-optimal and the NN would corrupt it).
   float get_noise_variance() const override { return noise_var; }
 
   // See the port_channel_estimator_results interface for documentation.
   float get_snr() const override { return snr_linear; }
+
+private:
+
+  // See the port_channel_estimator_results interface for documentation.
+  float get_epre() const override { return epre; }
 
   // See the port_channel_estimator_results interface for documentation.
   float get_rsrp(unsigned tx_layer) const override
