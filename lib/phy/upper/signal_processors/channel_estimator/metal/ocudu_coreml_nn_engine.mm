@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 using namespace ocudu;
 
@@ -39,6 +40,15 @@ struct coreml_nn_engine_impl {
   bool                    job_ok      = false;
   double                  last_predict_us = 0.0;
 
+  // ANE keep-alive: the compiled ANE program is evicted after ~15-20 s of idle
+  // (deep power-gate) and the next prediction recompiles it (~13.6 ms - the E2E
+  // first full-bandwidth slot spike). The worker runs a dummy prediction every
+  // KEEPALIVE_PERIOD so the program stays resident.
+  static constexpr auto KEEPALIVE_PERIOD = std::chrono::seconds(2);
+  unsigned              model_nof_subc   = 612;
+  std::vector<float>    keepalive_in;
+  std::vector<float>    keepalive_out;
+
   ~coreml_nn_engine_impl()
   {
     {
@@ -51,6 +61,9 @@ struct coreml_nn_engine_impl {
     }
   }
 };
+
+// Out-of-class definition (odr-used by the worker lambda's wait_for).
+constexpr std::chrono::seconds coreml_nn_engine_impl::KEEPALIVE_PERIOD;
 
 bool run_prediction(coreml_nn_engine_impl* e, const float* in, float* out, unsigned nof_subc)
 {
@@ -141,6 +154,16 @@ bool coreml_nn_engine::init(const char* modelc_path)
   if (e->in_name == nil || e->out_name == nil) {
     return false;
   }
+  // The model's trained grid width (612 / 624 subcarriers) from the input description.
+  {
+    MLFeatureDescription* fd = desc.inputDescriptionsByName[e->in_name];
+    if (fd != nil && fd.type == MLFeatureTypeMultiArray && fd.multiArrayConstraint != nil &&
+        fd.multiArrayConstraint.shape.count > 1) {
+      e->model_nof_subc = fd.multiArrayConstraint.shape[1].unsignedIntValue;
+    }
+  }
+  e->keepalive_in.resize(static_cast<size_t>(e->model_nof_subc) * 14 * 2, 0.0F);
+  e->keepalive_out.resize(static_cast<size_t>(e->model_nof_subc) * 14 * 2);
 
   // Dedicated worker thread: all predictions (including the warm-up) run here,
   // so the per-thread Core ML/ANE initialization is paid exactly once, at
@@ -150,24 +173,33 @@ bool coreml_nn_engine::init(const char* modelc_path)
       const float* in;
       float*       out;
       unsigned     nsc;
+      bool         keepalive = false;
       {
         std::unique_lock<std::mutex> lock(e->mtx);
-        e->cv.wait(lock, [e]() { return e->has_job || e->shutdown; });
+        e->cv.wait_for(lock, coreml_nn_engine_impl::KEEPALIVE_PERIOD, [e]() { return e->has_job || e->shutdown; });
         if (e->shutdown) {
           return;
         }
-        in  = e->job_in;
-        out = e->job_out;
-        nsc = e->job_nof_subc;
+        if (!e->has_job) {
+          // Idle keep-alive: touch the ANE so the compiled program stays resident.
+          keepalive = true;
+          in        = e->keepalive_in.data();
+          out       = e->keepalive_out.data();
+          nsc       = e->model_nof_subc;
+        } else {
+          in  = e->job_in;
+          out = e->job_out;
+          nsc = e->job_nof_subc;
+        }
       }
       const bool ok = run_prediction(e, in, out, nsc);
-      {
+      if (!keepalive) {
         std::lock_guard<std::mutex> lock(e->mtx);
         e->job_ok   = ok;
         e->job_done = true;
         e->has_job  = false;
+        e->cv.notify_all();
       }
-      e->cv.notify_all();
     }
   });
   return true;
