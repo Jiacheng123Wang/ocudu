@@ -157,8 +157,7 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
 - **G-5 数据采集钩子 v1（已入库，commit `9f69154317`）**：
   `OCUDU_HELENA_DUMP_DIR` 环境变量 → 每个 NN 活跃槽把 NN 输入网格（classical
   插值 LS，[prb*12,14,2] float32）落盘为 `<dir>/dump_<idx>_prb<N>.f32` +
-  `<dir>/meta.csv`（idx,prb,snr_db,alpha,engine_nsc）。采集方式：先建目录，
-  `OCUDU_HELENA_DUMP_DIR=~/ai_ce_work/capture/<site>_<date> sudo ... gnb`。
+  `<dir>/meta.csv`（idx,prb,snr_db,alpha,engine_nsc）。采集方式：先建目录，变量必须在 `sudo` **之后**（macOS sudo 的 env_reset 会过滤 sudo 前的变量——踩过坑：目录空 + `[helena_time]` 正常打印）：`sudo OCUDU_MMSE_TIME=1 OCUDU_HELENA_DUMP_DIR=<绝对路径> ./build/apps/gnb/gnb ...`。。
   **下一步**：UL-SCH 的 CRC-OK 决策导向标签钩子（重编码→重调制→H=Y/X̂），
   与 dump 配对成真实信道训练集。
 
