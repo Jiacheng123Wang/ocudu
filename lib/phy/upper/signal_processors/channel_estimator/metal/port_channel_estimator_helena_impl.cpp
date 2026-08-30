@@ -6,11 +6,23 @@
 #include "ocudu/ocudulog/ocudulog.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 using namespace ocudu;
+
+namespace {
+// G-5 per-site adaptation data hook: when OCUDU_HELENA_DUMP_DIR is set, every
+// NN-active slot dumps the exact NN input grid (the classical interpolated-LS
+// grid, allocation width x 14 x 2, float32) as <dir>/dump_<idx>_prb<N>.f32 and
+// appends <dir>/meta.csv with idx,prb,snr_db,alpha,engine_nsc. The decision-
+// directed LABELS (re-encoded CRC-OK slots) come from the UL-SCH hook - next
+// increment. The night-training sidecar pairs these dumps with the labels.
+std::atomic<unsigned> g_dump_counter{0};
+} // namespace
 
 port_channel_estimator_helena_impl::port_channel_estimator_helena_impl(
     std::unique_ptr<interpolator>                        interp,
@@ -181,6 +193,29 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
         const cf_t v                          = to_cf(scratch[k]);
         nn_in[2 * (k * MAX_NSYMB_PER_SLOT + sym)]     = v.real();
         nn_in[2 * (k * MAX_NSYMB_PER_SLOT + sym) + 1] = v.imag();
+      }
+    }
+
+    // G-5 data hook: dump the NN input grid + meta of the first layer.
+    if (i_layer == 0) {
+      if (const char* dump_dir = std::getenv("OCUDU_HELENA_DUMP_DIR"); dump_dir != nullptr) {
+        const unsigned idx = g_dump_counter.fetch_add(1, std::memory_order_relaxed);
+        char           path[512];
+        std::snprintf(path, sizeof(path), "%s/dump_%08u_prb%u.f32", dump_dir, idx, nof_prb);
+        FILE* f = std::fopen(path, "wb");
+        if (f != nullptr) {
+          std::fwrite(nn_in.data(),
+                      sizeof(float),
+                      static_cast<size_t>(nof_subc) * MAX_NSYMB_PER_SLOT * 2,
+                      f);
+          std::fclose(f);
+        }
+        std::snprintf(path, sizeof(path), "%s/meta.csv", dump_dir);
+        f = std::fopen(path, "a");
+        if (f != nullptr) {
+          std::fprintf(f, "%u,%u,%.2f,%.2f,%u\n", idx, nof_prb, snr_db, alpha, engine_nsc);
+          std::fclose(f);
+        }
       }
     }
 
