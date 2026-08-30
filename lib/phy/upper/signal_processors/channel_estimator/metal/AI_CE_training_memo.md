@@ -130,10 +130,18 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
   **HELENA 超 metal_mmse +8.2 dB**——G2 精度门禁决定性通过（"≥ MMSE"达成且
   大幅超出；metal_mmse 的 −12.6 dB 与单测 veha 口径 −12.7 dB 一致，交叉验证 ✓；
   三方数字均在同一份再生数据集上重算对齐）。
-- **下一步（AI 计划 §6 系统集成）**：`port_channel_estimator_helena_impl`——
-  Core ML(ANE) 引擎（零拷贝缓冲 + 单 slot 一次 predict + 超时回退）、工厂/配置
-  贯通（`pusch_channel_estimator_algorithm: helena` + 模型路径）、A/B 阴影模式
-  与探针（ai_ce_us 细分、NMSE 差值、回退计数）、E2E 门禁（金属 MMSE 三腿 A/B）。
+- **系统集成里程碑（2026-08-30）**：`ocudu_coreml_nn_engine`（Core ML/ANE，
+  零拷贝 MLMultiArray + outputBackings）+ `port_channel_estimator_helena_impl`
+  （经典前级 → NN 网格 → 回退）已入库并入 gnb 路径；C++ 三方对拍：
+  cpu-average −10.95 / metal_mmse −12.62 / **helena-ane −13.57 dB**。
+- **输入语义失配（发现）**：C++ 集成 −13.57 dB vs Python 参考 −20.86 dB——
+  差距来自 srsRAN 经典插值（边界/虚拟导频语义）与训练用 numpy 插值的差异；
+  fd=filter 与 none 差异不大。**解法 = Phase C：用 C++ 链的真实输入网格
+  （bench 加 dump 模式导出 nn_in+truth）再微调**，由构造保证对齐，同时顺带
+  获得 srsRAN 输入统计的自适应。
+- **下一步**：Phase C（dump 训练集 → 再微调 → 转 Core ML → 复测 ≥ −18 dB 目标）
+  → 工厂/配置贯通（`pusch_channel_estimator_algorithm: helena`）→ A/B 阴影
+  模式与探针 → E2E 三腿门禁。
 
 ## 9. 坑与教训（持续更新）
 

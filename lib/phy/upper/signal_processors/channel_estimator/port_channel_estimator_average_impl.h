@@ -65,8 +65,9 @@ public:
     return *this;
   }
 
-private:
+protected:
   // See the port_channel_estimator_results interface for documentation.
+  // (protected so derived estimators can delegate to the classical fallback path).
   void get_symbol_ch_estimate(span<cbf16_t> symbol, unsigned i_symbol, unsigned tx_layer) const override;
 
   // See the port_channel_estimator_results interface for documentation.
@@ -74,6 +75,8 @@ private:
                               unsigned                                   i_symbol,
                               unsigned                                   tx_layer,
                               const bounded_bitset<MAX_NOF_SUBCARRIERS>& re_mask) const override;
+
+private:
 
   // See the port_channel_estimator_results interface for documentation.
   float get_epre() const override { return epre; }
@@ -164,8 +167,34 @@ protected:
   /// strategy is then applied on demand by \c get_symbol_ch_estimate. Derived estimators
   /// (e.g., the Metal 2D MMSE estimator) may override this stage to produce the complete
   /// time-frequency grid in one shot and override \c get_symbol_ch_estimate accordingly.
-  virtual void apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args);
+  virtual void apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
+  {
+    apply_fd_td_estimation_stage_classical(args);
+  }
 
+  /// \brief The classical FD smoothing + TD interpolation stage (the default behavior,
+  /// factored out of the virtual hook). Derived estimators that need the classical
+  /// per-symbol estimates as their input (e.g. the AI channel estimator) call this
+  /// explicitly and then refine the result.
+  void apply_fd_td_estimation_stage_classical(fd_td_estimation_stage_args& args);
+
+  /// \brief Applies the time domain interpolation strategy for a given OFDM symbol within the hop transmission.
+  /// (protected: derived estimators build their input grid from the classical per-symbol estimates).
+  /// \param[out] estimated_rg        Estimated resource grid OFDM symbol for a single channel.
+  /// \param[in]  dmrs_mask           Time-domain DM-RS mask.
+  /// \param[in]  freq_response_dmrs  Frequency-domain channel estimates for the given channel for each of the OFDM
+  ///                                 symbols containing DM-RS.
+  /// \param[in]  hop_first_symbol    Start symbol index for the hop within the slot.
+  /// \param[in]  hop_last_symbol     Last symbol index for the hop within the slot.
+  /// \param[in]  i_symbol            OFDM symbol index within the slot to calculate.
+  /// \param[in]  i_layer             Transmission layer.
+  void apply_td_domain_strategy(span<cbf16_t>                     estimated_rg,
+                                const symbol_slot_mask&           dmrs_mask,
+                                const re_measurement<const cf_t>& freq_response_dmrs,
+                                unsigned                          hop_first_symbol,
+                                unsigned                          hop_last_symbol,
+                                unsigned                          i_symbol,
+                                unsigned                          i_layer) const;
 private:
 
   /// Specializes \ref compute for one hop.
@@ -217,22 +246,9 @@ private:
   /// The symbol starting time is computed from the start of the slot and is expressed in units of OFDM symbol duration.
   void initialize_symbol_start_epochs(cyclic_prefix cp, subcarrier_spacing scs);
 
-  /// \brief Applies the time domain interpolation strategy for a given OFDM symbol within the hop transmission.
-  /// \param[out] estimated_rg        Estimated resource grid OFDM symbol for a single channel.
-  /// \param[in]  dmrs_mask           Time-domain DM-RS mask.
-  /// \param[in]  freq_response_dmrs  Frequency-domain channel estimates for the given channel for each of the OFDM
-  ///                                 symbols containing DM-RS.
-  /// \param[in]  hop_first_symbol    Start symbol index for the hop within the slot.
-  /// \param[in]  hop_last_symbol     Last symbol index for the hop within the slot.
-  /// \param[in]  i_symbol            OFDM symbol index within the slot to calculate.
-  /// \param[in]  i_layer             Transmission layer.
-  void apply_td_domain_strategy(span<cbf16_t>                     estimated_rg,
-                                const symbol_slot_mask&           dmrs_mask,
-                                const re_measurement<const cf_t>& freq_response_dmrs,
-                                unsigned                          hop_first_symbol,
-                                unsigned                          hop_last_symbol,
-                                unsigned                          i_symbol,
-                                unsigned                          i_layer) const;
+
+
+private:
 
   /// Frequency domain smoothing strategy.
   port_channel_estimator_fd_smoothing_strategy fd_smoothing_strategy;

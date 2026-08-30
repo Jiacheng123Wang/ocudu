@@ -6,6 +6,7 @@
 // Usage: helena_head2head_bench <R_test.npy> <Y_test.npy> [--nogpu]
 
 #include "../port_channel_estimator_metal_mmse_impl.h"
+#include "../port_channel_estimator_helena_impl.h"
 #include "port_channel_estimator_helpers.h"
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/phy/support/support_factories.h"
@@ -199,9 +200,12 @@ int main(int argc, char** argv)
         create_interpolator(), make_ta_estimator(),
         std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F), 3, false);
     ests.push_back(std::move(mmse));
+    auto helena = std::make_unique<port_channel_estimator_helena_impl>(
+        create_interpolator(), make_ta_estimator(), OCUDU_HELENA_MODEL_PATH, false);
+    ests.push_back(std::move(helena));
   }
-  const char* names[2] = {"cpu-average", "metal_mmse"};
-  std::vector<double> err(2, 0.0);
+  const char*          names[3] = {"cpu-average", "metal_mmse", "helena-ane"};
+  std::vector<double>  err(3, 0.0);
   double              sig = 0.0;
 
   for (unsigned i = 0; i != n; ++i) {
@@ -214,7 +218,7 @@ int main(int argc, char** argv)
       grid.set_symbol(sym);
     }
     const float* yb = &y[static_cast<size_t>(i) * nff * 14 * 2];
-    for (unsigned e = 0; e != 2; ++e) {
+    for (unsigned e = 0; e != 3; ++e) {
       const auto& res = ests[e]->compute(grid, 0, pilots, cfg);
       for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
         std::vector<cbf16_t> est(nff);
@@ -234,7 +238,7 @@ int main(int argc, char** argv)
       sig += static_cast<double>(yb[j]) * yb[j];
     }
   }
-  for (unsigned e = 0; e != 2; ++e) {
+  for (unsigned e = 0; e != 3; ++e) {
     std::printf("%-12s NMSE %8.2f dB\n", names[e], 10.0 * std::log10(err[e] / sig));
   }
   return 0;

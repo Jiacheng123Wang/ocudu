@@ -746,7 +746,7 @@ simd_vector_interpolate(span<cbf16_t> out, span<const cf_t> first, span<const cf
 }
 
 
-void port_channel_estimator_average_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
+void port_channel_estimator_average_impl::apply_fd_td_estimation_stage_classical(fd_td_estimation_stage_args& args)
 {
   unsigned nof_tx_layers = args.dmrs_patterns.size();
   unsigned nof_lse_symbols = 1;
