@@ -16,7 +16,7 @@
 cu_cp:
   amf:
     no_core: false
-    addr: 192.168.100.153            # The address or hostname of the AMF (Open5GS core, separate VM).
+    addr: 192.168.100.127            # The address or hostname of the AMF (Open5GS core, separate VM).
     port: 38412
     bind_addr: 192.168.100.125       # A local IP that the gNB binds to for traffic from the AMF.
     supported_tracking_areas:
@@ -29,7 +29,7 @@ cu_cp:
 
 ru_sdr:
   device_driver: zmq
-  device_args: tx_port=tcp://0.0.0.0:4556,rx_port=tcp://198.19.0.2:4557
+  device_args: tx_port=tcp://0.0.0.0:4556,rx_port=tcp://192.168.64.2:4557
   srate: 23.04
   tx_gain: -12                      # Back off from full scale, required by OAI fixed point FFT
                                     # (also macOS ZMQ requires gain <= 0 dB)
@@ -56,7 +56,7 @@ cell_cfg:
 
 log:
   filename: /tmp/gnb.log            # Path of the log file.
-  all_level: info                   # Logging level applied to all layers.
+  all_level: debug                   # Logging level applied to all layers.
   hex_max_size: 0
 
 pcap:
