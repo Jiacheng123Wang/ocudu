@@ -7,6 +7,16 @@
 >
 > 版本：v1.0 ｜ 状态：规划（待评审）
 
+> **MEMO 2026-08-30（metal_mmse 完成后更新）**：本规划 v1.0 撰写时仓库尚无 MMSE
+> 实现，故 §0-3 的"L0 基线升级（必做）"列为前置任务。**该基线现已完成**：
+> `port_channel_estimator_metal_mmse_impl`（2D 时频块 MMSE，R=R_t⊗R_f，σ² 复用
+> 经典噪声估计，τ̄/f_d 为固定可配常量，`channel_statistics_estimator` 接口为 v2
+> 估计/AI 预留）已通过全部单测与实链验证（500 ping）。L0 由"待建"变为**现成**，
+> G2 的"≥ MMSE"验收基线直接对拍 metal_mmse。另注意：AI 计划 §2.2 的时延锚点已
+> 被 2026-08-30 实测更新（CE metal_mmse 实链 median ~255 µs@36 PRB/3 DMRS、
+> cpu 63.6 µs；Metal 基础设施的 occupancy/warm-up/粮草先行/bit-exact 经验教训
+> 见 `docs/apple_silicon_heterogeneous_gnb_plan.md` 与 CE `PLAN.md` §7.0.15）。
+
 ---
 
 ## 0. 结论速览（TL;DR）
@@ -20,9 +30,11 @@
    NMSE −16.78 dB，比 srsRAN 现行实用估计器（−12.25 dB）好约 **4.5 dB**、比 LS（−3.56 dB）
    好 13 dB；MIT 开源 + 权重 + ONNX 齐全。风险：论文在 V100 上单网格 0.175 ms，
    Apple MPS 上是否满足预算**必须先做原型实测**（决策门 G1）。
-3. **基线升级（必做）**：现行 `port_channel_estimator_average_impl` 是 LS+平均/插值，
-   **并不是 MMSE**。先实现一个实用的经典 MMSE（基于估计 PDP 的 Wiener 平滑）作为
-   严格验收基线——AI 必须在该基线上继续有增益才允许默认启用（满足"不低于 MMSE"的硬指标）。
+3. **基线升级（L0 已完成，2026-08-30）**：~~现行 `port_channel_estimator_average_impl` 是 LS+平均/插值，
+   并不是 MMSE。先实现一个实用的经典 MMSE（基于估计 PDP 的 Wiener 平滑）作为
+   严格验收基线——AI 必须在该基线上继续有增益才允许默认启用（满足"不低于 MMSE"的硬指标）。~~
+   **现已落地**：`metal_mmse`（2D 时频块 MMSE，`expert_phy --pusch_channel_estimator_algo
+   metal_mmse`）实链 500 ping 验证通过——G2 的"≥ MMSE"基线直接对拍它即可。
 4. **备选/兜底 AI**：DMRS-only 2D CNN 去噪器（CNN4CE 思想）+ 经典插值，全 PRB 范围内
    都在时延预算内（5–50 MMAC），作为 HELENA 的降级备选。
 5. **否定项**（读过但不采用）：AdaFortiTran（自注意力 O(S²) 在 273 PRB 达 46.7 GMAC/端口，

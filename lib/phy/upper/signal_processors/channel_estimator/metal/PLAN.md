@@ -792,12 +792,23 @@ MAC PDU 经回调直接给 FAPI;V2X 小包走 P/E 核、大带宽视频走 GPU(�
   覆盖不到执行器线程)。缓解方案:启动期在 UL 执行器线程上跑一次哑提交——需要
   executor 侧配合,列入待办(与 LDPC 大 z 内核优化同批)。
 
-### 7.0.8 剩余工作（实验室依赖，列入收尾清单）
+### 7.0.8 剩余工作（复盘收尾清单，2026-08-30 更新）
 
-- 实链三腿 A/B（ZMQ → RF B200）：`expert_phy --pusch_channel_estimator_algo cpu|metal_mmse`
-  背靠背，`[ul_pipeline]` 探针口径（参照 LDPC 实链轮次）；预期重点：30 kHz SCS 与低 SNR 场景。
-- 探针 `ai_ce_us` 细分与 metrics decorator 扩展（GPU 时延直方图/回退计数）。
-- 跨端口批处理 + 持久 command buffer（§7.0.5 缓解方向，视实链时延数据决定优先级）。
+**metal_mmse 主线已闭环**（算法/引擎/配置/单测/时延优化/E2E 500-ping/粮草先行）。
+剩余 pending issue（按优先级）：
+
+1. **首槽 ~3 ms 一次性税**：执行器线程首次 Metal 调用的 per-thread 驱动初始化
+   （构造期主线程 warm-up 覆盖不到）。缓解：启动期在 UL 执行器线程跑一次哑提交
+   ——需要 executor 侧配合，列为待办。影响：仅 attach 首槽一次，数据无损失。
+2. **30 kHz SCS 未验证**：预算 0.5 ms；当前 CE ~255 µs + LDPC ~730 µs 会超——
+   LDPC 每轮 barrier 链（46 × ~8.7 µs）是大头，需先做 LDPC 优化
+   （多 TG + 设备栅栏 persistent / 小 z 走 layered）再验 30 kHz。
+3. **RF B200 实链三腿 A/B**：实验室依赖，ZMQ 已验证，RF 未做。
+4. **(C) NEON 加速**：不触发（CPU 仅 ~14%），保留为预算收紧时储备。
+5. **(D) 引擎单例 + 跨端口批处理 + 持久 command buffer**：多端口时摊销提交往返。
+6. **探针 `ai_ce_us` 细分 + metrics decorator**：现用 `OCUDU_MMSE_TIME` 环境开关替代。
+7. **τ̄/f_d 估计（v2 统计）与 PUCCH/SRS**：接口已预留（`channel_statistics_estimator`），
+   v2/AI-CE 任务承接（见 `AI_channel_estimation_implementation_plan.md` MEMO）。
 
 - **M3**：NMSE/BLER 对比测试、时延基准（`metal/test/` 扩展 + `pusch_processor_benchmark`
   --algo 选项）、探针、实链三腿 A/B（ZMQ → RF B200）。

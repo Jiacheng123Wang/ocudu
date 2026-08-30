@@ -6,6 +6,25 @@
 > （CE：`lib/phy/upper/signal_processors/channel_estimator/metal/PLAN.md`，
 > LDPC：`lib/phy/upper/channel_coding/ldpc/metal/PLAN.md`）。
 
+## 0. "Heterogeneous" 的两层含义
+
+本规划的 **heterogeneous（异构）** 是双重异构，且恰好映射到 V2X 的需求异构：
+
+| 层 | 异构维度 | 组成 | 优势 |
+|---|---|---|---|
+| **算力异构** | 计算资源 | P 性能核 / E 能效核 / **GPU** / **NPU** | 时延敏感走 CPU 核、高并发走 GPU、AI 推理走 NPU |
+| **存储异构** | 数据存放 | 寄存器/缓存 / **统一内存**（RAM）/ **flash**（mmap 页缓存） | 热数据驻统一内存零拷贝、冷数据（如 GB 级矩阵/模型权重）驻 flash 按需换页 |
+
+**需求异构的天然匹配**：
+
+- **V2X 控制信令**：极低时延、极高可靠性、小包——走 P/E 核（CPU 路径，µs 级链）
+  + 热缓存（全部战备状态常驻内存，粮草先行）；
+- **V2X 摄像头数据**：极高带宽、海量数据、时延相对宽松——走 GPU（高并发吞吐）
+  + 大对象经统一内存/flash 分层（页缓存弹性驻留，§2.2 的 mmap 方案）。
+
+一台 gnb 内**算力与存储双层异构协同**，是对需求异构的结构性应答——这也是 OCUDU
+在 Apple Silicon 上相对纯 x86 方案的核心竞争力。
+
 ## 1. 定位：GPU Metal 的核心优势与适用场景
 
 - **Metal 的优势是高并发，不是单链路低时延**。Apple GPU 以成千上万的线程隐藏延迟；
@@ -106,20 +125,24 @@ mmap 的价值在"CPU 繁忙/实时期零计算"与页缓存弹性驻留，代�
 数据面走 GPU（未来 +NPU 做 AI PHY），在成本/功耗/性能上与纯 x86 方案形成结构性
 差异——这是 OCUDU 在 Apple Silicon 上的核心竞争力路线。
 
-## 5. 现状与下一步（2026-08-30 实链证据）
+## 5. 现状与下一步（2026-08-30 实链证据，500-ping 更新）
 
-- **CE metal_mmse**：E2E 全通（UE 接入、IP 获取、ping 通）；稳态 ~200 µs/槽
-  （3 DMRS 符号、36 PRB），管线预算内；首槽一次性 ~3 ms（已知，attach 时）。
-- **LDPC metal（layered）**：E2E 与 CE 双开全通（crc=OK、0 nok 稳态），但每解码
-  **~550-981 µs**，根因 = 每解码固定 290 个 dispatch（max_iter=6 × 48/轮）×
-  ~1.9 µs/dispatch 的调度链开销（小 TB 的 GPU 算力远未吃饱）；离群值 ~3-8 ms =
-  运行中首次出现的 (BG, Z) 槽构造（H 矩阵/CSR 构建，CPU 侧）。
-- **立即实验项**：`expert_phy --pusch_ldpc_decoder_type metal_persistent`
-  （单 dispatch 常驻内核，迭代/层循环在核内，单测对拍 100% 一致）——预期消除
-  dispatch 链开销；若仍超预算，按 §2 策略 E2E 时 LDPC 回 CPU 即可。
-- **中期**：CE 引擎单例 + 跨端口批处理（CE PLAN (D)）；LDPC 槽预构建常用
-  (BG, Z)；逐模块把同步 wait 改为回调挂接（§3.1 机制）。
+- **CE metal_mmse**：E2E 全通；**500 个 ping 全部通过**（2013 样本）。稳态
+  median ~255 µs（3 DMRS 符号、36 PRB），p99 457 µs；首槽一次性 ~2.6 ms（已知，
+  per-thread 驱动初始化，attach 时一次）。cpu 基线 63.6 µs。
+- **LDPC metal_persistent**：与 CE 双开全通（500 ping，crc=OK 100%）。median
+  **730 µs**（min 288 / p95 1746 / p99 2122）：实链 2-5 dB 工作点 iter==max_iter
+  （2-4 轮全预算、crc=OK）是正常收敛行为，每轮 ~300-400 µs = 46 次 × 1024 线程
+  device 级 barrier + 层计算；**粮草先行已落地**（102 槽启动期 ~12 ms 建齐、
+  运行中零惰性构建、首包解码 171× 提速）。
+- **管线** median 1133 µs（超 1 ms 槽长 ~13%）：ZMQ 无硬实时、功能达标；压预算
+  方向 = LDPC 每轮 barrier 链（多 TG + 设备栅栏 persistent / 小 z 走 layered）。
+- **中期**：CE 引擎单例 + 跨端口批处理（CE PLAN (D)）；首槽 per-thread 税缓解
+  （启动期执行器线程哑提交）；逐模块把同步 wait 改为回调挂接（§3.1 机制）。
+- **下一个任务**：**AI based channel estimation**（HELENA/MPSGraph，见
+  `AI_channel_estimation_implementation_plan.md`——L0 基线（metal_mmse）已就绪，
+  直接进 G1 延迟原型门禁）。
 - **长期**：FFT / Equalization / MIMO Detection 的 Metal 化（复用 CE/LDPC 的
   引擎范式与经验教训：occupancy 优先、构造期 warm-up、metallib 路径权威化、
-  ocudulog 诊断、累加顺序保 bit-exact——CE PLAN §7.0.15）；最终拼成 §3 的
-  单 dispatch 全链编排与 §4 的异构分流架构。
+  ocudulog 诊断、累加顺序保 bit-exact、粮草先行——CE PLAN §7.0.15）；最终拼成
+  §3 的单 dispatch 全链编排与 §4 的异构分流架构。
