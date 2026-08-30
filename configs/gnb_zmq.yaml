@@ -8,7 +8,7 @@
 
 cu_cp:
   amf:
-    addr: 192.168.100.127                 # The address or hostname of the AMF.
+    addr: 192.168.100.153                 # The address or hostname of the AMF.
     port: 38412
     bind_addr: 192.168.100.125            # A local IP that the gNB binds to for traffic from the AMF.
     supported_tracking_areas:

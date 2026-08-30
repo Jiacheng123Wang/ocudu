@@ -35,6 +35,18 @@ port_channel_estimator_helena_impl::port_channel_estimator_helena_impl(
       ocudulog::fetch_basic_logger("PHY").warning("AI-CE: 52-PRB engine init failed - classical fallback for 52 PRB");
     }
   }
+
+  // Warm-up predictions: the FIRST Core ML prediction compiles the ANE program
+  // (~15 ms, observed in the E2E first full-bandwidth slot - the attach-phase
+  // dec_t spike). Running it here at construction moves the cost off the slot
+  // critical path (the '粮草先行' principle, Core ML edition).
+  std::fill(nn_in.begin(), nn_in.end(), 0.0F);
+  if (engine != nullptr) {
+    (void)engine->predict(nn_in.data(), nn_out.data(), 612);
+  }
+  if (engine_52 != nullptr) {
+    (void)engine_52->predict(nn_in.data(), nn_out.data(), 624);
+  }
 }
 
 port_channel_estimator_helena_impl::~port_channel_estimator_helena_impl() = default;
@@ -50,6 +62,8 @@ bool port_channel_estimator_helena_impl::reload(const std::string& modelc_path_)
   // Atomic swap: the new engine serves from the next slot.
   engine      = std::move(next);
   modelc_path = modelc_path_;
+  // Warm up the new engine too (the first prediction compiles the ANE program).
+  (void)engine->predict(nn_in.data(), nn_out.data(), 612);
   ocudulog::fetch_basic_logger("PHY").info("AI-CE: model reloaded from {}", modelc_path);
   return true;
 }
