@@ -211,6 +211,10 @@ int main(int argc, char** argv)
   if (nogpu) {
     setenv("OCUDU_MMSE_NOGPU", "1", 1);
   }
+  // The harness's synthetic noise estimation saturates at the 100 dB SNR floor,
+  // which would trip the high-SNR classical bypass gate and skip the NN for the
+  // whole test set; force the NN path (the gate targets live high-SNR links).
+  setenv("OCUDU_HELENA_FORCE_NN", "1", 1);
 
   std::vector<unsigned> rshape, yshape;
   std::vector<float>    r = load_npy(r_path, rshape);

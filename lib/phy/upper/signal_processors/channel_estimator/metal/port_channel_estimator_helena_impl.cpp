@@ -121,7 +121,11 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
   // 40+ dB SINR). Beyond the training envelope the classical grid is near-optimal,
   // so serve it unchanged (the NN's value zone is low/mid SNR).
   constexpr float kHelenaMaxSnrDb = 25.0F;
-  if (10.0F * std::log10(get_snr()) > kHelenaMaxSnrDb) {
+  // OCUDU_HELENA_FORCE_NN disables the gate (the head-to-head harness needs it:
+  // its synthetic noise estimation saturates at the 100 dB floor, which would
+  // bypass the NN for the whole test set).
+  const bool force_nn = std::getenv("OCUDU_HELENA_FORCE_NN") != nullptr;
+  if (!force_nn && 10.0F * std::log10(get_snr()) > kHelenaMaxSnrDb) {
     if (time_en) {
       ocudulog::fetch_basic_logger("PHY").debug(
           "[helena_gate] prb={} snr={:.1f}dB > {:.0f}dB -> classical bypass",
