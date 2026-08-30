@@ -87,6 +87,20 @@ v1 两桶 + classical 兜底：
   commit `ac5226fd1f`）**；ZMQ 45 dB 下门控生效（1512 次 bypass），NN 不参与。
   剩余可选腿：UE `r=106` 验证 106 桶分派（门控下 NN 仍 bypass，仅验证分派路径；
   106 引擎的预测正确性由 head2head 合成集证明）。
+
+  **gnb 侧预算探针（ZMQ E2E 停止时输出，802 个 UL 槽，r=51/门控全开）**：
+
+  | 阶段 | mean | median | max | p95 |
+  |---|---|---|---|---|
+  | ul_pipeline（总） | 288.6 µs | 287.0 | 415.0 | 322.0 |
+  | ul_time_frequency | 169.1 | 166.5 | 251.2 | 190.4 |
+  | ul_channel_estimation | 72.0 | 70.2 | 121.1 | 99.4 |
+  | ul_equalization_demod | 22.7 | 21.6 | 43.2 | 34.4 |
+  | ul_ldpc_decode | 24.8 | 24.0 | 52.0 | 33.0 |
+
+  **预算判定：总流水线 mean 288.6 µs / max 415 µs，1 ms slot 预算内留 ~2.4× 余量** ✓
+  （此样本为 ping 流量、授权 ≤51 PRB 且 NN 被门控 bypass；106 全带宽授权的预算需
+  r=106 高负载跑测或 G-4 实机补充）。
 - **G-4 实机 A/B**：helena vs metal_mmse 双跑 shadow；真信道无 ground truth →
   用 BLER / HARQ 重传 / CQI-MCS / 吞吐 / ping 间接指标 + 保存 IQ/LS 网格离线
   分析（两估计器一致性 + TD 功率剖面合理性）。
