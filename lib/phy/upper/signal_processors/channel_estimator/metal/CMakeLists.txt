@@ -44,3 +44,7 @@ target_link_libraries(ocudu_channel_estimator_metal PRIVATE "-framework Metal" "
 # ---- Unit-level validation (inversion golden + GPU/CPU seam + NMSE vs the cpu estimator) ----
 add_executable(port_channel_estimator_metal_mmse_unit_test test/port_channel_estimator_metal_mmse_unit_test.cpp)
 target_link_libraries(port_channel_estimator_metal_mmse_unit_test PRIVATE ocudu_channel_estimator_metal ocudu_channel_estimator ocudu_phy_support ocuduvec ocudu_dft)
+
+# ---- G2 head-to-head: metal_mmse / cpu vs the AI-CE synthetic test set (.npy) ----
+add_executable(helena_head2head_bench test/helena_head2head_bench.cpp)
+target_link_libraries(helena_head2head_bench PRIVATE ocudu_channel_estimator_metal ocudu_channel_estimator ocudu_phy_support ocuduvec ocudu_dft)

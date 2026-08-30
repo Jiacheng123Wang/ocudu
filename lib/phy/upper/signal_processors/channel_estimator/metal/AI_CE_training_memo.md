@@ -94,7 +94,40 @@ loss 曲线：epoch1 val_loss 0.203 → epoch5 0.063 → epoch35 0.0203（仍在
 **运行时 = Core ML（ANE）**：141 µs p50 优于 metal_mmse 基线（~255 µs）；
 MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延不变。
 
-## 7. 坑与教训（持续更新）
+## 7. 资产备份与重启检查点（2026-08-30，macMini 重启前）
+
+**/tmp 重启后不可靠**（macOS 周期清理 + 重启可能清空），全部关键资产已备份到
+OneDrive **之外**的稳定位置：
+
+```
+/Users/jiachengwang/ai_ce_assets/
+├── dataset/   290525_dataset_ce.mat(5.0G) pusch_ce_dataset.npz(2.1G)
+│              R_test.npy Y_test.npy snr_test.npy   ← C++ 头对头对拍输入
+├── models/    helena_g2_savedmodel(作者集 35ep) helena_pusch_sm(PUSCH 10ep)
+│              helena_{fixed,f16,g2,b4}_ml.mlpackage(Core ML 转换)
+├── repo/      helena_repo/(官方仓库 102M)
+└── venv/      helena_venv/(python3.11 + tf-keras/coremltools/onnxruntime, 1.6G)
+```
+
+**重启后恢复流程**：1) `sudo powermetrics --samplers gpu_power -n 2 -i 1000` 确认
+GPU idle（孤儿 kernel 已被重启清除）；2) 把工作副本放回 /tmp（rsync/cp，或把脚本
+路径直接改到 ai_ce_assets）；3) 按下方"当前状态与续接点"继续。
+
+## 8. 当前状态与续接点（重启后从这里继续）
+
+- **已完成**：G1（ANE 141 µs 定案）；G2-A（作者集 35ep 重训 −15.03 dB）；Phase B
+  微调（PUSCH 10ep）→ **HELENA −20.91 dB**（输入 −11.42 dB，+9.5 dB）；
+  C++ 头对头工具已入库（`metal/test/helena_head2head_bench.cpp`，--nogpu 可跑）。
+- **进行中（有 bug）**：头对头首跑 `cpu-average +0.61 dB / metal_mmse +0.46 dB`
+  ——两个估计器都明显错误而 HELENA 同数据 −20.9 dB。已插桩：单样本 debug 显示
+  数据加载正确（rx/truth 合理）、估计值量级/相位大体对，但整体 NMSE 为正——
+  **待续查**（下一步：按 SNR 分桶统计 err/sig 定位爆炸来源；候选：深衰样本、
+  cbf16 截断、harness 的 grid_fake 单符号缓冲语义、或 estimates 与 truth 的
+  逐符号错位）。修复后重跑 `--nogpu`（GPU 重启后可直接跑 GPU 路径对比）。
+- **待办**：head-to-head 修好后与 HELENA −20.91 dB 三方对比入档；Core ML 集成
+  （port_channel_estimator_helena_impl + ANE 引擎）按 AI 计划 §6 推进。
+
+## 9. 坑与教训（持续更新）
 
 1. **coremltools 9 移除了 ONNX 直转**（`source='onnx'` 报错）→ 走 TF 路线。
 2. **TF 2.21/Keras 3 无法载入 Keras-2 格式 .keras**（`keras.src.engine` 反序列化失败）
@@ -114,8 +147,17 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
 9. **训练极快**：0.116M 参数 + 11k 样本，M4 Pro CPU 25 s/epoch——本项目的训练根本
    不需要 GPU/云资源。
 10. **git 纪律**：commit 前必看 `git status`（5.3 GB 数据集误提交一次，已 amend）。
+11. **孤儿 GPU kernel（2026-08-30 实锤）**：旧二进制 + 新 metallib 错配（旧参数表
+    绑定 + 新 kernel 签名）可让 kernel 读垃圾边界进入死循环；进程被 SIGTERM 杀掉后
+    **kernel 仍留在 GPU 上无限执行**（Apple GPU 无看门狗）——powermetrics 显示
+    HW active residency 100%/满频、ioreg Renderer 1%、Device 100%，无归属进程。
+    **唯一修复 = 重启**。预防：改 kernel 后必须重编译所有使用方；异常超时进程
+    kill 后查 GPU 状态；GPU 基准只跑在空载机器上。
+12. **C++ 头对头 harness 首跑 NMSE 为正（+0.6 dB）**：单样本估计值量级/相位合理但
+    聚合误差 > 信号功率——bug 未定位（候选：深衰样本爆炸、grid_fake 单符号缓冲
+    语义、逐符号错位），见 §8 续接点。
 
-## 8. 脚本清单（本仓库 `lib/phy/upper/signal_processors/channel_estimator/metal/ai_train/`）
+## 10. 脚本清单（本仓库 `lib/phy/upper/signal_processors/channel_estimator/metal/ai_train/`）
 
 | 文件 | 用途 |
 |---|---|
