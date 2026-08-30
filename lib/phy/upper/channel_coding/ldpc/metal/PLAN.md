@@ -1420,6 +1420,32 @@ median 753(前次 979)。
    `docs/apple_silicon_heterogeneous_gnb_plan.md` §1,模块级 >10× 可容忍,E2E
    预算策略由 §2 的组合开关控制。
 
+## 4.19 粮草先行落地:CSR syndrome + 全尺寸预构建(2026-08-30)
+
+按 `docs/apple_silicon_heterogeneous_gnb_plan.md` §2.1 铁律(初始化绝不落在数据包
+路径上)实施:
+
+1. **CSR-only 表示(layered 家族)**:`nmsl_final_syndrome` 与 `nmsl_persistent_decode`
+   内联 syndrome 改为**走 CSR 边表**(H 行与 CSR 边集相同,XOR 奇偶逐位一致);
+   layered/persistent **不再物化打包 H**(引擎按模式跳过 buf_h)。收益:
+   - 内存:全尺寸矩阵从 ~11.7 GB(双 BG)降到 **~40 MB**;
+   - 构建:从原图直接枚举 CSR(每 lifted 行的边按列升序 = 旧 H 扫描序,**逐位一致**),
+     大 z 构建更快;
+   - 实测 syndrome 更快:persistent z=352 单解码 3.2 ms → **761 µs**;
+     layered z=352 1.06 ms → **1.09 ms**(持平)。
+2. **全尺寸预构建**:layered/persistent 模式构造期建齐 **2 BG × 51 z = 102 个槽**
+   (矩阵 + 引擎 + 缓冲),首个 PUSCH 到达时零初始化成本;flooding/LLS/async 仍需
+   打包 H/Hᵀ(全量 ~5.8 GB/BG)保持惰性 + 构造期只预热家族 JIT(折衷见异构规划
+   §2.2 的 flash/mmap 量化评估)。
+3. **warm-up 每家族仅一次**:内核 JIT 是每进程每 pipeline 的——仅该家族第一个
+   引擎跑 1 轮哑解码,后续引擎跳过(102 槽 × ~200 µs 的重复税消除)。
+4. 单元对拍 **0 disagreements**(含 persistent,逐位一致);mt-stress 通过。
+
+**教训(排查记录)**:改 kernel 后单跑 z=352 曾测出 48 ms"回归"——实为后台
+`-j8` gnb 构建占满 CPU/内存带宽所致(Apple 统一内存:GPU 访存带宽被 CPU 内存
+压力挤占,访存密集 kernel 慢 ~45×)。构建结束后同二进制 1.09 ms。**Metal 性能
+测量必须在空载机器上进行**,否则结论不可信。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`

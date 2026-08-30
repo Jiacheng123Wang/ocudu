@@ -10,6 +10,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -402,8 +403,13 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
                                                      options:MTLResourceStorageModeShared];
 
   // Zero-copy wrap the host-side packed H matrix (4KB-aligned, owned by the caller).
-  engine->buf_h = zero_copy_buffer(engine, h, static_cast<size_t>(engine->m_aligned) *
-                                                 engine->n_h_chunks * sizeof(uint32_t));
+  // The layered family computes the syndrome from the CSR edge lists (identical edge
+  // sets), so H is only needed by the flooding / async / LLS kernels.
+  const bool needs_h = (mode == algo::flooding) || (mode == algo::async_delta) || (mode == algo::lls);
+  if (needs_h) {
+    engine->buf_h = zero_copy_buffer(engine, h, static_cast<size_t>(engine->m_aligned) *
+                                                   engine->n_h_chunks * sizeof(uint32_t));
+  }
 
   if (mode == algo::lls) {
     // LLS buffers (see PLAN.md 4.6): the fp16 LLRs live in the zero-copy host buffer, s_hard packs
@@ -471,11 +477,21 @@ bool decoder_engine::init(uint32_t n_logical, uint32_t m_logical, float factor, 
   // compile / first command-buffer commit (~ms, CPU-side - inside the slot if left to the
   // first real decode). A 1-iteration dummy decode here moves that cost to the (lazy,
   // per-TB-size) slot construction. Same pattern as the MMSE channel-estimator engine.
-  if (::posix_memalign(&engine->warmup_llr, 4096,
-                       static_cast<size_t>(engine->n_aligned) * sizeof(uint16_t)) == 0) {
-    std::memset(engine->warmup_llr, 0, static_cast<size_t>(engine->n_aligned) * sizeof(uint16_t));
-    // Outputs are skipped (nullptr hard-bits / error-count arguments).
-    (void)decode(engine->warmup_llr, nullptr, /*max_iter=*/1, nullptr);
+  // The kernel JIT is per-process per pipeline: only the FIRST engine of a family needs
+  // the warm-up decode; later engines of the same family skip it (their buffers are
+  // wrapped on first use, which is microsecond-scale).
+  {
+    static std::atomic<int> family_warmed{0};
+    const int              mode_bit = 1 << static_cast<int>(mode);
+    if ((family_warmed.load(std::memory_order_acquire) & mode_bit) == 0) {
+      if (::posix_memalign(&engine->warmup_llr, 4096,
+                           static_cast<size_t>(engine->n_aligned) * sizeof(uint16_t)) == 0) {
+        std::memset(engine->warmup_llr, 0, static_cast<size_t>(engine->n_aligned) * sizeof(uint16_t));
+        // Outputs are skipped (nullptr hard-bits / error-count arguments).
+        (void)decode(engine->warmup_llr, nullptr, /*max_iter=*/1, nullptr);
+      }
+      family_warmed.fetch_or(mode_bit, std::memory_order_release);
+    }
   }
 
   return true;
@@ -631,9 +647,7 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
   [enc setBytes:&no_edges length:sizeof(uint32_t) atIndex:11];
   [enc setBytes:&engine->n_aligned length:sizeof(uint32_t) atIndex:12];
   [enc setBytes:&engine->m_aligned length:sizeof(uint32_t) atIndex:13];
-  [enc setBytes:&engine->n_h_chunks length:sizeof(uint32_t) atIndex:14];
-  [enc setBuffer:engine->buf_h offset:0 atIndex:15];
-  [enc setBuffer:mtl_llr_i8 offset:0 atIndex:16];
+  [enc setBuffer:mtl_llr_i8 offset:0 atIndex:14];
   [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(1024, 1, 1)];
   } else if (is_async) {
@@ -694,11 +708,11 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
   [enc setBytes:&engine->factor length:sizeof(float) atIndex:6];
   [enc setBytes:&engine->beta length:sizeof(float) atIndex:7];
   [enc setBuffer:engine->buf_ctrl offset:0 atIndex:8];
-  // Final syndrome: 10-14.
-  [enc setBuffer:engine->buf_h offset:0 atIndex:10];
-  [enc setBuffer:engine->buf_llr_fp16 offset:0 atIndex:11];
-  [enc setBuffer:engine->buf_h_pred_bits offset:0 atIndex:12];
-  [enc setBytes:&engine->n_h_chunks length:sizeof(uint32_t) atIndex:13];
+  // Final syndrome (CSR walk): 10-14.
+  [enc setBuffer:engine->buf_row_start offset:0 atIndex:10];
+  [enc setBuffer:engine->buf_edge_vn offset:0 atIndex:11];
+  [enc setBuffer:engine->buf_llr_fp16 offset:0 atIndex:12];
+  [enc setBuffer:engine->buf_h_pred_bits offset:0 atIndex:13];
   [enc setBuffer:engine->buf_ctrl offset:0 atIndex:14];
   // ET gate: 15.
   [enc setBuffer:engine->buf_ctrl offset:0 atIndex:15];

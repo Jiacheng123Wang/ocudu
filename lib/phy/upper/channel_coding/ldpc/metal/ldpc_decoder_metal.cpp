@@ -175,59 +175,96 @@ std::shared_ptr<ldpc_decoder_metal::slot_matrices> get_shared_matrices(metal::de
   m->m_aligned             = ((m_rows + 31) / 32) * 32;
   m->n_h_chunks            = m->n_aligned / 32;
 
-  m->h = aligned_alloc<uint32_t>(static_cast<size_t>(m->m_aligned) * m->n_h_chunks);
-  const bool build_ht =
-      (mode == metal::decoder_engine::algo::flooding) || (mode == metal::decoder_engine::algo::lls);
-  if (build_ht) {
-    const unsigned h_pred_len = m->m_aligned / 32;
-    m->ht = aligned_alloc<uint32_t>(static_cast<size_t>(m->n_aligned) * h_pred_len);
-    ocudu_assert(m->ht, "Metal LDPC: H^T allocation failed.");
-    std::memset(m->ht.get(), 0, static_cast<size_t>(m->n_aligned) * h_pred_len * sizeof(uint32_t));
-  }
-  ocudu_assert(m->h, "Metal LDPC: H allocation failed.");
-  std::memset(m->h.get(), 0, static_cast<size_t>(m->m_aligned) * m->n_h_chunks * sizeof(uint32_t));
+  const bool is_layered_family = (mode == metal::decoder_engine::algo::layered) ||
+                                 (mode == metal::decoder_engine::algo::layered_persistent);
+  // The layered family computes the syndrome from the CSR edge lists, so the packed H
+  // matrix is never materialized for it (order-of-magnitude memory saving, which is what
+  // makes the all-size pre-build affordable on unified memory). Flooding / LLS / async
+  // kernels walk the packed rows and keep H (and H^T where their kernels need it).
+  const bool build_h  = !is_layered_family;
+  const bool build_ht = (mode == metal::decoder_engine::algo::flooding) || (mode == metal::decoder_engine::algo::lls);
 
   const ldpc_graph_impl graph(bg, static_cast<ldpc::lifting_size_t>(z));
   m->n_layers = graph.get_nof_BG_check_nodes();
-  for (unsigned row = 0; row != graph.get_nof_BG_check_nodes(); ++row) {
-    for (unsigned col = 0; col != graph.get_nof_BG_var_nodes_full(); ++col) {
-      const uint16_t shift = graph.get_lifted_node(row, col);
-      if (shift == ldpc::NO_EDGE) {
-        continue;
-      }
-      for (unsigned k = 0; k != z; ++k) {
-        const unsigned lifted_row = row * z + k;
-        const unsigned lifted_col = col * z + ((k + shift) % z);
-        m->h.get()[lifted_row * m->n_h_chunks + lifted_col / 32] |= 1u << (lifted_col % 32);
-        if (build_ht) {
-          const unsigned h_pred_len = m->m_aligned / 32;
-          m->ht.get()[lifted_col * h_pred_len + lifted_row / 32] |= 1u << (lifted_row % 32);
+  if (build_h) {
+    m->h = aligned_alloc<uint32_t>(static_cast<size_t>(m->m_aligned) * m->n_h_chunks);
+    ocudu_assert(m->h, "Metal LDPC: H allocation failed.");
+    std::memset(m->h.get(), 0, static_cast<size_t>(m->m_aligned) * m->n_h_chunks * sizeof(uint32_t));
+    if (build_ht) {
+      const unsigned h_pred_len = m->m_aligned / 32;
+      m->ht = aligned_alloc<uint32_t>(static_cast<size_t>(m->n_aligned) * h_pred_len);
+      ocudu_assert(m->ht, "Metal LDPC: H^T allocation failed.");
+      std::memset(m->ht.get(), 0, static_cast<size_t>(m->n_aligned) * h_pred_len * sizeof(uint32_t));
+    }
+    for (unsigned row = 0; row != graph.get_nof_BG_check_nodes(); ++row) {
+      for (unsigned col = 0; col != graph.get_nof_BG_var_nodes_full(); ++col) {
+        const uint16_t shift = graph.get_lifted_node(row, col);
+        if (shift == ldpc::NO_EDGE) {
+          continue;
+        }
+        for (unsigned k = 0; k != z; ++k) {
+          const unsigned lifted_row = row * z + k;
+          const unsigned lifted_col = col * z + ((k + shift) % z);
+          m->h.get()[lifted_row * m->n_h_chunks + lifted_col / 32] |= 1u << (lifted_col % 32);
+          if (build_ht) {
+            const unsigned h_pred_len = m->m_aligned / 32;
+            m->ht.get()[lifted_col * h_pred_len + lifted_row / 32] |= 1u << (lifted_row % 32);
+          }
         }
       }
     }
   }
 
-  if (mode == metal::decoder_engine::algo::layered || mode == metal::decoder_engine::algo::layered_persistent) {
-    for (unsigned r = 0; r != m->m_aligned; ++r) {
-      for (unsigned c = 0; c != m->n_h_chunks; ++c) {
-        m->no_edges += static_cast<uint32_t>(__builtin_popcount(m->h.get()[r * m->n_h_chunks + c]));
+  // CSR edge layout: built for the layered family (and async, which also injects over
+  // edges). For the layered family it is built DIRECTLY from the protograph - per lifted
+  // row the edges come out in ascending column order, exactly the order the previous
+  // packed-H scan produced, so the decode stays bit-exact.
+  if (mode == metal::decoder_engine::algo::layered || mode == metal::decoder_engine::algo::layered_persistent ||
+      mode == metal::decoder_engine::algo::async_delta) {
+    uint32_t no_edges = 0;
+    for (unsigned row = 0; row != graph.get_nof_BG_check_nodes(); ++row) {
+      for (unsigned col = 0; col != graph.get_nof_BG_var_nodes_full(); ++col) {
+        if (graph.get_lifted_node(row, col) != ldpc::NO_EDGE) {
+          no_edges += z;
+        }
       }
     }
+    m->no_edges  = no_edges;
     m->row_start = aligned_alloc<uint32_t>(static_cast<size_t>(m->m_aligned) + 1);
     m->edge_vn   = aligned_alloc<uint32_t>(m->no_edges);
     ocudu_assert(m->row_start && m->edge_vn, "Metal LDPC: CSR allocation failed.");
-    uint32_t cursor    = 0;
+    uint32_t cursor      = 0;
     m->row_start.get()[0] = 0;
-    for (unsigned r = 0; r != m->m_aligned; ++r) {
-      for (unsigned c = 0; c != m->n_h_chunks; ++c) {
-        uint32_t mask = m->h.get()[r * m->n_h_chunks + c];
-        while (mask != 0) {
-          const uint32_t bit = static_cast<uint32_t>(__builtin_ctz(mask));
-          m->edge_vn.get()[cursor++] = c * 32 + bit;
-          mask &= (mask - 1);
+    if (is_layered_family) {
+      // Direct protograph enumeration (bit-exact edge order, no packed-H scan).
+      for (unsigned row = 0; row != graph.get_nof_BG_check_nodes(); ++row) {
+        for (unsigned k = 0; k != z; ++k) {
+          for (unsigned col = 0; col != graph.get_nof_BG_var_nodes_full(); ++col) {
+            const uint16_t shift = graph.get_lifted_node(row, col);
+            if (shift == ldpc::NO_EDGE) {
+              continue;
+            }
+            m->edge_vn.get()[cursor++] = col * z + ((k + shift) % z);
+          }
+          m->row_start.get()[row * z + k + 1] = cursor;
         }
       }
-      m->row_start.get()[r + 1] = cursor;
+      for (unsigned r = graph.get_nof_BG_check_nodes() * z; r != m->m_aligned; ++r) {
+        m->row_start.get()[r + 1] = cursor; // padded rows carry no edges
+      }
+    } else {
+      // Async: scan the packed H as before (it is materialized for the async kernels).
+      for (unsigned r = 0; r != m->m_aligned; ++r) {
+        for (unsigned c = 0; c != m->n_h_chunks; ++c) {
+          uint32_t mask = m->h.get()[r * m->n_h_chunks + c];
+          while (mask != 0) {
+            const uint32_t bit = static_cast<uint32_t>(__builtin_ctz(mask));
+            m->edge_vn.get()[cursor++] = c * 32 + bit;
+            mask &= (mask - 1);
+          }
+        }
+        m->row_start.get()[r + 1] = cursor;
+      }
     }
   }
 
@@ -266,12 +303,23 @@ ldpc_decoder_metal::ldpc_decoder_metal(bool force_decoding_, bool early_stop_syn
   beta_override(beta_override_),
   enable_et(enable_et_)
 {
-  // Pre-warm the GPU family at construction: the first (base graph, z) slot used to be
-  // built lazily inside the first live decode, paying the pipeline-state creation and the
-  // first-dispatch kernel JIT (~tens of ms - the E2E first-slot dec_t=49ms anomaly) on the
-  // slot critical path. Building one tiny slot here moves all of it to the decoder-pool
-  // construction (gnb startup).
-  (void)get_slot(ldpc_base_graph_type::BG2, ldpc::lifting_size_t::LS2);
+  // "兵马未动，粮草先行" (docs/apple_silicon_heterogeneous_gnb_plan.md): everything
+  // preparable is prepared at construction (gnb startup) - engine and matrix
+  // initialization must never land on the packet path. For the layered family the
+  // CSR-only representation makes the ALL-SIZE pre-build affordable (~40 MB shared
+  // matrices + ~37 MB engine buffers per instance on unified memory); the
+  // flooding/LLS/async kernels still need the packed H (GB-scale across all sizes),
+  // so those modes keep the lazy build and only the family JIT is pre-warmed here.
+  if (mode == metal::decoder_engine::algo::layered || mode == metal::decoder_engine::algo::layered_persistent) {
+    for (unsigned bg_idx = 0; bg_idx != 2; ++bg_idx) {
+      for (unsigned zi = 0; zi != ldpc::NOF_LIFTING_SIZES; ++zi) {
+        (void)get_slot(bg_idx == 0 ? ldpc_base_graph_type::BG1 : ldpc_base_graph_type::BG2,
+                       ldpc::all_lifting_sizes[zi]);
+      }
+    }
+  } else {
+    (void)get_slot(ldpc_base_graph_type::BG2, ldpc::lifting_size_t::LS2);
+  }
 }
 
 ldpc_decoder_metal::~ldpc_decoder_metal() = default;

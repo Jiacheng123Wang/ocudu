@@ -188,10 +188,10 @@ kernel void nmsl_cn_update(
 // bits (one threadgroup per check row) so the CPU-side readback is exact, and
 // accumulates the unsatisfied-row count for the ET gate.
 kernel void nmsl_final_syndrome(
-    device const uint32_t* h_matrix [[buffer(10)]],
-    device const half* llr [[buffer(11)]],
-    device uint32_t* h_pred_bits [[buffer(12)]],
-    constant uint32_t& n_h_chunks [[buffer(13)]],
+    device const uint32_t* row_start [[buffer(10)]],
+    device const uint32_t* edge_vn [[buffer(11)]],
+    device const half* llr [[buffer(12)]],
+    device uint32_t* h_pred_bits [[buffer(13)]],
     device DecodeCtrl* ctrl [[buffer(14)]],
     uint tid [[thread_index_in_threadgroup]],
     uint wid [[threadgroup_position_in_grid]])
@@ -202,15 +202,13 @@ if (atomic_load_explicit(&ctrl->early_terminate, memory_order_relaxed)) {
 
     const uint row = wid;
     uint parity = 0;
-    const uint row_base = row * n_h_chunks;
-    
-    for (uint i = tid; i < n_h_chunks; i += 32) {
-        uint32_t mask = h_matrix[row_base + i];
-        while (mask != 0) {
-            const uint bit = ctz(mask);
-            parity ^= (llr[i * 32 + bit] < 0.0h) ? 1u : 0u;
-            mask &= (mask - 1);
-        }
+    const uint e0 = row_start[row];
+    const uint e1 = row_start[row + 1];
+
+    // Walk the CSR edge list of the row (identical edge set as the packed H row,
+    // so the XOR parity is bit-exact with the previous H-matrix walk).
+    for (uint e = e0 + tid; e < e1; e += 32) {
+        parity ^= (llr[edge_vn[e]] < 0.0h) ? 1u : 0u;
     }
 
     for (uint offset = 16; offset > 0; offset >>= 1) {
@@ -308,9 +306,7 @@ kernel void nmsl_persistent_decode(
     constant uint32_t& no_edges [[buffer(11)]],
     constant uint32_t& n_aligned [[buffer(12)]],
     constant uint32_t& m_aligned [[buffer(13)]],
-    constant uint32_t& n_h_chunks [[buffer(14)]],
-    device const uint32_t* h_matrix [[buffer(15)]],
-    device const int8_t* in_i8 [[buffer(16)]],
+    device const int8_t* in_i8 [[buffer(14)]],
     uint tid [[thread_index_in_threadgroup]])
 {
     const uint lane = tid & 31u;
@@ -356,17 +352,15 @@ kernel void nmsl_persistent_decode(
         }
 
         // ---- Final syndrome refresh (former nmsl_final_syndrome): each
-        // simdgroup scans its rows and accumulates the unsatisfied count. ----
+        // simdgroup scans its rows and accumulates the unsatisfied count.
+        // CSR walk: identical edge set as the packed H row, so the XOR parity
+        // is bit-exact with the previous H-matrix version. ----
         for (uint row = sg; row < m_aligned; row += 32) {
             uint parity = 0;
-            const uint row_base = row * n_h_chunks;
-            for (uint i = lane; i < n_h_chunks; i += 32) {
-                uint32_t mask = h_matrix[row_base + i];
-                while (mask != 0) {
-                    const uint bit = ctz(mask);
-                    parity ^= ((float)llr[i * 32 + bit] < 0.0f) ? 1u : 0u;
-                    mask &= (mask - 1);
-                }
+            const uint e0 = row_start[row];
+            const uint e1 = row_start[row + 1];
+            for (uint e = e0 + lane; e < e1; e += 32) {
+                parity ^= (llr[edge_vn[e]] < 0.0h) ? 1u : 0u;
             }
             for (uint offset = 16; offset > 0; offset >>= 1) {
                 parity ^= simd_shuffle_xor(parity, offset);
