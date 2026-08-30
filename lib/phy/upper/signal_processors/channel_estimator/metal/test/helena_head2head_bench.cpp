@@ -14,6 +14,7 @@
 #include "ocudu/ran/resource_allocation/rb_bitmap.h"
 #include "ocudu/support/math/math_utils.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -248,12 +249,17 @@ int main(int argc, char** argv)
                                                                OCUDU_HELENA_MODEL_PATH_52,
                                                                OCUDU_HELENA_MODEL_PATH_106,
                                                                false);
+      helena_ptr = helena.get();
       ests.push_back(std::move(helena));
     }
   }
   const char*         names[3] = {"cpu-average", "metal_mmse", "helena-ane"};
   std::vector<double> err(3, 0.0);
   double              sig = 0.0;
+  // HELENA predict wall time per sample (C++ zero-copy ANE path, idle-machine floor;
+  // the E2E adds pipeline contention on top).
+  std::vector<double> helena_us;
+  helena_us.reserve(n);
   std::vector<float>  dump_x, dump_y;
   if (dump_mode) {
     dump_x.reserve(static_cast<size_t>(n) * nff * 14 * 2);
@@ -278,6 +284,9 @@ int main(int argc, char** argv)
         dump_x.insert(dump_x.end(), xin, xin + static_cast<size_t>(nff) * 14 * 2);
         dump_y.insert(dump_y.end(), yb, yb + static_cast<size_t>(nff) * 14 * 2);
         continue;
+      }
+      if (e == 2) {
+        helena_us.push_back(helena_ptr->last_predict_us());
       }
       for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
         std::vector<cbf16_t> est(nff);
@@ -307,6 +316,20 @@ int main(int argc, char** argv)
   }
   for (unsigned e = 0; e != 3; ++e) {
     std::printf("%-12s NMSE %8.2f dB\n", names[e], 10.0 * std::log10(err[e] / sig));
+  }
+  if (!helena_us.empty()) {
+    std::sort(helena_us.begin(), helena_us.end());
+    const double p50 = helena_us[helena_us.size() / 2];
+    const double p95 = helena_us[static_cast<size_t>(helena_us.size() * 0.95)];
+    const double mx  = helena_us.back();
+    const double sum = 0.0;
+    double       acc = 0.0;
+    for (double v : helena_us) {
+      acc += v;
+    }
+    (void)sum;
+    std::printf("helena predict (n=%zu): p50=%.1fus p95=%.1fus max=%.1fus mean=%.1fus\n",
+                helena_us.size(), p50, p95, mx, acc / helena_us.size());
   }
   return 0;
 }
