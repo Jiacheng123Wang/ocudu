@@ -1447,6 +1447,22 @@ median 753(前次 979)。
 压力挤占,访存密集 kernel 慢 ~45×)。构建结束后同二进制 1.09 ms。**Metal 性能
 测量必须在空载机器上进行**,否则结论不可信。
 
+### 4.19.1 500-ping 实链验证:粮草先行完全生效(2026-08-30)
+
+`metal_persistent` + `metal_mmse` 双开,500 个 ping 全通(2013 样本):
+
+- **启动期战备**:102 个 (BG,z) 槽 ~12 ms 内全部建成(gnb started 之前),会话全程
+  **零**惰性构建;首个 PUSCH 解码 dec_t **286.6 µs**(修复前 48993 µs,171×);
+- **CE** 稳态 median 254.7 µs、p99 457 µs;首槽 2.59 ms = 每线程首次 Metal 调用
+  一次性税(每进程一次,已知);
+- **LDPC** median 730 µs,metal_t≈dec_t(时间都在真解码):实链 2-5 dB 工作点
+  iter==max_iter(2-4 轮全预算,crc=OK)是正常收敛行为;每轮 ~300-400 µs =
+  46 次 × 1024 线程 device 级 barrier(~8.7 µs/次)+ 层计算——persistent 的
+  barrier 链是剩余成本主体;
+- 管线 median 1133 µs(~13% 超 1 ms 槽长):ZMQ 无硬实时,功能达标;压预算方向 =
+  LDPC 每轮 barrier 链(多 TG + 设备栅栏 persistent 变体 / 小 z 走 layered),
+  列入待办。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`
