@@ -224,8 +224,11 @@ int main(int argc, char** argv)
     // CFO phase at low SNR would randomly rotate the DMRS symbols and destroy the
     // TD average / MMSE coherence (the original +0.6 dB harness bug).
     if (dump_mode) {
-      auto helena = std::make_unique<port_channel_estimator_helena_impl>(
-          create_interpolator(), make_ta_estimator(), OCUDU_HELENA_MODEL_PATH, false);
+      auto helena = std::make_unique<port_channel_estimator_helena_impl>(create_interpolator(),
+                                                               make_ta_estimator(),
+                                                               OCUDU_HELENA_MODEL_PATH,
+                                                               OCUDU_HELENA_MODEL_PATH_52,
+                                                               false);
       helena_ptr = helena.get();
       ests.push_back(std::move(helena));
     } else {
@@ -238,8 +241,11 @@ int main(int argc, char** argv)
           create_interpolator(), make_ta_estimator(),
           std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F), 3, false);
       ests.push_back(std::move(mmse));
-      auto helena = std::make_unique<port_channel_estimator_helena_impl>(
-          create_interpolator(), make_ta_estimator(), OCUDU_HELENA_MODEL_PATH, false);
+      auto helena = std::make_unique<port_channel_estimator_helena_impl>(create_interpolator(),
+                                                               make_ta_estimator(),
+                                                               OCUDU_HELENA_MODEL_PATH,
+                                                               OCUDU_HELENA_MODEL_PATH_52,
+                                                               false);
       ests.push_back(std::move(helena));
     }
   }

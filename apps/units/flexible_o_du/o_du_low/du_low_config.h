@@ -89,6 +89,8 @@ struct du_low_unit_expert_upper_phy_config {
   unsigned pusch_channel_estimator_mmse_block_prb = 3;
   /// Compiled Core ML model path for the HELENA channel estimator (empty = baked-in default).
   std::string pusch_channel_estimator_helena_model_path;
+  /// 52-PRB HELENA model (empty = baked-in default).
+  std::string pusch_channel_estimator_helena_model_path_52;
   /// \brief PUSCH channel equalizer algorithm.
   ///
   /// Use one of these options:

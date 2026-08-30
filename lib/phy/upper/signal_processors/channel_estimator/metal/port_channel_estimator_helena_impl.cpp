@@ -13,6 +13,7 @@ port_channel_estimator_helena_impl::port_channel_estimator_helena_impl(
     std::unique_ptr<interpolator>                        interp,
     std::unique_ptr<time_alignment_estimator>            ta_estimator,
     std::string                                         modelc_path_,
+    std::string                                         modelc_path_52_,
     bool                                                compensate_cfo_) :
   port_channel_estimator_average_impl(std::move(interp),
                                       std::move(ta_estimator),
@@ -21,11 +22,18 @@ port_channel_estimator_helena_impl::port_channel_estimator_helena_impl(
                                       // responses; the TD interpolation fills the NN input grid.
                                       port_channel_estimator_td_interpolation_strategy::interpolate,
                                       compensate_cfo_),
-  modelc_path(std::move(modelc_path_))
+  modelc_path(std::move(modelc_path_)),
+  modelc_path_52(std::move(modelc_path_52_))
 {
   engine = std::make_unique<metal::coreml_nn_engine>();
   if (!engine->init(modelc_path.c_str())) {
-    ocudulog::fetch_basic_logger("PHY").warning("AI-CE: engine init failed - classical fallback active");
+    ocudulog::fetch_basic_logger("PHY").warning("AI-CE: 51-PRB engine init failed - classical fallback for 51 PRB");
+  }
+  if (!modelc_path_52.empty()) {
+    engine_52 = std::make_unique<metal::coreml_nn_engine>();
+    if (!engine_52->init(modelc_path_52.c_str())) {
+      ocudulog::fetch_basic_logger("PHY").warning("AI-CE: 52-PRB engine init failed - classical fallback for 52 PRB");
+    }
   }
 }
 
@@ -57,10 +65,18 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
   nn_grid_valid             = false;
   last_predict_us_          = 0.0;
 
-  // v1 envelope: single hop, 51 PRB starting at CRB 0 (the trained grid shape);
+  // v1 envelope: single hop, 51/52 PRB starting at CRB 0 (the trained grid shapes);
   // everything else is served by the classical path unchanged.
-  if (engine == nullptr || args.hop != 0 || nof_subc != 612 ||
-      args.dmrs_patterns.front().rb_mask.find_lowest() != 0) {
+  active_engine = nullptr;
+  if (args.hop != 0 || args.dmrs_patterns.front().rb_mask.find_lowest() != 0) {
+    return;
+  }
+  if (nof_subc == 612 && engine != nullptr) {
+    active_engine = engine.get();
+  } else if (nof_subc == 624 && engine_52 != nullptr) {
+    active_engine = engine_52.get();
+  }
+  if (active_engine == nullptr) {
     return;
   }
 
@@ -88,10 +104,10 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
       }
     }
 
-    if (!engine->predict(nn_in.data(), nn_out.data())) {
+    if (!active_engine->predict(nn_in.data(), nn_out.data(), nof_subc)) {
       return; // classical fallback for this slot
     }
-    last_predict_us_ = engine->last_predict_us();
+    last_predict_us_ = active_engine->last_predict_us();
 
     for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
       span<cf_t> dst = grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + sym);

@@ -32,11 +32,15 @@ class port_channel_estimator_helena_impl : public port_channel_estimator_average
 public:
   /// \param[in] interp         Interpolator (the classical pre-stage).
   /// \param[in] ta_estimator   Time alignment estimator (base class).
-  /// \param[in] modelc_path    Compiled Core ML model (.mlmodelc bundle path).
-  /// \param[in] compensate_cfo Whether the classical pre-stage compensates CFO.
+  /// \param[in] modelc_path      Compiled Core ML model (.mlmodelc bundle path) for the
+  ///                             51-PRB (612-subcarrier) grid.
+  /// \param[in] modelc_path_52   Compiled Core ML model for the 52-PRB (624-subcarrier)
+  ///                             grid (the E2E cell full-bandwidth allocation).
+  /// \param[in] compensate_cfo   Whether the classical pre-stage compensates CFO.
   port_channel_estimator_helena_impl(std::unique_ptr<interpolator>             interp,
                                      std::unique_ptr<time_alignment_estimator> ta_estimator,
                                      std::string                              modelc_path,
+                                     std::string                              modelc_path_52 = "",
                                      bool                                     compensate_cfo_ = true);
   ~port_channel_estimator_helena_impl() override;
 
@@ -70,12 +74,17 @@ private:
   mutable bool nn_grid_valid = false;
 
   std::unique_ptr<ocudu::metal::coreml_nn_engine> engine;
+  std::unique_ptr<ocudu::metal::coreml_nn_engine> engine_52;
   std::string                                    modelc_path;
+  std::string                                    modelc_path_52;
+  /// Engine selected by the current slot's grid width (nullptr = fallback).
+  ocudu::metal::coreml_nn_engine*                active_engine = nullptr;
   double                                         last_predict_us_ = 0.0;
 
-  /// NN input/output grids [612, 14, 2] fp32, subcarrier-major (the training layout).
-  std::array<float, 612 * 14 * 2> nn_in;
-  std::array<float, 612 * 14 * 2> nn_out;
+  /// NN input/output grids fp32, subcarrier-major (the training layout), sized for the
+  /// widest trained grid (52 PRB = 624 subcarriers; the 51-PRB model uses the first 612).
+  std::array<float, 624 * 14 * 2> nn_in;
+  std::array<float, 624 * 14 * 2> nn_out;
 
   /// Estimated full time-frequency grid (layer x symbol slices, cbf16).
   static_re_buffer<MAX_LAYERS * MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS> grid_est;

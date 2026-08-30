@@ -32,10 +32,11 @@ public:
   bool init(const char* modelc_path);
 
   /// \brief Runs one prediction over the HELENA grid.
-  /// \param[in]  in  Input grid [1, 612, 14, 2] fp32 (subcarrier, symbol, re/im).
-  /// \param[out] out Output grid, same shape.
+  /// \param[in]  in       Input grid [1, nof_subc, 14, 2] fp32 (subcarrier, symbol, re/im).
+  /// \param[out] out      Output grid, same shape.
+  /// \param[in]  nof_subc Grid width in subcarriers (612 = 51 PRB, 624 = 52 PRB).
   /// \return True on success.
-  bool predict(const float* in, float* out);
+  bool predict(const float* in, float* out, unsigned nof_subc);
 
   /// Wall-clock duration of the last predict() in microseconds.
   double last_predict_us() const { return last_predict_us_; }

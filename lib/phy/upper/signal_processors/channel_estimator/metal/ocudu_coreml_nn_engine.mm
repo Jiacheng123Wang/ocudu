@@ -63,25 +63,27 @@ bool coreml_nn_engine::init(const char* modelc_path)
   return e->in_name != nil && e->out_name != nil;
 }
 
-bool coreml_nn_engine::predict(const float* in, float* out)
+bool coreml_nn_engine::predict(const float* in, float* out, unsigned nof_subc)
 {
   auto* e = static_cast<coreml_nn_engine_impl*>(impl);
   if (e == nullptr || e->model == nil) {
     return false;
   }
 
-  // Zero-copy wrappers over the host buffers (shared memory; no copies).
-  NSArray<NSNumber*>* shape = @[@1, @612, @14, @2];
+  // Zero-copy wrappers over the host buffers (shared memory; no copies). The grid
+  // width is the 51/52-PRB trained shape (612 / 624 subcarriers).
+  const unsigned      nsc = nof_subc;
+  NSArray<NSNumber*>* shape = @[@1, @(nsc), @14, @2];
   MLMultiArray*       in_arr = [[MLMultiArray alloc] initWithDataPointer:const_cast<float*>(in)
                                                                   shape:shape
                                                                dataType:MLMultiArrayDataTypeFloat32
-                                                                strides:@[@(612 * 14 * 2), @(14 * 2), @2, @1]
+                                                                strides:@[@(nsc * 14 * 2), @(14 * 2), @2, @1]
                                                             deallocator:nil
                                                                   error:nil];
   MLMultiArray*       out_arr = [[MLMultiArray alloc] initWithDataPointer:out
                                                                     shape:shape
                                                                  dataType:MLMultiArrayDataTypeFloat32
-                                                                  strides:@[@(612 * 14 * 2), @(14 * 2), @2, @1]
+                                                                  strides:@[@(nsc * 14 * 2), @(14 * 2), @2, @1]
                                                               deallocator:nil
                                                                     error:nil];
   if (in_arr == nil || out_arr == nil) {

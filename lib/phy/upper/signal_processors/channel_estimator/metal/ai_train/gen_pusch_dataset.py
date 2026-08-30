@@ -18,6 +18,8 @@ import sys
 
 PRB, NSYM, NFFT = 51, 14, 612
 DMRS_SC = [2, 7, 11]
+# The 52-PRB (624-subcarrier) E2E cell variant is selected via NFFT/PRB override:
+#   gen_pusch_dataset.py 40000 4000 out.npz --nfft 624
 PILOT_SC = np.arange(0, 12, 2)          # type-1: 6 RE/PRB
 
 TDL = {
@@ -80,7 +82,11 @@ def ls_and_interp(H, noise_std, rng):
             X[:, :, sym] = (1 - w) * ls[:, :, DMRS_SC.index(lo)] + w * ls[:, :, DMRS_SC.index(hi)]
     return X
 
-def main(n_train, n_test, out):
+def main(n_train, n_test, out, nfft_override=0):
+    global NFFT, PRB
+    if nfft_override:
+        NFFT = nfft_override
+        PRB = NFFT // 12
     rng = np.random.default_rng(0)
     def make(count, rng):
         H = gen_true_channels(count, rng)
@@ -110,4 +116,7 @@ if __name__ == '__main__':
     n_train = int(sys.argv[1]) if len(sys.argv) > 1 else 40000
     n_test  = int(sys.argv[2]) if len(sys.argv) > 2 else 4000
     out     = sys.argv[3] if len(sys.argv) > 3 else os.path.join(os.path.expanduser('~/ai_ce_work'), 'work', 'pusch_ce_dataset.npz')
-    main(n_train, n_test, out)
+    nfft    = 0
+    if '--nfft' in sys.argv:
+        nfft = int(sys.argv[sys.argv.index('--nfft') + 1])
+    main(n_train, n_test, out, nfft)

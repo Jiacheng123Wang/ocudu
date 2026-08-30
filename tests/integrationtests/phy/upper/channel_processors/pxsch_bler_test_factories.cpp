@@ -243,6 +243,7 @@ ocudu::create_sw_pusch_processor_factory(task_executor&                         
 
   const port_channel_estimator_algorithm ce_algo =
       (channel_estimator_algo == "metal_mmse") ? port_channel_estimator_algorithm::metal_mmse
+      : (channel_estimator_algo == "helena")   ? port_channel_estimator_algorithm::helena
                                                : port_channel_estimator_algorithm::cpu;
   std::shared_ptr<port_channel_estimator_factory> chan_estimator_factory =
       create_port_channel_estimator_factory_sw(ta_est_factory, ce_algo);

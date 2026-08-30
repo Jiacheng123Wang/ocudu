@@ -359,6 +359,9 @@ struct upper_phy_factory_configuration {
   /// Compiled Core ML model path for the HELENA AI channel estimator (empty = the
   /// baked-in default from ai_assets/).
   std::string pusch_channel_estimator_helena_model_path;
+  /// 52-PRB (624-subcarrier) HELENA model (the E2E cell full-bandwidth allocation;
+  /// empty = baked-in default).
+  std::string pusch_channel_estimator_helena_model_path_52;
   /// PUSCH channel estimator CFO compensation.
   bool pusch_channel_estimator_compensate_cfo;
   /// \brief PUSCH channel equalizer algorithm.

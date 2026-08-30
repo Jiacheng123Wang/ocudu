@@ -555,6 +555,7 @@ static std::shared_ptr<pusch_processor_factory> create_pusch_processor_factory()
   // tau_rms = 0.37 us, f_d = 0 Hz, 3-PRB blocks).
   const port_channel_estimator_algorithm ce_algo =
       (channel_estimator_algo == "metal_mmse") ? port_channel_estimator_algorithm::metal_mmse
+      : (channel_estimator_algo == "helena")   ? port_channel_estimator_algorithm::helena
                                                : port_channel_estimator_algorithm::cpu;
   std::shared_ptr<port_channel_estimator_factory> port_chan_estimator_factory =
       create_port_channel_estimator_factory_sw(ta_estimator_factory, ce_algo);
