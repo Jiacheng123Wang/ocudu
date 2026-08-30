@@ -374,8 +374,26 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
     std::snprintf(path, sizeof(path), "%s/rx_meta.csv", dump_dir);
     f = std::fopen(path, "a");
     if (f != nullptr) {
-      std::fprintf(f, "%u,%lld,%u,%u,%u,%u\n", idx, static_cast<long long>(t_us), n_prb,
-                   pdu.nof_symbols, static_cast<unsigned>(pdu.rx_ports.size()), k0);
+      // Columns: idx,t_us,n_prb,n_syms,n_ports,k0,mod,dmrs_sym_mask,n_id,n_scid,
+      // scrambling_id,rnti,n_layers - everything the offline re-encoder needs to
+      // rebuild X_hat from the decoded TB (the DD-label sidecar).
+      unsigned dmrs_mask = 0;
+      for (unsigned s = 0; s != MAX_NSYMB_PER_SLOT; ++s) {
+        dmrs_mask |= (pdu.dmrs_symbol_mask.test(s) ? 1U : 0U) << s;
+      }
+      unsigned scr_id   = 0;
+      unsigned n_scid_v = 0;
+      if (std::holds_alternative<ocudu::pusch_processor::dmrs_configuration>(pdu.dmrs)) {
+        const auto& dmrs_cfg = std::get<ocudu::pusch_processor::dmrs_configuration>(pdu.dmrs);
+        scr_id               = dmrs_cfg.scrambling_id;
+        n_scid_v             = dmrs_cfg.n_scid;
+      }
+      std::fprintf(f, "%u,%lld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", idx,
+                   static_cast<long long>(t_us), n_prb, pdu.nof_symbols,
+                   static_cast<unsigned>(pdu.rx_ports.size()), k0,
+                   static_cast<unsigned>(pdu.mcs_descr.modulation), dmrs_mask, pdu.n_id,
+                   n_scid_v, scr_id,
+                   static_cast<unsigned>(pdu.rnti), pdu.nof_tx_layers);
       std::fclose(f);
     }
   }
