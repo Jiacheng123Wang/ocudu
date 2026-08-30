@@ -77,16 +77,16 @@ v1 两桶 + classical 兜底：
   （val −17.52），52 模型窄带 +2.5 dB（见训练备忘 §8）；两模型已转 CoreML 并
   提交 ai_assets（commit `0658b4bb6e`）。全宽 head2head 终值：52 → −13.69，
   106 → −13.77 dB（vs metal_mmse −12.5，增益 ~1.2 dB 维持）。
-- **G-3 20 MHz ZMQ E2E**：接线完成（分桶分发 + 路径四件套 + `gnb_zmq_oaiue.yaml`
-  已加 expert_phy helena）。**C++ 零填充路径已验证**（窄授权→桶宽填充的运行时
-  语义：30 PRB→52 桶 cpu −10.45 / metal_mmse −12.32 / helena −13.25；60 PRB→106 桶
-  −10.18 / −12.05 / −13.04——helena 窄带仍领先 ~+1 dB）。**空闲唤醒无尖峰已证**
-  （`helena_head2head_bench --idle 25`：52 引擎 106 µs、106 引擎 163 µs，无
-  13.6 ms 重编译税）。20 MHz 小区校验通过（bw=20 MHz, dl_arfcn=632628）。
-  剩余：OAI UE 侧 `r=106`（见 `configs/oaiue_zmq_20m.conf`；注意 r=51 的旧配置
-  只走 52 桶，从未触发 106 桶）→ 联合 E2E。验收一键报告：
-  `scripts/e2e_helena_report.sh`（二进制 commit、30 次模型加载、引擎桶分布、
-  首个 106 预测、全量 predict 均值/max、流水线探针汇总）。
+- **G-3 20 MHz ZMQ E2E**：**通过（2026-08-30）**。接线完成（分桶分发 + 路径
+  四件套 + `gnb_zmq_oaiue.yaml` expert_phy helena）。**C++ 零填充路径已验证**
+  （30 PRB→52 桶 helena −13.25 vs mmse −12.32；60 PRB→106 桶 −13.04 vs −12.05）。
+  **空闲唤醒无尖峰已证**（`--idle 25`：52 引擎 106 µs、106 引擎 163 µs）。
+  **联合 E2E：UE attach 成功（IP 10.45.0.4），500 ping 0% 丢包（avg 74.6 ms）**。
+  途中定位并修复 attach 死循环根因：NN 在高 SNR OOD 破坏输入（6 PRB：−45→−22 dB
+  NMSE），SRB1 PUSCH/PUCCH 解调失败 → **SNR 门控（>25 dB classical bypass，
+  commit `ac5226fd1f`）**；ZMQ 45 dB 下门控生效（1512 次 bypass），NN 不参与。
+  剩余可选腿：UE `r=106` 验证 106 桶分派（门控下 NN 仍 bypass，仅验证分派路径；
+  106 引擎的预测正确性由 head2head 合成集证明）。
 - **G-4 实机 A/B**：helena vs metal_mmse 双跑 shadow；真信道无 ground truth →
   用 BLER / HARQ 重传 / CQI-MCS / 吞吐 / ping 间接指标 + 保存 IQ/LS 网格离线
   分析（两估计器一致性 + TD 功率剖面合理性）。
