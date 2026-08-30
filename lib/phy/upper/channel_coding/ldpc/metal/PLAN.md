@@ -1428,15 +1428,16 @@ median 753(前次 979)。
 1. **CSR-only 表示(layered 家族)**:`nmsl_final_syndrome` 与 `nmsl_persistent_decode`
    内联 syndrome 改为**走 CSR 边表**(H 行与 CSR 边集相同,XOR 奇偶逐位一致);
    layered/persistent **不再物化打包 H**(引擎按模式跳过 buf_h)。收益:
-   - 内存:全尺寸矩阵从 ~11.7 GB(双 BG)降到 **~40 MB**;
+   - 内存:全尺寸矩阵从 ~702 MB(双 BG 打包 H,0/1 已按 uint32 位打包)降到
+     **~11 MB**(CSR 边表);
    - 构建:从原图直接枚举 CSR(每 lifted 行的边按列升序 = 旧 H 扫描序,**逐位一致**),
      大 z 构建更快;
    - 实测 syndrome 更快:persistent z=352 单解码 3.2 ms → **761 µs**;
      layered z=352 1.06 ms → **1.09 ms**(持平)。
 2. **全尺寸预构建**:layered/persistent 模式构造期建齐 **2 BG × 51 z = 102 个槽**
    (矩阵 + 引擎 + 缓冲),首个 PUSCH 到达时零初始化成本;flooding/LLS/async 仍需
-   打包 H/Hᵀ(全量 ~5.8 GB/BG)保持惰性 + 构造期只预热家族 JIT(折衷见异构规划
-   §2.2 的 flash/mmap 量化评估)。
+   打包 H/Hᵀ(双 BG 打包全量 ≈ **1.4 GB**)保持惰性 + 构造期只预热家族 JIT(折衷见
+   异构规划 §2.2 的 flash/mmap 量化评估)。
 3. **warm-up 每家族仅一次**:内核 JIT 是每进程每 pipeline 的——仅该家族第一个
    引擎跑 1 轮哑解码,后续引擎跳过(102 槽 × ~200 µs 的重复税消除)。
 4. 单元对拍 **0 disagreements**(含 persistent,逐位一致);mt-stress 通过。

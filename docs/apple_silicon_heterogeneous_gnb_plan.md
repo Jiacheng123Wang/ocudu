@@ -38,10 +38,11 @@
   强项，但也要按量权衡——原则是"能便宜预构建的全部预构建，太贵的保留惰性并
   在文档中明示"。
 - **当前落地**（2026-08-30）：
-  - LDPC layered/persistent：CSR-only 表示（~40 MB 共享矩阵 + ~37 MB/实例引擎
+  - LDPC layered/persistent：CSR-only 表示（~11 MB 共享矩阵 + ~37 MB/实例引擎
     缓冲）→ **全部 102 个 (BG, z) 槽在构造期一次建成**（见 LDPC PLAN §4.19）；
-  - LDPC flooding/LLS/async：需要打包 H/Hᵀ（全量 ~5.8 GB/BG，超预算）→ 保持
-    惰性构建 + 构造期只预热家族 JIT；
+  - LDPC flooding/LLS/async：需要打包 H/Hᵀ（0/1 已按 uint32 位打包，全量
+    H+Hᵀ 双 BG ≈ **1.4 GB**，超 RAM 预构建预算）→ 保持惰性构建 + 构造期只
+    预热家族 JIT；
   - CE：引擎与 warm-up 自 A+B 起即在构造期完成（10 实例，启动期），无惰性状态；
     残留 ~3 ms = 执行器线程首次 Metal 调用的每线程驱动初始化（一次性，attach
     首槽），缓解方案（启动期在 UL 执行器线程上跑一次哑提交）列入待办。
@@ -58,9 +59,10 @@
 
 量化结论：**首次取用延迟两者同量级**（mmap 换页 ~5-20 ms vs CPU 构建 0.01-6.8 ms），
 mmap 的价值在"CPU 繁忙/实时期零计算"与页缓存弹性驻留，代价是文件管理复杂度。
-当前裁决：layered 家族用 RAM 全量预构建（已落地，~40 MB 便宜）；flooding/LLS/async
-维持惰性 CPU 构建（这些是实验模式，不在默认路径）；若未来它们转正且 CPU 预算紧张，
-再实施离线文件 + mmap 方案。
+离线文件规模可控（H/Hᵀ 双 BG 打包全量 ≈ 1.4 GB）。当前裁决：layered 家族用 RAM
+全量预构建（已落地，CSR ~11 MB 便宜）；flooding/LLS/async 维持惰性 CPU 构建（这些
+是实验模式，不在默认路径）；若未来它们转正且 CPU 预算紧张，再实施离线文件 + mmap
+方案。
 
 ## 3. 终局架构：整条 UL 链一次 dispatch，扔出去不等
 
