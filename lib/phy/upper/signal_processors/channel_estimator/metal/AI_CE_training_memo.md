@@ -149,6 +149,18 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
   全宽模型的同域对照（6-12/13-25/26-52 PRB）：−15.70/−16.76/−17.23 vs
   −13.16/−15.30/−16.49——窄带 +2.5 dB，全宽仅 −0.2 dB。详见
   `AI_CE_20MHz_plan.md`。
+- **G-4 实机 A/B（2026-08-30，OnePlus 8T + iPhone17 配置 + 3408.96）**：
+  cpu 首传 CRC 90.7%（CE 25 µs）> helena 30.6%（NN α≈1 跑 48417 次，HARQ 补齐
+  51.3 MB）> metal_mmse attach 失败（GPU 首调 2.57 ms + 稳态 ~580 µs/授权，
+  时序爆掉）。**合成训练模型在真实信道+邻道干扰上劣于 classical**——合成↔真实
+  分布差 + 干扰 OOD，G-5 每站自适应的必要性被实机数据坐实。
+- **G-5 数据采集钩子 v1（已入库，commit `9f69154317`）**：
+  `OCUDU_HELENA_DUMP_DIR` 环境变量 → 每个 NN 活跃槽把 NN 输入网格（classical
+  插值 LS，[prb*12,14,2] float32）落盘为 `<dir>/dump_<idx>_prb<N>.f32` +
+  `<dir>/meta.csv`（idx,prb,snr_db,alpha,engine_nsc）。采集方式：先建目录，
+  `OCUDU_HELENA_DUMP_DIR=~/ai_ce_work/capture/<site>_<date> sudo ... gnb`。
+  **下一步**：UL-SCH 的 CRC-OK 决策导向标签钩子（重编码→重调制→H=Y/X̂），
+  与 dump 配对成真实信道训练集。
 
 ## 9. 坑与教训（持续更新）
 
