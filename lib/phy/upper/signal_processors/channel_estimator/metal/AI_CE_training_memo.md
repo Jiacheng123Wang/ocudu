@@ -141,6 +141,14 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
   再微调 10ep）后 C++ 路径 **−15.20 dB**（pooled），超 metal_mmse +2.6 dB。
 - **下一步**：工厂/配置贯通（`pusch_channel_estimator_algorithm: helena`）→
   A/B 阴影模式与探针 → E2E 三腿门禁（G3-G5）。
+- **20 MHz（106 PRB）pad-aware 训练（2026-08-30，G-2 完成）**：手机任意宽度
+  授权 → 分桶（≤52 PRB → 52 模型，53–106 → 106 模型，<6 → classical）+ 桶内
+  零填充。宽度无关架构（无位置编码的内容 MHA）使 52→106 **零训练迁移**即达
+  全宽 −13.87 dB（追平 52 训练模型）；106 pad-aware 微调 8ep 后分宽度段
+  −16.97/−17.58/−17.60 dB（val −17.52）。52 模型补 pad-aware 微调后，与旧
+  全宽模型的同域对照（6-12/13-25/26-52 PRB）：−15.70/−16.76/−17.23 vs
+  −13.16/−15.30/−16.49——窄带 +2.5 dB，全宽仅 −0.2 dB。详见
+  `AI_CE_20MHz_plan.md`。
 
 ## 9. 坑与教训（持续更新）
 
@@ -180,6 +188,14 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
     "合并误差功率的 dB"（dB-of-mean）在 SNR 跨 30 dB 时相差 ~6 dB——跨工具对比
     （Python eval vs C++ bench）曾因此产生虚假的 7 dB"失配"与错误的 +8.2 dB
     结论。**所有跨实现对比一律用 pooled（Σerr/Σsig 取 dB）口径**。
+16. **tf.keras 元素级 sample_weight 的尾维必须是 1**：对 (n, nsc, 14, 2) 的标签
+    传 (n, nsc, 14, 2) 的掩码会触发 `Squeeze` 报错（"expected a dimension of 1,
+    got 2"）——TF 会 squeeze 权重尾部的 size-1 维再广播。正确形状
+    `(n, nsc, 14, 1)`（用 `np.broadcast_to` 零拷贝视图即可）。
+17. **pad-aware 训练 vs 全宽训练的权衡**：随机宽度+零填充微调后，全宽 head2head
+    掉 ~0.2 dB（全宽在训练分布中占比变小），但窄带（6-12 PRB）+2.5 dB——真实
+    手机几乎全是窄/中带授权，权衡明确值得；两模型都要各自做 pad-aware 微调，
+    不能只训新宽度。
 
 ## 10. 脚本清单（本仓库 `lib/phy/upper/signal_processors/channel_estimator/metal/ai_train/`）
 
@@ -187,5 +203,8 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
 |---|---|
 | `train_helena.py` | HDF5 加载 + 划分 + 重训/微调（环境变量 HELENA_EPOCHS/DATA/MODEL） |
 | `eval_helena.py` | per-SNR NMSE 评估（LS/线性插值/PracticalMMSE/HELENA 对照） |
-| `gen_pusch_dataset.py` | Phase B：我方 PUSCH 合成集（TDL-A..E、DMRS {2,7,11} type1、LS+线性插值输入格式） |
-| `convert_coreml.py` | SavedModel → Core ML（固定形状）+ ANE/GPU/CPU 时延基准 |
+| `gen_pusch_dataset.py` | Phase B：我方 PUSCH 合成集（TDL-A..E、DMRS {2,7,11} type1、LS+线性插值输入格式；`--pad-aware --min-prb/--max-prb` 随机宽度+零填充） |
+| `convert_coreml.py` | SavedModel → Core ML（固定形状，`--shape`）+ ANE/GPU/CPU 时延基准 |
+| `train_pad.py` | pad-aware 微调（元素级损失掩码、`--transfer/--init`） |
+| `eval_pad.py` | pad-aware 测试集分宽度段 pooled NMSE |
+| `probe106.py` | 52→106 零训练宽度迁移探针（SavedModel 重建 + 保存） |

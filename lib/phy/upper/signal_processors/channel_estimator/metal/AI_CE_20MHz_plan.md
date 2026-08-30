@@ -71,12 +71,14 @@ v1 两桶 + classical 兜底：
 - **G-1 空口链路加固**（不依赖新训练）：**已完成（用户实测确认）**——n78 20 MHz
   实机（B200 + iPhone 17）传统 CPU CE 路径 E2E 已跑通、无问题。空口风险已去，
   HELENA 实机 A/B（G-4）前置条件满足。
-- **G-2 106 模型**：day-1 延迟探针 **已完成**（52 权重零训练迁移 → 106，
-  ANE fp32 p50=191 µs / p95=266 µs / p99=393 µs，空闲机下限；判定 fp32 先行，
-  E2E 争用下的实数待 G-3）；**106 C++ 通路已验证**（3-way head2head @106 全宽：
-  cpu −10.89 / metal_mmse −12.51 / 迁移未训练 helena −13.87 dB，已追平 52 训练模型
-  −13.91）→ pad-aware 训练中 → 转换 → 分宽度段 head2head 达标。
-- **G-3 20 MHz ZMQ E2E**：桶接线 + probes + 无尖峰 + 预算内（先于实机，隔离 RF 变量）。
+- **G-2 106 模型**：**已完成**。day-1 探针（ANE fp32 p50=191 µs，fp32 先行）；
+  106 C++ 通路 3-way head2head（cpu −10.89 / metal_mmse −12.51 / 零训练迁移
+  helena −13.87）；pad-aware 训练后：106 模型分宽度段 −16.97/−17.58/−17.60 dB
+  （val −17.52），52 模型窄带 +2.5 dB（见训练备忘 §8）；两模型已转 CoreML 并
+  提交 ai_assets（commit `0658b4bb6e`）。全宽 head2head 终值：52 → −13.69，
+  106 → −13.77 dB（vs metal_mmse −12.5，增益 ~1.2 dB 维持）。
+- **G-3 20 MHz ZMQ E2E**：接线完成（分桶分发 + 路径四件套 + `gnb_zmq_oaiue.yaml`
+  已加 expert_phy helena）；待跑：OAI UE 侧 `r=106` 确认 → E2E（无尖峰 + 预算内）。
 - **G-4 实机 A/B**：helena vs metal_mmse 双跑 shadow；真信道无 ground truth →
   用 BLER / HARQ 重传 / CQI-MCS / 吞吐 / ping 间接指标 + 保存 IQ/LS 网格离线
   分析（两估计器一致性 + TD 功率剖面合理性）。
