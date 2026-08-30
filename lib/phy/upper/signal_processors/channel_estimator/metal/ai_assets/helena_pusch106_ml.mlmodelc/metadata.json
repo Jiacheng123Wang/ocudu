@@ -53,8 +53,8 @@
     },
     "userDefinedMetadata" : {
       "com.github.apple.coremltools.version" : "9.0",
-      "com.github.apple.coremltools.source" : "tensorflow==2.21.0",
-      "com.github.apple.coremltools.conversion_date" : "2026-08-30"
+      "com.github.apple.coremltools.conversion_date" : "2026-08-30",
+      "com.github.apple.coremltools.source" : "tensorflow==2.21.0"
     },
     "inputSchema" : [
       {
@@ -68,7 +68,7 @@
         "type" : "MultiArray"
       }
     ],
-    "generatedClassName" : "helena_pusch106_ml",
+    "generatedClassName" : "helena_pusch106_trained_ml",
     "method" : "predict"
   }
 ]

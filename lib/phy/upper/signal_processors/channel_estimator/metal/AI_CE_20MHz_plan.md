@@ -73,7 +73,9 @@ v1 两桶 + classical 兜底：
   HELENA 实机 A/B（G-4）前置条件满足。
 - **G-2 106 模型**：day-1 延迟探针 **已完成**（52 权重零训练迁移 → 106，
   ANE fp32 p50=191 µs / p95=266 µs / p99=393 µs，空闲机下限；判定 fp32 先行，
-  E2E 争用下的实数待 G-3）→ pad-aware 训练 → 转换 → 合成 3-way head2head 达标。
+  E2E 争用下的实数待 G-3）；**106 C++ 通路已验证**（3-way head2head @106 全宽：
+  cpu −10.89 / metal_mmse −12.51 / 迁移未训练 helena −13.87 dB，已追平 52 训练模型
+  −13.91）→ pad-aware 训练中 → 转换 → 分宽度段 head2head 达标。
 - **G-3 20 MHz ZMQ E2E**：桶接线 + probes + 无尖峰 + 预算内（先于实机，隔离 RF 变量）。
 - **G-4 实机 A/B**：helena vs metal_mmse 双跑 shadow；真信道无 ground truth →
   用 BLER / HARQ 重传 / CQI-MCS / 吞吐 / ping 间接指标 + 保存 IQ/LS 网格离线
