@@ -178,6 +178,9 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
   离线 sidecar（下一步）：按 t_us 配对 → 重编码/重调制 → H=Y/X̂ → 平滑 →
   与 CE 输入网格组成真实信道训练集。
 
+> G-5（每站在线自适应：数据采集/格式/档案/管线/计划）的完整主文档见
+> `AI_CE_G5_online_adaptation_memo.md`——本文件保留训练/转换/坑的通用部分。
+
 ## 9. 坑与教训（持续更新）
 
 1. **coremltools 9 移除了 ONNX 直转**（`source='onnx'` 报错）→ 走 TF 路线。
