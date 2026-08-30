@@ -17,6 +17,30 @@
 > cpu 63.6 µs；Metal 基础设施的 occupancy/warm-up/粮草先行/bit-exact 经验教训
 > 见 `docs/apple_silicon_heterogeneous_gnb_plan.md` 与 CE `PLAN.md` §7.0.15）。
 
+> **G1 延迟原型实测记录（2026-08-30，M4 Pro，macOS 26.5）**：
+> 官方仓库 [HELENA_Channel_Estimation](https://github.com/miguelhdo/HELENA_Channel_Estimation)
+> 自带 `HELENA.onnx` 与 `010625_HELENA_CE_model.keras`（116,290 参数 ✓）。经
+> SavedModel → coremltools 9 转换（**必须固定输入形状 (1,612,14,2)**，flexible
+> shape 版本会 SIGBUS），实测（batch 1，随机输入，200 次）：
+
+| 计算单元 | p50 | p95 | p99 |
+|---|---|---|---|
+| CPU_ONLY | 693 µs | 744 | 908 |
+| CPU_AND_GPU（MPS 路径） | 690 µs | 711 | 747 |
+| **CPU_AND_NE（ANE）** | **141 µs** | 179 | **208** |
+| ANE + fp16 权重 | 142 µs | 175 | 196 |
+| ANE batch-4（4 端口批） | 794 µs（每端口 199 µs） | – | – |
+
+- **ANE 是唯一可行运行时**：141 µs p50 / 208 µs p99，**已优于 metal_mmse 基线
+  （~255 µs）**；MPS/GPU 路径无收益（MHA 分解落 CPU，690 µs ≈ CPU）；fp16 无
+  额外收益；batch-4 无批处理红利（4 次单发 564 µs 更优）。
+- **G1 严格口径未过**（原门禁 p99 ≤ 100 µs），**但决策口径已变化**：基线
+  metal_mmse 本身 255 µs，HELENA@ANE 在时延上已达标（比基线快 1.8×）。时延
+  数字含 CPU→ANE→CPU 往返拷贝（Python predict 全链路）。
+- **裁决**：运行时选 **Core ML（ANE）**，放弃 MPS 手写路径；下一步 G2——在
+  我方合成数据集上重训/微调（§7）后对拍 metal_mmse 的 NMSE，并验证真实
+  DMRS 网格数值（作者训练集的归一化与我方不同，直接权重不可用）。
+
 ---
 
 ## 0. 结论速览（TL;DR）

@@ -3,7 +3,7 @@
 > 状态：2026-08-30 立项。本文档记录 OCUDU 在 Apple Silicon 上的高层路线图，
 > 供后续各 PHY 模块（FFT / Channel Estimation / Equalization / MIMO Detection /
 > LDPC …）的 Metal 化工作统一参照。各模块的实现级记录在其 `metal/PLAN.md`
-> （CE：`lib/phy/upper/signal_processors/channel_estimator/metal/PLAN.md`，
+> （CE：`lib/phy/upper/signal_processors/channel_estimator/metal/Metal_MMSE_Channel_Estimator_PLAN.md`，
 > LDPC：`lib/phy/upper/channel_coding/ldpc/metal/PLAN.md`）。
 
 ## 0. "Heterogeneous" 的两层含义
