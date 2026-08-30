@@ -4,11 +4,12 @@
 Rows: LS / linear-interpolation / practical-MMSE (authors' baselines) / HELENA.
 """
 import os, time
+WORK = os.environ.get('AI_CE_WORK', os.path.expanduser('~/ai_ce_work'))
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 import numpy as np, h5py, tf_keras
 
-DATA = '/tmp/290525_dataset_ce.mat'
-MODEL = '/tmp/helena_g2_savedmodel'
+DATA = os.path.join(WORK, 'dataset', '290525_dataset_ce.mat')
+MODEL = os.path.join(WORK, 'work', 'helena_g2_savedmodel')
 
 def load_dataset(path):
     with h5py.File(path, 'r') as f:

@@ -12,6 +12,7 @@ pilot power 1.
 
 Output: .npz {X_train, Y_train, snr_train, X_test, Y_test, snr_test}.
 """
+import os
 import numpy as np
 import sys
 
@@ -108,5 +109,5 @@ def main(n_train, n_test, out):
 if __name__ == '__main__':
     n_train = int(sys.argv[1]) if len(sys.argv) > 1 else 40000
     n_test  = int(sys.argv[2]) if len(sys.argv) > 2 else 4000
-    out     = sys.argv[3] if len(sys.argv) > 3 else '/tmp/pusch_ce_dataset.npz'
+    out     = sys.argv[3] if len(sys.argv) > 3 else os.path.join(os.path.expanduser('~/ai_ce_work'), 'work', 'pusch_ce_dataset.npz')
     main(n_train, n_test, out)

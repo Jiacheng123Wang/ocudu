@@ -94,24 +94,24 @@ loss 曲线：epoch1 val_loss 0.203 → epoch5 0.063 → epoch35 0.0203（仍在
 **运行时 = Core ML（ANE）**：141 µs p50 优于 metal_mmse 基线（~255 µs）；
 MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延不变。
 
-## 7. 资产备份与重启检查点（2026-08-30，macMini 重启前）
+## 7. 工作目录（2026-08-30 起固定，不再使用 /tmp）
 
-**/tmp 重启后不可靠**（macOS 周期清理 + 重启可能清空），全部关键资产已备份到
-OneDrive **之外**的稳定位置：
+**工作目录：`/Users/jiachengwang/ai_ce_work/`**（OneDrive 之外；/tmp 重启不可靠，
+已全部迁入，以后训练/转换/对拍一律在本目录下进行）：
 
 ```
-/Users/jiachengwang/ai_ce_assets/
+/Users/jiachengwang/ai_ce_work/
 ├── dataset/   290525_dataset_ce.mat(5.0G) pusch_ce_dataset.npz(2.1G)
-│              R_test.npy Y_test.npy snr_test.npy   ← C++ 头对头对拍输入
 ├── models/    helena_g2_savedmodel(作者集 35ep) helena_pusch_sm(PUSCH 10ep)
 │              helena_{fixed,f16,g2,b4}_ml.mlpackage(Core ML 转换)
 ├── repo/      helena_repo/(官方仓库 102M)
-└── venv/      helena_venv/(python3.11 + tf-keras/coremltools/onnxruntime, 1.6G)
+├── venv/      python3.11 虚拟环境(tf-keras/coremltools/onnxruntime/h5py)
+└── work/      R_test.npy Y_test.npy snr_test.npy 等中间产物
 ```
 
-**重启后恢复流程**：1) `sudo powermetrics --samplers gpu_power -n 2 -i 1000` 确认
-GPU idle（孤儿 kernel 已被重启清除）；2) 把工作副本放回 /tmp（rsync/cp，或把脚本
-路径直接改到 ai_ce_assets）；3) 按下方"当前状态与续接点"继续。
+- 脚本默认路径指向本目录（`AI_CE_WORK` 环境变量可覆盖，默认 `~/ai_ce_work`）；
+- 训练/评估代码在 git 仓库 `lib/phy/upper/signal_processors/channel_estimator/
+  metal/ai_train/`（已入库，随仓库备份）。
 
 ## 8. 当前状态与续接点（重启后从这里继续）
 
@@ -122,13 +122,14 @@ GPU idle（孤儿 kernel 已被重启清除）；2) 把工作副本放回 /tmp�
 
 | 估计器 | 总 NMSE |
 |---|---|
-| 线性插值输入 | −11.42 dB |
+| 线性插值输入 | −11.32 dB |
 | cpu-average | −10.95 dB |
 | metal_mmse（GPU 与 CPU 回退逐位一致） | −12.62 dB |
-| **HELENA（重训+微调，ANE 141 µs）** | **−20.91 dB** |
+| **HELENA（重训+微调，ANE 141 µs）** | **−20.86 dB** |
 
-  **HELENA 超 metal_mmse +8.3 dB**——G2 精度门禁决定性通过（"≥ MMSE"达成且
-  大幅超出；metal_mmse 的 −12.6 dB 与单测 veha 口径 −12.7 dB 一致，交叉验证 ✓）。
+  **HELENA 超 metal_mmse +8.2 dB**——G2 精度门禁决定性通过（"≥ MMSE"达成且
+  大幅超出；metal_mmse 的 −12.6 dB 与单测 veha 口径 −12.7 dB 一致，交叉验证 ✓；
+  三方数字均在同一份再生数据集上重算对齐）。
 - **下一步（AI 计划 §6 系统集成）**：`port_channel_estimator_helena_impl`——
   Core ML(ANE) 引擎（零拷贝缓冲 + 单 slot 一次 predict + 超时回退）、工厂/配置
   贯通（`pusch_channel_estimator_algorithm: helena` + 模型路径）、A/B 阴影模式

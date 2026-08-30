@@ -6,12 +6,13 @@ load the pretrained HELENA .keras as init -> fine-tune (Adam, mse) ->
 save SavedModel + .h5 for the coremltools conversion.
 """
 import os, sys, time
+WORK = os.environ.get('AI_CE_WORK', os.path.expanduser('~/ai_ce_work'))
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 import numpy as np, h5py, tf_keras
 
-DATA = '/tmp/290525_dataset_ce.mat'
-MODEL = '/tmp/helena_repo/models/010625_HELENA_CE_model.keras'
-OUT_SM = '/tmp/helena_g2_savedmodel'
+DATA = os.path.join(WORK, 'dataset', '290525_dataset_ce.mat')
+MODEL = os.path.join(WORK, 'repo', 'helena_repo', 'models', '010625_HELENA_CE_model.keras')
+OUT_SM = os.path.join(WORK, 'work', 'helena_g2_savedmodel')
 EPOCHS = int(os.environ.get('HELENA_EPOCHS', '5'))
 BATCH = 32
 
