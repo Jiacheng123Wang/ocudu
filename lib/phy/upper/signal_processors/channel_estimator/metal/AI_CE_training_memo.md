@@ -166,6 +166,10 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
   解调前）+ `rx_meta.csv`（idx,t_us,n_prb,n_syms,n_ports,k0）；
   `tb_<idx>_tbs<N>.bits`（CRC-OK 槽的解码 TB 字节）+ `dd_meta.csv`
   （idx,t_us,tb_bits,nof_cbs）；CE 侧 meta.csv 新增第 6 列 t_us。
+- **site3_0831（2026-08-31 凌晨，突发强干扰时段）**：23,010 CE 输入 + 23,860 rx
+  + 4,856 CRC-OK 标签（13 列新 rx_meta）。iperf 三跑 111K/297K/3.67M bps——突发
+  邻道干扰导致 42 次掉线重连；数据含干扰条件下的真实分布（CRC-OK 率 ~20%），
+  是训练鲁棒性的稀缺样本。
   离线 sidecar（下一步）：按 t_us 配对 → 重编码/重调制 → H=Y/X̂ → 平滑 →
   与 CE 输入网格组成真实信道训练集。
 
