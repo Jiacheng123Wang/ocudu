@@ -282,6 +282,12 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              expert_phy_params.pusch_channel_estimator_helena_model_path_52,
              "Compiled Core ML model path for the 52-PRB HELENA channel estimator (empty = baked-in default).")
       ->capture_default_str();
+
+  add_option(app,
+             "--pusch_channel_estimator_helena_model_path_106",
+             expert_phy_params.pusch_channel_estimator_helena_model_path_106,
+             "Compiled Core ML model path for the 106-PRB HELENA channel estimator (20 MHz; empty = baked-in default).")
+      ->capture_default_str();
   add_option(app,
              "--pusch_channel_estimator_mmse_tau_rms_us",
              expert_phy_params.pusch_channel_estimator_mmse_tau_rms_us,

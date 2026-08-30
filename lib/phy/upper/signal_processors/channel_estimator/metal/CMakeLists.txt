@@ -30,6 +30,7 @@ add_custom_target(ocudu_mmse_metallib ALL
 # ---- Compiled Core ML model (AI channel estimator; see the training memo) ----
 set(HELENA_MODELC ${CMAKE_CURRENT_SOURCE_DIR}/ai_assets/helena_pusch_ml.mlmodelc)
 set(HELENA_MODELC_52 ${CMAKE_CURRENT_SOURCE_DIR}/ai_assets/helena_pusch52_ml.mlmodelc)
+set(HELENA_MODELC_106 ${CMAKE_CURRENT_SOURCE_DIR}/ai_assets/helena_pusch106_ml.mlmodelc)
 
 # ---- Static library: MMSE engine + AI (Core ML) engine + adapters ----
 add_library(ocudu_channel_estimator_metal STATIC
@@ -48,7 +49,8 @@ target_compile_definitions(ocudu_channel_estimator_metal PUBLIC
     OCUDU_METAL_CHEST
     OCUDU_MMSE_METALLIB_PATH="${MMSE_METALLIB}"
     OCUDU_HELENA_MODEL_PATH="${HELENA_MODELC}"
-    OCUDU_HELENA_MODEL_PATH_52="${HELENA_MODELC_52}")
+    OCUDU_HELENA_MODEL_PATH_52="${HELENA_MODELC_52}"
+    OCUDU_HELENA_MODEL_PATH_106="${HELENA_MODELC_106}")
 add_dependencies(ocudu_channel_estimator_metal ocudu_mmse_metallib)
 target_link_libraries(ocudu_channel_estimator_metal PUBLIC ocuduvec ocudu_phy_support ocudulog)
 target_link_libraries(ocudu_channel_estimator_metal PRIVATE "-framework Metal" "-framework Foundation" "-framework CoreML")

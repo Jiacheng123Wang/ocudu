@@ -91,6 +91,8 @@ struct du_low_unit_expert_upper_phy_config {
   std::string pusch_channel_estimator_helena_model_path;
   /// 52-PRB HELENA model (empty = baked-in default).
   std::string pusch_channel_estimator_helena_model_path_52;
+  /// 106-PRB HELENA model - the 20 MHz cell full-bandwidth allocation (empty = baked-in default).
+  std::string pusch_channel_estimator_helena_model_path_106;
   /// \brief PUSCH channel equalizer algorithm.
   ///
   /// Use one of these options:

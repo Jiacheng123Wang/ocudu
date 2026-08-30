@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """SavedModel -> Core ML (fixed input shape) + latency benchmark.
 
-Usage: convert_coreml.py <savedmodel_dir> <out.mlpackage> [--batch N]
+Usage: convert_coreml.py <savedmodel_dir> <out.mlpackage> [--batch N] [--shape SC]
 """
 import sys, time
 import numpy as np
@@ -10,14 +10,15 @@ import coremltools as ct
 def main():
     sm_dir, out_path = sys.argv[1], sys.argv[2]
     batch = int(sys.argv[sys.argv.index('--batch') + 1]) if '--batch' in sys.argv else 1
-    spec_input = ct.TensorType(name='input_1', shape=(batch, 612, 14, 2), dtype=np.float32)
+    shape = int(sys.argv[sys.argv.index('--shape') + 1]) if '--shape' in sys.argv else 612
+    spec_input = ct.TensorType(name='input_1', shape=(batch, shape, 14, 2), dtype=np.float32)
     t0 = time.time()
     mlmodel = ct.convert(sm_dir, source='tensorflow', inputs=[spec_input],
                          minimum_deployment_target=ct.target.macOS15)
     mlmodel.save(out_path)
     print(f'converted -> {out_path} in {time.time()-t0:.1f}s')
 
-    x = np.random.randn(batch, 612, 14, 2).astype(np.float32)
+    x = np.random.randn(batch, shape, 14, 2).astype(np.float32)
     for cu in ['CPU_ONLY', 'CPU_AND_GPU', 'CPU_AND_NE', 'ALL']:
         ml = ct.models.MLModel(out_path, compute_units=getattr(ct.ComputeUnit, cu))
         ml.predict({'input_1': x})

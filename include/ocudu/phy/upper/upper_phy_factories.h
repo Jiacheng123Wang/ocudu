@@ -362,6 +362,9 @@ struct upper_phy_factory_configuration {
   /// 52-PRB (624-subcarrier) HELENA model (the E2E cell full-bandwidth allocation;
   /// empty = baked-in default).
   std::string pusch_channel_estimator_helena_model_path_52;
+  /// 106-PRB (1272-subcarrier) HELENA model (the 20 MHz cell full-bandwidth
+  /// allocation; empty = baked-in default).
+  std::string pusch_channel_estimator_helena_model_path_106;
   /// PUSCH channel estimator CFO compensation.
   bool pusch_channel_estimator_compensate_cfo;
   /// \brief PUSCH channel equalizer algorithm.

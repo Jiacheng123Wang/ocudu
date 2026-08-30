@@ -65,6 +65,8 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
       du_low.expert_phy_cfg.pusch_channel_estimator_helena_model_path;
   upper_phy_factory_config.pusch_channel_estimator_helena_model_path_52 =
       du_low.expert_phy_cfg.pusch_channel_estimator_helena_model_path_52;
+  upper_phy_factory_config.pusch_channel_estimator_helena_model_path_106 =
+      du_low.expert_phy_cfg.pusch_channel_estimator_helena_model_path_106;
 #if !defined(__APPLE__)
   // The Metal MMSE estimator is Apple Silicon only: on other platforms the expert knob is
   // forced back to the classical estimator (same policy as the LDPC decoder type).

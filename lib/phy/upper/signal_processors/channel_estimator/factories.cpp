@@ -26,14 +26,16 @@ public:
                                              float                            mmse_fd_hz_,
                                              unsigned                         mmse_block_prb_,
                                              std::string                      helena_model_path_,
-                                             std::string                      helena_model_path_52_) :
+                                             std::string                      helena_model_path_52_,
+                                             std::string                      helena_model_path_106_) :
     ta_estimator_factory(std::move(ta_estimator_factory_)),
     algo(algo_),
     mmse_tau_rms_s(mmse_tau_rms_s_),
     mmse_fd_hz(mmse_fd_hz_),
     mmse_block_prb(mmse_block_prb_),
     helena_model_path(std::move(helena_model_path_)),
-    helena_model_path_52(std::move(helena_model_path_52_))
+    helena_model_path_52(std::move(helena_model_path_52_)),
+    helena_model_path_106(std::move(helena_model_path_106_))
   {
     ocudu_assert(ta_estimator_factory, "Invalid TA estimator factory.");
 #if !defined(OCUDU_METAL_CHEST)
@@ -65,10 +67,11 @@ public:
 
     if (algo == port_channel_estimator_algorithm::helena) {
 #if defined(OCUDU_METAL_CHEST)
-      const std::string& path   = helena_model_path.empty() ? OCUDU_HELENA_MODEL_PATH : helena_model_path;
-      const std::string& path52 = helena_model_path_52.empty() ? OCUDU_HELENA_MODEL_PATH_52 : helena_model_path_52;
+      const std::string& path    = helena_model_path.empty() ? OCUDU_HELENA_MODEL_PATH : helena_model_path;
+      const std::string& path52  = helena_model_path_52.empty() ? OCUDU_HELENA_MODEL_PATH_52 : helena_model_path_52;
+      const std::string& path106 = helena_model_path_106.empty() ? OCUDU_HELENA_MODEL_PATH_106 : helena_model_path_106;
       return std::make_unique<port_channel_estimator_helena_impl>(
-          std::move(interp), ta_estimator_factory->create(), path, path52, compensate_cfo);
+          std::move(interp), ta_estimator_factory->create(), path, path52, path106, compensate_cfo);
 #else
       return nullptr;
 #endif
@@ -89,6 +92,7 @@ private:
   unsigned                                          mmse_block_prb;
   std::string                                       helena_model_path;
   std::string                                       helena_model_path_52;
+  std::string                                       helena_model_path_106;
 };
 
 } // namespace
@@ -100,7 +104,8 @@ ocudu::create_port_channel_estimator_factory_sw(std::shared_ptr<time_alignment_e
                                                 float                            mmse_fd_hz,
                                                 unsigned                         mmse_block_prb,
                                                 const std::string&               helena_model_path,
-                                                const std::string&               helena_model_path_52)
+                                                const std::string&               helena_model_path_52,
+                                                const std::string&               helena_model_path_106)
 {
   return std::make_shared<port_channel_estimator_factory_sw>(std::move(ta_estimator_factory),
                                                              algo,
@@ -108,5 +113,6 @@ ocudu::create_port_channel_estimator_factory_sw(std::shared_ptr<time_alignment_e
                                                              mmse_fd_hz,
                                                              mmse_block_prb,
                                                              helena_model_path,
-                                                             helena_model_path_52);
+                                                             helena_model_path_52,
+                                                             helena_model_path_106);
 }

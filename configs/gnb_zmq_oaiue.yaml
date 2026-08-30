@@ -64,3 +64,10 @@ pcap:
   mac_filename: /tmp/gnb_mac.pcap   # Path where the MAC PCAP is stored.
   ngap_enable: false                # Set to true to enable NGAP PCAPs.
   ngap_filename: /tmp/gnb_ngap.pcap # Path where the NGAP PCAP is stored.
+
+expert_phy:
+  pusch_ldpc_decoder_type: auto
+  pusch_dec_max_iterations: 6
+  # G-3 (20 MHz ZMQ E2E): helena (bucket dispatch <=52 PRB -> 52-model,
+  # 53..106 PRB -> 106-model, <6 PRB -> classical). A/B: cpu / metal_mmse.
+  pusch_channel_estimator_algo: helena

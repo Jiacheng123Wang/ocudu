@@ -7,9 +7,10 @@
 /// The stage runs the CLASSICAL LS + FD smoothing + TD interpolation first (same
 /// input semantics as the training set: the interpolated-LS grid), then refines
 /// the full time-frequency grid with the HELENA network (one Core ML prediction
-/// per port per slot). When the network is unavailable or the configuration is
-/// outside the v1 envelope (51 PRB at CRB 0, hop 0), the classical estimates are
-/// served unchanged - graceful fallback.
+/// per port per slot). Bucket dispatch (v1): <=52 PRB -> the 52-PRB model,
+/// 53..106 PRB -> the 106-PRB model (the 20 MHz cell), <6 PRB or hopping ->
+/// classical fallback. The NN grid is allocation-local (offset 0, zero-padded to
+/// the bucket width), so any CRB works.
 ///
 /// Per-site online adaptation (AI plan 9.0): the training sidecar atomically
 /// swaps the model file and calls reload(); the new weights take effect from the
@@ -36,11 +37,14 @@ public:
   ///                             51-PRB (612-subcarrier) grid.
   /// \param[in] modelc_path_52   Compiled Core ML model for the 52-PRB (624-subcarrier)
   ///                             grid (the E2E cell full-bandwidth allocation).
+  /// \param[in] modelc_path_106  Compiled Core ML model for the 106-PRB (1272-subcarrier)
+  ///                             grid (the 20 MHz cell full-bandwidth allocation).
   /// \param[in] compensate_cfo   Whether the classical pre-stage compensates CFO.
   port_channel_estimator_helena_impl(std::unique_ptr<interpolator>             interp,
                                      std::unique_ptr<time_alignment_estimator> ta_estimator,
                                      std::string                              modelc_path,
                                      std::string                              modelc_path_52 = "",
+                                     std::string                              modelc_path_106 = "",
                                      bool                                     compensate_cfo_ = true);
   ~port_channel_estimator_helena_impl() override;
 
@@ -48,8 +52,10 @@ public:
   ///
   /// The training sidecar writes the new bundle and swaps it in atomically;
   /// on failure the incumbent model stays active. Call during low load.
+  /// \param[in] nof_subc Bucket selector: 612 or less reloads the 51-PRB model,
+  ///                       up to 624 the 52-PRB model, else the 106-PRB model.
   /// \return True when the new model is active.
-  bool reload(const std::string& modelc_path);
+  bool reload(const std::string& modelc_path, unsigned nof_subc = 612);
 
   /// Wall-clock duration of the last NN forward pass in microseconds (0 when the
   /// NN was not used on the last slot).
@@ -75,16 +81,21 @@ private:
 
   std::unique_ptr<ocudu::metal::coreml_nn_engine> engine;
   std::unique_ptr<ocudu::metal::coreml_nn_engine> engine_52;
+  std::unique_ptr<ocudu::metal::coreml_nn_engine> engine_106;
   std::string                                    modelc_path;
   std::string                                    modelc_path_52;
+  std::string                                    modelc_path_106;
   /// Engine selected by the current slot's grid width (nullptr = fallback).
   ocudu::metal::coreml_nn_engine*                active_engine = nullptr;
+  /// Width (subcarriers) the active engine runs at; the allocation grid is zero-padded
+  /// to this width (bucket semantics).
+  unsigned                                       active_engine_nsc = 0;
   double                                         last_predict_us_ = 0.0;
 
   /// NN input/output grids fp32, subcarrier-major (the training layout), sized for the
-  /// widest trained grid (52 PRB = 624 subcarriers; the 51-PRB model uses the first 612).
-  std::array<float, 624 * 14 * 2> nn_in;
-  std::array<float, 624 * 14 * 2> nn_out;
+  /// widest trained grid (106 PRB = 1272 subcarriers).
+  std::array<float, 1272 * 14 * 2> nn_in;
+  std::array<float, 1272 * 14 * 2> nn_out;
 
   /// Estimated full time-frequency grid (layer x symbol slices, cbf16).
   static_re_buffer<MAX_LAYERS * MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS> grid_est;

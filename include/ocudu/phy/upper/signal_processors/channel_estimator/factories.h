@@ -27,6 +27,7 @@ create_port_channel_estimator_factory_sw(std::shared_ptr<time_alignment_estimato
                                          float mmse_fd_hz                              = 0.0F,
                                          unsigned mmse_block_prb                       = 3,
                                          const std::string& helena_model_path          = "",
-                                         const std::string& helena_model_path_52       = "");
+                                         const std::string& helena_model_path_52       = "",
+                                         const std::string& helena_model_path_106      = "");
 
 } // namespace ocudu

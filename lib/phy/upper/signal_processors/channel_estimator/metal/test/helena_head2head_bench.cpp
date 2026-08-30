@@ -228,6 +228,7 @@ int main(int argc, char** argv)
                                                                make_ta_estimator(),
                                                                OCUDU_HELENA_MODEL_PATH,
                                                                OCUDU_HELENA_MODEL_PATH_52,
+                                                               OCUDU_HELENA_MODEL_PATH_106,
                                                                false);
       helena_ptr = helena.get();
       ests.push_back(std::move(helena));
@@ -245,6 +246,7 @@ int main(int argc, char** argv)
                                                                make_ta_estimator(),
                                                                OCUDU_HELENA_MODEL_PATH,
                                                                OCUDU_HELENA_MODEL_PATH_52,
+                                                               OCUDU_HELENA_MODEL_PATH_106,
                                                                false);
       ests.push_back(std::move(helena));
     }

@@ -1,25 +1,31 @@
 #!/usr/bin/env python
-"""Phase B: synthesize OCUDU-style PUSCH grids for HELENA fine-tuning.
+"""Synthesize OCUDU-style PUSCH grids for HELENA training (width-parameterized).
 
-Format matches the authors' trainData EXACTLY as discovered (see
-AI_CE_training_memo.md): the INPUT is the LINEAR-INTERPOLATED LS grid
-[n, 612, 14, 2] (dense), the LABEL is the true channel grid.
+Format: INPUT = linear-interpolated LS grid [n, NFFT, 14, 2] (dense, allocation-
+local subcarrier indexing), LABEL = true channel grid. NFFT here is the GRID
+WIDTH in subcarriers (12 x PRB); e.g. 624 for 52 PRB, 1272 for 106 PRB.
+
+--pad-aware --min-prb P --max-prb Q: every sample gets a random allocation
+width in [P, Q] PRB; the allocation sits at subcarrier offset 0 of the full
+grid and the remainder is zero-padded (the gNB bucket semantics). X is
+interpolated from the allocation's OWN pilots only (matching the gNB classical
+pre-stage, which only sees the grant). The width in PRB is stored per sample
+(width_train/width_test) for loss masking / per-band evaluation.
 
 Channels: 3GPP TDL-A..E (38.901 delays/powers, normalized), Rayleigh taps,
 quasi-static per slot. DMRS: PUSCH type-1 (6 RE/PRB at subcarrier offsets
 0,2,4,6,8,10) at symbols {2,7,11} (the E2E cell pattern). SNR -5..25 dB,
 pilot power 1.
 
-Output: .npz {X_train, Y_train, snr_train, X_test, Y_test, snr_test}.
+Output: .npz {X_train, Y_train, snr_train, width_train, R_train,
+              X_test, Y_test, snr_test, width_test, R_test}.
 """
 import os
 import numpy as np
 import sys
 
-PRB, NSYM, NFFT = 51, 14, 612
+NSYM = 14
 DMRS_SC = [2, 7, 11]
-# The 52-PRB (624-subcarrier) E2E cell variant is selected via NFFT/PRB override:
-#   gen_pusch_dataset.py 40000 4000 out.npz --nfft 624
 PILOT_SC = np.arange(0, 12, 2)          # type-1: 6 RE/PRB
 
 TDL = {
@@ -36,10 +42,10 @@ TDL = {
 }
 PROFILES = list(TDL.keys())
 
-def gen_true_channels(n, rng):
-    """True channel grids [n, 612, 14, 2], quasi-static per slot, unit-average power."""
-    H = np.zeros((n, NFFT, NSYM, 2), dtype=np.float32)
-    k = np.arange(NFFT)
+def gen_true_channels(n, nfft, rng):
+    """True channel grids [n, nfft, 14, 2], quasi-static per slot, unit-average power."""
+    H = np.zeros((n, nfft, NSYM, 2), dtype=np.float32)
+    k = np.arange(nfft)
     profs = rng.integers(len(PROFILES), size=n)
     for pi, prof in enumerate(PROFILES):
         idx = np.where(profs == pi)[0]
@@ -55,17 +61,17 @@ def gen_true_channels(n, rng):
         H[idx, :, :, 1] = h.imag[:, :, None]
     return H
 
-def ls_and_interp(H, noise_std, rng):
+def ls_and_interp(H, noise_std, rng, nfft, prb):
     """LS at the DMRS REs (pilot = 1), then FD + TD linear interpolation."""
-    n = H.shape[0]
-    ls = np.zeros((n, NFFT, len(DMRS_SC), 2), dtype=np.float32)
-    xs = np.concatenate([12 * prb + PILOT_SC for prb in range(PRB)])
-    xs_all = np.arange(NFFT)
+    m = H.shape[0]
+    ls = np.zeros((m, nfft, len(DMRS_SC), 2), dtype=np.float32)
+    xs = np.concatenate([12 * prb + PILOT_SC for prb in range(prb)])
+    xs_all = np.arange(nfft)
     for si, s in enumerate(DMRS_SC):
         h = H[:, :, s, 0] + 1j * H[:, :, s, 1]
-        rx = h + (rng.standard_normal((n, NFFT)) + 1j * rng.standard_normal((n, NFFT))) * noise_std / np.sqrt(2)
+        rx = h + (rng.standard_normal((m, nfft)) + 1j * rng.standard_normal((m, nfft))) * noise_std[:, None] / np.sqrt(2)
         ls_h = rx[:, xs]  # pilots only
-        for i in range(n):
+        for i in range(m):
             ls[i, :, si, 0] = np.interp(xs_all, xs, ls_h[i].real)
             ls[i, :, si, 1] = np.interp(xs_all, xs, ls_h[i].imag)
     # TD linear interpolation across DMRS symbols, edge symbols = nearest DMRS.
@@ -82,41 +88,50 @@ def ls_and_interp(H, noise_std, rng):
             X[:, :, sym] = (1 - w) * ls[:, :, DMRS_SC.index(lo)] + w * ls[:, :, DMRS_SC.index(hi)]
     return X
 
-def main(n_train, n_test, out, nfft_override=0):
-    global NFFT, PRB
-    if nfft_override:
-        NFFT = nfft_override
-        PRB = NFFT // 12
-    rng = np.random.default_rng(0)
-    def make(count, rng):
-        H = gen_true_channels(count, rng)
-        snr_db = rng.uniform(-5, 25, count)
-        ns = np.sqrt(10.0 ** (-snr_db / 10.0))
-        # X: interpolated-LS input grid; R: raw received grids at the DMRS symbols
-        # (the C++ metal_mmse head-to-head harness consumes R + unit pilots).
-        X = np.zeros((count, NFFT, NSYM, 2), dtype=np.float32)
-        R = np.zeros((count, len(DMRS_SC), NFFT, 2), dtype=np.float32)
-        for i in range(count):
-            h = H[i]
-            X[i] = ls_and_interp(h[None], ns[i], rng)[0]
+def make(count, rng, grid_prb, pad_aware, min_prb, max_prb):
+    nfft = grid_prb * 12
+    H = np.zeros((count, nfft, NSYM, 2), dtype=np.float32)
+    X = np.zeros_like(H)
+    R = np.zeros((count, len(DMRS_SC), nfft, 2), dtype=np.float32)
+    width = np.full(count, grid_prb, dtype=np.int32)
+    snr_db = rng.uniform(-5, 25, count)
+    ns = np.sqrt(10.0 ** (-snr_db / 10.0))
+    if pad_aware:
+        width = rng.integers(min_prb, max_prb + 1, count)
+    for w in np.unique(width):
+        idx = np.where(width == w)[0]
+        wsc = int(w) * 12
+        # Channel + interpolated-LS grid computed INSIDE the allocation only,
+        # then scattered into the zero-padded full grid at offset 0.
+        Hw = gen_true_channels(idx.size, wsc, rng)
+        Xw = ls_and_interp(Hw, ns[idx], rng, wsc, int(w))
+        for j, i in enumerate(idx):
+            H[i, :wsc] = Hw[j]
+            X[i, :wsc] = Xw[j]
             for si, s in enumerate(DMRS_SC):
-                hc = h[:, s, 0] + 1j * h[:, s, 1]
-                rxc = hc + (rng.standard_normal(NFFT) + 1j * rng.standard_normal(NFFT)) * ns[i] / np.sqrt(2)
-                R[i, si, :, 0] = rxc.real
-                R[i, si, :, 1] = rxc.imag
-        return X, R, H, snr_db
-    Xtr, Rtr, Ytr, str_ = make(n_train, rng)
-    Xte, Rte, Yte, ste = make(n_test, rng)
-    np.savez_compressed(out, X_train=Xtr, Y_train=Ytr, snr_train=str_, R_train=Rtr,
-                        X_test=Xte, Y_test=Yte, snr_test=ste, R_test=Rte)
-    print(f'saved {out}: train {Xtr.shape} test {Xte.shape}; '
-          f'X range [{Xtr.min():.2f},{Xtr.max():.2f}] mean|X|={np.abs(Xtr).mean():.3f}')
+                hc = Hw[j, :, s, 0] + 1j * Hw[j, :, s, 1]
+                rxc = hc + (rng.standard_normal(wsc) + 1j * rng.standard_normal(wsc)) * ns[i] / np.sqrt(2)
+                R[i, si, :wsc, 0] = rxc.real
+                R[i, si, :wsc, 1] = rxc.imag
+    return X, R, H, snr_db, width
+
+def main(n_train, n_test, out, nfft_override=0, pad_aware=False, min_prb=0, max_prb=0):
+    grid_prb = (nfft_override or 612) // 12
+    rng = np.random.default_rng(0)
+    Xtr, Rtr, Ytr, str_, wtr = make(n_train, rng, grid_prb, pad_aware, min_prb, max_prb)
+    Xte, Rte, Yte, ste, wte = make(n_test, rng, grid_prb, pad_aware, min_prb, max_prb)
+    np.savez_compressed(out, X_train=Xtr, Y_train=Ytr, snr_train=str_, width_train=wtr, R_train=Rtr,
+                        X_test=Xte, Y_test=Yte, snr_test=ste, width_test=wte, R_test=Rte)
+    wmsg = f'width range [{wtr.min()},{wtr.max()}] PRB; ' if wtr.size else ''
+    xmsg = f'X range [{Xtr.min():.2f},{Xtr.max():.2f}] mean|X|={np.abs(Xtr).mean():.3f}' if Xtr.size else ''
+    print(f'saved {out}: train {Xtr.shape} test {Xte.shape}; ' + wmsg + xmsg)
 
 if __name__ == '__main__':
     n_train = int(sys.argv[1]) if len(sys.argv) > 1 else 40000
     n_test  = int(sys.argv[2]) if len(sys.argv) > 2 else 4000
     out     = sys.argv[3] if len(sys.argv) > 3 else os.path.join(os.path.expanduser('~/ai_ce_work'), 'work', 'pusch_ce_dataset.npz')
-    nfft    = 0
-    if '--nfft' in sys.argv:
-        nfft = int(sys.argv[sys.argv.index('--nfft') + 1])
-    main(n_train, n_test, out, nfft)
+    nfft    = int(sys.argv[sys.argv.index('--nfft') + 1]) if '--nfft' in sys.argv else 0
+    pad     = '--pad-aware' in sys.argv
+    min_prb = int(sys.argv[sys.argv.index('--min-prb') + 1]) if '--min-prb' in sys.argv else 0
+    max_prb = int(sys.argv[sys.argv.index('--max-prb') + 1]) if '--max-prb' in sys.argv else 0
+    main(n_train, n_test, out, nfft, pad, min_prb, max_prb)

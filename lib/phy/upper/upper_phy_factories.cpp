@@ -635,7 +635,8 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
       config.pusch_channel_estimator_mmse_fd_hz,
       config.pusch_channel_estimator_mmse_block_prb,
       config.pusch_channel_estimator_helena_model_path,
-      config.pusch_channel_estimator_helena_model_path_52);
+      config.pusch_channel_estimator_helena_model_path_52,
+      config.pusch_channel_estimator_helena_model_path_106);
   report_error_if_not(pusch_ch_estimator_factory, "Invalid channel estimator factory.");
   // PUCCH keeps the classical estimator for now (the MMSE path is PUSCH-only in v1).
   std::shared_ptr<port_channel_estimator_factory> pucch_ch_estimator_factory =
