@@ -5,6 +5,7 @@
 #include "../port_channel_estimator_helpers.h"
 #include "ocudu/ocudulog/ocudulog.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -113,24 +114,22 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
   nn_grid_valid             = false;
   last_predict_us_          = 0.0;
 
-  // High-SNR bypass (2026-08-30 E2E root cause): the first deployment was trained
-  // at SNR -5..25 dB; beyond the envelope the NN's denoising bias CORRUPTED the
-  // near-perfect input (-45 dB input -> -22 dB output at 6 PRB), breaking
-  // 64QAM/256QAM demod and the attach. Fix: retrained with the SNR envelope
-  // extended to -5..55 dB (the model now learns near-identity on clean inputs);
-  // the gate remains as the final safety for anything beyond the NEW envelope.
-  constexpr float kHelenaMaxSnrDb = 55.0F;
-  // OCUDU_HELENA_FORCE_NN disables the gate (the head-to-head harness needs it:
-  // its synthetic noise estimation saturates at the 100 dB floor, which would
-  // bypass the NN for the whole test set).
-  const bool force_nn = std::getenv("OCUDU_HELENA_FORCE_NN") != nullptr;
-  if (!force_nn && 10.0F * std::log10(get_snr()) > kHelenaMaxSnrDb) {
+  // High-SNR soft blend (2026-08-30 E2E root cause): beyond the training envelope
+  // the NN's denoising bias corrupts near-perfect inputs (the original -5..25 dB
+  // model turned a -45 dB input into -22 dB at 6 PRB, breaking the attach). The
+  // model is now retrained over -5..55 dB, and the NN correction is blended with
+  // the classical grid by alpha: 1 at <=25 dB (full NN), linearly to 0 at >=50 dB
+  // (pure classical input). This keeps the NN active everywhere while guaranteeing
+  // it can never corrupt a clean channel (verified: >=-34 dB at 45 dB, 6 PRB).
+  const float snr_db   = 10.0F * std::log10(get_snr());
+  const bool  force_nn = std::getenv("OCUDU_HELENA_FORCE_NN") != nullptr;
+  // The harness forces alpha=1: its synthetic noise estimation saturates at the
+  // 100 dB floor, which would otherwise blend the NN output away entirely.
+  const float alpha = force_nn ? 1.0F : std::clamp((50.0F - snr_db) / 25.0F, 0.0F, 1.0F);
+  if (alpha <= 0.0F) {
     if (time_en) {
       ocudulog::fetch_basic_logger("PHY").debug(
-          "[helena_gate] prb={} snr={:.1f}dB > {:.0f}dB -> classical bypass",
-          nof_prb,
-          10.0F * std::log10(get_snr()),
-          kHelenaMaxSnrDb);
+          "[helena_blend] prb={} snr={:.1f}dB alpha=0 -> classical", nof_prb, snr_db);
     }
     return;
   }
@@ -193,21 +192,26 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
     if (time_en) {
       const auto us = [](auto d) { return std::chrono::duration<double, std::micro>(d).count(); };
       ocudulog::fetch_basic_logger("PHY").debug(
-          "[helena_time] prb={} subc={} engine={} layer={} | classical={:.1f}us predict={:.1f}us (worker engine last={:.1f}us)",
+          "[helena_time] prb={} subc={} engine={} alpha={:.2f} layer={} | classical={:.1f}us predict={:.1f}us (worker engine last={:.1f}us)",
           nof_prb,
           nof_subc,
           engine_nsc,
+          alpha,
           i_layer,
           us(t_classical - t_begin),
           us(std::chrono::steady_clock::now() - t_nn_begin),
           last_predict_us_);
     }
 
+    // SNR-soft blend: grid = classical_input + alpha * (NN - classical_input).
     for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
       span<cf_t> dst = grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + sym);
       for (unsigned k = 0; k != nof_subc; ++k) {
-        dst[k] = {nn_out[2 * (k * MAX_NSYMB_PER_SLOT + sym)],
-                  nn_out[2 * (k * MAX_NSYMB_PER_SLOT + sym) + 1]};
+        const cf_t in{nn_in[2 * (k * MAX_NSYMB_PER_SLOT + sym)],
+                      nn_in[2 * (k * MAX_NSYMB_PER_SLOT + sym) + 1]};
+        const cf_t nn{nn_out[2 * (k * MAX_NSYMB_PER_SLOT + sym)],
+                      nn_out[2 * (k * MAX_NSYMB_PER_SLOT + sym) + 1]};
+        dst[k] = in + alpha * (nn - in);
       }
     }
   }

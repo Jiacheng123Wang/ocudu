@@ -68,7 +68,7 @@
         "type" : "MultiArray"
       }
     ],
-    "generatedClassName" : "helena_pusch52_trained_ml",
+    "generatedClassName" : "helena_pusch52_hi_ml",
     "method" : "predict"
   }
 ]
