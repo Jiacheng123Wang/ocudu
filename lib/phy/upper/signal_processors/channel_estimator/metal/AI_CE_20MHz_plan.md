@@ -101,6 +101,14 @@ v1 两桶 + classical 兜底：
   **预算判定：总流水线 mean 288.6 µs / max 415 µs，1 ms slot 预算内留 ~2.4× 余量** ✓
   （此样本为 ping 流量、授权 ≤51 PRB 且 NN 被门控 bypass；106 全带宽授权的预算需
   r=106 高负载跑测或 G-4 实机补充）。
+
+- **高 SNR 修复后的重跑（commit `31272e7d0d`，α-blend + −5..55 dB 重训）**：
+  803 个 UL 槽，NN 实际预测 9 次（6/18 PRB 授权，α=0.04-0.19，predict 265-451 µs），
+  attach ×2 成功、ping 流量 487 KB 正常。**之前打崩 attach 的 6-PRB 授权在
+  α-blend 下全部解码成功**。预算：CE max 503.5 µs（含 NN）、pipeline max 729 µs、
+  mean 284 µs——1 ms 预算内 ✓。注：ping 数据授权为 5 PRB（<6 PRB 阈值走
+  classical，795/805 槽），NN 参与的是信令授权；高负载数据授权的 NN 预算待
+  G-4 实机（真实信道下 α=1、全带宽授权）补充。
 - **G-4 实机 A/B**：helena vs metal_mmse 双跑 shadow；真信道无 ground truth →
   用 BLER / HARQ 重传 / CQI-MCS / 吞吐 / ping 间接指标 + 保存 IQ/LS 网格离线
   分析（两估计器一致性 + TD 功率剖面合理性）。
