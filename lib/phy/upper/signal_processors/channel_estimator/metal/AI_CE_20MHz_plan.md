@@ -121,6 +121,15 @@ v1 两桶 + classical 兜底：
   ④ `OCUDU_MMSE_TIME=1` 的 `[helena_time]` 分布。对比口径：同位置同频点，
   手机保持静止。G-5 数据原料（真信道 LS 网格 dump）的 gnb 侧采集钩子为下阶段
   工作，先以日志指标为主。
+
+  **首个实机 HELENA 跑测（2026-08-30，iPhone17 配置 + gpsdo）：attach 稳定、
+  手机 ping 全程跑通**。NN 实机参与：606 次预测（52 桶，授权 ≤52 PRB），
+  **α=0.90~1.00**（真机 SNR 25-28 dB，NN 全力区）；predict mean 338 µs /
+  max 931 µs；CE 探针 mean 82.3 µs / max 627.7 µs；pipeline max 779 µs ✓
+  预算内。UL 首传 CRC ~45% OK（HARQ 补齐，高 MCS 27 实信道属正常）。⚠️
+  对照提醒：**stock 配置（无 gpsdo）下手机接入不稳定是 RF 层问题**（3408.96
+  邻道干扰 + 时钟漂移），与 CE 算法无关——所有实机 A/B 必须用 iPhone17 配置。
+  待补：metal_mmse 腿 + iperf3 吞吐三腿对比 + 106 桶实机（大上传触发）。
 - **G-5 每站自适应启动**：白天采真信道数据（LS 网格 + metal_mmse 教师输出），
   夜间蒸馏训练，A/B 晋升 + 热加载（沿 §9，真数据不再依赖合成信道）。
 
