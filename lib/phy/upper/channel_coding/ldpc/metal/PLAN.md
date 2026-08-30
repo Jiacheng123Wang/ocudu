@@ -1333,6 +1333,31 @@ LDPC 引擎的 GPU 等待问题:
 - 首个 decode 的**槽构造**(H 矩阵/CSR 构建,CPU 侧)仍按 (BG,Z) 惰性发生——一次性
   成本,当前可接受;预留:启动期预构建常用 (BG,Z) 槽。
 
+## 4.17 E2E 双 Metal(CE+LDPC)全通与 dispatch 链瓶颈确认(2026-08-30)
+
+`--pusch_channel_estimator_algo metal_mmse --pusch_ldpc_decoder_type metal` 双开:
+UE 接入、IP 获取、**ping 核心网完整运行**,crc=OK、稳态 0 nok。
+
+**时延数据(215 样本)**:`[ul_ldpc_decode]` mean 966.7 / median **981** / min 550 /
+p95 1281 / max 8831 µs(cpu 基线 9-71 µs)。管线 median 1371 µs > 1 ms → `ovl`
+持续,但 ZMQ 无硬实时、数据全对。
+
+**根因(§4.16 预测的 dispatch 链瓶颈坐实)**:layered 每解码固定
+**290 个 dispatch**(max_iter=6 × [46 层 + syndrome + gate] + init + convert),
+~1.9 µs/dispatch ≈ **550 µs 地板**;GPU 对小 TB 的实际计算量远低于调度开销。
+离群 3-8 ms = 运行中首次出现的 (BG, Z) 槽构造(H 矩阵/CSR 构建,CPU 侧,一次性)。
+
+**缓解路径(按序)**:
+1. `--pusch_ldpc_decoder_type metal_persistent`:单 dispatch 常驻内核,迭代/层循环
+   在核内(§4.12),单测对拍 100% 一致——预期直接消除 dispatch 链开销,待 E2E A/B;
+2. E2E 预算策略:仅开 CE metal、LDPC 走 CPU(用户既定组合策略);
+3. 槽预构建:启动期/空闲期预建常用 (BG, Z) 槽,消除运行中离群值。
+
+**长期规划**:`docs/apple_silicon_heterogeneous_gnb_plan.md`(2026-08-30 立项)——
+GPU 定位高并发/多用户/高带宽,模块级 >10× CPU 可容忍但 E2E 必须在预算内;终局 =
+UL 全链单 command buffer 一次 dispatch、CPU 不等回;LDPC crc=OK 后 MAC PDU 经
+回调直接给 FAPI(§3.1 的调度机制);V2X 小包走 P/E 核、大带宽视频走 GPU(NPU 后续)。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`

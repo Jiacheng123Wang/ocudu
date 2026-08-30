@@ -760,6 +760,28 @@ median 293 µs 含小分配/边缘块差异;管线 median 407 µs < 1 ms 预算,
 8. 同方法已回灌 LDPC 引擎(LDPC PLAN §4.16):warm-up 补上、NSLog 迁日志;layered
    内核小 z 的 dispatch 链特征记录在案,必要时走 persistent 变体。
 
+### 7.0.16 E2E 第四轮:CE+LDPC 双 Metal 全通(2026-08-30)
+
+`--pusch_channel_estimator_algo metal_mmse --pusch_ldpc_decoder_type metal` 双开:
+UE 接入、取得 IP、**ping 核心网完整运行**。探针(215 样本):
+
+| 阶段 | mean | median | p95 | 说明 |
+|---|---|---|---|---|
+| ul_channel_estimation | 264.1 µs | 267.2 µs | 380.2 µs | 稳态 ~200 µs 健康(223 条 mmse_time median 197 µs、p90 323 µs),max 3123 µs = 首槽一次性税 |
+| ul_ldpc_decode | 966.7 µs | **981.0 µs** | 1281 µs | **新的预算破坏者**(见下) |
+| ul_pipeline | 1303.3 µs | 1371.0 µs | 1693 µs | 超 1 ms 预算 → `ovl` 持续;ZMQ 无硬实时,数据仍正确(稳态 0 nok) |
+
+**LDPC metal(layered)时延根因**:每解码固定 **290 个 dispatch**(max_iter=6 ×
+48 个/轮[46 层+syndrome+gate]+init+convert),实测 ~1.9 µs/dispatch ≈ **550 µs 地板**,
+GPU 算力远未吃饱(小 TB 场景 dispatch 链主导);离群 3-8 ms = 运行中新 (BG,Z) 的
+槽构造。缓解:`--pusch_ldpc_decoder_type metal_persistent`(单 dispatch 常驻内核,
+单测对拍 100%)或 E2E 时 LDPC 回 CPU(§7.0.15 策略)。详见 LDPC PLAN §4.17。
+
+**长期规划立项**:`docs/apple_silicon_heterogeneous_gnb_plan.md`——GPU 定位高并发/
+多用户/高带宽;模块级 >10× CPU 时延可容忍但 E2E 必须在预算内;终局 = UL 全链
+(FFT/CE/MIMO/LDPC)单 command buffer 一次 dispatch、CPU 不等回;LDPC crc=OK 后
+MAC PDU 经回调直接给 FAPI;V2X 小包走 P/E 核、大带宽视频走 GPU(未来 NPU)。
+
 ### 7.0.8 剩余工作（实验室依赖，列入收尾清单）
 
 - 实链三腿 A/B（ZMQ → RF B200）：`expert_phy --pusch_channel_estimator_algo cpu|metal_mmse`
