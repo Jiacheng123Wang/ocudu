@@ -187,14 +187,17 @@ int main(int argc, char** argv)
 
   std::vector<std::unique_ptr<port_channel_estimator>> ests;
   {
+    // compensate_cfo = false: the synthetic set has NO CFO, so the noise-derived
+    // CFO phase at low SNR would randomly rotate the DMRS symbols and destroy the
+    // TD average / MMSE coherence (the original +0.6 dB harness bug).
     auto cpu = std::make_unique<port_channel_estimator_average_impl>(
         create_interpolator(), make_ta_estimator(),
         port_channel_estimator_fd_smoothing_strategy::filter,
-        port_channel_estimator_td_interpolation_strategy::average, true);
+        port_channel_estimator_td_interpolation_strategy::average, false);
     ests.push_back(std::move(cpu));
     auto mmse = std::make_unique<port_channel_estimator_metal_mmse_impl>(
         create_interpolator(), make_ta_estimator(),
-        std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F), 3, true);
+        std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F), 3, false);
     ests.push_back(std::move(mmse));
   }
   const char* names[2] = {"cpu-average", "metal_mmse"};
@@ -211,25 +214,16 @@ int main(int argc, char** argv)
       grid.set_symbol(sym);
     }
     const float* yb = &y[static_cast<size_t>(i) * nff * 14 * 2];
-    if (i == 0) {
-      std::fprintf(stderr, "[dbg] sample0: rx[0]=(%.3f,%.3f) truth sym2 k0=(%.3f,%.3f) k2=(%.3f,%.3f)\n",
-                   r[0], r[1], yb[2 * nff * 2], yb[2 * nff * 2 + 1], yb[(2 * nff + 2) * 2], yb[(2 * nff + 2) * 2 + 1]);
-    }
     for (unsigned e = 0; e != 2; ++e) {
       const auto& res = ests[e]->compute(grid, 0, pilots, cfg);
-      if (i == 0) {
-        std::vector<cbf16_t> dbg(nff);
-        res.get_symbol_ch_estimate(dbg, 2, 0);
-        std::fprintf(stderr, "[dbg] %s sample0 est sym2: k0=(%.3f,%.3f) k2=(%.3f,%.3f)\n", names[e],
-                     to_cf(dbg[0]).real(), to_cf(dbg[0]).imag(), to_cf(dbg[2]).real(), to_cf(dbg[2]).imag());
-      }
       for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
         std::vector<cbf16_t> est(nff);
         res.get_symbol_ch_estimate(est, l, 0);
         for (unsigned k = 0; k != nff; ++k) {
           const cf_t  h  = to_cf(est[k]);
-          const float tr = yb[(l * nff + k) * 2];
-          const float ti = yb[(l * nff + k) * 2 + 1];
+          // Y_test.npy is [n, 612, 14, 2]: subcarrier-major, then symbol.
+          const float tr = yb[(k * 14 + l) * 2];
+          const float ti = yb[(k * 14 + l) * 2 + 1];
           const double dr = h.real() - tr;
           const double di = h.imag() - ti;
           err[e] += dr * dr + di * di;
@@ -238,9 +232,6 @@ int main(int argc, char** argv)
     }
     for (size_t j = 0; j != static_cast<size_t>(nff) * 14 * 2; ++j) {
       sig += static_cast<double>(yb[j]) * yb[j];
-    }
-    if (i < 5) {
-      std::fprintf(stderr, "[dbg] sample%u truth power=%.3f\n", i, sig);
     }
   }
   for (unsigned e = 0; e != 2; ++e) {

@@ -117,15 +117,22 @@ GPU idle（孤儿 kernel 已被重启清除）；2) 把工作副本放回 /tmp�
 
 - **已完成**：G1（ANE 141 µs 定案）；G2-A（作者集 35ep 重训 −15.03 dB）；Phase B
   微调（PUSCH 10ep）→ **HELENA −20.91 dB**（输入 −11.42 dB，+9.5 dB）；
-  C++ 头对头工具已入库（`metal/test/helena_head2head_bench.cpp`，--nogpu 可跑）。
-- **进行中（有 bug）**：头对头首跑 `cpu-average +0.61 dB / metal_mmse +0.46 dB`
-  ——两个估计器都明显错误而 HELENA 同数据 −20.9 dB。已插桩：单样本 debug 显示
-  数据加载正确（rx/truth 合理）、估计值量级/相位大体对，但整体 NMSE 为正——
-  **待续查**（下一步：按 SNR 分桶统计 err/sig 定位爆炸来源；候选：深衰样本、
-  cbf16 截断、harness 的 grid_fake 单符号缓冲语义、或 estimates 与 truth 的
-  逐符号错位）。修复后重跑 `--nogpu`（GPU 重启后可直接跑 GPU 路径对比）。
-- **待办**：head-to-head 修好后与 HELENA −20.91 dB 三方对比入档；Core ML 集成
-  （port_channel_estimator_helena_impl + ANE 引擎）按 AI 计划 §6 推进。
+  C++ 头对头工具已入库并**修复两处 harness bug**（见 §9 第 13/14 条）。
+- **G2 对拍定案（2026-08-30 重启后，同一 4000 样本测试集）**：
+
+| 估计器 | 总 NMSE |
+|---|---|
+| 线性插值输入 | −11.42 dB |
+| cpu-average | −10.95 dB |
+| metal_mmse（GPU 与 CPU 回退逐位一致） | −12.62 dB |
+| **HELENA（重训+微调，ANE 141 µs）** | **−20.91 dB** |
+
+  **HELENA 超 metal_mmse +8.3 dB**——G2 精度门禁决定性通过（"≥ MMSE"达成且
+  大幅超出；metal_mmse 的 −12.6 dB 与单测 veha 口径 −12.7 dB 一致，交叉验证 ✓）。
+- **下一步（AI 计划 §6 系统集成）**：`port_channel_estimator_helena_impl`——
+  Core ML(ANE) 引擎（零拷贝缓冲 + 单 slot 一次 predict + 超时回退）、工厂/配置
+  贯通（`pusch_channel_estimator_algorithm: helena` + 模型路径）、A/B 阴影模式
+  与探针（ai_ce_us 细分、NMSE 差值、回退计数）、E2E 门禁（金属 MMSE 三腿 A/B）。
 
 ## 9. 坑与教训（持续更新）
 
@@ -156,6 +163,11 @@ GPU idle（孤儿 kernel 已被重启清除）；2) 把工作副本放回 /tmp�
 12. **C++ 头对头 harness 首跑 NMSE 为正（+0.6 dB）**：单样本估计值量级/相位合理但
     聚合误差 > 信号功率——bug 未定位（候选：深衰样本爆炸、grid_fake 单符号缓冲
     语义、逐符号错位），见 §8 续接点。
+13. **真值索引转置（harness 正根因）**：Y_test.npy 是 `[n, 子载波, 符号, 2]`
+    （子载波主序），首版 C++ 按符号主序读——跨符号同信道掩盖了错位，NMSE +0.6 dB。
+    **教训：npy 与 C++ 互操作先写清布局契约**（生成器注释 + harness 注释双写）。
+14. **无 CFO 的合成数据必须关 compensate_cfo**：低 SNR 下噪声主导的 CFO 相位随机
+    旋转 DMRS 符号，破坏 TD 平均/MMSE 相干性（本次修复后数字未变说明是次因）。
 
 ## 10. 脚本清单（本仓库 `lib/phy/upper/signal_processors/channel_estimator/metal/ai_train/`）
 
