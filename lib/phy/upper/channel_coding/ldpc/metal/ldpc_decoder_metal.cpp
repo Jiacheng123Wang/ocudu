@@ -10,10 +10,12 @@
 #include "ldpc_decoder_metal.h"
 #include "ldpc_graph_impl.h"
 #include "ocudu_metal_decoder_engine.h"
+#include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/ocudu_assert.h"
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 using namespace ocudu;
@@ -102,25 +104,155 @@ static std::unique_ptr<T, free_deleter> aligned_alloc(size_t count)
 
 } // namespace
 
-struct ldpc_decoder_metal::engine_slot
+struct ldpc_decoder_metal::slot_matrices
 {
-  unsigned z             = 0;
-  unsigned n_aligned     = 0;
-  unsigned m_aligned     = 0;
-  unsigned n_h_chunks    = 0;
+  unsigned z          = 0;
+  unsigned n_aligned  = 0;
+  unsigned m_aligned  = 0;
+  unsigned n_h_chunks = 0;
+  unsigned no_edges   = 0;
+  unsigned n_layers   = 0;
 
-  std::unique_ptr<metal::decoder_engine> engine;
   std::unique_ptr<uint32_t, free_deleter> h;
   std::unique_ptr<uint32_t, free_deleter> ht; // flooding / LLS (packed H^T)
-  std::unique_ptr<int8_t, free_deleter> llr_i8;
-  std::unique_ptr<uint16_t, free_deleter> llr_fp16; // LLS only (host-filled fp16)
-  std::vector<uint8_t>                   hard_bits;
-  // CSR edge layout (built once per slot). The fused CN+VN kernel needs no
-  // per-layer column tables (see ocudu_nms_layered_decoder.metal).
-  std::unique_ptr<uint32_t, free_deleter> row_start;
-  std::unique_ptr<uint32_t, free_deleter> edge_vn;
-  metal::decoder_engine::layered_info   layered_info;
+  std::unique_ptr<uint32_t, free_deleter> row_start; // layered CSR offsets (m_aligned + 1)
+  std::unique_ptr<uint32_t, free_deleter> edge_vn;   // layered CSR edge VN indices
 };
+
+struct ldpc_decoder_metal::engine_slot
+{
+  /// Packed matrices, shared process-wide with the other decoder instances
+  /// (built once per (mode, base graph, lifting size), see slot_matrices_cache).
+  std::shared_ptr<slot_matrices> m;
+
+  std::unique_ptr<int8_t, free_deleter>   llr_i8;
+  std::unique_ptr<uint16_t, free_deleter> llr_fp16; // LLS only (host-filled fp16)
+  std::vector<uint8_t>                    hard_bits;
+  metal::decoder_engine::layered_info     layered_info;
+  std::unique_ptr<metal::decoder_engine>  engine;
+};
+
+namespace {
+
+/// Process-wide cache of the packed matrices, keyed by (mode, base graph, z).
+/// The pool creates several decoder instances; without the sharing each one
+/// rebuilt H/H^T/CSR on its first use of every TB size (a several-ms stall on
+/// the live chain per instance per size).
+std::mutex                                                        slot_matrices_mtx;
+std::unordered_map<uint64_t, std::shared_ptr<ldpc_decoder_metal::slot_matrices>> slot_matrices_cache;
+
+uint64_t slot_matrices_key(metal::decoder_engine::algo mode, ldpc_base_graph_type bg, unsigned z)
+{
+  return (static_cast<uint64_t>(static_cast<unsigned>(mode)) << 40) |
+         (static_cast<uint64_t>(static_cast<unsigned>(bg)) << 32) | z;
+}
+
+/// Builds the packed parity-check matrix (and its transpose / CSR layout where the mode
+/// needs them) for one (base graph, z) combination from the 3GPP protograph.
+std::shared_ptr<ldpc_decoder_metal::slot_matrices> get_shared_matrices(metal::decoder_engine::algo mode,
+                                                                       ldpc_base_graph_type       bg,
+                                                                       unsigned                   z)
+{
+  const uint64_t key = slot_matrices_key(mode, bg, z);
+  {
+    std::lock_guard<std::mutex> lock(slot_matrices_mtx);
+    auto                       it = slot_matrices_cache.find(key);
+    if (it != slot_matrices_cache.end()) {
+      return it->second;
+    }
+  }
+
+  const auto t_build_begin = std::chrono::steady_clock::now();
+  auto       m             = std::make_shared<ldpc_decoder_metal::slot_matrices>();
+  m->z                     = z;
+
+  const bool     is_bg1    = bg == ldpc_base_graph_type::BG1;
+  const unsigned n_full    = is_bg1 ? 68 : 52;
+  const unsigned bg_m      = is_bg1 ? 46 : 42;
+  const unsigned n         = n_full * z;
+  const unsigned m_rows    = bg_m * z;
+  m->n_aligned             = ((n + 31) / 32) * 32;
+  m->m_aligned             = ((m_rows + 31) / 32) * 32;
+  m->n_h_chunks            = m->n_aligned / 32;
+
+  m->h = aligned_alloc<uint32_t>(static_cast<size_t>(m->m_aligned) * m->n_h_chunks);
+  const bool build_ht =
+      (mode == metal::decoder_engine::algo::flooding) || (mode == metal::decoder_engine::algo::lls);
+  if (build_ht) {
+    const unsigned h_pred_len = m->m_aligned / 32;
+    m->ht = aligned_alloc<uint32_t>(static_cast<size_t>(m->n_aligned) * h_pred_len);
+    ocudu_assert(m->ht, "Metal LDPC: H^T allocation failed.");
+    std::memset(m->ht.get(), 0, static_cast<size_t>(m->n_aligned) * h_pred_len * sizeof(uint32_t));
+  }
+  ocudu_assert(m->h, "Metal LDPC: H allocation failed.");
+  std::memset(m->h.get(), 0, static_cast<size_t>(m->m_aligned) * m->n_h_chunks * sizeof(uint32_t));
+
+  const ldpc_graph_impl graph(bg, static_cast<ldpc::lifting_size_t>(z));
+  m->n_layers = graph.get_nof_BG_check_nodes();
+  for (unsigned row = 0; row != graph.get_nof_BG_check_nodes(); ++row) {
+    for (unsigned col = 0; col != graph.get_nof_BG_var_nodes_full(); ++col) {
+      const uint16_t shift = graph.get_lifted_node(row, col);
+      if (shift == ldpc::NO_EDGE) {
+        continue;
+      }
+      for (unsigned k = 0; k != z; ++k) {
+        const unsigned lifted_row = row * z + k;
+        const unsigned lifted_col = col * z + ((k + shift) % z);
+        m->h.get()[lifted_row * m->n_h_chunks + lifted_col / 32] |= 1u << (lifted_col % 32);
+        if (build_ht) {
+          const unsigned h_pred_len = m->m_aligned / 32;
+          m->ht.get()[lifted_col * h_pred_len + lifted_row / 32] |= 1u << (lifted_row % 32);
+        }
+      }
+    }
+  }
+
+  if (mode == metal::decoder_engine::algo::layered || mode == metal::decoder_engine::algo::layered_persistent) {
+    for (unsigned r = 0; r != m->m_aligned; ++r) {
+      for (unsigned c = 0; c != m->n_h_chunks; ++c) {
+        m->no_edges += static_cast<uint32_t>(__builtin_popcount(m->h.get()[r * m->n_h_chunks + c]));
+      }
+    }
+    m->row_start = aligned_alloc<uint32_t>(static_cast<size_t>(m->m_aligned) + 1);
+    m->edge_vn   = aligned_alloc<uint32_t>(m->no_edges);
+    ocudu_assert(m->row_start && m->edge_vn, "Metal LDPC: CSR allocation failed.");
+    uint32_t cursor    = 0;
+    m->row_start.get()[0] = 0;
+    for (unsigned r = 0; r != m->m_aligned; ++r) {
+      for (unsigned c = 0; c != m->n_h_chunks; ++c) {
+        uint32_t mask = m->h.get()[r * m->n_h_chunks + c];
+        while (mask != 0) {
+          const uint32_t bit = static_cast<uint32_t>(__builtin_ctz(mask));
+          m->edge_vn.get()[cursor++] = c * 32 + bit;
+          mask &= (mask - 1);
+        }
+      }
+      m->row_start.get()[r + 1] = cursor;
+    }
+  }
+
+  const auto t_build_end = std::chrono::steady_clock::now();
+  {
+    std::lock_guard<std::mutex> lock(slot_matrices_mtx);
+    auto [it, inserted] = slot_matrices_cache.emplace(key, m);
+    if (!inserted) {
+      // Another thread built it first; keep its entry (ours is discarded).
+      m = it->second;
+    }
+  }
+  ocudulog::fetch_basic_logger("PHY").debug(
+      "Metal LDPC: built matrices bg={} z={} in {:.1f}us (m={} n={}, edges={}, cache={})",
+      static_cast<unsigned>(bg),
+      z,
+      std::chrono::duration<double, std::micro>(t_build_end - t_build_begin).count(),
+      m->m_aligned,
+      m->n_aligned,
+      m->no_edges,
+      slot_matrices_cache.size());
+  return m;
+}
+
+} // namespace
 
 ldpc_decoder_metal::ldpc_decoder_metal(bool force_decoding_, bool early_stop_syndrome_,
                                        metal::decoder_engine::algo mode_, float factor_override_,
@@ -132,6 +264,12 @@ ldpc_decoder_metal::ldpc_decoder_metal(bool force_decoding_, bool early_stop_syn
   beta_override(beta_override_),
   enable_et(enable_et_)
 {
+  // Pre-warm the GPU family at construction: the first (base graph, z) slot used to be
+  // built lazily inside the first live decode, paying the pipeline-state creation and the
+  // first-dispatch kernel JIT (~tens of ms - the E2E first-slot dec_t=49ms anomaly) on the
+  // slot critical path. Building one tiny slot here moves all of it to the decoder-pool
+  // construction (gnb startup).
+  (void)get_slot(ldpc_base_graph_type::BG2, ldpc::lifting_size_t::LS2);
 }
 
 ldpc_decoder_metal::~ldpc_decoder_metal() = default;
@@ -162,157 +300,75 @@ ldpc_decoder_metal::engine_slot& ldpc_decoder_metal::get_slot(ldpc_base_graph_ty
     return *it->second;
   }
 
-  const bool     is_bg1    = bg == ldpc_base_graph_type::BG1;
-  const unsigned n_full    = is_bg1 ? 68 : 52;
-  const unsigned bg_m      = is_bg1 ? 46 : 42;
-  const unsigned n         = n_full * z;
-  const unsigned m         = bg_m * z;
-  const unsigned n_aligned = ((n + 31) / 32) * 32;
-  const unsigned m_aligned = ((m + 31) / 32) * 32;
+  const auto t_begin = std::chrono::steady_clock::now();
 
-  auto slot        = std::make_unique<engine_slot>();
-  slot->z          = z;
-  slot->n_aligned  = n_aligned;
-  slot->m_aligned  = m_aligned;
-  slot->n_h_chunks = n_aligned / 32;
+  const bool     is_bg1 = bg == ldpc_base_graph_type::BG1;
+  const unsigned n_full = is_bg1 ? 68 : 52;
+  const unsigned bg_m   = is_bg1 ? 46 : 42;
+  const unsigned n      = n_full * z;
+  const unsigned m      = bg_m * z;
 
-  slot->h        = aligned_alloc<uint32_t>(static_cast<size_t>(m_aligned) * slot->n_h_chunks);
-  slot->llr_i8 = aligned_alloc<int8_t>(n_aligned);
+  auto slot = std::make_unique<engine_slot>();
+  // Packed matrices: built once per (mode, bg, z) PROCESS-WIDE and shared by every
+  // decoder instance (the per-instance lazy build used to stall each new TB size).
+  slot->m = get_shared_matrices(mode, bg, z);
+
+  slot->llr_i8 = aligned_alloc<int8_t>(slot->m->n_aligned);
   slot->hard_bits.resize(n_full * z - m);
   if (mode == metal::decoder_engine::algo::lls) {
-    slot->llr_fp16 = aligned_alloc<uint16_t>(n_aligned);
+    slot->llr_fp16 = aligned_alloc<uint16_t>(slot->m->n_aligned);
   }
-  ocudu_assert(slot->h && slot->llr_i8 && (mode != metal::decoder_engine::algo::lls || slot->llr_fp16),
+  ocudu_assert(slot->llr_i8 && (mode != metal::decoder_engine::algo::lls || slot->llr_fp16),
                "Metal LDPC: aligned allocation failed.");
 
-  // Build the packed parity-check matrix (and its transpose in flooding/LLS mode)
-  // from the 3GPP protograph.
-  const ldpc_graph_impl graph(bg, ls);
-  {
-    const size_t h_size = static_cast<size_t>(m_aligned) * slot->n_h_chunks;
-    std::memset(slot->h.get(), 0, h_size * sizeof(uint32_t));
-    const bool build_ht =
-        (mode == metal::decoder_engine::algo::flooding) || (mode == metal::decoder_engine::algo::lls);
-    if (build_ht) {
-      const unsigned h_pred_len = m_aligned / 32;
-      slot->ht = aligned_alloc<uint32_t>(static_cast<size_t>(n_aligned) * h_pred_len);
-      ocudu_assert(slot->ht, "Metal LDPC: H^T allocation failed.");
-      std::memset(slot->ht.get(), 0, static_cast<size_t>(n_aligned) * h_pred_len * sizeof(uint32_t));
-    }
-
-    for (unsigned row = 0; row != graph.get_nof_BG_check_nodes(); ++row) {
-      for (unsigned col = 0; col != graph.get_nof_BG_var_nodes_full(); ++col) {
-        const uint16_t shift = graph.get_lifted_node(row, col);
-        if (shift == ldpc::NO_EDGE) {
-          continue;
-        }
-        for (unsigned k = 0; k != z; ++k) {
-          const unsigned lifted_row = row * z + k;
-          const unsigned lifted_col = col * z + ((k + shift) % z);
-          slot->h.get()[lifted_row * slot->n_h_chunks + lifted_col / 32] |= 1u << (lifted_col % 32);
-          if (build_ht) {
-            const unsigned h_pred_len = m_aligned / 32;
-            slot->ht.get()[lifted_col * h_pred_len + lifted_row / 32] |= 1u << (lifted_row % 32);
-          }
-        }
-      }
-    }
-  }
-
-  // CSR edge layout (row offsets + edge VN indices), layered mode only.
-  const unsigned n_layers = graph.get_nof_BG_check_nodes();
-  if (mode == metal::decoder_engine::algo::flooding) {
-    slot->layered_info.n_layers = n_layers;
-    slot->layered_info.z        = z;
-    slot->layered_info.row_start = nullptr;
-    slot->layered_info.edge_vn   = nullptr;
-    slot->layered_info.no_edges  = 0;
-    slot->engine = std::make_unique<metal::decoder_engine>();
-    // Flooding defaults: norm 0.45 (fp16-era flooding optimum; the layered
-    // damping does not apply to the parallel schedule).
-    const float factor = (factor_override >= 0.0F) ? factor_override : 0.45F;
-    const float beta   = (beta_override >= 0.0F) ? beta_override : 0.0F;
-    if (!slot->engine->init(n, m, factor, beta, slot->h.get(), slot->ht.get(), slot->layered_info,
-                            metal::decoder_engine::algo::flooding, enable_et)) {
-      ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
-    }
-    engine_slot& ref = *slot;
-    slots.emplace(std::move(key), std::move(slot));
-    return ref;
-  }
-
-  // LLS mode (restored from the git history, PLAN.md 4.6/4.12): no CSR layout - the kernels walk
-  // the packed H / H^T rows directly. The column weights are computed inside the engine.
-  if (mode == metal::decoder_engine::algo::lls) {
-    slot->layered_info.n_layers = n_layers;
-    slot->layered_info.z        = z;
-    slot->engine = std::make_unique<metal::decoder_engine>();
-    // LLS step size (alpha): 1.5 is the Phase 1 champion (PLAN.md 4.15, paired
-    // with the reset post-flip magnitude gamma = 0); the legacy 0.8 with the
-    // overshoot policy measured 1.5-2.5 dB weaker and left a ~5% high-SNR floor
-    // at high code rates. The full parameter struct takes over once
-    // set_lls_params() is used.
-    const float factor = lls_params_set_ ? lls_params_.alpha
-                                         : (factor_override >= 0.0F ? factor_override : 1.5F);
-    const float beta   = (beta_override >= 0.0F) ? beta_override : 0.0F;
-    if (!slot->engine->init(n, m, factor, beta, slot->h.get(), slot->ht.get(), slot->layered_info,
-                            metal::decoder_engine::algo::lls, enable_et,
-                            lls_params_set_ ? &lls_params_ : nullptr)) {
-      ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
-    }
-    engine_slot& ref = *slot;
-    slots.emplace(std::move(key), std::move(slot));
-    return ref;
-  }
-  uint32_t       no_edges = 0;
-  for (unsigned r = 0; r != m_aligned; ++r) {
-    for (unsigned c = 0; c != slot->n_h_chunks; ++c) {
-      no_edges += static_cast<uint32_t>(__builtin_popcount(slot->h.get()[r * slot->n_h_chunks + c]));
-    }
-  }
-  slot->row_start = aligned_alloc<uint32_t>(static_cast<size_t>(m_aligned) + 1);
-  slot->edge_vn   = aligned_alloc<uint32_t>(no_edges);
-  ocudu_assert(slot->row_start && slot->edge_vn, "Metal LDPC: CSR allocation failed.");
-
-  uint32_t cursor = 0;
-  slot->row_start.get()[0] = 0;
-  for (unsigned r = 0; r != m_aligned; ++r) {
-    for (unsigned c = 0; c != slot->n_h_chunks; ++c) {
-      uint32_t mask = slot->h.get()[r * slot->n_h_chunks + c];
-      while (mask != 0) {
-        const uint32_t bit = static_cast<uint32_t>(__builtin_ctz(mask));
-        slot->edge_vn.get()[cursor++] = c * 32 + bit;
-        mask &= (mask - 1);
-      }
-    }
-    slot->row_start.get()[r + 1] = cursor;
-  }
-
-  slot->layered_info.row_start = slot->row_start.get();
-  slot->layered_info.edge_vn   = slot->edge_vn.get();
-  slot->layered_info.no_edges  = no_edges;
-  slot->layered_info.n_layers  = n_layers;
+  slot->layered_info.n_layers  = slot->m->n_layers;
   slot->layered_info.z         = z;
+  slot->layered_info.row_start = slot->m->row_start.get();
+  slot->layered_info.edge_vn   = slot->m->edge_vn.get();
+  slot->layered_info.no_edges  = slot->m->no_edges;
 
-  slot->engine = std::make_unique<metal::decoder_engine>();
-  // Defaults from the BLER benchmark sweeps (see PLAN.md 4.8/4.9): the layered
-  // schedule's inherent damping allows a high norm, and the offset min-sum pair
-  // (0.7, beta 0.5) closes the residual waterfall points to CPU parity. The
-  // persistent variant (metal_persistent) runs the same schedule as one GPU
-  // resident dispatch and shares the CSR layout, defaults and buffers. The
-  // asynchronous delta-BP variant (metal_async) is flooding-family and uses
-  // the flooding-tuned defaults (norm 0.45, beta 0).
-  const bool is_async = mode == metal::decoder_engine::algo::async_delta;
-  const float factor = (factor_override >= 0.0F) ? factor_override : (is_async ? 0.45F : 0.7F);
-  const float beta   = (beta_override >= 0.0F) ? beta_override : (is_async ? 0.0F : 0.5F);
+  // Per-mode defaults from the BLER benchmark sweeps (PLAN.md 4.8/4.9/4.15): the
+  // layered schedule's inherent damping allows a high norm and the (0.7, 0.5) pair
+  // closes the residual waterfall points to CPU parity; flooding/async use the
+  // flooding-tuned defaults; LLS uses alpha 1.5 (Phase 1 champion) unless overridden.
+  float factor = 0.0F;
+  float beta   = 0.0F;
+  if (mode == metal::decoder_engine::algo::flooding) {
+    factor = (factor_override >= 0.0F) ? factor_override : 0.45F;
+    beta   = (beta_override >= 0.0F) ? beta_override : 0.0F;
+  } else if (mode == metal::decoder_engine::algo::lls) {
+    factor = lls_params_set_ ? lls_params_.alpha : (factor_override >= 0.0F ? factor_override : 1.5F);
+    beta   = (beta_override >= 0.0F) ? beta_override : 0.0F;
+  } else {
+    const bool is_async = mode == metal::decoder_engine::algo::async_delta;
+    factor              = (factor_override >= 0.0F) ? factor_override : (is_async ? 0.45F : 0.7F);
+    beta                = (beta_override >= 0.0F) ? beta_override : (is_async ? 0.0F : 0.5F);
+  }
   const metal::decoder_engine::algo init_mode =
-      (mode == metal::decoder_engine::algo::async_delta)        ? metal::decoder_engine::algo::async_delta
+      (mode == metal::decoder_engine::algo::async_delta)          ? metal::decoder_engine::algo::async_delta
       : (mode == metal::decoder_engine::algo::layered_persistent) ? metal::decoder_engine::algo::layered_persistent
+      : (mode == metal::decoder_engine::algo::flooding)           ? metal::decoder_engine::algo::flooding
+      : (mode == metal::decoder_engine::algo::lls)                ? metal::decoder_engine::algo::lls
                                                                   : metal::decoder_engine::algo::layered;
-  if (!slot->engine->init(n, m, factor, beta, slot->h.get(), nullptr, slot->layered_info, init_mode,
-                          enable_et)) {
+  slot->engine = std::make_unique<metal::decoder_engine>();
+  if (!slot->engine->init(n,
+                          m,
+                          factor,
+                          beta,
+                          slot->m->h.get(),
+                          slot->m->ht.get(),
+                          slot->layered_info,
+                          init_mode,
+                          enable_et,
+                          (init_mode == metal::decoder_engine::algo::lls && lls_params_set_) ? &lls_params_ : nullptr)) {
     ocudu_assert(false, "Metal LDPC: GPU engine initialization failed.");
   }
+
+  ocudulog::fetch_basic_logger("PHY").debug(
+      "Metal LDPC: engine slot bg={} z={} ready in {:.1f}us",
+      static_cast<unsigned>(bg),
+      z,
+      std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t_begin).count());
 
   engine_slot& ref = *slot;
   slots.emplace(std::move(key), std::move(slot));
@@ -378,10 +434,10 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
     // erasures (punctured 2Z columns and the un-transmitted tail) get a weak +1 bias: the LLS
     // update treats an exact 0 as "bit 0 with sign +", which corrupts the erasure handling
     // (see PLAN.md 4.6).
-    std::memset(slot.llr_fp16.get(), 0, static_cast<size_t>(slot.n_aligned) * sizeof(uint16_t));
+    std::memset(slot.llr_fp16.get(), 0, static_cast<size_t>(slot.m->n_aligned) * sizeof(uint16_t));
     const uint16_t erasure_bias = llr_to_fp16(1);
     std::fill(slot.llr_fp16.get(), slot.llr_fp16.get() + 2 * z, erasure_bias);
-    std::fill(slot.llr_fp16.get() + 2 * z + input.size(), slot.llr_fp16.get() + slot.n_aligned, erasure_bias);
+    std::fill(slot.llr_fp16.get() + 2 * z + input.size(), slot.llr_fp16.get() + slot.m->n_aligned, erasure_bias);
     uint16_t* fp16 = slot.llr_fp16.get() + 2 * z;
     for (const log_likelihood_ratio llr : input) {
       *fp16++ = llr_to_fp16(llr.to_int());
@@ -393,9 +449,9 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
     // a single memcpy (the int8->fp16 conversion runs inside the GPU). The
     // structural erasures get a weak +1 bias as before.
     static_assert(sizeof(log_likelihood_ratio) == 1, "LLR storage must be a single byte");
-    std::memset(slot.llr_i8.get(), 0, static_cast<size_t>(slot.n_aligned) * sizeof(int8_t));
+    std::memset(slot.llr_i8.get(), 0, static_cast<size_t>(slot.m->n_aligned) * sizeof(int8_t));
     std::fill(slot.llr_i8.get(), slot.llr_i8.get() + 2 * z, int8_t{1});
-    std::fill(slot.llr_i8.get() + 2 * z + input.size(), slot.llr_i8.get() + slot.n_aligned, int8_t{1});
+    std::fill(slot.llr_i8.get() + 2 * z + input.size(), slot.llr_i8.get() + slot.m->n_aligned, int8_t{1});
     std::memcpy(slot.llr_i8.get() + 2 * z, input.data(), input.size() * sizeof(int8_t));
 
     iters = slot.engine->decode(slot.llr_i8.get(), slot.hard_bits.data(),

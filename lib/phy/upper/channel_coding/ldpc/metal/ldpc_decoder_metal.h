@@ -58,6 +58,11 @@ public:
   /// so they get rebuilt with the new parameters on the next use.
   void set_lls_params(const metal::decoder_engine::lls_params& p);
 
+  /// Per-(mode, base graph, lifting size) packed matrices (H/H^T/CSR), shared
+  /// process-wide across decoder instances (defined in the implementation file;
+  /// public for the process-wide cache helpers).
+  struct slot_matrices;
+
 private:
   /// Per-(base graph, lifting size) GPU engine and its host-side buffers.
   struct engine_slot;

@@ -1358,6 +1358,37 @@ GPU 定位高并发/多用户/高带宽,模块级 >10× CPU 可容忍但 E2E 必
 UL 全链单 command buffer 一次 dispatch、CPU 不等回;LDPC crc=OK 后 MAC PDU 经
 回调直接给 FAPI(§3.1 的调度机制);V2X 小包走 P/E 核、大带宽视频走 GPU(NPU 后续)。
 
+## 4.18 首解码 49ms 异常定位与修复(2026-08-30)
+
+**症状**:metal_persistent 实链 `[ul_ldpc_decode] max=48995.0us`(p95 5152、p99 6636)。
+
+**历史修复核查**(用户指定的两个 commit):
+- `2efbf19100`(槽号回绕 → 92s 假样本):staleness gate;
+- `52af9442b0`(±2 容差误配对 → 2132µs 假样本):exact-key pairing。
+两者都是**探针样本配对**修复,在 `ul_pipeline_probe` 中,与 decoder 类型无关,
+当前 HEAD 均生效——本次 49ms 不是配对伪影。
+
+**新根因(per-PUSCH 日志取证)**:首个 PUSCH(Msg3, tbs=11)
+`dec_t=48993.1us` 但 **`metal_t=104.8us`**——Metal 解码本身只花 105µs,其余 49ms
+是**惰性槽构造**:第一个 (BG,Z) 槽在首次 decode() 内创建,包含引擎家族初始化
+(pipeline 状态创建)+ **首次 dispatch 的持久内核 JIT 编译(~45ms,08-30 日志中
+"loaded pre-compiled shader library" 与 PUSCH 完成之间有 ~48ms 无日志窗口)**。
+即 §4.16 的 warm-up 只在"引擎已建"后有效;槽构造本身在首解码内,税仍在槽内。
+其余 5-10ms 离群 = 运行中新 (BG,Z) 的**每实例**矩阵构建(tbs=528 → z=192 的
+H/CSR 构建;pool 每实例各建一份)。
+
+**修复(覆盖全部 decoder 选项,矩阵构建路径共享)**:
+1. **构造期预热**:`ldpc_decoder_metal` 构造时立即构建一个 (BG2, z=2) 哑槽 →
+   家族 pipeline 创建 + 内核 JIT 移到 gnb 启动期(pool 构造),首解码不再付税;
+2. **进程级矩阵共享缓存**:`slot_matrices_cache` 按 (mode, bg, z) 缓存
+   H/H^T/CSR(shared_ptr + mutex),pool 各实例复用同一份——每尺寸每进程只构建
+   一次,消除"每实例 × 每新尺寸"的重复 5-10ms 停顿;
+3. **debug 日志**:矩阵构建耗时、引擎槽就绪耗时(`Metal LDPC: built matrices
+   bg=.. z=.. in ..us` / `engine slot .. ready in ..us`)。
+
+单测(解码对拍 disagreements 0)与 BLER 延迟口径不变;gnb 启动增加 ~50ms
+(一次,pool 构造期)。**待实链复跑确认首槽 dec_t 回落至 ~数百 µs**。
+
 ## 5. 交付物清单
 
 - [ ] `metal/PLAN.md`（本文件）+ `metal/.gitignore`
