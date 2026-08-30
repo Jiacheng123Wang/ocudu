@@ -132,7 +132,9 @@ v1 两桶 + classical 兜底：
   | metal_mmse | ✗（3 次飞行模式全失败） | 6/166 | **1599 µs / 2682 µs** | — | — |
 
   吞吐补充（iperf3 服务端在 127，UE=OnePlus 8T）：**cpu 腿 16.4/16.9/16.5 Mbps
-  （三次 30 s 服务端实测，中位 16.5 Mbps）**；helena 腿服务端数据待取。
+  （中位 16.5）**；**helena 腿（重跑）6.28/3.75/6.53 Mbps（中位 ~6.3）**——
+  helena 的 UL 吞吐约为 classical 的 38%，与首传 CRC 30.6% vs 90.7% 互为印证。
+  注：helena 各轮内吞吐呈前高后低衰减（前 10 s 8-15 Mbps → 尾部 1-5 Mbps）。
 
   结论：
   1. **实机当前冠军是 classical**（首传 90.7% + 16.5 Mbps UL）；helena 合成训练模型在真实信道+
