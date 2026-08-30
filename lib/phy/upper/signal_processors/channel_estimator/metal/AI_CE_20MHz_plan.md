@@ -80,13 +80,25 @@ v1 两桶 + classical 兜底：
 - **G-3 20 MHz ZMQ E2E**：接线完成（分桶分发 + 路径四件套 + `gnb_zmq_oaiue.yaml`
   已加 expert_phy helena）。**C++ 零填充路径已验证**（窄授权→桶宽填充的运行时
   语义：30 PRB→52 桶 cpu −10.45 / metal_mmse −12.32 / helena −13.25；60 PRB→106 桶
-  −10.18 / −12.05 / −13.04——helena 窄带仍领先 ~+1 dB）。20 MHz 小区校验通过
-  （bw=20 MHz, dl_arfcn=632628）。剩余：OAI UE 侧 `r=106`（见
-  `configs/oaiue_zmq_20m.conf`；注意 r=51 的旧配置只走 52 桶，从未触发 106 桶）
-  → 联合 E2E（无尖峰 + 预算内）。
+  −10.18 / −12.05 / −13.04——helena 窄带仍领先 ~+1 dB）。**空闲唤醒无尖峰已证**
+  （`helena_head2head_bench --idle 25`：52 引擎 106 µs、106 引擎 163 µs，无
+  13.6 ms 重编译税）。20 MHz 小区校验通过（bw=20 MHz, dl_arfcn=632628）。
+  剩余：OAI UE 侧 `r=106`（见 `configs/oaiue_zmq_20m.conf`；注意 r=51 的旧配置
+  只走 52 桶，从未触发 106 桶）→ 联合 E2E。验收一键报告：
+  `scripts/e2e_helena_report.sh`（二进制 commit、30 次模型加载、引擎桶分布、
+  首个 106 预测、全量 predict 均值/max、流水线探针汇总）。
 - **G-4 实机 A/B**：helena vs metal_mmse 双跑 shadow；真信道无 ground truth →
   用 BLER / HARQ 重传 / CQI-MCS / 吞吐 / ping 间接指标 + 保存 IQ/LS 网格离线
   分析（两估计器一致性 + TD 功率剖面合理性）。
+
+  **执行清单（G-3 通过后）**：三次同条件实机跑（同一位置/时段，各 ~5 min）：
+  `--pusch_channel_estimator_algo cpu | metal_mmse | helena`（配置
+  `gnb_rf_b200_tdd_n78_20mhz.yml_iPhone17` + gpsdo）。每轮收集：① UE 侧
+  ping 网关 RTT/丢包（100 次）；② UE 侧 iperf3 上行吞吐（3 次取中位）；
+  ③ gnb 日志 HARQ/CRC 计数与 `[ul_channel_estimation]` 探针；
+  ④ `OCUDU_MMSE_TIME=1` 的 `[helena_time]` 分布。对比口径：同位置同频点，
+  手机保持静止。G-5 数据原料（真信道 LS 网格 dump）的 gnb 侧采集钩子为下阶段
+  工作，先以日志指标为主。
 - **G-5 每站自适应启动**：白天采真信道数据（LS 网格 + metal_mmse 教师输出），
   夜间蒸馏训练，A/B 晋升 + 热加载（沿 §9，真数据不再依赖合成信道）。
 
