@@ -343,3 +343,11 @@ slot 列使 89% 的 TB 免于时间配对（剩余走内容验证候选）。
 5. **遗留研究课题**（若重启 NN 路线）：NN/classical 输出校准（部分混合
    破坏高阶 QAM 的根因）、256QAM 高 SINR 段、低 SNR 段对 classical 的
    反超机会。
+6. **metal_mmse 双 UE 腿（2026-09-01 凌晨，条件不可比：SINR 10.1 vs cpu
+   腿 14.5）**：总 CRC-OK 57.4%；OAI UE（0x4601，185.8k 授权，SINR 11.0）
+   59.6%、手机（0x4602，SINR 2.5）84.3%。OAI UE 的 iperf 中途崩溃进入
+   RAR-failed 循环（UE 侧：Msg2 LDPC 反复解码失败 + 重同步改频 −2.1 kHz）。
+   机理：metal_mmse ~500–600 µs/授权（GPU，186k 授权）使 gNB 管线饱和、
+   DL 发送被拖后 → UE 侧 RAR 解不出；叠加 OAI UE 自由时钟漂移（实测
+   −2,107 Hz）+ 静态补偿失配。手机（AFC）幸存。结论：metal_mmse 是最重
+   且会拖垮 DL 时序的选项，双 UE 场景禁用。

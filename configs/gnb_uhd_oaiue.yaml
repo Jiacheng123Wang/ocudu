@@ -26,7 +26,7 @@ cu_cp:
 
 ru_sdr:
   device_driver: uhd
-  device_args: type=b200,num_recv_frames=64,num_send_frames=64   # B210 is type=b200
+  device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1   # B210 is type=b200
   srate: 23.04                          # 20 MHz @ 30 kHz SCS
   otw_format: sc12
   tx_gain: 85                           # B210 TX range 0-89.8 dB: compensate the -27.9 dB DFT
@@ -37,6 +37,8 @@ ru_sdr:
                                         # far below the HELENA model's trained input scale)
   amplitude_control:
     tx_gain_backoff: 0                  # Remove the default 12 dB back-off to maximize TX power
+  clock: gpsdo
+  sync: internal
 
 cell_cfg:
   dl_arfcn: 632628                      # n78, 20 MHz (matches OAI UE: r=51, numerology=1, band=78, C=3489420000)
