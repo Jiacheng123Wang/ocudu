@@ -139,13 +139,14 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
   // it can never corrupt a clean channel (verified: >=-34 dB at 45 dB, 6 PRB).
   const float snr_db   = 10.0F * std::log10(get_snr());
   const bool  force_nn = std::getenv("OCUDU_HELENA_FORCE_NN") != nullptr;
-  // SNR-soft blend v2 (2026-09-01 dual-UE evidence): alpha=1 at <=12 dB, linear
-  // to 0 at 24 dB. The original 25..50 dB ramp kept alpha=1 at ~21 dB, where the
-  // NN's estimation error floor collapsed 64QAM/256QAM decodes (OAI UE @21 dB:
-  // cpu 98.0% -> helena 52.5%; 256QAM 79% -> 19%). The phone at ~13 dB keeps
-  // alpha~0.92, nearly unchanged. Low-SNR regimes keep the full NN where its
-  // denoising is worth more than the error floor.
-  const float alpha = force_nn ? 1.0F : std::clamp((24.0F - snr_db) / 12.0F, 0.0F, 1.0F);
+  // SNR-soft blend (restored 2026-09-01 after the v2 experiment FAILED on
+  // hardware): alpha=1 at <=25 dB, linear to 0 at >=50 dB. The v2 curve
+  // (<=12 dB full NN, 0 at 24 dB) broke both UEs' attach: the PARTIAL blends
+  // (0 < alpha < 1) mix two gain/phase-miscalibrated estimates and corrupt
+  // high-order QAM decodes (bisect: OCUDU_HELENA_FORCE_NN=1 attached fine).
+  // Do not re-introduce partial blends without fixing the NN/classical output
+  // calibration mismatch first.
+  const float alpha = force_nn ? 1.0F : std::clamp((50.0F - snr_db) / 25.0F, 0.0F, 1.0F);
 
   // Bucket dispatch (v1): <=52 PRB -> 52-model, 53..106 PRB -> 106-model,
   // below kHelenaMinPrb PRB or frequency hopping -> classical. The NN grid is
