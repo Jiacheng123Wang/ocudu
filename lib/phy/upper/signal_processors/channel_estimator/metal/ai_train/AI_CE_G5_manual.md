@@ -231,4 +231,9 @@ git add -A && git commit -m "promote site-tuned 52 model to default" && git push
 - prb<6/跳频/高 SNR 回退槽在旧钩子里没有 CE 输入 dump（NN 未运行）→ 新钩子
   已改为全授权落盘（engine_nsc=0）；
 - 采集必须 iPhone17 配置（gpsdo），stock 配置会时钟漂移导致接入不稳；
+- **每次采集必须用全新目录**——多次 gnb 运行追加写入同一目录会把配对
+  （slot/时间戳）搞乱（site7 教训：56 个 TB 只剩 5 个可配对）；
+- 采集后先跑 `capture_qa.py <采集目录>` 体检：确认 prb/mod/engine_nsc 分布
+  与 **CE 输入尺度**（|X| rms 应在 ~0.1–0.25 附近；差 10× 以上说明 rx_gain
+  或 UE 功率异常，模型会 OOD——OAI UE 接入失败的根因）；
 - 训练别和实机测试抢 CPU（nice + 限制线程）。
