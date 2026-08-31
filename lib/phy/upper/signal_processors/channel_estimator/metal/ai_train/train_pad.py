@@ -33,6 +33,23 @@ def main():
     d = np.load(npz_path)
     X, Y, W = d['X_train'], d['Y_train'], d['width_train']
     assert X.shape[1] == nsc, f'dataset grid {X.shape[1]} != model grid {nsc}'
+    # Runtime input-scale normalization mirror (--norm <rms>): the helena impl
+    # normalizes the NN input's active-region RMS to 0.15 before predicting
+    # (2026-08-31 OAI-UE fix), so training data must be scaled the same way or
+    # the model sees a different scale than deployment. X and Y share the
+    # physical scale (both are channel estimates of the same signal), so both
+    # are scaled by the same per-sample factor.
+    if '--norm' in sys.argv:
+        tgt = opt_float('--norm', 0.15)
+        X = X.astype(np.float64); Y = Y.astype(np.float64)
+        for i in range(len(W)):
+            w = int(W[i]) * 12
+            rms = float(np.sqrt((X[i, :w] ** 2).sum() / (w * 14 * 2)))
+            if rms > 1e-9:
+                f = tgt / rms
+                X[i], Y[i] = X[i] * f, Y[i] * f
+        X = X.astype(np.float32); Y = Y.astype(np.float32)
+        print(f'--norm: per-sample active-region RMS scaled to {tgt}')
     # Optional high-SNR focus pass: keep only the samples at/above the SNR floor so
     # the optimizer is forced to fit the (near-)identity mapping on clean inputs
     # (the high-SNR absolute errors are otherwise too small to influence the loss).

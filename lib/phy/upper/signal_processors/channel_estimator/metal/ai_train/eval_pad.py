@@ -2,6 +2,8 @@
 """Per-width-band pooled NMSE of a HELENA SavedModel on a pad-aware test set.
 
 Usage: eval_pad.py <savedmodel> <npz> [--bands "6-12,13-25,26-52"] [--prb 52]
+                 [--norm <rms>]   # scale each sample's active-region RMS to <rms>
+                                  # (mirror the runtime's input normalization)
 Bands are PRB ranges; NMSE is pooled (10log10(sum err / sum sig)) over the
 ACTIVE allocation region only.
 """
@@ -23,6 +25,17 @@ def main():
     d = np.load(npz_path)
     X, Y, W = d['X_test'], d['Y_test'], d['width_test']
     assert X.shape[1] == nsc, f'dataset grid {X.shape[1]} != model grid {nsc}'
+    if '--norm' in sys.argv:
+        tgt = float(opt('--norm', '0.15'))
+        X = X.astype(np.float64); Y = Y.astype(np.float64)
+        for i in range(len(W)):
+            w = int(W[i]) * 12
+            rms = float(np.sqrt((X[i, :w] ** 2).sum() / (w * 14 * 2)))
+            if rms > 1e-9:
+                f = tgt / rms
+                X[i], Y[i] = X[i] * f, Y[i] * f
+        X = X.astype(np.float32); Y = Y.astype(np.float32)
+        print(f'--norm: samples scaled to rms {tgt} (runtime mirror)')
     yp = model.predict(X, batch_size=32, verbose=0)
     err, sig = np.abs(yp - Y) ** 2, np.abs(Y) ** 2
     act = np.broadcast_to((np.arange(nsc)[None, :, None, None] < W[:, None, None, None]).astype(bool), Y.shape)
