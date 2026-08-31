@@ -276,8 +276,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   args.pattern_symbols.for_each(args.first_symbol, args.last_symbol, [&](unsigned s) { dmrs_sym.push_back(s); });
   const unsigned npt = dmrs_sym.size();
 
-  // Per-phase timing (OCUDU_MMSE_TIME=1): sigma2 / corr-build / GPU / CPU-blocks / finish.
-  const bool           time_en = std::getenv("OCUDU_CE_TIME") != nullptr ||
+  // Per-phase timing (OCUDU_CE_TIME=1; OCUDU_MMSE_TIME kept as legacy alias):
+  // sigma2 / corr-build / GPU / CPU-blocks / finish.
+  const bool           time_en  = std::getenv("OCUDU_CE_TIME") != nullptr ||
                                std::getenv("OCUDU_MMSE_TIME") != nullptr;
   using steady_clock            = std::chrono::steady_clock;
   const auto t_begin            = steady_clock::now();

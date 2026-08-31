@@ -631,6 +631,9 @@ Metal LDPC 路径存在同类时延问题（用户确认），计划一起优化
 
 ### 7.0.11 metal_mmse 时延分相分析（2026-08-29，`OCUDU_MMSE_TIME=1` 单测口径）
 
+> 命名注记（2026-08-31）：该环境变量已改名 `OCUDU_CE_TIME`（两个信道估计器共用），
+> `OCUDU_MMSE_TIME` 保留为兼容别名——本节历史记录保留原始命令不变。
+
 新增分相计时（`OCUDU_MMSE_TIME=1`，E2E 可用）与引擎状态打印（`OCUDU_MMSE_DBG=1`
 输出 `[mmse_ce] engine READY/UNAVAILABLE`）。52 PRB/2 DMRS（10 MHz 实链配置）单测实测：
 

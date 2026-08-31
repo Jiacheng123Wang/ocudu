@@ -4,7 +4,9 @@
 Rows: LS / linear-interpolation / practical-MMSE (authors' baselines) / HELENA.
 """
 import os, time
-WORK = os.environ.get('AI_CE_WORK', os.path.expanduser('~/ai_ce_work'))
+# Self-contained: paths default to this script's directory; AI_CE_WORK can point
+# them at a historical checkout (e.g. ~/ai_ce_work).
+WORK = os.environ.get('AI_CE_WORK', os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 import numpy as np, h5py, tf_keras
 

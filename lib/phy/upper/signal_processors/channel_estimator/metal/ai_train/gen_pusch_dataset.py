@@ -129,7 +129,7 @@ def main(n_train, n_test, out, nfft_override=0, pad_aware=False, min_prb=0, max_
 if __name__ == '__main__':
     n_train = int(sys.argv[1]) if len(sys.argv) > 1 else 40000
     n_test  = int(sys.argv[2]) if len(sys.argv) > 2 else 4000
-    out     = sys.argv[3] if len(sys.argv) > 3 else os.path.join(os.path.expanduser('~/ai_ce_work'), 'work', 'pusch_ce_dataset.npz')
+    out     = sys.argv[3] if len(sys.argv) > 3 else 'pusch_ce_dataset.npz'
     nfft    = int(sys.argv[sys.argv.index('--nfft') + 1]) if '--nfft' in sys.argv else 0
     pad     = '--pad-aware' in sys.argv
     min_prb = int(sys.argv[sys.argv.index('--min-prb') + 1]) if '--min-prb' in sys.argv else 0

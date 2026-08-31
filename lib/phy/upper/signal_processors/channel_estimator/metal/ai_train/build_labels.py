@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
-"""G-5 end-to-end DD label builder.
+"""G-5 end-to-end DD label builder with candidate content verification.
 
-Per tight pair (tb bits + rx grid + CE input dump, from pair_capture.py):
+For each TB (dd_meta row), pair_capture.py emits up to K candidate rx-grid/CE
+triples (nearest timestamps first). Timestamps alone are ambiguous when two
+grants land in adjacent slots (the decode finishes ~0.2-3 slots after its
+grant, so a TB can sit closer in time to the NEXT grant's dumps). This builder
+re-encodes the TB against EVERY candidate and keeps the one whose label best
+matches the CE input (the label-vs-input power ratio is ~-20 dB for the true
+grant and ~0 dB for a foreign grant). The per-pair winner is then quality
+gated (default -10 dB).
+
+Per chosen candidate:
   TB -> CRC + segmentation -> LDPC encode (nr_ldpc) -> PUSCH rate match (rv)
      -> scramble -> modulate -> X_hat at the data REs -> H_dd = Y / X_hat
-     -> FD+TD smoothing -> label grid [n_sc, 14, 2].
+     -> FD+TD smoothing -> per-symbol CFO alignment against the CE input
+     -> zero-pad to the --bucket grid width.
 
-Output: labels.npz {X, Y, width} for the fine-tune (X = the CE input dump,
-Y = the smoothed DD label, width in PRB).
+Output: labels.npz {X, Y, width, snr_train, rank} (grids padded to
+--bucket*12 subcarriers; snr_train from meta.csv of the chosen CE dump).
 
 Usage: build_labels.py <capture_dir> [--max N] [--out labels.npz]
+                        [--bucket 52|106] [--gate DB] [--keep-raw]
 """
 import os, sys, csv
 import numpy as np
@@ -18,15 +29,16 @@ from dd_label import segment, rate_match, bit_interleave, scramble, modulate, sm
 import nr_ldpc
 
 
-def build_one(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
-              n_scid, scr_id, rnti, n_layers, rv):
+def build_label(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
+                n_scid, scr_id, rnti, n_layers, rv):
+    """Re-encode the TB against this grant and return H [n_sc, n_syms] complex."""
     n_sc = n_prb * 12
     # Data RE layout (measured on the captured grids): all 12 REs/PRB on the
     # non-DMRS symbols; the DMRS symbols carry ONLY the pilots (both combs are
     # DMRS/reserved with 2 CDM groups without data - the odd REs measure ~0).
     dmrs_syms = [s for s in range(14) if (dmrs_mask >> s) & 1]
     data_pos = []  # (sym, sc) in the transmission order (symbol-major, sc ascending)
-    for s in range(14):
+    for s in range(n_syms):
         if s in dmrs_syms:
             continue
         for sc in range(n_sc):
@@ -39,7 +51,7 @@ def build_one(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
     n_cb = len(cbs)
     bg, Zc, n_cb2 = nr_ldpc.select_bg_and_zc(tbs, E_total)
     assert n_cb2 == n_cb, f'cb count mismatch {n_cb2} vs {n_cb}'
-    # The CRC overheads are NOT in the subagent's selection: bump the lifting size
+    # The CRC overheads are NOT in select_bg_and_zc's model: bump the lifting size
     # so K_b fits the actual (CRC-attached) code block lengths.
     max_cb = max(len(b) for b in cbs)
     zc_list = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 26,
@@ -74,8 +86,9 @@ def build_one(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
     sc = scramble(coded, (rnti << 15) + n_id)
     syms = np.array(modulate(sc, mod), dtype=np.complex64)
     assert len(syms) == n_data_re
-    # Map to the data REs; rx grid order: [port][sym][sc].
-    rx = rx_grid.reshape(n_ports, n_syms, n_sc)[0]
+    # Map to the data REs; rx grid file order: [sym][port][sc] (single-port
+    # captures: identical to symbol-major [sym][sc]).
+    rx = rx_grid.reshape(n_syms, n_ports, n_sc)[:, 0]
     H = np.zeros((n_syms, n_sc), dtype=np.complex64)
     for i, (s, sc) in enumerate(data_pos):
         H[s, sc] = rx[s, sc] / syms[i]
@@ -83,62 +96,108 @@ def build_one(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
     return Hd  # [n_sc, n_syms]
 
 
+def metric_db(Xc, Y):
+    """Label-vs-input power ratio on the active region: strongly negative = good."""
+    err = np.abs(Xc - Y) ** 2
+    sig = np.abs(Y) ** 2
+    return 10 * np.log10(err.sum() / max(sig.sum(), 1e-30))
+
+
 def main():
     d = sys.argv[1]
-    max_n = int(sys.argv[sys.argv.index('--max') + 1]) if '--max' in sys.argv else 100000
+    max_n = int(sys.argv[sys.argv.index('--max') + 1]) if '--max' in sys.argv else 1000000
     out = sys.argv[sys.argv.index('--out') + 1] if '--out' in sys.argv else os.path.join(d, 'labels.npz')
+    bucket = int(sys.argv[sys.argv.index('--bucket') + 1]) if '--bucket' in sys.argv else 52
+    gate = float(sys.argv[sys.argv.index('--gate') + 1]) if '--gate' in sys.argv else -10.0
+    nsc_pad = bucket * 12
+
     pairs = np.load(os.path.join(d, 'pairs.npz'))
-    tb_idx = pairs['tb_idx'][:max_n]; rx_idx = pairs['rx_idx'][:max_n]
-    ce_idx = pairs['ce_idx'][:max_n]; n_prb = pairs['n_prb'][:max_n]
+    def to2d(a):
+        a = np.asarray(a)
+        return a.reshape(-1, 1) if a.ndim == 1 else a
+    tb_idx = to2d(pairs['tb_idx'])[:max_n]   # (N,K) — backward-compat with 1-D files
+    rx_idx = to2d(pairs['rx_idx'])[:max_n]
+    ce_idx = to2d(pairs['ce_idx'])[:max_n]
+    n_prb = to2d(pairs['n_prb'])[:max_n]
+    N, K = tb_idx.shape
+
     dd = {}
     for r in csv.reader(open(os.path.join(d, 'dd_meta.csv'))):
         dd[int(r[0])] = int(r[2])
     rx = {}
     for r in csv.reader(open(os.path.join(d, 'rx_meta.csv'))):
         rx[int(r[0])] = tuple(int(x) for x in r)
-    Xs, Ys, Ws = [], [], []
-    done = skipped = 0
-    for i in range(len(tb_idx)):
-        t, r, c = tb_idx[i], rx_idx[i], ce_idx[i]
-        (_, t_us, p, nsym, nports, k0, mod, dmask, nid, nscid, scrid, rnti, nlay, rv, nd) = rx[r]
+    ce_snr = {}
+    for r in csv.reader(open(os.path.join(d, 'meta.csv'))):
+        if len(r) >= 6:
+            ce_snr[int(r[0])] = float(r[2])
+
+    Xs, Ys, Ws, Ss, Rs = [], [], [], [], []
+    stats = {'none': 0, 'no_candidate_pass': 0, 'build_fail': 0, 'won_rank': {}, 'gate': 0}
+    for i in range(N):
+        t = tb_idx[i, 0]
         tb_file = os.path.join(d, f'tb_{t:08d}_tbs{dd[t]}.bits')
         if not os.path.exists(tb_file):
-            skipped += 1
+            stats['none'] += 1
             continue
         tb_bits = [int(x) for x in np.unpackbits(np.fromfile(tb_file, dtype=np.uint8))]
-        g = np.fromfile(os.path.join(d, f'rx_{r:08d}_prb{p}.f32'), dtype=np.float32)
-        rx_grid = g[0::2] + 1j * g[1::2]
-        try:
-            Y = build_one(tb_bits, rx_grid, p, nsym, nports, mod, dmask, nid,
-                          nscid, scrid, rnti, nlay, rv)
-        except Exception:
-            skipped += 1
+        best = None  # (metric, X_padded, Y_padded, width, snr, rank)
+        for k in range(K):
+            r, c, p = rx_idx[i, k], ce_idx[i, k], n_prb[i, k]
+            if r < 0 or c < 0:
+                break
+            try:
+                row = rx[r]
+                row = row + (0, 1)[len(row) - 13:]  # tolerate 13-col metas (no rv/nd): rv=0, nd=1
+                (_, _, _, nsym, nports, k0, mod, dmask, nid, nscid, scrid, rnti, nlay, rv, nd) = row[:15]
+                g = np.fromfile(os.path.join(d, f'rx_{r:08d}_prb{p}.f32'), dtype=np.float32)
+                if g.size < p * 12 * nsym * nports * 2:
+                    continue
+                rx_grid = g[0::2] + 1j * g[1::2]
+                Y = build_label(tb_bits, rx_grid, p, nsym, nports, mod, dmask, nid,
+                                nscid, scrid, rnti, nlay, rv)
+                Xf = os.path.join(d, f'dump_{c:08d}_prb{p}.f32')
+                X = np.fromfile(Xf, dtype=np.float32).reshape(p * 12, 14, 2)
+                Xc = X[..., 0] + 1j * X[..., 1]
+                # Align the label frame to the input frame: the raw rx grid carries
+                # the residual CFO phase ramp (the classical input is CFO-compensated)
+                # and the SCH-to-DMRS power ratio. Fit one complex gain per symbol
+                # and de-rotate the label.
+                for s in range(14):
+                    gg = np.vdot(Y[:, s], Xc[:, s]) / max(np.vdot(Xc[:, s], Xc[:, s]).real, 1e-12)
+                    if abs(gg) > 1e-6:
+                        Y[:, s] = Y[:, s] / gg
+                m = metric_db(Xc, Y)
+                if best is None or m < best[0]:
+                    Xp = np.zeros((nsc_pad, 14, 2), np.float32); Xp[:p * 12] = X
+                    Yp = np.zeros((nsc_pad, 14, 2), np.float32); Yp[:p * 12] = np.stack([Y.real, Y.imag], -1)
+                    best = (m, Xp, Yp, p, ce_snr.get(c, np.nan), k)
+            except Exception:
+                stats['build_fail'] += 1
+                continue
+        if best is None:
+            stats['no_candidate_pass'] += 1
             continue
-        X = np.fromfile(os.path.join(d, f'dump_{c:08d}_prb{p}.f32'), dtype=np.float32)
-        X = X.reshape(p * 12, 14, 2)
-        # Align the label frame to the input frame: the raw rx grid carries the
-        # residual CFO phase ramp (the classical input is CFO-compensated) and the
-        # SCH-to-DMRS power ratio. Fit one complex gain per symbol and de-rotate.
-        Xc = X[..., 0] + 1j * X[..., 1]
-        for s in range(14):
-            g = np.vdot(Y[:, s], Xc[:, s]) / max(np.vdot(Xc[:, s], Xc[:, s]).real, 1e-12)
-            if abs(g) > 1e-6:
-                Y[:, s] = Y[:, s] / g
-        Yr = np.stack([Y.real, Y.imag], -1).astype(np.float32)
-        # Zero-pad to the 52-PRB bucket width (the train_pad fixed-grid format).
-        Xp = np.zeros((624, 14, 2), np.float32); Xp[:p * 12] = X
-        Yp = np.zeros((624, 14, 2), np.float32); Yp[:p * 12] = Yr
-        Xs.append(Xp); Ys.append(Yp); Ws.append(p)
-        done += 1
+        if best[0] > gate:
+            stats['gate'] += 1
+            continue
+        Xs.append(best[1]); Ys.append(best[2]); Ws.append(best[3]); Ss.append(best[4]); Rs.append(best[5])
+        stats['won_rank'][best[5]] = stats['won_rank'].get(best[5], 0) + 1
+    done = len(Xs)
+    print(f'pairs={N} done={done} skipped: none={stats["none"]} '
+          f'no_candidate_pass={stats["no_candidate_pass"]} build_fail={stats["build_fail"]} '
+          f'gate({gate:.0f}dB)={stats["gate"]}')
+    print(f'chosen candidate rank histogram: {dict(sorted(stats["won_rank"].items()))}')
     if done:
         Xa = np.stack(Xs); Ya = np.stack(Ys); Wa = np.array(Ws)
-        np.savez(out, X=Xa, Y=Ya, width=Wa)
-        err = np.abs(Xa - Ya)**2; sig = np.abs(Ya)**2
-        print(f'done={done} skipped={skipped} saved -> {out}')
-        print(f'label vs input: |X-Y|^2/|Y|^2 = {10*np.log10(err.sum()/sig.sum()):.1f} dB (expect strongly negative)')
+        np.savez(out, X=Xa, Y=Ya, width=Wa, snr_train=np.array(Ss), rank=np.array(Rs))
+        err = np.abs(Xa - Ya) ** 2
+        act = np.broadcast_to((np.arange(nsc_pad)[None, :, None, None] < Wa[:, None, None, None] * 12), Xa.shape)
+        print(f'saved -> {out}')
+        print(f'label vs input (active region): {10*np.log10(err[act].sum()/max((np.abs(Ya)[act]**2).sum(),1e-30)):.1f} dB '
+              f'(expect strongly negative)')
     else:
-        print(f'NOTHING BUILT (skipped {skipped})')
-
+        print('NOTHING BUILT')
 
 if __name__ == '__main__':
     main()

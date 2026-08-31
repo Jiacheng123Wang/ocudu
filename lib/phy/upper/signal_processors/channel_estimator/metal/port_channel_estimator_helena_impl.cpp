@@ -142,35 +142,41 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
   // The harness forces alpha=1: its synthetic noise estimation saturates at the
   // 100 dB floor, which would otherwise blend the NN output away entirely.
   const float alpha = force_nn ? 1.0F : std::clamp((50.0F - snr_db) / 25.0F, 0.0F, 1.0F);
-  if (alpha <= 0.0F) {
-    if (time_en) {
-      ocudulog::fetch_basic_logger("PHY").debug(
-          "[helena_blend] prb={} snr={:.1f}dB alpha=0 -> classical", nof_prb, snr_db);
-    }
-    return;
-  }
 
   // Bucket dispatch (v1): <=52 PRB -> 52-model, 53..106 PRB -> 106-model,
   // below kHelenaMinPrb PRB or frequency hopping -> classical. The NN grid is
   // allocation-local (zero-padded to the bucket width) so any CRB works.
   constexpr unsigned kHelenaMinPrb = 6;
-  active_engine     = nullptr;
-  active_engine_nsc = 0;
-  if (args.hop != 0 || nof_prb < kHelenaMinPrb) {
-    return;
+  active_engine                     = nullptr;
+  active_engine_nsc                 = 0;
+  const bool nn_applicable = (alpha > 0.0F) && (args.hop == 0) && (nof_prb >= kHelenaMinPrb);
+  if (nn_applicable) {
+    if (nof_subc <= 624 && engine_52 != nullptr) {
+      active_engine     = engine_52.get();
+      active_engine_nsc = 624;
+    } else if (nof_subc <= 1272 && engine_106 != nullptr) {
+      active_engine     = engine_106.get();
+      active_engine_nsc = 1272;
+    } else if (nof_subc == 612 && engine != nullptr) {
+      active_engine     = engine.get();
+      active_engine_nsc = 612;
+    }
   }
-  if (nof_subc <= 624 && engine_52 != nullptr) {
-    active_engine     = engine_52.get();
-    active_engine_nsc = 624;
-  } else if (nof_subc <= 1272 && engine_106 != nullptr) {
-    active_engine     = engine_106.get();
-    active_engine_nsc = 1272;
-  } else if (nof_subc == 612 && engine != nullptr) {
-    active_engine     = engine.get();
-    active_engine_nsc = 612;
-  }
+
+  // G-5 data hook: dump the layer-0 classical TD-interpolated input of EVERY
+  // grant, including the classical-fallback ones (prb < kHelenaMinPrb, hopped,
+  // alpha = 0). Those slots never reach the NN, so without this they would never
+  // yield an input dump and their CRC-OK TBs could not be turned into training
+  // labels. The engine_nsc meta column is 0 for the NN-inactive slots.
+  const bool dump_en = std::getenv("OCUDU_HELENA_DUMP_DIR") != nullptr;
   if (active_engine == nullptr) {
-    return;
+    if (alpha <= 0.0F && time_en) {
+      ocudulog::fetch_basic_logger("PHY").debug(
+          "[helena_blend] prb={} snr={:.1f}dB alpha=0 -> classical", nof_prb, snr_db);
+    }
+    if (!dump_en) {
+      return;
+    }
   }
   const unsigned engine_nsc = active_engine_nsc;
 
@@ -179,7 +185,7 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
   modular_re_measurement<const cf_t, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS> freq_view =
       static_cast<const re_measurement<cf_t>&>(args.freq_response);
 
-  for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+  for (unsigned i_layer = 0; i_layer != ((active_engine != nullptr) ? nof_layers : 1U); ++i_layer) {
     // Build the NN input grid: the classical TD-interpolated LS estimates, laid out
     // subcarrier-major [nsc, 14, 2] exactly like the training set (no extra scaling),
     // zero-padded to the bucket width beyond the allocation.
@@ -200,33 +206,36 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
       }
     }
 
-    // G-5 data hook: dump the NN input grid + meta of the first layer.
-    if (i_layer == 0) {
-      if (const char* dump_dir = std::getenv("OCUDU_HELENA_DUMP_DIR"); dump_dir != nullptr) {
-        const unsigned idx = g_dump_counter.fetch_add(1, std::memory_order_relaxed);
-        char           path[512];
-        std::snprintf(path, sizeof(path), "%s/dump_%08u_prb%u.f32", dump_dir, idx, nof_prb);
-        FILE* f = std::fopen(path, "wb");
-        if (f != nullptr) {
-          std::fwrite(nn_in.data(),
-                      sizeof(float),
-                      static_cast<size_t>(nof_subc) * MAX_NSYMB_PER_SLOT * 2,
-                      f);
-          std::fclose(f);
-        }
-        std::snprintf(path, sizeof(path), "%s/meta.csv", dump_dir);
-        f = std::fopen(path, "a");
-        if (f != nullptr) {
-          // Last column: steady-clock microseconds - the pairing key with the
-          // decoder-side rx/tb dumps of the same slot.
-          const auto t_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                                std::chrono::steady_clock::now().time_since_epoch())
-                                .count();
-          std::fprintf(f, "%u,%u,%.2f,%.2f,%u,%lld\n", idx, nof_prb, snr_db, alpha, engine_nsc,
-                       static_cast<long long>(t_us));
-          std::fclose(f);
-        }
+    // G-5 data hook: dump the layer-0 classical input grid + meta of the first
+    // layer (engine_nsc = 0 marks the NN-inactive classical slots).
+    if (i_layer == 0 && dump_en) {
+      const unsigned idx = g_dump_counter.fetch_add(1, std::memory_order_relaxed);
+      char           path[512];
+      std::snprintf(path, sizeof(path), "%s/dump_%08u_prb%u.f32", std::getenv("OCUDU_HELENA_DUMP_DIR"), idx, nof_prb);
+      FILE* f = std::fopen(path, "wb");
+      if (f != nullptr) {
+        std::fwrite(nn_in.data(),
+                    sizeof(float),
+                    static_cast<size_t>(nof_subc) * MAX_NSYMB_PER_SLOT * 2,
+                    f);
+        std::fclose(f);
       }
+      std::snprintf(path, sizeof(path), "%s/meta.csv", std::getenv("OCUDU_HELENA_DUMP_DIR"));
+      f = std::fopen(path, "a");
+      if (f != nullptr) {
+        // Last column: steady-clock microseconds - the pairing key with the
+        // decoder-side rx/tb dumps of the same slot.
+        const auto t_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+        std::fprintf(f, "%u,%u,%.2f,%.2f,%u,%lld\n", idx, nof_prb, snr_db, alpha, engine_nsc,
+                     static_cast<long long>(t_us));
+        std::fclose(f);
+      }
+    }
+
+    if (active_engine == nullptr) {
+      continue; // dump-only slot: no NN pass, production stays classical
     }
 
     const auto t_nn_begin = std::chrono::steady_clock::now();
@@ -260,7 +269,7 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
       }
     }
   }
-  nn_grid_valid = true;
+  nn_grid_valid = (active_engine != nullptr);
 }
 
 void port_channel_estimator_helena_impl::get_symbol_ch_estimate(span<cbf16_t> symbol,

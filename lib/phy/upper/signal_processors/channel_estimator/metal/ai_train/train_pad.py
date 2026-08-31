@@ -13,13 +13,14 @@ os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 import numpy as np
 import tf_keras
 
-REPO_AI = os.path.join(os.path.expanduser('~'),
-    'Library/CloudStorage/OneDrive-个人/newWork/work/ocudu',
-    'lib/phy/upper/signal_processors/channel_estimator/metal/ai_train')
-sys.path.insert(0, REPO_AI)
+# Self-contained: helena_arch.py lives next to this script (no external paths).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def opt(name, default):
     return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+def opt_float(name, default):
+    return float(opt(name, default))
 
 def main():
     npz_path, out_sm = sys.argv[1], sys.argv[2]
@@ -32,6 +33,14 @@ def main():
     d = np.load(npz_path)
     X, Y, W = d['X_train'], d['Y_train'], d['width_train']
     assert X.shape[1] == nsc, f'dataset grid {X.shape[1]} != model grid {nsc}'
+    # Optional high-SNR focus pass: keep only the samples at/above the SNR floor so
+    # the optimizer is forced to fit the (near-)identity mapping on clean inputs
+    # (the high-SNR absolute errors are otherwise too small to influence the loss).
+    snr_floor = opt_float('--filter-snr-min', -1e9)
+    if '--filter-snr-min' in sys.argv and 'snr_train' in d:
+        keep = d['snr_train'] >= snr_floor
+        X, Y, W = X[keep], Y[keep], W[keep]
+        print(f'snr filter >= {snr_floor}: kept {X.shape[0]} samples')
     n = X.shape[0]
     idx = np.random.RandomState(42).permutation(n)
     nva = max(int(n * 0.1), 200)
@@ -55,6 +64,18 @@ def main():
     mask = np.broadcast_to(
         (np.arange(nsc)[None, :, None, None] < W[:, None, None, None]).astype(np.float32),
         (n, nsc, 14, 1))
+
+    # Optional SNR balancing (--snr-weight): weight ~ 1/error_power = 10^(snr/10),
+    # normalized at 25 dB and clipped. Without it the high-SNR samples' tiny absolute
+    # errors never influence the loss and the model underfits the clean regime
+    # (the 45 dB corruption bug); a pure high-SNR focus pass instead causes
+    # catastrophic forgetting of the low-SNR regime.
+    if '--snr-weight' in sys.argv and 'snr_train' in d:
+        snr_db = d['snr_train'][keep] if '--filter-snr-min' in sys.argv else d['snr_train']
+        snr_db = snr_db[: n]
+        wsnr = np.clip(np.power(10.0, (snr_db - 25.0) / 10.0), 0.02, 300.0)
+        mask = mask * wsnr[:, None, None, None]
+        print(f'snr weight: range [{wsnr.min():.2f}, {wsnr.max():.0f}]')
 
     model.compile(optimizer=tf_keras.optimizers.legacy.Adam(learning_rate=lr), loss='mse')
     t0 = time.time()

@@ -490,8 +490,10 @@ void pusch_decoder_impl::join_and_notify()
                to_string(previous_state));
 
   // G-5 DD-label data hook: dump the decoded TB of CRC-OK slots. Paired with the
-  // CE input dump (meta.csv) and the rx grid dump (rx_*.f32) by the steady-clock
-  // microsecond timestamp.
+  // CE input dump (meta.csv) and the rx grid dump (rx_*.f32); the trailing slot
+  // column matches rx_meta.csv's slot column exactly (the async LDPC decode can
+  // finish 0.2-3 slots after its grant, so the steady-clock timestamp alone is
+  // ambiguous when grants land in adjacent slots).
   if (stats.tb_crc_ok) {
     if (const char* dump_dir = std::getenv("OCUDU_HELENA_DUMP_DIR"); dump_dir != nullptr) {
       static std::atomic<unsigned> dd_idx{0};
@@ -510,8 +512,8 @@ void pusch_decoder_impl::join_and_notify()
       std::snprintf(path, sizeof(path), "%s/dd_meta.csv", dump_dir);
       f = std::fopen(path, "a");
       if (f != nullptr) {
-        std::fprintf(f, "%u,%lld,%u,%u\n", idx, static_cast<long long>(t_us), tb_bits,
-                     stats.nof_codeblocks_total);
+        std::fprintf(f, "%u,%lld,%u,%u,%u\n", idx, static_cast<long long>(t_us), tb_bits,
+                     stats.nof_codeblocks_total, current_config.slot.system_slot());
         std::fclose(f);
       }
     }

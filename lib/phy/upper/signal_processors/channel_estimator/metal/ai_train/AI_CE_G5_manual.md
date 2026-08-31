@@ -31,7 +31,7 @@ sudo OCUDU_CE_TIME=1 OCUDU_HELENA_DUMP_DIR=$HOME/capture/site_<日期> \
   ./build/apps/gnb/gnb -c configs/gnb_rf_b200_tdd_n78_20mhz.yml_iPhone17 \
   expert_phy --pusch_ldpc_decoder_type auto --pusch_channel_estimator_algo helena
 
-# 手机 attach 后：iperf3 上行 30s ×3（服务端在核心网主机，如 127）：
+#   手机 attach 后：iperf3 上行 30s ×3（服务端在核心网主机）：
 #   服务端（127 上）：iperf3 -s -B 10.45.0.1 -p 5201
 #   手机客户端：iperf3 -c 10.45.0.1 -p 5201 -t 30
 # 完成后 Ctrl-C 停 gnb；校验产物：

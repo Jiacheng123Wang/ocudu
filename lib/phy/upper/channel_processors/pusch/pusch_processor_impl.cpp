@@ -375,8 +375,11 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
     f = std::fopen(path, "a");
     if (f != nullptr) {
       // Columns: idx,t_us,n_prb,n_syms,n_ports,k0,mod,dmrs_sym_mask,n_id,n_scid,
-      // scrambling_id,rnti,n_layers - everything the offline re-encoder needs to
-      // rebuild X_hat from the decoded TB (the DD-label sidecar).
+      // scrambling_id,rnti,n_layers,rv,new_data,slot - everything the offline
+      // re-encoder needs to rebuild X_hat from the decoded TB (the DD-label
+      // sidecar). The slot column pairs exactly with dd_meta.csv's slot column
+      // (single-UE captures): the grant whose decode produced a TB is the rx row
+      // with the same slot, immune to the async-decode timestamp jitter.
       unsigned dmrs_mask = 0;
       for (unsigned s = 0; s != MAX_NSYMB_PER_SLOT; ++s) {
         dmrs_mask |= (pdu.dmrs_symbol_mask.test(s) ? 1U : 0U) << s;
@@ -390,12 +393,13 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
       }
       const unsigned rv       = pdu.codeword.has_value() ? pdu.codeword->rv : 0;
       const unsigned new_data = pdu.codeword.has_value() ? (pdu.codeword->new_data ? 1U : 0U) : 1U;
-      std::fprintf(f, "%u,%lld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", idx,
+      std::fprintf(f, "%u,%lld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", idx,
                    static_cast<long long>(t_us), n_prb, pdu.nof_symbols,
                    static_cast<unsigned>(pdu.rx_ports.size()), k0,
                    static_cast<unsigned>(pdu.mcs_descr.modulation), dmrs_mask, pdu.n_id,
                    n_scid_v, scr_id,
-                   static_cast<unsigned>(pdu.rnti), pdu.nof_tx_layers, rv, new_data);
+                   static_cast<unsigned>(pdu.rnti), pdu.nof_tx_layers, rv, new_data,
+                   pdu.slot.system_slot());
       std::fclose(f);
     }
   }

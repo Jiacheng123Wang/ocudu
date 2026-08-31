@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Day-1 106-PRB latency probe: zero-training width transfer from the 52-PRB
-HELENA model, then convert + benchmark. Run from ~/ai_ce_work/work with the
-venv python; expects the repo ai_train dir on PYTHONPATH.
+HELENA model, then convert + benchmark. Self-contained: run from this directory,
+with the 52-PRB SavedModel (`helena_pusch52_sm`) placed next to the script.
 """
 import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -9,7 +9,7 @@ import numpy as np
 from tf_keras.models import load_model
 from helena_arch import transfer_from_51
 
-WORK = os.path.expanduser('~/ai_ce_work/work')
+WORK = os.path.dirname(os.path.abspath(__file__))
 
 def main():
     t0 = time.time()
