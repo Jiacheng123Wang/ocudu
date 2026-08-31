@@ -197,18 +197,35 @@ git add -A && git commit -m "promote site-tuned 52 model to default" && git push
 
 ## 10. 106-PRB 模型全套（差异点）
 
-与 52 流程相同，仅宽度参数与运行时配置不同：
+> **先读这里（2026-08-31 勘误）**：RF 实机（n78 20 MHz @ 30 kHz）= **51 PRB**
+> 天花板（3GPP 带宽表；srsRAN 不支持 n78@15 kHz），53–106 桶在 RF 链上永远
+> 不会触发。**当前硬件上唯一能拿到真实 106-PRB PUSCH 授权的链路是 40 MHz
+> ZMQ harness**（虚拟采样率 46.08 Msps，OAI UE r=106）。手机空口 106 数据
+> 需等 40 MHz 载波的无线电（B210 不支持）或 15 kHz 重配。
+
+**ZMQ 106 桶流程（当前硬件可行）**：
+
+```bash
+# gnb 侧（本机，40 MHz / 106 PRB 小区）：
+sudo OCUDU_CE_TIME=1 OCUDU_HELENA_DUMP_DIR=<新目录> \
+  ./build/apps/gnb/gnb -c configs/gnb_zmq_oaiue_40mhz.yaml \
+  expert_phy --pusch_ldpc_decoder_type auto --pusch_channel_estimator_algo helena
+
+# UE 侧（153，ZMQ 模式，r=106）：
+sudo ./nr-uesoftmodem -O configs/oaiue_zmq_40m.conf   # 把仓库 configs/ 的 conf 拷过去
+# UE 接入后经 oaitun_ue1 跑 iperf3 上行（服务端在核心网主机），BSR 满缓冲即拿 106 PRB。
+# 采集后：capture_qa.py 体检 → 确认 prb 53–106 有量 → §2–§7 流程加 --bucket 106。
+```
+
+**RF 20 MHz 流程（52 桶全覆盖，106 桶不触发）**：
 
 1. **合成基线数据**（若从零开始）：
    `gen_pusch_dataset.py 20000 3000 pusch106pad.npz --nfft 1272 --pad-aware --min-prb 53 --max-prb 106 --snr-min -5 --snr-max 55`
-2. **采集**：与 §1 完全相同。要拿到 53–106 PRB 的授权必须**全缓冲上行**：
-   手机侧 iperf3 多流长跑——`iperf3 -c 10.45.0.1 -p 5201 -t 120 -P 4`
-   （`-P 4` 并行流；**不要加 `-w 1M`**——Android 的 socket 缓冲上限会钳制
-   setsockopt 导致 "socket buffer size not set correctly" 报错退出；窗口大小
-   与授权宽度无关，106 PRB 由 BSR 满缓冲驱动）。采集后先验授权分布：
-   `awk -F, '{print $3}' ~/capture/site_<日期>/rx_meta.csv | sort -n |
-   uniq -c | sort -rn | head`——**确认 53–106 PRB 档有量**（若最大只有 51 PRB，
-   说明上行流量没打满，重跑 iperf）。dump 钩子自动按授权宽度落盘；
+2. **采集**：与 §1 完全相同。手机侧 iperf3 多流长跑——`iperf3 -c 10.45.0.1 -p 5201 -t 120 -P 4`
+   （**不要加 `-w 1M`**——Android 的 socket 缓冲上限会钳制 setsockopt 导致
+   "socket buffer size not set correctly" 报错退出；窗口大小与授权宽度无关，
+   授权由 BSR 满缓冲驱动）。采集后先验授权分布：
+   `python $AI_TRAIN/capture_qa.py ~/capture/site_<日期>`；
 3. **配对/重建/训练集**：与 §2–§4 完全相同，`build_labels.py` 加
    `--bucket 106`（填充宽度 1272）；
 4. **微调**：`--prb 106`；初始化用 `$AI_TRAIN/init_models/helena_pusch106_sm_hi`
