@@ -241,6 +241,21 @@ slot 列使 89% 的 TB 免于时间配对（剩余走内容验证候选）。
   `ai_assets/helena_pusch52_real3_ml.mlmodelc`，作 A/B 主候选（对
   incumbent + real2 三腿）。
 
+- **双 UE 三腿 A/B（2026-09-01 凌晨，SINR 可比 ✓）**：cpu / helena incumbent /
+  real4，按 rnti 分账：
+  | UE | cpu | helena | real4 |
+  |---|---|---|---|
+  | 手机（13 dB，16QAM/QPSK） | 98.7% | 96.1% | 94.9% |
+  | OAI UE（21 dB，64/256QAM） | 98.0% | **52.5%** | 70.7% |
+  崩塌集中在高调制阶（OAI UE @21 dB）：64QAM 98.6%→74%、**256QAM 79%→19%**
+  （24,210 KO）。CFO 假说排除（残差仅 ~20 Hz）。根因：alpha=1 全权 NN 的
+  估计误差底在高阶 QAM 上被放大；之前 8 小时采集几乎无 256QAM（10 个授权）
+  故未暴露。**修复：alpha 曲线 v2——≤12 dB 全 NN、24 dB 线性归零**（21 dB
+  α≈0.25；手机 13 dB α≈0.92 几乎不变），已重建待复测。
+  更大图景：现有证据下 classical ≥ helena 于所有实测区间——若 v2 复测仍不
+  能反超，实机结论 = NN 对 CE 无净增益，保留 classical 默认 + helena 作为
+  106 桶（未来硬件）的前置基建。
+
 - **双 UE 实测结论（2026-09-01 凌晨，用户实测）**：手机与 OAI UE 同时接入
   只有一种组合——**gnb_uhd_oaiue.yaml（3489.42 MHz，双自由时钟）**；
   iPhone17 config（3408.96 MHz + gpsdo）只有手机能接入，OAI UE 不行。
