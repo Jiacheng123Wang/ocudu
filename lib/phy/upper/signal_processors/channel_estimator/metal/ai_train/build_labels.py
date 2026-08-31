@@ -14,7 +14,6 @@ Usage: build_labels.py <capture_dir> [--max N] [--out labels.npz]
 import os, sys, csv
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.expanduser('~/ai_ce_work/work'))
 from dd_label import segment, rate_match, bit_interleave, scramble, modulate, smooth_dense
 import nr_ldpc
 

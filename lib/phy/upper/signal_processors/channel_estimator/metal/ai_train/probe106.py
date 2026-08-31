@@ -4,9 +4,7 @@ HELENA model, then convert + benchmark. Run from ~/ai_ce_work/work with the
 venv python; expects the repo ai_train dir on PYTHONPATH.
 """
 import os, sys, time
-sys.path.insert(0, os.path.join(os.path.expanduser('~'),
-    'Library/CloudStorage/OneDrive-个人/newWork/work/ocudu',
-    'lib/phy/upper/signal_processors/channel_estimator/metal/ai_train'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from tf_keras.models import load_model
 from helena_arch import transfer_from_51
