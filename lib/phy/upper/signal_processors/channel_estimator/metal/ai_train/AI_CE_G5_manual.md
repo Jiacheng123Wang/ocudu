@@ -213,6 +213,7 @@ sudo OCUDU_CE_TIME=1 OCUDU_HELENA_DUMP_DIR=<新目录> \
 
 # UE 侧（153，ZMQ 模式，r=106）：
 sudo ./nr-uesoftmodem -O configs/oaiue_zmq_40m.conf   # 把仓库 configs/ 的 conf 拷过去
+# （gnb 配置已预验证：bw=40 MHz, dl_ssb_arfcn=631680 自动落同步栅格）
 # UE 接入后经 oaitun_ue1 跑 iperf3 上行（服务端在核心网主机），BSR 满缓冲即拿 106 PRB。
 # 采集后：capture_qa.py 体检 → 确认 prb 53–106 有量 → §2–§7 流程加 --bucket 106。
 ```
