@@ -135,8 +135,12 @@ scrambling_id, rnti, n_layers, rv, new_data`
   **Qm 符号粒度**分配、k0 要在未压缩缓冲上算——多码块对 0.06→0.99+。
   256QAM 映射本身无误。pair 2963 类重传对（nd=0）的 tb/rx 存在**时间错位**
   （捕获数据问题，非代码），用质量门（<−10 dB）过滤。
-- **真实数据训练集已建**：质量门过滤后 2,069 train + 229 test；已启动
-  52 模型真实数据微调（sm_hi 初始化，lr 1e-5）。
+- **首个真实数据微调完成（helena_pusch52_sm_real）**：2,069 真实标签，val
+  −20.33 dB；合成集回归 −16.21（−0.8 dB 代价）；45 dB 恒等探针持平。
+  已转 CoreML 入库 `ai_assets/helena_pusch52_real_ml.mlmodelc`。
+- **A/B 待跑**：incumbent（默认）vs 新模型（`--pusch_channel_estimator_helena_
+  model_path_52 <...>/helena_pusch52_real_ml.mlmodelc`），同一 iPhone17 配置 +
+  OnePlus，指标 = 首传 CRC + iperf 吞吐。
 
 ## 7. 下一步计划（对齐 §9 门控）
 
