@@ -42,14 +42,15 @@ def main():
         rms = np.array(rms)
         print(f'CE input |X| rms: p50={np.median(rms):.4f} p5={np.percentile(rms,5):.4f} '
               f'p95={np.percentile(rms,95):.4f} (model trained ~0.1-0.25)')
-    # CRC-OK rate per width band (the label yield proxy).
-    tb_slots = set(int(r[4]) for r in dd)
+    # CRC-OK rate per width band (the label yield proxy). slot matching must be
+    # time-windowed: system_slot() wraps every hyperframe (~5.12 s at 30 kHz).
+    tb_slots = [(int(r[4]), int(r[1])) for r in dd]
     bands = [(1, 5), (6, 12), (13, 25), (26, 52), (53, 106)]
     for lo, hi in bands:
         sel = [r for r in rx if lo <= int(r[2]) <= hi]
-        ok = sum(1 for r in sel if int(r[15]) in tb_slots)
+        ok = sum(1 for r in sel if any(s == int(r[15]) and abs(t - int(r[1])) <= 5000 for s, t in tb_slots))
         if sel:
-            print(f'prb {lo:3d}-{hi:3d}: grants={len(sel)} crc_ok_slots={ok}')
+            print(f'prb {lo:3d}-{hi:3d}: grants={len(sel)} crc_ok_grants={ok}')
 
 if __name__ == '__main__':
     main()
