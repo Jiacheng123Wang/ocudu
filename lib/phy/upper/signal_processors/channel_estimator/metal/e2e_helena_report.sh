@@ -12,10 +12,10 @@ LOG=${1:-/tmp/gnb.log}
 echo "== binary =="
 grep -m1 "Built in" "$LOG"
 
-echo "== Core ML model loads (expect 30 = 10 estimators x 3 engines) =="
+echo "== Core ML model loads (expect 2-3 per estimator; exact count varies with pool size) =="
 grep -c "Core ML model loaded" "$LOG"
 
-echo "== engine buckets used =="
+echo "== engine buckets used (624=52-model; 1272 empty means the 106 bucket never fired) =="
 grep -o "engine=[0-9]*" "$LOG" | sort | uniq -c | sort -rn
 
 echo "== first 106-bucket prediction (the spike check: predict must be ~<1 ms) =="
