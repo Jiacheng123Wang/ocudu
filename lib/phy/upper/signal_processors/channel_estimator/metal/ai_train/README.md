@@ -16,6 +16,7 @@
 | `train_pad.py` | pad-aware 微调（元素级掩码损失、`--transfer/--init` 初始化、`--filter-snr-min`、`--snr-weight`） |
 | `eval_pad.py` | pad-aware 测试集分宽度段 pooled NMSE |
 | `pair_capture.py` | 采集三元组（tb/rx/ce）配对 → `pairs.npz`：每 TB 最多 K 个候选（新格式采集按 slot 精确配对，旧格式按时间最近排序） |
+| `capture_qa.py` | 采集一键体检：prb/mod/snr/engine 分布、CE 输入数字尺度（模型训练尺度 ~0.1-0.25，超差时需查 rx_gain/UE 功率）、分宽度段 CRC-OK 率 |
 | `build_labels.py` | 端到端 DD 标签重建 + **候选内容验证**（对每个候选重编码重建标签，取"标签 vs 输入"最负者并过质量门）→ `labels.npz`（`--bucket 52\|106`、`--gate`、`--pairs`） |
 | `run_g5_pipeline.sh` | 离线管线 sidecar：采集目录 → 配对 → 重建 → 划分 → 微调 → 转换（`VENV_PY=... run_g5_pipeline.sh <采集目录> --prb 52\|106`） |
 | `init_models/` | 微调初始化的 SavedModel（`helena_pusch52_sm_hi` / `helena_pusch106_sm_hi`，合成基线）——`train_pad.py --init` 直接用，独立于 `~/ai_ce_work` |
