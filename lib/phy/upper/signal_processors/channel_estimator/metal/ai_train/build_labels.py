@@ -19,8 +19,8 @@ Per chosen candidate:
 Output: labels.npz {X, Y, width, snr_train, rank} (grids padded to
 --bucket*12 subcarriers; snr_train from meta.csv of the chosen CE dump).
 
-Usage: build_labels.py <capture_dir> [--max N] [--out labels.npz]
-                        [--bucket 52|106] [--gate DB] [--keep-raw]
+Usage: build_labels.py <capture_dir> [--pairs <pairs.npz>] [--max N]
+                        [--out labels.npz] [--bucket 52|106] [--gate DB]
 """
 import os, sys, csv
 import numpy as np
@@ -107,11 +107,12 @@ def main():
     d = sys.argv[1]
     max_n = int(sys.argv[sys.argv.index('--max') + 1]) if '--max' in sys.argv else 1000000
     out = sys.argv[sys.argv.index('--out') + 1] if '--out' in sys.argv else os.path.join(d, 'labels.npz')
+    pairs_path = sys.argv[sys.argv.index('--pairs') + 1] if '--pairs' in sys.argv else os.path.join(d, 'pairs.npz')
     bucket = int(sys.argv[sys.argv.index('--bucket') + 1]) if '--bucket' in sys.argv else 52
     gate = float(sys.argv[sys.argv.index('--gate') + 1]) if '--gate' in sys.argv else -10.0
     nsc_pad = bucket * 12
 
-    pairs = np.load(os.path.join(d, 'pairs.npz'))
+    pairs = np.load(pairs_path)
     def to2d(a):
         a = np.asarray(a)
         return a.reshape(-1, 1) if a.ndim == 1 else a
@@ -133,7 +134,7 @@ def main():
             ce_snr[int(r[0])] = float(r[2])
 
     Xs, Ys, Ws, Ss, Rs = [], [], [], [], []
-    stats = {'none': 0, 'no_candidate_pass': 0, 'build_fail': 0, 'won_rank': {}, 'gate': 0}
+    stats = {'none': 0, 'no_pass': 0, 'build_fail': 0, 'won_rank': {}, 'gate': 0}
     for i in range(N):
         t = tb_idx[i, 0]
         tb_file = os.path.join(d, f'tb_{t:08d}_tbs{dd[t]}.bits')
@@ -141,11 +142,13 @@ def main():
             stats['none'] += 1
             continue
         tb_bits = [int(x) for x in np.unpackbits(np.fromfile(tb_file, dtype=np.uint8))]
-        best = None  # (metric, X_padded, Y_padded, width, snr, rank)
+        accepted = None  # (X_padded, Y_padded, width, snr, rank)
+        tried = 0
         for k in range(K):
             r, c, p = rx_idx[i, k], ce_idx[i, k], n_prb[i, k]
             if r < 0 or c < 0:
                 break
+            tried += 1
             try:
                 row = rx[r]
                 row = row + (0, 1)[len(row) - 13:]  # tolerate 13-col metas (no rv/nd): rv=0, nd=1
@@ -168,26 +171,26 @@ def main():
                     if abs(gg) > 1e-6:
                         Y[:, s] = Y[:, s] / gg
                 m = metric_db(Xc, Y)
-                if best is None or m < best[0]:
+                # Content verification: a foreign grant's grid yields ~0..+inf dB
+                # (label = noise); the true grant yields ~-20 dB. Accept the first
+                # candidate that clears the gate - it cannot be a foreign one.
+                if m <= gate:
                     Xp = np.zeros((nsc_pad, 14, 2), np.float32); Xp[:p * 12] = X
                     Yp = np.zeros((nsc_pad, 14, 2), np.float32); Yp[:p * 12] = np.stack([Y.real, Y.imag], -1)
-                    best = (m, Xp, Yp, p, ce_snr.get(c, np.nan), k)
+                    accepted = (Xp, Yp, p, ce_snr.get(c, np.nan), k)
+                    break
             except Exception:
                 stats['build_fail'] += 1
                 continue
-        if best is None:
-            stats['no_candidate_pass'] += 1
+        if accepted is None:
+            stats['no_pass'] += 1
             continue
-        if best[0] > gate:
-            stats['gate'] += 1
-            continue
-        Xs.append(best[1]); Ys.append(best[2]); Ws.append(best[3]); Ss.append(best[4]); Rs.append(best[5])
-        stats['won_rank'][best[5]] = stats['won_rank'].get(best[5], 0) + 1
+        Xs.append(accepted[0]); Ys.append(accepted[1]); Ws.append(accepted[2]); Ss.append(accepted[3]); Rs.append(accepted[4])
+        stats['won_rank'][accepted[4]] = stats['won_rank'].get(accepted[4], 0) + 1
     done = len(Xs)
-    print(f'pairs={N} done={done} skipped: none={stats["none"]} '
-          f'no_candidate_pass={stats["no_candidate_pass"]} build_fail={stats["build_fail"]} '
-          f'gate({gate:.0f}dB)={stats["gate"]}')
-    print(f'chosen candidate rank histogram: {dict(sorted(stats["won_rank"].items()))}')
+    print(f'pairs={N} done={done} skipped: tb_missing={stats["none"]} '
+          f'no_candidate_passed={stats["no_pass"]} build_fail={stats["build_fail"]}')
+    print(f'accepted candidate rank histogram: {dict(sorted(stats["won_rank"].items()))}')
     if done:
         Xa = np.stack(Xs); Ya = np.stack(Ys); Wa = np.array(Ws)
         np.savez(out, X=Xa, Y=Ya, width=Wa, snr_train=np.array(Ss), rank=np.array(Rs))

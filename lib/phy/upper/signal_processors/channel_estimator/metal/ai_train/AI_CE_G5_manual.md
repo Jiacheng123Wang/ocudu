@@ -38,6 +38,11 @@ sudo OCUDU_CE_TIME=1 OCUDU_HELENA_DUMP_DIR=$HOME/capture/site_<日期> \
 ls ~/capture/site_<日期> | wc -l        # 应见 dump_*/rx_*/tb_* + 3 个 meta.csv
 ```
 
+采集钩子现在对**每个 PUSCH 授权**落盘（含 prb<6/跳频/高 SNR 回退槽——
+`meta.csv` 的 engine_nsc=0 标记 NN 未运行）；`rx_meta.csv`（16 列）与
+`dd_meta.csv`（5 列）尾部带 slot 列，配对按 slot 精确进行，不受异步解码
+时延抖动影响。
+
 采集质量提示：CRC-OK 率 16~40% 属正常（3408.96 邻道干扰时段波动）；干扰样本
 本身是稀缺训练料。数据格式全量规范见 `AI_CE_G5_online_adaptation_memo.md` §3。
 
@@ -45,33 +50,37 @@ ls ~/capture/site_<日期> | wc -l        # 应见 dump_*/rx_*/tb_* + 3 个 meta
 
 ```bash
 python $AI_TRAIN/pair_capture.py ~/capture/site_<日期>
-# 输出 pairs.npz（tb_idx/rx_idx/ce_idx/n_prb）；打印配对质量（紧配对比例、dt 分布）
+# 输出 pairs.npz：tb_idx/rx_idx/ce_idx/n_prb，每 TB 最多 K=4 个候选（按时间最近排序；
+# 新格式采集含 slot 列时按 slot 精确配对）。打印候选数分布（0/1/>=2）。
 ```
 
-## 3. 标签重建（决策导向）
+配对为什么需要多候选：gNB 的 TB 落盘发生在其 LDPC 解码**完成**时（比授权晚
+0.2–3 个时隙）。相邻时隙都有授权时，"时间最近"会把下一个授权的网格误配给该 TB
+（历史上观察到的 529 µs 错位）。因此配对只出候选，**内容验证**（第 3 步）定胜负。
+
+## 3. 标签重建（决策导向 + 候选内容验证）
 
 ```bash
-python $AI_TRAIN/build_labels.py ~/capture/site_<日期> --out ~/capture/site_<日期>/labels_all.npz
-# 输出 labels_all.npz {X, Y, width}；末尾打印 |X-Y|²/|Y|² 的聚合值（供参考，
-# 重传对存在时间错位，聚合值会偏乐观/悲观，用第 4 步的质量门为准）。
+python $AI_TRAIN/build_labels.py ~/capture/site_<日期> \
+    --out ~/capture/site_<日期>/labels_all.npz
+# 对每个 TB 把候选网格逐一重编码重建标签，取"标签 vs 输入"功率比最负（<-10 dB）
+# 的候选——错配网格的比值 ~0 dB，真网格 ~-20 dB，天然分离。
+# 输出 labels_all.npz {X, Y, width, snr_train, rank}，已按质量门过滤。
+# rank 直方图显示经内容验证从非最近候选救回的标签数（rank>=1）。
 ```
 
-## 4. 训练集生成（质量门过滤）
+## 4. 训练集划分（质量门已在第 3 步内置，这里只做划分）
 
 ```bash
 python - <<'EOF'
 import numpy as np, os
 d = np.load(os.path.expanduser('~/capture/site_<日期>/labels_all.npz'))
 X, Y, W = d['X'], d['Y'], d['width']
-keep = [i for i in range(len(W)) if
-        10*np.log10((np.abs(X[i,:W[i]*12]-Y[i,:W[i]*12])**2).sum()/
-        max((np.abs(Y[i,:W[i]*12])**2).sum(),1e-30)) < -10]
-keep = np.array(keep)
-rng = np.random.default_rng(42); perm = rng.permutation(len(keep))
-nva = max(len(keep)//10, 50); te, tr = perm[:nva], perm[nva:]
+rng = np.random.default_rng(42); perm = rng.permutation(len(W))
+nva = max(len(W)//10, 50); te, tr = perm[:nva], perm[nva:]
 np.savez(os.path.expanduser('~/capture/site_<日期>/realtrain.npz'),
-         X_train=X[keep[tr]], Y_train=Y[keep[tr]], width_train=W[keep[tr]],
-         X_test=X[keep[te]], Y_test=Y[keep[te]], width_test=W[keep[te]])
+         X_train=X[tr], Y_train=Y[tr], width_train=W[tr],
+         X_test=X[te], Y_test=Y[te], width_test=W[te])
 print(f'train={len(tr)} test={len(te)}')
 EOF
 ```
@@ -79,18 +88,20 @@ EOF
 ## 5. 微调（夜间）
 
 ```bash
-# 从当前线上模型（52 桶）初始化微调；lr 1e-5、6 epoch 是验证过的起点
+# 从仓库自带的 init SavedModel 初始化（init_models/ 目录，独立于 ~/ai_ce_work）：
+#   52 桶：init_models/helena_pusch52_sm_hi
+#   106 桶：init_models/helena_pusch106_sm_hi
 python $AI_TRAIN/train_pad.py ~/capture/site_<日期>/realtrain.npz \
     ~/capture/site_<日期>/helena_pusch52_sm_real \
-    --prb 52 --init <当前线上 52 SavedModel，例如 ai_assets 对应模型的 sm 导出> \
+    --prb 52 --init $AI_TRAIN/init_models/helena_pusch52_sm_hi \
     --epochs 6 --batch 32 --lr 1e-5
+# 可选：--filter-snr-min N 只保留高 SNR 样本做聚焦 pass；--snr-weight 按
+# 10^((snr-25)/10) 加权（需要 labels 含 snr_train，build_labels 已存档）。
 ```
 
-> 初始化的 SavedModel 从哪来：若无历史 sm 文件，先用合成数据训练一个基线
-> （`gen_pusch_dataset.py 15000 3000 pusch52pad.npz --nfft 624 --pad-aware
-> --min-prb 6 --max-prb 52 --snr-min -5 --snr-max 55` +
-> `train_pad.py ... --prb 52 --init <52 基模型> --epochs 8`，基模型可由
-> `helena_arch.py` 的 `transfer_from_51` 从仓库 ai_assets 的任一 52 模型生成）。
+> init SavedModel 的由来（复现链）：`gen_pusch_dataset.py` 合成数据 +
+> `train_pad.py`（52 桶从 `helena_arch.transfer_from_51` 宽度迁移初始化；
+> 106 桶同样由 52 权重零训练迁移），详见 `AI_CE_training_memo.md`。
 
 ## 6. 验证（双保险）
 
@@ -186,21 +197,32 @@ git add -A && git commit -m "promote site-tuned 52 model to default" && git push
 
 1. **合成基线数据**（若从零开始）：
    `gen_pusch_dataset.py 20000 3000 pusch106pad.npz --nfft 1272 --pad-aware --min-prb 53 --max-prb 106 --snr-min -5 --snr-max 55`
-2. **采集**：与 §1 完全相同（dump 钩子自动按授权宽度落盘；要触发 106 桶，
-   UE 需支持大授权——OAI UE 的 conf 里 `r = 106`，或手机大上传）；
-3. **配对/重建/训练集**：与 §2-§4 完全相同（宽度从 meta 读出，无需改脚本）；
-4. **微调**：`--prb 106`；初始化用 106 模型（`helena_pusch106_sm_hi` 或
-   `transfer_from_51(52 模型, 106)` 迁移生成）；
-5. **转换**：`--shape 1272`；入库 `helena_pusch106_real.mlmodelc`；
+2. **采集**：与 §1 完全相同。要拿到 53–106 PRB 的授权必须**全缓冲上行**：
+   手机侧 iperf3 加大并跑多流——`iperf3 -c 10.45.0.1 -p 5201 -t 120 -P 4 -w 1M`
+   （`-P 4` 并行流 + 1 MB 窗口），让调度器按 BSR 顶满 106 PRB。采集后先验授权
+   分布：`awk -F, '{print $3}' ~/capture/site_<日期>/rx_meta.csv | sort -n |
+   uniq -c | sort -rn | head`——**确认 53–106 PRB 档有量**（若最大只有 51 PRB，
+   说明上行流量没打满，重跑 iperf）。dump 钩子自动按授权宽度落盘；
+3. **配对/重建/训练集**：与 §2–§4 完全相同，`build_labels.py` 加
+   `--bucket 106`（填充宽度 1272）；
+4. **微调**：`--prb 106`；初始化用 `$AI_TRAIN/init_models/helena_pusch106_sm_hi`
+   （106 合成基线，52 权重零训练迁移 + pad-aware 训练得来），小 lr 起步；
+5. **转换**：`convert_coreml.py ... --shape 1272`；入库
+   `ai_assets/helena_pusch106_real.mlmodelc`；
 6. **运行时**：`--pusch_channel_estimator_helena_model_path_106 <路径>`
    （分桶分发自动把 53-106 PRB 授权路由到该模型；≤52 PRB 仍走 52 模型）。
-7. **A/B/上线**：同 §8/§9（B 腿加 106 路径参数）。
+7. **A/B/上线**：同 §8/§9（B 腿加 106 路径参数）。106 桶 A/B 的指标只看
+   53–106 PRB 授权的首传 CRC 与大授权吞吐（≤52 PRB 走 52 模型，不混合比较）。
 
 ## 附录：常见坑速查
 
 - `sudo` 前的环境变量被 env_reset 过滤 → 变量放 sudo 后；
 - `modulation_scheme` 枚举 = 每符号比特数（2/4/6/8），不是 1/2/3/4；
 - NR LDPC 速率匹配 = 自然序循环缓冲（无 32 列交织器）；位交织逐码块；
-- 重传（new_data=0）对的 tb/rx 可能时间错位 → 用质量门过滤；
+- 重传/相邻时隙授权的 tb/rx 时间错位 → 配对只出候选，`build_labels.py` 内容
+  验证定胜负（rank 直方图可查救回数）；旧格式采集（无 slot 列）也走此路径；
+- `build_labels.py` 默认读 `<采集目录>/pairs.npz`；用 `--pairs` 指定其他文件名；
+- prb<6/跳频/高 SNR 回退槽在旧钩子里没有 CE 输入 dump（NN 未运行）→ 新钩子
+  已改为全授权落盘（engine_nsc=0）；
 - 采集必须 iPhone17 配置（gpsdo），stock 配置会时钟漂移导致接入不稳；
 - 训练别和实机测试抢 CPU（nice + 限制线程）。

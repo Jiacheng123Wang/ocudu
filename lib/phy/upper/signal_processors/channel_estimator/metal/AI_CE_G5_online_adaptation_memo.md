@@ -62,34 +62,42 @@ sudo OCUDU_CE_TIME=1 OCUDU_HELENA_DUMP_DIR=/Users/jiachengwang/ai_ce_work/captur
 
 ## 3. 数据格式规范（全量）
 
-### 3.1 meta.csv（CE 输入侧，每槽一行）
+### 3.1 meta.csv（CE 输入侧，每授权一行）
 
 `idx, prb, snr_db, alpha, engine_nsc, t_us`
-- `dump_<idx:08d>_prb<N>.f32`：NN 输入网格（classical 插值 LS），
+- `dump_<idx:08d>_prb<N>.f32`：layer-0 的 classical 插值 LS 输入网格，
   `[prb*12, 14, 2]` float32（子载波主序，re/im 交替）。
-- `t_us` = steady-clock 微秒——**三组文件的配对键**。
+- **每个 PUSCH 授权都落盘**（2026-08-31 起）：prb<6、跳频、alpha=0 的回退槽
+  也 dump，其 `engine_nsc=0` 标记 NN 未运行（旧钩子只在 NN 活跃槽 dump，这些
+  槽的 TB 无法重建标签）。
+- `t_us` = steady-clock 微秒——rx↔ce 同槽关联的配对键。
 
-### 3.2 rx_meta.csv（接收侧，每授权一行，15 列）
+### 3.2 rx_meta.csv（接收侧，每授权一行，16 列）
 
 `idx, t_us, n_prb, n_syms, n_ports, k0, mod, dmrs_mask, n_id, n_scid,
-scrambling_id, rnti, n_layers, rv, new_data`
+scrambling_id, rnti, n_layers, rv, new_data, slot`
 - `mod` = srsRAN `modulation_scheme` 枚举 = **每符号比特数**（2=QPSK, 4=16QAM,
   6=64QAM, 8=256QAM——不是 1/2/3/4！曾踩坑）。
 - `dmrs_mask` = 槽内 DMRS 符号位掩码（2180 = 符号 {2,7,11}）。
-- `rx_<idx:08d>_prb<N>.f32`：解调前接收网格 RE，`[port][sym][sc]` 顺序、
+- `slot`（2026-08-31 起）= `slot_point::system_slot()`——与 dd_meta 的 slot 列
+  精确配对（单 UE 采集），免疫异步解码的时延抖动。
+- `rx_<idx:08d>_prb<N>.f32`：解调前接收网格 RE，`[sym][port][sc]` 顺序、
   float32 (re,im) 对、sc 为授权局部子载波（k0 起）。
 
 ### 3.3 dd_meta.csv（解码侧，每 CRC-OK 槽一行）
 
-`idx, t_us, tb_bits, nof_cbs`；`tb_<idx:08d>_tbs<N>.bits` = 解码 TB 的原始字节。
+`idx, t_us, tb_bits, nof_cbs, slot`；`tb_<idx:08d>_tbs<N>.bits` = 解码 TB 的
+原始字节。`slot` = 该 TB 解码所在授权的系统槽号（2026-08-31 起）。
 
 ### 3.4 派生文件
 
-- `pairs.npz`（`pair_capture.py`）：`tb_idx, rx_idx, ce_idx, n_prb`——按 t_us
-  最近邻 + 宽度一致的紧配对（|dt|≤5 ms）。
-- `labels.npz`（`build_labels.py`）：`X, Y, width`——X = CE 输入（零填充到
-  52 桶宽 624）、Y = 平滑后的 DD 标签、width = 授权 PRB 数。可直接喂
-  `train_pad.py`。
+- `pairs.npz`（`pair_capture.py`）：`tb_idx, rx_idx, ce_idx, n_prb`，形状
+  `(N,K)`——每 TB 最多 K=4 个候选（有 slot 列时按 slot 精确配对优先，其余按
+  时间最近补齐；旧格式按时间最近）。**配对只出候选，内容验证在
+  build_labels 做**（见 §6 的 529 µs 根因）。
+- `labels.npz`（`build_labels.py`）：`X, Y, width, snr_train, rank`——X = CE
+  输入（零填充到桶宽 52×12=624 或 `--bucket 106` 的 1272）、Y = 平滑后的 DD
+  标签、rank = 被接受的候选序（0=时间最近）。**已按质量门（<-10 dB）过滤**。
 
 ### 3.5 实测布局约定（从采集网格测量得出，非假设）
 
@@ -115,10 +123,10 @@ scrambling_id, rnti, n_layers, rv, new_data`
 
 | 文件 | 用途 | 状态 |
 |---|---|---|
-| `pair_capture.py` | t_us 配对 → pairs.npz | ✓ 跑通 |
+| `pair_capture.py` | 每 TB 多候选配对（slot 精确优先 + 时间最近补齐）→ pairs.npz | ✓ 跑通 |
 | `nr_ldpc.py`（work 目录） | 5G NR LDPC 编码器（BG1/BG2 完整表 + 提升 + 双对角编码 + H·c=0 自校验；子代理交付，含 4 处规范纠正） | ✓ 自校验全过 |
 | `dd_label.py` | CRC16/24A/24B、分段（38.212 §6.2.2）、32 列交织 + rv 速率匹配、gold 加扰、调制、平滑 | ✓ 合成闭环 −148 dB |
-| `build_labels.py` | 端到端标签重建（配对→重编码→H=Y/X̂→CFO 每符号去旋转→桶宽填充）→ labels.npz | ⏳ 卡在真实流对拍（见 §6） |
+| `build_labels.py` | 端到端标签重建 + **候选内容验证**（每个候选重编码重建标签，"标签 vs 输入"最负者胜 + <-10 dB 质量门）→ labels.npz | ✓ 跑通（见 §6） |
 | `train_pad.py` / `eval_pad.py` | pad-aware 微调 / 分宽度段评估（mask 损失） | ✓ 已有 |
 | `convert_coreml.py` | SavedModel→CoreML + 时延基准 | ✓ 已有 |
 
@@ -150,13 +158,33 @@ scrambling_id, rnti, n_layers, rv, new_data`
   70%、吞吐逼近 classical——**白天采数→夜间训练→次日晋升的闭环第一次转通**。
   剩余差距靠更多标签（256QAM 重传对错位修复后产量可翻数倍）+ 迭代收敛。
 
+- **配对错位根因与修复（2026-08-31，已入库 commit `b85690c857`）**：
+
+  1. **根因定位**（site5 逐对分析）：TB 落盘发生在 LDPC 解码**完成**时（比授权
+     晚 0.2–3 个时隙，p50≈481 µs）；当相邻时隙都有授权时，"时间最近"会把
+     **下一个授权**的网格误配给该 TB（pair 2963 类的 529 µs 错位），重编码后
+     标签是噪声（"标签 vs 输入"≈0 dB），被质量门正确拒收但白白损失标签。
+     site5 有 9,522/9,964 个 TB 的 ±4 ms 窗口内有 ≥2 个授权网格——误配面巨大。
+  2. **离线修复**（对旧采集有效）：`pair_capture.py` 每 TB 出 K=4 候选；
+     `build_labels.py` 对每个候选重编码重建标签，取"标签 vs 输入"最负者
+     （错配候选 ≈0 dB，真候选 ≈−20 dB，天然分离），过 <-10 dB 门才收。
+  3. **采集侧根治**（对后续采集）：
+     - rx_meta/dd_meta 增 slot 列 → 配对按 slot 精确（不再依赖时戳）；
+     - CE 输入 dump 扩到**每个授权**（prb<6/跳频/alpha=0 回退槽也有，
+       engine_nsc=0 标记）——旧钩子这些槽没有 X，其 TB 无法重建标签；
+       这是 site5 残留损失的主因（prb<6 与跳频授权约 1/4）。
+  4. **site5 重建结果**：labels_v2 重建进行中（pairs_v2：9,964 TB × ≤4 候选；
+     首 400 行预查 rank{0:229,1:…}），完成后回填本节并作为 52 模型二次微调的
+     原料。
+
 ## 7. 下一步计划（对齐 §9 门控）
 
-1. **完成标签重建**（子代理修复 → 三对验证 → 全量 site5 建标签）；
-2. **真实数据微调**：labels.npz → `train_pad.py`（52 桶，从 helena_pusch52_sm_hi
-   初始化，小 lr）→ 合成集 head2head 回归（不得劣化）→ 45 dB 探针（保持恒等）；
-3. **转换 + 入库**：convert_coreml → ai_assets 替换（A/B 双模型并存时用
-   `--pusch_channel_estimator_helena_model_path_52` 指定新模型路径）；
-4. **A/B 晋升**：实机三腿复测（同 iPhone17 配置），指标 = 首传 CRC + iperf 吞吐；
-   达标则热加载（`reload()` API 已就绪）；
-5. **周期化**：白天采数 → 夜间训练 → 次日晋升（脚本化 sidecar）。
+1. **site5 标签重建**（配对修复后）：labels_v2 重建 → 与 2,298 基线对比产量；
+2. **52 模型二次微调**（可选）：用扩产后的标签集重跑 52 微调 → 合成集回归 +
+   45 dB 探针 → A/B（若产量显著提升）；
+3. **106 模型全套（本轮重点）**：新采集（全缓冲 UL 拿到 53–106 PRB 授权，
+   新钩子含 slot 列 + 全授权 dump）→ 配对/重建（`--bucket 106`）→ 从
+   `init_models/helena_pusch106_sm_hi` 微调 → 转换入库
+   `helena_pusch106_real.mlmodelc` → 实机 A/B（指标只看 53–106 PRB 授权的
+   首传 CRC 与大授权吞吐）→ 晋升；
+4. **周期化**：白天采数 → 夜间训练 → 次日晋升（脚本化 sidecar）。

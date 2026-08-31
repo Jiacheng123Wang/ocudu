@@ -15,8 +15,9 @@
 | `gen_pusch_dataset.py` | 合成 PUSCH 数据集生成（TDL-A..E 信道、DMRS {2,7,11}、LS+插值输入；`--pad-aware` 随机宽度、`--snr-min/--snr-max`） |
 | `train_pad.py` | pad-aware 微调（元素级掩码损失、`--transfer/--init` 初始化、`--filter-snr-min`、`--snr-weight`） |
 | `eval_pad.py` | pad-aware 测试集分宽度段 pooled NMSE |
-| `pair_capture.py` | 采集三元组（tb/rx/ce）时间戳配对 → `pairs.npz` |
-| `build_labels.py` | 端到端 DD 标签重建（配对→重编码→H=Y/X̂→CFO 去旋转→桶宽填充）→ `labels.npz` |
+| `pair_capture.py` | 采集三元组（tb/rx/ce）配对 → `pairs.npz`：每 TB 最多 K 个候选（新格式采集按 slot 精确配对，旧格式按时间最近排序） |
+| `build_labels.py` | 端到端 DD 标签重建 + **候选内容验证**（对每个候选重编码重建标签，取"标签 vs 输入"最负者并过质量门）→ `labels.npz`（`--bucket 52\|106`、`--gate`、`--pairs`） |
+| `init_models/` | 微调初始化的 SavedModel（`helena_pusch52_sm_hi` / `helena_pusch106_sm_hi`，合成基线）——`train_pad.py --init` 直接用，独立于 `~/ai_ce_work` |
 | `convert_coreml.py` | SavedModel → Core ML（固定形状，`--shape`）+ ANE/GPU/CPU 时延基准（仅 macOS） |
 | `train_helena.py` / `eval_helena.py` | 作者原始数据集的训练/评估（历史工具） |
 | `probe106.py` | 52→106 零训练宽度迁移探针（延迟预算判定用） |
@@ -39,6 +40,19 @@ xcrun coremlcompiler compile <model.mlpackage> <输出目录>
 ```
 
 **运行时**：OCUDU gNB（本仓库，Apple Silicon + `-framework CoreML`）。
+
+**快速自检**（验证本目录独立可工作，无需 `~/ai_ce_work`）：
+
+```bash
+python3 -m venv /tmp/ai_train_venv && source /tmp/ai_train_venv/bin/activate
+pip install numpy
+python dd_label.py                      # LDPC/CRC/调制原语自检
+# 从任一采集目录跑配对+标签（只需 numpy）：
+python pair_capture.py <采集目录> --out <采集目录>/pairs_v2.npz
+python build_labels.py <采集目录> --pairs <采集目录>/pairs_v2.npz --out /tmp/labels.npz
+```
+
+（训练/转换再加 `pip install tensorflow tf-keras h5py coremltools`。）
 
 ## 开源参照（信息性，本目录代码不依赖它们）
 
