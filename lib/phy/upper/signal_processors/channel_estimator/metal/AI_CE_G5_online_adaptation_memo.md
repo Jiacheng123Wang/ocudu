@@ -241,6 +241,22 @@ slot 列使 89% 的 TB 免于时间配对（剩余走内容验证候选）。
   `ai_assets/helena_pusch52_real3_ml.mlmodelc`，作 A/B 主候选（对
   incumbent + real2 三腿）。
 
+- **SINR 核查后的历史对照总账（2026-08-31 晚复盘，ab_report.py）**：
+  | 场次 | 腿 | CRC-OK | SINR 中位 | 可比？ |
+  |---|---|---|---|---|
+  | G-4（02:11，OnePlus） | classical | 90.7% | 22.4 | 与同场 helena 不可比（helena 信号反而更好） |
+  | G-4（01:58） | helena 修复前 | 30.6% | **25.6** | 信号好 3.2 dB 仍输 60 pp——修复前劣势被低估 |
+  | 首轮 A/B（10:06，phone） | incumbent | 39.3% | 24.1 | **可比 ✓** |
+  | 首轮 A/B（10:12） | real | 69.6% | 24.3 | +30.3 pp 成立 |
+  | real3 A/B（22:40，phone） | incumbent | 81.1% | 12.5 | 不可比（B 腿信号好 9 dB） |
+  | real3 A/B（22:52） | real3 | 68.0% | **21.4** | real3 退化被低估 |
+  - 修正一处此前表述：OAI UE 重测对比中引用的"classical 90.7%"是**手机
+    G-4 场次的 classical**，不是 OAI UE 的 classical 参照——OAI UE 的
+    classical 参照尚无（cpu 腿仅 45 个授权、SINR 5.9 dB，不可作参照）。
+  - **A/B 规程（今后强制）**：三腿背靠背（classical / incumbent / 候选），
+    每腿录日志 → `ab_report.py` 输出 CRC + SINR 分布，**SINR 中位差 >3 dB
+    的对照无效**，需重跑。
+
 - **real3 实机 A/B 回退（2026-08-31 晚，背靠背）**：A 腿 incumbent **81.1%**
   （180,115 OK/41,872 KO）vs B 腿 real3 **68.0%**（148,700 OK/69,982 KO）——
   **real3 实机回退 13 pp，不晋升**。两点观察：① incumbent 相对首轮 A/B 的
