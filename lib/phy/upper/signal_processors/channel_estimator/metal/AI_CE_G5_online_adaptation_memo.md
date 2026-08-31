@@ -183,6 +183,15 @@ scrambling_id, rnti, n_layers, rv, new_data, slot`
      （新钩子已根治）+ 少量构建失败。宽度分布 51(3,173)/43(1,933)/48(1,096)/
      25(827)/50/44/46，SNR 20.2–30.2 dB（p50 26.1）——52 桶二次微调的原料。
 
+- **106 桶实机天花板（2026-08-31，site6 实机证实）**："20 MHz = 106 PRB"只对
+  15 kHz SCS 成立；本系统 20 MHz@**30 kHz = 51 PRB**（srsRAN 带宽表
+  `{MHz20,106,51,24}`；band_helper 只有 n78@30 kHz 的 SSB 配置，15 kHz 无法
+  配置）。因此 PUSCH 授权 ≤51 PRB 是载波 numerology 的天花板，**53–106 桶在
+  本硬件（B200 + n78@30 kHz + iPhone）永不被触发**——site1..6 最大授权全部
+  51 PRB 即此因，与调度/流量无关。106 模型的合成训练/入库仍有效（为 40 MHz
+  载波或 15 kHz 重配备用）；"实机 106 数据微调"在现硬件上不可行。详见
+  `AI_CE_20MHz_plan.md` 顶部勘误。
+
 - **52 模型二次微调（helena_pusch52_sm_real2，7,884 标签 → 7,096 训练 /
   788 验证，2026-08-31）**：val −19.37 dB（DD 标签噪声底 ~−19.5）。三模型
   同集对照（合成 pusch52pad_hi / 真实 holdout）：
@@ -205,9 +214,9 @@ scrambling_id, rnti, n_layers, rv, new_data, slot`
    `train_pad.py`（从 `init_models/helena_pusch52_sm_hi`，lr 1e-5，6 ep）→
    合成集 head2head 回归（不得劣化）→ 45 dB 探针（保持恒等）→ 转换入库
    `helena_pusch52_real2.mlmodelc` → 实机 A/B（若显著优于 helena_pusch52_real）；
-3. **106 模型全套（本轮重点，等实机采集）**：新采集（全缓冲 UL 拿到 53–106 PRB
-   授权，新钩子含 slot 列 + 全授权 dump）→ 配对/重建（`--bucket 106`）→ 从
-   `init_models/helena_pusch106_sm_hi` 微调 → 转换入库
-   `helena_pusch106_real.mlmodelc` → 实机 A/B（指标只看 53–106 PRB 授权的
-   首传 CRC 与大授权吞吐）→ 晋升；
+3. **106 模型全套（受 §6 天花板约束，待用户决策）**：现硬件 20 MHz@30 kHz
+   = 51 PRB，53–106 桶不会被触发。可行分支：(a) 接受现实——106 模型保持合成
+   版备用，实机闭环收敛到 52 桶（site6 数据仍可增强 52 微调）；(b) 未来换
+   40 MHz 载波的无线电（B210 不行）+ 干净频段再重启 106 实机流。
+   若走 (a)：site6 → 配对/重建（52 桶）→ 52 real3 微调 → A/B。
 4. **周期化**：白天采数 → 夜间训练 → 次日晋升（脚本化 sidecar）。

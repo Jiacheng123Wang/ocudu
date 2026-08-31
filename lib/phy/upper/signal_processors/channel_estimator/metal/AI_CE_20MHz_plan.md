@@ -1,5 +1,17 @@
 # 20 MHz（n78 / 106 PRB）实机 HELENA CE 实施方案
 
+> **⚠️ 重要勘误（2026-08-31，site6 实机数据证实）**：本方案标题的
+> "20 MHz = 106 PRB"只对 **15 kHz SCS** 成立；实际 E2E 配置是 **30 kHz SCS**
+> （n78 TDD 的 srsRAN 唯一支持组合——`lib/ran/band_helper.cpp` 的 SSB 表只有
+> n78@30 kHz case C），20 MHz@30 kHz = **51 PRB**（srsRAN 带宽表
+> `{MHz20, 106, 51, 24}` 第 2 列 = 30 kHz 取值）。因此**本实机系统的 PUSCH
+> 授权永远 ≤51 PRB，106 桶（53–106 PRB）在本硬件上不会被触发**——所有实机
+> 采集（site1..site6）的最大授权都是 51 PRB，与调度无关，是载波 numerology
+> 的天花板。106 模型的合成训练/转换/入库仍然有效（为未来 40 MHz 载波或
+> 15 kHz 重配做准备），但"实机 106 数据微调"在当前 B200 + n78@30 kHz +
+> iPhone 组合上不可行。52 桶模型是当前实机系统的完整覆盖面。
+> （B210 USB3 也无法承载 40 MHz 载波所需的 38+ MHz 采样率。）
+
 ## 0. 现状盘点
 
 - 已跑通：10 MHz ZMQ E2E（52-PRB HELENA，worker keep-alive 修复后无尖峰，
