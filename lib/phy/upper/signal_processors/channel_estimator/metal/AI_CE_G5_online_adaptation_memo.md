@@ -138,9 +138,17 @@ scrambling_id, rnti, n_layers, rv, new_data`
 - **首个真实数据微调完成（helena_pusch52_sm_real）**：2,069 真实标签，val
   −20.33 dB；合成集回归 −16.21（−0.8 dB 代价）；45 dB 恒等探针持平。
   已转 CoreML 入库 `ai_assets/helena_pusch52_real_ml.mlmodelc`。
-- **A/B 待跑**：incumbent（默认）vs 新模型（`--pusch_channel_estimator_helena_
-  model_path_52 <...>/helena_pusch52_real_ml.mlmodelc`），同一 iPhone17 配置 +
-  OnePlus，指标 = 首传 CRC + iperf 吞吐。
+- **首次 A/B 晋升结果（2026-08-31，背靠背同条件）——闭环验证成功**：
+
+  | 腿 | 首传 CRC OK | iperf 吞吐中位 | UL 数据量 |
+  |---|---|---|---|
+  | incumbent | 39.3% | 8.61 Mbps | 100.9 MB |
+  | **真实微调** | **69.6%（+30.3pp）** | **15.6 Mbps（+81%）** | 173.7 MB |
+  | classical（G-4 参照） | 90.7% | 16.5 Mbps | — |
+
+  结论：2,069 个真实标签的"最小可行微调"把 helena 的实机首传 CRC 从 39% 拉到
+  70%、吞吐逼近 classical——**白天采数→夜间训练→次日晋升的闭环第一次转通**。
+  剩余差距靠更多标签（256QAM 重传对错位修复后产量可翻数倍）+ 迭代收敛。
 
 ## 7. 下一步计划（对齐 §9 门控）
 
