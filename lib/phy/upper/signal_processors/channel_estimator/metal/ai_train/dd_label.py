@@ -32,7 +32,7 @@ def crc_attach(bits, poly, n):
     reg = 0
     out = []
     # Standard LFSR over the whole stream (zero-padded tail).
-    stream = list(bits) + [0] * n
+    stream = [int(b) for b in bits] + [0] * n
     for b in stream:
         fb = (reg >> (n - 1)) & 1
         reg = ((reg << 1) & ((1 << n) - 1)) | b
@@ -41,33 +41,49 @@ def crc_attach(bits, poly, n):
         out.append(b)
     # The parity = the register after processing (MSB-first).
     crc_bits = [(reg >> (n - 1 - k)) & 1 for k in range(n)]
-    return list(bits) + crc_bits
+    return [int(b) for b in bits] + crc_bits
 
 CRC16_POLY  = 0x1021
 CRC24A_POLY = 0x1864CFB
 CRC24B_POLY = 0x1800063
 
-# ---------------- Segmentation (38.212 6.2.2) ----------------
+# ---------------- Segmentation (38.212 6.2.1 / 6.2.2) ----------------
 def segment(tb_bits):
-    """Returns a list of codeblock bit lists (with CRCs attached, fillers appended
-    conceptually - fillers are encoded but not transmitted)."""
+    """CRC attachment + code-block segmentation.
+
+    Returns a list of code-block bit lists (each with its own CRC).  A single
+    code block carries ONLY the transport-block CRC (CRC16 for A<=3824, CRC24A
+    for A>3824); the extra 24-bit code-block CRC (CRC24B) is added only when the
+    block is actually split (A > 8448, i.e. BG1 multi-block).  Filler bits are
+    appended separately by the LDPC encoder and are not part of this list.
+    """
     if len(tb_bits) <= 3824:
         return [crc_attach(tb_bits, CRC16_POLY, 16)]
-    b = len(tb_bits) + 24
-    C = int(np.ceil(b / (8448 - 24)))
-    b_plus = b + C * 24
-    Kp = int(np.ceil(b_plus / C))
+    tb = crc_attach(tb_bits, CRC24A_POLY, 24)
+    B = len(tb_bits) + 24
+    if B <= 8448:
+        return [tb]  # single code block: no per-code-block CRC
+    L = 24
+    C = int(np.ceil(B / (8448 - L)))
+    Kp = int(np.ceil((B + C * L) / C))
+    info_per = Kp - L
     out = []
     pos = 0
-    tb = crc_attach(tb_bits, CRC24A_POLY, 24)
     for c in range(C):
-        part = tb[c * Kp:(c + 1) * Kp]
+        take = info_per if c < C - 1 else B - pos
+        part = tb[pos:pos + take] + [0] * (info_per - take)
+        pos += take
         out.append(crc_attach(part, CRC24B_POLY, 24))
     return out
 
 # ---------------- Rate matching (38.212 5.4.2) ----------------
 def subblock_interleave(bits):
-    """32-column sub-block interleaver with the NR pattern."""
+    """32-column sub-block interleaver (LTE 36.212 style).
+
+    NOTE: this is NOT part of NR LDPC rate matching (38.212 5.4.2.1 keeps the
+    circular buffer in natural order).  Retained only for interface compatibility;
+    :func:`rate_match` no longer calls it.
+    """
     P = [0, 16, 8, 24, 4, 20, 12, 28, 2, 18, 10, 26, 6, 22, 14, 30,
          1, 17, 9, 25, 5, 21, 13, 29, 3, 19, 11, 27, 7, 23, 15, 31]
     D = len(bits)
@@ -85,31 +101,52 @@ def subblock_interleave(bits):
             k += 1
     return [int(v) for v in y]
 
-def rate_match(codeblock_bits, K_transmitted, K_b, Zc, E, rv):
-    """codeblock_bits: the full N-bit codeword from the LDPC encoder (punctured
-    prefix first). K_b: the FULL information bit count incl. the fillers (the
-    parity starts after them); K_transmitted: the info bits without the fillers
-    (the systematic window excludes the trailing fillers). Returns E bits."""
-    N = len(codeblock_bits)
-    sys_bits  = codeblock_bits[2 * Zc:2 * Zc + K_transmitted]
-    par_total = codeblock_bits[2 * Zc + K_b:]
-    half      = len(par_total) // 2
-    p0, p1    = par_total[:half], par_total[half:]
-    s_i = subblock_interleave(sys_bits)
-    p0_i = subblock_interleave(p0)
-    p1_i = subblock_interleave(p1)
-    buf = s_i + [v for pair in zip(p0_i, p1_i) for v in pair]
+def rate_match(codeblock_bits, K_transmitted, K_b, Zc, E, rv, bg=None):
+    """NR LDPC rate matching, bit selection (38.212 5.4.2.1).
+
+    The NR circular buffer is the codeword in *natural* order:
+
+        [systematic bits, parity bits]
+
+    * ``K_transmitted`` = the information-bit count WITHOUT the filler bits; the
+      systematic window is ``codeblock_bits[2*Zc : K_transmitted]`` (it excludes
+      the ``2*Zc`` punctured prefix AND the trailing filler).
+    * ``K_b`` = the FULL information-bit count including the filler; the parity
+      section starts at ``K_b`` and is kept in natural (column) order.
+
+    Unlike LTE, NR LDPC rate matching has NO 32-column sub-block interleaver and
+    NO p0/p1 interleaver.  Bit selection reads ``E`` bits cyclically from ``k0``
+    (Table 5.4.2.1-2: BG1 {0,17,33,56}, BG2 {0,13,25,43}).
+    """
+    if bg is None:
+        bg = 1 if (int(K_b) // int(Zc)) == 22 else 2
+    codeblock_bits = np.asarray(codeblock_bits, dtype=np.uint8)
+    sys_bits = codeblock_bits[2 * Zc:K_transmitted]
+    par_bits = codeblock_bits[K_b:]
+    buf = np.concatenate([sys_bits, par_bits])
     Ncb = len(buf)
-    k0 = {0: 0,
-          1: (17 * Ncb // (32 * Zc)) * Zc,
-          2: (33 * Ncb // (32 * Zc)) * Zc,
-          3: (56 * Ncb // (32 * Zc)) * Zc}[rv]
-    out = []
-    k = k0
-    while len(out) < E:
-        out.append(buf[k % Ncb])
-        k += 1
-    return out
+    N_short = (66 if bg == 1 else 50) * Zc
+    shift_factor = {1: (0, 17, 33, 56), 2: (0, 13, 25, 43)}[bg]
+    k0 = (shift_factor[rv] * Ncb // N_short) * Zc
+    return [int(v) for v in buf[(np.arange(E) + k0) % Ncb]]
+
+
+def bit_interleave(bits, mod):
+    """Modulation-order bit interleaver (38.212 5.4.2.2).
+
+    Maps the rate-matched sequence ``e`` (length E) to the modulator input ``f``:
+    the sequence is written into ``mod`` rows of ``E//mod`` bits and read out
+    column by column, i.e. ``f[i*mod + j] = e[j*(E//mod) + i]``.
+    """
+    E = len(bits)
+    Qm = mod
+    EQm = E // Qm
+    bits = np.asarray(bits, dtype=np.uint8)
+    f = np.empty(E, dtype=np.uint8)
+    for i in range(EQm):
+        for j in range(Qm):
+            f[i * Qm + j] = bits[j * EQm + i]
+    return [int(v) for v in f]
 
 # ---------------- Scrambling (38.211 5.2.1 / 6.3.1.1) ----------------
 def gold_seq(c_init, n):

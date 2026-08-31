@@ -15,7 +15,7 @@ import os, sys, csv
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.expanduser('~/ai_ce_work/work'))
-from dd_label import segment, rate_match, scramble, modulate, smooth_dense
+from dd_label import segment, rate_match, bit_interleave, scramble, modulate, smooth_dense
 import nr_ldpc
 
 
@@ -46,11 +46,12 @@ def build_one(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
     zc_list = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 26,
                28, 30, 32, 36, 40, 44, 48, 52, 56, 60, 64, 72, 80, 88, 96, 104, 112,
                120, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352, 384]
+    kb_info = 22 if bg == 1 else nr_ldpc._info_columns(bg, max_cb)
     for z in zc_list:
-        if (22 * z if bg == 1 else 10 * z) >= max_cb:
+        if kb_info * z >= max_cb:
             Zc = z
             break
-    K_b = 22 * Zc if bg == 1 else 10 * Zc
+    K_b = kb_info * Zc
     # Encode + rate match per block; the fillers sit at the end of the info part
     # and are excluded from the transmitted systematic bits.
     E_per = E_total // n_cb
@@ -61,9 +62,11 @@ def build_one(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
         u = list(cbs[c]) + [0] * (K_b - len(cbs[c]))  # filler padding
         cw = nr_ldpc.ldpc_encode(bg, Zc, u)
         E_c = E_per + (E_total - E_per * n_cb if c == n_cb - 1 else 0)
-        coded.extend(rate_match(cw, len(cbs[c]), K_b, Zc, E_c, rv))
+        coded.extend(rate_match(cw, len(cbs[c]), K_b, Zc, E_c, rv, bg))
     assert len(coded) == E_total, f'E mismatch: {len(coded)} vs {E_total}'
-    # Scramble (the PUSCH data c_init has no slot term).
+    # Modulation-order bit interleaver (38.212 5.4.2.2), then scramble (the
+    # PUSCH data c_init has no slot term).
+    coded = bit_interleave(coded, mod)
     sc = scramble(coded, (rnti << 15) + n_id)
     syms = np.array(modulate(sc, mod), dtype=np.complex64)
     assert len(syms) == n_data_re
