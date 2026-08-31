@@ -227,6 +227,15 @@ slot 列使 89% 的 TB 免于时间配对（剩余走内容验证候选）。
   3.4× 标签的宽度/SNR 覆盖差异只能由实机 A/B 裁决。已转 CoreML 入库
   `ai_assets/helena_pusch52_real2_ml.mlmodelc` 作 A/B 第三腿候选。
 
+- **52 模型三次微调（real3，2026-08-31）**：site5+site6 合并 28,693 训练 /
+  3,188 验证（site6 重建得 23,997 个过门标签，slot 精确配对 rank{0:23995,
+  1:2}）。同一 s56 holdout 四模型对照：init −17.75 / real(2,069) −18.65 /
+  real2(7,096) −18.74 / **real3(28,693) −18.84**（+1.09 dB vs init，最佳）；
+  合成回归 −17.99（−1.94 dB vs init——真实标签越多合成越弱，趋势延续）；
+  45 dB 探针 −25.1/−29.8/−33.5（无高 SNR 破坏）。ANE p50 171 µs。入库
+  `ai_assets/helena_pusch52_real3_ml.mlmodelc`，作 A/B 主候选（对
+  incumbent + real2 三腿）。
+
 ## 7. 下一步计划（对齐 §9 门控）
 
 1. ~~**site5 标签重建**~~ ✅ 7,884 个过门标签（3.4×，见 §6）；
