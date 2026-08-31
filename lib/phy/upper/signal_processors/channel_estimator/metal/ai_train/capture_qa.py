@@ -44,11 +44,18 @@ def main():
               f'p95={np.percentile(rms,95):.4f} (model trained ~0.1-0.25)')
     # CRC-OK rate per width band (the label yield proxy). slot matching must be
     # time-windowed: system_slot() wraps every hyperframe (~5.12 s at 30 kHz).
-    tb_slots = [(int(r[4]), int(r[1])) for r in dd]
+    # Hash on (slot, coarse time bucket) to keep large captures linear.
+    tb_keys = {}
+    for r in dd:
+        tb_keys.setdefault((int(r[4]), int(r[1]) // 10000), True)
     bands = [(1, 5), (6, 12), (13, 25), (26, 52), (53, 106)]
     for lo, hi in bands:
         sel = [r for r in rx if lo <= int(r[2]) <= hi]
-        ok = sum(1 for r in sel if any(s == int(r[15]) and abs(t - int(r[1])) <= 5000 for s, t in tb_slots))
+        ok = 0
+        for r in sel:
+            b = int(r[1]) // 10000
+            if (int(r[15]), b) in tb_keys or (int(r[15]), b - 1) in tb_keys or (int(r[15]), b + 1) in tb_keys:
+                ok += 1
         if sel:
             print(f'prb {lo:3d}-{hi:3d}: grants={len(sel)} crc_ok_grants={ok}')
 

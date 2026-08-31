@@ -61,7 +61,7 @@ ru_sdr:
   srate: 23.04
   otw_format: sc12
   tx_gain: 80
-  rx_gain: 60
+  rx_gain: 75
   clock: gpsdo
   sync: internal
 

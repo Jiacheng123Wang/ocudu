@@ -8,10 +8,11 @@ NEXT grant's grid instead of the one that carried the TB (the "529 us"
 mispairing observed on retransmission pairs).
 
 Newer captures carry a slot column in rx_meta.csv (col 16) and dd_meta.csv
-(col 5); single-UE captures pair exactly on it. Older captures (and any slot
-without a match) fall back to up to K timestamp candidates (nearest first);
-build_labels.py then picks the candidate whose re-encoded label matches the
-input (content verification) instead of trusting the timestamp.
+(col 5); single-UE captures pair exactly on it (hashed, O(n)). Older captures
+(and any slot without a match) fall back to up to K timestamp candidates
+(nearest first); build_labels.py then picks the candidate whose re-encoded
+label matches the input (content verification) instead of trusting the
+timestamp.
 
 Usage: pair_capture.py <capture_dir> [--out <pairs.npz>] [--k K] [--win US]
 Output pairs.npz: tb_idx[N], rx_idx[N,K], ce_idx[N,K], n_prb[N,K]
@@ -36,42 +37,60 @@ def main():
     rx_t = np.array([x[1] for x in rx]); rx_p = np.array([x[2] for x in rx])
     dd_t = np.array([x[1] for x in dd])
     slot_mode = all(len(r) >= 16 for r in rx) and all(len(r) >= 5 for r in dd)
-    rx_slot = np.array([r[15] for r in rx], dtype=np.int64) if slot_mode else None
     print(f'capture {d}: ce={len(ce)} rx={len(rx)} tb={len(dd)} slot_mode={slot_mode}')
+
+    # Slot hash (the exact-pairing path) + sorted time index (the fallback path).
+    slot_idx = {}
+    if slot_mode:
+        for j, r in enumerate(rx):
+            slot_idx.setdefault(r[15], []).append(j)
+    order_t = np.argsort(rx_t, kind='stable')
+
+    # CE dumps sorted by time for the same-slot association.
+    ce_order = np.argsort(ce_t, kind='stable')
+    ce_t_s = ce_t[ce_order]
 
     def assoc_ce(j):
         """CE dump written in the SAME slot as rx grid j: the CE pre-stage runs just
         before the grid dump (same pipeline task), so the matching dump is
         microseconds away with an equal width. A half-slot window keeps the
         association from jumping to the adjacent slot. Returns (ce_idx, prb)."""
-        dce = np.abs(ce_t - rx_t[j])
-        l = int(np.argmin(dce))
-        if dce[l] <= 500 and ce_p[l] == rx_p[j]:
-            return ce[l][0], rx_p[j]
-        return None
+        pos = np.searchsorted(ce_t_s, rx_t[j])
+        best = None
+        for k in (pos - 1, pos, pos + 1):
+            if 0 <= k < len(ce_t_s):
+                l = ce_order[k]
+                if abs(ce_t[l] - rx_t[j]) <= 500 and ce_p[l] == rx_p[j]:
+                    return ce[l][0], rx_p[j]
+        return best
 
     tb_rows, rx_rows, ce_rows, prb_rows = [], [], [], []
     exact = 0
     for di, t in enumerate(dd_t):
         cand = []
         if slot_mode:
-            # Exact: the rx row of the same slot (single-UE capture).
-            for j in np.where(rx_slot == dd[di][4])[0]:
+            # Exact: the rx rows of the same slot (single-UE capture).
+            for j in slot_idx.get(dd[di][4], ()):
                 if abs(rx_t[j] - t) <= WIN:
                     a = assoc_ce(j)
                     if a is not None:
                         cand.append((rx[j][0], a[0], a[1]))
                         exact += 1
-        # Timestamp candidates (backup / legacy captures), nearest first.
-        order = np.argsort(np.abs(rx_t - t))
-        for j in order:
-            if abs(rx_t[j] - t) > WIN or len(cand) >= K:
-                break
-            if any(c[0] == rx[j][0] for c in cand):
-                continue
-            a = assoc_ce(j)
-            if a is not None:
-                cand.append((rx[j][0], a[0], a[1]))
+        # Timestamp candidates (backup / legacy captures), nearest first, via
+        # the sorted time index: window [t-WIN, t+WIN) then sort by |dt|.
+        if len(cand) < K:
+            rx_t_s = rx_t[order_t]
+            left  = int(np.searchsorted(rx_t_s, t - WIN, side='left'))
+            right = int(np.searchsorted(rx_t_s, t + WIN, side='right'))
+            near = sorted(order_t[left:right], key=lambda j: abs(rx_t[j] - t))
+            for j in near:
+                if abs(rx_t[j] - t) > WIN or len(cand) >= K:
+                    break
+                if any(c[0] == rx[j][0] for c in cand):
+                    continue
+                a = assoc_ce(j)
+                if a is not None:
+                    cand.append((rx[j][0], a[0], a[1]))
         for k in range(K):
             tb_rows.append(dd[di][0])
             if k < len(cand):
