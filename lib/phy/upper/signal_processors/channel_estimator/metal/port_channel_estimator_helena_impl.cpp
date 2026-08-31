@@ -114,7 +114,11 @@ bool port_channel_estimator_helena_impl::reload(const std::string& modelc_path_,
 
 void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
 {
-  const bool time_en = std::getenv("OCUDU_MMSE_TIME") != nullptr;
+  // OCUDU_CE_TIME enables the per-phase estimator timing debug prints
+  // ([helena_time]/[helena_blend]/[helena_gate]); OCUDU_MMSE_TIME is kept as a
+  // legacy alias (the pre-HELENA metal_mmse era name).
+  const bool time_en = std::getenv("OCUDU_CE_TIME") != nullptr ||
+                       std::getenv("OCUDU_MMSE_TIME") != nullptr;
   const auto t_begin = std::chrono::steady_clock::now();
   // Classical pre-stage: fills freq_response and the filtered pilots (RSrp / noise / TA).
   apply_fd_td_estimation_stage_classical(args);

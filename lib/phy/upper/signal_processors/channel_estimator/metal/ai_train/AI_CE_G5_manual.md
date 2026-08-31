@@ -27,7 +27,7 @@ git pull && cmake --build build --target gnb -j8
 
 mkdir -p ~/capture/site_<日期>
 # 注意：环境变量必须在 sudo 之后（macOS sudo 的 env_reset 会过滤 sudo 前的变量）
-sudo OCUDU_MMSE_TIME=1 OCUDU_HELENA_DUMP_DIR=$HOME/capture/site_<日期> \
+sudo OCUDU_CE_TIME=1 OCUDU_HELENA_DUMP_DIR=$HOME/capture/site_<日期> \
   ./build/apps/gnb/gnb -c configs/gnb_rf_b200_tdd_n78_20mhz.yml_iPhone17 \
   expert_phy --pusch_ldpc_decoder_type auto --pusch_channel_estimator_algo helena
 
@@ -139,12 +139,12 @@ cd <ocudu 仓库根目录> && git add -A && git commit -m "G-5: new site-tuned 5
 cd <ocudu 仓库根目录>
 
 # A 腿：incumbent（默认路径）
-sudo OCUDU_MMSE_TIME=1 ./build/apps/gnb/gnb -c configs/gnb_rf_b200_tdd_n78_20mhz.yml_iPhone17 \
+sudo OCUDU_CE_TIME=1 ./build/apps/gnb/gnb -c configs/gnb_rf_b200_tdd_n78_20mhz.yml_iPhone17 \
   expert_phy --pusch_ldpc_decoder_type auto --pusch_channel_estimator_algo helena
 # → ping 100 + iperf3 UL ×3 → Ctrl-C → cp /tmp/gnb.log /tmp/gnb_ab_old.log
 
 # B 腿：站点微调模型（用 CLI 指定路径，不改默认）
-sudo OCUDU_MMSE_TIME=1 ./build/apps/gnb/gnb -c configs/gnb_rf_b200_tdd_n78_20mhz.yml_iPhone17 \
+sudo OCUDU_CE_TIME=1 ./build/apps/gnb/gnb -c configs/gnb_rf_b200_tdd_n78_20mhz.yml_iPhone17 \
   expert_phy --pusch_ldpc_decoder_type auto --pusch_channel_estimator_algo helena \
   --pusch_channel_estimator_helena_model_path_52 \
   <绝对路径>/ai_assets/helena_pusch52_real.mlmodelc

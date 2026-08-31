@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # G-3 (20 MHz ZMQ E2E) one-shot acceptance report from /tmp/gnb.log.
-# Run after the E2E (gnb must have run with OCUDU_MMSE_TIME=1 and the log
+# Run after the E2E (gnb must have run with OCUDU_CE_TIME=1 and the log
 # level >= debug so the [helena_time] lines are present):
-#   sudo OCUDU_MMSE_TIME=1 ./build/apps/gnb/gnb -c configs/gnb_zmq_oaiue.yaml \
+#   sudo OCUDU_CE_TIME=1 ./build/apps/gnb/gnb -c configs/gnb_zmq_oaiue.yaml \
 #       expert_phy --pusch_ldpc_decoder_type auto
 #   lib/phy/upper/signal_processors/channel_estimator/metal/e2e_helena_report.sh [logfile]
 set -u

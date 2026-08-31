@@ -157,7 +157,7 @@ MPS/GPU 无收益（MHA 分解落 CPU）。重训后权重同架构，ANE 时延
 - **G-5 数据采集钩子 v1（已入库，commit `9f69154317`）**：
   `OCUDU_HELENA_DUMP_DIR` 环境变量 → 每个 NN 活跃槽把 NN 输入网格（classical
   插值 LS，[prb*12,14,2] float32）落盘为 `<dir>/dump_<idx>_prb<N>.f32` +
-  `<dir>/meta.csv`（idx,prb,snr_db,alpha,engine_nsc）。采集方式：先建目录，变量必须在 `sudo` **之后**（macOS sudo 的 env_reset 会过滤 sudo 前的变量——踩过坑：目录空 + `[helena_time]` 正常打印）：`sudo OCUDU_MMSE_TIME=1 OCUDU_HELENA_DUMP_DIR=<绝对路径> ./build/apps/gnb/gnb ...`。。
+  `<dir>/meta.csv`（idx,prb,snr_db,alpha,engine_nsc）。采集方式：先建目录，变量必须在 `sudo` **之后**（macOS sudo 的 env_reset 会过滤 sudo 前的变量——踩过坑：目录空 + `[helena_time]` 正常打印）：`sudo OCUDU_CE_TIME=1 OCUDU_HELENA_DUMP_DIR=<绝对路径> ./build/apps/gnb/gnb ...`。。
   **下一步**：UL-SCH 的 CRC-OK 决策导向标签钩子（重编码→重调制→H=Y/X̂），
   与 dump 配对成真实信道训练集。
 - **首批真实采集（site1_0831，2026-08-31）**：55,064 个 NN 活跃槽。宽度 25 PRB(18,077)/51 PRB(18,261)/43(7,099)/46(6,267)/50(3,676) + 6-24 PRB 长尾；SNR -2.1~33.9 dB（中位 24.7）；alpha 0.65~1.00（32,299 槽 α=1.00）；全部 52 桶。格式校验通过（prb×12×14×2 float32，幅值 0.10-0.25）。等待 CRC-OK 标签钩子配对。
