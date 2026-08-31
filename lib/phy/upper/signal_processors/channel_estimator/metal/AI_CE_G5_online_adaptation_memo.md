@@ -327,14 +327,19 @@ slot 列使 89% 的 TB 免于时间配对（剩余走内容验证候选）。
 
 ## 7. 下一步计划（对齐 §9 门控）
 
-1. ~~**site5 标签重建**~~ ✅ 7,884 个过门标签（3.4×，见 §6）；
-2. **52 模型二次微调（进行中）**：realtrain_v2（7,096 训练 / 788 验证）→
-   `train_pad.py`（从 `init_models/helena_pusch52_sm_hi`，lr 1e-5，6 ep）→
-   合成集 head2head 回归（不得劣化）→ 45 dB 探针（保持恒等）→ 转换入库
-   `helena_pusch52_real2.mlmodelc` → 实机 A/B（若显著优于 helena_pusch52_real）；
-3. **106 模型全套（受 §6 天花板约束，待用户决策）**：现硬件 20 MHz@30 kHz
-   = 51 PRB，53–106 桶不会被触发。可行分支：(a) 接受现实——106 模型保持合成
-   版备用，实机闭环收敛到 52 桶（site6 数据仍可增强 52 微调）；(b) 未来换
-   40 MHz 载波的无线电（B210 不行）+ 干净频段再重启 106 实机流。
-   若走 (a)：site6 → 配对/重建（52 桶）→ 52 real3 微调 → A/B。
-4. **周期化**：白天采数 → 夜间训练 → 次日晋升（脚本化 sidecar）。
+**实机最终结论（2026-09-01，用户拍板）**：全部 A/B 证据（单 UE/双 UE/
+四模型/两曲线）表明 **classical ≥ helena 于所有实测区间**——默认 CE 已切回
+`cpu`（configs 三处 + 文档更新），helena 保留为 opt-in 算法与 106 桶前置基建。
+已完成的迭代记录（供未来恢复研究）：
+
+1. ~~site5 标签重建~~ ✅ 7,884；~~site6~~ ✅ 23,997；~~OAI UE 8h~~ ✅ 99,598；
+2. ~~real/real2/real3/real3n/real4 微调~~ ✅ 全部完成入库（real3 实机回退、
+   real3n 回退、real4 未跑终局腿——均不再推进）；
+3. **106 桶**：RF 天花板 51 PRB 实锤；ZMQ 40 MHz 配置已备（运行时去风险用，
+   按需 opt-in helena）；
+4. **周期化 sidecar 与全套工具**：✅ 已入库（`run_g5_pipeline.sh` /
+   `pair_capture` / `build_labels` / `split_labels` / `capture_qa` /
+   `ab_report` / `init_models`）。
+5. **遗留研究课题**（若重启 NN 路线）：NN/classical 输出校准（部分混合
+   破坏高阶 QAM 的根因）、256QAM 高 SINR 段、低 SNR 段对 classical 的
+   反超机会。
