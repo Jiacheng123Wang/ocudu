@@ -4,7 +4,7 @@
 # level >= debug so the [helena_time] lines are present):
 #   sudo OCUDU_MMSE_TIME=1 ./build/apps/gnb/gnb -c configs/gnb_zmq_oaiue.yaml \
 #       expert_phy --pusch_ldpc_decoder_type auto
-#   scripts/e2e_helena_report.sh [logfile]
+#   lib/phy/upper/signal_processors/channel_estimator/metal/e2e_helena_report.sh [logfile]
 set -u
 LOG=${1:-/tmp/gnb.log}
 [ -f "$LOG" ] || { echo "no log: $LOG"; exit 1; }

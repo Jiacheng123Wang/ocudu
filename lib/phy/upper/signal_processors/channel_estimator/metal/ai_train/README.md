@@ -1,7 +1,7 @@
 # ai_train — HELENA 训练与在线自适应工具集
 
 本目录包含 OCUDU HELENA AI 信道估计的全部训练/数据处理/转换工具，**自包含**
-（不依赖 `~/ai_ce_work` 之外的环境变量；脚本按相对本目录的路径工作）。
+（不依赖其他的环境变量；脚本按相对本目录的路径工作）。
 配套文档：`AI_CE_G5_manual.md`（G-5 每站在线自适应逐步操作手册）、
 `AI_CE_training_memo.md`（训练/转换/坑）、`../AI_CE_20MHz_plan.md`（G-1..G-5 门控）。
 
@@ -42,8 +42,7 @@ xcrun coremlcompiler compile <model.mlpackage> <输出目录>
 
 ## 开源参照（信息性，本目录代码不依赖它们）
 
-- **HELENA 论文模型**：`~/ai_ce_work/repo/helena_repo`（原始 ViT/CE 模型，仅用于
-  初始权重迁移的历史步骤；当前管线用本目录的 `helena_arch.py` 重建）。
+- **HELENA 论文模型**：`https://github.com/miguelhdo/HELENA_Channel_Estimation.git`（原始 ViT/CE 模型，仅用于初始权重迁移的历史步骤；当前管线用本目录的 `helena_arch.py` 重建）。
 - **5G NR LDPC 基图校验**：NVIDIA Sionna（`https://github.com/NVlabs/sionna`，
   其 `5G_bg1.csv`/`5G_bg2.csv` 与 3GPP TS 38.212 表逐位一致；`nr_ldpc.py`
   的基图据此转录并自校验）。
