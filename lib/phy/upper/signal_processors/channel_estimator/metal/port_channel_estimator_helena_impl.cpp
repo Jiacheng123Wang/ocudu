@@ -238,9 +238,35 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
       continue; // dump-only slot: no NN pass, production stays classical
     }
 
+    // Input scale normalization (2026-08-31 OAI-UE attach failure root cause):
+    // the model was trained on channel grids with |H| ~ 0.1-0.25 (the phone
+    // captures at rx_gain 60), but the received digital level depends on the
+    // rx_gain and the UE TX power - the OAI-UE runs arrive ~34 dB weaker
+    // (|X| ~ 0.003). That far below the training scale the model amplifies the
+    // input ~2.2x and corrupts the estimate (measured: |NN-X|^2/|NN|^2 = -0.5 dB,
+    // vs -14.9 dB after normalization; 45/45 18-PRB decodes failed at alpha=1).
+    // Normalize the active-region RMS to kHelenaInputRms before the NN and
+    // restore the scale afterwards. The dumped grid (G-5 hook above) stays
+    // unnormalized - it is the training-data format.
+    constexpr float  kHelenaInputRms = 0.15F;
+    const unsigned   active_len       = nof_subc * MAX_NSYMB_PER_SLOT * 2;
+    float            rms2             = 0.0F;
+    for (unsigned i = 0; i != active_len; ++i) {
+      rms2 += nn_in[i] * nn_in[i];
+    }
+    const float rms      = std::sqrt(rms2 / static_cast<float>(active_len));
+    const float nn_gain  = (rms > 1e-9F) ? (kHelenaInputRms / rms) : 1.0F;
+    for (unsigned i = 0; i != active_len; ++i) {
+      nn_in[i] *= nn_gain;
+    }
+
     const auto t_nn_begin = std::chrono::steady_clock::now();
     if (!active_engine->predict(nn_in.data(), nn_out.data(), engine_nsc)) {
       return; // classical fallback for this slot
+    }
+    const float inv_gain = 1.0F / nn_gain;
+    for (unsigned i = 0; i != active_len; ++i) {
+      nn_out[i] *= inv_gain;
     }
     last_predict_us_ = active_engine->last_predict_us();
     if (time_en) {

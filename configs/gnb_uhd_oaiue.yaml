@@ -32,7 +32,9 @@ ru_sdr:
   tx_gain: 85                           # B210 TX range 0-89.8 dB: compensate the -27.9 dB DFT
                                         # normalization (612 subcarriers) applied by the amplitude
                                         # controller, otherwise the RF output is below the noise floor
-  rx_gain: 40                           # B210 RX range 0-76 dB
+  rx_gain: 60                           # B210 RX range 0-76 dB; 60 = the iPhone17-config value
+                                        # (40 dB left the OAI-UE UL ~34 dB weaker in digital level,
+                                        # far below the HELENA model's trained input scale)
   amplitude_control:
     tx_gain_backoff: 0                  # Remove the default 12 dB back-off to maximize TX power
 
