@@ -202,9 +202,11 @@ git add -A && git commit -m "promote site-tuned 52 model to default" && git push
 1. **合成基线数据**（若从零开始）：
    `gen_pusch_dataset.py 20000 3000 pusch106pad.npz --nfft 1272 --pad-aware --min-prb 53 --max-prb 106 --snr-min -5 --snr-max 55`
 2. **采集**：与 §1 完全相同。要拿到 53–106 PRB 的授权必须**全缓冲上行**：
-   手机侧 iperf3 加大并跑多流——`iperf3 -c 10.45.0.1 -p 5201 -t 120 -P 4 -w 1M`
-   （`-P 4` 并行流 + 1 MB 窗口），让调度器按 BSR 顶满 106 PRB。采集后先验授权
-   分布：`awk -F, '{print $3}' ~/capture/site_<日期>/rx_meta.csv | sort -n |
+   手机侧 iperf3 多流长跑——`iperf3 -c 10.45.0.1 -p 5201 -t 120 -P 4`
+   （`-P 4` 并行流；**不要加 `-w 1M`**——Android 的 socket 缓冲上限会钳制
+   setsockopt 导致 "socket buffer size not set correctly" 报错退出；窗口大小
+   与授权宽度无关，106 PRB 由 BSR 满缓冲驱动）。采集后先验授权分布：
+   `awk -F, '{print $3}' ~/capture/site_<日期>/rx_meta.csv | sort -n |
    uniq -c | sort -rn | head`——**确认 53–106 PRB 档有量**（若最大只有 51 PRB，
    说明上行流量没打满，重跑 iperf）。dump 钩子自动按授权宽度落盘；
 3. **配对/重建/训练集**：与 §2–§4 完全相同，`build_labels.py` 加
