@@ -43,7 +43,7 @@ def main():
         print(f'snr filter >= {snr_floor}: kept {X.shape[0]} samples')
     n = X.shape[0]
     idx = np.random.RandomState(42).permutation(n)
-    nva = max(int(n * 0.1), 200)
+    nva = min(max(int(n * 0.1), 200 if n >= 1000 else 1), n - 1)
     va, tr = idx[:nva], idx[nva:]
     print(f'{npz_path}: train {tr.size} val {va.size}, widths {W.min()}..{W.max()} PRB')
 
