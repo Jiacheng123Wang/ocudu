@@ -52,21 +52,26 @@ def build_one(tb_bits, rx_grid, n_prb, n_syms, n_ports, mod, dmrs_mask, n_id,
             Zc = z
             break
     K_b = kb_info * Zc
-    # Encode + rate match per block; the fillers sit at the end of the info part
-    # and are excluded from the transmitted systematic bits.
-    E_per = E_total // n_cb
+    # Encode + rate match + bit interleave per block; the fillers sit at the
+    # end of the info part and are excluded from the transmitted systematic
+    # bits.  The modulation-order bit interleaver (38.212 5.4.2.2) is applied
+    # PER CODE BLOCK (on each E_r-bit rate-matched sequence), and only then are
+    # the code blocks concatenated (38.212 5.5), before the scrambling.
+    # E_r (38.212 5.4.2.1) is distributed over the code blocks at SYMBOL
+    # granularity (so every E_r is a multiple of the modulation order): the first
+    # (C - mod(G/Qm, C)) blocks take floor(G/Qm/C)*Qm bits, the rest ceil(...).
+    E_sym = E_total // mod
+    nof_short = n_cb - (E_sym % n_cb)
     coded = []
     for c in range(n_cb):
         if K_b < len(cbs[c]):
             raise ValueError(f'K_b {K_b} < cb {len(cbs[c])}')
         u = list(cbs[c]) + [0] * (K_b - len(cbs[c]))  # filler padding
         cw = nr_ldpc.ldpc_encode(bg, Zc, u)
-        E_c = E_per + (E_total - E_per * n_cb if c == n_cb - 1 else 0)
-        coded.extend(rate_match(cw, len(cbs[c]), K_b, Zc, E_c, rv, bg))
+        E_c = (E_sym // n_cb) * mod if c < nof_short else ((E_sym + n_cb - 1) // n_cb) * mod
+        coded.extend(bit_interleave(rate_match(cw, len(cbs[c]), K_b, Zc, E_c, rv, bg), mod))
     assert len(coded) == E_total, f'E mismatch: {len(coded)} vs {E_total}'
-    # Modulation-order bit interleaver (38.212 5.4.2.2), then scramble (the
-    # PUSCH data c_init has no slot term).
-    coded = bit_interleave(coded, mod)
+    # Scramble (the PUSCH data c_init has no slot term).
     sc = scramble(coded, (rnti << 15) + n_id)
     syms = np.array(modulate(sc, mod), dtype=np.complex64)
     assert len(syms) == n_data_re

@@ -127,7 +127,16 @@ def rate_match(codeblock_bits, K_transmitted, K_b, Zc, E, rv, bg=None):
     Ncb = len(buf)
     N_short = (66 if bg == 1 else 50) * Zc
     shift_factor = {1: (0, 17, 33, 56), 2: (0, 13, 25, 43)}[bg]
-    k0 = (shift_factor[rv] * Ncb // N_short) * Zc
+    # k0 (38.212 Table 5.4.2.1-2) is defined on the UNcompressed circular buffer
+    # of length N_short (filler still present): k0 = floor(coeff * Ncb/N) * Zc,
+    # with Ncb = N = N_short when Tbslbrm is 0, i.e. k0 = coeff * Zc.  Map it to
+    # the compressed buffer (filler removed) by subtracting the filler length
+    # when k0 falls after the filler block.
+    k0 = shift_factor[rv] * Zc
+    filler_start = K_transmitted - 2 * Zc
+    filler_len = K_b - K_transmitted
+    if k0 >= filler_start:
+        k0 -= filler_len
     return [int(v) for v in buf[(np.arange(E) + k0) % Ncb]]
 
 
