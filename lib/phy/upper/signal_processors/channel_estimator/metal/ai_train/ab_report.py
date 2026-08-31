@@ -37,6 +37,27 @@ def main():
               f'sinr min={np.min(s):.1f} p25={np.percentile(s,25):.1f} '
               f'p50={np.percentile(s,50):.1f} p75={np.percentile(s,75):.1f} '
               f'max={np.max(s):.1f} dB (n={len(s)})')
+        # per-rnti breakdown (dual-UE runs: 0x4601=OAI UE, 0x4602=phone)
+        rntis = {}
+        with open(p, errors='replace') as f:
+            for line in f:
+                if 'CRC.indication' in line:
+                    m = re.search(r'rnti=0x([0-9a-f]+)', line)
+                    if m:
+                        r = m.group(1)
+                        d = rntis.setdefault(r, [0, 0, []])
+                        if 'tb_status=OK' in line:
+                            d[0] += 1
+                        elif 'tb_status=KO' in line:
+                            d[1] += 1
+                        ms = re.search(r'sinr=([-0-9.]+)dB', line)
+                        if ms:
+                            d[2].append(float(ms.group(1)))
+        if len(rntis) > 1:
+            for r, (o, k, ss) in sorted(rntis.items()):
+                ss = np.array(ss) if ss else np.array([np.nan])
+                print(f'  rnti=0x{r}: OK={o} KO={k} crc_ok={100*o/(o+k) if o+k else float("nan"):.1f}% '
+                      f'sinr_p50={np.percentile(ss,50):.1f} (n={o+k})')
     meds = [np.percentile(leg(p)[3], 50) for p in paths]
     print(f'comparable SINR medians: {"YES" if max(meds) - min(meds) < 3 else "NO (be careful with the CRC comparison)"}')
 
