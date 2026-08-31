@@ -37,22 +37,15 @@ echo "== [2/5] DD label rebuild (content-verified candidates) =="
 "$PY" "$AI_TRAIN/build_labels.py" "$CAP" --pairs "$CAP/pairs_v2.npz" \
   --out "$CAP/labels_all.npz" "${BUCKET[@]}"
 
-echo "== [3/5] train/val split (10% holdout, seed 42) =="
-"$PY" - "$CAP" <<'EOF'
-import numpy as np, sys
-cap = sys.argv[1]
-d = np.load(f'{cap}/labels_all.npz')
-X, Y, W = d['X'], d['Y'], d['width']
-rng = np.random.default_rng(42); perm = rng.permutation(len(W))
-nva = max(len(W) // 10, 50); te, tr = perm[:nva], perm[nva:]
-np.savez(f'{cap}/realtrain.npz', X_train=X[tr], Y_train=Y[tr], width_train=W[tr],
-         X_test=X[te], Y_test=Y[te], width_test=W[te])
-print(f'train={len(tr)} test={len(te)}')
-EOF
+echo "== [3/5] train/val split (10% holdout, seed 42; GATE env 可收紧) =="
+"$PY" "$AI_TRAIN/split_labels.py" "$CAP/labels_all.npz" "$CAP/realtrain.npz" \
+  --gate "${GATE:--10}"
 
-echo "== [4/5] fine-tune (init=$INIT, lr=$LR, epochs=$EPOCHS) =="
+echo "== [4/5] fine-tune (init=$INIT, lr=$LR, epochs=$EPOCHS; NORM env -> --norm) =="
+NORM_ARGS=()
+[[ -n "${NORM:-}" ]] && NORM_ARGS=(--norm "$NORM")
 "$PY" "$AI_TRAIN/train_pad.py" "$CAP/realtrain.npz" "$CAP/helena_pusch${PRB}_sm_real" \
-  --prb "$PRB" --init "$INIT" --epochs "$EPOCHS" --batch 32 --lr "$LR"
+  --prb "$PRB" --init "$INIT" --epochs "$EPOCHS" --batch 32 --lr "$LR" "${NORM_ARGS[@]}"
 
 echo "== [5/5] convert (macOS coremltools + coremlcompiler) =="
 if [[ "$CONVERT" == "1" ]]; then
