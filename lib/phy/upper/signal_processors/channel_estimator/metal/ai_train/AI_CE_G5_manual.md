@@ -54,6 +54,10 @@ python $AI_TRAIN/pair_capture.py ~/capture/site_<日期>
 # 新格式采集含 slot 列时按 slot 精确配对）。打印候选数分布（0/1/>=2）。
 ```
 
+> 快捷方式：§2–§5（配对→重建→划分→微调）与转换（§7）可一条命令跑完——
+> `VENV_PY=~/helena_venv/bin/python $AI_TRAIN/run_g5_pipeline.sh ~/capture/site_<日期>
+> --prb 52|106 [--epochs N] [--lr R] [--no-convert]`。
+
 配对为什么需要多候选：gNB 的 TB 落盘发生在其 LDPC 解码**完成**时（比授权晚
 0.2–3 个时隙）。相邻时隙都有授权时，"时间最近"会把下一个授权的网格误配给该 TB
 （历史上观察到的 529 µs 错位）。因此配对只出候选，**内容验证**（第 3 步）定胜负。
