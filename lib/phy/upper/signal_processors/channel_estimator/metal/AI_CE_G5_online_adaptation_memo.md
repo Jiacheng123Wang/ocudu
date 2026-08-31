@@ -241,6 +241,15 @@ slot 列使 89% 的 TB 免于时间配对（剩余走内容验证候选）。
   `ai_assets/helena_pusch52_real3_ml.mlmodelc`，作 A/B 主候选（对
   incumbent + real2 三腿）。
 
+- **双 UE 实测结论（2026-09-01 凌晨，用户实测）**：手机与 OAI UE 同时接入
+  只有一种组合——**gnb_uhd_oaiue.yaml（3489.42 MHz，双自由时钟）**；
+  iPhone17 config（3408.96 MHz + gpsdo）只有手机能接入，OAI UE 不行。
+  机理：OAI UE 的静态 `initial-fo=10000` 按"gNB 自由时钟 +2.8 ppm"调；
+  对 gpsdo 锁定（误差≈0）的 gNB，预补偿变成反向 ~10 kHz 频率误差，且 OAI
+  UE 无 AFC 跟踪（手机有完整 AFC，所以两个 config 都能进）。此前的
+  `oaiue_b210_3408.conf`（改 C 匹配频率）方案**作废**——频率不是根因，
+  时钟补偿匹配才是。
+
 - **SINR 核查后的历史对照总账（2026-08-31 晚复盘，ab_report.py）**：
   | 场次 | 腿 | CRC-OK | SINR 中位 | 可比？ |
   |---|---|---|---|---|
