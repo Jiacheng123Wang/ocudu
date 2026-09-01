@@ -437,13 +437,17 @@ bool io_broker_kqueue::unregister_fd(int fd, std::promise<bool>* complete_notifi
 
 void io_broker_kqueue::stop_impl()
 {
+  // NOTE: stop_impl() runs after the kqueue thread has been joined, so no further events can arrive. The
+  // per-fd job_count may still be non-zero at this point when a deferred callback sits in an executor queue that
+  // will never run it again (e.g. a manual_task_worker whose owner stopped popping, or a task worker that already
+  // shut down). Waiting for the count to drop - as the Linux epoll broker does - can therefore spin forever and
+  // hang the application shutdown; instead, remove every remaining entry unconditionally. Any callback epilogue
+  // running on a still-live executor thread after the erase performs the documented latent write to freed memory
+  // (see UAF-001 in docs/macos_compat_refactor/phase3_report.md); the shutdown itself must not depend on it.
+
   // Process any pending file descriptor removals.
   for (auto it = pending_fds_to_remove.begin(); it != pending_fds_to_remove.end();) {
     if (auto event_it = event_handler.find(it->first); event_it != event_handler.end()) {
-      while (event_it->second.job_count.load(std::memory_order_acquire) != 0) {
-        // Postpone file descriptor removal until all tasks using it finish.
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
       handle_fd_removal(it->first, true, std::nullopt, it->second);
       it = pending_fds_to_remove.erase(it);
       continue;
@@ -458,9 +462,6 @@ void io_broker_kqueue::stop_impl()
 
   // Deregistering all existing file descriptors.
   for (auto it = event_handler.begin(); it != event_handler.end();) {
-    while (it->second.job_count.load(std::memory_order_acquire) != 0) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
     struct kevent ev;
     EV_SET(&ev, it->first, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
     ::kevent(kqueue_fd.value(), &ev, 1, nullptr, 0, nullptr);

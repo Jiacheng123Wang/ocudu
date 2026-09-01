@@ -218,15 +218,19 @@ void sctp_network_server_impl::receive_impl(std::vector<uint8_t>      payload,
 
 void sctp_network_server_impl::handle_socket_shutdown(const char* cause)
 {
+  // Stop handling new SCTP events FIRST: the broker deregistration only completes once every in-flight receive
+  // callback has finished, so the association map cannot be mutated by the io path while it is swept below. The
+  // sweep used to run before this reset, which raced with concurrent association removals from the io path when
+  // app_exec is a non-serial executor (e.g. the inline executor used by the gateway unit tests) and crashed
+  // sporadically in the multi-client teardown.
+  io_sub.reset();
+
   // Clean up all associations.
   while (not associations.empty()) {
     // TO-DO: send EOF to close association gracefully
     handle_association_shutdown(associations.begin()->first, cause);
     remove_association(associations.begin()->first);
   }
-
-  // Stop handling new SCTP events.
-  io_sub.reset();
 }
 
 void sctp_network_server_impl::defer_socket_shutdown(const char* cause, std::optional<scoped_sync_token> token)
