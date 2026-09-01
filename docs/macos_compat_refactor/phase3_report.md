@@ -50,11 +50,11 @@ lib/gateways/CMakeLists.txt                [改] if(APPLE) 选择 usrsctp 后端
 - **`peel_off_result`**：Linux 返回 peeled-off fd（`supported=true`）；macOS 返回 `supported=false`（单 socket 多关联）。服务端 `handle_sctp_comm_up` 用**数据驱动**（`assoc_fd.is_open()`）决定是否订阅，零宏、零常量分支。
 - **`compat::mmsghdr + sendmmsg/recvmmsg`**：Linux 直通内核 syscall（`static_assert` 布局一致 + reinterpret_cast）；macOS 为原仿真逐行搬迁。`MSG_WAITFORONE` 由 compat 头兜底定义。
 
-## 2. 缺陷记录（UAF-001）：kqueue broker 回调内同步擦除导致的 use-after-free —— **状态：PENDING（未修复，已知潜伏）**
+## 2. 缺陷记录（UAF-001）：kqueue broker 回调内同步擦除导致的 use-after-free —— **状态：FIXED（2026-09-02，专项修复）**
 
-> **当前状态（2026-09-01）**：UAF-001 **仍未修复**。`unregister_fd` 保持历史版本（broker 线程内回调自注销仍走同步擦除快路径，`event_handler.erase()` 在回调收尾写入前执行）。优雅退出依赖的是**另一组修复**（§7a 回退 + §7c stop_impl 无条件清理 + §7d SCTP 停机顺序），与 UAF-001 无直接关系。ASAN 覆盖 SCTP gateway 套件时仍会报告该 UAF；常规运行无可见影响（写入无害 + 内存未即时复用，开工前至今从未发作）。
+> **当前状态（2026-09-02）**：UAF-001 **已修复**。修复方案为**共享所有权**：`event_handler` 表改为 `std::unordered_map<int, std::shared_ptr<fd_handler>>`，投递给执行器的 lambda **捕获节点的 shared_ptr**（而非 `&read_callback` / `&job_count` / `&is_executing_recv_callback` 三个裸指针）。这样无论节点在哪条路径上被擦除——回调内自注销的同步擦除快路径、EV_ERROR/EV_EOF 路径、§7c 停机无条件清理——在飞 lambda 的收尾写入都落在**自己持有的节点**上，节点在 lambda 完成前不会被销毁。控制流、promise 语义、pending 队列、job_count 门控**零改动**（因此不再有尝试①的计数泄漏、②的 promise 死锁、③的停机挂起）；顺带消除了两个同族隐患：回调内擦除导致 fd 在回调中途被关闭的 fd-复用风险、`handle_fd_removal` 里 error_callback 重入注销后对悬垂迭代器 `erase` 的 UB。此外新增 broker 级 `lifetime` 共享标志：滞留在存活执行器上的任务在 broker 析构后不再触碰 `rearm_fd`，杜绝"任务晚于 broker 对象运行"的最后一类 UAF。Linux 完全不受影响（`io_broker_kqueue.cpp` 仅 macOS 编译，见 §"Linux/Ubuntu 是否有同样问题？"）。
 >
-> 修复尝试历史：尝试①（自注销置标 + epilogue 守卫）引入故障 1（job_count 泄漏 → 停机挂起）；尝试②（事件队列延迟擦除）造成死锁；尝试③（对齐 Linux epoll 模式）通过局部验证但引发 du_high 集成测试挂起（雷 2 的触发者）。三次尝试均已回退。**正确修复需在 kqueue 语义下重新设计**（EV_EOF/定时器管道/延后回调与 pending 队列的交互），另行专项排期，并在修复前补充 du_high 集成测试 + ASAN + 优雅退出三重回归。
+> 修复尝试历史：尝试①（自注销置标 + epilogue 守卫）引入故障 1（job_count 泄漏 → 停机挂起）；尝试②（事件队列延迟擦除）造成死锁；尝试③（对齐 Linux epoll 模式）通过局部验证但引发 du_high 集成测试挂起（雷 2 的触发者）。三次尝试均已回退。最终方案见下方"最终修复（2026-09-02）"。
 
 ### 缺陷描述
 
@@ -79,7 +79,8 @@ USE: io_broker_kqueue::thread_loop()::$_0 → is_in_callback->store(...) / job_c
 | 修复尝试②（事件队列延迟擦除） | broker 线程自等待 promise → 死锁 |
 | 回退历史代码 | 功能恢复（优雅退出 3/3），UAF 登记待修 |
 | 最终修复（用户批准） | **对齐 Linux epoll 成熟模式**：删除同步擦除快路径；回调内注销立即完成 promise；擦除交由 job_count 门控的事件队列（与 `io_broker_epoll.cpp` 逐行同构） |
-| **修复被回退（2026-09-01 全量回归发现新雷）** | epoll 对齐版通过局部验证（ASAN gateway 零报错、优雅退出 3/3），但**全量回归暴露新缺陷**：du_high 集成测试（timer 源注销 + worker 线程延后回调路径）在 `stop_impl` 永久挂起（历史版 48 用例 26s，对齐版首个用例即挂起）。二分定位确认系 unregister 改动所致 → **按"不行再回退"约定，恢复历史代码**（`git diff` 与 HEAD 零差异）。UAF-001 恢复为**已知潜伏缺陷**，其正确修复需在 kqueue 语义（EV_EOF/定时器管道/延后回调与 pending 队列的交互）下重新设计，另行专项处理 |
+| **修复被回退（2026-09-01 全量回归发现新雷）** | epoll 对齐版通过局部验证（ASAN gateway 零报错、优雅退出 3/3），但**全量回归暴露新缺陷**：du_high 集成测试（timer 源注销 + worker 线程延后回调路径）在 `stop_impl` 永久挂起（历史版 48 用例 26s，对齐版首个用例即挂起）。二分定位确认系 unregister 改动所致 → **按"不行再回退"约定，恢复历史代码**（`git diff` 与 HEAD 零差异）。UAF-001 恢复为**已知潜伏缺陷** |
+| **最终修复（2026-09-02，用户指示专项攻关）** | **共享所有权方案**：`event_handler` 表值改为 `shared_ptr<fd_handler>`，lambda 捕获节点 shared_ptr。同步擦除快路径、job_count 门控、promise 语义、pending 队列**全部保留**（零控制流改动）——历史行为不变，但所有擦除路径上在飞 lambda 收尾写入都指向其自持节点，内存生命周期与 lambda 绑定 → UAF 结构性消除。同步加固：①`handle_fd_removal` 以节点 shared_ptr 贯穿 error_callback（重入注销不再悬挂 `ev_it`），erase 前按节点身份比对（防误删重注册的同 fd 新节点）；②broker 级 `lifetime` 共享标志，析构后滞留在存活执行器上的 lambda 不再触碰 `rearm_fd`。**三重回归全绿（见下）** |
 
 ### Linux/Ubuntu 是否有同样问题？——**没有**
 
@@ -94,7 +95,32 @@ USE: io_broker_kqueue::thread_loop()::$_0 → is_in_callback->store(...) / job_c
 | gNB Ctrl+C 优雅退出 | 3/3 次 ~1s、零强制退出 |
 | du_high 集成测试 | **挂起（雷 2）→ 触发回退** |
 
-**当前状态下的已知表现**：常规构建全绿；ASAN 覆盖 SCTP gateway 套件会再次报告该 UAF（预期，见本节顶部状态）。
+### 最终修复（2026-09-02）的设计与验证——当前状态
+
+**复现基线**：修复前在 `build_asan` 用插桩确认触发链——`UAF-INSTRUMENT: sync erase fast path on broker thread, fd=14 (in_callback=14)` 后紧跟 ASAN `heap-use-after-free WRITE of size 1 … thread_loop()::$_0`（`sctp_multi_client_test/sctp_network_link_test.multi_client_recv_data/1` 单次即触发）。
+
+**修复文件**：`lib/support/network/io_broker_kqueue.{h,cpp}`（仅 macOS 编译，Linux/上游零改动）。改动要点：
+
+1. `event_handler`：`unordered_map<int, fd_handler>` → `unordered_map<int, std::shared_ptr<fd_handler>>`；注册用 `std::make_shared<fd_handler>`。
+2. `thread_loop` 投递 lambda：捕获 `handler_node = it->second`（shared_ptr 副本）替换三个裸成员指针；失败分支同样使用该副本（不再回读可能已失效的迭代器）。
+3. `handle_fd_removal`：error_callback 前取节点 shared_ptr 副本（重入注销安全）；`EV_DELETE` 后按 `it->second == handler_node` 身份比对再 `erase`（防悬挂迭代器、防误删同 fd 新注册节点）。
+4. 新增 `std::shared_ptr<std::atomic<bool>> lifetime`：析构在 `stop_impl()` 之后、关 kqueue 之前置 false；lambda 收尾仅在 `lifetime` 为真时 `rearm_fd`（滞留在存活执行器上的任务不再触碰已析构 broker）。
+
+**为什么这次不会重蹈①②③**：①②③都在改**控制流**（谁擦除、何时擦除、谁递减计数），必然牵动 pending 队列 / promise / job_count 的配合。本方案不改任何控制流，只改**内存所有权**——把"lambda 依赖的表项内存"从"表"手里转到"lambda 自己"手里，与 §7c 停机无条件清理天然兼容（滞留 lambda 持有自身节点，稍后运行或随队列销毁均安全，broker 不依赖其完成）。
+
+**验证矩阵（2026-09-02，全绿）**：
+
+| 验证 | 结果 |
+|---|---|
+| ASAN `sctp_network_gateway_test`（原复现点，全量 42+10） | **零 ASAN 报错**；`multi_client_recv_data/*` ×30 轮（120 用例次）零报错（修复前 1 次即触发） |
+| ASAN `network_test`（含确定性用例 `reentrant_handle_and_deregistration`） | 16/16 + 1 预期 skip，零报错 |
+| ASAN `sctp_socket_test` / `udp_network_gateway_test` / `macos_compat_test` / `du_high_clock_controller_test` | 19/7/18/7 全绿，零报错 |
+| 常规 `sctp_network_gateway_test` / `network_test` | 42/42 + 16/16 |
+| `du_high_clock_controller_test` | 7/7，56ms（与 Ubuntu 0.06s 一致） |
+| `du_high_test`（尝试③的挂起点，全量回归） | **48/48，25.5s，零挂起**（历史 26s） |
+| macOS 全量 ctest | **7598/7598（0 失败；7584 通过 + 14 skip/disabled，与基线一致）** |
+| gNB Ctrl+C 优雅退出（FLOW_PROBES=ON + UHD no_core） | **3/3 干净退出，零强制退出** |
+| Linux/Ubuntu | 不受影响（kqueue 文件仅 macOS 编译，未改） |
 
 ### 关联记录
 
@@ -148,7 +174,7 @@ sudo ./build/apps/gnb/gnb -c configs/gnb_uhd_oaiue.yaml   # 或您的 5GC 联调
 
 **根因**：测试夹具使用 `manual_task_worker`（任务需测试手动弹出）作为定时器执行器；停机时最后一笔定时器回调仍滞留其队列、无人再弹出 → 该 fd 的 `job_count` 永不归零。`stop_impl()` 的两个清理循环都在无条件等待 `job_count == 0`（历史代码沿用了 epoll 的模式），于是永久自旋。这是 **macOS kqueue broker 停机路径的真实设计缺陷**（历史上因调度时序恰好躲过，调度语义回退后暴露）；与调度配置无关，换配置只是改变竞态窗口。
 
-**修复**（`lib/support/network/io_broker_kqueue.cpp`，仅停机路径）：`stop_impl()` 在 broker 线程已 join、不可能再有新事件的前提下，**无条件清理**全部条目（pending 与残余 fd 均不再等待 `job_count`）。滞留的执行器任务若稍后运行，其收尾对已释放内存的写入即 §2 已登记的 UAF-001 潜伏行为（无害），但停机流程不再依赖它。
+**修复**（`lib/support/network/io_broker_kqueue.cpp`，仅停机路径）：`stop_impl()` 在 broker 线程已 join、不可能再有新事件的前提下，**无条件清理**全部条目（pending 与残余 fd 均不再等待 `job_count`）。滞留的执行器任务若稍后运行，其收尾写入落在**任务自持的节点 shared_ptr** 上（2026-09-02 UAF-001 专项修复后，节点生命周期与任务绑定，见 §2），停机流程不依赖其完成、也无 UAF 风险。
 
 **验证**：`du_high_clock_controller_test` **7/7，60ms（与 Ubuntu 0.06s 一致）**；`du_high_test` 48/48、25.5s；gateway 42/42；gNB 优雅退出 ~1s 零强制。全量 ctest 交由用户手动 `make test` 复核。
 

@@ -6,7 +6,9 @@
 #include "ocudu/adt/blocking_queue.h"
 #include "ocudu/support/io/io_broker.h"
 #include "ocudu/support/io/unique_fd.h"
+#include <atomic>
 #include <future>
+#include <memory>
 #include <unordered_map>
 #include <utility>
 
@@ -96,8 +98,15 @@ private:
   unique_fd ctrl_event_write_fd;
   int       ctrl_event_raw_fd = -1;
 
-  // Lookup table mapping file descriptors to handlers.
-  std::unordered_map<int, fd_handler> event_handler;
+  // Lookup table mapping file descriptors to handlers. Nodes are shared_ptr-owned: the deferred receive callback
+  // holds its own reference, so a handler erased while a callback is in flight (e.g. the broker-thread synchronous
+  // deregistration fast path) outlives the callback epilogue instead of being written to after free (UAF-001).
+  std::unordered_map<int, std::shared_ptr<fd_handler>> event_handler;
+
+  // Shared lifetime flag: the deferred receive callback holds a copy and stops touching the broker (rearm_fd) once
+  // this is cleared in the destructor, so a task stranded on an executor that outlives the broker cannot
+  // use-after-free the broker object itself (UAF-001 family).
+  std::shared_ptr<std::atomic<bool>> lifetime{std::make_shared<std::atomic<bool>>(true)};
 
   // Queue used to communicate commands to the kqueue broker.
   blocking_queue<control_event> event_queue;

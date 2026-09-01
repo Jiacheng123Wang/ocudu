@@ -76,6 +76,10 @@ io_broker_kqueue::~io_broker_kqueue()
 
   stop_impl();
 
+  // No deferred callback may touch the broker from now on: clear the shared lifetime flag BEFORE closing the
+  // kqueue. A task still queued on a live executor will skip the rearm in its epilogue when it eventually runs.
+  lifetime->store(false, std::memory_order_release);
+
   // Close the kqueue and the control pipe.
   if (not kqueue_fd.close()) {
     logger.error("Failed to close io kqueue: {}", ::strerror(errno));
@@ -107,7 +111,7 @@ void io_broker_kqueue::thread_loop()
     // Process any pending file descriptor removals.
     for (auto it = pending_fds_to_remove.begin(); it != pending_fds_to_remove.end();) {
       if (auto event_it = event_handler.find(it->first); event_it != event_handler.end()) {
-        if (event_it->second.job_count.load(std::memory_order_acquire) == 0) {
+        if (event_it->second->job_count.load(std::memory_order_acquire) == 0) {
           handle_fd_removal(it->first, true, std::nullopt, it->second);
           it = pending_fds_to_remove.erase(it);
           continue;
@@ -150,13 +154,13 @@ void io_broker_kqueue::thread_loop()
       }
 
       const auto it = event_handler.find(fd);
-      if (it == event_handler.end() or not it->second.registered_in_kqueue()) {
+      if (it == event_handler.end() or not it->second->registered_in_kqueue()) {
         logger.info("fd={}: Ignoring event. Cause: File descriptor handler not found", fd);
         continue;
       }
 
       if (fd == ctrl_event_raw_fd) {
-        it->second.read_callback();
+        it->second->read_callback();
         // No rearming needed when the stop command has been executed by the callback.
         if (running.load(std::memory_order_relaxed)) {
           rearm_fd(fd);
@@ -178,36 +182,37 @@ void io_broker_kqueue::thread_loop()
 
       // Make sure that the socket was not re-armed while the callback is still running.
       bool in_callback = false;
-      it->second.is_executing_recv_callback.compare_exchange_strong(
+      it->second->is_executing_recv_callback.compare_exchange_strong(
           in_callback, true, std::memory_order_acq_rel, std::memory_order_relaxed);
       if (in_callback) {
         logger.error("Trying to defer callback execution, but previous callback for this socket is not finished");
         continue;
       }
 
-      // Increment fd_handler job count before deferring the task.
-      it->second.job_count.fetch_add(1, std::memory_order_release);
-      if (not it->second.executor->defer([this,
-                                          fd,
-                                          callback       = &it->second.read_callback,
-                                          job_count      = &it->second.job_count,
-                                          is_in_callback = &it->second.is_executing_recv_callback]() {
+      // Increment fd_handler job count before deferring the task. The callback holds the handler node alive through
+      // its own shared_ptr reference: the node may be erased from the lookup table at any point (e.g. a
+      // deregistration performed from within the callback via the broker-thread synchronous fast path, or a shutdown
+      // while the task is still queued) without the epilogue below ever writing to freed memory (UAF-001).
+      std::shared_ptr<fd_handler> handler_node = it->second;
+      handler_node->job_count.fetch_add(1, std::memory_order_release);
+      if (not handler_node->executor->defer([this, fd, handler_node, lifetime_flag = lifetime]() {
             // Track the current FD that is being read by this thread.
             fd_read_in_callback = fd;
-            (*callback)();
-            is_in_callback->store(false, std::memory_order_release);
-            // Avoid rearming this FD if the callback unregistered it.
-            if (fd_read_in_callback != AVOID_FD_REARMING) {
+            handler_node->read_callback();
+            handler_node->is_executing_recv_callback.store(false, std::memory_order_release);
+            // Avoid rearming this FD if the callback unregistered it, and never touch the broker once its lifetime
+            // flag has been cleared (a task stranded on an executor that outlives the broker).
+            if (fd_read_in_callback != AVOID_FD_REARMING and lifetime_flag->load(std::memory_order_acquire)) {
               rearm_fd(fd);
             }
             fd_read_in_callback = -1;
             // Decrement fd_handler job count after deferred task finished.
-            job_count->fetch_sub(1, std::memory_order_release);
+            handler_node->job_count.fetch_sub(1, std::memory_order_release);
           })) {
         rearm_fd(fd);
         // Reset is_executing_recv_callback flag and decrement fd_handler job count after task deferring failed.
-        it->second.is_executing_recv_callback.store(false, std::memory_order_release);
-        it->second.job_count.fetch_sub(1, std::memory_order_release);
+        handler_node->is_executing_recv_callback.store(false, std::memory_order_release);
+        handler_node->job_count.fetch_sub(1, std::memory_order_release);
         logger.error("Could not enqueue task for processing file descriptor: {}", fd);
       }
     }
@@ -247,7 +252,7 @@ void io_broker_kqueue::handle_enqueued_events()
       case control_event::event_type::deregister_fd:
         if (auto it = event_handler.find(ev.raw_fd); it != event_handler.end()) {
           // It is safe to directly deregister the FD if there are no tasks reading from it.
-          if (it->second.job_count.load(std::memory_order_acquire) == 0) {
+          if (it->second->job_count.load(std::memory_order_acquire) == 0) {
             handle_fd_removal(ev.raw_fd, false, std::nullopt, ev.completed);
             break;
           }
@@ -298,9 +303,8 @@ bool io_broker_kqueue::handle_fd_registration(unique_fd               fd,
   }
 
   // Register the handler of the fd.
-  event_handler.emplace(std::piecewise_construct,
-                        std::forward_as_tuple(raw_fd),
-                        std::forward_as_tuple(executor, handler, err_handler, std::move(fd)));
+  event_handler.emplace(raw_fd,
+                        std::make_shared<fd_handler>(executor, handler, err_handler, std::move(fd)));
 
   if (complete_notifier != nullptr) {
     complete_notifier->set_value(true);
@@ -326,11 +330,16 @@ bool io_broker_kqueue::handle_fd_removal(int                       fd,
     return false;
   }
 
+  // Keep the handler node alive through this call: the error callback below may re-enter the broker (e.g. the
+  // subscriber resets its handle from within its own error handler), synchronously erasing the map entry and
+  // invalidating ev_it before this function reaches the erase below.
+  std::shared_ptr<fd_handler> handler_node = ev_it->second;
+
   // In case the cause for the FD removal was a kqueue error, forward the error to the event handler.
   // Note: We avoid calling the error handling callback in case the FD removal was due to the subscriber
   // close/destruction or due to the io_broker being destroyed.
   if (kqueue_error.has_value()) {
-    ev_it->second.error_callback(*kqueue_error);
+    handler_node->error_callback(*kqueue_error);
   }
 
   // Remove FD from the kqueue. Note: if the file descriptor was already closed, the kernel removed the filter
@@ -340,7 +349,11 @@ bool io_broker_kqueue::handle_fd_removal(int                       fd,
   ::kevent(kqueue_fd.value(), &ev, 1, nullptr, 0, nullptr);
 
   logger.debug("fd={}: File descriptor deregistered from kqueue interest list", fd);
-  event_handler.erase(ev_it);
+  // Only erase the entry this call was handling: a re-entrant removal may have already erased it, or a re-entrant
+  // registration may have replaced it with a new handler for the same fd number.
+  if (auto it = event_handler.find(fd); it != event_handler.end() and it->second == handler_node) {
+    event_handler.erase(it);
+  }
 
   // Notify completion of asynchronous task.
   if (complete_notifier != nullptr) {
@@ -441,9 +454,9 @@ void io_broker_kqueue::stop_impl()
   // per-fd job_count may still be non-zero at this point when a deferred callback sits in an executor queue that
   // will never run it again (e.g. a manual_task_worker whose owner stopped popping, or a task worker that already
   // shut down). Waiting for the count to drop - as the Linux epoll broker does - can therefore spin forever and
-  // hang the application shutdown; instead, remove every remaining entry unconditionally. Any callback epilogue
-  // running on a still-live executor thread after the erase performs the documented latent write to freed memory
-  // (see UAF-001 in docs/macos_compat_refactor/phase3_report.md); the shutdown itself must not depend on it.
+  // hang the application shutdown; instead, remove every remaining entry unconditionally. A callback still queued
+  // on a live executor keeps its handler node alive through its own shared_ptr reference (UAF-001 fix), so the
+  // shutdown neither depends on it nor risks a use-after-free when it eventually runs.
 
   // Process any pending file descriptor removals.
   for (auto it = pending_fds_to_remove.begin(); it != pending_fds_to_remove.end();) {
