@@ -101,6 +101,10 @@ add_executable(complex_normal_random_test complex_normal_random_test.cpp)
 target_link_libraries(complex_normal_random_test ocudulog gtest ocudu_gtest_main)
 add_test(complex_normal_random_test complex_normal_random_test)
 
+add_executable(macos_compat_test macos_compat_test.cpp)
+target_link_libraries(macos_compat_test ocudu_support gtest ocudu_gtest_main)
+gtest_discover_tests(macos_compat_test)
+
 add_executable(transform_optional_test transform_optional_test.cpp)
 target_link_libraries(transform_optional_test ocudulog gtest ocudu_gtest_main)
 add_test(transform_optional_test transform_optional_test)
