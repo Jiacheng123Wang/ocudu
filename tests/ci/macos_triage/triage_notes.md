@@ -230,3 +230,32 @@ strings). The zmq/PHY logs go to the normal log file; remember to set `log: lib_
 setup (gnb=198.19.0.1, UE=198.19.0.2, Ubuntu gnb=198.19.0.3, direct cable) is the reference transport
 for future E2E runs. The reusable analysis scripts, the capture protocol and the full comparison
 report live in `tests/ci/macos_e2e/` (REPORT.md, README.md and the pcap/probe parsers).
+
+## 6. Test-host environment incidents
+
+### 6a. lo0 alias loss after reboot: 18 failures (2026-09-01)
+
+Symptom: `make test` reported **99% tests passed, 18 tests failed out of 7580**. Every failure was the same
+error class: `Failed to bind UDP socket to 127.0.0.2:0 (or 127.0.1.1). Can't assign requested address` and one
+SCTP variant (`test_sctp: Failed to bind 3 address(es)`). `ifconfig lo0` showed only `127.0.0.1` - the host had
+rebooted and the four test aliases (127.0.0.2 / 127.0.0.3 / 127.0.1.1 / 127.0.0.101, see the prerequisites in
+README.md) were gone, as they do not survive a reboot.
+
+The 18 affected cases (all alias-dependent, none of them a code defect):
+
+| group | cases |
+|---|---|
+| `cu_up_test` | `dl_data_flow`, `ul_data_flow`, `echo_data_flow` (3) |
+| `f1u_cu_split_connector_test` | all 7 cases |
+| `f1u_du_split_connector_test` | all 5 cases |
+| `sctp_socket_test` | `bindx_with_multiple_ipv4_addresses` |
+| `udp_network_gateway_tester` / `udp_pool_network_gateway_tester` | `when_config_valid_then_trx_succeeds` (2) |
+
+Fix: re-added the four aliases (see README.md). Re-run results: the 18 cases pass, and the full suite
+reports **100% tests passed out of 7589** (7599 registered with the 9 new `macos_compat` cases of the
+compat-layer refactor, 10 ctest-disabled excluded from the denominator, 24 runtime-skipped as usual).
+
+Prevention: a LaunchDaemon bundle that re-adds the aliases at boot is committed under
+`tests/ci/macos_triage/lo0_aliases/` (`add_lo0_aliases.sh` + `com.ocudu.lo0-test-aliases.plist` +
+`INSTALL.md`). Install it once with sudo on every macOS test host so this failure class cannot recur after
+a reboot.

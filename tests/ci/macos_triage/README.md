@@ -46,6 +46,10 @@ sudo ifconfig lo0 alias 127.0.1.1 up
 sudo ifconfig lo0 alias 127.0.0.101 up
 ```
 
+The aliases do not survive a reboot. To re-add them automatically at boot, install the bundled
+LaunchDaemon once (see `lo0_aliases/INSTALL.md`); without it, expect the gateway/f1u/cu_up tests to
+fail with `Can't assign requested address` after every reboot (18 cases on the 2026-09-01 scan).
+
 ## SCTP transport mode (`OCUDU_USRSCTP_MODE`)
 
 The usrsctp shim (`lib/gateways/sctp_socket.cpp`) selects the SCTP transport automatically per process:

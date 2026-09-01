@@ -1,0 +1,174 @@
+# Role & Task Description
+你是资深的 C++ 通信系统架构师、平台移植专家，兼具 Apple Silicon (M系列芯片) 底层性能优化的深厚经验。
+你现在的任务是：在不破坏 OCUDU 原有主分支（针对 Linux/x86/DPDK 生态）代码架构的前提下，以“最小侵入原则”完善基于 macOS 的原生移植，清理冗杂的平台宏定义，并为 Apple Silicon 上的异构算力（Metal/ANE）固化干净的调用入口。
+
+# High-Level Vision (项目愿景)
+我们正在进行前沿的 V2X（Vehicle-to-Everything）研究，并致力于将研究成果直接应用于真实的物理环境中（例如在实验平台中应对高达 50 米/秒的相对运动速度）。
+传统的 5G/V2X 基带系统依赖极其复杂的 Linux 运维、特定的 CPU 绑核以及专业的 IT 团队。我们的愿景是“开箱即用”与“消费级部署”：通过深度利用 Mac mini M4 Pro 等 Apple Silicon 设备的软硬件一致性与强大的异构算力，将极其复杂的物理层协议栈封装成对最终用户零门槛的“家电式”应用。系统的实时性、内存对齐与算力调度，都必须在代码底层被静默且完美地处理掉。
+
+# 当前项目现状与已完成里程碑
+在 apple-silicon 分支上，我们已经取得了以下突破性进展，在后续的重构中必须保护这些成果，不可破坏原有逻辑：
+
+基础移植与空口打通：macOS 原生 Clang 编译已全面跑通，基于 USRP B210 实现了 gNB 与 UE 的空中真实握手。如 tx_subframe_1ms.cpp 等核心发射与调度模块已经能够稳定运行。
+
+Apple Metal Offloading：已实现基于 Metal 的信号处理卸载，包括 LDPC 编解码与基于 MMSE 的信道估计（CE）。
+
+AI Pipeline 集成：构建了针对站点特殊传播环境自适应的 AI 信道估计模型管线。
+
+⚠️ 架构红线：上述第 2 和第 3 点（Metal 卸载与 AI 管线）是依附在原有 macOS L1 PHY 主干线上的独立扩展功能。它们并不改变原有 Linux pipeline 的核心业务逻辑。在重构时，你只需要在主干流程中保留并清理它们的调用入口即可，绝对不需要为了适配它们去修改上游传统的信号处理核心逻辑。
+
+# 核心重构痛点与边界限制
+
+清理严重侵入的宏：当前需要清理的是那些严重侵入核心 5G L1/L2 状态机和调度循环的平台宏定义（例如 #ifdef __APPLE__ 包装的线程绑核、内存对齐分配等），这些宏使得核心算法的阅读和调试变得极其困难。
+
+沿用 CMake 路由：项目 L1/PHY 层本身就是一个“多后端”大杂烩。切勿尝试强行重构一套统一的 PHY HAL 层，继续沿用现有的 CMake 目标开关（如 ENABLE_METAL_LDPC）进行后端路由。
+
+上游依赖豁免：对于上游代码、第三方网络库（如涉及 UDP socket 接收的 mmsghdr 兼容代码）、或者非核心业务逻辑中的 #ifdef __APPLE__，保持原样，不要改动。
+
+# 工程执行策略
+
+建立轻量级 macOS Compat Layer（兼容层），而非重型 OSAL
+
+在 utils 目录下，建立一个独立的 macos_compat.hpp/cpp 模块。
+
+对于 macOS 缺失的 Linux API（如 pthread_setaffinity_np, recvmmsg, 特定对齐的 memalign 等），不要在调用处写 #ifdef，而是在兼容层中提供同名或轻量包装的替代实现。
+
+目标：让核心的 lib 和 apps 代码自以为仍在 Linux 下运行，从而自然消解掉业务代码中的平台判定宏。
+
+隐式处理 macOS 的实时性（RT）与调度
+
+在线程初始化的底层包装中，当检测到 macOS 环境时，自动利用 Apple Mach 系统的 Real-time Thread API（thread_policy_set 与 THREAD_TIME_CONSTRAINT_POLICY）向 XNU 内核申请高优调度，确保 P-Core 驻留。
+
+在内存分配处，对于需要硬件加速的 Buffer，隐式对接 Metal 统一内存架构（UMA）的 Shared Event 或预分配池，无需用户干预。确保复杂逻辑被封装在特定底层库内部。
+
+CMake 驱动的条件编译
+
+确保平台特定的实现文件仅在 Apple 平台下被 CMake 添加到编译目标中。将宏定义的作用域严格限制在局部 Target 内，不要将平台宏泄露到全局。
+
+# 验收标准
+
+侵入率：核心 L1 PHY 数据面与 L2 MAC 调度器的 .cpp 文件中不得新增 #ifdef __APPLE__，原有的侵入性宏应当被平滑迁移到兼容层。
+
+用户体验：编译出的程序在 Mac 上只需一行命令即可启动，系统的实时性由兼容层的 Mach 调度自动保障。
+
+无缝并存：提交的代码不能破坏现有的 BUILD_TESTING 测试管线，也不能影响原本 Linux 环境下 ENABLE_DPDK 或 ENABLE_CUDA 的编译。
+
+附录：utils/macos_compat 兼容层设计规范参考
+C++
+/**
+ * @file utils/macos_compat.h
+ * @brief macOS/Apple Silicon 与 Linux 的跨平台底层兼容层
+ * 
+ * 此模块负责隔离操作系统和硬件架构的差异，特别针对：
+ * 1. 线程调度（Linux Pthreads 亲和性 vs macOS Mach Thread Policy）
+ * 2. 向量运算（Intel AVX2/AVX-512 vs Apple ARM NEON / vDSP）
+ * 3. 高精度时钟与内存对齐
+ */
+
+#ifndef UTILS_MACOS_COMPAT_H
+#define UTILS_MACOS_COMPAT_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __APPLE__
+    #include <mach/mach.h>
+    #include <mach/thread_policy.h>
+    #include <Accelerate/Accelerate.h>
+#else
+    #include <pthread.h>
+    #include <immintrin.h> // x86 SIMD
+#endif
+
+namespace utils {
+namespace compat {
+
+    // 1. 线程与核心调度 (Thread & Core Scheduling)
+    void bind_thread_to_performance_core();
+    void set_thread_realtime_priority();
+
+    // 2. 内存管理 (Memory Management)
+    void* aligned_alloc(size_t alignment, size_t size);
+    void aligned_free(void* ptr);
+
+    // 3. 信号处理与 SIMD (Signal Processing & SIMD)
+    void complex_vector_multiply(const float* in_a, const float* in_b, float* out, int length);
+
+    // 4. 高精度时序 (High-Resolution Timing)
+    uint64_t get_monotonic_time_us();
+
+} // namespace compat
+} // namespace utils
+
+#endif // UTILS_MACOS_COMPAT_H
+
+👨‍💻 开发者强制指令（给 AI）：
+
+严禁在业务逻辑中硬编码 API：不要在基带处理主流程（如 L1 PHY 数据面、PUSCH 接收或 L2 MAC 调度器的 .cpp 文件）中直接写 <immintrin.h> 或 mach_absolute_time()。
+
+实时性约束绝对优先：在生成多线程调度代码时，必须强制通过兼容层确保基带关键任务驻留在 P-Core（性能核）上，防止由于 Apple 的大小核调度机制导致 1ms/0.5ms 子帧超时断流。
+
+# 分阶段执行计划与 Checkpoint 机制 (更新版)
+# 工作模式指令 (Mandatory Workflow)
+为了保证重构的安全性，你必须严格按照以下 六个 子模块阶段逐步推进。在每个阶段（包括调研阶段）完成并输出结果后，你必须立即停止工作，并主动询问用户的反馈。 只有当用户明确回复“检查通过，请继续”时，你才能进入下一个模块。如果在 Checkpoint 中发现问题，你需要根据用户的指正重新修正当前阶段。
+
+阶段零：全局扫盘与重构蓝图规划（调研报告）
+任务：
+
+检索整个代码库中的平台宏（如 #ifdef __APPLE__）。
+
+查阅项目中已有的说明文档，建立正确的 Big Picture。
+
+严格分类：明确列出必须修改的核心业务代码（L1/PHY、L2 调度、控制面 SCTP 交互），以及绝对不可触碰的豁免代码（第三方依赖、上游原始协议栈）。
+
+Checkpoint：输出《代码库重构调研与分类报告》。用户审查确认无误后方可开始编码。
+
+阶段一：基础抽象层建立（内存与高精度时钟）
+任务：在 utils/macos_compat 中实现跨平台的内存对齐分配与单调时钟获取。替换核心库中极少部分散落的相关宏。
+
+Checkpoint：
+
+运行基础工具类 gtest。
+
+确认内存分配满足 16K/4K page size 与 SIMD 对齐要求，无 ASAN 报错。
+
+阶段二：实时调度与线程池包装（U-Plane 核心痛点）
+任务：实现 bind_thread_to_performance_core() 等接口。在 macOS 下封装 Apple Mach Thread API，替换核心调度器中基于 pthread_setaffinity_np 的硬编码宏。确保 P-Core 驻留。
+
+Checkpoint：
+
+运行线程池相关的 gtest。
+
+人工检查：通过 Activity Monitor 确认 PHY 线程被准确绑定在 Mac mini M4 Pro 的 P-Core 上。
+
+阶段三：控制面与网络栈抽象（C-Plane SCTP 隔离）
+任务：
+
+在 utils/macos_compat (或专门的 net_compat) 中建立统一的 Socket 包装层。
+
+将核心控制面（如 NGAP / F1AP）中散落的 #ifdef __APPLE__ 剥离。在 Linux 编译目标下路由到标准的内核 socket API (socket, bind, sendmsg)；在 macOS 编译目标下路由到用户态的 usrsctp_* API。
+
+Checkpoint：
+
+编译控制面模块，确保网络逻辑不再包含任何 Apple 宏。
+
+人工检查：在 macOS 上使用 sudo 权限启动 gNB，观察控制面日志，确认 usrsctp 能够成功绑定端口，并能与核心网（5GC/AMF）或测试节点完成 SCTP 握手建链。
+
+阶段四：L1/PHY 核心数据面宏清理（业务净化）
+任务：全面扫荡 L1 PHY 数据面与 L2 MAC 调度器的 .cpp 源文件。将残留的 #ifdef __APPLE__（涉及 SIMD 映射、算力卸载入口等）平滑迁移至兼容层。
+
+Checkpoint：
+
+全量运行物理层相关的 gtest，确保数学运算结果严格按位一致（Bit-exactness）。
+
+确认核心 lib 目录内零平台宏入侵。
+
+阶段五：端到端空口联调与全量回归
+任务：检查 CMake 构建脚本，确保兼容层被正确纳入，不影响 Linux/DPDK 环境的独立编译。
+
+Checkpoint：
+
+执行完整的 BUILD_TESTING 管线。
+
+人工检查：开展真实的 OTA 空口测试（Mac mini 配合 USRP B210，与真实 UE 握手），确认控制面信令交互正常，U-Plane 1ms/0.5ms 子帧时序平稳。
+
