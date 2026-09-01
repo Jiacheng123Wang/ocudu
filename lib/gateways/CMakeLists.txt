@@ -4,6 +4,14 @@
 
 find_package(SCTP REQUIRED)
 
+# Platform backend of the SCTP socket layer: the Linux kernel stack or the usrsctp user-space stack (macOS).
+# The shared sources below are platform-agnostic: the backend selection happens here, at the CMake level.
+if (APPLE)
+    list(APPEND SCTP_BACKEND_SOURCES sctp_socket_usrsctp.cpp)
+else ()
+    list(APPEND SCTP_BACKEND_SOURCES sctp_socket_linux.cpp sctp_network_server_impl_linux.cpp)
+endif ()
+
 add_library(ocudu_gateway
         sctp_socket.cpp
         sctp_network_gateway_common_impl.cpp
@@ -14,6 +22,7 @@ add_library(ocudu_gateway
         sctp_network_client_factory.cpp
         sctp_network_server_factory.cpp
         udp_network_gateway_factory.cpp
+        ${SCTP_BACKEND_SOURCES}
 )
 
 if (OPENSSL_HAS_DTLS_SCTP)

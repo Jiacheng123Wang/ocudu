@@ -2,152 +2,22 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "sctp_network_gateway_common_impl.h"
+#include "sctp_socket_backend.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/io/sockets.h"
 #include <algorithm>
 #include <netdb.h>
 #include "ocudu/gateways/sctp_socket.h"
-#if defined(__APPLE__)
-//#include <usrsctp.h>
-#else
-#include <netinet/sctp.h>
-#endif
 #include <sys/socket.h>
 
 using namespace ocudu;
 
-#ifndef __APPLE__
-template <>
-struct fmt::formatter<sctp_sac_state> : fmt::formatter<std::string_view> {
-  auto format(sctp_sac_state v, fmt::format_context& ctx) const
-  {
-    std::string_view name = "UNKNOWN";
-    switch (v) {
-      case SCTP_COMM_UP:
-        name = "SCTP_COMM_UP";
-        break;
-      case SCTP_COMM_LOST:
-        name = "SCTP_COMM_LOST";
-        break;
-      case SCTP_RESTART:
-        name = "SCTP_RESTART";
-        break;
-      case SCTP_SHUTDOWN_COMP:
-        name = "SCTP_SHUTDOWN_COMP";
-        break;
-      case SCTP_CANT_STR_ASSOC:
-        name = "SCTP_CANT_STR_ASSOC";
-        break;
-    }
-    return fmt::formatter<std::string_view>::format(name, ctx);
-  }
-};
-
-template <>
-struct fmt::formatter<sctp_sn_error> : fmt::formatter<std::string_view> {
-  auto format(sctp_sn_error v, fmt::format_context& ctx) const
-  {
-    std::string_view name = "UNKNOWN";
-    switch (v) {
-      case SCTP_FAILED_THRESHOLD:
-        name = "SCTP_FAILED_THRESHOLD";
-        break;
-      case SCTP_RECEIVED_SACK:
-        name = "SCTP_RECEIVED_SACK";
-        break;
-      case SCTP_HEARTBEAT_SUCCESS:
-        name = "SCTP_HEARTBEAT_SUCCESS";
-        break;
-      case SCTP_RESPONSE_TO_USER_REQ:
-        name = "SCTP_RESPONSE_TO_USER_REQ";
-        break;
-      case SCTP_INTERNAL_ERROR:
-        name = "SCTP_INTERNAL_ERROR";
-        break;
-      case SCTP_SHUTDOWN_GUARD_EXPIRES:
-        name = "SCTP_SHUTDOWN_GUARD_EXPIRES";
-        break;
-      case SCTP_PEER_FAULTY:
-        name = "SCTP_PEER_FAULTY";
-        break;
-    }
-    return fmt::formatter<std::string_view>::format(name, ctx);
-  }
-};
-
-template <>
-struct fmt::formatter<sctp_sn_type> : fmt::formatter<std::string_view> {
-  auto format(sctp_sn_type v, fmt::format_context& ctx) const
-  {
-    std::string_view name = "UNKNOWN";
-    switch (v) {
-      case SCTP_DATA_IO_EVENT:
-        name = "SCTP_DATA_IO_EVENT";
-        break;
-      case SCTP_ASSOC_CHANGE:
-        name = "SCTP_ASSOC_CHANGE";
-        break;
-      case SCTP_PEER_ADDR_CHANGE:
-        name = "SCTP_PEER_ADDR_CHANGE";
-        break;
-      case SCTP_SEND_FAILED:
-        name = "SCTP_SEND_FAILED";
-        break;
-      case SCTP_REMOTE_ERROR:
-        name = "SCTP_REMOTE_ERROR";
-        break;
-      case SCTP_SHUTDOWN_EVENT:
-        name = "SCTP_SHUTDOWN_EVENT";
-        break;
-      case SCTP_PARTIAL_DELIVERY_EVENT:
-        name = "SCTP_PARTIAL_DELIVERY_EVENT";
-        break;
-      case SCTP_ADAPTATION_INDICATION:
-        name = "SCTP_ADAPTATION_INDICATION";
-        break;
-      case SCTP_AUTHENTICATION_EVENT:
-        name = "SCTP_AUTHENTICATION_EVENT";
-        break;
-      case SCTP_SENDER_DRY_EVENT:
-        name = "SCTP_SENDER_DRY_EVENT";
-        break;
-      case SCTP_STREAM_RESET_EVENT:
-        name = "SCTP_STREAM_RESET_EVENT";
-        break;
-      case SCTP_ASSOC_RESET_EVENT:
-        name = "SCTP_ASSOC_RESET_EVENT";
-        break;
-      case SCTP_STREAM_CHANGE_EVENT:
-        name = "SCTP_STREAM_CHANGE_EVENT";
-        break;
-      case SCTP_SEND_FAILED_EVENT:
-        name = "SCTP_SEND_FAILED_EVENT";
-        break;
-    }
-    return fmt::formatter<std::string_view>::format(name, ctx);
-  }
-};
-#endif
-
 sockaddr_searcher::sockaddr_searcher(const std::string& address, int port, ocudulog::basic_logger& logger)
 {
-  struct addrinfo hints = {};
-  // support ipv4, ipv6 and hostnames
-  hints.ai_family = AF_UNSPEC;
-#if defined(__APPLE__)
-  // macOS has no native SCTP support: getaddrinfo() rejects the IPPROTO_SCTP protocol hint (EAI_BADFLAGS).
-  // Resolve the address without transport protocol constraints; the resulting sockaddr is protocol-agnostic and
-  // is only used to configure the usrsctp stack.
-  hints.ai_socktype = SOCK_STREAM;
-  hints.ai_protocol = 0;
-#else
-  hints.ai_socktype = SOCK_SEQPACKET;
-  hints.ai_protocol = IPPROTO_SCTP;
-#endif
-  hints.ai_flags     = 0;
-  hints.ai_canonname = nullptr;
-  hints.ai_addr      = nullptr;
-  hints.ai_next      = nullptr;
+  // Platform mapping lives in the backend: macOS has no native SCTP support, so getaddrinfo() rejects the
+  // IPPROTO_SCTP protocol hint (EAI_BADFLAGS); the address is resolved without transport protocol constraints and
+  // the resulting sockaddr is only used to configure the usrsctp stack. Linux resolves with the SCTP hints.
+  struct addrinfo hints = sctp_backend::make_sctp_addrinfo_hints();
 
   std::string port_str = std::to_string(port);
   int         ret      = ::getaddrinfo(address.c_str(), port_str.c_str(), &hints, &results);

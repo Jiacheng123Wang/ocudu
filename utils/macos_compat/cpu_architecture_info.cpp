@@ -12,7 +12,7 @@
 #include <set>
 #include <string>
 #include <sys/stat.h>
-#include <thread> // 引入 std::thread，用于 macOS 获取核心数
+#include <thread> // std::thread, used on macOS to obtain the hardware concurrency
 
 #ifdef NUMA_SUPPORT
 #include <numa.h>
@@ -48,20 +48,24 @@ cpu_architecture_info::cpu_description cpu_architecture_info::discover_cpu_archi
   cpu_description cpuinfo;
 
 #if defined(__APPLE__)
-  // macOS / Apple Silicon 兼容逻辑
-  // Apple M系列芯片为统一内存架构，没有超线程，直接按获取到的硬件并发线程数映射
+  // macOS / Apple Silicon discovery.
+  //
+  // Apple M-series chips are a unified-memory architecture without
+  // hyper-threading: the logical CPU count equals the hardware concurrency.
+  // NUMA does not exist (single node).
   cpuinfo.nof_cpus = std::thread::hardware_concurrency();
   if (cpuinfo.nof_cpus == 0) {
-    cpuinfo.nof_cpus = 1; // 极少数情况下的 fallback
+    cpuinfo.nof_cpus = 1; // Fallback for the rare case where the query fails.
   }
-  
+
   cpuinfo.nof_available_cpus = cpuinfo.nof_cpus;
   cpuinfo.max_cpu_id         = cpuinfo.nof_cpus - 1;
-  
-  cpuinfo.allowed_cpus.resize(cpuinfo.nof_cpus);
-  cpuinfo.allowed_cpus.fill(0, cpuinfo.nof_cpus); // 允许在所有核上运行
 
-  // Apple Silicon物理核与逻辑核 1:1，建立基础映射
+  cpuinfo.allowed_cpus.resize(cpuinfo.nof_cpus);
+  cpuinfo.allowed_cpus.fill(0, cpuinfo.nof_cpus); // All CPUs are available.
+
+  // Apple Silicon maps physical cores to logical CPUs 1:1: build the
+  // per-core bitmasks with one CPU each.
   for (unsigned i = 0; i < cpuinfo.nof_cpus; ++i) {
     cpuinfo.logical_cpu_lists.emplace_back();
     auto& bitmask = cpuinfo.logical_cpu_lists.back();
@@ -72,7 +76,7 @@ cpu_architecture_info::cpu_description cpu_architecture_info::discover_cpu_archi
   cpuinfo.nof_numa_nodes = 1;
 
 #else
-  // 原生 Linux 逻辑
+  // Native Linux discovery.
   ::cpu_set_t&    cpuset = cpuinfo.cpuset;
 
   // Discover host CPU architecture.

@@ -2,15 +2,11 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "sctp_network_client_impl.h"
+#include "sctp_socket_backend.h"
+#include "ocudu/gateways/sctp_socket.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/io/sockets.h"
 #include <algorithm>
-#include "ocudu/gateways/sctp_socket.h"
-#if defined(__APPLE__)
-//#include <usrsctp.h>
-#else
-#include <netinet/sctp.h>
-#endif
 
 using namespace ocudu;
 
@@ -392,33 +388,27 @@ void sctp_network_client_impl::receive()
     return;
   }
 
-#if defined(__APPLE__)
-  // usrsctp shim: sctp_rcvinfo + explicit length argument (see sctp_socket.h).
-  struct sctp_rcvinfo sri     = {};
-  socklen_t           sri_len = sizeof(sri);
-#else
-  struct sctp_sndrcvinfo sri = {};
-#endif
-  int                                               msg_flags = 0;
-  std::array<uint8_t, network_gateway_sctp_max_len> temp_recv_buffer;
-
-  // fromlen is an in/out variable in sctp_recvmsg.
-  sockaddr_storage msg_src_addr;
-  socklen_t        msg_src_addrlen = sizeof(msg_src_addr);
-
-  int rx_bytes = ::sctp_recvmsg(socket.fd().value(),
-                                temp_recv_buffer.data(),
-                                temp_recv_buffer.size(),
-                                reinterpret_cast<sockaddr*>(&msg_src_addr),
-                                &msg_src_addrlen,
-                                &sri,
-#if defined(__APPLE__)
-                                &sri_len,
-#endif
-                                &msg_flags);
+  // Platform mapping lives in the backend: exactly one message per wake-up on Linux, read + drain on macOS
+  // (several messages can queue behind one bridge wake-up byte, e.g. the SCTP_SHUTDOWN_COMP that follows an
+  // SCTP_SHUTDOWN_EVENT).
+  const auto sink = [](void*                         user,
+                       std::vector<uint8_t>          payload,
+                       const struct sctp_sndrcvinfo& sri,
+                       int                           msg_flags,
+                       const sockaddr_storage&       src_addr,
+                       socklen_t                     src_addrlen) {
+    auto*                client = static_cast<sctp_network_client_impl*>(user);
+    span<const uint8_t>  span_payload(payload.data(), payload.size());
+    if (msg_flags & MSG_NOTIFICATION) {
+      client->handle_notification(span_payload, sri, *reinterpret_cast<const sockaddr*>(&src_addr), src_addrlen);
+    } else {
+      client->handle_data(span_payload);
+    }
+  };
+  const int ret = sctp_backend::receive_available(socket.fd().value(), sink, this);
 
   // Handle error.
-  if (rx_bytes == -1) {
+  if (ret < 0) {
     if (errno != EAGAIN) {
       std::string cause = fmt::format("Error reading from SCTP socket: {}", ::strerror(errno));
       handle_connection_terminated(cause);
@@ -427,39 +417,7 @@ void sctp_network_client_impl::receive()
         logger.debug("{}: Socket timeout reached", node_cfg.if_name);
       }
     }
-    return;
   }
-
-  span<const uint8_t> payload(temp_recv_buffer.data(), rx_bytes);
-  if (msg_flags & MSG_NOTIFICATION) {
-    handle_notification(payload, sri, *reinterpret_cast<const sockaddr*>(&msg_src_addr), msg_src_addrlen);
-  } else {
-    handle_data(payload);
-  }
-
-#if defined(__APPLE__)
-  // Drain the socket: the usrsctp shim may queue several notifications/messages behind a single broker wake-up
-  // byte, and reading only one message per callback would leave the rest (e.g. the SCTP_SHUTDOWN_COMP that follows
-  // an SCTP_SHUTDOWN_EVENT) waiting indefinitely for another event.
-  while ((rx_bytes = ::sctp_recvmsg_nowait(socket.fd().value(),
-                                            temp_recv_buffer.data(),
-                                            temp_recv_buffer.size(),
-                                            reinterpret_cast<sockaddr*>(&msg_src_addr),
-                                            &msg_src_addrlen,
-                                            &sri,
-                                            &sri_len,
-                                            &msg_flags)) != -1) {
-    span<const uint8_t> drained_payload(temp_recv_buffer.data(), rx_bytes);
-    if (msg_flags & MSG_NOTIFICATION) {
-      handle_notification(drained_payload, sri, *reinterpret_cast<const sockaddr*>(&msg_src_addr), msg_src_addrlen);
-    } else {
-      handle_data(drained_payload);
-    }
-  }
-  if (errno != EAGAIN) {
-    handle_connection_terminated(fmt::format("Error reading from SCTP socket: {}", ::strerror(errno)));
-  }
-#endif
 }
 
 void sctp_network_client_impl::handle_connection_shutdown(const char* cause)
@@ -503,11 +461,7 @@ void sctp_network_client_impl::handle_data(span<const uint8_t> payload)
 }
 
 void sctp_network_client_impl::handle_notification(span<const uint8_t>           payload,
-#if defined(__APPLE__)
-                                                   const struct sctp_rcvinfo&    sri,
-#else
                                                    const struct sctp_sndrcvinfo& sri,
-#endif
                                                    const sockaddr&               src_addr,
                                                    socklen_t                     src_addr_len)
 {

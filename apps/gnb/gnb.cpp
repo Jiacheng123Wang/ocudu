@@ -47,7 +47,7 @@
 #include "ocudu/support/cpu_features.h"
 #include "ocudu/support/io/io_broker_factory.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
-#include "ocudu/support/scheduling/darwin_thread_scheduling.h"
+#include "ocudu/support/macos_compat.h"
 #include "ocudu/support/signal_handling.h"
 #include "ocudu/support/signal_observer.h"
 #include "ocudu/support/sysinfo.h"
@@ -210,10 +210,9 @@ static void autoderive_cu_up_parameters_after_parsing(cu_up_unit_config& cu_up_c
 
 int main(int argc, char** argv)
 {
-#if defined(__APPLE__)
-  // macOS: elevate the main control-loop thread QoS so the gNB control plane is not starved by the workers.
-  ocudu::set_this_thread_qos_class(QOS_CLASS_USER_INTERACTIVE);
-#endif
+  // Platform mapping lives in the compat layer: on macOS this elevates the main control-loop thread QoS so the
+  // gNB control plane is not starved by the workers (no-op on Linux).
+  ocudu::compat::set_thread_realtime_priority();
 
   // Set the application error handler.
   set_error_handler(app_error_report_handler);

@@ -13,6 +13,11 @@ set(SOURCES
 
 add_library(ocudu_o_du_low_unit_helpers STATIC ${SOURCES})
 target_include_directories(ocudu_o_du_low_unit_helpers PRIVATE ${CMAKE_SOURCE_DIR})
+# Availability of the Metal offload backends is routed here, at the CMake level, so the translator can select the
+# effective PHY algorithm without any platform macro (0/1 compile-time constants, folded by the compiler).
+target_compile_definitions(ocudu_o_du_low_unit_helpers PRIVATE
+        OCUDU_METAL_CHEST_AVAILABLE=$<BOOL:${ENABLE_METAL_CHEST}>
+        OCUDU_METAL_LDPC_AVAILABLE=$<BOOL:${ENABLE_METAL_LDPC}>)
 set(DU_LOW_UNIT_HELPERS_LIBRARIES ocudu_upper_phy ocudu_cpu_affinities_helper ocudu_o_du_low ocudu_app_helpers)
 
 # Hardware acceleration for both PUSCH and PDSCH is enabled by default when using DPDK.

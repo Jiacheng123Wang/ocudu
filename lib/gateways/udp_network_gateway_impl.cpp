@@ -13,48 +13,6 @@
 #include <unistd.h>
 #include <utility>
 
-#if defined(__APPLE__)
-#ifndef MSG_WAITFORONE
-#define MSG_WAITFORONE 0
-#endif
-
-inline int sendmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int vlen, int flags) {
-  for (unsigned int i = 0; i < vlen; ++i) {
-    ssize_t res = ::sendmsg(sockfd, &msgvec[i].msg_hdr, flags);
-    if (res < 0) return i > 0 ? static_cast<int>(i) : -1;
-    msgvec[i].msg_len = static_cast<unsigned int>(res);
-  }
-  return static_cast<int>(vlen);
-}
-
-inline int recvmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int vlen, int flags, struct timespec *timeout) {
-  (void)timeout;
-  // macOS has no recvmmsg(): emulate the Linux MSG_WAITFORONE semantics the caller relies on - wait for at least
-  // one datagram, then return everything already buffered (up to vlen). Block on the first recvmsg, then drain
-  // with MSG_DONTWAIT until EAGAIN. Keeping the callback short is essential: the io_broker re-arms the fd after
-  // every callback and the level-triggered EVFILT_READ fires again while data is pending, so a busy socket is
-  // drained by successive short callbacks. The previous emulation looped blocking recvmsg calls up to vlen times,
-  // so a slow trickle of datagrams held the callback for one inter-packet gap per packet - with vlen=256 and a
-  // 10 pps flow the receive path stalled for tens of seconds and delivered the E2E ping replies in ~26 s bursts.
-  unsigned int i    = 0;
-  ssize_t      res  = ::recvmsg(sockfd, &msgvec[0].msg_hdr, flags & ~MSG_DONTWAIT);
-  if (res < 0) {
-    return -1;
-  }
-  msgvec[0].msg_len = static_cast<unsigned int>(res);
-  i                 = 1;
-  for (; i < vlen; ++i) {
-    res = ::recvmsg(sockfd, &msgvec[i].msg_hdr, flags | MSG_DONTWAIT);
-    if (res < 0) {
-      // Nothing left to read (EAGAIN/EWOULDBLOCK) or a real error: report the datagrams received so far.
-      break;
-    }
-    msgvec[i].msg_len = static_cast<unsigned int>(res);
-  }
-  return static_cast<int>(i);
-}
-#endif
-
 using namespace ocudu;
 
 udp_network_gateway_impl::udp_network_gateway_impl(udp_network_gateway_config                   config_,
@@ -143,13 +101,9 @@ void udp_network_gateway_impl::handle_pdu_impl(span<udp_tx_pdu_t> pdus)
     tx_ctx.mmsg[msg_index].msg_hdr.msg_iov        = tx_ctx.msgs[msg_index].data();
     tx_ctx.mmsg[msg_index].msg_hdr.msg_iovlen     = segment_index;
     tx_ctx.mmsg[msg_index].msg_hdr.msg_name       = (void*)&pdu.dst_addr;
-#if defined(__APPLE__)
-    // macOS rejects sendmsg() with the full sockaddr_storage size as msg_namelen for IPv6 destinations (EINVAL);
-    // only the exact family-specific length is accepted.
-    tx_ctx.mmsg[msg_index].msg_hdr.msg_namelen = sockaddr_length(pdu.dst_addr);
-#else
-    tx_ctx.mmsg[msg_index].msg_hdr.msg_namelen = sizeof(pdu.dst_addr);
-#endif
+    // Platform mapping lives in the compat layer: the family-specific length on macOS (sendmsg rejects the full
+    // sockaddr_storage size for IPv6 destinations with EINVAL), sizeof(sockaddr_storage) on Linux.
+    tx_ctx.mmsg[msg_index].msg_hdr.msg_namelen    = compat::sockaddr_length_for_send(pdu.dst_addr);
     tx_ctx.mmsg[msg_index].msg_hdr.msg_control    = nullptr;
     tx_ctx.mmsg[msg_index].msg_hdr.msg_controllen = 0;
     tx_ctx.mmsg[msg_index].msg_hdr.msg_flags      = 0;
@@ -171,7 +125,7 @@ void udp_network_gateway_impl::handle_pdu_impl(span<udp_tx_pdu_t> pdus)
     }
   }
 
-  int ret = ::sendmmsg(sock_fd.value(), tx_ctx.mmsg.data(), msg_index, 0);
+  int ret = compat::sendmmsg(sock_fd.value(), tx_ctx.mmsg.data(), msg_index, 0);
   if (ret < 0) {
     logger.error("Could not send {} packets to socket. ret={} error={}", msg_index, ret, ::strerror(errno));
   }
@@ -293,7 +247,7 @@ void udp_network_gateway_impl::receive()
     logger.error("Cannot receive on UDP gateway: Socket is not initialized.");
   }
 
-  int rx_msgs = recvmmsg(sock_fd.value(), rx_context.rx_msghdr.data(), config.rx_max_mmsg, MSG_WAITFORONE, nullptr);
+  int rx_msgs = compat::recvmmsg(sock_fd.value(), rx_context.rx_msghdr.data(), config.rx_max_mmsg, MSG_WAITFORONE, nullptr);
   ocudulog::fetch_basic_logger("IO-EPOLL").info("UDP rx {} packets, max is {}", rx_msgs, config.rx_max_mmsg);
   if (rx_msgs == -1 && errno != EAGAIN) {
     logger.error("Error reading from UDP socket: {}", ::strerror(errno));

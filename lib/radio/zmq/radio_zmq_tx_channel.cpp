@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "radio_zmq_tx_channel.h"
+#include "ocudu/support/macos_compat.h"
 #include "ocudu/support/synchronization/sync_event.h"
 #include "radio_zmq_backoff.h"
 #include <set>
@@ -44,17 +45,15 @@ radio_zmq_tx_channel::radio_zmq_tx_channel(void*                      zmq_contex
     return;
   }
 
-#if defined(__APPLE__)
-  // Enlarge the send buffer so a full baseband block (up to ~385 KB) is handed to the kernel in one go. The
-  // blocking zmq_send otherwise stalls the REP channel loop for the whole duration of the peer's receive (see
-  // radio_zmq_rx_channel for the receive side).
-  {
-    int sndbuf = 8 * 1024 * 1024;
+  // Platform mapping lives in the compat layer: on macOS the send buffer is enlarged so a full baseband block
+  // (up to ~385 KB) is handed to the kernel in one go; the blocking zmq_send otherwise stalls the REP channel
+  // loop for the whole duration of the peer's receive. Linux keeps the ZMQ default.
+  if (const size_t io_buf_bytes = compat::recommended_zmq_io_buf_bytes(); io_buf_bytes > 0) {
+    int sndbuf = static_cast<int>(io_buf_bytes);
     if (::zmq_setsockopt(sock, ZMQ_SNDBUF, &sndbuf, sizeof(sndbuf)) == -1) {
       logger.warning("Failed to enlarge the transmitter socket buffer ({}). {}", config.address, ::zmq_strerror(::zmq_errno()));
     }
   }
-#endif
 
   // Bind socket.
   logger.info("Binding to address {}.", config.address);

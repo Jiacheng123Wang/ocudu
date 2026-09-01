@@ -4,7 +4,7 @@
 #include "ocudu/support/executors/unique_thread.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/adt/static_vector.h"
-#include "ocudu/support/scheduling/darwin_thread_scheduling.h"
+#include "ocudu/support/macos_compat.h"
 #include "fmt/std.h"
 #include <cstdio>
 #include <mutex>
@@ -32,39 +32,10 @@ static bool thread_set_param(::pthread_t t, os_thread_realtime_priority prio)
 
 static bool thread_set_affinity(::pthread_t t, const os_sched_affinity_bitmask& bitmap, const std::string& name)
 {
-#if !defined(__APPLE__)
-  auto invalid_ids = bitmap.subtract(os_sched_affinity_bitmask::available_cpus());
-  if (!invalid_ids.empty()) {
-    fmt::println("Warning: The CPU affinity of thread \"{}\" contains the following invalid CPU ids: {}",
-                 name,
-                 span<const size_t>(invalid_ids));
-  }
-
-  ::cpu_set_t* cpusetp     = CPU_ALLOC(bitmap.size());
-  size_t       cpuset_size = CPU_ALLOC_SIZE(bitmap.size());
-  CPU_ZERO_S(cpuset_size, cpusetp);
-
-  for (size_t i = 0, e = bitmap.size(); i != e; ++i) {
-    if (bitmap.test(i)) {
-      CPU_SET_S(i, cpuset_size, cpusetp);
-    }
-  }
-
-  int ret;
-  if ((ret = ::pthread_setaffinity_np(t, cpuset_size, cpusetp)) != 0) {
-    fmt::print("Couldn't set affinity for {} thread. Cause: '{}'\n", name, ::strerror(ret));
-    CPU_FREE(cpusetp);
-    return false;
-  }
-
-  CPU_FREE(cpusetp);
-  return true;
-#else
-  (void)t;
-  (void)bitmap;
-  (void)name;
-  return true;
-#endif
+  // Platform mapping lives in the compat layer: pthread_setaffinity_np on
+  // Linux, no-op on macOS (the QoS class and Mach affinity tag are the
+  // scheduling mechanisms there).
+  return compat::set_thread_affinity(t, bitmap, name);
 }
 
 static std::string compute_this_thread_name()
@@ -87,23 +58,9 @@ static void print_thread_priority(::pthread_t t, const char* tname)
     return;
   }
 
-#if !defined(__APPLE__)
-  ::cpu_set_t cpuset;
-
-  int s = ::pthread_getaffinity_np(t, sizeof(::cpu_set_t), &cpuset);
-  if (s != 0) {
-    fmt::println("error pthread_getaffinity_np: {}", ::strerror(s));
-  }
-
-  fmt::println("Set returned by pthread_getaffinity_np() contained:");
-  for (unsigned j = 0; j != CPU_SETSIZE; ++j) {
-    if (CPU_ISSET(j, &cpuset)) {
-      fmt::println("    CPU {}", j);
-    }
-  }
-#else
-  fmt::println("Thread affinity query is not supported on macOS.");
-#endif
+  // Platform mapping lives in the compat layer (CPU set on Linux, notice on
+  // macOS).
+  compat::print_thread_affinity_info(t);
 
   int           policy;
   ::sched_param param;
@@ -235,19 +192,13 @@ const os_sched_affinity_bitmask& os_sched_affinity_bitmask::available_cpus()
 {
   static os_sched_affinity_bitmask available_cpus_mask = []() {
     os_sched_affinity_bitmask bitmask;
-#if !defined(__APPLE__)
-    ::cpu_set_t cpuset = cpu_architecture_info::get().get_available_cpuset();
-    for (size_t i = 0, e = bitmask.size(); i != e; ++i) {
-      if (CPU_ISSET(i, &cpuset)) {
-        bitmask.cpu_bitset.set(i);
+    // Platform mapping lives in the compat layer: the process affinity cpuset
+    // on Linux, the first N hardware threads on macOS.
+    for (size_t cpu_idx : compat::get_available_cpu_ids()) {
+      if (cpu_idx < bitmask.size()) {
+        bitmask.cpu_bitset.set(cpu_idx);
       }
     }
-#else
-    unsigned n = std::thread::hardware_concurrency();
-    for (size_t i = 0; i < n && i < bitmask.size(); ++i) {
-      bitmask.cpu_bitset.set(i);
-    }
-#endif
     return bitmask;
   }();
 
@@ -281,12 +232,10 @@ unique_thread::thread_handle_impl unique_thread::make_thread(const std::string& 
 {
   ::pthread_attr_t attr;
   ::pthread_attr_init(&attr);
-#if defined(__APPLE__)
-  // The macOS default pthread stack (512 KiB) is too small for the gNB's deep call chains: the FAPI fastpath
-  // translators keep large TTI structures on the stack, which overflow the default stack. Use a stack size similar
-  // to the Linux default (8 MiB), with margin.
-  ::pthread_attr_setstacksize(&attr, 16u * 1024u * 1024u);
-#endif
+  // Platform mapping lives in the compat layer: on macOS the default pthread
+  // stack (512 KiB) is too small for the gNB's deep call chains, so the compat
+  // layer enlarges it to 16 MiB (Linux keeps its 8 MiB default).
+  compat::configure_worker_thread_attributes(attr);
 
   auto* thread_callable = new unique_function<void()>([name, prio, cpu_mask, callable = std::move(callable)]() {
     std::string fixed_name = name;
@@ -302,35 +251,24 @@ unique_thread::thread_handle_impl unique_thread::make_thread(const std::string& 
                    fixed_name);
     }
 
-#if defined(__APPLE__)
-    if (::pthread_setname_np(fixed_name.c_str()) != 0) {
+    // Platform mapping lives in the compat layer: the pthread_setname_np
+    // signature differs between Linux (handle + name) and macOS (name only).
+    if (not compat::set_thread_name(::pthread_self(), fixed_name.c_str())) {
       ::perror("pthread_setname_np");
       fmt::println("Thread [{}]: Error while setting thread name to {}.", std::this_thread::get_id(), name);
     }
-#else
-    ::pthread_t tself = ::pthread_self();
-    if (::pthread_setname_np(tself, fixed_name.c_str()) != 0) {
-      ::perror("pthread_setname_np");
-      fmt::println("Thread [{}]: Error while setting thread name to {}.", std::this_thread::get_id(), name);
-    }
-#endif
 
-#if defined(__APPLE__)
-    // Darwin scheduling: POSIX SCHED_FIFO and CPU pinning are not enforceable on macOS. Instead, elevate the QoS
-    // class and set the Mach affinity tag of the thread:
-    // - QoS: real-time intent -> QOS_CLASS_USER_INTERACTIVE, otherwise QOS_CLASS_USER_INITIATED (both keep the
-    //   thread on the performance cores);
-    // - affinity tag: derived from the configured CPU mask when present, otherwise from the worker pool name, so
-    //   threads sharing a pipeline are co-located on one L2 cluster.
-    set_this_thread_qos_class(darwin_qos_class_for_prio(prio));
-    set_this_thread_affinity_tag(cpu_mask.any() ? affinity_tag_from_cpu_mask(cpu_mask)
-                                                : affinity_tag_from_thread_name(name));
-#endif
+    // Platform mapping lives in the compat layer: on macOS this elevates the
+    // QoS class (P-core steering), applies the Mach affinity tag and, for the
+    // real-time intent, requests the Mach time constraint. On Linux it is a
+    // no-op because the POSIX priority and affinity below are the native
+    // mechanisms there.
+    compat::apply_worker_thread_scheduling(prio, cpu_mask, name);
 
     // Set thread OS priority and affinity.
     // Note: TSAN seems to have issues with thread attributes when running as normal user, disable them in that case.
 #ifndef HAVE_TSAN
-    if (prio != os_thread_realtime_priority::no_realtime()) {
+    if (prio != os_thread_realtime_priority::no_realtime() && compat::posix_realtime_priority_is_enforceable()) {
       thread_set_param(::pthread_self(), prio);
     }
     if (cpu_mask.any()) {

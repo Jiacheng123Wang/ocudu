@@ -41,11 +41,12 @@ void ocudu::set_pthread_attr_qos_class(::pthread_attr_t& attr, os_qos_class_t qo
 void ocudu::set_this_thread_time_constraint(const darwin_thread_time_constraint& constraint)
 {
   // Conversion factor from microseconds to Mach absolute time units (timebase-dependent; 1:1 on Apple Silicon,
-  // e.g., 24 MHz ticks on some models).
+  // e.g., 24 MHz ticks on some models). mach_timebase_info reports numer/denom nanoseconds per tick, so
+  // ticks = 1000 * us * denom / numer.
   static const double abs_ticks_per_us = []() {
     ::mach_timebase_info_data_t timebase_info;
     ::mach_timebase_info(&timebase_info);
-    return static_cast<double>(timebase_info.denom) / static_cast<double>(timebase_info.numer);
+    return 1000.0 * static_cast<double>(timebase_info.denom) / static_cast<double>(timebase_info.numer);
   }();
 
   const auto to_abs_ticks = [](std::chrono::microseconds us) {
@@ -117,28 +118,6 @@ void ocudu::set_this_thread_time_constraint(const darwin_thread_time_constraint&
 void ocudu::set_this_thread_affinity_tag(int /*affinity_tag*/) {}
 
 #endif
-
-int ocudu::affinity_tag_from_cpu_mask(const os_sched_affinity_bitmask& mask)
-{
-  if (not mask.any() || mask.count() > 4) {
-    return 0;
-  }
-  return mask.find_lowest(0, mask.size()) + 1;
-}
-
-int ocudu::affinity_tag_from_thread_name(std::string_view name)
-{
-  // Strip the worker index suffix: "main_pool#2" -> "main_pool".
-  std::string_view pool_prefix = name;
-  if (auto pos = pool_prefix.rfind('#'); pos != std::string_view::npos) {
-    pool_prefix = pool_prefix.substr(0, pos);
-  }
-
-  // FNV-1a, folded into [1, 4095] (0 is reserved for "no hint"). With ~10 distinct pools, collisions are negligible.
-  uint32_t hash = 2166136261u;
-  for (char c : pool_prefix) {
-    hash ^= static_cast<uint8_t>(c);
-    hash *= 16777619u;
-  }
-  return 1 + static_cast<int>(hash % 4095);
-}
+// The definitions of affinity_tag_from_cpu_mask() and affinity_tag_from_thread_name() live in the
+// macos_compat target (utils/macos_compat/macos_compat.cpp): they are shared by the compat wrappers
+// and this module, and that placement avoids a link cycle with ocudu_support.

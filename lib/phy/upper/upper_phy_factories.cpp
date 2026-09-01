@@ -25,6 +25,7 @@
 #include "ocudu/phy/upper/signal_processors/prs/factories.h"
 #include "ocudu/phy/upper/signal_processors/srs/srs_estimator_factory.h"
 #include "ocudu/support/error_handling.h"
+#include "ocudu/support/macos_compat.h"
 #include <algorithm>
 
 using namespace ocudu;
@@ -764,12 +765,10 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
          .ldpc_decoder_offset    = config.ldpc_decoder_offset});
     report_fatal_error_if_not(
         decoder_config.decoder_factory, "Invalid LDPC decoder factory of type {}.", config.crc_calculator_type);
-#if defined(__APPLE__)
-    // macOS: log the effective PUSCH LDPC decoder type so the expert knob
-    // (expert_phy --pusch_ldpc_decoder_type) A/B runs are verifiable at startup
-    // (Linux keeps the upstream silent path).
-    ocudulog::fetch_basic_logger("GNB").info("PUSCH LDPC decoder type: {}", config.ldpc_decoder_type);
-#endif
+    // Platform mapping lives in the compat layer: on macOS the effective PUSCH LDPC decoder type is logged at
+    // startup so the expert knob (expert_phy --pusch_ldpc_decoder_type) A/B runs are verifiable; Linux keeps the
+    // upstream silent path.
+    compat::log_effective_decoder_backend(config.ldpc_decoder_type);
     decoder_config.dematcher_factory = create_ldpc_rate_dematcher_factory_sw(config.ldpc_rate_dematcher_type);
     report_fatal_error_if_not(decoder_config.dematcher_factory,
                               "Invalid LDPC Rate Dematcher factory of type {}.",

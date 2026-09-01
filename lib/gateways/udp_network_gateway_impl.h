@@ -7,17 +7,11 @@
 #include "ocudu/gateways/udp_network_gateway.h"
 #include "ocudu/support/executors/task_executor.h"
 #include "ocudu/support/io/unique_fd.h"
+#include "ocudu/support/macos_compat.h" // compat::mmsghdr, sendmmsg/recvmmsg, MSG_WAITFORONE
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#if defined(__APPLE__)
-#include <sys/socket.h>
-struct mmsghdr {
-  struct msghdr msg_hdr;
-  unsigned int   msg_len;
-};
-#endif
 
 namespace ocudu {
 
@@ -34,7 +28,7 @@ struct receive_context {
 
   std::vector<std::vector<uint8_t>> rx_mem;
   std::vector<::sockaddr_storage>   rx_srcaddr;
-  std::vector<::mmsghdr>            rx_msghdr;
+  std::vector<compat::mmsghdr>      rx_msghdr;
   std::vector<::iovec>              rx_iovecs;
 };
 
@@ -49,7 +43,7 @@ struct transmit_context {
     }
   }
 
-  std::vector<::mmsghdr>            mmsg;
+  std::vector<compat::mmsghdr>            mmsg;
   std::vector<std::vector<::iovec>> msgs;
 };
 

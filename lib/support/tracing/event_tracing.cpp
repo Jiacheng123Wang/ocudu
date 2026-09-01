@@ -10,21 +10,12 @@
 #include "ocudu/support/format/fmt_to_c_str.h"
 #include "ocudu/support/tracing/rusage_trace_recorder.h"
 #include "fmt/chrono.h"
-#include <sched.h>
+#include "ocudu/support/macos_compat.h"
 
 using namespace ocudu;
 using namespace std::chrono;
 
 namespace {
-
-static inline unsigned get_current_cpu()
-{
-#if defined(__APPLE__)
-  return 0;
-#else
-  return ::sched_getcpu();
-#endif
-}
 
 struct instant_trace_event_extended;
 
@@ -173,7 +164,7 @@ struct trace_event_extended : public trace_event {
   trace_duration duration;
 
   trace_event_extended(const trace_event& event, trace_duration duration_) :
-    trace_event(event), cpu(get_current_cpu()), thread_name(this_thread_name()), duration(duration_)
+    trace_event(event), cpu(compat::get_current_cpu()), thread_name(this_thread_name()), duration(duration_)
   {
   }
 };
@@ -184,7 +175,10 @@ struct instant_trace_event_extended : public instant_trace_event {
   trace_point tp;
 
   instant_trace_event_extended(const instant_trace_event& event) :
-    instant_trace_event(event), cpu(get_current_cpu()), thread_name(this_thread_name()), tp(trace_point::clock::now())
+    instant_trace_event(event),
+    cpu(compat::get_current_cpu()),
+    thread_name(this_thread_name()),
+    tp(trace_point::clock::now())
   {
   }
 };

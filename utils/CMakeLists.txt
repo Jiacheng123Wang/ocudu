@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 
+add_subdirectory(macos_compat)
+
 if (ENABLE_TRX_DRIVER)
     add_subdirectory(trx_ocudu)
 endif (ENABLE_TRX_DRIVER)

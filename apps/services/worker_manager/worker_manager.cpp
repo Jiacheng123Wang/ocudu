@@ -10,6 +10,7 @@
 #include "ocudu/support/executors/executor_decoration_factory.h"
 #include "ocudu/support/executors/inline_task_executor.h"
 #include "ocudu/support/executors/strand_executor.h"
+#include "ocudu/support/macos_compat.h"
 
 using namespace ocudu;
 
@@ -550,13 +551,9 @@ void worker_manager::create_lower_phy_executors(const worker_manager_config::ru_
                      concurrent_queue_policy::lockfree_mpmc,
                      std::chrono::microseconds{50},
                      affinity_mng.front().calcute_affinity_mask(sched_affinity_mask_types::ru),
-#if defined(__APPLE__)
-                     // On macOS, the radio channel loop moves the RF samples in/out of the baseband (ZMQ or OFH):
-                     // treat it as real-time so that it is elevated to QOS_CLASS_USER_INTERACTIVE.
-                     os_thread_realtime_priority::max() - 1);
-#else
-                     os_thread_realtime_priority::no_realtime());
-#endif
+                     // Platform mapping lives in the compat layer: on macOS the radio channel loop is treated as
+                     // real-time (QoS elevation), on Linux it keeps the upstream non-realtime priority.
+                     compat::radio_worker_realtime_priority());
 
   switch (config.profile) {
     case worker_manager_config::ru_sdr_config::lower_phy_thread_profile::sequential: {

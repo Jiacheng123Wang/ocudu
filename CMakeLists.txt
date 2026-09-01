@@ -745,12 +745,15 @@ endfunction()
 # Add the subdirectories
 ########################################################################
 
+# The compat layer (utils/macos_compat) must be defined before lib/: the core
+# libraries link it through ocudu_support, so its target has to exist by the
+# time the link graph is generated.
+add_subdirectory(utils)
 add_subdirectory(apps)
 add_subdirectory(configs)
 add_subdirectory(docs/doxygen)
 add_subdirectory(external)
 add_subdirectory(lib)
-add_subdirectory(utils)
 
 if (BUILD_TESTING)
     if (DISABLE_MBEDTLS OR DISABLE_SCTP)

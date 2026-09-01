@@ -3,23 +3,6 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #pragma once
-#if defined(__APPLE__)
-#include <libkern/OSByteOrder.h>
-#ifndef le16toh
-#define le16toh(x) OSSwapLittleToHostInt16(x)
-#endif
-#ifndef htole16
-#define htole16(x) OSSwapHostToLittleInt16(x)
-#endif
-#ifndef le32toh
-#define le32toh(x) OSSwapLittleToHostInt32(x)
-#endif
-#ifndef htole32
-#define htole32(x) OSSwapHostToLittleInt32(x)
-#endif
-#else
-#include <endian.h>
-#endif
 
 #include "lcid_ul_sch.h"
 #include "ul_bsr.h"
@@ -29,6 +12,7 @@
 #include "ocudu/adt/span.h"
 #include "ocudu/adt/static_vector.h"
 #include "ocudu/ran/rnti.h"
+#include "ocudu/support/macos_compat.h" // compat::le16toh / htole16 / le32toh / htole32
 #include "ocudu/support/ocudu_assert.h"
 #include "fmt/ranges.h"
 #include "fmt/std.h"
@@ -95,7 +79,7 @@ inline rnti_t decode_crnti_ce(byte_buffer_view payload)
   }
 
   // Conversion between Little Endian to RNTI value. See TS 38.321, 6.1.3.2 - C-RNTI MAC CE.
-  return to_rnti(le16toh((uint16_t)payload[0] << 8U | payload[1]));
+  return to_rnti(compat::le16_to_host((uint16_t)payload[0] << 8U | payload[1]));
 }
 
 } // namespace ocudu

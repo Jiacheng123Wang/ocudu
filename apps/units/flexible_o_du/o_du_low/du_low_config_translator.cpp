@@ -14,6 +14,15 @@
 #include "ocudu/support/cpu_architecture_info.h"
 #include <cmath>
 
+#ifndef OCUDU_METAL_CHEST_AVAILABLE
+// Set by CMake from ENABLE_METAL_CHEST (1 when the Metal MMSE channel estimator is linked into the app).
+#define OCUDU_METAL_CHEST_AVAILABLE 0
+#endif
+#ifndef OCUDU_METAL_LDPC_AVAILABLE
+// Set by CMake from ENABLE_METAL_LDPC (1 when the Metal LDPC codec is linked into the app).
+#define OCUDU_METAL_LDPC_AVAILABLE 0
+#endif
+
 using namespace ocudu;
 
 static odu::du_low_config generate_du_low_config(const du_low_unit_config&                       du_low,
@@ -67,11 +76,11 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
       du_low.expert_phy_cfg.pusch_channel_estimator_helena_model_path_52;
   upper_phy_factory_config.pusch_channel_estimator_helena_model_path_106 =
       du_low.expert_phy_cfg.pusch_channel_estimator_helena_model_path_106;
-#if !defined(__APPLE__)
-  // The Metal MMSE estimator is Apple Silicon only: on other platforms the expert knob is
-  // forced back to the classical estimator (same policy as the LDPC decoder type).
-  upper_phy_factory_config.pusch_channel_estimator_algo = "cpu";
-#endif
+  if (!OCUDU_METAL_CHEST_AVAILABLE) {
+    // The Metal MMSE estimator is Apple Silicon only: when it is not built into the app, the expert knob is
+    // forced back to the classical estimator (same policy as the LDPC decoder type).
+    upper_phy_factory_config.pusch_channel_estimator_algo = "cpu";
+  }
   upper_phy_factory_config.pusch_channel_equalizer_algorithm = du_low.expert_phy_cfg.pusch_channel_equalizer_algorithm;
   upper_phy_factory_config.ldpc_decoder_iterations           = du_low.expert_phy_cfg.pusch_decoder_max_iterations;
   upper_phy_factory_config.ldpc_decoder_early_stop           = du_low.expert_phy_cfg.pusch_decoder_early_stop;
@@ -80,13 +89,14 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   upper_phy_factory_config.ul_bw_rb                          = max_ul_bw_rb;
   upper_phy_factory_config.pusch_max_nof_layers              = pusch_max_nof_layers;
   upper_phy_factory_config.enable_metrics                    = du_low.metrics_cfg.enable_du_low;
-#if defined(__APPLE__)
-  // macOS: honor the expert knob (expert_phy --pusch_ldpc_decoder_type, assigned above). Upstream
-  // leaves an unconditional "auto" override here (see 3f227a41fb) that silently discards the
-  // configured decoder type; keep Linux byte-for-byte with upstream per the port policy.
-#else
-  upper_phy_factory_config.ldpc_decoder_type                 = "auto";
-#endif
+  if (OCUDU_METAL_LDPC_AVAILABLE) {
+    // Honor the expert knob (expert_phy --pusch_ldpc_decoder_type, assigned above) when the Metal LDPC codec is
+    // built in. Upstream leaves an unconditional "auto" override here (see 3f227a41fb) that silently discards
+    // the configured decoder type; when no Metal codec is available, keep Linux byte-for-byte with upstream per
+    // the port policy.
+  } else {
+    upper_phy_factory_config.ldpc_decoder_type = "auto";
+  }
   if (du_low.expert_phy_cfg.enable_phy_tap) {
     upper_phy_factory_config.phy_tap_arguments = du_low.expert_phy_cfg.phy_tap_arguments;
     if (cells[0].tdd_pattern) {

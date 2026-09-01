@@ -15,6 +15,7 @@
 #include "ocudu/phy/lower/sampling_rate.h"
 #include "ocudu/support/executors/flow_probe.h"
 #include "ocudu/support/executors/task_executor.h"
+#include "ocudu/support/macos_compat.h"
 #include <future>
 
 namespace ocudu {
@@ -137,31 +138,27 @@ private:
         // Increment the process count before considering stopped.
         uint32_t current_state = state.fetch_add(1) + 1;
         if (current_state >= state_stopped) {
-#if defined(__APPLE__)
-          // The processing chain ends here: no more tasks will be enqueued. The stop completes when this task
-          // finishes (see on_process_end()).
+          // Platform mapping lives in the compat layer: Linux completes the stop here (upstream behaviour);
+          // macOS defers it to on_process_end(), where the task has actually finished.
+          compat::lower_phy_stop_chain_end(stop_control);
           return false;
-#else
-          stop_control.set_value();
-          return false;
-#endif
         }
       }
       return true;
     }
 
-#if defined(__APPLE__)
     /// \brief Call when the processing task finishes.
     void on_process_end()
     {
-      // Only the task that ended the processing chain (the one that incremented the process count to state_stopped)
-      // reaches this point with the state at or past the stop threshold: signal the completion of the stop. This
-      // guarantees that stop() waits until all processing tasks have finished, not merely started.
-      if (((state.load() & state_wait_stop) != 0) and (state.load() >= state_stopped)) {
-        stop_control.set_value();
-      }
+      // Platform mapping lives in the compat layer (no-op on Linux). On macOS only the task that ended the
+      // sequential processing chain observes the state at or past the stop threshold: signal the completion of
+      // the stop. This guarantees that stop() waits until all processing tasks have finished, not merely started.
+      const uint32_t current_state = state.load(std::memory_order_relaxed);
+      compat::lower_phy_stop_task_end(current_state,
+                                      (current_state & state_wait_stop) != 0,
+                                      state_stopped,
+                                      stop_control);
     }
-#endif
 
   private:
     /// State value in idle.

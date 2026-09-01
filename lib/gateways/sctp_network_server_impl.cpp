@@ -3,19 +3,22 @@
 
 #include "sctp_network_server_impl.h"
 #include "sctp_dtls.h"
+#include "sctp_socket_backend.h"
+#include "ocudu/gateways/sctp_socket.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/synchronization/sync_event.h"
-#if defined(__APPLE__)
-//#include <usrsctp.h>
-#else
-#include <netinet/sctp.h>
-#endif
-#include "ocudu/gateways/sctp_socket.h"
 
 using namespace ocudu;
 
 /// Stream number to use for sending.
 static constexpr unsigned stream_no = 0;
+
+sctp_network_server_impl::sctp_associaton_context::sctp_associaton_context(int                       assoc_id_,
+                                                                           int                       fd_,
+                                                                           sctp_network_server_impl& parent_) :
+  assoc_id(assoc_id_), fd(fd_), parent(parent_)
+{
+}
 
 class sctp_network_server_impl::sctp_send_notifier : public sctp_association_sdu_notifier
 {
@@ -24,11 +27,7 @@ public:
                      const sctp_network_server_impl::sctp_associaton_context& assoc,
                      ocudulog::basic_logger&                                  logger_) :
     ppid(parent.node_cfg.ppid),
-#if defined(__APPLE__)
-    fd(parent.socket.fd().value()),
-#else
     fd(assoc.fd),
-#endif
     if_name(parent.node_cfg.if_name),
     assoc_id(assoc.assoc_id),
     client_addr(assoc.addr),
@@ -87,52 +86,11 @@ private:
       return;
     }
 
-    // Send EOF to SCTP client.
-#if defined(__APPLE__)
+    // Send EOF to SCTP client (platform mechanism in the backend: sendmsg + SCTP_SNDINFO control message on Linux,
+    // sctp_sendmsg with SCTP_EOF through the usrsctp shim on macOS).
     transport_layer_address::native_type dest_addr  = client_addr.native();
-    int                                  bytes_sent = ::sctp_sendmsg(fd,
-                                    nullptr,
-                                    0,
-                                    const_cast<struct sockaddr*>(dest_addr.addr),
-                                    dest_addr.addrlen,
-                                    htonl(ppid),
-                                    SCTP_EOF,
-                                    stream_no,
-                                    0,
-                                    0);
-#else
-    transport_layer_address::native_type dest_addr = client_addr.native();
-    struct sctp_sndinfo                  sndinfo{};
-    sndinfo.snd_sid   = stream_no;
-    sndinfo.snd_ppid  = htonl(ppid);
-    sndinfo.snd_flags = SCTP_EOF;
-
-    char control[CMSG_SPACE(sizeof(sndinfo))];
-
-    struct iovec iov{};
-    iov.iov_base = nullptr;
-    iov.iov_len  = 0;
-
-    struct msghdr msg{};
-    msg.msg_name    = dest_addr.addr;
-    msg.msg_namelen = dest_addr.addrlen;
-    msg.msg_iov     = &iov;
-    msg.msg_iovlen  = 1;
-
-    msg.msg_control    = control;
-    msg.msg_controllen = sizeof(control);
-
-    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level     = IPPROTO_SCTP;
-    cmsg->cmsg_type      = SCTP_SNDINFO;
-    cmsg->cmsg_len       = CMSG_LEN(sizeof(sndinfo));
-
-    memcpy(CMSG_DATA(cmsg), &sndinfo, sizeof(sndinfo));
-
-    msg.msg_controllen = cmsg->cmsg_len;
-
-    ssize_t bytes_sent = sendmsg(fd, &msg, MSG_NOSIGNAL);
-#endif
+    int                                  bytes_sent = sctp_backend::send_eof(
+        fd, dest_addr.addr, dest_addr.addrlen, htonl(ppid), stream_no);
 
     if (bytes_sent == -1) {
       // Failed to send EOF.
@@ -162,58 +120,6 @@ private:
   // Buffer used to store data to send to client.
   std::array<uint8_t, network_gateway_sctp_max_len> send_buffer;
 };
-
-#if defined(__APPLE__)
-sctp_network_server_impl::sctp_associaton_context::sctp_associaton_context(int assoc_id_) : assoc_id(assoc_id_) {}
-#else
-sctp_network_server_impl::sctp_associaton_context::sctp_associaton_context(int                       assoc_id_,
-                                                                           int                       fd_,
-                                                                           sctp_network_server_impl& parent_) :
-  assoc_id(assoc_id_), fd(fd_), parent(parent_)
-{
-}
-
-void sctp_network_server_impl::sctp_associaton_context::receive()
-{
-  struct sctp_sndrcvinfo                            sri       = {};
-  int                                               msg_flags = 0;
-  std::array<uint8_t, network_gateway_sctp_max_len> temp_recv_buffer;
-
-  // fromlen is an in/out variable in sctp_recvmsg.
-  sockaddr_storage msg_src_addr;
-  socklen_t        msg_src_addrlen = sizeof(msg_src_addr);
-
-  int rx_bytes = ::sctp_recvmsg(fd,
-                                temp_recv_buffer.data(),
-                                temp_recv_buffer.size(),
-                                (struct sockaddr*)&msg_src_addr,
-                                &msg_src_addrlen,
-                                &sri,
-                                &msg_flags);
-
-  if (rx_bytes == -1) {
-    if (errno != EAGAIN) {
-      parent.logger.error("Error reading from SCTP socket: {}", ::strerror(errno));
-      while (not parent.app_exec.defer([this, keepalive = parent.keepalive_token]() {
-        if (*keepalive) {
-          parent.handle_sctp_comm_lost(assoc_id);
-        }
-      })) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      }
-    } else {
-      if (!parent.node_cfg.non_blocking_mode) {
-        parent.logger.debug("Socket timeout reached");
-      }
-    }
-    return;
-  }
-
-  /// We pass the actual data and association handling back to the parent, to avoid code duplication.
-  auto payload = std::vector<uint8_t>(temp_recv_buffer.begin(), temp_recv_buffer.begin() + rx_bytes);
-  parent.receive_impl(std::move(payload), sri, msg_flags, msg_src_addr, msg_src_addrlen);
-}
-#endif
 
 sctp_network_server_impl::sctp_network_server_impl(const ocudu::sctp_network_gateway_config& sctp_cfg_,
                                                    io_broker&                                broker_,
@@ -257,33 +163,22 @@ bool sctp_network_server_impl::create_and_bind()
 
 void sctp_network_server_impl::receive()
 {
-#if defined(__APPLE__)
-  // usrsctp shim: sctp_rcvinfo + explicit length argument (see sctp_socket.h).
-  struct sctp_rcvinfo sri     = {};
-  socklen_t           sri_len = sizeof(sri);
-#else
-  struct sctp_sndrcvinfo sri = {};
-#endif
-  int                                               msg_flags = 0;
-  std::array<uint8_t, network_gateway_sctp_max_len> temp_recv_buffer;
-
-  // fromlen is an in/out variable in sctp_recvmsg.
-  sockaddr_storage msg_src_addr;
-  socklen_t        msg_src_addrlen = sizeof(msg_src_addr);
-
-  int rx_bytes = ::sctp_recvmsg(socket.fd().value(),
-                                temp_recv_buffer.data(),
-                                temp_recv_buffer.size(),
-                                (struct sockaddr*)&msg_src_addr,
-                                &msg_src_addrlen,
-                                &sri,
-#if defined(__APPLE__)
-                                &sri_len,
-#endif
-                                &msg_flags);
+  // Platform mapping lives in the backend: exactly one message per wake-up on Linux (the peeled-off association
+  // fds deliver one event per notification), read + drain on macOS (several messages can queue behind the single
+  // bridge wake-up byte).
+  const auto sink = [](void*                         user,
+                       std::vector<uint8_t>          payload,
+                       const struct sctp_sndrcvinfo& sri,
+                       int                           msg_flags,
+                       const sockaddr_storage&       src_addr,
+                       socklen_t                     src_addrlen) {
+    static_cast<sctp_network_server_impl*>(user)->receive_impl(
+        std::move(payload), sri, msg_flags, src_addr, src_addrlen);
+  };
+  const int ret = sctp_backend::receive_available(socket.fd().value(), sink, this);
 
   // Handle error.
-  if (rx_bytes == -1) {
+  if (ret < 0) {
     if (errno != EAGAIN) {
       logger.error("Error reading from SCTP socket: {}", ::strerror(errno));
       defer_socket_shutdown(nullptr);
@@ -292,43 +187,14 @@ void sctp_network_server_impl::receive()
         logger.debug("Socket timeout reached");
       }
     }
-    return;
   }
-
-  // Defer all processing after sctp_recvmsg to app_exec.
-  auto payload = std::vector<uint8_t>(temp_recv_buffer.begin(), temp_recv_buffer.begin() + rx_bytes);
-  receive_impl(std::move(payload), sri, msg_flags, msg_src_addr, msg_src_addrlen);
-
-#if defined(__APPLE__)
-  // Drain the socket: the usrsctp shim may queue several notifications/messages behind a single broker wake-up
-  // byte, and reading only one message per callback would leave the rest waiting indefinitely for another event.
-  while ((rx_bytes = ::sctp_recvmsg_nowait(socket.fd().value(),
-                                            temp_recv_buffer.data(),
-                                            temp_recv_buffer.size(),
-                                            (struct sockaddr*)&msg_src_addr,
-                                            &msg_src_addrlen,
-                                            &sri,
-                                            &sri_len,
-                                            &msg_flags)) != -1) {
-    auto drained_payload = std::vector<uint8_t>(temp_recv_buffer.begin(), temp_recv_buffer.begin() + rx_bytes);
-    receive_impl(std::move(drained_payload), sri, msg_flags, msg_src_addr, msg_src_addrlen);
-  }
-  if (errno != EAGAIN) {
-    logger.error("Error reading from SCTP socket: {}", ::strerror(errno));
-    defer_socket_shutdown(nullptr);
-  }
-#endif
 }
 
-void sctp_network_server_impl::receive_impl(std::vector<uint8_t>   payload,
-#if defined(__APPLE__)
-                                            struct sctp_rcvinfo    sri,
-#else
-                                            struct sctp_sndrcvinfo sri,
-#endif
-                                            int                    msg_flags,
-                                            sockaddr_storage       msg_src_addr,
-                                            socklen_t              msg_src_addrlen)
+void sctp_network_server_impl::receive_impl(std::vector<uint8_t>      payload,
+                                            struct sctp_sndrcvinfo    sri,
+                                            int                       msg_flags,
+                                            sockaddr_storage          msg_src_addr,
+                                            socklen_t                 msg_src_addrlen)
 {
   while (not app_exec.defer([this,
                              keepalive = keepalive_token,
@@ -473,11 +339,7 @@ async_task<bool> sctp_network_server_impl::connect(std::vector<transport_layer_a
 }
 
 void sctp_network_server_impl::handle_notification(span<const uint8_t>           payload,
-#if defined(__APPLE__)
-                                                   const struct sctp_rcvinfo&    sri,
-#else
                                                    const struct sctp_sndrcvinfo& sri,
-#endif
                                                    const sockaddr&               src_addr,
                                                    socklen_t                     src_addr_len)
 {
@@ -530,10 +392,11 @@ void sctp_network_server_impl::handle_sctp_comm_up(const struct sctp_assoc_chang
     return;
   }
 
-#if !defined(__APPLE__)
-  /// Peel-off a socket. This is done for easier DTLS support.
-  int assoc_fd_raw = sctp_peeloff(socket.fd().value(), assoc_id);
-  if (assoc_fd_raw == -1) {
+  // Platform mapping lives in the backend: on Linux a per-association socket is peeled off (needed for DTLS and
+  // per-association broker subscription); on macOS the single one-to-many socket delivers every association and
+  // nothing is peeled off.
+  auto peeled = sctp_backend::peel_off_socket(socket.fd().value(), assoc_id);
+  if (peeled.supported and not peeled.fd.is_open()) {
     logger.error(
         "{} assoc={}: Could not peel off new association. err={}", node_cfg.if_name, assoc_id, ::strerror(errno));
     /// Remove association as if it was lost. Do it directly, as we are running in the app excutor already.
@@ -541,21 +404,19 @@ void sctp_network_server_impl::handle_sctp_comm_up(const struct sctp_assoc_chang
     remove_association(assoc_id);
     return;
   }
-  auto assoc_fd = unique_fd(assoc_fd_raw);
 
   /// Make sure peeled-off socket follows the blocking mode of the parent.
-  if (node_cfg.non_blocking_mode) {
-    ::set_non_blocking(assoc_fd, logger);
+  if (peeled.supported and node_cfg.non_blocking_mode) {
+    ::set_non_blocking(peeled.fd, logger);
   }
-#endif
+
+  // The association context send fd: the peeled-off fd on Linux, the parent one-to-many socket fd on macOS.
+  const int ctx_fd = peeled.supported ? peeled.fd.value() : socket.fd().value();
 
   // Add an entry for the association in the lookup
-#if defined(__APPLE__)
-  auto result = associations.emplace(assoc_id, assoc_id);
-#else
-  auto result = associations.emplace(
-      std::piecewise_construct, std::forward_as_tuple(assoc_id), std::forward_as_tuple(assoc_id, assoc_fd_raw, *this));
-#endif
+  auto result = associations.emplace(std::piecewise_construct,
+                                     std::forward_as_tuple(assoc_id),
+                                     std::forward_as_tuple(assoc_id, ctx_fd, *this));
   if (not result.second) {
     logger.error("{} assoc={}: Unable to create new SCTP association", node_cfg.if_name, assoc_id);
     return;
@@ -584,27 +445,22 @@ void sctp_network_server_impl::handle_sctp_comm_up(const struct sctp_assoc_chang
   // Signaling inline here would resume the coroutine within this task, before the enqueued tasks that connect the
   // notifiers have a chance to finish.
   while (not app_exec.defer(
-             [this, addr = assoc_ctxt.addr
-#if !defined(__APPLE__)
-              ,
-              assoc_fd = std::move(assoc_fd), &assoc_ctxt
-#endif
-             ]() mutable {
+             [this, addr = assoc_ctxt.addr, assoc_fd = std::move(peeled.fd), &assoc_ctxt]() mutable {
                auto pending_it = std::find_if(pending_connects.begin(),
                                               pending_connects.end(),
                                               [&addr](const pending_connect& pending) { return pending.contains(addr); });
                if (pending_it != pending_connects.end()) {
                  pending_it->event.set(true);
                }
-#if !defined(__APPLE__)
-               /// Register peeled-off socket in IO broker.
-               if (not subscribe_association_to_broker(std::move(assoc_fd), assoc_ctxt)) {
-                 logger.error("Connection loss due to IO broker subscription failure");
-                 handle_association_shutdown(assoc_ctxt.assoc_id, "IO broker error");
-                 remove_association(assoc_ctxt.assoc_id);
-                 return;
+               /// Register peeled-off socket in IO broker (Linux only: there is no peeled-off fd on macOS).
+               if (assoc_fd.is_open()) {
+                 if (not subscribe_association_to_broker(std::move(assoc_fd), assoc_ctxt)) {
+                   logger.error("Connection loss due to IO broker subscription failure");
+                   handle_association_shutdown(assoc_ctxt.assoc_id, "IO broker error");
+                   remove_association(assoc_ctxt.assoc_id);
+                   return;
+                 }
                }
-#endif
              })) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
@@ -717,21 +573,6 @@ bool sctp_network_server_impl::subscribe_to_broker()
       });
   return io_sub.registered();
 }
-
-#if !defined(__APPLE__)
-bool sctp_network_server_impl::subscribe_association_to_broker(unique_fd assoc_fd, sctp_associaton_context& assoc_ctxt)
-{
-  assoc_ctxt.io_sub = broker.register_fd(
-      std::move(assoc_fd),
-      io_rx_executor,
-      [&assoc_ctxt]() { assoc_ctxt.receive(); },
-      [this](io_broker::error_code code) {
-        logger.info("Connection loss due to IO error code={}.", (int)code);
-        defer_socket_shutdown(nullptr);
-      });
-  return assoc_ctxt.io_sub.registered();
-}
-#endif
 
 std::unique_ptr<sctp_network_server> sctp_network_server_impl::create(const sctp_network_gateway_config& sctp_cfg,
                                                                       io_broker&                         broker_,

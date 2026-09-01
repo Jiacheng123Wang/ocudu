@@ -7,10 +7,10 @@
 #include "ocudu/adt/detail/intrusive_ptr.h"
 #include "ocudu/adt/noop_functor.h"
 #include "ocudu/support/cpu_architecture_info.h"
+#include "ocudu/support/macos_compat.h"
 #include "ocudu/support/math/math_utils.h"
 #include <atomic>
 #include <memory>
-#include <sched.h>
 #include <utility>
 
 namespace ocudu {
@@ -145,11 +145,8 @@ public:
   /// \brief Retrieves the segment and object index of a free object in the pool.
   std::pair<unsigned, unsigned> get()
   {
-#if defined(__APPLE__)
-    const unsigned cpuid = 0;
-#else
-    const unsigned cpuid = std::max(::sched_getcpu(), 0);
-#endif
+    // Platform mapping of sched_getcpu() lives in the compat layer (0 on macOS).
+    const unsigned cpuid = compat::get_current_cpu();
     unsigned       seg_offset = 0;
     if (segments.size() > 1) {
       seg_offset = (cpuid * cpu_seg_offset_dist_coeff) % segments.size();

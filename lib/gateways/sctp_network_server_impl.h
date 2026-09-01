@@ -44,15 +44,11 @@ public:
   int get_socket_fd() const override { return socket.fd().value(); }
 
   void receive();
-  void receive_impl(std::vector<uint8_t>   payload,
-#if defined(__APPLE__)
-                    struct sctp_rcvinfo    sri,
-#else
-                    struct sctp_sndrcvinfo sri,
-#endif
-                    int                    msg_flags,
-                    sockaddr_storage       msg_src_addr,
-                    socklen_t              msg_src_addrlen);
+  void receive_impl(std::vector<uint8_t>      payload,
+                    struct sctp_sndrcvinfo    sri,
+                    int                       msg_flags,
+                    sockaddr_storage          msg_src_addr,
+                    socklen_t                 msg_src_addrlen);
 
   bool listen() override;
 
@@ -64,26 +60,23 @@ private:
   class sctp_send_notifier;
 
   struct sctp_associaton_context {
+    /// \c fd is the send fd on every platform: the peeled-off association fd on Linux (also used for receives, with
+    /// per-association broker subscription) and the single one-to-many socket fd on macOS (receives go through the
+    /// parent-socket receive() path).
     const int assoc_id;
-#if !defined(__APPLE__)
     const int fd;
-#endif
 
     transport_layer_address            addr;
     std::shared_ptr<std::atomic<bool>> association_shutdown_received;
-#if !defined(__APPLE__)
+    /// Broker subscription of the peeled-off association fd (Linux only; never registered on macOS).
     io_broker::subscriber              io_sub;
-#endif
 
     std::unique_ptr<sctp_association_sdu_notifier> sctp_data_recv_notifier;
 
-#if defined(__APPLE__)
-    sctp_associaton_context(int assoc_id);
-#else
     sctp_associaton_context(int assoc_id, int fd_, sctp_network_server_impl& parent_);
+    /// Receives from the peeled-off association fd (Linux only; defined in sctp_network_server_impl_linux.cpp).
     void                      receive();
     sctp_network_server_impl& parent;
-#endif
   };
 
   // We use unique_ptr to maintain address stability.
@@ -95,20 +88,16 @@ private:
 
   // Subscribe to IO broker to listen for incoming SCTP messages/events.
   bool subscribe_to_broker();
-#if !defined(__APPLE__)
+  /// Subscribes the peeled-off association fd to the broker (Linux only; defined in
+  /// sctp_network_server_impl_linux.cpp). Never called on macOS.
   bool subscribe_association_to_broker(unique_fd assoc_fd, sctp_associaton_context& assoc_ctxt);
-#endif
 
   void handle_socket_shutdown(const char* cause);
   void defer_socket_shutdown(const char* cause, std::optional<scoped_sync_token> token = std::nullopt);
 
   void handle_data(int assoc_id, span<const uint8_t> payload);
   void handle_notification(span<const uint8_t>           payload,
-#if defined(__APPLE__)
-                           const struct sctp_rcvinfo&    sri,
-#else
                            const struct sctp_sndrcvinfo& sri,
-#endif
                            const sockaddr&               src_addr,
                            socklen_t                     src_addr_len);
   void handle_association_shutdown(int assoc_id, const char* cause);

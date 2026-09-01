@@ -3,6 +3,7 @@
 
 #include "radio_zmq_rx_channel.h"
 #include "ocudu/ocuduvec/zero.h"
+#include "ocudu/support/macos_compat.h"
 #include "ocudu/support/synchronization/sync_event.h"
 #include "radio_zmq_backoff.h"
 #include <set>
@@ -41,17 +42,16 @@ radio_zmq_rx_channel::radio_zmq_rx_channel(void*                      zmq_contex
     return;
   }
 
-#if defined(__APPLE__)
-  // Enlarge the receive buffer so a full baseband block (up to ~385 KB) fits the advertised TCP window. With the
-  // default buffer the peer's send stalls on the small window and each UL block trickles over tens of
-  // milliseconds, which freezes the request/response lockstep and compounds into multi-second E2E bursts.
-  {
-    int rcvbuf = 8 * 1024 * 1024;
+  // Platform mapping lives in the compat layer: on macOS the receive buffer is enlarged so a full baseband block
+  // (up to ~385 KB) fits the advertised TCP window. With the default buffer the peer's send stalls on the small
+  // window and each UL block trickles over tens of milliseconds, which freezes the request/response lockstep and
+  // compounds into multi-second E2E bursts. Linux keeps the ZMQ default.
+  if (const size_t io_buf_bytes = compat::recommended_zmq_io_buf_bytes(); io_buf_bytes > 0) {
+    int rcvbuf = static_cast<int>(io_buf_bytes);
     if (::zmq_setsockopt(sock, ZMQ_RCVBUF, &rcvbuf, sizeof(rcvbuf)) == -1) {
       logger.warning("Failed to enlarge the receiver socket buffer ({}). {}", config.address, ::zmq_strerror(::zmq_errno()));
     }
   }
-#endif
 
   // Bind socket.
   logger.info("Connecting to address {}.", config.address);
