@@ -6,6 +6,11 @@
 /// normalized min-sum kernel. The packed H matrix and the CSR edge layout are
 /// generated in-memory from the ocudu ldpc_graph (the same 3GPP protograph the
 /// CPU decoder runs), covering BG1, BG2 and every lifting size.
+///
+/// Note: the decode() orchestration skeleton (assertions, tail trimming, early
+/// return, CRC/syndrome verdict) derives from the upstream srsRAN
+/// ldpc_decoder_impl.cpp; the GPU packing, dispatch and result-mapping logic is
+/// new.
 
 #include "ldpc_decoder_metal.h"
 #include "ldpc_graph_impl.h"

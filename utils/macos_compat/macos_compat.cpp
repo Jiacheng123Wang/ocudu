@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
+// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+// (Linux affinity branches relocated verbatim from upstream unique_thread.cpp.)
 
 #include "ocudu/support/macos_compat.h"
 #include "ocudu/ocudulog/ocudulog.h" // fetch_basic_logger (log_effective_decoder_backend)

@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
+// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+// (Derives from the upstream port_channel_estimator_average_impl base class.)
 
 #include "port_channel_estimator_metal_mmse_impl.h"
 #include "../port_channel_estimator_helpers.h"

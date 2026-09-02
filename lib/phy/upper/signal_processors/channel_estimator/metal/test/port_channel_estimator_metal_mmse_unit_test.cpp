@@ -76,7 +76,8 @@ private:
 };
 
 // ---------------------------------------------------------------------------------------
-// Synthetic Vehicular-A channel (ITU): quasi-static over the slot, Rayleigh taps.
+// Synthetic Vehicular-A channel (ITU-R M.1225 Vehicular-A tap profile, published
+// standard parameters): quasi-static over the slot, Rayleigh taps.
 // ---------------------------------------------------------------------------------------
 struct veha_channel {
   static constexpr std::array<float, 6> DELAYS_NS = {0, 310, 710, 1090, 1730, 2510};

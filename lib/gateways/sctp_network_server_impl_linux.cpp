@@ -1,7 +1,13 @@
-// SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
+// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 /// \brief Linux-only parts of the SCTP server: per-association socket handling.
+///
+/// Moved verbatim from sctp_network_server_impl.cpp (upstream SRS code, Linux
+/// peel-off backend): sctp_associaton_context::receive() and
+/// subscribe_association_to_broker() are only compiled on Linux, where each
+/// association owns a peeled-off fd registered with the io_broker. macOS
+/// (usrsctp, one-to-many parent socket) never references these members.
 ///
 /// On Linux each association gets a peeled-off fd subscribed to the broker, so
 /// the receive path is per-association. On macOS the single one-to-many socket

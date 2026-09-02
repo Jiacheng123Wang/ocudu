@@ -62,7 +62,7 @@ port_channel_estimator_helena_impl::port_channel_estimator_helena_impl(
   // Warm-up predictions: the FIRST Core ML prediction compiles the ANE program
   // (~15 ms, observed in the E2E first full-bandwidth slot - the attach-phase
   // dec_t spike). Running it here at construction moves the cost off the slot
-  // critical path (the '粮草先行' principle, Core ML edition).
+  // critical path.
   std::fill(nn_in.begin(), nn_in.end(), 0.0F);
   if (engine != nullptr) {
     (void)engine->predict(nn_in.data(), nn_out.data(), 612);
@@ -243,10 +243,10 @@ void port_channel_estimator_helena_impl::apply_fd_td_estimation_stage(fd_td_esti
       continue; // dump-only slot: no NN pass, production stays classical
     }
 
-    // Input scale normalization (2026-08-31 OAI-UE attach failure root cause):
+    // Input scale normalization (2026-08-31 root cause of failed attaches):
     // the model was trained on channel grids with |H| ~ 0.1-0.25 (the phone
     // captures at rx_gain 60), but the received digital level depends on the
-    // rx_gain and the UE TX power - the OAI-UE runs arrive ~34 dB weaker
+    // rx_gain and the UE TX power - some UE configurations arrive ~34 dB weaker
     // (|X| ~ 0.003). That far below the training scale the model amplifies the
     // input ~2.2x and corrupts the estimate (measured: |NN-X|^2/|NN|^2 = -0.5 dB,
     // vs -14.9 dB after normalization; 45/45 18-PRB decodes failed at alpha=1).

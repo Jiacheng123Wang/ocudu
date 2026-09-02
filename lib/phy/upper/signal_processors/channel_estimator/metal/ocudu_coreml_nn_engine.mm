@@ -1,5 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+//
+// Core ML usage follows Apple's Core ML framework documentation (zero-copy
+// MLMultiArray initWithDataPointer, MLPredictionOptions.outputBackings,
+// MLModelConfiguration.computeUnits); no Apple sample-code blocks are copied.
 
 #include "ocudu_coreml_nn_engine.h"
 
