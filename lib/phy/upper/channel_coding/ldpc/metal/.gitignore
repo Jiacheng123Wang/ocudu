@@ -1,1 +1,9 @@
 # The BLER baseline plots are ocudu-side deliverables (regenerable with plot_bler.py).
+
+# Metal shader build artifacts: the .metallib libraries are regenerated IN PLACE in this
+# source directory at build time (see CMakeLists.txt / cmake/modules/ocudu_metal.cmake),
+# so they must never be committed again. The .air/.air.d intermediates stay in the build
+# directory, but ignore them here too in case of a manual xcrun run.
+*.metallib
+*.air
+*.air.d

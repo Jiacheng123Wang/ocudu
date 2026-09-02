@@ -1,13 +1,38 @@
 # Build wiring for the Metal GPU LDPC decoder (layered normalized min-sum, see PLAN.md).
 #
-# The shaders are pre-compiled offline with the macOS Metal toolchain into .metallib
-# files and loaded at runtime with newLibraryWithURL - no runtime shader compilation.
-# After editing a .metal file, re-compile its .metallib (and re-run cmake so the
-# baked-in absolute paths stay current):
-#   xcrun -sdk macosx metal -c ocudu_nms_layered_decoder.metal -o ocudu_nms_layered_decoder.air
-#   xcrun -sdk macosx metallib ocudu_nms_layered_decoder.air -o ocudu_nms_layered_decoder.metallib
-#   (same for ocudu_nms_flooding_decoder.metal, ocudu_nms_async_decoder.metal and
-#    ocudu_lls_decoder.metal)
+# The .metal shaders are compiled into .metallib libraries as part of the build by
+# ocudu_add_metallib (cmake/modules/ocudu_metal.cmake): `xcrun metal` -> `xcrun metallib`,
+# one .metallib per .metal source, generated IN PLACE at the source-tree location the
+# runtime engine loads (the absolute paths baked into the engine at configure time point
+# here, so the runtime code is untouched). CMake tracks the shader sources (DEPENDS) and
+# their user-header includes (DEPFILE via `metal -MMD`), so editing a .metal file
+# recompiles only the affected .metallib - no manual xcrun steps and no re-run of cmake
+# needed. Only the .air/.air.d intermediates live in the build directory; the generated
+# .metallib files are git-ignored (*.metallib, see .gitignore).
+
+include(ocudu_metal)
+
+# ---- Shader libraries: one .metallib per .metal source, generated in the source tree ----
+set(METALLIB_OUT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+ocudu_add_metallib(
+    TARGET ocudu_metallib_layered
+    OUTPUT ${METALLIB_OUT_DIR}/ocudu_nms_layered_decoder.metallib
+    SOURCES ocudu_nms_layered_decoder.metal)
+ocudu_add_metallib(
+    TARGET ocudu_metallib_flooding
+    OUTPUT ${METALLIB_OUT_DIR}/ocudu_nms_flooding_decoder.metallib
+    SOURCES ocudu_nms_flooding_decoder.metal)
+ocudu_add_metallib(
+    TARGET ocudu_metallib_async
+    OUTPUT ${METALLIB_OUT_DIR}/ocudu_nms_async_decoder.metallib
+    SOURCES ocudu_nms_async_decoder.metal)
+ocudu_add_metallib(
+    TARGET ocudu_metallib_lls
+    OUTPUT ${METALLIB_OUT_DIR}/ocudu_lls_decoder.metallib
+    SOURCES ocudu_lls_decoder.metal)
+add_custom_target(ocudu_ldpc_metallib ALL)
+add_dependencies(ocudu_ldpc_metallib
+    ocudu_metallib_layered ocudu_metallib_flooding ocudu_metallib_async ocudu_metallib_lls)
 
 # ---- Static library: engine driver + ldpc_decoder adapter ----
 enable_language(OBJCXX)
@@ -27,6 +52,8 @@ target_compile_definitions(ocudu_ldpc_metal PRIVATE
     OCUDU_METAL_FLOODING_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_nms_flooding_decoder.metallib"
     OCUDU_METAL_ASYNC_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_nms_async_decoder.metallib"
     OCUDU_METAL_LLS_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_lls_decoder.metallib")
+# Ensure the shaders are (re)built whenever the engine library is built.
+add_dependencies(ocudu_ldpc_metal ocudu_ldpc_metallib)
 # The adapter generates the packed H matrix from the ocudu ldpc_graph implementation.
 target_link_libraries(ocudu_ldpc_metal PUBLIC ocudu_ldpc ocudulog)
 target_link_libraries(ocudu_ldpc_metal PRIVATE "-framework Metal" "-framework Foundation")

@@ -3,29 +3,28 @@
 #
 # The library is only built when ENABLE_METAL_CHEST is ON (default ON for Apple Silicon,
 # OFF elsewhere - Linux keeps the upstream byte-for-byte). The MSL shaders are compiled
-# into ocudu_mmse.metallib at build time (xcrun metal/metallib) and loaded at runtime via
-# newLibraryWithURL; the absolute path is baked in as OCUDU_MMSE_METALLIB_PATH. The AI
-# estimator loads the compiled Core ML bundle (ai_assets/helena_pusch_ml.mlmodelc) whose
-# absolute source-tree path is baked in as OCUDU_HELENA_MODEL_PATH.
+# into ocudu_mmse.metallib as part of the build by ocudu_add_metallib (cmake/modules/
+# ocudu_metal.cmake): `xcrun metal` -> `xcrun metallib`, generated IN PLACE at the
+# source-tree location the engine loads (the absolute path baked in as
+# OCUDU_MMSE_METALLIB_PATH at configure time points here, so the runtime code is
+# untouched). CMake tracks the shader sources (DEPENDS) and their user-header includes
+# (DEPFILE via `metal -MMD`), so editing a .metal file recompiles the .metallib
+# incrementally - no manual xcrun steps and no re-run of cmake needed. Only the
+# .air/.air.d intermediates live in the build directory; the generated .metallib is
+# git-ignored (*.metallib, see .gitignore). The AI estimator loads the compiled Core ML
+# bundle (ai_assets/helena_pusch_ml.mlmodelc) whose absolute source-tree path is baked
+# in as OCUDU_HELENA_MODEL_PATH.
 
 enable_language(OBJCXX)
 
-# ---- Shader library (LDPC-style: pre-compiled .metallib lives in the source tree) ----
-# After editing a .metal file, re-compile the .metallib (and re-run cmake so the baked-in
-# absolute path stays current):
-#   xcrun -sdk macosx metal -c ocudu_mmse_inv.metal -o /tmp/ocudu_mmse_inv.air
-#   xcrun -sdk macosx metal -c ocudu_mmse_apply.metal -o /tmp/ocudu_mmse_apply.air
-#   xcrun -sdk macosx metal -c ocudu_mmse_weights.metal -o /tmp/ocudu_mmse_weights.air
-#   xcrun -sdk macosx metallib /tmp/ocudu_mmse_{inv,apply,weights}.air -o ocudu_mmse.metallib
-set(MMSE_METALLIB ${CMAKE_CURRENT_SOURCE_DIR}/ocudu_mmse.metallib)
+include(ocudu_metal)
 
-# Keep a fresh copy of the .metallib next to the unit-test executable: the engine's
-# NSBundle fallback looks there first, and copy_if_different guarantees it never goes
-# stale relative to the source-tree file (which is the authoritative load source).
-add_custom_target(ocudu_mmse_metallib ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${MMSE_METALLIB} ${CMAKE_CURRENT_BINARY_DIR}/ocudu_mmse.metallib
-    COMMENT "Syncing ocudu_mmse.metallib to the build directory")
+# ---- Shader library: generated in the source tree, authoritative for the runtime load ----
+set(MMSE_METALLIB ${CMAKE_CURRENT_SOURCE_DIR}/ocudu_mmse.metallib)
+ocudu_add_metallib(
+    TARGET ocudu_mmse_metallib
+    OUTPUT ${MMSE_METALLIB}
+    SOURCES ocudu_mmse_inv.metal ocudu_mmse_apply.metal ocudu_mmse_weights.metal)
 
 # ---- Compiled Core ML model (AI channel estimator; see the training memo) ----
 set(HELENA_MODELC ${CMAKE_CURRENT_SOURCE_DIR}/ai_assets/helena_pusch_ml.mlmodelc)

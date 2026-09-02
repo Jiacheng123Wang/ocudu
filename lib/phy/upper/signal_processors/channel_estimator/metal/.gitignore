@@ -1,0 +1,7 @@
+# Metal shader build artifacts: ocudu_mmse.metallib is regenerated IN PLACE in this
+# source directory at build time (see CMakeLists.txt / cmake/modules/ocudu_metal.cmake),
+# so it must never be committed again. The .air/.air.d intermediates stay in the build
+# directory, but ignore them here too in case of a manual xcrun run.
+*.metallib
+*.air
+*.air.d
