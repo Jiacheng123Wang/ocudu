@@ -1,13 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 //
-// LLS (likelihood-erosion bit-flipping) LDPC decoder, restored from the git
-// history (originally the verbatim SynchroPlus decode/ldpc_gpu_decoder.metal,
-// stripped in commit c823a1eb7d, see PLAN.md 4.6/4.12). Provenance: the source
-// is the author's own SynchroPlus project
-// (github.com/Jiacheng123Wang/ORAN-L1-on-Apple-M-Processor, sole committer
-// Jiacheng Wang; that repository carries no LICENSE file - the code is
-// re-licensed here under BSD-3-Clause-Open-MPI by its author). The LLS
+// LLS (likelihood-erosion bit-flipping) LDPC decoder, The LLS
 // algorithm is ~5-8 dB weaker than the layered NMS decoder on BLER; its
 // advantage is extreme parallelism (2 dispatches per round, no message
 // passing). Re-compile the .metallib after editing:
