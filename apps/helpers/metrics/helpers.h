@@ -12,7 +12,7 @@
 namespace ocudu {
 namespace app_helpers {
 
-/// 辅助模板函数：将任意 Clock/Duration 的 time_point 安全转换为 system_clock::time_point
+/// Helper template: safely converts an arbitrary Clock/Duration time_point into a system_clock::time_point
 template <typename Clock, typename Duration>
 inline std::chrono::system_clock::time_point to_system_time_point(std::chrono::time_point<Clock, Duration> tp)
 {

@@ -219,12 +219,12 @@ bool ocudu::is_trace_file_open()
 
 /// Helper to get an approximation of the system clock timestamp.
 namespace {
-/// 1. 定义一个简单的包装体，替代原先的 make_formattable
+/// 1. Define a simple wrapper that replaces the original make_formattable
 struct trace_date_wrapper {
   trace_point tp;
 };
 
-/// 辅助函数：返回包装体
+/// Helper: returns the wrapper
 inline trace_date_wrapper formatted_date(trace_point start_tp)
 {
   return {start_tp};
@@ -232,7 +232,7 @@ inline trace_date_wrapper formatted_date(trace_point start_tp)
 } // namespace
 
 namespace fmt {
-/// 2. 为该包装体特化标准的 fmt::formatter
+/// 2. Specialize the standard fmt::formatter for the wrapper
 template <>
 struct formatter<trace_date_wrapper> {
   constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
@@ -252,7 +252,7 @@ struct formatter<trace_date_wrapper> {
     // Retrieve system clock approximation
     auto systp = cached_sys_tp + (wrapper.tp - cached_trace_tp);
     
-    // 3. 显式转换为 system_clock 的 duration，修复 macOS 下的编译报错
+    // 3. Explicitly cast to the system_clock duration type, fixing the macOS compile error
     auto systp_cast = std::chrono::time_point_cast<system_clock::duration>(systp);
     
     std::tm current_time = fmt::gmtime(system_clock::to_time_t(systp_cast));

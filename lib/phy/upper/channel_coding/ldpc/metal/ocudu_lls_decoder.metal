@@ -12,16 +12,16 @@
 using namespace metal;
 
 // ==========================================================
-// 1. 全局控制与结构体定义
+// 1. Global control and struct definitions
 // ==========================================================
 struct DecodeCtrl
 {
-    atomic_uint error_count;     // 当前迭代中报错的校验方程数
-    atomic_uint early_terminate; // 提前终止标志 (1 = 停止, 0 = 继续)
-    atomic_uint actual_iters;    // 实际执行的迭代次数
-    atomic_uint prev_error_count; // 上一轮的 error_count (停滞检测)
-    atomic_uint stall_counter;    // 连续停滞轮数 (error_count == prev 的连击)
-    atomic_uint stall_flag;       // 1 = 下一轮 update 执行硬多翻逃逸 (PLAN.md 4.15 C4)
+    atomic_uint error_count;     // number of check equations reporting errors in the current iteration
+    atomic_uint early_terminate; // early-termination flag (1 = stop, 0 = continue)
+    atomic_uint actual_iters;    // number of iterations actually executed
+    atomic_uint prev_error_count; // error_count of the previous round (stall detection)
+    atomic_uint stall_counter;    // consecutive stalled rounds (error_count == prev)
+    atomic_uint stall_flag;       // 1 = the next update round performs the hard multi-flip escape (PLAN.md 4.15 C4)
 };
 
 struct VNStats
@@ -75,7 +75,7 @@ inline void insert_sorted(thread float* m, thread uint* iv, uint L, float v, uin
     iv[pos] = idx;
 }
 
-// 辅助函数：浮点数原子加法
+// Helper: atomic floating-point addition
 void atomic_float_add(device atomic_uint *addr, float delta)
 {
     uint old_val, new_val;
@@ -89,7 +89,7 @@ void atomic_float_add(device atomic_uint *addr, float delta)
 }
 
 // ==========================================================
-// Kernel 0: 预处理与初始化 (执行 1 次)
+// Kernel 0: pre-processing and initialization (executed once)
 // ==========================================================
 kernel void init_hard_decisions(
     device const half *llr_array [[buffer(0)]],
@@ -128,7 +128,7 @@ kernel void init_hard_decisions(
 }
 
 // ==========================================================
-// Kernel 2: 首轮全量 Syndrome 计算 (仅执行 1 次)
+// Kernel 2: full syndrome computation of the first round (executed only once)
 // ==========================================================
 kernel void compute_syndrome(
     device const uint32_t *h_matrix [[buffer(0)]],
@@ -154,13 +154,13 @@ kernel void compute_syndrome(
 
     if (tid == 0)
     {
-        // 仅写入 h_pred 状态，统计工作统一交给 cn_centric_scan 处理
+        // Only the h_pred state is written here; the statistics are handled by cn_centric_scan
         h_pred[wid] = res_mask;
     }
 }
 
 // ==========================================================
-// Kernel 3: CN 扫描与 Syndrome 权重统计 (合并优化版)
+// Kernel 3: CN scan and syndrome weight statistics (merged and optimized)
 // ==========================================================
 kernel void cn_centric_scan(
     device const uint32_t *h_matrix [[buffer(0)]],
@@ -174,10 +174,10 @@ kernel void cn_centric_scan(
     constant LLSParams &params [[buffer(8)]],
     device atomic_uint *cool_flag [[buffer(9)]],
     uint tid [[thread_index_in_threadgroup]],
-    uint wid [[threadgroup_position_in_grid]],     // 对应校验方程索引 (0 ~ M-1)
-    uint lane_id [[thread_index_in_simdgroup]])    // 【新增】组内索引
+    uint wid [[threadgroup_position_in_grid]],     // corresponding check-equation index (0 ~ M-1)
+    uint lane_id [[thread_index_in_simdgroup]])    // [added] lane index within the SIMD group
 {
-    // 1. 检查全局终止标志
+    // 1. Check the global termination flag
     if (atomic_load_explicit(&ctrl->early_terminate, memory_order_relaxed))
         return;
 
@@ -185,9 +185,9 @@ kernel void cn_centric_scan(
     uint32_t bit_idx = wid % 32;
 
     // ==========================================
-    // 【核心优化】：极其精密的分布式 popcount 统计
-    // 保证每个 h_pred 的 Word (包含 32 个方程状态) 只被统计一次
-    // 触发条件：当前行是 32 的倍数 (bit_idx == 0)，且由 0 号线程执行
+    // [core optimization]: precise distributed popcount statistics
+    // Guarantees that each h_pred word (holding 32 equation states) is counted exactly once
+    // Trigger condition: the current row is a multiple of 32 (bit_idx == 0) and is executed by thread 0
     // ==========================================
     if (lane_id == 0 && bit_idx == 0) 
     {
@@ -198,7 +198,7 @@ kernel void cn_centric_scan(
         }
     }
 
-    // 2. 原有的扫描跳过逻辑
+    // 2. Existing scan-skip logic
     if (!((h_pred[word_idx] >> bit_idx) & 1))
         return;
 
@@ -215,7 +215,7 @@ kernel void cn_centric_scan(
 
     const uint row_base = wid * n_h_chunks;
 
-    // 3. 寻找嫌疑人: k-min 插入排序 (比旧的 2-min 分支跟踪更通用)
+    // 3. Find suspects: k-min insertion sort (more general than the old 2-min branch tracking)
     for (uint i = tid; i < n_h_chunks; i += 32)
     {
         uint32_t mask = h_matrix[row_base + i];
@@ -231,7 +231,7 @@ kernel void cn_centric_scan(
         }
     }
 
-    // 4. SIMD 组内归约: 邻道列表插入合并
+    // 4. SIMD-group reduction: insert-merge of the neighbor lists
     for (uint offset = 16; offset > 0; offset /= 2)
     {
         for (uint t = 0; t < K; ++t)
@@ -242,7 +242,7 @@ kernel void cn_centric_scan(
         }
     }
 
-    // 5. 投票: k 个嫌疑人, 证据分配由 params.evidence_mode 决定
+    // 5. Voting: k suspects, evidence assignment decided by params.evidence_mode
     if (tid == 0)
     {
         const uint k = params.k_suspects;
@@ -251,7 +251,7 @@ kernel void cn_centric_scan(
             if (m[j] >= 65504.0f)
                 break;
             const uint vn = iv[j];
-            // 振荡护栏: 刚翻转的 VN 跳过一轮投票 (err_eq_cnt 仍计数, 见扫描循环)
+            // Oscillation guard: a VN flipped in the previous round skips one voting round (err_eq_cnt is still counted, see the scan loop)
             if (params.cooldown != 0u && atomic_load_explicit(&cool_flag[vn], memory_order_relaxed) != 0u)
                 continue;
             float ev;
@@ -287,7 +287,7 @@ kernel void cn_centric_scan(
 }
 
 // ==========================================================
-// Kernel 4: VN 更新与 Syndrome 增量维护
+// Kernel 4: VN update and incremental syndrome maintenance
 // ==========================================================
 kernel void update_llr_hpred(
     device half *llr_array [[buffer(0)]],
@@ -306,8 +306,8 @@ kernel void update_llr_hpred(
     uint lane_id [[thread_index_in_simdgroup]])
 {
     // ==========================================
-    // 【判定提前终止】：接管原本在 scan 里的裁判权
-    // 因为 ctrl->error_count 刚刚在 scan 阶段统计完毕
+    // [early-termination decision]: takes over the verdict that used to live in scan
+    // because ctrl->error_count has just been finalized by the scan stage
     // ==========================================
     if (atomic_load_explicit(&ctrl->error_count, memory_order_relaxed) == 0)
     {
@@ -321,7 +321,7 @@ kernel void update_llr_hpred(
     if (atomic_load_explicit(&ctrl->early_terminate, memory_order_relaxed))
         return;
 
-    // 1. 加载当前 VN 的统计状态
+    // 1. Load the statistics state of the current VN
     uint s_cnt = atomic_load_explicit(&suspect_cnt[vn_idx], memory_order_relaxed);
     uint e_cnt = atomic_load_explicit(&err_eq_cnt[vn_idx], memory_order_relaxed);
     float e_sum = as_type<float>(atomic_load_explicit(&evidence_sum[vn_idx], memory_order_relaxed));
@@ -338,13 +338,13 @@ kernel void update_llr_hpred(
 
     bool flipped = false;
 
-    // C4 停滞逃逸 (PLAN.md 4.15): 上一轮 vn0 判定 syndrome 连续停滞, 本轮对
-    // "绝大多数校验都不满足"的 VN 强制翻转 (正常路径可能永远凑不够证据)。
+    // C4 stall escape (PLAN.md 4.15): vn0 detected consecutive syndrome stalls in the previous round;
+    // this round force-flips VNs that "fail the vast majority of their checks" (the normal path may never gather enough evidence).
     const bool hard_escape = (params.stall_escape != 0u) &&
                              (atomic_load_explicit(&ctrl->stall_flag, memory_order_relaxed) != 0u) &&
                              (e_cnt > 0u) && ((float)e_cnt >= params.theta * (float)total_cnt);
 
-    // 2. 执行 LLR 更新逻辑 (PLAN.md 4.15, 参数化: 归一化 / 自先验 / 后更新幅值策略)
+    // 2. Execute the LLR update logic (PLAN.md 4.15, parameterized: normalization / self-prior / post-update magnitude strategy)
     if (s_cnt > 0 || hard_escape)
     {
         const float ratio = (float)e_cnt / (float)total_cnt;
@@ -391,7 +391,7 @@ kernel void update_llr_hpred(
         stats.current_llr = new_llr;
     }
 
-    // 3. SIMD 组协作增量更新 h_pred
+    // 3. SIMD-group cooperative incremental update of h_pred
     uint flip_mask = (uint)(simd_vote::vote_t)simd_ballot(flipped);
     while (flip_mask != 0)
     {
@@ -410,33 +410,33 @@ kernel void update_llr_hpred(
         flip_mask &= (flip_mask - 1);
     }
 
-    // 4. 打扫战场
+    // 4. Cleanup
     atomic_store_explicit(&suspect_cnt[vn_idx], 0, memory_order_relaxed);
     atomic_store_explicit(&err_eq_cnt[vn_idx], 0, memory_order_relaxed);
     atomic_store_explicit(&evidence_sum[vn_idx], 0, memory_order_relaxed);
 
-    // 振荡护栏 (PLAN.md 4.15 Phase 2): 翻转者冷却 1 轮 (下轮 scan 不投票),
-    // 未翻转者无条件解除冷却 —— 冷却 VN 本轮拿不到票、必然走进 else 分支,
-    // 所以冷却期恰好 1 轮, 确定性无死锁。
+    // Oscillation guard (PLAN.md 4.15 Phase 2): the flipped VN cools down for 1 round (no vote in the next scan),
+    // non-flipped VNs are released unconditionally -- a cooling VN gets no votes this round and necessarily takes the else branch,
+    // so the cool-down lasts exactly 1 round: deterministic and deadlock-free.
     if (params.cooldown != 0u)
     {
         atomic_store_explicit(&cool_flag[vn_idx], flipped ? 1u : 0u, memory_order_relaxed);
     }
 
     // =========================================================
-    // 核心修改：在 kernel 结束前，由 0 号线程接管状态维护
+    // Core change: thread 0 takes over the state maintenance before the kernel ends
     // =========================================================
     
-    // 必须确保所有线程的原子操作和内存写入已对齐（在同一 Kernel 内通常是隐式的，
-    // 但 0 号线程的重置是为了下一轮迭代准备）
+    // All threads' atomic operations and memory writes must be ordered (usually implicit within a kernel,
+    // but thread 0's reset prepares the next iteration)
     if (vn_idx == 0) 
     {
-        // 1. 增加实际迭代计数
+        // 1. Increment the actual iteration count
         atomic_fetch_add_explicit(&ctrl->actual_iters, 1, memory_order_relaxed);
         
-        // 2. 停滞检测 (C4): 本轮 error_count 由 scan 统计完毕; 与上一轮比较,
-        //    连续 stall_rounds 轮不降 → 置 stall_flag, 下一轮 update 执行硬多翻。
-        //    滞后一轮避免了"vn0 置位与其他 VN 读位"的核内竞态。
+        // 2. Stall detection (C4): this round's error_count was finalized by scan; compared with the previous round,
+        //    no decrease for stall_rounds consecutive rounds -> set stall_flag, the next update round performs the hard multi-flip.
+        //    The one-round lag avoids the in-kernel race between "vn0 sets the bit" and "other VNs read the bit".
         if (params.stall_escape != 0u)
         {
             const uint err  = atomic_load_explicit(&ctrl->error_count, memory_order_relaxed);
@@ -448,8 +448,8 @@ kernel void update_llr_hpred(
             atomic_store_explicit(&ctrl->prev_error_count, err, memory_order_relaxed);
         }
 
-        // 3. 清空错误计数，为下一轮迭代的 cn_centric_scan 做准备
-        // 注意：初始化的清零由 init_hard_decisions 负责
+        // 3. Clear the error count to prepare the next round's cn_centric_scan
+        // Note: the initial zeroing is handled by init_hard_decisions
         atomic_store_explicit(&ctrl->error_count, 0, memory_order_relaxed);
     }
 }

@@ -225,7 +225,7 @@ static slot_point chrono_to_slot_point(std::chrono::time_point<Clock, Duration> 
   using namespace std::chrono;
   static constexpr microseconds half_system_frame_dur = milliseconds{10240 / 2};
 
-  // 跨平台时钟转换：处理 macOS 下 Clock (system_clock) 与 high_resolution_clock (steady_clock) 不一致的问题
+  // Cross-platform clock conversion: handle the mismatch between Clock (system_clock) and high_resolution_clock (steady_clock) on macOS
   microseconds hol_delay;
   if constexpr (std::is_same_v<Clock, high_resolution_clock>) {
     hol_delay = duration_cast<microseconds>(last_slot_tp - hol_toa);

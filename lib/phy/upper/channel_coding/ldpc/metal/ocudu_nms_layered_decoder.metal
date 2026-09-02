@@ -82,9 +82,9 @@ kernel void nmsl_cn_update(
     const half norm_h = (half)norm;
     const half beta_h = (half)beta;
 
-    // 核心优化：静态展开 (Static Unrolling) 锁定寄存器
-    // 基于 3GPP 38.212 规范，LDPC BG1/BG2 最大行度数为 68。
-    // SIMD32 线程组内，单个线程最多处理 3 个 Node。纯标量声明彻底杜绝 Register Spilling。
+    // Core optimization: static unrolling pins registers
+    // Per 3GPP TS 38.212, the maximum row degree of LDPC BG1/BG2 is 68.
+    // Within the SIMD32 threadgroup, a single thread processes at most 3 nodes. Pure scalar declarations eliminate register spilling.
     uint vn_0 = 0, vn_1 = 0, vn_2 = 0;
     half cv_0 = 0, cv_1 = 0, cv_2 = 0;
     half v_0  = 0, v_1  = 0, v_2  = 0;
@@ -93,7 +93,7 @@ kernel void nmsl_cn_update(
     const uint e_1 = e_0 + 32;
     const uint e_2 = e_1 + 32;
 
-    // Pass 1: 静态分支展开，消除 for 循环和动态数组寻址
+    // Pass 1: static branch unrolling, eliminating for loops and dynamic array indexing
     if (e_0 < e1) {
         vn_0 = edge_vn[e_0];
         cv_0 = c2v[e_0];
@@ -130,7 +130,7 @@ kernel void nmsl_cn_update(
         else if (val < m2) { m2 = val; }
     }
 
-    // Butterfly reduction (原生 half 并行规约)
+    // Butterfly reduction (native half parallel reduction)
     for (uint offset = 16; offset > 0; offset >>= 1) {
         const half om1 = simd_shuffle_xor(m1, offset);
         const uint oi1 = simd_shuffle_xor(i1, offset);
@@ -152,7 +152,7 @@ kernel void nmsl_cn_update(
         h_pred_bits[row] = parity & 1u;
     }
 
-    // Pass 2: 完全依赖物理寄存器内的数据 (v_0/v_1/v_2)，真正实现 0 全局内存读取
+    // Pass 2: rely entirely on the data already in physical registers (v_0/v_1/v_2), truly achieving zero global-memory reads
     if (e_0 < e1) {
         half mag = (vn_0 == i1) ? m2 : m1;
         mag = max(mag - beta_h, (half)0.0h) * norm_h;

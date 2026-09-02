@@ -7,7 +7,7 @@
 #include "ocudu/ocudulog/logger.h"
 #if defined(__APPLE__)
 #include <cstdint>
-// macOS 无 cpu_set_t，定义存根类型以满足编译
+// macOS has no cpu_set_t: define a stub type to satisfy compilation
 using cpu_set_t = uint64_t;
 #endif
 
