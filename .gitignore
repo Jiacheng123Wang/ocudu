@@ -12,6 +12,7 @@ tests/ci/macos_triage/__pycache__/
 # CMake build directory (regenerable)
 /build/
 tmp/
+doc_chinese/
 
 __pycache__/
 *.pyc
