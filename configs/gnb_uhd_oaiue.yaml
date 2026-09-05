@@ -13,9 +13,9 @@
 
 cu_cp:
   amf:
-    addrs: 192.168.100.127               # Open5GS core network (separate VM, verified working)
+    addrs: 192.168.64.4               # Open5GS core network (separate VM, verified working)
     port: 38412
-    bind_addrs: 192.168.100.125          # Local IP of this Mac (en1, same subnet as the AMF)
+    bind_addrs: 192.168.64.1          # Local IP of this Mac (en11 dock Ethernet)
     supported_tracking_areas:
       - tac: 7
         plmn_list:
@@ -67,10 +67,15 @@ expert_phy:
 
 log:
   filename: /tmp/gnb.log
-  all_level: debug
+  all_level: info
 
 pcap:
   mac_enable: false
   mac_filename: /tmp/gnb_mac.pcap
   ngap_enable: false
   ngap_filename: /tmp/gnb_ngap.pcap
+
+cu_up:
+  ngu:
+    socket:
+      - bind_addr: 192.168.64.1   # NG-U GTP bind: LAN address reachable by the UPF (192.168.31.122)
