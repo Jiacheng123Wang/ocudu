@@ -4,6 +4,16 @@
 
 find_package(SCTP REQUIRED)
 
+if(SCTP_FOUND)
+    sbom_add(
+        PACKAGE            "SCTP"
+        DOWNLOAD_LOCATION  "https://www.sctp.org/"
+        SUPPLIER           "SCTP project"
+        LICENSE            "BSD-3-Clause"
+    )
+endif (SCTP_FOUND)
+
+
 add_library(ocudu_gateway
         sctp_socket.cpp
         sctp_network_gateway_common_impl.cpp

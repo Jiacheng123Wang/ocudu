@@ -628,16 +628,6 @@ else (ENABLE_DPDK)
     unset(DPDK_FOUND CACHE)
 endif (ENABLE_DPDK)
 
-if(SCTP_FOUND)
-    sbom_add(
-        PACKAGE            "SCTP"
-        DOWNLOAD_LOCATION  "https://www.sctp.org/"
-        SUPPLIER           "SCTP project"
-        LICENSE            "BSD-3-Clause"
-        VERSION            ${PC_SCTP_VERSION}
-    )
-endif (SCTP_FOUND)
-
 # FlatBuffers, fetched at build time by the scheduler event tracer. Being fetched, it has no entry in
 # COPYRIGHTS.txt for parse_copyright_file() to pick up, so it is added to the SBOM here.
 if (ENABLE_SCHEDTRACE)
