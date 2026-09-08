@@ -1395,8 +1395,8 @@ TEST(serving_cell_config_converter_test, test_rlm_cfg_conversion)
   odu::du_ue_resource_config dest_cfg{src_cfg};
 
   // 1. Make a RLM config that uses SSB resources.
-  uint8_t                                      L_max   = 4U;
-  constexpr std::array<uint8_t, NOF_SSB_BEAMS> ssb_ids = {0};
+  uint8_t                                               L_max   = 4U;
+  constexpr std::array<uint8_t, MAX_NOF_SSB_CANDIDATES> ssb_ids = {0};
   rlm_helper::rlm_builder_params rlm_params(rlm_resource_type::ssb, L_max, ssb_bitmap_t(0b1000, L_max), ssb_ids);
 
   dest_cfg.cell_group.cells.at(SERVING_PCELL_IDX)

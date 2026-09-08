@@ -40,7 +40,7 @@ sib1_scheduler::sib1_scheduler(const cell_configuration& cfg_,
   sib1_rtx_period = std::chrono::milliseconds{
       std::max<unsigned>(to_underlying(cfg_.params.ssb_cfg.ssb_period), to_underlying(expert_cfg.sib1_retx_period))};
 
-  // Only the first L_max SSB beams can be used.
+  // Only the first L_max SSB candidates can be used.
   for (size_t i_ssb = 0; i_ssb != L_max; ++i_ssb) {
     if (not cell_cfg.params.ssb_cfg.ssb_bitmap.test(i_ssb)) {
       continue;
@@ -85,7 +85,7 @@ void sib1_scheduler::run_slot(cell_slot_resource_allocator& res_grid)
   const unsigned sib1_rtx_period_slots   = sib1_rtx_period.count() * sl_point.nof_slots_per_subframe();
   const unsigned sib1_newtx_period_slots = sib1_newtx_period.count() * sl_point.nof_slots_per_subframe();
 
-  // For each beam, check if the SIB1 needs to be allocated in this slot.
+  // For each SSB candidate, check if the SIB1 needs to be allocated in this slot.
   for (unsigned ssb_idx = 0; ssb_idx != L_max; ++ssb_idx) {
     // Do not schedule the SIB1 for the SSB indices that are not used.
     if (not cell_cfg.params.ssb_cfg.ssb_bitmap.test(ssb_idx)) {
@@ -95,7 +95,7 @@ void sib1_scheduler::run_slot(cell_slot_resource_allocator& res_grid)
     if (sl_point.count() % sib1_rtx_period_slots == sib1_type0_pdcch_css_slots[ssb_idx].count()) {
       // Ensure slot for SIB1 has DL enabled.
       if (not cell_cfg.is_dl_enabled(sl_point)) {
-        logger.error("Could not allocate SIB1 for beam idx {} as slot is not DL enabled.", ssb_idx);
+        logger.error("Could not allocate SIB1 for SSB index {} as slot is not DL enabled.", ssb_idx);
         return;
       }
 
@@ -144,7 +144,7 @@ void sib1_scheduler::stop()
 
 //  ------   Private methods   ------ .
 
-bool sib1_scheduler::allocate_sib1(cell_slot_resource_allocator& res_grid, unsigned beam_idx, unsigned time_resource)
+bool sib1_scheduler::allocate_sib1(cell_slot_resource_allocator& res_grid, unsigned ssb_idx, unsigned time_resource)
 {
   const auto& pdsch_td_res_alloc_list = get_si_rnti_pdsch_time_domain_list(
       cell_cfg.params.dl_cfg_common.init_dl_bwp.generic_params.cp, cell_cfg.params.dmrs_typeA_pos);
@@ -174,7 +174,7 @@ bool sib1_scheduler::allocate_sib1(cell_slot_resource_allocator& res_grid, unsig
     sib1_crbs = rb_helper::find_empty_interval_of_length(used_crbs, nof_sib1_rbs);
     if (sib1_crbs.length() < nof_sib1_rbs) {
       // early exit
-      logger.error("Not enough PDSCH space for SIB1 in beam idx: {}", beam_idx);
+      logger.error("Not enough PDSCH space for SIB1 for SSB index {}", ssb_idx);
       return false;
     }
   }
@@ -186,7 +186,7 @@ bool sib1_scheduler::allocate_sib1(cell_slot_resource_allocator& res_grid, unsig
                                         cell_cfg.params.dl_cfg_common.init_dl_bwp.pdcch_common.sib1_search_space_id,
                                         expert_cfg.sib1_dci_aggr_lev);
   if (pdcch == nullptr) {
-    logger.warning("Could not allocated SIB1's DCI in PDCCH for beam idx: {}", beam_idx);
+    logger.warning("Could not allocated SIB1's DCI in PDCCH for SSB index {}", ssb_idx);
     return false;
   }
 

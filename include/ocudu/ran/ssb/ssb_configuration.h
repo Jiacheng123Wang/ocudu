@@ -11,19 +11,19 @@
 
 namespace ocudu {
 
-/// Maximum number of SS/PBCH beams or SSB occasions in a SS/PBCH period as per TS 38.213 Section 4.1.
-constexpr size_t NOF_SSB_BEAMS = 64;
+/// Maximum number of candidate SS/PBCH blocks in a SS/PBCH period as per TS 38.213 Section 4.1.
+constexpr size_t MAX_NOF_SSB_CANDIDATES = 64;
 
 /// SSB-Index identifies an SS-Block within an SS-Burst.
 /// \remark See TS 38.331, "SSB-Index" and "maxNrofSSBs". See also, TS 38.213, clause 4.1.
 using ssb_id_t = bounded_integer<uint8_t, 0, 63>;
 
 /// Implements \c ssb-PositionsInBurst, as per TS 38.331.
-class ssb_bitmap_t : public bounded_bitset<NOF_SSB_BEAMS, true>
+class ssb_bitmap_t : public bounded_bitset<MAX_NOF_SSB_CANDIDATES, true>
 {
 public:
   /// \brief Build a default bitmap with L_max 64, with all zero bits.
-  ssb_bitmap_t() : bounded_bitset(NOF_SSB_BEAMS) { reset(); }
+  ssb_bitmap_t() : bounded_bitset(MAX_NOF_SSB_CANDIDATES) { reset(); }
   /// \brief Build a bitmap with specified L_max. L_max possible values: {4, 8, 64}.
   /// \ref set_bitmap for the details.
   ssb_bitmap_t(uint64_t bitmap, uint8_t l_max) { set_bitmap(bitmap, l_max); }
@@ -35,12 +35,12 @@ public:
   void set_bitmap(uint64_t bitmap, uint8_t l_max)
   {
     ocudu_assert(l_max == 4 or l_max == 8 or l_max == 64, "L_max must be 4, 8 or 64");
-    resize(NOF_SSB_BEAMS);
-    if (l_max == NOF_SSB_BEAMS) {
+    resize(MAX_NOF_SSB_CANDIDATES);
+    if (l_max == MAX_NOF_SSB_CANDIDATES) {
       from_uint64(bitmap);
     } else {
       ocudu_assert(bitmap < static_cast<uint64_t>(0b1 << l_max), "SSB bitmap exceeds the max size for L_max={}", l_max);
-      from_uint64(bitmap << (NOF_SSB_BEAMS - l_max));
+      from_uint64(bitmap << (MAX_NOF_SSB_CANDIDATES - l_max));
     }
     resize(l_max);
   }
@@ -72,12 +72,12 @@ struct ssb_configuration {
   ssb_periodicity ssb_period;
   /// k_ssb or SSB SubcarrierOffest, as per TS38.211 Section 7.4.3.1. Possible values: {0, ..., 23}.
   ssb_subcarrier_offset k_ssb;
-  /// Each bit in this bitmap represents whether a beam is active or not as per TS 38.331 Section 6.3.2 IE
-  /// ssb-PositionsInBurst.
+  /// Each bit in this bitmap represents whether an SSB candidate is transmitted or not as per TS 38.331 Section
+  /// 6.3.2 IE ssb-PositionsInBurst.
   ssb_bitmap_t ssb_bitmap;
-  /// The n-th element of the array indicates what Beam ID to use for the n-th SSB occasion in \c ssb_bitmap. Only
+  /// The n-th element of the array indicates what Beam ID to use for the n-th SSB candidate in \c ssb_bitmap. Only
   /// relevant if the n-th bit of \c ssb_bitmap is set.
-  std::array<uint8_t, NOF_SSB_BEAMS> beam_ids;
+  std::array<uint8_t, MAX_NOF_SSB_CANDIDATES> beam_ids;
   /// PSS EPRE to SSS EPRE for SSB. TS 38.213, Section 4.1 gives an explanation of this measure, but doesn't provide a
   /// name for this parameter. Nor is there a name in the TS 38.331.
   ssb_pss_to_sss_epre pss_to_sss_epre;

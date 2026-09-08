@@ -167,13 +167,13 @@ struct search_space_configuration {
   void set_non_ss0_monitoring_slot_offset(unsigned slot_offset, subcarrier_spacing scs_common);
 
   /// \brief Returns the SearchSpace slot offset.
-  unsigned get_monitoring_slot_offset(uint8_t ssb_beam_idx = 0) const
+  unsigned get_monitoring_slot_offset(uint8_t ssb_idx = 0) const
   {
     if (is_search_space0()) {
-      ocudu_assert(ssb_beam_idx < monitoring_slot_offset.size(), "Invalid SSB beam index={}", ssb_beam_idx);
-      return monitoring_slot_offset[ssb_beam_idx].count();
+      ocudu_assert(ssb_idx < monitoring_slot_offset.size(), "Invalid SSB index={}", ssb_idx);
+      return monitoring_slot_offset[ssb_idx].count();
     }
-    ocudu_assert(ssb_beam_idx == 0, "SSB beam index is not used for SearchSpace Id > 0");
+    ocudu_assert(ssb_idx == 0, "SSB index is not used for SearchSpace Id > 0");
     return monitoring_slot_offset.back().count();
   }
 
@@ -192,29 +192,29 @@ struct search_space_configuration {
   void set_non_ss0_monitoring_symbols_within_slot(monitoring_symbols_within_slot_t symbols_within_slot);
 
   /// \brief Returns the PDCCH monitoring symbols within slot.
-  const monitoring_symbols_within_slot_t& get_monitoring_symbols_within_slot(uint8_t ssb_beam_idx = 0) const
+  const monitoring_symbols_within_slot_t& get_monitoring_symbols_within_slot(uint8_t ssb_idx = 0) const
   {
     if (is_search_space0()) {
       // TODO: Revise this when FR2 support is added.
       // As per TS 38.213, Table 13-11.
-      ocudu_assert(ssb_beam_idx < monitoring_symbols_within_slot.size(), "Invalid SSB beam index={}", ssb_beam_idx);
-      return monitoring_symbols_within_slot[ssb_beam_idx];
+      ocudu_assert(ssb_idx < monitoring_symbols_within_slot.size(), "Invalid SSB index={}", ssb_idx);
+      return monitoring_symbols_within_slot[ssb_idx];
     }
-    ocudu_assert(ssb_beam_idx == 0, "SSB beam index is not used for SearchSpace Id > 0");
+    ocudu_assert(ssb_idx == 0, "SSB index is not used for SearchSpace Id > 0");
     return monitoring_symbols_within_slot.back();
   }
 
   /// \brief Returns the first monitoring symbol for the current SearchSpace.
-  unsigned get_first_symbol_index(uint8_t ssb_beam_idx = 0) const
+  unsigned get_first_symbol_index(uint8_t ssb_idx = 0) const
   {
     monitoring_symbols_within_slot_t symbols_within_slot;
     if (is_search_space0()) {
       // TODO: Revise this when FR2 support is added.
       // As per TS 38.213, Table 13-11.
-      ocudu_assert(ssb_beam_idx < monitoring_symbols_within_slot.size(), "Invalid SSB beam index={}", ssb_beam_idx);
-      symbols_within_slot = monitoring_symbols_within_slot[ssb_beam_idx];
+      ocudu_assert(ssb_idx < monitoring_symbols_within_slot.size(), "Invalid SSB index={}", ssb_idx);
+      symbols_within_slot = monitoring_symbols_within_slot[ssb_idx];
     } else {
-      ocudu_assert(ssb_beam_idx == 0, "SSB beam index is not used for SearchSpace Id > 0");
+      ocudu_assert(ssb_idx == 0, "SSB index is not used for SearchSpace Id > 0");
       symbols_within_slot = monitoring_symbols_within_slot.back();
     }
     for (unsigned n = 0; n < symbols_within_slot.size(); ++n) {

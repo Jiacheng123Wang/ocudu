@@ -59,7 +59,7 @@ private:
   const unsigned           nof_slots_per_frame;
 
   // Active SS/PBCH block indexes, in increasing order.
-  static_vector<ssb_id_t, NOF_SSB_BEAMS> ssb_indexes;
+  static_vector<ssb_id_t, MAX_NOF_SSB_CANDIDATES> ssb_indexes;
   // Set when a single SS/PBCH block is active, in which case every PRACH occasion maps to it.
   std::optional<ssb_id_t> single_ssb;
 

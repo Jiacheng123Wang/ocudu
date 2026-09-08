@@ -235,10 +235,10 @@ TEST_P(ssb_scheduler_test, test_time_dom_allocation)
       const bool is_ssb_slot =
           cell_cfg.params.dl_carrier.arfcn_f_ref <= cutoff_freq ? sl.hrf_slot_index() <= 1U : sl.hrf_slot_index() <= 3U;
       if (is_ssb_slot) {
-        static constexpr unsigned NOF_SSB_BEAMS_PER_SLOT_FR1 = 2U;
-        const auto                slot_bitmap = cell_cfg.params.ssb_cfg.ssb_bitmap.slice<NOF_SSB_BEAMS_PER_SLOT_FR1>(
-            sl.hrf_slot_index() * NOF_SSB_BEAMS_PER_SLOT_FR1,
-            sl.hrf_slot_index() * NOF_SSB_BEAMS_PER_SLOT_FR1 + NOF_SSB_BEAMS_PER_SLOT_FR1);
+        static constexpr unsigned NOF_SSB_CANDIDATES_PER_SLOT_FR1 = 2U;
+        const auto slot_bitmap = cell_cfg.params.ssb_cfg.ssb_bitmap.slice<NOF_SSB_CANDIDATES_PER_SLOT_FR1>(
+            sl.hrf_slot_index() * NOF_SSB_CANDIDATES_PER_SLOT_FR1,
+            sl.hrf_slot_index() * NOF_SSB_CANDIDATES_PER_SLOT_FR1 + NOF_SSB_CANDIDATES_PER_SLOT_FR1);
 
         ASSERT_EQ(res_grid[0].result.dl.bc.ssb_info.size(), slot_bitmap.count())
             << fmt::format("Number of SSB PDUs not as expected at slot={}", sl);
@@ -251,7 +251,7 @@ TEST_P(ssb_scheduler_test, test_time_dom_allocation)
           }
           // Test the correctness of SSB PDU fields.
           const ssb_information ssb_info = *ssb_pdu_it;
-          ASSERT_EQ(ssb_info.ssb_index, sl.hrf_slot_index() * NOF_SSB_BEAMS_PER_SLOT_FR1 + j);
+          ASSERT_EQ(ssb_info.ssb_index, sl.hrf_slot_index() * NOF_SSB_CANDIDATES_PER_SLOT_FR1 + j);
           const crb_interval expected_ssb_crbs = get_ssb_crbs();
           ASSERT_EQ(expected_ssb_crbs, ssb_info.crbs);
           ASSERT_EQ(ofdm_symbol_range(starting_symbs[j], starting_symbs[j] + NOF_SYMB_PER_SSB), ssb_info.symbols);
