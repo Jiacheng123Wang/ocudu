@@ -5,6 +5,7 @@
 #pragma once
 
 #include "ocudu/adt/bounded_bitset.h"
+#include "ocudu/ran/beamforming/beam_identifier.h"
 #include "ocudu/ran/ssb/ssb_properties.h"
 #include "ocudu/ran/subcarrier_spacing.h"
 #include <array>
@@ -75,9 +76,10 @@ struct ssb_configuration {
   /// Each bit in this bitmap represents whether an SSB candidate is transmitted or not as per TS 38.331 Section
   /// 6.3.2 IE ssb-PositionsInBurst.
   ssb_bitmap_t ssb_bitmap;
-  /// The n-th element of the array indicates what Beam ID to use for the n-th SSB candidate in \c ssb_bitmap. Only
-  /// relevant if the n-th bit of \c ssb_bitmap is set.
-  std::array<uint8_t, MAX_NOF_SSB_CANDIDATES> beam_ids;
+  /// The n-th element of the array is the beam that carries the n-th SSB candidate in \c ssb_bitmap. Entries whose
+  /// \c ssb_bitmap bit is not set are \c beam_identifier::invalid.
+  /// \note Not honoured by the PHY yet: every SSB is transmitted on the same beam.
+  std::array<beam_identifier, MAX_NOF_SSB_CANDIDATES> beam_ids;
   /// PSS EPRE to SSS EPRE for SSB. TS 38.213, Section 4.1 gives an explanation of this measure, but doesn't provide a
   /// name for this parameter. Nor is there a name in the TS 38.331.
   ssb_pss_to_sss_epre pss_to_sss_epre;
