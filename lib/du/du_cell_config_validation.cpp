@@ -354,9 +354,18 @@ static check_outcome check_ssb_configuration(const du_cell_config& cell_cfg)
         fmt::underlying(ssb_cfg.scs), fmt::underlying(subcarrier_spacing::kHz120), "SSB SCS must be 120kHz for FR2.");
   }
 
-  // TODO: remove this when multiple beams are supported.
-  CHECK_TRUE(ssb_cfg.ssb_bitmap.test(0) and ssb_cfg.ssb_bitmap.none(1U, ssb_cfg.ssb_bitmap.get_L_max()),
-             "Multiple beams not supported for SSB.");
+  CHECK_TRUE(ssb_cfg.ssb_bitmap.any(), "At least one SSB candidate must be transmitted.");
+
+  // A beam is assigned to the transmitted SSB candidates only.
+  for (unsigned ssb_idx = 0, l_max = ssb_cfg.ssb_bitmap.get_L_max(); ssb_idx != l_max; ++ssb_idx) {
+    if (ssb_cfg.ssb_bitmap.test(ssb_idx)) {
+      CHECK_TRUE(is_beam_id_valid(ssb_cfg.beam_ids[ssb_idx]), "Invalid beam ID for SSB index={}", ssb_idx);
+    } else {
+      CHECK_TRUE(ssb_cfg.beam_ids[ssb_idx] == beam_identifier::invalid,
+                 "A beam ID is set for SSB index={}, which is not transmitted",
+                 ssb_idx);
+    }
+  }
 
   if (ssb_cfg.ssb_bitmap.count() > 1) {
     // The SS/PBCH block associated with a detected preamble is derived from the position of its PRACH occasion in the
@@ -369,13 +378,22 @@ static check_outcome check_ssb_configuration(const du_cell_config& cell_cfg)
                                 rach_cfg.rach_cfg_generic.prach_config_index);
     CHECK_EQ(rach_cfg.rach_cfg_generic.msg1_fdm,
              1,
-             "Frequency multiplexed PRACH occasions are not supported with multiple SSB beams.");
+             "Frequency multiplexed PRACH occasions are not supported with multiple SSB candidates.");
     CHECK_EQ_OR_BELOW(prach_cfg.nof_occasions_within_slot,
                       1,
-                      "Time multiplexed PRACH occasions are not supported with multiple SSB beams.");
+                      "Time multiplexed PRACH occasions are not supported with multiple SSB candidates.");
     CHECK_EQ(fmt::underlying(rach_cfg.nof_ssb_per_ro),
              fmt::underlying(ssb_per_rach_occasions::one),
-             "Only one SSB per RACH occasion is supported with multiple SSB beams.");
+             "Only one SSB per RACH occasion is supported with multiple SSB candidates.");
+
+    // TODO: repeat the SI messages in the Type0-PDCCH CSS occasion of every transmitted SSB candidate, the way the SIB1
+    // scheduler does. The SI message scheduler resolves the monitoring occasions of SearchSpace#0 for SSB index 0 only.
+    if (cell_cfg.si.si_config.has_value()) {
+      const auto& pdcch_common = cell_cfg.ran.dl_cfg_common.init_dl_bwp.pdcch_common;
+      CHECK_TRUE(pdcch_common.other_si_search_space_id.value_or(pdcch_common.sib1_search_space_id) !=
+                     to_search_space_id(0),
+                 "SI messages scheduled on SearchSpace#0 are not supported with multiple SSB candidates.");
+    }
   }
 
   // Checks that SSB does not get located outside the band.

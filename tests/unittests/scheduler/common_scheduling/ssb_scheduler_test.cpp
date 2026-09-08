@@ -100,7 +100,8 @@ static sched_cell_configuration_request_message make_cell_cfg_req_msg(const ssb_
   msg.ran.dl_cfg_common.freq_info_dl.offset_to_point_a = offset_to_point_A;
   msg.ran.dl_cfg_common.init_dl_bwp.generic_params.scs = params.ssb_scs;
   msg.ran.ssb_cfg.scs                                  = params.ssb_scs;
-  msg.ran.ssb_cfg.ssb_bitmap        = ssb_bitmap_t(test_rng::uniform_int<uint8_t>(1, params.L_max - 1), params.L_max);
+  const uint64_t max_ssb_bitmap     = (params.L_max == 64U) ? ~uint64_t{0} : (uint64_t{1} << params.L_max) - 1;
+  msg.ran.ssb_cfg.ssb_bitmap        = ssb_bitmap_t(test_rng::uniform_int<uint64_t>(1, max_ssb_bitmap), params.L_max);
   msg.ran.ssb_cfg.ssb_period        = params.periodicity;
   msg.ran.ssb_cfg.offset_to_point_A = offset_to_point_A;
   msg.ran.ssb_cfg.k_ssb             = k_ssb;
