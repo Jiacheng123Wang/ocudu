@@ -251,11 +251,14 @@ static check_outcome check_rlm_config(const du_cell_config& cell_cfg)
     }
 
     if (std::holds_alternative<ssb_id_t>(rlm_res.detection_resource)) {
-      const ssb_id_t ssb_rs_id = std::get<ssb_id_t>(rlm_res.detection_resource);
-      CHECK_TRUE(std::any_of(cell_cfg.ran.ssb_cfg.beam_ids.begin(),
-                             cell_cfg.ran.ssb_cfg.beam_ids.end(),
-                             [ssb_rs_id](const uint8_t ssb_idx) { return ssb_idx == static_cast<uint8_t>(ssb_rs_id); }),
-                 "RLM resource id={} points at SSB index={}, which wasn't found in SSB configuration",
+      const ssb_id_t      ssb_rs_id  = std::get<ssb_id_t>(rlm_res.detection_resource);
+      const ssb_bitmap_t& ssb_bitmap = cell_cfg.ran.ssb_cfg.ssb_bitmap;
+      CHECK_BELOW(ssb_rs_id.value(),
+                  ssb_bitmap.get_L_max(),
+                  "SSB index of RLM resource id={}",
+                  fmt::underlying(rlm_res.res_id));
+      CHECK_TRUE(ssb_bitmap.test(ssb_rs_id.value()),
+                 "RLM resource id={} points at SSB index={}, which is not transmitted",
                  fmt::underlying(rlm_res.res_id),
                  ssb_rs_id);
     }

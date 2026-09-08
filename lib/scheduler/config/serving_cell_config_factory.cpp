@@ -95,8 +95,7 @@ static std::optional<radio_link_monitoring_config> make_default_rlm_config(const
 
   rlm_helper::rlm_builder_params rlm_params;
   if (rlm_type == rlm_resource_type::ssb || rlm_type == rlm_resource_type::ssb_and_csi_rs) {
-    rlm_params =
-        rlm_helper::rlm_builder_params(rlm_type, l_max, cell_cfg.ssb_cfg.ssb_bitmap, cell_cfg.ssb_cfg.beam_ids);
+    rlm_params = rlm_helper::rlm_builder_params(rlm_type, l_max, cell_cfg.ssb_cfg.ssb_bitmap);
   } else {
     rlm_params = rlm_helper::rlm_builder_params(rlm_type, l_max);
   }

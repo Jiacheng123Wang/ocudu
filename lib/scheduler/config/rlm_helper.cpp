@@ -42,16 +42,17 @@ ocudu::rlm_helper::make_radio_link_monitoring_config(const rlm_builder_params&  
     return rlm_cfg;
   }
 
-  // [Implementation-defined] We build the RLM resource list with 1 resource only: assign the SSB id of the only SSB
-  // beam currently supported.
+  // [Implementation-defined] We build the RLM resource list with 1 resource only: assign the index of the first
+  // transmitted SSB candidate.
   unsigned rlm_rs_idx = 0U;
   if (params.resource_type == rlm_resource_type::ssb or params.resource_type == rlm_resource_type::ssb_and_csi_rs) {
-    ocudu_assert(params.ssb_params.value().ssb_bitmap.test(0U), "Invalid SSB bitmap");
+    const ssb_bitmap_t& ssb_bitmap = params.ssb_params.value().ssb_bitmap;
+    ocudu_assert(ssb_bitmap.any(), "No SSB candidate is transmitted");
     auto& rlm_rs  = rlm_cfg.rlm_resources.emplace_back();
     rlm_rs.res_id = to_rlm_res_id(rlm_rs_idx++);
     // [Implementation-defined] This is the only supported option at the moment.
     rlm_rs.resource_purpose = radio_link_monitoring_config::radio_link_monitoring_rs::purpose::rlf;
-    rlm_rs.detection_resource.emplace<ssb_id_t>(params.ssb_params.value().ssb_beam_ids[0U]);
+    rlm_rs.detection_resource.emplace<ssb_id_t>(static_cast<uint8_t>(ssb_bitmap.find_lowest(true)));
   }
 
   // [Implementation-defined] We build the RLM resource list with the maximum allowed number of resources N_RLM, as per
