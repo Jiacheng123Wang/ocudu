@@ -150,7 +150,7 @@ public:
       *ret = pdu;
     } else {
       logger.warning("cell={}: Discarding {} event. Cause: Payload pool is empty",
-                     fmt::underlying(cell_cfg.cell_index),
+                     cell_cfg.cell_index,
                      pdu_type_name<std::decay_t<PDUType>>());
     }
     return ret;
@@ -161,14 +161,12 @@ public:
   void push(const char* ev_name, Callable&& callable)
   {
     if (OCUDU_UNLIKELY(not active.load(std::memory_order_acquire))) {
-      logger.warning(
-          "cell={}: Discarding {} event. Cause: Cell is not active", fmt::underlying(cell_cfg.cell_index), ev_name);
+      logger.warning("cell={}: Discarding {} event. Cause: Cell is not active", cell_cfg.cell_index, ev_name);
       return;
     }
 
     if (not pending_events.try_push(event_t{ev_name, std::forward<Callable>(callable)})) {
-      logger.warning(
-          "cell={}: Discarding {} event. Cause: Event queue is full", fmt::underlying(cell_cfg.cell_index), ev_name);
+      logger.warning("cell={}: Discarding {} event. Cause: Event queue is full", cell_cfg.cell_index, ev_name);
     }
   }
 

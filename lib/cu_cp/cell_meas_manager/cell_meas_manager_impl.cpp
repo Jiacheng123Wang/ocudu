@@ -528,7 +528,7 @@ static expected<cell_measurement_positioning_info, std::string> generate_measure
   ocudu_assert(ue_meas_context.meas_id_to_meas_context.find(meas_results.meas_id) !=
                    ue_meas_context.meas_id_to_meas_context.end(),
                "ue={}: Measurement result for unknown meas_id={} received",
-               fmt::underlying(ue_index),
+               ue_index,
                fmt::underlying(meas_results.meas_id));
 
   meas_context_t& meas_ctxt = ue_meas_context.meas_id_to_meas_context.at(meas_results.meas_id);

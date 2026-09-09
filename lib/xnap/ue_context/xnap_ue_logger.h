@@ -20,15 +20,12 @@ public:
                      peer_xnap_ue_id_t  peer_xnap_ue_id  = peer_xnap_ue_id_t::invalid)
   {
     fmt::memory_buffer buffer;
-    fmt::format_to(std::back_inserter(buffer),
-                   "ue={}{}{}: ",
-                   ue_index,
-                   local_xnap_ue_id != local_xnap_ue_id_t::invalid
-                       ? fmt::format(" local_xnap_ue={}", fmt::underlying(local_xnap_ue_id))
-                       : "",
-                   peer_xnap_ue_id != peer_xnap_ue_id_t::invalid
-                       ? fmt::format(" peer_xnap_ue={}", fmt::underlying(peer_xnap_ue_id))
-                       : "");
+    fmt::format_to(
+        std::back_inserter(buffer),
+        "ue={}{}{}: ",
+        ue_index,
+        local_xnap_ue_id != local_xnap_ue_id_t::invalid ? fmt::format(" local_xnap_ue={}", local_xnap_ue_id) : "",
+        peer_xnap_ue_id != peer_xnap_ue_id_t::invalid ? fmt::format(" peer_xnap_ue={}", peer_xnap_ue_id) : "");
     prefix = ocudu::to_c_str(buffer);
   }
   const char* to_c_str() const { return prefix.c_str(); }

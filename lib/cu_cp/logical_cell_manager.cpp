@@ -119,17 +119,15 @@ const logical_cell& logical_cell_manager::realize_cell(nr_cell_identity nci, cu_
 
   logical_cell& cell = it->second;
   if (cell.realized && cell.du_index != du_index) {
-    logger.warning("Logical cell nci={:#x} reported by du={} is already realized by du={}",
-                   nci.value(),
-                   fmt::underlying(du_index),
-                   fmt::underlying(cell.du_index));
+    logger.warning(
+        "Logical cell nci={:#x} reported by du={} is already realized by du={}", nci.value(), du_index, cell.du_index);
   }
   cell.realized = true;
   cell.du_index = du_index;
 
   logger.info("Logical cell nci={:#x} realized by du={} (admin_state={} barred={})",
               nci.value(),
-              fmt::underlying(du_index),
+              du_index,
               to_string(cell.admin_state),
               cell.barred);
 
@@ -149,20 +147,19 @@ void logical_cell_manager::derealize_du_cells(cu_cp_du_index_t du_index)
         cell.admin_state = cell_admin_state::locked;
         logger.info("Logical cell nci={:#x} admin_state: shutting_down -> locked (du={} removed mid-stop)",
                     nci.value(),
-                    fmt::underlying(du_index));
+                    du_index);
       }
       if (cell.barred_by_failed_stop) {
         // The bar a failed stop left on the air is gone with the DU; only operator intent survives.
         cell.barred                = false;
         cell.barred_by_failed_stop = false;
-        logger.info(
-            "Logical cell nci={:#x} failed-stop bar cleared (du={} removed)", nci.value(), fmt::underlying(du_index));
+        logger.info("Logical cell nci={:#x} failed-stop bar cleared (du={} removed)", nci.value(), du_index);
       }
 
       logger.info("Logical cell nci={:#x} de-realized (du={} removed). Operator intent kept (admin_state={} "
                   "barred={})",
                   nci.value(),
-                  fmt::underlying(du_index),
+                  du_index,
                   to_string(cell.admin_state),
                   cell.barred);
     }

@@ -64,8 +64,7 @@ void cell_activation_routine::operator()(coro_context<async_task<bool>>& ctx)
       if (std::any_of(failed_cells.begin(), failed_cells.end(), [&cell](const f1ap_cell_failed_to_activate& failed) {
             return failed.cgi == cell.cgi;
           })) {
-        logger.warning(
-            "Cell nci={:#x} failed to activate at du={}", cell.cgi.nci.value(), fmt::underlying(du_update_it->first));
+        logger.warning("Cell nci={:#x} failed to activate at du={}", cell.cgi.nci.value(), du_update_it->first);
         continue;
       }
       logical_cells.set_operational_state(cell.cgi.nci, cell_operational_state::enabled);

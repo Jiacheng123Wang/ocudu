@@ -30,7 +30,7 @@ async_task<bool> mac_ul_processor::add_ue(const mac_ue_create_request& request)
       cfg.timers,
       [this, request]() { return ue_manager.add_ue(request); },
       [this, ue_idx = request.ue_index]() {
-        logger.warning("ue={}: Postponed UE creation. Cause: Task queue is full", fmt::underlying(ue_idx));
+        logger.warning("ue={}: Postponed UE creation. Cause: Task queue is full", ue_idx);
       });
 }
 
@@ -43,8 +43,7 @@ async_task<bool> mac_ul_processor::addmod_bearers(du_ue_index_t                 
       cfg.timers,
       [this, ue_index, ul_logical_channels]() { return ue_manager.addmod_bearers(ue_index, ul_logical_channels); },
       [this, ue_index]() {
-        logger.warning("ue={}: Postponed UE bearer add/mod operation. Cause: Task queue is full",
-                       fmt::underlying(ue_index));
+        logger.warning("ue={}: Postponed UE bearer add/mod operation. Cause: Task queue is full", ue_index);
       });
 }
 
@@ -57,7 +56,7 @@ async_task<bool> mac_ul_processor::remove_bearers(du_ue_index_t ue_index, span<c
       cfg.timers,
       [this, ue_index, lcids = std::move(lcids)]() { return ue_manager.remove_bearers(ue_index, lcids); },
       [this, ue_index]() {
-        logger.warning("ue={}: Postponed UE bearer removal. Cause: Task queue is full", fmt::underlying(ue_index));
+        logger.warning("ue={}: Postponed UE bearer removal. Cause: Task queue is full", ue_index);
       });
 }
 
@@ -72,7 +71,7 @@ async_task<void> mac_ul_processor::remove_ue(const mac_ue_delete_request& msg)
       cfg.timers,
       [this, ue_index = msg.ue_index]() { ue_manager.remove_ue(ue_index); },
       [this, ue_index = msg.ue_index]() {
-        logger.warning("ue={}: Postponed UE removal. Cause: Task queue is full", fmt::underlying(ue_index));
+        logger.warning("ue={}: Postponed UE removal. Cause: Task queue is full", ue_index);
       });
 }
 
@@ -91,7 +90,7 @@ bool mac_ul_processor::flush_ul_ccch_msg(du_ue_index_t    ue_index,
               pdu_handler.handle_msg3_mac_ces(ue_index, cell_index, slot_rx, mac_ces);
             }
           })) {
-    logger.warning("ue={}: Unable to forward the Msg3 content. Cause: task queue is full.", fmt::underlying(ue_index));
+    logger.warning("ue={}: Unable to forward the Msg3 content. Cause: task queue is full.", ue_index);
     // Note: The UE is not yet created in the CU, so there in no inactivity timer.
     return false;
   }
@@ -102,8 +101,7 @@ void mac_ul_processor::handle_ue_config_applied(du_ue_index_t ue_index)
 {
   if (not cfg.ue_exec_mapper.ctrl_executor(ue_index).execute(
           [this, ue_index]() { ue_manager.handle_ue_config_applied(ue_index); })) {
-    logger.warning("ue={}: Unable to forward UE config applied to upper layers. Cause: task queue is full.",
-                   fmt::underlying(ue_index));
+    logger.warning("ue={}: Unable to forward UE config applied to upper layers. Cause: task queue is full.", ue_index);
   }
 }
 

@@ -539,7 +539,7 @@ unsigned intra_slice_scheduler::schedule_dl_newtx_candidates(dl_ran_slice_candid
     vrb_interval alloc_vrbs = grant_builder.recommended_vrbs(used_dl_vrbs, max_grant_size);
     if (alloc_vrbs.empty()) {
       logger.warning("ue={} c-rnti={}: Failed to allocate RBs for PDSCH grant at slot={}",
-                     fmt::underlying(grant_builder.ue().ue_index()),
+                     grant_builder.ue().ue_index(),
                      grant_builder.ue().crnti(),
                      slice.get_slot_tx());
       // We let the grant be empty. It will be skipped in the post-processing scheduling step.
@@ -663,7 +663,7 @@ unsigned intra_slice_scheduler::schedule_ul_newtx_candidates(ul_ran_slice_candid
     vrb_interval alloc_vrbs = grant_builder.recommended_vrbs(used_ul_vrbs, max_grant_size);
     if (alloc_vrbs.empty()) {
       logger.error("ue={} c-rnti={}: Failed to allocate RBs for PUSCH grant at slot={}",
-                   fmt::underlying(grant_builder.ue().ue_index()),
+                   grant_builder.ue().ue_index(),
                    grant_builder.ue().crnti(),
                    slice.get_slot_tx());
       // We let the grant be empty. It will be skipped in the post-processing scheduling step.
@@ -733,7 +733,7 @@ std::optional<ue_newtx_candidate> intra_slice_scheduler::create_newtx_dl_candida
           "ue={} rnti={} PDSCH allocation skipped. Cause: All the HARQs are allocated and waiting for their "
           "respective HARQ-ACK. Check if any HARQ-ACK went missing in the lower layers or is arriving too late to "
           "the scheduler.",
-          fmt::underlying(ue_cc.ue_index),
+          ue_cc.ue_index,
           ue_cc.rnti());
       cell_metrics.handle_late_dl_harqs();
     }
@@ -763,7 +763,7 @@ std::optional<ue_newtx_candidate> intra_slice_scheduler::create_newtx_ul_candida
       logger.info("ue={} rnti={} PUSCH allocation skipped. Cause: All the UE HARQs are busy waiting for "
                   "their respective CRC result. Check if any CRC PDU went missing in the lower layers or is "
                   "arriving too late to the scheduler.",
-                  fmt::underlying(ue_cc.ue_index),
+                  ue_cc.ue_index,
                   ue_cc.rnti());
       cell_metrics.handle_late_ul_harqs();
     }

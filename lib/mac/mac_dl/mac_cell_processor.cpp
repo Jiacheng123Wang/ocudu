@@ -267,14 +267,14 @@ async_task<bool> mac_cell_processor::add_ue(const mac_ue_create_request& request
         return false;
       },
       [this, ue_index = request.ue_index]() {
-        logger.warning("ue={}: Postponed UE creation. Cause: Task queue is full", fmt::underlying(ue_index));
+        logger.warning("ue={}: Postponed UE creation. Cause: Task queue is full", ue_index);
       });
 }
 
 async_task<void> mac_cell_processor::remove_ue(const mac_ue_delete_request& request)
 {
   auto log_dispatch_failure = [this, ue_index = request.ue_index]() {
-    logger.warning("ue={}: Postponed UE removal. Cause: task queue is full", fmt::underlying(ue_index));
+    logger.warning("ue={}: Postponed UE removal. Cause: task queue is full", ue_index);
   };
 
   return launch_async([this, request, log_dispatch_failure](coro_context<async_task<void>>& ctx) mutable {
@@ -316,8 +316,7 @@ async_task<bool> mac_cell_processor::addmod_bearers(du_ue_index_t               
         return state == cell_state::active and ue_mng.addmod_bearers(ue_index, logical_channels);
       },
       [this, ue_index]() {
-        logger.warning("ue={}: Postponed UE bearer add/mod operation. Cause: Task queue is full",
-                       fmt::underlying(ue_index));
+        logger.warning("ue={}: Postponed UE bearer add/mod operation. Cause: Task queue is full", ue_index);
       });
 }
 
@@ -335,7 +334,7 @@ async_task<bool> mac_cell_processor::remove_bearers(du_ue_index_t ue_index, span
         return state == cell_state::active and ue_mng.remove_bearers(ue_index, lcids_to_rem_bset);
       },
       [this, ue_index]() {
-        logger.warning("ue={}: Postponed UE bearer removal. Cause: Task queue is full", fmt::underlying(ue_index));
+        logger.warning("ue={}: Postponed UE bearer removal. Cause: Task queue is full", ue_index);
       });
 }
 

@@ -109,9 +109,9 @@ private:
     });
     if (not dispatched) {
       if (rb_id.has_value()) {
-        logger.warning("ue={} {}: Failed to dispatch RLF detection handling", fmt::underlying(ue_index), *rb_id);
+        logger.warning("ue={} {}: Failed to dispatch RLF detection handling", ue_index, *rb_id);
       } else {
-        logger.warning("ue={}: Failed to dispatch RLF detection handling", fmt::underlying(ue_index));
+        logger.warning("ue={}: Failed to dispatch RLF detection handling", ue_index);
       }
       rlf_triggered.store(false, std::memory_order_relaxed);
     }
@@ -198,7 +198,7 @@ public:
     if (release_timer.is_running() and is_mac_rlf_cause(*current_cause)) {
       // If the RLF was not due to MAC KOs, a C-RNTI CE is not enough to cancel the RLF.
       release_timer.stop();
-      logger.info("ue={}: RLF timer reset. Cause: C-RNTI CE was received for the UE", fmt::underlying(ue_ctx.ue_index));
+      logger.info("ue={}: RLF timer reset. Cause: C-RNTI CE was received for the UE", ue_ctx.ue_index);
     }
   }
 
@@ -233,7 +233,7 @@ private:
   void trigger_ue_release()
   {
     logger.info("ue={}: RLF timer expired with cause=\"{}\". Requesting a UE release...",
-                fmt::underlying(ue_ctx.ue_index),
+                ue_ctx.ue_index,
                 get_rlf_cause_str(*current_cause));
 
     // Request UE release to the CU.
@@ -282,7 +282,7 @@ du_ue_controller_impl::~du_ue_controller_impl() {}
 void du_ue_controller_impl::disable_rlf_detection()
 {
   if (rlf_handler->deactivate()) {
-    logger.debug("ue={}: Disabled RLF detection", fmt::underlying(ue_index));
+    logger.debug("ue={}: Disabled RLF detection", ue_index);
   }
 }
 
@@ -319,9 +319,9 @@ async_task<void> du_ue_controller_impl::handle_rb_stop_request(bool stop_srbs)
     }
 
     if (stop_srbs) {
-      logger.info("ue={}: SRB and DRB traffic stopped", fmt::underlying(ue_index));
+      logger.info("ue={}: SRB and DRB traffic stopped", ue_index);
     } else {
-      logger.info("ue={}: DRB traffic stopped", fmt::underlying(ue_index));
+      logger.info("ue={}: DRB traffic stopped", ue_index);
     }
   });
 }
@@ -341,11 +341,11 @@ async_task<void> du_ue_controller_impl::handle_drb_stop_request(span<const drb_i
     for (drb_id_t drb_id : drbs_to_stop_cpy) {
       auto it = ue_drbs.find(drb_id);
       if (it == ue_drbs.end()) {
-        logger.warning("ue={}: Failed to stop {} activity. Cause: DRB not found", fmt::underlying(ue_index), drb_id);
+        logger.warning("ue={}: Failed to stop {} activity. Cause: DRB not found", ue_index, drb_id);
         continue;
       }
       it->second->stop();
-      logger.debug("ue={}: DRB {} traffic was stopped", fmt::underlying(ue_index), drb_id);
+      logger.debug("ue={}: DRB {} traffic was stopped", ue_index, drb_id);
     }
   });
 }
@@ -365,7 +365,7 @@ async_task<void> du_ue_controller_impl::run_in_ue_executor(unique_task task)
   auto log_dispatch_retry = [this](const char* exec_name) {
     return [this, exec_name]() {
       logger.warning("ue={}: Postpone dispatching of control task to \"{}\" executor. Cause: Task queue is full",
-                     fmt::underlying(ue_index),
+                     ue_index,
                      exec_name);
     };
   };

@@ -289,8 +289,7 @@ public:
   }
   const ue_cell_configuration& ue_cell_cfg(serv_cell_index_t serv_cell_index) const
   {
-    ocudu_assert(
-        serv_cell_index < ue_cell_to_du_cell_index.size(), "Invalid cell_index={}", fmt::underlying(serv_cell_index));
+    ocudu_assert(serv_cell_index < ue_cell_to_du_cell_index.size(), "Invalid cell_index={}", serv_cell_index);
     return ue_cell_cfg(ue_cell_to_du_cell_index[serv_cell_index]);
   }
   const ue_cell_configuration& pcell_cfg() const { return ue_cell_cfg(SERVING_PCELL_IDX); }

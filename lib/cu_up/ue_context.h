@@ -231,8 +231,7 @@ private:
           msg.ue_index                                    = index;
           e1ap.handle_bearer_context_inactivity_notification(msg);
         })) {
-      logger.log_warning("Could not handle expired UE inactivity handler, queue is full. ue={}",
-                         fmt::underlying(index));
+      logger.log_warning("Could not handle expired UE inactivity handler, queue is full. ue={}", index);
     }
   }
 };

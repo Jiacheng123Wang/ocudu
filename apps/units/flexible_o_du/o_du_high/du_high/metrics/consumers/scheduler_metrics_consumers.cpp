@@ -290,11 +290,8 @@ void scheduler_cell_metrics_consumer_log::handle_metric(const scheduler_metrics_
       continue;
     }
     for (const auto& ue : cell.ue_metrics) {
-      fmt::format_to(std::back_inserter(buffer),
-                     "Scheduler UE ue={} pci={} rnti={} metrics:",
-                     fmt::underlying(ue.ue_index),
-                     ue.pci,
-                     ue.rnti);
+      fmt::format_to(
+          std::back_inserter(buffer), "Scheduler UE ue={} pci={} rnti={} metrics:", ue.ue_index, ue.pci, ue.rnti);
       if (ue.cqi_stats.get_nof_observations() > 0) {
         fmt::format_to(
             std::back_inserter(buffer), " cqi={}", static_cast<unsigned>(std::round(ue.cqi_stats.get_mean())));

@@ -124,7 +124,7 @@ std::unique_ptr<du_ue_drb> ocudu::odu::create_drb(const drb_creation_info& drb_i
   // > Setup DL UP TNL info.
   expected<gtpu_teid_t> dl_teid = teid_pool.request_teid();
   if (not dl_teid.has_value()) {
-    ocudulog::fetch_basic_logger("DU-MNG").warning("ue={}: Failed to allocate DL GTP-TEID.", fmt::underlying(ue_index));
+    ocudulog::fetch_basic_logger("DU-MNG").warning("ue={}: Failed to allocate DL GTP-TEID.", ue_index);
     return nullptr;
   }
 
@@ -152,8 +152,7 @@ std::unique_ptr<du_ue_drb> ocudu::odu::create_drb(const drb_creation_info& drb_i
       timer_factory{drb_info.du_params.services.timers, drb_info.du_params.services.ue_execs.ctrl_executor(ue_index)},
       drb_info.du_params.services.ue_execs.f1u_dl_pdu_executor(ue_index));
   if (drb->f1u_gw_bearer == nullptr) {
-    ocudulog::fetch_basic_logger("DU-MNG").warning("ue={}: Failed to connect F1-U GW bearer to CU-UP.",
-                                                   fmt::underlying(ue_index));
+    ocudulog::fetch_basic_logger("DU-MNG").warning("ue={}: Failed to connect F1-U GW bearer to CU-UP.", ue_index);
     return nullptr;
   }
 
@@ -180,7 +179,7 @@ std::unique_ptr<du_ue_drb> ocudu::odu::create_drb(const drb_creation_info& drb_i
 
   drb->drb_f1u = odu::create_f1u_bearer(f1u_msg);
   if (drb->f1u_gw_bearer == nullptr) {
-    ocudulog::fetch_basic_logger("DU-MNG").warning("ue={}: Failed to create F1-U bearer.", fmt::underlying(ue_index));
+    ocudulog::fetch_basic_logger("DU-MNG").warning("ue={}: Failed to create F1-U bearer.", ue_index);
     return nullptr;
   }
 

@@ -10,7 +10,7 @@ using namespace ocudu::ocucp;
 
 e1ap_ue_context* e1ap_ue_context_list::add_ue(cu_cp_ue_index_t ue_index, gnb_cu_cp_ue_e1ap_id_t cu_cp_ue_e1ap_id)
 {
-  ocudu_assert(ue_index != cu_cp_ue_index_t::invalid, "Invalid ue_index={}", fmt::underlying(ue_index));
+  ocudu_assert(ue_index != cu_cp_ue_index_t::invalid, "Invalid ue_index={}", ue_index);
   ocudu_assert(cu_cp_ue_e1ap_id != gnb_cu_cp_ue_e1ap_id_t::invalid,
                "Invalid cu_cp_ue_e1ap_id={}",
                fmt::underlying(cu_cp_ue_e1ap_id));

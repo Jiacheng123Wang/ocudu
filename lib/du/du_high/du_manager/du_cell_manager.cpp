@@ -278,7 +278,7 @@ async_task<void> du_cell_manager::set_cell_barred(du_cell_index_t cell_index, bo
     CORO_BEGIN(ctx);
 
     if (!has_cell(cell_index)) {
-      logger.warning("cell={}: set_cell_barred called for a cell that does not exist.", fmt::underlying(cell_index));
+      logger.warning("cell={}: set_cell_barred called for a cell that does not exist.", cell_index);
       CORO_EARLY_RETURN();
     }
 
@@ -286,7 +286,7 @@ async_task<void> du_cell_manager::set_cell_barred(du_cell_index_t cell_index, bo
 
     cells[cell_index]->live_barred = barred;
 
-    logger.info("cell={}: MIB cellBarred set to {}", fmt::underlying(cell_index), barred);
+    logger.info("cell={}: MIB cellBarred set to {}", cell_index, barred);
 
     CORO_RETURN();
   });
@@ -295,8 +295,7 @@ async_task<void> du_cell_manager::set_cell_barred(du_cell_index_t cell_index, bo
 async_task<void> du_cell_manager::set_cell_barred_and_wait(du_cell_index_t cell_index) const
 {
   if (!has_cell(cell_index)) {
-    logger.warning("cell={}: set_cell_barred_and_wait called for a cell that does not exist.",
-                   fmt::underlying(cell_index));
+    logger.warning("cell={}: set_cell_barred_and_wait called for a cell that does not exist.", cell_index);
     return launch_no_op_task();
   }
 
@@ -307,8 +306,7 @@ async_task<void> du_cell_manager::set_cell_barred_and_wait(du_cell_index_t cell_
   // guarantees the barred MIB airs at least once before the stop that follows this call halts SSB.
   const bool already_barred = is_cell_barred(cell_index);
   if (already_barred) {
-    logger.debug("cell={}: cell already barred. Skipping re-bar and holding the settling window.",
-                 fmt::underlying(cell_index));
+    logger.debug("cell={}: cell already barred. Skipping re-bar and holding the settling window.", cell_index);
   }
 
   // Derive the settling window from the cell's configured SSB period: the barred MIB only needs to reach the

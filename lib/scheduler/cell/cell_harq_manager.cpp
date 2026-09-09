@@ -245,7 +245,7 @@ void cell_harq_repository<IsDl>::handle_harq_ack_timeout(harq_type& h, slot_poin
     logger.info("rnti={} h_id={}: Discarding {} HARQ. Cause: The scheduler took too long to reschedule this HARQ "
                 "process ({} slots elapsed since last NOK).",
                 h.rnti,
-                fmt::underlying(h.h_id),
+                h.h_id,
                 IsDl ? std::string_view{"DL"} : std::string_view{"UL"},
                 h.slot_timeout - h.slot_ack);
 
@@ -256,7 +256,7 @@ void cell_harq_repository<IsDl>::handle_harq_ack_timeout(harq_type& h, slot_poin
     logger.warning("rnti={} h_id={}: Discarding {} HARQ. Cause: Timeout was reached ({} slots) to receive the "
                    "respective HARQ-ACK indication from lower layers (HARQ-ACK slot={})",
                    h.rnti,
-                   fmt::underlying(h.h_id),
+                   h.h_id,
                    IsDl ? std::string_view{"DL"} : std::string_view{"UL"},
                    h.slot_timeout - h.slot_ack_end,
                    h.slot_ack);
@@ -322,7 +322,7 @@ cell_harq_repository<IsDl>::alloc_harq(du_ue_index_t                       ue_id
       // freed by the timeout wheel before the next CG occasion. If this fires, the timeout is misconfigured.
       logger.warning("rnti={} h_id={}: CG HARQ forced reuse — timeout did not release the process in time",
                      ue_harq_entity.harqs[cg_h_id].rnti,
-                     fmt::underlying(cg_h_id));
+                     cg_h_id);
       dealloc_harq(ue_harq_entity.harqs[cg_h_id]);
       rit = ue_harq_entity.free_harq_ids.rbegin();
     }
@@ -425,14 +425,14 @@ void cell_harq_repository<IsDl>::handle_ack(harq_type& h, bool ack)
       logger.debug("rnti={} h_id={}: Discarding {} HARQ process TB with tbs={}. Cause: Retxs for this HARQ process "
                    "were cancelled",
                    h.rnti,
-                   fmt::underlying(h.h_id),
+                   h.h_id,
                    IsDl ? std::string_view{"DL"} : std::string_view{"UL"},
                    h.prev_tx_params.tbs);
     } else if (h.max_nof_harq_retxs != 0) {
       logger.info(
           "rnti={} h_id={}: Discarding {} HARQ process TB with tbs={}. Cause: Maximum number of reTxs {} exceeded",
           h.rnti,
-          fmt::underlying(h.h_id),
+          h.h_id,
           IsDl ? std::string_view{"DL"} : std::string_view{"UL"},
           h.prev_tx_params.tbs,
           h.max_nof_harq_retxs);
@@ -483,8 +483,7 @@ bool cell_harq_repository<IsDl>::handle_new_retx(harq_type& h,
                                                  uint8_t    nof_repetitions)
 {
   if (h.status != harq_state_t::pending_retx) {
-    logger.warning(
-        "rnti={} h_id={}: Attempt of retx in a HARQ process that has no pending retx", h.rnti, fmt::underlying(h.h_id));
+    logger.warning("rnti={} h_id={}: Attempt of retx in a HARQ process that has no pending retx", h.rnti, h.h_id);
     return false;
   }
 
@@ -568,7 +567,7 @@ void cell_harq_repository<IsDl>::extend_ue_harqs(du_ue_index_t ue_idx, rnti_t rn
   }
 
   logger.debug("ue={} rnti={}: Extended {} HARQs from {} to {}",
-               fmt::underlying(ue_idx),
+               ue_idx,
                rnti,
                IsDl ? "DL" : "UL",
                current_nof_harqs,
@@ -810,14 +809,13 @@ bool dl_harq_process_handle::dl_ack_info(mac_harq_ack_report_status ack, const s
 {
   if (impl->status != harq_state_t::waiting_ack) {
     // If the HARQ process is not expecting an HARQ-ACK, it means that it has already been ACKed/NACKed.
-    harq_repo->logger.warning(
-        "rnti={} h_id={}: ACK arrived for inactive DL HARQ", impl->rnti, fmt::underlying(impl->h_id));
+    harq_repo->logger.warning("rnti={} h_id={}: ACK arrived for inactive DL HARQ", impl->rnti, impl->h_id);
     return false;
   }
 
   if (impl->mode == harq_mode_t::feedback_disabled_or_mode_b) {
     harq_repo->logger.warning(
-        "rnti={} h_id={}: ACK arrived for DL HARQ with feedback disabled", impl->rnti, fmt::underlying(impl->h_id));
+        "rnti={} h_id={}: ACK arrived for DL HARQ with feedback disabled", impl->rnti, impl->h_id);
     return false;
   }
 
@@ -839,7 +837,7 @@ void dl_harq_process_handle::save_grant_params(const dl_harq_alloc_context& ctx,
   ocudu_sanity_check(pdsch.harq_id == impl->h_id, "HARQ-id mismatch");
   ocudu_assert(impl->status == harq_utils::harq_state_t::waiting_ack,
                "Setting allocation parameters for DL HARQ process id={} in invalid state",
-               fmt::underlying(id()));
+               id());
 
   const pdsch_codeword&               cw          = pdsch.codewords[CW_INDEX];
   dl_harq_process_impl::alloc_params& prev_params = impl->prev_tx_params;
@@ -888,9 +886,8 @@ expected<units::bytes> ul_harq_process_handle::ul_crc_info(bool ack)
 {
   if (impl->status != harq_state_t::waiting_ack) {
     // HARQ is not expecting CRC info.
-    harq_repo->logger.warning("rnti={} h_id={}: Discarding CRC. Cause: UL HARQ process is not expecting any CRC",
-                              impl->rnti,
-                              fmt::underlying(impl->h_id));
+    harq_repo->logger.warning(
+        "rnti={} h_id={}: Discarding CRC. Cause: UL HARQ process is not expecting any CRC", impl->rnti, impl->h_id);
     return make_unexpected(default_error_t{});
   }
 
@@ -905,7 +902,7 @@ void ul_harq_process_handle::save_grant_params(const ul_harq_alloc_context& ctx,
   ocudu_sanity_check(pusch.harq_id == impl->h_id, "HARQ-id mismatch");
   ocudu_assert(impl->status == harq_utils::harq_state_t::waiting_ack,
                "Setting allocation parameters for UL HARQ process id={} in invalid state",
-               fmt::underlying(id()));
+               id());
 
   ul_harq_process_impl::alloc_params& prev_tx_params = impl->prev_tx_params;
 

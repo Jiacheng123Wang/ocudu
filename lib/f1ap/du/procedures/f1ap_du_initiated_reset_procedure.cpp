@@ -78,7 +78,7 @@ void f1ap_du_initiated_reset_procedure::send_f1_reset()
         }
         lst.push_back(std::move(prot_ie));
       } else {
-        logger.warning("ue={}: UE not found. It will be skipped in the F1 Reset message.", fmt::underlying(ue_idx));
+        logger.warning("ue={}: UE not found. It will be skipped in the F1 Reset message.", ue_idx);
       }
     }
   } else {

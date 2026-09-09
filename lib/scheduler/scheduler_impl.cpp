@@ -67,7 +67,7 @@ void scheduler_impl::handle_slice_reconfiguration_request(const du_cell_slice_re
 
 void scheduler_impl::handle_ntn_ul_ta_update(const sched_cell_ntn_ul_ta_update& req)
 {
-  ocudu_assert(cells.contains(req.cell_index), "cell={} does not exist", fmt::underlying(req.cell_index));
+  ocudu_assert(cells.contains(req.cell_index), "cell={} does not exist", req.cell_index);
   // Only the cell configuration is affected: T_TA is read when placing the uplink measurement gap window. No cell
   // scheduler needs to be notified.
   cfg_mng.update_ntn_ul_ta(req);
@@ -81,7 +81,7 @@ void scheduler_impl::handle_si_update_request(const si_scheduling_update_request
 
 void scheduler_impl::handle_pws_si_update_request(const pws_si_scheduling_update_request& req)
 {
-  ocudu_assert(cells.contains(req.cell_index), "cell={} does not exist", fmt::underlying(req.cell_index));
+  ocudu_assert(cells.contains(req.cell_index), "cell={} does not exist", req.cell_index);
   cells[req.cell_index]->handle_pws_si_update_request(req);
 }
 
@@ -130,7 +130,7 @@ void scheduler_impl::handle_ue_config_applied(du_ue_index_t ue_index)
 {
   const du_cell_index_t pcell_idx = cfg_mng.get_pcell_index(ue_index);
   if (pcell_idx == INVALID_DU_CELL_INDEX) {
-    logger.error("ue={}: Discarding ue config applied event. Cause: UE does not exist", fmt::underlying(ue_index));
+    logger.error("ue={}: Discarding ue config applied event. Cause: UE does not exist", ue_index);
     return;
   }
   cells[pcell_idx]->get_ue_configurator().handle_ue_config_applied(ue_index);
@@ -140,7 +140,7 @@ void scheduler_impl::handle_ue_deactivation_request(du_ue_index_t ue_index)
 {
   const du_cell_index_t pcell_idx = cfg_mng.get_pcell_index(ue_index);
   if (pcell_idx == INVALID_DU_CELL_INDEX) {
-    logger.error("ue={}: Discarding ue deactivation event. Cause: UE does not exist", fmt::underlying(ue_index));
+    logger.error("ue={}: Discarding ue deactivation event. Cause: UE does not exist", ue_index);
     return;
   }
   cells[pcell_idx]->get_ue_configurator().handle_ue_deactivation_request(ue_index);
@@ -164,7 +164,7 @@ void scheduler_impl::handle_ul_phr_indication(const ul_phr_indication_message& p
 
   // Early return if UE has not been created in the scheduler.
   if (phr_ind.ue_index == INVALID_DU_UE_INDEX) {
-    logger.warning("ue={}: Discarding UL PHR. Cause: UE Id is not valid", fmt::underlying(INVALID_DU_UE_INDEX));
+    logger.warning("ue={}: Discarding UL PHR. Cause: UE Id is not valid", INVALID_DU_UE_INDEX);
     return;
   }
 
@@ -173,12 +173,11 @@ void scheduler_impl::handle_ul_phr_indication(const ul_phr_indication_message& p
 
 void scheduler_impl::handle_ul_ta_report_indication(const ul_ta_report_indication_message& ta_report_ind)
 {
-  ocudu_assert(
-      cells.contains(ta_report_ind.cell_index), "cell={} does not exist", fmt::underlying(ta_report_ind.cell_index));
+  ocudu_assert(cells.contains(ta_report_ind.cell_index), "cell={} does not exist", ta_report_ind.cell_index);
 
   // Early return if UE has not been created in the scheduler.
   if (ta_report_ind.ue_index == INVALID_DU_UE_INDEX) {
-    logger.warning("ue={}: Discarding TA report. Cause: UE Id is not valid", fmt::underlying(INVALID_DU_UE_INDEX));
+    logger.warning("ue={}: Discarding TA report. Cause: UE Id is not valid", INVALID_DU_UE_INDEX);
     return;
   }
 
@@ -189,7 +188,7 @@ void scheduler_impl::handle_dl_buffer_state_indication(const dl_buffer_state_ind
 {
   const du_cell_index_t pcell_index = cfg_mng.get_pcell_index(bs.ue_index);
   if (pcell_index == INVALID_DU_CELL_INDEX) {
-    logger.warning("ue={}: Discarding DL buffer status update. Cause: UE not recognized", fmt::underlying(bs.ue_index));
+    logger.warning("ue={}: Discarding DL buffer status update. Cause: UE not recognized", bs.ue_index);
     return;
   }
   cells[pcell_index]->get_dl_buffer_state_indication_handler().handle_dl_buffer_state_indication(bs);
@@ -219,7 +218,7 @@ void scheduler_impl::handle_dl_mac_ce_indication(const dl_mac_ce_indication& mac
 {
   const du_cell_index_t pcell_idx = cfg_mng.get_pcell_index(mac_ce.ue_index);
   if (pcell_idx == INVALID_DU_CELL_INDEX) {
-    logger.warning("ue={}: Discarding MAC CE update. Cause: UE not recognized", fmt::underlying(mac_ce.ue_index));
+    logger.warning("ue={}: Discarding MAC CE update. Cause: UE not recognized", mac_ce.ue_index);
     return;
   }
   cells[pcell_idx]->get_feedback_handler().handle_dl_mac_ce_indication(mac_ce);

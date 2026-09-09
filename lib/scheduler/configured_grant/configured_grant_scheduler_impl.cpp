@@ -388,7 +388,7 @@ bool configured_grant_scheduler_impl::allocate_cg_opportunity(cell_slot_resource
       get_harq_id(pusch_slot, pusch_params.symbols.start(), cg_cfg.periodicity, cg_cfg.nof_harq_processes);
   const unsigned cg_harq_timeout = cg_configuration::configured_grant_timer * static_cast<unsigned>(cg_cfg.periodicity);
   auto h_ul = ue_cc->harqs.alloc_ul_harq(pusch_slot, nof_harq_retx, cg_harq_alloc_params{h_id, cg_harq_timeout});
-  ocudu_assert(h_ul.has_value(), "Failed to allocate UL HARQ id={}", fmt::underlying(h_id));
+  ocudu_assert(h_ul.has_value(), "Failed to allocate UL HARQ id={}", h_id);
 
   // Compute VRBs: CG PUSCH uses non-interleaved VRB-to-PRB mapping, so VRBs = PRBs.
   const auto cg_vrbs = compute_cg_vrbs(ul_grant);

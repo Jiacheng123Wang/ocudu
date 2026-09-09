@@ -355,8 +355,8 @@ du_ran_resource_manager_impl::update_context(du_ue_index_t                      
             deallocate_cell_resources(ue_index, sc.serv_cell_index);
           }
         }
-        resp.procedure_error = make_unexpected(
-            fmt::format("Unable to allocate CG resources for ue={} at cell={}", fmt::underlying(ue_index), pcell_idx));
+        resp.procedure_error =
+            make_unexpected(fmt::format("Unable to allocate CG resources for ue={} at cell={}", ue_index, pcell_idx));
       }
       // After this point, allocation succeeded (either CG resources were allocated or allocation was skipped due to CG
       // config not requested).

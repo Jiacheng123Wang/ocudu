@@ -49,8 +49,8 @@ bool ue_security_manager::init_security_context(const security::security_context
     return false;
   }
   logger.debug("Selected security algorithms integrity=NIA{} ciphering=NEA{}",
-               fmt::underlying(sec_context.sel_algos.integ_algo),
-               fmt::underlying(sec_context.sel_algos.cipher_algo));
+               sec_context.sel_algos.integ_algo,
+               sec_context.sel_algos.cipher_algo);
 
   // Generate K_rrc_enc and K_rrc_int
   sec_context.generate_as_keys();
@@ -85,8 +85,8 @@ bool ue_security_manager::init_retrieved_security_context(const security::securi
     return false;
   }
   logger.debug("Selected security algorithms integrity=NIA{} ciphering=NEA{}",
-               fmt::underlying(sec_context.sel_algos.integ_algo),
-               fmt::underlying(sec_context.sel_algos.cipher_algo));
+               sec_context.sel_algos.integ_algo,
+               sec_context.sel_algos.cipher_algo);
 
   // Derive the AS keys from the KgNB* the peer transferred.
   sec_context.generate_as_keys();

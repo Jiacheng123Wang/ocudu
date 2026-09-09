@@ -45,7 +45,7 @@ ocuup::cu_up_config ocudu::generate_cu_up_config(const cu_up_unit_config& config
       .gnb_id                = config.gnb_id,
       .cu_up_id              = config.gnb_cu_up_id,
       .max_nof_ues           = config.max_nof_ues,
-      .cu_up_name            = fmt::format("ocuup_{}", fmt::underlying(config.gnb_cu_up_id)),
+      .cu_up_name            = fmt::format("ocuup_{}", config.gnb_cu_up_id),
       .e1ap_json_log_enabled = config.loggers.e1ap_json_enabled,
       .e1ap_metrics_period =
           timer_duration{config.metrics.layers_cfg.enable_e1ap && config.metrics.common_metrics_cfg.enable_log_metrics

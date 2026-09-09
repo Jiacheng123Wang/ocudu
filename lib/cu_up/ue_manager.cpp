@@ -79,11 +79,11 @@ async_task<void> ue_manager::remove_ues(const std::vector<cu_up_ue_index_t>& ue_
   for (cu_up_ue_index_t ue_index : ue_indexes) {
     ue_context* ue_ctx = find_ue(ue_index);
     if (ue_ctx == nullptr) {
-      logger.info("ue={}: Discarding UE removal. UE context not found", fmt::underlying(ue_index));
+      logger.info("ue={}: Discarding UE removal. UE context not found", ue_index);
       continue;
     }
     if (ue_ctx->remove_pending()) {
-      logger.info("ue={}: Discarding UE removal. UE removal is already pending", fmt::underlying(ue_index));
+      logger.info("ue={}: Discarding UE removal. UE removal is already pending", ue_index);
       continue;
     }
     ue_ctx->request_removal();
@@ -107,7 +107,7 @@ async_task<void> ue_manager::remove_ues(const std::vector<cu_up_ue_index_t>& ue_
 
 ue_context* ue_manager::find_ue(cu_up_ue_index_t ue_index)
 {
-  ocudu_assert(ue_index < max_nof_ues, "Invalid ue_index={}", fmt::underlying(ue_index));
+  ocudu_assert(ue_index < max_nof_ues, "Invalid ue_index={}", ue_index);
   return ue_db.find(ue_index) != ue_db.end() ? ue_db[ue_index].get() : nullptr;
 }
 
@@ -167,9 +167,8 @@ ue_context* ue_manager::add_ue(cu_up_e1_index_t e1_index, const ue_context_cfg& 
 
 async_task<void> ue_manager::remove_ue(cu_up_ue_index_t ue_index)
 {
-  logger.debug("ue={}: Scheduling UE deletion", fmt::underlying(ue_index));
-  ocudu_assert(
-      ue_db.find(ue_index) != ue_db.end(), "Remove UE called for nonexistent ue_index={}", fmt::underlying(ue_index));
+  logger.debug("ue={}: Scheduling UE deletion", ue_index);
+  ocudu_assert(ue_db.find(ue_index) != ue_db.end(), "Remove UE called for nonexistent ue_index={}", ue_index);
 
   // Move UE context out from ue_db and erase the slot (from CU-UP shared ctrl executor)
   std::unique_ptr<ue_context> ue_ctxt = std::move(ue_db[ue_index]);
@@ -201,7 +200,7 @@ void ue_manager::schedule_ue_async_task(cu_up_ue_index_t ue_index, async_task<vo
 {
   ue_context* ue_ctx = find_ue(ue_index);
   if (ue_ctx == nullptr) {
-    logger.error("Cannot schedule UE task, could not find UE. ue_index={}", fmt::underlying(ue_index));
+    logger.error("Cannot schedule UE task, could not find UE. ue_index={}", ue_index);
     return;
   }
   ue_ctx->task_sched.schedule(std::move(task));
@@ -212,7 +211,7 @@ async_task<expected<>> ue_manager::schedule_and_wait_ue_removal(cu_up_ue_index_t
   // The UE is flagged for removal by the caller, so it cannot have been released by another trigger in the meantime.
   ue_context* ue_ctx = find_ue(ue_index);
   if (ue_ctx == nullptr) {
-    logger.error("Cannot schedule UE removal, could not find UE. ue_index={}", fmt::underlying(ue_index));
+    logger.error("Cannot schedule UE removal, could not find UE. ue_index={}", ue_index);
     return launch_no_op_task(expected<>{make_unexpected(default_error_t{})});
   }
 

@@ -138,13 +138,13 @@ public:
 
   du_cell_index_t get_pcell_index(du_ue_index_t ue_index) const
   {
-    ocudu_assert(ue_index < MAX_NOF_DU_UES, "Invalid ue_index={}", fmt::underlying(ue_index));
+    ocudu_assert(ue_index < MAX_NOF_DU_UES, "Invalid ue_index={}", ue_index);
     return ue_to_pcell_index[ue_index].load(std::memory_order_relaxed);
   }
 
   du_cell_group_index_t get_cell_group_index(du_ue_index_t ue_index) const
   {
-    ocudu_assert(ue_index < MAX_NOF_DU_UES, "Invalid ue_index={}", fmt::underlying(ue_index));
+    ocudu_assert(ue_index < MAX_NOF_DU_UES, "Invalid ue_index={}", ue_index);
     return get_cell_group_index(get_pcell_index(ue_index));
   }
 

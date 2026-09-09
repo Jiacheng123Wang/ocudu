@@ -27,7 +27,7 @@ ue_configuration_procedure::ue_configuration_procedure(const f1ap_ue_context_upd
   ue(ue_mng.find_ue(request.ue_index)),
   proc_logger(logger, name(), request.ue_index, ue != nullptr ? ue->rnti : rnti_t::INVALID_RNTI)
 {
-  ocudu_assert(ue != nullptr, "ueId={} not found", fmt::underlying(request.ue_index));
+  ocudu_assert(ue != nullptr, "ueId={} not found", request.ue_index);
 }
 
 void ue_configuration_procedure::operator()(coro_context<async_task<f1ap_ue_context_update_response>>& ctx)
@@ -239,7 +239,7 @@ void ue_configuration_procedure::clear_old_ue_context()
     if (not exec.defer([drbs = std::move(drbs_to_rem)]() mutable { drbs.clear(); })) {
       logger.warning("ue={}: Could not dispatch DRB removal task to UE executor. Destroying it the main DU manager "
                      "execution context",
-                     fmt::underlying(ue->ue_index));
+                     ue->ue_index);
     }
   }
 }
@@ -527,6 +527,6 @@ void ue_configuration_procedure::handle_rrc_reconfiguration_complete_ind()
       })) {
     logger.warning("ue={}: Could not dispatch DRB removal task to UE executor. Destroying it the main DU manager "
                    "execution context",
-                   fmt::underlying(ue->ue_index));
+                   ue->ue_index);
   }
 }

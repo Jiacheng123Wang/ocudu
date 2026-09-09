@@ -106,7 +106,7 @@ public:
   {
     ocudu_assert(ue_index_to_ue_e1ap_id.find(ue_index) != ue_index_to_ue_e1ap_id.end(),
                  "ue={} gNB-CU-CP-UE-E1AP-ID not found",
-                 fmt::underlying(ue_index));
+                 ue_index);
     ocudu_assert(ues.find(ue_index_to_ue_e1ap_id.at(ue_index)) != ues.end(),
                  "cu_cp_ue_e1ap_id={}: E1AP UE context not found",
                  fmt::underlying(ue_index_to_ue_e1ap_id.at(ue_index)));

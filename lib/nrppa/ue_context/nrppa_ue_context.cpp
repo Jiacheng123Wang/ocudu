@@ -31,7 +31,7 @@ nrppa_ue_context& nrppa_ue_context_list::add_ue(cu_cp_ue_index_t         ue_inde
                                                 task_executor&           task_exec)
 {
   logger.debug("ue={} ran_ue={} lmf_ue={}: NRPPA UE context created",
-               fmt::underlying(ue_index),
+               ue_index,
                fmt::underlying(ran_ue_meas_id),
                fmt::underlying(lmf_ue_meas_id));
   ues.emplace(std::piecewise_construct,

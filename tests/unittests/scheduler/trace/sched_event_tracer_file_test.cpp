@@ -22,7 +22,7 @@ using namespace ocudu::schedtrace::test_helper;
 /// Reads all size-prefixed event records of a schedtrace file, verifying each record.
 static std::vector<std::vector<uint8_t>> read_cell_events(const std::filesystem::path& dir, du_cell_index_t cell_idx)
 {
-  std::ifstream f(dir / fmt::format("schedtrace_cell{}.bin", fmt::underlying(cell_idx)), std::ios::binary);
+  std::ifstream f(dir / fmt::format("schedtrace_cell{}.bin", cell_idx), std::ios::binary);
   EXPECT_TRUE(f.is_open());
 
   std::vector<std::vector<uint8_t>> events;

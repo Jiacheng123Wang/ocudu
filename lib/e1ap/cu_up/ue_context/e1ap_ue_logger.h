@@ -26,7 +26,7 @@ public:
     fmt::memory_buffer buffer;
     fmt::format_to(std::back_inserter(buffer),
                    "ue={}{}{}: ",
-                   fmt::underlying(ue_index),
+                   ue_index,
                    cu_up_ue_e1ap_id != gnb_cu_up_ue_e1ap_id_t::invalid
                        ? fmt::format(" cu_up_ue_e1ap_id={}", fmt::underlying(cu_up_ue_e1ap_id))
                        : "",

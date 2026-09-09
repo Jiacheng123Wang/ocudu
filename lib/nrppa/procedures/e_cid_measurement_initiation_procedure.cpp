@@ -134,7 +134,7 @@ void e_cid_measurement_initiation_procedure::get_measurement_result()
 {
   ocudu_assert(ue_ctxt->get_cu_cp_ue() != nullptr,
                "ue={} ran_ue={} lmf_ue={}: UE for UE context doesn't exist",
-               fmt::underlying(ue_ctxt->ue_ids.ue_index),
+               ue_ctxt->ue_ids.ue_index,
                fmt::underlying(ue_ctxt->ue_ids.ran_ue_meas_id),
                fmt::underlying(ue_ctxt->ue_ids.lmf_ue_meas_id));
 
@@ -144,7 +144,7 @@ void e_cid_measurement_initiation_procedure::get_measurement_result()
   // Perform sanity checks.
   nrppa_cause_t failure_cause = nrppa_cause_radio_network_t::requested_item_temporarily_not_available;
   if (!ue_measurement_results.has_value() or ue_measurement_results.value().cell_measurements.empty()) {
-    ue_ctxt->logger.log_warning("ue={}: No measurement results available", fmt::underlying(ue_ctxt->ue_ids.ue_index));
+    ue_ctxt->logger.log_warning("ue={}: No measurement results available", ue_ctxt->ue_ids.ue_index);
     e_cid_meas_results = make_unexpected(failure_cause);
     return;
   }

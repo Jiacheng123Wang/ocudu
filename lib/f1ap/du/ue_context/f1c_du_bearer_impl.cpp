@@ -158,7 +158,7 @@ void f1c_other_srb_du_bearer::handle_sdu(byte_buffer_chain sdu)
                      ue_ctxt.ue_index,
                      ue_ctxt.rnti,
                      fmt::underlying(ue_ctxt.gnb_du_ue_f1ap_id),
-                     fmt::underlying(srb_id));
+                     srb_id);
       return;
     }
 

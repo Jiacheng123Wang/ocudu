@@ -43,7 +43,7 @@ struct formatter<pdu_log_prefix> : public basic_parser {
   {
     fmt::format_to(ctx.out(), "{} rnti={}", p.type, p.rnti);
     if (p.ue_index != ocudu::INVALID_DU_UE_INDEX) {
-      fmt::format_to(ctx.out(), " ue={}", fmt::underlying(p.ue_index));
+      fmt::format_to(ctx.out(), " ue={}", p.ue_index);
     }
     if (p.lcid.has_value()) {
       const char* event = p.lcid->is_sdu() ? p.lcid->is_ccch() ? "UL-CCCH" : "UL-DCCH" : "CE";
@@ -121,8 +121,7 @@ bool pdu_rx_handler::push_ul_ccch_msg(du_ue_index_t ue_index, byte_buffer ul_ccc
 {
   mac_ul_ue_context* ue = ue_manager.find_ue(ue_index);
   if (ue == nullptr) {
-    logger.warning(
-        "UL subPDU ue={}, lcid={} UL-CCCH: Received UL-CCCH for non-existent UE", fmt::underlying(ue_index), LCID_SRB0);
+    logger.warning("UL subPDU ue={}, lcid={} UL-CCCH: Received UL-CCCH for non-existent UE", ue_index, LCID_SRB0);
     return false;
   }
 
@@ -408,7 +407,7 @@ bool pdu_rx_handler::handle_msg3_mac_ces(du_ue_index_t           ue_index,
 {
   const mac_ul_ue_context* ue = ue_manager.find_ue(ue_index);
   if (ue == nullptr) {
-    logger.warning("ue={}: Discarding Msg3 MAC CEs. Cause: UE does not exist", fmt::underlying(ue_index));
+    logger.warning("ue={}: Discarding Msg3 MAC CEs. Cause: UE does not exist", ue_index);
     return false;
   }
 

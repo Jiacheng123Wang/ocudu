@@ -67,7 +67,7 @@ void verify_dmrs_info(const dmrs_information& expected_dmrs, const dmrs_informat
   report_fatal_error_if_not(expected_dmrs.dmrs_symb_pos == dmrs_under_test.dmrs_symb_pos,
                             "expected_dmrs.dmrs_symb_pos == dmrs_under_test.dmrs_symb_pos");
   report_fatal_error_if_not(
-      (fmt::underlying(expected_dmrs.config_type)) == (fmt::underlying(dmrs_under_test.config_type)),
+      (expected_dmrs.config_type) == (dmrs_under_test.config_type),
       "fmt::underlying(expected_dmrs.config_type) != fmt::underlying(dmrs_under_test.config_type)");
   report_fatal_error_if_not((expected_dmrs.dmrs_scrambling_id) == (dmrs_under_test.dmrs_scrambling_id),
                             "expected_dmrs.dmrs_scrambling_id != dmrs_under_test.dmrs_scrambling_id");

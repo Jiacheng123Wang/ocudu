@@ -6,7 +6,6 @@
 
 #include "ocudu/ran/rnti.h"
 #include "ocudu/support/ocudu_assert.h"
-#include "fmt/format.h"
 #include <atomic>
 #include <limits>
 #include <memory>
@@ -48,7 +47,7 @@ public:
   bool add_ue(rnti_t crnti, T value, bool is_cs_rnti = false)
   {
     ocudu_assert(is_crnti(crnti), "Invalid c-rnti={}", crnti);
-    ocudu_assert(value != SentinelValue, "Invalid rnti_value_table value={}", fmt::underlying(value));
+    ocudu_assert(value != SentinelValue, "Invalid rnti_value_table value={}", value);
 
     std::atomic<T>& ue_pos      = get(crnti);
     T               prev_ue_idx = ue_pos.exchange(value, std::memory_order_relaxed);

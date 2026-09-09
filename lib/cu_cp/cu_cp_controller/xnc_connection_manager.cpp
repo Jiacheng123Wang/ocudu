@@ -253,7 +253,7 @@ xnc_connection_manager::handle_new_xnc_cu_cp_connection(std::unique_ptr<xnap_mes
         shared_ctxt->connect_xnc(xnc_index);
 
         if (not xnc_connections.insert(std::make_pair(xnc_index, std::move(shared_ctxt))).second) {
-          logger.error("Failed to store new CU-CP connection {}", fmt::underlying(xnc_index));
+          logger.error("Failed to store new CU-CP connection {}", xnc_index);
           return;
         }
 

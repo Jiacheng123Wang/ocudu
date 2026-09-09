@@ -237,7 +237,7 @@ async_task<f1_setup_result> du_setup_procedure::start_f1_setup_request()
       ctxt.logger.info(serv_cell.du_sys_info.packed_sib1.begin(),
                        serv_cell.du_sys_info.packed_sib1.end(),
                        "SIB1 cell={}: {}",
-                       fmt::underlying(to_du_cell_index(i)),
+                       to_du_cell_index(i),
                        js_str);
 
       log_cell_si_messages(

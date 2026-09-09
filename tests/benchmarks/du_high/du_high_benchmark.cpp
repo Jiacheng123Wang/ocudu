@@ -878,7 +878,7 @@ public:
     // Mark the UE as fully setup.
     ue_created_flag_list[ue_idx] = true;
 
-    test_logger.info("ue={}: Creation completed successfully", fmt::underlying(ue_idx));
+    test_logger.info("ue={}: Creation completed successfully", ue_idx);
   }
 
   // \brief Push a DL PDUs to DU-high via F1-U interface.

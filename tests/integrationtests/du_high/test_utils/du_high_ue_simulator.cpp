@@ -145,7 +145,7 @@ du_high_ue_simulator::du_high_ue_simulator(const du_high_ue_simulator_config& cf
       bc.rlc                = std::move(entity);
     }
     auto ret = bearers.insert(std::make_pair(srb_id_to_lcid(srb_id), std::move(bc)));
-    ocudu_assert(ret.second, "Failed to create RLC entity for SRB {}", fmt::underlying(srb_id));
+    ocudu_assert(ret.second, "Failed to create RLC entity for SRB {}", srb_id);
   }
 }
 

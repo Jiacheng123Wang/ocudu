@@ -345,7 +345,7 @@ std::vector<nr_cell_identity> logical_cell_controller::handle_du_cells_reported(
     if (!scheduled) {
       logger.warning("du={}: Failed to schedule the barred-intent re-application after F1 setup. Cause: task "
                      "queue is full",
-                     fmt::underlying(du_index));
+                     du_index);
     }
   }
 

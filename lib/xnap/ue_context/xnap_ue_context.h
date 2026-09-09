@@ -227,9 +227,8 @@ public:
 
   xnap_ue_context& operator[](local_xnap_ue_id_t local_xnap_ue_id)
   {
-    ocudu_assert(ues.find(local_xnap_ue_id) != ues.end(),
-                 "local_xnap_ue={}: XNAP UE context not found",
-                 fmt::underlying(local_xnap_ue_id));
+    ocudu_assert(
+        ues.find(local_xnap_ue_id) != ues.end(), "local_xnap_ue={}: XNAP UE context not found", local_xnap_ue_id);
     return ues.at(local_xnap_ue_id);
   }
 
@@ -240,7 +239,7 @@ public:
                  ue_index);
     ocudu_assert(ues.find(ue_index_to_local_xnap_ue_id.at(ue_index)) != ues.end(),
                  "local_xnap_ue={}: XNAP UE context not found",
-                 fmt::underlying(ue_index_to_local_xnap_ue_id.at(ue_index)));
+                 ue_index_to_local_xnap_ue_id.at(ue_index));
     return ues.at(ue_index_to_local_xnap_ue_id.at(ue_index));
   }
 
@@ -248,10 +247,10 @@ public:
   {
     ocudu_assert(peer_xnap_ue_id_to_local_xnap_ue_id.find(peer_xnap_ue_id) != peer_xnap_ue_id_to_local_xnap_ue_id.end(),
                  "peer_xnap_ue={}: local XNAP UE ID not found",
-                 fmt::underlying(peer_xnap_ue_id));
+                 peer_xnap_ue_id);
     ocudu_assert(ues.find(peer_xnap_ue_id_to_local_xnap_ue_id.at(peer_xnap_ue_id)) != ues.end(),
                  "peer_xnap_ue={}: XNAP UE context not found",
-                 fmt::underlying(peer_xnap_ue_id_to_local_xnap_ue_id.at(peer_xnap_ue_id)));
+                 peer_xnap_ue_id_to_local_xnap_ue_id.at(peer_xnap_ue_id));
     return ues.at(peer_xnap_ue_id_to_local_xnap_ue_id.at(peer_xnap_ue_id));
   }
 
@@ -307,10 +306,10 @@ public:
 
   xnap_ue_context& add_ue(cu_cp_ue_index_t ue_index, local_xnap_ue_id_t xnap_ue_id)
   {
-    ocudu_assert(ue_index != cu_cp_ue_index_t::invalid, "Invalid ue_index={}", fmt::underlying(ue_index));
-    ocudu_assert(xnap_ue_id != local_xnap_ue_id_t::invalid, "Invalid xnap_ue_id={}", fmt::underlying(xnap_ue_id));
+    ocudu_assert(ue_index != cu_cp_ue_index_t::invalid, "Invalid ue_index={}", ue_index);
+    ocudu_assert(xnap_ue_id != local_xnap_ue_id_t::invalid, "Invalid xnap_ue_id={}", xnap_ue_id);
 
-    logger.debug("ue={} xnap_ue={}: XNAP UE context created", fmt::underlying(ue_index), fmt::underlying(xnap_ue_id));
+    logger.debug("ue={} xnap_ue={}: XNAP UE context created", ue_index, xnap_ue_id);
     ues.emplace(std::piecewise_construct,
                 std::forward_as_tuple(xnap_ue_id),
                 std::forward_as_tuple(ue_index, xnap_ue_id, timer_factory{timers, ctrl_exec}, logger));
@@ -410,14 +409,10 @@ public:
 
   void update_peer_xnap_ue_id(local_xnap_ue_id_t local_xnap_ue_id, peer_xnap_ue_id_t peer_xnap_ue_id)
   {
+    ocudu_assert(peer_xnap_ue_id != peer_xnap_ue_id_t::invalid, "Invalid peer_xnap_ue_id={}", peer_xnap_ue_id);
+    ocudu_assert(local_xnap_ue_id != local_xnap_ue_id_t::invalid, "Invalid local_xnap_ue_id={}", local_xnap_ue_id);
     ocudu_assert(
-        peer_xnap_ue_id != peer_xnap_ue_id_t::invalid, "Invalid peer_xnap_ue_id={}", fmt::underlying(peer_xnap_ue_id));
-    ocudu_assert(local_xnap_ue_id != local_xnap_ue_id_t::invalid,
-                 "Invalid local_xnap_ue_id={}",
-                 fmt::underlying(local_xnap_ue_id));
-    ocudu_assert(ues.find(local_xnap_ue_id) != ues.end(),
-                 "local_xnap_ue={}: XNAP UE context not found",
-                 fmt::underlying(local_xnap_ue_id));
+        ues.find(local_xnap_ue_id) != ues.end(), "local_xnap_ue={}: XNAP UE context not found", local_xnap_ue_id);
 
     auto& ue = ues.at(local_xnap_ue_id);
 
@@ -428,13 +423,13 @@ public:
 
     if (ue.ue_ids.peer_xnap_ue_id == peer_xnap_ue_id_t::invalid) {
       // If it was not set before, we add it.
-      ue.logger.log_debug("Setting peer_xnap_ue_id={}", fmt::underlying(peer_xnap_ue_id));
+      ue.logger.log_debug("Setting peer_xnap_ue_id={}", peer_xnap_ue_id);
       ue.ue_ids.peer_xnap_ue_id = peer_xnap_ue_id;
       peer_xnap_ue_id_to_local_xnap_ue_id.emplace(peer_xnap_ue_id, local_xnap_ue_id);
     } else if (ue.ue_ids.peer_xnap_ue_id != peer_xnap_ue_id) {
       // If it was set before, we update it.
       peer_xnap_ue_id_t old_peer_xnap_ue_id = ue.ue_ids.peer_xnap_ue_id;
-      ue.logger.log_info("Updating peer_xnap_ue_id={}", fmt::underlying(peer_xnap_ue_id));
+      ue.logger.log_info("Updating peer_xnap_ue_id={}", peer_xnap_ue_id);
       ue.ue_ids.peer_xnap_ue_id = peer_xnap_ue_id;
       peer_xnap_ue_id_to_local_xnap_ue_id.emplace(peer_xnap_ue_id, local_xnap_ue_id);
       peer_xnap_ue_id_to_local_xnap_ue_id.erase(old_peer_xnap_ue_id);
@@ -453,9 +448,8 @@ public:
 
     local_xnap_ue_id_t local_xnap_ue_id = ue_index_to_local_xnap_ue_id.at(old_ue_index);
 
-    ocudu_assert(ues.find(local_xnap_ue_id) != ues.end(),
-                 "local_xnap_ue={}: XNAP UE context not found",
-                 fmt::underlying(local_xnap_ue_id));
+    ocudu_assert(
+        ues.find(local_xnap_ue_id) != ues.end(), "local_xnap_ue={}: XNAP UE context not found", local_xnap_ue_id);
 
     // Update UE context.
     ues.at(local_xnap_ue_id).ue_ids.ue_index = new_ue_index;
@@ -483,7 +477,7 @@ public:
     ue_index_to_local_xnap_ue_id.erase(ue_index);
 
     if (ues.find(local_xnap_ue_id) == ues.end()) {
-      logger.warning("local_xnap_ue={}: XNAP UE context not found", fmt::underlying(local_xnap_ue_id));
+      logger.warning("local_xnap_ue={}: XNAP UE context not found", local_xnap_ue_id);
       return;
     }
 

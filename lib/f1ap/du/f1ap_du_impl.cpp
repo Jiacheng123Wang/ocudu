@@ -141,7 +141,7 @@ f1ap_ue_creation_response f1ap_du_impl::handle_ue_creation_request(const f1ap_ue
   if (resp.result) {
     logger.info("{}: F1 UE context created successfully.", ues[msg.ue_index].context);
   } else {
-    logger.warning("ue={} crnti={}: F1 UE context failed to be created.", fmt::underlying(msg.ue_index), msg.c_rnti);
+    logger.warning("ue={} crnti={}: F1 UE context failed to be created.", msg.ue_index, msg.c_rnti);
   }
   return resp;
 }
@@ -313,8 +313,7 @@ void f1ap_du_impl::handle_ue_context_release_request(const f1ap_ue_context_relea
 {
   f1ap_du_ue* ue = ues.find(request.ue_index);
   if (ue == nullptr) {
-    logger.error("ue={}: Skipping UEContextReleaseRequest transmission. Cause: UE not found",
-                 fmt::underlying(request.ue_index));
+    logger.error("ue={}: Skipping UEContextReleaseRequest transmission. Cause: UE not found", request.ue_index);
     return;
   }
   if (ue->context.gnb_cu_ue_f1ap_id == gnb_cu_ue_f1ap_id_t::invalid) {
@@ -659,7 +658,7 @@ void f1ap_du_impl::handle_access_success(const f1ap_access_success_event& msg)
 {
   f1ap_du_ue* ue = ues.find(msg.ue_index);
   if (ue == nullptr) {
-    logger.error("ue={}: Skipping AccessSuccess transmission. Cause: UE not found", fmt::underlying(msg.ue_index));
+    logger.error("ue={}: Skipping AccessSuccess transmission. Cause: UE not found", msg.ue_index);
     return;
   }
   if (ue->context.gnb_cu_ue_f1ap_id == gnb_cu_ue_f1ap_id_t::invalid) {

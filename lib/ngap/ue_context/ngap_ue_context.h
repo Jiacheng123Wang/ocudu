@@ -105,7 +105,7 @@ public:
   {
     ocudu_assert(amf_ue_id_to_ran_ue_id.find(amf_ue_id) != amf_ue_id_to_ran_ue_id.end(),
                  "amf_ue={}: RAN-UE-ID not found",
-                 fmt::underlying(amf_ue_id));
+                 amf_ue_id);
     ocudu_assert(ues.find(amf_ue_id_to_ran_ue_id.at(amf_ue_id)) != ues.end(),
                  "ran_ue={}: NGAP UE context not found",
                  fmt::underlying(amf_ue_id_to_ran_ue_id.at(amf_ue_id)));
@@ -148,10 +148,10 @@ public:
 
   ngap_ue_context& add_ue(cu_cp_ue_index_t ue_index, ran_ue_id_t ran_ue_id, ngap_cu_cp_ue_notifier& ue_notifier)
   {
-    ocudu_assert(ue_index != cu_cp_ue_index_t::invalid, "Invalid ue_index={}", fmt::underlying(ue_index));
+    ocudu_assert(ue_index != cu_cp_ue_index_t::invalid, "Invalid ue_index={}", ue_index);
     ocudu_assert(ran_ue_id != ran_ue_id_t::invalid, "Invalid ran_ue={}", fmt::underlying(ran_ue_id));
 
-    logger.debug("ue={} ran_ue={}: NGAP UE context created", fmt::underlying(ue_index), fmt::underlying(ran_ue_id));
+    logger.debug("ue={} ran_ue={}: NGAP UE context created", ue_index, fmt::underlying(ran_ue_id));
     ues.emplace(std::piecewise_construct,
                 std::forward_as_tuple(ran_ue_id),
                 std::forward_as_tuple(ue_index, ran_ue_id, ue_notifier, timers));
@@ -161,7 +161,7 @@ public:
 
   void update_amf_ue_id(ran_ue_id_t ran_ue_id, amf_ue_id_t amf_ue_id)
   {
-    ocudu_assert(amf_ue_id != amf_ue_id_t::invalid, "Invalid amf_ue={}", fmt::underlying(amf_ue_id));
+    ocudu_assert(amf_ue_id != amf_ue_id_t::invalid, "Invalid amf_ue={}", amf_ue_id);
     ocudu_assert(ran_ue_id != ran_ue_id_t::invalid, "Invalid ran_ue={}", fmt::underlying(ran_ue_id));
     ocudu_assert(ues.find(ran_ue_id) != ues.end(), "ran_ue={}: NGAP UE context not found", fmt::underlying(ran_ue_id));
 
@@ -174,13 +174,13 @@ public:
 
     if (ue.ue_ids.amf_ue_id == amf_ue_id_t::invalid) {
       // If it was not set before, we add it.
-      ue.logger.log_debug("Setting AMF-UE-NGAP-ID={}", fmt::underlying(amf_ue_id));
+      ue.logger.log_debug("Setting AMF-UE-NGAP-ID={}", amf_ue_id);
       ue.ue_ids.amf_ue_id = amf_ue_id;
       amf_ue_id_to_ran_ue_id.emplace(amf_ue_id, ran_ue_id);
     } else if (ue.ue_ids.amf_ue_id != amf_ue_id) {
       // If it was set before, we update it.
       amf_ue_id_t old_amf_ue_id = ue.ue_ids.amf_ue_id;
-      ue.logger.log_info("Updating AMF-UE-NGAP-ID={}", fmt::underlying(amf_ue_id));
+      ue.logger.log_info("Updating AMF-UE-NGAP-ID={}", amf_ue_id);
       ue.ue_ids.amf_ue_id = amf_ue_id;
       amf_ue_id_to_ran_ue_id.emplace(amf_ue_id, ran_ue_id);
       amf_ue_id_to_ran_ue_id.erase(old_amf_ue_id);

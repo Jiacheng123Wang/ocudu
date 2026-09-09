@@ -138,8 +138,7 @@ cu_up_manager_impl::handle_bearer_context_release_command(const e1ap_bearer_cont
 {
   ue_context* ue_ctxt = ue_mng->find_ue(msg.ue_index);
   if (!ue_ctxt) {
-    logger.error("ue={}: Discarding E1 Bearer Context Release Command. UE context not found",
-                 fmt::underlying(msg.ue_index));
+    logger.error("ue={}: Discarding E1 Bearer Context Release Command. UE context not found", msg.ue_index);
     return launch_async([](coro_context<async_task<void>>& ctx) {
       CORO_BEGIN(ctx);
       CORO_RETURN();
@@ -150,7 +149,7 @@ cu_up_manager_impl::handle_bearer_context_release_command(const e1ap_bearer_cont
 
   // Skip if UE is already flagged for removal; flag it for removal otherwise.
   if (ue_ctxt->remove_pending()) {
-    logger.info("ue={}: Skipped scheduling UE removal, UE removal is already pending.", fmt::underlying(msg.ue_index));
+    logger.info("ue={}: Skipped scheduling UE removal, UE removal is already pending.", msg.ue_index);
     return launch_no_op_task();
   }
   ue_ctxt->request_removal();
@@ -207,9 +206,8 @@ void cu_up_manager_impl::handle_pdcp_protocol_failure(cu_up_ue_index_t ue_index)
   }
   cu_up_e1_index_t e1_index = ue_ctxt->get_e1_index();
   if (to_underlying(e1_index) >= e1aps.size()) {
-    logger.error("e1={} ue={}: Could not handle PDCP protocol failure from unknown E1",
-                 fmt::underlying(e1_index),
-                 fmt::underlying(ue_index));
+    logger.error(
+        "e1={} ue={}: Could not handle PDCP protocol failure from unknown E1", fmt::underlying(e1_index), ue_index);
     return;
   }
 
@@ -226,9 +224,8 @@ void cu_up_manager_impl::handle_pdcp_integrity_failure(cu_up_ue_index_t ue_index
   }
   cu_up_e1_index_t e1_index = ue_ctxt->get_e1_index();
   if (to_underlying(e1_index) >= e1aps.size()) {
-    logger.error("e1={} ue={}: Could not handle PDCP integrity failure from unknown E1",
-                 fmt::underlying(e1_index),
-                 fmt::underlying(ue_index));
+    logger.error(
+        "e1={} ue={}: Could not handle PDCP integrity failure from unknown E1", fmt::underlying(e1_index), ue_index);
     return;
   }
 
@@ -246,9 +243,8 @@ void cu_up_manager_impl::handle_pdcp_max_count_reached(cu_up_ue_index_t ue_index
 
   cu_up_e1_index_t e1_index = ue_ctxt->get_e1_index();
   if (to_underlying(e1_index) >= e1aps.size()) {
-    logger.error("e1={} ue={}: Could not handle PDCP MAX count reached from unknown E1",
-                 fmt::underlying(e1_index),
-                 fmt::underlying(ue_index));
+    logger.error(
+        "e1={} ue={}: Could not handle PDCP MAX count reached from unknown E1", fmt::underlying(e1_index), ue_index);
     return;
   }
 
@@ -266,9 +262,8 @@ void cu_up_manager_impl::handle_pdcp_resume_required(cu_up_ue_index_t ue_index)
 
   cu_up_e1_index_t e1_index = ue_ctxt->get_e1_index();
   if (to_underlying(e1_index) >= e1aps.size()) {
-    logger.error("e1={} ue={}: Could not handle PDCP resume required from unknown E1",
-                 fmt::underlying(e1_index),
-                 fmt::underlying(ue_index));
+    logger.error(
+        "e1={} ue={}: Could not handle PDCP resume required from unknown E1", fmt::underlying(e1_index), ue_index);
     return;
   }
   std::reference_wrapper<e1ap_interface> e1ap = e1aps[to_underlying(e1_index)];

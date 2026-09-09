@@ -135,7 +135,7 @@ expected<std::pair<units::bytes, bool>> ue_cell::handle_crc_pdu(slot_point      
 
     logger.warning("rnti={} h_id={}: Discarding CRC. Cause: UL HARQ process is not expecting CRC for PUSCH slot {}",
                    rnti(),
-                   fmt::underlying(crc_pdu.harq_id),
+                   crc_pdu.harq_id,
                    pusch_slot);
     return make_unexpected(default_error_t{});
   }
@@ -185,7 +185,7 @@ void ue_cell::handle_csi_report(const csi_report_data& csi_report)
 {
   apply_link_adaptation_procedures(csi_report);
   if (not components.channel_state->handle_csi_report(csi_report)) {
-    logger.warning("ue={} rnti={}: Invalid CSI report received", fmt::underlying(ue_index), rnti());
+    logger.warning("ue={} rnti={}: Invalid CSI report received", ue_index, rnti());
   }
 
   if (csi_report.valid and csi_report.first_tb_wideband_cqi == csi_report_data::wideband_cqi_type{0}) {

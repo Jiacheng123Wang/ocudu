@@ -270,7 +270,7 @@ TEST_F(ue_manager_deferred_task_test, when_ues_are_removed_then_all_of_them_are_
   for (cu_up_ue_index_t ue_index : {ue_indexes[1], ue_indexes[2]}) {
     ue_context* ue_ctxt = ue_mng->find_ue(ue_index);
     ASSERT_NE(ue_ctxt, nullptr);
-    ASSERT_TRUE(ue_ctxt->remove_pending()) << "ue=" << fmt::underlying(ue_index) << " was not flagged for removal";
+    ASSERT_TRUE(ue_ctxt->remove_pending()) << "ue=" << ue_index << " was not flagged for removal";
   }
 
   // A second removal routine for the same UEs must not schedule anything.

@@ -22,7 +22,7 @@ class file_trace_writer final : public event_trace_writer
 public:
   file_trace_writer(const std::string& base_path, du_cell_index_t cell_idx) :
     cell_index(cell_idx),
-    fptr(fmt::format("{}/schedtrace_cell{}.bin", base_path, fmt::underlying(cell_idx)),
+    fptr(fmt::format("{}/schedtrace_cell{}.bin", base_path, cell_idx),
          std::ios::binary | std::ios::out | std::ios::trunc)
   {
     report_fatal_error_if_not(

@@ -25,7 +25,7 @@ public:
                    "ue={}{}{}: ",
                    ue_index,
                    ran_ue_id != ran_ue_id_t::invalid ? fmt::format(" ran_ue={}", fmt::underlying(ran_ue_id)) : "",
-                   amf_ue_id != amf_ue_id_t::invalid ? fmt::format(" amf_ue={}", fmt::underlying(amf_ue_id)) : "");
+                   amf_ue_id != amf_ue_id_t::invalid ? fmt::format(" amf_ue={}", amf_ue_id) : "");
     prefix = ocudu::to_c_str(buffer);
   }
   const char* to_c_str() const { return prefix.c_str(); }

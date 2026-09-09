@@ -63,7 +63,7 @@ void ue_repository::slot_indication(slot_point sl_tx)
 
     const du_ue_index_t ue_idx = rem_ev.ue_index();
     if (not ues.contains(ue_idx)) {
-      logger.error("ue={}: Unexpected UE removal from UE repository", fmt::underlying(ue_idx));
+      logger.error("ue={}: Unexpected UE removal from UE repository", ue_idx);
       rem_ev.reset();
       continue;
     }
@@ -81,7 +81,7 @@ void ue_repository::slot_indication(slot_point sl_tx)
     // Marks UE config removal as complete.
     rem_ev.reset();
 
-    logger.debug("ue={} rnti={}: UE has been successfully removed.", fmt::underlying(ue_idx), crnti);
+    logger.debug("ue={} rnti={}: UE has been successfully removed.", ue_idx, crnti);
   }
 
   // In case the elements at the front of the ring has been marked for removal, pop them from the queue.
@@ -111,11 +111,11 @@ void ue_repository::register_cell(ue_cell_repository& cell_ue_repo)
 
 void ue_repository::deregister_cell(du_cell_index_t cell_index)
 {
-  ocudu_sanity_check(cell_ues.contains(cell_index), "Cell index {} not registered", fmt::underlying(cell_index));
+  ocudu_sanity_check(cell_ues.contains(cell_index), "Cell index {} not registered", cell_index);
   // Any UE left in the cell would keep a dangling ue_cell pointer once the cell repository is destroyed.
   ocudu_sanity_check(cell_ues[cell_index]->empty(),
                      "cell={}: Deregistering cell that still holds {} UEs",
-                     fmt::underlying(cell_index),
+                     cell_index,
                      cell_ues[cell_index]->size());
   cell_ues.erase(cell_index);
 }
@@ -203,8 +203,7 @@ void ue_repository::add_ue(const ue_configuration& ue_cfg, const ue_creation_con
 
 void ue_repository::reconfigure_ue(const ue_configuration& new_cfg, sched_ue_config_request::causes cause)
 {
-  ocudu_assert(
-      ues.contains(new_cfg.ue_index), "ue={} : UE not found in the repository", fmt::underlying(new_cfg.ue_index));
+  ocudu_assert(ues.contains(new_cfg.ue_index), "ue={} : UE not found in the repository", new_cfg.ue_index);
   ocudu_sanity_check(new_cfg.nof_cells() > 0, "Creation of a UE requires at least PCell configuration.");
   auto& u      = ues[new_cfg.ue_index];
   auto& lc_mng = u.logical_channels();
@@ -357,9 +356,7 @@ void ue_repository::rem_ue(const ue& u)
   if (it != rnti_to_ue_index_lookup.end()) {
     rnti_to_ue_index_lookup.erase(it);
   } else {
-    logger.error("ue={} rnti={}: UE with provided c-rnti not found in RNTI-to-UE-index lookup table.",
-                 fmt::underlying(ue_idx),
-                 crnti);
+    logger.error("ue={} rnti={}: UE with provided c-rnti not found in RNTI-to-UE-index lookup table.", ue_idx, crnti);
   }
 
   // Finally, remove UE from the repository.

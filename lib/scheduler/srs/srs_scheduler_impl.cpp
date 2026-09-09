@@ -227,12 +227,12 @@ void srs_scheduler_impl::handle_positioning_measurement_request(
     const ue_cell* ue_cc = ue_cell_db.find(cell_req.ue_index.value());
     if (ue_cc == nullptr) {
       logger.warning("ue={}: Positioning measurement request discarded. Cause: Non-existent UE",
-                     fmt::underlying(cell_req.ue_index.value()));
+                     cell_req.ue_index.value());
       return;
     }
     if (ue_cc->rnti() != cell_req.pos_rnti) {
       logger.warning("ue={}: Positioning measurement request discarded. Cause: Incorrect C-RNTI",
-                     fmt::underlying(cell_req.ue_index.value()));
+                     cell_req.ue_index.value());
       return;
     }
     ocudu_sanity_check(ue_cc->is_pcell(), "The SRS of a UE is only scheduled in its PCell");
@@ -240,7 +240,7 @@ void srs_scheduler_impl::handle_positioning_measurement_request(
 
     if (ul_cfg == nullptr or not ul_cfg->srs_cfg.has_value()) {
       logger.warning("ue={}: Positioning measurement request discarded. Cause: UE has no configured SRS config",
-                     fmt::underlying(cell_req.ue_index.value()));
+                     cell_req.ue_index.value());
       return;
     }
 
