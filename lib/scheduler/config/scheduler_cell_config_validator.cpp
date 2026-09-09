@@ -219,9 +219,9 @@ static error_type<std::string> validate_sib1_cfg(const sched_cell_configuration_
   const auto&    pdcch_common      = msg.ran.dl_cfg_common.init_dl_bwp.pdcch_common;
   const auto&    sib1_ss_cfg       = pdcch_common.search_spaces[pdcch_common.sib1_search_space_id];
   const unsigned coreset0_duration = pdcch_common.coreset0->duration();
-  const unsigned L_max             = msg.ran.ssb_cfg.ssb_bitmap.get_L_max();
+  const unsigned L_max             = msg.ran.ssb_cfg.ssb_beams.get_L_max();
   for (unsigned ssb_idx = 0; ssb_idx != L_max; ++ssb_idx) {
-    if (not msg.ran.ssb_cfg.ssb_bitmap.test(ssb_idx)) {
+    if (not msg.ran.ssb_cfg.ssb_beams.is_transmitted(ssb_idx)) {
       continue;
     }
     const unsigned required_start = sib1_ss_cfg.get_first_symbol_index(ssb_idx) + coreset0_duration;

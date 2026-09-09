@@ -182,7 +182,7 @@ public:
 
     sched_cell_configuration_request_message msg =
         sched_config_helper::make_default_sched_cell_configuration_request(cell_cfg);
-    msg.ran.ssb_cfg.ssb_bitmap.set_bitmap(ssb_bitmap, l_max);
+    msg.ran.ssb_cfg.ssb_beams  = ssb_beam_mapping(ssb_bitmap_t(ssb_bitmap, l_max));
     msg.ran.ssb_cfg.ssb_period = ssb_period;
 
     return msg;
@@ -212,7 +212,7 @@ public:
         sched_config_helper::make_default_sched_cell_configuration_request(cell_cfg);
     msg.ran.dl_cfg_common.freq_info_dl.offset_to_point_a = offset_to_point_A;
 
-    msg.ran.ssb_cfg.ssb_bitmap.set_bitmap(ssb_bitmap, l_max);
+    msg.ran.ssb_cfg.ssb_beams         = ssb_beam_mapping(ssb_bitmap_t(ssb_bitmap, l_max));
     msg.ran.ssb_cfg.ssb_period        = ssb_periodicity::ms10;
     msg.ran.ssb_cfg.offset_to_point_A = ssb_offset_to_pointA{offset_to_point_A};
     msg.ran.ssb_cfg.k_ssb             = k_ssb;
@@ -289,7 +289,7 @@ void test_sib1_scheduler(subcarrier_spacing                         scs_common,
     // Verify if for any active beam, the SIB1 got allocated within the proper n0 slots.
     for (size_t ssb_idx = 0; ssb_idx != l_max; ++ssb_idx) {
       // Only check for the active slots.
-      if (t_bench.cell_cfg.params.ssb_cfg.ssb_bitmap.test(ssb_idx) &&
+      if (t_bench.cell_cfg.params.ssb_cfg.ssb_beams.is_transmitted(ssb_idx) &&
           (sl_idx % sib1_period_slots == sib1_pdcch_slots[ssb_idx])) {
         // Verify that the scheduler results list contain 1 element with the SIB1 information.
         report_fatal_error_if_not(

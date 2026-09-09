@@ -723,11 +723,9 @@ std::vector<odu::du_cell_config> ocudu::generate_du_cell_config(const du_high_un
     out_cell.ran.ta_offset = band_helper::get_ta_offset(band, base_cell.eutra_coexistence);
 
     // > SSB.
-    out_cell.ran.ssb_cfg.ssb_bitmap.reset();
-    out_cell.ran.ssb_cfg.beam_ids.fill(beam_identifier::invalid);
+    out_cell.ran.ssb_cfg.ssb_beams.reset();
     for (const auto& ssb_beam : base_cell.ssb_cfg.beams) {
-      out_cell.ran.ssb_cfg.ssb_bitmap.set(ssb_beam.ssb_index);
-      out_cell.ran.ssb_cfg.beam_ids[ssb_beam.ssb_index] = to_beam_id(ssb_beam.beam_id);
+      out_cell.ran.ssb_cfg.ssb_beams.set_beam(ssb_beam.ssb_index, to_beam_id(ssb_beam.beam_id));
     }
     out_cell.ran.ssb_cfg.ssb_period      = static_cast<ssb_periodicity>(base_cell.ssb_cfg.ssb_period_msec);
     out_cell.ran.ssb_cfg.ssb_block_power = base_cell.ssb_cfg.ssb_block_power;

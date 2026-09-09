@@ -3859,17 +3859,15 @@ bool ocudu::odu::calculate_reconfig_with_sync_diff(asn1::rrc_nr::recfg_with_sync
   // As per \c ssb-PositionsInBurst, in \c ServingCellConfigCommon, TS 38.331, the length of \c ssb-PositionsInBurst
   // needs to be set according to TS 38.213, Section 4.1.
   out.sp_cell_cfg_common.ssb_positions_in_burst_present = true;
-  const uint8_t l_max                                   = du_cell_cfg.ran.ssb_cfg.ssb_bitmap.get_L_max();
+  const ssb_bitmap_t ssb_bitmap                         = du_cell_cfg.ran.ssb_cfg.ssb_beams.get_ssb_bitmap();
+  const uint8_t      l_max                              = ssb_bitmap.get_L_max();
   ocudu_assert(l_max == 4U or l_max == 8U or l_max == 64U, "L_max value {} not valid", l_max);
   if (l_max == 4U) {
-    out.sp_cell_cfg_common.ssb_positions_in_burst.set_short_bitmap().from_number(
-        du_cell_cfg.ran.ssb_cfg.ssb_bitmap.to_uint64());
+    out.sp_cell_cfg_common.ssb_positions_in_burst.set_short_bitmap().from_number(ssb_bitmap.to_uint64());
   } else if (l_max == 8U) {
-    out.sp_cell_cfg_common.ssb_positions_in_burst.set_medium_bitmap().from_number(
-        du_cell_cfg.ran.ssb_cfg.ssb_bitmap.to_uint64());
+    out.sp_cell_cfg_common.ssb_positions_in_burst.set_medium_bitmap().from_number(ssb_bitmap.to_uint64());
   } else {
-    out.sp_cell_cfg_common.ssb_positions_in_burst.set_long_bitmap().from_number(
-        du_cell_cfg.ran.ssb_cfg.ssb_bitmap.to_uint64());
+    out.sp_cell_cfg_common.ssb_positions_in_burst.set_long_bitmap().from_number(ssb_bitmap.to_uint64());
   }
 
   out.sp_cell_cfg_common.ssb_periodicity_serving_cell_present = true;

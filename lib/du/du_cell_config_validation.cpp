@@ -251,13 +251,11 @@ static check_outcome check_rlm_config(const du_cell_config& cell_cfg)
     }
 
     if (std::holds_alternative<ssb_id_t>(rlm_res.detection_resource)) {
-      const ssb_id_t      ssb_rs_id  = std::get<ssb_id_t>(rlm_res.detection_resource);
-      const ssb_bitmap_t& ssb_bitmap = cell_cfg.ran.ssb_cfg.ssb_bitmap;
-      CHECK_BELOW(ssb_rs_id.value(),
-                  ssb_bitmap.get_L_max(),
-                  "SSB index of RLM resource id={}",
-                  fmt::underlying(rlm_res.res_id));
-      CHECK_TRUE(ssb_bitmap.test(ssb_rs_id.value()),
+      const ssb_id_t          ssb_rs_id = std::get<ssb_id_t>(rlm_res.detection_resource);
+      const ssb_beam_mapping& ssb_beams = cell_cfg.ran.ssb_cfg.ssb_beams;
+      CHECK_BELOW(
+          ssb_rs_id.value(), ssb_beams.get_L_max(), "SSB index of RLM resource id={}", fmt::underlying(rlm_res.res_id));
+      CHECK_TRUE(ssb_beams.is_transmitted(ssb_rs_id.value()),
                  "RLM resource id={} points at SSB index={}, which is not transmitted",
                  fmt::underlying(rlm_res.res_id),
                  ssb_rs_id);
@@ -354,20 +352,9 @@ static check_outcome check_ssb_configuration(const du_cell_config& cell_cfg)
         fmt::underlying(ssb_cfg.scs), fmt::underlying(subcarrier_spacing::kHz120), "SSB SCS must be 120kHz for FR2.");
   }
 
-  CHECK_TRUE(ssb_cfg.ssb_bitmap.any(), "At least one SSB candidate must be transmitted.");
+  CHECK_TRUE(not ssb_cfg.ssb_beams.empty(), "At least one SSB candidate must be transmitted.");
 
-  // A beam is assigned to the transmitted SSB candidates only.
-  for (unsigned ssb_idx = 0, l_max = ssb_cfg.ssb_bitmap.get_L_max(); ssb_idx != l_max; ++ssb_idx) {
-    if (ssb_cfg.ssb_bitmap.test(ssb_idx)) {
-      CHECK_TRUE(is_beam_id_valid(ssb_cfg.beam_ids[ssb_idx]), "Invalid beam ID for SSB index={}", ssb_idx);
-    } else {
-      CHECK_TRUE(ssb_cfg.beam_ids[ssb_idx] == beam_identifier::invalid,
-                 "A beam ID is set for SSB index={}, which is not transmitted",
-                 ssb_idx);
-    }
-  }
-
-  if (ssb_cfg.ssb_bitmap.count() > 1) {
+  if (ssb_cfg.ssb_beams.nof_transmitted() > 1) {
     // The SS/PBCH block associated with a detected preamble is derived from the position of its PRACH occasion in the
     // occasion ordering of TS 38.213, Section 8.1, which requires the occasion to be identified unambiguously. The
     // lower layers report neither the frequency-domain occasion index nor the time-domain one.
@@ -436,17 +423,18 @@ static check_outcome check_ssb_configuration(const du_cell_config& cell_cfg)
 
   ssb_pattern_case ssb_case = band_helper::get_ssb_pattern(cell_cfg.ran.dl_carrier.band, ssb_cfg.scs);
   const uint8_t L_max = ssb_get_L_max(ssb_cfg.scs, cell_cfg.ran.dl_carrier.arfcn_f_ref, cell_cfg.ran.dl_carrier.band);
-  CHECK_TRUE(ssb_cfg.ssb_bitmap.get_L_max() == L_max, "Mismatch between SSB bitmap size and L_max");
+  CHECK_TRUE(ssb_cfg.ssb_beams.get_L_max() == L_max, "Mismatch between the SSB beam mapping size and L_max");
 
   // (Only for Lmax = 64) It is assumed in \c inOneGroup, \c ssb-PositionsInBurst, \c ServingCellConfigCommonSIB,
   // TS 38.331 that, if a group of 8-bit bitmaps [n, n+8), with n=0, 8, 16, ...56 has non-zero bits, then these 8
   // bits are common to all non-zero 8-bit bitmaps starting with n=0, 8, 16, ...56.
   if (L_max == 64) {
+    const ssb_bitmap_t     ssb_bitmap                 = ssb_cfg.ssb_beams.get_ssb_bitmap();
     constexpr uint8_t      nof_groups_and_bits_per_gr = 8U;
     std::optional<uint8_t> first_non_zero_group;
     for (uint8_t group_idx = 0; group_idx != nof_groups_and_bits_per_gr; ++group_idx) {
       const auto group_8_bits =
-          ssb_cfg.ssb_bitmap.extract<uint8_t>(nof_groups_and_bits_per_gr * group_idx, nof_groups_and_bits_per_gr);
+          ssb_bitmap.extract<uint8_t>(nof_groups_and_bits_per_gr * group_idx, nof_groups_and_bits_per_gr);
       if (group_8_bits != 0U and not first_non_zero_group.has_value()) {
         first_non_zero_group.emplace(group_8_bits);
       }

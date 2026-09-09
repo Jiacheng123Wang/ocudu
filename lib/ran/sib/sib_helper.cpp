@@ -43,8 +43,8 @@ sib_helper::sib1_sched_occations sib_helper::get_occupied_slot_offsets(const ssb
 
   sib1_sched_occations result;
   result.window_period_slots = window_period_slots;
-  for (unsigned ssb_idx = 0; ssb_idx < ssb_cfg.ssb_bitmap.size(); ++ssb_idx) {
-    if (!ssb_cfg.ssb_bitmap.test(ssb_idx)) {
+  for (unsigned ssb_idx = 0; ssb_idx < ssb_cfg.ssb_beams.get_L_max(); ++ssb_idx) {
+    if (!ssb_cfg.ssb_beams.is_transmitted(ssb_idx)) {
       continue;
     }
     // SIB1 is scheduled in slot n0+1 of the Type0-CSS window.

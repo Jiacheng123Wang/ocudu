@@ -20,7 +20,7 @@ prach_helper::ssb_to_ro_mapping::ssb_to_ro_mapping(const prach_occasion_mapping_
   nof_ssb_per_ro(get_nof_ssb_per_ro(config.rach_cfg.nof_ssb_per_ro)),
   nof_ro_per_ssb(get_nof_ro_per_ssb(config.rach_cfg.nof_ssb_per_ro))
 {
-  for (size_t idx : config.ssb_cfg.ssb_bitmap.get_bit_positions()) {
+  for (uint8_t idx : config.ssb_cfg.ssb_beams.transmitted_indexes()) {
     ssb_indexes.push_back(static_cast<uint8_t>(idx));
   }
   report_error_if_not(not ssb_indexes.empty(), "No SS/PBCH block is active");

@@ -100,8 +100,9 @@ static sched_cell_configuration_request_message make_cell_cfg_req_msg(const ssb_
   msg.ran.dl_cfg_common.freq_info_dl.offset_to_point_a = offset_to_point_A;
   msg.ran.dl_cfg_common.init_dl_bwp.generic_params.scs = params.ssb_scs;
   msg.ran.ssb_cfg.scs                                  = params.ssb_scs;
-  const uint64_t max_ssb_bitmap     = (params.L_max == 64U) ? ~uint64_t{0} : (uint64_t{1} << params.L_max) - 1;
-  msg.ran.ssb_cfg.ssb_bitmap        = ssb_bitmap_t(test_rng::uniform_int<uint64_t>(1, max_ssb_bitmap), params.L_max);
+  const uint64_t max_ssb_bitmap = (params.L_max == 64U) ? ~uint64_t{0} : (uint64_t{1} << params.L_max) - 1;
+  msg.ran.ssb_cfg.ssb_beams =
+      ssb_beam_mapping(ssb_bitmap_t(test_rng::uniform_int<uint64_t>(1, max_ssb_bitmap), params.L_max));
   msg.ran.ssb_cfg.ssb_period        = params.periodicity;
   msg.ran.ssb_cfg.offset_to_point_A = offset_to_point_A;
   msg.ran.ssb_cfg.k_ssb             = k_ssb;
@@ -229,15 +230,16 @@ TEST_P(ssb_scheduler_test, test_time_dom_allocation)
     const slot_point sl = res_grid[0].slot;
 
     if (const bool is_ssb_half_sfn = sl.half_sfn() % ssb_period_half_sfn == 0U; is_ssb_half_sfn) {
-      // Check whether the L_max matches the ssb_bitmap length.
-      const uint8_t expected_l_max = cell_cfg.params.dl_carrier.arfcn_f_ref <= cutoff_freq ? 4U : 8U;
-      ASSERT_EQ(cell_cfg.params.ssb_cfg.ssb_bitmap.get_L_max(), expected_l_max);
+      // Check whether the L_max matches the SSB beam mapping size.
+      const ssb_bitmap_t ssb_bitmap     = cell_cfg.params.ssb_cfg.ssb_beams.get_ssb_bitmap();
+      const uint8_t      expected_l_max = cell_cfg.params.dl_carrier.arfcn_f_ref <= cutoff_freq ? 4U : 8U;
+      ASSERT_EQ(ssb_bitmap.get_L_max(), expected_l_max);
 
       const bool is_ssb_slot =
           cell_cfg.params.dl_carrier.arfcn_f_ref <= cutoff_freq ? sl.hrf_slot_index() <= 1U : sl.hrf_slot_index() <= 3U;
       if (is_ssb_slot) {
         static constexpr unsigned NOF_SSB_CANDIDATES_PER_SLOT_FR1 = 2U;
-        const auto slot_bitmap = cell_cfg.params.ssb_cfg.ssb_bitmap.slice<NOF_SSB_CANDIDATES_PER_SLOT_FR1>(
+        const auto                slot_bitmap                     = ssb_bitmap.slice<NOF_SSB_CANDIDATES_PER_SLOT_FR1>(
             sl.hrf_slot_index() * NOF_SSB_CANDIDATES_PER_SLOT_FR1,
             sl.hrf_slot_index() * NOF_SSB_CANDIDATES_PER_SLOT_FR1 + NOF_SSB_CANDIDATES_PER_SLOT_FR1);
 

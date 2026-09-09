@@ -39,7 +39,7 @@ ssb_configuration make_ssb_cfg(uint64_t bitmap, uint8_t l_max, subcarrier_spacin
   ssb_configuration cfg{};
   cfg.scs        = scs;
   cfg.ssb_period = ssb_periodicity::ms10;
-  cfg.ssb_bitmap = ssb_bitmap_t(bitmap, l_max);
+  cfg.ssb_beams  = ssb_beam_mapping(ssb_bitmap_t(bitmap, l_max));
   return cfg;
 }
 

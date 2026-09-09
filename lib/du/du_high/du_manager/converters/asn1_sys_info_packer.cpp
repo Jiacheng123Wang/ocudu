@@ -253,29 +253,28 @@ static asn1::rrc_nr::serving_cell_cfg_common_sib_s make_asn1_rrc_cell_serving_ce
   cell.ul_cfg_common         = make_asn1_rrc_ul_config_common(du_cfg.ran.ul_cfg_common);
 
   // SSB params.
+  const ssb_bitmap_t ssb_bitmap = du_cfg.ran.ssb_cfg.ssb_beams.get_ssb_bitmap();
   if (frequency_range::FR2 == band_helper::get_freq_range(du_cfg.ran.dl_carrier.band)) {
     // Populate FR2 SSB params based on TS 38.331 section 6.3.2 IE "ServingCellConfigCommonSIB".
     constexpr unsigned nof_bits_group = 8U;
 
     // We assume the SSB bitmap has been checked in the validator.
     for (size_t i = 0; i != nof_bits_group; ++i) {
-      constexpr unsigned nof_groups = 8U;
-      const bool         i_th_ssb_group_has_non_zero_elems =
-          du_cfg.ran.ssb_cfg.ssb_bitmap.extract(i * nof_bits_group, nof_bits_group) != 0U;
+      constexpr unsigned nof_groups                = 8U;
+      const bool i_th_ssb_group_has_non_zero_elems = ssb_bitmap.extract(i * nof_bits_group, nof_bits_group) != 0U;
       cell.ssb_positions_in_burst.group_presence.set(nof_groups - i - 1, i_th_ssb_group_has_non_zero_elems);
     }
 
-    cell.ssb_positions_in_burst.in_one_group.from_number(du_cfg.ran.ssb_cfg.ssb_bitmap.extract(0U, 8U));
+    cell.ssb_positions_in_burst.in_one_group.from_number(ssb_bitmap.extract(0U, 8U));
     cell.ssb_positions_in_burst.group_presence_present = true;
   } else {
     // As per \c inOneGroup, \c ssb-PositionsInBurst, \c ServingCellConfigCommonSIB, TS 38.331, maximum number of
     // SS/PBCH blocks per half frame (i.e., L_max) equals to 4, only 4 left-most bits are valid; if L_max = 8, then all
     // 8 bits are valid.
-    ocudu_assert(du_cfg.ran.ssb_cfg.ssb_bitmap.get_L_max() == 4U or du_cfg.ran.ssb_cfg.ssb_bitmap.get_L_max() == 8U,
+    ocudu_assert(ssb_bitmap.get_L_max() == 4U or ssb_bitmap.get_L_max() == 8U,
                  "For FR1, only L_max = 4 and 8 are supported");
-    cell.ssb_positions_in_burst.in_one_group.from_number(
-        du_cfg.ran.ssb_cfg.ssb_bitmap.extract<uint64_t>(0U, du_cfg.ran.ssb_cfg.ssb_bitmap.get_L_max())
-        << (8U - du_cfg.ran.ssb_cfg.ssb_bitmap.get_L_max()));
+    cell.ssb_positions_in_burst.in_one_group.from_number(ssb_bitmap.extract<uint64_t>(0U, ssb_bitmap.get_L_max())
+                                                         << (8U - ssb_bitmap.get_L_max()));
   }
 
   asn1::number_to_enum(cell.ssb_periodicity_serving_cell, to_underlying(du_cfg.ran.ssb_cfg.ssb_period));

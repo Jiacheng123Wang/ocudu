@@ -343,12 +343,10 @@ config_helpers::make_default_ssb_config(const config_helpers::cell_config_builde
   cfg.ssb_period        = ssb_periodicity::ms10;
   cfg.k_ssb             = *params.k_ssb;
 
-  // Set SSB idx 0 to 1.
-  cfg.ssb_bitmap.set(0);
-  cfg.ssb_bitmap.set_L_max(ssb_get_L_max(*params.scs_ssb, params.dl_carrier.arfcn_f_ref, params.dl_carrier.band));
-  // Only the SSB candidates that are transmitted are assigned a beam.
-  cfg.beam_ids.fill(beam_identifier::invalid);
-  cfg.beam_ids[0] = beam_identifier::n0;
+  // Transmit SSB candidate 0 on beam 0.
+  cfg.ssb_beams =
+      ssb_beam_mapping(ssb_get_L_max(*params.scs_ssb, params.dl_carrier.arfcn_f_ref, params.dl_carrier.band));
+  cfg.ssb_beams.set_beam(0, beam_identifier::n0);
 
   // The values we assign to these parameters are implementation-defined.
   cfg.ssb_block_power = -16;

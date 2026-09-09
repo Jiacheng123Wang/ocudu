@@ -103,8 +103,7 @@ void ssb_scheduler::ssb_alloc_case_A_C(ssb_information_list& ssb_list,
     constexpr std::array<uint8_t, 2U> ssb_burst_ofdm_symb = {2, 8};
     for (uint32_t n = 0, sz = ssb_burst_ofdm_symb.size(); n != sz; ++n) {
       const uint32_t ssb_idx = n + slot_idx * 2U;
-      ocudu_assert(ssb_idx < cell_cfg.params.ssb_cfg.ssb_bitmap.size(), "SSB index exceeds SSB bitmap size");
-      if (cell_cfg.params.ssb_cfg.ssb_bitmap.test(ssb_idx)) {
+      if (cell_cfg.params.ssb_cfg.ssb_beams.is_transmitted(ssb_idx)) {
         fill_ssb_parameters(ssb_list,
                             cell_cfg.params.ssb_cfg.offset_to_point_A,
                             cell_cfg.params.ssb_cfg.k_ssb,
@@ -138,8 +137,7 @@ void ssb_scheduler::ssb_alloc_case_B(ssb_information_list& ssb_list, slot_point 
 
     for (uint32_t n = 0, sz = ssb_burst_ofdm_symb.size(); n != sz; ++n) {
       const uint32_t ssb_idx = n + slot_idx * 2U;
-      ocudu_assert(ssb_idx < cell_cfg.params.ssb_cfg.ssb_bitmap.size(), "SSB index exceeds SSB bitmap size");
-      if (cell_cfg.params.ssb_cfg.ssb_bitmap.test(ssb_idx)) {
+      if (cell_cfg.params.ssb_cfg.ssb_beams.is_transmitted(ssb_idx)) {
         fill_ssb_parameters(ssb_list,
                             cell_cfg.params.ssb_cfg.offset_to_point_A,
                             cell_cfg.params.ssb_cfg.k_ssb,
@@ -157,8 +155,7 @@ void ssb_scheduler::ssb_alloc_case_B(ssb_information_list& ssb_list, slot_point 
 
     for (uint32_t n = 0, sz = ssb_burst_ofdm_symb.size(); n != sz; ++n) {
       const uint32_t ssb_idx = n + slot_idx * 2;
-      ocudu_assert(ssb_idx < cell_cfg.params.ssb_cfg.ssb_bitmap.size(), "SSB index exceeds SSB bitmap size");
-      if (cell_cfg.params.ssb_cfg.ssb_bitmap.test(ssb_idx)) {
+      if (cell_cfg.params.ssb_cfg.ssb_beams.is_transmitted(ssb_idx)) {
         fill_ssb_parameters(ssb_list,
                             cell_cfg.params.ssb_cfg.offset_to_point_A,
                             cell_cfg.params.ssb_cfg.k_ssb,
@@ -202,7 +199,7 @@ void ssb_scheduler::ssb_alloc_case_D(ssb_information_list& ssb_list, slot_point 
 
   // The starting symbols for the first SSB position in the slot correspond to symbol 4 if the slot index is even,
   // otherwise to symbol 2.
-  if (cell_cfg.params.ssb_cfg.ssb_bitmap.test(first_ssb_idx)) {
+  if (cell_cfg.params.ssb_cfg.ssb_beams.is_transmitted(first_ssb_idx)) {
     const unsigned start_symbol_idx = (slot_idx % 2 == 0) ? 4 : 2;
     fill_ssb_parameters(ssb_list,
                         cell_cfg.params.ssb_cfg.offset_to_point_A,
@@ -215,7 +212,7 @@ void ssb_scheduler::ssb_alloc_case_D(ssb_information_list& ssb_list, slot_point 
 
   // The starting symbols for the first SSB position in the slot correspond to symbol 8 if the slot index is even,
   // otherwise to symbol 6.
-  if (cell_cfg.params.ssb_cfg.ssb_bitmap.test(first_ssb_idx + 1)) {
+  if (cell_cfg.params.ssb_cfg.ssb_beams.is_transmitted(first_ssb_idx + 1)) {
     const unsigned start_symbol_idx = (slot_idx % 2 == 0) ? 8 : 6;
     fill_ssb_parameters(ssb_list,
                         cell_cfg.params.ssb_cfg.offset_to_point_A,

@@ -57,7 +57,7 @@ static std::vector<int8_t> make_ssb_symbol_table(const prach_helper::prach_occas
       static_cast<int>(to_numerology_value(config.ul_scs)) - static_cast<int>(to_numerology_value(ssb_cfg.scs));
 
   std::vector<int8_t> last_ssb_symbol(ssb_period_slots, -1);
-  for (size_t ssb_idx : ssb_cfg.ssb_bitmap.get_bit_positions()) {
+  for (uint8_t ssb_idx : ssb_cfg.ssb_beams.transmitted_indexes()) {
     // First symbol of the SS/PBCH block within the half-frame.
     unsigned l_first  = ssb_get_l_first(ssb_case, static_cast<uint8_t>(ssb_idx));
     unsigned nof_symb = NOF_SSB_SYMB;

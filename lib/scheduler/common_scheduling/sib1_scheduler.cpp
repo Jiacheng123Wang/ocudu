@@ -28,7 +28,7 @@ sib1_scheduler::sib1_scheduler(const cell_configuration& cfg_,
   cell_cfg{cfg_},
   pdcch_sched{pdcch_sch},
   sib1_payload_size{sib1_payload_size_},
-  L_max(cfg_.params.ssb_cfg.ssb_bitmap.get_L_max())
+  L_max(cfg_.params.ssb_cfg.ssb_beams.get_L_max())
 {
   const auto coreset0 = cell_cfg.params.dl_cfg_common.init_dl_bwp.pdcch_common.get_coreset0();
   ocudu_assert(coreset0.has_value(), "CORESET#0 not configured");
@@ -42,7 +42,7 @@ sib1_scheduler::sib1_scheduler(const cell_configuration& cfg_,
 
   // Only the first L_max SSB candidates can be used.
   for (size_t i_ssb = 0; i_ssb != L_max; ++i_ssb) {
-    if (not cell_cfg.params.ssb_cfg.ssb_bitmap.test(i_ssb)) {
+    if (not cell_cfg.params.ssb_cfg.ssb_beams.is_transmitted(i_ssb)) {
       continue;
     }
     // NOTE:
@@ -88,7 +88,7 @@ void sib1_scheduler::run_slot(cell_slot_resource_allocator& res_grid)
   // For each SSB candidate, check if the SIB1 needs to be allocated in this slot.
   for (unsigned ssb_idx = 0; ssb_idx != L_max; ++ssb_idx) {
     // Do not schedule the SIB1 for the SSB indices that are not used.
-    if (not cell_cfg.params.ssb_cfg.ssb_bitmap.test(ssb_idx)) {
+    if (not cell_cfg.params.ssb_cfg.ssb_beams.is_transmitted(ssb_idx)) {
       continue;
     }
 

@@ -65,11 +65,9 @@ TEST_F(ssb_assembler_test, assembled_ssb_carries_the_beam_of_its_ssb_index)
 
   // Transmit the two lowest SSB candidates, each on a different beam.
   mac_cell_creation_request multi_ssb_cfg = test_helpers::make_default_mac_cell_config();
-  multi_ssb_cfg.ssb_cfg.ssb_bitmap.reset();
-  multi_ssb_cfg.ssb_cfg.beam_ids.fill(beam_identifier::invalid);
+  multi_ssb_cfg.ssb_cfg.ssb_beams.reset();
   for (uint8_t ssb_index = 0; ssb_index != beams.size(); ++ssb_index) {
-    multi_ssb_cfg.ssb_cfg.ssb_bitmap.set(ssb_index);
-    multi_ssb_cfg.ssb_cfg.beam_ids[ssb_index] = beams[ssb_index];
+    multi_ssb_cfg.ssb_cfg.ssb_beams.set_beam(ssb_index, beams[ssb_index]);
   }
 
   ssb_assembler multi_ssb_assembler(multi_ssb_cfg);
