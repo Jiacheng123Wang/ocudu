@@ -31,6 +31,7 @@ void ssb_assembler::assemble_ssb(dl_ssb_pdu& ssb_pdu, const ssb_information& ssb
   ssb_pdu.offset_to_pointA  = ssb_cfg.offset_to_point_A;
   ssb_pdu.ssb_case          = ssb_case;
   ssb_pdu.L_max             = L_max;
+  ssb_pdu.beam_id           = ssb_cfg.beam_ids[ssb_info.ssb_index];
 
   // Fields required for PBCH payload/MIB generation.
   ssb_pdu.mib_data.cell_barred            = cell_barred;

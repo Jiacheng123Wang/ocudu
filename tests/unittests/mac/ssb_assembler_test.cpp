@@ -17,11 +17,11 @@ class ssb_assembler_test : public ::testing::Test
 protected:
   ssb_assembler_test() : cell_cfg(test_helpers::make_default_mac_cell_config()), assembler(cell_cfg) {}
 
-  dl_ssb_pdu assemble()
+  dl_ssb_pdu assemble(uint8_t ssb_index = 0)
   {
     dl_ssb_pdu      pdu{};
     ssb_information info{};
-    info.ssb_index = 0;
+    info.ssb_index = ssb_index;
     assembler.assemble_ssb(pdu, info);
     return pdu;
   }
@@ -57,4 +57,29 @@ TEST_F(ssb_assembler_test, set_intra_freq_reselection_takes_effect_on_next_assem
 
   assembler.set_intra_freq_reselection(true);
   EXPECT_TRUE(assemble().mib_data.intra_freq_reselection);
+}
+
+TEST_F(ssb_assembler_test, assembled_ssb_carries_the_beam_of_its_ssb_index)
+{
+  const std::array<beam_identifier, 2> beams = {beam_identifier::n0, to_beam_id(5)};
+
+  // Transmit the two lowest SSB candidates, each on a different beam.
+  mac_cell_creation_request multi_ssb_cfg = test_helpers::make_default_mac_cell_config();
+  multi_ssb_cfg.ssb_cfg.ssb_bitmap.reset();
+  multi_ssb_cfg.ssb_cfg.beam_ids.fill(beam_identifier::invalid);
+  for (uint8_t ssb_index = 0; ssb_index != beams.size(); ++ssb_index) {
+    multi_ssb_cfg.ssb_cfg.ssb_bitmap.set(ssb_index);
+    multi_ssb_cfg.ssb_cfg.beam_ids[ssb_index] = beams[ssb_index];
+  }
+
+  ssb_assembler multi_ssb_assembler(multi_ssb_cfg);
+  for (uint8_t ssb_index = 0; ssb_index != beams.size(); ++ssb_index) {
+    dl_ssb_pdu      pdu{};
+    ssb_information info{};
+    info.ssb_index = ssb_index;
+    multi_ssb_assembler.assemble_ssb(pdu, info);
+
+    ASSERT_EQ(pdu.ssb_index, ssb_index);
+    ASSERT_EQ(pdu.beam_id, beams[ssb_index]);
+  }
 }
