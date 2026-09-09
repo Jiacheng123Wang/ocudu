@@ -29,7 +29,7 @@ namespace {
 class null_iq_decompressor : public iq_decompressor
 {
 public:
-  void decompress(span<cbf16_t>, span<const uint8_t>, const ru_compression_params&) override {}
+  bool decompress(span<cbf16_t>, span<const uint8_t>, const ru_compression_params&) override { return true; }
 };
 
 /// Returns a static decoder instance configured for no-compression / 16-bit samples.

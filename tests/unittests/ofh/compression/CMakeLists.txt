@@ -4,6 +4,10 @@
 
 set_directory_properties(PROPERTIES LABELS "compression")
 
+add_executable(compression_validator_test compression_validator_test.cpp)
+target_link_libraries(compression_validator_test ocudu_ofh_compression ocudulog GTest::gtest GTest::gtest_main)
+gtest_discover_tests(compression_validator_test)
+
 add_executable(ofh_iq_compression_bfp_test ofh_iq_compression_bfp_test.cpp)
 target_link_libraries(ofh_iq_compression_bfp_test ocudu_ofh_compression ocudulog GTest::gtest GTest::gtest_main)
 gtest_discover_tests(ofh_iq_compression_bfp_test)

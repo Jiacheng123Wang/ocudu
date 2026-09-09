@@ -20,7 +20,7 @@ public:
       std::array<std::unique_ptr<iq_decompressor>, NOF_COMPRESSION_TYPES_SUPPORTED> decompressors_);
 
   // See interface for documentation.
-  void
+  bool
   decompress(span<cbf16_t> iq_data, span<const uint8_t> compressed_data, const ru_compression_params& params) override;
 
 private:

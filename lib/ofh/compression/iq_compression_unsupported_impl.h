@@ -9,17 +9,18 @@
 namespace ocudu {
 namespace ofh {
 
-/// \brief IQ compression death implementation.
+/// \brief IQ compression implementation used for the compression types that OCUDU does not implement.
 ///
-/// Using this compression will kill the application.
-class iq_compression_death_impl : public iq_compressor, public iq_decompressor
+/// Decompression always fails, so the Open Fronthaul decoder drops the message. Using the compression method
+/// will kill the application.
+class iq_compression_unsupported_impl : public iq_compressor, public iq_decompressor
 {
 public:
   // See interface for documentation.
   void compress(span<uint8_t> buffer, span<const cbf16_t> iq_data, const ru_compression_params& params) override;
 
   // See interface for documentation.
-  void
+  bool
   decompress(span<cbf16_t> iq_data, span<const uint8_t> compressed_data, const ru_compression_params& params) override;
 };
 

@@ -112,7 +112,7 @@ void iq_compression_bfp_impl::decompress_prb_generic(span<cbf16_t>       output,
   }
 }
 
-void iq_compression_bfp_impl::decompress(span<cbf16_t>                iq_data,
+bool iq_compression_bfp_impl::decompress(span<cbf16_t>                iq_data,
                                          span<const uint8_t>          compressed_data,
                                          const ru_compression_params& params)
 {
@@ -138,4 +138,6 @@ void iq_compression_bfp_impl::decompress(span<cbf16_t>                iq_data,
     decompress_prb_generic(out_prb_samples, comp_prb, q_in, params.data_width);
     out_idx += NOF_SUBCARRIERS_PER_RB;
   }
+
+  return true;
 }

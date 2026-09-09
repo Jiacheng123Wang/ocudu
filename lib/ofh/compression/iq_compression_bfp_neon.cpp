@@ -198,14 +198,13 @@ void iq_compression_bfp_neon::compress(span<uint8_t>                buffer,
   }
 }
 
-void iq_compression_bfp_neon::decompress(span<cbf16_t>                iq_data,
+bool iq_compression_bfp_neon::decompress(span<cbf16_t>                iq_data,
                                          span<const uint8_t>          compressed_data,
                                          const ru_compression_params& params)
 {
   // Use generic implementation if NEON utils don't support requested bit width.
   if (!neon::iq_width_packing_supported(params.data_width)) {
-    iq_compression_bfp_impl::decompress(iq_data, compressed_data, params);
-    return;
+    return iq_compression_bfp_impl::decompress(iq_data, compressed_data, params);
   }
 
   // Number of output PRBs.
@@ -246,4 +245,6 @@ void iq_compression_bfp_neon::decompress(span<cbf16_t>                iq_data,
     q_out.to_brain_float(output_span, unpacked_span, scaler);
     out_idx += NOF_SUBCARRIERS_PER_RB;
   }
+
+  return true;
 }

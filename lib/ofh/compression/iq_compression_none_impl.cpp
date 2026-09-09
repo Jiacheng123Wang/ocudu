@@ -46,7 +46,7 @@ void iq_compression_none_impl::compress(span<uint8_t>                buffer,
   }
 }
 
-void iq_compression_none_impl::decompress(span<cbf16_t>                output,
+bool iq_compression_none_impl::decompress(span<cbf16_t>                output,
                                           span<const uint8_t>          input,
                                           const ru_compression_params& params)
 {
@@ -74,6 +74,8 @@ void iq_compression_none_impl::decompress(span<cbf16_t>                output,
       output[out_idx++] = {q.to_float(re), q.to_float(im)};
     }
   }
+
+  return true;
 }
 
 void iq_compression_none_impl::log_post_quantization_rms(span<const int16_t> samples)
