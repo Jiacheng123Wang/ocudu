@@ -90,7 +90,7 @@ inline compression_type to_compression_type(const std::string& compr)
   return compression_type::none;
 }
 
-inline std::string to_string(compression_type c)
+constexpr const char* to_string(compression_type c)
 {
   switch (c) {
     case compression_type::none:
