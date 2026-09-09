@@ -51,7 +51,8 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
     std::unique_ptr<time_alignment_estimator>            ta_estimator_,
     std::shared_ptr<const channel_statistics_estimator>  stats_estimator_,
     unsigned                                             block_prb_,
-    bool                                                 compensate_cfo_) :
+    bool                                                 compensate_cfo_,
+    bool                                                 use_matrix_engine_) :
   port_channel_estimator_average_impl(std::move(interp),
                                       std::move(ta_estimator_),
                                       port_channel_estimator_fd_smoothing_strategy::none,
@@ -59,6 +60,7 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
                                       // DM-RS symbol (the 2D estimator handles time by itself).
                                       port_channel_estimator_td_interpolation_strategy::interpolate,
                                       compensate_cfo_),
+  use_matrix_engine(use_matrix_engine_),
   max_blocks(divide_ceil(MAX_NOF_PRBS, std::min(std::max(block_prb_, 1U), MAX_BLOCK_PRB))),
   stats_estimator(std::move(stats_estimator_)),
   block_prb(std::min(std::max(block_prb_, 1U), MAX_BLOCK_PRB))
@@ -80,6 +82,23 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   gpu_y        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * max_blocks * 2 * MAX_BLOCK_PILOTS);
   gpu_h        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * max_blocks * 2 * MAX_BLOCK_OUT);
 
+  // metal_nn_mmse flavor: compile the simdgroup_matrix 8x8 pipelines and stage the
+  // quad-packed pilot matrix qy (zero-initialized: tail-quad columns of non-existent
+  // blocks stay zero, which the apply kernel needs for NaN-free accumulation).
+  matrix_ready = false;
+  if (engine_ready && use_matrix_engine) {
+    const std::size_t qy_quads = (static_cast<std::size_t>(max_blocks) + 3u) / 4u;
+    gpu_qy = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * qy_quads * MAX_BLOCK_PILOTS * 8);
+    matrix_ready = engine->init_matrix_pipelines();
+    // INFO level (no env needed): confirms which GPU kernels the A/B flavor runs. The nn
+    // path is taken on EVERY standard-block hop - nout/L that are not multiples of 8 are
+    // zero-padded to ceil8 automatically (see the [mmse_time] pad= field); nn=0 only shows
+    // up when this line reports UNAVAILABLE (stale metallib / NOGPU).
+    logger.info("[mmse_ce] metal_nn_mmse: matrix pipelines {} - non-8-aligned dims are zero-padded, "
+                "per-slot selection: [mmse_time] nn=",
+                matrix_ready ? "READY (simdgroup 8x8)" : "UNAVAILABLE (falling back to legacy kernels)");
+  }
+
   // Warm-up dispatch: Metal JIT-compiles the kernels and pays the first command-buffer
   // commit on first use (~3 ms on Apple Silicon, see PLAN.md 7.0.11/7.0.12). Running it
   // here, with the FULL staging-buffer capacities, moves that cost off the slot critical
@@ -89,6 +108,12 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
     (void)engine->run_weights_only(
         gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, MAX_BLOCK_OUT, MAX_BLOCK_PILOTS, MAX_LAYERS, max_blocks);
   }
+  // The matrix kernels need their own warm-up (JIT + zero-copy cache entry sized
+  // MAX_LAYERS * ceil(max_blocks/4) * 72 * 8 floats - larger than any later call).
+  if (matrix_ready) {
+    (void)engine->run_nn(
+        gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, MAX_BLOCK_OUT, MAX_BLOCK_PILOTS, MAX_LAYERS, max_blocks);
+  }
 }
 
 port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl()
@@ -97,6 +122,7 @@ port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl(
   free_aligned(gpu_r_hp);
   free_aligned(gpu_w);
   free_aligned(gpu_y);
+  free_aligned(gpu_qy);
   free_aligned(gpu_h);
 }
 
@@ -280,8 +306,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 
   // Per-phase timing (OCUDU_CE_TIME=1; OCUDU_MMSE_TIME kept as legacy alias):
   // sigma2 / corr-build / GPU / CPU-blocks / finish.
+  // metal_nn_mmse (A/B flavor) keeps the per-slot [mmse_time] line self-enabled so the
+  // actual kernel selection (nn=0 legacy / nn=1 simdgroup 8x8) is always visible in the log.
   const bool           time_en  = std::getenv("OCUDU_CE_TIME") != nullptr ||
-                               std::getenv("OCUDU_MMSE_TIME") != nullptr;
+                                std::getenv("OCUDU_MMSE_TIME") != nullptr || use_matrix_engine;
   using steady_clock            = std::chrono::steady_clock;
   const auto t_begin            = steady_clock::now();
 
@@ -332,79 +360,65 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   }
   const auto t_corr_std = steady_clock::now();
 
-  const bool gpu_std = engine_ready && (n_std_blocks != 0);
-  if (gpu_std) {
-    // K1 -> K1b -> K2 in ONE command buffer (per-layer slots are ready for the v2 statistics).
-    // NOTE: the system-slot strides MUST be L_std (a_inv) and nout_std*L_std (r_hp/w) - the GPU
-    // kernels index the slots with strides p.L and p.nout*p.L, NOT the MAX_BLOCK_* capacities.
-    for (unsigned sys = 0; sys != nof_layers; ++sys) {
-      std::memcpy(gpu_a + static_cast<std::size_t>(sys) * L_std * L_std,
-                  w_r_pp.data(),
-                  static_cast<std::size_t>(L_std) * L_std * sizeof(float));
-      std::memcpy(gpu_r_hp + static_cast<std::size_t>(sys) * nout_std * L_std,
-                  w_r_hp.data(),
-                  static_cast<std::size_t>(nout_std) * L_std * sizeof(float));
+  // ---- Engine (GPU) stage ---------------------------------------------------------------
+  // metal_nn_mmse: when the flavor is enabled and the simdgroup 8x8 pipelines are compiled,
+  // the matrix kernels ALWAYS process the hop; metal_mmse: the legacy kernels do. Both engines
+  // now cover EVERY block of the hop - the standard block_prb-wide batch plus the tail/edge
+  // block (a whole hop narrower than block_prb runs as its own single-block batch) - so with
+  // the engine ready there is no CPU fallback per hop. Matrix dims that are not multiples of 8
+  // are zero-padded to ceil8 in the staging buffers (Lp/Np row strides); the kernels truncate
+  // the outputs back to the real geometry. nn=0 therefore only means the matrix engine itself
+  // is unavailable (stale metallib / NOGPU): the legacy kernels (metal_mmse) or the CPU loop
+  // then take over.
+  const bool matrix_on = engine_ready && use_matrix_engine && matrix_ready;
+  bool       hop_gpu   = false; // engine processed this hop (any block)
+  bool       hop_nn    = false; // the simdgroup 8x8 (matrix) kernels were the ones used
+  unsigned   hop_pad   = 0;     // ceil8(L) - L of the last matrix batch (A/B pad overhead)
+  unsigned   tail_L    = 0;     // block L of the tail batch (log aid for std-less hops)
+  if (engine_ready) {
+    if (n_std_blocks != 0) {
+      // Standard blocks: correlation matrices already built above (w_r_pp/w_r_hp, L_std/nout_std).
+      run_engine_blocks(args, 0, n_std_blocks, block_prb, nout_std, L_std, npt, matrix_on);
+      hop_gpu = true;
+      hop_nn  = matrix_on;
+      hop_pad = matrix_on ? static_cast<unsigned>(((L_std + 7u) & ~7u) - L_std) : 0;
     }
-
-    // Pack the pilot vectors of all layers and standard blocks.
-    const unsigned npf_std = block_prb * args.dmrs_patterns.front().re_pattern.count();
-    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-      for (unsigned b = 0; b != n_std_blocks; ++b) {
-        float* yp = gpu_y + (static_cast<std::size_t>(i_layer) * n_std_blocks + b) * 2 * L_std;
-        for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
-          span<const cf_t> src =
-              args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan(b * block_prb * 6, block_prb * 6);
-          for (unsigned j = 0; j != npf_std; ++j) {
-            yp[2 * (i_symbol * npf_std + j)]     = src[j].real();
-            yp[2 * (i_symbol * npf_std + j) + 1] = src[j].imag();
-          }
-        }
-      }
+    if (rem_prb != 0) {
+      // Tail/edge block - and when nof_prb < block_prb this is the WHOLE hop (single block):
+      // run it through the engine with its actual geometry instead of the CPU reference math.
+      unsigned nout_e = 0;
+      unsigned L_e    = 0;
+      build_correlation_matrices(stats,
+                                 args.dmrs_patterns.front().re_pattern,
+                                 rem_prb,
+                                 span<const unsigned>(dmrs_sym.begin(), npt),
+                                 scs_khz,
+                                 span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS),
+                                 span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
+                                 nout_e,
+                                 L_e);
+      tail_L = L_e;
+      run_engine_blocks(args, n_std_blocks * block_prb, 1, rem_prb, nout_e, L_e, npt, matrix_on);
+      hop_gpu = true;
+      hop_nn  = matrix_on;
+      hop_pad = matrix_on ? static_cast<unsigned>(((L_e + 7u) & ~7u) - L_e) : 0;
     }
-
-    // v1 hot path: A^-1 on the CPU (us-level; the batched 36x36 GPU Gauss-Jordan kernel is
-    // barrier-bound, see PLAN.md 7.0.6), then K1b (weights) + K2 (apply) in ONE GPU command buffer.
-    for (unsigned sys = 0; sys != nof_layers; ++sys) {
-      // CPU Gauss-Jordan on a copy of the system's A (gpu_a slot keeps the input for the engine).
-      std::array<float, 2 * MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS> gj;
-      std::fill(gj.begin(), gj.end(), 0.0F);
-      for (unsigned r = 0; r != L_std; ++r) {
-        for (unsigned col = 0; col != L_std; ++col) {
-          gj[r * 2 * L_std + col] = w_r_pp[r * L_std + col];
-        }
-        gj[r * 2 * L_std + L_std + r] = 1.0F;
-      }
-      gauss_jordan_invert(span<float>(gj.data(), 2 * L_std * L_std), L_std);
-      for (unsigned r = 0; r != L_std; ++r) {
-        for (unsigned col = 0; col != L_std; ++col) {
-          gpu_a[static_cast<std::size_t>(sys) * L_std * L_std + r * L_std + col] =
-              gj[r * 2 * L_std + L_std + col];
-        }
-      }
-    }
-    engine->run_weights_only(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout_std, L_std, nof_layers, n_std_blocks);
-
-    // Unpack the block outputs into the full grid (symbol-major within the block).
-    const unsigned nf_std = block_prb * NOF_SUBCARRIERS_PER_RB;
-    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-      for (unsigned b = 0; b != n_std_blocks; ++b) {
-        const float* hp = gpu_h + (static_cast<std::size_t>(i_layer) * n_std_blocks + b) * 2 * nout_std;
-        for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
-          span<cf_t> dst =
-              grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + sym).subspan(b * block_prb * 12, nf_std);
-          for (unsigned sc = 0; sc != nf_std; ++sc) {
-            dst[sc] = {hp[2 * (sym * nf_std + sc)], hp[2 * (sym * nf_std + sc) + 1]};
-          }
-        }
-      }
-    }
+    // A/B observability: whether the last stage engaged the matrix kernels (nn=1) - or the
+    // legacy kernels (nn=0, only when the matrix pipelines are unavailable/stale).
+    last_stage_nn = matrix_on;
+  } else {
+    // Engine unavailable (OCUDU_MMSE_NOGPU / stale metallib): the CPU loop below handles the
+    // whole hop (standard blocks included).
+    last_stage_nn = false;
   }
 
   const auto t_gpu_end = steady_clock::now();
 
-  // CPU path for the standard blocks (engine unavailable) and for the edge block.
-  const unsigned cpu_first = gpu_std ? n_std_blocks : 0U;
+  // CPU reference path: only when the engine is unavailable - with the engine ready every
+  // block of the hop (standard + tail/small) already ran on the GPU above.
   const unsigned n_blocks  = n_std_blocks + (rem_prb == 0 ? 0U : 1U);
+  const unsigned cpu_first = engine_ready ? n_blocks : 0U;
+
   for (unsigned b = cpu_first; b != n_blocks; ++b) {
     const unsigned b_prb       = (b < n_std_blocks) ? block_prb : rem_prb;
     const unsigned b_start_prb = (b < n_std_blocks) ? b * block_prb : n_std_blocks * block_prb;
@@ -517,13 +531,15 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   if (time_en) {
     const auto t_finish = steady_clock::now();
     const auto us       = [](auto d) { return std::chrono::duration<double, std::micro>(d).count(); };
-    logger.debug("[mmse_time] prb={} npt={} L={} n_std={} gpu={} | sigma2={:.1f}us corr_std={:.1f}us "
+    logger.debug("[mmse_time] prb={} npt={} L={} n_std={} gpu={} nn={} pad={} | sigma2={:.1f}us corr_std={:.1f}us "
                  "gpu_path={:.1f}us (gpu_wait={:.1f}us) cpu_blocks={:.1f}us finish={:.1f}us | total={:.1f}us",
                  nof_prb,
                  npt,
-                 L_std,
+                 (n_std_blocks != 0 || tail_L == 0) ? L_std : tail_L,
                  n_std_blocks,
-                 gpu_std ? 1 : 0,
+                 hop_gpu ? 1 : 0,
+                 hop_nn ? 1 : 0,
+                 hop_pad,
                  us(t_sigma2 - t_begin),
                  us(t_corr_std - t_sigma2),
                  us(t_gpu_end - t_corr_std),
@@ -531,6 +547,145 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                  us(t_cpu_end - t_gpu_end),
                  us(t_finish - t_cpu_end),
                  us(t_finish - t_begin));
+  }
+}
+
+void port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estimation_stage_args& args,
+                                                               unsigned                           gb_start,
+                                                               unsigned                           n_blk,
+                                                               unsigned                           b_prb,
+                                                               unsigned                           nout,
+                                                               unsigned                           L,
+                                                               unsigned                           npt,
+                                                               bool                               matrix)
+{
+  const unsigned nof_layers = args.dmrs_patterns.size();
+  const unsigned npf        = b_prb * args.dmrs_patterns.front().re_pattern.count();
+  const unsigned nf         = b_prb * NOF_SUBCARRIERS_PER_RB;
+  // Slot strides: legacy kernels use the compact L / nout*L layout; the matrix kernels use
+  // the zero-padded ceil8 strides (Lp/Np) - the host zeroes the pad rows/columns below so the
+  // kernels tile 8x8 seamlessly and the pad regions stay exactly zero.
+  const unsigned Lp = matrix ? ((L + 7u) & ~7u) : L;
+  const unsigned Np = matrix ? ((nout + 7u) & ~7u) : nout;
+
+  // Stage R_hp into the per-system GPU slots (real values in rows o < nout, cols k < L).
+  for (unsigned sys = 0; sys != nof_layers; ++sys) {
+    float* slot = gpu_r_hp + static_cast<std::size_t>(sys) * Np * Lp;
+    for (unsigned o = 0; o != Np; ++o) {
+      if (o < nout) {
+        std::memcpy(slot + static_cast<std::size_t>(o) * Lp,
+                    w_r_hp.data() + static_cast<std::size_t>(o) * L,
+                    static_cast<std::size_t>(L) * sizeof(float));
+        if (Lp > L) {
+          std::memset(slot + static_cast<std::size_t>(o) * Lp + L,
+                      0,
+                      static_cast<std::size_t>(Lp - L) * sizeof(float));
+        }
+      } else {
+        std::memset(slot + static_cast<std::size_t>(o) * Lp, 0, static_cast<std::size_t>(Lp) * sizeof(float));
+      }
+    }
+  }
+
+  // Pack the pilot vectors of all layers and blocks [gb_start, gb_start + n_blk).
+  // Matrix flavor: quad-interleaved qy [layer][nquads][Lp][8] (cols = 2*(b%4)+{re,im}; pad rows
+  // k >= L and the tail-quad columns of non-existent blocks zeroed). Legacy: per-block
+  // real/imag interleaved y [layer][n_blk][2L].
+  if (matrix) {
+    const unsigned nquads = (n_blk + 3u) / 4u;
+    const unsigned n_tail = n_blk & 3u;
+    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+      for (unsigned quad = 0; quad != nquads; ++quad) {
+        float* qbase = gpu_qy + ((static_cast<std::size_t>(i_layer) * nquads + quad) * Lp) * 8;
+        if (quad + 1 == nquads && n_tail != 0) {
+          // Tail quad: full clear (missing-block columns and pad rows in one memset).
+          std::memset(qbase, 0, static_cast<std::size_t>(Lp) * 8 * sizeof(float));
+        } else if (Lp > L) {
+          // Full quad: only the pad rows k in [L, Lp) are not written by the pack.
+          std::memset(qbase + static_cast<std::size_t>(L) * 8,
+                      0,
+                      static_cast<std::size_t>(Lp - L) * 8 * sizeof(float));
+        }
+      }
+      for (unsigned b = 0; b != n_blk; ++b) {
+        const unsigned quad = b / 4u;
+        const unsigned bl   = b % 4u;
+        float* qp = gpu_qy + ((static_cast<std::size_t>(i_layer) * nquads + quad) * Lp) * 8 + 2 * bl;
+        for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
+          span<const cf_t> src =
+              args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan((gb_start + b) * npf, npf);
+          for (unsigned j = 0; j != npf; ++j) {
+            qp[(i_symbol * npf + j) * 8]     = src[j].real();
+            qp[(i_symbol * npf + j) * 8 + 1] = src[j].imag();
+          }
+        }
+      }
+    }
+  } else {
+    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+      for (unsigned b = 0; b != n_blk; ++b) {
+        float* yp = gpu_y + (static_cast<std::size_t>(i_layer) * n_blk + b) * 2 * L;
+        for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
+          span<const cf_t> src =
+              args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan((gb_start + b) * npf, npf);
+          for (unsigned j = 0; j != npf; ++j) {
+            yp[2 * (i_symbol * npf + j)]     = src[j].real();
+            yp[2 * (i_symbol * npf + j) + 1] = src[j].imag();
+          }
+        }
+      }
+    }
+  }
+
+  // A^-1 on the CPU (us-level; the batched 36x36 GPU Gauss-Jordan kernel is barrier-bound,
+  // see PLAN.md 7.0.6), written straight into the engine slot layout of the chosen flavor.
+  for (unsigned sys = 0; sys != nof_layers; ++sys) {
+    std::array<float, 2 * MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS> gj;
+    std::fill(gj.begin(), gj.end(), 0.0F);
+    for (unsigned r = 0; r != L; ++r) {
+      for (unsigned c = 0; c != L; ++c) {
+        gj[r * 2 * L + c] = w_r_pp[r * L + c];
+      }
+      gj[r * 2 * L + L + r] = 1.0F;
+    }
+    gauss_jordan_invert(span<float>(gj.data(), 2 * L * L), L);
+    if (matrix) {
+      // Zero-padded slot: the pad rows/cols must be exactly 0 so the W pad columns come out 0.
+      float* slot = gpu_a + static_cast<std::size_t>(sys) * Lp * Lp;
+      std::memset(slot, 0, static_cast<std::size_t>(Lp) * Lp * sizeof(float));
+      for (unsigned r = 0; r != L; ++r) {
+        std::memcpy(slot + static_cast<std::size_t>(r) * Lp,
+                    &gj[static_cast<std::size_t>(r) * 2 * L + L],
+                    static_cast<std::size_t>(L) * sizeof(float));
+      }
+    } else {
+      for (unsigned r = 0; r != L; ++r) {
+        for (unsigned c = 0; c != L; ++c) {
+          gpu_a[static_cast<std::size_t>(sys) * L * L + r * L + c] = gj[r * 2 * L + L + c];
+        }
+      }
+    }
+  }
+
+  // Weight (W = R_hp . A^-1) + apply (h = W . y) in ONE engine command buffer.
+  if (matrix) {
+    engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_layers, n_blk);
+  } else {
+    engine->run_weights_only(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_layers, n_blk);
+  }
+  // Unpack the block outputs into the full grid (symbol-major within the block; the blocks
+  // start at PRB gb_start so the estimates land at their real frequency offsets).
+  for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+    for (unsigned b = 0; b != n_blk; ++b) {
+      const float* hp = gpu_h + (static_cast<std::size_t>(i_layer) * n_blk + b) * 2 * nout;
+      for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+        span<cf_t> dst = grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + sym)
+                             .subspan(static_cast<std::size_t>(gb_start + b) * b_prb * NOF_SUBCARRIERS_PER_RB, nf);
+        for (unsigned sc = 0; sc != nf; ++sc) {
+          dst[sc] = {hp[2 * (sym * nf + sc)], hp[2 * (sym * nf + sc) + 1]};
+        }
+      }
+    }
   }
 }
 

@@ -130,8 +130,11 @@ std::unique_ptr<time_alignment_estimator> make_ta_estimator()
   return ta_factory->create();
 }
 
-port_channel_estimator::configuration
-make_config(unsigned n_prb = 51, bool two_dmrs_symbols = true, unsigned crb_offset = 0, bool three_dmrs_symbols = false)
+port_channel_estimator::configuration make_config(unsigned n_prb              = 51,
+                                                   bool    two_dmrs_symbols   = true,
+                                                   unsigned crb_offset        = 0,
+                                                   bool    three_dmrs_symbols = false,
+                                                   bool    four_dmrs_symbols  = false)
 {
   port_channel_estimator::configuration cfg;
   cfg.scs          = subcarrier_spacing::kHz15;
@@ -144,12 +147,19 @@ make_config(unsigned n_prb = 51, bool two_dmrs_symbols = true, unsigned crb_offs
   port_channel_estimator::layer_dmrs_pattern pattern;
   pattern.symbols.resize(MAX_NSYMB_PER_SLOT);
   pattern.symbols.set(2);
-  if (two_dmrs_symbols) {
-    pattern.symbols.set(11);
-  }
-  if (three_dmrs_symbols) {
-    // E2E cell config: pos2 + additional position 2 -> symbols {2, 7, 11}.
+  if (four_dmrs_symbols) {
+    // A/B nn configuration: L = 4 DM-RS symbols x 6 RE x 3 PRB = 72 (8-aligned, simdgroup 8x8 path).
     pattern.symbols.set(7);
+    pattern.symbols.set(11);
+    pattern.symbols.set(12);
+  } else {
+    if (two_dmrs_symbols) {
+      pattern.symbols.set(11);
+    }
+    if (three_dmrs_symbols) {
+      // E2E cell config: pos2 + additional position 2 -> symbols {2, 7, 11}.
+      pattern.symbols.set(7);
+    }
   }
   crb_bitmap mask;
   mask.resize(MAX_NOF_PRBS);
@@ -767,8 +777,10 @@ int main()
   // (mimics the real attach traffic: small grant, then full-BW data, retransmissions).
   // -----------------------------------------------------------------------------------
   {
-    const std::array<unsigned, 6> prb_seq    = {6, 52, 4, 52, 12, 25};
-    const std::array<unsigned, 6> sym_seq    = {1, 2, 1, 2, 1, 2};
+    // Includes 1-2 PRB whole hops: narrower than block_prb (3 PRB), they must still run on
+    // the engine (single tail block) instead of the CPU reference path.
+    const std::array<unsigned, 8> prb_seq    = {6, 52, 4, 52, 12, 25, 1, 2};
+    const std::array<unsigned, 8> sym_seq    = {1, 2, 1, 2, 1, 2, 2, 1};
     std::mt19937                  rr(99);
     auto mmse = std::make_unique<port_channel_estimator_metal_mmse_impl>(
         create_interpolator(),
@@ -805,6 +817,249 @@ int main()
       }
     }
     std::printf("Test 7 PASS: 200-slot alternating-config stress (no crash, no NaN)\n");
+  }
+
+  // -----------------------------------------------------------------------------------
+  // Test 8: metal_nn_mmse A/B parity vs metal_mmse (identical host math, different GPU
+  // kernels). 51 PRB, block 3 PRB, 4 DM-RS symbols -> nout_std = 504, L_std = 72: the
+  // simdgroup 8x8 path must be engaged (matrix_accel_ready) and reproduce metal_mmse up
+  // to the cbf16 output quantization. 3 DM-RS symbols -> L_std = 54 (NOT 8-aligned): the
+  // nn flavor must degrade to the legacy kernels without crashing and keep a sane NMSE.
+  // -----------------------------------------------------------------------------------
+  {
+    const unsigned n_prb = 51; // 17 standard blocks of 3 PRB: 4 full quads + 1-block tail quad
+    auto cfg4 = make_config(n_prb, /*two_dmrs_symbols=*/true, 0, /*three=*/false, /*four=*/true);
+    auto pil4 = make_pilots(n_prb, 4);
+    auto cfg3 = make_config(n_prb, /*two_dmrs_symbols=*/true, 0, /*three=*/true);
+    auto pil3 = make_pilots(n_prb, 3);
+
+    auto make_est = [](bool use_nn) {
+      return std::make_unique<port_channel_estimator_metal_mmse_impl>(
+          create_interpolator(),
+          make_ta_estimator(),
+          std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F),
+          3,
+          true,
+          use_nn);
+    };
+    auto legacy = make_est(false);
+    auto nn     = make_est(true);
+    if (!nn->matrix_accel_ready()) {
+      std::printf("Test 8 FAIL: simdgroup 8x8 pipelines not ready (stale ocudu_mmse.metallib?)\n");
+      return -1;
+    }
+
+    const double                            sigma2 = 0.1; // 10 dB SNR
+    std::normal_distribution<float>         gauss(0.0F, static_cast<float>(std::sqrt(sigma2 / 2.0)));
+    const std::vector<unsigned>             syms4 = {2, 7, 11, 12};
+    const std::vector<unsigned>             syms3 = {2, 7, 11};
+    std::vector<std::vector<cf_t>>          a(MAX_NSYMB_PER_SLOT), b(MAX_NSYMB_PER_SLOT);
+    std::vector<std::vector<cf_t>>          h_true(MAX_NSYMB_PER_SLOT);
+    std::vector<cf_t>                       rx_sym(n_prb * 12, {0.0F, 0.0F});
+    grid_fake                               grid(n_prb * 12);
+
+    auto build_scene = [&](const std::vector<unsigned>& syms, dmrs_symbol_list& pilots) {
+      veha_channel ch(rng);
+      for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
+        h_true[l].resize(n_prb * 12);
+        for (unsigned k = 0; k != n_prb * 12; ++k) {
+          h_true[l][k] = ch(k);
+        }
+      }
+      unsigned s = 0;
+      for (unsigned l : syms) {
+        std::fill(rx_sym.begin(), rx_sym.end(), cf_t{0.0F, 0.0F});
+        unsigned j = 0;
+        for (unsigned prb = 0; prb != n_prb; ++prb) {
+          for (unsigned pos = 0; pos != 12; pos += 2) {
+            rx_sym[prb * 12 + pos] = h_true[l][prb * 12 + pos] * pilots.get_symbol(s, 0)[j] + cf_t{gauss(rng), gauss(rng)};
+            ++j;
+          }
+        }
+        grid.set_symbol(l, rx_sym);
+        ++s;
+      }
+    };
+
+    auto collect = [&](port_channel_estimator& est, dmrs_symbol_list& pilots,
+                       port_channel_estimator::configuration& cfg, std::vector<std::vector<cf_t>>& out) {
+      const auto& res = est.compute(grid, 0, pilots, cfg);
+      for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
+        std::vector<cbf16_t> sym(n_prb * 12);
+        res.get_symbol_ch_estimate(sym, l, 0);
+        out[l].resize(n_prb * 12);
+        for (unsigned k = 0; k != n_prb * 12; ++k) {
+          out[l][k] = to_cf(sym[k]);
+        }
+      }
+    };
+
+    // (a) Parity on the 8-aligned configuration (nn engaged, tail quad exercised).
+    double diff = 0.0, pwr = 0.0;
+    for (unsigned r = 0; r != 16; ++r) {
+      build_scene(syms4, pil4);
+      collect(*legacy, pil4, cfg4, a);
+      collect(*nn, pil4, cfg4, b);
+      for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
+        for (unsigned k = 0; k != n_prb * 12; ++k) {
+          const cf_t d = a[l][k] - b[l][k];
+          diff += std::real(d) * std::real(d) + std::imag(d) * std::imag(d);
+          pwr += std::real(a[l][k]) * std::real(a[l][k]) + std::imag(a[l][k]) * std::imag(a[l][k]);
+        }
+      }
+    }
+    const double parity_db = 10.0 * std::log10(diff / pwr);
+    std::printf("Test 8: metal_nn_mmse vs metal_mmse parity (4 DMRS, L=72): %.2f dB\n", parity_db);
+    if (parity_db > -30.0) {
+      std::printf("Test 8 FAIL: nn deviates from metal_mmse beyond the bf16 quantization floor\n");
+      return -1;
+    }
+
+    // (b) Non-8-aligned dims (3 DM-RS -> L=54): the nn flavor must STILL engage the matrix
+    // kernels (zero-padding to Lp=56 inside the staging buffers) and match metal_mmse, and
+    // nn_engaged_last() must report the matrix path - nn=0 is never allowed here.
+    double diff3 = 0.0, pwr3 = 0.0, err3 = 0.0, sig3 = 0.0;
+    bool   engaged = false;
+    for (unsigned r = 0; r != 8; ++r) {
+      build_scene(syms3, pil3);
+      collect(*legacy, pil3, cfg3, a);
+      collect(*nn, pil3, cfg3, b);
+      engaged = engaged || nn->nn_engaged_last();
+      for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
+        for (unsigned k = 0; k != n_prb * 12; ++k) {
+          const cf_t d = a[l][k] - b[l][k];
+          diff3 += std::real(d) * std::real(d) + std::imag(d) * std::imag(d);
+          pwr3 += std::real(a[l][k]) * std::real(a[l][k]) + std::imag(a[l][k]) * std::imag(a[l][k]);
+          const cf_t e = b[l][k] - h_true[l][k];
+          err3 += std::real(e) * std::real(e) + std::imag(e) * std::imag(e);
+          sig3 += std::real(h_true[l][k]) * std::real(h_true[l][k]) + std::imag(h_true[l][k]) * std::imag(h_true[l][k]);
+          if (std::isnan(std::real(b[l][k]))) {
+            std::printf("Test 8 FAIL: NaN in the padded L=54 path\n");
+            return -1;
+          }
+        }
+      }
+    }
+    const double parity3_db = 10.0 * std::log10(diff3 / pwr3);
+    const double nmse3_db   = 10.0 * std::log10(err3 / sig3);
+    std::printf("Test 8: nn parity with L=54 zero-padded to 56 (3 DMRS): %.2f dB | NMSE %.2f dB | nn engaged %d\n",
+                parity3_db, nmse3_db, engaged ? 1 : 0);
+    if (!engaged || parity3_db > -30.0 || nmse3_db > -3.0) {
+      std::printf("Test 8 FAIL: L=54 must run the padded matrix kernels (nn=1) and match metal_mmse\n");
+      return -1;
+    }
+
+    // (c) Engine-level parity on ODD dims (nout=37, L=13 -> Np=40, Lp=16): exercises the
+    // ceil8 tiling, pad-zeroing and the output truncation guards directly on the kernels,
+    // against a CPU double reference and the legacy engine.
+    {
+      const unsigned nout = 37, L = 13, nsys = 2, nblk = 5;
+      const unsigned Np = (nout + 7) & ~7u, Lp = (L + 7) & ~7u;
+      const unsigned nquads = (nblk + 3) / 4;
+      std::uniform_real_distribution<float> uni(-0.5F, 0.5F);
+      std::vector<float> r_hp_pad(static_cast<std::size_t>(nsys) * Np * Lp, 0.0F);
+      std::vector<float> a_inv_pad(static_cast<std::size_t>(nsys) * Lp * Lp, 0.0F);
+      std::vector<float> w_pad(static_cast<std::size_t>(nsys) * Np * Lp, 0.0F);
+      std::vector<float> y(static_cast<std::size_t>(nsys) * nblk * 2 * L, 0.0F);
+      std::vector<float> qy(static_cast<std::size_t>(nsys) * nquads * Lp * 8, 0.0F);
+      std::vector<float> h_nn(static_cast<std::size_t>(nsys) * nblk * 2 * nout, 0.0F);
+      std::vector<float> r_hp_c(static_cast<std::size_t>(nsys) * nout * L);
+      std::vector<float> a_inv_c(static_cast<std::size_t>(nsys) * L * L);
+      std::vector<float> w_c(static_cast<std::size_t>(nsys) * nout * L);
+      std::vector<float> h_c(static_cast<std::size_t>(nsys) * nblk * 2 * nout, 0.0F);
+      for (unsigned s = 0; s != nsys; ++s) {
+        for (unsigned o = 0; o != nout; ++o) {
+          for (unsigned k = 0; k != L; ++k) {
+            const float v = uni(rng);
+            r_hp_pad[(static_cast<std::size_t>(s) * Np + o) * Lp + k] = v;
+            r_hp_c[(static_cast<std::size_t>(s) * nout + o) * L + k]  = v;
+          }
+        }
+        for (unsigned r = 0; r != L; ++r) {
+          for (unsigned c = 0; c != L; ++c) {
+            const float v = uni(rng);
+            a_inv_pad[(static_cast<std::size_t>(s) * Lp + r) * Lp + c] = v;
+            a_inv_c[(static_cast<std::size_t>(s) * L + r) * L + c]     = v;
+          }
+        }
+      }
+      for (unsigned s = 0; s != nsys; ++s) {
+        for (unsigned blk = 0; blk != nblk; ++blk) {
+          for (unsigned k = 0; k != L; ++k) {
+            const float re = uni(rng), im = uni(rng);
+            y[(static_cast<std::size_t>(s) * nblk + blk) * 2 * L + 2 * k]     = re;
+            y[(static_cast<std::size_t>(s) * nblk + blk) * 2 * L + 2 * k + 1] = im;
+            const unsigned quad = blk / 4, bl = blk % 4;
+            float* qrow = &qy[((static_cast<std::size_t>(s) * nquads + quad) * Lp + k) * 8 + 2 * bl];
+            qrow[0] = re;
+            qrow[1] = im;
+          }
+        }
+      }
+      // CPU double reference.
+      std::vector<double> w_ref(static_cast<std::size_t>(nsys) * nout * L), h_ref(static_cast<std::size_t>(nsys) * nblk * 2 * nout, 0.0);
+      for (unsigned s = 0; s != nsys; ++s) {
+        for (unsigned o = 0; o != nout; ++o) {
+          for (unsigned c = 0; c != L; ++c) {
+            double acc = 0.0;
+            for (unsigned k = 0; k != L; ++k) {
+              acc += r_hp_c[(static_cast<std::size_t>(s) * nout + o) * L + k] * a_inv_c[(static_cast<std::size_t>(s) * L + k) * L + c];
+            }
+            w_ref[(static_cast<std::size_t>(s) * nout + o) * L + c] = acc;
+          }
+        }
+      }
+      for (unsigned s = 0; s != nsys; ++s) {
+        for (unsigned blk = 0; blk != nblk; ++blk) {
+          for (unsigned o = 0; o != nout; ++o) {
+            double re = 0.0, im = 0.0;
+            for (unsigned k = 0; k != L; ++k) {
+              const double wv = w_ref[(static_cast<std::size_t>(s) * nout + o) * L + k];
+              re += wv * y[(static_cast<std::size_t>(s) * nblk + blk) * 2 * L + 2 * k];
+              im += wv * y[(static_cast<std::size_t>(s) * nblk + blk) * 2 * L + 2 * k + 1];
+            }
+            h_ref[(static_cast<std::size_t>(s) * nblk + blk) * 2 * nout + 2 * o]     = re;
+            h_ref[(static_cast<std::size_t>(s) * nblk + blk) * 2 * nout + 2 * o + 1] = im;
+          }
+        }
+      }
+      metal::mmse_engine eng;
+      if (!eng.init() || !eng.init_matrix_pipelines()) {
+        std::printf("Test 8c SKIPPED: Metal/matrix pipelines unavailable\n");
+      } else {
+        const bool ok_nn = eng.run_nn(a_inv_pad.data(), r_hp_pad.data(), w_pad.data(), qy.data(), h_nn.data(), nout, L,
+                                      nsys, nblk);
+        const bool ok_legacy = eng.run_weights_only(a_inv_c.data(), r_hp_c.data(), w_c.data(), y.data(), h_c.data(),
+                                                    nout, L, nsys, nblk);
+        double wmax = 0.0, hmax = 0.0, hleg = 0.0;
+        unsigned wbad = 0, hbad = 0, hlegbad = 0;
+        for (unsigned s = 0; s != nsys; ++s) {
+          for (unsigned o = 0; o != nout; ++o) {
+            for (unsigned c = 0; c != L; ++c) {
+              const double g = w_pad[(static_cast<std::size_t>(s) * Np + o) * Lp + c];
+              const double d = std::abs(g - w_ref[(static_cast<std::size_t>(s) * nout + o) * L + c]);
+              wmax = std::max(wmax, d);
+              if (d > 1e-3) wbad++;
+            }
+          }
+        }
+        for (std::size_t i = 0; i != h_nn.size(); ++i) {
+          const double d  = std::abs(static_cast<double>(h_nn[i]) - h_ref[i]);
+          const double dl = std::abs(static_cast<double>(h_c[i]) - h_ref[i]);
+          hmax = std::max(hmax, d);
+          hleg = std::max(hleg, dl);
+          if (d > 1e-3) hbad++;
+          if (dl > 1e-3) hlegbad++;
+        }
+        std::printf("Test 8c: odd dims nout=%u L=%u (padded %ux%u): nn W err %.2e h err %.2e | legacy h err %.2e\n",
+                    nout, L, Np, Lp, wmax, hmax, hleg);
+        if (!ok_nn || !ok_legacy || wbad != 0 || hbad != 0 || hlegbad != 0) {
+          std::printf("Test 8c FAIL: padded kernels deviate from the reference (wbad=%u hbad=%u)\n", wbad, hbad);
+          return -1;
+        }
+      }
+    }
+    std::printf("Test 8 PASS: metal_nn_mmse parity + zero-padding (nn always engaged)\n");
   }
 
   std::printf("All tests PASSED\n");

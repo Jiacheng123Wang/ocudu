@@ -41,11 +41,16 @@ public:
   /// \param[in] stats_estimator Channel statistics provider (v1: fixed constants).
   /// \param[in] block_prb       Time-frequency block size in PRBs (1..3).
   /// \param[in] compensate_cfo  Whether CFO compensation is active.
+  /// \param[in] use_matrix_engine Whether to run the K1b/K2 work on the simdgroup_matrix
+  ///                            8x8 pipelines (metal_nn_mmse A/B twin); the statistics,
+  ///                            correlation math and CPU inversion are identical to the
+  ///                            legacy kernel path, so only the GPU kernels differ.
   port_channel_estimator_metal_mmse_impl(std::unique_ptr<interpolator>                        interp,
                                          std::unique_ptr<time_alignment_estimator>            ta_estimator_,
                                          std::shared_ptr<const channel_statistics_estimator>  stats_estimator_,
                                          unsigned                                             block_prb_,
-                                         bool                                                 compensate_cfo_ = true);
+                                         bool                                                 compensate_cfo_ = true,
+                                         bool                                                 use_matrix_engine_ = false);
 
   /// Destructor (releases the aligned GPU staging buffers).
   ~port_channel_estimator_metal_mmse_impl() override;
@@ -57,6 +62,15 @@ public:
   /// Returns the GPU-side duration of the last Metal engine operation in microseconds
   /// (0 when the engine is unavailable).
   double last_gpu_wait_us() const { return engine ? engine->last_gpu_wait_us() : 0.0; }
+
+  /// Returns whether the simdgroup 8x8 (metal_nn_mmse) pipelines are compiled and the
+  /// estimator runs them on the standard blocks (dims are zero-padded to 8-alignment
+  /// automatically; A/B observability: nn=0 in [mmse_time] then only means the engine
+  /// itself was unavailable, never a dims fallback).
+  bool matrix_accel_ready() const { return use_matrix_engine && matrix_ready; }
+
+  /// Whether the LAST processed fd/td estimation stage actually ran the matrix kernels.
+  bool nn_engaged_last() const { return last_stage_nn; }
 
 private:
   // See the base class documentation.
@@ -88,21 +102,55 @@ private:
                                          unsigned&                                      nout,
                                          unsigned&                                      L);
 
+  /// \brief Runs one GPU batch over n_blk equal-width (b_prb PRB) blocks on the engine and
+  /// unpacks the estimates into the grid. Covers BOTH the standard blocks and the tail block
+  /// (or a whole hop narrower than block_prb): with the engine ready, no hop block ever runs
+  /// the CPU reference math. The caller must have filled w_r_pp / w_r_hp via
+  /// build_correlation_matrices(b_prb ...) beforehand; the pilot view must stay alive.
+  ///
+  /// \param matrix Selects the metal_nn_mmse simdgroup path (zero-padded staging + run_nn)
+  ///               vs the legacy kernels (run_weights_only).
+  /// \param npt    Number of DM-RS symbols of the hop (the block pilot count is
+  ///               L = npt x b_prb x 6 for the type-1 comb-2 pattern used here).
+  void run_engine_blocks(const fd_td_estimation_stage_args& args,
+                         unsigned                           gb_start,
+                         unsigned                           n_blk,
+                         unsigned                           b_prb,
+                         unsigned                           nout,
+                         unsigned                           L,
+                         unsigned                           npt,
+                         bool                               matrix);
+
   /// Metal compute engine (K1 batched inversion + K2 batched block matmul); the CPU reference
   /// math remains as the automatic fallback when the engine is unavailable or fails.
   std::unique_ptr<ocudu::metal::mmse_engine> engine;
   bool                                       engine_ready = false;
+
+  /// metal_nn_mmse (matrix-accelerated) flavor: the engine also compiles the simdgroup 8x8
+  /// kernels and the standard-block path ALWAYS runs them - dims that are not multiples of 8
+  /// are zero-padded to ceil8(nout)/ceil8(L) by the packing code (see ocudu_mmse_*_matrix.metal
+  /// for the padding contract). nn=0 can therefore only mean the matrix engine itself is
+  /// unavailable (stale metallib, NOGPU); the CPU path remains the fallback for that case.
+  bool use_matrix_engine = false;
+  bool matrix_ready      = false;
+
+  /// Whether the last fd/td estimation stage engaged the simdgroup 8x8 kernels
+  /// (diagnostics/A-B observability; see nn_engaged_last()).
+  bool last_stage_nn = false;
 
   /// Maximum number of full blocks per slot for the configured block size.
   unsigned max_blocks;
 
   /// GPU staging buffers (4KB aligned, engine lifetime):
   /// a_slots [MAX_LAYERS][36][36], w_slots [MAX_LAYERS][504][36],
-  /// y_slots [MAX_LAYERS][max_blocks][2*36], h_slots [MAX_LAYERS][max_blocks][2*504].
+  /// y_slots [MAX_LAYERS][max_blocks][2*36], h_slots [MAX_LAYERS][max_blocks][2*504],
+  /// qy_slots (metal_nn_mmse only) [MAX_LAYERS][ceil(max_blocks/4)][36][8]: quad-packed
+  /// real pilot matrix for the simdgroup 8x8 apply kernel.
   float* gpu_a = nullptr;
   float* gpu_r_hp = nullptr;
   float* gpu_w = nullptr;
   float* gpu_y = nullptr;
+  float* gpu_qy = nullptr;
   float* gpu_h = nullptr;
 
   /// Statistics provider (fixed constants in v1).

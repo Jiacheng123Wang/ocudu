@@ -79,7 +79,9 @@ struct du_low_unit_expert_upper_phy_config {
   /// Use one of these options:
   /// - \c cpu: classical LS + FD smoothing + TD strategy (default, all platforms), or
   /// - \c metal_mmse: 2D time-frequency block MMSE, Metal-accelerated (Apple Silicon only;
-  ///   the MMSE estimator ignores the fd/td strategies above).
+  ///   the MMSE estimator ignores the fd/td strategies above), or
+  /// - \c metal_nn_mmse: same MMSE math on the GPU hardware matrix unit
+  ///   (simdgroup_matrix 8x8; A/B twin of metal_mmse, Apple Silicon only).
   std::string pusch_channel_estimator_algo = "cpu";
   /// \brief MMSE estimator: fixed RMS delay spread (in microseconds) - v1 constant.
   float pusch_channel_estimator_mmse_tau_rms_us = 0.37F;

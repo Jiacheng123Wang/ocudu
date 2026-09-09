@@ -30,6 +30,9 @@ enum class port_channel_estimator_algorithm {
   cpu = 0,
   /// 2D time-frequency block MMSE estimator, Metal-accelerated (Apple Silicon).
   metal_mmse,
+  /// 2D time-frequency block MMSE estimator, Apple GPU hardware matrix unit
+  /// (simdgroup_matrix 8x8) accelerated: same math as metal_mmse, A/B comparison twin.
+  metal_nn_mmse,
   /// HELENA AI estimator, Core ML (Apple Neural Engine) accelerated (Apple Silicon).
   helena
 };

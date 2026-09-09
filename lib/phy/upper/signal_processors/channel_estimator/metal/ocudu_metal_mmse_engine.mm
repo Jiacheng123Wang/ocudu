@@ -27,6 +27,9 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    inv_pipe    = nil;
   id<MTLComputePipelineState>    weights_pipe = nil;
   id<MTLComputePipelineState>    apply_pipe  = nil;
+  // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
+  id<MTLComputePipelineState>    weights_matrix_pipe = nil;
+  id<MTLComputePipelineState>    apply_matrix_pipe  = nil;
   std::unordered_map<const void*, id<MTLBuffer>> buffer_cache;
   std::mutex                                     cache_mutex;   // compute() may run on executor threads
   double                                         last_gpu_us = 0.0;
@@ -95,6 +98,30 @@ struct mmse_engine_impl {
       ocudulog::fetch_basic_logger("PHY").debug("MMSE engine: metallib loaded from {}", loaded);
     }
     return library != nil;
+  }
+
+  // Loads and compiles the metal_nn_mmse pipelines (simdgroup_matrix 8x8 kernels).
+  // Called by mmse_engine::init_matrix_pipelines() after load_library(); the legacy
+  // pipelines stay untouched so the engine keeps working when the kernels are absent.
+  bool load_matrix_pipelines()
+  {
+    NSError*          err    = nil;
+    id<MTLFunction>   wm_fn  = [library newFunctionWithName:@"mmse_weights_matrix"];
+    id<MTLFunction>   am_fn  = [library newFunctionWithName:@"mmse_apply_matrix"];
+    if (wm_fn == nil || am_fn == nil) {
+      ocudulog::fetch_basic_logger("PHY").debug(
+          "MMSE engine: matrix-accelerated kernels not found in the metallib (legacy kernels only)");
+      return false;
+    }
+    weights_matrix_pipe = [device newComputePipelineStateWithFunction:wm_fn
+                                                              options:MTLPipelineOptionNone
+                                                           reflection:nil
+                                                                error:&err];
+    apply_matrix_pipe   = [device newComputePipelineStateWithFunction:am_fn
+                                                              options:MTLPipelineOptionNone
+                                                           reflection:nil
+                                                                error:&err];
+    return weights_matrix_pipe != nil && apply_matrix_pipe != nil;
   }
 };
 
@@ -357,6 +384,98 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
   [enc setBytes:&aparams length:sizeof(aparams) atIndex:3];
   [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
+
+  [enc endEncoding];
+  [cb commit];
+  [cb waitUntilCompleted];
+
+  if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
+    return false;
+  }
+  if (cb.GPUStartTime != 0 && cb.GPUEndTime != 0) {
+    e->last_gpu_us = (cb.GPUEndTime - cb.GPUStartTime) * 1e6;
+  }
+  return true;
+}
+
+bool mmse_engine::init_matrix_pipelines()
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if (e == nullptr || e->device == nil || e->library == nil) {
+    return false;
+  }
+  if (e->weights_matrix_pipe != nil && e->apply_matrix_pipe != nil) {
+    return true;
+  }
+  return e->load_matrix_pipelines();
+}
+
+bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const float* qy, float* h, unsigned nout,
+                         unsigned L, unsigned nof_systems, unsigned nof_blocks)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if (e == nullptr || e->device == nil || e->weights_matrix_pipe == nil || e->apply_matrix_pipe == nil) {
+    return false;
+  }
+  // The kernels always run: any non-zero nout/L are zero-padded by the caller to the next
+  // multiples of 8 (Np/Lp below) inside the staging buffers - see the *_matrix.metal
+  // comments for the padding contract. The apply kernel truncates the output back to the
+  // real nout, so h keeps the legacy [systems][blocks][2*nout] layout.
+  if (nout == 0 || L == 0 || nof_systems == 0 || nof_blocks == 0) {
+    return false;
+  }
+  const uint32_t Lp     = (L + 7u) & ~7u;    // ceil8(L): row stride of the w/r_hp/a_inv regions
+  const uint32_t Np     = (nout + 7u) & ~7u; // ceil8(nout)
+  const uint32_t nquads = (nof_blocks + 3u) / 4u; // 4 blocks per quad, tail quad may be partial
+
+  id<MTLBuffer> ai_buf = e->wrap(a_inv, static_cast<NSUInteger>(nof_systems) * Lp * Lp * sizeof(float));
+  id<MTLBuffer> rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * Np * Lp * sizeof(float));
+  id<MTLBuffer> w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * Np * Lp * sizeof(float));
+  id<MTLBuffer> qy_buf = e->wrap(qy, static_cast<NSUInteger>(nof_systems) * nquads * Lp * 8 * sizeof(float));
+  id<MTLBuffer> h_buf  = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
+  if (ai_buf == nil || rp_buf == nil || w_buf == nil || qy_buf == nil || h_buf == nil) {
+    return false;
+  }
+
+  // Parameter structs mirror the MSL constant structs of ocudu_mmse_*_matrix.metal
+  // (the kernels receive the ACTUAL dims and derive the padded ones themselves).
+  struct mmse_weights_matrix_params {
+    uint32_t nout;
+    uint32_t L;
+    uint32_t nof_systems;
+  } wm{nout, L, nof_systems};
+  struct mmse_apply_matrix_params {
+    uint32_t nout;
+    uint32_t L;
+    uint32_t nof_systems;
+    uint32_t nof_blocks;
+  } am{nout, L, nof_systems, nof_blocks};
+
+  // One command buffer, two ordered dispatches (W = R_hp . A^-1, then h = W . Y).
+  // One SIMD-group (32 threads) computes one 8x8 output tile in both kernels; the tile
+  // grids are ceil(nout/8) x ceil(L/8), so any dims are covered by the zero padding.
+  id<MTLCommandBuffer> cb = [e->queue commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+
+  [enc setComputePipelineState:e->weights_matrix_pipe];
+  [enc setBuffer:rp_buf offset:0 atIndex:0];
+  [enc setBuffer:ai_buf offset:0 atIndex:1];
+  [enc setBuffer:w_buf offset:0 atIndex:2];
+  [enc setBytes:&wm length:sizeof(wm) atIndex:3];
+  {
+    const NSUInteger w_tgs = static_cast<NSUInteger>(nof_systems) * (Np / 8) * (Lp / 8);
+    [enc dispatchThreadgroups:MTLSizeMake(w_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  }
+
+  [enc setComputePipelineState:e->apply_matrix_pipe];
+  [enc setBuffer:w_buf offset:0 atIndex:0];
+  [enc setBuffer:qy_buf offset:0 atIndex:1];
+  [enc setBuffer:h_buf offset:0 atIndex:2];
+  [enc setBytes:&am length:sizeof(am) atIndex:3];
+  {
+    const NSUInteger a_tgs = static_cast<NSUInteger>(nof_systems) * nquads * (Np / 8);
+    [enc dispatchThreadgroups:MTLSizeMake(a_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  }
 
   [enc endEncoding];
   [cb commit];

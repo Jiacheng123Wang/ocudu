@@ -347,7 +347,9 @@ struct upper_phy_factory_configuration {
   /// Use one of these options:
   /// - \c cpu: classical LS + FD smoothing + TD strategy (default, all platforms), or
   /// - \c metal_mmse: 2D time-frequency block MMSE, Metal-accelerated (Apple Silicon only;
-  ///   the MMSE estimator ignores the fd/td strategies above).
+  ///   the MMSE estimator ignores the fd/td strategies above), or
+  /// - \c metal_nn_mmse: same MMSE math on the GPU hardware matrix unit
+  ///   (simdgroup_matrix 8x8; A/B twin of metal_mmse, Apple Silicon only).
   std::string pusch_channel_estimator_algo = "cpu";
   /// \brief MMSE estimator: fixed RMS delay spread (in microseconds) - v1 constant.
   /// \remark The estimation-backed provider arrives with the v2 statistics module.

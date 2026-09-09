@@ -186,10 +186,10 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
     return "Invalid PUSCH channel estimator time-domain strategy. Accepted values [average,interpolate]";
   };
   auto pusch_channel_estimator_algo_method_check = [](const std::string& value) -> std::string {
-    if ((value == "cpu") || (value == "metal_mmse") || (value == "helena")) {
+    if ((value == "cpu") || (value == "metal_mmse") || (value == "metal_nn_mmse") || (value == "helena")) {
       return {};
     }
-    return "Invalid PUSCH channel estimator algorithm. Accepted values [cpu,metal_mmse,helena]";
+    return "Invalid PUSCH channel estimator algorithm. Accepted values [cpu,metal_mmse,metal_nn_mmse,helena]";
   };
   auto pusch_channel_equalizer_algorithm_method_check = [](const std::string& value) -> std::string {
     if ((value == "zf") || (value == "mmse")) {
@@ -267,7 +267,7 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
   add_option(app,
              "--pusch_channel_estimator_algo",
              expert_phy_params.pusch_channel_estimator_algo,
-             "PUSCH channel estimator algorithm: cpu, metal_mmse and helena (Apple Silicon only).")
+             "PUSCH channel estimator algorithm: cpu, metal_mmse, metal_nn_mmse and helena (Apple Silicon only).")
       ->capture_default_str()
       ->check(pusch_channel_estimator_algo_method_check);
 

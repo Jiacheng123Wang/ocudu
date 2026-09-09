@@ -39,8 +39,10 @@ public:
   {
     ocudu_assert(ta_estimator_factory, "Invalid TA estimator factory.");
 #if !defined(OCUDU_METAL_CHEST)
-    if (algo == port_channel_estimator_algorithm::metal_mmse || algo == port_channel_estimator_algorithm::helena) {
-      report_error("The 'metal_mmse'/'helena' channel estimators are only available on Apple Silicon macOS builds.");
+    if (algo == port_channel_estimator_algorithm::metal_mmse || algo == port_channel_estimator_algorithm::metal_nn_mmse ||
+        algo == port_channel_estimator_algorithm::helena) {
+      report_error("The 'metal_mmse'/'metal_nn_mmse'/'helena' channel estimators are only available on Apple Silicon "
+                   "macOS builds.");
     }
 #endif
   }
@@ -52,14 +54,19 @@ public:
   {
     std::unique_ptr<interpolator> interp = create_interpolator();
 
-    if (algo == port_channel_estimator_algorithm::metal_mmse) {
+    if (algo == port_channel_estimator_algorithm::metal_mmse ||
+        algo == port_channel_estimator_algorithm::metal_nn_mmse) {
 #if defined(OCUDU_METAL_CHEST)
+      // metal_nn_mmse shares the metal_mmse implementation (same statistics/correlation math and
+      // CPU inversion) and only switches the GPU kernels to the simdgroup_matrix 8x8 variants, so
+      // the two algorithms are A/B twins: measured differences come from the kernels alone.
       return std::make_unique<port_channel_estimator_metal_mmse_impl>(
           std::move(interp),
           ta_estimator_factory->create(),
           std::make_shared<channel_statistics_estimator_fixed>(mmse_tau_rms_s, mmse_fd_hz),
           mmse_block_prb,
-          compensate_cfo);
+          compensate_cfo,
+          algo == port_channel_estimator_algorithm::metal_nn_mmse);
 #else
       return nullptr;
 #endif

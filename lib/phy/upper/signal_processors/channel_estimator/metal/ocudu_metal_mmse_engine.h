@@ -85,6 +85,45 @@ public:
   bool run_weights_only(const float* a_inv, const float* r_hp, float* w, const float* y, float* h, unsigned nout,
                         unsigned L, unsigned nof_systems, unsigned nof_blocks);
 
+  /// \brief Compiles the simdgroup_matrix 8x8 pipelines of the metal_nn_mmse variant
+  /// (mmse_weights_matrix / mmse_apply_matrix, ocudu_mmse_*_matrix.metal).
+  ///
+  /// Call after init(); idempotent. Returns false when the loaded .metallib does not
+  /// contain the matrix kernels (e.g. it predates this feature) - the caller then keeps
+  /// the legacy run_weights_only()/CPU path as the automatic fallback.
+  bool init_matrix_pipelines();
+
+  /// \brief A/B twin of run_weights_only() on the GPU hardware matrix unit:
+  /// W = R_hp . A^-1 (mmse_weights_matrix) and h = W . Y (mmse_apply_matrix) in ONE
+  /// command buffer. The kernels ALWAYS run on the hardware matrix unit: any nout/L are
+  /// zero-padded by the caller to ceil8 (Np/Lp) inside the staging buffers and the apply
+  /// kernel truncates the output back to the real nout - see the *_matrix.metal comments
+  /// for the padding contract. Only a zero dimension batch returns false (no GPU work).
+  ///
+  /// Staging layouts (all pad rows/columns beyond the real nout/L must be zero):
+  /// \param[in]  a_inv       [systems][Lp][Lp] row-major inverted matrices, Lp = ceil8(L)
+  ///                         (CPU Gauss-Jordan result in rows/cols < L, zero elsewhere).
+  /// \param[in]  r_hp        [systems][Np][Lp] row-major cross-correlation matrices,
+  ///                         Np = ceil8(nout), real values in rows < nout and cols < L.
+  /// \param[out] w           [systems][Np][Lp] weight matrices (written fully; the pad
+  ///                         columns/rows come out exactly zero).
+  /// \param[in]  qy          [systems][ceil(nof_blocks/4)][Lp][8] row-major REAL pilot
+  ///                         matrix packed by the caller: row k = block pilot (symbol-major),
+  ///                         col 2*(block%4)+{0,1} = {real,imag} of that block; rows >= L
+  ///                         and the columns of the non-existent tail-quad blocks must be 0.
+  /// \param[out] h           [systems][nof_blocks][2*nout] real/imag interleaved outputs
+  ///                         (identical layout to run_weights_only; padded rows dropped).
+  /// \return True on success.
+  bool run_nn(const float* a_inv,
+              const float* r_hp,
+              float*       w,
+              const float* qy,
+              float*       h,
+              unsigned     nout,
+              unsigned     L,
+              unsigned     nof_systems,
+              unsigned     nof_blocks);
+
   /// Returns the GPU-side duration of the last operation in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;
 
