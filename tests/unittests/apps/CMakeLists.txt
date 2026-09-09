@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 # SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
-
 add_subdirectory(units)
 add_subdirectory(helpers)
 
@@ -38,6 +37,15 @@ target_link_libraries(yaml_roundtrip_du_test PRIVATE
         ocudu_flexible_o_du_split_dynamic
         ${YAML_ROUNDTRIP_LINKS})
 gtest_discover_tests(yaml_roundtrip_du_test)
+
+add_executable(du_ssb_config_validation_test du_ssb_config_validation_test.cpp)
+target_include_directories(du_ssb_config_validation_test PRIVATE ${YAML_ROUNDTRIP_INCLUDES})
+target_compile_definitions(du_ssb_config_validation_test PRIVATE CONFIGS_DIR="${CMAKE_SOURCE_DIR}/configs")
+target_link_libraries(du_ssb_config_validation_test PRIVATE
+        odu_base
+        ocudu_flexible_o_du_split_dynamic
+        ${YAML_ROUNDTRIP_LINKS})
+gtest_discover_tests(du_ssb_config_validation_test)
 
 # CU. The cu app does not have a base static library, so we compile its appconfig sources directly into the test target.
 add_executable(yaml_roundtrip_cu_test

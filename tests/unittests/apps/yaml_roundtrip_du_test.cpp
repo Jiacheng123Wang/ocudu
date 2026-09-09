@@ -94,4 +94,22 @@ TEST(du_pws_config_test, roundtrip)
   assert_roundtrip(YAML::Dump(cfg), &load_and_emit, "du pws");
 }
 
+TEST(du_multiple_ssb_beams_config_test, roundtrip)
+{
+  // Band n78 with 30kHz SSB SCS gives L_max 8, so SSB indexes 0 to 7 are valid.
+  const std::string yaml_text = read_file(CONFIGS + "/du_rf_b200_tdd_n78_20mhz.yml");
+
+  YAML::Node node = YAML::Load(yaml_text);
+  YAML::Node beams;
+  for (unsigned ssb_index : {0U, 3U, 7U}) {
+    YAML::Node beam_node;
+    beam_node["ssb_index"] = ssb_index;
+    beam_node["beam_id"]   = ssb_index * 2;
+    beams.push_back(beam_node);
+  }
+  node["cell_cfg"]["ssb"]["beams"] = beams;
+
+  assert_roundtrip(YAML::Dump(node), &load_and_emit, "du multiple SSB beams");
+}
+
 } // namespace

@@ -135,6 +135,12 @@ static YAML::Node build_du_high_ssb_section(const du_high_unit_ssb_config& confi
 {
   YAML::Node node;
 
+  for (const auto& ssb_beam : config.beams) {
+    YAML::Node beam_node;
+    beam_node["ssb_index"] = ssb_beam.ssb_index;
+    beam_node["beam_id"]   = ssb_beam.beam_id;
+    node["beams"].push_back(beam_node);
+  }
   node["ssb_period"]          = config.ssb_period_msec;
   node["ssb_block_power_dbm"] = config.ssb_block_power;
   node["pss_to_sss_epre_db"]  = config.pss_to_sss_epre == ssb_pss_to_sss_epre::dB_0 ? "0" : "3";

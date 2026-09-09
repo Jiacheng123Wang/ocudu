@@ -15,6 +15,7 @@
 #include "ocudu/ran/pucch/pucch_info.h"
 #include "ocudu/ran/pucch/pucch_mapping.h"
 #include "ocudu/ran/rb_id.h"
+#include "ocudu/ran/ssb/ssb_mapping.h"
 #include "ocudu/ran/transform_precoding/transform_precoding_helpers.h"
 #include "ocudu/rlc/rlc_config.h"
 #include "ocudu/support/math/math_utils.h"
@@ -1338,6 +1339,67 @@ static bool validate_tdd_ul_dl_unit_config(const du_high_unit_tdd_ul_dl_config& 
   return true;
 }
 
+static bool validate_ssb_cell_unit_config(const du_high_unit_ssb_config& config, nr_band band, arfcn_t dl_arfcn)
+{
+  if (config.beams.empty()) {
+    fmt::print("At least one SSB candidate must be transmitted.\n");
+    return false;
+  }
+
+  const subcarrier_spacing ssb_scs = band_helper::get_most_suitable_ssb_scs(band, subcarrier_spacing::kHz15);
+  const uint8_t            l_max   = ssb_get_L_max(ssb_scs, dl_arfcn, band);
+
+  ssb_bitmap_t transmitted_ssbs;
+  transmitted_ssbs.set_L_max(l_max);
+  transmitted_ssbs.reset();
+
+  for (const auto& ssb_beam : config.beams) {
+    if (ssb_beam.ssb_index >= l_max) {
+      fmt::print("SSB index {} is out of range. With band n{} and SSB SCS {}kHz, L_max is {}.\n",
+                 ssb_beam.ssb_index,
+                 fmt::underlying(band),
+                 scs_to_khz(ssb_scs),
+                 l_max);
+      return false;
+    }
+    if (transmitted_ssbs.test(ssb_beam.ssb_index)) {
+      fmt::print("SSB index {} is configured more than once.\n", ssb_beam.ssb_index);
+      return false;
+    }
+    if (!is_beam_id_valid(to_beam_id(ssb_beam.beam_id))) {
+      fmt::print("Beam ID {} of SSB index {} is out of range. Valid range is [0, {}).\n",
+                 ssb_beam.beam_id,
+                 ssb_beam.ssb_index,
+                 max_nof_beams);
+      return false;
+    }
+    transmitted_ssbs.set(ssb_beam.ssb_index);
+  }
+
+  // As per inOneGroup, ssb-PositionsInBurst, ServingCellConfigCommonSIB, TS 38.331, the non-zero groups of 8 bits must
+  // all be equal.
+  if (l_max == 64) {
+    static constexpr uint8_t nof_groups_and_bits_per_gr = 8;
+    std::optional<uint8_t>   first_non_zero_group;
+    for (uint8_t group_idx = 0; group_idx != nof_groups_and_bits_per_gr; ++group_idx) {
+      const auto group_8_bits =
+          transmitted_ssbs.extract<uint8_t>(nof_groups_and_bits_per_gr * group_idx, nof_groups_and_bits_per_gr);
+      if (group_8_bits == 0) {
+        continue;
+      }
+      if (!first_non_zero_group.has_value()) {
+        first_non_zero_group.emplace(group_8_bits);
+      } else if (group_8_bits != *first_non_zero_group) {
+        fmt::print("Invalid set of SSB indexes. With L_max 64, the transmitted SSB indexes must repeat the same "
+                   "pattern in every group of 8 candidates.\n");
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 static bool validate_dl_ul_arfcn_and_band(const du_high_unit_base_cell_config& config)
 {
   const nr_band band = config.band.value_or(band_helper::get_band_from_dl_arfcn(config.dl_f_ref_arfcn));
@@ -1752,6 +1814,10 @@ static bool validate_base_cell_unit_config(const du_high_unit_base_cell_config& 
     fmt::print("Common SCS {}kHz is not equal to SSB SCS {}kHz. Different SCS for common and SSB is not supported.\n",
                scs_to_khz(config.common_scs),
                scs_to_khz(ssb_scs));
+    return false;
+  }
+
+  if (!validate_ssb_cell_unit_config(config.ssb_cfg, band, config.dl_f_ref_arfcn)) {
     return false;
   }
 

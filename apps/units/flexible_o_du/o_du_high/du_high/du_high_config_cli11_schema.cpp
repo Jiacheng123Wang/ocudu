@@ -549,8 +549,24 @@ static void configure_cli11_mac_cell_group_args(CLI::App& app, du_high_unit_mac_
   configure_cli11_mac_sr_args(*sr_subcmd, mcg_params.sr_cfg);
 }
 
+static void configure_cli11_ssb_beam_args(CLI::App& app, du_high_unit_ssb_beam_config& beam_params)
+{
+  add_option(app, "--ssb_index", beam_params.ssb_index, "Index of the SSB candidate within the SSB burst")
+      ->capture_default_str()
+      ->range(0, static_cast<int>(MAX_NOF_SSB_CANDIDATES - 1));
+  add_option(app, "--beam_id", beam_params.beam_id, "Beam that carries the SSB candidate")
+      ->capture_default_str()
+      ->range(0, static_cast<int>(max_nof_beams - 1));
+}
+
 static void configure_cli11_ssb_args(CLI::App& app, du_high_unit_ssb_config& ssb_params)
 {
+  add_option_object_list<du_high_unit_ssb_beam_config>(
+      app,
+      "--beams",
+      ssb_params.beams,
+      configure_cli11_ssb_beam_args,
+      "Transmitted SSB candidates and the beam assigned to each of them");
   add_option(app, "--ssb_period", ssb_params.ssb_period_msec, "Period of SSB scheduling in milliseconds")
       ->capture_default_str()
       ->enum_values({5, 10, 20});
