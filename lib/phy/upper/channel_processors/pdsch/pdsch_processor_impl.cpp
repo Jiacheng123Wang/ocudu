@@ -32,8 +32,8 @@ void pdsch_processor_impl::process(resource_grid_writer&                        
   [[maybe_unused]] std::string msg;
   ocudu_assert(handle_validation(msg, pdsch_processor_validator_impl().is_valid(pdu)), "{}", msg);
 
-  // Number of layers from the precoding configuration.
-  unsigned nof_layers = pdu.precoding.get_nof_layers();
+  // Number of layers from the precoding and beamforming configuration.
+  unsigned nof_layers = pdu.precoding_and_beamforming.get_nof_layers();
 
   // Number of codewords.
   unsigned nof_codewords = data.size();
@@ -120,9 +120,6 @@ void pdsch_processor_impl::modulate(resource_grid_writer& grid, span<const bit_b
   // Number of codewords in this transmission.
   unsigned nof_codewords = codewords.size();
 
-  // Number of ports from precoding configuration.
-  unsigned nof_ports = pdu.precoding.get_nof_ports();
-
   pdsch_modulator::config_t modulator_config = {
       .rnti                        = pdu.rnti,
       .bwp                         = {pdu.bwp_start_rb, pdu.bwp_start_rb + pdu.bwp_size_rb},
@@ -136,13 +133,7 @@ void pdsch_processor_impl::modulate(resource_grid_writer& grid, span<const bit_b
       .n_id                        = pdu.n_id,
       .scaling                     = convert_dB_to_amplitude(-pdu.ratio_pdsch_data_to_sss_dB),
       .reserved                    = pdu.reserved,
-      .precoding                   = pdu.precoding};
-
-  // Populate the list of resource grid ports for this transmission. Since the logical ports map physical ports, the
-  // list is trivial.
-  static_vector<unsigned, precoding_constants::MAX_NOF_PORTS> ports(nof_ports);
-  std::iota(ports.begin(), ports.end(), 0);
-  modulator_config.ports = ports;
+      .precoding_and_beamforming   = pdu.precoding_and_beamforming};
 
   // Set the second codeword modulation scheme.
   if (nof_codewords == 2) {

@@ -4,10 +4,10 @@
 
 #pragma once
 
-#include "ocudu/phy/support/precoding_formatters.h"
 #include "ocudu/phy/support/re_pattern_formatters.h"
 #include "ocudu/phy/upper/channel_processors/pdsch/pdsch_processor.h"
 #include "ocudu/ran/pdsch/pdsch_context_formatter.h"
+#include "ocudu/ran/precoding_beamforming_formatters.h"
 #include "fmt/ranges.h"
 
 namespace fmt {
@@ -79,7 +79,13 @@ struct formatter<ocudu::pdsch_processor::pdu_t> {
     helper.format_if_verbose(ctx, "power_data={:+.1f}dB", pdu.ratio_pdsch_data_to_sss_dB);
     helper.format_if_verbose(ctx, "slot={}", pdu.slot);
     helper.format_if_verbose(ctx, "cp={}", pdu.cp.to_string());
-    helper.format_if_verbose(ctx, "precoding={}", pdu.precoding);
+
+    if (helper.is_multiline()) {
+      helper.format_if_verbose(ctx, "{:n}", pdu.precoding_and_beamforming);
+    } else {
+      helper.format_if_verbose(ctx, "{}", pdu.precoding_and_beamforming);
+    }
+
     if (pdu.reserved.get_nof_entries() > 0) {
       helper.format_if_verbose(ctx, "reserved={}", pdu.reserved.get_re_patterns());
     }

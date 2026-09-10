@@ -119,8 +119,8 @@ int main(int argc, char** argv)
     dmrs_config.amplitude            = 1.0f;
     dmrs_config.symbols_mask         = symbol_slot_mask(
         {false, false, true, false, false, false, false, false, false, false, false, true, false, false});
-    dmrs_config.rb_mask   = ~crb_bitmap(nof_rb);
-    dmrs_config.precoding = precoding_configuration::make_wideband(weights);
+    dmrs_config.rb_mask                   = ~crb_bitmap(nof_rb);
+    dmrs_config.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(weights);
 
     // Test DM-RS Type 1 generation.
     {

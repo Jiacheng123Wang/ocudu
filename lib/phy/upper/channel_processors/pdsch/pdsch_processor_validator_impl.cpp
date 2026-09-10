@@ -84,7 +84,7 @@ error_type<std::string> pdsch_processor_validator_impl::is_valid(const pdsch_pro
   }
 
   // Transmissions with more than four layers require DM-RS time-domain OCC, as per TS38.211 Table 7.4.1.1.2-1.
-  if (pdu.precoding.get_nof_layers() > 4) {
+  if (pdu.precoding_and_beamforming.get_nof_layers() > 4) {
     for (unsigned i_symbol = 0, e = pdu.dmrs_symbol_mask.size(); i_symbol != e;) {
       if (!pdu.dmrs_symbol_mask.test(i_symbol)) {
         ++i_symbol;
@@ -96,7 +96,7 @@ error_type<std::string> pdsch_processor_validator_impl::is_valid(const pdsch_pro
         return make_unexpected(fmt::format(
             "A transmission with {} layers requires double-symbol DM-RS, but the DM-RS symbol mask (i.e., {}) "
             "is not composed of adjacent symbol pairs.",
-            pdu.precoding.get_nof_layers(),
+            pdu.precoding_and_beamforming.get_nof_layers(),
             pdu.dmrs_symbol_mask));
       }
 
@@ -105,10 +105,10 @@ error_type<std::string> pdsch_processor_validator_impl::is_valid(const pdsch_pro
     }
   }
 
-  if (pdu.precoding.get_nof_ports() % pdu.codewords.size() != 0) {
+  if (pdu.precoding_and_beamforming.get_nof_beams() % pdu.codewords.size() != 0) {
     return make_unexpected(
-        fmt::format("The number of ports (i.e., {}) must be divisible by the number of codewords (i.e., {}).",
-                    pdu.precoding.get_nof_ports(),
+        fmt::format("The number of beams (i.e., {}) must be divisible by the number of codewords (i.e., {}).",
+                    pdu.precoding_and_beamforming.get_nof_beams(),
                     pdu.codewords.size()));
   }
 

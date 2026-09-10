@@ -90,10 +90,8 @@ private:
     unsigned nof_cb_batches;
     /// Codeblock resource block offset.
     static_vector<unsigned, MAX_NOF_SEGMENTS> re_offset;
-    /// Precoding configuration scaled.
-    precoding_configuration precoding;
-    /// Port identifiers onto which the codeword is mapped in the resource grid.
-    span<const unsigned> ports;
+    /// Precoding and beamforming configuration scaled.
+    precoding_beamforming_configuration precoding_and_beamforming;
     /// Number of layers the codeword is mapped into.
     unsigned nof_layers;
   };
@@ -150,9 +148,6 @@ private:
   std::atomic<unsigned> cb_task_counter = {0};
   /// Pending asynchronous task counter (DM-RS and CB processing).
   std::atomic<unsigned> async_task_counter = {0};
-  /// List of resource grid ports for the current transmission - each codeword gets a view of their corresponding ports
-  /// from the list.
-  static_vector<unsigned, precoding_constants::MAX_NOF_PORTS> ports;
   /// Number of resource elements used to map PDSCH on the resource grid - common for all codewords.
   unsigned nof_re_pdsch;
 };

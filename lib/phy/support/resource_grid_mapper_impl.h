@@ -33,15 +33,6 @@ public:
            const precoding_beamforming_configuration& precoding,
            unsigned                                   re_skip) const override;
 
-  // See interface for documentation.
-  void map(resource_grid_writer&           grid,
-           symbol_buffer&                  buffer,
-           const allocation_configuration& allocation,
-           const re_pattern_list&          reserved,
-           span<const unsigned>            ports,
-           const precoding_configuration&  precoding,
-           unsigned                        re_skip) const override;
-
 private:
   /// Maximum number of subcarriers that can be accommodated in an OFDM symbol.
   static constexpr unsigned max_nof_subcarriers = MAX_NOF_SUBCARRIERS;

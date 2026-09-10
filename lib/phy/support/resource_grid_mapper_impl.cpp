@@ -5,7 +5,6 @@
 #include "resource_grid_mapper_impl.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/phy/antenna_ports.h"
-#include "ocudu/phy/support/precoding_configuration.h"
 #include "ocudu/phy/support/re_pattern.h"
 #include "ocudu/ran/beamforming/beam_identifier_helpers.h"
 
@@ -323,37 +322,6 @@ void resource_grid_mapper_impl::map(resource_grid_writer&                      w
                "The number of total precoded RE (i.e., {}) does not match the number of total input RE (i.e., {}).",
                i_re_buffer,
                input.get_nof_re());
-}
-
-void resource_grid_mapper_impl::map(resource_grid_writer&           writer,
-                                    symbol_buffer&                  buffer,
-                                    const allocation_configuration& allocation,
-                                    const re_pattern_list&          reserved,
-                                    span<const unsigned>            ports,
-                                    const precoding_configuration&  precoding,
-                                    unsigned                        re_skip) const
-{
-  ocudu_assert(ports.size() == precoding.get_nof_ports(),
-               "The number of ports (i.e., {}) does not match the precoding number of ports (i.e., {}).",
-               ports.size(),
-               precoding.get_nof_ports());
-
-  // The transmission does not apply beamforming: each of the precoding ports is carried by the beam that selects the
-  // given resource grid port.
-  precoding_beam_list beams;
-  for (unsigned i_port : ports) {
-    beams.push_back(to_beam_id(i_port));
-  }
-
-  // Extend the precoding configuration to precoding and beamforming configuration.
-  precoding_beamforming_configuration precoding_beamforming = to_precoding_beamforming_configuration(precoding);
-
-  // Update the precoding configuration to use the received port list instead of the default one.
-  for (unsigned i_prg = 0, i_prg_end = precoding.get_nof_prg(); i_prg != i_prg_end; ++i_prg) {
-    precoding_beamforming.set_prg({precoding.get_prg_coefficients(i_prg), beams}, i_prg);
-  }
-
-  map(writer, buffer, allocation, reserved, precoding_beamforming, re_skip);
 }
 
 void resource_grid_mapper_impl::map(resource_grid_writer&                      writer,

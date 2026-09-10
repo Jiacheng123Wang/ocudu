@@ -65,10 +65,10 @@ benchmark_modes to_benchmark_mode(const char* string)
   return benchmark_modes::invalid;
 }
 
-static bool adjust_precoding_for_two_codewords(precoding_configuration& precoding)
+static bool adjust_precoding_for_two_codewords(precoding_beamforming_configuration& precoding)
 {
   unsigned nof_layers = precoding.get_nof_layers();
-  unsigned nof_ports  = precoding.get_nof_ports();
+  unsigned nof_ports  = precoding.get_nof_beams();
 
   // If the number of layers is less than four, only one codeword is transmitted.
   if (nof_layers <= 4) {
@@ -86,16 +86,23 @@ static bool adjust_precoding_for_two_codewords(precoding_configuration& precodin
   // Half the number of ports.
   unsigned nof_half_ports = nof_ports / 2;
 
-  // Check the upper-left diagonal subset of coefficients for the first codeword.
-  for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-    for (unsigned i_port = 0; i_port != nof_ports; ++i_port) {
-      bool is_upper_left  = (i_port < nof_half_ports) && (i_layer < nof_layers_cw0);
-      bool is_lower_right = (i_port >= nof_half_ports) && (i_layer >= nof_layers_cw0);
+  // Zero the coefficients out of the block diagonal, so that each codeword is mapped onto its own half of the beams.
+  for (unsigned i_prg = 0, i_prg_end = precoding.get_nof_prg(); i_prg != i_prg_end; ++i_prg) {
+    const precoding_beamforming_composite& prg_composite = precoding.get_prg(i_prg);
 
-      if (!is_upper_left && !is_lower_right) {
-        precoding.set_coefficient(cf_t(0.0f, 0.0f), i_layer, i_port, 0);
+    precoding_weight_matrix mimo = prg_composite.mimo;
+    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+      for (unsigned i_port = 0; i_port != nof_ports; ++i_port) {
+        bool is_upper_left  = (i_port < nof_half_ports) && (i_layer < nof_layers_cw0);
+        bool is_lower_right = (i_port >= nof_half_ports) && (i_layer >= nof_layers_cw0);
+
+        if (!is_upper_left && !is_lower_right) {
+          mimo.set_coefficient(cf_t(0.0F, 0.0F), i_layer, i_port);
+        }
       }
     }
+
+    precoding.set_prg({mimo, prg_composite.beams}, i_prg);
   }
 
   return true;
@@ -564,21 +571,21 @@ static std::vector<test_case_type> generate_test_cases(const test_profile& profi
   std::vector<test_case_type> test_case_set;
 
   // Precoding configuration selected from profile.
-  precoding_configuration precoding_config;
+  precoding_beamforming_configuration precoding_config;
   // DM-RS symbol mask selected from profile.
   static bounded_bitset<MAX_NSYMB_PER_SLOT> dmrs_mask;
 
   switch (profile.mimo) {
     case test_profile::mimo_topology::one_port_one_layer:
-      precoding_config = precoding_configuration::make_wideband(make_single_port());
+      precoding_config = precoding_beamforming_configuration::make_wideband(make_single_port());
       dmrs_mask        = dmrs_single_mask;
       break;
     case test_profile::mimo_topology::two_port_two_layer:
-      precoding_config = precoding_configuration::make_wideband(make_two_layer_two_ports(0));
+      precoding_config = precoding_beamforming_configuration::make_wideband(make_two_layer_two_ports(0));
       dmrs_mask        = dmrs_single_mask;
       break;
     case test_profile::mimo_topology::four_port_four_layer:
-      precoding_config = precoding_configuration::make_wideband(make_type1_sp_mode1(
+      precoding_config = precoding_beamforming_configuration::make_wideband(make_type1_sp_mode1(
           pmi_typeI_single_panel{{pmi_codebook_single_panel_config::two_one, pmi_codebook_typeI_mode::one},
                                  0,
                                  std::nullopt,
@@ -588,7 +595,7 @@ static std::vector<test_case_type> generate_test_cases(const test_profile& profi
       dmrs_mask        = dmrs_single_mask;
       break;
     case test_profile::mimo_topology::eight_port_eight_layer:
-      precoding_config = precoding_configuration::make_wideband(make_type1_sp_mode1(
+      precoding_config = precoding_beamforming_configuration::make_wideband(make_type1_sp_mode1(
           pmi_typeI_single_panel{{pmi_codebook_single_panel_config::four_one, pmi_codebook_typeI_mode::one},
                                  0,
                                  std::nullopt,
@@ -660,7 +667,7 @@ static std::vector<test_case_type> generate_test_cases(const test_profile& profi
                                          .ptrs     = std::nullopt,
                                          .ratio_pdsch_dmrs_to_sss_dB = 0.0,
                                          .ratio_pdsch_data_to_sss_dB = 0.0,
-                                         .precoding                  = precoding_config};
+                                         .precoding_and_beamforming  = precoding_config};
         test_case_set.emplace_back(std::tuple<pdsch_processor::pdu_t, unsigned>(config, tbs.value()));
       }
     }
@@ -998,7 +1005,7 @@ int main(int argc, char** argv)
 
     // Add a second transport block for more than four layers.
     std::vector<uint8_t> data_vector_2tb;
-    if (config.precoding.get_nof_layers() > 4) {
+    if (config.precoding_and_beamforming.get_nof_layers() > 4) {
       data_vector_2tb.resize(tbs / 8);
       std::generate(
           data_vector_2tb.begin(), data_vector_2tb.end(), [&rgen]() { return static_cast<uint8_t>(rgen() & 0xff); });

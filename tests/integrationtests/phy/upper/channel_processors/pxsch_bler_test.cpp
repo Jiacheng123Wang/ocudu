@@ -251,7 +251,8 @@ private:
           .reserved                    = {},
           .ratio_pdsch_dmrs_to_sss_dB  = get_sch_to_dmrs_ratio_dB(nof_cdm_groups_without_data),
           .ratio_pdsch_data_to_sss_dB  = 0.0F,
-          .precoding                   = precoding_configuration::make_wideband(make_identity(cfg.nof_layers))});
+          .precoding_and_beamforming =
+              precoding_beamforming_configuration::make_wideband(make_identity(cfg.nof_layers))});
 
       static_vector<uint8_t, MAX_PORTS> rx_ports(cfg.nof_rx_ports);
       std::iota(rx_ports.begin(), rx_ports.end(), 0U);

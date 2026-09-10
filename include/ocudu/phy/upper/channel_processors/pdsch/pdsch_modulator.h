@@ -5,11 +5,11 @@
 #pragma once
 
 #include "ocudu/adt/bit_buffer.h"
-#include "ocudu/phy/support/precoding_configuration.h"
 #include "ocudu/phy/support/rb_allocation.h"
 #include "ocudu/phy/support/re_pattern.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/ran/dmrs/dmrs.h"
+#include "ocudu/ran/precoding_beamforming_configuration.h"
 #include "ocudu/ran/resource_allocation/ofdm_symbol_range.h"
 #include "ocudu/ran/rnti.h"
 #include "ocudu/ran/sch/modulation_scheme.h"
@@ -61,15 +61,8 @@ public:
     float scaling;
     /// Reserved RE pattern where PDSCH is not mapped.
     re_pattern_list reserved;
-    /// Precoding configuration for both codewords.
-    std::reference_wrapper<const precoding_configuration> precoding;
-    /// \brief List of ports where the codewords are being mapped to.
-    ///
-    /// List of resource grid ports where the codeword or codewords are being mapped to. Given that the maximum number
-    /// of layers is eight, the effective maximum number of logical ports (resource grid ports) is eight, four per
-    /// codeword. If the total logical number of ports were to be higher, i.e., more than eight, as in the case of
-    /// beamforming, codewords will still be mapped to a reduced subset (maximum eight) of logical resource grid ports.
-    static_vector<unsigned, precoding_constants::MAX_NOF_PORTS> ports;
+    /// Precoding and beamforming configuration.
+    std::reference_wrapper<const precoding_beamforming_configuration> precoding_and_beamforming;
   };
 
   /// Default destructor.

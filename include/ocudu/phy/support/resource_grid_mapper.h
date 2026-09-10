@@ -17,7 +17,6 @@ namespace ocudu {
 struct re_pattern;
 class re_pattern_list;
 class precoding_beamforming_configuration;
-class precoding_configuration;
 
 /// \brief Resource Element mapping interface.
 ///
@@ -128,23 +127,6 @@ public:
                    const re_pattern_list&                     reserved,
                    const precoding_beamforming_configuration& precoding,
                    unsigned                                   re_skip = 0) const = 0;
-
-  /// \brief Maps complex symbols onto the resource grid, without beamforming.
-  ///
-  /// \param[out] grid       Resource grid writer interface.
-  /// \param[in]  buffer     Buffer containing the complex symbols to map.
-  /// \param[in]  allocation Resource allocation parameters.
-  /// \param[in]  reserved   Reserved resource elements, to be excluded from the allocation pattern.
-  /// \param[in]  ports      List of port identifiers onto which the complex symbols are mapped in the resource grid.
-  /// \param[in]  precoding  Precoding configuration.
-  /// \param[in]  re_skip    Number of RE to skip before start mapping the buffer.
-  virtual void map(resource_grid_writer&           grid,
-                   symbol_buffer&                  buffer,
-                   const allocation_configuration& allocation,
-                   const re_pattern_list&          reserved,
-                   span<const unsigned>            ports,
-                   const precoding_configuration&  precoding,
-                   unsigned                        re_skip = 0) const = 0;
 };
 
 } // namespace ocudu
