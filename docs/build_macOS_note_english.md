@@ -32,7 +32,7 @@ brew install cmake ninja pkgconf \
 brew link --force mbedtls@2                  # key step: make pkg-config resolve mbedtls 2.x
 
 # (4) Configure + build
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build
 cmake --build build -j"$(sysctl -n hw.ncpu)"
 
 # (5) Artifact
@@ -82,7 +82,7 @@ brew install ccache       # faster incremental builds (CMake detects and uses it
 |---|---|---|
 | UHD (USRP driver) | `brew install uhd` | With `ENABLE_UHD=ON` (default) a missing UHD is skipped silently; only needed for USRP hardware. Pulls in boost/libusb/python |
 | openssl@3 | `brew install openssl@3` | Only needed for DTLS-SCTP; usually found automatically, otherwise point at it with the module-supported `-DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3` (or `-DOPENSSL_DIR=...`) |
-| ccache | `brew install ccache` | Detected automatically by the top-level CMake and used as the compiler launcher |
+| ccache | `brew install ccache` | Detected automatically by the top-level CMake and used as the compiler launcher. Pulls in (and may **link**) Homebrew's fmt, which can then shadow the vendored fmt headers - see §3.6 if the build fails inside `external/fmt` |
 | python3 | `/usr/bin/python3` from the command line tools (or `brew install python@3.11`) | Only needed for SBOM generation (`external/cmake-sbom`) and the `ai_train/` training scripts; not needed to compile the C++ code |
 | Core ML / Python training stack | `pip install numpy tensorflow tf-keras h5py coremltools` | Only needed to **regenerate** `ai_assets/*.mlmodelc`; the repository ships pre-compiled models, so normal builds do not need it |
 
@@ -93,7 +93,7 @@ submodules**, so no `git submodule update` is required:
 
 | Directory | Content |
 |---|---|
-| `external/fmt` | fmt formatting library |
+| `external/fmt` | fmt formatting library (**11.1.3**; see §3.6 - a *linked* Homebrew fmt 12.x shadows it) |
 | `external/uWebSockets` (with `uSockets`) | WebSocket/HTTP (pure C + pthread, no OpenSSL/zlib dependency) |
 | `external/CLI` | CLI11 command line parsing |
 | `external/nlohmann` | JSON |
@@ -369,6 +369,65 @@ value exists). Fix it **in the environment only** - no repository change is need
 Runtime note: the usrsctp backend picks its transport automatically (`OCUDU_USRSCTP_MODE`, §5.1)
 and does not require root - unprivileged runs use SCTP-over-UDP encapsulation (RFC 6951).
 
+### 3.6 Homebrew headers shadowing the vendored libraries (fmt 12 vs vendored fmt 11)
+
+Symptom - the first build fails inside the vendored fmt sources:
+
+```
+FAILED: external/fmt/CMakeFiles/fmt.dir/src/format.cc.o
+.../external/fmt/src/format.cc:20:30: error: explicit instantiation of 'locale_ref' not in a namespace enclosing 'v12'
+/opt/homebrew/include/fmt/base.h:904:3: note: explicit instantiation refers here
+.../external/fmt/src/format.cc:35:43: error: no template named 'vformat_args'
+4 errors generated.
+```
+
+**Cause**: the repository vendors fmt 11.1.3 (`external/fmt`, `FMT_VERSION 110103`) and the top level adds
+two directory-level *system* include directories, in this order:
+
+- `CMakeLists.txt:51` -> `-isystem /opt/homebrew/include`
+- `CMakeLists.txt:710` -> `-isystem <repo>/external/fmt/include`
+
+Clang consults `-isystem` directories in command-line order, so whenever Homebrew's fmt is **linked** into
+the prefix (`/opt/homebrew/include/fmt/base.h` exists, `FMT_VERSION 120200` = fmt 12) its headers shadow
+the vendored ones and the vendored fmt 11 sources no longer compile. Homebrew links fmt automatically as a
+dependency of e.g. `ccache`, `gnuradio`, `spdlog` or `volk` - which is exactly why the same commit builds
+on one machine (fmt installed but not linked) and fails on another (fmt linked).
+
+One-line check before building:
+
+```bash
+grep FMT_VERSION external/fmt/include/fmt/base.h          # vendored: 110103
+grep FMT_VERSION /opt/homebrew/include/fmt/base.h 2>/dev/null || echo "no Homebrew fmt headers: OK"
+```
+
+If the second command prints `120200`, this failure is waiting for you.
+
+**Fix 1 (recommended; leaves Homebrew untouched)**: prepend the project's own include dirs:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INCLUDE_DIRECTORIES_BEFORE=ON
+```
+
+The resulting order becomes `-isystem <repo>/external/fmt/include` -> `-isystem /opt/homebrew/include`, so
+the vendored fmt wins. The value is cached, later `cmake --build build` runs need nothing extra. (Verified:
+that flag alone makes the vendored fmt sources compile even while Homebrew's fmt stays linked.)
+
+**Fix 2 (targeted, verified)**: unlink Homebrew's fmt - the project does not use it, and software that
+links libfmt keeps working, because `brew unlink` only removes the prefix symlinks while the
+`/opt/homebrew/opt/fmt/...` paths stay in place:
+
+```bash
+brew unlink fmt
+ccache --version      # still works: ccache resolves libfmt through /opt/homebrew/opt/fmt
+```
+
+Caveat: a later `brew upgrade fmt` / `brew reinstall fmt` can link it again - re-run the check above after
+such operations.
+
+**What does *not* work** (verified): adding `-I<repo>/external/fmt/include` (via `-DCMAKE_CXX_FLAGS=...` or
+`CPATH`) does not help - with this project's flag layout clang keeps resolving `<fmt/base.h>` from
+`/opt/homebrew/include`, because the ordering that matters is the `-isystem` one.
+
 ## 4. Configure and build
 
 ### 4.1 Standard configuration (Release + Ninja + all features)
@@ -378,6 +437,10 @@ cd <repo root>
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(sysctl -n hw.ncpu)"          # or: cmake --build build --target gnb
 ```
+
+> If Homebrew's fmt is linked into `/opt/homebrew/include` (common once `ccache`/`gnuradio`/
+> `spdlog`/`volk` are installed), add `-DCMAKE_INCLUDE_DIRECTORIES_BEFORE=ON` to the configure step;
+> see §3.6.
 
 Relevant options (all have defaults; changing them is normally unnecessary):
 
@@ -484,6 +547,7 @@ fails with `Unable to create log file`; `sudo rm /tmp/gnb.log` first.
 | `gnb`/`du` application targets do not exist | They are only added when both MbedTLS and SCTP are available | Install both as above; do not set `-DDISABLE_MBEDTLS=ON` / `-DDISABLE_SCTP=ON` |
 | `unable to find utility "metal"` / `xcrun: error` | Metal toolchain not installed | `xcodebuild -downloadComponent MetalToolchain`; alternatively configure with `-DENABLE_METAL_LDPC=OFF -DENABLE_METAL_CHEST=OFF` |
 | Metal targets skipped (Intel Mac) | The top level only defaults them on for aarch64/arm64 | On Intel, pass `-DENABLE_METAL_LDPC=OFF -DENABLE_METAL_CHEST=OFF` explicitly |
+| `explicit instantiation of 'locale_ref' not in a namespace enclosing 'v12'` / `no template named 'vformat_args'` while compiling `external/fmt` | Homebrew's fmt headers are linked into `/opt/homebrew/include` and shadow the vendored fmt 11 (see §3.6) | Configure with `-DCMAKE_INCLUDE_DIRECTORIES_BEFORE=ON`, or `brew unlink fmt`; verify with `grep FMT_VERSION /opt/homebrew/include/fmt/base.h` |
 | Compilation fails on new warnings (`-Werror`) | A newer clang introduced new warnings | Use `-DENABLE_WERROR=OFF` while diagnosing |
 | `.metallib` not generated / fails to load at run time | Source tree not writable, or the checkout was moved | Make the source directory writable; reconfigure and rebuild after moving the path |
 | `ld: warning: ignoring duplicate libraries` | A static library appears more than once on the link line (Apple-ld specific warning) | The top level already adds `-Wl,-no_warn_duplicate_libraries`; ignore it |
