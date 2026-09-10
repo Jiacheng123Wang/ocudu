@@ -268,6 +268,19 @@ How to read the output:
 
 ### 3.5 SCTP on macOS (usrsctp) - required, and the most common configure failure
 
+> **Branch prerequisite**: everything in this section (and in this guide) describes the
+> **Apple Silicon port branch `apple-silicon`**. On the upstream Linux branch (`dev`), neither
+> `lib/gateways/sctp_socket_usrsctp.cpp` nor a macOS-aware `FindSCTP` exists: that module only
+> matches `netinet/sctp.h` plus a `sctp` library in `/usr/local` or `/usr`, so Homebrew's
+> `usrsctp.h` + `libusrsctp` can never satisfy it and configure is guaranteed to fail with
+> `Could NOT find SCTP`. Check the branch before chasing the environment:
+>
+> ```bash
+> git branch --show-current     # must print apple-silicon
+> git switch apple-silicon      # after: git fetch origin
+> rm -rf build                  # drop a cache holding SCTP_*_NOTFOUND from the wrong branch
+> ```
+
 macOS has **no in-kernel SCTP**, so the gateway layer builds its user-space backend
 (`lib/gateways/sctp_socket_usrsctp.cpp`, selected in `lib/gateways/CMakeLists.txt` when `APPLE`)
 and line 5 of that file calls `find_package(SCTP REQUIRED)`. Without usrsctp the configure step
