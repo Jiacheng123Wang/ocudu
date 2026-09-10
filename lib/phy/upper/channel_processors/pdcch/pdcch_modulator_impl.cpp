@@ -52,7 +52,7 @@ void pdcch_modulator_impl::map(resource_grid_writer& grid, const re_buffer_reade
   pattern.re_mask = re_mask;
 
   // Actual mapping.
-  mapper->map(grid, d_pdcch, pattern, to_precoding_beamforming_configuration(config.precoding));
+  mapper->map(grid, d_pdcch, pattern, config.precoding_and_beamforming);
 }
 
 void pdcch_modulator_impl::modulate(resource_grid_writer&            grid,

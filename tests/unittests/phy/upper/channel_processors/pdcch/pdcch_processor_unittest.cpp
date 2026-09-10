@@ -118,7 +118,7 @@ TEST(pdcch_processor_unittest, process)
                   bit = dist_payload(rgen);
                 }
                 dci.payload.resize(dist_payload_sz(rgen));
-                dci.precoding = precoding_configuration::make_wideband(make_single_port());
+                dci.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(make_single_port());
 
                 // Reset spy classes.
                 encoder->reset();
@@ -147,7 +147,7 @@ TEST(pdcch_processor_unittest, process)
                 ASSERT_EQ(modulator_entry.config.n_id, dci.n_id_pdcch_data);
                 ASSERT_EQ(modulator_entry.config.n_rnti, dci.n_rnti);
                 ASSERT_EQ(modulator_entry.config.scaling, convert_dB_to_amplitude(dci.data_power_offset_dB));
-                ASSERT_EQ(pdu.dci.precoding, modulator_entry.config.precoding);
+                ASSERT_EQ(pdu.dci.precoding_and_beamforming, modulator_entry.config.precoding_and_beamforming);
                 ASSERT_EQ(const_span<uint8_t>(modulator_entry.bits), const_span<uint8_t>(encoder_entry.encoded));
                 ASSERT_EQ((void*)modulator_entry.grid, (void*)&grid.get_writer());
 
@@ -162,7 +162,7 @@ TEST(pdcch_processor_unittest, process)
                 ASSERT_EQ(dmrs_entry.config.duration, coreset.duration);
                 ASSERT_EQ(dmrs_entry.config.n_id, dci.n_id_pdcch_dmrs);
                 ASSERT_EQ(dmrs_entry.config.amplitude, convert_dB_to_amplitude(dci.dmrs_power_offset_dB));
-                ASSERT_EQ(pdu.dci.precoding, dmrs_entry.config.precoding);
+                ASSERT_EQ(pdu.dci.precoding_and_beamforming, dmrs_entry.config.precoding_and_beamforming);
               }
             }
           }

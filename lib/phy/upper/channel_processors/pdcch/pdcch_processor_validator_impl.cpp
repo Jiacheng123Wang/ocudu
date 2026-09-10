@@ -63,9 +63,9 @@ error_type<std::string> pdcch_processor_validator_impl::is_valid(const pdcch_pro
     return make_unexpected("Empty payload.");
   }
 
-  if (pdu.dci.precoding.get_nof_layers() != 1) {
-    return make_unexpected(
-        fmt::format("Precoding number of layers (i.e., {}) must be one.", pdu.dci.precoding.get_nof_layers()));
+  if (pdu.dci.precoding_and_beamforming.get_nof_layers() != 1) {
+    return make_unexpected(fmt::format("Precoding number of layers (i.e., {}) must be one.",
+                                       pdu.dci.precoding_and_beamforming.get_nof_layers()));
   }
 
   return default_success_t();

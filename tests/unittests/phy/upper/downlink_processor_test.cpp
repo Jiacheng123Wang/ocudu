@@ -77,7 +77,7 @@ TEST(downlinkProcessorTest, worksInOrder)
   dl_processor->process_ssb({});
 
   pdcch_processor::pdu_t pdu;
-  pdu.dci.precoding = precoding_configuration::make_wideband(make_single_port());
+  pdu.dci.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(make_single_port());
   dl_processor->process_pdcch(pdu);
 
   std::vector<uint8_t> pdsch_data = {1, 2, 3, 4};
@@ -142,7 +142,7 @@ TEST(downlinkProcessorTest, finishIsCalledBeforeProcessingPdus)
 
   dl_processor->process_ssb({});
   pdcch_processor::pdu_t pdu;
-  pdu.dci.precoding = precoding_configuration::make_wideband(make_single_port());
+  pdu.dci.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(make_single_port());
   dl_processor->process_pdcch(pdu);
   std::vector<uint8_t> data = {1, 2, 3, 4};
   dl_processor->process_pdsch({shared_transport_block(data)}, {});
@@ -200,7 +200,7 @@ TEST(downlinkProcessorTest, twoConsecutiveSlots)
 
   dl_processor->process_ssb({});
   pdcch_processor::pdu_t pdu;
-  pdu.dci.precoding = precoding_configuration::make_wideband(make_single_port());
+  pdu.dci.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(make_single_port());
   dl_processor->process_pdcch(pdu);
   std::vector<uint8_t> data = {1, 2, 3, 4};
   dl_processor->process_pdsch({shared_transport_block(data)}, {});
