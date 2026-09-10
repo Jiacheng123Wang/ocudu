@@ -28,7 +28,7 @@ eval "$(/opt/homebrew/bin/brew shellenv)"    # put /opt/homebrew/bin on PATH
 # (3) Dependencies
 brew install cmake ninja pkgconf \
              mbedtls@2 libusrsctp yaml-cpp googletest \
-             fftw zeromq
+             fftw zeromq   # libusrsctp = the macOS SCTP backend; see section 3.5
 brew link --force mbedtls@2                  # key step: make pkg-config resolve mbedtls 2.x
 
 # (4) Configure + build
@@ -61,7 +61,7 @@ brew install ccache       # faster incremental builds (CMake detects and uses it
 | Ninja or Make | `brew install ninja` | 1.13.2 | `-G Ninja` (optional; Make also works) | Build executor |
 | pkgconf | `brew install pkgconf` | 3.0.5 | several modules: `find_package(PkgConfig REQUIRED)` | Discovers fftw/mbedtls/uhd/zmq etc. |
 | mbedtls@2 | `brew install mbedtls@2` + `brew link --force mbedtls@2` | 2.28.10 | `lib/security/CMakeLists.txt: find_package(MbedTLS REQUIRED)` | Crypto/integrity (NIA2 etc.) |
-| libusrsctp | `brew install libusrsctp` | 0.9.5.0_1 | `lib/gateways/CMakeLists.txt: find_package(SCTP REQUIRED)` | macOS has no in-kernel SCTP, so the user-space usrsctp stack is used |
+| libusrsctp | `brew install libusrsctp` (formula name is **libusrsctp**) | 0.9.5.0_1 | `lib/gateways/CMakeLists.txt: find_package(SCTP REQUIRED)` | macOS has no in-kernel SCTP, so the user-space usrsctp stack is used. **Details and the common configure failure: §3.5** |
 | yaml-cpp | `brew install yaml-cpp` | 0.9.0 | top-level `find_package(YAMLCPP REQUIRED)` (missing triggers `FATAL_ERROR`) | Configuration file parsing |
 | googletest | `brew install googletest` | 1.18.0 | `if(BUILD_TESTING) find_package(GTest REQUIRED)` | Unit tests (`BUILD_TESTING=ON` by default) |
 
@@ -203,6 +203,7 @@ brew update
 ```bash
 # Required
 brew install cmake ninja pkgconf mbedtls@2 libusrsctp yaml-cpp googletest
+#   (libusrsctp is mandatory on macOS: the gateway layer needs usrsctp, see 3.5)
 # Strongly recommended (DFT/transport)
 brew install fftw zeromq
 # Optional
@@ -259,11 +260,101 @@ How to read the output:
 - `mbedtls` should report **2.28.x** (if it reports 4.x, `mbedtls@2` was not linked - see 3.3);
 - the `sctp` pkg-config module **not being found is normal**: `FindSCTP` calls
   `PKG_CHECK_MODULES(PC_SCTP sctp)` without REQUIRED and really decides on `<usrsctp.h>` plus
-  `libusrsctp`;
+  `libusrsctp` (the Homebrew pkg-config module is named `usrsctp`, not `sctp`; see §3.5);
 - `libzmq` is the pkg-config name of ZeroMQ (the module name written in `FindZeroMQ` is `ZeroMQ`,
   which does not match case-wise, but the `zmq.h`/`libzmq` fallback lookup still succeeds).
 
 ---
+
+### 3.5 SCTP on macOS (usrsctp) - required, and the most common configure failure
+
+macOS has **no in-kernel SCTP**, so the gateway layer builds its user-space backend
+(`lib/gateways/sctp_socket_usrsctp.cpp`, selected in `lib/gateways/CMakeLists.txt` when `APPLE`)
+and line 5 of that file calls `find_package(SCTP REQUIRED)`. Without usrsctp the configure step
+aborts - and because `apps/CMakeLists.txt` only adds `gnb`, `du`, `cu`, ... when
+`NOT DISABLE_MBEDTLS AND NOT DISABLE_SCTP`, this is a hard requirement for a gNB build.
+
+**Install (the formula name matters - there is no `usrsctp` or `sctp` formula):**
+
+```bash
+brew install libusrsctp
+```
+
+Homebrew installs everything into the default `/opt/homebrew` prefix (no keg-only handling needed):
+
+| Artifact | Path |
+|---|---|
+| Header | `/opt/homebrew/include/usrsctp.h` |
+| Library | `/opt/homebrew/lib/libusrsctp.dylib` (plus `.2.dylib`, `.2.0.0.dylib`) |
+| pkg-config module | `/opt/homebrew/lib/pkgconfig/usrsctp.pc` (module name **`usrsctp`**, not `sctp`) |
+
+**Expected configure output on a healthy machine** - note the benign `sctp` pkg-config miss:
+
+```
+-- Checking for module 'sctp'
+--   Package 'sctp' not found          <- NORMAL on macOS: this probe is optional
+-- SCTP LIBRARIES: /opt/homebrew/lib/libusrsctp.dylib
+-- SCTP INCLUDE DIRS: /opt/homebrew/include
+-- Found SCTP: /opt/homebrew/lib/libusrsctp.dylib
+```
+
+**If configure fails with**
+
+```
+CMake Error at .../FindPackageHandleStandardArgs.cmake:290 (message):
+  Could NOT find SCTP (missing: SCTP_LIBRARIES SCTP_INCLUDE_DIRS)
+Call Stack (most recent call first):
+  .../FindPackageHandleStandardArgs.cmake:654 (_FPHSA_FAILURE_MESSAGE)
+  cmake/modules/FindSCTP.cmake:41 (FIND_PACKAGE_HANDLE_STANDARD_ARGS)
+  lib/gateways/CMakeLists.txt:5 (find_package)
+```
+
+then `usrsctp.h` and/or `libusrsctp` were simply not visible to CMake (this is the usual
+cause: the package is not installed; CMake re-searches automatically whenever no valid cached
+value exists). Fix it **in the environment only** - no repository change is needed, because
+`FindSCTP` already searches `/opt/homebrew` *and* `/usr/local`:
+
+1. **Install and verify the artifacts**
+
+   ```bash
+   brew install libusrsctp
+   ls -l /opt/homebrew/include/usrsctp.h /opt/homebrew/lib/libusrsctp.dylib
+   pkg-config --modversion usrsctp        # optional: should print 0.9.5.0
+   ```
+
+2. **Re-configure with a clean cache** (only needed if a previously cached value points at a
+   path that no longer exists - for example after uninstalling/reinstalling the package):
+
+   ```bash
+   rm -rf build && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+   # keeping the build directory instead:
+   #   cmake -S . -B build -U 'SCTP_*' -U 'PC_SCTP*'
+   ```
+
+3. **Non-standard prefix** (Homebrew elsewhere, or a self-built usrsctp): pre-seed the two cache
+   variables the module exports, or point the generic search paths at the prefix:
+
+   ```bash
+   cmake -S . -B build -G Ninja \
+         -DSCTP_INCLUDE_DIRS=/your/prefix/include \
+         -DSCTP_LIBRARIES=/your/prefix/lib/libusrsctp.dylib
+   # equivalent:
+   #   -DCMAKE_INCLUDE_PATH=/your/prefix/include -DCMAKE_LIBRARY_PATH=/your/prefix/lib
+   ```
+
+4. **No Homebrew at all**: build usrsctp from source and install it into `/usr/local` (also
+   searched by the module):
+
+   ```bash
+   git clone https://github.com/sctplab/usrsctp.git && cd usrsctp && mkdir -p build && cd build
+   cmake -DCMAKE_INSTALL_PREFIX=/usr/local .. && make -j"$(sysctl -n hw.ncpu)" && sudo make install
+   ```
+
+5. Do **not** "fix" it with `-DDISABLE_SCTP=ON` unless you really want a build without the
+   core-network applications (that switch removes `gnb`/`du`/`cu`/... targets entirely).
+
+Runtime note: the usrsctp backend picks its transport automatically (`OCUDU_USRSCTP_MODE`, §5.1)
+and does not require root - unprivileged runs use SCTP-over-UDP encapsulation (RFC 6951).
 
 ## 4. Configure and build
 
@@ -372,7 +463,9 @@ fails with `Unable to create log file`; `sudo rm /tmp/gnb.log` first.
 |---|---|---|
 | `CMake Error: Could NOT find PkgConfig` | pkgconf is not installed | `brew install pkgconf` |
 | `Could NOT find MbedTLS` / `mbedtls` resolves to 4.x | The default link points at Homebrew `mbedtls` 4.x while the version known to work here is 2.x | `brew install mbedtls@2 && brew link --force mbedtls@2`, or use the environment variable `MBEDTLS_DIR=/opt/homebrew/opt/mbedtls@2 cmake ...` (it must be an environment variable, not a `-D` flag) |
-| `Could NOT find SCTP` | usrsctp is missing | `brew install libusrsctp` (verify `/opt/homebrew/include/usrsctp.h` and `libusrsctp.dylib` exist) |
+| `Could NOT find SCTP (missing: SCTP_LIBRARIES SCTP_INCLUDE_DIRS)` | usrsctp is not installed (usual cause), or a cached value points at a path that no longer exists | `brew install libusrsctp`, verify `/opt/homebrew/include/usrsctp.h` and `/opt/homebrew/lib/libusrsctp.dylib`, then re-configure with a clean cache (`rm -rf build`, or `cmake -U 'SCTP_*'`); full walk-through in §3.5 |
+| `-- Checking for module 'sctp'` / `Package 'sctp' not found` | Benign on macOS: the pkg-config probe is optional, the module decides on `usrsctp.h` + `libusrsctp` | Nothing to do (the next lines must say `Found SCTP: ...`) |
+| `OpenSSL found, but without DTLS/SCTP support` | The Homebrew OpenSSL is built without SCTP | Benign; DTLS-SCTP is optional. Install/point at an SCTP-enabled OpenSSL only if you need it |
 | `yaml-cpp is required to build ocudu` | yaml-cpp is missing (REQUIRED) | `brew install yaml-cpp` |
 | `Could NOT find GTest` | googletest missing while `BUILD_TESTING=ON` | `brew install googletest` (or pass `-DBUILD_TESTING=OFF`) |
 | `gnb`/`du` application targets do not exist | They are only added when both MbedTLS and SCTP are available | Install both as above; do not set `-DDISABLE_MBEDTLS=ON` / `-DDISABLE_SCTP=ON` |
@@ -444,3 +537,50 @@ git status --short | grep -c metallib                                   # must b
 | FFT backend | MKL / AOCL-FFTZ / FFTW / ARMPL selectable | Mainly FFTW (ARM) |
 | Time resolution | Nanoseconds | `system_clock` at microsecond resolution (a few R16 reference-time cases are skipped for this reason) |
 | Test cases | All run | 34 cases are intentionally not applicable (see `NOT_RUN_AUDIT.md`) |
+
+---
+
+## 10. Appendix: reference configure output on a healthy machine
+
+Use this as a checklist when comparing a fresh machine's `cmake` output. The lines below are the
+dependency-related ones from a verified Apple Silicon machine (`cmake -S . -B build -G Ninja
+-DCMAKE_BUILD_TYPE=Release`, configure only):
+
+```
+-- Could NOT find libdw ... / libbfd ... / libdwarf ...   <- expected on macOS (Backward is skipped)
+--   Package 'rohc' not found                             <- expected (ROHC is optional)
+-- Found OpenSSL 3.6.3
+-- OpenSSL found, but without DTLS/SCTP support            <- benign (Homebrew OpenSSL has no SCTP)
+-- Checking for module 'fftw3f >= 3.0'
+--   Found fftw3f, version 3.3.11
+-- Found FFTW3F: /opt/homebrew/lib/libfftw3f.dylib
+-- Found GTest: /opt/homebrew/lib/cmake/GTest/GTestConfig.cmake (found version "1.18.0")
+-- UHD LIBRARIES /opt/homebrew/lib/libuhd.dylib
+-- Found UHD: /opt/homebrew/lib/libuhd.dylib
+-- Could NOT find Sidekiq (...)                             <- expected (proprietary, optional)
+-- FINDING ZEROMQ.
+-- Checking for module 'ZeroMQ'
+--   Package 'ZeroMQ' not found                             <- benign: found through zmq.h/libzmq below
+-- Found libZEROMQ: /opt/homebrew/include, /opt/homebrew/lib/libzmq.dylib
+-- Could NOT find Doxygen (...)                             <- expected (documentation only)
+-- Checking for module 'sctp'
+--   Package 'sctp' not found                               <- benign (see §3.5)
+-- SCTP LIBRARIES: /opt/homebrew/lib/libusrsctp.dylib
+-- SCTP INCLUDE DIRS: /opt/homebrew/include
+-- Found SCTP: /opt/homebrew/lib/libusrsctp.dylib
+-- The OBJCXX compiler identification is AppleClang ...
+-- Checking for module 'mbedtls'
+--   Found mbedtls, version 2.28.10
+-- MBEDTLS LIBRARIES: /opt/homebrew/lib/libmbedcrypto.dylib
+-- Found MbedTLS: /opt/homebrew/lib/libmbedcrypto.dylib
+-- Configuring done (4.1s)
+-- Generating done (1.1s)
+```
+
+Two notes on the mbedTLS line:
+
+- `2.28.10` means `mbedtls@2` is linked and the baseline of §7 is reproduced (see §3.3).
+- Homebrew's `mbedtls` 4.x also ships `mbedtls/md.h` and `libmbedcrypto`, so a machine that never
+  force-linked `mbedtls@2` usually still *configures* - it just binds a different library than the
+  one this guide (and the macOS test audit) was validated against. Force-link `mbedtls@2` if you
+  want the verified configuration.
