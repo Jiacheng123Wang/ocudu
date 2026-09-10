@@ -780,14 +780,14 @@ GPU 算力远未吃饱(小 TB 场景 dispatch 链主导);离群 3-8 ms = 运行�
 槽构造。缓解:`--pusch_ldpc_decoder_type metal_persistent`(单 dispatch 常驻内核,
 单测对拍 100%)或 E2E 时 LDPC 回 CPU(§7.0.15 策略)。详见 LDPC PLAN §4.17。
 
-**长期规划立项**:`docs/apple_silicon_heterogeneous_gnb_plan.md`——GPU 定位高并发/
+**长期规划立项**:`docs/apple_silicon_heterogeneous_gnb_plan_english.md`——GPU 定位高并发/
 多用户/高带宽;模块级 >10× CPU 时延可容忍但 E2E 必须在预算内;终局 = UL 全链
 (FFT/CE/MIMO/LDPC)单 command buffer 一次 dispatch、CPU 不等回;LDPC crc=OK 后
 MAC PDU 经回调直接给 FAPI;V2X 小包走 P/E 核、大带宽视频走 GPU(未来 NPU)。
 
 ### 7.0.17 "粮草先行"审计:CE 已合规,残留一项入待办(2026-08-30)
 
-按 `docs/apple_silicon_heterogeneous_gnb_plan.md` §2.1 铁律审计 CE:
+按 `docs/apple_silicon_heterogeneous_gnb_plan_english.md` §2.1 铁律审计 CE:
 - **CE 无惰性初始化**:引擎 + pipeline + 缓冲区 + warm-up 自 A+B 起即在构造期完成
   (10 实例在 gnb 启动期),首个 PUSCH 不付任何引擎初始化成本——已合规。
 - **残留(一次性,attach 首槽)**:实链首槽 `gpu_path≈3 ms(gpu_wait≈24 µs)` =

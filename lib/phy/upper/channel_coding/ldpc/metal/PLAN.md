@@ -1353,7 +1353,7 @@ p95 1281 / max 8831 µs(cpu 基线 9-71 µs)。管线 median 1371 µs > 1 ms →
 2. E2E 预算策略:仅开 CE metal、LDPC 走 CPU(用户既定组合策略);
 3. 槽预构建:启动期/空闲期预建常用 (BG, Z) 槽,消除运行中离群值。
 
-**长期规划**:`docs/apple_silicon_heterogeneous_gnb_plan.md`(2026-08-30 立项)——
+**长期规划**:`docs/apple_silicon_heterogeneous_gnb_plan_english.md`(2026-08-30 立项)——
 GPU 定位高并发/多用户/高带宽,模块级 >10× CPU 可容忍但 E2E 必须在预算内;终局 =
 UL 全链单 command buffer 一次 dispatch、CPU 不等回;LDPC crc=OK 后 MAC PDU 经
 回调直接给 FAPI(§3.1 的调度机制);V2X 小包走 P/E 核、大带宽视频走 GPU(NPU 后续)。
@@ -1417,12 +1417,12 @@ median 753(前次 979)。
 - (b) 启动期预构建实链常见大 z(BG1/2 × {192,208,256,352},~50ms 启动、~100MB
    常驻),消除运行中 5-9ms 一次性停顿;
 - (c) 接受现状:尾部为一次性/大 TB 代价,crc 全对、链路功能不受影响——按
-   `docs/apple_silicon_heterogeneous_gnb_plan.md` §1,模块级 >10× 可容忍,E2E
+   `docs/apple_silicon_heterogeneous_gnb_plan_english.md` §1,模块级 >10× 可容忍,E2E
    预算策略由 §2 的组合开关控制。
 
 ## 4.19 粮草先行落地:CSR syndrome + 全尺寸预构建(2026-08-30)
 
-按 `docs/apple_silicon_heterogeneous_gnb_plan.md` §2.1 铁律(初始化绝不落在数据包
+按 `docs/apple_silicon_heterogeneous_gnb_plan_english.md` §2.1 铁律(初始化绝不落在数据包
 路径上)实施:
 
 1. **CSR-only 表示(layered 家族)**:`nmsl_final_syndrome` 与 `nmsl_persistent_decode`

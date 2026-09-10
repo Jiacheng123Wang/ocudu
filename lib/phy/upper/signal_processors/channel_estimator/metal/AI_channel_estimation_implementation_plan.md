@@ -15,7 +15,7 @@
 > G2 的"≥ MMSE"验收基线直接对拍 metal_mmse。另注意：AI 计划 §2.2 的时延锚点已
 > 被 2026-08-30 实测更新（CE metal_mmse 实链 median ~255 µs@36 PRB/3 DMRS、
 > cpu 63.6 µs；Metal 基础设施的 occupancy/warm-up/粮草先行/bit-exact 经验教训
-> 见 `docs/apple_silicon_heterogeneous_gnb_plan.md` 与 CE `PLAN.md` §7.0.15）。
+> 见 `docs/apple_silicon_heterogeneous_gnb_plan_english.md` 与 CE `PLAN.md` §7.0.15）。
 
 > **G1 延迟原型实测记录（2026-08-30，M4 Pro，macOS 26.5）**：
 > 官方仓库 [HELENA_Channel_Estimation](https://github.com/miguelhdo/HELENA_Channel_Estimation)
@@ -499,7 +499,7 @@ DMRS type 1/2、1–2 符号只改变稀疏输入的非零位置，不改变计�
 - 权重资产版本化（版本号 + 校验和 + 训练配置快照，随模型文件管理）；
 - 回退语义不变：任何时刻回退到经典 MMSE（L0）。
 
-**与异构规划的联系**（`docs/apple_silicon_heterogeneous_gnb_plan.md`）：这是
+**与异构规划的联系**（`docs/apple_silicon_heterogeneous_gnb_plan_english.md`）：这是
 "算力异构 × 存储异构"的教科书式协同——白天热数据走 ANE 推理、夜间冷数据驻 flash、
 训练用空闲 CPU——同一台 gNB 的算力与存储按时间维度复用。
 

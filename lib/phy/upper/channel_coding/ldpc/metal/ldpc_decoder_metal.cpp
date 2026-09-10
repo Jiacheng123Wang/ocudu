@@ -308,7 +308,7 @@ ldpc_decoder_metal::ldpc_decoder_metal(bool force_decoding_, bool early_stop_syn
   beta_override(beta_override_),
   enable_et(enable_et_)
 {
-  // "Provisions before the troops march" (docs/apple_silicon_heterogeneous_gnb_plan.md): everything
+  // "Provisions before the troops march" (docs/apple_silicon_heterogeneous_gnb_plan_english.md): everything
   // preparable is prepared at construction (gnb startup) - engine and matrix
   // initialization must never land on the packet path. For the layered family the
   // CSR-only representation makes the ALL-SIZE pre-build affordable (~40 MB shared
