@@ -20,6 +20,18 @@ if(ENABLE_FLOW_PROBES)
     add_definitions(-DOCUDU_FLOW_PROBES)
 endif()
 
+# Debug aids of the Metal offload backends, selected at build time (the same pattern as
+# ENABLE_FLOW_PROBES): off by default, no runtime environment variables involved.
+option(ENABLE_METAL_STATS "Enable the Metal engine commit/wait statistics probe ([metal_stats], debug aid, off by default)" OFF)
+if(ENABLE_METAL_STATS)
+    add_definitions(-DOCUDU_METAL_STATS)
+endif()
+
+option(ENABLE_CE_TIME "Enable the per-slot channel-estimation phase timing probe ([mmse_time]/[helena_time], debug aid, off by default)" OFF)
+if(ENABLE_CE_TIME)
+    add_definitions(-DOCUDU_CE_TIME)
+endif()
+
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     set(METAL_LDPC_DEFAULT ON)
 else()

@@ -27,6 +27,9 @@ namespace metal {
 namespace {
 
 // ---- Process-wide dispatch/wait statistics (same accounting as the LDPC/MMSE engines) ----
+// Compile-time debug aid (ENABLE_METAL_STATS=ON defines OCUDU_METAL_STATS); off by default
+// with zero overhead. Reported at process exit.
+#if defined(OCUDU_METAL_STATS)
 struct dft_stats_t {
   std::atomic<uint64_t> commits{0};
   std::atomic<uint64_t> waits{0};
@@ -59,9 +62,6 @@ static void dft_stats_wait()
 
 static void dft_stats_report()
 {
-  if (std::getenv("OCUDU_METAL_STATS") == nullptr) {
-    return;
-  }
   const dft_stats_t& s = dft_stats();
   std::fprintf(stderr,
                "[metal_stats] dft commits=%llu waits=%llu max_in_flight=%llu\n",
@@ -69,6 +69,10 @@ static void dft_stats_report()
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
 }
+#else  // OCUDU_METAL_STATS
+static void dft_stats_commit() {}
+static void dft_stats_wait() {}
+#endif // OCUDU_METAL_STATS
 
 // ---- Process-wide Metal resources: one device, one queue, one pipeline for all sizes ----
 struct dft_resources_t {
@@ -165,8 +169,11 @@ dft_metal_engine::~dft_metal_engine()
 
 bool dft_metal_engine::init(unsigned size, bool inverse)
 {
+  // Register the process-exit stats report exactly once (the counters live for the process).
+#if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
   std::call_once(stats_atexit_flag, []() { std::atexit(dft_stats_report); });
+#endif
 
   if (size < 2 || size > max_size || (size & (size - 1)) != 0) {
     return false;

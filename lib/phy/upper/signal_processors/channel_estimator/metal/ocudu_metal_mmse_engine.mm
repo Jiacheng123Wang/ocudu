@@ -24,7 +24,9 @@ namespace {
 
 // ---- Process-wide dispatch/wait statistics (S-1 audit probe A2) ---------------------------
 // Same accounting as the LDPC engine: commits / waits / cross-thread in-flight occupancy of the
-// per-engine command queues. Reported at process exit when OCUDU_METAL_STATS is set.
+// per-engine command queues. Compile-time debug aid (ENABLE_METAL_STATS=ON defines
+// OCUDU_METAL_STATS); off by default with zero overhead. Reported at process exit.
+#if defined(OCUDU_METAL_STATS)
 struct mmse_stats_t {
   std::atomic<uint64_t> commits{0};
   std::atomic<uint64_t> waits{0};
@@ -57,9 +59,6 @@ static void mmse_stats_wait()
 
 static void mmse_stats_report()
 {
-  if (std::getenv("OCUDU_METAL_STATS") == nullptr) {
-    return;
-  }
   const mmse_stats_t& s = mmse_stats();
   std::fprintf(stderr,
                "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu\n",
@@ -67,6 +66,10 @@ static void mmse_stats_report()
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
 }
+#else  // OCUDU_METAL_STATS
+static void mmse_stats_commit() {}
+static void mmse_stats_wait() {}
+#endif // OCUDU_METAL_STATS
 
 struct mmse_engine_impl {
   id<MTLDevice>                  device      = nil;
@@ -196,8 +199,10 @@ mmse_engine::~mmse_engine()
 bool mmse_engine::init(const char* metallib_path)
 {
   // Register the process-exit stats report exactly once (the counters live for the process).
+#if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
   std::call_once(stats_atexit_flag, []() { std::atexit(mmse_stats_report); });
+#endif
 
   if (impl == nullptr) {
     impl = new mmse_engine_impl;

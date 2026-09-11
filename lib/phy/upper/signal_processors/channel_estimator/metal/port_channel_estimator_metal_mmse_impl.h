@@ -45,12 +45,17 @@ public:
   ///                            8x8 pipelines (metal_nn_mmse A/B twin); the statistics,
   ///                            correlation math and CPU inversion are identical to the
   ///                            legacy kernel path, so only the GPU kernels differ.
+  /// \param[in] force_cpu_path  Test-only hook: skips the Metal engine entirely so the
+  ///                            CPU reference loop handles every block (used by the
+  ///                            head-to-head benchmark; production code leaves it false
+  ///                            and selects the CPU estimator via the factory instead).
   port_channel_estimator_metal_mmse_impl(std::unique_ptr<interpolator>                        interp,
                                          std::unique_ptr<time_alignment_estimator>            ta_estimator_,
                                          std::shared_ptr<const channel_statistics_estimator>  stats_estimator_,
                                          unsigned                                             block_prb_,
                                          bool                                                 compensate_cfo_ = true,
-                                         bool                                                 use_matrix_engine_ = false);
+                                         bool                                                 use_matrix_engine_ = false,
+                                         bool                                                 force_cpu_path = false);
 
   /// Destructor (releases the aligned GPU staging buffers).
   ~port_channel_estimator_metal_mmse_impl() override;
@@ -134,7 +139,7 @@ private:
   /// kernels and the standard-block path ALWAYS runs them - dims that are not multiples of 8
   /// are zero-padded to ceil8(nout)/ceil8(L) by the packing code (see ocudu_mmse_*_matrix.metal
   /// for the padding contract). nn=0 can therefore only mean the matrix engine itself is
-  /// unavailable (stale metallib, NOGPU); the CPU path remains the fallback for that case.
+  /// unavailable (stale metallib); the CPU path remains the fallback for that case.
   bool use_matrix_engine = false;
   bool matrix_ready      = false;
 

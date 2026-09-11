@@ -208,9 +208,6 @@ int main(int argc, char** argv)
     }
   }
   const bool dump_mode = !dump_prefix.empty();
-  if (nogpu) {
-    setenv("OCUDU_MMSE_NOGPU", "1", 1);
-  }
   // The harness's synthetic noise estimation saturates at the 100 dB SNR floor,
   // which would trip the high-SNR classical bypass gate and skip the NN for the
   // whole test set; force the NN path (the gate targets live high-SNR links).
@@ -251,7 +248,7 @@ int main(int argc, char** argv)
       ests.push_back(std::move(cpu));
       auto mmse = std::make_unique<port_channel_estimator_metal_mmse_impl>(
           create_interpolator(), make_ta_estimator(),
-          std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F), 3, false);
+          std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F), 3, false, false, nogpu);
       ests.push_back(std::move(mmse));
       auto helena = std::make_unique<port_channel_estimator_helena_impl>(create_interpolator(),
                                                                make_ta_estimator(),

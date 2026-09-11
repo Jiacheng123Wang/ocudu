@@ -633,6 +633,12 @@ Metal LDPC 路径存在同类时延问题（用户确认），计划一起优化
 
 > 命名注记（2026-08-31）：该环境变量已改名 `OCUDU_CE_TIME`（两个信道估计器共用），
 > `OCUDU_MMSE_TIME` 保留为兼容别名——本节历史记录保留原始命令不变。
+>
+> 迁移注记（2026-09-11）：分相计时已从运行时环境变量改为**编译期开关**
+> `ENABLE_CE_TIME`（CMake，默认 OFF，定义 `OCUDU_CE_TIME`）；`OCUDU_MMSE_TIME`、
+> `OCUDU_MMSE_DBG`、`OCUDU_MMSE_NOGPU` 三个环境变量已删除（CPU 路径改用
+> `expert_phy --pusch_channel_estimator_algo cpu` 选择）。本节的历史命令
+> 保持原样。
 
 新增分相计时（`OCUDU_MMSE_TIME=1`，E2E 可用）与引擎状态打印（`OCUDU_MMSE_DBG=1`
 输出 `[mmse_ce] engine READY/UNAVAILABLE`）。52 PRB/2 DMRS（10 MHz 实链配置）单测实测：
@@ -809,7 +815,8 @@ MAC PDU 经回调直接给 FAPI;V2X 小包走 P/E 核、大带宽视频走 GPU(�
 3. **RF B200 实链三腿 A/B**：实验室依赖，ZMQ 已验证，RF 未做。
 4. **(C) NEON 加速**：不触发（CPU 仅 ~14%），保留为预算收紧时储备。
 5. **(D) 引擎单例 + 跨端口批处理 + 持久 command buffer**：多端口时摊销提交往返。
-6. **探针 `ai_ce_us` 细分 + metrics decorator**：现用 `OCUDU_MMSE_TIME` 环境开关替代。
+6. **探针 `ai_ce_us` 细分 + metrics decorator**：现用 `ENABLE_CE_TIME` 编译开关替代
+   （原 `OCUDU_MMSE_TIME` 环境变量，2026-09-11 迁移）。
 7. **τ̄/f_d 估计（v2 统计）与 PUCCH/SRS**：接口已预留（`channel_statistics_estimator`），
    v2/AI-CE 任务承接（见 `AI_channel_estimation_implementation_plan.md` MEMO）。
 

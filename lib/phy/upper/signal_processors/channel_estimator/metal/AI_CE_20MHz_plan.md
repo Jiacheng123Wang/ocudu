@@ -130,7 +130,8 @@ v1 两桶 + classical 兜底：
   `gnb_rf_b200_tdd_n78_20mhz.yml_iPhone17` + gpsdo）。每轮收集：① UE 侧
   ping 网关 RTT/丢包（100 次）；② UE 侧 iperf3 上行吞吐（3 次取中位）；
   ③ gnb 日志 HARQ/CRC 计数与 `[ul_channel_estimation]` 探针；
-  ④ `OCUDU_CE_TIME=1` 的 `[helena_time]` 分布。对比口径：同位置同频点，
+  ④ `[helena_time]` 分布（`ENABLE_CE_TIME=ON` 构建；2026-09-11 起由编译期开关
+  控制，原 `OCUDU_CE_TIME=1` 环境变量已迁移）。对比口径：同位置同频点，
   手机保持静止。G-5 数据原料（真信道 LS 网格 dump）的 gnb 侧采集钩子为下阶段
   工作，先以日志指标为主。
 

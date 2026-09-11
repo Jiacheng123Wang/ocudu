@@ -52,7 +52,8 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
     std::shared_ptr<const channel_statistics_estimator>  stats_estimator_,
     unsigned                                             block_prb_,
     bool                                                 compensate_cfo_,
-    bool                                                 use_matrix_engine_) :
+    bool                                                 use_matrix_engine_,
+    bool                                                 force_cpu_path) :
   port_channel_estimator_average_impl(std::move(interp),
                                       std::move(ta_estimator_),
                                       port_channel_estimator_fd_smoothing_strategy::none,
@@ -67,15 +68,13 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
 {
   ocudu_assert(stats_estimator, "Invalid channel statistics estimator.");
 
-  // Metal compute engine (K1/K2); the CPU reference math below is the automatic fallback.
-  // OCUDU_MMSE_NOGPU=1 forces the CPU path (diagnostics).
+  // Metal compute engine (K1/K2); the CPU reference math below is the automatic fallback
+  // when the engine is unavailable (init failure / stale metallib). Forcing the whole
+  // estimator onto the CPU path from the outside is the expert_phy knob:
+  // --pusch_channel_estimator_algo cpu (force_cpu_path is the test-only hook used by the
+  // head-to-head benchmark).
   engine       = std::make_unique<metal::mmse_engine>();
-  engine_ready = (std::getenv("OCUDU_MMSE_NOGPU") == nullptr) && engine->init();
-  if (std::getenv("OCUDU_MMSE_DBG") != nullptr) {
-    logger.debug("[mmse_ce] engine {} (NOGPU={})",
-                 engine_ready ? "READY - GPU hot path active" : "UNAVAILABLE - CPU fallback path",
-                 std::getenv("OCUDU_MMSE_NOGPU") != nullptr ? 1 : 0);
-  }
+  engine_ready = !force_cpu_path && engine->init();
   gpu_a        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS);
   gpu_r_hp     = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_OUT * MAX_BLOCK_PILOTS);
   gpu_w        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_OUT * MAX_BLOCK_PILOTS);
@@ -93,7 +92,7 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
     // INFO level (no env needed): confirms which GPU kernels the A/B flavor runs. The nn
     // path is taken on EVERY standard-block hop - nout/L that are not multiples of 8 are
     // zero-padded to ceil8 automatically (see the [mmse_time] pad= field); nn=0 only shows
-    // up when this line reports UNAVAILABLE (stale metallib / NOGPU).
+    // up when this line reports UNAVAILABLE (stale metallib).
     logger.info("[mmse_ce] metal_nn_mmse: matrix pipelines {} - non-8-aligned dims are zero-padded, "
                 "per-slot selection: [mmse_time] nn=",
                 matrix_ready ? "READY (simdgroup 8x8)" : "UNAVAILABLE (falling back to legacy kernels)");
@@ -304,14 +303,16 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   args.pattern_symbols.for_each(args.first_symbol, args.last_symbol, [&](unsigned s) { dmrs_sym.push_back(s); });
   const unsigned npt = dmrs_sym.size();
 
-  // Per-phase timing (OCUDU_CE_TIME=1; OCUDU_MMSE_TIME kept as legacy alias):
-  // sigma2 / corr-build / GPU / CPU-blocks / finish.
-  // metal_nn_mmse (A/B flavor) keeps the per-slot [mmse_time] line self-enabled so the
-  // actual kernel selection (nn=0 legacy / nn=1 simdgroup 8x8) is always visible in the log.
-  const bool           time_en  = std::getenv("OCUDU_CE_TIME") != nullptr ||
-                                std::getenv("OCUDU_MMSE_TIME") != nullptr || use_matrix_engine;
-  using steady_clock            = std::chrono::steady_clock;
-  const auto t_begin            = steady_clock::now();
+  // Per-phase timing (compile-time debug aid, ENABLE_CE_TIME=ON defines OCUDU_CE_TIME):
+  // sigma2 / corr-build / GPU / CPU-blocks / finish, printed through the [mmse_time]
+  // debug line.
+#if defined(OCUDU_CE_TIME)
+  const bool time_en = true;
+#else
+  const bool time_en = false;
+#endif
+  using steady_clock = std::chrono::steady_clock;
+  const auto t_begin = steady_clock::now();
 
   // Classical noise variance (reuses the existing noise estimator).
   const float sigma2 = estimate_sigma2(args);
@@ -368,7 +369,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // the engine ready there is no CPU fallback per hop. Matrix dims that are not multiples of 8
   // are zero-padded to ceil8 in the staging buffers (Lp/Np row strides); the kernels truncate
   // the outputs back to the real geometry. nn=0 therefore only means the matrix engine itself
-  // is unavailable (stale metallib / NOGPU): the legacy kernels (metal_mmse) or the CPU loop
+  // is unavailable (stale metallib): the legacy kernels (metal_mmse) or the CPU loop
   // then take over.
   const bool matrix_on = engine_ready && use_matrix_engine && matrix_ready;
   bool       hop_gpu   = false; // engine processed this hop (any block)
@@ -409,7 +410,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // legacy kernels (nn=0, only when the matrix pipelines are unavailable/stale).
     last_stage_nn = matrix_on;
   } else {
-    // Engine unavailable (OCUDU_MMSE_NOGPU / stale metallib): the CPU loop below handles the
+    // Engine unavailable (init failure / stale metallib): the CPU loop below handles the
     // whole hop (standard blocks included).
     last_stage_nn = false;
   }
@@ -485,12 +486,6 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           y_block[2 * (i_symbol * b_npf + j)]     = src[j].real();
           y_block[2 * (i_symbol * b_npf + j) + 1] = src[j].imag();
         }
-      }
-      if (std::getenv("OCUDU_MMSE_DBG")) {
-        float py = 0.0F, pw = 0.0F;
-        for (unsigned j = 0; j != 2 * L; ++j) py += y_block[j] * y_block[j];
-        for (unsigned i = 0; i != nout * L; ++i) pw += w_mat[i] * w_mat[i];
-        logger.debug("[dbgblk] b={} nout={} L={} sigma2={:.4f} |y|2={:.3f} |W|2={:.3f}", b, nout, L, sigma2, py, pw);
       }
       // h = W . y (real weights, complex vector): two real matrix-vector products.
       std::fill(h_block.begin(), h_block.begin() + 2 * nout, 0.0F);

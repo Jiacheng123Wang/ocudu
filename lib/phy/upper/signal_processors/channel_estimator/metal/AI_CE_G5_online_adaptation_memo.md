@@ -49,7 +49,9 @@ sudo 的 env_reset 会过滤 sudo 前的变量，曾导致目录空采集）。
 ```bash
 git pull && cmake --build build --target gnb -j8
 mkdir -p ~/ai_ce_work/capture/site<N>_<MMDD>
-sudo OCUDU_CE_TIME=1 OCUDU_HELENA_DUMP_DIR=/Users/jiachengwang/ai_ce_work/capture/site<N>_<MMDD> \
+# 2026-09-11 起 [helena_time] 由编译期开关 ENABLE_CE_TIME=ON 控制（不再传 OCUDU_CE_TIME=1）；
+# OCUDU_HELENA_DUMP_DIR 保持为运行时环境变量。
+sudo OCUDU_HELENA_DUMP_DIR=/Users/jiachengwang/ai_ce_work/capture/site<N>_<MMDD> \
   ./build/apps/gnb/gnb -c configs/gnb_rf_b200_tdd_n78_20mhz.yml_iPhone17 \
   expert_phy --pusch_ldpc_decoder_type auto --pusch_channel_estimator_algo helena
 # 手机 attach 后 iperf3 上行 30s×3（服务端在 127：iperf3 -s -B 10.45.0.1 -p 5201）

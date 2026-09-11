@@ -25,10 +25,12 @@ namespace metal {
 
 // ---- Process-wide dispatch/wait statistics (S-1 audit probe A2) ---------------------------
 // Counted per command-buffer commit/wait across every engine of every algorithm family;
-// reported at process exit when OCUDU_METAL_STATS is set. max_in_flight measures the
+// reported at process exit. Compile-time debug aid (ENABLE_METAL_STATS=ON defines
+// OCUDU_METAL_STATS); off by default with zero overhead. max_in_flight measures the
 // cross-thread queue occupancy of the shared per-family command queue: with several pool
 // threads committing on the same queue before waiting, it quantifies the submission-order
 // serialization (audit bottleneck B7/B10).
+#if defined(OCUDU_METAL_STATS)
 struct decoder_stats_t {
   std::atomic<uint64_t> commits{0};
   std::atomic<uint64_t> waits{0};
@@ -61,9 +63,6 @@ static void decoder_stats_wait()
 
 static void decoder_stats_report()
 {
-  if (std::getenv("OCUDU_METAL_STATS") == nullptr) {
-    return;
-  }
   const decoder_stats_t& s = decoder_stats();
   std::fprintf(stderr,
                "[metal_stats] ldpc_decoder commits=%llu waits=%llu max_in_flight=%llu\n",
@@ -71,6 +70,10 @@ static void decoder_stats_report()
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
 }
+#else  // OCUDU_METAL_STATS
+static void decoder_stats_commit() {}
+static void decoder_stats_wait() {}
+#endif // OCUDU_METAL_STATS
 
 // Must match the DecodeCtrl struct in ocudu_nms_layered_decoder.metal (shader ABI).
 // The async kernel uses the same 3-word layout as its AsyncCtrl (stop_flag,
@@ -272,8 +275,10 @@ std::mutex& algo_resources_mutex()
 algo_resources_t* get_algo_resources(decoder_engine::algo mode)
 {
   // Register the process-exit stats report exactly once (the counters live for the process).
+#if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
   std::call_once(stats_atexit_flag, []() { std::atexit(decoder_stats_report); });
+#endif
 
   std::lock_guard<std::mutex> lock(algo_resources_mutex());
   auto&                      cache = algo_resources_cache();
