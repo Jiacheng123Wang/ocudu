@@ -4,6 +4,8 @@
 
 #include "lower_phy_factory.h"
 
+#include <cstdlib>
+
 using namespace ocudu;
 
 static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_phy_configuration& config,
@@ -17,6 +19,17 @@ static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_p
 
   // Create DFT factory.
   std::shared_ptr<dft_processor_factory> dft_factory = create_dft_processor_factory();
+#if defined(OCUDU_METAL_DFT)
+  // GPU FFT opt-in (A/B routing): set OCUDU_DFT_METAL=1 to route the DFT instances through
+  // the Metal implementation. The factory falls back per configuration (non-power-of-two
+  // and oversized transforms, e.g. the PRACH FFT, stay on the CPU implementation), and the
+  // default path (env unset) keeps the previous behavior bit for bit.
+  if (std::getenv("OCUDU_DFT_METAL") != nullptr) {
+    if (auto metal_factory = create_dft_processor_factory_metal()) {
+      dft_factory = std::move(metal_factory);
+    }
+  }
+#endif // OCUDU_METAL_DFT
   report_fatal_error_if_not(dft_factory, "Failed to create DFT factory.");
 
   // Create OFDM modulator factory.

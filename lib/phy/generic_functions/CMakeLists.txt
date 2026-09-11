@@ -54,4 +54,12 @@ target_link_directories(ocudu_dft PRIVATE ${OCUDU_DFT_LIBRARY_DIRS})
 target_link_libraries(ocudu_dft PRIVATE ${OCUDU_DFT_LIBRARIES} ocuduvec ocudulog)
 target_compile_definitions(ocudu_dft PRIVATE ${OCUDU_DFT_DEFINITIONS})
 
+# Metal GPU DFT processor (Apple Silicon): engine + adapter live in metal/.
+if(ENABLE_METAL_DFT)
+    add_subdirectory(metal)
+    target_include_directories(ocudu_dft PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/metal)
+    target_compile_definitions(ocudu_dft PUBLIC OCUDU_METAL_DFT)
+    target_link_libraries(ocudu_dft PUBLIC ocudu_dft_metal)
+endif()
+
 add_to_exported_libs(ocudu_dft)

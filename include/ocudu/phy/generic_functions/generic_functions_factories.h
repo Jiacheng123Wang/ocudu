@@ -101,6 +101,15 @@ inline std::shared_ptr<dft_processor_factory> create_dft_processor_factory()
   return create_dft_processor_factory_generic();
 }
 
+/// \brief Creates a DFT processor factory that prefers the Metal GPU implementation.
+///
+/// The Metal DFT covers power-of-two sizes up to the kernel's maximum (the OFDM
+/// demodulator/modulator sizes); any other configuration falls back transparently to the
+/// default implementation (\ref create_dft_processor_factory), so the factory never
+/// rejects a valid configuration because of the GPU.
+/// \return A valid pointer to a DFT processor factory if Metal is available. Otherwise, \c nullptr.
+std::shared_ptr<dft_processor_factory> create_dft_processor_factory_metal();
+
 /// Factory for the Discrete Fourier Transform (DFT) processor for 16-bit complex integer values.
 class dft_processor_ci16_factory
 {

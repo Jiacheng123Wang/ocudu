@@ -15,6 +15,10 @@
 #include "dft_processor_fftz_impl.h"
 #endif // HAVE_FFTZ
 
+#if defined(OCUDU_METAL_DFT)
+#include "metal/dft_processor_metal.h"
+#endif // OCUDU_METAL_DFT
+
 #ifdef __x86_64__
 #include "dft_processor_ci16_avx2.h"
 #endif // __x86_64__
@@ -116,6 +120,33 @@ private:
 };
 #endif // HAVE_FFTZ
 
+#if defined(OCUDU_METAL_DFT)
+class dft_processor_factory_metal : public dft_processor_factory
+{
+public:
+  dft_processor_factory_metal() : fallback(create_dft_processor_factory())
+  {
+    report_fatal_error_if_not(fallback != nullptr, "Failed to create the fallback DFT factory.");
+  }
+
+private:
+  std::unique_ptr<dft_processor> create(const dft_processor::configuration& dft_config) override
+  {
+    // The Metal kernel covers power-of-two sizes up to its threadgroup budget; everything
+    // else (e.g. the PRACH FFT sizes) falls back transparently.
+    if (dft_processor_metal::is_supported_size(dft_config.size)) {
+      auto dft = std::make_unique<dft_processor_metal>(dft_config);
+      if (dft->is_valid()) {
+        return dft;
+      }
+    }
+    return fallback->create(dft_config);
+  }
+
+  std::shared_ptr<dft_processor_factory> fallback;
+};
+#endif // OCUDU_METAL_DFT
+
 } // namespace
 
 std::shared_ptr<dft_processor_factory> ocudu::create_dft_processor_factory_generic()
@@ -143,6 +174,15 @@ std::shared_ptr<dft_processor_factory> ocudu::create_dft_processor_factory_fftz(
 #else  // HAVE_FFTZ
   return nullptr;
 #endif // HAVE_FFTZ
+}
+
+std::shared_ptr<dft_processor_factory> ocudu::create_dft_processor_factory_metal()
+{
+#if defined(OCUDU_METAL_DFT)
+  return std::make_shared<dft_processor_factory_metal>();
+#else  // OCUDU_METAL_DFT
+  return nullptr;
+#endif // OCUDU_METAL_DFT
 }
 
 std::shared_ptr<dft_processor_ci16_factory> ocudu::create_dft_processor_ci16_factory_avx2()
