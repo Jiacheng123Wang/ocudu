@@ -17,6 +17,7 @@ static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_p
   }
 
   // Create DFT factory (selected through the expert_phy knob, e.g. --pusch_dft_type metal).
+  bool                                    metal_selected = false;
   std::shared_ptr<dft_processor_factory> dft_factory;
   if (config.dft_processor_type == "metal") {
 #if defined(OCUDU_METAL_DFT)
@@ -32,8 +33,14 @@ static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_p
   }
   if (dft_factory == nullptr) {
     dft_factory = create_dft_processor_factory();
+  } else {
+    metal_selected = true;
   }
   report_fatal_error_if_not(dft_factory, "Failed to create DFT factory.");
+  // Startup diagnostic: which DFT backend this lower PHY instance actually uses.
+  ocudulog::fetch_basic_logger("PHY").info("[lower_phy] DFT backend: {} (expert_phy --pusch_dft_type {})",
+                                          metal_selected ? "metal (GPU)" : "cpu",
+                                          config.dft_processor_type);
 
   // Create OFDM modulator factory.
   ofdm_factory_generic_configuration      ofdm_common_config = {.dft_factory = dft_factory};
