@@ -4,8 +4,9 @@
 /// \file
 /// \brief C++ front end of the Metal DFT (FFT) engine (Objective-C++ implementation in
 /// ocudu_dft_metal_engine.mm): loads the precompiled ocudu_dft.metallib and runs the
-/// iterative radix-2 DIT kernel. One (size, direction) per engine instance; the device,
-/// command queue and pipeline state are shared process-wide across all instances.
+/// iterative mixed-radix (2^k * 3^m) DIT kernel. One (size, direction) per engine
+/// instance; the device, command queue and pipeline state are shared process-wide
+/// across all instances.
 ///
 /// The engine follows the same conventions as the LDPC/MMSE Metal engines: zero-copy
 /// wraps of the host buffers (page-aligned, cached by pointer with a length check),
@@ -32,9 +33,9 @@ public:
   /// Maximum transform size supported by the kernel (the threadgroup memory budget).
   static constexpr unsigned max_size = 4096;
 
-  /// \brief One-shot setup: shared device/queue/pipeline, host-side twiddle table and the
-  /// warm-up dispatch.
-  /// \param[in] size    Transform size (a power of two, 2..max_size).
+  /// \brief One-shot setup: shared device/queue/pipeline, host-side twiddle table, the
+  /// mixed-radix digit-reversal permutation table and the warm-up dispatch.
+  /// \param[in] size    Transform size (2^k * 3^m, 2..max_size).
   /// \param[in] inverse True for the inverse transform (conjugated twiddles, unnormalized).
   /// \return True on success.
   bool init(unsigned size, bool inverse);

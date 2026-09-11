@@ -13,13 +13,14 @@
 
 namespace ocudu {
 
-/// DFT processor using the Metal GPU (iterative radix-2 DIT, power-of-two sizes up to
-/// metal::dft_metal_engine::max_size). Input/output buffers are page-aligned and zero-copy
+/// DFT processor using the Metal GPU (iterative mixed-radix 2^k*3^m DIT, sizes up to
+/// metal::dft_metal_engine::max_size: every NR OFDM FFT size of that family, e.g. 384/512/768/
+/// 1024/1536/2048/3072). Input/output buffers are page-aligned and zero-copy
 /// wrapped into MTLBuffers: the GPU reads/writes the host memory directly.
 class dft_processor_metal : public dft_processor
 {
 public:
-  /// Returns whether the Metal implementation supports the given size (power of two,
+  /// Returns whether the Metal implementation supports the given size (2^k*3^m,
   /// 2..max_size). The factory falls back to the default DFT implementation otherwise.
   static bool is_supported_size(unsigned size);
 

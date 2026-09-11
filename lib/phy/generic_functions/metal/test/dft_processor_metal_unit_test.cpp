@@ -74,8 +74,8 @@ int main()
 
   bool ok = true;
 
-  // A/B comparison over the OFDM-relevant power-of-two sizes, both directions.
-  const unsigned sizes[] = {128, 512, 1024, 2048, 4096};
+  // A/B comparison over the OFDM-relevant 2^k * 3^m sizes, both directions.
+  const unsigned sizes[] = {128, 384, 512, 768, 1024, 1536, 2048, 3072, 4096};
   for (unsigned size : sizes) {
     for (auto dir : {dft_processor::direction::DIRECT, dft_processor::direction::INVERSE}) {
       const dft_processor::configuration config{size, dir};
@@ -142,15 +142,16 @@ int main()
     }
   }
 
-  // Unsupported-size semantics: the static predicate rejects non-power-of-two / oversized
-  // transforms, and the metal factory falls back transparently (never returns null).
+  // Unsupported-size semantics: the static predicate rejects sizes outside the 2^k*3^m
+  // family (or beyond the kernel maximum), and the metal factory falls back transparently
+  // (never returns null).
   {
     std::shared_ptr<dft_processor_factory> metal_factory = create_dft_processor_factory_metal();
     if (metal_factory == nullptr) {
       std::fprintf(stderr, "FAIL: Metal DFT factory unavailable (built without OCUDU_METAL_DFT?)\n");
       return 1;
     }
-    for (unsigned bad : {1U, 3U, 1000U, 8192U, 12288U}) {
+    for (unsigned bad : {1U, 5U, 1000U, 5000U, 8192U, 12288U}) {
       if (dft_processor_metal::is_supported_size(bad)) {
         std::fprintf(stderr, "FAIL: is_supported_size(%u) returned true\n", bad);
         ok = false;
@@ -165,7 +166,7 @@ int main()
   }
 
   // Steady-state latency (audit data): 100 runs per backend at the OFDM sizes.
-  for (unsigned size : {512U, 1024U, 2048U}) {
+  for (unsigned size : {512U, 768U, 1024U, 2048U}) {
     dft_processor_metal metal({size, dft_processor::direction::DIRECT});
     if (!metal.is_valid()) {
       continue;

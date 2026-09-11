@@ -9,7 +9,18 @@ using namespace ocudu;
 
 bool dft_processor_metal::is_supported_size(unsigned size)
 {
-  return (size >= 2) && (size <= metal::dft_metal_engine::max_size) && ((size & (size - 1)) == 0);
+  if (size < 2 || size > metal::dft_metal_engine::max_size) {
+    return false;
+  }
+  // The kernel covers the 2^k * 3^m family (every NR OFDM FFT size, e.g. 384/512/768/1024/
+  // 1536/2048/3072); anything else (e.g. the PRACH FFT sizes) stays on the CPU implementation.
+  while (size % 2 == 0) {
+    size /= 2;
+  }
+  while (size % 3 == 0) {
+    size /= 3;
+  }
+  return size == 1;
 }
 
 dft_processor_metal::dft_processor_metal(const configuration& config) : cfg(config), dir(config.dir)

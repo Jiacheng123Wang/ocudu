@@ -115,16 +115,18 @@ NSString* resolve_dft_metallib_path()
 }
 
 struct dft_engine_impl {
-  uint32_t n        = 0;
-  uint32_t log2_n   = 0;
-  uint32_t inverse  = 0;
+  uint32_t n       = 0;
+  uint32_t radix2  = 0; // number of radix-2 stages (k in N = 2^k * 3^m)
+  uint32_t radix3  = 0; // number of radix-3 stages (m)
+  uint32_t inverse = 0;
   double   last_gpu_us = 0.0;
 
   // Zero-copy wrappers, cached by host pointer with the cached length stored alongside
   // (the S-1 audit hardening: a larger request re-wraps instead of silently truncating).
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
 
-  id<MTLBuffer> buf_tw = nil; // zero-copy wrap of the host twiddle table (N/2 float2)
+  id<MTLBuffer> buf_tw   = nil; // zero-copy wrap of the host twiddle table (N/2 float2)
+  id<MTLBuffer> buf_perm = nil; // zero-copy wrap of the digit-reversal permutation table (N uint32)
 
   // Warm-up scratch (page-aligned, engine lifetime; freed by the destructor).
   void* warmup_mem = nullptr;
@@ -175,18 +177,34 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   std::call_once(stats_atexit_flag, []() { std::atexit(dft_stats_report); });
 #endif
 
-  if (size < 2 || size > max_size || (size & (size - 1)) != 0) {
+  if (size < 2 || size > max_size) {
     return false;
   }
-
-  auto* engine  = new dft_engine_impl();
-  impl          = engine;
-  engine->n     = size;
-  engine->log2_n = 0;
-  while ((1u << engine->log2_n) < size) {
-    ++engine->log2_n;
+  // Factor N = 2^k * 3^m (the kernel's supported family); anything else is rejected here
+  // (the factory then falls back per configuration).
+  {
+    unsigned rem = size;
+    unsigned k   = 0;
+    unsigned m   = 0;
+    while (rem % 2 == 0) {
+      rem /= 2;
+      ++k;
+    }
+    while (rem % 3 == 0) {
+      rem /= 3;
+      ++m;
+    }
+    if (rem != 1) {
+      return false;
+    }
+    auto* engine   = new dft_engine_impl();
+    impl           = engine;
+    engine->n      = size;
+    engine->radix2 = k;
+    engine->radix3 = m;
   }
-  engine->inverse = inverse ? 1u : 0u;
+  auto* engine      = static_cast<dft_engine_impl*>(impl);
+  engine->inverse   = inverse ? 1u : 0u;
 
   // Device, queue and pipeline are shared process-wide (they are size-independent).
   {
@@ -264,6 +282,48 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
     return false;
   }
 
+  // Host-side mixed-radix digit-reversal permutation table (the DIT input order), page-aligned,
+  // zero-copy wrapped. Factors are processed radix-2 first, then radix-3, matching the kernel.
+  const size_t perm_bytes = static_cast<size_t>(size) * sizeof(uint32_t);
+  void*        perm_mem   = nullptr;
+  if (::posix_memalign(&perm_mem, 4096, perm_bytes) != 0 || perm_mem == nullptr) {
+    ocudulog::fetch_basic_logger("PHY").error("Metal DFT: permutation table allocation failed");
+    std::free(tw_mem);
+    delete engine;
+    impl = nullptr;
+    return false;
+  }
+  {
+    auto* perm = static_cast<uint32_t*>(perm_mem);
+    for (uint32_t i = 0; i != size; ++i) {
+      uint32_t rem        = i;
+      uint32_t rev        = 0;
+      uint32_t remaining  = size;
+      // Radix-2 digits (least significant first).
+      for (uint32_t q = 0; q != engine->radix2; ++q) {
+        remaining /= 2;
+        rev += (rem % 2) * remaining;
+        rem /= 2;
+      }
+      // Radix-3 digits.
+      for (uint32_t q = 0; q != engine->radix3; ++q) {
+        remaining /= 3;
+        rev += (rem % 3) * remaining;
+        rem /= 3;
+      }
+      perm[i] = rev;
+    }
+  }
+  engine->buf_perm = wrap_buffer(engine, perm_mem, perm_bytes);
+  if (engine->buf_perm == nil) {
+    ocudulog::fetch_basic_logger("PHY").error("Metal DFT: permutation buffer wrap failed");
+    std::free(perm_mem);
+    std::free(tw_mem);
+    delete engine;
+    impl = nullptr;
+    return false;
+  }
+
   // Warm-up dispatch (once per process): the first command-buffer commit of each pipeline
   // pays the Metal driver's lazy compile; paying it here keeps it off the packet path.
   {
@@ -299,8 +359,10 @@ bool dft_metal_engine::run(const void* in, void* out)
   [enc setBuffer:b_in offset:0 atIndex:0];
   [enc setBuffer:b_out offset:0 atIndex:1];
   [enc setBuffer:engine->buf_tw offset:0 atIndex:2];
-  [enc setBytes:&engine->log2_n length:sizeof(uint32_t) atIndex:3];
-  [enc setBytes:&engine->inverse length:sizeof(uint32_t) atIndex:4];
+  [enc setBuffer:engine->buf_perm offset:0 atIndex:3];
+  [enc setBytes:&engine->radix2 length:sizeof(uint32_t) atIndex:4];
+  [enc setBytes:&engine->radix3 length:sizeof(uint32_t) atIndex:5];
+  [enc setBytes:&engine->inverse length:sizeof(uint32_t) atIndex:6];
   [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
   [enc endEncoding];
