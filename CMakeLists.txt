@@ -66,6 +66,14 @@ endif()
 option(ENABLE_METAL_EQUALIZER "Enable the Metal GPU channel equalizer (Apple Silicon only)" ${METAL_EQUALIZER_DEFAULT})
 # Note: OCUDU_METAL_EQUALIZER is defined per-target (see channel_processors/CMakeLists.txt).
 
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    set(METAL_DEMODULATION_DEFAULT ON)
+else()
+    set(METAL_DEMODULATION_DEFAULT OFF)
+endif()
+option(ENABLE_METAL_DEMODULATION "Enable the Metal GPU soft demapper (Apple Silicon only)" ${METAL_DEMODULATION_DEFAULT})
+# Note: OCUDU_METAL_DEMODULATION is defined per-target (see channel_modulation/CMakeLists.txt).
+
 
 if(APPLE AND NOT TARGET atomic)
     # macOS does not provide a separate libatomic. Some targets link the

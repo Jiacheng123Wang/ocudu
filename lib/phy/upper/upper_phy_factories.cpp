@@ -29,6 +29,9 @@
 #if defined(OCUDU_METAL_EQUALIZER)
 #include "channel_equalizer_metal_factory.h"
 #endif // OCUDU_METAL_EQUALIZER
+#if defined(OCUDU_METAL_DEMODULATION)
+#include "demodulation_mapper_metal_factory.h"
+#endif // OCUDU_METAL_DEMODULATION
 #include <algorithm>
 
 using namespace ocudu;
@@ -717,6 +720,14 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
   std::shared_ptr<crc_calculator_factory>          pusch_crc_calc_factory     = crc_calc_factory;
   std::shared_ptr<pseudo_random_generator_factory> pusch_scrambling_factory   = prg_factory;
   std::shared_ptr<demodulation_mapper_factory>     pusch_demodulation_factory = demodulation_factory;
+#if defined(OCUDU_METAL_DEMODULATION)
+  // The same backend knob routes the PUSCH soft demapper to the Metal implementation
+  // (per-scheme fallback to the CPU generic for BPSK/pi/2-BPSK); the PDSCH keeps the CPU
+  // implementation unconditionally.
+  if (config.pusch_channel_equalizer_backend == "metal") {
+    pusch_demodulation_factory = create_demodulation_mapper_metal_factory();
+  }
+#endif // OCUDU_METAL_DEMODULATION
   std::shared_ptr<evm_calculator_factory>          pusch_evm_calc_factory     = evm_calc_factory;
   std::shared_ptr<transform_precoder_factory>      pusch_precoding_factory    = precoding_factory;
   if (metric_notifier) {
