@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 /// \file
-/// \brief C++ front end of the Metal MIMO channel equalizer engine (Objective-C++
+/// \brief C++ front end of the Metal channel equalizer engine (Objective-C++
 /// implementation in ocudu_equalizer_metal_engine.mm). One engine instance per equalizer
 /// object; device/queue/pipeline shared process-wide, following the DFT/LDPC engine
 /// conventions: zero-copy wraps of page-aligned staging buffers with a length-checked
@@ -33,28 +33,34 @@ public:
   bool init();
 
   /// \brief Synchronous equalization of one symbol batch.
-  /// \param[in]  h         Staged channel estimates, layout [port][layer][re], float2,
-  ///                       page-aligned, tx_scaling already applied by the caller.
-  /// \param[in]  y         Staged received symbols, layout [port][re], float2, page-aligned.
-  /// \param[out] eq        Equalized symbols, layout [re][layer] interleaved, float2,
-  ///                       page-aligned.
-  /// \param[out] nv        Post-equalization noise variances, layout [re][layer], float,
-  ///                       page-aligned.
-  /// \param[in]  nof_re    Number of resource elements.
-  /// \param[in]  nof_ports Receive ports (2, 4 or 8).
-  /// \param[in]  nof_layers Transmit layers (2..4, <= nof_ports).
-  /// \param[in]  mmse      True for the MMSE algorithm (false = ZF).
-  /// \param[in]  noise_var Noise variance estimate (the max across ports, CPU convention).
+  /// \param[in]  h          Staged channel estimates, layout [port][layer][re], float2,
+  ///                        page-aligned. tx_scaling is applied by the caller on the
+  ///                        multi-layer path and left out on the single-layer path.
+  /// \param[in]  y          Staged received symbols, layout [port][re], float2, page-aligned.
+  /// \param[in]  sigma2     Staged per-port noise variances, float, page-aligned (used by
+  ///                        the single-layer path only).
+  /// \param[out] eq         Equalized symbols, layout [re][layer] interleaved, float2,
+  ///                        page-aligned.
+  /// \param[out] nv         Post-equalization noise variances, layout [re][layer], float,
+  ///                        page-aligned.
+  /// \param[in]  nof_re     Number of resource elements.
+  /// \param[in]  nof_ports  Receive ports (1..8; 2/4/8 on the multi-layer path).
+  /// \param[in]  nof_layers Transmit layers (1..4, <= nof_ports).
+  /// \param[in]  mmse       True for the MMSE algorithm (false = ZF).
+  /// \param[in]  noise_var  Noise variance estimate (max across ports, multi-layer path).
+  /// \param[in]  tx_scaling Transmission gain scaling factor (single-layer path).
   /// \return True on success.
   bool equalize(const void* h,
                 const void* y,
+                const void* sigma2,
                 void*       eq,
                 void*       nv,
                 unsigned    nof_re,
                 unsigned    nof_ports,
                 unsigned    nof_layers,
                 bool        mmse,
-                float       noise_var);
+                float       noise_var,
+                float       tx_scaling);
 
   /// GPU-side duration of the last call in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;

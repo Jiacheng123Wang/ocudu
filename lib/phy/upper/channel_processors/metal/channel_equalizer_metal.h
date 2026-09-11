@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 /// \file
-/// \brief Metal GPU multi-layer MIMO channel equalizer (ZF and MMSE) behind the
-/// channel_equalizer interface. Covers the 2..4 Tx layer topologies (2/4/8 Rx ports); the
-/// single-layer path keeps the CPU implementation (per-port noise-validity reduction
-/// semantics). The per-call staging converts the bf16 grid/channel data to float and copies
-/// the results back - the zero-copy boundaries arrive with the chained pipeline work.
+/// \brief Metal GPU channel equalizer (ZF and MMSE) behind the channel_equalizer interface.
+/// Covers the 1..4 Tx layer topologies (1/2/4/8 Rx ports): the single-layer path replicates
+/// the CPU 1 x n combiner including its per-port noise-validity port reduction, and the
+/// multi-layer path replicates the CPU Gram-inverse plus matched filter. The per-call staging
+/// converts the bf16 grid/channel data to float and copies the results back - the zero-copy
+/// boundaries arrive with the chained pipeline work.
 
 #pragma once
 

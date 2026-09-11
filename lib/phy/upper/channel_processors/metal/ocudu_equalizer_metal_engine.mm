@@ -204,13 +204,15 @@ bool equalizer_metal_engine::init()
 
 bool equalizer_metal_engine::equalize(const void* h,
                                       const void* y,
+                                      const void* sigma2,
                                       void*       eq,
                                       void*       nv,
                                       unsigned    nof_re,
                                       unsigned    nof_ports,
                                       unsigned    nof_layers,
                                       bool        mmse,
-                                      float       noise_var)
+                                      float       noise_var,
+                                      float       tx_scaling)
 {
   eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
   if (engine == nullptr || eq_resources().pipeline == nil) {
@@ -218,17 +220,19 @@ bool equalizer_metal_engine::equalize(const void* h,
   }
   const size_t h_bytes  = static_cast<size_t>(nof_ports) * nof_layers * nof_re * 2 * sizeof(float);
   const size_t y_bytes  = static_cast<size_t>(nof_ports) * nof_re * 2 * sizeof(float);
+  const size_t s_bytes  = static_cast<size_t>(nof_ports) * sizeof(float);
   const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
   const size_t nv_bytes = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
   id<MTLBuffer> b_h  = wrap_buffer(engine, h, h_bytes);
   id<MTLBuffer> b_y  = wrap_buffer(engine, y, y_bytes);
+  id<MTLBuffer> b_s  = wrap_buffer(engine, sigma2, s_bytes);
   id<MTLBuffer> b_eq = wrap_buffer(engine, eq, eq_bytes);
   id<MTLBuffer> b_nv = wrap_buffer(engine, nv, nv_bytes);
-  if (b_h == nil || b_y == nil || b_eq == nil || b_nv == nil) {
+  if (b_h == nil || b_y == nil || b_s == nil || b_eq == nil || b_nv == nil) {
     return false;
   }
 
-  equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, 1.0F};
+  equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, tx_scaling};
 
   id<MTLCommandBuffer>         cmd_buf = [eq_resources().queue commandBuffer];
   id<MTLComputeCommandEncoder> enc     = [cmd_buf computeCommandEncoder];
@@ -237,6 +241,7 @@ bool equalizer_metal_engine::equalize(const void* h,
   [enc setBuffer:b_y offset:0 atIndex:1];
   [enc setBuffer:b_eq offset:0 atIndex:2];
   [enc setBuffer:b_nv offset:0 atIndex:3];
+  [enc setBuffer:b_s offset:0 atIndex:5];
   [enc setBytes:&params length:sizeof(params) atIndex:4];
   [enc dispatchThreads:MTLSizeMake(nof_re, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   [enc endEncoding];

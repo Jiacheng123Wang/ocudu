@@ -1,11 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
-/// Multi-layer (2..4 Tx layers x 2/4/8 Rx ports) MIMO channel equalizer: one thread per
-/// resource element, scalar per-RE closed-form math replicating the CPU generic ZF/MMSE
-/// implementation (equalize_zf_mxn_simd / equalize_mmse_mxn_simd). The single-layer path
-/// keeps the CPU implementation (its per-port noise-validity reduction semantics are not
-/// part of this kernel).
+/// Channel equalizer: one thread per resource element, scalar per-RE math replicating the
+/// CPU generic ZF/MMSE implementation.
+///
+/// Two topologies are covered:
+/// - single Tx layer (1 x P SIMO, equalize_zf_1xn): per-port noise-variance validity is
+///   resolved by the host (ports with non-positive or non-finite noise variance are dropped
+///   before the call, like the CPU reduction) and the kernel combines the remaining ports.
+///   Channel estimates are passed UNSCALED - tx_scaling enters the denominator, as in the
+///   CPU 1 x n path. Both ZF and MMSE use this path (for a single layer the two algorithms
+///   are equivalent once the LLR scaling is included).
+/// - 2..4 Tx layers x 2/4/8 Rx ports: Gram matrix inversion plus the matched filter.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -15,11 +21,11 @@ constant uint MAX_PORTS  = 8;
 
 struct equalize_params {
     uint  nof_re;       // resource elements
-    uint  nof_ports;    // receive ports (2, 4 or 8)
-    uint  nof_layers;   // transmit layers (2..4, <= nof_ports)
-    uint  algo;         // 0 = ZF, 1 = MMSE
-    float noise_var;    // noise variance estimate (the max across ports, CPU convention)
-    float tx_scaling;   // already applied to H by the host in this kernel's path
+    uint  nof_ports;    // receive ports (1..8; 2/4/8 on the multi-layer path)
+    uint  nof_layers;   // transmit layers (1..4, <= nof_ports)
+    uint  algo;         // 0 = ZF, 1 = MMSE (the single-layer path is algorithm-independent)
+    float noise_var;    // noise variance estimate (max across ports, multi-layer path)
+    float tx_scaling;   // single-layer path only; the multi-layer path pre-scales H
 };
 
 // Complex multiply / multiply-conjugate helpers.
@@ -86,6 +92,7 @@ kernel void equalize_mxn(device const float2* h  [[buffer(0)]], // [port][layer]
                          device float2*       eq  [[buffer(2)]], // [re][layer] interleaved
                          device float*        nv  [[buffer(3)]], // [re][layer]
                          constant equalize_params& p [[buffer(4)]],
+                         device const float* sigma2 [[buffer(5)]], // [port] (single-layer path)
                          uint re [[thread_position_in_grid]])
 {
     if (re >= p.nof_re) {
@@ -99,6 +106,39 @@ kernel void equalize_mxn(device const float2* h  [[buffer(0)]], // [port][layer]
         for (uint layer = 0; layer != L; ++layer) {
             H[port][layer] = h[((port * L + layer) * p.nof_re) + re];
         }
+    }
+
+    // ---- Single Tx layer: 1 x P SIMO combiner (CPU equalize_zf_1xn) ----
+    if (L == 1u) {
+        float  ch_mod_sq = 0.0f; // sum of |h|^2 over the valid ports
+        float  nvar_acc  = 0.0f; // sum of |h|^2 * noise_var over the valid ports
+        float2 re_out    = float2(0.0f);
+        for (uint port = 0; port != P; ++port) {
+            const float2 hv  = H[port][0];
+            const float  nrm = hv.x * hv.x + hv.y * hv.y;
+            // CPU per-port mask: max(infinity, |h|^2) is a comparison, i.e., the port takes
+            // part only when its channel square norm is finite (NaN fails the compare too).
+            if (nrm < INFINITY) {
+                ch_mod_sq += nrm;
+                nvar_acc += nrm * sigma2[port];
+                // Matched filter: conjprod(re_in, ch_est) = re_in * conj(ch_est).
+                const float2 yv = y[port * p.nof_re + re];
+                re_out += cmul(yv, float2(hv.x, -hv.y));
+            }
+        }
+
+        // Denominator of the pseudo-inverse (tx_scaling is NOT folded into H here).
+        const float d = p.tx_scaling * ch_mod_sq;
+        // CPU validity: (d > 0) && (infinity > d), i.e., strictly positive and finite.
+        if ((d > 0.0f) && !isinf(d) && !isnan(d)) {
+            const float rcp = 1.0f / d;
+            eq[re] = re_out * rcp;
+            nv[re] = nvar_acc * (rcp * rcp);
+        } else {
+            eq[re] = 0;
+            nv[re] = INFINITY;
+        }
+        return;
     }
 
     // Gram matrix G[i][j] = sum_p h[p][i] * conj(h[p][j]). Every entry (including the lower

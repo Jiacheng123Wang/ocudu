@@ -9,9 +9,9 @@ using namespace ocudu;
 
 namespace {
 
-/// Composite equalizer: Metal for the supported multi-layer topologies, the CPU generic
-/// implementation otherwise. The topology is fixed per cell, so the routing decision made
-/// on the first call stays valid for the instance lifetime.
+/// Composite equalizer: Metal for the supported topologies (1..4 Tx layers x 1/2/4/8 Rx
+/// ports), the CPU generic implementation otherwise. The topology is fixed per cell, so the
+/// routing decision made on the first call stays valid for the instance lifetime.
 class channel_equalizer_metal_or_generic : public channel_equalizer
 {
 public:

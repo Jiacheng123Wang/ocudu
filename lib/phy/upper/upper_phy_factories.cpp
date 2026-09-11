@@ -688,6 +688,9 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
 #if defined(OCUDU_METAL_EQUALIZER)
   if (config.pusch_channel_equalizer_backend == "metal") {
     pusch_equalizer_factory = create_channel_equalizer_metal_factory(pusch_equalizer_algorithm_type);
+    ocudulog::fetch_basic_logger("PHY").info(
+        "PUSCH equalizer backend: metal (GPU) for 1..4 Tx layers x 1/2/4/8 Rx ports, CPU generic for any "
+        "other topology");
   }
 #endif // OCUDU_METAL_EQUALIZER
   if (pusch_equalizer_factory == nullptr) {
@@ -726,6 +729,8 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
   // implementation unconditionally.
   if (config.pusch_channel_equalizer_backend == "metal") {
     pusch_demodulation_factory = create_demodulation_mapper_metal_factory();
+    ocudulog::fetch_basic_logger("PHY").info(
+        "PUSCH demapper backend: metal (GPU) for QPSK/16/64/256QAM, CPU generic for BPSK and pi/2-BPSK");
   }
 #endif // OCUDU_METAL_DEMODULATION
   std::shared_ptr<evm_calculator_factory>          pusch_evm_calc_factory     = evm_calc_factory;
