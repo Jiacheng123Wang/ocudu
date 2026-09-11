@@ -16,14 +16,20 @@ static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_p
     fr = frequency_range::FR2;
   }
 
-  // Create DFT factory (selected through the expert_phy knob, e.g. --pusch_dft_type metal).
+  // Create the UL RX DFT factory (selected through the expert_phy knob, e.g.
+  // --pusch_dft_type metal). The Metal DFT routes ONLY the uplink receive path (the OFDM
+  // demodulator and the PRACH demodulator): the downlink transmit path (the OFDM modulator,
+  // i.e. the IFFT behind PDSCH/PDCCH/SSB) keeps the CPU implementation untouched until the
+  // RX-only Metal pipeline is validated end to end - the shared dft_processor abstraction
+  // would otherwise pull the TX side onto the GPU as well (DIRECT/INVERSE is the only
+  // difference between the two call sites).
   bool                                    metal_selected = false;
-  std::shared_ptr<dft_processor_factory> dft_factory;
+  std::shared_ptr<dft_processor_factory> rx_dft_factory;
   if (config.dft_processor_type == "metal") {
 #if defined(OCUDU_METAL_DFT)
-    dft_factory = create_dft_processor_factory_metal();
+    rx_dft_factory = create_dft_processor_factory_metal();
 #endif // OCUDU_METAL_DFT
-    if (dft_factory == nullptr) {
+    if (rx_dft_factory == nullptr) {
       // The Metal DFT is not built into this binary: fall back to the CPU implementation
       // instead of failing the whole lower PHY (the CLI accepts "metal" everywhere so the
       // same configuration stays runnable across platforms).
@@ -31,20 +37,24 @@ static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_p
           "Metal DFT requested but unavailable in this build; falling back to the CPU DFT implementation.");
     }
   }
-  if (dft_factory == nullptr) {
-    dft_factory = create_dft_processor_factory();
+  if (rx_dft_factory == nullptr) {
+    rx_dft_factory = create_dft_processor_factory();
   } else {
     metal_selected = true;
   }
-  report_fatal_error_if_not(dft_factory, "Failed to create DFT factory.");
-  // Startup diagnostic: which DFT backend this lower PHY instance actually uses.
-  ocudulog::fetch_basic_logger("PHY").info("[lower_phy] DFT backend: {} (expert_phy --pusch_dft_type {})",
+  report_fatal_error_if_not(rx_dft_factory, "Failed to create the RX DFT factory.");
+  // The TX (IFFT) side always runs the default CPU implementation in this phase.
+  std::shared_ptr<dft_processor_factory> tx_dft_factory = create_dft_processor_factory();
+  report_fatal_error_if_not(tx_dft_factory, "Failed to create the TX DFT factory.");
+  // Startup diagnostic: which DFT backend each direction actually uses.
+  ocudulog::fetch_basic_logger("PHY").info("[lower_phy] DFT backend: rx={} tx=cpu (expert_phy --pusch_dft_type {})",
                                           metal_selected ? "metal (GPU)" : "cpu",
                                           config.dft_processor_type);
 
-  // Create OFDM modulator factory.
-  ofdm_factory_generic_configuration      ofdm_common_config = {.dft_factory = dft_factory};
-  std::shared_ptr<ofdm_modulator_factory> modulator_factory = create_ofdm_modulator_factory_generic(ofdm_common_config);
+  // Create OFDM modulator factory (TX path: CPU DFT, untouched by the Metal knob).
+  ofdm_factory_generic_configuration tx_ofdm_common_config = {.dft_factory = tx_dft_factory};
+  std::shared_ptr<ofdm_modulator_factory> modulator_factory =
+      create_ofdm_modulator_factory_generic(tx_ofdm_common_config);
   report_fatal_error_if_not(modulator_factory, "Failed to create OFDM modulator factory.");
 
   // Wrap the OFDM modulator factory with a pool factory.
@@ -52,14 +62,15 @@ static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_p
       create_ofdm_modulator_pool_factory(std::move(modulator_factory), MAX_NSYMB_PER_SLOT * config.nof_tx_ports);
   report_fatal_error_if_not(modulator_factory, "Failed to create OFDM modulator pool factory.");
 
-  // Create OFDM demodulator factory.
+  // Create OFDM demodulator factory (RX path: the Metal knob applies here).
+  ofdm_factory_generic_configuration rx_ofdm_common_config = {.dft_factory = rx_dft_factory};
   std::shared_ptr<ofdm_demodulator_factory> demodulator_factory =
-      create_ofdm_demodulator_factory_generic(ofdm_common_config);
+      create_ofdm_demodulator_factory_generic(rx_ofdm_common_config);
   report_fatal_error_if_not(demodulator_factory, "Failed to create OFDM demodulator factory.");
 
   // Create OFDM PRACH demodulator factory.
   std::shared_ptr<ofdm_prach_demodulator_factory> prach_demodulator_factory =
-      create_ofdm_prach_demodulator_factory_sw(dft_factory, config.srate, fr);
+      create_ofdm_prach_demodulator_factory_sw(rx_dft_factory, config.srate, fr);
   report_fatal_error_if_not(prach_demodulator_factory, "Failed to create PRACH demodulator factory.");
 
   // Create amplitude control factory.
