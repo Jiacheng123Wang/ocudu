@@ -6,6 +6,7 @@
 #include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/async/execute_on_blocking.h"
+#include "ocudu/support/executors/ul_pipeline_probe.h"
 
 using namespace ocudu;
 
@@ -122,5 +123,10 @@ void mac_ul_processor::handle_rx_data_indication(mac_rx_data_indication msg)
             })) {
       logger.warning("cell={} slot_rx={}: Discarding Rx PDU. Cause: Rx task queue is full.", msg.cell_index, msg.sl_rx);
     }
+
+    // FAPI->MAC tail-latency probe: CRC-OK completion (recorded at the PHY decoder notifier) -> this enqueue
+    // point. Recorded per PDU on the same thread as record_end_crc_ok() (the P7 fastpath is a synchronous
+    // call chain), so the pairing is exact by slot. No-op unless OCUDU_FLOW_PROBES is enabled.
+    ul_pipeline_probe::get().record_fapi_mac_end(msg.sl_rx.count());
   }
 }

@@ -661,7 +661,8 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
         config.pusch_channel_estimator_mmse_fd_hz,
         config.pusch_channel_estimator_mmse_block_prb,
         config.pusch_channel_estimator_helena_model_path,
-        config.pusch_channel_estimator_helena_model_path_52);
+        config.pusch_channel_estimator_helena_model_path_52,
+        config.pusch_channel_estimator_helena_model_path_106);
     report_error_if_not(pusch_ch_estimator_factory, "Invalid channel estimator factory.");
 
     // Finally, wrap the factory with the metric decorator.
@@ -766,7 +767,7 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
          .early_stop_syndrome    = false,
          .ldpc_decoder_offset    = config.ldpc_decoder_offset});
     report_fatal_error_if_not(
-        decoder_config.decoder_factory, "Invalid LDPC decoder factory of type {}.", config.crc_calculator_type);
+        decoder_config.decoder_factory, "Invalid LDPC decoder factory of type {}.", config.ldpc_decoder_type);
     // Platform mapping lives in the compat layer: on macOS the effective PUSCH LDPC decoder type is logged at
     // startup so the expert knob (expert_phy --pusch_ldpc_decoder_type) A/B runs are verifiable; Linux keeps the
     // upstream silent path.

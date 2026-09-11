@@ -55,6 +55,12 @@ struct ul_phase_durations {
 /// A third series records the size in bytes of each CRC-OK MAC PDU (the data burst), in lockstep with the LDPC
 /// latency series, so its sample count always matches [ul_ldpc_decode]; report() prints its distribution and the
 /// total number of bytes on separate lines.
+///
+/// A fourth series measures the FAPI->MAC tail latency (transport-block CRC OK -> MAC UL task enqueue, covering
+/// the FAPI P7 fastpath translation and the byte_buffer copy): record_fapi_mac_end() is called by the MAC UL
+/// processor right after the per-PDU enqueue. Starts are the CRC-OK completion timestamps (record_end_crc_ok,
+/// which is only ever called for CRC-OK TBs) and are matched by exact slot number, with the same staleness gate.
+/// A start left behind when the PDU is dropped (e.g. the per-UE queue full) is simply evicted later.
 class ul_pipeline_probe
 {
 public:
@@ -155,6 +161,10 @@ public:
     std::chrono::time_point<std::chrono::high_resolution_clock> now = std::chrono::high_resolution_clock::now();
 
     std::lock_guard<std::mutex> lock(mutex);
+    // CRC-OK completion timestamp for the FAPI->MAC tail-latency series (see record_fapi_mac_end): recorded
+    // unconditionally, this method is only ever called for CRC-OK TBs.
+    pending_crc_ok_ends[slot] = {now, next_start_seq++};
+    evict_oldest(pending_crc_ok_ends);
     auto it = find_fresh(pending_starts, slot, now);
     if (it != pending_starts.end()) {
       double latency_us =
@@ -195,6 +205,29 @@ public:
     }
   }
 
+  /// Records the arrival of a CRC-OK transport block at the MAC UL task enqueue point (call from the MAC UL
+  /// processor right after the per-PDU executor enqueue). Matched against the CRC-OK completion timestamp of the
+  /// same slot (see record_end_crc_ok) to produce the FAPI->MAC tail latency.
+  /// \param[in] slot Slot number of the PUSCH (same reference as record_end_crc_ok).
+  void record_fapi_mac_end(uint64_t slot)
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto now = std::chrono::high_resolution_clock::now();
+    auto       it  = find_fresh_exact(pending_crc_ok_ends, slot, now);
+    if (it == pending_crc_ok_ends.end()) {
+      // No CRC-OK completion on record for this slot (already consumed, dropped at the FAPI gate, or a stale
+      // entry from a previous slot-count wrap cycle).
+      return;
+    }
+    const int64_t fapi_mac_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now - it->second.tp).count();
+    pending_crc_ok_ends.erase(it);
+    // Negative durations can only come from a mismatched pairing: drop the sample.
+    if (fapi_mac_ns >= 0) {
+      fapi_mac_latencies_us.push_back(static_cast<double>(fapi_mac_ns) / 1e3);
+    }
+  }
+
   /// Prints the statistics of the recorded latencies. Called once during the application shutdown.
   void report()
   {
@@ -204,6 +237,7 @@ public:
     std::vector<double> sorted_t2f;
     std::vector<double> sorted_ce;
     std::vector<double> sorted_eqdem;
+    std::vector<double> sorted_fapi_mac;
     {
       std::lock_guard<std::mutex> lock(mutex);
       sorted_pipeline  = latencies_us;
@@ -212,6 +246,7 @@ public:
       sorted_t2f       = t2f_latencies_us;
       sorted_ce        = ce_latencies_us;
       sorted_eqdem     = eqdem_latencies_us;
+      sorted_fapi_mac  = fapi_mac_latencies_us;
     }
     if (sorted_pipeline.empty()) {
       std::fprintf(stderr, "[ul_pipeline] no CRC-OK samples recorded\n");
@@ -262,6 +297,9 @@ public:
     print_series("ul_time_frequency", sorted_t2f);
     print_series("ul_channel_estimation", sorted_ce);
     print_series("ul_equalization_demod", sorted_eqdem);
+    // FAPI->MAC tail (CRC-OK -> MAC UL task enqueue): recorded in lockstep with the CRC-OK completions, so its
+    // sample count tracks [ul_ldpc_decode] (minus PDUs dropped at the per-UE queue).
+    print_series("ul_fapi_mac", sorted_fapi_mac);
 
     if (sorted_ldpc.empty()) {
       std::fprintf(stderr, "[ul_ldpc_decode] no samples recorded\n");
@@ -401,6 +439,9 @@ private:
   start_registry   pending_t2f_ends;
   /// Slot-keyed timestamps of the PUSCH channel estimation completions (see record_ce_end()).
   start_registry   pending_ce_ends;
+  /// Slot-keyed timestamps of the CRC-OK completions (see record_end_crc_ok()); consumed by
+  /// record_fapi_mac_end() to produce the FAPI->MAC tail-latency series.
+  start_registry   pending_crc_ok_ends;
   /// Slot-keyed phase-segment durations assembled at the LDPC decode start (see record_ldpc_start()); erased
   /// when the matching CRC-OK completion records them into the summary series.
   phases_registry  pending_phases;
@@ -408,6 +449,8 @@ private:
   std::vector<double> t2f_latencies_us;
   std::vector<double> ce_latencies_us;
   std::vector<double> eqdem_latencies_us;
+  /// FAPI->MAC tail latencies of the CRC-OK completions (µs): CRC-OK -> MAC UL task enqueue.
+  std::vector<double> fapi_mac_latencies_us;
 };
 
 #else // not OCUDU_FLOW_PROBES: no-op implementation with zero overhead.
@@ -425,6 +468,7 @@ public:
   void record_t2f_end(uint64_t /*slot*/) {}
   void record_ce_end(uint64_t /*slot*/) {}
   void record_end_crc_ok(uint64_t /*slot*/, size_t /*mac_pdu_bytes*/) {}
+  void record_fapi_mac_end(uint64_t /*slot*/) {}
   std::optional<ul_phase_durations> get_phase_durations(uint64_t /*slot*/) { return std::nullopt; }
   void report() {}
 

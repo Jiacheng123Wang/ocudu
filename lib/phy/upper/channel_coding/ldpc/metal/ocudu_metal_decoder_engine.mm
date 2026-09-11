@@ -11,6 +11,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -21,6 +22,55 @@
 
 namespace ocudu {
 namespace metal {
+
+// ---- Process-wide dispatch/wait statistics (S-1 audit probe A2) ---------------------------
+// Counted per command-buffer commit/wait across every engine of every algorithm family;
+// reported at process exit when OCUDU_METAL_STATS is set. max_in_flight measures the
+// cross-thread queue occupancy of the shared per-family command queue: with several pool
+// threads committing on the same queue before waiting, it quantifies the submission-order
+// serialization (audit bottleneck B7/B10).
+struct decoder_stats_t {
+  std::atomic<uint64_t> commits{0};
+  std::atomic<uint64_t> waits{0};
+  std::atomic<uint64_t> in_flight{0};
+  std::atomic<uint64_t> in_flight_max{0};
+};
+
+static decoder_stats_t& decoder_stats()
+{
+  static decoder_stats_t s;
+  return s;
+}
+
+static void decoder_stats_commit()
+{
+  decoder_stats_t& s = decoder_stats();
+  s.commits.fetch_add(1, std::memory_order_relaxed);
+  const uint64_t nf = s.in_flight.fetch_add(1, std::memory_order_acq_rel) + 1;
+  uint64_t       prev = s.in_flight_max.load(std::memory_order_relaxed);
+  while (nf > prev && !s.in_flight_max.compare_exchange_weak(prev, nf, std::memory_order_relaxed)) {
+  }
+}
+
+static void decoder_stats_wait()
+{
+  decoder_stats_t& s = decoder_stats();
+  s.waits.fetch_add(1, std::memory_order_relaxed);
+  s.in_flight.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+static void decoder_stats_report()
+{
+  if (std::getenv("OCUDU_METAL_STATS") == nullptr) {
+    return;
+  }
+  const decoder_stats_t& s = decoder_stats();
+  std::fprintf(stderr,
+               "[metal_stats] ldpc_decoder commits=%llu waits=%llu max_in_flight=%llu\n",
+               static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
+}
 
 // Must match the DecodeCtrl struct in ocudu_nms_layered_decoder.metal (shader ABI).
 // The async kernel uses the same 3-word layout as its AsyncCtrl (stop_flag,
@@ -68,8 +118,11 @@ struct engine_impl_t {
   id<MTLComputePipelineState> p_lls_scan = nil;
   id<MTLComputePipelineState> p_lls_update = nil;
 
-  // Zero-copy wrappers, cached by host pointer (the host buffers outlive the engine).
-  std::unordered_map<const void*, id<MTLBuffer>> buffer_cache;
+  // Zero-copy wrappers, cached by host pointer (the host buffers outlive the engine). The cached
+  // length is stored alongside: a cache hit with a LARGER request re-wraps instead of silently
+  // handing back a too-short buffer (S-1 audit fix; the previous size-blind cache relied on the
+  // construction-time warm-up establishing the maximum size first).
+  std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
 
   id<MTLBuffer> buf_h        = nil; // zero-copy (final syndrome refresh)
   id<MTLBuffer> buf_ctrl     = nil; // shared (GPU writes, CPU reads)
@@ -151,7 +204,16 @@ id<MTLBuffer> zero_copy_buffer(engine_impl_t* engine, const void* ptr, size_t le
 {
   auto it = engine->buffer_cache.find(ptr);
   if (it != engine->buffer_cache.end()) {
-    return it->second;
+    if (length <= it->second.second) {
+      return it->second.first;
+    }
+    // Larger request than the cached wrap: re-wrap (the previous wrapper is replaced; ARC releases it).
+    // This should never happen on the packet path (the warm-up establishes the maximum size), but it
+    // must not silently truncate the GPU's view either.
+    ocudulog::fetch_basic_logger("PHY").warning(
+        "Metal LDPC: zero-copy cache hit with a larger request ({} > cached {}): re-wrapping the buffer",
+        length,
+        it->second.second);
   }
   size_t aligned = (length + 4095) & ~4095;
   id<MTLBuffer> buf =
@@ -162,7 +224,7 @@ id<MTLBuffer> zero_copy_buffer(engine_impl_t* engine, const void* ptr, size_t le
   if (buf == nil) {
     buf = [engine->device newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
   }
-  engine->buffer_cache[ptr] = buf;
+  engine->buffer_cache[ptr] = std::make_pair(buf, aligned);
   return buf;
 }
 
@@ -209,6 +271,10 @@ std::mutex& algo_resources_mutex()
 /// loaded and the pipelines are compiled exactly once per family, logged once).
 algo_resources_t* get_algo_resources(decoder_engine::algo mode)
 {
+  // Register the process-exit stats report exactly once (the counters live for the process).
+  static std::once_flag stats_atexit_flag;
+  std::call_once(stats_atexit_flag, []() { std::atexit(decoder_stats_report); });
+
   std::lock_guard<std::mutex> lock(algo_resources_mutex());
   auto&                      cache = algo_resources_cache();
   auto                       it    = cache.find(static_cast<int>(mode));
@@ -748,7 +814,9 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
 
   [enc endEncoding];
   [cmd_buf commit];
+  decoder_stats_commit();
   [cmd_buf waitUntilCompleted];
+  decoder_stats_wait();
   if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
     ocudulog::fetch_basic_logger("PHY").error("Metal LDPC: command buffer failed with status {}",
                                               static_cast<unsigned long>(cmd_buf.status));

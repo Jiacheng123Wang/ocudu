@@ -28,9 +28,11 @@ public:
     layered,
     /// Flooding normalized min-sum (2 dispatches/round, more iterations).
     flooding,
-    /// Layered NMS as ONE persistent dispatch: W = min(Z, 128) resident
-    /// threadgroups run the (iteration, layer) loops inside the kernel with a
-    /// software grid barrier between layers (metal_persistent).
+    /// Layered NMS as ONE persistent dispatch (metal_persistent): a single resident
+    /// threadgroup of 1024 threads runs the (iteration, layer) loops inside the kernel,
+    /// serialized by threadgroup_barrier. The earlier multi-threadgroup variant with a
+    /// software grid barrier was falsified on this platform (only relaxed atomics exist
+    /// on this MSL target, see PLAN.md 4.12) and is NOT implemented.
     layered_persistent,
     /// Asynchronous residual (delta) belief propagation: a BARRIER-FREE
     /// persistent grid (one threadgroup per check row plus a syndrome

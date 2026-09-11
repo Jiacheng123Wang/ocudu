@@ -112,7 +112,11 @@ private:
   ///               vs the legacy kernels (run_weights_only).
   /// \param npt    Number of DM-RS symbols of the hop (the block pilot count is
   ///               L = npt x b_prb x 6 for the type-1 comb-2 pattern used here).
-  void run_engine_blocks(const fd_td_estimation_stage_args& args,
+  /// \return True when the engine processed and unpacked the batch; false when the engine call
+  ///         failed (wrap/commit error), in which case the caller MUST fall back to the CPU
+  ///         reference math for these blocks (S-1 audit fix: the return value was previously
+  ///         ignored, which could silently leave stale channel estimates in the grid).
+  bool run_engine_blocks(const fd_td_estimation_stage_args& args,
                          unsigned                           gb_start,
                          unsigned                           n_blk,
                          unsigned                           b_prb,

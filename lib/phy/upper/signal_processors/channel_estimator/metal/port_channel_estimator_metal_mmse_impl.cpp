@@ -375,13 +375,15 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   bool       hop_nn    = false; // the simdgroup 8x8 (matrix) kernels were the ones used
   unsigned   hop_pad   = 0;     // ceil8(L) - L of the last matrix batch (A/B pad overhead)
   unsigned   tail_L    = 0;     // block L of the tail batch (log aid for std-less hops)
+  bool       std_blocks_ok = true; // standard-block engine batch succeeded (CPU fallback otherwise)
+  bool       tail_ok       = true; // tail/edge-block engine batch succeeded
   if (engine_ready) {
     if (n_std_blocks != 0) {
       // Standard blocks: correlation matrices already built above (w_r_pp/w_r_hp, L_std/nout_std).
-      run_engine_blocks(args, 0, n_std_blocks, block_prb, nout_std, L_std, npt, matrix_on);
-      hop_gpu = true;
-      hop_nn  = matrix_on;
-      hop_pad = matrix_on ? static_cast<unsigned>(((L_std + 7u) & ~7u) - L_std) : 0;
+      std_blocks_ok = run_engine_blocks(args, 0, n_std_blocks, block_prb, nout_std, L_std, npt, matrix_on);
+      hop_gpu       = std_blocks_ok;
+      hop_nn        = std_blocks_ok && matrix_on;
+      hop_pad       = (std_blocks_ok && matrix_on) ? static_cast<unsigned>(((L_std + 7u) & ~7u) - L_std) : 0;
     }
     if (rem_prb != 0) {
       // Tail/edge block - and when nof_prb < block_prb this is the WHOLE hop (single block):
@@ -397,11 +399,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                  span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
                                  nout_e,
                                  L_e);
-      tail_L = L_e;
-      run_engine_blocks(args, n_std_blocks * block_prb, 1, rem_prb, nout_e, L_e, npt, matrix_on);
-      hop_gpu = true;
-      hop_nn  = matrix_on;
-      hop_pad = matrix_on ? static_cast<unsigned>(((L_e + 7u) & ~7u) - L_e) : 0;
+      tail_L   = L_e;
+      tail_ok  = run_engine_blocks(args, n_std_blocks * block_prb, 1, rem_prb, nout_e, L_e, npt, matrix_on);
+      hop_gpu  = hop_gpu || tail_ok;
+      hop_nn   = hop_nn || (tail_ok && matrix_on);
+      hop_pad  = (tail_ok && matrix_on) ? static_cast<unsigned>(((L_e + 7u) & ~7u) - L_e) : hop_pad;
     }
     // A/B observability: whether the last stage engaged the matrix kernels (nn=1) - or the
     // legacy kernels (nn=0, only when the matrix pipelines are unavailable/stale).
@@ -414,12 +416,23 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 
   const auto t_gpu_end = steady_clock::now();
 
-  // CPU reference path: only when the engine is unavailable - with the engine ready every
-  // block of the hop (standard + tail/small) already ran on the GPU above.
-  const unsigned n_blocks  = n_std_blocks + (rem_prb == 0 ? 0U : 1U);
-  const unsigned cpu_first = engine_ready ? n_blocks : 0U;
+  // CPU reference path: blocks whose engine batch failed (or the whole hop when the engine is
+  // unavailable). The per-batch fallback is the S-1 audit fix: an engine failure must never
+  // leave stale estimates in the grid while hop_gpu=1 is reported.
+  const unsigned n_blocks = n_std_blocks + (rem_prb == 0 ? 0U : 1U);
+  const auto     block_gpu_done = [&](unsigned b) {
+    if (!engine_ready) {
+      return false;
+    }
+    return (b < n_std_blocks) ? std_blocks_ok : tail_ok;
+  };
+  unsigned cpu_fallback_blocks = 0;
 
-  for (unsigned b = cpu_first; b != n_blocks; ++b) {
+  for (unsigned b = 0; b != n_blocks; ++b) {
+    if (block_gpu_done(b)) {
+      continue;
+    }
+    ++cpu_fallback_blocks;
     const unsigned b_prb       = (b < n_std_blocks) ? block_prb : rem_prb;
     const unsigned b_start_prb = (b < n_std_blocks) ? b * block_prb : n_std_blocks * block_prb;
     unsigned       nout        = 0;
@@ -531,7 +544,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   if (time_en) {
     const auto t_finish = steady_clock::now();
     const auto us       = [](auto d) { return std::chrono::duration<double, std::micro>(d).count(); };
-    logger.debug("[mmse_time] prb={} npt={} L={} n_std={} gpu={} nn={} pad={} | sigma2={:.1f}us corr_std={:.1f}us "
+    logger.debug("[mmse_time] prb={} npt={} L={} n_std={} gpu={} nn={} pad={} fb={} | sigma2={:.1f}us corr_std={:.1f}us "
                  "gpu_path={:.1f}us (gpu_wait={:.1f}us) cpu_blocks={:.1f}us finish={:.1f}us | total={:.1f}us",
                  nof_prb,
                  npt,
@@ -540,6 +553,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                  hop_gpu ? 1 : 0,
                  hop_nn ? 1 : 0,
                  hop_pad,
+                 cpu_fallback_blocks,
                  us(t_sigma2 - t_begin),
                  us(t_corr_std - t_sigma2),
                  us(t_gpu_end - t_corr_std),
@@ -550,7 +564,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   }
 }
 
-void port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estimation_stage_args& args,
+bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estimation_stage_args& args,
                                                                unsigned                           gb_start,
                                                                unsigned                           n_blk,
                                                                unsigned                           b_prb,
@@ -667,11 +681,23 @@ void port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
     }
   }
 
-  // Weight (W = R_hp . A^-1) + apply (h = W . y) in ONE engine command buffer.
-  if (matrix) {
-    engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_layers, n_blk);
-  } else {
-    engine->run_weights_only(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_layers, n_blk);
+  // Weight (W = R_hp . A^-1) + apply (h = W . y) in ONE engine command buffer. The engine
+  // return value is checked (S-1 audit fix): on failure the caller falls back to the CPU
+  // reference math for these blocks instead of unpacking stale gpu_h contents.
+  const bool engine_ok =
+      matrix ? engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_layers, n_blk)
+             : engine->run_weights_only(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_layers, n_blk);
+  if (!engine_ok) {
+    logger.error(
+        "[mmse_ce] engine call failed (gb_start={} n_blk={} prb={} nout={} L={} matrix={}): falling back to the "
+        "CPU path for these blocks",
+        gb_start,
+        n_blk,
+        b_prb,
+        nout,
+        L,
+        matrix ? 1 : 0);
+    return false;
   }
   // Unpack the block outputs into the full grid (symbol-major within the block; the blocks
   // start at PRB gb_start so the estimates land at their real frequency offsets).
@@ -687,6 +713,7 @@ void port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
       }
     }
   }
+  return true;
 }
 
 void port_channel_estimator_metal_mmse_impl::get_symbol_ch_estimate(span<cbf16_t> symbol,

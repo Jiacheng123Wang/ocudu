@@ -8,6 +8,8 @@
 
 #include "ocudu/ocudulog/ocudulog.h"
 
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -20,6 +22,52 @@ using namespace ocudu;
 
 namespace {
 
+// ---- Process-wide dispatch/wait statistics (S-1 audit probe A2) ---------------------------
+// Same accounting as the LDPC engine: commits / waits / cross-thread in-flight occupancy of the
+// per-engine command queues. Reported at process exit when OCUDU_METAL_STATS is set.
+struct mmse_stats_t {
+  std::atomic<uint64_t> commits{0};
+  std::atomic<uint64_t> waits{0};
+  std::atomic<uint64_t> in_flight{0};
+  std::atomic<uint64_t> in_flight_max{0};
+};
+
+static mmse_stats_t& mmse_stats()
+{
+  static mmse_stats_t s;
+  return s;
+}
+
+static void mmse_stats_commit()
+{
+  mmse_stats_t& s = mmse_stats();
+  s.commits.fetch_add(1, std::memory_order_relaxed);
+  const uint64_t nf = s.in_flight.fetch_add(1, std::memory_order_acq_rel) + 1;
+  uint64_t       prev = s.in_flight_max.load(std::memory_order_relaxed);
+  while (nf > prev && !s.in_flight_max.compare_exchange_weak(prev, nf, std::memory_order_relaxed)) {
+  }
+}
+
+static void mmse_stats_wait()
+{
+  mmse_stats_t& s = mmse_stats();
+  s.waits.fetch_add(1, std::memory_order_relaxed);
+  s.in_flight.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+static void mmse_stats_report()
+{
+  if (std::getenv("OCUDU_METAL_STATS") == nullptr) {
+    return;
+  }
+  const mmse_stats_t& s = mmse_stats();
+  std::fprintf(stderr,
+               "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu\n",
+               static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
+}
+
 struct mmse_engine_impl {
   id<MTLDevice>                  device      = nil;
   id<MTLCommandQueue>            queue       = nil;
@@ -30,7 +78,7 @@ struct mmse_engine_impl {
   // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
   id<MTLComputePipelineState>    weights_matrix_pipe = nil;
   id<MTLComputePipelineState>    apply_matrix_pipe  = nil;
-  std::unordered_map<const void*, id<MTLBuffer>> buffer_cache;
+  std::unordered_map<const void*, std::pair<id<MTLBuffer>, NSUInteger>> buffer_cache;
   std::mutex                                     cache_mutex;   // compute() may run on executor threads
   double                                         last_gpu_us = 0.0;
 
@@ -43,7 +91,17 @@ struct mmse_engine_impl {
       std::lock_guard<std::mutex> lock(cache_mutex);
       auto it = buffer_cache.find(ptr);
       if (it != buffer_cache.end()) {
-        return it->second;
+        if (bytes <= it->second.second) {
+          return it->second.first;
+        }
+        // Larger request than the cached wrap: re-wrap instead of silently handing back a
+        // too-short buffer (S-1 audit fix). The construction-time warm-up wraps the maximum
+        // sizes first, so this should never happen on the packet path - but it must not
+        // truncate the GPU's view if it does.
+        ocudulog::fetch_basic_logger("PHY").warning(
+            "MMSE engine: zero-copy cache hit with a larger request ({} > cached {}): re-wrapping the buffer",
+            static_cast<unsigned long long>(bytes),
+            static_cast<unsigned long long>(it->second.second));
       }
     }
     id<MTLBuffer> buf = [device newBufferWithBytesNoCopy:const_cast<void*>(ptr)
@@ -52,7 +110,7 @@ struct mmse_engine_impl {
                                             deallocator:nil];
     if (buf != nil) {
       std::lock_guard<std::mutex> lock(cache_mutex);
-      buffer_cache.emplace(ptr, buf);
+      buffer_cache.emplace(ptr, std::make_pair(buf, bytes));
     }
     return buf;
   }
@@ -137,6 +195,10 @@ mmse_engine::~mmse_engine()
 
 bool mmse_engine::init(const char* metallib_path)
 {
+  // Register the process-exit stats report exactly once (the counters live for the process).
+  static std::once_flag stats_atexit_flag;
+  std::call_once(stats_atexit_flag, []() { std::atexit(mmse_stats_report); });
+
   if (impl == nullptr) {
     impl = new mmse_engine_impl;
   }
@@ -208,7 +270,9 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
       threadsPerThreadgroup:MTLSizeMake(n, 1, 1)];
   [enc endEncoding];
   [cb commit];
+  mmse_stats_commit();
   [cb waitUntilCompleted];
+  mmse_stats_wait();
 
   if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
     return false;
@@ -252,7 +316,9 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
   [enc endEncoding];
   [cb commit];
+  mmse_stats_commit();
   [cb waitUntilCompleted];
+  mmse_stats_wait();
 
   if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
     return false;
@@ -323,7 +389,9 @@ bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, flo
 
   [enc endEncoding];
   [cb commit];
+  mmse_stats_commit();
   [cb waitUntilCompleted];
+  mmse_stats_wait();
 
   if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
     return false;
@@ -387,7 +455,9 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
 
   [enc endEncoding];
   [cb commit];
+  mmse_stats_commit();
   [cb waitUntilCompleted];
+  mmse_stats_wait();
 
   if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
     return false;
@@ -479,7 +549,9 @@ bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const 
 
   [enc endEncoding];
   [cb commit];
+  mmse_stats_commit();
   [cb waitUntilCompleted];
+  mmse_stats_wait();
 
   if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
     return false;
