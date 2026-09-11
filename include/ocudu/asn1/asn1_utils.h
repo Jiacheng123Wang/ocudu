@@ -438,7 +438,7 @@ public:
     T*       old_data = head;
     uint32_t newcap   = new_size + 5;
     head              = new T[newcap];
-    std::copy(&small_buffer.data[0], &small_buffer.data[size_], head);
+    std::copy(old_data, old_data + size_, head);
     size_ = new_size;
     if (old_data != &small_buffer.data[0]) {
       delete[] old_data;
