@@ -93,6 +93,33 @@ TEST(asn1_array_test, pack_unpack_operators)
   ASSERT_TRUE(not ext_ar.is_in_small_buffer());
 }
 
+// Regression test for a bug where a second growth of the array (i.e. a resize() call that is not
+// the one moving the array out of the small buffer for the first time) copied the previous content
+// from the small buffer storage instead of from the heap allocation that is actually in use, causing
+// an out-of-bounds read/corrupted data whenever size() had already grown past small_buffer_size.
+TEST(asn1_array_test, resize_beyond_capacity_twice_preserves_previous_content)
+{
+  ext_array<uint8_t, 2> ext_ar;
+  ASSERT_TRUE(ext_ar.is_in_small_buffer());
+
+  // First growth: moves the array out of the small buffer.
+  ext_ar.resize(4);
+  ASSERT_TRUE(not ext_ar.is_in_small_buffer());
+  ext_ar[0] = 0xaa;
+  ext_ar[1] = 0xbb;
+  ext_ar[2] = 0xcc;
+  ext_ar[3] = 0xdd;
+
+  // Second growth: array is already outside the small buffer, so the copy must be sourced from the
+  // current (heap) storage, not from the small buffer union member.
+  ext_ar.resize(20);
+  ASSERT_TRUE(not ext_ar.is_in_small_buffer());
+  ASSERT_EQ(ext_ar[0], 0xaa);
+  ASSERT_EQ(ext_ar[1], 0xbb);
+  ASSERT_EQ(ext_ar[2], 0xcc);
+  ASSERT_EQ(ext_ar[3], 0xdd);
+}
+
 TEST(asn1_bit_ref, pack_unpack_operators)
 {
   for (uint32_t n_bit_stride = 1; n_bit_stride < 32; ++n_bit_stride) {
