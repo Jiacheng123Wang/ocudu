@@ -26,6 +26,9 @@
 #include "ocudu/phy/upper/signal_processors/srs/srs_estimator_factory.h"
 #include "ocudu/support/error_handling.h"
 #include "ocudu/support/macos_compat.h"
+#if defined(OCUDU_METAL_EQUALIZER)
+#include "channel_equalizer_metal_factory.h"
+#endif // OCUDU_METAL_EQUALIZER
 #include <algorithm>
 
 using namespace ocudu;
@@ -675,8 +678,18 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
       create_low_papr_sequence_generator_sw_factory();
   report_error_if_not(low_papr_sequence_gen_factory, "Invalid low-PAPR sequence generator factory.");
 
-  std::shared_ptr<channel_equalizer_factory> pusch_equalizer_factory =
-      create_channel_equalizer_generic_factory(pusch_equalizer_algorithm_type);
+  // PUSCH equalizer: the expert_phy backend knob selects the Metal GPU implementation
+  // (with a transparent per-topology fallback to the CPU generic); the PUCCH equalizer
+  // keeps the CPU implementation unconditionally.
+  std::shared_ptr<channel_equalizer_factory> pusch_equalizer_factory;
+#if defined(OCUDU_METAL_EQUALIZER)
+  if (config.pusch_channel_equalizer_backend == "metal") {
+    pusch_equalizer_factory = create_channel_equalizer_metal_factory(pusch_equalizer_algorithm_type);
+  }
+#endif // OCUDU_METAL_EQUALIZER
+  if (pusch_equalizer_factory == nullptr) {
+    pusch_equalizer_factory = create_channel_equalizer_generic_factory(pusch_equalizer_algorithm_type);
+  }
   report_error_if_not(pusch_equalizer_factory, "Invalid PUSCH equalizer factory.");
 
   std::shared_ptr<channel_equalizer_factory> pucch_equalizer_factory =

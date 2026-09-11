@@ -29,6 +29,14 @@ target_link_libraries(ocudu_channel_processors INTERFACE
         ocudu_ssb_tx_processor
         ocudu_uci_decoder)
 
+# Metal GPU channel equalizer (Apple Silicon): the factory selection in upper_phy_factories
+# is gated by the OCUDU_METAL_EQUALIZER compile definition propagated through this target.
+if(ENABLE_METAL_EQUALIZER)
+    add_subdirectory(metal)
+    target_link_libraries(ocudu_channel_processors INTERFACE ocudu_channel_processors_metal)
+    target_compile_definitions(ocudu_channel_processors INTERFACE OCUDU_METAL_EQUALIZER)
+endif()
+
 add_to_exported_libs(ocudu_channel_processors
         ocudu_pdcch_processor
         ocudu_pdsch_processor

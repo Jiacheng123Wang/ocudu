@@ -58,6 +58,14 @@ endif()
 option(ENABLE_METAL_DFT "Enable the Metal GPU DFT (FFT) processor (Apple Silicon only)" ${METAL_DFT_DEFAULT})
 # Note: OCUDU_METAL_DFT is defined per-target (see generic_functions/CMakeLists.txt).
 
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    set(METAL_EQUALIZER_DEFAULT ON)
+else()
+    set(METAL_EQUALIZER_DEFAULT OFF)
+endif()
+option(ENABLE_METAL_EQUALIZER "Enable the Metal GPU channel equalizer (Apple Silicon only)" ${METAL_EQUALIZER_DEFAULT})
+# Note: OCUDU_METAL_EQUALIZER is defined per-target (see channel_processors/CMakeLists.txt).
+
 
 if(APPLE AND NOT TARGET atomic)
     # macOS does not provide a separate libatomic. Some targets link the

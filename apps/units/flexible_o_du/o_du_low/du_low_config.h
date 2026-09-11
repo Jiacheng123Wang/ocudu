@@ -101,6 +101,14 @@ struct du_low_unit_expert_upper_phy_config {
   /// - \c zf: use zero-forcing algorithm, or
   /// - \c mmse: use minimum mean square error algorithm.
   std::string pusch_channel_equalizer_algorithm = "mmse";
+  /// \brief PUSCH channel equalizer implementation backend.
+  ///
+  /// Use one of these options:
+  /// - \c cpu: the CPU generic implementation (default), or
+  /// - \c metal: the Metal GPU implementation (Apple Silicon only; 2..4 Tx layers x 2/4/8 Rx
+  ///   ports, with a transparent per-topology fallback to the CPU implementation, e.g. for
+  ///   single-layer cells).
+  std::string pusch_channel_equalizer_backend = "cpu";
   /// \brief DFT (FFT) processor implementation of the lower PHY uplink receive path.
   ///
   /// Use one of these options:

@@ -375,6 +375,13 @@ struct upper_phy_factory_configuration {
   /// - \c zf: use zero-forcing algorithm, or
   /// - \c mmse: use minimum mean square error algorithm.
   std::string pusch_channel_equalizer_algorithm;
+  /// \brief PUSCH channel equalizer implementation backend.
+  ///
+  /// Use one of these options:
+  /// - \c cpu: the CPU generic implementation (default), or
+  /// - \c metal: the Metal GPU implementation (Apple Silicon only, with a transparent
+  ///   per-topology fallback to the CPU implementation).
+  std::string pusch_channel_equalizer_backend = "cpu";
   /// Number of LDPC decoder iterations.
   unsigned ldpc_decoder_iterations;
   /// Set to true to enable the LDPC decoder early stop.

@@ -197,6 +197,12 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
     }
     return "Invalid PUSCH channel equalizer algorithm. Accepted values [zf,mmse]";
   };
+  auto pusch_channel_equalizer_backend_check = [](const std::string& value) -> std::string {
+    if ((value == "cpu") || (value == "metal")) {
+      return {};
+    }
+    return "Invalid PUSCH channel equalizer backend. Accepted values [cpu,metal]";
+  };
   auto pusch_dft_type_check = [](const std::string& value) -> std::string {
     if ((value == "cpu") || (value == "metal")) {
       return {};
@@ -318,6 +324,12 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "PUSCH channel equalizer algorithm: zf and mmse.")
       ->capture_default_str()
       ->check(pusch_channel_equalizer_algorithm_method_check);
+  add_option(app,
+             "--pusch_channel_equalizer_backend",
+             expert_phy_params.pusch_channel_equalizer_backend,
+             "PUSCH channel equalizer backend: cpu and metal (Apple Silicon only).")
+      ->capture_default_str()
+      ->check(pusch_channel_equalizer_backend_check);
   add_option(app,
              "--pusch_dft_type",
              expert_phy_params.pusch_dft_type,
