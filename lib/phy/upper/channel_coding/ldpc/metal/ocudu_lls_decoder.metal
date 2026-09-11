@@ -349,7 +349,6 @@ kernel void update_llr_hpred(
     {
         const float ratio = (float)e_cnt / (float)total_cnt;
         const float ratio_p = (params.p > 1.5f) ? (ratio * ratio) : ratio;
-        const float avg_vote = (s_cnt > 0u) ? (e_sum / (float)s_cnt) : 1.0f;
         float delta;
         if (params.norm_mode == 2u)
         {
