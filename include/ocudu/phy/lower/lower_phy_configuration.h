@@ -58,13 +58,16 @@ struct lower_phy_configuration {
   unsigned nof_rx_ports;
   /// Shifts the DFT window by a fraction of the cyclic prefix [0, 1).
   float dft_window_offset;
-  /// \brief DFT (FFT) processor implementation.
+  /// \brief DFT (FFT) processor implementation of the uplink receive path.
   ///
   /// Use one of these options:
   /// - \c cpu: the default CPU implementation (FFTZ when available, the generic DFT otherwise), or
-  /// - \c metal: the Metal GPU implementation (Apple Silicon only; power-of-two sizes up to the
+  /// - \c metal: the Metal GPU implementation (Apple Silicon only; 2^k*3^m sizes up to the
   ///   kernel maximum, with a transparent per-configuration fallback for the rest, e.g. the
   ///   PRACH FFT sizes).
+  ///
+  /// \note Uplink receive only: the OFDM demodulator and the PRACH demodulator consume this
+  /// choice; the downlink transmit path (the OFDM modulator) always runs the CPU implementation.
   std::string dft_processor_type = "cpu";
   /// \brief Number of slots the timing handler is notified in advance of the transmission time.
   ///

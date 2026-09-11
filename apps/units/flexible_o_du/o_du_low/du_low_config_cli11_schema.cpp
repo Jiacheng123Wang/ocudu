@@ -321,7 +321,8 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
   add_option(app,
              "--pusch_dft_type",
              expert_phy_params.pusch_dft_type,
-             "PUSCH DFT processor type: cpu and metal (Apple Silicon only).")
+             "PUSCH (uplink receive) DFT processor type: cpu and metal (Apple Silicon only; the "
+             "downlink transmit path is unaffected).")
       ->capture_default_str()
       ->check(pusch_dft_type_check);
   add_option(app,

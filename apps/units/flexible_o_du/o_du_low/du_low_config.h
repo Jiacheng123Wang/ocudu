@@ -101,13 +101,17 @@ struct du_low_unit_expert_upper_phy_config {
   /// - \c zf: use zero-forcing algorithm, or
   /// - \c mmse: use minimum mean square error algorithm.
   std::string pusch_channel_equalizer_algorithm = "mmse";
-  /// \brief DFT (FFT) processor implementation of the lower PHY.
+  /// \brief DFT (FFT) processor implementation of the lower PHY uplink receive path.
   ///
   /// Use one of these options:
   /// - \c cpu: the default CPU implementation (FFTZ when available, the generic DFT otherwise), or
-  /// - \c metal: the Metal GPU implementation (Apple Silicon only; power-of-two sizes up to the
-  ///   kernel maximum, with a transparent per-configuration fallback for the rest, e.g. the
+  /// - \c metal: the Metal GPU implementation (Apple Silicon only; power-of-two and 2^k*3^m sizes up
+  ///   to the kernel maximum, with a transparent per-configuration fallback for the rest, e.g. the
   ///   PRACH FFT sizes).
+  ///
+  /// \note As the name says, the knob is PUSCH (uplink) only: it routes the OFDM demodulator and the
+  /// PRACH demodulator; the downlink transmit path (the OFDM modulator behind PDSCH/PDCCH/SSB)
+  /// always keeps the CPU implementation.
   std::string pusch_dft_type = "cpu";
   /// \brief Request headroom size in slots.
   ///
