@@ -21,4 +21,5 @@ target_link_libraries(ocudu_lower_phy
         ocudu_lower_phy_prach_processor
         ocudu_lower_phy_puxch_processor
         ocudu_lower_phy_uplink_processor
-        ocudu_macos_compat)
+        ocudu_macos_compat
+        ocudu_support)

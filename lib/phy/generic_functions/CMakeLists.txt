@@ -60,6 +60,11 @@ if(ENABLE_METAL_DFT)
     target_include_directories(ocudu_dft PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/metal)
     target_compile_definitions(ocudu_dft PUBLIC OCUDU_METAL_DFT)
     target_link_libraries(ocudu_dft PUBLIC ocudu_dft_metal)
+    # ocudu_dft_metal's public interface uses compat::aligned_alloc/aligned_free
+    # (ocudu_macos_compat), whose scheduling symbols live in ocudu_support (ocudu_macos_compat
+    # cannot link it back: ocudu_support already links ocudu_macos_compat, so the edge would
+    # cycle). Consumers of ocudu_dft therefore need ocudu_support on their link line as well.
+    target_link_libraries(ocudu_dft PUBLIC ocudu_support)
 endif()
 
 add_to_exported_libs(ocudu_dft)
