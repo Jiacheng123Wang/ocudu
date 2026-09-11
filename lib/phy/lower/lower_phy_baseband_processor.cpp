@@ -46,9 +46,12 @@ lower_phy_baseband_processor::lower_phy_baseband_processor(const lower_phy_baseb
   ocudu_assert(config.nof_rx_ports != 0, "Invalid number of receive ports.");
   ocudu_assert(config.nof_tx_ports != 0, "Invalid number of transmit ports.");
 
-  // Create queue of receive buffers.
+  // Create queue of receive buffers. Page-aligned storage: the GPU zero-copy FFT path
+  // wraps these buffers with newBufferWithBytesNoCopy (MTLResourceStorageModeShared) and
+  // reads the I/Q samples without any host-side copy.
   while (!rx_buffers.full()) {
-    rx_buffers.push_blocking(std::make_unique<baseband_gateway_buffer_dynamic>(config.nof_rx_ports, rx_buffer_size));
+    rx_buffers.push_blocking(
+        std::make_unique<baseband_gateway_buffer_dynamic_aligned>(config.nof_rx_ports, rx_buffer_size));
   }
 }
 
@@ -230,7 +233,7 @@ void lower_phy_baseband_processor::ul_process()
   }
 
   // Get receive buffer.
-  std::unique_ptr<baseband_gateway_buffer_dynamic> rx_buffer = rx_buffers.pop_blocking();
+  std::unique_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer = rx_buffers.pop_blocking();
 
   // Receive baseband.
   trace_point tp = ru_tracer.now();

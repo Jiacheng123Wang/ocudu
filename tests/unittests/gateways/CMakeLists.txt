@@ -23,3 +23,20 @@ gtest_discover_tests(udp_network_gateway_test PROPERTIES "LABELS;tsan")
 add_executable(udp_network_gateway_pool_depletion_test udp_network_gateway_pool_depletion_test.cpp)
 target_link_libraries(udp_network_gateway_pool_depletion_test ocudu_gateway ocudu_support ocudulog gtest gtest_main)
 gtest_discover_tests(udp_network_gateway_pool_depletion_test PROPERTIES "LABELS;tsan")
+
+# Page-aligned baseband buffer (zero-copy GPU FFT prerequisite): interface + alignment tests.
+add_executable(baseband_gateway_buffer_dynamic_aligned_test baseband_gateway_buffer_dynamic_aligned_test.cpp)
+target_link_libraries(baseband_gateway_buffer_dynamic_aligned_test ocudu_macos_compat ocudu_support ocudulog gtest gtest_main)
+gtest_discover_tests(baseband_gateway_buffer_dynamic_aligned_test PROPERTIES "LABELS;gateways")
+
+# Metal zero-copy wrap smoke of the aligned buffer (Apple platforms only).
+if (APPLE)
+    enable_language(OBJCXX)
+    add_executable(baseband_gateway_buffer_metal_smoke_test baseband_gateway_buffer_metal_smoke_test.mm)
+    set_source_files_properties(baseband_gateway_buffer_metal_smoke_test.mm
+        PROPERTIES LANGUAGE OBJCXX COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(baseband_gateway_buffer_metal_smoke_test
+        ocudu_macos_compat ocudu_support ocudulog gtest gtest_main
+        "-framework Metal" "-framework Foundation")
+    gtest_discover_tests(baseband_gateway_buffer_metal_smoke_test PROPERTIES "LABELS;gateways")
+endif()

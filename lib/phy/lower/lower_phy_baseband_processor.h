@@ -210,7 +210,7 @@ private:
   baseband_gateway_transmitter&                                              transmitter;
   uplink_processor_baseband&                                                 uplink_processor;
   downlink_processor_baseband&                                               downlink_processor;
-  blocking_queue<std::unique_ptr<baseband_gateway_buffer_dynamic>>           rx_buffers;
+  blocking_queue<std::unique_ptr<baseband_gateway_buffer_dynamic_aligned>> rx_buffers;
   baseband_gateway_timestamp                                                 tx_time_offset;
   baseband_gateway_timestamp                                                 rx_to_tx_max_delay;
   baseband_gateway_timestamp                                                 start_time_sfn0;
