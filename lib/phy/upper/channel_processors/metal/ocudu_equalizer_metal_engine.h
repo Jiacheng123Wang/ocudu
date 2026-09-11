@@ -62,6 +62,28 @@ public:
                 float       noise_var,
                 float       tx_scaling);
 
+  /// \brief Batched enqueue API (S2 groundwork): every dispatch enqueued between begin_batch()
+  /// and flush_batch() shares a single command buffer, so a symbol batch pays one commit/wait
+  /// round trip instead of one per dispatch. The caller owns the buffers: they must stay alive
+  /// and untouched until flush_batch() returns.
+  /// \return True on success.
+  bool begin_batch();
+  bool enqueue(const void* h,
+               const void* y,
+               const void* sigma2,
+               void*       eq,
+               void*       nv,
+               unsigned    nof_re,
+               unsigned    nof_ports,
+               unsigned    nof_layers,
+               bool        mmse,
+               float       noise_var,
+               float       tx_scaling);
+  bool flush_batch();
+
+  /// Number of dispatches enqueued in the batch in progress (diagnostics).
+  unsigned batch_size() const;
+
   /// GPU-side duration of the last call in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;
 

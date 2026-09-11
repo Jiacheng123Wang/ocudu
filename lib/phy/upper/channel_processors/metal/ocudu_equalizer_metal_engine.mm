@@ -116,6 +116,11 @@ struct equalize_params_t {
 struct eq_engine_impl {
   double last_gpu_us = 0.0;
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
+
+  // Batch in progress (nil when no batch is open).
+  id<MTLCommandBuffer>         batch_cb  = nil;
+  id<MTLComputeCommandEncoder> batch_enc = nil;
+  unsigned                     batch_n   = 0;
 };
 
 id<MTLBuffer> wrap_buffer(eq_engine_impl* engine, const void* ptr, size_t length)
@@ -202,25 +207,41 @@ bool equalizer_metal_engine::init()
   return true;
 }
 
-bool equalizer_metal_engine::equalize(const void* h,
-                                      const void* y,
-                                      const void* sigma2,
-                                      void*       eq,
-                                      void*       nv,
-                                      unsigned    nof_re,
-                                      unsigned    nof_ports,
-                                      unsigned    nof_layers,
-                                      bool        mmse,
-                                      float       noise_var,
-                                      float       tx_scaling)
+bool equalizer_metal_engine::begin_batch()
 {
   eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
   if (engine == nullptr || eq_resources().pipeline == nil) {
     return false;
   }
-  const size_t h_bytes  = static_cast<size_t>(nof_ports) * nof_layers * nof_re * 2 * sizeof(float);
-  const size_t y_bytes  = static_cast<size_t>(nof_ports) * nof_re * 2 * sizeof(float);
-  const size_t s_bytes  = static_cast<size_t>(nof_ports) * sizeof(float);
+  if (engine->batch_cb != nil) {
+    return false; // a batch is already open
+  }
+  engine->batch_cb           = [eq_resources().queue commandBuffer];
+  engine->batch_enc          = [engine->batch_cb computeCommandEncoder];
+  engine->batch_n            = 0;
+  [engine->batch_enc setComputePipelineState:eq_resources().pipeline];
+  return engine->batch_enc != nil;
+}
+
+bool equalizer_metal_engine::enqueue(const void* h,
+                                     const void* y,
+                                     const void* sigma2,
+                                     void*       eq,
+                                     void*       nv,
+                                     unsigned    nof_re,
+                                     unsigned    nof_ports,
+                                     unsigned    nof_layers,
+                                     bool        mmse,
+                                     float       noise_var,
+                                     float       tx_scaling)
+{
+  eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
+  if (engine == nullptr || engine->batch_enc == nil) {
+    return false;
+  }
+  const size_t h_bytes = static_cast<size_t>(nof_ports) * nof_layers * nof_re * 2 * sizeof(float);
+  const size_t y_bytes = static_cast<size_t>(nof_ports) * nof_re * 2 * sizeof(float);
+  const size_t s_bytes = static_cast<size_t>(nof_ports) * sizeof(float);
   const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
   const size_t nv_bytes = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
   id<MTLBuffer> b_h  = wrap_buffer(engine, h, h_bytes);
@@ -233,10 +254,7 @@ bool equalizer_metal_engine::equalize(const void* h,
   }
 
   equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, tx_scaling};
-
-  id<MTLCommandBuffer>         cmd_buf = [eq_resources().queue commandBuffer];
-  id<MTLComputeCommandEncoder> enc     = [cmd_buf computeCommandEncoder];
-  [enc setComputePipelineState:eq_resources().pipeline];
+  id<MTLComputeCommandEncoder> enc = engine->batch_enc;
   [enc setBuffer:b_h offset:0 atIndex:0];
   [enc setBuffer:b_y offset:0 atIndex:1];
   [enc setBuffer:b_eq offset:0 atIndex:2];
@@ -244,6 +262,22 @@ bool equalizer_metal_engine::equalize(const void* h,
   [enc setBuffer:b_s offset:0 atIndex:5];
   [enc setBytes:&params length:sizeof(params) atIndex:4];
   [enc dispatchThreads:MTLSizeMake(nof_re, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  ++engine->batch_n;
+  return true;
+}
+
+bool equalizer_metal_engine::flush_batch()
+{
+  eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
+  if (engine == nullptr || engine->batch_cb == nil) {
+    return false;
+  }
+  id<MTLCommandBuffer>         cmd_buf = engine->batch_cb;
+  id<MTLComputeCommandEncoder> enc     = engine->batch_enc;
+  engine->batch_cb  = nil;
+  engine->batch_enc = nil;
+  engine->batch_n   = 0;
+
   [enc endEncoding];
   [cmd_buf commit];
   eq_stats_commit();
@@ -260,6 +294,35 @@ bool equalizer_metal_engine::equalize(const void* h,
     engine->last_gpu_us = 0.0;
   }
   return true;
+}
+
+unsigned equalizer_metal_engine::batch_size() const
+{
+  const eq_engine_impl* engine = static_cast<const eq_engine_impl*>(impl);
+  return engine != nullptr ? engine->batch_n : 0;
+}
+
+bool equalizer_metal_engine::equalize(const void* h,
+                                      const void* y,
+                                      const void* sigma2,
+                                      void*       eq,
+                                      void*       nv,
+                                      unsigned    nof_re,
+                                      unsigned    nof_ports,
+                                      unsigned    nof_layers,
+                                      bool        mmse,
+                                      float       noise_var,
+                                      float       tx_scaling)
+{
+  // Compatibility wrapper: one dispatch per command buffer.
+  if (!begin_batch()) {
+    return false;
+  }
+  if (!enqueue(h, y, sigma2, eq, nv, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling)) {
+    flush_batch();
+    return false;
+  }
+  return flush_batch();
 }
 
 double equalizer_metal_engine::last_gpu_wait_us() const
