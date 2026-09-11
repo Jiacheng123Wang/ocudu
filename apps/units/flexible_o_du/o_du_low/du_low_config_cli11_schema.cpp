@@ -197,6 +197,12 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
     }
     return "Invalid PUSCH channel equalizer algorithm. Accepted values [zf,mmse]";
   };
+  auto pusch_dft_type_check = [](const std::string& value) -> std::string {
+    if ((value == "cpu") || (value == "metal")) {
+      return {};
+    }
+    return "Invalid PUSCH DFT processor type. Accepted values [cpu,metal]";
+  };
 
   add_option(app,
              "--max_proc_delay",
@@ -312,6 +318,12 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "PUSCH channel equalizer algorithm: zf and mmse.")
       ->capture_default_str()
       ->check(pusch_channel_equalizer_algorithm_method_check);
+  add_option(app,
+             "--pusch_dft_type",
+             expert_phy_params.pusch_dft_type,
+             "PUSCH DFT processor type: cpu and metal (Apple Silicon only).")
+      ->capture_default_str()
+      ->check(pusch_dft_type_check);
   add_option(app,
              "--max_request_headroom_slots",
              expert_phy_params.nof_slots_request_headroom,

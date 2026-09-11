@@ -15,8 +15,8 @@ std::unique_ptr<radio_unit> ocudu::create_sdr_radio_unit(const ru_sdr_unit_confi
                                                          const flexible_o_du_ru_config&       du_ru_config,
                                                          const flexible_o_du_ru_dependencies& ru_dependencies)
 {
-  ru_sdr_configuration config =
-      generate_ru_sdr_config(ru_sdr_cfg, du_ru_config.cells, du_ru_config.max_processing_delay);
+  ru_sdr_configuration config = generate_ru_sdr_config(
+      ru_sdr_cfg, du_ru_config.cells, du_ru_config.max_processing_delay, du_ru_config.dft_processor_type);
 
   ru_sdr_executor_mapper& exec_map = ru_dependencies.workers.get_sdr_ru_executor_mapper();
 

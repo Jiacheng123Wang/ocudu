@@ -101,6 +101,14 @@ struct du_low_unit_expert_upper_phy_config {
   /// - \c zf: use zero-forcing algorithm, or
   /// - \c mmse: use minimum mean square error algorithm.
   std::string pusch_channel_equalizer_algorithm = "mmse";
+  /// \brief DFT (FFT) processor implementation of the lower PHY.
+  ///
+  /// Use one of these options:
+  /// - \c cpu: the default CPU implementation (FFTZ when available, the generic DFT otherwise), or
+  /// - \c metal: the Metal GPU implementation (Apple Silicon only; power-of-two sizes up to the
+  ///   kernel maximum, with a transparent per-configuration fallback for the rest, e.g. the
+  ///   PRACH FFT sizes).
+  std::string pusch_dft_type = "cpu";
   /// \brief Request headroom size in slots.
   ///
   /// The request headroom size is the number of delayed slots that the upper physical layer will accept, ie, if the

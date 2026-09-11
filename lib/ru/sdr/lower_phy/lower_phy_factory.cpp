@@ -3,8 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "lower_phy_factory.h"
-
-#include <cstdlib>
+#include "ocudu/ocudulog/ocudulog.h"
 
 using namespace ocudu;
 
@@ -17,19 +16,23 @@ static std::shared_ptr<lower_phy_factory> create_lower_phy_factory(const lower_p
     fr = frequency_range::FR2;
   }
 
-  // Create DFT factory.
-  std::shared_ptr<dft_processor_factory> dft_factory = create_dft_processor_factory();
+  // Create DFT factory (selected through the expert_phy knob, e.g. --pusch_dft_type metal).
+  std::shared_ptr<dft_processor_factory> dft_factory;
+  if (config.dft_processor_type == "metal") {
 #if defined(OCUDU_METAL_DFT)
-  // GPU FFT opt-in (A/B routing): set OCUDU_DFT_METAL=1 to route the DFT instances through
-  // the Metal implementation. The factory falls back per configuration (non-power-of-two
-  // and oversized transforms, e.g. the PRACH FFT, stay on the CPU implementation), and the
-  // default path (env unset) keeps the previous behavior bit for bit.
-  if (std::getenv("OCUDU_DFT_METAL") != nullptr) {
-    if (auto metal_factory = create_dft_processor_factory_metal()) {
-      dft_factory = std::move(metal_factory);
+    dft_factory = create_dft_processor_factory_metal();
+#endif // OCUDU_METAL_DFT
+    if (dft_factory == nullptr) {
+      // The Metal DFT is not built into this binary: fall back to the CPU implementation
+      // instead of failing the whole lower PHY (the CLI accepts "metal" everywhere so the
+      // same configuration stays runnable across platforms).
+      ocudulog::fetch_basic_logger("PHY").warning(
+          "Metal DFT requested but unavailable in this build; falling back to the CPU DFT implementation.");
     }
   }
-#endif // OCUDU_METAL_DFT
+  if (dft_factory == nullptr) {
+    dft_factory = create_dft_processor_factory();
+  }
   report_fatal_error_if_not(dft_factory, "Failed to create DFT factory.");
 
   // Create OFDM modulator factory.

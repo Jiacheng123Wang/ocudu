@@ -58,6 +58,14 @@ struct lower_phy_configuration {
   unsigned nof_rx_ports;
   /// Shifts the DFT window by a fraction of the cyclic prefix [0, 1).
   float dft_window_offset;
+  /// \brief DFT (FFT) processor implementation.
+  ///
+  /// Use one of these options:
+  /// - \c cpu: the default CPU implementation (FFTZ when available, the generic DFT otherwise), or
+  /// - \c metal: the Metal GPU implementation (Apple Silicon only; power-of-two sizes up to the
+  ///   kernel maximum, with a transparent per-configuration fallback for the rest, e.g. the
+  ///   PRACH FFT sizes).
+  std::string dft_processor_type = "cpu";
   /// \brief Number of slots the timing handler is notified in advance of the transmission time.
   ///
   /// Sets the maximum allowed processing delay in slots.
@@ -119,7 +127,9 @@ struct lower_phy_dependencies {
 /// Returns true if the given lower PHY configuration is valid, otherwise false.
 inline bool is_valid_lower_phy_config(const lower_phy_configuration& config)
 {
-  // :TODO: Implement me!
+  if ((config.dft_processor_type != "cpu") && (config.dft_processor_type != "metal")) {
+    return false;
+  }
 
   return true;
 }

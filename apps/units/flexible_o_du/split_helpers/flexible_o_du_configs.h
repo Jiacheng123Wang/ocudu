@@ -53,6 +53,8 @@ struct flexible_o_du_ru_config {
   std::vector<cell_config> cells;
   unsigned                 max_processing_delay;
   unsigned                 prach_nof_ports;
+  /// Lower-PHY DFT (FFT) processor implementation: "cpu" (default) or "metal" (Apple Silicon).
+  std::string              dft_processor_type = "cpu";
 };
 
 /// Radio Unit dependencies of the flexible O-RAN DU.
