@@ -43,3 +43,28 @@ target_include_directories(channel_equalizer_metal_unit_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../equalization)
 target_link_libraries(channel_equalizer_metal_unit_test PRIVATE
     ocudu_channel_processors_metal ocudu_channel_equalizer ocudu_support)
+
+# ---- Offline replay of a recorded PUSCH reception (A/B/C of one test vector) ----
+add_executable(ul_chain_replay test/ul_chain_replay.cpp)
+target_include_directories(ul_chain_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pusch)
+target_link_libraries(ul_chain_replay PRIVATE
+    ocudu_pusch_processor ocudu_pusch_demodulator
+    ocudu_channel_processors_metal ocudu_channel_modulation_metal
+    ocudu_channel_equalizer ocudu_channel_modulation ocudu_channel_coding
+    ocudu_uci_decoder ocudu_upper_phy_support ocudu_dft ocudu_transform_precoding
+    ocudu_dmrs_pusch ocudu_sequence_generators ocudu_channel_estimator
+    ocudu_phy_support ocudu_support ocudu_macos_compat)
+
+# AddressSanitizer twin of the replay tool: it pinpoints a wild write in the receiver with a real
+# stack, which the plain build cannot show (the crash corrupts it).
+add_executable(ul_chain_replay_asan test/ul_chain_replay.cpp)
+target_include_directories(ul_chain_replay_asan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pusch)
+target_compile_options(ul_chain_replay_asan PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
+target_link_options(ul_chain_replay_asan PRIVATE -fsanitize=address)
+target_link_libraries(ul_chain_replay_asan PRIVATE
+    ocudu_pusch_processor ocudu_pusch_demodulator
+    ocudu_channel_processors_metal ocudu_channel_modulation_metal
+    ocudu_channel_equalizer ocudu_channel_modulation ocudu_channel_coding
+    ocudu_uci_decoder ocudu_upper_phy_support ocudu_dft ocudu_transform_precoding
+    ocudu_dmrs_pusch ocudu_sequence_generators ocudu_channel_estimator
+    ocudu_phy_support ocudu_support ocudu_macos_compat)

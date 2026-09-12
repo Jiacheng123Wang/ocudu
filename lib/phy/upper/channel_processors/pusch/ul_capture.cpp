@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <set>
 #include <optional>
 #include <string>
 #include <vector>
@@ -28,16 +29,41 @@ unsigned capture_budget()
   return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 8U;
 }
 
-/// True while this reception is within the capture budget.
-bool take()
-{
-  static std::atomic<unsigned> count{0};
-  return count.fetch_add(1, std::memory_order_relaxed) < capture_budget();
-}
-
 std::string make_key(slot_point slot, rnti_t rnti)
 {
   return capture_prefix() + "_" + std::to_string(slot.count()) + "_" + std::to_string(to_value(rnti));
+}
+
+/// Receptions selected for capture. The decision is taken once, by the grid capture, and the
+/// later stages (which may run on other threads) only check membership, so all three stage files
+/// of a reception exist together and the budget bounds the whole set.
+std::mutex&                      selected_mutex()
+{
+  static std::mutex m;
+  return m;
+}
+
+std::set<std::string>& selected()
+{
+  static std::set<std::string> keys;
+  return keys;
+}
+
+bool select(slot_point slot, rnti_t rnti)
+{
+  static std::atomic<unsigned> count{0};
+  std::lock_guard              lock(selected_mutex());
+  if (count.fetch_add(1, std::memory_order_relaxed) >= capture_budget()) {
+    return false;
+  }
+  selected().insert(make_key(slot, rnti));
+  return true;
+}
+
+bool is_selected(slot_point slot, rnti_t rnti)
+{
+  std::lock_guard lock(selected_mutex());
+  return selected().count(make_key(slot, rnti)) != 0;
 }
 
 /// Reception the captures belong to (the demodulator has no access to the PDU).
@@ -69,13 +95,16 @@ bool ocudu::ul_capture::enabled()
 
 bool ocudu::ul_capture::llr_enabled()
 {
-  static const bool on = (std::getenv("OCUDU_UL_DUMP_LLR") != nullptr);
+  static const bool on = []() {
+    const char* env = std::getenv("OCUDU_UL_DUMP_LLR");
+    return (env != nullptr) && (std::string(env) != "0");
+  }();
   return on;
 }
 
 void ocudu::ul_capture::capture_grid(const resource_grid_reader& grid, const pusch_processor::pdu_t& pdu)
 {
-  if (!enabled() || !pdu.codeword.has_value() || !take()) {
+  if (!enabled() || !pdu.codeword.has_value() || !select(pdu.slot, pdu.rnti)) {
     return;
   }
   const std::string name = make_key(pdu.slot, pdu.rnti);
@@ -95,6 +124,7 @@ void ocudu::ul_capture::capture_grid(const resource_grid_reader& grid, const pus
     std::fprintf(f, "modulation=%s\n", to_string(pdu.mcs_descr.modulation).c_str());
     std::fprintf(f, "target_code_rate=%u\n", static_cast<unsigned>(std::lround(pdu.mcs_descr.target_code_rate)));
     std::fprintf(f, "rv=%u\n", static_cast<unsigned>(pdu.codeword->rv));
+    std::fprintf(f, "ldpc_base_graph=%u\n", static_cast<unsigned>(pdu.codeword->ldpc_base_graph));
     std::fprintf(f, "new_data=%d\n", static_cast<int>(pdu.codeword->new_data));
     std::fprintf(f, "tbs_lbrm=%u\n", pdu.tbs_lbrm.value());
     std::fprintf(f, "nof_harq_ack=%u\n", pdu.uci.nof_harq_ack);
@@ -145,7 +175,7 @@ void ocudu::ul_capture::capture_grid(const resource_grid_reader& grid, const pus
 void ocudu::ul_capture::capture_ce(const dmrs_pusch_estimator_results& est_results,
                                    const pusch_processor::pdu_t&       pdu)
 {
-  if (!enabled() || !pdu.codeword.has_value()) {
+  if (!enabled() || !pdu.codeword.has_value() || !is_selected(pdu.slot, pdu.rnti)) {
     return;
   }
   FILE* f = std::fopen((make_key(pdu.slot, pdu.rnti) + "_ce.txt").c_str(), "w");
@@ -177,7 +207,7 @@ void ocudu::ul_capture::set_current(slot_point slot, rnti_t rnti)
 
 void ocudu::ul_capture::capture_llr(span<const log_likelihood_ratio> llr)
 {
-  if (!llr_enabled() || !current().valid) {
+  if (!llr_enabled() || !current().valid || !is_selected(current().slot, current().rnti)) {
     return;
   }
   static std::mutex mutex;
