@@ -319,8 +319,14 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
   // One threadgroup per system, laid out as (column, row) so that the elimination of a pivot
   // column spreads over the whole block (see ocudu_mmse_inv.metal).
-  [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  {
+    const char* env = std::getenv("OCUDU_INV_TGX");
+    const unsigned tgx = (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 32;
+    const char* envy = std::getenv("OCUDU_INV_TGY");
+    const unsigned tgy = (envy != nullptr) ? static_cast<unsigned>(std::strtoul(envy, nullptr, 10)) : 4;
+    [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(tgx, tgy, 1)];
+  }
   [enc endEncoding];
   [cb commit];
   mmse_stats_commit();

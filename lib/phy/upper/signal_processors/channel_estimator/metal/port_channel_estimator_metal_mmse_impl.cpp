@@ -845,17 +845,19 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   // fixed to n <= 36 by its threadgroup memory and unused by the nn flavor (ceil8-padded layout).
   // TRANSITIONAL (S-4c/S-4d, to be removed by S-5): the inversion runs on the CPU. The K1 kernel
   // costs 91.3 us of GPU time for a SINGLE 36x36 system today (measured: hop mean 160.2 -> 254.0 us
-  // with K1), which is a DEFECT OF THE KERNEL, not evidence about where the work belongs: a hop
-  // shares one A over all of its blocks (build_correlation_matrices depends only on block_prb, the
-  // DMRS symbols, the SCS and the statistics), so the hop inverts exactly one 36x36 system = 47k
-  // FLOPs, yet K1 spends 2 barriered pivot steps per column on it with every element moving through
-  // threadgroup memory. PHY compute is meant to end up on the Metal path as a whole (S-5a): block
-  // the elimination (b=8, no pivoting needed - A is SPD) and drive the block updates with
-  // simdgroup_matrix, target <=10-15 us inside the same command buffer as the weights and the
-  // apply (engine->run() already encodes those three in one buffer).
-  // OCUDU_CE_GPU_INVERT=1 selects K1 today for A/B.
+  // The inversion runs on the GPU: K1 (ocudu_mmse_inv.metal) is a blocked Gauss-Jordan (b=8, no
+  // pivoting - A is SPD) and costs 24.5 us for one 36x36 system, down from 91.3 us as a per-pivot
+  // barrier chain (S-5a). It is encoded in the SAME command buffer as the weights and the apply
+  // (engine->run() below), so the host never reads the inverse back and pays no extra round trip.
+  //
+  // It is still a few us slower end to end than the ~10 us of host-side CPU Gauss-Jordan in the
+  // chain as wired today (the local A/B: hop mean 169.0 -> 182.4 us), and it stays the default
+  // anyway: PHY compute belongs to the Metal path as a whole, so the remaining gap is a kernel
+  // engineering item (the 72 pivot phases of the diagonal blocks, see the kernel header), not a
+  // reason to move the work back to the CPU. OCUDU_CE_CPU_INVERT=1 forces the CPU path for A/B.
   static constexpr unsigned MAX_GPU_INVERT_ORDER = 36;
-  const bool gpu_invert = !matrix && (L <= MAX_GPU_INVERT_ORDER) && (std::getenv("OCUDU_CE_GPU_INVERT") != nullptr);
+  const bool cpu_invert_forced = (std::getenv("OCUDU_CE_CPU_INVERT") != nullptr);
+  const bool gpu_invert        = !matrix && !cpu_invert_forced && (L <= MAX_GPU_INVERT_ORDER);
   if (gpu_invert) {
     // Stage A itself (not A^-1): K1 overwrites the slot with the inverse in place.
     for (unsigned sys = 0; sys != nof_layers; ++sys) {
