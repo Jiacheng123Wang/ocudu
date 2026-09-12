@@ -114,6 +114,11 @@ struct demod_params_t {
 
 struct demod_engine_impl {
   double last_gpu_us = 0.0;
+  // Batch in progress (nil when no batch is open).
+  id<MTLCommandBuffer>         batch_cb  = nil;
+  id<MTLComputeCommandEncoder> batch_enc = nil;
+  unsigned                     batch_n   = 0;
+  id<MTLCommandBuffer>         last_committed = nil;
   bool   last_call_no_copy = true; // false when any buffer of the last call was copied
   bool   no_copy_fallback_logged = false;
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
@@ -216,14 +221,27 @@ bool demod_metal_engine::init()
   return true;
 }
 
-bool demod_metal_engine::demodulate(const void* symbols,
-                                    const void* noise_var,
-                                    void*       llrs,
-                                    unsigned    nof_symbols,
-                                    unsigned    mod)
+bool demod_metal_engine::begin_batch()
 {
   demod_engine_impl* engine = static_cast<demod_engine_impl*>(impl);
-  if (engine == nullptr || demod_resources().pipeline == nil) {
+  if (engine == nullptr || demod_resources().pipeline == nil || engine->batch_cb != nil) {
+    return false;
+  }
+  engine->batch_cb           = [demod_resources().queue commandBuffer];
+  engine->batch_enc          = [engine->batch_cb computeCommandEncoder];
+  engine->batch_n            = 0;
+  [engine->batch_enc setComputePipelineState:demod_resources().pipeline];
+  return engine->batch_enc != nil;
+}
+
+bool demod_metal_engine::enqueue(const void* symbols,
+                                 const void* noise_var,
+                                 void*       llrs,
+                                 unsigned    nof_symbols,
+                                 unsigned    mod)
+{
+  demod_engine_impl* engine = static_cast<demod_engine_impl*>(impl);
+  if (engine == nullptr || engine->batch_enc == nil) {
     return false;
   }
   const size_t symbols_bytes = static_cast<size_t>(nof_symbols) * 2 * sizeof(float);
@@ -238,20 +256,45 @@ bool demod_metal_engine::demodulate(const void* symbols,
 
   engine->last_call_no_copy = true;
   const demod_params_t params{nof_symbols, mod};
-
-  id<MTLCommandBuffer>         cmd_buf = [demod_resources().queue commandBuffer];
-  id<MTLComputeCommandEncoder> enc     = [cmd_buf computeCommandEncoder];
-  [enc setComputePipelineState:demod_resources().pipeline];
+  id<MTLComputeCommandEncoder> enc = engine->batch_enc;
   [enc setBuffer:b_sym offset:0 atIndex:0];
   [enc setBuffer:b_nv offset:0 atIndex:1];
   [enc setBuffer:b_llrs offset:0 atIndex:2];
   [enc setBytes:&params length:sizeof(params) atIndex:3];
   [enc dispatchThreads:MTLSizeMake(nof_symbols, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  ++engine->batch_n;
+  return true;
+}
+
+bool demod_metal_engine::commit_batch()
+{
+  demod_engine_impl* engine = static_cast<demod_engine_impl*>(impl);
+  if (engine == nullptr || engine->batch_cb == nil) {
+    return false;
+  }
+  id<MTLCommandBuffer>         cmd_buf = engine->batch_cb;
+  id<MTLComputeCommandEncoder> enc     = engine->batch_enc;
+  engine->batch_cb  = nil;
+  engine->batch_enc = nil;
+  engine->batch_n   = 0;
+
   [enc endEncoding];
   [cmd_buf commit];
   demod_stats_commit();
-  [cmd_buf waitUntilCompleted];
+  engine->last_committed = cmd_buf;
+  return true;
+}
+
+bool demod_metal_engine::wait_committed()
+{
+  demod_engine_impl* engine = static_cast<demod_engine_impl*>(impl);
+  if ((engine == nullptr) || (engine->last_committed == nil)) {
+    return true;
+  }
+  id<MTLCommandBuffer> cmd_buf = engine->last_committed;
+  engine->last_committed       = nil;
   demod_stats_wait();
+  [cmd_buf waitUntilCompleted];
   if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
     ocudulog::fetch_basic_logger("PHY").error("Metal demapper: command buffer failed with status {}",
                                               static_cast<unsigned long>(cmd_buf.status));
@@ -259,10 +302,28 @@ bool demod_metal_engine::demodulate(const void* symbols,
   }
   if (cmd_buf.GPUStartTime > 0.0 && cmd_buf.GPUEndTime > 0.0) {
     engine->last_gpu_us = (cmd_buf.GPUEndTime - cmd_buf.GPUStartTime) * 1e6;
-  } else {
-    engine->last_gpu_us = 0.0;
   }
   return true;
+}
+
+bool demod_metal_engine::demodulate(const void* symbols,
+                                    const void* noise_var,
+                                    void*       llrs,
+                                    unsigned    nof_symbols,
+                                    unsigned    mod)
+{
+  // Compatibility wrapper: one dispatch per command buffer, waited immediately.
+  if (!begin_batch()) {
+    return false;
+  }
+  if (!enqueue(symbols, noise_var, llrs, nof_symbols, mod)) {
+    (void)commit_batch();
+    return false;
+  }
+  if (!commit_batch()) {
+    return false;
+  }
+  return wait_committed();
 }
 
 bool demod_metal_engine::last_call_used_no_copy() const

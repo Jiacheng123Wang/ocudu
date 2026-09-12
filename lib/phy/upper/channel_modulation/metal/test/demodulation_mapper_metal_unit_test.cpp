@@ -227,6 +227,38 @@ int main()
     }
   }
 
+  // Deferred chain (A-2): submit() + wait() must be bit-identical to demodulate_soft().
+  {
+    const unsigned nof_symbols = 256;
+    const unsigned nof_bits    = nof_symbols * 6;
+    auto           dist        = std::normal_distribution<float>(0.0F, 0.3F);
+    std::vector<cf_t>               symbols(nof_symbols);
+    std::vector<float>              noise_vars(nof_symbols);
+    for (auto& z : symbols) {
+      z = {dist(rng), dist(rng)};
+    }
+    for (auto& n : noise_vars) {
+      n = 0.05F + 0.05F * std::abs(dist(rng));
+    }
+    std::vector<log_likelihood_ratio> llrs_sync(nof_bits);
+    std::vector<log_likelihood_ratio> llrs_deferred(nof_bits);
+
+    demodulation_mapper_metal metal;
+    if (!metal.supports_deferred_chain()) {
+      std::fprintf(stderr, "FAIL: deferred chain not advertised by the demapper\n");
+      ok = false;
+    }
+    metal.demodulate_soft(llrs_sync, symbols, noise_vars, modulation_scheme::QAM64);
+    metal.submit(llrs_deferred, symbols, noise_vars, modulation_scheme::QAM64);
+    metal.wait();
+    const bool same = bit_exact(llrs_sync, llrs_deferred);
+    std::printf("[chain]  submit()+wait() bit-identical to demodulate_soft(): %s\n", same ? "OK" : "MISMATCH");
+    if (!same) {
+      std::fprintf(stderr, "FAIL: deferred demapping differs from the synchronous path\n");
+      ok = false;
+    }
+  }
+
   // Steady-state latency (audit data): 100 calls per backend at 64QAM.
   {
     const unsigned nof_symbols = 256;

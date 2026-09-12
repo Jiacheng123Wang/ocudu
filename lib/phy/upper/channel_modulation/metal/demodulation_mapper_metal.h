@@ -33,10 +33,29 @@ public:
                        span<const float>          noise_vars,
                        modulation_scheme          mod) override;
 
+  // See interface for documentation.
+  void submit(span<log_likelihood_ratio> llrs,
+              span<const cf_t>           symbols,
+              span<const float>          noise_vars,
+              modulation_scheme          mod) override;
+
+  // See interface for documentation.
+  void wait() override;
+
+  // See interface for documentation.
+  bool supports_deferred_chain() const override { return true; }
+
   /// GPU-side duration of the last call in microseconds (0 when unavailable / invalid).
   double engine_gpu_wait_us() const;
 
 private:
+  /// \brief Shared implementation of demodulate_soft() and submit().
+  void run_demodulate(span<log_likelihood_ratio> llrs,
+                      span<const cf_t>           symbols,
+                      span<const float>          noise_vars,
+                      modulation_scheme          mod,
+                      bool                       defer);
+
   struct impl;
   std::unique_ptr<impl> impl_;
 };

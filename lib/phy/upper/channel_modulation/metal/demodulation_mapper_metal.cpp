@@ -26,8 +26,14 @@ bool is_page_aligned_buffer(const void* ptr)
 
 struct demodulation_mapper_metal::impl {
   metal::demod_metal_engine engine;
-  bool                      engine_ok   = false;
-  bool                      path_logged = false;
+  bool                      engine_ok      = false;
+  bool                      path_logged    = false;
+  bool                      chain_pending  = false;
+
+  // Deferred-submission state: where the staged LLRs must be copied back.
+  span<log_likelihood_ratio> pending_llrs    = {};
+  void*                      pending_llr_ptr = nullptr;
+  size_t                     pending_llr_sz  = 0;
 
   // Staging buffers (page-aligned, grown on demand and reused across calls).
   void*  sym_buf = nullptr;
@@ -82,6 +88,35 @@ void demodulation_mapper_metal::demodulate_soft(span<log_likelihood_ratio> llrs,
                                                 span<const float>          noise_vars,
                                                 modulation_scheme          mod)
 {
+  run_demodulate(llrs, symbols, noise_vars, mod, false);
+}
+
+void demodulation_mapper_metal::submit(span<log_likelihood_ratio> llrs,
+                                       span<const cf_t>           symbols,
+                                       span<const float>          noise_vars,
+                                       modulation_scheme          mod)
+{
+  run_demodulate(llrs, symbols, noise_vars, mod, true);
+}
+
+void demodulation_mapper_metal::wait()
+{
+  if (!impl_->chain_pending) {
+    return;
+  }
+  impl_->chain_pending = false;
+  impl_->engine.wait_committed();
+  // The kernel wrote the LLRs into the staging buffer: copy them into the caller's span, exactly
+  // like the synchronous path does.
+  std::memcpy(impl_->pending_llrs.data(), impl_->pending_llr_ptr, impl_->pending_llr_sz);
+}
+
+void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
+                                               span<const cf_t>           symbols,
+                                               span<const float>          noise_vars,
+                                               modulation_scheme          mod,
+                                               bool                       defer)
+{
   ocudu_assert(symbols.size() == noise_vars.size(), "Inputs symbols and noise_vars must have the same length.");
   ocudu_assert(symbols.size() * get_bits_per_symbol(mod) == llrs.size(), "Input and output lengths are incompatible.");
   ocudu_assert(is_supported(mod), "Unsupported modulation scheme for the Metal demapper.");
@@ -128,12 +163,27 @@ void demodulation_mapper_metal::demodulate_soft(span<log_likelihood_ratio> llrs,
     std::memcpy(const_cast<void*>(nv_ptr), noise_vars.data(), nv_bytes);
   }
 
-  const bool ok = impl_->engine.demodulate(sym_ptr, nv_ptr, llr_ptr, nof_symbols, mod_id);
+  impl_->engine.begin_batch();
+  const bool ok = impl_->engine.enqueue(sym_ptr, nv_ptr, llr_ptr, nof_symbols, mod_id);
   if (!ok) {
     // Engine failure: zero LLRs (the CPU's ill-formed input semantics) instead of stale data.
+    (void)impl_->engine.commit_batch();
+    (void)impl_->engine.wait_committed();
     std::memset(llrs.data(), 0, llr_bytes);
     return;
   }
+  if (defer) {
+    // Submitted for the fused chain: the wait (and the copy-back of the staged LLRs) is deferred
+    // to wait() - or guaranteed by a later stage dispatching on the same queue.
+    (void)impl_->engine.commit_batch();
+    impl_->chain_pending   = true;
+    impl_->pending_llrs    = llrs;
+    impl_->pending_llr_ptr = llr_ptr;
+    impl_->pending_llr_sz  = llr_bytes;
+    return;
+  }
+  (void)impl_->engine.commit_batch();
+  impl_->engine.wait_committed();
 
   if (!impl_->path_logged) {
     impl_->path_logged = true;

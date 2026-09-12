@@ -45,6 +45,21 @@ public:
   /// platform refused the no-copy wrap and the engine staged through an owned MTLBuffer.
   bool last_call_used_no_copy() const;
 
+  /// \name Deferrable batch API (used by the fused PUSCH demodulation chain).
+  ///@{
+  /// \brief Opens a batch: every dispatch enqueued until commit_batch() shares one command buffer.
+  bool begin_batch();
+
+  /// \brief Enqueues one demodulation dispatch into the open batch (no wait).
+  bool enqueue(const void* symbols, const void* noise_var, void* llrs, unsigned nof_symbols, unsigned mod);
+
+  /// \brief Commits the batch without waiting (pairs with wait_committed()).
+  bool commit_batch();
+
+  /// \brief Waits for the batch committed last (no-op when nothing is pending).
+  bool wait_committed();
+  ///@}
+
   /// GPU-side duration of the last call in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;
 
