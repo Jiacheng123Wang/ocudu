@@ -1398,6 +1398,178 @@ int main()
     std::printf("Test 9 PASS: level-consistent channel estimator results\n");
   }
 
+  // -----------------------------------------------------------------------------------
+  // Test 11: the merged standard+tail batch estimates what the split path estimates (S-5c).
+  // Both paths run over identical pilots, so the reference is the OTHER estimator and not the
+  // true channel: every mistake the merge can make - the tail taking the standard geometry, the
+  // unpack reading with the block geometry instead of the batch strides, or the tail matrices
+  // overwriting the standard ones - shows up as a large difference on the blocks it touches.
+  // The knob is read per call, so one binary runs both paths back to back.
+  // -----------------------------------------------------------------------------------
+  {
+    struct merge_shape {
+      unsigned n_prb;
+      unsigned n_sym;
+      bool     expect_merge; // the batch must be merged: an edge block and enough layers fit
+    };
+    // block_prb = 3: 52 and 25 PRB leave an edge block, 51 does not, and a 2 PRB hop is a single
+    // narrow block (no standard block to merge with).
+    const std::array<merge_shape, 6> shapes = {{{52, 2, true}, {52, 1, true}, {25, 2, true},
+                                                {4, 3, true}, {51, 2, false}, {2, 2, false}}};
+    double   worst_rel_h = 0.0;
+    double   worst_dn_db = 0.0;
+    unsigned n_tail_re   = 0;
+
+    for (const merge_shape& shape : shapes) {
+      const unsigned n_prb = shape.n_prb;
+      const unsigned n_sym = shape.n_sym;
+      auto           cfg   = make_config(n_prb, n_sym != 1, 0, n_sym == 3, n_sym == 4);
+      auto           pilots = make_pilots(n_prb, n_sym);
+      veha_channel   ch(rng);
+
+      // DM-RS slot symbols of each supported shape (mirrors make_config()).
+      std::vector<unsigned> dmrs_l;
+      if (n_sym == 4) {
+        dmrs_l = {2, 7, 11, 12};
+      } else {
+        dmrs_l = {2};
+        if (n_sym >= 2) {
+          dmrs_l.push_back(11);
+        }
+        if (n_sym == 3) {
+          dmrs_l.push_back(7);
+        }
+      }
+
+      std::vector<std::vector<cf_t>> h_true(MAX_NSYMB_PER_SLOT, std::vector<cf_t>(n_prb * 12));
+      grid_fake                      grid(n_prb * 12);
+      std::vector<cf_t>              rx_sym(n_prb * 12, {0.0F, 0.0F});
+      std::normal_distribution<float> gauss(0.0F, 0.4F);
+      for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
+        for (unsigned k = 0; k != n_prb * 12; ++k) {
+          h_true[l][k] = ch(k);
+        }
+      }
+      for (unsigned s = 0; s != n_sym; ++s) {
+        const unsigned l = dmrs_l[s];
+        std::fill(rx_sym.begin(), rx_sym.end(), cf_t{0.0F, 0.0F});
+        unsigned j = 0;
+        for (unsigned prb = 0; prb != n_prb; ++prb) {
+          for (unsigned pos = 0; pos != 12; pos += 2) {
+            const unsigned k = prb * 12 + pos;
+            rx_sym[k]        = h_true[l][k] * pilots.get_symbol(s, 0)[j] + cf_t{gauss(rng), gauss(rng)};
+            ++j;
+          }
+        }
+        grid.set_symbol(l, rx_sym);
+      }
+
+      const auto make_est = []() {
+        return std::make_unique<port_channel_estimator_metal_mmse_impl>(
+            create_interpolator(),
+            make_ta_estimator(),
+            std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F),
+            3,
+            true);
+      };
+      auto est_merged = make_est();
+      auto est_split  = make_est();
+
+      const auto run = [&](port_channel_estimator_metal_mmse_impl& est, std::vector<std::vector<cf_t>>& out) {
+        const auto& res = est.compute(grid, 0, pilots, cfg);
+        for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
+          std::vector<cbf16_t> e(n_prb * 12);
+          res.get_symbol_ch_estimate(e, l, 0);
+          for (unsigned k = 0; k != n_prb * 12; ++k) {
+            out[l][k] = to_cf(e[k]);
+          }
+        }
+      };
+      std::vector<std::vector<cf_t>> h_merged(MAX_NSYMB_PER_SLOT, std::vector<cf_t>(n_prb * 12));
+      std::vector<std::vector<cf_t>> h_split(MAX_NSYMB_PER_SLOT, std::vector<cf_t>(n_prb * 12));
+
+      unsetenv("OCUDU_CE_SPLIT_TAIL");
+      run(*est_merged, h_merged);
+      const bool merged_engaged = est_merged->merged_batch_last();
+      setenv("OCUDU_CE_SPLIT_TAIL", "1", 1);
+      run(*est_split, h_split);
+      const bool split_engaged = est_split->merged_batch_last();
+      unsetenv("OCUDU_CE_SPLIT_TAIL");
+
+      // A path that silently takes the other branch would make this comparison vacuous.
+      // OCUDU_CE_TAIL_CPU=1 is the A/B knob that deliberately routes the tail to the CPU and so
+      // disables the merge: it relaxes the expectation, the comparison stays valid either way.
+      const bool tail_on_cpu  = (std::getenv("OCUDU_CE_TAIL_CPU") != nullptr);
+      const bool expect_merge = shape.expect_merge && !tail_on_cpu;
+      const bool engaged_ok   = (merged_engaged == expect_merge) && !split_engaged;
+
+      double err_m = 0.0, err_s = 0.0, sig = 0.0, worst = 0.0;
+      const unsigned tail_sc = (n_prb - (n_prb / 3) * 3) * 12;
+      for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
+        for (unsigned k = 0; k != n_prb * 12; ++k) {
+          const cf_t e = h_merged[l][k] - h_split[l][k];
+          const double ad = std::sqrt(std::norm(e));
+          // Only the edge block can differ at all: the standard blocks run the identical batch in
+          // both paths. The gate below is a fraction of the signal RMS, so it is independent of
+          // the channel gain.
+          worst = std::max(worst, ad);
+          const cf_t dm = h_merged[l][k] - h_true[l][k];
+          const cf_t ds = h_split[l][k] - h_true[l][k];
+          err_m += std::norm(dm);
+          err_s += std::norm(ds);
+          sig += std::norm(h_true[l][k]);
+        }
+      }
+      const double rms      = std::sqrt(sig / (MAX_NSYMB_PER_SLOT * n_prb * 12));
+      const double rel      = (rms > 0.0) ? worst / rms : 0.0;
+      const double nmse_m   = 10.0 * std::log10(err_m / sig);
+      const double nmse_s   = 10.0 * std::log10(err_s / sig);
+      const double d_nmse   = std::abs(nmse_m - nmse_s);
+      // The public estimate is bf16 (8-bit mantissa), so the comparison floor is one quantization
+      // step: the two paths agree exactly unless a value lands on a rounding boundary.
+      const double bf16_step = std::ldexp(1.0, -8);
+      worst_rel_h            = std::max(worst_rel_h, rel);
+      worst_dn_db            = std::max(worst_dn_db, d_nmse);
+      if (shape.expect_merge) {
+        n_tail_re += tail_sc * MAX_NSYMB_PER_SLOT;
+      }
+      std::printf("Test 11 (%2u PRB, %u DMRS): merged=%d split=%d | max|dh|/rms %.2e (%.0f dB, bf16 step %.2e) "
+                  "| NMSE merged %.2f dB split %.2f dB (d %.3f dB)\n",
+                  n_prb,
+                  n_sym,
+                  merged_engaged ? 1 : 0,
+                  split_engaged ? 1 : 0,
+                  rel,
+                  20.0 * std::log10(std::max(rel, 1e-12)),
+                  bf16_step,
+                  nmse_m,
+                  nmse_s,
+                  d_nmse);
+      if (!engaged_ok) {
+        std::printf("Test 11 FAIL: merged_batch_last() is %d (expected %d) / split path %d for %u PRB\n",
+                    merged_engaged ? 1 : 0,
+                    expect_merge ? 1 : 0,
+                    split_engaged ? 1 : 0,
+                    n_prb);
+        return -1;
+      }
+      if ((rel > 0.01) || (d_nmse > 0.05)) {
+        std::printf("Test 11 FAIL: the merged batch does not estimate what the split path estimates "
+                    "(%u PRB, %u DMRS: max|dh|/rms %.3e, dNMSE %.3f dB)\n",
+                    n_prb,
+                    n_sym,
+                    rel,
+                    d_nmse);
+        return -1;
+      }
+    }
+    std::printf("Test 11 PASS: the merged standard+tail batch matches the split path "
+                "(worst max|dh|/rms %.2e over %u tail REs, worst dNMSE %.3f dB)\n",
+                worst_rel_h,
+                n_tail_re,
+                worst_dn_db);
+  }
+
   std::printf("All tests PASSED\n");
   return 0;
 }

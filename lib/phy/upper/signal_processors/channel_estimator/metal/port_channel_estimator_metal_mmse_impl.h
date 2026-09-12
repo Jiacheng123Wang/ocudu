@@ -77,6 +77,11 @@ public:
   /// Whether the LAST processed fd/td estimation stage actually ran the matrix kernels.
   bool nn_engaged_last() const { return last_stage_nn; }
 
+  /// Whether the LAST processed fd/td estimation stage merged the tail block into the standard
+  /// batch (one engine call per hop instead of two). A hop without an edge block, or with more
+  /// layers than the merged batch fits, never engages it, so this is what tells an A/B apart.
+  bool merged_batch_last() const { return last_stage_merged; }
+
 private:
   // See the base class documentation.
   void apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args) override;
@@ -111,20 +116,64 @@ private:
                                          unsigned&                                      nout,
                                          unsigned&                                      L);
 
-  /// \brief Runs one GPU batch over n_blk equal-width (b_prb PRB) blocks on the engine and
-  /// unpacks the estimates into the grid. Covers BOTH the standard blocks and the tail block
-  /// (or a whole hop narrower than block_prb): with the engine ready, no hop block ever runs
-  /// the CPU reference math. The caller must have filled w_r_pp / w_r_hp via
-  /// build_correlation_matrices(b_prb ...) beforehand; the pilot view must stay alive.
+  /// Destination strides of one staged engine batch, in elements. The block geometry of a group
+  /// (nout / L, from build_correlation_matrices) may be smaller than its slots: the merged
+  /// standard + tail batch gives the tail block the standard strides and pads its matrix to a
+  /// block diagonal, so one engine call covers both geometries.
+  struct engine_strides {
+    unsigned L     = 0; ///< Pilot-count stride (Ls) of the slots.
+    unsigned nout  = 0; ///< Block-output stride (Ns) of the slots.
+    unsigned n_blk = 0; ///< Blocks per system in this batch.
+  };
+
+  /// \brief Stages one group of layers (systems [sys_offset, sys_offset + nof_layers)) into the
+  /// engine slots: A (or A^-1 when \c gpu_invert is false), R_hp and the pilot vectors of the
+  /// blocks [gb_start, gb_start + n_blk). The caller must have filled w_r_pp / w_r_hp via
+  /// build_correlation_matrices(b_prb ...) beforehand and must keep the pilot view alive.
   ///
-  /// \param matrix Selects the metal_nn_mmse simdgroup path (zero-padded staging + run_nn)
-  ///               vs the legacy kernels (run_weights_only).
+  /// Oversized slots (Ls > L) hold A padded to blockdiag(A, I) when K1 inverts it in place, and
+  /// R_hp padded with zero rows/columns, so the pad columns of W come out exactly zero and the
+  /// real entries keep the values of the unpadded system.
+  ///
+  /// \param matrix Selects the quad-packed pilot matrix (run_nn staging) over the per-block
+  ///               real/imag interleaved vectors (legacy kernels).
   /// \param npt    Number of DM-RS symbols of the hop (the block pilot count is
   ///               L = npt x b_prb x 6 for the type-1 comb-2 pattern used here).
+  void stage_engine_group(const fd_td_estimation_stage_args& args,
+                          unsigned                           gb_start,
+                          unsigned                           n_blk,
+                          unsigned                           b_prb,
+                          unsigned                           npt,
+                          unsigned                           nout,
+                          unsigned                           L,
+                          unsigned                           sys_offset,
+                          const engine_strides&              st,
+                          bool                               matrix,
+                          bool                               gpu_invert);
+
+  /// \brief One engine call (one command buffer, one commit/wait) over the staged slots.
+  /// \return False when the engine call failed (wrap/commit error), in which case the caller MUST
+  ///         fall back to the CPU reference math for these blocks (S-1 audit fix: the return value
+  ///         was previously ignored, which could silently leave stale channel estimates in the
+  ///         grid).
+  bool engine_run(unsigned nout, unsigned L, unsigned nof_systems, unsigned nof_blocks, bool matrix, bool gpu_invert);
+
+  /// \brief Unpacks the engine outputs of the group staged at \c sys_offset into the grid
+  /// (symbol-major within each block; the blocks start at PRB gb_start).
+  void unpack_engine_group(unsigned              gb_start,
+                           unsigned              n_blk,
+                           unsigned              b_prb,
+                           unsigned              nout,
+                           unsigned              nof_layers,
+                           unsigned              sys_offset,
+                           const engine_strides& st);
+
+  /// \brief Runs one GPU batch over n_blk equal-width (b_prb PRB) blocks on the engine and
+  /// unpacks the estimates into the grid - the staging, the call and the unpack of a single-group
+  /// batch. Covers the standard blocks, the tail block and a whole hop narrower than block_prb:
+  /// with the engine ready, no hop block ever runs the CPU reference math.
   /// \return True when the engine processed and unpacked the batch; false when the engine call
-  ///         failed (wrap/commit error), in which case the caller MUST fall back to the CPU
-  ///         reference math for these blocks (S-1 audit fix: the return value was previously
-  ///         ignored, which could silently leave stale channel estimates in the grid).
+  ///         failed, in which case the caller MUST fall back to the CPU reference math.
   bool run_engine_blocks(const fd_td_estimation_stage_args& args,
                          unsigned                           gb_start,
                          unsigned                           n_blk,
@@ -150,6 +199,10 @@ private:
   /// Whether the last fd/td estimation stage engaged the simdgroup 8x8 kernels
   /// (diagnostics/A-B observability; see nn_engaged_last()).
   bool last_stage_nn = false;
+
+  /// Whether the last fd/td estimation stage merged the tail block into the standard batch
+  /// (diagnostics/A-B observability; see merged_batch_last()).
+  bool last_stage_merged = false;
 
   /// Maximum number of full blocks per slot for the configured block size.
   unsigned max_blocks;
