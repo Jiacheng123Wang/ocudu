@@ -374,6 +374,9 @@ bool dft_metal_engine::wait_slot(unsigned slot)
   id<MTLCommandBuffer> cmd_buf = engine->slot_cb[slot];
   engine->slot_pending[slot]   = false;
   engine->slot_cb[slot]        = nil;
+  // Account for the slot wait so [metal_stats] reports the real in-flight depth (the ring keeps
+  // up to `pipeline depth` transforms in flight instead of one).
+  dft_stats_wait();
   [cmd_buf waitUntilCompleted];
   if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
     ocudulog::fetch_basic_logger("PHY").error("Metal DFT: slot {} command buffer failed with status {}",
