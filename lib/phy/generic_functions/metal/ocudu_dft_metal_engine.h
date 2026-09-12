@@ -70,6 +70,13 @@ public:
   /// \return True when the dispatch was encoded and committed.
   bool submit_slot(const void* in, void* out, unsigned slot);
 
+  /// \brief Waits for the transform submitted in \c slot (no-op when nothing is pending there).
+  ///
+  /// Unlike wait_all(), this only waits for that slot's command buffer, so a pipelined caller that
+  /// keeps several transforms in flight does not stall on the newest submission.
+  /// \return False when the slot's command buffer failed.
+  bool wait_slot(unsigned slot);
+
   /// \brief Waits for every command buffer committed through the shared Metal queue.
   ///
   /// Command buffers of the shared queue complete in submission order, so this drains every

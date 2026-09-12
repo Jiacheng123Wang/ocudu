@@ -120,6 +120,11 @@ NSString* resolve_dft_metallib_path()
 static constexpr unsigned max_batch_slots = 16;
 
 struct dft_engine_impl {
+  id<MTLCommandBuffer> last_committed_cb = nil; // newest commit (ring bookkeeping)
+  /// Command buffer of the newest submission per transform slot (ring pipelining).
+  id<MTLCommandBuffer> slot_cb[max_batch_slots <= 16 ? 16 : max_batch_slots] = {};
+  bool                 slot_pending[16]                                  = {};
+
   uint32_t n       = 0;
   uint32_t radix2  = 0; // number of radix-2 stages (k in N = 2^k * 3^m)
   uint32_t radix3  = 0; // number of radix-3 stages (m)
@@ -346,7 +351,40 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
 
 bool dft_metal_engine::submit_slot(const void* in, void* out, unsigned slot)
 {
-  return submit_at(in, out, 1, slot, false);
+  if (slot >= max_batch_slots) {
+    return false;
+  }
+  bool ok = submit_at(in, out, 1, slot, false);
+  if (ok) {
+    // Remember the slot's command buffer so a pipelined caller can wait for this transform only
+    // (wait_all() would also wait for the newer submissions and flatten the pipeline).
+    dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
+    engine->slot_cb[slot]   = engine->last_committed_cb;
+    engine->slot_pending[slot] = true;
+  }
+  return ok;
+}
+
+bool dft_metal_engine::wait_slot(unsigned slot)
+{
+  dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
+  if ((engine == nullptr) || (slot >= max_batch_slots) || !engine->slot_pending[slot]) {
+    return true;
+  }
+  id<MTLCommandBuffer> cmd_buf = engine->slot_cb[slot];
+  engine->slot_pending[slot]   = false;
+  engine->slot_cb[slot]        = nil;
+  [cmd_buf waitUntilCompleted];
+  if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
+    ocudulog::fetch_basic_logger("PHY").error("Metal DFT: slot {} command buffer failed with status {}",
+                                              slot,
+                                              static_cast<unsigned long>(cmd_buf.status));
+    return false;
+  }
+  if (cmd_buf.GPUStartTime > 0.0 && cmd_buf.GPUEndTime > 0.0) {
+    engine->last_gpu_us = (cmd_buf.GPUEndTime - cmd_buf.GPUStartTime) * 1e6;
+  }
+  return true;
 }
 
 bool dft_metal_engine::wait_all()
@@ -393,6 +431,7 @@ bool dft_metal_engine::submit_at(
   // Publish the commit on the shared queue so wait_all_committed() and the consumer stages can
   // synchronize with it (the engines share one queue, so ordering is global).
   metal::shared_queue::notify_commit(cmd_buf);
+  engine->last_committed_cb = cmd_buf;
   if (!wait_for_completion) {
     return true;
   }

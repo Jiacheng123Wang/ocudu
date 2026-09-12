@@ -38,6 +38,20 @@ public:
   }
 
   // See the interface for documentation.
+  unsigned get_pipeline_depth() const override { return base->get_pipeline_depth(); }
+
+  // See the interface for documentation.
+  void
+  submit_symbol(span<const ci16_t> input, unsigned port_index, unsigned symbol_index, unsigned slot) override
+  {
+    forward_center_frequency();
+    base->submit_symbol(input, port_index, symbol_index, slot);
+  }
+
+  // See the interface for documentation.
+  void finish_symbol(resource_grid_writer& grid, unsigned slot) override { base->finish_symbol(grid, slot); }
+
+  // See the interface for documentation.
   void
   demodulate(resource_grid_writer& grid, span<const ci16_t> input, unsigned port_index, unsigned symbol_index) override
   {
@@ -48,15 +62,23 @@ public:
       return;
     }
 
-    double current_center_frequency_Hz = center_frequency_Hz.load(std::memory_order_relaxed);
-    if (std::isnormal(current_center_frequency_Hz)) {
-      demodulator->set_center_frequency(current_center_frequency_Hz);
-    }
+    forward_center_frequency(*demodulator);
 
     demodulator->demodulate(grid, input, port_index, symbol_index);
   }
 
 private:
+  /// Forwards the pending center frequency (if any) to the given demodulator instance.
+  void forward_center_frequency(ofdm_symbol_demodulator& demodulator) const
+  {
+    double current_center_frequency_Hz = center_frequency_Hz.load(std::memory_order_relaxed);
+    if (std::isnormal(current_center_frequency_Hz)) {
+      demodulator.set_center_frequency(current_center_frequency_Hz);
+    }
+  }
+
+  void forward_center_frequency() const { forward_center_frequency(*base); }
+
   std::atomic<double>                      center_frequency_Hz = {};
   ocudulog::basic_logger&                  logger;
   std::unique_ptr<ofdm_symbol_demodulator> base;

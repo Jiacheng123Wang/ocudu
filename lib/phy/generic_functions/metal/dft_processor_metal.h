@@ -76,9 +76,14 @@ public:
   // See interface for documentation.
   void wait() override { (void)metal::dft_metal_engine::wait_all(); }
 
-  /// View of the whole output batch buffer (max_batch transforms), as filled by the asynchronous
-  /// run_async(slot) path. Valid only after wait().
-  span<const cf_t> get_output_batch() const { return {output.get(), static_cast<size_t>(cfg.size) * max_batch}; }
+  // See interface for documentation.
+  void wait_slot(unsigned slot) override { (void)engine->wait_slot(slot); }
+
+  // See interface for documentation.
+  span<const cf_t> get_output_batch() override
+  {
+    return {output.get(), static_cast<size_t>(cfg.size) * max_batch};
+  }
 
   /// GPU-side duration of the last transform in microseconds (0 when unavailable).
   double engine_gpu_wait_us() const { return engine != nullptr ? engine->last_gpu_wait_us() : 0.0; }

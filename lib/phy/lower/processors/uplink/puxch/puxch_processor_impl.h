@@ -6,9 +6,12 @@
 
 #include "../../resource_request_pool.h"
 #include "ocudu/adt/circular_array.h"
+#include "ocudu/phy/lower/lower_phy_rx_symbol_context.h"
 #include "ocudu/phy/lower/modulation/ofdm_demodulator.h"
 #include "ocudu/phy/lower/processors/lower_phy_center_freq_controller.h"
 #include "ocudu/phy/lower/processors/uplink/puxch/puxch_processor.h"
+
+#include <array>
 #include "ocudu/phy/lower/processors/uplink/puxch/puxch_processor_baseband.h"
 #include "ocudu/phy/lower/processors/uplink/puxch/puxch_processor_notifier.h"
 #include "ocudu/phy/lower/processors/uplink/puxch/puxch_processor_request_handler.h"
@@ -64,6 +67,21 @@ private:
   // See interface for documentation.
   bool set_carrier_center_frequency(double carrier_center_frequency_Hz) override;
 
+  /// rief One symbol whose DFT is still in flight (submitted but not post-processed yet).
+  struct in_flight_symbol {
+    lower_phy_rx_symbol_context context;
+    unsigned                    slot = 0;
+  };
+
+  /// Maximum number of in-flight symbols tracked by the pipeline bookkeeping.
+  static constexpr unsigned max_in_flight_symbols = 16;
+
+  /// rief Waits for the oldest in-flight symbol, writes it into the grid and reports it.
+  void finish_oldest_symbol();
+
+  /// rief Finishes every in-flight symbol (used at the end of a slot and on slot changes).
+  void drain_pipeline();
+
   std::atomic<bool>                           stopped = false;
   unsigned                                    nof_symbols_per_slot;
   unsigned                                    nof_rx_ports;
@@ -71,6 +89,14 @@ private:
   std::unique_ptr<ofdm_symbol_demodulator>    demodulator;
   slot_point                                  current_slot;
   shared_resource_grid                        current_grid;
+
+  // Pipelined demodulation bookkeeping: a FIFO of the symbols whose DFT was submitted but not yet
+  // post-processed. The ring position of each submission advances monotonically, so a slot is
+  // reused exactly when its transform is finished (depth submissions later).
+  std::array<in_flight_symbol, max_in_flight_symbols> in_flight = {};
+  unsigned                                            in_flight_begin  = 0;
+  unsigned                                            nof_in_flight    = 0;
+  unsigned                                            next_pipeline_slot = 0;
   resource_request_pool<shared_resource_grid> requests;
 };
 

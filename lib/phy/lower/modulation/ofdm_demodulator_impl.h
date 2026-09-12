@@ -7,6 +7,7 @@
 #include "phase_compensation_lut.h"
 #include "ocudu/phy/generic_functions/dft_processor.h"
 #include "ocudu/phy/lower/modulation/ofdm_demodulator.h"
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -48,6 +49,17 @@ class ofdm_symbol_demodulator_impl : public ofdm_symbol_demodulator
   /// DFT window offset phase compensation.
   std::vector<cf_t> window_phase_compensation;
 
+  /// Maximum number of symbols kept in flight by the pipelined path.
+  static constexpr unsigned max_pipeline_depth = 8;
+
+  /// Symbol carried by each in-flight DFT slot.
+  struct pipeline_entry {
+    unsigned port_index   = 0;
+    unsigned symbol_index = 0;
+    bool     valid        = false;
+  };
+  std::array<pipeline_entry, max_pipeline_depth> pipeline_slots = {};
+
 public:
   /// \brief Constructs an OFDM symbol demodulator.
   /// \param[in] ofdm_config  Provides generic OFDM configuration parameters.
@@ -80,6 +92,21 @@ public:
   // See interface for documentation.
   void
   demodulate(resource_grid_writer& grid, span<const ci16_t> input, unsigned port_index, unsigned symbol_index) override;
+
+  /// \brief Pipeline depth: how many symbols can be in flight (1 = synchronous per-symbol path).
+  ///
+  /// The per-symbol DFT of the RX chain costs a command buffer round trip, so the puxch now submits
+  /// the transforms without waiting and post-processes them with a lag: the FFTs of the in-flight
+  /// symbols overlap with the radio while the grid content of a symbol is still written before that
+  /// symbol is reported to the upper PHY. The depth is bounded by the DFT ring capacity and by
+  /// \c max_pipeline_depth (a deeper ring delays the symbol reports further).
+  unsigned get_pipeline_depth() const override;
+
+  /// \brief Fills DFT slot \c slot with one symbol and submits it without waiting.
+  void submit_symbol(span<const ci16_t> input, unsigned port_index, unsigned symbol_index, unsigned slot) override;
+
+  /// \brief Waits for DFT slot \c slot and writes the symbol it carries into the grid.
+  void finish_symbol(resource_grid_writer& grid, unsigned slot) override;
 
   /// \brief Demodulates the symbols of a batch with a single DFT dispatch when the DFT processor
   /// supports batching, otherwise symbol by symbol (see the interface documentation).

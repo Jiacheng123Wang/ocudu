@@ -86,6 +86,30 @@ public:
   /// \param[in]  port_index Indicates the port index to demodulate.
   /// \param[in]  first_symbol_index Symbol index within the subframe of the first symbol of the batch.
   /// \param[in]  nof_symbols Number of consecutive symbols to demodulate.
+  /// \brief Number of symbols that can be demodulated concurrently (1 = no pipeline).
+  ///
+  /// The pipeline lets the caller submit the transforms of the in-flight symbols and post-process
+  /// them with a lag, so the FFTs overlap with the radio while the grid content of a symbol is
+  /// still written before that symbol is reported.
+  virtual unsigned get_pipeline_depth() const { return 1; }
+
+  /// \brief Fills the transform slot \c slot with one symbol and submits it without waiting.
+  ///
+  /// Only valid when get_pipeline_depth() > 1. The caller must call finish_symbol() for the same
+  /// slot before reusing it.
+  virtual void
+  submit_symbol(span<const ci16_t> input, unsigned port_index, unsigned symbol_index, unsigned slot)
+  {
+    // Without a pipeline (get_pipeline_depth() == 1) the caller uses demodulate() instead.
+    (void)input;
+    (void)port_index;
+    (void)symbol_index;
+    (void)slot;
+  }
+
+  /// \brief Waits for the transform submitted in \c slot and writes its symbol into the grid.
+  virtual void finish_symbol(resource_grid_writer& grid, unsigned slot) { (void)grid; (void)slot; }
+
   virtual void demodulate_batch(resource_grid_writer& grid,
                                 span<const ci16_t>    input,
                                 unsigned              port_index,

@@ -119,6 +119,18 @@ public:
   /// every earlier submission of every stage sharing the queue, not only this processor's.
   virtual void wait() {}
 
+  /// \brief Waits for the transform submitted in \c slot.
+  ///
+  /// Releases the caller's input slot for reuse without stalling on newer submissions, which is
+  /// what a ring pipeline needs (wait() would also cover the newest one).
+  virtual void wait_slot(unsigned slot) { (void)slot; }
+
+  /// \brief View of the ring outputs: get_max_batch() * get_size() complex samples.
+  ///
+  /// Empty for processors without an asynchronous path. Valid after the corresponding
+  /// wait_slot()/wait().
+  virtual span<const cf_t> get_output_batch() { return {}; }
+
   virtual span<const cf_t> run_batch(unsigned nof_transforms)
   {
     ocudu_assert(nof_transforms == 1, "Batched DFT is not supported by this processor (requested {} transforms).",

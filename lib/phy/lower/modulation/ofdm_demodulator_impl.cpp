@@ -11,6 +11,8 @@
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/ran/subcarrier_spacing.h"
 #include "ocudu/support/error_handling.h"
+#include <algorithm>
+#include <cstdlib>
 
 using namespace ocudu;
 
@@ -150,6 +152,42 @@ void ofdm_symbol_demodulator_impl::demodulate(resource_grid_writer& grid,
 // allocations or UEs of one cell share one per-symbol transform and need no batching.
 // TODO(multi-port/multi-carrier): batch the ports of one symbol first (no added latency), then the
 // same symbol of several carriers once multiple cells are driven from one place.
+unsigned ofdm_symbol_demodulator_impl::get_pipeline_depth() const
+{
+  // Debug probe (documented in the plan): OCUDU_DFT_PIPELINE_DEPTH overrides the depth so a
+  // suspicious RX regression can be bisected between the pipelined path (depth > 1) and the
+  // original synchronous per-symbol path (depth = 1) without rebuilding.
+  static const unsigned debug_depth = []() {
+    const char* env = std::getenv("OCUDU_DFT_PIPELINE_DEPTH");
+    return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : max_pipeline_depth;
+  }();
+
+  // Only as deep as the DFT ring and the configured bound; 1 keeps the synchronous per-symbol path.
+  return std::min({dft->get_max_batch(), max_pipeline_depth, std::max(1U, debug_depth)});
+}
+
+void ofdm_symbol_demodulator_impl::submit_symbol(span<const ci16_t> input,
+                                                 unsigned          port_index,
+                                                 unsigned          symbol_index,
+                                                 unsigned          slot)
+{
+  ocudu_assert(slot < max_pipeline_depth, "Invalid pipeline slot {}.", slot);
+  fill_dft_input(dft->get_input().subspan(static_cast<size_t>(slot) * dft_size, dft_size), input, symbol_index);
+  dft->run_async(slot);
+  pipeline_slots[slot] = {.port_index = port_index, .symbol_index = symbol_index, .valid = true};
+}
+
+void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, unsigned slot)
+{
+  ocudu_assert(slot < max_pipeline_depth, "Invalid pipeline slot {}.", slot);
+  ocudu_assert(pipeline_slots[slot].valid, "Pipeline slot {} holds no symbol.", slot);
+  dft->wait_slot(slot);
+  span<const cf_t> dft_output =
+      dft->get_output_batch().subspan(static_cast<size_t>(slot) * dft_size, dft_size);
+  process_dft_output(grid, dft_output, pipeline_slots[slot].port_index, pipeline_slots[slot].symbol_index);
+  pipeline_slots[slot].valid = false;
+}
+
 void ofdm_symbol_demodulator_impl::demodulate_batch(resource_grid_writer& grid,
                                                     span<const ci16_t>    input,
                                                     unsigned              port_index,
