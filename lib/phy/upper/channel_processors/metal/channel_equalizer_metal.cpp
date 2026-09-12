@@ -6,6 +6,7 @@
 #include "ocudu/adt/bf16.h"
 #include "ocudu/ocuduvec/fill.h"
 #include "ocudu/ocuduvec/zero.h"
+#include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/macos_compat.h"
 #include "ocudu/support/ocudu_assert.h"
 #include <algorithm>
@@ -33,6 +34,9 @@ struct channel_equalizer_metal::impl {
   metal::equalizer_metal_engine engine;
   bool                           engine_ok = false;
   bool                           mmse      = false;
+
+  // One-shot diagnostic: reports whether the caller's buffers allow the in-place path.
+  bool path_logged = false;
 
   // Staging buffers (page-aligned, grown on demand and reused across calls).
   void* h_buf      = nullptr;
@@ -162,6 +166,16 @@ void channel_equalizer_metal::equalize(span<cf_t>                       eq_symbo
                                      : impl::ensure(impl_->eq_buf, impl_->eq_cap, eq_bytes);
   void*        nv_ptr    = nv_direct ? static_cast<void*>(eq_noise_vars.data())
                                      : impl::ensure(impl_->nv_buf, impl_->nv_cap, nv_bytes);
+
+  if (!impl_->path_logged) {
+    impl_->path_logged = true;
+    ocudulog::fetch_basic_logger("PHY").debug(
+        "Metal equalizer: outputs {} (eq {} nv {}), inputs staged as cbf16 ({} bytes/call)",
+        (eq_direct && nv_direct) ? "written in place (zero copy)" : "written to staging and copied back",
+        eq_direct ? "direct" : "staged",
+        nv_direct ? "direct" : "staged",
+        h_bytes + y_bytes);
+  }
 
   for (unsigned i_used = 0; i_used != nof_used_ports; ++i_used) {
     const unsigned i_port = port_map[i_used];

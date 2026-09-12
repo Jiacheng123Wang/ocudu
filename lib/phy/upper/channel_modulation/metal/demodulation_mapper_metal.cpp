@@ -4,6 +4,7 @@
 #include "demodulation_mapper_metal.h"
 #include "ocudu_demod_metal_engine.h"
 #include "ocudu/ran/sch/modulation_scheme.h"
+#include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/macos_compat.h"
 #include "ocudu/support/ocudu_assert.h"
 #include <cstdint>
@@ -25,7 +26,8 @@ bool is_page_aligned_buffer(const void* ptr)
 
 struct demodulation_mapper_metal::impl {
   metal::demod_metal_engine engine;
-  bool                      engine_ok = false;
+  bool                      engine_ok   = false;
+  bool                      path_logged = false;
 
   // Staging buffers (page-aligned, grown on demand and reused across calls).
   void*  sym_buf = nullptr;
@@ -118,6 +120,15 @@ void demodulation_mapper_metal::demodulate_soft(span<log_likelihood_ratio> llrs,
                                   : impl::ensure(impl_->nv_buf, impl_->nv_cap, nv_bytes);
   // The LLR destination is the UL-SCH demultiplexer buffer (not page aligned): stage it.
   auto* llr_ptr = static_cast<int8_t*>(impl::ensure(impl_->llr_buf, impl_->llr_cap, llr_bytes));
+
+  if (!impl_->path_logged) {
+    impl_->path_logged = true;
+    ocudulog::fetch_basic_logger("PHY").debug(
+        "Metal demapper: inputs {} (symbols {} noise {}), LLRs staged",
+        (sym_direct && nv_direct) ? "read in place (zero copy)" : "staged",
+        sym_direct ? "direct" : "staged",
+        nv_direct ? "direct" : "staged");
+  }
 
   if (!sym_direct) {
     std::memcpy(const_cast<void*>(sym_ptr), symbols.data(), sym_bytes);
