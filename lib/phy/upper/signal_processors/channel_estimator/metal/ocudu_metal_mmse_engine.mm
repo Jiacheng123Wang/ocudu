@@ -218,7 +218,7 @@ bool mmse_engine::init(const char* metallib_path)
   if (e->device == nil) {
     return false;
   }
-  e->queue = metal::shared_queue::queue();
+  e->queue = metal::shared_queue::backend_queue();
   if (e->queue == nil) {
     return false;
   }

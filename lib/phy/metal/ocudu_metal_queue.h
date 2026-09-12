@@ -43,9 +43,20 @@ public:
   /// Returns the process-wide Metal device, or nil when the platform has no Metal device.
   static id<MTLDevice> device();
 
-  /// Returns the process-wide command queue (nil when the device is unavailable or the queue
-  /// could not be created).
+  /// Returns the front-end command queue, used by the asynchronous producers of the RX chain (the
+  /// per-symbol DFTs). nil when the device is unavailable or the queue could not be created.
   static id<MTLCommandQueue> queue();
+
+  /// \brief Returns the back-end command queue, used by the late stages (channel estimator,
+  /// equalizer, demapper, LDPC).
+  ///
+  /// The two queues keep the steadily fed front-end stream (a slot's worth of symbol DFTs submitted
+  /// by the radio thread) from blocking the back-end stages: with one queue the back-end waits
+  /// queue behind the in-flight FFTs and their measured latency exploded. Ordering across the two
+  /// queues is provided by the explicit synchronization points instead of the queue itself - the
+  /// RX chain drains and waits for a slot's DFTs before the grid is consumed, and every back-end
+  /// stage waits for its own command buffer before its output is read on the CPU.
+  static id<MTLCommandQueue> backend_queue();
 
   /// \brief Registers a command buffer committed through the shared queue.
   ///

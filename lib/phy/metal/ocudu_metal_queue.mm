@@ -16,8 +16,9 @@ namespace metal {
 namespace {
 
 struct shared_queue_state {
-  id<MTLDevice>       device = nil;
-  id<MTLCommandQueue> queue  = nil;
+  id<MTLDevice>       device        = nil;
+  id<MTLCommandQueue> queue         = nil;
+  id<MTLCommandQueue> backend_queue = nil;
 
   std::mutex                       mutex;
   id<MTLCommandBuffer>             last_committed = nil; // newest commit of the pending chain
@@ -52,6 +53,10 @@ id<MTLDevice> shared_queue::device()
     if (s.queue == nil) {
       ocudulog::fetch_basic_logger("PHY").error("Metal: command queue creation failed");
     }
+    s.backend_queue = [s.device newCommandQueue];
+    if (s.backend_queue == nil) {
+      ocudulog::fetch_basic_logger("PHY").error("Metal: back-end command queue creation failed");
+    }
   });
   return state().device;
 }
@@ -60,6 +65,12 @@ id<MTLCommandQueue> shared_queue::queue()
 {
   (void)device(); // ensures the device and queue are initialized
   return state().queue;
+}
+
+id<MTLCommandQueue> shared_queue::backend_queue()
+{
+  (void)device(); // ensures the device and queues are initialized
+  return state().backend_queue;
 }
 
 void shared_queue::notify_commit(id<MTLCommandBuffer> command_buffer)

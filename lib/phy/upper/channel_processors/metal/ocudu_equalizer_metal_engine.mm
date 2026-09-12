@@ -198,7 +198,7 @@ bool equalizer_metal_engine::init()
       ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: no Metal device available");
       return false;
     }
-    res.queue = metal::shared_queue::queue();
+    res.queue = metal::shared_queue::backend_queue();
     NSString* lib_path = resolve_eq_metallib_path();
     if (lib_path == nil) {
       ocudulog::fetch_basic_logger("PHY").error(

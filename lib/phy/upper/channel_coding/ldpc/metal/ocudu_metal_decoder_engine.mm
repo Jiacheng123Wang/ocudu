@@ -295,7 +295,7 @@ algo_resources_t* get_algo_resources(decoder_engine::algo mode)
     ocudulog::fetch_basic_logger("PHY").error("Metal LDPC: no Metal device available");
     return nullptr;
   }
-  res.queue = metal::shared_queue::queue();
+  res.queue = metal::shared_queue::backend_queue();
 
   // Pre-compiled shader library per algorithm family (offline xcrun
   // metal/metallib, one .metallib per .metal source): loaded directly, so

@@ -184,7 +184,7 @@ bool demod_metal_engine::init()
       ocudulog::fetch_basic_logger("PHY").error("Metal demapper: no Metal device available");
       return false;
     }
-    res.queue = metal::shared_queue::queue();
+    res.queue = metal::shared_queue::backend_queue();
     NSString* lib_path = resolve_demod_metallib_path();
     if (lib_path == nil) {
       ocudulog::fetch_basic_logger("PHY").error(
