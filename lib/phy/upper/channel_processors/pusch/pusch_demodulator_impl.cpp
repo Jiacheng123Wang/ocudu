@@ -6,6 +6,7 @@
 /// \brief PUSCH demodulator implementation definition.
 
 #include "pusch_demodulator_impl.h"
+#include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/simd.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_codeword_buffer.h"
@@ -319,6 +320,24 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
     return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : max_deferred_group_symbols;
   }();
   const unsigned group_size = deferred_chain ? std::clamp(deferred_group_size, 1U, max_deferred_group_symbols) : 1;
+
+  // One-shot routing diagnostic: the effective chain and, when it is the synchronous one, which
+  // condition disabled it. It makes every run self-describing instead of relying on the shape of
+  // the Metal commit/wait counters.
+  static const bool routing_logged = [&]() {
+    if (deferred_chain) {
+      ocudulog::fetch_basic_logger("PHY").info("PUSCH: deferred chain enabled (group of {} OFDM symbols)", group_size);
+    } else {
+      ocudulog::fetch_basic_logger("PHY").info(
+          "PUSCH: synchronous chain (forced {}, equalizer {}, demapper {}, transform precoding {})",
+          force_serial,
+          equalizer->supports_deferred_chain(),
+          demapper->supports_deferred_chain(),
+          config.enable_transform_precoding);
+    }
+    return true;
+  }();
+  (void)routing_logged;
 
   // Per-symbol data and stats of one group.
   struct symbol_state {
