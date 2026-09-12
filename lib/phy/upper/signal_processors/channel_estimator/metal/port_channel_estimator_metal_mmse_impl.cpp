@@ -243,13 +243,12 @@ float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estima
   tmp_lse.assign(tmp_lse_enlarged, MAX_V_PILOTS, nof_symbol_pilots);
   tmp_filtered.assign(tmp_filtered_enlarged, MAX_V_PILOTS, nof_symbol_pilots);
 
-  // The caller has already applied the DM-RS to data scaling (1 / beta) to the LSE pilots, exactly
-  // like the classical FD stage, so here they only need smoothing. estimate_noise() reconstructs
-  // the received (unscaled) pilots from this buffer and beta, and returns the residual in the
-  // received domain.
+  // Copy and scale the LSE pilots the same way the classical FD stage does (1 / beta).
+  const float total_scaling = 1.0F / args.beta_scaling;
   for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
     for (unsigned i_symbol = 0; i_symbol != nof_dmrs_symbols; ++i_symbol) {
       ocuduvec::copy(tmp_lse.get_symbol(i_symbol, i_layer), args.pilots_lse_view.get_symbol(i_symbol, i_layer));
+      ocuduvec::sc_prod(tmp_lse.get_symbol(i_symbol, i_layer), tmp_lse.get_symbol(i_symbol, i_layer), total_scaling);
       apply_fd_smoothing(tmp_filtered_enlarged.get_symbol(i_symbol, i_layer),
                          tmp_lse_enlarged.get_symbol(i_symbol, i_layer),
                          nof_prb,
@@ -311,12 +310,7 @@ void port_channel_estimator_metal_mmse_impl::build_correlation_matrices(
   const float ts     = 1.0F / (scs_hz * MAX_NSYMB_PER_SLOT);
   const float ridge  = 1e-6F;
 
-  // --- A = R_pp + sigma2_rel I + ridge I = kron(R_t_pp, R_f_pp) + (sigma2_rel + ridge) I ---
-  // R_pp is the correlation of unit-power pilots (its diagonal is one), while the pilots the
-  // weights are applied to carry the received power. The diagonal loading must therefore be the
-  // noise-to-pilot-power RATIO: with an absolute noise power the regularization follows the radio
-  // gain, and away from the nominal level the weights are under-regularized and blow up (the
-  // channel estimates and the reported noise variance explode) or over-smooth the channel.
+  // --- A = R_pp + sigma2 I + ridge I = kron(R_t_pp, R_f_pp) + (sigma2 + ridge) I ---
   std::fill(a_out.begin(), a_out.begin() + L * L, 0.0F);
   for (unsigned t1 = 0; t1 != npt; ++t1) {
     for (unsigned t2 = 0; t2 != npt; ++t2) {
@@ -420,52 +414,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   using steady_clock = std::chrono::steady_clock;
   const auto t_begin = steady_clock::now();
 
-  // Mean power of the received DM-RS pilots, measured BEFORE the DM-RS to data scaling below: the
-  // classical noise estimator returns the residual in the received domain, so this is its
-  // reference for the noise-to-signal ratio.
-  float pilots_power = 0.0F;
-  {
-    size_t nof_pilots = 0;
-    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-      for (unsigned i_symbol = 0; i_symbol != args.nof_dmrs_symbols; ++i_symbol) {
-        span<const cf_t> sym = args.pilots_lse_view.get_symbol(i_symbol, i_layer);
-        for (const cf_t& x : sym) {
-          pilots_power += std::norm(x);
-        }
-        nof_pilots += sym.size();
-      }
-    }
-    pilots_power = (nof_pilots == 0) ? 0.0F : pilots_power / static_cast<float>(nof_pilots);
-  }
-
-  // Mirror the classical FD stage: scale the least-squares pilots by 1 / beta so that the estimator
-  // produces the DATA-domain channel (the domain the equalizer and the demapper expect). Skipping
-  // this made every channel estimate 1 / beta too small whenever the PUSCH processor sets a
-  // scaling other than one - which it always does in a real cell (0.708 for two CDM groups
-  // without data) and never does in the lab tests.
-  const float inv_beta = 1.0F / args.beta_scaling;
-  for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-    for (unsigned i_symbol = 0; i_symbol != args.nof_dmrs_symbols; ++i_symbol) {
-      span<cf_t> sym = args.pilots_lse_view.get_symbol(i_symbol, i_layer);
-      ocuduvec::sc_prod(sym, sym, inv_beta);
-    }
-  }
-
   // Classical noise variance (reuses the existing noise estimator).
   const float sigma2 = estimate_sigma2(args);
-  const float sigma2_rel   = sigma2 / std::max(pilots_power, 1e-30F);
-  // Rate-limited diagnostic (OCUDU_CE_DEBUG=1): an absolute sigma2 makes the MMSE weights - and
-  // with them the channel estimates and the equalizer's noise variance that scales the soft bits -
-  // follow the input level instead of the SNR. One line every 1000 hops.
-  if (std::getenv("OCUDU_CE_DEBUG") != nullptr) {
-    static std::atomic<uint32_t> debug_counter{0};
-    if ((debug_counter.fetch_add(1, std::memory_order_relaxed) % 1000U) == 0U) {
-      std::fprintf(stderr, "[ce_debug] pilots_power=%.6e sigma2=%.6e sigma2_rel=%.6e\n",
-                   static_cast<double>(pilots_power),
-                   static_cast<double>(sigma2),
-                   static_cast<double>(sigma2_rel));
-    }
-  }
   const auto  t_sigma2 = steady_clock::now();
 
   // Estimated full grid and classical frequency-response buffers.
@@ -481,7 +431,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // Assemble the statistics input (v1: the same statistics for every layer; per-layer
   // statistics arrive with the v2 estimation-backed provider).
   channel_statistics_input stats_in{};
-  stats_in.sigma2            = sigma2_rel;
+  stats_in.sigma2            = sigma2;
   stats_in.nof_symbol_pilots = args.nof_symbol_pilots;
   stats_in.nof_dmrs_symbols  = args.nof_dmrs_symbols;
   stats_in.scs               = args.scs;
@@ -493,8 +443,6 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                    args.pilots_lse_view.get_symbol(i_symbol, 0));
   }
   stats_in.pilots_lse = pilots_span;
-  // \note \c stats_in.sigma2 carries the noise-to-pilot-power ratio, not an absolute power: see
-  // build_correlation_matrices().
   const channel_statistics stats = stats_estimator->estimate(stats_in);
 
   // Weight matrices of the standard blocks (shared by all layers in v1).
@@ -665,13 +613,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 
   const auto t_cpu_end = steady_clock::now();
 
-  // Fill the filtered-pilots buffer (the estimated pilot REs) for RSrp / noise / TA, and the
+  // Fill the filtered-pilots buffer (pilot REs scaled by 1 / beta) for RSrp / noise / TA, and the
   // classical frequency response with the DM-RS symbol slices of the grid.
-  //
-  // No extra 1/beta here: the classical stage smooths the LSE pilots it already scaled by 1/beta,
-  // and the grid below is the estimate of that same (data-domain) quantity, so both buffers are in
-  // the domain estimate_noise() expects. Scaling again by 1/beta inflated RSrp by 1/beta^2 and the
-  // noise variance by ~1/beta^4 - 17 dB of missing soft bits with the 0.708 of a real cell.
+  const float inv_beta = 1.0F / args.beta_scaling;
   for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
     const auto& re_pattern = args.dmrs_patterns[i_layer].re_pattern;
     for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
@@ -681,7 +625,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       unsigned         j      = 0;
       for (unsigned prb = 0; prb != nof_prb; ++prb) {
         re_pattern.for_each(0, re_pattern.size(), [&](unsigned pos) {
-          dst[j++] = src[prb * NOF_SUBCARRIERS_PER_RB + pos];
+          dst[j++] = src[prb * NOF_SUBCARRIERS_PER_RB + pos] * inv_beta;
         });
       }
     }
