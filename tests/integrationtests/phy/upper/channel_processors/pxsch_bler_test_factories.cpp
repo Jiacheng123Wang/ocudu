@@ -3,6 +3,8 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pxsch_bler_test_factories.h"
+
+#include <cstdlib>
 #include "ocudu/adt/format.h"
 #if defined(HWACC_PDSCH_ENABLED) && defined(HWACC_PUSCH_ENABLED)
 #include "ocudu/hal/dpdk/bbdev/bbdev_acc.h"
@@ -245,8 +247,20 @@ ocudu::create_sw_pusch_processor_factory(task_executor&                         
       (channel_estimator_algo == "metal_mmse") ? port_channel_estimator_algorithm::metal_mmse
       : (channel_estimator_algo == "helena")   ? port_channel_estimator_algorithm::helena
                                                : port_channel_estimator_algorithm::cpu;
+  // The MMSE estimator runs on FIXED channel statistics (an RMS delay spread and a Doppler shift),
+  // which the cell configuration exposes as pusch_channel_estimator_mmse_tau_rms_us / _fd_hz. The
+  // overrides below make this harness sweep them, which is how the model mismatch of a fixed pair
+  // is told apart from a defect in the estimator itself.
+  const float tau_rms_s = []() {
+    const char* env = std::getenv("OCUDU_CE_TAU_RMS_US");
+    return (env != nullptr) ? std::strtof(env, nullptr) * 1e-6F : 0.37e-6F;
+  }();
+  const float fd_hz = []() {
+    const char* env = std::getenv("OCUDU_CE_FD_HZ");
+    return (env != nullptr) ? std::strtof(env, nullptr) : 0.0F;
+  }();
   std::shared_ptr<port_channel_estimator_factory> chan_estimator_factory =
-      create_port_channel_estimator_factory_sw(ta_est_factory, ce_algo);
+      create_port_channel_estimator_factory_sw(ta_est_factory, ce_algo, tau_rms_s, fd_hz);
   report_fatal_error_if_not(chan_estimator_factory, "Failed to create factory.");
 
   // CFO compensation is not necessary if time domain interpolation is enabled.

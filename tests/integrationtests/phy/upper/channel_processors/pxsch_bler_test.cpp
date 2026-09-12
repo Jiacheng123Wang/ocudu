@@ -20,6 +20,7 @@
 #include "ocudu/ran/sch/tbs_calculator.h"
 #include "ocudu/support/executors/task_worker_pool.h"
 #include <condition_variable>
+#include <cstdlib>
 #include <getopt.h>
 #include <mutex>
 #include <random>
@@ -27,14 +28,32 @@
 
 using namespace ocudu;
 
-static constexpr subcarrier_spacing scs                         = subcarrier_spacing::kHz30;
+// The cell shape is overridable so a defect that only exists in one configuration (carrier
+// spacing, number of DM-RS symbols, CDM groups without data) can be bisected without rebuilding.
+static subcarrier_spacing scs = []() {
+  const char* env = std::getenv("OCUDU_BLER_SCS_KHZ");
+  const unsigned khz = (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 30U;
+  return (khz == 15) ? subcarrier_spacing::kHz15 : (khz == 60) ? subcarrier_spacing::kHz60 : subcarrier_spacing::kHz30;
+}();
 static constexpr rnti_t             rnti                        = to_rnti(0x1234);
 static constexpr unsigned           bwp_start_rb                = 0;
 static constexpr unsigned           nof_ofdm_symbols            = 14;
-static const symbol_slot_mask       dmrs_mask                   = {0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0};
+static symbol_slot_mask dmrs_mask = []() {
+  // Default: DM-RS in symbols 2 and 11 (2 DM-RS symbols). OCUDU_BLER_DMRS=3 adds symbol 7, which is
+  // what the E2E cell configures.
+  symbol_slot_mask mask = {0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0};
+  const char*      env  = std::getenv("OCUDU_BLER_DMRS");
+  if ((env != nullptr) && (std::strtoul(env, nullptr, 10) == 3)) {
+    mask.set(7);
+  }
+  return mask;
+}();
 static constexpr unsigned           nof_ldpc_iterations         = 10;
 static constexpr dmrs_config_type   dmrs                        = dmrs_config_type::type1;
-static constexpr unsigned           nof_cdm_groups_without_data = 2;
+static unsigned nof_cdm_groups_without_data = []() {
+  const char* env = std::getenv("OCUDU_BLER_CDM_GROUPS");
+  return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 2U;
+}();
 static constexpr cyclic_prefix      cy_prefix                   = cyclic_prefix::NORMAL;
 static constexpr unsigned           rv                          = 0;
 static constexpr unsigned           n_id                        = 0;
