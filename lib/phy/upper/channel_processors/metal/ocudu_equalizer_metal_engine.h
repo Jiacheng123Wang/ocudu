@@ -106,6 +106,29 @@ public:
                      float       h_scaling);
 
   /// True when the thread-local burst has dispatches encoded but not committed yet.
+  /// \brief Encodes ONE dispatch that equalizes \c nof_symbols symbols of a group whose buffers
+  /// are uniformly strided (the layout the deferred chain allocates). The arithmetic is identical
+  /// to enqueue_burst(), which is dispatched once per symbol.
+  /// \param[in] strides Per-symbol element strides: h and y in cbf16 elements, eq in float2
+  ///            elements, nv in floats.
+  bool enqueue_burst_batch(const void* h,
+                           const void* y,
+                           const void* sigma2,
+                           void*       eq,
+                           void*       nv,
+                           unsigned    nof_re,
+                           unsigned    nof_symbols,
+                           unsigned    h_symbol_stride,
+                           unsigned    y_symbol_stride,
+                           unsigned    eq_symbol_stride,
+                           unsigned    nv_symbol_stride,
+                           unsigned    nof_ports,
+                           unsigned    nof_layers,
+                           bool        mmse,
+                           float       noise_var,
+                           float       tx_scaling,
+                           float       h_scaling);
+
   static bool burst_open();
 
   /// Commits the thread-local burst without waiting.

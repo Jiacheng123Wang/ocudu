@@ -247,3 +247,149 @@ kernel void equalize_mxn(device const ushort2* h [[buffer(0)]], // cbf16 [port][
         }
     }
 }
+
+/// \brief Per-symbol strides of a batched dispatch, in elements of the bound buffers.
+struct equalize_strides {
+    uint nof_symbols;
+    uint h_stride;   // cbf16 elements per symbol
+    uint y_stride;   // cbf16 elements per symbol
+    uint eq_stride;  // float2 elements per symbol
+    uint nv_stride;  // float elements per symbol
+};
+
+/// \brief Batched equalizer: the SAME arithmetic as equalize_mxn(), one thread per (resource
+/// element, OFDM symbol) instead of one dispatch per symbol.
+///
+/// The stages of a deferred group submit one dispatch per symbol today, and a dispatch costs about
+/// 10 us while the work of a 25 PRB symbol is a couple of microseconds, so the dispatch itself is
+/// most of `ul_equalization_demod`. Batching the symbols of a group into a single dispatch removes
+/// that overhead without touching the math: the body below is the one above with the per-symbol
+/// buffers offset by gid.y.
+kernel void equalize_mxn_batch(device const ushort2* h [[buffer(0)]], // cbf16 [symbol][port][layer][re]
+                               device const ushort2* y [[buffer(1)]], // cbf16 [symbol][port][re]
+                               device float2*       eq  [[buffer(2)]], // [symbol][re][layer]
+                               device float*        nv  [[buffer(3)]], // [symbol][re][layer]
+                               constant equalize_params& p [[buffer(4)]],
+                               device const float* sigma2 [[buffer(5)]],
+                               constant equalize_strides& st [[buffer(6)]],
+                               uint2 gid [[thread_position_in_grid]])
+{
+    const uint re  = gid.x;
+    const uint sym = gid.y;
+    if (re >= p.nof_re || sym >= st.nof_symbols) {
+        return;
+    }
+    h += sym * st.h_stride;
+    y += sym * st.y_stride;
+    eq += sym * st.eq_stride;
+    nv += sym * st.nv_stride;
+
+    const uint L = p.nof_layers;
+    const uint P = p.nof_ports;
+
+    float2 H[MAX_PORTS][MAX_LAYERS];
+    for (uint port = 0; port != P; ++port) {
+        for (uint layer = 0; layer != L; ++layer) {
+            H[port][layer] = load_cbf16(h, ((port * L + layer) * p.nof_re) + re) * p.h_scaling;
+        }
+    }
+
+    // ---- Single Tx layer: 1 x P SIMO combiner (CPU equalize_zf_1xn) ----
+    if (L == 1u) {
+        float  ch_mod_sq = 0.0f;
+        float  nvar_acc  = 0.0f;
+        float2 re_out    = float2(0.0f);
+        for (uint port = 0; port != P; ++port) {
+            const float2 hv  = H[port][0];
+            const float  nrm = hv.x * hv.x + hv.y * hv.y;
+            if (nrm < INFINITY) {
+                ch_mod_sq += nrm;
+                nvar_acc += nrm * sigma2[port];
+                const float2 yv = load_cbf16(y, port * p.nof_re + re);
+                re_out += cmul(yv, float2(hv.x, -hv.y));
+            }
+        }
+        const float d = p.tx_scaling * ch_mod_sq;
+        if ((d > 0.0f) && !isinf(d) && !isnan(d)) {
+            const float rcp = 1.0f / d;
+            eq[re] = re_out * rcp;
+            nv[re] = nvar_acc * (rcp * rcp);
+        } else {
+            eq[re] = 0;
+            nv[re] = INFINITY;
+        }
+        return;
+    }
+
+    // Multi-layer path: identical to equalize_mxn().
+    float2 G[MAX_LAYERS][MAX_LAYERS];
+    for (uint i = 0; i != L; ++i) {
+        for (uint j = 0; j != L; ++j) {
+            float2 acc = float2(0.0f);
+            for (uint port = 0; port != P; ++port) {
+                acc += conjmul(H[port][i], H[port][j]);
+            }
+            G[i][j] = acc;
+        }
+    }
+    bool diag_ok = true;
+    if (p.algo == 1u) {
+        for (uint i = 0; i != L; ++i) {
+            diag_ok = diag_ok && (G[i][i].x > 0.0f);
+        }
+        for (uint i = 0; i != L; ++i) {
+            G[i][i].x += p.noise_var;
+        }
+    }
+    float2 aug[MAX_LAYERS][2 * MAX_LAYERS];
+    for (uint i = 0; i != L; ++i) {
+        for (uint j = 0; j != L; ++j) {
+            aug[i][j]     = G[i][j];
+            aug[i][j + L] = (i == j) ? float2(1.0f, 0.0f) : float2(0.0f);
+        }
+    }
+    const uint ok = invert_aug(&aug[0][0], L);
+    float2    Gi[MAX_LAYERS][MAX_LAYERS];
+    for (uint i = 0; i != L; ++i) {
+        for (uint j = 0; j != L; ++j) {
+            Gi[i][j] = aug[i][j + L];
+        }
+    }
+    if (ok != 0u || !diag_ok) {
+        for (uint layer = 0; layer != L; ++layer) {
+            eq[re * L + layer] = 0;
+            nv[re * L + layer] = INFINITY;
+        }
+        return;
+    }
+    float2 W[MAX_PORTS][MAX_LAYERS];
+    for (uint layer = 0; layer != L; ++layer) {
+        for (uint port = 0; port != P; ++port) {
+            float2 acc = float2(0.0f);
+            for (uint k = 0; k != L; ++k) {
+                acc += conjmul(H[port][k], Gi[layer][k]);
+            }
+            W[port][layer] = acc;
+        }
+    }
+    for (uint layer = 0; layer != L; ++layer) {
+        float2 eq_acc = 0;
+        float  corr   = 0.0f;
+        for (uint port = 0; port != P; ++port) {
+            const float2 yv = load_cbf16(y, port * p.nof_re + re);
+            eq_acc += cmul(W[port][layer], yv);
+            if (p.algo == 1u) {
+                const float2 wh = cmul(W[port][layer], H[port][layer]);
+                corr += wh.x;
+            }
+        }
+        if (p.algo == 0u) {
+            eq[re * L + layer] = eq_acc;
+            nv[re * L + layer] = Gi[layer][layer].x * p.noise_var;
+        } else {
+            const float c = 1.0f / corr;
+            eq[re * L + layer] = eq_acc * c;
+            nv[re * L + layer] = c - 1.0f;
+        }
+    }
+}

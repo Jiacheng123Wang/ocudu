@@ -73,9 +73,20 @@ static void eq_stats_wait() {}
 #endif // OCUDU_METAL_STATS
 
 struct eq_resources_t {
-  id<MTLDevice>               device   = nil;
-  id<MTLCommandQueue>         queue    = nil;
-  id<MTLComputePipelineState> pipeline = nil;
+  id<MTLDevice>               device         = nil;
+  id<MTLCommandQueue>         queue          = nil;
+  id<MTLComputePipelineState> pipeline       = nil;
+  id<MTLComputePipelineState> pipeline_batch = nil;
+};
+
+/// Per-symbol element strides handed to equalize_mxn_batch(); must match struct equalize_strides in
+/// the shader source.
+struct eq_strides_t {
+  unsigned nof_symbols;
+  unsigned h_stride;
+  unsigned y_stride;
+  unsigned eq_stride;
+  unsigned nv_stride;
 };
 static eq_resources_t& eq_resources()
 {
@@ -205,6 +216,13 @@ bool equalizer_metal_engine::init()
       return false;
     }
     res.pipeline = [res.device newComputePipelineStateWithFunction:fn error:&error];
+    // One dispatch for a whole group of symbols, same arithmetic (see equalize_mxn_batch).
+    id<MTLFunction> fn_batch = [library newFunctionWithName:@"equalize_mxn_batch"];
+    if (fn_batch == nil) {
+      ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: kernel 'equalize_mxn_batch' not found");
+      return false;
+    }
+    res.pipeline_batch = [res.device newComputePipelineStateWithFunction:fn_batch error:&error];
     if (res.pipeline == nil) {
       ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: pipeline creation failed: {}",
                                                 error != nil ? error.localizedDescription.UTF8String : "nil error");
@@ -330,6 +348,67 @@ bool equalizer_metal_engine::enqueue_burst(const void* h,
   [enc setBytes:&params length:sizeof(params) atIndex:4];
   [enc setBuffer:b_s offset:0 atIndex:5];
   [enc dispatchThreads:MTLSizeMake(nof_re, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
+  return true;
+}
+
+bool equalizer_metal_engine::enqueue_burst_batch(const void* h,
+                                                const void* y,
+                                                const void* sigma2,
+                                                void*       eq,
+                                                void*       nv,
+                                                unsigned    nof_re,
+                                                unsigned    nof_symbols,
+                                                unsigned    h_symbol_stride,
+                                                unsigned    y_symbol_stride,
+                                                unsigned    eq_symbol_stride,
+                                                unsigned    nv_symbol_stride,
+                                                unsigned    nof_ports,
+                                                unsigned    nof_layers,
+                                                bool        mmse,
+                                                float       noise_var,
+                                                float       tx_scaling,
+                                                float       h_scaling)
+{
+  eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
+  if ((engine == nullptr) || (nof_symbols == 0)) {
+    return false;
+  }
+  id<MTLComputeCommandEncoder> enc = metal::shared_burst::encoder(eq_resources().pipeline_batch);
+  if (enc == nil) {
+    return false;
+  }
+  // The bound buffers cover the whole group: one symbol's worth plus the stride to the next.
+  const size_t h_bytes  = static_cast<size_t>(nof_ports) * nof_layers *
+                          ((static_cast<size_t>(nof_symbols) - 1) * h_symbol_stride + nof_re) * sizeof(cbf16_t);
+  const size_t y_bytes  = static_cast<size_t>(nof_ports) *
+                          ((static_cast<size_t>(nof_symbols) - 1) * y_symbol_stride + nof_re) * sizeof(cbf16_t);
+  const size_t s_bytes  = static_cast<size_t>(nof_ports) * sizeof(float);
+  const size_t eq_bytes = ((static_cast<size_t>(nof_symbols) - 1) * eq_symbol_stride + nof_re * nof_layers) * 2 *
+                          sizeof(float);
+  const size_t nv_bytes = ((static_cast<size_t>(nof_symbols) - 1) * nv_symbol_stride + nof_re * nof_layers) *
+                          sizeof(float);
+
+  id<MTLBuffer> b_h  = wrap_buffer(engine, h, h_bytes);
+  id<MTLBuffer> b_y  = wrap_buffer(engine, y, y_bytes);
+  id<MTLBuffer> b_s  = wrap_buffer(engine, sigma2, s_bytes);
+  id<MTLBuffer> b_eq = wrap_buffer(engine, eq, eq_bytes);
+  id<MTLBuffer> b_nv = wrap_buffer(engine, nv, nv_bytes);
+  if (b_h == nil || b_y == nil || b_s == nil || b_eq == nil || b_nv == nil) {
+    engine->last_call_no_copy = false;
+    return false;
+  }
+  engine->last_call_no_copy          = true;
+  const equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, tx_scaling, h_scaling};
+  const eq_strides_t      strides{nof_symbols, h_symbol_stride, y_symbol_stride, eq_symbol_stride, nv_symbol_stride};
+  [enc setBuffer:b_h offset:0 atIndex:0];
+  [enc setBuffer:b_y offset:0 atIndex:1];
+  [enc setBuffer:b_eq offset:0 atIndex:2];
+  [enc setBuffer:b_nv offset:0 atIndex:3];
+  [enc setBytes:&params length:sizeof(params) atIndex:4];
+  [enc setBuffer:b_s offset:0 atIndex:5];
+  [enc setBytes:&strides length:sizeof(strides) atIndex:6];
+  [enc dispatchThreads:MTLSizeMake(nof_re, nof_symbols, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
   return true;
 }

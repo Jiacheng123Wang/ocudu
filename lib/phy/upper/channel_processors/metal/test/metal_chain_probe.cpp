@@ -20,6 +20,11 @@
 /// (slots, default 20), OCUDU_PROBE_LAYERS (default 1, 1..2) and OCUDU_PROBE_PORTS (default 1).
 
 #include "../channel_equalizer_metal.h"
+#include "../ocudu_equalizer_metal_engine.h"
+
+#include <chrono>
+#include <cstring>
+#include <vector>
 #include "demodulation_mapper_metal.h"
 #include "ocudu/adt/bf16.h"
 #include "ocudu/phy/support/re_buffer.h"
@@ -335,5 +340,120 @@ int main()
               nof_nv_mismatch);
   std::printf("[chain] A (equalization never waited) vs B: %u mismatching input sets (informational)\n",
               nof_mismatch);
-  return (nof_br_mismatch == 0 && nof_cr_mismatch == 0) ? 0 : 1;
+
+  // ---------------------------------------------------------------------------------------------
+  // Pattern D: one dispatch for the whole group of symbols against one dispatch per symbol.
+  //
+  // A dispatch costs about 10 us while a 25 PRB symbol takes a couple of microseconds of GPU time,
+  // so `ul_equalization_demod` is mostly dispatch overhead. Batching the symbols into a single
+  // dispatch (equalize_mxn_batch, one thread per resource element and symbol) must produce
+  // bit-identical outputs, and this pattern measures what it saves per slot.
+  // ---------------------------------------------------------------------------------------------
+  unsigned nof_batch_mismatch = 0;
+  {
+    metal::equalizer_metal_engine engine;
+    if (!engine.init()) {
+      std::printf("[chain] D SKIPPED: no Metal device\n");
+    } else {
+      // Group inputs: one contiguous buffer per quantity, uniformly strided by symbol.
+      const size_t h_stride  = static_cast<size_t>(ports) * layers * nof_re;
+      const size_t y_stride  = static_cast<size_t>(ports) * nof_re;
+      const size_t eq_el     = eq_stride / sizeof(cf_t);   // float2 elements per symbol
+      const size_t nv_el     = nv_stride / sizeof(float);  // float elements per symbol
+
+      std::vector<cbf16_t> h_group(h_stride * nof_symbols);
+      std::vector<cbf16_t> y_group(y_stride * nof_symbols);
+      std::vector<float>   sigma2(ports, 0.02F);
+      for (cbf16_t& v : h_group) {
+        v = cbf16_t(1.0F + ch_dist(rgen), ch_dist(rgen));
+      }
+      for (cbf16_t& v : y_group) {
+        v = cbf16_t(ch_dist(rgen), ch_dist(rgen));
+      }
+
+      aligned_buffer eq_sym;
+      aligned_buffer nv_sym;
+      aligned_buffer eq_bat;
+      aligned_buffer nv_bat;
+      eq_sym.allocate(eq_stride * nof_symbols);
+      nv_sym.allocate(nv_stride * nof_symbols);
+      eq_bat.allocate(eq_stride * nof_symbols);
+      nv_bat.allocate(nv_stride * nof_symbols);
+
+      // Per-symbol path: one dispatch per symbol, one commit and wait at the end (what the deferred
+      // chain does today).
+      auto run_per_symbol = [&]() {
+        for (unsigned s = 0; s != nof_symbols; ++s) {
+          engine.enqueue_burst(h_group.data() + s * h_stride,
+                               y_group.data() + s * y_stride,
+                               sigma2.data(),
+                               static_cast<char*>(eq_sym.ptr) + s * eq_stride,
+                               static_cast<char*>(nv_sym.ptr) + s * nv_stride,
+                               nof_re,
+                               ports,
+                               layers,
+                               true,
+                               0.02F,
+                               1.0F,
+                               1.0F);
+        }
+        engine.burst_commit();
+        engine.burst_wait_committed();
+      };
+      run_per_symbol();
+
+      const auto t0 = std::chrono::steady_clock::now();
+      run_per_symbol();
+      const auto t1 = std::chrono::steady_clock::now();
+
+      engine.burst_open();
+      bool ok = engine.enqueue_burst_batch(h_group.data(),
+                                           y_group.data(),
+                                           sigma2.data(),
+                                           eq_bat.ptr,
+                                           nv_bat.ptr,
+                                           nof_re,
+                                           nof_symbols,
+                                           static_cast<unsigned>(h_stride),
+                                           static_cast<unsigned>(y_stride),
+                                           static_cast<unsigned>(eq_el),
+                                           static_cast<unsigned>(nv_el),
+                                           ports,
+                                           layers,
+                                           true,
+                                           0.02F,
+                                           1.0F,
+                                           1.0F);
+      engine.burst_commit();
+      ok = engine.burst_wait_committed() && ok;
+
+      const auto t2 = std::chrono::steady_clock::now();
+      const double us_sym = std::chrono::duration<double, std::micro>(t1 - t0).count();
+      const double us_bat = std::chrono::duration<double, std::micro>(t2 - t1).count();
+
+      const auto* pa = static_cast<const cf_t*>(eq_sym.ptr);
+      const auto* pb = static_cast<const cf_t*>(eq_bat.ptr);
+      const auto* na = static_cast<const float*>(nv_sym.ptr);
+      const auto* nb = static_cast<const float*>(nv_bat.ptr);
+      const size_t eq_total = eq_el * nof_symbols;
+      const size_t nv_total = nv_el * nof_symbols;
+      for (size_t i = 0; i != eq_total; ++i) {
+        nof_batch_mismatch += (std::memcmp(&pa[i], &pb[i], sizeof(cf_t)) != 0) ? 1 : 0;
+      }
+      for (size_t i = 0; i != nv_total; ++i) {
+        nof_batch_mismatch += (std::memcmp(&na[i], &nb[i], sizeof(float)) != 0) ? 1 : 0;
+      }
+      std::printf("[chain] D equalizer: per symbol %.1f us/slot (%.1f us/symbol) against batched "
+                  "%.1f us/slot (%.1f us/symbol), %.2fx; %u differing eq/nv values -> %s\n",
+                  us_sym,
+                  us_sym / nof_symbols,
+                  us_bat,
+                  us_bat / nof_symbols,
+                  (us_bat > 0.0) ? us_sym / us_bat : 0.0,
+                  nof_batch_mismatch,
+                  (nof_batch_mismatch == 0) ? "OK" : "MISMATCH");
+    }
+  }
+
+  return (nof_br_mismatch == 0 && nof_cr_mismatch == 0 && nof_batch_mismatch == 0) ? 0 : 1;
 }
