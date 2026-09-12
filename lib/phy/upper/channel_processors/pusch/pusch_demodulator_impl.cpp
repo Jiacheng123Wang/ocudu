@@ -363,6 +363,19 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
 
     std::array<symbol_state, max_deferred_group_symbols> symbols{};
     unsigned                                             nof_group_symbols = 0;
+    // Deferred chain: the group entries collected by pass 1, handed to the equalizer in ONE call
+    // (a GPU backend encodes them as few dispatches; the default implementation is the per-symbol
+    // sequence this replaces).
+    static_vector<channel_equalizer::group_symbol, max_deferred_group_symbols> group_entries;
+    // Debug switch (research): submit the deferred group through channel_equalizer::submit_group()
+    // instead of one submit() per symbol. The default stays on the per-symbol calls because the
+    // grouped path does not reproduce the per-symbol results yet (see the S-5 section of the design
+    // document: it diverges even with the batched dispatch disabled, so the defect is on this side
+    // of the call, not in the batched kernel).
+    static const bool group_submit = []() {
+      const char* env = std::getenv("OCUDU_EQ_GROUP_SUBMIT");
+      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    }();
 
     // Pass 1: extract the channel data, equalize channels and, for each Tx layer, combine
     // contribution from all Rx antenna ports. With the deferred chain the equalization is only
@@ -418,9 +431,6 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
         dc_position_local = *dc_position - re_interval.start();
       }
 
-      const channel_equalizer::ch_est_list& ch_estimates = get_ch_data_estimates(
-          est_results, i_symbol, config.nof_tx_layers, symbol_re_mask_local, dc_position_local, config.rx_ports);
-
       // Extract the Rx port noise variances from the channel estimation.
       for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
         noise_var_estimates[i_port] = est_results.get_noise_variance(i_port);
@@ -428,14 +438,42 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
 
       // Extract the data symbols, equalize channels and, for each Tx layer, combine contribution from all Rx antenna
       // ports.
-      const re_buffer_reader<cbf16_t>& ch_re = get_ch_data_re(grid, i_symbol, symbol_re_mask, config.rx_ports);
-      if (deferred_chain) {
-        // Fused path: submit the equalization without waiting. The demapper dispatches on the
-        // same command queue, so waiting for its command buffer also guarantees this one
-        // completed; the equalized symbols and noise variances are read only after that wait.
+      if (deferred_chain && group_submit) {
+        ensure_group_storage();
+        // Fused path (grouped variant): collect the group instead of submitting per symbol. Every symbol extracts
+        // into its OWN storage (ch_est_group / ch_re_group_*): the shared extraction members are
+        // refilled by each call, so collecting views of them would alias the last symbol. The
+        // group is submitted in one submit_group() call after this loop, before the demapping of
+        // the same group is encoded - both stages share one command buffer, so the hand-off stays
+        // ordered without a CPU wait.
+        const channel_equalizer::ch_est_list& ch_estimates = get_ch_data_estimates_into(est_results,
+                                                                                        i_symbol,
+                                                                                        config.nof_tx_layers,
+                                                                                        symbol_re_mask_local,
+                                                                                        dc_position_local,
+                                                                                        config.rx_ports,
+                                                                                        ch_est_group[i_group]);
+        const re_buffer_reader<cbf16_t>&      ch_re =
+            get_ch_data_re_into(grid, i_symbol, symbol_re_mask, config.rx_ports, ch_re_group_view[i_group], ch_re_group_copy[i_group]);
+        group_entries.push_back({state.eq,
+                                 state.nv,
+                                 &ch_re,
+                                 &ch_estimates,
+                                 span<const float>(noise_var_estimates).first(nof_rx_ports),
+                                 1.0F});
+      } else if (deferred_chain) {
+        // Fused path (default): submit this symbol without waiting. The demapper dispatches on the
+        // same command queue, so waiting for its command buffer also guarantees this one completed;
+        // the equalized symbols and noise variances are read only after that wait.
+        const channel_equalizer::ch_est_list& ch_estimates = get_ch_data_estimates(
+            est_results, i_symbol, config.nof_tx_layers, symbol_re_mask_local, dc_position_local, config.rx_ports);
+        const re_buffer_reader<cbf16_t>& ch_re = get_ch_data_re(grid, i_symbol, symbol_re_mask, config.rx_ports);
         equalizer->submit(
             state.eq, state.nv, ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
       } else {
+        const channel_equalizer::ch_est_list& ch_estimates = get_ch_data_estimates(
+            est_results, i_symbol, config.nof_tx_layers, symbol_re_mask_local, dc_position_local, config.rx_ports);
+        const re_buffer_reader<cbf16_t>& ch_re = get_ch_data_re(grid, i_symbol, symbol_re_mask, config.rx_ports);
         equalizer->equalize(
             state.eq, state.nv, ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
 
@@ -460,6 +498,12 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
       // equalization dispatches of this same group wrote. Both stages go into one command buffer
       // and the pipeline change inserts a memory barrier between them, so the hand-off is ordered
       // without waiting on the CPU and without depending on the command-queue ordering.
+
+      // One call for the whole group: the Metal backend encodes it as one dispatch per run of
+      // equal geometry (the default implementation loops over submit()).
+      if (group_submit) {
+        equalizer->submit_group(group_entries);
+      }
 
       // Pass 2: demap every symbol of the group. A whole OFDM symbol is dispatched as one command
       // buffer into its page-aligned staging region: how the codeword buffer splits a symbol into
@@ -599,6 +643,17 @@ pusch_demodulator_impl::get_ch_data_re(const resource_grid_reader&              
                                        const re_symbol_mask_type&               re_mask,
                                        const static_vector<uint8_t, MAX_PORTS>& rx_ports)
 {
+  return get_ch_data_re_into(grid, i_symbol, re_mask, rx_ports, ch_re_view, ch_re_copy);
+}
+
+const re_buffer_reader<cbf16_t>&
+pusch_demodulator_impl::get_ch_data_re_into(const resource_grid_reader&              grid,
+                                            unsigned                                 i_symbol,
+                                            const re_symbol_mask_type&               re_mask,
+                                            const static_vector<uint8_t, MAX_PORTS>& rx_ports,
+                                            modular_re_buffer_reader<cbf16_t, MAX_PORTS>& view_out,
+                                            dynamic_re_buffer<cbf16_t>&                   copy_out)
+{
   // Extract RE boundaries.
   unsigned nof_re = re_mask.count();
   int      begin  = re_mask.find_lowest();
@@ -608,7 +663,7 @@ pusch_demodulator_impl::get_ch_data_re(const resource_grid_reader&              
   // Check if the mask is contiguous.
   if (nof_re == static_cast<unsigned>(end + 1 - begin)) {
     // Prepare channel estimates view.
-    ch_re_view.resize(rx_ports.size(), nof_re);
+    view_out.resize(rx_ports.size(), nof_re);
 
     // Iterate over all layers and ports.
     for (unsigned i_port = 0, i_port_end = rx_ports.size(); i_port != i_port_end; ++i_port) {
@@ -616,18 +671,18 @@ pusch_demodulator_impl::get_ch_data_re(const resource_grid_reader&              
       span<const cbf16_t> ch_data_re = grid.get_view(i_port, i_symbol);
 
       // Set the view in the channel estimates.
-      ch_re_view.set_slice(i_port, ch_data_re.subspan(begin, nof_re));
+      view_out.set_slice(i_port, ch_data_re.subspan(begin, nof_re));
     }
-    return ch_re_view;
+    return view_out;
   }
 
   // Prepare channel estimates copy destination.
-  ch_re_copy.resize(rx_ports.size(), nof_re);
+  copy_out.resize(rx_ports.size(), nof_re);
 
   // Extract RE for each port and symbol.
   for (unsigned i_port = 0, i_port_end = rx_ports.size(); i_port != i_port_end; ++i_port) {
     // Get a view of the port data RE.
-    span<cbf16_t> re_port_buffer = ch_re_copy.get_slice(i_port);
+    span<cbf16_t> re_port_buffer = copy_out.get_slice(i_port);
 
     // Copy grid data resource elements into the buffer.
     re_port_buffer = grid.get(re_port_buffer, rx_ports[i_port], i_symbol, 0, re_mask);
@@ -637,7 +692,7 @@ pusch_demodulator_impl::get_ch_data_re(const resource_grid_reader&              
         re_port_buffer.empty(), "Invalid number of RE read from the grid. {} RE are missing.", re_port_buffer.size());
   }
 
-  return ch_re_copy;
+  return copy_out;
 }
 
 const channel_equalizer::ch_est_list&
@@ -648,19 +703,32 @@ pusch_demodulator_impl::get_ch_data_estimates(const dmrs_pusch_estimator_results
                                               std::optional<unsigned>                  dc_position,
                                               const static_vector<uint8_t, MAX_PORTS>& rx_ports)
 {
+  return get_ch_data_estimates_into(est_results, i_symbol, nof_tx_layers, re_mask, dc_position, rx_ports,
+                                    ch_estimates_copy);
+}
+
+const channel_equalizer::ch_est_list&
+pusch_demodulator_impl::get_ch_data_estimates_into(const dmrs_pusch_estimator_results&      est_results,
+                                                   unsigned                                 i_symbol,
+                                                   unsigned                                 nof_tx_layers,
+                                                   const re_symbol_mask_type&               re_mask,
+                                                   std::optional<unsigned>                  dc_position,
+                                                   const static_vector<uint8_t, MAX_PORTS>& rx_ports,
+                                                   dynamic_ch_est_list&                     out)
+{
   // Extract RE boundaries.
   unsigned nof_re = re_mask.count();
   int      begin  = re_mask.find_lowest();
   int      end    = re_mask.find_highest();
   ocudu_assert((begin >= 0) && (end >= 0), "Invalid mask.");
 
-  ch_estimates_copy.resize(nof_re, rx_ports.size(), nof_tx_layers);
+  out.resize(nof_re, rx_ports.size(), nof_tx_layers);
 
   // Extract data RE coefficients from the channel estimation.
   for (unsigned i_layer = 0, i_layer_end = nof_tx_layers; i_layer != i_layer_end; ++i_layer) {
     for (unsigned i_port = 0, i_port_end = rx_ports.size(); i_port != i_port_end; ++i_port) {
       // Get a view of the channel estimates buffer for a single Rx port.
-      span<cbf16_t> ch_port_buffer = ch_estimates_copy.get_channel(i_port, i_layer);
+      span<cbf16_t> ch_port_buffer = out.get_channel(i_port, i_layer);
 
       // Store non-DM-RS REs.
       est_results.get_symbol_ch_estimate(ch_port_buffer, i_symbol, i_port, i_layer, re_mask);
@@ -674,5 +742,5 @@ pusch_demodulator_impl::get_ch_data_estimates(const dmrs_pusch_estimator_results
     }
   }
 
-  return ch_estimates_copy;
+  return out;
 }

@@ -49,6 +49,26 @@ public:
     select(ch_estimates).submit(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling);
   }
 
+  void submit_group(span<const group_symbol> group) override
+  {
+    // Forward the group as a GROUP, split by the backend each symbol routes to: the routing is per
+    // call (Metal covers the 1..4 layer topologies, the generic one the rest), so a group whose
+    // symbols all route to Metal reaches channel_equalizer_metal::submit_group() as one call - which
+    // is what lets it encode the whole group as a few dispatches. Falling back to the interface
+    // default here (one submit() per symbol) is what silently turned the batched path into the
+    // per-symbol one, so this wrapper must not do that.
+    unsigned i = 0;
+    while (i != group.size()) {
+      channel_equalizer& backend = select(*group[i].ch_estimates);
+      unsigned           n_run   = 1;
+      while ((i + n_run != group.size()) && (&select(*group[i + n_run].ch_estimates) == &backend)) {
+        ++n_run;
+      }
+      backend.submit_group(group.subspan(i, n_run));
+      i += n_run;
+    }
+  }
+
   void wait() override
   {
     // Each backend waits for its own in-flight submits; the unused one is a no-op.

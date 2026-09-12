@@ -61,6 +61,23 @@ public:
   }
 
   // See interface for documentation.
+  void submit_group(span<const group_symbol> group) override
+  {
+    // Forward the group as a GROUP: turning it into one submit() per symbol here is exactly what
+    // the batched backend would encode as one dispatch per symbol, so a decorator that only
+    // forwarded submit() would silently remove the batching from the production chain. The
+    // metrics of the group are collected per symbol, as in submit().
+    channel_equalizer_metrics metrics;
+    {
+      resource_usage_utils::scoped_resource_usage rusage_tracker(metrics.measurements);
+      base_equalizer->submit_group(group);
+    }
+    for (const group_symbol& symbol : group) {
+      collect_metrics(metrics, *symbol.ch_estimates);
+    }
+  }
+
+  // See interface for documentation.
   void wait() override { base_equalizer->wait(); }
 
   // See interface for documentation.
