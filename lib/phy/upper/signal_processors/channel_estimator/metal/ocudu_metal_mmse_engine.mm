@@ -3,6 +3,10 @@
 
 #include "ocudu_metal_mmse_engine.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -72,6 +76,40 @@ static void mmse_stats_report()
 static void mmse_stats_commit() {}
 static void mmse_stats_wait() {}
 #endif // OCUDU_METAL_STATS
+
+// Debug phase timer (OCUDU_MMSE_DEBUG=1): the estimator statistics show that the HOST side of an
+// engine call dominates its GPU time, and this splits that host time into its parts (buffer
+// wrapping, command buffer creation, encoding, commit, and the wait for the GPU).
+struct mmse_phase_timer {
+  const char*                   name;
+  bool                          enabled;
+  std::chrono::steady_clock::time_point t0, t_wrap, t_cb, t_enc, t_commit;
+
+  explicit mmse_phase_timer(const char* n) :
+    name(n), enabled(std::getenv("OCUDU_MMSE_DEBUG") != nullptr), t0(std::chrono::steady_clock::now())
+  {
+  }
+  void wrapped() { t_wrap = std::chrono::steady_clock::now(); }
+  void created() { t_cb = std::chrono::steady_clock::now(); }
+  void encoded() { t_enc = std::chrono::steady_clock::now(); }
+  void committed() { t_commit = std::chrono::steady_clock::now(); }
+  ~mmse_phase_timer()
+  {
+    if (!enabled) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const auto us  = [](auto a, auto b) { return std::chrono::duration<double, std::micro>(b - a).count(); };
+    std::fprintf(stderr,
+                 "[mmse_eng] %s wrap %.1f cb %.1f encode %.1f commit %.1f wait %.1f us\n",
+                 name,
+                 us(t0, t_wrap),
+                 us(t_wrap, t_cb),
+                 us(t_cb, t_enc),
+                 us(t_enc, t_commit),
+                 us(t_commit, now));
+  }
+};
 
 struct mmse_engine_impl {
   id<MTLDevice>                  device      = nil;
@@ -261,13 +299,19 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
     return false;
   }
 
+  // Phase timers (OCUDU_MMSE_DEBUG=1): the estimator statistics show that the host side of an
+  // engine call dominates its GPU time, and this says which part of it.
+  const bool   debug_en = (std::getenv("OCUDU_MMSE_DEBUG") != nullptr);
+  const auto   t_wrap0  = std::chrono::steady_clock::now();
   const NSUInteger bytes = static_cast<NSUInteger>(nof_systems) * n * n * sizeof(float);
   id<MTLBuffer>    a_buf = e->wrap(a, bytes);
   if (a_buf == nil) {
     return false;
   }
+  const auto t_wrap1 = std::chrono::steady_clock::now();
 
   id<MTLCommandBuffer> cb = [e->queue commandBuffer];
+  const auto t_cb1 = std::chrono::steady_clock::now();
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   [enc setComputePipelineState:e->inv_pipe];
   [enc setBuffer:a_buf offset:0 atIndex:0];
@@ -375,7 +419,9 @@ bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, flo
   [enc setBuffer:a_buf offset:0 atIndex:0];
   [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
-  [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1) threadsPerThreadgroup:MTLSizeMake(L, 1, 1)];
+  // Same (column, row) threadgroup layout as invert(): the pivot-column elimination spreads over
+  // the block instead of one thread walking a whole row (ocudu_mmse_inv.metal).
+  [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
 
   [enc setComputePipelineState:e->weights_pipe];
   [enc setBuffer:rp_buf offset:0 atIndex:0];
@@ -419,11 +465,13 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
     return false;
   }
 
+  mmse_phase_timer phase("run_weights_only");
   id<MTLBuffer> ai_buf = e->wrap(a_inv, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
   id<MTLBuffer> rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
   id<MTLBuffer> w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
   id<MTLBuffer> y_buf  = e->wrap(y, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * L * sizeof(float));
   id<MTLBuffer> h_buf  = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
+  phase.wrapped();
   if (ai_buf == nil || rp_buf == nil || w_buf == nil || y_buf == nil || h_buf == nil) {
     return false;
   }
@@ -441,6 +489,7 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
   } aparams{nout, L, nof_systems, nof_blocks};
 
   id<MTLCommandBuffer> cb = [e->queue commandBuffer];
+  phase.created();
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
   [enc setComputePipelineState:e->weights_pipe];
@@ -463,7 +512,9 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
 
   [enc endEncoding];
+  phase.encoded();
   [cb commit];
+  phase.committed();
   mmse_stats_commit();
   [cb waitUntilCompleted];
   mmse_stats_wait();

@@ -813,42 +813,65 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
     }
   }
 
-  // A^-1 on the CPU (us-level; the batched 36x36 GPU Gauss-Jordan kernel is barrier-bound,
-  // see PLAN.md 7.0.6), written straight into the engine slot layout of the chosen flavor.
-  for (unsigned sys = 0; sys != nof_layers; ++sys) {
-    std::array<float, 2 * MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS> gj;
-    std::fill(gj.begin(), gj.end(), 0.0F);
-    for (unsigned r = 0; r != L; ++r) {
-      for (unsigned c = 0; c != L; ++c) {
-        gj[r * 2 * L + c] = w_r_pp[r * L + c];
-      }
-      gj[r * 2 * L + L + r] = 1.0F;
+  // A^-1 on the CPU (us-level: a 36x36 Gauss-Jordan is ~23k FLOPs, see the measurement above) or,
+  // when OCUDU_CE_GPU_INVERT=1 selects it, by the engine's K1 kernel inside the SAME command buffer
+  // as the weights and the apply (engine->run() below) so the host never reads the inverse back.
+  // A is symmetric positive definite (see ocudu_mmse_inv.metal), so K1 needs no pivoting; it is
+  // fixed to n <= 36 by its threadgroup memory and unused by the nn flavor (ceil8-padded layout).
+  // MEASURED (S-4c, 36x36 / 25 PRB / 2 DMRS): the K1 kernel costs 75-92 us of GPU time for a
+  // SINGLE system - it is a serial chain of 2n threadgroup barriers inside one threadgroup - while
+  // the CPU Gauss-Jordan of the same matrix is ~10 us. Handing the production inversion to K1
+  // therefore made the whole slot SLOWER (hop mean 160.2 -> 254.0 us, gpu_wait 21.7 -> 95.9 us).
+  // K1 stays available as an opt-in debug path (it wins once one call inverts many systems, e.g.
+  // many layers or a batched multi-UE schedule), the production default is the CPU inversion.
+  static constexpr unsigned MAX_GPU_INVERT_ORDER = 36;
+  const bool gpu_invert = !matrix && (L <= MAX_GPU_INVERT_ORDER) && (std::getenv("OCUDU_CE_GPU_INVERT") != nullptr);
+  if (gpu_invert) {
+    // Stage A itself (not A^-1): K1 overwrites the slot with the inverse in place.
+    for (unsigned sys = 0; sys != nof_layers; ++sys) {
+      std::memcpy(gpu_a + static_cast<std::size_t>(sys) * L * L,
+                  w_r_pp.data(),
+                  static_cast<std::size_t>(L) * L * sizeof(float));
     }
-    gauss_jordan_invert(span<float>(gj.data(), 2 * L * L), L);
-    if (matrix) {
-      // Zero-padded slot: the pad rows/cols must be exactly 0 so the W pad columns come out 0.
-      float* slot = gpu_a + static_cast<std::size_t>(sys) * Lp * Lp;
-      std::memset(slot, 0, static_cast<std::size_t>(Lp) * Lp * sizeof(float));
-      for (unsigned r = 0; r != L; ++r) {
-        std::memcpy(slot + static_cast<std::size_t>(r) * Lp,
-                    &gj[static_cast<std::size_t>(r) * 2 * L + L],
-                    static_cast<std::size_t>(L) * sizeof(float));
-      }
-    } else {
+  } else {
+    for (unsigned sys = 0; sys != nof_layers; ++sys) {
+      std::array<float, 2 * MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS> gj;
+      std::fill(gj.begin(), gj.end(), 0.0F);
       for (unsigned r = 0; r != L; ++r) {
         for (unsigned c = 0; c != L; ++c) {
-          gpu_a[static_cast<std::size_t>(sys) * L * L + r * L + c] = gj[r * 2 * L + L + c];
+          gj[r * 2 * L + c] = w_r_pp[r * L + c];
+        }
+        gj[r * 2 * L + L + r] = 1.0F;
+      }
+      gauss_jordan_invert(span<float>(gj.data(), 2 * L * L), L);
+      if (matrix) {
+        // Zero-padded slot: the pad rows/cols must be exactly 0 so the W pad columns come out 0.
+        float* slot = gpu_a + static_cast<std::size_t>(sys) * Lp * Lp;
+        std::memset(slot, 0, static_cast<std::size_t>(Lp) * Lp * sizeof(float));
+        for (unsigned r = 0; r != L; ++r) {
+          std::memcpy(slot + static_cast<std::size_t>(r) * Lp,
+                      &gj[static_cast<std::size_t>(r) * 2 * L + L],
+                      static_cast<std::size_t>(L) * sizeof(float));
+        }
+      } else {
+        for (unsigned r = 0; r != L; ++r) {
+          for (unsigned c = 0; c != L; ++c) {
+            gpu_a[static_cast<std::size_t>(sys) * L * L + r * L + c] = gj[r * 2 * L + L + c];
+          }
         }
       }
     }
   }
 
-  // Weight (W = R_hp . A^-1) + apply (h = W . y) in ONE engine command buffer. The engine
-  // return value is checked (S-1 audit fix): on failure the caller falls back to the CPU
-  // reference math for these blocks instead of unpacking stale gpu_h contents.
+  // Weight (W = R_hp . A^-1) + apply (h = W . y) in ONE engine command buffer, with the inversion
+  // (K1) prepended in the same buffer for the legacy flavor. The engine return value is checked
+  // (S-1 audit fix): on failure the caller falls back to the CPU reference math for these blocks
+  // instead of unpacking stale gpu_h contents.
   const bool engine_ok =
       matrix ? engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_layers, n_blk)
-             : engine->run_weights_only(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_layers, n_blk);
+             : (gpu_invert
+                    ? engine->run(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_layers, n_blk)
+                    : engine->run_weights_only(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_layers, n_blk));
   if (!engine_ok) {
     logger.error(
         "[mmse_ce] engine call failed (gb_start={} n_blk={} prb={} nout={} L={} matrix={}): falling back to the "
