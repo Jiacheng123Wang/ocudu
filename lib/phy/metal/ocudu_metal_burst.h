@@ -31,6 +31,11 @@ namespace metal {
 class shared_burst
 {
 public:
+  /// Stage that appended a dispatch. The engines taking part in a burst also keep their own
+  /// commit/wait counters, but those only account for their synchronous per-call path, so the burst
+  /// probe attributes each dispatch to its stage to make the split visible.
+  enum class stage { equalizer, demapper, other };
+
   /// \brief Opens the burst if needed and returns its encoder, switching to \c pipeline.
   ///
   /// A memory barrier is inserted when the pipeline changes, i.e. between the stages of a burst, so
@@ -53,7 +58,7 @@ public:
   static unsigned size();
 
   /// Accounts one dispatch appended to the burst (diagnostics).
-  static void count_dispatch();
+  static void count_dispatch(stage which = stage::other);
 };
 
 } // namespace metal

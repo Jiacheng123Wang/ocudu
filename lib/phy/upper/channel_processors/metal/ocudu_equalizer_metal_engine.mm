@@ -61,7 +61,8 @@ static void eq_stats_report()
 {
   const eq_stats_t& s = eq_stats();
   std::fprintf(stderr,
-               "[metal_stats] equalizer commits=%llu waits=%llu max_in_flight=%llu\n",
+               "[metal_stats] equalizer commits=%llu waits=%llu max_in_flight=%llu (synchronous "
+               "path only; deferred group dispatches are counted by [metal_stats] burst)\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
@@ -329,7 +330,7 @@ bool equalizer_metal_engine::enqueue_burst(const void* h,
   [enc setBytes:&params length:sizeof(params) atIndex:4];
   [enc setBuffer:b_s offset:0 atIndex:5];
   [enc dispatchThreads:MTLSizeMake(nof_re, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-  metal::shared_burst::count_dispatch();
+  metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
   return true;
 }
 
