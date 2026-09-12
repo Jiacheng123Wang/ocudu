@@ -97,6 +97,10 @@ public:
   /// Number of dispatches enqueued in the batch in progress (diagnostics).
   unsigned batch_size() const;
 
+  /// True when every buffer of the last dispatch was wrapped without a copy. False means the
+  /// platform refused the no-copy wrap and the engine staged through an owned MTLBuffer.
+  bool last_call_used_no_copy() const;
+
   /// GPU-side duration of the last call in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;
 

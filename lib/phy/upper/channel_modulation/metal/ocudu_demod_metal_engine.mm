@@ -7,6 +7,7 @@
 #import <Metal/Metal.h>
 
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/support/macos_compat.h"
 
 #include <atomic>
 #include <cstdio>
@@ -111,6 +112,8 @@ struct demod_params_t {
 
 struct demod_engine_impl {
   double last_gpu_us = 0.0;
+  bool   last_call_no_copy = true; // false when any buffer of the last call was copied
+  bool   no_copy_fallback_logged = false;
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
 };
 
@@ -126,12 +129,25 @@ id<MTLBuffer> wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t len
         length,
         it->second.second);
   }
-  const size_t aligned = (length + 4095) & ~4095;
+  // The no-copy wrap requires a page-aligned base address AND a page-multiple length.
+  const size_t page    = compat::page_size();
+  const size_t aligned = ((length + page - 1) / page) * page;
   id<MTLBuffer> buf    = [demod_resources().device newBufferWithBytesNoCopy:(void*)ptr
                                                                  length:aligned
                                                                 options:MTLResourceStorageModeShared
                                                            deallocator:nil];
   if (buf == nil) {
+    engine->last_call_no_copy = false;
+    if (!engine->no_copy_fallback_logged) {
+      engine->no_copy_fallback_logged = true;
+      ocudulog::fetch_basic_logger("PHY").warning(
+          "Metal demapper: no-copy buffer wrap failed (ptr aligned {}, length {} rounded to {}, page {}); "
+          "falling back to a staging copy",
+          (reinterpret_cast<uintptr_t>(ptr) % page) == 0,
+          length,
+          aligned,
+          page);
+    }
     buf = [demod_resources().device newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
   }
   engine->buffer_cache[ptr] = std::make_pair(buf, aligned);
@@ -218,6 +234,7 @@ bool demod_metal_engine::demodulate(const void* symbols,
     return false;
   }
 
+  engine->last_call_no_copy = true;
   const demod_params_t params{nof_symbols, mod};
 
   id<MTLCommandBuffer>         cmd_buf = [demod_resources().queue commandBuffer];
@@ -244,6 +261,12 @@ bool demod_metal_engine::demodulate(const void* symbols,
     engine->last_gpu_us = 0.0;
   }
   return true;
+}
+
+bool demod_metal_engine::last_call_used_no_copy() const
+{
+  const demod_engine_impl* engine = static_cast<const demod_engine_impl*>(impl);
+  return engine != nullptr ? engine->last_call_no_copy : false;
 }
 
 double demod_metal_engine::last_gpu_wait_us() const

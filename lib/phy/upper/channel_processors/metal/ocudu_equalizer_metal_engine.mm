@@ -7,6 +7,7 @@
 #import <Metal/Metal.h>
 
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/support/macos_compat.h"
 
 #include <atomic>
 #include <cstdio>
@@ -116,6 +117,8 @@ struct equalize_params_t {
 
 struct eq_engine_impl {
   double last_gpu_us = 0.0;
+  bool   last_call_no_copy = true; // false when any buffer of the last call was copied
+  bool   no_copy_fallback_logged = false;
   unsigned pending = 0; // committed command buffers not waited for yet
   id<MTLCommandBuffer> last_committed = nil; // newest commit of the current burst
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
@@ -138,12 +141,27 @@ id<MTLBuffer> wrap_buffer(eq_engine_impl* engine, const void* ptr, size_t length
         length,
         it->second.second);
   }
-  const size_t aligned = (length + 4095) & ~4095;
-  id<MTLBuffer> buf    = [eq_resources().device newBufferWithBytesNoCopy:(void*)ptr
-                                                              length:aligned
-                                                             options:MTLResourceStorageModeShared
-                                                         deallocator:nil];
+  // The no-copy wrap requires a page-aligned base address AND a page-multiple length (the
+  // platform page size is 16 KiB on Apple Silicon, not the 4 KiB this used to assume).
+  const size_t  page    = compat::page_size();
+  const size_t  aligned = ((length + page - 1) / page) * page;
+  id<MTLBuffer> buf     = [eq_resources().device newBufferWithBytesNoCopy:(void*)ptr
+                                                                length:aligned
+                                                               options:MTLResourceStorageModeShared
+                                                           deallocator:nil];
   if (buf == nil) {
+    // A silent copy would hide a broken zero-copy contract: make it visible once per process.
+    engine->last_call_no_copy = false;
+    if (!engine->no_copy_fallback_logged) {
+      engine->no_copy_fallback_logged = true;
+      ocudulog::fetch_basic_logger("PHY").warning(
+          "Metal equalizer: no-copy buffer wrap failed (ptr page-aligned {}, length {} rounded to {}, page {}); "
+          "falling back to a staging copy",
+          (reinterpret_cast<uintptr_t>(ptr) % page) == 0,
+          length,
+          aligned,
+          page);
+    }
     buf = [eq_resources().device newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
   }
   engine->buffer_cache[ptr] = std::make_pair(buf, aligned);
@@ -258,6 +276,7 @@ bool equalizer_metal_engine::enqueue(const void* h,
     return false;
   }
 
+  engine->last_call_no_copy = true;
   equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, tx_scaling, h_scaling};
   id<MTLComputeCommandEncoder> enc = engine->batch_enc;
   [enc setBuffer:b_h offset:0 atIndex:0];
@@ -377,6 +396,12 @@ bool equalizer_metal_engine::equalize(const void* h,
     return false;
   }
   return flush_batch();
+}
+
+bool equalizer_metal_engine::last_call_used_no_copy() const
+{
+  const eq_engine_impl* engine = static_cast<const eq_engine_impl*>(impl);
+  return engine != nullptr ? engine->last_call_no_copy : false;
 }
 
 double equalizer_metal_engine::last_gpu_wait_us() const

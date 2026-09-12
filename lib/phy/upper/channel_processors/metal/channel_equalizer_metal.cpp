@@ -167,16 +167,6 @@ void channel_equalizer_metal::equalize(span<cf_t>                       eq_symbo
   void*        nv_ptr    = nv_direct ? static_cast<void*>(eq_noise_vars.data())
                                      : impl::ensure(impl_->nv_buf, impl_->nv_cap, nv_bytes);
 
-  if (!impl_->path_logged) {
-    impl_->path_logged = true;
-    ocudulog::fetch_basic_logger("PHY").debug(
-        "Metal equalizer: outputs {} (eq {} nv {}), inputs staged as cbf16 ({} bytes/call)",
-        (eq_direct && nv_direct) ? "written in place (zero copy)" : "written to staging and copied back",
-        eq_direct ? "direct" : "staged",
-        nv_direct ? "direct" : "staged",
-        h_bytes + y_bytes);
-  }
-
   for (unsigned i_used = 0; i_used != nof_used_ports; ++i_used) {
     const unsigned i_port = port_map[i_used];
     std::memcpy(y_ptr + static_cast<size_t>(i_used) * nof_re,
@@ -216,6 +206,17 @@ void channel_equalizer_metal::equalize(span<cf_t>                       eq_symbo
     ocuduvec::zero(eq_symbols);
     std::fill(eq_noise_vars.begin(), eq_noise_vars.end(), std::numeric_limits<float>::infinity());
     return;
+  }
+
+  if (!impl_->path_logged) {
+    impl_->path_logged = true;
+    ocudulog::fetch_basic_logger("PHY").info(
+        "Metal equalizer: outputs {}, inputs {} (eq {} nv {}, engine no-copy wrap {})",
+        (eq_direct && nv_direct) ? "written in place" : "written to staging and copied back",
+        h_bytes + y_bytes > 0 ? "staged as cbf16" : "staged",
+        eq_direct ? "direct" : "staged",
+        nv_direct ? "direct" : "staged",
+        impl_->engine.last_call_used_no_copy() ? "OK" : "FELL BACK TO COPY");
   }
 
   if (!eq_direct) {

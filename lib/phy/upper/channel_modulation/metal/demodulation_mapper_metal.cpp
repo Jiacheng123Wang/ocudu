@@ -121,15 +121,6 @@ void demodulation_mapper_metal::demodulate_soft(span<log_likelihood_ratio> llrs,
   // The LLR destination is the UL-SCH demultiplexer buffer (not page aligned): stage it.
   auto* llr_ptr = static_cast<int8_t*>(impl::ensure(impl_->llr_buf, impl_->llr_cap, llr_bytes));
 
-  if (!impl_->path_logged) {
-    impl_->path_logged = true;
-    ocudulog::fetch_basic_logger("PHY").debug(
-        "Metal demapper: inputs {} (symbols {} noise {}), LLRs staged",
-        (sym_direct && nv_direct) ? "read in place (zero copy)" : "staged",
-        sym_direct ? "direct" : "staged",
-        nv_direct ? "direct" : "staged");
-  }
-
   if (!sym_direct) {
     std::memcpy(const_cast<void*>(sym_ptr), symbols.data(), sym_bytes);
   }
@@ -142,6 +133,16 @@ void demodulation_mapper_metal::demodulate_soft(span<log_likelihood_ratio> llrs,
     // Engine failure: zero LLRs (the CPU's ill-formed input semantics) instead of stale data.
     std::memset(llrs.data(), 0, llr_bytes);
     return;
+  }
+
+  if (!impl_->path_logged) {
+    impl_->path_logged = true;
+    ocudulog::fetch_basic_logger("PHY").info(
+        "Metal demapper: inputs {} (symbols {} noise {}), LLRs staged, engine no-copy wrap {}",
+        (sym_direct && nv_direct) ? "read in place" : "staged",
+        sym_direct ? "direct" : "staged",
+        nv_direct ? "direct" : "staged",
+        impl_->engine.last_call_used_no_copy() ? "OK" : "FELL BACK TO COPY");
   }
 
   std::memcpy(llrs.data(), llr_ptr, llr_bytes);
