@@ -17,7 +17,9 @@
 #include "ocudu/phy/upper/equalization/dynamic_ch_est_list.h"
 #include "ocudu/phy/upper/sequence_generators/pseudo_random_generator.h"
 #include "ocudu/ran/pusch/pusch_constants.h"
+#include "ocudu/support/macos_compat.h"
 #include "page_aligned_allocator.h"
+#include <cstddef>
 
 namespace ocudu {
 
@@ -25,6 +27,10 @@ namespace ocudu {
 class pusch_demodulator_impl : public pusch_demodulator
 {
 public:
+  /// Number of OFDM symbols whose equalization and demapping dispatches are grouped behind a
+  /// single wait by the deferred chain (see \ref demodulate).
+  static constexpr unsigned max_deferred_group_symbols = 7;
+
   /// Constructor: sets up internal components and acquires their ownership.
   pusch_demodulator_impl(std::unique_ptr<channel_equalizer>       equalizer_,
                          std::unique_ptr<transform_precoder>      precoder_,
@@ -38,9 +44,19 @@ public:
     demapper(std::move(demapper_)),
     evm_calc(std::move(evm_calc_)),
     descrambler(std::move(descrambler_)),
+    max_symbol_re(max_nof_rb * NOF_SUBCARRIERS_PER_RB),
+    eq_symbol_stride_re(round_up_to_page(static_cast<size_t>(max_symbol_re) * pusch_constants::MAX_NOF_LAYERS *
+                                         sizeof(cf_t)) /
+                        sizeof(cf_t)),
+    eq_symbol_stride_nv(round_up_to_page(static_cast<size_t>(max_symbol_re) * pusch_constants::MAX_NOF_LAYERS *
+                                         sizeof(float)) /
+                        sizeof(float)),
+    llr_symbol_stride(round_up_to_page(static_cast<size_t>(max_symbol_re) * pusch_constants::MAX_NOF_LAYERS *
+                                       get_bits_per_symbol(modulation_scheme::QAM256))),
     ch_re_copy(MAX_PORTS, max_nof_rb * NOF_SUBCARRIERS_PER_RB),
-    temp_eq_re(max_nof_rb * NOF_SUBCARRIERS_PER_RB * pusch_constants::MAX_NOF_LAYERS),
-    temp_eq_noise_vars(max_nof_rb * NOF_SUBCARRIERS_PER_RB * pusch_constants::MAX_NOF_LAYERS),
+    temp_eq_re(static_cast<size_t>(max_deferred_group_symbols) * eq_symbol_stride_re),
+    temp_eq_noise_vars(static_cast<size_t>(max_deferred_group_symbols) * eq_symbol_stride_nv),
+    temp_llr(static_cast<size_t>(max_deferred_group_symbols) * llr_symbol_stride),
     ch_estimates_copy(max_nof_rb * NOF_SUBCARRIERS_PER_RB,
                       pusch_constants::MAX_NOF_RX_PORTS,
                       pusch_constants::MAX_NOF_LAYERS),
@@ -60,6 +76,17 @@ public:
 private:
   /// Data type for representing an RE mask within an OFDM symbol.
   using re_symbol_mask_type = bounded_bitset<MAX_NOF_SUBCARRIERS>;
+
+  /// \brief Rounds a byte count up to a whole number of pages.
+  ///
+  /// The Metal no-copy buffers require a page-aligned base address and map a page-rounded length,
+  /// so every buffer that a kernel reads or writes in place must start on a page boundary and its
+  /// allocation must cover whole pages.
+  static size_t round_up_to_page(size_t bytes)
+  {
+    const size_t page = compat::page_size();
+    return ((bytes + page - 1) / page) * page;
+  }
 
   /// \brief Gets channel data Resource Elements from the resource grid.
   ///
@@ -110,16 +137,29 @@ private:
   std::unique_ptr<evm_calculator> evm_calc;
   /// Descrambler component.
   std::unique_ptr<pseudo_random_generator> descrambler;
+  /// Number of RE of one OFDM symbol occupying the whole configured bandwidth.
+  unsigned max_symbol_re;
+  /// Page-aligned stride of one OFDM symbol in \c temp_eq_re, in elements.
+  unsigned eq_symbol_stride_re;
+  /// Page-aligned stride of one OFDM symbol in \c temp_eq_noise_vars, in elements.
+  unsigned eq_symbol_stride_nv;
+  /// Page-aligned stride of one OFDM symbol in \c temp_llr, in soft bits.
+  unsigned llr_symbol_stride;
   /// Copy buffer used to transfer channel modulation symbols from the resource grid to the equalizer.
   dynamic_re_buffer<cbf16_t> ch_re_copy;
   /// View buffer used to transfer channel modulation symbols from the resource grid to the equalizer.
   modular_re_buffer_reader<cbf16_t, MAX_PORTS> ch_re_view;
-  /// Buffer used to store channel modulation resource elements at the equalizer output.
-  /// Page-aligned so a Metal equalizer can write it in place (no staging copy).
+  /// Buffer used to store channel modulation resource elements at the equalizer output: one
+  /// page-aligned region per OFDM symbol of the deferred group, so a Metal equalizer can write all
+  /// of them in place while the whole group is in flight.
   std::vector<cf_t, page_aligned_allocator<cf_t>> temp_eq_re;
-  /// Buffer used to transfer symbol noise variances at the equalizer output.
-  /// Page-aligned for the same reason as \c temp_eq_re.
+  /// Buffer used to transfer symbol noise variances at the equalizer output: same layout as
+  /// \c temp_eq_re, and page-aligned for the same reason.
   std::vector<float, page_aligned_allocator<float>> temp_eq_noise_vars;
+  /// LLR staging of the deferred chain: one page-aligned region per OFDM symbol of the group. The
+  /// Metal demapper writes it in place, and the codeword blocks are splayed out of it after the
+  /// group wait (the codeword buffer splits a symbol into blocks only once its cursor advances).
+  std::vector<log_likelihood_ratio, page_aligned_allocator<log_likelihood_ratio>> temp_llr;
   /// Copy buffer used to transfer channel estimation coefficients from the channel estimate to the equalizer.
   dynamic_ch_est_list ch_estimates_copy;
   /// Buffer used to transfer noise variance estimates from the channel estimate to the equalizer.

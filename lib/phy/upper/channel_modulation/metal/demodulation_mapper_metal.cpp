@@ -9,6 +9,9 @@
 #include "ocudu/support/ocudu_assert.h"
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <utility>
+#include <vector>
 
 using namespace ocudu;
 
@@ -24,42 +27,62 @@ bool is_page_aligned_buffer(const void* ptr)
 
 } // namespace
 
+void demodulation_mapper_metal::staging::swap(staging& other) noexcept
+{
+  std::swap(ptr, other.ptr);
+  std::swap(cap, other.cap);
+}
+
+demodulation_mapper_metal::staging& demodulation_mapper_metal::staging::operator=(staging&& other) noexcept
+{
+  if (this != &other) {
+    compat::aligned_free(ptr);
+    ptr       = other.ptr;
+    cap       = other.cap;
+    other.ptr = nullptr;
+    other.cap = 0;
+  }
+  return *this;
+}
+
+demodulation_mapper_metal::staging::~staging()
+{
+  compat::aligned_free(ptr);
+}
+
+void* demodulation_mapper_metal::staging::ensure(size_t needed)
+{
+  if (cap >= needed) {
+    return ptr;
+  }
+  compat::aligned_free(ptr);
+  ptr = compat::aligned_alloc(compat::page_size(), needed);
+  ocudu_assert(ptr != nullptr, "Demapper staging allocation failed.");
+  cap = needed;
+  return ptr;
+}
+
 struct demodulation_mapper_metal::impl {
   metal::demod_metal_engine engine;
-  bool                      engine_ok      = false;
-  bool                      path_logged    = false;
-  bool                      chain_pending  = false;
+  bool                      engine_ok   = false;
+  bool                      path_logged = false;
 
-  // Deferred-submission state: where the staged LLRs must be copied back.
-  span<log_likelihood_ratio> pending_llrs    = {};
-  void*                      pending_llr_ptr = nullptr;
-  size_t                     pending_llr_sz  = 0;
+  /// In-flight deferred submits, oldest first. All of them are committed to the shared back-end
+  /// queue in order, so a single wait on the newest command buffer covers the whole FIFO.
+  std::vector<std::unique_ptr<pending_entry>> pending;
+  /// Entries released by wait(), kept so their staging buffers stay warm.
+  std::vector<std::unique_ptr<pending_entry>> pool;
+  /// Staging for the synchronous path (never in flight).
+  pending_entry scratch;
 
-  // Staging buffers (page-aligned, grown on demand and reused across calls).
-  void*  sym_buf = nullptr;
-  void*  nv_buf  = nullptr;
-  void*  llr_buf = nullptr;
-  size_t sym_cap = 0; // bytes
-  size_t nv_cap  = 0;
-  size_t llr_cap = 0;
-
-  ~impl()
+  std::unique_ptr<pending_entry> acquire()
   {
-    compat::aligned_free(sym_buf);
-    compat::aligned_free(nv_buf);
-    compat::aligned_free(llr_buf);
-  }
-
-  static void* ensure(void*& buf, size_t& cap, size_t needed)
-  {
-    if (cap >= needed) {
-      return buf;
+    if (pool.empty()) {
+      return std::make_unique<pending_entry>();
     }
-    compat::aligned_free(buf);
-    buf = compat::aligned_alloc(compat::page_size(), needed);
-    ocudu_assert(buf != nullptr, "Demapper staging allocation failed.");
-    cap = needed;
-    return buf;
+    std::unique_ptr<pending_entry> entry = std::move(pool.back());
+    pool.pop_back();
+    return entry;
   }
 };
 
@@ -101,14 +124,21 @@ void demodulation_mapper_metal::submit(span<log_likelihood_ratio> llrs,
 
 void demodulation_mapper_metal::wait()
 {
-  if (!impl_->chain_pending) {
+  if (impl_->pending.empty()) {
     return;
   }
-  impl_->chain_pending = false;
+  // Every deferred submit was committed to the shared back-end queue in order, so waiting for the
+  // newest command buffer also covers the older ones.
   impl_->engine.wait_committed();
-  // The kernel wrote the LLRs into the staging buffer: copy them into the caller's span, exactly
-  // like the synchronous path does.
-  std::memcpy(impl_->pending_llrs.data(), impl_->pending_llr_ptr, impl_->pending_llr_sz);
+  for (std::unique_ptr<pending_entry>& entry : impl_->pending) {
+    if (!entry->llr_direct) {
+      // The kernel wrote the LLRs into the staging buffer: copy them into the caller's span,
+      // exactly like the synchronous path does.
+      std::memcpy(entry->llrs.data(), entry->llr_ptr, entry->llr_sz);
+    }
+    impl_->pool.push_back(std::move(entry));
+  }
+  impl_->pending.clear();
 }
 
 void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
@@ -147,14 +177,22 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
 
   // The equalized symbols and their noise variances are consumed as-is when they are page
   // aligned (the PUSCH demodulator allocates them that way), otherwise they are staged.
+  std::unique_ptr<pending_entry> owned;
+  pending_entry*                 entry = &impl_->scratch;
+  if (defer) {
+    owned = impl_->acquire();
+    entry = owned.get();
+  }
+
   const bool sym_direct = is_page_aligned_buffer(symbols.data());
   const bool nv_direct  = is_page_aligned_buffer(noise_vars.data());
-  const void* sym_ptr = sym_direct ? static_cast<const void*>(symbols.data())
-                                   : impl::ensure(impl_->sym_buf, impl_->sym_cap, sym_bytes);
-  const void* nv_ptr  = nv_direct ? static_cast<const void*>(noise_vars.data())
-                                  : impl::ensure(impl_->nv_buf, impl_->nv_cap, nv_bytes);
-  // The LLR destination is the UL-SCH demultiplexer buffer (not page aligned): stage it.
-  auto* llr_ptr = static_cast<int8_t*>(impl::ensure(impl_->llr_buf, impl_->llr_cap, llr_bytes));
+  const void* sym_ptr = sym_direct ? static_cast<const void*>(symbols.data()) : entry->sym.ensure(sym_bytes);
+  const void* nv_ptr  = nv_direct ? static_cast<const void*>(noise_vars.data()) : entry->nv.ensure(nv_bytes);
+  // The LLR destination is usually the UL-SCH demultiplexer buffer (not page aligned) and is
+  // staged. A page-aligned destination (the deferred chain's per-symbol staging) is written by
+  // the kernel directly, which removes the copy-back entirely.
+  const bool llr_direct = is_page_aligned_buffer(llrs.data());
+  void*      llr_ptr    = llr_direct ? static_cast<void*>(llrs.data()) : entry->llr.ensure(llr_bytes);
 
   if (!sym_direct) {
     std::memcpy(const_cast<void*>(sym_ptr), symbols.data(), sym_bytes);
@@ -172,30 +210,36 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
     std::memset(llrs.data(), 0, llr_bytes);
     return;
   }
+
+  if (!impl_->path_logged) {
+    impl_->path_logged = true;
+    ocudulog::fetch_basic_logger("PHY").info("Metal demapper: inputs {} (symbols {} noise {}), LLRs {}, engine "
+                                             "no-copy wrap {}",
+                                             (sym_direct && nv_direct) ? "read in place" : "staged",
+                                             sym_direct ? "direct" : "staged",
+                                             nv_direct ? "direct" : "staged",
+                                             llr_direct ? "written in place" : "staged",
+                                             impl_->engine.last_call_used_no_copy() ? "OK" : "FELL BACK TO COPY");
+  }
+
   if (defer) {
     // Submitted for the fused chain: the wait (and the copy-back of the staged LLRs) is deferred
     // to wait() - or guaranteed by a later stage dispatching on the same queue.
     (void)impl_->engine.commit_batch();
-    impl_->chain_pending   = true;
-    impl_->pending_llrs    = llrs;
-    impl_->pending_llr_ptr = llr_ptr;
-    impl_->pending_llr_sz  = llr_bytes;
+    entry->llrs       = llrs;
+    entry->llr_ptr    = llr_ptr;
+    entry->llr_sz     = llr_bytes;
+    entry->llr_direct = llr_direct;
+    impl_->pending.push_back(std::move(owned));
     return;
   }
+
   (void)impl_->engine.commit_batch();
   impl_->engine.wait_committed();
 
-  if (!impl_->path_logged) {
-    impl_->path_logged = true;
-    ocudulog::fetch_basic_logger("PHY").info(
-        "Metal demapper: inputs {} (symbols {} noise {}), LLRs staged, engine no-copy wrap {}",
-        (sym_direct && nv_direct) ? "read in place" : "staged",
-        sym_direct ? "direct" : "staged",
-        nv_direct ? "direct" : "staged",
-        impl_->engine.last_call_used_no_copy() ? "OK" : "FELL BACK TO COPY");
+  if (!llr_direct) {
+    std::memcpy(llrs.data(), llr_ptr, llr_bytes);
   }
-
-  std::memcpy(llrs.data(), llr_ptr, llr_bytes);
 }
 
 double demodulation_mapper_metal::engine_gpu_wait_us() const

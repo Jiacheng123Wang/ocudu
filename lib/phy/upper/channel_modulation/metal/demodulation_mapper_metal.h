@@ -49,6 +49,41 @@ public:
   double engine_gpu_wait_us() const;
 
 private:
+  /// \brief Page-aligned staging buffer, grown on demand and kept across calls.
+  ///
+  /// One instance per in-flight dispatch: a deferred submit is committed without waiting, so the
+  /// buffers it hands to the kernel must stay untouched until its command buffer completes.
+  struct staging {
+    void*  ptr = nullptr;
+    size_t cap = 0; // bytes
+
+    staging() noexcept                 = default;
+    staging(const staging&)            = delete;
+    staging& operator=(const staging&) = delete;
+
+    staging(staging&& other) noexcept { swap(other); }
+    staging& operator=(staging&& other) noexcept;
+
+    ~staging();
+
+    void swap(staging& other) noexcept;
+
+    /// Returns a buffer of at least \c needed bytes, reallocating it when it is too small.
+    void* ensure(size_t needed);
+  };
+
+  /// \brief One submit() awaiting wait(): where the staged LLRs must be copied back, plus the
+  /// inputs it staged and that the kernel reads until its command buffer completes.
+  struct pending_entry {
+    span<log_likelihood_ratio> llrs       = {};
+    void*                      llr_ptr    = nullptr;
+    size_t                     llr_sz     = 0;
+    bool                       llr_direct = false;
+    staging                    sym;
+    staging                    nv;
+    staging                    llr;
+  };
+
   /// \brief Shared implementation of demodulate_soft() and submit().
   void run_demodulate(span<log_likelihood_ratio> llrs,
                       span<const cf_t>           symbols,

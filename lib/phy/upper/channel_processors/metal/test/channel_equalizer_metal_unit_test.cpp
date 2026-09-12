@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <cstdio>
 #include <random>
@@ -299,6 +300,122 @@ int main()
     if (!same) {
       std::fprintf(stderr, "FAIL: deferred equalization differs from the synchronous path\n");
       ok = false;
+    }
+  }
+
+  // Deferred chain with several submits in flight (A-2): the whole burst is committed before a
+  // single wait, so every submit must keep its own staged inputs and outputs. Distinct inputs per
+  // submit catch a shared staging buffer.
+  {
+    const unsigned nof_re = 128;
+    const unsigned ports  = 2;
+    const unsigned layers = 2;
+    const unsigned nof_submits = 5;
+    std::normal_distribution<float> dist(0.0F, 0.01F);
+
+    std::vector<cf_t>  eq_sync(nof_re * layers * nof_submits);
+    std::vector<float> nv_sync(nof_re * layers * nof_submits);
+    std::vector<cf_t>  eq_deferred(nof_re * layers * nof_submits);
+    std::vector<float> nv_deferred(nof_re * layers * nof_submits);
+
+    channel_equalizer_metal metal(false);
+    if (!metal.supports_deferred_chain()) {
+      std::fprintf(stderr, "FAIL: deferred chain not advertised (burst)\n");
+      ok = false;
+    }
+
+    // Each submit uses a different channel realization and noise variance, so a shared staging
+    // buffer would make the earlier outputs match the last one.
+    std::vector<std::vector<std::vector<cbf16_t>>> h(nof_submits,
+                                                     std::vector<std::vector<cbf16_t>>(ports * layers,
+                                                                                       std::vector<cbf16_t>(nof_re)));
+    std::vector<std::vector<std::vector<cbf16_t>>> y(nof_submits,
+                                                     std::vector<std::vector<cbf16_t>>(ports,
+                                                                                       std::vector<cbf16_t>(nof_re)));
+    std::vector<std::vector<float>> nv_est(nof_submits, std::vector<float>(ports));
+    for (unsigned s = 0; s != nof_submits; ++s) {
+      for (auto& slice : h[s]) {
+        for (auto& v : slice) {
+          v = cbf16_t(dist(rng), dist(rng));
+        }
+      }
+      for (auto& slice : y[s]) {
+        for (auto& v : slice) {
+          v = cbf16_t(dist(rng), dist(rng));
+        }
+      }
+      for (unsigned p = 0; p != ports; ++p) {
+        nv_est[s][p] = 0.01F * static_cast<float>(s + 1);
+      }
+    }
+
+    // Two destination layouts: page-aligned per-submit regions (what the PUSCH demodulator
+    // allocates, so the kernel writes them in place) and plain vectors (staged outputs copied back
+    // at wait()). Both must survive a burst: the staged path needs one staging buffer per submit.
+    for (unsigned variant = 0; variant != 2; ++variant) {
+      const bool        in_place = (variant == 0);
+      const size_t      page     = compat::page_size();
+      const size_t      eq_bytes = ((nof_re * layers * sizeof(cf_t) + page - 1) / page) * page;
+      const size_t      nv_bytes = ((nof_re * layers * sizeof(float) + page - 1) / page) * page;
+
+      std::vector<cf_t>  eq_plain(in_place ? 0 : nof_re * layers * nof_submits);
+      std::vector<float> nv_plain(in_place ? 0 : nof_re * layers * nof_submits);
+      auto*              eq_page = in_place ? static_cast<cf_t*>(compat::aligned_alloc(page, eq_bytes * nof_submits))
+                                            : nullptr;
+      auto*              nv_page = in_place ? static_cast<float*>(compat::aligned_alloc(page, nv_bytes * nof_submits))
+                                            : nullptr;
+
+      for (unsigned s = 0; s != nof_submits; ++s) {
+        modular_re_buffer_reader<cbf16_t, 8> ch_symbols(ports, nof_re);
+        for (unsigned p = 0; p != ports; ++p) {
+          ch_symbols.set_slice(p, y[s][p]);
+        }
+        modular_ch_est_list<8 * 4> ch_est(nof_re, ports, layers);
+        for (unsigned p = 0; p != ports; ++p) {
+          for (unsigned l = 0; l != layers; ++l) {
+            ch_est.set_channel(h[s][p * layers + l], p, l);
+          }
+        }
+        span<cf_t>  eq_s = span<cf_t>(eq_sync).subspan(s * nof_re * layers, nof_re * layers);
+        span<float> nv_s = span<float>(nv_sync).subspan(s * nof_re * layers, nof_re * layers);
+        metal.equalize(eq_s, nv_s, ch_symbols, ch_est, nv_est[s], 1.0F);
+
+        span<cf_t>  eq_d = in_place ? span<cf_t>(eq_page + s * eq_bytes / sizeof(cf_t), nof_re * layers)
+                                    : span<cf_t>(eq_plain).subspan(s * nof_re * layers, nof_re * layers);
+        span<float> nv_d = in_place ? span<float>(nv_page + s * nv_bytes / sizeof(float), nof_re * layers)
+                                    : span<float>(nv_plain).subspan(s * nof_re * layers, nof_re * layers);
+        metal.submit(eq_d, nv_d, ch_symbols, ch_est, nv_est[s], 1.0F);
+      }
+      // Single wait for the whole burst.
+      metal.wait();
+
+      if (in_place) {
+        // Gather the page-aligned regions into the comparison buffer.
+        for (unsigned s = 0; s != nof_submits; ++s) {
+          std::memcpy(eq_deferred.data() + s * nof_re * layers,
+                      eq_page + s * eq_bytes / sizeof(cf_t),
+                      nof_re * layers * sizeof(cf_t));
+          std::memcpy(nv_deferred.data() + s * nof_re * layers,
+                      nv_page + s * nv_bytes / sizeof(float),
+                      nof_re * layers * sizeof(float));
+        }
+      } else {
+        std::memcpy(eq_deferred.data(), eq_plain.data(), eq_plain.size() * sizeof(cf_t));
+        std::memcpy(nv_deferred.data(), nv_plain.data(), nv_plain.size() * sizeof(float));
+      }
+      compat::aligned_free(eq_page);
+      compat::aligned_free(nv_page);
+
+      const bool same = (std::memcmp(eq_sync.data(), eq_deferred.data(), eq_sync.size() * sizeof(cf_t)) == 0) &&
+                        (std::memcmp(nv_sync.data(), nv_deferred.data(), nv_sync.size() * sizeof(float)) == 0);
+      std::printf("[chain]  %u submits in flight + single wait (%s) bit-identical to equalize(): %s\n",
+                  nof_submits,
+                  in_place ? "in place" : "staged",
+                  same ? "OK" : "MISMATCH");
+      if (!same) {
+        std::fprintf(stderr, "FAIL: deferred equalization burst differs from the synchronous path\n");
+        ok = false;
+      }
     }
   }
 

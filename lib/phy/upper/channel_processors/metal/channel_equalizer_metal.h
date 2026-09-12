@@ -57,18 +57,60 @@ public:
   double engine_gpu_wait_us() const;
 
 private:
-  /// \brief Shared implementation of equalize() and submit(): stages the inputs and either waits
-  /// for the command buffer (defer = false) or only commits it (defer = true).
+  /// \brief Page-aligned staging buffer, grown on demand and kept across calls.
+  ///
+  /// One instance per in-flight dispatch: a deferred submit is committed without waiting, so the
+  /// buffers it hands to the kernel must stay untouched until its command buffer completes. A
+  /// single shared set of buffers would be overwritten by the next submit of the same burst.
+  struct staging {
+    void*  ptr = nullptr;
+    size_t cap = 0; // bytes
+
+    staging() noexcept                 = default;
+    staging(const staging&)            = delete;
+    staging& operator=(const staging&) = delete;
+
+    staging(staging&& other) noexcept { swap(other); }
+    staging& operator=(staging&& other) noexcept;
+
+    ~staging();
+
+    void swap(staging& other) noexcept;
+
+    /// Returns a buffer of at least \c needed bytes, reallocating it when it is too small.
+    void* ensure(size_t needed);
+  };
+
+  /// \brief One submit() awaiting wait(): where its outputs must be copied back, plus the inputs it
+  /// staged and that the kernel reads until its command buffer completes.
+  struct pending_entry {
+    span<cf_t>  eq = {};
+    span<float> nv = {};
+    void*       eq_ptr    = nullptr;
+    void*       nv_ptr    = nullptr;
+    bool        eq_direct = false;
+    bool        nv_direct = false;
+    staging     h;
+    staging     y;
+    staging     s;
+    staging     eq_stage;
+    staging     nv_stage;
+  };
+
+  /// \brief Shared implementation of equalize() and submit(): stages the inputs into \c entry and
+  /// either waits for the command buffer (defer = false) or only commits it (defer = true).
   void run_equalize(span<cf_t>                       eq_symbols,
                     span<float>                      eq_noise_vars,
                     const re_buffer_reader<cbf16_t>& ch_symbols,
                     const ch_est_list&               ch_estimates,
                     span<const float>                noise_var_estimates,
                     float                            tx_scaling,
+                    pending_entry&                   entry,
                     bool                             defer);
 
-  /// \brief Copies the staged outputs back to the caller after the command buffer completed.
-  void finish_symbol();
+  /// \brief Copies the staged outputs of \c entry back to the caller after its command buffer
+  /// completed (no-op for the in-place path).
+  void finish_symbol(pending_entry& entry);
 
   struct impl;
   std::unique_ptr<impl> impl_;

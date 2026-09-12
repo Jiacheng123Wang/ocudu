@@ -15,6 +15,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <utility>
+#include <vector>
 
 using namespace ocudu;
 
@@ -30,6 +33,41 @@ bool is_page_aligned_buffer(const void* ptr)
 
 } // namespace
 
+void channel_equalizer_metal::staging::swap(staging& other) noexcept
+{
+  std::swap(ptr, other.ptr);
+  std::swap(cap, other.cap);
+}
+
+channel_equalizer_metal::staging& channel_equalizer_metal::staging::operator=(staging&& other) noexcept
+{
+  if (this != &other) {
+    compat::aligned_free(ptr);
+    ptr       = other.ptr;
+    cap       = other.cap;
+    other.ptr = nullptr;
+    other.cap = 0;
+  }
+  return *this;
+}
+
+channel_equalizer_metal::staging::~staging()
+{
+  compat::aligned_free(ptr);
+}
+
+void* channel_equalizer_metal::staging::ensure(size_t needed)
+{
+  if (cap >= needed) {
+    return ptr;
+  }
+  compat::aligned_free(ptr);
+  ptr = compat::aligned_alloc(compat::page_size(), needed);
+  ocudu_assert(ptr != nullptr, "Equalizer staging allocation failed.");
+  cap = needed;
+  return ptr;
+}
+
 struct channel_equalizer_metal::impl {
   metal::equalizer_metal_engine engine;
   bool                           engine_ok = false;
@@ -38,46 +76,22 @@ struct channel_equalizer_metal::impl {
   // One-shot diagnostic: reports whether the caller's buffers allow the in-place path.
   bool path_logged = false;
 
-  // Deferred-submission state (submit()/wait()): where the staged outputs must be copied back.
-  bool         chain_pending     = false;
-  span<cf_t>   pending_eq        = {};
-  span<float>  pending_nv        = {};
-  void*        pending_eq_ptr    = nullptr;
-  void*        pending_nv_ptr    = nullptr;
-  bool         pending_eq_direct = false;
-  bool         pending_nv_direct = false;
+  /// In-flight deferred submits, oldest first. All of them are committed to the shared back-end
+  /// queue in order, so a single wait on the newest command buffer covers the whole FIFO.
+  std::vector<std::unique_ptr<pending_entry>> pending;
+  /// Entries released by wait(), kept so their staging buffers stay warm.
+  std::vector<std::unique_ptr<pending_entry>> pool;
+  /// Staging for the synchronous path (never in flight).
+  pending_entry scratch;
 
-  // Staging buffers (page-aligned, grown on demand and reused across calls).
-  void* h_buf      = nullptr;
-  void* s_buf      = nullptr;
-  void* y_buf      = nullptr;
-  void* eq_buf     = nullptr;
-  void* nv_buf     = nullptr;
-  size_t h_cap     = 0; // bytes
-  size_t s_cap     = 0;
-  size_t y_cap     = 0;
-  size_t eq_cap    = 0;
-  size_t nv_cap    = 0;
-
-  ~impl()
+  std::unique_ptr<pending_entry> acquire()
   {
-    compat::aligned_free(h_buf);
-    compat::aligned_free(s_buf);
-    compat::aligned_free(y_buf);
-    compat::aligned_free(eq_buf);
-    compat::aligned_free(nv_buf);
-  }
-
-  static void* ensure(void*& buf, size_t& cap, size_t needed)
-  {
-    if (cap >= needed) {
-      return buf;
+    if (pool.empty()) {
+      return std::make_unique<pending_entry>();
     }
-    compat::aligned_free(buf);
-    buf = compat::aligned_alloc(compat::page_size(), needed);
-    ocudu_assert(buf != nullptr, "Equalizer staging allocation failed.");
-    cap = needed;
-    return buf;
+    std::unique_ptr<pending_entry> entry = std::move(pool.back());
+    pool.pop_back();
+    return entry;
   }
 };
 
@@ -105,7 +119,7 @@ void channel_equalizer_metal::equalize(span<cf_t>                       eq_symbo
                                        span<const float>                noise_var_estimates,
                                        float                            tx_scaling)
 {
-  run_equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, false);
+  run_equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, impl_->scratch, false);
 }
 
 void channel_equalizer_metal::submit(span<cf_t>                       eq_symbols,
@@ -115,16 +129,24 @@ void channel_equalizer_metal::submit(span<cf_t>                       eq_symbols
                                      span<const float>                noise_var_estimates,
                                      float                            tx_scaling)
 {
-  run_equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, true);
+  std::unique_ptr<pending_entry> entry = impl_->acquire();
+  run_equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, *entry, true);
+  impl_->pending.push_back(std::move(entry));
 }
 
 void channel_equalizer_metal::wait()
 {
-  if (!impl_->chain_pending) {
+  if (impl_->pending.empty()) {
     return;
   }
+  // Every deferred submit was committed to the shared back-end queue in order, so waiting for the
+  // newest command buffer also covers the older ones.
   impl_->engine.wait_committed();
-  finish_symbol();
+  for (std::unique_ptr<pending_entry>& entry : impl_->pending) {
+    finish_symbol(*entry);
+    impl_->pool.push_back(std::move(entry));
+  }
+  impl_->pending.clear();
 }
 
 void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_symbols,
@@ -133,6 +155,7 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
                                            const ch_est_list&               ch_estimates,
                                            span<const float>                noise_var_estimates,
                                            float                            tx_scaling,
+                                           pending_entry&                   entry,
                                            bool                             defer)
 {
   const unsigned nof_re       = ch_estimates.get_nof_re();
@@ -196,15 +219,13 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
   const size_t nv_bytes = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
 
-  auto*        h_ptr    = static_cast<cbf16_t*>(impl::ensure(impl_->h_buf, impl_->h_cap, h_bytes));
-  auto*        y_ptr    = static_cast<cbf16_t*>(impl::ensure(impl_->y_buf, impl_->y_cap, y_bytes));
-  auto*        s_ptr    = static_cast<float*>(impl::ensure(impl_->s_buf, impl_->s_cap, s_bytes));
+  auto*        h_ptr    = static_cast<cbf16_t*>(entry.h.ensure(h_bytes));
+  auto*        y_ptr    = static_cast<cbf16_t*>(entry.y.ensure(y_bytes));
+  auto*        s_ptr    = static_cast<float*>(entry.s.ensure(s_bytes));
   const bool   eq_direct = is_page_aligned_buffer(eq_symbols.data());
   const bool   nv_direct = is_page_aligned_buffer(eq_noise_vars.data());
-  void*        eq_ptr    = eq_direct ? static_cast<void*>(eq_symbols.data())
-                                     : impl::ensure(impl_->eq_buf, impl_->eq_cap, eq_bytes);
-  void*        nv_ptr    = nv_direct ? static_cast<void*>(eq_noise_vars.data())
-                                     : impl::ensure(impl_->nv_buf, impl_->nv_cap, nv_bytes);
+  void*        eq_ptr    = eq_direct ? static_cast<void*>(eq_symbols.data()) : entry.eq_stage.ensure(eq_bytes);
+  void*        nv_ptr    = nv_direct ? static_cast<void*>(eq_noise_vars.data()) : entry.nv_stage.ensure(nv_bytes);
 
   for (unsigned i_used = 0; i_used != nof_used_ports; ++i_used) {
     const unsigned i_port = port_map[i_used];
@@ -242,20 +263,26 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
                                        tx_scaling,
                                        single_layer ? 1.0F : tx_scaling);
   if (!ok) {
-    // Engine failure: mirror the CPU invalid-input semantics instead of leaving stale data.
+    // Engine failure: mirror the CPU invalid-input semantics instead of leaving stale data. The
+    // outputs are written in place, so the entry must not copy staging data over them later.
     (void)impl_->engine.flush_batch();
     ocuduvec::zero(eq_symbols);
     std::fill(eq_noise_vars.begin(), eq_noise_vars.end(), std::numeric_limits<float>::infinity());
+    entry.eq_direct = true;
+    entry.nv_direct = true;
+    entry.eq        = eq_symbols;
+    entry.nv        = eq_noise_vars;
+    entry.eq_ptr    = nullptr;
+    entry.nv_ptr    = nullptr;
     return;
   }
   // Remember what has to be copied back once the command buffer completes (deferred path only).
-  impl_->chain_pending  = defer;
-  impl_->pending_eq     = eq_symbols;
-  impl_->pending_nv     = eq_noise_vars;
-  impl_->pending_eq_ptr = eq_ptr;
-  impl_->pending_nv_ptr = nv_ptr;
-  impl_->pending_eq_direct = eq_direct;
-  impl_->pending_nv_direct = nv_direct;
+  entry.eq                 = eq_symbols;
+  entry.nv                 = eq_noise_vars;
+  entry.eq_ptr             = eq_ptr;
+  entry.nv_ptr             = nv_ptr;
+  entry.eq_direct          = eq_direct;
+  entry.nv_direct          = nv_direct;
 
   if (defer) {
     // Submitted for the fused chain: the wait is deferred. The caller (or the demapper that
@@ -265,26 +292,25 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
     return;
   }
   (void)impl_->engine.flush_batch();
-  finish_symbol();
+  finish_symbol(entry);
 }
-void channel_equalizer_metal::finish_symbol()
+void channel_equalizer_metal::finish_symbol(pending_entry& entry)
 {
   // Copies the staged outputs back after the command buffer completed (no-op for the in-place
   // path). The one-shot routing diagnostic is emitted here, once the wrap outcome is known.
   if (!impl_->path_logged) {
     impl_->path_logged = true;
-    ocudulog::fetch_basic_logger("PHY").info(
-        "Metal equalizer: outputs {}, engine no-copy wrap {}",
-        impl_->pending_eq_direct && impl_->pending_nv_direct ? "written in place" : "written to staging and copied back",
-        impl_->engine.last_call_used_no_copy() ? "OK" : "FELL BACK TO COPY");
+    ocudulog::fetch_basic_logger("PHY").info("Metal equalizer: outputs {}, engine no-copy wrap {}",
+                                             entry.eq_direct && entry.nv_direct ? "written in place"
+                                                                                : "written to staging and copied back",
+                                             impl_->engine.last_call_used_no_copy() ? "OK" : "FELL BACK TO COPY");
   }
-  if (!impl_->pending_eq_direct) {
-    std::memcpy(impl_->pending_eq.data(), impl_->pending_eq_ptr, impl_->pending_eq.size() * sizeof(cf_t));
+  if (!entry.eq_direct) {
+    std::memcpy(entry.eq.data(), entry.eq_ptr, entry.eq.size() * sizeof(cf_t));
   }
-  if (!impl_->pending_nv_direct) {
-    std::memcpy(impl_->pending_nv.data(), impl_->pending_nv_ptr, impl_->pending_nv.size() * sizeof(float));
+  if (!entry.nv_direct) {
+    std::memcpy(entry.nv.data(), entry.nv_ptr, entry.nv.size() * sizeof(float));
   }
-  impl_->chain_pending = false;
 }
 
 double channel_equalizer_metal::engine_gpu_wait_us() const

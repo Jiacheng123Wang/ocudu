@@ -259,6 +259,82 @@ int main()
     }
   }
 
+  // Deferred chain with several submits in flight (A-2): the whole burst is committed before a
+  // single wait. Distinct inputs per submit catch a shared staging buffer, and the split of one
+  // symbol into blocks must give the same LLRs as a single whole-symbol dispatch (the PUSCH
+  // demodulator demaps a whole symbol and replays the codeword block split afterwards).
+  {
+    const unsigned    nof_blocks  = 3;
+    const unsigned    block_syms  = 256;
+    const unsigned    nof_symbols = nof_blocks * block_syms;
+    const unsigned    bps         = 6;
+    auto              dist        = std::normal_distribution<float>(0.0F, 0.3F);
+    std::vector<cf_t>  symbols(nof_symbols);
+    std::vector<float> noise_vars(nof_symbols);
+    for (auto& z : symbols) {
+      z = {dist(rng), dist(rng)};
+    }
+    for (auto& n : noise_vars) {
+      n = 0.05F + 0.05F * std::abs(dist(rng));
+    }
+
+    // Reference: one synchronous dispatch per block.
+    std::vector<log_likelihood_ratio> llrs_ref(nof_symbols * bps);
+    {
+      demodulation_mapper_metal metal;
+      for (unsigned b = 0; b != nof_blocks; ++b) {
+        metal.demodulate_soft(span<log_likelihood_ratio>(llrs_ref).subspan(b * block_syms * bps, block_syms * bps),
+                              span<const cf_t>(symbols).subspan(b * block_syms, block_syms),
+                              span<const float>(noise_vars).subspan(b * block_syms, block_syms),
+                              modulation_scheme::QAM64);
+      }
+    }
+
+    // Deferred burst: one dispatch per block, staged destinations, a single wait at the end.
+    {
+      std::vector<log_likelihood_ratio> llrs_def(nof_symbols * bps);
+      demodulation_mapper_metal        metal;
+      for (unsigned b = 0; b != nof_blocks; ++b) {
+        metal.submit(span<log_likelihood_ratio>(llrs_def).subspan(b * block_syms * bps, block_syms * bps),
+                     span<const cf_t>(symbols).subspan(b * block_syms, block_syms),
+                     span<const float>(noise_vars).subspan(b * block_syms, block_syms),
+                     modulation_scheme::QAM64);
+      }
+      metal.wait();
+      const bool same = bit_exact(llrs_ref, llrs_def);
+      std::printf("[chain]  %u staged submits in flight + single wait bit-identical: %s\n",
+                  nof_blocks,
+                  same ? "OK" : "MISMATCH");
+      if (!same) {
+        std::fprintf(stderr, "FAIL: deferred demapping burst differs from the synchronous path\n");
+        ok = false;
+      }
+    }
+
+    // Deferred burst into one page-aligned destination (the PUSCH demodulator layout): the kernel
+    // writes the LLRs in place, so a whole symbol is one dispatch and the block split is only a
+    // view of the result.
+    {
+      const size_t page      = compat::page_size();
+      const size_t llr_bytes = ((static_cast<size_t>(nof_symbols) * bps + page - 1) / page) * page;
+      auto* llr_buf = static_cast<log_likelihood_ratio*>(compat::aligned_alloc(page, llr_bytes));
+      std::memset(llr_buf, 0, llr_bytes);
+
+      demodulation_mapper_metal metal;
+      metal.submit(span<log_likelihood_ratio>(llr_buf, nof_symbols * bps), symbols, noise_vars, modulation_scheme::QAM64);
+      metal.wait();
+
+      const bool same =
+          bit_exact(llrs_ref, span<const log_likelihood_ratio>(llr_buf, nof_symbols * bps));
+      std::printf("[chain]  page-aligned in-place LLRs + block split bit-identical: %s\n", same ? "OK" : "MISMATCH");
+      if (!same) {
+        std::fprintf(stderr, "FAIL: in-place demapping or the block split differs from the synchronous path\n");
+        ok = false;
+      }
+      compat::aligned_free(llr_buf);
+    }
+  }
+
   // Steady-state latency (audit data): 100 calls per backend at 64QAM.
   {
     const unsigned nof_symbols = 256;

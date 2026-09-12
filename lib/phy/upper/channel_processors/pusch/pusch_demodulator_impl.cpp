@@ -10,6 +10,10 @@
 #include "ocudu/ocuduvec/simd.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_codeword_buffer.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_demodulator_notifier.h"
+#include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <cstring>
 
 #if defined(__SSE3__)
 #include <immintrin.h>
@@ -297,163 +301,242 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   float    total_noise_var_accumulate = 0.0;
   float    total_evm_accumulate       = 0.0;
 
-  // Process each OFDM symbol.
-  for (unsigned i_symbol = config.start_symbol_index, i_symbol_end = config.start_symbol_index + config.nof_symbols;
-       i_symbol != i_symbol_end;
-       ++i_symbol) {
-    // Stats accumulators for the OFDM symbol.
-    unsigned symbol_evm_symbol_count     = 0;
-    unsigned symbol_sinr_softbit_count   = 0;
-    float    symbol_noise_var_accumulate = 0.0;
-    float    symbol_evm_accumulate       = 0.0;
+  // Number of OFDM symbols whose dispatches share a single wait: the deferred chain commits the
+  // equalization and the demapping of a whole group and synchronizes once. Without it the group is
+  // a single symbol and the code below reproduces the original per-symbol path call for call.
+  // Debug probe (documented in the plan): OCUDU_PUSCH_DEFERRED_GROUP overrides the group size so a
+  // suspicious RX regression can be bisected down to the per-symbol chain (1) without rebuilding.
+  static const unsigned deferred_group_size = []() {
+    const char* env = std::getenv("OCUDU_PUSCH_DEFERRED_GROUP");
+    return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : max_deferred_group_symbols;
+  }();
+  const unsigned group_size = deferred_chain ? std::clamp(deferred_group_size, 1U, max_deferred_group_symbols) : 1;
 
-    // Select RE mask for the symbol.
-    re_symbol_mask_type& symbol_re_mask = config.dmrs_symb_pos.test(i_symbol) ? re_mask_dmrs : re_mask;
+  // Per-symbol data and stats of one group.
+  struct symbol_state {
+    unsigned    i_symbol             = 0;
+    unsigned    nof_re               = 0;
+    unsigned    llr_offset           = 0;
+    span<cf_t>  eq                   = {};
+    span<float> nv                   = {};
+    unsigned    evm_symbol_count     = 0;
+    unsigned    sinr_softbit_count   = 0;
+    float       noise_var_accumulate = 0.0F;
+    float       evm_accumulate       = 0.0F;
+  };
 
-    // Count the amount of active RE in the symbol.
-    unsigned nof_re_symbol = symbol_re_mask.count();
+  // Process the OFDM symbols of the slot in groups.
+  for (unsigned group_begin = config.start_symbol_index,
+                group_stop  = config.start_symbol_index + config.nof_symbols;
+       group_begin < group_stop;
+       group_begin += group_size) {
+    const unsigned group_end = std::min(group_begin + group_size, group_stop);
 
-    // Skip symbol if it does not contain data.
-    if (nof_re_symbol == 0) {
-      continue;
-    }
+    std::array<symbol_state, max_deferred_group_symbols> symbols{};
+    unsigned                                             nof_group_symbols = 0;
 
-    // Resize equalizer output buffers.
-    span<cf_t>  eq_re         = span<cf_t>(temp_eq_re).first(nof_re_symbol * config.nof_tx_layers);
-    span<float> eq_noise_vars = span<float>(temp_eq_noise_vars).first(nof_re_symbol * config.nof_tx_layers);
+    // Pass 1: extract the channel data, equalize channels and, for each Tx layer, combine
+    // contribution from all Rx antenna ports. With the deferred chain the equalization is only
+    // submitted here, so the whole group is in flight before the single synchronization point.
+    unsigned llr_offset = 0;
+    for (unsigned i_symbol = group_begin; i_symbol != group_end; ++i_symbol) {
+      // Select RE mask for the symbol.
+      re_symbol_mask_type& symbol_re_mask = config.dmrs_symb_pos.test(i_symbol) ? re_mask_dmrs : re_mask;
 
-    // Look for DC (Direct Current) subcarrier only with transform precoding disabled. This step is skipped when
-    // transform precoding is used, as forcing the DC to zero in that case may introduce non-linear distortion after the
-    // inverse transform. The issue is particularly pronounced for narrowband PUSCH transmissions.
-    std::optional<unsigned> dc_position = config.enable_transform_precoding ? std::nullopt : config.dc_position;
+      // Count the amount of active RE in the symbol.
+      unsigned nof_re_symbol = symbol_re_mask.count();
 
-    // Extract channel estimates from the resource grid.
-    interval<unsigned>      re_interval(config.rb_mask.find_lowest() * NOF_SUBCARRIERS_PER_RB,
-                                   (config.rb_mask.find_highest() + 1) * NOF_SUBCARRIERS_PER_RB);
-    re_symbol_mask_type     symbol_re_mask_local = symbol_re_mask.slice(re_interval.start(), re_interval.stop());
-    std::optional<unsigned> dc_position_local    = std::nullopt;
-    if (dc_position.has_value() && (re_interval.contains(*dc_position))) {
-      dc_position_local = *dc_position - re_interval.start();
-    }
-
-    const channel_equalizer::ch_est_list& ch_estimates = get_ch_data_estimates(
-        est_results, i_symbol, config.nof_tx_layers, symbol_re_mask_local, dc_position_local, config.rx_ports);
-
-    // Extract the Rx port noise variances from the channel estimation.
-    for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
-      noise_var_estimates[i_port] = est_results.get_noise_variance(i_port);
-    }
-
-    // Extract the data symbols, equalize channels and, for each Tx layer, combine contribution from all Rx antenna
-    // ports.
-    const re_buffer_reader<cbf16_t>& ch_re = get_ch_data_re(grid, i_symbol, symbol_re_mask, config.rx_ports);
-    if (deferred_chain) {
-      // Fused path: submit the equalization without waiting. The demapper below dispatches on the
-      // same command queue, so waiting for its command buffer also guarantees this one completed;
-      // the equalized symbols and noise variances are read only after that wait.
-      equalizer->submit(
-          eq_re, eq_noise_vars, ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
-    } else {
-      equalizer->equalize(
-          eq_re, eq_noise_vars, ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
-
-      // Revert transform precoding for the entire OFDM symbol.
-      if (config.enable_transform_precoding) {
-        ocudu_assert(config.nof_tx_layers == 1,
-                     "Transform precoding is only possible with one layer (i.e. {}).",
-                     config.nof_tx_layers);
-        precoder->deprecode_ofdm_symbol(eq_re, eq_re);
-        precoder->deprecode_ofdm_symbol_noise(eq_noise_vars, eq_noise_vars);
+      // Skip symbol if it does not contain data.
+      if (nof_re_symbol == 0) {
+        continue;
       }
 
-      // Estimate post equalization Signal-to-Interference-plus-Noise Ratio.
-      if (compute_post_eq_sinr) {
-        symbol_noise_var_accumulate += filter_infinite_and_accumulate(symbol_sinr_softbit_count, eq_noise_vars);
-      }
-    }
+      // Select the page-aligned region of the group buffers that holds this OFDM symbol: every
+      // region starts on a page boundary, so the Metal kernels read and write them in place.
+      const unsigned i_group = nof_group_symbols++;
+      symbol_state&  state   = symbols[i_group];
+      state.i_symbol         = i_symbol;
+      state.nof_re           = nof_re_symbol;
+      state.llr_offset       = llr_offset;
+      state.eq               = span<cf_t>(temp_eq_re).subspan(static_cast<size_t>(i_group) * eq_symbol_stride_re,
+                                                nof_re_symbol * config.nof_tx_layers);
+      state.nv = span<float>(temp_eq_noise_vars).subspan(static_cast<size_t>(i_group) * eq_symbol_stride_nv,
+                                                         nof_re_symbol * config.nof_tx_layers);
+      llr_offset += nof_re_symbol * nof_bits_per_re;
 
-    // Counts the number of processed RE for the OFDM symbol.
-    unsigned count_re_symbol = 0;
+      ocudu_assert(nof_re_symbol <= max_symbol_re,
+                   "The number of active RE of symbol {} (i.e., {}) exceeds the configured bandwidth (i.e., {}).",
+                   i_symbol,
+                   nof_re_symbol,
+                   max_symbol_re);
+      ocudu_assert(llr_offset <= max_deferred_group_symbols * llr_symbol_stride,
+                   "The group of {} symbols needs {} soft bits, more than the {} available.",
+                   max_deferred_group_symbols,
+                   llr_offset,
+                   max_deferred_group_symbols * llr_symbol_stride);
 
-    // Process subcarriers in groups.
-    while (count_re_symbol != nof_re_symbol) {
-      // Calculate the remainder number of subcarriers to process for the current OFDM symbol.
-      unsigned remain_nof_subc = nof_re_symbol - count_re_symbol;
+      // Look for DC (Direct Current) subcarrier only with transform precoding disabled. This step is skipped when
+      // transform precoding is used, as forcing the DC to zero in that case may introduce non-linear distortion after the
+      // inverse transform. The issue is particularly pronounced for narrowband PUSCH transmissions.
+      std::optional<unsigned> dc_position = config.enable_transform_precoding ? std::nullopt : config.dc_position;
 
-      // Get a view of the codeword buffer destination.
-      span<log_likelihood_ratio> codeword = codeword_buffer.get_next_block_view(remain_nof_subc * nof_bits_per_re);
-
-      // Limit block size if the codeword block is smaller.
-      ocudu_assert(codeword.size() % nof_bits_per_re == 0,
-                   "The codeword block size (i.e., {}) must be multiple of the number of bits per RE (i.e., {}).",
-                   codeword.size(),
-                   nof_bits_per_re);
-
-      // Select equalizer output.
-      unsigned          nof_block_softbits    = codeword.size();
-      unsigned          codeword_block_offset = count_re_symbol * config.nof_tx_layers;
-      unsigned          codeword_block_size   = nof_block_softbits / get_bits_per_symbol(config.modulation);
-      span<const cf_t>  eq_re_block           = eq_re.subspan(codeword_block_offset, codeword_block_size);
-      span<const float> eq_noise_vars_block   = eq_noise_vars.subspan(codeword_block_offset, codeword_block_size);
-
-      // Build LLRs from channel symbols.
-      demapper->demodulate_soft(codeword, eq_re_block, eq_noise_vars_block, config.modulation);
-
-      // Calculate EVM only if it is available.
-      if (evm_calc) {
-        symbol_evm_accumulate +=
-            static_cast<float>(codeword_block_size) * evm_calc->calculate(codeword, eq_re_block, config.modulation);
-        symbol_evm_symbol_count += codeword_block_size;
+      // Extract channel estimates from the resource grid.
+      interval<unsigned>      re_interval(config.rb_mask.find_lowest() * NOF_SUBCARRIERS_PER_RB,
+                                     (config.rb_mask.find_highest() + 1) * NOF_SUBCARRIERS_PER_RB);
+      re_symbol_mask_type     symbol_re_mask_local = symbol_re_mask.slice(re_interval.start(), re_interval.stop());
+      std::optional<unsigned> dc_position_local    = std::nullopt;
+      if (dc_position.has_value() && (re_interval.contains(*dc_position))) {
+        dc_position_local = *dc_position - re_interval.start();
       }
 
-      // Generate scrambling sequence.
-      static_bit_buffer<pusch_constants::MAX_NOF_BITS_PER_OFDM_SYMBOL> scrambling_seq(nof_block_softbits);
-      descrambler->generate(scrambling_seq);
+      const channel_equalizer::ch_est_list& ch_estimates = get_ch_data_estimates(
+          est_results, i_symbol, config.nof_tx_layers, symbol_re_mask_local, dc_position_local, config.rx_ports);
 
-      // Revert scrambling.
-      revert_scrambling(codeword, codeword, scrambling_seq);
+      // Extract the Rx port noise variances from the channel estimation.
+      for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
+        noise_var_estimates[i_port] = est_results.get_noise_variance(i_port);
+      }
 
-      // Increment the number of processed RE within the OFDM symbol.
-      count_re_symbol += nof_block_softbits / nof_bits_per_re;
+      // Extract the data symbols, equalize channels and, for each Tx layer, combine contribution from all Rx antenna
+      // ports.
+      const re_buffer_reader<cbf16_t>& ch_re = get_ch_data_re(grid, i_symbol, symbol_re_mask, config.rx_ports);
+      if (deferred_chain) {
+        // Fused path: submit the equalization without waiting. The demapper dispatches on the
+        // same command queue, so waiting for its command buffer also guarantees this one
+        // completed; the equalized symbols and noise variances are read only after that wait.
+        equalizer->submit(
+            state.eq, state.nv, ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
+      } else {
+        equalizer->equalize(
+            state.eq, state.nv, ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
 
-      // Update and notify statistics if it is the last processed block for the OFDM symbol. The provisional stats must
-      // be notified earlier than the new processed block to ensure the stats are available upon the notification of the
-      // results.
-      if (count_re_symbol == nof_re_symbol) {
-        // Prepare OFDM symbol stats and report.
-        pusch_demodulator_notifier::demodulation_stats stats;
-        if ((symbol_sinr_softbit_count != 0) && (symbol_noise_var_accumulate > 0.0)) {
-          float mean_noise_var = symbol_noise_var_accumulate / static_cast<float>(symbol_sinr_softbit_count);
-          stats.sinr_dB.emplace(-convert_power_to_dB(mean_noise_var));
-        } else {
-          stats.sinr_dB.emplace(std::numeric_limits<float>::infinity());
+        // Revert transform precoding for the entire OFDM symbol.
+        if (config.enable_transform_precoding) {
+          ocudu_assert(config.nof_tx_layers == 1,
+                       "Transform precoding is only possible with one layer (i.e. {}).",
+                       config.nof_tx_layers);
+          precoder->deprecode_ofdm_symbol(state.eq, state.eq);
+          precoder->deprecode_ofdm_symbol_noise(state.nv, state.nv);
         }
-        if (symbol_evm_symbol_count != 0) {
-          stats.evm.emplace(symbol_evm_accumulate / static_cast<float>(symbol_evm_symbol_count));
+
+        // Estimate post equalization Signal-to-Interference-plus-Noise Ratio.
+        if (compute_post_eq_sinr) {
+          state.noise_var_accumulate += filter_infinite_and_accumulate(state.sinr_softbit_count, state.nv);
         }
-        notifier.on_provisional_stats(i_symbol, stats);
-
-        // Prepare final stats.
-        total_evm_symbol_count += symbol_evm_symbol_count;
-        total_sinr_softbit_count += symbol_sinr_softbit_count;
-        total_noise_var_accumulate += symbol_noise_var_accumulate;
-        total_evm_accumulate += symbol_evm_accumulate;
       }
-
-      // Notify a new processed block.
-      codeword_buffer.on_new_block(codeword, scrambling_seq);
     }
 
     if (deferred_chain) {
-      // The demapper's wait already covers the equalization command buffer (same queue, submitted
-      // order); this call only releases the deferred state. It is unconditional so the combination
-      // "deferred equalizer + waiting demapper" stays correct in every backend mix.
+      // Pass 2: demap every symbol of the group. A whole OFDM symbol is dispatched as one command
+      // buffer into its page-aligned staging region: how the codeword buffer splits a symbol into
+      // blocks only materializes once its cursor advances, so that split is replayed by the
+      // consumption pass below.
+      for (unsigned i_group = 0; i_group != nof_group_symbols; ++i_group) {
+        const symbol_state&        state = symbols[i_group];
+        span<log_likelihood_ratio> llrs =
+            span<log_likelihood_ratio>(temp_llr).subspan(state.llr_offset, state.nof_re * nof_bits_per_re);
+        demapper->submit(llrs, state.eq, state.nv, config.modulation);
+      }
+
+      // Single synchronization point of the group. The demapper's wait also covers the
+      // equalization command buffers: both stages dispatch on the same back-end queue and the
+      // equalization of the whole group was committed first.
+      demapper->wait();
       equalizer->wait();
 
-      // Post-equalization SINR: the very same reduction as the non-deferred path above, moved past
-      // the wait so the equalized noise variances are guaranteed to be visible.
+      // Post-equalization SINR of every symbol of the group: the very same reduction as the
+      // non-deferred path, moved past the wait so the equalized noise variances are guaranteed to
+      // be visible.
       if (compute_post_eq_sinr) {
-        symbol_noise_var_accumulate += filter_infinite_and_accumulate(symbol_sinr_softbit_count, eq_noise_vars);
+        for (unsigned i_group = 0; i_group != nof_group_symbols; ++i_group) {
+          symbol_state& state = symbols[i_group];
+          state.noise_var_accumulate += filter_infinite_and_accumulate(state.sinr_softbit_count, state.nv);
+        }
+      }
+    }
+
+    // Pass 3: consume the codeword blocks of every symbol of the group, in the original order.
+    for (unsigned i_group = 0; i_group != nof_group_symbols; ++i_group) {
+      symbol_state& state = symbols[i_group];
+
+      // Counts the number of processed RE for the OFDM symbol.
+      unsigned count_re_symbol = 0;
+
+      // Process subcarriers in groups.
+      while (count_re_symbol != state.nof_re) {
+        // Calculate the remainder number of subcarriers to process for the current OFDM symbol.
+        unsigned remain_nof_subc = state.nof_re - count_re_symbol;
+
+        // Get a view of the codeword buffer destination.
+        span<log_likelihood_ratio> codeword = codeword_buffer.get_next_block_view(remain_nof_subc * nof_bits_per_re);
+
+        // Limit block size if the codeword block is smaller.
+        ocudu_assert(codeword.size() % nof_bits_per_re == 0,
+                     "The codeword block size (i.e., {}) must be multiple of the number of bits per RE (i.e., {}).",
+                     codeword.size(),
+                     nof_bits_per_re);
+
+        // Select equalizer output.
+        unsigned          nof_block_softbits    = codeword.size();
+        unsigned          codeword_block_offset = count_re_symbol * config.nof_tx_layers;
+        unsigned          codeword_block_size   = nof_block_softbits / get_bits_per_symbol(config.modulation);
+        span<const cf_t>  eq_re_block           = state.eq.subspan(codeword_block_offset, codeword_block_size);
+        span<const float> eq_noise_vars_block   = state.nv.subspan(codeword_block_offset, codeword_block_size);
+
+        if (deferred_chain) {
+          // The LLRs of this OFDM symbol were produced by the group dispatch: splay the block out
+          // of the contiguous per-symbol staging.
+          std::memcpy(codeword.data(),
+                      temp_llr.data() + state.llr_offset + count_re_symbol * nof_bits_per_re,
+                      nof_block_softbits);
+        } else {
+          // Build LLRs from channel symbols.
+          demapper->demodulate_soft(codeword, eq_re_block, eq_noise_vars_block, config.modulation);
+        }
+
+        // Calculate EVM only if it is available.
+        if (evm_calc) {
+          state.evm_accumulate +=
+              static_cast<float>(codeword_block_size) * evm_calc->calculate(codeword, eq_re_block, config.modulation);
+          state.evm_symbol_count += codeword_block_size;
+        }
+
+        // Generate scrambling sequence.
+        static_bit_buffer<pusch_constants::MAX_NOF_BITS_PER_OFDM_SYMBOL> scrambling_seq(nof_block_softbits);
+        descrambler->generate(scrambling_seq);
+
+        // Revert scrambling.
+        revert_scrambling(codeword, codeword, scrambling_seq);
+
+        // Increment the number of processed RE within the OFDM symbol.
+        count_re_symbol += nof_block_softbits / nof_bits_per_re;
+
+        // Update and notify statistics if it is the last processed block for the OFDM symbol. The provisional stats must
+        // be notified earlier than the new processed block to ensure the stats are available upon the notification of the
+        // results.
+        if (count_re_symbol == state.nof_re) {
+          // Prepare OFDM symbol stats and report.
+          pusch_demodulator_notifier::demodulation_stats stats;
+          if ((state.sinr_softbit_count != 0) && (state.noise_var_accumulate > 0.0)) {
+            float mean_noise_var = state.noise_var_accumulate / static_cast<float>(state.sinr_softbit_count);
+            stats.sinr_dB.emplace(-convert_power_to_dB(mean_noise_var));
+          } else {
+            stats.sinr_dB.emplace(std::numeric_limits<float>::infinity());
+          }
+          if (state.evm_symbol_count != 0) {
+            stats.evm.emplace(state.evm_accumulate / static_cast<float>(state.evm_symbol_count));
+          }
+          notifier.on_provisional_stats(state.i_symbol, stats);
+
+          // Prepare final stats.
+          total_evm_symbol_count += state.evm_symbol_count;
+          total_sinr_softbit_count += state.sinr_softbit_count;
+          total_noise_var_accumulate += state.noise_var_accumulate;
+          total_evm_accumulate += state.evm_accumulate;
+        }
+
+        // Notify a new processed block.
+        codeword_buffer.on_new_block(codeword, scrambling_seq);
       }
     }
   }
