@@ -195,6 +195,7 @@ int main()
 {
   std::mt19937 rng(1234);
 
+  unsigned n_bad = 0;
   // Engine inversion of every matrix size the estimator can ask for: the same kernel serves the
   // 6x6 of a one-PRB hop and the 36x36 of the production hop, and a size-dependent defect (a block
   // that is only partially filled, a lane outside the last block) shows up as a catastrophic error
@@ -205,7 +206,7 @@ int main()
     metal::mmse_engine               engine;
     std::normal_distribution<float>  nd(0.0F, 1.0F);
     if (engine.init()) {
-      for (unsigned n : {6u, 8u, 12u, 16u, 18u, 24u, 32u, 36u}) {
+      for (unsigned n : {36u, 32u, 24u, 18u, 16u, 12u, 8u, 6u}) {
         std::vector<float> a(static_cast<size_t>(n) * n, 0.0F);
         std::vector<float> r(static_cast<size_t>(n) * n);
         for (auto& v : r) {
@@ -266,9 +267,13 @@ int main()
                     (!ok || !(err < 1e-1)) ? "FAIL" : "");
         if (!ok || !(err < 1e-1)) {
           std::printf("Test 10 FAIL: inversion of size %u is wrong (err %.3e)\n", n, err);
-          return -1;
+          n_bad++;
         }
       }
+    }
+    if (n_bad != 0) {
+      std::printf("Test 10 FAIL: %u sizes inverted incorrectly\n", n_bad);
+      return -1;
     }
   }
 
