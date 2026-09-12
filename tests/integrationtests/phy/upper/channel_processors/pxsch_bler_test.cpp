@@ -510,7 +510,9 @@ static void usage(std::string_view prog)
 static void parse_args(int argc, char** argv)
 {
   int opt = 0;
-  while ((opt = getopt(argc, argv, "C:F:S:N:P:L:R:B:M:m:DT:vch")) != -1) {
+  // NOTE: "c" needs its colon - without it the argument of -c (the PUSCH channel estimator
+  // algorithm) is dropped and every run silently uses the default estimator.
+  while ((opt = getopt(argc, argv, "C:F:S:N:P:L:R:B:M:m:DT:vc:h")) != -1) {
     switch (opt) {
       case 'C':
         if (optarg != nullptr) {
