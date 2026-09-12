@@ -92,10 +92,9 @@ private:
 
   /// \brief Estimates sigma2 for the current hop reusing the existing classical noise estimator
   /// (RC smoothing of the LSE pilots followed by estimate_noise).
-  /// \param[out] pilots_power Mean power of the received DM-RS pilots, i.e. the reference the
-  ///             returned noise variance refers to (the correlation model is unit-normalized, so
-  ///             only the ratio of the two enters the MMSE weights).
-  float estimate_sigma2(const fd_td_estimation_stage_args& args, float& pilots_power);
+  /// \note Expects the LSE pilots already scaled by 1 / beta (the received domain is recovered
+  /// inside from \c beta_scaling), and returns the noise variance in the received domain.
+  float estimate_sigma2(const fd_td_estimation_stage_args& args);
 
   /// \brief Builds the correlation matrices of one block:
   /// \c a_out = R_pp + sigma2 I + ridge I (LxL) and \c r_hp_out = R_hp (nout x L).

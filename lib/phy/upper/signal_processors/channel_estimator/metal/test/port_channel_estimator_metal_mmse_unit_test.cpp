@@ -1083,11 +1083,25 @@ int main()
   // -----------------------------------------------------------------------------------
   {
     const double                snr_db = 20.0;
-    const std::array<double, 5> levels = {1.0, 0.3, 0.1, 0.03, 0.01};
+    // The uplink runs its DFT output far below the unit-power levels a lab sweep usually uses:
+    // the OTA reports DM-RS EPRE around -70 dBFS, i.e. pilot amplitudes near 1e-3.5. The sweep
+    // therefore has to reach -100 dB, where a fixed absolute ridge (let alone an absolute sigma2)
+    // would dominate the correlation model.
+    const std::array<double, 8> levels = {1.0, 0.3, 0.1, 0.03, 0.01, 1e-3, 1e-4, 1e-5};
     const unsigned              n_real = 40;
 
-    auto cfg    = make_config();
-    auto pilots = make_pilots();
+    // Production shapes: the E2E cell uses three DM-RS symbols (pos2 + additional position 2) and
+    // the PUSCH processor sets scaling = 10^(-SCH_to_DMRS/20), i.e. 0.708 for two CDM groups
+    // without data. Neither was part of the lab sweeps, so sweep them here.
+    struct shape_t {
+      bool        three_dmrs;
+      float       scaling;
+      const char* name;
+    };
+    const std::array<shape_t, 4> shapes = {{{false, 1.0F, "2 DMRS beta=1"},
+                                            {true, 1.0F, "3 DMRS beta=1"},
+                                            {true, 0.708F, "3 DMRS beta=0.708"},
+                                            {false, 2.0F, "2 DMRS beta=2"}}};
 
     auto cpu = std::make_unique<port_channel_estimator_average_impl>(
         create_interpolator(),
@@ -1102,8 +1116,14 @@ int main()
         3,
         true);
 
-    std::printf("Test 9: level consistency of the channel estimator results (SNR %.0f dB), values "
-                "normalized by level^2 / level\n",
+    for (const shape_t& shape : shapes) {
+      auto cfg    = make_config(51, true, 0, shape.three_dmrs, false);
+      cfg.scaling = shape.scaling;
+      auto pilots = make_pilots(51, shape.three_dmrs ? 3 : 2);
+
+    std::printf("Test 9 [%s]: level consistency (SNR %.0f dB), values normalized by level^2 / "
+                "level\n",
+                shape.name,
                 snr_db);
     std::printf("  %-7s | %-13s %-13s %-9s %-9s %-9s %-9s %-11s %-11s\n",
                 "level",
@@ -1260,6 +1280,8 @@ int main()
       std::printf("Test 9 FAIL: the estimator results follow the input level instead of the SNR, so "
                   "the soft-bit scale of the uplink depends on the radio gain\n");
       return -1;
+    }
+      std::printf("Test 9 [%s] PASS: level-consistent channel estimator results\n", shape.name);
     }
     std::printf("Test 9 PASS: level-consistent channel estimator results\n");
   }
