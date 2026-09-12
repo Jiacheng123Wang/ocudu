@@ -420,7 +420,10 @@ bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, flo
   [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
   // Same (column, row) threadgroup layout as invert(): the pivot-column elimination spreads over
-  // the block instead of one thread walking a whole row (ocudu_mmse_inv.metal).
+  // the block instead of one thread walking a whole row (ocudu_mmse_inv.metal). K1 is still
+  // latency-bound (91.3 us for a single 36x36 system, 2 barriered pivot steps per column); S-5a
+  // replaces the elimination with a blocked/simdgroup_matrix form before it becomes the default
+  // inversion path - see the note in port_channel_estimator_metal_mmse_impl.cpp.
   [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
 
   [enc setComputePipelineState:e->weights_pipe];

@@ -545,13 +545,17 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     if (rem_prb != 0) {
       // Tail/edge block - and when nof_prb < block_prb this is the WHOLE hop (single block).
       //
-      // MEASURED (S-4d): an engine call costs ~100 us of fixed command-buffer round trip (wait),
-      // which the second call of the hop pays for a <= block_prb-1 PRB block of ~1 us of GPU work.
-      // The CPU reference math of the fallback loop below computes that block in ~16 us, so the
-      // tail goes there and the hop issues ONE engine call instead of two:
+      // TRANSITIONAL (S-4d/S-4e, to be removed by S-5): the tail runs on the CPU reference math of
+      // the fallback loop below. This is NOT a statement about where the work belongs - PHY compute
+      // is meant to run on the Metal path as a whole - it only avoids a second commit+wait in the
+      // chain as it is wired today: an engine call costs ~100 us of fixed round trip, which the
+      // second call of the hop would pay for a <= block_prb-1 PRB block of ~1 us of GPU work, while
+      // the CPU reference math computes it in ~16 us (measured: 25 PRB/2 DMRS 234.1 -> 153.8 us/hop,
+      // identical NMSE).
       //
-      //   25 PRB/2 DMRS: 234.1 -> 153.8 us/hop, 52 PRB/2 DMRS: 239.6 -> 163.1 us/hop,
-      //   52 PRB/1 DMRS: 217.3 -> 128.3 us/hop (identical NMSE in all three).
+      // S-5 replaces this with a second DISPATCH of the engine inside the SAME command buffer (the
+      // geometry differs from the standard batch, but a different geometry never required a second
+      // commit+wait), and deletes this CPU path together with the CPU inversion below.
       //
       // tail_ok=false is what routes the block to that loop: it is the same per-block decision
       // used when an engine batch fails (leaving it true would skip the block and keep stale
@@ -839,12 +843,17 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   // as the weights and the apply (engine->run() below) so the host never reads the inverse back.
   // A is symmetric positive definite (see ocudu_mmse_inv.metal), so K1 needs no pivoting; it is
   // fixed to n <= 36 by its threadgroup memory and unused by the nn flavor (ceil8-padded layout).
-  // MEASURED (S-4c, 36x36 / 25 PRB / 2 DMRS): the K1 kernel costs 75-92 us of GPU time for a
-  // SINGLE system - it is a serial chain of 2n threadgroup barriers inside one threadgroup - while
-  // the CPU Gauss-Jordan of the same matrix is ~10 us. Handing the production inversion to K1
-  // therefore made the whole slot SLOWER (hop mean 160.2 -> 254.0 us, gpu_wait 21.7 -> 95.9 us).
-  // K1 stays available as an opt-in debug path (it wins once one call inverts many systems, e.g.
-  // many layers or a batched multi-UE schedule), the production default is the CPU inversion.
+  // TRANSITIONAL (S-4c/S-4d, to be removed by S-5): the inversion runs on the CPU. The K1 kernel
+  // costs 91.3 us of GPU time for a SINGLE 36x36 system today (measured: hop mean 160.2 -> 254.0 us
+  // with K1), which is a DEFECT OF THE KERNEL, not evidence about where the work belongs: a hop
+  // shares one A over all of its blocks (build_correlation_matrices depends only on block_prb, the
+  // DMRS symbols, the SCS and the statistics), so the hop inverts exactly one 36x36 system = 47k
+  // FLOPs, yet K1 spends 2 barriered pivot steps per column on it with every element moving through
+  // threadgroup memory. PHY compute is meant to end up on the Metal path as a whole (S-5a): block
+  // the elimination (b=8, no pivoting needed - A is SPD) and drive the block updates with
+  // simdgroup_matrix, target <=10-15 us inside the same command buffer as the weights and the
+  // apply (engine->run() already encodes those three in one buffer).
+  // OCUDU_CE_GPU_INVERT=1 selects K1 today for A/B.
   static constexpr unsigned MAX_GPU_INVERT_ORDER = 36;
   const bool gpu_invert = !matrix && (L <= MAX_GPU_INVERT_ORDER) && (std::getenv("OCUDU_CE_GPU_INVERT") != nullptr);
   if (gpu_invert) {
