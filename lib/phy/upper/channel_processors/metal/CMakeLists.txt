@@ -23,7 +23,7 @@ target_compile_definitions(ocudu_channel_processors_metal PRIVATE
     OCUDU_EQUALIZER_METALLIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_equalizer.metallib")
 add_dependencies(ocudu_channel_processors_metal ocudu_metallib_equalizer)
 target_link_libraries(ocudu_channel_processors_metal
-    PUBLIC ocudulog ocudu_macos_compat ocudu_support
+    PUBLIC ocudulog ocudu_macos_compat ocudu_support ocudu_metal_queue
     PRIVATE "-framework Metal" "-framework Foundation")
 
 # ---- Dispatch-pattern probe (S2 design input, not part of the test suite) ----

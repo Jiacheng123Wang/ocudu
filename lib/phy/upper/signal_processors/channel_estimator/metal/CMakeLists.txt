@@ -52,7 +52,7 @@ target_compile_definitions(ocudu_channel_estimator_metal PUBLIC
     OCUDU_HELENA_MODEL_PATH_52="${HELENA_MODELC_52}"
     OCUDU_HELENA_MODEL_PATH_106="${HELENA_MODELC_106}")
 add_dependencies(ocudu_channel_estimator_metal ocudu_mmse_metallib)
-target_link_libraries(ocudu_channel_estimator_metal PUBLIC ocuduvec ocudu_phy_support ocudulog)
+target_link_libraries(ocudu_channel_estimator_metal PUBLIC ocuduvec ocudu_phy_support ocudulog ocudu_metal_queue)
 target_link_libraries(ocudu_channel_estimator_metal PRIVATE "-framework Metal" "-framework Foundation" "-framework CoreML")
 
 # ---- Unit-level validation (inversion golden + GPU/CPU seam + NMSE vs the cpu estimator) ----

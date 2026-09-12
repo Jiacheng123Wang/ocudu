@@ -3,6 +3,8 @@
 
 #include "ocudu_dft_metal_engine.h"
 
+#include "ocudu_metal_queue.h"
+
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -218,7 +220,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
         impl = nullptr;
         return false;
       }
-      res.queue = [res.device newCommandQueue];
+      res.queue = metal::shared_queue::queue();
 
       NSString* lib_path = resolve_dft_metallib_path();
       if (lib_path == nil) {
@@ -339,8 +341,9 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   return true;
 }
 
-bool dft_metal_engine::run(const void* in, void* out, unsigned nof_transforms)
+bool dft_metal_engine::submit(const void* in, void* out, unsigned nof_transforms, bool wait_for_completion)
 {
+
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
   if (engine == nullptr || dft_resources().pipeline == nil) {
     return false;
@@ -368,6 +371,12 @@ bool dft_metal_engine::run(const void* in, void* out, unsigned nof_transforms)
   [enc endEncoding];
   [cmd_buf commit];
   dft_stats_commit();
+  // Publish the commit on the shared queue so wait_all_committed() and the consumer stages can
+  // synchronize with it (the engines share one queue, so ordering is global).
+  metal::shared_queue::notify_commit(cmd_buf);
+  if (!wait_for_completion) {
+    return true;
+  }
   [cmd_buf waitUntilCompleted];
   dft_stats_wait();
   if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
@@ -381,6 +390,16 @@ bool dft_metal_engine::run(const void* in, void* out, unsigned nof_transforms)
     engine->last_gpu_us = 0.0;
   }
   return true;
+}
+
+bool dft_metal_engine::submit(const void* in, void* out, unsigned nof_transforms)
+{
+  return submit(in, out, nof_transforms, false);
+}
+
+bool dft_metal_engine::run(const void* in, void* out, unsigned nof_transforms)
+{
+  return submit(in, out, nof_transforms, true);
 }
 
 double dft_metal_engine::last_gpu_wait_us() const

@@ -52,10 +52,24 @@ public:
   /// \return True on success.
   bool run(const void* in, void* out, unsigned nof_transforms);
 
+  /// \brief Commits \c nof_transforms transforms without waiting for completion.
+  ///
+  /// The outputs are only valid once the shared queue is synchronized: either by a later engine
+  /// dispatching on the same queue (command buffers of one queue run in submission order) or by an
+  /// explicit metal::shared_queue::wait_all_committed() before the data is read on the CPU.
+  /// This is the entry point used by the CPU/GPU pipelined RX chain: the per-symbol DFTs are
+  /// submitted without stalling the CPU, and the consumer stage synchronizes once.
+  /// \return True when the dispatch was encoded and committed.
+  bool submit(const void* in, void* out, unsigned nof_transforms);
+
   /// GPU-side duration of the last transform in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;
 
 private:
+  /// \brief Encodes and commits the transforms; \c wait_for_completion selects the synchronous
+  /// run() path or the non-waiting submit() path.
+  bool submit(const void* in, void* out, unsigned nof_transforms, bool wait_for_completion);
+
   void* impl = nullptr;
 };
 

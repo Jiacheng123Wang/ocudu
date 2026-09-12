@@ -62,6 +62,16 @@ public:
   ///
   /// The default is 1 (one transform per call). Implementations backed by hardware that can
   /// process several independent transforms in one dispatch report a larger value.
+  ///
+  /// \note Batching is *not* used by the radio-paced RX OFDM demodulation: the baseband samples
+  /// of a slot arrive symbol by symbol in real time, so a slot-sized batch could not start
+  /// before the last symbol arrives - it would only move the wait from the per-symbol dispatches
+  /// to the end of the slot, without shortening the elapsed time of the time-frequency phase.
+  /// The batched path is kept for the planned batched/multi-PUSCH processing (see the TODO in
+  /// ofdm_demodulator.h), where several allocations are processed together and the samples are
+  /// already available when the batch is issued.
+  /// \todo Feed the batched path from a multi-allocation scheduler (multi-PUSCH / multi-slot
+  ///       batches) once the samples of several allocations can be gathered before dispatching.
   virtual unsigned get_max_batch() const { return 1; }
 
   /// \brief Executes \c nof_transforms transforms over the contiguous input buffer.
@@ -73,6 +83,30 @@ public:
   /// \param[in] nof_transforms Number of transforms, at most get_max_batch().
   /// \return A view of the internal output DFT buffer holding \c nof_transforms * get_size()
   ///         complex samples.
+  /// \brief Executes the DFT without waiting for the result.
+  ///
+  /// The transform is dispatched and the call returns immediately, so the CPU stays free while the
+  /// GPU works. The output returned by a later run()/run_batch() and the internal input buffer are
+  /// only valid once the work is synchronized: either by a consumer stage dispatching on the same
+  /// command queue (queues execute command buffers in submission order) or explicitly through the
+  /// Metal engine's wait_all_committed() before the data is read on the CPU.
+  ///
+  /// \note Intended for the CPU/GPU pipelined RX chain: the per-symbol DFTs are submitted without
+  /// stalling the CPU and the consumer stage (channel estimator) synchronizes once.
+  /// \warning The caller must not overwrite the input buffer (get_input()) nor read the output
+  ///          until the submission is synchronized: an in-flight transform still reads its input
+  ///          while the GPU executes it. Pipelined callers therefore need one input/output buffer
+  ///          set per in-flight transform and must advance the ring only after synchronizing.
+  /// \todo Provide the per-in-flight-transform ring (double/quad buffering) with the pipeline
+  ///       decoupling work, so the RX chain can submit several symbols before the first wait.
+  /// \todo Chain the RX stages onto one command queue and synchronize once per slot instead of
+  ///       once per consumer stage, together with the pipeline decoupling work.
+  virtual void run_async()
+  {
+    // Default: the processor has no asynchronous path, execute synchronously.
+    (void)run();
+  }
+
   virtual span<const cf_t> run_batch(unsigned nof_transforms)
   {
     ocudu_assert(nof_transforms == 1, "Batched DFT is not supported by this processor (requested {} transforms).",

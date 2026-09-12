@@ -71,6 +71,15 @@ public:
   /// supports batching (see dft_processor::get_max_batch()) override it to execute all the
   /// transforms of the batch in a single dispatch.
   ///
+  /// \note The gNB RX path (puxch_processor_impl) demodulates symbol by symbol on purpose: it is
+  /// driven by the radio, which delivers one OFDM symbol at a time, and the upper PHY consumes
+  /// the resource grid as soon as a symbol is reported. Batching a whole slot here would delay
+  /// every symbol of the slot to its last symbol, which is a different wait rather than a
+  /// saving. This entry point is kept for batched/multi-allocation processing.
+  /// \todo Use the batch path for multi-PUSCH processing: when several allocations of the same
+  ///       slot are known up front, their symbols can be demodulated together (one DFT dispatch
+  ///       per symbol group) instead of one dispatch per allocation symbol.
+  ///
   /// \param[out] grid       Provides the output as frequency-domain signal corresponding to one slot.
   /// \param[in]  input      Provides the concatenated time domain symbols, each including its cyclic prefix.
   /// \param[in]  port_index Indicates the port index to demodulate.

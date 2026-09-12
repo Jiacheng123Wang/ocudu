@@ -6,6 +6,8 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include "ocudu_metal_queue.h"
+
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/macos_compat.h"
 
@@ -196,7 +198,7 @@ bool equalizer_metal_engine::init()
       ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: no Metal device available");
       return false;
     }
-    res.queue = [res.device newCommandQueue];
+    res.queue = metal::shared_queue::queue();
     NSString* lib_path = resolve_eq_metallib_path();
     if (lib_path == nil) {
       ocudulog::fetch_basic_logger("PHY").error(

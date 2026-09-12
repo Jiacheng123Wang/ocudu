@@ -23,7 +23,7 @@ target_compile_definitions(ocudu_channel_modulation_metal PRIVATE
     OCUDU_DEMOD_METALLIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_demod.metallib")
 add_dependencies(ocudu_channel_modulation_metal ocudu_metallib_demod)
 target_link_libraries(ocudu_channel_modulation_metal
-    PUBLIC ocudulog ocudu_macos_compat ocudu_support
+    PUBLIC ocudulog ocudu_macos_compat ocudu_support ocudu_metal_queue
     PRIVATE "-framework Metal" "-framework Foundation")
 
 # ---- Unit-level validation: bit-exact A/B vs the CPU generic demapper ----

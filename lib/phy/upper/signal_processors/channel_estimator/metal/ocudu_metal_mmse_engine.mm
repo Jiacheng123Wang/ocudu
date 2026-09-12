@@ -6,6 +6,8 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include "ocudu_metal_queue.h"
+
 #include "ocudu/ocudulog/ocudulog.h"
 
 #include <atomic>
@@ -216,7 +218,7 @@ bool mmse_engine::init(const char* metallib_path)
   if (e->device == nil) {
     return false;
   }
-  e->queue = [e->device newCommandQueue];
+  e->queue = metal::shared_queue::queue();
   if (e->queue == nil) {
     return false;
   }

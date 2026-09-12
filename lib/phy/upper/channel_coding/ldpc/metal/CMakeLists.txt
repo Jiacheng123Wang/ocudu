@@ -55,7 +55,7 @@ target_compile_definitions(ocudu_ldpc_metal PRIVATE
 # Ensure the shaders are (re)built whenever the engine library is built.
 add_dependencies(ocudu_ldpc_metal ocudu_ldpc_metallib)
 # The adapter generates the packed H matrix from the ocudu ldpc_graph implementation.
-target_link_libraries(ocudu_ldpc_metal PUBLIC ocudu_ldpc ocudulog)
+target_link_libraries(ocudu_ldpc_metal PUBLIC ocudu_ldpc ocudulog ocudu_metal_queue)
 target_link_libraries(ocudu_ldpc_metal PRIVATE "-framework Metal" "-framework Foundation")
 
 # ---- Unit-level validation binary (golden H check + decode parity vs the CPU decoder) ----

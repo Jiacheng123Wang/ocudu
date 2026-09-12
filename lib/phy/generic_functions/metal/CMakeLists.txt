@@ -30,7 +30,7 @@ target_compile_definitions(ocudu_dft_metal PRIVATE
     OCUDU_DFT_METALLIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/ocudu_dft.metallib")
 # Ensure the shader is (re)built whenever the engine library is built.
 add_dependencies(ocudu_dft_metal ocudu_metallib_dft)
-target_link_libraries(ocudu_dft_metal PUBLIC ocudulog ocudu_macos_compat)
+target_link_libraries(ocudu_dft_metal PUBLIC ocudulog ocudu_macos_compat ocudu_metal_queue)
 target_link_libraries(ocudu_dft_metal PRIVATE "-framework Metal" "-framework Foundation")
 
 # ---- Unit-level validation: random-IQ A/B vs the CPU reference (NMSE gate) ----

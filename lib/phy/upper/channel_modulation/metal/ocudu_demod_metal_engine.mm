@@ -6,6 +6,8 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include "ocudu_metal_queue.h"
+
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/macos_compat.h"
 
@@ -182,7 +184,7 @@ bool demod_metal_engine::init()
       ocudulog::fetch_basic_logger("PHY").error("Metal demapper: no Metal device available");
       return false;
     }
-    res.queue = [res.device newCommandQueue];
+    res.queue = metal::shared_queue::queue();
     NSString* lib_path = resolve_demod_metallib_path();
     if (lib_path == nil) {
       ocudulog::fetch_basic_logger("PHY").error(

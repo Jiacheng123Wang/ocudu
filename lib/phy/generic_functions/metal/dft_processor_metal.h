@@ -50,6 +50,12 @@ public:
 
   /// Number of transforms executed by one run_batch() dispatch (one threadgroup each, so they
   /// run concurrently on different GPU cores). Covers a whole slot worth of OFDM symbols.
+  ///
+  /// \note Not used by the radio-paced RX OFDM demodulation, which dispatches one transform per
+  /// symbol (see dft_processor::get_max_batch()); kept for the planned batched/multi-PUSCH
+  /// processing, where one dispatch covers the transforms of several allocations at once.
+  /// \todo Re-tune max_batch (and the buffer size) once the multi-PUSCH scheduler defines how
+  ///       many transforms are gathered per dispatch.
   static constexpr unsigned max_batch = 16;
 
   // See interface for documentation.
@@ -57,6 +63,9 @@ public:
 
   // See interface for documentation.
   span<const cf_t> run_batch(unsigned nof_transforms) override;
+
+  // See interface for documentation.
+  void run_async() override { (void)engine->submit(input.get(), output.get(), 1); }
 
   /// GPU-side duration of the last transform in microseconds (0 when unavailable).
   double engine_gpu_wait_us() const { return engine != nullptr ? engine->last_gpu_wait_us() : 0.0; }

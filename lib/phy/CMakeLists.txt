@@ -4,6 +4,7 @@
 
 
 add_subdirectory(generic_functions)
+add_subdirectory(metal)
 add_subdirectory(lower)
 add_subdirectory(metrics)
 add_subdirectory(support)

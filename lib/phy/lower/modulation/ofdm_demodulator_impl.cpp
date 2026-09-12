@@ -143,6 +143,11 @@ void ofdm_symbol_demodulator_impl::demodulate(resource_grid_writer& grid,
   process_dft_output(grid, dft_output, port_index, symbol_index);
 }
 
+// NOTE: the gNB RX path (puxch_processor_impl) calls demodulate() once per OFDM symbol because
+// the radio paces the processing symbol by symbol; the batched path below is therefore dormant on
+// that path and is retained for batched/multi-PUSCH processing (see ofdm_demodulator.h).
+// TODO(multi-PUSCH): drive it from a scheduler that hands over the symbol samples of several
+// allocations at once, so one dispatch covers a whole symbol group.
 void ofdm_symbol_demodulator_impl::demodulate_batch(resource_grid_writer& grid,
                                                     span<const ci16_t>    input,
                                                     unsigned              port_index,
