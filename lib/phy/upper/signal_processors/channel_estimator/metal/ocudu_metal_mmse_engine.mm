@@ -396,11 +396,13 @@ bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, flo
     return false;
   }
 
+  mmse_phase_timer phase("run");
   id<MTLBuffer> a_buf  = e->wrap(a, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
   id<MTLBuffer> rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
   id<MTLBuffer> w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
   id<MTLBuffer> y_buf  = e->wrap(y, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * L * sizeof(float));
   id<MTLBuffer> h_buf  = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
+  phase.wrapped();
   if (a_buf == nil || rp_buf == nil || w_buf == nil || y_buf == nil || h_buf == nil) {
     return false;
   }
@@ -419,6 +421,7 @@ bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, flo
 
   // One command buffer, three ordered dispatches (K1 -> K1b -> K2), single commit/wait.
   id<MTLCommandBuffer> cb = [e->queue commandBuffer];
+  phase.created();
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
   [enc setComputePipelineState:e->inv_pipe];
@@ -452,7 +455,9 @@ bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, flo
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
 
   [enc endEncoding];
+  phase.encoded();
   [cb commit];
+  phase.committed();
   mmse_stats_commit();
   [cb waitUntilCompleted];
   mmse_stats_wait();
