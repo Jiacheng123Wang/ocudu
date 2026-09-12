@@ -242,6 +242,12 @@ def main():
     for b in buckets.values():
         ack.update(b.pucch_ack)
     total_ack = sum(ack.values())
+    # At log level info the PHY does not print the per-PDU verbose lines (UL CRC indications, PUCCH
+    # results, UCI indications) nor the FAPI grants, so those columns stay empty: say so instead of
+    # letting a healthy run look like a silent one.
+    if (ul_ok == 0) and (ul_ko == 0) and (total_ack == 0) and (pusch_total != 0):
+        print("  note: no UL CRC / PUCCH lines in this log - they are debug-level; a run logged at "
+              "info only feeds the PUSCH table below and the console metric block")
     lat = [r["lat"] for r in pusch_rows if not args.rnti or r["rnti"] == args.rnti]
     print("== summary")
     print("  UL CRC indications      : ok=%d ko=%d  (ko %.1f%%)"
