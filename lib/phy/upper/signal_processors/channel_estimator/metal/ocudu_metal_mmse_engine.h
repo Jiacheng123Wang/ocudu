@@ -41,6 +41,38 @@ public:
   /// \return True on success.
   bool init(const char* metallib_path = nullptr);
 
+  /// \brief Device-side reformat stage (K3) of the per-hop pipeline: the equalizer's channel
+  /// estimates, built from the K2 output inside the same command buffer.
+  ///
+  /// The equalizer consumes, per OFDM symbol and layer, the channel estimates of the allocated
+  /// data resource elements packed in ascending subcarrier order as cbf16 (see
+  /// channel_equalizer::ch_est_list). K3 gathers them out of the block layout K2 writes, applying
+  /// the per-symbol RE mask, so the host never walks the grid to build that input.
+  struct reformat_stage {
+    /// Destination: [nof_layers][total_re] complex cbf16 (2 x uint16 per element), resident in
+    /// the estimator's staging buffers.
+    void* dst = nullptr;
+    /// Per-symbol RE masks, [nof_symbols][mask_words] 32-bit words: bit (sc & 31) of word
+    /// (sc >> 5) set for the data REs of that symbol (ascending subcarrier order defines the
+    /// destination order).
+    const uint32_t* masks = nullptr;
+    /// Prefix RE counts: offsets[s] is the destination index of the first RE of symbol s and
+    /// offsets[nof_symbols] == total_re. Only the first nof_symbols + 1 entries are read.
+    const uint32_t* offsets = nullptr;
+    unsigned nof_symbols    = 0;
+    unsigned mask_words     = 0;
+    unsigned total_re       = 0;
+    /// Destination layers (the systems of the batch hold either one block geometry per layer, or
+    /// two: the standard blocks in [0, nof_layers) and the edge block in [sys_tail, ...)).
+    unsigned nof_layers = 0;
+    /// Subcarriers of one standard block (the batch's nof_blocks of them cover
+    /// [0, nf_std * nof_blocks)) and of the edge block, at the systems [sys_tail, ...), block 0.
+    unsigned nf_std   = 0;
+    unsigned nf_tail  = 0;
+    unsigned sys_tail = 0;
+    bool     has_tail = false;
+  };
+
   /// \brief Batched inversion (K1): A_inv = (A)^-1 for each system, in-place Gauss-Jordan.
   ///
   /// \param[in,out] a           [systems][n][n] row-major matrices (overwritten with the inverse).
@@ -74,16 +106,21 @@ public:
   /// \param[in]     L           Number of block pilots (<= 36).
   /// \param[in]     nof_systems Number of systems (<= MAX_SYSTEMS).
   /// \param[in]     nof_blocks  Number of time-frequency blocks.
+  /// \param[in]     reformat    Optional K3 stage appended to the same command buffer, turning the
+  ///                            h it just produced into the equalizer's per-symbol estimates. Pass
+  ///                            nullptr (the default) to skip it.
   /// \return True on success.
   bool run(float* a, const float* r_hp, float* w, const float* y, float* h, unsigned nout, unsigned L,
-           unsigned nof_systems, unsigned nof_blocks);
+           unsigned nof_systems, unsigned nof_blocks, const reformat_stage* reformat = nullptr);
 
   /// \brief Hot path (v1): K1b + K2 in ONE command buffer with a single commit/wait.
   /// The A^-1 inversion runs on the CPU (the batched 36x36 Gauss-Jordan kernel is
   /// barrier-bound on the GPU - see PLAN.md 7.0.6); the Metal inversion kernel remains
   /// as the algorithm skeleton and the golden reference.
+  /// \param[in] reformat Optional K3 stage appended to the same command buffer (see run()).
   bool run_weights_only(const float* a_inv, const float* r_hp, float* w, const float* y, float* h, unsigned nout,
-                        unsigned L, unsigned nof_systems, unsigned nof_blocks);
+                        unsigned L, unsigned nof_systems, unsigned nof_blocks,
+                        const reformat_stage* reformat = nullptr);
 
   /// \brief Compiles the simdgroup_matrix 8x8 pipelines of the metal_nn_mmse variant
   /// (mmse_weights_matrix / mmse_apply_matrix, ocudu_mmse_*_matrix.metal).

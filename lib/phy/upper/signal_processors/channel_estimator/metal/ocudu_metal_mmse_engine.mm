@@ -118,6 +118,8 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    inv_pipe    = nil;
   id<MTLComputePipelineState>    weights_pipe = nil;
   id<MTLComputePipelineState>    apply_pipe  = nil;
+  // K3: per-symbol, mask-compressed cbf16 estimates for the equalizer (optional, loaded on demand).
+  id<MTLComputePipelineState>    reformat_pipe = nil;
   // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
   id<MTLComputePipelineState>    weights_matrix_pipe = nil;
   id<MTLComputePipelineState>    apply_matrix_pipe  = nil;
@@ -226,10 +228,73 @@ struct mmse_engine_impl {
   }
 };
 
+// Appends the K3 gather (the equalizer's per-symbol estimates) to an encoder that has just run
+// K2 over h. Shared by run() and run_weights_only() so both inversion paths produce it.
+static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
+                            mmse_engine_impl*                          e,
+                            id<MTLBuffer>                              h_buf,
+                            const ocudu::metal::mmse_engine::reformat_stage* reformat,
+                            unsigned                                   nout,
+                            unsigned                                   nof_blocks)
+{
+  // K3 (optional): gather the equalizer's per-symbol estimates out of the h K2 has just written,
+  // in the same command buffer so the hop still costs one commit and one wait.
+  if (reformat != nullptr && e->reformat_pipe != nil && (reformat->dst != nullptr) &&
+      (reformat->masks != nullptr) && (reformat->offsets != nullptr) && (reformat->nof_symbols != 0) &&
+      (reformat->nof_layers != 0) && (reformat->total_re != 0)) {
+    const NSUInteger mask_bytes =
+        static_cast<NSUInteger>(reformat->nof_symbols) * reformat->mask_words * sizeof(uint32_t);
+    const NSUInteger dst_bytes =
+        static_cast<NSUInteger>(reformat->nof_layers) * reformat->total_re * 2 * sizeof(uint16_t);
+    id<MTLBuffer> mask_buf = e->wrap(reformat->masks, mask_bytes);
+    id<MTLBuffer> dst_buf  = e->wrap(reformat->dst, dst_bytes);
+    if (mask_buf != nil && dst_buf != nil) {
+      struct mmse_reformat_params {
+        uint32_t nout_stride;
+        uint32_t n_blk;
+        uint32_t nf_std;
+        uint32_t sc_tail_base;
+        uint32_t nf_tail;
+        uint32_t sys_tail;
+        uint32_t nof_layers;
+        uint32_t nof_symbols;
+        uint32_t mask_words;
+        uint32_t total_re;
+      } rparams{static_cast<uint32_t>(nout),
+                static_cast<uint32_t>(nof_blocks),
+                reformat->nf_std,
+                reformat->nf_std * static_cast<uint32_t>(nof_blocks),
+                reformat->has_tail ? reformat->nf_tail : 0u,
+                reformat->sys_tail,
+                reformat->nof_layers,
+                reformat->nof_symbols,
+                reformat->mask_words,
+                reformat->total_re};
+      // K3 reads what K2 wrote: the one stage boundary in this command buffer where a write must
+      // be made visible to a later dispatch (K1 -> K1b -> K2 have always shared an encoder and
+      // rely on its in-order execution).
+      [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+      [enc setComputePipelineState:e->reformat_pipe];
+      [enc setBuffer:h_buf offset:0 atIndex:0];
+      [enc setBuffer:mask_buf offset:0 atIndex:1];
+      [enc setBytes:reformat->offsets
+             length:static_cast<NSUInteger>(reformat->nof_symbols + 1) * sizeof(uint32_t)
+             atIndex:2];
+      [enc setBuffer:dst_buf offset:0 atIndex:3];
+      [enc setBytes:&rparams length:sizeof(rparams) atIndex:4];
+      const NSUInteger nof_sub =
+          static_cast<NSUInteger>(rparams.sc_tail_base) + (reformat->has_tail ? rparams.nf_tail : 0u);
+      const NSUInteger nof_threads = nof_sub * reformat->nof_symbols * reformat->nof_layers;
+      [enc dispatchThreads:MTLSizeMake(nof_threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    }
+  }
+}
+
 } // namespace
 
 namespace ocudu {
 namespace metal {
+
 
 mmse_engine::~mmse_engine()
 {
@@ -283,6 +348,15 @@ bool mmse_engine::init(const char* metallib_path)
                                                          options:MTLPipelineOptionNone
                                                       reflection:nil
                                                            error:&err];
+  // K3 (the equalizer's per-symbol estimates) is optional: a metallib that predates it keeps the
+  // estimator working, and the caller then leaves the reformat stage out of the command buffer.
+  id<MTLFunction> rfmt_fn = [e->library newFunctionWithName:@"mmse_reformat"];
+  if (rfmt_fn != nil) {
+    e->reformat_pipe = [e->device newComputePipelineStateWithFunction:rfmt_fn
+                                                              options:MTLPipelineOptionNone
+                                                           reflection:nil
+                                                                error:&err];
+  }
   // ARC-managed; no explicit release.
   return e->inv_pipe != nil && e->weights_pipe != nil && e->apply_pipe != nil;
 }
@@ -389,7 +463,7 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
 }
 
 bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, float* h, unsigned nout,
-                      unsigned L, unsigned nof_systems, unsigned nof_blocks)
+                      unsigned L, unsigned nof_systems, unsigned nof_blocks, const reformat_stage* reformat)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
@@ -454,6 +528,8 @@ bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, flo
   [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
 
+  encode_reformat(enc, e, h_buf, reformat, nout, nof_blocks);
+
   [enc endEncoding];
   phase.encoded();
   [cb commit];
@@ -472,7 +548,8 @@ bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, flo
 }
 
 bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float* w, const float* y, float* h,
-                                 unsigned nout, unsigned L, unsigned nof_systems, unsigned nof_blocks)
+                                 unsigned nout, unsigned L, unsigned nof_systems, unsigned nof_blocks,
+                                 const reformat_stage* reformat)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
@@ -524,6 +601,8 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
   [enc setBytes:&aparams length:sizeof(aparams) atIndex:3];
   [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
+
+  encode_reformat(enc, e, h_buf, reformat, nout, nof_blocks);
 
   [enc endEncoding];
   phase.encoded();

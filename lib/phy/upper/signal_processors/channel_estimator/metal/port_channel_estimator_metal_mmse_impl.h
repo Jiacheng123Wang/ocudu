@@ -82,6 +82,29 @@ public:
   /// layers than the merged batch fits, never engages it, so this is what tells an A/B apart.
   bool merged_batch_last() const { return last_stage_merged; }
 
+  /// Whether the LAST hop produced the device-side (K3) per-symbol estimates the equalizer
+  /// consumes. False when the A/B knob is off, when the engine call did not cover the whole
+  /// allocation, or when the engine failed.
+  bool device_estimates_ready_last() const { return gpu_ce_ready; }
+
+  /// Device-side per-symbol channel estimates of the last hop: [layer][total_re] complex cbf16,
+  /// laid out per symbol by device_estimate_offsets(). Only valid when
+  /// device_estimates_ready_last(); \c i_layer must be below device_estimate_layers().
+  const cbf16_t* device_estimate_layer(unsigned i_layer) const
+  {
+    return reinterpret_cast<const cbf16_t*>(gpu_ce) + static_cast<std::size_t>(i_layer) * gpu_ce_total_re;
+  }
+
+  /// Offsets of the device estimates: symbol s occupies [offsets()[s], offsets()[s + 1]) of each
+  /// layer, MAX_NSYMB_PER_SLOT + 1 entries.
+  span<const unsigned> device_estimate_offsets() const
+  {
+    return span<const unsigned>(re_offsets.data(), MAX_NSYMB_PER_SLOT + 1);
+  }
+
+  /// Number of layers the device estimates of the last hop cover.
+  unsigned device_estimate_layers() const { return gpu_ce_layers; }
+
 private:
   // See the base class documentation.
   void apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args) override;
@@ -151,12 +174,21 @@ private:
                           bool                               matrix,
                           bool                               gpu_invert);
 
-  /// \brief One engine call (one command buffer, one commit/wait) over the staged slots.
+  /// \brief One engine call (one command buffer, one commit/wait) over the staged slots, with the
+  /// optional K3 reformat stage appended to the same command buffer.
+  /// \param reformat Per-symbol mask/offsets and destination of the equalizer's estimates, or
+  ///                 nullptr to skip K3. Only meaningful for the legacy (non-matrix) kernels.
   /// \return False when the engine call failed (wrap/commit error), in which case the caller MUST
   ///         fall back to the CPU reference math for these blocks (S-1 audit fix: the return value
   ///         was previously ignored, which could silently leave stale channel estimates in the
   ///         grid).
-  bool engine_run(unsigned nout, unsigned L, unsigned nof_systems, unsigned nof_blocks, bool matrix, bool gpu_invert);
+  bool engine_run(unsigned                                 nout,
+                  unsigned                                 L,
+                  unsigned                                 nof_systems,
+                  unsigned                                 nof_blocks,
+                  bool                                     matrix,
+                  bool                                     gpu_invert,
+                  const metal::mmse_engine::reformat_stage* reformat = nullptr);
 
   /// \brief Unpacks the engine outputs of the group staged at \c sys_offset into the grid
   /// (symbol-major within each block; the blocks start at PRB gb_start).
@@ -181,7 +213,24 @@ private:
                          unsigned                           nout,
                          unsigned                           L,
                          unsigned                           npt,
-                         bool                               matrix);
+                         bool                               matrix,
+                         const metal::mmse_engine::reformat_stage* reformat = nullptr);
+
+  /// \brief Builds the per-symbol data-RE masks of the current hop - the layout the equalizer
+  /// indexes its channel estimates by - and their prefix RE counts.
+  ///
+  /// Mirrors what the PUSCH demodulator does when it extracts the channel estimates
+  /// (pusch_demodulator_impl::demodulate): the hop's allocated PRBs expanded to subcarriers, with
+  /// the DM-RS REs of a DM-RS symbol removed, in ascending subcarrier order. The DM-RS RE set of a
+  /// PRB is the union over the layers' RE patterns (for the type-1 pattern these are the per-layer
+  /// combs, so the union is the comb set the demodulator's CDM group count selects).
+  ///
+  /// \param[in] nof_prb   Number of PRBs of the hop.
+  /// \param[in] first_prb First PRB of the hop (the mask is relative to it, as the demodulator's
+  ///                      slice of the RE mask is).
+  /// \return Number of compressed REs (the destination length per layer), 0 when the hop does not
+  ///         fit the mask buffers.
+  unsigned stage_re_masks(const fd_td_estimation_stage_args& args, unsigned nof_prb, unsigned first_prb);
 
   /// Metal compute engine (K1 batched inversion + K2 batched block matmul); the CPU reference
   /// math remains as the automatic fallback when the engine is unavailable or fails.
@@ -203,6 +252,27 @@ private:
   /// Whether the last fd/td estimation stage merged the tail block into the standard batch
   /// (diagnostics/A-B observability; see merged_batch_last()).
   bool last_stage_merged = false;
+
+  /// K3 (S-6a): the equalizer's channel estimates built on the GPU - per-symbol RE masks, their
+  /// prefix RE counts, and the destination [MAX_LAYERS][total_re] cbf16 buffer. The path is
+  /// enabled by OCUDU_CE_DEVICE_CE (A/B until the demodulator consumes it) and only engages on
+  /// hops whose engine call covers the whole allocation with the legacy kernels.
+  static constexpr unsigned MAX_MASK_WORDS = (MAX_NOF_PRBS * NOF_SUBCARRIERS_PER_RB + 31) / 32;
+  bool                      device_ce_enabled = false;
+  uint32_t*                 gpu_masks         = nullptr; // [MAX_NSYMB_PER_SLOT][MAX_MASK_WORDS]
+  uint16_t*                 gpu_ce            = nullptr; // [MAX_LAYERS][MAX_NOF_PRBS * 12 * 14]
+  std::array<unsigned, MAX_NSYMB_PER_SLOT + 1> re_offsets{};
+  unsigned                  gpu_ce_mask_words = 0;
+  unsigned                  gpu_ce_layers     = 0;
+  unsigned                  gpu_ce_total_re   = 0;
+  bool                      gpu_ce_ready      = false;
+  /// Signature of the allocation the staged masks belong to (see stage_re_masks()).
+  unsigned mask_first_prb     = ~0u;
+  unsigned mask_nof_prb       = 0;
+  unsigned mask_hop           = ~0u;
+  unsigned mask_rb_pattern    = 0;
+  unsigned mask_dmrs_re_bits  = ~0u;
+  unsigned mask_dmrs_sym_bits = ~0u;
 
   /// Maximum number of full blocks per slot for the configured block size.
   unsigned max_blocks;

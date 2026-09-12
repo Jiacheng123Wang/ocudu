@@ -132,12 +132,14 @@ inline float rt_corr(float delta_t_s, float fd_hz)
 }
 
 /// 4KB-aligned allocation (Metal zero-copy requires page alignment).
-float* alloc_aligned(std::size_t n)
+template <typename T>
+T* alloc_aligned(std::size_t n)
 {
-  return new (std::align_val_t(4096)) float[n]();
+  return new (std::align_val_t(4096)) T[n]();
 }
 
-void free_aligned(float* p)
+template <typename T>
+void free_aligned(T* p)
 {
   if (p != nullptr) {
     ::operator delete[](p, std::align_val_t(4096));
@@ -175,11 +177,19 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // head-to-head benchmark).
   engine       = std::make_unique<metal::mmse_engine>();
   engine_ready = !force_cpu_path && engine->init();
-  gpu_a        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS);
-  gpu_r_hp     = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_OUT * MAX_BLOCK_PILOTS);
-  gpu_w        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_OUT * MAX_BLOCK_PILOTS);
-  gpu_y        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * max_blocks * 2 * MAX_BLOCK_PILOTS);
-  gpu_h        = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * max_blocks * 2 * MAX_BLOCK_OUT);
+  gpu_a        = alloc_aligned<float>(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS);
+  gpu_r_hp     = alloc_aligned<float>(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_OUT * MAX_BLOCK_PILOTS);
+  gpu_w        = alloc_aligned<float>(static_cast<std::size_t>(MAX_LAYERS) * MAX_BLOCK_OUT * MAX_BLOCK_PILOTS);
+  gpu_y        = alloc_aligned<float>(static_cast<std::size_t>(MAX_LAYERS) * max_blocks * 2 * MAX_BLOCK_PILOTS);
+  gpu_h        = alloc_aligned<float>(static_cast<std::size_t>(MAX_LAYERS) * max_blocks * 2 * MAX_BLOCK_OUT);
+
+  // K3 (S-6a): the equalizer's per-symbol estimates. The masks are staged per hop, the destination
+  // holds every layer of the hop - the merged batch keeps at most MAX_LAYERS / 2 of them (see the
+  // merge gate), the split batches up to MAX_LAYERS.
+  device_ce_enabled = (std::getenv("OCUDU_CE_DEVICE_CE") != nullptr);
+  gpu_masks = alloc_aligned<uint32_t>(static_cast<std::size_t>(MAX_NSYMB_PER_SLOT) * MAX_MASK_WORDS);
+  gpu_ce    = alloc_aligned<uint16_t>(static_cast<std::size_t>(MAX_LAYERS) * MAX_NOF_PRBS *
+                                   NOF_SUBCARRIERS_PER_RB * MAX_NSYMB_PER_SLOT * 2);
 
   // metal_nn_mmse flavor: compile the simdgroup_matrix 8x8 pipelines and stage the
   // quad-packed pilot matrix qy (zero-initialized: tail-quad columns of non-existent
@@ -187,7 +197,7 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   matrix_ready = false;
   if (engine_ready && use_matrix_engine) {
     const std::size_t qy_quads = (static_cast<std::size_t>(max_blocks) + 3u) / 4u;
-    gpu_qy = alloc_aligned(static_cast<std::size_t>(MAX_LAYERS) * qy_quads * MAX_BLOCK_PILOTS * 8);
+    gpu_qy = alloc_aligned<float>(static_cast<std::size_t>(MAX_LAYERS) * qy_quads * MAX_BLOCK_PILOTS * 8);
     matrix_ready = engine->init_matrix_pipelines();
     // INFO level (no env needed): confirms which GPU kernels the A/B flavor runs. The nn
     // path is taken on EVERY standard-block hop - nout/L that are not multiples of 8 are
@@ -223,6 +233,8 @@ port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl(
   free_aligned(gpu_y);
   free_aligned(gpu_qy);
   free_aligned(gpu_h);
+  free_aligned(gpu_masks);
+  free_aligned(gpu_ce);
 }
 
 float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estimation_stage_args& args)
@@ -558,6 +570,33 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // against the ~100 us of host round trip it removes.
     const bool merge_tail = (rem_prb != 0) && (n_std_blocks != 0) && !matrix_on && !tail_on_cpu &&
                             (2 * nof_layers <= MAX_LAYERS) && (std::getenv("OCUDU_CE_SPLIT_TAIL") == nullptr);
+    // K3 (S-6a): the equalizer's per-symbol estimates, built on the GPU inside the engine call. The
+    // destination can only be filled by a call that covers the WHOLE allocation with the legacy
+    // kernels - the merged batch, or a hop whose single batch is everything - otherwise the blocks
+    // the call did not compute would keep stale entries. The masks are the demodulator's data-RE
+    // layout, so a consumer must check the RE count before using them.
+    gpu_ce_ready          = false;
+    unsigned nof_re_total = 0;
+    if (device_ce_enabled && (nof_prb != 0) && !matrix_on) {
+      nof_re_total = stage_re_masks(args, nof_prb, hop_rb_mask.find_lowest());
+    }
+    metal::mmse_engine::reformat_stage reformat{};
+    reformat.dst         = gpu_ce;
+    reformat.masks       = gpu_masks;
+    reformat.offsets     = re_offsets.data();
+    reformat.nof_symbols = MAX_NSYMB_PER_SLOT;
+    reformat.mask_words  = gpu_ce_mask_words;
+    reformat.total_re    = nof_re_total;
+    // Standard blocks cover subcarriers [0, nf_std * nof_blocks) of the batch; the edge block, when
+    // the batch carries one, sits in the systems [sys_tail, ...) at block 0.
+    const auto reformat_for = [&](unsigned nf_std, unsigned nf_tail, unsigned sys_tail) {
+      reformat.nf_std   = nf_std;
+      reformat.nf_tail  = nf_tail;
+      reformat.sys_tail = sys_tail;
+      reformat.has_tail = (nf_tail != 0);
+      reformat.nof_layers = nof_layers;
+      return (nof_re_total != 0) ? &reformat : nullptr;
+    };
     if (merge_tail) {
       // Both groups share the standard block's slot geometry.
       const engine_strides st{L_std, nout_std, n_std_blocks};
@@ -589,11 +628,22 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       stage_engine_group(
           args, n_std_blocks * block_prb, 1, rem_prb, npt, nout_e, L_e, nof_layers, st, matrix_on, gpu_invert);
       // 4) ONE engine call over both groups, then unpack both.
-      const bool merged_ok = engine_run(nout_std, L_std, 2 * nof_layers, n_std_blocks, false, gpu_invert);
+      const bool merged_ok = engine_run(nout_std,
+                                        L_std,
+                                        2 * nof_layers,
+                                        n_std_blocks,
+                                        false,
+                                        gpu_invert,
+                                        reformat_for(block_prb * NOF_SUBCARRIERS_PER_RB,
+                                                     rem_prb * NOF_SUBCARRIERS_PER_RB,
+                                                     nof_layers));
       std_blocks_ok        = merged_ok;
       tail_ok              = merged_ok;
       hop_gpu              = merged_ok;
       hop_nn               = false;
+      gpu_ce_ready         = merged_ok && (nof_re_total != 0);
+      gpu_ce_layers        = nof_layers;
+      gpu_ce_total_re      = nof_re_total;
       if (merged_ok) {
         unpack_engine_group(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st);
         unpack_engine_group(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st);
@@ -601,10 +651,25 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     } else {
       if (n_std_blocks != 0) {
         // Standard blocks: correlation matrices already built above (w_r_pp/w_r_hp, L_std/nout_std).
-        std_blocks_ok = run_engine_blocks(args, 0, n_std_blocks, block_prb, nout_std, L_std, npt, matrix_on);
-        hop_gpu       = std_blocks_ok;
-        hop_nn        = std_blocks_ok && matrix_on;
-        hop_pad       = (std_blocks_ok && matrix_on) ? static_cast<unsigned>(((L_std + 7u) & ~7u) - L_std) : 0;
+        // A hop without an edge block (or with its tail on the CPU) is covered by this single
+        // batch, so K3 can be attached to it.
+        const bool covers_hop = (rem_prb == 0);
+        std_blocks_ok         = run_engine_blocks(args,
+                                         0,
+                                         n_std_blocks,
+                                         block_prb,
+                                         nout_std,
+                                         L_std,
+                                         npt,
+                                         matrix_on,
+                                         covers_hop ? reformat_for(block_prb * NOF_SUBCARRIERS_PER_RB, 0, 0)
+                                                    : nullptr);
+        hop_gpu               = std_blocks_ok;
+        hop_nn                = std_blocks_ok && matrix_on;
+        hop_pad               = (std_blocks_ok && matrix_on) ? static_cast<unsigned>(((L_std + 7u) & ~7u) - L_std) : 0;
+        gpu_ce_ready          = std_blocks_ok && covers_hop && (nof_re_total != 0);
+        gpu_ce_layers         = nof_layers;
+        gpu_ce_total_re       = nof_re_total;
       }
       if (rem_prb != 0) {
         // Tail/edge block - and when nof_prb < block_prb this is the WHOLE hop (single block).
@@ -626,10 +691,26 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                      nout_e,
                                      L_e);
           tail_L  = L_e;
-          tail_ok = run_engine_blocks(args, n_std_blocks * block_prb, 1, rem_prb, nout_e, L_e, npt, matrix_on);
-          hop_gpu = hop_gpu || tail_ok;
-          hop_nn  = hop_nn || (tail_ok && matrix_on);
-          hop_pad = (tail_ok && matrix_on) ? static_cast<unsigned>(((L_e + 7u) & ~7u) - L_e) : hop_pad;
+          // A hop narrower than block_prb is this single narrow-block batch, so it covers the whole
+          // allocation too (see the standard-block batch above).
+          const bool covers_hop = (n_std_blocks == 0);
+          tail_ok               = run_engine_blocks(args,
+                                      n_std_blocks * block_prb,
+                                      1,
+                                      rem_prb,
+                                      nout_e,
+                                      L_e,
+                                      npt,
+                                      matrix_on,
+                                      covers_hop ? reformat_for(rem_prb * NOF_SUBCARRIERS_PER_RB, 0, 0) : nullptr);
+          hop_gpu               = hop_gpu || tail_ok;
+          hop_nn                = hop_nn || (tail_ok && matrix_on);
+          hop_pad               = (tail_ok && matrix_on) ? static_cast<unsigned>(((L_e + 7u) & ~7u) - L_e) : hop_pad;
+          if (covers_hop) {
+            gpu_ce_ready    = tail_ok && (nof_re_total != 0);
+            gpu_ce_layers   = nof_layers;
+            gpu_ce_total_re = nof_re_total;
+          }
         } else {
           // Route the block to the CPU fallback loop below. tail_ok MUST be cleared: leaving it
           // true while skipping the engine batch makes block_gpu_done() report the block as done
@@ -944,17 +1025,19 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(unsigned nout,
                                                         unsigned nof_systems,
                                                         unsigned nof_blocks,
                                                         bool     matrix,
-                                                        bool     gpu_invert)
+                                                        bool     gpu_invert,
+                                                        const metal::mmse_engine::reformat_stage* reformat)
 {
   // Weight (W = R_hp . A^-1) + apply (h = W . y) in ONE engine command buffer, with the inversion
-  // (K1) prepended in the same buffer when the A slots hold A itself. The engine return value is
-  // checked (S-1 audit fix): on failure the caller falls back to the CPU reference math for these
-  // blocks instead of unpacking stale gpu_h contents.
+  // (K1) prepended in the same buffer when the A slots hold A itself, and the equalizer's
+  // per-symbol estimates (K3) appended to the same buffer when the caller asked for them. The
+  // engine return value is checked (S-1 audit fix): on failure the caller falls back to the CPU
+  // reference math for these blocks instead of unpacking stale gpu_h contents.
   const bool engine_ok =
       matrix ? engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_systems, nof_blocks)
-             : (gpu_invert ? engine->run(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks)
+             : (gpu_invert ? engine->run(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
                            : engine->run_weights_only(
-                                 gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks));
+                                 gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat));
   if (!engine_ok) {
     logger.error("[mmse_ce] engine call failed (systems={} blocks={} nout={} L={} matrix={}): falling back to the "
                  "CPU path for these blocks",
@@ -965,6 +1048,86 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(unsigned nout,
                  matrix ? 1 : 0);
   }
   return engine_ok;
+}
+
+unsigned port_channel_estimator_metal_mmse_impl::stage_re_masks(const fd_td_estimation_stage_args& args,
+                                                                unsigned                           nof_prb,
+                                                                unsigned                           first_prb)
+{
+  const unsigned nof_sub    = nof_prb * NOF_SUBCARRIERS_PER_RB;
+  const unsigned mask_words = (nof_sub + 31u) / 32u;
+  if (mask_words > MAX_MASK_WORDS) {
+    return 0;
+  }
+
+  // DM-RS resource elements of one PRB: the union over the layers' RE patterns. For the type-1
+  // pattern these are the per-layer combs, so the union is exactly the comb set that the
+  // demodulator's CDM group count selects for the DM-RS symbols.
+  std::array<bool, NOF_SUBCARRIERS_PER_RB> dmrs_re{};
+  for (const auto& pattern : args.dmrs_patterns) {
+    pattern.re_pattern.for_each(
+        0, pattern.re_pattern.size(), [&](unsigned pos) { dmrs_re[pos % NOF_SUBCARRIERS_PER_RB] = true; });
+  }
+  // DM-RS symbols of the slot (all layers of a PUSCH share them).
+  const auto& slot_dmrs = args.dmrs_patterns.front().symbols;
+
+  unsigned dmrs_re_bits = 0;
+  for (unsigned i_re = 0; i_re != NOF_SUBCARRIERS_PER_RB; ++i_re) {
+    dmrs_re_bits |= (dmrs_re[i_re] ? 1u : 0u) << i_re;
+  }
+  unsigned dmrs_sym_bits = 0;
+  for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+    dmrs_sym_bits |= (slot_dmrs.test(sym) ? 1u : 0u) << sym;
+  }
+  // The allocated PRB *pattern* matters, not just its first PRB and count (non-contiguous
+  // allocations with the same span must not share staged masks).
+  const auto& rb_mask_for_hash = (args.hop == 0) ? args.dmrs_patterns.front().rb_mask : args.dmrs_patterns.front().rb_mask2;
+  unsigned    rb_pattern       = 0;
+  for (unsigned prb = 0; prb != nof_prb; ++prb) {
+    rb_pattern = rb_pattern * 33u + (rb_mask_for_hash.test(first_prb + prb) ? 1u : 2u);
+  }
+
+  // The masks depend only on the allocation, which in a slot-to-slot stream repeats hop after hop,
+  // and staging them costs more host time than the whole reformat kernel. Rebuild them only when
+  // the allocation actually changes.
+  if ((first_prb == mask_first_prb) && (nof_prb == mask_nof_prb) && (args.hop == mask_hop) &&
+      (rb_pattern == mask_rb_pattern) && (dmrs_re_bits == mask_dmrs_re_bits) &&
+      (dmrs_sym_bits == mask_dmrs_sym_bits) && (mask_words == gpu_ce_mask_words) && (gpu_ce_total_re != 0)) {
+    return gpu_ce_total_re;
+  }
+
+  const auto& hop_rb_mask = rb_mask_for_hash;
+  std::memset(gpu_masks, 0, static_cast<std::size_t>(MAX_NSYMB_PER_SLOT) * mask_words * sizeof(uint32_t));
+
+  unsigned total = 0;
+  for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+    re_offsets[sym]             = total;
+    uint32_t*           row     = gpu_masks + static_cast<std::size_t>(sym) * mask_words;
+    const bool          is_dmrs = slot_dmrs.test(sym);
+    unsigned            sc      = 0;
+    for (unsigned prb = 0; prb != nof_prb; ++prb, sc += NOF_SUBCARRIERS_PER_RB) {
+      if (!hop_rb_mask.test(first_prb + prb)) {
+        continue;
+      }
+      for (unsigned i_re = 0; i_re != NOF_SUBCARRIERS_PER_RB; ++i_re) {
+        if (is_dmrs && dmrs_re[i_re]) {
+          continue;
+        }
+        row[(sc + i_re) >> 5] |= 1u << ((sc + i_re) & 31);
+        ++total;
+      }
+    }
+  }
+  re_offsets[MAX_NSYMB_PER_SLOT] = total;
+
+  mask_first_prb    = first_prb;
+  mask_nof_prb      = nof_prb;
+  mask_hop          = args.hop;
+  mask_rb_pattern   = rb_pattern;
+  mask_dmrs_re_bits = dmrs_re_bits;
+  mask_dmrs_sym_bits = dmrs_sym_bits;
+  gpu_ce_mask_words = mask_words;
+  return total;
 }
 
 void port_channel_estimator_metal_mmse_impl::unpack_engine_group(unsigned              gb_start,
@@ -1000,7 +1163,8 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                                                                unsigned                           nout,
                                                                unsigned                           L,
                                                                unsigned                           npt,
-                                                               bool                               matrix)
+                                                               bool                               matrix,
+                                                               const metal::mmse_engine::reformat_stage* reformat)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
   // Slot strides: the legacy kernels use the compact L / nout layout; the matrix kernels use the
@@ -1025,7 +1189,7 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   const bool gpu_invert        = !matrix && !cpu_invert_forced && (L <= MAX_GPU_INVERT_ORDER);
 
   stage_engine_group(args, gb_start, n_blk, b_prb, npt, nout, L, 0, st, matrix, gpu_invert);
-  if (!engine_run(nout, L, nof_layers, n_blk, matrix, gpu_invert)) {
+  if (!engine_run(nout, L, nof_layers, n_blk, matrix, gpu_invert, reformat)) {
     return false;
   }
   unpack_engine_group(gb_start, n_blk, b_prb, nout, nof_layers, 0, st);

@@ -1570,6 +1570,137 @@ int main()
                 worst_dn_db);
   }
 
+  // -----------------------------------------------------------------------------------
+  // Test 12: the device-side per-symbol estimates (K3) are exactly what the host path produces.
+  // K3 does the relayout, the mask gather and the float -> bfloat16 rounding on the GPU, so this
+  // compares its output RE by RE against the gather the demodulator performs on the CPU today, over
+  // the same masks - built here the way the demodulator builds them (the allocation expanded to
+  // subcarriers, minus the DM-RS comb of the DM-RS symbols) rather than the way the estimator
+  // derives them, so a divergence between the two mask rules fails here instead of in the
+  // equalizer.
+  // -----------------------------------------------------------------------------------
+  {
+    const std::array<std::pair<unsigned, unsigned>, 5> shapes = {{{52, 2}, {25, 2}, {4, 3}, {51, 2}, {2, 2}}};
+    unsigned                                          total_checked = 0;
+
+    // One instance for every shape: the estimator memoizes the staged masks per allocation, so this
+    // also exercises the invalidation when the allocation changes from hop to hop.
+    setenv("OCUDU_CE_DEVICE_CE", "1", 1);
+    auto mmse = std::make_unique<port_channel_estimator_metal_mmse_impl>(
+        create_interpolator(),
+        make_ta_estimator(),
+        std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F),
+        3,
+        true);
+
+    for (const auto& [n_prb, n_sym] : shapes) {
+      auto                            cfg    = make_config(n_prb, n_sym != 1, 0, n_sym == 3, n_sym == 4);
+      auto                            pilots = make_pilots(n_prb, n_sym);
+      veha_channel                    ch(rng);
+      grid_fake                       grid(n_prb * 12);
+      std::vector<cf_t>               rx_sym(n_prb * 12, {0.0F, 0.0F});
+      std::normal_distribution<float> gauss(0.0F, 0.4F);
+      std::vector<std::vector<cf_t>>  h_true(MAX_NSYMB_PER_SLOT, std::vector<cf_t>(n_prb * 12));
+      for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
+        for (unsigned k = 0; k != n_prb * 12; ++k) {
+          h_true[l][k] = ch(k);
+        }
+      }
+      std::vector<unsigned> dmrs_l;
+      if (n_sym == 4) {
+        dmrs_l = {2, 7, 11, 12};
+      } else {
+        dmrs_l = {2};
+        if (n_sym >= 2) {
+          dmrs_l.push_back(11);
+        }
+        if (n_sym == 3) {
+          dmrs_l.push_back(7);
+        }
+      }
+      for (unsigned s = 0; s != n_sym; ++s) {
+        const unsigned l = dmrs_l[s];
+        std::fill(rx_sym.begin(), rx_sym.end(), cf_t{0.0F, 0.0F});
+        unsigned j = 0;
+        for (unsigned prb = 0; prb != n_prb; ++prb) {
+          for (unsigned pos = 0; pos != 12; pos += 2) {
+            const unsigned k = prb * 12 + pos;
+            rx_sym[k]        = h_true[l][k] * pilots.get_symbol(s, 0)[j] + cf_t{gauss(rng), gauss(rng)};
+            ++j;
+          }
+        }
+        grid.set_symbol(l, rx_sym);
+      }
+
+      const auto& res = mmse->compute(grid, 0, pilots, cfg);
+
+      if (!mmse->device_estimates_ready_last()) {
+        std::printf("Test 12 FAIL: the device estimates were not produced (%u PRB, %u DMRS)\n", n_prb, n_sym);
+        return -1;
+      }
+
+      // DM-RS REs within a PRB and the DM-RS symbols of the slot, as the demodulator sees them for
+      // this configuration (the estimator's RE pattern is the type-1 single-CDM-group comb).
+      const re_prb_mask         dmrs_prb  = get_dmrs_prb_mask(dmrs_config_type::type1, 1);
+      const auto&               slot_dmrs = cfg.dmrs_pattern.front().symbols;
+      const span<const unsigned> offs     = mmse->device_estimate_offsets();
+      unsigned                  bad       = 0;
+      unsigned                  checked   = 0;
+
+      for (unsigned i_layer = 0; i_layer != mmse->device_estimate_layers(); ++i_layer) {
+        const cbf16_t* dev = mmse->device_estimate_layer(i_layer);
+        for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+          std::vector<cbf16_t> dense(n_prb * 12);
+          res.get_symbol_ch_estimate(dense, sym, i_layer);
+
+          // Host gather: the demodulator's data-RE mask, in ascending subcarrier order.
+          std::vector<cbf16_t> ref;
+          const bool           is_dmrs = slot_dmrs.test(sym);
+          for (unsigned sc = 0; sc != n_prb * 12; ++sc) {
+            if (is_dmrs && dmrs_prb.test(sc % NOF_SUBCARRIERS_PER_RB)) {
+              continue;
+            }
+            ref.push_back(dense[sc]);
+          }
+
+          const unsigned nof_re = offs[sym + 1] - offs[sym];
+          if (nof_re != ref.size()) {
+            std::printf("Test 12 FAIL: symbol %u of %u PRB/%u DMRS has %u device REs, while the demodulator's "
+                        "mask has %u\n",
+                        sym,
+                        n_prb,
+                        n_sym,
+                        nof_re,
+                        static_cast<unsigned>(ref.size()));
+            return -1;
+          }
+          for (unsigned j = 0; j != nof_re; ++j) {
+            if (dev[offs[sym] + j] != ref[j]) {
+              ++bad;
+            }
+          }
+          checked += nof_re;
+        }
+      }
+      total_checked += checked;
+      std::printf("Test 12 (%2u PRB, %u DMRS): device estimates %s (%u REs checked, %u mismatching)\n",
+                  n_prb,
+                  n_sym,
+                  (bad == 0) ? "match the host path" : "DEVIATE",
+                  checked,
+                  bad);
+      if (bad != 0) {
+        std::printf("Test 12 FAIL: %u of %u device REs differ from the host gather\n", bad, checked);
+        return -1;
+      }
+    }
+    unsetenv("OCUDU_CE_DEVICE_CE");
+    std::printf("Test 12 PASS: K3 reproduces the host gather bit for bit (%u REs over %u shapes, one "
+                "instance)\n",
+                total_checked,
+                static_cast<unsigned>(shapes.size()));
+  }
+
   std::printf("All tests PASSED\n");
   return 0;
 }
