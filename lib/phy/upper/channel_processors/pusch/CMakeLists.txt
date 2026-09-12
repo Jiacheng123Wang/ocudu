@@ -6,6 +6,9 @@
 add_library(ocudu_pusch_demodulator STATIC
         pusch_demodulator_impl.cpp
         demodulator_factories.cpp)
+# page_aligned_allocator.h uses the macos_compat aligned allocation shims (link both
+# ocudu_support and ocudu_macos_compat because of their mutual dependency).
+target_link_libraries(ocudu_pusch_demodulator PUBLIC ocudu_support ocudu_macos_compat)
 
 add_library(ocudu_pusch_processor STATIC
         processor_factories.cpp

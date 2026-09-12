@@ -17,6 +17,7 @@
 #include "ocudu/phy/upper/equalization/dynamic_ch_est_list.h"
 #include "ocudu/phy/upper/sequence_generators/pseudo_random_generator.h"
 #include "ocudu/ran/pusch/pusch_constants.h"
+#include "page_aligned_allocator.h"
 
 namespace ocudu {
 
@@ -114,9 +115,11 @@ private:
   /// View buffer used to transfer channel modulation symbols from the resource grid to the equalizer.
   modular_re_buffer_reader<cbf16_t, MAX_PORTS> ch_re_view;
   /// Buffer used to store channel modulation resource elements at the equalizer output.
-  std::vector<cf_t> temp_eq_re;
+  /// Page-aligned so a Metal equalizer can write it in place (no staging copy).
+  std::vector<cf_t, page_aligned_allocator<cf_t>> temp_eq_re;
   /// Buffer used to transfer symbol noise variances at the equalizer output.
-  std::vector<float> temp_eq_noise_vars;
+  /// Page-aligned for the same reason as \c temp_eq_re.
+  std::vector<float, page_aligned_allocator<float>> temp_eq_noise_vars;
   /// Copy buffer used to transfer channel estimation coefficients from the channel estimate to the equalizer.
   dynamic_ch_est_list ch_estimates_copy;
   /// Buffer used to transfer noise variance estimates from the channel estimate to the equalizer.

@@ -28,7 +28,8 @@ target_link_libraries(ocudu_channel_processors_metal
 
 # ---- Dispatch-pattern probe (S2 design input, not part of the test suite) ----
 add_executable(metal_dispatch_probe test/metal_dispatch_probe.cpp)
-target_link_libraries(metal_dispatch_probe PRIVATE ocudu_channel_processors_metal ocudu_support)
+target_include_directories(metal_dispatch_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../equalization)
+target_link_libraries(metal_dispatch_probe PRIVATE ocudu_channel_processors_metal ocudu_channel_equalizer ocudu_support)
 
 # ---- Unit-level validation: A/B vs the CPU generic equalizer ----
 add_executable(channel_equalizer_metal_unit_test test/channel_equalizer_metal_unit_test.cpp)

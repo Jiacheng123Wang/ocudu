@@ -12,6 +12,9 @@
 ///   CPU 1 x n path. Both ZF and MMSE use this path (for a single layer the two algorithms
 ///   are equivalent once the LLR scaling is included).
 /// - 2..4 Tx layers x 2/4/8 Rx ports: Gram matrix inversion plus the matched filter.
+///
+/// Both input grids arrive as raw bf16 pairs (cbf16_t, 4 bytes per complex sample) and are
+/// widened in the kernel, so the host never converts them and only copies half the bytes.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -25,8 +28,22 @@ struct equalize_params {
     uint  nof_layers;   // transmit layers (1..4, <= nof_ports)
     uint  algo;         // 0 = ZF, 1 = MMSE (the single-layer path is algorithm-independent)
     float noise_var;    // noise variance estimate (max across ports, multi-layer path)
-    float tx_scaling;   // single-layer path only; the multi-layer path pre-scales H
+    float tx_scaling;   // single-layer path: folded into the pseudo-inverse denominator
+    float h_scaling;    // multi-layer path: scales the channel estimates (1 on the single-layer path)
 };
+
+// bf16 (cbf16_t) widening: the value is the upper half of the IEEE-754 single, so the
+// conversion is a 16-bit left shift (identical to the CPU to_float(bf16_t)).
+static inline float bf16_to_f(ushort v)
+{
+    return as_type<float>((uint)v << 16);
+}
+
+static inline float2 load_cbf16(device const ushort2* p, uint idx)
+{
+    const ushort2 v = p[idx];
+    return float2(bf16_to_f(v.x), bf16_to_f(v.y));
+}
 
 // Complex multiply / multiply-conjugate helpers.
 static inline float2 cmul(float2 a, float2 b)
@@ -87,8 +104,8 @@ static uint invert_aug(thread float2* a, uint n)
     return 0;
 }
 
-kernel void equalize_mxn(device const float2* h  [[buffer(0)]], // [port][layer][re]
-                         device const float2* y  [[buffer(1)]], // [port][re]
+kernel void equalize_mxn(device const ushort2* h [[buffer(0)]], // cbf16 [port][layer][re]
+                         device const ushort2* y [[buffer(1)]], // cbf16 [port][re]
                          device float2*       eq  [[buffer(2)]], // [re][layer] interleaved
                          device float*        nv  [[buffer(3)]], // [re][layer]
                          constant equalize_params& p [[buffer(4)]],
@@ -104,7 +121,7 @@ kernel void equalize_mxn(device const float2* h  [[buffer(0)]], // [port][layer]
     float2 H[MAX_PORTS][MAX_LAYERS];
     for (uint port = 0; port != P; ++port) {
         for (uint layer = 0; layer != L; ++layer) {
-            H[port][layer] = h[((port * L + layer) * p.nof_re) + re];
+            H[port][layer] = load_cbf16(h, ((port * L + layer) * p.nof_re) + re) * p.h_scaling;
         }
     }
 
@@ -122,7 +139,7 @@ kernel void equalize_mxn(device const float2* h  [[buffer(0)]], // [port][layer]
                 ch_mod_sq += nrm;
                 nvar_acc += nrm * sigma2[port];
                 // Matched filter: conjprod(re_in, ch_est) = re_in * conj(ch_est).
-                const float2 yv = y[port * p.nof_re + re];
+                const float2 yv = load_cbf16(y, port * p.nof_re + re);
                 re_out += cmul(yv, float2(hv.x, -hv.y));
             }
         }
@@ -211,7 +228,7 @@ kernel void equalize_mxn(device const float2* h  [[buffer(0)]], // [port][layer]
         float2 eq_acc  = 0;
         float  corr    = 0.0f;
         for (uint port = 0; port != P; ++port) {
-            const float2 yv = y[port * p.nof_re + re];
+            const float2 yv = load_cbf16(y, port * p.nof_re + re);
             eq_acc += cmul(W[port][layer], yv);
             if (p.algo == 1u) {
                 const float2 wh = cmul(W[port][layer], H[port][layer]);

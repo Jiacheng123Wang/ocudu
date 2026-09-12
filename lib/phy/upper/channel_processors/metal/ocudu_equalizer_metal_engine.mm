@@ -111,6 +111,7 @@ struct equalize_params_t {
   uint32_t algo;
   float    noise_var;
   float    tx_scaling;
+  float    h_scaling;
 };
 
 struct eq_engine_impl {
@@ -233,14 +234,16 @@ bool equalizer_metal_engine::enqueue(const void* h,
                                      unsigned    nof_layers,
                                      bool        mmse,
                                      float       noise_var,
-                                     float       tx_scaling)
+                                     float       tx_scaling,
+                                     float       h_scaling)
 {
   eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
   if (engine == nullptr || engine->batch_enc == nil) {
     return false;
   }
-  const size_t h_bytes = static_cast<size_t>(nof_ports) * nof_layers * nof_re * 2 * sizeof(float);
-  const size_t y_bytes = static_cast<size_t>(nof_ports) * nof_re * 2 * sizeof(float);
+  // cbf16_t inputs: 4 bytes per complex sample, widened inside the kernel.
+  const size_t h_bytes = static_cast<size_t>(nof_ports) * nof_layers * nof_re * 4;
+  const size_t y_bytes = static_cast<size_t>(nof_ports) * nof_re * 4;
   const size_t s_bytes = static_cast<size_t>(nof_ports) * sizeof(float);
   const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
   const size_t nv_bytes = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
@@ -253,7 +256,7 @@ bool equalizer_metal_engine::enqueue(const void* h,
     return false;
   }
 
-  equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, tx_scaling};
+  equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, tx_scaling, h_scaling};
   id<MTLComputeCommandEncoder> enc = engine->batch_enc;
   [enc setBuffer:b_h offset:0 atIndex:0];
   [enc setBuffer:b_y offset:0 atIndex:1];
@@ -312,13 +315,14 @@ bool equalizer_metal_engine::equalize(const void* h,
                                       unsigned    nof_layers,
                                       bool        mmse,
                                       float       noise_var,
-                                      float       tx_scaling)
+                                      float       tx_scaling,
+                                      float       h_scaling)
 {
   // Compatibility wrapper: one dispatch per command buffer.
   if (!begin_batch()) {
     return false;
   }
-  if (!enqueue(h, y, sigma2, eq, nv, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling)) {
+  if (!enqueue(h, y, sigma2, eq, nv, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling)) {
     flush_batch();
     return false;
   }

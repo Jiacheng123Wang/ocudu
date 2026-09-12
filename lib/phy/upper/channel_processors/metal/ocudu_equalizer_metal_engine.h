@@ -33,10 +33,10 @@ public:
   bool init();
 
   /// \brief Synchronous equalization of one symbol batch.
-  /// \param[in]  h          Staged channel estimates, layout [port][layer][re], float2,
+  /// \param[in]  h          Staged channel estimates, layout [port][layer][re], cbf16,
   ///                        page-aligned. tx_scaling is applied by the caller on the
   ///                        multi-layer path and left out on the single-layer path.
-  /// \param[in]  y          Staged received symbols, layout [port][re], float2, page-aligned.
+  /// \param[in]  y          Staged received symbols, layout [port][re], cbf16, page-aligned.
   /// \param[in]  sigma2     Staged per-port noise variances, float, page-aligned (used by
   ///                        the single-layer path only).
   /// \param[out] eq         Equalized symbols, layout [re][layer] interleaved, float2,
@@ -49,6 +49,8 @@ public:
   /// \param[in]  mmse       True for the MMSE algorithm (false = ZF).
   /// \param[in]  noise_var  Noise variance estimate (max across ports, multi-layer path).
   /// \param[in]  tx_scaling Transmission gain scaling factor (single-layer path).
+  /// \param[in]  h_scaling  Channel estimate scaling applied in-kernel (multi-layer path;
+  ///                        use 1 on the single-layer path).
   /// \return True on success.
   bool equalize(const void* h,
                 const void* y,
@@ -60,7 +62,8 @@ public:
                 unsigned    nof_layers,
                 bool        mmse,
                 float       noise_var,
-                float       tx_scaling);
+                float       tx_scaling,
+                float       h_scaling);
 
   /// \brief Batched enqueue API (S2 groundwork): every dispatch enqueued between begin_batch()
   /// and flush_batch() shares a single command buffer, so a symbol batch pays one commit/wait
@@ -78,7 +81,8 @@ public:
                unsigned    nof_layers,
                bool        mmse,
                float       noise_var,
-               float       tx_scaling);
+               float       tx_scaling,
+               float       h_scaling);
   bool flush_batch();
 
   /// Number of dispatches enqueued in the batch in progress (diagnostics).

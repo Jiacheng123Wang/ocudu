@@ -6,9 +6,22 @@
 #include "ocudu/ran/sch/modulation_scheme.h"
 #include "ocudu/support/macos_compat.h"
 #include "ocudu/support/ocudu_assert.h"
+#include <cstdint>
 #include <cstring>
 
 using namespace ocudu;
+
+namespace {
+
+/// True when the buffer can be handed to the Metal no-copy wrap (page-aligned base address;
+/// the engine maps a page-rounded length, so the caller's allocation must cover the tail -
+/// page_aligned_allocator does, and only the symbol range within the span is touched).
+bool is_page_aligned_buffer(const void* ptr)
+{
+  return (ptr != nullptr) && ((reinterpret_cast<uintptr_t>(ptr) % compat::page_size()) == 0);
+}
+
+} // namespace
 
 struct demodulation_mapper_metal::impl {
   metal::demod_metal_engine engine;
@@ -94,12 +107,24 @@ void demodulation_mapper_metal::demodulate_soft(span<log_likelihood_ratio> llrs,
   const size_t sym_bytes   = nof_symbols * 2 * sizeof(float);
   const size_t nv_bytes    = nof_symbols * sizeof(float);
   const size_t llr_bytes   = nof_bits * sizeof(int8_t);
-  auto*        sym_ptr     = static_cast<float*>(impl::ensure(impl_->sym_buf, impl_->sym_cap, sym_bytes));
-  auto*        nv_ptr      = static_cast<float*>(impl::ensure(impl_->nv_buf, impl_->nv_cap, nv_bytes));
-  auto*        llr_ptr     = static_cast<int8_t*>(impl::ensure(impl_->llr_buf, impl_->llr_cap, llr_bytes));
 
-  std::memcpy(sym_ptr, symbols.data(), sym_bytes);
-  std::memcpy(nv_ptr, noise_vars.data(), nv_bytes);
+  // The equalized symbols and their noise variances are consumed as-is when they are page
+  // aligned (the PUSCH demodulator allocates them that way), otherwise they are staged.
+  const bool sym_direct = is_page_aligned_buffer(symbols.data());
+  const bool nv_direct  = is_page_aligned_buffer(noise_vars.data());
+  const void* sym_ptr = sym_direct ? static_cast<const void*>(symbols.data())
+                                   : impl::ensure(impl_->sym_buf, impl_->sym_cap, sym_bytes);
+  const void* nv_ptr  = nv_direct ? static_cast<const void*>(noise_vars.data())
+                                  : impl::ensure(impl_->nv_buf, impl_->nv_cap, nv_bytes);
+  // The LLR destination is the UL-SCH demultiplexer buffer (not page aligned): stage it.
+  auto* llr_ptr = static_cast<int8_t*>(impl::ensure(impl_->llr_buf, impl_->llr_cap, llr_bytes));
+
+  if (!sym_direct) {
+    std::memcpy(const_cast<void*>(sym_ptr), symbols.data(), sym_bytes);
+  }
+  if (!nv_direct) {
+    std::memcpy(const_cast<void*>(nv_ptr), noise_vars.data(), nv_bytes);
+  }
 
   const bool ok = impl_->engine.demodulate(sym_ptr, nv_ptr, llr_ptr, nof_symbols, mod_id);
   if (!ok) {

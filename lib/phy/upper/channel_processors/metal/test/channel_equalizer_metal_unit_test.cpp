@@ -13,6 +13,7 @@
 #include "ocudu/adt/format.h"
 #include "ocudu/phy/support/re_buffer.h"
 #include "ocudu/phy/upper/equalization/modular_ch_est_list.h"
+#include "ocudu/support/macos_compat.h"
 #include "ocudu/support/ocudu_assert.h"
 #include <algorithm>
 #include <chrono>
@@ -75,8 +76,31 @@ struct topology {
   unsigned layers;
 };
 
-bool run_topology(const topology& topo, channel_equalizer_algorithm_type algo, std::mt19937& rng,
-                  float tx_scaling = 1.0F, span<const float> nv_override = {})
+/// RAII page-aligned region used to exercise the in-place (no staging) output path.
+struct aligned_region {
+  void*  ptr = nullptr;
+  size_t cap = 0;
+
+  explicit aligned_region(size_t bytes)
+  {
+    if (bytes == 0) {
+      return;
+    }
+    const size_t page = compat::page_size();
+    cap               = ((bytes + page - 1) / page) * page;
+    ptr               = compat::aligned_alloc(page, cap);
+  }
+  ~aligned_region() { compat::aligned_free(ptr); }
+  aligned_region(const aligned_region&)            = delete;
+  aligned_region& operator=(const aligned_region&) = delete;
+};
+
+bool run_topology(const topology& topo,
+                  channel_equalizer_algorithm_type algo,
+                  std::mt19937&                  rng,
+                  float                          tx_scaling       = 1.0F,
+                  span<const float>              nv_override      = {},
+                  bool                           aligned_outputs  = false)
 {
   const unsigned nof_re = 128;
   auto           dist   = std::normal_distribution<float>(0.0F, 0.01F);
@@ -114,10 +138,16 @@ bool run_topology(const topology& topo, channel_equalizer_algorithm_type algo, s
     }
   }
 
-  std::vector<cf_t>  eq_metal(nof_re * topo.layers);
-  std::vector<float> nv_metal(nof_re * topo.layers);
-  std::vector<cf_t>  eq_ref(nof_re * topo.layers);
-  std::vector<float> nv_ref(nof_re * topo.layers);
+  const unsigned     nof_eq = nof_re * topo.layers;
+  std::vector<cf_t>  eq_staged(nof_eq);
+  std::vector<float> nv_staged(nof_eq);
+  aligned_region     eq_mem(aligned_outputs ? nof_eq * sizeof(cf_t) : 0);
+  aligned_region     nv_mem(aligned_outputs ? nof_eq * sizeof(float) : 0);
+  span<cf_t>  eq_metal = aligned_outputs ? span<cf_t>(static_cast<cf_t*>(eq_mem.ptr), nof_eq) : span<cf_t>(eq_staged);
+  span<float> nv_metal =
+      aligned_outputs ? span<float>(static_cast<float*>(nv_mem.ptr), nof_eq) : span<float>(nv_staged);
+  std::vector<cf_t>  eq_ref(nof_eq);
+  std::vector<float> nv_ref(nof_eq);
 
   channel_equalizer_metal        metal(algo == channel_equalizer_algorithm_type::mmse);
   channel_equalizer_generic_impl ref(algo);
@@ -132,8 +162,14 @@ bool run_topology(const topology& topo, channel_equalizer_algorithm_type algo, s
   const double nmse   = nmse_db(span<const cf_t>(eq_ref), span<const cf_t>(eq_metal));
   const double nver   = max_rel_err(span<const float>(nv_ref), span<const float>(nv_metal));
   const unsigned nover = count_rel_err_above(span<const float>(nv_ref), span<const float>(nv_metal), 1e-3);
-  std::printf("[A/B] %ux%u %-4s nmse=%8.2f dB nv_max_rel_err=%.2e (re>1e-3: %u/%u)", topo.ports, topo.layers,
-              algo == channel_equalizer_algorithm_type::zf ? "zf" : "mmse", nmse, nver, nover,
+  std::printf("[A/B] %ux%u %-4s %-9s nmse=%8.2f dB nv_max_rel_err=%.2e (re>1e-3: %u/%u)",
+              topo.ports,
+              topo.layers,
+              algo == channel_equalizer_algorithm_type::zf ? "zf" : "mmse",
+              aligned_outputs ? "zero-copy" : "staging",
+              nmse,
+              nver,
+              nover,
               static_cast<unsigned>(nv_ref.size()));
 
   // Noise-variance gates. Both pipelines are float32: for the multi-layer path the Gram
@@ -180,6 +216,13 @@ int main()
     ok = run_topology({2, 1}, channel_equalizer_algorithm_type::zf, rng, 1.0F, span<const float>(nv_none, 2)) && ok;
     ok = run_topology({1, 1}, channel_equalizer_algorithm_type::mmse, rng, 1.0F, span<const float>(nv_none, 1)) && ok;
   }
+
+  // In-place (page-aligned) outputs must be bit-identical to the staging path: same kernel,
+  // the only difference is whether the results are copied back.
+  ok = run_topology({1, 1}, channel_equalizer_algorithm_type::zf, rng, 1.0F, {}, true) && ok;
+  ok = run_topology({4, 1}, channel_equalizer_algorithm_type::mmse, rng, 1.0F, {}, true) && ok;
+  ok = run_topology({4, 4}, channel_equalizer_algorithm_type::zf, rng, 1.0F, {}, true) && ok;
+  ok = run_topology({8, 3}, channel_equalizer_algorithm_type::mmse, rng, 2.0F, {}, true) && ok;
 
   // Tx-scaling consistency: the host applies tx_scaling to H while the CPU's dedicated
   // 2-layer path folds it into the determinant - both must agree for scaling != 1.

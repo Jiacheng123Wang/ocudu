@@ -10,11 +10,24 @@
 #include "ocudu/support/ocudu_assert.h"
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <limits>
 
 using namespace ocudu;
+
+namespace {
+
+/// True when the buffer can be handed to the Metal no-copy wrap: its base address is page
+/// aligned. The engine maps a page-rounded length, so the caller's allocation must cover the
+/// rounded tail (page_aligned_allocator does); only the RE range within the span is touched.
+bool is_page_aligned_buffer(const void* ptr)
+{
+  return (ptr != nullptr) && ((reinterpret_cast<uintptr_t>(ptr) % compat::page_size()) == 0);
+}
+
+} // namespace
 
 struct channel_equalizer_metal::impl {
   metal::equalizer_metal_engine engine;
@@ -130,33 +143,35 @@ void channel_equalizer_metal::equalize(span<cf_t>                       eq_symbo
     }
   }
 
-  // Stage H (bf16 -> float2) and y (bf16 -> float2) for the selected ports.
-  const float  h_scaling = single_layer ? 1.0F : tx_scaling;
-  const size_t h_bytes   = static_cast<size_t>(nof_used_ports) * nof_layers * nof_re * 2 * sizeof(float);
-  const size_t y_bytes   = static_cast<size_t>(nof_used_ports) * nof_re * 2 * sizeof(float);
-  const size_t s_bytes   = static_cast<size_t>(nof_used_ports) * sizeof(float);
-  const size_t eq_bytes  = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
-  const size_t nv_bytes  = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
-  auto*        h_ptr     = static_cast<float*>(impl::ensure(impl_->h_buf, impl_->h_cap, h_bytes));
-  auto*        y_ptr     = static_cast<float*>(impl::ensure(impl_->y_buf, impl_->y_cap, y_bytes));
-  auto*        s_ptr     = static_cast<float*>(impl::ensure(impl_->s_buf, impl_->s_cap, s_bytes));
-  auto*        eq_ptr    = static_cast<float*>(impl::ensure(impl_->eq_buf, impl_->eq_cap, eq_bytes));
-  auto*        nv_ptr    = static_cast<float*>(impl::ensure(impl_->nv_buf, impl_->nv_cap, nv_bytes));
+  // Stage the cbf16 inputs (the kernel widens them) and pick the output buffers: when the
+  // caller's spans satisfy the Metal no-copy requirements (page-aligned, page-multiple
+  // length) the kernel writes them directly, otherwise the reusable staging buffers are used
+  // and copied back afterwards.
+  const size_t h_bytes  = static_cast<size_t>(nof_used_ports) * nof_layers * nof_re * sizeof(cbf16_t);
+  const size_t y_bytes  = static_cast<size_t>(nof_used_ports) * nof_re * sizeof(cbf16_t);
+  const size_t s_bytes  = static_cast<size_t>(nof_used_ports) * sizeof(float);
+  const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
+  const size_t nv_bytes = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
+
+  auto*        h_ptr    = static_cast<cbf16_t*>(impl::ensure(impl_->h_buf, impl_->h_cap, h_bytes));
+  auto*        y_ptr    = static_cast<cbf16_t*>(impl::ensure(impl_->y_buf, impl_->y_cap, y_bytes));
+  auto*        s_ptr    = static_cast<float*>(impl::ensure(impl_->s_buf, impl_->s_cap, s_bytes));
+  const bool   eq_direct = is_page_aligned_buffer(eq_symbols.data());
+  const bool   nv_direct = is_page_aligned_buffer(eq_noise_vars.data());
+  void*        eq_ptr    = eq_direct ? static_cast<void*>(eq_symbols.data())
+                                     : impl::ensure(impl_->eq_buf, impl_->eq_cap, eq_bytes);
+  void*        nv_ptr    = nv_direct ? static_cast<void*>(eq_noise_vars.data())
+                                     : impl::ensure(impl_->nv_buf, impl_->nv_cap, nv_bytes);
 
   for (unsigned i_used = 0; i_used != nof_used_ports; ++i_used) {
-    const unsigned      i_port = port_map[i_used];
-    span<const cbf16_t> y_view = ch_symbols.get_slice(i_port);
-    for (unsigned i_re = 0; i_re != nof_re; ++i_re) {
-      y_ptr[2 * (i_used * nof_re + i_re)]     = to_float(y_view[i_re].real);
-      y_ptr[2 * (i_used * nof_re + i_re) + 1] = to_float(y_view[i_re].imag);
-    }
+    const unsigned i_port = port_map[i_used];
+    std::memcpy(y_ptr + static_cast<size_t>(i_used) * nof_re,
+                ch_symbols.get_slice(i_port).data(),
+                static_cast<size_t>(nof_re) * sizeof(cbf16_t));
     for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-      span<const cbf16_t> h_view = ch_estimates.get_channel(i_port, i_layer);
-      for (unsigned i_re = 0; i_re != nof_re; ++i_re) {
-        const size_t idx = ((static_cast<size_t>(i_used) * nof_layers + i_layer) * nof_re + i_re) * 2;
-        h_ptr[idx]       = to_float(h_view[i_re].real) * h_scaling;
-        h_ptr[idx + 1]   = to_float(h_view[i_re].imag) * h_scaling;
-      }
+      std::memcpy(h_ptr + (static_cast<size_t>(i_used) * nof_layers + i_layer) * nof_re,
+                  ch_estimates.get_channel(i_port, i_layer).data(),
+                  static_cast<size_t>(nof_re) * sizeof(cbf16_t));
     }
     if (single_layer) {
       s_ptr[i_used] = noise_var_estimates[i_port];
@@ -165,8 +180,7 @@ void channel_equalizer_metal::equalize(span<cf_t>                       eq_symbo
   // The single-layer kernel reads a per-port noise variance array; keep it defined (and
   // cached) even when the multi-layer path does not use it.
   if (!single_layer) {
-    s_ptr[0] = noise_var;
-    for (unsigned i_port = 1; i_port != nof_used_ports; ++i_port) {
+    for (unsigned i_port = 0; i_port != nof_used_ports; ++i_port) {
       s_ptr[i_port] = noise_var;
     }
   }
@@ -181,7 +195,8 @@ void channel_equalizer_metal::equalize(span<cf_t>                       eq_symbo
                                         nof_layers,
                                         impl_->mmse,
                                         noise_var,
-                                        tx_scaling);
+                                        tx_scaling,
+                                        single_layer ? 1.0F : tx_scaling);
   if (!ok) {
     // Engine failure: mirror the CPU invalid-input semantics instead of leaving stale data.
     ocuduvec::zero(eq_symbols);
@@ -189,8 +204,12 @@ void channel_equalizer_metal::equalize(span<cf_t>                       eq_symbo
     return;
   }
 
-  std::memcpy(eq_symbols.data(), eq_ptr, eq_bytes);
-  std::memcpy(eq_noise_vars.data(), nv_ptr, nv_bytes);
+  if (!eq_direct) {
+    std::memcpy(eq_symbols.data(), eq_ptr, eq_bytes);
+  }
+  if (!nv_direct) {
+    std::memcpy(eq_noise_vars.data(), nv_ptr, nv_bytes);
+  }
 }
 
 double channel_equalizer_metal::engine_gpu_wait_us() const

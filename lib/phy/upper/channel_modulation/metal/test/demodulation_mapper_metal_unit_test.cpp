@@ -12,6 +12,7 @@
 #include "../demodulation_mapper_metal_factory.h"
 #include "demodulation_mapper_impl.h"
 #include "ocudu/adt/format.h"
+#include "ocudu/support/macos_compat.h"
 #include "ocudu/ran/sch/modulation_scheme.h"
 #include <chrono>
 #include <cmath>
@@ -127,6 +128,49 @@ bool run_special(modulation_scheme mod)
   return true;
 }
 
+// Page-aligned inputs exercise the in-place (no staging) input path; the LLR output stays
+// staged in both cases. Results must be bit-identical to the CPU reference.
+bool run_aligned(modulation_scheme mod, std::mt19937& rng)
+{
+  const unsigned nof_symbols = 256;
+  const unsigned nof_bits    = nof_symbols * bits_per_scheme(mod);
+  const size_t   page        = compat::page_size();
+  const size_t   sym_bytes   = nof_symbols * sizeof(cf_t);
+  const size_t   nv_bytes    = nof_symbols * sizeof(float);
+
+  void* sym_mem = compat::aligned_alloc(page, ((sym_bytes + page - 1) / page) * page);
+  void* nv_mem  = compat::aligned_alloc(page, ((nv_bytes + page - 1) / page) * page);
+  if ((sym_mem == nullptr) || (nv_mem == nullptr)) {
+    compat::aligned_free(sym_mem);
+    compat::aligned_free(nv_mem);
+    return false;
+  }
+  span<cf_t>  symbols(static_cast<cf_t*>(sym_mem), nof_symbols);
+  span<float> noise_vars(static_cast<float*>(nv_mem), nof_symbols);
+
+  auto dist = std::normal_distribution<float>(0.0F, 0.3F);
+  for (auto& z : symbols) {
+    z = {dist(rng), dist(rng)};
+  }
+  for (auto& n : noise_vars) {
+    n = 0.05F + 0.05F * std::abs(dist(rng));
+  }
+
+  std::vector<log_likelihood_ratio> llrs_metal(nof_bits);
+  std::vector<log_likelihood_ratio> llrs_ref(nof_bits);
+  std::vector<cf_t>                 symbols_copy(symbols.begin(), symbols.end());
+  std::vector<float>                nv_copy(noise_vars.begin(), noise_vars.end());
+
+  demodulation_mapper_metal metal;
+  demodulation_mapper_impl  ref;
+  metal.demodulate_soft(llrs_metal, symbols, noise_vars, mod);
+  ref.demodulate_soft(llrs_ref, symbols_copy, nv_copy, mod);
+
+  compat::aligned_free(sym_mem);
+  compat::aligned_free(nv_mem);
+  return bit_exact(llrs_ref, llrs_metal);
+}
+
 } // namespace
 
 int main()
@@ -140,10 +184,15 @@ int main()
                                        modulation_scheme::QAM256};
   const char*            names[]   = {"qpsk", "qam16", "qam64", "qam256"};
   for (unsigned i = 0; i != 4; ++i) {
-    const bool rnd = run_random(schemes[i], rng);
-    const bool spc = run_special(schemes[i]);
-    std::printf("[A/B] %-6s random=%s special=%s\n", names[i], rnd ? "OK" : "FAIL", spc ? "OK" : "FAIL");
-    ok = ok && rnd && spc;
+    const bool rnd  = run_random(schemes[i], rng);
+    const bool spc  = run_special(schemes[i]);
+    const bool algn = run_aligned(schemes[i], rng);
+    std::printf("[A/B] %-6s random=%s special=%s aligned=%s\n",
+                names[i],
+                rnd ? "OK" : "FAIL",
+                spc ? "OK" : "FAIL",
+                algn ? "OK" : "FAIL");
+    ok = ok && rnd && spc && algn;
   }
 
   // Composite-factory fallback: BPSK and pi/2-BPSK stay on the CPU implementation.
