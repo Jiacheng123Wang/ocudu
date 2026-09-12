@@ -9,6 +9,106 @@
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/math/math_utils.h"
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+
+#if defined(OCUDU_CE_TIME)
+namespace {
+
+/// \brief Aggregated channel-estimation phase statistics (ENABLE_CE_TIME build only).
+///
+/// The per-hop [mmse_time] debug line is far too verbose to run under load (tens of lines per
+/// slot, which perturbs what it measures) and needs all_level: debug on top. This accumulator
+/// keeps the same fields and prints one summary line per process, to stderr, like [metal_stats].
+struct mmse_time_stats {
+  std::atomic<uint64_t> calls{0};
+  std::atomic<uint64_t> hops_gpu{0};
+  std::atomic<uint64_t> hops_no_gpu{0};
+  std::atomic<uint64_t> hops_nn{0};
+  std::atomic<uint64_t> fallback_blocks{0};
+  std::atomic<uint64_t> total_us{0};
+  std::atomic<uint64_t> gpu_path_us{0};
+  std::atomic<uint64_t> gpu_wait_us{0};
+  std::atomic<uint64_t> cpu_blocks_us{0};
+  std::atomic<uint64_t> sigma2_us{0};
+  std::atomic<uint64_t> corr_us{0};
+  std::atomic<uint64_t> max_total_us{0};
+};
+
+mmse_time_stats& mmse_stats()
+{
+  static mmse_time_stats s;
+  return s;
+}
+
+void mmse_stats_register_atexit()
+{
+  static std::once_flag flag;
+  std::call_once(flag, []() {
+    std::atexit([]() {
+      const mmse_time_stats& s = mmse_stats();
+      const uint64_t          n = s.calls.load(std::memory_order_relaxed);
+      if (n == 0) {
+        return;
+      }
+      const auto avg = [n](const std::atomic<uint64_t>& v) {
+        return static_cast<double>(v.load(std::memory_order_relaxed)) / static_cast<double>(n);
+      };
+      std::fprintf(stderr,
+                   "[mmse_time_sum] calls=%llu hops_gpu=%llu hops_no_gpu=%llu hops_nn=%llu fb_blocks=%llu | "
+                   "mean total=%.1fus sigma2=%.1fus corr=%.1fus gpu_path=%.1fus (gpu_wait=%.1fus) "
+                   "cpu_blocks=%.1fus | max total=%lluus\n",
+                   static_cast<unsigned long long>(n),
+                   static_cast<unsigned long long>(s.hops_gpu.load(std::memory_order_relaxed)),
+                   static_cast<unsigned long long>(s.hops_no_gpu.load(std::memory_order_relaxed)),
+                   static_cast<unsigned long long>(s.hops_nn.load(std::memory_order_relaxed)),
+                   static_cast<unsigned long long>(s.fallback_blocks.load(std::memory_order_relaxed)),
+                   avg(s.total_us),
+                   avg(s.sigma2_us),
+                   avg(s.corr_us),
+                   avg(s.gpu_path_us),
+                   avg(s.gpu_wait_us),
+                   avg(s.cpu_blocks_us),
+                   static_cast<unsigned long long>(s.max_total_us.load(std::memory_order_relaxed)));
+    });
+  });
+}
+
+void mmse_stats_accumulate(bool     hop_gpu,
+                           bool     hop_nn,
+                           unsigned fallback_blocks,
+                           double   sigma2_us,
+                           double   corr_us,
+                           double   gpu_path_us,
+                           double   gpu_wait_us,
+                           double   cpu_blocks_us,
+                           double   total_us)
+{
+  mmse_stats_register_atexit();
+  mmse_time_stats& s = mmse_stats();
+  s.calls.fetch_add(1, std::memory_order_relaxed);
+  (hop_gpu ? s.hops_gpu : s.hops_no_gpu).fetch_add(1, std::memory_order_relaxed);
+  if (hop_nn) {
+    s.hops_nn.fetch_add(1, std::memory_order_relaxed);
+  }
+  s.fallback_blocks.fetch_add(fallback_blocks, std::memory_order_relaxed);
+  s.sigma2_us.fetch_add(static_cast<uint64_t>(sigma2_us), std::memory_order_relaxed);
+  s.corr_us.fetch_add(static_cast<uint64_t>(corr_us), std::memory_order_relaxed);
+  s.gpu_path_us.fetch_add(static_cast<uint64_t>(gpu_path_us), std::memory_order_relaxed);
+  s.gpu_wait_us.fetch_add(static_cast<uint64_t>(gpu_wait_us), std::memory_order_relaxed);
+  s.cpu_blocks_us.fetch_add(static_cast<uint64_t>(cpu_blocks_us), std::memory_order_relaxed);
+  s.total_us.fetch_add(static_cast<uint64_t>(total_us), std::memory_order_relaxed);
+  uint64_t prev = s.max_total_us.load(std::memory_order_relaxed);
+  const auto cur = static_cast<uint64_t>(total_us);
+  while (cur > prev && !s.max_total_us.compare_exchange_weak(prev, cur, std::memory_order_relaxed)) {
+  }
+}
+
+} // namespace
+#endif // OCUDU_CE_TIME
+
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -556,6 +656,18 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                  us(t_cpu_end - t_gpu_end),
                  us(t_finish - t_cpu_end),
                  us(t_finish - t_begin));
+
+    // Aggregated summary (printed once at exit, stderr) - the debug line above is only usable
+    // interactively because it emits tens of lines per slot.
+    mmse_stats_accumulate(hop_gpu,
+                          hop_nn,
+                          cpu_fallback_blocks,
+                          us(t_sigma2 - t_begin),
+                          us(t_corr_std - t_sigma2),
+                          us(t_gpu_end - t_corr_std),
+                          engine_ready ? engine->last_gpu_wait_us() : 0.0,
+                          us(t_cpu_end - t_gpu_end),
+                          us(t_finish - t_begin));
   }
 }
 
