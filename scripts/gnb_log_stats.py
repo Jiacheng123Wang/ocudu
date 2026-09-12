@@ -8,6 +8,10 @@ failures reach the MAC, how often the downlink HARQ-ACK is not even detected
 (DTX), and how much MCS the outer loops are asking for while doing so.
 
 Usage:  scripts/gnb_log_stats.py /tmp/gnb.log [--bucket 10] [--rnti 0x460c]
+
+\note Numeric fields are parsed with an optional sign: a PUSCH result line prints signed
+values ("epre=+16.6dB" on success, "-40.3dB" on failure) and a parser that only accepts
+a minus sign silently drops every successful block.
 """
 
 import argparse
@@ -19,17 +23,17 @@ import sys
 TS = re.compile(r"^(\d{4}-\d\d-\d\dT(\d\d):(\d\d):(\d\d\.\d+))")
 PUSCH = re.compile(
     r"PUSCH: rnti=(\S+) harq_id=(\d+) prb=\[(\d+), (\d+)\) symb=\[(\d+), (\d+)\) "
-    r"mod=(\S+) rv=(\d+) tbs=(\d+) crc=(\w+) iter=([\d.]+) sinr=(-?[\d.]+)dB "
-    r"epre=(-?[\d.]+)dB rsrp=(-?[\d.]+)dB t_align=(-?[\d.]+)us t=([\d.]+)us")
+    r"mod=(\S+) rv=(\d+) tbs=(\d+) crc=(\w+) iter=([\d.]+) sinr=([+-]?[\d.]+)dB "
+    r"epre=([+-]?[\d.]+)dB rsrp=([+-]?[\d.]+)dB t_align=([+-]?[\d.]+)us t=([\d.]+)us")
 PUCCH = re.compile(
-    r"PUCCH: rnti=(\S+) format=(\d+) .*?ack=(\d+)?.*? sinr=(-?[\d.]+)dB")
+    r"PUCCH: rnti=(\S+) format=(\d+) .*?ack=(\d+)?.*? sinr=([+-]?[\d.]+)dB")
 UCI = re.compile(r"UCI\.indication .*?rnti=(\S+).*?harq_ack=(\w+)")
-CRC_IND = re.compile(r"\- CRC: ue=(\d+) rnti=(\S+) rx_slot=(\S+) h_id=(\d+) crc=(\w+) sinr=(-?[\d.]+)dB")
+CRC_IND = re.compile(r"\- CRC: ue=(\d+) rnti=(\S+) rx_slot=(\S+) h_id=(\d+) crc=(\w+) sinr=([+-]?[\d.]+)dB")
 DL_GRANT = re.compile(r"PDSCH rnti=(\S+) .*?CW: mod=(\S+) mcs_index=(\d+) mcs_table=(\d+) rv_idx=(\d+) tbs=(\d+)")
 UL_GRANT = re.compile(
     r"PUSCH rnti=(\S+) .*?target_code_rate=(\d+) modulation=(\S+) mcs_index=(\d+) "
     r".*?CW: rv_idx=(\d+) harq_id=(\d+) new_data=(\w+) tbs=(\d+)")
-PRACH = re.compile(r"PRACH: rsi=(\d+) rssi=(-?[\d.]+)dB")
+PRACH = re.compile(r"PRACH: rsi=(\d+) rssi=([+-]?[\d.]+)dB")
 RAR = re.compile(r"RAR PDSCH: ra-rnti=(\S+).*?grants \(\d+\): \[tc-rnti=(\S+):")
 MSG3_GRANT_FAIL = re.compile(r"Failed to allocate PUSCH Msg3")
 GRANT = re.compile(r"^\t")
