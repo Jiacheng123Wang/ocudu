@@ -540,24 +540,38 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       hop_pad       = (std_blocks_ok && matrix_on) ? static_cast<unsigned>(((L_std + 7u) & ~7u) - L_std) : 0;
     }
     if (rem_prb != 0) {
-      // Tail/edge block - and when nof_prb < block_prb this is the WHOLE hop (single block):
-      // run it through the engine with its actual geometry instead of the CPU reference math.
-      unsigned nout_e = 0;
-      unsigned L_e    = 0;
-      build_correlation_matrices(stats,
-                                 args.dmrs_patterns.front().re_pattern,
-                                 rem_prb,
-                                 span<const unsigned>(dmrs_sym.begin(), npt),
-                                 scs_khz,
-                                 span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS),
-                                 span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
-                                 nout_e,
-                                 L_e);
-      tail_L   = L_e;
-      tail_ok  = run_engine_blocks(args, n_std_blocks * block_prb, 1, rem_prb, nout_e, L_e, npt, matrix_on);
-      hop_gpu  = hop_gpu || tail_ok;
-      hop_nn   = hop_nn || (tail_ok && matrix_on);
-      hop_pad  = (tail_ok && matrix_on) ? static_cast<unsigned>(((L_e + 7u) & ~7u) - L_e) : hop_pad;
+      // Tail/edge block - and when nof_prb < block_prb this is the WHOLE hop (single block).
+      //
+      // MEASURED (S-4d): an engine call costs ~100 us of fixed command-buffer round trip (wait),
+      // which the second call of the hop pays for a <= block_prb-1 PRB block of ~1 us of GPU work.
+      // The CPU reference math of the fallback loop below computes that block in ~16 us, so the
+      // tail goes there and the hop issues ONE engine call instead of two:
+      //
+      //   25 PRB/2 DMRS: 234.1 -> 153.8 us/hop, 52 PRB/2 DMRS: 239.6 -> 163.1 us/hop,
+      //   52 PRB/1 DMRS: 217.3 -> 128.3 us/hop (identical NMSE in all three).
+      //
+      // tail_ok=false is what routes the block to that loop: it is the same per-block decision
+      // used when an engine batch fails (leaving it true would skip the block and keep stale
+      // estimates in the grid). OCUDU_CE_TAIL_GPU=1 restores the engine tail for A/B.
+      tail_ok = false;
+      if (std::getenv("OCUDU_CE_TAIL_GPU") != nullptr) {
+        unsigned nout_e = 0;
+        unsigned L_e    = 0;
+        build_correlation_matrices(stats,
+                                   args.dmrs_patterns.front().re_pattern,
+                                   rem_prb,
+                                   span<const unsigned>(dmrs_sym.begin(), npt),
+                                   scs_khz,
+                                   span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS),
+                                   span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
+                                   nout_e,
+                                   L_e);
+        tail_L  = L_e;
+        tail_ok = run_engine_blocks(args, n_std_blocks * block_prb, 1, rem_prb, nout_e, L_e, npt, matrix_on);
+        hop_gpu = hop_gpu || tail_ok;
+        hop_nn  = hop_nn || (tail_ok && matrix_on);
+        hop_pad = (tail_ok && matrix_on) ? static_cast<unsigned>(((L_e + 7u) & ~7u) - L_e) : hop_pad;
+      }
     }
     // A/B observability: whether the last stage engaged the matrix kernels (nn=1) - or the
     // legacy kernels (nn=0, only when the matrix pipelines are unavailable/stale).

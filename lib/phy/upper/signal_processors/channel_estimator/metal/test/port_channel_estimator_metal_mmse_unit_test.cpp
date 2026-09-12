@@ -706,6 +706,9 @@ int main()
           3,
           true);
       double err = 0.0, sig = 0.0;
+      // Per-shape steady-state latency of the production hop (the aggregate [mmse_time_sum] mixes
+      // every shape of the sweep, so the shapes with an edge/tail block need their own number).
+      const auto t_lat0 = std::chrono::steady_clock::now();
       for (unsigned rep = 0; rep != 50; ++rep) {
         const auto& res = mmse->compute(grid, 0, pilots, cfg);
         for (unsigned l = 0; l != MAX_NSYMB_PER_SLOT; ++l) {
@@ -719,8 +722,14 @@ int main()
         }
         (void)cpu;
       }
-      std::printf("Test 6 (%u PRB, %u DMRS): metal_mmse NMSE %.2f dB (no crash)\n",
-                  n_prb, n_sym, 10.0 * std::log10(err / sig));
+      const auto t_lat1  = std::chrono::steady_clock::now();
+      const double lat_us =
+          std::chrono::duration<double, std::micro>(t_lat1 - t_lat0).count() / 50.0;
+      std::printf("Test 6 (%u PRB, %u DMRS): metal_mmse NMSE %.2f dB, %.1f us/hop (no crash)\n",
+                  n_prb,
+                  n_sym,
+                  10.0 * std::log10(err / sig),
+                  lat_us);
       if (n_sym == 1) {
         const auto& res = mmse->compute(grid, 0, pilots, cfg);
         std::vector<cbf16_t> est(n_prb * 12);
