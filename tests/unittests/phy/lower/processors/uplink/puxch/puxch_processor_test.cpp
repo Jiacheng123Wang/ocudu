@@ -339,6 +339,81 @@ TEST_P(LowerPhyUplinkProcessorFixture, FlowFloodRequest)
   }
 }
 
+TEST_P(LowerPhyUplinkProcessorFixture, FlowPipelinedNotificationPerSymbol)
+{
+  const unsigned     nof_rx_ports = std::get<0>(GetParam());
+  sampling_rate      srate        = std::get<1>(GetParam());
+  subcarrier_spacing scs          = std::get<2>(GetParam());
+  cyclic_prefix      cp           = std::get<3>(GetParam());
+
+  const unsigned base_symbol_size = srate.get_dft_size(scs);
+  const unsigned nof_symbols_per_slot   = get_nsymb_per_slot(cp);
+  const unsigned nof_slots_per_subframe = get_nof_slots_per_subframe(scs);
+
+  baseband_gateway_buffer_dynamic buffer(nof_rx_ports, 2 * base_symbol_size);
+
+  // Run the demodulator in pipelined mode and connect the notifier. Every notification is
+  // snapshotted together with the number of ports of that symbol that are already in the grid.
+  ofdm_demod_spy->pipeline_depth = 2;
+
+  struct notification_snapshot {
+    unsigned symbol_index;
+    unsigned finished_ports;
+  };
+  std::vector<notification_snapshot> notifications;
+
+  puxch_processor_notifier_spy puxch_proc_notifier_spy;
+  puxch_proc_notifier_spy.on_rx_symbol_hook = [&](const lower_phy_rx_symbol_context& context) {
+    notifications.push_back({context.nof_symbols, ofdm_demod_spy->nof_finished_ports(context.nof_symbols)});
+  };
+  puxch_proc->connect(puxch_proc_notifier_spy);
+
+  slot_point slot(to_numerology_value(scs), 0);
+  for (unsigned i_frame = 0; i_frame != nof_frames_test; ++i_frame) {
+    for (unsigned i_subframe = 0; i_subframe != NOF_SUBFRAMES_PER_FRAME; ++i_subframe) {
+      for (unsigned i_slot = 0, i_symbol_subframe = 0; i_slot != nof_slots_per_subframe; ++i_slot, ++slot) {
+        resource_grid_context rg_context;
+        rg_context.slot   = slot;
+        rg_context.sector = dist_sector_id(rgen);
+
+        puxch_proc->get_request_handler().handle_request(shared_rg_spy.get_grid(), rg_context);
+        ofdm_demod_spy->clear_pipeline();
+        notifications.clear();
+
+        for (unsigned i_symbol = 0; i_symbol != nof_symbols_per_slot; ++i_symbol, ++i_symbol_subframe) {
+          const unsigned cp_size = cp.get_length(i_symbol_subframe, scs).to_samples(srate.to_Hz());
+          buffer.resize(cp_size + base_symbol_size);
+          for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
+            span<ci16_t> port_buffer = buffer[i_port];
+            std::generate(port_buffer.begin(), port_buffer.end(), []() {
+              return to_ci16(cf_t(dist_sample(rgen) * INT16_MAX, dist_sample(rgen) * INT16_MAX));
+            });
+          }
+
+          lower_phy_rx_symbol_context puxch_context;
+          puxch_context.slot        = rg_context.slot;
+          puxch_context.sector      = rg_context.sector;
+          puxch_context.nof_symbols = i_symbol;
+
+          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context);
+        }
+
+        // Exactly one notification per OFDM symbol of the slot, in order (never one per port).
+        ASSERT_EQ(notifications.size(), nof_symbols_per_slot);
+        for (unsigned i_symbol = 0; i_symbol != nof_symbols_per_slot; ++i_symbol) {
+          ASSERT_EQ(notifications[i_symbol].symbol_index, i_symbol)
+              << "the symbols of a slot must be reported once each, in order";
+          // ... and the symbol must be complete in the grid when it is reported.
+          ASSERT_EQ(notifications[i_symbol].finished_ports, nof_rx_ports)
+              << "symbol " << i_symbol << " was reported with a port still missing";
+        }
+        ASSERT_EQ(ofdm_demod_spy->get_demodulate_entries().size(), 0)
+            << "the pipelined path must not demodulate synchronously";
+      }
+    }
+  }
+}
+
 TEST_P(LowerPhyUplinkProcessorFixture, LateRequest)
 {
   unsigned           sector_id    = dist_sector_id(rgen);

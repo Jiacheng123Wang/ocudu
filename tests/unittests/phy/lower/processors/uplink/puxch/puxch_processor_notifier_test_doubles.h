@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "ocudu/phy/lower/lower_phy_rx_symbol_context.h"
 #include "ocudu/phy/lower/processors/uplink/puxch/puxch_processor_notifier.h"
 #include "ocudu/phy/support/resource_grid_context.h"
@@ -26,7 +28,13 @@ public:
   {
     rx_symbol_entry entry = rx_symbol_entry{&grid.get_reader(), context};
     rx_symbol.emplace_back(entry);
+    if (on_rx_symbol_hook) {
+      on_rx_symbol_hook(context);
+    }
   }
+
+  /// Optional hook invoked on every notification (used to correlate it with another spy).
+  std::function<void(const lower_phy_rx_symbol_context&)> on_rx_symbol_hook;
 
   const std::vector<resource_grid_context>& get_request_late() const { return request_late; }
 

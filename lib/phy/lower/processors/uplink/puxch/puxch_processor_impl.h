@@ -71,6 +71,11 @@ private:
   struct in_flight_symbol {
     lower_phy_rx_symbol_context context;
     unsigned                    slot = 0;
+    /// True for the last receive port of an OFDM symbol: the upper PHY is notified once every port
+    /// of the symbol has been written into the grid. Notifying on the first port instead would
+    /// report a symbol whose remaining ports are still missing from the grid, which the PUCCH -
+    /// two symbols long and combining every port - cannot tolerate.
+    bool last_port = true;
   };
 
   /// Maximum number of in-flight symbols tracked by the pipeline bookkeeping.

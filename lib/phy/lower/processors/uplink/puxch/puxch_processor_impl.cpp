@@ -67,7 +67,8 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
       unsigned slot = next_pipeline_slot % pipeline_depth;
       ++next_pipeline_slot;
       demodulator->submit_symbol(samples.get_channel_buffer(i_port), i_port, symbol_index_subframe, slot);
-      in_flight[(in_flight_begin + nof_in_flight) % max_in_flight_symbols] = {.context = context, .slot = slot};
+      in_flight[(in_flight_begin + nof_in_flight) % max_in_flight_symbols] = {
+          .context = context, .slot = slot, .last_port = (i_port + 1 == nof_rx_ports)};
       ++nof_in_flight;
     }
 
@@ -107,7 +108,11 @@ void puxch_processor_impl::finish_oldest_symbol()
   ocudu_assert(nof_in_flight != 0, "No in-flight symbol to finish.");
   const in_flight_symbol& entry = in_flight[in_flight_begin];
   demodulator->finish_symbol(current_grid.get().get_writer(), entry.slot);
-  notifier->on_rx_symbol(current_grid, entry.context, true);
+  // Only the last port of a symbol completes it: the upper PHY must not be told that a symbol is
+  // ready while another of its ports is still missing from the grid.
+  if (entry.last_port) {
+    notifier->on_rx_symbol(current_grid, entry.context, true);
+  }
   in_flight_begin = (in_flight_begin + 1) % max_in_flight_symbols;
   --nof_in_flight;
 }
