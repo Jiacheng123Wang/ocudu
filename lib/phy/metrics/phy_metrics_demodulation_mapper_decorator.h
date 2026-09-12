@@ -5,7 +5,7 @@
 #pragma once
 
 #include "ocudu/phy/metrics/phy_metrics_notifiers.h"
-#include "ocudu/phy/upper/channel_modulation/modulation_mapper.h"
+#include "ocudu/phy/upper/channel_modulation/demodulation_mapper.h"
 #include "ocudu/phy/upper/unique_rx_buffer.h"
 #include "ocudu/support/resource_usage/scoped_resource_usage.h"
 
@@ -35,12 +35,41 @@ public:
       resource_usage_utils::scoped_resource_usage rusage_tracker(metrics.measurements);
       base->demodulate_soft(llrs, symbols, noise_vars, mod);
     }
+    collect_metrics(metrics, symbols.size(), mod);
+  }
+
+  // See interface for documentation.
+  void submit(span<log_likelihood_ratio> llrs,
+              span<const cf_t>           symbols,
+              span<const float>          noise_vars,
+              modulation_scheme          mod) override
+  {
+    demodulation_mapper_metrics metrics;
+    {
+      // Use scoped resource usage class to measure CPU usage of this block. A deferred backend
+      // only stages and dispatches here, so the metric covers the same amount of work per symbol
+      // as the synchronous path (which blocks in the GPU wait instead of on the CPU).
+      resource_usage_utils::scoped_resource_usage rusage_tracker(metrics.measurements);
+      base->submit(llrs, symbols, noise_vars, mod);
+    }
+    collect_metrics(metrics, symbols.size(), mod);
+  }
+
+  // See interface for documentation.
+  void wait() override { base->wait(); }
+
+  // See interface for documentation.
+  bool supports_deferred_chain() const override { return base->supports_deferred_chain(); }
+
+private:
+  /// Completes and reports the metric of one demapping.
+  void collect_metrics(demodulation_mapper_metrics& metrics, size_t nof_symbols, modulation_scheme mod)
+  {
     metrics.modulation  = mod;
-    metrics.nof_symbols = static_cast<unsigned>(symbols.size());
+    metrics.nof_symbols = static_cast<unsigned>(nof_symbols);
     notifier.on_new_metric(metrics);
   }
 
-private:
   std::unique_ptr<demodulation_mapper>       base;
   common_channel_modulation_metric_notifier& notifier;
 };

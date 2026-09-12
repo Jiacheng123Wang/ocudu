@@ -335,6 +335,41 @@ int main()
     }
   }
 
+  // Production wiring: the composite factory adapter (Metal or generic) must keep the deferred
+  // chain available, otherwise the PUSCH demodulator silently falls back to the per-symbol chain.
+  {
+    const unsigned nof_symbols = 256;
+    const unsigned bps         = 6;
+    auto           dist        = std::normal_distribution<float>(0.0F, 0.3F);
+    std::vector<cf_t>  symbols(nof_symbols);
+    std::vector<float> noise_vars(nof_symbols);
+    for (auto& z : symbols) {
+      z = {dist(rng), dist(rng)};
+    }
+    for (auto& n : noise_vars) {
+      n = 0.05F + 0.05F * std::abs(dist(rng));
+    }
+    std::vector<log_likelihood_ratio> llrs_sync(nof_symbols * bps);
+    std::vector<log_likelihood_ratio> llrs_deferred(nof_symbols * bps);
+
+    std::shared_ptr<demodulation_mapper_factory> factory = create_demodulation_mapper_metal_factory();
+    std::unique_ptr<demodulation_mapper>         composite = factory->create();
+    if (!composite->supports_deferred_chain()) {
+      std::fprintf(stderr, "FAIL: the composite demapper factory hides the deferred chain\n");
+      ok = false;
+    }
+    composite->demodulate_soft(llrs_sync, symbols, noise_vars, modulation_scheme::QAM64);
+    composite->submit(llrs_deferred, symbols, noise_vars, modulation_scheme::QAM64);
+    composite->wait();
+    const bool same = bit_exact(llrs_sync, llrs_deferred);
+    std::printf("[chain]  composite factory submit()+wait() bit-identical to demodulate_soft(): %s\n",
+                same ? "OK" : "MISMATCH");
+    if (!same) {
+      std::fprintf(stderr, "FAIL: the composite demapper factory breaks the deferred chain\n");
+      ok = false;
+    }
+  }
+
   // Steady-state latency (audit data): 100 calls per backend at 64QAM.
   {
     const unsigned nof_symbols = 256;

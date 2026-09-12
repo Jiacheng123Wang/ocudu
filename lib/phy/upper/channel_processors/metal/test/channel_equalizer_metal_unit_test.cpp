@@ -419,6 +419,57 @@ int main()
     }
   }
 
+  // Production wiring: the composite factory adapter (Metal or generic) must keep the deferred
+  // chain available, otherwise the PUSCH demodulator silently falls back to the per-symbol chain.
+  {
+    const unsigned nof_re = 128;
+    const unsigned ports  = 1;
+    const unsigned layers = 1;
+    auto           dist   = std::normal_distribution<float>(0.0F, 0.01F);
+    std::vector<std::vector<cbf16_t>> h(ports * layers, std::vector<cbf16_t>(nof_re));
+    std::vector<std::vector<cbf16_t>> y(ports, std::vector<cbf16_t>(nof_re));
+    std::vector<float>                nv_est(ports, 0.01F);
+    for (auto& slice : h) {
+      for (auto& v : slice) {
+        v = cbf16_t(dist(rng), dist(rng));
+      }
+    }
+    for (auto& slice : y) {
+      for (auto& v : slice) {
+        v = cbf16_t(dist(rng), dist(rng));
+      }
+    }
+    modular_re_buffer_reader<cbf16_t, 8> ch_symbols(ports, nof_re);
+    for (unsigned p = 0; p != ports; ++p) {
+      ch_symbols.set_slice(p, y[p]);
+    }
+    modular_ch_est_list<8 * 4> ch_est(nof_re, ports, layers);
+    ch_est.set_channel(h[0], 0, 0);
+
+    std::shared_ptr<channel_equalizer_factory> factory =
+        create_channel_equalizer_metal_factory(channel_equalizer_algorithm_type::zf);
+    std::unique_ptr<channel_equalizer> composite = factory->create();
+    if (!composite->supports_deferred_chain()) {
+      std::fprintf(stderr, "FAIL: the composite equalizer factory hides the deferred chain\n");
+      ok = false;
+    }
+    std::vector<cf_t>  eq_sync(nof_re * layers);
+    std::vector<float> nv_sync(nof_re * layers);
+    std::vector<cf_t>  eq_deferred(nof_re * layers);
+    std::vector<float> nv_deferred(nof_re * layers);
+    composite->equalize(eq_sync, nv_sync, ch_symbols, ch_est, nv_est, 1.0F);
+    composite->submit(eq_deferred, nv_deferred, ch_symbols, ch_est, nv_est, 1.0F);
+    composite->wait();
+    const bool same = (std::memcmp(eq_sync.data(), eq_deferred.data(), nof_re * layers * sizeof(cf_t)) == 0) &&
+                      (std::memcmp(nv_sync.data(), nv_deferred.data(), nof_re * layers * sizeof(float)) == 0);
+    std::printf("[chain]  composite factory submit()+wait() bit-identical to equalize(): %s\n",
+                same ? "OK" : "MISMATCH");
+    if (!same) {
+      std::fprintf(stderr, "FAIL: the composite equalizer factory breaks the deferred chain\n");
+      ok = false;
+    }
+  }
+
   // Steady-state latency (audit data): 100 calls per backend at 4x4.
   {
     const unsigned nof_re = 128;

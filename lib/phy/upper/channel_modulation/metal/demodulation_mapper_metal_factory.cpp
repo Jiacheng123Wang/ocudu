@@ -25,12 +25,36 @@ public:
                        span<const float>          noise_vars,
                        modulation_scheme          mod) override
   {
-    demodulation_mapper& active = metal_->is_supported(mod) ? static_cast<demodulation_mapper&>(*metal_)
-                                                            : static_cast<demodulation_mapper&>(*generic_);
-    active.demodulate_soft(llrs, symbols, noise_vars, mod);
+    select(mod).demodulate_soft(llrs, symbols, noise_vars, mod);
   }
 
+  void submit(span<log_likelihood_ratio> llrs,
+              span<const cf_t>           symbols,
+              span<const float>          noise_vars,
+              modulation_scheme          mod) override
+  {
+    // The routing decision is per call: the Metal backend defers, while the CPU one executes
+    // synchronously (its submit() default is demodulate_soft()), so a mixed sequence stays correct.
+    select(mod).submit(llrs, symbols, noise_vars, mod);
+  }
+
+  void wait() override
+  {
+    // Each backend waits for its own in-flight submits; the unused one is a no-op.
+    metal_->wait();
+    generic_->wait();
+  }
+
+  bool supports_deferred_chain() const override { return metal_->supports_deferred_chain(); }
+
 private:
+  /// Returns the backend in charge of the given modulation scheme.
+  demodulation_mapper& select(modulation_scheme mod)
+  {
+    return metal_->is_supported(mod) ? static_cast<demodulation_mapper&>(*metal_)
+                                     : static_cast<demodulation_mapper&>(*generic_);
+  }
+
   std::unique_ptr<demodulation_mapper_metal> metal_;
   std::unique_ptr<demodulation_mapper>       generic_;
 };

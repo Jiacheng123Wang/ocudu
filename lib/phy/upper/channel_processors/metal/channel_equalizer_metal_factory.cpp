@@ -34,13 +34,45 @@ public:
                 span<const float>                noise_var_estimates,
                 float                            tx_scaling) override
   {
-    channel_equalizer& active = metal_->is_supported(ch_estimates.get_nof_rx_ports(), ch_estimates.get_nof_tx_layers())
-                                    ? static_cast<channel_equalizer&>(*metal_)
-                                    : static_cast<channel_equalizer&>(*generic_);
-    active.equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling);
+    select(ch_estimates).equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling);
   }
 
+  void submit(span<cf_t>                       eq_symbols,
+              span<float>                      eq_noise_vars,
+              const re_buffer_reader<cbf16_t>& ch_symbols,
+              const ch_est_list&               ch_estimates,
+              span<const float>                noise_var_estimates,
+              float                            tx_scaling) override
+  {
+    // The routing decision is per call: the Metal backend defers, while the CPU one executes
+    // synchronously (its submit() default is equalize()), so a mixed sequence stays correct.
+    select(ch_estimates).submit(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling);
+  }
+
+  void wait() override
+  {
+    // Each backend waits for its own in-flight submits; the unused one is a no-op.
+    metal_->wait();
+    generic_->wait();
+  }
+
+  bool get_post_eq_sinr(span<float> out) override
+  {
+    // Only the Metal backend can reduce the equalized noise variances without a CPU pass.
+    return metal_->get_post_eq_sinr(out);
+  }
+
+  bool supports_deferred_chain() const override { return metal_->supports_deferred_chain(); }
+
 private:
+  /// Returns the backend in charge of the given topology.
+  channel_equalizer& select(const ch_est_list& ch_estimates)
+  {
+    return metal_->is_supported(ch_estimates.get_nof_rx_ports(), ch_estimates.get_nof_tx_layers())
+               ? static_cast<channel_equalizer&>(*metal_)
+               : static_cast<channel_equalizer&>(*generic_);
+  }
+
   std::unique_ptr<channel_equalizer_metal> metal_;
   std::unique_ptr<channel_equalizer>     generic_;
 };
