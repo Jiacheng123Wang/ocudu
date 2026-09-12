@@ -24,6 +24,8 @@ struct burst_state {
   id<MTLComputeCommandEncoder>      enc      = nil;
   id<MTLComputePipelineState>       pipeline = nil;
   unsigned                          n        = 0;
+  void*                             flush_ctx  = nullptr;
+  shared_burst::flush_hook_t        flush_hook = nullptr;
   std::vector<id<MTLCommandBuffer>> outstanding; // committed through this thread, not waited yet
 
   ~burst_state()
@@ -105,23 +107,48 @@ void burst_stats_wait() {}
 
 } // namespace
 
+/// Creates the command buffer and its encoder when the burst is not open yet. Returns false when
+/// the queue or the encoder could not be created; leaves the pipeline/number of dispatches alone.
+static bool burst_ensure_open(burst_state& s)
+{
+  if (s.cb != nil) {
+    return true;
+  }
+  id<MTLCommandQueue> queue = shared_queue::backend_queue();
+  if (queue == nil) {
+    return false;
+  }
+  s.cb  = [queue commandBuffer];
+  s.enc = (s.cb != nil) ? [s.cb computeCommandEncoder] : nil;
+  if (s.enc == nil) {
+    s.cb       = nil;
+    s.pipeline = nil;
+    return false;
+  }
+  s.pipeline = nil;
+  s.n        = 0;
+  return true;
+}
+
 id<MTLComputeCommandEncoder> shared_burst::encoder(id<MTLComputePipelineState> pipeline)
 {
   burst_state& s = state();
-  if (s.cb == nil) {
-    id<MTLCommandQueue> queue = shared_queue::backend_queue();
-    if (queue == nil) {
-      return nil;
+  if (!burst_ensure_open(s)) {
+    return nil;
+  }
+
+  // A stage that accumulated dispatches (instead of encoding one per call) hands them over here,
+  // before the pipeline comparison below decides whether a stage barrier is needed: the barrier
+  // must land after those dispatches and before the next stage reads what they wrote.
+  if (s.flush_hook != nullptr) {
+    shared_burst::flush_hook_t  hook = s.flush_hook;
+    void*                       ctx  = s.flush_ctx;
+    s.flush_hook                     = nullptr;
+    s.flush_ctx                      = nullptr;
+    id<MTLComputePipelineState> flushed = hook(ctx, s.enc);
+    if (flushed != nil) {
+      s.pipeline = flushed;
     }
-    s.cb  = [queue commandBuffer];
-    s.enc = (s.cb != nil) ? [s.cb computeCommandEncoder] : nil;
-    if (s.enc == nil) {
-      s.cb       = nil;
-      s.pipeline = nil;
-      return nil;
-    }
-    s.pipeline = nil;
-    s.n        = 0;
   }
 
   if (s.pipeline != pipeline) {
@@ -139,7 +166,10 @@ id<MTLComputeCommandEncoder> shared_burst::encoder(id<MTLComputePipelineState> p
 
 bool shared_burst::open()
 {
-  return state().cb != nil;
+  burst_state& s = state();
+  // A stage that accumulated dispatches (instead of encoding them) counts as an open burst even
+  // before its first dispatch exists: the caller's wait() must still close and commit it.
+  return (s.cb != nil) || (s.flush_hook != nullptr);
 }
 
 unsigned shared_burst::size()
@@ -150,6 +180,21 @@ unsigned shared_burst::size()
 bool shared_burst::commit()
 {
   burst_state& s = state();
+  // Hand over the accumulated dispatches FIRST: a stage that encoded nothing per call still has to
+  // hand its work over here (there is no later stage to trigger the pipeline change).
+  if (s.flush_hook != nullptr) {
+    if (!burst_ensure_open(s)) {
+      return false;
+    }
+    shared_burst::flush_hook_t  hook = s.flush_hook;
+    void*                       ctx  = s.flush_ctx;
+    s.flush_hook                     = nullptr;
+    s.flush_ctx                      = nullptr;
+    id<MTLComputePipelineState> flushed = hook(ctx, s.enc);
+    if (flushed != nil) {
+      s.pipeline = flushed;
+    }
+  }
   if (s.cb == nil) {
     return false;
   }
@@ -187,6 +232,25 @@ bool shared_burst::wait_committed()
     }
   }
   return ok;
+}
+
+void shared_burst::set_flush_hook(void* context, flush_hook_t hook)
+{
+  burst_state& s = state();
+  if ((s.flush_hook != nullptr) && ((s.flush_hook != hook) || (s.flush_ctx != context))) {
+    // A different stage left work pending: flush it before it can be lost. The encoder may still be
+    // nil when nothing was encoded yet, in which case the hook has nothing to hand over.
+    flush_hook_t                pending = s.flush_hook;
+    void*                       ctx     = s.flush_ctx;
+    s.flush_hook                        = nullptr;
+    s.flush_ctx                         = nullptr;
+    id<MTLComputePipelineState> flushed = pending(ctx, s.enc);
+    if (flushed != nil) {
+      s.pipeline = flushed;
+    }
+  }
+  s.flush_ctx  = context;
+  s.flush_hook = hook;
 }
 
 void shared_burst::count_dispatch(stage which)

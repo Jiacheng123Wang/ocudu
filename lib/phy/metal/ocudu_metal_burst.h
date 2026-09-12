@@ -59,6 +59,21 @@ public:
 
   /// Accounts one dispatch appended to the burst (diagnostics).
   static void count_dispatch(stage which = stage::other);
+
+  /// \brief Callback a stage registers to encode its deferred dispatches into the open burst.
+  ///
+  /// A stage that accumulates work (for example the equalizer, which can encode a whole group as
+  /// one dispatch instead of one per symbol) must hand over the accumulated dispatches BEFORE the
+  /// burst moves on: before the pipeline changes to the next stage (so the barrier that orders the
+  /// stages still lands after them) and before the burst is committed. The hook returns the
+  /// pipeline it encoded with, or nil when it encoded nothing, so the burst keeps its stage
+  /// tracking correct.
+  using flush_hook_t = id<MTLComputePipelineState> (*)(void* context, id<MTLComputeCommandEncoder> encoder);
+
+  /// Registers the flush hook of the calling thread, together with its context. A hook registered
+  /// by a different context while another one is pending is flushed first, so no accumulated work
+  /// can be lost; pass a null hook to unregister.
+  static void set_flush_hook(void* context, flush_hook_t hook);
 };
 
 } // namespace metal

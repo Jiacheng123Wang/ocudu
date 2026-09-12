@@ -537,6 +537,124 @@ int main()
     compat::aligned_free(nv_group);
   }
 
+  // Deferred burst whose submits share geometry, noise path and output strides: the backend turns
+  // the whole burst into ONE batched dispatch (not one per symbol) and must still match the
+  // synchronous per-symbol path bit for bit. This is the PUSCH shape (17 PRB -> 204 RE, 2 ports,
+  // 1 layer, 12 data symbols).
+  //
+  // Gated on OCUDU_EQ_DEFER_ENCODE=1 because that is what selects the accumulated/flushed encoding
+  // in the engine: the default encodes each dispatch right away (called out below), and with it
+  // there is nothing to batch. The gate documents the current state - see the S-5 section of the
+  // full-chain design document for why the deferred form is not the default yet.
+  if (std::getenv("OCUDU_EQ_DEFER_ENCODE") == nullptr) {
+    std::printf("[chain]  batched burst: skipped (OCUDU_EQ_DEFER_ENCODE selects the deferred encoder)\n");
+  } else {
+    const unsigned       nof_re  = 204;
+    const unsigned       ports   = 2;
+    const unsigned       layers  = 1;
+    const unsigned       nof_sym = 12;
+    std::normal_distribution<float> dist(0.0F, 0.01F);
+
+    std::vector<std::vector<std::vector<cbf16_t>>> h(nof_sym, std::vector<std::vector<cbf16_t>>(ports * layers));
+    std::vector<std::vector<std::vector<cbf16_t>>> y(nof_sym, std::vector<std::vector<cbf16_t>>(ports));
+    for (unsigned si = 0; si != nof_sym; ++si) {
+      for (auto& slice : h[si]) {
+        slice.resize(nof_re);
+        for (auto& v : slice) { v = cbf16_t(dist(rng), dist(rng)); }
+      }
+      for (auto& slice : y[si]) {
+        slice.resize(nof_re);
+        for (auto& v : slice) { v = cbf16_t(dist(rng), dist(rng)); }
+      }
+    }
+    std::vector<float> nv_est(ports, 0.02F);
+
+    std::vector<modular_re_buffer_reader<cbf16_t, 8>> readers;
+    std::vector<modular_ch_est_list<8 * 4>>           ests;
+    readers.reserve(nof_sym);
+    ests.reserve(nof_sym);
+    for (unsigned si = 0; si != nof_sym; ++si) {
+      modular_re_buffer_reader<cbf16_t, 8> reader(ports, nof_re);
+      for (unsigned p = 0; p != ports; ++p) { reader.set_slice(p, y[si][p]); }
+      modular_ch_est_list<8 * 4> est(nof_re, ports, layers);
+      for (unsigned p = 0; p != ports; ++p) {
+        for (unsigned l = 0; l != layers; ++l) { est.set_channel(h[si][p * layers + l], p, l); }
+      }
+      readers.push_back(std::move(reader));
+      ests.push_back(std::move(est));
+    }
+
+    const size_t page      = compat::page_size();
+    const size_t eq_stride = ((nof_re * layers * sizeof(cf_t) + page - 1) / page) * page;
+    const size_t nv_stride = ((nof_re * layers * sizeof(float) + page - 1) / page) * page;
+    auto*        eq_group  = static_cast<cf_t*>(compat::aligned_alloc(page, eq_stride * nof_sym));
+    auto*        nv_group  = static_cast<float*>(compat::aligned_alloc(page, nv_stride * nof_sym));
+    std::vector<cf_t>  eq_ref(nof_re * layers * nof_sym);
+    std::vector<float> nv_ref(nof_re * layers * nof_sym);
+
+    channel_equalizer_metal metal(false);
+    if (!metal.supports_deferred_chain()) {
+      std::fprintf(stderr, "FAIL: deferred chain not advertised (batched burst)\n");
+      ok = false;
+    }
+    // All references first, then all submits, then one wait: exactly how the PUSCH chain uses the
+    // burst (a synchronous call in between would flush the accumulated submits one by one).
+    for (unsigned si = 0; si != nof_sym; ++si) {
+      span<cf_t>  eq_s = span<cf_t>(eq_ref).subspan(si * nof_re * layers, nof_re * layers);
+      span<float> nv_s = span<float>(nv_ref).subspan(si * nof_re * layers, nof_re * layers);
+      metal.equalize(eq_s, nv_s, readers[si], ests[si], nv_est, 1.0F);
+    }
+    for (unsigned si = 0; si != nof_sym; ++si) {
+      span<cf_t>  eq_d(eq_group + si * eq_stride / sizeof(cf_t), nof_re * layers);
+      span<float> nv_d(nv_group + si * nv_stride / sizeof(float), nof_re * layers);
+      metal.submit(eq_d, nv_d, readers[si], ests[si], nv_est, 1.0F);
+    }
+    const unsigned batches_before = metal.engine_batch_dispatch_count();
+    metal.wait();
+    const unsigned batches = metal.engine_batch_dispatch_count() - batches_before;
+
+    bool same = (batches == 1);
+    unsigned bad_sym = 0;
+    for (unsigned si = 0; si != nof_sym; ++si) {
+      const bool eq_ok = (std::memcmp(eq_group + si * eq_stride / sizeof(cf_t),
+                                      eq_ref.data() + si * nof_re * layers,
+                                      nof_re * layers * sizeof(cf_t)) == 0);
+      const bool nv_ok = (std::memcmp(nv_group + si * nv_stride / sizeof(float),
+                                      nv_ref.data() + si * nof_re * layers,
+                                      nof_re * layers * sizeof(float)) == 0);
+      if (!eq_ok || !nv_ok) {
+        ++bad_sym;
+        if (bad_sym <= 2) {
+          const cf_t* got = eq_group + si * eq_stride / sizeof(cf_t);
+          const cf_t* exp = eq_ref.data() + si * nof_re * layers;
+          std::fprintf(stderr,
+                       "[batched] sym %u: eq %s nv %s | re0 got (%.4f,%.4f) want (%.4f,%.4f) | nv0 got %.5f want %.5f\n",
+                       si,
+                       eq_ok ? "ok" : "BAD",
+                       nv_ok ? "ok" : "BAD",
+                       got[0].real(),
+                       got[0].imag(),
+                       exp[0].real(),
+                       exp[0].imag(),
+                       nv_group[si * nv_stride / sizeof(float)],
+                       nv_ref[si * nof_re * layers]);
+        }
+      }
+      same = same && eq_ok && nv_ok;
+    }
+    std::fprintf(stderr, "[batched] bad symbols: %u of %u\n", bad_sym, nof_sym);
+    std::printf("[chain]  batched burst of %u submits: batches=%u, bit-identical to equalize(): %s\n",
+                nof_sym,
+                batches,
+                same ? "OK" : "MISMATCH");
+    if (!same) {
+      std::fprintf(stderr, "FAIL: batched deferred burst differs from the per-symbol path\n");
+      ok = false;
+    }
+    compat::aligned_free(eq_group);
+    compat::aligned_free(nv_group);
+  }
+
   // Production wiring: the composite factory adapter (Metal or generic) must keep the deferred
   // chain available, otherwise the PUSCH demodulator silently falls back to the per-symbol chain.
   {

@@ -67,25 +67,6 @@ public:
     ocudu_assert(equalizer, "Invalid pointer to channel_equalizer object.");
     ocudu_assert(demapper, "Invalid pointer to demodulation_mapper object.");
     ocudu_assert(descrambler, "Invalid pointer to pseudo_random_generator object.");
-
-  }
-
-  /// Allocates the per-symbol extraction destinations of the grouped deferred path (see
-  /// ch_est_group). Called on first use only: the default per-symbol chain never touches them.
-  void ensure_group_storage()
-  {
-    if (!ch_est_group.empty()) {
-      return;
-    }
-    ch_est_group.resize(max_deferred_group_symbols);
-    for (dynamic_ch_est_list& dst : ch_est_group) {
-      dst.resize(max_symbol_re, pusch_constants::MAX_NOF_RX_PORTS, pusch_constants::MAX_NOF_LAYERS);
-    }
-    ch_re_group_view.resize(max_deferred_group_symbols);
-    ch_re_group_copy.reserve(max_deferred_group_symbols);
-    for (unsigned i = 0; i != max_deferred_group_symbols; ++i) {
-      ch_re_group_copy.emplace_back(MAX_PORTS, max_symbol_re);
-    }
   }
   // See interface for the documentation.
   void demodulate(pusch_codeword_buffer&              codeword_buffer,
@@ -124,18 +105,6 @@ private:
                                                   const re_symbol_mask_type&               re_mask,
                                                   const static_vector<uint8_t, MAX_PORTS>& rx_ports);
 
-  /// \brief Same as get_ch_data_re(), but extracting into caller-owned storage.
-  ///
-  /// The deferred chain consumes the WHOLE group in one equalizer call after pass 1, so every
-  /// symbol of the group needs its own destination: the shared \c ch_re_view / \c ch_re_copy
-  /// members are refilled by each call and the collected views would alias the last symbol.
-  const re_buffer_reader<cbf16_t>& get_ch_data_re_into(const resource_grid_reader&              grid,
-                                                       unsigned                                 i_symbol,
-                                                       const re_symbol_mask_type&               re_mask,
-                                                       const static_vector<uint8_t, MAX_PORTS>& rx_ports,
-                                                       modular_re_buffer_reader<cbf16_t, MAX_PORTS>& view_out,
-                                                       dynamic_re_buffer<cbf16_t>&                   copy_out);
-
   /// \brief Gets channel data estimates.
   ///
   /// Extracts the channel estimation coefficients corresponding to the PUSCH data Resource Elements from the channel
@@ -159,16 +128,6 @@ private:
                                                               const re_symbol_mask_type&               re_mask,
                                                               std::optional<unsigned>                  dc_position,
                                                               const static_vector<uint8_t, MAX_PORTS>& rx_ports);
-
-  /// \brief Same as get_ch_data_estimates(), but extracting into caller-owned storage (see
-  /// get_ch_data_re_into() for why the deferred chain needs one destination per symbol).
-  const channel_equalizer::ch_est_list& get_ch_data_estimates_into(const dmrs_pusch_estimator_results& est_results,
-                                                                   unsigned                            i_symbol,
-                                                                   unsigned                            nof_tx_layers,
-                                                                   const re_symbol_mask_type&          re_mask,
-                                                                   std::optional<unsigned>             dc_position,
-                                                                   const static_vector<uint8_t, MAX_PORTS>& rx_ports,
-                                                                   dynamic_ch_est_list&                     out);
 
   /// Channel equalization component, also in charge of combining contributions of all receive antenna ports.
   std::unique_ptr<channel_equalizer> equalizer;
@@ -205,11 +164,6 @@ private:
   std::vector<log_likelihood_ratio, page_aligned_allocator<log_likelihood_ratio>> temp_llr;
   /// Copy buffer used to transfer channel estimation coefficients from the channel estimate to the equalizer.
   dynamic_ch_est_list ch_estimates_copy;
-  /// Group-stable extraction targets of the deferred chain: one destination per symbol of the group,
-  /// because the whole group is handed to the equalizer in a single submit_group() call (S-5).
-  std::vector<dynamic_ch_est_list>                          ch_est_group;
-  std::vector<modular_re_buffer_reader<cbf16_t, MAX_PORTS>> ch_re_group_view;
-  std::vector<dynamic_re_buffer<cbf16_t>>                   ch_re_group_copy;
   /// Buffer used to transfer noise variance estimates from the channel estimate to the equalizer.
   std::array<float, MAX_PORTS> noise_var_estimates;
 
