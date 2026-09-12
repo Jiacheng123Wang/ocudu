@@ -39,10 +39,37 @@ public:
                 span<const float>                noise_var_estimates,
                 float                            tx_scaling) override;
 
+  // See interface for documentation.
+  void submit(span<cf_t>                       eq_symbols,
+              span<float>                      eq_noise_vars,
+              const re_buffer_reader<cbf16_t>& ch_symbols,
+              const ch_est_list&               ch_estimates,
+              span<const float>                noise_var_estimates,
+              float                            tx_scaling) override;
+
+  // See interface for documentation.
+  void wait() override;
+
+  // See interface for documentation.
+  bool supports_deferred_chain() const override { return true; }
+
   /// GPU-side duration of the last call in microseconds (0 when unavailable / invalid).
   double engine_gpu_wait_us() const;
 
 private:
+  /// \brief Shared implementation of equalize() and submit(): stages the inputs and either waits
+  /// for the command buffer (defer = false) or only commits it (defer = true).
+  void run_equalize(span<cf_t>                       eq_symbols,
+                    span<float>                      eq_noise_vars,
+                    const re_buffer_reader<cbf16_t>& ch_symbols,
+                    const ch_est_list&               ch_estimates,
+                    span<const float>                noise_var_estimates,
+                    float                            tx_scaling,
+                    bool                             defer);
+
+  /// \brief Copies the staged outputs back to the caller after the command buffer completed.
+  void finish_symbol();
+
   struct impl;
   std::unique_ptr<impl> impl_;
 };

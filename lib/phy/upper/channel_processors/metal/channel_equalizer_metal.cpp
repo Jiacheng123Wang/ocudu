@@ -38,6 +38,15 @@ struct channel_equalizer_metal::impl {
   // One-shot diagnostic: reports whether the caller's buffers allow the in-place path.
   bool path_logged = false;
 
+  // Deferred-submission state (submit()/wait()): where the staged outputs must be copied back.
+  bool         chain_pending     = false;
+  span<cf_t>   pending_eq        = {};
+  span<float>  pending_nv        = {};
+  void*        pending_eq_ptr    = nullptr;
+  void*        pending_nv_ptr    = nullptr;
+  bool         pending_eq_direct = false;
+  bool         pending_nv_direct = false;
+
   // Staging buffers (page-aligned, grown on demand and reused across calls).
   void* h_buf      = nullptr;
   void* s_buf      = nullptr;
@@ -95,6 +104,36 @@ void channel_equalizer_metal::equalize(span<cf_t>                       eq_symbo
                                        const ch_est_list&               ch_estimates,
                                        span<const float>                noise_var_estimates,
                                        float                            tx_scaling)
+{
+  run_equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, false);
+}
+
+void channel_equalizer_metal::submit(span<cf_t>                       eq_symbols,
+                                     span<float>                      eq_noise_vars,
+                                     const re_buffer_reader<cbf16_t>& ch_symbols,
+                                     const ch_est_list&               ch_estimates,
+                                     span<const float>                noise_var_estimates,
+                                     float                            tx_scaling)
+{
+  run_equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, true);
+}
+
+void channel_equalizer_metal::wait()
+{
+  if (!impl_->chain_pending) {
+    return;
+  }
+  impl_->engine.wait_committed();
+  finish_symbol();
+}
+
+void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_symbols,
+                                           span<float>                      eq_noise_vars,
+                                           const re_buffer_reader<cbf16_t>& ch_symbols,
+                                           const ch_est_list&               ch_estimates,
+                                           span<const float>                noise_var_estimates,
+                                           float                            tx_scaling,
+                                           bool                             defer)
 {
   const unsigned nof_re       = ch_estimates.get_nof_re();
   const unsigned nof_rx_ports = ch_estimates.get_nof_rx_ports();
@@ -189,42 +228,63 @@ void channel_equalizer_metal::equalize(span<cf_t>                       eq_symbo
     }
   }
 
-  const bool ok = impl_->engine.equalize(h_ptr,
-                                        y_ptr,
-                                        s_ptr,
-                                        eq_ptr,
-                                        nv_ptr,
-                                        nof_re,
-                                        nof_used_ports,
-                                        nof_layers,
-                                        impl_->mmse,
-                                        noise_var,
-                                        tx_scaling,
-                                        single_layer ? 1.0F : tx_scaling);
+  impl_->engine.begin_batch();
+  const bool ok = impl_->engine.enqueue(h_ptr,
+                                       y_ptr,
+                                       s_ptr,
+                                       eq_ptr,
+                                       nv_ptr,
+                                       nof_re,
+                                       nof_used_ports,
+                                       nof_layers,
+                                       impl_->mmse,
+                                       noise_var,
+                                       tx_scaling,
+                                       single_layer ? 1.0F : tx_scaling);
   if (!ok) {
     // Engine failure: mirror the CPU invalid-input semantics instead of leaving stale data.
+    (void)impl_->engine.flush_batch();
     ocuduvec::zero(eq_symbols);
     std::fill(eq_noise_vars.begin(), eq_noise_vars.end(), std::numeric_limits<float>::infinity());
     return;
   }
+  // Remember what has to be copied back once the command buffer completes (deferred path only).
+  impl_->chain_pending  = defer;
+  impl_->pending_eq     = eq_symbols;
+  impl_->pending_nv     = eq_noise_vars;
+  impl_->pending_eq_ptr = eq_ptr;
+  impl_->pending_nv_ptr = nv_ptr;
+  impl_->pending_eq_direct = eq_direct;
+  impl_->pending_nv_direct = nv_direct;
 
+  if (defer) {
+    // Submitted for the fused chain: the wait is deferred. The caller (or the demapper that
+    // reads this output) synchronizes through the shared back-end queue, so waiting for the
+    // later stage's command buffer also guarantees this one has completed.
+    (void)impl_->engine.commit_batch();
+    return;
+  }
+  (void)impl_->engine.flush_batch();
+  finish_symbol();
+}
+void channel_equalizer_metal::finish_symbol()
+{
+  // Copies the staged outputs back after the command buffer completed (no-op for the in-place
+  // path). The one-shot routing diagnostic is emitted here, once the wrap outcome is known.
   if (!impl_->path_logged) {
     impl_->path_logged = true;
     ocudulog::fetch_basic_logger("PHY").info(
-        "Metal equalizer: outputs {}, inputs {} (eq {} nv {}, engine no-copy wrap {})",
-        (eq_direct && nv_direct) ? "written in place" : "written to staging and copied back",
-        h_bytes + y_bytes > 0 ? "staged as cbf16" : "staged",
-        eq_direct ? "direct" : "staged",
-        nv_direct ? "direct" : "staged",
+        "Metal equalizer: outputs {}, engine no-copy wrap {}",
+        impl_->pending_eq_direct && impl_->pending_nv_direct ? "written in place" : "written to staging and copied back",
         impl_->engine.last_call_used_no_copy() ? "OK" : "FELL BACK TO COPY");
   }
-
-  if (!eq_direct) {
-    std::memcpy(eq_symbols.data(), eq_ptr, eq_bytes);
+  if (!impl_->pending_eq_direct) {
+    std::memcpy(impl_->pending_eq.data(), impl_->pending_eq_ptr, impl_->pending_eq.size() * sizeof(cf_t));
   }
-  if (!nv_direct) {
-    std::memcpy(eq_noise_vars.data(), nv_ptr, nv_bytes);
+  if (!impl_->pending_nv_direct) {
+    std::memcpy(impl_->pending_nv.data(), impl_->pending_nv_ptr, impl_->pending_nv.size() * sizeof(float));
   }
+  impl_->chain_pending = false;
 }
 
 double channel_equalizer_metal::engine_gpu_wait_us() const
