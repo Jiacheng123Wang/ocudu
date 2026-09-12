@@ -502,8 +502,12 @@ protected:
     result.nof_softbits  = buffer.get_nof_softbits();
 
     if (deferred) {
-      // The deferred chain is gated off for transform precoding: the decorators stay unused.
-      const unsigned expected_symbols = config.enable_transform_precoding ? 0 : expected_data_symbols(config);
+      // The deferred chain is gated off for transform precoding and by the debug override that
+      // forces the synchronous chain: in both cases the decorators stay unused.
+      const char*    force_env       = std::getenv("OCUDU_PUSCH_FORCE_SERIAL");
+      const bool     force_serial    = (force_env != nullptr) && (std::strtoul(force_env, nullptr, 10) != 0);
+      const unsigned expected_symbols =
+          (config.enable_transform_precoding || force_serial) ? 0 : expected_data_symbols(config);
       EXPECT_EQ(eq_decorator->nof_submits, expected_symbols);
       EXPECT_EQ(demapper_decorator->nof_submits, expected_symbols);
       EXPECT_EQ(eq_decorator->nof_waits, demapper_decorator->nof_waits);

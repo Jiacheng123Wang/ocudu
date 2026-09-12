@@ -264,11 +264,19 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   // Number of receive antenna ports.
   auto nof_rx_ports = static_cast<unsigned>(config.rx_ports.size());
 
+  // Debug probe (documented in the plan): OCUDU_PUSCH_FORCE_SERIAL=1 drives the classic
+  // synchronous chain (one wait per stage and symbol) even with back ends that support the
+  // deferred one, so an RX regression can be bisected between the two without rebuilding.
+  static const bool force_serial = []() {
+    const char* env = std::getenv("OCUDU_PUSCH_FORCE_SERIAL");
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  }();
+
   // Fused (deferred) equalization + demapping: only when both backends support it and the
   // transform precoding path - which reads the equalized symbols on the CPU before the demapping -
   // is disabled.
-  const bool deferred_chain = equalizer->supports_deferred_chain() && demapper->supports_deferred_chain() &&
-                              !config.enable_transform_precoding;
+  const bool deferred_chain = !force_serial && equalizer->supports_deferred_chain() &&
+                              demapper->supports_deferred_chain() && !config.enable_transform_precoding;
 
   // Initialize scrambling sequence. When msgA is sent over PUSCH, an alternative scrambling sequence is used, as per
   // TS 38.211 Section 6.3.1.1 Release 16.
