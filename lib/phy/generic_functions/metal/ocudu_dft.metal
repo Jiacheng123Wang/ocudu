@@ -25,7 +25,8 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
                     constant uint&       radix2  [[buffer(4)]], // number of radix-2 stages (k)
                     constant uint&       radix3  [[buffer(5)]], // number of radix-3 stages (m)
                     constant uint&       inverse [[buffer(6)]], // 1 = conjugate twiddles
-                    uint                 tid     [[thread_position_in_threadgroup]])
+                    uint                 tid     [[thread_position_in_threadgroup]],
+                    uint                 tgid    [[threadgroup_position_in_grid]])
 {
     threadgroup float2 buf[MAX_FFT_N];
 
@@ -38,6 +39,10 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
     const uint threads = min(n, 1024u);
     const uint half_n  = n >> 1u;
 
+    // One threadgroup per transform: independent transforms are batched by dispatching several
+    // threadgroups, each working on its own slice of the input/output buffers.
+    const uint batch_offset = tgid * n;
+
     if (tid >= threads) {
         return;
     }
@@ -47,7 +52,7 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
 
     // Digit-reversed load (one element per owned index; ownership is i = tid, tid+threads, ...).
     for (uint i = tid; i < n; i += threads) {
-        buf[i] = in[perm[i]];
+        buf[i] = in[batch_offset + perm[i]];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -151,6 +156,6 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = tid; i < n; i += threads) {
-        out[i] = buf[i];
+        out[batch_offset + i] = buf[i];
     }
 }

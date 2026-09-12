@@ -64,6 +64,31 @@ public:
   /// \note The output size must be consistent with the configured bandwidth.
   virtual void
   demodulate(resource_grid_writer& grid, span<const ci16_t> input, unsigned port_index, unsigned symbol_index) = 0;
+
+  /// \brief Demodulates a batch of consecutive symbols of one port.
+  ///
+  /// The default implementation demodulates the symbols one by one. Implementations whose DFT
+  /// supports batching (see dft_processor::get_max_batch()) override it to execute all the
+  /// transforms of the batch in a single dispatch.
+  ///
+  /// \param[out] grid       Provides the output as frequency-domain signal corresponding to one slot.
+  /// \param[in]  input      Provides the concatenated time domain symbols, each including its cyclic prefix.
+  /// \param[in]  port_index Indicates the port index to demodulate.
+  /// \param[in]  first_symbol_index Symbol index within the subframe of the first symbol of the batch.
+  /// \param[in]  nof_symbols Number of consecutive symbols to demodulate.
+  virtual void demodulate_batch(resource_grid_writer& grid,
+                                span<const ci16_t>    input,
+                                unsigned              port_index,
+                                unsigned              first_symbol_index,
+                                unsigned              nof_symbols)
+  {
+    for (unsigned i_symbol = 0; i_symbol != nof_symbols; ++i_symbol) {
+      unsigned symbol_index = first_symbol_index + i_symbol;
+      unsigned symbol_size  = get_symbol_size(symbol_index);
+      demodulate(grid, input.first(symbol_size), port_index, symbol_index);
+      input = input.last(input.size() - symbol_size);
+    }
+  }
 };
 
 /// \brief Describes an OFDM demodulator with slot granularity.

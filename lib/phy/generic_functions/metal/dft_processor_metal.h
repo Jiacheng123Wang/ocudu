@@ -17,6 +17,10 @@ namespace ocudu {
 /// metal::dft_metal_engine::max_size: every NR OFDM FFT size of that family, e.g. 384/512/768/
 /// 1024/1536/2048/3072). Input/output buffers are page-aligned and zero-copy
 /// wrapped into MTLBuffers: the GPU reads/writes the host memory directly.
+///
+/// The buffers hold up to max_batch transforms and run_batch() executes them in a single
+/// dispatch - one threadgroup (one GPU core) per transform - instead of paying a command
+/// buffer round trip and a single-core transform per symbol.
 class dft_processor_metal : public dft_processor
 {
 public:
@@ -39,10 +43,20 @@ public:
   unsigned get_size() const override { return cfg.size; }
 
   // See interface for documentation.
-  span<cf_t> get_input() override { return {input.get(), cfg.size}; }
+  span<cf_t> get_input() override { return {input.get(), static_cast<size_t>(cfg.size) * max_batch}; }
 
   // See interface for documentation.
   span<const cf_t> run() override;
+
+  /// Number of transforms executed by one run_batch() dispatch (one threadgroup each, so they
+  /// run concurrently on different GPU cores). Covers a whole slot worth of OFDM symbols.
+  static constexpr unsigned max_batch = 16;
+
+  // See interface for documentation.
+  unsigned get_max_batch() const override { return max_batch; }
+
+  // See interface for documentation.
+  span<const cf_t> run_batch(unsigned nof_transforms) override;
 
   /// GPU-side duration of the last transform in microseconds (0 when unavailable).
   double engine_gpu_wait_us() const { return engine != nullptr ? engine->last_gpu_wait_us() : 0.0; }

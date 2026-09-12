@@ -80,6 +80,24 @@ public:
   // See interface for documentation.
   void
   demodulate(resource_grid_writer& grid, span<const ci16_t> input, unsigned port_index, unsigned symbol_index) override;
+
+  /// \brief Demodulates the symbols of a batch with a single DFT dispatch when the DFT processor
+  /// supports batching, otherwise symbol by symbol (see the interface documentation).
+  void demodulate_batch(resource_grid_writer& grid,
+                        span<const ci16_t>    input,
+                        unsigned              port_index,
+                        unsigned              first_symbol_index,
+                        unsigned              nof_symbols) override;
+
+private:
+  /// \brief Converts one symbol of time-domain samples into the DFT input buffer \c dft_input.
+  void fill_dft_input(span<cf_t> dft_input, span<const ci16_t> input, unsigned symbol_index);
+
+  /// \brief Applies phase and window compensation to one DFT output and writes it into the grid.
+  void process_dft_output(resource_grid_writer& grid,
+                          span<const cf_t>      dft_output,
+                          unsigned              port_index,
+                          unsigned              symbol_index);
 };
 
 /// Describes a generic OFDM slot demodulator.

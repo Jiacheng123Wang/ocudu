@@ -36,3 +36,8 @@ target_link_libraries(ocudu_dft_metal PRIVATE "-framework Metal" "-framework Fou
 # ---- Unit-level validation: random-IQ A/B vs the CPU reference (NMSE gate) ----
 add_executable(dft_processor_metal_unit_test test/dft_processor_metal_unit_test.cpp)
 target_link_libraries(dft_processor_metal_unit_test PRIVATE ocudu_dft ocudu_dft_metal ocudu_support)
+
+# ---- Slot-level A/B: batched Metal DFT inside the OFDM demodulator ----
+add_executable(ofdm_demodulator_metal_batch_test test/ofdm_demodulator_metal_batch_test.cpp)
+target_link_libraries(ofdm_demodulator_metal_batch_test PRIVATE
+    ocudu_dft ocudu_dft_metal ocudu_lower_phy_modulation ocudu_phy_support ocudu_support)

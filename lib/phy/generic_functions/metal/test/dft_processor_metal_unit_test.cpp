@@ -165,6 +165,77 @@ int main()
     std::printf("[size] unsupported-size fallback OK\n");
   }
 
+  // Batched execution (Phase 1): a batch of one slot worth of transforms must be bit-identical
+  // to executing the same transforms one by one, and must be much faster than the per-symbol
+  // dispatch pattern.
+  for (unsigned size : {512U, 768U, 1024U, 2048U}) {
+    constexpr unsigned nof_transforms = 14; // OFDM symbols per slot
+    auto               metal          = dft_processor_metal({size, dft_processor::direction::DIRECT});
+    if (!metal.is_valid()) {
+      continue;
+    }
+    if (metal.get_max_batch() < nof_transforms) {
+      std::fprintf(stderr, "FAIL: size=%u max_batch=%u < %u\n", size, metal.get_max_batch(), nof_transforms);
+      ok = false;
+      continue;
+    }
+
+    // Random input for the whole batch.
+    std::vector<cf_t> batch_in(static_cast<size_t>(size) * nof_transforms);
+    for (auto& v : batch_in) {
+      v = cf_t(dist(rng), dist(rng));
+    }
+    std::copy(batch_in.begin(), batch_in.end(), metal.get_input().begin());
+    // Copy the batch result out: the reference runs below reuse the same output buffer (slot 0).
+    span<const cf_t>  batch_view = metal.run_batch(nof_transforms);
+    std::vector<cf_t> batch_out(batch_view.begin(), batch_view.end());
+
+    // Reference: one transform at a time, with the input of each transform in slot 0.
+    std::vector<cf_t> ref_out(static_cast<size_t>(size) * nof_transforms);
+    for (unsigned i = 0; i != nof_transforms; ++i) {
+      std::copy(batch_in.begin() + static_cast<size_t>(i) * size,
+                batch_in.begin() + static_cast<size_t>(i + 1) * size,
+                metal.get_input().begin());
+      span<const cf_t> single = metal.run();
+      std::copy(single.begin(), single.end(), ref_out.begin() + static_cast<size_t>(i) * size);
+    }
+
+    bool identical = true;
+    for (unsigned i = 0; i != nof_transforms * size; ++i) {
+      if ((batch_out[i] != ref_out[i])) {
+        identical = false;
+        break;
+      }
+    }
+    std::printf("[batch] size=%4u n=%2u bit-identical=%s\n", size, nof_transforms, identical ? "OK" : "MISMATCH");
+    if (!identical) {
+      std::fprintf(stderr, "FAIL: batched DFT differs from single-transform runs (size=%u)\n", size);
+      ok = false;
+    }
+
+    // Latency: 14 symbols batched versus 14 single dispatches.
+    constexpr unsigned rounds = 20;
+    auto               t0     = std::chrono::steady_clock::now();
+    for (unsigned r = 0; r != rounds; ++r) {
+      (void)metal.run_batch(nof_transforms);
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    for (unsigned r = 0; r != rounds; ++r) {
+      for (unsigned i = 0; i != nof_transforms; ++i) {
+        (void)metal.run();
+      }
+    }
+    auto         t2       = std::chrono::steady_clock::now();
+    const double batch_us = std::chrono::duration<double, std::micro>(t1 - t0).count() / rounds;
+    const double per_sym_us =
+        std::chrono::duration<double, std::micro>(t2 - t1).count() / (rounds * nof_transforms);
+    std::printf("[time]  size=%4u slot batch(14)=%.1fus  per-symbol dispatch=%.1fus  (%.1fx)\n",
+                size,
+                batch_us,
+                per_sym_us,
+                per_sym_us * nof_transforms / batch_us);
+  }
+
   // Steady-state latency (audit data): 100 runs per backend at the OFDM sizes.
   for (unsigned size : {512U, 768U, 1024U, 2048U}) {
     dft_processor_metal metal({size, dft_processor::direction::DIRECT});

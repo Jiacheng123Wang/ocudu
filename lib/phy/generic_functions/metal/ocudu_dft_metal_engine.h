@@ -44,7 +44,13 @@ public:
   /// \param[in]  in  Input, \c size complex floats, page-aligned, engine lifetime.
   /// \param[out] out Output, \c size complex floats, page-aligned, engine lifetime.
   /// \return True on success.
-  bool run(const void* in, void* out);
+  /// \brief Executes \c nof_transforms independent transforms over the contiguous input buffer.
+  /// \param[in]  in             Input samples, nof_transforms * size complex samples.
+  /// \param[out] out            Output samples, same layout.
+  /// \param[in]  nof_transforms Number of transforms (>= 1). Each transform is dispatched as its
+  ///                            own threadgroup, so concurrent transforms use different GPU cores.
+  /// \return True on success.
+  bool run(const void* in, void* out, unsigned nof_transforms);
 
   /// GPU-side duration of the last transform in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;

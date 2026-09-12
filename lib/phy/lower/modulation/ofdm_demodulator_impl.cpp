@@ -75,10 +75,9 @@ unsigned ofdm_symbol_demodulator_impl::get_cp_offset(unsigned symbol_index, unsi
   return cp_offset;
 }
 
-void ofdm_symbol_demodulator_impl::demodulate(resource_grid_writer& grid,
-                                              span<const ci16_t>    input,
-                                              unsigned              port_index,
-                                              unsigned              symbol_index)
+void ofdm_symbol_demodulator_impl::fill_dft_input(span<cf_t>         dft_input,
+                                                  span<const ci16_t>  input,
+                                                  unsigned            symbol_index)
 {
   // Recalculate phase compensation if the center frequency has changed.
   double center_freq_Hz = next_center_freq_Hz.load(std::memory_order::memory_order_relaxed);
@@ -86,9 +85,6 @@ void ofdm_symbol_demodulator_impl::demodulate(resource_grid_writer& grid,
     phase_compensation_table = phase_compensation_lut(scs, cp, dft_size, center_freq_Hz, false);
     current_center_freq_Hz   = center_freq_Hz;
   }
-
-  // Calculate number of symbols per slot.
-  unsigned nsymb = get_nsymb_per_slot(cp);
 
   // Calculate cyclic prefix length.
   unsigned cp_len = cp.get_length(symbol_index, scs).to_samples(sampling_rate_Hz);
@@ -99,17 +95,22 @@ void ofdm_symbol_demodulator_impl::demodulate(resource_grid_writer& grid,
                input.size(),
                symbol_index,
                cp_len,
-               dft_size,
                cp_len + dft_size,
                scs_to_khz(scs));
 
   // Prepare the DFT inputs, while skipping the cyclic prefix.
-  ocuduvec::convert(dft->get_input().first(dft_size),
+  ocuduvec::convert(dft_input,
                     input.subspan(cp_len - nof_samples_window_offset, dft_size),
                     ocuduvec::scaling_factor_ci16_to_cf);
+}
 
-  // Execute DFT.
-  span<const cf_t> dft_output = dft->run();
+void ofdm_symbol_demodulator_impl::process_dft_output(resource_grid_writer& grid,
+                                                      span<const cf_t>      dft_output,
+                                                      unsigned              port_index,
+                                                      unsigned              symbol_index)
+{
+  // Calculate number of symbols per slot.
+  unsigned nsymb = get_nsymb_per_slot(cp);
 
   // Get phase correction (TS138.211, Section 5.4)
   cf_t phase_compensation = phase_compensation_table.get_coefficient(symbol_index);
@@ -129,6 +130,53 @@ void ofdm_symbol_demodulator_impl::demodulate(resource_grid_writer& grid,
   // Map the lower bound frequency domain data.
   span<cf_t> lower_bound(&compensated_output[0], rg_size / 2);
   grid.put(port_index, symbol_index % nsymb, rg_size / 2, lower_bound);
+}
+
+void ofdm_symbol_demodulator_impl::demodulate(resource_grid_writer& grid,
+                                              span<const ci16_t>    input,
+                                              unsigned              port_index,
+                                              unsigned              symbol_index)
+{
+  // Fill the DFT input, execute one transform and post-process its output.
+  fill_dft_input(dft->get_input().first(dft_size), input, symbol_index);
+  span<const cf_t> dft_output = dft->run();
+  process_dft_output(grid, dft_output, port_index, symbol_index);
+}
+
+void ofdm_symbol_demodulator_impl::demodulate_batch(resource_grid_writer& grid,
+                                                    span<const ci16_t>    input,
+                                                    unsigned              port_index,
+                                                    unsigned              first_symbol_index,
+                                                    unsigned              nof_symbols)
+{
+  // Batched execution requires a DFT processor able to run several transforms in one dispatch.
+  if ((nof_symbols <= 1) || (dft->get_max_batch() < nof_symbols)) {
+    ofdm_symbol_demodulator::demodulate_batch(grid, input, port_index, first_symbol_index, nof_symbols);
+    return;
+  }
+
+  // 1) Fill the input of every transform of the batch.
+  span<cf_t>         batch_input = dft->get_input().first(static_cast<size_t>(nof_symbols) * dft_size);
+  span<const ci16_t> remaining   = input;
+  for (unsigned i_symbol = 0; i_symbol != nof_symbols; ++i_symbol) {
+    unsigned symbol_index = first_symbol_index + i_symbol;
+    unsigned symbol_size  = get_symbol_size(symbol_index);
+    fill_dft_input(batch_input.subspan(static_cast<size_t>(i_symbol) * dft_size, dft_size),
+                   remaining.first(symbol_size),
+                   symbol_index);
+    remaining = remaining.last(remaining.size() - symbol_size);
+  }
+
+  // 2) Execute all transforms with a single dispatch.
+  span<const cf_t> batch_output = dft->run_batch(nof_symbols);
+
+  // 3) Post-process each transform output.
+  for (unsigned i_symbol = 0; i_symbol != nof_symbols; ++i_symbol) {
+    process_dft_output(grid,
+                       batch_output.subspan(static_cast<size_t>(i_symbol) * dft_size, dft_size),
+                       port_index,
+                       first_symbol_index + i_symbol);
+  }
 }
 
 unsigned ofdm_slot_demodulator_impl::get_slot_size(unsigned slot_index) const
@@ -151,14 +199,7 @@ void ofdm_slot_demodulator_impl::demodulate(resource_grid_writer& grid,
 {
   unsigned nsymb = get_nsymb_per_slot(cp);
 
-  // For each symbol in the slot.
-  for (unsigned symbol_idx = 0; symbol_idx != nsymb; ++symbol_idx) {
-    // Get the current symbol size.
-    unsigned symbol_sz = symbol_demodulator->get_symbol_size(nsymb * slot_index + symbol_idx);
-
-    // Demodulate symbol.
-    symbol_demodulator->demodulate(grid, input.first(symbol_sz), port_index, nsymb * slot_index + symbol_idx);
-
-    input = input.last(input.size() - symbol_sz);
-  }
+  // Demodulate the whole slot: implementations whose DFT supports batching execute all the
+  // symbol transforms in a single dispatch.
+  symbol_demodulator->demodulate_batch(grid, input, port_index, nsymb * slot_index, nsymb);
 }

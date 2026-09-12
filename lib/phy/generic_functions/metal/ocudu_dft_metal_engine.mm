@@ -331,7 +331,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
     if (warmed.fetch_add(1, std::memory_order_acq_rel) == 0) {
       if (::posix_memalign(&engine->warmup_mem, 4096, static_cast<size_t>(size) * 2 * sizeof(float)) == 0) {
         std::memset(engine->warmup_mem, 0, static_cast<size_t>(size) * 2 * sizeof(float));
-        (void)run(engine->warmup_mem, engine->warmup_mem);
+        (void)run(engine->warmup_mem, engine->warmup_mem, 1);
       }
     }
   }
@@ -339,14 +339,14 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   return true;
 }
 
-bool dft_metal_engine::run(const void* in, void* out)
+bool dft_metal_engine::run(const void* in, void* out, unsigned nof_transforms)
 {
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
   if (engine == nullptr || dft_resources().pipeline == nil) {
     return false;
   }
 
-  const size_t bytes = static_cast<size_t>(engine->n) * 2 * sizeof(float);
+  const size_t bytes = static_cast<size_t>(engine->n) * nof_transforms * 2 * sizeof(float);
   id<MTLBuffer> b_in  = wrap_buffer(engine, in, bytes);
   id<MTLBuffer> b_out = wrap_buffer(engine, out, bytes);
   if (b_in == nil || b_out == nil) {
@@ -363,7 +363,7 @@ bool dft_metal_engine::run(const void* in, void* out)
   [enc setBytes:&engine->radix2 length:sizeof(uint32_t) atIndex:4];
   [enc setBytes:&engine->radix3 length:sizeof(uint32_t) atIndex:5];
   [enc setBytes:&engine->inverse length:sizeof(uint32_t) atIndex:6];
-  [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+  [enc dispatchThreadgroups:MTLSizeMake(nof_transforms, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
   [enc endEncoding];
   [cmd_buf commit];

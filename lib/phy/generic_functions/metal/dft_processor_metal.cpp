@@ -30,10 +30,12 @@ dft_processor_metal::dft_processor_metal(const configuration& config) : cfg(conf
   }
 
   // Page-aligned input/output buffers (the zero-copy wrap contract); compat::aligned_alloc
-  // rounds the size up to a page multiple.
-  const size_t page = compat::page_size();
-  void*        in   = compat::aligned_alloc(page, static_cast<size_t>(config.size) * sizeof(cf_t));
-  void*        out  = compat::aligned_alloc(page, static_cast<size_t>(config.size) * sizeof(cf_t));
+  // rounds the size up to a page multiple. They hold up to max_batch transforms so a whole
+  // slot's symbols can be filled first and executed by a single run_batch() dispatch.
+  const size_t page  = compat::page_size();
+  const size_t bytes = static_cast<size_t>(config.size) * max_batch * sizeof(cf_t);
+  void*        in    = compat::aligned_alloc(page, bytes);
+  void*        out   = compat::aligned_alloc(page, bytes);
   if (in == nullptr || out == nullptr) {
     compat::aligned_free(in);
     compat::aligned_free(out);
@@ -53,6 +55,20 @@ dft_processor_metal::dft_processor_metal(const configuration& config) : cfg(conf
 span<const cf_t> dft_processor_metal::run()
 {
   report_fatal_error_if_not(valid, "Metal DFT processor is not valid (unsupported size or engine init failed).");
-  report_fatal_error_if_not(engine->run(input.get(), output.get()), "Metal DFT run failed.");
+  report_fatal_error_if_not(engine->run(input.get(), output.get(), 1), "Metal DFT run failed.");
   return {output.get(), cfg.size};
+}
+
+span<const cf_t> dft_processor_metal::run_batch(unsigned nof_transforms)
+{
+  report_fatal_error_if_not(valid, "Metal DFT processor is not valid (unsupported size or engine init failed).");
+  report_fatal_error_if_not(nof_transforms >= 1 && nof_transforms <= max_batch,
+                            "Invalid Metal DFT batch size ({}), must be in [1, {}].",
+                            nof_transforms,
+                            max_batch);
+  if (nof_transforms == 1) {
+    return run();
+  }
+  report_fatal_error_if_not(engine->run(input.get(), output.get(), nof_transforms), "Metal DFT batch run failed.");
+  return {output.get(), static_cast<size_t>(cfg.size) * nof_transforms};
 }
