@@ -260,6 +260,12 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   // Number of receive antenna ports.
   auto nof_rx_ports = static_cast<unsigned>(config.rx_ports.size());
 
+  // Fused (deferred) equalization + demapping: only when both backends support it and the
+  // transform precoding path - which reads the equalized symbols on the CPU before the demapping -
+  // is disabled.
+  const bool deferred_chain = equalizer->supports_deferred_chain() && demapper->supports_deferred_chain() &&
+                              !config.enable_transform_precoding;
+
   // Initialize scrambling sequence. When msgA is sent over PUSCH, an alternative scrambling sequence is used, as per
   // TS 38.211 Section 6.3.1.1 Release 16.
   unsigned c_init  = to_value(config.rnti) * pow2(15) + config.n_id;
@@ -341,21 +347,29 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
     // Extract the data symbols, equalize channels and, for each Tx layer, combine contribution from all Rx antenna
     // ports.
     const re_buffer_reader<cbf16_t>& ch_re = get_ch_data_re(grid, i_symbol, symbol_re_mask, config.rx_ports);
-    equalizer->equalize(
-        eq_re, eq_noise_vars, ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
+    if (deferred_chain) {
+      // Fused path: submit the equalization without waiting. The demapper below dispatches on the
+      // same command queue, so waiting for its command buffer also guarantees this one completed;
+      // the equalized symbols and noise variances are read only after that wait.
+      equalizer->submit(
+          eq_re, eq_noise_vars, ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
+    } else {
+      equalizer->equalize(
+          eq_re, eq_noise_vars, ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
 
-    // Revert transform precoding for the entire OFDM symbol.
-    if (config.enable_transform_precoding) {
-      ocudu_assert(config.nof_tx_layers == 1,
-                   "Transform precoding is only possible with one layer (i.e. {}).",
-                   config.nof_tx_layers);
-      precoder->deprecode_ofdm_symbol(eq_re, eq_re);
-      precoder->deprecode_ofdm_symbol_noise(eq_noise_vars, eq_noise_vars);
-    }
+      // Revert transform precoding for the entire OFDM symbol.
+      if (config.enable_transform_precoding) {
+        ocudu_assert(config.nof_tx_layers == 1,
+                     "Transform precoding is only possible with one layer (i.e. {}).",
+                     config.nof_tx_layers);
+        precoder->deprecode_ofdm_symbol(eq_re, eq_re);
+        precoder->deprecode_ofdm_symbol_noise(eq_noise_vars, eq_noise_vars);
+      }
 
-    // Estimate post equalization Signal-to-Interference-plus-Noise Ratio.
-    if (compute_post_eq_sinr) {
-      symbol_noise_var_accumulate += filter_infinite_and_accumulate(symbol_sinr_softbit_count, eq_noise_vars);
+      // Estimate post equalization Signal-to-Interference-plus-Noise Ratio.
+      if (compute_post_eq_sinr) {
+        symbol_noise_var_accumulate += filter_infinite_and_accumulate(symbol_sinr_softbit_count, eq_noise_vars);
+      }
     }
 
     // Counts the number of processed RE for the OFDM symbol.
@@ -428,6 +442,19 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
 
       // Notify a new processed block.
       codeword_buffer.on_new_block(codeword, scrambling_seq);
+    }
+
+    if (deferred_chain) {
+      // The demapper's wait already covers the equalization command buffer (same queue, submitted
+      // order); this call only releases the deferred state. It is unconditional so the combination
+      // "deferred equalizer + waiting demapper" stays correct in every backend mix.
+      equalizer->wait();
+
+      // Post-equalization SINR: the very same reduction as the non-deferred path above, moved past
+      // the wait so the equalized noise variances are guaranteed to be visible.
+      if (compute_post_eq_sinr) {
+        symbol_noise_var_accumulate += filter_infinite_and_accumulate(symbol_sinr_softbit_count, eq_noise_vars);
+      }
     }
   }
 
