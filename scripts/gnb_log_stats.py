@@ -30,6 +30,8 @@ UL_GRANT = re.compile(
     r"PUSCH rnti=(\S+) .*?target_code_rate=(\d+) modulation=(\S+) mcs_index=(\d+) "
     r".*?CW: rv_idx=(\d+) harq_id=(\d+) new_data=(\w+) tbs=(\d+)")
 PRACH = re.compile(r"PRACH: rsi=(\d+) rssi=(-?[\d.]+)dB")
+RAR = re.compile(r"RAR PDSCH: ra-rnti=(\S+).*?grants \(\d+\): \[tc-rnti=(\S+):")
+MSG3_GRANT_FAIL = re.compile(r"Failed to allocate PUSCH Msg3")
 GRANT = re.compile(r"^\t")
 
 
@@ -58,6 +60,9 @@ class Bucket:
         self.ul_harq_discard = 0
         self.dl_harq_discard = 0
         self.prach = 0
+        self.prach_rssi = []
+        self.rar = 0
+        self.msg3_grant_fail = 0
         self.dl_pdu = 0
 
 
@@ -74,6 +79,7 @@ def parse(path, bucket_seconds, rnti_filter):
     buckets = collections.defaultdict(Bucket)
     per_mod = collections.defaultdict(lambda: [0, 0, []])
     pusch_rows = []
+    msg3_rntis = set()
     first = last = None
     commit = ""
     cur = None
@@ -117,7 +123,17 @@ def parse(path, bucket_seconds, rnti_filter):
             elif "Discarding DL HARQ process" in line:
                 bucket.dl_harq_discard += 1
             elif "PRACH: rsi=" in line:
+                found = PRACH.search(line)
                 bucket.prach += 1
+                if found:
+                    bucket.prach_rssi.append(float(found.group(2)))
+            elif "RAR PDSCH:" in line:
+                found = RAR.search(line)
+                if found:
+                    bucket.rar += 1
+                    msg3_rntis.add(found.group(2))
+            elif MSG3_GRANT_FAIL.search(line):
+                bucket.msg3_grant_fail += 1
             elif "DL PDU:" in line:
                 bucket.dl_pdu += 1
             elif GRANT.match(line):
@@ -138,7 +154,7 @@ def parse(path, bucket_seconds, rnti_filter):
         entry[0] += 1
         entry[1] += row["crc"] == "KO"
         entry[2].append(row["sinr"])
-    return buckets, per_mod, pusch_rows, first, last, commit, pusch_total
+    return buckets, per_mod, pusch_rows, first, last, commit, pusch_total, msg3_rntis
 
 
 def main():
@@ -149,7 +165,7 @@ def main():
     parser.add_argument("--rnti", default=None, help="focus the per-modulation table on one UE")
     args = parser.parse_args()
 
-    buckets, per_mod, pusch_rows, first, last, commit, pusch_total = parse(
+    buckets, per_mod, pusch_rows, first, last, commit, pusch_total, msg3_rntis = parse(
         args.log, args.bucket, args.rnti)
     if first is None:
         print("no timestamped lines found in %s" % args.log)
@@ -192,6 +208,27 @@ def main():
                                                        if r["mod"] == mod
                                                        and (not args.rnti or r["rnti"] == args.rnti)]),
                  median(sinrs), pct(sinrs, 0.9)))
+    print()
+
+    # ---- random access ------------------------------------------------------
+    nof_prach = sum(b.prach for b in buckets.values())
+    nof_rar = sum(b.rar for b in buckets.values())
+    msg3 = [r for r in pusch_rows if r["rnti"] in msg3_rntis]
+    print("== random access")
+    print("  PRACH detections=%d  RAR grants=%d  Msg3 grant allocation failures=%d"
+          % (nof_prach, nof_rar, sum(b.msg3_grant_fail for b in buckets.values())))
+    if msg3:
+        ok = sum(1 for r in msg3 if r["crc"] == "OK")
+        print("  Msg3 attempts=%d  crc OK=%d (%.1f%%)  sinr median %.1f p10 %.1f p90 %.1f dB  epre median %.1f"
+              % (len(msg3), ok, 100 * ok / len(msg3), median([r["sinr"] for r in msg3]),
+                 pct([r["sinr"] for r in msg3], 0.1), pct([r["sinr"] for r in msg3], 0.9),
+                 median([r["rsrp"] for r in msg3])))
+        print("  Msg3 cycles=%d (tc-rntis: %s)"
+              % (len(msg3_rntis), " ".join(sorted(msg3_rntis)[:6]) + (" ..." if len(msg3_rntis) > 6 else "")))
+    if nof_prach:
+        rssi = [v for b in buckets.values() for v in b.prach_rssi]
+        print("  PRACH rssi: median %.1f dB  min %.1f  max %.1f"
+              % (median(rssi), min(rssi), max(rssi)))
     print()
 
     # ---- aggregate counters -------------------------------------------------

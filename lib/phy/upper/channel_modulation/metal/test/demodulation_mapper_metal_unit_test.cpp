@@ -16,6 +16,7 @@
 #include "ocudu/ran/sch/modulation_scheme.h"
 #include <chrono>
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -171,6 +172,67 @@ bool run_aligned(modulation_scheme mod, std::mt19937& rng)
   return bit_exact(llrs_ref, llrs_metal);
 }
 
+// \brief Level behaviour of the quantizer: the metal LLRs must stay bit-exact to the CPU at
+/// every input level, and the report shows how the LLRs react to a common scaling of the
+/// equalized symbols and of the noise variances (the same SNR at a different absolute level).
+///
+/// The reaction is measurement, not an assertion: the LLRs of this implementation are *not*
+/// level-invariant (they scale roughly as 1/level), so the absolute level of the received
+/// signal decides how many soft bits the quantizer keeps. The uplink decoder trims trailing
+/// zero LLRs and skips the decode when what is left is shorter than the message, which is why
+/// an over-attenuated capture can report CRC failures without the LDPC decoder ever running.
+bool run_level_scale(modulation_scheme mod, float k, std::mt19937& rng)
+{
+  const unsigned nof_symbols = 256;
+  const unsigned nof_bits    = nof_symbols * bits_per_scheme(mod);
+
+  std::vector<cf_t>  symbols(nof_symbols);
+  std::vector<float> noise_vars(nof_symbols);
+  auto               dist = std::normal_distribution<float>(0.0F, 0.3F);
+  for (auto& z : symbols) {
+    z = {dist(rng), dist(rng)};
+  }
+  for (auto& n : noise_vars) {
+    n = 0.05F + 0.05F * std::abs(dist(rng));
+  }
+
+  std::vector<log_likelihood_ratio> llrs_ref(nof_bits);
+  std::vector<log_likelihood_ratio> llrs_metal(nof_bits);
+  std::vector<log_likelihood_ratio> llrs_scaled_ref(nof_bits);
+  std::vector<log_likelihood_ratio> llrs_scaled_metal(nof_bits);
+
+  std::vector<cf_t>  symbols_scaled(symbols);
+  std::vector<float> nv_scaled(noise_vars);
+  for (cf_t& z : symbols_scaled) {
+    z *= k;
+  }
+  for (float& n : nv_scaled) {
+    n *= k * k;
+  }
+
+  demodulation_mapper_metal metal;
+  demodulation_mapper_impl  ref;
+  metal.demodulate_soft(llrs_metal, symbols, noise_vars, mod);
+  ref.demodulate_soft(llrs_ref, symbols, noise_vars, mod);
+  metal.demodulate_soft(llrs_scaled_metal, symbols_scaled, nv_scaled, mod);
+  ref.demodulate_soft(llrs_scaled_ref, symbols_scaled, nv_scaled, mod);
+
+  const unsigned zeros_ref    = std::count_if(llrs_scaled_ref.begin(), llrs_scaled_ref.end(),
+                                              [](const log_likelihood_ratio& l) { return l.to_int() == 0; });
+  const unsigned zeros_metal  = std::count_if(llrs_scaled_metal.begin(), llrs_scaled_metal.end(),
+                                              [](const log_likelihood_ratio& l) { return l.to_int() == 0; });
+  const bool     cpu_scaled_ok = bit_exact(llrs_ref, llrs_scaled_ref);
+  const bool     gpu_scaled_ok = bit_exact(llrs_metal, llrs_scaled_metal);
+  std::printf("[level] %-6s k=%.4f  metal==cpu %s  cpu scaled==unscaled %s  metal scaled==unscaled %s  "
+              "zeros unscaled %u/%u, scaled %u/%u\n",
+              to_string(mod).c_str(), k, bit_exact(llrs_ref, llrs_metal) ? "OK" : "FAIL",
+              cpu_scaled_ok ? "OK" : "DIFF", gpu_scaled_ok ? "OK" : "DIFF",
+              static_cast<unsigned>(std::count_if(llrs_ref.begin(), llrs_ref.end(),
+                                                  [](const log_likelihood_ratio& l) { return l.to_int() == 0; })),
+              nof_bits, zeros_ref, nof_bits);
+  return bit_exact(llrs_ref, llrs_metal) && (zeros_ref == zeros_metal);
+}
+
 } // namespace
 
 int main()
@@ -193,6 +255,16 @@ int main()
                 spc ? "OK" : "FAIL",
                 algn ? "OK" : "FAIL");
     ok = ok && rnd && spc && algn;
+  }
+
+  // Level invariance (see run_level_scale): the OTA uplink runs at levels the lab never used.
+  for (unsigned i = 0; i != 4; ++i) {
+    for (float k : {1.0F, 0.1F, 0.03F, 0.01F}) {
+      if (k == 1.0F) {
+        continue;
+      }
+      ok = run_level_scale(schemes[i], k, rng) && ok;
+    }
   }
 
   // Composite-factory fallback: BPSK and pi/2-BPSK stay on the CPU implementation.
