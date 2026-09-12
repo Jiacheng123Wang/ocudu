@@ -157,6 +157,9 @@ public:
   /// GPU-side duration of the last call in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;
 
+  /// Number of batched group dispatches encoded so far (diagnostics).
+  unsigned batch_dispatch_count() const;
+
 private:
   void* impl = nullptr;
 };

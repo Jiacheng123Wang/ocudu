@@ -138,6 +138,149 @@ void channel_equalizer_metal::submit(span<cf_t>                       eq_symbols
   impl_->pending.push_back(std::move(entry));
 }
 
+void channel_equalizer_metal::submit_batch_run(span<const group_symbol> run, const symbol_plan& plan)
+{
+  // One dispatch for the whole run. The inputs are staged into one contiguous buffer using the
+  // uniform per-symbol strides the kernel expects (h: [port][layer][re], y: [port][re]); the
+  // outputs are written in place, which submit_group() guarantees for the runs sent here.
+  const unsigned n_sym    = run.size();
+  const unsigned nof_re   = plan.nof_re;
+  const size_t   h_stride = static_cast<size_t>(plan.nof_used_ports) * plan.nof_layers * nof_re;
+  const size_t   y_stride = static_cast<size_t>(plan.nof_used_ports) * nof_re;
+  const auto     eq_stride = static_cast<unsigned>(run[1].eq_symbols.data() - run[0].eq_symbols.data());
+  const auto     nv_stride = static_cast<unsigned>(run[1].eq_noise_vars.data() - run[0].eq_noise_vars.data());
+
+  std::unique_ptr<pending_entry> entry = impl_->acquire();
+
+  auto* h_ptr = static_cast<cbf16_t*>(entry->h.ensure(h_stride * n_sym * sizeof(cbf16_t)));
+  auto* y_ptr = static_cast<cbf16_t*>(entry->y.ensure(y_stride * n_sym * sizeof(cbf16_t)));
+  auto* s_ptr = static_cast<float*>(entry->s.ensure(static_cast<size_t>(plan.nof_used_ports) * sizeof(float)));
+
+  for (unsigned i_sym = 0; i_sym != n_sym; ++i_sym) {
+    const group_symbol& symbol = run[i_sym];
+    cbf16_t*            h_sym  = h_ptr + i_sym * h_stride;
+    cbf16_t*            y_sym  = y_ptr + i_sym * y_stride;
+    for (unsigned i_used = 0; i_used != plan.nof_used_ports; ++i_used) {
+      const unsigned i_port = plan.port_map[i_used];
+      std::memcpy(y_sym + static_cast<size_t>(i_used) * nof_re,
+                  symbol.ch_symbols->get_slice(i_port).data(),
+                  static_cast<size_t>(nof_re) * sizeof(cbf16_t));
+      for (unsigned i_layer = 0; i_layer != plan.nof_layers; ++i_layer) {
+        std::memcpy(h_sym + (static_cast<size_t>(i_used) * plan.nof_layers + i_layer) * nof_re,
+                    symbol.ch_estimates->get_channel(i_port, i_layer).data(),
+                    static_cast<size_t>(nof_re) * sizeof(cbf16_t));
+      }
+    }
+  }
+  // Single-layer: the per-port noise variances the kernel reads (the run predicate checked that
+  // every symbol of the run carries the same ones). Multi-layer: the shared noise variance.
+  for (unsigned i_used = 0; i_used != plan.nof_used_ports; ++i_used) {
+    s_ptr[i_used] = plan.single_layer ? run.front().noise_var_estimates[plan.port_map[i_used]] : plan.noise_var;
+  }
+
+  const bool ok = impl_->engine.enqueue_burst_batch(h_ptr,
+                                                    y_ptr,
+                                                    s_ptr,
+                                                    run.front().eq_symbols.data(),
+                                                    run.front().eq_noise_vars.data(),
+                                                    nof_re,
+                                                    n_sym,
+                                                    static_cast<unsigned>(h_stride),
+                                                    static_cast<unsigned>(y_stride),
+                                                    eq_stride,
+                                                    nv_stride,
+                                                    plan.nof_used_ports,
+                                                    plan.nof_layers,
+                                                    impl_->mmse,
+                                                    plan.noise_var,
+                                                    run.front().tx_scaling,
+                                                    plan.single_layer ? 1.0F : run.front().tx_scaling);
+  if (!ok) {
+    // Engine failure: mirror the invalid-input semantics of the per-symbol path.
+    for (const group_symbol& symbol : run) {
+      ocuduvec::zero(symbol.eq_symbols);
+      std::fill(symbol.eq_noise_vars.begin(), symbol.eq_noise_vars.end(), std::numeric_limits<float>::infinity());
+    }
+    return;
+  }
+  // Every output of the run is written in place by this dispatch, so there is nothing to copy back.
+  entry->eq_direct = true;
+  entry->nv_direct = true;
+  for (const group_symbol& symbol : run) {
+    entry->batch_outs.emplace_back(symbol.eq_symbols, symbol.eq_noise_vars);
+  }
+  impl_->pending.push_back(std::move(entry));
+}
+
+void channel_equalizer_metal::submit_group(span<const group_symbol> group)
+{
+  // The group is split into maximal runs sharing a geometry (nof_re), a port reduction / noise
+  // path, the same noise variance inputs and uniformly strided page-aligned outputs; each run
+  // becomes ONE dispatch. A single-symbol run (a run boundary, an odd geometry, or a caller whose
+  // outputs cannot be wrapped) goes through the per-symbol submit() path unchanged.
+  unsigned i = 0;
+  while (i != group.size()) {
+    const group_symbol& head = group[i];
+    const symbol_plan   plan = resolve_plan(*head.ch_symbols, *head.ch_estimates, head.noise_var_estimates);
+    if (plan.invalid_input) {
+      // CPU semantics of the per-symbol path for an ill-formed noise variance.
+      ocuduvec::zero(head.eq_symbols);
+      std::fill(head.eq_noise_vars.begin(), head.eq_noise_vars.end(), std::numeric_limits<float>::infinity());
+      ++i;
+      continue;
+    }
+
+    const bool head_wrappable = is_page_aligned_buffer(head.eq_symbols.data()) &&
+                                is_page_aligned_buffer(head.eq_noise_vars.data());
+    unsigned   n_run = 1;
+    if (head_wrappable) {
+      const auto eq_stride = (i + 1 != group.size())
+                                 ? group[i + 1].eq_symbols.data() - group[i].eq_symbols.data()
+                                 : ptrdiff_t{0};
+      const auto nv_stride = (i + 1 != group.size())
+                                 ? group[i + 1].eq_noise_vars.data() - group[i].eq_noise_vars.data()
+                                 : ptrdiff_t{0};
+      while (i + n_run != group.size()) {
+        const group_symbol& next = group[i + n_run];
+        const group_symbol& prev = group[i + n_run - 1];
+        const symbol_plan   next_plan =
+            resolve_plan(*next.ch_symbols, *next.ch_estimates, next.noise_var_estimates);
+        const bool same_plan = !next_plan.invalid_input && (next_plan.nof_re == plan.nof_re) &&
+                               (next_plan.nof_layers == plan.nof_layers) &&
+                               (next_plan.nof_used_ports == plan.nof_used_ports) &&
+                               (next_plan.single_layer == plan.single_layer) &&
+                               (next_plan.port_map == plan.port_map) && (next_plan.noise_var == plan.noise_var) &&
+                               std::equal(next.noise_var_estimates.begin(),
+                                          next.noise_var_estimates.end(),
+                                          head.noise_var_estimates.begin());
+        const bool same_layout = (next.eq_symbols.size() == head.eq_symbols.size()) &&
+                                 (next.eq_noise_vars.size() == head.eq_noise_vars.size()) &&
+                                 (next.eq_symbols.data() - prev.eq_symbols.data() == eq_stride) &&
+                                 (next.eq_noise_vars.data() - prev.eq_noise_vars.data() == nv_stride) &&
+                                 (next.tx_scaling == head.tx_scaling) &&
+                                 is_page_aligned_buffer(next.eq_symbols.data()) &&
+                                 is_page_aligned_buffer(next.eq_noise_vars.data());
+        if (!same_plan || !same_layout) {
+          break;
+        }
+        ++n_run;
+      }
+    }
+
+    if (n_run == 1) {
+      submit(head.eq_symbols,
+             head.eq_noise_vars,
+             *head.ch_symbols,
+             *head.ch_estimates,
+             head.noise_var_estimates,
+             head.tx_scaling);
+    } else {
+      submit_batch_run(group.subspan(i, n_run), plan);
+    }
+    i += n_run;
+  }
+}
+
 void channel_equalizer_metal::wait()
 {
   // Close the shared burst opened by the submits of this group and wait for it. The demapping of
@@ -155,6 +298,56 @@ void channel_equalizer_metal::wait()
     impl_->pool.push_back(std::move(entry));
   }
   impl_->pending.clear();
+}
+
+channel_equalizer_metal::symbol_plan channel_equalizer_metal::resolve_plan(
+    const re_buffer_reader<cbf16_t>& ch_symbols,
+    const ch_est_list&               ch_estimates,
+    span<const float>                noise_var_estimates)
+{
+  symbol_plan plan;
+  plan.nof_re       = ch_estimates.get_nof_re();
+  plan.nof_rx_ports = ch_estimates.get_nof_rx_ports();
+  plan.nof_layers   = ch_estimates.get_nof_tx_layers();
+
+  ocudu_assert(ch_symbols.get_nof_re() == plan.nof_re, "Invalid channel symbols size.");
+  ocudu_assert(ch_symbols.get_nof_slices() == plan.nof_rx_ports, "Invalid channel symbols ports.");
+  ocudu_assert(noise_var_estimates.size() == plan.nof_rx_ports, "Invalid noise variance estimates size.");
+  ocudu_assert(is_supported(plan.nof_rx_ports, plan.nof_layers), "Unsupported equalizer topology.");
+
+  // Multi-layer path: single noise variance (the most pessimistic one, as the CPU m x n path does)
+  // and H pre-scaled by tx_scaling. Single-layer path: per-port noise variances and UNSCALED H (the
+  // 1 x n CPU path folds tx_scaling into the pseudo-inverse denominator). Ports with a non-positive
+  // or non-finite noise variance are dropped, replicating the CPU port reduction.
+  plan.single_layer   = (plan.nof_layers == 1);
+  plan.nof_used_ports = plan.nof_rx_ports;
+  if (plan.single_layer) {
+    unsigned nof_valid = 0;
+    for (unsigned i_port = 0; i_port != plan.nof_rx_ports; ++i_port) {
+      const float nvar = noise_var_estimates[i_port];
+      // CPU validity predicate of equalize_zf_single_tx_layer_reduction.
+      if ((nvar > 0.0F) && (nvar < std::numeric_limits<float>::infinity())) {
+        plan.port_map[nof_valid++] = i_port;
+      }
+    }
+    if (nof_valid == 0) {
+      // CPU semantics: no valid noise variance, fill the output with invalid data.
+      plan.invalid_input = true;
+      return plan;
+    }
+    plan.nof_used_ports = nof_valid;
+  } else {
+    plan.noise_var = *std::max_element(noise_var_estimates.begin(), noise_var_estimates.end());
+    // Skip processing if the noise variance is NaN, infinity or negative (CPU semantics).
+    if (!std::isnormal(plan.noise_var) || (plan.noise_var < 0.0F)) {
+      plan.invalid_input = true;
+      return plan;
+    }
+    for (unsigned i_port = 0; i_port != plan.nof_rx_ports; ++i_port) {
+      plan.port_map[i_port] = i_port;
+    }
+  }
+  return plan;
 }
 
 void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_symbols,
@@ -178,44 +371,18 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   ocudu_assert(tx_scaling > 0, "Tx scaling factor must be positive.");
   ocudu_assert(is_supported(nof_rx_ports, nof_layers), "Unsupported equalizer topology.");
 
-  // Multi-layer path: single noise variance (the most pessimistic one, as the CPU m x n
-  // path does) and H pre-scaled by tx_scaling.
-  // Single-layer path: per-port noise variances and UNSCALED H (the 1 x n CPU path folds
-  // tx_scaling into the pseudo-inverse denominator). Ports with a non-positive or
-  // non-finite noise variance are dropped, replicating the CPU port reduction.
-  const bool     single_layer = (nof_layers == 1);
-  float          noise_var    = 0.0F;
-  unsigned       nof_used_ports = nof_rx_ports;
-  std::array<unsigned, metal::equalizer_metal_engine::max_ports> port_map{};
-
-  if (single_layer) {
-    unsigned nof_valid = 0;
-    for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
-      const float nvar = noise_var_estimates[i_port];
-      // CPU validity predicate of equalize_zf_single_tx_layer_reduction.
-      if ((nvar > 0.0F) && (nvar < std::numeric_limits<float>::infinity())) {
-        port_map[nof_valid++] = i_port;
-      }
-    }
-    if (nof_valid == 0) {
-      // CPU semantics: no valid noise variance, fill the output with invalid data.
-      ocuduvec::zero(eq_symbols);
-      std::fill(eq_noise_vars.begin(), eq_noise_vars.end(), std::numeric_limits<float>::infinity());
-      return;
-    }
-    nof_used_ports = nof_valid;
-  } else {
-    noise_var = *std::max_element(noise_var_estimates.begin(), noise_var_estimates.end());
-    // Skip processing if the noise variance is NaN, infinity or negative (CPU semantics).
-    if (!std::isnormal(noise_var) || (noise_var < 0.0F)) {
-      ocuduvec::zero(eq_symbols);
-      std::fill(eq_noise_vars.begin(), eq_noise_vars.end(), std::numeric_limits<float>::infinity());
-      return;
-    }
-    for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
-      port_map[i_port] = i_port;
-    }
+  // Port reduction, validity and noise path of this symbol (shared with submit_group()).
+  const symbol_plan plan = resolve_plan(ch_symbols, ch_estimates, noise_var_estimates);
+  if (plan.invalid_input) {
+    // CPU semantics: fill the output with invalid data for an ill-formed noise variance.
+    ocuduvec::zero(eq_symbols);
+    std::fill(eq_noise_vars.begin(), eq_noise_vars.end(), std::numeric_limits<float>::infinity());
+    return;
   }
+  const bool     single_layer   = plan.single_layer;
+  const float    noise_var      = plan.noise_var;
+  const unsigned nof_used_ports = plan.nof_used_ports;
+  const std::array<unsigned, metal::equalizer_metal_engine::max_ports>& port_map = plan.port_map;
 
   // Stage the cbf16 inputs (the kernel widens them) and pick the output buffers: when the
   // caller's spans satisfy the Metal no-copy requirements (page-aligned, page-multiple
@@ -359,4 +526,9 @@ void channel_equalizer_metal::finish_symbol(pending_entry& entry)
 double channel_equalizer_metal::engine_gpu_wait_us() const
 {
   return impl_->engine.last_gpu_wait_us();
+}
+
+unsigned channel_equalizer_metal::engine_batch_dispatch_count() const
+{
+  return impl_->engine.batch_dispatch_count();
 }

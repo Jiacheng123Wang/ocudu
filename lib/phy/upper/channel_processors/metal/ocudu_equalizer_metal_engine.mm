@@ -133,6 +133,9 @@ struct equalize_params_t {
 struct eq_engine_impl {
   double last_gpu_us = 0.0;
   bool   last_call_no_copy = true; // false when any buffer of the last call was copied
+  /// Batched group dispatches encoded so far (diagnostics: proves that a group really took the
+  /// batched kernel instead of falling back to one dispatch per symbol).
+  unsigned batch_dispatches = 0;
   bool   no_copy_fallback_logged = false;
   /// Command buffers committed and not waited for yet. Metal only serializes the *start* of the
   /// command buffers of one queue and lets them overlap, so a wait has to cover every one of them
@@ -410,6 +413,7 @@ bool equalizer_metal_engine::enqueue_burst_batch(const void* h,
   [enc setBytes:&strides length:sizeof(strides) atIndex:6];
   [enc dispatchThreads:MTLSizeMake(nof_re, nof_symbols, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
+  ++engine->batch_dispatches;
   return true;
 }
 
@@ -534,6 +538,12 @@ bool equalizer_metal_engine::last_call_used_no_copy() const
 {
   const eq_engine_impl* engine = static_cast<const eq_engine_impl*>(impl);
   return engine != nullptr ? engine->last_call_no_copy : false;
+}
+
+unsigned equalizer_metal_engine::batch_dispatch_count() const
+{
+  auto* engine = static_cast<eq_engine_impl*>(impl);
+  return (engine == nullptr) ? 0 : engine->batch_dispatches;
 }
 
 double equalizer_metal_engine::last_gpu_wait_us() const

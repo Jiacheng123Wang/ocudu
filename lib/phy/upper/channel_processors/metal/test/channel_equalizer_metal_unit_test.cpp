@@ -419,6 +419,124 @@ int main()
     }
   }
 
+  // Group submit (S-5): submit_group() must equalize a whole PUSCH-like group with the batched
+  // kernel. The group mixes geometries the way a slot does (symbols carrying DM-RS have fewer
+  // active RE), so it is encoded as runs of equal geometry: with nof_re {128,128,96,128,128} the
+  // group must become TWO batched dispatches plus the single-symbol DM-RS one - which is what makes
+  // this a test of the batching and not of a silent per-symbol fallback - and every output must be
+  // bit-identical to the synchronous per-symbol equalization.
+  {
+    const unsigned       ports     = 2;
+    const unsigned       layers    = 2;
+    const unsigned       nof_sym   = 5;
+    const unsigned       nof_re[]  = {128, 128, 96, 128, 128};
+    std::normal_distribution<float> dist(0.0F, 0.01F);
+
+    // Per-symbol inputs (each symbol a different realization, so a shared staging buffer shows up).
+    std::vector<std::vector<std::vector<cbf16_t>>> h(nof_sym,
+                                                     std::vector<std::vector<cbf16_t>>(ports * layers));
+    std::vector<std::vector<std::vector<cbf16_t>>> y(nof_sym, std::vector<std::vector<cbf16_t>>(ports));
+    std::vector<std::vector<float>>                nv_est(nof_sym, std::vector<float>(ports, 0.01F));
+    for (unsigned s = 0; s != nof_sym; ++s) {
+      for (auto& slice : h[s]) {
+        slice.resize(nof_re[s]);
+        for (auto& v : slice) {
+          v = cbf16_t(dist(rng), dist(rng));
+        }
+      }
+      for (auto& slice : y[s]) {
+        slice.resize(nof_re[s]);
+        for (auto& v : slice) {
+          v = cbf16_t(dist(rng), dist(rng));
+        }
+      }
+    }
+
+    // Page-aligned per-symbol output regions with the uniform stride of the PUSCH group buffers.
+    const size_t page       = compat::page_size();
+    const size_t eq_stride  = ((128 * layers * sizeof(cf_t) + page - 1) / page) * page;
+    const size_t nv_stride  = ((128 * layers * sizeof(float) + page - 1) / page) * page;
+    auto*        eq_group   = static_cast<cf_t*>(compat::aligned_alloc(page, eq_stride * nof_sym));
+    auto*        nv_group   = static_cast<float*>(compat::aligned_alloc(page, nv_stride * nof_sym));
+    std::vector<cf_t>  eq_ref(128 * layers * nof_sym);
+    std::vector<float> nv_ref(128 * layers * nof_sym);
+
+    channel_equalizer_metal metal(false);
+    std::vector<channel_equalizer::group_symbol> group;
+    for (unsigned s = 0; s != nof_sym; ++s) {
+      modular_re_buffer_reader<cbf16_t, 8> ch_symbols(ports, nof_re[s]);
+      for (unsigned p = 0; p != ports; ++p) {
+        ch_symbols.set_slice(p, y[s][p]);
+      }
+      modular_ch_est_list<8 * 4> ch_est(nof_re[s], ports, layers);
+      for (unsigned p = 0; p != ports; ++p) {
+        for (unsigned l = 0; l != layers; ++l) {
+          ch_est.set_channel(h[s][p * layers + l], p, l);
+        }
+      }
+      // Reference: the synchronous per-symbol path into its own buffers.
+      span<cf_t>  eq_s = span<cf_t>(eq_ref).subspan(s * 128 * layers, nof_re[s] * layers);
+      span<float> nv_s = span<float>(nv_ref).subspan(s * 128 * layers, nof_re[s] * layers);
+      metal.equalize(eq_s, nv_s, ch_symbols, ch_est, nv_est[s], 1.0F);
+
+      // Group entry: same inputs, page-aligned region of the group buffers.
+      group.push_back({span<cf_t>(eq_group + s * eq_stride / sizeof(cf_t), nof_re[s] * layers),
+                       span<float>(nv_group + s * nv_stride / sizeof(float), nof_re[s] * layers),
+                       nullptr,
+                       nullptr,
+                       nv_est[s],
+                       1.0F});
+    }
+
+    // The views must stay alive for the whole submit_group() call, exactly as in the demodulator.
+    std::vector<modular_re_buffer_reader<cbf16_t, 8>> ch_symbols_keep;
+    std::vector<modular_ch_est_list<8 * 4>>           ch_est_keep;
+    ch_symbols_keep.reserve(nof_sym);
+    ch_est_keep.reserve(nof_sym);
+    for (unsigned s = 0; s != nof_sym; ++s) {
+      modular_re_buffer_reader<cbf16_t, 8> ch_symbols(ports, nof_re[s]);
+      for (unsigned p = 0; p != ports; ++p) {
+        ch_symbols.set_slice(p, y[s][p]);
+      }
+      modular_ch_est_list<8 * 4> ch_est(nof_re[s], ports, layers);
+      for (unsigned p = 0; p != ports; ++p) {
+        for (unsigned l = 0; l != layers; ++l) {
+          ch_est.set_channel(h[s][p * layers + l], p, l);
+        }
+      }
+      ch_symbols_keep.push_back(std::move(ch_symbols));
+      ch_est_keep.push_back(std::move(ch_est));
+    }
+    for (unsigned s = 0; s != nof_sym; ++s) {
+      group[s].ch_symbols   = &ch_symbols_keep[s];
+      group[s].ch_estimates = &ch_est_keep[s];
+    }
+
+    const unsigned batches_before = metal.engine_batch_dispatch_count();
+    metal.submit_group(group);
+    metal.wait();
+    const unsigned batches = metal.engine_batch_dispatch_count() - batches_before;
+
+    bool same = (batches == 2);
+    for (unsigned s = 0; s != nof_sym; ++s) {
+      const cf_t*  eq_g = eq_group + s * eq_stride / sizeof(cf_t);
+      const float* nv_g = nv_group + s * nv_stride / sizeof(float);
+      same = same && (std::memcmp(eq_g, eq_ref.data() + s * 128 * layers, nof_re[s] * layers * sizeof(cf_t)) == 0);
+      same = same &&
+             (std::memcmp(nv_g, nv_ref.data() + s * 128 * layers, nof_re[s] * layers * sizeof(float)) == 0);
+    }
+    std::printf("[chain]  submit_group(): %u symbols, %u batched dispatches, bit-identical to per-symbol: %s\n",
+                nof_sym,
+                batches,
+                same ? "OK" : "MISMATCH");
+    if (!same) {
+      std::fprintf(stderr, "FAIL: submit_group() differs from the per-symbol chain (%u batches)\n", batches);
+      ok = false;
+    }
+    compat::aligned_free(eq_group);
+    compat::aligned_free(nv_group);
+  }
+
   // Production wiring: the composite factory adapter (Metal or generic) must keep the deferred
   // chain available, otherwise the PUSCH demodulator silently falls back to the per-symbol chain.
   {

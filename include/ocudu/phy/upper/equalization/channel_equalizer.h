@@ -104,6 +104,37 @@ public:
     equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling);
   }
 
+  /// \brief One symbol of a group submitted through submit_group() (same arguments as submit()).
+  struct group_symbol {
+    span<cf_t>                       eq_symbols;
+    span<float>                      eq_noise_vars;
+    const re_buffer_reader<cbf16_t>* ch_symbols;
+    const ch_est_list*               ch_estimates;
+    span<const float>                noise_var_estimates;
+    float                            tx_scaling;
+  };
+
+  /// \brief Submits the equalization of a whole group of symbols without waiting.
+  ///
+  /// A GPU backend uses one call to encode the group as a few dispatches instead of one per symbol
+  /// (the symbols of a group do not all share a geometry: a symbol carrying DM-RS has fewer active
+  /// RE than a data-only one, so a backend may split the group accordingly). The default
+  /// implementation is exactly the sequence of submit() calls that it replaces, so a backend that
+  /// does not override it keeps its per-symbol behaviour.
+  ///
+  /// \note As for submit(), the outputs are only valid after wait().
+  virtual void submit_group(span<const group_symbol> group)
+  {
+    for (const group_symbol& symbol : group) {
+      submit(symbol.eq_symbols,
+             symbol.eq_noise_vars,
+             *symbol.ch_symbols,
+             *symbol.ch_estimates,
+             symbol.noise_var_estimates,
+             symbol.tx_scaling);
+    }
+  }
+
   /// \brief Waits for the work submitted by submit().
   virtual void wait() {}
 
