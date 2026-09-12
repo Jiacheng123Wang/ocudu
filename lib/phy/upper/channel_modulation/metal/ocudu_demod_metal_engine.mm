@@ -247,14 +247,15 @@ bool demod_metal_engine::enqueue(const void* symbols,
   const size_t symbols_bytes = static_cast<size_t>(nof_symbols) * 2 * sizeof(float);
   const size_t noise_bytes   = static_cast<size_t>(nof_symbols) * sizeof(float);
   const size_t llr_bytes     = static_cast<size_t>(nof_symbols) * 8;
+  // wrap_buffer() clears this flag when a no-copy wrap falls back to a copy. Reset it before the
+  // wraps (not after, where it would overwrite the outcome) so the diagnostic reports the truth.
+  engine->last_call_no_copy = true;
   id<MTLBuffer> b_sym  = wrap_buffer(engine, symbols, symbols_bytes);
   id<MTLBuffer> b_nv   = wrap_buffer(engine, noise_var, noise_bytes);
   id<MTLBuffer> b_llrs = wrap_buffer(engine, llrs, llr_bytes);
   if (b_sym == nil || b_nv == nil || b_llrs == nil) {
     return false;
   }
-
-  engine->last_call_no_copy = true;
   const demod_params_t params{nof_symbols, mod};
   id<MTLComputeCommandEncoder> enc = engine->batch_enc;
   [enc setBuffer:b_sym offset:0 atIndex:0];

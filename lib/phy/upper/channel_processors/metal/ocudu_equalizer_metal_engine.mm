@@ -269,6 +269,9 @@ bool equalizer_metal_engine::enqueue(const void* h,
   const size_t s_bytes = static_cast<size_t>(nof_ports) * sizeof(float);
   const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
   const size_t nv_bytes = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
+  // wrap_buffer() clears this flag when a no-copy wrap falls back to a copy. Reset it before the
+  // wraps (not after, where it would overwrite the outcome) so the diagnostic reports the truth.
+  engine->last_call_no_copy = true;
   id<MTLBuffer> b_h  = wrap_buffer(engine, h, h_bytes);
   id<MTLBuffer> b_y  = wrap_buffer(engine, y, y_bytes);
   id<MTLBuffer> b_s  = wrap_buffer(engine, sigma2, s_bytes);
@@ -277,8 +280,6 @@ bool equalizer_metal_engine::enqueue(const void* h,
   if (b_h == nil || b_y == nil || b_s == nil || b_eq == nil || b_nv == nil) {
     return false;
   }
-
-  engine->last_call_no_copy = true;
   equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, tx_scaling, h_scaling};
   id<MTLComputeCommandEncoder> enc = engine->batch_enc;
   [enc setBuffer:b_h offset:0 atIndex:0];
