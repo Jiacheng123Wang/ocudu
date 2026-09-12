@@ -116,6 +116,8 @@ struct equalize_params_t {
 
 struct eq_engine_impl {
   double last_gpu_us = 0.0;
+  unsigned pending = 0; // committed command buffers not waited for yet
+  id<MTLCommandBuffer> last_committed = nil; // newest commit of the current burst
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
 
   // Batch in progress (nil when no batch is open).
@@ -266,6 +268,54 @@ bool equalizer_metal_engine::enqueue(const void* h,
   [enc setBytes:&params length:sizeof(params) atIndex:4];
   [enc dispatchThreads:MTLSizeMake(nof_re, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   ++engine->batch_n;
+  return true;
+}
+
+bool equalizer_metal_engine::commit_batch()
+{
+  eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
+  if (engine == nullptr || engine->batch_cb == nil) {
+    return false;
+  }
+  id<MTLCommandBuffer>         cmd_buf = engine->batch_cb;
+  id<MTLComputeCommandEncoder> enc     = engine->batch_enc;
+  engine->batch_cb  = nil;
+  engine->batch_enc = nil;
+  engine->batch_n   = 0;
+
+  [enc endEncoding];
+  [cmd_buf commit];
+  eq_stats_commit();
+  engine->last_committed = cmd_buf;
+  ++engine->pending;
+  return true;
+}
+
+bool equalizer_metal_engine::wait_committed()
+{
+  eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
+  if (engine == nullptr || engine->pending == 0) {
+    return true;
+  }
+  // Command buffers of one queue complete in order: waiting for the most recent one drains
+  // the whole burst.
+  id<MTLCommandBuffer> cmd_buf = engine->last_committed;
+  const unsigned       pending = engine->pending;
+  engine->pending              = 0;
+  engine->last_committed       = nil;
+
+  [cmd_buf waitUntilCompleted];
+  for (unsigned i = 0; i != pending; ++i) {
+    eq_stats_wait();
+  }
+  if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
+    ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: command buffer failed with status {}",
+                                              static_cast<unsigned long>(cmd_buf.status));
+    return false;
+  }
+  if (cmd_buf.GPUStartTime > 0.0 && cmd_buf.GPUEndTime > 0.0) {
+    engine->last_gpu_us = (cmd_buf.GPUEndTime - cmd_buf.GPUStartTime) * 1e6;
+  }
   return true;
 }
 

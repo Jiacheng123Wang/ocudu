@@ -85,6 +85,15 @@ public:
                float       h_scaling);
   bool flush_batch();
 
+  /// \brief Commits the batch without waiting (pairs with wait_committed()).
+  ///
+  /// Command buffers of one queue complete in submission order, so a single
+  /// wait_committed() at the end of a burst covers every commit_batch() issued before it.
+  bool commit_batch();
+
+  /// \brief Waits for the command buffers committed so far (no-op when none are pending).
+  bool wait_committed();
+
   /// Number of dispatches enqueued in the batch in progress (diagnostics).
   unsigned batch_size() const;
 

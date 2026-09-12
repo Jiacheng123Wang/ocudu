@@ -12,6 +12,7 @@
 /// 1 x 1 / 1272-RE payload (override with OCUDU_PROBE_RE).
 
 #include "../channel_equalizer_metal.h"
+#include "ocudu_equalizer_metal_engine.h"
 #include "ocudu/adt/bf16.h"
 #include "ocudu/phy/support/re_buffer.h"
 #include "ocudu/phy/upper/equalization/modular_ch_est_list.h"
@@ -107,6 +108,93 @@ int main()
     eq.equalize(eq_direct_span, nv_direct_span, ch_symbols, ch_est, nv_est, 1.0F);
   }
 
+  // ---- Deferred-wait pattern on the engine: one command buffer per dispatch, committed
+  // back to back, with a single wait at the end of a burst. This separates the per-commit
+  // cost from the per-wait cost and decides whether S2 needs one giant command buffer or
+  // only deferred waits.
+  {
+    constexpr unsigned              max_burst = 16;
+    metal::equalizer_metal_engine   eng;
+    if (!eng.init()) {
+      std::fprintf(stderr, "FAIL: engine init\n");
+      return 1;
+    }
+    std::vector<std::unique_ptr<aligned_buffer>> hb(max_burst);
+    std::vector<std::unique_ptr<aligned_buffer>> yb(max_burst);
+    std::vector<std::unique_ptr<aligned_buffer>> sb(max_burst);
+    std::vector<std::unique_ptr<aligned_buffer>> eb(max_burst);
+    std::vector<std::unique_ptr<aligned_buffer>> nb(max_burst);
+    for (unsigned i = 0; i != max_burst; ++i) {
+      hb[i] = std::make_unique<aligned_buffer>();
+      yb[i] = std::make_unique<aligned_buffer>();
+      sb[i] = std::make_unique<aligned_buffer>();
+      eb[i] = std::make_unique<aligned_buffer>();
+      nb[i] = std::make_unique<aligned_buffer>();
+      hb[i]->allocate(static_cast<size_t>(ports) * layers * nof_re * sizeof(cbf16_t) + 4096);
+      yb[i]->allocate(static_cast<size_t>(ports) * nof_re * sizeof(cbf16_t) + 4096);
+      sb[i]->allocate(ports * sizeof(float) + 4096);
+      eb[i]->allocate(static_cast<size_t>(layers) * nof_re * 2 * sizeof(float) + 4096);
+      nb[i]->allocate(static_cast<size_t>(layers) * nof_re * sizeof(float) + 4096);
+      std::memcpy(hb[i]->ptr, h[0].data(), nof_re * sizeof(cbf16_t));
+      std::memcpy(yb[i]->ptr, y[0].data(), nof_re * sizeof(cbf16_t));
+      static_cast<float*>(sb[i]->ptr)[0] = 0.01F;
+    }
+    for (unsigned i = 0; i != 8; ++i) { // warm-up
+      eng.equalize(hb[0]->ptr, yb[0]->ptr, sb[0]->ptr, eb[0]->ptr, nb[0]->ptr, nof_re, ports, layers, false, 0.01F,
+                   1.0F, 1.0F);
+    }
+    std::printf("\n[engine dispatch patterns, %ux%u, nof_re=%u]\n", ports, layers, nof_re);
+    for (unsigned burst : {4u, 16u}) {
+      std::vector<double> samples;
+      constexpr unsigned  rounds = 40;
+      for (unsigned r = 0; r != rounds; ++r) {
+        auto t = std::chrono::steady_clock::now();
+        for (unsigned k = 0; k != burst; ++k) {
+          eng.begin_batch();
+          eng.enqueue(hb[k]->ptr, yb[k]->ptr, sb[k]->ptr, eb[k]->ptr, nb[k]->ptr, nof_re, ports, layers, false,
+                      0.01F, 1.0F, 1.0F);
+          eng.commit_batch();
+        }
+        eng.wait_committed();
+        samples.push_back(us_since(t) / burst);
+      }
+      std::sort(samples.begin(), samples.end());
+      std::printf("  burst %2u: commit-per-dispatch, 1 wait  : min %7.1f  p50 %7.1f us/dispatch\n",
+                  burst, samples.front(), samples[samples.size() / 2]);
+    }
+    {
+      std::vector<double> samples;
+      constexpr unsigned  rounds = 400;
+      for (unsigned r = 0; r != rounds; ++r) {
+        auto t = std::chrono::steady_clock::now();
+        eng.equalize(hb[0]->ptr, yb[0]->ptr, sb[0]->ptr, eb[0]->ptr, nb[0]->ptr, nof_re, ports, layers, false, 0.01F,
+                     1.0F, 1.0F);
+        samples.push_back(us_since(t));
+      }
+      std::sort(samples.begin(), samples.end());
+      std::printf("  commit+wait per dispatch (sync)        : min %7.1f  p50 %7.1f us/dispatch\n",
+                  samples.front(), samples[samples.size() / 2]);
+    }
+    {
+      std::vector<double> samples;
+      constexpr unsigned  rounds = 40;
+      constexpr unsigned  burst  = 16;
+      for (unsigned r = 0; r != rounds; ++r) {
+        auto t = std::chrono::steady_clock::now();
+        eng.begin_batch();
+        for (unsigned k = 0; k != burst; ++k) {
+          eng.enqueue(hb[k]->ptr, yb[k]->ptr, sb[k]->ptr, eb[k]->ptr, nb[k]->ptr, nof_re, ports, layers, false,
+                      0.01F, 1.0F, 1.0F);
+        }
+        eng.flush_batch();
+        samples.push_back(us_since(t) / burst);
+      }
+      std::sort(samples.begin(), samples.end());
+      std::printf("  burst 16 in ONE command buffer         : min %7.1f  p50 %7.1f us/dispatch\n",
+                  samples.front(), samples[samples.size() / 2]);
+    }
+  }
+
   std::printf("\n[adapter, %ux%u, nof_re=%u]\n", ports, layers, nof_re);
 
   // The host dispatch round trip is noisy (virtualised GPU), so report the minimum and the
@@ -134,6 +222,7 @@ int main()
 
   const auto staged = measure(false);
   const auto direct = measure(true);
+
   std::printf("  staging outputs (heap)  : min %7.1f  p50 %7.1f  mean %7.1f us/call\n", staged[0], staged[1], staged[2]);
   std::printf("  page-aligned (in-place) : min %7.1f  p50 %7.1f  mean %7.1f us/call\n", direct[0], direct[1], direct[2]);
   std::printf("  CPU-side delta (min)    : %+.1f us/call  (%.0f%%)\n",
