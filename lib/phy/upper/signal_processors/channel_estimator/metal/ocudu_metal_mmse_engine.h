@@ -71,6 +71,9 @@ public:
     unsigned nf_tail  = 0;
     unsigned sys_tail = 0;
     bool     has_tail = false;
+    /// DC subcarrier of the allocation, relative to its first subcarrier (>= nf_std * n_blk +
+    /// nf_tail when there is none): the gather writes a zero estimate there.
+    unsigned dc_sc = ~0u;
   };
 
   /// \brief Batched inversion (K1): A_inv = (A)^-1 for each system, in-place Gauss-Jordan.

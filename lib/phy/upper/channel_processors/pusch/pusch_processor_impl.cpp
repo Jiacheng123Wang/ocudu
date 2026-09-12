@@ -206,6 +206,10 @@ void pusch_processor_impl::process(span<uint8_t>                    data,
   ch_est_config.first_symbol = pdu.start_symbol_index;
   ch_est_config.nof_symbols  = pdu.nof_symbols;
   ch_est_config.rx_ports.assign(pdu.rx_ports.begin(), pdu.rx_ports.end());
+  // The DC subcarrier carries no data: tell the estimator so that an estimator building the
+  // equalizer's input on the device erases that resource element itself (the host path erases it
+  // when it gathers the estimates).
+  ch_est_config.dc_position = pdu.dc_position;
 
   // Configure and get the estimator notifier.
   dmrs_pusch_estimator&          estimator          = dependencies->get_estimator();

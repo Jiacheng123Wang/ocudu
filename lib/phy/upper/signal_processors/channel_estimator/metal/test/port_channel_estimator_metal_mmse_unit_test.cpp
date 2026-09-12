@@ -1580,12 +1580,26 @@ int main()
   // equalizer.
   // -----------------------------------------------------------------------------------
   {
-    const std::array<std::pair<unsigned, unsigned>, 5> shapes = {{{52, 2}, {25, 2}, {4, 3}, {51, 2}, {2, 2}}};
-    unsigned                                          total_checked = 0;
+    struct device_shape {
+      unsigned                n_prb;
+      unsigned                n_sym;
+      /// DC subcarrier of the hop (relative to its first subcarrier), when the allocation has one.
+      std::optional<unsigned> dc;
+    };
+    const std::array<device_shape, 6> shapes = {{{52, 2, {}},
+                                                 {25, 2, {}},
+                                                 {4, 3, {}},
+                                                 {51, 2, {}},
+                                                 {2, 2, {}},
+                                                 // The DC subcarrier carries no data: the producer
+                                                 // must write a zero estimate there for the
+                                                 // equalizer (see the host path's own erasure).
+                                                 {25, 2, 137}}};
+    unsigned                          total_checked = 0;
 
     // One instance for every shape: the estimator memoizes the staged masks per allocation, so this
     // also exercises the invalidation when the allocation changes from hop to hop.
-    setenv("OCUDU_CE_DEVICE_CE", "1", 1);
+    unsetenv("OCUDU_CE_CPU_CE");
     auto mmse = std::make_unique<port_channel_estimator_metal_mmse_impl>(
         create_interpolator(),
         make_ta_estimator(),
@@ -1593,8 +1607,11 @@ int main()
         3,
         true);
 
-    for (const auto& [n_prb, n_sym] : shapes) {
+    for (const device_shape& shape : shapes) {
+      const unsigned                  n_prb  = shape.n_prb;
+      const unsigned                  n_sym  = shape.n_sym;
       auto                            cfg    = make_config(n_prb, n_sym != 1, 0, n_sym == 3, n_sym == 4);
+      cfg.dc_position                        = shape.dc;
       auto                            pilots = make_pilots(n_prb, n_sym);
       veha_channel                    ch(rng);
       grid_fake                       grid(n_prb * 12);
@@ -1660,7 +1677,9 @@ int main()
             if (is_dmrs && dmrs_prb.test(sc % NOF_SUBCARRIERS_PER_RB)) {
               continue;
             }
-            ref.push_back(dense[sc]);
+            // The host path erases the DC resource element when it gathers the estimates (the
+            // device path must have written the zero itself).
+            ref.push_back((cfg.dc_position.has_value() && (*cfg.dc_position == sc)) ? cbf16_t() : dense[sc]);
           }
 
           const unsigned nof_re = offs[sym + 1] - offs[sym];
@@ -1683,9 +1702,10 @@ int main()
         }
       }
       total_checked += checked;
-      std::printf("Test 12 (%2u PRB, %u DMRS): device estimates %s (%u REs checked, %u mismatching)\n",
+      std::printf("Test 12 (%2u PRB, %u DMRS%s): device estimates %s (%u REs checked, %u mismatching)\n",
                   n_prb,
                   n_sym,
+                  cfg.dc_position.has_value() ? ", DC" : "",
                   (bad == 0) ? "match the host path" : "DEVIATE",
                   checked,
                   bad);
@@ -1694,7 +1714,6 @@ int main()
         return -1;
       }
     }
-    unsetenv("OCUDU_CE_DEVICE_CE");
     std::printf("Test 12 PASS: K3 reproduces the host gather bit for bit (%u REs over %u shapes, one "
                 "instance)\n",
                 total_checked,

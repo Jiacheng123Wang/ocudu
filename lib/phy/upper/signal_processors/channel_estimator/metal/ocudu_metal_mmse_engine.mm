@@ -260,6 +260,7 @@ static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
         uint32_t nof_symbols;
         uint32_t mask_words;
         uint32_t total_re;
+        uint32_t dc_sc;
       } rparams{static_cast<uint32_t>(nout),
                 static_cast<uint32_t>(nof_blocks),
                 reformat->nf_std,
@@ -269,7 +270,8 @@ static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
                 reformat->nof_layers,
                 reformat->nof_symbols,
                 reformat->mask_words,
-                reformat->total_re};
+                reformat->total_re,
+                reformat->dc_sc};
       // K3 reads what K2 wrote: the one stage boundary in this command buffer where a write must
       // be made visible to a later dispatch (K1 -> K1b -> K2 have always shared an encoder and
       // rely on its in-order execution).

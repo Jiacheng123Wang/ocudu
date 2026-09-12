@@ -15,6 +15,7 @@
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_demodulator.h"
 #include "ocudu/phy/upper/equalization/channel_equalizer.h"
 #include "ocudu/phy/upper/equalization/dynamic_ch_est_list.h"
+#include "ocudu/phy/upper/equalization/view_ch_est_list.h"
 #include "ocudu/phy/upper/sequence_generators/pseudo_random_generator.h"
 #include "ocudu/ran/pusch/pusch_constants.h"
 #include "ocudu/support/macos_compat.h"
@@ -164,6 +165,11 @@ private:
   std::vector<log_likelihood_ratio, page_aligned_allocator<log_likelihood_ratio>> temp_llr;
   /// Copy buffer used to transfer channel estimation coefficients from the channel estimate to the equalizer.
   dynamic_ch_est_list ch_estimates_copy;
+
+  /// \brief Channel estimates read out of the estimator's device (GPU) buffer, when the estimator
+  /// produces them (see ch_est_device_view). Filled per OFDM symbol, exactly like the host copy -
+  /// the equalizer consumes it during the call that follows (see get_ch_data_estimates()).
+  view_ch_est_list device_ch_estimates;
   /// Buffer used to transfer noise variance estimates from the channel estimate to the equalizer.
   std::array<float, MAX_PORTS> noise_var_estimates;
 

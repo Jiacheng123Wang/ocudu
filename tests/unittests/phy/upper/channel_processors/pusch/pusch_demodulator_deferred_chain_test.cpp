@@ -136,7 +136,7 @@ class est_results_double : public dmrs_pusch_estimator_results
 {
 public:
   est_results_double(unsigned nof_ports_, unsigned nof_layers_, unsigned nof_subc_, float noise_var_) :
-    nof_layers(nof_layers_), nof_subc(nof_subc_), noise_var(noise_var_),
+    nof_ports(nof_ports_), nof_layers(nof_layers_), nof_subc(nof_subc_), noise_var(noise_var_),
     channel(static_cast<size_t>(nof_ports_) * nof_layers_ * nof_subc_)
   {
     std::mt19937                          rgen(0x5eed1234);
@@ -181,16 +181,97 @@ public:
 
   void get_channel_state_information(channel_state_information& /*csi*/) const override {}
 
+  /// \brief Offers the device fast path: the same channel, gathered into the compressed per-symbol
+  /// layout a device-side estimator produces (the allocation minus the DM-RS REs of a DM-RS symbol,
+  /// in ascending subcarrier order, with the DC resource element erased).
+  void enable_device_view(const pusch_demodulator::configuration& config)
+  {
+    // The demodulator slices the RE mask to the span of the allocation, so the compressed layout
+    // follows that same span (the estimator derives it from the allocation too).
+    const unsigned first_subc = config.rb_mask.find_lowest() * NOF_SUBCARRIERS_PER_RB;
+    const unsigned nof_subc_alloc =
+        (config.rb_mask.find_highest() + 1) * NOF_SUBCARRIERS_PER_RB - first_subc;
+    const re_prb_mask dmrs_prb = get_dmrs_prb_mask(config.dmrs_type, config.nof_cdm_groups_without_data);
+
+    offsets[0] = 0;
+    for (unsigned i_symbol = 0; i_symbol != MAX_NSYMB_PER_SLOT; ++i_symbol) {
+      const bool is_dmrs = config.dmrs_symb_pos.test(i_symbol);
+      unsigned   count   = 0;
+      for (unsigned i_subc = 0; i_subc != nof_subc_alloc; ++i_subc) {
+        if (is_dmrs && dmrs_prb.test(i_subc % NOF_SUBCARRIERS_PER_RB)) {
+          continue;
+        }
+        ++count;
+      }
+      offsets[i_symbol + 1] = offsets[i_symbol] + count;
+    }
+    total_re     = offsets[MAX_NSYMB_PER_SLOT];
+    device_ready = true;
+    device_buffer.assign(static_cast<size_t>(nof_ports) * nof_layers * total_re, cbf16_t());
+
+    for (unsigned i_port = 0; i_port != nof_ports; ++i_port) {
+      for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+        for (unsigned i_symbol = 0; i_symbol != MAX_NSYMB_PER_SLOT; ++i_symbol) {
+          const bool          is_dmrs = config.dmrs_symb_pos.test(i_symbol);
+          span<const cbf16_t> src = span<const cbf16_t>(channel).subspan(offset(i_port, i_layer), nof_subc);
+          unsigned            i   = offsets[i_symbol];
+          for (unsigned i_subc = 0; i_subc != nof_subc_alloc; ++i_subc) {
+            if (is_dmrs && dmrs_prb.test(i_subc % NOF_SUBCARRIERS_PER_RB)) {
+              continue;
+            }
+            // The DC subcarrier carries no data: the producer of the device estimates erases it.
+            const bool is_dc =
+                config.dc_position.has_value() && (*config.dc_position == i_subc + first_subc);
+            device_buffer[(static_cast<size_t>(i_port) * nof_layers + i_layer) * total_re + i] =
+                is_dc ? cbf16_t() : src[i_subc];
+            ++i;
+          }
+        }
+      }
+    }
+  }
+
+  /// Number of device views this double handed over (see get_device_ch_estimates()).
+  unsigned get_nof_device_views() const { return nof_device_views; }
+
+  std::optional<ch_est_device_view>
+  get_device_ch_estimates(unsigned i_symbol, unsigned rx_port, unsigned tx_layer) const override
+  {
+    ++nof_device_queries;
+    if (!device_ready || (i_symbol >= MAX_NSYMB_PER_SLOT) || (rx_port >= nof_ports) || (tx_layer >= nof_layers)) {
+      return std::nullopt;
+    }
+    ++nof_device_views;
+    ch_est_device_view view;
+    view.data       = device_buffer.data() + static_cast<size_t>(rx_port) * nof_layers * total_re;
+    view.offset     = offsets[i_symbol];
+    view.nof_re     = offsets[i_symbol + 1] - offsets[i_symbol];
+    view.total_re   = total_re;
+    view.nof_layers = nof_layers;
+    return view;
+  }
+
 private:
   size_t offset(unsigned port, unsigned layer) const
   {
     return (static_cast<size_t>(port) * nof_layers + layer) * nof_subc;
   }
 
+  unsigned             nof_ports;
   unsigned             nof_layers;
   unsigned             nof_subc;
   float                noise_var;
   std::vector<cbf16_t> channel;
+
+  /// Device view state (see enable_device_view()). The counters let a test prove that the device
+  /// path was actually taken: a comparison that silently fell back to the host gather would pass
+  /// without testing anything.
+  mutable unsigned                      nof_device_queries = 0;
+  mutable unsigned                      nof_device_views   = 0;
+  bool                                  device_ready = false;
+  unsigned                              total_re     = 0;
+  std::array<unsigned, MAX_NSYMB_PER_SLOT + 1> offsets{};
+  std::vector<cbf16_t>                  device_buffer;
 };
 
 /// Transform precoder stand-in: both paths use it, so its output only has to be deterministic.
@@ -477,9 +558,11 @@ protected:
     std::vector<codeword_buffer_double::event_t> events;
     notifier_double                              notifier;
     unsigned                                     nof_softbits = 0;
+    /// Device view queries and views handed over (0 on runs that do not offer the device path).
+    unsigned                                     nof_device_queries = 0;
   };
 
-  result_t run(bool deferred, const pusch_demodulator::configuration& config)
+  result_t run(bool deferred, const pusch_demodulator::configuration& config, bool device_estimates = false)
   {
     const unsigned nof_ports         = static_cast<unsigned>(config.rx_ports.size());
     const unsigned nof_re_per_symbol = max_nof_prb * NOF_SUBCARRIERS_PER_RB;
@@ -489,6 +572,9 @@ protected:
 
     grid_reader_double grid(nof_ports, MAX_NSYMB_PER_SLOT, nof_re_per_symbol);
     est_results_double est(nof_ports, config.nof_tx_layers, nof_re_per_symbol, 0.02F);
+    if (device_estimates) {
+      est.enable_device_view(config);
+    }
     // Clamp the block to a whole number of RE, as the UL-SCH demultiplexer does: a symbol then
     // splits into six blocks, which exercises the block replay of the deferred chain.
     const unsigned         nof_bits_per_re = config.nof_tx_layers * get_bits_per_symbol(config.modulation);
@@ -502,8 +588,9 @@ protected:
 
     demodulator->demodulate(buffer, result.notifier, grid, est, config);
 
-    result.events        = buffer.get_events();
-    result.nof_softbits  = buffer.get_nof_softbits();
+    result.events             = buffer.get_events();
+    result.nof_softbits       = buffer.get_nof_softbits();
+    result.nof_device_queries = est.get_nof_device_views();
 
     if (deferred) {
       // The deferred chain is gated off for transform precoding and by the debug override that
@@ -539,6 +626,65 @@ protected:
 /// The deferred chain must produce exactly the same codeword blocks, in the same order, as the
 /// serial path - including the block split of every OFDM symbol and the provisional statistics
 /// order.
+/// \brief The device channel-estimate path produces exactly the soft bits of the host gather.
+///
+/// The estimator may build the equalizer's channel estimates on the device (see
+/// ch_est_device_view); the demodulator then hands the equalizer views of that buffer instead of
+/// gathering the estimates RE by RE on the CPU. Everything else in the chain is untouched, so the
+/// two paths must agree to the last soft bit - including the DC resource element, which only the
+/// producer erases on the device path.
+TEST_F(pusch_demodulator_deferred_chain_test, device_ch_estimates_match_the_host_path)
+{
+  struct test_case {
+    unsigned                nof_symbols;
+    unsigned                nof_ports;
+    unsigned                nof_cdm_groups_without_data;
+    std::optional<unsigned> dc_position;
+  };
+  const std::array<test_case, 3> cases = {{{12, 2, 1, std::nullopt},
+                                           {12, 2, 2, std::nullopt},
+                                           {12, 2, 1, 7 * NOF_SUBCARRIERS_PER_RB + 3}}};
+
+  for (const test_case& test : cases) {
+    for (bool deferred : {false, true}) {
+      pusch_demodulator::configuration config = make_config(modulation_scheme::QAM16,
+                                                            1,
+                                                            test.nof_ports,
+                                                            test.nof_symbols,
+                                                            test.nof_cdm_groups_without_data,
+                                                            false);
+      config.dc_position = test.dc_position;
+
+      const result_t host = run(deferred, config, /*device_estimates=*/false);
+      const result_t dev  = run(deferred, config, /*device_estimates=*/true);
+
+      // The comparison is only meaningful if the device run really used the device views.
+      ASSERT_EQ(host.nof_device_queries, 0U);
+      ASSERT_GT(dev.nof_device_queries, 0U) << "the device channel-estimate path was not taken";
+      ASSERT_EQ(host.events.size(), dev.events.size());
+      ASSERT_EQ(host.nof_softbits, dev.nof_softbits);
+      unsigned nof_checked = 0;
+      for (unsigned i_event = 0, i_event_end = host.events.size(); i_event != i_event_end; ++i_event) {
+        ASSERT_EQ(host.events[i_event].type, dev.events[i_event].type);
+        ASSERT_EQ(host.events[i_event].cursor_before, dev.events[i_event].cursor_before);
+        ASSERT_EQ(host.events[i_event].block.size(), dev.events[i_event].block.size());
+        for (unsigned i_bit = 0, i_bit_end = host.events[i_event].block.size(); i_bit != i_bit_end; ++i_bit) {
+          ASSERT_EQ(host.events[i_event].block[i_bit].to_int(), dev.events[i_event].block[i_bit].to_int())
+              << "soft bit " << i_bit << " of block " << i_event << (deferred ? " (deferred)" : " (serial)")
+              << " differs between the host and the device channel-estimate paths";
+          ++nof_checked;
+        }
+      }
+      ASSERT_GT(nof_checked, 0U);
+    }
+  }
+
+  // The host gather walks every RE of every symbol, port and layer; the device path hands the
+  // equalizer the estimator's own buffer instead. The demodulator-side saving is proportional to
+  // the allocation and is measured by the OTA probe ([ul_equalization_demod]) - a local
+  // micro-benchmark of this harness is dominated by machine noise, so it is not asserted here.
+}
+
 TEST_F(pusch_demodulator_deferred_chain_test, deferred_chain_matches_serial_path)
 {
   struct test_case {

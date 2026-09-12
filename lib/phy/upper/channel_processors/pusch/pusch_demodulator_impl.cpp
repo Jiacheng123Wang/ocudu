@@ -649,10 +649,41 @@ pusch_demodulator_impl::get_ch_data_estimates(const dmrs_pusch_estimator_results
                                               const static_vector<uint8_t, MAX_PORTS>& rx_ports)
 {
   // Extract RE boundaries.
+  // A/B knob: OCUDU_CE_CPU_CE=1 keeps the per-symbol host gather even when the estimator offers
+  // device estimates (the same knob keeps the estimator from producing them).
+  static const bool force_host_estimates = (std::getenv("OCUDU_CE_CPU_CE") != nullptr);
+
   unsigned nof_re = re_mask.count();
   int      begin  = re_mask.find_lowest();
   int      end    = re_mask.find_highest();
   ocudu_assert((begin >= 0) && (end >= 0), "Invalid mask.");
+
+  // Device fast path: when the estimator built these estimates on the GPU with the same RE layout,
+  // hand the equalizer views of its buffer instead of gathering them here RE by RE. The RE count is
+  // the guard - the estimator derives the RE layout of the allocation itself, so a mismatch means
+  // the two disagree and the host path below is the correct source.
+  if (!force_host_estimates && (nof_re != 0)) {
+    bool device_ok = true;
+    device_ch_estimates.reset(nof_re, rx_ports.size(), nof_tx_layers);
+    for (unsigned i_layer = 0; device_ok && (i_layer != nof_tx_layers); ++i_layer) {
+      for (unsigned i_port = 0; i_port != rx_ports.size(); ++i_port) {
+        std::optional<ch_est_device_view> view = est_results.get_device_ch_estimates(i_symbol, i_port, i_layer);
+        if (!view.has_value()) {
+          device_ok = false;
+          break;
+        }
+        span<const cbf16_t> ch = view->get_layer(i_layer);
+        if (ch.size() != nof_re) {
+          device_ok = false;
+          break;
+        }
+        device_ch_estimates.set_channel(i_port, i_layer, ch);
+      }
+    }
+    if (device_ok) {
+      return device_ch_estimates;
+    }
+  }
 
   ch_estimates_copy.resize(nof_re, rx_ports.size(), nof_tx_layers);
 

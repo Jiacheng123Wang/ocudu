@@ -375,6 +375,7 @@ void port_channel_estimator_average_impl::compute_hop(const ocudu::resource_grid
       .symbol_start_epochs       = symbol_start_epochs,
       .compensate_cfo_flag       = compensate_cfo,
       .scs                       = cfg_local.scs,
+      .dc_position               = cfg_local.dc_position,
       .pilots_lse_view           = pilots_lse,
       .filtered_pilots_lse_view  = filtered_pilots_lse,
       .enlarged_filtered_pilots_lse = enlarged_filtered_pilots_lse,

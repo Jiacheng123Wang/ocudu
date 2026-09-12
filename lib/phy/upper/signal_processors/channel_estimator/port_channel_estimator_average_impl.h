@@ -148,6 +148,9 @@ protected:
     bool compensate_cfo_flag;
     /// Subcarrier spacing of the current transmission.
     subcarrier_spacing scs;
+    /// DC subcarrier of the cell, in absolute subcarriers within the BWP, when the allocation
+    /// contains it (see port_channel_estimator::configuration).
+    std::optional<unsigned> dc_position;
     /// View over the LSE pilots buffer (per symbol per layer).
     modular_re_measurement<cf_t, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS>& pilots_lse_view;
     /// View over the filtered-pilots buffer — the stage MUST fill it with the filtered

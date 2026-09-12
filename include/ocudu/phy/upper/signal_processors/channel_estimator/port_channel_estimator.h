@@ -26,6 +26,36 @@ using dmrs_symbol_list = static_re_measurement<cf_t,
 
 class port_channel_estimator_results;
 
+/// \brief Device-resident (GPU) channel estimates of one OFDM symbol: the optional fast path that
+/// lets a consumer read the estimates where the estimator produced them instead of gathering them
+/// out of a host grid, RE by RE.
+///
+/// The buffer belongs to the estimator and stays valid until its next estimation. A consumer MUST
+/// check \c nof_re against the number of REs of the mask it is about to apply: the estimator
+/// derives the RE layout of the allocation itself, so a mismatch means the two disagree (a
+/// non-contiguous allocation, for example) and the host path is the correct source.
+struct ch_est_device_view {
+  /// Base of the layer-major buffer: layer \c l starts at <tt>data + l * total_re</tt>.
+  const cbf16_t* data = nullptr;
+  /// First RE of the requested symbol within each layer.
+  unsigned offset = 0;
+  /// Number of REs of the requested symbol.
+  unsigned nof_re = 0;
+  /// REs per layer (the layer stride).
+  unsigned total_re = 0;
+  /// Number of layers the buffer holds.
+  unsigned nof_layers = 0;
+
+  /// Estimates of one transmission layer, or an empty span when the layer is out of range.
+  span<const cbf16_t> get_layer(unsigned tx_layer) const
+  {
+    if ((data == nullptr) || (tx_layer >= nof_layers)) {
+      return {};
+    }
+    return span<const cbf16_t>(data + static_cast<std::size_t>(tx_layer) * total_re + offset, nof_re);
+  }
+};
+
 /// DM-RS-based channel estimator for one receive antenna port.
 class port_channel_estimator
 {
@@ -68,6 +98,14 @@ public:
     /// Should be equal to one for PUCCH and equal to parameter \f$\beta_{\textup{PUSCH}}^{\textup{DMRS}}\f$ (see
     /// TS38.214 Section 6.2.2) for PUSCH.
     float scaling = 1;
+    /// \brief DC subcarrier of the cell, in absolute subcarriers within the BWP, when the
+    /// allocation contains it.
+    ///
+    /// The DC subcarrier carries no data (TS38.211 Section 6.3.1.7): a consumer of the estimates
+    /// erases that resource element, and an estimator that builds the consumer's input on the
+    /// device must write it as zero. Estimators that let the consumer gather the estimates itself
+    /// may ignore it.
+    std::optional<unsigned> dc_position;
   };
 
   /// Default destructor.
@@ -118,6 +156,16 @@ public:
                                       unsigned                                   i_symbol,
                                       unsigned                                   tx_layer,
                                       const bounded_bitset<MAX_NOF_SUBCARRIERS>& re_mask) const = 0;
+
+  /// \brief Gets the device-resident channel estimates of one OFDM symbol, when the estimator
+  /// produces them (see \ref ch_est_device_view).
+  ///
+  /// The default implementation reports "not available": an estimator that runs on the host, or a
+  /// consumer that does not want the device path, keeps working unchanged.
+  virtual std::optional<ch_est_device_view> get_device_ch_estimates(unsigned i_symbol, unsigned tx_layer) const
+  {
+    return std::nullopt;
+  }
 
   /// Gets the estimated EPRE.
   virtual float get_epre() const = 0;

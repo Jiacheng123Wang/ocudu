@@ -110,6 +110,9 @@ private:
   void apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args) override;
 
   // See the base class documentation.
+  std::optional<ch_est_device_view> get_device_ch_estimates(unsigned i_symbol, unsigned tx_layer) const override;
+
+  // See the base class documentation.
   void get_symbol_ch_estimate(span<cbf16_t> symbol, unsigned i_symbol, unsigned tx_layer) const override;
 
   // See the base class documentation.

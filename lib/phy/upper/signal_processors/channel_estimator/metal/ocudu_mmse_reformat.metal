@@ -36,6 +36,8 @@ struct mmse_reformat_params {
   uint nof_symbols;
   uint mask_words;   // 32-bit words per symbol mask.
   uint total_re;     // Compressed resource elements per layer (sum over symbols).
+  uint dc_sc;        // DC subcarrier of the hop (>= nof_sub when there is none): the estimate
+                     // there is written as zero, as the DC subcarrier carries no data.
 };
 
 /// Round-to-nearest-even conversion to bfloat16, bit-identical to ocudu::to_bf16(): the 16 least
@@ -93,7 +95,12 @@ kernel void mmse_reformat(device const float* h [[buffer(0)]],   // [nof_systems
   device const float* hp =
       h + (sys * p.n_blk + b) * (2 * p.nout_stride) + 2 * (sym * nf + local_sc);
 
+  // The DC subcarrier carries no data (TS38.211 Section 6.3.1.7): the equalizer must see a zero
+  // estimate there, and only the producer of this buffer can write it.
+  const float re = (sc == p.dc_sc) ? 0.0F : hp[0];
+  const float im = (sc == p.dc_sc) ? 0.0F : hp[1];
+
   const uint idx = lay * p.total_re + offsets[sym] + rank;
-  dst[2 * idx]     = ocudu_to_bf16(hp[0]);
-  dst[2 * idx + 1] = ocudu_to_bf16(hp[1]);
+  dst[2 * idx]     = ocudu_to_bf16(re);
+  dst[2 * idx + 1] = ocudu_to_bf16(im);
 }

@@ -186,7 +186,9 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // K3 (S-6a): the equalizer's per-symbol estimates. The masks are staged per hop, the destination
   // holds every layer of the hop - the merged batch keeps at most MAX_LAYERS / 2 of them (see the
   // merge gate), the split batches up to MAX_LAYERS.
-  device_ce_enabled = (std::getenv("OCUDU_CE_DEVICE_CE") != nullptr);
+  // The demodulator consumes these estimates (S-6b), so the device path is the default;
+  // OCUDU_CE_CPU_CE=1 keeps both sides on the per-symbol host gather for A/B.
+  device_ce_enabled = (std::getenv("OCUDU_CE_CPU_CE") == nullptr);
   gpu_masks = alloc_aligned<uint32_t>(static_cast<std::size_t>(MAX_NSYMB_PER_SLOT) * MAX_MASK_WORDS);
   gpu_ce    = alloc_aligned<uint16_t>(static_cast<std::size_t>(MAX_LAYERS) * MAX_NOF_PRBS *
                                    NOF_SUBCARRIERS_PER_RB * MAX_NSYMB_PER_SLOT * 2);
@@ -580,6 +582,17 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     if (device_ce_enabled && (nof_prb != 0) && !matrix_on) {
       nof_re_total = stage_re_masks(args, nof_prb, hop_rb_mask.find_lowest());
     }
+    // The DC subcarrier carries no data: the equalizer erases that resource element, so the
+    // device buffer must hold a zero there (K3 writes it - the host path zeroes the value it
+    // gathers instead).
+    unsigned dc_sc = ~0u;
+    if (args.dc_position.has_value()) {
+      const unsigned first_sc = hop_rb_mask.find_lowest() * NOF_SUBCARRIERS_PER_RB;
+      if ((*args.dc_position >= first_sc) &&
+          (*args.dc_position < first_sc + nof_prb * NOF_SUBCARRIERS_PER_RB)) {
+        dc_sc = *args.dc_position - first_sc;
+      }
+    }
     metal::mmse_engine::reformat_stage reformat{};
     reformat.dst         = gpu_ce;
     reformat.masks       = gpu_masks;
@@ -587,6 +600,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     reformat.nof_symbols = MAX_NSYMB_PER_SLOT;
     reformat.mask_words  = gpu_ce_mask_words;
     reformat.total_re    = nof_re_total;
+    reformat.dc_sc       = dc_sc;
     // Standard blocks cover subcarriers [0, nf_std * nof_blocks) of the batch; the edge block, when
     // the batch carries one, sits in the systems [sys_tail, ...) at block 0.
     const auto reformat_for = [&](unsigned nf_std, unsigned nf_tail, unsigned sys_tail) {
@@ -1194,6 +1208,22 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   }
   unpack_engine_group(gb_start, n_blk, b_prb, nout, nof_layers, 0, st);
   return true;
+}
+
+std::optional<ch_est_device_view> port_channel_estimator_metal_mmse_impl::get_device_ch_estimates(
+    unsigned i_symbol,
+    unsigned tx_layer) const
+{
+  if (!gpu_ce_ready || (i_symbol >= MAX_NSYMB_PER_SLOT) || (tx_layer >= gpu_ce_layers)) {
+    return std::nullopt;
+  }
+  ch_est_device_view view;
+  view.data       = reinterpret_cast<const cbf16_t*>(gpu_ce);
+  view.offset     = re_offsets[i_symbol];
+  view.nof_re     = re_offsets[i_symbol + 1] - re_offsets[i_symbol];
+  view.total_re   = gpu_ce_total_re;
+  view.nof_layers = gpu_ce_layers;
+  return view;
 }
 
 void port_channel_estimator_metal_mmse_impl::get_symbol_ch_estimate(span<cbf16_t> symbol,

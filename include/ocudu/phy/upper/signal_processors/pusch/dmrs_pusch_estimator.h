@@ -8,6 +8,7 @@
 #pragma once
 
 #include "ocudu/adt/static_vector.h"
+#include "ocudu/phy/upper/signal_processors/channel_estimator/port_channel_estimator.h"
 #include "ocudu/phy/upper/channel_state_information.h"
 #include "ocudu/phy/upper/dmrs_mapping.h"
 #include "ocudu/ran/cyclic_prefix.h"
@@ -81,6 +82,9 @@ public:
     unsigned nof_symbols = 0;
     /// List of receive ports.
     static_vector<uint8_t, DMRS_MAX_NPORTS> rx_ports;
+    /// \brief DC subcarrier of the cell, in absolute subcarriers within the BWP, when the
+    /// allocation contains it (see port_channel_estimator::configuration).
+    std::optional<unsigned> dc_position;
 
     /// \brief Gets the number of transmit layers.
     ///
@@ -188,6 +192,17 @@ public:
                                       unsigned                                   rx_port,
                                       unsigned                                   tx_layer,
                                       const bounded_bitset<MAX_NOF_SUBCARRIERS>& re_mask) const = 0;
+
+  /// \brief Gets the device-resident channel estimates of one OFDM symbol for one receive port,
+  /// when the estimator produces them (see \ref ch_est_device_view).
+  ///
+  /// The default implementation reports "not available", so an estimator that runs on the host
+  /// keeps working unchanged.
+  virtual std::optional<ch_est_device_view>
+  get_device_ch_estimates(unsigned i_symbol, unsigned rx_port, unsigned tx_layer) const
+  {
+    return std::nullopt;
+  }
 
   /// \brief Gets the general Channel State Information.
   ///

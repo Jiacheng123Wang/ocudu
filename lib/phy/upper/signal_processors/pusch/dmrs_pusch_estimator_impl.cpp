@@ -46,6 +46,7 @@ void dmrs_pusch_estimator_impl::estimate(dmrs_pusch_estimator_notifier& notifier
   est_cfg.nof_symbols  = config.nof_symbols;
   est_cfg.rx_ports     = config.rx_ports;
   est_cfg.scaling      = config.scaling;
+  est_cfg.dc_position  = config.dc_position;
 
   ch_est_result.resize(nof_rx_ports);
   pending_ports = nof_rx_ports;
@@ -167,6 +168,16 @@ void dmrs_pusch_estimator_impl::generate(dmrs_symbol_list&        symbols,
     mask[i_layer].rb_mask    = cfg.rb_mask;
     mask[i_layer].re_pattern = params.re_pattern;
   }
+}
+
+std::optional<ch_est_device_view> dmrs_pusch_estimator_impl::get_device_ch_estimates(unsigned i_symbol,
+                                                                                        unsigned rx_port,
+                                                                                        unsigned tx_layer) const
+{
+  if ((rx_port >= ch_est_result.size()) || (ch_est_result[rx_port] == nullptr)) {
+    return std::nullopt;
+  }
+  return ch_est_result[rx_port]->get_device_ch_estimates(i_symbol, tx_layer);
 }
 
 void dmrs_pusch_estimator_impl::get_symbol_ch_estimate(span<cbf16_t> estimates,
