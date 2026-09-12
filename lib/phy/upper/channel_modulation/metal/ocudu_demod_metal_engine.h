@@ -57,6 +57,21 @@ public:
   /// committed yet).
   bool batch_open() const;
 
+  /// \name Shared burst: the dispatch is appended to the command buffer that the previous stages
+  /// of the same demodulation opened, with a memory barrier at the pipeline change.
+  ///@{
+  bool enqueue_burst(const void* symbols, const void* noise_var, void* llrs, unsigned nof_symbols, unsigned mod);
+
+  /// True when the thread-local burst has dispatches encoded but not committed yet.
+  static bool burst_open();
+
+  /// Commits the thread-local burst without waiting.
+  static bool burst_commit();
+
+  /// Waits for the command buffers committed through the thread-local burst.
+  static bool burst_wait_committed();
+  ///@}
+
   /// \brief Commits the batch without waiting (pairs with wait_committed()).
   bool commit_batch();
 

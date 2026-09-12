@@ -13,6 +13,8 @@
 #include <array>
 #include <cstdint>
 #include <cmath>
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -129,13 +131,8 @@ void channel_equalizer_metal::submit(span<cf_t>                       eq_symbols
                                      span<const float>                noise_var_estimates,
                                      float                            tx_scaling)
 {
-  // All the dispatches submitted before the next wait() share one command buffer: committing one
-  // command buffer per dispatch costs about 23 us per dispatch on this platform, against about
-  // 10 us when the same dispatches are encoded into a single command buffer. The batch is closed
-  // by wait().
-  if (!impl_->engine.batch_open()) {
-    (void)impl_->engine.begin_batch();
-  }
+  // The dispatches of the whole burst (this stage and the next one) are appended to the shared
+  // command buffer, which wait() closes: see shared_burst.
   std::unique_ptr<pending_entry> entry = impl_->acquire();
   run_equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, *entry, true);
   impl_->pending.push_back(std::move(entry));
@@ -143,16 +140,16 @@ void channel_equalizer_metal::submit(span<cf_t>                       eq_symbols
 
 void channel_equalizer_metal::wait()
 {
-  // Close the batch opened by the submits of this burst.
-  if (impl_->engine.batch_open()) {
-    (void)impl_->engine.commit_batch();
+  // Close the shared burst opened by the submits of this group and wait for it. The demapping of
+  // the same group usually closed it already, in which case both calls are no-ops.
+  if (impl_->engine.burst_open()) {
+    (void)impl_->engine.burst_commit();
   }
   if (impl_->pending.empty()) {
+    (void)impl_->engine.burst_wait_committed();
     return;
   }
-  // Every deferred submit was committed to the shared back-end queue in order, so waiting for the
-  // newest command buffer also covers the older ones.
-  impl_->engine.wait_committed();
+  (void)impl_->engine.burst_wait_committed();
   for (std::unique_ptr<pending_entry>& entry : impl_->pending) {
     finish_symbol(*entry);
     impl_->pool.push_back(std::move(entry));
@@ -260,11 +257,49 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
     }
   }
 
-  // A batch opened by an earlier submit() of the same burst is reused; otherwise this call opens
-  // its own (the synchronous path closes it immediately below).
-  if (!impl_->engine.batch_open()) {
-    (void)impl_->engine.begin_batch();
+  if (defer) {
+    // Append the dispatch to the shared burst of this group: every stage of the burst ends up in
+    // one command buffer, with a memory barrier where the pipeline changes (see shared_burst).
+    const bool ok = impl_->engine.enqueue_burst(h_ptr,
+                                                y_ptr,
+                                                s_ptr,
+                                                eq_ptr,
+                                                nv_ptr,
+                                                nof_re,
+                                                nof_used_ports,
+                                                nof_layers,
+                                                impl_->mmse,
+                                                noise_var,
+                                                tx_scaling,
+                                                single_layer ? 1.0F : tx_scaling);
+    if (!ok) {
+      // Engine failure: mirror the CPU invalid-input semantics instead of leaving stale data. The
+      // outputs are written in place, so the entry must not copy staging data over them later.
+      ocuduvec::zero(eq_symbols);
+      std::fill(eq_noise_vars.begin(), eq_noise_vars.end(), std::numeric_limits<float>::infinity());
+      entry.eq_direct = true;
+      entry.nv_direct = true;
+      entry.eq        = eq_symbols;
+      entry.nv        = eq_noise_vars;
+      entry.eq_ptr    = nullptr;
+      entry.nv_ptr    = nullptr;
+      return;
+    }
+    entry.eq        = eq_symbols;
+    entry.nv        = eq_noise_vars;
+    entry.eq_ptr    = eq_ptr;
+    entry.nv_ptr    = nv_ptr;
+    entry.eq_direct = eq_direct;
+    entry.nv_direct = nv_direct;
+    return;
   }
+
+  // Synchronous path: never share a command buffer with an unfinished burst.
+  if (impl_->engine.burst_open()) {
+    (void)impl_->engine.burst_commit();
+    (void)impl_->engine.burst_wait_committed();
+  }
+  (void)impl_->engine.begin_batch();
   const bool ok = impl_->engine.enqueue(h_ptr,
                                        y_ptr,
                                        s_ptr,
@@ -299,11 +334,6 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   entry.eq_direct          = eq_direct;
   entry.nv_direct          = nv_direct;
 
-  if (defer) {
-    // Submitted for the fused chain: neither the commit nor the wait happen here. The dispatch
-    // stays encoded in the open batch (one command buffer per burst) and wait() closes it.
-    return;
-  }
   (void)impl_->engine.flush_batch();
   finish_symbol(entry);
 }

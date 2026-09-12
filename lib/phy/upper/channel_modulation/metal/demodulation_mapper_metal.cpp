@@ -8,6 +8,7 @@
 #include "ocudu/support/macos_compat.h"
 #include "ocudu/support/ocudu_assert.h"
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -124,16 +125,14 @@ void demodulation_mapper_metal::submit(span<log_likelihood_ratio> llrs,
 
 void demodulation_mapper_metal::wait()
 {
-  // Close the batch opened by the submits of this burst.
-  if (impl_->engine.batch_open()) {
-    (void)impl_->engine.commit_batch();
+  // Close the shared burst of this group and wait for it: it holds the dispatches of every stage.
+  if (impl_->engine.burst_open()) {
+    (void)impl_->engine.burst_commit();
   }
+  (void)impl_->engine.burst_wait_committed();
   if (impl_->pending.empty()) {
     return;
   }
-  // Every deferred submit was committed to the shared back-end queue in order, so waiting for the
-  // newest command buffer also covers the older ones.
-  impl_->engine.wait_committed();
   for (std::unique_ptr<pending_entry>& entry : impl_->pending) {
     if (!entry->llr_direct) {
       // The kernel wrote the LLRs into the staging buffer: copy them into the caller's span,
@@ -205,25 +204,32 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
     std::memcpy(const_cast<void*>(nv_ptr), noise_vars.data(), nv_bytes);
   }
 
-  // All the dispatches submitted before the next wait() share one command buffer: committing one
-  // command buffer per dispatch costs about 23 us per dispatch on this platform, against about
-  // 10 us when the same dispatches are encoded into a single command buffer. The synchronous path
-  // closes the batch immediately below; the deferred one leaves it open for wait().
-  if (!defer && impl_->engine.batch_open()) {
-    // Do not let a synchronous call share a command buffer with an unfinished burst.
-    (void)impl_->engine.commit_batch();
-    (void)impl_->engine.wait_committed();
-  }
-  if (!impl_->engine.batch_open()) {
-    (void)impl_->engine.begin_batch();
-  }
-  const bool ok = impl_->engine.enqueue(sym_ptr, nv_ptr, llr_ptr, nof_symbols, mod_id);
-  if (!ok) {
-    // Engine failure: zero LLRs (the CPU's ill-formed input semantics) instead of stale data.
-    (void)impl_->engine.commit_batch();
-    (void)impl_->engine.wait_committed();
-    std::memset(llrs.data(), 0, llr_bytes);
-    return;
+  if (defer) {
+    // Append to the shared burst of this group: the memory barrier that the pipeline change
+    // inserts orders this stage after the equalization encoded before it.
+    const bool ok = impl_->engine.enqueue_burst(sym_ptr, nv_ptr, llr_ptr, nof_symbols, mod_id);
+    if (!ok) {
+      // Engine failure: zero LLRs (the CPU's ill-formed input semantics) instead of stale data.
+      std::memset(llrs.data(), 0, llr_bytes);
+      return;
+    }
+  } else {
+    // Synchronous path: never share a command buffer with an unfinished burst.
+    if (impl_->engine.burst_open()) {
+      (void)impl_->engine.burst_commit();
+      (void)impl_->engine.burst_wait_committed();
+    }
+    if (!impl_->engine.batch_open()) {
+      (void)impl_->engine.begin_batch();
+    }
+    const bool ok = impl_->engine.enqueue(sym_ptr, nv_ptr, llr_ptr, nof_symbols, mod_id);
+    if (!ok) {
+      // Engine failure: zero LLRs (the CPU's ill-formed input semantics) instead of stale data.
+      (void)impl_->engine.commit_batch();
+      (void)impl_->engine.wait_committed();
+      std::memset(llrs.data(), 0, llr_bytes);
+      return;
+    }
   }
 
   if (!impl_->path_logged) {
@@ -239,8 +245,8 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
 
   if (defer) {
     // Submitted for the fused chain: neither the commit nor the wait happen here. The dispatch
-    // stays encoded in the open batch (one command buffer per burst) and wait() closes it, also
-    // copying back the staged LLRs.
+    // stays encoded in the shared burst (one command buffer for every stage of the group) and
+    // wait() closes it, also copying back the staged LLRs.
     entry->llrs       = llrs;
     entry->llr_ptr    = llr_ptr;
     entry->llr_sz     = llr_bytes;

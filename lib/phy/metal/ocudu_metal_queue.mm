@@ -4,9 +4,11 @@
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/support/macos_compat.h"
 
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
 
 using namespace ocudu;
 
@@ -21,6 +23,8 @@ struct shared_queue_state {
   id<MTLCommandQueue> backend_queue = nil;
 
   std::mutex                       mutex;
+  /// No-copy wraps shared by every engine (see shared_queue::wrap_no_copy).
+  std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> wrap_cache;
   id<MTLCommandBuffer>             last_committed = nil; // newest commit of the pending chain
   uint64_t                         commits        = 0;
   uint64_t                         pending        = 0;
@@ -39,6 +43,35 @@ std::once_flag& init_flag()
 }
 
 } // namespace
+
+id<MTLBuffer> shared_queue::wrap_no_copy(id<MTLDevice> device, const void* ptr, size_t length)
+{
+  if ((device == nil) || (ptr == nullptr)) {
+    return nil;
+  }
+  const size_t page    = compat::page_size();
+  const size_t aligned = ((length + page - 1) / page) * page;
+
+  shared_queue_state& s = state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  auto                        it = s.wrap_cache.find(ptr);
+  if (it != s.wrap_cache.end()) {
+    if (it->second.second >= aligned) {
+      return it->second.first;
+    }
+    // The cached mapping is smaller than what this call needs: replace it.
+    s.wrap_cache.erase(it);
+  }
+  id<MTLBuffer> buf = [device newBufferWithBytesNoCopy:(void*)ptr
+                                               length:aligned
+                                              options:MTLResourceStorageModeShared
+                                          deallocator:nil];
+  if (buf == nil) {
+    return nil;
+  }
+  s.wrap_cache[ptr] = std::make_pair(buf, aligned);
+  return buf;
+}
 
 id<MTLDevice> shared_queue::device()
 {

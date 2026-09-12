@@ -515,12 +515,12 @@ protected:
       EXPECT_EQ(eq_decorator->nof_submits, expected_symbols);
       EXPECT_EQ(demapper_decorator->nof_submits, expected_symbols);
       if (expected_symbols != 0) {
-        // One demapper wait per group, and two equalizer waits: one that makes the equalized
-        // symbols visible before the demapping is submitted and one that releases the adapter.
+        // One wait per stage and group: the stages of a group share one command buffer and the
+        // pipeline change orders them, so no intermediate equalizer wait is needed.
         const unsigned nof_groups = divide_ceil(config.nof_symbols, expected_group_size());
         EXPECT_EQ(demapper_decorator->nof_waits, nof_groups)
             << "symbols of the allocation are grouped, including the ones without data";
-        EXPECT_EQ(eq_decorator->nof_waits, 2 * nof_groups);
+        EXPECT_EQ(eq_decorator->nof_waits, nof_groups);
       }
     }
     return result;

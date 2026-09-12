@@ -89,6 +89,32 @@ public:
   /// committed yet).
   bool batch_open() const;
 
+  /// \name Shared burst: the dispatch is appended to the command buffer that the following stages
+  /// of the same demodulation share, so a whole burst costs one command buffer and one commit.
+  ///@{
+  bool enqueue_burst(const void* h,
+                     const void* y,
+                     const void* sigma2,
+                     void*       eq,
+                     void*       nv,
+                     unsigned    nof_re,
+                     unsigned    nof_ports,
+                     unsigned    nof_layers,
+                     bool        mmse,
+                     float       noise_var,
+                     float       tx_scaling,
+                     float       h_scaling);
+
+  /// True when the thread-local burst has dispatches encoded but not committed yet.
+  static bool burst_open();
+
+  /// Commits the thread-local burst without waiting.
+  static bool burst_commit();
+
+  /// Waits for the command buffers committed through the thread-local burst.
+  static bool burst_wait_committed();
+  ///@}
+
   /// \brief Commits the batch without waiting (pairs with wait_committed()).
   ///
   /// Command buffers of one queue complete in submission order, so a single

@@ -60,6 +60,20 @@ public:
   /// stage waits for its own command buffer before its output is read on the CPU.
   static id<MTLCommandQueue> backend_queue();
 
+  /// \brief Returns a no-copy buffer that wraps \p ptr for at least \p length bytes.
+  ///
+  /// The cache is process wide on purpose: Metal relates memory accesses (hazard tracking, memory
+  /// barriers) through the *resource* they are bound to, so two engines that wrap the same memory
+  /// separately would leave the producer/consumer dependency between their stages invisible to the
+  /// driver. Handing out one buffer object per address makes the chained stages - for example the
+  /// equalizer writing the symbols that the demapper reads - a tracked dependency again.
+  ///
+  /// \param[in] device Device that creates the buffer when the address is not cached yet.
+  /// \param[in] ptr    Page-aligned base address.
+  /// \param[in] length Number of bytes the caller needs (the mapping is page rounded).
+  /// \return The buffer, or nil when the wrap failed and the caller must stage through a copy.
+  static id<MTLBuffer> wrap_no_copy(id<MTLDevice> device, const void* ptr, size_t length);
+
   /// \brief Registers a command buffer committed through the shared queue.
   ///
   /// Called by the engines right after commit() so that wait_all_committed() knows what to wait

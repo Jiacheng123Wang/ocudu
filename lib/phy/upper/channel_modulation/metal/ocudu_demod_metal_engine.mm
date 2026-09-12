@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_demod_metal_engine.h"
+#include "ocudu_metal_burst.h"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -130,39 +131,23 @@ struct demod_engine_impl {
 
 id<MTLBuffer> wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t length)
 {
-  auto it = engine->buffer_cache.find(ptr);
-  if (it != engine->buffer_cache.end()) {
-    if (length <= it->second.second) {
-      return it->second.first;
-    }
+  // Same shared cache as the other engines: the demapper reads the symbols that the equalizer wrote
+  // through the very same buffer object, so Metal tracks the dependency (see
+  // shared_queue::wrap_no_copy).
+  id<MTLBuffer> buf = metal::shared_queue::wrap_no_copy(metal::shared_queue::device(), ptr, length);
+  if (buf != nil) {
+    return buf;
+  }
+  engine->last_call_no_copy = false;
+  if (!engine->no_copy_fallback_logged) {
+    engine->no_copy_fallback_logged = true;
     ocudulog::fetch_basic_logger("PHY").warning(
-        "Metal demapper: zero-copy cache hit with a larger request ({} > cached {}): re-wrapping the buffer",
+        "Metal demapper: no-copy buffer wrap failed (ptr {} length {} page {}); falling back to a staging copy",
+        ptr,
         length,
-        it->second.second);
+        compat::page_size());
   }
-  // The no-copy wrap requires a page-aligned base address AND a page-multiple length.
-  const size_t page    = compat::page_size();
-  const size_t aligned = ((length + page - 1) / page) * page;
-  id<MTLBuffer> buf    = [demod_resources().device newBufferWithBytesNoCopy:(void*)ptr
-                                                                 length:aligned
-                                                                options:MTLResourceStorageModeShared
-                                                           deallocator:nil];
-  if (buf == nil) {
-    engine->last_call_no_copy = false;
-    if (!engine->no_copy_fallback_logged) {
-      engine->no_copy_fallback_logged = true;
-      ocudulog::fetch_basic_logger("PHY").warning(
-          "Metal demapper: no-copy buffer wrap failed (ptr aligned {}, length {} rounded to {}, page {}); "
-          "falling back to a staging copy",
-          (reinterpret_cast<uintptr_t>(ptr) % page) == 0,
-          length,
-          aligned,
-          page);
-    }
-    buf = [demod_resources().device newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
-  }
-  engine->buffer_cache[ptr] = std::make_pair(buf, aligned);
-  return buf;
+  return [metal::shared_queue::device() newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
 }
 
 } // namespace
@@ -275,6 +260,58 @@ bool demod_metal_engine::batch_open() const
 {
   const demod_engine_impl* engine = static_cast<const demod_engine_impl*>(impl);
   return (engine != nullptr) && (engine->batch_cb != nil);
+}
+
+bool demod_metal_engine::enqueue_burst(const void* symbols,
+                                       const void* noise_var,
+                                       void*       llrs,
+                                       unsigned    nof_symbols,
+                                       unsigned    mod)
+{
+  demod_engine_impl* engine = static_cast<demod_engine_impl*>(impl);
+  if (engine == nullptr) {
+    return false;
+  }
+  // The encoder switches the compute pipeline, which inserts the memory barrier that orders this
+  // stage after the equalization encoded before it in the same command buffer.
+  id<MTLComputeCommandEncoder> enc = metal::shared_burst::encoder(demod_resources().pipeline);
+  if (enc == nil) {
+    return false;
+  }
+  const size_t symbols_bytes = static_cast<size_t>(nof_symbols) * 2 * sizeof(float);
+  const size_t noise_bytes   = static_cast<size_t>(nof_symbols) * sizeof(float);
+  const size_t llr_bytes     = static_cast<size_t>(nof_symbols) * 8;
+
+  engine->last_call_no_copy = true;
+  id<MTLBuffer> b_sym  = wrap_buffer(engine, symbols, symbols_bytes);
+  id<MTLBuffer> b_nv   = wrap_buffer(engine, noise_var, noise_bytes);
+  id<MTLBuffer> b_llrs = wrap_buffer(engine, llrs, llr_bytes);
+  if (b_sym == nil || b_nv == nil || b_llrs == nil) {
+    return false;
+  }
+  const demod_params_t params{nof_symbols, mod};
+  [enc setBuffer:b_sym offset:0 atIndex:0];
+  [enc setBuffer:b_nv offset:0 atIndex:1];
+  [enc setBuffer:b_llrs offset:0 atIndex:2];
+  [enc setBytes:&params length:sizeof(params) atIndex:3];
+  [enc dispatchThreads:MTLSizeMake(nof_symbols, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  metal::shared_burst::count_dispatch();
+  return true;
+}
+
+bool demod_metal_engine::burst_open()
+{
+  return metal::shared_burst::open();
+}
+
+bool demod_metal_engine::burst_commit()
+{
+  return metal::shared_burst::commit();
+}
+
+bool demod_metal_engine::burst_wait_committed()
+{
+  return metal::shared_burst::wait_committed();
 }
 
 bool demod_metal_engine::commit_batch()

@@ -27,9 +27,11 @@ namespace ocudu {
 class pusch_demodulator_impl : public pusch_demodulator
 {
 public:
-  /// Number of OFDM symbols whose equalization and demapping dispatches are grouped behind a
-  /// single wait by the deferred chain (see \ref demodulate).
-  static constexpr unsigned max_deferred_group_symbols = 7;
+  /// Number of OFDM symbols whose equalization and demapping dispatches share one command buffer.
+  /// A whole slot per group is the best measured operating point: the dispatches of both stages of
+  /// a group cost one command buffer commit and one wait, so the larger the group the smaller the
+  /// per-slot overhead (the GPU batch itself is the same). See \ref demodulate.
+  static constexpr unsigned max_deferred_group_symbols = 14;
 
   /// Constructor: sets up internal components and acquires their ownership.
   pusch_demodulator_impl(std::unique_ptr<channel_equalizer>       equalizer_,

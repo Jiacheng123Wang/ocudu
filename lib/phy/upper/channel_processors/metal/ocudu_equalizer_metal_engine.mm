@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_equalizer_metal_engine.h"
+#include "ocudu_metal_burst.h"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -135,41 +136,23 @@ struct eq_engine_impl {
 
 id<MTLBuffer> wrap_buffer(eq_engine_impl* engine, const void* ptr, size_t length)
 {
-  auto it = engine->buffer_cache.find(ptr);
-  if (it != engine->buffer_cache.end()) {
-    if (length <= it->second.second) {
-      return it->second.first;
-    }
+  // One buffer object per address for every engine: the stages of the chain write and read the same
+  // memory, and Metal only relates accesses through the resource they are bound to (see
+  // shared_queue::wrap_no_copy).
+  id<MTLBuffer> buf = metal::shared_queue::wrap_no_copy(metal::shared_queue::device(), ptr, length);
+  if (buf != nil) {
+    return buf;
+  }
+  engine->last_call_no_copy = false;
+  if (!engine->no_copy_fallback_logged) {
+    engine->no_copy_fallback_logged = true;
     ocudulog::fetch_basic_logger("PHY").warning(
-        "Metal equalizer: zero-copy cache hit with a larger request ({} > cached {}): re-wrapping the buffer",
+        "Metal equalizer: no-copy buffer wrap failed (ptr {} length {} page {}); falling back to a staging copy",
+        ptr,
         length,
-        it->second.second);
+        compat::page_size());
   }
-  // The no-copy wrap requires a page-aligned base address AND a page-multiple length (the
-  // platform page size is 16 KiB on Apple Silicon, not the 4 KiB this used to assume).
-  const size_t  page    = compat::page_size();
-  const size_t  aligned = ((length + page - 1) / page) * page;
-  id<MTLBuffer> buf     = [eq_resources().device newBufferWithBytesNoCopy:(void*)ptr
-                                                                length:aligned
-                                                               options:MTLResourceStorageModeShared
-                                                           deallocator:nil];
-  if (buf == nil) {
-    // A silent copy would hide a broken zero-copy contract: make it visible once per process.
-    engine->last_call_no_copy = false;
-    if (!engine->no_copy_fallback_logged) {
-      engine->no_copy_fallback_logged = true;
-      ocudulog::fetch_basic_logger("PHY").warning(
-          "Metal equalizer: no-copy buffer wrap failed (ptr page-aligned {}, length {} rounded to {}, page {}); "
-          "falling back to a staging copy",
-          (reinterpret_cast<uintptr_t>(ptr) % page) == 0,
-          length,
-          aligned,
-          page);
-    }
-    buf = [eq_resources().device newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
-  }
-  engine->buffer_cache[ptr] = std::make_pair(buf, aligned);
-  return buf;
+  return [metal::shared_queue::device() newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
 }
 
 } // namespace
@@ -299,6 +282,70 @@ bool equalizer_metal_engine::batch_open() const
 {
   const eq_engine_impl* engine = static_cast<const eq_engine_impl*>(impl);
   return (engine != nullptr) && (engine->batch_cb != nil);
+}
+
+bool equalizer_metal_engine::enqueue_burst(const void* h,
+                                          const void* y,
+                                          const void* sigma2,
+                                          void*       eq,
+                                          void*       nv,
+                                          unsigned    nof_re,
+                                          unsigned    nof_ports,
+                                          unsigned    nof_layers,
+                                          bool        mmse,
+                                          float       noise_var,
+                                          float       tx_scaling,
+                                          float       h_scaling)
+{
+  eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
+  if (engine == nullptr) {
+    return false;
+  }
+  id<MTLComputeCommandEncoder> enc = metal::shared_burst::encoder(eq_resources().pipeline);
+  if (enc == nil) {
+    return false;
+  }
+  const size_t h_bytes  = static_cast<size_t>(nof_ports) * nof_layers * nof_re * sizeof(cbf16_t);
+  const size_t y_bytes  = static_cast<size_t>(nof_ports) * nof_re * sizeof(cbf16_t);
+  const size_t s_bytes  = static_cast<size_t>(nof_ports) * sizeof(float);
+  const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
+  const size_t nv_bytes = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
+
+  id<MTLBuffer> b_h  = wrap_buffer(engine, h, h_bytes);
+  id<MTLBuffer> b_y  = wrap_buffer(engine, y, y_bytes);
+  id<MTLBuffer> b_s  = wrap_buffer(engine, sigma2, s_bytes);
+  id<MTLBuffer> b_eq = wrap_buffer(engine, eq, eq_bytes);
+  id<MTLBuffer> b_nv = wrap_buffer(engine, nv, nv_bytes);
+  if (b_h == nil || b_y == nil || b_s == nil || b_eq == nil || b_nv == nil) {
+    engine->last_call_no_copy = false;
+    return false;
+  }
+  engine->last_call_no_copy         = true;
+  const equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, tx_scaling, h_scaling};
+  [enc setBuffer:b_h offset:0 atIndex:0];
+  [enc setBuffer:b_y offset:0 atIndex:1];
+  [enc setBuffer:b_eq offset:0 atIndex:2];
+  [enc setBuffer:b_nv offset:0 atIndex:3];
+  [enc setBytes:&params length:sizeof(params) atIndex:4];
+  [enc setBuffer:b_s offset:0 atIndex:5];
+  [enc dispatchThreads:MTLSizeMake(nof_re, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  metal::shared_burst::count_dispatch();
+  return true;
+}
+
+bool equalizer_metal_engine::burst_open()
+{
+  return metal::shared_burst::open();
+}
+
+bool equalizer_metal_engine::burst_commit()
+{
+  return metal::shared_burst::commit();
+}
+
+bool equalizer_metal_engine::burst_wait_committed()
+{
+  return metal::shared_burst::wait_committed();
 }
 
 bool equalizer_metal_engine::commit_batch()
