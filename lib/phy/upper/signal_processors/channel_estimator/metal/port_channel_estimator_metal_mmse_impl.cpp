@@ -525,8 +525,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // is unavailable (stale metallib): the legacy kernels (metal_mmse) or the CPU loop
   // then take over.
   const bool matrix_on = engine_ready && use_matrix_engine && matrix_ready;
-  // Largest tail block order (L = pilots per block) the CPU reference path is known to be fast
-  // for: a 36x36 Gauss-Jordan is ~23k FLOPs, while the engine call it replaces costs ~100 us.
+  // Largest tail block order (L = pilots per block) the CPU reference path is known to be fast for
+  // (a 36x36 Gauss-Jordan is ~23k FLOPs). Only consulted by the OCUDU_CE_TAIL_CPU A/B knob.
   static constexpr unsigned MAX_CPU_TAIL_ORDER = 36;
   bool       hop_gpu   = false; // engine processed this hop (any block)
   bool       hop_nn    = false; // the simdgroup 8x8 (matrix) kernels were the ones used
@@ -545,27 +545,22 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     if (rem_prb != 0) {
       // Tail/edge block - and when nof_prb < block_prb this is the WHOLE hop (single block).
       //
-      // TRANSITIONAL (S-4d/S-4e, to be removed by S-5): the tail runs on the CPU reference math of
-      // the fallback loop below. This is NOT a statement about where the work belongs - PHY compute
-      // is meant to run on the Metal path as a whole - it only avoids a second commit+wait in the
-      // chain as it is wired today: an engine call costs ~100 us of fixed round trip, which the
-      // second call of the hop would pay for a <= block_prb-1 PRB block of ~1 us of GPU work, while
-      // the CPU reference math computes it in ~16 us (measured: 25 PRB/2 DMRS 234.1 -> 153.8 us/hop,
-      // identical NMSE).
+      // The tail block runs on the ENGINE, like every other block of the hop: PHY compute belongs
+      // to the Metal path as a whole, and a different block geometry never required a second
+      // commit+wait - it only has one in the chain as wired today, which S-5b removes by encoding
+      // this batch as a second dispatch inside the same command buffer.
       //
-      // S-5 replaces this with a second DISPATCH of the engine inside the SAME command buffer (the
-      // geometry differs from the standard batch, but a different geometry never required a second
-      // commit+wait), and deletes this CPU path together with the CPU inversion below.
+      // A/B knob (research only, not a supported configuration): OCUDU_CE_TAIL_CPU=1 computes the
+      // tail with the CPU reference math of the fallback loop below. Measured worth ~86 us/hop in
+      // the chain as wired today (25 PRB/2 DMRS 234.1 -> 148.1 us/hop, identical NMSE) because it
+      // drops the second round trip, which is exactly the cost S-5b takes out of the GPU path too.
       //
-      // tail_ok=false is what routes the block to that loop: it is the same per-block decision
-      // used when an engine batch fails (leaving it true would skip the block and keep stale
-      // estimates in the grid). OCUDU_CE_TAIL_GPU=1 restores the engine tail for A/B.
-      // Size guard: the CPU block path inverts its A with a serial O(L^3) Gauss-Jordan, which is
-      // ~10 us at the production L=36 but milliseconds for the L a large block_prb would make of
-      // the tail. Above that order the engine call is the cheaper side again.
-      const unsigned tail_L_est = rem_prb * 6U * npt;
-      tail_ok                   = false;
-      if ((tail_L_est > MAX_CPU_TAIL_ORDER) || (std::getenv("OCUDU_CE_TAIL_GPU") != nullptr)) {
+      // The CPU block path inverts its A with a serial O(L^3) Gauss-Jordan, so the knob is honoured
+      // only up to the order that path is fast for (L<=36; a large block_prb would make the tail
+      // milliseconds there) - above it, the engine runs the tail regardless.
+      const unsigned tail_L_est  = rem_prb * 6U * npt;
+      const bool     tail_on_cpu = (tail_L_est <= MAX_CPU_TAIL_ORDER) && (std::getenv("OCUDU_CE_TAIL_CPU") != nullptr);
+      if (!tail_on_cpu) {
         unsigned nout_e = 0;
         unsigned L_e    = 0;
         build_correlation_matrices(stats,
@@ -582,6 +577,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         hop_gpu = hop_gpu || tail_ok;
         hop_nn  = hop_nn || (tail_ok && matrix_on);
         hop_pad = (tail_ok && matrix_on) ? static_cast<unsigned>(((L_e + 7u) & ~7u) - L_e) : hop_pad;
+      } else {
+        // Route the block to the CPU fallback loop below. tail_ok MUST be cleared: leaving it true
+        // while skipping the engine batch makes block_gpu_done() report the block as done and keeps
+        // the stale grid content there (it cost 7 dB of NMSE while chasing S-4d).
+        tail_ok = false;
       }
     }
     // A/B observability: whether the last stage engaged the matrix kernels (nn=1) - or the
