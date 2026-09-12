@@ -525,6 +525,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // is unavailable (stale metallib): the legacy kernels (metal_mmse) or the CPU loop
   // then take over.
   const bool matrix_on = engine_ready && use_matrix_engine && matrix_ready;
+  // Largest tail block order (L = pilots per block) the CPU reference path is known to be fast
+  // for: a 36x36 Gauss-Jordan is ~23k FLOPs, while the engine call it replaces costs ~100 us.
+  static constexpr unsigned MAX_CPU_TAIL_ORDER = 36;
   bool       hop_gpu   = false; // engine processed this hop (any block)
   bool       hop_nn    = false; // the simdgroup 8x8 (matrix) kernels were the ones used
   unsigned   hop_pad   = 0;     // ceil8(L) - L of the last matrix batch (A/B pad overhead)
@@ -553,8 +556,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // tail_ok=false is what routes the block to that loop: it is the same per-block decision
       // used when an engine batch fails (leaving it true would skip the block and keep stale
       // estimates in the grid). OCUDU_CE_TAIL_GPU=1 restores the engine tail for A/B.
-      tail_ok = false;
-      if (std::getenv("OCUDU_CE_TAIL_GPU") != nullptr) {
+      // Size guard: the CPU block path inverts its A with a serial O(L^3) Gauss-Jordan, which is
+      // ~10 us at the production L=36 but milliseconds for the L a large block_prb would make of
+      // the tail. Above that order the engine call is the cheaper side again.
+      const unsigned tail_L_est = rem_prb * 6U * npt;
+      tail_ok                   = false;
+      if ((tail_L_est > MAX_CPU_TAIL_ORDER) || (std::getenv("OCUDU_CE_TAIL_GPU") != nullptr)) {
         unsigned nout_e = 0;
         unsigned L_e    = 0;
         build_correlation_matrices(stats,
