@@ -5,9 +5,11 @@
 /// \brief Slot-level A/B of the batched Metal DFT in the OFDM demodulator.
 ///
 /// \note This exercises the batched entry point (dft_processor::run_batch()), which the gNB RX
-/// path does not use today: the radio-paced puxch path demodulates one symbol per call. Keeping
-/// the A/B in place protects the batched path until the planned multi-PUSCH processing starts
-/// using it (see the TODOs in dft_processor.h and ofdm_demodulator.h).
+/// path does not use today: the radio-paced puxch path demodulates one symbol per call. The A/B is
+/// kept so the batched path stays validated until the planned multi-port and multi-carrier
+/// batching starts using it (see the TODOs in dft_processor.h and ofdm_demodulator.h). It also
+/// documents why batching several symbols of one stream is not a latency win: the samples of a
+/// stream arrive symbol by symbol.
 ///
 /// Demodulates the same slot twice with the generic OFDM demodulator: once with the Metal DFT
 /// processor (which executes all the symbols of the slot in a single dispatch through

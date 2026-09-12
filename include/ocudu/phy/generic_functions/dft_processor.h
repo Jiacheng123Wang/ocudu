@@ -63,15 +63,19 @@ public:
   /// The default is 1 (one transform per call). Implementations backed by hardware that can
   /// process several independent transforms in one dispatch report a larger value.
   ///
-  /// \note Batching is *not* used by the radio-paced RX OFDM demodulation: the baseband samples
-  /// of a slot arrive symbol by symbol in real time, so a slot-sized batch could not start
-  /// before the last symbol arrives - it would only move the wait from the per-symbol dispatches
-  /// to the end of the slot, without shortening the elapsed time of the time-frequency phase.
-  /// The batched path is kept for the planned batched/multi-PUSCH processing (see the TODO in
-  /// ofdm_demodulator.h), where several allocations are processed together and the samples are
-  /// already available when the batch is issued.
-  /// \todo Feed the batched path from a multi-allocation scheduler (multi-PUSCH / multi-slot
-  ///       batches) once the samples of several allocations can be gathered before dispatching.
+  /// \note Batching applies to *independent transform streams*, of which there are exactly three
+  /// kinds:
+  ///  - multiple Rx ports of the same symbol: their transforms are independent and their samples
+  ///    are already available together, so they can be batched with no added latency;
+  ///  - multiple carriers / sectors (one symbol stream each): the same symbol index of several
+  ///    carriers can share one dispatch (they must have the same transform size);
+  ///  - several OFDM symbols of one stream, which is *not* used by the radio-paced RX
+  ///    demodulation: the samples arrive symbol by symbol, so a slot-sized batch could only start
+  ///    once the last symbol arrived - that moves the wait instead of removing it.
+  /// Multiple PUSCH allocations or UEs of one cell share the very same per-symbol transform, so
+  /// they add no transform and cannot benefit from batching.
+  /// \todo Batch across Rx ports (immediately usable: no added latency) and across carriers /
+  ///       sectors once several symbol streams are driven from one place.
   virtual unsigned get_max_batch() const { return 1; }
 
   /// \brief Executes \c nof_transforms transforms over the contiguous input buffer.

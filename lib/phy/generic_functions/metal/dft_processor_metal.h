@@ -52,10 +52,12 @@ public:
   /// run concurrently on different GPU cores). Covers a whole slot worth of OFDM symbols.
   ///
   /// \note Not used by the radio-paced RX OFDM demodulation, which dispatches one transform per
-  /// symbol (see dft_processor::get_max_batch()); kept for the planned batched/multi-PUSCH
-  /// processing, where one dispatch covers the transforms of several allocations at once.
-  /// \todo Re-tune max_batch (and the buffer size) once the multi-PUSCH scheduler defines how
-  ///       many transforms are gathered per dispatch.
+  /// symbol (see dft_processor::get_max_batch()). The batched entry point targets independent
+  /// transform streams: the Rx ports of one symbol (no added latency) and the same symbol of
+  /// several carriers / sectors. Multiple PUSCH allocations or UEs of one cell share one
+  /// per-symbol transform, so they add no transform to batch.
+  /// \todo Re-tune max_batch (and the buffer size) when the multi-port / multi-carrier batching
+  ///       defines how many transforms are gathered per dispatch.
   static constexpr unsigned max_batch = 16;
 
   // See interface for documentation.
