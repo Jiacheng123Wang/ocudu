@@ -195,6 +195,83 @@ int main()
 {
   std::mt19937 rng(1234);
 
+  // Engine inversion of every matrix size the estimator can ask for: the same kernel serves the
+  // 6x6 of a one-PRB hop and the 36x36 of the production hop, and a size-dependent defect (a block
+  // that is only partially filled, a lane outside the last block) shows up as a catastrophic error
+  // rather than a few ulp. The reference is a pivoted Gauss-Jordan in double; the tolerance is
+  // loose because these random SPD matrices are far worse conditioned than the estimator's (the
+  // ridge is 1e-3 against a unit-diagonal correlation), which is what the bound below allows.
+  {
+    metal::mmse_engine               engine;
+    std::normal_distribution<float>  nd(0.0F, 1.0F);
+    if (engine.init()) {
+      for (unsigned n : {6u, 8u, 12u, 16u, 18u, 24u, 32u, 36u}) {
+        std::vector<float> a(static_cast<size_t>(n) * n, 0.0F);
+        std::vector<float> r(static_cast<size_t>(n) * n);
+        for (auto& v : r) {
+          v = nd(rng);
+        }
+        for (unsigned i = 0; i != n; ++i) {
+          for (unsigned j = 0; j != n; ++j) {
+            float acc = 0.0F;
+            for (unsigned k = 0; k != n; ++k) {
+              acc += r[k * n + i] * r[k * n + j];
+            }
+            a[i * n + j] = acc + ((i == j) ? 1e-3F : 0.0F);
+          }
+        }
+        std::vector<double> m(static_cast<size_t>(2) * n * n, 0.0);
+        for (unsigned i = 0; i != n; ++i) {
+          for (unsigned j = 0; j != n; ++j) {
+            m[i * 2 * n + j] = a[i * n + j];
+          }
+          m[i * 2 * n + n + i] = 1.0;
+        }
+        for (unsigned col = 0; col != n; ++col) {
+          // Partial pivoting: without it this reference is not accurate enough to judge the kernel.
+          unsigned pivot = col;
+          for (unsigned i = col + 1; i != n; ++i) {
+            if (std::abs(m[i * 2 * n + col]) > std::abs(m[pivot * 2 * n + col])) {
+              pivot = i;
+            }
+          }
+          for (unsigned c = 0; c != 2 * n; ++c) {
+            std::swap(m[col * 2 * n + c], m[pivot * 2 * n + c]);
+          }
+          const double piv = m[col * 2 * n + col];
+          for (unsigned c = 0; c != 2 * n; ++c) {
+            m[col * 2 * n + c] /= piv;
+          }
+          for (unsigned i = 0; i != n; ++i) {
+            if (i == col) {
+              continue;
+            }
+            const double f = m[i * 2 * n + col];
+            for (unsigned c = 0; c != 2 * n; ++c) {
+              m[i * 2 * n + c] -= f * m[col * 2 * n + c];
+            }
+          }
+        }
+        const bool ok  = engine.invert(a.data(), n, 1);
+        double     err = 0.0;
+        for (unsigned i = 0; i != n; ++i) {
+          for (unsigned j = 0; j != n; ++j) {
+            err = std::max(err, std::abs(static_cast<double>(a[i * n + j]) - m[i * 2 * n + n + j]));
+          }
+        }
+        std::printf("Test 10 (inversion by size): n=%2u ok=%d err=%.3e %s\n",
+                    n,
+                    ok ? 1 : 0,
+                    err,
+                    (!ok || !(err < 1e-1)) ? "FAIL" : "");
+        if (!ok || !(err < 1e-1)) {
+          std::printf("Test 10 FAIL: inversion of size %u is wrong (err %.3e)\n", n, err);
+          return -1;
+        }
+      }
+    }
+  }
+
   // -----------------------------------------------------------------------------------
   // Test 1: Gauss-Jordan inversion golden.
   // -----------------------------------------------------------------------------------
