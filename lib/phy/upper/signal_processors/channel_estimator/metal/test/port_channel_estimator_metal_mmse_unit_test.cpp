@@ -18,7 +18,9 @@
 #include "ocudu/ran/resource_allocation/rb_bitmap.h"
 #include "ocudu/support/math/math_utils.h"
 #include <cmath>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <random>
 #include <vector>
@@ -390,7 +392,12 @@ int main()
       std::printf("Test 4 SKIPPED: Metal device unavailable\n");
     } else {
       const unsigned n          = 36;
-      const unsigned nof_sys    = 4;
+      // The estimator inverts one system per layer and hop: a single system is the production
+      // case, four systems show how the kernel scales when several layers are configured.
+      const unsigned nof_sys    = []() {
+        const char* env = std::getenv("OCUDU_INV_SYSTEMS");
+        return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 4U;
+      }();
       const unsigned nout       = 504;
       const unsigned L          = 36;
       const unsigned nof_blocks = 17;
@@ -407,7 +414,17 @@ int main()
         }
       }
       std::vector<float> a_ref = a;
-      engine.invert(a.data(), n, nof_sys);
+      // Wall time of the call against the GPU execution it reports: the difference is the host-side
+      // cost of issuing the operation (buffer wrapping, encoding, submission), which dominates the
+      // estimator in the OTA statistics ([mmse_time_sum] gpu_path against gpu_wait).
+      const auto t_inv0 = std::chrono::steady_clock::now();
+      const bool inv_ok = engine.invert(a.data(), n, nof_sys);
+      const auto t_inv1 = std::chrono::steady_clock::now();
+      const double inv_wall_us = std::chrono::duration<double, std::micro>(t_inv1 - t_inv0).count();
+      if (!inv_ok) {
+        std::printf("Test 4 FAIL: invert() refused the system\n");
+        return -1;
+      }
       // CPU double reference.
       double max_err = 0.0;
       for (unsigned s = 0; s != nof_sys; ++s) {
@@ -457,8 +474,12 @@ int main()
         std::printf("Test 4 FAIL: GPU inversion error %.3e\n", max_err);
         return -1;
       }
-      std::printf("Test 4a PASS: GPU batched inversion (max err %.2e, gpu %.1f us)\n",
-                  max_err, engine.last_gpu_wait_us());
+      std::printf("Test 4a PASS: GPU batched inversion (max err %.2e, GPU %.1f us, host %.1f us of the "
+                  "%.1f us call)\n",
+                  max_err,
+                  engine.last_gpu_wait_us(),
+                  inv_wall_us - engine.last_gpu_wait_us(),
+                  inv_wall_us);
 
       // K2 golden.
       std::uniform_real_distribution<float> uni(-1.0F, 1.0F);

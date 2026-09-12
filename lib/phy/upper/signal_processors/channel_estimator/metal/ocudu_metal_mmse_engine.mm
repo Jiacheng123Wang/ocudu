@@ -273,8 +273,10 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
   [enc setBuffer:a_buf offset:0 atIndex:0];
   [enc setBytes:&n length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
+  // One threadgroup per system, laid out as (column, row) so that the elimination of a pivot
+  // column spreads over the whole block (see ocudu_mmse_inv.metal).
   [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(n, 1, 1)];
+      threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   [enc endEncoding];
   [cb commit];
   mmse_stats_commit();
