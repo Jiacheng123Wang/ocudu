@@ -85,6 +85,10 @@ public:
                float       h_scaling);
   bool flush_batch();
 
+  /// True when a batch opened by begin_batch() is still open (dispatches enqueued but not
+  /// committed yet).
+  bool batch_open() const;
+
   /// \brief Commits the batch without waiting (pairs with wait_committed()).
   ///
   /// Command buffers of one queue complete in submission order, so a single

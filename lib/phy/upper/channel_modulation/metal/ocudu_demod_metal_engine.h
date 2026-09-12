@@ -53,6 +53,10 @@ public:
   /// \brief Enqueues one demodulation dispatch into the open batch (no wait).
   bool enqueue(const void* symbols, const void* noise_var, void* llrs, unsigned nof_symbols, unsigned mod);
 
+  /// True when a batch opened by begin_batch() is still open (dispatches enqueued but not
+  /// committed yet).
+  bool batch_open() const;
+
   /// \brief Commits the batch without waiting (pairs with wait_committed()).
   bool commit_batch();
 

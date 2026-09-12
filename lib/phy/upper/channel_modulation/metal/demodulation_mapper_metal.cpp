@@ -124,6 +124,10 @@ void demodulation_mapper_metal::submit(span<log_likelihood_ratio> llrs,
 
 void demodulation_mapper_metal::wait()
 {
+  // Close the batch opened by the submits of this burst.
+  if (impl_->engine.batch_open()) {
+    (void)impl_->engine.commit_batch();
+  }
   if (impl_->pending.empty()) {
     return;
   }
@@ -201,7 +205,18 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
     std::memcpy(const_cast<void*>(nv_ptr), noise_vars.data(), nv_bytes);
   }
 
-  impl_->engine.begin_batch();
+  // All the dispatches submitted before the next wait() share one command buffer: committing one
+  // command buffer per dispatch costs about 23 us per dispatch on this platform, against about
+  // 10 us when the same dispatches are encoded into a single command buffer. The synchronous path
+  // closes the batch immediately below; the deferred one leaves it open for wait().
+  if (!defer && impl_->engine.batch_open()) {
+    // Do not let a synchronous call share a command buffer with an unfinished burst.
+    (void)impl_->engine.commit_batch();
+    (void)impl_->engine.wait_committed();
+  }
+  if (!impl_->engine.batch_open()) {
+    (void)impl_->engine.begin_batch();
+  }
   const bool ok = impl_->engine.enqueue(sym_ptr, nv_ptr, llr_ptr, nof_symbols, mod_id);
   if (!ok) {
     // Engine failure: zero LLRs (the CPU's ill-formed input semantics) instead of stale data.
@@ -223,9 +238,9 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
   }
 
   if (defer) {
-    // Submitted for the fused chain: the wait (and the copy-back of the staged LLRs) is deferred
-    // to wait() - or guaranteed by a later stage dispatching on the same queue.
-    (void)impl_->engine.commit_batch();
+    // Submitted for the fused chain: neither the commit nor the wait happen here. The dispatch
+    // stays encoded in the open batch (one command buffer per burst) and wait() closes it, also
+    // copying back the staged LLRs.
     entry->llrs       = llrs;
     entry->llr_ptr    = llr_ptr;
     entry->llr_sz     = llr_bytes;

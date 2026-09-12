@@ -129,6 +129,13 @@ void channel_equalizer_metal::submit(span<cf_t>                       eq_symbols
                                      span<const float>                noise_var_estimates,
                                      float                            tx_scaling)
 {
+  // All the dispatches submitted before the next wait() share one command buffer: committing one
+  // command buffer per dispatch costs about 23 us per dispatch on this platform, against about
+  // 10 us when the same dispatches are encoded into a single command buffer. The batch is closed
+  // by wait().
+  if (!impl_->engine.batch_open()) {
+    (void)impl_->engine.begin_batch();
+  }
   std::unique_ptr<pending_entry> entry = impl_->acquire();
   run_equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling, *entry, true);
   impl_->pending.push_back(std::move(entry));
@@ -136,6 +143,10 @@ void channel_equalizer_metal::submit(span<cf_t>                       eq_symbols
 
 void channel_equalizer_metal::wait()
 {
+  // Close the batch opened by the submits of this burst.
+  if (impl_->engine.batch_open()) {
+    (void)impl_->engine.commit_batch();
+  }
   if (impl_->pending.empty()) {
     return;
   }
@@ -249,7 +260,11 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
     }
   }
 
-  impl_->engine.begin_batch();
+  // A batch opened by an earlier submit() of the same burst is reused; otherwise this call opens
+  // its own (the synchronous path closes it immediately below).
+  if (!impl_->engine.batch_open()) {
+    (void)impl_->engine.begin_batch();
+  }
   const bool ok = impl_->engine.enqueue(h_ptr,
                                        y_ptr,
                                        s_ptr,
@@ -285,10 +300,8 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   entry.nv_direct          = nv_direct;
 
   if (defer) {
-    // Submitted for the fused chain: the wait is deferred. The caller (or the demapper that
-    // reads this output) synchronizes through the shared back-end queue, so waiting for the
-    // later stage's command buffer also guarantees this one has completed.
-    (void)impl_->engine.commit_batch();
+    // Submitted for the fused chain: neither the commit nor the wait happen here. The dispatch
+    // stays encoded in the open batch (one command buffer per burst) and wait() closes it.
     return;
   }
   (void)impl_->engine.flush_batch();

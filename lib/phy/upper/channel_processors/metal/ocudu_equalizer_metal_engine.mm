@@ -295,6 +295,12 @@ bool equalizer_metal_engine::enqueue(const void* h,
   return true;
 }
 
+bool equalizer_metal_engine::batch_open() const
+{
+  const eq_engine_impl* engine = static_cast<const eq_engine_impl*>(impl);
+  return (engine != nullptr) && (engine->batch_cb != nil);
+}
+
 bool equalizer_metal_engine::commit_batch()
 {
   eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);

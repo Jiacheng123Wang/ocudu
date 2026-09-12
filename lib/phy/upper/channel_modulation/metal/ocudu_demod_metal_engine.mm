@@ -271,6 +271,12 @@ bool demod_metal_engine::enqueue(const void* symbols,
   return true;
 }
 
+bool demod_metal_engine::batch_open() const
+{
+  const demod_engine_impl* engine = static_cast<const demod_engine_impl*>(impl);
+  return (engine != nullptr) && (engine->batch_cb != nil);
+}
+
 bool demod_metal_engine::commit_batch()
 {
   demod_engine_impl* engine = static_cast<demod_engine_impl*>(impl);
