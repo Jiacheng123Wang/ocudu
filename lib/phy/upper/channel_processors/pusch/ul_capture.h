@@ -39,6 +39,11 @@ void capture_grid(const resource_grid_reader& grid, const pusch_processor::pdu_t
 /// Captures the channel estimator scalars of one PUSCH reception.
 void capture_ce(const dmrs_pusch_estimator_results& est_results, const pusch_processor::pdu_t& pdu);
 
+/// \brief Captures the estimated channel coefficients of the whole bandwidth, layer by layer and
+/// symbol by symbol (<prefix>_<slot>_<rnti>_h.bin). This is the quantity the equalizer turns into
+/// the equalized symbols, so a scale or interpolation difference between two estimators shows here.
+void capture_h(const dmrs_pusch_estimator_results& est_results, const pusch_processor::pdu_t& pdu);
+
 /// \brief Marks the reception the following captures belong to (the demodulator receives no PDU,
 /// so the key is carried per thread).
 void set_current(slot_point slot, rnti_t rnti);

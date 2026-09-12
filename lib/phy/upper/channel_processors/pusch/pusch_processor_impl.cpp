@@ -231,6 +231,7 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
   // again here because this function may run on a different thread than process().
   ul_capture::set_current(pdu.slot, pdu.rnti);
   ul_capture::capture_ce(est_results, pdu);
+  ul_capture::capture_h(est_results, pdu);
 
   using namespace units::literals;
 

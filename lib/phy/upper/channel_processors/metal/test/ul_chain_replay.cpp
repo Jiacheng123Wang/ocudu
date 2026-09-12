@@ -26,7 +26,10 @@
 ///   scripts/ul_stage_diff.py /tmp/replay_cpu /tmp/replay_gpu
 
 #include "ocudu/adt/span.h"
+#include "ocudu/phy/lower/modulation/modulation_factories.h"
+#include "ocudu/phy/lower/modulation/ofdm_demodulator.h"
 #include "ocudu/phy/support/resource_grid.h"
+#include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/phy/support/support_factories.h"
 #include "ocudu/phy/upper/channel_processors/pusch/factories.h"
@@ -46,6 +49,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string>
@@ -177,14 +181,30 @@ int main(int argc, char** argv)
 {
   std::string prefix;
   std::string out_prefix;
+  bool        dft_mode         = false;
+  bool        dft_metal        = false;
   bool        use_metal_ce     = false;
   bool        use_metal_demod  = false;
   bool        use_metal_decoder = false;
+  unsigned    nof_prb           = 25;
+  // Default to the strategy the gNB app configures (pusch_channel_estimator_td_strategy), so that a
+  // replay compares like with like: the classical estimator divides the least-squares pilots by the
+  // number of DM-RS symbols only under "average", while the Metal one always runs its own MMSE.
+  bool td_strategy_average = false;
 
   for (int i = 1; i != argc; ++i) {
     std::string arg = argv[i];
     if (arg == "--out" && (i + 1 < argc)) {
       out_prefix = argv[++i];
+    } else if ((arg == "--nof-prb") && (i + 1 < argc)) {
+      nof_prb = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
+    } else if (arg == "--dft") {
+      dft_mode = true;
+    } else if (arg == "--dft-metal") {
+      dft_mode = true;
+      dft_metal = true;
+    } else if ((arg == "--td-strategy") && (i + 1 < argc)) {
+      td_strategy_average = (std::string(argv[++i]) == "average");
     } else if (arg == "--cpu") {
       use_metal_ce = use_metal_demod = use_metal_decoder = false;
     } else if (arg == "--metal") {
@@ -223,6 +243,171 @@ int main(int argc, char** argv)
     setenv("OCUDU_UL_DUMP_LLR", "1", 1);
   }
   setenv("OCUDU_UL_DUMP_COUNT", "1", 1);
+
+  // --------------------------------------------------------------------------------------------
+  // Time-domain replay: rebuild the resource grid of each recorded slot with the selected DFT
+  // back end and pipeline depth (OCUDU_DFT_PIPELINE_DEPTH), which is the only way to compare the
+  // pipelined front end with the serial one on the same samples.
+  // --------------------------------------------------------------------------------------------
+  if (dft_mode) {
+    std::ifstream list(prefix + "_td.txt");
+    if (!list.is_open()) {
+      std::fprintf(stderr, "cannot read %s_td.txt\n", prefix.c_str());
+      return 1;
+    }
+    std::ifstream bin(prefix + "_td.bin", std::ios::binary);
+    if (!bin.is_open()) {
+      std::fprintf(stderr, "cannot read %s_td.bin\n", prefix.c_str());
+      return 1;
+    }
+
+    struct entry_t {
+      unsigned slot;
+      unsigned symbol;
+      unsigned port;
+      size_t   size;
+    };
+    std::vector<entry_t> entries;
+    {
+      std::string line;
+      while (std::getline(list, line)) {
+        entry_t      entry = {};
+        std::string  key;
+        std::stringstream stream(line);
+        while (std::getline(stream, key, ' ')) {
+          auto pos = key.find('=');
+          if (pos == std::string::npos) {
+            continue;
+          }
+          const std::string name  = key.substr(0, pos);
+          const unsigned    value = static_cast<unsigned>(std::strtoul(key.substr(pos + 1).c_str(), nullptr, 10));
+          if (name == "slot") entry.slot = value;
+          if (name == "symbol") entry.symbol = value;
+          if (name == "port") entry.port = value;
+          if (name == "size") entry.size = value;
+        }
+        entries.push_back(entry);
+      }
+    }
+    if (entries.empty()) {
+      std::fprintf(stderr, "%s_td.txt holds no transform\n", prefix.c_str());
+      return 1;
+    }
+
+    // All the samples of the capture, read once.
+    std::vector<ci16_t> samples;
+    {
+      bin.seekg(0, std::ios::end);
+      const size_t bytes = static_cast<size_t>(bin.tellg());
+      bin.seekg(0);
+      samples.resize(bytes / sizeof(ci16_t));
+      bin.read(reinterpret_cast<char*>(samples.data()), static_cast<std::streamsize>(bytes));
+    }
+
+    // One DFT back end, one demodulator: the depth comes from OCUDU_DFT_PIPELINE_DEPTH.
+    ofdm_factory_generic_configuration ofdm_config = {
+        // The default CPU DFT factory is the one the lower PHY uses when the Metal one is not
+        // selected; the generic variant refuses the cell configurations the radio produces.
+        .dft_factory = dft_metal ? create_dft_processor_factory_metal() : create_dft_processor_factory()};
+    std::shared_ptr<ofdm_demodulator_factory> ofdm_factory = create_ofdm_demodulator_factory_generic(ofdm_config);
+    if (ofdm_factory == nullptr) {
+      std::fprintf(stderr, "cannot create the OFDM demodulator factory\n");
+      return 1;
+    }
+    ofdm_demodulator_configuration demod_config = {};
+    demod_config.numerology                = 0;
+    demod_config.bw_rb                     = nof_prb;
+    demod_config.dft_size                  = static_cast<unsigned>(entries.front().size);
+    demod_config.cp                        = cyclic_prefix::NORMAL;
+    demod_config.nof_samples_window_offset = 0;
+    demod_config.scale                     = 1.0F;
+    demod_config.center_freq_Hz            = 0.0;
+    std::shared_ptr<resource_grid_factory> dft_grid_factory = create_resource_grid_factory();
+    if (dft_grid_factory == nullptr) {
+      std::fprintf(stderr, "cannot create the resource grid factory\n");
+      return 1;
+    }
+    std::unique_ptr<ofdm_symbol_demodulator> demodulator = ofdm_factory->create_ofdm_symbol_demodulator(demod_config);
+    if (demodulator == nullptr) {
+      std::fprintf(stderr, "cannot create the OFDM symbol demodulator\n");
+      return 1;
+    }
+    const unsigned depth = demodulator->get_pipeline_depth();
+
+    std::printf("dft replay %s -> %s (%s DFT, pipeline depth %u, %u PRB, %zu transforms)\n",
+                prefix.c_str(),
+                out_prefix.c_str(),
+                dft_metal ? "metal" : "cpu",
+                depth,
+                nof_prb,
+                entries.size());
+
+    unsigned                cursor = 0;
+    std::vector<unsigned>   ring_slots;
+    std::shared_ptr<resource_grid> grid;
+    unsigned                current_slot = std::numeric_limits<unsigned>::max();
+    unsigned                ring         = 0;
+    unsigned                drained      = 0;
+
+    auto write_grid = [&](unsigned slot) {
+      const std::string base = out_prefix + "_" + std::to_string(slot) + "_dft";
+      if (FILE* f = std::fopen((base + ".txt").c_str(), "w")) {
+        std::fprintf(f,
+                     "slot=%u\nscs_khz=15\ncp=normal\nrnti=0\nbwp_size_rb=%u\nbwp_start_rb=0\n"
+                     "rx_ports=0\nnof_dft=%u\ndepth=%u\n",
+                     slot,
+                     nof_prb,
+                     demod_config.dft_size,
+                     depth);
+        std::fclose(f);
+      }
+      if (FILE* f = std::fopen((base + ".bin").c_str(), "wb")) {
+        std::vector<cf_t> symbol(nof_prb * NOF_SUBCARRIERS_PER_RB);
+        for (unsigned i_symbol = 0; i_symbol != MAX_NSYMB_PER_SLOT; ++i_symbol) {
+          grid->get_reader().get(symbol, 0, i_symbol, 0);
+          std::fwrite(symbol.data(), sizeof(cf_t), symbol.size(), f);
+        }
+        std::fclose(f);
+      }
+    };
+
+    for (const entry_t& entry : entries) {
+      if (entry.slot != current_slot) {
+        // Close the previous slot: finish every transform still in flight.
+        if (grid != nullptr) {
+          while (drained != ring_slots.size()) {
+            demodulator->finish_symbol(grid->get_writer(), ring_slots[drained++]);
+          }
+          write_grid(current_slot);
+        }
+        current_slot = entry.slot;
+        ring_slots.clear();
+        drained = 0;
+        ring    = 0;
+        grid    = dft_grid_factory->create(1, MAX_NSYMB_PER_SLOT, nof_prb * NOF_SUBCARRIERS_PER_RB);
+      }
+      const span<const ci16_t> input(samples.data() + cursor, entry.size);
+      cursor += entry.size;
+      if (depth > 1) {
+        if (ring_slots.size() == depth) {
+          demodulator->finish_symbol(grid->get_writer(), ring_slots[drained++]);
+        }
+        const unsigned ring_slot = ring++ % depth;
+        demodulator->submit_symbol(input, entry.port, entry.symbol, ring_slot);
+        ring_slots.push_back(ring_slot);
+      } else {
+        demodulator->demodulate(grid->get_writer(), input, entry.port, entry.symbol);
+      }
+    }
+    if (grid != nullptr) {
+      while (drained != ring_slots.size()) {
+        demodulator->finish_symbol(grid->get_writer(), ring_slots[drained++]);
+      }
+      write_grid(current_slot);
+    }
+    std::printf("dft replay done: grid dumps written as %s_<slot>_dft{.txt,.bin}\n", out_prefix.c_str());
+    return 0;
+  }
 
   // Shared infrastructure. Every factory is checked: a null one means the tool was built without
   // the matching back end and the failure has to be visible instead of a crash.
@@ -307,7 +492,8 @@ int main(int argc, char** argv)
       *executor,
       pusch_constants::MAX_NOF_RX_PORTS,
       port_channel_estimator_fd_smoothing_strategy::filter,
-      port_channel_estimator_td_interpolation_strategy::average,
+      td_strategy_average ? port_channel_estimator_td_interpolation_strategy::average
+                          : port_channel_estimator_td_interpolation_strategy::interpolate,
       true);
   check(estimator_factory, "estimator_factory");
   report("created estimator_factory");

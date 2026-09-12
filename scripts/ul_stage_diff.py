@@ -126,7 +126,8 @@ def main():
     for key in shared[: args.max_receptions]:
         cfg_a = read_text(a_index[key])
         cfg_b = read_text(b_index[key])
-        row = {"key": key, "pdu_match": True, "grid": "n/a", "ce": "n/a", "llr": "n/a", "first": "llr"}
+        row = {"key": key, "pdu_match": True, "grid": "n/a", "ce": "n/a", "h": None, "llr": "n/a",
+               "first": "llr"}
 
         for field in ("modulation", "target_code_rate", "rv", "bwp_size_rb", "alloc_nof_rb",
                       "dmrs_symbols", "nof_tx_layers", "rx_ports", "dmrs_nof_cdm_groups_without_data"):
@@ -173,6 +174,43 @@ def main():
                 if deltas and row["first"] == "later":
                     row["first"] = "ce"
 
+        path_a = a_index[key][:-4] + "_h.bin"
+        path_b = b_index[key][:-4] + "_h.bin"
+        if os.path.exists(path_a) and os.path.exists(path_b):
+            def read_h(path, nof_re, nof_symbols=14):
+                raw = open(path, "rb").read()
+                values = struct.unpack("<%df" % (len(raw) // 4), raw)
+                out = []
+                for s in range(nof_symbols):
+                    base = s * nof_re * 2
+                    out.append([complex(values[base + 2 * i], values[base + 2 * i + 1]) for i in range(nof_re)])
+                return out
+
+            try:
+                ha = read_h(path_a, nof_subc)
+                hb = read_h(path_b, nof_subc)
+                dmrs = [int(x) for x in cfg_a.get("dmrs_symbols", "").split(",") if x != ""]
+                worst = None
+                ratios = []
+                for s, (sa, sb) in enumerate(zip(ha, hb)):
+                    num = sum(abs(x - y) ** 2 for x, y in zip(sa, sb))
+                    den = sum(abs(y) ** 2 for y in sb)
+                    rel = math.sqrt(num / den) if den > 0 else float("nan")
+                    pa = sum(abs(x) ** 2 for x in sa) / max(1, len(sa))
+                    pb = sum(abs(y) ** 2 for y in sb) / max(1, len(sb))
+                    if pa > 0 and math.isfinite(rel):
+                        ratios.append(10.0 * math.log10(pb / pa))
+                    if worst is None or (math.isfinite(rel) and rel > worst[1]):
+                        worst = (s, rel)
+                if worst is not None and ratios:
+                    mark = " (DM-RS)" if worst[0] in dmrs else ""
+                    row["h"] = ("worst symbol %d%s rel err %.3f, power ratio median %+.2f dB "
+                                "(min %+.2f max %+.2f)"
+                                % (worst[0], mark, worst[1], sorted(ratios)[len(ratios) // 2],
+                                   min(ratios), max(ratios)))
+            except Exception as error:  # noqa: BLE001 - a debug tool reports, it does not fail
+                row["h"] = "cannot compare: %s" % error
+
         path_a = a_index[key][:-4] + "_llr.bin"
         path_b = b_index[key][:-4] + "_llr.bin"
         if os.path.exists(path_a) and os.path.exists(path_b):
@@ -196,6 +234,8 @@ def main():
             print("\n[%s] pdu %s" % (key, "matches" if row["pdu_match"] else "DIFFERS"))
             print("    grid : %s" % row["grid"])
             print("    ce   : %s" % row["ce"])
+            if row.get("h") is not None:
+                print("    h    : %s" % row["h"])
             print("    llr  : %s" % row["llr"])
 
     print("\n== verdict: first stage that differs")

@@ -3,6 +3,8 @@
 
 #include "ul_capture.h"
 
+#include "ocudu/phy/support/resource_grid_writer.h"
+
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -203,6 +205,38 @@ void ocudu::ul_capture::set_current(slot_point slot, rnti_t rnti)
   current().slot  = slot;
   current().rnti  = rnti;
   current().valid = true;
+}
+
+void ocudu::ul_capture::capture_h(const dmrs_pusch_estimator_results& est_results,
+                                  const pusch_processor::pdu_t&       pdu)
+{
+  if (!enabled() || !pdu.codeword.has_value() || !is_selected(pdu.slot, pdu.rnti)) {
+    return;
+  }
+  const unsigned nof_subc = pdu.bwp_size_rb * NOF_SUBCARRIERS_PER_RB;
+  const unsigned nof_layers = pdu.nof_tx_layers;
+  const unsigned nof_ports  = pdu.rx_ports.size();
+
+  FILE* f = std::fopen((make_key(pdu.slot, pdu.rnti) + "_h.bin").c_str(), "wb");
+  if (f == nullptr) {
+    return;
+  }
+  bounded_bitset<MAX_NOF_SUBCARRIERS> mask(nof_subc);
+  mask.fill(0, nof_subc);
+  std::vector<cbf16_t> h(nof_subc);
+  std::vector<cf_t>    out(nof_subc);
+  for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+    for (unsigned i_port = 0; i_port != nof_ports; ++i_port) {
+      for (unsigned i_symbol = 0; i_symbol != MAX_NSYMB_PER_SLOT; ++i_symbol) {
+        est_results.get_symbol_ch_estimate(h, i_symbol, pdu.rx_ports[i_port], i_layer, mask);
+        for (unsigned i = 0; i != nof_subc; ++i) {
+          out[i] = to_cf(h[i]);
+        }
+        std::fwrite(out.data(), sizeof(cf_t), out.size(), f);
+      }
+    }
+  }
+  std::fclose(f);
 }
 
 void ocudu::ul_capture::capture_llr(span<const log_likelihood_ratio> llr)

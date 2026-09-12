@@ -3,6 +3,12 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "puxch_processor_impl.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <set>
+#include <string>
 #include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_reader.h"
 #include "ocudu/phy/lower/lower_phy_rx_symbol_context.h"
 #include "ocudu/phy/support/resource_grid_context.h"
@@ -10,6 +16,59 @@
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 
 using namespace ocudu;
+
+
+namespace {
+
+/// \brief Debug capture of the time-domain samples handed to the DFT (OCUDU_UL_DUMP_TD=<prefix>).
+///
+/// Writes <prefix>_td.txt (one line per submitted transform: slot, symbol, port, size) and
+/// <prefix>_td.bin (the ci16 samples back to back, in the same order), for the first
+/// OCUDU_UL_DUMP_TD_SLOTS (default 4) slots that carry a transmission.  A resource grid capture
+/// (OCUDU_UL_DUMP) is taken after the DFT, so only this one can replay the transform itself - which
+/// is what separates the pipelined front end from the serial one.
+class td_capture
+{
+public:
+  static bool enabled()
+  {
+    static const bool on = (std::getenv("OCUDU_UL_DUMP_TD") != nullptr);
+    return on;
+  }
+
+  static void capture(slot_point slot, unsigned symbol_index, unsigned port, span<const ci16_t> samples)
+  {
+    if (!enabled()) {
+      return;
+    }
+    static const unsigned max_slots = []() {
+      const char* env = std::getenv("OCUDU_UL_DUMP_TD_SLOTS");
+      return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 4U;
+    }();
+    static std::set<unsigned> captured_slots;
+    static std::mutex         mutex;
+
+    std::lock_guard lock(mutex);
+    if (captured_slots.count(slot.count()) == 0) {
+      if (captured_slots.size() >= max_slots) {
+        return;
+      }
+      captured_slots.insert(slot.count());
+    }
+
+    const std::string prefix = std::getenv("OCUDU_UL_DUMP_TD");
+    if (FILE* f = std::fopen((prefix + "_td.txt").c_str(), "a")) {
+      std::fprintf(f, "slot=%u symbol=%u port=%u size=%zu\n", slot.count(), symbol_index, port, samples.size());
+      std::fclose(f);
+    }
+    if (FILE* f = std::fopen((prefix + "_td.bin").c_str(), "ab")) {
+      std::fwrite(samples.data(), sizeof(ci16_t), samples.size(), f);
+      std::fclose(f);
+    }
+  }
+};
+
+} // namespace
 
 bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& samples,
                                           const lower_phy_rx_symbol_context&    context)
@@ -67,7 +126,9 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
       }
       unsigned slot = next_pipeline_slot % pipeline_depth;
       ++next_pipeline_slot;
-      demodulator->submit_symbol(samples.get_channel_buffer(i_port), i_port, symbol_index_subframe, slot);
+      span<const ci16_t> td_samples = samples.get_channel_buffer(i_port);
+      td_capture::capture(context.slot, symbol_index_subframe, i_port, td_samples);
+      demodulator->submit_symbol(td_samples, i_port, symbol_index_subframe, slot);
       in_flight[(in_flight_begin + nof_in_flight) % max_in_flight_symbols] = {
           .context = context, .slot = slot, .last_port = (i_port + 1 == nof_rx_ports)};
       ++nof_in_flight;
@@ -86,8 +147,9 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
 
   // Demodulate each of the ports.
   for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
-    demodulator->demodulate(
-        current_grid.get().get_writer(), samples.get_channel_buffer(i_port), i_port, symbol_index_subframe);
+    span<const ci16_t> td_samples = samples.get_channel_buffer(i_port);
+    td_capture::capture(context.slot, symbol_index_subframe, i_port, td_samples);
+    demodulator->demodulate(current_grid.get().get_writer(), td_samples, i_port, symbol_index_subframe);
   }
 
   // Notify.

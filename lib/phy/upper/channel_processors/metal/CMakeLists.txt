@@ -53,6 +53,8 @@ target_link_libraries(ul_chain_replay PRIVATE
     ocudu_channel_equalizer ocudu_channel_modulation ocudu_channel_coding
     ocudu_uci_decoder ocudu_upper_phy_support ocudu_dft ocudu_transform_precoding
     ocudu_dmrs_pusch ocudu_sequence_generators ocudu_channel_estimator
+    ocudu_lower_phy_modulation
+    ocudu_lower_phy_modulation
     ocudu_phy_support ocudu_support ocudu_macos_compat)
 
 # AddressSanitizer twin of the replay tool: it pinpoints a wild write in the receiver with a real
@@ -67,4 +69,6 @@ target_link_libraries(ul_chain_replay_asan PRIVATE
     ocudu_channel_equalizer ocudu_channel_modulation ocudu_channel_coding
     ocudu_uci_decoder ocudu_upper_phy_support ocudu_dft ocudu_transform_precoding
     ocudu_dmrs_pusch ocudu_sequence_generators ocudu_channel_estimator
+    ocudu_lower_phy_modulation
+    ocudu_lower_phy_modulation
     ocudu_phy_support ocudu_support ocudu_macos_compat)
