@@ -4,13 +4,15 @@
 /// \file
 /// \brief Process-wide Metal device and command queue shared by every PHY GPU engine.
 ///
-/// \note Metal executes the command buffers of one queue in submission order. Sharing a single
-/// queue across the PHY stages is therefore what makes a producer/consumer split possible without
-/// a wait per stage: a producer (for example the per-symbol DFT of the RX chain) can commit
-/// without waiting, and a consumer (for example the channel estimator reading the resource grid)
-/// is guaranteed to observe the produced data as soon as it synchronizes - either by waiting for
-/// its own command buffer (which the shared queue orders after the producer's) or explicitly by
-/// calling wait_all_committed() before touching the shared memory on the CPU.
+/// \note Metal only serializes the *start* of the command buffers of one queue and is free to let
+/// them overlap, and a buffer wrapped no-copy by one engine is a different resource than the same
+/// memory wrapped by another one, so hazard tracking does not relate them either. A producer and a
+/// consumer that share memory through the queue therefore have to synchronize explicitly: waiting
+/// for the consumer's own command buffer does *not* guarantee that the producer's writes are
+/// visible. Waiting for the newest command buffer of a burst does not even drain the older ones of
+/// that same burst. The reliable options are a CPU-side wait (wait_all_committed() before touching
+/// the memory, or the engine's own wait_committed(), which waits for every command buffer it has
+/// committed) or a single command buffer with an explicit barrier between the encoders.
 ///
 /// The intended usage for the CPU/GPU pipelining of the RX chain is:
 ///  - producer stage: submit work with the engine's non-waiting entry point (e.g.
