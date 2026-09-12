@@ -49,6 +49,32 @@ public:
                                span<const cf_t>           symbols,
                                span<const float>          noise_vars,
                                modulation_scheme          mod) = 0;
+
+  /// \name Deferred (fused) chain hooks.
+  ///
+  /// Companion of channel_equalizer::submit(): a GPU backend can append the demodulation of one
+  /// symbol to the command buffer that already holds its equalization, so the caller waits once
+  /// instead of twice per symbol.
+  ///@{
+
+  /// \brief Submits the demodulation of one symbol without waiting for the result.
+  ///
+  /// \note The LLRs are only valid after wait(). Backends whose supports_deferred_chain() returns
+  ///       false execute synchronously, i.e. exactly like demodulate_soft().
+  virtual void submit(span<log_likelihood_ratio> llrs,
+                      span<const cf_t>           symbols,
+                      span<const float>          noise_vars,
+                      modulation_scheme          mod)
+  {
+    demodulate_soft(llrs, symbols, noise_vars, mod);
+  }
+
+  /// \brief Waits for the work submitted by submit().
+  virtual void wait() {}
+
+  /// \brief True when submit() defers the work and wait() synchronizes it.
+  virtual bool supports_deferred_chain() const { return false; }
+  ///@}
 };
 
 } // namespace ocudu

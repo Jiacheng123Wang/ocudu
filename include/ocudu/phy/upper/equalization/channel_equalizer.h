@@ -74,6 +74,57 @@ public:
                         const ch_est_list&               ch_estimates,
                         span<const float>                noise_var_estimates,
                         float                            tx_scaling) = 0;
+
+  /// \name Deferred (fused) chain hooks.
+  ///
+  /// A GPU backend can keep the equalization of one symbol and the demodulation that consumes its
+  /// output in a single command buffer, which removes the per-stage synchronization wait (each
+  /// wait costs ~0.1 ms, and the PUSCH chain performs ~22 of them per slot). These hooks let the
+  /// caller use that path. Every default implementation keeps the classic synchronous behaviour,
+  /// so existing (CPU) backends are unaffected.
+  ///@{
+
+  /// \brief Submits the equalization of one symbol without waiting for the result.
+  ///
+  /// \param[in,out] eq_symbols      Equalized symbols, layout [RE][layer], written by the call.
+  /// \param[out]    eq_noise_vars   Post-equalization noise variances, layout [RE][layer].
+  /// \param[in]     ch_symbols      Received symbols per port.
+  /// \param[in]     ch_estimates    Channel estimates per port and layer.
+  /// \param[in]     noise_var_estimates Noise variance estimates per receive port.
+  /// \param[in]     tx_scaling      Transmission gain scaling factor.
+  /// \note The outputs are only valid after wait(). Backends whose supports_deferred_chain()
+  ///       returns false execute synchronously, i.e. exactly like equalize().
+  virtual void submit(span<cf_t>                       eq_symbols,
+                      span<float>                      eq_noise_vars,
+                      const re_buffer_reader<cbf16_t>& ch_symbols,
+                      const ch_est_list&               ch_estimates,
+                      span<const float>                noise_var_estimates,
+                      float                            tx_scaling)
+  {
+    equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling);
+  }
+
+  /// \brief Waits for the work submitted by submit().
+  virtual void wait() {}
+
+  /// \brief Post-equalization SINR reduction of the symbol submitted by the last submit().
+  ///
+  /// Computes over the equalized noise variances of that symbol: \c out[0] receives the sum of
+  /// the finite values (infinities and NaN are skipped) and \c out[1] their count, matching the
+  /// CPU reduction performed by the PUSCH demodulator.
+  ///
+  /// \return True when the reduction is available, false when the caller must compute it from the
+  ///         equalized noise variances itself (default).
+  virtual bool get_post_eq_sinr(span<float> out)
+  {
+    (void)out;
+    return false;
+  }
+
+  /// \brief True when submit() defers the work, wait() synchronizes it and get_post_eq_sinr()
+  /// provides the SINR reduction without a CPU pass over the equalized noise variances.
+  virtual bool supports_deferred_chain() const { return false; }
+  ///@}
 };
 
 } // namespace ocudu
