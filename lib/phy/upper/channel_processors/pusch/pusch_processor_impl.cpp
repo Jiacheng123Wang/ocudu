@@ -3,6 +3,17 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pusch_processor_impl.h"
+
+#include "ul_capture.h"
+
+#include <atomic>
+#include <cmath>
+#include <cstdio>
+#include <mutex>
+#include <optional>
+#include <vector>
+#include <cstdlib>
+#include <string>
 #include "pusch_decoder_buffer_dummy.h"
 #include "pusch_processor_notifier_adaptor.h"
 #include "pusch_processor_validator_impl.h"
@@ -116,6 +127,11 @@ pusch_processor_impl::pusch_processor_impl(configuration& config) :
   ocudu_assert(dec_nof_iterations != 0, "The decoder number of iterations must be non-zero.");
 }
 
+
+namespace {
+
+} // namespace
+
 void pusch_processor_impl::process(span<uint8_t>                    data,
                                    unique_rx_buffer                 rm_buffer,
                                    pusch_processor_result_notifier& notifier,
@@ -147,6 +163,11 @@ void pusch_processor_impl::process(span<uint8_t>                    data,
   // Assert PDU.
   [[maybe_unused]] std::string msg;
   ocudu_assert(handle_validation(msg, pusch_processor_validator_impl(ce_dims).is_valid(pdu)), "{}", msg);
+
+  // Debug capture of the received grid and the PDU (see ul_capture): no-op unless OCUDU_UL_DUMP
+  // is set.
+  ul_capture::set_current(pdu.slot, pdu.rnti);
+  ul_capture::capture_grid(grid, pdu);
 
   // Get RB mask relative to Point A. It assumes PUSCH is never interleaved.
   crb_bitmap rb_mask = pdu.freq_alloc.get_crb_mask(pdu.bwp_start_rb, pdu.bwp_size_rb);
@@ -205,6 +226,12 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
                                         dmrs_config_type                       dmrs_type,
                                         unsigned                               nof_cdm_groups_without_data)
 {
+  // Debug capture of the channel estimator results (no-op unless OCUDU_UL_DUMP is set). It is the
+  // stage that decides the equalizer's noise variance and hence the soft-bit scale. The key is set
+  // again here because this function may run on a different thread than process().
+  ul_capture::set_current(pdu.slot, pdu.rnti);
+  ul_capture::capture_ce(est_results, pdu);
+
   using namespace units::literals;
 
   // The channel estimator has finished: the channel estimates of all the data symbols of the slot are ready.

@@ -6,6 +6,8 @@
 /// \brief PUSCH demodulator implementation definition.
 
 #include "pusch_demodulator_impl.h"
+
+#include "ul_capture.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/simd.h"
@@ -568,6 +570,9 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
         }
 
         // Notify a new processed block.
+        // Debug capture of the soft bits (no-op unless OCUDU_UL_DUMP_LLR is set).
+        ul_capture::capture_llr(codeword);
+
         codeword_buffer.on_new_block(codeword, scrambling_seq);
       }
     }
