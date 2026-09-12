@@ -56,11 +56,12 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
 
   if (pipeline_depth > 1) {
     // Pipelined path: submit the per-symbol DFTs without waiting and post-process them with a lag of
-    // `pipeline_depth` symbols. The FFTs therefore overlap with the radio, while the grid content of
-    // a symbol is still written before that symbol is reported to the upper PHY.
+    // `pipeline_depth` transforms (there is one transform per receive port, so with several ports the
+    // lag in symbols is `pipeline_depth / nof_rx_ports`). The FFTs therefore overlap with the radio,
+    // while the grid content of a symbol is still written before that symbol is reported.
     for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
       // The slot about to be reused holds the oldest in-flight transform: its command buffer was
-      // submitted `pipeline_depth` symbols ago, so finishing it does not stall on the GPU.
+      // submitted `pipeline_depth` transforms ago, so finishing it does not stall on the GPU.
       if (nof_in_flight == pipeline_depth) {
         finish_oldest_symbol();
       }

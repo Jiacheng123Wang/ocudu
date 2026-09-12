@@ -78,7 +78,7 @@ private:
     bool last_port = true;
   };
 
-  /// Maximum number of in-flight symbols tracked by the pipeline bookkeeping.
+  /// Maximum number of in-flight transforms (one per port and symbol) tracked by the pipeline.
   static constexpr unsigned max_in_flight_symbols = 16;
 
   /// rief Waits for the oldest in-flight symbol, writes it into the grid and reports it.
@@ -95,8 +95,8 @@ private:
   slot_point                                  current_slot;
   shared_resource_grid                        current_grid;
 
-  // Pipelined demodulation bookkeeping: a FIFO of the symbols whose DFT was submitted but not yet
-  // post-processed. The ring position of each submission advances monotonically, so a slot is
+  // Pipelined demodulation bookkeeping: a FIFO of the transforms (one per port and symbol) whose DFT
+  // was submitted but not yet post-processed. The ring position of each submission advances monotonically, so a slot is
   // reused exactly when its transform is finished (depth submissions later).
   std::array<in_flight_symbol, max_in_flight_symbols> in_flight = {};
   unsigned                                            in_flight_begin  = 0;
