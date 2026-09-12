@@ -67,7 +67,18 @@ public:
   span<const cf_t> run_batch(unsigned nof_transforms) override;
 
   // See interface for documentation.
-  void run_async() override { (void)engine->submit(input.get(), output.get(), 1); }
+  void run_async(unsigned slot) override
+  {
+    report_fatal_error_if_not(slot < max_batch, "Invalid Metal DFT slot {} (max {}).", slot, max_batch);
+    (void)engine->submit_slot(input.get(), output.get(), slot);
+  }
+
+  // See interface for documentation.
+  void wait() override { (void)metal::dft_metal_engine::wait_all(); }
+
+  /// View of the whole output batch buffer (max_batch transforms), as filled by the asynchronous
+  /// run_async(slot) path. Valid only after wait().
+  span<const cf_t> get_output_batch() const { return {output.get(), static_cast<size_t>(cfg.size) * max_batch}; }
 
   /// GPU-side duration of the last transform in microseconds (0 when unavailable).
   double engine_gpu_wait_us() const { return engine != nullptr ? engine->last_gpu_wait_us() : 0.0; }

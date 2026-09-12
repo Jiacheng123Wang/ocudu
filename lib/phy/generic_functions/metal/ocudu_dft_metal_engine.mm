@@ -116,6 +116,9 @@ NSString* resolve_dft_metallib_path()
   return nil;
 }
 
+/// Transform slots covered by the input/output buffers (dft_processor_metal::max_batch).
+static constexpr unsigned max_batch_slots = 16;
+
 struct dft_engine_impl {
   uint32_t n       = 0;
   uint32_t radix2  = 0; // number of radix-2 stages (k in N = 2^k * 3^m)
@@ -341,7 +344,18 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   return true;
 }
 
-bool dft_metal_engine::submit(const void* in, void* out, unsigned nof_transforms, bool wait_for_completion)
+bool dft_metal_engine::submit_slot(const void* in, void* out, unsigned slot)
+{
+  return submit_at(in, out, 1, slot, false);
+}
+
+bool dft_metal_engine::wait_all()
+{
+  return metal::shared_queue::wait_all_committed();
+}
+
+bool dft_metal_engine::submit_at(
+    const void* in, void* out, unsigned nof_transforms, unsigned first_slot, bool wait_for_completion)
 {
 
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
@@ -349,9 +363,12 @@ bool dft_metal_engine::submit(const void* in, void* out, unsigned nof_transforms
     return false;
   }
 
-  const size_t bytes = static_cast<size_t>(engine->n) * nof_transforms * 2 * sizeof(float);
+  // The buffers cover the whole batch (all slots): a ring caller reuses them without re-wrapping.
+  const size_t bytes      = static_cast<size_t>(engine->n) * max_batch_slots * 2 * sizeof(float);
+  const size_t byte_begin = static_cast<size_t>(engine->n) * first_slot * 2 * sizeof(float);
   id<MTLBuffer> b_in  = wrap_buffer(engine, in, bytes);
   id<MTLBuffer> b_out = wrap_buffer(engine, out, bytes);
+  (void)byte_begin;
   if (b_in == nil || b_out == nil) {
     return false;
   }
@@ -366,6 +383,8 @@ bool dft_metal_engine::submit(const void* in, void* out, unsigned nof_transforms
   [enc setBytes:&engine->radix2 length:sizeof(uint32_t) atIndex:4];
   [enc setBytes:&engine->radix3 length:sizeof(uint32_t) atIndex:5];
   [enc setBytes:&engine->inverse length:sizeof(uint32_t) atIndex:6];
+  const uint32_t base = first_slot * engine->n;
+  [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
   [enc dispatchThreadgroups:MTLSizeMake(nof_transforms, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
   [enc endEncoding];
@@ -394,12 +413,12 @@ bool dft_metal_engine::submit(const void* in, void* out, unsigned nof_transforms
 
 bool dft_metal_engine::submit(const void* in, void* out, unsigned nof_transforms)
 {
-  return submit(in, out, nof_transforms, false);
+  return submit_at(in, out, nof_transforms, 0, false);
 }
 
 bool dft_metal_engine::run(const void* in, void* out, unsigned nof_transforms)
 {
-  return submit(in, out, nof_transforms, true);
+  return submit_at(in, out, nof_transforms, 0, true);
 }
 
 double dft_metal_engine::last_gpu_wait_us() const

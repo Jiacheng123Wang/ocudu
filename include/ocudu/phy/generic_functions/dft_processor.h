@@ -87,13 +87,14 @@ public:
   /// \param[in] nof_transforms Number of transforms, at most get_max_batch().
   /// \return A view of the internal output DFT buffer holding \c nof_transforms * get_size()
   ///         complex samples.
-  /// \brief Executes the DFT without waiting for the result.
+  /// \brief Executes the transform held in \c slot without waiting for the result.
   ///
   /// The transform is dispatched and the call returns immediately, so the CPU stays free while the
-  /// GPU works. The output returned by a later run()/run_batch() and the internal input buffer are
-  /// only valid once the work is synchronized: either by a consumer stage dispatching on the same
-  /// command queue (queues execute command buffers in submission order) or explicitly through the
-  /// Metal engine's wait_all_committed() before the data is read on the CPU.
+  /// GPU works. The internal buffers cover get_max_batch() transform slots: a pipelined caller
+  /// fills slot after slot (a ring) and keeps several transforms in flight instead of stalling the
+  /// CPU on each one. The output and the input slot are only valid once the work is synchronized:
+  /// either by a consumer stage dispatching on the same command queue (queues execute command
+  /// buffers in submission order) or explicitly through wait() before the data is read on the CPU.
   ///
   /// \note Intended for the CPU/GPU pipelined RX chain: the per-symbol DFTs are submitted without
   /// stalling the CPU and the consumer stage (channel estimator) synchronizes once.
@@ -105,11 +106,18 @@ public:
   ///       decoupling work, so the RX chain can submit several symbols before the first wait.
   /// \todo Chain the RX stages onto one command queue and synchronize once per slot instead of
   ///       once per consumer stage, together with the pipeline decoupling work.
-  virtual void run_async()
+  virtual void run_async(unsigned slot)
   {
     // Default: the processor has no asynchronous path, execute synchronously.
+    (void)slot;
     (void)run();
   }
+
+  /// \brief Waits for every previously submitted asynchronous transform.
+  ///
+  /// No-op for processors without an asynchronous path. On a shared Metal queue the wait drains
+  /// every earlier submission of every stage sharing the queue, not only this processor's.
+  virtual void wait() {}
 
   virtual span<const cf_t> run_batch(unsigned nof_transforms)
   {

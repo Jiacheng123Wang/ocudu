@@ -25,6 +25,7 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
                     constant uint&       radix2  [[buffer(4)]], // number of radix-2 stages (k)
                     constant uint&       radix3  [[buffer(5)]], // number of radix-3 stages (m)
                     constant uint&       inverse [[buffer(6)]], // 1 = conjugate twiddles
+                    constant uint&       base    [[buffer(7)]], // element offset of the first transform
                     uint                 tid     [[thread_position_in_threadgroup]],
                     uint                 tgid    [[threadgroup_position_in_grid]])
 {
@@ -41,7 +42,9 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
 
     // One threadgroup per transform: independent transforms are batched by dispatching several
     // threadgroups, each working on its own slice of the input/output buffers.
-    const uint batch_offset = tgid * n;
+    // Element offset of this transform: the batch base plus one transform per grid position, so a
+    // single-transform dispatch can target any slot of the batch buffers (ring usage).
+    const uint batch_offset = base + tgid * n;
 
     if (tid >= threads) {
         return;

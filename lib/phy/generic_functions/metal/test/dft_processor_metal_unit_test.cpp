@@ -236,6 +236,58 @@ int main()
                 per_sym_us * nof_transforms / batch_us);
   }
 
+  // Ring submission (CPU/GPU pipelining, S2): each transform of a slot is submitted into its own
+  // slot without waiting and the whole ring is synchronized once. The result must be bit-identical
+  // to the synchronous path, and the CPU must not have waited between submissions.
+  for (unsigned size : {512U, 1024U, 2048U}) {
+    constexpr unsigned nof_transforms = 8; // ring depth (<= max_batch)
+    auto               metal          = dft_processor_metal({size, dft_processor::direction::DIRECT});
+    if (!metal.is_valid()) {
+      continue;
+    }
+
+    std::vector<cf_t> batch_in(static_cast<size_t>(size) * nof_transforms);
+    for (auto& v : batch_in) {
+      v = cf_t(dist(rng), dist(rng));
+    }
+
+    // Submit every transform into its own slot, then synchronize once.
+    for (unsigned i = 0; i != nof_transforms; ++i) {
+      std::copy(batch_in.begin() + static_cast<size_t>(i) * size,
+                batch_in.begin() + static_cast<size_t>(i + 1) * size,
+                metal.get_input().begin() + static_cast<size_t>(i) * size);
+      metal.run_async(i);
+    }
+    metal.wait();
+
+    // Copy the ring results out first: the reference below reuses slot 0 of the output buffer.
+    span<const cf_t>  ring_view = metal.get_output_batch().first(static_cast<size_t>(size) * nof_transforms);
+    std::vector<cf_t> ring_out(ring_view.begin(), ring_view.end());
+
+    // Reference: the same transforms, one synchronous run() each (slot 0).
+    std::vector<cf_t> ref_out(static_cast<size_t>(size) * nof_transforms);
+    for (unsigned i = 0; i != nof_transforms; ++i) {
+      std::copy(batch_in.begin() + static_cast<size_t>(i) * size,
+                batch_in.begin() + static_cast<size_t>(i + 1) * size,
+                metal.get_input().begin());
+      span<const cf_t> single = metal.run();
+      std::copy(single.begin(), single.end(), ref_out.begin() + static_cast<size_t>(i) * size);
+    }
+
+    bool identical = true;
+    for (unsigned i = 0; i != nof_transforms * size; ++i) {
+      if (ring_out[i] != ref_out[i]) {
+        identical = false;
+        break;
+      }
+    }
+    std::printf("[ring]  size=%4u depth=%u bit-identical=%s\n", size, nof_transforms, identical ? "OK" : "MISMATCH");
+    if (!identical) {
+      std::fprintf(stderr, "FAIL: ring-submitted DFT differs from synchronous runs (size=%u)\n", size);
+      ok = false;
+    }
+  }
+
   // Steady-state latency (audit data): 100 runs per backend at the OFDM sizes.
   for (unsigned size : {512U, 768U, 1024U, 2048U}) {
     dft_processor_metal metal({size, dft_processor::direction::DIRECT});

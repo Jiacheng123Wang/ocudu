@@ -62,13 +62,29 @@ public:
   /// \return True when the dispatch was encoded and committed.
   bool submit(const void* in, void* out, unsigned nof_transforms);
 
+  /// \brief Commits the transform held in slot \c slot of the batch buffers without waiting.
+  ///
+  /// The input and output buffers cover max_batch() transforms; this entry point lets a pipelined
+  /// caller keep several transforms in flight in different slots (a ring) and synchronize once
+  /// every few submissions. \c in / \c out must be the base of the whole batch buffer.
+  /// \return True when the dispatch was encoded and committed.
+  bool submit_slot(const void* in, void* out, unsigned slot);
+
+  /// \brief Waits for every command buffer committed through the shared Metal queue.
+  ///
+  /// Command buffers of the shared queue complete in submission order, so this drains every
+  /// previously submitted stage (DFT, channel estimator, equalizer, demapper, LDPC).
+  /// \return False when a command buffer failed.
+  static bool wait_all();
+
   /// GPU-side duration of the last transform in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;
 
 private:
-  /// \brief Encodes and commits the transforms; \c wait_for_completion selects the synchronous
-  /// run() path or the non-waiting submit() path.
-  bool submit(const void* in, void* out, unsigned nof_transforms, bool wait_for_completion);
+  /// \brief Encodes and commits \c nof_transforms transforms starting at slot \c first_slot;
+  /// \c wait_for_completion selects the synchronous run() path or the non-waiting submit() path.
+  bool submit_at(
+      const void* in, void* out, unsigned nof_transforms, unsigned first_slot, bool wait_for_completion);
 
   void* impl = nullptr;
 };
