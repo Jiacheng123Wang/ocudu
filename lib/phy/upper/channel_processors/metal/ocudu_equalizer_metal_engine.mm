@@ -121,8 +121,10 @@ struct eq_engine_impl {
   double last_gpu_us = 0.0;
   bool   last_call_no_copy = true; // false when any buffer of the last call was copied
   bool   no_copy_fallback_logged = false;
-  unsigned pending = 0; // committed command buffers not waited for yet
-  id<MTLCommandBuffer> last_committed = nil; // newest commit of the current burst
+  /// Command buffers committed and not waited for yet. Metal only serializes the *start* of the
+  /// command buffers of one queue and lets them overlap, so a wait has to cover every one of them
+  /// and not only the newest.
+  std::vector<id<MTLCommandBuffer>> outstanding;
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
 
   // Batch in progress (nil when no batch is open).
@@ -308,37 +310,32 @@ bool equalizer_metal_engine::commit_batch()
   [enc endEncoding];
   [cmd_buf commit];
   eq_stats_commit();
-  engine->last_committed = cmd_buf;
-  ++engine->pending;
+  engine->outstanding.push_back(cmd_buf);
   return true;
 }
 
 bool equalizer_metal_engine::wait_committed()
 {
   eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
-  if (engine == nullptr || engine->pending == 0) {
+  if (engine == nullptr || engine->outstanding.empty()) {
     return true;
   }
-  // Command buffers of one queue complete in order: waiting for the most recent one drains
-  // the whole burst.
-  id<MTLCommandBuffer> cmd_buf = engine->last_committed;
-  const unsigned       pending = engine->pending;
-  engine->pending              = 0;
-  engine->last_committed       = nil;
-
-  [cmd_buf waitUntilCompleted];
-  for (unsigned i = 0; i != pending; ++i) {
+  std::vector<id<MTLCommandBuffer>> outstanding;
+  outstanding.swap(engine->outstanding);
+  bool ok = true;
+  for (id<MTLCommandBuffer> cmd_buf : outstanding) {
+    [cmd_buf waitUntilCompleted];
     eq_stats_wait();
+    if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
+      ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: command buffer failed with status {}",
+                                                static_cast<unsigned long>(cmd_buf.status));
+      ok = false;
+    }
+    if (cmd_buf.GPUStartTime > 0.0 && cmd_buf.GPUEndTime > 0.0) {
+      engine->last_gpu_us = (cmd_buf.GPUEndTime - cmd_buf.GPUStartTime) * 1e6;
+    }
   }
-  if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
-    ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: command buffer failed with status {}",
-                                              static_cast<unsigned long>(cmd_buf.status));
-    return false;
-  }
-  if (cmd_buf.GPUStartTime > 0.0 && cmd_buf.GPUEndTime > 0.0) {
-    engine->last_gpu_us = (cmd_buf.GPUEndTime - cmd_buf.GPUStartTime) * 1e6;
-  }
-  return true;
+  return ok;
 }
 
 bool equalizer_metal_engine::flush_batch()
@@ -356,19 +353,18 @@ bool equalizer_metal_engine::flush_batch()
   [enc endEncoding];
   [cmd_buf commit];
   eq_stats_commit();
-  [cmd_buf waitUntilCompleted];
-  eq_stats_wait();
-  if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
-    ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: command buffer failed with status {}",
-                                              static_cast<unsigned long>(cmd_buf.status));
-    return false;
+  // Register the command buffer and drain every outstanding one through the same path the deferred
+  // entry point uses, so both the accounting and the wait cover the whole chain.
+  engine->outstanding.push_back(cmd_buf);
+  const bool ok = wait_committed();
+  if (cmd_buf.status == MTLCommandBufferStatusCompleted) {
+    if (cmd_buf.GPUStartTime > 0.0 && cmd_buf.GPUEndTime > 0.0) {
+      engine->last_gpu_us = (cmd_buf.GPUEndTime - cmd_buf.GPUStartTime) * 1e6;
+    } else {
+      engine->last_gpu_us = 0.0;
+    }
   }
-  if (cmd_buf.GPUStartTime > 0.0 && cmd_buf.GPUEndTime > 0.0) {
-    engine->last_gpu_us = (cmd_buf.GPUEndTime - cmd_buf.GPUStartTime) * 1e6;
-  } else {
-    engine->last_gpu_us = 0.0;
-  }
-  return true;
+  return ok;
 }
 
 unsigned equalizer_metal_engine::batch_size() const

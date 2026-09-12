@@ -162,6 +162,7 @@ int main()
   unsigned           nof_nv_mismatch = 0;
   size_t             first_bad_eq    = 0;
 
+  double   us_c          = 0.0;
   double   us_a          = 0.0;
   double   us_b          = 0.0;
   unsigned nof_mismatch   = 0;
@@ -215,8 +216,9 @@ int main()
     std::memcpy(eq_b.data(), eq_buf.ptr, eq_b.size() * sizeof(cf_t));
     std::memcpy(nv_b.data(), nv_buf.ptr, nv_b.size() * sizeof(float));
 
-    // Pattern C: same grouping as B but with an explicit wait between the equalization burst and
-    // the demapping burst, i.e. the ordering no longer relies on the command queue alone.
+    // Pattern C: the safe grouping (what the caller does): an explicit wait between the equalization
+    // burst and the demapping burst, so the hand-off does not rely on the command queue ordering.
+    const auto t_c0 = std::chrono::steady_clock::now();
     for (unsigned group_begin = 0; group_begin < nof_symbols; group_begin += group_size) {
       const unsigned group_end = std::min(group_begin + group_size, nof_symbols);
       for (unsigned s = group_begin; s != group_end; ++s) {
@@ -228,6 +230,7 @@ int main()
       }
       demapper.wait();
     }
+    us_c += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t_c0).count();
     {
       unsigned bad_c = 0;
       for (unsigned s = 0; s != nof_symbols; ++s) {
@@ -291,6 +294,7 @@ int main()
   }
   us_a /= nof_iters;
   us_b /= nof_iters;
+  us_c /= nof_iters;
 
   std::printf("[chain] A per-symbol chain: %.1f us/slot (%.1f us/symbol)\n", us_a, us_a / nof_symbols);
   std::printf("[chain] B deferred groups (K=%u): %.1f us/slot (%.1f us/symbol), %.2fx\n",
@@ -313,7 +317,12 @@ int main()
     }
     nof_br_mismatch = bad_br;
     nof_cr_mismatch = bad_cr;
-    std::printf("[chain] REFERENCE R (serial) vs B (deferred, one wait per stage): %u differing LLR bytes -> %s\n",
+    std::printf("[chain] C safe deferred groups (K=%u): %.1f us/slot (%.1f us/symbol), %.2fx\n",
+              group_size,
+              us_c,
+              us_c / nof_symbols,
+              us_a / us_c);
+  std::printf("[chain] REFERENCE R (serial) vs B (deferred, one wait per stage): %u differing LLR bytes -> %s\n",
                 bad_br,
                 (bad_br == 0) ? "OK" : "MISMATCH");
     std::printf("[chain] REFERENCE R (serial) vs C (deferred, explicit eq wait):   %u differing LLR bytes -> %s\n",

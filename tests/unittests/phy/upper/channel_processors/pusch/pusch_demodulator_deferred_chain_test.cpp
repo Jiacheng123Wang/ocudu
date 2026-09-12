@@ -23,6 +23,8 @@
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_demodulator_notifier.h"
 #include "ocudu/phy/upper/equalization/channel_equalizer.h"
 #include "ocudu/phy/upper/equalization/equalization_factories.h"
+#include "channel_equalizer_metal_factory.h"
+#include "demodulation_mapper_metal_factory.h"
 #include "ocudu/phy/upper/sequence_generators/sequence_generator_factories.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ran/pusch/pusch_constants.h"
@@ -33,6 +35,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
+#include <atomic>
 #include <gtest/gtest.h>
 #include <memory>
 #include <random>
@@ -510,11 +514,13 @@ protected:
           (config.enable_transform_precoding || force_serial) ? 0 : expected_data_symbols(config);
       EXPECT_EQ(eq_decorator->nof_submits, expected_symbols);
       EXPECT_EQ(demapper_decorator->nof_submits, expected_symbols);
-      EXPECT_EQ(eq_decorator->nof_waits, demapper_decorator->nof_waits);
       if (expected_symbols != 0) {
-        // One single wait per group of up to max_deferred_group_symbols symbols.
-        EXPECT_EQ(eq_decorator->nof_waits, divide_ceil(config.nof_symbols, expected_group_size()))
+        // One demapper wait per group, and two equalizer waits: one that makes the equalized
+        // symbols visible before the demapping is submitted and one that releases the adapter.
+        const unsigned nof_groups = divide_ceil(config.nof_symbols, expected_group_size());
+        EXPECT_EQ(demapper_decorator->nof_waits, nof_groups)
             << "symbols of the allocation are grouped, including the ones without data";
+        EXPECT_EQ(eq_decorator->nof_waits, 2 * nof_groups);
       }
     }
     return result;
@@ -602,3 +608,335 @@ TEST_F(pusch_demodulator_deferred_chain_test, deferred_chain_matches_serial_path
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------------------------
+// Metal integration: the same caller, the same Metal kernels and the same codeword path, once
+// with the deferred chain and once with the synchronous one, so any difference is caused by the
+// chain and not by the kernels or by the back-end numerics.
+// The failing over-the-air shape is used: a partial-bandwidth allocation (17 of 25 PRB) with
+// DM-RS symbols that carry no data, so the per-symbol sizes differ and the LLR destinations are
+// not page aligned.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+/// \brief Equalizer that forwards everything but hides the deferred chain from the caller.
+class synchronous_equalizer_double : public channel_equalizer
+{
+public:
+  explicit synchronous_equalizer_double(std::unique_ptr<channel_equalizer> base_) : base(std::move(base_)) {}
+
+  bool is_supported(unsigned nof_ports, unsigned nof_layers) override
+  {
+    return base->is_supported(nof_ports, nof_layers);
+  }
+
+  void equalize(span<cf_t>                       eq_symbols,
+                span<float>                      eq_noise_vars,
+                const re_buffer_reader<cbf16_t>& ch_symbols,
+                const ch_est_list&               ch_estimates,
+                span<const float>                noise_var_estimates,
+                float                            tx_scaling) override
+  {
+    base->equalize(eq_symbols, eq_noise_vars, ch_symbols, ch_estimates, noise_var_estimates, tx_scaling);
+  }
+
+  bool supports_deferred_chain() const override { return false; }
+
+private:
+  std::unique_ptr<channel_equalizer> base;
+};
+
+/// \brief Demapper that forwards everything but hides the deferred chain from the caller.
+class synchronous_demapper_double : public demodulation_mapper
+{
+public:
+  explicit synchronous_demapper_double(std::unique_ptr<demodulation_mapper> base_) : base(std::move(base_)) {}
+
+  void demodulate_soft(span<log_likelihood_ratio> llrs,
+                       span<const cf_t>           symbols,
+                       span<const float>          noise_vars,
+                       modulation_scheme          mod) override
+  {
+    base->demodulate_soft(llrs, symbols, noise_vars, mod);
+  }
+
+  bool supports_deferred_chain() const override { return false; }
+
+private:
+  std::unique_ptr<demodulation_mapper> base;
+};
+
+/// Codeword buffer that records the LLR stream and serves page-misaligned block views, like the
+/// UL-SCH demultiplexer: the demodulator must go through the demapper's staging path.
+class recording_codeword_buffer : public pusch_codeword_buffer
+{
+public:
+  explicit recording_codeword_buffer(unsigned block_capacity_) : block_capacity(block_capacity_) {}
+
+  span<log_likelihood_ratio> get_next_block_view(unsigned block_size) override
+  {
+    if (buffer.size() < cursor + block_size) {
+      buffer.resize(cursor + block_size + 1024);
+    }
+    return span<log_likelihood_ratio>(buffer).subspan(cursor, std::min(block_size, block_capacity));
+  }
+
+  void on_new_block(span<const log_likelihood_ratio> new_data, const bit_buffer& /*new_scrambling_seq*/) override
+  {
+    llrs.insert(llrs.end(), new_data.begin(), new_data.end());
+    cursor += new_data.size();
+  }
+
+  void on_end_codeword() override {}
+
+  /// Concatenated LLR stream handed over by the demodulator.
+  std::vector<log_likelihood_ratio> llrs;
+
+private:
+  unsigned                          block_capacity;
+  std::vector<log_likelihood_ratio> buffer;
+  unsigned                          cursor = 0;
+};
+
+} // namespace
+
+TEST_F(pusch_demodulator_deferred_chain_test, metal_back_ends_match_the_cpu_chain)
+{
+  // Exact grant shape of the over-the-air failure: 17 PRB starting at PRB 4 of a 25 PRB cell,
+  // QPSK, one layer, two receive ports, 14 symbols, DM-RS in symbols 2 and 11 with two CDM groups
+  // without data (so those symbols carry no PUSCH data at all).
+  const unsigned allocation_first_prb = 4;
+  const unsigned allocation_nof_prb   = 17;
+
+  std::shared_ptr<channel_equalizer_factory> metal_eq_factory =
+      create_channel_equalizer_metal_factory(channel_equalizer_algorithm_type::mmse);
+  std::shared_ptr<demodulation_mapper_factory> metal_demod_factory = create_demodulation_mapper_metal_factory();
+  ASSERT_NE(metal_eq_factory, nullptr);
+  ASSERT_NE(metal_demod_factory, nullptr);
+  if (!metal_eq_factory->create()->supports_deferred_chain() || !metal_demod_factory->create()->supports_deferred_chain()) {
+    GTEST_SKIP() << "Metal deferred chain not available";
+  }
+
+  // Both demodulators use the very same Metal kernels: only the chain differs.
+  auto make = [&](bool deferred) {
+    std::unique_ptr<channel_equalizer> eq       = metal_eq_factory->create();
+    std::unique_ptr<demodulation_mapper> demapper = metal_demod_factory->create();
+    if (!deferred) {
+      eq       = std::make_unique<synchronous_equalizer_double>(std::move(eq));
+      demapper = std::make_unique<synchronous_demapper_double>(std::move(demapper));
+    }
+    return std::make_unique<pusch_demodulator_impl>(std::move(eq),
+                                                    std::make_unique<precoder_double>(),
+                                                    std::move(demapper),
+                                                    evm_factory->create(),
+                                                    prg_factory->create(),
+                                                    max_nof_prb,
+                                                    true);
+  };
+
+  // Two independent runs: CPU reference (serial chain) and Metal (deferred chain).
+  const unsigned nof_ports  = 2;
+  const unsigned nof_layers = 1;
+  const unsigned nof_symbols = 14;
+
+  auto run = [&](pusch_demodulator& demodulator) {
+    const unsigned nof_re_per_symbol = max_nof_prb * NOF_SUBCARRIERS_PER_RB;
+    grid_reader_double grid(nof_ports, MAX_NSYMB_PER_SLOT, nof_re_per_symbol);
+    est_results_double est(nof_ports, nof_layers, nof_re_per_symbol, 0.02F);
+
+    pusch_demodulator::configuration config        = {};
+    config.rnti                                    = to_rnti(0x460e);
+    config.rb_mask.resize(max_nof_prb);
+    config.rb_mask.fill(allocation_first_prb, allocation_first_prb + allocation_nof_prb);
+    config.modulation                              = modulation_scheme::QPSK;
+    config.start_symbol_index                      = 0;
+    config.nof_symbols                             = nof_symbols;
+    config.dmrs_type                               = dmrs_config_type::type1;
+    config.nof_cdm_groups_without_data             = 2;
+    config.n_id                                    = 42;
+    config.nof_tx_layers                           = nof_layers;
+    config.dc_position                             = std::nullopt;
+    config.enable_transform_precoding              = false;
+    config.n_rapid                                 = std::nullopt;
+    for (unsigned i_port = 0; i_port != nof_ports; ++i_port) {
+      config.rx_ports.push_back(static_cast<uint8_t>(i_port));
+    }
+    config.dmrs_symb_pos.set(2);
+    config.dmrs_symb_pos.set(11);
+
+    recording_codeword_buffer buffer(2048);
+    notifier_double           notifier;
+    demodulator.demodulate(buffer, notifier, grid, est, config);
+    return buffer.llrs;
+  };
+
+  std::unique_ptr<pusch_demodulator> serial_demod   = make(false);
+  std::unique_ptr<pusch_demodulator> deferred_demod = make(true);
+
+  std::vector<log_likelihood_ratio> cpu_llrs   = run(*serial_demod);
+  std::vector<log_likelihood_ratio> metal_llrs = run(*deferred_demod);
+
+  ASSERT_EQ(cpu_llrs.size(), metal_llrs.size());
+  ASSERT_FALSE(cpu_llrs.empty());
+
+  unsigned nof_diff = 0;
+  unsigned first    = 0;
+  for (unsigned i = 0; i != cpu_llrs.size(); ++i) {
+    if (cpu_llrs[i] != metal_llrs[i]) {
+      if (nof_diff == 0) {
+        first = i;
+      }
+      ++nof_diff;
+    }
+  }
+  std::printf("[metal] partial-bandwidth PUSCH (17 of 25 PRB, 2 DM-RS symbols without data), "
+              "Metal kernels, deferred vs synchronous chain: %u of %u LLRs differ\n",
+              nof_diff,
+              static_cast<unsigned>(cpu_llrs.size()));
+  if (nof_diff != 0) {
+    std::printf("[metal] first difference at %u: cpu=%d metal=%d\n",
+                first,
+                cpu_llrs[first].to_int(),
+                metal_llrs[first].to_int());
+  }
+  EXPECT_EQ(nof_diff, 0U);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Concurrency: the uplink processor defers each PDU to an executor, so several demodulations run
+// at the same time, each with its own demodulator instance from the dependencies pool. The Metal
+// engines of those instances share the process-wide command queue, which is the last dimension the
+// single-threaded checks above cannot cover.
+// ---------------------------------------------------------------------------------------------
+
+TEST_F(pusch_demodulator_deferred_chain_test, concurrent_metal_demodulations_match_the_serial_chain)
+{
+  std::shared_ptr<channel_equalizer_factory> metal_eq_factory =
+      create_channel_equalizer_metal_factory(channel_equalizer_algorithm_type::mmse);
+  std::shared_ptr<demodulation_mapper_factory> metal_demod_factory = create_demodulation_mapper_metal_factory();
+  ASSERT_NE(metal_eq_factory, nullptr);
+  ASSERT_NE(metal_demod_factory, nullptr);
+  if (!metal_eq_factory->create()->supports_deferred_chain() || !metal_demod_factory->create()->supports_deferred_chain()) {
+    GTEST_SKIP() << "Metal deferred chain not available";
+  }
+
+  // A PDU of the over-the-air failing shape, one instance per concurrent worker.
+  struct worker_ctx {
+    unsigned                                          index = 0;
+    std::vector<log_likelihood_ratio>                 llrs;
+  };
+
+  constexpr unsigned nof_workers    = 4;
+  constexpr unsigned nof_iterations = 15;
+  const unsigned     allocation_first_prb = 4;
+  const unsigned     allocation_nof_prb   = 17;
+  const unsigned     nof_ports            = 2;
+  const unsigned     nof_layers           = 1;
+  const unsigned     nof_symbols          = 14;
+
+  auto build_config = [&](unsigned nof_prb_shift) {
+    pusch_demodulator::configuration config = {};
+    config.rnti                             = to_rnti(0x460e);
+    config.rb_mask.resize(max_nof_prb);
+    config.rb_mask.fill(allocation_first_prb + nof_prb_shift, allocation_first_prb + nof_prb_shift + allocation_nof_prb);
+    config.modulation                  = modulation_scheme::QPSK;
+    config.start_symbol_index          = 0;
+    config.nof_symbols                 = nof_symbols;
+    config.dmrs_type                   = dmrs_config_type::type1;
+    config.nof_cdm_groups_without_data = 2;
+    config.n_id                        = 42;
+    config.nof_tx_layers               = nof_layers;
+    config.dc_position                 = std::nullopt;
+    config.enable_transform_precoding  = false;
+    config.n_rapid                     = std::nullopt;
+    for (unsigned i_port = 0; i_port != nof_ports; ++i_port) {
+      config.rx_ports.push_back(static_cast<uint8_t>(i_port));
+    }
+    config.dmrs_symb_pos.set(2);
+    config.dmrs_symb_pos.set(11);
+    return config;
+  };
+
+  auto run_one = [&](pusch_demodulator& demodulator, const pusch_demodulator::configuration& config) {
+    const unsigned     nof_re_per_symbol = max_nof_prb * NOF_SUBCARRIERS_PER_RB;
+    grid_reader_double grid(nof_ports, MAX_NSYMB_PER_SLOT, nof_re_per_symbol);
+    est_results_double est(nof_ports, nof_layers, nof_re_per_symbol, 0.02F);
+    recording_codeword_buffer buffer(2048);
+    notifier_double           notifier;
+    demodulator.demodulate(buffer, notifier, grid, est, config);
+    return buffer.llrs;
+  };
+
+  // Reference: the same shape, synchronous chain, one PDU at a time.
+  std::vector<std::vector<log_likelihood_ratio>> reference(nof_workers);
+  for (unsigned w = 0; w != nof_workers; ++w) {
+    auto demodulator = std::make_unique<pusch_demodulator_impl>(
+        std::make_unique<synchronous_equalizer_double>(metal_eq_factory->create()),
+        std::make_unique<precoder_double>(),
+        std::make_unique<synchronous_demapper_double>(metal_demod_factory->create()),
+        evm_factory->create(),
+        prg_factory->create(),
+        max_nof_prb,
+        true);
+    reference[w] = run_one(*demodulator, build_config(w));
+  }
+
+  // Deferred chain, all workers at the same time.
+  // Create the demodulators (and therefore their Metal engines) before starting the threads, so
+  // an initialization race can be told apart from a run-time one.
+  std::vector<std::unique_ptr<pusch_demodulator>> demodulators;
+  for (unsigned w = 0; w != nof_workers; ++w) {
+    demodulators.push_back(std::make_unique<pusch_demodulator_impl>(metal_eq_factory->create(),
+                                                                   std::make_unique<precoder_double>(),
+                                                                   metal_demod_factory->create(),
+                                                                   evm_factory->create(),
+                                                                   prg_factory->create(),
+                                                                   max_nof_prb,
+                                                                   true));
+  }
+
+  std::atomic<unsigned> nof_diff{0};
+  std::atomic<unsigned> nof_detail{0};
+  std::vector<std::thread> threads;
+  for (unsigned w = 0; w != nof_workers; ++w) {
+    threads.emplace_back([&, w]() {
+      pusch_demodulator::configuration config = build_config(w);
+      for (unsigned it = 0; it != nof_iterations; ++it) {
+        std::vector<log_likelihood_ratio> llrs = run_one(*demodulators[w], config);
+        if (llrs != reference[w]) {
+          nof_diff.fetch_add(1, std::memory_order_relaxed);
+          if (nof_detail.fetch_add(1, std::memory_order_relaxed) < 3) {
+            unsigned nz_ref = 0;
+            unsigned nz_def = 0;
+            unsigned first  = 0;
+            for (unsigned i = 0; i != llrs.size(); ++i) {
+              nz_ref += (reference[w][i].to_int() == 0) ? 1 : 0;
+              nz_def += (llrs[i].to_int() == 0) ? 1 : 0;
+              if ((llrs[i] != reference[w][i]) && (first == 0)) {
+                first = i;
+              }
+            }
+            std::printf("[metal]   worker %u iteration %u: zeros ref=%u def=%u, first diff at %u (ref=%d def=%d)\n",
+                        w,
+                        it,
+                        nz_ref,
+                        nz_def,
+                        first,
+                        reference[w][first].to_int(),
+                        llrs[first].to_int());
+          }
+        }
+      }
+    });
+  }
+  for (std::thread& t : threads) {
+    t.join();
+  }
+
+  std::printf("[metal] concurrent deferred demodulations (%u workers x %u iterations): %u mismatching runs\n",
+              nof_workers,
+              nof_iterations,
+              nof_diff.load());
+  EXPECT_EQ(nof_diff.load(), 0U);
+}

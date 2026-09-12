@@ -454,6 +454,12 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
     }
 
     if (deferred_chain) {
+      // The demapping of the group reads the equalized symbols and their noise variances, which the
+      // equalization command buffers of this same group write. Waiting for the equalizer here - one
+      // wait per group - makes that hand-off independent of the command-queue ordering, which is
+      // not guaranteed once several demodulations share the process-wide queue.
+      equalizer->wait();
+
       // Pass 2: demap every symbol of the group. A whole OFDM symbol is dispatched as one command
       // buffer into its page-aligned staging region: how the codeword buffer splits a symbol into
       // blocks only materializes once its cursor advances, so that split is replayed by the

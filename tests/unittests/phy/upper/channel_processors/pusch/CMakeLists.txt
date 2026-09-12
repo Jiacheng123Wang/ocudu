@@ -23,11 +23,16 @@ target_link_libraries(pusch_processor_unittest ocudu_channel_processors ocudulog
 add_test(pusch_processor_unittest pusch_processor_unittest)
 
 add_executable(pusch_demodulator_deferred_chain_test pusch_demodulator_deferred_chain_test.cpp)
-target_include_directories(pusch_demodulator_deferred_chain_test PRIVATE ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_processors/pusch)
+target_include_directories(pusch_demodulator_deferred_chain_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_processors/pusch
+        ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_processors/metal
+        ${CMAKE_SOURCE_DIR}/lib/phy/upper/channel_modulation/metal)
 target_link_libraries(pusch_demodulator_deferred_chain_test
         ocudu_channel_equalizer
         ocudu_channel_modulation
         ocudu_channel_processors
+        ocudu_channel_processors_metal
+        ocudu_channel_modulation_metal
         ocudu_phy_support
         ocudu_sequence_generators
         ocudu_transform_precoding

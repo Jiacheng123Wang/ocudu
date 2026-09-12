@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <vector>
 #include <cstdlib>
 #include <mutex>
 #include <unordered_map>
@@ -118,7 +119,10 @@ struct demod_engine_impl {
   id<MTLCommandBuffer>         batch_cb  = nil;
   id<MTLComputeCommandEncoder> batch_enc = nil;
   unsigned                     batch_n   = 0;
-  id<MTLCommandBuffer>         last_committed = nil;
+  /// Command buffers committed and not waited for yet. Metal only serializes the *start* of the
+  /// command buffers of one queue and lets them overlap, so a wait has to cover every one of them
+  /// and not only the newest.
+  std::vector<id<MTLCommandBuffer>> outstanding;
   bool   last_call_no_copy = true; // false when any buffer of the last call was copied
   bool   no_copy_fallback_logged = false;
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
@@ -282,29 +286,32 @@ bool demod_metal_engine::commit_batch()
   [enc endEncoding];
   [cmd_buf commit];
   demod_stats_commit();
-  engine->last_committed = cmd_buf;
+  engine->outstanding.push_back(cmd_buf);
   return true;
 }
 
 bool demod_metal_engine::wait_committed()
 {
   demod_engine_impl* engine = static_cast<demod_engine_impl*>(impl);
-  if ((engine == nullptr) || (engine->last_committed == nil)) {
+  if ((engine == nullptr) || engine->outstanding.empty()) {
     return true;
   }
-  id<MTLCommandBuffer> cmd_buf = engine->last_committed;
-  engine->last_committed       = nil;
-  demod_stats_wait();
-  [cmd_buf waitUntilCompleted];
-  if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
-    ocudulog::fetch_basic_logger("PHY").error("Metal demapper: command buffer failed with status {}",
-                                              static_cast<unsigned long>(cmd_buf.status));
-    return false;
+  std::vector<id<MTLCommandBuffer>> outstanding;
+  outstanding.swap(engine->outstanding);
+  bool ok = true;
+  for (id<MTLCommandBuffer> cmd_buf : outstanding) {
+    demod_stats_wait();
+    [cmd_buf waitUntilCompleted];
+    if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
+      ocudulog::fetch_basic_logger("PHY").error("Metal demapper: command buffer failed with status {}",
+                                                static_cast<unsigned long>(cmd_buf.status));
+      ok = false;
+    }
+    if (cmd_buf.GPUStartTime > 0.0 && cmd_buf.GPUEndTime > 0.0) {
+      engine->last_gpu_us = (cmd_buf.GPUEndTime - cmd_buf.GPUStartTime) * 1e6;
+    }
   }
-  if (cmd_buf.GPUStartTime > 0.0 && cmd_buf.GPUEndTime > 0.0) {
-    engine->last_gpu_us = (cmd_buf.GPUEndTime - cmd_buf.GPUStartTime) * 1e6;
-  }
-  return true;
+  return ok;
 }
 
 bool demod_metal_engine::demodulate(const void* symbols,
