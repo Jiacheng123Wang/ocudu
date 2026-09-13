@@ -40,6 +40,9 @@ struct mmse_time_stats {
   std::atomic<uint64_t> stage_ns{0};
   std::atomic<uint64_t> submit_ns{0};
   std::atomic<uint64_t> unpack_ns{0};
+  std::atomic<uint64_t> completion_wait_ns{0};
+  std::atomic<uint64_t> completion_unpack_ns{0};
+  std::atomic<uint64_t> completion_fill_ns{0};
   std::atomic<uint64_t> sigma2_us{0};
   std::atomic<uint64_t> corr_us{0};
   std::atomic<uint64_t> deferred_wait_us{0};
@@ -97,7 +100,7 @@ void mmse_stats_register_atexit()
       };
       std::fprintf(stderr,
                    "[mmse_time_sum] calls=%llu hops_gpu=%llu hops_no_gpu=%llu hops_nn=%llu fb_blocks=%llu | "
-                   "mean total=%.1fus pre=%.2fus stage=%.2fus submit=%.2fus unpack=%.2fus sigma2=%.1fus corr=%.1fus gpu_path=%.1fus (gpu_wait=%.1fus) "
+                   "mean total=%.1fus pre=%.2fus stage=%.2fus submit=%.2fus unpack=%.2fus cpl_wait=%.1fus cpl_unpack=%.1fus cpl_fill=%.1fus sigma2=%.1fus corr=%.1fus gpu_path=%.1fus (gpu_wait=%.1fus) "
                    "cpu_blocks=%.1fus defer_wait=%.1fus | device_hops=%llu max total=%lluus\n",
                    static_cast<unsigned long long>(n),
                    static_cast<unsigned long long>(s.hops_gpu.load(std::memory_order_relaxed)),
@@ -109,6 +112,9 @@ void mmse_stats_register_atexit()
                    static_cast<double>(s.stage_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
                    static_cast<double>(s.submit_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
                    static_cast<double>(s.unpack_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
+                   static_cast<double>(s.completion_wait_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
+                   static_cast<double>(s.completion_unpack_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
+                   static_cast<double>(s.completion_fill_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
                    avg(s.sigma2_us),
                    avg(s.corr_us),
                    avg(s.gpu_path_us),
@@ -1578,7 +1584,16 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
   }
   stage_pending = false;
 
+#if defined(OCUDU_CE_TIME)
+  const auto t_wait_begin = std::chrono::steady_clock::now();
+#endif
   const bool ok = (engine == nullptr) || engine->wait_pending();
+#if defined(OCUDU_CE_TIME)
+  mmse_stats().completion_wait_ns.fetch_add(
+      static_cast<uint64_t>(
+          std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t_wait_begin).count() * 1e3),
+      std::memory_order_relaxed);
+#endif
 #if defined(OCUDU_CE_TIME)
   // The wait above is the rest of the GPU phase of a deferred hop: count it with everything the
   // stage measured before returning (see mmse_stats_accumulate()).
@@ -1613,16 +1628,38 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     deferred_fill.valid = false;
     return false;
   }
+#if defined(OCUDU_CE_TIME)
+  const auto t_unpack2_begin = std::chrono::steady_clock::now();
+#endif
   for (unsigned i = 0; i != nof_pending_unpacks; ++i) {
     const pending_unpack& u = pending_unpacks[i];
     unpack_engine_group(u.gb_start, u.n_blk, u.b_prb, u.nout, u.nof_layers, u.sys_offset, u.st);
   }
+#if defined(OCUDU_CE_TIME)
+  mmse_stats().completion_unpack_ns.fetch_add(
+      static_cast<uint64_t>(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() -
+                                                                     t_unpack2_begin)
+                                .count() *
+                            1e3),
+      std::memory_order_relaxed);
+#endif
   nof_pending_unpacks = 0;
 
   // The grid is complete now: derive the buffers the hop statistics are computed from.
   if (deferred_fill.valid) {
+#if defined(OCUDU_CE_TIME)
+    const auto t_fill_begin = std::chrono::steady_clock::now();
+#endif
     deferred_fill.fill(grid_est);
     deferred_fill.valid = false;
+#if defined(OCUDU_CE_TIME)
+    mmse_stats().completion_fill_ns.fetch_add(
+        static_cast<uint64_t>(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() -
+                                                                       t_fill_begin)
+                                  .count() *
+                              1e3),
+        std::memory_order_relaxed);
+#endif
   }
   return true;
 }
