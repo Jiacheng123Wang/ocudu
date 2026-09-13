@@ -22,6 +22,32 @@ public:
   static constexpr unsigned max_ports  = 8;
   static constexpr unsigned max_layers = 4;
 
+  /// \brief Where one dispatch reads its channel estimates from.
+  ///
+  /// The engine wraps \c buffer in the process-wide zero-copy cache and the kernel starts reading
+  /// \c offset elements into it, stepping \c layer_stride elements per transmission layer (a zero
+  /// \c layer_stride means "packed", i.e. nof_re). A caller that staged the estimates itself passes
+  /// its own pointer at offset zero; a caller consuming estimates another stage produced - the
+  /// channel estimator's device output - passes the very pointer that stage wrapped, so the two
+  /// bind the same Metal resource for the same memory instead of copying it through the host.
+  struct ch_est_binding {
+    /// Buffer base: the pointer the producing stage wrapped.
+    const void* buffer = nullptr;
+    /// First element of the packed layout, in cbf16_t elements from \c buffer.
+    unsigned offset = 0;
+    /// Elements between two consecutive transmission layers (0 = packed, i.e. nof_re).
+    unsigned layer_stride = 0;
+
+    ch_est_binding() = default;
+    /// Packed layout starting at \c ptr (the staging path).
+    ch_est_binding(const void* ptr) : buffer(ptr) {} // NOLINT(google-explicit-constructor)
+    /// Layout of a slice produced elsewhere: \c first_element from \c ptr, \c stride elements apart.
+    ch_est_binding(const void* ptr, unsigned first_element, unsigned stride) :
+      buffer(ptr), offset(first_element), layer_stride(stride)
+    {
+    }
+  };
+
   equalizer_metal_engine()  = default;
   ~equalizer_metal_engine();
 
@@ -33,9 +59,11 @@ public:
   bool init();
 
   /// \brief Synchronous equalization of one symbol batch.
-  /// \param[in]  h          Staged channel estimates, layout [port][layer][re], cbf16,
-  ///                        page-aligned. tx_scaling is applied by the caller on the
-  ///                        multi-layer path and left out on the single-layer path.
+  /// \param[in]  h          Channel estimates, layout [port][layer][re], cbf16. tx_scaling is
+  ///                        applied by the caller on the multi-layer path and left out on the
+  ///                        single-layer path. A staged buffer is page-aligned; estimates another
+  ///                        stage produced are passed as the slice that stage wrapped, see
+  ///                        ch_est_binding.
   /// \param[in]  y          Staged received symbols, layout [port][re], cbf16, page-aligned.
   /// \param[in]  sigma2     Staged per-port noise variances, float, page-aligned (used by
   ///                        the single-layer path only).
@@ -52,7 +80,7 @@ public:
   /// \param[in]  h_scaling  Channel estimate scaling applied in-kernel (multi-layer path;
   ///                        use 1 on the single-layer path).
   /// \return True on success.
-  bool equalize(const void* h,
+  bool equalize(const ch_est_binding& h,
                 const void* y,
                 const void* sigma2,
                 void*       eq,
@@ -71,7 +99,7 @@ public:
   /// and untouched until flush_batch() returns.
   /// \return True on success.
   bool begin_batch();
-  bool enqueue(const void* h,
+  bool enqueue(const ch_est_binding& h,
                const void* y,
                const void* sigma2,
                void*       eq,
@@ -92,7 +120,7 @@ public:
   /// \name Shared burst: the dispatch is appended to the command buffer that the following stages
   /// of the same demodulation share, so a whole burst costs one command buffer and one commit.
   ///@{
-  bool enqueue_burst(const void* h,
+  bool enqueue_burst(const ch_est_binding& h,
                      const void* y,
                      const void* sigma2,
                      void*       eq,
@@ -111,7 +139,7 @@ public:
   /// to enqueue_burst(), which is dispatched once per symbol.
   /// \param[in] strides Per-symbol element strides: h and y in cbf16 elements, eq in float2
   ///            elements, nv in floats.
-  bool enqueue_burst_batch(const void* h,
+  bool enqueue_burst_batch(const ch_est_binding& h,
                            const void* y,
                            const void* sigma2,
                            void*       eq,

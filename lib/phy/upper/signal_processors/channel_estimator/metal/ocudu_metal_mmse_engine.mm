@@ -165,6 +165,26 @@ struct mmse_engine_impl {
     return buf;
   }
 
+  /// \brief Zero-copy mapping of a buffer that another engine consumes (see
+  /// reserve_shared_buffer()).
+  ///
+  /// Unlike wrap(), which keeps an engine-private mapping, this one goes through the process-wide
+  /// cache every Metal engine shares: the stage that reads an exported tensor must bind the very
+  /// same Metal buffer object the producing stage wrote through. The shared cache rounds the length
+  /// up to a whole page and replaces its entry on a larger request, so exported buffers are
+  /// allocated page-rounded and reserved at capacity once, at construction.
+  id<MTLBuffer> wrap_shared(const void* ptr, NSUInteger bytes)
+  {
+    id<MTLBuffer> buf = metal::shared_queue::wrap_no_copy(device, ptr, static_cast<size_t>(bytes));
+    if (buf == nil) {
+      ocudulog::fetch_basic_logger("PHY").warning(
+          "MMSE engine: zero-copy wrap of the exported buffer {} ({} bytes) failed",
+          ptr,
+          static_cast<unsigned long long>(bytes));
+    }
+    return buf;
+  }
+
   bool load_library(const char* path)
   {
     NSError* err = nil;
@@ -249,7 +269,7 @@ static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
       (reformat->total_re != 0)) {
     const NSUInteger dst_bytes =
         static_cast<NSUInteger>(reformat->nof_layers) * reformat->total_re * 2 * sizeof(uint16_t);
-    id<MTLBuffer> dst_buf = e->wrap(reformat->dst, dst_bytes);
+    id<MTLBuffer> dst_buf = e->wrap_shared(reformat->dst, dst_bytes);
     if (dst_buf != nil) {
       struct mmse_reformat_params {
         uint32_t nout_stride;
@@ -313,7 +333,7 @@ static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
         static_cast<NSUInteger>(noise.npt) * noise.nof_cdm_groups * noise.npf * 2 * sizeof(float);
     id<MTLBuffer> pilots_buf = e->wrap(noise.pilots, pilots_bytes);
     id<MTLBuffer> rx_buf     = e->wrap(noise.rx_pilots, rx_bytes);
-    id<MTLBuffer> nv_buf     = e->wrap(noise.nv, sizeof(float));
+    id<MTLBuffer> nv_buf     = e->wrap_shared(noise.nv, sizeof(float));
     if (pilots_buf != nil && rx_buf != nil && nv_buf != nil) {
       struct mmse_noise_params {
         uint32_t nout_stride;
@@ -852,6 +872,15 @@ bool mmse_engine::reserve_buffer(const void* ptr, std::size_t bytes)
     return false;
   }
   return e->wrap(ptr, static_cast<NSUInteger>(bytes)) != nil;
+}
+
+bool mmse_engine::reserve_shared_buffer(const void* ptr, std::size_t bytes)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if ((e == nullptr) || (e->device == nil) || (ptr == nullptr) || (bytes == 0)) {
+    return false;
+  }
+  return e->wrap_shared(ptr, static_cast<NSUInteger>(bytes)) != nil;
 }
 
 double mmse_engine::last_gpu_wait_us() const

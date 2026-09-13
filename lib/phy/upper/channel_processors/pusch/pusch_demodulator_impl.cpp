@@ -710,7 +710,7 @@ pusch_demodulator_impl::get_ch_data_estimates(const dmrs_pusch_estimator_results
           device_ok = false;
           break;
         }
-        device_ch_estimates.set_channel(i_port, i_layer, ch);
+        device_ch_estimates.set_channel(i_port, i_layer, ch, view->data);
       }
     }
     if (device_ok) {

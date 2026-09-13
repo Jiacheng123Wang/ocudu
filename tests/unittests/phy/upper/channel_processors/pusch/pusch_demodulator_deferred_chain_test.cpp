@@ -23,6 +23,7 @@
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_demodulator_notifier.h"
 #include "ocudu/phy/upper/equalization/channel_equalizer.h"
 #include "ocudu/phy/upper/equalization/equalization_factories.h"
+#include "channel_equalizer_metal.h"
 #include "channel_equalizer_metal_factory.h"
 #include "demodulation_mapper_metal_factory.h"
 #include "ocudu/phy/upper/sequence_generators/sequence_generator_factories.h"
@@ -641,10 +642,10 @@ TEST_F(pusch_demodulator_deferred_chain_test, device_ch_estimates_match_the_host
     unsigned                nof_cdm_groups_without_data;
     std::optional<unsigned> dc_position;
   };
-  const std::array<test_case, 3> cases = {{{12, 2, 1, std::nullopt},
+  const std::array<test_case, 4> cases = {{{12, 1, 1, std::nullopt},
+                                           {12, 2, 1, std::nullopt},
                                            {12, 2, 2, std::nullopt},
                                            {12, 2, 1, 7 * NOF_SUBCARRIERS_PER_RB + 3}}};
-
   for (const test_case& test : cases) {
     for (bool deferred : {false, true}) {
       pusch_demodulator::configuration config = make_config(modulation_scheme::QAM16,
@@ -655,12 +656,20 @@ TEST_F(pusch_demodulator_deferred_chain_test, device_ch_estimates_match_the_host
                                                             false);
       config.dc_position = test.dc_position;
 
+      const unsigned device_before = channel_equalizer_metal::nof_device_ch_est_dispatches();
+      const unsigned staged_before = channel_equalizer_metal::nof_staged_ch_est_dispatches();
+
       const result_t host = run(deferred, config, /*device_estimates=*/false);
       const result_t dev  = run(deferred, config, /*device_estimates=*/true);
 
       // The comparison is only meaningful if the device run really used the device views.
       ASSERT_EQ(host.nof_device_queries, 0U);
       ASSERT_GT(dev.nof_device_queries, 0U) << "the device channel-estimate path was not taken";
+      // This fixture runs the CPU equalizer, so no binding happens here and the counters must stay
+      // put: the zero-copy path is asserted where the Metal backend runs
+      // (metal_equalizer_binds_the_estimator_device_buffer).
+      ASSERT_EQ(channel_equalizer_metal::nof_device_ch_est_dispatches(), device_before);
+      ASSERT_EQ(channel_equalizer_metal::nof_staged_ch_est_dispatches(), staged_before);
       ASSERT_EQ(host.events.size(), dev.events.size());
       ASSERT_EQ(host.nof_softbits, dev.nof_softbits);
       unsigned nof_checked = 0;
@@ -1085,4 +1094,81 @@ TEST_F(pusch_demodulator_deferred_chain_test, concurrent_metal_demodulations_mat
               nof_iterations,
               nof_diff.load());
   EXPECT_EQ(nof_diff.load(), 0U);
+}
+
+TEST_F(pusch_demodulator_deferred_chain_test, metal_equalizer_binds_the_estimator_device_buffer)
+{
+  // The zero-copy target of the device-estimate path: with a single receive port the equalizer
+  // binds the buffer the estimator produced the estimates in, so they are read where the GPU wrote
+  // them and never travel through host memory. Wire it end to end - estimator double with a device
+  // view, demodulator, Metal equalizer - and prove both halves: the soft bits are unchanged, and
+  // the binding really happened. Both sources produce the same soft bits, so only the counters can
+  // tell them apart; the multi-port case checks the other side of the guard (one buffer per port
+  // cannot be described by a single dispatch, so those keep staging).
+  std::shared_ptr<channel_equalizer_factory> metal_eq_factory =
+      create_channel_equalizer_metal_factory(channel_equalizer_algorithm_type::mmse);
+  std::shared_ptr<demodulation_mapper_factory> metal_demod_factory = create_demodulation_mapper_metal_factory();
+  ASSERT_NE(metal_eq_factory, nullptr);
+  ASSERT_NE(metal_demod_factory, nullptr);
+  if (!metal_eq_factory->create()->supports_deferred_chain() ||
+      !metal_demod_factory->create()->supports_deferred_chain()) {
+    GTEST_SKIP() << "Metal deferred chain not available";
+  }
+
+  const unsigned nof_symbols = 12;
+
+  auto run = [&](unsigned nof_ports, bool device_estimates) {
+    pusch_demodulator::configuration config =
+        make_config(modulation_scheme::QAM16, 1, nof_ports, nof_symbols, 1, false);
+    const unsigned     nof_re_per_symbol = max_nof_prb * NOF_SUBCARRIERS_PER_RB;
+    grid_reader_double grid(nof_ports, MAX_NSYMB_PER_SLOT, nof_re_per_symbol);
+    est_results_double est(nof_ports, 1, nof_re_per_symbol, 0.02F);
+    if (device_estimates) {
+      est.enable_device_view(config);
+    }
+    recording_codeword_buffer buffer(4096);
+    notifier_double           notifier;
+    pusch_demodulator_impl    demodulator(metal_eq_factory->create(),
+                                       std::make_unique<precoder_double>(),
+                                       metal_demod_factory->create(),
+                                       evm_factory->create(),
+                                       prg_factory->create(),
+                                       max_nof_prb,
+                                       true);
+    demodulator.demodulate(buffer, notifier, grid, est, config);
+    return buffer.llrs;
+  };
+
+  for (unsigned nof_ports : {1U, 2U}) {
+    const unsigned device_before = channel_equalizer_metal::nof_device_ch_est_dispatches();
+    const unsigned staged_before = channel_equalizer_metal::nof_staged_ch_est_dispatches();
+    const auto     host          = run(nof_ports, /*device_estimates=*/false);
+    const unsigned host_device   = channel_equalizer_metal::nof_device_ch_est_dispatches() - device_before;
+    const unsigned host_staged   = channel_equalizer_metal::nof_staged_ch_est_dispatches() - staged_before;
+
+    const unsigned device_mid = channel_equalizer_metal::nof_device_ch_est_dispatches();
+    const unsigned staged_mid = channel_equalizer_metal::nof_staged_ch_est_dispatches();
+    const auto     dev        = run(nof_ports, /*device_estimates=*/true);
+    const unsigned dev_device = channel_equalizer_metal::nof_device_ch_est_dispatches() - device_mid;
+    const unsigned dev_staged = channel_equalizer_metal::nof_staged_ch_est_dispatches() - staged_mid;
+
+    // The reference run gathered the estimates, as it must: the counters are not vacuous.
+    ASSERT_EQ(host_device, 0U);
+    ASSERT_GT(host_staged, 0U);
+    if (nof_ports == 1) {
+      ASSERT_GT(dev_device, 0U) << "the estimates were not bound where they were produced";
+      ASSERT_EQ(dev_staged, 0U) << "the single-port case must not gather the estimates";
+    } else {
+      ASSERT_EQ(dev_device, 0U) << "more than one port is one buffer per port: not bindable yet";
+      ASSERT_GT(dev_staged, 0U);
+    }
+
+    ASSERT_FALSE(dev.empty());
+    ASSERT_EQ(host.size(), dev.size());
+    for (unsigned i = 0; i != host.size(); ++i) {
+      ASSERT_EQ(host[i].to_int(), dev[i].to_int())
+          << "soft bit " << i << " differs between the staged and the bound channel estimates ("
+          << nof_ports << " port(s))";
+    }
+  }
 }

@@ -28,7 +28,36 @@ struct shared_queue_state {
   id<MTLCommandBuffer>             last_committed = nil; // newest commit of the pending chain
   uint64_t                         commits        = 0;
   uint64_t                         pending        = 0;
+  /// Zero-copy wrap-cache accounting (see the [metal_stats] report below): a hit means two stages
+  /// of the chain bind the SAME Metal buffer object for one address, which is what relates their
+  /// accesses to it; a replace means a stage asked for more than the cached mapping and got a
+  /// different object instead.
+  uint64_t wrap_hits     = 0;
+  uint64_t wrap_creates  = 0;
+  uint64_t wrap_replaces = 0;
+  /// Requests the platform refused to map (the pointer is not page-aligned, or the mapping failed):
+  /// the caller staged the buffer through a copy instead, which is correct but is not zero-copy.
+  uint64_t wrap_failures = 0;
 };
+
+shared_queue_state& state();
+
+#if defined(OCUDU_METAL_STATS)
+void shared_queue_stats_report()
+{
+  shared_queue_state& s = state();
+  std::fprintf(stderr, "[metal_stats] wrap hits=%llu creates=%llu replaces=%llu failures=%llu\n",
+               static_cast<unsigned long long>(s.wrap_hits),
+               static_cast<unsigned long long>(s.wrap_creates),
+               static_cast<unsigned long long>(s.wrap_replaces),
+               static_cast<unsigned long long>(s.wrap_failures));
+}
+
+const bool shared_queue_stats_registered = []() {
+  std::atexit(shared_queue_stats_report);
+  return true;
+}();
+#endif
 
 shared_queue_state& state()
 {
@@ -57,18 +86,25 @@ id<MTLBuffer> shared_queue::wrap_no_copy(id<MTLDevice> device, const void* ptr, 
   auto                        it = s.wrap_cache.find(ptr);
   if (it != s.wrap_cache.end()) {
     if (it->second.second >= aligned) {
+      ++s.wrap_hits;
       return it->second.first;
     }
-    // The cached mapping is smaller than what this call needs: replace it.
+    // The cached mapping is smaller than what this call needs: replace it. The object handed out
+    // so far stays alive (its owner and any command buffer referencing it retain it), so a stage
+    // that wrapped the same address earlier keeps binding the older, smaller object - see the wrap
+    // accounting in the [metal_stats] report.
     s.wrap_cache.erase(it);
+    ++s.wrap_replaces;
   }
   id<MTLBuffer> buf = [device newBufferWithBytesNoCopy:(void*)ptr
                                                length:aligned
                                               options:MTLResourceStorageModeShared
                                           deallocator:nil];
   if (buf == nil) {
+    ++s.wrap_failures;
     return nil;
   }
+  ++s.wrap_creates;
   s.wrap_cache[ptr] = std::make_pair(buf, aligned);
   return buf;
 }

@@ -33,6 +33,39 @@ bool is_page_aligned_buffer(const void* ptr)
   return (ptr != nullptr) && ((reinterpret_cast<uintptr_t>(ptr) % compat::page_size()) == 0);
 }
 
+/// \name Which source the channel estimates of a dispatch were read from (S-6c-2, diagnostics).
+///
+/// `device` counts the dispatches that bound the buffer the estimator produced the estimates in,
+/// `staged` the ones that gathered them into the equalizer's own staging first. The device path is
+/// what keeps the estimates off the host, so a regression to `staged` shows up here - including the
+/// RE-count guard of the demodulator falling back when the two layouts disagree. The counts are
+/// kept in every build (one relaxed atomic increment per dispatch) because the fallback is
+/// otherwise unobservable: both sources produce the same soft bits.
+///@{
+struct ch_est_source_counters {
+  std::atomic<uint64_t> device{0};
+  std::atomic<uint64_t> staged{0};
+};
+
+ch_est_source_counters& ch_est_source()
+{
+  static ch_est_source_counters c;
+  return c;
+}
+
+#if defined(OCUDU_METAL_STATS)
+const bool ch_est_source_registered = []() {
+  std::atexit([]() {
+    std::fprintf(stderr,
+                 "[metal_stats] equalizer ch_est device=%llu staged=%llu\n",
+                 static_cast<unsigned long long>(ch_est_source().device.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(ch_est_source().staged.load(std::memory_order_relaxed)));
+  });
+  return true;
+}();
+#endif
+///@}
+
 } // namespace
 
 void channel_equalizer_metal::staging::swap(staging& other) noexcept
@@ -394,7 +427,22 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
   const size_t nv_bytes = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
 
-  auto*        h_ptr    = static_cast<cbf16_t*>(entry.h.ensure(h_bytes));
+  // Channel estimates: one dispatch reads the estimates of every used port and layer. When there is
+  // a single used port and the estimator published them as a device slice of the buffer it produced
+  // them in, bind that buffer - the estimates are then read where the GPU wrote them, and the hop
+  // never touches them on the host. Otherwise gather them into the staging buffer as before.
+  metal::equalizer_metal_engine::ch_est_binding h_binding;
+  bool                                         h_device = false;
+  if (single_layer && (nof_used_ports == 1)) {
+    std::optional<ch_est_list::device_slice> slice = ch_estimates.get_device_slice(port_map[0]);
+    if (slice.has_value() && (slice->nof_layers == nof_layers) && (slice->base != nullptr)) {
+      h_binding = metal::equalizer_metal_engine::ch_est_binding(slice->base, static_cast<unsigned>(slice->offset),
+                                                                slice->layer_stride);
+      h_device  = true;
+    }
+  }
+
+  auto*        h_ptr    = h_device ? nullptr : static_cast<cbf16_t*>(entry.h.ensure(h_bytes));
   auto*        y_ptr    = static_cast<cbf16_t*>(entry.y.ensure(y_bytes));
   auto*        s_ptr    = static_cast<float*>(entry.s.ensure(s_bytes));
   const bool   eq_direct = is_page_aligned_buffer(eq_symbols.data());
@@ -407,15 +455,21 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
     std::memcpy(y_ptr + static_cast<size_t>(i_used) * nof_re,
                 ch_symbols.get_slice(i_port).data(),
                 static_cast<size_t>(nof_re) * sizeof(cbf16_t));
-    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-      std::memcpy(h_ptr + (static_cast<size_t>(i_used) * nof_layers + i_layer) * nof_re,
-                  ch_estimates.get_channel(i_port, i_layer).data(),
-                  static_cast<size_t>(nof_re) * sizeof(cbf16_t));
+    if (!h_device) {
+      for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+        std::memcpy(h_ptr + (static_cast<size_t>(i_used) * nof_layers + i_layer) * nof_re,
+                    ch_estimates.get_channel(i_port, i_layer).data(),
+                    static_cast<size_t>(nof_re) * sizeof(cbf16_t));
+      }
     }
     if (single_layer) {
       s_ptr[i_used] = noise_var_estimates[i_port];
     }
   }
+  if (!h_device) {
+    h_binding = metal::equalizer_metal_engine::ch_est_binding(h_ptr);
+  }
+  (h_device ? ch_est_source().device : ch_est_source().staged).fetch_add(1, std::memory_order_relaxed);
   // The single-layer kernel reads a per-port noise variance array; keep it defined (and
   // cached) even when the multi-layer path does not use it.
   if (!single_layer) {
@@ -427,7 +481,7 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   if (defer) {
     // Append the dispatch to the shared burst of this group: every stage of the burst ends up in
     // one command buffer, with a memory barrier where the pipeline changes (see shared_burst).
-    const bool ok = impl_->engine.enqueue_burst(h_ptr,
+    const bool ok = impl_->engine.enqueue_burst(h_binding,
                                                 y_ptr,
                                                 s_ptr,
                                                 eq_ptr,
@@ -467,7 +521,7 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
     (void)impl_->engine.burst_wait_committed();
   }
   (void)impl_->engine.begin_batch();
-  const bool ok = impl_->engine.enqueue(h_ptr,
+  const bool ok = impl_->engine.enqueue(h_binding,
                                        y_ptr,
                                        s_ptr,
                                        eq_ptr,
@@ -531,4 +585,14 @@ double channel_equalizer_metal::engine_gpu_wait_us() const
 unsigned channel_equalizer_metal::engine_batch_dispatch_count() const
 {
   return impl_->engine.batch_dispatch_count();
+}
+
+unsigned channel_equalizer_metal::nof_device_ch_est_dispatches()
+{
+  return static_cast<unsigned>(ch_est_source().device.load(std::memory_order_relaxed));
+}
+
+unsigned channel_equalizer_metal::nof_staged_ch_est_dispatches()
+{
+  return static_cast<unsigned>(ch_est_source().staged.load(std::memory_order_relaxed));
 }

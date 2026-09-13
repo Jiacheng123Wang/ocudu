@@ -148,6 +148,19 @@ T* alloc_aligned(std::size_t n)
   return new (std::align_val_t(4096)) T[n]();
 }
 
+/// \brief 4KB-aligned allocation that owns a whole number of pages.
+///
+/// Required by the buffers another engine consumes: the process-wide zero-copy mapping rounds the
+/// length up to a whole page, so a buffer that only owns part of its last page would be mapped past
+/// its end (see mmse_engine::reserve_shared_buffer()).
+template <typename T>
+T* alloc_aligned_pages(std::size_t n)
+{
+  constexpr std::size_t page = 4096;
+  const std::size_t     bytes = ((n * sizeof(T) + page - 1) / page) * page;
+  return new (std::align_val_t(4096)) T[bytes / sizeof(T)]();
+}
+
 template <typename T>
 void free_aligned(T* p)
 {
@@ -199,10 +212,10 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // The demodulator consumes these estimates (S-6b), so the device path is the default;
   // OCUDU_CE_CPU_CE=1 keeps both sides on the per-symbol host gather for A/B.
   device_ce_enabled = (std::getenv("OCUDU_CE_CPU_CE") == nullptr);
-  gpu_ce    = alloc_aligned<uint16_t>(static_cast<std::size_t>(MAX_LAYERS) * MAX_NOF_PRBS *
-                                   NOF_SUBCARRIERS_PER_RB * MAX_NSYMB_PER_SLOT * 2);
+  gpu_ce    = alloc_aligned_pages<uint16_t>(static_cast<std::size_t>(MAX_LAYERS) * MAX_NOF_PRBS *
+                                         NOF_SUBCARRIERS_PER_RB * MAX_NSYMB_PER_SLOT * 2);
   // K4 (S-6c-0): the device noise variance and its pilot inputs (2 floats per complex sample).
-  gpu_nv        = alloc_aligned<float>(1);
+  gpu_nv        = alloc_aligned_pages<float>(1);
   gpu_pilots    = alloc_aligned<float>(2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * MAX_LAYERS *
                                     MAX_NOF_PILOTS_SYMBOL);
   // One CDM group per pair of layers (type-1 DM-RS), so at most MAX_LAYERS / 2 of them.
@@ -240,17 +253,20 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // The device-side stages (K3/K4) read and write staging buffers whose size follows the
   // allocation, so reserve their zero-copy mappings at capacity here: without this, every hop that
   // needs more than the first allocation seen re-wraps a Metal buffer on the hot path.
+  // K3's output (the estimates) and K4's output (the noise variance) are exported: the equalizer
+  // binds them, so they are mapped in the process-wide cache every engine shares and the consuming
+  // stage binds the same Metal buffer object these kernels wrote through.
   if (engine_ready) {
-    (void)engine->reserve_buffer(gpu_ce,
-                                 static_cast<std::size_t>(MAX_LAYERS) * MAX_NOF_PRBS * NOF_SUBCARRIERS_PER_RB *
-                                     MAX_NSYMB_PER_SLOT * 2 * sizeof(uint16_t));
+    (void)engine->reserve_shared_buffer(gpu_ce,
+                                        static_cast<std::size_t>(MAX_LAYERS) * MAX_NOF_PRBS *
+                                            NOF_SUBCARRIERS_PER_RB * MAX_NSYMB_PER_SLOT * 2 * sizeof(uint16_t));
     (void)engine->reserve_buffer(
         gpu_pilots,
         2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * MAX_LAYERS * MAX_NOF_PILOTS_SYMBOL * sizeof(float));
     (void)engine->reserve_buffer(
         gpu_rx_pilots,
         2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * (MAX_LAYERS / 2) * MAX_NOF_PILOTS_SYMBOL * sizeof(float));
-    (void)engine->reserve_buffer(gpu_nv, sizeof(float));
+    (void)engine->reserve_shared_buffer(gpu_nv, sizeof(float));
   }
 
   // The matrix kernels need their own warm-up (JIT + zero-copy cache entry sized

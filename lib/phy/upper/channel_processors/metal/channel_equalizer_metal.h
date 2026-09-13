@@ -63,6 +63,20 @@ public:
   /// Number of batched group dispatches encoded so far (diagnostics; see submit_group()).
   unsigned engine_batch_dispatch_count() const;
 
+  /// \name Channel-estimate source accounting (diagnostics; see run_equalize()).
+  ///
+  /// The counts separate the two sources a dispatch can read its channel estimates from: the buffer
+  /// the channel estimator produced them in (bound directly, so they never reach the host) and the
+  /// equalizer's own staging buffer. They are kept in every build - the cost is one relaxed atomic
+  /// increment per dispatch, against a dispatch that costs microseconds - because a fallback to
+  /// staging is otherwise invisible: it produces the same soft bits.
+  ///@{
+  /// Dispatches that bound the estimator's own buffer for the estimates.
+  static unsigned nof_device_ch_est_dispatches();
+  /// Dispatches that gathered the estimates into the equalizer staging buffer first.
+  static unsigned nof_staged_ch_est_dispatches();
+  ///@}
+
 private:
   /// \brief Page-aligned staging buffer, grown on demand and kept across calls.
   ///

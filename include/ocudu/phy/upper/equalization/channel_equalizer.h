@@ -11,6 +11,9 @@
 #include "ocudu/adt/span.h"
 #include "ocudu/phy/support/re_buffer.h"
 
+#include <cstddef>
+#include <optional>
+
 namespace ocudu {
 
 /// \brief Channel equalizer interface.
@@ -38,6 +41,33 @@ public:
 
     /// Gets the number of transmit layers.
     virtual unsigned get_nof_tx_layers() const = 0;
+
+    /// \brief Device-resident storage of the estimates of one receive port.
+    ///
+    /// The coefficients of every transmission layer of one OFDM symbol live in a single backend
+    /// buffer - typically the one the channel estimator produced them in - starting at \c offset
+    /// elements from \c base, \c layer_stride elements apart. A GPU backend binds that buffer
+    /// instead of gathering the coefficients into its own staging, so the estimates are read where
+    /// they were produced and never travel through host memory.
+    struct device_slice {
+      /// Buffer base, as wrapped by the stage that owns it.
+      const void* base = nullptr;
+      /// First coefficient of the first layer, in \c cbf16_t elements from \c base.
+      std::size_t offset = 0;
+      /// Number of coefficients between two consecutive layers.
+      unsigned layer_stride = 0;
+      /// Number of layers the slice holds.
+      unsigned nof_layers = 0;
+    };
+
+    /// \brief Gets the device-resident storage of one receive port, if there is one.
+    ///
+    /// \note The default implementation reports "not available": a list that gathers the
+    /// coefficients into host memory, or a backend that reads them from there, is unaffected.
+    virtual std::optional<device_slice> get_device_slice(unsigned /*i_rx_port*/) const
+    {
+      return std::nullopt;
+    }
   };
 
   /// Default destructor.

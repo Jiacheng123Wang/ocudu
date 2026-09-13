@@ -30,6 +30,8 @@ struct equalize_params {
     float noise_var;    // noise variance estimate (max across ports, multi-layer path)
     float tx_scaling;   // single-layer path: folded into the pseudo-inverse denominator
     float h_scaling;    // multi-layer path: scales the channel estimates (1 on the single-layer path)
+    uint  h_offset;     // first channel estimate of the dispatch, in cbf16_t elements
+    uint  h_layer_stride; // elements between two consecutive transmission layers
 };
 
 // bf16 (cbf16_t) widening: the value is the upper half of the IEEE-754 single, so the
@@ -43,6 +45,15 @@ static inline float2 load_cbf16(device const ushort2* p, uint idx)
 {
     const ushort2 v = p[idx];
     return float2(bf16_to_f(v.x), bf16_to_f(v.y));
+}
+
+// Channel estimate of one port and layer. The caller either staged the estimates packed as
+// [port][layer][re] (offset 0, layer stride nof_re) or bound the buffer they were produced in - the
+// channel estimator's device output, whose layers are total_re apart and whose symbol starts at an
+// offset inside it - so the layout travels in the parameters instead of being copied into one.
+static inline float2 load_h(device const ushort2* h, constant equalize_params& p, uint port, uint layer, uint re)
+{
+    return load_cbf16(h, p.h_offset + (port * p.nof_layers + layer) * p.h_layer_stride + re) * p.h_scaling;
 }
 
 // Complex multiply / multiply-conjugate helpers.
@@ -121,7 +132,7 @@ kernel void equalize_mxn(device const ushort2* h [[buffer(0)]], // cbf16 [port][
     float2 H[MAX_PORTS][MAX_LAYERS];
     for (uint port = 0; port != P; ++port) {
         for (uint layer = 0; layer != L; ++layer) {
-            H[port][layer] = load_cbf16(h, ((port * L + layer) * p.nof_re) + re) * p.h_scaling;
+            H[port][layer] = load_h(h, p, port, layer, re);
         }
     }
 
@@ -290,7 +301,7 @@ kernel void equalize_mxn_batch(device const ushort2* h [[buffer(0)]], // cbf16 [
     float2 H[MAX_PORTS][MAX_LAYERS];
     for (uint port = 0; port != P; ++port) {
         for (uint layer = 0; layer != L; ++layer) {
-            H[port][layer] = load_cbf16(h, ((port * L + layer) * p.nof_re) + re) * p.h_scaling;
+            H[port][layer] = load_h(h, p, port, layer, re);
         }
     }
 

@@ -240,6 +240,22 @@ public:
   /// \return True when the mapping exists.
   bool reserve_buffer(const void* ptr, std::size_t bytes);
 
+  /// \brief Reserves the zero-copy mapping of a buffer that another engine consumes.
+  ///
+  /// The estimator's own staging buffers are internal: only this engine binds them, so an
+  /// engine-private mapping is enough (reserve_buffer()). The tensors a later stage of the chain
+  /// reads - the K3 estimates and the K4 noise variance, both of which the equalizer binds - are
+  /// not: Metal only relates the accesses of two dispatches through the resource they are bound to,
+  /// so the producing stage and the consuming stage must bind the same Metal buffer object. Those
+  /// buffers are mapped in the process-wide cache that every Metal engine shares
+  /// (metal::shared_queue::wrap_no_copy), which is keyed by pointer and hands the same object to
+  /// every caller.
+  ///
+  /// \note The shared mapping rounds the length up to a whole page, so an exported buffer must own
+  /// a whole number of pages - the estimator allocates them page-rounded for this reason.
+  /// \return True when the mapping exists.
+  bool reserve_shared_buffer(const void* ptr, std::size_t bytes);
+
   /// Returns the GPU-side duration of the last operation in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;
 

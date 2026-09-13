@@ -130,7 +130,43 @@ struct equalize_params_t {
   float    noise_var;
   float    tx_scaling;
   float    h_scaling;
+  /// First element of the channel estimates, in cbf16_t elements (see ch_est_binding).
+  uint32_t h_offset;
+  /// Elements between two consecutive transmission layers.
+  uint32_t h_layer_stride;
 };
+
+/// Bytes the kernel may read from a channel-estimate binding: its offset plus every port and layer
+/// it holds, stride included.
+static size_t ch_est_binding_bytes(const equalizer_metal_engine::ch_est_binding& h,
+                                   unsigned                                      nof_ports,
+                                   unsigned                                      nof_layers,
+                                   unsigned                                      nof_re)
+{
+  const size_t stride = (h.layer_stride != 0) ? h.layer_stride : nof_re;
+  return (static_cast<size_t>(h.offset) + static_cast<size_t>(nof_ports) * nof_layers * stride) * sizeof(cbf16_t);
+}
+
+/// Kernel parameters of one dispatch: the binding carries its own layout (see ch_est_binding_bytes).
+static equalize_params_t make_params(const equalizer_metal_engine::ch_est_binding& h,
+                                     unsigned                                      nof_re,
+                                     unsigned                                      nof_ports,
+                                     unsigned                                      nof_layers,
+                                     bool                                          mmse,
+                                     float                                         noise_var,
+                                     float                                         tx_scaling,
+                                     float                                         h_scaling)
+{
+  return equalize_params_t{nof_re,
+                           nof_ports,
+                           nof_layers,
+                           mmse ? 1u : 0u,
+                           noise_var,
+                           tx_scaling,
+                           h_scaling,
+                           h.offset,
+                           (h.layer_stride != 0) ? h.layer_stride : nof_re};
+}
 
 struct eq_engine_impl {
   double last_gpu_us = 0.0;
@@ -255,7 +291,7 @@ bool equalizer_metal_engine::begin_batch()
   return engine->batch_enc != nil;
 }
 
-bool equalizer_metal_engine::enqueue(const void* h,
+bool equalizer_metal_engine::enqueue(const ch_est_binding& h,
                                      const void* y,
                                      const void* sigma2,
                                      void*       eq,
@@ -273,7 +309,7 @@ bool equalizer_metal_engine::enqueue(const void* h,
     return false;
   }
   // cbf16_t inputs: 4 bytes per complex sample, widened inside the kernel.
-  const size_t h_bytes = static_cast<size_t>(nof_ports) * nof_layers * nof_re * 4;
+  const size_t h_bytes = ch_est_binding_bytes(h, nof_ports, nof_layers, nof_re);
   const size_t y_bytes = static_cast<size_t>(nof_ports) * nof_re * 4;
   const size_t s_bytes = static_cast<size_t>(nof_ports) * sizeof(float);
   const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
@@ -281,7 +317,7 @@ bool equalizer_metal_engine::enqueue(const void* h,
   // wrap_buffer() clears this flag when a no-copy wrap falls back to a copy. Reset it before the
   // wraps (not after, where it would overwrite the outcome) so the diagnostic reports the truth.
   engine->last_call_no_copy = true;
-  id<MTLBuffer> b_h  = wrap_buffer(engine, h, h_bytes);
+  id<MTLBuffer> b_h  = wrap_buffer(engine, h.buffer, h_bytes);
   id<MTLBuffer> b_y  = wrap_buffer(engine, y, y_bytes);
   id<MTLBuffer> b_s  = wrap_buffer(engine, sigma2, s_bytes);
   id<MTLBuffer> b_eq = wrap_buffer(engine, eq, eq_bytes);
@@ -289,7 +325,8 @@ bool equalizer_metal_engine::enqueue(const void* h,
   if (b_h == nil || b_y == nil || b_s == nil || b_eq == nil || b_nv == nil) {
     return false;
   }
-  equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, tx_scaling, h_scaling};
+  const equalize_params_t params =
+      make_params(h, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling);
   id<MTLComputeCommandEncoder> enc = engine->batch_enc;
   [enc setBuffer:b_h offset:0 atIndex:0];
   [enc setBuffer:b_y offset:0 atIndex:1];
@@ -310,7 +347,7 @@ bool equalizer_metal_engine::batch_open() const
 
 /// One equalization the deferred path accumulated instead of encoding one dispatch per symbol.
 struct eq_pending_t {
-  const void* h         = nullptr;
+  equalizer_metal_engine::ch_est_binding h;
   const void* y         = nullptr;
   const void* sigma2    = nullptr;
   void*       eq        = nullptr;
@@ -385,6 +422,10 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
                              (next.nof_layers == head.nof_layers) && (next.mmse == head.mmse) &&
                              (next.noise_var == head.noise_var) && (next.tx_scaling == head.tx_scaling) &&
                              (next.h_scaling == head.h_scaling);
+      // The group staging below copies the estimates of every symbol of the run, so a run can only
+      // hold symbols whose estimates are laid out the same way. That includes the device slices of
+      // K3: two symbols of one hop share a buffer but not their offset.
+      const bool same_h = (next.h.buffer == head.h.buffer) && (next.h.layer_stride == head.h.layer_stride);
       const bool same_strides =
           (static_cast<const char*>(next.eq) - static_cast<const char*>(prev.eq)) ==
               (static_cast<const char*>(st.pending[first + 1].eq) - static_cast<const char*>(head.eq)) &&
@@ -392,7 +433,7 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
               (static_cast<const char*>(st.pending[first + 1].nv) - static_cast<const char*>(head.nv)) &&
           (next.eq != nullptr) && (next.nv != nullptr);
       const bool same_sigma = (std::memcmp(next.sigma2, head.sigma2, head.nof_ports * sizeof(float)) == 0);
-      if (!same_geom || !same_strides || !same_sigma) {
+      if (!same_geom || !same_strides || !same_sigma || !same_h) {
         break;
       }
       ++n_run;
@@ -421,11 +462,19 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
       return nil;
     }
     for (unsigned k = 0; k != n_run; ++k) {
-      std::memcpy(h_alloc + k * h_stride, st.pending[first + k].h, h_stride * sizeof(cbf16_t));
+      std::memcpy(h_alloc + k * h_stride,
+                  static_cast<const cbf16_t*>(st.pending[first + k].h.buffer) + st.pending[first + k].h.offset,
+                  h_stride * sizeof(cbf16_t));
       std::memcpy(y_alloc + k * y_stride, st.pending[first + k].y, y_stride * sizeof(cbf16_t));
     }
-    const equalize_params_t params{
-        head.nof_re, head.nof_ports, head.nof_layers, head.mmse ? 1u : 0u, head.noise_var, head.tx_scaling, head.h_scaling};
+    const equalize_params_t params = make_params(equalizer_metal_engine::ch_est_binding(h_alloc),
+                                                 head.nof_re,
+                                                 head.nof_ports,
+                                                 head.nof_layers,
+                                                 head.mmse,
+                                                 head.noise_var,
+                                                 head.tx_scaling,
+                                                 head.h_scaling);
     const eq_strides_t strides{n_run,
                                static_cast<unsigned>(h_stride),
                                static_cast<unsigned>(y_stride),
@@ -489,7 +538,7 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
   return used_pipeline;
 }
 
-bool equalizer_metal_engine::enqueue_burst(const void* h,
+bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
                                           const void* y,
                                           const void* sigma2,
                                           void*       eq,
@@ -532,12 +581,12 @@ bool equalizer_metal_engine::enqueue_burst(const void* h,
     if (enc == nil) {
       return false;
     }
-    const size_t h_bytes  = static_cast<size_t>(nof_ports) * nof_layers * nof_re * sizeof(cbf16_t);
+    const size_t h_bytes  = ch_est_binding_bytes(h, nof_ports, nof_layers, nof_re);
     const size_t y_bytes  = static_cast<size_t>(nof_ports) * nof_re * sizeof(cbf16_t);
     const size_t s_bytes  = static_cast<size_t>(nof_ports) * sizeof(float);
     const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
     const size_t nv_bytes = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
-    id<MTLBuffer> b_h  = wrap_buffer(engine, h, h_bytes);
+    id<MTLBuffer> b_h  = wrap_buffer(engine, h.buffer, h_bytes);
     id<MTLBuffer> b_y  = wrap_buffer(engine, y, y_bytes);
     id<MTLBuffer> b_s  = wrap_buffer(engine, sigma2, s_bytes);
     id<MTLBuffer> b_eq = wrap_buffer(engine, eq, eq_bytes);
@@ -547,7 +596,8 @@ bool equalizer_metal_engine::enqueue_burst(const void* h,
       return false;
     }
     engine->last_call_no_copy         = true;
-    const equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, tx_scaling, h_scaling};
+    const equalize_params_t params =
+        make_params(h, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling);
     [enc setBuffer:b_h offset:0 atIndex:0];
     [enc setBuffer:b_y offset:0 atIndex:1];
     [enc setBuffer:b_eq offset:0 atIndex:2];
@@ -564,7 +614,7 @@ bool equalizer_metal_engine::enqueue_burst(const void* h,
   return true;
 }
 
-bool equalizer_metal_engine::enqueue_burst_batch(const void* h,
+bool equalizer_metal_engine::enqueue_burst_batch(const ch_est_binding& h,
                                                 const void* y,
                                                 const void* sigma2,
                                                 void*       eq,
@@ -592,7 +642,8 @@ bool equalizer_metal_engine::enqueue_burst_batch(const void* h,
   }
   // The bound buffers cover the whole group: one symbol's worth plus the stride to the next.
   const size_t h_bytes  = static_cast<size_t>(nof_ports) * nof_layers *
-                          ((static_cast<size_t>(nof_symbols) - 1) * h_symbol_stride + nof_re) * sizeof(cbf16_t);
+                          ((static_cast<size_t>(nof_symbols) - 1) * h_symbol_stride + nof_re) * sizeof(cbf16_t) +
+                          static_cast<size_t>(h.offset) * sizeof(cbf16_t);
   const size_t y_bytes  = static_cast<size_t>(nof_ports) *
                           ((static_cast<size_t>(nof_symbols) - 1) * y_symbol_stride + nof_re) * sizeof(cbf16_t);
   const size_t s_bytes  = static_cast<size_t>(nof_ports) * sizeof(float);
@@ -601,7 +652,7 @@ bool equalizer_metal_engine::enqueue_burst_batch(const void* h,
   const size_t nv_bytes = ((static_cast<size_t>(nof_symbols) - 1) * nv_symbol_stride + nof_re * nof_layers) *
                           sizeof(float);
 
-  id<MTLBuffer> b_h  = wrap_buffer(engine, h, h_bytes);
+  id<MTLBuffer> b_h  = wrap_buffer(engine, h.buffer, h_bytes);
   id<MTLBuffer> b_y  = wrap_buffer(engine, y, y_bytes);
   id<MTLBuffer> b_s  = wrap_buffer(engine, sigma2, s_bytes);
   id<MTLBuffer> b_eq = wrap_buffer(engine, eq, eq_bytes);
@@ -611,7 +662,8 @@ bool equalizer_metal_engine::enqueue_burst_batch(const void* h,
     return false;
   }
   engine->last_call_no_copy          = true;
-  const equalize_params_t params{nof_re, nof_ports, nof_layers, mmse ? 1u : 0u, noise_var, tx_scaling, h_scaling};
+  const equalize_params_t params =
+      make_params(h, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling);
   const eq_strides_t      strides{nof_symbols, h_symbol_stride, y_symbol_stride, eq_symbol_stride, nv_symbol_stride};
   [enc setBuffer:b_h offset:0 atIndex:0];
   [enc setBuffer:b_y offset:0 atIndex:1];
@@ -719,7 +771,7 @@ unsigned equalizer_metal_engine::batch_size() const
   return engine != nullptr ? engine->batch_n : 0;
 }
 
-bool equalizer_metal_engine::equalize(const void* h,
+bool equalizer_metal_engine::equalize(const ch_est_binding& h,
                                       const void* y,
                                       const void* sigma2,
                                       void*       eq,
