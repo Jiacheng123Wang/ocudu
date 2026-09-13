@@ -579,5 +579,123 @@ int main()
     }
   }
 
-  return (nof_br_mismatch == 0 && nof_cr_mismatch == 0 && nof_batch_mismatch == 0 && nof_ota_mismatch == 0) ? 0 : 1;
+  // ---------------------------------------------------------------------------------------------
+  // Pattern F: the ADAPTER (channel_equalizer_metal), not the engine - per-symbol submit() against
+  // one submit_group() call, with the over-the-air layout: page-aligned gapped output strides and
+  // one independent set of inputs per symbol (what the demodulator's deferred group hands over).
+  // Pattern E proved the kernel and the engine encoding correct for this geometry, so a mismatch
+  // here is in the run splitting / staging / in-place write-back of the adapter.
+  // ---------------------------------------------------------------------------------------------
+  unsigned nof_adapter_mismatch = 0;
+  {
+    const unsigned f_ports  = 2;
+    const unsigned f_layers = 1;
+    const unsigned f_nof_re = 204;
+    const unsigned f_syms   = 12;
+    const size_t   f_eq_gap = 4096; // cf_t elements between symbols (page multiple)
+    const size_t   f_nv_gap = 4096; // float elements between symbols
+
+    channel_equalizer_metal f_equalizer(false);
+
+    std::mt19937                    r3(11);
+    std::normal_distribution<float> d3(0.0F, 0.3F);
+    std::uniform_real_distribution<float> c3(-0.5F, 0.5F);
+
+    // One set of inputs per symbol, alive for the whole group (the demodulator's group slots).
+    std::vector<modular_re_buffer_reader<cbf16_t, 8>> f_ch_symbols;
+    std::vector<modular_ch_est_list<8 * 4>>           f_ch_est;
+    std::vector<std::vector<cbf16_t>>                 f_y;
+    std::vector<std::vector<cbf16_t>>                 f_h;
+    f_ch_symbols.reserve(f_syms);
+    f_ch_est.reserve(f_syms);
+    for (unsigned s = 0; s != f_syms; ++s) {
+      f_y.emplace_back(static_cast<size_t>(f_ports) * f_nof_re);
+      f_h.emplace_back(static_cast<size_t>(f_ports) * f_layers * f_nof_re);
+      for (cbf16_t& v : f_y.back()) {
+        v = cbf16_t(d3(r3), d3(r3));
+      }
+      for (cbf16_t& v : f_h.back()) {
+        v = cbf16_t(1.0F + c3(r3), c3(r3));
+      }
+      f_ch_symbols.emplace_back(f_ports, f_nof_re);
+      for (unsigned p = 0; p != f_ports; ++p) {
+        f_ch_symbols.back().set_slice(
+            p, span<const cbf16_t>(f_y.back()).subspan(static_cast<size_t>(p) * f_nof_re, f_nof_re));
+      }
+      f_ch_est.emplace_back(f_nof_re, f_ports, f_layers);
+      for (unsigned p = 0; p != f_ports; ++p) {
+        for (unsigned l = 0; l != f_layers; ++l) {
+          f_ch_est.back().set_channel(
+              span<const cbf16_t>(f_h.back()).subspan((static_cast<size_t>(p) * f_layers + l) * f_nof_re, f_nof_re),
+              p,
+              l);
+        }
+      }
+    }
+    const std::vector<float> f_nv(f_ports, 0.02F);
+
+    aligned_buffer f_eq_a;
+    aligned_buffer f_nv_a;
+    aligned_buffer f_eq_b;
+    aligned_buffer f_nv_b;
+    f_eq_a.allocate(f_eq_gap * f_syms * sizeof(cf_t));
+    f_nv_a.allocate(f_nv_gap * f_syms * sizeof(float));
+    f_eq_b.allocate(f_eq_gap * f_syms * sizeof(cf_t));
+    f_nv_b.allocate(f_nv_gap * f_syms * sizeof(float));
+
+    const auto f_eq = [&](aligned_buffer& buf, unsigned s) {
+      return span<cf_t>(static_cast<cf_t*>(buf.ptr) + static_cast<size_t>(s) * f_eq_gap,
+                        static_cast<size_t>(f_nof_re) * f_layers);
+    };
+    const auto f_nvv = [&](aligned_buffer& buf, unsigned s) {
+      return span<float>(static_cast<float*>(buf.ptr) + static_cast<size_t>(s) * f_nv_gap,
+                         static_cast<size_t>(f_nof_re) * f_layers);
+    };
+
+    // Path A: one submit() per symbol, exactly what the deferred chain does today.
+    for (unsigned s = 0; s != f_syms; ++s) {
+      f_equalizer.submit(f_eq(f_eq_a, s), f_nvv(f_nv_a, s), f_ch_symbols[s], f_ch_est[s], f_nv, 1.0F);
+    }
+    f_equalizer.wait();
+
+    // Path B: one submit_group() for the whole group.
+    std::vector<channel_equalizer::group_symbol> f_group;
+    f_group.reserve(f_syms);
+    for (unsigned s = 0; s != f_syms; ++s) {
+      f_group.push_back(channel_equalizer::group_symbol{
+          f_eq(f_eq_b, s), f_nvv(f_nv_b, s), &f_ch_symbols[s], &f_ch_est[s], f_nv, 1.0F});
+    }
+    f_equalizer.submit_group(f_group);
+    f_equalizer.wait();
+
+    const auto* fa = static_cast<const cf_t*>(f_eq_a.ptr);
+    const auto* fb = static_cast<const cf_t*>(f_eq_b.ptr);
+    const auto* fna = static_cast<const float*>(f_nv_a.ptr);
+    const auto* fnb = static_cast<const float*>(f_nv_b.ptr);
+    int         f_first_bad = -1;
+    for (unsigned s = 0; s != f_syms; ++s) {
+      for (unsigned i = 0; i != f_nof_re; ++i) {
+        const size_t ea = static_cast<size_t>(s) * f_eq_gap + i;
+        const size_t eb = ea;
+        if (std::memcmp(&fa[ea], &fb[eb], sizeof(cf_t)) != 0) {
+          nof_adapter_mismatch += 1;
+          if (f_first_bad < 0) {
+            f_first_bad = static_cast<int>(s);
+          }
+        }
+        const size_t nva = static_cast<size_t>(s) * f_nv_gap + i;
+        nof_adapter_mismatch += (std::memcmp(&fna[nva], &fnb[nva], sizeof(float)) != 0) ? 1 : 0;
+      }
+    }
+    std::printf("[chain] F adapter (2 ports, %u symbols, %u REs, gap %zu): %u differing eq/nv, first bad symbol %d "
+                "-> %s\n",
+                f_syms,
+                f_nof_re,
+                f_eq_gap,
+                nof_adapter_mismatch,
+                f_first_bad,
+                (nof_adapter_mismatch == 0) ? "OK" : "MISMATCH");
+  }
+
+  return (nof_br_mismatch == 0 && nof_cr_mismatch == 0 && nof_batch_mismatch == 0 && nof_ota_mismatch == 0 && nof_adapter_mismatch == 0) ? 0 : 1;
 }
