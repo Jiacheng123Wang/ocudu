@@ -24,9 +24,15 @@
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_demodulator_notifier.h"
 #include "ocudu/phy/upper/equalization/channel_equalizer.h"
 #include "ocudu/phy/upper/equalization/equalization_factories.h"
+// The Metal back ends only exist in an Apple Silicon build (their targets are gated by the options
+// below), so the tests that exercise them - and the counters they expose - are compiled in only
+// there. Everything else in this file runs against the CPU back ends on every platform.
+#if defined(OCUDU_METAL_EQUALIZER) && defined(OCUDU_METAL_DEMODULATION)
 #include "channel_equalizer_metal.h"
 #include "channel_equalizer_metal_factory.h"
 #include "demodulation_mapper_metal_factory.h"
+#define OCUDU_HAS_METAL_PUSCH_CHAIN 1
+#endif
 #include "ocudu/phy/upper/sequence_generators/sequence_generator_factories.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ran/pusch/pusch_constants.h"
@@ -491,6 +497,36 @@ private:
 // Test fixture
 // ---------------------------------------------------------------------------------------------
 
+namespace {
+
+/// Number of equalizer dispatches that read the channel estimates where the estimator produced them,
+/// and of those that gathered them into the equalizer's own staging first.
+///
+/// The counters live in the Metal backend: without it nothing can bind device estimates, so both are
+/// zero and the comparisons below degrade to "no dispatch took the device path", which is the truth
+/// on a CPU-only build.
+#if defined(OCUDU_HAS_METAL_PUSCH_CHAIN)
+unsigned nof_device_ch_est_dispatches()
+{
+  return channel_equalizer_metal::nof_device_ch_est_dispatches();
+}
+unsigned nof_staged_ch_est_dispatches()
+{
+  return channel_equalizer_metal::nof_staged_ch_est_dispatches();
+}
+#else
+unsigned nof_device_ch_est_dispatches()
+{
+  return 0;
+}
+unsigned nof_staged_ch_est_dispatches()
+{
+  return 0;
+}
+#endif
+
+} // namespace
+
 class pusch_demodulator_deferred_chain_test : public ::testing::Test
 {
 protected:
@@ -698,8 +734,8 @@ TEST_F(pusch_demodulator_deferred_chain_test, device_ch_estimates_match_the_host
                                                             false);
       config.dc_position = test.dc_position;
 
-      const unsigned device_before = channel_equalizer_metal::nof_device_ch_est_dispatches();
-      const unsigned staged_before = channel_equalizer_metal::nof_staged_ch_est_dispatches();
+      const unsigned device_before = nof_device_ch_est_dispatches();
+      const unsigned staged_before = nof_staged_ch_est_dispatches();
 
       const result_t host = run(deferred, config, /*device_estimates=*/false);
       const result_t dev  = run(deferred, config, /*device_estimates=*/true);
@@ -710,8 +746,8 @@ TEST_F(pusch_demodulator_deferred_chain_test, device_ch_estimates_match_the_host
       // This fixture runs the CPU equalizer, so no binding happens here and the counters must stay
       // put: the zero-copy path is asserted where the Metal backend runs
       // (metal_equalizer_binds_the_estimator_device_buffer).
-      ASSERT_EQ(channel_equalizer_metal::nof_device_ch_est_dispatches(), device_before);
-      ASSERT_EQ(channel_equalizer_metal::nof_staged_ch_est_dispatches(), staged_before);
+      ASSERT_EQ(nof_device_ch_est_dispatches(), device_before);
+      ASSERT_EQ(nof_staged_ch_est_dispatches(), staged_before);
       ASSERT_EQ(host.events.size(), dev.events.size());
       ASSERT_EQ(host.nof_softbits, dev.nof_softbits);
       unsigned nof_checked = 0;
@@ -898,6 +934,7 @@ private:
 
 } // namespace
 
+#if defined(OCUDU_HAS_METAL_PUSCH_CHAIN)
 TEST_F(pusch_demodulator_deferred_chain_test, metal_back_ends_match_the_cpu_chain)
 {
   // Exact grant shape of the over-the-air failure: 17 PRB starting at PRB 4 of a 25 PRB cell,
@@ -1007,6 +1044,9 @@ TEST_F(pusch_demodulator_deferred_chain_test, metal_back_ends_match_the_cpu_chai
 // single-threaded checks above cannot cover.
 // ---------------------------------------------------------------------------------------------
 
+#endif // OCUDU_HAS_METAL_PUSCH_CHAIN
+
+#if defined(OCUDU_HAS_METAL_PUSCH_CHAIN)
 TEST_F(pusch_demodulator_deferred_chain_test, concurrent_metal_demodulations_match_the_serial_chain)
 {
   std::shared_ptr<channel_equalizer_factory> metal_eq_factory =
@@ -1138,6 +1178,9 @@ TEST_F(pusch_demodulator_deferred_chain_test, concurrent_metal_demodulations_mat
   EXPECT_EQ(nof_diff.load(), 0U);
 }
 
+#endif // OCUDU_HAS_METAL_PUSCH_CHAIN
+
+#if defined(OCUDU_HAS_METAL_PUSCH_CHAIN)
 TEST_F(pusch_demodulator_deferred_chain_test, metal_equalizer_binds_the_estimator_device_buffer)
 {
   // The zero-copy target of the device-estimate path: with a single receive port the equalizer
@@ -1187,19 +1230,19 @@ TEST_F(pusch_demodulator_deferred_chain_test, metal_equalizer_binds_the_estimato
   };
 
   for (unsigned nof_ports : {1U, 2U}) {
-    const unsigned device_before = channel_equalizer_metal::nof_device_ch_est_dispatches();
-    const unsigned staged_before = channel_equalizer_metal::nof_staged_ch_est_dispatches();
+    const unsigned device_before = nof_device_ch_est_dispatches();
+    const unsigned staged_before = nof_staged_ch_est_dispatches();
     const auto [host, host_nv_reads] = run(nof_ports, /*device_estimates=*/false, std::nullopt);
-    const unsigned host_device   = channel_equalizer_metal::nof_device_ch_est_dispatches() - device_before;
-    const unsigned host_staged   = channel_equalizer_metal::nof_staged_ch_est_dispatches() - staged_before;
+    const unsigned host_device   = nof_device_ch_est_dispatches() - device_before;
+    const unsigned host_staged   = nof_staged_ch_est_dispatches() - staged_before;
 
-    const unsigned device_mid = channel_equalizer_metal::nof_device_ch_est_dispatches();
-    const unsigned staged_mid = channel_equalizer_metal::nof_staged_ch_est_dispatches();
+    const unsigned device_mid = nof_device_ch_est_dispatches();
+    const unsigned staged_mid = nof_staged_ch_est_dispatches();
     // The device run publishes both the estimates and the noise variance as device-resident, which
     // is the shape the estimator produces on the GPU: nothing of it may be read on the host.
     const auto [dev, dev_nv_reads] = run(nof_ports, /*device_estimates=*/true, 0.02F);
-    const unsigned dev_device = channel_equalizer_metal::nof_device_ch_est_dispatches() - device_mid;
-    const unsigned dev_staged = channel_equalizer_metal::nof_staged_ch_est_dispatches() - staged_mid;
+    const unsigned dev_device = nof_device_ch_est_dispatches() - device_mid;
+    const unsigned dev_staged = nof_staged_ch_est_dispatches() - staged_mid;
 
     // The reference run gathered the estimates and read the noise variance on the host, as it must:
     // the counters are not vacuous.
@@ -1246,3 +1289,4 @@ TEST_F(pusch_demodulator_deferred_chain_test, metal_equalizer_binds_the_estimato
     ASSERT_GT(host_reads, 0U);
   }
 }
+#endif // OCUDU_HAS_METAL_PUSCH_CHAIN

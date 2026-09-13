@@ -31,8 +31,6 @@ target_link_libraries(pusch_demodulator_deferred_chain_test
         ocudu_channel_equalizer
         ocudu_channel_modulation
         ocudu_channel_processors
-        ocudu_channel_processors_metal
-        ocudu_channel_modulation_metal
         ocudu_phy_support
         ocudu_sequence_generators
         ocudu_transform_precoding
@@ -40,4 +38,11 @@ target_link_libraries(pusch_demodulator_deferred_chain_test
         ocudulog
         GTest::gtest
         GTest::gtest_main)
+# The Metal back ends and their tests only exist in an Apple Silicon build; without them the test
+# keeps running against the CPU back ends (see the OCUDU_HAS_METAL_PUSCH_CHAIN guards in the file).
+if(ENABLE_METAL_EQUALIZER AND ENABLE_METAL_DEMODULATION)
+    target_link_libraries(pusch_demodulator_deferred_chain_test
+            ocudu_channel_processors_metal
+            ocudu_channel_modulation_metal)
+endif()
 add_test(pusch_demodulator_deferred_chain_test pusch_demodulator_deferred_chain_test)

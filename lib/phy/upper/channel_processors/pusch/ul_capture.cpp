@@ -115,7 +115,7 @@ void ocudu::ul_capture::capture_grid(const resource_grid_reader& grid, const pus
     std::fprintf(f, "slot=%u\n", pdu.slot.count());
     std::fprintf(f, "scs_khz=%u\n", scs_to_khz(pdu.slot.scs()));
     std::fprintf(f, "cp=%s\n", pdu.cp.to_string().c_str());
-    std::fprintf(f, "rnti=%u\n", pdu.rnti);
+    std::fprintf(f, "rnti=%u\n", to_value(pdu.rnti));
     std::fprintf(f, "harq_id=%u\n", static_cast<unsigned>(pdu.harq_id));
     std::fprintf(f, "bwp_size_rb=%u\n", pdu.bwp_size_rb);
     std::fprintf(f, "bwp_start_rb=%u\n", pdu.bwp_start_rb);
