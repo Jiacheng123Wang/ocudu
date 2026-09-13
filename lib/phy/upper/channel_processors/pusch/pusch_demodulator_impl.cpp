@@ -301,9 +301,25 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   // queue orders the two stages, and running the pass while it finishes is the whole point of
   // deferring the estimation - so the estimator is left running. When it does not, this pass gathers
   // the values from host memory and the estimation must have published them first.
-  const bool estimates_read_in_place = !force_host_ch_estimates() &&
-                                       equalizer->consumes_device_estimates(nof_rx_ports, config.nof_tx_layers) &&
-                                       est_results.device_results_cover_last_estimate();
+  const bool force_host_estimates_now = force_host_ch_estimates();
+  const bool equalizer_reads_device    = equalizer->consumes_device_estimates(nof_rx_ports, config.nof_tx_layers);
+  const bool estimator_published      = est_results.device_results_cover_last_estimate();
+  const bool estimates_read_in_place  = !force_host_estimates_now && equalizer_reads_device && estimator_published;
+#if defined(OCUDU_METAL_STATS)
+  // One-shot routing report (info level, so it lands in the log file): reading the estimates where
+  // they were produced is what lets the estimation stay deferred, and the three conditions are
+  // indistinguishable from the timings alone.
+  static const bool estimates_route_logged = [&]() {
+    ocudulog::fetch_basic_logger("PHY").info("PUSCH: estimates read {} of the demodulation (OCUDU_CE_CPU_CE={}, "
+                                             "equalizer reads device={}, estimator published device={})",
+                                             estimates_read_in_place ? "in place, before" : "from host memory, after",
+                                             force_host_estimates_now,
+                                             equalizer_reads_device,
+                                             estimator_published);
+    return true;
+  }();
+  (void)estimates_route_logged;
+#endif
   if (!estimates_read_in_place) {
     (void)est_results.sync_device_estimates();
   }
