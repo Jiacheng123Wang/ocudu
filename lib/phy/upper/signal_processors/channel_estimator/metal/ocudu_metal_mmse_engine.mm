@@ -39,6 +39,14 @@ struct mmse_stats_t {
   std::atomic<uint64_t> waits{0};
   std::atomic<uint64_t> in_flight{0};
   std::atomic<uint64_t> in_flight_max{0};
+  // Entry-guard accounting: every submission entry waits for this engine's own outstanding batch
+  // first, because the call is about to overwrite the staging buffers that batch is still reading.
+  // With a single pending slot this guard is the estimator's only remaining serialization point, so
+  // it is reported separately from the encode (which the phase timer shows to be ~5us).
+  std::atomic<uint64_t> guard_calls{0};      // entry guards entered
+  std::atomic<uint64_t> guard_hits{0};       // of those, the ones that found an outstanding batch
+  std::atomic<uint64_t> guard_wait_ns{0};    // host time spent in the guards that hit
+  std::atomic<uint64_t> guard_wait_max_ns{0};
 };
 
 static mmse_stats_t& mmse_stats()
@@ -64,18 +72,62 @@ static void mmse_stats_wait()
   s.in_flight.fetch_sub(1, std::memory_order_acq_rel);
 }
 
+/// \param[in] had_pending Whether the guard actually had a batch to wait for.
+/// \param[in] wait_ns     Host time spent inside the guard.
+static void mmse_stats_guard(bool had_pending, uint64_t wait_ns)
+{
+  mmse_stats_t& s = mmse_stats();
+  s.guard_calls.fetch_add(1, std::memory_order_relaxed);
+  if (!had_pending) {
+    return;
+  }
+  s.guard_hits.fetch_add(1, std::memory_order_relaxed);
+  s.guard_wait_ns.fetch_add(wait_ns, std::memory_order_relaxed);
+  uint64_t prev = s.guard_wait_max_ns.load(std::memory_order_relaxed);
+  while (wait_ns > prev && !s.guard_wait_max_ns.compare_exchange_weak(prev, wait_ns, std::memory_order_relaxed)) {
+  }
+}
+
+/// Times one entry guard (see mmse_stats_t::guard_calls) into the report above.
+struct mmse_guard_timer {
+  bool                                  had_pending;
+  std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+
+  explicit mmse_guard_timer(bool pending) : had_pending(pending) {}
+  ~mmse_guard_timer()
+  {
+    const auto ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+    mmse_stats_guard(had_pending, static_cast<uint64_t>(ns));
+  }
+};
+
 static void mmse_stats_report()
 {
   const mmse_stats_t& s = mmse_stats();
+  const uint64_t      hits = s.guard_hits.load(std::memory_order_relaxed);
+  const uint64_t      wait = s.guard_wait_ns.load(std::memory_order_relaxed);
   std::fprintf(stderr,
-               "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu\n",
+               "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu guard=%llu/%llu "
+               "guard_mean=%.1fus guard_max=%.1fus\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(hits),
+               static_cast<unsigned long long>(s.guard_calls.load(std::memory_order_relaxed)),
+               (hits != 0) ? (static_cast<double>(wait) / static_cast<double>(hits) / 1e3) : 0.0,
+               static_cast<double>(s.guard_wait_max_ns.load(std::memory_order_relaxed)) / 1e3);
 }
 #else  // OCUDU_METAL_STATS
 static void mmse_stats_commit() {}
 static void mmse_stats_wait() {}
+
+/// Stats off: the guard still has to be a non-trivially-destructible object, so that the explicit
+/// scope around it does not look like an unused variable to the compiler.
+struct mmse_guard_timer {
+  explicit mmse_guard_timer(bool) {}
+  ~mmse_guard_timer() {}
+};
 #endif // OCUDU_METAL_STATS
 
 // Debug phase timer (OCUDU_MMSE_DEBUG=1): the estimator statistics show that the HOST side of an
@@ -474,7 +526,11 @@ bool mmse_engine::init(const char* metallib_path)
 
 bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
 {
-  (void)wait_pending();
+  {
+    // The local engine pointer is declared below: has_pending() is the null-safe query.
+    mmse_guard_timer guard(has_pending());
+    (void)wait_pending();
+  }
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
     return false;
@@ -531,7 +587,11 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
 bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout, unsigned L, unsigned nof_systems,
                         unsigned nof_blocks)
 {
-  (void)wait_pending();
+  {
+    // The local engine pointer is declared below: has_pending() is the null-safe query.
+    mmse_guard_timer guard(has_pending());
+    (void)wait_pending();
+  }
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
     return false;
@@ -598,7 +658,10 @@ bool mmse_engine::run_async(float*       a,
   }
   // At most one submission in flight: the previous one must have completed before the staging
   // buffers it was reading can be overwritten.
-  (void)wait_pending();
+  {
+    mmse_guard_timer guard(e->pending_cb != nil);
+    (void)wait_pending();
+  }
 
   mmse_phase_timer phase("run_async");
   id<MTLBuffer> a_buf  = e->wrap(a, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
@@ -720,7 +783,10 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
   if (e == nullptr || e->device == nil) {
     return false;
   }
-  (void)wait_pending();
+  {
+    mmse_guard_timer guard(e->pending_cb != nil);
+    (void)wait_pending();
+  }
   return encode_weights_only(e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, true);
 }
 
@@ -734,7 +800,10 @@ bool mmse_engine::run_weights_only_async(const float* a_inv, const float* r_hp, 
   }
   // Only this engine's own outstanding submission has to complete first: the staging buffers this call is about
   // to overwrite are exactly the ones it was reading.
-  (void)wait_pending();
+  {
+    mmse_guard_timer guard(e->pending_cb != nil);
+    (void)wait_pending();
+  }
   return encode_weights_only(e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, false);
 }
 
@@ -837,7 +906,11 @@ bool mmse_engine::init_matrix_pipelines()
 bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const float* qy, float* h, unsigned nout,
                          unsigned L, unsigned nof_systems, unsigned nof_blocks)
 {
-  (void)wait_pending();
+  {
+    // The local engine pointer is declared below: has_pending() is the null-safe query.
+    mmse_guard_timer guard(has_pending());
+    (void)wait_pending();
+  }
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil || e->weights_matrix_pipe == nil || e->apply_matrix_pipe == nil) {
     return false;

@@ -19,7 +19,11 @@
 #include "ocudu/support/ocudu_assert.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -30,6 +34,171 @@ namespace {
 // The NMS kernels consume a native int8 buffer with a plain memcpy; the int8->fp16
 // conversion happens inside the GPU (one preprocessing dispatch per decode). The LLS
 // kernels consume fp16 directly, so the adapter converts on the host (LLS mode only).
+
+// ---- Process-exit cost split of decode() --------------------------------------------------------
+// The uplink segment probe ([ul_ldpc_decode]) reports the CPU wall time of a decode, which mixes
+// three very different things: the GPU kernels, the submission queue in front of them, and the
+// host-side LLR layout / hard-bit repacking. The command buffer carries its own GPU window
+// (GPUStartTime..GPUEndTime, exposed by the engine as last_gpu_wait_us()), so splitting the wall
+// time separates them: a decode whose wall is mostly GPU time is a kernel problem, one whose wall is
+// mostly gap (wall - gpu) is a queueing problem - the whole uplink chain submits on the same
+// back-end queue, so the difference is also the ordering cost between the stages.
+struct ldpc_time_stats {
+  std::atomic<uint64_t> calls{0};
+  std::atomic<uint64_t> ok{0};        // decode() returned a value (CRC OK / clean syndrome)
+  std::atomic<uint64_t> ko{0};        // no convergence, or the engine call failed
+  std::atomic<uint64_t> wall_ns{0};   // whole decode()
+  std::atomic<uint64_t> pack_ns{0};   // LLR layout (memset + erasure bias + payload copy)
+  std::atomic<uint64_t> submit_ns{0}; // engine call: commit + waitUntilCompleted + result extraction
+  std::atomic<uint64_t> gpu_ns{0};    // command buffer GPU window (0 when the timestamps are unavailable)
+  std::atomic<uint64_t> unpack_ns{0}; // hard-bit repacking + CRC / syndrome verdict
+  std::atomic<uint64_t> max_wall_ns{0};
+  std::atomic<uint64_t> max_gap_ns{0}; // max(wall - gpu) over the calls
+  std::atomic<uint64_t> iters_sum{0};
+  std::atomic<uint64_t> cap_sum{0};
+  std::atomic<uint64_t> iters_hist[64]{}; // index = iterations actually run (0 = engine failure)
+  std::atomic<uint64_t> cap_hist[64]{};   // index = requested max_iterations
+};
+
+/// Per-(algorithm, base graph, lifting size) split: the aggregate above mixes geometries whose cost
+/// differs by orders of magnitude. The dispatch-per-layer path pays per layer AND per iteration, so
+/// the iteration histogram of the actual gNB geometry is what a tuning decision needs.
+struct ldpc_shape_stats {
+  uint64_t calls     = 0;
+  uint64_t wall_ns   = 0;
+  uint64_t gpu_ns    = 0;
+  uint64_t iters_sum = 0;
+  uint64_t ko        = 0;
+};
+
+/// \note Leaked for the same reason as the aggregate above.
+std::mutex& ldpc_shapes_mutex()
+{
+  static std::mutex* m = new std::mutex();
+  return *m;
+}
+
+std::map<uint64_t, ldpc_shape_stats>& ldpc_shapes()
+{
+  static std::map<uint64_t, ldpc_shape_stats>* m = new std::map<uint64_t, ldpc_shape_stats>();
+  return *m;
+}
+
+uint64_t ldpc_shape_key(metal::decoder_engine::algo mode, unsigned bg, unsigned z)
+{
+  return (static_cast<uint64_t>(mode) << 32) | (static_cast<uint64_t>(bg) << 24) | z;
+}
+
+const char* ldpc_mode_name(metal::decoder_engine::algo mode)
+{
+  switch (mode) {
+    case metal::decoder_engine::algo::layered:
+      return "layered";
+    case metal::decoder_engine::algo::flooding:
+      return "flooding";
+    case metal::decoder_engine::algo::lls:
+      return "lls";
+    case metal::decoder_engine::algo::layered_persistent:
+      return "persistent";
+    case metal::decoder_engine::algo::async_delta:
+      return "async";
+  }
+  return "unknown";
+}
+
+/// \note Intentionally leaked: the atexit report runs while the process statics are already being
+/// destroyed, and a function-local static with a destructor would be gone before it (see the
+/// estimator's probe for the same pitfall).
+ldpc_time_stats& ldpc_time_stats_get()
+{
+  static ldpc_time_stats* s = new ldpc_time_stats();
+  return *s;
+}
+
+void ldpc_time_bump_max(std::atomic<uint64_t>& v, uint64_t candidate)
+{
+  uint64_t prev = v.load(std::memory_order_relaxed);
+  while (candidate > prev && !v.compare_exchange_weak(prev, candidate, std::memory_order_relaxed)) {
+  }
+}
+
+void ldpc_time_stats_report()
+{
+  const ldpc_time_stats& s = ldpc_time_stats_get();
+  const uint64_t         n = s.calls.load(std::memory_order_relaxed);
+  if (n == 0) {
+    return;
+  }
+  const auto mean = [n](const std::atomic<uint64_t>& v) {
+    return static_cast<double>(v.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3;
+  };
+  std::fprintf(stderr,
+               "[ldpc_time_sum] calls=%llu ok=%llu ko=%llu | mean wall=%.1fus pack=%.1fus submit=%.1fus gpu=%.1fus "
+               "gap=%.1fus unpack=%.1fus | iters mean=%.2f cap mean=%.2f | max wall=%.1fus max gap=%.1fus |",
+               static_cast<unsigned long long>(n),
+               static_cast<unsigned long long>(s.ok.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.ko.load(std::memory_order_relaxed)),
+               mean(s.wall_ns),
+               mean(s.pack_ns),
+               mean(s.submit_ns),
+               mean(s.gpu_ns),
+               (mean(s.wall_ns) > mean(s.gpu_ns)) ? (mean(s.wall_ns) - mean(s.gpu_ns)) : 0.0,
+               mean(s.unpack_ns),
+               static_cast<double>(s.iters_sum.load(std::memory_order_relaxed)) / static_cast<double>(n),
+               static_cast<double>(s.cap_sum.load(std::memory_order_relaxed)) / static_cast<double>(n),
+               static_cast<double>(s.max_wall_ns.load(std::memory_order_relaxed)) / 1e3,
+               static_cast<double>(s.max_gap_ns.load(std::memory_order_relaxed)) / 1e3);
+  std::fprintf(stderr, " iters hist:");
+  for (unsigned i = 0; i != 64; ++i) {
+    const uint64_t c = s.iters_hist[i].load(std::memory_order_relaxed);
+    if (c != 0) {
+      std::fprintf(stderr, " %u=%llu", i, static_cast<unsigned long long>(c));
+    }
+  }
+  std::fprintf(stderr, " | cap hist:");
+  for (unsigned i = 0; i != 64; ++i) {
+    const uint64_t c = s.cap_hist[i].load(std::memory_order_relaxed);
+    if (c != 0) {
+      std::fprintf(stderr, " %u=%llu", i, static_cast<unsigned long long>(c));
+    }
+  }
+  std::fprintf(stderr, "\n");
+
+  // Per-geometry breakdown, most frequent first.
+  std::vector<std::pair<uint64_t, ldpc_shape_stats>> shapes;
+  {
+    std::lock_guard<std::mutex> lock(ldpc_shapes_mutex());
+    shapes.assign(ldpc_shapes().begin(), ldpc_shapes().end());
+  }
+  std::sort(shapes.begin(), shapes.end(),
+            [](const auto& a, const auto& b) { return a.second.calls > b.second.calls; });
+  for (const auto& [key, sh] : shapes) {
+    if (sh.calls == 0) {
+      continue;
+    }
+    const double cn = static_cast<double>(sh.calls);
+    std::fprintf(stderr,
+                 "[ldpc_time_shape] mode=%s bg=%llu z=%llu calls=%llu ko=%llu | mean wall=%.1fus gpu=%.1fus "
+                 "gap=%.1fus iters=%.2f\n",
+                 ldpc_mode_name(static_cast<metal::decoder_engine::algo>(key >> 32)),
+                 static_cast<unsigned long long>((key >> 24) & 0xff),
+                 static_cast<unsigned long long>(key & 0xff),
+                 static_cast<unsigned long long>(sh.calls),
+                 static_cast<unsigned long long>(sh.ko),
+                 static_cast<double>(sh.wall_ns) / cn / 1e3,
+                 static_cast<double>(sh.gpu_ns) / cn / 1e3,
+                 (static_cast<double>(sh.wall_ns) > static_cast<double>(sh.gpu_ns))
+                     ? ((static_cast<double>(sh.wall_ns) - static_cast<double>(sh.gpu_ns)) / cn / 1e3)
+                     : 0.0,
+                 static_cast<double>(sh.iters_sum) / cn);
+  }
+}
+
+void ldpc_time_stats_register()
+{
+  static std::once_flag flag;
+  std::call_once(flag, []() { std::atexit(ldpc_time_stats_report); });
+}
 
 #if !defined(__arm64__)
 /// Generic float -> IEEE 754 half conversion fallback (non-arm64 builds).
@@ -442,6 +611,9 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
   // (the codeblock-decoder pool hands out one instance per task).
   std::lock_guard<std::mutex> lock(decode_mtx);
 
+  ldpc_time_stats_register();
+  const auto t_begin = std::chrono::steady_clock::now();
+
   // Reset the per-call Metal library duration: it is set again only when the decode
   // actually dispatches to the GPU, so early returns (e.g. a too-short input) do not
   // leak the previous decode's measurement through get_last_decode_metal_elapsed().
@@ -481,6 +653,10 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
 
   engine_slot& slot = get_slot(cfg.base_graph, cfg.lifting_size);
 
+  // Stamped around the packing and around the engine call, then folded by record() below.
+  std::chrono::steady_clock::time_point t_packed{};
+  std::chrono::steady_clock::time_point t_engine{};
+
   uint32_t error_count = 0;
   int      iters       = -1;
   if (mode == metal::decoder_engine::algo::lls) {
@@ -497,6 +673,7 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
     for (const log_likelihood_ratio llr : input) {
       *fp16++ = llr_to_fp16(llr.to_int());
     }
+    t_packed = std::chrono::steady_clock::now();
     iters = slot.engine->decode(slot.llr_fp16.get(), slot.hard_bits.data(),
                                 static_cast<int>(cfg.max_iterations), &error_count);
   } else {
@@ -509,10 +686,50 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
     std::fill(slot.llr_i8.get() + 2 * z + input.size(), slot.llr_i8.get() + slot.m->n_aligned, int8_t{1});
     std::memcpy(slot.llr_i8.get() + 2 * z, input.data(), input.size() * sizeof(int8_t));
 
+    t_packed = std::chrono::steady_clock::now();
     iters = slot.engine->decode(slot.llr_i8.get(), slot.hard_bits.data(),
                                 static_cast<int>(cfg.max_iterations), &error_count);
   }
+  /// Folds one decode() into the process-exit split. \c verdict is what the caller gets back (empty
+  /// on no convergence), \c gpu_us the command buffer's GPU window (0 when unavailable).
+  const auto record = [&](std::optional<unsigned> verdict, double gpu_us) {
+    const auto t_end = std::chrono::steady_clock::now();
+    const auto ns    = [](auto a, auto b) {
+      return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+    };
+    ldpc_time_stats& s    = ldpc_time_stats_get();
+    const uint64_t   wall = ns(t_begin, t_end);
+    const uint64_t   gpu  = static_cast<uint64_t>(gpu_us * 1e3);
+    s.calls.fetch_add(1, std::memory_order_relaxed);
+    (verdict.has_value() ? s.ok : s.ko).fetch_add(1, std::memory_order_relaxed);
+    s.wall_ns.fetch_add(wall, std::memory_order_relaxed);
+    s.pack_ns.fetch_add(ns(t_begin, t_packed), std::memory_order_relaxed);
+    s.submit_ns.fetch_add(ns(t_packed, t_engine), std::memory_order_relaxed);
+    s.gpu_ns.fetch_add(gpu, std::memory_order_relaxed);
+    s.unpack_ns.fetch_add(ns(t_engine, t_end), std::memory_order_relaxed);
+    ldpc_time_bump_max(s.max_wall_ns, wall);
+    ldpc_time_bump_max(s.max_gap_ns, (wall > gpu) ? (wall - gpu) : 0);
+    s.iters_sum.fetch_add((iters > 0) ? static_cast<uint64_t>(iters) : 0, std::memory_order_relaxed);
+    s.cap_sum.fetch_add(static_cast<uint64_t>(cfg.max_iterations), std::memory_order_relaxed);
+    s.iters_hist[(iters > 0) ? std::min<unsigned>(static_cast<unsigned>(iters), 63u) : 0u].fetch_add(
+        1, std::memory_order_relaxed);
+    s.cap_hist[std::min<unsigned>(cfg.max_iterations, 63u)].fetch_add(1, std::memory_order_relaxed);
+
+    // Per-geometry copy of the same split (the gNB geometry is what a tuning decision reads).
+    const uint64_t key = ldpc_shape_key(mode, (cfg.base_graph == ldpc_base_graph_type::BG1) ? 1u : 2u,
+                                        static_cast<unsigned>(cfg.lifting_size));
+    std::lock_guard<std::mutex> lock(ldpc_shapes_mutex());
+    ldpc_shape_stats&           sh = ldpc_shapes()[key];
+    sh.calls += 1;
+    sh.wall_ns += wall;
+    sh.gpu_ns += gpu;
+    sh.iters_sum += (iters > 0) ? static_cast<uint64_t>(iters) : 0;
+    sh.ko += verdict.has_value() ? 0 : 1;
+  };
+
+  t_engine = std::chrono::steady_clock::now();
   if (iters < 0) {
+    record(std::nullopt, 0.0);
     return std::nullopt;
   }
   last_gpu_wait_us_ = slot.engine->last_gpu_wait_us();
@@ -524,18 +741,19 @@ std::optional<unsigned> ldpc_decoder_metal::decode(bit_buffer&                  
 
   const unsigned nof_significant_bits = message_length - cfg.nof_filler_bits;
 
+  // Single exit so that every path folds its cost into the split (the verdict itself is unchanged).
+  std::optional<unsigned> verdict;
   if (crc != nullptr) {
     if (crc->calculate(output.first(nof_significant_bits)) == 0) {
-      return static_cast<unsigned>(iters);
+      verdict = static_cast<unsigned>(iters);
     }
-    return std::nullopt;
+  } else if (error_count == 0) {
+    // No CRC: fall back to the syndrome check (GPU-side early stop always applies internally).
+    verdict = early_stop_syndrome ? std::optional<unsigned>(static_cast<unsigned>(iters))
+                                  : std::optional<unsigned>(cfg.max_iterations);
   }
-
-  // No CRC: fall back to the syndrome check (GPU-side early stop always applies internally).
-  if (error_count == 0) {
-    return early_stop_syndrome ? static_cast<unsigned>(iters) : cfg.max_iterations;
-  }
-  return std::nullopt;
+  record(verdict, last_gpu_wait_us_);
+  return verdict;
 }
 
 std::optional<std::chrono::nanoseconds> ldpc_decoder_metal::get_last_decode_metal_elapsed() const
