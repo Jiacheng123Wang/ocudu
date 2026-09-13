@@ -164,6 +164,8 @@ int main()
   unsigned           nof_br_mismatch  = 0;
   unsigned           nof_cr_mismatch  = 0;
   unsigned           nof_eq_mismatch = 0;
+  /// Pattern G: the equalization of a group submitted in ONE call, the demapping one per symbol.
+  unsigned           nof_group_llr_mismatch = 0;
   unsigned           nof_nv_mismatch = 0;
   size_t             first_bad_eq    = 0;
 
@@ -247,6 +249,81 @@ int main()
         }
       }
       (void)bad_c;
+    }
+
+    // Pattern G: exactly what the demodulator's deferred group does - the equalization of the whole
+    // group in ONE submit_group() call, the demapping still one submit() per symbol, both in the
+    // same shared burst with a single wait at the end.
+    aligned_buffer llr_g;
+    llr_g.allocate(llr_stride * nof_symbols);
+    // OCUDU_PROBE_GAPPED=1 reproduces the over-the-air layout: a page-aligned GAPPED stride of 4096
+    // elements (32 KiB) per symbol, which is what temp_eq_re hands the engine. With that layout the
+    // group submit and the per-symbol demapping bind DIFFERENT Metal buffer objects to the same
+    // memory (the group wraps the allocation base once, the demapper wraps base + s*32KiB per
+    // symbol), and the demapping then reads the symbols beyond the first one before the equalization
+    // has written them: 21480 differing LLR bytes, first bad symbol 1. Without the flag the outputs
+    // are contiguous, both stages wrap the same pointers, and the pattern passes.
+    const bool   g_gapped = (std::getenv("OCUDU_PROBE_GAPPED") != nullptr);
+    const size_t g_eq_gap = g_gapped ? 4096 : eq_stride / sizeof(cf_t); // cf_t elements between symbols
+    const size_t g_nv_gap = g_gapped ? 4096 : nv_stride / sizeof(float);
+    aligned_buffer g_eq;
+    aligned_buffer g_nv;
+    g_eq.allocate(g_eq_gap * nof_symbols * sizeof(cf_t));
+    g_nv.allocate(g_nv_gap * nof_symbols * sizeof(float));
+    const auto g_eq_of = [&](unsigned s) {
+      return span<cf_t>(static_cast<cf_t*>(g_eq.ptr) + static_cast<size_t>(s) * g_eq_gap,
+                        static_cast<size_t>(nof_re) * layers);
+    };
+    const auto g_nv_of = [&](unsigned s) {
+      return span<float>(static_cast<float*>(g_nv.ptr) + static_cast<size_t>(s) * g_nv_gap,
+                         static_cast<size_t>(nof_re) * layers);
+    };
+    // Without the flag the outputs stay the probe's own buffers, i.e. exactly the layout patterns
+    // A/B/C use, so this pattern only differs from them in HOW the equalization is submitted.
+    const auto g_out_eq = [&](unsigned s) { return g_gapped ? g_eq_of(s) : eq_of(eq_buf, s); };
+    const auto g_out_nv = [&](unsigned s) { return g_gapped ? g_nv_of(s) : nv_of(s); };
+    const auto t_g0 = std::chrono::steady_clock::now();
+    for (unsigned group_begin = 0; group_begin < nof_symbols; group_begin += group_size) {
+      const unsigned group_end = std::min(group_begin + group_size, nof_symbols);
+      std::vector<channel_equalizer::group_symbol> run;
+      run.reserve(group_end - group_begin);
+      for (unsigned s = group_begin; s != group_end; ++s) {
+        run.push_back(
+            channel_equalizer::group_symbol{g_out_eq(s), g_out_nv(s), &ch_symbols, &ch_est, noise_var_estimates, 1.0F});
+      }
+      equalizer.submit_group(run);
+      for (unsigned s = group_begin; s != group_end; ++s) {
+        demapper.submit(llr_of(llr_g, s), g_out_eq(s), g_out_nv(s), mod);
+      }
+      demapper.wait();
+      equalizer.wait();
+    }
+    const double us_g = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t_g0).count();
+    {
+      unsigned bad_g       = 0;
+      int      first_bad_g = -1;
+      for (unsigned s = 0; s != nof_symbols; ++s) {
+        const auto*    pa      = static_cast<const int8_t*>(llr_a.ptr) + s * llr_stride;
+        const auto*    pg      = static_cast<const int8_t*>(llr_g.ptr) + s * llr_stride;
+        const unsigned sym_len = static_cast<unsigned>(nof_re) * layers * bps;
+        for (unsigned i = 0; i != sym_len; ++i) {
+          if (pa[i] != pg[i]) {
+            ++bad_g;
+            if (first_bad_g < 0) {
+              first_bad_g = static_cast<int>(s);
+            }
+          }
+        }
+      }
+      nof_group_llr_mismatch = bad_g;
+      std::printf("[chain] G group submit + per-symbol demap in one burst (%s): %u differing LLR bytes, first bad "
+                  "symbol %d (%.1f us/slot vs per-symbol %.1f us/slot) -> %s\n",
+                  g_gapped ? "gapped outputs, the air layout" : "contiguous outputs",
+                  bad_g,
+                  first_bad_g,
+                  us_g,
+                  us_b,
+                  (bad_g == 0) ? "OK" : "MISMATCH");
     }
 
     // Compare the equalizer outputs of the two patterns (same inputs, so they must agree).
@@ -349,7 +426,7 @@ int main()
   // dispatch (equalize_mxn_batch, one thread per resource element and symbol) must produce
   // bit-identical outputs, and this pattern measures what it saves per slot.
   // ---------------------------------------------------------------------------------------------
-  unsigned nof_batch_mismatch = 0;
+  unsigned nof_batch_mismatch     = 0;
   {
     metal::equalizer_metal_engine engine;
     if (!engine.init()) {
@@ -697,5 +774,5 @@ int main()
                 (nof_adapter_mismatch == 0) ? "OK" : "MISMATCH");
   }
 
-  return (nof_br_mismatch == 0 && nof_cr_mismatch == 0 && nof_batch_mismatch == 0 && nof_ota_mismatch == 0 && nof_adapter_mismatch == 0) ? 0 : 1;
+  return (nof_br_mismatch == 0 && nof_cr_mismatch == 0 && nof_batch_mismatch == 0 && nof_ota_mismatch == 0 && nof_adapter_mismatch == 0 && nof_group_llr_mismatch == 0) ? 0 : 1;
 }
