@@ -542,10 +542,9 @@ int main()
   // synchronous per-symbol path bit for bit. This is the PUSCH shape (17 PRB -> 204 RE, 2 ports,
   // 1 layer, 12 data symbols).
   //
-  // Skipped unless the deferred encoding is selected (OCUDU_EQ_DEFER_ENCODE=1): the default encodes
-  // each dispatch where it is submitted (see enqueue_burst), and with it there is nothing to batch.
-  // The check is what proves the batched form bit-exact once the default flips.
-  if (std::getenv("OCUDU_EQ_DEFER_ENCODE") == nullptr) {
+  // Skipped under the debug override OCUDU_EQ_IMMEDIATE_ENCODE=1, which encodes each dispatch where
+  // it is submitted: with it there is nothing to batch, which is the point of the override.
+  if (std::getenv("OCUDU_EQ_IMMEDIATE_ENCODE") != nullptr) {
     std::printf("[chain]  batched burst: skipped (OCUDU_EQ_IMMEDIATE_ENCODE forces per-symbol encoding)\n");
   } else {
     const unsigned       nof_re  = 204;

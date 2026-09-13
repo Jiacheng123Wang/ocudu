@@ -686,13 +686,15 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
   /// that disappear, so what fails is the stage hand-off inside the shared command buffer once
   /// several threads encode into their own bursts.
   ///
-  /// Select the batched form with OCUDU_EQ_DEFER_ENCODE=1; OCUDU_EQ_IMMEDIATE_ENCODE=1 pins the
-  /// per-symbol form regardless of the default, so an RX regression can be bisected without a
-  /// rebuild.
+  /// The batched form is the DEFAULT: it is bit-exact in every check (the chain probe, the
+  /// equalizer unit test with a group of twelve, the deferred demodulation equivalence test, and
+  /// the concurrent demodulation test) and it is the whole point of the group hand-off. Debug
+  /// override: OCUDU_EQ_IMMEDIATE_ENCODE=1 pins the per-symbol form, so an RX regression can be
+  /// bisected against the encoding without a rebuild.
   ///@{
   static const bool defer_encode = []() {
-    const char* env = std::getenv("OCUDU_EQ_DEFER_ENCODE");
-    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    const char* env = std::getenv("OCUDU_EQ_IMMEDIATE_ENCODE");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) == 0);
   }();
   if (defer_encode) {
     // A thread can accumulate for several engines over its lifetime (a worker creating one
