@@ -392,7 +392,10 @@ bool dft_metal_engine::wait_slot(unsigned slot)
 
 bool dft_metal_engine::wait_all()
 {
-  return metal::shared_queue::wait_all_committed();
+  // Every DFT instance commits on the front-end queue and publishes there, so this drains this
+  // engine's own work (and every other front-end commit) - not the back-end stages' command
+  // buffers, which run on a queue of their own (see shared_queue::queue_kind).
+  return metal::shared_queue::wait_all_committed(metal::shared_queue::queue_kind::front_end);
 }
 
 bool dft_metal_engine::submit_at(
@@ -431,9 +434,11 @@ bool dft_metal_engine::submit_at(
   [enc endEncoding];
   [cmd_buf commit];
   dft_stats_commit();
-  // Publish the commit on the shared queue so wait_all_committed() and the consumer stages can
-  // synchronize with it (the engines share one queue, so ordering is global).
-  metal::shared_queue::notify_commit(cmd_buf);
+  // Publish the commit on the front-end chain so wait_all_committed() can drain it: the DFT is the
+  // only engine on this queue, and it is a different queue than the back-end stages' (a commit must
+  // never be published on the wrong chain, or the wait would target another queue's command buffer
+  // and return before this one completed).
+  metal::shared_queue::notify_commit(cmd_buf, metal::shared_queue::queue_kind::front_end);
   engine->last_committed_cb = cmd_buf;
   if (!wait_for_completion) {
     return true;

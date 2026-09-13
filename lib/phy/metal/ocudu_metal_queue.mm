@@ -25,9 +25,23 @@ struct shared_queue_state {
   std::mutex                       mutex;
   /// No-copy wraps shared by every engine (see shared_queue::wrap_no_copy).
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> wrap_cache;
-  id<MTLCommandBuffer>             last_committed = nil; // newest commit of the pending chain
-  uint64_t                         commits        = 0;
-  uint64_t                         pending        = 0;
+
+  /// Pending chain of one queue: the newest commit and how many are outstanding. Kept per queue
+  /// because a wait on a command buffer of one queue cannot stand for the work of the other (see
+  /// shared_queue::queue_kind).
+  struct pending_chain {
+    id<MTLCommandBuffer> last_committed = nil;
+    uint64_t             pending        = 0;
+  };
+  static constexpr size_t nof_queue_kinds = 2;
+  pending_chain           chains[nof_queue_kinds];
+
+  pending_chain& chain(shared_queue::queue_kind kind)
+  {
+    return chains[static_cast<size_t>(kind)];
+  }
+
+  uint64_t commits = 0;
   /// Zero-copy wrap-cache accounting (see the [metal_stats] report below): a hit means two stages
   /// of the chain bind the SAME Metal buffer object for one address, which is what relates their
   /// accesses to it; a replace means a stage asked for more than the cached mapping and got a
@@ -142,16 +156,17 @@ id<MTLCommandQueue> shared_queue::backend_queue()
   return state().backend_queue;
 }
 
-void shared_queue::notify_commit(id<MTLCommandBuffer> command_buffer)
+void shared_queue::notify_commit(id<MTLCommandBuffer> command_buffer, queue_kind kind)
 {
   shared_queue_state& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
-  s.last_committed = command_buffer;
+  shared_queue_state::pending_chain& c = s.chain(kind);
+  c.last_committed                     = command_buffer;
+  ++c.pending;
   ++s.commits;
-  ++s.pending;
 }
 
-bool shared_queue::wait_all_committed()
+bool shared_queue::wait_all_committed(queue_kind kind)
 {
   shared_queue_state& s = state();
 
@@ -159,10 +174,11 @@ bool shared_queue::wait_all_committed()
   uint64_t             pending = 0;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
-    cmd_buf       = s.last_committed;
-    pending       = s.pending;
-    s.pending     = 0;
-    s.last_committed = nil;
+    shared_queue_state::pending_chain& c = s.chain(kind);
+    cmd_buf                              = c.last_committed;
+    pending                              = c.pending;
+    c.pending                            = 0;
+    c.last_committed                     = nil;
   }
   if ((pending == 0) || (cmd_buf == nil)) {
     return true;
@@ -183,7 +199,11 @@ uint64_t shared_queue::nof_pending()
 {
   shared_queue_state& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
-  return s.pending;
+  uint64_t total = 0;
+  for (const shared_queue_state::pending_chain& c : s.chains) {
+    total += c.pending;
+  }
+  return total;
 }
 
 } // namespace metal

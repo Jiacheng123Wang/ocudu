@@ -74,17 +74,32 @@ public:
   /// \return The buffer, or nil when the wrap failed and the caller must stage through a copy.
   static id<MTLBuffer> wrap_no_copy(id<MTLDevice> device, const void* ptr, size_t length);
 
-  /// \brief Registers a command buffer committed through the shared queue.
+  /// \brief Which of the two process-wide queues a commit belongs to.
+  ///
+  /// A wait can only speak about the command buffers of ONE queue: the two queues execute
+  /// concurrently, so waiting for a command buffer of the other one says nothing about this one's
+  /// work. The pending chain is therefore kept per queue, and a stage that publishes a commit must
+  /// say which queue it committed on - a back-end commit published as a front-end one (or the other
+  /// way round) would make the wait return before the work it was supposed to cover.
+  enum class queue_kind {
+    /// The front-end queue (see queue()): the per-symbol producers.
+    front_end,
+    /// The back-end queue (see backend_queue()): the late stages of the RX chain.
+    back_end
+  };
+
+  /// \brief Registers a command buffer committed through one of the shared queues.
   ///
   /// Called by the engines right after commit() so that wait_all_committed() knows what to wait
   /// for and the [metal_stats] probe can account for the shared dispatches.
-  static void notify_commit(id<MTLCommandBuffer> command_buffer);
+  static void notify_commit(id<MTLCommandBuffer> command_buffer, queue_kind kind);
 
-  /// \brief Waits for every command buffer committed through the shared queue so far.
+  /// \brief Waits for every command buffer committed through \p kind's queue so far.
   ///
   /// \note Command buffers of one queue complete in submission order, so waiting for the most
-  /// recently committed one drains the whole chain. Returns false when a command buffer failed.
-  static bool wait_all_committed();
+  /// recently committed one drains the whole chain of that queue. Returns false when a command
+  /// buffer failed, and true when there is nothing to wait for.
+  static bool wait_all_committed(queue_kind kind);
 
   /// Number of command buffers committed through the shared queue (diagnostics).
   static uint64_t nof_commits();

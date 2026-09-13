@@ -56,7 +56,8 @@ public:
   ///
   /// The outputs are only valid once the shared queue is synchronized: either by a later engine
   /// dispatching on the same queue (command buffers of one queue run in submission order) or by an
-  /// explicit metal::shared_queue::wait_all_committed() before the data is read on the CPU.
+  /// explicit metal::shared_queue::wait_all_committed(queue_kind::front_end) before the data is read
+  /// on the CPU (it drains this queue only - see shared_queue::queue_kind).
   /// This is the entry point used by the CPU/GPU pipelined RX chain: the per-symbol DFTs are
   /// submitted without stalling the CPU, and the consumer stage synchronizes once.
   /// \return True when the dispatch was encoded and committed.
