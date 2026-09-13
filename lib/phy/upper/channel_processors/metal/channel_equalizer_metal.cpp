@@ -515,15 +515,6 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   const void* s_binding = (s_dev != nullptr) ? static_cast<const void*>(s_dev) : static_cast<const void*>(s_ptr);
 
   if (defer) {
-    if (std::getenv("OCUDU_EQ_LOG") != nullptr) {
-      std::fprintf(stderr,
-                   "[eqlog] submit eq=%p align=%d nv=%p align_nv=%d re=%u\n",
-                   static_cast<void*>(eq_symbols.data()),
-                   static_cast<int>(is_page_aligned_buffer(eq_symbols.data())),
-                   static_cast<void*>(eq_noise_vars.data()),
-                   static_cast<int>(is_page_aligned_buffer(eq_noise_vars.data())),
-                   nof_re);
-    }
     // Append the dispatch to the shared burst of this group: every stage of the burst ends up in
     // one command buffer, with a memory barrier where the pipeline changes (see shared_burst).
     const bool ok = impl_->engine.enqueue_burst(h_binding,
