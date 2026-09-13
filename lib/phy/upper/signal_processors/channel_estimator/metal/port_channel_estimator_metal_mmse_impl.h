@@ -118,6 +118,9 @@ private:
   void apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args) override;
 
   // See the base class documentation.
+  void complete_fd_td_estimation_stage() override;
+
+  // See the base class documentation.
   std::optional<ch_est_device_view> get_device_ch_estimates(unsigned i_symbol, unsigned tx_layer) const override;
 
   // See the base class documentation.
@@ -196,13 +199,18 @@ private:
   ///         fall back to the CPU reference math for these blocks (S-1 audit fix: the return value
   ///         was previously ignored, which could silently leave stale channel estimates in the
   ///         grid).
+  /// \param defer Submit without waiting when the kernels allow it (the legacy path does; the
+  ///              matrix flavor and the CPU-inversion A/B knob do not, and complete the batch
+  ///              inline). A deferred batch must be completed by complete_fd_td_estimation_stage()
+  ///              before anything reads its results - including their unpack into the grid.
   bool engine_run(unsigned                                 nout,
                   unsigned                                 L,
                   unsigned                                 nof_systems,
                   unsigned                                 nof_blocks,
                   bool                                     matrix,
                   bool                                     gpu_invert,
-                  const metal::mmse_engine::reformat_stage* reformat = nullptr);
+                  const metal::mmse_engine::reformat_stage* reformat = nullptr,
+                  bool                                     defer    = false);
 
   /// \brief Unpacks the engine outputs of the group staged at \c sys_offset into the grid
   /// (symbol-major within each block; the blocks start at PRB gb_start).
@@ -228,7 +236,86 @@ private:
                          unsigned                           L,
                          unsigned                           npt,
                          bool                               matrix,
-                         const metal::mmse_engine::reformat_stage* reformat = nullptr);
+                         const metal::mmse_engine::reformat_stage* reformat = nullptr,
+                         bool                               defer    = false);
+
+  /// \brief Unpack of a batch whose command buffer has not been waited for yet.
+  ///
+  /// The estimates are in gpu_h once that command buffer completes, so a deferred batch records
+  /// where they go and complete_fd_td_estimation_stage() unpacks them - waiting first, because
+  /// gpu_h is a shared staging buffer: the next hop overwrites it.
+  struct pending_unpack {
+    unsigned       gb_start   = 0;
+    unsigned       n_blk      = 0;
+    unsigned       b_prb      = 0;
+    unsigned       nout       = 0;
+    unsigned       nof_layers = 0;
+    unsigned       sys_offset = 0;
+    engine_strides st{};
+  };
+
+  /// A hop has at most two batches (the standard blocks and the tail block, or the merged pair).
+  static constexpr unsigned max_pending_unpacks = 2;
+
+  /// Records the unpack of a batch submitted without waiting (see engine_run()).
+  void defer_unpack(unsigned              gb_start,
+                    unsigned              n_blk,
+                    unsigned              b_prb,
+                    unsigned              nout,
+                    unsigned              nof_layers,
+                    unsigned              sys_offset,
+                    const engine_strides& st);
+
+  std::array<pending_unpack, max_pending_unpacks> pending_unpacks{};
+  unsigned                                        nof_pending_unpacks = 0;
+  /// True while a batch submitted by the last stage call is still outstanding.
+  bool stage_pending = false;
+
+  /// \brief The pilot-derived buffers of a hop, filled out of the estimated grid.
+  ///
+  /// RSrp, the noise variance and the time alignment are computed by the base class from these, and
+  /// they are read from the grid the batch writes - so they can only be filled once that batch has
+  /// completed, which is why a deferred stage records what to fill here (see
+  /// complete_fd_td_estimation_stage()). The destinations are views into buffers the caller keeps
+  /// alive until the hop is completed.
+  struct pending_fill {
+    bool     valid      = false;
+    unsigned nof_prb    = 0;
+    unsigned npt        = 0;
+    unsigned nof_layers = 0;
+    std::array<unsigned, MAX_NOF_DMRS_SYMBOLS>                    dmrs_sym{};
+    std::array<bounded_bitset<NOF_SUBCARRIERS_PER_RB>, MAX_LAYERS> re_pattern{};
+    std::array<span<cf_t>, MAX_NOF_DMRS_SYMBOLS * MAX_LAYERS>      filtered_dst{};
+    std::array<span<cf_t>, MAX_NOF_DMRS_SYMBOLS * MAX_LAYERS>      freq_dst{};
+
+    /// Copies the pilot REs and the DM-RS symbol slices of every layer out of the estimated grid.
+    void fill(const static_re_buffer<MAX_LAYERS * MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS>& grid) const;
+  };
+
+  pending_fill deferred_fill;
+
+#if defined(OCUDU_CE_TIME)
+  /// Measurements of a stage whose batch is still outstanding ([mmse_time_sum], debug aid).
+  ///
+  /// The GPU busy time of a deferred batch and the wall time the caller spends waiting for it are
+  /// only known when complete_fd_td_estimation_stage() runs, so the stage leaves what it measured
+  /// here and the completion finishes the accounting (see mmse_stats_accumulate()).
+  struct deferred_stage_stats {
+    bool     valid = false;
+    bool     hop_gpu = false;
+    bool     hop_nn = false;
+    unsigned fallback_blocks = 0;
+    double   sigma2_us = 0.0;
+    double   corr_us = 0.0;
+    /// Stage start -> end of the stage's CPU work, i.e. the GPU phase without the deferred wait.
+    double gpu_path_us = 0.0;
+    double cpu_blocks_us = 0.0;
+    /// The same window: the hop without the deferred wait.
+    double total_us = 0.0;
+  };
+  deferred_stage_stats                  deferred_stats;
+  std::chrono::steady_clock::time_point deferred_wait_begin{};
+#endif
 
   /// \brief Builds the per-symbol data-RE masks of the current hop - the layout the equalizer
   /// indexes its channel estimates by - and their prefix RE counts.

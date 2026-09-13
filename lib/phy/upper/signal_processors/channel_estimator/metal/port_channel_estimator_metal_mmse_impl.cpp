@@ -35,6 +35,7 @@ struct mmse_time_stats {
   std::atomic<uint64_t> device_hops{0};
   std::atomic<uint64_t> sigma2_us{0};
   std::atomic<uint64_t> corr_us{0};
+  std::atomic<uint64_t> deferred_wait_us{0};
   std::atomic<uint64_t> max_total_us{0};
 };
 
@@ -60,7 +61,7 @@ void mmse_stats_register_atexit()
       std::fprintf(stderr,
                    "[mmse_time_sum] calls=%llu hops_gpu=%llu hops_no_gpu=%llu hops_nn=%llu fb_blocks=%llu | "
                    "mean total=%.1fus sigma2=%.1fus corr=%.1fus gpu_path=%.1fus (gpu_wait=%.1fus) "
-                   "cpu_blocks=%.1fus | device_hops=%llu max total=%lluus\n",
+                   "cpu_blocks=%.1fus defer_wait=%.1fus | device_hops=%llu max total=%lluus\n",
                    static_cast<unsigned long long>(n),
                    static_cast<unsigned long long>(s.hops_gpu.load(std::memory_order_relaxed)),
                    static_cast<unsigned long long>(s.hops_no_gpu.load(std::memory_order_relaxed)),
@@ -72,6 +73,7 @@ void mmse_stats_register_atexit()
                    avg(s.gpu_path_us),
                    avg(s.gpu_wait_us),
                    avg(s.cpu_blocks_us),
+                   avg(s.deferred_wait_us),
                    static_cast<unsigned long long>(s.device_hops.load(std::memory_order_relaxed)),
                    static_cast<unsigned long long>(s.max_total_us.load(std::memory_order_relaxed)));
     });
@@ -86,6 +88,10 @@ void mmse_stats_device_hop()
   mmse_stats().device_hops.fetch_add(1, std::memory_order_relaxed);
 }
 
+/// \param deferred_wait_us Wall time between the end of a deferred stage and the completion of its
+///        batch. The stage returns before its batch is done, so this wait happens outside the window
+///        the other measurements cover: it is part of the GPU phase and of the hop, and it is also
+///        reported on its own so the split stays visible.
 void mmse_stats_accumulate(bool     hop_gpu,
                            bool     hop_nn,
                            unsigned fallback_blocks,
@@ -94,9 +100,12 @@ void mmse_stats_accumulate(bool     hop_gpu,
                            double   gpu_path_us,
                            double   gpu_wait_us,
                            double   cpu_blocks_us,
-                           double   total_us)
+                           double   total_us,
+                           double   deferred_wait_us = 0.0)
 {
   mmse_stats_register_atexit();
+  gpu_path_us += deferred_wait_us;
+  total_us += deferred_wait_us;
   mmse_time_stats& s = mmse_stats();
   s.calls.fetch_add(1, std::memory_order_relaxed);
   (hop_gpu ? s.hops_gpu : s.hops_no_gpu).fetch_add(1, std::memory_order_relaxed);
@@ -110,6 +119,7 @@ void mmse_stats_accumulate(bool     hop_gpu,
   s.gpu_wait_us.fetch_add(static_cast<uint64_t>(gpu_wait_us), std::memory_order_relaxed);
   s.cpu_blocks_us.fetch_add(static_cast<uint64_t>(cpu_blocks_us), std::memory_order_relaxed);
   s.total_us.fetch_add(static_cast<uint64_t>(total_us), std::memory_order_relaxed);
+  s.deferred_wait_us.fetch_add(static_cast<uint64_t>(deferred_wait_us), std::memory_order_relaxed);
   uint64_t prev = s.max_total_us.load(std::memory_order_relaxed);
   const auto cur = static_cast<uint64_t>(total_us);
   while (cur > prev && !s.max_total_us.compare_exchange_weak(prev, cur, std::memory_order_relaxed)) {
@@ -594,6 +604,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // S-5c: the tail block no longer costs a second engine call - it is merged into the standard
   // batch as an extra padded system (see merge_tail below), so a hop is one command buffer.
   const bool matrix_on = engine_ready && use_matrix_engine && matrix_ready;
+  // Deferring the batch is what lets the rest of the receiving chain run while the GPU works on it
+  // (see port_channel_estimator::submit()); the matrix flavor and the CPU-inversion knob keep
+  // completing their batches here, so a stage that cannot defer reports stage_pending = false.
+  const bool defer = !matrix_on;
+  nof_pending_unpacks = 0;
+  stage_pending       = false;
   // Largest tail block order (L = pilots per block) the CPU reference path is known to be fast for
   // (a 36x36 Gauss-Jordan is ~23k FLOPs). Only consulted by the OCUDU_CE_TAIL_CPU A/B knob.
   static constexpr unsigned MAX_CPU_TAIL_ORDER = 36;
@@ -764,7 +780,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                   static_cast<std::size_t>(nof_layers) * n_std_blocks * 2 * L_std * sizeof(float));
       stage_engine_group(
           args, n_std_blocks * block_prb, 1, rem_prb, npt, nout_e, L_e, nof_layers, st, matrix_on, gpu_invert);
-      // 4) ONE engine call over both groups, then unpack both.
+      // 4) ONE engine call over both groups, then unpack both. The call is submitted without
+      //    waiting when the kernels allow it, so the unpack moves to the completion of the stage
+      //    (see complete_fd_td_estimation_stage()).
+      const bool merged_defer = defer && gpu_invert;
       const bool merged_ok = engine_run(nout_std,
                                         L_std,
                                         2 * nof_layers,
@@ -783,8 +802,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       gpu_ce_total_re      = nof_re_total;
       gpu_nv_ready         = gpu_ce_ready && (reformat.noise.nv != nullptr);
       if (merged_ok) {
-        unpack_engine_group(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st);
-        unpack_engine_group(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st);
+        if (merged_defer) {
+          defer_unpack(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st);
+          defer_unpack(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st);
+        } else {
+          unpack_engine_group(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st);
+          unpack_engine_group(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st);
+        }
       }
     } else {
       if (n_std_blocks != 0) {
@@ -801,7 +825,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                          npt,
                                          matrix_on,
                                          covers_hop ? reformat_for(block_prb * NOF_SUBCARRIERS_PER_RB, 0, 0)
-                                                    : nullptr);
+                                                    : nullptr,
+                                         defer);
         hop_gpu               = std_blocks_ok;
         hop_nn                = std_blocks_ok && matrix_on;
         hop_pad               = (std_blocks_ok && matrix_on) ? static_cast<unsigned>(((L_std + 7u) & ~7u) - L_std) : 0;
@@ -841,7 +866,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                       L_e,
                                       npt,
                                       matrix_on,
-                                      covers_hop ? reformat_for(rem_prb * NOF_SUBCARRIERS_PER_RB, 0, 0) : nullptr);
+                                      covers_hop ? reformat_for(rem_prb * NOF_SUBCARRIERS_PER_RB, 0, 0) : nullptr,
+                                      defer);
           hop_gpu               = hop_gpu || tail_ok;
           hop_nn                = hop_nn || (tail_ok && matrix_on);
           hop_pad               = (tail_ok && matrix_on) ? static_cast<unsigned>(((L_e + 7u) & ~7u) - L_e) : hop_pad;
@@ -863,6 +889,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // legacy kernels (nn=0, only when the matrix pipelines are unavailable/stale).
     last_stage_nn     = matrix_on;
     last_stage_merged = merge_tail;
+    // The batches have been submitted: if any of them was not waited for, the stage is pending and
+    // complete_fd_td_estimation_stage() must unpack it before its results are read.
+    stage_pending = (nof_pending_unpacks != 0);
 #if defined(OCUDU_CE_TIME)
     if (gpu_ce_ready) {
       mmse_stats_device_hop();
@@ -973,29 +1002,44 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 
   const auto t_cpu_end = steady_clock::now();
 
-  // Fill the filtered-pilots buffer (the estimated pilot REs, already in the data domain because the
-  // pilots were scaled above) for RSrp / noise / TA, and the classical frequency response with the
-  // DM-RS symbol slices of the grid. An extra 1 / beta here inflated RSrp by 1 / beta^2 and the
-  // noise variance by about 1 / beta^4, i.e. 17 dB of missing soft bits with the 0.708 of a real
-  // cell.
-  for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-    const auto& re_pattern = args.dmrs_patterns[i_layer].re_pattern;
+  // Fill the pilot-derived buffers (the estimated pilot REs for RSrp / noise / TA, and the classical
+  // frequency response) out of the estimated grid. The grid only holds the estimates once the batch
+  // that produced them has completed, so a deferred stage records what to fill and lets its
+  // completion do it.
+  if (stage_pending) {
+    deferred_fill.valid      = true;
+    deferred_fill.nof_prb    = nof_prb;
+    deferred_fill.npt        = npt;
+    deferred_fill.nof_layers = nof_layers;
+    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+      deferred_fill.re_pattern[i_layer] = args.dmrs_patterns[i_layer].re_pattern;
+    }
     for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
-      const unsigned slot_sym = dmrs_sym[i_symbol];
-      span<const cf_t> src    = grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + slot_sym);
-      span<cf_t>       dst    = args.filtered_pilots_lse_view.get_symbol(i_symbol, i_layer);
-      unsigned         j      = 0;
-      for (unsigned prb = 0; prb != nof_prb; ++prb) {
-        re_pattern.for_each(0, re_pattern.size(), [&](unsigned pos) {
-          dst[j++] = src[prb * NOF_SUBCARRIERS_PER_RB + pos];
-        });
+      deferred_fill.dmrs_sym[i_symbol] = dmrs_sym[i_symbol];
+    }
+    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+      for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
+        deferred_fill.filtered_dst[i_layer * MAX_NOF_DMRS_SYMBOLS + i_symbol] =
+            args.filtered_pilots_lse_view.get_symbol(i_symbol, i_layer);
+        deferred_fill.freq_dst[i_layer * MAX_NOF_DMRS_SYMBOLS + i_symbol] =
+            args.freq_response.get_symbol(i_symbol, i_layer);
       }
     }
-    for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
-      const unsigned slot_sym = dmrs_sym[i_symbol];
-      ocuduvec::copy(args.freq_response.get_symbol(i_symbol, i_layer),
-                     grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + slot_sym));
+  } else {
+    pending_fill fill;
+    fill.nof_prb    = nof_prb;
+    fill.npt        = npt;
+    fill.nof_layers = nof_layers;
+    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+      fill.re_pattern[i_layer] = args.dmrs_patterns[i_layer].re_pattern;
+      for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
+        fill.dmrs_sym[i_symbol]                                                       = dmrs_sym[i_symbol];
+        fill.filtered_dst[i_layer * MAX_NOF_DMRS_SYMBOLS + i_symbol] =
+            args.filtered_pilots_lse_view.get_symbol(i_symbol, i_layer);
+        fill.freq_dst[i_layer * MAX_NOF_DMRS_SYMBOLS + i_symbol] = args.freq_response.get_symbol(i_symbol, i_layer);
+      }
     }
+    fill.fill(grid_est);
   }
 
   if (time_en) {
@@ -1020,16 +1064,31 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                  us(t_finish - t_begin));
 
     // Aggregated summary (printed once at exit, stderr) - the debug line above is only usable
-    // interactively because it emits tens of lines per slot.
-    mmse_stats_accumulate(hop_gpu,
-                          hop_nn,
-                          cpu_fallback_blocks,
-                          us(t_sigma2 - t_begin),
-                          us(t_corr_std - t_sigma2),
-                          us(t_gpu_end - t_corr_std),
-                          engine_ready ? engine->last_gpu_wait_us() : 0.0,
-                          us(t_cpu_end - t_gpu_end),
-                          us(t_finish - t_begin));
+    // interactively because it emits tens of lines per slot. A deferred batch is waited for outside
+    // this call and its GPU busy time is only known then, so the accounting is finished by
+    // complete_fd_td_estimation_stage(); until it runs, the measurements wait here.
+    if (stage_pending) {
+      deferred_stats = {true,
+                        hop_gpu,
+                        hop_nn,
+                        cpu_fallback_blocks,
+                        us(t_sigma2 - t_begin),
+                        us(t_corr_std - t_sigma2),
+                        us(t_gpu_end - t_corr_std),
+                        us(t_cpu_end - t_gpu_end),
+                        us(t_finish - t_begin)};
+      deferred_wait_begin = steady_clock::now();
+    } else {
+      mmse_stats_accumulate(hop_gpu,
+                            hop_nn,
+                            cpu_fallback_blocks,
+                            us(t_sigma2 - t_begin),
+                            us(t_corr_std - t_sigma2),
+                            us(t_gpu_end - t_corr_std),
+                            engine_ready ? engine->last_gpu_wait_us() : 0.0,
+                            us(t_cpu_end - t_gpu_end),
+                            us(t_finish - t_begin));
+    }
   }
 }
 
@@ -1171,16 +1230,21 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(unsigned nout,
                                                         unsigned nof_blocks,
                                                         bool     matrix,
                                                         bool     gpu_invert,
-                                                        const metal::mmse_engine::reformat_stage* reformat)
+                                                        const metal::mmse_engine::reformat_stage* reformat,
+                                                        bool     defer)
 {
   // Weight (W = R_hp . A^-1) + apply (h = W . y) in ONE engine command buffer, with the inversion
   // (K1) prepended in the same buffer when the A slots hold A itself, and the equalizer's
   // per-symbol estimates (K3) appended to the same buffer when the caller asked for them. The
   // engine return value is checked (S-1 audit fix): on failure the caller falls back to the CPU
   // reference math for these blocks instead of unpacking stale gpu_h contents.
+  // The legacy kernels cover the whole hop in one command buffer that the caller may walk away
+  // from (run_async) and complete later; the matrix flavor and the CPU-inversion A/B knob have no
+  // asynchronous form, so those paths always complete the batch here.
   const bool engine_ok =
       matrix ? engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_systems, nof_blocks)
-             : (gpu_invert ? engine->run(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
+             : (gpu_invert ? (defer ? engine->run_async(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
+                                   : engine->run(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat))
                            : engine->run_weights_only(
                                  gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat));
   if (!engine_ok) {
@@ -1278,7 +1342,8 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                                                                unsigned                           L,
                                                                unsigned                           npt,
                                                                bool                               matrix,
-                                                               const metal::mmse_engine::reformat_stage* reformat)
+                                                               const metal::mmse_engine::reformat_stage* reformat,
+                                                               bool                               defer)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
   // Slot strides: the legacy kernels use the compact L / nout layout; the matrix kernels use the
@@ -1303,11 +1368,100 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   const bool gpu_invert        = !matrix && !cpu_invert_forced && (L <= MAX_GPU_INVERT_ORDER);
 
   stage_engine_group(args, gb_start, n_blk, b_prb, npt, nout, L, 0, st, matrix, gpu_invert);
-  if (!engine_run(nout, L, nof_layers, n_blk, matrix, gpu_invert, reformat)) {
+  const bool deferred = defer && !matrix && gpu_invert;
+  if (!engine_run(nout, L, nof_layers, n_blk, matrix, gpu_invert, reformat, deferred)) {
     return false;
   }
-  unpack_engine_group(gb_start, n_blk, b_prb, nout, nof_layers, 0, st);
+  if (deferred) {
+    defer_unpack(gb_start, n_blk, b_prb, nout, nof_layers, 0, st);
+  } else {
+    unpack_engine_group(gb_start, n_blk, b_prb, nout, nof_layers, 0, st);
+  }
   return true;
+}
+
+void port_channel_estimator_metal_mmse_impl::defer_unpack(unsigned              gb_start,
+                                                          unsigned              n_blk,
+                                                          unsigned              b_prb,
+                                                          unsigned              nout,
+                                                          unsigned              nof_layers,
+                                                          unsigned              sys_offset,
+                                                          const engine_strides& st)
+{
+  ocudu_assert(nof_pending_unpacks < max_pending_unpacks,
+               "A hop has at most {} batches pending, this one already has {}.",
+               max_pending_unpacks,
+               nof_pending_unpacks);
+  pending_unpacks[nof_pending_unpacks++] = pending_unpack{gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st};
+}
+
+void port_channel_estimator_metal_mmse_impl::pending_fill::fill(
+    const static_re_buffer<MAX_LAYERS * MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS>& grid) const
+{
+  // An extra 1 / beta in this path inflated RSrp by 1 / beta^2 and the noise variance by about
+  // 1 / beta^4, i.e. 17 dB of missing soft bits with the 0.708 of a real cell, so the values are
+  // taken as they are (the pilots were already scaled in the data domain).
+  for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+    const auto& pattern = re_pattern[i_layer];
+    for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
+      const unsigned   slot_sym = dmrs_sym[i_symbol];
+      span<const cf_t> src      = grid.get_slice(i_layer * MAX_NSYMB_PER_SLOT + slot_sym);
+      span<cf_t>       dst      = filtered_dst[i_layer * MAX_NOF_DMRS_SYMBOLS + i_symbol];
+      unsigned         j        = 0;
+      for (unsigned prb = 0; prb != nof_prb; ++prb) {
+        pattern.for_each(0, pattern.size(), [&](unsigned pos) { dst[j++] = src[prb * NOF_SUBCARRIERS_PER_RB + pos]; });
+      }
+      ocuduvec::copy(freq_dst[i_layer * MAX_NOF_DMRS_SYMBOLS + i_symbol], src);
+    }
+  }
+}
+
+void port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
+{
+  if (!stage_pending) {
+    return;
+  }
+  stage_pending = false;
+
+  const bool ok = (engine == nullptr) || engine->wait_pending();
+#if defined(OCUDU_CE_TIME)
+  // The wait above is the rest of the GPU phase of a deferred hop: count it with everything the
+  // stage measured before returning (see mmse_stats_accumulate()).
+  if (deferred_stats.valid) {
+    const auto   now     = std::chrono::steady_clock::now();
+    const double wait_us = std::chrono::duration<double, std::micro>(now - deferred_wait_begin).count();
+    mmse_stats_accumulate(deferred_stats.hop_gpu,
+                          deferred_stats.hop_nn,
+                          deferred_stats.fallback_blocks,
+                          deferred_stats.sigma2_us,
+                          deferred_stats.corr_us,
+                          deferred_stats.gpu_path_us,
+                          engine_ready ? engine->last_gpu_wait_us() : 0.0,
+                          deferred_stats.cpu_blocks_us,
+                          deferred_stats.total_us,
+                          wait_us);
+    deferred_stats.valid = false;
+  }
+#endif
+  if (!ok) {
+    // A command buffer that failed after a successful submission cannot be recomputed here: the CPU
+    // reference math that backs up a failed engine call would need the hop state this stage no
+    // longer holds. Report it instead of leaving the consumer with the previous hop's estimates.
+    logger.error("[mmse_ce] the deferred engine batch of this hop failed: its estimates are not valid");
+    nof_pending_unpacks = 0;
+    return;
+  }
+  for (unsigned i = 0; i != nof_pending_unpacks; ++i) {
+    const pending_unpack& u = pending_unpacks[i];
+    unpack_engine_group(u.gb_start, u.n_blk, u.b_prb, u.nout, u.nof_layers, u.sys_offset, u.st);
+  }
+  nof_pending_unpacks = 0;
+
+  // The grid is complete now: derive the buffers the hop statistics are computed from.
+  if (deferred_fill.valid) {
+    deferred_fill.fill(grid_est);
+    deferred_fill.valid = false;
+  }
 }
 
 std::optional<ch_est_device_view> port_channel_estimator_metal_mmse_impl::get_device_ch_estimates(
