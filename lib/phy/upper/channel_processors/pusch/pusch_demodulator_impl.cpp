@@ -14,6 +14,8 @@
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_codeword_buffer.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_demodulator_notifier.h"
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <array>
 #include <cstdlib>
 #include <cstring>
@@ -640,6 +642,37 @@ pusch_demodulator_impl::get_ch_data_re(const resource_grid_reader&              
   return ch_re_copy;
 }
 
+#if defined(OCUDU_METAL_STATS)
+namespace {
+
+/// Device channel-estimate accounting (see get_ch_data_estimates()): how many per-symbol
+/// extractions read the estimator's device buffer and how many gathered the estimates on the host.
+/// A fallback is legitimate (the estimator may not offer device estimates for this hop), but a run
+/// whose device count is zero has not exercised the device path at all.
+struct demod_ch_est_stats {
+  std::atomic<uint64_t> device{0};
+  std::atomic<uint64_t> host{0};
+};
+
+demod_ch_est_stats& demod_ch_est_counters()
+{
+  static demod_ch_est_stats s;
+  static std::once_flag    flag;
+  std::call_once(flag, []() {
+    std::atexit([]() {
+      const demod_ch_est_stats& c = demod_ch_est_counters();
+      std::fprintf(stderr,
+                   "[metal_stats] pusch_demod ch_est device=%llu host=%llu\n",
+                   static_cast<unsigned long long>(c.device.load(std::memory_order_relaxed)),
+                   static_cast<unsigned long long>(c.host.load(std::memory_order_relaxed)));
+    });
+  });
+  return s;
+}
+
+} // namespace
+#endif // OCUDU_METAL_STATS
+
 const channel_equalizer::ch_est_list&
 pusch_demodulator_impl::get_ch_data_estimates(const dmrs_pusch_estimator_results&      est_results,
                                               unsigned                                 i_symbol,
@@ -681,9 +714,15 @@ pusch_demodulator_impl::get_ch_data_estimates(const dmrs_pusch_estimator_results
       }
     }
     if (device_ok) {
+#if defined(OCUDU_METAL_STATS)
+      demod_ch_est_counters().device.fetch_add(1, std::memory_order_relaxed);
+#endif
       return device_ch_estimates;
     }
   }
+#if defined(OCUDU_METAL_STATS)
+  demod_ch_est_counters().host.fetch_add(1, std::memory_order_relaxed);
+#endif
 
   ch_estimates_copy.resize(nof_re, rx_ports.size(), nof_tx_layers);
 

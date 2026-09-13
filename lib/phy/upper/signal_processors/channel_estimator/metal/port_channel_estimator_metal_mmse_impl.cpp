@@ -32,6 +32,7 @@ struct mmse_time_stats {
   std::atomic<uint64_t> gpu_path_us{0};
   std::atomic<uint64_t> gpu_wait_us{0};
   std::atomic<uint64_t> cpu_blocks_us{0};
+  std::atomic<uint64_t> device_hops{0};
   std::atomic<uint64_t> sigma2_us{0};
   std::atomic<uint64_t> corr_us{0};
   std::atomic<uint64_t> max_total_us{0};
@@ -59,7 +60,7 @@ void mmse_stats_register_atexit()
       std::fprintf(stderr,
                    "[mmse_time_sum] calls=%llu hops_gpu=%llu hops_no_gpu=%llu hops_nn=%llu fb_blocks=%llu | "
                    "mean total=%.1fus sigma2=%.1fus corr=%.1fus gpu_path=%.1fus (gpu_wait=%.1fus) "
-                   "cpu_blocks=%.1fus | max total=%lluus\n",
+                   "cpu_blocks=%.1fus | device_hops=%llu max total=%lluus\n",
                    static_cast<unsigned long long>(n),
                    static_cast<unsigned long long>(s.hops_gpu.load(std::memory_order_relaxed)),
                    static_cast<unsigned long long>(s.hops_no_gpu.load(std::memory_order_relaxed)),
@@ -71,9 +72,18 @@ void mmse_stats_register_atexit()
                    avg(s.gpu_path_us),
                    avg(s.gpu_wait_us),
                    avg(s.cpu_blocks_us),
+                   static_cast<unsigned long long>(s.device_hops.load(std::memory_order_relaxed)),
                    static_cast<unsigned long long>(s.max_total_us.load(std::memory_order_relaxed)));
     });
   });
+}
+
+/// Counts the hops whose device-side estimates (K3) were produced: a consumer that reads them is
+/// what makes the device path observable, and a hop that does not produce them falls back silently.
+void mmse_stats_device_hop()
+{
+  mmse_stats_register_atexit();
+  mmse_stats().device_hops.fetch_add(1, std::memory_order_relaxed);
 }
 
 void mmse_stats_accumulate(bool     hop_gpu,
@@ -737,6 +747,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // legacy kernels (nn=0, only when the matrix pipelines are unavailable/stale).
     last_stage_nn     = matrix_on;
     last_stage_merged = merge_tail;
+#if defined(OCUDU_CE_TIME)
+    if (gpu_ce_ready) {
+      mmse_stats_device_hop();
+    }
+#endif
   } else {
     // Engine unavailable (init failure / stale metallib): the CPU loop below handles the
     // whole hop (standard blocks included).
