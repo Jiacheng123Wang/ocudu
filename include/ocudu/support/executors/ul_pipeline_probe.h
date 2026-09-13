@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "ocudu/phy/phy_pipeline_mode.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -61,6 +62,11 @@ struct ul_phase_durations {
 /// processor right after the per-PDU enqueue. Starts are the CRC-OK completion timestamps (record_end_crc_ok,
 /// which is only ever called for CRC-OK TBs) and are matched by exact slot number, with the same staleness gate.
 /// A start left behind when the PDU is dropped (e.g. the per-UE queue full) is simply evicted later.
+///
+/// The phase-segment series (time-frequency / channel estimation / equalization+demodulation) measure the CPU side of
+/// the module boundaries, so they are meaningless once the whole IQ -> LLR chain runs inside the fused device-side
+/// lane: in phy_pipeline_mode::gpu neither their recording nor their report happens (the lane reports its own
+/// 'into the GPU -> out of the GPU' residency and busy/gap split instead).
 class ul_pipeline_probe
 {
 public:
@@ -92,6 +98,10 @@ public:
     // without a CRC-OK completion (or with one in a shifted slot).
     evict_oldest(pending_ldpc_starts);
 
+    if (!records_phase_segments()) {
+      return;
+    }
+
     // Assemble the per-slot phase durations now that all the timestamps of this PUSCH are available (the
     // equalization+demodulation segment ends right here, at the first codeblock decode invocation). The lower
     // PHY-derived keys (start, t2f) are matched with the same small offset tolerance used at completion time;
@@ -119,6 +129,9 @@ public:
   /// \param[in] slot Slot number (same reference as record_start).
   void record_t2f_end(uint64_t slot)
   {
+    if (!records_phase_segments()) {
+      return;
+    }
     std::lock_guard<std::mutex> lock(mutex);
     pending_t2f_ends[slot] = {std::chrono::high_resolution_clock::now(), next_start_seq++};
     evict_oldest(pending_t2f_ends);
@@ -129,6 +142,9 @@ public:
   /// \param[in] slot Slot number of the PUSCH (same reference as record_end_crc_ok).
   void record_ce_end(uint64_t slot)
   {
+    if (!records_phase_segments()) {
+      return;
+    }
     std::lock_guard<std::mutex> lock(mutex);
     pending_ce_ends[slot] = {std::chrono::high_resolution_clock::now(), next_start_seq++};
     evict_oldest(pending_ce_ends);
@@ -187,7 +203,7 @@ public:
 
       // Phase-segment durations (time-frequency / channel estimation / equalization+demodulation), recorded
       // only together with an LDPC latency sample, so the sample counts of the series always match
-      // [ul_ldpc_decode].
+      // [ul_ldpc_decode] (and only outside the fused lane: see records_phase_segments()).
       // Exact key, same FAPI slot reference as the assembly (see the LDPC comment above).
       auto phases_it = pending_phases.find(slot);
       if (phases_it != pending_phases.end() && now - phases_it->second.tp > max_entry_age) {
@@ -294,9 +310,14 @@ public:
                    pct(sorted, 0.95),
                    pct(sorted, 0.99));
     };
-    print_series("ul_time_frequency", sorted_t2f);
-    print_series("ul_channel_estimation", sorted_ce);
-    print_series("ul_equalization_demod", sorted_eqdem);
+    if (records_phase_segments()) {
+      print_series("ul_time_frequency", sorted_t2f);
+      print_series("ul_channel_estimation", sorted_ce);
+      print_series("ul_equalization_demod", sorted_eqdem);
+    }
+    // In the fused-lane mode these three segments are not reported: the per-module boundaries they measure do not
+    // exist anymore, so their numbers would be CPU-side artifacts (the lane reports 'into the GPU -> out of the GPU'
+    // residency with its busy/gap split instead). The series printed below cross both modes unchanged.
     // FAPI->MAC tail (CRC-OK -> MAC UL task enqueue): recorded in lockstep with the CRC-OK completions, so its
     // sample count tracks [ul_ldpc_decode] (minus PDUs dropped at the per-UE queue).
     print_series("ul_fapi_mac", sorted_fapi_mac);
@@ -344,6 +365,13 @@ public:
 
 private:
   ul_pipeline_probe() = default;
+
+  /// Whether the per-module phase segments (time-frequency / channel estimation / equalization+demodulation) are
+  /// meaningful in the current effective pipeline mode. They measure the CPU side of the module boundaries, which the
+  /// fused lane (phy_pipeline_mode::gpu) removes altogether: recording them there would only add probe overhead to the
+  /// lane, and reporting them would revive the "it got faster" illusion (the work merely moved out of the measured
+  /// window). The mode is published once at startup by the application (see phy_pipeline_mode_registry).
+  static bool records_phase_segments() { return phy_pipeline_mode_registry::get() != phy_pipeline_mode::gpu; }
 
   /// Registry entry: start timestamp plus a monotonic insertion sequence (the slot key wraps every SFN cycle,
   /// so it cannot serve as the age order for the bounded-registry eviction).

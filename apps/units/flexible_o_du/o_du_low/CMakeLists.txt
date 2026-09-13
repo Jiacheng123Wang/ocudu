@@ -9,14 +9,19 @@ set(SOURCES
             du_low_config_validator.cpp
             du_low_config_yaml_writer.cpp
             du_low_hal_factory.cpp
+            du_low_phy_pipeline.cpp
             o_du_low_unit_factory.cpp)
 
 add_library(ocudu_o_du_low_unit_helpers STATIC ${SOURCES})
 target_include_directories(ocudu_o_du_low_unit_helpers PRIVATE ${CMAKE_SOURCE_DIR})
-# Availability of the Metal offload backends is routed here, at the CMake level, so the translator can select the
-# effective PHY algorithm without any platform macro (0/1 compile-time constants, folded by the compiler).
+# Availability of the Metal offload backends is routed here, at the CMake level, so the uplink PHY pipeline resolver
+# (see du_low_phy_pipeline.h) can select the effective per-module backend without any platform macro (0/1 compile-time
+# constants, folded by the compiler).
 target_compile_definitions(ocudu_o_du_low_unit_helpers PRIVATE
+        OCUDU_METAL_DFT_AVAILABLE=$<BOOL:${ENABLE_METAL_DFT}>
         OCUDU_METAL_CHEST_AVAILABLE=$<BOOL:${ENABLE_METAL_CHEST}>
+        OCUDU_METAL_EQUALIZER_AVAILABLE=$<BOOL:${ENABLE_METAL_EQUALIZER}>
+        OCUDU_METAL_DEMODULATION_AVAILABLE=$<BOOL:${ENABLE_METAL_DEMODULATION}>
         OCUDU_METAL_LDPC_AVAILABLE=$<BOOL:${ENABLE_METAL_LDPC}>)
 set(DU_LOW_UNIT_HELPERS_LIBRARIES ocudu_upper_phy ocudu_cpu_affinities_helper ocudu_o_du_low ocudu_app_helpers)
 

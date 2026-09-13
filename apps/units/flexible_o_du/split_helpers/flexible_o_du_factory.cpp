@@ -8,6 +8,7 @@
 #include "apps/units/flexible_o_du/flexible_o_du_commands.h"
 #include "apps/units/flexible_o_du/o_du_high/du_high/du_high_config_translators.h"
 #include "apps/units/flexible_o_du/o_du_high/o_du_high_unit_factory.h"
+#include "apps/units/flexible_o_du/o_du_low/du_low_phy_pipeline.h"
 #include "apps/units/flexible_o_du/o_du_low/o_du_low_unit_factory.h"
 #include "commands/ntn_config_update_remote_command.h"
 #include "flexible_o_du_impl.h"
@@ -262,10 +263,13 @@ o_du_unit flexible_o_du_factory::create_flexible_o_du(const o_du_unit_dependenci
   auto odu_instance = make_o_du(std::move(odu_dependencies));
   report_error_if_not(odu_instance, "Invalid Distributed Unit");
 
-  flexible_o_du_ru_config ru_config = generate_o_du_ru_config(du_cells,
+  // The DFT backend of the lower PHY follows the uplink PHY pipeline mode. Both layers resolve their backends through
+  // the same entry point, so the two sides of the boundary cannot drift apart.
+  const phy_pipeline_effective uplink_pipeline = resolve_phy_pipeline_or_fatal(du_lo.expert_phy_cfg);
+  flexible_o_du_ru_config     ru_config        = generate_o_du_ru_config(du_cells,
                                                               du_lo.expert_phy_cfg.max_processing_delay_slots,
                                                               du_hi.cells_cfg.front().cell.prach_cfg.ports.size(),
-                                                              du_lo.expert_phy_cfg.pusch_dft_type);
+                                                              uplink_pipeline.dft);
   flexible_o_du_ru_dependencies ru_dependencies{*dependencies.workers,
                                                 du_impl->get_upper_ru_ul_adapter(),
                                                 du_impl->get_upper_ru_timing_adapter(),

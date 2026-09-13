@@ -5,7 +5,9 @@
 #include "du_low_config_translator.h"
 #include "apps/services/worker_manager/worker_manager_config.h"
 #include "du_low_config.h"
+#include "du_low_phy_pipeline.h"
 #include "ocudu/adt/format.h"
+#include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc.h"
 #include "ocudu/phy/upper/upper_phy_factories.h"
 #include "ocudu/ran/duplex_mode.h"
@@ -14,22 +16,64 @@
 #include "ocudu/support/cpu_architecture_info.h"
 #include <cmath>
 
-#ifndef OCUDU_METAL_CHEST_AVAILABLE
-// Set by CMake from ENABLE_METAL_CHEST (1 when the Metal MMSE channel estimator is linked into the app).
-#define OCUDU_METAL_CHEST_AVAILABLE 0
-#endif
-#ifndef OCUDU_METAL_LDPC_AVAILABLE
-// Set by CMake from ENABLE_METAL_LDPC (1 when the Metal LDPC codec is linked into the app).
-#define OCUDU_METAL_LDPC_AVAILABLE 0
-#endif
-
 using namespace ocudu;
+
+/// Describes one effective module backend for the startup log, flagging the substitutions applied because the
+/// requested backend is not built into this binary.
+static std::string describe_backend(const std::string& requested, const std::string& effective)
+{
+  if (requested == effective) {
+    return effective;
+  }
+  return fmt::format("{}->{} (requested backend not built in)", requested, effective);
+}
+
+/// \brief Logs the effective uplink PHY pipeline configuration, once at startup.
+///
+/// The per-module backend lines are the single place where the user can see what the pipeline mode actually selected;
+/// the substitutions applied for backends that are not built into the binary are flagged there as well.
+static void log_phy_pipeline_config(const du_low_unit_expert_upper_phy_config& config,
+                                    const phy_pipeline_effective&              effective)
+{
+  // Publish the effective mode for the instrumentation probes (see phy_pipeline_mode_registry).
+  phy_pipeline_mode_registry::set(effective.mode);
+
+  ocudulog::basic_logger& logger = ocudulog::fetch_basic_logger("PHY");
+  logger.info("[phy_pipeline] mode={} fused={} lane=IQ->LLR (expert_phy --phy_pipeline {})",
+              to_string(effective.mode),
+              effective.lane_fused ? "yes" : "no",
+              config.phy_pipeline);
+
+  // The demapper has no backend knob of its own: it follows the channel equalizer (see the upper PHY factory).
+  const char* demapper =
+      is_cpu_phy_backend(effective.equalizer) ? "cpu" : (effective.equalizer == "metal" ? "metal" : "follows-equalizer");
+  logger.info("[phy_pipeline]   dft={} channel_estimator={} equalizer={} demapper={} ldpc_decoder={}",
+              describe_backend(config.pusch_dft_type, effective.dft),
+              describe_backend(config.pusch_channel_estimator_algo, effective.ch_est),
+              describe_backend(config.pusch_channel_equalizer_backend, effective.equalizer),
+              demapper,
+              describe_backend(config.ldpc_decoder_type, effective.ldpc));
+
+  if ((effective.mode == phy_pipeline_mode::cpu_gpu) && is_cpu_phy_backend(effective.dft) &&
+      is_cpu_phy_backend(effective.ch_est) && is_cpu_phy_backend(effective.equalizer) &&
+      is_cpu_phy_backend(effective.ldpc)) {
+    // Not an error: cpu_gpu with every module on the CPU is exactly the CPU pipeline (the mode is derived from the
+    // module knobs, so this is what a command line without any offload knob selects).
+    logger.info("[phy_pipeline]   no offload module selected: the effective backend of every module is CPU");
+  }
+}
 
 static odu::du_low_config generate_du_low_config(const du_low_unit_config&                       du_low,
                                                  span<const o_du_low_unit_config::du_low_config> cells)
 {
   odu::du_low_config out_config;
   out_config.cells.reserve(cells.size());
+
+  // Resolve the uplink pipeline mode against the module backend knobs. The result is the single source of truth for
+  // every backend handed to the PHY factories below, and for the lower PHY (the DFT reaches the radio unit through
+  // the RU configuration, resolved through the same entry point).
+  const phy_pipeline_effective effective = resolve_phy_pipeline_or_fatal(du_low.expert_phy_cfg);
+  log_phy_pipeline_config(du_low.expert_phy_cfg, effective);
 
   unsigned max_ul_bw_rb         = 0;
   unsigned pusch_max_nof_layers = 0;
@@ -52,7 +96,10 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   upper_phy_factory_config.rx_symbol_printer_port     = du_low.loggers.phy_rx_symbols_port;
   upper_phy_factory_config.rx_symbol_printer_prach    = du_low.loggers.phy_rx_symbols_prach;
   upper_phy_factory_config.ldpc_encoder_type          = "auto";
-  upper_phy_factory_config.ldpc_decoder_type          = du_low.expert_phy_cfg.ldpc_decoder_type;
+  // Effective backends of the uplink pipeline mode: resolved once above, so the factories only ever see a concrete
+  // implementation (the LDPC decoder honors the expert knob when the Metal codec is built in, and stays on the CPU
+  // default otherwise - it is not part of the fused lane).
+  upper_phy_factory_config.ldpc_decoder_type          = effective.ldpc;
   upper_phy_factory_config.ldpc_decoder_offset        = du_low.expert_phy_cfg.ldpc_decoder_offset;
   upper_phy_factory_config.ldpc_rate_dematcher_type   = "auto";
   upper_phy_factory_config.crc_calculator_type        = "auto";
@@ -63,7 +110,7 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
       du_low.expert_phy_cfg.pusch_channel_estimator_td_strategy;
   upper_phy_factory_config.pusch_channel_estimator_compensate_cfo =
       du_low.expert_phy_cfg.pusch_channel_estimator_cfo_compensation;
-  upper_phy_factory_config.pusch_channel_estimator_algo = du_low.expert_phy_cfg.pusch_channel_estimator_algo;
+  upper_phy_factory_config.pusch_channel_estimator_algo = effective.ch_est;
   upper_phy_factory_config.pusch_channel_estimator_mmse_tau_rms_us =
       du_low.expert_phy_cfg.pusch_channel_estimator_mmse_tau_rms_us;
   upper_phy_factory_config.pusch_channel_estimator_mmse_fd_hz =
@@ -76,13 +123,8 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
       du_low.expert_phy_cfg.pusch_channel_estimator_helena_model_path_52;
   upper_phy_factory_config.pusch_channel_estimator_helena_model_path_106 =
       du_low.expert_phy_cfg.pusch_channel_estimator_helena_model_path_106;
-  if (!OCUDU_METAL_CHEST_AVAILABLE) {
-    // The Metal MMSE estimator is Apple Silicon only: when it is not built into the app, the expert knob is
-    // forced back to the classical estimator (same policy as the LDPC decoder type).
-    upper_phy_factory_config.pusch_channel_estimator_algo = "cpu";
-  }
   upper_phy_factory_config.pusch_channel_equalizer_algorithm = du_low.expert_phy_cfg.pusch_channel_equalizer_algorithm;
-  upper_phy_factory_config.pusch_channel_equalizer_backend   = du_low.expert_phy_cfg.pusch_channel_equalizer_backend;
+  upper_phy_factory_config.pusch_channel_equalizer_backend   = effective.equalizer;
   upper_phy_factory_config.ldpc_decoder_iterations           = du_low.expert_phy_cfg.pusch_decoder_max_iterations;
   upper_phy_factory_config.ldpc_decoder_early_stop           = du_low.expert_phy_cfg.pusch_decoder_early_stop;
   upper_phy_factory_config.ldpc_decoder_force_decoding       = du_low.expert_phy_cfg.pusch_decoder_force_decoding;
@@ -90,14 +132,6 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
   upper_phy_factory_config.ul_bw_rb                          = max_ul_bw_rb;
   upper_phy_factory_config.pusch_max_nof_layers              = pusch_max_nof_layers;
   upper_phy_factory_config.enable_metrics                    = du_low.metrics_cfg.enable_du_low;
-  if (OCUDU_METAL_LDPC_AVAILABLE) {
-    // Honor the expert knob (expert_phy --pusch_ldpc_decoder_type, assigned above) when the Metal LDPC codec is
-    // built in. Upstream leaves an unconditional "auto" override here (see 3f227a41fb) that silently discards
-    // the configured decoder type; when no Metal codec is available, keep Linux byte-for-byte with upstream per
-    // the port policy.
-  } else {
-    upper_phy_factory_config.ldpc_decoder_type = "auto";
-  }
   if (du_low.expert_phy_cfg.enable_phy_tap) {
     upper_phy_factory_config.phy_tap_arguments = du_low.expert_phy_cfg.phy_tap_arguments;
     if (cells[0].tdd_pattern) {

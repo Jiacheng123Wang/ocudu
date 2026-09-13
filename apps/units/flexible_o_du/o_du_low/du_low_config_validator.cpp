@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "du_low_config_validator.h"
+#include "du_low_phy_pipeline.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/interval.h"
 #include "ocudu/phy/upper/channel_processors/prach/prach_detector_phy_validator.h"
@@ -68,10 +69,50 @@ static bool validate_phy_prach_configuration(span<const du_low_prach_validation_
   return true;
 }
 
+/// Validates the uplink PHY pipeline mode against the per-module backend knobs.
+static bool validate_phy_pipeline_config(const du_low_unit_expert_upper_phy_config& config)
+{
+  phy_pipeline_request request;
+  request.mode      = config.phy_pipeline;
+  request.dft       = config.pusch_dft_type;
+  request.ch_est    = config.pusch_channel_estimator_algo;
+  request.equalizer = config.pusch_channel_equalizer_backend;
+  request.ldpc      = config.ldpc_decoder_type;
+
+  const phy_backend_availability available = query_phy_backend_availability();
+
+  if (config.phy_pipeline == "gpu") {
+    // The fused lane is built from the device-side chain: without those backends there is nothing to run.
+    const std::string lane_error = check_phy_pipeline_lane_available(available);
+    if (!lane_error.empty()) {
+      fmt::print("Invalid configuration: {}.\n", lane_error);
+      return false;
+    }
+    // The lane itself lands in a later step of the GPU pipeline work. Refuse it loudly instead of running the module
+    // level path under a name that promises a fused one.
+    fmt::print("Invalid configuration: --phy_pipeline gpu (the fused IQ -> LLR GPU pipeline) is not implemented yet; "
+               "use --phy_pipeline cpu_gpu for the module-level offload.\n");
+    return false;
+  }
+
+  // Cross-check the mode against the module backend knobs (see resolve_phy_pipeline for the rules).
+  std::string error;
+  if (!resolve_phy_pipeline(request, available, error)) {
+    fmt::print("Invalid configuration: {}.\n", error);
+    return false;
+  }
+
+  return true;
+}
+
 /// Validates expert physical layer configuration parameters.
 static bool validate_expert_phy_unit_config(const du_low_unit_expert_upper_phy_config& config)
 {
   bool valid = true;
+
+  if (!validate_phy_pipeline_config(config)) {
+    valid = false;
+  }
 
   if ((config.pusch_sinr_calc_method != "channel_estimator") &&
       (config.pusch_sinr_calc_method != "post_equalization") && (config.pusch_sinr_calc_method != "evm")) {

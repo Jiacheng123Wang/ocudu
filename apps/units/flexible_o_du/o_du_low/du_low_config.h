@@ -13,6 +13,21 @@ namespace ocudu {
 
 /// Expert upper physical layer configuration.
 struct du_low_unit_expert_upper_phy_config {
+  /// \brief Uplink PHY pipeline mode: how the uplink receive chain is orchestrated.
+  ///
+  /// Use one of these options:
+  /// - \c auto: derive the mode from the module backend knobs below (default). A command line without
+  ///   \c --phy_pipeline therefore keeps behaving exactly as it did before the mode existed: the module knobs are
+  ///   honored, and any offload module selects the module-level offload mode, or
+  /// - \c cpu: the whole uplink receive chain runs on the CPU. A module knob that asks for an offload backend is
+  ///   rejected as a configuration conflict (never silently ignored), or
+  /// - \c cpu_gpu: module-level offload, each module follows its own backend knob (every module boundary keeps its own
+  ///   host <-> device crossing), or
+  /// - \c gpu: fused IQ -> LLR GPU pipeline: the chain runs inside a single device-side lane with only two host <->
+  ///   device *data* crossings (the IQ upload and the LLR download). The lane takes over the DFT, channel estimator,
+  ///   equalizer and demapper backends, which must be left at \c auto; the LDPC decoder is not part of the lane (the
+  ///   LLR leaves the device for the CPU decoder).
+  std::string phy_pipeline = "auto";
   /// \brief Sets the maximum allowed downlink processing delay in slots.
   ///
   /// Higher values increase the downlink processing pipeline length, which improves performance and stability for
@@ -77,12 +92,15 @@ struct du_low_unit_expert_upper_phy_config {
   /// \brief PUSCH channel estimator algorithm.
   ///
   /// Use one of these options:
-  /// - \c cpu: classical LS + FD smoothing + TD strategy (default, all platforms), or
+  /// - \c auto: follow the uplink PHY pipeline mode (default; the classical CPU estimator with the fd/td strategies
+  ///   above, or the Metal MMSE estimator in the fused lane), or
+  /// - \c cpu: classical LS + FD smoothing + TD strategy (all platforms), or
   /// - \c metal_mmse: 2D time-frequency block MMSE, Metal-accelerated (Apple Silicon only;
   ///   the MMSE estimator ignores the fd/td strategies above), or
   /// - \c metal_nn_mmse: same MMSE math on the GPU hardware matrix unit
-  ///   (simdgroup_matrix 8x8; A/B twin of metal_mmse, Apple Silicon only).
-  std::string pusch_channel_estimator_algo = "cpu";
+  ///   (simdgroup_matrix 8x8; A/B twin of metal_mmse, Apple Silicon only), or
+  /// - \c helena: Core ML model inference (Apple Silicon only).
+  std::string pusch_channel_estimator_algo = "auto";
   /// \brief MMSE estimator: fixed RMS delay spread (in microseconds) - v1 constant.
   float pusch_channel_estimator_mmse_tau_rms_us = 0.37F;
   /// \brief MMSE estimator: fixed maximum Doppler shift (in hertz) - v1 constant.
@@ -104,14 +122,16 @@ struct du_low_unit_expert_upper_phy_config {
   /// \brief PUSCH channel equalizer implementation backend.
   ///
   /// Use one of these options:
-  /// - \c cpu: the CPU generic implementation (default), or
+  /// - \c auto: follow the uplink PHY pipeline mode (default; the CPU implementation outside the fused lane), or
+  /// - \c cpu: the CPU generic implementation, or
   /// - \c metal: the Metal GPU implementation (Apple Silicon only; 2..4 Tx layers x 2/4/8 Rx
   ///   ports, with a transparent per-topology fallback to the CPU implementation, e.g. for
   ///   single-layer cells).
-  std::string pusch_channel_equalizer_backend = "cpu";
+  std::string pusch_channel_equalizer_backend = "auto";
   /// \brief DFT (FFT) processor implementation of the lower PHY uplink receive path.
   ///
   /// Use one of these options:
+  /// - \c auto: follow the uplink PHY pipeline mode (default; the CPU implementation outside the fused lane), or
   /// - \c cpu: the default CPU implementation (FFTZ when available, the generic DFT otherwise), or
   /// - \c metal: the Metal GPU implementation (Apple Silicon only; power-of-two and 2^k*3^m sizes up
   ///   to the kernel maximum, with a transparent per-configuration fallback for the rest, e.g. the
@@ -120,7 +140,7 @@ struct du_low_unit_expert_upper_phy_config {
   /// \note As the name says, the knob is PUSCH (uplink) only: it routes the OFDM demodulator and the
   /// PRACH demodulator; the downlink transmit path (the OFDM modulator behind PDSCH/PDCCH/SSB)
   /// always keeps the CPU implementation.
-  std::string pusch_dft_type = "cpu";
+  std::string pusch_dft_type = "auto";
   /// \brief Request headroom size in slots.
   ///
   /// The request headroom size is the number of delayed slots that the upper physical layer will accept, ie, if the

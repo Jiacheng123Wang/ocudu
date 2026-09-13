@@ -158,6 +158,12 @@ static void configure_cli11_expert_execution_args(CLI::App& app, du_low_unit_exp
 
 static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_upper_phy_config& expert_phy_params)
 {
+  auto phy_pipeline_check = [](const std::string& value) -> std::string {
+    if ((value == "auto") || (value == "cpu") || (value == "cpu_gpu") || (value == "gpu")) {
+      return {};
+    }
+    return "Invalid uplink PHY pipeline mode. Accepted values [auto,cpu,cpu_gpu,gpu]";
+  };
   auto pusch_sinr_method_check = [](const std::string& value) -> std::string {
     if ((value == "channel_estimator") || (value == "post_equalization") || (value == "evm")) {
       return {};
@@ -186,10 +192,11 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
     return "Invalid PUSCH channel estimator time-domain strategy. Accepted values [average,interpolate]";
   };
   auto pusch_channel_estimator_algo_method_check = [](const std::string& value) -> std::string {
-    if ((value == "cpu") || (value == "metal_mmse") || (value == "metal_nn_mmse") || (value == "helena")) {
+    if ((value == "auto") || (value == "cpu") || (value == "metal_mmse") || (value == "metal_nn_mmse") ||
+        (value == "helena")) {
       return {};
     }
-    return "Invalid PUSCH channel estimator algorithm. Accepted values [cpu,metal_mmse,metal_nn_mmse,helena]";
+    return "Invalid PUSCH channel estimator algorithm. Accepted values [auto,cpu,metal_mmse,metal_nn_mmse,helena]";
   };
   auto pusch_channel_equalizer_algorithm_method_check = [](const std::string& value) -> std::string {
     if ((value == "zf") || (value == "mmse")) {
@@ -198,18 +205,25 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
     return "Invalid PUSCH channel equalizer algorithm. Accepted values [zf,mmse]";
   };
   auto pusch_channel_equalizer_backend_check = [](const std::string& value) -> std::string {
-    if ((value == "cpu") || (value == "metal")) {
+    if ((value == "auto") || (value == "cpu") || (value == "metal")) {
       return {};
     }
-    return "Invalid PUSCH channel equalizer backend. Accepted values [cpu,metal]";
+    return "Invalid PUSCH channel equalizer backend. Accepted values [auto,cpu,metal]";
   };
   auto pusch_dft_type_check = [](const std::string& value) -> std::string {
-    if ((value == "cpu") || (value == "metal")) {
+    if ((value == "auto") || (value == "cpu") || (value == "metal")) {
       return {};
     }
-    return "Invalid PUSCH DFT processor type. Accepted values [cpu,metal]";
+    return "Invalid PUSCH DFT processor type. Accepted values [auto,cpu,metal]";
   };
 
+  add_option(app,
+             "--phy_pipeline",
+             expert_phy_params.phy_pipeline,
+             "Uplink PHY pipeline mode: auto (derive from the module backends), cpu (whole chain on the CPU), cpu_gpu "
+             "(module-level offload) and gpu (fused IQ->LLR GPU pipeline).")
+      ->capture_default_str()
+      ->check(phy_pipeline_check);
   add_option(app,
              "--max_proc_delay",
              expert_phy_params.max_processing_delay_slots,
@@ -279,7 +293,8 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
   add_option(app,
              "--pusch_channel_estimator_algo",
              expert_phy_params.pusch_channel_estimator_algo,
-             "PUSCH channel estimator algorithm: cpu, metal_mmse, metal_nn_mmse and helena (Apple Silicon only).")
+             "PUSCH channel estimator algorithm: auto, cpu, metal_mmse, metal_nn_mmse and helena (Apple Silicon "
+             "only).")
       ->capture_default_str()
       ->check(pusch_channel_estimator_algo_method_check);
 
@@ -327,13 +342,13 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
   add_option(app,
              "--pusch_channel_equalizer_backend",
              expert_phy_params.pusch_channel_equalizer_backend,
-             "PUSCH channel equalizer backend: cpu and metal (Apple Silicon only).")
+             "PUSCH channel equalizer backend: auto, cpu and metal (Apple Silicon only).")
       ->capture_default_str()
       ->check(pusch_channel_equalizer_backend_check);
   add_option(app,
              "--pusch_dft_type",
              expert_phy_params.pusch_dft_type,
-             "PUSCH (uplink receive) DFT processor type: cpu and metal (Apple Silicon only; the "
+             "PUSCH (uplink receive) DFT processor type: auto, cpu and metal (Apple Silicon only; the "
              "downlink transmit path is unaffected).")
       ->capture_default_str()
       ->check(pusch_dft_type_check);
