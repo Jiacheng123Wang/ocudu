@@ -123,8 +123,8 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    reformat_pipe = nil;
   // K4: the equalizer's noise variance, reduced on the device (optional, same metallib).
   id<MTLComputePipelineState>    noise_pipe    = nil;
-  /// Ring of run_async() submissions that have not been waited for yet (see the header).
-  id<MTLCommandBuffer>           pending_cb[ocudu::metal::mmse_engine::max_slots] = {};
+  /// Submission of run_async() that has not been waited for yet (at most one, see the header).
+  id<MTLCommandBuffer>           pending_cb    = nil;
   // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
   id<MTLComputePipelineState>    weights_matrix_pipe = nil;
   id<MTLComputePipelineState>    apply_matrix_pipe  = nil;
@@ -474,7 +474,7 @@ bool mmse_engine::init(const char* metallib_path)
 
 bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
 {
-  (void)wait_all_pending();
+  (void)wait_pending();
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
     return false;
@@ -531,7 +531,7 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
 bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout, unsigned L, unsigned nof_systems,
                         unsigned nof_blocks)
 {
-  (void)wait_all_pending();
+  (void)wait_pending();
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
     return false;
@@ -578,7 +578,7 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
 bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, float* h, unsigned nout,
                       unsigned L, unsigned nof_systems, unsigned nof_blocks, const reformat_stage* reformat)
 {
-  return run_async(a, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat) && wait_pending(0);
+  return run_async(a, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat) && wait_pending();
 }
 
 bool mmse_engine::run_async(float*       a,
@@ -590,17 +590,15 @@ bool mmse_engine::run_async(float*       a,
                             unsigned     L,
                             unsigned     nof_systems,
                             unsigned     nof_blocks,
-                            const reformat_stage* reformat,
-                            unsigned              slot)
+                            const reformat_stage* reformat)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
-  if (e == nullptr || e->device == nil || slot >= max_slots) {
+  if (e == nullptr || e->device == nil) {
     return false;
   }
-  // The slot's own previous submission must have completed: it read the staging buffers this call is
-  // about to overwrite. Submissions in other slots are left alone - that is the whole point of the
-  // ring (the caller rotates its buffers per slot and collects them in order).
-  (void)wait_pending(slot);
+  // At most one submission in flight: the previous one must have completed before the staging
+  // buffers it was reading can be overwritten.
+  (void)wait_pending();
 
   mmse_phase_timer phase("run_async");
   id<MTLBuffer> a_buf  = e->wrap(a, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
@@ -667,18 +665,18 @@ bool mmse_engine::run_async(float*       a,
   [cb commit];
   phase.committed();
   mmse_stats_commit();
-  e->pending_cb[slot] = cb;
+  e->pending_cb = cb;
   return true;
 }
 
-bool mmse_engine::wait_pending(unsigned slot)
+bool mmse_engine::wait_pending()
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
-  if ((e == nullptr) || (slot >= max_slots) || (e->pending_cb[slot] == nil)) {
+  if ((e == nullptr) || (e->pending_cb == nil)) {
     return true;
   }
-  id<MTLCommandBuffer> cb = e->pending_cb[slot];
-  e->pending_cb[slot]     = nil;
+  id<MTLCommandBuffer> cb = e->pending_cb;
+  e->pending_cb            = nil;
   [cb waitUntilCompleted];
   mmse_stats_wait();
 
@@ -691,26 +689,17 @@ bool mmse_engine::wait_pending(unsigned slot)
   return true;
 }
 
-bool mmse_engine::wait_all_pending()
-{
-  bool ok = true;
-  for (unsigned slot = 0; slot != max_slots; ++slot) {
-    ok = wait_pending(slot) && ok;
-  }
-  return ok;
-}
-
-bool mmse_engine::has_pending(unsigned slot) const
+bool mmse_engine::has_pending() const
 {
   const auto* e = static_cast<const mmse_engine_impl*>(impl);
-  return (e != nullptr) && (slot < max_slots) && (e->pending_cb[slot] != nil);
+  return (e != nullptr) && (e->pending_cb != nil);
 }
 
 bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float* w, const float* y, float* h,
                                  unsigned nout, unsigned L, unsigned nof_systems, unsigned nof_blocks,
                                  const reformat_stage* reformat)
 {
-  (void)wait_all_pending();
+  (void)wait_pending();
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
     return false;
@@ -796,7 +785,7 @@ bool mmse_engine::init_matrix_pipelines()
 bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const float* qy, float* h, unsigned nout,
                          unsigned L, unsigned nof_systems, unsigned nof_blocks)
 {
-  (void)wait_all_pending();
+  (void)wait_pending();
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil || e->weights_matrix_pipe == nil || e->apply_matrix_pipe == nil) {
     return false;
