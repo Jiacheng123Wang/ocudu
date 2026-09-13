@@ -126,6 +126,26 @@ public:
                                                         unsigned                    port,
                                                         const dmrs_symbol_list&     pilots,
                                                         const configuration&        cfg) = 0;
+
+  /// \brief Starts the channel estimation, without waiting for it.
+  ///
+  /// Same inputs as compute(). A backend that dispatches the work to a device may return from this
+  /// call before the results exist, which lets the rest of the receiving chain run while the device
+  /// works; the caller must then complete it with finish() before reading any host-visible result.
+  ///
+  /// The default implementation calls compute(), so the estimation is already complete when it
+  /// returns and an estimator that runs on the host is unaffected.
+  virtual void submit(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots, const configuration& cfg)
+  {
+    (void)compute(grid, port, pilots, cfg);
+  }
+
+  /// \brief Completes an estimation started by submit().
+  ///
+  /// \param[in] pilots The same DM-RS symbols submit() was called with. They must outlive the
+  ///                   estimation: the stages that complete it read them.
+  /// \note The default implementation has nothing to do (submit() completed the estimation).
+  virtual void finish(const dmrs_symbol_list& /*pilots*/) {}
 };
 
 /// \brief Port channel estimator reader.

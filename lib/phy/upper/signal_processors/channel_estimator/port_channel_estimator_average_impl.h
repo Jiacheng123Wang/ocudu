@@ -60,10 +60,20 @@ public:
                                                 const dmrs_symbol_list&     pilots,
                                                 const configuration&        cfg) override
   {
-    cfg_local = cfg;
-    do_compute(grid, port, pilots);
+    submit(grid, port, pilots, cfg);
+    finish(pilots);
     return *this;
   }
+
+  // See the port_channel_estimator interface for documentation.
+  void submit(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots, const configuration& cfg) override
+  {
+    cfg_local = cfg;
+    do_submit(grid, port, pilots);
+  }
+
+  // See the port_channel_estimator interface for documentation.
+  void finish(const dmrs_symbol_list& pilots) override { do_finish(pilots); }
 
 protected:
   // See the port_channel_estimator_results interface for documentation.
@@ -107,6 +117,17 @@ private:
 
   /// Actual implementation of the \c compute public method.
   void do_compute(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots);
+
+  /// \brief First phase of do_compute(): per-hop pilot processing and the estimation stage.
+  ///
+  /// The last hop is left for do_finish() to complete: its estimation stage may return before its
+  /// results exist (see port_channel_estimator::submit()), and holding it back is what lets the rest
+  /// of the receiving chain overlap the device work. Every other hop is completed here, so nothing
+  /// of the shared staging outlives its own hop.
+  void do_submit(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots);
+
+  /// \brief Second phase of do_compute(): completes the last hop and derives the metrics.
+  void do_finish(const dmrs_symbol_list& pilots);
 
 protected:
   /// \brief Arguments passed to the FD+TD estimation stage virtual hook.
@@ -183,6 +204,14 @@ protected:
   /// explicitly and then refine the result.
   void apply_fd_td_estimation_stage_classical(fd_td_estimation_stage_args& args);
 
+  /// \brief Completes the estimation stage of a hop that apply_fd_td_estimation_stage() started.
+  ///
+  /// The default implementation has nothing to do: a stage that computes inline has already filled
+  /// its outputs when it returns. A backend that dispatches the stage to a device overrides it with
+  /// the wait and the unpack, so that the caller can run the rest of the chain in between (see
+  /// port_channel_estimator::submit()).
+  virtual void complete_fd_td_estimation_stage() {}
+
   /// \brief Applies the time domain interpolation strategy for a given OFDM symbol within the hop transmission.
   /// (protected: derived estimators build their input grid from the classical per-symbol estimates).
   /// \param[out] estimated_rg        Estimated resource grid OFDM symbol for a single channel.
@@ -204,6 +233,43 @@ private:
 
   /// Specializes \ref compute for one hop.
   void compute_hop(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots, unsigned hop);
+
+  /// \brief First phase of compute_hop(): everything up to the estimation stage of the hop.
+  ///
+  /// The hop is left pending (see \c pending_hop): its estimation stage may not have produced its
+  /// outputs yet, and compute_hop_finish() completes it.
+  void compute_hop_submit(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots, unsigned hop);
+
+  /// \brief Second phase of compute_hop(): the hop statistics derived from the filtered pilots.
+  ///
+  /// Completes the estimation stage first (a no-op for a stage that computed inline) and then
+  /// accumulates the RSRP, the noise variance and the time alignment of the hop.
+  void compute_hop_finish(const dmrs_symbol_list& pilots);
+
+  /// \brief State of the hop between compute_hop_submit() and compute_hop_finish().
+  ///
+  /// The statistics of a hop are derived from the filtered pilot estimates the estimation stage
+  /// writes, so - when the stage completes the hop later than it was submitted - the buffer holding
+  /// them and the values the stage was called with have to outlive the call. Everything else the
+  /// statistics need is derived again from \c cfg_local and the pilots.
+  struct pending_hop_state {
+    /// True while a hop is waiting for compute_hop_finish().
+    bool                 valid = false;
+    /// Index of the pending hop (0 or 1).
+    unsigned             hop = 0;
+    /// Number of LSE symbols of the pending hop.
+    unsigned             nof_lse_symbols = 0;
+    /// Offset of the hop within the DM-RS symbols of the slot (see fd_td_estimation_stage_args).
+    unsigned             stage_hop_offset = 0;
+    /// DM-RS to data amplitude scaling of the pending hop.
+    float                beta_scaling = 0.0F;
+    /// Estimated CFO of the pending hop (empty when unavailable).
+    std::optional<float> cfo_hop;
+    /// Filtered pilot estimates of the pending hop: written by the estimation stage, read by the
+    /// statistics. \c filtered_pilots_lse is a view over it and is rebuilt in compute_hop_finish().
+    static_re_measurement<cf_t, MAX_NOF_PILOTS_SYMBOL, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS> enlarged_filtered_pilots_lse;
+  };
+  pending_hop_state pending_hop;
 
   /// \brief Preprocesses the pilots and computes the CFO.
   ///

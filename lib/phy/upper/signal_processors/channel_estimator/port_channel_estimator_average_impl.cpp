@@ -213,9 +213,16 @@ void port_channel_estimator_average_impl::do_compute(const resource_grid_reader&
                                                      unsigned                    port,
                                                      const dmrs_symbol_list&     pilots)
 {
-  re_measurement_dimensions symbols_size    = pilots.size();
-  unsigned                  nof_layers      = symbols_size.nof_slices;
-  unsigned                  nof_dmrs_pilots = symbols_size.nof_subc * symbols_size.nof_symbols;
+  do_submit(grid, port, pilots);
+  do_finish(pilots);
+}
+
+void port_channel_estimator_average_impl::do_submit(const resource_grid_reader& grid,
+                                                    unsigned                    port,
+                                                    const dmrs_symbol_list&     pilots)
+{
+  re_measurement_dimensions symbols_size = pilots.size();
+  unsigned                  nof_layers   = symbols_size.nof_slices;
 
   unsigned nof_cdm        = divide_ceil(nof_layers, 2);
   symbols_size.nof_slices = nof_cdm;
@@ -232,10 +239,32 @@ void port_channel_estimator_average_impl::do_compute(const resource_grid_reader&
   time_alignment_s = 0;
   cfo_normalized   = std::nullopt;
 
-  // compute_hop updates rsrp, epre, niose_var, time_alignment_s, and cfo_normalized.
-  compute_hop(grid, port, pilots, /*hop=*/0);
+  // The hops update rsrp, epre, noise_var, time_alignment_s and cfo_normalized. Only the last one is
+  // left pending: completing it here would keep the host busy while the device is still working on
+  // it (see port_channel_estimator::submit()).
+  compute_hop_submit(grid, port, pilots, /*hop=*/0);
   if (cfg_local.dmrs_pattern[0].hopping_symbol_index.has_value()) {
-    compute_hop(grid, port, pilots, /*hop=*/1);
+    // The second hop overwrites the staging the first one was dispatched with, so the first hop must
+    // be complete before the second is submitted.
+    if (pending_hop.valid) {
+      compute_hop_finish(pilots);
+    }
+    compute_hop_submit(grid, port, pilots, /*hop=*/1);
+  }
+}
+
+void port_channel_estimator_average_impl::do_finish(const dmrs_symbol_list& pilots)
+{
+  // Complete the pending hop, if any: this also folds in its statistics.
+  if (pending_hop.valid) {
+    compute_hop_finish(pilots);
+  }
+
+  unsigned nof_dmrs_pilots = pilots.size().nof_subc * pilots.size().nof_symbols;
+  // Same source as before the split: the number of layers the pilots were built for.
+  unsigned nof_cdm = divide_ceil(pilots.size().nof_slices, 2);
+
+  if (cfg_local.dmrs_pattern[0].hopping_symbol_index.has_value()) {
     time_alignment_s /= 2.0F;
   }
 
@@ -269,6 +298,15 @@ void port_channel_estimator_average_impl::compute_hop(const ocudu::resource_grid
                                                       const dmrs_symbol_list&            pilots,
                                                       unsigned                           hop)
 {
+  compute_hop_submit(grid, port, pilots, hop);
+  compute_hop_finish(pilots);
+}
+
+void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resource_grid_reader& grid,
+                                                             unsigned                           port,
+                                                             const dmrs_symbol_list&            pilots,
+                                                             unsigned                           hop)
+{
   unsigned nof_tx_layers = cfg_local.dmrs_pattern.size();
   ocudu_assert(
       nof_tx_layers <= MAX_LAYERS, "The number of Tx layers is {}, max {} supported.", nof_tx_layers, MAX_LAYERS);
@@ -293,8 +331,11 @@ void port_channel_estimator_average_impl::compute_hop(const ocudu::resource_grid
   // Auxiliary buffers for pilot computations. Calling the setup_auxiliary_buffers function will resize
   // enlarged_pilots_lse, enlarged_filtered_pilots_lse and pilot_products, and will assign slices to the modular buffers
   // pilots_lse and filtered_pilots_lse.
-  static_re_measurement<cf_t, MAX_NOF_PILOTS_SYMBOL, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS> enlarged_filtered_pilots_lse(
-      {.nof_subc = nof_symbol_pilots, .nof_symbols = nof_lse_symbols, .nof_slices = nof_tx_layers});
+  // The filtered pilots live in pending_hop: a device backend may complete the estimation stage after
+  // this call returns, and the hop statistics read them (see pending_hop_state).
+  static_re_measurement<cf_t, MAX_NOF_PILOTS_SYMBOL, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS>& enlarged_filtered_pilots_lse =
+      pending_hop.enlarged_filtered_pilots_lse;
+  enlarged_filtered_pilots_lse.resize({.nof_subc = nof_symbol_pilots, .nof_symbols = nof_lse_symbols, .nof_slices = nof_tx_layers});
   modular_re_measurement<cf_t, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS> filtered_pilots_lse(enlarged_filtered_pilots_lse);
   pilots_lse.resize({.nof_subc = nof_symbol_pilots, .nof_symbols = nof_dmrs_symbols, .nof_slices = nof_tx_layers});
 
@@ -381,7 +422,36 @@ void port_channel_estimator_average_impl::compute_hop(const ocudu::resource_grid
       .enlarged_filtered_pilots_lse = enlarged_filtered_pilots_lse,
       .freq_response             = freq_response,
   };
+  // Record what the hop statistics need before starting the stage: it may complete this hop much
+  // later than it was submitted (see port_channel_estimator::submit()), and everything else they
+  // read is either a member or is derived again from cfg_local.
+  pending_hop.valid            = true;
+  pending_hop.hop              = hop;
+  pending_hop.nof_lse_symbols  = nof_lse_symbols;
+  pending_hop.stage_hop_offset = stage_hop_offset;
+  pending_hop.beta_scaling     = beta_scaling;
+  pending_hop.cfo_hop          = cfo_hop;
+
   apply_fd_td_estimation_stage(stage_args);
+}
+
+void port_channel_estimator_average_impl::compute_hop_finish(const dmrs_symbol_list& pilots)
+{
+  ocudu_assert(pending_hop.valid, "No hop is waiting to be completed.");
+  pending_hop_state& st = pending_hop;
+
+  // A stage that computes inline has already filled its outputs when it returned; one that
+  // dispatched them to a device waits for them and unpacks them here.
+  complete_fd_td_estimation_stage();
+
+  auto [pattern_symbols, first_symbol, last_symbol, nof_dmrs_symbols] = extract_common_pattern(cfg_local, st.hop);
+  (void) pattern_symbols; // the statistics read the pattern from cfg_local
+  modular_re_measurement<cf_t, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS> filtered_pilots_lse(st.enlarged_filtered_pilots_lse);
+
+  unsigned nof_tx_layers = cfg_local.dmrs_pattern.size();
+  unsigned nof_lse_symbols = st.nof_lse_symbols;
+  float    beta_scaling    = st.beta_scaling;
+  std::optional<float>& cfo_hop = pending_hop.cfo_hop;
 
   // RSrp accumulation from the filtered pilot estimates (identical for all estimation paths).
   float power_normalization_factor =
@@ -410,13 +480,15 @@ void port_channel_estimator_average_impl::compute_hop(const ocudu::resource_grid
                                        compensate_cfo,
                                        first_symbol,
                                        last_symbol,
-                                       stage_hop_offset,
+                                       st.stage_hop_offset,
                                        i_layer,
                                        stop_layer);
   }
 
   time_alignment_s +=
-      estimate_time_alignment(filtered_pilots_lse, cfg_local.dmrs_pattern.front(), hop, cfg_local.scs, *ta_estimator);
+      estimate_time_alignment(filtered_pilots_lse, cfg_local.dmrs_pattern.front(), st.hop, cfg_local.scs, *ta_estimator);
+
+  pending_hop.valid = false;
 }
 
 std::optional<float> port_channel_estimator_average_impl::preprocess_pilots_and_estimate_cfo(
