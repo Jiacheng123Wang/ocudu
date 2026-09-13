@@ -29,6 +29,8 @@
 #include "ocudu/adt/bf16.h"
 #include "ocudu/phy/support/re_buffer.h"
 #include "ocudu/phy/upper/equalization/modular_ch_est_list.h"
+#include "ocudu/phy/upper/equalization/view_ch_est_list.h"
+#include "ocudu/phy/upper/signal_processors/channel_estimator/port_channel_estimator.h"
 #include "ocudu/ran/sch/modulation_scheme.h"
 #include "ocudu/support/macos_compat.h"
 #include <algorithm>
@@ -774,5 +776,208 @@ int main()
                 (nof_adapter_mismatch == 0) ? "OK" : "MISMATCH");
   }
 
-  return (nof_br_mismatch == 0 && nof_cr_mismatch == 0 && nof_batch_mismatch == 0 && nof_ota_mismatch == 0 && nof_adapter_mismatch == 0 && nof_group_llr_mismatch == 0) ? 0 : 1;
+  // ---------------------------------------------------------------------------------------------
+  // Pattern H: the DEVICE-slice form of the deferred group - one Rx port and one Tx layer, so the
+  // adapter reads the estimates where the estimator produced them instead of gathering them (the
+  // only shape that takes that path). Every symbol of the hop points into the SAME device buffer at
+  // its own offset, which is exactly the layout the estimator publishes, and the equalization of
+  // the group is expected to become ONE batched dispatch.
+  //
+  // The per-symbol reference is produced by the synchronous equalize() of the same adapter over the
+  // same device slices, so a mismatch is the batched kernel or its staging - not the device path,
+  // which both sides share.
+  // ---------------------------------------------------------------------------------------------
+  unsigned nof_device_mismatch = 0;
+  {
+    const unsigned h_ports  = 1;
+    const unsigned h_layers = 1;
+    const unsigned h_nof_re = 204;
+    const unsigned h_syms   = 12;
+    const size_t   h_gap    = 4096; // cf_t elements between symbols (page multiple)
+
+    std::mt19937                    r4(23);
+    std::normal_distribution<float> d4(0.0F, 0.3F);
+    std::uniform_real_distribution<float> c4(-0.5F, 0.5F);
+
+    // Device estimate buffer: [symbol][re], one layer, so the layer stride is the symbol stride
+    // (with a single layer the adapter never steps it anyway). The noise variance the estimator
+    // publishes lives in its own device float, handed over the way the demodulator does it.
+    std::vector<cbf16_t>                   h_device(static_cast<size_t>(h_syms) * h_nof_re);
+    std::vector<std::vector<cbf16_t>>      h_y(h_ports, std::vector<cbf16_t>(h_nof_re));
+    std::vector<modular_re_buffer_reader<cbf16_t, 8>> h_ch_symbols;
+    std::vector<view_ch_est_list>                     h_ch_est;
+    std::vector<float>                                h_device_nv(h_ports, 0.02F);
+    for (cbf16_t& v : h_device) {
+      v = cbf16_t(1.0F + c4(r4), c4(r4));
+    }
+    for (auto& slice : h_y) {
+      for (cbf16_t& v : slice) {
+        v = cbf16_t(d4(r4), d4(r4));
+      }
+    }
+    h_ch_symbols.reserve(h_syms);
+    h_ch_est.reserve(h_syms);
+    for (unsigned s = 0; s != h_syms; ++s) {
+      h_ch_symbols.emplace_back(h_ports, h_nof_re);
+      h_ch_symbols.back().set_slice(0, h_y[0]);
+
+      ch_est_device_view view;
+      view.data       = h_device.data();
+      view.offset     = s * h_nof_re;
+      view.nof_re     = h_nof_re;
+      view.total_re   = h_syms * h_nof_re;
+      view.nof_layers = 1;
+
+      h_ch_est.emplace_back();
+      h_ch_est.back().reset(h_nof_re, h_ports, h_layers);
+      h_ch_est.back().set_channel(0, 0, view.get_layer(0), view.data);
+      h_ch_est.back().set_device_noise_variance(0, h_device_nv.data());
+    }
+    const std::vector<float> h_nv(h_ports, 0.02F);
+
+    channel_equalizer_metal h_equalizer(false);
+    if (!h_equalizer.consumes_device_estimates(h_ports, h_layers)) {
+      std::fprintf(stderr, "FAIL: the adapter refuses the device estimates of the 1x1 shape\n");
+      return 1;
+    }
+
+    aligned_buffer h_eq_b;
+    aligned_buffer h_nv_b;
+    aligned_buffer h_eq_ref_buf;
+    aligned_buffer h_nv_ref_buf;
+    h_eq_b.allocate(h_gap * h_syms * sizeof(cf_t));
+    h_nv_b.allocate(h_gap * h_syms * sizeof(float));
+    h_eq_ref_buf.allocate(h_gap * h_syms * sizeof(cf_t));
+    h_nv_ref_buf.allocate(h_gap * h_syms * sizeof(float));
+    const auto h_eq = [&](aligned_buffer& buf, unsigned s) {
+      return span<cf_t>(static_cast<cf_t*>(buf.ptr) + static_cast<size_t>(s) * h_gap, h_nof_re * h_layers);
+    };
+    const auto h_nvv = [&](aligned_buffer& buf, unsigned s) {
+      return span<float>(static_cast<float*>(buf.ptr) + static_cast<size_t>(s) * h_gap, h_nof_re * h_layers);
+    };
+
+    // Reference: the synchronous per-symbol chain over the same device slices. It needs its own
+    // outputs - the deferred pass below writes the group's regions in place, so sharing them would
+    // overwrite the reference (the device estimates themselves are read by both).
+    for (unsigned s = 0; s != h_syms; ++s) {
+      h_equalizer.equalize(h_eq(h_eq_ref_buf, s), h_nvv(h_nv_ref_buf, s), h_ch_symbols[s], h_ch_est[s], h_nv, 1.0F);
+    }
+    std::vector<cf_t>  h_eq_ref(static_cast<size_t>(h_gap) * h_syms);
+    std::vector<float> h_nv_ref(static_cast<size_t>(h_gap) * h_syms);
+    std::memcpy(h_eq_ref.data(), h_eq_ref_buf.ptr, h_eq_ref.size() * sizeof(cf_t));
+    std::memcpy(h_nv_ref.data(), h_nv_ref_buf.ptr, h_nv_ref.size() * sizeof(float));
+
+    // Oracle: the same arithmetic over HOST-staged estimates of the same values, i.e. the form the
+    // 2-port path always uses. It says which of the two sides above is the defective one when they
+    // disagree. Its comparison happens after the deferred pass, when the batch outputs exist.
+    aligned_buffer h_eq_host;
+    aligned_buffer h_nv_host;
+    h_eq_host.allocate(h_gap * h_syms * sizeof(cf_t));
+    h_nv_host.allocate(h_gap * h_syms * sizeof(float));
+    std::vector<modular_ch_est_list<8 * 4>> h_ch_est_host;
+    h_ch_est_host.reserve(h_syms);
+    for (unsigned s = 0; s != h_syms; ++s) {
+      h_ch_est_host.emplace_back(h_nof_re, h_ports, h_layers);
+      h_ch_est_host.back().set_channel(
+          span<const cbf16_t>(h_device).subspan(static_cast<size_t>(s) * h_nof_re, h_nof_re), 0, 0);
+      h_equalizer.equalize(
+          h_eq(h_eq_host, s), h_nvv(h_nv_host, s), h_ch_symbols[s], h_ch_est_host[s], h_nv, 1.0F);
+    }
+
+    h_equalizer.reset_engine_batch_diagnostics();
+    for (unsigned s = 0; s != h_syms; ++s) {
+      h_equalizer.submit(h_eq(h_eq_b, s), h_nvv(h_nv_b, s), h_ch_symbols[s], h_ch_est[s], h_nv, 1.0F);
+    }
+    h_equalizer.wait();
+    const auto h_diag = h_equalizer.engine_batch_diagnostics();
+
+    // Diagnostic dump of the first elements of a few symbols: enough to recompute one RE by hand
+    // when the two paths disagree.
+    for (unsigned s = 0; s != 4 && s != h_syms; ++s) {
+      const cbf16_t h0 = h_device[static_cast<size_t>(s) * h_nof_re];
+      std::printf("[device] sym %u re0 y=(%.6f,%.6f) h=(%.6f,%.6f) ref=(%.6f,%.6f) batch=(%.6f,%.6f)\n",
+                  s,
+                  to_float(h_y[0][0].real),
+                  to_float(h_y[0][0].imag),
+                  to_float(h0.real),
+                  to_float(h0.imag),
+                  h_eq_ref[static_cast<size_t>(s) * h_gap].real(),
+                  h_eq_ref[static_cast<size_t>(s) * h_gap].imag(),
+                  static_cast<const cf_t*>(h_eq_b.ptr)[static_cast<size_t>(s) * h_gap].real(),
+                  static_cast<const cf_t*>(h_eq_b.ptr)[static_cast<size_t>(s) * h_gap].imag());
+    }
+
+    unsigned h_bad_eq = 0;
+    unsigned h_bad_nv = 0;
+    unsigned h_bad_oracle_ref = 0;
+    unsigned h_bad_oracle_batch = 0;
+    for (unsigned s = 0; s != h_syms; ++s) {
+      for (unsigned i = 0; i != h_nof_re; ++i) {
+        const size_t idx = static_cast<size_t>(s) * h_gap + i;
+        const bool   eq_diff =
+            (std::memcmp(&static_cast<const cf_t*>(h_eq_b.ptr)[idx], &h_eq_ref[idx], sizeof(cf_t)) != 0);
+        const bool nv_diff =
+            (std::memcmp(&static_cast<const float*>(h_nv_b.ptr)[idx], &h_nv_ref[idx], sizeof(float)) != 0);
+        h_bad_eq += eq_diff ? 1 : 0;
+        h_bad_nv += nv_diff ? 1 : 0;
+        h_bad_oracle_ref +=
+            (std::memcmp(&static_cast<const cf_t*>(h_eq_host.ptr)[idx], &h_eq_ref[idx], sizeof(cf_t)) != 0) ? 1 : 0;
+        h_bad_oracle_batch +=
+            (std::memcmp(&static_cast<const cf_t*>(h_eq_host.ptr)[idx], &static_cast<const cf_t*>(h_eq_b.ptr)[idx],
+                         sizeof(cf_t)) != 0)
+                ? 1
+                : 0;
+        if (eq_diff || nv_diff) {
+          if (nof_device_mismatch == 0) {
+            std::fprintf(stderr,
+                         "[device] sym %u re %u: eq %s got (%.6f,%.6f) want (%.6f,%.6f) | nv %s got %.6f want %.6f\n",
+                         s,
+                         i,
+                         eq_diff ? "BAD" : "ok",
+                         static_cast<const cf_t*>(h_eq_b.ptr)[idx].real(),
+                         static_cast<const cf_t*>(h_eq_b.ptr)[idx].imag(),
+                         h_eq_ref[idx].real(),
+                         h_eq_ref[idx].imag(),
+                         nv_diff ? "BAD" : "ok",
+                         static_cast<const float*>(h_nv_b.ptr)[idx],
+                         h_nv_ref[idx]);
+          }
+          nof_device_mismatch += 1;
+        }
+      }
+    }
+    // A device-slice group is the shape that reaches the batched kernel once the deferred encoding
+    // is selected: a silent fallback to one dispatch per symbol would still produce the right
+    // values, so - when the deferred form is what this process asked for - the counters are part of
+    // the verdict. The oracle pinpoints which side is wrong when the two disagree.
+    const bool expect_batch = (std::getenv("OCUDU_EQ_DEFER_ENCODE") != nullptr) &&
+                              (std::strtoul(std::getenv("OCUDU_EQ_DEFER_ENCODE"), nullptr, 10) != 0);
+    const bool h_batched = (h_diag.batched_runs == 1) && (h_diag.max_run == h_syms);
+    std::printf("[chain] H device slices (1 port, %u symbols, %u REs, gap %zu): %u differing eq (%u) / nv (%u), "
+                "flushes=%llu runs=%llu batched=%llu max_run=%u first_break=%s; oracle (host-staged): reference "
+                "differs in %u, batch in %u -> %s\n",
+                h_syms,
+                h_nof_re,
+                h_gap,
+                nof_device_mismatch,
+                h_bad_eq,
+                h_bad_nv,
+                static_cast<unsigned long long>(h_diag.flushes),
+                static_cast<unsigned long long>(h_diag.runs),
+                static_cast<unsigned long long>(h_diag.batched_runs),
+                h_diag.max_run,
+                h_diag.first_break,
+                h_bad_oracle_ref,
+                h_bad_oracle_batch,
+                (nof_device_mismatch == 0 && h_bad_oracle_ref == 0 && h_bad_oracle_batch == 0 &&
+                 (h_batched || !expect_batch))
+                    ? "OK"
+                    : "MISMATCH");
+    if (expect_batch && !h_batched) {
+      std::fprintf(stderr, "FAIL: the device-slice group did not become one batched dispatch\n");
+      return 1;
+    }
+  }
+
+  return (nof_br_mismatch == 0 && nof_cr_mismatch == 0 && nof_batch_mismatch == 0 && nof_ota_mismatch == 0 && nof_adapter_mismatch == 0 && nof_group_llr_mismatch == 0 && nof_device_mismatch == 0) ? 0 : 1;
 }
