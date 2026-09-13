@@ -11,7 +11,14 @@
 /// the CPU implementation per size, and the build has no RTTI to type-test its output).
 
 #include "../dft_processor_metal.h"
+#include "ocudu/ocuduvec/conversion.h"
+#include "ocudu/ocuduvec/prod.h"
+#include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/phy/generic_functions/generic_functions_factories.h"
+#include "ocudu/phy/support/resource_grid.h"
+#include "ocudu/phy/support/resource_grid_reader.h"
+#include "ocudu/phy/support/resource_grid_writer.h"
+#include "ocudu/phy/support/support_factories.h"
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -285,6 +292,140 @@ int main()
     if (!identical) {
       std::fprintf(stderr, "FAIL: ring-submitted DFT differs from synchronous runs (size=%u)\n", size);
       ok = false;
+    }
+  }
+
+
+  // Grid write (S-7b, "FFT phase 2"): the transform and the write of one grid symbol are encoded in ONE command buffer,
+  // and the result must be identical to the host post-processing of the same transform output - the same complex
+  // products in the same order and the same bf16 rounding, including the upper/lower band mapping. A single
+  // mismatching element fails the check (the grid feeds the channel estimator and the equalizer, so a drift here would
+  // surface as a numeric regression much later).
+  {
+    constexpr unsigned size     = 512; // 5 MHz cell: 25 PRB = 300 subcarriers
+    constexpr unsigned nof_subc = 300;
+    constexpr unsigned nof_symb = 14;
+    constexpr unsigned port     = 0;
+    constexpr unsigned symbol   = 7;
+    constexpr unsigned slot     = 3;
+
+    dft_processor_metal metal({size, dft_processor::direction::DIRECT});
+    if (!metal.is_valid()) {
+      std::fprintf(stderr, "FAIL: Metal DFT invalid for the grid-write check (size=%u)\n", size);
+      return 1;
+    }
+
+    std::shared_ptr<resource_grid_factory> grid_factory = create_resource_grid_factory();
+    if (grid_factory == nullptr) {
+      std::fprintf(stderr, "FAIL: no resource grid factory\n");
+      return 1;
+    }
+    std::unique_ptr<resource_grid> device_grid = grid_factory->create(1, nof_symb, nof_subc);
+    std::unique_ptr<resource_grid> host_grid   = grid_factory->create(1, nof_symb, nof_subc);
+    if (device_grid == nullptr || host_grid == nullptr) {
+      std::fprintf(stderr, "FAIL: resource grid creation failed\n");
+      return 1;
+    }
+
+    const resource_grid_device_view view = device_grid->get_writer().get_device_view();
+    auto*                           grid_writer = static_cast<dft_processor_grid_write*>(&metal);
+    if (!view.is_valid() || !grid_writer->supports_grid_write(view)) {
+      std::fprintf(stderr, "FAIL: the Metal DFT cannot write the resource grid (view valid=%d)\n", view.is_valid());
+      return 1;
+    }
+
+    // Input shared by the reference transform and the grid write.
+    std::vector<cf_t> input(size);
+    for (unsigned i = 0; i != size; ++i) {
+      input[i] = cf_t(static_cast<float>(dist(rng)), static_cast<float>(dist(rng)));
+    }
+
+    // Reference transform: run it synchronously (slot 0) and keep its output.
+    std::copy(input.begin(), input.end(), metal.get_input().begin());
+    span<const cf_t> reference_transform = metal.run();
+    std::vector<cf_t> transform_out(reference_transform.begin(), reference_transform.end());
+
+    // Compensation of the grid write: a per-symbol coefficient (phase compensation times the output scaling) and, in
+    // the second round, the DFT window table.
+    const cf_t coefficient              = cf_t(0.937F, -0.349F);
+    const unsigned map_offset           = size - nof_subc / 2;
+
+    for (bool with_window : {false, true}) {
+      std::vector<cf_t> window;
+      if (with_window) {
+        window.resize(size);
+        const float omega = 2.0F * static_cast<float>(M_PI) * 3.0F / static_cast<float>(size);
+        for (unsigned i = 0; i != size; ++i) {
+          window[i] = std::polar(1.0F, omega * static_cast<float>(i));
+        }
+      }
+      if (!grid_writer->set_grid_write_window(window)) {
+        std::fprintf(stderr, "FAIL: publishing the grid-write window failed (window=%d)\n", with_window);
+        return 1;
+      }
+
+      // Device path: fill slot `slot` with the same input, then submit the transform and the grid write together.
+      // Slot 0 is refilled with DIFFERENT samples first: the grid write must consume the transform of its own slot, and
+      // a slot mix-up would then be caught by the comparison instead of passing with the leftover reference transform.
+      for (unsigned i = 0; i != size; ++i) {
+        metal.get_input()[i] = cf_t(static_cast<float>(dist(rng)), static_cast<float>(dist(rng)));
+      }
+      std::copy(input.begin(), input.end(), metal.get_input().begin() + static_cast<size_t>(slot) * size);
+      dft_grid_write_params params;
+      params.view         = view;
+      params.port         = port;
+      params.symbol       = symbol;
+      params.nof_subc     = nof_subc;
+      params.map_offset   = map_offset;
+      params.coefficient  = coefficient;
+      params.apply_window = with_window;
+      if (!grid_writer->submit_grid_write(slot, params)) {
+        std::fprintf(stderr, "FAIL: submit_grid_write rejected the request (window=%d)\n", with_window);
+        return 1;
+      }
+      // The processor's wait_slot() is the plain synchronous wait (no result); a failed command buffer would leave the
+      // grid untouched and the comparison below would report it.
+      metal.wait_slot(slot);
+
+      // Host reference: exactly what the demodulator does with the transform output it reads back
+      // (ofdm_demodulator_impl::process_dft_output with the same coefficient and window).
+      std::vector<cf_t> compensated(size);
+      ocuduvec::sc_prod(compensated, span<const cf_t>(transform_out), coefficient);
+      if (!window.empty()) {
+        ocuduvec::prod(compensated, span<const cf_t>(window), compensated);
+      }
+      {
+        resource_grid_writer& writer = host_grid->get_writer();
+        writer.put(port, symbol, 0, span<const cf_t>(&compensated[size - nof_subc / 2], nof_subc / 2));
+        writer.put(port, symbol, nof_subc / 2, span<const cf_t>(&compensated[0], nof_subc / 2));
+      }
+
+      const span<const cbf16_t> got  = device_grid->get_reader().get_view(port, symbol).first(nof_subc);
+      const span<const cbf16_t> want = host_grid->get_reader().get_view(port, symbol).first(nof_subc);
+      unsigned                  mismatches = 0;
+      for (unsigned k = 0; k != nof_subc; ++k) {
+        if ((got[k] != want[k])) {
+          if (mismatches == 0) {
+            std::fprintf(stderr,
+                         "  first mismatch at subcarrier %u: device=(%f,%f) host=(%f,%f)\n",
+                         k,
+                         to_cf(got[k]).real(),
+                         to_cf(got[k]).imag(),
+                         to_cf(want[k]).real(),
+                         to_cf(want[k]).imag());
+          }
+          ++mismatches;
+        }
+      }
+      std::printf("[grid]  size=%4u window=%d subcarriers=%u mismatching=%u\n",
+                  size,
+                  with_window ? 1 : 0,
+                  nof_subc,
+                  mismatches);
+      if (mismatches != 0) {
+        std::fprintf(stderr, "FAIL: the device grid write differs from the host reference (window=%d)\n", with_window);
+        ok = false;
+      }
     }
   }
 

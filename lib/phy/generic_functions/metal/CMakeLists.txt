@@ -13,7 +13,7 @@ set(METALLIB_OUT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 ocudu_add_metallib(
     TARGET ocudu_metallib_dft
     OUTPUT ${METALLIB_OUT_DIR}/ocudu_dft.metallib
-    SOURCES ocudu_dft.metal)
+    SOURCES ocudu_dft.metal ocudu_grid_write.metal)
 
 # ---- Static library: engine driver (ARC) + dft_processor adapter ----
 enable_language(OBJCXX)
@@ -35,7 +35,8 @@ target_link_libraries(ocudu_dft_metal PRIVATE "-framework Metal" "-framework Fou
 
 # ---- Unit-level validation: random-IQ A/B vs the CPU reference (NMSE gate) ----
 add_executable(dft_processor_metal_unit_test test/dft_processor_metal_unit_test.cpp)
-target_link_libraries(dft_processor_metal_unit_test PRIVATE ocudu_dft ocudu_dft_metal ocudu_support)
+target_link_libraries(dft_processor_metal_unit_test PRIVATE
+    ocudu_dft ocudu_dft_metal ocudu_support ocudu_phy_support ocuduvec)
 
 # ---- Slot-level A/B: batched Metal DFT inside the OFDM demodulator ----
 add_executable(ofdm_demodulator_metal_batch_test test/ofdm_demodulator_metal_batch_test.cpp)

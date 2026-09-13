@@ -8,6 +8,7 @@
 
 #include "ocudu_dft_metal_engine.h"
 #include "ocudu/phy/generic_functions/dft_processor.h"
+#include "ocudu/phy/generic_functions/dft_processor_grid_write.h"
 #include "ocudu/support/macos_compat.h"
 #include <memory>
 
@@ -21,7 +22,12 @@ namespace ocudu {
 /// The buffers hold up to max_batch transforms and run_batch() executes them in a single
 /// dispatch - one threadgroup (one GPU core) per transform - instead of paying a command
 /// buffer round trip and a single-core transform per symbol.
-class dft_processor_metal : public dft_processor
+///
+/// The processor also implements dft_processor_grid_write: its engine can write a demodulated symbol straight into the
+/// resource grid (the "FFT phase 2" kernel), in the same command buffer as the transform and bit-identically to the
+/// host post-processing, so the OFDM demodulator can fill a device-addressable grid without the host touching the
+/// transform output.
+class dft_processor_metal : public dft_processor, public dft_processor_grid_write
 {
 public:
   /// Returns whether the Metal implementation supports the given size (2^k*3^m,
@@ -84,6 +90,15 @@ public:
   {
     return {output.get(), static_cast<size_t>(cfg.size) * max_batch};
   }
+
+  // See interface for documentation.
+  bool supports_grid_write(const resource_grid_device_view& view) const override;
+
+  // See interface for documentation.
+  bool set_grid_write_window(span<const cf_t> window) override;
+
+  // See interface for documentation.
+  bool submit_grid_write(unsigned slot, const dft_grid_write_params& params) override;
 
   /// GPU-side duration of the last transform in microseconds (0 when unavailable).
   double engine_gpu_wait_us() const { return engine != nullptr ? engine->last_gpu_wait_us() : 0.0; }

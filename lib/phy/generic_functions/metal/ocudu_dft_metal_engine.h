@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace ocudu {
@@ -84,6 +85,43 @@ public:
   /// previously submitted stage (DFT, channel estimator, equalizer, demapper, LDPC).
   /// \return False when a command buffer failed.
   static bool wait_all();
+
+  /// \brief Parameters of the optional resource grid write encoded in the same command buffer as the transform.
+  ///
+  /// The engine is told where to write and how to compensate; which grid element corresponds to a (port, symbol) pair
+  /// is the caller's business (see ocudu::dft_processor_grid_write).
+  struct grid_write {
+    /// Grid storage, addressable by the device (page-aligned: it is wrapped as a no-copy buffer).
+    const void* grid_base = nullptr;
+    /// Whole grid storage in bytes (mapped page-rounded, like every other zero-copy buffer of the engine).
+    size_t grid_bytes = 0;
+    /// Element offset of this (port, symbol) within the grid.
+    uint32_t dst_offset = 0;
+    /// Grid subcarriers to write.
+    uint32_t nof_subc = 0;
+    /// Rotation of the transform output: grid[i] <- transform[(i + map_offset) % size].
+    uint32_t map_offset = 0;
+    /// Per-symbol compensation (phase compensation times the output scaling), real and imaginary parts.
+    float phase_re = 1.0F;
+    float phase_im = 0.0F;
+    /// Apply the per-element table published with set_grid_write_window().
+    bool apply_window = false;
+  };
+
+  /// \brief Publishes the per-element compensation table of the grid write (one complex entry per transform element).
+  ///
+  /// \param[in] window      Interleaved real/imaginary floats (a \c float2 per entry), or nullptr to clear the table.
+  /// \param[in] nof_entries Number of complex entries of \c window.
+  /// \return True on success.
+  bool set_grid_write_window(const void* window, unsigned nof_entries);
+
+  /// \brief Commits the transform held in slot \c slot together with the write of one grid symbol, without waiting.
+  ///
+  /// \c in and \c out are the batch buffers of submit_slot() (the caller has filled the input of that slot), and the
+  /// caller must not also submit the transform through submit_slot(). Both dispatches go into one command buffer, in
+  /// this order, with a buffer barrier in between: the grid write reads what the transform wrote.
+  /// \return True when the dispatch was encoded and committed.
+  bool submit_slot_grid_write(const void* in, void* out, unsigned slot, const grid_write& write);
 
   /// GPU-side duration of the last transform in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;

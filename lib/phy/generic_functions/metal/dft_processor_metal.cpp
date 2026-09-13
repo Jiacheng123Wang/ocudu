@@ -72,3 +72,41 @@ span<const cf_t> dft_processor_metal::run_batch(unsigned nof_transforms)
   report_fatal_error_if_not(engine->run(input.get(), output.get(), nof_transforms), "Metal DFT batch run failed.");
   return {output.get(), static_cast<size_t>(cfg.size) * nof_transforms};
 }
+
+bool dft_processor_metal::supports_grid_write(const resource_grid_device_view& view) const
+{
+  if (!valid || (engine == nullptr) || !view.is_valid()) {
+    return false;
+  }
+  // The engine rotates the transform output into the grid, so the grid cannot be wider than the transform, and the
+  // layout has to be the one the kernel addresses (contiguous subcarriers within a symbol).
+  return (view.nof_subc != 0) && (view.nof_subc <= cfg.size) && (view.subc_stride == 1) &&
+         (view.symb_stride >= view.nof_subc) && (view.port_stride >= view.nof_symb * view.symb_stride) && (view.nof_ports != 0);
+}
+
+bool dft_processor_metal::set_grid_write_window(span<const cf_t> window)
+{
+  if (engine == nullptr) {
+    return false;
+  }
+  return engine->set_grid_write_window(window.empty() ? nullptr : window.data(), window.size());
+}
+
+bool dft_processor_metal::submit_grid_write(unsigned slot, const dft_grid_write_params& params)
+{
+  if (!supports_grid_write(params.view) || (params.nof_subc > cfg.size) || (params.port >= params.view.nof_ports) ||
+      (params.symbol >= params.view.nof_symb)) {
+    return false;
+  }
+
+  metal::dft_metal_engine::grid_write write;
+  write.grid_base   = params.view.base;
+  write.grid_bytes  = static_cast<size_t>(params.view.nof_ports) * params.view.port_stride * sizeof(cbf16_t);
+  write.dst_offset  = params.view.get_symbol_offset(params.port, params.symbol);
+  write.nof_subc    = params.nof_subc;
+  write.map_offset  = params.map_offset % cfg.size;
+  write.phase_re    = params.coefficient.real();
+  write.phase_im    = params.coefficient.imag();
+  write.apply_window = params.apply_window;
+  return engine->submit_slot_grid_write(input.get(), output.get(), slot, write);
+}
