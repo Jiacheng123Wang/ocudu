@@ -201,14 +201,22 @@ public:
               unsigned     nof_systems,
               unsigned     nof_blocks);
 
-  /// \brief Encodes the combined pipeline and commits it WITHOUT waiting for the GPU.
+  /// \brief Encodes the combined pipeline into \c slot and commits it WITHOUT waiting for the GPU.
   ///
   /// The estimator uses this to overlap the GPU work with the host-side preparation of whatever
   /// consumes it: the wait moves to wait_pending(), which the consumer calls once it has nothing
-  /// else to do. Any submission still outstanding when a run*() entry point is called is waited for
-  /// first, so an engine never holds more than one command buffer in flight - this is deliberately
-  /// NOT the batch API that stalled in the field (many command buffers committed late, queue slots
-  /// exhausted); here every call commits immediately and at most one is outstanding.
+  /// else to do.
+  ///
+  /// \param[in] slot Ring slot of this submission. Each slot has its own command buffer and its own
+  ///            set of caller-provided staging buffers, so up to max_slots submissions can be in
+  ///            flight: submitting into a slot waits for THAT slot's previous submission only (never
+  ///            for the newer ones), which is what lets a consumer rotate its staging buffers and
+  ///            keep the host and the GPU busy at the same time. The caller owns the rotation: it
+  ///            must not reuse a slot's buffers before collecting that slot.
+  ///
+  /// \note This is a BOUNDED ring on purpose. An earlier batch API of this engine let the caller
+  /// commit many command buffers and exhausted the queue's slots in the field; here every call
+  /// commits immediately, the ring is max_slots deep, and the depth is the caller's back-pressure.
   ///
   /// \return False when the encoding failed and nothing was submitted.
   bool run_async(float*       a,
@@ -220,14 +228,22 @@ public:
                  unsigned     L,
                  unsigned     nof_systems,
                  unsigned     nof_blocks,
-                 const reformat_stage* reformat = nullptr);
+                 const reformat_stage* reformat = nullptr,
+                 unsigned              slot     = 0);
 
-  /// \brief Waits for the submission of run_async() and reports whether it completed.
-  /// \return True when there was nothing pending, or when the pending submission succeeded.
-  bool wait_pending();
+  /// \brief Waits for the submission of run_async() in \c slot and reports whether it completed.
+  /// \return True when there was nothing pending in that slot, or when it succeeded.
+  bool wait_pending(unsigned slot = 0);
 
-  /// Whether a submission from run_async() is still outstanding.
-  bool has_pending() const;
+  /// \brief Waits for every outstanding submission (the synchronous entry points need it).
+  /// \return True when all of them completed.
+  bool wait_all_pending();
+
+  /// Whether a submission from run_async() is still outstanding in \c slot.
+  bool has_pending(unsigned slot = 0) const;
+
+  /// Ring depth of run_async(): how many submissions may be in flight at once.
+  static constexpr unsigned max_slots = 2;
 
   /// \brief Reserves the zero-copy mapping of a buffer at its maximum size.
   ///
