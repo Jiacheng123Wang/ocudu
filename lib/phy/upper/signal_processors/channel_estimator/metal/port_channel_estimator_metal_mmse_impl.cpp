@@ -90,8 +90,10 @@ void mmse_stats_device_hop()
 
 /// \param deferred_wait_us Wall time between the end of a deferred stage and the completion of its
 ///        batch. The stage returns before its batch is done, so this wait happens outside the window
-///        the other measurements cover: it is part of the GPU phase and of the hop, and it is also
-///        reported on its own so the split stays visible.
+///        the other measurements cover - and, because the estimator is deferred, the rest of the
+///        receiving chain (the equalization and the demapping) runs inside it. It is therefore
+///        reported on its own instead of being folded into gpu_path/total, which stay the stage's
+///        own window and remain comparable with the non-deferred measurements.
 void mmse_stats_accumulate(bool     hop_gpu,
                            bool     hop_nn,
                            unsigned fallback_blocks,
@@ -104,8 +106,6 @@ void mmse_stats_accumulate(bool     hop_gpu,
                            double   deferred_wait_us = 0.0)
 {
   mmse_stats_register_atexit();
-  gpu_path_us += deferred_wait_us;
-  total_us += deferred_wait_us;
   mmse_time_stats& s = mmse_stats();
   s.calls.fetch_add(1, std::memory_order_relaxed);
   (hop_gpu ? s.hops_gpu : s.hops_no_gpu).fetch_add(1, std::memory_order_relaxed);
