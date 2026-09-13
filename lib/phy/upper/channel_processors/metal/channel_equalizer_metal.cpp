@@ -515,6 +515,15 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   const void* s_binding = (s_dev != nullptr) ? static_cast<const void*>(s_dev) : static_cast<const void*>(s_ptr);
 
   if (defer) {
+    if (std::getenv("OCUDU_EQ_LOG") != nullptr) {
+      std::fprintf(stderr,
+                   "[eqlog] submit eq=%p align=%d nv=%p align_nv=%d re=%u\n",
+                   static_cast<void*>(eq_symbols.data()),
+                   static_cast<int>(is_page_aligned_buffer(eq_symbols.data())),
+                   static_cast<void*>(eq_noise_vars.data()),
+                   static_cast<int>(is_page_aligned_buffer(eq_noise_vars.data())),
+                   nof_re);
+    }
     // Append the dispatch to the shared burst of this group: every stage of the burst ends up in
     // one command buffer, with a memory barrier where the pipeline changes (see shared_burst).
     const bool ok = impl_->engine.enqueue_burst(h_binding,
@@ -621,6 +630,16 @@ double channel_equalizer_metal::engine_gpu_wait_us() const
 unsigned channel_equalizer_metal::engine_batch_dispatch_count() const
 {
   return impl_->engine.batch_dispatch_count();
+}
+
+metal::equalizer_metal_engine::batch_diag channel_equalizer_metal::engine_batch_diagnostics() const
+{
+  return impl_->engine.batch_diagnostics();
+}
+
+void channel_equalizer_metal::reset_engine_batch_diagnostics()
+{
+  impl_->engine.reset_batch_diagnostics();
 }
 
 unsigned channel_equalizer_metal::nof_device_ch_est_dispatches()

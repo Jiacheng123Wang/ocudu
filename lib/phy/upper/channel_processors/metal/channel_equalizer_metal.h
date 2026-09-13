@@ -70,6 +70,15 @@ public:
   /// Number of batched group dispatches encoded so far (diagnostics; see submit_group()).
   unsigned engine_batch_dispatch_count() const;
 
+  /// \brief How the deferred burst was cut into dispatches (diagnostics; see submit_group()).
+  ///
+  /// submit_group() batches inside the caller, enqueue_burst() batches inside the engine: this
+  /// reports the latter, which is the form the PUSCH chain reaches without changing the caller.
+  metal::equalizer_metal_engine::batch_diag engine_batch_diagnostics() const;
+
+  /// Clears the engine's burst diagnostics (start of a measurement).
+  void reset_engine_batch_diagnostics();
+
   /// \name Channel-estimate source accounting (diagnostics; see run_equalize()).
   ///
   /// The counts separate the two sources a dispatch can read its channel estimates from: the buffer

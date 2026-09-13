@@ -188,6 +188,35 @@ public:
   /// Number of batched group dispatches encoded so far (diagnostics).
   unsigned batch_dispatch_count() const;
 
+  /// \brief Why the accumulated burst did not become one dispatch per group (diagnostics).
+  ///
+  /// The deferred burst encodes its groups in the engine (see enqueue_burst()), so a group that
+  /// stays one dispatch per symbol is invisible from the outside: the dispatch counters of the
+  /// burst look the same as the ones of the caller-side group submit. These counters say whether
+  /// the flush ran at all and, when a run stopped extending, which predicate stopped it.
+  struct batch_diag {
+    /// Flush hooks that found accumulated symbols and encoded them (i.e. reached the run loop).
+    uint64_t flushes = 0;
+    /// Symbols handed to those flushes.
+    uint64_t symbols = 0;
+    /// Runs encoded by them (one pipeline dispatch each, batched or per symbol).
+    uint64_t runs = 0;
+    /// Runs encoded with the batched kernel (more than one symbol).
+    uint64_t batched_runs = 0;
+    /// Longest run seen since the counters were reset.
+    unsigned max_run = 0;
+    /// First predicate that ever stopped a run from extending: "" (never), "geometry",
+    /// "estimates" (a different estimate buffer), "strides" or "sigma2".
+    const char* first_break = "";
+  };
+
+  /// Diagnostics of the deferred burst encoding (see batch_diag). Cheap enough for every build:
+  /// a handful of relaxed increments per flush.
+  batch_diag batch_diagnostics() const;
+
+  /// Clears batch_diagnostics() counters (start of a measurement).
+  void reset_batch_diagnostics();
+
 private:
   void* impl = nullptr;
 };

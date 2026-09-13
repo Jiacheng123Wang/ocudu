@@ -74,6 +74,18 @@ public:
   /// by a different context while another one is pending is flushed first, so no accumulated work
   /// can be lost; pass a null hook to unregister.
   static void set_flush_hook(void* context, flush_hook_t hook);
+
+  /// \brief Hand over the work a registered hook still has pending, keeping the burst's stage.
+  ///
+  /// A caller that is about to accumulate in a context DIFFERENT from the registered one must call
+  /// this first: replacing (or bypassing) the hook of a context that still has work pending would
+  /// drop that work silently - the next hook only ever encodes its own context. This is what makes
+  /// a thread that runs several deferred engines one after another safe.
+  /// \return The pipeline the pending hook encoded with, or nil when there was nothing to hand over.
+  static id<MTLComputePipelineState> flush_pending();
+
+  /// Context of the registered hook, or nullptr when none is registered (diagnostics).
+  static void* flush_hook_context();
 };
 
 } // namespace metal

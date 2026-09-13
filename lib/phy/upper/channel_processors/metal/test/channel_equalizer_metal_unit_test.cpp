@@ -542,12 +542,11 @@ int main()
   // synchronous per-symbol path bit for bit. This is the PUSCH shape (17 PRB -> 204 RE, 2 ports,
   // 1 layer, 12 data symbols).
   //
-  // Gated on OCUDU_EQ_DEFER_ENCODE=1 because that is what selects the accumulated/flushed encoding
-  // in the engine: the default encodes each dispatch right away (called out below), and with it
-  // there is nothing to batch. The gate documents the current state - see the S-5 section of the
-  // full-chain design document for why the deferred form is not the default yet.
+  // Skipped unless the deferred encoding is selected (OCUDU_EQ_DEFER_ENCODE=1): the default encodes
+  // each dispatch where it is submitted (see enqueue_burst), and with it there is nothing to batch.
+  // The check is what proves the batched form bit-exact once the default flips.
   if (std::getenv("OCUDU_EQ_DEFER_ENCODE") == nullptr) {
-    std::printf("[chain]  batched burst: skipped (OCUDU_EQ_DEFER_ENCODE selects the deferred encoder)\n");
+    std::printf("[chain]  batched burst: skipped (OCUDU_EQ_IMMEDIATE_ENCODE forces per-symbol encoding)\n");
   } else {
     const unsigned       nof_re  = 204;
     const unsigned       ports   = 2;
@@ -610,8 +609,10 @@ int main()
       metal.submit(eq_d, nv_d, readers[si], ests[si], nv_est, 1.0F);
     }
     const unsigned batches_before = metal.engine_batch_dispatch_count();
+    metal.reset_engine_batch_diagnostics();
     metal.wait();
     const unsigned batches = metal.engine_batch_dispatch_count() - batches_before;
+    const auto     diag    = metal.engine_batch_diagnostics();
 
     bool same = (batches == 1);
     unsigned bad_sym = 0;
@@ -647,6 +648,13 @@ int main()
                 nof_sym,
                 batches,
                 same ? "OK" : "MISMATCH");
+    std::printf("[chain]  engine burst: flushes=%llu symbols=%llu runs=%llu batched=%llu max_run=%u first_break=%s\n",
+                static_cast<unsigned long long>(diag.flushes),
+                static_cast<unsigned long long>(diag.symbols),
+                static_cast<unsigned long long>(diag.runs),
+                static_cast<unsigned long long>(diag.batched_runs),
+                diag.max_run,
+                diag.first_break);
     if (!same) {
       std::fprintf(stderr, "FAIL: batched deferred burst differs from the per-symbol path\n");
       ok = false;

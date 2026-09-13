@@ -18,6 +18,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 #ifndef OCUDU_EQUALIZER_METALLIB_PATH
 #define OCUDU_EQUALIZER_METALLIB_PATH "ocudu_equalizer.metallib"
@@ -71,6 +72,59 @@ static void eq_stats_report()
 #else
 static void eq_stats_commit() {}
 static void eq_stats_wait() {}
+#endif // OCUDU_METAL_STATS
+
+/// Batch diagnostics of the deferred burst (see equalizer_metal_engine::batch_diag). Kept in every
+/// build: the counters cost a few relaxed increments per flush and are the only way to tell a group
+/// that fell back to one dispatch per symbol from one that was batched.
+struct eq_batch_diag_t {
+  std::atomic<uint64_t> flushes{0};
+  std::atomic<uint64_t> symbols{0};
+  std::atomic<uint64_t> runs{0};
+  std::atomic<uint64_t> batched_runs{0};
+  std::atomic<unsigned> max_run{0};
+  std::atomic<const char*> first_break{nullptr};
+};
+
+eq_batch_diag_t& eq_batch_diag()
+{
+  // Deliberately leaked: this is reported while other static destructors may already have run.
+  static eq_batch_diag_t* s = new eq_batch_diag_t();
+  return *s;
+}
+
+/// Records the first predicate that stopped a run from extending.
+void eq_batch_note_break(const char* reason)
+{
+  const char* expected = nullptr;
+  eq_batch_diag().first_break.compare_exchange_strong(expected, reason, std::memory_order_relaxed);
+}
+
+/// Raises the recorded longest run to \p run.
+void eq_batch_note_run(unsigned run)
+{
+  unsigned prev = eq_batch_diag().max_run.load(std::memory_order_relaxed);
+  while ((run > prev) &&
+         !eq_batch_diag().max_run.compare_exchange_weak(prev, run, std::memory_order_relaxed)) {
+  }
+}
+
+#if defined(OCUDU_METAL_STATS)
+const bool eq_batch_diag_registered = []() {
+  std::atexit([]() {
+    const eq_batch_diag_t& d = eq_batch_diag();
+    const char*            brk = d.first_break.load(std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "[metal_stats] eq_batch flushes=%llu symbols=%llu runs=%llu batched=%llu max_run=%u first_break=%s\n",
+                 static_cast<unsigned long long>(d.flushes.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(d.symbols.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(d.runs.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(d.batched_runs.load(std::memory_order_relaxed)),
+                 d.max_run.load(std::memory_order_relaxed),
+                 (brk == nullptr) ? "none" : brk);
+  });
+  return true;
+}();
 #endif // OCUDU_METAL_STATS
 
 struct eq_resources_t {
@@ -192,6 +246,10 @@ struct wrapped_buffer {
   NSUInteger    offset = 0;
 };
 
+/// Hand the deferred dispatches \p engine accumulated in this thread over to the burst (defined
+/// next to the flush state below; the engine destructor only needs the declaration).
+void eq_pending_release(void* engine);
+
 wrapped_buffer wrap_buffer(eq_engine_impl* engine, const void* ptr, size_t length)
 {
   // One buffer object per address for every engine: the stages of the chain write and read the same
@@ -220,6 +278,12 @@ wrapped_buffer wrap_buffer(eq_engine_impl* engine, const void* ptr, size_t lengt
 equalizer_metal_engine::~equalizer_metal_engine()
 {
   eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
+  if (engine != nullptr) {
+    // Hand the dispatches this engine still had accumulated in this thread over to the burst: every
+    // path that reaches wait() flushes them, so a non-empty list means a caller that never waited,
+    // and neither the list nor the flush hook may outlive the engine they belong to.
+    eq_pending_release(engine);
+  }
   delete engine;
   impl = nullptr;
 }
@@ -368,25 +432,52 @@ struct eq_pending_t {
   float       h_scaling  = 0.0F;
 };
 
-/// Per-thread accumulation of the deferred burst (the burst itself is thread local).
+/// Per-thread accumulation of the deferred burst (the burst itself is thread local), one list per
+/// engine.
 ///
 /// The equalizer submits one symbol per call, which used to encode one dispatch per symbol. The
 /// dispatches are accumulated here instead and handed over through shared_burst's flush hook right
 /// before the burst changes stage or commits, so a group of symbols whose geometry, noise path and
 /// output strides match becomes ONE batched dispatch - without the caller having to collect
 /// anything (the inputs are staged per symbol, exactly as before).
+///
+/// The lists are per engine because one thread can run several equalizers over its lifetime - the
+/// concurrency test creates one per worker and switches between sequential demodulations - and a
+/// list that survives its engine would be handed to the flush hook of the next one: the hook then
+/// finds its own empty list, encodes nothing, and the group of the new engine never reaches the
+/// GPU (the soft bits of every symbol but the first of the group stay zero).
 struct eq_flush_state_t {
-  void*                      engine = nullptr;
-  std::vector<eq_pending_t>  pending;
+  std::unordered_map<void*, std::vector<eq_pending_t>> pending;
   /// Group staging handed over to a committed command buffer, recycled by the next flush (the
   /// kernels read it until that command buffer completes).
-  std::vector<void*>         inflight;
+  std::vector<void*> inflight;
 };
 static eq_flush_state_t& eq_flush_state()
 {
   static thread_local eq_flush_state_t s;
   return s;
 }
+
+/// Accumulated dispatches of \p engine in this thread.
+static std::vector<eq_pending_t>& eq_pending(void* engine)
+{
+  return eq_flush_state().pending[engine];
+}
+
+namespace {
+void eq_pending_release(void* engine)
+{
+  // The work this engine accumulated must not outlive it: the entries point at the caller's input
+  // buffers, and their addresses are reusable, so a later engine that happens to be allocated at
+  // the same address would inherit them and encode a group of dangling dispatches. Handing it over
+  // keeps the burst's dispatches; dropping it would leave the caller's outputs at their old values.
+  metal::shared_burst::flush_pending();
+  eq_pending(engine).clear();
+  if (metal::shared_burst::flush_hook_context() == engine) {
+    metal::shared_burst::set_flush_hook(nullptr, nullptr);
+  }
+}
+} // namespace
 
 /// Recycles the group staging of the previous flush (its command buffer was waited for).
 static void eq_flush_recycle()
@@ -403,59 +494,75 @@ static void eq_flush_recycle()
 /// runs that do not. Returns the pipeline the dispatches were encoded with.
 static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCommandEncoder> enc)
 {
-  eq_flush_state_t& st = eq_flush_state();
-  if ((enc == nil) || (st.engine != context) || st.pending.empty()) {
+  eq_engine_impl* engine = static_cast<eq_engine_impl*>(context);
+  if ((enc == nil) || (engine == nullptr)) {
     return nil;
   }
-  eq_engine_impl* engine = static_cast<eq_engine_impl*>(context);
-  if (engine == nullptr) {
+  // This engine's pending list in this thread (see eq_flush_state_t): the hook is installed with the
+  // engine as its context, so a thread that runs several equalizers encodes the group of the one
+  // that installed it.
+  std::vector<eq_pending_t>& pending = eq_pending(context);
+  if (pending.empty()) {
     return nil;
   }
   // The previous flush's command buffer has been waited for before a new group is accumulated.
   eq_flush_recycle();
 
-  const unsigned n_sym = static_cast<unsigned>(st.pending.size());
+  const unsigned n_sym = static_cast<unsigned>(pending.size());
   unsigned       first = 0;
   bool           any_batch = false;
   id<MTLComputePipelineState> used_pipeline = nil;
+  eq_batch_diag_t& diag = eq_batch_diag();
+  diag.flushes.fetch_add(1, std::memory_order_relaxed);
+  diag.symbols.fetch_add(n_sym, std::memory_order_relaxed);
   while (first != n_sym) {
-    const eq_pending_t& head = st.pending[first];
+    const eq_pending_t& head = pending[first];
     // Extend the run while geometry, noise path, scalings, noise variances and output strides match.
     unsigned n_run = 1;
     while (first + n_run != n_sym) {
-      const eq_pending_t& next = st.pending[first + n_run];
-      const eq_pending_t& prev = st.pending[first + n_run - 1];
+      const eq_pending_t& next = pending[first + n_run];
+      const eq_pending_t& prev = pending[first + n_run - 1];
       const bool same_geom = (next.nof_re == head.nof_re) && (next.nof_ports == head.nof_ports) &&
                              (next.nof_layers == head.nof_layers) && (next.mmse == head.mmse) &&
                              (next.noise_var == head.noise_var) && (next.tx_scaling == head.tx_scaling) &&
                              (next.h_scaling == head.h_scaling);
       // The group staging below copies the estimates of every symbol of the run, so a run can only
       // hold symbols whose estimates are laid out the same way. That includes the device slices of
-      // K3: two symbols of one hop share a buffer but not their offset.
-      const bool same_h = (next.h.buffer == head.h.buffer) && (next.h.layer_stride == head.h.layer_stride);
+      // K3: two symbols of one hop share a buffer but not their offset - the offset travels in the
+      // per-symbol copy, the stride has to match because one dispatch reads the whole run with it.
+      const bool same_h = (next.h.layer_stride == head.h.layer_stride);
       const bool same_strides =
           (static_cast<const char*>(next.eq) - static_cast<const char*>(prev.eq)) ==
-              (static_cast<const char*>(st.pending[first + 1].eq) - static_cast<const char*>(head.eq)) &&
+              (static_cast<const char*>(pending[first + 1].eq) - static_cast<const char*>(head.eq)) &&
           (static_cast<const char*>(next.nv) - static_cast<const char*>(prev.nv)) ==
-              (static_cast<const char*>(st.pending[first + 1].nv) - static_cast<const char*>(head.nv)) &&
+              (static_cast<const char*>(pending[first + 1].nv) - static_cast<const char*>(head.nv)) &&
           (next.eq != nullptr) && (next.nv != nullptr);
       const bool same_sigma = (std::memcmp(next.sigma2, head.sigma2, head.nof_ports * sizeof(float)) == 0);
-      if (!same_geom || !same_strides || !same_sigma || !same_h) {
+      if (!same_geom || !same_h || !same_strides || !same_sigma) {
+        eq_batch_note_break(!same_geom  ? "geometry"
+                            : !same_h   ? "estimates"
+                            : !same_strides ? "strides"
+                                            : "sigma2");
         break;
       }
       ++n_run;
     }
+    diag.runs.fetch_add(1, std::memory_order_relaxed);
+    if (n_run > 1) {
+      diag.batched_runs.fetch_add(1, std::memory_order_relaxed);
+    }
+    eq_batch_note_run(n_run);
 
     // Group staging: h [symbol][port][layer][re], y [symbol][port][re], one sigma2 array per run.
     const size_t h_stride = static_cast<size_t>(head.nof_ports) * head.nof_layers * head.nof_re;
     const size_t y_stride = static_cast<size_t>(head.nof_ports) * head.nof_re;
     const unsigned eq_stride_elems =
-        (n_run > 1) ? static_cast<unsigned>((static_cast<const char*>(st.pending[first + 1].eq) -
+        (n_run > 1) ? static_cast<unsigned>((static_cast<const char*>(pending[first + 1].eq) -
                                              static_cast<const char*>(head.eq)) /
                                             2 / sizeof(float))
                     : 0;
     const unsigned nv_stride_elems =
-        (n_run > 1) ? static_cast<unsigned>((static_cast<const char*>(st.pending[first + 1].nv) -
+        (n_run > 1) ? static_cast<unsigned>((static_cast<const char*>(pending[first + 1].nv) -
                                              static_cast<const char*>(head.nv)) /
                                             sizeof(float))
                     : 0;
@@ -470,9 +577,9 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     }
     for (unsigned k = 0; k != n_run; ++k) {
       std::memcpy(h_alloc + k * h_stride,
-                  static_cast<const cbf16_t*>(st.pending[first + k].h.buffer) + st.pending[first + k].h.offset,
+                  static_cast<const cbf16_t*>(pending[first + k].h.buffer) + pending[first + k].h.offset,
                   h_stride * sizeof(cbf16_t));
-      std::memcpy(y_alloc + k * y_stride, st.pending[first + k].y, y_stride * sizeof(cbf16_t));
+      std::memcpy(y_alloc + k * y_stride, pending[first + k].y, y_stride * sizeof(cbf16_t));
     }
     const equalize_params_t params = make_params(equalizer_metal_engine::ch_est_binding(h_alloc),
                                                  head.nof_re,
@@ -533,14 +640,14 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
 
     // The group staging stays alive until the command buffer that reads it completes: it is
     // recycled by the next flush, which the caller only reaches after waiting (see wait()).
-    st.inflight.push_back(h_alloc);
-    st.inflight.push_back(y_alloc);
-    st.inflight.push_back(s_alloc);
+    eq_flush_state().inflight.push_back(h_alloc);
+    eq_flush_state().inflight.push_back(y_alloc);
+    eq_flush_state().inflight.push_back(s_alloc);
     any_batch = true;
     first += n_run;
   }
 
-  st.pending.clear();
+  pending.clear();
   (void)any_batch;
   return used_pipeline;
 }
@@ -562,28 +669,46 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
   if (engine == nullptr) {
     return false;
   }
-  // Accumulate instead of encoding one dispatch per symbol: the dispatches of the whole group are
-  // encoded by the flush hook when the burst changes stage (the demapping) or commits, so symbols
-  // that share geometry, noise path and output strides become one batched dispatch. The caller's
-  // inputs are read at that point, which is why they must stay alive until wait() - exactly the
-  // contract the per-symbol path already had.
-  eq_flush_state_t& st = eq_flush_state();
-  if ((st.engine != nullptr) && (st.engine != engine) && !st.pending.empty()) {
-    // A different engine left work pending in this thread's burst: hand it over before mixing.
-    metal::shared_burst::set_flush_hook(st.engine, &eq_flush_hook);
-    (void)metal::shared_burst::encoder(eq_resources().pipeline);
+  // \name Two encodings of the same dispatch.
+  ///
+  /// The default encodes the symbol right here, exactly as the chain has always done. The batched
+  /// form accumulates instead and lets the flush hook encode the whole group as ONE dispatch when
+  /// the burst changes stage (the demapping) or commits; the caller's inputs are read at that point,
+  /// which is why they must stay alive until wait() - the contract the per-symbol path already has.
+  ///
+  /// The batched form is bit-exact against the per-symbol chain in every single-threaded check (the
+  /// chain probe, the equalizer unit test with a group of twelve, and the deferred demodulation
+  /// equivalence test), and 2.0x cheaper on the equalization alone at the over-the-air shape. It is
+  /// NOT the default yet because the concurrency test (four demodulations at the same time, one
+  /// engine each) still comes out wrong once a group holds ten or more symbols: the eq_batch probe
+  /// reports the single batched run of the whole group, so the group IS encoded, yet the demapping
+  /// of the symbols after the first reads zeros. A CPU synchronization between the two stages makes
+  /// that disappear, so what fails is the stage hand-off inside the shared command buffer once
+  /// several threads encode into their own bursts.
+  ///
+  /// Select the batched form with OCUDU_EQ_DEFER_ENCODE=1; OCUDU_EQ_IMMEDIATE_ENCODE=1 pins the
+  /// per-symbol form regardless of the default, so an RX regression can be bisected without a
+  /// rebuild.
+  ///@{
+  static const bool defer_encode = []() {
+    const char* env = std::getenv("OCUDU_EQ_DEFER_ENCODE");
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  if (defer_encode) {
+    // A thread can accumulate for several engines over its lifetime (a worker creating one
+    // demodulator after another). The burst only carries ONE pending hook, so work accumulated for
+    // another engine must be handed over before this one installs its own - otherwise the new hook
+    // would look for its own (empty) list and the earlier group would never reach the GPU.
+    if ((metal::shared_burst::flush_hook_context() != nullptr) &&
+        (metal::shared_burst::flush_hook_context() != engine)) {
+      (void)metal::shared_burst::flush_pending();
+    }
+    eq_pending(engine).push_back(
+        {h, y, sigma2, eq, nv, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling});
+    metal::shared_burst::set_flush_hook(engine, &eq_flush_hook);
+    return true;
   }
-  // Default: encode the dispatch right here, exactly as the chain has always done (verified: a
-  // deferred group of any size matches the synchronous path bit for bit). The accumulated/flushed
-  // form below - which is what turns a group of symbols into ONE batched dispatch - is selected by
-  // OCUDU_EQ_DEFER_ENCODE=1 and is NOT equivalent yet: encoding the equalization later (at the
-  // first encode of the next stage) makes the demapping read symbols >= 2 of a group as if the
-  // equalization had not run (their soft bits come out zero), even with the batching disabled.
-  // The measurement that separates the two: identical plumbing with immediate encoding = 0 of 4896
-  // differing LLRs, deferred encoding = 4485, and forcing one dispatch per symbol while deferred
-  // still differs (1442 for a group of two) - so the defect is the ENCODING INSTANT, not the
-  // batched dispatch. See the S-5 section of the full-chain design document.
-  if (std::getenv("OCUDU_EQ_DEFER_ENCODE") == nullptr) {
+  {
     id<MTLComputeCommandEncoder> enc = metal::shared_burst::encoder(eq_resources().pipeline);
     if (enc == nil) {
       return false;
@@ -615,10 +740,7 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
     metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
     return true;
   }
-  st.engine = engine;
-  st.pending.push_back({h, y, sigma2, eq, nv, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling});
-  metal::shared_burst::set_flush_hook(engine, &eq_flush_hook);
-  return true;
+  ///@}
 }
 
 bool equalizer_metal_engine::enqueue_burst_batch(const ch_est_binding& h,
@@ -812,6 +934,33 @@ unsigned equalizer_metal_engine::batch_dispatch_count() const
 {
   auto* engine = static_cast<eq_engine_impl*>(impl);
   return (engine == nullptr) ? 0 : engine->batch_dispatches;
+}
+
+equalizer_metal_engine::batch_diag equalizer_metal_engine::batch_diagnostics() const
+{
+  // One process-wide set of counters, like the [metal_stats] report: the flush hook is a free
+  // function that a thread-local burst calls, so it has no engine instance to count on.
+  batch_diag             d;
+  const eq_batch_diag_t& c = eq_batch_diag();
+  d.flushes      = c.flushes.load(std::memory_order_relaxed);
+  d.symbols      = c.symbols.load(std::memory_order_relaxed);
+  d.runs         = c.runs.load(std::memory_order_relaxed);
+  d.batched_runs = c.batched_runs.load(std::memory_order_relaxed);
+  d.max_run      = c.max_run.load(std::memory_order_relaxed);
+  const char* brk = c.first_break.load(std::memory_order_relaxed);
+  d.first_break  = (brk == nullptr) ? "" : brk;
+  return d;
+}
+
+void equalizer_metal_engine::reset_batch_diagnostics()
+{
+  eq_batch_diag_t& c = eq_batch_diag();
+  c.flushes.store(0, std::memory_order_relaxed);
+  c.symbols.store(0, std::memory_order_relaxed);
+  c.runs.store(0, std::memory_order_relaxed);
+  c.batched_runs.store(0, std::memory_order_relaxed);
+  c.max_run.store(0, std::memory_order_relaxed);
+  c.first_break.store(nullptr, std::memory_order_relaxed);
 }
 
 double equalizer_metal_engine::last_gpu_wait_us() const
