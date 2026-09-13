@@ -400,36 +400,49 @@ int main()
         engine.burst_commit();
         engine.burst_wait_committed();
       };
+      // Batched path: ONE dispatch for every symbol of the group (the API the deferred chain does
+      // not use yet - see the D-section conclusion).
+      auto run_batch = [&]() {
+        engine.burst_open();
+        bool b_ok = engine.enqueue_burst_batch(h_group.data(),
+                                              y_group.data(),
+                                              sigma2.data(),
+                                              eq_bat.ptr,
+                                              nv_bat.ptr,
+                                              nof_re,
+                                              nof_symbols,
+                                              static_cast<unsigned>(h_stride),
+                                              static_cast<unsigned>(y_stride),
+                                              static_cast<unsigned>(eq_el),
+                                              static_cast<unsigned>(nv_el),
+                                              ports,
+                                              layers,
+                                              true,
+                                              0.02F,
+                                              1.0F,
+                                              1.0F);
+        engine.burst_commit();
+        return engine.burst_wait_committed() && b_ok;
+      };
+
+      // Warm BOTH patterns before timing them. The first dispatch of a freshly bound pipeline pays
+      // its setup, and timing a warm pattern against a cold one is how the batch path came out
+      // "twice as slow" in the first run of this probe. Repeat as well: one sample cannot separate
+      // a 10us-per-dispatch difference from machine noise.
       run_per_symbol();
+      bool ok = run_batch();
 
-      const auto t0 = std::chrono::steady_clock::now();
-      run_per_symbol();
-      const auto t1 = std::chrono::steady_clock::now();
-
-      engine.burst_open();
-      bool ok = engine.enqueue_burst_batch(h_group.data(),
-                                           y_group.data(),
-                                           sigma2.data(),
-                                           eq_bat.ptr,
-                                           nv_bat.ptr,
-                                           nof_re,
-                                           nof_symbols,
-                                           static_cast<unsigned>(h_stride),
-                                           static_cast<unsigned>(y_stride),
-                                           static_cast<unsigned>(eq_el),
-                                           static_cast<unsigned>(nv_el),
-                                           ports,
-                                           layers,
-                                           true,
-                                           0.02F,
-                                           1.0F,
-                                           1.0F);
-      engine.burst_commit();
-      ok = engine.burst_wait_committed() && ok;
-
-      const auto t2 = std::chrono::steady_clock::now();
-      const double us_sym = std::chrono::duration<double, std::micro>(t1 - t0).count();
-      const double us_bat = std::chrono::duration<double, std::micro>(t2 - t1).count();
+      double us_sym = 1e9;
+      double us_bat = 1e9;
+      for (unsigned rep = 0; rep != 10; ++rep) {
+        const auto t0 = std::chrono::steady_clock::now();
+        run_per_symbol();
+        const auto t1 = std::chrono::steady_clock::now();
+        ok           = run_batch() && ok;
+        const auto t2 = std::chrono::steady_clock::now();
+        us_sym        = std::min(us_sym, std::chrono::duration<double, std::micro>(t1 - t0).count());
+        us_bat        = std::min(us_bat, std::chrono::duration<double, std::micro>(t2 - t1).count());
+      }
 
       const auto* pa = static_cast<const cf_t*>(eq_sym.ptr);
       const auto* pb = static_cast<const cf_t*>(eq_bat.ptr);
