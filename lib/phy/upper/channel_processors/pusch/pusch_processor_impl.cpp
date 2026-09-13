@@ -234,8 +234,14 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
   // stage that decides the equalizer's noise variance and hence the soft-bit scale. The key is set
   // again here because this function may run on a different thread than process().
   ul_capture::set_current(pdu.slot, pdu.rnti);
-  ul_capture::capture_ce(est_results, pdu);
-  ul_capture::capture_h(est_results, pdu);
+  if (ul_capture::enabled()) {
+    // The capture reads host copies of the estimator's results, so it needs them complete. With a
+    // deferred estimator that costs the overlap the demodulation below would get, which is the
+    // right trade for a debug capture - and it is why this is gated instead of unconditional.
+    est_results.sync_device_estimates();
+    ul_capture::capture_ce(est_results, pdu);
+    ul_capture::capture_h(est_results, pdu);
+  }
 
   using namespace units::literals;
 
@@ -247,9 +253,11 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
   // interleaved.
   crb_bitmap rb_mask = pdu.freq_alloc.get_crb_mask(pdu.bwp_start_rb, pdu.bwp_size_rb);
 
-  // Extract channel state information.
-  channel_state_information csi(csi_sinr_calc_method);
-  est_results.get_channel_state_information(csi);
+  // Note: the channel estimator's measurements (RSRP, EPRE, noise, time alignment, CFO, its own
+  // SINR) are merged into the reported Channel State Information at the end of this function, once
+  // its results are complete - the demodulation in between is what overlaps the estimator's device
+  // work when the estimator defers it. They are fields the demodulator does not write, so merging
+  // them there preserves its post-equalization SINR and EVM.
 
   // Number of RB used by this transmission.
   unsigned nof_rb = pdu.freq_alloc.get_nof_rb();
@@ -314,7 +322,7 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
                                                              ulsch_config);
 
   // Prepare notifiers.
-  notifier_adaptor.new_transmission(notifier, csi_part1_feedback, csi, has_sch_data ? data.size() : 0);
+  notifier_adaptor.new_transmission(notifier, csi_part1_feedback, csi_sinr_calc_method, has_sch_data ? data.size() : 0);
   notifier_adaptor.set_slot(pdu.slot);
   csi_part1_feedback.connect_notifier(notifier_adaptor);
 
@@ -438,4 +446,10 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
 
   dependencies->get_demodulator().demodulate(
       demodulator_buffer, notifier_adaptor.get_demodulator_notifier(), grid, est_results, demod_config);
+
+  // The demodulation is done: complete the channel estimation and merge its measurements into the
+  // reported Channel State Information. Reading them any earlier would put the whole demodulation
+  // behind the estimator's synchronization.
+  (void)est_results.sync_device_estimates();
+  est_results.get_channel_state_information(notifier_adaptor.get_channel_state_information());
 }

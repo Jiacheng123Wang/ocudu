@@ -216,6 +216,20 @@ public:
   /// \return The device address of the noise variance, or nullptr when there is none (the default).
   virtual const float* get_device_noise_variance(unsigned /*rx_port*/) const { return nullptr; }
 
+  /// \brief Makes the results of a deferred estimation available on the host.
+  ///
+  /// An estimator may commit its work and return before the results exist - on a GPU that is what
+  /// lets the rest of the receiving chain run while the estimation completes. Any accessor of the
+  /// host-visible results then requires this call first: it completes the pending work and publishes
+  /// the results. The default implementation has nothing to do and reports the results are ready, so
+  /// an estimator that runs synchronously is unaffected.
+  ///
+  /// \note The device-resident results (see \ref get_device_ch_estimates and
+  /// \ref get_device_noise_variance) do not need it: a consumer that reads them where they were
+  /// produced is ordered by the device queue, not by this call.
+  /// \return True when the results are available.
+  virtual bool sync_device_estimates() const { return true; }
+
   /// \brief Gets the general Channel State Information.
   ///
   /// \param[out] csi Channel State Information object where the CSI parameters are stored.

@@ -71,24 +71,35 @@ public:
   /// \brief Configures the notifier for a new transmission.
   /// \param[in] notifier_            PUSCH processor result notifier.
   /// \param[in] csi_part_1_feedback_ Uplink control information field CSI Part 1 feedback notifier.
-  /// \param[in] csi                  Channel state information.
+  /// \param[in] sinr_report_type     SINR the reported Channel State Information carries (see
+  ///                                 channel_state_information). The estimator's measurements are
+  ///                                 merged into that object once they are complete, which - with a
+  ///                                 deferred estimator - is after the demodulation.
   /// \param[in] sch_data_bytes_      Size in bytes of the UL-SCH (MAC PDU) buffer of this transmission, recorded by
   ///                                 the UL pipeline probe when the CRC passes (0 when the PUSCH carries no SCH data).
   /// \return A PUSCH processor notifier adaptor.
-  void new_transmission(pusch_processor_result_notifier&    notifier_,
-                        pusch_processor_csi_part1_feedback& csi_part_1_feedback_,
-                        const channel_state_information&    csi,
-                        size_t                              sch_data_bytes_ = 0)
+  void new_transmission(pusch_processor_result_notifier&      notifier_,
+                        pusch_processor_csi_part1_feedback&   csi_part_1_feedback_,
+                        channel_state_information::sinr_type  sinr_report_type,
+                        size_t                                sch_data_bytes_ = 0)
   {
     notifier            = &notifier_;
     csi_part_1_feedback = &csi_part_1_feedback_;
-    uci_payload.csi     = csi;
+    uci_payload.csi     = channel_state_information(sinr_report_type);
     sch_data_bytes      = sch_data_bytes_;
 
     uci_payload.harq_ack.clear();
     uci_payload.csi_part1.clear();
     uci_payload.csi_part2.clear();
   }
+
+  /// \brief Channel state information of the current transmission, as reported.
+  ///
+  /// The demodulator writes its post-equalization SINR and EVM into this object while it runs, and
+  /// the channel estimator's measurements are merged into it afterwards (they are different fields,
+  /// so nothing is overwritten). The caller must not read it before the estimator's results are
+  /// complete - see dmrs_pusch_estimator_results::sync_device_estimates().
+  channel_state_information& get_channel_state_information() { return uci_payload.csi; }
 
   /// Gets the PUSCH demodulator notifier.
   pusch_demodulator_notifier& get_demodulator_notifier() { return pusch_demod_notifier; }
