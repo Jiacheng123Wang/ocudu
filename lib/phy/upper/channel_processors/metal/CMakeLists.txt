@@ -37,6 +37,12 @@ target_include_directories(metal_chain_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(metal_chain_probe PRIVATE
     ocudu_channel_processors_metal ocudu_channel_modulation_metal ocudu_channel_equalizer ocudu_support)
 
+# ---- Minimal reproducer of the deferred-group stage hand-off (probe, not part of the suite) ----
+add_executable(eq_handoff_probe test/eq_handoff_probe.cpp)
+target_include_directories(eq_handoff_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../equalization)
+target_link_libraries(eq_handoff_probe PRIVATE
+    ocudu_channel_processors_metal ocudu_channel_modulation_metal ocudu_channel_equalizer ocudu_support)
+
 # ---- Unit-level validation: A/B vs the CPU generic equalizer ----
 add_executable(channel_equalizer_metal_unit_test test/channel_equalizer_metal_unit_test.cpp)
 target_include_directories(channel_equalizer_metal_unit_test PRIVATE
