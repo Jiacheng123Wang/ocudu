@@ -52,16 +52,19 @@ public:
     /// Destination: [nof_layers][total_re] complex cbf16 (2 x uint16 per element), resident in
     /// the estimator's staging buffers.
     void* dst = nullptr;
-    /// Per-symbol RE masks, [nof_symbols][mask_words] 32-bit words: bit (sc & 31) of word
-    /// (sc >> 5) set for the data REs of that symbol (ascending subcarrier order defines the
-    /// destination order).
-    const uint32_t* masks = nullptr;
     /// Prefix RE counts: offsets[s] is the destination index of the first RE of symbol s and
     /// offsets[nof_symbols] == total_re. Only the first nof_symbols + 1 entries are read.
     const uint32_t* offsets = nullptr;
     unsigned nof_symbols    = 0;
-    unsigned mask_words     = 0;
     unsigned total_re       = 0;
+    /// Data REs per PRB of a symbol without (drpp) and with (drpp_dmrs) DM-RS, the DM-RS RE
+    /// positions within a PRB (12 bits) and the DM-RS symbols of the slot (one bit per symbol).
+    /// The destination index is derived from these arithmetically: the allocation is contiguous,
+    /// so every PRB of a symbol contributes the same data REs.
+    unsigned drpp          = 0;
+    unsigned drpp_dmrs     = 0;
+    unsigned dmrs_re_bits  = 0;
+    unsigned dmrs_sym_bits = 0;
     /// Destination layers (the systems of the batch hold either one block geometry per layer, or
     /// two: the standard blocks in [0, nof_layers) and the edge block in [sys_tail, ...)).
     unsigned nof_layers = 0;

@@ -240,15 +240,12 @@ static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
   // K3 (optional): gather the equalizer's per-symbol estimates out of the h K2 has just written,
   // in the same command buffer so the hop still costs one commit and one wait.
   if (reformat != nullptr && e->reformat_pipe != nil && (reformat->dst != nullptr) &&
-      (reformat->masks != nullptr) && (reformat->offsets != nullptr) && (reformat->nof_symbols != 0) &&
-      (reformat->nof_layers != 0) && (reformat->total_re != 0)) {
-    const NSUInteger mask_bytes =
-        static_cast<NSUInteger>(reformat->nof_symbols) * reformat->mask_words * sizeof(uint32_t);
+      (reformat->offsets != nullptr) && (reformat->nof_symbols != 0) && (reformat->nof_layers != 0) &&
+      (reformat->total_re != 0)) {
     const NSUInteger dst_bytes =
         static_cast<NSUInteger>(reformat->nof_layers) * reformat->total_re * 2 * sizeof(uint16_t);
-    id<MTLBuffer> mask_buf = e->wrap(reformat->masks, mask_bytes);
-    id<MTLBuffer> dst_buf  = e->wrap(reformat->dst, dst_bytes);
-    if (mask_buf != nil && dst_buf != nil) {
+    id<MTLBuffer> dst_buf = e->wrap(reformat->dst, dst_bytes);
+    if (dst_buf != nil) {
       struct mmse_reformat_params {
         uint32_t nout_stride;
         uint32_t n_blk;
@@ -258,9 +255,12 @@ static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
         uint32_t sys_tail;
         uint32_t nof_layers;
         uint32_t nof_symbols;
-        uint32_t mask_words;
         uint32_t total_re;
         uint32_t dc_sc;
+        uint32_t drpp;
+        uint32_t drpp_dmrs;
+        uint32_t dmrs_re_bits;
+        uint32_t dmrs_sym_bits;
       } rparams{static_cast<uint32_t>(nout),
                 static_cast<uint32_t>(nof_blocks),
                 reformat->nf_std,
@@ -269,21 +269,23 @@ static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
                 reformat->sys_tail,
                 reformat->nof_layers,
                 reformat->nof_symbols,
-                reformat->mask_words,
                 reformat->total_re,
-                reformat->dc_sc};
+                reformat->dc_sc,
+                reformat->drpp,
+                reformat->drpp_dmrs,
+                reformat->dmrs_re_bits,
+                reformat->dmrs_sym_bits};
       // K3 reads what K2 wrote: the one stage boundary in this command buffer where a write must
       // be made visible to a later dispatch (K1 -> K1b -> K2 have always shared an encoder and
       // rely on its in-order execution).
       [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
       [enc setComputePipelineState:e->reformat_pipe];
       [enc setBuffer:h_buf offset:0 atIndex:0];
-      [enc setBuffer:mask_buf offset:0 atIndex:1];
       [enc setBytes:reformat->offsets
              length:static_cast<NSUInteger>(reformat->nof_symbols + 1) * sizeof(uint32_t)
-             atIndex:2];
-      [enc setBuffer:dst_buf offset:0 atIndex:3];
-      [enc setBytes:&rparams length:sizeof(rparams) atIndex:4];
+             atIndex:1];
+      [enc setBuffer:dst_buf offset:0 atIndex:2];
+      [enc setBytes:&rparams length:sizeof(rparams) atIndex:3];
       const NSUInteger nof_sub =
           static_cast<NSUInteger>(rparams.sc_tail_base) + (reformat->has_tail ? rparams.nf_tail : 0u);
       const NSUInteger nof_threads = nof_sub * reformat->nof_symbols * reformat->nof_layers;

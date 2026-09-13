@@ -1718,6 +1718,31 @@ int main()
                 "instance)\n",
                 total_checked,
                 static_cast<unsigned>(shapes.size()));
+
+    // Negative case: the destination index is arithmetic, which needs a contiguous allocation. A
+    // non-contiguous one must produce NO device estimates - the consumer then gathers them on the
+    // host, which is always correct. Silently producing a shifted layout here would corrupt the
+    // equalizer's input, which is exactly what the RE-count guard in the consumer catches.
+    {
+      auto cfg = make_config(12, true);
+      cfg.dmrs_pattern.front().rb_mask.reset(5);
+      auto                            pilots = make_pilots(12, 2);
+      grid_fake                       grid(12 * 12);
+      std::vector<cf_t>               rx_sym(12 * 12, {0.0F, 0.0F});
+      std::normal_distribution<float> gauss(0.0F, 0.4F);
+      for (unsigned k = 0; k != rx_sym.size(); ++k) {
+        rx_sym[k] = cf_t{gauss(rng), gauss(rng)};
+      }
+      grid.set_symbol(2, rx_sym);
+      grid.set_symbol(11, rx_sym);
+
+      (void)mmse->compute(grid, 0, pilots, cfg);
+      if (mmse->device_estimates_ready_last()) {
+        std::printf("Test 12 FAIL: a non-contiguous allocation produced device estimates\n");
+        return -1;
+      }
+      std::printf("Test 12 (12 PRB with a hole): no device estimates, as expected\n");
+    }
   }
 
   std::printf("All tests PASSED\n");

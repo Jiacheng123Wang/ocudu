@@ -199,7 +199,6 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // The demodulator consumes these estimates (S-6b), so the device path is the default;
   // OCUDU_CE_CPU_CE=1 keeps both sides on the per-symbol host gather for A/B.
   device_ce_enabled = (std::getenv("OCUDU_CE_CPU_CE") == nullptr);
-  gpu_masks = alloc_aligned<uint32_t>(static_cast<std::size_t>(MAX_NSYMB_PER_SLOT) * MAX_MASK_WORDS);
   gpu_ce    = alloc_aligned<uint16_t>(static_cast<std::size_t>(MAX_LAYERS) * MAX_NOF_PRBS *
                                    NOF_SUBCARRIERS_PER_RB * MAX_NSYMB_PER_SLOT * 2);
 
@@ -245,7 +244,6 @@ port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl(
   free_aligned(gpu_y);
   free_aligned(gpu_qy);
   free_aligned(gpu_h);
-  free_aligned(gpu_masks);
   free_aligned(gpu_ce);
 }
 
@@ -605,10 +603,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     }
     metal::mmse_engine::reformat_stage reformat{};
     reformat.dst         = gpu_ce;
-    reformat.masks       = gpu_masks;
     reformat.offsets     = re_offsets.data();
     reformat.nof_symbols = MAX_NSYMB_PER_SLOT;
-    reformat.mask_words  = gpu_ce_mask_words;
+    reformat.drpp          = gpu_ce_drpp;
+    reformat.drpp_dmrs     = gpu_ce_drpp_dmrs;
+    reformat.dmrs_re_bits  = gpu_ce_dmrs_re_bits;
+    reformat.dmrs_sym_bits = gpu_ce_dmrs_sym_bits;
     reformat.total_re    = nof_re_total;
     reformat.dc_sc       = dc_sc;
     // Standard blocks cover subcarriers [0, nf_std * nof_blocks) of the batch; the edge block, when
@@ -1083,79 +1083,48 @@ unsigned port_channel_estimator_metal_mmse_impl::stage_re_masks(const fd_td_esti
                                                                 unsigned                           nof_prb,
                                                                 unsigned                           first_prb)
 {
-  const unsigned nof_sub    = nof_prb * NOF_SUBCARRIERS_PER_RB;
-  const unsigned mask_words = (nof_sub + 31u) / 32u;
-  if (mask_words > MAX_MASK_WORDS) {
+  const auto& hop_rb_mask = (args.hop == 0) ? args.dmrs_patterns.front().rb_mask : args.dmrs_patterns.front().rb_mask2;
+
+  // The destination index is arithmetic (see ocudu_mmse_reformat.metal), which requires a
+  // contiguous allocation: every PRB then contributes the same data REs. A non-contiguous
+  // allocation simply does not get device estimates - the consumer falls back to the host gather.
+  if ((hop_rb_mask.find_highest() + 1 - first_prb) != nof_prb) {
     return 0;
   }
 
   // DM-RS resource elements of one PRB: the union over the layers' RE patterns. For the type-1
   // pattern these are the per-layer combs, so the union is exactly the comb set that the
   // demodulator's CDM group count selects for the DM-RS symbols.
-  std::array<bool, NOF_SUBCARRIERS_PER_RB> dmrs_re{};
+  unsigned dmrs_re_bits = 0;
   for (const auto& pattern : args.dmrs_patterns) {
-    pattern.re_pattern.for_each(
-        0, pattern.re_pattern.size(), [&](unsigned pos) { dmrs_re[pos % NOF_SUBCARRIERS_PER_RB] = true; });
+    pattern.re_pattern.for_each(0, pattern.re_pattern.size(), [&](unsigned pos) {
+      dmrs_re_bits |= 1u << (pos % NOF_SUBCARRIERS_PER_RB);
+    });
   }
+  const unsigned dmrs_per_prb = static_cast<unsigned>(__builtin_popcount(dmrs_re_bits));
+
   // DM-RS symbols of the slot (all layers of a PUSCH share them).
   const auto& slot_dmrs = args.dmrs_patterns.front().symbols;
-
-  unsigned dmrs_re_bits = 0;
-  for (unsigned i_re = 0; i_re != NOF_SUBCARRIERS_PER_RB; ++i_re) {
-    dmrs_re_bits |= (dmrs_re[i_re] ? 1u : 0u) << i_re;
-  }
-  unsigned dmrs_sym_bits = 0;
+  unsigned    dmrs_sym_bits = 0;
   for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
     dmrs_sym_bits |= (slot_dmrs.test(sym) ? 1u : 0u) << sym;
   }
-  // The allocated PRB *pattern* matters, not just its first PRB and count (non-contiguous
-  // allocations with the same span must not share staged masks).
-  const auto& rb_mask_for_hash = (args.hop == 0) ? args.dmrs_patterns.front().rb_mask : args.dmrs_patterns.front().rb_mask2;
-  unsigned    rb_pattern       = 0;
-  for (unsigned prb = 0; prb != nof_prb; ++prb) {
-    rb_pattern = rb_pattern * 33u + (rb_mask_for_hash.test(first_prb + prb) ? 1u : 2u);
-  }
 
-  // The masks depend only on the allocation, which in a slot-to-slot stream repeats hop after hop,
-  // and staging them costs more host time than the whole reformat kernel. Rebuild them only when
-  // the allocation actually changes.
-  if ((first_prb == mask_first_prb) && (nof_prb == mask_nof_prb) && (args.hop == mask_hop) &&
-      (rb_pattern == mask_rb_pattern) && (dmrs_re_bits == mask_dmrs_re_bits) &&
-      (dmrs_sym_bits == mask_dmrs_sym_bits) && (mask_words == gpu_ce_mask_words) && (gpu_ce_total_re != 0)) {
-    return gpu_ce_total_re;
-  }
-
-  const auto& hop_rb_mask = rb_mask_for_hash;
-  std::memset(gpu_masks, 0, static_cast<std::size_t>(MAX_NSYMB_PER_SLOT) * mask_words * sizeof(uint32_t));
-
+  // Size and per-symbol offsets: a DM-RS symbol contributes the data REs of its comb, the others
+  // all twelve.
   unsigned total = 0;
   for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
-    re_offsets[sym]             = total;
-    uint32_t*           row     = gpu_masks + static_cast<std::size_t>(sym) * mask_words;
-    const bool          is_dmrs = slot_dmrs.test(sym);
-    unsigned            sc      = 0;
-    for (unsigned prb = 0; prb != nof_prb; ++prb, sc += NOF_SUBCARRIERS_PER_RB) {
-      if (!hop_rb_mask.test(first_prb + prb)) {
-        continue;
-      }
-      for (unsigned i_re = 0; i_re != NOF_SUBCARRIERS_PER_RB; ++i_re) {
-        if (is_dmrs && dmrs_re[i_re]) {
-          continue;
-        }
-        row[(sc + i_re) >> 5] |= 1u << ((sc + i_re) & 31);
-        ++total;
-      }
-    }
+    re_offsets[sym] = total;
+    const unsigned drpp = slot_dmrs.test(sym) ? (NOF_SUBCARRIERS_PER_RB - dmrs_per_prb) : NOF_SUBCARRIERS_PER_RB;
+    total += nof_prb * drpp;
   }
   re_offsets[MAX_NSYMB_PER_SLOT] = total;
 
-  mask_first_prb    = first_prb;
-  mask_nof_prb      = nof_prb;
-  mask_hop          = args.hop;
-  mask_rb_pattern   = rb_pattern;
-  mask_dmrs_re_bits = dmrs_re_bits;
-  mask_dmrs_sym_bits = dmrs_sym_bits;
-  gpu_ce_mask_words = mask_words;
+  gpu_ce_drpp          = NOF_SUBCARRIERS_PER_RB;
+  gpu_ce_drpp_dmrs     = NOF_SUBCARRIERS_PER_RB - dmrs_per_prb;
+  gpu_ce_dmrs_re_bits  = dmrs_re_bits;
+  gpu_ce_dmrs_sym_bits = dmrs_sym_bits;
+
   return total;
 }
 

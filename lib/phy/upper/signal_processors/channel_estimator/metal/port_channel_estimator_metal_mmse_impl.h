@@ -256,26 +256,21 @@ private:
   /// (diagnostics/A-B observability; see merged_batch_last()).
   bool last_stage_merged = false;
 
-  /// K3 (S-6a): the equalizer's channel estimates built on the GPU - per-symbol RE masks, their
-  /// prefix RE counts, and the destination [MAX_LAYERS][total_re] cbf16 buffer. The path is
-  /// enabled by OCUDU_CE_DEVICE_CE (A/B until the demodulator consumes it) and only engages on
-  /// hops whose engine call covers the whole allocation with the legacy kernels.
-  static constexpr unsigned MAX_MASK_WORDS = (MAX_NOF_PRBS * NOF_SUBCARRIERS_PER_RB + 31) / 32;
+  /// K3 (S-6a): the equalizer's channel estimates built on the GPU - the destination
+  /// [MAX_LAYERS][total_re] cbf16 buffer and the layout (per-symbol RE counts and the DM-RS comb)
+  /// K3 derives the destination indices from. The path is on by default (the demodulator consumes
+  /// the estimates) and only engages on hops whose engine call covers the whole allocation with
+  /// the legacy kernels; OCUDU_CE_CPU_CE=1 keeps both sides on the host gather for A/B.
   bool                      device_ce_enabled = false;
-  uint32_t*                 gpu_masks         = nullptr; // [MAX_NSYMB_PER_SLOT][MAX_MASK_WORDS]
   uint16_t*                 gpu_ce            = nullptr; // [MAX_LAYERS][MAX_NOF_PRBS * 12 * 14]
   std::array<unsigned, MAX_NSYMB_PER_SLOT + 1> re_offsets{};
-  unsigned                  gpu_ce_mask_words = 0;
+  unsigned                  gpu_ce_drpp          = 0;
+  unsigned                  gpu_ce_drpp_dmrs     = 0;
+  unsigned                  gpu_ce_dmrs_re_bits  = 0;
+  unsigned                  gpu_ce_dmrs_sym_bits = 0;
   unsigned                  gpu_ce_layers     = 0;
   unsigned                  gpu_ce_total_re   = 0;
   bool                      gpu_ce_ready      = false;
-  /// Signature of the allocation the staged masks belong to (see stage_re_masks()).
-  unsigned mask_first_prb     = ~0u;
-  unsigned mask_nof_prb       = 0;
-  unsigned mask_hop           = ~0u;
-  unsigned mask_rb_pattern    = 0;
-  unsigned mask_dmrs_re_bits  = ~0u;
-  unsigned mask_dmrs_sym_bits = ~0u;
 
   /// Maximum number of full blocks per slot for the configured block size.
   unsigned max_blocks;
