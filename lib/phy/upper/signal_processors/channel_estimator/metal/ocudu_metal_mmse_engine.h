@@ -201,6 +201,34 @@ public:
               unsigned     nof_systems,
               unsigned     nof_blocks);
 
+  /// \brief Encodes the combined pipeline and commits it WITHOUT waiting for the GPU.
+  ///
+  /// The estimator uses this to overlap the GPU work with the host-side preparation of whatever
+  /// consumes it: the wait moves to wait_pending(), which the consumer calls once it has nothing
+  /// else to do. Any submission still outstanding when a run*() entry point is called is waited for
+  /// first, so an engine never holds more than one command buffer in flight - this is deliberately
+  /// NOT the batch API that stalled in the field (many command buffers committed late, queue slots
+  /// exhausted); here every call commits immediately and at most one is outstanding.
+  ///
+  /// \return False when the encoding failed and nothing was submitted.
+  bool run_async(float*       a,
+                 const float* r_hp,
+                 float*       w,
+                 const float* y,
+                 float*       h,
+                 unsigned     nout,
+                 unsigned     L,
+                 unsigned     nof_systems,
+                 unsigned     nof_blocks,
+                 const reformat_stage* reformat = nullptr);
+
+  /// \brief Waits for the submission of run_async() and reports whether it completed.
+  /// \return True when there was nothing pending, or when the pending submission succeeded.
+  bool wait_pending();
+
+  /// Whether a submission from run_async() is still outstanding.
+  bool has_pending() const;
+
   /// \brief Reserves the zero-copy mapping of a buffer at its maximum size.
   ///
   /// The zero-copy cache is keyed by pointer and keeps the mapping created first: a later request

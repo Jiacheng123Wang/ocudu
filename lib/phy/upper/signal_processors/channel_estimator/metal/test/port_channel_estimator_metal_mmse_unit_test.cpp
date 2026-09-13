@@ -605,6 +605,87 @@ int main()
   }
 
   // -----------------------------------------------------------------------------------
+  // Test 4c: the asynchronous submission (commit now, wait later) stays bounded and correct.
+  // The point of run_async() is to overlap the GPU with the host's preparation of the consumer, so
+  // the wait is deliberately deferred - which is also exactly the shape that stalled in the field
+  // once (many committed-but-unwaited command buffers exhausting the queue's slots). This hammers
+  // it for far longer than that stall took to appear, checks that at most one submission is ever
+  // outstanding, and compares the result with the synchronous path.
+  // -----------------------------------------------------------------------------------
+  {
+    metal::mmse_engine engine;
+    if (engine.init()) {
+      const unsigned nof_sys = 2, nout = 504, L = 36, nof_blocks = 17;
+      std::uniform_real_distribution<float> uni(-1.0F, 1.0F);
+      std::vector<float> a(static_cast<std::size_t>(nof_sys) * L * L);
+      std::vector<float> rp(static_cast<std::size_t>(nof_sys) * nout * L);
+      std::vector<float> w(static_cast<std::size_t>(nof_sys) * nout * L);
+      std::vector<float> y(static_cast<std::size_t>(nof_sys) * nof_blocks * 2 * L);
+      std::vector<float> h(static_cast<std::size_t>(nof_sys) * nof_blocks * 2 * nout);
+      std::vector<float> h_ref(h.size());
+      for (auto& v : a) {
+        v = uni(rng);
+      }
+      for (auto& v : rp) {
+        v = uni(rng);
+      }
+      for (auto& v : y) {
+        v = uni(rng);
+      }
+      // A is A^T A + ridge: symmetric positive definite, as the real one is.
+      for (unsigned s = 0; s != nof_sys; ++s) {
+        float* am = a.data() + static_cast<std::size_t>(s) * L * L;
+        for (unsigned r = 0; r != L; ++r) {
+          for (unsigned c = r + 1; c != L; ++c) {
+            am[c * L + r] = am[r * L + c];
+          }
+          am[r * L + r] += 10.0F;
+        }
+      }
+      std::vector<float> a_orig(a);
+      if (!engine.run(a.data(), rp.data(), w.data(), y.data(), h_ref.data(), nout, L, nof_sys, nof_blocks)) {
+        std::printf("Test 4c FAIL: the synchronous reference call failed\n");
+        return -1;
+      }
+
+      // 3000 deferred submissions. The synchronous call above waited, so the first async call has
+      // nothing outstanding; every later one must wait for its predecessor before it can overwrite
+      // the staging buffers, which is what keeps the queue bounded.
+      const unsigned nof_reps       = 3000;
+      unsigned       nof_outstanding = 0;
+      for (unsigned rep = 0; rep != nof_reps; ++rep) {
+        a = a_orig;
+        if (!engine.run_async(a.data(), rp.data(), w.data(), y.data(), h.data(), nout, L, nof_sys, nof_blocks)) {
+          std::printf("Test 4c FAIL: run_async() failed at repetition %u\n", rep);
+          return -1;
+        }
+        nof_outstanding = std::max(nof_outstanding, engine.has_pending() ? 1U : 0U);
+        if (!engine.wait_pending()) {
+          std::printf("Test 4c FAIL: wait_pending() failed at repetition %u\n", rep);
+          return -1;
+        }
+      }
+      if (engine.has_pending()) {
+        std::printf("Test 4c FAIL: a submission is still pending at the end\n");
+        return -1;
+      }
+      double max_err = 0.0;
+      for (std::size_t i = 0; i != h.size(); ++i) {
+        max_err = std::max(max_err, std::abs(static_cast<double>(h[i]) - h_ref[i]));
+      }
+      if (max_err > 1e-3) {
+        std::printf("Test 4c FAIL: the asynchronous path deviates by %.3e\n", max_err);
+        return -1;
+      }
+      std::printf("Test 4c PASS: %u deferred submissions, at most %u in flight, result matches the "
+                  "synchronous path (max err %.2e)\n",
+                  nof_reps,
+                  nof_outstanding,
+                  max_err);
+    }
+  }
+
+  // -----------------------------------------------------------------------------------
   // Test 5: steady-state latency of compute() (cpu vs metal_mmse), single thread.
   // -----------------------------------------------------------------------------------
   {
