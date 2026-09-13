@@ -33,6 +33,8 @@ struct mmse_time_stats {
   std::atomic<uint64_t> gpu_wait_us{0};
   std::atomic<uint64_t> cpu_blocks_us{0};
   std::atomic<uint64_t> device_hops{0};
+  std::atomic<uint64_t> pre_stage_ns{0};
+  std::atomic<uint64_t> stage_ns{0};
   std::atomic<uint64_t> sigma2_us{0};
   std::atomic<uint64_t> corr_us{0};
   std::atomic<uint64_t> deferred_wait_us{0};
@@ -60,7 +62,7 @@ void mmse_stats_register_atexit()
       };
       std::fprintf(stderr,
                    "[mmse_time_sum] calls=%llu hops_gpu=%llu hops_no_gpu=%llu hops_nn=%llu fb_blocks=%llu | "
-                   "mean total=%.1fus sigma2=%.1fus corr=%.1fus gpu_path=%.1fus (gpu_wait=%.1fus) "
+                   "mean total=%.1fus pre=%.2fus stage=%.2fus sigma2=%.1fus corr=%.1fus gpu_path=%.1fus (gpu_wait=%.1fus) "
                    "cpu_blocks=%.1fus defer_wait=%.1fus | device_hops=%llu max total=%lluus\n",
                    static_cast<unsigned long long>(n),
                    static_cast<unsigned long long>(s.hops_gpu.load(std::memory_order_relaxed)),
@@ -68,6 +70,8 @@ void mmse_stats_register_atexit()
                    static_cast<unsigned long long>(s.hops_nn.load(std::memory_order_relaxed)),
                    static_cast<unsigned long long>(s.fallback_blocks.load(std::memory_order_relaxed)),
                    avg(s.total_us),
+                   static_cast<double>(s.pre_stage_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
+                   static_cast<double>(s.stage_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
                    avg(s.sigma2_us),
                    avg(s.corr_us),
                    avg(s.gpu_path_us),
@@ -97,6 +101,8 @@ void mmse_stats_device_hop()
 void mmse_stats_accumulate(bool     hop_gpu,
                            bool     hop_nn,
                            unsigned fallback_blocks,
+                           double   pre_stage_us,
+                           double   stage_us,
                            double   sigma2_us,
                            double   corr_us,
                            double   gpu_path_us,
@@ -113,6 +119,8 @@ void mmse_stats_accumulate(bool     hop_gpu,
     s.hops_nn.fetch_add(1, std::memory_order_relaxed);
   }
   s.fallback_blocks.fetch_add(fallback_blocks, std::memory_order_relaxed);
+  s.pre_stage_ns.fetch_add(static_cast<uint64_t>(pre_stage_us * 1e3), std::memory_order_relaxed);
+  s.stage_ns.fetch_add(static_cast<uint64_t>(stage_us * 1e3), std::memory_order_relaxed);
   s.sigma2_us.fetch_add(static_cast<uint64_t>(sigma2_us), std::memory_order_relaxed);
   s.corr_us.fetch_add(static_cast<uint64_t>(corr_us), std::memory_order_relaxed);
   s.gpu_path_us.fetch_add(static_cast<uint64_t>(gpu_path_us), std::memory_order_relaxed);
@@ -590,6 +598,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                L_std);
   }
   const auto t_corr_std = steady_clock::now();
+#if defined(OCUDU_CE_TIME)
+  // Time spent copying the precomputed coefficient matrices and pilot vectors into the engine slots: this is what a
+  // device-side build of the correlation matrices (the K0-d step of the fused-lane work) removes.
+  double stage_us_local = 0.0;
+#endif
 
   // ---- Engine (GPU) stage ---------------------------------------------------------------
   // metal_nn_mmse: when the flavor is enabled and the simdgroup 8x8 pipelines are compiled,
@@ -758,7 +771,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       static constexpr unsigned MAX_GPU_INVERT_ORDER = 36;
       const bool gpu_invert = (std::getenv("OCUDU_CE_CPU_INVERT") == nullptr) && (L_std <= MAX_GPU_INVERT_ORDER);
       // 1) Stage the standard group while w_r_pp / w_r_hp still hold the standard matrices.
+#if defined(OCUDU_CE_TIME)
+      const auto t_stage_begin = steady_clock::now();
+#endif
       stage_engine_group(args, 0, n_std_blocks, block_prb, npt, nout_std, L_std, 0, st, matrix_on, gpu_invert);
+#if defined(OCUDU_CE_TIME)
+      stage_us_local += std::chrono::duration<double, std::micro>(steady_clock::now() - t_stage_begin).count();
+#endif
       // 2) Only NOW build the tail matrices: they overwrite w_r_pp / w_r_hp, so the reverse order
       //    silently stages the tail's matrices for the standard blocks.
       unsigned nout_e = 0;
@@ -1046,7 +1065,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   if (time_en) {
     const auto t_finish = steady_clock::now();
     const auto us       = [](auto d) { return std::chrono::duration<double, std::micro>(d).count(); };
-    logger.debug("[mmse_time] prb={} npt={} L={} n_std={} gpu={} nn={} pad={} fb={} | sigma2={:.1f}us corr_std={:.1f}us "
+    logger.debug("[mmse_time] prb={} npt={} L={} n_std={} gpu={} nn={} pad={} fb={} | pre={:.1f}us stage={:.1f}us sigma2={:.1f}us corr_std={:.1f}us "
                  "gpu_path={:.1f}us (gpu_wait={:.1f}us) cpu_blocks={:.1f}us finish={:.1f}us | total={:.1f}us",
                  nof_prb,
                  npt,
@@ -1056,6 +1075,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                  hop_nn ? 1 : 0,
                  hop_pad,
                  cpu_fallback_blocks,
+                 args.pre_stage_us,
+                 stage_us_local,
                  us(t_sigma2 - t_begin),
                  us(t_corr_std - t_sigma2),
                  us(t_gpu_end - t_corr_std),
@@ -1073,6 +1094,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                         hop_gpu,
                         hop_nn,
                         cpu_fallback_blocks,
+                        args.pre_stage_us,
+                        stage_us_local,
                         us(t_sigma2 - t_begin),
                         us(t_corr_std - t_sigma2),
                         us(t_gpu_end - t_corr_std),
@@ -1083,6 +1106,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       mmse_stats_accumulate(hop_gpu,
                             hop_nn,
                             cpu_fallback_blocks,
+                            args.pre_stage_us,
+                            stage_us_local,
                             us(t_sigma2 - t_begin),
                             us(t_corr_std - t_sigma2),
                             us(t_gpu_end - t_corr_std),
@@ -1452,6 +1477,8 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     mmse_stats_accumulate(deferred_stats.hop_gpu,
                           deferred_stats.hop_nn,
                           deferred_stats.fallback_blocks,
+                          deferred_stats.pre_stage_us,
+                          deferred_stats.stage_us,
                           deferred_stats.sigma2_us,
                           deferred_stats.corr_us,
                           deferred_stats.gpu_path_us,

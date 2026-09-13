@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "port_channel_estimator_average_impl.h"
+#include <chrono>
 #include "port_channel_estimator_helpers.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/add.h"
@@ -309,6 +310,12 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
                                                              const dmrs_symbol_list&            pilots,
                                                              unsigned                           hop)
 {
+#if defined(OCUDU_CE_TIME)
+  // The pre-stage window (pilot extraction from the resource grid, EPRE, LSE and CFO) is what a device-side pilot
+  // extraction would take over, so it is measured even though it happens outside the estimation stage. Debug aid:
+  // nothing is timed without the probe.
+  const auto pre_stage_begin = std::chrono::steady_clock::now();
+#endif
   unsigned nof_tx_layers = cfg_local.dmrs_pattern.size();
   ocudu_assert(
       nof_tx_layers <= MAX_LAYERS, "The number of Tx layers is {}, max {} supported.", nof_tx_layers, MAX_LAYERS);
@@ -433,6 +440,10 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
   pending_hop.beta_scaling     = beta_scaling;
   pending_hop.cfo_hop          = cfo_hop;
 
+#if defined(OCUDU_CE_TIME)
+  stage_args.pre_stage_us =
+      std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - pre_stage_begin).count();
+#endif
   apply_fd_td_estimation_stage(stage_args);
 }
 

@@ -317,6 +317,11 @@ private:
     bool     hop_gpu = false;
     bool     hop_nn = false;
     unsigned fallback_blocks = 0;
+    /// CPU time of the hop before the stage (pilot extraction + LSE + CFO): what a device-side pilot
+    /// extraction takes over.
+    double   pre_stage_us = 0.0;
+    /// Time spent copying the coefficient matrices and pilot vectors into the engine slots.
+    double   stage_us = 0.0;
     double   sigma2_us = 0.0;
     double   corr_us = 0.0;
     /// Stage start -> end of the stage's CPU work, i.e. the GPU phase without the deferred wait.

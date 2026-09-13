@@ -189,6 +189,10 @@ protected:
         enlarged_filtered_pilots_lse;
     /// Frequency-response output buffer (per LSE symbol per layer).
     re_measurement<cf_t>& freq_response;
+    /// \brief CPU time spent in this hop before the stage (pilot extraction from the grid, EPRE, LSE, CFO and the
+    /// argument assembly), in microseconds. Measured only by builds with the channel-estimation phase probe
+    /// (OCUDU_CE_TIME); zero otherwise. Reported by [mmse_time]/[mmse_time_sum] as the pre= field.
+    double pre_stage_us = 0.0;
   };
 
   /// \brief FD+TD estimation stage of one hop.
