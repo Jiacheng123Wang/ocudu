@@ -314,6 +314,8 @@ private:
   /// here and the completion finishes the accounting (see mmse_stats_accumulate()).
   struct deferred_stage_stats {
     bool     valid = false;
+    unsigned nof_prb = 0;
+    unsigned npt = 0;
     bool     hop_gpu = false;
     bool     hop_nn = false;
     unsigned fallback_blocks = 0;
@@ -322,6 +324,9 @@ private:
     double   pre_stage_us = 0.0;
     /// Time spent copying the coefficient matrices and pilot vectors into the engine slots.
     double   stage_us = 0.0;
+    /// Time spent encoding and submitting the engine batch, and unpacking its K3 results.
+    double   submit_us = 0.0;
+    double   unpack_us = 0.0;
     double   sigma2_us = 0.0;
     double   corr_us = 0.0;
     /// Stage start -> end of the stage's CPU work, i.e. the GPU phase without the deferred wait.

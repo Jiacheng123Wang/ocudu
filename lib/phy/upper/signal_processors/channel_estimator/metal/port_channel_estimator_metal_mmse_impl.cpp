@@ -12,7 +12,10 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
+#include <algorithm>
 #include <mutex>
+#include <vector>
 
 #if defined(OCUDU_CE_TIME)
 namespace {
@@ -35,11 +38,43 @@ struct mmse_time_stats {
   std::atomic<uint64_t> device_hops{0};
   std::atomic<uint64_t> pre_stage_ns{0};
   std::atomic<uint64_t> stage_ns{0};
+  std::atomic<uint64_t> submit_ns{0};
+  std::atomic<uint64_t> unpack_ns{0};
   std::atomic<uint64_t> sigma2_us{0};
   std::atomic<uint64_t> corr_us{0};
   std::atomic<uint64_t> deferred_wait_us{0};
   std::atomic<uint64_t> max_total_us{0};
 };
+
+/// One entry per (PRB, DM-RS symbols) shape: the aggregate above mixes the whole shape sweep, and the shapes differ by
+/// orders of magnitude (the fused-lane work is planned from the OTA geometry, not from the average).
+struct mmse_shape_stats {
+  uint64_t calls = 0;
+  uint64_t pre_ns = 0;
+  uint64_t stage_ns = 0;
+  uint64_t submit_ns = 0;
+  uint64_t unpack_ns = 0;
+  uint64_t sigma2_us = 0;
+  uint64_t corr_us = 0;
+  uint64_t gpu_path_us = 0;
+  uint64_t gpu_wait_us = 0;
+  uint64_t total_us = 0;
+};
+
+/// \note Both are intentionally leaked: the atexit report reads them while the static destructors of the process are
+/// already running, and a function-local static with a destructor would be destroyed before the handler that reports it
+/// (which showed up as an empty table).
+std::mutex& mmse_shapes_mutex()
+{
+  static std::mutex* m = new std::mutex();
+  return *m;
+}
+
+std::map<uint64_t, mmse_shape_stats>& mmse_shapes()
+{
+  static std::map<uint64_t, mmse_shape_stats>* m = new std::map<uint64_t, mmse_shape_stats>();
+  return *m;
+}
 
 mmse_time_stats& mmse_stats()
 {
@@ -62,7 +97,7 @@ void mmse_stats_register_atexit()
       };
       std::fprintf(stderr,
                    "[mmse_time_sum] calls=%llu hops_gpu=%llu hops_no_gpu=%llu hops_nn=%llu fb_blocks=%llu | "
-                   "mean total=%.1fus pre=%.2fus stage=%.2fus sigma2=%.1fus corr=%.1fus gpu_path=%.1fus (gpu_wait=%.1fus) "
+                   "mean total=%.1fus pre=%.2fus stage=%.2fus submit=%.2fus unpack=%.2fus sigma2=%.1fus corr=%.1fus gpu_path=%.1fus (gpu_wait=%.1fus) "
                    "cpu_blocks=%.1fus defer_wait=%.1fus | device_hops=%llu max total=%lluus\n",
                    static_cast<unsigned long long>(n),
                    static_cast<unsigned long long>(s.hops_gpu.load(std::memory_order_relaxed)),
@@ -72,6 +107,8 @@ void mmse_stats_register_atexit()
                    avg(s.total_us),
                    static_cast<double>(s.pre_stage_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
                    static_cast<double>(s.stage_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
+                   static_cast<double>(s.submit_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
+                   static_cast<double>(s.unpack_ns.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3,
                    avg(s.sigma2_us),
                    avg(s.corr_us),
                    avg(s.gpu_path_us),
@@ -80,6 +117,36 @@ void mmse_stats_register_atexit()
                    avg(s.deferred_wait_us),
                    static_cast<unsigned long long>(s.device_hops.load(std::memory_order_relaxed)),
                    static_cast<unsigned long long>(s.max_total_us.load(std::memory_order_relaxed)));
+
+      // Per-shape breakdown, most frequent first: the fused-lane planning reads the OTA geometry out of this table.
+      std::vector<std::pair<uint64_t, mmse_shape_stats>> shapes;
+      {
+        std::lock_guard<std::mutex> lock(mmse_shapes_mutex());
+        shapes.assign(mmse_shapes().begin(), mmse_shapes().end());
+      }
+      std::sort(shapes.begin(), shapes.end(), [](const auto& a, const auto& b) { return a.second.calls > b.second.calls; });
+      for (const auto& [key, sh] : shapes) {
+        if (sh.calls == 0) {
+          continue;
+        }
+        const double shape_calls = static_cast<double>(sh.calls);
+        std::fprintf(stderr,
+                     "[mmse_time_shape] prb=%llu npt=%llu calls=%llu | pre=%.2fus stage=%.2fus sigma2=%.1fus corr=%.1fus "
+                     "gpu_path=%.1fus (gpu_wait=%.1fus) total=%.1fus | stage=%.2f submit=%.2f unpack=%.2f\n",
+                     static_cast<unsigned long long>(key >> 8),
+                     static_cast<unsigned long long>(key & 0xff),
+                     static_cast<unsigned long long>(sh.calls),
+                     static_cast<double>(sh.pre_ns) / shape_calls / 1e3,
+                     static_cast<double>(sh.stage_ns) / shape_calls / 1e3,
+                     static_cast<double>(sh.sigma2_us) / shape_calls,
+                     static_cast<double>(sh.corr_us) / shape_calls,
+                     static_cast<double>(sh.gpu_path_us) / shape_calls,
+                     static_cast<double>(sh.gpu_wait_us) / shape_calls,
+                     static_cast<double>(sh.total_us) / shape_calls,
+                     static_cast<double>(sh.stage_ns) / shape_calls / 1e3,
+                     static_cast<double>(sh.submit_ns) / shape_calls / 1e3,
+                     static_cast<double>(sh.unpack_ns) / shape_calls / 1e3);
+      }
     });
   });
 }
@@ -98,11 +165,15 @@ void mmse_stats_device_hop()
 ///        receiving chain (the equalization and the demapping) runs inside it. It is therefore
 ///        reported on its own instead of being folded into gpu_path/total, which stay the stage's
 ///        own window and remain comparable with the non-deferred measurements.
-void mmse_stats_accumulate(bool     hop_gpu,
+void mmse_stats_accumulate(unsigned nof_prb,
+                           unsigned nof_dmrs_symbols,
+                           bool     hop_gpu,
                            bool     hop_nn,
                            unsigned fallback_blocks,
                            double   pre_stage_us,
                            double   stage_us,
+                           double   submit_us,
+                           double   unpack_us,
                            double   sigma2_us,
                            double   corr_us,
                            double   gpu_path_us,
@@ -121,6 +192,22 @@ void mmse_stats_accumulate(bool     hop_gpu,
   s.fallback_blocks.fetch_add(fallback_blocks, std::memory_order_relaxed);
   s.pre_stage_ns.fetch_add(static_cast<uint64_t>(pre_stage_us * 1e3), std::memory_order_relaxed);
   s.stage_ns.fetch_add(static_cast<uint64_t>(stage_us * 1e3), std::memory_order_relaxed);
+  s.submit_ns.fetch_add(static_cast<uint64_t>(submit_us * 1e3), std::memory_order_relaxed);
+  s.unpack_ns.fetch_add(static_cast<uint64_t>(unpack_us * 1e3), std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lock(mmse_shapes_mutex());
+    mmse_shape_stats&           sh = mmse_shapes()[(static_cast<uint64_t>(nof_prb) << 8) | nof_dmrs_symbols];
+    ++sh.calls;
+    sh.pre_ns += static_cast<uint64_t>(pre_stage_us * 1e3);
+    sh.stage_ns += static_cast<uint64_t>(stage_us * 1e3);
+    sh.submit_ns += static_cast<uint64_t>(submit_us * 1e3);
+    sh.unpack_ns += static_cast<uint64_t>(unpack_us * 1e3);
+    sh.sigma2_us += static_cast<uint64_t>(sigma2_us);
+    sh.corr_us += static_cast<uint64_t>(corr_us);
+    sh.gpu_path_us += static_cast<uint64_t>(gpu_path_us);
+    sh.gpu_wait_us += static_cast<uint64_t>(gpu_wait_us);
+    sh.total_us += static_cast<uint64_t>(total_us);
+  }
   s.sigma2_us.fetch_add(static_cast<uint64_t>(sigma2_us), std::memory_order_relaxed);
   s.corr_us.fetch_add(static_cast<uint64_t>(corr_us), std::memory_order_relaxed);
   s.gpu_path_us.fetch_add(static_cast<uint64_t>(gpu_path_us), std::memory_order_relaxed);
@@ -601,7 +688,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 #if defined(OCUDU_CE_TIME)
   // Time spent copying the precomputed coefficient matrices and pilot vectors into the engine slots: this is what a
   // device-side build of the correlation matrices (the K0-d step of the fused-lane work) removes.
-  double stage_us_local = 0.0;
+  double stage_us_local  = 0.0;
+  double submit_us_local = 0.0;
+  double unpack_us_local = 0.0;
 #endif
 
   // ---- Engine (GPU) stage ---------------------------------------------------------------
@@ -803,6 +892,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       //    waiting when the kernels allow it, so the unpack moves to the completion of the stage
       //    (see complete_fd_td_estimation_stage()).
       const bool merged_defer = defer && gpu_invert;
+#if defined(OCUDU_CE_TIME)
+      const auto t_submit_begin = steady_clock::now();
+#endif
       const bool merged_ok = engine_run(nout_std,
                                         L_std,
                                         2 * nof_layers,
@@ -812,6 +904,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                         reformat_for(block_prb * NOF_SUBCARRIERS_PER_RB,
                                                      rem_prb * NOF_SUBCARRIERS_PER_RB,
                                                      nof_layers));
+#if defined(OCUDU_CE_TIME)
+      submit_us_local += std::chrono::duration<double, std::micro>(steady_clock::now() - t_submit_begin).count();
+#endif
       std_blocks_ok        = merged_ok;
       tail_ok              = merged_ok;
       hop_gpu              = merged_ok;
@@ -821,6 +916,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       gpu_ce_total_re      = nof_re_total;
       gpu_nv_ready         = gpu_ce_ready && (reformat.noise.nv != nullptr);
       if (merged_ok) {
+#if defined(OCUDU_CE_TIME)
+        const auto t_unpack_begin = steady_clock::now();
+#endif
         if (merged_defer) {
           defer_unpack(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st);
           defer_unpack(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st);
@@ -828,6 +926,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           unpack_engine_group(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st);
           unpack_engine_group(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st);
         }
+#if defined(OCUDU_CE_TIME)
+        unpack_us_local += std::chrono::duration<double, std::micro>(steady_clock::now() - t_unpack_begin).count();
+#endif
       }
     } else {
       if (n_std_blocks != 0) {
@@ -1077,6 +1178,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                  cpu_fallback_blocks,
                  args.pre_stage_us,
                  stage_us_local,
+                 submit_us_local,
+                 unpack_us_local,
                  us(t_sigma2 - t_begin),
                  us(t_corr_std - t_sigma2),
                  us(t_gpu_end - t_corr_std),
@@ -1091,11 +1194,15 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // complete_fd_td_estimation_stage(); until it runs, the measurements wait here.
     if (stage_pending) {
       deferred_stats = {true,
+                        nof_prb,
+                        npt,
                         hop_gpu,
                         hop_nn,
                         cpu_fallback_blocks,
                         args.pre_stage_us,
                         stage_us_local,
+                        submit_us_local,
+                        unpack_us_local,
                         us(t_sigma2 - t_begin),
                         us(t_corr_std - t_sigma2),
                         us(t_gpu_end - t_corr_std),
@@ -1103,11 +1210,15 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                         us(t_finish - t_begin)};
       deferred_wait_begin = steady_clock::now();
     } else {
-      mmse_stats_accumulate(hop_gpu,
+      mmse_stats_accumulate(nof_prb,
+                            npt,
+                            hop_gpu,
                             hop_nn,
                             cpu_fallback_blocks,
                             args.pre_stage_us,
                             stage_us_local,
+                            submit_us_local,
+                            unpack_us_local,
                             us(t_sigma2 - t_begin),
                             us(t_corr_std - t_sigma2),
                             us(t_gpu_end - t_corr_std),
@@ -1474,11 +1585,15 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
   if (deferred_stats.valid) {
     const auto   now     = std::chrono::steady_clock::now();
     const double wait_us = std::chrono::duration<double, std::micro>(now - deferred_wait_begin).count();
-    mmse_stats_accumulate(deferred_stats.hop_gpu,
+    mmse_stats_accumulate(deferred_stats.nof_prb,
+                          deferred_stats.npt,
+                          deferred_stats.hop_gpu,
                           deferred_stats.hop_nn,
                           deferred_stats.fallback_blocks,
                           deferred_stats.pre_stage_us,
                           deferred_stats.stage_us,
+                          deferred_stats.submit_us,
+                          deferred_stats.unpack_us,
                           deferred_stats.sigma2_us,
                           deferred_stats.corr_us,
                           deferred_stats.gpu_path_us,
