@@ -889,6 +889,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // legacy kernels (nn=0, only when the matrix pipelines are unavailable/stale).
     last_stage_nn     = matrix_on;
     last_stage_merged = merge_tail;
+    last_estimate_hopping = (args.hop != 0);
     // The batches have been submitted: if any of them was not waited for, the stage is pending and
     // complete_fd_td_estimation_stage() must unpack it before its results are read.
     stage_pending = (nof_pending_unpacks != 0);
@@ -1238,6 +1239,12 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(unsigned nout,
   // per-symbol estimates (K3) appended to the same buffer when the caller asked for them. The
   // engine return value is checked (S-1 audit fix): on failure the caller falls back to the CPU
   // reference math for these blocks instead of unpacking stale gpu_h contents.
+  // Safety net (run_engine_blocks() has to do this before its staging): a batch may not be left
+  // outstanding while another one is submitted, because they share the gpu_h staging buffer.
+  if (nof_pending_unpacks != 0) {
+    (void)complete_fd_td_estimation_stage();
+  }
+
   // The legacy kernels cover the whole hop in one command buffer that the caller may walk away
   // from (run_async) and complete later; the matrix flavor and the CPU-inversion A/B knob have no
   // asynchronous form, so those paths always complete the batch here.
@@ -1346,6 +1353,15 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                                                                bool                               defer)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
+
+  // A batch of this hop may still be outstanding - the split-tail path runs two per hop. Its
+  // estimates are in gpu_h and its kernels are still reading the staging slots this call is about
+  // to overwrite, so complete it (wait and unpack) before touching them. Only ever the LAST batch
+  // of a hop stays outstanding, which is what the caller's completion then unpacks.
+  if (nof_pending_unpacks != 0) {
+    (void)complete_fd_td_estimation_stage();
+  }
+
   // Slot strides: the legacy kernels use the compact L / nout layout; the matrix kernels use the
   // zero-padded ceil8 strides (Lp/Np) - the staging zeroes the pad rows/columns below so the
   // kernels tile 8x8 seamlessly and the pad regions stay exactly zero.
@@ -1393,6 +1409,9 @@ void port_channel_estimator_metal_mmse_impl::defer_unpack(unsigned              
                max_pending_unpacks,
                nof_pending_unpacks);
   pending_unpacks[nof_pending_unpacks++] = pending_unpack{gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st};
+  // The stage is outstanding from this point (not only from the end of the stage call): a batch of
+  // the same hop that is submitted later - the split-tail path - must complete this one first.
+  stage_pending = true;
 }
 
 void port_channel_estimator_metal_mmse_impl::pending_fill::fill(
@@ -1416,10 +1435,10 @@ void port_channel_estimator_metal_mmse_impl::pending_fill::fill(
   }
 }
 
-void port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
+bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
 {
   if (!stage_pending) {
-    return;
+    return true;
   }
   stage_pending = false;
 
@@ -1449,7 +1468,8 @@ void port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     // longer holds. Report it instead of leaving the consumer with the previous hop's estimates.
     logger.error("[mmse_ce] the deferred engine batch of this hop failed: its estimates are not valid");
     nof_pending_unpacks = 0;
-    return;
+    deferred_fill.valid = false;
+    return false;
   }
   for (unsigned i = 0; i != nof_pending_unpacks; ++i) {
     const pending_unpack& u = pending_unpacks[i];
@@ -1462,6 +1482,7 @@ void port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     deferred_fill.fill(grid_est);
     deferred_fill.valid = false;
   }
+  return true;
 }
 
 std::optional<ch_est_device_view> port_channel_estimator_metal_mmse_impl::get_device_ch_estimates(

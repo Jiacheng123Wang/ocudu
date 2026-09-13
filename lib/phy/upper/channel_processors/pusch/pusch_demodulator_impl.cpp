@@ -28,6 +28,19 @@
 
 using namespace ocudu;
 
+namespace {
+
+/// A/B knob (documented in the plan, env only for debug and A/B): OCUDU_CE_CPU_CE=1 keeps the
+/// per-symbol host gather even when the estimator offers device estimates, and keeps the estimator
+/// itself on the host.
+bool force_host_ch_estimates()
+{
+  static const bool forced = (std::getenv("OCUDU_CE_CPU_CE") != nullptr);
+  return forced;
+}
+
+} // namespace
+
 static void
 revert_scrambling(span<log_likelihood_ratio> out, span<const log_likelihood_ratio> in, const bit_buffer& sequence)
 {
@@ -283,12 +296,18 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   const bool deferred_chain = !force_serial && equalizer->supports_deferred_chain() &&
                               demapper->supports_deferred_chain() && !config.enable_transform_precoding;
 
-  // Noise variances: a backend that reads the channel estimates off the device reads them there
-  // too, so this pass never needs a host copy of a device-produced value. That matters beyond the
-  // copy itself: reading one requires the estimator to have completed, which would put the whole
-  // receiving pass behind that synchronization. A backend that cannot use them is handed the host
-  // values, exactly as before.
-  const bool use_device_noise_vars = equalizer->consumes_device_estimates(nof_rx_ports, config.nof_tx_layers);
+  // Whether this pass reads the channel estimates and the noise variances where they were produced.
+  // When it does, the estimation does not have to complete before the demodulation - the device
+  // queue orders the two stages, and running the pass while it finishes is the whole point of
+  // deferring the estimation - so the estimator is left running. When it does not, this pass gathers
+  // the values from host memory and the estimation must have published them first.
+  const bool estimates_read_in_place = !force_host_ch_estimates() &&
+                                       equalizer->consumes_device_estimates(nof_rx_ports, config.nof_tx_layers) &&
+                                       est_results.device_results_cover_last_estimate();
+  if (!estimates_read_in_place) {
+    (void)est_results.sync_device_estimates();
+  }
+  const bool use_device_noise_vars = estimates_read_in_place;
 
   // Initialize scrambling sequence. When msgA is sent over PUSCH, an alternative scrambling sequence is used, as per
   // TS 38.211 Section 6.3.1.1 Release 16.
@@ -698,9 +717,7 @@ pusch_demodulator_impl::get_ch_data_estimates(const dmrs_pusch_estimator_results
                                               const static_vector<uint8_t, MAX_PORTS>& rx_ports)
 {
   // Extract RE boundaries.
-  // A/B knob: OCUDU_CE_CPU_CE=1 keeps the per-symbol host gather even when the estimator offers
-  // device estimates (the same knob keeps the estimator from producing them).
-  static const bool force_host_estimates = (std::getenv("OCUDU_CE_CPU_CE") != nullptr);
+  const bool force_host_estimates = force_host_ch_estimates();
 
   unsigned nof_re = re_mask.count();
   int      begin  = re_mask.find_lowest();

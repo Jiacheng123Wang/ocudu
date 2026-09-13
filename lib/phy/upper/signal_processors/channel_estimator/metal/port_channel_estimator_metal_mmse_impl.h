@@ -118,7 +118,16 @@ private:
   void apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args) override;
 
   // See the base class documentation.
-  void complete_fd_td_estimation_stage() override;
+  bool complete_fd_td_estimation_stage() override;
+
+  // See the base class documentation.
+  bool device_results_cover_last_estimate() const override
+  {
+    // K3 and K4 write the LAST hop: with frequency hopping the estimates of the earlier hop are not
+    // in the device buffers any more, so a consumer must gather those from host memory (and
+    // therefore complete the estimation first).
+    return gpu_ce_ready && gpu_nv_ready && !last_estimate_hopping;
+  }
 
   // See the base class documentation.
   std::optional<ch_est_device_view> get_device_ch_estimates(unsigned i_symbol, unsigned tx_layer) const override;
@@ -202,7 +211,10 @@ private:
   /// \param defer Submit without waiting when the kernels allow it (the legacy path does; the
   ///              matrix flavor and the CPU-inversion A/B knob do not, and complete the batch
   ///              inline). A deferred batch must be completed by complete_fd_td_estimation_stage()
-  ///              before anything reads its results - including their unpack into the grid.
+  ///              before anything reads its results - including their unpack into the grid - and
+  ///              before another batch of the same hop is submitted, because they share the gpu_h
+  ///              staging buffer this call overwrites. That is what the call below enforces: only
+  ///              the LAST batch of a hop stays outstanding.
   bool engine_run(unsigned                                 nout,
                   unsigned                                 L,
                   unsigned                                 nof_systems,
@@ -369,6 +381,8 @@ private:
   unsigned                  gpu_ce_layers     = 0;
   unsigned                  gpu_ce_total_re   = 0;
   bool                      gpu_ce_ready      = false;
+  /// True when the last estimation stage covered the second hop of a frequency-hopping allocation.
+  bool                      last_estimate_hopping = false;
 
   /// K4 (S-6c-0): the equalizer's noise variance reduced on the device, and the pilot inputs the
   /// reduction reads (staged by the estimator, [npt][layers or groups][npf] complex each).

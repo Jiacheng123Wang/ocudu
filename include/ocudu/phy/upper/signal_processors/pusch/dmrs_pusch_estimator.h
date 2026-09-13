@@ -230,6 +230,16 @@ public:
   /// \return True when the results are available.
   virtual bool sync_device_estimates() const { return true; }
 
+  /// \brief Whether the results of this estimation are read where they were produced.
+  ///
+  /// A consumer that reads the device-resident results needs no synchronization before using them -
+  /// the device queue orders the estimation before its own dispatch - and can therefore start while
+  /// the estimation is still running. A consumer that does not must call sync_device_estimates()
+  /// first, or read stale or unpublished host values.
+  ///
+  /// \note The default reports "no", which is the answer for every estimator that runs on the host.
+  virtual bool device_results_cover_last_estimate() const { return false; }
+
   /// \brief Gets the general Channel State Information.
   ///
   /// \param[out] csi Channel State Information object where the CSI parameters are stored.

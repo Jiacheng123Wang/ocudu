@@ -66,14 +66,18 @@ public:
   }
 
   // See the port_channel_estimator interface for documentation.
-  void submit(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots, const configuration& cfg) override
+  const port_channel_estimator_results& submit(const resource_grid_reader& grid,
+                                              unsigned                    port,
+                                              const dmrs_symbol_list&     pilots,
+                                              const configuration&        cfg) override
   {
     cfg_local = cfg;
     do_submit(grid, port, pilots);
+    return *this;
   }
 
   // See the port_channel_estimator interface for documentation.
-  void finish(const dmrs_symbol_list& pilots) override { do_finish(pilots); }
+  bool finish(const dmrs_symbol_list& pilots) override { return do_finish(pilots); }
 
 protected:
   // See the port_channel_estimator_results interface for documentation.
@@ -127,7 +131,8 @@ private:
   void do_submit(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots);
 
   /// \brief Second phase of do_compute(): completes the last hop and derives the metrics.
-  void do_finish(const dmrs_symbol_list& pilots);
+  /// \return False when the deferred stage of the last hop failed (the metrics are then meaningless).
+  bool do_finish(const dmrs_symbol_list& pilots);
 
 protected:
   /// \brief Arguments passed to the FD+TD estimation stage virtual hook.
@@ -210,7 +215,9 @@ protected:
   /// its outputs when it returns. A backend that dispatches the stage to a device overrides it with
   /// the wait and the unpack, so that the caller can run the rest of the chain in between (see
   /// port_channel_estimator::submit()).
-  virtual void complete_fd_td_estimation_stage() {}
+  /// \return False when a batch submitted by the stage failed, in which case the results of the hop
+  ///         are not valid.
+  virtual bool complete_fd_td_estimation_stage() { return true; }
 
   /// \brief Applies the time domain interpolation strategy for a given OFDM symbol within the hop transmission.
   /// (protected: derived estimators build their input grid from the classical per-symbol estimates).
@@ -244,7 +251,8 @@ private:
   ///
   /// Completes the estimation stage first (a no-op for a stage that computed inline) and then
   /// accumulates the RSRP, the noise variance and the time alignment of the hop.
-  void compute_hop_finish(const dmrs_symbol_list& pilots);
+  /// \return False when the completion of the stage failed.
+  bool compute_hop_finish(const dmrs_symbol_list& pilots);
 
   /// \brief State of the hop between compute_hop_submit() and compute_hop_finish().
   ///

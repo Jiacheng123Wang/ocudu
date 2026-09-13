@@ -49,12 +49,15 @@ void dmrs_pusch_estimator_impl::estimate(dmrs_pusch_estimator_notifier& notifier
   est_cfg.dc_position  = config.dc_position;
 
   ch_est_result.resize(nof_rx_ports);
-  pending_ports = nof_rx_ports;
+  pending_ports     = nof_rx_ports;
+  estimates_complete = false;
   for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
     auto estimator_callback = [this, &grid, i_port, &notifier]() {
-      const port_channel_estimator_results& ch_est_results =
-          ch_estimator[i_port]->compute(grid, i_port, temp_symbols, est_cfg);
-      ch_est_result[i_port] = &ch_est_results;
+      // Submit rather than compute: a backend that dispatches its work to a device returns here
+      // before the estimates exist, which is what lets the rest of the receiving chain - the
+      // equalization and the demapping, reading them where they were produced - run while it
+      // finishes. sync_device_estimates() completes it for the consumers that need host values.
+      ch_est_result[i_port] = &ch_estimator[i_port]->submit(grid, i_port, temp_symbols, est_cfg);
 
       if (pending_ports.fetch_sub(1) == 1) {
         notifier.on_estimation_complete(*this);
@@ -178,6 +181,35 @@ std::optional<ch_est_device_view> dmrs_pusch_estimator_impl::get_device_ch_estim
     return std::nullopt;
   }
   return ch_est_result[rx_port]->get_device_ch_estimates(i_symbol, tx_layer);
+}
+
+bool dmrs_pusch_estimator_impl::device_results_cover_last_estimate() const
+{
+  if (ch_est_result.empty()) {
+    return false;
+  }
+  for (const port_channel_estimator_results* results : ch_est_result) {
+    if ((results == nullptr) || !results->device_results_cover_last_estimate()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool dmrs_pusch_estimator_impl::sync_device_estimates() const
+{
+  if (estimates_complete) {
+    return true;
+  }
+  estimates_complete = true;
+
+  bool ok = true;
+  for (const std::unique_ptr<port_channel_estimator>& estimator : ch_estimator) {
+    if (estimator != nullptr) {
+      ok = estimator->finish(temp_symbols) && ok;
+    }
+  }
+  return ok;
 }
 
 const float* dmrs_pusch_estimator_impl::get_device_noise_variance(unsigned rx_port) const

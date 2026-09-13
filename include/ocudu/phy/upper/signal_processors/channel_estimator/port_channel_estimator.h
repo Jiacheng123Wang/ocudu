@@ -135,17 +135,24 @@ public:
   ///
   /// The default implementation calls compute(), so the estimation is already complete when it
   /// returns and an estimator that runs on the host is unaffected.
-  virtual void submit(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots, const configuration& cfg)
+  /// \return The results of this estimation - the same reader compute() returns, whose host-visible
+  ///         values are only complete after finish().
+  virtual const port_channel_estimator_results& submit(const resource_grid_reader& grid,
+                                                       unsigned                    port,
+                                                       const dmrs_symbol_list&     pilots,
+                                                       const configuration&        cfg)
   {
-    (void)compute(grid, port, pilots, cfg);
+    return compute(grid, port, pilots, cfg);
   }
 
   /// \brief Completes an estimation started by submit().
   ///
   /// \param[in] pilots The same DM-RS symbols submit() was called with. They must outlive the
   ///                   estimation: the stages that complete it read them.
+  /// \return True when the results are available. False when a deferred stage failed, in which case
+  ///         the results must not be used.
   /// \note The default implementation has nothing to do (submit() completed the estimation).
-  virtual void finish(const dmrs_symbol_list& /*pilots*/) {}
+  virtual bool finish(const dmrs_symbol_list& /*pilots*/) { return true; }
 };
 
 /// \brief Port channel estimator reader.
@@ -186,6 +193,17 @@ public:
   {
     return std::nullopt;
   }
+
+  /// \brief Whether the device-resident results of the last estimation cover everything a consumer
+  /// of that estimate needs: the estimates of every symbol and layer, and the noise variance.
+  ///
+  /// A consumer that reads them where they were produced needs no synchronization: the device queue
+  /// orders the estimation before its own dispatch. One that does not must complete the estimation
+  /// first (see dmrs_pusch_estimator_results::sync_device_estimates()).
+  ///
+  /// \note The default reports "no", which is also the answer for an estimator that runs on the
+  /// host.
+  virtual bool device_results_cover_last_estimate() const { return false; }
 
   /// \brief Gets the device-resident noise variance, when the estimator produces it there.
   ///

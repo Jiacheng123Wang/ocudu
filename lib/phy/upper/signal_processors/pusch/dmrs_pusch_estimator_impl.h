@@ -65,6 +65,9 @@ private:
   port_channel_estimator::configuration est_cfg;
   /// Counter of ports still pending to be estimated.
   std::atomic<unsigned> pending_ports;
+  /// True once sync_device_estimates() completed the estimation in progress. It makes the call
+  /// idempotent: completing a hop twice would scale its metrics twice.
+  mutable bool estimates_complete = true;
   /// Task executor for running the port channel estimator.
   task_executor& executor;
   /// Number of REs (subcarriers) in the most recently processed transmission.
@@ -104,6 +107,12 @@ private:
 
   // See the dmrs_pusch_estimator_results interface for the documentation.
   const float* get_device_noise_variance(unsigned rx_port) const override;
+
+  // See the dmrs_pusch_estimator_results interface for the documentation.
+  bool device_results_cover_last_estimate() const override;
+
+  // See the dmrs_pusch_estimator_results interface for the documentation.
+  bool sync_device_estimates() const override;
 
   // See the dmrs_pusch_estimator_results interface for the documentation.
   void get_symbol_ch_estimate(span<cbf16_t> estimates,

@@ -253,11 +253,12 @@ void port_channel_estimator_average_impl::do_submit(const resource_grid_reader& 
   }
 }
 
-void port_channel_estimator_average_impl::do_finish(const dmrs_symbol_list& pilots)
+bool port_channel_estimator_average_impl::do_finish(const dmrs_symbol_list& pilots)
 {
   // Complete the pending hop, if any: this also folds in its statistics.
+  bool ok = true;
   if (pending_hop.valid) {
-    compute_hop_finish(pilots);
+    ok = compute_hop_finish(pilots);
   }
 
   unsigned nof_dmrs_pilots = pilots.size().nof_subc * pilots.size().nof_symbols;
@@ -291,6 +292,7 @@ void port_channel_estimator_average_impl::do_finish(const dmrs_symbol_list& pilo
   }
 
   cfo_Hz = transform_optional(cfo_normalized, std::multiplies(), static_cast<float>(scs_to_khz(cfg_local.scs) * 1000));
+  return ok;
 }
 
 void port_channel_estimator_average_impl::compute_hop(const ocudu::resource_grid_reader& grid,
@@ -299,7 +301,7 @@ void port_channel_estimator_average_impl::compute_hop(const ocudu::resource_grid
                                                       unsigned                           hop)
 {
   compute_hop_submit(grid, port, pilots, hop);
-  compute_hop_finish(pilots);
+  (void)compute_hop_finish(pilots);
 }
 
 void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resource_grid_reader& grid,
@@ -434,14 +436,15 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
   apply_fd_td_estimation_stage(stage_args);
 }
 
-void port_channel_estimator_average_impl::compute_hop_finish(const dmrs_symbol_list& pilots)
+bool port_channel_estimator_average_impl::compute_hop_finish(const dmrs_symbol_list& pilots)
 {
   ocudu_assert(pending_hop.valid, "No hop is waiting to be completed.");
   pending_hop_state& st = pending_hop;
 
   // A stage that computes inline has already filled its outputs when it returned; one that
-  // dispatched them to a device waits for them and unpacks them here.
-  complete_fd_td_estimation_stage();
+  // dispatched them to a device waits for them and unpacks them here. Everything below reads those
+  // outputs, so a failed completion makes the statistics meaningless - the caller is told instead.
+  const bool stage_ok = complete_fd_td_estimation_stage();
 
   auto [pattern_symbols, first_symbol, last_symbol, nof_dmrs_symbols] = extract_common_pattern(cfg_local, st.hop);
   (void) pattern_symbols; // the statistics read the pattern from cfg_local
@@ -487,6 +490,7 @@ void port_channel_estimator_average_impl::compute_hop_finish(const dmrs_symbol_l
       estimate_time_alignment(filtered_pilots_lse, cfg_local.dmrs_pattern.front(), st.hop, cfg_local.scs, *ta_estimator);
 
   pending_hop.valid = false;
+  return stage_ok;
 }
 
 std::optional<float> port_channel_estimator_average_impl::preprocess_pilots_and_estimate_cfo(

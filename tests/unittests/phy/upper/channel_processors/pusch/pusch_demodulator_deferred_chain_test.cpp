@@ -172,6 +172,14 @@ public:
   {
     return device_noise_var_ready ? &device_noise_var_value[0] : nullptr;
   }
+
+  /// The double publishes the estimates of every symbol and the noise variance as device-resident
+  /// when the test enabled them, so a consumer can read the whole pass in place - which is what the
+  /// real estimator reports out of its K3/K4 buffers.
+  bool device_results_cover_last_estimate() const override { return device_ready && device_noise_var_ready; }
+
+  /// A double has no deferred work to complete.
+  bool sync_device_estimates() const override { return true; }
   float get_rsrp(unsigned /*rx_port*/, unsigned /*tx_layer*/ = 0) const override { return 1.0F; }
   static_vector<float, MAX_PORTS> get_rsrp_all_ports(unsigned /*tx_layer*/ = 0) const override { return {}; }
   float get_epre(unsigned /*rx_port*/) const override { return 1.0F; }
