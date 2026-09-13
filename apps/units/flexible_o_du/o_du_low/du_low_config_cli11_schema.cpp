@@ -164,6 +164,12 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
     }
     return "Invalid uplink PHY pipeline mode. Accepted values [auto,cpu,cpu_gpu,gpu]";
   };
+  auto device_resource_grid_check = [](const std::string& value) -> std::string {
+    if ((value == "auto") || (value == "on") || (value == "off")) {
+      return {};
+    }
+    return "Invalid device resource grid value. Accepted values [auto,on,off]";
+  };
   auto pusch_sinr_method_check = [](const std::string& value) -> std::string {
     if ((value == "channel_estimator") || (value == "post_equalization") || (value == "evm")) {
       return {};
@@ -224,6 +230,13 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "(module-level offload) and gpu (fused IQ->LLR GPU pipeline).")
       ->capture_default_str()
       ->check(phy_pipeline_check);
+  add_option(app,
+             "--device_resource_grid",
+             expert_phy_params.device_resource_grid,
+             "Keep the uplink resource grid on the device (the OFDM demodulation writes it from the GPU): auto (follow "
+             "the pipeline mode), on and off.")
+      ->capture_default_str()
+      ->check(device_resource_grid_check);
   add_option(app,
              "--max_proc_delay",
              expert_phy_params.max_processing_delay_slots,

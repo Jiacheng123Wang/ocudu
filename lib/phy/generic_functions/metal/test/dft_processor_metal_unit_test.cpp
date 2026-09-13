@@ -429,6 +429,62 @@ int main()
     }
   }
 
+  // Cost of the fused grid write: the final store of the transform kernel writes the subcarriers of the grid with the
+  // compensation applied, so it replaces the plain store instead of adding a dispatch. Measured warm (the first
+  // submission of a grid pays the one-off mapping of its buffer, which a ring reuses for the whole run).
+  {
+    constexpr unsigned size     = 2048;
+    constexpr unsigned nof_subc = 1272;
+    dft_processor_metal metal({size, dft_processor::direction::DIRECT});
+    if (!metal.is_valid()) {
+      std::fprintf(stderr, "FAIL: Metal DFT invalid for the grid-write cost probe (size=%u)\n", size);
+      return 1;
+    }
+    auto       grid = create_resource_grid_factory()->create(1, 14, nof_subc);
+    const auto view = grid->get_writer().get_device_view();
+    auto*      gw   = static_cast<dft_processor_grid_write*>(&metal);
+    if (!gw->supports_grid_write(view) || !gw->set_grid_write_window({})) {
+      std::fprintf(stderr, "FAIL: the Metal DFT cannot write the resource grid\n");
+      return 1;
+    }
+
+    dft_grid_write_params params;
+    params.view        = view;
+    params.nof_subc    = nof_subc;
+    params.map_offset  = size - nof_subc / 2;
+    params.coefficient = cf_t(0.9F, -0.3F);
+
+    constexpr unsigned iters   = 200;
+    constexpr unsigned nof_warmup = 8;
+    for (unsigned i = 0; i != nof_warmup; ++i) {
+      metal.run_async(0);
+      metal.wait_slot(0);
+      gw->submit_grid_write(0, params);
+      metal.wait_slot(0);
+    }
+
+    auto t0 = std::chrono::steady_clock::now();
+    for (unsigned i = 0; i != iters; ++i) {
+      metal.run_async(0);
+      metal.wait_slot(0);
+    }
+    auto         t1        = std::chrono::steady_clock::now();
+    const double plain_gpu = metal.engine_gpu_wait_us();
+    for (unsigned i = 0; i != iters; ++i) {
+      gw->submit_grid_write(0, params);
+      metal.wait_slot(0);
+    }
+    auto         t2       = std::chrono::steady_clock::now();
+    const double grid_gpu = metal.engine_gpu_wait_us();
+    std::printf("[grid-time] size=%u subcarriers=%u plain=%.1fus/transform (gpu %.1f) with-grid=%.1fus/transform (gpu %.1f)\n",
+                size,
+                nof_subc,
+                std::chrono::duration<double, std::micro>(t1 - t0).count() / iters,
+                plain_gpu,
+                std::chrono::duration<double, std::micro>(t2 - t1).count() / iters,
+                grid_gpu);
+  }
+
   // Steady-state latency (audit data): 100 runs per backend at the OFDM sizes.
   for (unsigned size : {512U, 768U, 1024U, 2048U}) {
     dft_processor_metal metal({size, dft_processor::direction::DIRECT});

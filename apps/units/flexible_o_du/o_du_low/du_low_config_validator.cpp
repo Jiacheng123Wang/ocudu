@@ -78,6 +78,7 @@ static bool validate_phy_pipeline_config(const du_low_unit_expert_upper_phy_conf
   request.ch_est    = config.pusch_channel_estimator_algo;
   request.equalizer = config.pusch_channel_equalizer_backend;
   request.ldpc      = config.ldpc_decoder_type;
+  request.device_grid = config.device_resource_grid;
 
   const phy_backend_availability available = query_phy_backend_availability();
 

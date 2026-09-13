@@ -393,7 +393,7 @@ int main(int argc, char** argv)
           demodulator->finish_symbol(grid->get_writer(), ring_slots[drained++]);
         }
         const unsigned ring_slot = ring++ % depth;
-        demodulator->submit_symbol(input, entry.port, entry.symbol, ring_slot);
+        demodulator->submit_symbol(grid->get_writer(), input, entry.port, entry.symbol, ring_slot);
         ring_slots.push_back(ring_slot);
       } else {
         demodulator->demodulate(grid->get_writer(), input, entry.port, entry.symbol);

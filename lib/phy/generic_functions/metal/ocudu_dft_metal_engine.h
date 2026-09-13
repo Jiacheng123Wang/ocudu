@@ -118,8 +118,10 @@ public:
   /// \brief Commits the transform held in slot \c slot together with the write of one grid symbol, without waiting.
   ///
   /// \c in and \c out are the batch buffers of submit_slot() (the caller has filled the input of that slot), and the
-  /// caller must not also submit the transform through submit_slot(). Both dispatches go into one command buffer, in
-  /// this order, with a buffer barrier in between: the grid write reads what the transform wrote.
+  /// caller must not also submit the transform through submit_slot(). The grid write is part of the transform kernel
+  /// itself (its final store), so this is ONE dispatch: no second dispatch and, more importantly, no cross-dispatch
+  /// dependency and therefore no memory barrier between them. The two-dispatch form measured several times slower on a
+  /// pipelined slot (and a barrier is what the sync model would have required there - see the pipeline notes).
   /// \return True when the dispatch was encoded and committed.
   bool submit_slot_grid_write(const void* in, void* out, unsigned slot, const grid_write& write);
 

@@ -13,10 +13,71 @@
 /// read-old-pair -> barrier -> write-new-value -> barrier exchange over the
 /// threadgroup buffer, so no cross-threadgroup synchronization exists.
 
+/// The optional grid write ("FFT phase 2") is part of this kernel on purpose: it consumes the
+/// transform output of this very threadgroup, so the write needs no cross-dispatch dependency - and
+/// with it no memory barrier, which is what the sync model would require between two dispatches of
+/// one encoder. Cost measured warm: the same as the plain store (see dft_processor_metal_unit_test).
+/// With active = 0 the final store is exactly what it always was.
+
 #include <metal_stdlib>
 using namespace metal;
 
 constant uint MAX_FFT_N = 4096;
+
+/// Parameters of the optional resource grid write of this transform (see ocudu::dft_grid_write_params).
+struct grid_write_params {
+  uint  active;       // 1 = write the grid instead of the plain output buffer
+  uint  nof_subc;     // grid subcarriers written by this transform (even)
+  uint  dst_offset;   // element offset of this (port, symbol) within the grid
+  uint  map_offset;   // unused by the fused form; kept for the standalone layout (see the kernel)
+  float phase_re;     // per-symbol compensation (phase compensation * scaling), real part
+  float phase_im;     // ... imaginary part
+  uint  apply_window; // 1 = multiply by the per-element table
+  uint  pad;
+};
+
+/// Round-to-nearest-even conversion to bfloat16, bit-identical to ocudu::to_bf16() (the 16 least
+/// significant fraction bits are dropped, the remaining 7 are rounded half to even).
+inline ushort ocudu_to_bf16(float value)
+{
+  const uint bits = as_type<uint>(value);
+  return static_cast<ushort>((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+
+/// \brief Writes transform element \c v (index \c i of the transform) into the resource grid, with the same
+/// compensation and rounding the host post-processing applies (ocudu::ocuduvec::sc_prod with the per-symbol
+/// coefficient, then ocudu::ocuduvec::prod with the window table, then the bf16 conversion).
+///
+/// Every product is its own statement so the compiler does not contract a multiply and an add into a fused
+/// multiply-add: the CPU reference (ARM NEON) rounds after each product as well.
+inline void ocudu_store_grid(device ushort*       grid,
+                            device const float2* window,
+                            constant grid_write_params& gw,
+                            uint                 i,
+                            uint                 grid_index,
+                            float2               v)
+{
+  const float rr = v.x * gw.phase_re;
+  const float ii = v.y * gw.phase_im;
+  const float ri = v.x * gw.phase_im;
+  const float ir = v.y * gw.phase_re;
+  float       re = rr - ii;
+  float       im = ri + ir;
+
+  if (gw.apply_window != 0u) {
+    const float2 w  = window[i];
+    const float  wr = re * w.x;
+    const float  wi = im * w.y;
+    const float  vr = re * w.y;
+    const float  vi = im * w.x;
+    re              = wr - wi;
+    im              = vr + vi;
+  }
+
+  const uint dst = 2u * (gw.dst_offset + grid_index);
+  grid[dst]      = ocudu_to_bf16(re);
+  grid[dst + 1u] = ocudu_to_bf16(im);
+}
 
 kernel void dft_dit(device const float2* in      [[buffer(0)]],
                     device float2*       out     [[buffer(1)]],
@@ -26,6 +87,9 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
                     constant uint&       radix3  [[buffer(5)]], // number of radix-3 stages (m)
                     constant uint&       inverse [[buffer(6)]], // 1 = conjugate twiddles
                     constant uint&       base    [[buffer(7)]], // element offset of the first transform
+                    device ushort*       grid    [[buffer(8)]], // grid storage (cbf16 pairs), unused when inactive
+                    device const float2* window  [[buffer(9)]], // per-element table, unused when inactive
+                    constant grid_write_params& gw [[buffer(10)]],
                     uint                 tid     [[thread_position_in_threadgroup]],
                     uint                 tgid    [[threadgroup_position_in_grid]])
 {
@@ -158,7 +222,23 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint i = tid; i < n; i += threads) {
-        out[batch_offset + i] = buf[i];
+    if (gw.active != 0u) {
+        // Grid write of the (port, symbol) the caller selected. The host maps grid subcarrier g to transform element
+        // (g + map_offset) % n with map_offset = n - nof_subc / 2; inverted, the transform elements that belong to the
+        // grid are [0, nof_subc / 2) -> grid [nof_subc / 2, nof_subc) and [n - nof_subc / 2, n) -> grid [0, nof_subc / 2),
+        // which is what the two conditions below select (nof_subc is even: its width is a whole number of PRBs).
+        // (`half` is a Metal type name, hence half_subc.)
+        const uint half_subc = gw.nof_subc >> 1u;
+        for (uint i = tid; i < n; i += threads) {
+            if (i < half_subc) {
+                ocudu_store_grid(grid, window, gw, i, half_subc + i, buf[i]);
+            } else if (i + half_subc >= n) {
+                ocudu_store_grid(grid, window, gw, i, i - (n - half_subc), buf[i]);
+            }
+        }
+    } else {
+        for (uint i = tid; i < n; i += threads) {
+            out[batch_offset + i] = buf[i];
+        }
     }
 }

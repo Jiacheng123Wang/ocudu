@@ -63,6 +63,7 @@ static void fill_du_low_expert_execution_section(YAML::Node node, const du_low_u
 static void fill_du_low_expert_section(YAML::Node node, const du_low_unit_expert_upper_phy_config& config)
 {
   node["phy_pipeline"]                             = config.phy_pipeline;
+  node["device_resource_grid"]                     = config.device_resource_grid;
   node["max_proc_delay"]                           = config.max_processing_delay_slots;
   node["prach_th_correction_factor"]               = config.prach_th_correction_factor;
   node["pusch_dec_max_iterations"]                 = config.pusch_decoder_max_iterations;

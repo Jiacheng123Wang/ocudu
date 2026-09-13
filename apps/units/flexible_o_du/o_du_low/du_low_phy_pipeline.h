@@ -25,6 +25,8 @@ struct phy_pipeline_request {
   std::string equalizer = "auto";
   /// `expert_phy --pusch_ldpc_decoder_type`.
   std::string ldpc = "auto";
+  /// `expert_phy --device_resource_grid`: "auto" (follow the pipeline mode), "on" or "off".
+  std::string device_grid = "auto";
 };
 
 /// Which offload backends are linked into this binary (from the ENABLE_METAL_* build options).
@@ -58,6 +60,9 @@ struct phy_pipeline_effective {
   std::string ldpc = "auto";
   /// True when the mode runs the IQ -> LLR chain as one fused device-side lane.
   bool lane_fused = false;
+  /// Keep the resource grid on the device: the OFDM demodulation writes it from the GPU (see
+  /// ofdm_demodulator_configuration::device_grid_write) and the CPU reads the same memory.
+  bool device_grid = false;
 };
 
 /// Whether a per-module backend value runs on the CPU.
@@ -134,6 +139,19 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
     return std::nullopt;
   }
 
+  // Device resource grid: "auto" follows the mode (the fused lane owns the grid, the module-level offload keeps the
+  // host one, so a command line without this knob behaves exactly as before the capability existed).
+  if (request.device_grid == "auto") {
+    out.device_grid = (out.mode == phy_pipeline_mode::gpu);
+  } else if (request.device_grid == "on") {
+    out.device_grid = true;
+  } else if (request.device_grid == "off") {
+    out.device_grid = false;
+  } else {
+    error = "Invalid device resource grid value '" + request.device_grid + "'. Accepted values [auto,on,off]";
+    return std::nullopt;
+  }
+
   switch (out.mode) {
     case phy_pipeline_mode::cpu:
       // No module may offload in this mode: report the first conflict instead of silently running on the CPU.
@@ -151,6 +169,11 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
       }
       if (!is_cpu_phy_backend(request.ldpc)) {
         set_phy_pipeline_conflict(error, out.mode, "--pusch_ldpc_decoder_type", request.ldpc);
+        return std::nullopt;
+      }
+      // Writing the grid from the device is an offload of the OFDM demodulation, which this mode does not allow.
+      if (request.device_grid == "on") {
+        set_phy_pipeline_conflict(error, out.mode, "--device_resource_grid", request.device_grid);
         return std::nullopt;
       }
       // Keep the requested CPU flavor of the LDPC decoder (e.g. a specific SIMD implementation).
@@ -230,13 +253,15 @@ inline phy_pipeline_effective resolve_phy_pipeline_or_fatal(std::string_view mod
                                                             std::string_view dft,
                                                             std::string_view ch_est,
                                                             std::string_view equalizer,
-                                                            std::string_view ldpc)
+                                                            std::string_view ldpc,
+                                                            std::string_view device_grid)
 {
   const phy_pipeline_request request{std::string(mode),
                                      std::string(dft),
                                      std::string(ch_est),
                                      std::string(equalizer),
-                                     std::string(ldpc)};
+                                     std::string(ldpc),
+                                     std::string(device_grid)};
   std::string                error;
   std::optional<phy_pipeline_effective> resolved =
       resolve_phy_pipeline(request, query_phy_backend_availability(), error);
@@ -257,7 +282,8 @@ phy_pipeline_effective resolve_phy_pipeline_or_fatal(const ExpertPhyConfig& conf
                                        config.pusch_dft_type,
                                        config.pusch_channel_estimator_algo,
                                        config.pusch_channel_equalizer_backend,
-                                       config.ldpc_decoder_type);
+                                       config.ldpc_decoder_type,
+                                       config.device_resource_grid);
 }
 
 } // namespace ocudu

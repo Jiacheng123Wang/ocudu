@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "ofdm_demodulator_impl.h"
+#include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ocuduvec/conversion.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/prod.h"
@@ -61,6 +62,62 @@ ofdm_symbol_demodulator_impl::ofdm_symbol_demodulator_impl(const ofdm_demodulato
       window_phase_compensation[i] = std::polar(1.0F, omega * static_cast<float>(i));
     }
   }
+
+  // Device grid write: the engine that can do it writes both the transform and the grid in one command buffer, so the
+  // transform output never travels back to the host. The table is constant, so it is published once.
+  device_grid_write = ofdm_config.device_grid_write;
+  if (device_grid_write) {
+    grid_write = dft->get_grid_write();
+    if (grid_write == nullptr) {
+      ocudulog::fetch_basic_logger("PHY").warning(
+          "OFDM demodulator: the device grid write was requested but the DFT engine does not provide it; the grid will "
+          "be written from the host");
+      device_grid_write = false;
+    } else if (!grid_write->set_grid_write_window(window_phase_compensation)) {
+      ocudulog::fetch_basic_logger("PHY").warning(
+          "OFDM demodulator: publishing the DFT window table failed; the grid will be written from the host");
+      device_grid_write = false;
+      grid_write         = nullptr;
+    }
+  }
+}
+
+bool ofdm_symbol_demodulator_impl::submit_grid_write(resource_grid_writer& grid,
+                                                     unsigned              port_index,
+                                                     unsigned              symbol_index,
+                                                     unsigned              slot)
+{
+  if (!device_grid_write || (grid_write == nullptr)) {
+    return false;
+  }
+
+  const resource_grid_device_view view = grid.get_device_view();
+  if (!grid_write->supports_grid_write(view) || (view.nof_subc != rg_size)) {
+    // The grid cannot be written from the device (its storage is not device-addressable, or it does not match this
+    // demodulator). Report it once: falling back silently would hide a configuration mistake for the whole run.
+    if (!device_grid_write_failed) {
+      device_grid_write_failed = true;
+      ocudulog::fetch_basic_logger("PHY").warning(
+          "OFDM demodulator: the resource grid cannot be written from the device (view valid={}, subcarriers={} vs "
+          "{}); falling back to the host grid write",
+          view.is_valid(),
+          view.nof_subc,
+          rg_size);
+    }
+    return false;
+  }
+
+  // The phase compensation table may have been rebuilt by fill_dft_input() (center frequency change), so the
+  // coefficient is taken here, after the input was filled.
+  dft_grid_write_params params;
+  params.view         = view;
+  params.port         = port_index;
+  params.symbol       = symbol_index % get_nsymb_per_slot(cp);
+  params.nof_subc     = rg_size;
+  params.map_offset   = dft_size - rg_size / 2;
+  params.coefficient  = phase_compensation_table.get_coefficient(symbol_index) * scale;
+  params.apply_window = !window_phase_compensation.empty();
+  return grid_write->submit_grid_write(slot, params);
 }
 
 unsigned ofdm_symbol_demodulator_impl::get_cp_offset(unsigned symbol_index, unsigned slot_index) const
@@ -166,25 +223,38 @@ unsigned ofdm_symbol_demodulator_impl::get_pipeline_depth() const
   return std::min({dft->get_max_batch(), max_pipeline_depth, std::max(1U, debug_depth)});
 }
 
-void ofdm_symbol_demodulator_impl::submit_symbol(span<const ci16_t> input,
-                                                 unsigned          port_index,
-                                                 unsigned          symbol_index,
-                                                 unsigned          slot)
+void ofdm_symbol_demodulator_impl::submit_symbol(resource_grid_writer& grid,
+                                                 span<const ci16_t>    input,
+                                                 unsigned              port_index,
+                                                 unsigned              symbol_index,
+                                                 unsigned              slot)
 {
   ocudu_assert(slot < max_pipeline_depth, "Invalid pipeline slot {}.", slot);
   fill_dft_input(dft->get_input().subspan(static_cast<size_t>(slot) * dft_size, dft_size), input, symbol_index);
-  dft->run_async(slot);
-  pipeline_slots[slot] = {.port_index = port_index, .symbol_index = symbol_index, .valid = true};
+
+  // The device grid write (when available) has to be encoded together with the transform, so it happens here and not in
+  // finish_symbol(): the transform output never has to reach the host.
+  bool device_write = submit_grid_write(grid, port_index, symbol_index, slot);
+  if (!device_write) {
+    dft->run_async(slot);
+  }
+  pipeline_slots[slot] = {
+      .port_index = port_index, .symbol_index = symbol_index, .valid = true, .device_write = device_write};
 }
 
 void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, unsigned slot)
 {
   ocudu_assert(slot < max_pipeline_depth, "Invalid pipeline slot {}.", slot);
   ocudu_assert(pipeline_slots[slot].valid, "Pipeline slot {} holds no symbol.", slot);
+
+  // Wait in both paths: the upper PHY reads the grid as soon as the symbol is reported, and with the device write that
+  // reads memory the GPU produced.
   dft->wait_slot(slot);
-  span<const cf_t> dft_output =
-      dft->get_output_batch().subspan(static_cast<size_t>(slot) * dft_size, dft_size);
-  process_dft_output(grid, dft_output, pipeline_slots[slot].port_index, pipeline_slots[slot].symbol_index);
+
+  if (!pipeline_slots[slot].device_write) {
+    span<const cf_t> dft_output = dft->get_output_batch().subspan(static_cast<size_t>(slot) * dft_size, dft_size);
+    process_dft_output(grid, dft_output, pipeline_slots[slot].port_index, pipeline_slots[slot].symbol_index);
+  }
   pipeline_slots[slot].valid = false;
 }
 

@@ -29,6 +29,9 @@ struct puxch_processor_configuration {
   double center_freq_Hz;
   /// Number of receive ports.
   unsigned nof_rx_ports;
+  /// Write the demodulated symbols into the resource grid from the device (see
+  /// ofdm_demodulator_configuration::device_grid_write).
+  bool device_grid_write;
 };
 
 /// Lower physical layer PUxCH processor - Factory interface.

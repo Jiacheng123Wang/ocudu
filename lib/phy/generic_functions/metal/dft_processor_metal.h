@@ -92,6 +92,9 @@ public:
   }
 
   // See interface for documentation.
+  dft_processor_grid_write* get_grid_write() override { return valid ? this : nullptr; }
+
+  // See interface for documentation.
   bool supports_grid_write(const resource_grid_device_view& view) const override;
 
   // See interface for documentation.

@@ -60,7 +60,11 @@ public:
   // is notified.
   unsigned get_pipeline_depth() const override { return pipeline_depth; }
 
-  void submit_symbol(span<const ci16_t> /*input*/, unsigned port_index, unsigned symbol_index, unsigned slot) override
+  void submit_symbol(resource_grid_writer& /*grid*/,
+                     span<const ci16_t> /*input*/,
+                     unsigned port_index,
+                     unsigned symbol_index,
+                     unsigned slot) override
   {
     if (pipeline_slots.size() <= slot) {
       pipeline_slots.resize(slot + 1, {});

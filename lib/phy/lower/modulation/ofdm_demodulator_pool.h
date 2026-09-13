@@ -42,10 +42,14 @@ public:
 
   // See the interface for documentation.
   void
-  submit_symbol(span<const ci16_t> input, unsigned port_index, unsigned symbol_index, unsigned slot) override
+  submit_symbol(resource_grid_writer& grid,
+                span<const ci16_t>    input,
+                unsigned              port_index,
+                unsigned              symbol_index,
+                unsigned              slot) override
   {
     forward_center_frequency();
-    base->submit_symbol(input, port_index, symbol_index, slot);
+    base->submit_symbol(grid, input, port_index, symbol_index, slot);
   }
 
   // See the interface for documentation.

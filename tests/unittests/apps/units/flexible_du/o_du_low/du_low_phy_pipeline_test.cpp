@@ -26,13 +26,15 @@ constexpr phy_backend_availability all_available{true, true, true, true, true};
 /// No Metal backend built in (any other platform).
 constexpr phy_backend_availability none_available{false, false, false, false, false};
 
-phy_pipeline_request make_request(std::string mode      = "auto",
-                                  std::string dft       = "auto",
-                                  std::string ch_est    = "auto",
-                                  std::string equalizer = "auto",
-                                  std::string ldpc      = "auto")
+phy_pipeline_request make_request(std::string mode        = "auto",
+                                  std::string dft         = "auto",
+                                  std::string ch_est      = "auto",
+                                  std::string equalizer   = "auto",
+                                  std::string ldpc        = "auto",
+                                  std::string device_grid = "auto")
 {
-  return phy_pipeline_request{std::move(mode), std::move(dft), std::move(ch_est), std::move(equalizer), std::move(ldpc)};
+  return phy_pipeline_request{
+      std::move(mode), std::move(dft), std::move(ch_est), std::move(equalizer), std::move(ldpc), std::move(device_grid)};
 }
 
 /// Resolves \c request and fails the test when it is rejected.
@@ -200,6 +202,39 @@ TEST(phy_pipeline_mode_test, gpu_mode_requires_the_lane_backends)
   // fused chain at all.
   constexpr phy_backend_availability no_demapper{true, true, true, false, true};
   EXPECT_FALSE(check_phy_pipeline_lane_available(no_demapper).empty());
+}
+
+TEST(phy_pipeline_mode_test, device_resource_grid_follows_the_mode_by_default)
+{
+  // "auto" keeps a module-level offload run comparable with the ones recorded before the capability existed.
+  EXPECT_FALSE(resolve(make_request()).device_grid);
+  EXPECT_FALSE(resolve(make_request("cpu_gpu", "metal", "metal_mmse", "metal", "metal")).device_grid);
+  // The fused lane owns the grid.
+  EXPECT_TRUE(resolve(make_request("gpu")).device_grid);
+
+  // The knob overrides the mode in both directions (it is the A/B control of the device grid).
+  EXPECT_TRUE(resolve(make_request("cpu_gpu", "metal", "auto", "auto", "auto", "on")).device_grid);
+  EXPECT_FALSE(resolve(make_request("gpu", "auto", "auto", "auto", "auto", "off")).device_grid);
+  // ... and the fused lane is still the fused lane: the knob only moves where the grid lives.
+  EXPECT_TRUE(resolve(make_request("gpu", "auto", "auto", "auto", "auto", "off")).lane_fused);
+}
+
+TEST(phy_pipeline_mode_test, device_resource_grid_is_rejected_by_the_cpu_pipeline)
+{
+  // Writing the grid from the device is an offload of the OFDM demodulation: the CPU pipeline has no DFT that can do
+  // it, so asking for it there is a conflict rather than a silent no-op.
+  EXPECT_NE(resolve_conflict(make_request("cpu", "auto", "auto", "auto", "auto", "on"))
+                .find("--device_resource_grid"),
+            std::string::npos);
+  // ... while the CPU pipeline with the knob off (or on auto) is fine.
+  EXPECT_FALSE(resolve(make_request("cpu", "auto", "auto", "auto", "auto", "off")).device_grid);
+}
+
+TEST(phy_pipeline_mode_test, invalid_device_resource_grid_is_rejected)
+{
+  EXPECT_NE(resolve_conflict(make_request("cpu_gpu", "auto", "auto", "auto", "auto", "yes"))
+                .find("Invalid device resource grid"),
+            std::string::npos);
 }
 
 TEST(phy_pipeline_mode_test, invalid_mode_is_rejected)

@@ -28,6 +28,18 @@ struct du_low_unit_expert_upper_phy_config {
   ///   equalizer and demapper backends, which must be left at \c auto; the LDPC decoder is not part of the lane (the
   ///   LLR leaves the device for the CPU decoder).
   std::string phy_pipeline = "auto";
+  /// \brief Keep the uplink resource grid on the device: the OFDM demodulation writes it from the GPU and the CPU reads
+  /// the same memory (see lower_phy_configuration::device_resource_grid).
+  ///
+  /// Use one of these options:
+  /// - \c auto: follow the uplink PHY pipeline mode (default: on for the fused lane, off otherwise), or
+  /// - \c on: the DFT engine writes the grid (needs a device-addressable grid and a DFT engine able to write it; the
+  ///   demodulator warns and falls back to the host write when either is missing), or
+  /// - \c off: the host post-processes the transform output and writes the grid, as it always did.
+  ///
+  /// \note This is the A/B control of the device grid: with \c auto the module-level offload path keeps writing the grid
+  /// from the host, so its measurements stay comparable with the runs recorded before the capability existed.
+  std::string device_resource_grid = "auto";
   /// \brief Sets the maximum allowed downlink processing delay in slots.
   ///
   /// Higher values increase the downlink processing pipeline length, which improves performance and stability for

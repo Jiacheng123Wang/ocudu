@@ -13,7 +13,7 @@ set(METALLIB_OUT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 ocudu_add_metallib(
     TARGET ocudu_metallib_dft
     OUTPUT ${METALLIB_OUT_DIR}/ocudu_dft.metallib
-    SOURCES ocudu_dft.metal ocudu_grid_write.metal)
+    SOURCES ocudu_dft.metal)
 
 # ---- Static library: engine driver (ARC) + dft_processor adapter ----
 enable_language(OBJCXX)

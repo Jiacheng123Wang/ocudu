@@ -55,6 +55,8 @@ struct flexible_o_du_ru_config {
   unsigned                 prach_nof_ports;
   /// Lower-PHY DFT (FFT) processor implementation: "cpu" (default) or "metal" (Apple Silicon).
   std::string              dft_processor_type = "cpu";
+  /// Keep the uplink resource grid on the device (see lower_phy_configuration::device_resource_grid).
+  bool device_resource_grid = false;
 };
 
 /// Radio Unit dependencies of the flexible O-RAN DU.

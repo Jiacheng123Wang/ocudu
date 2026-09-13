@@ -109,12 +109,14 @@ static o_du_low_unit_config generate_o_du_low_config(const du_low_unit_config&  
 static flexible_o_du_ru_config generate_o_du_ru_config(span<const odu::du_cell_config> cells,
                                                        unsigned                         max_processing_delay,
                                                        unsigned                         prach_nof_ports,
-                                                       const std::string&              dft_processor_type)
+                                                       const std::string&              dft_processor_type,
+                                                       bool                             device_resource_grid)
 {
   flexible_o_du_ru_config out_cfg;
   out_cfg.prach_nof_ports      = prach_nof_ports;
   out_cfg.max_processing_delay = max_processing_delay;
   out_cfg.dft_processor_type   = dft_processor_type;
+  out_cfg.device_resource_grid = device_resource_grid;
 
   for (const auto& cell : cells) {
     auto&                    out_cell   = out_cfg.cells.emplace_back();
@@ -269,7 +271,8 @@ o_du_unit flexible_o_du_factory::create_flexible_o_du(const o_du_unit_dependenci
   flexible_o_du_ru_config     ru_config        = generate_o_du_ru_config(du_cells,
                                                               du_lo.expert_phy_cfg.max_processing_delay_slots,
                                                               du_hi.cells_cfg.front().cell.prach_cfg.ports.size(),
-                                                              uplink_pipeline.dft);
+                                                              uplink_pipeline.dft,
+                                                              uplink_pipeline.device_grid);
   flexible_o_du_ru_dependencies ru_dependencies{*dependencies.workers,
                                                 du_impl->get_upper_ru_ul_adapter(),
                                                 du_impl->get_upper_ru_timing_adapter(),

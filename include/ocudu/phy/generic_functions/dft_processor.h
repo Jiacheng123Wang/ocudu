@@ -6,6 +6,7 @@
 
 #include "ocudu/adt/complex.h"
 #include "ocudu/adt/span.h"
+#include "ocudu/phy/generic_functions/dft_processor_grid_write.h"
 
 namespace ocudu {
 
@@ -137,6 +138,15 @@ public:
                  nof_transforms);
     return run();
   }
+
+  /// \brief Grid-write capability of this processor, when it has one.
+  ///
+  /// Lets a demodulator fill the resource grid from the device without knowing which implementation it holds (the
+  /// build has no RTTI, and not every processor can do it). A processor that returns nullptr is asked for nothing:
+  /// its caller writes the grid from the host, as it always did.
+  ///
+  /// \return The capability, or nullptr.
+  virtual dft_processor_grid_write* get_grid_write() { return nullptr; }
 };
 
 } // namespace ocudu

@@ -28,6 +28,13 @@ struct ofdm_demodulator_configuration {
   float scale;
   /// Carrier center frequency in Hertz.
   double center_freq_Hz;
+  /// \brief Write the demodulated OFDM symbols into the resource grid from the device.
+  ///
+  /// Set by the uplink PHY pipeline mode: the fused lane keeps the grid on the device, so the transform output never
+  /// travels back to the host. Requires a DFT engine able to write the grid (see dft_processor_grid_write) and a grid
+  /// whose storage is device-addressable (see resource_grid_writer::get_device_view()); a symbol that cannot be
+  /// written from the device is written from the host instead, with a warning the first time it happens.
+  bool device_grid_write = false;
 };
 
 /// \brief Describes an OFDM demodulator that demodulates at symbol granularity.
@@ -97,10 +104,23 @@ public:
   ///
   /// Only valid when get_pipeline_depth() > 1. The caller must call finish_symbol() for the same
   /// slot before reusing it.
-  virtual void
-  submit_symbol(span<const ci16_t> input, unsigned port_index, unsigned symbol_index, unsigned slot)
+  ///
+  /// \param[in] grid       Grid the symbol belongs to. A DFT engine able to write the grid from the device (see
+  ///                       dft_processor_grid_write) uses it here, so that the transform and the grid write share one
+  ///                       command buffer; the host path only needs it later, in finish_symbol(). The grid must stay
+  ///                       alive until the slot is finished.
+  /// \param[in] input      Time domain samples of the symbol, including its cyclic prefix.
+  /// \param[in] port_index Port index of the symbol.
+  /// \param[in] symbol_index Symbol index within the subframe.
+  /// \param[in] slot       Transform slot (see get_pipeline_depth()).
+  virtual void submit_symbol(resource_grid_writer& grid,
+                             span<const ci16_t>    input,
+                             unsigned              port_index,
+                             unsigned              symbol_index,
+                             unsigned              slot)
   {
     // Without a pipeline (get_pipeline_depth() == 1) the caller uses demodulate() instead.
+    (void)grid;
     (void)input;
     (void)port_index;
     (void)symbol_index;

@@ -69,6 +69,12 @@ struct lower_phy_configuration {
   /// \note Uplink receive only: the OFDM demodulator and the PRACH demodulator consume this
   /// choice; the downlink transmit path (the OFDM modulator) always runs the CPU implementation.
   std::string dft_processor_type = "cpu";
+  /// \brief Write the demodulated uplink symbols into the resource grid from the device.
+  ///
+  /// Part of the uplink PHY pipeline mode: the fused lane keeps the resource grid on the device so the transform output
+  /// never travels back to the host. Requires a DFT engine able to write the grid and a grid whose storage the device
+  /// can address (both are checked per symbol; see ofdm_demodulator_configuration::device_grid_write).
+  bool device_resource_grid = false;
   /// \brief Number of slots the timing handler is notified in advance of the transmission time.
   ///
   /// Sets the maximum allowed processing delay in slots.

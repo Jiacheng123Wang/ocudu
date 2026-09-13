@@ -128,7 +128,7 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
       ++next_pipeline_slot;
       span<const ci16_t> td_samples = samples.get_channel_buffer(i_port);
       td_capture::capture(context.slot, symbol_index_subframe, i_port, td_samples);
-      demodulator->submit_symbol(td_samples, i_port, symbol_index_subframe, slot);
+      demodulator->submit_symbol(current_grid.get().get_writer(), td_samples, i_port, symbol_index_subframe, slot);
       in_flight[(in_flight_begin + nof_in_flight) % max_in_flight_symbols] = {
           .context = context, .slot = slot, .last_port = (i_port + 1 == nof_rx_ports)};
       ++nof_in_flight;

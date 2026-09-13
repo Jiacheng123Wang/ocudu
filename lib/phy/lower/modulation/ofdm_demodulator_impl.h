@@ -6,6 +6,7 @@
 
 #include "phase_compensation_lut.h"
 #include "ocudu/phy/generic_functions/dft_processor.h"
+#include "ocudu/phy/generic_functions/dft_processor_grid_write.h"
 #include "ocudu/phy/lower/modulation/ofdm_demodulator.h"
 #include <array>
 #include <memory>
@@ -48,6 +49,19 @@ class ofdm_symbol_demodulator_impl : public ofdm_symbol_demodulator
   std::vector<cf_t> compensated_output;
   /// DFT window offset phase compensation.
   std::vector<cf_t> window_phase_compensation;
+  /// Device grid write of the DFT engine, if it has one (nullptr otherwise: the grid is then written from the host).
+  dft_processor_grid_write* grid_write = nullptr;
+  /// Configuration: write the demodulated symbols into the resource grid from the device.
+  bool device_grid_write = false;
+  /// Set once the device grid write was requested but could not be used, so the warning is not spammed per symbol.
+  bool device_grid_write_failed = false;
+
+  /// \brief Submits the transform of \c slot together with the write of one symbol into the grid, from the device.
+  ///
+  /// The transform input of the slot must already be filled. Called only when the engine and the grid allow it; the
+  /// caller falls back to the plain asynchronous submission otherwise.
+  /// \return True when the transform and the grid write were submitted.
+  bool submit_grid_write(resource_grid_writer& grid, unsigned port_index, unsigned symbol_index, unsigned slot);
 
   /// Maximum number of symbols kept in flight by the pipelined path.
   static constexpr unsigned max_pipeline_depth = 8;
@@ -57,6 +71,9 @@ class ofdm_symbol_demodulator_impl : public ofdm_symbol_demodulator
     unsigned port_index   = 0;
     unsigned symbol_index = 0;
     bool     valid        = false;
+    /// The symbol was written into the grid by the device: finish_symbol() only waits for it then (the host path
+    /// instead post-processes the transform output it reads back).
+    bool device_write = false;
   };
   std::array<pipeline_entry, max_pipeline_depth> pipeline_slots = {};
 
@@ -103,7 +120,11 @@ public:
   unsigned get_pipeline_depth() const override;
 
   /// \brief Fills DFT slot \c slot with one symbol and submits it without waiting.
-  void submit_symbol(span<const ci16_t> input, unsigned port_index, unsigned symbol_index, unsigned slot) override;
+  void submit_symbol(resource_grid_writer& grid,
+                     span<const ci16_t>    input,
+                     unsigned              port_index,
+                     unsigned              symbol_index,
+                     unsigned              slot) override;
 
   /// \brief Waits for DFT slot \c slot and writes the symbol it carries into the grid.
   void finish_symbol(resource_grid_writer& grid, unsigned slot) override;

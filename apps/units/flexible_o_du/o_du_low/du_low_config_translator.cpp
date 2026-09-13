@@ -25,6 +25,10 @@ static std::string describe_backend(const std::string& requested, const std::str
   if (requested == effective) {
     return effective;
   }
+  if (requested == "auto") {
+    // "auto" is the "follow the pipeline mode" value, not a fallback: say which backend it resolved to.
+    return fmt::format("{} (auto)", effective);
+  }
   return fmt::format("{}->{} (requested backend not built in)", requested, effective);
 }
 
@@ -39,9 +43,10 @@ static void log_phy_pipeline_config(const du_low_unit_expert_upper_phy_config& c
   phy_pipeline_mode_registry::set(effective.mode);
 
   ocudulog::basic_logger& logger = ocudulog::fetch_basic_logger("PHY");
-  logger.info("[phy_pipeline] mode={} fused={} lane=IQ->LLR (expert_phy --phy_pipeline {})",
+  logger.info("[phy_pipeline] mode={} fused={} device_grid={} lane=IQ->LLR (expert_phy --phy_pipeline {})",
               to_string(effective.mode),
               effective.lane_fused ? "yes" : "no",
+              effective.device_grid ? "yes" : "no",
               config.phy_pipeline);
 
   // The demapper has no backend knob of its own: it follows the channel equalizer (see the upper PHY factory).

@@ -84,8 +84,6 @@ struct dft_resources_t {
   id<MTLDevice>              device   = nil;
   id<MTLCommandQueue>        queue    = nil;
   id<MTLComputePipelineState> pipeline = nil;
-  /// Grid write of one OFDM symbol (FFT phase 2), encoded in the same command buffer as the transform.
-  id<MTLComputePipelineState> grid_pipeline = nil;
 };
 
 static dft_resources_t& dft_resources()
@@ -278,17 +276,6 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
         return false;
       }
 
-      // Optional companion kernel: the grid write of one demodulated symbol (FFT phase 2). A library without it is not
-      // fatal - the grid is then written from the host, as before (see dft_processor_grid_write).
-      id<MTLFunction> grid_fn = [library newFunctionWithName:@"grid_write"];
-      if (grid_fn != nil) {
-        res.grid_pipeline = [res.device newComputePipelineStateWithFunction:grid_fn error:&error];
-        if (res.grid_pipeline == nil) {
-          ocudulog::fetch_basic_logger("PHY").warning(
-              "Metal DFT: grid-write pipeline creation failed ({}); the grid will be written from the host",
-              error != nil ? error.localizedDescription.UTF8String : "nil error");
-        }
-      }
       ocudulog::fetch_basic_logger("PHY").debug("Metal DFT: loaded pre-compiled shader library {}", lib_path.UTF8String);
     }
   }
@@ -469,7 +456,7 @@ bool dft_metal_engine::set_grid_write_window(const void* window, unsigned nof_en
 bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigned slot, const grid_write& write)
 {
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
-  if (engine == nullptr || dft_resources().pipeline == nil || dft_resources().grid_pipeline == nil) {
+  if (engine == nullptr || dft_resources().pipeline == nil) {
     return false;
   }
   if (slot >= max_batch_slots || write.grid_base == nullptr || write.nof_subc == 0) {
@@ -477,9 +464,9 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   }
 
   // The buffers cover the whole batch (all slots), as in submit_at(): a ring caller reuses them without re-wrapping.
-  const size_t bytes = static_cast<size_t>(engine->n) * max_batch_slots * 2 * sizeof(float);
-  id<MTLBuffer> b_in  = wrap_buffer(engine, in, bytes);
-  id<MTLBuffer> b_out = wrap_buffer(engine, out, bytes);
+  const size_t  bytes  = static_cast<size_t>(engine->n) * max_batch_slots * 2 * sizeof(float);
+  id<MTLBuffer> b_in   = wrap_buffer(engine, in, bytes);
+  id<MTLBuffer> b_out  = wrap_buffer(engine, out, bytes);
   id<MTLBuffer> b_grid = wrap_buffer(engine, write.grid_base, write.grid_bytes);
   if (b_in == nil || b_out == nil || b_grid == nil) {
     return false;
@@ -487,8 +474,6 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
 
   id<MTLCommandBuffer>         cmd_buf = [dft_resources().queue commandBuffer];
   id<MTLComputeCommandEncoder> enc     = [cmd_buf computeCommandEncoder];
-
-  // 1) The transform of this slot.
   [enc setComputePipelineState:dft_resources().pipeline];
   [enc setBuffer:b_in offset:0 atIndex:0];
   [enc setBuffer:b_out offset:0 atIndex:1];
@@ -499,47 +484,38 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   [enc setBytes:&engine->inverse length:sizeof(uint32_t) atIndex:6];
   const uint32_t base = slot * engine->n;
   [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
-  [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
-
-  // 2) The grid write, which reads what the transform just wrote: the barrier is what makes that dependency explicit
-  //    (dispatch order alone does not guarantee the visibility of the buffer writes).
-  [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+  // The grid and its per-element table are only read when the write is active; Metal still requires every buffer the
+  // kernel names to be bound, so the transform output and the twiddle table stand in when there is none.
+  [enc setBuffer:b_grid offset:0 atIndex:8];
+  [enc setBuffer:(engine->buf_window != nil ? engine->buf_window : engine->buf_tw) offset:0 atIndex:9];
 
   struct {
-    uint32_t n;
+    uint32_t active;
     uint32_t nof_subc;
     uint32_t dst_offset;
     uint32_t map_offset;
     float    phase_re;
     float    phase_im;
     uint32_t apply_window;
-  } params = {engine->n,
+    uint32_t pad;
+  } params = {1u,
               write.nof_subc,
               write.dst_offset,
               write.map_offset % engine->n,
               write.phase_re,
               write.phase_im,
-              (write.apply_window && engine->has_window) ? 1u : 0u};
+              (write.apply_window && engine->has_window) ? 1u : 0u,
+              0u};
+  [enc setBytes:&params length:sizeof(params) atIndex:10];
 
-  [enc setComputePipelineState:dft_resources().grid_pipeline];
-  // The grid write consumes the transform of THIS slot: the output buffer covers the whole batch (all slots), so the
-  // binding starts at the slot's own transform.
-  const NSUInteger fft_offset = static_cast<NSUInteger>(slot) * engine->n * 2 * sizeof(float);
-  [enc setBuffer:b_out offset:fft_offset atIndex:0];
-  [enc setBuffer:b_grid offset:0 atIndex:1];
-  [enc setBuffer:(engine->buf_window != nil ? engine->buf_window : b_out) offset:0 atIndex:2];
-  [enc setBytes:&params length:sizeof(params) atIndex:3];
-  const unsigned threads = 256;
-  [enc dispatchThreadgroups:MTLSizeMake((write.nof_subc + threads - 1) / threads, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+  [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
   [enc endEncoding];
   [cmd_buf commit];
   dft_stats_commit();
   metal::shared_queue::notify_commit(cmd_buf, metal::shared_queue::queue_kind::front_end);
-  engine->last_committed_cb = cmd_buf;
-  // Ring bookkeeping: the slot is waited for through wait_slot(), like a plain asynchronous submission.
-  engine->slot_cb[slot] = cmd_buf;
-  engine->slot_pending[slot] = true;
+  engine->last_committed_cb    = cmd_buf;
+  engine->slot_cb[slot]        = cmd_buf;
+  engine->slot_pending[slot]   = true;
   return true;
 }
 

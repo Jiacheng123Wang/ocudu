@@ -151,6 +151,105 @@ int main()
 
   bool ok = (nmse <= -60.0);
 
+
+  // Device grid write (S-7b-3): the pipelined path the gNB actually uses (submit_symbol / finish_symbol, one transform
+  // per symbol) with the grid written from the device must produce EXACTLY the grid the host path produces - the same
+  // transform values, the same compensation and the same bf16 rounding. A single differing resource element fails the
+  // check: the grid feeds the channel estimator and the equalizer, so a drift here would only surface much later.
+  {
+    ofdm_demodulator_configuration device_config = config;
+    device_config.device_grid_write               = true;
+
+    auto device_demod = metal_factory->create_ofdm_symbol_demodulator(device_config);
+    auto host_demod   = metal_factory->create_ofdm_symbol_demodulator(config);
+    if ((device_demod == nullptr) || (host_demod == nullptr)) {
+      std::fprintf(stderr, "FAIL: demodulator creation for the device grid write\n");
+      return 1;
+    }
+    if (device_demod->get_pipeline_depth() <= 1) {
+      std::fprintf(stderr, "FAIL: the Metal DFT must expose a transform pipeline\n");
+      return 1;
+    }
+
+    auto grid_device = grid_factory->create(1, nsymb, rg_size);
+    auto grid_host   = grid_factory->create(1, nsymb, rg_size);
+    if ((grid_device == nullptr) || (grid_host == nullptr)) {
+      std::fprintf(stderr, "FAIL: grid creation for the device grid write\n");
+      return 1;
+    }
+
+    // Runs a whole slot through the pipelined path of one demodulator, with the ring depth the implementation reports.
+    auto run_pipelined = [&](ofdm_symbol_demodulator& demod, resource_grid& grid) {
+      const unsigned        depth = demod.get_pipeline_depth();
+      std::vector<unsigned> in_flight;
+      unsigned              offset = 0;
+      for (unsigned s = 0; s != nsymb; ++s) {
+        // Keep the ring at `depth` transforms in flight: the slot about to be reused holds the oldest one.
+        if (in_flight.size() == depth) {
+          demod.finish_symbol(grid.get_writer(), in_flight.front());
+          in_flight.erase(in_flight.begin());
+        }
+        span<const ci16_t> symbol_samples =
+            span<const ci16_t>(time_data).subspan(offset, symbol_sizes[s]);
+        const unsigned slot = s % depth;
+        demod.submit_symbol(grid.get_writer(), symbol_samples, 0, s, slot);
+        in_flight.push_back(slot);
+        offset += symbol_sizes[s];
+      }
+      while (!in_flight.empty()) {
+        demod.finish_symbol(grid.get_writer(), in_flight.front());
+        in_flight.erase(in_flight.begin());
+      }
+    };
+
+    run_pipelined(*device_demod, *grid_device);
+    run_pipelined(*host_demod, *grid_host);
+
+    std::vector<cf_t> device_out = grid_to_vector(grid_device->get_reader(), 1, nsymb, rg_size);
+    std::vector<cf_t> host_out   = grid_to_vector(grid_host->get_reader(), 1, nsymb, rg_size);
+
+    unsigned mismatching = 0;
+    for (unsigned i = 0; i != device_out.size(); ++i) {
+      if ((device_out[i] != host_out[i])) {
+        if (mismatching == 0) {
+          std::fprintf(stderr,
+                       "  first mismatch at RE %u: device=(%f,%f) host=(%f,%f)\n",
+                       i,
+                       device_out[i].real(),
+                       device_out[i].imag(),
+                       host_out[i].real(),
+                       host_out[i].imag());
+        }
+        ++mismatching;
+      }
+    }
+    std::printf("[grid]  pipelined device write vs host write: REs=%zu mismatching=%u\n", device_out.size(), mismatching);
+    if (mismatching != 0) {
+      std::fprintf(stderr, "FAIL: the device grid write differs from the host grid write\n");
+      ok = false;
+    }
+
+    // Latency of the two paths (the device one must not pay a round trip per symbol for the grid). Informational only:
+    // the first rounds of a process carry the GPU's clock ramp-up on this machine, so the numbers are averaged over
+    // enough rounds to smooth it (the authoritative cost of the grid write is measured warm in
+    // dft_processor_metal_unit_test, where it comes out the same as the plain store).
+    run_pipelined(*device_demod, *grid_device);
+    run_pipelined(*host_demod, *grid_host);
+    constexpr unsigned grid_rounds = 50;
+    auto               g0          = std::chrono::steady_clock::now();
+    for (unsigned r = 0; r != grid_rounds; ++r) {
+      run_pipelined(*device_demod, *grid_device);
+    }
+    auto g1 = std::chrono::steady_clock::now();
+    for (unsigned r = 0; r != grid_rounds; ++r) {
+      run_pipelined(*host_demod, *grid_host);
+    }
+    auto         g2            = std::chrono::steady_clock::now();
+    const double device_slot_us = std::chrono::duration<double, std::micro>(g1 - g0).count() / grid_rounds;
+    const double host_slot_us   = std::chrono::duration<double, std::micro>(g2 - g1).count() / grid_rounds;
+    std::printf("[time] slot pipelined: device-grid=%.1fus host-grid=%.1fus\n", device_slot_us, host_slot_us);
+  }
+
   // Latency: one batched slot versus the per-symbol path.
   constexpr unsigned rounds = 20;
   auto t0 = std::chrono::steady_clock::now();

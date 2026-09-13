@@ -121,7 +121,8 @@ public:
                                                      .rate                = config.srate,
                                                      .bandwidth_prb       = config.bandwidth_rb,
                                                      .center_frequency_Hz = config.ul_freq_hz,
-                                                     .nof_rx_ports        = config.nof_rx_ports};
+                                                     .nof_rx_ports        = config.nof_rx_ports,
+                                                     .device_grid_write   = config.device_resource_grid};
 
     // Create uplink processor.
     std::unique_ptr<lower_phy_uplink_processor> ul_proc = uplink_proc_factory->create(ul_proc_config);
