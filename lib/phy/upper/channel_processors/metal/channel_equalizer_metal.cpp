@@ -518,6 +518,7 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
     // Append the dispatch to the shared burst of this group: every stage of the burst ends up in
     // one command buffer, with a memory barrier where the pipeline changes (see shared_burst).
     const bool ok = impl_->engine.enqueue_burst(h_binding,
+                                                h_device,
                                                 y_ptr,
                                                 s_binding,
                                                 eq_ptr,

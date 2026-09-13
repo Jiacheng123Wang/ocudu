@@ -419,6 +419,11 @@ bool equalizer_metal_engine::batch_open() const
 /// One equalization the deferred path accumulated instead of encoding one dispatch per symbol.
 struct eq_pending_t {
   equalizer_metal_engine::ch_est_binding h;
+  /// True when \c h points into the buffer the channel estimator produced the estimates in, i.e.
+  /// when its contents are written by a GPU dispatch that may still be in flight. Such a binding is
+  /// never read on the host by the batched encoding: the dispatch reads it, exactly like the
+  /// per-symbol path does (see eq_flush_hook).
+  bool        h_on_device = false;
   const void* y         = nullptr;
   const void* sigma2    = nullptr;
   void*       eq        = nullptr;
@@ -526,11 +531,17 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
                              (next.nof_layers == head.nof_layers) && (next.mmse == head.mmse) &&
                              (next.noise_var == head.noise_var) && (next.tx_scaling == head.tx_scaling) &&
                              (next.h_scaling == head.h_scaling);
-      // The group staging below copies the estimates of every symbol of the run, so a run can only
-      // hold symbols whose estimates are laid out the same way. That includes the device slices of
-      // K3: two symbols of one hop share a buffer but not their offset - the offset travels in the
-      // per-symbol copy, the stride has to match because one dispatch reads the whole run with it.
-      const bool same_h = (next.h.layer_stride == head.h.layer_stride);
+      // The estimates of the run must be describable by ONE dispatch: the batched kernel reads them
+      // all through one binding, stepping by a fixed number of elements per symbol. A run of device
+      // slices is NOT copied to the host (see eq_flush_hook) - their producer may still be running,
+      // and only the GPU read, ordered through the queue, sees its writes - so it must also share
+      // one buffer and advance by exactly that step, which is what the estimator's offsets do.
+      const unsigned h_step = (head.h.layer_stride != 0) ? head.h.layer_stride : head.nof_re;
+      const unsigned h_want = prev.h.offset + h_step;
+      const bool     same_h = (next.h.layer_stride == head.h.layer_stride) &&
+                          (next.h_on_device == head.h_on_device) &&
+                          (!next.h_on_device ||
+                           ((next.h.buffer == head.h.buffer) && (next.h.offset == h_want)));
       const bool same_strides =
           (static_cast<const char*>(next.eq) - static_cast<const char*>(prev.eq)) ==
               (static_cast<const char*>(pending[first + 1].eq) - static_cast<const char*>(head.eq)) &&
@@ -575,13 +586,22 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
       compat::aligned_free(s_alloc);
       return nil;
     }
+    // A run whose estimates were produced on the device is read THERE, with the per-symbol offset
+    // step the kernel applies through h_layer_stride (see the run predicate): copying it to the host
+    // would read a buffer whose producing dispatch may not have completed - the host has no wait
+    // that covers it - and the equalization would run on whatever was there.
+    const bool h_device_run = pending[first].h_on_device;
     for (unsigned k = 0; k != n_run; ++k) {
-      std::memcpy(h_alloc + k * h_stride,
-                  static_cast<const cbf16_t*>(pending[first + k].h.buffer) + pending[first + k].h.offset,
-                  h_stride * sizeof(cbf16_t));
+      if (!h_device_run) {
+        std::memcpy(h_alloc + k * h_stride,
+                    static_cast<const cbf16_t*>(pending[first + k].h.buffer) + pending[first + k].h.offset,
+                    h_stride * sizeof(cbf16_t));
+      }
       std::memcpy(y_alloc + k * y_stride, pending[first + k].y, y_stride * sizeof(cbf16_t));
     }
-    const equalize_params_t params = make_params(equalizer_metal_engine::ch_est_binding(h_alloc),
+    const equalizer_metal_engine::ch_est_binding h_run_binding =
+        h_device_run ? pending[first].h : equalizer_metal_engine::ch_est_binding(h_alloc);
+    const equalize_params_t params = make_params(h_run_binding,
                                                  head.nof_re,
                                                  head.nof_ports,
                                                  head.nof_layers,
@@ -598,13 +618,17 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
 
 
 
-    const size_t h_bytes  = h_stride * n_run * sizeof(cbf16_t);
+    // The estimates are wrapped where they live: the host staging of a staged run, or the buffer the
+    // estimator produced them in for a device run (which the kernel then reads through the queue).
+    const unsigned h_step = (head.h.layer_stride != 0) ? head.h.layer_stride : head.nof_re;
+    const size_t   h_bytes = ch_est_binding_bytes(h_run_binding, head.nof_ports, head.nof_layers, head.nof_re) +
+                           static_cast<size_t>(n_run - 1) * h_step * sizeof(cbf16_t);
     const size_t y_bytes  = y_stride * n_run * sizeof(cbf16_t);
     const size_t s_bytes  = static_cast<size_t>(head.nof_ports) * sizeof(float);
     const size_t eq_bytes = ((static_cast<size_t>(n_run) - 1) * eq_stride_elems + static_cast<size_t>(head.nof_re) * head.nof_layers) * 2 * sizeof(float);
     const size_t nv_bytes = ((static_cast<size_t>(n_run) - 1) * nv_stride_elems + static_cast<size_t>(head.nof_re) * head.nof_layers) * sizeof(float);
 
-    wrapped_buffer b_h = wrap_buffer(engine, h_alloc, h_bytes);
+    wrapped_buffer b_h = wrap_buffer(engine, h_run_binding.buffer, h_bytes);
     wrapped_buffer b_y = wrap_buffer(engine, y_alloc, y_bytes);
     wrapped_buffer b_s = wrap_buffer(engine, s_alloc, s_bytes);
     wrapped_buffer b_eq = wrap_buffer(engine, head.eq, eq_bytes);
@@ -623,7 +647,7 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     id<MTLComputePipelineState> run_pipeline = (n_run > 1) ? eq_resources().pipeline_batch : eq_resources().pipeline;
     used_pipeline                            = run_pipeline;
     [enc setComputePipelineState:run_pipeline];
-    [enc setBuffer:b_h.buffer offset:b_h.offset atIndex:0];
+    [enc setBuffer:b_h.buffer offset:(b_h.offset + h_run_binding.offset * sizeof(cbf16_t)) atIndex:0];
     [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
     [enc setBuffer:b_eq.buffer offset:b_eq.offset atIndex:2];
     [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:3];
@@ -653,6 +677,7 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
 }
 
 bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
+                                          bool        h_on_device,
                                           const void* y,
                                           const void* sigma2,
                                           void*       eq,
@@ -702,7 +727,7 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
       (void)metal::shared_burst::flush_pending();
     }
     eq_pending(engine).push_back(
-        {h, y, sigma2, eq, nv, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling});
+        {h, h_on_device, y, sigma2, eq, nv, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling});
     metal::shared_burst::set_flush_hook(engine, &eq_flush_hook);
     return true;
   }

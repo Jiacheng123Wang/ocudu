@@ -464,6 +464,7 @@ int main()
       auto run_per_symbol = [&]() {
         for (unsigned s = 0; s != nof_symbols; ++s) {
           engine.enqueue_burst(h_group.data() + s * h_stride,
+                               /*h_on_device=*/false,
                                y_group.data() + s * y_stride,
                                sigma2.data(),
                                static_cast<char*>(eq_sym.ptr) + s * eq_stride,
@@ -590,6 +591,7 @@ int main()
       auto per_symbol = [&]() {
         for (unsigned s = 0; s != e_syms; ++s) {
           engine.enqueue_burst(h_group.data() + s * e_h_str,
+                               /*h_on_device=*/false,
                                y_group.data() + s * e_y_str,
                                sigma2.data(),
                                static_cast<char*>(eq_sym.ptr) + static_cast<size_t>(s) * e_eq_gap * sizeof(cf_t),

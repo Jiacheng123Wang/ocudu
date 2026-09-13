@@ -120,7 +120,12 @@ public:
   /// \name Shared burst: the dispatch is appended to the command buffer that the following stages
   /// of the same demodulation share, so a whole burst costs one command buffer and one commit.
   ///@{
+  /// \param[in] h_on_device True when \p h points into the buffer the channel estimator produced
+  ///            the estimates in. The batched encoding then reads them where they are, with the
+  ///            dispatch, instead of copying them to the host: their producer may still be running,
+  ///            and only a GPU read ordered through the queue sees its writes.
   bool enqueue_burst(const ch_est_binding& h,
+                     bool                  h_on_device,
                      const void* y,
                      const void* sigma2,
                      void*       eq,
