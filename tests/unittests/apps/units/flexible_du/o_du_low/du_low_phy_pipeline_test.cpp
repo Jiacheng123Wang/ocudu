@@ -112,7 +112,7 @@ TEST(phy_pipeline_mode_test, unspecified_mode_follows_the_module_knobs)
 
 TEST(phy_pipeline_mode_test, cpu_mode_rejects_every_offload_module)
 {
-  for (const std::string& value : {"metal", "metal_mmse", "metal_nn_mmse", "helena"}) {
+  for (const char* value : {"metal", "metal_mmse", "metal_nn_mmse", "helena"}) {
     EXPECT_FALSE(resolve_conflict(make_request("cpu", "auto", value)).empty());
   }
   EXPECT_NE(resolve_conflict(make_request("cpu", "metal")).find("--pusch_dft_type"), std::string::npos);
