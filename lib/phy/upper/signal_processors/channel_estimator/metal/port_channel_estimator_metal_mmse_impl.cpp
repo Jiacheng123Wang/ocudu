@@ -201,6 +201,15 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   device_ce_enabled = (std::getenv("OCUDU_CE_CPU_CE") == nullptr);
   gpu_ce    = alloc_aligned<uint16_t>(static_cast<std::size_t>(MAX_LAYERS) * MAX_NOF_PRBS *
                                    NOF_SUBCARRIERS_PER_RB * MAX_NSYMB_PER_SLOT * 2);
+  // K4 (S-6c-0): the device noise variance and its pilot inputs (2 floats per complex sample).
+  gpu_nv        = alloc_aligned<float>(1);
+  gpu_pilots    = alloc_aligned<float>(2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * MAX_LAYERS *
+                                    MAX_NOF_PILOTS_SYMBOL);
+  // One CDM group per pair of layers (type-1 DM-RS), so at most MAX_LAYERS / 2 of them.
+  static constexpr unsigned MAX_CDM_GROUPS = MAX_LAYERS / 2;
+  gpu_rx_pilots = alloc_aligned<float>(2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * MAX_CDM_GROUPS *
+                                       MAX_NOF_PILOTS_SYMBOL);
+  gpu_epochs    = alloc_aligned<float>(MAX_NSYMB_PER_SLOT);
 
   // metal_nn_mmse flavor: compile the simdgroup_matrix 8x8 pipelines and stage the
   // quad-packed pilot matrix qy (zero-initialized: tail-quad columns of non-existent
@@ -245,6 +254,10 @@ port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl(
   free_aligned(gpu_qy);
   free_aligned(gpu_h);
   free_aligned(gpu_ce);
+  free_aligned(gpu_nv);
+  free_aligned(gpu_pilots);
+  free_aligned(gpu_rx_pilots);
+  free_aligned(gpu_epochs);
 }
 
 float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estimation_stage_args& args)
@@ -601,6 +614,43 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         dc_sc = *args.dc_position - first_sc;
       }
     }
+    // K4 (S-6c-0): the equalizer's noise variance is reduced on the device out of the same h, from
+    // the estimates at the pilot positions and the transmitted/received pilots. The latter two are
+    // inputs the host already holds, copied into the staging buffers in the [npt][slices][npf]
+    // layout the kernel indexes by.
+    gpu_nv_ready          = false;
+    unsigned nof_cdm_groups = 0;
+    if (nof_re_total != 0) {
+      const unsigned npf = args.nof_symbol_pilots;
+      nof_cdm_groups     = args.rx_pilots.size().nof_slices;
+      if ((npf != 0) && (nof_cdm_groups != 0) && (npt <= MAX_DMRS_SYMBOLS)) {
+        for (unsigned i_dmrs = 0; i_dmrs != npt; ++i_dmrs) {
+          for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+            span<const cf_t> src = args.pilots.get_symbol(args.hop_offset + i_dmrs, i_layer);
+            float* dst = gpu_pilots + ((static_cast<std::size_t>(i_dmrs) * nof_layers + i_layer) * npf) * 2;
+            for (unsigned j = 0; j != npf; ++j) {
+              dst[2 * j]     = src[j].real();
+              dst[2 * j + 1] = src[j].imag();
+            }
+          }
+          for (unsigned i_group = 0; i_group != nof_cdm_groups; ++i_group) {
+            span<const cf_t> src = args.rx_pilots.get_symbol(i_dmrs, i_group);
+            float* dst = gpu_rx_pilots + ((static_cast<std::size_t>(i_dmrs) * nof_cdm_groups + i_group) * npf) * 2;
+            for (unsigned j = 0; j != npf; ++j) {
+              dst[2 * j]     = src[j].real();
+              dst[2 * j + 1] = src[j].imag();
+            }
+          }
+        }
+        // Symbol start times (the CFO rotation of the reduction) and the comb geometry.
+        for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+          gpu_epochs[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
+        }
+      } else {
+        nof_cdm_groups = 0;
+      }
+    }
+
     metal::mmse_engine::reformat_stage reformat{};
     reformat.dst         = gpu_ce;
     reformat.offsets     = re_offsets.data();
@@ -609,8 +659,39 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     reformat.drpp_dmrs     = gpu_ce_drpp_dmrs;
     reformat.dmrs_re_bits  = gpu_ce_dmrs_re_bits;
     reformat.dmrs_sym_bits = gpu_ce_dmrs_sym_bits;
-    reformat.total_re    = nof_re_total;
-    reformat.dc_sc       = dc_sc;
+
+    // K4 is attached only when the whole hop is covered (same rule as K3) and the pilot inputs were
+    // staged: it reads the estimates at the pilot positions out of the same h.
+    if ((nof_cdm_groups != 0) && (nof_re_total != 0)) {
+      reformat.noise.nv                  = gpu_nv;
+      reformat.noise.pilots              = gpu_pilots;
+      reformat.noise.rx_pilots           = gpu_rx_pilots;
+      reformat.noise.symbol_start_epochs = gpu_epochs;
+      reformat.noise.npt                 = npt;
+      reformat.noise.nof_cdm_groups      = nof_cdm_groups;
+      reformat.noise.npf                 = args.nof_symbol_pilots;
+      reformat.noise.nof_prb             = nof_prb;
+      reformat.noise.comb_size           = static_cast<unsigned>(__builtin_popcount(gpu_ce_dmrs_re_bits));
+      reformat.noise.dmrs_re_bits        = gpu_ce_dmrs_re_bits;
+      reformat.noise.beta                = args.beta_scaling;
+      reformat.noise.compensate_cfo      = args.compensate_cfo_flag;
+      // The same normalization and SINR ceiling the host applies to the variance it reports.
+      reformat.noise.nof_dmrs_pilots     = args.nof_symbol_pilots * npt;
+      reformat.noise.nof_cdm             = divide_ceil(nof_layers, 2);
+      reformat.noise.min_snr_power       = convert_dB_to_power(MAX_SINR_DB);
+      if (args.cfo_hop.has_value() && args.compensate_cfo_flag) {
+        reformat.noise.cfo = *args.cfo_hop;
+      }
+      for (unsigned i_dmrs = 0; i_dmrs != npt; ++i_dmrs) {
+        reformat.noise.dmrs_slots[i_dmrs] = dmrs_sym[i_dmrs];
+      }
+      // The reduction needs the comb geometry, which stage_re_masks() has just published.
+      if (reformat.noise.comb_size == 0) {
+        reformat.noise.nv = nullptr;
+      }
+    }
+    reformat.total_re       = nof_re_total;
+    reformat.dc_sc          = dc_sc;
     // Standard blocks cover subcarriers [0, nf_std * nof_blocks) of the batch; the edge block, when
     // the batch carries one, sits in the systems [sys_tail, ...) at block 0.
     const auto reformat_for = [&](unsigned nf_std, unsigned nf_tail, unsigned sys_tail) {
@@ -668,6 +749,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       gpu_ce_ready         = merged_ok && (nof_re_total != 0);
       gpu_ce_layers        = nof_layers;
       gpu_ce_total_re      = nof_re_total;
+      gpu_nv_ready         = gpu_ce_ready && (reformat.noise.nv != nullptr);
       if (merged_ok) {
         unpack_engine_group(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st);
         unpack_engine_group(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st);
@@ -694,7 +776,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         gpu_ce_ready          = std_blocks_ok && covers_hop && (nof_re_total != 0);
         gpu_ce_layers         = nof_layers;
         gpu_ce_total_re       = nof_re_total;
-      }
+        gpu_nv_ready          = gpu_ce_ready && (reformat.noise.nv != nullptr);
+       }
       if (rem_prb != 0) {
         // Tail/edge block - and when nof_prb < block_prb this is the WHOLE hop (single block).
         //
@@ -734,6 +817,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
             gpu_ce_ready    = tail_ok && (nof_re_total != 0);
             gpu_ce_layers   = nof_layers;
             gpu_ce_total_re = nof_re_total;
+            gpu_nv_ready    = gpu_ce_ready && (reformat.noise.nv != nullptr);
           }
         } else {
           // Route the block to the CPU fallback loop below. tail_ok MUST be cleared: leaving it

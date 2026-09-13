@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "ocudu/ran/pusch/pusch_constants.h"
 #include <cstdint>
 
 namespace ocudu {
@@ -77,6 +78,38 @@ public:
     /// DC subcarrier of the allocation, relative to its first subcarrier (>= nf_std * n_blk +
     /// nf_tail when there is none): the gather writes a zero estimate there.
     unsigned dc_sc = ~0u;
+
+    /// \brief Optional K4 stage: the noise variance the equalizer scales its soft bits with,
+    /// reduced from the same h into a device value, so that no consumer of the estimate has to
+    /// read the grid before dispatching the equalizer.
+    struct noise_stage_t {
+      /// Destination: one float, written by the reduction.
+      float* nv = nullptr;
+      /// Transmitted pilots, [npt][nof_layers][npf] complex, staged by the estimator.
+      const void* pilots = nullptr;
+      /// Received pilots, [npt][nof_cdm_groups][npf] complex, staged by the estimator.
+      const void* rx_pilots = nullptr;
+      /// Start time of every slot symbol, in symbol durations (MAX_NSYMB_PER_SLOT entries).
+      const float* symbol_start_epochs = nullptr;
+      unsigned     npt                 = 0;
+      unsigned     nof_cdm_groups      = 0;
+      unsigned     npf                 = 0;
+      /// Slot symbols carrying DM-RS in this hop, ascending. The kernel's parameter block hard-codes
+      /// this size, so it must match the estimator's MAX_DMRS_SYMBOLS (4) exactly.
+      unsigned dmrs_slots[4] = {};
+      unsigned nof_prb                      = 0;
+      unsigned comb_size                    = 0;
+      unsigned dmrs_re_bits                 = 0;
+      float    beta                         = 1.0F;
+      float    cfo                          = 0.0F;
+      bool     compensate_cfo               = false;
+      /// Pilots of the hop (all its DM-RS symbols and layers) and the CDM groups of the
+      /// transmission, i.e. the sample count the host normalizes the variance by, plus the SINR
+      /// ceiling it bounds it with.
+      unsigned nof_dmrs_pilots = 0;
+      unsigned nof_cdm         = 0;
+      float    min_snr_power   = 1.0F;
+    } noise;
   };
 
   /// \brief Batched inversion (K1): A_inv = (A)^-1 for each system, in-place Gauss-Jordan.

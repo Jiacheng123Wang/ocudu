@@ -13,6 +13,7 @@
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/ran/cyclic_prefix.h"
 
 #include <atomic>
 #include <cstdio>
@@ -120,6 +121,8 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    apply_pipe  = nil;
   // K3: per-symbol, mask-compressed cbf16 estimates for the equalizer (optional, loaded on demand).
   id<MTLComputePipelineState>    reformat_pipe = nil;
+  // K4: the equalizer's noise variance, reduced on the device (optional, same metallib).
+  id<MTLComputePipelineState>    noise_pipe    = nil;
   // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
   id<MTLComputePipelineState>    weights_matrix_pipe = nil;
   id<MTLComputePipelineState>    apply_matrix_pipe  = nil;
@@ -292,6 +295,81 @@ static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
       [enc dispatchThreads:MTLSizeMake(nof_threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     }
   }
+
+  // K4 (optional): the noise variance the equalizer scales its soft bits with, reduced from the
+  // same h - one threadgroup covers the hop. It reads the estimates at the pilot positions, hence
+  // the barrier after K2 (K3 and K4 write and read disjoint buffers, so their order is free).
+  const ocudu::metal::mmse_engine::reformat_stage::noise_stage_t& noise =
+      (reformat != nullptr) ? reformat->noise : ocudu::metal::mmse_engine::reformat_stage::noise_stage_t{};
+  static const bool k4_enabled = (std::getenv("OCUDU_CE_NO_K4") == nullptr);
+  if (k4_enabled && (reformat != nullptr) && (e->noise_pipe != nil) && (noise.nv != nullptr) && (noise.pilots != nullptr) &&
+      (noise.rx_pilots != nullptr) && (noise.symbol_start_epochs != nullptr) && (noise.npt != 0) &&
+      (noise.npf != 0) && (noise.comb_size != 0) && (reformat->nof_layers != 0)) {
+    const NSUInteger pilots_bytes =
+        static_cast<NSUInteger>(noise.npt) * reformat->nof_layers * noise.npf * 2 * sizeof(float);
+    const NSUInteger rx_bytes =
+        static_cast<NSUInteger>(noise.npt) * noise.nof_cdm_groups * noise.npf * 2 * sizeof(float);
+    id<MTLBuffer> pilots_buf = e->wrap(noise.pilots, pilots_bytes);
+    id<MTLBuffer> rx_buf     = e->wrap(noise.rx_pilots, rx_bytes);
+    id<MTLBuffer> nv_buf     = e->wrap(noise.nv, sizeof(float));
+    if (pilots_buf != nil && rx_buf != nil && nv_buf != nil) {
+      struct mmse_noise_params {
+        uint32_t nout_stride;
+        uint32_t n_blk;
+        uint32_t nf_std;
+        uint32_t sc_tail_base;
+        uint32_t nf_tail;
+        uint32_t sys_tail;
+        uint32_t nof_layers;
+        uint32_t npt;
+        uint32_t nof_cdm_groups;
+        uint32_t npf;
+        uint32_t nof_prb;
+        uint32_t comb_size;
+        uint32_t dmrs_re_bits;
+        uint32_t dmrs_slots[4]; // must match mmse_noise_params and reformat_stage::noise_stage_t
+        float    beta;
+        float    cfo;
+        uint32_t compensate_cfo;
+        uint32_t nof_dmrs_pilots;
+        uint32_t nof_cdm;
+        float    min_snr_power;
+      } nparams{static_cast<uint32_t>(nout),
+                static_cast<uint32_t>(nof_blocks),
+                reformat->nf_std,
+                reformat->nf_std * static_cast<uint32_t>(nof_blocks),
+                reformat->has_tail ? reformat->nf_tail : 0u,
+                reformat->sys_tail,
+                reformat->nof_layers,
+                noise.npt,
+                noise.nof_cdm_groups,
+                noise.npf,
+                noise.nof_prb,
+                noise.comb_size,
+                noise.dmrs_re_bits,
+                {},
+                noise.beta,
+                noise.cfo,
+                noise.compensate_cfo ? 1u : 0u,
+                noise.nof_dmrs_pilots,
+                noise.nof_cdm,
+                noise.min_snr_power};
+      for (unsigned i = 0; i != 4; ++i) {
+        nparams.dmrs_slots[i] = noise.dmrs_slots[i];
+      }
+      [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+      [enc setComputePipelineState:e->noise_pipe];
+      [enc setBuffer:h_buf offset:0 atIndex:0];
+      [enc setBuffer:pilots_buf offset:0 atIndex:1];
+      [enc setBuffer:rx_buf offset:0 atIndex:2];
+      [enc setBuffer:nv_buf offset:0 atIndex:3];
+      [enc setBytes:&nparams length:sizeof(nparams) atIndex:4];
+      [enc setBytes:noise.symbol_start_epochs
+             length:static_cast<NSUInteger>(ocudu::MAX_NSYMB_PER_SLOT) * sizeof(float)
+             atIndex:5];
+      [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    }
+  }
 }
 
 } // namespace
@@ -360,6 +438,13 @@ bool mmse_engine::init(const char* metallib_path)
                                                               options:MTLPipelineOptionNone
                                                            reflection:nil
                                                                 error:&err];
+  }
+  id<MTLFunction> noise_fn = [e->library newFunctionWithName:@"mmse_noise"];
+  if (noise_fn != nil) {
+    e->noise_pipe = [e->device newComputePipelineStateWithFunction:noise_fn
+                                                           options:MTLPipelineOptionNone
+                                                        reflection:nil
+                                                             error:&err];
   }
   // ARC-managed; no explicit release.
   return e->inv_pipe != nil && e->weights_pipe != nil && e->apply_pipe != nil;

@@ -1596,6 +1596,7 @@ int main()
                                                  // equalizer (see the host path's own erasure).
                                                  {25, 2, 137}}};
     unsigned                          total_checked = 0;
+    float                             worst_nv_rel  = 0.0F;
 
     // One instance for every shape: the estimator memoizes the staged masks per allocation, so this
     // also exercises the invalidation when the allocation changes from hop to hop.
@@ -1702,22 +1703,47 @@ int main()
         }
       }
       total_checked += checked;
-      std::printf("Test 12 (%2u PRB, %u DMRS%s): device estimates %s (%u REs checked, %u mismatching)\n",
+
+      // K4 (S-6c-0): the noise variance the equalizer scales its soft bits with is reduced on the
+      // device out of the same h. The reduction order is not the host's, so this compares the two
+      // values numerically - a bit-for-bit match is not achievable for a sum over hundreds of
+      // terms, and the quantity is a statistic.
+      const float* dev_nv  = mmse->device_noise_variance();
+      const float  host_nv = res.get_noise_variance();
+      if (dev_nv == nullptr) {
+        std::printf("Test 12 FAIL: the device noise variance was not produced (%u PRB)\n", n_prb);
+        return -1;
+      }
+      const float nv_rel = std::abs(*dev_nv - host_nv) / std::max(std::abs(host_nv), 1e-30F);
+      worst_nv_rel       = std::max(worst_nv_rel, nv_rel);
+      if (!(nv_rel < 1e-5F)) {
+        std::printf("Test 12 FAIL: device noise variance %.9e vs host %.9e (relative %.3e)\n",
+                    static_cast<double>(*dev_nv),
+                    static_cast<double>(host_nv),
+                    static_cast<double>(nv_rel));
+        return -1;
+      }
+
+      std::printf("Test 12 (%2u PRB, %u DMRS%s): device estimates %s (%u REs checked, %u mismatching), "
+                  "noise variance %s (relative %.2e)\n",
                   n_prb,
                   n_sym,
                   cfg.dc_position.has_value() ? ", DC" : "",
                   (bad == 0) ? "match the host path" : "DEVIATE",
                   checked,
-                  bad);
+                  bad,
+                  (nv_rel < 1e-5F) ? "matches" : "DEVIATES",
+                  static_cast<double>(nv_rel));
       if (bad != 0) {
         std::printf("Test 12 FAIL: %u of %u device REs differ from the host gather\n", bad, checked);
         return -1;
       }
     }
     std::printf("Test 12 PASS: K3 reproduces the host gather bit for bit (%u REs over %u shapes, one "
-                "instance)\n",
+                "instance); K4 noise variance matches the host (worst relative %.2e)\n",
                 total_checked,
-                static_cast<unsigned>(shapes.size()));
+                static_cast<unsigned>(shapes.size()),
+                static_cast<double>(worst_nv_rel));
 
     // Negative case: the destination index is arithmetic, which needs a contiguous allocation. A
     // non-contiguous one must produce NO device estimates - the consumer then gathers them on the

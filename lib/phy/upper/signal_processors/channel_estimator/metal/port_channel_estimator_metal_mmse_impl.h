@@ -87,6 +87,14 @@ public:
   /// allocation, or when the engine failed.
   bool device_estimates_ready_last() const { return gpu_ce_ready; }
 
+  /// \brief Device noise variance of the last hop (K4), or nullptr when it was not produced.
+  ///
+  /// The equalizer scales its soft bits with this value. It is reduced on the device out of the
+  /// same h the estimates come from, so a consumer never has to read the grid before dispatching
+  /// the equalizer. \note The reduction order is not the host's, so the value matches
+  /// get_noise_variance() to floating-point reassociation, not bit for bit.
+  const float* device_noise_variance() const { return gpu_nv_ready ? gpu_nv : nullptr; }
+
   /// Device-side per-symbol channel estimates of the last hop: [layer][total_re] complex cbf16,
   /// laid out per symbol by device_estimate_offsets(). Only valid when
   /// device_estimates_ready_last(); \c i_layer must be below device_estimate_layers().
@@ -271,6 +279,14 @@ private:
   unsigned                  gpu_ce_layers     = 0;
   unsigned                  gpu_ce_total_re   = 0;
   bool                      gpu_ce_ready      = false;
+
+  /// K4 (S-6c-0): the equalizer's noise variance reduced on the device, and the pilot inputs the
+  /// reduction reads (staged by the estimator, [npt][layers or groups][npf] complex each).
+  float* gpu_nv        = nullptr;
+  float* gpu_pilots    = nullptr;
+  float* gpu_rx_pilots = nullptr;
+  float* gpu_epochs    = nullptr;
+  bool   gpu_nv_ready  = false;
 
   /// Maximum number of full blocks per slot for the configured block size.
   unsigned max_blocks;

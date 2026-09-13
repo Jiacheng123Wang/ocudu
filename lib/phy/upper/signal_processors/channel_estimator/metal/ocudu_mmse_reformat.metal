@@ -110,3 +110,172 @@ kernel void mmse_reformat(device const float* h [[buffer(0)]],      // [nof_syst
   dst[2 * idx]     = ocudu_to_bf16(re);
   dst[2 * idx + 1] = ocudu_to_bf16(im);
 }
+
+// -------------------------------------------------------------------------------------------
+// K4: the equalizer's noise variance, reduced on the GPU out of the same h K2 has just written.
+//
+// The value the equalizer scales its soft bits with is the residual energy of the received DM-RS
+// pilots against the ones regenerated from the channel estimate:
+//
+//   noise = SUM over (DM-RS symbol s, pilot sc) | SUM over the layers of s's CDM group
+//                    ( beta / nof_lse_symbols * SUM over DM-RS symbols s2 of H[s2][l][sc] )
+//                    * X[s][l][sc] * exp(j 2 pi f_cfo t_s)  -  Y[s][g][sc] |^2
+//
+// with H the filtered (MMSE) estimates at the pilot positions - the only term that comes from the
+// estimator's OUTPUT, which is why this belongs in the estimator's own command buffer: the host
+// then never has to read the grid before the equalizer can be dispatched. X (the transmitted
+// pilots) and Y (the received ones) are inputs the host already holds, so they are staged once per
+// hop and the kernel reads them from the device.
+//
+// One threadgroup per hop: the reduction spans a few hundred pilots per DM-RS symbol, so a single
+// threadgroup with a register accumulator and one tree reduction beats a grid-wide atomic. The
+// summation order is not the host's, so the result matches it to floating-point reassociation
+// (~1e-7 relative on float), not bit for bit - the value is a statistic, and the resulting soft
+// bits are compared separately.
+struct mmse_noise_params {
+  // Block geometry of h, addressed exactly as K3 does.
+  uint  nout_stride;
+  uint  n_blk;
+  uint  nf_std;
+  uint  sc_tail_base;
+  uint  nf_tail;
+  uint  sys_tail;
+  uint  nof_layers;
+  // Pilots.
+  uint  npt;              // DM-RS symbols of the hop (the time average runs over them).
+  uint  nof_cdm_groups;   // CDM groups without data (one per pair of layers).
+  uint  npf;              // Pilots per DM-RS symbol and layer.
+  uint  nof_prb;          // PRBs of the allocation (pilot index -> subcarrier).
+  uint  comb_size;        // DM-RS REs per PRB.
+  uint  dmrs_re_bits;     // DM-RS RE positions within a PRB (12 bits, ascending).
+  uint  dmrs_slots[4];    // Slot symbols carrying DM-RS in this hop, ascending (the estimator
+                          // produces at most MAX_DMRS_SYMBOLS = 4 per hop).
+  float beta;             // DM-RS to data amplitude scaling.
+  float cfo;              // Estimated carrier frequency offset of the hop.
+  uint  compensate_cfo;   // 0 or 1.
+  // Finalization of the value the equalizer consumes (identical to the host's).
+  uint  nof_dmrs_pilots;  // Pilots of the hop (all DM-RS symbols and layers).
+  uint  nof_cdm;          // CDM groups of the transmission (ceil(nof_layers / 2)).
+  float min_snr_power;    // convert_dB_to_power(MAX_SINR_DB): the SINR ceiling the variance is
+                          // bounded by (a noiseless-synthetic guard).
+};
+
+/// Subcarrier of the \c sc -th pilot within the hop: pilots are PRB-major, comb ascending.
+inline uint mmse_noise_pilot_subcarrier(constant mmse_noise_params& p, uint sc)
+{
+  const uint prb    = sc / p.comb_size;
+  uint       within = sc % p.comb_size;
+  uint       pos    = 0;
+  for (uint i_re = 0; i_re != 12; ++i_re) {
+    if (((p.dmrs_re_bits >> i_re) & 1u) == 0) {
+      continue;
+    }
+    if (within == 0) {
+      pos = i_re;
+      break;
+    }
+    --within;
+  }
+  return prb * 12 + pos;
+}
+
+/// Filtered estimate at (slot symbol, layer, pilot subcarrier), out of the block layout of h.
+inline float2 mmse_noise_load_h(device const float* h, constant mmse_noise_params& p, uint sym, uint layer, uint sc)
+{
+  const uint sc_h = mmse_noise_pilot_subcarrier(p, sc);
+  uint       nf, b, local_sc, sys;
+  if (sc_h < p.sc_tail_base) {
+    nf       = p.nf_std;
+    b        = sc_h / nf;
+    local_sc = sc_h % nf;
+    sys      = layer;
+  } else {
+    nf       = p.nf_tail;
+    b        = 0;
+    local_sc = sc_h - p.sc_tail_base;
+    sys      = p.sys_tail + layer;
+  }
+  device const float* hp =
+      h + (sys * p.n_blk + b) * (2 * p.nout_stride) + 2 * (sym * nf + local_sc);
+  return float2{hp[0], hp[1]};
+}
+
+kernel void mmse_noise(device const float*  h [[buffer(0)]],
+                       device const float2* pilots [[buffer(1)]],    // [npt][nof_layers][npf]
+                       device const float2* rx_pilots [[buffer(2)]], // [npt][nof_cdm_groups][npf]
+                       device float*        nv [[buffer(3)]],        // one value per estimator
+                       constant mmse_noise_params& p [[buffer(4)]],
+                       constant float*      epochs [[buffer(5)]],    // symbol start times, in symbols
+                       uint tid [[thread_position_in_threadgroup]],
+                       uint tg_size [[threads_per_threadgroup]])
+{
+  float acc      = 0.0F;
+  float rsrp_acc = 0.0F; // SUM |H|^2 over the hop's DM-RS symbols, layers and pilots
+
+  for (uint sc = tid; sc < p.npf; sc += tg_size) {
+    // The filtered estimates are loaded ONCE per (layer, DM-RS symbol) and reused for every DM-RS
+    // symbol of the hop: they are the same values, and the layout - a DM-RS comb, one subcarrier
+    // every twelve - makes each load an uncoalesced, high-latency fetch. Loading them per symbol
+    // (the first version did) multiplied the latency of the whole kernel by the number of symbols.
+    float2 h_avg[4];
+    for (uint l = 0; l != 4; ++l) {
+      h_avg[l] = float2{0.0F, 0.0F};
+    }
+    for (uint l = 0; l != p.nof_layers; ++l) {
+      float2 sum = float2{0.0F, 0.0F};
+      for (uint s2 = 0; s2 != p.npt; ++s2) {
+        const float2 h_sym = mmse_noise_load_h(h, p, p.dmrs_slots[s2], l, sc);
+        sum += h_sym;
+        rsrp_acc += h_sym.x * h_sym.x + h_sym.y * h_sym.y;
+      }
+      h_avg[l] = sum * (p.beta / static_cast<float>(p.npt));
+    }
+
+    for (uint i_dmrs = 0; i_dmrs != p.npt; ++i_dmrs) {
+      const uint sym = p.dmrs_slots[i_dmrs];
+      for (uint g = 0; g != p.nof_cdm_groups; ++g) {
+        const uint layer_begin = 2 * g;
+        const uint layer_end   = min(layer_begin + 2, p.nof_layers);
+        float2     predicted   = float2{0.0F, 0.0F};
+        for (uint l = layer_begin; l != layer_end; ++l) {
+          // Regenerate the observation of this symbol out of the time-averaged estimate.
+          const float2 x   = pilots[(i_dmrs * p.nof_layers + l) * p.npf + sc];
+          const float2 hav = h_avg[l];
+          predicted += float2{hav.x * x.x - hav.y * x.y, hav.x * x.y + hav.y * x.x};
+        }
+        if (p.compensate_cfo != 0) {
+          // The same rotation the host applies: the CFO times the start time of the symbol, the
+          // latter being an input (it depends on the cyclic prefix, not on the symbol index).
+          const float phase = 2.0F * M_PI_F * p.cfo * epochs[sym];
+          const float c     = cos(phase);
+          const float s     = sin(phase);
+          predicted = float2{predicted.x * c - predicted.y * s, predicted.x * s + predicted.y * c};
+        }
+
+        const float2 y = rx_pilots[(i_dmrs * p.nof_cdm_groups + g) * p.npf + sc];
+        const float2 e = predicted - y;
+        acc += e.x * e.x + e.y * e.y;
+      }
+    }
+  }
+
+  // Threadgroup tree reduction (one threadgroup covers the whole hop).
+  threadgroup float2 partial[256];
+  partial[tid] = float2{acc, rsrp_acc};
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint stride = tg_size / 2; stride != 0; stride /= 2) {
+    if (tid < stride) {
+      partial[tid] += partial[tid + stride];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  if (tid == 0) {
+    // The host's finalization: normalize by the number of independent noise samples, and bound the
+    // result from below by the SINR ceiling (a guard for noiseless synthetic inputs).
+    const float rsrp_avg = (partial[0].y * p.beta * p.beta) /
+                           (static_cast<float>(p.nof_dmrs_pilots) * static_cast<float>(p.nof_layers));
+    const float min_nv = rsrp_avg / p.min_snr_power;
+    const float energy = partial[0].x / (static_cast<float>(p.nof_dmrs_pilots * p.nof_cdm) - 1.0F);
+    nv[0]              = max(min_nv, energy);
+  }
+}
