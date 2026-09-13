@@ -22,9 +22,49 @@ struct shared_queue_state {
   id<MTLCommandQueue> queue         = nil;
   id<MTLCommandQueue> backend_queue = nil;
 
-  std::mutex                       mutex;
-  /// No-copy wraps shared by every engine (see shared_queue::wrap_no_copy).
-  std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> wrap_cache;
+  std::mutex mutex;
+
+  /// One no-copy wrap: the buffer, the host range it covers, and the allocation it was made for.
+  ///
+  /// Address containment alone is not sound. The allocator hands the pages of a released block to
+  /// the next allocation, so two different buffers can share a page range over time; and the stages
+  /// of the chain ask for different ranges of ONE allocation (a group submit wraps the whole group,
+  /// a per-symbol stage wraps a slice of it), so those must share the object. The allocation
+  /// describes which case applies: compat::describe_aligned_allocation() answers it exactly, and a
+  /// mapping is only reused for a request of the same allocation.
+  struct wrap_entry {
+    id<MTLBuffer> buffer = nil;
+    /// First byte of the mapped range.
+    const char* base = nullptr;
+    /// Bytes the mapping covers (page rounded).
+    size_t len = 0;
+    /// Allocation the mapping was created for (null when the address belongs to no known block).
+    const void* alloc = nullptr;
+
+    /// True when a request at \p p may be served by this mapping.
+    bool serves(const char* p, size_t aligned) const
+    {
+      if ((base == nullptr) || (p < base)) {
+        return false;
+      }
+      if ((static_cast<size_t>(p - base) + aligned) > len) {
+        return false;
+      }
+      if (alloc == nullptr) {
+        return true;
+      }
+      void*       req_alloc = nullptr;
+      size_t      req_size  = 0;
+      const bool  known     = compat::describe_aligned_allocation(p, &req_alloc, &req_size);
+      // An unknown request (a slice of a mapping, a non-allocator address) is left to the geometry
+      // test above; a known one must belong to the very allocation this mapping was made for.
+      return !known || (req_alloc == alloc);
+    }
+  };
+
+  /// No-copy wraps shared by every engine (see shared_queue::wrap_no_copy), keyed by the address
+  /// the mapping was created for.
+  std::unordered_map<const void*, wrap_entry> wrap_cache;
 
   /// Pending chain of one queue: the newest commit and how many are outstanding. Kept per queue
   /// because a wait on a command buffer of one queue cannot stand for the work of the other (see
@@ -108,33 +148,41 @@ id<MTLBuffer> shared_queue::wrap_no_copy(id<MTLDevice> device, const void* ptr, 
   // requested range wins, even when a smaller mapping exists for the very same address - a stale
   // small mapping from an earlier wrap must not shadow the group-wide one, or the stages would bind
   // different objects again.
-  if (offset != nullptr) {
-    const char*   p        = static_cast<const char*>(ptr);
-    id<MTLBuffer> best     = nil;
-    size_t        best_off = 0;
-    size_t        best_len = 0;
-    for (const auto& entry : s.wrap_cache) {
-      const auto* base  = static_cast<const char*>(entry.first);
-      const auto  avail = entry.second.second;
-      if ((p >= base) && ((static_cast<size_t>(p - base) + aligned) <= avail) && (avail > best_len)) {
-        best     = entry.second.first;
-        best_off = static_cast<size_t>(p - base);
-        best_len = avail;
-      }
+  const char* const p = static_cast<const char*>(ptr);
+
+  // The allocation the request starts in, when the allocator knows it (see wrap_entry::serves).
+  void*  alloc_base = nullptr;
+  size_t alloc_size = 0;
+  const bool alloc_known = compat::describe_aligned_allocation(ptr, &alloc_base, &alloc_size);
+
+  // Containment lookup: the mapping created for the closest address at or below the request wins,
+  // provided it covers the page-rounded request and belongs to the same allocation. The
+  // largest-mapping rule is what the chained stages need; the allocation check is what keeps two
+  // allocations that share a page range apart.
+  const shared_queue_state::wrap_entry* best     = nullptr;
+  size_t                                best_off = 0;
+  for (const auto& entry : s.wrap_cache) {
+    const shared_queue_state::wrap_entry& candidate = entry.second;
+    if (!candidate.serves(p, aligned)) {
+      continue;
     }
-    if (best != nil) {
-      ++s.wrap_hits;
-      publish_offset(best_off);
-      return best;
+    if ((best == nullptr) || (candidate.base > best->base)) {
+      best     = &candidate;
+      best_off = static_cast<size_t>(p - candidate.base);
     }
+  }
+  if (best != nullptr) {
+    ++s.wrap_hits;
+    publish_offset(best_off);
+    return best->buffer;
   }
 
   auto it = s.wrap_cache.find(ptr);
   if (it != s.wrap_cache.end()) {
-    if (it->second.second >= aligned) {
+    if (it->second.len >= aligned) {
       ++s.wrap_hits;
       publish_offset(0);
-      return it->second.first;
+      return it->second.buffer;
     }
     // The cached mapping is smaller than what this call needs: replace it. The object handed out
     // so far stays alive (its owner and any command buffer referencing it retain it), so a stage
@@ -143,8 +191,11 @@ id<MTLBuffer> shared_queue::wrap_no_copy(id<MTLDevice> device, const void* ptr, 
     s.wrap_cache.erase(it);
     ++s.wrap_replaces;
   }
+  // Map the whole allocation when the allocator knows it, so that a later request for a smaller
+  // slice of the same allocation is served by this object instead of creating a second one.
+  const size_t mapped_len = alloc_known ? ((alloc_size + page - 1) / page) * page : aligned;
   id<MTLBuffer> buf = [device newBufferWithBytesNoCopy:(void*)ptr
-                                               length:aligned
+                                               length:mapped_len
                                               options:MTLResourceStorageModeShared
                                           deallocator:nil];
   if (buf == nil) {
@@ -153,7 +204,7 @@ id<MTLBuffer> shared_queue::wrap_no_copy(id<MTLDevice> device, const void* ptr, 
   }
   ++s.wrap_creates;
   publish_offset(0);
-  s.wrap_cache[ptr] = std::make_pair(buf, aligned);
+  s.wrap_cache[ptr] = shared_queue_state::wrap_entry{buf, p, mapped_len, alloc_known ? alloc_base : nullptr};
   return buf;
 }
 

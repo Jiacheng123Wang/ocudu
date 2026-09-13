@@ -95,7 +95,7 @@ struct worker {
   size_t llr_gap = 0;
   unsigned bits_per_re = 0;
 
-  void init(unsigned re, unsigned symbols, unsigned ports, unsigned layers, unsigned seed)
+  void init(unsigned re, unsigned symbols, unsigned ports, unsigned layers, unsigned seed, bool wide_slots)
   {
     nof_re     = re;
     nof_syms   = symbols;
@@ -107,6 +107,13 @@ struct worker {
     nv_gap  = ((static_cast<size_t>(nof_re) * layers * sizeof(float) + page - 1) / page) * page / sizeof(float);
     bits_per_re = layers * get_bits_per_symbol(modulation_scheme::QPSK);
     llr_gap = ((static_cast<size_t>(nof_re) * bits_per_re + page - 1) / page) * page;
+    if (wide_slots) {
+      // The PUSCH demodulator's group geometry: the same slot sizes for a much larger maximum
+      // symbol count, so every slot is one page or more and the three buffers are ~448 KiB each.
+      eq_gap  = 32768 / sizeof(cf_t);
+      nv_gap  = 16384 / sizeof(float);
+      llr_gap = 32768;
+    }
 
     equalizer = std::make_unique<channel_equalizer_metal>(false);
     demapper  = std::make_unique<demodulation_mapper_metal>();
@@ -145,6 +152,9 @@ struct worker {
     nv_est.assign(nof_ports, 0.02F);
 
     eq.allocate(static_cast<size_t>(eq_gap) * nof_syms * sizeof(cf_t));
+    if (std::getenv("OCUDU_HANDOFF_ADDR") != nullptr) {
+      std::fprintf(stderr, "[addr] eq=%p nv=%p llr=%p y=%p h=%p\n", eq.ptr, nv.ptr, llr_ref.ptr, y[0].data(), h[0].data());
+    }
     nv.allocate(static_cast<size_t>(nv_gap) * nof_syms * sizeof(float));
     llr_ref.allocate(static_cast<size_t>(llr_gap) * nof_syms);
     llr_dut.allocate(static_cast<size_t>(llr_gap) * nof_syms);
@@ -176,11 +186,15 @@ struct worker {
     }
   }
 
-  /// Unit under test: the deferred group, one wait per stage and group.
-  void run_deferred()
+  /// Unit under test: the deferred group, with a configurable wait policy per stage so the failing
+  /// combination of the real chain can be reproduced one step at a time.
+  void run_deferred(bool defer_eq, bool defer_demap)
   {
     for (unsigned s = 0; s != nof_syms; ++s) {
       equalizer->submit(eq_of(s), nv_of(s), ch_symbols[s], ch_est[s], nv_est, 1.0F);
+    }
+    if (!defer_eq) {
+      equalizer->wait();
     }
     for (unsigned s = 0; s != nof_syms; ++s) {
       demapper->submit(llr_of(llr_dut, s), eq_of(s), nv_of(s), modulation_scheme::QPSK);
@@ -214,21 +228,28 @@ int main()
   const unsigned rounds   = std::max(1U, env_unsigned("OCUDU_HANDOFF_ROUNDS", 3));
   const unsigned ports    = 2;
   const unsigned layers   = 1;
+  const bool     wide     = (std::getenv("OCUDU_HANDOFF_WIDE") != nullptr);
+  const bool     defer_eq = (std::getenv("OCUDU_HANDOFF_EQ_DEFER") != nullptr);
+  const bool     defer_dm = (std::getenv("OCUDU_HANDOFF_DM_DEFER") != nullptr);
 
-  std::printf("[handoff] re=%u symbols=%u ports=%u threads=%u rounds=%u deferred=%s\n",
+  std::printf("[handoff] re=%u symbols=%u ports=%u threads=%u rounds=%u deferred=%s wide=%s "
+              "eq_defer=%s dm_defer=%s\n",
               nof_re,
               nof_syms,
               ports,
               threads,
               rounds,
-              (std::getenv("OCUDU_EQ_DEFER_ENCODE") != nullptr) ? "yes" : "no");
+              (std::getenv("OCUDU_EQ_DEFER_ENCODE") != nullptr) ? "yes" : "no",
+              wide ? "yes" : "no",
+              defer_eq ? "yes" : "no",
+              defer_dm ? "yes" : "no");
 
   std::atomic<unsigned> failures{0};
   std::atomic<bool>     go{false};
   std::vector<std::unique_ptr<worker>> workers;
   for (unsigned w = 0; w != threads; ++w) {
     workers.push_back(std::make_unique<worker>());
-    workers.back()->init(nof_re, nof_syms, ports, layers, 0x1234 + w);
+    workers.back()->init(nof_re, nof_syms, ports, layers, 0x1234 + w, wide);
   }
 
   std::vector<std::thread> pool;
@@ -238,7 +259,7 @@ int main()
       }
       for (unsigned r = 0; r != rounds; ++r) {
         workers[w]->run_reference();
-        workers[w]->run_deferred();
+        workers[w]->run_deferred(defer_eq, defer_dm);
         if (!workers[w]->matches()) {
           failures.fetch_add(1, std::memory_order_relaxed);
           std::fprintf(stderr, "[handoff] worker %u round %u: MISMATCH\n", w, r);

@@ -56,6 +56,18 @@ void* aligned_alloc(size_t alignment, size_t size);
 /// \brief Releases memory allocated by aligned_alloc().
 void aligned_free(void* ptr);
 
+/// \brief Describes the aligned allocation a pointer belongs to.
+///
+/// Returns true and fills \p base / \p size when \p ptr lies inside a block handed out by
+/// aligned_alloc(), and false when it does not (a static or non-aligned buffer, or a pointer that
+/// was already released). Consumers that map host memory for a device - the Metal no-copy wrap
+/// cache - need this to tell "a slice of the same allocation" from "a different allocation that
+/// happens to share a page range": the two must never share one device resource.
+///
+/// \note The lookup is exact, including after a block has been released and its pages handed to a
+/// new allocation: the registry entry is dropped by aligned_free().
+bool describe_aligned_allocation(const void* ptr, void** base, size_t* size);
+
 /// \brief Returns the operating system page size (4 KiB on x86 Linux,
 ///        16 KiB on Apple Silicon macOS).
 size_t page_size();

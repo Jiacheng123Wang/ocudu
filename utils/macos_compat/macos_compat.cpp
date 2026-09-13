@@ -23,6 +23,8 @@
 #undef htole32
 #endif
 #include <cstdlib> // posix_memalign(), free()
+#include <mutex>
+#include <unordered_map>
 #include <thread>  // std::thread::hardware_concurrency()
 #include <unistd.h> // sysconf(), _SC_PAGESIZE
 #include <algorithm> // std::find()
@@ -56,6 +58,28 @@ constexpr darwin_thread_time_constraint default_rt_time_constraint{
 
 } // namespace
 
+namespace {
+
+/// Registry of the blocks handed out by aligned_alloc(), keyed by the block address.
+///
+/// The device mapping of a host buffer is only sound when the consumer knows which allocation a
+/// pointer belongs to: the allocator hands the pages of a released block to the next one, so two
+/// different buffers can occupy one page range over time. The registry keeps "base -> size" exact
+/// (an entry is dropped by aligned_free()), which is all the wrap cache needs to keep the two apart.
+struct aligned_registry {
+  std::mutex                            mutex;
+  std::unordered_map<const void*, size_t> blocks;
+};
+
+aligned_registry& registry()
+{
+  // Deliberately leaked: freed at exit, while other translation units may still describe pointers.
+  static aligned_registry* r = new aligned_registry();
+  return *r;
+}
+
+} // namespace
+
 void* aligned_alloc(size_t alignment, size_t size)
 {
   if (alignment < MIN_ALIGNMENT) {
@@ -75,12 +99,53 @@ void* aligned_alloc(size_t alignment, size_t size)
   if (::posix_memalign(&ptr, alignment, rounded_size) != 0) {
     return nullptr;
   }
+
+  aligned_registry& r = registry();
+  std::lock_guard<std::mutex> lock(r.mutex);
+  r.blocks[ptr] = rounded_size;
   return ptr;
 }
 
 void aligned_free(void* ptr)
 {
+  if (ptr != nullptr) {
+    aligned_registry& r = registry();
+    std::lock_guard<std::mutex> lock(r.mutex);
+    r.blocks.erase(ptr);
+  }
   ::free(ptr);
+}
+
+bool describe_aligned_allocation(const void* ptr, void** base, size_t* size)
+{
+  if (ptr == nullptr) {
+    return false;
+  }
+  const char* p = static_cast<const char*>(ptr);
+  aligned_registry& r = registry();
+  std::lock_guard<std::mutex> lock(r.mutex);
+  // The block that contains the pointer: the highest base at or below it.
+  const void* best      = nullptr;
+  size_t      best_size = 0;
+  for (const auto& entry : r.blocks) {
+    const char* b = static_cast<const char*>(entry.first);
+    if ((p >= b) && (static_cast<size_t>(p - b) < entry.second)) {
+      if ((best == nullptr) || (b > static_cast<const char*>(best))) {
+        best      = entry.first;
+        best_size = entry.second;
+      }
+    }
+  }
+  if (best == nullptr) {
+    return false;
+  }
+  if (base != nullptr) {
+    *base = const_cast<void*>(best);
+  }
+  if (size != nullptr) {
+    *size = best_size;
+  }
+  return true;
 }
 
 size_t page_size()
