@@ -187,14 +187,20 @@ struct eq_engine_impl {
   unsigned                     batch_n   = 0;
 };
 
-id<MTLBuffer> wrap_buffer(eq_engine_impl* engine, const void* ptr, size_t length)
+struct wrapped_buffer {
+  id<MTLBuffer> buffer = nil;
+  NSUInteger    offset = 0;
+};
+
+wrapped_buffer wrap_buffer(eq_engine_impl* engine, const void* ptr, size_t length)
 {
   // One buffer object per address for every engine: the stages of the chain write and read the same
   // memory, and Metal only relates accesses through the resource they are bound to (see
   // shared_queue::wrap_no_copy).
-  id<MTLBuffer> buf = metal::shared_queue::wrap_no_copy(metal::shared_queue::device(), ptr, length);
+  size_t        offset = 0;
+  id<MTLBuffer> buf    = metal::shared_queue::wrap_no_copy(metal::shared_queue::device(), ptr, length, &offset);
   if (buf != nil) {
-    return buf;
+    return wrapped_buffer{buf, static_cast<NSUInteger>(offset)};
   }
   engine->last_call_no_copy = false;
   if (!engine->no_copy_fallback_logged) {
@@ -205,7 +211,8 @@ id<MTLBuffer> wrap_buffer(eq_engine_impl* engine, const void* ptr, size_t length
         length,
         compat::page_size());
   }
-  return [metal::shared_queue::device() newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
+  return wrapped_buffer{
+      [metal::shared_queue::device() newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared], 0};
 }
 
 } // namespace
@@ -317,22 +324,22 @@ bool equalizer_metal_engine::enqueue(const ch_est_binding& h,
   // wrap_buffer() clears this flag when a no-copy wrap falls back to a copy. Reset it before the
   // wraps (not after, where it would overwrite the outcome) so the diagnostic reports the truth.
   engine->last_call_no_copy = true;
-  id<MTLBuffer> b_h  = wrap_buffer(engine, h.buffer, h_bytes);
-  id<MTLBuffer> b_y  = wrap_buffer(engine, y, y_bytes);
-  id<MTLBuffer> b_s  = wrap_buffer(engine, sigma2, s_bytes);
-  id<MTLBuffer> b_eq = wrap_buffer(engine, eq, eq_bytes);
-  id<MTLBuffer> b_nv = wrap_buffer(engine, nv, nv_bytes);
-  if (b_h == nil || b_y == nil || b_s == nil || b_eq == nil || b_nv == nil) {
+  wrapped_buffer b_h = wrap_buffer(engine, h.buffer, h_bytes);
+  wrapped_buffer b_y = wrap_buffer(engine, y, y_bytes);
+  wrapped_buffer b_s = wrap_buffer(engine, sigma2, s_bytes);
+  wrapped_buffer b_eq = wrap_buffer(engine, eq, eq_bytes);
+  wrapped_buffer b_nv = wrap_buffer(engine, nv, nv_bytes);
+  if (b_h.buffer == nil || b_y.buffer == nil || b_s.buffer == nil || b_eq.buffer == nil || b_nv.buffer == nil) {
     return false;
   }
   const equalize_params_t params =
       make_params(h, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling);
   id<MTLComputeCommandEncoder> enc = engine->batch_enc;
-  [enc setBuffer:b_h offset:0 atIndex:0];
-  [enc setBuffer:b_y offset:0 atIndex:1];
-  [enc setBuffer:b_eq offset:0 atIndex:2];
-  [enc setBuffer:b_nv offset:0 atIndex:3];
-  [enc setBuffer:b_s offset:0 atIndex:5];
+  [enc setBuffer:b_h.buffer offset:b_h.offset atIndex:0];
+  [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
+  [enc setBuffer:b_eq.buffer offset:b_eq.offset atIndex:2];
+  [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:3];
+  [enc setBuffer:b_s.buffer offset:b_s.offset atIndex:5];
   [enc setBytes:&params length:sizeof(params) atIndex:4];
   [enc dispatchThreads:MTLSizeMake(nof_re, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   ++engine->batch_n;
@@ -490,12 +497,12 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     const size_t eq_bytes = ((static_cast<size_t>(n_run) - 1) * eq_stride_elems + static_cast<size_t>(head.nof_re) * head.nof_layers) * 2 * sizeof(float);
     const size_t nv_bytes = ((static_cast<size_t>(n_run) - 1) * nv_stride_elems + static_cast<size_t>(head.nof_re) * head.nof_layers) * sizeof(float);
 
-    id<MTLBuffer> b_h  = wrap_buffer(engine, h_alloc, h_bytes);
-    id<MTLBuffer> b_y  = wrap_buffer(engine, y_alloc, y_bytes);
-    id<MTLBuffer> b_s  = wrap_buffer(engine, s_alloc, s_bytes);
-    id<MTLBuffer> b_eq = wrap_buffer(engine, head.eq, eq_bytes);
-    id<MTLBuffer> b_nv = wrap_buffer(engine, head.nv, nv_bytes);
-    if ((b_h == nil) || (b_y == nil) || (b_s == nil) || (b_eq == nil) || (b_nv == nil)) {
+    wrapped_buffer b_h = wrap_buffer(engine, h_alloc, h_bytes);
+    wrapped_buffer b_y = wrap_buffer(engine, y_alloc, y_bytes);
+    wrapped_buffer b_s = wrap_buffer(engine, s_alloc, s_bytes);
+    wrapped_buffer b_eq = wrap_buffer(engine, head.eq, eq_bytes);
+    wrapped_buffer b_nv = wrap_buffer(engine, head.nv, nv_bytes);
+    if ((b_h.buffer == nil) || (b_y.buffer == nil) || (b_s.buffer == nil) || (b_eq.buffer == nil) || (b_nv.buffer == nil)) {
       engine->last_call_no_copy = false;
       compat::aligned_free(h_alloc);
       compat::aligned_free(y_alloc);
@@ -509,12 +516,12 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     id<MTLComputePipelineState> run_pipeline = (n_run > 1) ? eq_resources().pipeline_batch : eq_resources().pipeline;
     used_pipeline                            = run_pipeline;
     [enc setComputePipelineState:run_pipeline];
-    [enc setBuffer:b_h offset:0 atIndex:0];
-    [enc setBuffer:b_y offset:0 atIndex:1];
-    [enc setBuffer:b_eq offset:0 atIndex:2];
-    [enc setBuffer:b_nv offset:0 atIndex:3];
+    [enc setBuffer:b_h.buffer offset:b_h.offset atIndex:0];
+    [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
+    [enc setBuffer:b_eq.buffer offset:b_eq.offset atIndex:2];
+    [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:3];
     [enc setBytes:&params length:sizeof(params) atIndex:4];
-    [enc setBuffer:b_s offset:0 atIndex:5];
+    [enc setBuffer:b_s.buffer offset:b_s.offset atIndex:5];
     if (n_run > 1) {
       [enc setBytes:&strides length:sizeof(strides) atIndex:6];
     }
@@ -586,24 +593,24 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
     const size_t s_bytes  = static_cast<size_t>(nof_ports) * sizeof(float);
     const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
     const size_t nv_bytes = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
-    id<MTLBuffer> b_h  = wrap_buffer(engine, h.buffer, h_bytes);
-    id<MTLBuffer> b_y  = wrap_buffer(engine, y, y_bytes);
-    id<MTLBuffer> b_s  = wrap_buffer(engine, sigma2, s_bytes);
-    id<MTLBuffer> b_eq = wrap_buffer(engine, eq, eq_bytes);
-    id<MTLBuffer> b_nv = wrap_buffer(engine, nv, nv_bytes);
-    if (b_h == nil || b_y == nil || b_s == nil || b_eq == nil || b_nv == nil) {
+    wrapped_buffer b_h = wrap_buffer(engine, h.buffer, h_bytes);
+    wrapped_buffer b_y = wrap_buffer(engine, y, y_bytes);
+    wrapped_buffer b_s = wrap_buffer(engine, sigma2, s_bytes);
+    wrapped_buffer b_eq = wrap_buffer(engine, eq, eq_bytes);
+    wrapped_buffer b_nv = wrap_buffer(engine, nv, nv_bytes);
+    if (b_h.buffer == nil || b_y.buffer == nil || b_s.buffer == nil || b_eq.buffer == nil || b_nv.buffer == nil) {
       engine->last_call_no_copy = false;
       return false;
     }
     engine->last_call_no_copy         = true;
     const equalize_params_t params =
         make_params(h, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling);
-    [enc setBuffer:b_h offset:0 atIndex:0];
-    [enc setBuffer:b_y offset:0 atIndex:1];
-    [enc setBuffer:b_eq offset:0 atIndex:2];
-    [enc setBuffer:b_nv offset:0 atIndex:3];
+    [enc setBuffer:b_h.buffer offset:b_h.offset atIndex:0];
+    [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
+    [enc setBuffer:b_eq.buffer offset:b_eq.offset atIndex:2];
+    [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:3];
     [enc setBytes:&params length:sizeof(params) atIndex:4];
-    [enc setBuffer:b_s offset:0 atIndex:5];
+    [enc setBuffer:b_s.buffer offset:b_s.offset atIndex:5];
     [enc dispatchThreads:MTLSizeMake(nof_re, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
     return true;
@@ -652,12 +659,12 @@ bool equalizer_metal_engine::enqueue_burst_batch(const ch_est_binding& h,
   const size_t nv_bytes = ((static_cast<size_t>(nof_symbols) - 1) * nv_symbol_stride + nof_re * nof_layers) *
                           sizeof(float);
 
-  id<MTLBuffer> b_h  = wrap_buffer(engine, h.buffer, h_bytes);
-  id<MTLBuffer> b_y  = wrap_buffer(engine, y, y_bytes);
-  id<MTLBuffer> b_s  = wrap_buffer(engine, sigma2, s_bytes);
-  id<MTLBuffer> b_eq = wrap_buffer(engine, eq, eq_bytes);
-  id<MTLBuffer> b_nv = wrap_buffer(engine, nv, nv_bytes);
-  if (b_h == nil || b_y == nil || b_s == nil || b_eq == nil || b_nv == nil) {
+  wrapped_buffer b_h = wrap_buffer(engine, h.buffer, h_bytes);
+  wrapped_buffer b_y = wrap_buffer(engine, y, y_bytes);
+  wrapped_buffer b_s = wrap_buffer(engine, sigma2, s_bytes);
+  wrapped_buffer b_eq = wrap_buffer(engine, eq, eq_bytes);
+  wrapped_buffer b_nv = wrap_buffer(engine, nv, nv_bytes);
+  if (b_h.buffer == nil || b_y.buffer == nil || b_s.buffer == nil || b_eq.buffer == nil || b_nv.buffer == nil) {
     engine->last_call_no_copy = false;
     return false;
   }
@@ -665,12 +672,12 @@ bool equalizer_metal_engine::enqueue_burst_batch(const ch_est_binding& h,
   const equalize_params_t params =
       make_params(h, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling);
   const eq_strides_t      strides{nof_symbols, h_symbol_stride, y_symbol_stride, eq_symbol_stride, nv_symbol_stride};
-  [enc setBuffer:b_h offset:0 atIndex:0];
-  [enc setBuffer:b_y offset:0 atIndex:1];
-  [enc setBuffer:b_eq offset:0 atIndex:2];
-  [enc setBuffer:b_nv offset:0 atIndex:3];
+  [enc setBuffer:b_h.buffer offset:b_h.offset atIndex:0];
+  [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
+  [enc setBuffer:b_eq.buffer offset:b_eq.offset atIndex:2];
+  [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:3];
   [enc setBytes:&params length:sizeof(params) atIndex:4];
-  [enc setBuffer:b_s offset:0 atIndex:5];
+  [enc setBuffer:b_s.buffer offset:b_s.offset atIndex:5];
   [enc setBytes:&strides length:sizeof(strides) atIndex:6];
   [enc dispatchThreads:MTLSizeMake(nof_re, nof_symbols, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);

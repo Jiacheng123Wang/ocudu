@@ -71,8 +71,16 @@ public:
   /// \param[in] device Device that creates the buffer when the address is not cached yet.
   /// \param[in] ptr    Page-aligned base address.
   /// \param[in] length Number of bytes the caller needs (the mapping is page rounded).
+  /// \param[out] offset When not null, receives the byte offset the requested range starts at inside
+  ///             the returned buffer. Passing it also enables the CONTAINMENT lookup: a request that
+  ///             falls inside a larger cached mapping returns that mapping with a non-zero offset
+  ///             instead of a new object, so two stages that wrap different ranges of one allocation
+  ///             (a group submit wrapping the whole group, a per-symbol stage wrapping a slice of it)
+  ///             bind the SAME Metal buffer object - which is what relates their accesses. Two
+  ///             objects over the same memory do not. Callers that do not ask for the offset keep
+  ///             the exact-address behaviour.
   /// \return The buffer, or nil when the wrap failed and the caller must stage through a copy.
-  static id<MTLBuffer> wrap_no_copy(id<MTLDevice> device, const void* ptr, size_t length);
+  static id<MTLBuffer> wrap_no_copy(id<MTLDevice> device, const void* ptr, size_t length, size_t* offset = nullptr);
 
   /// \brief Which of the two process-wide queues a commit belongs to.
   ///

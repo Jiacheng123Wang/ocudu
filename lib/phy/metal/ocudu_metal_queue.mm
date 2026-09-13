@@ -87,7 +87,7 @@ std::once_flag& init_flag()
 
 } // namespace
 
-id<MTLBuffer> shared_queue::wrap_no_copy(id<MTLDevice> device, const void* ptr, size_t length)
+id<MTLBuffer> shared_queue::wrap_no_copy(id<MTLDevice> device, const void* ptr, size_t length, size_t* offset)
 {
   if ((device == nil) || (ptr == nullptr)) {
     return nil;
@@ -95,12 +95,45 @@ id<MTLBuffer> shared_queue::wrap_no_copy(id<MTLDevice> device, const void* ptr, 
   const size_t page    = compat::page_size();
   const size_t aligned = ((length + page - 1) / page) * page;
 
+  const auto publish_offset = [offset](size_t value) {
+    if (offset != nullptr) {
+      *offset = value;
+    }
+  };
+
   shared_queue_state& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
-  auto                        it = s.wrap_cache.find(ptr);
+
+  // Offset mode (the caller asked for the offset): the LARGEST cached mapping that contains the
+  // requested range wins, even when a smaller mapping exists for the very same address - a stale
+  // small mapping from an earlier wrap must not shadow the group-wide one, or the stages would bind
+  // different objects again.
+  if (offset != nullptr) {
+    const char*   p        = static_cast<const char*>(ptr);
+    id<MTLBuffer> best     = nil;
+    size_t        best_off = 0;
+    size_t        best_len = 0;
+    for (const auto& entry : s.wrap_cache) {
+      const auto* base  = static_cast<const char*>(entry.first);
+      const auto  avail = entry.second.second;
+      if ((p >= base) && ((static_cast<size_t>(p - base) + aligned) <= avail) && (avail > best_len)) {
+        best     = entry.second.first;
+        best_off = static_cast<size_t>(p - base);
+        best_len = avail;
+      }
+    }
+    if (best != nil) {
+      ++s.wrap_hits;
+      publish_offset(best_off);
+      return best;
+    }
+  }
+
+  auto it = s.wrap_cache.find(ptr);
   if (it != s.wrap_cache.end()) {
     if (it->second.second >= aligned) {
       ++s.wrap_hits;
+      publish_offset(0);
       return it->second.first;
     }
     // The cached mapping is smaller than what this call needs: replace it. The object handed out
@@ -119,6 +152,7 @@ id<MTLBuffer> shared_queue::wrap_no_copy(id<MTLDevice> device, const void* ptr, 
     return nil;
   }
   ++s.wrap_creates;
+  publish_offset(0);
   s.wrap_cache[ptr] = std::make_pair(buf, aligned);
   return buf;
 }

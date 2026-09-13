@@ -130,14 +130,20 @@ struct demod_engine_impl {
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
 };
 
-id<MTLBuffer> wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t length)
+struct wrapped_buffer {
+  id<MTLBuffer> buffer = nil;
+  NSUInteger    offset = 0;
+};
+
+wrapped_buffer wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t length)
 {
   // Same shared cache as the other engines: the demapper reads the symbols that the equalizer wrote
   // through the very same buffer object, so Metal tracks the dependency (see
   // shared_queue::wrap_no_copy).
-  id<MTLBuffer> buf = metal::shared_queue::wrap_no_copy(metal::shared_queue::device(), ptr, length);
+  size_t        offset = 0;
+  id<MTLBuffer> buf    = metal::shared_queue::wrap_no_copy(metal::shared_queue::device(), ptr, length, &offset);
   if (buf != nil) {
-    return buf;
+    return wrapped_buffer{buf, static_cast<NSUInteger>(offset)};
   }
   engine->last_call_no_copy = false;
   if (!engine->no_copy_fallback_logged) {
@@ -148,7 +154,8 @@ id<MTLBuffer> wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t len
         length,
         compat::page_size());
   }
-  return [metal::shared_queue::device() newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
+  return wrapped_buffer{
+      [metal::shared_queue::device() newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared], 0};
 }
 
 } // namespace
@@ -240,17 +247,17 @@ bool demod_metal_engine::enqueue(const void* symbols,
   // wrap_buffer() clears this flag when a no-copy wrap falls back to a copy. Reset it before the
   // wraps (not after, where it would overwrite the outcome) so the diagnostic reports the truth.
   engine->last_call_no_copy = true;
-  id<MTLBuffer> b_sym  = wrap_buffer(engine, symbols, symbols_bytes);
-  id<MTLBuffer> b_nv   = wrap_buffer(engine, noise_var, noise_bytes);
-  id<MTLBuffer> b_llrs = wrap_buffer(engine, llrs, llr_bytes);
-  if (b_sym == nil || b_nv == nil || b_llrs == nil) {
+  wrapped_buffer b_sym = wrap_buffer(engine, symbols, symbols_bytes);
+  wrapped_buffer b_nv = wrap_buffer(engine, noise_var, noise_bytes);
+  wrapped_buffer b_llrs = wrap_buffer(engine, llrs, llr_bytes);
+  if (b_sym.buffer == nil || b_nv.buffer == nil || b_llrs.buffer == nil) {
     return false;
   }
   const demod_params_t params{nof_symbols, mod};
   id<MTLComputeCommandEncoder> enc = engine->batch_enc;
-  [enc setBuffer:b_sym offset:0 atIndex:0];
-  [enc setBuffer:b_nv offset:0 atIndex:1];
-  [enc setBuffer:b_llrs offset:0 atIndex:2];
+  [enc setBuffer:b_sym.buffer offset:b_sym.offset atIndex:0];
+  [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:1];
+  [enc setBuffer:b_llrs.buffer offset:b_llrs.offset atIndex:2];
   [enc setBytes:&params length:sizeof(params) atIndex:3];
   [enc dispatchThreads:MTLSizeMake(nof_symbols, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   ++engine->batch_n;
@@ -284,16 +291,16 @@ bool demod_metal_engine::enqueue_burst(const void* symbols,
   const size_t llr_bytes     = static_cast<size_t>(nof_symbols) * 8;
 
   engine->last_call_no_copy = true;
-  id<MTLBuffer> b_sym  = wrap_buffer(engine, symbols, symbols_bytes);
-  id<MTLBuffer> b_nv   = wrap_buffer(engine, noise_var, noise_bytes);
-  id<MTLBuffer> b_llrs = wrap_buffer(engine, llrs, llr_bytes);
-  if (b_sym == nil || b_nv == nil || b_llrs == nil) {
+  wrapped_buffer b_sym = wrap_buffer(engine, symbols, symbols_bytes);
+  wrapped_buffer b_nv = wrap_buffer(engine, noise_var, noise_bytes);
+  wrapped_buffer b_llrs = wrap_buffer(engine, llrs, llr_bytes);
+  if (b_sym.buffer == nil || b_nv.buffer == nil || b_llrs.buffer == nil) {
     return false;
   }
   const demod_params_t params{nof_symbols, mod};
-  [enc setBuffer:b_sym offset:0 atIndex:0];
-  [enc setBuffer:b_nv offset:0 atIndex:1];
-  [enc setBuffer:b_llrs offset:0 atIndex:2];
+  [enc setBuffer:b_sym.buffer offset:b_sym.offset atIndex:0];
+  [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:1];
+  [enc setBuffer:b_llrs.buffer offset:b_llrs.offset atIndex:2];
   [enc setBytes:&params length:sizeof(params) atIndex:3];
   [enc dispatchThreads:MTLSizeMake(nof_symbols, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::demapper);
