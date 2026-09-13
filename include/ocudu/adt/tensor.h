@@ -205,7 +205,10 @@ private:
 /// \tparam Type         Type of data to store.
 /// \tparam Index_type Data type used for representing dimension indices. It is used in method \ref
 /// get_dimension_size().
-template <unsigned NDIMS, typename Type, typename Index_type = unsigned>
+/// \tparam Allocator    Allocator of the storage. Defaults to the standard one; a consumer that hands its storage to
+/// an accelerator (e.g. the resource grid, which a GPU writer fills in place) selects an allocator with the alignment
+/// and size-rounding guarantees that the accelerator needs.
+template <unsigned NDIMS, typename Type, typename Index_type = unsigned, typename Allocator = std::allocator<Type>>
 class dynamic_tensor : public tensor<NDIMS, Type, Index_type>
 {
 public:
@@ -276,7 +279,7 @@ private:
   /// Tensor actual dimensions.
   dimensions_size_type dimensions_size = {};
   /// Tensor actual storage.
-  std::vector<Type> elements = {};
+  std::vector<Type, Allocator> elements = {};
 };
 
 } // namespace ocudu

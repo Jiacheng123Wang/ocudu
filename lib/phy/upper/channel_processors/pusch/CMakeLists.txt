@@ -7,8 +7,9 @@ add_library(ocudu_pusch_demodulator STATIC
         pusch_demodulator_impl.cpp
         demodulator_factories.cpp
         ul_capture.cpp)
-# page_aligned_allocator.h uses the macos_compat aligned allocation shims (link both
-# ocudu_support and ocudu_macos_compat because of their mutual dependency).
+# The demodulator's zero-copy buffers use the shared page-aligned allocator
+# (ocudu/support/page_aligned_allocator.h), which relies on the macos_compat aligned allocation shims
+# (link both ocudu_support and ocudu_macos_compat because of their mutual dependency).
 # ul_capture.cpp is the debug capture of the PUSCH reception (grid, estimates and the soft bits the
 # demodulator produces), so it lives here: the demodulator library uses it, and the processor
 # library - which links this one - uses it as well. Keeping it in the processor instead made the two

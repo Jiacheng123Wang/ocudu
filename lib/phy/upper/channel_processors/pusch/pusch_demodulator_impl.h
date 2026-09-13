@@ -19,7 +19,7 @@
 #include "ocudu/phy/upper/sequence_generators/pseudo_random_generator.h"
 #include "ocudu/ran/pusch/pusch_constants.h"
 #include "ocudu/support/macos_compat.h"
-#include "page_aligned_allocator.h"
+#include "ocudu/support/page_aligned_allocator.h"
 #include <cstddef>
 
 namespace ocudu {

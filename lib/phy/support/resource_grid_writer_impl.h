@@ -54,9 +54,20 @@ public:
   // See interface for documentation.
   span<cbf16_t> get_view(unsigned port, unsigned l) override;
 
+  // See interface for documentation.
+  resource_grid_device_view get_device_view() const override { return device_view; }
+
+  /// \brief Publishes the device view of the storage (see resource_grid_writer::get_device_view()).
+  ///
+  /// Called by the grid that owns the buffer once its storage is in place. A writer whose grid never publishes a view
+  /// keeps writing from the host.
+  void set_device_view(const resource_grid_device_view& view) { device_view = view; }
+
 private:
   storage_type&                  data;
   resource_grid_allocation_info& alloc_mask;
+  /// Device view of the storage, invalid until the owning grid publishes one.
+  resource_grid_device_view device_view;
 };
 
 } // namespace ocudu

@@ -10,6 +10,7 @@
 #include "resource_grid_writer_impl.h"
 #include "ocudu/adt/tensor.h"
 #include "ocudu/phy/support/resource_grid.h"
+#include "ocudu/support/page_aligned_allocator.h"
 #include "ocudu/phy/support/resource_grid_dimensions.h"
 
 namespace ocudu {
@@ -32,7 +33,15 @@ private:
   ///
   /// The resource grid buffer is a three-dimensional array with the dimensions representing, in order, subcarriers,
   /// OFDM symbols and antenna ports.
-  dynamic_tensor<static_cast<unsigned>(resource_grid_dimensions::all), cbf16_t, resource_grid_dimensions> rg_buffer;
+  ///
+  /// \note The storage is page-aligned and page-rounded (see page_aligned_allocator) so that the GPU stages of the
+  /// uplink chain can wrap it as a zero-copy buffer and fill the grid in place (see
+  /// resource_grid_writer::get_device_view()); the CPU reads the same memory, so nothing is copied back.
+  dynamic_tensor<static_cast<unsigned>(resource_grid_dimensions::all),
+                 cbf16_t,
+                 resource_grid_dimensions,
+                 page_aligned_allocator<cbf16_t>>
+      rg_buffer;
 
   /// Resource grid writer implementation.
   resource_grid_writer_impl writer;

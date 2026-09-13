@@ -8,6 +8,7 @@
 #include "ocudu/adt/complex.h"
 #include "ocudu/adt/span.h"
 #include "ocudu/phy/support/resource_grid_base.h"
+#include "ocudu/phy/support/resource_grid_device_view.h"
 #include "ocudu/ran/resource_block.h"
 
 namespace ocudu {
@@ -88,6 +89,16 @@ public:
   /// \param[in] l    OFDM symbol index.
   /// \return Resource grid view.
   virtual span<cbf16_t> get_view(unsigned port, unsigned l) = 0;
+
+  /// \brief Device view of the grid storage, for a writer that runs on an accelerator.
+  ///
+  /// Lets a GPU stage (e.g. the OFDM demodulation's grid write) fill the very same buffer the CPU reads afterwards, so
+  /// the grid never has to be copied between the two. The default implementation reports an invalid view: a grid whose
+  /// storage is neither page-aligned nor shared with the device cannot be written from the device (those writers stay
+  /// on the host, as they always were).
+  ///
+  /// \return The device view, invalid (see resource_grid_device_view::is_valid()) when unavailable.
+  virtual resource_grid_device_view get_device_view() const { return {}; }
 };
 
 } // namespace ocudu

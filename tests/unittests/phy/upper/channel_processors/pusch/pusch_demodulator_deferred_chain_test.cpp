@@ -14,7 +14,7 @@
 /// event order (provisional statistics strictly before on_new_block() of the same symbol) and
 /// identical statistics.
 
-#include "page_aligned_allocator.h"
+#include "ocudu/support/page_aligned_allocator.h"
 #include "pusch_demodulator_impl.h"
 #include "ocudu/adt/bf16.h"
 #include "ocudu/adt/format.h"

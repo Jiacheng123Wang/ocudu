@@ -5,6 +5,9 @@
 /// \brief Page-aligned allocator for buffers that hardware accelerators read or write
 /// directly (Metal no-copy buffers require a page-aligned base address, and the accelerator
 /// wraps a page-rounded length, so the allocation must cover whole pages).
+///
+/// Used by the upper PHY's zero-copy buffers (the PUSCH demodulator's equalized symbols, noise
+/// variances and soft bits) and by the resource grid storage, which a GPU writer fills in place.
 
 #pragma once
 

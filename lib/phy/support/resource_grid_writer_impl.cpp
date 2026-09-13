@@ -192,3 +192,4 @@ span<cbf16_t> resource_grid_writer_impl::get_view(unsigned port, unsigned l)
   alloc_mask.update_crb_range(port, l);
   return data.get_view({l, port});
 }
+

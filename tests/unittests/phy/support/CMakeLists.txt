@@ -45,3 +45,12 @@ gtest_discover_tests(precoding_configuration_test)
 add_executable(re_pattern_test re_pattern_test.cpp)
 target_link_libraries(re_pattern_test ocudu_phy_support ocudulog)
 add_test(re_pattern_test re_pattern_test)
+
+add_executable(resource_grid_device_view_test resource_grid_device_view_test.cpp)
+target_link_libraries(resource_grid_device_view_test
+        ocuduvec
+        ocudu_phy_support
+        ocudulog
+        GTest::gtest
+        GTest::gtest_main)
+add_test(resource_grid_device_view_test resource_grid_device_view_test)
