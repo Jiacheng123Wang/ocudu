@@ -865,6 +865,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // padded order, not to the tail's.
       static constexpr unsigned MAX_GPU_INVERT_ORDER = 36;
       const bool gpu_invert = (std::getenv("OCUDU_CE_CPU_INVERT") == nullptr) && (L_std <= MAX_GPU_INVERT_ORDER);
+      // A batch of the previous hop may still be outstanding: it reads the very staging slots this hop is
+      // about to overwrite (the split-tail path runs two batches per hop, and a deferred hop keeps its last
+      // batch alive until its consumer collects it), so complete it before touching them. Only ever the last
+      // batch of a hop stays outstanding, which is what the caller's completion then unpacks.
+      if (nof_pending_unpacks != 0) {
+        (void)complete_fd_td_estimation_stage();
+      }
       // 1) Stage the standard group while w_r_pp / w_r_hp still hold the standard matrices.
 #if defined(OCUDU_CE_TIME)
       const auto t_stage_begin = steady_clock::now();
@@ -897,7 +904,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // 4) ONE engine call over both groups, then unpack both. The call is submitted without
       //    waiting when the kernels allow it, so the unpack moves to the completion of the stage
       //    (see complete_fd_td_estimation_stage()).
-      const bool merged_defer = defer && gpu_invert;
+      // Both inversion flavors defer now: the weights-only pipeline (block order above the inversion kernel's
+      // limit, which is the OTA geometry) used to be synchronous, and waiting for its batch inside the stage
+      // cost ~150-230us per hop of pure host time.
+      const bool merged_defer = defer;
 #if defined(OCUDU_CE_TIME)
       const auto t_submit_begin = steady_clock::now();
 #endif
@@ -1392,10 +1402,13 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(unsigned nout,
   // asynchronous form, so those paths always complete the batch here.
   const bool engine_ok =
       matrix ? engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_systems, nof_blocks)
-             : (gpu_invert ? (defer ? engine->run_async(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
-                                   : engine->run(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat))
-                           : engine->run_weights_only(
-                                 gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat));
+             : (gpu_invert
+                    ? (defer ? engine->run_async(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
+                             : engine->run(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat))
+                    : (defer ? engine->run_weights_only_async(
+                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
+                             : engine->run_weights_only(
+                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)));
   if (!engine_ok) {
     logger.error("[mmse_ce] engine call failed (systems={} blocks={} nout={} L={} matrix={}): falling back to the "
                  "CPU path for these blocks",
@@ -1526,7 +1539,7 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   const bool gpu_invert        = !matrix && !cpu_invert_forced && (L <= MAX_GPU_INVERT_ORDER);
 
   stage_engine_group(args, gb_start, n_blk, b_prb, npt, nout, L, 0, st, matrix, gpu_invert);
-  const bool deferred = defer && !matrix && gpu_invert;
+  const bool deferred = defer && !matrix;
   if (!engine_run(nout, L, nof_layers, n_blk, matrix, gpu_invert, reformat, deferred)) {
     return false;
   }

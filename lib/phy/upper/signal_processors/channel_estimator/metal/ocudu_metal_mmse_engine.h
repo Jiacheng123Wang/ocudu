@@ -162,6 +162,27 @@ public:
                         unsigned L, unsigned nof_systems, unsigned nof_blocks,
                         const reformat_stage* reformat = nullptr);
 
+  /// \brief As run_weights_only(), but commits WITHOUT waiting for the GPU.
+  ///
+  /// The weights-only pipeline (the caller inverted A on the host, so K1 is not part of the batch) is the
+  /// path every hop with a block order above the inversion kernel's limit takes, and it used to be the one
+  /// path that could not defer: the estimator had to wait for the whole batch inside its stage, which at the
+  /// OTA geometry (block order 54, limit 36) cost ~150-230us per hop of pure waiting. With this entry point
+  /// the batch defers like the inverted one: the wait moves to wait_pending(), which the consumer calls once
+  /// it has nothing else to do (the receiving chain's demodulation runs inside that window).
+  ///
+  /// \return False when the encoding failed and nothing was submitted.
+  bool run_weights_only_async(const float* a_inv,
+                              const float* r_hp,
+                              float*       w,
+                              const float* y,
+                              float*       h,
+                              unsigned     nout,
+                              unsigned     L,
+                              unsigned     nof_systems,
+                              unsigned     nof_blocks,
+                              const reformat_stage* reformat = nullptr);
+
   /// \brief Compiles the simdgroup_matrix 8x8 pipelines of the metal_nn_mmse variant
   /// (mmse_weights_matrix / mmse_apply_matrix, ocudu_mmse_*_matrix.metal).
   ///

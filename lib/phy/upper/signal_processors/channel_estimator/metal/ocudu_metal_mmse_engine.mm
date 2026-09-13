@@ -695,17 +695,64 @@ bool mmse_engine::has_pending() const
   return (e != nullptr) && (e->pending_cb != nil);
 }
 
+namespace {
+/// \brief Encodes and commits the weights-only pipeline (K1b -> K2 -> K3/K4) for the two entry points below.
+/// \param[in] wait_for_completion True for run_weights_only(), false for run_weights_only_async().
+bool encode_weights_only(mmse_engine_impl*                  e,
+                         const float*                       a_inv,
+                         const float*                       r_hp,
+                         float*                             w,
+                         const float*                       y,
+                         float*                             h,
+                         unsigned                           nout,
+                         unsigned                           L,
+                         unsigned                           nof_systems,
+                         unsigned                           nof_blocks,
+                         const mmse_engine::reformat_stage* reformat,
+                         bool                               wait_for_completion);
+} // namespace
+
 bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float* w, const float* y, float* h,
                                  unsigned nout, unsigned L, unsigned nof_systems, unsigned nof_blocks,
                                  const reformat_stage* reformat)
 {
-  (void)wait_pending();
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
     return false;
   }
+  (void)wait_pending();
+  return encode_weights_only(e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, true);
+}
 
-  mmse_phase_timer phase("run_weights_only");
+bool mmse_engine::run_weights_only_async(const float* a_inv, const float* r_hp, float* w, const float* y, float* h,
+                                        unsigned nout, unsigned L, unsigned nof_systems, unsigned nof_blocks,
+                                        const reformat_stage* reformat)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if (e == nullptr || e->device == nil) {
+    return false;
+  }
+  // Only this engine's own outstanding submission has to complete first: the staging buffers this call is about
+  // to overwrite are exactly the ones it was reading.
+  (void)wait_pending();
+  return encode_weights_only(e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, false);
+}
+
+namespace {
+bool encode_weights_only(mmse_engine_impl*                  e,
+                         const float*                       a_inv,
+                         const float*                       r_hp,
+                         float*                             w,
+                         const float*                       y,
+                         float*                             h,
+                         unsigned                           nout,
+                         unsigned                           L,
+                         unsigned                           nof_systems,
+                         unsigned                           nof_blocks,
+                         const mmse_engine::reformat_stage* reformat,
+                         bool                               wait_for_completion)
+{
+  mmse_phase_timer phase(wait_for_completion ? "run_weights_only" : "run_weights_only_async");
   id<MTLBuffer> ai_buf = e->wrap(a_inv, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
   id<MTLBuffer> rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
   id<MTLBuffer> w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
@@ -758,6 +805,10 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
   [cb commit];
   phase.committed();
   mmse_stats_commit();
+  if (!wait_for_completion) {
+    e->pending_cb = cb;
+    return true;
+  }
   [cb waitUntilCompleted];
   mmse_stats_wait();
 
@@ -769,6 +820,7 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
   }
   return true;
 }
+} // namespace
 
 bool mmse_engine::init_matrix_pipelines()
 {
