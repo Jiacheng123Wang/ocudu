@@ -14,6 +14,7 @@
 /// event order (provisional statistics strictly before on_new_block() of the same symbol) and
 /// identical statistics.
 
+#include "page_aligned_allocator.h"
 #include "pusch_demodulator_impl.h"
 #include "ocudu/adt/bf16.h"
 #include "ocudu/adt/format.h"
@@ -147,7 +148,30 @@ public:
     }
   }
 
-  float get_noise_variance(unsigned /*rx_port*/) const override { return noise_var; }
+  /// \brief Offers the noise variance as device-resident, with the given value.
+  ///
+  /// A consumer that reads the estimates off the device reads this instead of get_noise_variance(),
+  /// so the host accessor must not be called at all (the counter below is the witness), and the
+  /// kernel must apply the same validity predicate the host would have applied to \c value.
+  void enable_device_noise_variance(float value)
+  {
+    device_noise_var_value[0] = value;
+    device_noise_var_ready    = true;
+  }
+
+  /// Number of times the host noise variance was read (see enable_device_noise_variance()).
+  unsigned get_nof_host_noise_var_reads() const { return nof_host_noise_var_reads; }
+
+  float get_noise_variance(unsigned /*rx_port*/) const override
+  {
+    ++nof_host_noise_var_reads;
+    return noise_var;
+  }
+
+  const float* get_device_noise_variance(unsigned /*rx_port*/) const override
+  {
+    return device_noise_var_ready ? &device_noise_var_value[0] : nullptr;
+  }
   float get_rsrp(unsigned /*rx_port*/, unsigned /*tx_layer*/ = 0) const override { return 1.0F; }
   static_vector<float, MAX_PORTS> get_rsrp_all_ports(unsigned /*tx_layer*/ = 0) const override { return {}; }
   float get_epre(unsigned /*rx_port*/) const override { return 1.0F; }
@@ -272,7 +296,17 @@ private:
   bool                                  device_ready = false;
   unsigned                              total_re     = 0;
   std::array<unsigned, MAX_NSYMB_PER_SLOT + 1> offsets{};
-  std::vector<cbf16_t>                  device_buffer;
+  /// Page-aligned so that a backend really maps it instead of copying it: a Metal no-copy wrap
+  /// needs a page-aligned base, and a backend that cannot map the buffer stages it through a copy -
+  /// which would hide a broken binding behind identical soft bits.
+  std::vector<cbf16_t, page_aligned_allocator<cbf16_t>> device_buffer;
+
+  /// Device noise variance state (see enable_device_noise_variance()).
+  mutable unsigned nof_host_noise_var_reads = 0;
+  bool             device_noise_var_ready   = false;
+  /// Page-aligned like the buffer the estimator really produces it in, so that a backend maps it
+  /// instead of falling back to a copy (which would hide a broken binding behind equal soft bits).
+  std::vector<float, page_aligned_allocator<float>> device_noise_var_value{0.0F};
 };
 
 /// Transform precoder stand-in: both paths use it, so its output only has to be deterministic.
@@ -1117,14 +1151,19 @@ TEST_F(pusch_demodulator_deferred_chain_test, metal_equalizer_binds_the_estimato
 
   const unsigned nof_symbols = 12;
 
-  auto run = [&](unsigned nof_ports, bool device_estimates) {
+  // \param device_noise_var  Value the estimator publishes as device-resident, or no value at all
+  //                          (std::nullopt) to leave the noise variance on the host.
+  auto run = [&](unsigned nof_ports, bool device_estimates, std::optional<float> device_noise_var, float host_noise_var = 0.02F) {
     pusch_demodulator::configuration config =
         make_config(modulation_scheme::QAM16, 1, nof_ports, nof_symbols, 1, false);
     const unsigned     nof_re_per_symbol = max_nof_prb * NOF_SUBCARRIERS_PER_RB;
     grid_reader_double grid(nof_ports, MAX_NSYMB_PER_SLOT, nof_re_per_symbol);
-    est_results_double est(nof_ports, 1, nof_re_per_symbol, 0.02F);
+    est_results_double est(nof_ports, 1, nof_re_per_symbol, host_noise_var);
     if (device_estimates) {
       est.enable_device_view(config);
+    }
+    if (device_noise_var.has_value()) {
+      est.enable_device_noise_variance(*device_noise_var);
     }
     recording_codeword_buffer buffer(4096);
     notifier_double           notifier;
@@ -1136,29 +1175,38 @@ TEST_F(pusch_demodulator_deferred_chain_test, metal_equalizer_binds_the_estimato
                                        max_nof_prb,
                                        true);
     demodulator.demodulate(buffer, notifier, grid, est, config);
-    return buffer.llrs;
+    return std::make_pair(buffer.llrs, est.get_nof_host_noise_var_reads());
   };
 
   for (unsigned nof_ports : {1U, 2U}) {
     const unsigned device_before = channel_equalizer_metal::nof_device_ch_est_dispatches();
     const unsigned staged_before = channel_equalizer_metal::nof_staged_ch_est_dispatches();
-    const auto     host          = run(nof_ports, /*device_estimates=*/false);
+    const auto [host, host_nv_reads] = run(nof_ports, /*device_estimates=*/false, std::nullopt);
     const unsigned host_device   = channel_equalizer_metal::nof_device_ch_est_dispatches() - device_before;
     const unsigned host_staged   = channel_equalizer_metal::nof_staged_ch_est_dispatches() - staged_before;
 
     const unsigned device_mid = channel_equalizer_metal::nof_device_ch_est_dispatches();
     const unsigned staged_mid = channel_equalizer_metal::nof_staged_ch_est_dispatches();
-    const auto     dev        = run(nof_ports, /*device_estimates=*/true);
+    // The device run publishes both the estimates and the noise variance as device-resident, which
+    // is the shape the estimator produces on the GPU: nothing of it may be read on the host.
+    const auto [dev, dev_nv_reads] = run(nof_ports, /*device_estimates=*/true, 0.02F);
     const unsigned dev_device = channel_equalizer_metal::nof_device_ch_est_dispatches() - device_mid;
     const unsigned dev_staged = channel_equalizer_metal::nof_staged_ch_est_dispatches() - staged_mid;
 
-    // The reference run gathered the estimates, as it must: the counters are not vacuous.
+    // The reference run gathered the estimates and read the noise variance on the host, as it must:
+    // the counters are not vacuous.
     ASSERT_EQ(host_device, 0U);
     ASSERT_GT(host_staged, 0U);
+    ASSERT_GT(host_nv_reads, 0U);
     if (nof_ports == 1) {
+      // Reading a device-produced value on the host is what forces a synchronization, so this shape
+      // must not do it - not even once.
+      ASSERT_EQ(dev_nv_reads, 0U) << "the device noise variance was read on the host";
       ASSERT_GT(dev_device, 0U) << "the estimates were not bound where they were produced";
       ASSERT_EQ(dev_staged, 0U) << "the single-port case must not gather the estimates";
     } else {
+      // One buffer per port is not bindable yet, so this shape reads both values on the host.
+      ASSERT_GT(dev_nv_reads, 0U);
       ASSERT_EQ(dev_device, 0U) << "more than one port is one buffer per port: not bindable yet";
       ASSERT_GT(dev_staged, 0U);
     }
@@ -1170,5 +1218,23 @@ TEST_F(pusch_demodulator_deferred_chain_test, metal_equalizer_binds_the_estimato
           << "soft bit " << i << " differs between the staged and the bound channel estimates ("
           << nof_ports << " port(s))";
     }
+  }
+
+  // An ill-formed noise variance makes the CPU path drop the port (and, with no port left, produce
+  // invalid output). The kernel applies the same predicate to the device value, so both paths must
+  // still agree - this is the gate of moving that predicate into the kernel.
+  for (float bad_nv : {0.0F, std::numeric_limits<float>::infinity()}) {
+    const auto [host_bad, host_reads] = run(1, /*device_estimates=*/true, std::nullopt, bad_nv);
+    const auto [dev_bad, dev_reads]   = run(1, /*device_estimates=*/true, bad_nv, bad_nv);
+    ASSERT_EQ(dev_reads, 0U);
+    ASSERT_FALSE(dev_bad.empty());
+    ASSERT_EQ(host_bad.size(), dev_bad.size());
+    unsigned nof_diff = 0;
+    for (unsigned i = 0; i != host_bad.size(); ++i) {
+      nof_diff += (host_bad[i].to_int() != dev_bad[i].to_int()) ? 1U : 0U;
+    }
+    EXPECT_EQ(nof_diff, 0U) << "an ill-formed noise variance (value " << bad_nv
+                            << ") is not handled like the host path handles it";
+    ASSERT_GT(host_reads, 0U);
   }
 }

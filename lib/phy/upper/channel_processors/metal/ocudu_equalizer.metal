@@ -143,12 +143,17 @@ kernel void equalize_mxn(device const ushort2* h [[buffer(0)]], // cbf16 [port][
         float2 re_out    = float2(0.0f);
         for (uint port = 0; port != P; ++port) {
             const float2 hv  = H[port][0];
-            const float  nrm = hv.x * hv.x + hv.y * hv.y;
-            // CPU per-port mask: max(infinity, |h|^2) is a comparison, i.e., the port takes
-            // part only when its channel square norm is finite (NaN fails the compare too).
-            if (nrm < INFINITY) {
+            const float  nrm     = hv.x * hv.x + hv.y * hv.y;
+            const float  nv_port = sigma2[port];
+            // CPU per-port mask: the port takes part only when its channel square norm is finite
+            // (NaN fails the compare too) and its noise variance is positive and finite. The host
+            // applies the same predicate to compact the ports when it owns the variances; a backend
+            // that hands the kernel the device ones lets it apply the predicate here. When no port
+            // passes, ch_mod_sq stays zero and the output takes the invalid branch below, which is
+            // exactly what the host produces for an ill-formed noise variance.
+            if ((nrm < INFINITY) && (nv_port > 0.0f) && (nv_port < INFINITY)) {
                 ch_mod_sq += nrm;
-                nvar_acc += nrm * sigma2[port];
+                nvar_acc += nrm * nv_port;
                 // Matched filter: conjprod(re_in, ch_est) = re_in * conj(ch_est).
                 const float2 yv = load_cbf16(y, port * p.nof_re + re);
                 re_out += cmul(yv, float2(hv.x, -hv.y));
@@ -312,10 +317,12 @@ kernel void equalize_mxn_batch(device const ushort2* h [[buffer(0)]], // cbf16 [
         float2 re_out    = float2(0.0f);
         for (uint port = 0; port != P; ++port) {
             const float2 hv  = H[port][0];
-            const float  nrm = hv.x * hv.x + hv.y * hv.y;
-            if (nrm < INFINITY) {
+            const float  nrm     = hv.x * hv.x + hv.y * hv.y;
+            const float  nv_port = sigma2[port];
+            // Same per-port mask as the per-symbol kernel above.
+            if ((nrm < INFINITY) && (nv_port > 0.0f) && (nv_port < INFINITY)) {
                 ch_mod_sq += nrm;
-                nvar_acc += nrm * sigma2[port];
+                nvar_acc += nrm * nv_port;
                 const float2 yv = load_cbf16(y, port * p.nof_re + re);
                 re_out += cmul(yv, float2(hv.x, -hv.y));
             }

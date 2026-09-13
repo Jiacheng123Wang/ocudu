@@ -147,6 +147,15 @@ bool channel_equalizer_metal::is_supported(unsigned nof_ports, unsigned nof_laye
   return (nof_layers >= 1) && (nof_layers <= 4) && (nof_layers <= nof_ports) && impl_->engine_ok;
 }
 
+bool channel_equalizer_metal::consumes_device_estimates(unsigned nof_ports, unsigned nof_layers) const
+{
+  // One receive port (hence one layer) is the shape a single dispatch can read straight out of the
+  // estimator's buffer: more ports means one buffer per port, which one base pointer cannot
+  // describe. The kernel also applies the noise-variance validity predicate the host would apply,
+  // so the variances it reads off the device need no host check either.
+  return (nof_ports == 1) && (nof_layers == 1) && impl_->engine_ok;
+}
+
 void channel_equalizer_metal::equalize(span<cf_t>                       eq_symbols,
                                        span<float>                      eq_noise_vars,
                                        const re_buffer_reader<cbf16_t>& ch_symbols,
@@ -336,7 +345,8 @@ void channel_equalizer_metal::wait()
 channel_equalizer_metal::symbol_plan channel_equalizer_metal::resolve_plan(
     const re_buffer_reader<cbf16_t>& ch_symbols,
     const ch_est_list&               ch_estimates,
-    span<const float>                noise_var_estimates)
+    span<const float>                noise_var_estimates,
+    bool                             device_noise_variance)
 {
   symbol_plan plan;
   plan.nof_re       = ch_estimates.get_nof_re();
@@ -354,6 +364,16 @@ channel_equalizer_metal::symbol_plan channel_equalizer_metal::resolve_plan(
   // or non-finite noise variance are dropped, replicating the CPU port reduction.
   plan.single_layer   = (plan.nof_layers == 1);
   plan.nof_used_ports = plan.nof_rx_ports;
+  if (device_noise_variance) {
+    // The kernel reads the variances off the device, where they are current, and applies the same
+    // per-port validity predicate and the same "no valid port" outcome. So the values must NOT be
+    // read here: every port takes part and the dispatch geometry does not depend on them.
+    ocudu_assert(plan.single_layer, "Device noise variances are only offered for a single layer.");
+    for (unsigned i_port = 0; i_port != plan.nof_rx_ports; ++i_port) {
+      plan.port_map[i_port] = i_port;
+    }
+    return plan;
+  }
   if (plan.single_layer) {
     unsigned nof_valid = 0;
     for (unsigned i_port = 0; i_port != plan.nof_rx_ports; ++i_port) {
@@ -404,8 +424,21 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   ocudu_assert(tx_scaling > 0, "Tx scaling factor must be positive.");
   ocudu_assert(is_supported(nof_rx_ports, nof_layers), "Unsupported equalizer topology.");
 
+  // Device slice of the estimates, when the estimator published one for a shape this backend can
+  // read in place: one receive port, hence one layer (see consumes_device_estimates()). Its noise
+  // variance, when it carries one, is what the kernel scales the soft bits with - so this pass never
+  // reads either of them on the host.
+  std::optional<ch_est_list::device_slice> device_slice;
+  if ((nof_rx_ports == 1) && (nof_layers == 1)) {
+    std::optional<ch_est_list::device_slice> slice = ch_estimates.get_device_slice(0);
+    if (slice.has_value() && (slice->nof_layers == 1) && (slice->base != nullptr)) {
+      device_slice = slice;
+    }
+  }
+  const bool device_noise_variance = device_slice.has_value() && (device_slice->noise_var != nullptr);
+
   // Port reduction, validity and noise path of this symbol (shared with submit_group()).
-  const symbol_plan plan = resolve_plan(ch_symbols, ch_estimates, noise_var_estimates);
+  const symbol_plan plan = resolve_plan(ch_symbols, ch_estimates, noise_var_estimates, device_noise_variance);
   if (plan.invalid_input) {
     // CPU semantics: fill the output with invalid data for an ill-formed noise variance.
     ocuduvec::zero(eq_symbols);
@@ -427,24 +460,24 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   const size_t eq_bytes = static_cast<size_t>(nof_layers) * nof_re * 2 * sizeof(float);
   const size_t nv_bytes = static_cast<size_t>(nof_layers) * nof_re * sizeof(float);
 
-  // Channel estimates: one dispatch reads the estimates of every used port and layer. When there is
-  // a single used port and the estimator published them as a device slice of the buffer it produced
-  // them in, bind that buffer - the estimates are then read where the GPU wrote them, and the hop
-  // never touches them on the host. Otherwise gather them into the staging buffer as before.
+  // Channel estimates and noise variance: one dispatch reads the estimates of every used port and
+  // layer. When there is a single used port and the estimator published them as a device slice of
+  // the buffer it produced them in, bind that buffer - the inputs are then read where the GPU wrote
+  // them, and the pass never touches them on the host. Otherwise gather them into the staging
+  // buffers as before.
   metal::equalizer_metal_engine::ch_est_binding h_binding;
   bool                                         h_device = false;
-  if (single_layer && (nof_used_ports == 1)) {
-    std::optional<ch_est_list::device_slice> slice = ch_estimates.get_device_slice(port_map[0]);
-    if (slice.has_value() && (slice->nof_layers == nof_layers) && (slice->base != nullptr)) {
-      h_binding = metal::equalizer_metal_engine::ch_est_binding(slice->base, static_cast<unsigned>(slice->offset),
-                                                                slice->layer_stride);
-      h_device  = true;
-    }
+  if (device_slice.has_value() && (nof_used_ports == 1) && single_layer) {
+    h_binding = metal::equalizer_metal_engine::ch_est_binding(device_slice->base,
+                                                              static_cast<unsigned>(device_slice->offset),
+                                                              device_slice->layer_stride);
+    h_device  = true;
   }
 
   auto*        h_ptr    = h_device ? nullptr : static_cast<cbf16_t*>(entry.h.ensure(h_bytes));
   auto*        y_ptr    = static_cast<cbf16_t*>(entry.y.ensure(y_bytes));
-  auto*        s_ptr    = static_cast<float*>(entry.s.ensure(s_bytes));
+  const float* s_dev    = device_noise_variance ? device_slice->noise_var : nullptr;
+  auto*        s_ptr    = (s_dev != nullptr) ? nullptr : static_cast<float*>(entry.s.ensure(s_bytes));
   const bool   eq_direct = is_page_aligned_buffer(eq_symbols.data());
   const bool   nv_direct = is_page_aligned_buffer(eq_noise_vars.data());
   void*        eq_ptr    = eq_direct ? static_cast<void*>(eq_symbols.data()) : entry.eq_stage.ensure(eq_bytes);
@@ -462,7 +495,7 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
                     static_cast<size_t>(nof_re) * sizeof(cbf16_t));
       }
     }
-    if (single_layer) {
+    if (single_layer && (s_ptr != nullptr)) {
       s_ptr[i_used] = noise_var_estimates[i_port];
     }
   }
@@ -477,13 +510,16 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
       s_ptr[i_port] = noise_var;
     }
   }
+  // Where the kernel reads the per-port noise variances from: the estimator's device buffer when it
+  // published one, the local staging array otherwise.
+  const void* s_binding = (s_dev != nullptr) ? static_cast<const void*>(s_dev) : static_cast<const void*>(s_ptr);
 
   if (defer) {
     // Append the dispatch to the shared burst of this group: every stage of the burst ends up in
     // one command buffer, with a memory barrier where the pipeline changes (see shared_burst).
     const bool ok = impl_->engine.enqueue_burst(h_binding,
                                                 y_ptr,
-                                                s_ptr,
+                                                s_binding,
                                                 eq_ptr,
                                                 nv_ptr,
                                                 nof_re,
@@ -523,7 +559,7 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   (void)impl_->engine.begin_batch();
   const bool ok = impl_->engine.enqueue(h_binding,
                                        y_ptr,
-                                       s_ptr,
+                                       s_binding,
                                        eq_ptr,
                                        nv_ptr,
                                        nof_re,

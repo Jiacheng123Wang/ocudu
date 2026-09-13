@@ -33,6 +33,13 @@ public:
   bool is_supported(unsigned nof_ports, unsigned nof_layers) override;
 
   // See interface for documentation.
+  /// One receive port (hence one layer) is the shape a single dispatch can read straight out of the
+  /// estimator's buffer: more ports means one buffer per port, which one base pointer cannot
+  /// describe. The kernel also applies the noise-variance validity predicate the host would apply,
+  /// so the variances it reads off the device need no host check either.
+  bool consumes_device_estimates(unsigned nof_ports, unsigned nof_layers) const override;
+
+  // See interface for documentation.
   void equalize(span<cf_t>                       eq_symbols,
                 span<float>                      eq_noise_vars,
                 const re_buffer_reader<cbf16_t>& ch_symbols,
@@ -139,10 +146,13 @@ private:
   };
 
   /// Resolves the plan of one symbol, applying the same validity rules and CPU semantics as
-  /// run_equalize() (which uses it as well).
+  /// run_equalize() (which uses it as well). With \c device_noise_variance the caller states that
+  /// the kernel reads the noise variances off the device, so this must not read them (see
+  /// consumes_device_estimates()).
   symbol_plan resolve_plan(const re_buffer_reader<cbf16_t>& ch_symbols,
                                   const ch_est_list&               ch_estimates,
-                                  span<const float>                noise_var_estimates);
+                                  span<const float>                noise_var_estimates,
+                                  bool                             device_noise_variance = false);
 
   /// Encodes one batched dispatch for a run of symbols that share \c plan, geometry and output
   /// strides, and registers the entry in the shared burst.

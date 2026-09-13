@@ -103,6 +103,9 @@ private:
   get_device_ch_estimates(unsigned i_symbol, unsigned rx_port, unsigned tx_layer) const override;
 
   // See the dmrs_pusch_estimator_results interface for the documentation.
+  const float* get_device_noise_variance(unsigned rx_port) const override;
+
+  // See the dmrs_pusch_estimator_results interface for the documentation.
   void get_symbol_ch_estimate(span<cbf16_t> estimates,
                               unsigned      i_symbol,
                               unsigned      rx_port,

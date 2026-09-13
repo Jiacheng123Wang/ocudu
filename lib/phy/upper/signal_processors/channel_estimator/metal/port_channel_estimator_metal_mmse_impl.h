@@ -121,6 +121,9 @@ private:
   std::optional<ch_est_device_view> get_device_ch_estimates(unsigned i_symbol, unsigned tx_layer) const override;
 
   // See the base class documentation.
+  const float* get_device_noise_variance() const override { return device_noise_variance(); }
+
+  // See the base class documentation.
   void get_symbol_ch_estimate(span<cbf16_t> symbol, unsigned i_symbol, unsigned tx_layer) const override;
 
   // See the base class documentation.

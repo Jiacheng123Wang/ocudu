@@ -167,6 +167,14 @@ public:
     return std::nullopt;
   }
 
+  /// \brief Gets the device-resident noise variance, when the estimator produces it there.
+  ///
+  /// The value lives in the same device buffer the estimates do, so a consumer that binds them
+  /// binds this too and needs no host copy of either (see \ref ch_est_device_view).
+  ///
+  /// \return The device address of the noise variance, or nullptr when there is none (the default).
+  virtual const float* get_device_noise_variance() const { return nullptr; }
+
   /// Gets the estimated EPRE.
   virtual float get_epre() const = 0;
 

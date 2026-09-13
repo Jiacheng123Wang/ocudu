@@ -58,6 +58,12 @@ public:
       unsigned layer_stride = 0;
       /// Number of layers the slice holds.
       unsigned nof_layers = 0;
+      /// \brief Device address of this port's noise variance, or nullptr when the host owns it.
+      ///
+      /// The value the producer publishes to the host may lag behind the device one - keeping it in
+      /// sync costs a synchronization the receiving chain does not want - so a backend that reads
+      /// the estimates off the device reads this instead.
+      const float* noise_var = nullptr;
     };
 
     /// \brief Gets the device-resident storage of one receive port, if there is one.
@@ -75,6 +81,15 @@ public:
 
   /// Determines if the dimensions and algorithm are valid.
   virtual bool is_supported(unsigned nof_ports, unsigned nof_layers) = 0;
+
+  /// \brief True when this backend reads the channel estimates and their noise variances from the
+  /// device buffers that produced them, for the given topology.
+  ///
+  /// The producer of device-resident estimates is not required to keep host copies up to date, so a
+  /// caller offers them - and skips the host copies it would otherwise pass - only to a backend that
+  /// reports this. The default implementation reports "no": a backend that reads the estimates from
+  /// host memory keeps working unchanged.
+  virtual bool consumes_device_estimates(unsigned /*nof_ports*/, unsigned /*nof_layers*/) const { return false; }
 
   /// \brief Equalizes the MIMO channel and combines Tx&ndash;Rx paths.
   ///

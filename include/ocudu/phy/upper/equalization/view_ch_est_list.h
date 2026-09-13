@@ -27,6 +27,7 @@ public:
     nof_layers  = nof_tx_layers_;
     channels.assign(static_cast<std::size_t>(nof_rx_ports_) * nof_tx_layers_, span<const cbf16_t>());
     device_bases.assign(channels.size(), nullptr);
+    device_noise_vars.assign(nof_rx_ports_, nullptr);
   }
 
   /// Sets the estimates of one (Rx port, Tx layer) pair.
@@ -49,6 +50,16 @@ public:
                  "The channel estimates start before the given device buffer.");
     channels[i_rx_port * nof_layers + i_layer]     = ch;
     device_bases[i_rx_port * nof_layers + i_layer] = device_base;
+  }
+
+  /// \brief Sets the device-resident noise variance of one receive port.
+  ///
+  /// \param[in] noise_var Device address of the noise variance, as produced by the estimator, or
+  ///                      nullptr when the host owns the value (see ch_est_list::device_slice).
+  void set_device_noise_variance(unsigned i_rx_port, const float* noise_var)
+  {
+    ocudu_assert(i_rx_port < device_noise_vars.size(), "Port index out of range.");
+    device_noise_vars[i_rx_port] = noise_var;
   }
 
   // See interface for documentation.
@@ -77,6 +88,7 @@ public:
     slice.layer_stride = (nof_layers > 1) ? static_cast<unsigned>(channels[base_index + 1].data() -
                                                                   channels[base_index].data())
                                           : 0;
+    slice.noise_var    = device_noise_vars[i_rx_port];
     // Every layer must sit in the same buffer, at the same distance from the previous one: the
     // slice describes the whole port with one base and one stride.
     for (unsigned i_layer = 1; i_layer != nof_layers; ++i_layer) {
@@ -108,6 +120,8 @@ private:
   std::vector<span<const cbf16_t>> channels;
   /// Buffer each entry was produced in, or nullptr when it lives in host memory (same indexing).
   std::vector<const void*> device_bases;
+  /// Device address of each port's noise variance, or nullptr when the host owns it (per port).
+  std::vector<const float*> device_noise_vars;
   /// Number of resource elements per channel.
   unsigned nof_re = 0;
   /// Number of transmission layers.

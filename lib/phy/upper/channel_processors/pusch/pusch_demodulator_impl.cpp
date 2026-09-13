@@ -283,6 +283,13 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   const bool deferred_chain = !force_serial && equalizer->supports_deferred_chain() &&
                               demapper->supports_deferred_chain() && !config.enable_transform_precoding;
 
+  // Noise variances: a backend that reads the channel estimates off the device reads them there
+  // too, so this pass never needs a host copy of a device-produced value. That matters beyond the
+  // copy itself: reading one requires the estimator to have completed, which would put the whole
+  // receiving pass behind that synchronization. A backend that cannot use them is handed the host
+  // values, exactly as before.
+  const bool use_device_noise_vars = equalizer->consumes_device_estimates(nof_rx_ports, config.nof_tx_layers);
+
   // Initialize scrambling sequence. When msgA is sent over PUSCH, an alternative scrambling sequence is used, as per
   // TS 38.211 Section 6.3.1.1 Release 16.
   unsigned c_init  = to_value(config.rnti) * pow2(15) + config.n_id;
@@ -423,9 +430,18 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
       const channel_equalizer::ch_est_list& ch_estimates = get_ch_data_estimates(
           est_results, i_symbol, config.nof_tx_layers, symbol_re_mask_local, dc_position_local, config.rx_ports);
 
-      // Extract the Rx port noise variances from the channel estimation.
+      // Extract the Rx port noise variances. When the equalizer reads the estimates off the device
+      // and the estimator produced the variance there too, it is handed the device address instead:
+      // the host copy is what costs a synchronization, so it is read only when it is the source
+      // (a backend that does not use device estimates, or an estimator that did not produce one).
+      const bool device_noise_vars = use_device_noise_vars && (&ch_estimates == &device_ch_estimates);
       for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
-        noise_var_estimates[i_port] = est_results.get_noise_variance(i_port);
+        const float* dev_nv = device_noise_vars ? est_results.get_device_noise_variance(i_port) : nullptr;
+        if (dev_nv != nullptr) {
+          device_ch_estimates.set_device_noise_variance(i_port, dev_nv);
+        } else {
+          noise_var_estimates[i_port] = est_results.get_noise_variance(i_port);
+        }
       }
 
       // Extract the data symbols, equalize channels and, for each Tx layer, combine contribution from all Rx antenna

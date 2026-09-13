@@ -180,6 +180,14 @@ std::optional<ch_est_device_view> dmrs_pusch_estimator_impl::get_device_ch_estim
   return ch_est_result[rx_port]->get_device_ch_estimates(i_symbol, tx_layer);
 }
 
+const float* dmrs_pusch_estimator_impl::get_device_noise_variance(unsigned rx_port) const
+{
+  if ((rx_port >= ch_est_result.size()) || (ch_est_result[rx_port] == nullptr)) {
+    return nullptr;
+  }
+  return ch_est_result[rx_port]->get_device_noise_variance();
+}
+
 void dmrs_pusch_estimator_impl::get_symbol_ch_estimate(span<cbf16_t> estimates,
                                                        unsigned      i_symbol,
                                                        unsigned      rx_port,

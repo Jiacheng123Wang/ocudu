@@ -204,6 +204,18 @@ public:
     return std::nullopt;
   }
 
+  /// \brief Gets the device-resident noise variance of one receive port, when the estimator
+  /// produces it there (see \ref ch_est_device_view).
+  ///
+  /// A consumer that reads the channel estimates where they were produced reads the noise variance
+  /// from the same place: the value is handed over as its device address, so the consumer never
+  /// needs a host copy - which would require the estimator to have completed, and would keep the
+  /// whole receiving pass behind that synchronization. A consumer that cannot use it keeps reading
+  /// get_noise_variance(), which is the host copy.
+  ///
+  /// \return The device address of the noise variance, or nullptr when there is none (the default).
+  virtual const float* get_device_noise_variance(unsigned /*rx_port*/) const { return nullptr; }
+
   /// \brief Gets the general Channel State Information.
   ///
   /// \param[out] csi Channel State Information object where the CSI parameters are stored.

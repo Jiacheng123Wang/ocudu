@@ -92,6 +92,14 @@ public:
     return base_equalizer->is_supported(nof_ports, nof_layers);
   }
 
+  // See interface for documentation.
+  bool consumes_device_estimates(unsigned nof_ports, unsigned nof_layers) const override
+  {
+    // Must be forwarded: a decorator that answered "no" would make the caller hand over host copies
+    // of values the backend reads off the device - the synchronization this capability avoids.
+    return base_equalizer->consumes_device_estimates(nof_ports, nof_layers);
+  }
+
 private:
   /// Completes and reports the metric of one equalization.
   void collect_metrics(channel_equalizer_metrics& metrics, const ch_est_list& ch_estimates)

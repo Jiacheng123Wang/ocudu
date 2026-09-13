@@ -27,6 +27,13 @@ public:
     return generic_->is_supported(nof_ports, nof_layers);
   }
 
+  bool consumes_device_estimates(unsigned nof_ports, unsigned nof_layers) const override
+  {
+    // Only the symbols this composite routes to Metal are read off the device (see select()); one
+    // routed to the CPU back end reads host memory, so the caller must hand over host values.
+    return metal_->is_supported(nof_ports, nof_layers) && metal_->consumes_device_estimates(nof_ports, nof_layers);
+  }
+
   void equalize(span<cf_t>                       eq_symbols,
                 span<float>                      eq_noise_vars,
                 const re_buffer_reader<cbf16_t>& ch_symbols,
