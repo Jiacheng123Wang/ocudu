@@ -17,6 +17,7 @@
 #pragma once
 
 #include "ocudu/ran/pusch/pusch_constants.h"
+#include <cstddef>
 #include <cstdint>
 
 namespace ocudu {
@@ -199,6 +200,17 @@ public:
               unsigned     L,
               unsigned     nof_systems,
               unsigned     nof_blocks);
+
+  /// \brief Reserves the zero-copy mapping of a buffer at its maximum size.
+  ///
+  /// The zero-copy cache is keyed by pointer and keeps the mapping created first: a later request
+  /// for the same pointer with a LARGER size re-wraps (a new Metal buffer, and the cache keeps the
+  /// old entry), while a smaller one is served from the cache. A buffer whose size follows the
+  /// allocation - the estimator's staging buffers do - must therefore be reserved at its capacity
+  /// once, or every hop that needs more than the first one allocated so far creates a Metal buffer
+  /// on the hot path (measured: 6492 re-wraps in one 160 s run, each with a warning line).
+  /// \return True when the mapping exists.
+  bool reserve_buffer(const void* ptr, std::size_t bytes);
 
   /// Returns the GPU-side duration of the last operation in microseconds (0 when unavailable).
   double last_gpu_wait_us() const;

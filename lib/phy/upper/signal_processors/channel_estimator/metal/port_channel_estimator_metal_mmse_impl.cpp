@@ -237,6 +237,22 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
     (void)engine->run_weights_only(
         gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, MAX_BLOCK_OUT, MAX_BLOCK_PILOTS, MAX_LAYERS, max_blocks);
   }
+  // The device-side stages (K3/K4) read and write staging buffers whose size follows the
+  // allocation, so reserve their zero-copy mappings at capacity here: without this, every hop that
+  // needs more than the first allocation seen re-wraps a Metal buffer on the hot path.
+  if (engine_ready) {
+    (void)engine->reserve_buffer(gpu_ce,
+                                 static_cast<std::size_t>(MAX_LAYERS) * MAX_NOF_PRBS * NOF_SUBCARRIERS_PER_RB *
+                                     MAX_NSYMB_PER_SLOT * 2 * sizeof(uint16_t));
+    (void)engine->reserve_buffer(
+        gpu_pilots,
+        2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * MAX_LAYERS * MAX_NOF_PILOTS_SYMBOL * sizeof(float));
+    (void)engine->reserve_buffer(
+        gpu_rx_pilots,
+        2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * (MAX_LAYERS / 2) * MAX_NOF_PILOTS_SYMBOL * sizeof(float));
+    (void)engine->reserve_buffer(gpu_nv, sizeof(float));
+  }
+
   // The matrix kernels need their own warm-up (JIT + zero-copy cache entry sized
   // MAX_LAYERS * ceil(max_blocks/4) * 72 * 8 floats - larger than any later call).
   if (matrix_ready) {

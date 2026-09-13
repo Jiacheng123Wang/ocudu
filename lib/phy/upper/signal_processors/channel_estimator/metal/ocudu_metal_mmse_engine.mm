@@ -804,6 +804,15 @@ bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const 
   return true;
 }
 
+bool mmse_engine::reserve_buffer(const void* ptr, std::size_t bytes)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if ((e == nullptr) || (e->device == nil) || (ptr == nullptr) || (bytes == 0)) {
+    return false;
+  }
+  return e->wrap(ptr, static_cast<NSUInteger>(bytes)) != nil;
+}
+
 double mmse_engine::last_gpu_wait_us() const
 {
   const auto* e = static_cast<const mmse_engine_impl*>(impl);
