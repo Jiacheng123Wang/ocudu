@@ -468,5 +468,116 @@ int main()
     }
   }
 
-  return (nof_br_mismatch == 0 && nof_cr_mismatch == 0 && nof_batch_mismatch == 0) ? 0 : 1;
+  // ---------------------------------------------------------------------------------------------
+  // Pattern E: the over-the-air shape - TWO ports, 12 symbols, 204 REs and a page-aligned GAPPED
+  // output stride (what the demodulator's temp_eq_re layout hands the engine). Pattern D above
+  // covers one port with contiguous strides, and wiring the batch path into the receiving chain
+  // exposed that the batch kernel does not hold outside that combination.
+  // ---------------------------------------------------------------------------------------------
+  unsigned nof_ota_mismatch = 0;
+  {
+    metal::equalizer_metal_engine engine;
+    if (engine.init()) {
+      const unsigned e_ports  = 2;
+      const unsigned e_layers = 1;
+      const unsigned e_nof_re = 204;
+      const unsigned e_syms   = 12;
+      const unsigned e_eq_gap = 4096; // cf_t elements between symbols (page multiple)
+      const unsigned e_nv_gap = 4096; // float elements between symbols
+      const size_t   e_h_str  = e_ports * e_layers * e_nof_re;
+      const size_t   e_y_str  = e_ports * e_nof_re;
+
+      std::vector<cbf16_t>            h_group(e_h_str * e_syms);
+      std::vector<cbf16_t>            y_group(e_y_str * e_syms);
+      std::mt19937                    r2(7);
+      std::normal_distribution<float> d2(0.0F, 0.4F);
+      for (cbf16_t& v : h_group) {
+        v = cbf16_t(1.0F + d2(r2), d2(r2));
+      }
+      for (cbf16_t& v : y_group) {
+        v = cbf16_t(d2(r2), d2(r2));
+      }
+      std::vector<float> sigma2(e_ports, 0.02F);
+
+      aligned_buffer eq_sym;
+      aligned_buffer nv_sym;
+      aligned_buffer eq_bat;
+      aligned_buffer nv_bat;
+      eq_sym.allocate(static_cast<size_t>(e_eq_gap) * e_syms * sizeof(cf_t));
+      nv_sym.allocate(static_cast<size_t>(e_nv_gap) * e_syms * sizeof(float));
+      eq_bat.allocate(static_cast<size_t>(e_eq_gap) * e_syms * sizeof(cf_t));
+      nv_bat.allocate(static_cast<size_t>(e_nv_gap) * e_syms * sizeof(float));
+
+      auto per_symbol = [&]() {
+        for (unsigned s = 0; s != e_syms; ++s) {
+          engine.enqueue_burst(h_group.data() + s * e_h_str,
+                               y_group.data() + s * e_y_str,
+                               sigma2.data(),
+                               static_cast<char*>(eq_sym.ptr) + static_cast<size_t>(s) * e_eq_gap * sizeof(cf_t),
+                               static_cast<char*>(nv_sym.ptr) + static_cast<size_t>(s) * e_nv_gap * sizeof(float),
+                               e_nof_re,
+                               e_ports,
+                               e_layers,
+                               true,
+                               0.02F,
+                               1.0F,
+                               1.0F);
+        }
+        engine.burst_commit();
+        engine.burst_wait_committed();
+      };
+      auto batched = [&]() {
+        engine.burst_open();
+        bool ok = engine.enqueue_burst_batch(h_group.data(),
+                                            y_group.data(),
+                                            sigma2.data(),
+                                            eq_bat.ptr,
+                                            nv_bat.ptr,
+                                            e_nof_re,
+                                            e_syms,
+                                            static_cast<unsigned>(e_h_str),
+                                            static_cast<unsigned>(e_y_str),
+                                            e_eq_gap,
+                                            e_nv_gap,
+                                            e_ports,
+                                            e_layers,
+                                            true,
+                                            0.02F,
+                                            1.0F,
+                                            1.0F);
+        engine.burst_commit();
+        return engine.burst_wait_committed() && ok;
+      };
+      per_symbol();
+      const bool ok = batched();
+
+      const auto* pa = static_cast<const cf_t*>(eq_sym.ptr);
+      const auto* pb = static_cast<const cf_t*>(eq_bat.ptr);
+      const auto* na = static_cast<const float*>(nv_sym.ptr);
+      const auto* nb = static_cast<const float*>(nv_bat.ptr);
+      unsigned    first_bad = ~0u;
+      for (unsigned s = 0; s != e_syms; ++s) {
+        for (unsigned i = 0; i != e_nof_re; ++i) {
+          const size_t off = static_cast<size_t>(s) * e_eq_gap + i;
+          if (std::memcmp(&pa[off], &pb[off], sizeof(cf_t)) != 0) {
+            nof_ota_mismatch += 1;
+            first_bad = std::min(first_bad, s);
+          }
+          const size_t noff = static_cast<size_t>(s) * e_nv_gap + i;
+          nof_ota_mismatch += (std::memcmp(&na[noff], &nb[noff], sizeof(float)) != 0) ? 1 : 0;
+        }
+      }
+      std::printf("[chain] E OTA shape (2 ports, %u symbols, %u REs, gapped stride %u): %u differing eq/nv, "
+                  "first bad symbol %d -> %s (engine ok=%d)\n",
+                  e_syms,
+                  e_nof_re,
+                  e_eq_gap,
+                  nof_ota_mismatch,
+                  (first_bad == ~0u) ? -1 : static_cast<int>(first_bad),
+                  (nof_ota_mismatch == 0) ? "OK" : "MISMATCH",
+                  ok ? 1 : 0);
+    }
+  }
+
+  return (nof_br_mismatch == 0 && nof_cr_mismatch == 0 && nof_batch_mismatch == 0 && nof_ota_mismatch == 0) ? 0 : 1;
 }
