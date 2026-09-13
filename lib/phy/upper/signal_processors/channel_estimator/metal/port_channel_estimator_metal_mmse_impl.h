@@ -215,14 +215,20 @@ private:
   ///              before another batch of the same hop is submitted, because they share the gpu_h
   ///              staging buffer this call overwrites. That is what the call below enforces: only
   ///              the LAST batch of a hop stays outstanding.
+  /// \param[in] defer Submit the batch without waiting for it (see port_channel_estimator::submit()):
+  ///                  the caller collects it through complete_fd_td_estimation_stage(). Deliberately
+  ///                  has NO default: a defaulted false here silently turned the merged
+  ///                  standard+tail path - the one every wide hop takes, and the only path the air
+  ///                  interface exercises - into a synchronous wait (~280us per hop), because that
+  ///                  call site omitted the argument while the unpack beside it used the flag.
   bool engine_run(unsigned                                 nout,
                   unsigned                                 L,
                   unsigned                                 nof_systems,
                   unsigned                                 nof_blocks,
                   bool                                     matrix,
                   bool                                     gpu_invert,
-                  const metal::mmse_engine::reformat_stage* reformat = nullptr,
-                  bool                                     defer    = false);
+                  const metal::mmse_engine::reformat_stage* reformat,
+                  bool                                     defer);
 
   /// \brief Unpacks the engine outputs of the group staged at \c sys_offset into the grid
   /// (symbol-major within each block; the blocks start at PRB gb_start).

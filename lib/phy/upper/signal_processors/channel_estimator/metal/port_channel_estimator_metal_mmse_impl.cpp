@@ -907,6 +907,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // Both inversion flavors defer now: the weights-only pipeline (block order above the inversion kernel's
       // limit, which is the OTA geometry) used to be synchronous, and waiting for its batch inside the stage
       // cost ~150-230us per hop of pure host time.
+      // NOTE: merged_defer has to be PASSED here. engine_run()'s defer argument used to have a
+      // defaulted false, so this call - the merged standard+tail path, which is what every wide hop
+      // (the air interface's 13 PRB among them) takes - was submitted synchronously while the unpack
+      // right below already used merged_defer: the wait showed up as submit=~280us per hop on the
+      // air, and every deferred-batch probe (cpl_wait, defer_wait) stayed at zero for it.
       const bool merged_defer = defer;
 #if defined(OCUDU_CE_TIME)
       const auto t_submit_begin = steady_clock::now();
@@ -919,7 +924,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                         gpu_invert,
                                         reformat_for(block_prb * NOF_SUBCARRIERS_PER_RB,
                                                      rem_prb * NOF_SUBCARRIERS_PER_RB,
-                                                     nof_layers));
+                                                     nof_layers),
+                                        merged_defer);
 #if defined(OCUDU_CE_TIME)
       submit_us_local += std::chrono::duration<double, std::micro>(steady_clock::now() - t_submit_begin).count();
 #endif
