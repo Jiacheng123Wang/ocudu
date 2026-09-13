@@ -345,6 +345,14 @@ private:
   /// Auxiliary buffer for processing the pilots.
   static_re_buffer<MAX_LAYERS, MAX_NOF_SUBCARRIERS> pilot_products;
 
+  /// \brief View of the filtered pilot estimates the hop statistics are computed from.
+  ///
+  /// It has to be the same object in both phases of a hop: setup_auxiliary_buffers() assigns it as a
+  /// window of the enlarged buffer (offset MAX_V_PILOTS with the filter smoothing strategy), so
+  /// rebuilding it from that buffer instead would silently drop the offset and shift every derived
+  /// measurement - RSRP, noise variance and time alignment - by that many subcarriers.
+  modular_re_measurement<cf_t, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS> filtered_pilots_lse;
+
   /// Second auxiliary buffer for processing the pilots.
   static_re_measurement<cf_t, MAX_NOF_PILOTS_SYMBOL, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS> enlarged_pilots_lse;
   modular_re_measurement<cf_t, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS>                       pilots_lse;

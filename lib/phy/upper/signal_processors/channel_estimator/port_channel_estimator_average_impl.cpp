@@ -336,7 +336,6 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
   static_re_measurement<cf_t, MAX_NOF_PILOTS_SYMBOL, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS>& enlarged_filtered_pilots_lse =
       pending_hop.enlarged_filtered_pilots_lse;
   enlarged_filtered_pilots_lse.resize({.nof_subc = nof_symbol_pilots, .nof_symbols = nof_lse_symbols, .nof_slices = nof_tx_layers});
-  modular_re_measurement<cf_t, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS> filtered_pilots_lse(enlarged_filtered_pilots_lse);
   pilots_lse.resize({.nof_subc = nof_symbol_pilots, .nof_symbols = nof_dmrs_symbols, .nof_slices = nof_tx_layers});
 
   setup_auxiliary_buffers(pilots_lse,
@@ -446,7 +445,6 @@ void port_channel_estimator_average_impl::compute_hop_finish(const dmrs_symbol_l
 
   auto [pattern_symbols, first_symbol, last_symbol, nof_dmrs_symbols] = extract_common_pattern(cfg_local, st.hop);
   (void) pattern_symbols; // the statistics read the pattern from cfg_local
-  modular_re_measurement<cf_t, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS> filtered_pilots_lse(st.enlarged_filtered_pilots_lse);
 
   unsigned nof_tx_layers = cfg_local.dmrs_pattern.size();
   unsigned nof_lse_symbols = st.nof_lse_symbols;
