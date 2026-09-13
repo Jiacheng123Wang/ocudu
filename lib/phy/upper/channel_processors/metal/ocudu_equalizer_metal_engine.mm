@@ -676,25 +676,21 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
   /// the burst changes stage (the demapping) or commits; the caller's inputs are read at that point,
   /// which is why they must stay alive until wait() - the contract the per-symbol path already has.
   ///
-  /// The batched form is bit-exact against the per-symbol chain in every single-threaded check (the
-  /// chain probe, the equalizer unit test with a group of twelve, and the deferred demodulation
-  /// equivalence test), and 2.0x cheaper on the equalization alone at the over-the-air shape. It is
-  /// NOT the default yet because the concurrency test (four demodulations at the same time, one
-  /// engine each) still comes out wrong once a group holds ten or more symbols: the eq_batch probe
-  /// reports the single batched run of the whole group, so the group IS encoded, yet the demapping
-  /// of the symbols after the first reads zeros. A CPU synchronization between the two stages makes
-  /// that disappear, so what fails is the stage hand-off inside the shared command buffer once
-  /// several threads encode into their own bursts.
+  /// The batched form is bit-exact against the per-symbol chain in every LOCAL check (the chain
+  /// probe, the equalizer unit test with a group of twelve, the deferred demodulation equivalence
+  /// test, and - since the wrap cache was fixed - the concurrent demodulation test), and it is 2.0x
+  /// cheaper on the equalization alone at the over-the-air shape. It is OFF by default because the
+  /// over-the-air link says otherwise: with it the PUSCH block error rate goes from 10% to 95% and
+  /// the handset cannot attach (the gNB reaches RLF on consecutive CRC failures), while the very
+  /// same binary with the per-symbol encoding is healthy. The difference between the two encodings
+  /// is not understood yet, so the local checks do not cover the path the air takes - until one
+  /// does, the chain keeps the per-symbol encoding.
   ///
-  /// The batched form is the DEFAULT: it is bit-exact in every check (the chain probe, the
-  /// equalizer unit test with a group of twelve, the deferred demodulation equivalence test, and
-  /// the concurrent demodulation test) and it is the whole point of the group hand-off. Debug
-  /// override: OCUDU_EQ_IMMEDIATE_ENCODE=1 pins the per-symbol form, so an RX regression can be
-  /// bisected against the encoding without a rebuild.
+  /// Debug override: OCUDU_EQ_DEFER_ENCODE=1 selects the batched form (probes and A/B legs use it).
   ///@{
   static const bool defer_encode = []() {
-    const char* env = std::getenv("OCUDU_EQ_IMMEDIATE_ENCODE");
-    return (env == nullptr) || (std::strtoul(env, nullptr, 10) == 0);
+    const char* env = std::getenv("OCUDU_EQ_DEFER_ENCODE");
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
   }();
   if (defer_encode) {
     // A thread can accumulate for several engines over its lifetime (a worker creating one
