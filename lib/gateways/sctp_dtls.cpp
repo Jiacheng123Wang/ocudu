@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 #include "sctp_dtls.h"
+#include "openssl_error.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/error_handling.h"
 #include <string>
@@ -44,49 +45,44 @@ bool openssl_dtls_context::init(int socket)
   // session will act as server or client.
   ssl_ctx = SSL_CTX_new(DTLS_method());
   if (ssl_ctx == nullptr) {
-    unsigned long err = ERR_get_error();
     logger.error("Could not initialize DTLS context. Cause: failure to create context. session={} err={}",
                  cfg.session_id,
-                 ERR_reason_error_string(err));
+                 openssl_error{ERR_get_error()});
     return false;
   }
 
   // Set session ID of DTLS context.
   if (!SSL_CTX_set_session_id_context(ssl_ctx, (const unsigned char*)cfg.session_id.c_str(), cfg.session_id.size())) {
-    unsigned long err = ERR_get_error();
     logger.error("Could not initialize DTLS context. Cause: failure to set session id. session={} err={}",
                  cfg.session_id,
-                 ERR_reason_error_string(err));
+                 openssl_error{ERR_get_error()});
     return false;
   }
 
   // Load certificate from file.
   if (!SSL_CTX_use_certificate_file(ssl_ctx, cfg.cert_filename.c_str(), SSL_FILETYPE_PEM)) {
-    unsigned long err = ERR_get_error();
     logger.error("Could not initialize DTLS context. Cause: invalid certificate file. session={} filename={} err={}",
                  cfg.session_id,
                  cfg.cert_filename,
-                 ERR_reason_error_string(err));
+                 openssl_error{ERR_get_error()});
     return false;
   }
 
   // Load private key from file.
   if (!SSL_CTX_use_PrivateKey_file(ssl_ctx, cfg.key_filename.c_str(), SSL_FILETYPE_PEM)) {
-    unsigned long err = ERR_get_error();
     logger.error("Could not initialize DTLS context. Cause: invalid key file. session={} filename={} err={}",
                  cfg.session_id,
                  cfg.key_filename,
-                 ERR_reason_error_string(err));
+                 openssl_error{ERR_get_error()});
     return false;
   }
 
   // Check private key is valid.
   if (!SSL_CTX_check_private_key(ssl_ctx)) {
-    unsigned long err = ERR_get_error();
     logger.error("Could not initialize DTLS context. Cause: invalid key. session={} filename={} err={}",
                  cfg.session_id,
                  cfg.key_filename,
-                 ERR_reason_error_string(err));
+                 openssl_error{ERR_get_error()});
     return false;
   }
 
@@ -99,13 +95,12 @@ bool openssl_dtls_context::init(int socket)
   // `sudo sysctl -w net.sctp.auth_enable=1`.
   BIO* bio = BIO_new_dgram_sctp(socket, BIO_NOCLOSE);
   if (!bio) {
-    unsigned long err = ERR_get_error();
     logger.error(
         "Could not initialize DTLS context. Cause: failed to configure socket. session={} key={} cert={} err={}",
         cfg.session_id,
         cfg.key_filename,
         cfg.cert_filename,
-        ERR_reason_error_string(err));
+        openssl_error{ERR_get_error()});
     logger.error("Make sure that net.sctp.auth_enable is set to 1");
     return false;
   }

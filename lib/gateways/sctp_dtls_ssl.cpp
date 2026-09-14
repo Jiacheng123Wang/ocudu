@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 #include "sctp_dtls_ssl.h"
+#include "openssl_error.h"
 #include "sctp_dtls.h"
 #include "ocudu/adt/byte_buffer.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -39,14 +40,12 @@ bool openssl_dtls_ssl::init(int socket)
   }
   ssl = SSL_new(ctx);
   if (ssl == nullptr) {
-    int err = ERR_get_error();
-    logger.error("Could not initialize SSL. Cause: failure to create SSL. err={}", ERR_reason_error_string(err));
+    logger.error("Could not initialize SSL. Cause: failure to create SSL. err={}", openssl_error{ERR_get_error()});
     return false;
   }
   bio = BIO_new_dgram_sctp(socket, BIO_NOCLOSE);
   if (bio == nullptr) {
-    int err = ERR_get_error();
-    logger.error("Could not initialize SSL. Cause: failure to create BIO. err={}", ERR_reason_error_string(err));
+    logger.error("Could not initialize SSL. Cause: failure to create BIO. err={}", openssl_error{ERR_get_error()});
     return false;
   }
   SSL_set_bio(ssl, bio, bio);
