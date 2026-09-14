@@ -571,10 +571,12 @@ struct mmse_corr_params_t {
   uint32_t pilot_re[12];
 };
 
-bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
+/// Encodes the two correlation dispatches of \p c into \p enc: the caller owns the command buffer,
+/// so the same encoding serves the standalone entry point and the prefix of an engine call.
+static bool encode_corr(mmse_engine_impl* e, id<MTLComputeCommandEncoder> enc, const mmse_engine::corr_stage& c,
+                        unsigned nof_systems)
 {
-  auto* e = static_cast<mmse_engine_impl*>(impl);
-  if ((e == nullptr) || (e->device == nil) || (e->corr_a_pipe == nil) || (e->corr_rhp_pipe == nil)) {
+  if ((e == nullptr) || (enc == nil) || (e->corr_a_pipe == nil) || (e->corr_rhp_pipe == nil)) {
     return false;
   }
   if ((c.a == nullptr) || (c.r_hp == nullptr) || (nof_systems == 0) || (c.l == 0) || (c.npf == 0) ||
@@ -589,29 +591,26 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
 
   mmse_corr_params_t p{};
   p.nof_systems = nof_systems;
-  p.npt        = npt;
-  p.npf        = c.npf;
-  p.ncomb      = c.ncomb;
-  p.nf         = c.nf;
-  p.L          = c.l;
-  p.Ls         = c.a_l_stride;
-  p.Ns         = c.r_stride;
-  p.ts         = c.ts;
-  p.scs_hz     = c.scs_hz;
-  p.fd_hz      = c.fd_hz;
-  p.tau_rms_s  = c.tau_rms_s;
-  p.sigma2     = c.sigma2;
+  p.npt         = npt;
+  p.npf         = c.npf;
+  p.ncomb       = c.ncomb;
+  p.nf          = c.nf;
+  p.L           = c.l;
+  p.Ls          = c.a_l_stride;
+  p.Ns          = c.r_stride;
+  p.ts          = c.ts;
+  p.scs_hz      = c.scs_hz;
+  p.fd_hz       = c.fd_hz;
+  p.tau_rms_s   = c.tau_rms_s;
+  p.sigma2      = c.sigma2;
   // The host's diagonal ridge (build_correlation_matrices(): const float ridge = 1e-6F).
-  p.ridge      = 1e-6F;
+  p.ridge = 1e-6F;
   for (unsigned k = 0; k != npt; ++k) {
     p.dmrs_slots[k] = c.dmrs_slots[k];
   }
   for (unsigned k = 0; k != c.ncomb; ++k) {
     p.pilot_re[k] = c.pilot_re[k];
   }
-
-  id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
-  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
   const NSUInteger a_per_sys   = static_cast<NSUInteger>(c.l) * c.l;
   const NSUInteger rhp_per_sys = static_cast<NSUInteger>(nout) * c.l;
@@ -637,6 +636,21 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
   [enc setBytes:&p length:sizeof(p) atIndex:1];
   [enc dispatchThreads:MTLSizeMake(rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
+  return true;
+}
+
+bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if ((e == nullptr) || (e->device == nil)) {
+    return false;
+  }
+  id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (!encode_corr(e, enc, c, nof_systems)) {
+    [enc endEncoding];
+    return false;
+  }
   [enc endEncoding];
   [cb commit];
   mmse_stats_commit();
@@ -904,12 +918,13 @@ bool encode_weights_only(mmse_engine_impl*                  e,
                          unsigned                           nof_systems,
                          unsigned                           nof_blocks,
                          const mmse_engine::reformat_stage* reformat,
+                         const mmse_engine::corr_stage*     corr,
                          bool                               wait_for_completion);
 } // namespace
 
 bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float* w, const float* y, float* h,
                                  unsigned nout, unsigned L, unsigned nof_systems, unsigned nof_blocks,
-                                 const reformat_stage* reformat)
+                                 const reformat_stage* reformat, const corr_stage* corr)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
@@ -919,12 +934,12 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
     mmse_guard_timer guard(e->pending_cb != nil);
     (void)wait_pending();
   }
-  return encode_weights_only(e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, true);
+  return encode_weights_only(e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, corr, true);
 }
 
 bool mmse_engine::run_weights_only_async(const float* a_inv, const float* r_hp, float* w, const float* y, float* h,
                                         unsigned nout, unsigned L, unsigned nof_systems, unsigned nof_blocks,
-                                        const reformat_stage* reformat)
+                                        const reformat_stage* reformat, const corr_stage* corr)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
@@ -936,7 +951,7 @@ bool mmse_engine::run_weights_only_async(const float* a_inv, const float* r_hp, 
     mmse_guard_timer guard(e->pending_cb != nil);
     (void)wait_pending();
   }
-  return encode_weights_only(e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, false);
+  return encode_weights_only(e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, corr, false);
 }
 
 namespace {
@@ -951,6 +966,7 @@ bool encode_weights_only(mmse_engine_impl*                  e,
                          unsigned                           nof_systems,
                          unsigned                           nof_blocks,
                          const mmse_engine::reformat_stage* reformat,
+                         const mmse_engine::corr_stage*     corr,
                          bool                               wait_for_completion)
 {
   mmse_phase_timer phase(wait_for_completion ? "run_weights_only" : "run_weights_only_async");
@@ -979,6 +995,18 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   id<MTLCommandBuffer> cb = [e->queue commandBuffer];
   phase.created();
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+
+  // K0-d prefix: the correlation matrices are built into their slots FIRST, in this same command
+  // buffer - the weights below read them. Building them in a command buffer of their own costs a
+  // whole submission round trip (~70us measured) against a fraction of that in host work, which is
+  // what made the device build look unprofitable; riding this buffer is what makes it pay.
+  if (corr != nullptr) {
+    if (!encode_corr(e, enc, *corr, nof_systems)) {
+      [enc endEncoding];
+      return false;
+    }
+  }
+
 
   [enc setComputePipelineState:e->weights_pipe];
   [enc setBuffer:rp_buf offset:0 atIndex:0];

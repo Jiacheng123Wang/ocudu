@@ -387,6 +387,50 @@ float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estima
   return n_pairs == 0 ? 0.0F : sigma2 / static_cast<float>(n_pairs);
 }
 
+metal::mmse_engine::corr_stage port_channel_estimator_metal_mmse_impl::correlation_stage(
+    const channel_statistics&                     stats,
+    const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
+    unsigned                                       b_prb,
+    span<const unsigned>                           dmrs_slot_symbols,
+    unsigned                                       scs_khz,
+    unsigned                                       sys_offset,
+    unsigned&                                      nout,
+    unsigned&                                      L)
+{
+  const unsigned nf  = b_prb * NOF_SUBCARRIERS_PER_RB;
+  const unsigned npt = dmrs_slot_symbols.size();
+  const unsigned npf = b_prb * re_pattern.count();
+  L                  = npt * npf;
+  nout               = nf * MAX_NSYMB_PER_SLOT;
+
+  metal::mmse_engine::corr_stage c{};
+  c.a          = gpu_a + static_cast<std::size_t>(sys_offset) * L * L;
+  c.r_hp       = gpu_r_hp + static_cast<std::size_t>(sys_offset) * nout * L;
+  c.a_l_stride = L;
+  c.r_stride   = nout;
+  c.l          = L;
+  c.nf         = nf;
+  c.npf        = npf;
+  c.ncomb      = re_pattern.count();
+  c.ts         = 1.0F / (static_cast<float>(scs_khz) * 1000.0F * MAX_NSYMB_PER_SLOT);
+  c.scs_hz     = static_cast<float>(scs_khz) * 1000.0F;
+  c.fd_hz      = stats.fd_hz;
+  c.tau_rms_s  = stats.tau_rms_s;
+  c.sigma2     = stats.sigma2;
+  for (unsigned k = 0; k != npt; ++k) {
+    c.dmrs_slots[k] = dmrs_slot_symbols[k];
+  }
+  {
+    unsigned n = 0;
+    for (unsigned pos = 0; (pos != NOF_SUBCARRIERS_PER_RB) && (n != c.ncomb); ++pos) {
+      if (re_pattern.test(pos)) {
+        c.pilot_re[n++] = pos;
+      }
+    }
+  }
+  return c;
+}
+
 bool port_channel_estimator_metal_mmse_impl::build_correlation_matrices_device(
     const channel_statistics&                     stats,
     const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
@@ -747,22 +791,19 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // standard geometry is the whole batch: otherwise the tail system would keep whatever the slot
     // held before, and the weights would be built from a stale matrix. With no tail, or with the
     // split form (two batches), the standard batch is the single geometry the kernel describes.
+    // OFF by default while one defect remains: with the stage folded into the engine call (the
+    // right place - see the corr parameter of run_weights_only()) the slots, the weights, the pilot
+    // staging, the h output and grid_est are all byte-identical to the host path, and the LLR still
+    // differs, so something after the engine call depends on which way the slots were filled. Until
+    // that is found the host build stays the default; OCUDU_CE_CORR_DEV=1 runs the device one.
     static const bool device_corr_enabled = []() {
       const char* env = std::getenv("OCUDU_CE_CORR_DEV");
       return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
     }();
-    if (device_corr_enabled && !merge_tail && (n_std_blocks != 0)) {
-      std_slots_filled = build_correlation_matrices_device(stats,
-                                                           args.dmrs_patterns.front().re_pattern,
-                                                           block_prb,
-                                                           0,
-                                                           span<const unsigned>(dmrs_sym.begin(), npt),
-                                                           scs_khz,
-                                                           0,
-                                                           nof_layers,
-                                                           nout_std,
-                                                           L_std);
-    }
+    // The matrices are built by the engine call that computes the weights (see the corr stage it
+    // takes): a command buffer of their own would cost a whole submission round trip, which is what
+    // made the device build look unprofitable. Only the DESCRIPTOR is prepared here.
+    std_slots_filled = device_corr_enabled && !merge_tail && (n_std_blocks != 0);
     // K3 (S-6a): the equalizer's per-symbol estimates, built on the GPU inside the engine call. The
     // destination can only be filled by a call that covers the WHOLE allocation with the legacy
     // kernels - the merged batch, or a hop whose single batch is everything - otherwise the blocks
@@ -980,7 +1021,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 #if defined(OCUDU_CE_TIME)
       const auto t_submit_begin = steady_clock::now();
 #endif
-      const bool merged_ok = engine_run(nout_std,
+      const bool merged_ok = engine_run(nullptr,
+                                        nout_std,
                                         L_std,
                                         2 * nof_layers,
                                         n_std_blocks,
@@ -1022,6 +1064,22 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // A hop without an edge block (or with its tail on the CPU) is covered by this single
         // batch, so K3 can be attached to it.
         const bool covers_hop = (rem_prb == 0);
+        // K0-d: the correlation matrices of the standard blocks are built by THIS engine call (the
+        // descriptor only names the geometry), so the host never builds them and the slots are
+        // filled where the inversion and the weights read them.
+        std::optional<metal::mmse_engine::corr_stage> corr_std;
+        if (std_slots_filled) {
+          unsigned nout_c = 0;
+          unsigned L_c    = 0;
+          corr_std        = correlation_stage(stats,
+                                              args.dmrs_patterns.front().re_pattern,
+                                              block_prb,
+                                              span<const unsigned>(dmrs_sym.begin(), npt),
+                                              scs_khz,
+                                              0,
+                                              nout_c,
+                                              L_c);
+        }
         std_blocks_ok         = run_engine_blocks(args,
                                          0,
                                          n_std_blocks,
@@ -1032,7 +1090,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                          matrix_on,
                                          covers_hop ? reformat_for(block_prb * NOF_SUBCARRIERS_PER_RB, 0, 0)
                                                     : nullptr,
-                                         defer);
+                                         defer,
+                                         corr_std.has_value() ? &corr_std.value() : nullptr);
         hop_gpu               = std_blocks_ok;
         hop_nn                = std_blocks_ok && matrix_on;
         hop_pad               = (std_blocks_ok && matrix_on) ? static_cast<unsigned>(((L_std + 7u) & ~7u) - L_std) : 0;
@@ -1469,7 +1528,8 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
   }
 }
 
-bool port_channel_estimator_metal_mmse_impl::engine_run(unsigned nout,
+bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine::corr_stage* corr,
+                                                        unsigned nout,
                                                         unsigned L,
                                                         unsigned nof_systems,
                                                         unsigned nof_blocks,
@@ -1497,10 +1557,28 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(unsigned nout,
              : (gpu_invert
                     ? (defer ? engine->run_async(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
                              : engine->run(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat))
-                    : (defer ? engine->run_weights_only_async(
-                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
-                             : engine->run_weights_only(
-                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)));
+                    : (defer ? engine->run_weights_only_async(gpu_a,
+                                                               gpu_r_hp,
+                                                               gpu_w,
+                                                               gpu_y,
+                                                               gpu_h,
+                                                               nout,
+                                                               L,
+                                                               nof_systems,
+                                                               nof_blocks,
+                                                               reformat,
+                                                               corr)
+                             : engine->run_weights_only(gpu_a,
+                                                        gpu_r_hp,
+                                                        gpu_w,
+                                                        gpu_y,
+                                                        gpu_h,
+                                                        nout,
+                                                        L,
+                                                        nof_systems,
+                                                        nof_blocks,
+                                                        reformat,
+                                                        corr)));
   if (!engine_ok) {
     logger.error("[mmse_ce] engine call failed (systems={} blocks={} nout={} L={} matrix={}): falling back to the "
                  "CPU path for these blocks",
@@ -1602,7 +1680,8 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                                                                unsigned                           npt,
                                                                bool                               matrix,
                                                                const metal::mmse_engine::reformat_stage* reformat,
-                                                               bool                               defer)
+                                                               bool                               defer,
+                                                               const metal::mmse_engine::corr_stage*      corr)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
 
@@ -1637,7 +1716,7 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
 
   stage_engine_group(args, gb_start, n_blk, b_prb, npt, nout, L, 0, st, matrix, gpu_invert);
   const bool deferred = defer && !matrix;
-  if (!engine_run(nout, L, nof_layers, n_blk, matrix, gpu_invert, reformat, deferred)) {
+  if (!engine_run(corr, nout, L, nof_layers, n_blk, matrix, gpu_invert, reformat, deferred)) {
     return false;
   }
   if (deferred) {

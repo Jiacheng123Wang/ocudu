@@ -207,9 +207,13 @@ public:
   /// barrier-bound on the GPU - see PLAN.md 7.0.6); the Metal inversion kernel remains
   /// as the algorithm skeleton and the golden reference.
   /// \param[in] reformat Optional K3 stage appended to the same command buffer (see run()).
+  /// \param[in] corr     Optional K0-d stage PREPENDED to the same command buffer: the correlation
+  ///                     matrices are built where the weights read them, instead of by a command
+  ///                     buffer of their own (a separate submit costs ~70us of round trip on its own,
+  ///                     which is what made the device build look unprofitable - see the plan).
   bool run_weights_only(const float* a_inv, const float* r_hp, float* w, const float* y, float* h, unsigned nout,
                         unsigned L, unsigned nof_systems, unsigned nof_blocks,
-                        const reformat_stage* reformat = nullptr);
+                        const reformat_stage* reformat = nullptr, const corr_stage* corr = nullptr);
 
   /// \brief As run_weights_only(), but commits WITHOUT waiting for the GPU.
   ///
@@ -230,7 +234,8 @@ public:
                               unsigned     L,
                               unsigned     nof_systems,
                               unsigned     nof_blocks,
-                              const reformat_stage* reformat = nullptr);
+                              const reformat_stage* reformat = nullptr,
+                              const corr_stage*     corr     = nullptr);
 
   /// \brief Compiles the simdgroup_matrix 8x8 pipelines of the metal_nn_mmse variant
   /// (mmse_weights_matrix / mmse_apply_matrix, ocudu_mmse_*_matrix.metal).

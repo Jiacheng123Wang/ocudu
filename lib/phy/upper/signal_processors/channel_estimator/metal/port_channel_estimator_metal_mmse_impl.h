@@ -185,6 +185,17 @@ private:
   ///
   /// \return False when the engine cannot build them (unsupported metallib or geometry), in which
   ///         case the caller falls back to build_correlation_matrices().
+  /// \brief The K0-d descriptor of one block geometry: what the engine call needs to build A and
+  /// R_hp into the slots itself (no dispatch of its own - see run_weights_only()'s corr stage).
+  metal::mmse_engine::corr_stage correlation_stage(const channel_statistics&                     stats,
+                                                   const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
+                                                   unsigned                                       b_prb,
+                                                   span<const unsigned>                           dmrs_slot_symbols,
+                                                   unsigned                                       scs_khz,
+                                                   unsigned                                       sys_offset,
+                                                   unsigned&                                      nout,
+                                                   unsigned&                                      L);
+
   bool build_correlation_matrices_device(const channel_statistics&                     stats,
                                          const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
                                          unsigned                                       b_prb,
@@ -243,7 +254,8 @@ private:
   ///                  standard+tail path - the one every wide hop takes, and the only path the air
   ///                  interface exercises - into a synchronous wait (~280us per hop), because that
   ///                  call site omitted the argument while the unpack beside it used the flag.
-  bool engine_run(unsigned                                 nout,
+  bool engine_run(const metal::mmse_engine::corr_stage*      corr,
+                  unsigned                                 nout,
                   unsigned                                 L,
                   unsigned                                 nof_systems,
                   unsigned                                 nof_blocks,
@@ -277,7 +289,8 @@ private:
                          unsigned                           npt,
                          bool                               matrix,
                          const metal::mmse_engine::reformat_stage* reformat = nullptr,
-                         bool                               defer    = false);
+                         bool                               defer    = false,
+                         const metal::mmse_engine::corr_stage*      corr     = nullptr);
 
   /// \brief Unpack of a batch whose command buffer has not been waited for yet.
   ///
