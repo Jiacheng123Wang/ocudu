@@ -6113,7 +6113,7 @@ tail 的 `L_e` 与槽位的 `L_std` 不等，指针会落到标准组的中间�
 | `sigma2` | 10–14 µs | **2.9 µs** |
 | `corr`（A/R_hp 构建 + 主机反演） | 17–22 µs | **10.9 µs** |
 | `stage`（staging） | 0–35 µs | **17.89 µs** |
-| `gpu_path`（提交到完成） | 60–660 µs（波动大） | **99.4 µs** |
+| `gpu_path`（corr 之后 → **引擎提交结束**，即 staging+submit；**不是**"到完成"） | 60–660 µs（波动大） | **99.4 µs** |
 | `gpu_wait` | 60–155 µs | **137.2 µs** |
 | `mean total` | 94–878 µs | **114.3 µs** |
 
@@ -7160,3 +7160,101 @@ underflow / late / overflow 分类——**165 这种数字必须分类看**，`g
 K1 内核的延迟（+400–480 µs/hop，§48.98(f)）**尚未优化**。用户明确选择"**先看 OTA 结果再决定**"，
 而 OTA 结果目前拿不到 ⇒ 这项**保持待命**，不擅自开工（改内核会改变 K1 的舍入，
 必须重跑 §48.99(a) 的 k1 门禁，属于"有验证成本的改动"，按用户的选择等信号）。
+
+#### 48.103 S-7f-4i：**上机腿拿到了**（设备 K1 生效）；以及"`[ul_channel_estimation]` 为什么只有 86 µs"的定案
+
+**（a）这一腿的实测（用户执行，手机跑 ping + iperf3）**
+
+| 量 | **基线 `d8e23f67d1`（主机 K1）** | **本次（设备 K1）** | Δ |
+|---|---|---|---|
+| `hops_gpu` | 71384 | 12405 | —（时长不同，只看比值） |
+| `device_corr_builds` | 26761 = **37.5%** | 3530 / 12405 = **28.5%** | 覆盖率随分配形状变化（见 (e)） |
+| `mmse_ce commits` | 98147（1.37/hop） | 15937（1.28/hop） | — |
+| `corr_build_fail` | 0 | **0** | ✓ |
+| `[mmse_time_sum] stage` | 17.89 µs | **2.54 µs** | **−15.4** ✓ 主机不再做 Gauss-Jordan |
+| `[mmse_time_sum] gpu_path` | 99.4 µs | **56.8 µs** | −42.6（见 (b)：这是 staging+提交，不是"到完成"） |
+| `[mmse_time_sum] gpu_wait` | 137.2 µs | **529.2 µs** | **+392** ← K1 |
+| `[mmse_time_sum] defer_wait` | 306.7 µs | **713.3 µs** | +407 |
+| `[ul_gpu_lane] busy` mean | 224.2 µs | **611.8 µs** | **+387.6** |
+| `[ul_gpu_lane] busy split ch_est` | 148.3 µs/lane | **537.7 µs/lane**（占 busy 的 **88%**） | **+389.4** ← K1 |
+| `[ul_gpu_lane] busy split eq_demap` | 75.9 µs/lane | **74.1 µs/lane** | **−1.8** ✓ 等化/解调**没变** |
+| `[ul_gpu_lane] residency` mean | 278.5 µs | 640.7 µs | +362 |
+| `[ul_gpu_lane] gap` mean | 54.3 µs | 28.9 µs | −25.4 |
+| `equalizer ch_est device/staged` | 785224 / 0 | **136455 / 0** | ✓ 仍 100% 设备直读 |
+| `wrap failures` / 崩溃 / USB 错误 | 0 / 0 / 0 | **0 / 0 / 0** | ✓ |
+
+⇒ **归因极其干净：唯一变大的是信道估计器的 GPU 时间（+389 µs/lane），而等化/解调一分没变。**
+主机侧**反而更快**（`stage` −15.4 µs，正是被 K1 取代的那段 Gauss-Jordan）。这与 §48.98(f) 的离线预测（+400–480 µs/hop）吻合。
+
+**（b）定案：`[ul_channel_estimation]` 没有坏，我的 K1 测量也没有错——两者测的是不同的东西**
+
+用户的疑问（提得很好）：`[ul_channel_estimation] mean=86.2 µs median=54.4 µs`，比 K1 的 ~390 µs 小得多，
+而按设计它应该是"整个 MMSE CE 的耗时"。核对代码后结论如下。
+
+**① `[ul_channel_estimation]` 是 CPU 侧边界探针**
+`include/ocudu/support/executors/ul_pipeline_probe.h:112-118`：
+`ce_ns = ce_end − t2f_end`；而 `ce_end` 由
+`lib/phy/upper/channel_processors/pusch/pusch_processor_impl.cpp:250` 的
+`ul_pipeline_probe::get().record_ce_end(...)` 打点，位置是 **`process_data()` 的第一行**
+（注释写的就是"the channel estimator has finished... start of the equalization+demodulation one"）。
+它量的是 **"FFT 完成 → CE 交出结果"** 这段**主机时间**。
+
+**② 设备路径上，CE 是"提交即返回"的（deferred chain），所以这段里不含 GPU 等待**
+`lib/phy/upper/channel_processors/pusch/pusch_demodulator_impl.cpp:325`：
+只有当等化器**不**就地读设备估计时才 `sync_device_estimates()`；本腿
+`equalizer ch_est device=136455 staged=0` ⇒ **100% 就地读**，所以**等化器路径上根本没有那次同步**。
+`sync_device_estimates()` 在 `pusch_processor_impl.cpp:453` 被调用，位置是**解调之后**（注释：
+"Reading them any earlier would put the whole demodulation behind the estimator's synchronization"）。
+⇒ CE 的命令缓冲区由 GPU 自己排队（等化器的 CB 链在它之后），主机直到**消费者阶段**才真的等。
+
+**③ 这一点本来就是**已知且写在代码注释里**的**
+`lib/phy/metal/ocudu_metal_lane_probe.h:7-11`：
+> "The staged probes ([ul_time_frequency], **[ul_channel_estimation]**, [ul_equalization_demod]) measure
+> **CPU-side boundaries**. ... a stage whose work is deferred measures the deferral."
+
+**④ GPU 侧有两个独立探针同时证明 K1 的代价是真的**
+- `[mmse_time_sum] gpu_wait = 529.2 µs`（引擎自己量的批次等待）
+- `[ul_gpu_lane] busy split ch_est = 537.7 µs/lane`（**GPU 时间戳**，与主机无关）
+
+两者相差 1.6%，且相对基线各 +392 / +389 µs。**一个测 CPU 边界、一个测 GPU 时间戳，
+不可能同时以同样的量级错。**
+
+**⑤ 历史对照：同一个探针以前**确实**量到过 CE 的 GPU 执行，是"推迟化"把它挪走的**
+本文档早期的 OTA 分解（§24 附近，那时估算器**同步等待**）写的是：
+`ul_channel_estimation = **430 µs**，其中 gpu_path=388 µs（gpu_wait 仅 44 µs）⇒ 是 GPU 执行本身`。
+——**同一个探针**，同步时代量到 430 µs（含 GPU 执行），推迟之后只剩 86 µs（只剩交接）。
+**变的是流水线，不是探针**；这也解释了为什么"按设计它应该是整个 CE 的耗时"这个印象是对的
+——在推迟化之前它确实是。
+
+⇒ **两条结论**：`[ul_channel_estimation]` 作为探针**没错**（它忠实地量了它定义的那一段），
+但它**在设备路径上不是"CE 的总耗时"**——K1 与整个 CE 的 GPU 工作被推迟到消费者的等待里，
+表现在 `[ul_equalization_demod]`（688.9 µs，而等化器自己的 GPU 工作只有 74.1 µs/lane）
+与 `[ul_pipeline]`（mean 1014.7 / median 1003.0 µs）。
+**要读 CE 的真实代价，看 `[ul_gpu_lane] busy split` 的 `ch_est`**（这一条是 GPU 时间戳，不受推迟影响）。
+
+**（c）文档更正：§48.84(b) 表里 `gpu_path` 的注写错了**
+代码（`port_channel_estimator_metal_mmse_impl.cpp:1360`）是 `gpu_path = t_gpu_end − t_corr_std`，
+即 **"corr 之后 → 引擎提交结束"**（staging + submit），**不是**"提交到完成"。
+旧表把它标成"提交到完成"是错的，是这次 86 µs 疑问的一部分来源。已改。
+
+**（d）`ota_k1_verify.sh` 已删除**（用户要求：上机一律由用户用 `sudo` 执行并把 console 贴回来，
+一个自己拉起 gNB 的脚本没有用处；其中"探测 AMF"的部分更是只在探环境、不在测被测对象）。
+判读配方保留在本文档里（本节 + §48.100(b) 的基线），不依赖那个脚本。
+`capture_gates.sh`（离线三条门禁）不受影响，保留。
+
+**（e）待确认 / 待观察（诚实列出）**
+1. **用户那次运行的 `hips_gpu` 覆盖率是 28.5% 而非 37.5%**：`device_corr_builds` 只在
+   "无余数（`rem_prb == 0`）且非 merged" 时计一次（§48.84(d)），所以它随**分配形状**变化。
+   ping/iperf3 的分配形状与 `d8e23f67d1` 那条腿不同，这是合理解释，但**本轮没有直接证据**，
+   记为待确认。
+2. **没看到 `Real-time failure in RF` 的条数**：它只进 `--log.filename` 那份日志
+   （console 里不出现，`--log.all_level warning` 时它以 `[RF] [W]` 写文件）。
+   **需要用户提供** `/tmp/gnb_ota_k1.log` 里的计数（按 underflow/late/overflow 分类），
+   才能与基线的 **165** 对比——这是本腿**唯一还缺的判据**。
+3. **用户那次运行的二进制版本戳未知**：`/tmp/gnb_ota_k1.log` 首行有
+   `Built in Release mode using commit <sha>`，需要与提交对一下。
+   （间接证据：`gpu_wait=529.2 µs` 且 `stage=2.54 µs` 只有"设备 K1 默认开"才会出现，
+   所以**几乎可以肯定包含 §48.98 的改动**，但仍以日志首行为准。）
+4. `[ul_pipeline]` median **1003.0 µs** 贴着 1 ms 时隙：本腿 `period median=1022.5 µs`、
+   `dropped=0`，尚能跟上，但**余量已经很小**（基线 `busy` 224 µs vs 现在 612 µs）。
+   若 (2) 显示实时失败显著多于 165，**下一步就是 K1 内核优化**（不是退回 CPU）。
