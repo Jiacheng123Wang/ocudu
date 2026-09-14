@@ -6051,3 +6051,154 @@ tail 的 `L_e` 与槽位的 `L_std` 不等，指针会落到标准组的中间�
 (b) 的语义反转让新代码静默不执行，而主机回退把结果兜住了——如果没有 `device_corr_builds`
 这个计数器，我会以为改动生效了。**每一个"接入新路径"的改动，都要配一个"它执行了几次"的计数器**，
 这条在 §48.74(b) 已经写过一次，本轮再次应验。
+
+#### 48.84 全链路状态快照（横向视图）
+
+> 本节是**横向**的状态视图：每个模块**跑在哪里**、数据**存在哪里**、每一段**做了什么**。
+> 前面各节是按时间推进的纵向记录，这一节是"某一时刻的整体切片"，供后续 session 直接对照。
+>
+> **维护约定（重要）**：这一节**描述当前状态，不记录历史**——
+> 每次**改变"某模块在哪跑"**、或**改变某缓冲的布局 / 写入者 / 读者**时，
+> **必须回来更新本节**（否则它会比正文更早过期，而读者会先信它）。
+> 代码基线见 `git log -1 --format=%h`；本节的数字来自 §48.82（上机）与 §48.75/§48.79（离线）的实测。
+
+##### 48.84(a) 模块落点总表
+
+| 段落 | 模块 | **跑在哪** | 备注 |
+|---|---|---|---|
+| 前段 | RF 收发（B200/UHD） | CPU/USB | `otw_format=sc12` |
+| 前段 | OFDM 解调 → 频域网格 | CPU | 网格进 `resource_grid` |
+| 前段 | DMRS 导频提取 / LS 估计 / EPRE | CPU | 产出 **`pilots_lse_view`**——CE 的输入 |
+| **CE** | **K0-d 相关矩阵 `A`/`R_hp`** | **GPU（设备建）** | **覆盖率 37.5%**，见 (d) |
+| **CE** | **K1 矩阵反演 `A⁻¹`** | **CPU（主机）** | **有意为之**：A 的 cond≈2.1e4，设备 f32 精度不够，且 Metal 无 `double`。见 §48.79(b) |
+| **CE** | K2a 权重 `W = R_hp·A⁻¹` | **GPU** | |
+| **CE** | K2b 应用 `h = W·y` | **GPU** | `tpt` 必须 = `nout`（见 (c)） |
+| **CE** | K3 估计重排（cbf16） | **GPU** | 附在引擎同一条 CB |
+| **CE** | K4 噪声方差归约 | **GPU** | 产出 1 个 float |
+| **CE** | unpack `gpu_h` → `grid_est` | CPU | ~5µs |
+| **CE** | RSRP / noise_var / TA 统计 | CPU | 读 `grid_est` |
+| 等化 | 等化（MMSE equalize） | **GPU** | 与解调共用一条 CB（`shared_burst`） |
+| 等化 | `ch_re` 收集（读网格） | **GPU（设备 gather）** | `OCUDU_EQ_GATHER=0` 是逃生口 |
+| 等化 | 读信道估计 | **设备直读 `gpu_ce`** | 不走主机 |
+| 等化 | 读噪声方差 | **设备直读 `gpu_nv`** | `OCUDU_CE_NO_K4` 是逃生口 |
+| 解调 | demap → LLR | **GPU** | |
+| 译码 | LDPC | **GPU** | `pusch_ldpc_decoder_type auto` |
+| 后段 | 解速率匹配 / CRC / MAC / RLC / PDCP / CU | CPU | |
+| 外部 | AMF / 核心网 | 外部 | |
+
+**一句话**：从"频域网格"到"LLR"，除了 **K1（一次 54×54 反演，~25µs）** 之外**全部在 GPU 上**。
+
+##### 48.84(b) 数据流每一站
+
+```
+[时域 IQ] ──OFDM 解调(CPU)──→ [频域网格 resource_grid] ──┬── DMRS 提取 + LS 估计(CPU)
+                                                        │        ↓
+                                                        │   [args.pilots_lse_view] ★进 GPU
+                                                        └──(留给等化器，由设备 gather 读)
+★ CE 每个 hop 一次：
+   ① sigma2 计算                    CPU（只产出 sigma2；tau_rms/fd 是配置常数）
+   ② K0-d 建 A / R_hp               GPU（37.5% hop）或 CPU（62.5%，merged 分支）
+   ③ K1 反演 A⁻¹（原地覆盖 gpu_a）   CPU
+   ④ 引擎调用（一条 CB，defer）      GPU: K2a → K2b → K3 → K4
+   ⑤ unpack gpu_h → grid_est        CPU（在 wait 之后）
+   ⑥ RSRP / noise_var / TA          CPU
+
+**分段耗时的两个工作点（差别很大，必须分清）**
+
+| 段 | 离线 replay（24/25 PRB 宽分配） | **OTA 实网**（`d8e23f67d1`，§48.82） |
+|---|---|---|
+| `pre`（导频提取/LSE/CFO 组装） | 6–18 µs | **0.69 µs** |
+| `sigma2` | 10–14 µs | **2.9 µs** |
+| `corr`（A/R_hp 构建 + 主机反演） | 17–22 µs | **10.9 µs** |
+| `stage`（staging） | 0–35 µs | **17.89 µs** |
+| `gpu_path`（提交到完成） | 60–660 µs（波动大） | **99.4 µs** |
+| `gpu_wait` | 60–155 µs | **137.2 µs** |
+| `mean total` | 94–878 µs | **114.3 µs** |
+
+⇒ **实网的 hop 结构（大量窄分配）与离线抓包（多为宽分配）不同**，
+所以"离线 980/980 一致"**不能替代上机验证**，两者要分别测量。
+★ 等化 + 解调（一条 CB）：gpu_ce + gpu_nv + 设备 gather → LLR
+★ LDPC (GPU) → 传输块 → 后段 (CPU)
+```
+
+**CE 阶段有 2 条 command buffer**：设备建矩阵那条（独立、**同步等待**）+ 引擎那条（defer）。
+实测那条独立 CB 的等待 **139–687µs 全是 GPU 排队**（commit 仅 5–12µs、GPU 执行 20–31µs，见 §48.81(a)）。
+
+##### 48.84(c) 缓冲区账本（谁写、谁读、什么布局）
+
+常量：`MAX_LAYERS=4`、`MAX_BLOCK_PILOTS=72`、`MAX_BLOCK_OUT=504`、`MAX_NOF_PRBS=275`
+（⇒ `MAX_NOF_SUBCARRIERS=3300`）。
+
+| 缓冲 | 类型 | 容量 | 实占 | 布局 | 写者 | 读者 |
+|---|---|---|---|---|---|---|
+| `gpu_a` | float | 4×72×72 = 20736 | **81 KiB** | `[sys][L][L]` | K0-d 设备 / 主机 staging | K1 原地反演 |
+| `gpu_r_hp` | float | 4×504×72 = 145152 | **567 KiB** | `[sys][nout][L]` | K0-d 设备 / 主机 staging | K2a |
+| `gpu_w` | float | 4×504×72 = 145152 | **567 KiB** | `[sys][nout][L]` | K2a | K2b |
+| `gpu_y` | float | 4×max_blocks×2×72 | 同上量级 | `[sys][blk][2L]` 实虚交错 | 主机 staging | K2b |
+| `gpu_qy` | float | 4×ceil(max_blocks/4)×72×8 | 同上量级 | 量化打包（矩阵引擎用） | 主机 staging | `run_nn` |
+| `gpu_h` | float | 4×max_blocks×2×504 | 同上量级 | `[sys][blk][2·nout]` 实虚交错 | K2b | K3、unpack |
+| `gpu_ce` | **uint16** | 4×275×12×14 = 184800 | **361 KiB** | cbf16，`[layer][total_re]` | K3 | 等化器（设备直读） |
+| `gpu_nv` | float | **1** | 4 B | 标量 | K4 | 等化器（设备直读） |
+| `gpu_pilots` / `gpu_rx_pilots` | float | 按 DMRS 符号×层×CDM 组 | — | 实虚交错 | 主机 staging | K4 |
+| `gpu_epochs` | float | 14 | 56 B | 符号起始时刻 | 主机 staging | K4 |
+| `grid_est` | `cf_t` | 56 槽 × 3300 = 184800 | **1.41 MiB**（实测 `sizeof`=1478432） | `[layer×14][RE]`，**内联在 estimator 对象内** | ⑤ unpack | RSRP 等统计 |
+
+**说明**：`gpu_a`/`gpu_r_hp`/`gpu_w`/`gpu_y`/`gpu_h` 都是 4KB 页对齐的独立分配
+（Metal 零拷贝要求），`gpu_ce`/`gpu_nv` 额外要求**整页**（它们是跨引擎导出的，
+走进程级零拷贝映射）；`grid_est` 相反——它是**对象内联**的，不参与零拷贝。
+
+**块几何**（离线抓包实测；`block_prb=3`、`npt=3`、`comb=6`）：
+标准块 `L_std = 3×6×3 = 54`、`nout_std = 36×14 = 504`；
+有余额时 edge 块如 `rem_prb=1` ⇒ `L_e = 18`、`nout_e = 168`；
+merged 批次把 edge 作为**额外 system** 挤进标准槽位（`A = blockdiag(A_e, I)`）。
+
+**`tpt` 硬约束**：`gpu_apply` 内核用 **`tid` 直接作输出位置索引**（`hp[2*tid]`），
+所以 `threadsPerThreadgroup` **必须等于 `nout`**。实测 `tpt=504` → SINR 23.97dB；
+`tpt=256` → **0.86dB**；`tpt=128` → **0.48dB**（静默丢尾部输出）。
+
+##### 48.84(d) K0-d 覆盖率的准确口径（重要，容易被总数误导）
+
+`device_corr_builds` 是**每次 `build_correlation()` 调用**计一次，不是"每个 hop 一次"：
+
+| 分支 | 条件 | 构建次数 |
+|---|---|---|
+| 标准块（无余额） | `rem_prb == 0` | **1** |
+| split 形式（`OCUDU_CE_SPLIT_TAIL=1`） | 标准组 + tail | **2** |
+| **merged 分支（有余数，实网大多数）** | `std_slots_filled == false` | **0**（走主机构建） |
+
+⇒ 上机腿 `26761 / 71384 hops = 37.5%` 是**hop 覆盖率**，不是构建次数比。
+
+##### 48.84(e) 门禁与可观测性
+
+**三层等价性**：① 离线 980/980 抓包 `llr/h/ce` 逐字节（默认 vs `OCUDU_CE_CORR_DEV=0`）；
+② 多形状 soak 6 形状 × 2 轮；③ `ctest -L phy` 162/162。
+
+**计数器**（都打在 stderr，退出时输出）：
+
+| 计数器 | 防的是什么 |
+|---|---|
+| `device_corr_builds` | **"以为跑了其实没跑"**（§48.74(b) 的教训） |
+| `corr_build_fail` | **"从未调用"与"调用后失败"混淆**（§48.83(b) 的教训） |
+| `ch_re device/host` | 设备 gather vs 主机 gather |
+| `ch_est device/staged` | 等化器读设备估计 vs 暂存 |
+| `mmse_ce commits/waits`、`wrap hits/creates/replaces/failures` | 提交/映射健康度 |
+| `ul_gpu_lane`（busy / gap / 按 stage 分账） | GPU 忙闲与阶段归属 |
+
+##### 48.84(f) 账本（已知未完成，按"是否阻塞全 GPU path"分类）
+
+**阻塞全 GPU path 的**：
+1. **merged 分支的设备建矩阵**——尝试过并**已回退**（标准组 A 被反演两次，`a0=1861`）。
+   重做前**必须先把两个几何的槽位区间与"谁在何时写/反演哪一段"画清楚**（§48.83(c)）。
+2. **K1 的设备化**——被"Metal 无 `double` + A 的 cond=2.1e4"挡住；
+   当前主机反演是**唯一**留在 CPU 的大块（~25µs/hop）。
+3. **`OCUDU_CE_DEV_INVERT`**——默认关闭、**已知不可用**：
+   `gpu_h` 只写了 2 个 float（`gpu_y`/`gpu_w` 两个输入都逐字节正确），
+   特征是非零 `tid` 满足 `tid = round(k×0.9)`、`0.9 = L/(L+comb)`（§48.81(c)）。
+
+**不阻塞、记在账上的**：
+4. `build_correlation()` 独立 CB 的排队等待（139–687µs；异步提交消不掉，只能减少 CB 数）。
+5. 设备 gather 相对主机 gather 的 **+27µs**（按"全 GPU path 优先"不作阻塞，见 §48.63）。
+6. K1b 右看式反演数值错误（opt-in `OCUDU_INV_RL=1`）。
+7. replay 工具 ~4% 间歇崩溃（`rx_buffer_impl::get_codeblock_data_bits`，两路边都有，与本研究无关）。
+
+**已否决**：用 ridge 正则化换取设备反演可用（240 抓包中 221 个 LLR 变化，代码已删除）。
