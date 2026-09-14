@@ -101,7 +101,7 @@ shared_queue_state& state();
 void shared_queue_stats_report()
 {
   shared_queue_state& s = state();
-  ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] wrap hits={} creates={} replaces={} failures={}",
+  ocudulog::fetch_basic_logger("PHY").info("[metal_stats] wrap hits={} creates={} replaces={} failures={}",
                static_cast<unsigned long long>(s.wrap_hits),
                static_cast<unsigned long long>(s.wrap_creates),
                static_cast<unsigned long long>(s.wrap_replaces),

@@ -181,7 +181,7 @@ void ldpc_time_stats_report()
       continue;
     }
     const double cn = static_cast<double>(sh.calls);
-    ocudulog::fetch_basic_logger("PHY").debug("[ldpc_time_shape] mode=%s bg=%llu z=%llu calls=%llu ko=%llu | mean wall=%.1fus gpu=%.1fus "
+    ocudulog::fetch_basic_logger("PHY").info("[ldpc_time_shape] mode=%s bg=%llu z=%llu calls=%llu ko=%llu | mean wall=%.1fus gpu=%.1fus "
                  "gap=%.1fus iters=%.2f",
                  ldpc_mode_name(static_cast<metal::decoder_engine::algo>(key >> 32)),
                  static_cast<unsigned long long>((key >> 24) & 0xff),

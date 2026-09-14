@@ -69,7 +69,7 @@ burst_stats_t& stats()
 void burst_stats_report()
 {
   const burst_stats_t& s = stats();
-  ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] burst commits={} waits={} max_in_flight={} dispatches={} "
+  ocudulog::fetch_basic_logger("PHY").info("[metal_stats] burst commits={} waits={} max_in_flight={} dispatches={} "
                "(equalizer={} demapper={})",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),

@@ -108,7 +108,7 @@ static void mmse_stats_report()
   const mmse_stats_t& s = mmse_stats();
   const uint64_t      hits = s.guard_hits.load(std::memory_order_relaxed);
   const uint64_t      wait = s.guard_wait_ns.load(std::memory_order_relaxed);
-  ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] mmse_ce commits={} waits={} max_in_flight={} guard={}/{} "
+  ocudulog::fetch_basic_logger("PHY").info("[metal_stats] mmse_ce commits={} waits={} max_in_flight={} guard={}/{} "
                "guard_mean={:.1f}us guard_max={:.1f}us",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),

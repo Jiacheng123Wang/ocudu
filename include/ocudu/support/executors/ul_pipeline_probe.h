@@ -296,7 +296,7 @@ public:
     // (CRC-OK completions only), so their sample counts always match it.
     auto print_series = [&pct, &logger](const char* name, std::vector<double>& sorted) {
       if (sorted.empty()) {
-        logger.debug("[{}] no samples recorded", name);
+        logger.info("[{}] no samples recorded", name);
         return;
       }
       std::sort(sorted.begin(), sorted.end());
@@ -304,7 +304,7 @@ public:
       for (double v : sorted) {
         series_sum += v;
       }
-      logger.debug("[{}] samples={} mean={:.1f}us median={:.1f}us min={:.1f}us max={:.1f}us p95={:.1f}us "
+      logger.info("[{}] samples={} mean={:.1f}us median={:.1f}us min={:.1f}us max={:.1f}us p95={:.1f}us "
                    "p99={:.1f}us",
                    name,
                    sorted.size(),
@@ -328,7 +328,7 @@ public:
     print_series("ul_fapi_mac", sorted_fapi_mac);
 
     if (sorted_ldpc.empty()) {
-      logger.debug("[ul_ldpc_decode] no samples recorded");
+      logger.info("[ul_ldpc_decode] no samples recorded");
       return;
     }
     std::sort(sorted_ldpc.begin(), sorted_ldpc.end());
@@ -336,7 +336,7 @@ public:
     for (double v : sorted_ldpc) {
       sum += v;
     }
-    logger.debug("[ul_ldpc_decode] samples={} mean={:.1f}us median={:.1f}us min={:.1f}us max={:.1f}us "
+    logger.info("[ul_ldpc_decode] samples={} mean={:.1f}us median={:.1f}us min={:.1f}us max={:.1f}us "
                  "p95={:.1f}us p99={:.1f}us",
                  sorted_ldpc.size(),
                  sum / static_cast<double>(sorted_ldpc.size()),
@@ -348,7 +348,7 @@ public:
     // MAC PDU size (CRC-OK data bursts): recorded in the same branch as the LDPC latency samples, so the sample
     // count matches [ul_ldpc_decode]. Printed after it, plus a second line with the total number of bytes.
     if (sorted_pdu_sizes.empty()) {
-      logger.debug("[ul_mac_pdu_size] no samples recorded");
+      logger.info("[ul_mac_pdu_size] no samples recorded");
       return;
     }
     std::sort(sorted_pdu_sizes.begin(), sorted_pdu_sizes.end());

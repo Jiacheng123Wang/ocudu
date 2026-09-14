@@ -99,7 +99,7 @@ void mmse_stats_register_atexit()
       const auto avg = [n](const std::atomic<uint64_t>& v) {
         return static_cast<double>(v.load(std::memory_order_relaxed)) / static_cast<double>(n);
       };
-      ocudulog::fetch_basic_logger("PHY").debug("[mmse_time_sum] calls={} hops_gpu={} hops_no_gpu={} hops_nn={} fb_blocks={} | "
+      ocudulog::fetch_basic_logger("PHY").info("[mmse_time_sum] calls={} hops_gpu={} hops_no_gpu={} hops_nn={} fb_blocks={} | "
                    "mean total={:.1f}us pre={:.2f}us stage={:.2f}us submit={:.2f}us unpack={:.2f}us cpl_wait={:.1f}us cpl_unpack={:.1f}us cpl_fill={:.1f}us sigma2={:.1f}us corr={:.1f}us gpu_path={:.1f}us (gpu_wait={:.1f}us) "
                    "cpu_blocks={:.1f}us defer_wait={:.1f}us | device_hops={} max total={}us",
                    static_cast<unsigned long long>(n),
@@ -136,7 +136,7 @@ void mmse_stats_register_atexit()
           continue;
         }
         const double shape_calls = static_cast<double>(sh.calls);
-        ocudulog::fetch_basic_logger("PHY").debug("[mmse_time_shape] prb={} npt={} calls={} | pre={:.2f}us stage={:.2f}us sigma2={:.1f}us corr={:.1f}us "
+        ocudulog::fetch_basic_logger("PHY").info("[mmse_time_shape] prb={} npt={} calls={} | pre={:.2f}us stage={:.2f}us sigma2={:.1f}us corr={:.1f}us "
                      "gpu_path={:.1f}us (gpu_wait={:.1f}us) total={:.1f}us | stage={:.2f} submit={:.2f} unpack={:.2f}",
                      static_cast<unsigned long long>(key >> 8),
                      static_cast<unsigned long long>(key & 0xff),
@@ -636,7 +636,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   if (std::getenv("OCUDU_CE_DEBUG") != nullptr) {
     static std::atomic<uint32_t> debug_counter{0};
     if ((debug_counter.fetch_add(1, std::memory_order_relaxed) % 1000U) == 0U) {
-      ocudulog::fetch_basic_logger("PHY").debug("[ce_debug] pilots_power={:.6e} sigma2={:.6e} sigma2_rel={:.6e}",
+      ocudulog::fetch_basic_logger("PHY").info("[ce_debug] pilots_power={:.6e} sigma2={:.6e} sigma2_rel={:.6e}",
                    static_cast<double>(pilots_power),
                    static_cast<double>(sigma2),
                    static_cast<double>(sigma2_rel));

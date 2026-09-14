@@ -69,7 +69,7 @@ static void dft_stats_wait()
 static void dft_stats_report()
 {
   const dft_stats_t& s = dft_stats();
-  ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] dft commits={} waits={} max_in_flight={}",
+  ocudulog::fetch_basic_logger("PHY").info("[metal_stats] dft commits={} waits={} max_in_flight={}",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
