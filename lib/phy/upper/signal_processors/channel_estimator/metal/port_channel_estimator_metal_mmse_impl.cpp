@@ -945,15 +945,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // Both groups share the standard block's slot geometry.
       const engine_strides st{L_std, nout_std, n_std_blocks};
       // K1 inverts the padded (L_std x L_std) systems, so the kernel's order limit applies to the
-      // padded order, not to the tail's.
-      // 36, not the kernel's own 54: at order 54 the inversion is latency-bound (measured this
-      // round: gpu_wait 85 -> 555us on a 14 PRB hop, i.e. ~470us MORE than the ~10us of host CPU
-      // Gauss-Jordan it replaces), and the K1 header says why - the elimination walks 72 pivot
-      // phases, two barriered steps each. Raising the limit is therefore gated on making K1 fast
-      // (its S-5a blocked/simdgroup_matrix form), and only then can the device correlation ride the
-      // same command buffer as the inversion.
-      static constexpr unsigned MAX_GPU_INVERT_ORDER = 36;
-      const bool gpu_invert = (std::getenv("OCUDU_CE_CPU_INVERT") == nullptr) && (L_std <= MAX_GPU_INVERT_ORDER);
+      // The gate is device_inverts(): default ON, bounded by the kernel's own MAX_N. See its comment
+      // for why the earlier performance-based retreat to the host was reversed (S-7f-3s).
+      const bool gpu_invert = device_inverts(L_std);
       // A batch of the previous hop may still be outstanding: it reads the very staging slots this hop is
       // about to overwrite (the split-tail path runs two batches per hop, and a deferred hop keeps its last
       // batch alive until its consumer collects it), so complete it before touching them. Only ever the last
@@ -1581,16 +1575,23 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
     (void)complete_fd_td_estimation_stage();
   }
 
-  // One entry point for the batch: the weights pipeline always. The K1 inversion is part of it when
-  // the slots hold A itself (see invert_first below), so there is no second flavor to dispatch to -
-  // the "inverted" form of run() is that same pipeline with K1 prepended. The matrix (nn) flavor is
-  // the only genuinely different one.
+  // Two flavors, selected by WHERE A IS INVERTED - not by which entry point happens to exist:
+  //   gpu_invert: the slots hold A, and K1 (plus the correlation prefix, when corr is given) runs in
+  //               THIS command buffer, before the weights. This is the form the full-GPU-path goal
+  //               asks for, and it is the default.
+  //   otherwise:  the caller already staged A^-1 (host Gauss-Jordan), so the weights read it as is.
+  // The matrix (nn) flavor is the only structurally different one.
   const bool engine_ok =
       matrix ? engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_systems, nof_blocks)
-             : (defer ? engine->run_weights_only_async(
-                            gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat, corr)
-                      : engine->run_weights_only(
-                            gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat, corr));
+             : (gpu_invert
+                    ? (defer ? engine->run_async(
+                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
+                             : engine->run(
+                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat))
+                    : (defer ? engine->run_weights_only_async(
+                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat, corr)
+                             : engine->run_weights_only(
+                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat, corr)));
   if (!engine_ok) {
     logger.error("[mmse_ce] engine call failed (systems={} blocks={} nout={} L={} matrix={}): falling back to the "
                  "CPU path for these blocks",
@@ -1704,14 +1705,20 @@ bool port_channel_estimator_metal_mmse_impl::build_slots_on_device(
   // The device-inversion experiment does not build anything here: its build has to ride the weights
   // command buffer as a prefix (so K1 can invert in that same buffer, one round trip less). The
   // caller gets the descriptor back and dispatches it itself.
-  if (device_invert_on_device()) {
-    // The caller dispatches this build in its own command buffer, so that K1 can invert it there.
-    deferred_corr = corr_std;
+  if (!engine->build_correlation(corr_std, nof_systems)) {
+    return false;
+  }
+
+  if (device_inverts(L)) {
+    // The device inverts these slots in the weights command buffer (K1), so this call must leave A
+    // in them. Inverting here as well would have K1 invert an A^-1 - the S-7f-3i defect.
     return true;
   }
 
-  if (!engine->build_correlation(corr_std, nof_systems)) {
-    return false;
+  if (device_inverts(L)) {
+    // The device will invert these slots in the weights command buffer (K1), so this call must leave
+    // A in them. Inverting here as well would have K1 invert an A^-1 - the S-7f-3i defect.
+    return true;
   }
   // Finish what the weights read: A^-1 in place, row by row through a scratch buffer because the
   // source and the destination are the same memory. The inversion stays on the HOST on purpose: the
@@ -1777,9 +1784,9 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   //   (b) the DEVICE builds A and R_hp (K0-d, this is the full-GPU-path form) and the host then
   //       inverts what the device wrote - the device build removes the host's construction of the
   //       matrices, which is the expensive half.
-  // The inversion stays on the HOST either way, and that is deliberate: K1 (the device inversion)
-  // is not accurate enough at this block order (measured 1.3e-5 relative error at order 54 - see
-  // k1_check and the plan), while the host Gauss-Jordan is exact to float32 and costs ~10us.
+  // WHICH of the two inverts is decided by device_inverts(): when the device does it, (a)/(b) must
+  // leave A in the slots and K1 inverts in the weights command buffer; otherwise the host writes
+  // A^-1 here. Getting that backwards is the S-7f-3i defect (an inverse inverted again).
   //
   // NOTE the order: the device must write BEFORE the host reads. A device build that runs as a
   // command-buffer PREFIX of the weights call (the form run_weights_only() supports for the orders
@@ -1805,28 +1812,44 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                                 L,
                                 device_corr);
   }
-  // True only in the device-inversion experiment: build_slots_on_device() fills this descriptor when
-  // (and only when) the caller has to dispatch the build itself, which is that experiment's form.
-  const bool dev_inv_now = device_invert_on_device();
+  // Whether THIS batch's inversion runs on the device (see device_inverts()): the slots must then
+  // still hold A when K1 reads them, and the engine call routes to the K1 pipeline.
+  const bool gpu_invert = !matrix && device_inverts(L);
+  const bool dev_inv_now = gpu_invert;
   // stage_engine_group() runs EVERY time: besides A and R_hp it also stages the pilot vectors (y or
   // qy), which every path needs - skipping the call left y zero and the apply produced infinities
-  // (measured). slots_filled only tells it to leave the A/R_hp slots alone, which is what the device
-  // build needs: it is about to fill them itself, and a host write of A^-1 there would be inverted
-  // again by K1 (the S-7f-3i defect).
-  stage_engine_group(args, gb_start, n_blk, b_prb, npt, nout, L, sys_offset, st, matrix, false, dev_inv_now);
+  // (measured). The A/R_hp stores themselves are skipped when the slots are already in their final
+  // state for this batch: either the device built them, or the device will invert them (gpu_invert),
+  // in which case they must still hold A when K1 reads them.
+  stage_engine_group(args,
+                     gb_start,
+                     n_blk,
+                     b_prb,
+                     npt,
+                     nout,
+                     L,
+                     sys_offset,
+                     st,
+                     matrix,
+                     gpu_invert,
+                     false,
+                     dev_inv_now);
   const bool deferred = defer && !matrix;
-  // No correlation prefix (corr == nullptr) and no K1: this call's slots already hold A^-1, either
-  // from the host staging or from the device build finished above.
-  // The device-inversion experiment hands the descriptor to this call, so the correlation kernels run
-  // as a prefix of the SAME command buffer and K1 inverts in it; the default path passed no
-  // descriptor and the slots already hold A^-1.
+  // gpu_invert is THE decision (device_inverts()); it must be passed through, not re-derived from
+  // whether a descriptor came back. Passing device_corr.has_value() here was a defect: on the normal
+  // path that is false, so the staging was told to leave A in the slots while the engine call was
+  // told the slots held A^-1 - the weights then read a raw A (SINR 24 -> 5.4 dB).
+  //
+  // corr stays for the caller that wants the device to BUILD the matrices as a prefix of this same
+  // buffer (build_slots_on_device() hands back a descriptor then); the default path builds them
+  // separately and passes nothing.
   if (!engine_run(device_corr.has_value() ? &device_corr.value() : nullptr,
                   nout,
                   L,
                   nof_layers,
                   n_blk,
                   matrix,
-                  device_corr.has_value(),
+                  gpu_invert,
                   reformat,
                   deferred)) {
     return false;

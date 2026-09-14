@@ -291,12 +291,28 @@ private:
   /// \param[in] device_stats When non-null, the DEVICE builds A and R_hp of this batch (K0-d) and
   ///                        the host then inverts them in the slots - the full-GPU-path form of the
   ///                        correlation matrices. Null keeps the host staging.
-  /// True when OCUDU_CE_DEV_INVERT is set: the experiment that keeps the inversion on the device by
-  /// riding the weights command buffer (correlation prefix + K1), instead of building here and
-  /// inverting on the host. Off by default - see the accuracy note at build_slots_on_device().
-  static bool device_invert_on_device()
+  /// Whether the inversion runs on the DEVICE for a block of this order.
+  ///
+  /// **DEFAULT OFF, and that is a functional decision, not a performance or accuracy one.**
+  /// The full-GPU-path rule says the device should invert, and K1's accuracy is NOT the obstacle:
+  /// the device inverse's W error is 7.67e-4 against the host's 1.40e-5, worth about 0.003 dB of
+  /// SINR, while the -18.7 dB that once looked like an accuracy failure was two staging defects.
+  /// What blocks it is that the kernel does not take effect inside run_async()'s command buffer:
+  /// measured (S-7f-3s), the A slots come out BYTE-IDENTICAL before and after the batch, so the
+  /// weights read a raw A and the chain collapses (SINR 24 -> -23 dB on the captures, and 5.4 dB
+  /// before the staging was corrected). The same matrix handed to the standalone invert() entry
+  /// point inverts correctly (residual 1.85e-04, better than the host's 2.09e-04), and alignment,
+  /// encoder splitting, pipeline creation and the dispatch geometry have all been ruled out.
+  /// OCUDU_CE_GPU_INVERT=1 turns it on for whoever fixes that; until then the default keeps the
+  /// chain correct, which the goal states as the precondition.
+  ///
+  /// \param[in] order Block order L. Above the kernel's own MAX_N (mmse_inv.metal: 54) the kernel
+  ///                  cannot be dispatched at all, so the host inversion is the only option there.
+  static bool device_inverts(unsigned order)
   {
-    return std::getenv("OCUDU_CE_DEV_INVERT") != nullptr;
+    static const bool enabled = (std::getenv("OCUDU_CE_GPU_INVERT") != nullptr);
+    static constexpr unsigned MAX_DEVICE_INVERT_ORDER = 54;
+    return enabled && (std::getenv("OCUDU_CE_CPU_INVERT") == nullptr) && (order <= MAX_DEVICE_INVERT_ORDER);
   }
 
   /// \brief K0-d: the device builds A and R_hp of one block geometry into the engine slots.
