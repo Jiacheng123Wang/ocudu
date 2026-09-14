@@ -20,12 +20,26 @@ set -u
 DUR=${1:-150}
 CFG=${2:-configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml}
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../.." && pwd)
-LOG=/tmp/gnb_ota_k1.log
-CONSOLE=/tmp/gnb_ota_k1_console.log
+# Timestamped sinks: a fixed name is a trap. An earlier version of this script removed the fixed
+# paths before starting, which UNLINKED the log a concurrently running gNB still had open - its
+# counters kept going to a deleted inode and were unrecoverable. Unique names make that impossible.
+STAMP=$(date +%Y%m%d-%H%M%S)
+LOG=/tmp/gnb_ota_k1_$STAMP.log
+CONSOLE=/tmp/gnb_ota_k1_${STAMP}_console.log
 
 cd "$REPO" || exit 1
-rm -f "$LOG" "$CONSOLE"
 
+# Never race another gNB: the NG-U gateway binds a fixed UDP port, so a second instance dies at
+# startup ("Failed to bind UDP socket ... Address already in use") and, worse, the operator's
+# running leg keeps writing to sinks this script would otherwise touch.
+if pgrep -f "build/apps/gnb/gnb" >/dev/null 2>&1; then
+  echo "a gNB is already running:"
+  pgrep -fl "build/apps/gnb/gnb"
+  echo "stop it first (its own counters print on SIGINT), then re-run this script."
+  exit 3
+fi
+
+echo "logs: $CONSOLE (counters)  $LOG (link events)"
 ./build/apps/gnb/gnb -c "$CFG" \
   --expert_phy.pusch_channel_estimator_algo metal_mmse \
   --expert_phy.pusch_channel_equalizer_backend metal \

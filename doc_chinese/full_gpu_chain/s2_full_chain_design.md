@@ -6984,6 +6984,19 @@ sudo ./build/apps/gnb/gnb -c configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml \
 **上机判据**（§9 的口径，未变）：`device_corr_builds > 0`；`Real-time failure in RF` 个位到数十；
 0 USB 错误 / 0 崩溃。`[mmse_time_sum]` 的 `corr=`/`gpu_path=`/`gpu_wait=` **只记录、不设 gate**。
 
+**（c-1）一条**我犯的操作错误**（写下来当规矩）**
+为了探"核心网是否起来"，我用**旧版**脚本又跑了一次 20 秒的腿；旧版开头 `rm -f` 固定路径的日志，
+而**用户此刻正用同一条命令在跑 OTA**——于是把那个 gNB **仍然打开着的日志文件 unlink 掉了**：
+它后面（包括退出时的 `[metal_stats]` 计数器）都写进了一个已被删除的 inode，**无法恢复**。
+（现象：第二次启动报 `Failed to bind UDP socket to …:2152 Address already in use` ——
+NG-U 网关的 UDP 端口是固定的，**这就是"已经有一个 gNB 在跑"的信号**，我当时没把它当信号看。）
+
+已修（`ota_k1_verify.sh`）：① 日志改成**带时间戳的独立路径**，不再删任何已存在的文件；
+② 启动前 `pgrep build/apps/gnb/gnb`，**有实例在跑就拒绝启动并打印是谁**（`exit 3`）。
+
+⇒ **规矩：探"环境是否就绪"的动作不能有副作用。** 任何会 `rm`/覆盖固定路径的脚本，
+在跑之前必须先确认**没有别的实例正在用那些路径**。
+
 **（d）OTA 的**已知风险**（不是"可能"，是**量化过的**）**
 设备 K1 让每条 hop 的 GPU 时间多 ~400–480 µs（§48.98(f)），离线 `defer_wait` 从 ~290/617 µs 升到
 ~1067/992 µs。**实网 1 ms 时隙下能否吃掉这 0.5 ms，只有上机能回答。**
