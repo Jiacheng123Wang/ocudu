@@ -10,6 +10,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include "ocudu_metal_lane_probe.h"
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
@@ -572,6 +573,7 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
   [enc endEncoding];
   [cb commit];
   mmse_stats_commit();
+  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
   [cb waitUntilCompleted];
   mmse_stats_wait();
 
@@ -623,6 +625,7 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
   [enc endEncoding];
   [cb commit];
   mmse_stats_commit();
+  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
   [cb waitUntilCompleted];
   mmse_stats_wait();
 
@@ -728,6 +731,7 @@ bool mmse_engine::run_async(float*       a,
   [cb commit];
   phase.committed();
   mmse_stats_commit();
+  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
   e->pending_cb = cb;
   return true;
 }
@@ -874,6 +878,7 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   [cb commit];
   phase.committed();
   mmse_stats_commit();
+  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
   if (!wait_for_completion) {
     e->pending_cb = cb;
     return true;
@@ -978,6 +983,7 @@ bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const 
   [enc endEncoding];
   [cb commit];
   mmse_stats_commit();
+  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
   [cb waitUntilCompleted];
   mmse_stats_wait();
 

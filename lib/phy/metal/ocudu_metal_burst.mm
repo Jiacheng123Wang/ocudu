@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_metal_burst.h"
+#include "ocudu_metal_lane_probe.h"
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
@@ -208,6 +209,10 @@ bool shared_burst::commit()
   [enc endEncoding];
   [cb commit];
   burst_stats_commit();
+  // The burst is the command buffer whose completion produces the LLRs, i.e. the last one of the
+  // lane: registering it here is what lets gpu_lane_probe attribute the residency to the stages that
+  // were committed before it on this thread.
+  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::equalizer_demapper);
   s.outstanding.push_back(cb);
   return true;
 }
@@ -231,6 +236,9 @@ bool shared_burst::wait_committed()
       ok = false;
     }
   }
+  // Everything the lane holds was committed before this burst on the same queue, so it completed
+  // with it: the lane's metrics are final now.
+  gpu_lane_probe::close_lane();
   return ok;
 }
 
