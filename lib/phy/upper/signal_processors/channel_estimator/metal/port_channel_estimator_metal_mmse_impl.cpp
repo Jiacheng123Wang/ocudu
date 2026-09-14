@@ -846,13 +846,6 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 #if defined(OCUDU_CE_TIME)
       const auto t_submit_begin = steady_clock::now();
 #endif
-      merge_geom.n_blk     = n_std_blocks;
-      merge_geom.nf_std    = block_prb * NOF_SUBCARRIERS_PER_RB;
-      merge_geom.nf_tail   = rem_prb * NOF_SUBCARRIERS_PER_RB;
-      merge_geom.sys_tail  = nof_layers;
-      merge_geom.nout_slot = nout_std;
-      merge_geom.h         = gpu_h;
-      merge_geom.valid     = true;
       const bool merged_ok = engine_run(nout_std,
                                         L_std,
                                         2 * nof_layers,
@@ -1564,23 +1557,6 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
   const auto t_wait_begin = std::chrono::steady_clock::now();
 #endif
   const bool ok = (engine == nullptr) || engine->wait_pending();
-  if (merge_geom.valid && (merge_geom.h != nullptr)) {
-    merge_geom.valid      = false;
-    const float* h        = merge_geom.h;
-    const size_t base     = static_cast<size_t>(merge_geom.sys_tail * merge_geom.n_blk) * 2 * merge_geom.nout_slot;
-    const unsigned sym    = 5;
-    auto           mag    = [&](size_t off) { return std::sqrt(h[off] * h[off] + h[off + 1] * h[off + 1]); };
-    std::fprintf(stderr, "[ce_edge] n_blk=%u nf_std=%u nf_tail=%u nout_slot=%u base=%zu\n",
-                 merge_geom.n_blk, merge_geom.nf_std, merge_geom.nf_tail, merge_geom.nout_slot, base);
-    std::fprintf(stderr, "[ce_edge] nf_tail:");
-    for (unsigned c = 0; c != 8; ++c) std::fprintf(stderr, " %.4f", mag(base + 2 * (sym * merge_geom.nf_tail + c)));
-    std::fprintf(stderr, "\n[ce_edge] nf_std :");
-    for (unsigned c = 0; c != 8; ++c) std::fprintf(stderr, " %.4f", mag(base + 2 * (sym * merge_geom.nf_std + c)));
-    std::fprintf(stderr, "\n[ce_edge] c*14+s :");
-    for (unsigned c = 0; c != 8; ++c) std::fprintf(stderr, " %.4f", mag(base + 2 * (c * 14 + sym)));
-    std::fprintf(stderr, "\n");
-    std::fflush(stderr);
-  }
   // Temporary experiment (OCUDU_CE_NV_OVERRIDE): replace the device noise variance with a known
   // value, to tell "the estimates are wrong" apart from "only the noise scale is wrong".
   if (const char* nv_env = std::getenv("OCUDU_CE_NV_OVERRIDE"); (nv_env != nullptr) && (gpu_nv != nullptr)) {
