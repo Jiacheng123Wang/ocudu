@@ -825,6 +825,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // take whatever geometry the estimator hands them, and the host Gauss-Jordan has no limit either,
     // which is what lets the OTA geometry (order 72) use this path. What the device build cannot do
     // is a MERGED batch, because a merged batch holds two different geometries in one slot array.
+    // NOT the merged batch: it carries TWO geometries in one slot array (the edge block rides as
+    // extra systems of the standard group), and building both needs the edge block's slots, strides
+    // and inversion to be worked out together - an attempt at that landed A twice-inverted in the
+    // standard slots (a0 = 1861 instead of ~1, and the 256QAM capture fell to 21.8 dB), so it stays
+    // out until that is redone deliberately. See the plan: the air leg measured 37.5% coverage
+    // (device_corr_builds=26761 of 71384 hops) with this gate in place.
     std_slots_filled = device_corr_enabled && !merge_tail && (n_std_blocks != 0);
     // K3 (S-6a): the equalizer's per-symbol estimates, built on the GPU inside the engine call. The
     // destination can only be filled by a call that covers the WHOLE allocation with the legacy
@@ -959,27 +965,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 #if defined(OCUDU_CE_TIME)
       const auto t_stage_begin = steady_clock::now();
 #endif
-      if (std_slots_filled) {
-        // K0-d: the DEVICE builds A and R_hp of the standard group (the merged batch's tail system
-        // keeps whatever the tail staging below puts in it), and the host then inverts what the
-        // device wrote. The device build cannot describe both geometries of a merged batch, so this
-        // is the standard group's slots only - exactly what a non-merged hop gets from
-        // run_engine_blocks() with device_stats.
-        const std::optional<metal::mmse_engine::corr_stage> merged_corr = build_slots_on_device(
-            stats,
-            args.dmrs_patterns.front().re_pattern,
-            block_prb,
-            span<const unsigned>(dmrs_sym.begin(), npt),
-            scs_khz,
-            0,
-            nof_layers,
-            st.L,
-            nout_std,
-            L_std);
-        // In the device-inversion experiment the merged batch cannot ride one command buffer (two
-        // geometries), so the descriptor is dropped and the host staging below fills the slots.
-        (void)merged_corr;
-      } else {
+      // K0-d: the DEVICE builds A and R_hp of the standard group; the host then inverts what it
+      // wrote. The edge block is built separately below, into these same slots.
+      {
+        // K0-d does not cover this branch (see the gate above): the host builds and stages both
+        // groups, exactly as before the device build existed.
+        std::optional<metal::mmse_engine::corr_stage> std_corr;
+        (void)std_corr;
         stage_engine_group(args,
                            0,
                            n_std_blocks,
@@ -990,7 +982,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                            0,
                            st,
                            matrix_on,
-                           gpu_invert,
+                           false,
                            false);
       }
 #if defined(OCUDU_CE_TIME)
@@ -1000,23 +992,44 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       //    silently stages the tail's matrices for the standard blocks.
       unsigned nout_e = 0;
       unsigned L_e    = 0;
-      build_correlation_matrices(stats,
-                                 args.dmrs_patterns.front().re_pattern,
-                                 rem_prb,
-                                 span<const unsigned>(dmrs_sym.begin(), npt),
-                                 scs_khz,
-                                 span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS),
-                                 span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
-                                 nout_e,
-                                 L_e);
+      // K0-d does not cover this branch yet. The edge block rides as EXTRA SYSTEMS of the standard
+      // batch, so its slots are the standard ones - slot stride L_std / nout_std while its own block
+      // order is L_e / nout_e, which is what the correlation kernels' system stride was added for.
+      // Attempting it directly (build the standard group, then the edge block into those same slots,
+      // with a_rhp_filled stopping the host write in between) left A inverted twice in the standard
+      // slots: a0 read 1861 instead of ~1 and the 256QAM capture fell from 24 to 21.8 dB. The slot
+      // bookkeeping needs to be redone deliberately - see the plan.
+      {
+        // Host construction and staging for the tail systems.
+        build_correlation_matrices(stats,
+                                   args.dmrs_patterns.front().re_pattern,
+                                   rem_prb,
+                                   span<const unsigned>(dmrs_sym.begin(), npt),
+                                   scs_khz,
+                                   span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS),
+                                   span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
+                                   nout_e,
+                                   L_e);
+      }
       tail_L = L_e;
       // 3) The tail systems carry n_std_blocks block slots but only block 0 is real: clear the
       //    group first so the pad blocks hold zeros instead of a previous hop's pilots.
       std::memset(gpu_y + static_cast<std::size_t>(nof_layers) * n_std_blocks * 2 * L_std,
                   0,
                   static_cast<std::size_t>(nof_layers) * n_std_blocks * 2 * L_std * sizeof(float));
-      stage_engine_group(
-          args, n_std_blocks * block_prb, 1, rem_prb, npt, nout_e, L_e, nof_layers, st, matrix_on, gpu_invert);
+      stage_engine_group(args,
+                         n_std_blocks * block_prb,
+                         1,
+                         rem_prb,
+                         npt,
+                         nout_e,
+                         L_e,
+                         nof_layers,
+                         st,
+                         matrix_on,
+                         gpu_invert,
+                         false,
+                         false);
       // 4) ONE engine call over both groups, then unpack both. The call is submitted without
       //    waiting when the kernels allow it, so the unpack moves to the completion of the stage
       //    (see complete_fd_td_estimation_stage()).
@@ -1406,7 +1419,8 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
                                                                 const engine_strides&              st,
                                                                 bool                               matrix,
                                                                 bool                               gpu_invert,
-                                                                bool                               slots_filled)
+                                                                bool                               slots_filled,
+                                                                bool                               a_rhp_filled)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
   // Pilots of one PRB, and the pilots this group carries per DM-RS symbol. The pilot view of a
@@ -1429,7 +1443,11 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
   // construction: writing it again here is the ~170KB memcpy this stage used to be, so it is
   // skipped entirely - the pad only has to stay zero, which it does because the kernel never
   // touches it and the device build happens on every hop that reaches this point.
-  for (unsigned sys = 0; !slots_filled && (sys != nof_layers); ++sys) {
+  // \c a_rhp_filled skips only the A/R_hp stores, keeping the pilot staging below: the device filled
+  // those slots and a host write of A^-1 there would undo it, while y/qy is staged by the host
+  // either way. \c slots_filled is the same decision for the whole call (no pilot geometry to
+  // stage at all).
+  for (unsigned sys = 0; !slots_filled && !a_rhp_filled && (sys != nof_layers); ++sys) {
     float* a_slot = gpu_a + static_cast<std::size_t>(sys_offset + sys) * Ls * Ls;
     if (gpu_invert) {
       if (Ls == L) {
@@ -1665,7 +1683,7 @@ void port_channel_estimator_metal_mmse_impl::unpack_engine_group(unsigned       
   }
 }
 
-std::optional<metal::mmse_engine::corr_stage> port_channel_estimator_metal_mmse_impl::build_slots_on_device(
+bool port_channel_estimator_metal_mmse_impl::build_slots_on_device(
     const channel_statistics&                     stats,
     const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
     unsigned                                      b_prb,
@@ -1675,7 +1693,8 @@ std::optional<metal::mmse_engine::corr_stage> port_channel_estimator_metal_mmse_
     unsigned                                      nof_systems,
     unsigned                                      a_stride,
     unsigned                                      r_stride,
-    unsigned                                      L)
+    unsigned                                      L,
+    std::optional<metal::mmse_engine::corr_stage>& deferred_corr)
 {
   unsigned nout_c = 0;
   unsigned L_c    = 0;
@@ -1686,11 +1705,13 @@ std::optional<metal::mmse_engine::corr_stage> port_channel_estimator_metal_mmse_
   // command buffer as a prefix (so K1 can invert in that same buffer, one round trip less). The
   // caller gets the descriptor back and dispatches it itself.
   if (device_invert_on_device()) {
-    return corr_std;
+    // The caller dispatches this build in its own command buffer, so that K1 can invert it there.
+    deferred_corr = corr_std;
+    return true;
   }
 
   if (!engine->build_correlation(corr_std, nof_systems)) {
-    return std::nullopt;
+    return false;
   }
   // Finish what the weights read: A^-1 in place, row by row through a scratch buffer because the
   // source and the destination are the same memory. The inversion stays on the HOST on purpose: the
@@ -1718,7 +1739,7 @@ std::optional<metal::mmse_engine::corr_stage> port_channel_estimator_metal_mmse_
       a_slot[static_cast<std::size_t>(k) * a_stride + k] = 1.0F;
     }
   }
-  return std::nullopt;
+  return true;
 }
 
 bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estimation_stage_args& args,
@@ -1772,18 +1793,21 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
     // them, not only on their count).
     static_vector<unsigned, MAX_NOF_DMRS_SYMBOLS> dmrs_slots;
     args.pattern_symbols.for_each(args.first_symbol, args.last_symbol, [&](unsigned s) { dmrs_slots.push_back(s); });
-    device_corr = build_slots_on_device(*device_stats,
-                                        args.dmrs_patterns.front().re_pattern,
-                                        b_prb,
-                                        span<const unsigned>(dmrs_slots.begin(), dmrs_slots.size()),
-                                        scs_to_khz(args.scs),
-                                        sys_offset,
-                                        nof_layers,
-                                        st.L,
-                                        nout,
-                                        L);
+    (void)build_slots_on_device(*device_stats,
+                                args.dmrs_patterns.front().re_pattern,
+                                b_prb,
+                                span<const unsigned>(dmrs_slots.begin(), dmrs_slots.size()),
+                                scs_to_khz(args.scs),
+                                sys_offset,
+                                nof_layers,
+                                st.L,
+                                nout,
+                                L,
+                                device_corr);
   }
-  const bool dev_inv_now = device_corr.has_value();
+  // True only in the device-inversion experiment: build_slots_on_device() fills this descriptor when
+  // (and only when) the caller has to dispatch the build itself, which is that experiment's form.
+  const bool dev_inv_now = device_invert_on_device();
   // stage_engine_group() runs EVERY time: besides A and R_hp it also stages the pilot vectors (y or
   // qy), which every path needs - skipping the call left y zero and the apply produced infinities
   // (measured). slots_filled only tells it to leave the A/R_hp slots alone, which is what the device

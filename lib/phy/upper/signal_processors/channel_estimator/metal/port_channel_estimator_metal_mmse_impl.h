@@ -238,7 +238,8 @@ private:
                           const engine_strides&              st,
                           bool                               matrix,
                           bool                               gpu_invert,
-                          bool                               slots_filled = false);
+                          bool                               slots_filled = false,
+                          bool                               a_rhp_filled = false);
 
   /// \brief One engine call (one command buffer, one commit/wait) over the staged slots, with the
   /// optional K3 reformat stage appended to the same command buffer.
@@ -309,8 +310,12 @@ private:
   ///     it to the weights call, which builds A as a prefix of its own command buffer and has K1
   ///     invert it in the same buffer - one round trip less, at the kernel's accuracy.
   ///
-  /// \return The descriptor when the caller must dispatch it itself (experiment), nullopt otherwise.
-  std::optional<metal::mmse_engine::corr_stage> build_slots_on_device(const channel_statistics& stats,
+  /// \param[out] deferred_corr The descriptor the CALLER must dispatch itself (device-inversion
+  ///             experiment only); empty when this call already built and inverted the slots.
+  /// \return True when the slots are filled and ready for the weights. False means the caller must
+  ///         fall back to its own staging - the return value is the success flag, never a descriptor
+  ///         (reading it as one was a defect: the success path leaves it nullopt).
+  bool build_slots_on_device(const channel_statistics& stats,
                              const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
                              unsigned                                       b_prb,
                              span<const unsigned>                           dmrs_slots,
@@ -319,7 +324,8 @@ private:
                              unsigned                                       nof_systems,
                              unsigned                                       a_stride,
                              unsigned                                       r_stride,
-                             unsigned                                       L);
+                             unsigned                                       L,
+                             std::optional<metal::mmse_engine::corr_stage>& deferred_corr);
 
   /// \param[in] sys_offset  First engine slot of this batch. The standard blocks start at 0; the
   ///                        edge/tail block of a hop sits at nof_layers, and the device build has to

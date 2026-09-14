@@ -54,6 +54,10 @@ struct mmse_stats_t {
   // captures never took, and 980 identical captures were read as agreement between two routes that
   // were in fact the same one).
   std::atomic<uint64_t> corr_builds{0};
+  /// Of those builds, the ones whose correlation stage could not be encoded (the caller falls back
+  /// to its host construction). Reported separately: a build that never happens and a build that
+  /// fails look identical in the totals, and this is what tells them apart.
+  std::atomic<uint64_t> corr_build_failures{0};
 };
 
 static mmse_stats_t& mmse_stats()
@@ -66,6 +70,13 @@ static void mmse_stats_corr_build()
 {
 #if defined(OCUDU_METAL_STATS)
   mmse_stats().corr_builds.fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
+static void mmse_stats_corr_build_failure()
+{
+#if defined(OCUDU_METAL_STATS)
+  mmse_stats().corr_build_failures.fetch_add(1, std::memory_order_relaxed);
 #endif
 }
 
@@ -123,7 +134,7 @@ static void mmse_stats_report()
   const uint64_t      wait = s.guard_wait_ns.load(std::memory_order_relaxed);
   std::fprintf(stderr,
                "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu guard=%llu/%llu "
-               "guard_mean=%.1fus guard_max=%.1fus device_corr_builds=%llu\n",
+               "guard_mean=%.1fus guard_max=%.1fus device_corr_builds=%llu corr_build_fail=%llu\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
@@ -131,7 +142,8 @@ static void mmse_stats_report()
                static_cast<unsigned long long>(s.guard_calls.load(std::memory_order_relaxed)),
                (hits != 0) ? (static_cast<double>(wait) / static_cast<double>(hits) / 1e3) : 0.0,
                static_cast<double>(s.guard_wait_max_ns.load(std::memory_order_relaxed)) / 1e3,
-               static_cast<unsigned long long>(s.corr_builds.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.corr_builds.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.corr_build_failures.load(std::memory_order_relaxed)));
 }
 #else  // OCUDU_METAL_STATS
 static void mmse_stats_commit() {}
@@ -676,6 +688,7 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   if (!encode_corr(e, enc, c, nof_systems)) {
     [enc endEncoding];
+    mmse_stats_corr_build_failure();
     return false;
   }
   [enc endEncoding];
