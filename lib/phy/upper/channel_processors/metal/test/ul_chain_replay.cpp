@@ -24,6 +24,16 @@
 ///   ul_chain_replay /tmp/C --cpu              --out /tmp/replay_cpu
 ///   ul_chain_replay /tmp/C --metal            --out /tmp/replay_gpu
 ///   scripts/ul_stage_diff.py /tmp/replay_cpu /tmp/replay_gpu
+///
+/// \warning DO NOT TRUST A DIFFERENCE FOUND UNDER HEAVY PARALLELISM (S-7f-4j). Run many instances at
+/// once - ten was enough - and this tool intermittently produces WRONG results, not merely missing
+/// ones: measured, 39 of 980 captures came out different between two runs of the SAME configuration,
+/// and the SINR of an unchanged configuration moved between 7.3 and 48.9 dB. Every one of those
+/// captures was clean when re-run serially, and the same corruption can also strike a re-run that
+/// still has other instances running. So: re-check any difference serially (with nothing else on the
+/// GPU) before believing it, and prefer a low instance count for anything whose result is a
+/// measurement. The known intermittent failure rx_buffer_impl::get_codeblock_data_bits is the
+/// visible half of this; the silent half is what this warning is about.
 
 #include "ocudu/adt/span.h"
 #include "ocudu/phy/lower/modulation/modulation_factories.h"

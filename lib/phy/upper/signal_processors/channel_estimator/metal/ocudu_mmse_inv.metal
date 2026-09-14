@@ -153,18 +153,26 @@ kernel void mmse_inv(device float*       a           [[buffer(0)]],  // [nof_sys
 // K1b: the same inverse, right-looking.
 //
 // K1 above updates the trailing submatrix once per BLOCK column (a rank-8 sweep) and reduces the
-// diagonal block with the per-pivot steps, which costs two barriers per pivot. Measured on the
-// production shape (one 54x54 system) that form is latency-bound: the elimination spends ~470us
-// more than the ~10us of host Gauss-Jordan it is meant to replace, and the pivot phases are what
-// the time goes into.
+// diagonal block with the per-pivot steps, which costs two barriers per pivot.
+//
+// CORRECTION (S-7f-4j): this comment used to claim that those pivot phases were where the time went,
+// on the evidence of a ~470us gap against the ~10us host Gauss-Jordan at order 54. That attribution
+// was WRONG, and S-5a had already measured the opposite: "removing 36 of its 72 barriers only saves
+// 2.5 us, so the barriers are not either". The gap was the THREADGROUP GEOMETRY - the same kernel
+// spans 91.3us at (32,4) to 24.5us at (64,16) on one 36x36 system - and the default path was
+// dispatching (32,4), the worst of the six. See mmse_inv_threadgroup() in
+// ocudu_metal_mmse_engine.mm, which is now the only place that picks it.
+//
+// K1b below was written against that wrong diagnosis. Its arithmetic description still holds, but
+// its motivation does not, and it is additionally NUMERICALLY WRONG at the orders this path uses
+// (it stays behind OCUDU_INV_RL=1, see the engine). It is kept only as a record of the attempt.
 //
 // This kernel keeps the same arithmetic (Gauss-Jordan on [A | I], no pivoting needed for the
 // symmetric positive definite A = R_pp + (sigma2 + ridge) I) but runs a RIGHT-looking update: after
 // a pivot row is normalized, every trailing element is updated with ONE rank-1 expression. Two
 // barriers per pivot remain (the row must be scaled before it is used, and the update must finish
-// before the next pivot is read), and that is the floor for a threadgroup-wide elimination - but the
-// arithmetic per pivot drops to one multiply-add per trailing element instead of a rank-8 chain,
-// which is what the latency was hiding behind.
+// before the next pivot is read), and that is the floor for a threadgroup-wide elimination - the
+// arithmetic per pivot drops to one multiply-add per trailing element instead of a rank-8 chain.
 //
 // One threadgroup per system (like K1), so several systems run concurrently instead of sharing one
 // threadgroup.

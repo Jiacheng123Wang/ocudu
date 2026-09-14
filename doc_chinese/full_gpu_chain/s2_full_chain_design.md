@@ -6107,15 +6107,15 @@ tail 的 `L_e` 与槽位的 `L_std` 不等，指针会落到标准组的中间�
 
 **分段耗时的两个工作点（差别很大，必须分清）**
 
-| 段 | 离线 replay（24/25 PRB 宽分配） | **OTA 实网**（`d8e23f67d1`，§48.82） |
-|---|---|---|
-| `pre`（导频提取/LSE/CFO 组装） | 6–18 µs | **0.69 µs** |
-| `sigma2` | 10–14 µs | **2.9 µs** |
-| `corr`（A/R_hp 构建 + 主机反演） | 17–22 µs | **10.9 µs** |
-| `stage`（staging） | 0–35 µs | **17.89 µs** |
-| `gpu_path`（corr 之后 → **引擎提交结束**，即 staging+submit；**不是**"到完成"） | 60–660 µs（波动大） | **99.4 µs** |
-| `gpu_wait` | 60–155 µs | **137.2 µs** |
-| `mean total` | 94–878 µs | **114.3 µs** |
+| 段 | 离线 replay（24/25 PRB 宽分配） | **OTA 基线**（主机 K1，`d8e23f67d1`） | **OTA 现状**（设备 K1，第二腿 §48.105） |
+|---|---|---|---|
+| `pre`（导频提取/LSE/CFO 组装） | 6–18 µs | 0.69 µs | **0.75 µs** |
+| `sigma2` | 10–14 µs | 2.9 µs | **3.0 µs** |
+| `corr`（主机建 A/R_hp） | 17–22 µs | 10.9 µs | **11.1 µs** |
+| `stage`（staging） | 0–35 µs | 17.89 µs | **2.24 µs**（主机不再做 54×54 Gauss-Jordan） |
+| `gpu_path`（corr 之后 → **引擎提交结束**，即 staging+submit；**不是**"到完成"） | 60–660 µs | 99.4 µs | **67.0 µs** |
+| `gpu_wait` | 60–155 µs | 137.2 µs | **527.3 µs** ← K1（几何修复前；§48.104 后应大幅回落） |
+| `mean total` | 94–878 µs | 114.3 µs | **82.2 µs** |
 
 ⇒ **实网的 hop 结构（大量窄分配）与离线抓包（多为宽分配）不同**，
 所以"离线 980/980 一致"**不能替代上机验证**，两者要分别测量。
@@ -6215,9 +6215,10 @@ vs `OCUDU_CE_GPU_INVERT=0 OCUDU_CE_CORR_DEV=0`（全主机）——**这条才�
    **与 §48.98 的改动无关**（§48.101(d)）：`iq1_10049` 6.24 → 3.15 dB、`iq2_10044` 31.78 → 8.87 dB，
    而 `rem_prb == 0` 的 `iq2_1009` 不受影响（split 与 merged 退化相同）。单测 Test 11 的合成形状测不出它，
    默认路径走 merged 所以不阻塞任何判据。要修必须先画清 split 两个几何的槽位区间（§48.83(c) 的同类工作）。
-4. **K1 内核的延迟**——设备 K1 每 hop 多 ~400–480 µs（§48.98(f)）：块 Gauss-Jordan 每主元两次
-   barrier，n=54 ⇒ ~108 次。**这是当前最大的一笔性能债**（主机侧反而省了 ~22 µs 的 Gauss-Jordan）。
-   真正的修复是 S-5a 的 blocked / `simdgroup_matrix` 形式（K1 还没用上 8×8 硬件矩阵单元）。
+4. ~~K1 内核的延迟~~ **已修（§48.104）**：设备 K1 每 hop 多出的 ~400–480 µs **不是** barrier
+   （S-5a 实测拆 36 次 barrier 只省 2.5 µs），而是**线程组几何**——内核按 `(64,16)` 优化，默认路径
+   却派发 `(32,4)`（六种里最差，3.7× 差距）。`mmse_inv_threadgroup()` 已统一为 `(64,16)`，
+   实测整机等待 357/212/284 → 121/107/195 µs。**剩余的 K1 延迟（若还有）才是性能债。**
 5. `build_correlation()` 独立 CB 的排队等待（139–687µs；异步提交消不掉，只能减少 CB 数）。
 6. 设备 gather 相对主机 gather 的 **+27µs**（按"全 GPU path 优先"不作阻塞，见 §48.63）。
 7. K1b 右看式反演数值错误（opt-in `OCUDU_INV_RL=1`）。
@@ -6235,7 +6236,7 @@ vs `OCUDU_CE_GPU_INVERT=0 OCUDU_CE_CORR_DEV=0`（全主机）——**这条才�
 |---|---|---|
 | K1 在 GPU | §28、行 1035/1084 | 单系统 36×36 比 CPU **慢 9 倍**（91.3µs vs ~10µs）。当时明确写下"**这不是'求逆该留 CPU'的依据**" |
 | 可切换 | 行 1089 | `OCUDU_CE_GPU_INVERT=1` 切到引擎内求逆（`engine->run()` 把 K1+K1b+K2 放进**同一条 CB**） |
-| **拐点：退回 CPU** | §48.68（`7b9f9ad6ed`） | 实网标准块 **L=54**，K1 上限 36。放开上限后设备反演 **555µs**（GPU 仅执行 4.4µs，其余是 108 次 barrier），比它替换的 ~10µs 主机 Gauss-Jordan **多花 ~470µs** |
+| **拐点：退回 CPU** | §48.68（`7b9f9ad6ed`） | 实网标准块 **L=54**，K1 上限 36。放开上限后设备反演 **555µs**（当时记为"GPU 仅执行 4.4µs，其余是 108 次 barrier"），比它替换的 ~10µs 主机 Gauss-Jordan **多花 ~470µs**。⚠️ **"108 次 barrier"这个归因后来被证伪**（见 §48.104(c)：S-5a 实测拆掉 72 次 barrier 里的 36 次只省 2.5 µs，真正的量是**线程组几何**；且当时派发的恰是六种里最差的 `(32,4)`）|
 
 ⇒ **回退 CPU 的唯一理由是"慢 ~470µs"**，文档当时还写下了修复方向（S-5a：blocked / simdgroup_matrix 形式）。
 
@@ -6933,6 +6934,10 @@ barrier**（n=54 ⇒ ~108 次）。真正的修复是 S-5a 的 blocked / `simdgr
 #### 48.99 S-7f-4f 收尾：门禁脚本落库；**OTA 尚未跑成**（阻塞在核心网，不是代码）
 
 **（a）门禁脚本落库（`/tmp` 里的那套会丢）**
+> ⚠️ **注**：本节提到的 `ota_k1_verify.sh`（上机腿的 runner）**已按用户要求删除**，见 §48.103(d)——
+> 上机一律由用户用 `sudo` 执行、把 console 贴回，自己拉起 gNB 的脚本没有用处。
+> 本节的**判据与判读配方仍然有效**，只是不再有那个脚本；离线门禁脚本 `capture_gates.sh` 保留。
+
 新增 `lib/phy/upper/signal_processors/channel_estimator/metal/capture_gates.sh`，把本会话用的两个
 抓包门禁固化成**两模式一条命令**（自并行、自带重试、退出码即判据）：
 
@@ -7004,8 +7009,9 @@ NG-U 网关的 UDP 端口是固定的，**这就是"已经有一个 gNB 在跑"�
 **（d）OTA 的**已知风险**（不是"可能"，是**量化过的**）**
 设备 K1 让每条 hop 的 GPU 时间多 ~400–480 µs（§48.98(f)），离线 `defer_wait` 从 ~290/617 µs 升到
 ~1067/992 µs。**实网 1 ms 时隙下能否吃掉这 0.5 ms，只有上机能回答。**
-若上机出现大量 `Real-time failure in RF`，**下一步就是 K1 内核本身**（把 ~108 次 barrier 降下来，
-S-5a 的 blocked / `simdgroup_matrix` 形式）——那是**性能修复，不是把 K1 退回 CPU 的理由**（用户方针）。
+若上机出现大量 `Real-time failure in RF`，**下一步就是 K1 的派发几何**（不是 barrier，更不是退回 CPU）
+——⚠️ 本段原先写的是"把 ~108 次 barrier 降下来 / S-5a 的 blocked 形式"，**该归因已被 §48.104(c) 证伪**：
+分块内核早就落地，缺的是与它配套的 `(64,16)` 线程组几何。**已修（§48.104(d)）。**
 
 #### 48.100 S-7f-4g：把"设备 K1 路径 `r_hp_nz = 27216/27216`"这条判据**直接测掉**，并建立 OTA 的**改动前基线**
 
@@ -7057,7 +7063,7 @@ S-5a 的 blocked / `simdgroup_matrix` 形式）——那是**性能修复，不�
 | `[ul_gpu_lane] busy` | 上升（224 → 可能 600+ µs） | 与 `gpu_path` 同源；**这是"1 ms 时隙装不装得下"的直接读数** |
 | `Real-time failure in RF` | 与 165 同量级或更好 | 若显著恶化 ⇒ 立即转向 K1 内核优化（不是退回 CPU） |
 
-判读用 `ota_k1_verify.sh report <console> <log>`（§48.99(a)），它把实时失败按
+判读把实时失败按
 underflow / late / overflow 分类——**165 这种数字必须分类看**，`grep -c` 会把它糊成一个数。
 
 #### 48.101 S-7f-4h：开关组合实测；**split 形式的退化是既有的，不是本次改动**（对照实验，不是推理）
@@ -7243,10 +7249,9 @@ K1 内核的延迟（+400–480 µs/hop，§48.98(f)）**尚未优化**。用户
 `capture_gates.sh`（离线三条门禁）不受影响，保留。
 
 **（e）待确认 / 待观察（诚实列出）**
-1. **用户那次运行的 `hips_gpu` 覆盖率是 28.5% 而非 37.5%**：`device_corr_builds` 只在
-   "无余数（`rem_prb == 0`）且非 merged" 时计一次（§48.84(d)），所以它随**分配形状**变化。
-   ping/iperf3 的分配形状与 `d8e23f67d1` 那条腿不同，这是合理解释，但**本轮没有直接证据**，
-   记为待确认。
+1. ~~覆盖率 28.5% 而非 37.5%~~ **已解释（第二腿）**：第二腿（§48.105）在**同一份代码**上给出
+   `5207/13640 = 38.2%`，与历史 37.5% 吻合。两次跑的差别来自**分配形状**（`device_corr_builds`
+   只在"无余数且非 merged"时计一次，§48.84(d)），不是缺陷。
 2. **没看到 `Real-time failure in RF` 的条数**：它只进 `--log.filename` 那份日志
    （console 里不出现，`--log.all_level warning` 时它以 `[RF] [W]` 写文件）。
    **需要用户提供** `/tmp/gnb_ota_k1.log` 里的计数（按 underflow/late/overflow 分类），
@@ -7334,3 +7339,56 @@ measured (32,4) 91.3, (64,4) 67.3, (32,8) 57.0, (64,8) 25.7, (32,16) 29.5, (64,1
 本次改动**不是新的性能优化**，而是**把 S-5a 已经做过、却没接到默认路径上的那一步接回来**
 （用户："不能把已有的优化丢掉"）。它同时让上机腿里 `ch_est=538.7 µs/lane`（占 GPU busy 88%）有希望回到 ~200 µs 量级，
 `[ul_pipeline]` median 1043 µs 也有望回到 1 ms 以内——**这是为全 GPU path 让路，不是为 K1 本身**。
+
+#### 48.105 S-7f-4j 补记：**第二腿上机（ABI 确认）**，以及 `[metal_stats]`/`[ul_gpu_lane]` 逐行释义
+
+**（a）第二腿实测（用户执行，手机 ping + iperf3；二进制 = `3dd7145e17`，与 HEAD 一致）**
+
+| 判据 | 结果 |
+|---|---|
+| 设备 K1 生效 | `gpu_wait=527.3 µs`、`stage=2.24 µs`（主机 Gauss-Jordan 已消失） |
+| `device_corr_builds` | **5207 / 13640 = 38.2%**（基线 37.5% ⇒ 第一腿的 28.5% 是分配形状，已解释） |
+| `corr_build_fail` | **0** |
+| `Real-time failure in RF` | **37**（late 18 + underflow 19） |
+| USB 错误 / 崩溃 | **0 / 0** |
+| 等化器设备直读 | `ch_est device=150040 staged=0` ✓ |
+| `[ul_gpu_lane] busy split` | `ch_est=538.7 µs/lane`（88%）、`eq_demap=74.3 µs/lane`（12%） |
+
+> **与基线的正确比法**：基线 165 次 / 71384 hop = **0.231%/hop**；本腿 37 次 / 13640 hop = **0.271%/hop**。
+> 绝对数小 4.5× 是因为**腿短了约 5×**，**单位 hop 的发生率基本持平（略高 17%）**。
+> ⇒ 结论是"**没有实时性退化**"，不是"改善 4.5 倍"。`Real-time failure in RF` 是射频线程错过截止时间
+> （USB/CPU 侧），K1 的代价落在**上行流水线延迟**上——两者的读数要分开看。
+
+**（b）`[metal_stats]`（各引擎自己的提交/等待记账；`OCUDU_METAL_STATS` 编译期探针，退出时打 stderr）**
+
+| 行 | 含义 |
+|---|---|
+| `pusch_demod ch_est device=/host=` | 解调器**从哪里拿到信道估计**：`device` = 直接绑定估计器的设备缓冲；`host` = 先取回主机。100% device 是设计目标，退回 `staged` 时软比特相同、**只有这个计数器看得出来** |
+| `dft commits/waits/max_in_flight=8` | 逐符号 DFT 引擎；`max_in_flight=8` = 最多 8 个批次同时在飞（用流水深度盖住 DFT 延迟） |
+| `demapper / equalizer commits=0 ... (synchronous path only)` | 这两者的**同步调用**为 0 属正常：它们的活搭在共享 burst 上 |
+| `demod_batch flushes/symbols/dispatches/max_run` | 解映射批处理：每时隙一次冲刷；`max_run=11` = 一个时隙 11 个数据符号**一次 dispatch 干完** |
+| `mmse_ce commits/waits/max_in_flight guard=命中/进入 device_corr_builds corr_build_fail` | 估计器引擎：`guard=0/13642` = 入口守卫 13642 次进入**一次都没等到未完成批次**（它是估计器仅剩的串行点，0 命中说明不阻塞）；后两个 = 设备建矩阵次数 / 其中编码失败退回首建的次数 |
+| `burst commits/waits/dispatches (equalizer= demapper=)` | 等化+解调**共用的那一条 command buffer**（每时隙一条）及其内部 dispatch 拆分 |
+| `wrap hits/creates/replaces/failures` | 零拷贝映射缓存：`hit` = 两阶段为同一地址绑定**同一个** buffer 对象（这才让访问有先后关系）；**`failures=0` = 没有一次映射被拒（即没有静默降级成拷贝）** |
+| `equalizer ch_re device/host` | 接收符号经**设备 gather**（GPU 上直读网格）到达等化器 |
+| `equalizer ch_est device/staged` | 信道估计来自设备缓冲（`staged` = 先收集到主机） |
+| `eq_batch flushes/symbols/runs/batched/max_run/first_break` | 等化器批处理；`first_break=estimates` = 第一次中断的原因是**相邻符号的信道估计缓冲变了**（代码里 `!same_h`）——每个时隙的估计是另一块缓冲，**结构性地**限制了一次能批多少符号，不是缺陷 |
+
+**（c）`[ul_gpu_lane]`（"数据在设备上的一生"，用 GPU 时间戳，不受主机推迟影响）**
+
+| 行 | 含义 |
+|---|---|
+| `lanes cbs/lane (max) dropped carried period_dropped` | 13640 条 lane、平均 2.38 条 CB。**后三个计数全 0 = 下面四条序列可信**（这就是"这份报告能不能信"的自证） |
+| `residency` | 第一条 CB 开始 → 最后一条结束 = **数据在 GPU 上占用了多久** |
+| `busy` | 各 CB 的 GPU 执行时间之和 = **其中 GPU 真正在执行的有多少** |
+| `gap` | `residency − busy` = **GPU 在等 CPU 喂**（中位 0.8 µs ⇒ 通常一点不等） |
+| `period` | 相邻 lane 结束的间隔 = **吞吐步调**；**只读 median**（1023 µs ≈ 1 时隙）。mean/p95 巨大是因为手机空闲时段没有上行数据 |
+| `busy split: ch_est=.../lane (..% of busy, cbs/lane=..) eq_demap=...` | `busy` 按阶段拆分。**读 K1 的代价就看 `ch_est` 这一项**（GPU 时间戳，推迟化藏不住）。交叉验证：`ch_est cbs/lane=1.38 = 1 条引擎批次 + 0.382 条设备建矩阵 CB`，而 `5207/13640 = 0.382` —— **数字自洽，说明设备建矩阵确实在派发** |
+
+**（d）本轮同时修正的**陈年错误归因**（"108 次 barrier"）**
+文档 §48.68/§48.85、`port_channel_estimator_metal_mmse_impl.h` 的 `device_inverts()` 注释、
+`ocudu_mmse_inv.metal` 的 K1b 注释都曾把设备 K1 慢 ~470 µs 归因于**每主元两次 barrier**。
+**该归因是错的**，而且 S-5a 当时就已经实测否定过它（"removing 36 of its 72 barriers only saves
+2.5 us, so the barriers are not either"）。真正的量是**线程组几何**（§48.104）。三处注释与本文档
+相关段落均已更正；**commit message 无法回改**，故 `63a15a7b9c` 里"~400–480 us/hop of barrier
+latency"这一句**以本节与 §48.104 为准**（后续提交 `352ad5ce68` 已给出正确归因）。

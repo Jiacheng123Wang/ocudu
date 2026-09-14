@@ -308,9 +308,12 @@ private:
   /// stage_engine_group() gated on `slots_filled` alone, the device path measures the same as the
   /// host's on every capture, so there is no functional reason left to keep it off.
   ///
-  /// Cost (a PERFORMANCE debt, tracked separately, not a blocking defect): the K1 kernel is
-  /// latency-bound (block Gauss-Jordan, ~2 barriers per pivot, ~555us per hop against the host's
-  /// ~10us). The blocked/simdgroup_matrix rewrite is the fix; until then the GPU path pays it.
+  /// Cost (a PERFORMANCE debt, tracked separately, not a blocking defect). It is NOT the barriers:
+  /// S-5a measured that removing 36 of the kernel's 72 barriers saves 2.5us, while the THREADGROUP
+  /// GEOMETRY moves the very same kernel over a 3.7x range - (32,4) 91.3us against (64,16) 24.5us on
+  /// one 36x36 system. The default path used to dispatch the worst of the six. mmse_inv_threadgroup()
+  /// (ocudu_metal_mmse_engine.mm) now picks the measured best for every K1 dispatch, which took the
+  /// whole-engine wait from 357/212/284us to 121/107/195us on the three reference captures.
   ///
   /// \param[in] order Block order L. Above the kernel's own MAX_N (mmse_inv.metal: 54) the kernel
   ///                  cannot be dispatched at all, so the host inversion is the only option there.
