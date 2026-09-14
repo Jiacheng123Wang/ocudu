@@ -836,7 +836,12 @@ bool mmse_engine::run_async(float*       a,
   phase.created();
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
-  [enc setComputePipelineState:(e->inv_rl_pipe != nil) ? e->inv_rl_pipe : e->inv_pipe];
+  // K1b (right-looking) is EXPERIMENTAL and numerically wrong at the orders this path uses now:
+  // in the device-correlation A/B at order 54 it produced an inverse ~1e8 times the correct one
+  // (the blocked K1 gives 353.2758 against the host's 353.2786 - see ocudu_mmse_inv.metal). It
+  // stays behind OCUDU_INV_RL=1 until its defect is found; the blocked kernel is the default.
+  const bool use_rl = (e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr);
+  [enc setComputePipelineState:use_rl ? e->inv_rl_pipe : e->inv_pipe];
   [enc setBuffer:a_buf offset:0 atIndex:0];
   [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
@@ -997,16 +1002,30 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
   // K0-d prefix: the correlation matrices are built into their slots FIRST, in this same command
-  // buffer - the weights below read them. Building them in a command buffer of their own costs a
-  // whole submission round trip (~70us measured) against a fraction of that in host work, which is
-  // what made the device build look unprofitable; riding this buffer is what makes it pay.
+  // buffer - the weights below read them, and K1 (which follows, in this same buffer) turns the A
+  // they wrote into the A^-1 the weights need. Building them in a command buffer of their own costs
+  // a whole submission round trip (~70us measured), which is what made the device build look
+  // unprofitable; riding this buffer is what makes it pay.
+  //
+  // NOTE: the estimator does NOT use this form. Its block order is 54, where K1's inverse carries a
+  // 1.3e-5 relative error (measured: device 353.2758 against the host's 353.2786), enough to take a
+  // 256QAM capture from 24 dB to -18 dB of SINR. It calls build_correlation() standalone and lets
+  // the HOST invert the device-built matrices, then calls this entry point with corr == nullptr.
+  // This prefix is kept for the orders (<= 36) where K1 is accurate, because that is the form that
+  // keeps the whole batch on the device.
   if (corr != nullptr) {
     if (!encode_corr(e, enc, *corr, nof_systems)) {
       [enc endEncoding];
       return false;
     }
+    [enc setComputePipelineState:(e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr)
+                                     ? e->inv_rl_pipe
+                                     : e->inv_pipe];
+    [enc setBuffer:ai_buf offset:0 atIndex:0];
+    [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
+    [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
+    [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
   }
-
 
   [enc setComputePipelineState:e->weights_pipe];
   [enc setBuffer:rp_buf offset:0 atIndex:0];

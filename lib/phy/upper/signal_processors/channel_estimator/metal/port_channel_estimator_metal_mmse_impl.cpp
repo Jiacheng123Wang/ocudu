@@ -791,18 +791,20 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // standard geometry is the whole batch: otherwise the tail system would keep whatever the slot
     // held before, and the weights would be built from a stale matrix. With no tail, or with the
     // split form (two batches), the standard batch is the single geometry the kernel describes.
-    // OFF by default while one defect remains: with the stage folded into the engine call (the
-    // right place - see the corr parameter of run_weights_only()) the slots, the weights, the pilot
-    // staging, the h output and grid_est are all byte-identical to the host path, and the LLR still
-    // differs, so something after the engine call depends on which way the slots were filled. Until
-    // that is found the host build stays the default; OCUDU_CE_CORR_DEV=1 runs the device one.
+    //
+    // ON by default since the equivalence defect was found and fixed: the host batch stages A^-1
+    // itself, so K1 must NOT run on it, and run_engine_blocks() now keys that decision on this
+    // stage's presence instead of on the order (see the gpu_invert note there). OCUDU_CE_CORR_DEV=0
+    // keeps the host build for A/B.
     static const bool device_corr_enabled = []() {
       const char* env = std::getenv("OCUDU_CE_CORR_DEV");
-      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+      return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
     }();
-    // The matrices are built by the engine call that computes the weights (see the corr stage it
-    // takes): a command buffer of their own would cost a whole submission round trip, which is what
-    // made the device build look unprofitable. Only the DESCRIPTOR is prepared here.
+    // The matrices are built by the DEVICE (build_correlation(), below) and then inverted by the
+    // HOST in the slots they were written to, so no order limit applies here: the correlation kernels
+    // take whatever geometry the estimator hands them, and the host Gauss-Jordan has no limit either,
+    // which is what lets the OTA geometry (order 72) use this path. What the device build cannot do
+    // is a MERGED batch, because a merged batch holds two different geometries in one slot array.
     std_slots_filled = device_corr_enabled && !merge_tail && (n_std_blocks != 0);
     // K3 (S-6a): the equalizer's per-symbol estimates, built on the GPU inside the engine call. The
     // destination can only be filled by a call that covers the WHOLE allocation with the legacy
@@ -938,34 +940,76 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       const auto t_stage_begin = steady_clock::now();
 #endif
       if (std_slots_filled) {
-        // The device built A and R_hp into the slots (K0-d). What the slots must HOLD is what the
-        // removed host staging used to put there: A itself when K1 inverts it in place, and A^-1
-        // otherwise - so the padding (blockdiag(A, I)) and, when the CPU owns the inversion, the
-        // Gauss-Jordan run in place on the device-written matrices. The expensive half of the old
-        // staging (building the matrices and copying ~170KB into the slots) is what is gone; this
-        // finishes what is left in the same place, which is what keeps the A/B exact.
-        const unsigned Ls = st.L;
-        for (unsigned sys = 0; sys != nof_layers; ++sys) {
-          float* a_slot = gpu_a + static_cast<std::size_t>(sys) * Ls * Ls;
-          if (!gpu_invert) {
-            std::array<float, 2 * MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS> gj;
-            std::fill(gj.begin(), gj.end(), 0.0F);
-            for (unsigned r = 0; r != L_std; ++r) {
-              for (unsigned c = 0; c != L_std; ++c) {
-                gj[r * 2 * L_std + c] = a_slot[static_cast<std::size_t>(r) * L_std + c];
-              }
-              gj[r * 2 * L_std + L_std + r] = 1.0F;
-            }
-            gauss_jordan_invert(span<float>(gj.data(), 2 * L_std * L_std), L_std);
-            for (unsigned r = 0; r != L_std; ++r) {
-              std::memcpy(a_slot + static_cast<std::size_t>(r) * L_std,
-                          &gj[static_cast<std::size_t>(r) * 2 * L_std + L_std],
-                          static_cast<std::size_t>(L_std) * sizeof(float));
-            }
+        // The device builds A and R_hp into the slots (K0-d), in a command buffer of its own that
+        // COMPLETES here, and the host then finishes what the slots must hold.
+        //
+        // The order is the whole point and it is easy to get backwards. The legacy weights kernels
+        // read A^-1, so the slots must END as A^-1 - and the only writer that can follow the device
+        // is the host, because K1 (the device inversion) is not accurate enough at the block order
+        // this path runs at (measured: 1.3e-5 relative error at order 54, enough to take the 256QAM
+        // capture from 24 dB to -18 dB SINR - see the note in run_engine_blocks()). So:
+        //   1. the device writes A and R_hp into the slots (this call),
+        //   2. the host runs its Gauss-Jordan on those very values and writes A^-1 back in place
+        //      (the loop below), and
+        //   3. the engine call runs the weights and the apply with NO correlation stage - corr ==
+        //      nullptr is what tells run_engine_blocks() that the slots hold an inverse and K1 must
+        //      not touch them.
+        // What the device build removes is the host construction of the matrices (~170 KB of stores
+        // and the two nested correlation loops); what it cannot remove is the small in-place
+        // inversion, which is what the merged/split branches below also rely on.
+        {
+          std::optional<metal::mmse_engine::corr_stage> corr_std;
+          unsigned                                      nout_c = 0;
+          unsigned                                      L_c    = 0;
+          corr_std = correlation_stage(stats,
+                                       args.dmrs_patterns.front().re_pattern,
+                                       block_prb,
+                                       span<const unsigned>(dmrs_sym.begin(), npt),
+                                       scs_khz,
+                                       0,
+                                       nout_c,
+                                       L_c);
+          if (!engine->build_correlation(*corr_std, nof_layers)) {
+            // The device could not build them: fall back to the host staging, which also produces the
+            // inverse these loops would. std_slots_filled is cleared so K1 stays off either way.
+            std_slots_filled = false;
+            stage_engine_group(args,
+                               0,
+                               n_std_blocks,
+                               block_prb,
+                               npt,
+                               nout_std,
+                               L_std,
+                               0,
+                               st,
+                               matrix_on,
+                               false);
           }
-          // The identity pad of an oversized slot: the device wrote the L x L block only.
-          for (unsigned k = L_std; k != Ls; ++k) {
-            a_slot[static_cast<std::size_t>(k) * Ls + k] = 1.0F;
+        }
+        if (std_slots_filled) {
+          const unsigned Ls = st.L;
+          for (unsigned sys = 0; sys != nof_layers; ++sys) {
+            float* a_slot = gpu_a + static_cast<std::size_t>(sys) * Ls * Ls;
+            if (!gpu_invert) {
+              std::array<float, 2 * MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS> gj;
+              std::fill(gj.begin(), gj.end(), 0.0F);
+              for (unsigned r = 0; r != L_std; ++r) {
+                for (unsigned c = 0; c != L_std; ++c) {
+                  gj[r * 2 * L_std + c] = a_slot[static_cast<std::size_t>(r) * Ls + c];
+                }
+                gj[r * 2 * L_std + L_std + r] = 1.0F;
+              }
+              gauss_jordan_invert(span<float>(gj.data(), 2 * L_std * L_std), L_std);
+              for (unsigned r = 0; r != L_std; ++r) {
+                std::memcpy(a_slot + static_cast<std::size_t>(r) * Ls,
+                            &gj[static_cast<std::size_t>(r) * 2 * L_std + L_std],
+                            static_cast<std::size_t>(L_std) * sizeof(float));
+              }
+            }
+            // The identity pad of an oversized slot: the device wrote the L x L block only.
+            for (unsigned k = L_std; k != Ls; ++k) {
+              a_slot[static_cast<std::size_t>(k) * Ls + k] = 1.0F;
+            }
           }
         }
       } else {
@@ -1064,22 +1108,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // A hop without an edge block (or with its tail on the CPU) is covered by this single
         // batch, so K3 can be attached to it.
         const bool covers_hop = (rem_prb == 0);
-        // K0-d: the correlation matrices of the standard blocks are built by THIS engine call (the
-        // descriptor only names the geometry), so the host never builds them and the slots are
-        // filled where the inversion and the weights read them.
-        std::optional<metal::mmse_engine::corr_stage> corr_std;
-        if (std_slots_filled) {
-          unsigned nout_c = 0;
-          unsigned L_c    = 0;
-          corr_std        = correlation_stage(stats,
-                                              args.dmrs_patterns.front().re_pattern,
-                                              block_prb,
-                                              span<const unsigned>(dmrs_sym.begin(), npt),
-                                              scs_khz,
-                                              0,
-                                              nout_c,
-                                              L_c);
-        }
+        // K0-d: the correlation matrices of this group were built by the DEVICE before this call
+        // (see the standard-group branch of the merged path above, and the device build in
+        // run_engine_blocks() for a hop narrower than the block size), and the host then inverted
+        // them in place. So this call carries no correlation stage: the slots already hold A^-1 and
+        // the weights read exactly that.
         std_blocks_ok         = run_engine_blocks(args,
                                          0,
                                          n_std_blocks,
@@ -1090,8 +1123,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                          matrix_on,
                                          covers_hop ? reformat_for(block_prb * NOF_SUBCARRIERS_PER_RB, 0, 0)
                                                     : nullptr,
-                                         defer,
-                                         corr_std.has_value() ? &corr_std.value() : nullptr);
+                                         defer);
         hop_gpu               = std_blocks_ok;
         hop_nn                = std_blocks_ok && matrix_on;
         hop_pad               = (std_blocks_ok && matrix_on) ? static_cast<unsigned>(((L_std + 7u) & ~7u) - L_std) : 0;
@@ -1549,36 +1581,16 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
     (void)complete_fd_td_estimation_stage();
   }
 
-  // The legacy kernels cover the whole hop in one command buffer that the caller may walk away
-  // from (run_async) and complete later; the matrix flavor and the CPU-inversion A/B knob have no
-  // asynchronous form, so those paths always complete the batch here.
+  // One entry point for the batch: the weights pipeline always. The K1 inversion is part of it when
+  // the slots hold A itself (see invert_first below), so there is no second flavor to dispatch to -
+  // the "inverted" form of run() is that same pipeline with K1 prepended. The matrix (nn) flavor is
+  // the only genuinely different one.
   const bool engine_ok =
       matrix ? engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_systems, nof_blocks)
-             : (gpu_invert
-                    ? (defer ? engine->run_async(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
-                             : engine->run(gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat))
-                    : (defer ? engine->run_weights_only_async(gpu_a,
-                                                               gpu_r_hp,
-                                                               gpu_w,
-                                                               gpu_y,
-                                                               gpu_h,
-                                                               nout,
-                                                               L,
-                                                               nof_systems,
-                                                               nof_blocks,
-                                                               reformat,
-                                                               corr)
-                             : engine->run_weights_only(gpu_a,
-                                                        gpu_r_hp,
-                                                        gpu_w,
-                                                        gpu_y,
-                                                        gpu_h,
-                                                        nout,
-                                                        L,
-                                                        nof_systems,
-                                                        nof_blocks,
-                                                        reformat,
-                                                        corr)));
+             : (defer ? engine->run_weights_only_async(
+                            gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat, corr)
+                      : engine->run_weights_only(
+                            gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat, corr));
   if (!engine_ok) {
     logger.error("[mmse_ce] engine call failed (systems={} blocks={} nout={} L={} matrix={}): falling back to the "
                  "CPU path for these blocks",
@@ -1698,25 +1710,21 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   // kernels tile 8x8 seamlessly and the pad regions stay exactly zero.
   const engine_strides st{matrix ? ((L + 7u) & ~7u) : L, matrix ? ((nout + 7u) & ~7u) : nout, n_blk};
 
-  // A is symmetric positive definite (see ocudu_mmse_inv.metal), so K1 needs no pivoting; it is
-  // fixed to n <= 36 by its threadgroup memory and unused by the nn flavor (ceil8-padded layout).
-  // The inversion runs on the GPU: K1 (ocudu_mmse_inv.metal) is a blocked Gauss-Jordan (b=8, no
-  // pivoting) and costs 24.5 us for one 36x36 system, down from 91.3 us as a per-pivot barrier
-  // chain (S-5a). It is encoded in the SAME command buffer as the weights and the apply
-  // (engine_run() below), so the host never reads the inverse back and pays no extra round trip.
-  //
-  // It is still a few us slower end to end than the ~10 us of host-side CPU Gauss-Jordan in the
-  // chain as wired today (the local A/B: hop mean 169.0 -> 182.4 us), and it stays the default
-  // anyway: PHY compute belongs to the Metal path as a whole, so the remaining gap is a kernel
-  // engineering item (the 72 pivot phases of the diagonal blocks, see the kernel header), not a
-  // reason to move the work back to the CPU. OCUDU_CE_CPU_INVERT=1 forces the CPU path for A/B.
-  static constexpr unsigned MAX_GPU_INVERT_ORDER = 36;
-  const bool cpu_invert_forced = (std::getenv("OCUDU_CE_CPU_INVERT") != nullptr);
-  const bool gpu_invert        = !matrix && !cpu_invert_forced && (L <= MAX_GPU_INVERT_ORDER);
+  // The slots of THIS batch hold A^-1 by the time this call runs, whichever way they were filled:
+  // stage_engine_group() inverts in place, and the device-correlation path (K0-d) has the device
+  // build A and then the host invert it in those same slots (see the standard-group branch of the
+  // stage above). So no kernel of this batch may invert them again, and the correlation prefix is
+  // not passed either - corr is for the caller that wants the DEVICE to build the slots and K1 to
+  // invert them in the same command buffer, which is the form the block orders <= 36 can use. The
+  // order this hardware runs at (54) is above that: K1's inverse carries a 1.3e-5 relative error
+  // there (device 353.2758 against the host's 353.2786), which is why the estimator keeps the
+  // inversion on the host (~10us per system, and exact to float32).
+  stage_engine_group(args, gb_start, n_blk, b_prb, npt, nout, L, 0, st, matrix, false);
 
-  stage_engine_group(args, gb_start, n_blk, b_prb, npt, nout, L, 0, st, matrix, gpu_invert);
   const bool deferred = defer && !matrix;
-  if (!engine_run(corr, nout, L, nof_layers, n_blk, matrix, gpu_invert, reformat, deferred)) {
+  // K1 (gpu_invert) is off: it belongs with the correlation prefix that fills the slots with A, and
+  // this call's slots already hold A^-1 (see above).
+  if (!engine_run(corr, nout, L, nof_layers, n_blk, matrix, false, reformat, deferred)) {
     return false;
   }
   if (deferred) {

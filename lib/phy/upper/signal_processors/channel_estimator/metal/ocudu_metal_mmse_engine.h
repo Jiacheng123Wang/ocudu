@@ -202,15 +202,19 @@ public:
   bool run(float* a, const float* r_hp, float* w, const float* y, float* h, unsigned nout, unsigned L,
            unsigned nof_systems, unsigned nof_blocks, const reformat_stage* reformat = nullptr);
 
-  /// \brief Hot path (v1): K1b + K2 in ONE command buffer with a single commit/wait.
-  /// The A^-1 inversion runs on the CPU (the batched 36x36 Gauss-Jordan kernel is
-  /// barrier-bound on the GPU - see PLAN.md 7.0.6); the Metal inversion kernel remains
-  /// as the algorithm skeleton and the golden reference.
+  /// \brief Hot path (v1): the weights (K2) with a pre-inverted A, in ONE command buffer.
+  /// The A^-1 inversion itself is the CALLER's: it either runs the host Gauss-Jordan or has the
+  /// device build the matrices and inverts those on the host (see corr below and
+  /// build_correlation()). See run() for the entry point that has K1 invert A in this same buffer.
   /// \param[in] reformat Optional K3 stage appended to the same command buffer (see run()).
   /// \param[in] corr     Optional K0-d stage PREPENDED to the same command buffer: the correlation
-  ///                     matrices are built where the weights read them, instead of by a command
-  ///                     buffer of their own (a separate submit costs ~70us of round trip on its own,
-  ///                     which is what made the device build look unprofitable - see the plan).
+  ///                     matrices are built where the weights read them, and K1 (dispatched right
+  ///                     after, in this same buffer) inverts them in place. That keeps the whole
+  ///                     batch on the device, at the price of K1's accuracy - usable up to the
+  ///                     block order its elimination is exact at (36). For the order this hardware
+  ///                     runs (54) build the matrices with build_correlation(), invert them on the
+  ///                     host, and call this entry point with corr == nullptr instead (which is what
+  ///                     the estimator does).
   bool run_weights_only(const float* a_inv, const float* r_hp, float* w, const float* y, float* h, unsigned nout,
                         unsigned L, unsigned nof_systems, unsigned nof_blocks,
                         const reformat_stage* reformat = nullptr, const corr_stage* corr = nullptr);
