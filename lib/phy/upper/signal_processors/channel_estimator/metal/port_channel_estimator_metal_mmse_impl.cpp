@@ -966,6 +966,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // groups, exactly as before the device build existed.
         std::optional<metal::mmse_engine::corr_stage> std_corr;
         (void)std_corr;
+        // The standard group's A/R_hp must be staged with the SAME inversion decision as the tail
+        // below and as run_engine_blocks(): when the device inverts, both must leave A in the slots
+        // for K1. A hardcoded false here wrote A^-1 into the very slots the tail filled with A
+        // (S-7f-4a), which is what "one geometry written with two semantics" looked like.
         stage_engine_group(args,
                            0,
                            n_std_blocks,
@@ -976,7 +980,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                            0,
                            st,
                            matrix_on,
-                           false,
+                           gpu_invert,
                            false);
       }
 #if defined(OCUDU_CE_TIME)
