@@ -11,6 +11,7 @@
 #pragma once
 
 #include "ocudu/adt/span.h"
+#include "ocudu/phy/upper/equalization/channel_equalizer_device_grid.h"
 
 #include <cstdint>
 
@@ -48,6 +49,30 @@ public:
       buffer(ptr), offset(first_element), layer_stride(stride)
     {
     }
+  };
+
+  /// \brief Where the received symbols (the y input) of one dispatch come from.
+  ///
+  /// The caller that owns the resource grid hands over the device plan of its hop
+  /// (ch_gather_desc) and the OFDM symbol of the dispatch within that plan, and the dispatch reads
+  /// its y input off the grid instead of the caller staging it on the host - one memcpy per port
+  /// per symbol, which is what the PUSCH chain spent most of its staging time on. The gather is a
+  /// cbf16 transport, so the kernel reads the same bytes the host gather would have produced.
+  ///
+  /// The plan is the caller's and must outlive the dispatch: like every other staged input of a
+  /// deferred submit, it is read until the burst is waited for.
+  struct gather_binding {
+    /// The hop's plan, or nullptr to keep gathering on the host.
+    const ch_gather_desc* desc;
+    /// OFDM symbol of the dispatch, in the grid's own coordinates.
+    unsigned symbol;
+
+    /// No plan: the caller staged the received symbols on the host.
+    gather_binding() : desc(nullptr), symbol(0) {}
+    gather_binding(const ch_gather_desc* desc, unsigned symbol) : desc(desc), symbol(symbol) {}
+
+    /// Whether the dispatch reads its y input off the device grid.
+    bool is_valid() const { return desc != nullptr; }
   };
 
   equalizer_metal_engine()  = default;
@@ -138,7 +163,8 @@ public:
                      bool        mmse,
                      float       noise_var,
                      float       tx_scaling,
-                     float       h_scaling);
+                     float       h_scaling,
+                     const gather_binding& gather = {});
 
   /// True when the thread-local burst has dispatches encoded but not committed yet.
   /// \brief Encodes ONE dispatch that equalizes \c nof_symbols symbols of a group whose buffers
@@ -168,8 +194,14 @@ public:
                            float       h_scaling);
 
   /// \brief Same as enqueue_burst_batch(), with the channel estimates of each symbol at an
-  /// explicit start. \p h_starts holds \c nof_symbols entries *inside* \p h's buffer (the same
-  /// space \c h.offset lives in), which is what the estimator's per-symbol slices are.
+  /// explicit start and, optionally, the received symbols gathered off the device grid.
+  /// \p h_starts holds \c nof_symbols entries *inside* \p h's buffer (the same space \c h.offset
+  /// lives in), which is what the estimator's per-symbol slices are.
+  ///
+  /// \p gather, when it names a plan, replaces the caller's staged y input for that symbol: the
+  /// kernel reads the received symbols off the grid instead. The caller must then still pass a valid
+  /// \p y buffer large enough for the dispatch (the gather writes it), which keeps one layout for
+  /// both routes.
   bool enqueue_burst_batch_at(const ch_est_binding& h,
                               ocudu::span<const unsigned> h_starts,
                               const void*           y,
@@ -185,7 +217,8 @@ public:
                               bool                  mmse,
                               float                 noise_var,
                               float                 tx_scaling,
-                              float                 h_scaling);
+                              float                 h_scaling,
+                              const gather_binding& gather = {});
 
   static bool burst_open();
 

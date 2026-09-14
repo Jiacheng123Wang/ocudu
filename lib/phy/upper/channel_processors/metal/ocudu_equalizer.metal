@@ -273,6 +273,66 @@ struct equalize_strides {
     uint nv_stride;  // float elements per symbol
 };
 
+/// \brief Where one OFDM symbol of the run starts in the gather plan.
+struct gather_tap {
+    uint symbol; // OFDM symbol index in the grid
+    uint offset; // first gather entry of the symbol, within the plan
+    uint nof_re; // gather entries of the symbol, i.e. its number of resource elements
+};
+
+/// \brief Gather plan of the received symbols: where the equalizer's y input comes from.
+///
+/// The host used to gather y itself, one memcpy per port per symbol, because the resource elements
+/// the equalizer consumes are not a contiguous run of the grid: the DM-RS comb and the per-PRB
+/// active pattern leave holes. The plan describes those elements in the grid's own coordinates, one
+/// entry per element (the subcarrier it comes from, the index it goes to), so the very same bytes
+/// are produced on the device - a pure transport, no conversion, hence bit-identical to the host
+/// gather.
+///
+/// One thread per (resource element, OFDM symbol of the run): the entries of a run are emitted
+/// symbol by symbol, so a thread reads its own entry and copies it for every port - the same
+/// element of every port, which is what the host's per-port memcpy did.
+struct gather_params {
+    ulong grid_base;        // byte offset of grid element 0 of port 0, symbol 0
+    uint  nof_symbols;      // OFDM symbols of the run
+    uint  nof_ports;        // receive ports to gather (the run is [port][re] per symbol)
+    uint  nof_dest;         // cbf16_t per port run (the dispatch's nof_re)
+    uint  grid_subc_stride; // elements between two consecutive subcarriers
+    uint  grid_symb_stride; // elements between two consecutive OFDM symbols
+    uint  grid_port_stride; // elements between two consecutive ports
+};
+
+/// One entry of a gather plan: the grid subcarrier of a resource element and where it goes.
+struct gather_entry {
+    uint subc; // grid subcarrier index, within the symbol's row of the grid
+    uint dest; // index within the symbol's output region
+};
+
+kernel void gather_ch_re(device const ushort2* grid [[buffer(0)]], // resource grid, element 0 of port 0, symbol 0
+                         device ushort2*       y [[buffer(1)]],    // [symbol][port][re] (cbf16)
+                         constant gather_params& p [[buffer(2)]],
+                         device const gather_entry* table [[buffer(3)]],
+                         constant gather_tap*  taps [[buffer(4)]],
+                         uint2 gid [[thread_position_in_grid]])
+{
+    const uint dest_idx = gid.x;
+    const uint sym      = gid.y;
+    if ((sym >= p.nof_symbols) || (dest_idx >= taps[sym].nof_re)) {
+        return;
+    }
+    const gather_entry e = table[taps[sym].offset + dest_idx];
+
+    // The element of the grid this entry names, then the same element of every port: y is the run's
+    // region, so its per-symbol stride is nof_ports * nof_dest elements.
+    device const ushort2* src =
+        (device const ushort2*)((device const char*)grid + p.grid_base) + taps[sym].symbol * p.grid_symb_stride +
+        p.grid_subc_stride * e.subc;
+    device ushort2* dst = y + (sym * p.nof_ports) * p.nof_dest + e.dest;
+    for (uint port = 0; port != p.nof_ports; ++port) {
+        dst[port * p.nof_dest] = src[port * p.grid_port_stride];
+    }
+}
+
 /// \brief Batched equalizer: the SAME arithmetic as equalize_mxn(), one thread per (resource
 /// element, OFDM symbol) instead of one dispatch per symbol.
 ///

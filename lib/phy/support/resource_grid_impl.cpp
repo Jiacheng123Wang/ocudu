@@ -21,8 +21,10 @@ resource_grid_impl::resource_grid_impl(unsigned nof_ports_, unsigned nof_symb_, 
   rg_buffer.reserve({nof_subc, nof_symb, nof_ports});
 
   // Publish the device view of the storage: it is page-aligned by construction, so the GPU stages of the uplink chain
-  // can fill the grid in place (see resource_grid_writer::get_device_view()).
+  // can fill the grid in place (see resource_grid_writer::get_device_view()) and read it back from the device instead
+  // of gathering it on the host (see resource_grid_reader::get_device_view()).
   writer.set_device_view(make_resource_grid_device_view(rg_buffer.get_data(), nof_subc, nof_symb, nof_ports));
+  reader.set_device_storage(rg_buffer.get_data());
 
   // Set all the resource elements to zero.
   ocuduvec::zero(rg_buffer.get_data());

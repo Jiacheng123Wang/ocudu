@@ -24,6 +24,8 @@
 
 namespace ocudu {
 
+class ch_gather_desc;
+
 /// PUSCH demodulator implementation.
 class pusch_demodulator_impl : public pusch_demodulator
 {
@@ -152,6 +154,15 @@ private:
   dynamic_re_buffer<cbf16_t> ch_re_copy;
   /// View buffer used to transfer channel modulation symbols from the resource grid to the equalizer.
   modular_re_buffer_reader<cbf16_t, MAX_PORTS> ch_re_view;
+  /// \brief Stand-in for the received symbols when the equalizer reads them off the device grid.
+  ///
+  /// A backend that accepts the device gather plan (see
+  /// channel_equalizer::consumes_gathered_symbols()) reads those symbols where the GPU wrote them, so
+  /// this pass neither gathers them nor owns the buffer: it hands over empty slices, which such a
+  /// backend never reads.
+  modular_re_buffer_reader<cbf16_t, MAX_PORTS> ch_re_device_stub = modular_re_buffer_reader<cbf16_t, MAX_PORTS>(
+      MAX_PORTS,
+      0);
   /// Buffer used to store channel modulation resource elements at the equalizer output: one
   /// page-aligned region per OFDM symbol of the deferred group, so a Metal equalizer can write all
   /// of them in place while the whole group is in flight.
@@ -172,6 +183,14 @@ private:
   view_ch_est_list device_ch_estimates;
   /// Buffer used to transfer noise variance estimates from the channel estimate to the equalizer.
   std::array<float, MAX_PORTS> noise_var_estimates;
+
+  /// \brief Device gather plan of the hop being demodulated (see channel_equalizer::set_device_grid()).
+  ///
+  /// Built once per demodulation, when the equalizer reads the received symbols off the device grid;
+  /// nullptr otherwise. It describes a whole allocation (tens of KB, see ch_gather_max_entries), so
+  /// it lives on the heap rather than in this object: the object is pooled and handed around by
+  /// value, and the plan is a per-hop scratch that no other state depends on.
+  std::unique_ptr<ch_gather_desc> device_gather_plan;
 
   /// Enables post equalization SINR calculation.
   bool compute_post_eq_sinr;

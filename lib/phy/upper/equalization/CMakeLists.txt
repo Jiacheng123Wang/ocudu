@@ -4,6 +4,7 @@
 
 
 set(SOURCES
+        channel_equalizer_device_grid.cpp
         channel_equalizer_generic_impl.cpp
         equalization_factories.cpp)
 

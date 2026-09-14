@@ -66,6 +66,37 @@ const bool ch_est_source_registered = []() {
 #endif
 ///@}
 
+/// \name Where the received symbols (the y input) of a deferred submit came from (diagnostics).
+///
+/// `device` counts the submits whose symbols the GPU gathers off the resource grid, `host` the ones
+/// that staged them with a memcpy per port. The two produce the same soft bits, so a silent fallback
+/// to the host path is otherwise unobservable - and the fallback is legitimate (a plan the backend
+/// cannot use, or the synchronous route).
+///@{
+struct ch_re_source_counters {
+  std::atomic<uint64_t> device{0};
+  std::atomic<uint64_t> host{0};
+};
+
+ch_re_source_counters& ch_re_source()
+{
+  static ch_re_source_counters c;
+  return c;
+}
+
+#if defined(OCUDU_METAL_STATS)
+const bool ch_re_source_registered = []() {
+  std::atexit([]() {
+    std::fprintf(stderr,
+                 "[metal_stats] equalizer ch_re device=%llu host=%llu\n",
+                 static_cast<unsigned long long>(ch_re_source().device.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(ch_re_source().host.load(std::memory_order_relaxed)));
+  });
+  return true;
+}();
+#endif
+///@}
+
 } // namespace
 
 void channel_equalizer_metal::staging::swap(staging& other) noexcept
@@ -110,6 +141,12 @@ struct channel_equalizer_metal::impl {
 
   // One-shot diagnostic: reports whether the caller's buffers allow the in-place path.
   bool path_logged = false;
+
+  /// Device gather plan of the symbol the next submit() covers, or nullptr when the received
+  /// symbols have to be staged on the host (see channel_equalizer::set_device_grid()). The plan
+  /// belongs to the caller and outlives the submit, so only the pointer and the symbol are kept.
+  const ch_gather_desc* device_grid        = nullptr;
+  unsigned              device_grid_symbol = 0;
 
   /// In-flight deferred submits, oldest first. All of them are committed to the shared back-end
   /// queue in order, so a single wait on the newest command buffer covers the whole FIFO.
@@ -323,6 +360,22 @@ void channel_equalizer_metal::submit_group(span<const group_symbol> group)
   }
 }
 
+bool channel_equalizer_metal::consumes_gathered_symbols(unsigned nof_ports, unsigned nof_layers) const
+{
+  // A single receive port (hence a single layer) is the shape one gather dispatch reads and one plan
+  // describes; the deferred route is the one that has a command buffer to share the gather with.
+  return (nof_ports == 1) && (nof_layers == 1) && impl_->engine_ok;
+}
+
+void channel_equalizer_metal::set_device_grid(const ch_gather_desc& grid, unsigned symbol)
+{
+  // The plan is used by the next submit() only, and only when it is a deferred one: the gather is a
+  // dispatch, so it needs the command buffer the burst opens. The synchronous path and the batched
+  // group path keep staging on the host.
+  impl_->device_grid        = grid.is_valid() ? &grid : nullptr;
+  impl_->device_grid_symbol = symbol;
+}
+
 void channel_equalizer_metal::wait()
 {
   // Close the shared burst opened by the submits of this group and wait for it. The demapping of
@@ -483,11 +536,31 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
   void*        eq_ptr    = eq_direct ? static_cast<void*>(eq_symbols.data()) : entry.eq_stage.ensure(eq_bytes);
   void*        nv_ptr    = nv_direct ? static_cast<void*>(eq_noise_vars.data()) : entry.nv_stage.ensure(nv_bytes);
 
+  // The received symbols: the deferred route reads them off the device grid when the caller
+  // announced a plan (see set_device_grid()), which is the whole point - the host no longer copies
+  // them, and the caller does not have to gather them either. The plan covers every receive port of
+  // the hop and the equalizer uses all of them (the kernel applies the port reduction), so the two
+  // agree on the port runs. Every other route stages them here as before.
+  const auto gather_plan = [&]() -> const ch_gather_desc* {
+    if (!defer || (impl_->device_grid == nullptr)) {
+      return nullptr;
+    }
+    if ((nof_used_ports != nof_rx_ports) || (impl_->device_grid->nof_ports != nof_rx_ports)) {
+      return nullptr;
+    }
+    return impl_->device_grid;
+  }();
+  if (gather_plan == nullptr) {
+    ch_re_source().host.fetch_add(1, std::memory_order_relaxed);
+  }
+
   for (unsigned i_used = 0; i_used != nof_used_ports; ++i_used) {
     const unsigned i_port = port_map[i_used];
-    std::memcpy(y_ptr + static_cast<size_t>(i_used) * nof_re,
-                ch_symbols.get_slice(i_port).data(),
-                static_cast<size_t>(nof_re) * sizeof(cbf16_t));
+    if (gather_plan == nullptr) {
+      std::memcpy(y_ptr + static_cast<size_t>(i_used) * nof_re,
+                  ch_symbols.get_slice(i_port).data(),
+                  static_cast<size_t>(nof_re) * sizeof(cbf16_t));
+    }
     if (!h_device) {
       for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
         std::memcpy(h_ptr + (static_cast<size_t>(i_used) * nof_layers + i_layer) * nof_re,
@@ -529,7 +602,12 @@ void channel_equalizer_metal::run_equalize(span<cf_t>                       eq_s
                                                 impl_->mmse,
                                                 noise_var,
                                                 tx_scaling,
-                                                single_layer ? 1.0F : tx_scaling);
+                                                single_layer ? 1.0F : tx_scaling,
+                                                metal::equalizer_metal_engine::gather_binding(
+                                                    gather_plan, impl_->device_grid_symbol));
+    if (ok && (gather_plan != nullptr)) {
+      ch_re_source().device.fetch_add(1, std::memory_order_relaxed);
+    }
     if (!ok) {
       // Engine failure: mirror the CPU invalid-input semantics instead of leaving stale data. The
       // outputs are written in place, so the entry must not copy staging data over them later.

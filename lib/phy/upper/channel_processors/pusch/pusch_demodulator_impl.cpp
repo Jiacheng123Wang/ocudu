@@ -13,6 +13,7 @@
 #include "ocudu/ocuduvec/simd.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_codeword_buffer.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_demodulator_notifier.h"
+#include "ocudu/phy/upper/equalization/channel_equalizer_device_grid.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -325,6 +326,14 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   }
   const bool use_device_noise_vars = estimates_read_in_place;
 
+  // Whether the received symbols of this hop reach the equalizer through a device gather instead of
+  // the host copy below. It needs the backend to accept the plan (see
+  // channel_equalizer::consumes_gathered_symbols()) and the grid storage to be device-addressable.
+  const resource_grid_device_view device_view   = grid.get_device_view();
+  const bool                      device_gather = equalizer->supports_deferred_chain() &&
+                             equalizer->consumes_gathered_symbols(nof_rx_ports, config.nof_tx_layers) &&
+                             device_view.is_valid();
+
   // Initialize scrambling sequence. When msgA is sent over PUSCH, an alternative scrambling sequence is used, as per
   // TS 38.211 Section 6.3.1.1 Release 16.
   unsigned c_init  = to_value(config.rnti) * pow2(15) + config.n_id;
@@ -342,6 +351,25 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   // Prepare RE mask.
   re_symbol_mask_type re_mask      = config.rb_mask.kronecker_product<NOF_SUBCARRIERS_PER_RB>(active_re_per_prb);
   re_symbol_mask_type re_mask_dmrs = config.rb_mask.kronecker_product<NOF_SUBCARRIERS_PER_RB>(active_re_per_prb_dmrs);
+
+  // Device gather plan of this hop: the received symbols (the equalizer's y input) are the one input
+  // of the demodulation that comes straight out of the resource grid, and a backend that accepts the
+  // plan reads them where the device wrote them instead of from the host copy get_ch_data_re() would
+  // make for it. The plan describes the very same resource elements re_mask selects - the active RE
+  // of a data PRB and of a DM-RS PRB - so the device gather produces the bytes the host gather would
+  // have produced. It is built only when it is going to be used: it describes an allocation, and
+  // building it costs a scan of that allocation.
+  static const ch_gather_desc no_gather_plan;
+  if (device_gather) {
+    device_gather_plan = std::make_unique<ch_gather_desc>(device_view,
+                        config.rb_mask,
+                        config.start_symbol_index,
+                        config.nof_symbols,
+                        nof_rx_ports,
+                        config.dmrs_symb_pos,
+                        active_re_per_prb.to_uint64(),
+                        active_re_per_prb_dmrs.to_uint64());
+  }
 
   // Calculate the number of bits per RE and port.
   unsigned nof_bits_per_re = config.nof_tx_layers * get_bits_per_symbol(config.modulation);
@@ -483,17 +511,28 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
       }
 
       // Extract the data symbols, equalize channels and, for each Tx layer, combine contribution from all Rx antenna
-      // ports.
-      const re_buffer_reader<cbf16_t>& ch_re = get_ch_data_re(grid, i_symbol, symbol_re_mask, config.rx_ports);
+      // ports. The extraction is skipped when the backend takes the received symbols off the device
+      // grid: the plan below describes the very same resource elements, so the copy would be written
+      // and then never read.
+      const re_buffer_reader<cbf16_t>* ch_re = &ch_re_device_stub;
+      if (!device_gather) {
+        ch_re = &get_ch_data_re(grid, i_symbol, symbol_re_mask, config.rx_ports);
+      }
       if (deferred_chain) {
+        // Offer the backend the grid itself for this symbol. An empty plan is announced when this
+        // symbol was gathered on the host, so a backend never keeps the plan of the previous one.
+        equalizer->set_device_grid(device_gather ? *device_gather_plan : no_gather_plan, i_symbol);
         // Fused path: submit the equalization without waiting. The demapper dispatches on the
         // same command queue, so waiting for its command buffer also guarantees this one
         // completed; the equalized symbols and noise variances are read only after that wait.
         equalizer->submit(
-            state.eq, state.nv, ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
+            state.eq, state.nv, *ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
       } else {
+        // The synchronous route stages the received symbols itself, so the backend must not keep a
+        // plan from an earlier symbol.
+        equalizer->set_device_grid(no_gather_plan, i_symbol);
         equalizer->equalize(
-            state.eq, state.nv, ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
+            state.eq, state.nv, *ch_re, ch_estimates, span<float>(noise_var_estimates).first(nof_rx_ports), 1.0F);
 
         // Revert transform precoding for the entire OFDM symbol.
         if (config.enable_transform_precoding) {

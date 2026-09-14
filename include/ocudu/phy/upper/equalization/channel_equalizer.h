@@ -10,6 +10,7 @@
 #include "ocudu/adt/complex.h"
 #include "ocudu/adt/span.h"
 #include "ocudu/phy/support/re_buffer.h"
+#include "ocudu/phy/upper/equalization/channel_equalizer_device_grid.h"
 
 #include <cstddef>
 #include <optional>
@@ -182,6 +183,44 @@ public:
 
   /// \brief Waits for the work submitted by submit().
   virtual void wait() {}
+
+  /// \brief Announces where the received symbols of the next submit() come from, when the resource
+  /// grid itself is readable by the backend.
+  ///
+  /// The received symbols (the \c ch_symbols argument of submit()) are the one input of the
+  /// equalization that comes straight out of the resource grid, and on the host they reach the
+  /// backend as a staging copy: one memcpy per receive port and OFDM symbol. A backend that can read
+  /// the grid on the device takes them from there instead, and this hook hands it the plan that
+  /// describes which resource elements of which symbol the caller is about to submit.
+  ///
+  /// Calling it is an offer, not a requirement: the default implementation does nothing, so every
+  /// existing backend keeps gathering on the host, and a backend that accepts one still falls back to
+  /// the staged \c ch_symbols when it cannot use the plan.
+  ///
+  /// \param[in] grid   Device plan of the hop the symbol belongs to. It must stay valid until wait()
+  ///                   returns - the lifetime the staged inputs of a deferred submit already have.
+  /// \param[in] symbol OFDM symbol the next submit() covers, in the grid's own coordinates.
+  /// \note A backend that uses the plan does not read the \c ch_symbols of that submit() on the host:
+  ///       the caller may hand over a reader whose slices are not backed by host memory.
+  virtual void set_device_grid(const ch_gather_desc& grid, unsigned symbol)
+  {
+    (void)grid;
+    (void)symbol;
+  }
+
+  /// \brief True when the backend takes the received symbols of every deferred submit from a device
+  /// gather plan, i.e. when it consumes what set_device_grid() announces.
+  ///
+  /// The caller uses it to decide whether it has to gather the received symbols on the host at all:
+  /// a backend that returns true is handed the plan for every symbol (see set_device_grid()) and
+  /// reads them off the grid, so the caller skips the copy it would otherwise make for the
+  /// \c ch_symbols argument. The default is false, which keeps the host gather - and therefore the
+  /// argument - authoritative for every existing backend.
+  ///
+  /// \note The predicate must be a property of the backend and of the shape, never of the values:
+  ///       when it returns true, the backend takes the plan it is offered. A plan the caller cannot
+  ///       offer (an unavailable device view of the grid) leaves the host gather in place.
+  virtual bool consumes_gathered_symbols(unsigned nof_ports, unsigned nof_layers) const { return false; }
 
   /// \brief Post-equalization SINR reduction of the symbol submitted by the last submit().
   ///

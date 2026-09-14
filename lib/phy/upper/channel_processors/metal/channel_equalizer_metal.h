@@ -62,6 +62,18 @@ public:
   void wait() override;
 
   // See interface for documentation.
+  /// The Metal backend accepts the plan: the deferred route reads the received symbols off the
+  /// device grid with a gather dispatch, and the synchronous route ignores the plan and uses the
+  /// staged input (it has no command buffer to share the gather with).
+  void set_device_grid(const ch_gather_desc& grid, unsigned symbol) override;
+
+  // See interface for documentation.
+  /// True for the same topology consumes_device_estimates() accepts: the gather reads the grid of
+  /// every receive port of the hop in one dispatch, which is the shape a single device plan can
+  /// describe.
+  bool consumes_gathered_symbols(unsigned nof_ports, unsigned nof_layers) const override;
+
+  // See interface for documentation.
   bool supports_deferred_chain() const override { return true; }
 
   /// GPU-side duration of the last call in microseconds (0 when unavailable / invalid).

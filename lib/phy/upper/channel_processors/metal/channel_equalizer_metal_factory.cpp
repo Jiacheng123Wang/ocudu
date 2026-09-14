@@ -3,6 +3,7 @@
 
 #include "channel_equalizer_metal_factory.h"
 #include "channel_equalizer_metal.h"
+#include <cstdlib>
 #include <memory>
 
 using namespace ocudu;
@@ -74,6 +75,27 @@ public:
       backend.submit_group(group.subspan(i, n_run));
       i += n_run;
     }
+  }
+
+  bool consumes_gathered_symbols(unsigned nof_ports, unsigned nof_layers) const override
+  {
+    // Same rule as consumes_device_estimates(): only the topologies this composite routes to Metal
+    // read the received symbols off the device grid, and the routing is a property of the shape.
+    // Escape hatch: OCUDU_EQ_GATHER=0 restores the host gather, which is what tells the two routes
+    // apart in one build - they must produce the very same soft bits (see the A/B in the plan).
+    static const bool gather_enabled = []() {
+      const char* env = std::getenv("OCUDU_EQ_GATHER");
+      return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+    }();
+    return gather_enabled && metal_->is_supported(nof_ports, nof_layers) &&
+           metal_->consumes_gathered_symbols(nof_ports, nof_layers);
+  }
+
+  void set_device_grid(const ch_gather_desc& grid, unsigned symbol) override
+  {
+    // The plan belongs to the next submit(), which select() routes to Metal for every topology that
+    // consumes_gathered_symbols() accepts; the CPU backend never reads it.
+    metal_->set_device_grid(grid, symbol);
   }
 
   void wait() override

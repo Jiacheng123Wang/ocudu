@@ -8,6 +8,7 @@
 #include "ocudu/adt/complex.h"
 #include "ocudu/adt/span.h"
 #include "ocudu/phy/support/resource_grid_base.h"
+#include "ocudu/phy/support/resource_grid_device_view.h"
 #include "ocudu/ran/resource_allocation/rb_interval.h"
 #include "ocudu/ran/resource_block.h"
 
@@ -117,6 +118,19 @@ public:
   /// \param[in]  port    Port index.
   /// \param[in]  l       OFDM symbol index.
   virtual span<const cbf16_t> get_view(unsigned port, unsigned l) const = 0;
+
+  /// \brief Device view of the grid storage, for a reader that runs on an accelerator.
+  ///
+  /// The counterpart of resource_grid_writer::get_device_view(): it describes the very same buffer this reader reads,
+  /// so a GPU stage of the receive chain can consume the grid where the GPU writer (the OFDM demodulation's grid
+  /// write) produced it, without gathering the resource elements into a staging buffer on the host first. The layout
+  /// is the one get_view() exposes: subcarriers contiguous within an OFDM symbol, symbols within a port.
+  ///
+  /// The default implementation reports an invalid view: a grid whose storage is neither page-aligned nor shared with
+  /// the device cannot be read from the device (those readers keep gathering on the host, as they always were).
+  ///
+  /// \return The device view, invalid (see resource_grid_device_view::is_valid()) when unavailable.
+  virtual resource_grid_device_view get_device_view() const { return {}; }
 };
 
 } // namespace ocudu

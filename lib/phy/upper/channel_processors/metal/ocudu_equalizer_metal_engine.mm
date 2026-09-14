@@ -132,6 +132,8 @@ struct eq_resources_t {
   id<MTLCommandQueue>         queue          = nil;
   id<MTLComputePipelineState> pipeline       = nil;
   id<MTLComputePipelineState> pipeline_batch = nil;
+  /// Reads the equalizer's received symbols off the device resource grid (see gather_binding).
+  id<MTLComputePipelineState> pipeline_gather = nil;
 };
 
 /// Per-symbol element strides handed to equalize_mxn_batch(); must match struct equalize_strides in
@@ -201,6 +203,14 @@ static size_t ch_est_binding_bytes(const equalizer_metal_engine::ch_est_binding&
   return (static_cast<size_t>(h.offset) + static_cast<size_t>(nof_ports) * nof_layers * stride) * sizeof(cbf16_t);
 }
 
+/// Bytes a gather dispatch may read from the device grid: the whole storage of the view, since the
+/// entries it names are spread over every port, symbol and subcarrier of the allocation.
+static size_t grid_view_bytes(const resource_grid_device_view& grid)
+{
+  const size_t elements = static_cast<size_t>(grid.port_stride) * grid.nof_ports;
+  return elements * sizeof(cbf16_t);
+}
+
 /// Kernel parameters of one dispatch: the binding carries its own layout (see ch_est_binding_bytes).
 static equalize_params_t make_params(const equalizer_metal_engine::ch_est_binding& h,
                                      unsigned                                      nof_re,
@@ -221,6 +231,36 @@ static equalize_params_t make_params(const equalizer_metal_engine::ch_est_bindin
                            h.offset,
                            (h.layer_stride != 0) ? h.layer_stride : nof_re};
 }
+
+// Must match gather_params / gather_tap / gather_entry in ocudu_equalizer.metal.
+struct gather_params_t {
+  uint64_t grid_base;        // byte offset of grid element 0 of port 0, symbol 0
+  uint32_t nof_symbols;      // OFDM symbols of the run
+  uint32_t nof_ports;        // receive ports to gather
+  uint32_t nof_dest;         // cbf16_t per port run (the dispatch's nof_re)
+  uint32_t grid_subc_stride; // elements between two consecutive subcarriers
+  uint32_t grid_symb_stride; // elements between two consecutive OFDM symbols
+  uint32_t grid_port_stride; // elements between two consecutive ports
+};
+
+struct gather_tap_t {
+  uint32_t symbol;
+  uint32_t offset;
+  uint32_t nof_re;
+};
+
+struct gather_entry_t {
+  uint32_t subc;
+  uint32_t dest;
+};
+
+/// \brief The plan tables of one gather dispatch, in one allocation.
+///
+/// The two tables a gather dispatch reads are built from the caller's plan at encode time: one tap
+/// per OFDM symbol of the run (its grid symbol, where its entries start, how many there are) and the
+/// entries themselves, copied out of the plan. The blob is handed to the flush state, which keeps it
+/// alive until the command buffer that reads it completed - the same rule the staged inputs follow.
+using gather_tables_t = std::vector<uint8_t>;
 
 struct eq_engine_impl {
   double last_gpu_us = 0.0;
@@ -372,6 +412,14 @@ bool equalizer_metal_engine::init()
       return false;
     }
     res.pipeline_batch = [res.device newComputePipelineStateWithFunction:fn_batch error:&error];
+    // Reads the received symbols off the device resource grid, so the equalizer's y input never
+    // crosses the host (see gather_binding).
+    id<MTLFunction> fn_gather = [library newFunctionWithName:@"gather_ch_re"];
+    if (fn_gather == nil) {
+      ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: kernel 'gather_ch_re' not found");
+      return false;
+    }
+    res.pipeline_gather = [res.device newComputePipelineStateWithFunction:fn_gather error:&error];
     if (res.pipeline == nil) {
       ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: pipeline creation failed: {}",
                                                 error != nil ? error.localizedDescription.UTF8String : "nil error");
@@ -466,6 +514,9 @@ struct eq_pending_t {
   /// never read on the host by the batched encoding: the dispatch reads it, exactly like the
   /// per-symbol path does (see eq_flush_hook).
   bool        h_on_device = false;
+  /// Where the received symbols of this symbol come from. Valid means the resource grid holds them
+  /// and the gather reads them there, so the caller did NOT stage them (see gather_binding).
+  equalizer_metal_engine::gather_binding gather;
   const void* y         = nullptr;
   const void* sigma2    = nullptr;
   void*       eq        = nullptr;
@@ -498,6 +549,9 @@ struct eq_flush_state_t {
   /// Group staging handed over to a committed command buffer, recycled by the next flush (the
   /// kernels read it until that command buffer completes).
   std::vector<void*> inflight;
+  /// Gather plan tables handed to a committed command buffer, kept alive the same way. They are
+  /// Metal buffers, so they are owned (released) rather than freed.
+  std::vector<id<MTLBuffer>> gather_tables;
 };
 static eq_flush_state_t& eq_flush_state()
 {
@@ -532,6 +586,7 @@ static void eq_flush_recycle()
     compat::aligned_free(p);
   }
   st.inflight.clear();
+  st.gather_tables.clear();
 }
 
 /// Encodes every accumulated symbol into the open burst: one batched dispatch per run of symbols
@@ -578,6 +633,94 @@ static id<MTLComputePipelineState> eq_encode_batch_dispatch(id<MTLComputeCommand
   [enc dispatchThreads:MTLSizeMake(nof_re, n_run, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
   return pipeline;
+}
+
+/// \brief Builds the tap and entry tables of one gather dispatch.
+///
+/// \param[in] plan   The hop's plan, owned by the caller.
+/// \param[in] symbol The dispatch's first OFDM symbol, in the grid's coordinates.
+/// \param[in] n_sym  Number of OFDM symbols of the dispatch.
+/// \return The tables, or an empty blob when the plan does not describe the dispatch.
+static gather_tables_t eq_build_gather_tables(const ch_gather_desc& plan, unsigned symbol, unsigned n_sym)
+{
+  gather_tables_t blob;
+  const unsigned  i_hop = symbol - plan.symbols[0].symbol;
+  if (!plan.is_valid() || (i_hop + n_sym > plan.nof_symbols)) {
+    return blob;
+  }
+  const size_t taps_bytes    = static_cast<size_t>(n_sym) * sizeof(gather_tap_t);
+  const size_t entries_bytes = plan.size() * sizeof(gather_entry_t);
+  blob.resize(taps_bytes + entries_bytes);
+  auto* taps    = reinterpret_cast<gather_tap_t*>(blob.data());
+  auto* entries = reinterpret_cast<gather_entry_t*>(blob.data() + taps_bytes);
+
+  // The plan groups its entries by symbol in hop order, and every symbol of the hop carries its own
+  // slice, so the taps are a copy of that grouping (the kernel indexes the entry table through it).
+  for (unsigned k = 0; k != n_sym; ++k) {
+    const ch_gather_symbol& run = plan.symbols[i_hop + k];
+    taps[k] = gather_tap_t{run.symbol, run.entry_base, run.nof_entries};
+  }
+  for (unsigned k = 0; k != plan.size(); ++k) {
+    entries[k] = gather_entry_t{plan.entries[k].subc, plan.entries[k].dest};
+  }
+  return blob;
+}
+
+/// \brief One gather table as its own Metal buffer.
+///
+/// The taps and the entries live in one host allocation, but each is bound to its own MTLBuffer:
+/// slicing a shared buffer with setBuffer:offset: is what a dispatch read its neighbour's slice
+/// through once already (see eq_make_h_starts), and a mis-resolved offset here makes the kernel
+/// read a plan that is not the one it was handed.
+static id<MTLBuffer> eq_make_gather_table(const void* data, size_t bytes)
+{
+  if ((data == nullptr) || (bytes == 0)) {
+    return nil;
+  }
+  return [metal::shared_queue::device() newBufferWithBytes:data
+                                                   length:static_cast<NSUInteger>(bytes)
+                                                  options:MTLResourceStorageModeShared];
+}
+
+/// \brief Dispatches the gather of the run's received symbols off the device grid.
+///
+/// One thread per (resource element, OFDM symbol of the run). The device work is a plain copy, and
+/// it is encoded in the same command buffer right before the equalization that consumes it: the
+/// equalization reads y afterwards, so the barrier the burst inserts between pipelines orders the
+/// two (the gather is its own pipeline, so the change is one).
+/// \return False when the dispatch could not be encoded; the caller then keeps the host-gathered y.
+static bool eq_encode_gather_dispatch(id<MTLComputeCommandEncoder> enc,
+                                      const wrapped_buffer&          b_grid,
+                                      const wrapped_buffer&          b_y,
+                                      const ch_gather_desc&          plan,
+                                      unsigned                       symbol,
+                                      unsigned                       n_sym,
+                                      unsigned                       nof_ports,
+                                      unsigned                       nof_re,
+                                      const gather_tables_t&         tables,
+                                      id<MTLBuffer>                  b_taps,
+                                      id<MTLBuffer>                  b_entries)
+{
+  if ((enc == nil) || (b_grid.buffer == nil) || (b_y.buffer == nil) || (b_taps == nil) ||
+      (b_entries == nil) || (tables.empty()) || (n_sym == 0)) {
+    return false;
+  }
+  const gather_params_t p{b_grid.offset,
+                          n_sym,
+                          nof_ports,
+                          nof_re,
+                          plan.grid.subc_stride,
+                          plan.grid.symb_stride,
+                          plan.grid.port_stride};
+  [enc setComputePipelineState:eq_resources().pipeline_gather];
+  [enc setBuffer:b_grid.buffer offset:0 atIndex:0];
+  [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
+  [enc setBytes:&p length:sizeof(p) atIndex:2];
+  [enc setBuffer:b_entries offset:0 atIndex:3];
+  [enc setBuffer:b_taps offset:0 atIndex:4];
+  [enc dispatchThreads:MTLSizeMake(nof_re, n_sym, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
+  return true;
 }
 
 static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCommandEncoder> enc)
@@ -632,11 +775,20 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
               (static_cast<const char*>(pending[first + 1].nv) - static_cast<const char*>(head.nv)) &&
           (next.eq != nullptr) && (next.nv != nullptr);
       const bool same_sigma = (std::memcmp(next.sigma2, head.sigma2, head.nof_ports * sizeof(float)) == 0);
-      if (!same_geom || !same_h || !same_strides || !same_sigma) {
+      // The received symbols of the run must come from the same place: either every symbol was
+      // staged by the caller, or every one of them is read off the device grid through the same
+      // plan, at the symbol the run's own symbol table describes (the tables are built for
+      // head.gather.symbol + k, so the symbols have to be consecutive in the grid).
+      const bool same_gather = next.gather.is_valid() == head.gather.is_valid() &&
+                               (!head.gather.is_valid() ||
+                                ((next.gather.desc == head.gather.desc) &&
+                                 (next.gather.symbol == head.gather.symbol + n_run)));
+      if (!same_geom || !same_h || !same_strides || !same_sigma || !same_gather) {
         eq_batch_note_break(!same_geom  ? "geometry"
                             : !same_h   ? "estimates"
                             : !same_strides ? "strides"
-                                            : "sigma2");
+                            : !same_sigma   ? "sigma2"
+                                            : "gather");
         break;
       }
       ++n_run;
@@ -674,13 +826,42 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     // would read a buffer whose producing dispatch may not have completed - the host has no wait
     // that covers it - and the equalization would run on whatever was there.
     const bool h_device_run = pending[first].h_on_device;
+    // A run whose received symbols are read off the device grid is gathered THERE too: the caller
+    // planned the hop (ch_gather_desc), so the elements are copied out of the grid by a dispatch of
+    // this same command buffer instead of by one memcpy per port per symbol here. The run predicate
+    // made sure every symbol of the run shares the plan.
+    const bool        gather_run = pending[first].gather.is_valid();
+    const ch_gather_desc* gather_plan = gather_run ? pending[first].gather.desc : nullptr;
+    gather_tables_t gather_tables;
+    id<MTLBuffer>   b_gather_taps    = nil;
+    id<MTLBuffer>   b_gather_entries = nil;
+    if (gather_run) {
+      gather_tables = eq_build_gather_tables(*gather_plan, pending[first].gather.symbol, n_run);
+      const size_t taps_bytes = static_cast<size_t>(n_run) * sizeof(gather_tap_t);
+      if ((gather_tables.size() <= taps_bytes) || (gather_tables.size() < sizeof(gather_tap_t))) {
+        compat::aligned_free(h_alloc);
+        compat::aligned_free(y_alloc);
+        compat::aligned_free(s_alloc);
+        return nil;
+      }
+      b_gather_taps    = eq_make_gather_table(gather_tables.data(), taps_bytes);
+      b_gather_entries = eq_make_gather_table(gather_tables.data() + taps_bytes, gather_tables.size() - taps_bytes);
+      if ((b_gather_taps == nil) || (b_gather_entries == nil)) {
+        compat::aligned_free(h_alloc);
+        compat::aligned_free(y_alloc);
+        compat::aligned_free(s_alloc);
+        return nil;
+      }
+    }
     for (unsigned k = 0; k != n_run; ++k) {
       if (!h_device_run) {
         std::memcpy(h_alloc + k * h_stride,
                     static_cast<const cbf16_t*>(pending[first + k].h.buffer) + pending[first + k].h.offset,
                     h_stride * sizeof(cbf16_t));
       }
-      std::memcpy(y_alloc + k * y_stride, pending[first + k].y, y_stride * sizeof(cbf16_t));
+      if (!gather_run) {
+        std::memcpy(y_alloc + k * y_stride, pending[first + k].y, y_stride * sizeof(cbf16_t));
+      }
     }
     equalizer_metal_engine::ch_est_binding h_run_binding =
         h_device_run ? pending[first].h : equalizer_metal_engine::ch_est_binding(h_alloc);
@@ -709,7 +890,15 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     const unsigned h_last  = (n_run > 1) ? pending[first + n_run - 1].h.offset : h_run_binding.offset;
     const size_t   h_bytes = ch_est_binding_bytes(h_run_binding, head.nof_ports, head.nof_layers, head.nof_re) +
                            static_cast<size_t>(h_last - h_run_binding.offset) * sizeof(cbf16_t);
-    const size_t y_bytes  = y_stride * n_run * sizeof(cbf16_t);
+    // A gather dispatch fills the run's y region, so the binding must reach the end of its last
+    // symbol - whose length is its own nof_re, not the run stride (a symbol is padded to the
+    // dispatch's geometry, and the gather skips the tail).
+    const size_t y_bytes = (gather_run && (n_run > 1))
+                               ? ((static_cast<size_t>(n_run) - 1) * y_stride +
+                                  static_cast<size_t>(pending[first + n_run - 1].nof_re) * head.nof_ports) *
+                                     sizeof(cbf16_t)
+                               : y_stride * n_run * sizeof(cbf16_t);
+
     const size_t s_bytes  = static_cast<size_t>(head.nof_ports) * sizeof(float);
     const size_t eq_bytes = ((static_cast<size_t>(n_run) - 1) * eq_stride_elems + static_cast<size_t>(head.nof_re) * head.nof_layers) * 2 * sizeof(float);
     const size_t nv_bytes = ((static_cast<size_t>(n_run) - 1) * nv_stride_elems + static_cast<size_t>(head.nof_re) * head.nof_layers) * sizeof(float);
@@ -736,6 +925,36 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
       return nil;
     }
     engine->last_call_no_copy = true;
+
+    // The received symbols: the gather dispatch reads them off the grid into the run's y region,
+    // right before the equalization that consumes them. Both are dispatches of this same command
+    // buffer and the gather has a pipeline of its own, so the burst's barrier between pipelines
+    // orders the two - and the grid's producing FFT is ordered by the queue, since the demodulator
+    // has already waited for every symbol of the slot before it reads the grid on the host for the
+    // channel estimates.
+    if (gather_run) {
+      wrapped_buffer b_grid = wrap_buffer(engine, gather_plan->grid.base, grid_view_bytes(gather_plan->grid));
+      if (b_grid.buffer == nil ||
+          !eq_encode_gather_dispatch(enc,
+                                     b_grid,
+                                     b_y,
+                                     *gather_plan,
+                                     pending[first].gather.symbol,
+                                     n_run,
+                                     head.nof_ports,
+                                     head.nof_re,
+                                     gather_tables,
+                                     b_gather_taps,
+                                     b_gather_entries)) {
+        engine->last_call_no_copy = false;
+        compat::aligned_free(h_alloc);
+        compat::aligned_free(y_alloc);
+        compat::aligned_free(s_alloc);
+        return nil;
+      }
+      eq_flush_state().gather_tables.push_back(b_gather_taps);
+      eq_flush_state().gather_tables.push_back(b_gather_entries);
+    }
 
     // A single-symbol run keeps the per-symbol kernel: it is the path every caller already
     // validates, while the batched kernel is the one that has to prove itself with a group.
@@ -784,18 +1003,19 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
 } // namespace
 
 bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
-                                          bool        h_on_device,
-                                          const void* y,
-                                          const void* sigma2,
-                                          void*       eq,
-                                          void*       nv,
-                                          unsigned    nof_re,
-                                          unsigned    nof_ports,
-                                          unsigned    nof_layers,
-                                          bool        mmse,
-                                          float       noise_var,
-                                          float       tx_scaling,
-                                          float       h_scaling)
+                                          bool                  h_on_device,
+                                          const void*           y,
+                                          const void*           sigma2,
+                                          void*                 eq,
+                                          void*                 nv,
+                                          unsigned              nof_re,
+                                          unsigned              nof_ports,
+                                          unsigned              nof_layers,
+                                          bool                  mmse,
+                                          float                 noise_var,
+                                          float                 tx_scaling,
+                                          float                 h_scaling,
+                                          const gather_binding& gather)
 {
   eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
   if (engine == nullptr) {
@@ -833,8 +1053,20 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
         (metal::shared_burst::flush_hook_context() != engine)) {
       (void)metal::shared_burst::flush_pending();
     }
-    eq_pending(engine).push_back(
-        {h, h_on_device, y, sigma2, eq, nv, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling});
+    eq_pending(engine).push_back({h,
+                                  h_on_device,
+                                  gather,
+                                  y,
+                                  sigma2,
+                                  eq,
+                                  nv,
+                                  nof_re,
+                                  nof_ports,
+                                  nof_layers,
+                                  mmse,
+                                  noise_var,
+                                  tx_scaling,
+                                  h_scaling});
     metal::shared_burst::set_flush_hook(engine, &eq_flush_hook);
     return true;
   }
@@ -935,7 +1167,8 @@ bool equalizer_metal_engine::enqueue_burst_batch_at(const ch_est_binding& h,
                                                     bool                  mmse,
                                                     float                 noise_var,
                                                     float                 tx_scaling,
-                                                    float                 h_scaling)
+                                                    float                 h_scaling,
+                                                    const gather_binding& gather)
 {
   const unsigned nof_symbols = static_cast<unsigned>(h_starts.size());
   if (nof_symbols == 0) {

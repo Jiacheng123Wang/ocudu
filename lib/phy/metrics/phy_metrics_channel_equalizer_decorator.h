@@ -100,6 +100,21 @@ public:
     return base_equalizer->consumes_device_estimates(nof_ports, nof_layers);
   }
 
+  // See interface for documentation.
+  void set_device_grid(const ch_gather_desc& grid, unsigned symbol) override
+  {
+    // Forwarded for the same reason as consumes_device_estimates(): the plan is what the caller
+    // offers in place of the staged received symbols, and a decorator that swallowed it would leave
+    // the backend gathering on the host with nothing to gather.
+    base_equalizer->set_device_grid(grid, symbol);
+  }
+
+  // See interface for documentation.
+  bool consumes_gathered_symbols(unsigned nof_ports, unsigned nof_layers) const override
+  {
+    return base_equalizer->consumes_gathered_symbols(nof_ports, nof_layers);
+  }
+
 private:
   /// Completes and reports the metric of one equalization.
   void collect_metrics(channel_equalizer_metrics& metrics, const ch_est_list& ch_estimates)

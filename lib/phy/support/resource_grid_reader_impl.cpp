@@ -222,3 +222,10 @@ span<const cbf16_t> resource_grid_reader_impl::get_view(unsigned port, unsigned 
   // Access the OFDM symbol from the resource grid.
   return data.get_view({l, port});
 }
+
+resource_grid_device_view resource_grid_reader_impl::get_device_view() const
+{
+  // The view describes the whole storage, so it does not depend on the port or the symbol of a call: it is the very
+  // buffer the host reads through get_view(), described in the coordinates a device kernel indexes it with.
+  return make_resource_grid_device_view(storage, get_nof_subc(), get_nof_symbols(), get_nof_ports());
+}
