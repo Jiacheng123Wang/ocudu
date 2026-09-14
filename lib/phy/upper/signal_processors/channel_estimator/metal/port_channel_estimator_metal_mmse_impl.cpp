@@ -846,6 +846,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 #if defined(OCUDU_CE_TIME)
       const auto t_submit_begin = steady_clock::now();
 #endif
+      merge_geom.n_blk     = n_std_blocks;
+      merge_geom.nf_std    = block_prb * NOF_SUBCARRIERS_PER_RB;
+      merge_geom.nf_tail   = rem_prb * NOF_SUBCARRIERS_PER_RB;
+      merge_geom.sys_tail  = nof_layers;
+      merge_geom.nout_slot = nout_std;
+      merge_geom.h         = gpu_h;
+      merge_geom.valid     = true;
       const bool merged_ok = engine_run(nout_std,
                                         L_std,
                                         2 * nof_layers,
@@ -1201,7 +1208,15 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
                                                                 bool                               gpu_invert)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
-  const unsigned npf        = b_prb * args.dmrs_patterns.front().re_pattern.count();
+  // Pilots of one PRB, and the pilots this group carries per DM-RS symbol. The pilot view of a
+  // (symbol, layer) is [prb][comb], one PRB after another, so the slice of block b starts at
+  // (gb_start + b * b_prb) * comb: gb_start counts PRBs while b counts blocks of b_prb PRBs. Using
+  // gb_start * npf instead (npf being the block's pilot count) reads the wrong pilots whenever the
+  // group starts past PRB 0 AND carries more than one PRB - the edge block of a hop whose
+  // allocation is not a multiple of the block size, which is where the air interface spent most of
+  // its failed grants.
+  const unsigned comb       = args.dmrs_patterns.front().re_pattern.count();
+  const unsigned npf        = b_prb * comb;
   const unsigned Ls         = st.L;
   const unsigned Ns         = st.nout;
   ocudu_assert((L <= Ls) && (nout <= Ns), "Engine slot strides must cover the block geometry.");
@@ -1290,7 +1305,7 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
         float* qp = gpu_qy + ((static_cast<std::size_t>(sys_offset + i_layer) * nquads + quad) * Ls) * 8 + 2 * bl;
         for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
           span<const cf_t> src =
-              args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan((gb_start + b) * npf, npf);
+              args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan((gb_start + b * b_prb) * comb, npf);
           for (unsigned j = 0; j != npf; ++j) {
             qp[(i_symbol * npf + j) * 8]     = src[j].real();
             qp[(i_symbol * npf + j) * 8 + 1] = src[j].imag();
@@ -1309,7 +1324,7 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
         }
         for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
           span<const cf_t> src =
-              args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan((gb_start + b) * npf, npf);
+              args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan((gb_start + b * b_prb) * comb, npf);
           for (unsigned j = 0; j != npf; ++j) {
             yp[2 * (i_symbol * npf + j)]     = src[j].real();
             yp[2 * (i_symbol * npf + j) + 1] = src[j].imag();
@@ -1544,6 +1559,28 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
   const auto t_wait_begin = std::chrono::steady_clock::now();
 #endif
   const bool ok = (engine == nullptr) || engine->wait_pending();
+  if (merge_geom.valid && (merge_geom.h != nullptr)) {
+    merge_geom.valid      = false;
+    const float* h        = merge_geom.h;
+    const size_t base     = static_cast<size_t>(merge_geom.sys_tail * merge_geom.n_blk) * 2 * merge_geom.nout_slot;
+    const unsigned sym    = 5;
+    auto           mag    = [&](size_t off) { return std::sqrt(h[off] * h[off] + h[off + 1] * h[off + 1]); };
+    std::fprintf(stderr, "[ce_edge] n_blk=%u nf_std=%u nf_tail=%u nout_slot=%u base=%zu\n",
+                 merge_geom.n_blk, merge_geom.nf_std, merge_geom.nf_tail, merge_geom.nout_slot, base);
+    std::fprintf(stderr, "[ce_edge] nf_tail:");
+    for (unsigned c = 0; c != 8; ++c) std::fprintf(stderr, " %.4f", mag(base + 2 * (sym * merge_geom.nf_tail + c)));
+    std::fprintf(stderr, "\n[ce_edge] nf_std :");
+    for (unsigned c = 0; c != 8; ++c) std::fprintf(stderr, " %.4f", mag(base + 2 * (sym * merge_geom.nf_std + c)));
+    std::fprintf(stderr, "\n[ce_edge] c*14+s :");
+    for (unsigned c = 0; c != 8; ++c) std::fprintf(stderr, " %.4f", mag(base + 2 * (c * 14 + sym)));
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+  }
+  // Temporary experiment (OCUDU_CE_NV_OVERRIDE): replace the device noise variance with a known
+  // value, to tell "the estimates are wrong" apart from "only the noise scale is wrong".
+  if (const char* nv_env = std::getenv("OCUDU_CE_NV_OVERRIDE"); (nv_env != nullptr) && (gpu_nv != nullptr)) {
+    gpu_nv[0] = std::strtof(nv_env, nullptr);
+  }
 #if defined(OCUDU_CE_TIME)
   mmse_stats().completion_wait_ns.fetch_add(
       static_cast<uint64_t>(
