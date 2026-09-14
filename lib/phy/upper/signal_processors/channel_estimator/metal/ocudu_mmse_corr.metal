@@ -33,6 +33,13 @@ struct mmse_corr_params {
     uint  L;        // matrix order: npt * npf
     uint  Ls;       // row stride of the destination slots (>= L; the pad is left untouched)
     uint  Ns;       // row stride of the R_hp slot (>= nout; the pad is left untouched)
+    // Distance between two systems of the batch. The engine call that consumes these slots uses the
+    // PACKED order the weights kernel expects ([sys][L][L] and [sys][nout][L]), while the slot's own
+    // row stride may belong to a different geometry (a merged batch puts a narrower edge block into
+    // the standard slot: Ls = L_std but the block order is L_e). Stepping the systems by L*L there
+    // would walk into the middle of the standard group.
+    uint  a_sys;    // spacing between A systems    (>= Ls * Ls)
+    uint  r_sys;    // spacing between R_hp systems (>= Ns * nout)
     float ts;       // slot symbol period in seconds, 1 / (scs_hz * 14)
     float scs_hz;   // subcarrier spacing in hertz
     float fd_hz;    // maximum Doppler shift (time correlation)
@@ -88,7 +95,7 @@ kernel void mmse_corr_a(device float* a [[buffer(0)]],
     if ((gid.x >= p.L * p.L) || (gid.y >= p.nof_systems)) {
         return;
     }
-    device float* a_sys = a + (ulong)gid.y * p.L * p.L;
+    device float* a_sys = a + (ulong)gid.y * p.a_sys;
     const uint    i     = gid.x;
     const uint    row   = i / p.L;
     const uint    col   = i % p.L;
@@ -124,7 +131,7 @@ kernel void mmse_corr_r_hp(device float* r_hp [[buffer(0)]],
     if ((gid.x >= nout * p.L) || (gid.y >= p.nof_systems)) {
         return;
     }
-    device float* r_sys = r_hp + (ulong)gid.y * p.Ns * p.L;
+    device float* r_sys = r_hp + (ulong)gid.y * p.r_sys;
     const uint    i     = gid.x;
     const uint    o     = i / p.L;
     const uint    col   = i % p.L;

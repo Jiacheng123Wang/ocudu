@@ -187,6 +187,11 @@ private:
   ///         case the caller falls back to build_correlation_matrices().
   /// \brief The K0-d descriptor of one block geometry: what the engine call needs to build A and
   /// R_hp into the slots itself (no dispatch of its own - see run_weights_only()'s corr stage).
+  /// \param[in] a_stride Slot row stride of A (>= L) and, together with \p r_stride, the spacing
+  ///                     between the systems of the batch. They are equal to L / nout when the batch
+  ///                     owns slots sized for its own geometry; a batch tucked into another
+  ///                     geometry's slots (the merged edge block) passes the SLOT's strides while
+  ///                     \p L and \p nout describe its own block.
   metal::mmse_engine::corr_stage correlation_stage(const channel_statistics&                     stats,
                                                    const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
                                                    unsigned                                       b_prb,
@@ -194,7 +199,9 @@ private:
                                                    unsigned                                       scs_khz,
                                                    unsigned                                       sys_offset,
                                                    unsigned&                                      nout,
-                                                   unsigned&                                      L);
+                                                   unsigned&                                      L,
+                                                   unsigned                                       a_stride,
+                                                   unsigned                                       r_stride);
 
   bool build_correlation_matrices_device(const channel_statistics&                     stats,
                                          const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
@@ -311,6 +318,7 @@ private:
                              unsigned                                       sys_offset,
                              unsigned                                       nof_systems,
                              unsigned                                       a_stride,
+                             unsigned                                       r_stride,
                              unsigned                                       L);
 
   /// \param[in] sys_offset  First engine slot of this batch. The standard blocks start at 0; the

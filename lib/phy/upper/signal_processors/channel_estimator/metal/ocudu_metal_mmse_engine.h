@@ -135,6 +135,14 @@ public:
     unsigned a_l_stride = 0;
     /// Row stride of the R_hp slots (>= nout).
     unsigned r_stride = 0;
+    /// Distance between two systems of the batch, in the A slots and in the R_hp slots. The engine
+    /// consumes them in the PACKED order ([sys][L][L], [sys][nout][L]) while the slot's row stride
+    /// can belong to another geometry: a merged batch puts a narrower edge block into the standard
+    /// slots (a_l_stride = L_std, block order L_e), and stepping by L_e * L_e there would walk into
+    /// the standard group. Callers that build one geometry into its own slots leave these at 0 and
+    /// the engine uses the packed spacing.
+    unsigned a_sys_stride = 0;
+    unsigned r_sys_stride = 0;
     /// Matrix order of one system: npt * npf.
     unsigned l = 0;
     /// Subcarriers of the block (nout = nf * 14).

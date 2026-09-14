@@ -395,7 +395,9 @@ metal::mmse_engine::corr_stage port_channel_estimator_metal_mmse_impl::correlati
     unsigned                                       scs_khz,
     unsigned                                       sys_offset,
     unsigned&                                      nout,
-    unsigned&                                      L)
+    unsigned&                                      L,
+    unsigned                                       a_stride,
+    unsigned                                       r_stride)
 {
   const unsigned nf  = b_prb * NOF_SUBCARRIERS_PER_RB;
   const unsigned npt = dmrs_slot_symbols.size();
@@ -403,12 +405,20 @@ metal::mmse_engine::corr_stage port_channel_estimator_metal_mmse_impl::correlati
   L                  = npt * npf;
   nout               = nf * MAX_NSYMB_PER_SLOT;
 
+  // Slots are addressed by the SLOT's strides, the block by its own L / nout. They differ when this
+  // block is tucked into another geometry's slots (the merged edge block: slot stride L_std, block
+  // order L_e). ocudu_assert rather than a silent clamp: a stride smaller than the block would have
+  // the kernel write rows on top of each other.
+  ocudu_assert((a_stride >= L) && (r_stride >= nout), "Slot strides must cover the block geometry.");
+
   metal::mmse_engine::corr_stage c{};
-  c.a          = gpu_a + static_cast<std::size_t>(sys_offset) * L * L;
-  c.r_hp       = gpu_r_hp + static_cast<std::size_t>(sys_offset) * nout * L;
-  c.a_l_stride = L;
-  c.r_stride   = nout;
-  c.l          = L;
+  c.a            = gpu_a + static_cast<std::size_t>(sys_offset) * a_stride * a_stride;
+  c.r_hp         = gpu_r_hp + static_cast<std::size_t>(sys_offset) * r_stride * a_stride;
+  c.a_l_stride   = a_stride;
+  c.r_stride     = r_stride;
+  c.a_sys_stride = a_stride * a_stride;
+  c.r_sys_stride = r_stride * a_stride;
+  c.l            = L;
   c.nf         = nf;
   c.npf        = npf;
   c.ncomb      = re_pattern.count();
@@ -964,6 +974,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
             0,
             nof_layers,
             st.L,
+            nout_std,
             L_std);
         // In the device-inversion experiment the merged batch cannot ride one command buffer (two
         // geometries), so the descriptor is dropped and the host staging below fills the slots.
@@ -1663,12 +1674,13 @@ std::optional<metal::mmse_engine::corr_stage> port_channel_estimator_metal_mmse_
     unsigned                                      sys_offset,
     unsigned                                      nof_systems,
     unsigned                                      a_stride,
+    unsigned                                      r_stride,
     unsigned                                      L)
 {
   unsigned nout_c = 0;
   unsigned L_c    = 0;
   const metal::mmse_engine::corr_stage corr_std =
-      correlation_stage(stats, re_pattern, b_prb, dmrs_slots, scs_khz, sys_offset, nout_c, L_c);
+      correlation_stage(stats, re_pattern, b_prb, dmrs_slots, scs_khz, sys_offset, nout_c, L_c, a_stride, r_stride);
 
   // The device-inversion experiment does not build anything here: its build has to ride the weights
   // command buffer as a prefix (so K1 can invert in that same buffer, one round trip less). The
@@ -1768,6 +1780,7 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                                         sys_offset,
                                         nof_layers,
                                         st.L,
+                                        nout,
                                         L);
   }
   const bool dev_inv_now = device_corr.has_value();

@@ -576,6 +576,8 @@ struct mmse_corr_params_t {
   uint32_t L;
   uint32_t Ls;
   uint32_t Ns;
+  uint32_t a_sys;
+  uint32_t r_sys;
   float    ts;
   float    scs_hz;
   float    fd_hz;
@@ -604,6 +606,18 @@ static bool encode_corr(mmse_engine_impl* e, id<MTLComputeCommandEncoder> enc, c
   }
   const unsigned nout = c.nf * MAX_NSYMB_PER_SLOT;
 
+  // Sizes first: the kernel parameters and the zero-copy mapping both need them.
+  const NSUInteger a_per_sys   = static_cast<NSUInteger>(c.l) * c.l;
+  const NSUInteger rhp_per_sys = static_cast<NSUInteger>(nout) * c.l;
+  // The batch is mapped by the SYSTEM stride, not by the packed per-system size: with a slot stride
+  // wider than the block order the last system reaches past nof_systems * a_per_sys. A zero leaves
+  // the packed spacing (the single-geometry case).
+  const NSUInteger a_sys   = (c.a_sys_stride != 0) ? c.a_sys_stride : a_per_sys;
+  const NSUInteger r_sys   = (c.r_sys_stride != 0) ? c.r_sys_stride : rhp_per_sys;
+  const NSUInteger a_bytes = (static_cast<NSUInteger>(nof_systems - 1) * a_sys + a_per_sys) * sizeof(float);
+  const NSUInteger rhp_bytes =
+      (static_cast<NSUInteger>(nof_systems - 1) * r_sys + rhp_per_sys) * sizeof(float);
+
   mmse_corr_params_t p{};
   p.nof_systems = nof_systems;
   p.npt         = npt;
@@ -613,6 +627,8 @@ static bool encode_corr(mmse_engine_impl* e, id<MTLComputeCommandEncoder> enc, c
   p.L           = c.l;
   p.Ls          = c.a_l_stride;
   p.Ns          = c.r_stride;
+  p.a_sys       = static_cast<uint32_t>(a_sys);
+  p.r_sys       = static_cast<uint32_t>(r_sys);
   p.ts          = c.ts;
   p.scs_hz      = c.scs_hz;
   p.fd_hz       = c.fd_hz;
@@ -627,11 +643,6 @@ static bool encode_corr(mmse_engine_impl* e, id<MTLComputeCommandEncoder> enc, c
   for (unsigned k = 0; k != c.ncomb; ++k) {
     p.pilot_re[k] = c.pilot_re[k];
   }
-
-  const NSUInteger a_per_sys   = static_cast<NSUInteger>(c.l) * c.l;
-  const NSUInteger rhp_per_sys = static_cast<NSUInteger>(nout) * c.l;
-  const NSUInteger a_bytes     = static_cast<NSUInteger>(nof_systems) * a_per_sys * sizeof(float);
-  const NSUInteger rhp_bytes   = static_cast<NSUInteger>(nof_systems) * rhp_per_sys * sizeof(float);
 
   // ONE dispatch per matrix for the whole batch: the second grid dimension selects the system, so
   // the batch's matrices are contiguous and the kernel indexes them itself. A dispatch per system
