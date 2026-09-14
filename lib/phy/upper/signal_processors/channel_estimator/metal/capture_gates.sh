@@ -12,7 +12,14 @@
 #
 # The corpus is a set of <name>_ce.txt baselines (the capture-info sidecars; the replay tool derives
 # everything else from the name). Each capture is replayed with ul_chain_replay and the published
-# outputs are compared. NOTE the tool's --out is a filename PREFIX, not a directory: it writes
+# outputs are compared.
+#
+# WARNING the replay tool is NOT reliable under heavy parallelism: at 10 shards it intermittently
+# produces WRONG (not merely missing) results - measured, 39 of 980 captures came out different
+# between two runs of the SAME configuration, and every one of them was clean when re-run serially.
+# A mismatch is therefore ALWAYS re-checked serially before it is reported (see RETRY below), and a
+# mismatch that survives the re-check is a real finding. Do not read a bare mismatch out of a
+# parallel run without that re-check. NOTE the tool's --out is a filename PREFIX, not a directory: it writes
 # <out>_<slot>_<rnti>{,.bin,_ce.txt,_llr.bin,_h.bin}.
 #
 # ---- k0d: is the DEVICE-BUILT correlation matrix a drop-in for the host's? -------------------
@@ -138,6 +145,18 @@ run_shard() {
         rel=${f#"$out_d"}
         cmp -s "$f" "$out_h$rel" || ok=0
       done
+      if [ $ok -eq 0 ]; then
+        # Serial re-check: a parallel-run mismatch is more often the tool than the code.
+        retried=$(( retried + 1 ))
+        rm -f "$out_d"_* "$out_h"_*
+        OCUDU_CE_GPU_INVERT=0 "$BIN" "$c" --metal --out "$out_d" >/dev/null 2>&1
+        OCUDU_CE_GPU_INVERT=0 OCUDU_CE_CORR_DEV=0 "$BIN" "$c" --metal --out "$out_h" >/dev/null 2>&1
+        ok=1
+        for f in "$out_d"_*; do
+          rel=${f#"$out_d"}
+          cmp -s "$f" "$out_h$rel" || ok=0
+        done
+      fi
       if [ $ok -eq 1 ]; then same=$(( same + 1 )); else bad="$bad $base"; fi
     else
       stdout_d=$("$BIN" "$c" --metal --out "$out_d" 2>/dev/null | grep -m1 "crc=") || true
@@ -152,6 +171,15 @@ run_shard() {
       fi
       local da dh
       da=$(decision "$stdout_d"); dh=$(decision "$stdout_h")
+      if [ -z "$da" ] || [ -z "$dh" ]; then bad="$bad $base(no-result)"; continue; fi
+      if [ "${da% *}" != "${dh% *}" ]; then
+        # Serial re-check before reporting (see the parallelism warning above).
+        retried=$(( retried + 1 ))
+        rm -f "$out_d"_* "$out_h"_*
+        stdout_d=$("$BIN" "$c" --metal --out "$out_d" 2>/dev/null | grep -m1 "crc=") || true
+        stdout_h=$(OCUDU_CE_CPU_INVERT=1 "$BIN" "$c" --metal --out "$out_h" 2>/dev/null | grep -m1 "crc=") || true
+        da=$(decision "$stdout_d"); dh=$(decision "$stdout_h")
+      fi
       if [ -z "$da" ] || [ -z "$dh" ]; then bad="$bad $base(no-result)"; continue; fi
       if [ "${da% *}" = "${dh% *}" ]; then same=$(( same + 1 )); else bad="$bad $base"; fi
       # Informational: how often the two inversions round to the same LLR bytes.
@@ -181,9 +209,13 @@ for (( j = 0; j < JOBS; j++ )); do
 done
 
 if [ "$MODE" = k0d ]; then
-  echo "mode=k0d captures=$TOTAL byte-identical=$SAME"
+  echo "mode=k0d captures=$TOTAL byte-identical=$SAME retried=$RETRIED"
 else
-  echo "mode=k1 captures=$TOTAL decision-identical=$SAME llr-byte-identical=$BYTESAME max|dSINR|=${MAXDELTA}dB retried=$RETRIED"
+  echo "mode=k1 captures=$TOTAL decision-identical=$SAME llr-byte-identical=$BYTESAME retried=$RETRIED"
+  # max|dSINR| is INFORMATIONAL ONLY: a corrupted parallel run keeps its CRC but reports a wild
+  # SINR, so this statistic is contaminated and must not be gated (it moved 7.3 -> 48.9 dB across
+  # runs of an unchanged configuration). The gate is decision-identical.
+  echo "mode=k1 max|dSINR|=${MAXDELTA}dB (informational, contaminated by parallel-run flakiness)"
 fi
 if [ -n "$BAD" ]; then
   echo "MISMATCH:$BAD"

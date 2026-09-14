@@ -710,6 +710,25 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
   return true;
 }
 
+/// Threadgroup geometry of the K1 (block Gauss-Jordan) dispatch, as (column, row) threads.
+///
+/// S-5a measured the blocked kernel on one 36x36 system at: (32,4) 91.3, (64,4) 67.3, (32,8) 57.0,
+/// (64,8) 25.7, (32,16) 29.5, (64,16) 24.5 us - the ROW dimension (one matrix row per y thread)
+/// dominates, and the spread between the best and the worst geometry (3.7x) is larger than anything
+/// the arithmetic rewrite bought. (64,16) is therefore the default for every K1 dispatch.
+///
+/// It is a single shared helper on purpose: the inline K1 of run_async() used to hardcode (32,4) -
+/// the worst of the six - so the geometry the kernel was optimized with never reached the path the
+/// air interface takes, and the estimator's GPU time carried ~6x more than it had to.
+/// OCUDU_INV_TGX / OCUDU_INV_TGY re-measure the sweep.
+static void mmse_inv_threadgroup(unsigned& tgx, unsigned& tgy)
+{
+  const char* envx = std::getenv("OCUDU_INV_TGX");
+  const char* envy = std::getenv("OCUDU_INV_TGY");
+  tgx = (envx != nullptr) ? static_cast<unsigned>(std::strtoul(envx, nullptr, 10)) : 64;
+  tgy = (envy != nullptr) ? static_cast<unsigned>(std::strtoul(envy, nullptr, 10)) : 16;
+}
+
 bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
 {
   {
@@ -748,10 +767,9 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
   // One threadgroup per system, laid out as (column, row) so that the elimination of a pivot
   // column spreads over the whole block (see ocudu_mmse_inv.metal).
   {
-    const char* env = std::getenv("OCUDU_INV_TGX");
-    const unsigned tgx = (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 32;
-    const char* envy = std::getenv("OCUDU_INV_TGY");
-    const unsigned tgy = (envy != nullptr) ? static_cast<unsigned>(std::strtoul(envy, nullptr, 10)) : 4;
+    unsigned tgx = 0;
+    unsigned tgy = 0;
+    mmse_inv_threadgroup(tgx, tgy);
     [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1)
         threadsPerThreadgroup:MTLSizeMake(tgx, tgy, 1)];
   }
@@ -888,12 +906,17 @@ bool mmse_engine::run_async(float*       a,
   [enc setBuffer:a_buf offset:0 atIndex:0];
   [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
-  // Same (column, row) threadgroup layout as invert(): the pivot-column elimination spreads over
-  // the block instead of one thread walking a whole row (ocudu_mmse_inv.metal). K1 is still
-  // latency-bound (91.3 us for a single 36x36 system, 2 barriered pivot steps per column); S-5a
-  // replaces the elimination with a blocked/simdgroup_matrix form before it becomes the default
-  // inversion path - see the note in port_channel_estimator_metal_mmse_impl.cpp.
-  [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+  // Same (column, row) threadgroup layout AND the same geometry as invert(): the pivot-column
+  // elimination spreads over the block instead of one thread walking a whole row, and the row
+  // dimension is what S-5a measured to matter most (see mmse_inv_threadgroup()). Hardcoding (32,4)
+  // here kept the worst measured geometry on the default path.
+  {
+    unsigned tgx = 0;
+    unsigned tgy = 0;
+    mmse_inv_threadgroup(tgx, tgy);
+    [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(tgx, tgy, 1)];
+  }
 
   [enc setComputePipelineState:e->weights_pipe];
   [enc setBuffer:rp_buf offset:0 atIndex:0];
@@ -1074,7 +1097,11 @@ bool encode_weights_only(mmse_engine_impl*                  e,
       [enc setBuffer:ai_buf offset:0 atIndex:0];
       [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
       [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
-      [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+      unsigned tgx = 0;
+      unsigned tgy = 0;
+      mmse_inv_threadgroup(tgx, tgy);
+      [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(tgx, tgy, 1)];
     }
   }
 

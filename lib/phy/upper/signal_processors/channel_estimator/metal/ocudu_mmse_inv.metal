@@ -22,10 +22,19 @@
 //
 // Compared with the per-pivot form this kernel replaces, the bulk of the matrix is updated once
 // per BLOCK column instead of once per single pivot column (36 sweeps -> 5), while the sequential
-// part stays inside the 8x8 block. Measured on the production shape (one 36x36 system): 91.3 us
-// with (32,4) threads and 33.9 us with (64,16) for the per-pivot form.
+// part stays inside the 8x8 block.
 //
-// Matrix order n <= 36, nof_systems <= 8.
+// THE THREADGROUP GEOMETRY MATTERS MORE THAN THE ARITHMETIC, and the winning one is (64,16) threads
+// - one matrix row per y thread. Measured on one 36x36 system (S-5a):
+//     (32,4) 91.3, (64,4) 67.3, (32,8) 57.0, (64,8) 25.7, (32,16) 29.5, (64,16) 24.5 us
+// That is a 3.7x spread across geometries against the 2.6x the per-pivot -> blocked rewrite bought
+// (233.9 -> 91.3 us at (32,4), S-4b), so dispatching (32,4) throws the rewrite away.
+// mmse_inv_threadgroup() (ocudu_metal_mmse_engine.mm) is the single place that picks it; every K1
+// dispatch must go through it. The geometry does NOT change the result: each element is computed by
+// exactly one thread with the same expression whatever the thread count, and (32,4) vs (64,16)
+// published byte-identical channel estimates and LLRs on the capture corpus.
+//
+// Matrix order n <= MAX_N (54, see below), nof_systems <= 8.
 
 #include <metal_stdlib>
 using namespace metal;
