@@ -1437,6 +1437,11 @@ void port_channel_estimator_metal_mmse_impl::unpack_engine_group(unsigned       
                                                                  const engine_strides& st)
 {
   const unsigned nf = b_prb * NOF_SUBCARRIERS_PER_RB;
+  // gb_start counts PRBs while b counts blocks of b_prb PRBs, so block b starts at subcarrier
+  // (gb_start + b * b_prb) * 12. Using (gb_start + b) * nf instead (nf being the block's
+  // subcarriers) is right only while gb_start is zero or a block is one PRB wide, and it lands
+  // past the end of the grid for the edge block of a hop that is not a multiple of the block
+  // size - the same mistake the pilot staging had, in the host half of the estimator.
   for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
     for (unsigned b = 0; b != n_blk; ++b) {
       // Slot addressing uses the BATCH strides: they may exceed the block geometry (the merged
@@ -1445,7 +1450,7 @@ void port_channel_estimator_metal_mmse_impl::unpack_engine_group(unsigned       
       const float* hp = gpu_h + (static_cast<std::size_t>(sys_offset + i_layer) * st.n_blk + b) * 2 * st.nout;
       for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
         span<cf_t> dst = grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + sym)
-                             .subspan(static_cast<std::size_t>(gb_start + b) * nf, nf);
+                             .subspan(static_cast<std::size_t>(gb_start + b * b_prb) * NOF_SUBCARRIERS_PER_RB, nf);
         for (unsigned sc = 0; sc != nf; ++sc) {
           dst[sc] = {hp[2 * (sym * nf + sc)], hp[2 * (sym * nf + sc) + 1]};
         }

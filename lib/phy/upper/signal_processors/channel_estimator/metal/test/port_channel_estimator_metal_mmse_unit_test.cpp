@@ -1498,9 +1498,10 @@ int main()
     // block, which is the geometry the pilot staging used to read from the wrong PRB: the merged
     // and the split path agreed with each other there (they share the staging), so this shape is
     // only caught by the NMSE against the synthetic truth below.
-    const std::array<merge_shape, 8> shapes = {{{52, 2, true}, {52, 1, true}, {25, 2, true},
+    const std::array<merge_shape, 10> shapes = {{{52, 2, true}, {52, 1, true}, {25, 2, true},
                                                 {4, 3, true}, {51, 2, false}, {2, 2, false},
-                                                {23, 2, true}, {14, 2, true}}};
+                                                {23, 2, true}, {14, 2, true},
+                                                {23, 3, true}, {14, 3, true}}};
     double   worst_rel_h  = 0.0;
     double   worst_dn_db  = 0.0;
     double   worst_nmse_edge_db = -1000.0;
@@ -1677,19 +1678,22 @@ int main()
       if (tail_sc != 0 && has_std) {
         worst_nmse_edge_db = std::max(worst_nmse_edge_db, nmse_m_edge - nmse_m_std);
       }
-      // KNOWN ISSUE (do not turn into an assertion yet): with a TWO-PRB edge block (23 and 14 PRB
-      // here) the edge estimates are still off by ~15 dB with respect to the standard blocks, and
-      // they are identical with and without the pilot-offset fix in stage_engine_group() - a second,
-      // independent edge-block defect that the over-the-air captures (three DM-RS symbols) do not
-      // show. The numbers are printed so the shape stays a reproducer; the assertion lands when the
-      // defect is understood.
-      if (tail_sc != 0 && has_std && (nmse_m_edge > nmse_m_std + 6.0)) {
-        std::printf("Test 11 NOTE: the edge block of a %u PRB hop is %.2f dB worse than its standard "
-                    "blocks (edge %.2f dB, standard %.2f dB)\n",
+      // The merged-vs-split comparison above cannot see anything the two paths share, and they
+      // share both halves of the edge block's plumbing: the pilot staging of block b, and the host
+      // unpack that places the block's estimates in the grid. A two-PRB edge block (a hop whose PRB
+      // count is 2 mod block_prb, i.e. 23 and 14 PRB here) is the geometry both of those used to
+      // get wrong - reading and writing the pilots of another PRB, and, in the unpack, addressing
+      // past the end of the grid - so the edge block is asserted against the synthetic truth,
+      // relative to the standard blocks of the same hop (the absolute NMSE depends on the bf16
+      // output and on the synthetic noise, the ratio does not).
+      if (tail_sc != 0 && has_std && (nmse_m_edge > nmse_m_std + 10.0)) {
+        std::printf("Test 11 FAIL: the merged batch does not estimate the edge block "
+                    "(%u PRB, %u DMRS: edge NMSE %.2f dB vs standard %.2f dB)\n",
                     n_prb,
-                    nmse_m_edge - nmse_m_std,
+                    n_sym,
                     nmse_m_edge,
                     nmse_m_std);
+        return -1;
       }
       if ((rel > 0.01) || (d_nmse > 0.05)) {
         std::printf("Test 11 FAIL: the merged batch does not estimate what the split path estimates "
