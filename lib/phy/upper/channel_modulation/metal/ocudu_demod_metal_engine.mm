@@ -61,9 +61,8 @@ static void demod_stats_wait()
 static void demod_stats_report()
 {
   const demod_stats_t& s = demod_stats();
-  std::fprintf(stderr,
-               "[metal_stats] demapper commits=%llu waits=%llu max_in_flight=%llu (synchronous "
-               "path only; deferred group dispatches are counted by [metal_stats] burst)\n",
+  ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] demapper commits={} waits={} max_in_flight={} (synchronous "
+               "path only; deferred group dispatches are counted by [metal_stats] burst)",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));

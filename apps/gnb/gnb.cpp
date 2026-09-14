@@ -45,8 +45,8 @@
 #include "ocudu/support/backtrace.h"
 #include "ocudu/support/config_parsers.h"
 #include "ocudu/support/cpu_features.h"
-#include "ocudu/support/io/io_broker_factory.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
+#include "ocudu/support/io/io_broker_factory.h"
 #include "ocudu/support/macos_compat.h"
 #include "ocudu/support/signal_handling.h"
 #include "ocudu/support/signal_observer.h"
@@ -640,6 +640,12 @@ int main(int argc, char** argv)
     while (is_app_running) {
       std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
+
+    // Report the UL compute pipeline statistics while the log backend is still alive (compiled in
+    // only with ENABLE_FLOW_PROBES). Reporting after this scope would reach the logging system too
+    // late for the file sink, and the numbers would end up on the console only.
+    // cmake -S . -B build -DENABLE_FLOW_PROBES=ON && make -C build gnb
+    ocudu::ul_pipeline_probe::get().report();
   }
 
   // Stop metrics manager.
@@ -664,9 +670,8 @@ int main(int argc, char** argv)
   e1_gw->stop();
   // Xn-C gateway is stopped by Xn-C connection manager.
 
-  // Report the UL compute pipeline statistics (compiled in only with ENABLE_FLOW_PROBES).
-  // cmake -S . -B build -DENABLE_FLOW_PROBES=ON && make -C build gnb
-  ocudu::ul_pipeline_probe::get().report();
+  // Everything the shutdown logged must reach the file sinks before the process goes away.
+  ocudulog::flush();
 
   return 0;
 }

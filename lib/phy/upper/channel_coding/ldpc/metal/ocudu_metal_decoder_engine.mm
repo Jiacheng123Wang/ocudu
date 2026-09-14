@@ -66,8 +66,7 @@ static void decoder_stats_wait()
 static void decoder_stats_report()
 {
   const decoder_stats_t& s = decoder_stats();
-  std::fprintf(stderr,
-               "[metal_stats] ldpc_decoder commits=%llu waits=%llu max_in_flight=%llu\n",
+  ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] ldpc_decoder commits={} waits={} max_in_flight={}",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));

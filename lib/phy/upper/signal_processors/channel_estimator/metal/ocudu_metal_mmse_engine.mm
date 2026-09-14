@@ -107,9 +107,8 @@ static void mmse_stats_report()
   const mmse_stats_t& s = mmse_stats();
   const uint64_t      hits = s.guard_hits.load(std::memory_order_relaxed);
   const uint64_t      wait = s.guard_wait_ns.load(std::memory_order_relaxed);
-  std::fprintf(stderr,
-               "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu guard=%llu/%llu "
-               "guard_mean=%.1fus guard_max=%.1fus\n",
+  ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] mmse_ce commits={} waits={} max_in_flight={} guard={}/{} "
+               "guard_mean={:.1f}us guard_max={:.1f}us",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
@@ -153,8 +152,7 @@ struct mmse_phase_timer {
     }
     const auto now = std::chrono::steady_clock::now();
     const auto us  = [](auto a, auto b) { return std::chrono::duration<double, std::micro>(b - a).count(); };
-    std::fprintf(stderr,
-                 "[mmse_eng] %s wrap %.1f cb %.1f encode %.1f commit %.1f wait %.1f us\n",
+    ocudulog::fetch_basic_logger("PHY").debug("[mmse_eng] {} wrap {:.1f} cb {:.1f} encode {:.1f} commit {:.1f} wait {:.1f} us",
                  name,
                  us(t0, t_wrap),
                  us(t_wrap, t_cb),

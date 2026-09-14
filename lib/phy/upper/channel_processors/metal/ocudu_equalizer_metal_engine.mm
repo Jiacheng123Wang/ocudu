@@ -62,9 +62,8 @@ static void eq_stats_wait()
 static void eq_stats_report()
 {
   const eq_stats_t& s = eq_stats();
-  std::fprintf(stderr,
-               "[metal_stats] equalizer commits=%llu waits=%llu max_in_flight=%llu (synchronous "
-               "path only; deferred group dispatches are counted by [metal_stats] burst)\n",
+  ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] equalizer commits={} waits={} max_in_flight={} (synchronous "
+               "path only; deferred group dispatches are counted by [metal_stats] burst)",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
@@ -114,8 +113,7 @@ const bool eq_batch_diag_registered = []() {
   std::atexit([]() {
     const eq_batch_diag_t& d = eq_batch_diag();
     const char*            brk = d.first_break.load(std::memory_order_relaxed);
-    std::fprintf(stderr,
-                 "[metal_stats] eq_batch flushes=%llu symbols=%llu runs=%llu batched=%llu max_run=%u first_break=%s\n",
+    ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] eq_batch flushes={} symbols={} runs={} batched={} max_run={} first_break={}",
                  static_cast<unsigned long long>(d.flushes.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(d.symbols.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(d.runs.load(std::memory_order_relaxed)),

@@ -712,8 +712,7 @@ demod_ch_est_stats& demod_ch_est_counters()
   std::call_once(flag, []() {
     std::atexit([]() {
       const demod_ch_est_stats& c = demod_ch_est_counters();
-      std::fprintf(stderr,
-                   "[metal_stats] pusch_demod ch_est device=%llu host=%llu\n",
+      ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] pusch_demod ch_est device={} host={}",
                    static_cast<unsigned long long>(c.device.load(std::memory_order_relaxed)),
                    static_cast<unsigned long long>(c.host.load(std::memory_order_relaxed)));
     });

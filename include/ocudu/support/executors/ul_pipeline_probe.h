@@ -264,8 +264,14 @@ public:
       sorted_eqdem     = eqdem_latencies_us;
       sorted_fapi_mac  = fapi_mac_latencies_us;
     }
+    // The probe reports through the logging system, at two levels: the harness reads the headline
+    // numbers (whole-pipeline latency, PDU sizes) on the console, while the per-segment breakdown
+    // goes to the log file only (debug). Printing to stderr instead - which this used to do, because
+    // the log backend is not guaranteed alive this late in the shutdown - left the console noisy and
+    // the log file without any of these numbers.
+    ocudulog::basic_logger& logger = ocudulog::fetch_basic_logger("PHY");
     if (sorted_pipeline.empty()) {
-      std::fprintf(stderr, "[ul_pipeline] no CRC-OK samples recorded\n");
+      logger.info("[ul_pipeline] no CRC-OK samples recorded");
       return;
     }
     std::sort(sorted_pipeline.begin(), sorted_pipeline.end());
@@ -276,22 +282,21 @@ public:
     auto pct = [](const std::vector<double>& sorted, double p) {
       return sorted[static_cast<size_t>((sorted.size() - 1) * p)];
     };
-    // Report to stderr (guaranteed to be visible at the shutdown, unlike the logging backend) and to the logs.
-    std::fprintf(stderr,
-                 "[ul_pipeline] samples=%zu mean=%.1fus median=%.1fus min=%.1fus max=%.1fus p95=%.1fus p99=%.1fus\n",
-                 sorted_pipeline.size(),
-                 sum / static_cast<double>(sorted_pipeline.size()),
-                 pct(sorted_pipeline, 0.5),
-                 sorted_pipeline.front(),
-                 sorted_pipeline.back(),
-                 pct(sorted_pipeline, 0.95),
-                 pct(sorted_pipeline, 0.99));
+    logger.info("[ul_pipeline] samples={} mean={:.1f}us median={:.1f}us min={:.1f}us max={:.1f}us "
+                "p95={:.1f}us p99={:.1f}us",
+                sorted_pipeline.size(),
+                sum / static_cast<double>(sorted_pipeline.size()),
+                pct(sorted_pipeline, 0.5),
+                sorted_pipeline.front(),
+                sorted_pipeline.back(),
+                pct(sorted_pipeline, 0.95),
+                pct(sorted_pipeline, 0.99));
 
     // Phase-segment series, printed in pipeline order. Recorded in lockstep with the [ul_ldpc_decode] series
     // (CRC-OK completions only), so their sample counts always match it.
-    auto print_series = [&pct](const char* name, std::vector<double>& sorted) {
+    auto print_series = [&pct, &logger](const char* name, std::vector<double>& sorted) {
       if (sorted.empty()) {
-        std::fprintf(stderr, "[%s] no samples recorded\n", name);
+        logger.debug("[{}] no samples recorded", name);
         return;
       }
       std::sort(sorted.begin(), sorted.end());
@@ -299,8 +304,8 @@ public:
       for (double v : sorted) {
         series_sum += v;
       }
-      std::fprintf(stderr,
-                   "[%s] samples=%zu mean=%.1fus median=%.1fus min=%.1fus max=%.1fus p95=%.1fus p99=%.1fus\n",
+      logger.debug("[{}] samples={} mean={:.1f}us median={:.1f}us min={:.1f}us max={:.1f}us p95={:.1f}us "
+                   "p99={:.1f}us",
                    name,
                    sorted.size(),
                    series_sum / static_cast<double>(sorted.size()),
@@ -323,7 +328,7 @@ public:
     print_series("ul_fapi_mac", sorted_fapi_mac);
 
     if (sorted_ldpc.empty()) {
-      std::fprintf(stderr, "[ul_ldpc_decode] no samples recorded\n");
+      logger.debug("[ul_ldpc_decode] no samples recorded");
       return;
     }
     std::sort(sorted_ldpc.begin(), sorted_ldpc.end());
@@ -331,8 +336,8 @@ public:
     for (double v : sorted_ldpc) {
       sum += v;
     }
-    std::fprintf(stderr,
-                 "[ul_ldpc_decode] samples=%zu mean=%.1fus median=%.1fus min=%.1fus max=%.1fus p95=%.1fus p99=%.1fus\n",
+    logger.debug("[ul_ldpc_decode] samples={} mean={:.1f}us median={:.1f}us min={:.1f}us max={:.1f}us "
+                 "p95={:.1f}us p99={:.1f}us",
                  sorted_ldpc.size(),
                  sum / static_cast<double>(sorted_ldpc.size()),
                  pct(sorted_ldpc, 0.5),
@@ -343,7 +348,7 @@ public:
     // MAC PDU size (CRC-OK data bursts): recorded in the same branch as the LDPC latency samples, so the sample
     // count matches [ul_ldpc_decode]. Printed after it, plus a second line with the total number of bytes.
     if (sorted_pdu_sizes.empty()) {
-      std::fprintf(stderr, "[ul_mac_pdu_size] no samples recorded\n");
+      logger.debug("[ul_mac_pdu_size] no samples recorded");
       return;
     }
     std::sort(sorted_pdu_sizes.begin(), sorted_pdu_sizes.end());
@@ -351,16 +356,16 @@ public:
     for (double v : sorted_pdu_sizes) {
       sum += v;
     }
-    std::fprintf(stderr,
-                 "[ul_mac_pdu_size] samples=%zu mean=%.1fB median=%.1fB min=%.1fB max=%.1fB p95=%.1fB p99=%.1fB\n",
-                 sorted_pdu_sizes.size(),
-                 sum / static_cast<double>(sorted_pdu_sizes.size()),
-                 pct(sorted_pdu_sizes, 0.5),
-                 sorted_pdu_sizes.front(),
-                 sorted_pdu_sizes.back(),
-                 pct(sorted_pdu_sizes, 0.95),
-                 pct(sorted_pdu_sizes, 0.99));
-    std::fprintf(stderr, "[ul_mac_pdu_size] total=%.1fB\n", sum);
+    logger.info("[ul_mac_pdu_size] samples={} mean={:.1f}B median={:.1f}B min={:.1f}B max={:.1f}B "
+                "p95={:.1f}B p99={:.1f}B total={:.1f}B",
+                sorted_pdu_sizes.size(),
+                sum / static_cast<double>(sorted_pdu_sizes.size()),
+                pct(sorted_pdu_sizes, 0.5),
+                sorted_pdu_sizes.front(),
+                sorted_pdu_sizes.back(),
+                pct(sorted_pdu_sizes, 0.95),
+                pct(sorted_pdu_sizes, 0.99),
+                sum);
   }
 
 private:

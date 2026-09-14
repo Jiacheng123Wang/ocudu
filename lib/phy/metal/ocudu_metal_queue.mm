@@ -100,7 +100,7 @@ shared_queue_state& state();
 void shared_queue_stats_report()
 {
   shared_queue_state& s = state();
-  std::fprintf(stderr, "[metal_stats] wrap hits=%llu creates=%llu replaces=%llu failures=%llu\n",
+  ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] wrap hits={} creates={} replaces={} failures={}",
                static_cast<unsigned long long>(s.wrap_hits),
                static_cast<unsigned long long>(s.wrap_creates),
                static_cast<unsigned long long>(s.wrap_replaces),

@@ -56,8 +56,7 @@ ch_est_source_counters& ch_est_source()
 #if defined(OCUDU_METAL_STATS)
 const bool ch_est_source_registered = []() {
   std::atexit([]() {
-    std::fprintf(stderr,
-                 "[metal_stats] equalizer ch_est device=%llu staged=%llu\n",
+    ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] equalizer ch_est device={} staged={}",
                  static_cast<unsigned long long>(ch_est_source().device.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(ch_est_source().staged.load(std::memory_order_relaxed)));
   });
