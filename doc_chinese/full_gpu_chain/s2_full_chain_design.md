@@ -7482,3 +7482,25 @@ mean total 178.1  =  pre 1.24 + sigma2 3.0 + corr 9.9 + gpu_path 164.1 (+ cpl_* 
 而 CE 的 **GPU 执行只有 305 µs** ⇒ **约 325 µs 是主机侧的等待/调度开销**。
 
 ⇒ 下一步的价值不在"把 GPU 算得更快"，而在**去掉那条同步等待**。
+
+#### 48.107 S-7f-4l 补记：**"在 GPU 上" ≠ "交接不需要 CPU"**——CE 的交接点清单
+
+用户问的关键问题：K0-d/K1/K2/K3/K4 **是不是像自动流水线一样跑在 GPU 上**，还是**交接需要 CPU 参与**？
+逐点核对代码后的答案如下。**结论：K1→K4 是真正的单 CB 流水；K0-d 与它之间是实打实的 CPU 胶水（且阻塞）。**
+
+| 交接 | CPU 参与 | 代码定位 |
+|---|---|---|
+| **K1 → K2a → K2b → K3 → K4** | **无** ✅ | `ocudu_metal_mmse_engine.mm` `run_async()`：K1 `dispatch` @905 → weights @921 → apply @932 → `encode_reformat()`（内含 K3 @50、K4 @64 两个 dispatch）→ `[enc endEncoding]` @942 → **一次 `[cb commit]`** @944。**同一 encoder = 同一条 CB**，K1 的结果被 K2a 在同一 CB 内直接读取；同 encoder 内的可见性由 `memoryBarrierWithScope:MTLBarrierScopeBuffers` 保证 |
+| **K0-d → K1** | **有，且阻塞** ❌ | `build_correlation()` 自成一条 CB：`[cb commit]` → **`[cb waitUntilCompleted]`**（`ocudu_metal_mmse_engine.mm:695-699`），宿主当场等；随后 `run_async()` 再编**第二条** CB。两者之间还要 `stage_engine_group()` 把 y/qy 从**主机**写进槽位。**注意：设备反演路径上这次等待没有数据依赖**——`gpu_invert=true` 时 `slots_filled` 跳过整个 staging 循环，主机既不读 A 也不写 A；等待的存在只是因为该函数被写成"独立同步调用" |
+| **CE → 等化/解调** | 只编码+提交，**不搬数据** ⚠️ | 等化 burst 是**另一条** CB（lane 探针 `cbs/lane=2.70` 与 `ch_est 1.70 + eq_demap 1.00` 自洽）。两条 CB 在同一队列上**按序执行**，且等化器**设备直读** `gpu_ce`/`gpu_nv`（`equalizer ch_est device=150040 staged=0`）⇒ **估计值不经主机**；剩下的是编排胶水（两次提交 + 一次等待） |
+| **导频输入（→ y/qy）** | **有** ❌ | CE 的**输入**由主机产生（CPU 的 DMRS/LS，实测 0.46–1.24 µs）并 memcpy 进引擎槽位；K4 的 `pilots`/`rx_pilots` 同样由主机 staging |
+
+**⇒ 验收口径（重要）**：判断"某段是否已经全 GPU"，不能只看"内核在哪跑"，
+必须同时看**它和上下游的交接有没有 CPU**。按此口径，当前 CE 的**未完成项**是：
+
+1. **K0-d 没有并进 K1..K4 的那条 CB**——存在能力缺口：`run_weights_only*` 支持 `corr` 前缀参数，
+   但**设备反演走的 `run_async()` 没有这个参数**。历史上有过这条路（`OCUDU_CE_DEV_INVERT`），现在已知不可用。
+2. **CE 的输入（导频 / y / qy）由主机生产并写入**——这是链路上唯一"输入由 CPU 生产"的一段。
+
+（对照：K1 的性能、K0-d 的排队等待都属于"因为主机在环才存在"的胶水，**按 §48.84(a0) 规则 1 不是目标**；
+上面两条才是结构性的交接缺陷。）
