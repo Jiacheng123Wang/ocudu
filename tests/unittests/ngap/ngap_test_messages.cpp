@@ -457,6 +457,21 @@ ngap_message ocudu::ocucp::generate_valid_ue_context_release_command_with_ue_nga
   return ngap_msg;
 }
 
+ngap_message ocudu::ocucp::generate_ue_context_release_command_with_choice_exts_ue_ngap_ids()
+{
+  ngap_message ngap_msg = {};
+
+  ngap_msg.pdu.set_init_msg();
+  ngap_msg.pdu.init_msg().load_info_obj(ASN1_NGAP_ID_UE_CONTEXT_RELEASE);
+
+  auto& ue_context_release_cmd = ngap_msg.pdu.init_msg().value.ue_context_release_cmd();
+  ue_context_release_cmd->ue_ngap_ids.set_choice_exts();
+  auto& cause = ue_context_release_cmd->cause.set_radio_network();
+  cause       = asn1::ngap::cause_radio_network_opts::options::radio_conn_with_ue_lost;
+
+  return ngap_msg;
+}
+
 ngap_message ocudu::ocucp::generate_pdu_session_resource_setup_request_base(amf_ue_id_t amf_ue_id,
                                                                             ran_ue_id_t ran_ue_id)
 {

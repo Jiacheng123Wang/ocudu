@@ -153,6 +153,10 @@ ngap_message generate_valid_ue_context_release_command_with_amf_ue_ngap_id(amf_u
 ngap_message generate_valid_ue_context_release_command_with_ue_ngap_id_pair(amf_ue_id_t amf_ue_id,
                                                                             ran_ue_id_t ran_ue_id);
 
+/// \brief Generate a dummy UE Context Release Command Message with the UE-NGAP-IDs choice set to its extension
+/// alternative (neither AMF UE NGAP ID nor UE NGAP ID pair present).
+ngap_message generate_ue_context_release_command_with_choice_exts_ue_ngap_ids();
+
 /// \brief Generate a dummy PDU Session Resource Setup Request base.
 ngap_message generate_pdu_session_resource_setup_request_base(amf_ue_id_t amf_ue_id, ran_ue_id_t ran_ue_id);
 

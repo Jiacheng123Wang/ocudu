@@ -446,6 +446,33 @@ TEST_F(ngap_ue_context_management_procedure_test,
   ASSERT_FALSE(was_ue_removed());
 }
 
+/// Regression test: the UE-NGAP-IDs choice can legally decode into its extension alternative
+/// (choice_exts), which carries neither an AMF UE NGAP ID nor a UE NGAP ID pair. The handler must
+/// reject the message instead of looking up a UE context with an invalid/default-constructed AMF UE
+/// ID.
+TEST_F(ngap_ue_context_management_procedure_test,
+       when_ue_context_release_command_has_choice_exts_ue_ngap_ids_then_message_is_dropped)
+{
+  // Test preamble
+  cu_cp_ue_index_t ue_index = this->start_procedure();
+
+  auto& ue = test_ues.at(ue_index);
+
+  // Inject Initial Context Setup Request.
+  ngap_message init_context_setup_request =
+      generate_valid_initial_context_setup_request_message(ue.amf_ue_id.value(), ue.ran_ue_id.value());
+  ngap->handle_message(init_context_setup_request);
+
+  ASSERT_TRUE(was_ue_added());
+
+  // Inject UE Context Release Command with an unsupported UE-NGAP-IDs choice.
+  ngap_message ue_context_release_cmd = generate_ue_context_release_command_with_choice_exts_ue_ngap_ids();
+  ngap->handle_message(ue_context_release_cmd);
+
+  ASSERT_FALSE(was_ue_context_release_complete_sent());
+  ASSERT_FALSE(was_ue_removed());
+}
+
 /// Test UE context release request for UE that hasn't received an AMF UE ID yet.
 TEST_F(ngap_ue_context_management_procedure_test,
        when_ue_context_release_request_is_received_but_no_amf_ue_ngap_id_is_set_then_request_is_ignored)
