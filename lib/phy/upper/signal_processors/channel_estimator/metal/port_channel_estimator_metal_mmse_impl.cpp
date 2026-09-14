@@ -49,36 +49,6 @@ struct mmse_time_stats {
   std::atomic<uint64_t> max_total_us{0};
 };
 
-/// One entry per (PRB, DM-RS symbols) shape: the aggregate above mixes the whole shape sweep, and the shapes differ by
-/// orders of magnitude (the fused-lane work is planned from the OTA geometry, not from the average).
-struct mmse_shape_stats {
-  uint64_t calls = 0;
-  uint64_t pre_ns = 0;
-  uint64_t stage_ns = 0;
-  uint64_t submit_ns = 0;
-  uint64_t unpack_ns = 0;
-  uint64_t sigma2_us = 0;
-  uint64_t corr_us = 0;
-  uint64_t gpu_path_us = 0;
-  uint64_t gpu_wait_us = 0;
-  uint64_t total_us = 0;
-};
-
-/// \note Both are intentionally leaked: the atexit report reads them while the static destructors of the process are
-/// already running, and a function-local static with a destructor would be destroyed before the handler that reports it
-/// (which showed up as an empty table).
-std::mutex& mmse_shapes_mutex()
-{
-  static std::mutex* m = new std::mutex();
-  return *m;
-}
-
-std::map<uint64_t, mmse_shape_stats>& mmse_shapes()
-{
-  static std::map<uint64_t, mmse_shape_stats>* m = new std::map<uint64_t, mmse_shape_stats>();
-  return *m;
-}
-
 mmse_time_stats& mmse_stats()
 {
   static mmse_time_stats s;
@@ -124,35 +94,6 @@ void mmse_stats_register_atexit()
                    static_cast<unsigned long long>(s.device_hops.load(std::memory_order_relaxed)),
                    static_cast<unsigned long long>(s.max_total_us.load(std::memory_order_relaxed)));
 
-      // Per-shape breakdown, most frequent first: the fused-lane planning reads the OTA geometry out of this table.
-      std::vector<std::pair<uint64_t, mmse_shape_stats>> shapes;
-      {
-        std::lock_guard<std::mutex> lock(mmse_shapes_mutex());
-        shapes.assign(mmse_shapes().begin(), mmse_shapes().end());
-      }
-      std::sort(shapes.begin(), shapes.end(), [](const auto& a, const auto& b) { return a.second.calls > b.second.calls; });
-      for (const auto& [key, sh] : shapes) {
-        if (sh.calls == 0) {
-          continue;
-        }
-        const double shape_calls = static_cast<double>(sh.calls);
-        std::fprintf(stderr,
-                     "[mmse_time_shape] prb=%llu npt=%llu calls=%llu | pre=%.2fus stage=%.2fus sigma2=%.1fus corr=%.1fus "
-                     "gpu_path=%.1fus (gpu_wait=%.1fus) total=%.1fus | stage=%.2f submit=%.2f unpack=%.2f\n",
-                     static_cast<unsigned long long>(key >> 8),
-                     static_cast<unsigned long long>(key & 0xff),
-                     static_cast<unsigned long long>(sh.calls),
-                     static_cast<double>(sh.pre_ns) / shape_calls / 1e3,
-                     static_cast<double>(sh.stage_ns) / shape_calls / 1e3,
-                     static_cast<double>(sh.sigma2_us) / shape_calls,
-                     static_cast<double>(sh.corr_us) / shape_calls,
-                     static_cast<double>(sh.gpu_path_us) / shape_calls,
-                     static_cast<double>(sh.gpu_wait_us) / shape_calls,
-                     static_cast<double>(sh.total_us) / shape_calls,
-                     static_cast<double>(sh.stage_ns) / shape_calls / 1e3,
-                     static_cast<double>(sh.submit_ns) / shape_calls / 1e3,
-                     static_cast<double>(sh.unpack_ns) / shape_calls / 1e3);
-      }
     });
   });
 }
@@ -200,20 +141,6 @@ void mmse_stats_accumulate(unsigned nof_prb,
   s.stage_ns.fetch_add(static_cast<uint64_t>(stage_us * 1e3), std::memory_order_relaxed);
   s.submit_ns.fetch_add(static_cast<uint64_t>(submit_us * 1e3), std::memory_order_relaxed);
   s.unpack_ns.fetch_add(static_cast<uint64_t>(unpack_us * 1e3), std::memory_order_relaxed);
-  {
-    std::lock_guard<std::mutex> lock(mmse_shapes_mutex());
-    mmse_shape_stats&           sh = mmse_shapes()[(static_cast<uint64_t>(nof_prb) << 8) | nof_dmrs_symbols];
-    ++sh.calls;
-    sh.pre_ns += static_cast<uint64_t>(pre_stage_us * 1e3);
-    sh.stage_ns += static_cast<uint64_t>(stage_us * 1e3);
-    sh.submit_ns += static_cast<uint64_t>(submit_us * 1e3);
-    sh.unpack_ns += static_cast<uint64_t>(unpack_us * 1e3);
-    sh.sigma2_us += static_cast<uint64_t>(sigma2_us);
-    sh.corr_us += static_cast<uint64_t>(corr_us);
-    sh.gpu_path_us += static_cast<uint64_t>(gpu_path_us);
-    sh.gpu_wait_us += static_cast<uint64_t>(gpu_wait_us);
-    sh.total_us += static_cast<uint64_t>(total_us);
-  }
   s.sigma2_us.fetch_add(static_cast<uint64_t>(sigma2_us), std::memory_order_relaxed);
   s.corr_us.fetch_add(static_cast<uint64_t>(corr_us), std::memory_order_relaxed);
   s.gpu_path_us.fetch_add(static_cast<uint64_t>(gpu_path_us), std::memory_order_relaxed);
