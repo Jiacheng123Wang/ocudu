@@ -877,6 +877,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       const engine_strides st{L_std, nout_std, n_std_blocks};
       // K1 inverts the padded (L_std x L_std) systems, so the kernel's order limit applies to the
       // padded order, not to the tail's.
+      // 36, not the kernel's own 54: at order 54 the inversion is latency-bound (measured this
+      // round: gpu_wait 85 -> 555us on a 14 PRB hop, i.e. ~470us MORE than the ~10us of host CPU
+      // Gauss-Jordan it replaces), and the K1 header says why - the elimination walks 72 pivot
+      // phases, two barriered steps each. Raising the limit is therefore gated on making K1 fast
+      // (its S-5a blocked/simdgroup_matrix form), and only then can the device correlation ride the
+      // same command buffer as the inversion.
       static constexpr unsigned MAX_GPU_INVERT_ORDER = 36;
       const bool gpu_invert = (std::getenv("OCUDU_CE_CPU_INVERT") == nullptr) && (L_std <= MAX_GPU_INVERT_ORDER);
       // A batch of the previous hop may still be outstanding: it reads the very staging slots this hop is

@@ -30,8 +30,15 @@
 #include <metal_stdlib>
 using namespace metal;
 
-constant uint MAX_N  = 36;  // maximum matrix order
-constant uint MAX_N2 = 72;  // 2 * MAX_N
+// The order limit is what fits the threadgroup memory: the augmented matrix is MAX_N x 2*MAX_N
+// floats. 36 covered the 2-PRB blocks of the first deployments; the standard block of the air
+// interface is 3 PRB with three DM-RS symbols, i.e. order 54, and 54 x 108 floats is 22.8 KiB -
+// inside the 32 KiB budget, while 72 would not be. Raising it is what lets the REAL allocation be
+// inverted on the device, which is a precondition for building the correlation matrices there too
+// (the correlation must ride the same command buffer as the inversion, and an engine call only
+// exists when the inversion is a device dispatch).
+constant uint MAX_N  = 54;  // maximum matrix order
+constant uint MAX_N2 = 108; // 2 * MAX_N
 constant uint BLK    = 8;   // block size of the elimination
 
 kernel void mmse_inv(device float*       a           [[buffer(0)]],  // [nof_systems][n][n] row-major

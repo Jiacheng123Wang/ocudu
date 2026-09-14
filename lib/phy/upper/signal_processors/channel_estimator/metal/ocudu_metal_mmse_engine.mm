@@ -654,9 +654,9 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
   if (e == nullptr || e->device == nil) {
     return false;
   }
-  if (n > 36) {
-    // The K1 kernel uses fixed-size threadgroup memory for 36x36; larger systems must use
-    // the CPU inversion (the hot path does that anyway).
+  if (n > 54) {
+    // The K1 kernel uses fixed-size threadgroup memory (54 x 108 floats, see ocudu_mmse_inv.metal);
+    // larger systems must use the CPU inversion.
     return false;
   }
 
