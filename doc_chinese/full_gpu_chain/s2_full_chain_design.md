@@ -7731,3 +7731,54 @@ metal 的 `apply_fd_td_estimation_stage()` 里加了设备 LSE 块（`OCUDU_CE_D
 上机判据见 §48.108(e)：attach + ping + iperf3；`device_corr_builds>0`；`corr_build_fail=0`；
 0 崩溃 / 0 USB 错误；每时隙实时失败率不劣于基线 **0.1148%**。
 **硬约束**：延迟不能大到手机 attach 不上 / ping、iperf3 跑不起来。
+
+#### 48.114 胶水消灭 #1 的施工图：把 K0-d 并进 K1..K4 的同一条 CB（**先画图，不动代码**）
+
+> 按 §48.83(c) 立的规矩：**动手前先把槽位/队列/时序画清楚**。本节只是图与判据，**未改任何代码**——
+> 按用户流程，要等 K0-a 的手机 OTA 确认之后才开工。
+
+**（a）现状（每 hop，设备建矩阵 + 设备反演这条默认路径）**
+
+```
+队列（同一 MTLCommandQueue，按提交顺序执行）
+  CB#1  build_correlation()   : [corr_a] [corr_r_hp]                       ← 主机 commit 后【当场 waitUntilCompleted】
+  CB#2  run_async()           : [K1] [K2a] [K2b] [K3] [K4]                 ← 主机 commit，【deferred 不等待】
+  CB#3  equalizer/demapper    : burst（设备直读 gpu_ce/gpu_nv）
+主机侧穿插：stage_engine_group() 把 y/qy 从主机写进槽位（在 CB#1 之前）
+```
+
+**（b）为什么 CB#1 现在是独立的（读代码得到的理由，不是猜）**
+`run_engine_blocks()` 的注释写得很清楚：设备必须在主机读之前写。
+但那条理由针对的是 **`gpu_invert == false`** 的路线（主机要把设备写的 A 在**原地**反演成 A⁻¹）——
+那时"设备写 A"必须**先于**"主机在 A 上做 Gauss-Jordan"。
+
+**在 `gpu_invert == true` 的默认路线上这条约束不存在**：`slots_filled` 跳过了整个 staging 循环，
+主机**既不读也不写 A/R_hp**（§48.107 已核实）。⇒ **CB#1 的那次 `waitUntilCompleted` 是纯胶水。**
+
+**（c）目标形态**
+
+```
+CB#2' : [corr_a] [corr_r_hp] ‖barrier‖ [K1] [K2a] [K2b] [K3] [K4]     ← 一条 CB、一次 commit
+```
+
+- 需要的改动：`run_async()` 增加 `corr` 前缀参数（**`run_weights_only*` 本来就有这个能力，
+  `run_async` 缺**——§48.107 记的能力缺口）；
+- **必须在 corr 与 K1 之间加 `memoryBarrierWithScope:MTLBarrierScopeBuffers`**
+  （同 encoder 内的可见性；K3 已经有先例）；
+- `run_engine_blocks()` 在 `gpu_invert` 时改为**把描述符传给 `engine_run()`**，不再单独调 `build_slots_on_device()`。
+
+**（d）必须先核实的四件事（写进施工单，逐条验，不猜）**
+1. **y/qy staging 与 corr 的先后**：两者写**不同缓冲**（`gpu_y`/`gpu_qy` vs `gpu_a`/`gpu_r_hp`）
+   ⇒ 理论上无竞争。**要核实**：`stage_engine_group()` 里 `slots_filled=true` 时是否真的完全不碰 A/R_hp。
+2. **失败回退**：`encode_corr` 失败时现在返回 false 并让主机 staging。改成前缀后，
+   失败发生在**编码阶段**（提交之前）⇒ 必须**在这条 CB 里回退**：要么放弃该 CB、让主机 staging 后重编，
+   要么保持两条 CB 的老路。**这条要设计清楚，不能只写"回退"两个字。**
+3. **`slots_filled` 的语义变化**：现在它同时表达"设备已写 A/R_hp"，前缀形态下这个判断要前置
+   （因为 staging 发生在提交之前）——**这正是 §48.92/§48.94 那类错误的高发区**，
+   动手前先写真值表。
+4. **合并分支不受影响**：`std_slots_filled=false` ⇒ 那条路本来就没有设备构建。
+
+**（e）验收（与用户流程一致）**
+离线：`k0d` 980/980 逐字节、`k1` 980/980 判决、`combos`、`ctest -L phy`；
+外加**"CB 数减少"的可观测判据**——`[ul_gpu_lane] cbs/lane` 应从 ~2.7 降到 ~2.0，
+且 `gap`（GPU 空转等 CPU）应下降。然后**停下来做手机 OTA**。
