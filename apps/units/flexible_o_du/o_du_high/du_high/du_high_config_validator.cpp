@@ -1339,15 +1339,17 @@ static bool validate_tdd_ul_dl_unit_config(const du_high_unit_tdd_ul_dl_config& 
   return true;
 }
 
-static bool validate_ssb_cell_unit_config(const du_high_unit_ssb_config& config, nr_band band, arfcn_t dl_arfcn)
+static bool validate_ssb_cell_unit_config(const du_high_unit_ssb_config& config,
+                                          nr_band                        band,
+                                          arfcn_t                        dl_arfcn,
+                                          subcarrier_spacing             ssb_scs)
 {
   if (config.beams.empty()) {
     fmt::print("At least one SSB candidate must be transmitted.\n");
     return false;
   }
 
-  const subcarrier_spacing ssb_scs = band_helper::get_most_suitable_ssb_scs(band, subcarrier_spacing::kHz15);
-  const uint8_t            l_max   = ssb_get_L_max(ssb_scs, dl_arfcn, band);
+  const uint8_t l_max = ssb_get_L_max(ssb_scs, dl_arfcn, band);
 
   ssb_bitmap_t transmitted_ssbs;
   transmitted_ssbs.set_L_max(l_max);
@@ -1817,7 +1819,7 @@ static bool validate_base_cell_unit_config(const du_high_unit_base_cell_config& 
     return false;
   }
 
-  if (!validate_ssb_cell_unit_config(config.ssb_cfg, band, config.dl_f_ref_arfcn)) {
+  if (!validate_ssb_cell_unit_config(config.ssb_cfg, band, config.dl_f_ref_arfcn, ssb_scs)) {
     return false;
   }
 
