@@ -54,10 +54,15 @@
 ///     td_interpolation_strategy::interpolate in its constructor ("so the LSE pilots are kept per
 ///     DM-RS symbol"), so the per-symbol products this file produces are the right shape.
 ///
-/// KNOWN GAP, not exercised by the current cell (single layer): the pilot positions come from
-/// dmrs_patterns.front().re_pattern for every layer. Layers of one CDM group do share their REs, so
-/// this is exact for up to two layers, but a 4-layer allocation puts layers 2 and 3 on the other
-/// comb and would need the per-layer pattern. Fix before enabling multiple layers.
+/// LAYER COUNT (S-7f-5k): the pilot positions come from dmrs_patterns.front().re_pattern for every
+/// layer, and that is EXACT FOR ANY NUMBER OF LAYERS - not a gap. An earlier revision of this comment
+/// claimed 4-layer allocations would need a per-layer pattern; checking the producer showed
+/// otherwise: dmrs_pusch_estimator_impl assigns the same pattern to every layer
+/// (`mask[i_layer].re_pattern = params.re_pattern`, dmrs_pusch_estimator_impl.cpp:172, inside
+/// `for (i_layer = 0; i_layer != nof_tx_layers; ++i_layer)`) and separates the layers with the
+/// orthogonal cover codes w_t (per symbol) and w_f (per subcarrier) applied to each layer's own
+/// REFERENCE sequence - which is CDM, and which this file already stages per layer. All layers
+/// therefore sit on the same REs.
 ///
 /// Still the host's, deliberately (the CPU glue this step keeps): EPRE, sigma2 and the FD smoothing
 /// of filtered_pilots_lse, plus the fact that the base class still runs its own pre-stage which
