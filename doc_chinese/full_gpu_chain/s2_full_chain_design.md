@@ -7585,3 +7585,34 @@ mean total 178.1  =  pre 1.24 + sigma2 3.0 + corr 9.9 + gpu_path 164.1 (+ cpl_* 
 **净延迟大概率是略增的**（按 K0-a 早年评估：多一次 dispatch 约 10–25 µs 量级）。
 这不违反用户方针：**性能不是模块落点的判据**，硬约束只有"手机能 attach + ping/iperf3 跑得起来"。
 ⇒ 验收时**不要把"流水线没变快"当成失败**；要看的判据是 §48.108(e) 那张表。
+
+#### 48.110 S-7f-5b：K0-a 开工前的算术复核——**并得出"哪些模块需要逐位复刻"的判据**
+
+**（a）已复核（都有代码依据，§48.109 规矩）**
+
+| 环节 | 事实 | 依据 |
+|---|---|---|
+| ① 导频提取的 RE 映射 | **每 PRB 内按 `re_pattern` 升序取点，PRB 主序** —— 与设备端 `ocudu_mmse_corr.metal` 的 `pilot_re[]` 约定**完全一致** | `extract_re_prb`（`port_channel_estimator_helpers.cpp:376-400`）：`out[prb*n + j] = convert(in[prb*12 + pos_j])` |
+| ② `cbf16 → cf_t` | **纯位操作**：`as_type<float>(uint(u16) << 16)`，**天生逐位可复刻** | `include/ocudu/adt/bf16.h:52-67`、`include/ocudu/adt/complex.h:55-58` |
+| ③ LS 算术 | `pilots_lse = rx ⊗ conj(ref)`（`prod_conj`），逐符号逐层 | `preprocess_pilots_and_estimate_cfo`（`port_channel_estimator_average_impl.cpp:507+`） |
+| ④ CFO | 由**第一个与第二个 DM-RS 符号**之间的相位估计（标量，需一次归约） | 同上 |
+| ⑤ 设备网格视图 | `{base, subc/symb/port stride, dims}`，`base` 页对齐，**实网上已有效**（等化器在用） | `resource_grid_device_view.h:22-47`；`ch_re device=150040 host=0` |
+
+**（b）复核查出的**隐患**（差一点就照抄别人的做法去追"逐位一致"）**
+`ocuduvec::prod_conj` 有 **SIMD 与标量两条路径**（`lib/ocuduvec/prod.cpp:107-135`）：
+SIMD 走 `ocudu_simd_cf_conjprod`，尾部标量走 `z[i] = x[i] * std::conj(y[i])`，
+Swift/NEON 上 `OCUDU_SIMD_CF_SIZE=4`。**要让设备端"逐位一致"，就得连 SIMD 的乘法次序一起复刻。**
+
+**（c）关键判据：不是所有搬上 GPU 的模块都需要逐位复刻**
+K0-d（相关矩阵）**必须**逐位一致，原因是**误差会被放大**：A 的 1 ulp 经 `W = R_hp·A⁻¹` 被
+**cond₂(A) ≈ 2e4** 放大成 W/h 的 ~1%（§48.98）。
+
+K0-a **不需要**，因为 `h = W·y` 对 y 是**线性**的：y 的相对误差 ε 原样传到 h，**没有放大因子**
+（W 本身良态）。所以 1 ulp（~1e-7）在 y 上是无关紧要的。
+
+⇒ **设计结论**：K0-a 的设备内核只需**数值等价到 float32 精度**，
+不必复刻 `prod_conj` 的 SIMD 路径；验收用**容差比对**（导频级）+
+**既有端到端门禁**（`k0d` 逐字节、`k1` 判决、`combos`、上机），而不是"逐位一致"。
+**判据公式（以后搬任何模块先算它）**：
+> 若该量到输出的放大因子 ≈ 1（线性、良态）⇒ 容差验收即可；
+> 若有 cond/条件数量级的放大 ⇒ 必须逐位复刻（并加进 `IEEE_MATH_SOURCES`）。
