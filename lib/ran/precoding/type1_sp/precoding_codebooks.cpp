@@ -7,7 +7,7 @@
 #include "ocudu/adt/interval.h"
 #include "ocudu/ran/beamforming/beam_identifier_helpers.h"
 #include "ocudu/ran/precoding/precoding_codebook_configuration.h"
-#include "ocudu/ran/precoding/precoding_codebook_helpers.h"
+#include "ocudu/ran/precoding/precoding_codebook_type1_helpers.h"
 #include "ocudu/support/math/math_utils.h"
 
 using namespace ocudu;

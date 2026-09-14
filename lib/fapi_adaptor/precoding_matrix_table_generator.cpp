@@ -6,7 +6,7 @@
 #include "precoding_matrix_repository_builder.h"
 #include "ocudu/adt/slotted_array.h"
 #include "ocudu/fapi_adaptor/precoding_matrix_mapper.h"
-#include "ocudu/ran/precoding/precoding_codebook_helpers.h"
+#include "ocudu/ran/precoding/precoding_codebook_type1_helpers.h"
 #include "ocudu/ran/precoding/precoding_codebooks.h"
 
 using namespace ocudu;

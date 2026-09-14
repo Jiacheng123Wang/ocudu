@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
-#include "ocudu/ran/precoding/precoding_codebook_helpers.h"
 #include "ocudu/adt/to_array.h"
 #include "ocudu/ran/precoding/precoding_codebook_configuration.h"
+#include "ocudu/ran/precoding/precoding_codebook_type1_helpers.h"
 #include "ocudu/support/math/math_utils.h"
 
 using namespace ocudu;

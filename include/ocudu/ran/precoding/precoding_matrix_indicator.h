@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "precoding_codebook_helpers.h"
+#include "precoding_codebook_type2_helpers.h"
 #include "ocudu/adt/static_vector.h"
 #include "ocudu/ran/precoding/precoding_codebook_configuration.h"
 #include <cstdint>

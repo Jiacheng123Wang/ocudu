@@ -16,7 +16,7 @@
 #include "ocudu/ran/beamforming/beam_weights_codebook.h"
 #include "ocudu/ran/beamforming/beam_weights_codebook_generator.h"
 #include "ocudu/ran/precoding/precoding_codebook_configuration.h"
-#include "ocudu/ran/precoding/precoding_codebook_helpers.h"
+#include "ocudu/ran/precoding/precoding_codebook_type1_helpers.h"
 #include "ocudu/ran/precoding/precoding_codebooks.h"
 #include "ocudu/ran/precoding/precoding_matrix_indicator.h"
 #include <gtest/gtest.h>

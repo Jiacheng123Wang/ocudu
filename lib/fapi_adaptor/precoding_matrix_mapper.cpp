@@ -4,7 +4,7 @@
 #include "ocudu/fapi_adaptor/precoding_matrix_mapper.h"
 #include "precoding_matrix_mapper_functions.h"
 #include "ocudu/ocudulog/ocudulog.h"
-#include "ocudu/ran/precoding/precoding_codebook_helpers.h"
+#include "ocudu/ran/precoding/precoding_codebook_type1_helpers.h"
 #include "ocudu/ran/precoding/precoding_matrix_indicator.h"
 #include "ocudu/support/ocudu_assert.h"
 #include "fmt/std.h"

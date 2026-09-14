@@ -5,7 +5,7 @@
 #include "csi_report_on_puxch_helpers.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/interval.h"
-#include "ocudu/ran/precoding/precoding_codebook_helpers.h"
+#include "ocudu/ran/precoding/precoding_codebook_type1_helpers.h"
 #include "ocudu/ran/precoding/precoding_constants.h"
 #include "ocudu/support/error_handling.h"
 

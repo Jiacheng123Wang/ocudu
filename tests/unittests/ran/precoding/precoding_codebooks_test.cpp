@@ -4,7 +4,6 @@
 
 #include "ocudu/adt/format.h"
 #include "ocudu/ran/precoding/precoding_codebook_configuration.h"
-#include "ocudu/ran/precoding/precoding_codebook_helpers.h"
 #include "ocudu/ran/precoding/precoding_codebooks.h"
 #include <gtest/gtest.h>
 #include <vector>

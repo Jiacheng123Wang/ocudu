@@ -42,4 +42,19 @@ enum class pmi_codebook_typeI_mode : uint8_t { one = 1, two = 2 };
 /// in TS38.214 Section 5.2.2.2.3, namely QPSK (\f$N_{PSK}=4\f$) or 8-PSK (\f$N_{PSK}=8\f$).
 enum class pmi_codebook_typeII_phase_size : uint8_t { qpsk = 4, psk8 = 8 };
 
+/// Single-panel codebook configuration of \f$(N_1, N_2)\f$ and \f$(O_1, O_2)\f$
+struct pmi_codebook_single_panel_info {
+  /// Parameter \f$N_1\f$.
+  unsigned n1;
+  /// Parameter \f$N_2\f$.
+  unsigned n2;
+  /// Parameter \f$O_1\f$.
+  unsigned o1;
+  /// Parameter \f$O_2\f$.
+  unsigned o2;
+};
+
+/// Returns the single-panel codebook configuration of \f$(N_1, N_2)\f$ and \f$(O_1, O_2)\f$.
+const pmi_codebook_single_panel_info& get_single_panel_info(pmi_codebook_single_panel_config n1_n2);
+
 } // namespace ocudu
