@@ -280,6 +280,39 @@ private:
   /// with the engine ready, no hop block ever runs the CPU reference math.
   /// \return True when the engine processed and unpacked the batch; false when the engine call
   ///         failed, in which case the caller MUST fall back to the CPU reference math.
+  /// \param[in] device_stats When non-null, the DEVICE builds A and R_hp of this batch (K0-d) and
+  ///                        the host then inverts them in the slots - the full-GPU-path form of the
+  ///                        correlation matrices. Null keeps the host staging.
+  /// True when OCUDU_CE_DEV_INVERT is set: the experiment that keeps the inversion on the device by
+  /// riding the weights command buffer (correlation prefix + K1), instead of building here and
+  /// inverting on the host. Off by default - see the accuracy note at build_slots_on_device().
+  static bool device_invert_on_device()
+  {
+    return std::getenv("OCUDU_CE_DEV_INVERT") != nullptr;
+  }
+
+  /// \brief K0-d: the device builds A and R_hp of one block geometry into the engine slots.
+  ///
+  /// Two shapes, selected by the accuracy experiment OCUDU_CE_DEV_INVERT:
+  ///   - default: the build completes HERE (its own command buffer) and the host then writes A^-1
+  ///     over A in those same slots. Removes the host's construction of A and R_hp (two nested
+  ///     correlation loops over 170 KB of stores); keeps the small in-place inversion, because the
+  ///     device inversion is not accurate enough at this conditioning.
+  ///   - experiment: nothing is dispatched here. The DESCRIPTOR is returned so the caller can pass
+  ///     it to the weights call, which builds A as a prefix of its own command buffer and has K1
+  ///     invert it in the same buffer - one round trip less, at the kernel's accuracy.
+  ///
+  /// \return The descriptor when the caller must dispatch it itself (experiment), nullopt otherwise.
+  std::optional<metal::mmse_engine::corr_stage> build_slots_on_device(const channel_statistics& stats,
+                             const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
+                             unsigned                                       b_prb,
+                             span<const unsigned>                           dmrs_slots,
+                             unsigned                                       scs_khz,
+                             unsigned                                       sys_offset,
+                             unsigned                                       nof_systems,
+                             unsigned                                       a_stride,
+                             unsigned                                       L);
+
   bool run_engine_blocks(const fd_td_estimation_stage_args& args,
                          unsigned                           gb_start,
                          unsigned                           n_blk,
@@ -288,9 +321,9 @@ private:
                          unsigned                           L,
                          unsigned                           npt,
                          bool                               matrix,
-                         const metal::mmse_engine::reformat_stage* reformat = nullptr,
-                         bool                               defer    = false,
-                         const metal::mmse_engine::corr_stage*      corr     = nullptr);
+                         const metal::mmse_engine::reformat_stage* reformat      = nullptr,
+                         bool                               defer           = false,
+                         const channel_statistics*          device_stats    = nullptr);
 
   /// \brief Unpack of a batch whose command buffer has not been waited for yet.
   ///

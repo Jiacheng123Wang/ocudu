@@ -48,12 +48,25 @@ struct mmse_stats_t {
   std::atomic<uint64_t> guard_hits{0};       // of those, the ones that found an outstanding batch
   std::atomic<uint64_t> guard_wait_ns{0};    // host time spent in the guards that hit
   std::atomic<uint64_t> guard_wait_max_ns{0};
+  // K0-d: how many times the estimator asked the DEVICE to build the correlation matrices. This is
+  // reported on purpose: an A/B against "the host builds them" proves nothing if this stayed at
+  // zero for both routes, which is exactly what happened once (the device build sat in a branch the
+  // captures never took, and 980 identical captures were read as agreement between two routes that
+  // were in fact the same one).
+  std::atomic<uint64_t> corr_builds{0};
 };
 
 static mmse_stats_t& mmse_stats()
 {
   static mmse_stats_t s;
   return s;
+}
+
+static void mmse_stats_corr_build()
+{
+#if defined(OCUDU_METAL_STATS)
+  mmse_stats().corr_builds.fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 
 static void mmse_stats_commit()
@@ -110,18 +123,20 @@ static void mmse_stats_report()
   const uint64_t      wait = s.guard_wait_ns.load(std::memory_order_relaxed);
   std::fprintf(stderr,
                "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu guard=%llu/%llu "
-               "guard_mean=%.1fus guard_max=%.1fus\n",
+               "guard_mean=%.1fus guard_max=%.1fus device_corr_builds=%llu\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(hits),
                static_cast<unsigned long long>(s.guard_calls.load(std::memory_order_relaxed)),
                (hits != 0) ? (static_cast<double>(wait) / static_cast<double>(hits) / 1e3) : 0.0,
-               static_cast<double>(s.guard_wait_max_ns.load(std::memory_order_relaxed)) / 1e3);
+               static_cast<double>(s.guard_wait_max_ns.load(std::memory_order_relaxed)) / 1e3,
+               static_cast<unsigned long long>(s.corr_builds.load(std::memory_order_relaxed)));
 }
 #else  // OCUDU_METAL_STATS
 static void mmse_stats_commit() {}
 static void mmse_stats_wait() {}
+static void mmse_stats_corr_build() {}
 
 /// Stats off: the guard still has to be a non-trivially-destructible object, so that the explicit
 /// scope around it does not look like an unused variable to the compiler.
@@ -603,7 +618,8 @@ static bool encode_corr(mmse_engine_impl* e, id<MTLComputeCommandEncoder> enc, c
   p.fd_hz       = c.fd_hz;
   p.tau_rms_s   = c.tau_rms_s;
   p.sigma2      = c.sigma2;
-  // The host's diagonal ridge (build_correlation_matrices(): const float ridge = 1e-6F).
+  // The host's diagonal ridge (build_correlation_matrices(): const float ridge = 1e-6F). Must track
+  // it exactly, or the device-built A differs from the host's.
   p.ridge = 1e-6F;
   for (unsigned k = 0; k != npt; ++k) {
     p.dmrs_slots[k] = c.dmrs_slots[k];
@@ -654,6 +670,7 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
   [enc endEncoding];
   [cb commit];
   mmse_stats_commit();
+  mmse_stats_corr_build();
   gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
   [cb waitUntilCompleted];
   mmse_stats_wait();
@@ -1018,13 +1035,21 @@ bool encode_weights_only(mmse_engine_impl*                  e,
       [enc endEncoding];
       return false;
     }
-    [enc setComputePipelineState:(e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr)
-                                     ? e->inv_rl_pipe
-                                     : e->inv_pipe];
-    [enc setBuffer:ai_buf offset:0 atIndex:0];
-    [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
-    [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
-    [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+    // EXPERIMENT (OCUDU_CE_DEV_INVERT=1): invert the freshly built A in this same command buffer, so
+    // the whole matrix path stays on the device - no host inversion, no standalone round trip. This
+    // is the form that would make the device build a net win; it is OFF by default because the
+    // float32 kernel's accuracy at this conditioning is not established (see the plan: on a real A
+    // the element-wise relative error is 9.7e-1 against the host's 1.7e-1, and Metal has no double
+    // to fall back on).
+    if (std::getenv("OCUDU_CE_DEV_INVERT") != nullptr) {
+      [enc setComputePipelineState:(e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr)
+                                       ? e->inv_rl_pipe
+                                       : e->inv_pipe];
+      [enc setBuffer:ai_buf offset:0 atIndex:0];
+      [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
+      [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
+      [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
+    }
   }
 
   [enc setComputePipelineState:e->weights_pipe];
