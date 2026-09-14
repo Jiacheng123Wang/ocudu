@@ -19,7 +19,7 @@ set -u
 
 DUR=${1:-150}
 CFG=${2:-configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml}
-REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../.." && pwd)
 LOG=/tmp/gnb_ota_k1.log
 CONSOLE=/tmp/gnb_ota_k1_console.log
 
@@ -48,29 +48,42 @@ done
 kill -9 $PID 2>/dev/null
 wait $PID 2>/dev/null
 
-echo "== binary =="
-grep -m1 "Built in" "$LOG" || true
+# The counters go to stderr (the console), the application log holds the link events. Some builds
+# route both to the console, so the greps below look at both files.
+BOTH=$(cat "$CONSOLE" "$LOG" 2>/dev/null)
 
-if grep -q "failed to connect to AMF" "$LOG"; then
+echo "== binary =="
+printf '%s\n' "$BOTH" | grep -m1 "Built in" || echo "   (no log at all - did the binary start?)"
+
+if printf '%s\n' "$BOTH" | grep -q "failed to connect to AMF"; then
   echo "== ABORTED: the AMF (NGAP) is not reachable - start the core, then re-run =="
-  grep -m1 "NG Setup" "$LOG"
+  printf '%s\n' "$BOTH" | grep -m1 "NG Setup"
   exit 1
 fi
 
-echo "== device build really executed =="
-echo "   (device_corr_builds > 0 and hops_gpu > 0 prove the CE ran on the device path)"
-grep -o "\[metal_stats\] mmse_ce commits=[^\"]*" "$LOG" | tail -1
+echo "== device path really executed =="
+echo "   device_corr_builds > 0 and hops_gpu > 0 prove the estimator ran; the K1 counters below"
+echo "   prove the device inversion ran (commits grow by one per batch)."
+printf '%s\n' "$BOTH" | grep -o "\[metal_stats\] mmse_ce commits=.*" | tail -1
+printf '%s\n' "$BOTH" | grep -o "\[mmse_time_sum\].*" | tail -1
 
 echo "== per-hop timing (recorded, NOT gated: the K1 kernel is a known performance debt) =="
-grep -o "\[mmse_time_sum\][^\"]*" "$LOG" | tail -1
+printf '%s\n' "$BOTH" | grep -o "\[ul_time_frequency\].*" | tail -1
 
 echo "== link health =="
-grep -ciE "Real-time failure in RF" "$LOG" | sed 's/^/   Real-time failure in RF lines: /'
-grep -iE "Real-time failure in RF" "$LOG" | tail -3
-grep -ciE "usb|libusb|overflow|underflow" "$LOG" | sed 's/^/   USB/overflow lines: /'
+echo -n "   Real-time failure in RF lines: "
+printf '%s\n' "$BOTH" | grep -ciE "Real-time failure in RF"
+printf '%s\n' "$BOTH" | tail -40 | grep -iE "Real-time failure in RF" || true
+echo -n "   USB error lines: "
+printf '%s\n' "$BOTH" | grep -ciE "usb.*(error|fail|overflow|underflow)"
 
 echo "== crashes =="
-grep -iE "assert|terminate|segmentation|abort" "$LOG" | tail -5
+printf '%s\n' "$BOTH" | grep -iE "assert|terminate|segmentation|core dumped" | tail -5 || true
 
-echo "== ACLR / UE activity (a leg with no UE proves nothing) =="
-grep -cE "PRACH|rnti=" "$LOG" | sed 's/^/   PRACH+RNTI lines: /'
+echo "== UE activity (a leg with no UE proves nothing) =="
+echo -n "   PRACH / RNTI lines: "
+printf '%s\n' "$BOTH" | grep -cE "PRACH|rnti="
+
+echo "== raw outputs kept for the record =="
+echo "   $CONSOLE"
+echo "   $LOG"
