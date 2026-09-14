@@ -261,6 +261,9 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   gpu_rx_pilots = alloc_aligned<float>(2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * MAX_CDM_GROUPS *
                                        MAX_NOF_PILOTS_SYMBOL);
   gpu_epochs    = alloc_aligned<float>(MAX_NSYMB_PER_SLOT);
+  gpu_ls_ref    = alloc_aligned<float>(k_ls_floats);
+  gpu_ls_out    = alloc_aligned<float>(k_ls_floats);
+  gpu_ls_cfo    = alloc_aligned<float>(1);
 
   // metal_nn_mmse flavor: compile the simdgroup_matrix 8x8 pipelines and stage the
   // quad-packed pilot matrix qy (zero-initialized: tail-quad columns of non-existent
@@ -328,6 +331,9 @@ port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl(
   free_aligned(gpu_pilots);
   free_aligned(gpu_rx_pilots);
   free_aligned(gpu_epochs);
+  free_aligned(gpu_ls_ref);
+  free_aligned(gpu_ls_out);
+  free_aligned(gpu_ls_cfo);
 }
 
 float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estimation_stage_args& args)
@@ -631,6 +637,121 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   static_vector<unsigned, MAX_NOF_DMRS_SYMBOLS> dmrs_sym;
   args.pattern_symbols.for_each(args.first_symbol, args.last_symbol, [&](unsigned s) { dmrs_sym.push_back(s); });
   const unsigned npt = dmrs_sym.size();
+
+  // ---- K0-a: the estimator's INPUT stage, on the device --------------------------------
+  // The host pre-stage that ran before this call has already filled pilots_lse from the grid.
+  // When OCUDU_CE_DEV_LS=1 and the grid is device-addressable, the pilots are recomputed HERE, on
+  // the device, and the result OVERWRITES pilots_lse_view - so the value the rest of the estimator
+  // consumes comes from the device. Recomputing rather than replacing is the CPU glue this step
+  // keeps on purpose (the host's copy is still what the statistics read); removing it is the next
+  // step. The device path is OFF by default until the tolerance probe and a phone OTA have cleared
+  // it, and it falls back to the host whenever the geometry or the grid does not qualify.
+  static const bool device_ls_enabled = (std::getenv("OCUDU_CE_DEV_LS") != nullptr);
+  if (device_ls_enabled && (npt != 0) && (nof_layers <= MAX_LAYERS) &&
+      (nof_layers <= args.dmrs_patterns.size())) {
+    const resource_grid_device_view dv           = args.grid.get_device_view();
+    const unsigned                  comb         = args.dmrs_patterns.front().re_pattern.count();
+    const unsigned                  nof_pilots   = nof_prb * comb;
+    // A contiguous allocation only: the kernels index the hop as first_prb + k/ncomb, which is the
+    // same restriction the device gather of the equalizer works under.
+    const bool contiguous = (hop_rb_mask.find_highest() + 1 - hop_rb_mask.find_lowest()) == nof_prb;
+    if (dv.is_valid() && contiguous && (comb != 0) && (nof_pilots == args.nof_symbol_pilots) &&
+        (nof_pilots <= MAX_NOF_PILOTS_SYMBOL)) {
+      for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+        for (unsigned i_symb = 0; i_symb != npt; ++i_symb) {
+          span<const cf_t> src = args.pilots.get_symbol(args.hop_offset + i_symb, i_layer);
+          float*           dst = gpu_ls_ref + (static_cast<std::size_t>(i_symb) * nof_layers + i_layer) * nof_pilots * 2;
+          for (unsigned j = 0; j != nof_pilots; ++j) {
+            dst[2 * j]     = src[j].real();
+            dst[2 * j + 1] = src[j].imag();
+          }
+        }
+      }
+      for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+        gpu_epochs[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
+      }
+
+      metal::mmse_engine::pilots_stage st{};
+      st.grid              = dv.base;
+      st.grid_bytes        = (static_cast<std::size_t>(dv.nof_ports - 1) * dv.port_stride +
+                       static_cast<std::size_t>(dv.nof_symb - 1) * dv.symb_stride +
+                       static_cast<std::size_t>(dv.nof_subc - 1) * dv.subc_stride + 1) * sizeof(cbf16_t);
+      st.grid_subc_stride  = dv.subc_stride;
+      st.grid_symb_stride  = dv.symb_stride;
+      st.grid_port_stride  = dv.port_stride;
+      st.ref               = gpu_ls_ref;
+      st.epochs            = gpu_epochs;
+      st.lse               = gpu_ls_out;
+      st.cfo               = gpu_ls_cfo;
+      st.nof_dmrs_symb     = npt;
+      st.nof_layers        = nof_layers;
+      st.nof_pilots        = nof_pilots;
+      st.ncomb             = comb;
+      st.nof_prb           = nof_prb;
+      st.first_prb         = hop_rb_mask.find_lowest();
+      st.port              = args.port;
+      for (unsigned k = 0; k != npt; ++k) {
+        st.dmrs_symb[k] = dmrs_sym[k];
+      }
+      {
+        unsigned n = 0;
+        const auto& re_pattern = args.dmrs_patterns.front().re_pattern;
+        for (unsigned pos = 0; (pos != NOF_SUBCARRIERS_PER_RB) && (n != comb); ++pos) {
+          if (re_pattern.test(pos)) {
+            st.pilot_re[n++] = pos;
+          }
+        }
+      }
+
+      if (engine->build_pilots_lse(st)) {
+        // Tolerance probe (OCUDU_CE_LS_CHECK=1): the device LSE against the host's, BEFORE the
+        // overwrite. Tolerance, not bit-exactness: the pilots enter h = W . y linearly, so a
+        // relative error carries no amplification factor (see ocudu_mmse_pilots.metal).
+        if (std::getenv("OCUDU_CE_LS_CHECK") != nullptr) {
+          double   max_rel = 0.0;
+          unsigned nof_bad = 0;
+          for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+            for (unsigned i_symb = 0; i_symb != npt; ++i_symb) {
+              span<const cf_t> ref_lse = args.pilots_lse_view.get_symbol(i_symb, i_layer);
+              const float*     d = gpu_ls_out + (static_cast<std::size_t>(i_symb) * nof_layers + i_layer) * nof_pilots * 2;
+              for (unsigned j = 0; j != nof_pilots; ++j) {
+                const double dr = static_cast<double>(d[2 * j]) - ref_lse[j].real();
+                const double di = static_cast<double>(d[2 * j + 1]) - ref_lse[j].imag();
+                const double mag = static_cast<double>(std::abs(ref_lse[j]));
+                const double rel = (mag > 1e-12) ? std::sqrt(dr * dr + di * di) / mag : std::sqrt(dr * dr + di * di);
+                if (rel > 1e-5) {
+                  ++nof_bad;
+                }
+                max_rel = std::max(max_rel, rel);
+              }
+            }
+          }
+          std::fprintf(stderr,
+                       "[ls_check] L=%u symb=%u pilots=%u layers=%u max_rel=%.3e bad(>1e-5)=%u cfo=%g\n",
+                       nof_pilots,
+                       npt,
+                       nof_pilots,
+                       nof_layers,
+                       max_rel,
+                       nof_bad,
+                       static_cast<double>(gpu_ls_cfo[0]));
+        }
+
+        // Consume the device result.
+        for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+          for (unsigned i_symb = 0; i_symb != npt; ++i_symb) {
+            span<cf_t>       dst = args.pilots_lse_view.get_symbol(i_symb, i_layer);
+            const float*     d = gpu_ls_out + (static_cast<std::size_t>(i_symb) * nof_layers + i_layer) * nof_pilots * 2;
+            for (unsigned j = 0; j != nof_pilots; ++j) {
+              dst[j] = cf_t(d[2 * j], d[2 * j + 1]);
+            }
+          }
+        }
+      } else {
+        logger.warning("[mmse_ce] device LSE build failed: keeping the host pre-stage");
+      }
+    }
+  }
 
   // Per-phase timing (compile-time debug aid, ENABLE_CE_TIME=ON defines OCUDU_CE_TIME):
   // sigma2 / corr-build / GPU / CPU-blocks / finish, printed through the [mmse_time]

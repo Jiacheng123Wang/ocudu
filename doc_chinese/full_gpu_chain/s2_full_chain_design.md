@@ -7650,3 +7650,40 @@ K0-a **不需要**，因为 `h = W·y` 对 y 是**线性**的：y 的相对误�
 外加导频级容差探针（设备 vs 主机 LSE 的最大相对差应在 float32 噪声量级）。
 **然后停下来交用户做手机 OTA**（attach + ping + iperf3；`device_corr_builds>0`；`corr_build_fail=0`；
 0 崩溃 / 0 USB 错误；每时隙实时失败率不劣于 0.1148%）。
+
+#### 48.112 S-7f-5g：K0-a 接线完成，**容差探针抓到真不一致**（还没到 OTA，这就是探针的用处）
+
+**（a）做了什么**
+metal 的 `apply_fd_td_estimation_stage()` 里加了设备 LSE 块（`OCUDU_CE_DEV_LS=1` 打开，
+**默认关**）：取 `args.grid.get_device_view()` → 组 `pilots_stage` → 调 `engine->build_pilots_lse()`
+→ **覆盖写 `args.pilots_lse_view`**；`OCUDU_CE_LS_CHECK=1` 时在覆盖前逐元素比对。
+不满足条件（设备视图无效 / 分配不连续 / `nof_pilots != args.nof_symbol_pilots`）时**自动回退主机**。
+
+**（b）探针结果：设备 LSE 与主机**不一致**（这就是本步要停下来验的东西）**
+
+| 抓包 | `nof_pilots` × 符号 × 层 | **max 相对差** | 超差(>1e-5)的导频数 |
+|---|---|---|---|
+| `iq2_1009_17923` | 144 × 3 × 1 | **5.86e-02** | 144 / 144 |
+| `iq1_10049_17921` | 150 × 3 × 1 | **1.42e-01** | 150 / 150 |
+| `iq2_10044_17923` | 150 × 3 × 1 | **7.73e-02** | 150 / 150 |
+
+6–14% 的差、且**全部**导频都超差 ⇒ 不是 float32 噪声，是**系统性差异**，**绝不能上机**。
+
+**（c）根因（自查，指向我自己列过的缺口 #2）**
+`compute_hop_submit` 的 pre-stage 在 `td_interpolation_strategy == average` 时**不是**逐符号存
+`pilots_lse[symb]`，而是把各 DM-RS 符号的乘积**累加进 `pilots_lse[0]`**
+（`compensate_cfo_and_accumulate`：`if (average) ocuduvec::add(pilots_lse[0], temp, pilots_lse[0])`；
+`combine_pilots` 里同样）。而我的内核产出的是**逐符号乘积**——两者是不同的量。
+§48.108 的内核头注释里，**缺口 #2 写的正是"`td_interpolation_strategy` 的分支未建模"**。
+⇒ **探针在 OTA 之前就把这个缺口变成了硬证据**，这正是"每步停下来验"的价值：
+如果直接上机，表现会是"链路时好时坏"，而根因要花很久才能定位。
+
+**（d）修复方向（下一步，不需要上机）**
+内核按策略分两种形态：
+- `average`：`lse[0] = Σ_s phasor_s · rx_s ⊗ conj(ref_s)`（其余符号不产），层对再做 `average_pairs`；
+- 非 `average`：逐符号（当前形态）+ symbols ≥ 2 的 `combine_pilots` 累加。
+**先确认本小区实际用的是哪个策略**（`cfg.td_interpolation_strategy` 的构造实参），
+再按它实现——**不猜**。修好后重跑探针，判据是 max 相对差回到 float32 量级（≤1e-5）。
+
+**（e）状态**：设备 LSE **默认关**，因此默认路径与上机链路**不受影响**（三条抓包 23.97/6.24/31.86 不变）。
+本次**不提交给 OTA**——按用户流程，要等离线探针与门禁全绿。

@@ -527,6 +527,15 @@ private:
   float* gpu_pilots    = nullptr;
   float* gpu_rx_pilots = nullptr;
   float* gpu_epochs    = nullptr;
+  /// K0-a staging: the transmitted DM-RS of the hop and the device's least-squares pilots, both
+  /// [symbol][layer][pilot] real/imag interleaved, plus the CFO scalar it estimates. Page-aligned so
+  /// the kernels can be handed them without a copy.
+  /// Elements of one K0-a staging buffer: [symbol][layer][pilot] real/imag interleaved.
+  static constexpr std::size_t k_ls_floats =
+      2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * MAX_LAYERS * MAX_NOF_PILOTS_SYMBOL;
+  float* gpu_ls_ref    = nullptr;
+  float* gpu_ls_out    = nullptr;
+  float* gpu_ls_cfo    = nullptr;
   bool   gpu_nv_ready  = false;
 
   /// Maximum number of full blocks per slot for the configured block size.
