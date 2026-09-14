@@ -555,9 +555,11 @@ struct eq_flush_state_t {
   std::vector<id<MTLBuffer>> gather_tables;
   /// The hop's tables while the burst is being encoded (see eq_gather_tables): one build per hop,
   /// every dispatch of that hop reads them.
-  gather_tables_t  hop_tables;
-  unsigned         hop_tables_plan = 0; // the plan they were built from, as an address
-  bool             hop_tables_valid = false;
+  gather_tables_t hop_tables;
+  /// The plan they were built from, as an address. It must hold a POINTER: an unsigned truncated it
+  /// on a 64-bit host and the key never matched the plan it was made from, so the cache never hit.
+  uintptr_t hop_tables_plan  = 0;
+  bool      hop_tables_valid = false;
 };
 static eq_flush_state_t& eq_flush_state()
 {
