@@ -7504,3 +7504,55 @@ mean total 178.1  =  pre 1.24 + sigma2 3.0 + corr 9.9 + gpu_path 164.1 (+ cpl_* 
 
 （对照：K1 的性能、K0-d 的排队等待都属于"因为主机在环才存在"的胶水，**按 §48.84(a0) 规则 1 不是目标**；
 上面两条才是结构性的交接缺陷。）
+
+#### 48.108 S-7f-5a 定案：**K0-a＝把 CE 的输入级搬上设备**（下一个"功能模块进 GPU"）
+
+**（a）工作流（用户 2026-09-15 定，优先级最高）**
+1. **先把功能模块搬进 GPU**，模块之间**允许用 CPU 胶水串**；
+2. **每一步搬完 → 离线门禁 → 停下来交给用户做手机 OTA**，确认没把整条通信链路搞坏；
+3. 确认无误后，**再逐个消灭 CPU 胶水**，让 GPU 内部流水线变长；
+4. **每消灭一处胶水，同样要 OTA 验证**。
+5. **硬约束**：性能不能差到手机 attach 不上 / ping、iperf3 跑不起来（延迟过大 ⇒ 手机接不上）。
+
+**（b）为什么下一个模块是 K0-a**
+§48.107 的交接点清单里，链路上**唯一"输入由 CPU 生产"**的一段就是 CE 的输入：
+`port_channel_estimator_average_impl::compute_hop_submit()` 的 pre-stage。代码注释自己就写明了：
+> "The pre-stage window (pilot extraction from the resource grid, EPRE, LSE and CFO) is what a
+> device-side pilot extraction would take over."
+
+它做四件事（`port_channel_estimator_average_impl.cpp:308-430`）：
+
+| 步骤 | 代码 | 内容 |
+|---|---|---|
+| ① 导频提取 | `extract_layer_hop_rx_pilots`（`port_channel_estimator_helpers.cpp:133`） | 按 `re_pattern` 从**频域网格**（`grid.get_view(port, sym)`，`cbf16_t`）取出各 DM-RS 符号的接收导频 → `rx_pilots[symbol][cdm][pilot]` |
+| ② EPRE | `ocuduvec::average_power(rx_pilots...)` | 接收导频平均功率（标量） |
+| ③ 解扰 + LS + CFO | `preprocess_pilots_and_estimate_cfo` | `pilot_products = rx · conj(ref)`；CFO 估计（标量） |
+| ④ CFO 补偿 | `compensate_cfo_and_accumulate`（`sc_prod(..., std::polar(1, TWOPI·epoch·cfo))`） | 乘相位后**累加成 `pilots_lse`** |
+
+**（c）落点设计（本步目标）**
+
+```
+[设备网格]──①提取──②EPRE──③解扰/LS/CFO──④补偿──→ 直接写进 gpu_y / gpu_qy（引擎输入布局）
+     │                                                      │
+     └─ 网格本来就在设备上（§47 S-7b：FFT 直写 + 主机零拷贝共享），等化器已用 device_view ─┘
+```
+
+⇒ **主机不再生产 y/qy**，`stage_engine_group()` 里那段 memcpy 消失。
+代价：新增 2–3 个 dispatch（提取 / 归约出 CFO 标量 / 应用）。
+
+**本步**不**做**的事（留给后续"消灭胶水"步骤，每步各自 OTA）：
+- `sigma2` 仍在主机算（它读 `pilots_lse_view`）——**这就是本步允许保留的 CPU 胶水**；
+- `unpack gpu_h`→`grid_est`、RSRP/noise/TA 统计仍在主机（不在 LLR 路径上）。
+
+**（d）数值纪律（照抄 K0-d 的经验）**
+设备端必须**逐位复现**主机的这四步算术（同一表达式顺序、同一字面量），
+并且 `ocudu_mmse_corr.metal` 的教训要照搬：**该内核要加进 `IEEE_MATH_SOURCES`（`-fno-fast-math`）**，
+否则 fast-math 的 fma 收缩会引入 1 ulp，再被 cond₂(A)≈2e4 放大。
+门禁：`k0d`（980 抓包逐字节）、`k1`（980 判决）、`combos`、`ctest -L phy`。
+**离线全绿后停下来，交用户做手机 OTA。**
+
+**（e）验收（每步都一样）**
+| 层级 | 判据 |
+|---|---|
+| 离线 | `capture_gates.sh k0d` 980/980 逐字节；`k1` 980/980 判决一致；`combos` PASS；`ctest -L phy` 162/162 |
+| **上机** | 手机能 attach + ping + iperf3；`device_corr_builds>0`；`corr_build_fail=0`；0 崩溃/0 USB 错误；`Real-time failure in RF` 每时隙率不劣于基线 0.1148%（§48.106(b) 的正确口径）|
