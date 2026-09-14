@@ -5,9 +5,11 @@
 #include "ocudu/ran/precoding/precoding_codebook_configuration.h"
 #include "ocudu/adt/to_array.h"
 #include "ocudu/ran/precoding/precoding_codebook_properties.h"
+#include "ocudu/ran/precoding/precoding_codebook_type2_helpers.h"
 #include "ocudu/support/error_handling.h"
 #include "ocudu/support/ocudu_assert.h"
 #include "fmt/format.h"
+#include <algorithm>
 
 using namespace ocudu;
 
@@ -114,6 +116,28 @@ unsigned ocudu::get_precoding_codebook_antenna_ports(const pmi_codebook_config& 
     {
       pmi_codebook_single_panel_info panel_config = get_single_panel_info(codebook.n1_n2);
       return 2 * panel_config.n1 * panel_config.n2;
+    }
+  };
+
+  return std::visit(overloaded{}, pmi_codebook);
+}
+
+unsigned ocudu::get_precoding_codebook_max_rank(const pmi_codebook_config& pmi_codebook)
+{
+  struct overloaded {
+    unsigned operator()(std::monostate) const { return 0; }
+    unsigned operator()(pmi_codebook_one_port) const { return 1; }
+    unsigned operator()(pmi_codebook_two_port) const { return 2; }
+    unsigned operator()(const pmi_codebook_typeI_single_panel& codebook) const
+    {
+      // The Type I single-panel codebook supports up to eight layers.
+      pmi_codebook_single_panel_info panel_config = get_single_panel_info(codebook.n1_n2);
+      return std::min(2 * panel_config.n1 * panel_config.n2, 8U);
+    }
+    unsigned operator()(const pmi_codebook_typeII&) const
+    {
+      // The UE shall not report RI greater than two.
+      return max_nof_typeII_layers;
     }
   };
 

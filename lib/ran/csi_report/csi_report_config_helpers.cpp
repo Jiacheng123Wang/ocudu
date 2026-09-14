@@ -97,16 +97,27 @@ bool ocudu::is_valid(const csi_report_configuration& config)
   }
 
   if (!std::holds_alternative<pmi_codebook_one_port>(config.pmi_codebook)) {
-    unsigned nof_csi_rs_ports = get_precoding_codebook_antenna_ports(config.pmi_codebook);
+    // The maximum rank is limited by the number of CSI-RS ports and by the codebook type.
+    unsigned max_rank = get_precoding_codebook_max_rank(config.pmi_codebook);
 
-    // The RI restriction set size is too small to cover all possible ranks given the number of CSI-RS ports.
-    if (config.ri_restriction.size() < nof_csi_rs_ports) {
+    // The RI restriction set size is too small to cover all possible ranks.
+    if (config.ri_restriction.size() < max_rank) {
       return false;
     }
 
-    // The RI Restriction set cannot allow a higher rank than the number of CSI-RS ports.
-    if (config.ri_restriction.find_highest() >= static_cast<int>(nof_csi_rs_ports)) {
+    // The RI Restriction set cannot allow a higher rank than the maximum rank.
+    if (config.ri_restriction.find_highest() >= static_cast<int>(max_rank)) {
       return false;
+    }
+
+    // When the number of CSI-RS ports is four, the Type II codebook only accepts two combined beams.
+    if (const auto* pmi = std::get_if<pmi_codebook_typeII>(&config.pmi_codebook)) {
+      // Number of antenna ports.
+      unsigned nof_ports = get_precoding_codebook_antenna_ports(config.pmi_codebook);
+
+      if ((nof_ports == 4) && (pmi->nof_beams != 2)) {
+        return false;
+      }
     }
   }
 

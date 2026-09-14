@@ -186,6 +186,7 @@ csi_report_size ocudu::get_csi_report_pusch_size(const csi_report_configuration&
 
   csi_report_size result                = {};
   unsigned        nof_csi_antenna_ports = get_precoding_codebook_antenna_ports(config.pmi_codebook);
+  unsigned        max_rank              = get_precoding_codebook_max_rank(config.pmi_codebook);
 
   // Get CSI Part 1 field sizes which do not depend on the number of layers.
   ri_li_cqi_cri_sizes part1_sizes =
@@ -195,11 +196,10 @@ csi_report_size ocudu::get_csi_report_pusch_size(const csi_report_configuration&
   result.part1_size = get_csi_report_part1_size(config, part1_sizes);
 
   // Skip CSI Part 2 if there is one transmit port or no quantity is reported in CSI Part 2. The cri-RI-CQI quantity
-  // reports the wideband CQI for the second TB in CSI Part 2 when more than four CSI-RS ports are configured.
-  const bool has_part2_content =
-      (config.quantities == csi_report_quantities::cri_ri_li_pmi_cqi) ||
-      (config.quantities == csi_report_quantities::cri_ri_pmi_cqi) ||
-      ((config.quantities == csi_report_quantities::cri_ri_cqi) && (nof_csi_antenna_ports > 4));
+  // reports the wideband CQI for the second TB in CSI Part 2 when the codebook allows more than four layers.
+  bool has_part2_content = (config.quantities == csi_report_quantities::cri_ri_li_pmi_cqi) ||
+                           (config.quantities == csi_report_quantities::cri_ri_pmi_cqi) ||
+                           ((config.quantities == csi_report_quantities::cri_ri_cqi) && (max_rank > 4));
   if ((nof_csi_antenna_ports == 1) || !has_part2_content) {
     return result;
   }
@@ -213,7 +213,7 @@ csi_report_size ocudu::get_csi_report_pusch_size(const csi_report_configuration&
   parameter.width                                  = part1_sizes.ri;
 
   // Fill the entry table in function of the RI.
-  for (unsigned i_rank = 1; i_rank <= nof_csi_antenna_ports; ++i_rank) {
+  for (unsigned i_rank = 1; i_rank <= max_rank; ++i_rank) {
     // As per TS38.214 Section 5.2.2.2.1, the RI can only indicate rank values allowed by the RI restriction bitset. If
     // the RI restriction bit corresponding to the current rank is not set, exclude the corresponding CSI Part 2 size.
     if (!config.ri_restriction.test(i_rank - 1)) {
@@ -285,17 +285,16 @@ csi_report_data ocudu::csi_report_unpack_pusch(const csi_report_packed&        c
 
   [[maybe_unused]] bool is_pmi_codebook_one_port = std::holds_alternative<pmi_codebook_one_port>(config.pmi_codebook);
   [[maybe_unused]] unsigned ri_restriction_size  = config.ri_restriction.size();
-  [[maybe_unused]] unsigned nof_csi_rs_antenna_ports = get_precoding_codebook_antenna_ports(config.pmi_codebook);
-  ocudu_assert(is_pmi_codebook_one_port || (ri_restriction_size >= nof_csi_rs_antenna_ports),
-               "The RI restriction set size, i.e., {}, is smaller than the number of CSI-RS ports, i.e., {}.",
+  [[maybe_unused]] unsigned max_rank             = get_precoding_codebook_max_rank(config.pmi_codebook);
+  ocudu_assert(is_pmi_codebook_one_port || (ri_restriction_size >= max_rank),
+               "The RI restriction set size, i.e., {}, is smaller than the maximum rank, i.e., {}.",
                ri_restriction_size,
-               nof_csi_rs_antenna_ports);
+               max_rank);
 
-  ocudu_assert(is_pmi_codebook_one_port ||
-                   (config.ri_restriction.find_highest() < static_cast<int>(nof_csi_rs_antenna_ports)),
-               "The RI restriction set, i.e., {}, allows higher rank values than the number of CSI-RS ports, i.e., {}.",
+  ocudu_assert(is_pmi_codebook_one_port || (config.ri_restriction.find_highest() < static_cast<int>(max_rank)),
+               "The RI restriction set, i.e., {}, allows higher rank values than the maximum rank, i.e., {}.",
                config.ri_restriction,
-               nof_csi_rs_antenna_ports);
+               max_rank);
 
   // Assert that CSI Part 2 payload is present if it is required.
   ocudu_assert((is_pmi_codebook_one_port || ((config.quantities != csi_report_quantities::cri_ri_li_pmi_cqi) &&
