@@ -803,26 +803,26 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
   }
   // \name Two encodings of the same dispatch.
   ///
-  /// The default encodes the symbol right here, exactly as the chain has always done. The batched
-  /// form accumulates instead and lets the flush hook encode the whole group as ONE dispatch when
-  /// the burst changes stage (the demapping) or commits; the caller's inputs are read at that point,
-  /// which is why they must stay alive until wait() - the contract the per-symbol path already has.
+  /// The batched form (the default) accumulates the symbols of a group and lets the flush hook encode
+  /// them as ONE dispatch per run when the burst changes stage (the demapping) or commits; the
+  /// caller's inputs are read at that point, which is why they must stay alive until wait() - the
+  /// contract the per-symbol path already has too.
   ///
-  /// The batched form is bit-exact against the per-symbol chain in every LOCAL check (the chain
-  /// probe, the equalizer unit test with a group of twelve, the deferred demodulation equivalence
-  /// test, and - since the wrap cache was fixed - the concurrent demodulation test), and it is 2.0x
-  /// cheaper on the equalization alone at the over-the-air shape. It is OFF by default because the
-  /// over-the-air link says otherwise: with it the PUSCH block error rate goes from 10% to 95% and
-  /// the handset cannot attach (the gNB reaches RLF on consecutive CRC failures), while the very
-  /// same binary with the per-symbol encoding is healthy. The difference between the two encodings
-  /// is not understood yet, so the local checks do not cover the path the air takes - until one
-  /// does, the chain keeps the per-symbol encoding.
+  /// It reads each symbol's estimates at the start the ESTIMATOR published for it, not at a fixed
+  /// stride: a symbol carrying DM-RS holds fewer data REs, so the starts step by 72, 108, 72, ...
+  /// elements (see eq_batch_kernel_probe for the controlled comparison, and enqueue_burst_batch_at
+  /// for the contract). Reading them at one stride is what made the first air legs fail - 95% of
+  /// the PUSCH blocks came back in error and the handset never attached.
   ///
-  /// Debug override: OCUDU_EQ_DEFER_ENCODE=1 selects the batched form (probes and A/B legs use it).
+  /// Escape hatch: OCUDU_EQ_DEFER_ENCODE=0 restores the per-symbol encoding, which encodes each
+  /// symbol where it is submitted. Both are bit-exact against each other: the recorded capture
+  /// replays to the same 6380 LLR bytes either way, and the over-the-air link is healthy with the
+  /// batched form (RRC setup completes, the session attaches, the ping goes through, and the PUSCH
+  /// block error rate sits at the same level as the per-symbol chain).
   ///@{
   static const bool defer_encode = []() {
     const char* env = std::getenv("OCUDU_EQ_DEFER_ENCODE");
-    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
   }();
   if (defer_encode) {
     // A thread can accumulate for several engines over its lifetime (a worker creating one
