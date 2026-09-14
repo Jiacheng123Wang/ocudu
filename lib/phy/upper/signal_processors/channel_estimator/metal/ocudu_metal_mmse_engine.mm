@@ -679,7 +679,7 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   [enc setBuffer:cfo_buf offset:0 atIndex:1];
   [enc setBuffer:ep_buf offset:0 atIndex:2];
   [enc setBytes:&p length:sizeof(p) atIndex:3];
-  [enc dispatchThreads:MTLSizeMake(s.nof_layers * s.nof_pilots, 2, 1)
+  [enc dispatchThreads:MTLSizeMake(s.nof_layers * s.nof_pilots, s.nof_dmrs_symb, 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
   [enc endEncoding];

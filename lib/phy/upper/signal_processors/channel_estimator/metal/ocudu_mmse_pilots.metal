@@ -171,20 +171,23 @@ kernel void mmse_pilots_cfo(device const float*          lse    [[buffer(0)]],
     out[0] = cfo_sum / static_cast<float>(nof_groups);
 }
 
-/// \brief Compensates the CFO on the first two DM-RS symbols' LSE pilots.
+/// \brief Compensates the CFO on EVERY DM-RS symbol's LSE pilots, each at ITS OWN epoch.
 ///
-/// Reproduces compensate_cfo_and_accumulate()'s phasors:
-///     lse[0] *= polar(1, -2pi . epoch[dmrs_0] . cfo)
-///     lse[1] *= polar(1, -2pi . epoch[dmrs_1] . cfo)
-/// (The host applies the second one to the symbol-1 products, which is the same buffer here.)
-/// Symbols beyond the first two are left alone, as on the host.
+/// The host reaches the same result through two call sites, which is why this is easy to get wrong:
+///   - compensate_cfo_and_accumulate() compensates symbols 0 and 1 with
+///     polar(1, -2pi . epoch[dmrs_0] . cfo) and polar(1, -2pi . epoch[dmrs_1] . cfo);
+///   - combine_pilots() then does symbols 2.. with polar(1, -2pi . epoch[i_symbol] . cfo), i.e. the
+///     phasor of the SLOT SYMBOL that symbol occupies.
+/// Compensating only the first two (which an earlier version of this kernel did) leaves a third of a
+/// three-symbol hop rotated: measured on a capture, symbols 0 and 1 matched the host to the last bit
+/// while symbol 2 was off by ~6% of its magnitude.
 kernel void mmse_pilots_apply_cfo(device float*                lse    [[buffer(0)]],
                                   device const float*          cfo    [[buffer(1)]], // [1]
                                   device const float*          epochs [[buffer(2)]],
                                   constant mmse_pilots_params& p      [[buffer(3)]],
                                   uint2                        gid    [[thread_position_in_grid]])
 {
-    if ((gid.y >= 2) || (gid.x >= p.nof_layers * p.nof_pilots)) {
+    if ((gid.y >= p.nof_dmrs_symb) || (gid.x >= p.nof_layers * p.nof_pilots)) {
         return;
     }
     const float  theta = -6.283185307179586F * epochs[p.dmrs_symb[gid.y]] * cfo[0];

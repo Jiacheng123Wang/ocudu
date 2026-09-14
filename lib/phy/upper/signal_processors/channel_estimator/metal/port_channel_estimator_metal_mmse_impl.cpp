@@ -646,7 +646,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // keeps on purpose (the host's copy is still what the statistics read); removing it is the next
   // step. The device path is OFF by default until the tolerance probe and a phone OTA have cleared
   // it, and it falls back to the host whenever the geometry or the grid does not qualify.
-  static const bool device_ls_enabled = (std::getenv("OCUDU_CE_DEV_LS") != nullptr);
+  // DEFAULT ON, like the device inversion: the pilots ARE the estimator's input, so producing them
+  // on the device is what takes the host out of that point of the chain. OCUDU_CE_CPU_LS=1 forces
+  // the host pre-stage (the escape hatch, and the A/B for the tolerance probe).
+  static const bool device_ls_enabled = (std::getenv("OCUDU_CE_CPU_LS") == nullptr);
   if (device_ls_enabled && (npt != 0) && (nof_layers <= MAX_LAYERS) &&
       (nof_layers <= args.dmrs_patterns.size())) {
     const resource_grid_device_view dv           = args.grid.get_device_view();
@@ -735,6 +738,27 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                        max_rel,
                        nof_bad,
                        static_cast<double>(gpu_ls_cfo[0]));
+          // Per-symbol/per-pilot detail: a small relative error on EVERY pilot is the signature of a
+          // neighbouring-subcarrier read (adjacent channel values are similar), while a rotation-like
+          // error points at the CFO phasors. Printed for the first few pilots of each symbol.
+          for (unsigned i_symb = 0; i_symb != npt; ++i_symb) {
+            span<const cf_t> ref_lse = args.pilots_lse_view.get_symbol(i_symb, 0);
+            const float*     d = gpu_ls_out + static_cast<std::size_t>(i_symb) * nof_layers * nof_pilots * 2;
+            std::fprintf(stderr,
+                         "[ls_sym] symb=%u slot_sym=%u ep=%.6g dev[0]=(%.6g,%.6g) host[0]=(%.6g,%.6g) dev[1]=(%.6g,%.6g) "
+                         "host[1]=(%.6g,%.6g)\n",
+                         i_symb,
+                         dmrs_sym[i_symb],
+                         static_cast<double>(gpu_epochs[dmrs_sym[i_symb]]),
+                         static_cast<double>(d[0]),
+                         static_cast<double>(d[1]),
+                         static_cast<double>(ref_lse[0].real()),
+                         static_cast<double>(ref_lse[0].imag()),
+                         static_cast<double>(d[2]),
+                         static_cast<double>(d[3]),
+                         static_cast<double>(ref_lse[1].real()),
+                         static_cast<double>(ref_lse[1].imag()));
+          }
         }
 
         // Consume the device result.
