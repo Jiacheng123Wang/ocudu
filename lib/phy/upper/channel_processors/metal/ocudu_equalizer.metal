@@ -288,6 +288,7 @@ kernel void equalize_mxn_batch(device const ushort2* h [[buffer(0)]], // cbf16 [
                                constant equalize_params& p [[buffer(4)]],
                                device const float* sigma2 [[buffer(5)]],
                                constant equalize_strides& st [[buffer(6)]],
+                               device const uint*   h_start [[buffer(7)]],
                                uint2 gid [[thread_position_in_grid]])
 {
     const uint re  = gid.x;
@@ -295,7 +296,12 @@ kernel void equalize_mxn_batch(device const ushort2* h [[buffer(0)]], // cbf16 [
     if (re >= p.nof_re || sym >= st.nof_symbols) {
         return;
     }
-    h += sym * st.h_stride;
+    // The symbols of a run are NOT evenly spaced in the estimate buffer: a symbol carrying DM-RS
+    // holds fewer data REs, so the estimator publishes its slices at irregular starts (its offsets
+    // step by 72, 108, 72, ... elements). One stride cannot describe them, so the run carries the
+    // per-symbol starts. h_start is absolute within the bound buffer and p.h_offset is the first
+    // symbol's start - which the dispatch already bound - hence the subtraction.
+    h += h_start[sym] - p.h_offset;
     y += sym * st.y_stride;
     eq += sym * st.eq_stride;
     nv += sym * st.nv_stride;

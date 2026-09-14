@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include "ocudu/adt/span.h"
+
 #include <cstdint>
 
 namespace ocudu {
@@ -144,6 +146,9 @@ public:
   /// to enqueue_burst(), which is dispatched once per symbol.
   /// \param[in] strides Per-symbol element strides: h and y in cbf16 elements, eq in float2
   ///            elements, nv in floats.
+  /// \note The channel estimates do NOT have to be evenly spaced: the estimator publishes each
+  ///       symbol's slice at its own offset (a DM-RS symbol holds fewer data REs), so use
+  ///       enqueue_burst_batch_at() whenever the starts are not h.offset + k * h_symbol_stride.
   bool enqueue_burst_batch(const ch_est_binding& h,
                            const void* y,
                            const void* sigma2,
@@ -161,6 +166,26 @@ public:
                            float       noise_var,
                            float       tx_scaling,
                            float       h_scaling);
+
+  /// \brief Same as enqueue_burst_batch(), with the channel estimates of each symbol at an
+  /// explicit start. \p h_starts holds \c nof_symbols entries *inside* \p h's buffer (the same
+  /// space \c h.offset lives in), which is what the estimator's per-symbol slices are.
+  bool enqueue_burst_batch_at(const ch_est_binding& h,
+                              ocudu::span<const unsigned> h_starts,
+                              const void*           y,
+                              const void*           sigma2,
+                              void*                 eq,
+                              void*                 nv,
+                              unsigned              nof_re,
+                              unsigned              y_symbol_stride,
+                              unsigned              eq_symbol_stride,
+                              unsigned              nv_symbol_stride,
+                              unsigned              nof_ports,
+                              unsigned              nof_layers,
+                              bool                  mmse,
+                              float                 noise_var,
+                              float                 tx_scaling,
+                              float                 h_scaling);
 
   static bool burst_open();
 
