@@ -241,6 +241,7 @@ struct gather_params_t {
   uint32_t grid_subc_stride; // elements between two consecutive subcarriers
   uint32_t grid_symb_stride; // elements between two consecutive OFDM symbols
   uint32_t grid_port_stride; // elements between two consecutive ports
+  uint32_t first_symbol;     // first symbol of the run within the hop's tap table
 };
 
 struct gather_tap_t {
@@ -552,6 +553,11 @@ struct eq_flush_state_t {
   /// Gather plan tables handed to a committed command buffer, kept alive the same way. They are
   /// Metal buffers, so they are owned (released) rather than freed.
   std::vector<id<MTLBuffer>> gather_tables;
+  /// The hop's tables while the burst is being encoded (see eq_gather_tables): one build per hop,
+  /// every dispatch of that hop reads them.
+  gather_tables_t  hop_tables;
+  unsigned         hop_tables_plan = 0; // the plan they were built from, as an address
+  bool             hop_tables_valid = false;
 };
 static eq_flush_state_t& eq_flush_state()
 {
@@ -635,29 +641,33 @@ static id<MTLComputePipelineState> eq_encode_batch_dispatch(id<MTLComputeCommand
   return pipeline;
 }
 
-/// \brief Builds the tap and entry tables of one gather dispatch.
+/// \brief Builds the tap and entry tables of a whole hop.
 ///
-/// \param[in] plan   The hop's plan, owned by the caller.
-/// \param[in] symbol The dispatch's first OFDM symbol, in the grid's coordinates.
-/// \param[in] n_sym  Number of OFDM symbols of the dispatch.
-/// \return The tables, or an empty blob when the plan does not describe the dispatch.
-static gather_tables_t eq_build_gather_tables(const ch_gather_desc& plan, unsigned symbol, unsigned n_sym)
+/// The tables describe the hop's ALLOCATION, not the symbols one dispatch happens to carry: the
+/// entries of a symbol and their positions in the table do not depend on which symbols travel
+/// together. So one table serves every dispatch of the hop - the kernel enters it at the run's first
+/// symbol (see gather_params::first_symbol) - and it is built once per hop, not once per dispatch.
+/// That matters: a rebuild costs a copy of the entry table (tens of KB for a wide allocation) plus
+/// two Metal buffer allocations, and the pipeline reaches four dispatches per slot.
+///
+/// \param[in] plan The hop's plan, owned by the caller.
+/// \return The tables, or an empty blob when the plan describes no symbols.
+static gather_tables_t eq_build_gather_tables(const ch_gather_desc& plan)
 {
   gather_tables_t blob;
-  const unsigned  i_hop = symbol - plan.symbols[0].symbol;
-  if (!plan.is_valid() || (i_hop + n_sym > plan.nof_symbols)) {
+  if (!plan.is_valid()) {
     return blob;
   }
-  const size_t taps_bytes    = static_cast<size_t>(n_sym) * sizeof(gather_tap_t);
+  // One tap per symbol of the hop: the run's symbols are a window into it, so the table does not
+  // depend on the window and stays valid for every dispatch of the hop.
+  const size_t taps_bytes    = static_cast<size_t>(plan.nof_symbols) * sizeof(gather_tap_t);
   const size_t entries_bytes = plan.size() * sizeof(gather_entry_t);
   blob.resize(taps_bytes + entries_bytes);
   auto* taps    = reinterpret_cast<gather_tap_t*>(blob.data());
   auto* entries = reinterpret_cast<gather_entry_t*>(blob.data() + taps_bytes);
 
-  // The plan groups its entries by symbol in hop order, and every symbol of the hop carries its own
-  // slice, so the taps are a copy of that grouping (the kernel indexes the entry table through it).
-  for (unsigned k = 0; k != n_sym; ++k) {
-    const ch_gather_symbol& run = plan.symbols[i_hop + k];
+  for (unsigned k = 0; k != plan.nof_symbols; ++k) {
+    const ch_gather_symbol& run = plan.symbols[k];
     taps[k] = gather_tap_t{run.symbol, run.entry_base, run.nof_entries};
   }
   for (unsigned k = 0; k != plan.size(); ++k) {
@@ -682,6 +692,57 @@ static id<MTLBuffer> eq_make_gather_table(const void* data, size_t bytes)
                                                   options:MTLResourceStorageModeShared];
 }
 
+/// \brief The hop's gather tables as Metal buffers, built once and reused by every dispatch of the
+/// hop (see eq_build_gather_tables).
+///
+/// The tables a gather dispatch reads do NOT depend on which symbols the dispatch carries: they
+/// describe the allocation, and the kernel enters them at the run's first symbol. So they are built
+/// and uploaded once per hop and shared by the (up to four) dispatches of that hop - rebuilding
+/// them per dispatch is a copy of the entry table plus two Metal buffer allocations EACH, which is
+/// what made the device gather cost more on the host than the memcpy it replaces.
+///
+/// \param[in] plan The hop's plan.
+/// \return False when the tables could not be built or uploaded.
+static bool eq_gather_tables(const ch_gather_desc& plan)
+{
+  eq_flush_state_t& st = eq_flush_state();
+  if (st.hop_tables_valid && (st.hop_tables_plan == reinterpret_cast<uintptr_t>(&plan))) {
+    return true;
+  }
+  st.hop_tables       = eq_build_gather_tables(plan);
+  st.hop_tables_plan  = reinterpret_cast<uintptr_t>(&plan);
+  st.hop_tables_valid = !st.hop_tables.empty();
+  if (!st.hop_tables_valid) {
+    return false;
+  }
+  // The buffers are handed to a command buffer, so they are kept until it completed - the same rule
+  // the staging follows (see eq_flush_recycle).
+  const size_t taps_bytes = static_cast<size_t>(plan.nof_symbols) * sizeof(gather_tap_t);
+  id<MTLBuffer> b_taps    = eq_make_gather_table(st.hop_tables.data(), taps_bytes);
+  id<MTLBuffer> b_entries = eq_make_gather_table(st.hop_tables.data() + taps_bytes, st.hop_tables.size() - taps_bytes);
+  if ((b_taps == nil) || (b_entries == nil)) {
+    st.hop_tables_valid = false;
+    return false;
+  }
+  st.gather_tables.push_back(b_taps);
+  st.gather_tables.push_back(b_entries);
+  return true;
+}
+
+/// The hop's tap buffer, or nil when eq_gather_tables() has not built one.
+static id<MTLBuffer> eq_gather_taps()
+{
+  const eq_flush_state_t& st = eq_flush_state();
+  return (st.gather_tables.size() >= 2) ? st.gather_tables[st.gather_tables.size() - 2] : nil;
+}
+
+/// The hop's entry table buffer, or nil when eq_gather_tables() has not built one.
+static id<MTLBuffer> eq_gather_entries()
+{
+  const eq_flush_state_t& st = eq_flush_state();
+  return st.gather_tables.empty() ? nil : st.gather_tables.back();
+}
+
 /// \brief Dispatches the gather of the run's received symbols off the device grid.
 ///
 /// One thread per (resource element, OFDM symbol of the run). The device work is a plain copy, and
@@ -693,7 +754,7 @@ static bool eq_encode_gather_dispatch(id<MTLComputeCommandEncoder> enc,
                                       const wrapped_buffer&          b_grid,
                                       const wrapped_buffer&          b_y,
                                       const ch_gather_desc&          plan,
-                                      unsigned                       symbol,
+                                      unsigned                       first_symbol,
                                       unsigned                       n_sym,
                                       unsigned                       nof_ports,
                                       unsigned                       nof_re,
@@ -711,7 +772,8 @@ static bool eq_encode_gather_dispatch(id<MTLComputeCommandEncoder> enc,
                           nof_re,
                           plan.grid.subc_stride,
                           plan.grid.symb_stride,
-                          plan.grid.port_stride};
+                          plan.grid.port_stride,
+                          first_symbol};
   [enc setComputePipelineState:eq_resources().pipeline_gather];
   [enc setBuffer:b_grid.buffer offset:0 atIndex:0];
   [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
@@ -832,26 +894,14 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     // made sure every symbol of the run shares the plan.
     const bool        gather_run = pending[first].gather.is_valid();
     const ch_gather_desc* gather_plan = gather_run ? pending[first].gather.desc : nullptr;
-    gather_tables_t gather_tables;
-    id<MTLBuffer>   b_gather_taps    = nil;
-    id<MTLBuffer>   b_gather_entries = nil;
-    if (gather_run) {
-      gather_tables = eq_build_gather_tables(*gather_plan, pending[first].gather.symbol, n_run);
-      const size_t taps_bytes = static_cast<size_t>(n_run) * sizeof(gather_tap_t);
-      if ((gather_tables.size() <= taps_bytes) || (gather_tables.size() < sizeof(gather_tap_t))) {
-        compat::aligned_free(h_alloc);
-        compat::aligned_free(y_alloc);
-        compat::aligned_free(s_alloc);
-        return nil;
-      }
-      b_gather_taps    = eq_make_gather_table(gather_tables.data(), taps_bytes);
-      b_gather_entries = eq_make_gather_table(gather_tables.data() + taps_bytes, gather_tables.size() - taps_bytes);
-      if ((b_gather_taps == nil) || (b_gather_entries == nil)) {
-        compat::aligned_free(h_alloc);
-        compat::aligned_free(y_alloc);
-        compat::aligned_free(s_alloc);
-        return nil;
-      }
+    // The run's entry point into the hop's tap table: only a gathered run has one.
+    const unsigned first_symbol =
+        gather_run ? (pending[first].gather.symbol - gather_plan->symbols[0].symbol) : 0u;
+    if (gather_run && !eq_gather_tables(*gather_plan)) {
+      compat::aligned_free(h_alloc);
+      compat::aligned_free(y_alloc);
+      compat::aligned_free(s_alloc);
+      return nil;
     }
     for (unsigned k = 0; k != n_run; ++k) {
       if (!h_device_run) {
@@ -939,21 +989,19 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
                                      b_grid,
                                      b_y,
                                      *gather_plan,
-                                     pending[first].gather.symbol,
+                                     first_symbol,
                                      n_run,
                                      head.nof_ports,
                                      head.nof_re,
-                                     gather_tables,
-                                     b_gather_taps,
-                                     b_gather_entries)) {
+                                     eq_flush_state().hop_tables,
+                                     eq_gather_taps(),
+                                     eq_gather_entries())) {
         engine->last_call_no_copy = false;
         compat::aligned_free(h_alloc);
         compat::aligned_free(y_alloc);
         compat::aligned_free(s_alloc);
         return nil;
       }
-      eq_flush_state().gather_tables.push_back(b_gather_taps);
-      eq_flush_state().gather_tables.push_back(b_gather_entries);
     }
 
     // A single-symbol run keeps the per-symbol kernel: it is the path every caller already

@@ -273,7 +273,7 @@ struct equalize_strides {
     uint nv_stride;  // float elements per symbol
 };
 
-/// \brief Where one OFDM symbol of the run starts in the gather plan.
+/// \brief Where one OFDM symbol of the HOP starts in the gather plan.
 struct gather_tap {
     uint symbol; // OFDM symbol index in the grid
     uint offset; // first gather entry of the symbol, within the plan
@@ -289,9 +289,14 @@ struct gather_tap {
 /// are produced on the device - a pure transport, no conversion, hence bit-identical to the host
 /// gather.
 ///
-/// One thread per (resource element, OFDM symbol of the run): the entries of a run are emitted
-/// symbol by symbol, so a thread reads its own entry and copies it for every port - the same
-/// element of every port, which is what the host's per-port memcpy did.
+/// One thread per (resource element, OFDM symbol of the run): the entries of a run were emitted
+/// symbol by symbol, so a thread reads its own entry and copies it for every port - the same element
+/// of every port, which is what the host's per-port memcpy did.
+///
+/// \note The tap table covers the WHOLE hop, not the run: the entries of a symbol do not depend on
+///       which symbols a dispatch happens to carry, so one table serves every dispatch of the hop
+///       and only the entry point moves (\c first_symbol). That is what keeps the table out of the
+///       per-run cost - building and uploading it per run is tens of microseconds per slot.
 struct gather_params {
     ulong grid_base;        // byte offset of grid element 0 of port 0, symbol 0
     uint  nof_symbols;      // OFDM symbols of the run
@@ -300,6 +305,7 @@ struct gather_params {
     uint  grid_subc_stride; // elements between two consecutive subcarriers
     uint  grid_symb_stride; // elements between two consecutive OFDM symbols
     uint  grid_port_stride; // elements between two consecutive ports
+    uint  first_symbol;     // first symbol of the run within the hop's tap table
 };
 
 /// One entry of a gather plan: the grid subcarrier of a resource element and where it goes.
@@ -317,16 +323,21 @@ kernel void gather_ch_re(device const ushort2* grid [[buffer(0)]], // resource g
 {
     const uint dest_idx = gid.x;
     const uint sym      = gid.y;
-    if ((sym >= p.nof_symbols) || (dest_idx >= taps[sym].nof_re)) {
+    if (sym >= p.nof_symbols) {
         return;
     }
-    const gather_entry e = table[taps[sym].offset + dest_idx];
+    // The hop's tap table, reached at the symbol this run starts at: a run is a contiguous window of
+    // the hop, so its own symbols are the next nof_symbols taps.
+    const gather_tap tap = taps[p.first_symbol + sym];
+    if (dest_idx >= tap.nof_re) {
+        return;
+    }
+    const gather_entry e = table[tap.offset + dest_idx];
 
     // The element of the grid this entry names, then the same element of every port: y is the run's
     // region, so its per-symbol stride is nof_ports * nof_dest elements.
-    device const ushort2* src =
-        (device const ushort2*)((device const char*)grid + p.grid_base) + taps[sym].symbol * p.grid_symb_stride +
-        p.grid_subc_stride * e.subc;
+    device const ushort2* src = (device const ushort2*)((device const char*)grid + p.grid_base) +
+                                tap.symbol * p.grid_symb_stride + p.grid_subc_stride * e.subc;
     device ushort2* dst = y + (sym * p.nof_ports) * p.nof_dest + e.dest;
     for (uint port = 0; port != p.nof_ports; ++port) {
         dst[port * p.nof_dest] = src[port * p.grid_port_stride];
