@@ -683,6 +683,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       st.grid_symb_stride  = dv.symb_stride;
       st.grid_port_stride  = dv.port_stride;
       st.ref               = gpu_ls_ref;
+      st.buf_bytes         = k_ls_floats * sizeof(float);
       st.epochs            = gpu_epochs;
       st.lse               = gpu_ls_out;
       st.cfo               = gpu_ls_cfo;

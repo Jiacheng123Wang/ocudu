@@ -630,8 +630,10 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   const NSUInteger pilots = static_cast<NSUInteger>(s.nof_dmrs_symb) * s.nof_layers * s.nof_pilots;
 
   id<MTLBuffer> grid_buf = e->wrap(s.grid, s.grid_bytes);
-  id<MTLBuffer> ref_buf  = e->wrap(s.ref, pilots * 2 * sizeof(float));
-  id<MTLBuffer> lse_buf  = e->wrap(s.lse, pilots * 2 * sizeof(float));
+  // Whole allocations, never the per-hop length: the wrap cache is pointer-keyed and a request
+  // larger than its cached entry forces a re-map (see pilots_stage::buf_bytes).
+  id<MTLBuffer> ref_buf  = e->wrap(s.ref, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
+  id<MTLBuffer> lse_buf  = e->wrap(s.lse, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
   id<MTLBuffer> cfo_buf  = e->wrap(s.cfo, sizeof(float));
   id<MTLBuffer> ep_buf   = e->wrap(s.epochs, MAX_NSYMB_PER_SLOT * sizeof(float));
   if ((grid_buf == nil) || (ref_buf == nil) || (lse_buf == nil) || (cfo_buf == nil) || (ep_buf == nil)) {

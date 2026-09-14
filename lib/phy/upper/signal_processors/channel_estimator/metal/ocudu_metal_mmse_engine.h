@@ -186,6 +186,14 @@ public:
     unsigned    grid_port_stride = 0;
     /// Transmitted DM-RS of the hop, [symbol][layer][pilot] real/imag interleaved (host array).
     const float* ref = nullptr;
+    /// CAPACITY of the ref and lse buffers, in bytes - not this hop's used length.
+    ///
+    /// The engine maps a host pointer to a Metal buffer through a pointer-keyed cache, and it warns
+    /// and re-maps whenever a request is LARGER than the entry already cached for that pointer. The
+    /// pilot count varies from hop to hop with the allocation width, so wrapping the per-hop length
+    /// made a fixed buffer look like a growing one: measured on air, 15580 re-maps in one two-minute
+    /// leg (0 before K0-a). Always wrap the whole allocation.
+    std::size_t buf_bytes = 0;
     /// Symbol start times of the slot (needed by the CFO phasors).
     const float* epochs = nullptr;
     /// Destination of the least-squares pilots, [symbol][layer][pilot] real/imag interleaved.
