@@ -173,6 +173,46 @@ public:
   /// \return True on success; on failure the caller falls back to its own construction.
   bool build_correlation(const corr_stage& c, unsigned nof_systems);
 
+  /// The estimator's INPUT stage of one hop (K0-a): where the pilots come from and where the
+  /// least-squares estimates go. Mirrors mmse_pilots_params in ocudu_mmse_pilots.metal.
+  struct pilots_stage {
+    /// Grid storage as the device view describes it (resource_grid_device_view::base and strides):
+    /// already device-resident, so the kernels read it in place - nothing is brought over.
+    const void* grid = nullptr;
+    /// Whole storage of the grid view, in bytes (the zero-copy mapping needs the extent).
+    std::size_t grid_bytes = 0;
+    unsigned    grid_subc_stride = 0;
+    unsigned    grid_symb_stride = 0;
+    unsigned    grid_port_stride = 0;
+    /// Transmitted DM-RS of the hop, [symbol][layer][pilot] real/imag interleaved (host array).
+    const float* ref = nullptr;
+    /// Symbol start times of the slot (needed by the CFO phasors).
+    const float* epochs = nullptr;
+    /// Destination of the least-squares pilots, [symbol][layer][pilot] real/imag interleaved.
+    float* lse = nullptr;
+    /// Destination of the estimated CFO (a single float).
+    float* cfo = nullptr;
+    unsigned nof_dmrs_symb = 0;
+    unsigned nof_layers    = 0;
+    unsigned nof_pilots    = 0;
+    unsigned ncomb         = 0;
+    unsigned nof_prb       = 0;
+    unsigned first_prb     = 0;
+    unsigned port          = 0;
+    /// Slot symbol index of each hop DM-RS symbol, in hop order (at most 4).
+    unsigned dmrs_symb[4] = {};
+    /// Pilot positions within a PRB, ascending (at most 12).
+    unsigned pilot_re[12] = {};
+  };
+
+  /// \brief Runs the estimator's input stage (K0-a) on the device: pilot extraction from the
+  /// device-resident grid, least-squares estimates, CFO estimation and compensation.
+  ///
+  /// The host consumes \c lse right afterwards (it is the estimator's input), so this completes
+  /// synchronously - the asynchronous form is a separate step (see the plan).
+  /// \return True on success; on failure the caller keeps its own host pre-stage.
+  bool build_pilots_lse(const pilots_stage& s);
+
   /// \brief Batched inversion (K1): A_inv = (A)^-1 for each system, in-place Gauss-Jordan.
   ///
   /// \param[in,out] a           [systems][n][n] row-major matrices (overwritten with the inverse).

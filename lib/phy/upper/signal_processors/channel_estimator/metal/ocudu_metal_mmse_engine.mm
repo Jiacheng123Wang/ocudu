@@ -209,6 +209,10 @@ struct mmse_engine_impl {
   // K0-d: the analytic correlation matrices A and R_hp (optional, same metallib).
   id<MTLComputePipelineState>    corr_a_pipe   = nil;
   id<MTLComputePipelineState>    corr_rhp_pipe = nil;
+  // K0-a: the estimator's input stage - pilot extraction, LSE, CFO (optional, same metallib).
+  id<MTLComputePipelineState>    pilots_lse_pipe   = nil;
+  id<MTLComputePipelineState>    pilots_cfo_pipe   = nil;
+  id<MTLComputePipelineState>    pilots_apply_pipe = nil;
   /// Submission of run_async() that has not been waited for yet (at most one, see the header).
   id<MTLCommandBuffer>           pending_cb    = nil;
   // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
@@ -561,6 +565,21 @@ bool mmse_engine::init(const char* metallib_path)
                                                         reflection:nil
                                                              error:&err];
   }
+  // K0-a (the estimator's input stage) is optional for the same reason.
+  {
+    id<MTLFunction> lse_fn   = [e->library newFunctionWithName:@"mmse_pilots_lse"];
+    id<MTLFunction> cfo_fn   = [e->library newFunctionWithName:@"mmse_pilots_cfo"];
+    id<MTLFunction> apply_fn = [e->library newFunctionWithName:@"mmse_pilots_apply_cfo"];
+    if (lse_fn != nil && cfo_fn != nil && apply_fn != nil) {
+      e->pilots_lse_pipe   = [e->device newComputePipelineStateWithFunction:lse_fn options:MTLPipelineOptionNone
+                                                                 reflection:nil error:&err];
+      e->pilots_cfo_pipe   = [e->device newComputePipelineStateWithFunction:cfo_fn options:MTLPipelineOptionNone
+                                                                 reflection:nil error:&err];
+      e->pilots_apply_pipe = [e->device newComputePipelineStateWithFunction:apply_fn options:MTLPipelineOptionNone
+                                                                 reflection:nil error:&err];
+    }
+  }
+
   // K0-d (the analytic correlation matrices) is optional for the same reason.
   id<MTLFunction> corr_a_fn   = [e->library newFunctionWithName:@"mmse_corr_a"];
   id<MTLFunction> corr_rhp_fn = [e->library newFunctionWithName:@"mmse_corr_r_hp"];
@@ -576,6 +595,101 @@ bool mmse_engine::init(const char* metallib_path)
   }
   // ARC-managed; no explicit release.
   return e->inv_pipe != nil && e->weights_pipe != nil && e->apply_pipe != nil;
+}
+
+/// Must match mmse_pilots_params in ocudu_mmse_pilots.metal.
+struct mmse_pilots_params_t {
+  uint32_t nof_dmrs_symb;
+  uint32_t nof_layers;
+  uint32_t nof_pilots;
+  uint32_t ncomb;
+  uint32_t nof_prb;
+  uint32_t first_prb;
+  uint32_t port;
+  uint32_t grid_subc_stride;
+  uint32_t grid_symb_stride;
+  uint32_t grid_port_stride;
+  uint32_t dmrs_symb[4];
+  uint32_t pilot_re[12];
+};
+static_assert(sizeof(mmse_pilots_params_t) == 104, "mmse_pilots_params_t must match mmse_pilots_params");
+
+bool mmse_engine::build_pilots_lse(const pilots_stage& s)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if ((e == nullptr) || (e->device == nil) || (e->pilots_lse_pipe == nil) || (e->pilots_cfo_pipe == nil) ||
+      (e->pilots_apply_pipe == nil)) {
+    return false;
+  }
+  if ((s.grid == nullptr) || (s.grid_bytes == 0) || (s.ref == nullptr) || (s.epochs == nullptr) ||
+      (s.lse == nullptr) || (s.cfo == nullptr) || (s.nof_dmrs_symb == 0) || (s.nof_dmrs_symb > 4) ||
+      (s.nof_layers == 0) || (s.nof_pilots == 0) || (s.ncomb == 0) || (s.nof_prb == 0)) {
+    return false;
+  }
+
+  const NSUInteger pilots = static_cast<NSUInteger>(s.nof_dmrs_symb) * s.nof_layers * s.nof_pilots;
+
+  id<MTLBuffer> grid_buf = e->wrap(s.grid, s.grid_bytes);
+  id<MTLBuffer> ref_buf  = e->wrap(s.ref, pilots * 2 * sizeof(float));
+  id<MTLBuffer> lse_buf  = e->wrap(s.lse, pilots * 2 * sizeof(float));
+  id<MTLBuffer> cfo_buf  = e->wrap(s.cfo, sizeof(float));
+  id<MTLBuffer> ep_buf   = e->wrap(s.epochs, MAX_NSYMB_PER_SLOT * sizeof(float));
+  if ((grid_buf == nil) || (ref_buf == nil) || (lse_buf == nil) || (cfo_buf == nil) || (ep_buf == nil)) {
+    return false;
+  }
+
+  mmse_pilots_params_t p{};
+  p.nof_dmrs_symb    = s.nof_dmrs_symb;
+  p.nof_layers       = s.nof_layers;
+  p.nof_pilots       = s.nof_pilots;
+  p.ncomb            = s.ncomb;
+  p.nof_prb          = s.nof_prb;
+  p.first_prb        = s.first_prb;
+  p.port             = s.port;
+  p.grid_subc_stride = s.grid_subc_stride;
+  p.grid_symb_stride = s.grid_symb_stride;
+  p.grid_port_stride = s.grid_port_stride;
+  for (unsigned k = 0; k != 4; ++k) {
+    p.dmrs_symb[k] = s.dmrs_symb[k];
+  }
+  for (unsigned k = 0; k != 12; ++k) {
+    p.pilot_re[k] = s.pilot_re[k];
+  }
+
+  id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+
+  [enc setComputePipelineState:e->pilots_lse_pipe];
+  [enc setBuffer:grid_buf offset:0 atIndex:0];
+  [enc setBuffer:ref_buf offset:0 atIndex:1];
+  [enc setBuffer:lse_buf offset:0 atIndex:2];
+  [enc setBytes:&p length:sizeof(p) atIndex:3];
+  [enc dispatchThreads:MTLSizeMake(s.nof_pilots, s.nof_dmrs_symb * s.nof_layers, 1)
+      threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+
+  [enc setComputePipelineState:e->pilots_cfo_pipe];
+  [enc setBuffer:lse_buf offset:0 atIndex:0];
+  [enc setBuffer:ep_buf offset:0 atIndex:1];
+  [enc setBuffer:cfo_buf offset:0 atIndex:2];
+  [enc setBytes:&p length:sizeof(p) atIndex:3];
+  [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+  [enc setComputePipelineState:e->pilots_apply_pipe];
+  [enc setBuffer:lse_buf offset:0 atIndex:0];
+  [enc setBuffer:cfo_buf offset:0 atIndex:1];
+  [enc setBuffer:ep_buf offset:0 atIndex:2];
+  [enc setBytes:&p length:sizeof(p) atIndex:3];
+  [enc dispatchThreads:MTLSizeMake(s.nof_layers * s.nof_pilots, 2, 1)
+      threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+
+  [enc endEncoding];
+  [cb commit];
+  mmse_stats_commit();
+  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
+  [cb waitUntilCompleted];
+  mmse_stats_wait();
+
+  return (cb.status == MTLCommandBufferStatusCompleted) && (cb.error == nil);
 }
 
 /// Must match mmse_corr_params in ocudu_mmse_corr.metal.
