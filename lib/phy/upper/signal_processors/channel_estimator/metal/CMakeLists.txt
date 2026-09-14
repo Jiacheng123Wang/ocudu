@@ -63,3 +63,8 @@ target_link_libraries(port_channel_estimator_metal_mmse_unit_test PRIVATE ocudu_
 # ---- G2 head-to-head: metal_mmse / cpu / HELENA vs the AI-CE synthetic test set (.npy) ----
 add_executable(helena_head2head_bench test/helena_head2head_bench.cpp)
 target_link_libraries(helena_head2head_bench PRIVATE ocudu_channel_estimator_metal ocudu_channel_estimator ocudu_phy_support ocuduvec ocudu_dft)
+
+# ---- Standalone check of the inversion variants against a CPU reference (not in the suite) ----
+add_executable(k1_check test/k1_check.cpp)
+target_include_directories(k1_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(k1_check PRIVATE ocudu_channel_estimator_metal ocudu_support)

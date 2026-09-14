@@ -139,3 +139,79 @@ kernel void mmse_inv(device float*       a           [[buffer(0)]],  // [nof_sys
     }
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// K1b: the same inverse, right-looking.
+//
+// K1 above updates the trailing submatrix once per BLOCK column (a rank-8 sweep) and reduces the
+// diagonal block with the per-pivot steps, which costs two barriers per pivot. Measured on the
+// production shape (one 54x54 system) that form is latency-bound: the elimination spends ~470us
+// more than the ~10us of host Gauss-Jordan it is meant to replace, and the pivot phases are what
+// the time goes into.
+//
+// This kernel keeps the same arithmetic (Gauss-Jordan on [A | I], no pivoting needed for the
+// symmetric positive definite A = R_pp + (sigma2 + ridge) I) but runs a RIGHT-looking update: after
+// a pivot row is normalized, every trailing element is updated with ONE rank-1 expression. Two
+// barriers per pivot remain (the row must be scaled before it is used, and the update must finish
+// before the next pivot is read), and that is the floor for a threadgroup-wide elimination - but the
+// arithmetic per pivot drops to one multiply-add per trailing element instead of a rank-8 chain,
+// which is what the latency was hiding behind.
+//
+// One threadgroup per system (like K1), so several systems run concurrently instead of sharing one
+// threadgroup.
+kernel void mmse_inv_rl(device float*       a           [[buffer(0)]],  // [nof_systems][n][n] row-major
+                        constant uint&      n           [[buffer(1)]],
+                        constant uint&      nof_systems [[buffer(2)]],
+                        uint2               tid         [[thread_position_in_threadgroup]],
+                        uint2               tgs         [[threads_per_threadgroup]],
+                        uint2               tgid        [[threadgroup_position_in_grid]])
+{
+  if (tgid.x >= nof_systems) {
+    return;
+  }
+
+  // [A | I], updated in place: the left half ends as the identity and the right half as the inverse.
+  threadgroup float gj[MAX_N][MAX_N2];
+
+  device float* src = a + tgid.x * n * n;
+
+  for (uint r = tid.y; r < n; r += tgs.y) {
+    for (uint c = tid.x; c < 2 * n; c += tgs.x) {
+      gj[r][c] = (c < n) ? src[r * n + c] : (((c - n) == r) ? 1.0F : 0.0F);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  const uint tid_lin = tid.y * tgs.x + tid.x;
+  const uint nthr    = tgs.x * tgs.y;
+
+  for (uint p = 0; p < n; ++p) {
+    const uint n_cols = 2 * n - p;
+
+    // 1) Scale the pivot row so the pivot becomes one (every column from the pivot on; the columns
+    //    before it are already zero there, so scaling them would be a no-op).
+    if (tid_lin < n_cols) {
+      gj[p][p + tid_lin] *= 1.0F / gj[p][p];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // 2) Eliminate the pivot column from EVERY other row and update each of their trailing columns
+    //    with the multiplier that row already carries - the classic in-place Gauss-Jordan step:
+    //      row_r -= row_r[p] * row_p   (for every r != p, over the columns from the pivot on).
+    //    Updating from the pivot column on is what keeps the eliminated column exactly zero: its
+    //    own entry becomes 1 - 1 * 1 = 0.
+    for (uint i = tid_lin; i < (n - 1) * n_cols; i += nthr) {
+      const uint ri = i / n_cols;
+      const uint r  = (ri < p) ? ri : (ri + 1);
+      const uint c  = p + (i % n_cols);
+      gj[r][c] -= gj[r][p] * gj[p][c];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  for (uint r = tid.y; r < n; r += tgs.y) {
+    for (uint c = tid.x; c < n; c += tgs.x) {
+      src[r * n + c] = gj[r][n + c];
+    }
+  }
+}

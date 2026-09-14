@@ -170,6 +170,9 @@ struct mmse_engine_impl {
   id<MTLCommandQueue>            queue       = nil;
   id<MTLLibrary>                 library     = nil;
   id<MTLComputePipelineState>    inv_pipe    = nil;
+  // K1b: the right-looking form of the same inversion (see ocudu_mmse_inv.metal). Used when it is
+  // available; K1 stays as the fallback for a metallib that has only the block form.
+  id<MTLComputePipelineState>    inv_rl_pipe = nil;
   id<MTLComputePipelineState>    weights_pipe = nil;
   id<MTLComputePipelineState>    apply_pipe  = nil;
   // K3: per-symbol, mask-compressed cbf16 estimates for the equalizer (optional, loaded on demand).
@@ -491,6 +494,13 @@ bool mmse_engine::init(const char* metallib_path)
 
   NSError* err    = nil;
   id<MTLFunction> inv_fn = [e->library newFunctionWithName:@"mmse_inv"];
+  id<MTLFunction> inv_rl_fn = [e->library newFunctionWithName:@"mmse_inv_rl"];
+  if (inv_rl_fn != nil) {
+    e->inv_rl_pipe = [e->device newComputePipelineStateWithFunction:inv_rl_fn
+                                                            options:MTLPipelineOptionNone
+                                                         reflection:nil
+                                                              error:&err];
+  }
   id<MTLFunction> wgt_fn = [e->library newFunctionWithName:@"mmse_weights"];
   id<MTLFunction> app_fn = [e->library newFunctionWithName:@"mmse_apply"];
   if (inv_fn == nil || wgt_fn == nil || app_fn == nil) {
@@ -812,7 +822,7 @@ bool mmse_engine::run_async(float*       a,
   phase.created();
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
-  [enc setComputePipelineState:e->inv_pipe];
+  [enc setComputePipelineState:(e->inv_rl_pipe != nil) ? e->inv_rl_pipe : e->inv_pipe];
   [enc setBuffer:a_buf offset:0 atIndex:0];
   [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
