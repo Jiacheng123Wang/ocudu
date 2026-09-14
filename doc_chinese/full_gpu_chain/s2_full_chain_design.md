@@ -7616,3 +7616,37 @@ K0-a **不需要**，因为 `h = W·y` 对 y 是**线性**的：y 的相对误�
 **判据公式（以后搬任何模块先算它）**：
 > 若该量到输出的放大因子 ≈ 1（线性、良态）⇒ 容差验收即可；
 > 若有 cond/条件数量级的放大 ⇒ 必须逐位复刻（并加进 `IEEE_MATH_SOURCES`）。
+
+#### 48.111 S-7f-5d：K0-a 的接线设计——**不需要新虚钩子**（复核后修正）
+
+**（a）复核得到的两条决定性事实**
+1. `ocuduvec::copy(dst, src)` —— **目标是第一个实参**（`include/ocudu/ocuduvec/copy.h:22`）。
+   所以 metal 实现里那句 `copy(tmp_lse.get_symbol(...), args.pilots_lse_view.get_symbol(...))`
+   是**从 `pilots_lse_view` 读进 `tmp_lse`**（§48.108 的读法正确）。
+2. **`fd_td_estimation_stage_args` 里没有 grid**（`port_channel_estimator_average_impl.h:146-205`：
+   有 `pilots`/`rx_pilots`/`hop`/`hop_offset`/first-last symbol/CFO，**唯独没有网格**）。
+
+**（b）因此接线方式是**（比原设想更小）
+原设想是"在基类加一个 K0-a 的虚钩子"（像 `apply_fd_td_estimation_stage` 那样）。
+复核后发现**不必**：基类的 `apply_fd_td_estimation_stage(args)` 是**末尾**调用、且
+`args.pilots_lse_view` 是**非 const 引用**（`average_impl.h:181`）——
+**metal 实现本来就能写它**。所以：
+
+| 步骤 | 改动 |
+|---|---|
+| ① 把 grid 交给 stage | `fd_td_estimation_stage_args` 增加 `const resource_grid_reader& grid` + `unsigned port`（2 个字段，基类构造处填） |
+| ② 设备端算 LSE | metal 的 `apply_fd_td_estimation_stage()` 里：取 `grid.get_device_view()`，staging ref 导频与几何，派发三个内核，**覆盖写 `args.pilots_lse_view`** |
+| ③ 门控与逃生口 | 环境变量 `OCUDU_CE_CPU_LS=1` 强制走主机（A/B）；设备视图无效时自动回退主机 |
+| ④ 容差探针 | 覆盖前先留一份主机的 LSE，覆盖后逐元素比对并打印最大相对差（**容差验收**，不是逐位——§48.110(c)） |
+
+**（c）这一步的"胶水"是什么（按 §48.108 的约定，本步允许保留）**
+主机仍会**算一遍** pre-stage（因为基类的调用顺序未动），设备算完把它**覆盖**。
+⇒ 被**消费**的值来自设备 ✓（这就是"模块进 GPU"），而"主机白算一遍"正是**下一步要消灭的胶水**。
+这样做的理由：**不动基类的调用顺序 = 不动其它估计器（CPU/average 路径）**，风险最小；
+先把"设备产出的输入能跑通整条链路"这件事用 OTA 证出来，再去拆主机那一遍。
+
+**（d）本步的验收（与 §48.108(e) 一致）**
+离线：`k0d` 980/980 逐字节、`k1` 980/980 判决、`combos` PASS、`ctest -L phy` 162/162，
+外加导频级容差探针（设备 vs 主机 LSE 的最大相对差应在 float32 噪声量级）。
+**然后停下来交用户做手机 OTA**（attach + ping + iperf3；`device_corr_builds>0`；`corr_build_fail=0`；
+0 崩溃 / 0 USB 错误；每时隙实时失败率不劣于 0.1148%）。
