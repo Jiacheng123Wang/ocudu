@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_equalizer_metal_engine.h"
-#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "ocudu_metal_burst.h"
 
 #import <Foundation/Foundation.h>
@@ -63,8 +62,9 @@ static void eq_stats_wait()
 static void eq_stats_report()
 {
   const eq_stats_t& s = eq_stats();
-  ocudulog::fetch_basic_logger("PHY").info("[metal_stats] equalizer commits={} waits={} max_in_flight={} (synchronous "
-               "path only; deferred group dispatches are counted by [metal_stats] burst)",
+  std::fprintf(stderr,
+               "[metal_stats] equalizer commits=%llu waits=%llu max_in_flight=%llu (synchronous "
+               "path only; deferred group dispatches are counted by [metal_stats] burst)\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
@@ -111,10 +111,11 @@ void eq_batch_note_run(unsigned run)
 
 #if defined(OCUDU_METAL_STATS)
 const bool eq_batch_diag_registered = []() {
-  ocudu::phy_shutdown_report::add([]() {
+  std::atexit([]() {
     const eq_batch_diag_t& d = eq_batch_diag();
     const char*            brk = d.first_break.load(std::memory_order_relaxed);
-    ocudulog::fetch_basic_logger("PHY").info("[metal_stats] eq_batch flushes={} symbols={} runs={} batched={} max_run={} first_break={}",
+    std::fprintf(stderr,
+                 "[metal_stats] eq_batch flushes=%llu symbols=%llu runs=%llu batched=%llu max_run=%u first_break=%s\n",
                  static_cast<unsigned long long>(d.flushes.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(d.symbols.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(d.runs.load(std::memory_order_relaxed)),
@@ -328,7 +329,7 @@ bool equalizer_metal_engine::init()
 {
 #if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
-  std::call_once(stats_atexit_flag, []() { ocudu::phy_shutdown_report::add(eq_stats_report); });
+  std::call_once(stats_atexit_flag, []() { std::atexit(eq_stats_report); });
 #endif
 
   if (impl == nullptr) {

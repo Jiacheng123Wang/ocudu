@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_metal_mmse_engine.h"
-#include "ocudu/support/executors/phy_shutdown_report.h"
 
 #include <chrono>
 #include <cstdio>
@@ -108,8 +107,9 @@ static void mmse_stats_report()
   const mmse_stats_t& s = mmse_stats();
   const uint64_t      hits = s.guard_hits.load(std::memory_order_relaxed);
   const uint64_t      wait = s.guard_wait_ns.load(std::memory_order_relaxed);
-  ocudulog::fetch_basic_logger("PHY").info("[metal_stats] mmse_ce commits={} waits={} max_in_flight={} guard={}/{} "
-               "guard_mean={:.1f}us guard_max={:.1f}us",
+  std::fprintf(stderr,
+               "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu guard=%llu/%llu "
+               "guard_mean=%.1fus guard_max=%.1fus\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
@@ -153,7 +153,8 @@ struct mmse_phase_timer {
     }
     const auto now = std::chrono::steady_clock::now();
     const auto us  = [](auto a, auto b) { return std::chrono::duration<double, std::micro>(b - a).count(); };
-    ocudulog::fetch_basic_logger("PHY").debug("[mmse_eng] {} wrap {:.1f} cb {:.1f} encode {:.1f} commit {:.1f} wait {:.1f} us",
+    std::fprintf(stderr,
+                 "[mmse_eng] %s wrap %.1f cb %.1f encode %.1f commit %.1f wait %.1f us\n",
                  name,
                  us(t0, t_wrap),
                  us(t_wrap, t_cb),
@@ -461,7 +462,7 @@ bool mmse_engine::init(const char* metallib_path)
   // Register the process-exit stats report exactly once (the counters live for the process).
 #if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
-  std::call_once(stats_atexit_flag, []() { ocudu::phy_shutdown_report::add(mmse_stats_report); });
+  std::call_once(stats_atexit_flag, []() { std::atexit(mmse_stats_report); });
 #endif
 
   if (impl == nullptr) {

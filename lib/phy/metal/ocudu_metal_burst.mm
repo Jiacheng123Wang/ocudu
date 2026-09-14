@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_metal_burst.h"
-#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
@@ -69,8 +68,9 @@ burst_stats_t& stats()
 void burst_stats_report()
 {
   const burst_stats_t& s = stats();
-  ocudulog::fetch_basic_logger("PHY").info("[metal_stats] burst commits={} waits={} max_in_flight={} dispatches={} "
-               "(equalizer={} demapper={})",
+  std::fprintf(stderr,
+               "[metal_stats] burst commits=%llu waits=%llu max_in_flight=%llu dispatches=%llu "
+               "(equalizer=%llu demapper=%llu)\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
@@ -97,7 +97,7 @@ void burst_stats_wait()
 }
 
 const bool burst_stats_registered = []() {
-  ocudu::phy_shutdown_report::add(burst_stats_report);
+  std::atexit(burst_stats_report);
   return true;
 }();
 #else

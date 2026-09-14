@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_dft_metal_engine.h"
-#include "ocudu/support/executors/phy_shutdown_report.h"
 
 #include "ocudu_metal_queue.h"
 
@@ -69,7 +68,8 @@ static void dft_stats_wait()
 static void dft_stats_report()
 {
   const dft_stats_t& s = dft_stats();
-  ocudulog::fetch_basic_logger("PHY").info("[metal_stats] dft commits={} waits={} max_in_flight={}",
+  std::fprintf(stderr,
+               "[metal_stats] dft commits=%llu waits=%llu max_in_flight=%llu\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
@@ -195,7 +195,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   // Register the process-exit stats report exactly once (the counters live for the process).
 #if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
-  std::call_once(stats_atexit_flag, []() { ocudu::phy_shutdown_report::add(dft_stats_report); });
+  std::call_once(stats_atexit_flag, []() { std::atexit(dft_stats_report); });
 #endif
 
   if (size < 2 || size > max_size) {

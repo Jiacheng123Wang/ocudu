@@ -11,7 +11,6 @@ target_link_libraries(ocudu_yaml_util PRIVATE ocudu::yaml-cpp)
 set(SOURCES
         executors/metrics/executor_metrics_backend.cpp
         executors/metrics/executor_metrics_channel.cpp
-        executors/phy_shutdown_report.cpp
         executors/priority_task_queue.cpp
         executors/priority_task_worker.cpp
         executors/task_execution_manager.cpp

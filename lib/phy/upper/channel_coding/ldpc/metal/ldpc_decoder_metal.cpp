@@ -13,7 +13,6 @@
 /// new.
 
 #include "ldpc_decoder_metal.h"
-#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "ldpc_graph_impl.h"
 #include "ocudu_metal_decoder_engine.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -133,40 +132,37 @@ void ldpc_time_stats_report()
   const auto mean = [n](const std::atomic<uint64_t>& v) {
     return static_cast<double>(v.load(std::memory_order_relaxed)) / static_cast<double>(n) / 1e3;
   };
-  // The summary and its two histograms are one logical record: assemble them and log once, so the
-  // line is not split across fragments (which also left the histograms on the console).
-  fmt::memory_buffer hist;
-  fmt::format_to(std::back_inserter(hist), " iters hist:");
+  std::fprintf(stderr,
+               "[ldpc_time_sum] calls=%llu ok=%llu ko=%llu | mean wall=%.1fus pack=%.1fus submit=%.1fus gpu=%.1fus "
+               "gap=%.1fus unpack=%.1fus | iters mean=%.2f cap mean=%.2f | max wall=%.1fus max gap=%.1fus |",
+               static_cast<unsigned long long>(n),
+               static_cast<unsigned long long>(s.ok.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.ko.load(std::memory_order_relaxed)),
+               mean(s.wall_ns),
+               mean(s.pack_ns),
+               mean(s.submit_ns),
+               mean(s.gpu_ns),
+               (mean(s.wall_ns) > mean(s.gpu_ns)) ? (mean(s.wall_ns) - mean(s.gpu_ns)) : 0.0,
+               mean(s.unpack_ns),
+               static_cast<double>(s.iters_sum.load(std::memory_order_relaxed)) / static_cast<double>(n),
+               static_cast<double>(s.cap_sum.load(std::memory_order_relaxed)) / static_cast<double>(n),
+               static_cast<double>(s.max_wall_ns.load(std::memory_order_relaxed)) / 1e3,
+               static_cast<double>(s.max_gap_ns.load(std::memory_order_relaxed)) / 1e3);
+  std::fprintf(stderr, " iters hist:");
   for (unsigned i = 0; i != 64; ++i) {
     const uint64_t c = s.iters_hist[i].load(std::memory_order_relaxed);
     if (c != 0) {
-      fmt::format_to(std::back_inserter(hist), " {}={}", i, c);
+      std::fprintf(stderr, " %u=%llu", i, static_cast<unsigned long long>(c));
     }
   }
-  fmt::format_to(std::back_inserter(hist), " | cap hist:");
+  std::fprintf(stderr, " | cap hist:");
   for (unsigned i = 0; i != 64; ++i) {
     const uint64_t c = s.cap_hist[i].load(std::memory_order_relaxed);
     if (c != 0) {
-      fmt::format_to(std::back_inserter(hist), " {}={}", i, c);
+      std::fprintf(stderr, " %u=%llu", i, static_cast<unsigned long long>(c));
     }
   }
-  ocudulog::fetch_basic_logger("PHY").debug(
-      "[ldpc_time_sum] calls={} ok={} ko={} | mean wall={:.1f}us pack={:.1f}us submit={:.1f}us gpu={:.1f}us "
-      "gap={:.1f}us unpack={:.1f}us | iters mean={:.2f} cap mean={:.2f} | max wall={:.1f}us max gap={:.1f}us |{}",
-      n,
-      s.ok.load(std::memory_order_relaxed),
-      s.ko.load(std::memory_order_relaxed),
-      mean(s.wall_ns),
-      mean(s.pack_ns),
-      mean(s.submit_ns),
-      mean(s.gpu_ns),
-      (mean(s.wall_ns) > mean(s.gpu_ns)) ? (mean(s.wall_ns) - mean(s.gpu_ns)) : 0.0,
-      mean(s.unpack_ns),
-      static_cast<double>(s.iters_sum.load(std::memory_order_relaxed)) / static_cast<double>(n),
-      static_cast<double>(s.cap_sum.load(std::memory_order_relaxed)) / static_cast<double>(n),
-      static_cast<double>(s.max_wall_ns.load(std::memory_order_relaxed)) / 1e3,
-      static_cast<double>(s.max_gap_ns.load(std::memory_order_relaxed)) / 1e3,
-      fmt::to_string(hist));
+  std::fprintf(stderr, "\n");
 
   // Per-geometry breakdown, most frequent first.
   std::vector<std::pair<uint64_t, ldpc_shape_stats>> shapes;
@@ -181,8 +177,9 @@ void ldpc_time_stats_report()
       continue;
     }
     const double cn = static_cast<double>(sh.calls);
-    ocudulog::fetch_basic_logger("PHY").info("[ldpc_time_shape] mode=%s bg=%llu z=%llu calls=%llu ko=%llu | mean wall=%.1fus gpu=%.1fus "
-                 "gap=%.1fus iters=%.2f",
+    std::fprintf(stderr,
+                 "[ldpc_time_shape] mode=%s bg=%llu z=%llu calls=%llu ko=%llu | mean wall=%.1fus gpu=%.1fus "
+                 "gap=%.1fus iters=%.2f\n",
                  ldpc_mode_name(static_cast<metal::decoder_engine::algo>(key >> 32)),
                  static_cast<unsigned long long>((key >> 24) & 0xff),
                  static_cast<unsigned long long>(key & 0xff),
@@ -200,7 +197,7 @@ void ldpc_time_stats_report()
 void ldpc_time_stats_register()
 {
   static std::once_flag flag;
-  std::call_once(flag, []() { ocudu::phy_shutdown_report::add(ldpc_time_stats_report); });
+  std::call_once(flag, []() { std::atexit(ldpc_time_stats_report); });
 }
 
 #if !defined(__arm64__)

@@ -4,7 +4,6 @@
 // (Derives from the upstream port_channel_estimator_average_impl base class.)
 
 #include "port_channel_estimator_metal_mmse_impl.h"
-#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "../port_channel_estimator_helpers.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/sc_prod.h"
@@ -90,7 +89,7 @@ void mmse_stats_register_atexit()
 {
   static std::once_flag flag;
   std::call_once(flag, []() {
-    ocudu::phy_shutdown_report::add([]() {
+    std::atexit([]() {
       const mmse_time_stats& s = mmse_stats();
       const uint64_t          n = s.calls.load(std::memory_order_relaxed);
       if (n == 0) {
@@ -99,9 +98,10 @@ void mmse_stats_register_atexit()
       const auto avg = [n](const std::atomic<uint64_t>& v) {
         return static_cast<double>(v.load(std::memory_order_relaxed)) / static_cast<double>(n);
       };
-      ocudulog::fetch_basic_logger("PHY").info("[mmse_time_sum] calls={} hops_gpu={} hops_no_gpu={} hops_nn={} fb_blocks={} | "
-                   "mean total={:.1f}us pre={:.2f}us stage={:.2f}us submit={:.2f}us unpack={:.2f}us cpl_wait={:.1f}us cpl_unpack={:.1f}us cpl_fill={:.1f}us sigma2={:.1f}us corr={:.1f}us gpu_path={:.1f}us (gpu_wait={:.1f}us) "
-                   "cpu_blocks={:.1f}us defer_wait={:.1f}us | device_hops={} max total={}us",
+      std::fprintf(stderr,
+                   "[mmse_time_sum] calls=%llu hops_gpu=%llu hops_no_gpu=%llu hops_nn=%llu fb_blocks=%llu | "
+                   "mean total=%.1fus pre=%.2fus stage=%.2fus submit=%.2fus unpack=%.2fus cpl_wait=%.1fus cpl_unpack=%.1fus cpl_fill=%.1fus sigma2=%.1fus corr=%.1fus gpu_path=%.1fus (gpu_wait=%.1fus) "
+                   "cpu_blocks=%.1fus defer_wait=%.1fus | device_hops=%llu max total=%lluus\n",
                    static_cast<unsigned long long>(n),
                    static_cast<unsigned long long>(s.hops_gpu.load(std::memory_order_relaxed)),
                    static_cast<unsigned long long>(s.hops_no_gpu.load(std::memory_order_relaxed)),
@@ -136,8 +136,9 @@ void mmse_stats_register_atexit()
           continue;
         }
         const double shape_calls = static_cast<double>(sh.calls);
-        ocudulog::fetch_basic_logger("PHY").info("[mmse_time_shape] prb={} npt={} calls={} | pre={:.2f}us stage={:.2f}us sigma2={:.1f}us corr={:.1f}us "
-                     "gpu_path={:.1f}us (gpu_wait={:.1f}us) total={:.1f}us | stage={:.2f} submit={:.2f} unpack={:.2f}",
+        std::fprintf(stderr,
+                     "[mmse_time_shape] prb=%llu npt=%llu calls=%llu | pre=%.2fus stage=%.2fus sigma2=%.1fus corr=%.1fus "
+                     "gpu_path=%.1fus (gpu_wait=%.1fus) total=%.1fus | stage=%.2f submit=%.2f unpack=%.2f\n",
                      static_cast<unsigned long long>(key >> 8),
                      static_cast<unsigned long long>(key & 0xff),
                      static_cast<unsigned long long>(sh.calls),
@@ -636,7 +637,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   if (std::getenv("OCUDU_CE_DEBUG") != nullptr) {
     static std::atomic<uint32_t> debug_counter{0};
     if ((debug_counter.fetch_add(1, std::memory_order_relaxed) % 1000U) == 0U) {
-      ocudulog::fetch_basic_logger("PHY").info("[ce_debug] pilots_power={:.6e} sigma2={:.6e} sigma2_rel={:.6e}",
+      std::fprintf(stderr, "[ce_debug] pilots_power=%.6e sigma2=%.6e sigma2_rel=%.6e\n",
                    static_cast<double>(pilots_power),
                    static_cast<double>(sigma2),
                    static_cast<double>(sigma2_rel));

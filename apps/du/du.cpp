@@ -10,7 +10,6 @@
 #include "apps/services/app_execution_metrics/executor_metrics_manager.h"
 #include "apps/services/app_resource_usage/app_resource_usage.h"
 #include "apps/services/application_message_banners.h"
-#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "apps/services/application_tracer.h"
 #include "apps/services/buffer_pool/buffer_pool_manager.h"
 #include "apps/services/cmdline/cmdline_command_dispatcher.h"
@@ -452,12 +451,6 @@ int main(int argc, char** argv)
     while (is_app_running) {
       std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
-
-    // Summarize the PHY probes (the Metal engines, the channel estimator, the LDPC decoder, the
-    // equalizer) while the log backend is still alive. They register here instead of with
-    // std::atexit, where the logger registry is already gone and asking it for a logger reads freed
-    // memory.
-    ocudu::phy_shutdown_report::run_all();
   }
   metrics_mngr.stop();
 

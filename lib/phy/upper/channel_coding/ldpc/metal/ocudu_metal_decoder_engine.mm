@@ -12,7 +12,6 @@
 #import <Metal/Metal.h>
 
 #include "ocudu_metal_queue.h"
-#include "ocudu/support/executors/phy_shutdown_report.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -67,7 +66,8 @@ static void decoder_stats_wait()
 static void decoder_stats_report()
 {
   const decoder_stats_t& s = decoder_stats();
-  ocudulog::fetch_basic_logger("PHY").info("[metal_stats] ldpc_decoder commits={} waits={} max_in_flight={}",
+  std::fprintf(stderr,
+               "[metal_stats] ldpc_decoder commits=%llu waits=%llu max_in_flight=%llu\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
@@ -279,7 +279,7 @@ algo_resources_t* get_algo_resources(decoder_engine::algo mode)
   // Register the process-exit stats report exactly once (the counters live for the process).
 #if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
-  std::call_once(stats_atexit_flag, []() { ocudu::phy_shutdown_report::add(decoder_stats_report); });
+  std::call_once(stats_atexit_flag, []() { std::atexit(decoder_stats_report); });
 #endif
 
   std::lock_guard<std::mutex> lock(algo_resources_mutex());

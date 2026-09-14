@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_demod_metal_engine.h"
-#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "ocudu_metal_burst.h"
 
 #import <Foundation/Foundation.h>
@@ -62,8 +61,9 @@ static void demod_stats_wait()
 static void demod_stats_report()
 {
   const demod_stats_t& s = demod_stats();
-  ocudulog::fetch_basic_logger("PHY").info("[metal_stats] demapper commits={} waits={} max_in_flight={} (synchronous "
-               "path only; deferred group dispatches are counted by [metal_stats] burst)",
+  std::fprintf(stderr,
+               "[metal_stats] demapper commits=%llu waits=%llu max_in_flight=%llu (synchronous "
+               "path only; deferred group dispatches are counted by [metal_stats] burst)\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
@@ -171,7 +171,7 @@ bool demod_metal_engine::init()
 {
 #if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
-  std::call_once(stats_atexit_flag, []() { ocudu::phy_shutdown_report::add(demod_stats_report); });
+  std::call_once(stats_atexit_flag, []() { std::atexit(demod_stats_report); });
 #endif
 
   if (impl == nullptr) {
