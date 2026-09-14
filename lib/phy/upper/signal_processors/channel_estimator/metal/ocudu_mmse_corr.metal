@@ -44,17 +44,26 @@ struct mmse_corr_params {
     uint  pilot_re[12];
 };
 
+/// Two pi, as the float the host's double expression rounds to.
+///
+/// The host evaluates `x = 2 * pi * df * tau` in DOUBLE (its TWOPI macro expands to a double
+/// literal) and rounds once into the float it divides by, so a float 2*pi would round differently
+/// and shift every correlation by an ulp - which the matrix inverse then amplifies into the
+/// weights. Metal has no double, so this is that double expression's rounding, bit for bit
+/// (0x40C90FDB, the nearest float to 2*pi).
+constant float MMSE_TWOPI = as_type<float>(0x40C90FDBu);
+
 /// Real part of the exponential-PDP time correlation (identical to the host's rt_corr).
 static inline float mmse_rt_corr(float delta_t_s, float fd_hz)
 {
-    const float x = 2.0F * M_PI_F * delta_t_s * fd_hz;
+    const float x = MMSE_TWOPI * delta_t_s * fd_hz;
     return 1.0F / (1.0F + x * x);
 }
 
 /// Real part of the exponential-PDP frequency correlation (identical to the host's rf_corr).
 static inline float mmse_rf_corr(float delta_f_hz, float tau_rms_s)
 {
-    const float x = 2.0F * M_PI_F * delta_f_hz * tau_rms_s;
+    const float x = MMSE_TWOPI * delta_f_hz * tau_rms_s;
     return 1.0F / (1.0F + x * x);
 }
 

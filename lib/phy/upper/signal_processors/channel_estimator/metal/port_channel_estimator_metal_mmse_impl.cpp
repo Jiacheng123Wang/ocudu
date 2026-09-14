@@ -884,18 +884,51 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 #if defined(OCUDU_CE_TIME)
       const auto t_stage_begin = steady_clock::now();
 #endif
-      stage_engine_group(args,
-                         0,
-                         n_std_blocks,
-                         block_prb,
-                         npt,
-                         nout_std,
-                         L_std,
-                         0,
-                         st,
-                         matrix_on,
-                         gpu_invert,
-                         std_slots_filled);
+      if (std_slots_filled) {
+        // The device built A and R_hp into the slots (K0-d). What the slots must HOLD is what the
+        // removed host staging used to put there: A itself when K1 inverts it in place, and A^-1
+        // otherwise - so the padding (blockdiag(A, I)) and, when the CPU owns the inversion, the
+        // Gauss-Jordan run in place on the device-written matrices. The expensive half of the old
+        // staging (building the matrices and copying ~170KB into the slots) is what is gone; this
+        // finishes what is left in the same place, which is what keeps the A/B exact.
+        const unsigned Ls = st.L;
+        for (unsigned sys = 0; sys != nof_layers; ++sys) {
+          float* a_slot = gpu_a + static_cast<std::size_t>(sys) * Ls * Ls;
+          if (!gpu_invert) {
+            std::array<float, 2 * MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS> gj;
+            std::fill(gj.begin(), gj.end(), 0.0F);
+            for (unsigned r = 0; r != L_std; ++r) {
+              for (unsigned c = 0; c != L_std; ++c) {
+                gj[r * 2 * L_std + c] = a_slot[static_cast<std::size_t>(r) * L_std + c];
+              }
+              gj[r * 2 * L_std + L_std + r] = 1.0F;
+            }
+            gauss_jordan_invert(span<float>(gj.data(), 2 * L_std * L_std), L_std);
+            for (unsigned r = 0; r != L_std; ++r) {
+              std::memcpy(a_slot + static_cast<std::size_t>(r) * L_std,
+                          &gj[static_cast<std::size_t>(r) * 2 * L_std + L_std],
+                          static_cast<std::size_t>(L_std) * sizeof(float));
+            }
+          }
+          // The identity pad of an oversized slot: the device wrote the L x L block only.
+          for (unsigned k = L_std; k != Ls; ++k) {
+            a_slot[static_cast<std::size_t>(k) * Ls + k] = 1.0F;
+          }
+        }
+      } else {
+        stage_engine_group(args,
+                           0,
+                           n_std_blocks,
+                           block_prb,
+                           npt,
+                           nout_std,
+                           L_std,
+                           0,
+                           st,
+                           matrix_on,
+                           gpu_invert,
+                           false);
+      }
 #if defined(OCUDU_CE_TIME)
       stage_us_local += std::chrono::duration<double, std::micro>(steady_clock::now() - t_stage_begin).count();
 #endif
