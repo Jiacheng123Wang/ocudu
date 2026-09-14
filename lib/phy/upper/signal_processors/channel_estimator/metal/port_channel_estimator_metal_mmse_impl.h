@@ -227,6 +227,12 @@ private:
   ///               real/imag interleaved vectors (legacy kernels).
   /// \param npt    Number of DM-RS symbols of the hop (the block pilot count is
   ///               L = npt x b_prb x 6 for the type-1 comb-2 pattern used here).
+  /// \param slots_filled The DEVICE already wrote A and R_hp of these slots (K0-d). It is the ONLY
+  ///               gate on the A/R_hp stores, and it covers both matrices: they are written TOGETHER
+  ///               or not at all. A separate "skip A but still write R_hp" flag was the defect that
+  ///               left R_hp stale on the device-inversion path (2916 of 27216 entries valid, SINR
+  ///               -23 dB). The pilot staging below runs either way. Deliberately has NO default, so
+  ///               every call site has to state which of the two it means.
   void stage_engine_group(const fd_td_estimation_stage_args& args,
                           unsigned                           gb_start,
                           unsigned                           n_blk,
@@ -238,8 +244,7 @@ private:
                           const engine_strides&              st,
                           bool                               matrix,
                           bool                               gpu_invert,
-                          bool                               slots_filled = false,
-                          bool                               a_rhp_filled = false);
+                          bool                               slots_filled);
 
   /// \brief One engine call (one command buffer, one commit/wait) over the staged slots, with the
   /// optional K3 reformat stage appended to the same command buffer.
@@ -293,44 +298,52 @@ private:
   ///                        correlation matrices. Null keeps the host staging.
   /// Whether the inversion runs on the DEVICE for a block of this order.
   ///
-  /// **DEFAULT OFF, and that is a functional decision, not a performance or accuracy one.**
-  /// The full-GPU-path rule says the device should invert, and K1's accuracy is NOT the obstacle:
-  /// the device inverse's W error is 7.67e-4 against the host's 1.40e-5, worth about 0.003 dB of
-  /// SINR, while the -18.7 dB that once looked like an accuracy failure was two staging defects.
-  /// What blocks it is that the kernel does not take effect inside run_async()'s command buffer:
-  /// measured (S-7f-3s), the A slots come out BYTE-IDENTICAL before and after the batch, so the
-  /// weights read a raw A and the chain collapses (SINR 24 -> -23 dB on the captures, and 5.4 dB
-  /// before the staging was corrected). The same matrix handed to the standalone invert() entry
-  /// point inverts correctly (residual 1.85e-04, better than the host's 2.09e-04), and alignment,
-  /// encoder splitting, pipeline creation and the dispatch geometry have all been ruled out.
-  /// OCUDU_CE_GPU_INVERT=1 turns it on for whoever fixes that; until then the default keeps the
-  /// chain correct, which the goal states as the precondition.
+  /// **DEFAULT ON**: the full-GPU-path form, and the reason the goal exists.
+  /// K1's accuracy is not an obstacle: the device inverse's W error is 7.67e-4 against the host's
+  /// 1.40e-5, worth about 0.003 dB of SINR, while the -18.7 dB that once looked like an accuracy
+  /// failure was two staging defects (S-7f-3i, S-7f-4x). What kept the default off was that only
+  /// _some_ hops came out right; the actual defect was in the STAGING, not in K1 - a per-flag skip
+  /// that stopped the host from writing R_hp whenever the device was to invert, so the weights ran
+  /// on the previous hop's residue (2916 of 27216 entries, h 1440 of 8064, SINR -23 dB). With
+  /// stage_engine_group() gated on `slots_filled` alone, the device path measures the same as the
+  /// host's on every capture, so there is no functional reason left to keep it off.
+  ///
+  /// Cost (a PERFORMANCE debt, tracked separately, not a blocking defect): the K1 kernel is
+  /// latency-bound (block Gauss-Jordan, ~2 barriers per pivot, ~555us per hop against the host's
+  /// ~10us). The blocked/simdgroup_matrix rewrite is the fix; until then the GPU path pays it.
   ///
   /// \param[in] order Block order L. Above the kernel's own MAX_N (mmse_inv.metal: 54) the kernel
   ///                  cannot be dispatched at all, so the host inversion is the only option there.
+  /// ESCAPE HATCHES (both must keep working): OCUDU_CE_GPU_INVERT=0 forces the host inversion, and
+  /// OCUDU_CE_CPU_INVERT=1 does the same from the other side (it also disables the device build's
+  /// inversion step, so the pair is unambiguous).
   static bool device_inverts(unsigned order)
   {
-    static const bool enabled = (std::getenv("OCUDU_CE_GPU_INVERT") != nullptr);
+    static const bool enabled = []() {
+      const char* env = std::getenv("OCUDU_CE_GPU_INVERT");
+      return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+    }();
     static constexpr unsigned MAX_DEVICE_INVERT_ORDER = 54;
     return enabled && (std::getenv("OCUDU_CE_CPU_INVERT") == nullptr) && (order <= MAX_DEVICE_INVERT_ORDER);
   }
 
   /// \brief K0-d: the device builds A and R_hp of one block geometry into the engine slots.
   ///
-  /// Two shapes, selected by the accuracy experiment OCUDU_CE_DEV_INVERT:
-  ///   - default: the build completes HERE (its own command buffer) and the host then writes A^-1
-  ///     over A in those same slots. Removes the host's construction of A and R_hp (two nested
-  ///     correlation loops over 170 KB of stores); keeps the small in-place inversion, because the
-  ///     device inversion is not accurate enough at this conditioning.
-  ///   - experiment: nothing is dispatched here. The DESCRIPTOR is returned so the caller can pass
-  ///     it to the weights call, which builds A as a prefix of its own command buffer and has K1
-  ///     invert it in the same buffer - one round trip less, at the kernel's accuracy.
+  /// The build completes HERE, in its own command buffer, and leaves the L x L / nout x L blocks of
+  /// A and R_hp in the slots, at the slot row stride \c a_stride. Removes the host's construction of
+  /// both matrices (two nested correlation loops over 170 KB of stores).
   ///
-  /// \param[out] deferred_corr The descriptor the CALLER must dispatch itself (device-inversion
-  ///             experiment only); empty when this call already built and inverted the slots.
+  /// When \c gpu_invert is set, the slots keep A and K1 inverts them inside the weights command
+  /// buffer (one round trip less); otherwise the host writes A^-1 over A in place here, which is
+  /// what run_weights_only() expects to read.
+  ///
+  /// \param[in] gpu_invert The SAME decision run_engine_blocks() gives the staging and the engine
+  ///             call (device_inverts()). Passed in rather than re-derived: deriving it here from
+  ///             the order alone let the matrix flavor - which never routes to K1 - leave a raw A
+  ///             where the weights expected an inverse.
   /// \return True when the slots are filled and ready for the weights. False means the caller must
   ///         fall back to its own staging - the return value is the success flag, never a descriptor
-  ///         (reading it as one was a defect: the success path leaves it nullopt).
+  ///         (reading it as one was a defect: the success path used to leave it nullopt).
   bool build_slots_on_device(const channel_statistics& stats,
                              const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
                              unsigned                                       b_prb,
@@ -341,7 +354,7 @@ private:
                              unsigned                                       a_stride,
                              unsigned                                       r_stride,
                              unsigned                                       L,
-                             std::optional<metal::mmse_engine::corr_stage>& deferred_corr);
+                             bool                                           gpu_invert);
 
   /// \param[in] sys_offset  First engine slot of this batch. The standard blocks start at 0; the
   ///                        edge/tail block of a hop sits at nof_layers, and the device build has to

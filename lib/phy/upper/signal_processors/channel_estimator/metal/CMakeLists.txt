@@ -26,7 +26,14 @@ ocudu_add_metallib(
     OUTPUT ${MMSE_METALLIB}
     SOURCES ocudu_mmse_inv.metal ocudu_mmse_apply.metal ocudu_mmse_weights.metal
             ocudu_mmse_weights_matrix.metal ocudu_mmse_apply_matrix.metal ocudu_mmse_reformat.metal
-            ocudu_mmse_corr.metal)
+            ocudu_mmse_corr.metal
+    # The correlation kernels are the one place with a BIT-EXACTNESS contract against a host float
+    # expression (build_correlation_matrices()): K0-d is only a drop-in for the host staging if A and
+    # R_hp come out identical, and a 1-ulp difference is amplified by cond_2(A) ~ 2e4 into ~1% of W
+    # and h (measured 0.4-0.9% on a 256QAM capture, which the LLR byte comparison sees). Metal's
+    # default fast math is free to contract `1 + x * x` into an fma and to reassociate the products,
+    # and that is exactly the 1 ulp - so this file is compiled with strict IEEE semantics.
+    IEEE_MATH_SOURCES ocudu_mmse_corr.metal)
 
 # ---- Compiled Core ML model (AI channel estimator; see the training memo) ----
 set(HELENA_MODELC ${CMAKE_CURRENT_SOURCE_DIR}/ai_assets/helena_pusch_ml.mlmodelc)

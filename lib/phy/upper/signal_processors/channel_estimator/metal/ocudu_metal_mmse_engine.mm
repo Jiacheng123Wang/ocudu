@@ -586,8 +586,7 @@ struct mmse_corr_params_t {
   uint32_t ncomb;
   uint32_t nf;
   uint32_t L;
-  uint32_t Ls;
-  uint32_t Ns;
+  uint32_t Ls; // row stride of BOTH slots: A is [Ls][Ls], R_hp is [Ns][Ls]
   uint32_t a_sys;
   uint32_t r_sys;
   float    ts;
@@ -599,6 +598,10 @@ struct mmse_corr_params_t {
   uint32_t dmrs_slots[4];
   uint32_t pilot_re[12];
 };
+
+// The kernel side asserts the same size: a field added on one side only would silently shift every
+// field after it (the struct crosses the boundary as opaque setBytes bytes).
+static_assert(sizeof(mmse_corr_params_t) == 124, "mmse_corr_params_t must match mmse_corr_params");
 
 /// Encodes the two correlation dispatches of \p c into \p enc: the caller owns the command buffer,
 /// so the same encoding serves the standalone entry point and the prefix of an engine call.
@@ -638,7 +641,6 @@ static bool encode_corr(mmse_engine_impl* e, id<MTLComputeCommandEncoder> enc, c
   p.nf          = c.nf;
   p.L           = c.l;
   p.Ls          = c.a_l_stride;
-  p.Ns          = c.r_stride;
   p.a_sys       = static_cast<uint32_t>(a_sys);
   p.r_sys       = static_cast<uint32_t>(r_sys);
   p.ts          = c.ts;

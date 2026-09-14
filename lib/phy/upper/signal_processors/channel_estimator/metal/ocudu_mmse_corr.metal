@@ -31,15 +31,21 @@ struct mmse_corr_params {
     uint  ncomb;    // pilots per PRB of a DM-RS symbol (the DM-RS comb size)
     uint  nf;       // subcarriers of the block (nout = nf * 14)
     uint  L;        // matrix order: npt * npf
-    uint  Ls;       // row stride of the destination slots (>= L; the pad is left untouched)
-    uint  Ns;       // row stride of the R_hp slot (>= nout; the pad is left untouched)
+    // Row stride of BOTH destination slots: A is [Ls][Ls] and R_hp is [Ns][Ls]. The two matrices
+    // share the stride because the host stages them that way (stage_engine_group(): `row = rp_slot +
+    // o * Ls`) and because every consumer reads them that way (mmse_weights.metal: `rp = r_hp + sys *
+    // nout * L + row * L`; mmse_weights_matrix.metal: row stride Lp). It is the SLOT's stride, which
+    // is >= L: a merged batch tucks a narrower edge block (order L_e) into the standard group's slots
+    // (stride L_std), and the matrix flavor pads the block to ceil8. The pad is left untouched by
+    // this kernel - the caller zeroes it.
+    uint  Ls;       // row stride of the A and R_hp slots (>= L)
     // Distance between two systems of the batch. The engine call that consumes these slots uses the
     // PACKED order the weights kernel expects ([sys][L][L] and [sys][nout][L]), while the slot's own
     // row stride may belong to a different geometry (a merged batch puts a narrower edge block into
     // the standard slot: Ls = L_std but the block order is L_e). Stepping the systems by L*L there
     // would walk into the middle of the standard group.
     uint  a_sys;    // spacing between A systems    (>= Ls * Ls)
-    uint  r_sys;    // spacing between R_hp systems (>= Ns * nout)
+    uint  r_sys;    // spacing between R_hp systems (>= Ns * Ls, Ns being the slot's output rows)
     float ts;       // slot symbol period in seconds, 1 / (scs_hz * 14)
     float scs_hz;   // subcarrier spacing in hertz
     float fd_hz;    // maximum Doppler shift (time correlation)
@@ -52,13 +58,18 @@ struct mmse_corr_params {
     uint  pilot_re[12];
 };
 
-/// Two pi, as the float the host's double expression rounds to.
+// The host mirrors this layout in mmse_corr_params_t (ocudu_metal_mmse_engine.mm) and passes it with
+// setBytes, so a field added on one side only would silently shift every field after it.
+static_assert(sizeof(mmse_corr_params) == 124, "mmse_corr_params must stay in step with its host mirror");
+
+/// Two pi, as the float the host's TWOPI constant holds.
 ///
-/// The host evaluates `x = 2 * pi * df * tau` in DOUBLE (its TWOPI macro expands to a double
-/// literal) and rounds once into the float it divides by, so a float 2*pi would round differently
-/// and shift every correlation by an ulp - which the matrix inverse then amplifies into the
-/// weights. Metal has no double, so this is that double expression's rounding, bit for bit
-/// (0x40C90FDB, the nearest float to 2*pi).
+/// The host's TWOPI is `2.0F * static_cast<float>(M_PI)` (include/ocudu/support/math/math_utils.h),
+/// and this is the same value bit for bit: (float)M_PI is 0x40490FDB and doubling it is exact, so the
+/// product here reproduces the host's float multiply exactly. The kernels are compiled with strict
+/// IEEE semantics (-fno-fast-math, see CMakeLists.txt) because the default fast math is free to
+/// contract, reassociate and approximate these expressions - and a 1-ulp difference from the host is
+/// amplified by the matrix inverse into ~1% of W and h.
 constant float MMSE_TWOPI = as_type<float>(0x40C90FDBu);
 
 /// Real part of the exponential-PDP time correlation (identical to the host's rt_corr).
@@ -119,7 +130,7 @@ kernel void mmse_corr_a(device float* a [[buffer(0)]],
     a_sys[(ulong)row * p.Ls + col] = v;
 }
 
-/// \brief Fills the R_hp slot (row stride \c p.Ns ) of one system: R_hp[o][k] = rt(sym(o) - t_k) * rf(sc(o) - f_k).
+/// \brief Fills the R_hp slot (row stride \c p.Ls , like A) of one system: R_hp[o][k] = rt(sym(o) - t_k) * rf(sc(o) - f_k).
 ///
 /// Rows are (slot symbol, subcarrier) in symbol-major order, columns are (DM-RS symbol, pilot) -
 /// the same indexing the host's build_correlation_matrices() uses.
@@ -146,5 +157,9 @@ kernel void mmse_corr_r_hp(device float* r_hp [[buffer(0)]],
     const int df = (int)sc - (int)mmse_corr_pilot_subcarrier(p, f2);
     const float rf = mmse_rf_corr((float)abs(df) * p.scs_hz, p.tau_rms_s);
 
-    r_sys[(ulong)o * p.Ns + col] = rt * rf;
+    // Row stride Ls, NOT the slot's output-row count: R_hp[o][k] is stored row-major with the same
+    // stride as A (see the struct). Stepping the rows by the output count wrote o * Ns instead, so
+    // only the first L rows landed inside the slot and every row past the first L*L entries was
+    // written elsewhere in the buffer (measured: 2916 of 27216 non-zero, 2916 = L * L).
+    r_sys[(ulong)o * p.Ls + col] = rt * rf;
 }

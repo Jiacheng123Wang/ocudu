@@ -131,9 +131,12 @@ public:
     float* a = nullptr;
     /// Destination R_hp slot of the whole batch: [nof_systems][r_stride][aL_stride] row-major.
     float* r_hp = nullptr;
-    /// Row stride of the A slots and of the R_hp columns (>= L).
+    /// Row stride of the A slots and of BOTH the R_hp rows and columns (>= L). R_hp shares the A
+    /// row stride: it is stored row-major as [nout][L] inside a slot laid out as [r_stride][aL_stride].
     unsigned a_l_stride = 0;
-    /// Row stride of the R_hp slots (>= nout).
+    /// Output rows of one R_hp slot (>= nout). Together with a_l_stride it is the slot's footprint
+    /// (r_stride * a_l_stride) and therefore the system spacing (see r_sys_stride). It is NOT the
+    /// R_hp row stride - that one is a_l_stride.
     unsigned r_stride = 0;
     /// Distance between two systems of the batch, in the A slots and in the R_hp slots. The engine
     /// consumes them in the PACKED order ([sys][L][L], [sys][nout][L]) while the slot's row stride

@@ -8,7 +8,16 @@
 #   ocudu_add_metallib(
 #       TARGET <custom-target-name>
 #       OUTPUT <metallib-output-path>
-#       SOURCES <metal-source...>)
+#       SOURCES <metal-source...>
+#       [IEEE_MATH_SOURCES <metal-source...>])
+#
+# IEEE_MATH_SOURCES names the sources among SOURCES that must be compiled
+# with -fno-fast-math. The Metal compiler enables fast math by default, which
+# lets it contract and reassociate float expressions; a kernel whose contract is
+# to reproduce a HOST float expression bit for bit (ocudu_mmse_corr.metal) needs
+# the strict IEEE semantics instead, while the rest of the library keeps the
+# (faster) default. Note this is per SOURCE, not per target: the flag changes
+# the rounding of those kernels only.
 #
 # On Apple platforms every .metal source is compiled with `xcrun metal` into a
 # .air file, the .air files are linked with `xcrun metallib` into the OUTPUT
@@ -30,7 +39,7 @@
 
 function(ocudu_add_metallib)
     set(one_value_keywords TARGET OUTPUT)
-    set(multi_value_keywords SOURCES)
+    set(multi_value_keywords SOURCES IEEE_MATH_SOURCES)
     cmake_parse_arguments(OCUDU_METALLIB "" "${one_value_keywords}" "${multi_value_keywords}" ${ARGN})
 
     if(NOT OCUDU_METALLIB_TARGET OR NOT OCUDU_METALLIB_OUTPUT OR NOT OCUDU_METALLIB_SOURCES)
@@ -47,14 +56,26 @@ function(ocudu_add_metallib)
     get_filename_component(metallib_name ${OCUDU_METALLIB_OUTPUT} NAME)
 
     set(air_files "")
+    # Absolute paths of the strict-IEEE sources, to match the loop's ${shader_src_abs}.
+    set(OCUDU_METALLIB_IEEE_MATH_SOURCES_ABS "")
+    foreach(ieee_src IN LISTS OCUDU_METALLIB_IEEE_MATH_SOURCES)
+        get_filename_component(ieee_src_abs ${ieee_src} ABSOLUTE)
+        list(APPEND OCUDU_METALLIB_IEEE_MATH_SOURCES_ABS ${ieee_src_abs})
+    endforeach()
     foreach(shader_src IN LISTS OCUDU_METALLIB_SOURCES)
         get_filename_component(shader_src_abs ${shader_src} ABSOLUTE)
         get_filename_component(shader_name ${shader_src} NAME_WE)
         set(air_file "${CMAKE_CURRENT_BINARY_DIR}/${shader_name}.air")
         set(dep_file "${CMAKE_CURRENT_BINARY_DIR}/${shader_name}.air.d")
+        # Strict IEEE float semantics for the sources that have to match a host expression bit for
+        # bit: the default fast math would be free to contract/reassociate them (see the header).
+        set(math_flag "")
+        if(shader_src_abs IN_LIST OCUDU_METALLIB_IEEE_MATH_SOURCES_ABS)
+            set(math_flag "-fno-fast-math")
+        endif()
         add_custom_command(
             OUTPUT ${air_file}
-            COMMAND xcrun -sdk macosx metal -c ${shader_src_abs} -o ${air_file} -MMD -MF ${dep_file}
+            COMMAND xcrun -sdk macosx metal ${math_flag} -c ${shader_src_abs} -o ${air_file} -MMD -MF ${dep_file}
             DEPENDS ${shader_src_abs}
             DEPFILE ${dep_file}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
