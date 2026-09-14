@@ -6,6 +6,7 @@
 
 #include "ocudu/adt/bounded_integer.h"
 #include "ocudu/ran/precoding/precoding_codebook_properties.h"
+#include <string>
 #include <variant>
 
 /// \file
@@ -71,7 +72,7 @@ pmi_codebook_id to_pmi_codebook_identifier(const pmi_codebook_config& codebook);
 const pmi_codebook_config& to_pmi_codebook_config(pmi_codebook_id identifier);
 
 /// Converts the PMI codebook configuration to a string.
-const char* to_string(const pmi_codebook_config& codebook);
+std::string to_string(const pmi_codebook_config& codebook);
 
 /// Gets the number of CSI-RS antenna ports from the PMI codebook configuration.
 unsigned get_precoding_codebook_antenna_ports(const pmi_codebook_config& pmi_codebook);

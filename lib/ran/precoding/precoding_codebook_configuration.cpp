@@ -6,6 +6,7 @@
 #include "ocudu/adt/to_array.h"
 #include "ocudu/ran/precoding/precoding_codebook_properties.h"
 #include "ocudu/support/ocudu_assert.h"
+#include "fmt/format.h"
 
 using namespace ocudu;
 
@@ -28,26 +29,6 @@ static constexpr auto codebook_configurations = to_array<pmi_codebook_config>(
      pmi_codebook_typeI_single_panel{pmi_codebook_single_panel_config::sixteen_one, pmi_codebook_typeI_mode::one}});
 static_assert(codebook_configurations.size() == pmi_codebook_id::max() + 1,
               "The number of codebook configurations does not match the number of identifiers.");
-
-/// List of PMI codebook descriptions as strings indexed by \c precoding_codebook_identifier.
-static constexpr auto codebook_configurations_string =
-    to_array<const char*>({"one port",
-                           "two port",
-                           "Type I mode 1 single-panel 4-port 2x1",
-                           "Type I mode 1 single-panel 8-port 2x2",
-                           "Type I mode 1 single-panel 8-port 4x1",
-                           "Type I mode 1 single-panel 12-port 3x2",
-                           "Type I mode 1 single-panel 12-port 6x1",
-                           "Type I mode 1 single-panel 16-port 4x2",
-                           "Type I mode 1 single-panel 16-port 8x1",
-                           "Type I mode 1 single-panel 24-port 4x3",
-                           "Type I mode 1 single-panel 24-port 6x2",
-                           "Type I mode 1 single-panel 24-port 12x1",
-                           "Type I mode 1 single-panel 32-port 4x4",
-                           "Type I mode 1 single-panel 32-port 8x2",
-                           "Type I mode 1 single-panel 32-port 16x1"});
-static_assert(codebook_configurations.size() == pmi_codebook_id::max() + 1,
-              "The number of codebook strings does not match the number of identifiers.");
 
 static pmi_codebook_id to_id(std::monostate)
 {
@@ -80,10 +61,24 @@ const pmi_codebook_config& ocudu::to_pmi_codebook_config(pmi_codebook_id identif
   return codebook_configurations[identifier.value()];
 }
 
-const char* ocudu::to_string(const pmi_codebook_config& codebook)
+std::string ocudu::to_string(const pmi_codebook_config& codebook)
 {
-  pmi_codebook_id id = to_pmi_codebook_identifier(codebook);
-  return codebook_configurations_string[id.value()];
+  struct overloaded {
+    std::string operator()(std::monostate) const { return "none"; }
+    std::string operator()(pmi_codebook_one_port) const { return "one port"; }
+    std::string operator()(pmi_codebook_two_port) const { return "two port"; }
+    std::string operator()(const pmi_codebook_typeI_single_panel& config) const
+    {
+      const pmi_codebook_single_panel_info& panel_info = get_single_panel_info(config.n1_n2);
+      return fmt::format("Type I mode {} single-panel {}-port {}x{}",
+                         static_cast<unsigned>(config.mode),
+                         get_precoding_codebook_antenna_ports(config),
+                         panel_info.n1,
+                         panel_info.n2);
+    }
+  };
+
+  return std::visit(overloaded{}, codebook);
 }
 
 unsigned ocudu::get_precoding_codebook_antenna_ports(const pmi_codebook_config& pmi_codebook)
