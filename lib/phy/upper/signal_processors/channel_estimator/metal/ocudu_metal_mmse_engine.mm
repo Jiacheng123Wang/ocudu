@@ -543,6 +543,7 @@ bool mmse_engine::init(const char* metallib_path)
 
 /// Must match mmse_corr_params in ocudu_mmse_corr.metal.
 struct mmse_corr_params_t {
+  uint32_t nof_systems;
   uint32_t npt;
   uint32_t npf;
   uint32_t ncomb;
@@ -577,6 +578,7 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
   const unsigned nout = c.nf * MAX_NSYMB_PER_SLOT;
 
   mmse_corr_params_t p{};
+  p.nof_systems = nof_systems;
   p.npt        = npt;
   p.npf        = c.npf;
   p.ncomb      = c.ncomb;
@@ -601,43 +603,29 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
   id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
-  // One dispatch per system, each bound at its own packed region (a system's matrices are
-  // contiguous, one after another, in the order the host used to stage them). Both matrices are
-  // built in the SAME command buffer, so the caller pays one submission for the pair.
-  // Every system gets its own dispatch, bound at ITS base inside the batch (the wrap cache is keyed
-  // by address, so binding each system's start is a cache hit on the batch's mapping - what the
-  // dispatch then reads and writes is that system's packed L x L and nout x L region).
-  //
-  // NOTE: the per-system base MUST move the pointer, not the binding offset. The kernels index the
-  // table from the buffer they are given (a[0] is the system's first element), so binding the
-  // batch's base for every system made them all write into the FIRST system's slots - which is what
-  // left every layer but the first with a matrix of the wrong system.
   const NSUInteger a_per_sys   = static_cast<NSUInteger>(c.l) * c.l;
   const NSUInteger rhp_per_sys = static_cast<NSUInteger>(nout) * c.l;
+  const NSUInteger a_bytes     = static_cast<NSUInteger>(nof_systems) * a_per_sys * sizeof(float);
+  const NSUInteger rhp_bytes   = static_cast<NSUInteger>(nof_systems) * rhp_per_sys * sizeof(float);
+
+  // ONE dispatch per matrix for the whole batch: the second grid dimension selects the system, so
+  // the batch's matrices are contiguous and the kernel indexes them itself. A dispatch per system
+  // measured 628us of GPU time on a 25 PRB hop - more than the host loops it replaces.
+  id<MTLBuffer> a_buf   = e->wrap(c.a, a_bytes);
+  id<MTLBuffer> rhp_buf = e->wrap(c.r_hp, rhp_bytes);
+  if ((a_buf == nil) || (rhp_buf == nil)) {
+    return false;
+  }
 
   [enc setComputePipelineState:e->corr_a_pipe];
+  [enc setBuffer:a_buf offset:0 atIndex:0];
   [enc setBytes:&p length:sizeof(p) atIndex:1];
-  for (unsigned sys = 0; sys != nof_systems; ++sys) {
-    const float* a_sys = c.a + static_cast<std::size_t>(sys) * c.l * c.l;
-    id<MTLBuffer> buf  = e->wrap(a_sys, static_cast<NSUInteger>(a_per_sys) * sizeof(float));
-    if (buf == nil) {
-      return false;
-    }
-    [enc setBuffer:buf offset:0 atIndex:0];
-    [enc dispatchThreads:MTLSizeMake(a_per_sys, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-  }
+  [enc dispatchThreads:MTLSizeMake(a_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
   [enc setComputePipelineState:e->corr_rhp_pipe];
+  [enc setBuffer:rhp_buf offset:0 atIndex:0];
   [enc setBytes:&p length:sizeof(p) atIndex:1];
-  for (unsigned sys = 0; sys != nof_systems; ++sys) {
-    const float* r_sys = c.r_hp + static_cast<std::size_t>(sys) * nout * c.l;
-    id<MTLBuffer> buf  = e->wrap(r_sys, static_cast<NSUInteger>(rhp_per_sys) * sizeof(float));
-    if (buf == nil) {
-      return false;
-    }
-    [enc setBuffer:buf offset:0 atIndex:0];
-    [enc dispatchThreads:MTLSizeMake(rhp_per_sys, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-  }
+  [enc dispatchThreads:MTLSizeMake(rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
   [enc endEncoding];
   [cb commit];

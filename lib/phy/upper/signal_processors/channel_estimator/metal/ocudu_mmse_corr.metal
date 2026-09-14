@@ -25,6 +25,7 @@
 using namespace metal;
 
 struct mmse_corr_params {
+    uint  nof_systems; // systems of the batch (the second grid dimension)
     uint  npt;      // DM-RS symbols of the hop (the time dimension of the block)
     uint  npf;      // pilots per DM-RS symbol (the frequency dimension of the block)
     uint  ncomb;    // pilots per PRB of a DM-RS symbol (the DM-RS comb size)
@@ -80,13 +81,17 @@ static inline uint mmse_corr_pilot_subcarrier(constant mmse_corr_params& p, uint
 /// diagonal loading is added to the first L diagonal entries.
 kernel void mmse_corr_a(device float* a [[buffer(0)]],
                         constant mmse_corr_params& p [[buffer(1)]],
-                        uint i [[thread_position_in_grid]])
+                        uint2 gid [[thread_position_in_grid]])
 {
-    if (i >= p.L * p.L) {
+    // One thread per matrix element of one system: the second grid dimension is the SYSTEM, so the
+    // whole batch is one dispatch (a dispatch per system cost more than the host loops it replaces).
+    if ((gid.x >= p.L * p.L) || (gid.y >= p.nof_systems)) {
         return;
     }
-    const uint row = i / p.L;
-    const uint col = i % p.L;
+    device float* a_sys = a + (ulong)gid.y * p.L * p.L;
+    const uint    i     = gid.x;
+    const uint    row   = i / p.L;
+    const uint    col   = i % p.L;
     const uint t1  = row / p.npf;
     const uint f1  = row % p.npf;
     const uint t2  = col / p.npf;
@@ -104,7 +109,7 @@ kernel void mmse_corr_a(device float* a [[buffer(0)]],
     if (row == col) {
         v += p.sigma2 + p.ridge;
     }
-    a[(ulong)row * p.Ls + col] = v;
+    a_sys[(ulong)row * p.Ls + col] = v;
 }
 
 /// \brief Fills the R_hp slot (row stride \c p.Ns ) of one system: R_hp[o][k] = rt(sym(o) - t_k) * rf(sc(o) - f_k).
@@ -113,14 +118,16 @@ kernel void mmse_corr_a(device float* a [[buffer(0)]],
 /// the same indexing the host's build_correlation_matrices() uses.
 kernel void mmse_corr_r_hp(device float* r_hp [[buffer(0)]],
                            constant mmse_corr_params& p [[buffer(1)]],
-                           uint i [[thread_position_in_grid]])
+                           uint2 gid [[thread_position_in_grid]])
 {
     const uint nout = p.nf * 14u;
-    if (i >= nout * p.L) {
+    if ((gid.x >= nout * p.L) || (gid.y >= p.nof_systems)) {
         return;
     }
-    const uint o   = i / p.L;
-    const uint col = i % p.L;
+    device float* r_sys = r_hp + (ulong)gid.y * p.Ns * p.L;
+    const uint    i     = gid.x;
+    const uint    o     = i / p.L;
+    const uint    col   = i % p.L;
     const uint sym = o / p.nf;
     const uint sc  = o % p.nf;
     const uint t2  = col / p.npf;
@@ -132,5 +139,5 @@ kernel void mmse_corr_r_hp(device float* r_hp [[buffer(0)]],
     const int df = (int)sc - (int)mmse_corr_pilot_subcarrier(p, f2);
     const float rf = mmse_rf_corr((float)abs(df) * p.scs_hz, p.tau_rms_s);
 
-    r_hp[(ulong)o * p.Ns + col] = rt * rf;
+    r_sys[(ulong)o * p.Ns + col] = rt * rf;
 }

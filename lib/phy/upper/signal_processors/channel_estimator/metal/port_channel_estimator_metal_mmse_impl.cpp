@@ -663,38 +663,23 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // (K0-d). The host arrays remain the fallback for a metallib without the kernel.
   unsigned L_std    = 0;
   unsigned nout_std = 0;
-  bool     std_slots_filled = false;
+  // Geometry of the standard blocks, from the host arrays: it is needed either way, and the device
+  // build below only replaces the VALUES (see the gate after merge_tail).
   if (n_std_blocks != 0) {
-    // OFF by default while the device path is being finished (the A slot matches the host's
-    // arithmetic element for element, R_hp does not yet - see the plan). OCUDU_CE_CORR_DEV=1 turns
-    // it on; OCUDU_CE_CPU_CORR=1 keeps it off explicitly.
-    static const bool device_corr_enabled = []() {
-      const char* env = std::getenv("OCUDU_CE_CORR_DEV");
-      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
-    }();
-    std_slots_filled = device_corr_enabled &&
-                       build_correlation_matrices_device(stats,
-                                                         args.dmrs_patterns.front().re_pattern,
-                                                         block_prb,
-                                                         0,
-                                                         span<const unsigned>(dmrs_sym.begin(), npt),
-                                                         scs_khz,
-                                                         0,
-                                                         nof_layers,
-                                                         nout_std,
-                                                         L_std);
-    if (!std_slots_filled) {
-      build_correlation_matrices(stats,
-                                 args.dmrs_patterns.front().re_pattern,
-                                 block_prb,
-                                 span<const unsigned>(dmrs_sym.begin(), npt),
-                                 scs_khz,
-                                 span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS),
-                                 span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
-                                 nout_std,
-                                 L_std);
-    }
+    build_correlation_matrices(stats,
+                               args.dmrs_patterns.front().re_pattern,
+                               block_prb,
+                               span<const unsigned>(dmrs_sym.begin(), npt),
+                               scs_khz,
+                               span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS),
+                               span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
+                               nout_std,
+                               L_std);
   }
+  // Whether the standard blocks' slots may be filled by the device instead. It is decided after
+  // merge_tail: a merged batch carries the TAIL block as an extra system whose geometry differs, and
+  // the device build only knows the standard one (see below).
+  bool std_slots_filled = false;
 #if defined(OCUDU_CE_TIME)
   const auto t_corr_std = steady_clock::now();
 #endif
@@ -757,6 +742,27 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // against the ~100 us of host round trip it removes.
     const bool merge_tail = (rem_prb != 0) && (n_std_blocks != 0) && !matrix_on && !tail_on_cpu &&
                             (2 * nof_layers <= MAX_LAYERS) && (std::getenv("OCUDU_CE_SPLIT_TAIL") == nullptr);
+    // The device build fills the slots of ONE geometry, and a merged batch holds TWO (the standard
+    // blocks in the layer systems and the tail block in the extra ones). So it is used only when the
+    // standard geometry is the whole batch: otherwise the tail system would keep whatever the slot
+    // held before, and the weights would be built from a stale matrix. With no tail, or with the
+    // split form (two batches), the standard batch is the single geometry the kernel describes.
+    static const bool device_corr_enabled = []() {
+      const char* env = std::getenv("OCUDU_CE_CORR_DEV");
+      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    }();
+    if (device_corr_enabled && !merge_tail && (n_std_blocks != 0)) {
+      std_slots_filled = build_correlation_matrices_device(stats,
+                                                           args.dmrs_patterns.front().re_pattern,
+                                                           block_prb,
+                                                           0,
+                                                           span<const unsigned>(dmrs_sym.begin(), npt),
+                                                           scs_khz,
+                                                           0,
+                                                           nof_layers,
+                                                           nout_std,
+                                                           L_std);
+    }
     // K3 (S-6a): the equalizer's per-symbol estimates, built on the GPU inside the engine call. The
     // destination can only be filled by a call that covers the WHOLE allocation with the legacy
     // kernels - the merged batch, or a hop whose single batch is everything - otherwise the blocks
