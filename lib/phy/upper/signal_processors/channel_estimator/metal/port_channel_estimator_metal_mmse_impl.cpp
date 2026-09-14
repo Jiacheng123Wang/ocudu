@@ -1097,6 +1097,18 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // it is what the merged batch above removes; OCUDU_CE_SPLIT_TAIL=1 keeps the split form
         // for the A/B of that merge.
         if (!tail_on_cpu) {
+          // K0-d: the edge/tail block is a batch of ONE geometry, so the device can build its
+          // matrices like the standard group's. Its slots start at nof_layers (the standard group
+          // owns [0, nof_layers) in the split form), which is why run_engine_blocks() takes
+          // sys_offset.
+          //
+          // NOTE: this is the SPLIT form only (OCUDU_CE_SPLIT_TAIL, or a whole hop narrower than a
+          // standard block). Hops with a remainder take the MERGED branch instead, where the tail
+          // rides as extra systems sharing the standard slots - a different geometry in the same
+          // buffer, which one correlation build cannot describe. That is why the device build
+          // covered 37.5% of the hops on the air (device_corr_builds=26761 of 71384 in the b22
+          // leg): the rest had a remainder and merged.
+          const bool tail_slots_on_device = std_slots_filled;
           unsigned nout_e = 0;
           unsigned L_e    = 0;
           build_correlation_matrices(stats,
@@ -1121,7 +1133,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                       npt,
                                       matrix_on,
                                       covers_hop ? reformat_for(rem_prb * NOF_SUBCARRIERS_PER_RB, 0, 0) : nullptr,
-                                      defer);
+                                      defer,
+                                      tail_slots_on_device ? &stats : nullptr,
+                                      nof_layers);
           hop_gpu               = hop_gpu || tail_ok;
           hop_nn                = hop_nn || (tail_ok && matrix_on);
           hop_pad               = (tail_ok && matrix_on) ? static_cast<unsigned>(((L_e + 7u) & ~7u) - L_e) : hop_pad;
@@ -1705,7 +1719,8 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                                                                bool                               matrix,
                                                                const metal::mmse_engine::reformat_stage* reformat,
                                                                bool                               defer,
-                                                               const channel_statistics*          device_stats)
+                                                               const channel_statistics*          device_stats,
+                                                               unsigned                           sys_offset)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
 
@@ -1750,7 +1765,7 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                                         b_prb,
                                         span<const unsigned>(dmrs_slots.begin(), dmrs_slots.size()),
                                         scs_to_khz(args.scs),
-                                        0,
+                                        sys_offset,
                                         nof_layers,
                                         st.L,
                                         L);
@@ -1761,7 +1776,7 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   // (measured). slots_filled only tells it to leave the A/R_hp slots alone, which is what the device
   // build needs: it is about to fill them itself, and a host write of A^-1 there would be inverted
   // again by K1 (the S-7f-3i defect).
-  stage_engine_group(args, gb_start, n_blk, b_prb, npt, nout, L, 0, st, matrix, false, dev_inv_now);
+  stage_engine_group(args, gb_start, n_blk, b_prb, npt, nout, L, sys_offset, st, matrix, false, dev_inv_now);
   const bool deferred = defer && !matrix;
   // No correlation prefix (corr == nullptr) and no K1: this call's slots already hold A^-1, either
   // from the host staging or from the device build finished above.
@@ -1780,9 +1795,9 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
     return false;
   }
   if (deferred) {
-    defer_unpack(gb_start, n_blk, b_prb, nout, nof_layers, 0, st);
+    defer_unpack(gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st);
   } else {
-    unpack_engine_group(gb_start, n_blk, b_prb, nout, nof_layers, 0, st);
+    unpack_engine_group(gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st);
   }
   return true;
 }

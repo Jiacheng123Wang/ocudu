@@ -313,6 +313,12 @@ private:
                              unsigned                                       a_stride,
                              unsigned                                       L);
 
+  /// \param[in] sys_offset  First engine slot of this batch. The standard blocks start at 0; the
+  ///                        edge/tail block of a hop sits at nof_layers, and the device build has to
+  ///                        write ITS slots or it would clobber the standard group's.
+  /// \param[in] device_stats When non-null, the DEVICE builds A and R_hp of this batch (K0-d) and
+  ///                        the host then inverts them in the slots - the full-GPU-path form of the
+  ///                        correlation matrices. Null keeps the host staging.
   bool run_engine_blocks(const fd_td_estimation_stage_args& args,
                          unsigned                           gb_start,
                          unsigned                           n_blk,
@@ -321,9 +327,10 @@ private:
                          unsigned                           L,
                          unsigned                           npt,
                          bool                               matrix,
-                         const metal::mmse_engine::reformat_stage* reformat      = nullptr,
-                         bool                               defer           = false,
-                         const channel_statistics*          device_stats    = nullptr);
+                         const metal::mmse_engine::reformat_stage* reformat   = nullptr,
+                         bool                               defer        = false,
+                         const channel_statistics*          device_stats = nullptr,
+                         unsigned                           sys_offset   = 0);
 
   /// \brief Unpack of a batch whose command buffer has not been waited for yet.
   ///

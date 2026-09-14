@@ -5947,3 +5947,48 @@ K1 原地写 `gpu_a`（54×54×4B），K3 写 `gpu_ce`，两者都不该碰 `gri
 而 `L/(L+6) = npf·npt/(npf·npt + npf/b_prb)` —— 指向**某个地方把 `L` 与 `L + comb` 混用了**。
 建议从 `corr_stage` / `mmse_corr_params` 与 `mmse_weights_params` 的字段顺序或 stride 入手，
 **先 diff 这三个结构体在 .metal 与 .mm 两侧的字段布局**（一个字段错位就会产生这种缩放特征）。
+
+#### 48.82 S-7f-3r：**OTA 验证通过**（设备建矩阵在真实链路上跑通），以及覆盖率 37.5% 的解释
+
+**（a）上机结果（`d8e23f67d1`，用户跑的腿，5MHz n1 bridge，Metal CE + Metal 等化器/解调 + Metal LDPC）**
+
+| 判据 | 实测 | 判定 |
+|---|---|---|
+| **`device_corr_builds` > 0** | **26761** | ✓ **设备建矩阵在真实链路里确实执行**（离线时它曾整段没跑过） |
+| `Real-time failure in RF` | **0** | ✓（上次健康基线是个位数） |
+| USB 错误 / 崩溃 | **0**（只有 `[B200] Operating over USB 3.`） | ✓ |
+| `hops_gpu / hops_no_gpu` | 71384 / 0，`fb_blocks=0` | ✓ 全部 hop 走 GPU |
+| `mmse_ce commits/waits` | 98147 / 98147，`max_in_flight=1` | ✓ |
+
+性能（只记录，不设 gate）：`mean total=114.3us`、`stage=17.89us`、`corr=10.9us`、`gpu_path=99.4us`、
+`gpu_wait=137.2us`、`defer_wait=306.7us`、`max total=1068us`。
+注意 **`pre=0.69us`**——比离线 replay（6–18us）低一个量级，说明 **OTA 的 hop 结构与离线抓包差别很大**
+（离线抓包多是 24/25 PRB 的宽分配，实网上海量的窄分配）。
+
+**（b）覆盖率 37.5% 的真正原因（我第一版分析错了，这里更正）**
+`device_corr_builds=26761` vs `hops_gpu=71384` ⇒ 只有 **37.5%** 的 hop 走了设备构建。
+我最初以为是"tail 分支没接设备构建"，于是给 `run_engine_blocks()` 加了 `sys_offset` 并在 tail 分支接上。
+**结果探针一次都没打印**——这批 hop 压根没走 tail 分支，而是走 **merged 分支**：
+
+| 分配 | `rem_prb` | `merge_tail` | `std_slots_filled` | 设备构建 |
+|---|---|---|---|---|
+| 整块（如 24 PRB ÷ 3 = 8） | 0 | false | **true** | ✓ 生效 |
+| 有余数（绝大多数） | ≠0 | **true** | **false** | ✗ 不走 |
+
+**merged 分支为什么不能用"两次设备构建"解决**：tail 是作为**额外的 system** 挤进**标准组的槽位**的
+（`A = blockdiag(A_e, I)`、`R_hp = [R_hp_e | 0]`），两家**共用同一对 A/R_hp 槽位**，
+只是几何不同。一次 `build_correlation` 只能描述一种几何，
+而两次调用会**互相覆盖**（`corr_stage` 的 `c.a = gpu_a + sys_offset * L * L` 用的是紧凑 stride，
+tail 的 `L_e` 与槽位的 `L_std` 不等，指针会落到标准组的中间）。
+⇒ 要覆盖 merged，需要让 `correlation_stage()` 支持 **`a_stride != L`**（把 stride 独立成参数），
+这是下一轮的具体动作。
+
+**（c）本轮顺带落地的（对 split 形式有效，对当前 OTA 配置无影响）**
+`run_engine_blocks()` 新增 `sys_offset` 参数，tail 分支接上设备构建。实测
+`OCUDU_CE_SPLIT_TAIL=1` 下 `device_corr_builds` 从 **0 → 2**（标准组 + tail），
+且三条抓包 **llr/h/ce 逐字节一致**。→ 这条改动是"split 形式下全 GPU path 更完整"，
+虽然当前 OTA 用不到，但它把 `merged` 与 `split` 两条路的设备构建**能力拉平到同一起点**。
+
+**（d）结论**：**"设备建矩阵"这一步在全 GPU path 的意义上已经上机跑通**——
+链路健康、零 RF 失败、零 USB 错误，且计数器证明它真的在执行。
+覆盖率（37.5% → 期望 ~100%）是下一个具体的、已定界的动作（(b) 的 stride 改造）。
