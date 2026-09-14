@@ -19,6 +19,11 @@ namespace ocudu {
 /// and UE specific Search Spaces.
 constexpr size_t MAX_NOF_SEARCH_SPACE_PER_BWP = 10;
 
+/// \brief [Implementation defined] Number of SSB candidates that SearchSpace#0 holds monitoring occasions for.
+/// TODO: support the 64 SSB candidates of FR2. Sizing the per-candidate lists for FR2 would grow every
+/// UE-dedicated SearchSpace, which uses their first element only, so SearchSpace#0 needs its own storage first.
+constexpr size_t MAX_NOF_SS0_SSB_CANDIDATES = 8;
+
 /// \brief Search Space identifier. This value is UE-specific, which means that a UE can have up to
 /// "maxNrofSearchSpaces=40" Search Spaces configured. The ID space is used across BWPs of a serving cell.
 enum search_space_id : uint8_t { MIN_SEARCH_SPACE_ID = 0, MAX_SEARCH_SPACE_ID = 39, MAX_NOF_SEARCH_SPACES = 40 };
@@ -251,12 +256,12 @@ private:
   /// beam of index equal to index in vector.
   /// For SearchSpace != 0, only the first element of the vector is used. Possible values:
   /// {0,...,monitoring_slot_period}.
-  static_vector<slot_point, MAX_NUM_BEAMS> monitoring_slot_offset;
+  static_vector<slot_point, MAX_NOF_SS0_SSB_CANDIDATES> monitoring_slot_offset;
   /// The first symbol(s) for PDCCH monitoring occasion(s) in the slots for PDCCH monitoring. The most
   /// significant bit represents the first OFDM in a slot.
   /// For SearchSpace == 0, each element in vector corresponds to a SSB beam of index equal to index in vector.
   /// For SearchSpace != 0, only the first element of the vector is used.
-  static_vector<monitoring_symbols_within_slot_t, MAX_NUM_BEAMS> monitoring_symbols_within_slot;
+  static_vector<monitoring_symbols_within_slot_t, MAX_NOF_SS0_SSB_CANDIDATES> monitoring_symbols_within_slot;
   /// SearchSpace#0 index of Table 13-{11, ..., 15}, TS 38.213.
   search_space0_index ss0_index = 0;
 };

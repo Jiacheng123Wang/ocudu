@@ -265,13 +265,13 @@ private:
 /// \param[in] carrier_bw_mhz corresponds to the width of this carrier in MHz. Values: 5, 10, 15, 20, 25, 30, 40,
 /// 50, 60, 70, 80, 90, 100, 200, 400.
 /// \param[in] duplx_mode corresponds to duplex mode FDD or TDD.
-void test_sib1_scheduler(subcarrier_spacing                         scs_common,
-                         const std::array<unsigned, MAX_NUM_BEAMS>& sib1_pdcch_slots,
-                         uint8_t                                    pdcch_config_sib1,
-                         uint8_t                                    ssb_beam_bitmap,
-                         uint8_t                                    l_max,
-                         uint16_t                                   carrier_bw_mhz,
-                         duplex_mode                                duplx_mode)
+void test_sib1_scheduler(subcarrier_spacing                                  scs_common,
+                         const std::array<unsigned, MAX_NOF_SSB_CANDIDATES>& sib1_pdcch_slots,
+                         uint8_t                                             pdcch_config_sib1,
+                         uint8_t                                             ssb_beam_bitmap,
+                         uint8_t                                             l_max,
+                         uint16_t                                            carrier_bw_mhz,
+                         duplex_mode                                         duplx_mode)
 {
   sib1_scheduler_setup t_bench{
       sib1_scheduler_setup::make_scheduler_expert_cfg({10, aggregation_level::n4, 10, aggregation_level::n4}),
@@ -462,8 +462,8 @@ TEST(sib1_scheduler_test, test_sib1_scheduler_allocation_fdd)
   // NOTE: for FDD, there is no option to have L_max = 8, as all FDD frequencies are below 3GHz.
 
   // SCS Common: 15kHz
-  std::array<unsigned, MAX_NUM_BEAMS> sib1_slots = {6, 8, 10, 12};
-  constexpr uint8_t                   l_max      = 4U;
+  std::array<unsigned, MAX_NOF_SSB_CANDIDATES> sib1_slots = {6, 8, 10, 12};
+  constexpr uint8_t                            l_max      = 4U;
   // pdcch_config_sib1 = 9U => { coreset0 = 0U, searchspace0 = 9U).
   test_sib1_scheduler(subcarrier_spacing::kHz15, sib1_slots, 9U, 0b1010, l_max, 20, ocudu::duplex_mode::FDD);
   // pdcch_config_sib1 = 57U => { coreset0 = 3U, searchspace0 = 9U).
@@ -526,8 +526,8 @@ TEST(sib1_scheduler_test, test_sib1_scheduler_allocation_tdd)
   // SCS Common: 15kHz.
   // With TDD pattern {period=10, dl=5, ul=4}, slots >= 5 fall in flexible/UL range.
   // Only ss0 indices that map n0+1 into [0,4] are valid.
-  std::array<unsigned, MAX_NUM_BEAMS> sib1_slots = {3};
-  uint8_t                             l_max      = 4U;
+  std::array<unsigned, MAX_NOF_SSB_CANDIDATES> sib1_slots = {3};
+  uint8_t                                      l_max      = 4U;
   test_sib1_scheduler(subcarrier_spacing::kHz15, sib1_slots, 2U, 0b1000, l_max, 20, ocudu::duplex_mode::TDD);
 
   // 10Mhz Carrier BW.

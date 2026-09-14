@@ -354,6 +354,12 @@ static check_outcome check_ssb_configuration(const du_cell_config& cell_cfg)
 
   CHECK_TRUE(not ssb_cfg.ssb_beams.empty(), "At least one SSB candidate must be transmitted.");
 
+  // SearchSpace#0 holds the Type0-PDCCH monitoring occasions of the first MAX_NOF_SS0_SSB_CANDIDATES candidates only,
+  // and SIB1 needs them for every transmitted candidate.
+  for (uint8_t ssb_idx : ssb_cfg.ssb_beams.transmitted_indexes()) {
+    CHECK_BELOW(ssb_idx, MAX_NOF_SS0_SSB_CANDIDATES, "index of a transmitted SSB candidate");
+  }
+
   if (ssb_cfg.ssb_beams.nof_transmitted() > 1) {
     // The SS/PBCH block associated with a detected preamble is derived from the position of its PRACH occasion in the
     // occasion ordering of TS 38.213, Section 8.1, which requires the occasion to be identified unambiguously. The

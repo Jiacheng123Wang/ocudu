@@ -76,7 +76,7 @@ private:
   bwp_configuration coreset0_bwp_cfg;
 
   /// Array of Type0-PDCCH CSS slots (1 per SSB candidate) used for SIB1 scheduling [TS 38.213, Section 13].
-  std::array<slot_point, MAX_NUM_BEAMS> sib1_type0_pdcch_css_slots;
+  std::array<slot_point, MAX_NOF_SSB_CANDIDATES> sib1_type0_pdcch_css_slots;
 
   /// Pending new SIB1 PDU to be applied.
   unsigned     pending_version = 0;

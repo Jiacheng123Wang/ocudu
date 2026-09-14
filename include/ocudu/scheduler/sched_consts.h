@@ -16,10 +16,6 @@ constexpr unsigned NOF_SSB_OFDM_SYMBOLS    = 4;
 /// SIB1 constants.
 /// SIB1 periodicity, see TS 38.331, Section 5.2.1.
 constexpr unsigned SIB1_PERIODICITY = 160;
-/// [Implementation defined] Max numbers of beams, to be used for SIB1 scheduler.
-/// NOTE: This is temporary, and valid only for FR1.
-constexpr unsigned MAX_NUM_BEAMS = 8;
-
 /// [Implementation defined] Maximum allowed slot offset between DCI and its scheduled PDSCH. Values {0,..,32}.
 constexpr unsigned SCHEDULER_MAX_K0 = 15;
 
