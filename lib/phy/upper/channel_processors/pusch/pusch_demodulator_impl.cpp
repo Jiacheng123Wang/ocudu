@@ -6,6 +6,7 @@
 /// \brief PUSCH demodulator implementation definition.
 
 #include "pusch_demodulator_impl.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 
 #include "ul_capture.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -710,7 +711,7 @@ demod_ch_est_stats& demod_ch_est_counters()
   static demod_ch_est_stats s;
   static std::once_flag    flag;
   std::call_once(flag, []() {
-    std::atexit([]() {
+    ocudu::phy_shutdown_report::add([]() {
       const demod_ch_est_stats& c = demod_ch_est_counters();
       ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] pusch_demod ch_est device={} host={}",
                    static_cast<unsigned long long>(c.device.load(std::memory_order_relaxed)),

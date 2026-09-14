@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_dft_metal_engine.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 
 #include "ocudu_metal_queue.h"
 
@@ -194,7 +195,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   // Register the process-exit stats report exactly once (the counters live for the process).
 #if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
-  std::call_once(stats_atexit_flag, []() { std::atexit(dft_stats_report); });
+  std::call_once(stats_atexit_flag, []() { ocudu::phy_shutdown_report::add(dft_stats_report); });
 #endif
 
   if (size < 2 || size > max_size) {

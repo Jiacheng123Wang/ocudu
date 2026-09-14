@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_metal_burst.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
@@ -96,7 +97,7 @@ void burst_stats_wait()
 }
 
 const bool burst_stats_registered = []() {
-  std::atexit(burst_stats_report);
+  ocudu::phy_shutdown_report::add(burst_stats_report);
   return true;
 }();
 #else

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_metal_mmse_engine.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 
 #include <chrono>
 #include <cstdio>
@@ -460,7 +461,7 @@ bool mmse_engine::init(const char* metallib_path)
   // Register the process-exit stats report exactly once (the counters live for the process).
 #if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
-  std::call_once(stats_atexit_flag, []() { std::atexit(mmse_stats_report); });
+  std::call_once(stats_atexit_flag, []() { ocudu::phy_shutdown_report::add(mmse_stats_report); });
 #endif
 
   if (impl == nullptr) {

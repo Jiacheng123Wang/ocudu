@@ -13,6 +13,7 @@
 /// new.
 
 #include "ldpc_decoder_metal.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "ldpc_graph_impl.h"
 #include "ocudu_metal_decoder_engine.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -199,7 +200,7 @@ void ldpc_time_stats_report()
 void ldpc_time_stats_register()
 {
   static std::once_flag flag;
-  std::call_once(flag, []() { std::atexit(ldpc_time_stats_report); });
+  std::call_once(flag, []() { ocudu::phy_shutdown_report::add(ldpc_time_stats_report); });
 }
 
 #if !defined(__arm64__)

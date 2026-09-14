@@ -45,6 +45,7 @@
 #include "ocudu/support/backtrace.h"
 #include "ocudu/support/config_parsers.h"
 #include "ocudu/support/cpu_features.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 #include "ocudu/support/io/io_broker_factory.h"
 #include "ocudu/support/macos_compat.h"
@@ -646,6 +647,11 @@ int main(int argc, char** argv)
     // late for the file sink, and the numbers would end up on the console only.
     // cmake -S . -B build -DENABLE_FLOW_PROBES=ON && make -C build gnb
     ocudu::ul_pipeline_probe::get().report();
+
+    // Summarize the PHY probes (the Metal engines, the channel estimator, the LDPC decoder, the
+    // equalizer): they register here instead of with std::atexit, because by the time atexit runs
+    // the logger registry is gone and asking it for a logger reads freed memory.
+    ocudu::phy_shutdown_report::run_all();
   }
 
   // Stop metrics manager.
@@ -670,8 +676,8 @@ int main(int argc, char** argv)
   e1_gw->stop();
   // Xn-C gateway is stopped by Xn-C connection manager.
 
-  // Everything the shutdown logged must reach the file sinks before the process goes away.
-  ocudulog::flush();
-
+  // The log files are flushed by the scope guard installed next to initialize_log(), so nothing
+  // needs to be flushed here - and flushing a second time at this point is what the shutdown
+  // statistics used to be blamed for.
   return 0;
 }

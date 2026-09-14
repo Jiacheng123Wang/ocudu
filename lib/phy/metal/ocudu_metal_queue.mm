@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_metal_queue.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/macos_compat.h"
@@ -108,7 +109,7 @@ void shared_queue_stats_report()
 }
 
 const bool shared_queue_stats_registered = []() {
-  std::atexit(shared_queue_stats_report);
+  ocudu::phy_shutdown_report::add(shared_queue_stats_report);
   return true;
 }();
 #endif

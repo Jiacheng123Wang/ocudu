@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "channel_equalizer_metal.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "ocudu_equalizer_metal_engine.h"
 #include "ocudu/adt/bf16.h"
 #include "ocudu/ocuduvec/fill.h"
@@ -55,7 +56,7 @@ ch_est_source_counters& ch_est_source()
 
 #if defined(OCUDU_METAL_STATS)
 const bool ch_est_source_registered = []() {
-  std::atexit([]() {
+  ocudu::phy_shutdown_report::add([]() {
     ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] equalizer ch_est device={} staged={}",
                  static_cast<unsigned long long>(ch_est_source().device.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(ch_est_source().staged.load(std::memory_order_relaxed)));

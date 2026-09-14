@@ -12,6 +12,7 @@
 #import <Metal/Metal.h>
 
 #include "ocudu_metal_queue.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -278,7 +279,7 @@ algo_resources_t* get_algo_resources(decoder_engine::algo mode)
   // Register the process-exit stats report exactly once (the counters live for the process).
 #if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
-  std::call_once(stats_atexit_flag, []() { std::atexit(decoder_stats_report); });
+  std::call_once(stats_atexit_flag, []() { ocudu::phy_shutdown_report::add(decoder_stats_report); });
 #endif
 
   std::lock_guard<std::mutex> lock(algo_resources_mutex());

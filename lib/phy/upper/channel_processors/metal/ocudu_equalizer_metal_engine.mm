@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_equalizer_metal_engine.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "ocudu_metal_burst.h"
 
 #import <Foundation/Foundation.h>
@@ -110,7 +111,7 @@ void eq_batch_note_run(unsigned run)
 
 #if defined(OCUDU_METAL_STATS)
 const bool eq_batch_diag_registered = []() {
-  std::atexit([]() {
+  ocudu::phy_shutdown_report::add([]() {
     const eq_batch_diag_t& d = eq_batch_diag();
     const char*            brk = d.first_break.load(std::memory_order_relaxed);
     ocudulog::fetch_basic_logger("PHY").debug("[metal_stats] eq_batch flushes={} symbols={} runs={} batched={} max_run={} first_break={}",
@@ -327,7 +328,7 @@ bool equalizer_metal_engine::init()
 {
 #if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
-  std::call_once(stats_atexit_flag, []() { std::atexit(eq_stats_report); });
+  std::call_once(stats_atexit_flag, []() { ocudu::phy_shutdown_report::add(eq_stats_report); });
 #endif
 
   if (impl == nullptr) {

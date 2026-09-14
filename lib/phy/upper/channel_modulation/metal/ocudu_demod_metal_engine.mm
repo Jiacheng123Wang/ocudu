@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_demod_metal_engine.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "ocudu_metal_burst.h"
 
 #import <Foundation/Foundation.h>
@@ -170,7 +171,7 @@ bool demod_metal_engine::init()
 {
 #if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
-  std::call_once(stats_atexit_flag, []() { std::atexit(demod_stats_report); });
+  std::call_once(stats_atexit_flag, []() { ocudu::phy_shutdown_report::add(demod_stats_report); });
 #endif
 
   if (impl == nullptr) {

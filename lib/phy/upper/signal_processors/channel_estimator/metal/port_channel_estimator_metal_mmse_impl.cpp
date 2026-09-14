@@ -4,6 +4,7 @@
 // (Derives from the upstream port_channel_estimator_average_impl base class.)
 
 #include "port_channel_estimator_metal_mmse_impl.h"
+#include "ocudu/support/executors/phy_shutdown_report.h"
 #include "../port_channel_estimator_helpers.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/sc_prod.h"
@@ -89,7 +90,7 @@ void mmse_stats_register_atexit()
 {
   static std::once_flag flag;
   std::call_once(flag, []() {
-    std::atexit([]() {
+    ocudu::phy_shutdown_report::add([]() {
       const mmse_time_stats& s = mmse_stats();
       const uint64_t          n = s.calls.load(std::memory_order_relaxed);
       if (n == 0) {
