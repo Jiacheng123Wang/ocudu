@@ -6179,6 +6179,8 @@ vs `OCUDU_CE_GPU_INVERT=0 OCUDU_CE_CORR_DEV=0`（全主机）——**这条才�
 **CRC/译码判决**必须 980/980 一致（LLR 字节不要求一致，反演舍入本来就不同）；
 ③ 多形状 soak 6 形状 × 2 轮；④ `ctest -L phy` 162/162。
 
+**① 与 ② 已固化为可重跑脚本**（`capture_gates.sh k0d|k1`，见 §48.99(a)）——不要再用 `/tmp` 里的临时脚本。
+
 > ⚠️ **历史注记（务必记住）**：在 §48.98 之前，① 的形式是"默认 vs `CORR_DEV=0`"，
 > 而**默认路径每次都让主机 staging 把设备写的 A/R_hp 覆盖掉**——
 > 所以那条绿灯证明的是"主机 vs 主机"，**对 `r_hp` 完全无效**（§48.96 的 1/9 缺陷因此藏了整轮）。
@@ -6923,3 +6925,67 @@ barrier**（n=54 ⇒ ~108 次）。真正的修复是 S-5a 的 blocked / `simdgr
 2. **"能编译过"之外，"默认参数"也是同类陷阱。** §48.94 的教训是实参个数；
    这次 `slots_filled`/`a_rhp_filled` 都带默认值，于是"少传一个"同样能编译。
    **凡是表达"谁写了哪块内存"的参数，都不给默认值。**
+
+#### 48.99 S-7f-4f 收尾：门禁脚本落库；**OTA 尚未跑成**（阻塞在核心网，不是代码）
+
+**（a）门禁脚本落库（`/tmp` 里的那套会丢）**
+新增 `lib/phy/upper/signal_processors/channel_estimator/metal/capture_gates.sh`，把本会话用的两个
+抓包门禁固化成**两模式一条命令**（自并行、自带重试、退出码即判据）：
+
+```bash
+M=lib/phy/upper/signal_processors/channel_estimator/metal
+$M/capture_gates.sh k0d 10      # K0-d 等价性：必须逐字节一致
+$M/capture_gates.sh k1  10      # K1 功能等价：必须判决一致
+```
+
+| 模式 | 两条路径 | 判据 | 本轮实测（980 抓包） |
+|---|---|---|---|
+| `k0d` | `GPU_INVERT=0`（设备建+主机反演）vs `GPU_INVERT=0 CORR_DEV=0`（全主机） | **所有发布文件逐字节一致** | **980/980 一致 → PASS** |
+| `k1` | 默认（设备 K1）vs `CPU_INVERT=1`（主机 K1） | **`tbs`+`crc` 判决一致**；LLR 字节数只作信息 | **980/980 判决一致 → PASS**（262/980 LLR 字节相同，max\|ΔSINR\|=7.32 dB，0 判决翻转） |
+
+脚本里的两处坑（都踩过，已修，写在这里免得下轮再踩）：
+1. `ul_chain_replay --out` 是**文件名前缀**，不是目录：写的是 `<out>_<slot>_<rnti>{,.bin,_ce.txt,_llr.bin,_h.bin}`。
+   第一版按目录拼 `"$out_h/$(basename $f)"`，于是**每一条都判成不一致**（假红）。
+2. 退化的抓包（`tbs=88`，无可用户数）打的是 **`sinr=inf`**，正则里的 `[-0-9.]+` 匹不上，
+   9 条会静默变成 "no-result"（假红）。**判据脚本也要对"合法的退化输出"留门。**
+
+**（b）语料里 `_h.bin`/`_llr.bin` 不是基线，别再拿它当参考**
+本会话试过拿 `/tmp/iq*_llr.bin`/`_h.bin` 当"改动前的基准"做回归，**不成立**：
+同一条 `iq2_1009_17923`，三条现行路径（设备 K1 / 主机 K1 / 全主机）**互相之间的差异都在舍入量级**，
+但与那两个文件的 `h` **8400/8400 个元素全部不同、最大差 1.086**——它们是**另一次计算**的产物
+（大小也对不上：`_llr.bin` 89936 B vs 现行 25388 B）。**语料里真正的基线是 `*_ce.txt`（抓包信息），
+不是那对 `.bin`。**
+
+**（c）OTA：B200 能开，卡在核心网**
+
+| 检查项 | 结果 |
+|---|---|
+| `build/apps/gnb/gnb` 版本戳 | `63a15a7b9c`（= HEAD，已同步重建） |
+| USRP B200 打开（**不加 sudo**） | **成功**（`Actually got clock rate 7.680000 MHz`，寄存器回环通过） |
+| N2 → AMF `192.168.31.250:38412` | **`"NG Setup Procedure" timed out after 5000ms` ⇒ `CU-CP failed to connect to AMF`，gNB 主动退出（约 8 s）** |
+| 后果 | AMF 不回 NG Setup ⇒ 无 UE ⇒ 无 PUSCH 授权 ⇒ **CE 一次都不跑**（`device_corr_builds=0`），OTA 判据一条也拿不到 |
+
+> 注：`nc -z 192.168.31.250 38412` 探不到端口是**正常的**——N2 走 **SCTP**，不是 TCP。
+> 判断核心网是否活着只能用 gNB 自己（或 `ss`/`netstat -a -p sctp`）。
+
+**上机命令（脚本已就绪，含 AMF 未起时的提前退出与报告）**：
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+lib/phy/upper/signal_processors/channel_estimator/metal/ota_k1_verify.sh 150
+# 或手动：
+sudo ./build/apps/gnb/gnb -c configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml \
+  --expert_phy.pusch_channel_estimator_algo metal_mmse \
+  --expert_phy.pusch_channel_equalizer_backend metal --expert_phy.pusch_dft_type metal \
+  --expert_phy.pusch_ldpc_decoder_type auto \
+  --log.all_level warning --log.filename /tmp/gnb_ota_k1.log > /tmp/gnb_ota_k1_console.log 2>&1
+```
+
+**上机判据**（§9 的口径，未变）：`device_corr_builds > 0`；`Real-time failure in RF` 个位到数十；
+0 USB 错误 / 0 崩溃。`[mmse_time_sum]` 的 `corr=`/`gpu_path=`/`gpu_wait=` **只记录、不设 gate**。
+
+**（d）OTA 的**已知风险**（不是"可能"，是**量化过的**）**
+设备 K1 让每条 hop 的 GPU 时间多 ~400–480 µs（§48.98(f)），离线 `defer_wait` 从 ~290/617 µs 升到
+~1067/992 µs。**实网 1 ms 时隙下能否吃掉这 0.5 ms，只有上机能回答。**
+若上机出现大量 `Real-time failure in RF`，**下一步就是 K1 内核本身**（把 ~108 次 barrier 降下来，
+S-5a 的 blocked / `simdgroup_matrix` 形式）——那是**性能修复，不是把 K1 退回 CPU 的理由**（用户方针）。
