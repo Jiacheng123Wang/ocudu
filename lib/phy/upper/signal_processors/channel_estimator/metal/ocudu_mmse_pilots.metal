@@ -33,23 +33,35 @@
 ///     the extraction introduces no rounding of its own;
 ///   - the host's accumulation ORDER is followed where it is visible (see the CFO reduction).
 
-/// ---- STATUS (S-7f-5c): kernels written and building, NOT yet dispatched ----
-/// Nothing calls these three kernels yet and the estimator still computes the pilots on the host, so
-/// the metallib change is behaviour-neutral (the capture gates are unchanged). Known gaps before the
-/// switch can be made, each of which has to be settled against the host code it mirrors:
-///   1. `compute_hop_submit()` calls the pre-stage ONCE PER HOP (hop 0 and hop 1 of a frequency-hopping
-///      allocation), and `cfo_normalized` averages the two hops' CFOs - the per-hop split is the
-///      caller's and is not modelled here;
-///   2. `td_interpolation_strategy` selects where the symbol-1 products live (pilot_products vs
-///      pilots_lse[1]) and whether the layers are averaged (`average_pairs`); only the
-///      non-averaging branch's buffers are assumed here;
-///   3. EPRE is a reduction over the extracted pilots that the host still owns (and `rx_pilots` is
-///      consumed by K4 as well), so the extraction kernel currently duplicates work rather than
-///      replacing it;
-///   4. which PRBs the hop occupies (`first_prb`/`nof_prb`) and the per-symbol slots come from
-///      `extract_common_pattern()` + the layer's `rb_mask`/`rb_mask2`, which the caller must pass.
-/// The next step is the wiring plus a tolerance probe against the host's `pilots_lse`, then the OTA
-/// handover described in the design document.
+/// ---- STATUS (S-7f-5h): dispatched by default, pilot-level probe green ----
+/// These kernels produce the estimator's input: port_channel_estimator_metal_mmse_impl::apply_fd_
+/// td_estimation_stage() builds a pilots_stage from the grid's device view and overwrites
+/// pilots_lse_view with the result. OCUDU_CE_CPU_LS=1 forces the host pre-stage instead, and the
+/// device path falls back to it automatically when the grid has no device view, the allocation is
+/// not contiguous, or the pilot count disagrees with the caller's.
+///
+/// Measured: the pilots match the host to 1.4-2.2e-07 maximum relative difference with none outside
+/// 1e-5 on the three reference captures, and the end-to-end result is unchanged. Gates with this as
+/// the default: k0d 980/980 byte-identical, k1 980/980 decision-identical, combos PASS,
+/// ctest -L phy 162/162.
+///
+/// Resolved since S-7f-5c, both worth remembering:
+///   - the host compensates the CFO through TWO call sites (compensate_cfo_and_accumulate() for
+///     symbols 0 and 1, combine_pilots() for the rest), each with the SLOT SYMBOL epoch of its own
+///     DM-RS symbol. An earlier version stopped at the first two, which left a third of a
+///     three-symbol hop rotated by ~6% while symbols 0 and 1 matched bit for bit;
+///   - the time-domain strategy is not a variable here: the metal estimator FORCES
+///     td_interpolation_strategy::interpolate in its constructor ("so the LSE pilots are kept per
+///     DM-RS symbol"), so the per-symbol products this file produces are the right shape.
+///
+/// KNOWN GAP, not exercised by the current cell (single layer): the pilot positions come from
+/// dmrs_patterns.front().re_pattern for every layer. Layers of one CDM group do share their REs, so
+/// this is exact for up to two layers, but a 4-layer allocation puts layers 2 and 3 on the other
+/// comb and would need the per-layer pattern. Fix before enabling multiple layers.
+///
+/// Still the host's, deliberately (the CPU glue this step keeps): EPRE, sigma2 and the FD smoothing
+/// of filtered_pilots_lse, plus the fact that the base class still runs its own pre-stage which
+/// these kernels overwrite.
 
 #include <metal_stdlib>
 using namespace metal;
