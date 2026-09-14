@@ -409,6 +409,8 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
   }
 
   fd_td_estimation_stage_args stage_args{
+      .grid                      = grid,
+      .port                      = port,
       .pilots                    = pilots,
       .rx_pilots                 = rx_pilots,
       .dmrs_patterns             = cfg_local.dmrs_pattern,

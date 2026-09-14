@@ -144,6 +144,14 @@ protected:
   /// store their own full time-frequency grid and override \c get_symbol_ch_estimate instead of
   /// relying on the time-domain strategy.
   struct fd_td_estimation_stage_args {
+    /// Resource grid the hop's pilots were extracted from, and the receive port they belong to.
+    ///
+    /// The host stage does not need them (it is handed the extracted pilots), but a DEVICE backend
+    /// does: it runs the extraction itself, reading the grid in place through
+    /// resource_grid_reader::get_device_view() - the grid is already device-resident (S-7b), so
+    /// nothing has to be brought over. See ocudu_mmse_pilots.metal (K0-a).
+    const resource_grid_reader& grid;
+    unsigned                    port;
     /// Transmitted pilots (per layer, per DM-RS symbol).
     const dmrs_symbol_list& pilots;
     /// Received pilots (per CDM group, per DM-RS symbol).
