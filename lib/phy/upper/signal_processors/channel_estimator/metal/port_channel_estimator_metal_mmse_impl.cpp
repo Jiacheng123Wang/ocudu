@@ -1581,9 +1581,19 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
   //               asks for, and it is the default.
   //   otherwise:  the caller already staged A^-1 (host Gauss-Jordan), so the weights read it as is.
   // The matrix (nn) flavor is the only structurally different one.
+  // TEMPORARY experiment: OCUDU_CE_INVERT_FIRST=1 inverts A with the ENGINE'S OWN standalone
+  // entry point (mmse_engine::invert(), its own command buffer - the path k1_check has always
+  // used successfully) right before the weights call, instead of leaving K1 inside that call's
+  // buffer. Isolates "K1 does not work" from "K1 does not work INSIDE run_async()'s buffer".
+  if (gpu_invert && (std::getenv("OCUDU_CE_INVERT_FIRST") != nullptr)) {
+    if (!engine->invert(gpu_a, L, nof_systems)) {
+      logger.error("[mmse_ce] standalone invert() failed (L={}, systems={})", L, nof_systems);
+    }
+  }
+  const bool k1_inline = gpu_invert && (std::getenv("OCUDU_CE_INVERT_FIRST") == nullptr);
   const bool engine_ok =
       matrix ? engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_systems, nof_blocks)
-             : (gpu_invert
+             : (k1_inline
                     ? (defer ? engine->run_async(
                                    gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
                              : engine->run(
