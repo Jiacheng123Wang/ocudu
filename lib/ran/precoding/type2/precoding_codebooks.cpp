@@ -11,9 +11,6 @@
 
 using namespace ocudu;
 
-/// Maximum number of layers supported by the Type II codebook.
-static constexpr unsigned max_nof_typeII_layers = 2;
-
 /// \brief Accumulates the contribution of a single Type II beam into a layer of the precoding weight matrix.
 ///
 /// The beam is added to the two polarizations of the given layer, each scaled by its own combining coefficient. The
