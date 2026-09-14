@@ -898,6 +898,12 @@ void ngap_impl::handle_ue_context_release_command(const asn1::ngap::ue_context_r
     if (stored_amf_ue_id == amf_ue_id_t::invalid) {
       ue_ctxt_list.update_amf_ue_id(ran_ue_id, amf_ue_id);
     }
+  } else {
+    // Neither an AMF UE ID nor a UE ID pair was provided.
+    logger.warning("Dropping UeContextReleaseCommand. Unsupported UE-NGAP-IDs choice={}",
+                   cmd->ue_ngap_ids.type().to_string());
+    send_error_indication(tx_pdu_notifier, logger, {}, {}, cause_protocol_t::abstract_syntax_error_reject);
+    return;
   }
 
   ngap_ue_context& ue_ctxt = ue_ctxt_list[amf_ue_id];
