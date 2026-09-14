@@ -299,6 +299,10 @@ csi_report_size ocudu::get_csi_report_pucch_size(const csi_report_configuration&
 {
   using namespace units::literals;
 
+  // The Type II CSI reporting is restricted to PUSCH, as per TS38.214 Section 5.2.1.4.
+  ocudu_assert(!std::holds_alternative<pmi_codebook_typeII>(config.pmi_codebook),
+               "Type II CSI reports are not supported on PUCCH.");
+
   unsigned nof_csi_antenna_ports = get_precoding_codebook_antenna_ports(config.pmi_codebook);
 
   if (config.subband.has_value()) {
@@ -395,6 +399,11 @@ bool ocudu::validate_pucch_csi_payload(const csi_report_packed& packed, const cs
     return false;
   }
 
+  // The Type II CSI reporting is restricted to PUSCH, as per TS38.214 Section 5.2.1.4.
+  if (std::holds_alternative<pmi_codebook_typeII>(config.pmi_codebook)) {
+    return false;
+  }
+
   // Subband PMI CSI reports are not supported on PUCCH.
   if (config.subband.has_value() && config.subband->pmi) {
     return false;
@@ -425,6 +434,10 @@ bool ocudu::validate_pucch_csi_payload(const csi_report_packed& packed, const cs
 
 csi_report_data ocudu::csi_report_unpack_pucch(const csi_report_packed& packed, const csi_report_configuration& config)
 {
+  // The Type II CSI reporting is restricted to PUSCH, as per TS38.214 Section 5.2.1.4.
+  ocudu_assert(!std::holds_alternative<pmi_codebook_typeII>(config.pmi_codebook),
+               "Type II CSI reports are not supported on PUCCH.");
+
   if (config.subband.has_value()) {
     ocudu_assert(!std::holds_alternative<std::monostate>(config.pmi_codebook), "Unsupported PMI codebook type.");
 
