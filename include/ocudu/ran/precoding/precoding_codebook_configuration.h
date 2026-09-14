@@ -50,8 +50,11 @@ struct pmi_codebook_typeII {
 };
 
 /// Defines the PMI codebook configuration types.
-using pmi_codebook_config =
-    std::variant<std::monostate, pmi_codebook_one_port, pmi_codebook_two_port, pmi_codebook_typeI_single_panel>;
+using pmi_codebook_config = std::variant<std::monostate,
+                                         pmi_codebook_one_port,
+                                         pmi_codebook_two_port,
+                                         pmi_codebook_typeI_single_panel,
+                                         pmi_codebook_typeII>;
 
 /// \brief PMI codebook configuration identifier.
 ///

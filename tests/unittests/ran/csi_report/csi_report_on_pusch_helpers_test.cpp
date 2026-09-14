@@ -302,6 +302,13 @@ private:
     return sizes.i_1_1 + sizes.i_1_2 + sizes.i_1_3 + sizes.i_2;
   }
 
+  static unsigned get_pmi_size(const pmi_codebook_typeII&, unsigned)
+  {
+    // The Type II PMI size also depends on the reported number of non-zero wideband amplitude coefficients, which is
+    // modelled along with the Type II test cases.
+    report_error("The Type II codebook is not covered by this test yet.");
+  }
+
   static unsigned get_pmi_size(const csi_report_configuration& config, unsigned ri)
   {
     return std::visit([ri](const auto& item) { return get_pmi_size(item, ri); }, config.pmi_codebook);

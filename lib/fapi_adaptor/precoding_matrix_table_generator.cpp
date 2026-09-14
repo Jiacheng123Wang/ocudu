@@ -221,6 +221,11 @@ struct codebook_table_generator {
     mapper_offsets.csi_rs_codebook_offsets.push_back(offset);
     generate_csi_rs(offset, nof_ports, repo_builder);
   }
+
+  void operator()(const pmi_codebook_typeII&) const
+  {
+    report_fatal_error("Static generation and mapping of Type II precoding matrices is not supported.");
+  }
 };
 
 } // namespace

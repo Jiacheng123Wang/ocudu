@@ -86,6 +86,9 @@ static unsigned get_pdsch_precoding_matrix_index(unsigned                       
     return offset + get_pdsch_single_panel_type1_precoding_matrix_index(param_ranges, report);
   }
 
+  report_fatal_error_if_not(!std::holds_alternative<pmi_typeII>(precoding_info),
+                            "Static generation and mapping of Type II precoding matrices is not supported.");
+
   return 0;
 }
 
