@@ -175,6 +175,27 @@ private:
     unsigned n_blk = 0; ///< Blocks per system in this batch.
   };
 
+  /// \brief Builds A and R_hp of one block geometry on the DEVICE (K0-d).
+  ///
+  /// Both matrices are analytic (a time correlation times a frequency correlation), so their values
+  /// come from the geometry and the three statistics alone - no received sample, no least-squares
+  /// estimate, no CFO. The host therefore does not build them: it hands the geometry to the engine,
+  /// which fills the very slots stage_engine_group() used to copy them into. \c nout and \c L are
+  /// still returned, because the caller needs the block geometry either way.
+  ///
+  /// \return False when the engine cannot build them (unsupported metallib or geometry), in which
+  ///         case the caller falls back to build_correlation_matrices().
+  bool build_correlation_matrices_device(const channel_statistics&                     stats,
+                                         const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
+                                         unsigned                                       b_prb,
+                                         unsigned                                       gb_start,
+                                         span<const unsigned>                           dmrs_slot_symbols,
+                                         unsigned                                       scs_khz,
+                                         unsigned                                       sys_offset,
+                                         unsigned                                       n_layers,
+                                         unsigned&                                      nout,
+                                         unsigned&                                      L);
+
   /// \brief Stages one group of layers (systems [sys_offset, sys_offset + nof_layers)) into the
   /// engine slots: A (or A^-1 when \c gpu_invert is false), R_hp and the pilot vectors of the
   /// blocks [gb_start, gb_start + n_blk). The caller must have filled w_r_pp / w_r_hp via
@@ -198,7 +219,8 @@ private:
                           unsigned                           sys_offset,
                           const engine_strides&              st,
                           bool                               matrix,
-                          bool                               gpu_invert);
+                          bool                               gpu_invert,
+                          bool                               slots_filled = false);
 
   /// \brief One engine call (one command buffer, one commit/wait) over the staged slots, with the
   /// optional K3 reformat stage appended to the same command buffer.

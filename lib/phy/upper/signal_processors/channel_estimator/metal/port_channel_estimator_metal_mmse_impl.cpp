@@ -387,6 +387,60 @@ float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estima
   return n_pairs == 0 ? 0.0F : sigma2 / static_cast<float>(n_pairs);
 }
 
+bool port_channel_estimator_metal_mmse_impl::build_correlation_matrices_device(
+    const channel_statistics&                     stats,
+    const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
+    unsigned                                       b_prb,
+    unsigned                                       gb_start,
+    span<const unsigned>                           dmrs_slot_symbols,
+    unsigned                                       scs_khz,
+    unsigned                                       sys_offset,
+    unsigned                                       n_layers,
+    unsigned&                                      nout,
+    unsigned&                                      L)
+{
+  const unsigned nf  = b_prb * NOF_SUBCARRIERS_PER_RB;
+  const unsigned npt = dmrs_slot_symbols.size();
+  const unsigned npf = b_prb * re_pattern.count();
+  L                  = npt * npf;
+  nout               = nf * MAX_NSYMB_PER_SLOT;
+
+  metal::mmse_engine::corr_stage c{};
+  // The slots are addressed exactly as stage_engine_group() writes them, so a system built here is
+  // the one K1 (or the weights kernels) reads.
+  c.a                = gpu_a + static_cast<std::size_t>(sys_offset) * L * L;
+  c.r_hp             = gpu_r_hp + static_cast<std::size_t>(sys_offset) * nout * L;
+  // The kernel writes the PACKED L x L and nout x L regions, one system after another, exactly
+  // where the host staging copies used to put them: the row stride it steps by is L, not the slot's
+  // stride (the pad beyond L is the caller's, and the device build never touches it).
+  c.a_l_stride       = L;
+  c.r_stride         = nout;
+  c.l                = L;
+  c.nf               = nf;
+  c.npf              = npf;
+  c.ncomb            = re_pattern.count();
+  c.ts               = 1.0F / (static_cast<float>(scs_khz) * 1000.0F * MAX_NSYMB_PER_SLOT);
+  c.scs_hz           = static_cast<float>(scs_khz) * 1000.0F;
+  c.fd_hz            = stats.fd_hz;
+  c.tau_rms_s        = stats.tau_rms_s;
+  c.sigma2           = stats.sigma2;
+  for (unsigned k = 0; k != npt; ++k) {
+    c.dmrs_slots[k] = dmrs_slot_symbols[k];
+  }
+  // Pilot positions within a PRB, ascending - the same walk the host's pilot_sc[] does.
+  {
+    unsigned n = 0;
+    for (unsigned pos = 0; (pos != NOF_SUBCARRIERS_PER_RB) && (n != c.ncomb); ++pos) {
+      if (re_pattern.test(pos)) {
+        c.pilot_re[n++] = pos;
+      }
+    }
+  }
+  (void)gb_start;
+  const bool ok = engine->build_correlation(c, n_layers);
+  return ok;
+}
+
 void port_channel_estimator_metal_mmse_impl::build_correlation_matrices(
     const channel_statistics&                     stats,
     const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
@@ -603,19 +657,43 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // build_correlation_matrices().
   const channel_statistics stats = stats_estimator->estimate(stats_in);
 
-  // Weight matrices of the standard blocks (shared by all layers in v1).
+  // Weight matrices of the standard blocks (shared by all layers in v1). They are built ON THE
+  // DEVICE when the engine offers the correlation stage: the product is analytic, so the host only
+  // hands the geometry over and the slots are filled where the inversion and the weights read them
+  // (K0-d). The host arrays remain the fallback for a metallib without the kernel.
   unsigned L_std    = 0;
   unsigned nout_std = 0;
+  bool     std_slots_filled = false;
   if (n_std_blocks != 0) {
-    build_correlation_matrices(stats,
-                               args.dmrs_patterns.front().re_pattern,
-                               block_prb,
-                               span<const unsigned>(dmrs_sym.begin(), npt),
-                               scs_khz,
-                               span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS),
-                               span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
-                               nout_std,
-                               L_std);
+    // OFF by default while the device path is being finished (the A slot matches the host's
+    // arithmetic element for element, R_hp does not yet - see the plan). OCUDU_CE_CORR_DEV=1 turns
+    // it on; OCUDU_CE_CPU_CORR=1 keeps it off explicitly.
+    static const bool device_corr_enabled = []() {
+      const char* env = std::getenv("OCUDU_CE_CORR_DEV");
+      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    }();
+    std_slots_filled = device_corr_enabled &&
+                       build_correlation_matrices_device(stats,
+                                                         args.dmrs_patterns.front().re_pattern,
+                                                         block_prb,
+                                                         0,
+                                                         span<const unsigned>(dmrs_sym.begin(), npt),
+                                                         scs_khz,
+                                                         0,
+                                                         nof_layers,
+                                                         nout_std,
+                                                         L_std);
+    if (!std_slots_filled) {
+      build_correlation_matrices(stats,
+                                 args.dmrs_patterns.front().re_pattern,
+                                 block_prb,
+                                 span<const unsigned>(dmrs_sym.begin(), npt),
+                                 scs_khz,
+                                 span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS),
+                                 span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
+                                 nout_std,
+                                 L_std);
+    }
   }
 #if defined(OCUDU_CE_TIME)
   const auto t_corr_std = steady_clock::now();
@@ -806,7 +884,18 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 #if defined(OCUDU_CE_TIME)
       const auto t_stage_begin = steady_clock::now();
 #endif
-      stage_engine_group(args, 0, n_std_blocks, block_prb, npt, nout_std, L_std, 0, st, matrix_on, gpu_invert);
+      stage_engine_group(args,
+                         0,
+                         n_std_blocks,
+                         block_prb,
+                         npt,
+                         nout_std,
+                         L_std,
+                         0,
+                         st,
+                         matrix_on,
+                         gpu_invert,
+                         std_slots_filled);
 #if defined(OCUDU_CE_TIME)
       stage_us_local += std::chrono::duration<double, std::micro>(steady_clock::now() - t_stage_begin).count();
 #endif
@@ -1198,7 +1287,8 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
                                                                 unsigned                           sys_offset,
                                                                 const engine_strides&              st,
                                                                 bool                               matrix,
-                                                                bool                               gpu_invert)
+                                                                bool                               gpu_invert,
+                                                                bool                               slots_filled)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
   // Pilots of one PRB, and the pilots this group carries per DM-RS symbol. The pilot view of a
@@ -1215,7 +1305,13 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
   ocudu_assert((L <= Ls) && (nout <= Ns), "Engine slot strides must cover the block geometry.");
 
   // A per system: K1 inverts it in place (gpu_invert), otherwise the CPU inverse is staged.
-  for (unsigned sys = 0; sys != nof_layers; ++sys) {
+  //
+  // When the device built the matrices (K0-d), the packed L x L region of every slot already holds
+  // A (or the identity-padded form the inversion expects) and the rest of the slot is zero from
+  // construction: writing it again here is the ~170KB memcpy this stage used to be, so it is
+  // skipped entirely - the pad only has to stay zero, which it does because the kernel never
+  // touches it and the device build happens on every hop that reaches this point.
+  for (unsigned sys = 0; !slots_filled && (sys != nof_layers); ++sys) {
     float* a_slot = gpu_a + static_cast<std::size_t>(sys_offset + sys) * Ls * Ls;
     if (gpu_invert) {
       if (Ls == L) {

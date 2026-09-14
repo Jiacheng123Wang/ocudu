@@ -113,6 +113,55 @@ public:
     } noise;
   };
 
+  /// \brief Device-side correlation stage (K0-d): A and R_hp built into the engine's own slots.
+  ///
+  /// Both matrices are analytic - every element is a time correlation times a frequency
+  /// correlation - so the whole product depends on the block geometry (which slot symbols carry
+  /// DM-RS, which subcarriers carry pilots) and on the three statistics, and on nothing else: no
+  /// received sample, no least-squares estimate, no CFO. The host therefore does not build them at
+  /// all: it hands the geometry over and the kernel fills the slots the inversion and the weights
+  /// read, which removes the largest CPU block of the estimator ([mmse_time_sum] stage + corr).
+  ///
+  /// The caller must have zeroed the slots whose pad is expected to be zero (the estimator does,
+  /// see stage_engine_group()): the kernel writes the L x L and nout x L blocks only, so a system
+  /// laid out with the padded strides keeps the blockdiag(A, I) / [R_hp | 0] structure K1 relies on.
+  struct corr_stage {
+    /// Destination A slot of the WHOLE batch: [nof_systems][aL_stride][aL_stride] row-major, read
+    /// by K1 (in place) or by K3b as the inverse. Only the slot of each system is touched.
+    float* a = nullptr;
+    /// Destination R_hp slot of the whole batch: [nof_systems][r_stride][aL_stride] row-major.
+    float* r_hp = nullptr;
+    /// Row stride of the A slots and of the R_hp columns (>= L).
+    unsigned a_l_stride = 0;
+    /// Row stride of the R_hp slots (>= nout).
+    unsigned r_stride = 0;
+    /// Matrix order of one system: npt * npf.
+    unsigned l = 0;
+    /// Subcarriers of the block (nout = nf * 14).
+    unsigned nf = 0;
+    /// Pilots per DM-RS symbol and pilots per PRB (comb size) of one system.
+    unsigned npf   = 0;
+    unsigned ncomb = 0;
+    /// Slot symbol period in seconds (1 / (scs_hz * 14)) and subcarrier spacing in hertz.
+    float ts     = 0.0F;
+    float scs_hz = 0.0F;
+    /// Statistics: maximum Doppler shift (time correlation), RMS delay spread (frequency
+    /// correlation) and the noise variance that loads A's diagonal.
+    float fd_hz      = 0.0F;
+    float tau_rms_s  = 0.0F;
+    float sigma2     = 0.0F;
+    /// DM-RS slot symbols of the hop, ascending (npt entries, at most 4).
+    unsigned dmrs_slots[4] = {};
+    /// Pilot positions within a PRB, ascending (ncomb entries, at most 12).
+    unsigned pilot_re[12] = {};
+  };
+
+  /// \brief Builds A and R_hp of every system of \p c on the device.
+  ///
+  /// The slots are zeroed by the caller (see corr_stage): this writes the L x L and nout x L blocks.
+  /// \return True on success; on failure the caller falls back to its own construction.
+  bool build_correlation(const corr_stage& c, unsigned nof_systems);
+
   /// \brief Batched inversion (K1): A_inv = (A)^-1 for each system, in-place Gauss-Jordan.
   ///
   /// \param[in,out] a           [systems][n][n] row-major matrices (overwritten with the inverse).

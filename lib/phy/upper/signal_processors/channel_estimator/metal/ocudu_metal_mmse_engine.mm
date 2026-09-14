@@ -176,6 +176,9 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    reformat_pipe = nil;
   // K4: the equalizer's noise variance, reduced on the device (optional, same metallib).
   id<MTLComputePipelineState>    noise_pipe    = nil;
+  // K0-d: the analytic correlation matrices A and R_hp (optional, same metallib).
+  id<MTLComputePipelineState>    corr_a_pipe   = nil;
+  id<MTLComputePipelineState>    corr_rhp_pipe = nil;
   /// Submission of run_async() that has not been waited for yet (at most one, see the header).
   id<MTLCommandBuffer>           pending_cb    = nil;
   // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
@@ -521,8 +524,135 @@ bool mmse_engine::init(const char* metallib_path)
                                                         reflection:nil
                                                              error:&err];
   }
+  // K0-d (the analytic correlation matrices) is optional for the same reason.
+  id<MTLFunction> corr_a_fn   = [e->library newFunctionWithName:@"mmse_corr_a"];
+  id<MTLFunction> corr_rhp_fn = [e->library newFunctionWithName:@"mmse_corr_r_hp"];
+  if (corr_a_fn != nil && corr_rhp_fn != nil) {
+    e->corr_a_pipe   = [e->device newComputePipelineStateWithFunction:corr_a_fn
+                                                              options:MTLPipelineOptionNone
+                                                           reflection:nil
+                                                                error:&err];
+    e->corr_rhp_pipe = [e->device newComputePipelineStateWithFunction:corr_rhp_fn
+                                                              options:MTLPipelineOptionNone
+                                                           reflection:nil
+                                                                error:&err];
+  }
   // ARC-managed; no explicit release.
   return e->inv_pipe != nil && e->weights_pipe != nil && e->apply_pipe != nil;
+}
+
+/// Must match mmse_corr_params in ocudu_mmse_corr.metal.
+struct mmse_corr_params_t {
+  uint32_t npt;
+  uint32_t npf;
+  uint32_t ncomb;
+  uint32_t nf;
+  uint32_t L;
+  uint32_t Ls;
+  uint32_t Ns;
+  float    ts;
+  float    scs_hz;
+  float    fd_hz;
+  float    tau_rms_s;
+  float    sigma2;
+  float    ridge;
+  uint32_t dmrs_slots[4];
+  uint32_t pilot_re[12];
+};
+
+bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if ((e == nullptr) || (e->device == nil) || (e->corr_a_pipe == nil) || (e->corr_rhp_pipe == nil)) {
+    return false;
+  }
+  if ((c.a == nullptr) || (c.r_hp == nullptr) || (nof_systems == 0) || (c.l == 0) || (c.npf == 0) ||
+      (c.ncomb == 0)) {
+    return false;
+  }
+  const unsigned npt = c.l / c.npf;
+  if ((npt == 0) || (npt > 4)) {
+    return false;
+  }
+  const unsigned nout = c.nf * MAX_NSYMB_PER_SLOT;
+
+  mmse_corr_params_t p{};
+  p.npt        = npt;
+  p.npf        = c.npf;
+  p.ncomb      = c.ncomb;
+  p.nf         = c.nf;
+  p.L          = c.l;
+  p.Ls         = c.a_l_stride;
+  p.Ns         = c.r_stride;
+  p.ts         = c.ts;
+  p.scs_hz     = c.scs_hz;
+  p.fd_hz      = c.fd_hz;
+  p.tau_rms_s  = c.tau_rms_s;
+  p.sigma2     = c.sigma2;
+  // The host's diagonal ridge (build_correlation_matrices(): const float ridge = 1e-6F).
+  p.ridge      = 1e-6F;
+  for (unsigned k = 0; k != npt; ++k) {
+    p.dmrs_slots[k] = c.dmrs_slots[k];
+  }
+  for (unsigned k = 0; k != c.ncomb; ++k) {
+    p.pilot_re[k] = c.pilot_re[k];
+  }
+
+  id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+
+  // One dispatch per system, each bound at its own packed region (a system's matrices are
+  // contiguous, one after another, in the order the host used to stage them). Both matrices are
+  // built in the SAME command buffer, so the caller pays one submission for the pair.
+  // Every system gets its own dispatch, bound at ITS base inside the batch (the wrap cache is keyed
+  // by address, so binding each system's start is a cache hit on the batch's mapping - what the
+  // dispatch then reads and writes is that system's packed L x L and nout x L region).
+  //
+  // NOTE: the per-system base MUST move the pointer, not the binding offset. The kernels index the
+  // table from the buffer they are given (a[0] is the system's first element), so binding the
+  // batch's base for every system made them all write into the FIRST system's slots - which is what
+  // left every layer but the first with a matrix of the wrong system.
+  const NSUInteger a_per_sys   = static_cast<NSUInteger>(c.l) * c.l;
+  const NSUInteger rhp_per_sys = static_cast<NSUInteger>(nout) * c.l;
+
+  [enc setComputePipelineState:e->corr_a_pipe];
+  [enc setBytes:&p length:sizeof(p) atIndex:1];
+  for (unsigned sys = 0; sys != nof_systems; ++sys) {
+    const float* a_sys = c.a + static_cast<std::size_t>(sys) * c.l * c.l;
+    id<MTLBuffer> buf  = e->wrap(a_sys, static_cast<NSUInteger>(a_per_sys) * sizeof(float));
+    if (buf == nil) {
+      return false;
+    }
+    [enc setBuffer:buf offset:0 atIndex:0];
+    [enc dispatchThreads:MTLSizeMake(a_per_sys, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  }
+
+  [enc setComputePipelineState:e->corr_rhp_pipe];
+  [enc setBytes:&p length:sizeof(p) atIndex:1];
+  for (unsigned sys = 0; sys != nof_systems; ++sys) {
+    const float* r_sys = c.r_hp + static_cast<std::size_t>(sys) * nout * c.l;
+    id<MTLBuffer> buf  = e->wrap(r_sys, static_cast<NSUInteger>(rhp_per_sys) * sizeof(float));
+    if (buf == nil) {
+      return false;
+    }
+    [enc setBuffer:buf offset:0 atIndex:0];
+    [enc dispatchThreads:MTLSizeMake(rhp_per_sys, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  }
+
+  [enc endEncoding];
+  [cb commit];
+  mmse_stats_commit();
+  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
+  [cb waitUntilCompleted];
+  mmse_stats_wait();
+
+  if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
+    return false;
+  }
+  if (cb.GPUStartTime != 0 && cb.GPUEndTime != 0) {
+    e->last_gpu_us = (cb.GPUEndTime - cb.GPUStartTime) * 1e6;
+  }
+  return true;
 }
 
 bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)

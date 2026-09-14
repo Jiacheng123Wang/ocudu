@@ -25,7 +25,8 @@ ocudu_add_metallib(
     TARGET ocudu_mmse_metallib
     OUTPUT ${MMSE_METALLIB}
     SOURCES ocudu_mmse_inv.metal ocudu_mmse_apply.metal ocudu_mmse_weights.metal
-            ocudu_mmse_weights_matrix.metal ocudu_mmse_apply_matrix.metal ocudu_mmse_reformat.metal)
+            ocudu_mmse_weights_matrix.metal ocudu_mmse_apply_matrix.metal ocudu_mmse_reformat.metal
+            ocudu_mmse_corr.metal)
 
 # ---- Compiled Core ML model (AI channel estimator; see the training memo) ----
 set(HELENA_MODELC ${CMAKE_CURRENT_SOURCE_DIR}/ai_assets/helena_pusch_ml.mlmodelc)
