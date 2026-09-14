@@ -7556,3 +7556,32 @@ mean total 178.1  =  pre 1.24 + sigma2 3.0 + corr 9.9 + gpu_path 164.1 (+ cpl_* 
 |---|---|
 | 离线 | `capture_gates.sh k0d` 980/980 逐字节；`k1` 980/980 判决一致；`combos` PASS；`ctest -L phy` 162/162 |
 | **上机** | 手机能 attach + ping + iperf3；`device_corr_builds>0`；`corr_build_fail=0`；0 崩溃/0 USB 错误；`Real-time failure in RF` 每时隙率不劣于基线 0.1148%（§48.106(b) 的正确口径）|
+
+#### 48.109 纪律（用户 2026-09-15 追加）：**读代码/注释/文档一律带怀疑，先复核再采用**
+
+> 用户原话："你在读代码，注释，文档的时候，一定要带着怀疑的态度，复核一下。因为有可能是错的，会把你带偏。"
+
+**这不是空话，本会话已经栽过两次**：
+1. `ocudu_mmse_inv.metal` 的头注释把"逐主元形式 91.3 µs"和"分块形式"的数字混在一句话里，
+   我照抄，于是把 530 µs 归因到 barrier，白绕一大圈（§48.104(c) 更正）；
+2. 而**同一份事实其实早就写在 S-5a 的 commit message 里**（"removing 36 of its 72 barriers only
+   saves 2.5 us, so the barriers are not either"）——我不是没读到，是**先信了注释**。
+
+**规矩**：任何一条会影响施工方向的事实（"X 在哪跑"、"Y 是瓶颈"、"Z 已经优化过"），
+采用前必须**找到可执行的依据**——代码位置、实测数字、或一次能证伪的实验；
+**注释与文档只能用来"提出假设"，不能用来"定案"**。
+本文件里的每一条实测数字都算依据；转述性的描述（包括本文件自己的转述）不算。
+
+**（a）按此规矩复核 §48.108 的 K0-a 方案——三条前提，全部有代码依据**
+
+| 前提 | 复核结果 | 依据 |
+|---|---|---|
+| `pre` 覆盖"提取+EPRE+LSE+CFO"四步 | ✅ 真 | `pre_stage_us` 在 `compute_hop_submit()` 入口起表（`port_channel_estimator_average_impl.cpp:317`）、在四步做完后收表（:444-445），确实覆盖全部四步 |
+| CE 能拿到**设备网格视图** | ✅ 真 | `resource_grid_reader::get_device_view()`（`include/ocudu/phy/support/resource_grid_reader.h:133`）返回 `resource_grid_device_view` = `{base, subc/symb/port stride, nof_subc/symb/ports}`（`resource_grid_device_view.h:22-47`），正是导频提取内核需要的东西；`base` 由 `page_aligned_allocator` 保证页对齐 |
+| 估计器与等化器用的是**同一个** grid 实例 | ✅ 真 | `pusch_processor_impl.cpp:220` 与 `:447` 传的是同一个 `grid`；等化器那条路径已实测 `ch_re device=150040 host=0` ⇒ 该实例的设备视图**在实网上有效**；`resource_grid_impl.h:37-43` 注明存储页对齐且"the CPU reads the same memory, so nothing is copied back" |
+
+**（b）复核同时得到的一条**诚实预期（写下来免得被当成"没效果"）**
+本步把 host 的 ~1.8 µs（`pre` 1.24 + `stage` 0.55，§48.106 第三腿实测）换成 **2–3 个 dispatch**，
+**净延迟大概率是略增的**（按 K0-a 早年评估：多一次 dispatch 约 10–25 µs 量级）。
+这不违反用户方针：**性能不是模块落点的判据**，硬约束只有"手机能 attach + ping/iperf3 跑得起来"。
+⇒ 验收时**不要把"流水线没变快"当成失败**；要看的判据是 §48.108(e) 那张表。
