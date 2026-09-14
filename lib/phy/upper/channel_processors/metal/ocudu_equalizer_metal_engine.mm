@@ -558,6 +558,11 @@ struct eq_flush_state_t {
   gather_tables_t hop_tables;
   /// The plan they were built from, as an address. It must hold a POINTER: an unsigned truncated it
   /// on a 64-bit host and the key never matched the plan it was made from, so the cache never hit.
+  ///
+  /// \note This key is only valid WITHIN one hop (one flush): the demodulator allocates a fresh plan
+  ///       object per hop, and the allocator hands the same address back for it, so an address match
+  ///       across hops means "a different plan that happens to live where the old one lived". The
+  ///       cache is invalidated when the flush is recycled (see eq_flush_recycle).
   uintptr_t hop_tables_plan  = 0;
   bool      hop_tables_valid = false;
 };
@@ -595,6 +600,12 @@ static void eq_flush_recycle()
   }
   st.inflight.clear();
   st.gather_tables.clear();
+  // The cached gather tables die with the hop that built them: they are read by command buffers this
+  // flush has already handed over, and their identity key (the plan's address) is REUSABLE - the
+  // demodulator builds a new plan object per hop, and the allocator hands back the same address for
+  // it. Keeping the cache across hops therefore served the previous hop's tables to the new hop,
+  // which is worse than a missing cache: the entries name the wrong resource elements.
+  st.hop_tables_valid = false;
 }
 
 /// Encodes every accumulated symbol into the open burst: one batched dispatch per run of symbols

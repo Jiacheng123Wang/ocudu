@@ -187,6 +187,19 @@ int main(int argc, char** argv)
   bool        use_metal_demod  = false;
   bool        use_metal_decoder = false;
   unsigned    nof_prb           = 25;
+  /// \brief How many times the same reception is replayed through one process (a soak).
+  ///
+  /// The receiver, the grid, the buffer pool and every GPU engine outlive a single reception, so a
+  /// defect in the per-hop state (a cached plan, a recycled staging region, a wrap mapping) only
+  /// shows up when several receptions run one after another. Default 1 keeps every existing use.
+  unsigned    repeat            = 1;
+  /// \brief Extra capture prefixes to rotate through in one process (soak across ALLOCATIONS).
+  ///
+  /// A soak that repeats ONE capture never changes the allocation, and an allocation-keyed cache that
+  /// went stale across hops would still hold the right tables - which is how a cross-hop cache defect
+  /// stayed invisible until it reached the air. Rotating captures of different shapes in one process
+  /// is what makes the per-hop state visible.
+  std::vector<std::string> rotate;
   // Default to the strategy the gNB app configures (pusch_channel_estimator_td_strategy), so that a
   // replay compares like with like: the classical estimator divides the least-squares pilots by the
   // number of DM-RS symbols only under "average", while the Metal one always runs its own MMSE.
@@ -198,6 +211,10 @@ int main(int argc, char** argv)
       out_prefix = argv[++i];
     } else if ((arg == "--nof-prb") && (i + 1 < argc)) {
       nof_prb = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
+    } else if ((arg == "--repeat") && (i + 1 < argc)) {
+      repeat = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
+    } else if ((arg == "--also") && (i + 1 < argc)) {
+      rotate.emplace_back(argv[++i]);
     } else if (arg == "--dft") {
       dft_mode = true;
     } else if (arg == "--dft-metal") {
@@ -567,20 +584,26 @@ int main(int argc, char** argv)
               use_metal_demod ? "metal" : "cpu",
               use_metal_decoder ? "metal" : "cpu");
 
-  unsigned  replayed = 0;
-  {
+  unsigned                 replayed = 0;
+  std::vector<std::string> prefixes;
+  prefixes.push_back(prefix);
+  for (const std::string& extra : rotate) {
+    prefixes.push_back(extra);
+  }
+  for (const std::string& capture_prefix : prefixes) {
+    for (unsigned rep = 0; rep != repeat; ++rep) {
     unsigned  i       = 0;
     capture_t capture;
     report("parsing");
-    if (!parse_capture(prefix, capture)) {
-      std::fprintf(stderr, "cannot read %s.txt\n", prefix.c_str());
+    if (!parse_capture(capture_prefix, capture)) {
+      std::fprintf(stderr, "cannot read %s.txt\n", capture_prefix.c_str());
       return 1;
     }
     const unsigned    nof_ports = capture.get_list("rx_ports").size();
     const unsigned    bwp_size  = capture.get_unsigned("bwp_size_rb");
     const unsigned    bwp_start = capture.get_unsigned("bwp_start_rb");
     const unsigned    nof_subc  = bwp_size * NOF_SUBCARRIERS_PER_RB;
-    const std::string bin_path  = prefix + ".bin";
+    const std::string bin_path  = capture_prefix + ".bin";
 
     report("rebuilding the grid");
     // Rebuild the grid.
@@ -605,6 +628,9 @@ int main(int argc, char** argv)
     // Rebuild the PDU.
     pusch_processor::pdu_t pdu = {};
     pdu.slot                   = slot_point(to_scs(capture.get_unsigned("scs_khz", 15)), capture.get_unsigned("slot"));
+    // A repetition is a NEW reception: it must not reuse the recorded slot, or the receive buffer
+    // pool would hand the same HARQ slot to a second reservation and the two would collide.
+    pdu.slot += rep * 40;
     pdu.rnti                   = to_rnti(static_cast<uint16_t>(capture.get_unsigned("rnti")));
     pdu.harq_id                = static_cast<harq_id_t>(capture.get_unsigned("harq_id"));
     pdu.bwp_size_rb            = bwp_size;
@@ -695,6 +721,7 @@ int main(int argc, char** argv)
                 spy.epre_db,
                 spy.rsrp_db);
     ++replayed;
+    }
   }
 
   std::printf("replayed %u reception(s); staged capture written to %s_<slot>_<rnti>{,.bin,_ce.txt,_llr.bin}\n",
