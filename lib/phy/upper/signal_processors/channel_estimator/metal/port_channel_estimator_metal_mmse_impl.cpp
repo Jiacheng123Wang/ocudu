@@ -1722,18 +1722,12 @@ bool port_channel_estimator_metal_mmse_impl::build_slots_on_device(
   if (!engine->build_correlation(corr_std, nof_systems)) {
     return false;
   }
-
   if (device_inverts(L)) {
     // The device inverts these slots in the weights command buffer (K1), so this call must leave A
     // in them. Inverting here as well would have K1 invert an A^-1 - the S-7f-3i defect.
     return true;
   }
 
-  if (device_inverts(L)) {
-    // The device will invert these slots in the weights command buffer (K1), so this call must leave
-    // A in them. Inverting here as well would have K1 invert an A^-1 - the S-7f-3i defect.
-    return true;
-  }
   // Finish what the weights read: A^-1 in place, row by row through a scratch buffer because the
   // source and the destination are the same memory. The inversion stays on the HOST on purpose: the
   // float32 device kernel's element-wise error on a real A is 9.7e-1 against this Gauss-Jordan's
