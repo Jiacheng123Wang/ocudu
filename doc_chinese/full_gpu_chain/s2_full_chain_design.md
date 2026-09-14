@@ -6751,3 +6751,55 @@ stage_engine_group(args, 0, n_std_blocks, block_prb, npt, nout_std, L_std, 0, st
 **（d）状态**：默认路径 **980/980 抓包逐字节一致、`ctest -L phy` 162/162**（本轮改动仅删掉
 `build_slots_on_device()` 里一段**重复的 `device_inverts` 块**，6 行死代码，无行为变化）；
 设备 K1 路径 2/3 正确（§48.95），剩余 1 条卡在上述**设备构建缺陷**上。
+
+#### 48.97 S-7f-4d：**系统性历史对标**（用户的批评成立：我在埋头调参，而不是对标正确代码）
+
+**（a）对标结论一：K1 在 GPU 上"历史上能工作"时的路径，与"设备建矩阵"无关**
+`a52677d194`（K1=GPU 且实测可用的版本）里 **`build_correlation` 根本不存在**（`git show … | grep -c` = **0**）。
+⇒ **历史那条可行路径是"主机构建 A/R_hp + 设备反演"**。
+**"设备构建 + 设备反演"这个组合在历史上从未存在过，也从未被验证过**——
+而这正是我这一整轮在调试的组合。
+
+**（b）对标结论二：历史代码的 staging 结构**（`a52677d194` 的原文，已核对）
+
+```cpp
+const bool gpu_invert = !matrix && (L <= MAX_GPU_INVERT_ORDER) && (getenv("OCUDU_CE_GPU_INVERT") != nullptr);
+if (gpu_invert) {
+  // Stage A itself (not A^-1): K1 overwrites the slot with the inverse in place.
+  for (sys) memcpy(gpu_a + sys*L*L, w_r_pp.data(), L*L*sizeof(float));
+} else {
+  for (sys) { /* 主机 Gauss-Jordan → 写 A^-1 */ }
+}
+// R_hp 写入：**在 if/else 之外，无条件执行**
+// Y staging：**无条件执行**
+const bool engine_ok = matrix ? engine->run_nn(...)
+                              : (gpu_invert ? engine->run(...) : engine->run_weights_only(...));
+```
+
+**（c）对标结论三：现在的代码与历史的**唯一实质偏离**，正是缺陷所在**
+| 维度 | 历史（可行） | 现在（有问题） |
+|---|---|---|
+| A 的写入选择 | `if (gpu_invert)` 直接决定写 A 还是 A⁻¹ | 同（**已对齐**） |
+| **R_hp 的写入** | **无条件执行**（在 if/else 之外） | **可被 `slots_filled`/`a_rhp_filled` 跳过** ← **偏离** |
+| **Y staging** | **无条件执行** | 可被同一个 flag 跳过（§48.76 已修过一次，症状相同） |
+| staging 的载体 | **内联在 `apply_fd_td_estimation_stage`** | 抽成 `stage_engine_group()` 并引入跳过参数 |
+| K0-d 设备构建 | **不存在** | 存在，且它自己写不全 `r_hp`（§48.96） |
+
+⇒ **缺陷的根都不是"某个 flag 传错"，而是"历史结构里 R_hp/Y 是无条件的，现在多了一道能跳过它们的门"。**
+§48.75/§48.76/§48.83/§48.92 四次修的都是这道门的**不同开法**——
+**正确的做法是把这道门按历史结构收掉**，而不是继续调它的开关组合。
+
+**（d）按历史结构收敛的施工图（下一轮照这个做，不再调 flag）**
+1. `stage_engine_group()`：**把 R_hp 与 Y 的写入移出任何跳过条件**（回到历史结构：只有 A 的写入由
+   `gpu_invert` 二选一），**只保留"设备已经写过 A/R_hp"这一种跳过情形**（即 `slots_filled`），
+   并且**先 `grep` 出全部三个调用点**核对实参（§48.95(d) 的教训）；
+2. 然后单独修 **K0-d 自身的 `r_hp` 只写 1/9**（§48.96(c) 的判据：让内核汇报最大 `gid.x`）——
+   这是**独立缺陷**，与 K1 无关；
+3. 两步各自跑：默认路径必须始终 980/980；设备 K1 路径的判据是
+   `r_hp_nz = 27216/27216`、三条抓包 SINR 与主机一致。
+
+**（e）我这一轮的方法论错误（用户点出的）**
+**"知道历史代码能工作"与"照着它施工"是两件事。** 我在 §48.86 就确认了"历史逻辑与现在一致"，
+但那只核对了**路由**（`gpu_invert → engine->run()`），**没有核对 staging 的结构**——
+于是后面四轮都在修那道"历史里根本不存在"的门。**教训：对标要落到
+"每一段的写入义务与条件"上，而不是只对"哪个函数被调用"。**
