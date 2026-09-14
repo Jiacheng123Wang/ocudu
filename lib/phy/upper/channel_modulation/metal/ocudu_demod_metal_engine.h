@@ -62,6 +62,19 @@ public:
   ///@{
   bool enqueue_burst(const void* symbols, const void* noise_var, void* llrs, unsigned nof_symbols, unsigned mod);
 
+  /// \brief Accumulates one OFDM symbol of a group instead of dispatching it.
+  ///
+  /// The deferred chain submits one symbol per call, and one dispatch per symbol costs about 10us on
+  /// this hardware while the kernel work of one 25 PRB symbol is a couple of microseconds. The
+  /// symbols are accumulated here and handed over through the shared burst's flush hook (exactly
+  /// like the equalizer's group), which encodes a run of symbols sharing the modulation, the element
+  /// count and the per-symbol array strides as ONE dispatch - the equalized symbols of a group live
+  /// in page-aligned per-symbol slots, and the kernel is told those strides, so nothing is staged.
+  ///
+  /// The caller's buffers must stay alive and unchanged until the burst is committed and waited for,
+  /// the same contract the per-symbol encoding has.
+  bool enqueue_burst_deferred(const void* symbols, const void* noise_var, void* llrs, unsigned nof_re, unsigned mod);
+
   /// True when the thread-local burst has dispatches encoded but not committed yet.
   static bool burst_open();
 

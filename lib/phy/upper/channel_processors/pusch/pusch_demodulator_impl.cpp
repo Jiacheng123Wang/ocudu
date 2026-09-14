@@ -425,7 +425,10 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
       }
 
       // Select the page-aligned region of the group buffers that holds this OFDM symbol: every
-      // region starts on a page boundary, so the Metal kernels read and write them in place.
+      // region - the LLRs included - starts on a page boundary, so the Metal kernels read and write
+      // them in place. The LLR region is a page-aligned slot of its own (not a compact run of soft
+      // bits) because that is what lets one batched dispatch write the soft bits of EVERY symbol of
+      // the group: a staged layout would leave the kernel with no addressable destination.
       const unsigned i_group = nof_group_symbols++;
       symbol_state&  state   = symbols[i_group];
       state.i_symbol         = i_symbol;
@@ -435,7 +438,7 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
                                                 nof_re_symbol * config.nof_tx_layers);
       state.nv = span<float>(temp_eq_noise_vars).subspan(static_cast<size_t>(i_group) * eq_symbol_stride_nv,
                                                          nof_re_symbol * config.nof_tx_layers);
-      llr_offset += nof_re_symbol * nof_bits_per_re;
+      llr_offset += llr_symbol_stride;
 
       ocudu_assert(nof_re_symbol <= max_symbol_re,
                    "The number of active RE of symbol {} (i.e., {}) exceeds the configured bandwidth (i.e., {}).",
@@ -571,8 +574,8 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
         span<const float> eq_noise_vars_block   = state.nv.subspan(codeword_block_offset, codeword_block_size);
 
         if (deferred_chain) {
-          // The LLRs of this OFDM symbol were produced by the group dispatch: splay the block out
-          // of the contiguous per-symbol staging.
+          // The LLRs of this OFDM symbol were produced by the group dispatch, each in its own
+          // page-aligned slot: take the block the codeword cursor is asking for.
           std::memcpy(codeword.data(),
                       temp_llr.data() + state.llr_offset + count_re_symbol * nof_bits_per_re,
                       nof_block_softbits);

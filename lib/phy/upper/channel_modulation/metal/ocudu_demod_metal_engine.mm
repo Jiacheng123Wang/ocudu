@@ -12,12 +12,14 @@
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/macos_compat.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
-#include <vector>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 #ifndef OCUDU_DEMOD_METALLIB_PATH
 #define OCUDU_DEMOD_METALLIB_PATH "ocudu_demod.metallib"
@@ -37,6 +39,14 @@ struct demod_stats_t {
   std::atomic<uint64_t> waits{0};
   std::atomic<uint64_t> in_flight{0};
   std::atomic<uint64_t> in_flight_max{0};
+  /// Deferred batch accounting: how many flushes ran, how many symbols they carried and how many
+  /// dispatches that took. Same shape as [metal_stats] eq_batch, and the only way to tell from a log
+  /// whether the batched encoding really ran (a per-symbol encoding dispatches one per symbol, so
+  /// dispatches == symbols means the batching never happened).
+  std::atomic<uint64_t> batch_flushes{0};
+  std::atomic<uint64_t> batch_symbols{0};
+  std::atomic<uint64_t> batch_dispatches{0};
+  std::atomic<uint64_t> batch_max_run{0};
 };
 static demod_stats_t& demod_stats()
 {
@@ -67,10 +77,28 @@ static void demod_stats_report()
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
+  std::fprintf(stderr,
+               "[metal_stats] demod_batch flushes=%llu symbols=%llu dispatches=%llu max_run=%llu\n",
+               static_cast<unsigned long long>(s.batch_flushes.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.batch_symbols.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.batch_dispatches.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.batch_max_run.load(std::memory_order_relaxed)));
+}
+/// Accounts one flush that encoded \p nof_symbols accumulated symbols as \p nof_dispatches.
+static void demod_stats_batch(uint64_t nof_symbols, uint64_t nof_dispatches, uint64_t max_run)
+{
+  demod_stats_t& s = demod_stats();
+  s.batch_flushes.fetch_add(1, std::memory_order_relaxed);
+  s.batch_symbols.fetch_add(nof_symbols, std::memory_order_relaxed);
+  s.batch_dispatches.fetch_add(nof_dispatches, std::memory_order_relaxed);
+  uint64_t prev = s.batch_max_run.load(std::memory_order_relaxed);
+  while (max_run > prev && !s.batch_max_run.compare_exchange_weak(prev, max_run, std::memory_order_relaxed)) {
+  }
 }
 #else
 static void demod_stats_commit() {}
 static void demod_stats_wait() {}
+static void demod_stats_batch(uint64_t, uint64_t, uint64_t) {}
 #endif // OCUDU_METAL_STATS
 
 struct demod_resources_t {
@@ -109,11 +137,67 @@ NSString* resolve_demod_metallib_path()
   return nil;
 }
 
+/// A pointer and the byte offset a zero-copy wrap resolved to.
+struct wrapped_buffer {
+  id<MTLBuffer> buffer = nil;
+  NSUInteger    offset = 0;
+};
+
 // Must match demod_params in ocudu_demod.metal.
 struct demod_params_t {
-  uint32_t nof_symbols;
+  uint32_t nof_symbols; // OFDM symbols covered by the dispatch
+  uint32_t nof_re;      // modulation symbols of one OFDM symbol
   uint32_t mod;
+  uint32_t sym_stride; // float2 elements between two OFDM symbols of symbols[]
+  uint32_t nv_stride;  // floats between two OFDM symbols of noise_var[]
+  uint32_t llr_stride; // bytes between two OFDM symbols of llrs[]
 };
+
+/// Bits per modulation symbol of a kernel modulation id (0 = QPSK, 1 = 16QAM, 2 = 64QAM, 3 = 256QAM).
+unsigned bits_per_symbol_of(unsigned mod)
+{
+  static constexpr unsigned bits[] = {2, 4, 6, 8};
+  return (mod < (sizeof(bits) / sizeof(bits[0]))) ? bits[mod] : 0;
+}
+
+/// Parameters of a dispatch that covers ONE OFDM symbol whose arrays are packed: the layout every
+/// caller that is not the deferred chain has (see enqueue()). \p nof_symbols is the number of
+/// modulation symbols of that symbol - the batch dimension of the grid is 1, and the packed strides
+/// (1 element, 1 variance and one LLR run of \c nof_symbols * bits) describe it.
+demod_params_t packed_params(unsigned nof_symbols, unsigned mod)
+{
+  return demod_params_t{1, nof_symbols, mod, 1, 1, nof_symbols * bits_per_symbol_of(mod)};
+}
+
+/// Encodes one dispatch of \p params over the wrapped buffers.
+void encode_demod(id<MTLComputeCommandEncoder> enc,
+                  const wrapped_buffer&        b_sym,
+                  const wrapped_buffer&        b_nv,
+                  const wrapped_buffer&        b_llrs,
+                  const demod_params_t&        params)
+{
+  [enc setBuffer:b_sym.buffer offset:b_sym.offset atIndex:0];
+  [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:1];
+  [enc setBuffer:b_llrs.buffer offset:b_llrs.offset atIndex:2];
+  [enc setBytes:&params length:sizeof(params) atIndex:3];
+  [enc dispatchThreads:MTLSizeMake(params.nof_re, params.nof_symbols, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+}
+
+/// Bytes the dispatch reads from / writes to each array, from its first OFDM symbol to the last.
+size_t symbols_span_bytes(const demod_params_t& p)
+{
+  return (static_cast<size_t>(p.nof_symbols - 1) * p.sym_stride + p.nof_re) * 2 * sizeof(float);
+}
+
+size_t noise_span_bytes(const demod_params_t& p)
+{
+  return (static_cast<size_t>(p.nof_symbols - 1) * p.nv_stride + p.nof_re) * sizeof(float);
+}
+
+size_t llr_span_bytes(const demod_params_t& p)
+{
+  return (static_cast<size_t>(p.nof_symbols - 1) * p.llr_stride + p.nof_re) * bits_per_symbol_of(p.mod);
+}
 
 struct demod_engine_impl {
   double last_gpu_us = 0.0;
@@ -128,11 +212,6 @@ struct demod_engine_impl {
   bool   last_call_no_copy = true; // false when any buffer of the last call was copied
   bool   no_copy_fallback_logged = false;
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
-};
-
-struct wrapped_buffer {
-  id<MTLBuffer> buffer = nil;
-  NSUInteger    offset = 0;
 };
 
 wrapped_buffer wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t length)
@@ -158,11 +237,146 @@ wrapped_buffer wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t le
       [metal::shared_queue::device() newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared], 0};
 }
 
+/// One OFDM symbol the deferred path accumulated instead of dispatching it (see
+/// demod_metal_engine::enqueue_burst_deferred).
+struct demod_pending_t {
+  const void* symbols   = nullptr;
+  const void* noise_var = nullptr;
+  void*       llrs      = nullptr;
+  unsigned    nof_re    = 0; // modulation symbols of this OFDM symbol
+  unsigned    mod       = 0;
+};
+
+/// Per-thread accumulation of the deferred burst, one list per engine: the burst itself is thread
+/// local and one thread can run several demodulators over its lifetime, so a list that outlived its
+/// engine would be handed to the next engine's flush hook - which would then find its own (empty)
+/// list and the group would never reach the GPU.
+struct demod_flush_state_t {
+  std::unordered_map<void*, std::vector<demod_pending_t>> pending;
+};
+
+demod_flush_state_t& demod_flush_state()
+{
+  static thread_local demod_flush_state_t s;
+  return s;
+}
+
+std::vector<demod_pending_t>& demod_pending(void* engine)
+{
+  return demod_flush_state().pending[engine];
+}
+
+/// \brief Encodes the accumulated symbols of one group into the open burst.
+///
+/// A run of OFDM symbols sharing the modulation, the element count and the per-symbol array strides
+/// becomes ONE dispatch: the kernel walks a (modulation symbols) x (OFDM symbols) grid, so a whole
+/// run costs one dispatch instead of one per symbol - the dispatch itself (about 10us on this
+/// hardware) dwarfs the kernel work of one 25 PRB symbol (a couple of microseconds). Nothing is
+/// staged: the strides are exactly what the demodulator's page-aligned group buffers have.
+id<MTLComputePipelineState> demod_flush_hook(void* context, id<MTLComputeCommandEncoder> enc)
+{
+  demod_engine_impl* engine = static_cast<demod_engine_impl*>(context);
+  if ((enc == nil) || (engine == nullptr)) {
+    return nil;
+  }
+  std::vector<demod_pending_t>& pending = demod_pending(context);
+  if (pending.empty()) {
+    return nil;
+  }
+
+  unsigned first      = 0;
+  unsigned nof_disp   = 0;
+  unsigned max_run    = 0;
+  while (first != pending.size()) {
+    const unsigned mod  = pending[first].mod;
+    const unsigned bps  = bits_per_symbol_of(mod);
+    const unsigned nof_re = pending[first].nof_re;
+    if ((bps == 0) || (nof_re == 0)) {
+      // Ill-formed entry: drop it rather than dispatching with a zero-sized grid.
+      pending.clear();
+      return nil;
+    }
+
+    // Extend the run while the next symbol keeps the geometry AND continues the same strides: one
+    // grid covers the whole run, so every symbol must be reachable from the first one by a constant
+    // step in each array. A symbol separated by a different gap simply starts a new run.
+    size_t   sym_stride = 0;
+    size_t   nv_stride  = 0;
+    size_t   llr_stride = 0;
+    unsigned n_sym      = 1;
+    while (first + n_sym != pending.size()) {
+      const demod_pending_t& prev = pending[first + n_sym - 1];
+      const demod_pending_t& next = pending[first + n_sym];
+      if ((next.mod != mod) || (next.nof_re != nof_re)) {
+        break;
+      }
+      const ptrdiff_t d_sym = static_cast<const char*>(next.symbols) - static_cast<const char*>(prev.symbols);
+      const ptrdiff_t d_nv  = static_cast<const char*>(next.noise_var) - static_cast<const char*>(prev.noise_var);
+      const ptrdiff_t d_llr = static_cast<const char*>(next.llrs) - static_cast<const char*>(prev.llrs);
+      // The strides are element counts of the arrays the kernel indexes, so a gap that is not a
+      // whole number of elements cannot be expressed: it ends the run.
+      if ((d_sym <= 0) || (d_nv <= 0) || (d_llr <= 0) || ((d_sym % static_cast<ptrdiff_t>(2 * sizeof(float))) != 0) ||
+          ((d_nv % static_cast<ptrdiff_t>(sizeof(float))) != 0)) {
+        break;
+      }
+      const size_t s_sym = static_cast<size_t>(d_sym) / (2 * sizeof(float));
+      const size_t s_nv  = static_cast<size_t>(d_nv) / sizeof(float);
+      const size_t s_llr = static_cast<size_t>(d_llr);
+      if (n_sym == 1) {
+        sym_stride = s_sym;
+        nv_stride  = s_nv;
+        llr_stride = s_llr;
+      } else if ((s_sym != sym_stride) || (s_nv != nv_stride) || (s_llr != llr_stride)) {
+        break;
+      }
+      ++n_sym;
+    }
+
+    const demod_params_t params{static_cast<uint32_t>(n_sym),
+                                static_cast<uint32_t>(nof_re),
+                                static_cast<uint32_t>(mod),
+                                static_cast<uint32_t>(sym_stride),
+                                static_cast<uint32_t>(nv_stride),
+                                static_cast<uint32_t>(llr_stride)};
+
+    engine->last_call_no_copy = true;
+    wrapped_buffer b_sym = wrap_buffer(engine, pending[first].symbols, symbols_span_bytes(params));
+    wrapped_buffer b_nv  = wrap_buffer(engine, pending[first].noise_var, noise_span_bytes(params));
+    wrapped_buffer b_llrs = wrap_buffer(engine, pending[first].llrs, llr_span_bytes(params));
+    if ((b_sym.buffer == nil) || (b_nv.buffer == nil) || (b_llrs.buffer == nil)) {
+      ocudulog::fetch_basic_logger("PHY").error("Metal demapper: no-copy wrap failed for a batched group");
+      pending.clear();
+      return nil;
+    }
+    encode_demod(enc, b_sym, b_nv, b_llrs, params);
+    metal::shared_burst::count_dispatch(metal::shared_burst::stage::demapper);
+    ++nof_disp;
+    max_run = std::max(max_run, n_sym);
+    first += n_sym;
+  }
+  demod_stats_batch(pending.size(), nof_disp, max_run);
+  pending.clear();
+  return demod_resources().pipeline;
+}
+
+/// Hands over and drops what this engine accumulated (its caller abandoned the group).
+void demod_pending_release(void* engine)
+{
+  (void)metal::shared_burst::flush_pending();
+  demod_pending(engine).clear();
+  if (metal::shared_burst::flush_hook_context() == engine) {
+    metal::shared_burst::set_flush_hook(nullptr, nullptr);
+  }
+}
+
 } // namespace
 
 demod_metal_engine::~demod_metal_engine()
 {
   demod_engine_impl* engine = static_cast<demod_engine_impl*>(impl);
+  if (engine != nullptr) {
+    demod_pending_release(engine);
+  }
   delete engine;
   impl = nullptr;
 }
@@ -241,25 +455,17 @@ bool demod_metal_engine::enqueue(const void* symbols,
   if (engine == nullptr || engine->batch_enc == nil) {
     return false;
   }
-  const size_t symbols_bytes = static_cast<size_t>(nof_symbols) * 2 * sizeof(float);
-  const size_t noise_bytes   = static_cast<size_t>(nof_symbols) * sizeof(float);
-  const size_t llr_bytes     = static_cast<size_t>(nof_symbols) * 8;
+  const demod_params_t params = packed_params(nof_symbols, mod);
   // wrap_buffer() clears this flag when a no-copy wrap falls back to a copy. Reset it before the
   // wraps (not after, where it would overwrite the outcome) so the diagnostic reports the truth.
   engine->last_call_no_copy = true;
-  wrapped_buffer b_sym = wrap_buffer(engine, symbols, symbols_bytes);
-  wrapped_buffer b_nv = wrap_buffer(engine, noise_var, noise_bytes);
-  wrapped_buffer b_llrs = wrap_buffer(engine, llrs, llr_bytes);
+  wrapped_buffer b_sym = wrap_buffer(engine, symbols, symbols_span_bytes(params));
+  wrapped_buffer b_nv = wrap_buffer(engine, noise_var, noise_span_bytes(params));
+  wrapped_buffer b_llrs = wrap_buffer(engine, llrs, llr_span_bytes(params));
   if (b_sym.buffer == nil || b_nv.buffer == nil || b_llrs.buffer == nil) {
     return false;
   }
-  const demod_params_t params{nof_symbols, mod};
-  id<MTLComputeCommandEncoder> enc = engine->batch_enc;
-  [enc setBuffer:b_sym.buffer offset:b_sym.offset atIndex:0];
-  [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:1];
-  [enc setBuffer:b_llrs.buffer offset:b_llrs.offset atIndex:2];
-  [enc setBytes:&params length:sizeof(params) atIndex:3];
-  [enc dispatchThreads:MTLSizeMake(nof_symbols, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  encode_demod(engine->batch_enc, b_sym, b_nv, b_llrs, params);
   ++engine->batch_n;
   return true;
 }
@@ -286,24 +492,44 @@ bool demod_metal_engine::enqueue_burst(const void* symbols,
   if (enc == nil) {
     return false;
   }
-  const size_t symbols_bytes = static_cast<size_t>(nof_symbols) * 2 * sizeof(float);
-  const size_t noise_bytes   = static_cast<size_t>(nof_symbols) * sizeof(float);
-  const size_t llr_bytes     = static_cast<size_t>(nof_symbols) * 8;
+  const demod_params_t params = packed_params(nof_symbols, mod);
 
   engine->last_call_no_copy = true;
-  wrapped_buffer b_sym = wrap_buffer(engine, symbols, symbols_bytes);
-  wrapped_buffer b_nv = wrap_buffer(engine, noise_var, noise_bytes);
-  wrapped_buffer b_llrs = wrap_buffer(engine, llrs, llr_bytes);
+  wrapped_buffer b_sym = wrap_buffer(engine, symbols, symbols_span_bytes(params));
+  wrapped_buffer b_nv = wrap_buffer(engine, noise_var, noise_span_bytes(params));
+  wrapped_buffer b_llrs = wrap_buffer(engine, llrs, llr_span_bytes(params));
   if (b_sym.buffer == nil || b_nv.buffer == nil || b_llrs.buffer == nil) {
     return false;
   }
-  const demod_params_t params{nof_symbols, mod};
-  [enc setBuffer:b_sym.buffer offset:b_sym.offset atIndex:0];
-  [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:1];
-  [enc setBuffer:b_llrs.buffer offset:b_llrs.offset atIndex:2];
-  [enc setBytes:&params length:sizeof(params) atIndex:3];
-  [enc dispatchThreads:MTLSizeMake(nof_symbols, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  encode_demod(enc, b_sym, b_nv, b_llrs, params);
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::demapper);
+  return true;
+}
+
+bool demod_metal_engine::enqueue_burst_deferred(const void* symbols,
+                                                const void* noise_var,
+                                                void*       llrs,
+                                                unsigned    nof_re,
+                                                unsigned    mod)
+{
+  demod_engine_impl* engine = static_cast<demod_engine_impl*>(impl);
+  if ((engine == nullptr) || (symbols == nullptr) || (noise_var == nullptr) || (llrs == nullptr) || (nof_re == 0)) {
+    return false;
+  }
+  // The FIRST submission of a group opens the burst through encoder(): that hands over the previous
+  // stage's accumulated dispatches (the equalization) with a live encoder, switches the pipeline -
+  // which inserts the memory barrier that orders this stage after them - and leaves the burst's
+  // stage set to the demapping one, so the symbols accumulated below are encoded behind that
+  // barrier. Later submissions of the same engine only accumulate: going through encoder() again
+  // would flush this engine's hook, i.e. one dispatch per symbol, which is what the batching is here
+  // to avoid.
+  if (metal::shared_burst::flush_hook_context() != engine) {
+    if (metal::shared_burst::encoder(demod_resources().pipeline) == nil) {
+      return false;
+    }
+  }
+  demod_pending(engine).push_back({symbols, noise_var, llrs, nof_re, mod});
+  metal::shared_burst::set_flush_hook(engine, &demod_flush_hook);
   return true;
 }
 

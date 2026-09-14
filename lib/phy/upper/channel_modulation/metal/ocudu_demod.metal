@@ -10,6 +10,10 @@
 ///
 /// Layout: llrs[symbol * B + bit] with B = 2/4/6/8, matching the CPU output order
 /// (bit 0 = real-axis first interval, bit 1 = imag-axis first interval, and so on).
+///
+/// One dispatch covers one or more OFDM symbols: the grid is (modulation symbols) x (OFDM symbols)
+/// and the parameters carry the stride of each array between two OFDM symbols, so the deferred
+/// chain's page-aligned per-symbol slots are read without staging them first.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -21,8 +25,12 @@ constant uint MOD_QAM64  = 2;
 constant uint MOD_QAM256 = 3;
 
 struct demod_params {
-    uint nof_symbols;
-    uint mod; // MOD_QPSK .. MOD_QAM256
+    uint nof_symbols; // OFDM symbols covered by this dispatch (the grid's y dimension)
+    uint nof_re;      // modulation symbols of one OFDM symbol (the grid's x dimension)
+    uint mod;         // MOD_QPSK .. MOD_QAM256
+    uint sym_stride;  // float2 elements between two consecutive OFDM symbols of symbols[]
+    uint nv_stride;   // floats between two consecutive OFDM symbols of noise_var[]
+    uint llr_stride;  // bytes between two consecutive OFDM symbols of llrs[]
 };
 
 // ---- Quantization: value -> int8 LLR (LLR_MAX = 120, ties to even, NaN -> 0) ----
@@ -126,17 +134,25 @@ static inline float qam16_23(float x, float rcp_noise)
     return (fabs(x) >= NEAR_ZERO) ? l : 0.0f;
 }
 
-kernel void demod_soft(device const float2* symbols   [[buffer(0)]], // [symbol]
-                       device const float*  noise_var [[buffer(1)]], // [symbol]
-                       device char*         llrs      [[buffer(2)]], // [symbol][bit]
+kernel void demod_soft(device const float2* symbols    [[buffer(0)]], // [OFDM symbol][modulation symbol]
+                       device const float*  noise_var  [[buffer(1)]], // [OFDM symbol][modulation symbol]
+                       device char*         llrs_base  [[buffer(2)]], // [OFDM symbol][modulation symbol][bit]
                        constant demod_params& p [[buffer(3)]],
-                       uint sym [[thread_position_in_grid]])
+                       uint2 pos [[thread_position_in_grid]])
 {
-    if (sym >= p.nof_symbols) {
+    if ((pos.x >= p.nof_re) || (pos.y >= p.nof_symbols)) {
         return;
     }
-    const float2 z   = symbols[sym];
-    const float  rcp = rcp_noise_safe(noise_var[sym]);
+    // One grid axis per dimension: pos.x walks the modulation symbols of one OFDM symbol and pos.y
+    // the OFDM symbols covered by this dispatch. The strides make a whole run of symbols ONE
+    // dispatch: the deferred chain's equalized symbols live in page-aligned per-symbol slots, so
+    // the symbols of a group are a constant stride apart rather than adjacent. A single-symbol
+    // dispatch passes stride 1 / 1 and its LLR count, which is exactly the packed layout this
+    // kernel used before batching - the arithmetic per element is untouched.
+    const uint   sym  = pos.x;
+    const float2 z    = symbols[pos.y * p.sym_stride + sym];
+    const float  rcp  = rcp_noise_safe(noise_var[pos.y * p.nv_stride + sym]);
+    device char* llrs = llrs_base + pos.y * p.llr_stride;
 
     if (p.mod == MOD_QPSK) {
         const float l0 = (GAIN_QPSK * z.x) * rcp;

@@ -9,6 +9,7 @@
 #include "ocudu/support/ocudu_assert.h"
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -154,6 +155,14 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
   ocudu_assert(symbols.size() * get_bits_per_symbol(mod) == llrs.size(), "Input and output lengths are incompatible.");
   ocudu_assert(is_supported(mod), "Unsupported modulation scheme for the Metal demapper.");
 
+  // Batched group encoding of the deferred chain (the default). OCUDU_DEMOD_DEFER_ENCODE=0 restores
+  // the per-symbol encoding, which stays bit-exact - it is what the offline A/B gate compares the
+  // batched path against.
+  static const bool defer_encode = []() {
+    const char* env = std::getenv("OCUDU_DEMOD_DEFER_ENCODE");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+
   unsigned mod_id = 0;
   switch (mod) {
     case modulation_scheme::QPSK:
@@ -205,9 +214,12 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
   }
 
   if (defer) {
-    // Append to the shared burst of this group: the memory barrier that the pipeline change
-    // inserts orders this stage after the equalization encoded before it.
-    const bool ok = impl_->engine.enqueue_burst(sym_ptr, nv_ptr, llr_ptr, nof_symbols, mod_id);
+    // A group is accumulated and the burst's flush hook encodes a run of its symbols as ONE
+    // dispatch: the per-symbol slots of the demodulator's group buffers are page-aligned, so the
+    // kernel is handed their strides and nothing is staged (see enqueue_burst_deferred). The memory
+    // barrier that the pipeline change inserts orders this stage after the equalization.
+    const bool ok = defer_encode ? impl_->engine.enqueue_burst_deferred(sym_ptr, nv_ptr, llr_ptr, nof_symbols, mod_id)
+                                 : impl_->engine.enqueue_burst(sym_ptr, nv_ptr, llr_ptr, nof_symbols, mod_id);
     if (!ok) {
       // Engine failure: zero LLRs (the CPU's ill-formed input semantics) instead of stale data.
       std::memset(llrs.data(), 0, llr_bytes);
