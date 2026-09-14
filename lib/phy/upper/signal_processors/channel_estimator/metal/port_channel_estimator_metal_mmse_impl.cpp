@@ -518,8 +518,10 @@ void port_channel_estimator_metal_mmse_impl::build_correlation_matrices(
   // float32 inversion of A is the accuracy limit of this estimator: measured, the host Gauss-Jordan
   // reaches 1.7e-1 element-wise relative error there and the device kernel 9.7e-1, while a float64
   // factorization reaches 4.6e-10. Raising this ridge buys accuracy back (at 1e-2 the device error
-  // drops to 1.8e-2 and the chain's SINR moves less than 0.12 dB - see the plan), but it changes A
-  // and therefore the estimates, so it is a deliberate configuration choice and not a default.
+  // drops to 1.8e-2), but that is NOT a free accuracy budget: on 240 staged captures, raising it to
+  // 1e-2 changed the published LLR in 221 of them (SINR moved only 0.01-0.31 dB, which is why the
+  // knob looked harmless at first). It therefore changes what the receiver decides, and is not a
+  // way to buy the device inversion back - see the plan.
   const float ridge  = 1e-6F;
 
   // --- A = R_pp + sigma2_rel I + ridge I = kron(R_t_pp, R_f_pp) + (sigma2_rel + ridge) I ---
@@ -953,15 +955,19 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // device wrote. The device build cannot describe both geometries of a merged batch, so this
         // is the standard group's slots only - exactly what a non-merged hop gets from
         // run_engine_blocks() with device_stats.
-        build_slots_on_device(stats,
-                              args.dmrs_patterns.front().re_pattern,
-                              block_prb,
-                              span<const unsigned>(dmrs_sym.begin(), npt),
-                              scs_khz,
-                              0,
-                              nof_layers,
-                              st.L,
-                              L_std);
+        const std::optional<metal::mmse_engine::corr_stage> merged_corr = build_slots_on_device(
+            stats,
+            args.dmrs_patterns.front().re_pattern,
+            block_prb,
+            span<const unsigned>(dmrs_sym.begin(), npt),
+            scs_khz,
+            0,
+            nof_layers,
+            st.L,
+            L_std);
+        // In the device-inversion experiment the merged batch cannot ride one command buffer (two
+        // geometries), so the descriptor is dropped and the host staging below fills the slots.
+        (void)merged_corr;
       } else {
         stage_engine_group(args,
                            0,
@@ -1660,7 +1666,6 @@ std::optional<metal::mmse_engine::corr_stage> port_channel_estimator_metal_mmse_
   if (!engine->build_correlation(corr_std, nof_systems)) {
     return std::nullopt;
   }
-
   // Finish what the weights read: A^-1 in place, row by row through a scratch buffer because the
   // source and the destination are the same memory. The inversion stays on the HOST on purpose: the
   // float32 device kernel's element-wise error on a real A is 9.7e-1 against this Gauss-Jordan's
@@ -1750,7 +1755,13 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                                         st.L,
                                         L);
   }
-  stage_engine_group(args, gb_start, n_blk, b_prb, npt, nout, L, 0, st, matrix, false);
+  const bool dev_inv_now = device_corr.has_value();
+  // stage_engine_group() runs EVERY time: besides A and R_hp it also stages the pilot vectors (y or
+  // qy), which every path needs - skipping the call left y zero and the apply produced infinities
+  // (measured). slots_filled only tells it to leave the A/R_hp slots alone, which is what the device
+  // build needs: it is about to fill them itself, and a host write of A^-1 there would be inverted
+  // again by K1 (the S-7f-3i defect).
+  stage_engine_group(args, gb_start, n_blk, b_prb, npt, nout, L, 0, st, matrix, false, dev_inv_now);
   const bool deferred = defer && !matrix;
   // No correlation prefix (corr == nullptr) and no K1: this call's slots already hold A^-1, either
   // from the host staging or from the device build finished above.
