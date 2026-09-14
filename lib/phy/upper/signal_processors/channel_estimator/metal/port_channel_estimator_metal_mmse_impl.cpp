@@ -587,14 +587,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 
   // Per-phase timing (compile-time debug aid, ENABLE_CE_TIME=ON defines OCUDU_CE_TIME):
   // sigma2 / corr-build / GPU / CPU-blocks / finish, printed through the [mmse_time]
-  // debug line.
+  // debug line. The measurements below are recorded unconditionally; only the reporting block at
+  // the end of this function is compiled out when the probe is disabled.
 #if defined(OCUDU_CE_TIME)
-  const bool time_en = true;
-#else
-  const bool time_en = false;
-#endif
   using steady_clock = std::chrono::steady_clock;
   const auto t_begin = steady_clock::now();
+#endif
 
   // Mean power of the received DM-RS pilots, measured BEFORE the DM-RS to data scaling below: the
   // classical noise estimator returns the residual in the received domain, so this is the reference
@@ -643,7 +641,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                    static_cast<double>(sigma2_rel));
     }
   }
-  const auto  t_sigma2 = steady_clock::now();
+#if defined(OCUDU_CE_TIME)
+  const auto t_sigma2 = steady_clock::now();
+#endif
 
   // Estimated full grid and classical frequency-response buffers.
   grid_est.resize(nof_layers * MAX_NSYMB_PER_SLOT, nof_prb * NOF_SUBCARRIERS_PER_RB);
@@ -688,7 +688,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                nout_std,
                                L_std);
   }
+#if defined(OCUDU_CE_TIME)
   const auto t_corr_std = steady_clock::now();
+#endif
 #if defined(OCUDU_CE_TIME)
   // Time spent copying the precomputed coefficient matrices and pilot vectors into the engine slots: this is what a
   // device-side build of the correlation matrices (the K0-d step of the fused-lane work) removes.
@@ -722,7 +724,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   bool       hop_gpu   = false; // engine processed this hop (any block)
   bool       hop_nn    = false; // the simdgroup 8x8 (matrix) kernels were the ones used
   unsigned   hop_pad   = 0;     // ceil8(L) - L of the last matrix batch (A/B pad overhead)
-  unsigned   tail_L    = 0;     // block L of the tail batch (log aid for std-less hops)
+  // Written on the data path, read only by the timing report below (hence maybe_unused).
+  [[maybe_unused]] unsigned tail_L = 0; // block L of the tail batch (log aid for std-less hops)
   bool       std_blocks_ok = true; // standard-block engine batch succeeded (CPU fallback otherwise)
   bool       tail_ok       = true; // tail/edge-block engine batch succeeded
   if (engine_ready) {
@@ -1045,7 +1048,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     last_stage_merged = false;
   }
 
+#if defined(OCUDU_CE_TIME)
   const auto t_gpu_end = steady_clock::now();
+#endif
 
   // CPU reference path: blocks whose engine batch failed (or the whole hop when the engine is
   // unavailable). The per-batch fallback is the S-1 audit fix: an engine failure must never
@@ -1057,7 +1062,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     }
     return (b < n_std_blocks) ? std_blocks_ok : tail_ok;
   };
-  unsigned cpu_fallback_blocks = 0;
+  // Written on the data path, read only by the timing report below (hence maybe_unused).
+  [[maybe_unused]] unsigned cpu_fallback_blocks = 0;
 
   for (unsigned b = 0; b != n_blocks; ++b) {
     if (block_gpu_done(b)) {
@@ -1141,7 +1147,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     }
   }
 
+#if defined(OCUDU_CE_TIME)
   const auto t_cpu_end = steady_clock::now();
+#endif
 
   // Fill the pilot-derived buffers (the estimated pilot REs for RSrp / noise / TA, and the classical
   // frequency response) out of the estimated grid. The grid only holds the estimates once the batch
@@ -1183,7 +1191,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     fill.fill(grid_est);
   }
 
-  if (time_en) {
+#if defined(OCUDU_CE_TIME)
+  {
     const auto t_finish = steady_clock::now();
     const auto us       = [](auto d) { return std::chrono::duration<double, std::micro>(d).count(); };
     logger.debug("[mmse_time] prb={} npt={} L={} n_std={} gpu={} nn={} pad={} fb={} | pre={:.1f}us stage={:.1f}us sigma2={:.1f}us corr_std={:.1f}us "
@@ -1247,6 +1256,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                             us(t_finish - t_begin));
     }
   }
+#endif
 }
 
 void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_estimation_stage_args& args,

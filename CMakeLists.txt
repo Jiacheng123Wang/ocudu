@@ -75,6 +75,23 @@ option(ENABLE_METAL_DEMODULATION "Enable the Metal GPU soft demapper (Apple Sili
 # Note: OCUDU_METAL_DEMODULATION is defined per-target (see channel_modulation/CMakeLists.txt).
 
 
+# The Metal offloads only build on Apple Silicon (they need Metal/Objective-C++). Enabling one
+# anywhere else used to be accepted silently and then ignored by the code that reads the option, so
+# the build reported success while the requested backend was never compiled in. Refuse it here
+# instead, where the message can say what to do.
+if(NOT (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64"))
+    if(ENABLE_METAL_LDPC OR ENABLE_METAL_CHEST OR ENABLE_METAL_DFT OR
+       ENABLE_METAL_EQUALIZER OR ENABLE_METAL_DEMODULATION)
+        message(FATAL_ERROR
+            "The Metal offloads (ENABLE_METAL_LDPC, ENABLE_METAL_CHEST, ENABLE_METAL_DFT, "
+            "ENABLE_METAL_EQUALIZER, ENABLE_METAL_DEMODULATION) require Apple Silicon: they are "
+            "implemented against Metal and Objective-C++. This is "
+            "${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}, so these options cannot be enabled "
+            "here. Configure with all of them off (they default to off on this platform) or build "
+            "on Apple Silicon.")
+    endif()
+endif()
+
 if(APPLE AND NOT TARGET atomic)
     # macOS does not provide a separate libatomic. Some targets link the
     # interface library named "atomic"; add an empty one so CMake treats it
