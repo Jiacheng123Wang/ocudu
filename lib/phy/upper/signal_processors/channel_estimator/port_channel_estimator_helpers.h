@@ -44,6 +44,16 @@ void apply_fd_smoothing(span<cf_t>                                   enlarged_fi
                         unsigned                                     stride,
                         port_channel_estimator_fd_smoothing_strategy fd_smoothing_strategy);
 
+/// \brief Writes the raised-cosine filter coefficients apply_fd_smoothing() uses for a hop into
+/// \p out.
+///
+/// The coefficients depend only on the hop's geometry (its PRB count and the pilot stride), so a
+/// device backend that has to run the same convolution can be handed them instead of reproducing
+/// filter_type()'s table and resampling - which is the part of the smoothing that is not worth
+/// moving.
+/// \return The number of coefficients written, or 0 when they do not fit in \p out.
+unsigned get_fd_smoothing_filter(span<float> out, unsigned nof_rb, unsigned stride);
+
 /// \brief Estimates the time alignment based on one hop.
 ///
 /// \param[in] pilots_lse   The estimated channel (only for REs carrying DM-RS).

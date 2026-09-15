@@ -570,6 +570,25 @@ private:
   float* gpu_ls_cfo    = nullptr;
   bool   gpu_nv_ready  = false;
 
+  /// S-7f-5w: the hop's noise variance, computed inside the K0-a command buffer. \c gpu_ls_smoothed
+  /// is the frequency-smoothed copy of the pilots the classical estimator reads (a scratch buffer:
+  /// the LSE itself must survive for the weights' y vectors), \c gpu_ls_sigma2 is the single float
+  /// the kernels leave behind, and \c fd_filter holds the raised-cosine coefficients of the hop's
+  /// geometry (a host-side table, see get_fd_smoothing_filter()).
+  float*                    gpu_ls_smoothed = nullptr;
+  float*                    gpu_ls_sigma2   = nullptr;
+  std::array<float, 32>     fd_filter{};
+  unsigned                  fd_filter_len = 0;
+  /// Whether the host asks the device for sigma2 (OCUDU_CE_DEV_SIGMA2=0 keeps the host computation,
+  /// which is also the A/B of capture_gates.sh sig2), and whether THIS hop got it.
+  bool device_sigma2_enabled = false;
+  bool device_sigma2_valid   = false;
+
+  /// \brief Stages the received DM-RS of the hop and the symbol epochs - the arrays the device noise
+  /// variance reads, and the same ones K4 reads.
+  /// \return The number of CDM groups staged, or 0 when the geometry does not fit the buffers.
+  unsigned stage_device_noise_inputs(const fd_td_estimation_stage_args& args, unsigned npt);
+
   /// Glue #2 (S-7f-5u): whether the device writes the engine's pilot vectors y out of gpu_ls_out
   /// instead of the host copying them in. On by default; OCUDU_CE_DEV_Y=0 keeps the host staging,
   /// which is the A/B of the two writers (capture_gates.sh ydev: the two must publish

@@ -210,6 +210,44 @@ public:
     float* lse = nullptr;
     /// Destination of the estimated CFO (a single float).
     float* cfo = nullptr;
+    /// Received DM-RS of the hop, [symbol][cdm][pilot] real/imag interleaved - the same array the
+    /// equalizer's noise reduction (K4) reads. The noise variance below needs it.
+    const float* rx_pilots = nullptr;
+    /// CAPACITY of \c rx_pilots in bytes.
+    std::size_t rx_bytes = 0;
+    /// Destination of the frequency-smoothed pilots, [symbol][layer][pilot] real/imag interleaved.
+    /// A scratch buffer of the same size as \c lse: the smoothing is what the noise variance is
+    /// estimated from, and the LSE itself must survive (the weights' y vectors are built from it
+    /// later, in the engine's own command buffer).
+    float* smoothed = nullptr;
+    /// Destination of the hop's noise variance (a single float), or nullptr to skip it. When set, the
+    /// two extra dispatches below ride THIS command buffer, so the host reads one float after the
+    /// wait instead of running estimate_sigma2() - measured 3.3 us per hop of host time on air.
+    float* sigma2 = nullptr;
+    /// \brief Set by build_pilots_lse() to whether it actually encoded the noise-variance stage.
+    ///
+    /// A caller that asked for \c sigma2 must test THIS, not the pointer it passed in. The stage is
+    /// skipped - and the destination left untouched - when the hop's geometry exceeds the kernels'
+    /// compile-time maxima (ocudu_metal_mmse_engine.mm refuses those instead of letting the kernels
+    /// clamp them, which would truncate silently), and the build itself still succeeds because the
+    /// least-squares pilots are unaffected. Without the flag the caller could only see a non-null
+    /// \c sigma2 and would read back a value the device never wrote.
+    bool* sigma2_done = nullptr;
+    /// Raised-cosine coefficients of the frequency-domain smoothing (a host-side table, geometry
+    /// only) and how many virtual pilots each edge takes. They belong to the smoothing alone.
+    const float* fd_filter     = nullptr;
+    unsigned     fd_filter_len = 0;
+    unsigned     nof_v_pilots  = 0;
+    /// CDM groups of the hop (the received pilots are indexed by group, the layers are paired).
+    unsigned nof_cdm = 0;
+    /// DM-RS to data amplitude scaling (the classical noise estimator scales by beta / nof_dmrs_symb),
+    /// and whether the CFO is compensated in the pilots the noise is estimated from.
+    float    beta           = 1.0F;
+    /// 1 / beta: the smoothing below has to reproduce the host's, which smooths the pilots the caller
+    /// has ALREADY scaled by this (estimate_sigma2(): "The caller has already applied the DM-RS to
+    /// data scaling (1 / beta) to the LSE pilots"). The device reads the unscaled LSE.
+    float    inv_beta       = 1.0F;
+    bool     compensate_cfo = false;
     unsigned nof_dmrs_symb = 0;
     unsigned nof_layers    = 0;
     unsigned nof_pilots    = 0;

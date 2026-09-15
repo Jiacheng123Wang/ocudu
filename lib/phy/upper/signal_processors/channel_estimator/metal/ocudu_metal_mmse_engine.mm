@@ -65,6 +65,10 @@ struct mmse_stats_t {
   // up the y staging at all, which is exactly what an A/B against OCUDU_CE_DEV_Y=0 must show.
   std::atomic<uint64_t> pilots_scatters{0};
   std::atomic<uint64_t> pilots_scatter_failures{0};
+  // S-7f-5w: how many hops had their noise variance computed on the device. Counted where the
+  // kernels are ENCODED (the same command buffer that extracts the pilots), so it is the observable
+  // that says whether the host gave up estimate_sigma2() at all.
+  std::atomic<uint64_t> pilots_sigma2{0};
 };
 
 static mmse_stats_t& mmse_stats()
@@ -98,6 +102,13 @@ static void mmse_stats_pilots_scatter_failure()
 {
 #if defined(OCUDU_METAL_STATS)
   mmse_stats().pilots_scatter_failures.fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
+static void mmse_stats_pilots_sigma2()
+{
+#if defined(OCUDU_METAL_STATS)
+  mmse_stats().pilots_sigma2.fetch_add(1, std::memory_order_relaxed);
 #endif
 }
 
@@ -156,7 +167,7 @@ static void mmse_stats_report()
   std::fprintf(stderr,
                "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu guard=%llu/%llu "
                "guard_mean=%.1fus guard_max=%.1fus device_corr_builds=%llu corr_build_fail=%llu "
-               "device_y_writes=%llu y_write_fail=%llu\n",
+               "device_y_writes=%llu y_write_fail=%llu device_sigma2=%llu\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
@@ -167,7 +178,8 @@ static void mmse_stats_report()
                static_cast<unsigned long long>(s.corr_builds.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.corr_build_failures.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.pilots_scatters.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.pilots_scatter_failures.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.pilots_scatter_failures.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.pilots_sigma2.load(std::memory_order_relaxed)));
 }
 #else  // OCUDU_METAL_STATS
 static void mmse_stats_commit() {}
@@ -176,6 +188,7 @@ static void mmse_stats_corr_build() {}
 static void mmse_stats_corr_build_failure() {}
 static void mmse_stats_pilots_scatter() {}
 static void mmse_stats_pilots_scatter_failure() {}
+static void mmse_stats_pilots_sigma2() {}
 
 /// Stats off: the guard still has to be a non-trivially-destructible object, so that the explicit
 /// scope around it does not look like an unused variable to the compiler.
@@ -240,6 +253,10 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    pilots_lse_pipe   = nil;
   id<MTLComputePipelineState>    pilots_cfo_pipe   = nil;
   id<MTLComputePipelineState>    pilots_apply_pipe = nil;
+  // S-7f-5w: the hop's noise variance (frequency smoothing + the classical estimator), optional on
+  // its own so that a metallib without them keeps the host's estimate_sigma2().
+  id<MTLComputePipelineState>    pilots_smooth_pipe = nil;
+  id<MTLComputePipelineState>    pilots_sigma2_pipe = nil;
   // Glue #2: the device writes the engine's pilot vectors out of K0-a's output (optional, same
   // metallib - a metallib without it simply keeps the host staging).
   id<MTLComputePipelineState>    pilots_scatter_pipe = nil;
@@ -509,7 +526,8 @@ static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
       [enc setBytes:noise.symbol_start_epochs
              length:static_cast<NSUInteger>(ocudu::MAX_NSYMB_PER_SLOT) * sizeof(float)
              atIndex:5];
-      [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+      // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (its reduction tree is written for it).
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
   }
 }
@@ -617,6 +635,18 @@ bool mmse_engine::init(const char* metallib_path)
                                                                    reflection:nil
                                                                         error:&err];
     }
+    id<MTLFunction> smooth_fn = [e->library newFunctionWithName:@"mmse_pilots_fd_smooth"];
+    id<MTLFunction> sigma2_fn = [e->library newFunctionWithName:@"mmse_pilots_sigma2"];
+    if (smooth_fn != nil && sigma2_fn != nil) {
+      e->pilots_smooth_pipe = [e->device newComputePipelineStateWithFunction:smooth_fn
+                                                                     options:MTLPipelineOptionNone
+                                                                  reflection:nil
+                                                                       error:&err];
+      e->pilots_sigma2_pipe = [e->device newComputePipelineStateWithFunction:sigma2_fn
+                                                                     options:MTLPipelineOptionNone
+                                                                  reflection:nil
+                                                                       error:&err];
+    }
   }
 
   // K0-d (the analytic correlation matrices) is optional for the same reason.
@@ -653,6 +683,21 @@ struct mmse_pilots_params_t {
 };
 static_assert(sizeof(mmse_pilots_params_t) == 104, "mmse_pilots_params_t must match mmse_pilots_params");
 
+/// Must match mmse_sigma2_params in ocudu_mmse_pilots.metal.
+struct mmse_sigma2_params_t {
+  uint32_t nof_dmrs_symb;
+  uint32_t nof_layers;
+  uint32_t nof_pilots;
+  uint32_t nof_v_pilots;
+  uint32_t filter_len;
+  uint32_t nof_cdm;
+  uint32_t compensate_cfo;
+  float    beta;
+  float    inv_beta;
+  uint32_t dmrs_symb[4];
+};
+static_assert(sizeof(mmse_sigma2_params_t) == 52, "mmse_sigma2_params_t must match mmse_sigma2_params");
+
 bool mmse_engine::build_pilots_lse(const pilots_stage& s)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
@@ -677,6 +722,61 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   id<MTLBuffer> ep_buf   = e->wrap(s.epochs, MAX_NSYMB_PER_SLOT * sizeof(float));
   if ((grid_buf == nil) || (ref_buf == nil) || (lse_buf == nil) || (cfo_buf == nil) || (ep_buf == nil)) {
     return false;
+  }
+
+  // S-7f-5w: the hop's noise variance, computed here when the caller asked for it and the metallib
+  // carries the kernels. Everything it needs is a buffer this call already holds - except the filter,
+  // which is the host's table for the hop's geometry.
+  // The kernels bound themselves with compile-time maxima (see ocudu_mmse_pilots.metal: a GPU kernel
+  // must terminate for ANY parameter values, because a hang freezes the machine). A geometry that
+  // exceeds those maxima would therefore be silently TRUNCATED, so it is refused here instead and the
+  // host keeps its own estimate_sigma2() - the clamps are a safety net, never a truncation.
+  static constexpr unsigned k_max_dmrs_symb   = 4;    // MAX_DMRS_SYMBOLS
+  static constexpr unsigned k_max_layers      = 4;    // MAX_LAYERS
+  static constexpr unsigned k_max_cdm         = 2;    // MAX_LAYERS / 2
+  static constexpr unsigned k_max_v_pilots    = 12;   // MAX_V_PILOTS
+  static constexpr unsigned k_max_filter_len  = 31;   // MAX_FILTER_LENGTH
+  static constexpr unsigned k_max_pilots_symb = 3324; // MAX_NOF_SUBCARRIERS + 2 * MAX_V_PILOTS
+  const bool sigma2_ok = (s.sigma2 != nullptr) && (s.smoothed != nullptr) && (s.rx_pilots != nullptr) &&
+                         (s.fd_filter != nullptr) && (s.fd_filter_len != 0) && (s.nof_v_pilots != 0) &&
+                         (s.nof_cdm != 0) && (e->pilots_smooth_pipe != nil) && (e->pilots_sigma2_pipe != nil) &&
+                         (s.nof_dmrs_symb != 0) && (s.nof_dmrs_symb <= k_max_dmrs_symb) &&
+                         (s.nof_layers <= k_max_layers) && (s.nof_cdm <= k_max_cdm) &&
+                         (s.nof_v_pilots <= k_max_v_pilots) && (s.fd_filter_len <= k_max_filter_len) &&
+                         (s.nof_pilots <= k_max_pilots_symb);
+  // A caller that asked for the scalar must never read it back unwritten (see pilots_stage::sigma2_done):
+  // report whether the stage runs, and say so loudly when it does not. The build still succeeds - the LSE
+  // is unaffected - so this flag is the ONLY signal the caller gets.
+  if (s.sigma2_done != nullptr) {
+    *s.sigma2_done = false;
+  }
+  if ((s.sigma2 != nullptr) && !sigma2_ok) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      ocudulog::fetch_basic_logger("PHY").error(
+          "MMSE engine: device noise variance skipped, geometry or inputs outside the kernel contract "
+          "(dmrs_symb={} layers={} cdm={} v_pilots={} filter_len={} pilots={}); the host estimate is used",
+          s.nof_dmrs_symb,
+          s.nof_layers,
+          s.nof_cdm,
+          s.nof_v_pilots,
+          s.fd_filter_len,
+          s.nof_pilots);
+    }
+  }
+  id<MTLBuffer> smoothed_buf = nil;
+  id<MTLBuffer> filt_buf     = nil;
+  id<MTLBuffer> rx_buf       = nil;
+  id<MTLBuffer> sigma2_buf   = nil;
+  if (sigma2_ok) {
+    smoothed_buf = e->wrap(s.smoothed, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
+    filt_buf     = e->wrap(s.fd_filter, s.fd_filter_len * sizeof(float));
+    rx_buf       = e->wrap(s.rx_pilots, s.rx_bytes);
+    sigma2_buf   = e->wrap(s.sigma2, sizeof(float));
+    if ((smoothed_buf == nil) || (filt_buf == nil) || (rx_buf == nil) || (sigma2_buf == nil)) {
+      return false;
+    }
   }
 
   mmse_pilots_params_t p{};
@@ -722,6 +822,51 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   [enc setBytes:&p length:sizeof(p) atIndex:3];
   [enc dispatchThreads:MTLSizeMake(s.nof_layers * s.nof_pilots, s.nof_dmrs_symb, 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+
+  // S-7f-5w: the hop's noise variance, from the pilots this buffer just produced. It is encoded HERE
+  // (and not in a command buffer of its own) because this one is already waited for, and because the
+  // host needs the scalar before it can build the correlation matrices.
+  if (sigma2_ok) {
+    if (s.sigma2_done != nullptr) {
+      *s.sigma2_done = true;
+    }
+    mmse_stats_pilots_sigma2();
+    mmse_sigma2_params_t q{};
+    q.nof_dmrs_symb  = s.nof_dmrs_symb;
+    q.nof_layers     = s.nof_layers;
+    q.nof_pilots     = s.nof_pilots;
+    q.nof_v_pilots   = s.nof_v_pilots;
+    q.filter_len     = s.fd_filter_len;
+    q.nof_cdm        = s.nof_cdm;
+    q.compensate_cfo = (s.compensate_cfo ? 1u : 0u);
+    q.beta           = s.beta;
+    q.inv_beta       = s.inv_beta;
+    for (unsigned k = 0; k != 4; ++k) {
+      q.dmrs_symb[k] = s.dmrs_symb[k];
+    }
+    // The CFO phasors use the estimate THIS command buffer just produced (cfo_buf): the host's own
+    // estimate is not known yet, and the two agree to the precision the pilots do.
+    [enc setComputePipelineState:e->pilots_smooth_pipe];
+    [enc setBuffer:lse_buf offset:0 atIndex:0];
+    [enc setBuffer:smoothed_buf offset:0 atIndex:1];
+    [enc setBuffer:filt_buf offset:0 atIndex:2];
+    [enc setBytes:&q length:sizeof(q) atIndex:3];
+    // 128 = mmse_smooth_tg_size in ocudu_mmse_pilots.metal (the kernel strides its walk by it).
+    [enc dispatchThreadgroups:MTLSizeMake(s.nof_dmrs_symb * s.nof_layers, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    [enc setComputePipelineState:e->pilots_sigma2_pipe];
+    [enc setBuffer:smoothed_buf offset:0 atIndex:0];
+    [enc setBuffer:ref_buf offset:0 atIndex:1];
+    [enc setBuffer:rx_buf offset:0 atIndex:2];
+    [enc setBuffer:ep_buf offset:0 atIndex:3];
+    [enc setBuffer:cfo_buf offset:0 atIndex:4];
+    [enc setBuffer:sigma2_buf offset:0 atIndex:5];
+    [enc setBytes:&q length:sizeof(q) atIndex:6];
+    // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (its reduction tree is written for it).
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  }
 
   [enc endEncoding];
   [cb commit];

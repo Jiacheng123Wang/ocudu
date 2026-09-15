@@ -24,6 +24,14 @@
 # parallel run without that re-check. NOTE the tool's --out is a filename PREFIX, not a directory: it writes
 # <out>_<slot>_<rnti>{,.bin,_ce.txt,_llr.bin,_h.bin}.
 #
+# A corpus is a set of capture PREFIXES, discovered through their <prefix>_ce.txt (the one the gNB
+# writes with OCUDU_UL_DUMP; the replay tool only needs <prefix>.txt and <prefix>.bin). When the
+# recorded corpus is gone - /tmp does not survive a reboot, and it did not - make_synthetic_capture.py
+# in this directory writes a valid one. Its random grid is enough for every MODE here, because each of
+# them compares the device against the host ON THE SAME INPUT: it is the geometry and the plumbing that
+# are under test, not the channel. The one exception is combos, which pins the known SINR/CRC of three
+# RECORDED receptions; that mode needs the real corpus.
+#
 # ---- k0d: is the DEVICE-BUILT correlation matrix a drop-in for the host's? -------------------
 # Both routes invert on the HOST (OCUDU_CE_GPU_INVERT=0), so the only difference under test is WHO
 # BUILT A and R_hp:
@@ -74,6 +82,21 @@
 # Without that, a capture whose hops all skipped the prefix would compare host against host - which is
 # exactly how k0d passed for a whole round (S-7f-4c) while the host staging overwrote the device build.
 #
+# ---- sig2: does the DEVICE-computed noise variance reproduce the host's (S-7f-5w)? -------------
+#     route A  default                  the hop's noise variance is computed in K0-a's command buffer
+#     route B  OCUDU_CE_DEV_SIGMA2=0    the host keeps estimate_sigma2(), as before
+# The moved quantity is one float per hop, and it reaches the output twice: channel_statistics turns
+# it into the SINR (and the RSRP/EPRE the _ce.txt records), and the equalizer adds it to the diagonal
+# of A as a ridge. So this gate reads BOTH:
+#   - the staged _ce.txt scalars, noise_variance per port, with a RELATIVE allowance of 1e-4. The
+#     device sums the same expression in a different order, so this is a TOLERANCE, not the byte
+#     equality k0d/k0dm demand: measured 1.2e-07 on the L1 harness, i.e. the allowance sits two
+#     orders above the measurement and four below anything that could move a decision (§48.110 - the
+#     amplification from sigma2 to the output is ~1, so a tolerance is the honest criterion here);
+#   - the DECISION (tbs + crc), which must be identical, with |dSINR| reported as information only.
+# VACUITY-CHECKED on both sides like k0dm: route A must report device_sigma2 > 0 and route B 0, or
+# this would be the host compared against itself (the k0d lesson, S-7f-4c).
+#
 # ---- combos: the flag matrix ------------------------------------------------------------------
 # OCUDU_CE_GPU_INVERT x OCUDU_CE_CORR_DEV x OCUDU_CE_SPLIT_TAIL over the three reference captures.
 # This pins the semantics of the escape hatches, which changed in S-7f-4f and are easy to get wrong:
@@ -90,7 +113,7 @@ GLOB=${3:-/tmp/iq1_*_ce.txt /tmp/iq2_*_ce.txt}
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../.." && pwd)
 BIN=$REPO/build/lib/phy/upper/channel_processors/metal/ul_chain_replay
 
-case "$MODE" in k0d|k1|ydev|k0dm|combos) ;; *) echo "usage: $0 <k0d|k1|ydev|k0dm|combos> [jobs] [corpus_glob]"; exit 2;; esac
+case "$MODE" in k0d|k1|ydev|k0dm|sig2|combos) ;; *) echo "usage: $0 <k0d|k1|ydev|k0dm|sig2|combos> [jobs] [corpus_glob]"; exit 2;; esac
 [ -x "$BIN" ] || { echo "no replay tool at $BIN - build the ul_chain_replay target first"; exit 2; }
 
 mapfile -t CAPS < <(ls $GLOB 2>/dev/null | sed -E 's/_ce\.txt$//' | sort -u)
@@ -100,35 +123,55 @@ WORK=$(mktemp -d /tmp/capgates.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
 if [ "$MODE" = combos ]; then
-  # name|env|expected "sinr crc" per capture (empty = not gated)
-  REF="iq2_1009_17923 iq1_10049_17921 iq2_10044_17923"
-  # The device inversion rounds differently, so the tolerance covers its <=0.08 dB.
+  # The invariant this mode gates needs no specific recording: on the SAME capture, EVERY combination
+  # of the flag matrix must reproduce the DEFAULT combination's decision (crc identical, |dSINR| within
+  # TOL - the device inversion rounds differently, <=0.08 dB). So the reference is taken from the corpus
+  # under test: the first three captures, baselined by combination 1 below. This is what makes the mode
+  # usable on a re-recorded corpus, which is the normal case after a reboot (/tmp does not survive one).
+  #
+  # The three receptions every earlier round was gated against are kept as an OPTIONAL absolute anchor
+  # (they pin the host's cross-session behaviour, which a fresh corpus cannot). When they are not in the
+  # corpus the mode SAYS SO - an unchecked anchor must not read as a checked one.
+  PINNED="iq2_1009_17923 iq1_10049_17921 iq2_10044_17923"
+  PINNED_SINR="23.97 6.24 31.78"
+  PINNED_CRC="KO OK KO"
   TOL=0.2
   # Defined here as well: this block runs before the helpers further down are declared.
   numeric() { awk -v v="$1" 'BEGIN{exit !(v ~ /^-?[0-9.]+$/)}'; }
   fails=0
-  printf '%-34s | %-14s | %-14s | %-14s\n' "combination" "iq2_1009" "iq1_10049" "iq2_10044"
-  printf '%-34s | %-14s | %-14s | %-14s\n' "expected (host K1)" "23.97 KO" "6.24 OK" "31.78 KO"
+  NREF=$(( ${#CAPS[@]} < 3 ? ${#CAPS[@]} : 3 ))
+  REFS=("${CAPS[@]:0:$NREF}")
+  hdr=""; for c in "${REFS[@]}"; do hdr="$hdr | $(printf '%-14s' "$(basename "$c" | cut -c1-14)")"; done
+  printf '%-34s%s\n' "combination" "$hdr"
+  run_one() {  # envs capture -> "sinr crc"
+    local out
+    out=$(env $1 "$BIN" "$2" --metal --out "$WORK/cb" 2>/dev/null | grep -o "crc=[A-Z]* .*sinr=[-0-9.a-z]* dB")
+    rm -f "$WORK"/cb_* 2>/dev/null
+    if [ -z "$out" ]; then echo "CRASH -"; return; fi
+    echo "$(sed -E 's/.*sinr=([-0-9.a-z]+) dB.*/\1/' <<<"$out") $(sed -E 's/.*crc=([A-Z]+).*/\1/' <<<"$out")"
+  }
+  # Baseline: the default combination, on this corpus.
+  base=""
+  for c in "${REFS[@]}"; do base="$base $(run_one "" "$c")"; done
+  set -- $base
+  printf '%-34s' "baseline (default, this corpus)"
+  for (( i = 0; i < NREF; i++ )); do printf ' | %-14s' "$(printf '%-7s %-6s' "${1:-?}" "${2:-?}")"; shift 2; done
+  echo
   run_combo() {  # label env gate(yes/no)
-    local label=$1 envs=$2 gate=$3 line="" bad=0 sinr crc out
-    for c in $REF; do
-      out=$(env $envs "$BIN" "/tmp/$c" --metal --out "$WORK/cb" 2>/dev/null | grep -o "crc=[A-Z]* .*sinr=[-0-9.a-z]* dB")
-      crc=$(sed -E 's/.*crc=([A-Z]+).*/\1/' <<<"$out")
-      sinr=$(sed -E 's/.*sinr=([-0-9.a-z]+) dB.*/\1/' <<<"$out")
-      [ -z "$sinr" ] && { sinr="CRASH"; crc="-"; }
+    local label=$1 envs=$2 gate=$3 line="" bad=0 got sinr crc exp_s exp_c k=0
+    for c in "${REFS[@]}"; do
+      got=$(run_one "$envs" "$c"); sinr=${got% *}; crc=${got#* }
       line="$line | $(printf '%-7s %-6s' "$sinr" "$crc")"
       if [ "$gate" = yes ]; then
-        case "$c" in
-          iq2_1009_17923) exp_s=23.97; exp_c=KO;;
-          iq1_10049_17921) exp_s=6.24; exp_c=OK;;
-          iq2_10044_17923) exp_s=31.78; exp_c=KO;;
-        esac
+        # The baseline of THIS capture (same order as $base above).
+        set -- $base
+        exp_s=$(eval echo \${$((2 * k + 1))}); exp_c=$(eval echo \${$((2 * k + 2))})
         if [ "$crc" != "$exp_c" ] || ! numeric "$sinr" ||
            ! awk -v a="$sinr" -v b="$exp_s" -v t="$TOL" 'BEGIN{exit !((a-b<=t)&&(b-a<=t))}'; then
           bad=1
         fi
       fi
-      rm -f "$WORK"/cb_* 2>/dev/null
+      k=$(( k + 1 ))
     done
     printf '%-34s%s' "$label" "$line"
     if [ "$gate" = yes ]; then
@@ -148,8 +191,31 @@ if [ "$MODE" = combos ]; then
   run_combo "9  SPLIT_TAIL=1 GPU_INVERT=0 CORR_DEV=0" "OCUDU_CE_SPLIT_TAIL=1 OCUDU_CE_GPU_INVERT=0 OCUDU_CE_CORR_DEV=0" yes
   run_combo "10 GPU_INVERT=0 CPU_INVERT=1" "OCUDU_CE_GPU_INVERT=0 OCUDU_CE_CPU_INVERT=1" yes
   echo
-  if [ $fails -ne 0 ]; then echo "combos: $fails gated combination(s) FAILED"; exit 1; fi
-  echo "combos: PASS"
+  # The optional absolute anchor: the three recorded receptions every earlier round was gated against.
+  # It pins the HOST's behaviour across sessions, which the self-baseline above cannot (it would happily
+  # accept a corpus-wide regression as long as every combination agreed with itself). Checked when the
+  # recordings are there, and REPORTED AS UNCHECKED when they are not - never silently skipped.
+  set -- $PINNED_SINR; pin_s=("$@"); set -- $PINNED_CRC; pin_c=("$@")
+  n_pin=0; n_absent=0; i=0; pin_bad=0
+  for c in $PINNED; do
+    if [ -r "/tmp/$c.txt" ]; then
+      got=$(run_one "" "/tmp/$c"); sinr=${got% *}; crc=${got#* }
+      [ "$crc" = "${pin_c[$i]}" ] && numeric "$sinr" &&
+        awk -v a="$sinr" -v b="${pin_s[$i]}" -v t="$TOL" 'BEGIN{exit !((a-b<=t)&&(b-a<=t))}' ||
+        pin_bad=$(( pin_bad + 1 ))
+      echo "pinned anchor $c: $sinr ${crc} (expected ${pin_s[$i]} ${pin_c[$i]})"
+      n_pin=$(( n_pin + 1 ))
+    else
+      n_absent=$(( n_absent + 1 ))
+    fi
+    i=$(( i + 1 ))
+  done
+  if [ $n_absent -ne 0 ]; then
+    echo "pinned anchors absent from this corpus: $n_absent/3 - the cross-session absolute anchor is NOT checked"
+  fi
+  if [ $pin_bad -ne 0 ]; then echo "combos: $pin_bad pinned anchor(s) FAILED"; fails=$(( fails + pin_bad )); fi
+  if [ $fails -ne 0 ]; then echo "combos: $fails check(s) FAILED (combination and/or pinned anchor)"; exit 1; fi
+  echo "combos: PASS ($n_pin/3 pinned anchors checked; self-baselined on ${#REFS[@]} capture(s))"
   exit 0
 fi
 
@@ -159,6 +225,21 @@ fi
 # SINR field is matched loosely and only used for the delta when it is actually a number.
 decision() { sed -nE 's/.*tbs=([0-9]+) slot=[0-9]+ rnti=[0-9]+ [A-Z0-9]+: crc=([A-Z]+).*sinr=([-0-9.a-z]+) dB.*/\1 \2 \3/p' <<<"$1" | head -1; }
 numeric() { awk -v v="$1" 'BEGIN{exit !(v ~ /^-?[0-9.]+$/)}'; }
+# Relative difference between the noise_variance scalars of two staged captures (both routes captured
+# the same reception, port by port). Reads the file, not stdout: a parallel-run corruption keeps the
+# CRC but reports a wild SINR, and this number must not inherit that.
+sigma2_rel() {
+  local fa fb
+  fa=$(ls "$1"_*_ce.txt 2>/dev/null | head -1)
+  fb=$(ls "$2"_*_ce.txt 2>/dev/null | head -1)
+  if [ -z "$fa" ] || [ -z "$fb" ]; then echo "nan"; return; fi
+  awk 'NR==FNR { split($2, x, "="); a[FNR] = x[2] + 0; next }
+       { split($2, y, "="); v = a[FNR]; w = y[2] + 0; d = w - v; if (d < 0) d = -d;
+         r = (v != 0) ? d / ((v < 0) ? -v : v) : d; if (r > m) m = r }
+       END { printf "%.3e", m + 0 }' "$fa" "$fb"
+}
+# The allowance of the sig2 mode (see its section in the header).
+SIG2_TOL=1e-04
 
 # The two env sets of the BYTE-COMPARISON modes (k0d, ydev, k0dm): route A is the one under test,
 # route B the reference it has to reproduce exactly. See the header for what each pair isolates.
@@ -174,6 +255,8 @@ case "$MODE" in
         VACUOUS_COUNTER="device_y_writes"; REPORT_COUNTER="";;
   k0dm) ENV_A=""; ENV_B="OCUDU_CE_CORR_DEV=0"
         VACUOUS_COUNTER="device_corr_builds"; REPORT_COUNTER="";;
+  sig2) ENV_A="OCUDU_CE_SIGMA2_CHECK=1"; ENV_B="OCUDU_CE_DEV_SIGMA2=0 OCUDU_CE_SIGMA2_CHECK=1"
+        VACUOUS_COUNTER="device_sigma2"; REPORT_COUNTER="";;
   *)    ENV_A=""; ENV_B=""; VACUOUS_COUNTER=""; REPORT_COUNTER="";;
 esac
 
@@ -235,6 +318,53 @@ run_shard() {
       # what an earlier revision of this rework did - it printed 46 mismatches that the second pass
       # had just cleared).
       if [ $ok -eq 1 ]; then same=$(( same + 1 )); fi
+    elif [ "$MODE" = sig2 ]; then
+      # Both routes write the same staged capture: what differs is WHO computed the hop's noise
+      # variance (the engine's command buffer in A, estimate_sigma2() in B).
+      env $ENV_A "$BIN" "$c" --metal --out "$out_d" >"$WORK/${id}_${base}.a.out" 2>"$WORK/${id}_${base}.a.err" ||
+        { bad="$bad $base(A)"; continue; }
+      env $ENV_B "$BIN" "$c" --metal --out "$out_h" >"$WORK/${id}_${base}.b.out" 2>"$WORK/${id}_${base}.b.err" ||
+        { bad="$bad $base(B)"; continue; }
+      local va vb
+      va=$(grep -o "device_sigma2=[0-9]*" "$WORK/${id}_${base}.a.err" | head -1 | cut -d= -f2)
+      vb=$(grep -o "device_sigma2=[0-9]*" "$WORK/${id}_${base}.b.err" | head -1 | cut -d= -f2)
+      if [ -z "$va" ] || [ "$va" -eq 0 ]; then
+        # This capture's hops never took the device path: comparing would be host against host.
+        echo "$base" >> "$WORK/vac_$id"
+        continue
+      fi
+      if [ -n "$vb" ] && [ "$vb" -ne 0 ]; then
+        bad="$bad $base(knob-ineffective:device_sigma2=$vb)"; continue
+      fi
+      local da dh rel raw dec_bad
+      da=$(decision "$(grep -m1 'crc=' "$WORK/${id}_${base}.a.out")")
+      dh=$(decision "$(grep -m1 'crc=' "$WORK/${id}_${base}.b.out")")
+      # The GATED quantity is the stage's own output: [sigma2_check] reports the device scalar against
+      # the reference implementation INSIDE the same process, per hop, with nothing downstream of it.
+      # The noise_variance in the staged _ce.txt is DERIVED from it by channel_statistics and amplifies
+      # the difference (measured on air: raw 2.8e-07 -> derived 9.86e-05, ~350x, i.e. 1.4% below the old
+      # allowance). Gating the derived value would fail the gate for an amplification that has nothing to
+      # do with this stage, so it is reported instead.
+      raw=$(grep -o 'rel=[-0-9.e+]*' "$WORK/${id}_${base}.a.err" | sed 's/rel=//' |
+            awk 'BEGIN{m=0} {v=$1+0; if(v<0)v=-v; if(v>m)m=v} END{printf "%.3e", m}')
+      rel=$(sigma2_rel "$out_d" "$out_h")
+      if [ -z "$da" ] || [ -z "$dh" ] || [ "$rel" = nan ]; then bad="$bad $base(no-result)"; continue; fi
+      echo "$raw" >> "$WORK/sig2raw_$id"
+      echo "$rel" >> "$WORK/sig2rel_$id"
+      dec_bad=0
+      [ "${da% *}" = "${dh% *}" ] || dec_bad=1
+      # Both kinds of candidate - a scalar beyond the allowance and a decision that moved - are only
+      # CANDIDATES here: the replay tool produces wrong results under parallelism (it flipped the CRC of
+      # two of these 237 captures while six instances were running, and both were clean re-run alone).
+      # The post-parallel pass below decides.
+      if [ "$dec_bad" -eq 1 ] || awk -v r="$raw" -v t="$SIG2_TOL" 'BEGIN{exit !(r > t)}'; then
+        echo "$c" >> "$WORK/recheck_$id"
+      fi
+      if [ "$dec_bad" -eq 0 ]; then same=$(( same + 1 )); fi
+      if numeric "${da##* }" && numeric "${dh##* }"; then
+        delta=$(awk -v a="${da##* }" -v b="${dh##* }" 'BEGIN{d=a-b; if(d<0)d=-d; printf "%.2f", d}')
+        maxdelta=$(awk -v m="$maxdelta" -v d="$delta" 'BEGIN{print (d>m)?d:m}')
+      fi
     else
       stdout_d=$("$BIN" "$c" --metal --out "$out_d" 2>/dev/null | grep -m1 "crc=") || true
       stdout_h=$(OCUDU_CE_CPU_INVERT=1 "$BIN" "$c" --metal --out "$out_h" 2>/dev/null | grep -m1 "crc=") || true
@@ -274,8 +404,13 @@ run_shard() {
   done
   # nbytes counts the BYTE mismatches of the comparison modes: their capture paths are in bad_$id and
   # the serial second pass below re-runs exactly those. Everything else (a route that crashed, a
-  # missing result, a knob that did not engage) is already final and travels in $bad.
-  echo "$total $same $bytesame $maxdelta $retried $nbytes$bad" > "$WORK/res_$id"
+  # missing result, a knob that did not engage) is already final and travels in the bad-name file.
+  # The names go through a FILE, not through a field of res_$id: read(1) eats the leading whitespace of
+  # its last field, so a shard whose findings started after a clean one lost the separator and its names
+  # ran into the previous ones. An empty list must also stay empty - a gate that answers "MISMATCH" with
+  # nothing after it is worse than no gate at all.
+  printf '%s\n' $bad > "$WORK/badnames_$id"
+  echo "$total $same $bytesame $maxdelta $retried $nbytes" > "$WORK/res_$id"
 }
 
 for (( j = 0; j < JOBS; j++ )); do run_shard "$j" & done
@@ -283,11 +418,12 @@ wait
 
 TOTAL=0; SAME=0; BYTESAME=0; MAXDELTA=0; RETRIED=0; BYTEMIS=0; BAD=""
 for (( j = 0; j < JOBS; j++ )); do
-  read -r t s b m r nb rest < "$WORK/res_$j"
-  TOTAL=$(( TOTAL + t )); SAME=$(( SAME + s )); BYTESAME=$(( BYTESAME + b )); RETRIED=$(( RETRIED + r )); BAD="$BAD$rest"
+  read -r t s b m r nb < "$WORK/res_$j"
+  TOTAL=$(( TOTAL + t )); SAME=$(( SAME + s )); BYTESAME=$(( BYTESAME + b )); RETRIED=$(( RETRIED + r ));
   BYTEMIS=$(( BYTEMIS + nb ))
   MAXDELTA=$(awk -v x="$MAXDELTA" -v y="$m" 'BEGIN{print (y>x)?y:x}')
 done
+BAD=$(grep -h . "$WORK"/badnames_* 2>/dev/null | tr '\n' ' ')
 
 # ---- Serial second pass over the byte mismatches ---------------------------------------------
 # Nothing else is running now, so this is the "re-check it serially before believing it" the header
@@ -319,6 +455,45 @@ if [ "$BYTEMIS" -ne 0 ]; then
   BAD="$BAD$SURVIVORS"
 fi
 
+# ---- Serial (nothing else running) re-check of the sigma2 candidates ---------------------------
+# Same discipline as the byte mismatches above: neither a moving decision nor a scalar beyond the
+# allowance is believed until it survives a run with an idle GPU. On the 237-capture corpus this pass
+# cleared every one of the candidates it was given.
+SIG2RECHECKED=0; SIG2SURV=0; SIG2RAWMAX=0; SIG2CLEARED=0
+if [ "$MODE" = sig2 ]; then
+  cat "$WORK"/recheck_* 2>/dev/null | sort -u > "$WORK/rechecklist"
+  SIG2RECHECKED=$(wc -l < "$WORK/rechecklist" | tr -d ' ')
+  while read -r bc; do
+    [ -n "$bc" ] || continue
+    rm -f "$WORK/ra"_* "$WORK/rb"_*
+    if ! env $ENV_A "$BIN" "$bc" --metal --out "$WORK/ra" >"$WORK/ra.out" 2>"$WORK/ra.err"; then
+      BAD="$BAD $(basename "$bc")(rerun-A)"; continue
+    fi
+    if ! env $ENV_B "$BIN" "$bc" --metal --out "$WORK/rb" >"$WORK/rb.out" 2>"$WORK/rb.err"; then
+      BAD="$BAD $(basename "$bc")(rerun-B)"; continue
+    fi
+    rda=$(decision "$(grep -m1 'crc=' "$WORK/ra.out")")
+    rdb=$(decision "$(grep -m1 'crc=' "$WORK/rb.out")")
+    rraw=$(grep -o 'rel=[-0-9.e+]*' "$WORK/ra.err" | sed 's/rel=//' |
+           awk 'BEGIN{m=0} {v=$1+0; if(v<0)v=-v; if(v>m)m=v} END{printf "%.3e", m}')
+    SIG2RAWMAX=$(awk -v m="$SIG2RAWMAX" -v v="$rraw" 'BEGIN{print (v>m)?v:m}')
+    if [ -z "$rda" ] || [ -z "$rdb" ]; then
+      BAD="$BAD $(basename "$bc")(rerun-no-result)"; continue
+    fi
+    if [ "${rda% *}" != "${rdb% *}" ]; then
+      BAD="$BAD $(basename "$bc")(serially-reproduced-decision:$rda|$rdb)"; SIG2SURV=$(( SIG2SURV + 1 ))
+    else
+      # The parallel phase had counted this capture as decision-different; it is not. Put it back, or
+      # the summary would read "decision-identical=236 ... survivors=0" and look self-contradictory.
+      SIG2CLEARED=$(( SIG2CLEARED + 1 ))
+    fi
+    if awk -v r="$rraw" -v t="$SIG2_TOL" 'BEGIN{exit !(r > t)}'; then
+      BAD="$BAD $(basename "$bc")(serially-reproduced-sigma2-rel=$rraw)"; SIG2SURV=$(( SIG2SURV + 1 ))
+    fi
+    rm -f "$WORK/ra"_* "$WORK/rb"_*
+  done < "$WORK/rechecklist"
+fi
+
 if [ "$MODE" = k0d ]; then
   DB=0
   for (( j = 0; j < JOBS; j++ )); do
@@ -329,6 +504,21 @@ elif [ "$MODE" = ydev ]; then
   echo "mode=ydev captures=$TOTAL byte-identical=$SAME vacuous=$VACUOUS rechecked=$RECHECKED retried=$RETRIED"
 elif [ "$MODE" = k0dm ]; then
   echo "mode=k0dm captures=$TOTAL byte-identical=$SAME vacuous=$VACUOUS rechecked=$RECHECKED retried=$RETRIED"
+elif [ "$MODE" = sig2 ]; then
+  SIG2REL=0; SIG2RAW=0
+  for (( j = 0; j < JOBS; j++ )); do
+    [ -f "$WORK/sig2rel_$j" ] && SIG2REL=$(awk -v m="$SIG2REL" '{ if ($1 + 0 > m) m = $1 + 0 } END { printf "%.3e", m }' "$WORK/sig2rel_$j")
+    [ -f "$WORK/sig2raw_$j" ] && SIG2RAW=$(awk -v m="$SIG2RAW" '{ if ($1 + 0 > m) m = $1 + 0 } END { printf "%.3e", m }' "$WORK/sig2raw_$j")
+  done
+  SAME=$(( SAME + SIG2CLEARED ))
+  echo "mode=sig2 captures=$TOTAL decision-identical=$SAME vacuous=$VACUOUS retried=$RETRIED serially-rechecked=$SIG2RECHECKED survivors=$SIG2SURV"
+  # The GATED number is the scalar the stage itself produces, against the reference implementation in
+  # the same process ([sigma2_check]), and it is the one the serial pass re-measured: clean runs gave
+  # 2.3e-06 on air, 1.3e-07 on the L1 harness, against an allowance of $SIG2_TOL.
+  echo "mode=sig2 max raw sigma2 rel (GATED, serial runs only)=$SIG2RAWMAX"
+  echo "mode=sig2 max raw sigma2 rel (all runs, contaminated by parallel-run flakiness)=$SIG2RAW"
+  echo "mode=sig2 max noise_variance rel=$SIG2REL (INFORMATIONAL: derived downstream, amplifies ~350x)"
+  echo "mode=sig2 max|dSINR|=${MAXDELTA}dB (INFORMATIONAL, contaminated by parallel-run flakiness)"
 else
   echo "mode=k1 captures=$TOTAL decision-identical=$SAME llr-byte-identical=$BYTESAME retried=$RETRIED"
   # max|dSINR| is INFORMATIONAL ONLY: a corrupted parallel run keeps its CRC but reports a wild

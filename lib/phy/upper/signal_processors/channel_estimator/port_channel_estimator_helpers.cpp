@@ -194,6 +194,16 @@ unsigned ocudu::extract_layer_hop_rx_pilots(dmrs_symbol_list&                   
   return dmrs_symbol_index;
 }
 
+unsigned ocudu::get_fd_smoothing_filter(span<float> out, unsigned nof_rb, unsigned stride)
+{
+  filter_type rc(nof_rb, stride);
+  if (rc.rc_filter.size() > out.size()) {
+    return 0;
+  }
+  std::copy(rc.rc_filter.begin(), rc.rc_filter.end(), out.begin());
+  return rc.rc_filter.size();
+}
+
 void ocudu::apply_fd_smoothing(span<cf_t>                                   enlarged_filtered_pilots_out,
                                span<cf_t>                                   enlarged_pilots_in,
                                unsigned                                     nof_rb,

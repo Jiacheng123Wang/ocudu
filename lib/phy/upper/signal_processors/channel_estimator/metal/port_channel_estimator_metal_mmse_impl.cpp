@@ -264,6 +264,10 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   gpu_ls_ref    = alloc_aligned<float>(k_ls_floats);
   gpu_ls_out    = alloc_aligned<float>(k_ls_floats);
   gpu_ls_cfo    = alloc_aligned<float>(1);
+  // S-7f-5w: the frequency-smoothed copy of the hop's pilots and the noise variance the device
+  // leaves behind. Both are read in the SAME command buffer that produces the LSE.
+  gpu_ls_smoothed = alloc_aligned<float>(k_ls_floats);
+  gpu_ls_sigma2   = alloc_aligned<float>(1);
 
   // Glue #2 (S-7f-5u): the DEVICE writes the engine's pilot vectors y out of the pilots it just
   // produced (gpu_ls_out), which removes the host's copy of them into the y slots - the last CPU
@@ -276,6 +280,17 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
     return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
   }();
   device_y_enabled = device_y_default_on;
+
+  // S-7f-5w: the device computes the hop's noise variance (FD smoothing + the classical estimator)
+  // inside the extraction's command buffer, and the host reads the scalar it leaves. ON by default
+  // like the other device stages; OCUDU_CE_DEV_SIGMA2=0 keeps estimate_sigma2() on the host, which
+  // is the A/B of the sig2 gate. It is a TOLERANCE path (see ocudu_mmse_pilots.metal): the value
+  // enters A's diagonal with a weight of ~1e-3, so the two computations are not bit-identical.
+  static const bool device_sigma2_default_on = []() {
+    const char* env = std::getenv("OCUDU_CE_DEV_SIGMA2");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  device_sigma2_enabled = device_sigma2_default_on;
 
   // metal_nn_mmse flavor: compile the simdgroup_matrix 8x8 pipelines and stage the
   // quad-packed pilot matrix qy (zero-initialized: tail-quad columns of non-existent
@@ -346,6 +361,37 @@ port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl(
   free_aligned(gpu_ls_ref);
   free_aligned(gpu_ls_out);
   free_aligned(gpu_ls_cfo);
+  free_aligned(gpu_ls_smoothed);
+  free_aligned(gpu_ls_sigma2);
+}
+
+unsigned port_channel_estimator_metal_mmse_impl::stage_device_noise_inputs(const fd_td_estimation_stage_args& args,
+                                                                             unsigned                           npt)
+{
+  const unsigned npf         = args.nof_symbol_pilots;
+  const unsigned nof_cdm_hop = args.rx_pilots.size().nof_slices;
+  // \note The caps are the BUFFERS' (gpu_rx_pilots is allocated for MAX_LAYERS / 2 CDM groups), and
+  //       they are a superset of K4's own gate - which now keys on this call's answer instead of
+  //       re-deriving it, so a geometry that does not fit cannot leave K4 reading unstaged pilots.
+  if ((npf == 0) || (nof_cdm_hop == 0) || (npt == 0) || (npt > MAX_DMRS_SYMBOLS) ||
+      (nof_cdm_hop > MAX_LAYERS / 2) || (npf > MAX_NOF_PILOTS_SYMBOL)) {
+    return 0;
+  }
+  for (unsigned i_dmrs = 0; i_dmrs != npt; ++i_dmrs) {
+    for (unsigned i_group = 0; i_group != nof_cdm_hop; ++i_group) {
+      span<const cf_t> src = args.rx_pilots.get_symbol(i_dmrs, i_group);
+      float* dst = gpu_rx_pilots + ((static_cast<std::size_t>(i_dmrs) * nof_cdm_hop + i_group) * npf) * 2;
+      for (unsigned j = 0; j != npf; ++j) {
+        dst[2 * j]     = src[j].real();
+        dst[2 * j + 1] = src[j].imag();
+      }
+    }
+  }
+  // Symbol start times: the CFO phasors of both the noise reduction and K4 read them.
+  for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+    gpu_epochs[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
+  }
+  return nof_cdm_hop;
 }
 
 float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estimation_stage_args& args)
@@ -381,6 +427,16 @@ float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estima
     }
   }
 
+  // \brief CFO the residual below is rotated with: the one that belongs to the LSE being smoothed.
+  //
+  // K0-a OVERWRITES pilots_lse_view with the device's own LSE and applies the DEVICE's CFO to it in
+  // that same command buffer, so smoothing that buffer and then rotating the residual with the host's
+  // estimate (args.cfo_hop) mixes two phase ramps. That is not a sigma2 difference - it is the
+  // difference between the two CFO estimators - and on a 4-layer capture whose estimates differ by
+  // 5e-3 it made the device disagree with this reference by 1.4e-02, while agreeing to 1.3e-07 once
+  // the kernel's own CFO was used. On a host-built LSE the host's estimate is the matching one.
+  const std::optional<float> cfo_ref = device_ls_valid ? std::optional<float>(gpu_ls_cfo[0]) : args.cfo_hop;
+
   // Noise variance from the existing classical estimator, averaged over the CDM layer pairs.
   float    sigma2  = 0.0F;
   unsigned n_pairs = 0;
@@ -391,7 +447,7 @@ float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estima
                                                    tmp_filtered,
                                                    args.beta_scaling,
                                                    args.pattern_symbols,
-                                                   args.cfo_hop,
+                                                   cfo_ref,
                                                    args.symbol_start_epochs,
                                                    args.compensate_cfo_flag,
                                                    args.first_symbol,
@@ -650,6 +706,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   args.pattern_symbols.for_each(args.first_symbol, args.last_symbol, [&](unsigned s) { dmrs_sym.push_back(s); });
   const unsigned npt = dmrs_sym.size();
 
+  // ---- S-7f-5w: the arrays the device noise variance reads ---------------------------------------
+  // Staged BEFORE the extraction, because the noise reduction rides that same command buffer; K4
+  // reads the very same buffers later, and keys its own gate on this call's answer.
+  const unsigned staged_cdm_groups = stage_device_noise_inputs(args, npt);
+
   // ---- K0-a: the estimator's INPUT stage, on the device --------------------------------
   // The host pre-stage that ran before this call has already filled pilots_lse from the grid.
   // When OCUDU_CE_DEV_LS=1 and the grid is device-addressable, the pilots are recomputed HERE, on
@@ -666,8 +727,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // the y scatter (glue #2) is gated on, and the descriptors the staging records. Both are reset on
   // EVERY hop, before K0-a decides, so a hop that fails K0-a cannot inherit the previous hop's
   // descriptors - which would make the engine write y from a buffer that no longer holds its pilots.
-  device_ls_valid    = false;
-  nof_device_y_stage = 0;
+  device_ls_valid     = false;
+  device_sigma2_valid = false;
+  nof_device_y_stage  = 0;
   static const bool device_ls_enabled = (std::getenv("OCUDU_CE_CPU_LS") == nullptr);
   if (device_ls_enabled && (npt != 0) && (nof_layers <= MAX_LAYERS) &&
       (nof_layers <= args.dmrs_patterns.size())) {
@@ -693,7 +755,21 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         gpu_epochs[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
       }
 
+      // The raised-cosine coefficients of the FD smoothing: they depend on the hop's geometry only, so
+      // the host hands them over (with how many virtual pilots the edges take, including
+      // apply_fd_smoothing()'s nof_rb == 1 special case).
+      const unsigned stride = configure_interpolator(args.dmrs_patterns.front().re_pattern).stride;
+      fd_filter_len         = get_fd_smoothing_filter(span<float>(fd_filter), nof_prb, stride);
+      unsigned nof_v_pilots = std::min<unsigned>(MAX_V_PILOTS, fd_filter_len / 2);
+      if (nof_prb == 1) {
+        nof_v_pilots = nof_pilots;
+      }
+
       metal::mmse_engine::pilots_stage st{};
+      // The engine skips the noise-variance stage - leaving the destination untouched - for a geometry
+      // outside the kernels' contract, and the build still succeeds: see pilots_stage::sigma2_done.
+      bool sigma2_done = false;
+      st.sigma2_done   = &sigma2_done;
       st.grid              = dv.base;
       st.grid_bytes        = (static_cast<std::size_t>(dv.nof_ports - 1) * dv.port_stride +
                        static_cast<std::size_t>(dv.nof_symb - 1) * dv.symb_stride +
@@ -706,6 +782,20 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       st.epochs            = gpu_epochs;
       st.lse               = gpu_ls_out;
       st.cfo               = gpu_ls_cfo;
+      // S-7f-5w: the noise variance of this hop, computed in this same command buffer when the host
+      // is not the one computing it (OCUDU_CE_DEV_SIGMA2=0).
+      st.rx_pilots         = gpu_rx_pilots;
+      st.rx_bytes          = 2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * (MAX_LAYERS / 2) *
+                             MAX_NOF_PILOTS_SYMBOL * sizeof(float);
+      st.smoothed          = gpu_ls_smoothed;
+      st.sigma2            = device_sigma2_enabled ? gpu_ls_sigma2 : nullptr;
+      st.fd_filter         = fd_filter.data();
+      st.fd_filter_len     = fd_filter_len;
+      st.nof_v_pilots      = nof_v_pilots;
+      st.nof_cdm           = staged_cdm_groups;
+      st.beta              = args.beta_scaling;
+      st.inv_beta          = 1.0F / args.beta_scaling;
+      st.compensate_cfo    = args.compensate_cfo_flag;
       st.nof_dmrs_symb     = npt;
       st.nof_layers        = nof_layers;
       st.nof_pilots        = nof_pilots;
@@ -730,6 +820,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // K0-a produced THIS hop's pilots: from here on the device may also write the engine's
         // pilot vectors out of them (glue #2, see record_device_y_stage()).
         device_ls_valid = true;
+        // S-7f-5w: and it computed this hop's noise variance, in the command buffer that just
+        // completed - so the scalar is valid now, with no extra synchronisation. NOT "sigma2 != nullptr":
+        // that pointer stays non-null when the engine skipped the stage, and the buffer then holds the
+        // previous hop's value (or nothing). The engine reports it through sigma2_done.
+        device_sigma2_valid = (st.sigma2 != nullptr) && sigma2_done;
         // Tolerance probe (OCUDU_CE_LS_CHECK=1): the device LSE against the host's, BEFORE the
         // overwrite. Tolerance, not bit-exactness: the pilots enter h = W . y linearly, so a
         // relative error carries no amplification factor (see ocudu_mmse_pilots.metal).
@@ -841,8 +936,22 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     }
   }
 
-  // Classical noise variance (reuses the existing noise estimator).
-  const float sigma2 = estimate_sigma2(args);
+  // Classical noise variance: computed by the DEVICE inside the extraction's command buffer when
+  // that path ran (S-7f-5w), by the host otherwise (OCUDU_CE_DEV_SIGMA2=0, no device LSE, or a
+  // metallib without the kernels - in which case this is also the CPU-block fallback's value).
+  float sigma2 = (device_sigma2_valid && device_sigma2_enabled) ? gpu_ls_sigma2[0] : estimate_sigma2(args);
+  if (std::getenv("OCUDU_CE_SIGMA2_CHECK") != nullptr) {
+    // Tolerance probe: sigma2 enters A's diagonal with a weight of ~1e-3, so the two are expected to
+    // differ in the last bits, not in kind (see ocudu_mmse_pilots.metal).
+    const float host_sigma2 = estimate_sigma2(args);
+    const double rel        = (host_sigma2 != 0.0F) ? (static_cast<double>(sigma2) - host_sigma2) / host_sigma2 : 0.0;
+    std::fprintf(stderr,
+                 "[sigma2_check] dev=%g host=%g rel=%.3e device=%d\n",
+                 static_cast<double>(sigma2),
+                 static_cast<double>(host_sigma2),
+                 rel,
+                 device_sigma2_valid ? 1 : 0);
+  }
   const float sigma2_rel   = sigma2 / std::max(pilots_power, 1e-30F);
   // Rate-limited diagnostic (OCUDU_CE_DEBUG=1): an absolute sigma2 makes the MMSE weights - and
   // with them the channel estimates and the equalizer's noise variance that scales the soft bits -
@@ -1079,8 +1188,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     unsigned nof_cdm_groups = 0;
     if (nof_re_total != 0) {
       const unsigned npf = args.nof_symbol_pilots;
-      nof_cdm_groups     = args.rx_pilots.size().nof_slices;
+      // The received pilots were staged before the extraction (S-7f-5w); use that answer rather than
+      // re-deriving it, or a geometry the staging refused would leave K4 reading unstaged pilots.
+      nof_cdm_groups     = staged_cdm_groups;
       if ((npf != 0) && (nof_cdm_groups != 0) && (npt <= MAX_DMRS_SYMBOLS)) {
+        // Only the TRANSMITTED pilots here: the received ones and the epochs were staged before the
+        // extraction (S-7f-5w), which is what the device noise variance reads.
         for (unsigned i_dmrs = 0; i_dmrs != npt; ++i_dmrs) {
           for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
             span<const cf_t> src = args.pilots.get_symbol(args.hop_offset + i_dmrs, i_layer);
@@ -1090,18 +1203,6 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
               dst[2 * j + 1] = src[j].imag();
             }
           }
-          for (unsigned i_group = 0; i_group != nof_cdm_groups; ++i_group) {
-            span<const cf_t> src = args.rx_pilots.get_symbol(i_dmrs, i_group);
-            float* dst = gpu_rx_pilots + ((static_cast<std::size_t>(i_dmrs) * nof_cdm_groups + i_group) * npf) * 2;
-            for (unsigned j = 0; j != npf; ++j) {
-              dst[2 * j]     = src[j].real();
-              dst[2 * j + 1] = src[j].imag();
-            }
-          }
-        }
-        // Symbol start times (the CFO rotation of the reduction) and the comb geometry.
-        for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
-          gpu_epochs[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
         }
       } else {
         nof_cdm_groups = 0;
