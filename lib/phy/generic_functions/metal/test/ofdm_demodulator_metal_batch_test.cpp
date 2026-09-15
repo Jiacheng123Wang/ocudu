@@ -86,18 +86,7 @@ int main()
     symbol_sizes[s] = cp.get_length(nsymb * slot_index + s, scs).to_samples(sampling_rate_Hz) + dft_size;
     slot_size += symbol_sizes[s];
   }
-  // The RX chain's samples live in a page-aligned, page-multiple allocation
-  // (baseband_gateway_buffer_dynamic_aligned), which is what lets the DFT engine read them zero-copy
-  // (see dft_grid_write_params::time_samples). A plain vector would make the engine refuse and stage
-  // the input on the host, so the test would not exercise that path at all.
-  const size_t page      = compat::page_size();
-  const size_t data_page = ((static_cast<size_t>(slot_size) * sizeof(ci16_t) + page - 1) / page) * page;
-  ci16_t*      aligned_time_data = static_cast<ci16_t*>(compat::aligned_alloc(page, data_page));
-  if (aligned_time_data == nullptr) {
-    std::fprintf(stderr, "FAIL: the aligned sample allocation failed\n");
-    return 1;
-  }
-  span<ci16_t> time_data(aligned_time_data, slot_size);
+  std::vector<ci16_t> time_data(slot_size);
   std::mt19937        rng(20260912);
   std::uniform_int_distribution<int> dist(-2000, 2000);
   for (auto& sample : time_data) {
@@ -200,7 +189,8 @@ int main()
           demod.finish_symbol(grid.get_writer(), in_flight.front());
           in_flight.erase(in_flight.begin());
         }
-        span<const ci16_t> symbol_samples = time_data.subspan(offset, symbol_sizes[s]);
+        span<const ci16_t> symbol_samples =
+            span<const ci16_t>(time_data).subspan(offset, symbol_sizes[s]);
         const unsigned slot = s % depth;
         demod.submit_symbol(grid.get_writer(), symbol_samples, 0, s, slot);
         in_flight.push_back(slot);

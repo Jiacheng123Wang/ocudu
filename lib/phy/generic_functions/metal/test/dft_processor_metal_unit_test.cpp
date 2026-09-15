@@ -19,7 +19,6 @@
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/phy/support/support_factories.h"
-#include "ocudu/support/macos_compat.h"
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -427,99 +426,6 @@ int main()
         std::fprintf(stderr, "FAIL: the device grid write differs from the host reference (window=%d)\n", with_window);
         ok = false;
       }
-    }
-
-    // Input straight from the radio buffer: the same symbol handed over as int16 samples in a
-    // page-aligned allocation (what baseband_gateway_buffer_dynamic_aligned gives the DFT), read by
-    // the kernel instead of the staged float2 input. The values are chosen so that the kernel's
-    // conversion (float(sample) * gain) reproduces the staged input EXACTLY, which isolates what
-    // this test is about: the offset, the wrap and the conversion plumbing, not the arithmetic.
-    {
-      const float gain = 1.0F / ocuduvec::scaling_factor_ci16_to_cf;
-
-      // A cyclic prefix in front of the transform, and the window offset the demodulator applies.
-      const unsigned cp_len = 64;
-      const unsigned offset = cp_len - 8;
-      const size_t   page   = compat::page_size();
-      const size_t   bytes  = ((static_cast<size_t>(cp_len + size) * sizeof(ci16_t) + page - 1) / page) * page;
-      ci16_t*        samples = static_cast<ci16_t*>(compat::aligned_alloc(page, bytes));
-      if (samples == nullptr) {
-        std::fprintf(stderr, "FAIL: the aligned sample allocation failed\n");
-        return 1;
-      }
-      std::vector<cf_t> time_input(size);
-      for (unsigned i = 0; i != size; ++i) {
-        // Round numbers so that the float product below is the value the kernel computes exactly.
-        const auto qi = static_cast<int16_t>(static_cast<int>(dist(rng)) % 30000);
-        const auto qq = static_cast<int16_t>(static_cast<int>(dist(rng)) % 30000);
-        samples[offset + i] = ci16_t(qi, qq);
-        time_input[i]       = cf_t(static_cast<float>(qi) * gain, static_cast<float>(qq) * gain);
-      }
-      // Reference: the staged path on those very values. run() transforms slot 0, so the reference
-      // goes there - and then the whole ring is filled with garbage on purpose: the radio-buffer
-      // dispatch below must produce the reference grid anyway, which proves it reads the samples and
-      // not the engine's own input buffer.
-      std::copy(time_input.begin(), time_input.end(), metal.get_input().begin());
-      span<const cf_t> staged_transform = metal.run();
-      std::vector<cf_t> staged_out(staged_transform.begin(), staged_transform.end());
-      for (cf_t& x : metal.get_input()) {
-        x = cf_t(1234.5F, -6789.0F);
-      }
-
-      if (!grid_writer->set_grid_write_window({})) {
-        std::fprintf(stderr, "FAIL: clearing the grid-write window failed\n");
-        return 1;
-      }
-      dft_grid_write_params params;
-      params.view               = view;
-      params.port               = port;
-      params.symbol             = symbol;
-      params.nof_subc           = nof_subc;
-      params.map_offset         = map_offset;
-      params.coefficient        = coefficient;
-      params.apply_window       = false;
-      params.time_samples       = samples;
-      params.time_samples_bytes = (cp_len + size) * sizeof(ci16_t);
-      params.time_window_start  = offset;
-      params.time_gain          = gain;
-      if (!grid_writer->submit_grid_write(slot, params)) {
-        std::fprintf(stderr, "FAIL: the engine refused the radio-buffer input\n");
-        compat::aligned_free(samples);
-        return 1;
-      }
-      metal.wait_slot(slot);
-
-      // The device grid must equal the host post-processing of the STAGED transform of the same values.
-      std::vector<cf_t> compensated(size);
-      ocuduvec::sc_prod(compensated, span<const cf_t>(staged_out), coefficient);
-      {
-        resource_grid_writer& writer = host_grid->get_writer();
-        writer.put(port, symbol, 0, span<const cf_t>(&compensated[size - nof_subc / 2], nof_subc / 2));
-        writer.put(port, symbol, nof_subc / 2, span<const cf_t>(&compensated[0], nof_subc / 2));
-      }
-      const span<const cbf16_t> got  = device_grid->get_reader().get_view(port, symbol).first(nof_subc);
-      const span<const cbf16_t> want = host_grid->get_reader().get_view(port, symbol).first(nof_subc);
-      unsigned                  mismatches = 0;
-      for (unsigned k = 0; k != nof_subc; ++k) {
-        if (got[k] != want[k]) {
-          if (mismatches == 0) {
-            std::fprintf(stderr,
-                         "  ci16 first mismatch at subcarrier %u: device=(%f,%f) host=(%f,%f)\n",
-                         k,
-                         to_cf(got[k]).real(),
-                         to_cf(got[k]).imag(),
-                         to_cf(want[k]).real(),
-                         to_cf(want[k]).imag());
-          }
-          ++mismatches;
-        }
-      }
-      std::printf("[ci16]  size=%4u window=0 subcarriers=%u mismatching=%u\n", size, nof_subc, mismatches);
-      if (mismatches != 0) {
-        std::fprintf(stderr, "FAIL: the radio-buffer input differs from the staged path\n");
-        ok = false;
-      }
-      compat::aligned_free(samples);
     }
   }
 

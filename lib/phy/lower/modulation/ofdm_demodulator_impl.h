@@ -55,32 +55,13 @@ class ofdm_symbol_demodulator_impl : public ofdm_symbol_demodulator
   bool device_grid_write = false;
   /// Set once the device grid write was requested but could not be used, so the warning is not spammed per symbol.
   bool device_grid_write_failed = false;
-  /// Set once the transform input could not be taken from the radio buffer (see submit_symbol()), so
-  /// the warning is not spammed per symbol; the input is then staged on the host for the whole run.
-  bool time_input_failed = false;
-
-  /// \brief Refreshes the phase compensation table when the center frequency changed.
-  ///
-  /// fill_dft_input() does this before converting the samples, and its caller takes the per-symbol
-  /// coefficient after it (see submit_grid_write()). The path that reads the samples straight from
-  /// the radio buffer never calls fill_dft_input(), so it refreshes the table here instead.
-  void refresh_phase_compensation();
 
   /// \brief Submits the transform of \c slot together with the write of one symbol into the grid, from the device.
   ///
-  /// The transform input of the slot must already be filled, unless \c time_input carries the
-  /// samples: then the engine reads the transform input from there instead of the engine's float2
-  /// ring (see dft_grid_write_params::time_samples) and the caller does not fill anything. The
-  /// engine refuses that request - and this returns false - when the samples are not in a registered
-  /// page-aligned allocation or the symbol does not fit in it.
-  /// Called only when the engine and the grid allow it; the caller falls back to the plain
-  /// asynchronous submission otherwise.
+  /// The transform input of the slot must already be filled. Called only when the engine and the grid allow it; the
+  /// caller falls back to the plain asynchronous submission otherwise.
   /// \return True when the transform and the grid write were submitted.
-  bool submit_grid_write(resource_grid_writer& grid,
-                         unsigned              port_index,
-                         unsigned              symbol_index,
-                         unsigned              slot,
-                         span<const ci16_t>    time_input = {});
+  bool submit_grid_write(resource_grid_writer& grid, unsigned port_index, unsigned symbol_index, unsigned slot);
 
   /// Maximum number of symbols kept in flight by the pipelined path.
   static constexpr unsigned max_pipeline_depth = 8;

@@ -30,31 +30,6 @@ struct dft_grid_write_params {
   cf_t coefficient = 1.0F;
   /// Apply the per-element table published with set_grid_write_window() (the DFT window phase compensation).
   bool apply_window = false;
-  /// \name Transform input taken from the radio buffer instead of the caller's float2 input.
-  ///
-  /// The RX chain receives its samples as int16 pairs in a page-aligned buffer
-  /// (baseband_gateway_buffer_dynamic_aligned) and the host used to convert them for every symbol -
-  /// skipping the cyclic prefix and scaling by 1 / 32767 (ocuduvec::convert with
-  /// ocuduvec::scaling_factor_ci16_to_cf) - into the engine's input ring. Handing the engine the
-  /// radio buffer as it is moves that conversion into the kernel, so nothing on the host reads the
-  /// samples at all: one zero-copy wrap of the allocation, and the per-symbol work is an offset.
-  ///
-  /// All four fields are only read when \c time_samples is not null; a caller that stages its input
-  /// as complex floats (or whose samples are not in a page-aligned allocation) leaves it null and
-  /// nothing changes. The engine refuses the request - and the caller falls back to staging - when
-  /// the samples do not belong to a registered page-aligned allocation or when the slice it is
-  /// given does not fit in it.
-  ///@{
-  /// Interleaved int16 samples (real, imaginary) of this transform's symbol, a slice of the allocation.
-  const void* time_samples = nullptr;
-  /// Bytes of that slice (validated against the allocation the pointer belongs to).
-  size_t time_samples_bytes = 0;
-  /// First sample the transform reads, relative to \c time_samples: the cyclic-prefix length minus
-  /// the window offset (see ofdm_symbol_demodulator_impl::fill_dft_input()).
-  unsigned time_window_start = 0;
-  /// Scale applied to every sample, 1 / 32767 for the radio's full-scale int16 convention.
-  float time_gain = 1.0F;
-  ///@}
 };
 
 /// \brief Optional DFT capability: write the demodulated symbol into the resource grid.

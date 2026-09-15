@@ -132,14 +132,7 @@ private:
   /// List of the symbol sizes in number samples for each symbol within the subframe.
   std::vector<unsigned> symbol_sizes;
   /// Temporal storage of baseband samples.
-  /// \brief Per-symbol sample buffer the baseband processor and the OFDM demodulator read.
-  ///
-  /// Page-aligned and page-multiple (baseband_gateway_buffer_dynamic_aligned): the DFT engine wraps
-  /// it with newBufferWithBytesNoCopy and reads the samples zero-copy, so the int16 -> float
-  /// conversion and the cyclic-prefix skip happen in the kernel instead of on the host (see
-  /// dft_grid_write_params::time_samples). Its storage is allocated once at construction and
-  /// resize() only moves the logical sample count, which keeps that mapping valid for every symbol.
-  baseband_gateway_buffer_dynamic_aligned temp_buffer;
+  baseband_gateway_buffer_dynamic temp_buffer;
   /// Internal PRACH processor.
   std::unique_ptr<prach_processor> prach_proc;
   /// Internal PUxCH processor.

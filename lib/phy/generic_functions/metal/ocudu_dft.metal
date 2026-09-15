@@ -18,20 +18,6 @@
 /// with it no memory barrier, which is what the sync model would require between two dispatches of
 /// one encoder. Cost measured warm: the same as the plain store (see dft_processor_metal_unit_test).
 /// With active = 0 the final store is exactly what it always was.
-///
-/// The input may also be the radio's own int16 buffer (see input_params): the cyclic-prefix skip and
-/// the int16 -> float2 scaling the host used to do per symbol happen HERE instead, so the host never
-/// touches the samples. The arithmetic is the same single multiply per component ocuduvec::convert()
-/// applies on the host (float(sample) * gain with gain = 1 / 32767), which is what keeps the
-/// transform output bit-identical to the staged path.
-
-/// Input source of the transform (see ocudu::dft_grid_write_params::time_samples).
-struct input_params {
-  uint  is_ci16; // 1 = read the int16 pairs at in16[], 0 = read the caller's float2 at in[]
-  uint  offset;  // first int16 pair of this transform, relative to the wrapped allocation
-  float gain;    // per-component scale of the int16 input
-  uint  pad;
-};
 
 #include <metal_stdlib>
 using namespace metal;
@@ -56,20 +42,6 @@ inline ushort ocudu_to_bf16(float value)
 {
   const uint bits = as_type<uint>(value);
   return static_cast<ushort>((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
-}
-
-/// One transform input element: the caller's complex float, or two int16 read straight from the
-/// radio buffer and scaled exactly like the host's ocuduvec::convert() does it.
-inline float2 ocudu_load_input(device const float2* in,
-                               device const short2* in16,
-                               constant input_params& ip,
-                               uint                 index)
-{
-  if (ip.is_ci16 == 0u) {
-    return in[index];
-  }
-  const short2 raw = in16[ip.offset + index];
-  return float2(static_cast<float>(raw.x) * ip.gain, static_cast<float>(raw.y) * ip.gain);
 }
 
 /// \brief Writes transform element \c v (index \c i of the transform) into the resource grid, with the same
@@ -118,8 +90,6 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
                     device ushort*       grid    [[buffer(8)]], // grid storage (cbf16 pairs), unused when inactive
                     device const float2* window  [[buffer(9)]], // per-element table, unused when inactive
                     constant grid_write_params& gw [[buffer(10)]],
-                    device const short2* in16    [[buffer(11)]], // radio samples, unused when is_ci16 = 0
-                    constant input_params& ip    [[buffer(12)]],
                     uint                 tid     [[thread_position_in_threadgroup]],
                     uint                 tgid    [[threadgroup_position_in_grid]])
 {
@@ -149,7 +119,7 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
 
     // Digit-reversed load (one element per owned index; ownership is i = tid, tid+threads, ...).
     for (uint i = tid; i < n; i += threads) {
-        buf[i] = ocudu_load_input(in, in16, ip, batch_offset + perm[i]);
+        buf[i] = in[batch_offset + perm[i]];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 

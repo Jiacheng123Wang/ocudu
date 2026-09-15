@@ -85,8 +85,7 @@ ofdm_symbol_demodulator_impl::ofdm_symbol_demodulator_impl(const ofdm_demodulato
 bool ofdm_symbol_demodulator_impl::submit_grid_write(resource_grid_writer& grid,
                                                      unsigned              port_index,
                                                      unsigned              symbol_index,
-                                                     unsigned              slot,
-                                                     span<const ci16_t>    time_input)
+                                                     unsigned              slot)
 {
   if (!device_grid_write || (grid_write == nullptr)) {
     return false;
@@ -118,19 +117,6 @@ bool ofdm_symbol_demodulator_impl::submit_grid_write(resource_grid_writer& grid,
   params.map_offset   = dft_size - rg_size / 2;
   params.coefficient  = phase_compensation_table.get_coefficient(symbol_index) * scale;
   params.apply_window = !window_phase_compensation.empty();
-  if (!time_input.empty()) {
-    // The transform reads the radio's int16 samples instead of the engine's float2 ring: the cyclic
-    // prefix is skipped by the offset and the per-component scaling is the one the host would apply
-    // (ocuduvec::convert with ocuduvec::scaling_factor_ci16_to_cf). The engine refuses the request,
-    // and the caller stages the input, when the samples are not in a registered page-aligned
-    // allocation or the symbol does not fit in it.
-    params.time_samples      = time_input.data();
-    params.time_samples_bytes = time_input.size() * sizeof(ci16_t);
-    // The symbol's samples start at the cyclic prefix, and the transform reads from there minus the
-    // DFT window offset - exactly the slice fill_dft_input() converts (see its subspan).
-    params.time_window_start = cp.get_length(symbol_index, scs).to_samples(sampling_rate_Hz) - nof_samples_window_offset;
-    params.time_gain          = 1.0F / ocuduvec::scaling_factor_ci16_to_cf;
-  }
   return grid_write->submit_grid_write(slot, params);
 }
 
@@ -148,7 +134,9 @@ unsigned ofdm_symbol_demodulator_impl::get_cp_offset(unsigned symbol_index, unsi
   return cp_offset;
 }
 
-void ofdm_symbol_demodulator_impl::refresh_phase_compensation()
+void ofdm_symbol_demodulator_impl::fill_dft_input(span<cf_t>         dft_input,
+                                                  span<const ci16_t>  input,
+                                                  unsigned            symbol_index)
 {
   // Recalculate phase compensation if the center frequency has changed.
   double center_freq_Hz = next_center_freq_Hz.load(std::memory_order::memory_order_relaxed);
@@ -156,13 +144,6 @@ void ofdm_symbol_demodulator_impl::refresh_phase_compensation()
     phase_compensation_table = phase_compensation_lut(scs, cp, dft_size, center_freq_Hz, false);
     current_center_freq_Hz   = center_freq_Hz;
   }
-}
-
-void ofdm_symbol_demodulator_impl::fill_dft_input(span<cf_t>         dft_input,
-                                                  span<const ci16_t>  input,
-                                                  unsigned            symbol_index)
-{
-  refresh_phase_compensation();
 
   // Calculate cyclic prefix length.
   unsigned cp_len = cp.get_length(symbol_index, scs).to_samples(sampling_rate_Hz);
@@ -249,32 +230,11 @@ void ofdm_symbol_demodulator_impl::submit_symbol(resource_grid_writer& grid,
                                                  unsigned              slot)
 {
   ocudu_assert(slot < max_pipeline_depth, "Invalid pipeline slot {}.", slot);
-
-  // The transform input, and the grid write that rides the same dispatch: the engine reads the
-  // radio's int16 samples straight out of the buffer the upper layers filled (see
-  // dft_grid_write_params::time_samples), so NOTHING on the host touches the samples - the cyclic
-  // prefix is an offset and the int16 -> float scaling is one multiply in the kernel. When the
-  // engine refuses (the samples are not in a page-aligned allocation, or the symbol does not fit),
-  // the input is staged on the host as before, once per run: refresh_phase_compensation() keeps the
-  // per-symbol coefficient below correct whether or not fill_dft_input() ran.
-  refresh_phase_compensation();
-  bool device_write = false;
-  if (!time_input_failed && device_grid_write && (grid_write != nullptr)) {
-    device_write = submit_grid_write(grid, port_index, symbol_index, slot, input);
-    if (!device_write) {
-      time_input_failed = true;
-      ocudulog::fetch_basic_logger("PHY").warning(
-          "OFDM demodulator: the transform input cannot be read from the radio buffer; the samples are staged on the "
-          "host for this run");
-    }
-  }
+  fill_dft_input(dft->get_input().subspan(static_cast<size_t>(slot) * dft_size, dft_size), input, symbol_index);
 
   // The device grid write (when available) has to be encoded together with the transform, so it happens here and not in
   // finish_symbol(): the transform output never has to reach the host.
-  if (!device_write) {
-    fill_dft_input(dft->get_input().subspan(static_cast<size_t>(slot) * dft_size, dft_size), input, symbol_index);
-    device_write = submit_grid_write(grid, port_index, symbol_index, slot);
-  }
+  bool device_write = submit_grid_write(grid, port_index, symbol_index, slot);
   if (!device_write) {
     dft->run_async(slot);
   }

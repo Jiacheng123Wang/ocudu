@@ -106,26 +106,6 @@ public:
     float phase_im = 0.0F;
     /// Apply the per-element table published with set_grid_write_window().
     bool apply_window = false;
-
-    /// \name Transform input read straight from the radio's int16 buffer (see the kernel's input_params).
-    ///
-    /// When \c time_samples is not null the transform reads its input there instead of \c in, which
-    /// the caller then does not have to fill. The pointer is a SLICE of a page-aligned allocation
-    /// (the RX chain's baseband buffer, see baseband_gateway_buffer_dynamic_aligned): the engine
-    /// looks the allocation up in the process-wide registry and wraps THAT - one mapping for the
-    /// whole buffer, reused by every symbol - passing the slice's offset to the kernel. Wrapping the
-    /// per-symbol slice instead would ask the cache for a different length at every symbol, which is
-    /// the re-map the demapper's wrap_length() exists to avoid.
-    ///
-    /// submit_slot_grid_write() returns false when the samples do not belong to a registered
-    /// allocation, or when the slice (as \c time_window_start + the transform size) does not fit in
-    /// it: the caller then stages its input on the host, exactly as before this existed.
-    ///@{
-    const void* time_samples      = nullptr;
-    size_t      time_samples_bytes = 0;
-    uint32_t    time_window_start  = 0;
-    float       time_gain          = 1.0F;
-    ///@}
   };
 
   /// \brief Publishes the per-element compensation table of the grid write (one complex entry per transform element).

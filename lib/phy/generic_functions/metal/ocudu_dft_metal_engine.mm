@@ -40,11 +40,6 @@ struct dft_stats_t {
   std::atomic<uint64_t> waits{0};
   std::atomic<uint64_t> in_flight{0};
   std::atomic<uint64_t> in_flight_max{0};
-  /// Transforms whose input came straight from the radio's int16 buffer instead of the engine's
-  /// float2 ring (see grid_write::time_samples). Zero means every transform is staging its input on
-  /// the host - either the caller never asks for it, or the engine refused the samples and the
-  /// caller fell back, which it warns about once.
-  std::atomic<uint64_t> radio_inputs{0};
 };
 
 static dft_stats_t& dft_stats()
@@ -74,11 +69,10 @@ static void dft_stats_report()
 {
   const dft_stats_t& s = dft_stats();
   std::fprintf(stderr,
-               "[metal_stats] dft commits=%llu waits=%llu max_in_flight=%llu radio_inputs=%llu\n",
+               "[metal_stats] dft commits=%llu waits=%llu max_in_flight=%llu\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.radio_inputs.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)));
 }
 #else  // OCUDU_METAL_STATS
 static void dft_stats_commit() {}
@@ -157,25 +151,6 @@ struct dft_engine_impl {
   // Warm-up scratch (page-aligned, engine lifetime; freed by the destructor).
   void* warmup_mem = nullptr;
 };
-
-/// Reports a refused radio-input request ONCE and tells the caller to stage its own input.
-///
-/// Not an error: the caller (the OFDM demodulator) falls back to filling the engine's float2 ring,
-/// which is what it did before the input could come from the radio buffer. It is worth one warning
-/// because it means the zero-copy input is not happening for the whole run.
-bool refuse_time_input(dft_engine_impl* engine, const dft_metal_engine::grid_write& write, const char* reason)
-{
-  static bool warned = false;
-  if (!warned) {
-    warned = true;
-    ocudulog::fetch_basic_logger("PHY").warning(
-        "Metal DFT: the transform input cannot be taken from the radio buffer ({}); the caller stages it on the host",
-        reason);
-  }
-  (void)engine;
-  (void)write;
-  return false;
-}
 
 id<MTLBuffer> wrap_buffer(dft_engine_impl* engine, const void* ptr, size_t length)
 {
@@ -497,44 +472,6 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
     return false;
   }
 
-  // Input straight from the radio buffer (see grid_write::time_samples): the WHOLE allocation is
-  // wrapped - it is the same pointer and the same length for every symbol of the slot, so the
-  // mapping is created once - and the slice's offset travels to the kernel. A slice whose
-  // allocation is unknown, or that does not fit in it, is refused: the caller stages its own input.
-  struct {
-    uint32_t is_ci16;
-    uint32_t offset;
-    float    gain;
-    uint32_t pad;
-  } input   = {0u, 0u, 1.0F, 0u};
-  id<MTLBuffer> b_in16 = b_in; // a stand-in: the kernel only reads it when is_ci16 = 0
-  if (write.time_samples != nullptr) {
-    void*  alloc_base = nullptr;
-    size_t alloc_size = 0;
-    if (!compat::describe_aligned_allocation(write.time_samples, &alloc_base, &alloc_size)) {
-      return refuse_time_input(engine, write, "the samples are not in a page-aligned allocation");
-    }
-    const size_t offset_bytes = static_cast<size_t>(static_cast<const char*>(write.time_samples) -
-                                                    static_cast<const char*>(alloc_base));
-    const size_t end_bytes =
-        offset_bytes + std::max<size_t>(write.time_samples_bytes,
-                                        (static_cast<size_t>(write.time_window_start) + engine->n) * 2 * sizeof(int16_t));
-    if (end_bytes > alloc_size) {
-      return refuse_time_input(engine, write, "the symbol does not fit in the allocation");
-    }
-    id<MTLBuffer> b = wrap_buffer(engine, alloc_base, alloc_size);
-    if (b == nil) {
-      return refuse_time_input(engine, write, "wrapping the radio buffer failed");
-    }
-    b_in16        = b;
-    input.is_ci16 = 1u;
-    dft_stats().radio_inputs.fetch_add(1, std::memory_order_relaxed);
-    // The kernel reads from the ALLOCATION base it was handed, so the offset is the slice's own
-    // offset plus the window start within it (the cyclic prefix the transform skips).
-    input.offset = static_cast<uint32_t>(offset_bytes / (2 * sizeof(int16_t))) + write.time_window_start;
-    input.gain   = write.time_gain;
-  }
-
   id<MTLCommandBuffer>         cmd_buf = [dft_resources().queue commandBuffer];
   id<MTLComputeCommandEncoder> enc     = [cmd_buf computeCommandEncoder];
   [enc setComputePipelineState:dft_resources().pipeline];
@@ -545,18 +482,12 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   [enc setBytes:&engine->radix2 length:sizeof(uint32_t) atIndex:4];
   [enc setBytes:&engine->radix3 length:sizeof(uint32_t) atIndex:5];
   [enc setBytes:&engine->inverse length:sizeof(uint32_t) atIndex:6];
-  // Element offset of the transform within the input it reads: the ring slot when the input is the
-  // engine's float2 batch, and ZERO when it is the radio's buffer - that one holds this transform's
-  // samples alone (the RX chain dispatches one transform per symbol), so the slot index does not
-  // apply to it.
-  const uint32_t base = (input.is_ci16 != 0u) ? 0u : (slot * engine->n);
+  const uint32_t base = slot * engine->n;
   [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
   // The grid and its per-element table are only read when the write is active; Metal still requires every buffer the
   // kernel names to be bound, so the transform output and the twiddle table stand in when there is none.
   [enc setBuffer:b_grid offset:0 atIndex:8];
   [enc setBuffer:(engine->buf_window != nil ? engine->buf_window : engine->buf_tw) offset:0 atIndex:9];
-  [enc setBuffer:b_in16 offset:0 atIndex:11];
-  [enc setBytes:&input length:sizeof(input) atIndex:12];
 
   struct {
     uint32_t active;
@@ -619,16 +550,6 @@ bool dft_metal_engine::submit_at(
   [enc setBytes:&engine->inverse length:sizeof(uint32_t) atIndex:6];
   const uint32_t base = first_slot * engine->n;
   [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
-  // The kernel names the radio-input arguments, so every dispatch has to bind them: the float2 input
-  // stands in for the int16 one and the flag is off, which is exactly the pre-S-7f-6c behaviour.
-  const struct {
-    uint32_t is_ci16;
-    uint32_t offset;
-    float    gain;
-    uint32_t pad;
-  } input = {0u, 0u, 1.0F, 0u};
-  [enc setBuffer:b_in offset:0 atIndex:11];
-  [enc setBytes:&input length:sizeof(input) atIndex:12];
   [enc dispatchThreadgroups:MTLSizeMake(nof_transforms, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
   [enc endEncoding];
