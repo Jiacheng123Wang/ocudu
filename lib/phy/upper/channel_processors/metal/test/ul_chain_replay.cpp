@@ -67,6 +67,8 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <set>
+#include <tuple>
 #include <vector>
 
 using namespace ocudu;
@@ -304,6 +306,7 @@ int main(int argc, char** argv)
       size_t   size;
     };
     std::vector<entry_t> entries;
+    std::set<std::tuple<unsigned, unsigned, unsigned>> seen_transforms;
     {
       std::string line;
       while (std::getline(list, line)) {
@@ -321,6 +324,16 @@ int main(int argc, char** argv)
           if (name == "symbol") entry.symbol = value;
           if (name == "port") entry.port = value;
           if (name == "size") entry.size = value;
+        }
+        // One entry per (slot, symbol, port), the FIRST one recorded: the capture appends the
+        // symbols of a slot every time its slot number comes round again (the counter wraps), so a
+        // long recording of four slots holds each of them several times over, with different
+        // samples. Replaying those as if they were one slot wrote every grid symbol twice and made
+        // the per-slot dump meaningless - the two rounds are different transmissions and only the
+        // first belongs to the slot this capture is about.
+        const auto key_slot = std::make_tuple(entry.slot, entry.symbol, entry.port);
+        if (!seen_transforms.insert(key_slot).second) {
+          continue;
         }
         entries.push_back(entry);
       }
