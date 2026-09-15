@@ -15,8 +15,67 @@
 #include "ocudu/phy/lower/processors/uplink/puxch/puxch_processor_baseband.h"
 #include "ocudu/phy/lower/processors/uplink/uplink_processor_notifier.h"
 #include "ocudu/support/math/stats.h"
+#include <atomic>
+#include <cstdio>
 
 using namespace ocudu;
+
+namespace {
+
+/// \brief Host passes over the uplink samples that the CFO compensation still makes.
+///
+/// The compensation is the last step of the IQ -> LLR chain that converts every sample on the host
+/// (int16 -> float -> int16 around the complex multiply). It only runs when an offset is in effect, so
+/// a run whose round-trip count is zero is a run in which the samples went from the radio to the PRACH
+/// and the PUxCH processors untouched - the contract the GPU pipeline mode has to satisfy (see
+/// [ul_cfo]). A non-zero count with a non-zero offset is the NTN / `cfo` console case, where the
+/// samples still have to be compensated for both consumers: that is the hard constraint the plan
+/// names.
+///
+/// Compiled out - both the counters and the report - when the statistics probe is off, which is every
+/// non-Apple-Silicon build.
+class cfo_stats
+{
+#if defined(OCUDU_METAL_STATS)
+  /// Symbols whose samples went through the round trip. Only symbols that were compensated reach it,
+  /// so a zero count is the zero-glue state the GPU pipeline mode is supposed to be in.
+  std::atomic<uint64_t> round_trips{0};
+  /// Symbols processed, so a zero round-trip count can be told from "nothing ran".
+  std::atomic<uint64_t> symbols{0};
+#endif
+
+public:
+#if defined(OCUDU_METAL_STATS)
+  void count_round_trip() { round_trips.fetch_add(1, std::memory_order_relaxed); }
+  void count_symbol() { symbols.fetch_add(1, std::memory_order_relaxed); }
+
+  /// Reports once at exit (the counters are a function-local static, see cfo_counters()). Silent when
+  /// no symbol was processed, so the tools that merely link this library print nothing.
+  ~cfo_stats()
+  {
+    uint64_t nof_symbols = symbols.load(std::memory_order_relaxed);
+    if (nof_symbols == 0) {
+      return;
+    }
+    std::fprintf(stderr,
+                 "[ul_cfo] symbols=%llu round_trips=%llu\n",
+                 static_cast<unsigned long long>(nof_symbols),
+                 static_cast<unsigned long long>(round_trips.load(std::memory_order_relaxed)));
+  }
+#else
+  void count_round_trip() {}
+  void count_symbol() {}
+#endif
+};
+
+/// Counters of this process, reported once at exit.
+cfo_stats& cfo_counters()
+{
+  static cfo_stats s;
+  return s;
+}
+
+} // namespace
 
 lower_phy_uplink_processor_impl::lower_phy_uplink_processor_impl(std::unique_ptr<prach_processor> prach_proc_,
                                                                  std::unique_ptr<puxch_processor> puxch_proc_,
@@ -220,18 +279,30 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
     return;
   }
 
-  // View over the temporary float-based complex samples for CFO processor.
-  span<cf_t> view;
-  // Perform carrier frequency offset compensation.
-  for (unsigned i_channel = 0; i_channel != symbol_buffer.get_nof_channels(); ++i_channel) {
-    // The CFO compensation is not currently supported for 16-bit complex integer samples. So, it must convert it to
-    // single-precision complex floating-point samples.
-    span<ci16_t> channel_buffer = symbol_buffer.get_writer().get_channel_buffer(i_channel);
-    view                        = temp_cf_buffer.get_view({i_channel}).subspan(0, channel_buffer.size());
-    ocuduvec::convert(view, channel_buffer, ocuduvec::scaling_factor_ci16_to_cf);
-    cfo_processor.process(view);
-    ocuduvec::convert(channel_buffer, view, ocuduvec::scaling_factor_cf_to_ci16);
+  // Carrier frequency offset compensation.
+  //
+  // The processor only modifies the samples when it has an offset to apply. While it has none - its
+  // state until something schedules a command (NTN Doppler compensation or the `cfo` console command,
+  // see the RU controller) - the only thing left of this pass would be the int16 -> float -> int16
+  // round trip, and that round trip is the exact identity (float(x) / 32767 * 32767 rounds back to x
+  // for every int16, see baseband_cfo_processor_test). Skipping it hands the PRACH and the PUxCH
+  // processors the samples exactly as the radio delivered them, byte for byte, and removes two host
+  // passes over every sample of the uplink.
+  if (cfo_processor.applies_compensation()) {
+    cfo_counters().count_round_trip();
+    // View over the temporary float-based complex samples for CFO processor.
+    span<cf_t> view;
+    for (unsigned i_channel = 0; i_channel != symbol_buffer.get_nof_channels(); ++i_channel) {
+      // The CFO compensation is not currently supported for 16-bit complex integer samples. So, it must convert it to
+      // single-precision complex floating-point samples.
+      span<ci16_t> channel_buffer = symbol_buffer.get_writer().get_channel_buffer(i_channel);
+      view                        = temp_cf_buffer.get_view({i_channel}).subspan(0, channel_buffer.size());
+      ocuduvec::convert(view, channel_buffer, ocuduvec::scaling_factor_ci16_to_cf);
+      cfo_processor.process(view);
+      ocuduvec::convert(channel_buffer, view, ocuduvec::scaling_factor_cf_to_ci16);
+    }
   }
+  cfo_counters().count_symbol();
 
   // Advance CFO processor number of samples.
   cfo_processor.advance(symbol_buffer.get_nof_samples());

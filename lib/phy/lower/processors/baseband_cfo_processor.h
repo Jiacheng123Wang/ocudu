@@ -73,11 +73,21 @@ public:
   /// Increments the CFO sample offset by a number of samples.
   void advance(unsigned nof_samples) { sample_offset += nof_samples; }
 
+  /// \brief Whether \ref process() would modify the samples it is given.
+  ///
+  /// False while no usable offset is in effect: the processor's initial state, and what a scheduled
+  /// command of 0 Hz leaves behind. Callers use it to skip the int16 -> float -> int16 round trip
+  /// they wrap around \ref process(): with no offset to apply that round trip would be the only
+  /// thing happening to the samples, and it is the exact identity (float(x) / 32767 * 32767 rounds
+  /// back to x for every int16 - see baseband_cfo_processor_test), so skipping it leaves the samples
+  /// exactly as the radio delivered them.
+  bool applies_compensation() const { return std::isnormal(current_cfo); }
+
   /// Applies carrier frequency offset in-place to a baseband buffer.
   void process(span<cf_t> buffer) const
   {
     // Skip CFO process if the current CFO is zero, NaN or infinity.
-    if (!std::isnormal(current_cfo)) {
+    if (!applies_compensation()) {
       return;
     }
 
