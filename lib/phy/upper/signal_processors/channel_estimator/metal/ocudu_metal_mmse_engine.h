@@ -349,6 +349,11 @@ public:
   /// exhausted); here every call commits immediately and at most one is outstanding.
   ///
   /// \return False when the encoding failed and nothing was submitted.
+  /// \param corr When non-null, the correlation build is encoded as a PREFIX of this same command
+  ///             buffer, before K1. That is only correct when the SLOTS ARE LEFT HOLDING A (the
+  ///             device-inversion route): the prefix writes A and R_hp on the device, and the host
+  ///             does not touch either afterwards. When the host is the inverter it has to read the
+  ///             device's A between the two, so it keeps calling build_correlation() standalone.
   bool run_async(float*       a,
                  const float* r_hp,
                  float*       w,
@@ -358,7 +363,8 @@ public:
                  unsigned     L,
                  unsigned     nof_systems,
                  unsigned     nof_blocks,
-                 const reformat_stage* reformat = nullptr);
+                 const reformat_stage* reformat = nullptr,
+                 const corr_stage*     corr     = nullptr);
 
   /// \brief Waits for the submission of run_async() and reports whether it completed.
   /// \return True when there was nothing pending, or when the pending submission succeeded.

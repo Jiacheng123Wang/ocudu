@@ -972,7 +972,8 @@ bool mmse_engine::run_async(float*       a,
                             unsigned     L,
                             unsigned     nof_systems,
                             unsigned     nof_blocks,
-                            const reformat_stage* reformat)
+                            const reformat_stage* reformat,
+                            const corr_stage*     corr)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
@@ -1017,6 +1018,20 @@ bool mmse_engine::run_async(float*       a,
   // in the device-correlation A/B at order 54 it produced an inverse ~1e8 times the correct one
   // (the blocked K1 gives 353.2758 against the host's 353.2786 - see ocudu_mmse_inv.metal). It
   // stays behind OCUDU_INV_RL=1 until its defect is found; the blocked kernel is the default.
+  // K0-d as a PREFIX of this buffer (S-7f-5p): the device builds A and R_hp here, K1 inverts A in
+  // place right after, and nothing on the host ever reads or writes either - which is exactly the
+  // device-inversion route. Everything before this point in the buffer is what the engine does
+  // anyway. A failure is caught at ENCODE time, before the commit, so the caller can fall back
+  // without a half-submitted batch (see run_weights_only()'s identical prefix).
+  if (corr != nullptr) {
+    if (!encode_corr(e, enc, *corr, nof_systems)) {
+      [enc endEncoding];
+      return false;
+    }
+    // Same encoder: the correlation writes must be visible to K1's reads.
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+  }
+
   const bool use_rl = (e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr);
   [enc setComputePipelineState:use_rl ? e->inv_rl_pipe : e->inv_pipe];
   [enc setBuffer:a_buf offset:0 atIndex:0];

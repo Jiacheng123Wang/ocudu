@@ -267,6 +267,9 @@ private:
   ///                  standard+tail path - the one every wide hop takes, and the only path the air
   ///                  interface exercises - into a synchronous wait (~280us per hop), because that
   ///                  call site omitted the argument while the unpack beside it used the flag.
+  /// \param corr K0-d descriptor to encode as a PREFIX of the engine's own command buffer, or
+  ///             nullptr. Only valid when the slots are left holding A (the device-inversion
+  ///             route); see mmse_engine::run_async() for why.
   bool engine_run(const metal::mmse_engine::corr_stage*      corr,
                   unsigned                                 nout,
                   unsigned                                 L,

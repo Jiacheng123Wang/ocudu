@@ -1743,8 +1743,17 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
   const bool engine_ok =
       matrix ? engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_systems, nof_blocks)
              : (k1_inline
-                    ? (defer ? engine->run_async(
-                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat)
+                    ? (defer ? engine->run_async(gpu_a,
+                                                 gpu_r_hp,
+                                                 gpu_w,
+                                                 gpu_y,
+                                                 gpu_h,
+                                                 nout,
+                                                 L,
+                                                 nof_systems,
+                                                 nof_blocks,
+                                                 reformat,
+                                                 corr)
                              : engine->run(
                                    gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat))
                     : (defer ? engine->run_weights_only_async(
@@ -1954,6 +1963,12 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   // K0-d: the device builds A and R_hp of this batch. The RETURN VALUE is the success flag (never a
   // descriptor, see the header).
   bool device_built = false;
+  // K0-d as a prefix of the engine's own command buffer. From the truth table (S-7f-5j) that is
+  // correct in exactly ONE cell: the device builds AND the device inverts, because that is the only
+  // route on which the host neither reads nor writes A or R_hp between the two command buffers. The
+  // other three keep the standalone build - with a host inversion the host must read the device's A
+  // to invert it in place, so the build has to complete first.
+  std::optional<metal::mmse_engine::corr_stage> corr_prefix;
   if (device_stats != nullptr) {
     // DM-RS slot symbols, rebuilt from the stage's own pattern: this function works from the block
     // geometry (npt), while the descriptor needs the slot INDICES (the time correlation depends on
@@ -1962,7 +1977,24 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
     args.pattern_symbols.for_each(args.first_symbol, args.last_symbol, [&](unsigned s) { dmrs_slots.push_back(s); });
     // The device build writes the L x L / nout x L blocks with the SLOT strides (st.L / st.nout), so
     // the batch's matrices land exactly where the host staging and every consumer expect them.
-    device_built = build_slots_on_device(*device_stats,
+    if (gpu_invert) {
+      unsigned nout_c = 0;
+      unsigned L_c    = 0;
+      corr_prefix     = correlation_stage(*device_stats,
+                                      args.dmrs_patterns.front().re_pattern,
+                                      b_prb,
+                                      span<const unsigned>(dmrs_slots.begin(), dmrs_slots.size()),
+                                      scs_to_khz(args.scs),
+                                      sys_offset,
+                                      nout_c,
+                                      L_c,
+                                      st.L,
+                                      st.nout);
+      // The slots WILL hold A and R_hp: the device writes them in this batch's command buffer, so
+      // the host must not stage them (it would race the device).
+      device_built = true;
+    } else {
+      device_built = build_slots_on_device(*device_stats,
                                          args.dmrs_patterns.front().re_pattern,
                                          b_prb,
                                          span<const unsigned>(dmrs_slots.begin(), dmrs_slots.size()),
@@ -1970,9 +2002,10 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                                          sys_offset,
                                          nof_layers,
                                          st.L,
-                                         st.nout,
-                                         L,
-                                         gpu_invert);
+                                           st.nout,
+                                           L,
+                                           gpu_invert);
+    }
   }
   // The host staging runs EXACTLY when the device did not fill these slots: A and R_hp are written
   // together (see stage_engine_group()). The extra stride test is what makes the device build
@@ -2003,7 +2036,15 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   // independent (a device build happens whether or not the device also inverts), so the staging was
   // told to leave A in the slots while the engine call was told the slots held A^-1 - the weights
   // then read a raw A (SINR 24 -> 5.4 dB).
-  if (!engine_run(nullptr, nout, L, nof_layers, n_blk, matrix, gpu_invert, reformat, deferred)) {
+  if (!engine_run(corr_prefix.has_value() ? &corr_prefix.value() : nullptr,
+                  nout,
+                  L,
+                  nof_layers,
+                  n_blk,
+                  matrix,
+                  gpu_invert,
+                  reformat,
+                  deferred)) {
     return false;
   }
   if (deferred) {
