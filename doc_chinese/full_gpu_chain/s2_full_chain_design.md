@@ -8138,3 +8138,54 @@ K0-a 设备内核 ──直接写──> gpu_y（legacy 布局）/ gpu_qy（matr
 离线：四条门禁全部（`k0d` 逐字节尤其关键——它比的是设备建矩阵两条路线的**全部发布字节**）；
 **新增可观测判据**：`[mmse_time_sum] stage` 应从 ~1.9 µs 降到 ~0，`mean total` 再降；
 上机：`cbs/lane` 不变（3.00）、失败率不劣于基线、0 崩溃/0 USB 错误、`zero-copy` 告警 0。
+
+#### 48.124 胶水 #2 的**代码形态**（已把映射关系核实到可直接施工，仍未动代码）
+
+**（a）映射关系（复核自 `stage_engine_group()` 的 legacy 分支）**
+```
+yp = gpu_y + (sys_offset + i_layer) * st.n_blk * 2 * st.L + b * 2 * st.L
+yp[2*(i_symbol*npf + j)] = pilots_lse_view.get_symbol(i_symbol, i_layer)[ (gb_start + b*b_prb)*comb + j ]
+```
+⇒ 从**跳内导频序号** `p` 到 y 位置的映射是纯代换：
+```
+b = (p - gb_start*comb) / npf ,  j = (p - gb_start*comb) % npf ,  npf = b_prb * comb
+```
+（标准组 `gb_start = 0`；尾块 `gb_start = n_std_blocks*block_prb`。）
+
+**（b）接入点选在 `stage_engine_group()`，不是 K0-a 的块里**
+理由：**只有那里同时握有** `st` / `gb_start` / `b_prb` / `npf` / `sys_offset`。
+K0-a 的块（`apply_fd_td_estimation_stage` 顶部）拿不到这些，硬塞会把几何算两遍。
+
+**（c）新增一个 scatter 内核就好，不必改 K0-a 的索引**
+```metal
+// lse 是跳内布局 [symb][layer][pilot]（K0-a 已产出）；本内核只做重新索引，不做算术
+kernel void mmse_pilots_scatter_y(device const float* lse [[buffer(0)]],
+                                  device float*       y   [[buffer(1)]],
+                                  constant ...&       p   [[buffer(2)]],
+                                  uint2 gid [[thread_position_in_grid]])
+// gid.x = 跳内导频序号 p (0..nof_pilots), gid.y = i_layer
+// 目标：y[(sys_offset + gid.y)*n_blk*2*Ls + b*2*Ls + 2*(i_symb*npf + j)]
+```
+参数需要：`nof_pilots`、`nof_dmrs_symb`、`nof_layers`、`npf`、`gb_start_comb`（= `gb_start*comb`）、
+`n_blk`、`Ls`(=st.L)、`sys_offset`。
+**只有重新索引、无浮点运算 ⇒ 逐位一致是构造性的**（与 §48.110 的判据一致，也更容易验证）。
+
+**（d）接入与回退**
+1. 设备 LSE 成功时置一个**成员标志**（如 `device_ls_ready`），供 `stage_engine_group()` 判断；
+2. `stage_engine_group()` 的 legacy 分支：标志为真 ⇒ **派发 scatter 内核**，跳过主机 memcpy；
+   否则**照旧**走主机循环（回退）；
+3. **matrix 分支（`gpu_qy`）本步不动** —— 四元交错布局另需一次映射，且 matrix 是 A/B flavor；
+   为它保留主机 staging，并在代码里写明这是**有意保留**而非遗漏。
+
+**（e）本步**不**做**：删掉主机那次 pre-stage 重算（`pilots_lse_view` 仍被 `estimate_sigma2` 与
+RSRP 统计读取，见 §48.123(c) 第 6 条）。
+
+**（f）判据**
+- 离线：`k0d` **980/980 逐字节**（这条最关键：它比的是两条路线的**全部发布字节**）、`k1` 980/980、
+  `combos` 10/10、单测 16 PASS / 0 FAIL、`ctest -L phy` 162/162；
+- **新可观测**：`[mmse_time_sum] stage` 应从 ~1.9 µs 降到 ~0（主机不再拷 y）；
+- 上机：`cbs/lane` 不变或 +1（多一次 scatter dispatch 但仍是同一条 CB）、失败率不劣于基线 0.1148%、
+  0 崩溃 / 0 USB 错误、`zero-copy` 告警 0、`device_corr_builds>0`。
+
+**（g）新会话的第一步**：读本节 + §48.123 + §48.107，按 (c) 写内核、按 (d) 接入、跑 (f) 的离线判据，
+**然后停下来交用户做手机 OTA**。
