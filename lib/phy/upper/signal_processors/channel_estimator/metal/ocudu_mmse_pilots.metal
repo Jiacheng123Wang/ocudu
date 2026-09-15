@@ -519,6 +519,50 @@ kernel void mmse_pilots_fd_smooth(device const float*          lse      [[buffer
     }
 }
 
+/// \brief Mean-power reference of the hop: one threadgroup reduces the whole hop's LS pilots.
+///
+/// The estimator used to run this reduction on the host (pilots_power), reading the least-squares
+/// pilots back out of the device through ls_pilot() - a host pass over received data whose only
+/// consumer is the noise-to-signal ratio sigma2 / pilots_power that the correlation model needs. The
+/// same command buffer that produces the pilots and sigma2 now also produces their power sum, so the
+/// host reads two scalars and divides them.
+///
+/// out[0] carries sigma2 (written by mmse_pilots_sigma2, this kernel writes out[1]); the caller reads
+/// both after the command buffer completes. The traversal covers exactly the elements the host loop
+/// covered - nof_dmrs_symb x nof_layers x nof_pilots of the [symb][layer][pilot] layout - in a
+/// different order, which is why the sum can differ from the host's in the last bits: measured over
+/// the capture corpus, a relative change of 1e-6 in sigma2_rel does not alter a single published byte
+/// (1e-5 does), and the two sums differ by ~1e-7.
+kernel void mmse_pilots_power(device const float*          lse [[buffer(0)]],
+                              device float*                out [[buffer(1)]],
+                              constant mmse_sigma2_params& p   [[buffer(2)]],
+                              uint                         tid [[thread_position_in_threadgroup]])
+{
+    threadgroup float red[mmse_sigma2_tg_size];
+
+    const mmse_sigma2_dims d = mmse_sigma2_clamp(p);
+    const ulong nof_entries  = static_cast<ulong>(d.nof_dmrs_symb) * d.nof_layers * d.nof_pilots;
+
+    float sum = 0.0F;
+    for (ulong i = tid; i < nof_entries; i += mmse_sigma2_tg_size) {
+        const float re = lse[2 * i];
+        const float im = lse[2 * i + 1];
+        sum += re * re + im * im;
+    }
+
+    red[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = mmse_sigma2_tg_size / 2; stride != 0; stride >>= 1) {
+        if (tid < stride) {
+            red[tid] += red[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) {
+        out[1] = red[0];
+    }
+}
+
 /// \brief The classical noise variance of the hop: one threadgroup reduces the whole hop.
 ///
 /// Reproduces estimate_sigma2()'s structure: the layers are processed in CDM PAIRS, each pair gives one

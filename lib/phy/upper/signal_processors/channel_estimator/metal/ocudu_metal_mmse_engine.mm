@@ -257,6 +257,8 @@ struct mmse_engine_impl {
   // its own so that a metallib without them keeps the host's estimate_sigma2().
   id<MTLComputePipelineState>    pilots_smooth_pipe = nil;
   id<MTLComputePipelineState>    pilots_sigma2_pipe = nil;
+
+  id<MTLComputePipelineState>    pilots_power_pipe   = nil;
   // Glue #2: the device writes the engine's pilot vectors out of K0-a's output (optional, same
   // metallib - a metallib without it simply keeps the host staging).
   id<MTLComputePipelineState>    pilots_scatter_pipe = nil;
@@ -637,6 +639,9 @@ bool mmse_engine::init(const char* metallib_path)
     }
     id<MTLFunction> smooth_fn = [e->library newFunctionWithName:@"mmse_pilots_fd_smooth"];
     id<MTLFunction> sigma2_fn = [e->library newFunctionWithName:@"mmse_pilots_sigma2"];
+    // The pilots' power sum rides the sigma2 block (it reduces the same pilots), so a metallib
+    // without it simply does not offer the second scalar and the host keeps its own reduction.
+    id<MTLFunction> power_fn = [e->library newFunctionWithName:@"mmse_pilots_power"];
     if (smooth_fn != nil && sigma2_fn != nil) {
       e->pilots_smooth_pipe = [e->device newComputePipelineStateWithFunction:smooth_fn
                                                                      options:MTLPipelineOptionNone
@@ -646,6 +651,12 @@ bool mmse_engine::init(const char* metallib_path)
                                                                      options:MTLPipelineOptionNone
                                                                   reflection:nil
                                                                        error:&err];
+      if (power_fn != nil) {
+        e->pilots_power_pipe = [e->device newComputePipelineStateWithFunction:power_fn
+                                                                     options:MTLPipelineOptionNone
+                                                                  reflection:nil
+                                                                       error:&err];
+      }
     }
   }
 
@@ -774,7 +785,9 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     filt_buf     = e->wrap(s.fd_filter,
                            (s.fd_filter_bytes != 0) ? s.fd_filter_bytes : s.fd_filter_len * sizeof(float));
     rx_buf       = e->wrap(s.rx_pilots, s.rx_bytes);
-    sigma2_buf   = e->wrap(s.sigma2, sizeof(float));
+    // Two floats: [0] the noise variance, [1] the pilots' power sum (see mmse_pilots_power). Wrapped
+    // with its full length here and nowhere else, so the cache never sees a larger request later.
+    sigma2_buf   = e->wrap(s.sigma2, 2 * sizeof(float));
     if ((smoothed_buf == nil) || (filt_buf == nil) || (rx_buf == nil) || (sigma2_buf == nil)) {
       return false;
     }
@@ -867,6 +880,17 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     [enc setBytes:&q length:sizeof(q) atIndex:6];
     // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (its reduction tree is written for it).
     [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+    // The pilots' mean power rides the same block: out[1] of the same buffer the sigma2 kernel wrote
+    // out[0] of, so the host reads both scalars after the wait (see mmse_pilots_power).
+    if (e->pilots_power_pipe != nil) {
+      [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+      [enc setComputePipelineState:e->pilots_power_pipe];
+      [enc setBuffer:lse_buf offset:0 atIndex:0];
+      [enc setBuffer:sigma2_buf offset:0 atIndex:1];
+      [enc setBytes:&q length:sizeof(q) atIndex:2];
+      [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    }
   }
 
   [enc endEncoding];

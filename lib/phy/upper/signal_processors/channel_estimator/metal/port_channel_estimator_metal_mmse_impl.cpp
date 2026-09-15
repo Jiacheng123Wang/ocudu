@@ -283,7 +283,9 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // S-7f-5w: the frequency-smoothed copy of the hop's pilots and the noise variance the device
   // leaves behind. Both are read in the SAME command buffer that produces the LSE.
   gpu_ls_smoothed = alloc_aligned<float>(k_ls_floats);
-  gpu_ls_sigma2   = alloc_aligned<float>(1);
+  // Two floats: [0] the noise variance, [1] the sum of the hop's |LS pilot|^2 (see the host's
+  // pilots_power and mmse_pilots_power).
+  gpu_ls_sigma2   = alloc_aligned<float>(2);
 
   // Glue #2 (S-7f-5u): the DEVICE writes the engine's pilot vectors y out of the pilots it just
   // produced (gpu_ls_out), which removes the host's copy of them into the y slots - the last CPU
@@ -1009,18 +1011,41 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // returns the residual in that domain, so this is the reference that turns sigma2 into the
   // noise-to-signal ratio the unit-normalized correlation model needs. It is a reduction over the
   // device's own pilots when the device built them (no copy, see ls_pilot()).
+  const size_t nof_power_pilots =
+      static_cast<size_t>(nof_layers) * args.nof_dmrs_symbols * args.nof_symbol_pilots;
   float pilots_power = 0.0F;
-  {
-    size_t nof_power_pilots = 0;
+  if (device_sigma2_valid && device_sigma2_enabled && (nof_power_pilots != 0)) {
+    // The device reduced the pilots it extracted (mmse_pilots_power rides the sigma2 block), so the
+    // host turns the sum into the mean instead of reading every pilot back: the loop below is the
+    // fallback for the routes without a device reduction (no device LSE, OCUDU_CE_DEV_SIGMA2=0, or a
+    // metallib without the kernel), and the tolerance probe's reference.
+    pilots_power = gpu_ls_sigma2[1] / static_cast<float>(nof_power_pilots);
+  }
+  if (!(device_sigma2_valid && device_sigma2_enabled) || (std::getenv("OCUDU_CE_PP_CHECK") != nullptr)) {
+    float host_pilots_power = 0.0F;
     for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
       for (unsigned i_symbol = 0; i_symbol != args.nof_dmrs_symbols; ++i_symbol) {
         for (unsigned j = 0; j != args.nof_symbol_pilots; ++j) {
-          pilots_power += std::norm(ls_pilot(args, i_symbol, i_layer, j, /*scaled=*/false));
+          host_pilots_power += std::norm(ls_pilot(args, i_symbol, i_layer, j, /*scaled=*/false));
         }
-        nof_power_pilots += args.nof_symbol_pilots;
       }
     }
-    pilots_power = (nof_power_pilots == 0) ? 0.0F : pilots_power / static_cast<float>(nof_power_pilots);
+    host_pilots_power =
+        (nof_power_pilots == 0) ? 0.0F : host_pilots_power / static_cast<float>(nof_power_pilots);
+    if (std::getenv("OCUDU_CE_PP_CHECK") != nullptr) {
+      // Tolerance probe (like OCUDU_CE_SIGMA2_CHECK): the two reductions differ only in their
+      // summation order, so the difference is expected in the last bits, not in kind.
+      const double rel = (host_pilots_power != 0.0F)
+                             ? (static_cast<double>(pilots_power) - host_pilots_power) / host_pilots_power
+                             : 0.0;
+      std::fprintf(stderr,
+                   "[pp_check] dev=%.9e host=%.9e rel=%.3e device=%d\n",
+                   static_cast<double>(pilots_power),
+                   static_cast<double>(host_pilots_power),
+                   rel,
+                   (device_sigma2_valid && device_sigma2_enabled) ? 1 : 0);
+    }
+    pilots_power = host_pilots_power;
   }
 
   // The DATA domain is what the estimator publishes (and what the equalizer and the demapper
@@ -1050,7 +1075,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                  rel,
                  device_sigma2_valid ? 1 : 0);
   }
-  const float sigma2_rel   = sigma2 / std::max(pilots_power, 1e-30F);
+  float sigma2_rel_perturbed = sigma2 / std::max(pilots_power, 1e-30F);
+  // TEMPORARY EXPERIMENT: does a relative change of the size a device-side reduction would introduce
+  // (tree summation instead of the host's sequential one, ~1e-7 in float) reach the published dumps?
+  if (const char* pert = std::getenv("OCUDU_CE_PP_PERTURB"); pert != nullptr) {
+    sigma2_rel_perturbed *= (1.0F + static_cast<float>(std::strtod(pert, nullptr)));
+  }
+  const float sigma2_rel = sigma2_rel_perturbed;
   // Rate-limited diagnostic (OCUDU_CE_DEBUG=1): an absolute sigma2 makes the MMSE weights - and
   // with them the channel estimates and the equalizer's noise variance that scales the soft bits -
   // follow the input level instead of the SNR. One line every 1000 hops.

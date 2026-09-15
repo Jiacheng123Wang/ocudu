@@ -220,9 +220,12 @@ public:
     /// estimated from, and the LSE itself must survive (the weights' y vectors are built from it
     /// later, in the engine's own command buffer).
     float* smoothed = nullptr;
-    /// Destination of the hop's noise variance (a single float), or nullptr to skip it. When set, the
-    /// two extra dispatches below ride THIS command buffer, so the host reads one float after the
-    /// wait instead of running estimate_sigma2() - measured 3.3 us per hop of host time on air.
+    /// Destination of the hop's noise variance and of the pilots' power sum (TWO floats: [0] sigma2,
+    /// [1] the sum of |LS pilot|^2), or nullptr to skip both. When set, the extra dispatches below
+    /// ride THIS command buffer, so the host reads two scalars after the wait instead of running
+    /// estimate_sigma2() (measured 3.3 us per hop of host time on air) and of walking the pilots for
+    /// their mean power. The power sum is skipped - and left untouched - whenever this whole block is
+    /// (see sigma2_done).
     float* sigma2 = nullptr;
     /// \brief Set by build_pilots_lse() to whether it actually encoded the noise-variance stage.
     ///
