@@ -771,7 +771,8 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   id<MTLBuffer> sigma2_buf   = nil;
   if (sigma2_ok) {
     smoothed_buf = e->wrap(s.smoothed, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
-    filt_buf     = e->wrap(s.fd_filter, s.fd_filter_len * sizeof(float));
+    filt_buf     = e->wrap(s.fd_filter,
+                           (s.fd_filter_bytes != 0) ? s.fd_filter_bytes : s.fd_filter_len * sizeof(float));
     rx_buf       = e->wrap(s.rx_pilots, s.rx_bytes);
     sigma2_buf   = e->wrap(s.sigma2, sizeof(float));
     if ((smoothed_buf == nil) || (filt_buf == nil) || (rx_buf == nil) || (sigma2_buf == nil)) {

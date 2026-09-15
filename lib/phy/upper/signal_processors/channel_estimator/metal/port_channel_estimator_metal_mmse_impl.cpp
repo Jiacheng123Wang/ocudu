@@ -790,6 +790,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       st.smoothed          = gpu_ls_smoothed;
       st.sigma2            = device_sigma2_enabled ? gpu_ls_sigma2 : nullptr;
       st.fd_filter         = fd_filter.data();
+      st.fd_filter_bytes   = sizeof(fd_filter);
       st.fd_filter_len     = fd_filter_len;
       st.nof_v_pilots      = nof_v_pilots;
       st.nof_cdm           = staged_cdm_groups;

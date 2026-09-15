@@ -235,9 +235,16 @@ public:
     bool* sigma2_done = nullptr;
     /// Raised-cosine coefficients of the frequency-domain smoothing (a host-side table, geometry
     /// only) and how many virtual pilots each edge takes. They belong to the smoothing alone.
-    const float* fd_filter     = nullptr;
-    unsigned     fd_filter_len = 0;
-    unsigned     nof_v_pilots  = 0;
+    const float* fd_filter = nullptr;
+    /// CAPACITY of \c fd_filter in bytes - not this hop's filter length.
+    ///
+    /// Same reason as \c buf_bytes: the filter is a fixed host array whose used length follows the
+    /// grant width (11 / 21 / 31 for 1 / 2 / 3 or more allocated PRB), so wrapping the per-hop
+    /// length makes one array look like a growing buffer as soon as a wide grant follows a narrow
+    /// one, and the engine re-wraps it (a warning, plus a new Metal object over the same memory).
+    std::size_t fd_filter_bytes = 0;
+    unsigned    fd_filter_len   = 0;
+    unsigned    nof_v_pilots    = 0;
     /// CDM groups of the hop (the received pilots are indexed by group, the layers are paired).
     unsigned nof_cdm = 0;
     /// DM-RS to data amplitude scaling (the classical noise estimator scales by beta / nof_dmrs_symb),

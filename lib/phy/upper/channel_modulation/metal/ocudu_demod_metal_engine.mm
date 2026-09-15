@@ -194,9 +194,59 @@ size_t noise_span_bytes(const demod_params_t& p)
   return (static_cast<size_t>(p.nof_symbols - 1) * p.nv_stride + p.nof_re) * sizeof(float);
 }
 
+/// Bytes the dispatch writes to the LLR array, from its first OFDM symbol to the last.
+///
+/// \c llr_stride is already a byte count - the kernel reaches the symbol through
+/// \c llrs_base + y * llr_stride on a \c char* (see ocudu_demod.metal) - so only the run of bits of
+/// the last symbol is scaled by the modulation order. Scaling the stride as well (as this did until
+/// S-7f-5x) overstates the span by the modulation order (2x to 8x): the request then exceeded the
+/// buffer's allocation by that factor and the wrap cache re-mapped the buffer on every run whose
+/// geometry changed, which is the "one replace per hop" the [metal_stats] wrap accounting reported.
 size_t llr_span_bytes(const demod_params_t& p)
 {
-  return (static_cast<size_t>(p.nof_symbols - 1) * p.llr_stride + p.nof_re) * bits_per_symbol_of(p.mod);
+  return (static_cast<size_t>(p.nof_symbols - 1) * p.llr_stride) +
+         (static_cast<size_t>(p.nof_re) * bits_per_symbol_of(p.mod));
+}
+
+/// \brief Length the no-copy mapping of \p ptr must cover for a run whose arrays reach \p span bytes.
+///
+/// The length a buffer is wrapped with must not follow the geometry of one run. The buffers of the
+/// chained stages are reused across runs of different sizes, and the shared cache only hands a
+/// mapping back when it covers the request, so a request that grows with the geometry re-maps the
+/// buffer - a new MTLBuffer object over the same memory, one newBufferWithBytesNoCopy on the host's
+/// hottest cell, and the per-object dependency tracking that reusing one mapping gives (see
+/// shared_queue::wrap_no_copy and pilots_stage::buf_bytes, which exists for this very reason).
+/// The allocation the pointer belongs to is therefore the right length: the whole buffer, not the
+/// run, exactly like the estimator's pilot staging.
+///
+/// The run span is the fallback for a pointer the process-wide registry does not describe (a buffer
+/// an engine allocated for itself), and a span that does not fit in its own allocation is a caller
+/// defect: it is named once instead of being mapped past the end of the allocation, which is what
+/// an overstated span does silently - until the pointer is one the registry does not know and the
+/// mapping then covers memory the buffer does not own.
+size_t wrap_length(const void* ptr, size_t span)
+{
+  void*       base = nullptr;
+  size_t      size = 0;
+  if (!compat::describe_aligned_allocation(ptr, &base, &size)) {
+    return span;
+  }
+  const size_t offset    = static_cast<size_t>(static_cast<const char*>(ptr) - static_cast<const char*>(base));
+  const size_t remaining = (size > offset) ? (size - offset) : 0;
+  if (span > remaining) {
+    static std::atomic<bool> warned{false};
+    bool                     expected = false;
+    if (warned.compare_exchange_strong(expected, true)) {
+      ocudulog::fetch_basic_logger("PHY").error(
+          "Metal demapper: a run reaches {} bytes but only {} bytes are left in the allocation at {}; "
+          "the span of one of its arrays is overstated and the mapping overshoots the buffer",
+          span,
+          remaining,
+          ptr);
+    }
+    return span;
+  }
+  return remaining;
 }
 
 struct demod_engine_impl {
@@ -214,8 +264,11 @@ struct demod_engine_impl {
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
 };
 
-wrapped_buffer wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t length)
+wrapped_buffer wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t span)
 {
+  // Every wrap of this engine goes through here, so the "length is the buffer, not the run" rule is
+  // applied once, at the one place a caller cannot forget it (see wrap_length).
+  const size_t length = wrap_length(ptr, span);
   // Same shared cache as the other engines: the demapper reads the symbols that the equalizer wrote
   // through the very same buffer object, so Metal tracks the dependency (see
   // shared_queue::wrap_no_copy).
