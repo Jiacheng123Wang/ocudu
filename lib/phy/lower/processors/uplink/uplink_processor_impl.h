@@ -36,6 +36,8 @@ public:
     sampling_rate rate;
     /// Number of receive ports.
     unsigned nof_rx_ports;
+    /// Measure the baseband metrics of every symbol (see uplink_processor_configuration).
+    bool metrics_enabled = true;
   };
 
   /// \brief Constructs a software generic lower PHY uplink processor that can process PRACH and PUxCH.
@@ -108,6 +110,8 @@ private:
   subcarrier_spacing scs;
   /// Number of receive ports.
   unsigned nof_rx_ports;
+  /// Measure the baseband metrics of every symbol (see uplink_processor_configuration).
+  bool metrics_enabled = true;
   /// Number of slots per subframe.
   unsigned nof_slots_per_subframe;
   /// Number of symbols per slot.

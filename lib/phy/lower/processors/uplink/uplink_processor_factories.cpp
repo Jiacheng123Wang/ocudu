@@ -37,7 +37,8 @@ public:
                                                                   .scs          = config.scs,
                                                                   .cp           = config.cp,
                                                                   .rate         = config.rate,
-                                                                  .nof_rx_ports = config.nof_rx_ports};
+                                                                  .nof_rx_ports = config.nof_rx_ports,
+                                                                  .metrics_enabled = config.metrics_enabled};
 
     return std::make_unique<lower_phy_uplink_processor_impl>(
         prach_proc_factory->create(), puxch_proc_factory->create(puxch_proc_config), proc_config);

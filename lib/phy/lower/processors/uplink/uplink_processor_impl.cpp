@@ -22,19 +22,28 @@ using namespace ocudu;
 
 namespace {
 
-/// \brief Host passes over the uplink samples that the CFO compensation still makes.
+/// \brief Host passes over the uplink samples that this processor still makes, per symbol.
 ///
-/// The compensation is the last step of the IQ -> LLR chain that converts every sample on the host
-/// (int16 -> float -> int16 around the complex multiply). It only runs when an offset is in effect, so
-/// a run whose round-trip count is zero is a run in which the samples went from the radio to the PRACH
-/// and the PUxCH processors untouched - the contract the GPU pipeline mode has to satisfy (see
-/// [ul_cfo]). A non-zero count with a non-zero offset is the NTN / `cfo` console case, where the
-/// samples still have to be compensated for both consumers: that is the hard constraint the plan
-/// names.
+/// The samples of a symbol are copied into the symbol buffer once (the assembly, which the radio's
+/// block-based delivery and the PRACH's need for a contiguous host buffer require), and - while they
+/// are there - two optional passes may still run over them on the host:
+///
+///   * the CFO compensation, which converts them to complex float and back. It is skipped unless an
+///     offset is in effect, so a run whose round-trip count is zero sent the samples from the radio to
+///     the PRACH and the PUxCH processors untouched. A non-zero count with a non-zero offset is the
+///     NTN / `cfo` console case, where both consumers need the compensated samples: the hard
+///     constraint the plan names.
+///   * the baseband metrics (average power, peak power, clipping), three passes per sample that only
+///     an application collecting RU metrics reads.
+///
+/// The report is what makes the pipeline mode's contract checkable on air: with the GPU pipeline and
+/// no frequency offset to apply, both counts are zero while \c symbols is not - which tells a real
+/// zero from a run that never happened. \c cfo_commands says whether anything ever asked for a
+/// compensation at all.
 ///
 /// Compiled out - both the counters and the report - when the statistics probe is off, which is every
 /// non-Apple-Silicon build.
-class cfo_stats
+class ul_host_stats
 {
 #if defined(OCUDU_METAL_STATS)
   /// Symbols whose samples went through the round trip. Only symbols that were compensated reach it,
@@ -46,6 +55,8 @@ class cfo_stats
   /// with a zero offset means "no controller ever asked" (a terrestrial cell); a non-zero count with
   /// a zero offset means "a controller asked for exactly 0 Hz" (an NTN cell with no Doppler).
   std::atomic<uint64_t> commands{0};
+  /// Symbols whose samples were measured for the baseband metrics.
+  std::atomic<uint64_t> metrics{0};
   /// Offset in effect, in hertz, as last observed.
   std::atomic<float> cfo_hz{0.0F};
 #endif
@@ -54,6 +65,7 @@ public:
 #if defined(OCUDU_METAL_STATS)
   void count_round_trip() { round_trips.fetch_add(1, std::memory_order_relaxed); }
   void count_symbol() { symbols.fetch_add(1, std::memory_order_relaxed); }
+  void count_metrics() { metrics.fetch_add(1, std::memory_order_relaxed); }
 
   /// Samples the state of the compensation (called once per processed symbol).
   void observe(float cfo_Hz, uint64_t nof_commands)
@@ -65,32 +77,34 @@ public:
     cfo_hz.store(cfo_Hz, std::memory_order_relaxed);
   }
 
-  /// Reports once at exit (the counters are a function-local static, see cfo_counters()). Silent when
-  /// no symbol was processed, so the tools that merely link this library print nothing.
-  ~cfo_stats()
+  /// Reports once at exit (the counters are a function-local static, see ul_host_counters()). Silent
+  /// when no symbol was processed, so the tools that merely link this library print nothing.
+  ~ul_host_stats()
   {
     uint64_t nof_symbols = symbols.load(std::memory_order_relaxed);
     if (nof_symbols == 0) {
       return;
     }
     std::fprintf(stderr,
-                 "[ul_cfo] symbols=%llu round_trips=%llu commands=%llu cfo_hz=%.3f\n",
+                 "[ul_host] symbols=%llu cfo_round_trips=%llu cfo_commands=%llu cfo_hz=%.3f metrics=%llu\n",
                  static_cast<unsigned long long>(nof_symbols),
                  static_cast<unsigned long long>(round_trips.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(commands.load(std::memory_order_relaxed)),
-                 static_cast<double>(cfo_hz.load(std::memory_order_relaxed)));
+                 static_cast<double>(cfo_hz.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(metrics.load(std::memory_order_relaxed)));
   }
 #else
   void count_round_trip() {}
   void count_symbol() {}
+  void count_metrics() {}
   void observe(float /*cfo_Hz*/, uint64_t /*nof_commands*/) {}
 #endif
 };
 
 /// Counters of this process, reported once at exit.
-cfo_stats& cfo_counters()
+ul_host_stats& ul_host_counters()
 {
-  static cfo_stats s;
+  static ul_host_stats s;
   return s;
 }
 
@@ -102,6 +116,7 @@ lower_phy_uplink_processor_impl::lower_phy_uplink_processor_impl(std::unique_ptr
   sector_id(config.sector_id),
   scs(config.scs),
   nof_rx_ports(config.nof_rx_ports),
+  metrics_enabled(config.metrics_enabled),
   nof_slots_per_subframe(get_nof_slots_per_subframe(config.scs)),
   nof_symbols_per_slot(get_nsymb_per_slot(config.cp)),
   nof_samples_per_subframe(config.rate.to_kHz()),
@@ -308,7 +323,7 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
   // processors the samples exactly as the radio delivered them, byte for byte, and removes two host
   // passes over every sample of the uplink.
   if (cfo_processor.applies_compensation()) {
-    cfo_counters().count_round_trip();
+    ul_host_counters().count_round_trip();
     // View over the temporary float-based complex samples for CFO processor.
     span<cf_t> view;
     for (unsigned i_channel = 0; i_channel != symbol_buffer.get_nof_channels(); ++i_channel) {
@@ -321,8 +336,8 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
       ocuduvec::convert(channel_buffer, view, ocuduvec::scaling_factor_cf_to_ci16);
     }
   }
-  cfo_counters().count_symbol();
-  cfo_counters().observe(cfo_processor.get_cfo_hz(), cfo_processor.get_nof_scheduled_commands());
+  ul_host_counters().count_symbol();
+  ul_host_counters().observe(cfo_processor.get_cfo_hz(), cfo_processor.get_nof_scheduled_commands());
 
   // Advance CFO processor number of samples.
   cfo_processor.advance(symbol_buffer.get_nof_samples());
@@ -338,7 +353,14 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
   bool processed =
       puxch_proc->get_baseband().process_symbol(symbol_buffer.get_reader(), puxch_context, current_symbol_buffer);
 
-  if (processed) {
+  // Baseband metrics. Three passes over every sample of the symbol (average power, peak power and
+  // the clipping count), for values that only the application's RU metrics collector reads: with the
+  // metrics disabled nothing consumes them, so they are not measured at all and the samples are not
+  // read again on the host (see lower_phy_configuration::are_metrics_enabled). `processed` is what
+  // the PUxCH processor returns for a symbol it actually took - the metrics describe a received
+  // symbol, so they are measured for exactly those.
+  if (processed && metrics_enabled) {
+    ul_host_counters().count_metrics();
     sample_statistics<float> avg_power;
     sample_statistics<float> peak_power;
     unsigned                 nof_channels = symbol_buffer.get_nof_channels();

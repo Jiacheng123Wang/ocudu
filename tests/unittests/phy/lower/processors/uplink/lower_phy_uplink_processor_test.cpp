@@ -317,6 +317,67 @@ TEST_P(LowerPhyUplinkProcessorFixture, Flow)
   }
 }
 
+TEST_P(LowerPhyUplinkProcessorFixture, MetricsAreMeasuredOnlyForAConsumer)
+{
+  const unsigned     nof_rx_ports = std::get<0>(GetParam());
+  sampling_rate      srate        = std::get<1>(GetParam());
+  subcarrier_spacing scs          = std::get<2>(GetParam());
+  cyclic_prefix      cp           = std::get<3>(GetParam());
+
+  const unsigned base_symbol_size     = srate.get_dft_size(scs);
+  const unsigned nof_symbols_per_slot = get_nsymb_per_slot(cp);
+
+  // Two processors that differ only in whether the baseband metrics are consumed: the measurement is
+  // three passes over every sample of every symbol (average power, peak power, clipping) and nothing
+  // reads its result unless the application exposes an RU metrics collector for the sector.
+  uplink_processor_configuration consuming_config = config;
+  consuming_config.metrics_enabled                = true;
+  uplink_processor_configuration ignored_config   = config;
+  ignored_config.metrics_enabled                  = false;
+
+  std::unique_ptr<lower_phy_uplink_processor> consuming_processor = ul_proc_factory->create(consuming_config);
+  std::unique_ptr<lower_phy_uplink_processor> ignoring_processor  = ul_proc_factory->create(ignored_config);
+  ASSERT_NE(consuming_processor, nullptr);
+  ASSERT_NE(ignoring_processor, nullptr);
+
+  // One slot of samples through a processor, symbol by symbol, exactly like the radio delivers them.
+  auto run_one_slot = [&](lower_phy_uplink_processor& processor, uplink_processor_notifier_spy& notifier) {
+    prach_processor_notifier_spy prach_notifier;
+    puxch_processor_notifier_spy puxch_notifier;
+    processor.connect(notifier, prach_notifier, puxch_notifier);
+
+    baseband_gateway_buffer_dynamic buffer(nof_rx_ports, 2 * base_symbol_size);
+    baseband_gateway_timestamp      timestamp = 0;
+    for (unsigned i_symbol = 0, i_symbol_subframe = 0; i_symbol != nof_symbols_per_slot;
+         ++i_symbol, ++i_symbol_subframe) {
+      const unsigned cp_size = cp.get_length(i_symbol_subframe, scs).to_samples(srate.to_Hz());
+      buffer.resize(cp_size + base_symbol_size);
+      for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
+        span<ci16_t> port_buffer = buffer[i_port];
+        std::generate(port_buffer.begin(), port_buffer.end(), []() {
+          return to_ci16(cf_t(dist_sample(rgen) * INT16_MAX, dist_sample(rgen) * INT16_MAX));
+        });
+      }
+      processor.get_baseband().process(buffer.get_reader(), timestamp);
+      timestamp += cp_size + base_symbol_size;
+    }
+  };
+
+  uplink_processor_notifier_spy consuming_notifier;
+  uplink_processor_notifier_spy ignoring_notifier;
+  run_one_slot(*consuming_processor, consuming_notifier);
+  run_one_slot(*ignoring_processor, ignoring_notifier);
+
+  // The consuming processor measures one set per processed symbol...
+  ASSERT_EQ(consuming_notifier.get_metrics().size(), nof_symbols_per_slot);
+  // ... and the other one measures nothing at all, while having processed the same slot (the full
+  // slot notification is what proves the samples went through: a zero count on its own could just
+  // mean the run never happened).
+  ASSERT_EQ(ignoring_notifier.get_metrics().size(), 0);
+  ASSERT_EQ(ignoring_notifier.get_full_slots().size(), 1);
+  ASSERT_EQ(consuming_notifier.get_full_slots().size(), 1);
+}
+
 // Creates test suite that combines all possible parameters.
 INSTANTIATE_TEST_SUITE_P(LowerPhyUplinkProcessor,
                          LowerPhyUplinkProcessorFixture,

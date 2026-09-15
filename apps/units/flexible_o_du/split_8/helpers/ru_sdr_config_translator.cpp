@@ -41,6 +41,10 @@ static lower_phy_configuration generate_lower_phy_config(const flexible_o_du_ru_
   out_cfg.srate                      = sampling_rate::from_MHz(ru_cfg.srate_MHz);
   out_cfg.ta_offset =
       band_helper::get_ta_offset(band_helper::get_band_from_dl_arfcn(config.dl_arfcn), false /* 5G SA mode */);
+  // The lower PHY only measures the samples for the metrics the application collects: with the RU
+  // metrics disabled nothing reads them (ru_sdr_impl::get_metrics_collector() returns null), and the
+  // measurement is three passes over every received sample.
+  out_cfg.are_metrics_enabled = ru_cfg.metrics_cfg.enable_ru_metrics;
 
   if (ru_cfg.time_alignment_calibration.has_value()) {
     // Selects the user specific value.

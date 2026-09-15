@@ -105,6 +105,17 @@ struct lower_phy_configuration {
   lower_phy_baseband_buffer_size_policy baseband_rx_buffer_size_policy;
   /// Amplitude control parameters, including baseband gain and clipping.
   amplitude_controller_clipping_config amplitude_config;
+  /// \brief Whether the lower PHY metrics (average power, peak power, clipping) are consumed.
+  ///
+  /// The uplink processor measures the samples of every symbol for them. Nothing reads those values
+  /// unless the application exposes a metrics collector for this sector
+  /// (ru_metrics_collector: see ru_sdr_impl::get_metrics_collector(), which returns null when the RU
+  /// metrics are disabled), so the caller turns the measurement off with this flag - and the samples
+  /// of a symbol are then not read on the host for anything.
+  ///
+  /// Defaults to true: a caller that does not know about the application's metrics configuration
+  /// keeps the historical behaviour.
+  bool are_metrics_enabled = true;
 };
 
 /// Lower physical layer dependencies.
