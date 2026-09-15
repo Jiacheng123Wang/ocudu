@@ -1130,16 +1130,24 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   stats_in.dmrs_symbol_0     = npt > 0 ? dmrs_sym[0] : 0;
   stats_in.dmrs_symbol_1     = npt > 1 ? dmrs_sym[1] : 0;
   span<cf_t> pilots_span(stats_pilots.data(), args.nof_dmrs_symbols * args.nof_symbol_pilots);
-  for (unsigned i_symbol = 0; i_symbol != args.nof_dmrs_symbols; ++i_symbol) {
-    // Layer 0 only, in the DATA domain: the correlation model is built from the pilot estimates the
-    // estimator publishes, and this is where they were copied from when the device result was
-    // published into pilots_lse_view (see ls_pilot()).
-    span<cf_t> dst = pilots_span.subspan(i_symbol * args.nof_symbol_pilots, args.nof_symbol_pilots);
-    for (unsigned j = 0; j != dst.size(); ++j) {
-      dst[j] = ls_pilot(args, i_symbol, 0, j, /*scaled=*/true);
+  // Only for a provider that reads them: the v1 fixed-constants estimator takes the noise variance
+  // and nothing else (see channel_statistics_estimator::consumes_pilots()), and these pilots are the
+  // device's, so filling them is a per-hop readback that nobody would look at. Measured on air
+  // before this guard: layer 0 of every DM-RS symbol copied, for a reader that ignores it.
+  if (!stats_estimator->consumes_pilots()) {
+    stats_in.pilots_lse = {}; // explicitly "not provided", not "provided and empty"
+  } else {
+    for (unsigned i_symbol = 0; i_symbol != args.nof_dmrs_symbols; ++i_symbol) {
+      // Layer 0 only, in the DATA domain: the correlation model is built from the pilot estimates the
+      // estimator publishes, and this is where they were copied from when the device result was
+      // published into pilots_lse_view (see ls_pilot()).
+      span<cf_t> dst = pilots_span.subspan(i_symbol * args.nof_symbol_pilots, args.nof_symbol_pilots);
+      for (unsigned j = 0; j != dst.size(); ++j) {
+        dst[j] = ls_pilot(args, i_symbol, 0, j, /*scaled=*/true);
+      }
     }
+    stats_in.pilots_lse = pilots_span;
   }
-  stats_in.pilots_lse = pilots_span;
   // \note \c stats_in.sigma2 carries the noise-to-pilot-power ratio, not an absolute power: see
   // build_correlation_matrices().
   const channel_statistics stats = stats_estimator->estimate(stats_in);

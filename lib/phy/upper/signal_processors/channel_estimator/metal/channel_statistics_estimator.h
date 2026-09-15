@@ -60,6 +60,17 @@ public:
 
   /// \brief Returns the channel statistics for the current estimation context.
   virtual channel_statistics estimate(const channel_statistics_input& input) const = 0;
+
+  /// \brief Whether estimate() reads \c channel_statistics_input::pilots_lse.
+  ///
+  /// The pilots in that input are the least-squares estimates the DEVICE produced, so filling them
+  /// costs a readback and a copy per hop (see port_channel_estimator_metal_mmse_impl). An estimator
+  /// that fits the channel from something else - the v1 fixed-constants one reads the noise
+  /// variance alone - does not need them, and says so here: the copy is skipped.
+  ///
+  /// The default is TRUE on purpose: an implementation that does read them must not have to opt in
+  /// to being fed, which would break it silently the day it is swapped in.
+  virtual bool consumes_pilots() const { return true; }
 };
 
 /// Fixed-constants implementation (v1): tau_rms and f_d are configurable constants and the
@@ -76,6 +87,10 @@ public:
   {
     return channel_statistics{.sigma2 = input.sigma2, .tau_rms_s = tau_rms_s, .fd_hz = fd_hz};
   }
+
+  // See interface for documentation. This implementation reads input.sigma2 and nothing else, so
+  // the per-hop pilot readback the caller would do for it is dead work.
+  bool consumes_pilots() const override { return false; }
 
 private:
   float tau_rms_s;
