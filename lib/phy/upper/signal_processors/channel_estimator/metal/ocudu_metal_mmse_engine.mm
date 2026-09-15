@@ -1026,8 +1026,14 @@ bool mmse_engine::run_async(float*       a,
   if (corr != nullptr) {
     if (!encode_corr(e, enc, *corr, nof_systems)) {
       [enc endEncoding];
+      mmse_stats_corr_build_failure();
       return false;
     }
+    // COUNT IT HERE TOO. The standalone entry point (build_correlation()) is what used to be the
+    // only way to build these matrices, and it owns the counter's increment; moving the build into
+    // this prefix took the work with it but left the counter behind, so a phone leg of a working
+    // device build reported device_corr_builds=0 - the very number the acceptance criteria read.
+    mmse_stats_corr_build();
     // Same encoder: the correlation writes must be visible to K1's reads.
     [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
   }
