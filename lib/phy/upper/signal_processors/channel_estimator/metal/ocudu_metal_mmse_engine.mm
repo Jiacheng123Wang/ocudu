@@ -1172,7 +1172,10 @@ bool mmse_engine::run_async(float*       a,
   // anyway. A failure is caught at ENCODE time, before the commit, so the caller can fall back
   // without a half-submitted batch (see run_weights_only()'s identical prefix).
   if (corr != nullptr) {
-    if (!encode_corr(e, enc, *corr, nof_systems)) {
+    // The stage may cover FEWER systems than the batch (corr_stage::nof_systems): a merged batch
+    // builds its standard group here while the edge group's slots belong to another geometry.
+    const unsigned corr_systems = (corr->nof_systems != 0) ? corr->nof_systems : nof_systems;
+    if (!encode_corr(e, enc, *corr, corr_systems)) {
       [enc endEncoding];
       mmse_stats_corr_build_failure();
       return false;
@@ -1387,7 +1390,8 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   // This prefix is kept for the orders (<= 36) where K1 is accurate, because that is the form that
   // keeps the whole batch on the device.
   if (corr != nullptr) {
-    if (!encode_corr(e, enc, *corr, nof_systems)) {
+    const unsigned corr_systems = (corr->nof_systems != 0) ? corr->nof_systems : nof_systems;
+    if (!encode_corr(e, enc, *corr, corr_systems)) {
       [enc endEncoding];
       return false;
     }

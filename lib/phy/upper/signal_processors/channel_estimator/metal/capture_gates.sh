@@ -9,6 +9,7 @@
 #   capture_gates.sh k0d [jobs] [corpus_glob]   K0-d equivalence      (byte-level, must PASS)
 #   capture_gates.sh k1  [jobs] [corpus_glob]   K1 functional equivalence (decisions, must PASS)
 #   capture_gates.sh ydev [jobs] [corpus_glob]  glue #2: device-written y vs host-staged y
+#   capture_gates.sh k0dm [jobs] [corpus_glob]  K0-d merged: device-built vs host-built A/R_hp
 #   capture_gates.sh combos                     flag-combination matrix (SINR/CRC, must PASS)
 #
 # The corpus is a set of <name>_ce.txt baselines (the capture-info sidecars; the replay tool derives
@@ -59,6 +60,20 @@
 # route B's must report 0. Without that, a gate like this compares the host against the host and
 # passes - which is exactly how the k0d gate once passed for a whole round (S-7f-4c).
 #
+# ---- k0dm: the MERGED batch's standard group, built on the device (S-7f-5v) -------------------
+#     route A  default              the DEVICE builds the standard group's A/R_hp as a prefix of the
+#                                   engine's own command buffer (the edge group stays host-built)
+#     route B  OCUDU_CE_CORR_DEV=0  the HOST builds them, as before
+# Both routes invert on the DEVICE, so the only difference under test is WHO BUILT those matrices,
+# and every published file must be BYTE-IDENTICAL for the same reason k0d demands it: the correlation
+# kernels reproduce the host's float expressions exactly, and a 1-ulp difference is amplified by
+# cond_2(A) ~ 2e4 into ~1% of W and h.
+#
+# This is the gate the earlier, failed attempt at a merged device build did not have. It is
+# VACUITY-CHECKED on both sides: route A must report device_corr_builds > 0 and route B must report 0.
+# Without that, a capture whose hops all skipped the prefix would compare host against host - which is
+# exactly how k0d passed for a whole round (S-7f-4c) while the host staging overwrote the device build.
+#
 # ---- combos: the flag matrix ------------------------------------------------------------------
 # OCUDU_CE_GPU_INVERT x OCUDU_CE_CORR_DEV x OCUDU_CE_SPLIT_TAIL over the three reference captures.
 # This pins the semantics of the escape hatches, which changed in S-7f-4f and are easy to get wrong:
@@ -75,7 +90,7 @@ GLOB=${3:-/tmp/iq1_*_ce.txt /tmp/iq2_*_ce.txt}
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../.." && pwd)
 BIN=$REPO/build/lib/phy/upper/channel_processors/metal/ul_chain_replay
 
-case "$MODE" in k0d|k1|ydev|combos) ;; *) echo "usage: $0 <k0d|k1|ydev|combos> [jobs] [corpus_glob]"; exit 2;; esac
+case "$MODE" in k0d|k1|ydev|k0dm|combos) ;; *) echo "usage: $0 <k0d|k1|ydev|k0dm|combos> [jobs] [corpus_glob]"; exit 2;; esac
 [ -x "$BIN" ] || { echo "no replay tool at $BIN - build the ul_chain_replay target first"; exit 2; }
 
 mapfile -t CAPS < <(ls $GLOB 2>/dev/null | sed -E 's/_ce\.txt$//' | sort -u)
@@ -145,37 +160,60 @@ fi
 decision() { sed -nE 's/.*tbs=([0-9]+) slot=[0-9]+ rnti=[0-9]+ [A-Z0-9]+: crc=([A-Z]+).*sinr=([-0-9.a-z]+) dB.*/\1 \2 \3/p' <<<"$1" | head -1; }
 numeric() { awk -v v="$1" 'BEGIN{exit !(v ~ /^-?[0-9.]+$/)}'; }
 
-# The two env sets of the BYTE-COMPARISON modes (k0d, ydev): route A is the one under test, route B
-# the reference it has to reproduce exactly. See the header for what each pair isolates. ydev
-# additionally checks that the device writer actually engaged (see run_shard), because a route that
-# silently falls back to the host staging would make the comparison vacuous.
+# The two env sets of the BYTE-COMPARISON modes (k0d, ydev, k0dm): route A is the one under test,
+# route B the reference it has to reproduce exactly. See the header for what each pair isolates.
+# VACUOUS_COUNTER names the [metal_stats] counter that proves route A took the device path at all
+# (and that route B's knob turned it off); without it the comparison can be host against host.
 case "$MODE" in
-  k0d)  ENV_A="OCUDU_CE_GPU_INVERT=0"; ENV_B="OCUDU_CE_GPU_INVERT=0 OCUDU_CE_CORR_DEV=0";;
-  ydev) ENV_A=""; ENV_B="OCUDU_CE_DEV_Y=0";;
-  *)    ENV_A=""; ENV_B="";;
+  k0d)  ENV_A="OCUDU_CE_GPU_INVERT=0"; ENV_B="OCUDU_CE_GPU_INVERT=0 OCUDU_CE_CORR_DEV=0"
+        # No hard assertion here: route A builds on the device only for hops WITHOUT a remainder, so a
+        # capture whose hops are all merged is legitimately host-against-host. The coverage is
+        # REPORTED instead (see the summary), so a vacuous corpus cannot hide.
+        VACUOUS_COUNTER=""; REPORT_COUNTER="device_corr_builds";;
+  ydev) ENV_A=""; ENV_B="OCUDU_CE_DEV_Y=0"
+        VACUOUS_COUNTER="device_y_writes"; REPORT_COUNTER="";;
+  k0dm) ENV_A=""; ENV_B="OCUDU_CE_CORR_DEV=0"
+        VACUOUS_COUNTER="device_corr_builds"; REPORT_COUNTER="";;
+  *)    ENV_A=""; ENV_B=""; VACUOUS_COUNTER=""; REPORT_COUNTER="";;
 esac
 
 run_shard() {
-  local id=$1 total=0 same=0 bytesame=0 maxdelta=0 bad="" delta
+  local id=$1 total=0 same=0 bytesame=0 maxdelta=0 bad="" delta nbytes=0
   local i c base out_d out_h stdout_d stdout_h ok f rel retried=0
   for (( i = id; i < ${#CAPS[@]}; i += JOBS )); do
     c=${CAPS[$i]}; base=$(basename "$c")
     out_d=$WORK/${id}_${base}_a; out_h=$WORK/${id}_${base}_b
     total=$(( total + 1 ))
-    if [ "$MODE" = k0d ] || [ "$MODE" = ydev ]; then
-      # stderr of route A carries the [metal_stats] line (printed at exit); ydev reads the device-y
-      # counter out of it, and keeps it so a failure can be diagnosed from the printed line.
-      env $ENV_A "$BIN" "$c" --metal --out "$out_d" >/dev/null 2>"$WORK/${id}_${base}.err" ||
+    if [ "$MODE" = k0d ] || [ "$MODE" = ydev ] || [ "$MODE" = k0dm ]; then
+      # stderr of both routes carries the [metal_stats] line (printed at exit): the vacuity check
+      # reads the counter that says whether the device path engaged.
+      env $ENV_A "$BIN" "$c" --metal --out "$out_d" >/dev/null 2>"$WORK/${id}_${base}.a.err" ||
         { bad="$bad $base(A)"; continue; }
-      env $ENV_B "$BIN" "$c" --metal --out "$out_h" >/dev/null 2>/dev/null ||
+      env $ENV_B "$BIN" "$c" --metal --out "$out_h" >/dev/null 2>"$WORK/${id}_${base}.b.err" ||
         { bad="$bad $base(B)"; continue; }
-      if [ "$MODE" = ydev ]; then
-        local yw
-        yw=$(grep -o "device_y_writes=[0-9]*" "$WORK/${id}_${base}.err" | head -1 | cut -d= -f2)
-        if [ -z "$yw" ] || [ "$yw" -eq 0 ]; then
-          # Route A never wrote y on the device: the comparison below would be host vs host.
-          bad="$bad $base(vacuous:device_y_writes=${yw:-absent})"; continue
+      if [ -n "$VACUOUS_COUNTER" ]; then
+        local va vb
+        va=$(grep -o "$VACUOUS_COUNTER=[0-9]*" "$WORK/${id}_${base}.a.err" | head -1 | cut -d= -f2)
+        vb=$(grep -o "$VACUOUS_COUNTER=[0-9]*" "$WORK/${id}_${base}.b.err" | head -1 | cut -d= -f2)
+        if [ -z "$va" ] || [ "$va" -eq 0 ]; then
+          # Route A never took the device path on this capture, so the comparison below would be host
+          # against host. That is a property of the capture's geometry (a hop with no block the device
+          # builds), not a defect - it is counted and reported, and the summary refuses to PASS if
+          # NOTHING engaged (a device path that silently went dead must not read as a green gate).
+          echo "$base" >> "$WORK/vac_$id"
+          continue
         fi
+        if [ -n "$vb" ] && [ "$vb" -ne 0 ]; then
+          # Route B's knob did not turn the device path off: the two routes are the same one.
+          bad="$bad $base(knob-ineffective:$VACUOUS_COUNTER=$vb)"; continue
+        fi
+      fi
+      if [ -n "$REPORT_COUNTER" ]; then
+        # How many captures route A actually ran the device path on: reported, not gated (see the
+        # mode table above).
+        local rv
+        rv=$(grep -o "$REPORT_COUNTER=[0-9]*" "$WORK/${id}_${base}.a.err" | head -1 | cut -d= -f2)
+        [ -n "$rv" ] && [ "$rv" -gt 0 ] && echo 1 >> "$WORK/rep_$id"
       fi
       ok=1
       for f in "$out_d"_*; do
@@ -183,18 +221,20 @@ run_shard() {
         cmp -s "$f" "$out_h$rel" || ok=0
       done
       if [ $ok -eq 0 ]; then
-        # Serial re-check: a parallel-run mismatch is more often the tool than the code.
+        # Re-checked AFTER the parallel phase, with nothing else running (see the second pass below).
+        # Re-running it here as well - which is what the earlier revision did - does not help: the
+        # other shards are still busy, so the tool's parallel-run flakiness is still in play. It was
+        # measured producing false mismatches on 5 captures across three gate runs, every one of them
+        # byte-identical when re-run alone.
         retried=$(( retried + 1 ))
-        rm -f "$out_d"_* "$out_h"_*
-        env $ENV_A "$BIN" "$c" --metal --out "$out_d" >/dev/null 2>/dev/null
-        env $ENV_B "$BIN" "$c" --metal --out "$out_h" >/dev/null 2>/dev/null
-        ok=1
-        for f in "$out_d"_*; do
-          rel=${f#"$out_d"}
-          cmp -s "$f" "$out_h$rel" || ok=0
-        done
+        nbytes=$(( nbytes + 1 ))
+        echo "$c" >> "$WORK/bad_$id"
       fi
-      if [ $ok -eq 1 ]; then same=$(( same + 1 )); else bad="$bad $base"; fi
+      # A byte mismatch is NOT counted here: the serial second pass below decides whether it is real,
+      # and adding it to $bad as well would report every parallel-phase flag as a finding (which is
+      # what an earlier revision of this rework did - it printed 46 mismatches that the second pass
+      # had just cleared).
+      if [ $ok -eq 1 ]; then same=$(( same + 1 )); fi
     else
       stdout_d=$("$BIN" "$c" --metal --out "$out_d" 2>/dev/null | grep -m1 "crc=") || true
       stdout_h=$(OCUDU_CE_CPU_INVERT=1 "$BIN" "$c" --metal --out "$out_h" 2>/dev/null | grep -m1 "crc=") || true
@@ -232,23 +272,63 @@ run_shard() {
     fi
     rm -f "$out_d"_* "$out_h"_*
   done
-  echo "$total $same $bytesame $maxdelta $retried$bad" > "$WORK/res_$id"
+  # nbytes counts the BYTE mismatches of the comparison modes: their capture paths are in bad_$id and
+  # the serial second pass below re-runs exactly those. Everything else (a route that crashed, a
+  # missing result, a knob that did not engage) is already final and travels in $bad.
+  echo "$total $same $bytesame $maxdelta $retried $nbytes$bad" > "$WORK/res_$id"
 }
 
 for (( j = 0; j < JOBS; j++ )); do run_shard "$j" & done
 wait
 
-TOTAL=0; SAME=0; BYTESAME=0; MAXDELTA=0; RETRIED=0; BAD=""
+TOTAL=0; SAME=0; BYTESAME=0; MAXDELTA=0; RETRIED=0; BYTEMIS=0; BAD=""
 for (( j = 0; j < JOBS; j++ )); do
-  read -r t s b m r rest < "$WORK/res_$j"
+  read -r t s b m r nb rest < "$WORK/res_$j"
   TOTAL=$(( TOTAL + t )); SAME=$(( SAME + s )); BYTESAME=$(( BYTESAME + b )); RETRIED=$(( RETRIED + r )); BAD="$BAD$rest"
+  BYTEMIS=$(( BYTEMIS + nb ))
   MAXDELTA=$(awk -v x="$MAXDELTA" -v y="$m" 'BEGIN{print (y>x)?y:x}')
 done
 
+# ---- Serial second pass over the byte mismatches ---------------------------------------------
+# Nothing else is running now, so this is the "re-check it serially before believing it" the header
+# promises: the replay tool produces WRONG results under heavy parallelism (see the top of this
+# file), and only what still differs here is a finding.
+VACUOUS=0
+for (( j = 0; j < JOBS; j++ )); do
+  [ -f "$WORK/vac_$j" ] && VACUOUS=$(( VACUOUS + $(wc -l < "$WORK/vac_$j") ))
+done
+
+SURVIVORS=""; RECHECKED=0
+if [ "$BYTEMIS" -ne 0 ]; then
+  cat "$WORK"/bad_* 2>/dev/null | sort -u > "$WORK/badlist"
+  while read -r bc; do
+    [ -n "$bc" ] || continue
+    RECHECKED=$(( RECHECKED + 1 ))
+    rm -f "$WORK/sa"_* "$WORK/sb"_*
+    if ! env $ENV_A "$BIN" "$bc" --metal --out "$WORK/sa" >/dev/null 2>&1; then
+      SURVIVORS="$SURVIVORS $(basename "$bc")(rerun-A)"; continue
+    fi
+    if ! env $ENV_B "$BIN" "$bc" --metal --out "$WORK/sb" >/dev/null 2>&1; then
+      SURVIVORS="$SURVIVORS $(basename "$bc")(rerun-B)"; continue
+    fi
+    ok=1
+    for f in "$WORK/sa"_*; do rel=${f#"$WORK/sa"}; cmp -s "$f" "$WORK/sb$rel" || ok=0; done
+    [ $ok -eq 1 ] || SURVIVORS="$SURVIVORS $(basename "$bc")"
+    rm -f "$WORK/sa"_* "$WORK/sb"_*
+  done < "$WORK/badlist"
+  BAD="$BAD$SURVIVORS"
+fi
+
 if [ "$MODE" = k0d ]; then
-  echo "mode=k0d captures=$TOTAL byte-identical=$SAME retried=$RETRIED"
+  DB=0
+  for (( j = 0; j < JOBS; j++ )); do
+    [ -f "$WORK/rep_$j" ] && DB=$(( DB + $(wc -l < "$WORK/rep_$j") ))
+  done
+  echo "mode=k0d captures=$TOTAL byte-identical=$SAME retried=$RETRIED device-built-captures=$DB"
 elif [ "$MODE" = ydev ]; then
-  echo "mode=ydev captures=$TOTAL byte-identical=$SAME retried=$RETRIED"
+  echo "mode=ydev captures=$TOTAL byte-identical=$SAME vacuous=$VACUOUS rechecked=$RECHECKED retried=$RETRIED"
+elif [ "$MODE" = k0dm ]; then
+  echo "mode=k0dm captures=$TOTAL byte-identical=$SAME vacuous=$VACUOUS rechecked=$RECHECKED retried=$RETRIED"
 else
   echo "mode=k1 captures=$TOTAL decision-identical=$SAME llr-byte-identical=$BYTESAME retried=$RETRIED"
   # max|dSINR| is INFORMATIONAL ONLY: a corrupted parallel run keeps its CRC but reports a wild
@@ -258,6 +338,12 @@ else
 fi
 if [ -n "$BAD" ]; then
   echo "MISMATCH:$BAD"
+  exit 1
+fi
+# A comparison mode that never engaged the device path anywhere compared host against host on every
+# capture: that is not a PASS, it is a gate that tested nothing (S-7f-4c).
+if [ "$MODE" != k1 ] && [ "$MODE" != k0d ] && [ "$SAME" -eq 0 ]; then
+  echo "VACUOUS: $MODE never engaged the device path on any of the $TOTAL captures"
   exit 1
 fi
 echo "PASS"

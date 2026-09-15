@@ -870,6 +870,49 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   const unsigned n_std_blocks = nof_prb / block_prb;
   const unsigned rem_prb      = nof_prb - n_std_blocks * block_prb;
 
+  // ---- WHO builds the weight matrices of the standard blocks (S-7f-5v) ---------------------------
+  // These flags are computed HERE, before the host build they control, because the answer decides
+  // whether that build happens at all. They used to be derived after it, which is why the host kept
+  // building the standard block's A / R_hp (measured on air: 11.0 us of the 35.3 us per hop) on
+  // routes where the DEVICE builds those very slots and the host never reads its own arrays:
+  //   - the non-merged batch (a hop without a remainder, or the split form): run_engine_blocks()
+  //     hands the slots to the device build and skips its own staging when the strides match;
+  //   - the MERGED batch (the default on air, 74% of the hops in the S-7f-5u leg): the device builds
+  //     the standard group as a PREFIX of the engine's own command buffer while the host stages only
+  //     the edge group. That is new here - see the corr_stage::nof_systems note for why the earlier
+  //     attempt at it corrupted the edge block's slots.
+  // The host's arrays stay the fallback: they are what stage_engine_group() copies from whenever the
+  // slots are NOT device-filled, and the CPU block path rebuilds its own.
+  const unsigned comb_std      = args.dmrs_patterns.front().re_pattern.count();
+  const unsigned L_std_geom    = npt * block_prb * comb_std;
+  const unsigned nout_std_geom = block_prb * NOF_SUBCARRIERS_PER_RB * MAX_NSYMB_PER_SLOT;
+  const bool     matrix_on     = engine_ready && use_matrix_engine && matrix_ready;
+  const bool     defer         = !matrix_on;
+  // Largest tail block order (L = pilots per block) the CPU reference path is known to be fast for
+  // (a 36x36 Gauss-Jordan is ~23k FLOPs). Only consulted by the OCUDU_CE_TAIL_CPU A/B knob.
+  static constexpr unsigned MAX_CPU_TAIL_ORDER = 36;
+  const unsigned            tail_L_est         = rem_prb * 6U * npt;
+  const bool                tail_on_cpu        = (rem_prb != 0) && (tail_L_est <= MAX_CPU_TAIL_ORDER) &&
+                                 (std::getenv("OCUDU_CE_TAIL_CPU") != nullptr);
+  const bool merge_tail = (rem_prb != 0) && (n_std_blocks != 0) && !matrix_on && !tail_on_cpu &&
+                          (2 * nof_layers <= MAX_LAYERS) && (std::getenv("OCUDU_CE_SPLIT_TAIL") == nullptr);
+  static const bool device_corr_enabled = []() {
+    const char* env = std::getenv("OCUDU_CE_CORR_DEV");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  // The device fills the standard group's slots on the non-merged routes through run_engine_blocks()
+  // (prefix when the device also inverts, standalone build otherwise). Unchanged.
+  const bool std_slots_filled = device_corr_enabled && !merge_tail && (n_std_blocks != 0);
+  // ... and on the merged route, which needs the device to invert for the same reason every prefix
+  // does: with a host inversion the host has to READ the device's A before K1, so the build cannot
+  // ride the engine's command buffer.
+  const bool gpu_invert_std = !matrix_on && device_inverts(L_std_geom);
+  const bool dev_corr_std_merged = device_corr_enabled && merge_tail && gpu_invert_std;
+  // Whether the host still builds the standard matrices: only when it also stages them. The matrix
+  // flavor always does (its slots are ceil8-padded, so the device's packed block is not the whole
+  // slot), and any route without the device build does.
+  const bool host_builds_std = !((std_slots_filled && !matrix_on) || dev_corr_std_merged);
+
   // Assemble the statistics input (v1: the same statistics for every layer; per-layer
   // statistics arrive with the v2 estimation-backed provider).
   channel_statistics_input stats_in{};
@@ -890,28 +933,57 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   const channel_statistics stats = stats_estimator->estimate(stats_in);
 
   // Weight matrices of the standard blocks (shared by all layers in v1). They are built ON THE
-  // DEVICE when the engine offers the correlation stage: the product is analytic, so the host only
-  // hands the geometry over and the slots are filled where the inversion and the weights read them
-  // (K0-d). The host arrays remain the fallback for a metallib without the kernel.
-  unsigned L_std    = 0;
-  unsigned nout_std = 0;
-  // Geometry of the standard blocks, from the host arrays: it is needed either way, and the device
-  // build below only replaces the VALUES (see the gate after merge_tail).
+  // DEVICE when the routes above say so - the product is analytic, so the host only hands the
+  // geometry over and the slots are filled where the inversion and the weights read them (K0-d).
+  // Only when the host is the one that will stage these slots does it also build them.
+  unsigned                                      L_std    = 0;
+  unsigned                                      nout_std = 0;
+  std::optional<metal::mmse_engine::corr_stage> std_corr_prefix;
   if (n_std_blocks != 0) {
-    build_correlation_matrices(stats,
-                               args.dmrs_patterns.front().re_pattern,
-                               block_prb,
-                               span<const unsigned>(dmrs_sym.begin(), npt),
-                               scs_khz,
-                               span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS),
-                               span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
-                               nout_std,
-                               L_std);
+    if (host_builds_std) {
+      build_correlation_matrices(stats,
+                                 args.dmrs_patterns.front().re_pattern,
+                                 block_prb,
+                                 span<const unsigned>(dmrs_sym.begin(), npt),
+                                 scs_khz,
+                                 span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS),
+                                 span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
+                                 nout_std,
+                                 L_std);
+    } else if (dev_corr_std_merged) {
+      // Merged batch: the device builds the standard group as a prefix of the engine's own command
+      // buffer (encoded by engine_run() below), and its geometry comes back from the same helper the
+      // non-merged device build uses. The two derivations must agree - the host's arithmetic above
+      // against correlation_stage()'s - and an assert is enough here because the k0d gate compares
+      // the device-built matrices against the host-built ones byte for byte on every capture.
+      unsigned nout_c = 0;
+      unsigned L_c    = 0;
+      std_corr_prefix = correlation_stage(stats,
+                                          args.dmrs_patterns.front().re_pattern,
+                                          block_prb,
+                                          span<const unsigned>(dmrs_sym.begin(), npt),
+                                          scs_khz,
+                                          0,
+                                          nout_c,
+                                          L_c,
+                                          L_std_geom,
+                                          nout_std_geom);
+      // Only THIS group's systems: the edge block occupies the systems after it, in the same slots
+      // but as a different geometry (corr_stage::nof_systems).
+      std_corr_prefix->nof_systems = nof_layers;
+      ocudu_assert((L_c == L_std_geom) && (nout_c == nout_std_geom),
+                   "The block geometry must not depend on who derives it.");
+      L_std    = L_c;
+      nout_std = nout_c;
+    } else {
+      // Non-merged device build: run_engine_blocks() owns it, the host only needs the geometry.
+      L_std    = L_std_geom;
+      nout_std = nout_std_geom;
+    }
   }
-  // Whether the standard blocks' slots may be filled by the device instead. It is decided after
+  // Whether the standard blocks' slots are filled by the device. It is decided after
   // merge_tail: a merged batch carries the TAIL block as an extra system whose geometry differs, and
   // the device build only knows the standard one (see below).
-  bool std_slots_filled = false;
 #if defined(OCUDU_CE_TIME)
   const auto t_corr_std = steady_clock::now();
 #endif
@@ -934,35 +1006,20 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // is unavailable (stale metallib): the legacy kernels (metal_mmse) or the CPU loop
   // then take over.
   // S-5c: the tail block no longer costs a second engine call - it is merged into the standard
-  // batch as an extra padded system (see merge_tail below), so a hop is one command buffer.
-  const bool matrix_on = engine_ready && use_matrix_engine && matrix_ready;
-  // Deferring the batch is what lets the rest of the receiving chain run while the GPU works on it
-  // (see port_channel_estimator::submit()); the matrix flavor and the CPU-inversion knob keep
-  // completing their batches here, so a stage that cannot defer reports stage_pending = false.
-  const bool defer = !matrix_on;
+  // batch as an extra padded system (see merge_tail above), so a hop is one command buffer.
+  // \note matrix_on / defer / tail_on_cpu / merge_tail / device_corr_enabled / std_slots_filled are
+  //       computed further up: the standard block's host build is skipped when the device fills
+  //       those slots, so those decisions have to exist before the build (S-7f-5v).
   nof_pending_unpacks = 0;
   stage_pending       = false;
-  // Largest tail block order (L = pilots per block) the CPU reference path is known to be fast for
-  // (a 36x36 Gauss-Jordan is ~23k FLOPs). Only consulted by the OCUDU_CE_TAIL_CPU A/B knob.
-  static constexpr unsigned MAX_CPU_TAIL_ORDER = 36;
-  bool       hop_gpu   = false; // engine processed this hop (any block)
-  bool       hop_nn    = false; // the simdgroup 8x8 (matrix) kernels were the ones used
-  unsigned   hop_pad   = 0;     // ceil8(L) - L of the last matrix batch (A/B pad overhead)
+  bool     hop_gpu = false; // engine processed this hop (any block)
+  bool     hop_nn  = false; // the simdgroup 8x8 (matrix) kernels were the ones used
+  unsigned hop_pad = 0;     // ceil8(L) - L of the last matrix batch (A/B pad overhead)
   // Written on the data path, read only by the timing report below (hence maybe_unused).
   [[maybe_unused]] unsigned tail_L = 0; // block L of the tail batch (log aid for std-less hops)
   bool       std_blocks_ok = true; // standard-block engine batch succeeded (CPU fallback otherwise)
   bool       tail_ok       = true; // tail/edge-block engine batch succeeded
   if (engine_ready) {
-    // Tail-block A/B knob (research only, not a supported configuration): OCUDU_CE_TAIL_CPU=1
-    // computes the tail with the CPU reference math of the fallback loop below. It also disables
-    // the merged batch below, which would otherwise stage the tail.
-    //
-    // The CPU block path inverts its A with a serial O(L^3) Gauss-Jordan, so the knob is honoured
-    // only up to the order that path is fast for (L<=36; a large block_prb would make the tail
-    // milliseconds there) - above it, the engine runs the tail regardless.
-    const unsigned tail_L_est  = rem_prb * 6U * npt;
-    const bool     tail_on_cpu = (rem_prb != 0) && (tail_L_est <= MAX_CPU_TAIL_ORDER) &&
-                                 (std::getenv("OCUDU_CE_TAIL_CPU") != nullptr);
     // Merged batch (S-5c): the standard blocks AND the tail block in ONE engine call, i.e. one
     // command buffer and one wait per hop instead of two. The tail rides as an extra SYSTEM of the
     // batch, not as an extra block: the engine takes one A / R_hp per system and one block count
@@ -972,34 +1029,27 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // exactly zero). It therefore estimates what the split path estimates, at the cost of a few us
     // of extra GPU work (each tail system carries n_std_blocks block slots, of which one is real)
     // against the ~100 us of host round trip it removes.
-    const bool merge_tail = (rem_prb != 0) && (n_std_blocks != 0) && !matrix_on && !tail_on_cpu &&
-                            (2 * nof_layers <= MAX_LAYERS) && (std::getenv("OCUDU_CE_SPLIT_TAIL") == nullptr);
-    // The device build fills the slots of ONE geometry, and a merged batch holds TWO (the standard
-    // blocks in the layer systems and the tail block in the extra ones). So it is used only when the
-    // standard geometry is the whole batch: otherwise the tail system would keep whatever the slot
-    // held before, and the weights would be built from a stale matrix. With no tail, or with the
-    // split form (two batches), the standard batch is the single geometry the kernel describes.
     //
-    // ON by default since the equivalence defect was found and fixed: the host batch stages A^-1
-    // itself, so K1 must NOT run on it, and run_engine_blocks() now keys that decision on this
-    // stage's presence instead of on the order (see the gpu_invert note there). OCUDU_CE_CORR_DEV=0
-    // keeps the host build for A/B.
-    static const bool device_corr_enabled = []() {
-      const char* env = std::getenv("OCUDU_CE_CORR_DEV");
-      return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
-    }();
-    // The matrices are built by the DEVICE (build_correlation(), below) and then inverted by the
-    // HOST in the slots they were written to, so no order limit applies here: the correlation kernels
+    // The device build fills the slots of ONE geometry, and a merged batch holds TWO (the standard
+    // blocks in the layer systems and the tail block in the extra ones), so it is a PREFIX that
+    // covers the standard systems only (corr_stage::nof_systems) - the edge group keeps the host
+    // build and staging. See dev_corr_std_merged above.
+    //
+    // device_corr_enabled is ON by default since the equivalence defect was found and fixed: the
+    // host batch stages A^-1 itself, so K1 must NOT run on it, and run_engine_blocks() keys that
+    // decision on this stage's presence instead of on the order (see the gpu_invert note there).
+    // OCUDU_CE_CORR_DEV=0 keeps the host build for A/B.
+    // The matrices are built by the DEVICE and then inverted by the HOST in the slots they were
+    // written to, so no order limit applies here: the correlation kernels
     // take whatever geometry the estimator hands them, and the host Gauss-Jordan has no limit either,
-    // which is what lets the OTA geometry (order 72) use this path. What the device build cannot do
-    // is a MERGED batch, because a merged batch holds two different geometries in one slot array.
-    // NOT the merged batch: it carries TWO geometries in one slot array (the edge block rides as
-    // extra systems of the standard group), and building both needs the edge block's slots, strides
-    // and inversion to be worked out together - an attempt at that landed A twice-inverted in the
-    // standard slots (a0 = 1861 instead of ~1, and the 256QAM capture fell to 21.8 dB), so it stays
-    // out until that is redone deliberately. See the plan: the air leg measured 37.5% coverage
-    // (device_corr_builds=26761 of 71384 hops) with this gate in place.
-    std_slots_filled = device_corr_enabled && !merge_tail && (n_std_blocks != 0);
+    // which is what lets the OTA geometry (order 72) use this path.
+    //
+    // S-7f-5v: the MERGED batch is covered now, but by a DIFFERENT mechanism - the device builds the
+    // standard group as a prefix of the engine's own command buffer (dev_corr_std_merged, decided
+    // above the host build) and the edge group keeps the host build. The two-geometry problem that
+    // defeated the first attempt is handled by corr_stage::nof_systems: the prefix covers the
+    // standard systems only, so it cannot write the edge block's slots. std_slots_filled therefore
+    // still means "the non-merged batch's slots are the device's", exactly as before.
     // K3 (S-6a): the equalizer's per-symbol estimates, built on the GPU inside the engine call. The
     // destination can only be filled by a call that covers the WHOLE allocation with the legacy
     // kernels - the merged batch, or a hop whose single batch is everything - otherwise the blocks
@@ -1130,14 +1180,15 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // K0-d: the DEVICE builds A and R_hp of the standard group; the host then inverts what it
       // wrote. The edge block is built separately below, into these same slots.
       {
-        // K0-d does not cover this branch (see the gate above): the host builds and stages both
-        // groups, exactly as before the device build existed.
-        std::optional<metal::mmse_engine::corr_stage> std_corr;
-        (void)std_corr;
         // The standard group's A/R_hp must be staged with the SAME inversion decision as the tail
         // below and as run_engine_blocks(): when the device inverts, both must leave A in the slots
         // for K1. A hardcoded false here wrote A^-1 into the very slots the tail filled with A
         // (S-7f-4a), which is what "one geometry written with two semantics" looked like.
+        //
+        // S-7f-5v: slots_filled = dev_corr_std_merged. When the device builds this group as a
+        // prefix of the engine's own command buffer (below), the host must not touch these slots at
+        // all - not even to stage them - or the write would land on the device's matrices. The y
+        // descriptors are recorded either way: they are not part of that gate.
         stage_engine_group(args,
                            0,
                            n_std_blocks,
@@ -1149,7 +1200,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                            st,
                            matrix_on,
                            gpu_invert,
-                           false);
+                           dev_corr_std_merged);
       }
 #if defined(OCUDU_CE_TIME)
       stage_us_local += std::chrono::duration<double, std::micro>(steady_clock::now() - t_stage_begin).count();
@@ -1161,10 +1212,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // K0-d does not cover this branch yet. The edge block rides as EXTRA SYSTEMS of the standard
       // batch, so its slots are the standard ones - slot stride L_std / nout_std while its own block
       // order is L_e / nout_e, which is what the correlation kernels' system stride was added for.
-      // Attempting it directly (build the standard group, then the edge block into those same slots,
-      // with the host write stopped in between) left A inverted twice in the standard
-      // slots: a0 read 1861 instead of ~1 and the 256QAM capture fell from 24 to 21.8 dB. The slot
-      // bookkeeping needs to be redone deliberately - see the plan.
+      // What defeated the first attempt at covering this branch was that the device prefix built the
+      // standard geometry for the WHOLE batch and so wrote over the edge block's slots; the prefix
+      // now covers the standard systems only (corr_stage::nof_systems), and the edge group keeps the
+      // host build and staging below - one geometry per writer.
       {
         // Host construction and staging for the tail systems.
         build_correlation_matrices(stats,
@@ -1210,7 +1261,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 #if defined(OCUDU_CE_TIME)
       const auto t_submit_begin = steady_clock::now();
 #endif
-      const bool merged_ok = engine_run(nullptr,
+      const bool merged_ok = engine_run(std_corr_prefix.has_value() ? &std_corr_prefix.value() : nullptr,
                                         nout_std,
                                         L_std,
                                         2 * nof_layers,
@@ -2243,10 +2294,15 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   // WIDER than the block (the matrix flavor's ceil8 pad) also needs the host's pad rows/columns in
   // their final state - and with st.L == L and st.nout == nout there is no pad to speak of.
   const bool slots_filled = device_built && (st.L == L) && (st.nout == nout);
-  if (device_stats != nullptr && !device_built) {
-    logger.warning("[mmse_ce] device correlation build failed (systems={} L={}): staging them on the host",
+  if (device_stats != nullptr && !device_built && !matrix) {
+    // S-7f-5v: on this route the caller did NOT build the host arrays - it skipped them precisely
+    // because this call was going to fill those slots - so staging "what the host has" would copy
+    // the PREVIOUS geometry's matrices, or nothing at all. Fail the batch instead: the caller's CPU
+    // block path rebuilds its own matrices and computes these blocks itself.
+    logger.warning("[mmse_ce] device correlation build failed (systems={} L={}): the blocks go to the CPU path",
                    nof_layers,
                    L);
+    return false;
   }
   stage_engine_group(args,
                      gb_start,

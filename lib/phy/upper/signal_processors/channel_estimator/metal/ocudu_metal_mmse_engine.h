@@ -146,6 +146,16 @@ public:
     /// the engine uses the packed spacing.
     unsigned a_sys_stride = 0;
     unsigned r_sys_stride = 0;
+    /// How many systems this stage covers, starting at its own pointers. 0 means "the whole batch"
+    /// (the caller's nof_systems), which is what every single-geometry caller wants.
+    ///
+    /// A MERGED batch is the case that needs it: it holds the standard blocks in the systems
+    /// [0, nof_layers) and the edge block in the systems [nof_layers, 2 * nof_layers), so a prefix
+    /// that built this stage's geometry for the BATCH's systems would write the standard matrices
+    /// over the edge block's slots - which are a different geometry. That is what the earlier
+    /// attempt at a merged device build did (the edge block's slots came out of the standard
+    /// geometry, A was then inverted once more by the host's own staging, and a0 read 1861).
+    unsigned nof_systems = 0;
     /// Matrix order of one system: npt * npf.
     unsigned l = 0;
     /// Subcarriers of the block (nout = nf * 14).
