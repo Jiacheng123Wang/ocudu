@@ -134,6 +134,32 @@ private:
   };
   ls_geometry ls_geometry_of(const fd_td_estimation_stage_args& args) const;
 
+  /// \brief One least-squares pilot of the hop: the device's own result when the device built them
+  /// (K0-a), the host pre-stage's buffer otherwise.
+  ///
+  /// This is the single accessor of the hop's LS pilots for every host consumer of the stage. It
+  /// replaced two whole-buffer passes - the copy-back of the device result into pilots_lse_view and
+  /// the in-place 1/beta scaling that followed it - which together published a device quantity into
+  /// host memory for a handful of readers that need a fraction of it, and left the host buffer as a
+  /// second source of truth that the device path had to keep rewriting.
+  ///
+  /// The DEVICE buffer holds the RECEIVED domain (no DM-RS to data scaling), which is what the
+  /// classical FD stage starts from and what the correlation model's noise-to-pilot-power reference
+  /// needs; the estimator's published channel is the DATA domain (the classical stage scales by
+  /// 1 / beta, and so does the device's own y scatter, see pilots_stage::inv_beta), so a consumer
+  /// asks for the domain it needs instead of relying on the buffer having been scaled.
+  ///
+  /// \param[in] args     Hop arguments (geometry and the DM-RS to data scaling).
+  /// \param[in] i_symbol DM-RS symbol of the hop.
+  /// \param[in] i_layer  Transmission layer.
+  /// \param[in] j        Pilot index within the symbol.
+  /// \param[in] scaled   True for the DATA domain, false for the received domain.
+  cf_t ls_pilot(const fd_td_estimation_stage_args& args,
+                unsigned                        i_symbol,
+                unsigned                        i_layer,
+                unsigned                        j,
+                bool                            scaled) const;
+
   // See the base class documentation.
   bool complete_fd_td_estimation_stage() override;
 

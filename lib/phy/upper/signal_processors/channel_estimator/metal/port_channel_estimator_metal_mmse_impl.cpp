@@ -431,10 +431,13 @@ float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estima
   // The caller has already applied the DM-RS to data scaling (1 / beta) to the LSE pilots, exactly
   // like the classical FD stage, so here they only need smoothing. estimate_noise() reconstructs the
   // received (unscaled) pilots from this buffer and beta, and returns the residual in the received
-  // domain.
+  // domain. ls_pilot() applies that scaling per element, from whichever side built the pilots.
   for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
     for (unsigned i_symbol = 0; i_symbol != nof_dmrs_symbols; ++i_symbol) {
-      ocuduvec::copy(tmp_lse.get_symbol(i_symbol, i_layer), args.pilots_lse_view.get_symbol(i_symbol, i_layer));
+      span<cf_t> dst = tmp_lse.get_symbol(i_symbol, i_layer);
+      for (unsigned j = 0; j != dst.size(); ++j) {
+        dst[j] = ls_pilot(args, i_symbol, i_layer, j, /*scaled=*/true);
+      }
       apply_fd_smoothing(tmp_filtered_enlarged.get_symbol(i_symbol, i_layer),
                          tmp_lse_enlarged.get_symbol(i_symbol, i_layer),
                          nof_prb,
@@ -750,6 +753,29 @@ bool port_channel_estimator_metal_mmse_impl::stage_produces_ls_pilots(const fd_t
   return ls_geometry_of(args).ok;
 }
 
+cf_t port_channel_estimator_metal_mmse_impl::ls_pilot(const fd_td_estimation_stage_args& args,
+                                                     unsigned                        i_symbol,
+                                                     unsigned                        i_layer,
+                                                     unsigned                        j,
+                                                     bool                            scaled) const
+{
+  const float scale = scaled ? (1.0F / args.beta_scaling) : 1.0F;
+
+  if (device_ls_valid) {
+    // [symbol][layer][pilot], real/imag interleaved, nof_symbol_pilots per (symbol, layer) - the
+    // layout K0-a staged (its gate makes its nof_pilots == args.nof_symbol_pilots).
+    const float* p = gpu_ls_out +
+                     ((static_cast<std::size_t>(i_symbol) * args.dmrs_patterns.size() + i_layer) *
+                          args.nof_symbol_pilots +
+                      j) * 2;
+    return cf_t(p[0] * scale, p[1] * scale);
+  }
+
+  // No device result for this hop: the host pre-stage filled pilots_lse_view, in the received domain.
+  cf_t v = args.pilots_lse_view.get_symbol(i_symbol, i_layer)[j];
+  return scaled ? v * scale : v;
+}
+
 void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
@@ -769,13 +795,14 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   const unsigned staged_cdm_groups = stage_device_noise_inputs(args, npt);
 
   // ---- K0-a: the estimator's INPUT stage, on the device --------------------------------
-  // The pilots are recomputed HERE, on the device, when the hop qualifies, and the result
-  // OVERWRITES pilots_lse_view - so the value the rest of the estimator consumes comes from the
-  // device. The host pre-stage is what this replaces, so it is SKIPPED for those hops (the base
-  // class asks stage_produces_ls_pilots(), which reads the same geometry this gate does through
-  // ls_geometry_of()); the CFO is then the device's too (see account_hop_cfo() below). The device
-  // path is DEFAULT ON, like the device inversion; OCUDU_CE_CPU_LS=1 forces the host pre-stage (the
-  // escape hatch, and the A/B for the tolerance probe), and OCUDU_CE_LS_CHECK=1 needs both sides.
+  // The pilots are recomputed HERE, on the device, when the hop qualifies, and every host consumer
+  // of them reads them where the device left them (see ls_pilot()): nothing is copied back into
+  // pilots_lse_view, which is now only the fallback's buffer. The host pre-stage is what this
+  // replaces, so it is SKIPPED for those hops (the base class asks stage_produces_ls_pilots(), which
+  // reads the same geometry this gate does through ls_geometry_of()); the CFO is then the device's
+  // too (see account_hop_cfo() below). The device path is DEFAULT ON, like the device inversion;
+  // OCUDU_CE_CPU_LS=1 forces the host pre-stage (the escape hatch, and the A/B for the tolerance
+  // probe), and OCUDU_CE_LS_CHECK=1 needs both sides.
   //
   // The per-hop state of the two device-side consumers of this result lives here: the validity flag
   // the y scatter (glue #2) is gated on, and the descriptors the staging records. Both are reset on
@@ -938,16 +965,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           }
         }
 
-        // Consume the device result.
-        for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-          for (unsigned i_symb = 0; i_symb != npt; ++i_symb) {
-            span<cf_t>       dst = args.pilots_lse_view.get_symbol(i_symb, i_layer);
-            const float*     d = gpu_ls_out + (static_cast<std::size_t>(i_symb) * nof_layers + i_layer) * nof_pilots * 2;
-            for (unsigned j = 0; j != nof_pilots; ++j) {
-              dst[j] = cf_t(d[2 * j], d[2 * j + 1]);
-            }
-          }
-        }
+        // The device result is NOT copied back: the host consumers read it where the device left it
+        // (see ls_pilot()). What used to be here was a full copy of the hop into pilots_lse_view
+        // plus an in-place 1/beta scaling of it, for readers that each need the domain they need.
       } else {
         // Cold path: this hop qualified for the device build, so the base class SKIPPED the host
         // pre-stage (stage_produces_ls_pilots()) and the least-squares pilots and the CFO have to
@@ -969,37 +989,34 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   const auto t_begin = steady_clock::now();
 #endif
 
-  // Mean power of the received DM-RS pilots, measured BEFORE the DM-RS to data scaling below: the
-  // classical noise estimator returns the residual in the received domain, so this is the reference
-  // that turns sigma2 into the noise-to-signal ratio the unit-normalized correlation model needs.
+  // Mean power of the received DM-RS pilots, in the RECEIVED domain: the classical noise estimator
+  // returns the residual in that domain, so this is the reference that turns sigma2 into the
+  // noise-to-signal ratio the unit-normalized correlation model needs. It is a reduction over the
+  // device's own pilots when the device built them (no copy, see ls_pilot()).
   float pilots_power = 0.0F;
   {
     size_t nof_power_pilots = 0;
     for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
       for (unsigned i_symbol = 0; i_symbol != args.nof_dmrs_symbols; ++i_symbol) {
-        span<const cf_t> sym = args.pilots_lse_view.get_symbol(i_symbol, i_layer);
-        for (const cf_t& x : sym) {
-          pilots_power += std::norm(x);
+        for (unsigned j = 0; j != args.nof_symbol_pilots; ++j) {
+          pilots_power += std::norm(ls_pilot(args, i_symbol, i_layer, j, /*scaled=*/false));
         }
-        nof_power_pilots += sym.size();
+        nof_power_pilots += args.nof_symbol_pilots;
       }
     }
     pilots_power = (nof_power_pilots == 0) ? 0.0F : pilots_power / static_cast<float>(nof_power_pilots);
   }
 
-  // Mirror the classical FD stage: scale the least-squares pilots by 1 / beta so that the estimator
-  // produces the DATA-domain channel, which is the domain the equalizer and the demapper expect.
-  // Skipping this made every channel estimate 1 / beta too small whenever the PUSCH processor sets
-  // a scaling other than one - which it always does in a real cell (0.708 for two CDM groups
-  // without data, the configuration this cell runs) and never does in a lab test that leaves the
-  // CDM group count at one.
-  const float inv_beta = 1.0F / args.beta_scaling;
-  for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-    for (unsigned i_symbol = 0; i_symbol != args.nof_dmrs_symbols; ++i_symbol) {
-      span<cf_t> sym = args.pilots_lse_view.get_symbol(i_symbol, i_layer);
-      ocuduvec::sc_prod(sym, sym, inv_beta);
-    }
-  }
+  // The DATA domain is what the estimator publishes (and what the equalizer and the demapper
+  // expect): the classical FD stage scales the least-squares pilots by 1 / beta, and so does the
+  // device's own y scatter (see pilots_stage::inv_beta). Skipping the scaling made every channel
+  // estimate 1 / beta too small whenever the PUSCH processor sets a scaling other than one - which
+  // it always does in a real cell (0.708 for two CDM groups without data, the configuration this
+  // cell runs) and never does in a lab test that leaves the CDM group count at one.
+  //
+  // It is applied by the consumers, per element, through ls_pilot(..., /*scaled=*/true): the hop is
+  // no longer scaled in place here, because after S-7f-5z the device's own pilots are the source
+  // and the host buffer is only the fallback's.
 
   // Classical noise variance: computed by the DEVICE inside the extraction's command buffer when
   // that path ran (S-7f-5w), by the host otherwise (OCUDU_CE_DEV_SIGMA2=0, no device LSE, or a
@@ -1098,8 +1115,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   stats_in.dmrs_symbol_1     = npt > 1 ? dmrs_sym[1] : 0;
   span<cf_t> pilots_span(stats_pilots.data(), args.nof_dmrs_symbols * args.nof_symbol_pilots);
   for (unsigned i_symbol = 0; i_symbol != args.nof_dmrs_symbols; ++i_symbol) {
-    ocuduvec::copy(pilots_span.subspan(i_symbol * args.nof_symbol_pilots, args.nof_symbol_pilots),
-                   args.pilots_lse_view.get_symbol(i_symbol, 0));
+    // Layer 0 only, in the DATA domain: the correlation model is built from the pilot estimates the
+    // estimator publishes, and this is where they were copied from when the device result was
+    // published into pilots_lse_view (see ls_pilot()).
+    span<cf_t> dst = pilots_span.subspan(i_symbol * args.nof_symbol_pilots, args.nof_symbol_pilots);
+    for (unsigned j = 0; j != dst.size(); ++j) {
+      dst[j] = ls_pilot(args, i_symbol, 0, j, /*scaled=*/true);
+    }
   }
   stats_in.pilots_lse = pilots_span;
   // \note \c stats_in.sigma2 carries the noise-to-pilot-power ratio, not an absolute power: see
@@ -1654,13 +1676,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     const unsigned b_npf = b_prb * args.dmrs_patterns.front().re_pattern.count();
     const unsigned b_nf  = b_prb * NOF_SUBCARRIERS_PER_RB;
     for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-      // Pack the block pilot vector (symbol-major, real/imag interleaved).
+      // Pack the block pilot vector (symbol-major, real/imag interleaved), in the DATA domain.
       for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
-        span<const cf_t> src =
-            args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan(b_start_prb * 6, b_prb * 6);
+        const unsigned base = b_start_prb * 6;
         for (unsigned j = 0; j != b_npf; ++j) {
-          y_block[2 * (i_symbol * b_npf + j)]     = src[j].real();
-          y_block[2 * (i_symbol * b_npf + j) + 1] = src[j].imag();
+          const cf_t v                            = ls_pilot(args, i_symbol, i_layer, base + j, /*scaled=*/true);
+          y_block[2 * (i_symbol * b_npf + j)]     = v.real();
+          y_block[2 * (i_symbol * b_npf + j) + 1] = v.imag();
         }
       }
       // h = W . y (real weights, complex vector): two real matrix-vector products.
@@ -1822,9 +1844,11 @@ bool port_channel_estimator_metal_mmse_impl::probe_device_y_stage(const fd_td_es
           if ((b < s.n_blk_real) && (k < s.nof_symb * s.npf)) {
             const unsigned i_symb = k / s.npf;
             const unsigned j      = k - i_symb * s.npf;
-            const cf_t     v      = args.pilots_lse_view.get_symbol(i_symb, i_layer)[s.pilot_base + b * s.npf + j];
-            er                    = v.real();
-            ei                    = v.imag();
+            // The device's y slots carry the DATA domain (it applies 1 / beta itself, see
+            // pilots_stage::inv_beta), so the expectation is the scaled LS pilot.
+            const cf_t v = ls_pilot(args, i_symb, i_layer, s.pilot_base + b * s.npf + j, /*scaled=*/true);
+            er           = v.real();
+            ei           = v.imag();
           }
           ++nof_slot;
           const double dr = static_cast<double>(d[2 * k]) - er;
@@ -1920,9 +1944,10 @@ bool port_channel_estimator_metal_mmse_impl::record_device_y_stage(const fd_td_e
   s.n_blk_slots = st.n_blk;
   s.n_blk_real  = n_blk;
   s.Ls          = st.L;
-  // The DM-RS to data scaling the host applies to pilots_lse_view() before staging it. The device
-  // reads gpu_ls_out, which does NOT carry it (the host scales its own copy afterwards), so the
-  // kernel applies it - one multiply per component, the same one ocuduvec::sc_prod() applies.
+  // The DM-RS to data scaling the host applies to the pilots it stages. The device reads
+  // gpu_ls_out, which does NOT carry it (that is the received domain K0-a produces), so the kernel
+  // applies it - one multiply per component, the same one the host's staging loop applies through
+  // ls_pilot(..., /*scaled=*/true).
   s.inv_beta = 1.0F / args.beta_scaling;
   ++nof_device_y_stage;
   return true;
@@ -2049,11 +2074,11 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
         const unsigned bl   = b % 4u;
         float* qp = gpu_qy + ((static_cast<std::size_t>(sys_offset + i_layer) * nquads + quad) * Ls) * 8 + 2 * bl;
         for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
-          span<const cf_t> src =
-              args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan((gb_start + b * b_prb) * comb, npf);
+          const unsigned base = (gb_start + b * b_prb) * comb;
           for (unsigned j = 0; j != npf; ++j) {
-            qp[(i_symbol * npf + j) * 8]     = src[j].real();
-            qp[(i_symbol * npf + j) * 8 + 1] = src[j].imag();
+            const cf_t v                     = ls_pilot(args, i_symbol, i_layer, base + j, /*scaled=*/true);
+            qp[(i_symbol * npf + j) * 8]     = v.real();
+            qp[(i_symbol * npf + j) * 8 + 1] = v.imag();
           }
         }
       }
@@ -2075,11 +2100,11 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
             std::memset(yp + 2 * L, 0, static_cast<std::size_t>(Ls - L) * 2 * sizeof(float));
           }
           for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
-            span<const cf_t> src =
-                args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan((gb_start + b * b_prb) * comb, npf);
+            const unsigned base = (gb_start + b * b_prb) * comb;
             for (unsigned j = 0; j != npf; ++j) {
-              yp[2 * (i_symbol * npf + j)]     = src[j].real();
-              yp[2 * (i_symbol * npf + j) + 1] = src[j].imag();
+              const cf_t v                     = ls_pilot(args, i_symbol, i_layer, base + j, /*scaled=*/true);
+              yp[2 * (i_symbol * npf + j)]     = v.real();
+              yp[2 * (i_symbol * npf + j) + 1] = v.imag();
             }
           }
         }
