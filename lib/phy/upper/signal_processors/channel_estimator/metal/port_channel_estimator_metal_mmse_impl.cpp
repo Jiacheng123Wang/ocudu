@@ -1198,7 +1198,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                         reformat_for(block_prb * NOF_SUBCARRIERS_PER_RB,
                                                      rem_prb * NOF_SUBCARRIERS_PER_RB,
                                                      nof_layers),
-                                        merged_defer);
+                                        merged_defer,
+                                        st,
+                                        0);
 #if defined(OCUDU_CE_TIME)
       submit_us_local += std::chrono::duration<double, std::micro>(steady_clock::now() - t_submit_begin).count();
 #endif
@@ -1711,8 +1713,24 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
                                                         bool     matrix,
                                                         bool     gpu_invert,
                                                         const metal::mmse_engine::reformat_stage* reformat,
-                                                        bool     defer)
+                                                        bool     defer,
+                                                        const engine_strides& st,
+                                                        unsigned sys_offset)
 {
+  // The engine addresses the systems of a batch from the BASE of each staging buffer, while the
+  // caller stages them (stage_engine_group()) and unpacks them (unpack_engine_group()) at
+  // `sys_offset` - a batch tucked into the slots AFTER another one, which is what the split form's
+  // tail block is (sys_offset = nof_layers). Handing the engine the base pointers made it read and
+  // write systems [0, nof_systems) instead of [sys_offset, sys_offset + nof_systems): the tail was
+  // computed from the standard group's slots, its results landed in the wrong h slots, and the
+  // unpack then read stale data. That is the defect the channel-estimator unit test's Test 11
+  // (merged vs split) has been reporting all along.
+  float* a_slot = gpu_a + static_cast<std::size_t>(sys_offset) * st.L * st.L;
+  float* r_slot = gpu_r_hp + static_cast<std::size_t>(sys_offset) * st.nout * st.L;
+  float* w_slot = gpu_w + static_cast<std::size_t>(sys_offset) * st.nout * st.L;
+  float* y_slot = gpu_y + static_cast<std::size_t>(sys_offset) * st.n_blk * 2 * st.L;
+  float* h_slot = gpu_h + static_cast<std::size_t>(sys_offset) * st.n_blk * 2 * st.nout;
+  float* q_slot = gpu_qy + static_cast<std::size_t>(sys_offset) * ((nof_blocks + 3u) / 4u) * st.L * 8;
   // Weight (W = R_hp . A^-1) + apply (h = W . y) in ONE engine command buffer, with the inversion
   // (K1) prepended in the same buffer when the A slots hold A itself, and the equalizer's
   // per-symbol estimates (K3) appended to the same buffer when the caller asked for them. The
@@ -1741,13 +1759,13 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
   }
   const bool k1_inline = gpu_invert && (std::getenv("OCUDU_CE_INVERT_FIRST") == nullptr);
   const bool engine_ok =
-      matrix ? engine->run_nn(gpu_a, gpu_r_hp, gpu_w, gpu_qy, gpu_h, nout, L, nof_systems, nof_blocks)
+      matrix ? engine->run_nn(a_slot, r_slot, w_slot, q_slot, h_slot, nout, L, nof_systems, nof_blocks)
              : (k1_inline
-                    ? (defer ? engine->run_async(gpu_a,
-                                                 gpu_r_hp,
-                                                 gpu_w,
-                                                 gpu_y,
-                                                 gpu_h,
+                    ? (defer ? engine->run_async(a_slot,
+                                                 r_slot,
+                                                 w_slot,
+                                                 y_slot,
+                                                 h_slot,
                                                  nout,
                                                  L,
                                                  nof_systems,
@@ -1757,9 +1775,9 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
                              : engine->run(
                                    gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat))
                     : (defer ? engine->run_weights_only_async(
-                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat, corr)
+                                   a_slot, r_slot, w_slot, y_slot, h_slot, nout, L, nof_systems, nof_blocks, reformat, corr)
                              : engine->run_weights_only(
-                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat, corr)));
+                                   a_slot, r_slot, w_slot, y_slot, h_slot, nout, L, nof_systems, nof_blocks, reformat, corr)));
   if (!engine_ok) {
     logger.error("[mmse_ce] engine call failed (systems={} blocks={} nout={} L={} matrix={}): falling back to the "
                  "CPU path for these blocks",
@@ -2044,7 +2062,9 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                   matrix,
                   gpu_invert,
                   reformat,
-                  deferred)) {
+                  deferred,
+                  st,
+                  sys_offset)) {
     return false;
   }
   if (deferred) {

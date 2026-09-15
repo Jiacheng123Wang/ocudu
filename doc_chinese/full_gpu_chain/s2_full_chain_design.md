@@ -8001,3 +8001,53 @@ pipeline median **+35 µs**。与"多一次同步 dispatch/CB"的预期同量级
 3. `Real-time failure in RF` 每时隙率不劣于基线 **0.1148%**；
 4. **0 崩溃 / 0 USB 错误**、`corr_build_fail=0`、`zero-copy` 告警 = 0；
 5. 顺带看 `[ul_channel_estimation]` median 是否从 238.5 µs 下降。
+
+#### 48.121 S-7f-5q：**把那个雷挖了**——split 形式的尾块被引擎算在了错误的系统上（用户督促下修正）
+
+**（a）用户的批评是对的**
+> "未注册进 ctest 不意味着不做 test，如果 test 有问题，一定是在某个地方埋了雷。请解决我再 OTA。"
+
+我此前把 Test 11 归为"既有缺陷、与本工作无关"就收手了——**"无关"是对的，但"不管"是错的**。
+它测的是 **merged ≡ split** 两条路径应当给出相同估计；一条红着，说明其中一条路径是错的。
+
+**（b）根因：槽位寻址在三个地方不一致（第三处漏了 `sys_offset`）**
+
+| 位置 | 是否带 `sys_offset` |
+|---|---|
+| `stage_engine_group()`（**写** A/R_hp/y/qy） | **是**：`(sys_offset + sys) * Ls * Ls` 等 |
+| `unpack_engine_group()`（**读** gpu_h） | **是**：`gpu_h + (sys_offset + i_layer) * st.n_blk * 2 * st.nout` |
+| **引擎调用**（`engine_run` → `run_async/run/run_weights_only/run_nn`） | **否**：传的是 `gpu_a/gpu_r_hp/gpu_w/gpu_y/gpu_h/gpu_qy` **基址**，内核从 sys=0 起寻址 |
+
+⇒ split 形式的**尾块**（`sys_offset = nof_layers`）被引擎算成了**系统 [0, nof_systems)**：
+**读的是标准组的槽位、结果写进错误的 h 槽**，而 unpack 去读 `nof_layers..` 的**陈旧数据**。
+⇒ 这正是 Test 11 的 `max|dh|/rms 2.11e+00`、NMSE 差 1.29 dB；也是真实抓包上
+`iq1_10049` 6.24→**3.15**、`iq2_10044` 31.78→**8.87** 的原因（§48.101(d)）。
+⇒ 也解释了**为什么 merged 一直是对的**：merged 把两个几何放进**同一批**、`sys_offset = 0`，
+恰好与引擎的基址寻址重合——**这个缺陷因此只在 opt-in 的 split 形式上暴露**。
+
+**（c）修复**：`engine_run()` 接收 `st` 与 `sys_offset`，把**偏移后的槽位基址**
+（`a_slot/r_slot/w_slot/y_slot/h_slot/q_slot`，各自用与 staging/unpack 相同的 stride）交给引擎；
+merged 分支传 `sys_offset = 0`（行为不变）。
+
+**（d）判据（全部达成）**
+
+| 检查 | 修复前 | **修复后** |
+|---|---|---|
+| 单测 Test 11（merged ≡ split，6 形状） | `max\|dh\|/rms 2.11e+00`、NMSE 差 1.29 dB、**FAIL** | **`0.00e+00`（−240 dB，逐位一致）**、**dNMSE 0.000 dB**、**PASS** |
+| 单测总计 | 13 PASS / 1 FAIL | **16 PASS / 0 FAIL（exit 0）** |
+| split 形式真实抓包 `iq1_10049` | 3.15 dB | **6.24 dB**（= merged） |
+| split 形式真实抓包 `iq2_10044` | 8.87 dB | **31.86 dB**（= merged） |
+| 默认（merged）三条抓包 | 23.97 / 6.24 / 31.86 | **不变** |
+| `k0d` / `k1` / `combos` / `ctest -L phy` | — | **980/980 / 980/980 / PASS / 162/162** |
+
+**（e）`combos` 门禁升级**：split 那四组从"known-bad、不设门禁"改为**正式门禁**，
+现已 **10/10 全过**（`capture_gates.sh` 里旧的豁免注释一并更新）。
+
+**（f）教训（写下来）**
+1. **"与本工作无关"只回答了"谁弄坏的"，没回答"要不要修"**。前者是归因，后者是责任。
+   我把前者当成了后者的答案——**这是本会话最贵的一次判断失误**，且是用户点出来的。
+2. **一个红的门禁 = 一个真缺陷**。Test 11 因为没注册进 ctest 而长期无人看见，
+   但它指向的缺陷是**真实的、可复现的**（真实抓包上 6.24→3.15 dB）。
+   §48.117 记录的"未注册"是**观测缺口**，不是"缺陷不存在"的理由。
+3. **同一份数据在三个地方用同一套 stride 寻址时，任何一处漏掉偏移都会静默错**——
+   这与 §48.92/§48.94 同源（写者/读者对同一块内存的理解不一致）。

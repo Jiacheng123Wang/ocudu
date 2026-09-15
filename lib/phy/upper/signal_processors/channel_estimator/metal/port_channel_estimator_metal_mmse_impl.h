@@ -278,7 +278,9 @@ private:
                   bool                                     matrix,
                   bool                                     gpu_invert,
                   const metal::mmse_engine::reformat_stage* reformat,
-                  bool                                     defer);
+                  bool                                     defer,
+                  const engine_strides&                    st,
+                  unsigned                                 sys_offset);
 
   /// \brief Unpacks the engine outputs of the group staged at \c sys_offset into the grid
   /// (symbol-major within each block; the blocks start at PRB gb_start).
