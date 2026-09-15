@@ -65,8 +65,11 @@ TEST(BasebandCfoProcessorTest, CompensationIsAppliedExactlyWhenItIsAnnounced)
   const sampling_rate srate = sampling_rate::from_MHz(7.68);
   baseband_cfo_processor cfo(srate);
 
-  // Fresh processor: nothing scheduled, so nothing to apply and nothing may change.
+  // Fresh processor: nothing scheduled, so nothing to apply and nothing may change. The probe has to
+  // be able to say that nothing asked for a compensation at all (see [ul_cfo]).
   ASSERT_FALSE(cfo.applies_compensation());
+  ASSERT_EQ(cfo.get_nof_scheduled_commands(), 0) << "a fresh processor reports a command that was never scheduled";
+  ASSERT_FLOAT_EQ(cfo.get_cfo_hz(), 0.0F);
   {
     std::vector<cf_t>  samples(64, cf_t(0.25F, -0.5F));
     std::vector<cf_t>  before = samples;
@@ -84,6 +87,8 @@ TEST(BasebandCfoProcessorTest, CompensationIsAppliedExactlyWhenItIsAnnounced)
   ASSERT_TRUE(cfo.schedule_cfo_command(std::chrono::system_clock::now(), cfo_hz));
   cfo.next_cfo_command();
   ASSERT_TRUE(cfo.applies_compensation());
+  ASSERT_EQ(cfo.get_nof_scheduled_commands(), 2) << "both accepted commands must be counted (0 Hz included)";
+  ASSERT_FLOAT_EQ(cfo.get_cfo_hz(), cfo_hz);
   {
     std::vector<cf_t> samples(64);
     std::vector<cf_t> expected(64);

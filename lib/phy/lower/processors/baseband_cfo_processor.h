@@ -12,6 +12,7 @@
 #include "ocudu/phy/lower/processors/lower_phy_cfo_controller.h"
 #include "ocudu/phy/lower/sampling_rate.h"
 #include "ocudu/support/math/math_utils.h"
+#include <atomic>
 #include <chrono>
 
 namespace ocudu {
@@ -31,7 +32,14 @@ public:
   bool schedule_cfo_command(time_point time_, float cfo_Hz_, float cfo_drift_Hz_s_ = 0) override
   {
     cfo_command command{time_, cfo_Hz_, cfo_drift_Hz_s_};
-    return cfo_command_queue.try_push(command);
+    bool        accepted = cfo_command_queue.try_push(command);
+    if (accepted) {
+      // One atomic add per command, i.e. per Doppler update of an NTN cell or per `cfo` console
+      // command - never per sample. It is what lets the [ul_cfo] report tell "no controller ever
+      // asked for a compensation" apart from "a controller asked for exactly 0 Hz" (see get_cfo_hz()).
+      nof_scheduled_commands.fetch_add(1, std::memory_order_relaxed);
+    }
+    return accepted;
   }
 
   /// Reset sample offset and update the CFO if any command is queued.
@@ -73,6 +81,16 @@ public:
   /// Increments the CFO sample offset by a number of samples.
   void advance(unsigned nof_samples) { sample_offset += nof_samples; }
 
+  /// \brief Offset currently in effect, in hertz.
+  ///
+  /// Zero while nothing has scheduled a command, which is the state of a terrestrial cell: the only
+  /// writers of this queue are the NTN Doppler adapter (wired only when a cell configures NTN) and the
+  /// `cfo` console command of the application.
+  float get_cfo_hz() const { return current_cfo * srate.to_Hz<float>(); }
+
+  /// Number of commands accepted since construction (probe, see schedule_cfo_command()).
+  uint64_t get_nof_scheduled_commands() const { return nof_scheduled_commands.load(std::memory_order_relaxed); }
+
   /// \brief Whether \ref process() would modify the samples it is given.
   ///
   /// False while no usable offset is in effect: the processor's initial state, and what a scheduled
@@ -112,6 +130,8 @@ private:
   unsigned sample_offset = 0;
   /// Current normalized CFO.
   float current_cfo = 0.0;
+  /// Commands accepted since construction (probe only, see schedule_cfo_command()).
+  std::atomic<uint64_t> nof_scheduled_commands{0};
   /// Normalized CFO at the start time.
   float initial_cfo = 0.0;
   /// Current CFO start timestamp.

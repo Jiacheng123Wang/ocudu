@@ -42,12 +42,28 @@ class cfo_stats
   std::atomic<uint64_t> round_trips{0};
   /// Symbols processed, so a zero round-trip count can be told from "nothing ran".
   std::atomic<uint64_t> symbols{0};
+  /// Commands accepted by the compensation, i.e. how many times anything asked for an offset. Zero
+  /// with a zero offset means "no controller ever asked" (a terrestrial cell); a non-zero count with
+  /// a zero offset means "a controller asked for exactly 0 Hz" (an NTN cell with no Doppler).
+  std::atomic<uint64_t> commands{0};
+  /// Offset in effect, in hertz, as last observed.
+  std::atomic<float> cfo_hz{0.0F};
 #endif
 
 public:
 #if defined(OCUDU_METAL_STATS)
   void count_round_trip() { round_trips.fetch_add(1, std::memory_order_relaxed); }
   void count_symbol() { symbols.fetch_add(1, std::memory_order_relaxed); }
+
+  /// Samples the state of the compensation (called once per processed symbol).
+  void observe(float cfo_Hz, uint64_t nof_commands)
+  {
+    uint64_t seen = commands.load(std::memory_order_relaxed);
+    while ((nof_commands > seen) &&
+           !commands.compare_exchange_weak(seen, nof_commands, std::memory_order_relaxed)) {
+    }
+    cfo_hz.store(cfo_Hz, std::memory_order_relaxed);
+  }
 
   /// Reports once at exit (the counters are a function-local static, see cfo_counters()). Silent when
   /// no symbol was processed, so the tools that merely link this library print nothing.
@@ -58,13 +74,16 @@ public:
       return;
     }
     std::fprintf(stderr,
-                 "[ul_cfo] symbols=%llu round_trips=%llu\n",
+                 "[ul_cfo] symbols=%llu round_trips=%llu commands=%llu cfo_hz=%.3f\n",
                  static_cast<unsigned long long>(nof_symbols),
-                 static_cast<unsigned long long>(round_trips.load(std::memory_order_relaxed)));
+                 static_cast<unsigned long long>(round_trips.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(commands.load(std::memory_order_relaxed)),
+                 static_cast<double>(cfo_hz.load(std::memory_order_relaxed)));
   }
 #else
   void count_round_trip() {}
   void count_symbol() {}
+  void observe(float /*cfo_Hz*/, uint64_t /*nof_commands*/) {}
 #endif
 };
 
@@ -303,6 +322,7 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
     }
   }
   cfo_counters().count_symbol();
+  cfo_counters().observe(cfo_processor.get_cfo_hz(), cfo_processor.get_nof_scheduled_commands());
 
   // Advance CFO processor number of samples.
   cfo_processor.advance(symbol_buffer.get_nof_samples());
