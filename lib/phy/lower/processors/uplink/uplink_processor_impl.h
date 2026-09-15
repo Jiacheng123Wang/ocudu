@@ -116,11 +116,14 @@ private:
   unsigned nof_samples_per_subframe;
   /// Number of symbols per subframe.
   unsigned nof_symbols_per_subframe;
-  /// \brief Write index for the \ref temp_buffer holding OFDM symbols.
+  /// \brief Write index for the symbol buffer holding the OFDM symbol being collected.
   ///
-  /// Sample index within the \c temp_buffer data, it points the writing position within the buffered signal. It is
-  /// used to copy the samples aligned with the requested timestamp into the destination buffer.
-  unsigned temp_buffer_write_index;
+  /// Sample index within the \c symbol_buffers data, it points the writing position within the buffered
+  /// signal. It is used to copy the samples aligned with the requested timestamp into the destination
+  /// buffer.
+  unsigned symbol_buffer_write_index;
+  /// Index of the symbol buffer the symbol being collected is assembled in.
+  unsigned current_symbol_buffer = 0;
   /// Current symbol index within the slot.
   unsigned current_symbol_index;
   /// Current symbol size.
@@ -131,8 +134,14 @@ private:
   slot_point current_slot;
   /// List of the symbol sizes in number samples for each symbol within the subframe.
   std::vector<unsigned> symbol_sizes;
-  /// Temporal storage of baseband samples.
-  baseband_gateway_buffer_dynamic temp_buffer;
+  /// \brief Storage of the baseband samples of the OFDM symbols being collected.
+  ///
+  /// One buffer per symbol the PUxCH pipeline can keep in flight (see
+  /// puxch_processor_baseband::get_nof_symbol_buffers()): a symbol is assembled in the buffer that
+  /// acquire_symbol_buffer() hands out, which no transform in flight reads anymore, so the samples of
+  /// a symbol are never overwritten while they are still being transformed. The page-aligned variant
+  /// is what lets a transform read them without a copy.
+  std::vector<baseband_gateway_buffer_dynamic_aligned> symbol_buffers;
   /// Internal PRACH processor.
   std::unique_ptr<prach_processor> prach_proc;
   /// Internal PUxCH processor.

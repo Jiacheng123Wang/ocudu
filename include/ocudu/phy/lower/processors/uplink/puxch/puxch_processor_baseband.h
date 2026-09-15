@@ -18,13 +18,30 @@ public:
   /// Default destructor.
   virtual ~puxch_processor_baseband() = default;
 
+  /// \brief Number of OFDM symbol buffers the caller has to provide.
+  ///
+  /// The processor keeps transforms of up to this many symbols in flight, each reading the buffer its
+  /// symbol was assembled in. The caller owns that many independent buffers and assembles every symbol
+  /// in the one acquire_symbol_buffer() hands out.
+  virtual unsigned get_nof_symbol_buffers() const = 0;
+
+  /// \brief Acquires the buffer the caller shall assemble the next OFDM symbol into.
+  ///
+  /// The returned buffer is not read by any transform in flight: when the pipeline is full this call
+  /// finishes (and reports) the oldest symbol until the buffer is free. The caller must call it once
+  /// per OFDM symbol, before writing the samples, and then pass the index to process_symbol().
+  virtual unsigned acquire_symbol_buffer() = 0;
+
   /// \brief Processes a baseband OFDM symbol.
   ///
-  /// \param[in] samples Baseband samples to process.
-  /// \param[in] context OFDM Symbol context.
+  /// \param[in] samples      Baseband samples to process.
+  /// \param[in] context      OFDM Symbol context.
+  /// \param[in] buffer_index Symbol buffer the samples were assembled in, as returned by
+  ///                         acquire_symbol_buffer().
   /// \return \c true if the signal is processed, \c false otherwise.
   virtual bool process_symbol(const baseband_gateway_buffer_reader& samples,
-                              const lower_phy_rx_symbol_context&    context) = 0;
+                              const lower_phy_rx_symbol_context&    context,
+                              unsigned                              buffer_index) = 0;
 };
 
 } // namespace ocudu

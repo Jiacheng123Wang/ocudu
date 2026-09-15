@@ -242,7 +242,8 @@ TEST_P(LowerPhyUplinkProcessorFixture, FlowNoRequest)
           puxch_context.nof_symbols = i_symbol_subframe;
 
           // Process baseband.
-          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context);
+          unsigned buffer_index = puxch_proc->get_baseband().acquire_symbol_buffer();
+          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index);
 
           // Assert OFDM demodulator call.
           auto& ofdm_demod_entries = ofdm_demod_spy->get_demodulate_entries();
@@ -312,7 +313,8 @@ TEST_P(LowerPhyUplinkProcessorFixture, FlowFloodRequest)
           puxch_context.nof_symbols = i_symbol;
 
           // Process baseband.
-          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context);
+          unsigned buffer_index = puxch_proc->get_baseband().acquire_symbol_buffer();
+          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index);
 
           // Assert OFDM demodulator call.
           const auto& ofdm_demod_entries = ofdm_demod_spy->get_demodulate_entries();
@@ -395,7 +397,8 @@ TEST_P(LowerPhyUplinkProcessorFixture, FlowPipelinedNotificationPerSymbol)
           puxch_context.sector      = rg_context.sector;
           puxch_context.nof_symbols = i_symbol;
 
-          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context);
+          unsigned buffer_index = puxch_proc->get_baseband().acquire_symbol_buffer();
+          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index);
         }
 
         // Exactly one notification per OFDM symbol of the slot, in order (never one per port).
@@ -410,6 +413,90 @@ TEST_P(LowerPhyUplinkProcessorFixture, FlowPipelinedNotificationPerSymbol)
         ASSERT_EQ(ofdm_demod_spy->get_demodulate_entries().size(), 0)
             << "the pipelined path must not demodulate synchronously";
       }
+    }
+  }
+}
+
+TEST_P(LowerPhyUplinkProcessorFixture, SymbolBuffersAreNotReusedWhileRead)
+{
+  const unsigned     nof_rx_ports = std::get<0>(GetParam());
+  sampling_rate      srate        = std::get<1>(GetParam());
+  subcarrier_spacing scs          = std::get<2>(GetParam());
+  cyclic_prefix      cp           = std::get<3>(GetParam());
+
+  const unsigned base_symbol_size     = srate.get_dft_size(scs);
+  const unsigned nof_symbols_per_slot = get_nsymb_per_slot(cp);
+
+  // The deepest pipeline there is: with a single receive port the buffers (one per symbol) and the
+  // in-flight transforms are the same size, so every buffer gets wrapped around and the release
+  // condition has to be exactly right. With more ports the pipeline holds fewer symbols per slot and
+  // the same check is less tight, though still valid.
+  ofdm_demod_spy->pipeline_depth = 8;
+
+  baseband_gateway_buffer_dynamic buffer(nof_rx_ports, 2 * base_symbol_size);
+
+  puxch_processor_notifier_spy puxch_proc_notifier_spy;
+  puxch_proc->connect(puxch_proc_notifier_spy);
+
+  const unsigned nof_symbol_buffers = puxch_proc->get_baseband().get_nof_symbol_buffers();
+
+  // Symbol assembled in each buffer, or -1 when the buffer holds no symbol whose transform is in
+  // flight. A symbol counts as in flight until every one of its ports has been finished - which is
+  // what the demodulator spy counts, independently of when the processor releases the buffer.
+  std::vector<int> symbol_of_buffer(nof_symbol_buffers, -1);
+
+  // Drops the buffers of the symbols whose ports have all been finished. Called after every call that
+  // may finish a transform (acquiring a buffer does, and so does processing a symbol).
+  auto release_finished_buffers = [&]() {
+    for (unsigned i_buffer = 0; i_buffer != nof_symbol_buffers; ++i_buffer) {
+      if ((symbol_of_buffer[i_buffer] >= 0) &&
+          (ofdm_demod_spy->nof_finished_ports(symbol_of_buffer[i_buffer]) == nof_rx_ports)) {
+        symbol_of_buffer[i_buffer] = -1;
+      }
+    }
+  };
+
+  slot_point slot(to_numerology_value(scs), 0);
+  for (unsigned i_slot = 0; i_slot != 2; ++i_slot, ++slot) {
+    resource_grid_context rg_context;
+    rg_context.slot   = slot;
+    rg_context.sector = dist_sector_id(rgen);
+    puxch_proc->get_request_handler().handle_request(shared_rg_spy.get_grid(), rg_context);
+    ofdm_demod_spy->clear_pipeline();
+
+    for (unsigned i_symbol = 0, i_symbol_subframe = 0; i_symbol != nof_symbols_per_slot;
+         ++i_symbol, ++i_symbol_subframe) {
+      const unsigned cp_size = cp.get_length(i_symbol_subframe, scs).to_samples(srate.to_Hz());
+      buffer.resize(cp_size + base_symbol_size);
+      for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
+        span<ci16_t> port_buffer = buffer[i_port];
+        std::generate(port_buffer.begin(), port_buffer.end(), []() {
+          return to_ci16(cf_t(dist_sample(rgen) * INT16_MAX, dist_sample(rgen) * INT16_MAX));
+        });
+      }
+
+      lower_phy_rx_symbol_context puxch_context;
+      puxch_context.slot        = rg_context.slot;
+      puxch_context.sector      = rg_context.sector;
+      puxch_context.nof_symbols = i_symbol;
+
+      unsigned buffer_index = puxch_proc->get_baseband().acquire_symbol_buffer();
+
+      // Acquiring may have finished the oldest transform - that is how a buffer becomes free - so the
+      // mirror is brought up to date before the buffer is checked.
+      release_finished_buffers();
+
+      // The buffer must not hold a symbol that is still being transformed: reading the samples of
+      // such a symbol is exactly what a transform does.
+      ASSERT_EQ(symbol_of_buffer[buffer_index], -1)
+          << "symbol buffer " << buffer_index << " was handed out for symbol " << i_symbol << " of slot "
+          << slot.count() << " while the transform of symbol " << symbol_of_buffer[buffer_index]
+          << " still reads it";
+      symbol_of_buffer[buffer_index] = static_cast<int>(i_symbol);
+
+      puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index);
+
+      release_finished_buffers();
     }
   }
 }
@@ -486,7 +573,8 @@ TEST_P(LowerPhyUplinkProcessorFixture, LateRequest)
         puxch_context.nof_symbols = i_symbol;
 
         // Process baseband.
-        puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context);
+        unsigned buffer_index = puxch_proc->get_baseband().acquire_symbol_buffer();
+        puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index);
 
         // Assert OFDM demodulator call only for initial and next slot.
         const auto& ofdm_demod_entries = ofdm_demod_spy->get_demodulate_entries();

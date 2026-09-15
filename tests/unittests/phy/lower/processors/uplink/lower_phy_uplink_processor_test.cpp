@@ -220,6 +220,12 @@ TEST_P(LowerPhyUplinkProcessorFixture, Flow)
 
   uplink_processor_baseband& ul_proc_baseband = ul_processor->get_baseband();
 
+  // The symbols must be assembled in the buffers the PUxCH processor hands out, one after the other:
+  // a buffer is only handed out again once every transform reading it has finished, which is what
+  // keeps the samples of an in-flight symbol alive without copying them per transform.
+  const unsigned nof_symbol_buffers = puxch_proc_spy->get_baseband().get_nof_symbol_buffers();
+  unsigned       expected_buffer    = 0;
+
   baseband_gateway_timestamp timestamp = 0;
   for (unsigned i_frame = 0, i_slot_frame = 0; i_frame != nof_frames_test; ++i_frame) {
     for (unsigned i_subframe = 0; i_subframe != NOF_SUBFRAMES_PER_FRAME; ++i_subframe) {
@@ -280,6 +286,10 @@ TEST_P(LowerPhyUplinkProcessorFixture, Flow)
           ASSERT_EQ(puxch_proc_entries.size(), 1);
           auto& puxch_proc_entry = puxch_proc_entries.back();
           ASSERT_EQ(puxch_proc_entry.context, puxch_context);
+          ASSERT_EQ(puxch_proc_entry.buffer_index, expected_buffer)
+              << "symbol " << i_symbol << " of slot " << i_slot_frame
+              << " was not assembled in the symbol buffer that was acquired";
+          expected_buffer = (expected_buffer + 1) % nof_symbol_buffers;
 
           // No PRACH or PUxCH notifications.
           ASSERT_EQ(prach_proc_notifier_spy.get_nof_notifications(), 0);

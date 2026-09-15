@@ -28,9 +28,8 @@ lower_phy_uplink_processor_impl::lower_phy_uplink_processor_impl(std::unique_ptr
   nof_symbols_per_slot(get_nsymb_per_slot(config.cp)),
   nof_samples_per_subframe(config.rate.to_kHz()),
   nof_symbols_per_subframe(nof_symbols_per_slot * get_nof_slots_per_subframe(config.scs)),
-  temp_buffer_write_index(0),
+  symbol_buffer_write_index(0),
   current_symbol_index(0),
-  temp_buffer(config.nof_rx_ports, 2 * config.rate.get_dft_size(config.scs)),
   prach_proc(std::move(prach_proc_)),
   puxch_proc(std::move(puxch_proc_)),
   cfo_processor(config.rate),
@@ -40,6 +39,16 @@ lower_phy_uplink_processor_impl::lower_phy_uplink_processor_impl(std::unique_ptr
   ocudu_assert(puxch_proc, "Invalid PUxCH processor.");
 
   unsigned symbol_size_no_cp = config.rate.get_dft_size(config.scs);
+
+  // Create the symbol buffers. The PUxCH processor tells how many symbols it can keep in flight, i.e.
+  // how many buffers it needs, and every one of them is created with the maximum symbol size so that
+  // resize() never has to grow (and hence never reallocate) the storage.
+  unsigned nof_symbol_buffers = puxch_proc->get_baseband().get_nof_symbol_buffers();
+  report_fatal_error_if_not(nof_symbol_buffers != 0, "The PUxCH processor requires no symbol buffer.");
+  symbol_buffers.reserve(nof_symbol_buffers);
+  for (unsigned i_buffer = 0; i_buffer != nof_symbol_buffers; ++i_buffer) {
+    symbol_buffers.emplace_back(config.nof_rx_ports, 2 * symbol_size_no_cp);
+  }
 
   // Setup symbol sizes.
   symbol_sizes.reserve(nof_symbols_per_subframe);
@@ -148,12 +157,17 @@ void lower_phy_uplink_processor_impl::process_symbol_boundary(const baseband_gat
   slot_point slot(to_numerology_value(scs), i_slot % (NOF_SFNS * NOF_SUBFRAMES_PER_FRAME * nof_slots_per_subframe));
 
   // Prepare current symbol context before collect samples.
-  current_slot             = slot;
-  current_symbol_index     = i_symbol;
-  current_symbol_size      = symbol_sizes[i_symbol_sf];
-  temp_buffer_write_index  = 0;
-  current_symbol_timestamp = timestamp;
-  temp_buffer.resize(current_symbol_size);
+  current_slot              = slot;
+  current_symbol_index      = i_symbol;
+  current_symbol_size       = symbol_sizes[i_symbol_sf];
+  symbol_buffer_write_index = 0;
+  current_symbol_timestamp  = timestamp;
+
+  // Reserve the buffer this symbol is assembled in before writing into it. Acquiring it may finish
+  // the oldest symbol still in flight, which is exactly what makes the buffer free: the samples of
+  // the symbol being collected are therefore never written over samples a transform still reads.
+  current_symbol_buffer = puxch_proc->get_baseband().acquire_symbol_buffer();
+  symbol_buffers[current_symbol_buffer].resize(current_symbol_size);
 
   if (i_symbol == 0) {
     cfo_processor.next_cfo_command();
@@ -169,8 +183,11 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
   ocudu_assert(notifier != nullptr, "Notifier has not been connected.");
   ocudu_assert(nof_rx_ports == samples.get_nof_channels(), "Invalid number of channels.");
 
+  // Buffer the symbol being collected is assembled in.
+  baseband_gateway_buffer_dynamic_aligned& symbol_buffer = symbol_buffers[current_symbol_buffer];
+
   // Check that the timestamp matches with the current sample timestamp.
-  if ((current_symbol_timestamp + temp_buffer_write_index) != timestamp) {
+  if ((current_symbol_timestamp + symbol_buffer_write_index) != timestamp) {
     // If the timestamp does not match, the alignment has been lost.
     process_alignment(samples, timestamp);
     return;
@@ -180,25 +197,25 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
   unsigned nof_input_samples = samples.get_nof_samples();
 
   // Select the minimum among the remainder of samples to process and the number of samples to complete the buffer.
-  unsigned nof_samples = std::min(nof_input_samples, current_symbol_size - temp_buffer_write_index);
+  unsigned nof_samples = std::min(nof_input_samples, current_symbol_size - symbol_buffer_write_index);
 
   // For each port, concatenate samples.
   for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
-    // Select view of the temporary buffer.
-    span<ci16_t> temp_buffer_dst = temp_buffer[i_port].subspan(temp_buffer_write_index, nof_samples);
+    // Select view of the symbol buffer.
+    span<ci16_t> symbol_buffer_dst = symbol_buffer[i_port].subspan(symbol_buffer_write_index, nof_samples);
 
     // Select view of the input samples.
-    span<const ci16_t> temp_buffer_src = samples.get_channel_buffer(i_port).first(nof_samples);
+    span<const ci16_t> input_samples = samples.get_channel_buffer(i_port).first(nof_samples);
 
-    // Append input samples into the temporary buffer.
-    ocuduvec::copy(temp_buffer_dst, temp_buffer_src);
+    // Append input samples into the symbol buffer.
+    ocuduvec::copy(symbol_buffer_dst, input_samples);
   }
 
-  // Increment the count of samples stored in the temporal buffer.
-  temp_buffer_write_index += nof_samples;
+  // Increment the count of samples stored in the symbol buffer.
+  symbol_buffer_write_index += nof_samples;
 
-  // If the temporal buffer is not full, keep state in-sync and return.
-  if (temp_buffer_write_index < current_symbol_size) {
+  // If the symbol buffer is not full, keep state in-sync and return.
+  if (symbol_buffer_write_index < current_symbol_size) {
     state = fsm_states::collecting;
     return;
   }
@@ -206,10 +223,10 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
   // View over the temporary float-based complex samples for CFO processor.
   span<cf_t> view;
   // Perform carrier frequency offset compensation.
-  for (unsigned i_channel = 0; i_channel != temp_buffer.get_nof_channels(); ++i_channel) {
+  for (unsigned i_channel = 0; i_channel != symbol_buffer.get_nof_channels(); ++i_channel) {
     // The CFO compensation is not currently supported for 16-bit complex integer samples. So, it must convert it to
     // single-precision complex floating-point samples.
-    span<ci16_t> channel_buffer = temp_buffer.get_writer().get_channel_buffer(i_channel);
+    span<ci16_t> channel_buffer = symbol_buffer.get_writer().get_channel_buffer(i_channel);
     view                        = temp_cf_buffer.get_view({i_channel}).subspan(0, channel_buffer.size());
     ocuduvec::convert(view, channel_buffer, ocuduvec::scaling_factor_ci16_to_cf);
     cfo_processor.process(view);
@@ -217,22 +234,23 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
   }
 
   // Advance CFO processor number of samples.
-  cfo_processor.advance(temp_buffer.get_nof_samples());
+  cfo_processor.advance(symbol_buffer.get_nof_samples());
 
   // Process symbol by PRACH processor.
   prach_processor_baseband::symbol_context prach_context = {
       .slot = current_slot, .symbol = current_symbol_index, .sector = sector_id};
-  prach_proc->get_baseband().process_symbol(temp_buffer.get_reader(), prach_context);
+  prach_proc->get_baseband().process_symbol(symbol_buffer.get_reader(), prach_context);
 
   // Process symbol by PUxCH processor.
   lower_phy_rx_symbol_context puxch_context = {
       .slot = current_slot, .sector = sector_id, .nof_symbols = current_symbol_index};
-  bool processed = puxch_proc->get_baseband().process_symbol(temp_buffer.get_reader(), puxch_context);
+  bool processed =
+      puxch_proc->get_baseband().process_symbol(symbol_buffer.get_reader(), puxch_context, current_symbol_buffer);
 
   if (processed) {
     sample_statistics<float> avg_power;
     sample_statistics<float> peak_power;
-    unsigned                 nof_channels = temp_buffer.get_nof_channels();
+    unsigned                 nof_channels = symbol_buffer.get_nof_channels();
 
     uint64_t total_processed_samples = 0;
     uint64_t nof_clipped_samples     = 0;
@@ -240,7 +258,7 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
     // Process received signal before demodulation.
     for (unsigned i_channel = 0; i_channel != nof_channels; ++i_channel) {
       // Perform signal measurements on CI16 samples.
-      span<const ci16_t> channel_buffer = temp_buffer.get_reader().get_channel_buffer(i_channel);
+      span<const ci16_t> channel_buffer = symbol_buffer.get_reader().get_channel_buffer(i_channel);
 
       avg_power.update(ocuduvec::average_power(channel_buffer, ocuduvec::scaling_factor_ci16_to_cf));
       peak_power.update(ocuduvec::max_abs_element(channel_buffer, ocuduvec::scaling_factor_ci16_to_cf).second);

@@ -24,15 +24,27 @@ public:
   struct entry_t {
     baseband_gateway_buffer_read_only samples;
     lower_phy_rx_symbol_context       context;
+    unsigned                          buffer_index = 0;
   };
 
+  unsigned get_nof_symbol_buffers() const override { return nof_symbol_buffers; }
+
+  unsigned acquire_symbol_buffer() override
+  {
+    unsigned buffer = next_buffer;
+    next_buffer     = (next_buffer + 1) % nof_symbol_buffers;
+    return buffer;
+  }
+
   bool process_symbol(const baseband_gateway_buffer_reader& samples,
-                      const lower_phy_rx_symbol_context&    context) override
+                      const lower_phy_rx_symbol_context&    context,
+                      unsigned                              buffer_index) override
   {
     entries.emplace_back();
-    entry_t& entry = entries.back();
-    entry.samples  = samples;
-    entry.context  = context;
+    entry_t& entry      = entries.back();
+    entry.samples       = samples;
+    entry.context       = context;
+    entry.buffer_index  = buffer_index;
     return true;
   }
 
@@ -40,8 +52,12 @@ public:
 
   void clear() { entries.clear(); }
 
+  /// Number of symbol buffers handed to the processor, mirroring the real one.
+  static constexpr unsigned nof_symbol_buffers = 8;
+
 private:
   std::vector<entry_t> entries;
+  unsigned             next_buffer = 0;
 };
 
 class puxch_processor_request_handler_spy : public puxch_processor_request_handler

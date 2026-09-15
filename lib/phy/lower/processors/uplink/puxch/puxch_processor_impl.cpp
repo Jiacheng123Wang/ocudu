@@ -70,10 +70,35 @@ public:
 
 } // namespace
 
+unsigned puxch_processor_impl::acquire_symbol_buffer()
+{
+  // Hand out a buffer no transform reads. A buffer is in use from the moment the symbol assembled in
+  // it is handed over (process_symbol()) until the transform of its last port is finished, and a
+  // symbol that submits nothing - no grid for its slot - never marks it. Waiting here, instead of
+  // overwriting, is what keeps the samples of an in-flight symbol valid: it is also why the caller
+  // needs no per-transform copy of them.
+  while (buffer_in_use[next_symbol_buffer]) {
+    finish_oldest_symbol();
+  }
+
+  unsigned buffer      = next_symbol_buffer;
+  next_symbol_buffer   = (buffer + 1) % nof_symbol_buffers;
+  last_acquired_buffer = buffer;
+  return buffer;
+}
+
 bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& samples,
-                                          const lower_phy_rx_symbol_context&    context)
+                                          const lower_phy_rx_symbol_context&    context,
+                                          unsigned                              buffer_index)
 {
   ocudu_assert(notifier != nullptr, "Notifier has not been connected.");
+  ocudu_assert(buffer_index < nof_symbol_buffers, "Invalid symbol buffer {}.", buffer_index);
+  // The caller writes the symbol into the buffer it acquired, and only then hands it over: taking the
+  // samples from anywhere else would mean overwriting a buffer a transform may still be reading.
+  ocudu_assert(buffer_index == last_acquired_buffer,
+               "Symbol assembled in buffer {} but buffer {} was acquired.",
+               buffer_index,
+               last_acquired_buffer);
 
   // Check if the slot has changed.
   if (context.slot != current_slot) {
@@ -118,9 +143,13 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
     // `pipeline_depth` transforms (there is one transform per receive port, so with several ports the
     // lag in symbols is `pipeline_depth / nof_rx_ports`). The FFTs therefore overlap with the radio,
     // while the grid content of a symbol is still written before that symbol is reported.
+    // The buffer holding this symbol cannot be handed out again while any of its transforms is in
+    // flight, so it is marked as in use here and released when the last port is finished.
+    buffer_in_use[buffer_index] = true;
     for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
-      // The slot about to be reused holds the oldest in-flight transform: its command buffer was
-      // submitted `pipeline_depth` transforms ago, so finishing it does not stall on the GPU.
+      // Safety net: acquire_symbol_buffer() already made room for the transforms of this symbol. The
+      // slot about to be reused holds the oldest in-flight transform - its command buffer was
+      // submitted `pipeline_depth` transforms ago - so finishing it does not stall on the GPU.
       if (nof_in_flight == pipeline_depth) {
         finish_oldest_symbol();
       }
@@ -129,8 +158,10 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
       span<const ci16_t> td_samples = samples.get_channel_buffer(i_port);
       td_capture::capture(context.slot, symbol_index_subframe, i_port, td_samples);
       demodulator->submit_symbol(current_grid.get().get_writer(), td_samples, i_port, symbol_index_subframe, slot);
-      in_flight[(in_flight_begin + nof_in_flight) % max_in_flight_symbols] = {
-          .context = context, .slot = slot, .last_port = (i_port + 1 == nof_rx_ports)};
+      in_flight[(in_flight_begin + nof_in_flight) % max_in_flight_symbols] = {.context      = context,
+                                                                             .slot         = slot,
+                                                                             .buffer_index = buffer_index,
+                                                                             .last_port = (i_port + 1 == nof_rx_ports)};
       ++nof_in_flight;
     }
 
@@ -169,11 +200,16 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
 void puxch_processor_impl::finish_oldest_symbol()
 {
   ocudu_assert(nof_in_flight != 0, "No in-flight symbol to finish.");
+  // The transforms in flight were submitted for the grid currently held: it is only released once
+  // they have all been finished.
+  ocudu_assert(static_cast<bool>(current_grid), "The in-flight transforms belong to no resource grid.");
   const in_flight_symbol& entry = in_flight[in_flight_begin];
   demodulator->finish_symbol(current_grid.get().get_writer(), entry.slot);
   // Only the last port of a symbol completes it: the upper PHY must not be told that a symbol is
   // ready while another of its ports is still missing from the grid.
   if (entry.last_port) {
+    // No transform reads the buffer of the symbol anymore: the caller may assemble a new symbol in it.
+    buffer_in_use[entry.buffer_index] = false;
     notifier->on_rx_symbol(current_grid, entry.context, true);
   }
   in_flight_begin = (in_flight_begin + 1) % max_in_flight_symbols;
