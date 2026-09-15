@@ -7851,3 +7851,46 @@ mask[i_layer].re_pattern = params.re_pattern;     // dmrs_pusch_estimator_impl.c
 **（d）验证**：注释更正后三条抓包 **23.97 / 6.24 / 31.86 dB 不变**。
 （另注：单测只覆盖单层——`port_channel_estimator_metal_mmse_unit_test.cpp` 里只有一处
 `layer_dmrs_pattern` 构造——所以多层的正确性目前**只有代码依据，没有测试覆盖**，如实记录。）
+
+#### 48.117 S-7f-5m：**验证缺口被自己找到**——信道估计器单测**从未进 ctest**，且它一直是红的
+
+**（a）怎么发现的**
+K0-a 上机后日志出现 15580 次零拷贝重映射告警（§48.116 之后那一段，已修）。想离线验证这个修复时，
+我注意到 `port_channel_estimator_metal_mmse_unit_test` 的二进制时间戳是 **Sep 14 15:28**（旧），
+于是查它是否在 ctest 里：
+
+```
+$ ctest -N -R "port_channel_estimator_metal"
+Total Tests: 0          ← 【没有注册】
+```
+
+⇒ **`ctest -L phy 162/162` 从来没有覆盖过这个单测。** 本会话（以及此前）引用的这条门禁，
+对"信道估计器自己"是**空的**——这正是 §48.84(e) 记过的同一类错误："门禁绿之前，先确认它测的是被测对象"。
+
+**（b）显式重建并运行后：它 FAILS**
+```
+Test 11 FAIL: the merged batch does not estimate what the split path estimates
+  (52 PRB, 2 DMRS): merged=1 split=0 | max|dh|/rms 2.11e+00 (6 dB) | NMSE merged -10.34 dB split -9.05 dB (d 1.294 dB)
+```
+
+**（c）"是不是我改坏的"——对照实验（三种配置，数值完全相同）**
+
+| 配置 | Test 11 结果 |
+|---|---|
+| 默认（设备建 + 设备反演 + 设备 LS） | `max|dh|/rms 2.11e+00`，NMSE −10.34 / −9.05，FAIL |
+| `CPU_LS=1`（关 K0-a） | **同上** |
+| `CORR_DEV=0 GPU_INVERT=0 CPU_LS=1`（**我的设备路径全关，纯主机**） | **同上** |
+
+⇒ **与 §48.98/§48.113 的改动无关**，就是 §48.101(d) 用 parent 对照定位过的**既有 split 形式缺陷**
+（split 的尾块批次算错）。**Test 11 从某个时刻起就是红的，而因为不在 ctest 里，没有人看见。**
+
+**（d）顺带得到的两条**
+1. **零拷贝告警的修复得到离线验证**：单测在**同一进程里跑多种形状**（52/25/4 PRB…），
+   正是复现"指针相同、尺寸变化"的条件；修复后单测输出里该告警 **0 次**（修复前的对照留待补做）。
+2. 除 Test 11 外其余用例（Test 9 等）**PASS**，`corr_build_fail=0`，`wrap failures=0`。
+
+**（e）待决（不擅自改，记录在此）**
+- 是否把 metal 单测**注册进 ctest**：一注册 `ctest -L phy` 立刻会红（Test 11）。
+  **但"红着且看不见"比"红着且看得见"糟得多。** 建议顺序：先把 split 尾块缺陷修掉（它是 §48.84(f) 账本里的一条），
+  再把单测注册进 ctest，那时它才是真门禁。**在此之前，本会话所有"ctest -L phy 162/162"的表述
+  都应理解为"不含信道估计器单测"** —— 已在本节更正。
