@@ -12,12 +12,11 @@ tests/ci/macos_triage/__pycache__/
 # CMake build directory (regenerable)
 /build/
 tmp/
-# The whole doc_chinese/ tree stays local EXCEPT the full-GPU-chain working set, which is the
-# project's cross-session memory for the task in flight (living design document, plans, pipeline
-# audit and every session handoff memo): those 15 files ARE tracked. Everything else under
-# doc_chinese/ - drafts, investor decks, meeting notes - stays out of the repository.
-doc_chinese/*
-!doc_chinese/full_gpu_chain/
+# doc_chinese/ is DELIBERATELY local-only: it is the session working memory (living design
+# document, plans, handoff memos) and is read from disk by the next session - which git adds
+# nothing to. Do not "helpfully" track it: the operator wants the repository to carry code and
+# code history, not the notes' own churn. See the handoff memo 2026-09-15-2.
+doc_chinese/
 
 __pycache__/
 *.pyc
