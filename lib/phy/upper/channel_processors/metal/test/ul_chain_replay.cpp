@@ -19,6 +19,10 @@
 /// Usage:
 ///   ul_chain_replay <capture-prefix> --out <prefix> [--slot N --rnti R] [--index N]
 ///                   [--cpu | --metal | --metal-cpu-ldpc | --metal-cpu-ldpc-cpu-demod]
+///                   [--dft [--device-grid]]   replay a RECORDED TIME-DOMAIN capture (OCUDU_UL_DUMP_TD)
+///                                             through the OFDM demodulator and dump the grids: the
+///                                             same IQ through two builds is the A/B of the DFT path,
+///                                             and --device-grid switches the grid write to the device.
 ///
 /// Example (the A/B/C comparison of one recorded over-the-air reception):
 ///   ul_chain_replay /tmp/C --cpu              --out /tmp/replay_cpu
@@ -193,6 +197,9 @@ int main(int argc, char** argv)
   std::string out_prefix;
   bool        dft_mode         = false;
   bool        dft_metal        = false;
+  // Write the resource grid from the device (--device-grid): the RX chain's default when
+  // the pipeline keeps the grid on the device (see --expert_phy.device_resource_grid on).
+  bool device_grid = false;
   bool        use_metal_ce     = false;
   bool        use_metal_demod  = false;
   bool        use_metal_decoder = false;
@@ -230,6 +237,8 @@ int main(int argc, char** argv)
     } else if (arg == "--dft-metal") {
       dft_mode = true;
       dft_metal = true;
+    } else if (arg == "--device-grid") {
+      device_grid = true;
     } else if ((arg == "--td-strategy") && (i + 1 < argc)) {
       td_strategy_average = (std::string(argv[++i]) == "average");
     } else if (arg == "--cpu") {
@@ -341,14 +350,36 @@ int main(int argc, char** argv)
       std::fprintf(stderr, "cannot create the OFDM demodulator factory\n");
       return 1;
     }
+    // The capture records one line per transform with the SYMBOL size (cyclic prefix + transform),
+    // not the transform size. Taking that as dft_size made the replay transform 552 points instead
+    // of 512 - a size outside the mixed-radix family, and not what the gNB computes - which is why
+    // its grid could not be compared with anything. The transform size is derived here instead, from
+    // the standard cyclic-prefix lengths of the numerology, and stays consistent across symbols.
+    const subcarrier_spacing     dft_scs = subcarrier_spacing::kHz15;
+    constexpr unsigned           dft_sampling_rate_Hz = 7680000;
+    const unsigned               first_slot           = entries.front().slot;
+    const cyclic_prefix          dft_cp               = cyclic_prefix::NORMAL;
+    const unsigned               first_cp_len =
+        dft_cp.get_length(entries.front().symbol, dft_scs).to_samples(dft_sampling_rate_Hz);
+    if (entries.front().size <= first_cp_len) {
+      std::fprintf(stderr,
+                   "%s_td.txt: symbol size %zu does not cover its cyclic prefix %u\n",
+                   prefix.c_str(),
+                   entries.front().size,
+                   first_cp_len);
+      return 1;
+    }
+    const unsigned inferred_dft_size = entries.front().size - first_cp_len;
+
     ofdm_demodulator_configuration demod_config = {};
     demod_config.numerology                = 0;
     demod_config.bw_rb                     = nof_prb;
-    demod_config.dft_size                  = static_cast<unsigned>(entries.front().size);
-    demod_config.cp                        = cyclic_prefix::NORMAL;
+    demod_config.dft_size                  = inferred_dft_size;
+    demod_config.cp                        = dft_cp;
     demod_config.nof_samples_window_offset = 0;
     demod_config.scale                     = 1.0F;
     demod_config.center_freq_Hz            = 0.0;
+    demod_config.device_grid_write         = device_grid;
     std::shared_ptr<resource_grid_factory> dft_grid_factory = create_resource_grid_factory();
     if (dft_grid_factory == nullptr) {
       std::fprintf(stderr, "cannot create the resource grid factory\n");
@@ -359,15 +390,17 @@ int main(int argc, char** argv)
       std::fprintf(stderr, "cannot create the OFDM symbol demodulator\n");
       return 1;
     }
+    (void) first_slot;
     const unsigned depth = demodulator->get_pipeline_depth();
 
-    std::printf("dft replay %s -> %s (%s DFT, pipeline depth %u, %u PRB, %zu transforms)\n",
+    std::printf("dft replay %s -> %s (%s DFT, pipeline depth %u, %u PRB, %zu transforms, grid write %s)\n",
                 prefix.c_str(),
                 out_prefix.c_str(),
                 dft_metal ? "metal" : "cpu",
                 depth,
                 nof_prb,
-                entries.size());
+                entries.size(),
+                device_grid ? "device" : "host");
 
     unsigned                cursor = 0;
     std::vector<unsigned>   ring_slots;
