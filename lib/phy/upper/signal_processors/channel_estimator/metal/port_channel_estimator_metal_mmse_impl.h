@@ -354,13 +354,18 @@ private:
 
   /// \brief Unpacks the engine outputs of the group staged at \c sys_offset into the grid
   /// (symbol-major within each block; the blocks start at PRB gb_start).
+  ///
+  /// \param[in] all_symbols True unpacks the whole slot grid, false only the hop's DM-RS symbols -
+  ///            which is what the hop statistics read, and the only part the air path needs (see
+  ///            materialize_host_grid()).
   void unpack_engine_group(unsigned              gb_start,
                            unsigned              n_blk,
                            unsigned              b_prb,
                            unsigned              nout,
                            unsigned              nof_layers,
                            unsigned              sys_offset,
-                           const engine_strides& st);
+                           const engine_strides& st,
+                           bool                  all_symbols) const;
 
   /// \brief Runs one GPU batch over n_blk equal-width (b_prb PRB) blocks on the engine and
   /// unpacks the estimates into the grid - the staging, the call and the unpack of a single-group
@@ -485,6 +490,28 @@ private:
   /// True while a batch submitted by the last stage call is still outstanding.
   bool stage_pending = false;
 
+  /// \brief Unpack of the last hop, kept so a HOST consumer of the estimates can still be served.
+  ///
+  /// The device's own estimates are the source of truth while a hop is current: the demodulator
+  /// reads them through get_device_ch_estimates() and the hop statistics are derived from the DM-RS
+  /// symbols alone. The host copy of the whole 14-symbol grid therefore has exactly three
+  /// consumers, all of them fallbacks - get_symbol_ch_estimate() when the device view is missing,
+  /// the CPU block path, and the OCUDU_UL_DUMP capture - and S-7f-6a stopped materializing it
+  /// eagerly: the DM-RS symbols are unpacked when the hop completes (the statistics need them) and
+  /// the rest is unpacked by the first call that asks for it.
+  ///
+  /// A hop that HOPS is the exception, and it is why the descriptors are kept at all: hop 0's
+  /// estimates must be published before hop 1's batch overwrites the device buffers they would be
+  /// read from, so a hopping hop is unpacked in full when it completes (host_grid_pending stays
+  /// false).
+  void materialize_host_grid() const;
+
+  /// Descriptors of the last hop's device batches, and whether their non-DM-RS symbols are still
+  /// waiting for a host consumer (see materialize_host_grid()).
+  mutable std::array<pending_unpack, max_pending_unpacks> host_unpacks{};
+  mutable unsigned                                        nof_host_unpacks   = 0;
+  mutable bool                                            host_grid_pending  = false;
+
   /// \brief The pilot-derived buffers of a hop, filled out of the estimated grid.
   ///
   /// RSrp, the noise variance and the time alignment are computed by the base class from these, and
@@ -500,7 +527,6 @@ private:
     std::array<unsigned, MAX_NOF_DMRS_SYMBOLS>                    dmrs_sym{};
     std::array<bounded_bitset<NOF_SUBCARRIERS_PER_RB>, MAX_LAYERS> re_pattern{};
     std::array<span<cf_t>, MAX_NOF_DMRS_SYMBOLS * MAX_LAYERS>      filtered_dst{};
-    std::array<span<cf_t>, MAX_NOF_DMRS_SYMBOLS * MAX_LAYERS>      freq_dst{};
 
     /// Copies the pilot REs and the DM-RS symbol slices of every layer out of the estimated grid.
     void fill(const static_re_buffer<MAX_LAYERS * MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS>& grid) const;
@@ -686,7 +712,17 @@ private:
 
   /// Estimated full time-frequency grid: slice (layer * MAX_NSYMB_PER_SLOT + symbol), one slice
   /// per layer and OFDM symbol of the slot, each of width 12 * nof_prb (hop RB-major order).
-  static_re_buffer<MAX_LAYERS * MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS> grid_est;
+  /// \brief The hop's per-symbol channel estimates, [layer * MAX_NSYMB_PER_SLOT + symbol].
+  ///
+  /// Mutable because the host copy of the non-DM-RS symbols is materialized on demand, from a const
+  /// consumer (see materialize_host_grid()).
+  mutable static_re_buffer<MAX_LAYERS * MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS> grid_est;
+
+  /// DM-RS symbols of the hop being completed, and how many: the symbols unpack_engine_group()
+  /// materializes eagerly, and whether the hop hops (see materialize_host_grid()).
+  unsigned unpack_npt     = 0;
+  bool     unpack_hopping = false;
+  std::array<unsigned, MAX_NOF_DMRS_SYMBOLS> unpack_dmrs_sym{};
 
   /// Auxiliary enlarged LSE buffers for the sigma2 estimation (RC smoothing).
   static_re_measurement<cf_t, MAX_NOF_PILOTS_SYMBOL, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS> tmp_lse_enlarged;

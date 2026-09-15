@@ -789,6 +789,22 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   args.pattern_symbols.for_each(args.first_symbol, args.last_symbol, [&](unsigned s) { dmrs_sym.push_back(s); });
   const unsigned npt = dmrs_sym.size();
 
+  // Per-hop state of the deferred unpack, set HERE and not in the device-LS branch below: it decides
+  // which symbols the completion publishes, which is needed even when the device builds nothing
+  // (OCUDU_CE_CPU_LS=1 and the other host routes) - the hop statistics read the same DM-RS pilots
+  // either way. The symbols are the DM-RS ones (the statistics' input) plus the whole grid when the
+  // slot hops, where hop 0's estimates must be out before hop 1's batch overwrites the device
+  // buffers they would be read from (see complete_fd_td_estimation_stage()).
+  unpack_npt     = npt;
+  unpack_hopping = args.dmrs_patterns.front().hopping_symbol_index.has_value();
+  for (unsigned k = 0; k != npt; ++k) {
+    unpack_dmrs_sym[k] = dmrs_sym[k];
+  }
+  // This hop's batches are about to overwrite the ones the previous hop's host grid would be
+  // materialized from: drop that pending work (a hopping hop published it at its completion).
+  host_grid_pending = false;
+  nof_host_unpacks  = 0;
+
   // ---- S-7f-5w: the arrays the device noise variance reads ---------------------------------------
   // Staged BEFORE the extraction, because the noise reduction rides that same command buffer; K4
   // reads the very same buffers later, and keys its own gate on this call's answer.
@@ -1481,8 +1497,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           defer_unpack(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st);
           defer_unpack(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st);
         } else {
-          unpack_engine_group(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st);
-          unpack_engine_group(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st);
+          // Inline (non-deferred) route: this is the synchronous fallback, where the caller wants
+          // the results now and the host consumers are the point - so the whole grid is unpacked,
+          // exactly as before S-7f-6a. Only the deferred completion below is lazy.
+          unpack_engine_group(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st, /*all_symbols=*/true);
+          unpack_engine_group(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st, /*all_symbols=*/true);
         }
 #if defined(OCUDU_CE_TIME)
         unpack_us_local += std::chrono::duration<double, std::micro>(steady_clock::now() - t_unpack_begin).count();
@@ -1732,8 +1751,6 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
         deferred_fill.filtered_dst[i_layer * MAX_NOF_DMRS_SYMBOLS + i_symbol] =
             args.filtered_pilots_lse_view.get_symbol(i_symbol, i_layer);
-        deferred_fill.freq_dst[i_layer * MAX_NOF_DMRS_SYMBOLS + i_symbol] =
-            args.freq_response.get_symbol(i_symbol, i_layer);
       }
     }
   } else {
@@ -1747,7 +1764,6 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         fill.dmrs_sym[i_symbol]                                                       = dmrs_sym[i_symbol];
         fill.filtered_dst[i_layer * MAX_NOF_DMRS_SYMBOLS + i_symbol] =
             args.filtered_pilots_lse_view.get_symbol(i_symbol, i_layer);
-        fill.freq_dst[i_layer * MAX_NOF_DMRS_SYMBOLS + i_symbol] = args.freq_response.get_symbol(i_symbol, i_layer);
       }
     }
     fill.fill(grid_est);
@@ -2299,7 +2315,8 @@ void port_channel_estimator_metal_mmse_impl::unpack_engine_group(unsigned       
                                                                  unsigned              nout,
                                                                  unsigned              nof_layers,
                                                                  unsigned              sys_offset,
-                                                                 const engine_strides& st)
+                                                                 const engine_strides& st,
+                                                                 bool                  all_symbols) const
 {
   const unsigned nf = b_prb * NOF_SUBCARRIERS_PER_RB;
   // gb_start counts PRBs while b counts blocks of b_prb PRBs, so block b starts at subcarrier
@@ -2307,20 +2324,38 @@ void port_channel_estimator_metal_mmse_impl::unpack_engine_group(unsigned       
   // subcarriers) is right only while gb_start is zero or a block is one PRB wide, and it lands
   // past the end of the grid for the edge block of a hop that is not a multiple of the block
   // size - the same mistake the pilot staging had, in the host half of the estimator.
+  // Only the symbols a consumer asked for: the hop statistics read the DM-RS ones, and the rest of
+  // the grid is materialized on demand by materialize_host_grid(). Unpacking all fourteen symbols
+  // eagerly was most of this function's cost, for a host copy the air path never reads.
+  const unsigned nof_unpack_symbols = all_symbols ? MAX_NSYMB_PER_SLOT : unpack_npt;
   for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
     for (unsigned b = 0; b != n_blk; ++b) {
       // Slot addressing uses the BATCH strides: they may exceed the block geometry (the merged
       // tail system keeps the standard Ls/Ns/n_blk slots while its own block is narrower), and
       // reading it with the block geometry silently unpacks the wrong rows.
       const float* hp = gpu_h + (static_cast<std::size_t>(sys_offset + i_layer) * st.n_blk + b) * 2 * st.nout;
-      for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
-        span<cf_t> dst = grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + sym)
+      for (unsigned i = 0; i != nof_unpack_symbols; ++i) {
+        const unsigned sym = all_symbols ? i : unpack_dmrs_sym[i];
+        span<cf_t>     dst = grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + sym)
                              .subspan(static_cast<std::size_t>(gb_start + b * b_prb) * NOF_SUBCARRIERS_PER_RB, nf);
         for (unsigned sc = 0; sc != nf; ++sc) {
           dst[sc] = {hp[2 * (sym * nf + sc)], hp[2 * (sym * nf + sc) + 1]};
         }
       }
     }
+  }
+}
+
+void port_channel_estimator_metal_mmse_impl::materialize_host_grid() const
+{
+  if (!host_grid_pending) {
+    return;
+  }
+  host_grid_pending = false;
+  for (unsigned i = 0; i != nof_host_unpacks; ++i) {
+    const pending_unpack& u = host_unpacks[i];
+    unpack_engine_group(
+        u.gb_start, u.n_blk, u.b_prb, u.nout, u.nof_layers, u.sys_offset, u.st, /*all_symbols=*/true);
   }
 }
 
@@ -2529,7 +2564,8 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   if (deferred) {
     defer_unpack(gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st);
   } else {
-    unpack_engine_group(gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st);
+    // Inline route: see the note at the other inline unpack - the whole grid, as before S-7f-6a.
+    unpack_engine_group(gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st, /*all_symbols=*/true);
   }
   return true;
 }
@@ -2558,6 +2594,11 @@ void port_channel_estimator_metal_mmse_impl::pending_fill::fill(
   // An extra 1 / beta in this path inflated RSrp by 1 / beta^2 and the noise variance by about
   // 1 / beta^4, i.e. 17 dB of missing soft bits with the 0.708 of a real cell, so the values are
   // taken as they are (the pilots were already scaled in the data domain).
+  //
+  // Only the DM-RS pilots are derived: freq_response used to be copied here as well, and it is dead
+  // in this backend - the classical get_symbol_ch_estimate() that reads it is overridden by this
+  // class (which serves its consumers out of grid_est), so the copy only wrote a buffer nobody
+  // read (S-7f-6a).
   for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
     const auto& pattern = re_pattern[i_layer];
     for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
@@ -2568,7 +2609,6 @@ void port_channel_estimator_metal_mmse_impl::pending_fill::fill(
       for (unsigned prb = 0; prb != nof_prb; ++prb) {
         pattern.for_each(0, pattern.size(), [&](unsigned pos) { dst[j++] = src[prb * NOF_SUBCARRIERS_PER_RB + pos]; });
       }
-      ocuduvec::copy(freq_dst[i_layer * MAX_NOF_DMRS_SYMBOLS + i_symbol], src);
     }
   }
 }
@@ -2632,10 +2672,24 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
 #if defined(OCUDU_CE_TIME)
   const auto t_unpack2_begin = std::chrono::steady_clock::now();
 #endif
+  // Which symbols have to be in the host grid NOW: all of them whenever a host consumer may read
+  // it, which is exactly when the DEVICE estimates do not cover this hop - the same signal the
+  // demodulator reads (device_results_cover_last_estimate()), and measured: the split-tail route
+  // takes the host route for every estimate it binds (ch_est device=0 staged=11), while the merged
+  // route binds the device's (device=10593 host=0). The slot hopping is the other case: hop 0's
+  // estimates must be out before hop 1's batch overwrites the device buffers they would come from.
+  //
+  // Otherwise only the DM-RS symbols are unpacked (the hop statistics read their pilots) and the
+  // rest waits for the first get_symbol_ch_estimate() call.
+  const bool publish_all_grid = unpack_hopping || !gpu_ce_ready;
   for (unsigned i = 0; i != nof_pending_unpacks; ++i) {
     const pending_unpack& u = pending_unpacks[i];
-    unpack_engine_group(u.gb_start, u.n_blk, u.b_prb, u.nout, u.nof_layers, u.sys_offset, u.st);
+    unpack_engine_group(
+        u.gb_start, u.n_blk, u.b_prb, u.nout, u.nof_layers, u.sys_offset, u.st, /*all_symbols=*/publish_all_grid);
   }
+  nof_host_unpacks  = nof_pending_unpacks;
+  host_unpacks      = pending_unpacks;
+  host_grid_pending = !publish_all_grid;
 #if defined(OCUDU_CE_TIME)
   mmse_stats().completion_unpack_ns.fetch_add(
       static_cast<uint64_t>(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() -
@@ -2685,6 +2739,9 @@ void port_channel_estimator_metal_mmse_impl::get_symbol_ch_estimate(span<cbf16_t
                                                                     unsigned      i_symbol,
                                                                     unsigned      tx_layer) const
 {
+  // A host consumer asked for the estimates: materialize the part of the grid the completion left
+  // to whoever needed it (see materialize_host_grid()).
+  materialize_host_grid();
   span<const cf_t> src = grid_est.get_slice(tx_layer * MAX_NSYMB_PER_SLOT + i_symbol);
   ocudu_assert(symbol.size() == src.size(), "Invalid symbol buffer size.");
   for (unsigned i = 0; i != src.size(); ++i) {
@@ -2698,6 +2755,8 @@ void port_channel_estimator_metal_mmse_impl::get_symbol_ch_estimate(
     unsigned                                   tx_layer,
     const bounded_bitset<MAX_NOF_SUBCARRIERS>& re_mask) const
 {
+  // See the other overload: this is a host consumer of the estimates.
+  materialize_host_grid();
   span<const cf_t> src = grid_est.get_slice(tx_layer * MAX_NSYMB_PER_SLOT + i_symbol);
   unsigned         j   = 0;
   re_mask.for_each(0, re_mask.size(), [&](unsigned i_re) { symbol[j++] = to_cbf16(src[i_re]); });
