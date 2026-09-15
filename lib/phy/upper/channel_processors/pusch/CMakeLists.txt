@@ -15,7 +15,12 @@ add_library(ocudu_pusch_demodulator STATIC
 # library - which links this one - uses it as well. Keeping it in the processor instead made the two
 # libraries depend on each other, which links only by accident of the order on the linker command
 # line (and not at all for a consumer that links just the demodulator).
-target_link_libraries(ocudu_pusch_demodulator PUBLIC ocudu_support ocudu_macos_compat)
+# The demodulator builds the device gather plan of the equalizer's received symbols
+# (ch_gather_desc, see pusch_demodulator_impl.h), whose only out-of-line member is defined in
+# ocudu_channel_equalizer. Declaring the dependency here is what makes that symbol reach every
+# consumer of this library: before, it resolved only where something else in the same link line
+# happened to pull the equalizer in, which held on Apple Silicon and failed to link on Ubuntu.
+target_link_libraries(ocudu_pusch_demodulator PUBLIC ocudu_support ocudu_macos_compat ocudu_channel_equalizer)
 
 add_library(ocudu_pusch_processor STATIC
         processor_factories.cpp
