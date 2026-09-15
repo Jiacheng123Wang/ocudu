@@ -92,26 +92,29 @@ public:
   /// Describes one hop. An invalid \c grid means "no device gather": the caller keeps reading the
   /// grid on the host and must not consult this plan.
   ///
-  /// \param[in] grid    Device view of the resource grid.
+  /// The parameters that would otherwise shadow a member carry a trailing underscore (GCC builds
+  /// every translation unit with -Wshadow -Werror; clang does not diagnose this form).
+  ///
+  /// \param[in] grid_    Device view of the resource grid.
   /// \param[in] rb_mask Allocation of the hop, in absolute common resource blocks.
   /// \param[in] first_symbol First OFDM symbol of the hop.
-  /// \param[in] nof_symbols Number of OFDM symbols of the hop.
-  /// \param[in] nof_ports Number of receive ports the caller will read from the grid.
+  /// \param[in] nof_symbols_ Number of OFDM symbols of the hop.
+  /// \param[in] nof_ports_ Number of receive ports the caller will read from the grid.
   /// \param[in] dmrs_symb_pos Positions of the DM-RS symbols within the slot.
   /// \param[in] active_re_per_prb Active subcarriers of a data-only PRB, as a 12-bit mask (bit \c n
   ///                   set means subcarrier \c n of the PRB carries data).
   /// \param[in] active_re_per_prb_dmrs Same, for a PRB of a DM-RS symbol.
-  ch_gather_desc(const resource_grid_device_view&          grid,
+  ch_gather_desc(const resource_grid_device_view&          grid_,
                  const crb_bitmap&                         rb_mask,
                  unsigned                                  first_symbol,
-                 unsigned                                  nof_symbols,
-                 unsigned                                  nof_ports,
+                 unsigned                                  nof_symbols_,
+                 unsigned                                  nof_ports_,
                  const bounded_bitset<MAX_NSYMB_PER_SLOT>& dmrs_symb_pos,
                  uint16_t                                  active_re_per_prb,
                  uint16_t                                  active_re_per_prb_dmrs) :
-    grid(grid), nof_ports(nof_ports)
+    grid(grid_), nof_ports(nof_ports_)
   {
-    build(rb_mask, first_symbol, nof_symbols, dmrs_symb_pos, active_re_per_prb, active_re_per_prb_dmrs);
+    build(rb_mask, first_symbol, nof_symbols_, dmrs_symb_pos, active_re_per_prb, active_re_per_prb_dmrs);
   }
 
   /// Whether the plan can be gathered on the device.
@@ -136,7 +139,7 @@ private:
   /// Fills \ref symbols, \ref nof_symbols and \ref entries from the demodulator's RE mask.
   void build(const crb_bitmap&                         rb_mask,
              unsigned                                  first_symbol,
-             unsigned                                  nof_symbols,
+             unsigned                                  nof_symbols_,
              const bounded_bitset<MAX_NSYMB_PER_SLOT>& dmrs_symb_pos,
              uint16_t                                  active_re_per_prb,
              uint16_t                                  active_re_per_prb_dmrs);
