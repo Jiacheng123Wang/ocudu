@@ -86,7 +86,18 @@ int main()
     symbol_sizes[s] = cp.get_length(nsymb * slot_index + s, scs).to_samples(sampling_rate_Hz) + dft_size;
     slot_size += symbol_sizes[s];
   }
-  std::vector<ci16_t> time_data(slot_size);
+  // The RX chain's samples live in a page-aligned, page-multiple allocation
+  // (baseband_gateway_buffer_dynamic_aligned), which is what lets the DFT engine read them zero-copy
+  // (see dft_grid_write_params::time_samples). A plain vector would make the engine refuse and stage
+  // the input on the host, so the test would not exercise that path at all.
+  const size_t page      = compat::page_size();
+  const size_t data_page = ((static_cast<size_t>(slot_size) * sizeof(ci16_t) + page - 1) / page) * page;
+  ci16_t*      aligned_time_data = static_cast<ci16_t*>(compat::aligned_alloc(page, data_page));
+  if (aligned_time_data == nullptr) {
+    std::fprintf(stderr, "FAIL: the aligned sample allocation failed\n");
+    return 1;
+  }
+  span<ci16_t> time_data(aligned_time_data, slot_size);
   std::mt19937        rng(20260912);
   std::uniform_int_distribution<int> dist(-2000, 2000);
   for (auto& sample : time_data) {
@@ -189,8 +200,7 @@ int main()
           demod.finish_symbol(grid.get_writer(), in_flight.front());
           in_flight.erase(in_flight.begin());
         }
-        span<const ci16_t> symbol_samples =
-            span<const ci16_t>(time_data).subspan(offset, symbol_sizes[s]);
+        span<const ci16_t> symbol_samples = time_data.subspan(offset, symbol_sizes[s]);
         const unsigned slot = s % depth;
         demod.submit_symbol(grid.get_writer(), symbol_samples, 0, s, slot);
         in_flight.push_back(slot);
@@ -229,16 +239,98 @@ int main()
       ok = false;
     }
 
-    // The RX pipeline REUSES its sample buffer: uplink_processor_impl assembles the next symbol into the
-    // very buffer the previous symbol's transform was submitted from, while up to `depth` transforms
-    // are still in flight (that is what the ring is for - see ofdm_symbol_demodulator::submit_symbol).
-    // A transform that reads the caller's samples instead of a private snapshot produces a grid of the
-    // WRONG symbol, and the failure mode is quiet: the preamble detector runs on the host and still
-    // works, so the cell looks alive while every PUSCH reception decodes to noise. This block is that
-    // scenario, and it must pass: the samples are overwritten the moment they are submitted.
+    // The RX pipeline does NOT copy the samples: the transform reads the buffer the caller assembled
+    // the symbol in (see dft_grid_write_params::time_samples). The caller - uplink_processor_impl -
+    // therefore owns a ring with one buffer per symbol the pipeline can keep in flight and only
+    // overwrites a buffer whose transforms have been finished (acquire_symbol_buffer()). The two
+    // blocks below check that contract from both sides.
+    auto alloc_aligned = [](size_t nof_samples) {
+      const size_t page  = compat::page_size();
+      const size_t bytes = ((nof_samples * sizeof(ci16_t) + page - 1) / page) * page;
+      return static_cast<ci16_t*>(compat::aligned_alloc(page, bytes));
+    };
+
     {
-      std::vector<ci16_t> reused(time_data.begin(), time_data.end());
-      auto                run_pipelined_reusing_buffer = [&](ofdm_symbol_demodulator& demod, resource_grid& grid) {
+      // (a) The ring, as the RX chain uses it: every symbol is assembled in the buffer of its own
+      // slot while the previous symbols are still in flight, and the buffer of a slot is only
+      // rewritten after the transform that read it has been finished. Every symbol must come out
+      // right - which can only happen if the transform reads the caller's memory and the caller
+      // keeps it valid for as long as the transform runs.
+      const unsigned depth          = device_demod->get_pipeline_depth();
+      const size_t   max_symbol_len = *std::max_element(symbol_sizes.begin(), symbol_sizes.end());
+      std::vector<span<ci16_t>> slot_buffer(depth);
+      for (span<ci16_t>& buffer : slot_buffer) {
+        ci16_t* mem = alloc_aligned(max_symbol_len);
+        if (mem == nullptr) {
+          std::fprintf(stderr, "FAIL: the aligned symbol-buffer allocation failed\n");
+          return 1;
+        }
+        buffer = span<ci16_t>(mem, max_symbol_len);
+      }
+
+      auto run_pipelined_with_ring = [&](ofdm_symbol_demodulator& demod, resource_grid& grid) {
+        std::vector<unsigned> in_flight;
+        unsigned              offset = 0;
+        for (unsigned s = 0; s != nsymb; ++s) {
+          // The slot about to be reused holds the oldest in-flight transform: it is finished before
+          // the buffer is written again, exactly like acquire_symbol_buffer() does it.
+          if (in_flight.size() == depth) {
+            demod.finish_symbol(grid.get_writer(), in_flight.front());
+            in_flight.erase(in_flight.begin());
+          }
+          const unsigned slot         = s % depth;
+          span<ci16_t>   slot_samples = slot_buffer[slot].first(symbol_sizes[s]);
+          std::copy_n(time_data.begin() + offset, symbol_sizes[s], slot_samples.begin());
+          demod.submit_symbol(grid.get_writer(), slot_samples, 0, s, slot);
+          in_flight.push_back(slot);
+          offset += symbol_sizes[s];
+        }
+        while (!in_flight.empty()) {
+          demod.finish_symbol(grid.get_writer(), in_flight.front());
+          in_flight.erase(in_flight.begin());
+        }
+      };
+
+      auto grid_ring = grid_factory->create(1, nsymb, rg_size);
+      if (grid_ring == nullptr) {
+        std::fprintf(stderr, "FAIL: grid creation for the symbol-buffer ring case\n");
+        return 1;
+      }
+      run_pipelined_with_ring(*device_demod, *grid_ring);
+      std::vector<cf_t> ring_out = grid_to_vector(grid_ring->get_reader(), 1, nsymb, rg_size);
+      unsigned          ring_mismatching = 0;
+      for (unsigned i = 0; i != ring_out.size(); ++i) {
+        if (ring_out[i] != host_out[i]) {
+          ++ring_mismatching;
+        }
+      }
+      std::printf("[reuse] one buffer per symbol in flight: REs=%zu mismatching=%u\n",
+                  ring_out.size(),
+                  ring_mismatching);
+      if (ring_mismatching != 0) {
+        std::fprintf(stderr,
+                     "FAIL: a symbol came out wrong although its buffer was kept valid until its transform was "
+                     "finished\n");
+        ok = false;
+      }
+    }
+
+    {
+      // (b) Negative control: overwriting the samples of a transform that is STILL IN FLIGHT has to
+      // corrupt the grid it produces. If it does not, the input is being staged (copied) somewhere
+      // on the host and the zero-copy input is vacuous - which is the trap this whole path was
+      // rewritten twice for. The samples are overwritten the moment they are submitted, exactly like
+      // the single-buffer RX chain used to do it (S-7f-6c, the leg that made the phone fail to
+      // attach).
+      ci16_t* probe_mem = alloc_aligned(slot_size);
+      if (probe_mem == nullptr) {
+        std::fprintf(stderr, "FAIL: the aligned probe allocation failed\n");
+        return 1;
+      }
+      span<ci16_t> probe(probe_mem, slot_size);
+      std::copy(time_data.begin(), time_data.end(), probe.begin());
+
+      auto run_pipelined_reusing_buffer = [&](ofdm_symbol_demodulator& demod, resource_grid& grid) {
         const unsigned        depth = demod.get_pipeline_depth();
         std::vector<unsigned> in_flight;
         unsigned              offset = 0;
@@ -247,7 +339,7 @@ int main()
             demod.finish_symbol(grid.get_writer(), in_flight.front());
             in_flight.erase(in_flight.begin());
           }
-          span<ci16_t> symbol_samples = span<ci16_t>(reused).subspan(offset, symbol_sizes[s]);
+          span<ci16_t> symbol_samples = probe.subspan(offset, symbol_sizes[s]);
           const unsigned slot         = s % depth;
           demod.submit_symbol(grid.get_writer(), symbol_samples, 0, s, slot);
           // The next symbol is assembled into the same buffer right away.
@@ -279,9 +371,10 @@ int main()
       std::printf("[reuse] samples overwritten right after submit: REs=%zu mismatching=%u\n",
                   reuse_out.size(),
                   reuse_mismatching);
-      if (reuse_mismatching != 0) {
+      if (reuse_mismatching == 0) {
         std::fprintf(stderr,
-                     "FAIL: the transform read the caller's samples after they were reused for the next symbol\n");
+                     "FAIL: overwriting the samples of an in-flight transform did not corrupt its grid, so the "
+                     "transform is not reading the buffer it was given (the input is still staged)\n");
         ok = false;
       }
     }

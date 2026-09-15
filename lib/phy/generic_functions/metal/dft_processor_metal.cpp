@@ -108,5 +108,11 @@ bool dft_processor_metal::submit_grid_write(unsigned slot, const dft_grid_write_
   write.phase_re    = params.coefficient.real();
   write.phase_im    = params.coefficient.imag();
   write.apply_window = params.apply_window;
+  // The transform input, when the caller hands over the radio's own int16 buffer instead of filling
+  // the engine's float2 ring (see dft_grid_write_params::time_samples).
+  write.time_samples       = params.time_samples;
+  write.time_samples_bytes = params.time_samples_bytes;
+  write.time_window_start  = params.time_window_start;
+  write.time_gain          = params.time_gain;
   return engine->submit_slot_grid_write(input.get(), output.get(), slot, write);
 }
