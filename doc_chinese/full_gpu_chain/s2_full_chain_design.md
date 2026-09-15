@@ -8097,3 +8097,44 @@ merged 分支传 `sys_offset = 0`（行为不变）。
 2. **CE 的输入仍被主机重算一遍**（K0-a 的设备结果覆盖它）——这一遍是纯浪费；
 3. `sigma2`、`EPRE`、FD 平滑仍在主机。
 下一项建议：**把 1 与 2 一起消灭**（设备产的 LS 导频直接写进 `gpu_y`/`gpu_qy`，主机不再算、不再拷）。
+
+#### 48.123 胶水 #2 的施工图：让设备的 LSE 导频**直接写进 `gpu_y`/`gpu_qy`**（先画图，未动代码）
+
+> 按 §48.83(c)：动手前先画清楚。**本节只画图**——按用户流程，改动要与门禁一起完成，
+> 不允许在树里留未经验证的代码（用户随时可能从本工作区构建并上机）。
+
+**（a）现状：同一份导频被算了两次、还拷了一次**
+```
+K0-a 设备内核 ──写──> gpu_ls_out ──主机 memcpy──> args.pilots_lse_view ──主机 memcpy──> gpu_y/gpu_qy
+     ↑（§48.113 已落地）                    ↑ 主机 pre-stage 又算了一遍（纯浪费）        ↑ stage_engine_group()
+```
+三处主机参与：
+1. 主机的 pre-stage **重算**一遍（K0-a 的结果随后覆盖它）——`pre=0.72 µs` + CFA/LS 部分；
+2. 主机把 `gpu_ls_out` **拷回** `pilots_lse_view`（§48.113 的覆盖写）；
+3. `stage_engine_group()` 再把 `pilots_lse_view` **拷进**引擎槽位（`stage=1.90 µs`）。
+
+**（b）目标形态：一次写入，零次主机拷贝**
+```
+K0-a 设备内核 ──直接写──> gpu_y（legacy 布局）/ gpu_qy（matrix 四元交错布局）
+主机只提供：参考导频、几何参数（setBytes）
+```
+
+**（c）必须逐条核实的事项（动手前，不猜）**
+1. **两种目标布局**：legacy `y[sys][blk][2*(symb*npf+j)]`（`stage_engine_group` 现在的算法）
+   与 matrix `qy[layer][nquad][Ls][8]` 的四元交错——**后者也要一并支持，否则 matrix 路径会读到旧值**；
+2. **`gb_start`/`b_prb` 切分**：一个 hop 的导频按块切分写进不同 `b`（`subspan((gb_start + b*b_prb)*comb, npf)`），
+   内核要按同样的切分写；merged 批次里尾块是**额外 system**，其 PRB 区间不同；
+3. **`sys_offset`**：内核要写到 `(sys_offset + layer)` 号 system（**与刚修的 split 雷同一类陷阱**——
+   写入者/读取者必须用同一套偏移）；
+4. **跳过条件**：`stage_engine_group()` 里 y/qy 那两段要能按 flag 跳过，而这个 flag 必须与
+   "设备真的写了"一致（**与 K0-a 的设备视图有效性判断同源**，不能各处自己推导）；
+5. **失败回退**：设备写失败（视图无效/几何不支持）时，主机那两段必须**照旧执行**；
+6. **`args.pilots_lse_view` 的其它消费者**：`estimate_sigma2()`（FD 平滑）与 RSRP 统计仍读它，
+   所以**主机 pre-stage 那一次重算不能立刻删掉**——要么保留，要么把 `sigma2` 也搬到设备。
+   ⇒ **本步建议只做 (b) 的"直接写 y/qy"与跳过 h0staging，把"删掉主机重算"留到 `sigma2` 上设备时一起做**
+   （否则 `pilots_lse_view` 会空）。
+
+**（d）验收**
+离线：四条门禁全部（`k0d` 逐字节尤其关键——它比的是设备建矩阵两条路线的**全部发布字节**）；
+**新增可观测判据**：`[mmse_time_sum] stage` 应从 ~1.9 µs 降到 ~0，`mean total` 再降；
+上机：`cbs/lane` 不变（3.00）、失败率不劣于基线、0 崩溃/0 USB 错误、`zero-copy` 告警 0。
