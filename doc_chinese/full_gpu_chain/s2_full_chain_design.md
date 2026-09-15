@@ -7967,3 +7967,37 @@ pipeline median **+35 µs**。与"多一次同步 dispatch/CB"的预期同量级
 **（e）K0-a 结论：通过**。CE 的输入级（导频提取 + EPRE + LSE + CFO）已在设备上、默认开、
 上机功能通过、无回归。**下一步进入工作流第 ④ 步：消灭 CPU 胶水 #1**
 （把 K0-d 并进 K1..K4 的同一条 command buffer；施工图 §48.114、真值表 §48.115 已就绪）。
+
+#### 48.120 S-7f-5p：**CPU 胶水 #1 已消灭**——K0-d 并进引擎那条 command buffer（等 OTA 确认）
+
+**（a）按真值表只改一格**（§48.115 的表：唯一"主机完全不消费 A"的情形）
+
+| 改动 | 内容 |
+|---|---|
+| `run_async()` | 新增 `corr` 前缀参数（默认 `nullptr`，现有调用点不受影响） |
+| 前缀编码 | K1 之前 `encode_corr(...)`，并加 **`memoryBarrierWithScope:MTLBarrierScopeBuffers`**（同 encoder 内可见性）|
+| `engine_run()` | 透传描述符 |
+| `run_engine_blocks()` | **`gpu_invert` 时**改传描述符、不再单独调 `build_slots_on_device()`；其余三格保持独立 CB |
+
+失败回退**不需要新机制**（施工单 #2 的答案）：`encode_corr` 在**提交前**失败 ⇒ 整条 CB 作废
+⇒ 走既有契约（该 hop 回退 CPU 参考实现）。
+
+**（b）"胶水真的少了"的可观测证据（离线）**
+
+| 量 | 之前 | **之后** |
+|---|---|---|
+| `[ul_gpu_lane] cbs/lane`（单测） | 含 K0-d 独立 CB | **3.00**；`ch_est`=**2.00**（K0-a + 引擎）、`eq_demap`=1.00 ⇒ **K0-d 那条没了** |
+| `[mmse_time_sum] mean total`（单测） | 34.4 µs | **23.6 µs** |
+| `gpu_path`（单测） | 22.8 µs | **11.8 µs**（"提交后当场等"的开销消失）|
+
+**（c）其余一切未动（离线门禁全绿）**
+三条抓包 **23.97 / 6.24 / 31.86 dB**、`k0d` **980/980 逐字节**、`k1` **980/980 判决**、`combos` **PASS**、
+`ctest -L phy` **162/162**、单测 **13 通过 + 仅 Test 11 失败**（既有 split 缺陷，三配置对照已证与本工作无关）、
+**零拷贝告警 0**。
+
+**（d）⏸ 等用户 OTA**。判据含这一步特有的可观测量：
+1. 手机 attach + ping + iperf3 正常；
+2. **`[ul_gpu_lane] cbs/lane` 应从 3.44 回落到 ~2.4**（胶水消失的直接证据）；
+3. `Real-time failure in RF` 每时隙率不劣于基线 **0.1148%**；
+4. **0 崩溃 / 0 USB 错误**、`corr_build_fail=0`、`zero-copy` 告警 = 0；
+5. 顺带看 `[ul_channel_estimation]` median 是否从 238.5 µs 下降。
