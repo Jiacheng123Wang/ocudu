@@ -229,6 +229,63 @@ int main()
       ok = false;
     }
 
+    // The RX pipeline REUSES its sample buffer: uplink_processor_impl assembles the next symbol into the
+    // very buffer the previous symbol's transform was submitted from, while up to `depth` transforms
+    // are still in flight (that is what the ring is for - see ofdm_symbol_demodulator::submit_symbol).
+    // A transform that reads the caller's samples instead of a private snapshot produces a grid of the
+    // WRONG symbol, and the failure mode is quiet: the preamble detector runs on the host and still
+    // works, so the cell looks alive while every PUSCH reception decodes to noise. This block is that
+    // scenario, and it must pass: the samples are overwritten the moment they are submitted.
+    {
+      std::vector<ci16_t> reused(time_data.begin(), time_data.end());
+      auto                run_pipelined_reusing_buffer = [&](ofdm_symbol_demodulator& demod, resource_grid& grid) {
+        const unsigned        depth = demod.get_pipeline_depth();
+        std::vector<unsigned> in_flight;
+        unsigned              offset = 0;
+        for (unsigned s = 0; s != nsymb; ++s) {
+          if (in_flight.size() == depth) {
+            demod.finish_symbol(grid.get_writer(), in_flight.front());
+            in_flight.erase(in_flight.begin());
+          }
+          span<ci16_t> symbol_samples = span<ci16_t>(reused).subspan(offset, symbol_sizes[s]);
+          const unsigned slot         = s % depth;
+          demod.submit_symbol(grid.get_writer(), symbol_samples, 0, s, slot);
+          // The next symbol is assembled into the same buffer right away.
+          for (ci16_t& sample : symbol_samples) {
+            sample = ci16_t(-32768, 32767);
+          }
+          in_flight.push_back(slot);
+          offset += symbol_sizes[s];
+        }
+        while (!in_flight.empty()) {
+          demod.finish_symbol(grid.get_writer(), in_flight.front());
+          in_flight.erase(in_flight.begin());
+        }
+      };
+
+      auto grid_reuse = grid_factory->create(1, nsymb, rg_size);
+      if (grid_reuse == nullptr) {
+        std::fprintf(stderr, "FAIL: grid creation for the buffer-reuse case\n");
+        return 1;
+      }
+      run_pipelined_reusing_buffer(*device_demod, *grid_reuse);
+      std::vector<cf_t> reuse_out = grid_to_vector(grid_reuse->get_reader(), 1, nsymb, rg_size);
+      unsigned          reuse_mismatching = 0;
+      for (unsigned i = 0; i != reuse_out.size(); ++i) {
+        if (reuse_out[i] != host_out[i]) {
+          ++reuse_mismatching;
+        }
+      }
+      std::printf("[reuse] samples overwritten right after submit: REs=%zu mismatching=%u\n",
+                  reuse_out.size(),
+                  reuse_mismatching);
+      if (reuse_mismatching != 0) {
+        std::fprintf(stderr,
+                     "FAIL: the transform read the caller's samples after they were reused for the next symbol\n");
+        ok = false;
+      }
+    }
+
     // Latency of the two paths (the device one must not pay a round trip per symbol for the grid). Informational only:
     // the first rounds of a process carry the GPU's clock ramp-up on this machine, so the numbers are averaged over
     // enough rounds to smooth it (the authoritative cost of the grid write is measured warm in
