@@ -221,6 +221,54 @@ public:
   /// \return True on success; on failure the caller keeps its own host pre-stage.
   bool build_pilots_lse(const pilots_stage& s);
 
+  /// The engine's pilot vectors (y) as the DEVICE writes them - glue #2 of the plan (S-7f-5u).
+  ///
+  /// \c build_pilots_lse() produces the hop layout ([symbol][layer][pilot]) while K2 consumes a
+  /// block layout, so something has to convert. The host used to, in two memcpys per group per hop
+  /// (device -> pilots_lse_view -> y slots). This descriptor hands the conversion to the device:
+  /// the kernel re-indexes the device's own output into the y slots, and the host never touches
+  /// them.
+  ///
+  /// One descriptor per STAGED GROUP, not per hop: a merged batch stages the standard blocks and
+  /// the narrower edge block as two groups and encodes both descriptors into the one command
+  /// buffer it already commits (so the command buffers per hop do not move).
+  ///
+  /// The values are byte-identical to the host's staging - the kernel re-indexes and applies the
+  /// same single-precision product the host applies - so OCUDU_CE_DEV_Y=0, which keeps the host
+  /// staging, is an exact A/B and the gate for this path.
+  struct pilots_scatter {
+    /// Source: the least-squares pilots of the hop, [symb][layer][pilot] real/imag interleaved -
+    /// the HOP layout build_pilots_lse() wrote, i.e. pilots_stage::lse.
+    const float* lse = nullptr;
+    /// CAPACITY of the source in bytes (the zero-copy cache is pointer-keyed: a larger request
+    /// re-wraps, see pilots_stage::buf_bytes).
+    std::size_t lse_bytes = 0;
+    /// Destination: this group's y slots, [layer][n_blk_slots][2 * Ls] real/imag interleaved, with
+    /// the group's system offset already in the pointer. The engine does NOT bind this pointer
+    /// directly: it turns it into an OFFSET into the y buffer the batch call binds (the y argument
+    /// of run_async()/run()), because a second MTLBuffer object over the same memory is a DIFFERENT
+    /// resource to Metal. Binding the tail group through its own wrap left its scatter unordered
+    /// with respect to K2's read of it - measured: the merged tail group came out as the host
+    /// memset's zeros and the split tail as a previous submission's leftovers, while the standard
+    /// group, whose pointer IS the batch base, was correct.
+    float* y = nullptr;
+    /// Geometry of the group (see mmse_scatter_params in ocudu_mmse_pilots.metal, field by field).
+    unsigned nof_layers  = 0;
+    unsigned nof_symb    = 0;
+    unsigned nof_pilots  = 0;
+    unsigned npf         = 0;
+    unsigned pilot_base  = 0;
+    unsigned n_blk_slots = 0;
+    unsigned n_blk_real  = 0;
+    unsigned Ls          = 0;
+    /// DM-RS to data scaling the host applies to its own pilots (1 / beta_scaling).
+    float inv_beta = 1.0F;
+  };
+
+  /// Whether the device-side pilot scatter (glue #2) can run: the metallib carries
+  /// mmse_pilots_scatter_y. When false the caller keeps staging y on the host.
+  bool scatter_available() const;
+
   /// \brief Batched inversion (K1): A_inv = (A)^-1 for each system, in-place Gauss-Jordan.
   ///
   /// \param[in,out] a           [systems][n][n] row-major matrices (overwritten with the inverse).
@@ -258,8 +306,11 @@ public:
   ///                            h it just produced into the equalizer's per-symbol estimates. Pass
   ///                            nullptr (the default) to skip it.
   /// \return True on success.
+  /// \param scatter Optional glue #2 stage encoded FIRST in the same command buffer (see
+  ///                run_async()): the device writes the y slots this call is about to read.
   bool run(float* a, const float* r_hp, float* w, const float* y, float* h, unsigned nout, unsigned L,
-           unsigned nof_systems, unsigned nof_blocks, const reformat_stage* reformat = nullptr);
+           unsigned nof_systems, unsigned nof_blocks, const reformat_stage* reformat = nullptr,
+           const pilots_scatter* scatter = nullptr, unsigned nof_scatter = 0);
 
   /// \brief Hot path (v1): the weights (K2) with a pre-inverted A, in ONE command buffer.
   /// The A^-1 inversion itself is the CALLER's: it either runs the host Gauss-Jordan or has the
@@ -276,7 +327,8 @@ public:
   ///                     the estimator does).
   bool run_weights_only(const float* a_inv, const float* r_hp, float* w, const float* y, float* h, unsigned nout,
                         unsigned L, unsigned nof_systems, unsigned nof_blocks,
-                        const reformat_stage* reformat = nullptr, const corr_stage* corr = nullptr);
+                        const reformat_stage* reformat = nullptr, const corr_stage* corr = nullptr,
+                        const pilots_scatter* scatter = nullptr, unsigned nof_scatter = 0);
 
   /// \brief As run_weights_only(), but commits WITHOUT waiting for the GPU.
   ///
@@ -298,7 +350,9 @@ public:
                               unsigned     nof_systems,
                               unsigned     nof_blocks,
                               const reformat_stage* reformat = nullptr,
-                              const corr_stage*     corr     = nullptr);
+                              const corr_stage*     corr     = nullptr,
+                              const pilots_scatter* scatter  = nullptr,
+                              unsigned              nof_scatter = 0);
 
   /// \brief Compiles the simdgroup_matrix 8x8 pipelines of the metal_nn_mmse variant
   /// (mmse_weights_matrix / mmse_apply_matrix, ocudu_mmse_*_matrix.metal).
@@ -354,6 +408,12 @@ public:
   ///             device-inversion route): the prefix writes A and R_hp on the device, and the host
   ///             does not touch either afterwards. When the host is the inverter it has to read the
   ///             device's A between the two, so it keeps calling build_correlation() standalone.
+  /// \param scatter When non-null, \p nof_scatter pilot scatters are encoded FIRST in this buffer
+  ///             (before K2 reads y). The caller MUST have left the y slots alone: the device is
+  ///             their only writer on that route, exactly as with the correlation prefix. Encoding
+  ///             failure is reported like every other failure here - nothing is committed, the
+  ///             caller falls back - but note the caller's fallback must not read y, because the
+  ///             host did not stage it (the CPU block path does not).
   bool run_async(float*       a,
                  const float* r_hp,
                  float*       w,
@@ -363,8 +423,10 @@ public:
                  unsigned     L,
                  unsigned     nof_systems,
                  unsigned     nof_blocks,
-                 const reformat_stage* reformat = nullptr,
-                 const corr_stage*     corr     = nullptr);
+                 const reformat_stage* reformat    = nullptr,
+                 const corr_stage*     corr        = nullptr,
+                 const pilots_scatter* scatter     = nullptr,
+                 unsigned              nof_scatter = 0);
 
   /// \brief Waits for the submission of run_async() and reports whether it completed.
   /// \return True when there was nothing pending, or when the pending submission succeeded.

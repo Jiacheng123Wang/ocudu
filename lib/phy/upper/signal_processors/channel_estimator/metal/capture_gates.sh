@@ -8,6 +8,7 @@
 #
 #   capture_gates.sh k0d [jobs] [corpus_glob]   K0-d equivalence      (byte-level, must PASS)
 #   capture_gates.sh k1  [jobs] [corpus_glob]   K1 functional equivalence (decisions, must PASS)
+#   capture_gates.sh ydev [jobs] [corpus_glob]  glue #2: device-written y vs host-staged y
 #   capture_gates.sh combos                     flag-combination matrix (SINR/CRC, must PASS)
 #
 # The corpus is a set of <name>_ce.txt baselines (the capture-info sidecars; the replay tool derives
@@ -44,13 +45,28 @@
 # (crc, tbs, iterations class) plus the SINR delta distribution. A CRC flip is a failure; the
 # byte-identical LLR count is reported as information, not as a criterion.
 #
+# ---- ydev: who writes the engine's pilot vectors y (glue #2, S-7f-5u)? ------------------------
+#     route A  default          the DEVICE scatters K0-a's pilots into the y slots, inside the
+#                               weights' own command buffer
+#     route B  OCUDU_CE_DEV_Y=0 the HOST stages them (device -> pilots_lse_view -> y), i.e. the
+#                               behaviour before glue #2
+# Every published file must come out BYTE-IDENTICAL. The kernel only re-indexes the pilots K0-a
+# already produced and applies the same inv_beta product the host applies, so a byte difference
+# means the re-indexing is wrong (block/pilot mapping, the system offset, the pad rows, or the
+# merged tail group's zeroed blocks) - not "rounding". This is the decisive gate for the step.
+#
+# It is a VACUITY-CHECKED gate: route A's [metal_stats] line must report device_y_writes > 0 and
+# route B's must report 0. Without that, a gate like this compares the host against the host and
+# passes - which is exactly how the k0d gate once passed for a whole round (S-7f-4c).
+#
 # ---- combos: the flag matrix ------------------------------------------------------------------
 # OCUDU_CE_GPU_INVERT x OCUDU_CE_CORR_DEV x OCUDU_CE_SPLIT_TAIL over the three reference captures.
 # This pins the semantics of the escape hatches, which changed in S-7f-4f and are easy to get wrong:
 # OCUDU_CE_GPU_INVERT used to mean "on for ANY value, including 0" and now means "on unless 0".
-# The non-split combinations must reproduce the known SINR/CRC; the SPLIT_TAIL ones are printed but
-# NOT gated, because that form is a KNOWN-BAD opt-in (S-7f-4h: its tail batch is wrong on real
-# captures, identically before and after S-7f-4f - the merged form is the default and is correct).
+# The non-split combinations must reproduce the known SINR/CRC. The SPLIT_TAIL ones are gated too:
+# the tail batch's addressing defect they were excluded for (S-7f-4h) was FIXED in 3417703ba3, and
+# S-7f-5u re-checked that split and merged publish byte-identical output on a real capture. If a
+# split combination ever fails here again, do not reach for this comment - look at the tail batch.
 set -u
 
 MODE=${1:-k0d}
@@ -59,7 +75,7 @@ GLOB=${3:-/tmp/iq1_*_ce.txt /tmp/iq2_*_ce.txt}
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../.." && pwd)
 BIN=$REPO/build/lib/phy/upper/channel_processors/metal/ul_chain_replay
 
-case "$MODE" in k0d|k1|combos) ;; *) echo "usage: $0 <k0d|k1|combos> [jobs] [corpus_glob]"; exit 2;; esac
+case "$MODE" in k0d|k1|ydev|combos) ;; *) echo "usage: $0 <k0d|k1|ydev|combos> [jobs] [corpus_glob]"; exit 2;; esac
 [ -x "$BIN" ] || { echo "no replay tool at $BIN - build the ul_chain_replay target first"; exit 2; }
 
 mapfile -t CAPS < <(ls $GLOB 2>/dev/null | sed -E 's/_ce\.txt$//' | sort -u)
@@ -129,6 +145,16 @@ fi
 decision() { sed -nE 's/.*tbs=([0-9]+) slot=[0-9]+ rnti=[0-9]+ [A-Z0-9]+: crc=([A-Z]+).*sinr=([-0-9.a-z]+) dB.*/\1 \2 \3/p' <<<"$1" | head -1; }
 numeric() { awk -v v="$1" 'BEGIN{exit !(v ~ /^-?[0-9.]+$/)}'; }
 
+# The two env sets of the BYTE-COMPARISON modes (k0d, ydev): route A is the one under test, route B
+# the reference it has to reproduce exactly. See the header for what each pair isolates. ydev
+# additionally checks that the device writer actually engaged (see run_shard), because a route that
+# silently falls back to the host staging would make the comparison vacuous.
+case "$MODE" in
+  k0d)  ENV_A="OCUDU_CE_GPU_INVERT=0"; ENV_B="OCUDU_CE_GPU_INVERT=0 OCUDU_CE_CORR_DEV=0";;
+  ydev) ENV_A=""; ENV_B="OCUDU_CE_DEV_Y=0";;
+  *)    ENV_A=""; ENV_B="";;
+esac
+
 run_shard() {
   local id=$1 total=0 same=0 bytesame=0 maxdelta=0 bad="" delta
   local i c base out_d out_h stdout_d stdout_h ok f rel retried=0
@@ -136,10 +162,21 @@ run_shard() {
     c=${CAPS[$i]}; base=$(basename "$c")
     out_d=$WORK/${id}_${base}_a; out_h=$WORK/${id}_${base}_b
     total=$(( total + 1 ))
-    if [ "$MODE" = k0d ]; then
-      OCUDU_CE_GPU_INVERT=0 "$BIN" "$c" --metal --out "$out_d" >/dev/null 2>&1 || { bad="$bad $base(A)"; continue; }
-      OCUDU_CE_GPU_INVERT=0 OCUDU_CE_CORR_DEV=0 "$BIN" "$c" --metal --out "$out_h" >/dev/null 2>&1 ||
+    if [ "$MODE" = k0d ] || [ "$MODE" = ydev ]; then
+      # stderr of route A carries the [metal_stats] line (printed at exit); ydev reads the device-y
+      # counter out of it, and keeps it so a failure can be diagnosed from the printed line.
+      env $ENV_A "$BIN" "$c" --metal --out "$out_d" >/dev/null 2>"$WORK/${id}_${base}.err" ||
+        { bad="$bad $base(A)"; continue; }
+      env $ENV_B "$BIN" "$c" --metal --out "$out_h" >/dev/null 2>/dev/null ||
         { bad="$bad $base(B)"; continue; }
+      if [ "$MODE" = ydev ]; then
+        local yw
+        yw=$(grep -o "device_y_writes=[0-9]*" "$WORK/${id}_${base}.err" | head -1 | cut -d= -f2)
+        if [ -z "$yw" ] || [ "$yw" -eq 0 ]; then
+          # Route A never wrote y on the device: the comparison below would be host vs host.
+          bad="$bad $base(vacuous:device_y_writes=${yw:-absent})"; continue
+        fi
+      fi
       ok=1
       for f in "$out_d"_*; do
         rel=${f#"$out_d"}
@@ -149,8 +186,8 @@ run_shard() {
         # Serial re-check: a parallel-run mismatch is more often the tool than the code.
         retried=$(( retried + 1 ))
         rm -f "$out_d"_* "$out_h"_*
-        OCUDU_CE_GPU_INVERT=0 "$BIN" "$c" --metal --out "$out_d" >/dev/null 2>&1
-        OCUDU_CE_GPU_INVERT=0 OCUDU_CE_CORR_DEV=0 "$BIN" "$c" --metal --out "$out_h" >/dev/null 2>&1
+        env $ENV_A "$BIN" "$c" --metal --out "$out_d" >/dev/null 2>/dev/null
+        env $ENV_B "$BIN" "$c" --metal --out "$out_h" >/dev/null 2>/dev/null
         ok=1
         for f in "$out_d"_*; do
           rel=${f#"$out_d"}
@@ -210,6 +247,8 @@ done
 
 if [ "$MODE" = k0d ]; then
   echo "mode=k0d captures=$TOTAL byte-identical=$SAME retried=$RETRIED"
+elif [ "$MODE" = ydev ]; then
+  echo "mode=ydev captures=$TOTAL byte-identical=$SAME retried=$RETRIED"
 else
   echo "mode=k1 captures=$TOTAL decision-identical=$SAME llr-byte-identical=$BYTESAME retried=$RETRIED"
   # max|dSINR| is INFORMATIONAL ONLY: a corrupted parallel run keeps its CRC but reports a wild

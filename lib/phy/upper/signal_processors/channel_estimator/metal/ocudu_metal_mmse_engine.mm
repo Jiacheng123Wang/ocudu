@@ -58,6 +58,13 @@ struct mmse_stats_t {
   /// to its host construction). Reported separately: a build that never happens and a build that
   /// fails look identical in the totals, and this is what tells them apart.
   std::atomic<uint64_t> corr_build_failures{0};
+  // Glue #2 (S-7f-5u): how many pilot groups the DEVICE wrote into the engine's y slots. Counted at
+  // ENCODE time, like the correlation builds, so a deferred batch is counted when it is submitted.
+  // A merged hop encodes two (the standard group and the edge group), a split hop one per batch, so
+  // the number is "hop groups", not hops - but it is the observable that says whether the host gave
+  // up the y staging at all, which is exactly what an A/B against OCUDU_CE_DEV_Y=0 must show.
+  std::atomic<uint64_t> pilots_scatters{0};
+  std::atomic<uint64_t> pilots_scatter_failures{0};
 };
 
 static mmse_stats_t& mmse_stats()
@@ -77,6 +84,20 @@ static void mmse_stats_corr_build_failure()
 {
 #if defined(OCUDU_METAL_STATS)
   mmse_stats().corr_build_failures.fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
+static void mmse_stats_pilots_scatter()
+{
+#if defined(OCUDU_METAL_STATS)
+  mmse_stats().pilots_scatters.fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
+static void mmse_stats_pilots_scatter_failure()
+{
+#if defined(OCUDU_METAL_STATS)
+  mmse_stats().pilots_scatter_failures.fetch_add(1, std::memory_order_relaxed);
 #endif
 }
 
@@ -134,7 +155,8 @@ static void mmse_stats_report()
   const uint64_t      wait = s.guard_wait_ns.load(std::memory_order_relaxed);
   std::fprintf(stderr,
                "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu guard=%llu/%llu "
-               "guard_mean=%.1fus guard_max=%.1fus device_corr_builds=%llu corr_build_fail=%llu\n",
+               "guard_mean=%.1fus guard_max=%.1fus device_corr_builds=%llu corr_build_fail=%llu "
+               "device_y_writes=%llu y_write_fail=%llu\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
@@ -143,12 +165,17 @@ static void mmse_stats_report()
                (hits != 0) ? (static_cast<double>(wait) / static_cast<double>(hits) / 1e3) : 0.0,
                static_cast<double>(s.guard_wait_max_ns.load(std::memory_order_relaxed)) / 1e3,
                static_cast<unsigned long long>(s.corr_builds.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.corr_build_failures.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.corr_build_failures.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.pilots_scatters.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.pilots_scatter_failures.load(std::memory_order_relaxed)));
 }
 #else  // OCUDU_METAL_STATS
 static void mmse_stats_commit() {}
 static void mmse_stats_wait() {}
 static void mmse_stats_corr_build() {}
+static void mmse_stats_corr_build_failure() {}
+static void mmse_stats_pilots_scatter() {}
+static void mmse_stats_pilots_scatter_failure() {}
 
 /// Stats off: the guard still has to be a non-trivially-destructible object, so that the explicit
 /// scope around it does not look like an unused variable to the compiler.
@@ -213,6 +240,9 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    pilots_lse_pipe   = nil;
   id<MTLComputePipelineState>    pilots_cfo_pipe   = nil;
   id<MTLComputePipelineState>    pilots_apply_pipe = nil;
+  // Glue #2: the device writes the engine's pilot vectors out of K0-a's output (optional, same
+  // metallib - a metallib without it simply keeps the host staging).
+  id<MTLComputePipelineState>    pilots_scatter_pipe = nil;
   /// Submission of run_async() that has not been waited for yet (at most one, see the header).
   id<MTLCommandBuffer>           pending_cb    = nil;
   // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
@@ -577,6 +607,15 @@ bool mmse_engine::init(const char* metallib_path)
                                                                  reflection:nil error:&err];
       e->pilots_apply_pipe = [e->device newComputePipelineStateWithFunction:apply_fn options:MTLPipelineOptionNone
                                                                  reflection:nil error:&err];
+    }
+    // Glue #2 is optional on its own: a metallib that carries K0-a but not the scatter keeps the
+    // host staging, and the estimator asks through scatter_available() rather than assuming.
+    id<MTLFunction> scatter_fn = [e->library newFunctionWithName:@"mmse_pilots_scatter_y"];
+    if (scatter_fn != nil) {
+      e->pilots_scatter_pipe = [e->device newComputePipelineStateWithFunction:scatter_fn
+                                                                      options:MTLPipelineOptionNone
+                                                                   reflection:nil
+                                                                        error:&err];
     }
   }
 
@@ -958,9 +997,101 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
 }
 
 bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, float* h, unsigned nout,
-                      unsigned L, unsigned nof_systems, unsigned nof_blocks, const reformat_stage* reformat)
+                      unsigned L, unsigned nof_systems, unsigned nof_blocks, const reformat_stage* reformat,
+                      const pilots_scatter* scatter, unsigned nof_scatter)
 {
-  return run_async(a, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat) && wait_pending();
+  return run_async(a, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, nullptr, scatter, nof_scatter) &&
+         wait_pending();
+}
+
+bool mmse_engine::scatter_available() const
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  return (e != nullptr) && (e->pilots_scatter_pipe != nil);
+}
+
+/// Must match mmse_scatter_params in ocudu_mmse_pilots.metal.
+struct mmse_scatter_params_t {
+  uint32_t nof_layers;
+  uint32_t nof_symb;
+  uint32_t nof_pilots;
+  uint32_t npf;
+  uint32_t pilot_base;
+  uint32_t n_blk_slots;
+  uint32_t n_blk_real;
+  uint32_t Ls;
+  float    inv_beta;
+};
+static_assert(sizeof(mmse_scatter_params_t) == 36, "mmse_scatter_params_t must match mmse_scatter_params");
+
+/// \brief Encodes the pilot scatter (glue #2) into \p enc: the device writes the engine's y slots
+/// out of the least-squares pilots K0-a already produced on the device.
+///
+/// \param[in] y_buf      The MTLBuffer the CALLER (run_async / encode_weights_only) already bound
+///                       for its own y argument. It must be that very object, not a second wrap of
+///                       the same memory: Metal relates two dispatches only through the resource
+///                       object they bind, so binding the group's destination through its own wrap
+///                       left the scatter unordered with respect to K2's read of it - measured, the
+///                       merged tail group came out of the host memset (zeros) and the split tail
+///                       out of a previous submission's leftovers, while the standard group - whose
+///                       base pointer equals the caller's, hence the same object - was correct.
+///                       One buffer, many offsets.
+/// \param[in] y_base     Start of \p y_buf, to turn the descriptor's absolute pointer into an
+///                       offset into that buffer.
+/// \param[in] y_buf_bytes Length \p y_buf was wrapped with.
+///
+/// The writes must be visible to K2's reads, and the two are separate dispatches even in the same
+/// encoder, so a buffer barrier closes the encode - exactly as the correlation prefix does.
+/// \return False when nothing was encoded; the caller must then not commit (the host staging was
+///         skipped in favour of this write, so a silent failure would leave stale pilots in y).
+static bool encode_scatter(mmse_engine_impl* e, id<MTLComputeCommandEncoder> enc,
+                           const mmse_engine::pilots_scatter& s, id<MTLBuffer> y_buf,
+                           const float* y_base, std::size_t y_buf_bytes)
+{
+  if ((e->pilots_scatter_pipe == nil) || (s.lse == nullptr) || (s.y == nullptr) || (y_buf == nil) ||
+      (y_base == nullptr) || (s.lse_bytes == 0) || (s.nof_layers == 0) || (s.nof_symb == 0) ||
+      (s.nof_pilots == 0) || (s.npf == 0) || (s.n_blk_slots == 0) || (s.n_blk_real == 0) ||
+      (s.n_blk_real > s.n_blk_slots) || (s.Ls == 0) || (s.nof_symb * s.npf > s.Ls)) {
+    mmse_stats_pilots_scatter_failure();
+    return false;
+  }
+  // The descriptor addresses the group's slots absolutely; the engine binds the BATCH's y buffer,
+  // so the group's position in it is the difference. A group outside that buffer is a caller bug
+  // (it would write over another batch's slots), hence the bound check rather than a clamp.
+  const std::ptrdiff_t y_off = reinterpret_cast<const char*>(s.y) - reinterpret_cast<const char*>(y_base);
+  const std::size_t    y_len = static_cast<std::size_t>(s.nof_layers) * s.n_blk_slots * 2 * s.Ls * sizeof(float);
+  if ((y_off < 0) || (static_cast<std::size_t>(y_off) + y_len > y_buf_bytes)) {
+    mmse_stats_pilots_scatter_failure();
+    return false;
+  }
+  // The source (K0-a's own output) is wrapped as the engine wraps it there: same pointer, same
+  // capacity, so the cache hands back the same object and the two stages stay related.
+  id<MTLBuffer> lse_buf = e->wrap(s.lse, s.lse_bytes);
+  if (lse_buf == nil) {
+    mmse_stats_pilots_scatter_failure();
+    return false;
+  }
+
+  mmse_scatter_params_t p{};
+  p.nof_layers  = s.nof_layers;
+  p.nof_symb    = s.nof_symb;
+  p.nof_pilots  = s.nof_pilots;
+  p.npf         = s.npf;
+  p.pilot_base  = s.pilot_base;
+  p.n_blk_slots = s.n_blk_slots;
+  p.n_blk_real  = s.n_blk_real;
+  p.Ls          = s.Ls;
+  p.inv_beta    = s.inv_beta;
+
+  [enc setComputePipelineState:e->pilots_scatter_pipe];
+  [enc setBuffer:lse_buf offset:0 atIndex:0];
+  [enc setBuffer:y_buf offset:static_cast<NSUInteger>(y_off) atIndex:1];
+  [enc setBytes:&p length:sizeof(p) atIndex:2];
+  [enc dispatchThreads:MTLSizeMake(s.Ls, s.n_blk_slots, s.nof_layers)
+      threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+  [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+  mmse_stats_pilots_scatter();
+  return true;
 }
 
 bool mmse_engine::run_async(float*       a,
@@ -973,7 +1104,9 @@ bool mmse_engine::run_async(float*       a,
                             unsigned     nof_systems,
                             unsigned     nof_blocks,
                             const reformat_stage* reformat,
-                            const corr_stage*     corr)
+                            const corr_stage*     corr,
+                            const pilots_scatter* scatter,
+                            unsigned              nof_scatter)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
@@ -990,7 +1123,10 @@ bool mmse_engine::run_async(float*       a,
   id<MTLBuffer> a_buf  = e->wrap(a, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
   id<MTLBuffer> rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
   id<MTLBuffer> w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
-  id<MTLBuffer> y_buf  = e->wrap(y, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * L * sizeof(float));
+  // The length the engine BINDS y with, and therefore the extent the scatter's offsets are checked
+  // against. wrap() may hand back a larger cached buffer; the batch's own slots are what matters.
+  const std::size_t y_bytes_used = static_cast<std::size_t>(nof_systems) * nof_blocks * 2 * L * sizeof(float);
+  id<MTLBuffer>     y_buf        = e->wrap(y, static_cast<NSUInteger>(y_bytes_used));
   id<MTLBuffer> h_buf  = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
   phase.wrapped();
   if (a_buf == nil || rp_buf == nil || w_buf == nil || y_buf == nil || h_buf == nil) {
@@ -1013,6 +1149,18 @@ bool mmse_engine::run_async(float*       a,
   id<MTLCommandBuffer> cb = [e->queue commandBuffer];
   phase.created();
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+
+  // Glue #2 (S-7f-5u): the pilot vectors of this batch, written by the DEVICE out of K0-a's output.
+  // Encoded FIRST because K2 is the reader and nothing else in this buffer touches y: the host
+  // deliberately did not stage these slots (the estimator skips its memcpy when it hands a
+  // descriptor over), so a failure here has to abort the whole submission rather than commit a
+  // buffer whose weights would read the previous hop's pilots.
+  for (unsigned i = 0; i != nof_scatter; ++i) {
+    if (!encode_scatter(e, enc, scatter[i], y_buf, y, y_bytes_used)) {
+      [enc endEncoding];
+      return false;
+    }
+  }
 
   // K1b (right-looking) is EXPERIMENTAL and numerically wrong at the orders this path uses now:
   // in the device-correlation A/B at order 54 it produced an inverse ~1e8 times the correct one
@@ -1127,12 +1275,15 @@ bool encode_weights_only(mmse_engine_impl*                  e,
                          unsigned                           nof_blocks,
                          const mmse_engine::reformat_stage* reformat,
                          const mmse_engine::corr_stage*     corr,
+                         const mmse_engine::pilots_scatter* scatter,
+                         unsigned                           nof_scatter,
                          bool                               wait_for_completion);
 } // namespace
 
 bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float* w, const float* y, float* h,
                                  unsigned nout, unsigned L, unsigned nof_systems, unsigned nof_blocks,
-                                 const reformat_stage* reformat, const corr_stage* corr)
+                                 const reformat_stage* reformat, const corr_stage* corr,
+                                 const pilots_scatter* scatter, unsigned nof_scatter)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
@@ -1142,12 +1293,14 @@ bool mmse_engine::run_weights_only(const float* a_inv, const float* r_hp, float*
     mmse_guard_timer guard(e->pending_cb != nil);
     (void)wait_pending();
   }
-  return encode_weights_only(e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, corr, true);
+  return encode_weights_only(
+      e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, corr, scatter, nof_scatter, true);
 }
 
 bool mmse_engine::run_weights_only_async(const float* a_inv, const float* r_hp, float* w, const float* y, float* h,
                                         unsigned nout, unsigned L, unsigned nof_systems, unsigned nof_blocks,
-                                        const reformat_stage* reformat, const corr_stage* corr)
+                                        const reformat_stage* reformat, const corr_stage* corr,
+                                        const pilots_scatter* scatter, unsigned nof_scatter)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
@@ -1159,7 +1312,8 @@ bool mmse_engine::run_weights_only_async(const float* a_inv, const float* r_hp, 
     mmse_guard_timer guard(e->pending_cb != nil);
     (void)wait_pending();
   }
-  return encode_weights_only(e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, corr, false);
+  return encode_weights_only(
+      e, a_inv, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, corr, scatter, nof_scatter, false);
 }
 
 namespace {
@@ -1175,13 +1329,18 @@ bool encode_weights_only(mmse_engine_impl*                  e,
                          unsigned                           nof_blocks,
                          const mmse_engine::reformat_stage* reformat,
                          const mmse_engine::corr_stage*     corr,
+                         const mmse_engine::pilots_scatter* scatter,
+                         unsigned                           nof_scatter,
                          bool                               wait_for_completion)
 {
   mmse_phase_timer phase(wait_for_completion ? "run_weights_only" : "run_weights_only_async");
   id<MTLBuffer> ai_buf = e->wrap(a_inv, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
   id<MTLBuffer> rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
   id<MTLBuffer> w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
-  id<MTLBuffer> y_buf  = e->wrap(y, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * L * sizeof(float));
+  // The length the engine BINDS y with, and therefore the extent the scatter's offsets are checked
+  // against. wrap() may hand back a larger cached buffer; the batch's own slots are what matters.
+  const std::size_t y_bytes_used = static_cast<std::size_t>(nof_systems) * nof_blocks * 2 * L * sizeof(float);
+  id<MTLBuffer>     y_buf        = e->wrap(y, static_cast<NSUInteger>(y_bytes_used));
   id<MTLBuffer> h_buf  = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
   phase.wrapped();
   if (ai_buf == nil || rp_buf == nil || w_buf == nil || y_buf == nil || h_buf == nil) {
@@ -1203,6 +1362,17 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   id<MTLCommandBuffer> cb = [e->queue commandBuffer];
   phase.created();
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+
+  // Glue #2 (S-7f-5u): the pilot vectors, written by the DEVICE out of K0-a's output. FIRST, because
+  // the apply kernel below is their reader. The host skipped its own staging in favour of this write,
+  // so a failure must abort the submission (nothing is committed, the caller falls back to its CPU
+  // path) rather than let the weights read the previous hop's pilots.
+  for (unsigned i = 0; i != nof_scatter; ++i) {
+    if (!encode_scatter(e, enc, scatter[i], y_buf, y, y_bytes_used)) {
+      [enc endEncoding];
+      return false;
+    }
+  }
 
   // K0-d prefix: the correlation matrices are built into their slots FIRST, in this same command
   // buffer - the weights below read them, and K1 (which follows, in this same buffer) turns the A

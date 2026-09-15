@@ -67,6 +67,18 @@
 /// Still the host's, deliberately (the CPU glue this step keeps): EPRE, sigma2 and the FD smoothing
 /// of filtered_pilots_lse, plus the fact that the base class still runs its own pre-stage which
 /// these kernels overwrite.
+///
+/// ---- STATUS (S-7f-5u): glue #2 - the device also writes the engine's pilot vectors ----
+/// The least-squares pilots above are the estimator's INPUT. The engine's weights do not read them
+/// where this file leaves them: they read a re-indexed block layout called y, which the host used
+/// to build by copying gpu_ls_out back to pilots_lse_view and then copying that into the y slots
+/// (two host memcpys per group per hop). mmse_pilots_scatter_y() below does the re-indexing on the
+/// device, inside the weights' own command buffer, so neither copy happens.
+///
+/// It is a re-index and a multiply ONLY, and the multiply is the same single-precision product the
+/// host applies (ocuduvec::sc_prod(pilots, inv_beta)): this file therefore still needs neither exact
+/// expression ordering nor IEEE_MATH_SOURCES, and "device-written y" is byte-identical to
+/// "host-staged y" - which is what makes OCUDU_CE_DEV_Y=0 an exact A/B (capture_gates.sh ydev).
 
 #include <metal_stdlib>
 using namespace metal;
@@ -214,4 +226,69 @@ kernel void mmse_pilots_apply_cfo(device float*                lse    [[buffer(0
     const float2 v   = float2(lse[base], lse[base + 1]);
     lse[base]     = v.x * ph.x - v.y * ph.y;
     lse[base + 1] = v.x * ph.y + v.y * ph.x;
+}
+
+/// ---- Glue #2 (S-7f-5u): the device writes the engine's pilot vectors ---------------------------
+///
+/// The engine's weights are applied to a BLOCK layout (y) that groups the hop's pilots by block,
+/// while this file produces the HOP layout ([symbol][layer][pilot]). The host used to convert
+/// between them - twice over: the device result was copied back into pilots_lse_view, and
+/// stage_engine_group() then copied pilots_lse_view into the y slots. This kernel does the same
+/// conversion where both ends already live: it reads the device's own output and writes the slots
+/// the weights kernel reads.
+///
+/// The host's staging (stage_engine_group(), legacy branch) is the specification:
+///     yp = gpu_y + (sys_offset + i_layer) * n_blk * 2 * Ls + b * 2 * Ls
+///     yp[2 * (i_symbol * npf + j)] = pilots_lse_view[i_symbol][i_layer][(gb_start + b * b_prb) * comb + j]
+///                                     * inv_beta                     (the DM-RS to data scaling)
+/// and every field below is one of its terms. The pilot index is expanded rather than kept as a
+/// subspan, which is the only re-indexing: (gb_start + b * b_prb) * comb + j == pilot_base + b * npf + j.
+///
+/// Three regions the host writes and this kernel must reproduce EXACTLY, because the apply kernel
+/// reads whatever is there (a non-finite leftover reaches h through 0 * inf = NaN):
+///   - the rows past the group's own pilot count (row >= nof_symb * npf) - the pad of a merged
+///     batch's narrower tail group, which the host memsets per block;
+///   - the block slots a merged tail group does not fill (b >= n_blk_real) - the host memsets the
+///     tail group's whole y region before staging it;
+///   - everything else is the pilot value times inv_beta.
+///
+/// One thread per (row, block, layer): the row is the contiguous axis so consecutive threads write
+/// consecutive pairs.
+struct mmse_scatter_params {
+    uint  nof_layers;   // Tx layers = systems of this group
+    uint  nof_symb;     // DM-RS symbols of the hop (the first dimension of the LSE layout)
+    uint  nof_pilots;   // pilots per (symbol, layer) of the WHOLE hop
+    uint  npf;          // pilots one block carries per DM-RS symbol of THIS group = b_prb * ncomb
+    uint  pilot_base;   // first pilot of this group inside the hop = gb_start * ncomb
+    uint  n_blk_slots;  // block slots per system (the engine's stride: a merged tail group carries
+                        // the standard block count while filling only n_blk_real of them)
+    uint  n_blk_real;   // blocks this group really fills; the remaining slots are zeroed
+    uint  Ls;           // rows of one block slot (the engine's L: n_blk_real * nof_symb * npf with
+                        // the merged tail's rows padded up to the standard geometry)
+    float inv_beta;     // 1 / beta_scaling, the DM-RS to data scaling
+};
+
+kernel void mmse_pilots_scatter_y(device const float*           lse [[buffer(0)]],
+                                  device float*                 y   [[buffer(1)]],
+                                  constant mmse_scatter_params& p   [[buffer(2)]],
+                                  uint3                         gid [[thread_position_in_grid]])
+{
+    const uint i_layer = gid.z;
+    const uint b       = gid.y;
+    const uint k       = gid.x; // row of the block slot: i_symb * npf + j
+    if ((i_layer >= p.nof_layers) || (b >= p.n_blk_slots) || (k >= p.Ls)) {
+        return;
+    }
+    device float* dst = y + (static_cast<ulong>(i_layer) * p.n_blk_slots + b) * 2 * p.Ls;
+    if ((b >= p.n_blk_real) || (k >= p.nof_symb * p.npf)) {
+        dst[2 * k]     = 0.0F;
+        dst[2 * k + 1] = 0.0F;
+        return;
+    }
+    const uint  i_symb = k / p.npf;
+    const uint  j      = k - i_symb * p.npf;
+    const ulong src =
+        (static_cast<ulong>(i_symb) * p.nof_layers + i_layer) * p.nof_pilots + p.pilot_base + b * p.npf + j;
+    dst[2 * k]     = lse[2 * src] * p.inv_beta;
+    dst[2 * k + 1] = lse[2 * src + 1] * p.inv_beta;
 }

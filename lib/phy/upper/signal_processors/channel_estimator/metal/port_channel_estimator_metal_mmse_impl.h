@@ -231,7 +231,9 @@ private:
   ///               gate on the A/R_hp stores, and it covers both matrices: they are written TOGETHER
   ///               or not at all. A separate "skip A but still write R_hp" flag was the defect that
   ///               left R_hp stale on the device-inversion path (2916 of 27216 entries valid, SINR
-  ///               -23 dB). The pilot staging below runs either way. Deliberately has NO default, so
+  ///               -23 dB). The pilot staging below runs either way - except that the DEVICE may be
+  ///               the one writing y (glue #2, see record_device_y_stage()), in which case the host
+  ///               skips its copy. Deliberately has NO default, so
   ///               every call site has to state which of the two it means.
   void stage_engine_group(const fd_td_estimation_stage_args& args,
                           unsigned                           gb_start,
@@ -245,6 +247,31 @@ private:
                           bool                               matrix,
                           bool                               gpu_invert,
                           bool                               slots_filled);
+
+  /// \brief Glue #2 (S-7f-5u): records that the DEVICE writes this group's y slots, so that
+  /// stage_engine_group() must NOT copy the pilots in from the host.
+  ///
+  /// \return True when the device will write them, i.e. when the host staging must be skipped. It
+  ///         is the ONLY such gate, and it is answered here - where the block geometry (gb_start,
+  ///         b_prb, npf), the batch strides and the system offset all live - rather than by the
+  ///         callers, so that "the device wrote y" cannot be derived differently in two places.
+  ///
+  /// The descriptor it appends is picked up by engine_run() and encoded into the engine's own
+  /// command buffer (the scatter is a dispatch of THAT buffer, not a submission of its own).
+  /// A merged batch stages two groups and therefore records two descriptors.
+  ///
+  /// It answers false - and the host stages y exactly as before - whenever the device cannot be
+  /// the writer: the device LSE is not valid for this hop (K0-a did not run or failed), the
+  /// path is switched off (OCUDU_CE_DEV_Y=0, the A/B), the metallib has no scatter kernel, or the
+  /// geometry does not fit the buffers.
+  bool record_device_y_stage(const fd_td_estimation_stage_args& args,
+                             unsigned                           gb_start,
+                             unsigned                           n_blk,
+                             unsigned                           b_prb,
+                             unsigned                           npt,
+                             unsigned                           L,
+                             unsigned                           sys_offset,
+                             const engine_strides&              st);
 
   /// \brief One engine call (one command buffer, one commit/wait) over the staged slots, with the
   /// optional K3 reformat stage appended to the same command buffer.
@@ -542,6 +569,37 @@ private:
   float* gpu_ls_out    = nullptr;
   float* gpu_ls_cfo    = nullptr;
   bool   gpu_nv_ready  = false;
+
+  /// Glue #2 (S-7f-5u): whether the device writes the engine's pilot vectors y out of gpu_ls_out
+  /// instead of the host copying them in. On by default; OCUDU_CE_DEV_Y=0 keeps the host staging,
+  /// which is the A/B of the two writers (capture_gates.sh ydev: the two must publish
+  /// byte-identical output, because the kernel only re-indexes and applies the same inv_beta
+  /// product the host applies).
+  bool device_y_enabled = false;
+  /// Whether gpu_ls_out holds THIS hop's pilots (K0-a ran and succeeded). It is set once per hop by
+  /// the K0-a stage and is what makes the device y write legal: the scatter reads exactly this
+  /// buffer, and a hop whose device LSE failed has nothing there.
+  bool device_ls_valid = false;
+  /// The descriptors of the groups the device will write, collected by stage_engine_group() and
+  /// consumed by engine_run(). At most two: a merged batch stages the standard group and the edge
+  /// group before its single engine call.
+  static constexpr unsigned k_max_y_scatter = 2;
+  std::array<metal::mmse_engine::pilots_scatter, k_max_y_scatter> device_y_stage{};
+  unsigned                                                        nof_device_y_stage = 0;
+  /// A copy of the descriptors of the LAST batch, kept for the OCUDU_CE_Y_CHECK probe below (the
+  /// staging list itself is consumed by engine_run()).
+  std::array<metal::mmse_engine::pilots_scatter, k_max_y_scatter> device_y_stage_last{};
+  unsigned                                                        nof_device_y_stage_last = 0;
+
+  /// \brief OCUDU_CE_Y_CHECK=1 probe: compares the y the DEVICE wrote against the values the host
+  /// staging would have written, element by element (the same comparison capture_gates.sh ydev
+  /// makes end to end, but per slot and per index).
+  ///
+  /// The device write happens inside a command buffer that may still be in flight, so the probe
+  /// completes the stage first. It is a diagnostic for the one thing a byte-identical end-to-end
+  /// gate cannot localize: WHICH slot differs.
+  /// \return True when every element matches.
+  bool probe_device_y_stage(const fd_td_estimation_stage_args& args);
 
   /// Maximum number of full blocks per slot for the configured block size.
   unsigned max_blocks;

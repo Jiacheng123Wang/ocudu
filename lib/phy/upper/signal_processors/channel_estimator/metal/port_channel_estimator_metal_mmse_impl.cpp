@@ -265,6 +265,18 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   gpu_ls_out    = alloc_aligned<float>(k_ls_floats);
   gpu_ls_cfo    = alloc_aligned<float>(1);
 
+  // Glue #2 (S-7f-5u): the DEVICE writes the engine's pilot vectors y out of the pilots it just
+  // produced (gpu_ls_out), which removes the host's copy of them into the y slots - the last CPU
+  // step between K0-a and the weights. DEFAULT ON, like the device inversion and the device LSE:
+  // the scatter only re-indexes and applies the same inv_beta product the host applies, so the
+  // published output is byte-identical either way, which is what OCUDU_CE_DEV_Y=0 (the host
+  // staging) is for: it is the A/B that proves the device writer (capture_gates.sh ydev).
+  static const bool device_y_default_on = []() {
+    const char* env = std::getenv("OCUDU_CE_DEV_Y");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  device_y_enabled = device_y_default_on;
+
   // metal_nn_mmse flavor: compile the simdgroup_matrix 8x8 pipelines and stage the
   // quad-packed pilot matrix qy (zero-initialized: tail-quad columns of non-existent
   // blocks stay zero, which the apply kernel needs for NaN-free accumulation).
@@ -649,6 +661,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // DEFAULT ON, like the device inversion: the pilots ARE the estimator's input, so producing them
   // on the device is what takes the host out of that point of the chain. OCUDU_CE_CPU_LS=1 forces
   // the host pre-stage (the escape hatch, and the A/B for the tolerance probe).
+  //
+  // The per-hop state of the two device-side consumers of this result lives here: the validity flag
+  // the y scatter (glue #2) is gated on, and the descriptors the staging records. Both are reset on
+  // EVERY hop, before K0-a decides, so a hop that fails K0-a cannot inherit the previous hop's
+  // descriptors - which would make the engine write y from a buffer that no longer holds its pilots.
+  device_ls_valid    = false;
+  nof_device_y_stage = 0;
   static const bool device_ls_enabled = (std::getenv("OCUDU_CE_CPU_LS") == nullptr);
   if (device_ls_enabled && (npt != 0) && (nof_layers <= MAX_LAYERS) &&
       (nof_layers <= args.dmrs_patterns.size())) {
@@ -708,6 +727,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       }
 
       if (engine->build_pilots_lse(st)) {
+        // K0-a produced THIS hop's pilots: from here on the device may also write the engine's
+        // pilot vectors out of them (glue #2, see record_device_y_stage()).
+        device_ls_valid = true;
         // Tolerance probe (OCUDU_CE_LS_CHECK=1): the device LSE against the host's, BEFORE the
         // overwrite. Tolerance, not bit-exactness: the pilots enter h = W . y linearly, so a
         // relative error carries no amplification factor (see ocudu_mmse_pilots.metal).
@@ -1330,6 +1352,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // The batches have been submitted: if any of them was not waited for, the stage is pending and
     // complete_fd_td_estimation_stage() must unpack it before its results are read.
     stage_pending = (nof_pending_unpacks != 0);
+    // Diagnostic (OCUDU_CE_Y_CHECK=1): did the DEVICE write the y slot values the host staging
+    // would have written? See probe_device_y_stage(). Costs a completion of the batch, so it is
+    // debug-only; the gate for this path is the byte-identical A/B (OCUDU_CE_DEV_Y=0).
+    static const bool y_check = (std::getenv("OCUDU_CE_Y_CHECK") != nullptr);
+    if (y_check) {
+      (void)probe_device_y_stage(args);
+    }
 #if defined(OCUDU_CE_TIME)
     if (gpu_ce_ready) {
       mmse_stats_device_hop();
@@ -1553,6 +1582,135 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 #endif
 }
 
+bool port_channel_estimator_metal_mmse_impl::probe_device_y_stage(const fd_td_estimation_stage_args& args)
+{
+  if (nof_device_y_stage_last == 0) {
+    return true;
+  }
+  // The scatter runs inside the engine's command buffer, which the deferred path has not waited
+  // for: complete it before reading what it wrote.
+  (void)complete_fd_td_estimation_stage();
+
+  unsigned nof_bad  = 0;
+  unsigned nof_slot = 0;
+  double   max_err  = 0.0;
+  for (unsigned g = 0; g != nof_device_y_stage_last; ++g) {
+    const metal::mmse_engine::pilots_scatter& s = device_y_stage_last[g];
+    for (unsigned i_layer = 0; i_layer != s.nof_layers; ++i_layer) {
+      for (unsigned b = 0; b != s.n_blk_slots; ++b) {
+        const float* d = s.y + (static_cast<std::size_t>(i_layer) * s.n_blk_slots + b) * 2 * s.Ls;
+        for (unsigned k = 0; k != s.Ls; ++k) {
+          float er = 0.0F;
+          float ei = 0.0F;
+          if ((b < s.n_blk_real) && (k < s.nof_symb * s.npf)) {
+            const unsigned i_symb = k / s.npf;
+            const unsigned j      = k - i_symb * s.npf;
+            const cf_t     v      = args.pilots_lse_view.get_symbol(i_symb, i_layer)[s.pilot_base + b * s.npf + j];
+            er                    = v.real();
+            ei                    = v.imag();
+          }
+          ++nof_slot;
+          const double dr = static_cast<double>(d[2 * k]) - er;
+          const double di = static_cast<double>(d[2 * k + 1]) - ei;
+          const double e  = std::max(std::abs(dr), std::abs(di));
+          if (e != 0.0) {
+            if (nof_bad < 12) {
+              std::fprintf(stderr,
+                           "[y_check] group=%u layer=%u block=%u row=%u dev=(%g,%g) host=(%g,%g)\n",
+                           g,
+                           i_layer,
+                           b,
+                           k,
+                           static_cast<double>(d[2 * k]),
+                           static_cast<double>(d[2 * k + 1]),
+                           static_cast<double>(er),
+                           static_cast<double>(ei));
+            }
+            ++nof_bad;
+          }
+          max_err = std::max(max_err, e);
+        }
+      }
+    }
+  }
+  std::fprintf(stderr,
+               "[y_check] groups=%u slots=%u mismatched=%u max_abs=%.3e\n",
+               nof_device_y_stage_last,
+               nof_slot,
+               nof_bad,
+               max_err);
+  return nof_bad == 0;
+}
+
+bool port_channel_estimator_metal_mmse_impl::record_device_y_stage(const fd_td_estimation_stage_args& args,
+                                                                   unsigned                           gb_start,
+                                                                   unsigned                           n_blk,
+                                                                   unsigned                           b_prb,
+                                                                   unsigned                           npt,
+                                                                   unsigned                           L,
+                                                                   unsigned                           sys_offset,
+                                                                   const engine_strides&              st)
+{
+  // The gates, in the order in which they can fail. Every one of them falls back to the host
+  // staging, which is the pre-glue-#2 behaviour and stays bit-for-bit equivalent, so a false here
+  // is never a correctness risk - only a missed removal.
+  if (!device_y_enabled || !device_ls_valid || !engine_ready || (engine == nullptr) ||
+      !engine->scatter_available()) {
+    return false;
+  }
+  const unsigned nof_layers = args.dmrs_patterns.size();
+  const auto&    hop_rb_mask =
+      (args.hop == 0) ? args.dmrs_patterns.front().rb_mask : args.dmrs_patterns.front().rb_mask2;
+  const unsigned comb = args.dmrs_patterns.front().re_pattern.count();
+  // The HOP layout of gpu_ls_out, as K0-a built it: nof_prb * comb pilots per (symbol, layer).
+  // K0-a refuses a geometry whose pilot count disagrees with the caller's, so this is the same
+  // number it produced - but it is checked again rather than assumed, because a mismatch here
+  // would read past the hop's pilots instead of failing.
+  const unsigned nof_hop_pilots = hop_rb_mask.count() * comb;
+  const unsigned npf            = b_prb * comb;
+  if ((comb == 0) || (nof_hop_pilots == 0) || (nof_hop_pilots != args.nof_symbol_pilots) || (npf == 0) ||
+      (npt == 0) || (npt > MAX_DMRS_SYMBOLS) || (nof_layers == 0) || (nof_layers > MAX_LAYERS) ||
+      (n_blk == 0) || (st.n_blk == 0) || (st.L == 0) || (L == 0) || (L > MAX_BLOCK_PILOTS) ||
+      (st.L > MAX_BLOCK_PILOTS) || (npt * npf > st.L) || (nof_device_y_stage >= device_y_stage.size())) {
+    return false;
+  }
+  // The destination must fit the buffer the engine call binds: the group's systems start at
+  // sys_offset and each carries st.n_blk block slots of 2 * st.L floats.
+  const std::size_t y_floats =
+      static_cast<std::size_t>(MAX_LAYERS) * max_blocks * 2 * MAX_BLOCK_PILOTS;
+  if ((static_cast<std::size_t>(sys_offset) + nof_layers) * st.n_blk * 2 * st.L > y_floats) {
+    return false;
+  }
+
+  metal::mmse_engine::pilots_scatter& s = device_y_stage[nof_device_y_stage];
+  s                                     = {};
+  s.lse                                 = gpu_ls_out;
+  s.lse_bytes                           = k_ls_floats * sizeof(float);
+  // The group's system offset goes into the POINTER, derived from the same (sys_offset, st) the
+  // engine call derives its own y base from - so the writer and the reader cannot disagree about
+  // which system they mean (the split-tail defect of S-7f-5l was exactly that, in the other
+  // direction). run_async() binds this pointer as given and adds no offset of its own.
+  s.y          = gpu_y + static_cast<std::size_t>(sys_offset) * st.n_blk * 2 * st.L;
+  s.nof_layers = nof_layers;
+  s.nof_symb   = npt;
+  s.nof_pilots = nof_hop_pilots;
+  s.npf        = npf;
+  s.pilot_base = gb_start * comb;
+  // The SLOT count and the FILLED count differ in exactly one place: a merged batch puts the edge
+  // block into the standard group's slots, so its tail group has st.n_blk slots of which one is
+  // real (n_blk == 1 there). The kernel zeroes the rest, which is what the host's memset of the
+  // tail's y region does before staging it.
+  s.n_blk_slots = st.n_blk;
+  s.n_blk_real  = n_blk;
+  s.Ls          = st.L;
+  // The DM-RS to data scaling the host applies to pilots_lse_view() before staging it. The device
+  // reads gpu_ls_out, which does NOT carry it (the host scales its own copy afterwards), so the
+  // kernel applies it - one multiply per component, the same one ocuduvec::sc_prod() applies.
+  s.inv_beta = 1.0F / args.beta_scaling;
+  ++nof_device_y_stage;
+  return true;
+}
+
 void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_estimation_stage_args& args,
                                                                 unsigned                           gb_start,
                                                                 unsigned                           n_blk,
@@ -1684,20 +1842,28 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
       }
     }
   } else {
-    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-      for (unsigned b = 0; b != n_blk; ++b) {
-        float* yp = gpu_y + (static_cast<std::size_t>(sys_offset + i_layer) * st.n_blk + b) * 2 * Ls;
-        // Pad rows k in [L, Ls) stay zero: their weights are exactly zero, but a non-finite value
-        // left there would reach h through 0 * inf = NaN.
-        if (Ls > L) {
-          std::memset(yp + 2 * L, 0, static_cast<std::size_t>(Ls - L) * 2 * sizeof(float));
-        }
-        for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
-          span<const cf_t> src =
-              args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan((gb_start + b * b_prb) * comb, npf);
-          for (unsigned j = 0; j != npf; ++j) {
-            yp[2 * (i_symbol * npf + j)]     = src[j].real();
-            yp[2 * (i_symbol * npf + j) + 1] = src[j].imag();
+    // Glue #2 (S-7f-5u): the DEVICE is the writer of these slots whenever it can be - it re-indexes
+    // the pilots K0-a already produced into exactly this layout, inside the command buffer whose
+    // weights read them, so nothing is copied through the host at all. record_device_y_stage()
+    // answers for the whole decision (device LSE valid, kernel present, knob, geometry) and is the
+    // reason the loop below is skipped; the loop itself is the fallback and must keep producing
+    // byte-identical values, because OCUDU_CE_DEV_Y=0 selects it as the A/B.
+    if (!record_device_y_stage(args, gb_start, n_blk, b_prb, npt, L, sys_offset, st)) {
+      for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+        for (unsigned b = 0; b != n_blk; ++b) {
+          float* yp = gpu_y + (static_cast<std::size_t>(sys_offset + i_layer) * st.n_blk + b) * 2 * Ls;
+          // Pad rows k in [L, Ls) stay zero: their weights are exactly zero, but a non-finite value
+          // left there would reach h through 0 * inf = NaN.
+          if (Ls > L) {
+            std::memset(yp + 2 * L, 0, static_cast<std::size_t>(Ls - L) * 2 * sizeof(float));
+          }
+          for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
+            span<const cf_t> src =
+                args.pilots_lse_view.get_symbol(i_symbol, i_layer).subspan((gb_start + b * b_prb) * comb, npf);
+            for (unsigned j = 0; j != npf; ++j) {
+              yp[2 * (i_symbol * npf + j)]     = src[j].real();
+              yp[2 * (i_symbol * npf + j) + 1] = src[j].imag();
+            }
           }
         }
       }
@@ -1742,6 +1908,18 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
     (void)complete_fd_td_estimation_stage();
   }
 
+  // Glue #2: the y descriptors stage_engine_group() recorded while staging this batch. They are
+  // CONSUMED here - the count is cleared before the call, so a failure cannot leave them to be
+  // encoded into a later batch (whose slots they do not describe), and a hop that stages nothing
+  // cannot inherit them. The matrix flavor never records any (qy is still host-packed, by design).
+  const metal::mmse_engine::pilots_scatter* y_scatter   = device_y_stage.data();
+  const unsigned                            nof_y_scatter = nof_device_y_stage;
+  nof_device_y_stage                                    = 0;
+  // Keep a copy for the OCUDU_CE_Y_CHECK probe (see probe_device_y_stage()): the descriptors are
+  // the only record of what the device was told to write, and the batch may be deferred.
+  device_y_stage_last      = device_y_stage;
+  nof_device_y_stage_last  = nof_y_scatter;
+
   // Two flavors, selected by WHERE A IS INVERTED - not by which entry point happens to exist:
   //   gpu_invert: the slots hold A, and K1 (plus the correlation prefix, when corr is given) runs in
   //               THIS command buffer, before the weights. This is the form the full-GPU-path goal
@@ -1771,13 +1949,47 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
                                                  nof_systems,
                                                  nof_blocks,
                                                  reformat,
-                                                 corr)
-                             : engine->run(
-                                   gpu_a, gpu_r_hp, gpu_w, gpu_y, gpu_h, nout, L, nof_systems, nof_blocks, reformat))
-                    : (defer ? engine->run_weights_only_async(
-                                   a_slot, r_slot, w_slot, y_slot, h_slot, nout, L, nof_systems, nof_blocks, reformat, corr)
-                             : engine->run_weights_only(
-                                   a_slot, r_slot, w_slot, y_slot, h_slot, nout, L, nof_systems, nof_blocks, reformat, corr)));
+                                                 corr,
+                                                 y_scatter,
+                                                 nof_y_scatter)
+                             : engine->run(a_slot,
+                                           r_slot,
+                                           w_slot,
+                                           y_slot,
+                                           h_slot,
+                                           nout,
+                                           L,
+                                           nof_systems,
+                                           nof_blocks,
+                                           reformat,
+                                           y_scatter,
+                                           nof_y_scatter))
+                    : (defer ? engine->run_weights_only_async(a_slot,
+                                                              r_slot,
+                                                              w_slot,
+                                                              y_slot,
+                                                              h_slot,
+                                                              nout,
+                                                              L,
+                                                              nof_systems,
+                                                              nof_blocks,
+                                                              reformat,
+                                                              corr,
+                                                              y_scatter,
+                                                              nof_y_scatter)
+                             : engine->run_weights_only(a_slot,
+                                                        r_slot,
+                                                        w_slot,
+                                                        y_slot,
+                                                        h_slot,
+                                                        nout,
+                                                        L,
+                                                        nof_systems,
+                                                        nof_blocks,
+                                                        reformat,
+                                                        corr,
+                                                        y_scatter,
+                                                        nof_y_scatter)));
   if (!engine_ok) {
     logger.error("[mmse_ce] engine call failed (systems={} blocks={} nout={} L={} matrix={}): falling back to the "
                  "CPU path for these blocks",
