@@ -118,6 +118,23 @@ private:
   void apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args) override;
 
   // See the base class documentation.
+  bool stage_produces_ls_pilots(const fd_td_estimation_stage_args& args) const override;
+
+  /// \brief The geometry of the hop, as K0-a sees it (see apply_fd_td_estimation_stage()).
+  ///
+  /// Factored out because TWO decisions read it now - whether the device builds this hop's
+  /// least-squares pilots, and whether the host pre-stage runs at all
+  /// (stage_produces_ls_pilots()) - and those two answers have to agree by construction.
+  struct ls_geometry {
+    /// True when the device qualifies for this hop.
+    bool     ok         = false;
+    unsigned nof_pilots = 0;
+    unsigned ncomb      = 0;
+    unsigned nof_prb    = 0;
+  };
+  ls_geometry ls_geometry_of(const fd_td_estimation_stage_args& args) const;
+
+  // See the base class documentation.
   bool complete_fd_td_estimation_stage() override;
 
   // See the base class documentation.

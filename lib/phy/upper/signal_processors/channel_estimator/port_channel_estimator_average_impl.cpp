@@ -358,9 +358,10 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
                           nof_dmrs_symbols,
                           nof_symbol_pilots);
 
-  std::optional<float> cfo_hop = std::nullopt;
-
   // We process layers in groups of two, since the DM-RS for layer 2n and layer 2n+1 are mapped onto the same REs.
+  // This pass extracts the received pilots - the device stages them, and the statistics accumulate
+  // their power - and it is unconditional: only the least-squares pilots and the CFO below can be
+  // taken over by the stage.
   for (unsigned i_layer = 0; i_layer < nof_tx_layers; i_layer += 2U) {
     ocudu_assert((hop == 0) || cfg_local.dmrs_pattern[i_layer].hopping_symbol_index.has_value(),
                  "Frequency hopping requested but not configured.");
@@ -372,30 +373,9 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
     for (unsigned i_dmrs = 0; i_dmrs != nof_dmrs_symbols; ++i_dmrs) {
       epre += ocuduvec::average_power(rx_pilots.get_symbol(i_dmrs, i_cdm)) * rx_pilots.get_symbol(i_dmrs, i_cdm).size();
     }
-
-    unsigned hop_offset = 0;
-    if (hop == 1) {
-      hop_offset = pilots.size().nof_symbols - nof_dmrs_symbols;
-    }
-
-    unsigned stop_layer = (i_layer < nof_tx_layers - 1) ? i_layer + 2 : i_layer + 1;
-
-    // Preprocess the pilots and compute the hop contribution to the CFO. Recall that this method updates pilot_products
-    // and pilots_lse.
-    std::optional<float> cfo_hop_cdm = preprocess_pilots_and_estimate_cfo(
-        pilots, pattern_symbols, first_symbol, last_symbol, hop_offset, i_layer, stop_layer);
-    if (cfo_hop_cdm.has_value()) {
-      cfo_hop = evaluate_or(cfo_hop, cfo_hop_cdm.value(), std::plus(), cfo_hop_cdm.value());
-    }
   }
 
-  cfo_hop = transform_optional(cfo_hop, std::divides(), static_cast<float>(divide_ceil(nof_tx_layers, 2)));
-  if (cfo_hop.has_value()) {
-    cfo_normalized = evaluate_or(cfo_normalized, *cfo_hop, [](float a, float b) { return (a + b) / 2.0F; }, *cfo_hop);
-  }
-
-  // Compensate the CFO. Recall that this method updates pilot_products and pilots_lse.
-  compensate_cfo_and_accumulate(pilots, pattern_symbols, first_symbol, last_symbol, cfo_hop);
+  std::optional<float> cfo_hop = std::nullopt;
 
   // Select the storage for the estimated frequency-domain channel coefficients.
   re_measurement<cf_t>& freq_response = (hop == 0) ? dynamic_cast<re_measurement<cf_t>&>(freq_response_hop0)
@@ -408,6 +388,11 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
     stage_hop_offset = pilots.size().nof_symbols - nof_dmrs_symbols;
   }
 
+  // Built BEFORE the pre-stage: the stage is asked whether it produces the least-squares pilots
+  // itself, and that answer decides whether the host pre-stage runs at all (see
+  // stage_produces_ls_pilots()). Everything the arguments carry at this point is hop geometry or
+  // the buffers setup_auxiliary_buffers() has just sized; \c cfo_hop is filled below by whichever
+  // side estimates it.
   fd_td_estimation_stage_args stage_args{
       .grid                      = grid,
       .port                      = port,
@@ -432,6 +417,17 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
       .enlarged_filtered_pilots_lse = enlarged_filtered_pilots_lse,
       .freq_response             = freq_response,
   };
+
+  // The host pre-stage: the least-squares pilots, the pilot products and the CFO estimate that goes
+  // with them. A stage that builds the pilots itself (a device backend, see
+  // stage_produces_ls_pilots()) makes this a CPU step with no consumer - the buffer is overwritten
+  // before any reader - so it is skipped and the CFO comes from the stage through account_hop_cfo().
+  if (!stage_produces_ls_pilots(stage_args)) {
+    cfo_hop = run_ls_pre_stage(stage_args);
+    stage_args.cfo_hop = cfo_hop;
+  }
+  account_hop_cfo(cfo_hop);
+
   // Record what the hop statistics need before starting the stage: it may complete this hop much
   // later than it was submitted (see port_channel_estimator::submit()), and everything else they
   // read is either a member or is derived again from cfg_local.
@@ -440,13 +436,53 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
   pending_hop.nof_lse_symbols  = nof_lse_symbols;
   pending_hop.stage_hop_offset = stage_hop_offset;
   pending_hop.beta_scaling     = beta_scaling;
-  pending_hop.cfo_hop          = cfo_hop;
 
 #if defined(OCUDU_CE_TIME)
   stage_args.pre_stage_us =
       std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - pre_stage_begin).count();
 #endif
   apply_fd_td_estimation_stage(stage_args);
+}
+
+std::optional<float> port_channel_estimator_average_impl::run_ls_pre_stage(const fd_td_estimation_stage_args& args)
+{
+  unsigned nof_tx_layers = args.dmrs_patterns.size();
+  unsigned hop_offset    = 0;
+  if (args.hop == 1) {
+    hop_offset = args.pilots.size().nof_symbols - args.nof_dmrs_symbols;
+  }
+
+  std::optional<float> cfo_hop = std::nullopt;
+  for (unsigned i_layer = 0; i_layer < nof_tx_layers; i_layer += 2U) {
+    unsigned stop_layer = (i_layer < nof_tx_layers - 1) ? i_layer + 2 : i_layer + 1;
+
+    // Preprocess the pilots and compute the hop contribution to the CFO. Recall that this method updates pilot_products
+    // and pilots_lse.
+    std::optional<float> cfo_hop_cdm = preprocess_pilots_and_estimate_cfo(args.pilots,
+                                                                         args.pattern_symbols,
+                                                                         args.first_symbol,
+                                                                         args.last_symbol,
+                                                                         hop_offset,
+                                                                         i_layer,
+                                                                         stop_layer);
+    if (cfo_hop_cdm.has_value()) {
+      cfo_hop = evaluate_or(cfo_hop, cfo_hop_cdm.value(), std::plus(), cfo_hop_cdm.value());
+    }
+  }
+
+  cfo_hop = transform_optional(cfo_hop, std::divides(), static_cast<float>(divide_ceil(nof_tx_layers, 2)));
+
+  // Compensate the CFO. Recall that this method updates pilot_products and pilots_lse.
+  compensate_cfo_and_accumulate(args.pilots, args.pattern_symbols, args.first_symbol, args.last_symbol, cfo_hop);
+  return cfo_hop;
+}
+
+void port_channel_estimator_average_impl::account_hop_cfo(std::optional<float> cfo)
+{
+  pending_hop.cfo_hop = cfo;
+  if (cfo.has_value()) {
+    cfo_normalized = evaluate_or(cfo_normalized, *cfo, [](float a, float b) { return (a + b) / 2.0F; }, *cfo);
+  }
 }
 
 bool port_channel_estimator_average_impl::compute_hop_finish(const dmrs_symbol_list& pilots)

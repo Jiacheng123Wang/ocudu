@@ -215,11 +215,42 @@ protected:
     apply_fd_td_estimation_stage_classical(args);
   }
 
+  /// \brief Whether the estimation stage produces the hop's least-squares pilots itself.
+  ///
+  /// A device backend recomputes them from the resource grid inside the stage and the result is what
+  /// the rest of the estimator consumes (see port_channel_estimator_metal_mmse_impl, where K0-a
+  /// overwrites \c pilots_lse_view): the host pre-stage would then fill a buffer that is replaced
+  /// before any reader, i.e. a CPU step in the middle of the chain with no consumer. Such a backend
+  /// answers true here and the pre-stage is skipped. It answers BEFORE the stage runs, because the
+  /// pre-stage is exactly what is being skipped, so the answer must not depend on the stage's own
+  /// result: a backend that says true and then cannot build the pilots calls run_ls_pre_stage() from
+  /// the stage (the cold path) and keeps the host result.
+  ///
+  /// The default is false: the classical estimator and every backend that estimates on the host keep
+  /// the pre-stage, which is also the fallback the caller selects with the estimator's own knobs.
+  virtual bool stage_produces_ls_pilots(const fd_td_estimation_stage_args& args) const { return false; }
+
   /// \brief The classical FD smoothing + TD interpolation stage (the default behavior,
   /// factored out of the virtual hook). Derived estimators that need the classical
   /// per-symbol estimates as their input (e.g. the AI channel estimator) call this
   /// explicitly and then refine the result.
   void apply_fd_td_estimation_stage_classical(fd_td_estimation_stage_args& args);
+
+  /// \brief Runs the host pre-stage of one hop: the least-squares pilots and the CFO estimate.
+  ///
+  /// This is the part of compute_hop_submit() that a device backend skips when
+  /// stage_produces_ls_pilots() says it will build the pilots itself - and that it calls from the
+  /// stage when the build fails anyway.
+  /// \param[in] args  Hop arguments; \c pilots and the pattern describe the hop.
+  /// \return The hop's CFO estimate, when the pilots carry one.
+  std::optional<float> run_ls_pre_stage(const fd_td_estimation_stage_args& args);
+
+  /// \brief Records the CFO the hop's pilots were rotated with, for the statistics and the report.
+  ///
+  /// The host pre-stage estimates it, but a device backend that builds the pilots returns its own
+  /// with them: the filtered pilots the statistics read come from that same rotation, so the CFO
+  /// that reaches estimate_noise() and get_cfo_Hz() has to be the matching one.
+  void account_hop_cfo(std::optional<float> cfo);
 
   /// \brief Completes the estimation stage of a hop that apply_fd_td_estimation_stage() started.
   ///

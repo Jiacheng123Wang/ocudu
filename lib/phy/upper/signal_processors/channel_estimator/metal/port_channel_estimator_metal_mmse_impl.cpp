@@ -207,6 +207,22 @@ void free_aligned(T* p)
   }
 }
 
+/// The device's pilot-extraction stage (K0-a). OCUDU_CE_CPU_LS=1 forces the host pre-stage: the
+/// escape hatch, and the A/B of the tolerance probe.
+bool device_ls_enabled()
+{
+  static const bool value = (std::getenv("OCUDU_CE_CPU_LS") == nullptr);
+  return value;
+}
+
+/// OCUDU_CE_LS_CHECK=1 compares the device's least-squares pilots against the host's, so both have
+/// to exist: it needs the host pre-stage (see stage_produces_ls_pilots()).
+bool ls_check_enabled()
+{
+  static const bool value = (std::getenv("OCUDU_CE_LS_CHECK") != nullptr);
+  return value;
+}
+
 } // namespace
 
 port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
@@ -693,6 +709,47 @@ bool port_channel_estimator_metal_mmse_impl::gauss_jordan_invert(span<float> a, 
   return true;
 }
 
+port_channel_estimator_metal_mmse_impl::ls_geometry
+port_channel_estimator_metal_mmse_impl::ls_geometry_of(const fd_td_estimation_stage_args& args) const
+{
+  ls_geometry geom;
+
+  const unsigned nof_layers = args.dmrs_patterns.size();
+  if ((nof_layers == 0) || (nof_layers > MAX_LAYERS)) {
+    return geom;
+  }
+
+  const auto& hop_rb_mask =
+      (args.hop == 0) ? args.dmrs_patterns.front().rb_mask : args.dmrs_patterns.front().rb_mask2;
+  const unsigned nof_prb = hop_rb_mask.count();
+  const unsigned comb    = args.dmrs_patterns.front().re_pattern.count();
+  geom.nof_prb           = nof_prb;
+  geom.ncomb             = comb;
+  geom.nof_pilots        = nof_prb * comb;
+
+  // DM-RS symbols of the hop, counted exactly like the stage's own loop.
+  unsigned npt = 0;
+  args.pattern_symbols.for_each(args.first_symbol, args.last_symbol, [&](unsigned) { ++npt; });
+
+  // A contiguous allocation only: the kernels index the hop as first_prb + k/ncomb, which is the
+  // same restriction the device gather of the equalizer works under. The rest is the kernels'
+  // compile-time contract and the staging buffers' capacity.
+  const bool contiguous =
+      (nof_prb != 0) && ((hop_rb_mask.find_highest() + 1 - hop_rb_mask.find_lowest()) == nof_prb);
+  geom.ok = (npt != 0) && (npt == args.nof_dmrs_symbols) && contiguous && (comb != 0) &&
+            (geom.nof_pilots == args.nof_symbol_pilots) && (geom.nof_pilots <= MAX_NOF_PILOTS_SYMBOL) &&
+            args.grid.get_device_view().is_valid();
+  return geom;
+}
+
+bool port_channel_estimator_metal_mmse_impl::stage_produces_ls_pilots(const fd_td_estimation_stage_args& args) const
+{
+  if (!device_ls_enabled() || ls_check_enabled() || !engine_ready) {
+    return false;
+  }
+  return ls_geometry_of(args).ok;
+}
+
 void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
@@ -712,16 +769,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   const unsigned staged_cdm_groups = stage_device_noise_inputs(args, npt);
 
   // ---- K0-a: the estimator's INPUT stage, on the device --------------------------------
-  // The host pre-stage that ran before this call has already filled pilots_lse from the grid.
-  // When OCUDU_CE_DEV_LS=1 and the grid is device-addressable, the pilots are recomputed HERE, on
-  // the device, and the result OVERWRITES pilots_lse_view - so the value the rest of the estimator
-  // consumes comes from the device. Recomputing rather than replacing is the CPU glue this step
-  // keeps on purpose (the host's copy is still what the statistics read); removing it is the next
-  // step. The device path is OFF by default until the tolerance probe and a phone OTA have cleared
-  // it, and it falls back to the host whenever the geometry or the grid does not qualify.
-  // DEFAULT ON, like the device inversion: the pilots ARE the estimator's input, so producing them
-  // on the device is what takes the host out of that point of the chain. OCUDU_CE_CPU_LS=1 forces
-  // the host pre-stage (the escape hatch, and the A/B for the tolerance probe).
+  // The pilots are recomputed HERE, on the device, when the hop qualifies, and the result
+  // OVERWRITES pilots_lse_view - so the value the rest of the estimator consumes comes from the
+  // device. The host pre-stage is what this replaces, so it is SKIPPED for those hops (the base
+  // class asks stage_produces_ls_pilots(), which reads the same geometry this gate does through
+  // ls_geometry_of()); the CFO is then the device's too (see account_hop_cfo() below). The device
+  // path is DEFAULT ON, like the device inversion; OCUDU_CE_CPU_LS=1 forces the host pre-stage (the
+  // escape hatch, and the A/B for the tolerance probe), and OCUDU_CE_LS_CHECK=1 needs both sides.
   //
   // The per-hop state of the two device-side consumers of this result lives here: the validity flag
   // the y scatter (glue #2) is gated on, and the descriptors the staging records. Both are reset on
@@ -730,19 +784,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   device_ls_valid     = false;
   device_sigma2_valid = false;
   nof_device_y_stage  = 0;
-  static const bool device_ls_enabled = (std::getenv("OCUDU_CE_CPU_LS") == nullptr);
-  if (device_ls_enabled && (npt != 0) && (nof_layers <= MAX_LAYERS) &&
-      (nof_layers <= args.dmrs_patterns.size())) {
-    const resource_grid_device_view dv           = args.grid.get_device_view();
-    const unsigned                  comb         = args.dmrs_patterns.front().re_pattern.count();
-    const unsigned                  nof_pilots   = nof_prb * comb;
-    // A contiguous allocation only: the kernels index the hop as first_prb + k/ncomb, which is the
-    // same restriction the device gather of the equalizer works under.
-    const bool contiguous = (hop_rb_mask.find_highest() + 1 - hop_rb_mask.find_lowest()) == nof_prb;
-    if (dv.is_valid() && contiguous && (comb != 0) && (nof_pilots == args.nof_symbol_pilots) &&
-        (nof_pilots <= MAX_NOF_PILOTS_SYMBOL)) {
-      for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
-        for (unsigned i_symb = 0; i_symb != npt; ++i_symb) {
+  const ls_geometry geom = ls_geometry_of(args);
+  if (device_ls_enabled() && geom.ok) {
+    const resource_grid_device_view dv         = args.grid.get_device_view();
+    const unsigned                  comb       = geom.ncomb;
+    const unsigned                  nof_pilots = geom.nof_pilots;
+    for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
+      for (unsigned i_symb = 0; i_symb != npt; ++i_symb) {
           span<const cf_t> src = args.pilots.get_symbol(args.hop_offset + i_symb, i_layer);
           float*           dst = gpu_ls_ref + (static_cast<std::size_t>(i_symb) * nof_layers + i_layer) * nof_pilots * 2;
           for (unsigned j = 0; j != nof_pilots; ++j) {
@@ -821,15 +869,24 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // K0-a produced THIS hop's pilots: from here on the device may also write the engine's
         // pilot vectors out of them (glue #2, see record_device_y_stage()).
         device_ls_valid = true;
+        // The CFO that goes with those pilots comes from the device too: the host pre-stage that
+        // estimated it did not run for this hop. It is the rotation the statistics have to use with
+        // the device's filtered pilots (see account_hop_cfo()), what the caller reports, and - as
+        // args.cfo_hop - what the noise reformat below compensates when it reduces the variance the
+        // equalizer reads. The kernel reproduces the host's estimate bit for bit (measured: both are
+        // the same float on every capture tried), but the host value is not available here.
+        args.cfo_hop = std::optional<float>(gpu_ls_cfo[0]);
+        account_hop_cfo(args.cfo_hop);
         // S-7f-5w: and it computed this hop's noise variance, in the command buffer that just
         // completed - so the scalar is valid now, with no extra synchronisation. NOT "sigma2 != nullptr":
         // that pointer stays non-null when the engine skipped the stage, and the buffer then holds the
         // previous hop's value (or nothing). The engine reports it through sigma2_done.
         device_sigma2_valid = (st.sigma2 != nullptr) && sigma2_done;
         // Tolerance probe (OCUDU_CE_LS_CHECK=1): the device LSE against the host's, BEFORE the
-        // overwrite. Tolerance, not bit-exactness: the pilots enter h = W . y linearly, so a
-        // relative error carries no amplification factor (see ocudu_mmse_pilots.metal).
-        if (std::getenv("OCUDU_CE_LS_CHECK") != nullptr) {
+        // overwrite. It is what makes stage_produces_ls_pilots() keep the host pre-stage when it is
+        // on. Tolerance, not bit-exactness: the pilots enter h = W . y linearly, so a relative error
+        // carries no amplification factor (see ocudu_mmse_pilots.metal).
+        if (ls_check_enabled()) {
           double   max_rel = 0.0;
           unsigned nof_bad = 0;
           for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
@@ -849,14 +906,15 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
             }
           }
           std::fprintf(stderr,
-                       "[ls_check] L=%u symb=%u pilots=%u layers=%u max_rel=%.3e bad(>1e-5)=%u cfo=%g\n",
+                       "[ls_check] L=%u symb=%u pilots=%u layers=%u max_rel=%.3e bad(>1e-5)=%u cfo=%g host_cfo=%g\n",
                        nof_pilots,
                        npt,
                        nof_pilots,
                        nof_layers,
                        max_rel,
                        nof_bad,
-                       static_cast<double>(gpu_ls_cfo[0]));
+                       static_cast<double>(gpu_ls_cfo[0]),
+                       args.cfo_hop.has_value() ? static_cast<double>(*args.cfo_hop) : 0.0);
           // Per-symbol/per-pilot detail: a small relative error on EVERY pilot is the signature of a
           // neighbouring-subcarrier read (adjacent channel values are similar), while a rotation-like
           // error points at the CFO phasors. Printed for the first few pilots of each symbol.
@@ -891,9 +949,15 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           }
         }
       } else {
-        logger.warning("[mmse_ce] device LSE build failed: keeping the host pre-stage");
+        // Cold path: this hop qualified for the device build, so the base class SKIPPED the host
+        // pre-stage (stage_produces_ls_pilots()) and the least-squares pilots and the CFO have to
+        // come from the host now - exactly as if the hop had not qualified. It cannot run every
+        // hop: the answer above must not depend on this call's outcome.
+        logger.warning("[mmse_ce] device LSE build failed: running the host pre-stage for this hop");
+        std::optional<float> host_cfo = run_ls_pre_stage(args);
+        account_hop_cfo(host_cfo);
+        args.cfo_hop = host_cfo;
       }
-    }
   }
 
   // Per-phase timing (compile-time debug aid, ENABLE_CE_TIME=ON defines OCUDU_CE_TIME):
@@ -910,17 +974,17 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // that turns sigma2 into the noise-to-signal ratio the unit-normalized correlation model needs.
   float pilots_power = 0.0F;
   {
-    size_t nof_pilots = 0;
+    size_t nof_power_pilots = 0;
     for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
       for (unsigned i_symbol = 0; i_symbol != args.nof_dmrs_symbols; ++i_symbol) {
         span<const cf_t> sym = args.pilots_lse_view.get_symbol(i_symbol, i_layer);
         for (const cf_t& x : sym) {
           pilots_power += std::norm(x);
         }
-        nof_pilots += sym.size();
+        nof_power_pilots += sym.size();
       }
     }
-    pilots_power = (nof_pilots == 0) ? 0.0F : pilots_power / static_cast<float>(nof_pilots);
+    pilots_power = (nof_power_pilots == 0) ? 0.0F : pilots_power / static_cast<float>(nof_power_pilots);
   }
 
   // Mirror the classical FD stage: scale the least-squares pilots by 1 / beta so that the estimator
