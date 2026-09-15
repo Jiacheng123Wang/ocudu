@@ -12,7 +12,12 @@ tests/ci/macos_triage/__pycache__/
 # CMake build directory (regenerable)
 /build/
 tmp/
-doc_chinese/
+# The whole doc_chinese/ tree stays local EXCEPT the full-GPU-chain working set, which is the
+# project's cross-session memory for the task in flight (living design document, plans, pipeline
+# audit and every session handoff memo): those 15 files ARE tracked. Everything else under
+# doc_chinese/ - drafts, investor decks, meeting notes - stays out of the repository.
+doc_chinese/*
+!doc_chinese/full_gpu_chain/
 
 __pycache__/
 *.pyc
