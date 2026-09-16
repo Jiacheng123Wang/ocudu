@@ -319,9 +319,26 @@ TEST(DuLowPhyPipelineTest, GpuModeEqualsTheModuleKnobsSpelledOut)
 TEST(DuLowPhyPipelineTest, GpuModeRejectsBackendsTheLaneDoesNotOwn)
 {
   // An explicit CPU backend is a conflict: this mode has no CPU fallback.
-  EXPECT_FALSE(resolve_conflict(make_request("gpu", "cpu")).empty());
-  EXPECT_FALSE(resolve_conflict(make_request("gpu", "metal", "cpu")).empty());
-  EXPECT_FALSE(resolve_conflict(make_request("gpu", "metal", "metal_mmse", "cpu")).empty());
+  // The whole conflict matrix: EVERY CPU backend (not only "cpu") is a conflict for every module the
+  // lane owns - "generic", "neon", "avx2" and "avx512" select a CPU implementation just as "cpu" does,
+  // and accepting them silently would let the command line claim the module runs on the host.
+  for (const char* cpu_backend : {"cpu", "generic", "neon", "avx2", "avx512"}) {
+    EXPECT_FALSE(resolve_conflict(make_request("gpu", cpu_backend)).empty()) << cpu_backend;
+    EXPECT_FALSE(resolve_conflict(make_request("gpu", "metal", cpu_backend)).empty()) << cpu_backend;
+    EXPECT_FALSE(resolve_conflict(make_request("gpu", "metal", "metal_mmse", cpu_backend)).empty()) << cpu_backend;
+  }
+
+  // The LDPC decoder is NOT part of the lane (the LLR still leaves the device for the CPU decoder), so
+  // its knob keeps its meaning in this mode: no conflict, and the requested flavor survives.
+  EXPECT_EQ(resolve(make_request("gpu", "auto", "auto", "auto", "cpu")).ldpc, "cpu");
+  EXPECT_EQ(resolve(make_request("gpu", "auto", "auto", "auto", "generic")).ldpc, "generic");
+
+  // The grid knob stays what it has always been - the A/B control of where the grid lives, which the
+  // mode only defaults (see device_resource_grid_follows_the_mode_by_default): asking for it here is not
+  // a conflict, and the lane is still declared.
+  EXPECT_TRUE(resolve(make_request("gpu", "auto", "auto", "auto", "auto", "on")).device_grid);
+  EXPECT_TRUE(resolve(make_request("gpu", "auto", "auto", "auto", "auto", "on")).lane_fused);
+  EXPECT_TRUE(resolve(make_request("gpu")).device_grid);
 
   // Any DEVICE flavor is accepted, spelled out or not: the knobs still pick which device backend
   // runs (the lane's own values are the defaults). resolve() is the helper that fails the test when a
