@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -46,6 +47,11 @@ struct dft_stats_t {
   /// the host - either the caller never asks for it, or the engine refused the samples and the
   /// caller fell back, which it warns about once.
   std::atomic<uint64_t> radio_inputs{0};
+  /// Wraps of this engine that could not be zero-copy and were staged instead (see wrap_buffer): the
+  /// engine's own tables when they are not page aligned, or a caller's buffer the registry does not
+  /// describe. Counted because a silent copy here is exactly how "the transform reads the radio
+  /// buffer" stops being true without any counter saying so.
+  std::atomic<uint64_t> wrap_copies{0};
 };
 
 static dft_stats_t& dft_stats()
@@ -79,15 +85,22 @@ static void dft_stats_radio_input()
   dft_stats().radio_inputs.fetch_add(1, std::memory_order_relaxed);
 }
 
+/// Counts one wrap that had to stage a copy (see dft_stats_t::wrap_copies).
+static void dft_stats_wrap_copy()
+{
+  dft_stats().wrap_copies.fetch_add(1, std::memory_order_relaxed);
+}
+
 static void dft_stats_report()
 {
   const dft_stats_t& s = dft_stats();
   std::fprintf(stderr,
-               "[metal_stats] dft commits=%llu waits=%llu max_in_flight=%llu radio_inputs=%llu\n",
+               "[metal_stats] dft commits=%llu waits=%llu max_in_flight=%llu radio_inputs=%llu wrap_copies=%llu\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.radio_inputs.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.radio_inputs.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.wrap_copies.load(std::memory_order_relaxed)));
 }
 /// \brief Registers the transform input requirement: the transforms of this run read the radio's
 /// int16 samples instead of a host-staged copy (S-7f-6f).
@@ -123,6 +136,7 @@ static const bool dft_contract_registered = []() {
 #else  // OCUDU_METAL_STATS
 static void dft_stats_commit() {}
 static void dft_stats_wait() {}
+static void dft_stats_wrap_copy() {}
 static void dft_stats_radio_input() {}
 #endif // OCUDU_METAL_STATS
 
@@ -230,12 +244,30 @@ id<MTLBuffer> wrap_buffer(dft_engine_impl* engine, const void* ptr, size_t lengt
         length,
         it->second.second);
   }
-  const size_t aligned = (length + 4095) & ~4095;
-  id<MTLBuffer> buf    = [dft_resources().device newBufferWithBytesNoCopy:(void*)ptr
-                                                              length:aligned
-                                                             options:MTLResourceStorageModeShared
-                                                         deallocator:nil];
+  // The mapping may never cover more than the allocation it starts in, and it must start on a page:
+  // the length is rounded with the RUNTIME page size (4 KiB on Linux, 16 KiB on Apple Silicon - a
+  // hard-coded 4096 both fails the alignment and overstates the block), and when the process-wide
+  // registry knows which aligned_alloc block the pointer belongs to, the rounded length is clamped to
+  // what is left of it. A pointer the registry does not describe keeps the historical behaviour (the
+  // caller's length is taken at face value).
+  size_t usable = std::numeric_limits<size_t>::max();
+  void*  alloc_base = nullptr;
+  size_t alloc_size = 0;
+  if (compat::describe_aligned_allocation(ptr, &alloc_base, &alloc_size)) {
+    const size_t offset = static_cast<size_t>(static_cast<const char*>(ptr) - static_cast<const char*>(alloc_base));
+    usable              = (alloc_size > offset) ? (alloc_size - offset) : 0;
+  }
+  const size_t page    = compat::page_size();
+  const size_t aligned = ((length + page - 1) / page) * page;
+  id<MTLBuffer> buf    = nil;
+  if (aligned <= usable) {
+    buf = [dft_resources().device newBufferWithBytesNoCopy:(void*)ptr
+                                                    length:aligned
+                                                   options:MTLResourceStorageModeShared
+                                               deallocator:nil];
+  }
   if (buf == nil) {
+    dft_stats_wrap_copy();
     buf = [dft_resources().device newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
   }
   engine->buffer_cache[ptr] = std::make_pair(buf, aligned);
@@ -346,10 +378,14 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
     }
   }
 
-  // Host-side twiddle table: N/2 entries of exp(-2*pi*i*k/N), page-aligned, zero-copy wrapped.
-  const size_t tw_bytes = static_cast<size_t>(size / 2) * 2 * sizeof(float);
+  // Host-side twiddle table: N/2 entries of exp(-2*pi*i*k/N), page-aligned, zero-copy wrapped. The
+  // alignment is the RUNTIME page size: a 4 KiB-aligned pointer is not page aligned where the page is
+  // 16 KiB (Apple Silicon), and newBufferWithBytesNoCopy then refuses it - the table used to be copied
+  // silently for that reason (the [metal_stats] dft wrap_copies counter now says so if it happens).
+  const size_t page     = compat::page_size();
+  const size_t tw_bytes = ((static_cast<size_t>(size / 2) * 2 * sizeof(float)) + page - 1) / page * page;
   void*        tw_mem   = nullptr;
-  if (::posix_memalign(&tw_mem, 4096, tw_bytes) != 0 || tw_mem == nullptr) {
+  if (::posix_memalign(&tw_mem, page, tw_bytes) != 0 || tw_mem == nullptr) {
     ocudulog::fetch_basic_logger("PHY").error("Metal DFT: twiddle allocation failed");
     delete engine;
     impl = nullptr;
@@ -373,8 +409,9 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   // Host-side mixed-radix digit-reversal permutation table (the DIT input order), page-aligned,
   // zero-copy wrapped. Factors are processed radix-2 first, then radix-3, matching the kernel.
   const size_t perm_bytes = static_cast<size_t>(size) * sizeof(uint32_t);
+  const size_t perm_bytes_rounded = (static_cast<size_t>(perm_bytes) + page - 1) / page * page;
   void*        perm_mem   = nullptr;
-  if (::posix_memalign(&perm_mem, 4096, perm_bytes) != 0 || perm_mem == nullptr) {
+  if (::posix_memalign(&perm_mem, page, perm_bytes_rounded) != 0 || perm_mem == nullptr) {
     ocudulog::fetch_basic_logger("PHY").error("Metal DFT: permutation table allocation failed");
     std::free(tw_mem);
     delete engine;
@@ -402,7 +439,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
       perm[i] = rev;
     }
   }
-  engine->buf_perm = wrap_buffer(engine, perm_mem, perm_bytes);
+  engine->buf_perm = wrap_buffer(engine, perm_mem, perm_bytes_rounded);
   if (engine->buf_perm == nil) {
     ocudulog::fetch_basic_logger("PHY").error("Metal DFT: permutation buffer wrap failed");
     std::free(perm_mem);
@@ -417,8 +454,9 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   {
     static std::atomic<int> warmed{0};
     if (warmed.fetch_add(1, std::memory_order_acq_rel) == 0) {
-      if (::posix_memalign(&engine->warmup_mem, 4096, static_cast<size_t>(size) * 2 * sizeof(float)) == 0) {
-        std::memset(engine->warmup_mem, 0, static_cast<size_t>(size) * 2 * sizeof(float));
+      const size_t warmup_bytes = ((static_cast<size_t>(size) * 2 * sizeof(float)) + page - 1) / page * page;
+      if (::posix_memalign(&engine->warmup_mem, page, warmup_bytes) == 0) {
+        std::memset(engine->warmup_mem, 0, warmup_bytes);
         (void)run(engine->warmup_mem, engine->warmup_mem, 1);
       }
     }
