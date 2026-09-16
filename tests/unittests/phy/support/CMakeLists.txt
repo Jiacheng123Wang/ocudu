@@ -45,3 +45,21 @@ gtest_discover_tests(precoding_configuration_test)
 add_executable(re_pattern_test re_pattern_test.cpp)
 target_link_libraries(re_pattern_test ocudu_phy_support ocudulog GTest::gtest ocudu_gtest_main)
 gtest_discover_tests(re_pattern_test)
+
+if (ENABLE_CUDA)
+    add_executable(resource_grid_cuda_visible_test resource_grid_cuda_visible_test.cpp)
+    target_link_libraries(resource_grid_cuda_visible_test
+            ocudu_phy_support
+            ocudulog
+            GTest::gtest
+            GTest::gtest_main)
+    add_cuda_test(resource_grid_cuda_visible_test resource_grid_cuda_visible_test)
+
+    add_executable(prach_buffer_cuda_visible_test prach_buffer_cuda_visible_test.cpp)
+    target_link_libraries(prach_buffer_cuda_visible_test
+            ocudu_phy_support
+            ocudulog
+            GTest::gtest
+            GTest::gtest_main)
+    add_cuda_test(prach_buffer_cuda_visible_test prach_buffer_cuda_visible_test)
+endif (ENABLE_CUDA)
