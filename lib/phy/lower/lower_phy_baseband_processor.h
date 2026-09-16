@@ -249,6 +249,13 @@ private:
   internal_fsm                                                               tx_state;
   internal_fsm                                                               rx_state;
   std::atomic<baseband_gateway_timestamp>                                    last_rx_timestamp;
+  /// \brief Whether the receive blocks have been slot aligned since the stream started.
+  ///
+  /// The radio starts streaming at a timestamp the PHY does not choose, so the first block only closes
+  /// the gap to the next slot boundary and is not processed (see ul_process): it would force the uplink
+  /// processor to assemble the one symbol its tail cuts in half. Set once a block starts on a slot
+  /// boundary, and cleared by start() so that a restarted stream establishes its phase again.
+  bool                                                                       rx_slot_aligned = false;
   std::optional<std::chrono::time_point<std::chrono::high_resolution_clock>> last_tx_time;
   unsigned                                                                   last_tx_buffer_size = 0;
   /// Flow instrumentation probe for the DL production rate (debug aid for cross-platform comparison).

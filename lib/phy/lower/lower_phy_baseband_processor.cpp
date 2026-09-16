@@ -69,6 +69,9 @@ void lower_phy_baseband_processor::start(baseband_gateway_timestamp init_time, b
   // If it is required to start with system frame number 0, then set a time offset to start an SFN earlier.
   start_time_sfn0   = sfn0_ref_time;
   last_rx_timestamp = init_time;
+  // A stream that starts here has to establish its phase again: the first block only closes the gap to
+  // the next slot boundary and is not processed (see ul_process).
+  rx_slot_aligned   = false;
 
   rx_state.start();
   report_fatal_error_if_not(rx_executor.defer([this]() { ul_process(); }), "Failed to execute initial uplink task.");
@@ -262,10 +265,12 @@ void lower_phy_baseband_processor::ul_process()
   /// is assembled.
   const unsigned nof_samples_per_slot =
       srate.to_kHz() * static_cast<uint64_t>(slot_duration.count()) / 1000;
-  unsigned nof_samples = rx_buffer->get_nof_samples();
+  unsigned nof_samples   = rx_buffer->get_nof_samples();
+  bool     partial_block = false;
   if (nof_samples >= nof_samples_per_slot) {
-    unsigned phase = static_cast<unsigned>(last_rx_timestamp.load(std::memory_order_acquire) % nof_samples_per_slot);
-    nof_samples    = (phase != 0) ? (nof_samples_per_slot - phase) : nof_samples_per_slot;
+    const unsigned phase = static_cast<unsigned>(last_rx_timestamp.load(std::memory_order_acquire) % nof_samples_per_slot);
+    partial_block        = (phase != 0);
+    nof_samples          = partial_block ? (nof_samples_per_slot - phase) : nof_samples_per_slot;
   }
   baseband_gateway_buffer_writer_view rx_writer(rx_buffer->get_writer(), 0, nof_samples);
 
@@ -288,40 +293,52 @@ void lower_phy_baseband_processor::ul_process()
 #endif
   ru_tracer << trace_event("receive_baseband", tp);
 
-  // T_start of the UL compute pipeline measurement (IQ samples just received, UL processing about to start).
-  // Use the same slot reference the FAPI slot_point carries to the PUSCH completion (the sample-timestamp-derived
-  // count modulo the SFN cycle, as computed by the uplink processor): with the plain absolute count the pairing
-  // only matched during the first SFN cycle of the run.
-  {
-    const uint64_t samples_per_slot        = srate.to_kHz() * static_cast<uint64_t>(slot_duration.count()) / 1000;
-    const uint64_t nof_slots_per_sfn_cycle = (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / samples_per_slot;
-    ul_pipeline_probe::get().record_start((apply_timestamp_sfn0_ref(rx_metadata.ts) / samples_per_slot) %
-                                          nof_slots_per_sfn_cycle);
-  }
-
   // Update last timestamp: the timestamp of the next sample to be received, i.e. the end of the block
   // just received (\c nof_samples of them - the receiver fills the buffer it was given).
   last_rx_timestamp.store(rx_metadata.ts + nof_samples, std::memory_order_release);
 
-  // Queue uplink buffer processing.
-  report_fatal_error_if_not(uplink_executor.defer([this, ul_buffer = std::move(rx_buffer), rx_metadata, nof_samples]() mutable {
-    trace_point ul_tp = ru_tracer.now();
+  // The block that establishes the phase of the stream is not processed. It starts mid-slot, so its
+  // tail is the head of an OFDM symbol that ends in the next block: the samples of that symbol are not
+  // contiguous in memory and the uplink processor would have to copy them into an assembly buffer -
+  // the one host pass over the samples the receive side can still force. Dropping them instead makes
+  // "no uplink sample is copied on the host" absolute, and costs at most one slot at the very start of
+  // the stream - before any UE can be transmitting, and the buffer goes straight back to the pool.
+  // Only that first block is dropped: once the receive side is slot aligned, a loss of alignment (a
+  // late or lost block) keeps the historical behaviour, where the uplink processor assembles the
+  // symbol the loss split instead of dropping samples (see process_symbol_boundary).
+  const bool establishes_phase = partial_block && !rx_slot_aligned;
+  rx_slot_aligned              = rx_slot_aligned || !partial_block;
 
-    // Process UL. The handle travels with the samples: the processor keeps the buffer alive for as
-    // long as a transform reads it, and this is the only reference left when it does not (see
-    // uplink_processor_baseband::rx_buffer_handle).
-    // The handle travels with the samples: the processor keeps the buffer alive for as long as a
-    // transform reads it, and it comes back to this pool when the last of those references is dropped
-    // (see return_receive_buffer_to_pool). Nothing here returns it - that is the point.
-    // The view is what was actually received: the buffer may be longer than the block the radio was
-    // asked for (the pool hands out buffers of one size, the receive asks for what completes a slot),
-    // and the samples beyond it are stale.
-    baseband_gateway_buffer_reader_view ul_samples(ul_buffer->get_reader(), 0, nof_samples);
-    uplink_processor.process(ul_samples, apply_timestamp_sfn0_ref(rx_metadata.ts), std::move(ul_buffer));
+  if (!establishes_phase) {
+    // T_start of the UL compute pipeline measurement (IQ samples just received, UL processing about to start).
+    // Use the same slot reference the FAPI slot_point carries to the PUSCH completion (the sample-timestamp-derived
+    // count modulo the SFN cycle, as computed by the uplink processor): with the plain absolute count the pairing
+    // only matched during the first SFN cycle of the run.
+    const uint64_t nof_slots_per_sfn_cycle =
+        (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
+    ul_pipeline_probe::get().record_start((apply_timestamp_sfn0_ref(rx_metadata.ts) / nof_samples_per_slot) %
+                                          nof_slots_per_sfn_cycle);
+  }
 
-    ru_tracer << trace_event("uplink_baseband", ul_tp);
-  }),
-                            "Failed to execute uplink processing task.");
+  // Queue uplink buffer processing. A block that only establishes the phase is not queued: its buffer
+  // goes out of scope here and returns to the pool (see rx_buffer_pool).
+  if (!establishes_phase) {
+    report_fatal_error_if_not(uplink_executor.defer([this, ul_buffer = std::move(rx_buffer), rx_metadata, nof_samples]() mutable {
+      trace_point ul_tp = ru_tracer.now();
+
+      // Process UL. The handle travels with the samples: the processor keeps the buffer alive for as
+      // long as a transform reads it, and it comes back to this pool when the last of those references
+      // is dropped (see return_receive_buffer_to_pool). Nothing here returns it - that is the point.
+      // The view is what was actually received: the buffer may be longer than the block the radio was
+      // asked for (the pool hands out buffers of one size, the receive asks for what completes a slot),
+      // and the samples beyond it are stale.
+      baseband_gateway_buffer_reader_view ul_samples(ul_buffer->get_reader(), 0, nof_samples);
+      uplink_processor.process(ul_samples, apply_timestamp_sfn0_ref(rx_metadata.ts), std::move(ul_buffer));
+
+      ru_tracer << trace_event("uplink_baseband", ul_tp);
+    }),
+                              "Failed to execute uplink processing task.");
+  }
 
   // Enqueue next iteration if it is running.
   report_fatal_error_if_not(rx_executor.defer([this]() { ul_process(); }), "Failed to execute receive task.");

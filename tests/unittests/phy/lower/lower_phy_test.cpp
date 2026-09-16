@@ -902,6 +902,18 @@ TEST_P(LowerPhyFixture, BasebandUplinkFlow)
     }
 
     // Run and assert uplink block.
+    if (i_slot == 0) {
+      // The stream starts mid-slot (see init_time), so the first block only closes the gap to the next
+      // slot boundary and is NOT processed: its tail cuts an OFDM symbol in half, and assembling that
+      // symbol is the one host copy of the samples the receive side can still force (see
+      // lower_phy_baseband_processor::ul_process). Nothing is queued for the uplink processor.
+      ASSERT_FALSE(ul_task_executor.try_run_next());
+      ASSERT_TRUE(uplink_proc_spy->get_uplink_proc_baseband_spy().get_entries().empty());
+
+      // The receiver advanced its own timestamp by what it delivered (see the entry), so the next block
+      // starts on a slot boundary - which is what the assertions above check.
+      continue;
+    }
     ASSERT_TRUE(ul_task_executor.try_run_next());
 
     // Extract and assert UL processor output.
