@@ -631,6 +631,8 @@ bool demod_metal_engine::commit_batch()
   engine->batch_n   = 0;
 
   [enc endEncoding];
+  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
+  metal::shared_queue::arm_gpu_time(cmd_buf, metal::shared_queue::queue_kind::back_end);
   [cmd_buf commit];
   demod_stats_commit();
   engine->outstanding.push_back(cmd_buf);

@@ -102,6 +102,13 @@ public:
   /// for and the [metal_stats] probe can account for the shared dispatches.
   static void notify_commit(id<MTLCommandBuffer> command_buffer, queue_kind kind);
 
+  /// \brief Arms the GPU-time probe on a command buffer, right BEFORE it is committed.
+  ///
+  /// Metal requires a completed handler to be installed before commit() (installing it afterwards is an
+  /// assertion failure), so the engines call this immediately before committing and notify_commit()
+  /// after. Statistics builds only: without the probe this is a no-op and the submit path pays nothing.
+  static void arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind kind);
+
   /// \brief Reports a wrap request whose slice offset does not satisfy the alignment its binding needs.
   ///
   /// The wrapped slice travels to the kernel as an offset into the mapped allocation, and a Metal

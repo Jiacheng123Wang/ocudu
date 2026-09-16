@@ -305,23 +305,18 @@ void shared_queue::notify_wrap_misaligned()
 #endif
 }
 
-void shared_queue::notify_commit(id<MTLCommandBuffer> command_buffer, queue_kind kind)
+void shared_queue::arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind kind)
 {
-  shared_queue_state& s = state();
-  {
-    std::lock_guard<std::mutex> lock(s.mutex);
-    shared_queue_state::pending_chain& c = s.chain(kind);
-    c.last_committed                     = command_buffer;
-    ++c.pending;
-    ++s.commits;
-  }
 #if defined(OCUDU_METAL_STATS)
   // The GPU's own view of the command buffer: GPUStartTime/GPUEndTime are only meaningful once it has
-  // completed, so they are read in the completion handler (which runs on a Metal thread and must not
-  // take our lock - the fields are atomics for that reason). Registered after commit(), which Metal
-  // allows as long as the buffer has not completed; a no-op in a build without the probe, so the
-  // production submit path pays nothing.
-  shared_queue_state::gpu_time_stats* g = &s.gpu_time[static_cast<size_t>(kind)];
+  // completed, so they are read in the completion handler. Metal REQUIRES the handler to be installed
+  // BEFORE commit() ("Completed handler provided after commit call" is an assertion, not a warning),
+  // which is why this is a separate call the engines make right before committing - a no-op in a build
+  // without the probe, so the production submit path pays nothing.
+  //
+  // The handler runs on a Metal thread and must not take our lock: the fields are atomics, and the
+  // min/max updates are CAS loops.
+  shared_queue_state::gpu_time_stats* g = &state().gpu_time[static_cast<size_t>(kind)];
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
     const double start_s = cb.GPUStartTime;
     const double end_s   = cb.GPUEndTime;
@@ -340,7 +335,20 @@ void shared_queue::notify_commit(id<MTLCommandBuffer> command_buffer, queue_kind
     while (end_ns > prev && !g->last_end_ns.compare_exchange_weak(prev, end_ns, std::memory_order_relaxed)) {
     }
   }];
+#else
+  (void)command_buffer;
+  (void)kind;
 #endif
+}
+
+void shared_queue::notify_commit(id<MTLCommandBuffer> command_buffer, queue_kind kind)
+{
+  shared_queue_state& s = state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  shared_queue_state::pending_chain& c = s.chain(kind);
+  c.last_committed                     = command_buffer;
+  ++c.pending;
+  ++s.commits;
 }
 
 bool shared_queue::wait_all_committed(queue_kind kind)
