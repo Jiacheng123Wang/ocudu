@@ -70,6 +70,14 @@ static void dft_stats_wait()
   s.in_flight.fetch_sub(1, std::memory_order_acq_rel);
 }
 
+/// Counts one transform whose input came straight from the radio's int16 buffer (the zero-copy
+/// path). Wrapped like the commit/wait counters so the call site never names the struct: the
+/// accessor only exists when the probe is compiled in.
+static void dft_stats_radio_input()
+{
+  dft_stats().radio_inputs.fetch_add(1, std::memory_order_relaxed);
+}
+
 static void dft_stats_report()
 {
   const dft_stats_t& s = dft_stats();
@@ -83,6 +91,7 @@ static void dft_stats_report()
 #else  // OCUDU_METAL_STATS
 static void dft_stats_commit() {}
 static void dft_stats_wait() {}
+static void dft_stats_radio_input() {}
 #endif // OCUDU_METAL_STATS
 
 // ---- Process-wide Metal resources: one device, one queue, one pipeline for all sizes ----
@@ -528,7 +537,7 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
     }
     b_in16        = b;
     input.is_ci16 = 1u;
-    dft_stats().radio_inputs.fetch_add(1, std::memory_order_relaxed);
+    dft_stats_radio_input();
     // The kernel reads from the ALLOCATION base it was handed, so the offset is the slice's own
     // offset plus the window start within it (the cyclic prefix the transform skips).
     input.offset = static_cast<uint32_t>(offset_bytes / (2 * sizeof(int16_t))) + write.time_window_start;
