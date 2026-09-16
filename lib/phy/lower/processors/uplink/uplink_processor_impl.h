@@ -17,6 +17,7 @@
 #include "ocudu/ran/slot_point.h"
 #include "ocudu/support/ocudu_assert.h"
 #include <memory>
+#include <optional>
 
 namespace ocudu {
 
@@ -80,6 +81,13 @@ private:
   enum class fsm_states {
     /// The processor is waiting to receive the next subframe boundary.
     alignment,
+    /// \brief The processor consumed a whole OFDM symbol and the next input block starts at a symbol
+    /// boundary: the next symbol is chosen from the timestamp of that block.
+    ///
+    /// This state is what lets a symbol be read where the radio put it: the samples of a symbol are
+    /// only looked at when they are in the block being processed, instead of reserving an assembly
+    /// buffer for a symbol whose samples have not arrived yet (see process_symbol_boundary()).
+    symbol_start,
     /// The processor baseband buffering is synchronized and it is collecting samples.
     collecting
   };
@@ -93,7 +101,11 @@ private:
   /// \param[in] timestamp Time instant in which the first sample within \c samples was received.
   void process_alignment(const baseband_gateway_buffer_reader& samples, baseband_gateway_timestamp timestamp);
 
-  /// \brief Processes a symbol boundary.
+  /// \brief Chooses the symbol that starts at \c timestamp and processes its samples.
+  ///
+  /// The samples of the symbol are handed over where they are - as a slice of \c samples - whenever
+  /// they lie entirely in it and they need no modification on the host; otherwise the symbol is
+  /// assembled in a symbol buffer (see process_collecting()).
   /// \param[in] samples   Input baseband samples.
   /// \param[in] timestamp Time instant in which the first sample within \c samples was received.
   void process_symbol_boundary(const baseband_gateway_buffer_reader& samples, baseband_gateway_timestamp timestamp);
@@ -102,6 +114,16 @@ private:
   /// \param[in] samples   Input baseband samples.
   /// \param[in] timestamp Time instant in which the first sample within \c samples was received.
   void process_collecting(const baseband_gateway_buffer_reader& samples, baseband_gateway_timestamp timestamp);
+
+  /// \brief Processes a complete OFDM symbol: compensation bookkeeping, PRACH, PUxCH and metrics.
+  ///
+  /// Called with the samples of exactly one symbol, either a slice of the receive buffer being processed
+  /// or the symbol buffer it was assembled in.
+  /// \param[in] symbol_samples Samples of the symbol, \c current_symbol_size of them.
+  /// \param[in] symbol_buffer  Symbol buffer holding them, or \c std::nullopt when they were read where
+  ///                           the radio put them.
+  void process_complete_symbol(const baseband_gateway_buffer_reader& symbol_samples,
+                               std::optional<unsigned>               symbol_buffer);
 
   /// Finite state machine state.
   fsm_states state = fsm_states::alignment;

@@ -5,6 +5,8 @@
 #include "lower_phy_baseband_processor.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/interval.h"
+#include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_reader_view.h"
+#include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_writer_view.h"
 #include "ocudu/instrumentation/traces/ru_traces.h"
 #if defined(OCUDU_FLOW_PROBES)
 #include "ocudu/ocudulog/ocudulog.h" // [zmq-probe] temporary: fetch_basic_logger
@@ -242,12 +244,37 @@ void lower_phy_baseband_processor::ul_process()
   // Get receive buffer.
   std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer = rx_pool->buffers.pop_blocking();
 
+  // \brief Samples to receive in this call.
+  ///
+  /// The radio is told how many samples to receive by the size of the buffer it is given
+  /// (baseband_gateway_receiver::receive), so asking for "the samples that complete the current slot"
+  /// makes every receive block end on a slot boundary - and a slot is a whole number of OFDM symbols,
+  /// so no symbol straddles two blocks. That is what lets the uplink processor read every symbol where
+  /// the radio put it, instead of copying it into an assembly buffer (see
+  /// lower_phy_uplink_processor_impl::process_symbol_boundary).
+  ///
+  /// The phase is only unknown for the first block (the pool hands out buffers, not a timeline): the
+  /// timestamp of the next sample to be received is last_rx_timestamp. Until the receive side is slot
+  /// aligned, each call asks for the samples that close the gap to the next slot boundary, which is at
+  /// most one slot; from the second block on, that is exactly one slot. A buffer that cannot hold a
+  /// whole slot (the single-packet and half-slot policies, see lower_phy_configuration) keeps the
+  /// historical behaviour: the block size is the buffer size, and a symbol that straddles two of them
+  /// is assembled.
+  const unsigned nof_samples_per_slot =
+      srate.to_kHz() * static_cast<uint64_t>(slot_duration.count()) / 1000;
+  unsigned nof_samples = rx_buffer->get_nof_samples();
+  if (nof_samples >= nof_samples_per_slot) {
+    unsigned phase = static_cast<unsigned>(last_rx_timestamp.load(std::memory_order_acquire) % nof_samples_per_slot);
+    nof_samples    = (phase != 0) ? (nof_samples_per_slot - phase) : nof_samples_per_slot;
+  }
+  baseband_gateway_buffer_writer_view rx_writer(rx_buffer->get_writer(), 0, nof_samples);
+
   // Receive baseband.
   trace_point tp = ru_tracer.now();
 #if defined(OCUDU_FLOW_PROBES)
   const auto t_recv_begin = std::chrono::steady_clock::now();
 #endif
-  baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_buffer->get_writer());
+  baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_writer);
 #if defined(OCUDU_FLOW_PROBES)
   // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES).
   {
@@ -272,11 +299,12 @@ void lower_phy_baseband_processor::ul_process()
                                           nof_slots_per_sfn_cycle);
   }
 
-  // Update last timestamp.
-  last_rx_timestamp.store(rx_metadata.ts + rx_buffer->get_nof_samples(), std::memory_order_release);
+  // Update last timestamp: the timestamp of the next sample to be received, i.e. the end of the block
+  // just received (\c nof_samples of them - the receiver fills the buffer it was given).
+  last_rx_timestamp.store(rx_metadata.ts + nof_samples, std::memory_order_release);
 
   // Queue uplink buffer processing.
-  report_fatal_error_if_not(uplink_executor.defer([this, ul_buffer = std::move(rx_buffer), rx_metadata]() mutable {
+  report_fatal_error_if_not(uplink_executor.defer([this, ul_buffer = std::move(rx_buffer), rx_metadata, nof_samples]() mutable {
     trace_point ul_tp = ru_tracer.now();
 
     // Process UL. The handle travels with the samples: the processor keeps the buffer alive for as
@@ -285,7 +313,11 @@ void lower_phy_baseband_processor::ul_process()
     // The handle travels with the samples: the processor keeps the buffer alive for as long as a
     // transform reads it, and it comes back to this pool when the last of those references is dropped
     // (see return_receive_buffer_to_pool). Nothing here returns it - that is the point.
-    uplink_processor.process(ul_buffer->get_reader(), apply_timestamp_sfn0_ref(rx_metadata.ts), std::move(ul_buffer));
+    // The view is what was actually received: the buffer may be longer than the block the radio was
+    // asked for (the pool hands out buffers of one size, the receive asks for what completes a slot),
+    // and the samples beyond it are stale.
+    baseband_gateway_buffer_reader_view ul_samples(ul_buffer->get_reader(), 0, nof_samples);
+    uplink_processor.process(ul_samples, apply_timestamp_sfn0_ref(rx_metadata.ts), std::move(ul_buffer));
 
     ru_tracer << trace_event("uplink_baseband", ul_tp);
   }),

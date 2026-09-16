@@ -62,15 +62,22 @@ static lower_phy_configuration generate_lower_phy_config(const flexible_o_du_ru_
   out_cfg.max_nof_prach_concurrent_requests = max_processing_delay_slot + 2;
 
   // Select RX buffer size policy.
-  if (ru_cfg.device_driver == "zmq") {
-    out_cfg.baseband_rx_buffer_size_policy = lower_phy_baseband_buffer_size_policy::slot;
-  } else if (ru_cfg.expert_execution_cfg.threads.execution_profile == lower_phy_thread_profile::single) {
-    // For single executor, the same executor processes uplink and downlink. In this case, the processing is blocked
-    // by the signal reception. The buffers must be smaller than a slot duration considering the downlink baseband
-    // samples must arrive to the baseband device before the transmission time passes.
+  //
+  // A slot-sized receive buffer is what removes the last host pass over the uplink samples: the receive
+  // asks the radio for the samples that complete the current slot (see
+  // lower_phy_baseband_processor::ul_process), so a block is a whole number of OFDM symbols and no
+  // symbol straddles two blocks - the uplink processor then reads every symbol where the radio put it
+  // instead of copying it into an assembly buffer (see
+  // lower_phy_uplink_processor_impl::process_symbol_boundary). The cost is that the first symbol of a
+  // slot is processed up to one slot later.
+  //
+  // Exception: with a single executor the same worker receives and transmits, so a receive that blocks
+  // until a slot is complete would hold up the downlink - that profile keeps packet-sized blocks (and
+  // the per-symbol assembly that comes with them).
+  if (ru_cfg.expert_execution_cfg.threads.execution_profile == lower_phy_thread_profile::single) {
     out_cfg.baseband_rx_buffer_size_policy = lower_phy_baseband_buffer_size_policy::single_packet;
   } else {
-    out_cfg.baseband_rx_buffer_size_policy = lower_phy_baseband_buffer_size_policy::single_packet;
+    out_cfg.baseband_rx_buffer_size_policy = lower_phy_baseband_buffer_size_policy::slot;
   }
 
   // Apply gain back-off to account for the PAPR of the signal and the DFT power normalization.

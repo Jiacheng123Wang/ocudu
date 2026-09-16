@@ -60,10 +60,15 @@ class ul_host_stats
   std::atomic<uint64_t> metrics{0};
   /// Offset in effect, in hertz, as last observed.
   std::atomic<float> cfo_hz{0.0F};
-  /// Symbols whose assembly started in a symbol buffer (one per symbol; counted at the symbol
-  /// boundary, so a symbol whose samples arrive in two radio blocks counts once). It can exceed
-  /// \c symbols by the number of symbols that were started and never completed. This is the host pass
-  /// over the IQ samples that the GPU pipeline mode is meant to remove (see the design document).
+  /// Symbols whose samples were read where the radio put them - a slice of the receive buffer being
+  /// processed, handed to the PRACH and the PUxCH without a single sample being copied on the host.
+  std::atomic<uint64_t> in_place{0};
+  /// Symbols whose samples were copied into a symbol buffer before being processed: either because they
+  /// straddle two receive buffers (the radio delivers blocks that are not aligned with the symbol
+  /// grid), or because the CFO compensation has to modify them. Counted when the assembly starts, so a
+  /// symbol whose samples arrive in two blocks counts once - and a symbol started and then discarded
+  /// by a loss of alignment counts too, since the copy did happen. This is the host pass over the IQ
+  /// samples that the GPU pipeline mode is meant to remove (see the design document).
   std::atomic<uint64_t> assembled{0};
   /// Whether the baseband metrics are consumed in this run (see the probe's own contract check).
   std::atomic<bool> metrics_consumed{false};
@@ -75,6 +80,7 @@ public:
   void count_symbol() { symbols.fetch_add(1, std::memory_order_relaxed); }
   void count_metrics() { metrics.fetch_add(1, std::memory_order_relaxed); }
   void count_assembled() { assembled.fetch_add(1, std::memory_order_relaxed); }
+  void count_in_place() { in_place.fetch_add(1, std::memory_order_relaxed); }
   /// Sticky: several processors may share the process (a gNB has one per sector, tests build more),
   /// and the check asks whether ANY of them measured for a consumer.
   void set_metrics_consumed(bool consumed)
@@ -89,6 +95,7 @@ public:
   uint64_t get_symbols() const { return symbols.load(std::memory_order_relaxed); }
   uint64_t get_metrics() const { return metrics.load(std::memory_order_relaxed); }
   uint64_t get_assembled() const { return assembled.load(std::memory_order_relaxed); }
+  uint64_t get_in_place() const { return in_place.load(std::memory_order_relaxed); }
   float    get_cfo_hz() const { return cfo_hz.load(std::memory_order_relaxed); }
   bool     get_metrics_consumed() const { return metrics_consumed.load(std::memory_order_relaxed); }
 
@@ -111,9 +118,10 @@ public:
       return;
     }
     std::fprintf(stderr,
-                 "[ul_host] symbols=%llu cfo_round_trips=%llu cfo_commands=%llu cfo_hz=%.3f metrics=%llu "
-                 "assembled=%llu\n",
+                 "[ul_host] symbols=%llu in_place=%llu cfo_round_trips=%llu cfo_commands=%llu cfo_hz=%.3f "
+                 "metrics=%llu assembled=%llu\n",
                  static_cast<unsigned long long>(nof_symbols),
+                 static_cast<unsigned long long>(in_place.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(round_trips.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(commands.load(std::memory_order_relaxed)),
                  static_cast<double>(cfo_hz.load(std::memory_order_relaxed)),
@@ -125,6 +133,7 @@ public:
   void count_symbol() {}
   void count_metrics() {}
   void count_assembled() {}
+  void count_in_place() {}
   void set_metrics_consumed(bool /*consumed*/) {}
   void observe(float /*cfo_Hz*/, uint64_t /*nof_commands*/) {}
 #endif
@@ -180,22 +189,33 @@ void register_ul_host_contract_checks()
          return (measured == 0) || consumed;
        }});
 
-  // The last host pass over the samples. Reported in every mode (the number is on the [ul_host] line
-  // too), but only the fused GPU mode claims to have removed it: with the CPU pipeline or the
-  // module-level offload the samples legitimately travel through the host.
+  // The last host pass over the samples. A symbol is read where the radio put it whenever its samples
+  // lie entirely in the block being processed, so the assembly is needed only by a symbol that
+  // straddles two blocks - which the receive side removes by asking the radio for blocks that end on a
+  // slot boundary (see lower_phy_baseband_processor::ul_process) - or by the CFO compensation above,
+  // which is legitimate and reported by its own check. Judged in every published mode: a host copy of
+  // the samples is host work whichever back end consumes them.
   register_phy_pipeline_check(
       {"host sample assembly", []() -> std::optional<bool> {
          const ul_host_stats& c         = ul_host_counters();
-         uint64_t              assembled = c.get_assembled();
-         phy_pipeline_mode     mode      = phy_pipeline_mode_registry::get();
+         uint64_t             in_place  = c.get_in_place();
+         uint64_t             assembled = c.get_assembled();
+         uint64_t             symbols   = c.get_symbols();
+         phy_pipeline_mode    mode      = phy_pipeline_mode_registry::get();
          std::fprintf(stderr,
-                      "%llu symbols copied into a symbol buffer (mode=%s)",
+                      "%llu of %llu symbols read where the radio put them, %llu copied into a symbol buffer "
+                      "(mode=%s)",
+                      static_cast<unsigned long long>(in_place),
+                      static_cast<unsigned long long>(symbols),
                       static_cast<unsigned long long>(assembled),
                       to_string(mode));
-         if (mode != phy_pipeline_mode::gpu) {
+         if (!phy_pipeline_mode_registry::is_published() || (symbols == 0)) {
            return std::nullopt;
          }
-         return assembled == 0;
+         // A symbol whose samples were copied and then discarded by a loss of alignment is counted as
+         // assembled (the copy did happen), and those losses are rare events of the radio, not a path:
+         // the tolerance is two orders of magnitude above the rate measured on air (0.1%).
+         return (assembled * 100) <= symbols;
        }});
 }
 #endif // OCUDU_METAL_STATS
@@ -297,6 +317,11 @@ void lower_phy_uplink_processor_impl::process(const baseband_gateway_buffer_read
     case fsm_states::alignment:
       process_alignment(samples, timestamp);
       break;
+    case fsm_states::symbol_start:
+      // The previous block ended exactly on an OFDM symbol boundary: this block starts with a symbol,
+      // and its samples are the ones that symbol is processed from.
+      process_symbol_boundary(samples, timestamp);
+      break;
     case fsm_states::collecting:
       process_collecting(samples, timestamp);
       break;
@@ -365,21 +390,143 @@ void lower_phy_uplink_processor_impl::process_symbol_boundary(const baseband_gat
   symbol_buffer_write_index = 0;
   current_symbol_timestamp  = timestamp;
 
-  // Reserve the buffer this symbol is assembled in before writing into it. Acquiring it may finish
-  // the oldest symbol still in flight, which is exactly what makes the buffer free: the samples of
-  // the symbol being collected are therefore never written over samples a transform still reads.
-  current_symbol_buffer = puxch_proc->get_baseband().acquire_symbol_buffer();
-  symbol_buffers[current_symbol_buffer].resize(current_symbol_size);
-  // One host copy of the samples per symbol (the assembly), counted here rather than where the copy
-  // runs: a symbol whose samples arrive in two radio blocks is written in two calls.
-  ul_host_counters().count_assembled();
+  unsigned nof_input_samples = samples.get_nof_samples();
+
+  // The block ended exactly on this symbol boundary, so the symbol starts in the NEXT block: its
+  // samples are the first samples of that block. Starting it here - as a symbol with no samples yet -
+  // would mean reserving an assembly buffer for samples that arrive whole in the next block, which is
+  // exactly what this path exists to avoid. Nothing is lost by waiting: the timestamp of the symbol is
+  // the timestamp of the next block, and this state is entered again with it.
+  if (nof_input_samples == 0) {
+    state = fsm_states::symbol_start;
+    return;
+  }
 
   if (i_symbol == 0) {
     cfo_processor.next_cfo_command();
   }
 
+  // The samples of the symbol lie entirely in this block and nothing has to modify them: process them
+  // where the radio put them. Every consumer reads a slice of the receive buffer - the GPU wraps that
+  // buffer with an offset (see shared_queue::wrap_no_copy), so no sample is copied on the host - and
+  // the handle the caller passed keeps the samples alive (see process_complete_symbol()).
+  if ((nof_input_samples >= current_symbol_size) && !cfo_processor.applies_compensation()) {
+    ul_host_counters().count_in_place();
+    process_complete_symbol(baseband_gateway_buffer_reader_view(samples, 0, current_symbol_size), std::nullopt);
+
+    // Process next symbol with the remainder samples.
+    process_symbol_boundary(
+        baseband_gateway_buffer_reader_view(samples, current_symbol_size, nof_input_samples - current_symbol_size),
+        timestamp + current_symbol_size);
+    return;
+  }
+
+  // The symbol either straddles this block and the next one, or the CFO compensation has to modify its
+  // samples (the radio's buffer is read-only): assemble it in a symbol buffer. This is the host copy of
+  // the samples that the pipeline mode is meant to remove, and it is counted: a run that never needs it
+  // says so on the [ul_host] line (see the "host sample assembly" contract check).
+  ul_host_counters().count_assembled();
+  current_symbol_buffer = puxch_proc->get_baseband().acquire_symbol_buffer();
+  symbol_buffers[current_symbol_buffer].resize(current_symbol_size);
+
   // Process baseband.
   process_collecting(samples, timestamp);
+}
+
+void lower_phy_uplink_processor_impl::process_complete_symbol(const baseband_gateway_buffer_reader& symbol_samples,
+                                                              std::optional<unsigned>               symbol_buffer)
+{
+  // Carrier frequency offset compensation.
+  //
+  // The processor only modifies the samples when it has an offset to apply. While it has none - its
+  // state until something schedules a command (NTN Doppler compensation or the `cfo` console command,
+  // see the RU controller) - the only thing left of this pass would be the int16 -> float -> int16
+  // round trip, and that round trip is the exact identity (float(x) / 32767 * 32767 rounds back to x
+  // for every int16, see baseband_cfo_processor_test). Skipping it hands the PRACH and the PUxCH
+  // processors the samples exactly as the radio delivered them, byte for byte, and removes two host
+  // passes over every sample of the uplink.
+  if (cfo_processor.applies_compensation()) {
+    // The compensation writes into the samples, so they cannot be the radio's own buffer: a symbol that
+    // needs it is always assembled first (see process_symbol_boundary).
+    ocudu_assert(symbol_buffer.has_value(), "The compensation modifies the samples: they must be assembled.");
+    baseband_gateway_buffer_dynamic_aligned& buffer = symbol_buffers[*symbol_buffer];
+    ul_host_counters().count_round_trip();
+    // View over the temporary float-based complex samples for CFO processor.
+    span<cf_t> view;
+    for (unsigned i_channel = 0; i_channel != buffer.get_nof_channels(); ++i_channel) {
+      // The CFO compensation is not currently supported for 16-bit complex integer samples. So, it must convert it to
+      // single-precision complex floating-point samples.
+      span<ci16_t> channel_buffer = buffer.get_writer().get_channel_buffer(i_channel);
+      view                        = temp_cf_buffer.get_view({i_channel}).subspan(0, channel_buffer.size());
+      ocuduvec::convert(view, channel_buffer, ocuduvec::scaling_factor_ci16_to_cf);
+      cfo_processor.process(view);
+      ocuduvec::convert(channel_buffer, view, ocuduvec::scaling_factor_cf_to_ci16);
+    }
+  }
+  ul_host_counters().count_symbol();
+  ul_host_counters().observe(cfo_processor.get_cfo_hz(), cfo_processor.get_nof_scheduled_commands());
+
+  // Advance CFO processor number of samples.
+  cfo_processor.advance(symbol_samples.get_nof_samples());
+
+  // Process symbol by PRACH processor.
+  prach_processor_baseband::symbol_context prach_context = {
+      .slot = current_slot, .symbol = current_symbol_index, .sector = sector_id};
+  prach_proc->get_baseband().process_symbol(symbol_samples, prach_context);
+
+  // Process symbol by PUxCH processor. The symbol buffer is empty for a symbol read where the radio put
+  // it: nothing of this processor holds those samples, so only the receive buffer handle keeps them
+  // alive (and it also covers the assembled case, where both do).
+  lower_phy_rx_symbol_context puxch_context = {
+      .slot = current_slot, .sector = sector_id, .nof_symbols = current_symbol_index};
+  bool processed = puxch_proc->get_baseband().process_symbol(symbol_samples, puxch_context, symbol_buffer, current_owner);
+
+  // Baseband metrics. Three passes over every sample of the symbol (average power, peak power and
+  // the clipping count), for values that only the application's RU metrics collector reads: with the
+  // metrics disabled nothing consumes them, so they are not measured at all and the samples are not
+  // read again on the host (see lower_phy_configuration::are_metrics_enabled). `processed` is what
+  // the PUxCH processor returns for a symbol it actually took - the metrics describe a received
+  // symbol, so they are measured for exactly those.
+  if (processed && metrics_enabled) {
+    ul_host_counters().count_metrics();
+    sample_statistics<float> avg_power;
+    sample_statistics<float> peak_power;
+    unsigned                 nof_channels = symbol_samples.get_nof_channels();
+
+    uint64_t total_processed_samples = 0;
+    uint64_t nof_clipped_samples     = 0;
+
+    // Process received signal before demodulation.
+    for (unsigned i_channel = 0; i_channel != nof_channels; ++i_channel) {
+      // Perform signal measurements on CI16 samples.
+      span<const ci16_t> channel_buffer = symbol_samples.get_channel_buffer(i_channel);
+
+      avg_power.update(ocuduvec::average_power(channel_buffer, ocuduvec::scaling_factor_ci16_to_cf));
+      peak_power.update(ocuduvec::max_abs_element(channel_buffer, ocuduvec::scaling_factor_ci16_to_cf).second);
+      nof_clipped_samples +=
+          ocuduvec::count_if_part_abs_greater_than(channel_buffer, 0.95F, ocuduvec::scaling_factor_ci16_to_cf);
+      total_processed_samples += channel_buffer.size();
+    }
+
+    lower_phy_baseband_metrics metrics = {.avg_power  = avg_power.get_mean(),
+                                          .peak_power = peak_power.get_max(),
+                                          .clipping =
+                                              clipping_counters{.nof_clipped_samples   = nof_clipped_samples,
+                                                                .nof_processed_samples = total_processed_samples}};
+    notifier->on_new_metrics(metrics);
+  }
+
+  // Detect half-slot boundary.
+  if (current_symbol_index == (nof_symbols_per_slot / 2) - 1) {
+    // Notify half slot boundary.
+    notifier->on_half_slot(lower_phy_timing_context{.slot = slot_point_extended(current_slot), .time_point = {}});
+  }
+
+  // Detect full slot boundary.
+  if (current_symbol_index == nof_symbols_per_slot - 1) {
+    // Notify full slot boundary.
+    notifier->on_full_slot(lower_phy_timing_context{.slot = slot_point_extended(current_slot), .time_point = {}});
+  }
 }
 
 void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_buffer_reader& samples,
@@ -425,92 +572,8 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
     return;
   }
 
-  // Carrier frequency offset compensation.
-  //
-  // The processor only modifies the samples when it has an offset to apply. While it has none - its
-  // state until something schedules a command (NTN Doppler compensation or the `cfo` console command,
-  // see the RU controller) - the only thing left of this pass would be the int16 -> float -> int16
-  // round trip, and that round trip is the exact identity (float(x) / 32767 * 32767 rounds back to x
-  // for every int16, see baseband_cfo_processor_test). Skipping it hands the PRACH and the PUxCH
-  // processors the samples exactly as the radio delivered them, byte for byte, and removes two host
-  // passes over every sample of the uplink.
-  if (cfo_processor.applies_compensation()) {
-    ul_host_counters().count_round_trip();
-    // View over the temporary float-based complex samples for CFO processor.
-    span<cf_t> view;
-    for (unsigned i_channel = 0; i_channel != symbol_buffer.get_nof_channels(); ++i_channel) {
-      // The CFO compensation is not currently supported for 16-bit complex integer samples. So, it must convert it to
-      // single-precision complex floating-point samples.
-      span<ci16_t> channel_buffer = symbol_buffer.get_writer().get_channel_buffer(i_channel);
-      view                        = temp_cf_buffer.get_view({i_channel}).subspan(0, channel_buffer.size());
-      ocuduvec::convert(view, channel_buffer, ocuduvec::scaling_factor_ci16_to_cf);
-      cfo_processor.process(view);
-      ocuduvec::convert(channel_buffer, view, ocuduvec::scaling_factor_cf_to_ci16);
-    }
-  }
-  ul_host_counters().count_symbol();
-  ul_host_counters().observe(cfo_processor.get_cfo_hz(), cfo_processor.get_nof_scheduled_commands());
-
-  // Advance CFO processor number of samples.
-  cfo_processor.advance(symbol_buffer.get_nof_samples());
-
-  // Process symbol by PRACH processor.
-  prach_processor_baseband::symbol_context prach_context = {
-      .slot = current_slot, .symbol = current_symbol_index, .sector = sector_id};
-  prach_proc->get_baseband().process_symbol(symbol_buffer.get_reader(), prach_context);
-
-  // Process symbol by PUxCH processor.
-  lower_phy_rx_symbol_context puxch_context = {
-      .slot = current_slot, .sector = sector_id, .nof_symbols = current_symbol_index};
-  bool processed = puxch_proc->get_baseband().process_symbol(
-      symbol_buffer.get_reader(), puxch_context, current_symbol_buffer, current_owner);
-
-  // Baseband metrics. Three passes over every sample of the symbol (average power, peak power and
-  // the clipping count), for values that only the application's RU metrics collector reads: with the
-  // metrics disabled nothing consumes them, so they are not measured at all and the samples are not
-  // read again on the host (see lower_phy_configuration::are_metrics_enabled). `processed` is what
-  // the PUxCH processor returns for a symbol it actually took - the metrics describe a received
-  // symbol, so they are measured for exactly those.
-  if (processed && metrics_enabled) {
-    ul_host_counters().count_metrics();
-    sample_statistics<float> avg_power;
-    sample_statistics<float> peak_power;
-    unsigned                 nof_channels = symbol_buffer.get_nof_channels();
-
-    uint64_t total_processed_samples = 0;
-    uint64_t nof_clipped_samples     = 0;
-
-    // Process received signal before demodulation.
-    for (unsigned i_channel = 0; i_channel != nof_channels; ++i_channel) {
-      // Perform signal measurements on CI16 samples.
-      span<const ci16_t> channel_buffer = symbol_buffer.get_reader().get_channel_buffer(i_channel);
-
-      avg_power.update(ocuduvec::average_power(channel_buffer, ocuduvec::scaling_factor_ci16_to_cf));
-      peak_power.update(ocuduvec::max_abs_element(channel_buffer, ocuduvec::scaling_factor_ci16_to_cf).second);
-      nof_clipped_samples +=
-          ocuduvec::count_if_part_abs_greater_than(channel_buffer, 0.95F, ocuduvec::scaling_factor_ci16_to_cf);
-      total_processed_samples += channel_buffer.size();
-    }
-
-    lower_phy_baseband_metrics metrics = {.avg_power  = avg_power.get_mean(),
-                                          .peak_power = peak_power.get_max(),
-                                          .clipping =
-                                              clipping_counters{.nof_clipped_samples   = nof_clipped_samples,
-                                                                .nof_processed_samples = total_processed_samples}};
-    notifier->on_new_metrics(metrics);
-  }
-
-  // Detect half-slot boundary.
-  if (current_symbol_index == (nof_symbols_per_slot / 2) - 1) {
-    // Notify half slot boundary.
-    notifier->on_half_slot(lower_phy_timing_context{.slot = slot_point_extended(current_slot), .time_point = {}});
-  }
-
-  // Detect full slot boundary.
-  if (current_symbol_index == nof_symbols_per_slot - 1) {
-    // Notify full slot boundary.
-    notifier->on_full_slot(lower_phy_timing_context{.slot = slot_point_extended(current_slot), .time_point = {}});
-  }
+  // The symbol is complete: process it from the buffer it was assembled in.
+  process_complete_symbol(symbol_buffer.get_reader(), current_symbol_buffer);
 
   // Process next symbol with the remainder samples.
   baseband_gateway_buffer_reader_view samples2(samples, nof_samples, nof_input_samples - nof_samples);

@@ -4,6 +4,7 @@
 
 #include "ocudu/phy/lower/lower_phy_factory.h"
 #include "lower_phy_impl.h"
+#include "ocudu/phy/phy_pipeline_mode.h"
 
 using namespace ocudu;
 
@@ -98,6 +99,21 @@ public:
     static constexpr unsigned max_pipeline_depth = 8;
     const unsigned            max_symbol_size =
         config.srate.get_dft_size(config.scs) + config.cp.get_length(0, config.scs).to_samples(config.srate.to_Hz());
+
+    // The fused lane claims that no host pass touches the samples of an OFDM symbol, and that claim is
+    // only reachable when a receive buffer holds a whole slot: the receive asks the radio for the
+    // samples that complete the current slot, so a slot-sized buffer is what makes a block a whole
+    // number of symbols, and a block that carries a whole symbol is read where the radio put it (see
+    // lower_phy_baseband_processor::ul_process and
+    // lower_phy_uplink_processor_impl::process_symbol_boundary). Refusing to start beats starting a run
+    // whose contract report at exit would say the claim is false.
+    report_fatal_error_if_not(
+        (phy_pipeline_mode_registry::get() != phy_pipeline_mode::gpu) || (rx_buffer_size >= nof_samples_per_slot),
+        "The gpu pipeline mode needs a receive buffer that holds a whole slot (baseband_rx_buffer_size_policy "
+        "'slot' or 'optimal_slot'), so that no OFDM symbol is split between two receive blocks. The configured "
+        "buffer holds {} samples of the {} a slot has.",
+        rx_buffer_size,
+        nof_samples_per_slot);
 
     // Get transmit time offset between the UL and the DL.
     int tx_time_offset = get_tx_time_offset(config.time_alignment_calibration, config.ta_offset, config.srate);

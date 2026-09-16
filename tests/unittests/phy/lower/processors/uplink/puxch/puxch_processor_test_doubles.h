@@ -24,7 +24,9 @@ public:
   struct entry_t {
     baseband_gateway_buffer_read_only samples;
     lower_phy_rx_symbol_context       context;
-    unsigned                          buffer_index = 0;
+    /// Symbol buffer the samples were assembled in, empty when the caller handed over a slice of its
+    /// own receive buffer (see puxch_processor_baseband::process_symbol).
+    std::optional<unsigned> buffer_index;
     /// Handle the caller passed with the samples (see uplink_processor_baseband::rx_buffer_handle).
     uplink_processor_baseband::rx_buffer_handle owner;
   };
@@ -35,12 +37,13 @@ public:
   {
     unsigned buffer = next_buffer;
     next_buffer     = (next_buffer + 1) % nof_symbol_buffers;
+    ++nof_acquired;
     return buffer;
   }
 
   bool process_symbol(const baseband_gateway_buffer_reader& samples,
                       const lower_phy_rx_symbol_context&    context,
-                      unsigned                              buffer_index,
+                      std::optional<unsigned>               buffer_index,
                       uplink_processor_baseband::rx_buffer_handle owner) override
   {
     entries.emplace_back();
@@ -54,14 +57,23 @@ public:
 
   const std::vector<entry_t>& get_entries() const { return entries; }
 
-  void clear() { entries.clear(); }
+  /// Number of symbol buffers acquired since the last clear(): one per symbol the caller assembled, and
+  /// none at all for a symbol it handed over where the radio put it (see process_symbol()).
+  unsigned get_nof_acquired_buffers() const { return nof_acquired; }
+
+  void clear()
+  {
+    entries.clear();
+    nof_acquired = 0;
+  }
 
   /// Number of symbol buffers handed to the processor, mirroring the real one.
   static constexpr unsigned nof_symbol_buffers = 8;
 
 private:
   std::vector<entry_t> entries;
-  unsigned             next_buffer = 0;
+  unsigned             next_buffer  = 0;
+  unsigned             nof_acquired = 0;
 };
 
 class puxch_processor_request_handler_spy : public puxch_processor_request_handler
@@ -109,6 +121,8 @@ public:
   {
     return baseband.get_entries();
   }
+
+  unsigned get_nof_acquired_buffers() const { return baseband.get_nof_acquired_buffers(); }
 
   void clear() { baseband.clear(); }
 

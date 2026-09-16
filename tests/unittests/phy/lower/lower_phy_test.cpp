@@ -889,6 +889,18 @@ TEST_P(LowerPhyFixture, BasebandUplinkFlow)
     auto& receive_entry = receive_entries.back();
     ASSERT_EQ(receive_entry.data.get_nof_channels(), nof_rx_ports);
 
+    // The receive asks the radio for the samples that complete the current slot: the block ends exactly
+    // on a slot boundary, so it is a whole number of OFDM symbols and no symbol straddles two blocks -
+    // the uplink processor then reads every symbol where the radio put it, without assembling it
+    // (see lower_phy_baseband_processor::ul_process).
+    const unsigned nof_samples_per_slot = srate.to_kHz() / pow2(to_numerology_value(scs));
+    ASSERT_EQ((receive_entry.metadata.ts + receive_entry.data.get_nof_samples()) % nof_samples_per_slot, 0);
+    // The stream starts mid-slot (see init_time), so the first block only closes the gap to the next
+    // slot boundary; from the second block on, every receive is exactly one slot.
+    if (i_slot != 0) {
+      ASSERT_EQ(receive_entry.data.get_nof_samples(), nof_samples_per_slot);
+    }
+
     // Run and assert uplink block.
     ASSERT_TRUE(ul_task_executor.try_run_next());
 

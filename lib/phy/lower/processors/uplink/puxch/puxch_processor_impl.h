@@ -12,6 +12,7 @@
 #include "ocudu/phy/lower/processors/uplink/puxch/puxch_processor.h"
 
 #include <array>
+#include <optional>
 #include "ocudu/phy/lower/processors/uplink/puxch/puxch_processor_baseband.h"
 #include "ocudu/phy/lower/processors/uplink/puxch/puxch_processor_notifier.h"
 #include "ocudu/phy/lower/processors/uplink/puxch/puxch_processor_request_handler.h"
@@ -73,7 +74,7 @@ private:
   // See interface for documentation.
   bool process_symbol(const baseband_gateway_buffer_reader& samples,
                       const lower_phy_rx_symbol_context&    context,
-                      unsigned                              buffer_index,
+                      std::optional<unsigned>               buffer_index,
                       uplink_processor_baseband::rx_buffer_handle owner) override;
 
   // See interface for documentation.
@@ -86,9 +87,11 @@ private:
   struct in_flight_symbol {
     lower_phy_rx_symbol_context context;
     unsigned                    slot = 0;
-    /// Symbol buffer the samples of this symbol were assembled in: it is released once the last port
-    /// of the symbol is finished, as no transform reads it after that (see acquire_symbol_buffer()).
-    unsigned buffer_index = 0;
+    /// Symbol buffer the samples of this symbol were assembled in, when they were: it is released once
+    /// the last port of the symbol is finished, as no transform reads it after that (see
+    /// acquire_symbol_buffer()). Empty when the samples were read where the radio put them - there is
+    /// no buffer of this processor to release then, only the receive buffer handle below.
+    std::optional<unsigned> buffer_index;
     /// Handle of the receive buffer the samples came from, held until this transform is finished (see
     /// uplink_processor_baseband::rx_buffer_handle). Dropping it returns the buffer to the radio's
     /// pool, which is what lets the radio reuse it the moment nothing reads it any more.

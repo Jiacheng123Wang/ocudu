@@ -89,17 +89,22 @@ unsigned puxch_processor_impl::acquire_symbol_buffer()
 
 bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& samples,
                                           const lower_phy_rx_symbol_context&    context,
-                                          unsigned                              buffer_index,
+                                          std::optional<unsigned>               buffer_index,
                                           uplink_processor_baseband::rx_buffer_handle owner)
 {
   ocudu_assert(notifier != nullptr, "Notifier has not been connected.");
-  ocudu_assert(buffer_index < nof_symbol_buffers, "Invalid symbol buffer {}.", buffer_index);
-  // The caller writes the symbol into the buffer it acquired, and only then hands it over: taking the
-  // samples from anywhere else would mean overwriting a buffer a transform may still be reading.
-  ocudu_assert(buffer_index == last_acquired_buffer,
-               "Symbol assembled in buffer {} but buffer {} was acquired.",
-               buffer_index,
-               last_acquired_buffer);
+  if (buffer_index.has_value()) {
+    ocudu_assert(*buffer_index < nof_symbol_buffers, "Invalid symbol buffer {}.", *buffer_index);
+    // The caller writes the symbol into the buffer it acquired, and only then hands it over: taking the
+    // samples from anywhere else would mean overwriting a buffer a transform may still be reading.
+    ocudu_assert(*buffer_index == last_acquired_buffer,
+                 "Symbol assembled in buffer {} but buffer {} was acquired.",
+                 *buffer_index,
+                 last_acquired_buffer);
+  }
+  // Without a symbol buffer the samples are a slice of the receive buffer the caller is processing: no
+  // buffer of this processor holds them, so there is nothing to release here - only the receive buffer
+  // handle (owner), which every transform of this symbol takes a reference to.
 
   // Check if the slot has changed.
   if (context.slot != current_slot) {
@@ -144,9 +149,12 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
     // `pipeline_depth` transforms (there is one transform per receive port, so with several ports the
     // lag in symbols is `pipeline_depth / nof_rx_ports`). The FFTs therefore overlap with the radio,
     // while the grid content of a symbol is still written before that symbol is reported.
-    // The buffer holding this symbol cannot be handed out again while any of its transforms is in
-    // flight, so it is marked as in use here and released when the last port is finished.
-    buffer_in_use[buffer_index] = true;
+    // The buffer holding this symbol (when the caller assembled it in one) cannot be handed out again
+    // while any of its transforms is in flight, so it is marked as in use here and released when the
+    // last port is finished.
+    if (buffer_index.has_value()) {
+      buffer_in_use[*buffer_index] = true;
+    }
     for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
       // Safety net: acquire_symbol_buffer() already made room for the transforms of this symbol. The
       // slot about to be reused holds the oldest in-flight transform - its command buffer was
@@ -214,7 +222,11 @@ void puxch_processor_impl::finish_oldest_symbol()
   // ready while another of its ports is still missing from the grid.
   if (entry.last_port) {
     // No transform reads the buffer of the symbol anymore: the caller may assemble a new symbol in it.
-    buffer_in_use[entry.buffer_index] = false;
+    // When the samples were never assembled - they were read where the radio put them - there is no
+    // buffer to release and the receive buffer handle below is the only lifetime that mattered.
+    if (entry.buffer_index.has_value()) {
+      buffer_in_use[*entry.buffer_index] = false;
+    }
     notifier->on_rx_symbol(current_grid, entry.context, true);
   }
   // The reference to the samples is dropped with the entry - EXPLICITLY, because the ring slot keeps
