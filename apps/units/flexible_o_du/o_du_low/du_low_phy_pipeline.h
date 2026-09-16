@@ -95,12 +95,20 @@ inline void set_phy_pipeline_conflict(std::string& error, phy_pipeline_mode mode
     error += ": the CPU pipeline requires a CPU backend for every module (use --phy_pipeline cpu_gpu to offload "
              "individual modules)";
   } else {
-    error += ": the fused lane runs the whole chain on the device, so the backend of the modules it owns is selected "
-             "by the pipeline mode (leave them at their default \"auto\")";
+    error += ": the fused lane runs the whole chain on the device, so the backend of every module it owns is the "
+             "lane's own (leave the knob at its default \"auto\"); the module knobs only choose backends in "
+             "--phy_pipeline cpu_gpu";
   }
 }
 
 /// \brief Resolves the effective uplink pipeline configuration from the expert-phy knobs.
+///
+/// The five per-module knobs (DFT, channel estimator, equalizer, LDPC decoder, device resource grid)
+/// are the module-level offload selection of \c cpu_gpu: they choose, module by module, what runs on
+/// the CPU and what runs on the device. \c cpu forbids every offload (any knob that selects one is a
+/// conflict) and \c gpu takes the whole set over (a knob may only repeat the lane's own backend, and
+/// --phy_pipeline gpu alone selects the same configuration as the five knobs spelled out - see
+/// du_low_phy_pipeline_test).
 ///
 /// Three rules, one per mode (see phy_pipeline_mode):
 /// - \c cpu: every module knob must be a CPU backend, otherwise it is a configuration conflict. "auto" resolves to
@@ -195,23 +203,26 @@ resolve_phy_pipeline(const phy_pipeline_request& request, const phy_backend_avai
       break;
 
     case phy_pipeline_mode::gpu:
-      // The lane owns these four modules: an explicit CPU backend cannot be honored, so it is a conflict rather than
-      // a silent override.
-      if (request.dft == "cpu") {
+      // The lane owns these four modules: a knob that selects the CPU cannot be honored - the mode has
+      // no CPU fallback - so it is a conflict rather than a silent override. Any other value stands:
+      // the knobs keep picking the FLAVOR of a device backend (a different Metal estimator, say),
+      // which is what they are for in cpu_gpu; what they may not do is claim the module runs on the
+      // CPU while the lane runs it on the device.
+      if (is_cpu_phy_backend(request.dft) && (request.dft != "auto")) {
         set_phy_pipeline_conflict(error, out.mode, "--pusch_dft_type", request.dft);
         return std::nullopt;
       }
-      if (request.ch_est == "cpu") {
+      if (is_cpu_phy_backend(request.ch_est) && (request.ch_est != "auto")) {
         set_phy_pipeline_conflict(error, out.mode, "--pusch_channel_estimator_algo", request.ch_est);
         return std::nullopt;
       }
-      if (request.equalizer == "cpu") {
+      if (is_cpu_phy_backend(request.equalizer) && (request.equalizer != "auto")) {
         set_phy_pipeline_conflict(error, out.mode, "--pusch_channel_equalizer_backend", request.equalizer);
         return std::nullopt;
       }
-      out.dft       = (request.dft == "auto") ? phy_pipeline_lane_defaults::dft : request.dft;
-      out.ch_est    = (request.ch_est == "auto") ? phy_pipeline_lane_defaults::ch_est : request.ch_est;
-      out.equalizer = (request.equalizer == "auto") ? phy_pipeline_lane_defaults::equalizer : request.equalizer;
+      out.dft        = (request.dft == "auto") ? phy_pipeline_lane_defaults::dft : request.dft;
+      out.ch_est     = (request.ch_est == "auto") ? phy_pipeline_lane_defaults::ch_est : request.ch_est;
+      out.equalizer  = (request.equalizer == "auto") ? phy_pipeline_lane_defaults::equalizer : request.equalizer;
       out.lane_fused = true;
       break;
   }

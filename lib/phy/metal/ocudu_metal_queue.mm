@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
+#include "ocudu/phy/phy_pipeline_contract.h"
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
@@ -106,6 +107,26 @@ void shared_queue_stats_report()
                static_cast<unsigned long long>(s.wrap_replaces),
                static_cast<unsigned long long>(s.wrap_failures));
 }
+
+/// \brief Registers the zero-copy requirement: a mapping is created once per object and never
+/// replaced (a "replaced" wrap is the re-map the demapper's G5 leg removed).
+const bool shared_queue_contract_registered = []() {
+  register_phy_pipeline_check(
+      {"zero-copy wraps", []() -> std::optional<bool> {
+         shared_queue_state& s = state();
+         std::fprintf(stderr,
+                      "%llu hits, %llu creates, %llu replaces, %llu failures",
+                      static_cast<unsigned long long>(s.wrap_hits),
+                      static_cast<unsigned long long>(s.wrap_creates),
+                      static_cast<unsigned long long>(s.wrap_replaces),
+                      static_cast<unsigned long long>(s.wrap_failures));
+         if (s.wrap_creates == 0 && s.wrap_hits == 0) {
+           return std::nullopt; // nothing was wrapped in this run
+         }
+         return (s.wrap_replaces == 0) && (s.wrap_failures == 0);
+       }});
+  return true;
+}();
 
 const bool shared_queue_stats_registered = []() {
   std::atexit(shared_queue_stats_report);

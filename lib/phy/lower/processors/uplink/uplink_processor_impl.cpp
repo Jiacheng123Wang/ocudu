@@ -14,6 +14,7 @@
 #include "ocudu/phy/lower/processors/uplink/prach/prach_processor_baseband.h"
 #include "ocudu/phy/lower/processors/uplink/puxch/puxch_processor_baseband.h"
 #include "ocudu/phy/lower/processors/uplink/uplink_processor_notifier.h"
+#include "ocudu/phy/phy_pipeline_contract.h"
 #include "ocudu/support/math/stats.h"
 #include <atomic>
 #include <cstdio>
@@ -59,6 +60,13 @@ class ul_host_stats
   std::atomic<uint64_t> metrics{0};
   /// Offset in effect, in hertz, as last observed.
   std::atomic<float> cfo_hz{0.0F};
+  /// Symbols whose assembly started in a symbol buffer (one per symbol; counted at the symbol
+  /// boundary, so a symbol whose samples arrive in two radio blocks counts once). It can exceed
+  /// \c symbols by the number of symbols that were started and never completed. This is the host pass
+  /// over the IQ samples that the GPU pipeline mode is meant to remove (see the design document).
+  std::atomic<uint64_t> assembled{0};
+  /// Whether the baseband metrics are consumed in this run (see the probe's own contract check).
+  std::atomic<bool> metrics_consumed{false};
 #endif
 
 public:
@@ -66,6 +74,23 @@ public:
   void count_round_trip() { round_trips.fetch_add(1, std::memory_order_relaxed); }
   void count_symbol() { symbols.fetch_add(1, std::memory_order_relaxed); }
   void count_metrics() { metrics.fetch_add(1, std::memory_order_relaxed); }
+  void count_assembled() { assembled.fetch_add(1, std::memory_order_relaxed); }
+  /// Sticky: several processors may share the process (a gNB has one per sector, tests build more),
+  /// and the check asks whether ANY of them measured for a consumer.
+  void set_metrics_consumed(bool consumed)
+  {
+    if (consumed) {
+      metrics_consumed.store(true, std::memory_order_relaxed);
+    }
+  }
+
+  uint64_t get_round_trips() const { return round_trips.load(std::memory_order_relaxed); }
+  uint64_t get_commands() const { return commands.load(std::memory_order_relaxed); }
+  uint64_t get_symbols() const { return symbols.load(std::memory_order_relaxed); }
+  uint64_t get_metrics() const { return metrics.load(std::memory_order_relaxed); }
+  uint64_t get_assembled() const { return assembled.load(std::memory_order_relaxed); }
+  float    get_cfo_hz() const { return cfo_hz.load(std::memory_order_relaxed); }
+  bool     get_metrics_consumed() const { return metrics_consumed.load(std::memory_order_relaxed); }
 
   /// Samples the state of the compensation (called once per processed symbol).
   void observe(float cfo_Hz, uint64_t nof_commands)
@@ -86,17 +111,21 @@ public:
       return;
     }
     std::fprintf(stderr,
-                 "[ul_host] symbols=%llu cfo_round_trips=%llu cfo_commands=%llu cfo_hz=%.3f metrics=%llu\n",
+                 "[ul_host] symbols=%llu cfo_round_trips=%llu cfo_commands=%llu cfo_hz=%.3f metrics=%llu "
+                 "assembled=%llu\n",
                  static_cast<unsigned long long>(nof_symbols),
                  static_cast<unsigned long long>(round_trips.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(commands.load(std::memory_order_relaxed)),
                  static_cast<double>(cfo_hz.load(std::memory_order_relaxed)),
-                 static_cast<unsigned long long>(metrics.load(std::memory_order_relaxed)));
+                 static_cast<unsigned long long>(metrics.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(assembled.load(std::memory_order_relaxed)));
   }
 #else
   void count_round_trip() {}
   void count_symbol() {}
   void count_metrics() {}
+  void count_assembled() {}
+  void set_metrics_consumed(bool /*consumed*/) {}
   void observe(float /*cfo_Hz*/, uint64_t /*nof_commands*/) {}
 #endif
 };
@@ -107,6 +136,69 @@ ul_host_stats& ul_host_counters()
   static ul_host_stats s;
   return s;
 }
+
+#if defined(OCUDU_METAL_STATS)
+/// \brief Registers this processor's requirements with the pipeline contract (see
+/// phy_pipeline_contract.h): the host touches the samples only for the reasons a mode allows.
+///
+/// Compiled with the counters it reads: without the statistics probe there is nothing to evaluate -
+/// and a build configuration that failed to compile because a probe was off is exactly the defect
+/// S-7g-5 fixed (a macOS build without ENABLE_METAL_STATS is the default one).
+void register_ul_host_contract_checks()
+{
+  // Nothing may convert the samples unless an offset is in effect: the round trip exists to apply the
+  // CFO, and a run whose offset is zero must not pay for it (S-7g-1).
+  register_phy_pipeline_check(
+      {"cfo compensation", []() -> std::optional<bool> {
+         const ul_host_stats& c           = ul_host_counters();
+         uint64_t             round_trips = c.get_round_trips();
+         uint64_t             commands    = c.get_commands();
+         float                cfo_hz      = c.get_cfo_hz();
+         std::fprintf(stderr,
+                      "%llu round trips over %llu symbols, %llu commands, offset %.3f Hz",
+                      static_cast<unsigned long long>(round_trips),
+                      static_cast<unsigned long long>(c.get_symbols()),
+                      static_cast<unsigned long long>(commands),
+                      static_cast<double>(cfo_hz));
+         // Round trips without an offset in effect would be pure waste; with an offset they are the
+         // compensation both the PRACH and the PUxCH need on the host (the hard constraint the plan
+         // names), so they are legitimate.
+         return (round_trips == 0) || (cfo_hz != 0.0F);
+       }});
+
+  // The baseband metrics are measured only for an application that reads them (S-7g-2).
+  register_phy_pipeline_check(
+      {"baseband metrics", []() -> std::optional<bool> {
+         const ul_host_stats& c        = ul_host_counters();
+         uint64_t             measured = c.get_metrics();
+         bool                 consumed = c.get_metrics_consumed();
+         std::fprintf(stderr,
+                      "%llu symbols measured for %llu processed (metrics %s)",
+                      static_cast<unsigned long long>(measured),
+                      static_cast<unsigned long long>(c.get_symbols()),
+                      consumed ? "enabled" : "disabled");
+         return (measured == 0) || consumed;
+       }});
+
+  // The last host pass over the samples. Reported in every mode (the number is on the [ul_host] line
+  // too), but only the fused GPU mode claims to have removed it: with the CPU pipeline or the
+  // module-level offload the samples legitimately travel through the host.
+  register_phy_pipeline_check(
+      {"host sample assembly", []() -> std::optional<bool> {
+         const ul_host_stats& c         = ul_host_counters();
+         uint64_t              assembled = c.get_assembled();
+         phy_pipeline_mode     mode      = phy_pipeline_mode_registry::get();
+         std::fprintf(stderr,
+                      "%llu symbols copied into a symbol buffer (mode=%s)",
+                      static_cast<unsigned long long>(assembled),
+                      to_string(mode));
+         if (mode != phy_pipeline_mode::gpu) {
+           return std::nullopt;
+         }
+         return assembled == 0;
+       }});
+}
+#endif // OCUDU_METAL_STATS
 
 } // namespace
 
@@ -130,6 +222,16 @@ lower_phy_uplink_processor_impl::lower_phy_uplink_processor_impl(std::unique_ptr
 {
   ocudu_assert(prach_proc, "Invalid PRACH processor.");
   ocudu_assert(puxch_proc, "Invalid PUxCH processor.");
+
+#if defined(OCUDU_METAL_STATS)
+  // Publish this processor's requirements to the pipeline contract (once per process).
+  static const bool checks_registered = []() {
+    register_ul_host_contract_checks();
+    return true;
+  }();
+  (void)checks_registered;
+  ul_host_counters().set_metrics_consumed(metrics_enabled);
+#endif
 
   unsigned symbol_size_no_cp = config.rate.get_dft_size(config.scs);
 
@@ -261,6 +363,9 @@ void lower_phy_uplink_processor_impl::process_symbol_boundary(const baseband_gat
   // the symbol being collected are therefore never written over samples a transform still reads.
   current_symbol_buffer = puxch_proc->get_baseband().acquire_symbol_buffer();
   symbol_buffers[current_symbol_buffer].resize(current_symbol_size);
+  // One host copy of the samples per symbol (the assembly), counted here rather than where the copy
+  // runs: a symbol whose samples arrive in two radio blocks is written in two calls.
+  ul_host_counters().count_assembled();
 
   if (i_symbol == 0) {
     cfo_processor.next_cfo_command();

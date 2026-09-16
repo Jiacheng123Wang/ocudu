@@ -9,6 +9,7 @@
 #import <Metal/Metal.h>
 
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/phy/phy_pipeline_contract.h"
 
 #include "ocudu/support/macos_compat.h"
 
@@ -88,6 +89,37 @@ static void dft_stats_report()
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.radio_inputs.load(std::memory_order_relaxed)));
 }
+/// \brief Registers the transform input requirement: the transforms of this run read the radio's
+/// int16 samples instead of a host-staged copy (S-7f-6f).
+static void register_dft_contract_check()
+{
+  register_phy_pipeline_check(
+      {"dft radio inputs", []() -> std::optional<bool> {
+         const dft_stats_t& s = dft_stats();
+         uint64_t commits     = s.commits.load(std::memory_order_relaxed);
+         uint64_t radio       = s.radio_inputs.load(std::memory_order_relaxed);
+         std::fprintf(stderr,
+                      "%llu of %llu transforms read the radio buffer",
+                      static_cast<unsigned long long>(radio),
+                      static_cast<unsigned long long>(commits));
+         if ((commits == 0) || !phy_pipeline_mode_registry::is_published() ||
+             (phy_pipeline_mode_registry::get() == phy_pipeline_mode::cpu)) {
+           // No Metal transform in this run, or a run that never claimed the offloaded pipeline (a
+           // unit test or a tool exercises the engine directly): nothing to require of it.
+           return std::nullopt;
+         }
+         // A handful of transforms of the same engine belong to other paths (the engine is shared);
+         // none at all means the input is still being staged on the host for the whole run.
+         return radio * 100 >= commits * 99;
+       }});
+}
+
+/// Registered once, on first use of the engine (see register_dft_contract_check()).
+static const bool dft_contract_registered = []() {
+  register_dft_contract_check();
+  return true;
+}();
+
 #else  // OCUDU_METAL_STATS
 static void dft_stats_commit() {}
 static void dft_stats_wait() {}

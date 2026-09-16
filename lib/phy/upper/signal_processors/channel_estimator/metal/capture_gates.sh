@@ -109,14 +109,21 @@ set -u
 
 MODE=${1:-k0d}
 JOBS=${2:-6}
+# Corpus: either the dumped <capture>_ce.txt files of an earlier round, or the captures themselves
+# (<name>.bin, written by make_synthetic_capture.py) - a reborn corpus after /tmp was lost has the
+# latter. Both name a capture PREFIX, which is what the tool takes.
 GLOB=${3:-/tmp/iq1_*_ce.txt /tmp/iq2_*_ce.txt}
+case "$GLOB" in
+  *.bin*) STRIP='s/\.bin$//' ;;
+  *)      STRIP='s/_ce\.txt$//' ;;
+esac
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../.." && pwd)
 BIN=$REPO/build/lib/phy/upper/channel_processors/metal/ul_chain_replay
 
 case "$MODE" in k0d|k1|ydev|k0dm|sig2|combos) ;; *) echo "usage: $0 <k0d|k1|ydev|k0dm|sig2|combos> [jobs] [corpus_glob]"; exit 2;; esac
 [ -x "$BIN" ] || { echo "no replay tool at $BIN - build the ul_chain_replay target first"; exit 2; }
 
-mapfile -t CAPS < <(ls $GLOB 2>/dev/null | sed -E 's/_ce\.txt$//' | sort -u)
+mapfile -t CAPS < <(ls $GLOB 2>/dev/null | sed -E "$STRIP" | sort -u)
 [ "${#CAPS[@]}" -gt 0 ] || { echo "no captures matched: $GLOB"; exit 2; }
 
 WORK=$(mktemp -d /tmp/capgates.XXXXXX)

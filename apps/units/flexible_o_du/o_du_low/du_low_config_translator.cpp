@@ -59,6 +59,15 @@ static void log_phy_pipeline_config(const du_low_unit_expert_upper_phy_config& c
               demapper,
               describe_backend(config.ldpc_decoder_type, effective.ldpc));
 
+  if (effective.mode == phy_pipeline_mode::gpu) {
+    // The mode's promise - no host pass over the samples - is verified by the probes' contract report
+    // at exit (see phy_pipeline_contract.h). This warns at startup because one host pass is still
+    // there and the report will say so: honesty about a mode whose contract is not met yet beats a
+    // silent claim. Remove this warning when the report comes out all-OK (the design document's
+    // ledger has the item: the per-symbol assembly copy in the uplink processor).
+    logger.warning("[phy_pipeline] mode=gpu selects the fused lane, but the samples are still copied into a symbol "
+                   "buffer on the host: the contract report at exit will show that check as FAILED");
+  }
   if ((effective.mode == phy_pipeline_mode::cpu_gpu) && is_cpu_phy_backend(effective.dft) &&
       is_cpu_phy_backend(effective.ch_est) && is_cpu_phy_backend(effective.equalizer) &&
       is_cpu_phy_backend(effective.ldpc)) {

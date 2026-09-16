@@ -294,4 +294,40 @@ TEST(phy_pipeline_cli_test, module_backends_accept_auto)
   EXPECT_THROW(parse_expert_phy({"expert_phy", "--pusch_channel_estimator_algo", "magic"}), CLI::ParseError);
 }
 
+
+/// \brief `--phy_pipeline gpu` must select exactly what spelling every module out selects.
+///
+/// This is the promise that lets the four module knobs be treated as cpu_gpu-only: once the glue is
+/// gone, the switch alone is the whole configuration. The two command lines differ only in how they
+/// say it, so their effective configurations must be identical field by field.
+TEST(DuLowPhyPipelineTest, GpuModeEqualsTheModuleKnobsSpelledOut)
+{
+  const phy_pipeline_effective via_mode = resolve(make_request("gpu"));
+  const phy_pipeline_effective via_knobs =
+      resolve(make_request("cpu_gpu", "metal", "metal_mmse", "metal", "metal", "on"));
+
+  // The mode LABEL differs by design (gpu also declares the fused lane), what must be identical is the
+  // configuration those two command lines select.
+  EXPECT_EQ(via_mode.dft, via_knobs.dft);
+  EXPECT_EQ(via_mode.ch_est, via_knobs.ch_est);
+  EXPECT_EQ(via_mode.equalizer, via_knobs.equalizer);
+  EXPECT_EQ(via_mode.device_grid, via_knobs.device_grid);
+}
+
+/// The gpu mode's knobs may only repeat the lane's own backend: everything else is a conflict rather
+/// than a silent override (a "cpu" knob that runs on the device makes the command line lie).
+TEST(DuLowPhyPipelineTest, GpuModeRejectsBackendsTheLaneDoesNotOwn)
+{
+  // An explicit CPU backend is a conflict: this mode has no CPU fallback.
+  EXPECT_FALSE(resolve_conflict(make_request("gpu", "cpu")).empty());
+  EXPECT_FALSE(resolve_conflict(make_request("gpu", "metal", "cpu")).empty());
+  EXPECT_FALSE(resolve_conflict(make_request("gpu", "metal", "metal_mmse", "cpu")).empty());
+
+  // Any DEVICE flavor is accepted, spelled out or not: the knobs still pick which device backend
+  // runs (the lane's own values are the defaults). resolve() is the helper that fails the test when a
+  // configuration is REJECTED, which is what these must not be.
+  EXPECT_EQ(resolve(make_request("gpu", "metal", "metal_mmse", "metal")).dft, "metal");
+  EXPECT_EQ(resolve(make_request("gpu", "metal", "metal_nn_mmse")).ch_est, "metal_nn_mmse");
+  EXPECT_EQ(resolve(make_request("gpu", "auto", "helena")).ch_est, "helena");
+}
 } // namespace

@@ -6,6 +6,7 @@
 /// \brief PUSCH demodulator implementation definition.
 
 #include "pusch_demodulator_impl.h"
+#include "ocudu/phy/phy_pipeline_contract.h"
 
 #include "ul_capture.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -762,6 +763,40 @@ demod_ch_est_stats& demod_ch_est_counters()
   });
   return s;
 }
+
+/// \brief Registers the estimator-input requirement: exactly one side did the work.
+///
+/// \c device > 0 with \c host == 0 is the offloaded route, \c host > 0 with \c device == 0 the CPU one
+/// - both are fine and the check is therefore mode-independent, which also keeps it honest in tools
+/// that never publish a mode. What it catches is BOTH sides working: that is the S-7f-6a failure, in
+/// which the host silently covered for a device path that had gone missing.
+static const bool demod_ch_est_contract_registered = []() {
+  register_phy_pipeline_check(
+      {"ce device estimates", []() -> std::optional<bool> {
+         const demod_ch_est_stats& c = demod_ch_est_counters();
+         uint64_t device = c.device.load(std::memory_order_relaxed);
+         uint64_t host   = c.host.load(std::memory_order_relaxed);
+         std::fprintf(stderr,
+                      "%llu device, %llu host",
+                      static_cast<unsigned long long>(device),
+                      static_cast<unsigned long long>(host));
+         if ((device == 0 && host == 0) || !phy_pipeline_mode_registry::is_published()) {
+           // No channel estimate in this run, or a process that never selected a pipeline (a unit
+           // test, a tool): nothing to require.
+           return std::nullopt;
+         }
+         if (phy_pipeline_mode_registry::get() == phy_pipeline_mode::cpu) {
+           // The CPU mode claims the host estimates every hop: a device estimate means the CPU-mode
+           // configuration is not what actually ran.
+           return (host > 0) && (device == 0);
+         }
+         // An offloaded mode claims the device estimator. The host may still cover individual hops -
+         // a geometry the device path refuses is a legitimate fallback, and it is reported above - but
+         // none at all is the S-7f-6a failure, where the device path had gone missing unnoticed.
+         return device > 0;
+       }});
+  return true;
+}();
 
 } // namespace
 #endif // OCUDU_METAL_STATS

@@ -234,7 +234,8 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "--device_resource_grid",
              expert_phy_params.device_resource_grid,
              "Keep the uplink resource grid on the device (the OFDM demodulation writes it from the GPU): auto (follow "
-             "the pipeline mode), on and off.")
+             "the pipeline mode), on and off.\nThe mode's own choice is the A/B control of the device grid, so this "
+             "knob is only needed with --phy_pipeline cpu_gpu.")
       ->capture_default_str()
       ->check(device_resource_grid_check);
   add_option(app,
@@ -275,7 +276,9 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "--pusch_ldpc_decoder_type",
              expert_phy_params.ldpc_decoder_type,
              "PUSCH LDPC decoder type: auto, generic, neon, avx2, avx512, metal, metal_flooding, metal_persistent, "
-             "metal_async and metal_lls.")
+             "metal_async and metal_lls.\nModule-level offload selection: only meaningful with --phy_pipeline "
+             "cpu_gpu (cpu fixes it; the fused gpu lane keeps it, since the LLRs still leave the device for the "
+             "decoder).")
       ->capture_default_str()
       ->check(ldpc_decoder_type_check);
 
@@ -307,7 +310,7 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "--pusch_channel_estimator_algo",
              expert_phy_params.pusch_channel_estimator_algo,
              "PUSCH channel estimator algorithm: auto, cpu, metal_mmse, metal_nn_mmse and helena (Apple Silicon "
-             "only).")
+             "only).\nModule-level offload selection: only meaningful with --phy_pipeline cpu_gpu (cpu and gpu fix it).")
       ->capture_default_str()
       ->check(pusch_channel_estimator_algo_method_check);
 
@@ -355,14 +358,14 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
   add_option(app,
              "--pusch_channel_equalizer_backend",
              expert_phy_params.pusch_channel_equalizer_backend,
-             "PUSCH channel equalizer backend: auto, cpu and metal (Apple Silicon only).")
+             "PUSCH channel equalizer backend: auto, cpu and metal (Apple Silicon only).\nModule-level offload selection: only meaningful with --phy_pipeline cpu_gpu (cpu and gpu fix it).")
       ->capture_default_str()
       ->check(pusch_channel_equalizer_backend_check);
   add_option(app,
              "--pusch_dft_type",
              expert_phy_params.pusch_dft_type,
              "PUSCH (uplink receive) DFT processor type: auto, cpu and metal (Apple Silicon only; the "
-             "downlink transmit path is unaffected).")
+             "downlink transmit path is unaffected).\nModule-level offload selection: only meaningful with --phy_pipeline cpu_gpu (cpu and gpu fix it).")
       ->capture_default_str()
       ->check(pusch_dft_type_check);
   add_option(app,

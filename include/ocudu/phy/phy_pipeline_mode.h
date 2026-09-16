@@ -68,7 +68,18 @@ class phy_pipeline_mode_registry
 {
 public:
   /// Publishes the effective mode (call once at startup, before any PHY thread runs).
-  static void set(phy_pipeline_mode mode) { instance().store(mode, std::memory_order_relaxed); }
+  static void set(phy_pipeline_mode mode)
+  {
+    instance().store(mode, std::memory_order_relaxed);
+    published().store(true, std::memory_order_relaxed);
+  }
+
+  /// \brief Whether an application published a mode.
+  ///
+  /// False in the unit tests and the tools, which run PHY components directly: a requirement that
+  /// depends on the mode (see phy_pipeline_contract.h) has nothing to check there and must say so
+  /// rather than judge a pipeline nobody selected.
+  static bool is_published() { return published().load(std::memory_order_relaxed); }
 
   /// Current effective mode, \c phy_pipeline_mode::cpu until set() is called.
   static phy_pipeline_mode get() { return instance().load(std::memory_order_relaxed); }
@@ -78,6 +89,12 @@ private:
   {
     static std::atomic<phy_pipeline_mode> mode{phy_pipeline_mode::cpu};
     return mode;
+  }
+
+  static std::atomic<bool>& published()
+  {
+    static std::atomic<bool> flag{false};
+    return flag;
   }
 };
 

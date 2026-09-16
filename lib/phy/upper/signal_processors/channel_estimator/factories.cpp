@@ -94,12 +94,15 @@ public:
 private:
   std::shared_ptr<time_alignment_estimator_factory> ta_estimator_factory;
   port_channel_estimator_algorithm                  algo;
-  float                                             mmse_tau_rms_s;
-  float                                             mmse_fd_hz;
-  unsigned                                          mmse_block_prb;
-  std::string                                       helena_model_path;
-  std::string                                       helena_model_path_52;
-  std::string                                       helena_model_path_106;
+  // The MMSE parameters and the model paths are read by the offloaded estimators alone, so a build
+  // without ENABLE_METAL_CHEST has no use for them: marked as such, because -Wunused-private-field
+  // (promoted to an error here) made that configuration fail to compile.
+  [[maybe_unused]] float    mmse_tau_rms_s;
+  [[maybe_unused]] float    mmse_fd_hz;
+  [[maybe_unused]] unsigned mmse_block_prb;
+  [[maybe_unused]] std::string helena_model_path;
+  [[maybe_unused]] std::string helena_model_path_52;
+  [[maybe_unused]] std::string helena_model_path_106;
 };
 
 } // namespace
