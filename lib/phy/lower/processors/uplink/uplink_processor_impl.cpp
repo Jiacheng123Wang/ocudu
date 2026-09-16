@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "uplink_processor_impl.h"
+#include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_reader_view.h"
 #include "ocudu/ocuduvec/compare.h"
 #include "ocudu/ocuduvec/conversion.h"
@@ -144,6 +145,35 @@ ul_host_stats& ul_host_counters()
 {
   static ul_host_stats s;
   return s;
+}
+
+/// \brief Reports the first symbol of the run whose samples had to be assembled in a symbol buffer.
+///
+/// The exit report counts them (see the "host sample assembly" contract check); this says which symbol
+/// it was and how the block carrying it looked, which is what a run that tolerates a handful of them
+/// needs to explain. Zero is the expected count: the receive side hands this processor whole slots (see
+/// lower_phy_baseband_processor::ul_process), so a copy means a block arrived whose end fell inside an
+/// OFDM symbol - the one case the samples of a symbol are not contiguous in memory.
+static void report_first_assembly(slot_point                 slot,
+                                  unsigned                   symbol,
+                                  baseband_gateway_timestamp block_timestamp,
+                                  unsigned                   block_samples,
+                                  unsigned                   symbol_size,
+                                  unsigned                   already_collected)
+{
+  static std::atomic<bool> reported{false};
+  if (reported.exchange(true, std::memory_order_relaxed)) {
+    return;
+  }
+  ocudulog::fetch_basic_logger("PHY").info(
+      "[ul_assembly] first host copy of the samples: slot={} symbol={} block_ts={} block_samples={} "
+      "symbol_size={} already_collected={}",
+      slot,
+      symbol,
+      block_timestamp,
+      block_samples,
+      symbol_size,
+      already_collected);
 }
 
 #if defined(OCUDU_METAL_STATS)
@@ -426,6 +456,7 @@ void lower_phy_uplink_processor_impl::process_symbol_boundary(const baseband_gat
   // the samples that the pipeline mode is meant to remove, and it is counted: a run that never needs it
   // says so on the [ul_host] line (see the "host sample assembly" contract check).
   ul_host_counters().count_assembled();
+  report_first_assembly(slot, i_symbol, timestamp, nof_input_samples, current_symbol_size, symbol_buffer_write_index);
   current_symbol_buffer = puxch_proc->get_baseband().acquire_symbol_buffer();
   symbol_buffers[current_symbol_buffer].resize(current_symbol_size);
 

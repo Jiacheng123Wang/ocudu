@@ -932,6 +932,50 @@ TEST_P(LowerPhyFixture, BasebandUplinkFlow)
   ASSERT_TRUE(rx_task_executor.has_pending_tasks());
 }
 
+/// The RU rounds the start time it hands the lower PHY to a subframe (see ru_controller_sdr_impl), while
+/// the radio starts streaming at a sample of its own: the two disagree about the first block of a stream.
+/// That block is a whole slot that does NOT start on a slot boundary, and its end cuts its last OFDM
+/// symbol in half - the one symbol whose samples are not contiguous in memory, and the one host copy the
+/// receive side could still force. The receive side therefore establishes the phase itself: it drops the
+/// blocks that cannot be read symbol by symbol (at most lower_phy_baseband_processor::max_phase_blocks
+/// of them) and hands the uplink processor whole slots only.
+TEST_P(LowerPhyFixture, ReceivePhaseBlocksAreDropped)
+{
+  lower_phy_controller& lphy_controller = lphy->get_controller();
+
+  const unsigned                   nof_samples_per_slot = srate.to_kHz() / pow2(to_numerology_value(scs));
+  const baseband_gateway_timestamp init_time            = 0; // The RU: rounded to a subframe.
+  const baseband_gateway_timestamp radio_ts             = nof_samples_per_slot / 3 + 7; // The radio: not.
+
+  bb_gateway_spy.set_receiver_current_timestamp(radio_ts);
+  lphy_controller.start(init_time);
+
+  for (unsigned i_block = 0; i_block != 3; ++i_block) {
+    bb_gateway_spy.clear_all_entries();
+    uplink_proc_spy->clear();
+
+    ASSERT_TRUE(rx_task_executor.try_run_next());
+    auto& receive_entries = bb_gateway_spy.get_receive_entries();
+    ASSERT_EQ(receive_entries.size(), 1);
+    const unsigned received = receive_entries.back().data.get_nof_samples();
+
+    const uplink_processor_baseband_spy& baseband_spy = uplink_proc_spy->get_uplink_proc_baseband_spy();
+    if (i_block < 2) {
+      // The first block holds a whole slot but starts mid-slot, the second closes the gap to the next
+      // slot boundary: neither can be split into whole OFDM symbols, so neither is processed.
+      ASSERT_FALSE(ul_task_executor.try_run_next()) << "block " << i_block << " must not be processed";
+      ASSERT_TRUE(baseband_spy.get_entries().empty());
+      continue;
+    }
+
+    // From the third block on the stream is slot aligned: exactly one slot, processed as it is.
+    ASSERT_EQ(received, nof_samples_per_slot);
+    ASSERT_TRUE(ul_task_executor.try_run_next());
+    ASSERT_EQ(baseband_spy.get_entries().size(), 1);
+    ASSERT_EQ(baseband_spy.get_entries().back().buffer.get_nof_samples(), nof_samples_per_slot);
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(LowerPhy,
                          LowerPhyFixture,
                          testing::Combine(testing::Values(subcarrier_spacing::kHz15, subcarrier_spacing::kHz30),

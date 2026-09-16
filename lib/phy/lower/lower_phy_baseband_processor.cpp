@@ -72,6 +72,9 @@ void lower_phy_baseband_processor::start(baseband_gateway_timestamp init_time, b
   // A stream that starts here has to establish its phase again: the first block only closes the gap to
   // the next slot boundary and is not processed (see ul_process).
   rx_slot_aligned   = false;
+  // Blocks the stream may drop while it establishes its phase: the first block of a stream, and the
+  // partial one that follows it when the start time of the RU and the radio disagree (see ul_process).
+  nof_phase_blocks  = 0;
 
   rx_state.start();
   report_fatal_error_if_not(rx_executor.defer([this]() { ul_process(); }), "Failed to execute initial uplink task.");
@@ -265,12 +268,11 @@ void lower_phy_baseband_processor::ul_process()
   /// is assembled.
   const unsigned nof_samples_per_slot =
       srate.to_kHz() * static_cast<uint64_t>(slot_duration.count()) / 1000;
-  unsigned nof_samples   = rx_buffer->get_nof_samples();
-  bool     partial_block = false;
-  if (nof_samples >= nof_samples_per_slot) {
+  const bool slot_capable = rx_buffer->get_nof_samples() >= nof_samples_per_slot;
+  unsigned   nof_samples  = rx_buffer->get_nof_samples();
+  if (slot_capable) {
     const unsigned phase = static_cast<unsigned>(last_rx_timestamp.load(std::memory_order_acquire) % nof_samples_per_slot);
-    partial_block        = (phase != 0);
-    nof_samples          = partial_block ? (nof_samples_per_slot - phase) : nof_samples_per_slot;
+    nof_samples          = (phase != 0) ? (nof_samples_per_slot - phase) : nof_samples_per_slot;
   }
   baseband_gateway_buffer_writer_view rx_writer(rx_buffer->get_writer(), 0, nof_samples);
 
@@ -297,17 +299,28 @@ void lower_phy_baseband_processor::ul_process()
   // just received (\c nof_samples of them - the receiver fills the buffer it was given).
   last_rx_timestamp.store(rx_metadata.ts + nof_samples, std::memory_order_release);
 
-  // The block that establishes the phase of the stream is not processed. It starts mid-slot, so its
-  // tail is the head of an OFDM symbol that ends in the next block: the samples of that symbol are not
-  // contiguous in memory and the uplink processor would have to copy them into an assembly buffer -
-  // the one host pass over the samples the receive side can still force. Dropping them instead makes
-  // "no uplink sample is copied on the host" absolute, and costs at most one slot at the very start of
-  // the stream - before any UE can be transmitting, and the buffer goes straight back to the pool.
-  // Only that first block is dropped: once the receive side is slot aligned, a loss of alignment (a
-  // late or lost block) keeps the historical behaviour, where the uplink processor assembles the
-  // symbol the loss split instead of dropping samples (see process_symbol_boundary).
-  const bool establishes_phase = partial_block && !rx_slot_aligned;
-  rx_slot_aligned              = rx_slot_aligned || !partial_block;
+  // A block that the uplink processor can read symbol by symbol: it holds exactly one slot and it
+  // starts on a slot boundary. This is measured on the block that was actually received - NOT on the
+  // phase the last timestamp predicted, because the two disagree about the first block of a stream:
+  // the RU rounds the start time it gives the lower PHY to a subframe (see ru_controller_sdr_impl),
+  // while the radio starts streaming at a sample of its own. A block that holds a whole slot but does
+  // not start on a boundary is the one that costs a copy: the uplink processor aligns to the first
+  // subframe boundary inside it and its LAST symbol is then cut in half by the end of the block (which
+  // does not fall on a boundary). Dropping such a block - at most the first two of a stream, before any
+  // UE can be transmitting - is what makes "no uplink sample is copied on the host" absolute.
+  const bool slot_aligned_block =
+      slot_capable && (nof_samples == nof_samples_per_slot) && ((rx_metadata.ts % nof_samples_per_slot) == 0);
+  const bool establishes_phase =
+      slot_capable && !slot_aligned_block && !rx_slot_aligned && (nof_phase_blocks < max_phase_blocks);
+  if (establishes_phase) {
+    ++nof_phase_blocks;
+  }
+  if (slot_aligned_block) {
+    // The stream is slot aligned from here on: a later loss of alignment (a late or lost block) keeps
+    // the historical behaviour, where the uplink processor assembles the symbol the loss split in two
+    // instead of dropping samples (see process_symbol_boundary).
+    rx_slot_aligned = true;
+  }
 
   if (!establishes_phase) {
     // T_start of the UL compute pipeline measurement (IQ samples just received, UL processing about to start).
