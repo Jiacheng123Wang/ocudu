@@ -67,6 +67,15 @@ struct shared_queue_state {
   /// the mapping was created for.
   std::unordered_map<const void*, wrap_entry> wrap_cache;
 
+  /// GPU execution time of the command buffers of one queue (see the [metal_stats] gpu busy report).
+  struct gpu_time_stats {
+    std::atomic<uint64_t> commits{0};
+    /// Sum of the buffers' execution windows, in nanoseconds of the GPU timeline.
+    std::atomic<uint64_t> busy_ns{0};
+    /// First GPU start and last GPU end seen on this queue: their difference is the queue's GPU window.
+    std::atomic<uint64_t> first_start_ns{0};
+    std::atomic<uint64_t> last_end_ns{0};
+  };
   /// Pending chain of one queue: the newest commit and how many are outstanding. Kept per queue
   /// because a wait on a command buffer of one queue cannot stand for the work of the other (see
   /// shared_queue::queue_kind).
@@ -76,6 +85,7 @@ struct shared_queue_state {
   };
   static constexpr size_t nof_queue_kinds = 2;
   pending_chain           chains[nof_queue_kinds];
+  gpu_time_stats          gpu_time[nof_queue_kinds];
 
   pending_chain& chain(shared_queue::queue_kind kind)
   {
@@ -93,6 +103,10 @@ struct shared_queue_state {
   /// Requests the platform refused to map (the pointer is not page-aligned, or the mapping failed):
   /// the caller staged the buffer through a copy instead, which is correct but is not zero-copy.
   uint64_t wrap_failures = 0;
+  /// Wrap requests whose slice offset did not satisfy the alignment the binding needs (a `float2`
+  /// argument wants 8 bytes, a `float` 4, a `char` 1). A non-zero count means the zero-copy path is
+  /// only "usually" aligned: the engine then stages a copy instead of binding a misaligned slice.
+  std::atomic<uint64_t> wrap_misaligned{0};
 };
 
 shared_queue_state& state();
@@ -101,11 +115,31 @@ shared_queue_state& state();
 void shared_queue_stats_report()
 {
   shared_queue_state& s = state();
-  std::fprintf(stderr, "[metal_stats] wrap hits=%llu creates=%llu replaces=%llu failures=%llu\n",
+  std::fprintf(stderr, "[metal_stats] wrap hits=%llu creates=%llu replaces=%llu failures=%llu misaligned=%llu\n",
                static_cast<unsigned long long>(s.wrap_hits),
                static_cast<unsigned long long>(s.wrap_creates),
                static_cast<unsigned long long>(s.wrap_replaces),
-               static_cast<unsigned long long>(s.wrap_failures));
+               static_cast<unsigned long long>(s.wrap_failures),
+               static_cast<unsigned long long>(s.wrap_misaligned.load(std::memory_order_relaxed)));
+  // GPU busy time, measured on the command buffers themselves (GPUStartTime/GPUEndTime in their
+  // completion handlers): this is the one time measurement that keeps its meaning once the stages are
+  // fused into a single command buffer, where the per-stage host timestamps say nothing any more.
+  // `busy` is the sum of the command buffers' execution windows, `window` the span from the first
+  // start to the last end of the queue (the union: with overlapping buffers it is smaller than busy).
+  for (size_t kind = 0; kind != shared_queue_state::nof_queue_kinds; ++kind) {
+    const shared_queue_state::gpu_time_stats& g = s.gpu_time[kind];
+    const uint64_t n = g.commits.load(std::memory_order_relaxed);
+    const uint64_t busy_ns = g.busy_ns.load(std::memory_order_relaxed);
+    const uint64_t first = g.first_start_ns.load(std::memory_order_relaxed);
+    const uint64_t last  = g.last_end_ns.load(std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "[metal_stats] gpu busy (%s): commits=%llu busy=%.1fus mean=%.2fus window=%.1fus\n",
+                 (kind == 0) ? "front_end" : "back_end",
+                 static_cast<unsigned long long>(n),
+                 static_cast<double>(busy_ns) / 1e3,
+                 (n != 0) ? (static_cast<double>(busy_ns) / 1e3 / static_cast<double>(n)) : 0.0,
+                 (last > first) ? (static_cast<double>(last - first) / 1e3) : 0.0);
+  }
 }
 
 /// \brief Registers the zero-copy requirement: a mapping is created once per object and never
@@ -115,15 +149,17 @@ const bool shared_queue_contract_registered = []() {
       {"zero-copy wraps", []() -> std::optional<bool> {
          shared_queue_state& s = state();
          std::fprintf(stderr,
-                      "%llu hits, %llu creates, %llu replaces, %llu failures",
+                      "%llu hits, %llu creates, %llu replaces, %llu failures, %llu misaligned",
                       static_cast<unsigned long long>(s.wrap_hits),
                       static_cast<unsigned long long>(s.wrap_creates),
                       static_cast<unsigned long long>(s.wrap_replaces),
-                      static_cast<unsigned long long>(s.wrap_failures));
+                      static_cast<unsigned long long>(s.wrap_failures),
+                      static_cast<unsigned long long>(s.wrap_misaligned.load(std::memory_order_relaxed)));
          if (s.wrap_creates == 0 && s.wrap_hits == 0) {
            return std::nullopt; // nothing was wrapped in this run
          }
-         return (s.wrap_replaces == 0) && (s.wrap_failures == 0);
+         return (s.wrap_replaces == 0) && (s.wrap_failures == 0) &&
+                (s.wrap_misaligned.load(std::memory_order_relaxed) == 0);
        }});
   return true;
 }();
@@ -262,14 +298,49 @@ id<MTLCommandQueue> shared_queue::backend_queue()
   return state().backend_queue;
 }
 
+void shared_queue::notify_wrap_misaligned()
+{
+#if defined(OCUDU_METAL_STATS)
+  state().wrap_misaligned.fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
 void shared_queue::notify_commit(id<MTLCommandBuffer> command_buffer, queue_kind kind)
 {
   shared_queue_state& s = state();
-  std::lock_guard<std::mutex> lock(s.mutex);
-  shared_queue_state::pending_chain& c = s.chain(kind);
-  c.last_committed                     = command_buffer;
-  ++c.pending;
-  ++s.commits;
+  {
+    std::lock_guard<std::mutex> lock(s.mutex);
+    shared_queue_state::pending_chain& c = s.chain(kind);
+    c.last_committed                     = command_buffer;
+    ++c.pending;
+    ++s.commits;
+  }
+#if defined(OCUDU_METAL_STATS)
+  // The GPU's own view of the command buffer: GPUStartTime/GPUEndTime are only meaningful once it has
+  // completed, so they are read in the completion handler (which runs on a Metal thread and must not
+  // take our lock - the fields are atomics for that reason). Registered after commit(), which Metal
+  // allows as long as the buffer has not completed; a no-op in a build without the probe, so the
+  // production submit path pays nothing.
+  shared_queue_state::gpu_time_stats* g = &s.gpu_time[static_cast<size_t>(kind)];
+  [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+    const double start_s = cb.GPUStartTime;
+    const double end_s   = cb.GPUEndTime;
+    if (!(end_s > start_s)) {
+      return;
+    }
+    const uint64_t start_ns = static_cast<uint64_t>(start_s * 1e9);
+    const uint64_t end_ns   = static_cast<uint64_t>(end_s * 1e9);
+    g->commits.fetch_add(1, std::memory_order_relaxed);
+    g->busy_ns.fetch_add(end_ns - start_ns, std::memory_order_relaxed);
+    uint64_t prev = g->first_start_ns.load(std::memory_order_relaxed);
+    while ((prev == 0 || start_ns < prev) &&
+           !g->first_start_ns.compare_exchange_weak(prev, start_ns, std::memory_order_relaxed)) {
+    }
+    prev = g->last_end_ns.load(std::memory_order_relaxed);
+    while (end_ns > prev && !g->last_end_ns.compare_exchange_weak(prev, end_ns, std::memory_order_relaxed)) {
+    }
+  }];
+#endif
 }
 
 bool shared_queue::wait_all_committed(queue_kind kind)
