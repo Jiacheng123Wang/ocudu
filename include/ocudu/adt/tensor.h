@@ -92,14 +92,19 @@ public:
   /// Resizes the tensor.
   virtual void resize(const dimensions_size_type& dimensions) = 0;
 
-protected:
-  /// Gets the stored data.
+  /// \brief Gets the stored data as a whole.
+  ///
+  /// Public alongside \ref get_view_offset() so that a consumer can address the data as one block and locate views
+  /// inside it.
   virtual span<Type> get_data() = 0;
-  /// Gets the stored data for read-only purposes.
+
+  /// Gets the stored data as a whole, for read-only purposes.
   virtual span<const Type> get_data() const = 0;
 
-private:
-  /// Gets the offset to the view of the first dimension.
+  /// \brief Gets the offset of a view within the stored data, counted in elements.
+  ///
+  /// \param[in] indices Indices of the dimensions above the view.
+  /// \return The position of the first element of the view.
   template <unsigned N>
   unsigned get_view_offset(const std::array<unsigned, NDIMS - N>& indices) const
   {
