@@ -36,6 +36,22 @@ struct gtpu_tunnel_psup_config {
   } tx;
 };
 
+/// \brief Configurable parameters for GTP-U PDCP tunnels (Xn-U interface)
+struct gtpu_tunnel_pdcp_config {
+  struct gtpu_tunnel_pdcp_rx_config {
+    gtpu_logical_interface    lif = gtpu_logical_interface::invalid;
+    gtpu_teid_t               local_teid;
+    std::chrono::milliseconds t_reordering = {};
+    bool                      warn_on_drop = false;
+  } rx;
+  struct gtpu_tunnel_pdcp_tx_config {
+    gtpu_logical_interface lif = gtpu_logical_interface::invalid;
+    gtpu_teid_t            peer_teid;
+    std::string            peer_addr;
+    uint16_t               peer_port;
+  } tx;
+};
+
 /// \brief Configurable parameters for GTP-U NR-U tunnels
 struct gtpu_tunnel_nru_config {
   struct gtpu_tunnel_nru_rx_config {
@@ -56,6 +72,64 @@ struct gtpu_tunnel_nru_config {
 // Formatters
 //
 namespace fmt {
+
+// GTP-U PDCP RX config
+template <>
+struct formatter<ocudu::gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_rx_config> {
+  template <typename ParseContext>
+  auto parse(ParseContext& ctx)
+  {
+    return ctx.begin();
+  }
+
+  template <typename FormatContext>
+  auto format(const ocudu::gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_rx_config& cfg, FormatContext& ctx) const
+  {
+    return format_to(ctx.out(),
+                     "lif={} local_teid={} t_reordering={} warn_on_drop={}",
+                     cfg.lif,
+                     cfg.local_teid,
+                     cfg.t_reordering,
+                     cfg.warn_on_drop);
+  }
+};
+
+// GTP-U PDCP TX config
+template <>
+struct formatter<ocudu::gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_tx_config> {
+  template <typename ParseContext>
+  auto parse(ParseContext& ctx)
+  {
+    return ctx.begin();
+  }
+
+  template <typename FormatContext>
+  auto format(const ocudu::gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_tx_config& cfg, FormatContext& ctx) const
+  {
+    return format_to(ctx.out(),
+                     "lif={} peer_teid={} peer_addr={} peer_port={}",
+                     cfg.lif,
+                     cfg.peer_teid,
+                     cfg.peer_addr,
+                     cfg.peer_port);
+  }
+};
+
+// GTP-U PDCP config
+template <>
+struct formatter<ocudu::gtpu_tunnel_pdcp_config> {
+  template <typename ParseContext>
+  auto parse(ParseContext& ctx)
+  {
+    return ctx.begin();
+  }
+
+  template <typename FormatContext>
+  auto format(const ocudu::gtpu_tunnel_pdcp_config& cfg, FormatContext& ctx) const
+  {
+    return format_to(ctx.out(), "rx=[{}] tx=[{}]", cfg.rx, cfg.tx);
+  }
+};
 
 // GTP-U PSUP RX config
 template <>

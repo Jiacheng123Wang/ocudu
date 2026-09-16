@@ -31,6 +31,18 @@ add_executable(gtpu_tunnel_psup_tx_test gtpu_tunnel_psup_tx_test.cpp)
 target_link_libraries(gtpu_tunnel_psup_tx_test ocudu_gtpu ocudu_support ocudulog GTest::gtest GTest::gtest_main)
 gtest_discover_tests(gtpu_tunnel_psup_tx_test)
 
+add_executable(gtpu_tunnel_pdcp_test gtpu_tunnel_pdcp_test.cpp)
+target_link_libraries(gtpu_tunnel_pdcp_test ocudu_gtpu ocudu_support ocudulog GTest::gtest GTest::gtest_main)
+gtest_discover_tests(gtpu_tunnel_pdcp_test)
+
+add_executable(gtpu_tunnel_pdcp_rx_test gtpu_tunnel_pdcp_rx_test.cpp)
+target_link_libraries(gtpu_tunnel_pdcp_rx_test ocudu_gtpu ocudu_support ocudulog GTest::gtest GTest::gtest_main)
+gtest_discover_tests(gtpu_tunnel_pdcp_rx_test)
+
+add_executable(gtpu_tunnel_pdcp_tx_test gtpu_tunnel_pdcp_tx_test.cpp)
+target_link_libraries(gtpu_tunnel_pdcp_tx_test ocudu_gtpu ocudu_support ocudulog GTest::gtest GTest::gtest_main)
+gtest_discover_tests(gtpu_tunnel_pdcp_tx_test)
+
 add_executable(gtpu_tunnel_nru_test gtpu_tunnel_nru_test.cpp)
 target_link_libraries(gtpu_tunnel_nru_test ocudu_gtpu ocudu_pcap ocudu_support ocudulog GTest::gtest GTest::gtest_main)
 gtest_discover_tests(gtpu_tunnel_nru_test)

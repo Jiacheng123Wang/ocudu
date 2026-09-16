@@ -50,6 +50,9 @@ constexpr unsigned GTPU_MAX_NUM_HEADER_EXTENSIONS = 10;
 constexpr unsigned GTPU_MAX_NUM_PRIVATE_EXTENSIONS     = 1;
 constexpr unsigned GTPU_PRIVATE_EXTENSION_VALUE_LENGTH = 1;
 
+constexpr unsigned GTPU_SN_MOD         = 65536;
+constexpr unsigned GTPU_RX_WINDOW_SIZE = 32768;
+
 /// GTP-U extension header types. See TS 29.281 v16.2.0, figure 5.2.1-3.
 enum class gtpu_extension_header_type : uint8_t {
   no_more_extension_headers = 0b00000000,

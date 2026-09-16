@@ -4,6 +4,7 @@
 
 
 set(SOURCES gtpu_tunnel_psup_factory.cpp
+            gtpu_tunnel_pdcp_factory.cpp
             gtpu_tunnel_nru_factory.cpp
             gtpu_pdu.cpp
             gtpu_demux_factory.cpp

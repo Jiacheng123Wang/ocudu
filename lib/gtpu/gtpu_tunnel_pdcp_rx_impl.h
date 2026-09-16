@@ -6,7 +6,7 @@
 
 #include "gtpu_tunnel_base_rx.h"
 #include "ocudu/gtpu/gtpu_config.h"
-#include "ocudu/gtpu/gtpu_tunnel_psup_rx.h"
+#include "ocudu/gtpu/gtpu_tunnel_pdcp_rx.h"
 #include "ocudu/psup/psup_packing.h"
 #include "ocudu/ran/cu_up_types.h"
 #include "ocudu/support/sdu_window.h"
@@ -14,8 +14,8 @@
 
 namespace ocudu {
 
-/// GTP-U RX state variables
-struct gtpu_rx_state {
+/// GTP-U PDCP RX state variables
+struct gtpu_pdcp_rx_state {
   /// RX_NEXT indicates the SN value of the next GTP-U SDU expected to be received.
   uint16_t rx_next;
   /// RX_DELIV indicates the SN value of the first GTP-U SDU not delivered to the lower layers, but still
@@ -25,42 +25,44 @@ struct gtpu_rx_state {
   /// triggered t-Reordering.
   uint16_t rx_reord;
 
-  /// \brief gtpu_rx_state Creates a GTP-U RX state initialized to a given value.
+  /// \brief gtpu_pdcp_rx_state Creates a GTP-U RX state initialized to a given value.
   /// \param init_sn Initial sequence number expected to be seen first.
-  gtpu_rx_state(uint16_t init_sn = 0) : rx_next(init_sn), rx_deliv(init_sn), rx_reord(init_sn) {}
+  gtpu_pdcp_rx_state(uint16_t init_sn = 0) : rx_next(init_sn), rx_deliv(init_sn), rx_reord(init_sn) {}
 };
 
-struct gtpu_rx_sdu_info {
-  byte_buffer             sdu         = {};
-  qos_flow_id_t           qos_flow_id = qos_flow_id_t::invalid;
-  std::optional<uint16_t> sn          = {};
+struct gtpu_pdcp_rx_tpdu_info {
+  /// GTP-U T-PDU encapsuling a PDCP SDU.
+  byte_buffer tpdu = {};
+  /// PDCP PDU number. Conveys a 12-bit PDCP SN or a 18-bit PDCP SN.
+  uint32_t pdcp_pdu_number = {};
+  /// GTP-U sequence number.
+  std::optional<uint16_t> gtpu_sn = {};
 };
 
-/// Class used for receiving GTP-U PSUP tunnels, e.g. on NG-U or Xn-U interfaces.
-class gtpu_tunnel_psup_rx_impl : public gtpu_tunnel_base_rx
+/// Class used for receiving GTP-U PDCP tunnels, e.g. on Xn-U interface.
+class gtpu_tunnel_pdcp_rx_impl : public gtpu_tunnel_base_rx
 {
 public:
-  gtpu_tunnel_psup_rx_impl(cu_up_ue_index_t                                    ue_index,
-                           gtpu_tunnel_psup_config::gtpu_tunnel_psup_rx_config cfg,
-                           gtpu_tunnel_psup_rx_lower_layer_notifier&           rx_lower_,
+  gtpu_tunnel_pdcp_rx_impl(cu_up_ue_index_t                                    ue_index,
+                           gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_rx_config cfg,
+                           gtpu_tunnel_pdcp_rx_lower_layer_notifier&           rx_lower_,
                            timer_factory                                       ue_ctrl_timer_factory_) :
-    gtpu_tunnel_base_rx(gtpu_tunnel_log_prefix{cfg.lif, ue_index, cfg.local_teid, "DL"}, cfg.test_mode),
+    gtpu_tunnel_base_rx(gtpu_tunnel_log_prefix{cfg.lif, ue_index, cfg.local_teid, "DL"}),
     psup_packer(logger.get_basic_logger()),
     lower_dn(rx_lower_),
     config(cfg),
     rx_window(logger, GTPU_RX_WINDOW_SIZE),
     ue_ctrl_timer_factory(ue_ctrl_timer_factory_)
   {
-    ocudu_assert(cfg.ue_ambr_limiter != nullptr, "No UE-AMBR limiter provided");
     if (config.t_reordering.count() != 0) {
       reordering_timer = ue_ctrl_timer_factory.create_timer();
       reordering_timer.set(config.t_reordering, reordering_callback{this});
     }
-    logger.log_info("GTP-U PSUP RX configured. {}", config);
+    logger.log_info("GTP-U PDCP RX configured. {}", config);
     ocudu_assert(
-        cfg.lif == gtpu_logical_interface::ngu, "GTP-U PSUP RX node not correctly initialized. lif={}", cfg.lif);
+        cfg.lif == gtpu_logical_interface::xnu, "GTP-U PDCP RX node not correctly initialized. lif={}", cfg.lif);
   }
-  ~gtpu_tunnel_psup_rx_impl() override = default;
+  ~gtpu_tunnel_pdcp_rx_impl() override = default;
 
   void stop()
   {
@@ -73,9 +75,9 @@ public:
   /*
    * Testing Helpers
    */
-  void                         set_state(std::optional<gtpu_rx_state> rx_state_) { rx_state = rx_state_; }
-  std::optional<gtpu_rx_state> get_state() { return rx_state; }
-  bool                         is_reordering_timer_running() { return reordering_timer.is_running(); }
+  void                              set_state(std::optional<gtpu_pdcp_rx_state> rx_state_) { rx_state = rx_state_; }
+  std::optional<gtpu_pdcp_rx_state> get_state() { return rx_state; }
+  bool                              is_reordering_timer_running() { return reordering_timer.is_running(); }
 
 protected:
   // domain-specific PDU handler
@@ -85,53 +87,30 @@ protected:
       return;
     }
 
-    // Limit UE to AMBR.
-    if (not config.ignore_ue_ambr && not config.ue_ambr_limiter->consume(pdu.buf.length())) {
-      if (not config.warn_on_drop) {
-        logger.log_info("Dropped GTP-U PDU. UE went over UE-AMBR");
-      } else {
-        logger.log_warning("Dropped GTP-U PDU. UE went over UE-AMBR");
-      }
-      return;
-    }
-
-    if (pdu.test_mode) {
-      gtpu_rx_sdu_info rx_sdu_info;
-      rx_sdu_info.sdu         = std::move(pdu.buf);
-      rx_sdu_info.qos_flow_id = qos_flow_id_t{0x01}; // QoS Flow ID for test DRB.
-      deliver_sdu(rx_sdu_info);
-      return;
-    }
-
-    size_t                          pdu_len               = pdu.buf.length();
-    gtpu_teid_t                     teid                  = pdu.hdr.teid;
-    psup_dl_pdu_session_information pdu_session_info      = {};
-    bool                            have_pdu_session_info = false;
+    size_t                  pdu_len         = pdu.buf.length();
+    gtpu_teid_t             teid            = pdu.hdr.teid;
+    std::optional<uint32_t> pdcp_pdu_number = std::nullopt;
     for (auto ext_hdr : pdu.hdr.ext_list) {
       switch (ext_hdr.extension_header_type) {
-        case gtpu_extension_header_type::pdu_session_container:
-          if (!have_pdu_session_info) {
-            have_pdu_session_info = psup_packer.unpack(pdu_session_info, ext_hdr.container);
-            if (!have_pdu_session_info) {
-              logger.log_error("Failed to unpack PDU session container. pdu_len={}", pdu_len);
-            }
+        case gtpu_extension_header_type::pdcp_pdu_number:
+          if (!pdcp_pdu_number.has_value()) {
+            // TODO: unpack PDCP PDU Number
+            pdcp_pdu_number = 66;
           } else {
-            logger.log_warning("Ignoring multiple PDU session container. pdu_len={}", pdu_len);
+            logger.log_warning("Ignoring multiple PDCP PDU numbers. pdu_len={}", pdu_len);
           }
           break;
         default:
-          logger.log_warning("Ignoring unexpected extension header at NG-U interface. type={} pdu_len={}",
+          logger.log_warning("Ignoring unexpected extension header at Xn-U interface. type={} pdu_len={}",
                              ext_hdr.extension_header_type,
                              pdu_len);
       }
     }
-    if (!have_pdu_session_info) {
+    if (!pdcp_pdu_number.has_value()) {
       logger.log_warning(
-          "Incomplete PDU at NG-U interface: missing or invalid PDU session container. pdu_len={} teid={}",
-          pdu_len,
-          teid);
-      // As per TS 29.281 Sec. 5.2.2.7 the (...) PDU Session Container (...) shall be transmitted in a G-PDU over the
-      // N3 and N9 user plane interfaces (...).
+          "Incomplete PDU at Xn-U interface: missing PDCP PDU number. pdu_len={} teid={}", pdu_len, teid);
+      // TS 38.300 Sec. 9.2.3.2.3: The SN of forwarded PDCP SDUs is carried in the "PDCP PDU number"
+      // field of the GTP-U extension header.
       return;
     }
 
@@ -139,33 +118,33 @@ protected:
 
     if (!pdu.hdr.flags.seq_number || config.t_reordering.count() == 0) {
       // Forward this SDU straight away.
-      byte_buffer      rx_sdu      = gtpu_extract_msg(std::move(pdu)); // header is invalidated after extraction
-      gtpu_rx_sdu_info rx_sdu_info = {std::move(rx_sdu), pdu_session_info.qos_flow_id};
+      byte_buffer            rx_sdu      = gtpu_extract_msg(std::move(pdu)); // header is invalidated after extraction.
+      gtpu_pdcp_rx_tpdu_info rx_sdu_info = {std::move(rx_sdu), *pdcp_pdu_number, std::nullopt};
       deliver_sdu(rx_sdu_info);
       return;
     }
 
-    uint16_t    sn     = pdu.hdr.seq_number;
-    byte_buffer rx_sdu = gtpu_extract_msg(std::move(pdu)); // header is invalidated after extraction
+    uint16_t    gtpu_sn = pdu.hdr.seq_number;
+    byte_buffer rx_sdu  = gtpu_extract_msg(std::move(pdu)); // header is invalidated after extraction.
 
     // Initialize rx_state if this is the first SN we received.
     if (!rx_state.has_value()) {
-      if (sn != 0) {
+      if (gtpu_sn != 0) {
         if (!config.warn_on_drop) {
-          logger.log_info("Initialized rx_state to non-zero value. sn={}", sn);
+          logger.log_info("Initialized rx_state to non-zero value. gtpu_sn={}", gtpu_sn);
         } else {
-          logger.log_warning("Initialized rx_state to non-zero value. sn={}", sn);
+          logger.log_warning("Initialized rx_state to non-zero value. gtpu_sn={}", gtpu_sn);
         }
       }
-      rx_state = gtpu_rx_state(sn);
+      rx_state = gtpu_pdcp_rx_state(gtpu_sn);
     }
     auto& st = *rx_state;
 
     // Check out-of-window
-    if (!inside_rx_window(sn, st)) {
+    if (!inside_rx_window(gtpu_sn, st)) {
       if (nof_log_sn_out_of_window++ < max_nof_log_sn_out_of_window) {
-        logger.log_warning("SN falls out of Rx window. sn={} pdu_len={} {} reordering_timer_running={}",
-                           sn,
+        logger.log_warning("GTP-U SN falls out of Rx window. gtpu_sn={} pdu_len={} {} reordering_timer_running={}",
+                           gtpu_sn,
                            pdu_len,
                            st,
                            reordering_timer.is_running());
@@ -174,36 +153,36 @@ protected:
                              nof_log_sn_out_of_window);
         }
       }
-      gtpu_rx_sdu_info rx_sdu_info = {std::move(rx_sdu), pdu_session_info.qos_flow_id, sn};
+      gtpu_pdcp_rx_tpdu_info rx_sdu_info = {std::move(rx_sdu), *pdcp_pdu_number, gtpu_sn};
       deliver_sdu(rx_sdu_info);
       return;
     }
 
     // Check late SN
-    if (rx_mod_base(sn, st) < rx_mod_base(st.rx_deliv, st)) {
-      logger.log_debug("Out-of-order after timeout or duplicate. sn={} pdu_len={} {}", sn, pdu_len, st);
-      gtpu_rx_sdu_info rx_sdu_info = {std::move(rx_sdu), pdu_session_info.qos_flow_id, sn};
+    if (rx_mod_base(gtpu_sn, st) < rx_mod_base(st.rx_deliv, st)) {
+      logger.log_debug("Out-of-order after timeout or duplicate. gtpu_sn={} pdu_len={} {}", gtpu_sn, pdu_len, st);
+      gtpu_pdcp_rx_tpdu_info rx_sdu_info = {std::move(rx_sdu), *pdcp_pdu_number, gtpu_sn};
       deliver_sdu(rx_sdu_info);
       return;
     }
 
     // Check if PDU has been received
-    if (rx_window.has_sn(sn)) {
-      logger.log_warning("Duplicate PDU dropped. sn={} pdu_len={}", sn, pdu_len);
+    if (rx_window.has_sn(gtpu_sn)) {
+      logger.log_warning("Duplicate PDU dropped. gtpu_sn={} pdu_len={}", gtpu_sn, pdu_len);
       return;
     }
 
-    gtpu_rx_sdu_info& rx_sdu_info = rx_window.add_sn(sn);
-    rx_sdu_info.sdu               = std::move(rx_sdu);
-    rx_sdu_info.qos_flow_id       = pdu_session_info.qos_flow_id;
-    rx_sdu_info.sn                = sn;
+    gtpu_pdcp_rx_tpdu_info& rx_sdu_info = rx_window.add_sn(gtpu_sn);
+    rx_sdu_info.tpdu                    = std::move(rx_sdu);
+    rx_sdu_info.pdcp_pdu_number         = *pdcp_pdu_number;
+    rx_sdu_info.gtpu_sn                 = gtpu_sn;
 
     // Update RX_NEXT
-    if (rx_mod_base(sn, st) >= rx_mod_base(st.rx_next, st)) {
-      st.rx_next = sn + 1;
+    if (rx_mod_base(gtpu_sn, st) >= rx_mod_base(st.rx_next, st)) {
+      st.rx_next = gtpu_sn + 1;
     }
 
-    if (rx_mod_base(sn, st) == rx_mod_base(st.rx_deliv, st)) {
+    if (rx_mod_base(gtpu_sn, st) == rx_mod_base(st.rx_deliv, st)) {
       // Deliver all consecutive SDUs in ascending order of associated SN
       deliver_all_consecutive_sdus();
     }
@@ -227,15 +206,15 @@ protected:
     nof_log_sn_out_of_window = 0;
   }
 
-  void deliver_sdu(gtpu_rx_sdu_info& sdu_info)
+  void deliver_sdu(gtpu_pdcp_rx_tpdu_info& sdu_info)
   {
-    logger.log_info(sdu_info.sdu.begin(),
-                    sdu_info.sdu.end(),
-                    "RX SDU. sdu_len={} qos_flow={} sn={}",
-                    sdu_info.sdu.length(),
-                    sdu_info.qos_flow_id,
-                    sdu_info.sn);
-    lower_dn.on_new_sdu(std::move(sdu_info.sdu), sdu_info.qos_flow_id);
+    logger.log_info(sdu_info.tpdu.begin(),
+                    sdu_info.tpdu.end(),
+                    "RX SDU. sdu_len={} pdcp_pdu_num={} gtpu_sn={}",
+                    sdu_info.tpdu.length(),
+                    sdu_info.pdcp_pdu_number,
+                    sdu_info.gtpu_sn);
+    lower_dn.on_new_sdu(std::move(sdu_info.tpdu), sdu_info.pdcp_pdu_number);
   }
 
   void deliver_all_consecutive_sdus()
@@ -247,7 +226,7 @@ protected:
     auto& st = *rx_state;
 
     while (st.rx_deliv != st.rx_next && rx_window.has_sn(st.rx_deliv)) {
-      gtpu_rx_sdu_info& sdu_info = rx_window[st.rx_deliv];
+      gtpu_pdcp_rx_tpdu_info& sdu_info = rx_window[st.rx_deliv];
       deliver_sdu(sdu_info);
       rx_window.remove_sn(st.rx_deliv);
 
@@ -276,7 +255,7 @@ protected:
 
     while (st.rx_deliv != st.rx_reord) {
       if (rx_window.has_sn(st.rx_deliv)) {
-        gtpu_rx_sdu_info& sdu_info = rx_window[st.rx_deliv];
+        gtpu_pdcp_rx_tpdu_info& sdu_info = rx_window[st.rx_deliv];
         deliver_sdu(sdu_info);
         rx_window.remove_sn(st.rx_deliv);
       }
@@ -300,19 +279,19 @@ protected:
 
 private:
   psup_packing                              psup_packer;
-  gtpu_tunnel_psup_rx_lower_layer_notifier& lower_dn;
+  gtpu_tunnel_pdcp_rx_lower_layer_notifier& lower_dn;
   bool                                      stopped = false;
 
   /// Rx config
-  gtpu_tunnel_psup_config::gtpu_tunnel_psup_rx_config config;
+  gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_rx_config config;
 
   /// Rx state
   ///
   /// The state is optional and is initialized upon first receptions of a sequence number
-  std::optional<gtpu_rx_state> rx_state;
+  std::optional<gtpu_pdcp_rx_state> rx_state;
 
   /// Rx window
-  sdu_window<gtpu_rx_sdu_info, gtpu_tunnel_logger> rx_window;
+  sdu_window<gtpu_pdcp_rx_tpdu_info, gtpu_tunnel_logger> rx_window;
 
   /// Rx reordering timer
   unique_timer reordering_timer;
@@ -324,7 +303,7 @@ private:
   class reordering_callback
   {
   public:
-    explicit reordering_callback(gtpu_tunnel_psup_rx_impl* parent_) : parent(parent_) {}
+    explicit reordering_callback(gtpu_tunnel_pdcp_rx_impl* parent_) : parent(parent_) {}
     void operator()()
     {
       if (not parent->config.warn_on_drop) {
@@ -340,7 +319,7 @@ private:
     }
 
   private:
-    gtpu_tunnel_psup_rx_impl* parent;
+    gtpu_tunnel_pdcp_rx_impl* parent;
   };
 
   /// \brief Helper function for arithmetic comparisons of state variables or SN values.
@@ -351,7 +330,7 @@ private:
   /// \param sn The sequence number to be rebased from RX_Deliv, as this is the lower-edge of the window.
   /// \param st The state of the RX entity.
   /// \return The rebased value of sn.
-  constexpr uint16_t rx_mod_base(uint16_t sn, const gtpu_rx_state& st) const
+  constexpr uint16_t rx_mod_base(uint16_t sn, const gtpu_pdcp_rx_state& st) const
   {
     return (sn - st.rx_deliv) % GTPU_SN_MOD;
   }
@@ -361,7 +340,7 @@ private:
   /// \param sn The sequence number to be checked.
   /// \param st The state of the RX entity.
   /// \return True if sn is inside the Rx window, false otherwise.
-  constexpr bool inside_rx_window(uint16_t sn, const gtpu_rx_state& st) const
+  constexpr bool inside_rx_window(uint16_t sn, const gtpu_pdcp_rx_state& st) const
   {
     // RX_Deliv <= SN < RX_Deliv + Window_Size
     return rx_mod_base(sn, st) < GTPU_RX_WINDOW_SIZE;
@@ -376,7 +355,7 @@ private:
 
 namespace fmt {
 template <>
-struct formatter<ocudu::gtpu_rx_state> {
+struct formatter<ocudu::gtpu_pdcp_rx_state> {
   template <typename ParseContext>
   auto parse(ParseContext& ctx)
   {
@@ -384,7 +363,7 @@ struct formatter<ocudu::gtpu_rx_state> {
   }
 
   template <typename FormatContext>
-  auto format(const ocudu::gtpu_rx_state& st, FormatContext& ctx) const
+  auto format(const ocudu::gtpu_pdcp_rx_state& st, FormatContext& ctx) const
   {
     return format_to(ctx.out(), "rx_deliv={} rx_reord={} rx_next={} ", st.rx_deliv, st.rx_reord, st.rx_next);
   }
