@@ -658,8 +658,6 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
 
   [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
   [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cmd_buf, metal::shared_queue::queue_kind::front_end);
   [cmd_buf commit];
   dft_stats_commit();
   metal::shared_queue::notify_commit(cmd_buf, metal::shared_queue::queue_kind::front_end);
@@ -713,8 +711,6 @@ bool dft_metal_engine::submit_at(
   [enc dispatchThreadgroups:MTLSizeMake(nof_transforms, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
   [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cmd_buf, metal::shared_queue::queue_kind::front_end);
   [cmd_buf commit];
   dft_stats_commit();
   // Publish the commit on the front-end chain so wait_all_committed() can drain it: the DFT is the

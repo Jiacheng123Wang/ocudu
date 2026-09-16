@@ -894,8 +894,6 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   }
 
   [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
   [cb commit];
   mmse_stats_commit();
   gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
@@ -1021,8 +1019,6 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
     return false;
   }
   [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
   [cb commit];
   mmse_stats_commit();
   mmse_stats_corr_build();
@@ -1103,8 +1099,6 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
         threadsPerThreadgroup:MTLSizeMake(tgx, tgy, 1)];
   }
   [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
   [cb commit];
   mmse_stats_commit();
   gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
@@ -1157,8 +1151,6 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
   [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
   [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
   [cb commit];
   mmse_stats_commit();
   gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
@@ -1407,8 +1399,6 @@ bool mmse_engine::run_async(float*       a,
 
   [enc endEncoding];
   phase.encoded();
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
   [cb commit];
   phase.committed();
   mmse_stats_commit();
@@ -1619,8 +1609,6 @@ bool encode_weights_only(mmse_engine_impl*                  e,
 
   [enc endEncoding];
   phase.encoded();
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
   [cb commit];
   phase.committed();
   mmse_stats_commit();
@@ -1727,8 +1715,6 @@ bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const 
   }
 
   [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
   [cb commit];
   mmse_stats_commit();
   gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);

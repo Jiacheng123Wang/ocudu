@@ -207,8 +207,6 @@ bool shared_burst::commit()
   s.n                              = 0;
 
   [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
   [cb commit];
   burst_stats_commit();
   // The burst is the command buffer whose completion produces the LLRs, i.e. the last one of the
