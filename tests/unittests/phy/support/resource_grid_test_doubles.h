@@ -136,6 +136,9 @@ public:
     return data.get_view({l, port});
   }
 
+  // See interface for documentation.
+  span<cbf16_t> get_buffer() override { return data.get_data(); }
+
   /// \brief Asserts that the mapped resource elements match with a list of expected entries.
   ///
   /// This method asserts that mapped resource elements using the put() methods match a list of expected entries
@@ -287,6 +290,9 @@ public:
   unsigned get_nof_subc() const override { return max_prb * NOF_SUBCARRIERS_PER_RB; }
 
   unsigned get_nof_symbols() const override { return max_symb; }
+
+  // See interface for documentation.
+  span<const cbf16_t> get_buffer() const override { return grid.get_data(); }
 
   bool is_empty(unsigned port) const override
   {

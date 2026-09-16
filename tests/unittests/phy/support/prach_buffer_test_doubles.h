@@ -78,6 +78,16 @@ public:
     return buffer.get_sequence_length();
   }
 
+  // See interface for documentation.
+  span<const cbf16_t> get_buffer() const override { return buffer.get_buffer(); }
+
+  // See interface for documentation.
+  unsigned
+  get_symbol_offset(unsigned i_port, unsigned i_td_occasion, unsigned i_fd_occasion, unsigned i_symbol) const override
+  {
+    return buffer.get_symbol_offset(i_port, i_td_occasion, i_fd_occasion, i_symbol);
+  }
+
   span<cbf16_t> get_symbol(unsigned i_port, unsigned i_td_occasion, unsigned i_fd_occasion, unsigned i_symbol) override
   {
     get_symbol_entries.emplace_back();

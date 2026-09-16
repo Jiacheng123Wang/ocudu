@@ -38,6 +38,14 @@ public:
 
   unsigned get_sequence_length() const override { return buffer.size(); }
 
+  // See interface for documentation.
+  span<const cbf16_t> get_buffer() const override { return buffer; }
+
+  // \brief See interface for documentation.
+  ///
+  /// Every symbol of this dummy shares one sequence, so each of them starts at the beginning.
+  unsigned get_symbol_offset(unsigned, unsigned, unsigned, unsigned) const override { return 0; }
+
   span<cbf16_t> get_symbol(unsigned i_port, unsigned i_td_occasion, unsigned i_fd_occasion, unsigned i_symbol) override
   {
     return buffer;
@@ -138,6 +146,9 @@ public:
     grid_written = true;
     nof_prbs_written += divide_ceil(symbols.size() * stride, NOF_SUBCARRIERS_PER_RB);
   }
+
+  // See interface for documentation.
+  span<cbf16_t> get_buffer() override { return grid_data; }
 
   span<cbf16_t> get_view(unsigned port, unsigned l) override
   {
