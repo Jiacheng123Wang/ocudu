@@ -89,7 +89,8 @@ unsigned puxch_processor_impl::acquire_symbol_buffer()
 
 bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& samples,
                                           const lower_phy_rx_symbol_context&    context,
-                                          unsigned                              buffer_index)
+                                          unsigned                              buffer_index,
+                                          uplink_processor_baseband::rx_buffer_handle owner)
 {
   ocudu_assert(notifier != nullptr, "Notifier has not been connected.");
   ocudu_assert(buffer_index < nof_symbol_buffers, "Invalid symbol buffer {}.", buffer_index);
@@ -158,10 +159,14 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
       span<const ci16_t> td_samples = samples.get_channel_buffer(i_port);
       td_capture::capture(context.slot, symbol_index_subframe, i_port, td_samples);
       demodulator->submit_symbol(current_grid.get().get_writer(), td_samples, i_port, symbol_index_subframe, slot);
-      in_flight[(in_flight_begin + nof_in_flight) % max_in_flight_symbols] = {.context      = context,
-                                                                             .slot         = slot,
-                                                                             .buffer_index = buffer_index,
-                                                                             .last_port = (i_port + 1 == nof_rx_ports)};
+      in_flight[(in_flight_begin + nof_in_flight) % max_in_flight_symbols] = {
+          .context      = context,
+          .slot         = slot,
+          .buffer_index = buffer_index,
+          // One reference per transform: the samples stay alive until the port that reads them has
+          // been finished, whichever port is the last one (see finish_oldest_symbol()).
+          .owner     = owner,
+          .last_port = (i_port + 1 == nof_rx_ports)};
       ++nof_in_flight;
     }
 
@@ -212,6 +217,13 @@ void puxch_processor_impl::finish_oldest_symbol()
     buffer_in_use[entry.buffer_index] = false;
     notifier->on_rx_symbol(current_grid, entry.context, true);
   }
+  // The reference to the samples is dropped with the entry - EXPLICITLY, because the ring slot keeps
+  // the old entry until it is reused, and a handle living that long would starve the radio's pool
+  // (four buffers: the receive loop would block on the fifth). This is the whole lifetime contract of
+  // a receive buffer (see rx_buffer_handle); the guard test in puxch_processor_test is what caught it
+  // being left to the ring's reuse, which no offline gate that stops above the radio can see.
+  // Retire the entry: its samples belong to the radio again from here on.
+  in_flight[in_flight_begin].owner.reset();
   in_flight_begin = (in_flight_begin + 1) % max_in_flight_symbols;
   --nof_in_flight;
 }

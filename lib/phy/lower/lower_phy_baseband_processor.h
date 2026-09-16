@@ -210,7 +210,39 @@ private:
   baseband_gateway_transmitter&                                              transmitter;
   uplink_processor_baseband&                                                 uplink_processor;
   downlink_processor_baseband&                                               downlink_processor;
-  blocking_queue<std::unique_ptr<baseband_gateway_buffer_dynamic_aligned>> rx_buffers;
+  /// \brief The receive buffers, and the rule that returns one to them.
+  ///
+  /// A separate object, held by shared_ptr: a buffer comes back here when the uplink processor drops
+  /// the last reference it kept for an in-flight transform (see
+  /// uplink_processor_baseband::rx_buffer_handle), and that can happen after this processor has been
+  /// destroyed - a handle outliving its pool must not touch it. The deleter holds a WEAK reference for
+  /// exactly that reason: the pool does not keep its buffers alive through it (that would be a cycle),
+  /// and a release that arrives too late frees the buffer instead of deadlocking on a queue that is
+  /// being destroyed - which is what a strong reference here did: the queue's destructor destroyed its
+  /// buffers, whose deleter pushed them back into the same queue.
+  struct rx_buffer_pool {
+    explicit rx_buffer_pool(unsigned nof_buffers) : buffers(nof_buffers) {}
+
+    blocking_queue<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>> buffers;
+
+    struct deleter {
+      std::weak_ptr<rx_buffer_pool> pool;
+
+      void operator()(baseband_gateway_buffer_dynamic_aligned* buffer) const
+      {
+        if (std::shared_ptr<rx_buffer_pool> alive = pool.lock()) {
+          alive->buffers.push_blocking(
+              std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>(buffer, *this));
+          return;
+        }
+        delete buffer;
+      }
+    };
+  };
+
+  /// The receive buffers of this sector (see rx_buffer_pool), sized by the configuration.
+  std::shared_ptr<rx_buffer_pool> rx_pool;
+
   baseband_gateway_timestamp                                                 tx_time_offset;
   baseband_gateway_timestamp                                                 rx_to_tx_max_delay;
   baseband_gateway_timestamp                                                 start_time_sfn0;

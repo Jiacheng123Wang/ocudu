@@ -15,6 +15,7 @@
 #include "ocudu/ran/resource_block.h"
 #include "fmt/ostream.h"
 #include <gtest/gtest.h>
+#include <memory>
 #include <random>
 
 using namespace ocudu;
@@ -226,6 +227,10 @@ TEST_P(LowerPhyUplinkProcessorFixture, Flow)
   const unsigned nof_symbol_buffers = puxch_proc_spy->get_baseband().get_nof_symbol_buffers();
   unsigned       expected_buffer    = 0;
 
+  // The buffer the radio would hand over: one per call, kept alive by the processor until the
+  // transforms reading it are finished (see uplink_processor_baseband::rx_buffer_handle).
+  auto rx_owner = std::make_shared<baseband_gateway_buffer_dynamic_aligned>(nof_rx_ports, 2 * base_symbol_size);
+
   baseband_gateway_timestamp timestamp = 0;
   for (unsigned i_frame = 0, i_slot_frame = 0; i_frame != nof_frames_test; ++i_frame) {
     for (unsigned i_subframe = 0; i_subframe != NOF_SUBFRAMES_PER_FRAME; ++i_subframe) {
@@ -253,7 +258,7 @@ TEST_P(LowerPhyUplinkProcessorFixture, Flow)
           puxch_proc_spy->clear();
 
           // Process baseband.
-          ul_proc_baseband.process(buffer.get_reader(), timestamp);
+          ul_proc_baseband.process(buffer.get_reader(), timestamp, rx_owner);
 
           // Prepare expected PRACH baseband entry context.
           prach_processor_baseband::symbol_context prach_context;
@@ -286,6 +291,10 @@ TEST_P(LowerPhyUplinkProcessorFixture, Flow)
           ASSERT_EQ(puxch_proc_entries.size(), 1);
           auto& puxch_proc_entry = puxch_proc_entries.back();
           ASSERT_EQ(puxch_proc_entry.context, puxch_context);
+          // The handle the caller passed must reach the pipeline (it is what keeps the samples alive
+          // there): forwarding it is one line, and dropping it is invisible until the radio reuses a
+          // buffer under a running transform.
+          ASSERT_EQ(puxch_proc_entry.owner, rx_owner) << "the symbol buffer handle did not reach the PUxCH";
           ASSERT_EQ(puxch_proc_entry.buffer_index, expected_buffer)
               << "symbol " << i_symbol << " of slot " << i_slot_frame
               << " was not assembled in the symbol buffer that was acquired";
@@ -358,7 +367,7 @@ TEST_P(LowerPhyUplinkProcessorFixture, MetricsAreMeasuredOnlyForAConsumer)
           return to_ci16(cf_t(dist_sample(rgen) * INT16_MAX, dist_sample(rgen) * INT16_MAX));
         });
       }
-      processor.get_baseband().process(buffer.get_reader(), timestamp);
+      processor.get_baseband().process(buffer.get_reader(), timestamp, nullptr);
       timestamp += cp_size + base_symbol_size;
     }
   };

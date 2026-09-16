@@ -285,8 +285,14 @@ uplink_processor_baseband& lower_phy_uplink_processor_impl::get_baseband()
 }
 
 void lower_phy_uplink_processor_impl::process(const baseband_gateway_buffer_reader& samples,
-                                              baseband_gateway_timestamp            timestamp)
+                                              baseband_gateway_timestamp            timestamp,
+                                              rx_buffer_handle                      owner)
 {
+  // The handle is kept for the whole call: every symbol assembled and submitted from these samples
+  // hands it to the PUxCH, which holds a reference per in-flight transform (see the interface). The
+  // member is cleared on the way out so that the last symbol's reference is the only one left - the
+  // buffer returns to the radio's pool as soon as that transform is finished.
+  current_owner = std::move(owner);
   switch (state) {
     case fsm_states::alignment:
       process_alignment(samples, timestamp);
@@ -295,6 +301,7 @@ void lower_phy_uplink_processor_impl::process(const baseband_gateway_buffer_read
       process_collecting(samples, timestamp);
       break;
   }
+  current_owner.reset();
 }
 
 void lower_phy_uplink_processor_impl::process_alignment(const baseband_gateway_buffer_reader& samples,
@@ -455,8 +462,8 @@ void lower_phy_uplink_processor_impl::process_collecting(const baseband_gateway_
   // Process symbol by PUxCH processor.
   lower_phy_rx_symbol_context puxch_context = {
       .slot = current_slot, .sector = sector_id, .nof_symbols = current_symbol_index};
-  bool processed =
-      puxch_proc->get_baseband().process_symbol(symbol_buffer.get_reader(), puxch_context, current_symbol_buffer);
+  bool processed = puxch_proc->get_baseband().process_symbol(
+      symbol_buffer.get_reader(), puxch_context, current_symbol_buffer, current_owner);
 
   // Baseband metrics. Three passes over every sample of the symbol (average power, peak power and
   // the clipping count), for values that only the application's RU metrics collector reads: with the

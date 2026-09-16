@@ -243,7 +243,7 @@ TEST_P(LowerPhyUplinkProcessorFixture, FlowNoRequest)
 
           // Process baseband.
           unsigned buffer_index = puxch_proc->get_baseband().acquire_symbol_buffer();
-          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index);
+          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index, nullptr);
 
           // Assert OFDM demodulator call.
           auto& ofdm_demod_entries = ofdm_demod_spy->get_demodulate_entries();
@@ -314,7 +314,7 @@ TEST_P(LowerPhyUplinkProcessorFixture, FlowFloodRequest)
 
           // Process baseband.
           unsigned buffer_index = puxch_proc->get_baseband().acquire_symbol_buffer();
-          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index);
+          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index, nullptr);
 
           // Assert OFDM demodulator call.
           const auto& ofdm_demod_entries = ofdm_demod_spy->get_demodulate_entries();
@@ -398,7 +398,7 @@ TEST_P(LowerPhyUplinkProcessorFixture, FlowPipelinedNotificationPerSymbol)
           puxch_context.nof_symbols = i_symbol;
 
           unsigned buffer_index = puxch_proc->get_baseband().acquire_symbol_buffer();
-          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index);
+          puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index, nullptr);
         }
 
         // Exactly one notification per OFDM symbol of the slot, in order (never one per port).
@@ -494,10 +494,81 @@ TEST_P(LowerPhyUplinkProcessorFixture, SymbolBuffersAreNotReusedWhileRead)
           << " still reads it";
       symbol_of_buffer[buffer_index] = static_cast<int>(i_symbol);
 
-      puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index);
+      puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index, nullptr);
 
       release_finished_buffers();
     }
+  }
+}
+
+/// \brief The samples of a symbol stay alive until the transform reading them is finished.
+///
+/// The radio hands a receive buffer over and waits for it to come back (it keeps receiving into the
+/// buffers it has, and a pool of four is what the SDR configuration gives it). The pipeline therefore
+/// holds a reference per in-flight transform - the contract that lets the transform read the radio's
+/// samples where they are instead of copying them per symbol (see rx_buffer_handle). The check is
+/// two-sided on purpose: a pipeline that keeps NO reference would let the radio overwrite the samples
+/// under a running transform, and one that keeps the reference after finishing would starve the pool.
+TEST_P(LowerPhyUplinkProcessorFixture, SymbolSamplesAreKeptAliveUntilTheirTransformIsFinished)
+{
+  const unsigned     nof_rx_ports = std::get<0>(GetParam());
+  sampling_rate      srate        = std::get<1>(GetParam());
+  subcarrier_spacing scs          = std::get<2>(GetParam());
+  cyclic_prefix      cp           = std::get<3>(GetParam());
+
+  const unsigned base_symbol_size     = srate.get_dft_size(scs);
+  const unsigned nof_symbols_per_slot = get_nsymb_per_slot(cp);
+
+  // Depth two keeps a symbol in flight across the next submission, which is when a buffer released
+  // too early would be reused; deeper pipelines behave the same way, only later.
+  ofdm_demod_spy->pipeline_depth = 2;
+
+  puxch_processor_notifier_spy puxch_proc_notifier_spy;
+  puxch_proc->connect(puxch_proc_notifier_spy);
+
+  resource_grid_context rg_context;
+  rg_context.slot   = slot_point(to_numerology_value(scs), 0);
+  rg_context.sector = dist_sector_id(rgen);
+  puxch_proc->get_request_handler().handle_request(shared_rg_spy.get_grid(), rg_context);
+  ofdm_demod_spy->clear_pipeline();
+
+  std::vector<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>> owners;
+  unsigned                                                              nof_kept_alive = 0;
+  for (unsigned i_symbol = 0, i_symbol_subframe = 0; i_symbol != nof_symbols_per_slot;
+       ++i_symbol, ++i_symbol_subframe) {
+    const unsigned cp_size = cp.get_length(i_symbol_subframe, scs).to_samples(srate.to_Hz());
+
+    // One receive buffer per symbol, as the radio delivers them.
+    auto owner = std::make_shared<baseband_gateway_buffer_dynamic_aligned>(nof_rx_ports, 2 * base_symbol_size);
+    owner->resize(cp_size + base_symbol_size);
+    for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
+      span<ci16_t> port_buffer = (*owner)[i_port];
+      std::generate(port_buffer.begin(), port_buffer.end(), []() {
+        return to_ci16(cf_t(dist_sample(rgen) * INT16_MAX, dist_sample(rgen) * INT16_MAX));
+      });
+    }
+
+    lower_phy_rx_symbol_context puxch_context;
+    puxch_context.slot        = rg_context.slot;
+    puxch_context.sector      = rg_context.sector;
+    puxch_context.nof_symbols = i_symbol;
+
+    unsigned buffer_index = puxch_proc->get_baseband().acquire_symbol_buffer();
+    puxch_proc->get_baseband().process_symbol(owner->get_reader(), puxch_context, buffer_index, owner);
+
+    if (owner.use_count() > 1) {
+      ++nof_kept_alive;
+    }
+    owners.push_back(std::move(owner));
+  }
+
+  // The pipeline held the samples of every symbol it had not finished yet...
+  ASSERT_GT(nof_kept_alive, 0) << "the pipeline kept no reference at all: nothing was protected";
+  // ... and dropped all of them when the slot's last symbol drained it: the radio owns the buffers
+  // again, which is what keeps its pool from starving.
+  for (unsigned i_symbol = 0; i_symbol != owners.size(); ++i_symbol) {
+    ASSERT_EQ(owners[i_symbol].use_count(), 1)
+        << "the samples of finished symbol " << i_symbol << " are still held by the pipeline";
   }
 }
 
@@ -574,7 +645,7 @@ TEST_P(LowerPhyUplinkProcessorFixture, LateRequest)
 
         // Process baseband.
         unsigned buffer_index = puxch_proc->get_baseband().acquire_symbol_buffer();
-        puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index);
+        puxch_proc->get_baseband().process_symbol(buffer.get_reader(), puxch_context, buffer_index, nullptr);
 
         // Assert OFDM demodulator call only for initial and next slot.
         const auto& ofdm_demod_entries = ofdm_demod_spy->get_demodulate_entries();

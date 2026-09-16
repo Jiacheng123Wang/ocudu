@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "ocudu/phy/lower/processors/uplink/uplink_processor_baseband.h"
+
 namespace ocudu {
 
 class baseband_gateway_buffer_reader;
@@ -38,10 +40,14 @@ public:
   /// \param[in] context      OFDM Symbol context.
   /// \param[in] buffer_index Symbol buffer the samples were assembled in, as returned by
   ///                         acquire_symbol_buffer().
+  /// \param[in] owner        Handle keeping the samples alive until the transforms submitted here are
+  ///                         finished (see uplink_processor_baseband::rx_buffer_handle), or null when
+  ///                         the caller owns the samples for long enough.
   /// \return \c true if the signal is processed, \c false otherwise.
   virtual bool process_symbol(const baseband_gateway_buffer_reader& samples,
                               const lower_phy_rx_symbol_context&    context,
-                              unsigned                              buffer_index) = 0;
+                              unsigned                              buffer_index,
+                              uplink_processor_baseband::rx_buffer_handle owner) = 0;
 };
 
 } // namespace ocudu

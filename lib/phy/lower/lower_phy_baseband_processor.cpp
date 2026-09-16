@@ -30,7 +30,7 @@ lower_phy_baseband_processor::lower_phy_baseband_processor(const lower_phy_baseb
   transmitter(deps.transmitter),
   uplink_processor(deps.ul_bb_proc),
   downlink_processor(deps.dl_bb_proc),
-  rx_buffers(config.nof_rx_buffers),
+  rx_pool(std::make_shared<rx_buffer_pool>(config.nof_rx_buffers)),
   tx_time_offset(config.tx_time_offset),
   rx_to_tx_max_delay(config.rx_to_tx_max_delay),
   tx_state(config.stop_nof_slots),
@@ -49,9 +49,16 @@ lower_phy_baseband_processor::lower_phy_baseband_processor(const lower_phy_baseb
   // Create queue of receive buffers. Page-aligned storage: the GPU zero-copy FFT path
   // wraps these buffers with newBufferWithBytesNoCopy (MTLResourceStorageModeShared) and
   // reads the I/Q samples without any host-side copy.
-  while (!rx_buffers.full()) {
-    rx_buffers.push_blocking(
-        std::make_unique<baseband_gateway_buffer_dynamic_aligned>(config.nof_rx_ports, rx_buffer_size));
+  // The pool is created with room for exactly the configured number of buffers, and every handle it
+  // hands out carries the rule that returns it here (see rx_buffer_pool).
+  {
+    auto& buffers = rx_pool->buffers;
+    std::weak_ptr<rx_buffer_pool> pool = rx_pool;
+    while (!buffers.full()) {
+      buffers.push_blocking(std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>(
+          new baseband_gateway_buffer_dynamic_aligned(config.nof_rx_ports, rx_buffer_size),
+          rx_buffer_pool::deleter{pool}));
+    }
   }
 }
 
@@ -233,7 +240,7 @@ void lower_phy_baseband_processor::ul_process()
   }
 
   // Get receive buffer.
-  std::unique_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer = rx_buffers.pop_blocking();
+  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer = rx_pool->buffers.pop_blocking();
 
   // Receive baseband.
   trace_point tp = ru_tracer.now();
@@ -272,11 +279,13 @@ void lower_phy_baseband_processor::ul_process()
   report_fatal_error_if_not(uplink_executor.defer([this, ul_buffer = std::move(rx_buffer), rx_metadata]() mutable {
     trace_point ul_tp = ru_tracer.now();
 
-    // Process UL.
-    uplink_processor.process(ul_buffer->get_reader(), apply_timestamp_sfn0_ref(rx_metadata.ts));
-
-    // Return buffer to receive.
-    rx_buffers.push_blocking(std::move(ul_buffer));
+    // Process UL. The handle travels with the samples: the processor keeps the buffer alive for as
+    // long as a transform reads it, and this is the only reference left when it does not (see
+    // uplink_processor_baseband::rx_buffer_handle).
+    // The handle travels with the samples: the processor keeps the buffer alive for as long as a
+    // transform reads it, and it comes back to this pool when the last of those references is dropped
+    // (see return_receive_buffer_to_pool). Nothing here returns it - that is the point.
+    uplink_processor.process(ul_buffer->get_reader(), apply_timestamp_sfn0_ref(rx_metadata.ts), std::move(ul_buffer));
 
     ru_tracer << trace_event("uplink_baseband", ul_tp);
   }),

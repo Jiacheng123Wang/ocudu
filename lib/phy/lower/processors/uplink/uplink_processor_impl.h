@@ -85,7 +85,8 @@ private:
   };
 
   // See interface for documentation.
-  void process(const baseband_gateway_buffer_reader& samples, baseband_gateway_timestamp timestamp) override;
+  void
+  process(const baseband_gateway_buffer_reader& samples, baseband_gateway_timestamp timestamp, rx_buffer_handle owner) override;
 
   /// \brief Processes samples in alignment state.
   /// \param[in] samples   Input baseband samples.
@@ -134,6 +135,10 @@ private:
   unsigned current_symbol_size;
   /// Current symbol timestamp.
   baseband_gateway_timestamp current_symbol_timestamp;
+  /// Handle of the receive buffer the samples being processed came in (see the interface): every
+  /// symbol submitted from this call hands it to the PUxCH, which keeps it until the transform
+  /// reading that symbol has been finished. Null when the caller owns the samples for long enough.
+  rx_buffer_handle current_owner;
   /// Current slot point.
   slot_point current_slot;
   /// List of the symbol sizes in number samples for each symbol within the subframe.

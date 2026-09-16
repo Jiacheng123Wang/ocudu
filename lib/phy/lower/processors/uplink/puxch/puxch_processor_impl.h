@@ -73,7 +73,8 @@ private:
   // See interface for documentation.
   bool process_symbol(const baseband_gateway_buffer_reader& samples,
                       const lower_phy_rx_symbol_context&    context,
-                      unsigned                              buffer_index) override;
+                      unsigned                              buffer_index,
+                      uplink_processor_baseband::rx_buffer_handle owner) override;
 
   // See interface for documentation.
   void handle_request(const shared_resource_grid& grid, const resource_grid_context& context) override;
@@ -88,6 +89,10 @@ private:
     /// Symbol buffer the samples of this symbol were assembled in: it is released once the last port
     /// of the symbol is finished, as no transform reads it after that (see acquire_symbol_buffer()).
     unsigned buffer_index = 0;
+    /// Handle of the receive buffer the samples came from, held until this transform is finished (see
+    /// uplink_processor_baseband::rx_buffer_handle). Dropping it returns the buffer to the radio's
+    /// pool, which is what lets the radio reuse it the moment nothing reads it any more.
+    uplink_processor_baseband::rx_buffer_handle owner;
     /// True for the last receive port of an OFDM symbol: the upper PHY is notified once every port
     /// of the symbol has been written into the grid. Notifying on the first port instead would
     /// report a symbol whose remaining ports are still missing from the grid, which the PUCCH -

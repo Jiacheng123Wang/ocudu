@@ -93,6 +93,12 @@ public:
         break;
     }
 
+    // The deepest pipeline the OFDM demodulator can run, and the longest OFDM symbol of the slot:
+    // both bound how many receive buffers the uplink processor can hold at once (see below).
+    static constexpr unsigned max_pipeline_depth = 8;
+    const unsigned            max_symbol_size =
+        config.srate.get_dft_size(config.scs) + config.cp.get_length(0, config.scs).to_samples(config.srate.to_Hz());
+
     // Get transmit time offset between the UL and the DL.
     int tx_time_offset = get_tx_time_offset(config.time_alignment_calibration, config.ta_offset, config.srate);
 
@@ -138,7 +144,27 @@ public:
         .tx_time_offset         = static_cast<baseband_gateway_timestamp>(tx_time_offset),
         .rx_to_tx_max_delay     = config.srate.to_kHz() + proc_bb_adaptor_config.tx_time_offset,
         .rx_buffer_size         = rx_buffer_size,
-        .nof_rx_buffers         = std::max(4U, rx_to_tx_max_delay / rx_buffer_size),
+        // Enough buffers for the pipeline, not only for the radio's own latency. The uplink processor
+        // keeps a receive buffer alive until the transforms reading its samples have been finished
+        // (see uplink_processor_baseband::rx_buffer_handle), so the radio must never run out of buffers
+        // while those transforms wait for MORE samples to arrive - that is a deadlock, not a stall:
+        // the transforms finish when the pipeline fills or a slot ends, and both need the radio to
+        // receive again. This sizes the pool for the deepest pipeline the demodulator can have
+        // (ofdm_symbol_demodulator::max_pipeline_depth symbols, one per receive port) plus the buffer
+        // being received, plus one spare.
+        // Enough buffers for the PIPELINE, not only for the radio's own latency: the uplink processor
+        // keeps a receive buffer alive until the transforms reading its samples have been finished
+        // (see uplink_processor_baseband::rx_buffer_handle), so the pool is what the receive loop
+        // blocks on when the uplink side is behind - the backpressure the radio needs, and a deadlock
+        // the moment the pool cannot cover what the pipeline holds: a transform finishes when the
+        // pipeline fills or a slot ends, and both need the radio to receive again. The floor of eight
+        // (the deepest pipeline: ofdm_symbol_demodulator::max_pipeline_depth symbols) also covers a
+        // single-threaded executor that runs the receive loop and the uplink processing on one thread
+        // - the unit tests - where a blocked receive task would otherwise starve the very tasks that
+        // release it (measured: four buffers deadlocked, nine passed).
+        .nof_rx_buffers         = std::max({8U,
+                                            rx_to_tx_max_delay / rx_buffer_size,
+                                            (max_pipeline_depth * max_symbol_size) / rx_buffer_size + 8U}),
         .system_time_throttling = config.system_time_throttling,
         .stop_nof_slots         = 2 * config.max_processing_delay_slots};
 

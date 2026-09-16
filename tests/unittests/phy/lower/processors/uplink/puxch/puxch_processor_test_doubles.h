@@ -25,6 +25,8 @@ public:
     baseband_gateway_buffer_read_only samples;
     lower_phy_rx_symbol_context       context;
     unsigned                          buffer_index = 0;
+    /// Handle the caller passed with the samples (see uplink_processor_baseband::rx_buffer_handle).
+    uplink_processor_baseband::rx_buffer_handle owner;
   };
 
   unsigned get_nof_symbol_buffers() const override { return nof_symbol_buffers; }
@@ -38,13 +40,15 @@ public:
 
   bool process_symbol(const baseband_gateway_buffer_reader& samples,
                       const lower_phy_rx_symbol_context&    context,
-                      unsigned                              buffer_index) override
+                      unsigned                              buffer_index,
+                      uplink_processor_baseband::rx_buffer_handle owner) override
   {
     entries.emplace_back();
-    entry_t& entry      = entries.back();
-    entry.samples       = samples;
-    entry.context       = context;
-    entry.buffer_index  = buffer_index;
+    entry_t& entry     = entries.back();
+    entry.samples      = samples;
+    entry.context      = context;
+    entry.buffer_index = buffer_index;
+    entry.owner        = std::move(owner);
     return true;
   }
 

@@ -51,14 +51,19 @@ public:
   struct entry_t {
     baseband_gateway_buffer_read_only buffer;
     baseband_gateway_timestamp        timestamp;
+    /// Handle the caller passed with the samples (see uplink_processor_baseband::rx_buffer_handle).
+    rx_buffer_handle owner;
   };
 
-  void process(const baseband_gateway_buffer_reader& buffer, baseband_gateway_timestamp timestamp) override
+  void process(const baseband_gateway_buffer_reader& buffer,
+               baseband_gateway_timestamp            timestamp,
+               rx_buffer_handle                      owner) override
   {
     entries.emplace_back();
     entry_t& entry  = entries.back();
     entry.timestamp = timestamp;
     entry.buffer    = buffer;
+    entry.owner     = std::move(owner);
   }
 
   const std::vector<entry_t>& get_entries() const { return entries; }
