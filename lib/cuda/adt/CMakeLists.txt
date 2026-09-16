@@ -8,7 +8,8 @@ set(SOURCES
         cuda_error.cpp
         cuda_event.cpp
         cuda_stream.cpp
-        device_vector.cpp)
+        device_vector.cpp
+        managed_vector.cpp)
 
 add_library(ocudu_cuda_adt ${SOURCES})
 

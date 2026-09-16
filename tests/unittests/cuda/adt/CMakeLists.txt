@@ -4,7 +4,7 @@
 
 
 add_executable(cuda_adt_test cuda_adt_test.cpp)
-target_link_libraries(cuda_adt_test ocudu_cuda_adt ocudulog gtest gtest_main)
+target_link_libraries(cuda_adt_test ocudu_cuda_adt ocudu_cuda_support ocudulog gtest gtest_main)
 # The CUDA runtime rejects allocations with cudaErrorDevicesUnavailable while several exclusive
 # device contexts are alive, so the tests that open one are serialised against each other.
 add_test(cuda_adt_test cuda_adt_test)

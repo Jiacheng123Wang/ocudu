@@ -6,6 +6,8 @@
 #include "ocudu/cuda/adt/cuda_event.h"
 #include "ocudu/cuda/adt/cuda_stream.h"
 #include "ocudu/cuda/adt/device_vector.h"
+#include "ocudu/cuda/adt/managed_vector.h"
+#include "ocudu/cuda/support/cuda_device.h"
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 #include <numeric>
@@ -180,4 +182,108 @@ TEST_F(cuda_adt_test, copy_larger_than_the_destination_reports_an_error)
 
   cuda_result written = copy_to_device(block.value(), span<const int>(source));
   ASSERT_FALSE(written.has_value());
+}
+
+TEST_F(cuda_adt_test, managed_vector_allocates_the_requested_size)
+{
+  cuda_expected<managed_vector<float>> block = managed_vector<float>::create(128);
+  ASSERT_TRUE(block.has_value());
+  EXPECT_EQ(block.value().size(), 128);
+  EXPECT_EQ(block.value().size_bytes(), 128 * sizeof(float));
+  EXPECT_NE(block.value().data(), nullptr);
+  EXPECT_FALSE(block.value().empty());
+}
+
+TEST_F(cuda_adt_test, empty_managed_vector_is_valid)
+{
+  cuda_expected<managed_vector<float>> block = managed_vector<float>::create(0);
+  ASSERT_TRUE(block.has_value());
+  EXPECT_TRUE(block.value().empty());
+  EXPECT_EQ(block.value().data(), nullptr);
+}
+
+TEST_F(cuda_adt_test, moved_from_managed_vector_releases_ownership)
+{
+  cuda_expected<managed_vector<int>> block = managed_vector<int>::create(16);
+  ASSERT_TRUE(block.has_value());
+
+  managed_vector<int> moved(std::move(block.value()));
+  EXPECT_EQ(moved.size(), 16);
+  EXPECT_NE(moved.data(), nullptr);
+  EXPECT_TRUE(block.value().empty());
+  EXPECT_EQ(block.value().data(), nullptr);
+}
+
+TEST_F(cuda_adt_test, managed_memory_is_addressable_from_the_host)
+{
+  cuda_expected<managed_vector<int>> block = managed_vector<int>::create(64);
+  ASSERT_TRUE(block.has_value());
+
+  // The point of a managed allocation: the host writes through the same pointer the device reads.
+  std::iota(block.value().data(), block.value().data() + block.value().size(), 0);
+  EXPECT_EQ(block.value().data()[0], 0);
+  EXPECT_EQ(block.value().data()[63], 63);
+}
+
+TEST_F(cuda_adt_test, managed_memory_survives_a_prefetch_round_trip)
+{
+  cuda_expected<cuda_stream> stream = cuda_stream::create();
+  ASSERT_TRUE(stream.has_value());
+  cuda_expected<managed_vector<int>> block = managed_vector<int>::create(256);
+  ASSERT_TRUE(block.has_value());
+
+  std::iota(block.value().data(), block.value().data() + block.value().size(), 1);
+
+  ASSERT_TRUE(block.value().prefetch(memory_location::device, 0, stream.value()).has_value());
+  ASSERT_TRUE(block.value().prefetch(memory_location::host, 0, stream.value()).has_value());
+  ASSERT_TRUE(stream.value().synchronize().has_value());
+
+  EXPECT_EQ(block.value().data()[0], 1);
+  EXPECT_EQ(block.value().data()[255], 256);
+}
+
+TEST_F(cuda_adt_test, managed_memory_advice_is_accepted)
+{
+  cuda_expected<managed_vector<int>> block = managed_vector<int>::create(64);
+  ASSERT_TRUE(block.has_value());
+
+  EXPECT_TRUE(block.value().advise_preferred_location(memory_location::device, 0).has_value());
+  EXPECT_TRUE(block.value().advise_accessed_by(memory_location::host, 0).has_value());
+}
+
+TEST_F(cuda_adt_test, prefetching_an_empty_block_succeeds)
+{
+  cuda_expected<cuda_stream> stream = cuda_stream::create();
+  ASSERT_TRUE(stream.has_value());
+  managed_vector<int> block;
+
+  EXPECT_TRUE(block.prefetch(memory_location::device, 0, stream.value()).has_value());
+  EXPECT_TRUE(block.advise_accessed_by(memory_location::device, 0).has_value());
+}
+
+TEST_F(cuda_adt_test, device_properties_are_queried)
+{
+  cuda_device_properties properties = get_cuda_device_properties(0);
+
+  // The values depend on the part the tests run on, so only their consistency is checked: an
+  // integrated device shares its memory with the host and therefore reads managed pages directly.
+  if (properties.integrated) {
+    EXPECT_TRUE(properties.concurrent_managed_access);
+  }
+}
+
+TEST_F(cuda_adt_test, unqueried_properties_are_all_false)
+{
+  // The conservative default matters: every property answers "assume nothing", so a backend that
+  // never queried the device migrates the pages explicitly rather than reading them in place.
+  //
+  // The failed-query path is not exercised with an out-of-range device on purpose. The CUDA API
+  // call it needs fails by design, and compute-sanitizer counts each such failure as an error,
+  // which would hide real findings behind expected ones.
+  cuda_device_properties properties;
+
+  EXPECT_FALSE(properties.direct_managed_access_from_host);
+  EXPECT_FALSE(properties.concurrent_managed_access);
+  EXPECT_FALSE(properties.pageable_memory_uses_host_page_tables);
+  EXPECT_FALSE(properties.integrated);
 }
