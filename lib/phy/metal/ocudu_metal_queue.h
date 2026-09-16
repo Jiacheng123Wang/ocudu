@@ -102,16 +102,6 @@ public:
   /// for and the [metal_stats] probe can account for the shared dispatches.
   static void notify_commit(id<MTLCommandBuffer> command_buffer, queue_kind kind);
 
-  /// \brief Reports a wrap request whose slice offset does not satisfy the alignment its binding needs.
-  ///
-  /// The wrapped slice travels to the kernel as an offset into the mapped allocation, and a Metal
-  /// binding requires that offset to be a multiple of the argument's element size (a `device const
-  /// float2*` wants 8 bytes, a `float` 4, a `char` 1). Page alignment of the *base* is guaranteed by
-  /// the allocation (see baseband_gateway_buffer_dynamic_aligned), the element alignment of a *slice*
-  /// is not: an engine that cannot satisfy it must stage a copy instead of binding, and say so here -
-  /// this counter is part of the "zero-copy wraps" contract check.
-  static void notify_wrap_misaligned();
-
   /// \brief Waits for every command buffer committed through \p kind's queue so far.
   ///
   /// \note Command buffers of one queue complete in submission order, so waiting for the most

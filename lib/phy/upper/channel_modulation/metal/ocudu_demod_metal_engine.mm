@@ -264,7 +264,7 @@ struct demod_engine_impl {
   std::unordered_map<const void*, std::pair<id<MTLBuffer>, size_t>> buffer_cache;
 };
 
-wrapped_buffer wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t span, size_t required_alignment = 1)
+wrapped_buffer wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t span)
 {
   // Every wrap of this engine goes through here, so the "length is the buffer, not the run" rule is
   // applied once, at the one place a caller cannot forget it (see wrap_length).
@@ -274,23 +274,6 @@ wrapped_buffer wrap_buffer(demod_engine_impl* engine, const void* ptr, size_t sp
   // shared_queue::wrap_no_copy).
   size_t        offset = 0;
   id<MTLBuffer> buf    = metal::shared_queue::wrap_no_copy(metal::shared_queue::device(), ptr, length, &offset);
-  if ((buf != nil) && (required_alignment > 1) && ((offset % required_alignment) != 0)) {
-    // The slice is inside a page-aligned allocation (so zero-copy is possible in principle) but its byte
-    // offset is not a multiple of the element size of the kernel argument it is bound to: binding it would
-    // be an alignment violation the CPU path never has - the GPU's own requirement, checked here instead of
-    // assumed. It is counted (the "zero-copy wraps" contract check reads the counter) and staged instead.
-    metal::shared_queue::notify_wrap_misaligned();
-    static std::atomic<bool> misaligned_logged{false};
-    bool                     expected = false;
-    if (misaligned_logged.compare_exchange_strong(expected, true)) {
-      ocudulog::fetch_basic_logger("PHY").warning(
-          "Metal demapper: a slice starts at offset {} of its allocation, which is not a multiple of {} bytes; "
-          "staging a copy instead of binding it",
-          offset,
-          required_alignment);
-    }
-    buf = nil;
-  }
   if (buf != nil) {
     return wrapped_buffer{buf, static_cast<NSUInteger>(offset)};
   }
@@ -410,9 +393,9 @@ id<MTLComputePipelineState> demod_flush_hook(void* context, id<MTLComputeCommand
                                 static_cast<uint32_t>(llr_stride)};
 
     engine->last_call_no_copy = true;
-    wrapped_buffer b_sym = wrap_buffer(engine, pending[first].symbols, symbols_span_bytes(params), 8 /* device const float2* symbols */);
-    wrapped_buffer b_nv  = wrap_buffer(engine, pending[first].noise_var, noise_span_bytes(params), alignof(float) /* device const float* noise_var */);
-    wrapped_buffer b_llrs = wrap_buffer(engine, pending[first].llrs, llr_span_bytes(params), alignof(char) /* device char* llrs_base */);
+    wrapped_buffer b_sym = wrap_buffer(engine, pending[first].symbols, symbols_span_bytes(params));
+    wrapped_buffer b_nv  = wrap_buffer(engine, pending[first].noise_var, noise_span_bytes(params));
+    wrapped_buffer b_llrs = wrap_buffer(engine, pending[first].llrs, llr_span_bytes(params));
     if ((b_sym.buffer == nil) || (b_nv.buffer == nil) || (b_llrs.buffer == nil)) {
       ocudulog::fetch_basic_logger("PHY").error("Metal demapper: no-copy wrap failed for a batched group");
       pending.clear();
@@ -529,9 +512,9 @@ bool demod_metal_engine::enqueue(const void* symbols,
   // wrap_buffer() clears this flag when a no-copy wrap falls back to a copy. Reset it before the
   // wraps (not after, where it would overwrite the outcome) so the diagnostic reports the truth.
   engine->last_call_no_copy = true;
-  wrapped_buffer b_sym = wrap_buffer(engine, symbols, symbols_span_bytes(params), 8 /* device const float2* symbols */);
-  wrapped_buffer b_nv = wrap_buffer(engine, noise_var, noise_span_bytes(params), alignof(float) /* device const float* noise_var */);
-  wrapped_buffer b_llrs = wrap_buffer(engine, llrs, llr_span_bytes(params), alignof(char) /* device char* llrs_base */);
+  wrapped_buffer b_sym = wrap_buffer(engine, symbols, symbols_span_bytes(params));
+  wrapped_buffer b_nv = wrap_buffer(engine, noise_var, noise_span_bytes(params));
+  wrapped_buffer b_llrs = wrap_buffer(engine, llrs, llr_span_bytes(params));
   if (b_sym.buffer == nil || b_nv.buffer == nil || b_llrs.buffer == nil) {
     return false;
   }
@@ -565,9 +548,9 @@ bool demod_metal_engine::enqueue_burst(const void* symbols,
   const demod_params_t params = packed_params(nof_symbols, mod);
 
   engine->last_call_no_copy = true;
-  wrapped_buffer b_sym = wrap_buffer(engine, symbols, symbols_span_bytes(params), 8 /* device const float2* symbols */);
-  wrapped_buffer b_nv = wrap_buffer(engine, noise_var, noise_span_bytes(params), alignof(float) /* device const float* noise_var */);
-  wrapped_buffer b_llrs = wrap_buffer(engine, llrs, llr_span_bytes(params), alignof(char) /* device char* llrs_base */);
+  wrapped_buffer b_sym = wrap_buffer(engine, symbols, symbols_span_bytes(params));
+  wrapped_buffer b_nv = wrap_buffer(engine, noise_var, noise_span_bytes(params));
+  wrapped_buffer b_llrs = wrap_buffer(engine, llrs, llr_span_bytes(params));
   if (b_sym.buffer == nil || b_nv.buffer == nil || b_llrs.buffer == nil) {
     return false;
   }

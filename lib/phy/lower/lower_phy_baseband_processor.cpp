@@ -8,7 +8,6 @@
 #include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_reader_view.h"
 #include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_writer_view.h"
 #include "ocudu/instrumentation/traces/ru_traces.h"
-#include "ocudu/phy/phy_pipeline_contract.h"
 #if defined(OCUDU_FLOW_PROBES)
 #include "ocudu/ocudulog/ocudulog.h" // [zmq-probe] temporary: fetch_basic_logger
 #endif
@@ -18,61 +17,6 @@
 #include <ctime>
 
 using namespace ocudu;
-
-#if defined(OCUDU_METAL_STATS)
-/// \brief Continuity of the sample stream the radio delivers (see ul_process).
-///
-/// Consecutive receive blocks must be adjacent in time: the second block starts exactly where the first
-/// ended. A gap means the radio lost (or repeated) samples, and it is the one measurement that says
-/// whether the receive side may ask for the block sizes it asks for at all - the size of a request is
-/// an implementation detail of the transport, the continuity of what comes back is not. It is also what
-/// a slice-based uplink depends on: a gap makes the timestamps disagree, the FSM re-aligns, and the
-/// symbols that straddle it are assembled (see the "host sample assembly" check).
-struct ul_rx_stats {
-  std::atomic<uint64_t> blocks{0};
-  std::atomic<uint64_t> samples{0};
-  std::atomic<uint64_t> gaps{0};
-  std::atomic<uint64_t> gap_samples{0};
-};
-
-ul_rx_stats& ul_rx_counters()
-{
-  static ul_rx_stats s;
-  return s;
-}
-
-void ul_rx_stats_report()
-{
-  const ul_rx_stats& c = ul_rx_counters();
-  if (c.blocks.load(std::memory_order_relaxed) == 0) {
-    return;
-  }
-  std::fprintf(stderr,
-               "[ul_rx] blocks=%llu samples=%llu gaps=%llu gap_samples=%llu\n",
-               static_cast<unsigned long long>(c.blocks.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(c.samples.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(c.gaps.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(c.gap_samples.load(std::memory_order_relaxed)));
-}
-
-const bool ul_rx_stats_registered = []() {
-  std::atexit(ul_rx_stats_report);
-  register_phy_pipeline_check(
-      {"radio sample continuity", []() -> std::optional<bool> {
-         const ul_rx_stats& c = ul_rx_counters();
-         std::fprintf(stderr,
-                      "%llu gaps over %llu blocks (%llu samples missing or repeated)",
-                      static_cast<unsigned long long>(c.gaps.load(std::memory_order_relaxed)),
-                      static_cast<unsigned long long>(c.blocks.load(std::memory_order_relaxed)),
-                      static_cast<unsigned long long>(c.gap_samples.load(std::memory_order_relaxed)));
-         if (c.blocks.load(std::memory_order_relaxed) < 2) {
-           return std::nullopt;
-         }
-         return c.gaps.load(std::memory_order_relaxed) == 0;
-       }});
-  return true;
-}();
-#endif // OCUDU_METAL_STATS
 
 lower_phy_baseband_processor::lower_phy_baseband_processor(const lower_phy_baseband_processor_configuration& config,
                                                            const lower_phy_baseband_processor_dependencies&  deps) :
@@ -350,33 +294,6 @@ void lower_phy_baseband_processor::ul_process()
   }
 #endif
   ru_tracer << trace_event("receive_baseband", tp);
-
-#if defined(OCUDU_METAL_STATS)
-  // Continuity of the stream (see ul_rx_stats): the first block of a stream may legitimately start
-  // wherever the radio's timeline starts (the RU rounds its start time to a subframe, the radio does
-  // not), so continuity is measured from the second block on.
-  {
-    ul_rx_stats&                          c        = ul_rx_counters();
-    const baseband_gateway_timestamp      expected = last_rx_timestamp.load(std::memory_order_acquire);
-    if ((c.blocks.load(std::memory_order_relaxed) != 0) && (rx_metadata.ts != expected)) {
-      const baseband_gateway_timestamp gap = (rx_metadata.ts > expected) ? (rx_metadata.ts - expected)
-                                                                        : (expected - rx_metadata.ts);
-      c.gaps.fetch_add(1, std::memory_order_relaxed);
-      c.gap_samples.fetch_add(gap, std::memory_order_relaxed);
-      static std::atomic<bool> gap_logged{false};
-      bool                     log_expected = false;
-      if (gap_logged.compare_exchange_strong(log_expected, true)) {
-        ocudulog::fetch_basic_logger("PHY").warning(
-            "Receive stream discontinuity: block at timestamp {} where {} was expected ({} samples)",
-            rx_metadata.ts,
-            expected,
-            gap);
-      }
-    }
-    c.blocks.fetch_add(1, std::memory_order_relaxed);
-    c.samples.fetch_add(nof_samples, std::memory_order_relaxed);
-  }
-#endif
 
   // Update last timestamp: the timestamp of the next sample to be received, i.e. the end of the block
   // just received (\c nof_samples of them - the receiver fills the buffer it was given).
