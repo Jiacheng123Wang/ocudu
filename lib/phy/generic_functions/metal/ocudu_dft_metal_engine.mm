@@ -250,44 +250,27 @@ id<MTLBuffer> wrap_buffer(dft_engine_impl* engine, const void* ptr, size_t lengt
   // registry knows which aligned_alloc block the pointer belongs to, the rounded length is clamped to
   // what is left of it. A pointer the registry does not describe keeps the historical behaviour (the
   // caller's length is taken at face value).
+  size_t usable = std::numeric_limits<size_t>::max();
   void*  alloc_base = nullptr;
   size_t alloc_size = 0;
-  bool   alloc_known = compat::describe_aligned_allocation(ptr, &alloc_base, &alloc_size);
-  const size_t page = compat::page_size();
-  size_t       aligned = 0;
-  if (alloc_known) {
+  if (compat::describe_aligned_allocation(ptr, &alloc_base, &alloc_size)) {
     const size_t offset = static_cast<size_t>(static_cast<const char*>(ptr) - static_cast<const char*>(alloc_base));
-    const size_t usable = (alloc_size > offset) ? (alloc_size - offset) : 0;
-    // The allocation is page rounded by construction, so the largest page multiple that fits in it is
-    // its own remainder: round DOWN to it. Rounding UP past the allocation is the over-map the old code
-    // did, and refusing instead is worse than that: a refusal falls back to a COPY, and this engine
-    // hands out the grid - a buffer the GPU keeps writing to - so a cached copy is a grid the
-    // demodulator reads but nobody ever writes (measured on air: garbage symbols, negative SINR, RLF).
-    aligned = (usable / page) * page;
-    if (aligned < length) {
-      aligned = 0; // the request really does not fit in the allocation: stage a copy
-    }
-  } else {
-    // A pointer the registry does not describe: the caller owns the contract (historical behaviour).
-    aligned = ((length + page - 1) / page) * page;
+    usable              = (alloc_size > offset) ? (alloc_size - offset) : 0;
   }
-  id<MTLBuffer> buf = nil;
-  if (aligned != 0) {
+  const size_t page    = compat::page_size();
+  const size_t aligned = ((length + page - 1) / page) * page;
+  id<MTLBuffer> buf    = nil;
+  if (aligned <= usable) {
     buf = [dft_resources().device newBufferWithBytesNoCopy:(void*)ptr
                                                     length:aligned
                                                    options:MTLResourceStorageModeShared
                                                deallocator:nil];
   }
-  size_t mapped = aligned;
   if (buf == nil) {
     dft_stats_wrap_copy();
     buf = [dft_resources().device newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
-    // The COPY holds `length` bytes, not the page-rounded length: recording `aligned` here would let a
-    // later, larger request (<= aligned) hit this cache entry and bind a buffer shorter than it reads -
-    // the kernel would then read past the copy and produce garbage without anything failing.
-    mapped = length;
   }
-  engine->buffer_cache[ptr] = std::make_pair(buf, mapped);
+  engine->buffer_cache[ptr] = std::make_pair(buf, aligned);
   return buf;
 }
 

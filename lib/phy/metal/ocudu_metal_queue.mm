@@ -308,16 +308,6 @@ void shared_queue::notify_wrap_misaligned()
 void shared_queue::arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind kind)
 {
 #if defined(OCUDU_METAL_STATS)
-  // Opt-in (OCUDU_METAL_GPU_TIME=1). A completion handler per command buffer is not free: the driver
-  // dispatches a block for each of them (tens per slot), and that lands on the same submission path the
-  // real-time uplink depends on. A measurement that perturbs what it measures is worse than no
-  // measurement, so the probe stays off unless a run asks for it (the counters do not have this
-  // problem: they are plain atomic increments on the existing path).
-  if (std::getenv("OCUDU_METAL_GPU_TIME") == nullptr) {
-    (void)command_buffer;
-    (void)kind;
-    return;
-  }
   // The GPU's own view of the command buffer: GPUStartTime/GPUEndTime are only meaningful once it has
   // completed, so they are read in the completion handler. Metal REQUIRES the handler to be installed
   // BEFORE commit() ("Completed handler provided after commit call" is an assertion, not a warning),

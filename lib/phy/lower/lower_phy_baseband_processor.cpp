@@ -33,9 +33,6 @@ struct ul_rx_stats {
   std::atomic<uint64_t> samples{0};
   std::atomic<uint64_t> gaps{0};
   std::atomic<uint64_t> gap_samples{0};
-  /// Blocks the radio returned with timestamp 0 (its stop/error path, see ul_process): not part of the
-  /// stream, and not a discontinuity.
-  std::atomic<uint64_t> ts0_blocks{0};
 };
 
 ul_rx_stats& ul_rx_counters()
@@ -51,12 +48,11 @@ void ul_rx_stats_report()
     return;
   }
   std::fprintf(stderr,
-               "[ul_rx] blocks=%llu samples=%llu gaps=%llu gap_samples=%llu ts0_blocks=%llu\n",
+               "[ul_rx] blocks=%llu samples=%llu gaps=%llu gap_samples=%llu\n",
                static_cast<unsigned long long>(c.blocks.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(c.samples.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(c.gaps.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(c.gap_samples.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(c.ts0_blocks.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(c.gap_samples.load(std::memory_order_relaxed)));
 }
 
 const bool ul_rx_stats_registered = []() {
@@ -65,11 +61,10 @@ const bool ul_rx_stats_registered = []() {
       {"radio sample continuity", []() -> std::optional<bool> {
          const ul_rx_stats& c = ul_rx_counters();
          std::fprintf(stderr,
-                      "%llu gaps over %llu blocks (%llu samples missing or repeated), %llu timestamp-0 blocks",
+                      "%llu gaps over %llu blocks (%llu samples missing or repeated)",
                       static_cast<unsigned long long>(c.gaps.load(std::memory_order_relaxed)),
                       static_cast<unsigned long long>(c.blocks.load(std::memory_order_relaxed)),
-                      static_cast<unsigned long long>(c.gap_samples.load(std::memory_order_relaxed)),
-                      static_cast<unsigned long long>(c.ts0_blocks.load(std::memory_order_relaxed)));
+                      static_cast<unsigned long long>(c.gap_samples.load(std::memory_order_relaxed)));
          if (c.blocks.load(std::memory_order_relaxed) < 2) {
            return std::nullopt;
          }
@@ -361,15 +356,9 @@ void lower_phy_baseband_processor::ul_process()
   // wherever the radio's timeline starts (the RU rounds its start time to a subframe, the radio does
   // not), so continuity is measured from the second block on.
   {
-    ul_rx_stats&                     c        = ul_rx_counters();
-    const baseband_gateway_timestamp expected = last_rx_timestamp.load(std::memory_order_acquire);
-    // A block that reports timestamp 0 is not a block of the stream: it is the radio's stop/error
-    // return (UHD hands back a zeroed buffer with an empty time_spec, and its timeout path returns the
-    // same). The stop sequence produces a burst of them, so counting those as discontinuities turned
-    // the shutdown into 362 "gaps" and hid the one thing this check is for. They are counted apart.
-    if (rx_metadata.ts == 0) {
-      c.ts0_blocks.fetch_add(1, std::memory_order_relaxed);
-    } else if ((c.blocks.load(std::memory_order_relaxed) != 0) && (rx_metadata.ts != expected)) {
+    ul_rx_stats&                          c        = ul_rx_counters();
+    const baseband_gateway_timestamp      expected = last_rx_timestamp.load(std::memory_order_acquire);
+    if ((c.blocks.load(std::memory_order_relaxed) != 0) && (rx_metadata.ts != expected)) {
       const baseband_gateway_timestamp gap = (rx_metadata.ts > expected) ? (rx_metadata.ts - expected)
                                                                         : (expected - rx_metadata.ts);
       c.gaps.fetch_add(1, std::memory_order_relaxed);
