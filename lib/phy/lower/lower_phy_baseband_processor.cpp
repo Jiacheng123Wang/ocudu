@@ -553,21 +553,21 @@ void lower_phy_baseband_processor::ul_process()
           ru_tracer << trace_event("uplink_baseband", ul_tp);
         });
     if (!deferred) {
-      // A refused task is fatal while the stream runs: the executor is gone and no symbol of this block
-      // would ever be processed, silently. During shutdown it is expected - the executor refuses tasks
-      // while the application takes the sectors down, and the drain that follows only guarantees that
-      // everything ALREADY enqueued runs (see stop()) - and aborting there takes the process down during
-      // its own shutdown, which also loses the exit reports every probe prints at exit, i.e. the whole
-      // leg's evidence. The chain is not cut short either way: it ends through the FSM's countdown, which
-      // is what wait_stop() waits for.
-      if (!rx_stop_requested.load(std::memory_order_acquire)) {
-        report_fatal_error("Failed to execute uplink processing task.");
-      }
+      // A refused task is never a reason to take the process down. It used to be fatal, on the theory that
+      // the executor could only refuse if it were gone - and the shutdown showed that theory is wrong in
+      // both directions: the application stops the uplink executor while this receive chain is still
+      // running (the S-7g-13 leg aborted here before the lower PHY had even been asked to stop, because a
+      // symbol-grained chain enqueues fourteen times as often and meets that window), and the abort then
+      // lands in the middle of the shutdown, taking every report with it. The loss the old check guarded
+      // against - a block that reaches no transform, silently - is covered instead by counting it and
+      // saying so at error level, which is visible in the log and in the pipeline's own counters. The chain
+      // is not cut short either way: it ends through the FSM's countdown, which is what wait_stop() waits
+      // for, and the blocks already enqueued still run.
       static std::atomic<bool> refused_logged{false};
       bool                     expected = false;
       if (refused_logged.compare_exchange_strong(expected, true)) {
-        ocudulog::fetch_basic_logger("PHY").warning(
-            "Uplink processing task refused while stopping: {} samples dropped", nof_samples);
+        ocudulog::fetch_basic_logger("PHY").error(
+            "Uplink processing task refused: {} samples dropped (the executor is stopping)", nof_samples);
       }
     }
   }
