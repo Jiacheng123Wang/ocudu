@@ -578,6 +578,11 @@ static bool collect_async_stage(mmse_engine_impl* e, stage_encoder& s, bool enco
 
   [s.cb waitUntilCompleted];
   mmse_stats_wait();
+  // The engine's own submission is COLLECTED now, so it must stop counting as outstanding: end_stage_async()
+  // published it as pending because the caller might have collected it later, and leaving it in place made
+  // the next wait_pending() wait for it a second time - which the [metal_stats] line showed as
+  // waits > commits and a max_in_flight that underflowed to 2^64-1 (the host-wait order's leg).
+  e->pending_cb = nil;
 
   if (s.cb.status != MTLCommandBufferStatusCompleted || s.cb.error != nil) {
     return false;
