@@ -48,6 +48,7 @@
 #include "ocudu/support/io/io_broker_factory.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 #include "ocudu/support/macos_compat.h"
+#include "ocudu/phy/phy_pipeline_contract.h"
 #include "ocudu/support/signal_handling.h"
 #include "ocudu/support/signal_observer.h"
 #include "ocudu/support/sysinfo.h"
@@ -642,6 +643,16 @@ int main(int argc, char** argv)
     }
   }
 
+  // Report the UL compute pipeline statistics and the pipeline contract NOW, before anything is stopped.
+  //
+  // They used to be printed only at the end of the shutdown, and the shutdown can crash on its way there:
+  // a MAC/scheduler task running a slot while the upper layers are taken down segfaults (observed
+  // 2026-09-17, intra_slice_scheduler::update_used_dl_vrbs, with the lower PHY already idle), and a crash
+  // takes every report with it - including the atexit ones - leaving a leg with no evidence at all except
+  // its logfile. Printing here costs nothing and cannot be lost to a later failure.
+  ocudu::ul_pipeline_probe::get().report();
+  ocudu::report_phy_pipeline_contract();
+
   // Stop metrics manager.
   metrics_mngr.stop();
 
@@ -663,10 +674,6 @@ int main(int argc, char** argv)
   f1c_gw->stop();
   e1_gw->stop();
   // Xn-C gateway is stopped by Xn-C connection manager.
-
-  // Report the UL compute pipeline statistics (compiled in only with ENABLE_FLOW_PROBES).
-  // cmake -S . -B build -DENABLE_FLOW_PROBES=ON && make -C build gnb
-  ocudu::ul_pipeline_probe::get().report();
 
   return 0;
 }
