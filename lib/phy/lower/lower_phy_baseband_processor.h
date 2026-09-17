@@ -262,6 +262,21 @@ private:
   /// and the uplink processor then handles its blocks as before (assembling what straddles).
   static constexpr unsigned                                                  max_phase_blocks = 2;
   unsigned                                                                   nof_phase_blocks = 0;
+  /// \brief Symbol-grained receive policy (see ul_process): whether the uplink processor describes the
+  /// OFDM symbol grid, i.e. whether the receive side can ask for whole symbols instead of whole slots.
+  bool                                                                       rx_symbol_grid_known = false;
+  /// Symbols one receive block covers under the symbol-grained policy. 0 keeps the historical
+  /// whole-slot blocks; 1 starts the front end as early as the samples allow.
+  unsigned                                                                   nof_symbols_per_block = 1;
+  /// \brief Slot buffer the symbol-grained policy is filling, or null when it is not in use.
+  ///
+  /// A receive block may hold fewer samples than a slot, so one buffer is filled across several calls and
+  /// retired when it holds a whole slot's worth of samples (see ul_process). The buffer returns to the
+  /// pool when its last reference is dropped: the one held here, and one per in-flight transform reading
+  /// it (see the handle the uplink processor is given).
+  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>                    rx_fill_buffer;
+  /// Samples of rx_fill_buffer written by the radio so far.
+  unsigned                                                                   rx_fill = 0;
   std::optional<std::chrono::time_point<std::chrono::high_resolution_clock>> last_tx_time;
   unsigned                                                                   last_tx_buffer_size = 0;
   /// Flow instrumentation probe for the DL production rate (debug aid for cross-platform comparison).

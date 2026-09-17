@@ -43,6 +43,35 @@ public:
   /// \remark The number of channels in \c buffer must be equal to the number of receive ports for the sector.
   virtual void
   process(const baseband_gateway_buffer_reader& buffer, baseband_gateway_timestamp timestamp, rx_buffer_handle owner) = 0;
+
+  /// \brief Where the OFDM symbol grid is, relative to a timestamp.
+  struct symbol_grid_position {
+    /// Samples between the timestamp and the next symbol boundary (0 when it is already on one).
+    unsigned nof_samples_to_boundary = 0;
+    /// Samples of the whole symbols starting at that boundary, at most the requested number of them.
+    unsigned nof_samples = 0;
+    /// Number of symbols \c nof_samples covers.
+    unsigned nof_symbols = 0;
+  };
+
+  /// \brief Locates the next OFDM symbols of a stream that starts at \p timestamp.
+  ///
+  /// The radio receives as many samples as the buffer it is given holds (see
+  /// baseband_gateway_receiver::receive), so the receive side chooses the block size, and that choice
+  /// decides when the front end can start: a block covering the arrival of a whole slot makes it wait
+  /// for the slot's last samples, while blocks holding whole symbols let every symbol be transformed as
+  /// soon as it arrived - and read where the radio put it, since a symbol lying wholly inside a block is
+  /// never assembled. The grid belongs to this processor: it owns the cyclic prefix configuration the
+  /// symbol sizes follow.
+  ///
+  /// \param[in] timestamp   Time instant of the first sample the caller is about to request.
+  /// \param[in] nof_symbols Upper bound on the symbols to cover.
+  /// \return The position of the next symbols, or a zeroed position when the grid is not known (the
+  ///         caller then keeps its block-sized receive policy).
+  virtual symbol_grid_position locate_symbols(baseband_gateway_timestamp timestamp, unsigned nof_symbols) const
+  {
+    return {};
+  }
 };
 
 } // namespace ocudu

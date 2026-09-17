@@ -66,12 +66,36 @@ public:
     entry.owner     = std::move(owner);
   }
 
+  /// \brief Size in samples of every symbol of the grid this spy describes, or 0 for "no grid".
+  ///
+  /// The receive side asks the radio for whole symbols only when the uplink processor describes the
+  /// grid (see lower_phy_baseband_processor::ul_process), and a uniform grid is enough to exercise that
+  /// policy: the real, uneven grid is asserted in the uplink processor's own test.
+  void set_symbol_size(unsigned size) { symbol_size = size; }
+
+  // See interface for documentation.
+  symbol_grid_position locate_symbols(baseband_gateway_timestamp timestamp, unsigned nof_symbols) const override
+  {
+    symbol_grid_position position;
+    if ((symbol_size == 0) || (nof_symbols == 0)) {
+      return position;
+    }
+    const unsigned offset = static_cast<unsigned>(timestamp % symbol_size);
+    if (offset != 0) {
+      position.nof_samples_to_boundary = symbol_size - offset;
+    }
+    position.nof_samples = nof_symbols * symbol_size;
+    position.nof_symbols = nof_symbols;
+    return position;
+  }
+
   const std::vector<entry_t>& get_entries() const { return entries; }
 
   void clear() { entries.clear(); }
 
 private:
   std::vector<entry_t> entries;
+  unsigned              symbol_size = 0;
 };
 
 class lower_phy_cfo_controller_spy : public lower_phy_cfo_controller
@@ -115,6 +139,9 @@ public:
   puxch_processor_notifier* get_puxch_notifier() { return puxch_notifier; }
 
   const uplink_processor_baseband_spy& get_uplink_proc_baseband_spy() const { return uplink_proc_baseband_spy; }
+
+  /// Describes an OFDM symbol grid to the receive side (see uplink_processor_baseband_spy).
+  void set_uplink_proc_baseband_symbol_size(unsigned size) { uplink_proc_baseband_spy.set_symbol_size(size); }
 
   const prach_processor_request_handler_spy& get_prach_req_handler_spy() const { return prach_req_handler_spy; }
 

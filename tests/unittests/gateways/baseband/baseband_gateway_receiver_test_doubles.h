@@ -15,6 +15,12 @@ public:
   struct entry_t {
     baseband_gateway_receiver::metadata metadata;
     baseband_gateway_buffer_read_only   data;
+    /// \brief First sample the radio wrote for this call.
+    ///
+    /// The caller hands the receiver a view of its receive buffer (see
+    /// baseband_gateway_buffer_writer_view), so this is where the block lands inside that buffer -
+    /// which is what a receive policy that fills one buffer across several calls is judged on.
+    const ci16_t* write_ptr = nullptr;
   };
 
   baseband_gateway_receiver_spy()
@@ -44,6 +50,7 @@ public:
     entry_t& entry    = entries.back();
     entry.metadata.ts = current_timestamp;
     entry.data        = data;
+    entry.write_ptr   = (data.get_nof_channels() != 0) ? data[0].data() : nullptr;
 
     current_timestamp += data.get_nof_samples();
 

@@ -15,6 +15,7 @@
 #include "ocudu/ran/slot_point_extended.h"
 #include "ocudu/support/executors/thread_utils.h" // cpu_relax()
 #include "ocudu/support/executors/ul_pipeline_probe.h"
+#include <cstdlib>
 #include <ctime>
 
 using namespace ocudu;
@@ -130,12 +131,27 @@ void lower_phy_baseband_processor::start(baseband_gateway_timestamp init_time, b
   // If it is required to start with system frame number 0, then set a time offset to start an SFN earlier.
   start_time_sfn0   = sfn0_ref_time;
   last_rx_timestamp = init_time;
+  // Whether this stream's blocks can hold whole OFDM symbols (S-7g-13, see ul_process): the grid belongs
+  // to the uplink processor, and one that does not describe it (a test double, or a build without one)
+  // keeps the historical whole-slot blocks. Decided per stream, when the configuration is final.
+  rx_symbol_grid_known = uplink_processor.locate_symbols(0, 1).nof_samples != 0;
+  // How many symbols one block covers. The environment override exists to A/B the front end's overlap
+  // against the radio's per-call cost on air without a rebuild: 0 restores the whole-slot blocks.
+  {
+    const char* env       = std::getenv("OCUDU_UL_RX_SYMBOLS");
+    nof_symbols_per_block = (env == nullptr) ? 1U : static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+  }
   // A stream that starts here has to establish its phase again: the first block only closes the gap to
-  // the next slot boundary and is not processed (see ul_process).
+  // the next slot (whole-slot policy) or symbol (symbol-grained policy) boundary and is not processed
+  // (see ul_process).
   rx_slot_aligned   = false;
   // Blocks the stream may drop while it establishes its phase: the first block of a stream, and the
   // partial one that follows it when the start time of the RU and the radio disagree (see ul_process).
   nof_phase_blocks  = 0;
+  // The slot buffer the symbol-grained policy was filling belongs to the previous stream: drop our
+  // reference (the transforms that still read it keep it alive and return it to the pool themselves).
+  rx_fill_buffer.reset();
+  rx_fill = 0;
 
   rx_state.start();
   report_fatal_error_if_not(rx_executor.defer([this]() { ul_process(); }), "Failed to execute initial uplink task.");
@@ -314,28 +330,72 @@ void lower_phy_baseband_processor::ul_process()
   // \brief Samples to receive in this call.
   ///
   /// The radio is told how many samples to receive by the size of the buffer it is given
-  /// (baseband_gateway_receiver::receive), so asking for "the samples that complete the current slot"
-  /// makes every receive block end on a slot boundary - and a slot is a whole number of OFDM symbols,
-  /// so no symbol straddles two blocks. That is what lets the uplink processor read every symbol where
-  /// the radio put it, instead of copying it into an assembly buffer (see
-  /// lower_phy_uplink_processor_impl::process_symbol_boundary).
+  /// (baseband_gateway_receiver::receive), so the block size is ours to choose, and it decides when the
+  /// front end can start:
   ///
-  /// The phase is only unknown for the first block (the pool hands out buffers, not a timeline): the
-  /// timestamp of the next sample to be received is last_rx_timestamp. Until the receive side is slot
-  /// aligned, each call asks for the samples that close the gap to the next slot boundary, which is at
-  /// most one slot; from the second block on, that is exactly one slot. A buffer that cannot hold a
-  /// whole slot (the single-packet and half-slot policies, see lower_phy_configuration) keeps the
-  /// historical behaviour: the block size is the buffer size, and a symbol that straddles two of them
-  /// is assembled.
+  ///  - \b whole \b slots (the historical policy, kept when the buffer cannot hold a slot or when the
+  ///    uplink processor does not describe the symbol grid): ask for the samples that complete the
+  ///    current slot, so every block ends on a slot boundary - and a slot is a whole number of OFDM
+  ///    symbols, so no symbol straddles two blocks. The front end then waits for the slot's LAST
+  ///    samples before it can transform the first symbol.
+  ///  - \b whole \b symbols (S-7g-13, the default): ask for an integer number of OFDM symbols, filled
+  ///    into one slot buffer across several calls, so a symbol is transformed as soon as it arrived and
+  ///    the front end overlaps the arrival of the rest of the slot. A symbol still lies wholly inside
+  ///    one block, which is what keeps it readable where the radio put it (see
+  ///    lower_phy_uplink_processor_impl::process_symbol_boundary).
+  ///
+  /// The phase is only unknown for the first block of a stream (the pool hands out buffers, not a
+  /// timeline): the timestamp of the next sample to be received is last_rx_timestamp. Until the stream
+  /// is symbol aligned, a block asks for the samples that close the gap to the next symbol boundary and
+  /// is dropped - at most one block, before any UE can be transmitting (see max_phase_blocks).
   const unsigned nof_samples_per_slot =
       srate.to_kHz() * static_cast<uint64_t>(slot_duration.count()) / 1000;
-  const bool slot_capable = rx_buffer->get_nof_samples() >= nof_samples_per_slot;
-  unsigned   nof_samples  = rx_buffer->get_nof_samples();
-  if (slot_capable) {
-    const unsigned phase = static_cast<unsigned>(last_rx_timestamp.load(std::memory_order_acquire) % nof_samples_per_slot);
-    nof_samples          = (phase != 0) ? (nof_samples_per_slot - phase) : nof_samples_per_slot;
+  const bool slot_capable  = rx_buffer_size >= nof_samples_per_slot;
+  const bool symbol_blocks = slot_capable && rx_symbol_grid_known && (nof_symbols_per_block != 0);
+
+  unsigned rx_offset   = 0;
+  unsigned nof_samples = 0;
+  if (!symbol_blocks) {
+    nof_samples = rx_buffer->get_nof_samples();
+    if (slot_capable) {
+      const unsigned phase =
+          static_cast<unsigned>(last_rx_timestamp.load(std::memory_order_acquire) % nof_samples_per_slot);
+      nof_samples = (phase != 0) ? (nof_samples_per_slot - phase) : nof_samples_per_slot;
+    }
+  } else {
+    // A slot buffer holds a whole number of symbols and is filled in order, so the samples of a symbol
+    // are contiguous in it and never split between two buffers.
+    if ((rx_fill_buffer == nullptr) || (rx_fill == nof_samples_per_slot)) {
+      rx_fill_buffer = std::move(rx_buffer);
+      rx_fill        = 0;
+    }
+    rx_buffer = rx_fill_buffer;
+    rx_offset = rx_fill;
+
+    const baseband_gateway_timestamp                      next_ts = last_rx_timestamp.load(std::memory_order_acquire);
+    uplink_processor_baseband::symbol_grid_position       position = uplink_processor.locate_symbols(next_ts, nof_symbols_per_block);
+    if (position.nof_samples_to_boundary != 0) {
+      // Not symbol aligned: ask for what is left of the straddled symbol and drop it (its beginning is
+      // already gone, so no transform can use it).
+      nof_samples = position.nof_samples_to_boundary;
+    } else {
+      // Whole symbols, reduced to the room the slot buffer still has so that a symbol is never cut.
+      while ((position.nof_symbols > 1) && ((rx_offset + position.nof_samples) > nof_samples_per_slot)) {
+        position = uplink_processor.locate_symbols(next_ts, position.nof_symbols - 1);
+      }
+      if ((position.nof_samples == 0) || ((rx_offset + position.nof_samples) > nof_samples_per_slot)) {
+        // The window has no room left for a whole symbol (a grid whose period does not tile it): retire
+        // the buffer and start the next one at this boundary instead of splitting a symbol.
+        rx_fill_buffer = rx_pool->buffers.pop_blocking();
+        rx_fill        = 0;
+        rx_buffer      = rx_fill_buffer;
+        rx_offset      = 0;
+        position       = uplink_processor.locate_symbols(next_ts, nof_symbols_per_block);
+      }
+      nof_samples = position.nof_samples;
+    }
   }
-  baseband_gateway_buffer_writer_view rx_writer(rx_buffer->get_writer(), 0, nof_samples);
+  baseband_gateway_buffer_writer_view rx_writer(rx_buffer->get_writer(), rx_offset, nof_samples);
 
   // Receive baseband.
   trace_point tp = ru_tracer.now();
@@ -404,16 +464,35 @@ void lower_phy_baseband_processor::ul_process()
   // UE can be transmitting - is what makes "no uplink sample is copied on the host" absolute.
   const bool slot_aligned_block =
       slot_capable && (nof_samples == nof_samples_per_slot) && ((rx_metadata.ts % nof_samples_per_slot) == 0);
-  const bool establishes_phase =
-      slot_capable && !slot_aligned_block && !rx_slot_aligned && (nof_phase_blocks < max_phase_blocks);
-  if (establishes_phase) {
-    ++nof_phase_blocks;
-  }
-  if (slot_aligned_block) {
-    // The stream is slot aligned from here on: a later loss of alignment (a late or lost block) keeps
-    // the historical behaviour, where the uplink processor assembles the symbol the loss split in two
-    // instead of dropping samples (see process_symbol_boundary).
-    rx_slot_aligned = true;
+  bool establishes_phase = false;
+  if (!symbol_blocks) {
+    establishes_phase = slot_capable && !slot_aligned_block && !rx_slot_aligned && (nof_phase_blocks < max_phase_blocks);
+    if (establishes_phase) {
+      ++nof_phase_blocks;
+    }
+    if (slot_aligned_block) {
+      // The stream is slot aligned from here on: a later loss of alignment (a late or lost block) keeps
+      // the historical behaviour, where the uplink processor assembles the symbol the loss split in two
+      // instead of dropping samples (see process_symbol_boundary).
+      rx_slot_aligned = true;
+    }
+  } else {
+    // Symbol-grained policy: the block is worth processing when the samples it brought start on a symbol
+    // boundary, and that is measured on the block that was ACTUALLY received - not on the phase the last
+    // timestamp predicted, because the two disagree about the first block of a stream (the RU rounds the
+    // start time it gives the lower PHY to a subframe, the radio starts at a sample of its own; see
+    // S-7g-10). A block that starts mid-symbol holds the tail of a symbol whose beginning is already
+    // gone, so it is dropped - at most max_phase_blocks of them, before any UE can be transmitting.
+    const bool symbol_aligned = uplink_processor.locate_symbols(rx_metadata.ts, 1).nof_samples_to_boundary == 0;
+    if (!symbol_aligned && (nof_phase_blocks < max_phase_blocks)) {
+      ++nof_phase_blocks;
+      establishes_phase = true;
+    }
+    if (!establishes_phase) {
+      // The samples stay in the slot buffer, where the transforms of the symbols they complete read them
+      // (the buffer is not handed over yet: rx_offset says where this block landed in it).
+      rx_fill += nof_samples;
+    }
   }
 
   if (!establishes_phase) {
@@ -428,23 +507,29 @@ void lower_phy_baseband_processor::ul_process()
   }
 
   // Queue uplink buffer processing. A block that only establishes the phase is not queued: its buffer
-  // goes out of scope here and returns to the pool (see rx_buffer_pool).
+  // goes out of scope here and returns to the pool (see rx_buffer_pool) - under the symbol-grained policy
+  // the slot buffer stays ours and the dropped samples are simply overwritten by the next block.
   if (!establishes_phase) {
-    report_fatal_error_if_not(uplink_executor.defer([this, ul_buffer = std::move(rx_buffer), rx_metadata, nof_samples]() mutable {
-      trace_point ul_tp = ru_tracer.now();
+    report_fatal_error_if_not(
+        uplink_executor.defer([this,
+                               ul_buffer = std::move(rx_buffer),
+                               rx_metadata,
+                               rx_offset,
+                               nof_samples]() mutable {
+          trace_point ul_tp = ru_tracer.now();
 
-      // Process UL. The handle travels with the samples: the processor keeps the buffer alive for as
-      // long as a transform reads it, and it comes back to this pool when the last of those references
-      // is dropped (see return_receive_buffer_to_pool). Nothing here returns it - that is the point.
-      // The view is what was actually received: the buffer may be longer than the block the radio was
-      // asked for (the pool hands out buffers of one size, the receive asks for what completes a slot),
-      // and the samples beyond it are stale.
-      baseband_gateway_buffer_reader_view ul_samples(ul_buffer->get_reader(), 0, nof_samples);
-      uplink_processor.process(ul_samples, apply_timestamp_sfn0_ref(rx_metadata.ts), std::move(ul_buffer));
+          // Process UL. The handle travels with the samples: the processor keeps the buffer alive for as
+          // long as a transform reads it, and it comes back to this pool when the last of those references
+          // is dropped (see return_receive_buffer_to_pool). Nothing here returns it - that is the point.
+          // The view is what was actually received: the buffer may be longer than the block the radio was
+          // asked for (the pool hands out buffers of one size, the receive asks for less than one), and the
+          // samples beyond it are stale.
+          baseband_gateway_buffer_reader_view ul_samples(ul_buffer->get_reader(), rx_offset, nof_samples);
+          uplink_processor.process(ul_samples, apply_timestamp_sfn0_ref(rx_metadata.ts), std::move(ul_buffer));
 
-      ru_tracer << trace_event("uplink_baseband", ul_tp);
-    }),
-                              "Failed to execute uplink processing task.");
+          ru_tracer << trace_event("uplink_baseband", ul_tp);
+        }),
+        "Failed to execute uplink processing task.");
   }
 
   // Enqueue next iteration if it is running.

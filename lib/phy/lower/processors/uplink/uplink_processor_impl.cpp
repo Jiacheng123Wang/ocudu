@@ -359,6 +359,40 @@ void lower_phy_uplink_processor_impl::process(const baseband_gateway_buffer_read
   current_owner.reset();
 }
 
+uplink_processor_baseband::symbol_grid_position
+lower_phy_uplink_processor_impl::locate_symbols(baseband_gateway_timestamp timestamp, unsigned nof_symbols) const
+{
+  symbol_grid_position position;
+  if (symbol_sizes.empty() || (nof_symbols == 0)) {
+    return position;
+  }
+
+  // Index of the symbol the timestamp falls in, and the sample index within it. The table covers one
+  // subframe and the cyclic prefix pattern repeats every subframe (the constructor checks the sizes add
+  // up to the subframe), so the grid is periodic and the indices wrap.
+  const unsigned nof_sizes    = static_cast<unsigned>(symbol_sizes.size());
+  unsigned       i_sample     = static_cast<unsigned>(timestamp % nof_samples_per_subframe);
+  unsigned       i_symbol     = 0;
+  while ((i_sample >= symbol_sizes[i_symbol]) && (i_symbol + 1 != nof_sizes)) {
+    i_sample -= symbol_sizes[i_symbol];
+    ++i_symbol;
+  }
+
+  if (i_sample != 0) {
+    // The stream is not symbol aligned here: the caller can only ask for the samples that are left of
+    // this symbol, and it has to drop them (they are part of a symbol whose beginning is already gone).
+    position.nof_samples_to_boundary = symbol_sizes[i_symbol] - i_sample;
+    i_symbol                         = (i_symbol + 1) % nof_sizes;
+  }
+
+  // Whole symbols from that boundary on.
+  for (unsigned k = 0; k != nof_symbols; ++k) {
+    position.nof_samples += symbol_sizes[(i_symbol + k) % nof_sizes];
+    ++position.nof_symbols;
+  }
+  return position;
+}
+
 void lower_phy_uplink_processor_impl::process_alignment(const baseband_gateway_buffer_reader& samples,
                                                         baseband_gateway_timestamp            timestamp)
 {

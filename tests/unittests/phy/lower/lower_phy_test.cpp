@@ -976,6 +976,86 @@ TEST_P(LowerPhyFixture, ReceivePhaseBlocksAreDropped)
   }
 }
 
+/// S-7g-13: the receive side asks the radio for whole OFDM symbols instead of whole slots, so the front
+/// end transforms a symbol as soon as it has arrived instead of waiting for the slot's last samples - and
+/// the symbols of one slot remain contiguous in memory, which is what keeps them readable where the radio
+/// put them (no assembly). The grid this test describes is uniform and tiles the slot exactly; the real
+/// one has fourteen uneven symbols and is asserted in the uplink processor's own test, because what is
+/// under test here is the receive POLICY, not the grid arithmetic.
+TEST_P(LowerPhyFixture, ReceiveBlocksHoldWholeSymbols)
+{
+  lower_phy_controller& lphy_controller = lphy->get_controller();
+
+  const unsigned nof_samples_per_slot = srate.to_kHz() / pow2(to_numerology_value(scs));
+  const unsigned nof_symbols_per_slot = 16;
+  const unsigned symbol_size          = nof_samples_per_slot / nof_symbols_per_slot;
+  uplink_proc_spy->set_uplink_proc_baseband_symbol_size(symbol_size);
+
+  // The RU hands the lower PHY a start time it rounded, the radio starts at a sample of its own: the two
+  // disagree about the first block, which is why the first block only closes the gap to the next symbol
+  // boundary and is dropped (its first samples are the tail of a symbol whose beginning is gone). From
+  // the second block on the radio's stream and the requested timeline agree, which is what the radio's
+  // own time reference gives in the field.
+  const baseband_gateway_timestamp init_time = symbol_size / 3;
+  const baseband_gateway_timestamp radio_ts  = init_time + symbol_size;
+  bb_gateway_spy.set_receiver_current_timestamp(radio_ts);
+  lphy_controller.start(init_time);
+
+  const void*   slot_buffer      = nullptr; // Buffer the symbols of the slot being filled live in.
+  const void*   prev_slot_buffer = nullptr;
+  const ci16_t* slot_start       = nullptr; // Where the first symbol of that buffer was written.
+  unsigned      i_symbol_in_slot = 0;
+
+  for (unsigned i_block = 0; i_block != nof_symbols_per_slot + 2; ++i_block) {
+    bb_gateway_spy.clear_all_entries();
+    uplink_proc_spy->clear();
+
+    ASSERT_TRUE(rx_task_executor.try_run_next());
+    const auto& receive_entries = bb_gateway_spy.get_receive_entries();
+    ASSERT_EQ(receive_entries.size(), 1);
+    const auto&    receive_entry = receive_entries.back();
+    const unsigned received      = receive_entry.data.get_nof_samples();
+
+    if (i_block == 0) {
+      // Phase block: the rest of the symbol the requested timeline starts in, dropped.
+      ASSERT_EQ(received, symbol_size - (init_time % symbol_size));
+      ASSERT_FALSE(ul_task_executor.try_run_next()) << "the phase block must not be processed";
+      ASSERT_TRUE(uplink_proc_spy->get_uplink_proc_baseband_spy().get_entries().empty());
+      continue;
+    }
+
+    // Every following block holds exactly one whole symbol and starts on its boundary.
+    ASSERT_EQ(received, symbol_size);
+    ASSERT_EQ(receive_entry.metadata.ts % symbol_size, 0);
+
+    ASSERT_TRUE(ul_task_executor.try_run_next());
+    const auto& entries = uplink_proc_spy->get_uplink_proc_baseband_spy().get_entries();
+    ASSERT_EQ(entries.size(), 1);
+    const auto& entry = entries.back();
+    ASSERT_EQ(entry.buffer.get_nof_samples(), symbol_size);
+    ASSERT_EQ(entry.timestamp, receive_entry.metadata.ts);
+
+    if (i_symbol_in_slot == 0) {
+      // First symbol of a slot buffer: a new one, and the one before it is complete.
+      slot_buffer = entry.owner.get();
+      if (i_block > 1) {
+        ASSERT_NE(slot_buffer, prev_slot_buffer) << "a full slot buffer must be retired";
+      }
+      slot_start = receive_entry.write_ptr;
+    } else {
+      // The same slot buffer, exactly one symbol further on: the samples of the slot are contiguous, so
+      // no symbol straddles two blocks and nothing has to be assembled.
+      ASSERT_EQ(entry.owner.get(), slot_buffer);
+      ASSERT_EQ(receive_entry.write_ptr - slot_start, static_cast<ptrdiff_t>(i_symbol_in_slot) * symbol_size);
+    }
+
+    if (++i_symbol_in_slot == nof_symbols_per_slot) {
+      prev_slot_buffer = slot_buffer;
+      i_symbol_in_slot = 0;
+    }
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(LowerPhy,
                          LowerPhyFixture,
                          testing::Combine(testing::Values(subcarrier_spacing::kHz15, subcarrier_spacing::kHz30),

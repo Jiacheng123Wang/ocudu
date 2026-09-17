@@ -563,6 +563,63 @@ TEST_P(LowerPhyUplinkProcessorFixture, MetricsAreMeasuredOnlyForAConsumer)
   ASSERT_EQ(consuming_notifier.get_full_slots().size(), 1);
 }
 
+/// S-7g-13: the receive side asks the radio for whole OFDM symbols, and it can only do that if this
+/// processor describes the grid exactly. The real grid is not uniform: fourteen symbols per slot whose
+/// cyclic prefix differs (the first symbol of each half-slot carries a longer one), so the properties
+/// below are checked over every sample offset of a slot rather than at a few chosen points:
+///  - a timestamp is either on a symbol boundary or inside exactly one symbol;
+///  - the boundary the processor reports IS a boundary (the next query there reports zero samples to it);
+///  - starting on a boundary, whole symbols tile the slot EXACTLY - the slot ends on a boundary and the
+///    number of symbols is the numerology's. That is what lets the receive side fill one slot buffer
+///    without ever splitting a symbol between two blocks.
+TEST_P(LowerPhyUplinkProcessorFixture, SymbolGridIsDescribedExactly)
+{
+  uplink_processor_baseband& baseband = ul_processor->get_baseband();
+
+  const unsigned nof_symbols_per_slot = get_nsymb_per_slot(config.cp);
+
+  // One slot's worth of symbols, walked from its first boundary: this measures the slot in samples the
+  // same way the receive side does (by asking the grid), instead of assuming a length for the sampling
+  // rate - a slot buffer is filled with exactly this many samples.
+  unsigned nof_samples_per_slot = 0;
+  for (unsigned i_symbol = 0; i_symbol != nof_symbols_per_slot; ++i_symbol) {
+    const uplink_processor_baseband::symbol_grid_position position = baseband.locate_symbols(nof_samples_per_slot, 1);
+    ASSERT_EQ(position.nof_samples_to_boundary, 0) << "symbol " << i_symbol << " must start on a boundary";
+    ASSERT_NE(position.nof_samples, 0) << "symbol " << i_symbol;
+    nof_samples_per_slot += position.nof_samples;
+  }
+  ASSERT_EQ(baseband.locate_symbols(nof_samples_per_slot, 1).nof_samples_to_boundary, 0)
+      << "a slot's worth of symbols must end on a boundary, or a slot buffer would split a symbol";
+
+  // Every offset of one slot: aligned, or a boundary that really is one.
+  for (unsigned offset = 0; offset != nof_samples_per_slot; ++offset) {
+    const uplink_processor_baseband::symbol_grid_position position = baseband.locate_symbols(offset, 1);
+    ASSERT_EQ(position.nof_symbols, 1) << "offset " << offset;
+    ASSERT_GT(position.nof_samples, 0) << "offset " << offset;
+    if (position.nof_samples_to_boundary == 0) {
+      continue; // On a boundary: the whole symbol starts here.
+    }
+    // Inside a symbol: the reported boundary is a boundary, and the whole symbol follows it.
+    ASSERT_LT(position.nof_samples_to_boundary, position.nof_samples + position.nof_samples_to_boundary)
+        << "offset " << offset;
+    const uplink_processor_baseband::symbol_grid_position at_boundary =
+        baseband.locate_symbols(offset + position.nof_samples_to_boundary, 1);
+    ASSERT_EQ(at_boundary.nof_samples_to_boundary, 0) << "offset " << offset;
+  }
+
+  // A request of several whole symbols covers exactly their sizes, so a receive block never holds a
+  // partial symbol (the policy reduces the request to what the buffer still has room for).
+  const uplink_processor_baseband::symbol_grid_position one   = baseband.locate_symbols(0, 1);
+  const uplink_processor_baseband::symbol_grid_position three = baseband.locate_symbols(0, 3);
+  ASSERT_EQ(three.nof_symbols, 3);
+  ASSERT_EQ(three.nof_samples,
+            one.nof_samples + baseband.locate_symbols(one.nof_samples, 1).nof_samples +
+                baseband.locate_symbols(one.nof_samples +
+                                            baseband.locate_symbols(one.nof_samples, 1).nof_samples,
+                                        1)
+                    .nof_samples);
+}
+
 // Creates test suite that combines all possible parameters.
 INSTANTIATE_TEST_SUITE_P(LowerPhyUplinkProcessor,
                          LowerPhyUplinkProcessorFixture,

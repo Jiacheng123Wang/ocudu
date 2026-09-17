@@ -96,6 +96,9 @@ private:
   void
   process(const baseband_gateway_buffer_reader& samples, baseband_gateway_timestamp timestamp, rx_buffer_handle owner) override;
 
+  // See interface for documentation.
+  symbol_grid_position locate_symbols(baseband_gateway_timestamp timestamp, unsigned nof_symbols) const override;
+
   /// \brief Processes samples in alignment state.
   /// \param[in] samples   Input baseband samples.
   /// \param[in] timestamp Time instant in which the first sample within \c samples was received.
