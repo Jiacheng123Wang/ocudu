@@ -32,6 +32,8 @@ struct puxch_processor_configuration {
   /// Write the demodulated symbols into the resource grid from the device (see
   /// ofdm_demodulator_configuration::device_grid_write).
   bool device_grid_write;
+  /// The grid is consumed on the device (see ofdm_demodulator_configuration::grid_consumed_on_device).
+  bool grid_consumed_on_device = false;
 };
 
 /// Lower physical layer PUxCH processor - Factory interface.

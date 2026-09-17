@@ -35,6 +35,15 @@ struct ofdm_demodulator_configuration {
   /// whose storage is device-addressable (see resource_grid_writer::get_device_view()); a symbol that cannot be
   /// written from the device is written from the host instead, with a warning the first time it happens.
   bool device_grid_write = false;
+
+  /// \brief The resource grid is CONSUMED on the device, not on the host.
+  ///
+  /// The declaration the front-end fence needs (see ofdm_symbol_demodulator_impl::finish_symbol() and the
+  /// design document, 48.189): device_grid_write says WHO WRITES the grid, this says who READS it. Both are
+  /// set from lower_phy_configuration::device_resource_grid in the production wiring, and a caller that
+  /// only sets device_grid_write - the demodulator's own tests, which verify the grid on the host - keeps
+  /// the per-symbol host wait, which is always correct.
+  bool grid_consumed_on_device = false;
 };
 
 /// \brief Describes an OFDM demodulator that demodulates at symbol granularity.

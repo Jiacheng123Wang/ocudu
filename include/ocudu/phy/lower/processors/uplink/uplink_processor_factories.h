@@ -32,6 +32,8 @@ struct uplink_processor_configuration {
   /// Write the demodulated symbols into the resource grid from the device (see
   /// ofdm_demodulator_configuration::device_grid_write).
   bool device_grid_write;
+  /// The grid is consumed on the device (see ofdm_demodulator_configuration::grid_consumed_on_device).
+  bool grid_consumed_on_device = false;
   /// Measure the baseband metrics (average power, peak power, clipping) of every symbol. False when
   /// nothing consumes them (see lower_phy_configuration::are_metrics_enabled). Defaults to true so a
   /// caller that does not set it keeps the historical behaviour.
