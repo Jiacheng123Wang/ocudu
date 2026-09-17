@@ -120,6 +120,20 @@ public:
   /// every earlier submission of every stage sharing the queue, not only this processor's.
   virtual void wait() {}
 
+  /// \brief Opens one command buffer for the transforms of the caller's current block of samples.
+  ///
+  /// A caller that holds a whole block of samples (the receiving chain under the whole-slot policy holds
+  /// a whole slot) can encode its transforms into one command buffer instead of one each: what that
+  /// saves is the per-command-buffer cost of the GPU timeline, which is real (a command buffer costs the
+  /// same whether it carries one transform or fourteen, see the DFT unit test) - but only samples that
+  /// have ALREADY ARRIVED may be batched, or the batch trades a command buffer for a stall. Both calls
+  /// are no-ops for processors without such a path.
+  /// \return Whether the block is open (false: every transform keeps its own command buffer).
+  virtual bool begin_block() { return false; }
+
+  /// \brief Closes the block opened by begin_block(): commits the command buffer its transforms went into.
+  virtual bool end_block() { return false; }
+
   /// \brief Tells the processor which receiving slot the transforms it is about to submit belong to.
   ///
   /// Instrumentation only: the device probe accounts the GPU time of a slot's transforms, and they are

@@ -317,6 +317,14 @@ void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, uns
   // not declare it and therefore keeps the historical wait. With the declaration, the wait belongs to
   // the slot's LAST symbol: fourteen host waits for one consumer become one. Every earlier symbol is
   // complete by then anyway - one queue completes its command buffers in submission order.
+  // The slot's transforms were encoded into one command buffer (see set_lane_slot()): its last symbol is
+  // where the block ends, so the command buffer is committed here - before the wait below, which would
+  // otherwise find nothing to wait for.
+  if (block_open && last_symbol_of_slot) {
+    (void)dft->end_block();
+    block_open = false;
+  }
+
   const bool wait_per_slot = pipeline_slots[slot].device_write && grid_consumed_on_device;
   if (!wait_per_slot || last_symbol_of_slot) {
     dft->wait_slot(slot);

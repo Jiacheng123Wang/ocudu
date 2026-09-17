@@ -64,6 +64,29 @@ public:
   /// \return True when the dispatch was encoded and committed.
   bool submit(const void* in, void* out, unsigned nof_transforms);
 
+  /// \brief One command buffer for the transforms of one block of samples (see commit_open()).
+  ///
+  /// A caller that holds a whole block of samples - the receiving chain under the default whole-slot
+  /// receive policy gets a whole slot per call - can hand its transforms over as a block instead of one
+  /// command buffer each: begin_block() opens the accumulation, every transform submitted while it is
+  /// open is encoded into one command buffer, and commit_open() closes and commits it. What that saves
+  /// is the per-command-buffer cost on the GPU timeline, which the DFT unit test measures at ~12.7us
+  /// whether the buffer carries one transform or fourteen (the transform itself is under a microsecond).
+  ///
+  /// \note The rule the caller must keep: **only samples that have already arrived may be batched**. The
+  ///       per-symbol submission exists so that a symbol is transformed as soon as its samples are there
+  ///       (see lower_phy_baseband_processor::ul_process); opening a block across samples still being
+  ///       waited for would trade a command buffer for a stall. Both calls are no-ops - begin_block()
+  ///       answers false - unless OCUDU_DFT_OPEN_BLOCK=1.
+  /// \return begin_block(): whether the accumulation is open. commit_open(): whether a buffer was committed.
+  ///@{
+  bool begin_block();
+  bool commit_open();
+  ///@}
+
+  /// Whether a block of transforms is currently being accumulated.
+  bool has_open() const;
+
   /// \brief Tells the engine which receiving slot the transforms it is about to submit belong to.
   ///
   /// Instrumentation: the GPU lane probe accounts the transforms as one group per slot (see

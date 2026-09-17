@@ -56,6 +56,9 @@ class ofdm_symbol_demodulator_impl : public ofdm_symbol_demodulator
   /// slot's LAST symbol only, since the grid is consumed once per slot.
   unsigned nof_symbols_per_slot = 0;
 
+  /// Whether the transforms of the current slot are being encoded into one command buffer (S-7g-18).
+  bool block_open = false;
+
   bool device_grid_write = false;
 
   /// Whether the resource grid is consumed on the device (see ofdm_demodulator_configuration::
@@ -122,10 +125,36 @@ public:
   unsigned get_cp_offset(unsigned symbol_index, unsigned slot_index) const;
 
   // See interface for documentation.
+  /// \brief Whether the transforms of one block of samples may share a command buffer (S-7g-18).
+  ///
+  /// Only when the receive block holds a whole slot: the whole-slot policy (the default) hands the
+  /// demodulator every symbol of the slot in one call, so batching cannot make a transform wait for
+  /// samples. The symbol-grained policy (OCUDU_UL_RX_SYMBOLS=N>0) exists precisely to transform a symbol
+  /// as soon as it arrives, and keeps one command buffer per symbol - the rule is "batch only what has
+  /// already arrived", and that policy's arrivals are one symbol at a time.
+  static bool block_batching_enabled()
+  {
+    const char* env = std::getenv("OCUDU_DFT_OPEN_BLOCK");
+    if ((env == nullptr) || (std::strtoul(env, nullptr, 10) == 0)) {
+      return false;
+    }
+    const char* rx = std::getenv("OCUDU_UL_RX_SYMBOLS");
+    return (rx == nullptr) || (std::strtoul(rx, nullptr, 10) == 0);
+  }
+
   void set_lane_slot(uint64_t slot_index) override
   {
+    // A new receiving slot ends the previous slot's block: its samples are all in and its transforms are
+    // already encoded, so the command buffer can go. Then the new slot's block is opened.
+    if (block_open) {
+      (void)dft->end_block();
+      block_open = false;
+    }
     if (dft != nullptr) {
       dft->set_lane_slot(slot_index);
+      if (block_batching_enabled() && dft->begin_block()) {
+        block_open = true;
+      }
     }
   }
 

@@ -81,7 +81,19 @@ public:
   }
 
   // See interface for documentation.
-  void wait() override { (void)metal::dft_metal_engine::wait_all(); }
+  void wait() override
+  {
+    // The open block of transforms is part of "everything submitted": commit it before draining, or the
+    // drain would leave it behind (wait_all() is static and cannot do it).
+    if (engine != nullptr) {
+      (void)engine->commit_open();
+    }
+    (void)metal::dft_metal_engine::wait_all();
+  }
+
+  bool begin_block() override { return (engine != nullptr) && engine->begin_block(); }
+
+  bool end_block() override { return (engine != nullptr) && engine->commit_open(); }
 
   void set_lane_slot(uint64_t slot_index) override
   {

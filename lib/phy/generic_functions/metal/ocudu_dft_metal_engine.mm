@@ -201,6 +201,21 @@ struct dft_engine_impl {
   /// (the offline tools submit transforms without a receiving slot at all).
   uint64_t lane_slot     = 0;
   bool     has_lane_slot = false;
+
+  /// \name One command buffer for a block of transforms (see commit_open()).
+  ///
+  /// A caller whose samples arrive a BLOCK at a time - the receiving chain under the whole-slot policy
+  /// gets a whole slot per receive call - hands the transforms of that block over here and they are
+  /// encoded into ONE command buffer, committed when the block ends or when a wait forces it. What it
+  /// saves is the per-command-buffer cost, measured at ~12.7us of GPU time whether the buffer carries
+  /// one transform or fourteen (see the DFT unit test): the transform itself is under a microsecond.
+  /// What it must never do is make a transform wait for samples that have not arrived: the caller opens
+  /// and commits the block around the samples it already holds (see set_block_transforms()).
+  ///@{
+  id<MTLCommandBuffer>         open_cb  = nil;
+  id<MTLComputeCommandEncoder> open_enc = nil;
+  uint64_t                     open_transforms = 0;
+  ///@}
   /// Command buffer of the newest submission per transform slot (ring pipelining).
   id<MTLCommandBuffer> slot_cb[max_batch_slots <= 16 ? 16 : max_batch_slots] = {};
   bool                 slot_pending[16]                                  = {};
@@ -228,6 +243,63 @@ struct dft_engine_impl {
   // Warm-up scratch (page-aligned, engine lifetime; freed by the destructor).
   void* warmup_mem = nullptr;
 };
+
+/// \brief Whether this run asks for a block of transforms to share one command buffer.
+static bool block_batching_requested()
+{
+  const char* env = std::getenv("OCUDU_DFT_OPEN_BLOCK");
+  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+}
+
+/// \brief Whether a block is OPEN, i.e. the transforms being submitted belong to one command buffer.
+static bool block_accumulating(const dft_engine_impl* e)
+{
+  return (e != nullptr) && (e->open_cb != nil);
+}
+
+/// \brief Encoder for the next dispatch: the open command buffer when one is accumulating, a fresh one otherwise.
+/// \return False when no encoder could be created (the caller must not commit anything).
+static bool encode_into(dft_engine_impl*                                 e,
+                        id<MTLCommandBuffer> __strong*                   cb_out,
+                        id<MTLComputeCommandEncoder> __strong*           enc_out)
+{
+  if (block_accumulating(e)) {
+    *cb_out  = e->open_cb;
+    *enc_out = e->open_enc;
+    return true;
+  }
+  id<MTLCommandBuffer> cmd_buf = [dft_resources().queue commandBuffer];
+  if (cmd_buf == nil) {
+    return false;
+  }
+  id<MTLComputeCommandEncoder> enc = [cmd_buf computeCommandEncoder];
+  if (enc == nil) {
+    return false;
+  }
+  *cb_out  = cmd_buf;
+  *enc_out = enc;
+  return true;
+}
+
+/// \brief Closes and commits a command buffer of this engine, with everything a front-end commit owes.
+///
+/// One place on purpose: the GPU-time probe must be armed before the commit, the front-end fence signal
+/// is a command-buffer level API that has to be encoded with the encoder already closed, and the commit
+/// has to be published on the front-end chain so wait_all_committed() can drain it (a commit published
+/// on the wrong chain would make the wait target another queue's command buffer).
+static void commit_front_end(dft_engine_impl* e, id<MTLCommandBuffer> cb)
+{
+  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::front_end);
+  metal::shared_queue::front_end_signal(cb);
+  [cb commit];
+  dft_stats_commit();
+  if (e->has_lane_slot) {
+    metal::gpu_lane_probe::register_front_end_commit(cb, e->lane_slot);
+  }
+  metal::shared_queue::notify_commit(cb, metal::shared_queue::queue_kind::front_end);
+  e->last_committed_cb = cb;
+}
+
 
 /// Reports a refused radio-input request ONCE and tells the caller to stage its own input.
 ///
@@ -508,7 +580,8 @@ bool dft_metal_engine::submit_slot(const void* in, void* out, unsigned slot)
     // Remember the slot's command buffer so a pipelined caller can wait for this transform only
     // (wait_all() would also wait for the newer submissions and flatten the pipeline).
     dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
-    engine->slot_cb[slot]   = engine->last_committed_cb;
+    // While a block accumulates, the transform is in the OPEN buffer and nothing was committed yet.
+    engine->slot_cb[slot]      = block_accumulating(engine) ? engine->open_cb : engine->last_committed_cb;
     engine->slot_pending[slot] = true;
     // The pipeline depth the diagnostic reports: the slots that hold an un-waited transform. It is what
     // "in flight" means for this engine, and it stays bounded by max_batch_slots however few waits the
@@ -522,11 +595,68 @@ bool dft_metal_engine::submit_slot(const void* in, void* out, unsigned slot)
   return ok;
 }
 
+bool dft_metal_engine::begin_block()
+{
+  dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
+  if ((engine == nullptr) || !block_batching_requested()) {
+    return false;
+  }
+  if (engine->open_cb != nil) {
+    return true; // already open
+  }
+  // The block's command buffer is created when the caller says the block starts: from here until
+  // commit_open() every transform is encoded into it.
+  engine->open_cb = [dft_resources().queue commandBuffer];
+  if (engine->open_cb == nil) {
+    return false;
+  }
+  engine->open_enc = [engine->open_cb computeCommandEncoder];
+  if (engine->open_enc == nil) {
+    engine->open_cb = nil;
+    return false;
+  }
+  engine->open_transforms = 0;
+  return true;
+}
+
+bool dft_metal_engine::commit_open()
+{
+  dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
+  if ((engine == nullptr) || (engine->open_cb == nil) || (engine->open_enc == nil)) {
+    return false;
+  }
+  id<MTLCommandBuffer>         cb  = engine->open_cb;
+  id<MTLComputeCommandEncoder> enc = engine->open_enc;
+  const uint64_t               nof = engine->open_transforms;
+  engine->open_cb         = nil;
+  engine->open_enc        = nil;
+  engine->open_transforms = 0;
+  [enc endEncoding];
+  if (nof == 0) {
+    // Nothing was encoded: the block produced no work, so there is nothing to commit. (The command
+    // buffer is dropped; a transform that was refused by the caller never reached the engine.)
+    return true;
+  }
+  commit_front_end(engine, cb);
+  return true;
+}
+
+bool dft_metal_engine::has_open() const
+{
+  const auto* engine = static_cast<const dft_engine_impl*>(impl);
+  return (engine != nullptr) && (engine->open_cb != nil);
+}
+
 bool dft_metal_engine::wait_slot(unsigned slot)
 {
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
   if ((engine == nullptr) || (slot >= max_batch_slots) || !engine->slot_pending[slot]) {
     return true;
+  }
+  // The transform of this slot may still be sitting in the OPEN command buffer of its block: commit it
+  // first, or the wait below would target a buffer that has not been committed at all.
+  if (engine->open_cb != nil) {
+    (void)commit_open();
   }
   id<MTLCommandBuffer> cmd_buf = engine->slot_cb[slot];
   engine->slot_pending[slot]   = false;
@@ -549,6 +679,8 @@ bool dft_metal_engine::wait_slot(unsigned slot)
 
 bool dft_metal_engine::wait_all()
 {
+  // \note Static by design (it drains the whole front-end chain, not one engine's work), so it cannot
+  //       commit an open block itself: the caller does it first (see dft_processor_metal::wait()).
   // Every DFT instance commits on the front-end queue and publishes there, so this drains this
   // engine's own work (and every other front-end commit) - not the back-end stages' command
   // buffers, which run on a queue of their own (see shared_queue::queue_kind).
@@ -655,8 +787,11 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
     input.gain   = write.time_gain;
   }
 
-  id<MTLCommandBuffer>         cmd_buf = [dft_resources().queue commandBuffer];
-  id<MTLComputeCommandEncoder> enc     = [cmd_buf computeCommandEncoder];
+  id<MTLCommandBuffer>         cmd_buf = nil;
+  id<MTLComputeCommandEncoder> enc     = nil;
+  if (!encode_into(engine, &cmd_buf, &enc)) {
+    return false;
+  }
   [enc setComputePipelineState:dft_resources().pipeline];
   [enc setBuffer:b_in offset:0 atIndex:0];
   [enc setBuffer:b_out offset:0 atIndex:1];
@@ -698,23 +833,19 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   [enc setBytes:&params length:sizeof(params) atIndex:10];
 
   [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
-  [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cmd_buf, metal::shared_queue::queue_kind::front_end);
-  // Front-end fence (S-7g-17): this command buffer produces grid symbols the back-end stages read, and
-  // the two queues are independent, so the commit signals the next generation for them to wait on. The
-  // signal is a command-buffer level API - encoded here, with the encoder already closed and before the
-  // commit (see shared_queue::front_end_signal()).
-  metal::shared_queue::front_end_signal(cmd_buf);
-  [cmd_buf commit];
-  dft_stats_commit();
-  if (engine->has_lane_slot) {
-    metal::gpu_lane_probe::register_front_end_commit(cmd_buf, engine->lane_slot);
+  if (block_accumulating(engine)) {
+    // The block's command buffer stays open: the transforms that arrive with it are encoded together and
+    // the commit happens when the block ends (see commit_open()). The slot still records WHICH command
+    // buffer carries its transform, so a wait for it commits the block first.
+    ++engine->open_transforms;
+    engine->slot_cb[slot]      = cmd_buf;
+    engine->slot_pending[slot] = true;
+    return true;
   }
-  metal::shared_queue::notify_commit(cmd_buf, metal::shared_queue::queue_kind::front_end);
-  engine->last_committed_cb    = cmd_buf;
-  engine->slot_cb[slot]        = cmd_buf;
-  engine->slot_pending[slot]   = true;
+  [enc endEncoding];
+  commit_front_end(engine, cmd_buf);
+  engine->slot_cb[slot]      = cmd_buf;
+  engine->slot_pending[slot] = true;
   return true;
 }
 
@@ -793,8 +924,11 @@ bool dft_metal_engine::submit_at(
     return false;
   }
 
-  id<MTLCommandBuffer>         cmd_buf = [dft_resources().queue commandBuffer];
-  id<MTLComputeCommandEncoder> enc     = [cmd_buf computeCommandEncoder];
+  id<MTLCommandBuffer>         cmd_buf = nil;
+  id<MTLComputeCommandEncoder> enc     = nil;
+  if (!encode_into(engine, &cmd_buf, &enc)) {
+    return false;
+  }
   [enc setComputePipelineState:dft_resources().pipeline];
   [enc setBuffer:b_in offset:0 atIndex:0];
   [enc setBuffer:b_out offset:0 atIndex:1];
@@ -817,25 +951,16 @@ bool dft_metal_engine::submit_at(
   [enc setBytes:&input length:sizeof(input) atIndex:12];
   [enc dispatchThreadgroups:MTLSizeMake(nof_transforms, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
-  [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cmd_buf, metal::shared_queue::queue_kind::front_end);
-  // Front-end fence (S-7g-17): this command buffer produces grid symbols the back-end stages read, and
-  // the two queues are independent, so the commit signals the next generation for them to wait on. The
-  // signal is a command-buffer level API - encoded here, with the encoder already closed and before the
-  // commit (see shared_queue::front_end_signal()).
-  metal::shared_queue::front_end_signal(cmd_buf);
-  [cmd_buf commit];
-  dft_stats_commit();
-  if (engine->has_lane_slot) {
-    metal::gpu_lane_probe::register_front_end_commit(cmd_buf, engine->lane_slot);
+  if (block_accumulating(engine)) {
+    // Part of a block: the encoder stays OPEN with the command buffer until the block ends (see
+    // commit_open() - ending it here would close the buffer the next transform still has to encode
+    // into). A caller that asked for accumulation must not ask for a completion wait on a single
+    // transform either: there is nothing committed to wait for yet.
+    ++engine->open_transforms;
+    return true;
   }
-  // Publish the commit on the front-end chain so wait_all_committed() can drain it: the DFT is the
-  // only engine on this queue, and it is a different queue than the back-end stages' (a commit must
-  // never be published on the wrong chain, or the wait would target another queue's command buffer
-  // and return before this one completed).
-  metal::shared_queue::notify_commit(cmd_buf, metal::shared_queue::queue_kind::front_end);
-  engine->last_committed_cb = cmd_buf;
+  [enc endEncoding];
+  commit_front_end(engine, cmd_buf);
   if (!wait_for_completion) {
     return true;
   }
