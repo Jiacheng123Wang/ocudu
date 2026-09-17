@@ -4,13 +4,13 @@
 
 #pragma once
 
+#include "extension_header/pdcp_pdu_number_packing.h"
 #include "gtpu_pdu.h"
 #include "gtpu_tunnel_base_tx.h"
 #include "ocudu/adt/byte_buffer.h"
 #include "ocudu/gtpu/gtpu_config.h"
 #include "ocudu/gtpu/gtpu_tunnel_pdcp_tx.h"
 #include "ocudu/ran/cu_up_types.h"
-#include "ocudu/support/bit_encoding.h"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
@@ -25,6 +25,7 @@ public:
                            dlt_pcap&                                                  gtpu_pcap_,
                            gtpu_tunnel_common_tx_upper_layer_notifier&                upper_dn_) :
     gtpu_tunnel_base_tx(gtpu_tunnel_log_prefix{cfg_.lif, ue_index, cfg_.peer_teid, "UL"}, gtpu_pcap_, upper_dn_),
+    pdcp_pdu_number_packer(logger.get_basic_logger()),
     cfg(cfg_),
     current_peer_teid(cfg_.peer_teid)
   {
@@ -57,13 +58,10 @@ public:
 
     // Put PDCP PDU number.
     byte_buffer ext_buf;
-    bit_encoder encoder{ext_buf};
-    bool        pack_ok = true;
-    pack_ok &= encoder.pack(pdcp_pdu_number, 16); // PDCP PDU number.
-
-    if (!pack_ok) {
-      logger.log_error(
-          "Dropped T-PDU, error writing GTP-U extension header. teid={} ext_len={}", hdr.teid, ext_buf.length());
+    if (!pdcp_pdu_number_packer.pack(ext_buf, pdcp_pdu_number)) {
+      logger.log_error("Dropped T-PDU, error writing PDCP PDU number to GTP-U extension header. teid={} ext_len={}",
+                       hdr.teid,
+                       ext_buf.length());
       return;
     }
 
@@ -89,6 +87,8 @@ public:
   }
 
 private:
+  pdcp_pdu_number_packing pdcp_pdu_number_packer;
+
   const gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_tx_config cfg;
   gtpu_teid_t                                               current_peer_teid = {};
   sockaddr_storage                                          peer_sockaddr     = {};

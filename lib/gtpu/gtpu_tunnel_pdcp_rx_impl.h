@@ -4,10 +4,10 @@
 
 #pragma once
 
+#include "extension_header/pdcp_pdu_number_packing.h"
 #include "gtpu_tunnel_base_rx.h"
 #include "ocudu/gtpu/gtpu_config.h"
 #include "ocudu/gtpu/gtpu_tunnel_pdcp_rx.h"
-#include "ocudu/psup/psup_packing.h"
 #include "ocudu/ran/cu_up_types.h"
 #include "ocudu/support/sdu_window.h"
 #include "ocudu/support/timers.h"
@@ -48,7 +48,7 @@ public:
                            gtpu_tunnel_pdcp_rx_lower_layer_notifier&           rx_lower_,
                            timer_factory                                       ue_ctrl_timer_factory_) :
     gtpu_tunnel_base_rx(gtpu_tunnel_log_prefix{cfg.lif, ue_index, cfg.local_teid, "DL"}),
-    psup_packer(logger.get_basic_logger()),
+    pdcp_pdu_number_packer(logger.get_basic_logger()),
     lower_dn(rx_lower_),
     config(cfg),
     rx_window(logger, GTPU_RX_WINDOW_SIZE),
@@ -87,15 +87,18 @@ protected:
       return;
     }
 
-    size_t                  pdu_len         = pdu.buf.length();
-    gtpu_teid_t             teid            = pdu.hdr.teid;
-    std::optional<uint32_t> pdcp_pdu_number = std::nullopt;
+    size_t      pdu_len              = pdu.buf.length();
+    gtpu_teid_t teid                 = pdu.hdr.teid;
+    uint32_t    pdcp_pdu_number      = 0;
+    bool        have_pdcp_pdu_number = false;
     for (auto ext_hdr : pdu.hdr.ext_list) {
       switch (ext_hdr.extension_header_type) {
         case gtpu_extension_header_type::pdcp_pdu_number:
-          if (!pdcp_pdu_number.has_value()) {
-            // TODO: unpack PDCP PDU Number
-            pdcp_pdu_number = 66;
+          if (!have_pdcp_pdu_number) {
+            have_pdcp_pdu_number = pdcp_pdu_number_packer.unpack(pdcp_pdu_number, ext_hdr.container);
+            if (!have_pdcp_pdu_number) {
+              logger.log_error("Failed to unpack PDCP PDU number. pdu_len={}", pdu_len);
+            }
           } else {
             logger.log_warning("Ignoring multiple PDCP PDU numbers. pdu_len={}", pdu_len);
           }
@@ -106,7 +109,7 @@ protected:
                              pdu_len);
       }
     }
-    if (!pdcp_pdu_number.has_value()) {
+    if (!have_pdcp_pdu_number) {
       logger.log_warning(
           "Incomplete PDU at Xn-U interface: missing PDCP PDU number. pdu_len={} teid={}", pdu_len, teid);
       // TS 38.300 Sec. 9.2.3.2.3: The SN of forwarded PDCP SDUs is carried in the "PDCP PDU number"
@@ -119,7 +122,7 @@ protected:
     if (!pdu.hdr.flags.seq_number || config.t_reordering.count() == 0) {
       // Forward this SDU straight away.
       byte_buffer            rx_sdu      = gtpu_extract_msg(std::move(pdu)); // header is invalidated after extraction.
-      gtpu_pdcp_rx_tpdu_info rx_sdu_info = {std::move(rx_sdu), *pdcp_pdu_number, std::nullopt};
+      gtpu_pdcp_rx_tpdu_info rx_sdu_info = {std::move(rx_sdu), pdcp_pdu_number, std::nullopt};
       deliver_sdu(rx_sdu_info);
       return;
     }
@@ -153,7 +156,7 @@ protected:
                              nof_log_sn_out_of_window);
         }
       }
-      gtpu_pdcp_rx_tpdu_info rx_sdu_info = {std::move(rx_sdu), *pdcp_pdu_number, gtpu_sn};
+      gtpu_pdcp_rx_tpdu_info rx_sdu_info = {std::move(rx_sdu), pdcp_pdu_number, gtpu_sn};
       deliver_sdu(rx_sdu_info);
       return;
     }
@@ -161,7 +164,7 @@ protected:
     // Check late SN
     if (rx_mod_base(gtpu_sn, st) < rx_mod_base(st.rx_deliv, st)) {
       logger.log_debug("Out-of-order after timeout or duplicate. gtpu_sn={} pdu_len={} {}", gtpu_sn, pdu_len, st);
-      gtpu_pdcp_rx_tpdu_info rx_sdu_info = {std::move(rx_sdu), *pdcp_pdu_number, gtpu_sn};
+      gtpu_pdcp_rx_tpdu_info rx_sdu_info = {std::move(rx_sdu), pdcp_pdu_number, gtpu_sn};
       deliver_sdu(rx_sdu_info);
       return;
     }
@@ -174,7 +177,7 @@ protected:
 
     gtpu_pdcp_rx_tpdu_info& rx_sdu_info = rx_window.add_sn(gtpu_sn);
     rx_sdu_info.tpdu                    = std::move(rx_sdu);
-    rx_sdu_info.pdcp_pdu_number         = *pdcp_pdu_number;
+    rx_sdu_info.pdcp_pdu_number         = pdcp_pdu_number;
     rx_sdu_info.gtpu_sn                 = gtpu_sn;
 
     // Update RX_NEXT
@@ -278,7 +281,7 @@ protected:
   }
 
 private:
-  psup_packing                              psup_packer;
+  pdcp_pdu_number_packing                   pdcp_pdu_number_packer;
   gtpu_tunnel_pdcp_rx_lower_layer_notifier& lower_dn;
   bool                                      stopped = false;
 
