@@ -517,7 +517,22 @@ void lower_phy_baseband_processor::ul_process()
   // Queue uplink buffer processing. A block that only establishes the phase is not queued: its buffer
   // goes out of scope here and returns to the pool (see rx_buffer_pool) - under the symbol-grained policy
   // the slot buffer stays ours and the dropped samples are simply overwritten by the next block.
-  if (!establishes_phase) {
+  // While the processor is stopping, the samples are NOT handed to the uplink processor: it is what feeds
+  // the MAC's slot indications, and the upper layers are being taken down at that very moment - a slot
+  // indication delivered in the middle of the DU's teardown is what makes that teardown race (observed
+  // 2026-09-17 twice, on consecutive runs: intra_slice_scheduler::update_used_dl_vrbs while a slot was
+  // being scheduled, and odu::du_ue_drb::stop() on a UE task strand). Those slots belong to a MAC that is
+  // going away, so the samples are dropped instead; the receive chain itself still runs to the end of the
+  // FSM's countdown (see stop() and wait_stop()), and the blocks already enqueued still run.
+  if (!establishes_phase && rx_stop_requested.load(std::memory_order_acquire)) {
+    static std::atomic<bool> stop_drop_logged{false};
+    bool                     expected = false;
+    if (stop_drop_logged.compare_exchange_strong(expected, true)) {
+      ocudulog::fetch_basic_logger("PHY").info(
+          "Uplink processing stopped: blocks received while stopping are not handed over ({} samples)",
+          nof_samples);
+    }
+  } else if (!establishes_phase) {
     const bool deferred =
         uplink_executor.defer([this,
                                ul_buffer = std::move(rx_buffer),
