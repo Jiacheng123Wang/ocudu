@@ -127,15 +127,18 @@ public:
   // See interface for documentation.
   /// \brief Whether the transforms of one block of samples may share a command buffer (S-7g-18).
   ///
-  /// Only when the receive block holds a whole slot: the whole-slot policy (the default) hands the
+  /// ONLY when the receive block holds a whole slot: the whole-slot policy (the default) hands the
   /// demodulator every symbol of the slot in one call, so batching cannot make a transform wait for
   /// samples. The symbol-grained policy (OCUDU_UL_RX_SYMBOLS=N>0) exists precisely to transform a symbol
   /// as soon as it arrives, and keeps one command buffer per symbol - the rule is "batch only what has
-  /// already arrived", and that policy's arrivals are one symbol at a time.
+  /// already arrived", and that policy's arrivals are one symbol at a time. Verified as a counter-example
+  /// gate: with both knobs set, the command-buffer count is the per-symbol one (48.191(f)).
+  ///
+  /// DEFAULT ON since its leg confirmed the saving (48.191(g)); OCUDU_DFT_OPEN_BLOCK=0 is the escape hatch.
   static bool block_batching_enabled()
   {
     const char* env = std::getenv("OCUDU_DFT_OPEN_BLOCK");
-    if ((env == nullptr) || (std::strtoul(env, nullptr, 10) == 0)) {
+    if ((env != nullptr) && (std::strtoul(env, nullptr, 10) == 0)) {
       return false;
     }
     const char* rx = std::getenv("OCUDU_UL_RX_SYMBOLS");

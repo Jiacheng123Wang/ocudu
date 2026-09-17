@@ -77,7 +77,8 @@ public:
   ///       per-symbol submission exists so that a symbol is transformed as soon as its samples are there
   ///       (see lower_phy_baseband_processor::ul_process); opening a block across samples still being
   ///       waited for would trade a command buffer for a stall. Both calls are no-ops - begin_block()
-  ///       answers false - unless OCUDU_DFT_OPEN_BLOCK=1.
+  ///       answers false - when the caller asks for the historical per-transform command buffers with
+  ///       OCUDU_DFT_OPEN_BLOCK=0 (the accumulation is the default, see 48.191(g)).
   /// \return begin_block(): whether the accumulation is open. commit_open(): whether a buffer was committed.
   ///@{
   bool begin_block();

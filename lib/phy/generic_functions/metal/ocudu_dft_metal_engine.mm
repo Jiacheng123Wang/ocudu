@@ -254,10 +254,14 @@ struct dft_engine_impl {
 };
 
 /// \brief Whether this run asks for a block of transforms to share one command buffer.
+///
+/// DEFAULT ON since its leg confirmed it (48.191(g)): the front end's GPU time per slot went from 531.6
+/// to 424.0us and the end-to-end [ul_pipeline] moved with it (-105us), with the contract, the red lines
+/// and the back-end lane unchanged. OCUDU_DFT_OPEN_BLOCK=0 is the escape hatch.
 static bool block_batching_requested()
 {
   const char* env = std::getenv("OCUDU_DFT_OPEN_BLOCK");
-  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
 }
 
 /// \brief Whether a block is OPEN, i.e. the transforms being submitted belong to one command buffer.
