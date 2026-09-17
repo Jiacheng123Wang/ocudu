@@ -10,6 +10,7 @@
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/ocuduvec/zero.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
+#include "ocudu/ran/frame_types.h"
 #include "ocudu/ran/subcarrier_spacing.h"
 #include "ocudu/support/error_handling.h"
 #include <algorithm>
@@ -65,6 +66,10 @@ ofdm_symbol_demodulator_impl::ofdm_symbol_demodulator_impl(const ofdm_demodulato
 
   // Device grid write: the engine that can do it writes both the transform and the grid in one command buffer, so the
   // transform output never travels back to the host. The table is constant, so it is published once.
+  // Symbols per slot of this numerology: normal CP carries 14, extended 12. The wait policy in
+  // finish_symbol() uses it to recognize the slot's last symbol (see there).
+  nof_symbols_per_slot = (ofdm_config.cp == cyclic_prefix::NORMAL) ? NOF_OFDM_SYM_PER_SLOT_NORMAL_CP
+                                                                  : NOF_OFDM_SYM_PER_SLOT_EXTENDED_CP;
   device_grid_write        = ofdm_config.device_grid_write;
   grid_consumed_on_device  = ofdm_config.grid_consumed_on_device;
   if (device_grid_write) {
@@ -283,30 +288,6 @@ void ofdm_symbol_demodulator_impl::submit_symbol(resource_grid_writer& grid,
       .port_index = port_index, .symbol_index = symbol_index, .valid = true, .device_write = device_write};
 }
 
-/// \brief Whether a configuration exists whose readers touch the resource grid on the HOST.
-///
-/// The front-end fence (see finish_symbol()) only orders the grid's producer against readers on the
-/// DEVICE, so these are the routes that must keep the host wait: the host LS pre-stage and the CPU
-/// estimator read the pilots out of the grid, the debug capture dumps it, and OCUDU_EQ_GATHER=0 makes
-/// the equalizer gather the received symbols on the host instead of on the device.
-/// Read once: a leg sets them before the process starts.
-static bool host_grid_readers_enabled()
-{
-  static const bool on = (std::getenv("OCUDU_CE_CPU_LS") != nullptr) || (std::getenv("OCUDU_CE_CPU_CE") != nullptr) ||
-                         (std::getenv("OCUDU_UL_DUMP") != nullptr) || (std::getenv("OCUDU_EQ_GATHER") != nullptr);
-  return on;
-}
-
-/// \brief Whether the front-end fence orders the front-end DFTs against the back-end grid readers.
-static bool front_end_fence_enabled()
-{
-  // Same knob as shared_queue's fence (OCUDU_UL_FRONTEND_FENCE): one switch for BOTH ends of the
-  // relation, because a fence that is signalled but never waited on - or the other way round - is not a
-  // half-optimization, it is an unordered chain.
-  const char* env = std::getenv("OCUDU_UL_FRONTEND_FENCE");
-  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
-}
-
 void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, unsigned slot)
 {
   ocudu_assert(slot < max_pipeline_depth, "Invalid pipeline slot {}.", slot);
@@ -327,9 +308,17 @@ void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, uns
   // ... and only when the deployment DECLARED that the grid's consumers read it on the device: writing it
   // there (device_grid_write) says nothing about who reads it, and a host reader - the demodulator's own
   // test verifies the grid on the host - would read memory the GPU has not written yet.
-  const bool fence_orders_the_grid =
-      front_end_fence_enabled() && device_grid_write && grid_consumed_on_device && !host_grid_readers_enabled();
-  if (!fence_orders_the_grid) {
+  const bool last_symbol_of_slot =
+      ((pipeline_slots[slot].symbol_index % nof_symbols_per_slot) == (nof_symbols_per_slot - 1));
+  // Whether the grid can be read before the slot is complete. Nobody in the receiving chain does - the
+  // upper PHY processes a slot after its last symbol has been reported - but a configuration has to SAY
+  // so: that is exactly what grid_consumed_on_device declares (the same declaration the front-end fence
+  // needs), and the demodulator's own test, which verifies the grid symbol by symbol on the host, does
+  // not declare it and therefore keeps the historical wait. With the declaration, the wait belongs to
+  // the slot's LAST symbol: fourteen host waits for one consumer become one. Every earlier symbol is
+  // complete by then anyway - one queue completes its command buffers in submission order.
+  const bool wait_per_slot = pipeline_slots[slot].device_write && grid_consumed_on_device;
+  if (!wait_per_slot || last_symbol_of_slot) {
     dft->wait_slot(slot);
   } else {
     // The host wait for this symbol is gone: the back end is ordered by the fence event instead. Said
@@ -341,8 +330,8 @@ void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, uns
     if (!reported) {
       reported = true;
       ocudulog::fetch_basic_logger("PHY").info(
-          "OFDM demodulator: the resource grid is handed to the back end through the front-end fence "
-          "(no host wait per symbol). Its consumers must read it on the device - see the pipeline contract");
+          "OFDM demodulator: the resource grid is waited for once per slot (last symbol) - the earlier "
+          "symbols are not waited for, since nothing reads the grid before the slot is complete");
     }
   }
 

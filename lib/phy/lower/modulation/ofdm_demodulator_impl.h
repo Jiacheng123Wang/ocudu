@@ -52,6 +52,10 @@ class ofdm_symbol_demodulator_impl : public ofdm_symbol_demodulator
   /// Device grid write of the DFT engine, if it has one (nullptr otherwise: the grid is then written from the host).
   dft_processor_grid_write* grid_write = nullptr;
   /// Configuration: write the demodulated symbols into the resource grid from the device.
+  /// Symbols per slot of this numerology (14 normal CP, 12 extended): the wait policy waits for the
+  /// slot's LAST symbol only, since the grid is consumed once per slot.
+  unsigned nof_symbols_per_slot = 0;
+
   bool device_grid_write = false;
 
   /// Whether the resource grid is consumed on the device (see ofdm_demodulator_configuration::
