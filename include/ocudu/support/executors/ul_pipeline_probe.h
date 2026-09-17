@@ -78,10 +78,21 @@ public:
 
   /// Records the start of the UL processing of a slot (call from the lower PHY baseband processor).
   /// \param[in] slot Slot number (SFN-referenced slot count, matching the FAPI slot indications).
+  ///
+  /// \note One slot may arrive in SEVERAL blocks: the receive policy decides the block size (see
+  ///       lower_phy_baseband_processor::ul_process), and a symbol-grained policy calls this once per
+  ///       symbol. The start of the series is the arrival of the slot's FIRST samples, so the earliest
+  ///       call wins. Overwriting it with a later block - which is what this did while every block was
+  ///       a whole slot - would shorten [ul_pipeline] and, through record_ldpc_start(),
+  ///       [ul_time_frequency] by an amount that grows as the blocks get smaller: a receive-policy
+  ///       change would report a latency win that no part of the pipeline earned.
   void record_start(uint64_t slot)
   {
     std::lock_guard<std::mutex> lock(mutex);
-    pending_starts[slot] = {std::chrono::high_resolution_clock::now(), next_start_seq++};
+    const auto now = std::chrono::high_resolution_clock::now();
+    if (pending_starts.find(slot) == pending_starts.end()) {
+      pending_starts[slot] = {now, next_start_seq++};
+    }
     // Bound the registry by INSERTION ORDER (the slot count wraps every SFN cycle, so the key order is not a
     // valid age order): unmatched entries belong to idle slots (no PUSCH), drop the oldest insertion.
     evict_oldest(pending_starts);
