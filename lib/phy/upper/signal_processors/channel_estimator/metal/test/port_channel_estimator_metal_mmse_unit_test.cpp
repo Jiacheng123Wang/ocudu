@@ -193,6 +193,10 @@ dmrs_symbol_list make_pilots(unsigned n_prb = 51, unsigned nof_symbols = 2)
 
 int main()
 {
+  // The fused lane's knob is opt-in and Test 13 sets it explicitly where it needs it: clearing it here
+  // keeps every other test on the default route whatever the caller's environment says.
+  unsetenv("OCUDU_CE_FUSED_BURST");
+
   std::mt19937 rng(1234);
 
   unsigned n_bad = 0;
