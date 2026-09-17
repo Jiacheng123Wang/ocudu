@@ -92,6 +92,17 @@ if(NOT (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64"))
     endif()
 endif()
 
+# Single source of truth for "this build compiles at least one Metal offload". The shared Metal
+# queue/burst infrastructure in lib/phy/metal is Objective-C++, so it must be pulled in only when
+# one of the five backends above is on. Deriving the aggregate here keeps that five-way test in one
+# place instead of repeating it in every directory that needs to know.
+if(ENABLE_METAL_LDPC OR ENABLE_METAL_CHEST OR ENABLE_METAL_DFT OR
+   ENABLE_METAL_EQUALIZER OR ENABLE_METAL_DEMODULATION)
+    set(METAL_OFFLOADS_ENABLED ON)
+else()
+    set(METAL_OFFLOADS_ENABLED OFF)
+endif()
+
 if(APPLE AND NOT TARGET atomic)
     # macOS does not provide a separate libatomic. Some targets link the
     # interface library named "atomic"; add an empty one so CMake treats it

@@ -1,4 +1,16 @@
 # Shared Metal infrastructure for the PHY GPU chain (GPU-PHY S2).
+#
+# This directory is entered only when at least one Metal offload is enabled (see the
+# METAL_OFFLOADS_ENABLED gate in lib/phy/CMakeLists.txt). Reaching it anywhere else would send the
+# configure step looking for an Objective-C++ compiler (cc1objplus) that is not part of a default
+# Linux/GCC install, and the failure would surface as a broken-compiler error rather than as the
+# real cause. Say the real cause here.
+if(NOT (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64"))
+    message(FATAL_ERROR
+        "lib/phy/metal (the shared Metal command queue) is Objective-C++ and builds on Apple "
+        "Silicon only. This is ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}. It must not be "
+        "added unless METAL_OFFLOADS_ENABLED is set; see lib/phy/CMakeLists.txt.")
+endif()
 
 enable_language(OBJCXX)
 add_library(ocudu_metal_queue STATIC
