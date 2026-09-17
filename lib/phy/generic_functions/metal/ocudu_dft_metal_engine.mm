@@ -40,7 +40,9 @@ namespace {
 struct dft_stats_t {
   std::atomic<uint64_t> commits{0};
   std::atomic<uint64_t> waits{0};
-  std::atomic<uint64_t> in_flight{0};
+  /// Peak PIPELINE DEPTH: how many of the batch slots held an un-waited transform at once. Tracked by
+  /// dft_stats_note_depth() from the engine's own slot_pending[] flags - never from commits minus waits,
+  /// which grows without bound now that the wait policy does not wait for every transform.
   std::atomic<uint64_t> in_flight_max{0};
   /// Transforms whose input came straight from the radio's int16 buffer instead of the engine's
   /// float2 ring (see grid_write::time_samples). Zero means every transform is staging its input on
@@ -60,21 +62,24 @@ static dft_stats_t& dft_stats()
   return s;
 }
 
+static void dft_stats_note_depth(uint64_t depth)
+{
+  dft_stats_t& s = dft_stats();
+  uint64_t     prev = s.in_flight_max.load(std::memory_order_relaxed);
+  while (depth > prev && !s.in_flight_max.compare_exchange_weak(prev, depth, std::memory_order_relaxed)) {
+  }
+}
+
 static void dft_stats_commit()
 {
   dft_stats_t& s = dft_stats();
   s.commits.fetch_add(1, std::memory_order_relaxed);
-  const uint64_t nf = s.in_flight.fetch_add(1, std::memory_order_acq_rel) + 1;
-  uint64_t       prev = s.in_flight_max.load(std::memory_order_relaxed);
-  while (nf > prev && !s.in_flight_max.compare_exchange_weak(prev, nf, std::memory_order_relaxed)) {
-  }
 }
 
 static void dft_stats_wait()
 {
   dft_stats_t& s = dft_stats();
   s.waits.fetch_add(1, std::memory_order_relaxed);
-  s.in_flight.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 /// Counts one transform whose input came straight from the radio's int16 buffer (the zero-copy
@@ -95,7 +100,11 @@ static void dft_stats_report()
 {
   const dft_stats_t& s = dft_stats();
   std::fprintf(stderr,
-               "[metal_stats] dft commits=%llu waits=%llu max_in_flight=%llu radio_inputs=%llu wrap_copies=%llu\n",
+               // slots_in_flight is the DEPTH OF THE PIPELINE (how many of the max_pipeline_depth slots
+               // hold an un-waited transform), not commits minus waits: the wait policy stopped waiting for
+               // every transform (see ofdm_demodulator_impl::finish_symbol()), so that difference grows
+               // without bound and would read like a backlog that is not there.
+               "[metal_stats] dft commits=%llu waits=%llu slots_in_flight=%llu radio_inputs=%llu wrap_copies=%llu\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
@@ -134,6 +143,7 @@ static const bool dft_contract_registered = []() {
 }();
 
 #else  // OCUDU_METAL_STATS
+static void dft_stats_note_depth(uint64_t /*depth*/) {}
 static void dft_stats_commit() {}
 static void dft_stats_wait() {}
 static void dft_stats_wrap_copy() {}
@@ -494,6 +504,14 @@ bool dft_metal_engine::submit_slot(const void* in, void* out, unsigned slot)
     dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
     engine->slot_cb[slot]   = engine->last_committed_cb;
     engine->slot_pending[slot] = true;
+    // The pipeline depth the diagnostic reports: the slots that hold an un-waited transform. It is what
+    // "in flight" means for this engine, and it stays bounded by max_batch_slots however few waits the
+    // caller pays (see dft_stats_note_depth()).
+    uint64_t depth = 0;
+    for (unsigned i = 0; i != max_batch_slots; ++i) {
+      depth += engine->slot_pending[i] ? 1u : 0u;
+    }
+    dft_stats_note_depth(depth);
   }
   return ok;
 }
