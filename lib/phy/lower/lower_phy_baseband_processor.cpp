@@ -9,9 +9,11 @@
 #include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_writer_view.h"
 #include "ocudu/instrumentation/traces/ru_traces.h"
 #include "ocudu/phy/phy_pipeline_contract.h"
-#if defined(OCUDU_FLOW_PROBES)
-#include "ocudu/ocudulog/ocudulog.h" // [zmq-probe] temporary: fetch_basic_logger
-#endif
+// fetch_basic_logger(): used by the shutdown path of ul_process (a refused uplink task) as well as by the
+// flow probe, so the include is not tied to OCUDU_FLOW_PROBES any more. It used to be, and the macOS build
+// still compiled because the logger header arrived transitively there - the Linux/GCC build is the one that
+// caught it (the warning did not exist before the S-7g-13 shutdown path).
+#include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/ran/slot_point_extended.h"
 #include "ocudu/support/executors/thread_utils.h" // cpu_relax()
 #include "ocudu/support/executors/ul_pipeline_probe.h"
