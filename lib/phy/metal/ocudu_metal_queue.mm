@@ -103,6 +103,10 @@ struct shared_queue_state {
   /// Requests the platform refused to map (the pointer is not page-aligned, or the mapping failed):
   /// the caller staged the buffer through a copy instead, which is correct but is not zero-copy.
   uint64_t wrap_failures = 0;
+  /// Mappings dropped because the allocation they were made for was released (see
+  /// purge_wrap_cache). Not a contract violation: the mapping of the NEXT allocation that gets those
+  /// pages is a create, whereas without the purge the stale mapping would count as a replaced one.
+  uint64_t wrap_purges = 0;
   /// Wrap requests whose slice offset did not satisfy the alignment the binding needs (a `float2`
   /// argument wants 8 bytes, a `float` 4, a `char` 1). A non-zero count means the zero-copy path is
   /// only "usually" aligned: the engine then stages a copy instead of binding a misaligned slice.
@@ -115,12 +119,14 @@ shared_queue_state& state();
 void shared_queue_stats_report()
 {
   shared_queue_state& s = state();
-  std::fprintf(stderr, "[metal_stats] wrap hits=%llu creates=%llu replaces=%llu failures=%llu misaligned=%llu\n",
+  std::fprintf(stderr,
+               "[metal_stats] wrap hits=%llu creates=%llu replaces=%llu failures=%llu misaligned=%llu purges=%llu\n",
                static_cast<unsigned long long>(s.wrap_hits),
                static_cast<unsigned long long>(s.wrap_creates),
                static_cast<unsigned long long>(s.wrap_replaces),
                static_cast<unsigned long long>(s.wrap_failures),
-               static_cast<unsigned long long>(s.wrap_misaligned.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.wrap_misaligned.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.wrap_purges));
   // GPU busy time, measured on the command buffers themselves (GPUStartTime/GPUEndTime in their
   // completion handlers): this is the one time measurement that keeps its meaning once the stages are
   // fused into a single command buffer, where the per-stage host timestamps say nothing any more.
@@ -176,6 +182,34 @@ shared_queue_state& state()
   return s;
 }
 
+/// \brief Drops the mappings created for an allocation that is about to be released.
+///
+/// A no-copy mapping is created for ONE allocation and its length describes that allocation (see
+/// wrap_no_copy), so it must not outlive it: the allocator hands the pages of a released block to
+/// the next allocation, and a mapping kept across that point serves the new buffer with an object
+/// created for the old one - a mapping that describes memory which no longer exists. It is also what
+/// the "zero-copy wraps" contract check sees as a REPLACED mapping, which is how the offline
+/// deferred-chain test reported it: its test cases allocate and release grids of different sizes,
+/// the allocator reuses one address, and the wrap of the new grid found the old grid's mapping.
+void purge_wrap_cache(void* base)
+{
+  shared_queue_state& s = state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  for (auto it = s.wrap_cache.begin(); it != s.wrap_cache.end();) {
+    if (it->second.alloc == base) {
+      it = s.wrap_cache.erase(it);
+      ++s.wrap_purges;
+    } else {
+      ++it;
+    }
+  }
+}
+
+const bool shared_queue_free_observer_registered = []() {
+  compat::register_aligned_free_observer(&purge_wrap_cache);
+  return true;
+}();
+
 std::once_flag& init_flag()
 {
   static std::once_flag f;
@@ -211,6 +245,29 @@ id<MTLBuffer> shared_queue::wrap_no_copy(id<MTLDevice> device, const void* ptr, 
   void*  alloc_base = nullptr;
   size_t alloc_size = 0;
   const bool alloc_known = compat::describe_aligned_allocation(ptr, &alloc_base, &alloc_size);
+
+  // The request must fit inside the allocation the pointer belongs to, and this is checked before
+  // anything else touches the cache: a request that reaches past its allocation would otherwise
+  // evict the mapping of an address that is perfectly valid, and then be handed a buffer SHORTER
+  // than the range it asked for. The kernel bound to that buffer would index memory the object does
+  // not back - silently, on the GPU, which is how a run that walked from one staging allocation
+  // into the next produced wrong LLRs (see the run bound in demod_flush_hook). Refuse instead: the
+  // caller stages a copy, and the failure is counted.
+  if (alloc_known && (aligned > ((alloc_size + page - 1) / page) * page)) {
+    ++s.wrap_failures;
+    static std::atomic<bool> overshoot_logged{false};
+    bool                     expected = false;
+    if (overshoot_logged.compare_exchange_strong(expected, true)) {
+      const size_t remaining = alloc_size - static_cast<size_t>(static_cast<const char*>(ptr) - static_cast<const char*>(alloc_base));
+      ocudulog::fetch_basic_logger("PHY").error(
+          "Metal: a no-copy wrap of {} bytes was requested at {}, but only {} bytes are left in its "
+          "allocation; refusing the mapping instead of handing out a shorter buffer",
+          aligned,
+          ptr,
+          remaining);
+    }
+    return nil;
+  }
 
   // Containment lookup: the mapping created for the closest address at or below the request wins,
   // provided it covers the page-rounded request and belongs to the same allocation. The

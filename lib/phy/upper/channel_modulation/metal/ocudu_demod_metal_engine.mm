@@ -208,6 +208,21 @@ size_t llr_span_bytes(const demod_params_t& p)
          (static_cast<size_t>(p.nof_re) * bits_per_symbol_of(p.mod));
 }
 
+/// \brief Bytes from \p ptr to the end of the allocation that contains it.
+///
+/// Returns SIZE_MAX when the process-wide registry does not describe the pointer, in which case the
+/// caller has no bound to apply and keeps its previous behaviour (see wrap_length).
+size_t allocation_bytes_left(const void* ptr)
+{
+  void*  base = nullptr;
+  size_t size = 0;
+  if (!compat::describe_aligned_allocation(ptr, &base, &size)) {
+    return std::numeric_limits<size_t>::max();
+  }
+  const size_t offset = static_cast<size_t>(static_cast<const char*>(ptr) - static_cast<const char*>(base));
+  return (size > offset) ? (size - offset) : 0;
+}
+
 /// \brief Length the no-copy mapping of \p ptr must cover for a run whose arrays reach \p span bytes.
 ///
 /// The length a buffer is wrapped with must not follow the geometry of one run. The buffers of the
@@ -370,6 +385,19 @@ id<MTLComputePipelineState> demod_flush_hook(void* context, id<MTLComputeCommand
     // Extend the run while the next symbol keeps the geometry AND continues the same strides: one
     // grid covers the whole run, so every symbol must be reachable from the first one by a constant
     // step in each array. A symbol separated by a different gap simply starts a new run.
+    //
+    // A constant step is necessary but NOT sufficient: the whole run is bound to the kernel through
+    // ONE mapping, and that mapping covers the allocation of the FIRST symbol and nothing else (see
+    // wrap_length). Symbols that happen to sit in different allocations at a uniform distance would
+    // satisfy the stride test and then be read - and written - past the end of the buffer object
+    // that backs them, which the GPU does silently. This is not hypothetical: the deferred chain
+    // stages every array it is given (the caller's buffers are not page aligned), and the staged
+    // buffers of three submits are three allocations, ~80% of the runs of the offline gate landed on
+    // a uniform distance and produced wrong LLRs. The run therefore has to stay inside the
+    // allocation of its first symbol in all three arrays.
+    const size_t sym_left = allocation_bytes_left(pending[first].symbols);
+    const size_t nv_left  = allocation_bytes_left(pending[first].noise_var);
+    const size_t llr_left = allocation_bytes_left(pending[first].llrs);
     size_t   sym_stride = 0;
     size_t   nv_stride  = 0;
     size_t   llr_stride = 0;
@@ -392,11 +420,20 @@ id<MTLComputePipelineState> demod_flush_hook(void* context, id<MTLComputeCommand
       const size_t s_sym = static_cast<size_t>(d_sym) / (2 * sizeof(float));
       const size_t s_nv  = static_cast<size_t>(d_nv) / sizeof(float);
       const size_t s_llr = static_cast<size_t>(d_llr);
-      if (n_sym == 1) {
+      if (n_sym > 1) {
+        if ((s_sym != sym_stride) || (s_nv != nv_stride) || (s_llr != llr_stride)) {
+          break;
+        }
+      } else {
         sym_stride = s_sym;
         nv_stride  = s_nv;
         llr_stride = s_llr;
-      } else if ((s_sym != sym_stride) || (s_nv != nv_stride) || (s_llr != llr_stride)) {
+      }
+      // Span of the run that one more symbol would make, against the allocation of the first one.
+      const size_t run_sym = (static_cast<size_t>(n_sym) * s_sym * 2 * sizeof(float)) + (nof_re * 2 * sizeof(float));
+      const size_t run_nv  = (static_cast<size_t>(n_sym) * s_nv * sizeof(float)) + (nof_re * sizeof(float));
+      const size_t run_llr = (static_cast<size_t>(n_sym) * s_llr) + (static_cast<size_t>(nof_re) * bps);
+      if ((run_sym > sym_left) || (run_nv > nv_left) || (run_llr > llr_left)) {
         break;
       }
       ++n_sym;
