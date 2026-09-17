@@ -43,6 +43,7 @@ bool pdcp_pdu_number_packing::unpack(uint32_t& pdcp_pdu_number, byte_buffer_view
     // TS 29.281 Sec. 5.2.2.2
     // '(...) at the Xn interface (...) or via the N3 interface (...)'
     // '(...) bits 5-8 of octet 2 are spare and shall be set to zero.'
+    return false;
   }
 
   // PDCP PDU number.
@@ -53,6 +54,11 @@ bool pdcp_pdu_number_packing::unpack(uint32_t& pdcp_pdu_number, byte_buffer_view
 
 bool pdcp_pdu_number_packing::pack(byte_buffer& out_buf, const uint32_t pdcp_pdu_number) const
 {
+  if (pdcp_pdu_number > 0xfff) {
+    logger.error("Cannot pack PDCP PDU number that exceeds 12bits. pdcp_pdu_number={}", pdcp_pdu_number);
+    return false;
+  }
+
   bit_encoder encoder{out_buf};
 
   // Spare.
