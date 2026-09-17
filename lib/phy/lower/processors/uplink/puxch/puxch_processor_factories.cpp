@@ -37,7 +37,8 @@ public:
         // Scale the DFT results to normalize the DFT output power.
         .scale          = 1.0F / static_cast<float>(std::sqrt(config.bandwidth_rb * nof_subcarriers_rb)),
         .center_freq_Hz = config.center_freq_Hz,
-        .device_grid_write = config.device_grid_write};
+        .device_grid_write          = config.device_grid_write,
+        .grid_consumed_on_device    = config.grid_consumed_on_device};
 
     // Prepare PUxCH processor configuration.
     puxch_processor_impl::configuration proc_config = {

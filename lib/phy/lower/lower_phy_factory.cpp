@@ -145,6 +145,7 @@ public:
                                                      .center_frequency_Hz = config.ul_freq_hz,
                                                      .nof_rx_ports        = config.nof_rx_ports,
                                                      .device_grid_write   = config.device_resource_grid,
+                                                     .grid_consumed_on_device = config.device_resource_grid,
                                                      .metrics_enabled     = config.are_metrics_enabled};
 
     // Create uplink processor.

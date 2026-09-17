@@ -53,6 +53,10 @@ class ofdm_symbol_demodulator_impl : public ofdm_symbol_demodulator
   dft_processor_grid_write* grid_write = nullptr;
   /// Configuration: write the demodulated symbols into the resource grid from the device.
   bool device_grid_write = false;
+
+  /// Whether the resource grid is consumed on the device (see ofdm_demodulator_configuration::
+  /// grid_consumed_on_device). Only then may the front-end fence replace the per-symbol host wait.
+  bool grid_consumed_on_device = false;
   /// Set once the device grid write was requested but could not be used, so the warning is not spammed per symbol.
   bool device_grid_write_failed = false;
   /// Set once the transform input could not be taken from the radio buffer (see submit_symbol()), so

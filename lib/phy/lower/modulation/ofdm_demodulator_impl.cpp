@@ -65,7 +65,8 @@ ofdm_symbol_demodulator_impl::ofdm_symbol_demodulator_impl(const ofdm_demodulato
 
   // Device grid write: the engine that can do it writes both the transform and the grid in one command buffer, so the
   // transform output never travels back to the host. The table is constant, so it is published once.
-  device_grid_write = ofdm_config.device_grid_write;
+  device_grid_write        = ofdm_config.device_grid_write;
+  grid_consumed_on_device  = ofdm_config.grid_consumed_on_device;
   if (device_grid_write) {
     grid_write = dft->get_grid_write();
     if (grid_write == nullptr) {
@@ -282,14 +283,68 @@ void ofdm_symbol_demodulator_impl::submit_symbol(resource_grid_writer& grid,
       .port_index = port_index, .symbol_index = symbol_index, .valid = true, .device_write = device_write};
 }
 
+/// \brief Whether a configuration exists whose readers touch the resource grid on the HOST.
+///
+/// The front-end fence (see finish_symbol()) only orders the grid's producer against readers on the
+/// DEVICE, so these are the routes that must keep the host wait: the host LS pre-stage and the CPU
+/// estimator read the pilots out of the grid, the debug capture dumps it, and OCUDU_EQ_GATHER=0 makes
+/// the equalizer gather the received symbols on the host instead of on the device.
+/// Read once: a leg sets them before the process starts.
+static bool host_grid_readers_enabled()
+{
+  static const bool on = (std::getenv("OCUDU_CE_CPU_LS") != nullptr) || (std::getenv("OCUDU_CE_CPU_CE") != nullptr) ||
+                         (std::getenv("OCUDU_UL_DUMP") != nullptr) || (std::getenv("OCUDU_EQ_GATHER") != nullptr);
+  return on;
+}
+
+/// \brief Whether the front-end fence orders the front-end DFTs against the back-end grid readers.
+static bool front_end_fence_enabled()
+{
+  // Same knob as shared_queue's fence (OCUDU_UL_FRONTEND_FENCE): one switch for BOTH ends of the
+  // relation, because a fence that is signalled but never waited on - or the other way round - is not a
+  // half-optimization, it is an unordered chain.
+  const char* env = std::getenv("OCUDU_UL_FRONTEND_FENCE");
+  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+}
+
 void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, unsigned slot)
 {
   ocudu_assert(slot < max_pipeline_depth, "Invalid pipeline slot {}.", slot);
   ocudu_assert(pipeline_slots[slot].valid, "Pipeline slot {} holds no symbol.", slot);
 
-  // Wait in both paths: the upper PHY reads the grid as soon as the symbol is reported, and with the device write that
-  // reads memory the GPU produced.
-  dft->wait_slot(slot);
+  // The upper PHY reads the grid as soon as the symbol is reported, and with the device write that
+  // reads memory the GPU produced - but it reads it on the DEVICE here: the estimator extracts the
+  // pilots with resource_grid_reader::get_device_view() and the equalizer gathers the received symbols
+  // with set_device_grid(). With the front-end fence on, that ordering is established by the shared
+  // event instead (see shared_queue::front_end_wait()), so the host does not have to wait for each
+  // symbol - which is exactly the per-symbol synchronization the fusion removes (design document,
+  // 48.189).
+  //
+  // The wait is KEPT whenever the grid can also be read on the host: device_grid_write false means the
+  // grid is not device-resident at all, and host_grid_readers_enabled() lists the routes whose readers
+  // touch it on the host. Keeping it costs the optimization and is always correct; skipping it where a
+  // host reader exists would read memory the GPU has not written yet.
+  // ... and only when the deployment DECLARED that the grid's consumers read it on the device: writing it
+  // there (device_grid_write) says nothing about who reads it, and a host reader - the demodulator's own
+  // test verifies the grid on the host - would read memory the GPU has not written yet.
+  const bool fence_orders_the_grid =
+      front_end_fence_enabled() && device_grid_write && grid_consumed_on_device && !host_grid_readers_enabled();
+  if (!fence_orders_the_grid) {
+    dft->wait_slot(slot);
+  } else {
+    // The host wait for this symbol is gone: the back end is ordered by the fence event instead. Said
+    // once, because it is the property the whole configuration now depends on - a host consumer that
+    // reads the grid without being listed in host_grid_readers_enabled() would read memory the GPU has
+    // not written yet, and the leg would only see it as wrong LLRs. The counters that prove it are the
+    // ones the contract prints (ce device estimates, equalizer ch_re): both must report host=0.
+    static bool reported = false;
+    if (!reported) {
+      reported = true;
+      ocudulog::fetch_basic_logger("PHY").info(
+          "OFDM demodulator: the resource grid is handed to the back end through the front-end fence "
+          "(no host wait per symbol). Its consumers must read it on the device - see the pipeline contract");
+    }
+  }
 
   if (!pipeline_slots[slot].device_write) {
     span<const cf_t> dft_output = dft->get_output_batch().subspan(static_cast<size_t>(slot) * dft_size, dft_size);
