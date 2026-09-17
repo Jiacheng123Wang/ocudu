@@ -14,24 +14,24 @@ using namespace ocudu;
 
 class gtpu_tunnel_tx_upper_dummy : public gtpu_tunnel_common_tx_upper_layer_notifier
 {
-  void on_new_pdu(byte_buffer buf, const ::sockaddr_storage& dest_addr) final
+  void on_new_pdu(byte_buffer gpdu, const ::sockaddr_storage& dest_addr) final
   {
-    tx_ul_pdus.push_back(buf);
+    tx_ul_gpdus.push_back(gpdu);
     last_dest_addr = dest_addr;
   }
 
 public:
   void clear()
   {
-    tx_ul_pdus.clear();
+    tx_ul_gpdus.clear();
     last_dest_addr = {};
   }
 
-  std::vector<byte_buffer> tx_ul_pdus;
+  std::vector<byte_buffer> tx_ul_gpdus;
   ::sockaddr_storage       last_dest_addr = {};
 };
 
-/// Fixture class for GTP-U tunnel PDCP Tx tests
+/// Fixture class for GTP-U tunnel PDCP Tx tests.
 class gtpu_tunnel_pdcp_tx_test : public ::testing::Test
 {
 public:
@@ -43,24 +43,24 @@ public:
 protected:
   void SetUp() override
   {
-    // init test's logger
+    // init test's logger.
     ocudulog::init();
     logger.set_level(ocudulog::basic_levels::debug);
 
-    // init GTP-U logger
+    // init GTP-U logger.
     gtpu_logger.set_level(ocudulog::basic_levels::debug);
     gtpu_logger.set_hex_dump_max_size(100);
   }
 
   void TearDown() override
   {
-    // flush logger after each test
+    // flush logger after each test.
     tx_upper.clear();
     ocudulog::flush();
   }
 
-  /// \brief Helper to advance the timers
-  /// \param nof_tick Number of ticks to advance timers
+  /// \brief Helper to advance the timers.
+  /// \param nof_tick Number of ticks to advance timers.
   void tick_all(uint32_t nof_ticks)
   {
     for (uint32_t i = 0; i < nof_ticks; i++) {
@@ -69,30 +69,30 @@ protected:
     }
   }
 
-  // Test logger
+  // Test logger.
   ocudulog::basic_logger& logger;
 
-  // GTP-U logger
+  // GTP-U logger.
   ocudulog::basic_logger& gtpu_logger;
 
-  // Timers
+  // Timers.
   manual_task_worker worker{64};
   timer_manager      timers_manager;
   timer_factory      timers{timers_manager, worker};
 
-  // GTP-U tunnel Tx entity
+  // GTP-U tunnel Tx entity.
   std::unique_ptr<gtpu_tunnel_pdcp_tx_impl> tx;
 
-  // Surrounding tester
+  // Surrounding tester.
   gtpu_tunnel_tx_upper_dummy tx_upper = {};
 
   null_dlt_pcap dummy_pcap;
 };
 
-/// \brief Test correct creation of Tx entity
+/// \brief Test correct creation of Tx entity.
 TEST_F(gtpu_tunnel_pdcp_tx_test, entity_creation)
 {
-  // create Tx entity
+  // create Tx entity.
   gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_tx_config tx_cfg = {};
   tx_cfg.lif                                                 = gtpu_logical_interface::xnu;
   tx_cfg.peer_addr                                           = "127.0.0.1";
@@ -103,10 +103,10 @@ TEST_F(gtpu_tunnel_pdcp_tx_test, entity_creation)
   ASSERT_NE(tx, nullptr);
 }
 
-/// \brief Test reception of PDUs with no SN
-TEST_F(gtpu_tunnel_pdcp_tx_test, tx_sdus)
+/// \brief Test transmission of T-PDUs with no GTP-U SN.
+TEST_F(gtpu_tunnel_pdcp_tx_test, tx_tpdus)
 {
-  // create Tx entity
+  // create Tx entity.
   gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_tx_config tx_cfg = {};
   tx_cfg.lif                                                 = gtpu_logical_interface::xnu;
   tx_cfg.peer_addr                                           = "127.0.0.1";
@@ -116,13 +116,26 @@ TEST_F(gtpu_tunnel_pdcp_tx_test, tx_sdus)
   ASSERT_NE(tx, nullptr);
 
   for (unsigned i = 0; i < 3; i++) {
-    byte_buffer sdu = byte_buffer::create(gtpu_ping_sdu).value();
-    byte_buffer pdu = byte_buffer::create(gtpu_ping_vec_teid_2_qfi_1_ul).value();
+    byte_buffer tpdu = byte_buffer::create(tpdu_1).value();
+    byte_buffer gpdu;
+    switch (i) {
+      case 0:
+        gpdu = byte_buffer::create(gpdu_tpdu_1_teid_1_pdcp_sn_0).value();
+        break;
+      case 1:
+        gpdu = byte_buffer::create(gpdu_tpdu_1_teid_1_pdcp_sn_1).value();
+        break;
+      case 2:
+        gpdu = byte_buffer::create(gpdu_tpdu_1_teid_1_pdcp_sn_2).value();
+        break;
+      default:
+        break;
+    }
 
-    tx->handle_sdu(std::move(sdu), i);
-    ASSERT_EQ(pdu, tx_upper.tx_ul_pdus[i]);
+    tx->handle_sdu(std::move(tpdu), i);
+    ASSERT_EQ(gpdu, tx_upper.tx_ul_gpdus[i]);
     gtpu_teid_t teid_out = {};
-    ASSERT_TRUE(gtpu_read_teid(teid_out.value(), tx_upper.tx_ul_pdus[i], gtpu_logger));
+    ASSERT_TRUE(gtpu_read_teid(teid_out.value(), tx_upper.tx_ul_gpdus[i], gtpu_logger));
     ASSERT_EQ(teid_out, tx_cfg.peer_teid);
     std::string dest_addr_str;
     ASSERT_TRUE(
@@ -131,10 +144,10 @@ TEST_F(gtpu_tunnel_pdcp_tx_test, tx_sdus)
   }
 }
 
-/// \brief Test in-order reception of PDUs
+/// \brief Test transmission of T-PDUs with no GTP-U SN is stopped after stop command.
 TEST_F(gtpu_tunnel_pdcp_tx_test, tx_stop)
 {
-  // create Tx entity
+  // create Tx entity.
   gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_tx_config tx_cfg = {};
   tx_cfg.lif                                                 = gtpu_logical_interface::xnu;
   tx_cfg.peer_addr                                           = "127.0.0.1";
@@ -144,20 +157,33 @@ TEST_F(gtpu_tunnel_pdcp_tx_test, tx_stop)
   ASSERT_NE(tx, nullptr);
 
   for (unsigned i = 0; i < 3; i++) {
-    byte_buffer sdu = byte_buffer::create(gtpu_ping_sdu).value();
-    byte_buffer pdu = byte_buffer::create(gtpu_ping_vec_teid_2_qfi_1_ul).value();
+    byte_buffer tpdu = byte_buffer::create(tpdu_1).value();
+    byte_buffer gpdu;
+    switch (i) {
+      case 0:
+        gpdu = byte_buffer::create(gpdu_tpdu_1_teid_1_pdcp_sn_0).value();
+        break;
+      case 1:
+        gpdu = byte_buffer::create(gpdu_tpdu_1_teid_1_pdcp_sn_1).value();
+        break;
+      case 2:
+        gpdu = byte_buffer::create(gpdu_tpdu_1_teid_1_pdcp_sn_2).value();
+        break;
+      default:
+        break;
+    }
 
-    tx->handle_sdu(std::move(sdu), i);
-    ASSERT_EQ(pdu, tx_upper.tx_ul_pdus[i]);
+    tx->handle_sdu(std::move(tpdu), i);
+    ASSERT_EQ(gpdu, tx_upper.tx_ul_gpdus[i]);
   }
   tx->stop();
-  tx_upper.tx_ul_pdus.clear();
+  tx_upper.tx_ul_gpdus.clear();
 
   // No more PDUs should be accepted.
-  for (unsigned i = 0; i < 3; i++) {
-    byte_buffer sdu = byte_buffer::create(gtpu_ping_sdu).value();
-    tx->handle_sdu(std::move(sdu), i);
-    ASSERT_TRUE(tx_upper.tx_ul_pdus.empty());
+  for (unsigned i = 3; i < 6; i++) {
+    byte_buffer tpdu = byte_buffer::create(tpdu_1).value();
+    tx->handle_sdu(std::move(tpdu), i);
+    ASSERT_TRUE(tx_upper.tx_ul_gpdus.empty());
   }
 }
 

@@ -8,8 +8,6 @@
 #include "ocudu/gtpu/gtpu_tunnel_pdcp_factory.h"
 #include "ocudu/gtpu/gtpu_tunnel_pdcp_tx.h"
 #include "ocudu/support/executors/manual_task_worker.h"
-#include "ocudu/support/rate_limiting/token_bucket.h"
-#include "ocudu/support/rate_limiting/token_bucket_config.h"
 #include <gtest/gtest.h>
 #include <sys/socket.h>
 
@@ -29,9 +27,9 @@ public:
 };
 class gtpu_tunnel_tx_upper_dummy : public gtpu_tunnel_common_tx_upper_layer_notifier
 {
-  void on_new_pdu(byte_buffer buf, const ::sockaddr_storage& dest_addr) final
+  void on_new_pdu(byte_buffer gpdu, const ::sockaddr_storage& dest_addr) final
   {
-    last_tx   = std::move(buf);
+    last_tx   = std::move(gpdu);
     last_addr = dest_addr;
   }
 
@@ -43,9 +41,9 @@ public:
 class gtpu_tunnel_rx_upper_dummy : public gtpu_tunnel_common_rx_upper_layer_interface
 {
 public:
-  void handle_pdu(byte_buffer pdu, const sockaddr_storage& src_addr) final
+  void handle_pdu(byte_buffer gpdu, const sockaddr_storage& src_addr) final
   {
-    last_rx   = std::move(pdu);
+    last_rx   = std::move(gpdu);
     last_addr = src_addr;
   }
 
@@ -53,7 +51,7 @@ public:
   sockaddr_storage last_addr = {};
 };
 
-/// Fixture class for GTP-U tunnel PDCP tests
+/// Fixture class for GTP-U tunnel PDCP tests.
 class gtpu_tunnel_pdcp_test : public ::testing::Test
 {
 public:
@@ -65,47 +63,47 @@ public:
 protected:
   void SetUp() override
   {
-    // init test's logger
+    // init test's logger.
     ocudulog::init();
     logger.set_level(ocudulog::basic_levels::debug);
 
-    // init GTP-U logger
+    // init GTP-U logger.
     gtpu_logger.set_level(ocudulog::basic_levels::debug);
     gtpu_logger.set_hex_dump_max_size(100);
   }
 
   void TearDown() override
   {
-    // flush logger after each test
+    // flush logger after each test.
     ocudulog::flush();
   }
 
-  // Test logger
+  // Test logger.
   ocudulog::basic_logger& logger;
 
-  // GTP-U logger
+  // GTP-U logger.
   ocudulog::basic_logger& gtpu_logger;
   gtpu_tunnel_logger      gtpu_rx_logger{"GTPU", {gtpu_logical_interface::xnu, {}, gtpu_teid_t{1}, "DL"}};
 
-  // Timers
+  // Timers.
   manual_task_worker worker{64};
   timer_manager      timers_manager;
   timer_factory      timers{timers_manager, worker};
 
-  // GTP-U tunnel entity
+  // GTP-U tunnel entity.
   std::unique_ptr<gtpu_tunnel_pdcp> gtpu;
 
-  // Surrounding tester
+  // Surrounding tester.
   gtpu_tunnel_rx_lower_dummy gtpu_rx = {};
   gtpu_tunnel_tx_upper_dummy gtpu_tx = {};
 };
 
-/// \brief Test correct creation of GTP-U entity
+/// \brief Test correct creation of GTP-U entity.
 TEST_F(gtpu_tunnel_pdcp_test, entity_creation)
 {
   null_dlt_pcap dummy_pcap;
 
-  // init GTP-U entity
+  // init GTP-U entity.
   gtpu_tunnel_pdcp_creation_message msg = {};
   msg.cfg.rx.lif                        = gtpu_logical_interface::xnu;
   msg.cfg.rx.local_teid                 = gtpu_teid_t{0x1};
@@ -121,12 +119,12 @@ TEST_F(gtpu_tunnel_pdcp_test, entity_creation)
   ASSERT_NE(gtpu, nullptr);
 }
 
-/// \brief Test correct reception of GTP-U packet with PDU Session Container
-TEST_F(gtpu_tunnel_pdcp_test, rx_sdu)
+/// \brief Test correct reception of GTP-U packet with PDCP PDU number.
+TEST_F(gtpu_tunnel_pdcp_test, rx)
 {
   null_dlt_pcap dummy_pcap;
 
-  // init GTP-U entity
+  // init GTP-U entity.
   gtpu_tunnel_pdcp_creation_message msg = {};
   msg.cfg.rx.lif                        = gtpu_logical_interface::xnu;
   msg.cfg.rx.local_teid                 = gtpu_teid_t{0x2};
@@ -140,8 +138,8 @@ TEST_F(gtpu_tunnel_pdcp_test, rx_sdu)
   gtpu                                  = create_gtpu_tunnel_pdcp(msg);
 
   sockaddr_storage   orig_addr = {};
-  byte_buffer        orig_vec  = make_byte_buffer(gtpu_ping_vec_teid_2_qfi_1_dl).value();
-  byte_buffer        strip_vec = make_byte_buffer(gtpu_ping_vec_teid_2_qfi_1_dl).value();
+  byte_buffer        orig_vec  = byte_buffer::create(gpdu_tpdu_1_teid_1_pdcp_sn_1).value();
+  byte_buffer        strip_vec = byte_buffer::create(gpdu_tpdu_1_teid_1_pdcp_sn_1).value();
   gtpu_dissected_pdu dissected_pdu;
   bool               read_ok = gtpu_dissect_pdu(dissected_pdu, strip_vec.deep_copy().value(), gtpu_rx_logger);
   ASSERT_EQ(read_ok, true);
@@ -152,12 +150,12 @@ TEST_F(gtpu_tunnel_pdcp_test, rx_sdu)
   ASSERT_EQ(1, gtpu_rx.last_pdcp_pdu_number);
 }
 
-/// \brief Test correct transmission of GTP-U packet
-TEST_F(gtpu_tunnel_pdcp_test, tx_pdu)
+/// \brief Test correct transmission of GTP-U packet with PDCP PDU number.
+TEST_F(gtpu_tunnel_pdcp_test, tx)
 {
   null_dlt_pcap dummy_pcap;
 
-  // init GTP-U entity
+  // init GTP-U entity.
   gtpu_tunnel_pdcp_creation_message msg = {};
   msg.cfg.rx.lif                        = gtpu_logical_interface::xnu;
   msg.cfg.rx.local_teid                 = gtpu_teid_t{0x1};
@@ -170,12 +168,12 @@ TEST_F(gtpu_tunnel_pdcp_test, tx_pdu)
   msg.ue_ctrl_timer_factory             = timers;
   gtpu                                  = create_gtpu_tunnel_pdcp(msg);
 
-  byte_buffer sdu = byte_buffer::create(gtpu_ping_sdu).value();
-  byte_buffer pdu = byte_buffer::create(gtpu_ping_vec_teid_2_qfi_1_ul).value();
+  byte_buffer tpdu = byte_buffer::create(tpdu_1).value();
+  byte_buffer gpdu = byte_buffer::create(gpdu_tpdu_1_teid_1_pdcp_sn_1).value();
 
   gtpu_tunnel_pdcp_tx_lower_layer_interface* tx = gtpu->get_tx_lower_layer_interface();
-  tx->handle_sdu(std::move(sdu), 1);
-  ASSERT_EQ(pdu, gtpu_tx.last_tx);
+  tx->handle_sdu(std::move(tpdu), 1);
+  ASSERT_EQ(gpdu, gtpu_tx.last_tx);
 }
 
 int main(int argc, char** argv)
