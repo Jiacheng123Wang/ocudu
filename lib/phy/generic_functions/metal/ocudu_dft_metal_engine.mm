@@ -40,6 +40,10 @@ namespace {
 #if defined(OCUDU_METAL_STATS)
 struct dft_stats_t {
   std::atomic<uint64_t> commits{0};
+  /// Transforms encoded. Equal to commits while every transform gets its own command buffer; larger
+  /// once a block of them shares one (see begin_block()), which is why the contract check counts
+  /// transforms and not commits.
+  std::atomic<uint64_t> transforms{0};
   std::atomic<uint64_t> waits{0};
   /// Peak PIPELINE DEPTH: how many of the batch slots held an un-waited transform at once. Tracked by
   /// dft_stats_note_depth() from the engine's own slot_pending[] flags - never from commits minus waits,
@@ -71,10 +75,11 @@ static void dft_stats_note_depth(uint64_t depth)
   }
 }
 
-static void dft_stats_commit()
+static void dft_stats_commit(uint64_t nof_transforms)
 {
   dft_stats_t& s = dft_stats();
   s.commits.fetch_add(1, std::memory_order_relaxed);
+  s.transforms.fetch_add(nof_transforms, std::memory_order_relaxed);
 }
 
 static void dft_stats_wait()
@@ -105,8 +110,10 @@ static void dft_stats_report()
                // hold an un-waited transform), not commits minus waits: the wait policy stopped waiting for
                // every transform (see ofdm_demodulator_impl::finish_symbol()), so that difference grows
                // without bound and would read like a backlog that is not there.
-               "[metal_stats] dft commits=%llu waits=%llu slots_in_flight=%llu radio_inputs=%llu wrap_copies=%llu\n",
+               "[metal_stats] dft commits=%llu transforms=%llu waits=%llu slots_in_flight=%llu radio_inputs=%llu "
+               "wrap_copies=%llu\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.transforms.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.radio_inputs.load(std::memory_order_relaxed)),
@@ -119,13 +126,15 @@ static void register_dft_contract_check()
   register_phy_pipeline_check(
       {"dft radio inputs", []() -> std::optional<bool> {
          const dft_stats_t& s = dft_stats();
-         uint64_t commits     = s.commits.load(std::memory_order_relaxed);
-         uint64_t radio       = s.radio_inputs.load(std::memory_order_relaxed);
+         // TRANSFORMS, not command buffers: a block of them shares one command buffer (begin_block()),
+         // so counting commits here printed "240016 of 17145 transforms" on the first batched leg.
+         const uint64_t transforms = s.transforms.load(std::memory_order_relaxed);
+         const uint64_t radio      = s.radio_inputs.load(std::memory_order_relaxed);
          std::fprintf(stderr,
                       "%llu of %llu transforms read the radio buffer",
                       static_cast<unsigned long long>(radio),
-                      static_cast<unsigned long long>(commits));
-         if ((commits == 0) || !phy_pipeline_mode_registry::is_published() ||
+                      static_cast<unsigned long long>(transforms));
+         if ((transforms == 0) || !phy_pipeline_mode_registry::is_published() ||
              (phy_pipeline_mode_registry::get() == phy_pipeline_mode::cpu)) {
            // No Metal transform in this run, or a run that never claimed the offloaded pipeline (a
            // unit test or a tool exercises the engine directly): nothing to require of it.
@@ -133,7 +142,7 @@ static void register_dft_contract_check()
          }
          // A handful of transforms of the same engine belong to other paths (the engine is shared);
          // none at all means the input is still being staged on the host for the whole run.
-         return radio * 100 >= commits * 99;
+         return radio * 100 >= transforms * 99;
        }});
 }
 
@@ -145,7 +154,7 @@ static const bool dft_contract_registered = []() {
 
 #else  // OCUDU_METAL_STATS
 static void dft_stats_note_depth(uint64_t /*depth*/) {}
-static void dft_stats_commit() {}
+static void dft_stats_commit(uint64_t /*nof_transforms*/ = 1) {}
 static void dft_stats_wait() {}
 static void dft_stats_wrap_copy() {}
 static void dft_stats_radio_input() {}
@@ -257,6 +266,25 @@ static bool block_accumulating(const dft_engine_impl* e)
   return (e != nullptr) && (e->open_cb != nil);
 }
 
+/// \brief Closes an open block's encoder without committing it, for the paths that drop the engine.
+///
+/// Releasing a command encoder without endEncoding ABORTS in the Metal validation layer, and that is not
+/// hypothetical: the first on-air leg of the block batching crashed on ^C with "Command encoder released
+/// without endEncoding", because stopping the stream leaves the block of the interrupted slot open. The
+/// command buffer is dropped rather than committed - at this point nothing is going to read its grid -
+/// which is the same choice shared_burst's thread state makes for an open burst.
+static void discard_open_block(dft_engine_impl* e)
+{
+  if ((e != nullptr) && (e->open_enc != nil)) {
+    [e->open_enc endEncoding];
+  }
+  if (e != nullptr) {
+    e->open_enc         = nil;
+    e->open_cb          = nil;
+    e->open_transforms  = 0;
+  }
+}
+
 /// \brief Encoder for the next dispatch: the open command buffer when one is accumulating, a fresh one otherwise.
 /// \return False when no encoder could be created (the caller must not commit anything).
 static bool encode_into(dft_engine_impl*                                 e,
@@ -287,12 +315,12 @@ static bool encode_into(dft_engine_impl*                                 e,
 /// is a command-buffer level API that has to be encoded with the encoder already closed, and the commit
 /// has to be published on the front-end chain so wait_all_committed() can drain it (a commit published
 /// on the wrong chain would make the wait target another queue's command buffer).
-static void commit_front_end(dft_engine_impl* e, id<MTLCommandBuffer> cb)
+static void commit_front_end(dft_engine_impl* e, id<MTLCommandBuffer> cb, uint64_t nof_transforms)
 {
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::front_end);
   metal::shared_queue::front_end_signal(cb);
   [cb commit];
-  dft_stats_commit();
+  dft_stats_commit(nof_transforms);
   if (e->has_lane_slot) {
     metal::gpu_lane_probe::register_front_end_commit(cb, e->lane_slot);
   }
@@ -385,6 +413,7 @@ dft_metal_engine::~dft_metal_engine()
 {
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
   if (engine != nullptr) {
+    discard_open_block(engine);
     engine->buffer_cache.clear();
     std::free(engine->warmup_mem);
     std::free(engine->window_mem);
@@ -438,6 +467,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
       res.device = MTLCreateSystemDefaultDevice();
       if (res.device == nil) {
         ocudulog::fetch_basic_logger("PHY").error("Metal DFT: no Metal device available");
+        discard_open_block(engine);
         delete engine;
         impl = nullptr;
         return false;
@@ -449,6 +479,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
         ocudulog::fetch_basic_logger("PHY").error(
             "Metal DFT: pre-compiled shader library 'ocudu_dft.metallib' not found (searched the configure-time "
             "path, next to the executable, and the working directory)");
+        discard_open_block(engine);
         delete engine;
         impl = nullptr;
         return false;
@@ -459,6 +490,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
         ocudulog::fetch_basic_logger("PHY").error("Metal DFT: failed to load the shader library {}: {}",
                                                   lib_path.UTF8String,
                                                   error != nil ? error.localizedDescription.UTF8String : "nil error");
+        discard_open_block(engine);
         delete engine;
         impl = nullptr;
         return false;
@@ -466,6 +498,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
       id<MTLFunction> fn = [library newFunctionWithName:@"dft_dit"];
       if (fn == nil) {
         ocudulog::fetch_basic_logger("PHY").error("Metal DFT: kernel 'dft_dit' not found in the shader library");
+        discard_open_block(engine);
         delete engine;
         impl = nullptr;
         return false;
@@ -474,6 +507,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
       if (res.pipeline == nil) {
         ocudulog::fetch_basic_logger("PHY").error("Metal DFT: pipeline creation failed: {}",
                                                   error != nil ? error.localizedDescription.UTF8String : "nil error");
+        discard_open_block(engine);
         delete engine;
         impl = nullptr;
         return false;
@@ -637,7 +671,7 @@ bool dft_metal_engine::commit_open()
     // buffer is dropped; a transform that was refused by the caller never reached the engine.)
     return true;
   }
-  commit_front_end(engine, cb);
+  commit_front_end(engine, cb, nof);
   return true;
 }
 
@@ -843,7 +877,7 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
     return true;
   }
   [enc endEncoding];
-  commit_front_end(engine, cmd_buf);
+  commit_front_end(engine, cmd_buf, 1);
   engine->slot_cb[slot]      = cmd_buf;
   engine->slot_pending[slot] = true;
   return true;
@@ -960,7 +994,7 @@ bool dft_metal_engine::submit_at(
     return true;
   }
   [enc endEncoding];
-  commit_front_end(engine, cmd_buf);
+  commit_front_end(engine, cmd_buf, nof_transforms);
   if (!wait_for_completion) {
     return true;
   }
