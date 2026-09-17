@@ -610,6 +610,46 @@ int main()
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Per-command-buffer cost of a transform (S-7g-17): the on-air front end spends ~38us of GPU time
+  // per per-symbol command buffer (~531us for a slot's fourteen), while the transform kernel itself is
+  // a few microseconds - so what a slot pays is dominated by the COMMAND BUFFERS, not by the FFT. This
+  // measures the same transform submitted as one batch of N inside a single command buffer, which is
+  // what a future front-end that batches a slot's symbols would look like. Printed, not asserted: it is
+  // a capacity measurement, and the number a reader needs to judge whether batching is worth it.
+  // ---------------------------------------------------------------------------------------------
+  {
+    const unsigned  size = 1024;
+    dft_processor_metal metal({size, dft_processor::direction::DIRECT});
+    std::vector<cf_t> input(size);
+    for (cf_t& v : input) {
+      v = cf_t{dist(rng), dist(rng)};
+    }
+    std::printf("per-command-buffer cost (size=%u):\n", size);
+    for (unsigned n : {1u, 2u, 4u, 14u}) {
+      if (n > metal.get_max_batch()) {
+        continue;
+      }
+      for (unsigned i = 0; i != n; ++i) {
+        std::copy(input.begin(), input.end(), metal.get_input().begin() + static_cast<size_t>(i) * size);
+      }
+      // Warm up (pipeline creation, first commit), then measure the steady state of `iters` runs.
+      (void)metal.run_batch(n);
+      const unsigned iters = 20;
+      const auto     t0    = std::chrono::steady_clock::now();
+      for (unsigned i = 0; i != iters; ++i) {
+        (void)metal.run_batch(n);
+      }
+      const auto   t1      = std::chrono::steady_clock::now();
+      const double host_us = std::chrono::duration<double, std::micro>(t1 - t0).count() / static_cast<double>(iters);
+      std::printf("  n=%2u: host %.1fus total, last command buffer %.1fus on the GPU -> %.1fus per transform in it\n",
+                  n,
+                  host_us,
+                  metal.engine_gpu_wait_us(),
+                  metal.engine_gpu_wait_us() / static_cast<double>(n));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Front-end fence (S-7g-17, design document 48.189): the event that relates the DFTs of the
   // front-end queue to the back-end command buffers that read the grid they produce.
   //
