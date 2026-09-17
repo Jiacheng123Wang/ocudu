@@ -677,6 +677,11 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   [enc endEncoding];
   // The GPU-time probe must be armed before commit (Metal asserts otherwise).
   metal::shared_queue::arm_gpu_time(cmd_buf, metal::shared_queue::queue_kind::front_end);
+  // Front-end fence (S-7g-17): this command buffer produces grid symbols the back-end stages read, and
+  // the two queues are independent, so the commit signals the next generation for them to wait on. The
+  // signal is a command-buffer level API - encoded here, with the encoder already closed and before the
+  // commit (see shared_queue::front_end_signal()).
+  metal::shared_queue::front_end_signal(cmd_buf);
   [cmd_buf commit];
   dft_stats_commit();
   metal::shared_queue::notify_commit(cmd_buf, metal::shared_queue::queue_kind::front_end);
@@ -684,6 +689,53 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   engine->slot_cb[slot]        = cmd_buf;
   engine->slot_pending[slot]   = true;
   return true;
+}
+
+uint64_t dft_metal_engine::fence_generation()
+{
+  return metal::shared_queue::front_end_generation();
+}
+
+uint64_t dft_metal_engine::fence_nof_signals()
+{
+  return metal::shared_queue::front_end_nof_signals();
+}
+
+uint64_t dft_metal_engine::fence_nof_waits()
+{
+  return metal::shared_queue::front_end_nof_waits();
+}
+
+uint64_t dft_metal_engine::fence_nof_skipped_waits()
+{
+  return metal::shared_queue::front_end_nof_skipped_waits();
+}
+
+bool dft_metal_engine::fence_selftest(bool& waited)
+{
+  waited = false;
+  id<MTLCommandQueue> queue = metal::shared_queue::backend_queue();
+  if (queue == nil) {
+    return false;
+  }
+  id<MTLCommandBuffer> cb = [queue commandBuffer];
+  if (cb == nil) {
+    return false;
+  }
+  waited = metal::shared_queue::front_end_wait(cb);
+  // A command buffer with only a wait would never run (Metal executes what its encoders encode), so the
+  // test puts one real blit in it: the point is that a buffer carrying a fence wait still completes.
+  id<MTLBuffer> src = [shared_queue::device() newBufferWithLength:64 options:MTLResourceStorageModeShared];
+  id<MTLBuffer> dst = [shared_queue::device() newBufferWithLength:64 options:MTLResourceStorageModeShared];
+  if ((src == nil) || (dst == nil)) {
+    return false;
+  }
+  id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+  [blit copyFromBuffer:src sourceOffset:0 toBuffer:dst destinationOffset:0 size:64];
+  [blit endEncoding];
+  [cb commit];
+  [cb waitUntilCompleted];
+  return cb.status == MTLCommandBufferStatusCompleted;
 }
 
 bool dft_metal_engine::submit_at(
@@ -732,6 +784,11 @@ bool dft_metal_engine::submit_at(
   [enc endEncoding];
   // The GPU-time probe must be armed before commit (Metal asserts otherwise).
   metal::shared_queue::arm_gpu_time(cmd_buf, metal::shared_queue::queue_kind::front_end);
+  // Front-end fence (S-7g-17): this command buffer produces grid symbols the back-end stages read, and
+  // the two queues are independent, so the commit signals the next generation for them to wait on. The
+  // signal is a command-buffer level API - encoded here, with the encoder already closed and before the
+  // commit (see shared_queue::front_end_signal()).
+  metal::shared_queue::front_end_signal(cmd_buf);
   [cmd_buf commit];
   dft_stats_commit();
   // Publish the commit on the front-end chain so wait_all_committed() can drain it: the DFT is the

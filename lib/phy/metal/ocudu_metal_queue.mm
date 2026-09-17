@@ -8,6 +8,7 @@
 #include "ocudu/support/macos_compat.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <mutex>
 #include <unordered_map>
 
@@ -24,6 +25,13 @@ struct shared_queue_state {
   id<MTLCommandQueue> backend_queue = nil;
 
   std::mutex mutex;
+
+  /// Front-end fence (see the header): one shared event carrying a generation.
+  id<MTLSharedEvent>       fence_event   = nil;
+  std::atomic<uint64_t>    fence_generation{0};
+  std::atomic<uint64_t>    fence_signals{0};
+  std::atomic<uint64_t>    fence_waits{0};
+  std::atomic<uint64_t>    fence_skipped_waits{0};
 
   /// One no-copy wrap: the buffer, the host range it covers, and the allocation it was made for.
   ///
@@ -416,6 +424,77 @@ void shared_queue::notify_commit(id<MTLCommandBuffer> command_buffer, queue_kind
   c.last_committed                     = command_buffer;
   ++c.pending;
   ++s.commits;
+}
+
+bool shared_queue::front_end_fence_enabled()
+{
+  // Read per call rather than cached in a static: the switch is consulted once per command buffer (not
+  // per dispatch), and the unit test has to be able to toggle it inside one process.
+  const char* env = std::getenv("OCUDU_UL_FRONTEND_FENCE");
+  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+}
+
+uint64_t shared_queue::front_end_signal(id<MTLCommandBuffer> command_buffer)
+{
+  if (!front_end_fence_enabled() || (command_buffer == nil)) {
+    return 0;
+  }
+  shared_queue_state& s = state();
+  if (s.fence_event == nil) {
+    id<MTLDevice> device = shared_queue::device();
+    if (device == nil) {
+      return 0;
+    }
+    s.fence_event = [device newSharedEvent];
+    if (s.fence_event == nil) {
+      return 0;
+    }
+  }
+  // The generation is taken and the signal encoded BEFORE the commit: the host's front_end_generation()
+  // only ever reports a value whose signalling command buffer exists (see the header).
+  const uint64_t generation = s.fence_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+  [command_buffer encodeSignalEvent:s.fence_event value:generation];
+  s.fence_signals.fetch_add(1, std::memory_order_relaxed);
+  return generation;
+}
+
+uint64_t shared_queue::front_end_generation()
+{
+  return state().fence_generation.load(std::memory_order_acquire);
+}
+
+bool shared_queue::front_end_wait(id<MTLCommandBuffer> command_buffer)
+{
+  if (!front_end_fence_enabled() || (command_buffer == nil)) {
+    return false;
+  }
+  shared_queue_state& s = state();
+  const uint64_t      generation = s.fence_generation.load(std::memory_order_acquire);
+  if ((generation == 0) || (s.fence_event == nil)) {
+    // Nothing has been committed on the front end in this process (the estimator's unit tests, the
+    // replay tool, a configuration without the device DFT): there is no signaller to wait for, and
+    // waiting for a value nobody will signal would hang the command buffer.
+    s.fence_skipped_waits.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  [command_buffer encodeWaitForEvent:s.fence_event value:generation];
+  s.fence_waits.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+uint64_t shared_queue::front_end_nof_signals()
+{
+  return state().fence_signals.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::front_end_nof_waits()
+{
+  return state().fence_waits.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::front_end_nof_skipped_waits()
+{
+  return state().fence_skipped_waits.load(std::memory_order_relaxed);
 }
 
 bool shared_queue::wait_all_committed(queue_kind kind)

@@ -442,6 +442,11 @@ static stage_encoder begin_stage(mmse_engine_impl*          e,
     // caller gets when the fusion is off - a slow lane, never a wrong one.
   }
   s.cb  = [e->queue commandBuffer];
+  // Front-end fence (S-7g-17): this stage may read the resource grid the front-end DFTs produce, and a
+  // wait on a command buffer of THIS queue says nothing about theirs. The wait is encoded before the
+  // encoder opens (command-buffer level API) and targets the newest COMMITTED front-end generation, so
+  // it can never wait for a signal that is not already on its way - see shared_queue::front_end_wait().
+  ocudu::metal::shared_queue::front_end_wait(s.cb);
   s.enc = [s.cb computeCommandEncoder];
   return s;
 }

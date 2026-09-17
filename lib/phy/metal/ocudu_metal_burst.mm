@@ -122,6 +122,13 @@ static bool burst_ensure_open(burst_state& s)
     return false;
   }
   s.cb  = [queue commandBuffer];
+  // Front-end fence (S-7g-17): the first stage that joins this burst may read the resource grid the
+  // front-end DFTs produce (the equalizer does, and so does the estimator when it is fused into the
+  // lane), and the two queues are independent. Encoded before the encoder opens, as the command-buffer
+  // level API requires, and it covers every dispatch encoded into this burst afterwards.
+  if (s.cb != nil) {
+    shared_queue::front_end_wait(s.cb);
+  }
   s.enc = (s.cb != nil) ? [s.cb computeCommandEncoder] : nil;
   if (s.enc == nil) {
     s.cb       = nil;

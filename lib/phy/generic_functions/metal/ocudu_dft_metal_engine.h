@@ -64,6 +64,25 @@ public:
   /// \return True when the dispatch was encoded and committed.
   bool submit(const void* in, void* out, unsigned nof_transforms);
 
+  /// \brief Front-end fence: the generation the front end has committed (see shared_queue::front_end_*()).
+  ///
+  /// The mechanism lives in the shared command queue, whose header is Objective-C++ only; these are the
+  /// C++-visible window onto it, for the unit test and the diagnostics.
+  static uint64_t fence_generation();
+  static uint64_t fence_nof_signals();
+  static uint64_t fence_nof_waits();
+  static uint64_t fence_nof_skipped_waits();
+
+  /// \brief Self-test of the fence plumbing, for builds and tests without the receiving chain.
+  ///
+  /// Opens a back-end command buffer, lets the fence encode its wait on it (nothing to wait for before
+  /// the first front-end commit, which is the path the offline tools take), puts one blit in it, and
+  /// commits and waits for it: a command buffer that carries a wait must still complete, which is the
+  /// one failure mode that would take the whole chain down instead of producing a wrong number.
+  /// \param[out] waited  Whether a wait was encoded (false when nothing had been committed yet).
+  /// \return True when the command buffer completed.
+  static bool fence_selftest(bool& waited);
+
   /// \brief Commits the transform held in slot \c slot of the batch buffers without waiting.
   ///
   /// The input and output buffers cover max_batch() transforms; this entry point lets a pipelined
