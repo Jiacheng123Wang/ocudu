@@ -64,6 +64,13 @@ public:
   /// \return True when the dispatch was encoded and committed.
   bool submit(const void* in, void* out, unsigned nof_transforms);
 
+  /// \brief Tells the engine which receiving slot the transforms it is about to submit belong to.
+  ///
+  /// Instrumentation: the GPU lane probe accounts the transforms as one group per slot (see
+  /// gpu_lane_probe::register_front_end_commit()), which is what gives the front end a place in the
+  /// device-side timeline the back-end lane is measured on.
+  void set_lane_slot(uint64_t slot_index);
+
   /// \brief Front-end fence: the generation the front end has committed (see shared_queue::front_end_*()).
   ///
   /// The mechanism lives in the shared command queue, whose header is Objective-C++ only; these are the

@@ -10,6 +10,7 @@
 #include "ocudu/phy/generic_functions/dft_processor.h"
 #include "ocudu/phy/generic_functions/dft_processor_grid_write.h"
 #include "ocudu/support/macos_compat.h"
+#include <cstdint>
 #include <memory>
 
 namespace ocudu {
@@ -81,6 +82,13 @@ public:
 
   // See interface for documentation.
   void wait() override { (void)metal::dft_metal_engine::wait_all(); }
+
+  void set_lane_slot(uint64_t slot_index) override
+  {
+    if (engine != nullptr) {
+      engine->set_lane_slot(slot_index);
+    }
+  }
 
   // See interface for documentation.
   void wait_slot(unsigned slot) override { (void)engine->wait_slot(slot); }

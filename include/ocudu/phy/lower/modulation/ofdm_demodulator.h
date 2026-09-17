@@ -63,6 +63,14 @@ public:
   /// \return The number of samples for the given symbol index.
   virtual unsigned get_symbol_size(unsigned symbol_index) const = 0;
 
+  /// \brief Tells the demodulator which receiving slot the symbols it is about to process belong to.
+  ///
+  /// Instrumentation only: the device probe accounts a slot's transforms as one group, and they are
+  /// submitted by the radio thread while the rest of the chain runs on another one, so the slot is the
+  /// identity that puts the transforms into the same timeline as the back-end lane. A demodulator
+  /// without a device backend ignores it.
+  virtual void set_lane_slot(uint64_t /*slot_index*/) {}
+
   /// \brief Sets the center frequency.
   ///
   /// The implementation of this method must be thread safe and the new center frequency takes effect in the next call
@@ -163,6 +171,9 @@ public:
 class ofdm_slot_demodulator
 {
 public:
+  /// See ofdm_symbol_demodulator::set_lane_slot().
+  virtual void set_lane_slot(uint64_t /*slot_index*/) {}
+
   /// Default destructor.
   virtual ~ofdm_slot_demodulator() = default;
 

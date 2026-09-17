@@ -122,6 +122,13 @@ public:
   unsigned get_cp_offset(unsigned symbol_index, unsigned slot_index) const;
 
   // See interface for documentation.
+  void set_lane_slot(uint64_t slot_index) override
+  {
+    if (dft != nullptr) {
+      dft->set_lane_slot(slot_index);
+    }
+  }
+
   unsigned get_symbol_size(unsigned symbol_index) const override
   {
     return cp.get_length(symbol_index, scs).to_samples(sampling_rate_Hz) + dft_size;

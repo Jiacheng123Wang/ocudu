@@ -70,6 +70,18 @@ public:
   /// next lane instead of being reported as gap.
   static void close_lane();
 
+  /// \brief Registers a front-end (DFT) command buffer with the slot it belongs to.
+  ///
+  /// The transforms of one slot are submitted by the radio thread, on the front-end queue, while the
+  /// lane of the same slot (estimator, equalizer, demapper) is filled by another thread - so the two
+  /// are accounted as two series instead of being merged: the front-end one answers what the transforms
+  /// cost the device and how much of that time they waited for it, and the lane one is the same
+  /// question for the back end. Together they cover the whole IQ -> LLR path.
+  ///
+  /// Called right after commit(), which is also when the slot must be told (set_lane_slot()): a slot
+  /// change closes the previous group.
+  static void register_front_end_commit(id<MTLCommandBuffer> cb, uint64_t slot_index);
+
   /// Prints the accumulated statistics to stderr (registered with atexit).
   static void report();
 };
@@ -83,6 +95,7 @@ public:
 
   static void register_commit(id<MTLCommandBuffer>, stage) {}
   static void close_lane() {}
+  static void register_front_end_commit(id<MTLCommandBuffer>, uint64_t) {}
   static void report() {}
 };
 

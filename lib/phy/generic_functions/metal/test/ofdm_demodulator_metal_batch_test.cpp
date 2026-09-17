@@ -194,6 +194,10 @@ int main()
       const unsigned        depth = demod.get_pipeline_depth();
       std::vector<unsigned> in_flight;
       unsigned              offset = 0;
+      // The receiving slot, as the lower PHY's FSM tells it (set_lane_slot()): it is what the device
+      // probe groups this slot's transforms by, so this test exercises that half of the device
+      // timeline too - its report is the "[ul_gpu_lane] dft ..." series on stderr.
+      demod.set_lane_slot(1);
       for (unsigned s = 0; s != nsymb; ++s) {
         // Keep the ring at `depth` transforms in flight: the slot about to be reused holds the oldest one.
         if (in_flight.size() == depth) {

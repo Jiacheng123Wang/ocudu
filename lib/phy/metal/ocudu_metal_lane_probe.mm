@@ -38,6 +38,26 @@ lane_thread_state& thread_state()
   return s;
 }
 
+/// The transforms of the slot currently being submitted by this thread, waiting to be accounted.
+///
+/// Thread local for the same reason as the lane state, and lockless for a stronger one: these
+/// registrations happen on the radio thread, per symbol, on the path the real-time uplink depends on.
+struct front_end_state {
+  uint64_t                         slot = 0;
+  bool                             open = false;
+  std::vector<id<MTLCommandBuffer>> cbs;
+};
+
+front_end_state& front_end_thread_state()
+{
+  // Never destroyed on purpose, for the same reason as stats(): the report runs from an atexit handler,
+  // which runs AFTER the thread-local destructors of the main thread - a function-local object would be
+  // an empty vector by the time the front end is reported (measured: the series came out as "no lanes
+  // recorded" with the command buffers already gone).
+  static thread_local front_end_state* s = new front_end_state();
+  return *s;
+}
+
 /// Process-wide statistics, accumulated by every thread's closed lanes.
 struct lane_stats_t {
   std::mutex mutex;
@@ -62,6 +82,14 @@ struct lane_stats_t {
   double last_lane_end_s = 0.0;
   bool   has_last_end    = false;
   uint64_t period_dropped = 0;
+
+  /// The front-end (DFT) timeline, one group per slot (see register_front_end_commit()).
+  std::vector<double> fe_residency_us;
+  std::vector<double> fe_busy_us;
+  std::vector<double> fe_gap_us;
+  uint64_t            fe_slots       = 0;
+  uint64_t            fe_cbs         = 0;
+  uint64_t            fe_carried     = 0;
 };
 
 lane_stats_t& stats()
@@ -132,6 +160,72 @@ void print_series(const char* name, std::vector<double>& sorted)
 }
 
 } // namespace
+
+/// Accumulates one front-end group (a slot's transforms) into the series. Command buffers that did not
+/// complete are counted as carried, never reported: a half-visible group would read as a gap.
+static void close_front_end_group(front_end_state& fe, lane_stats_t& st)
+{
+  if (!fe.open || fe.cbs.empty()) {
+    fe.cbs.clear();
+    fe.open = false;
+    return;
+  }
+
+  double   first_start = 0.0;
+  double   last_end    = 0.0;
+  double   busy        = 0.0;
+  bool     any         = false;
+  uint64_t carried     = 0;
+  uint64_t counted     = 0;
+  for (id<MTLCommandBuffer> cb : fe.cbs) {
+    if ((cb == nil) || (cb.status != MTLCommandBufferStatusCompleted)) {
+      ++carried;
+      continue;
+    }
+    const double start = cb.GPUStartTime;
+    const double end   = cb.GPUEndTime;
+    if (!(start > 0.0) || !(end >= start)) {
+      ++carried;
+      continue;
+    }
+    if (!any) {
+      first_start = start;
+      any         = true;
+    }
+    last_end = std::max(last_end, end);
+    busy += (end - start) * 1e6;
+    ++counted;
+  }
+  fe.cbs.clear();
+  fe.open = false;
+  st.fe_carried += carried;
+  if (!any) {
+    return;
+  }
+  const double residency = (last_end - first_start) * 1e6;
+  st.fe_residency_us.push_back(residency);
+  st.fe_busy_us.push_back(busy);
+  st.fe_gap_us.push_back(residency - busy);
+  ++st.fe_slots;
+  st.fe_cbs += counted;
+}
+
+void gpu_lane_probe::register_front_end_commit(id<MTLCommandBuffer> cb, uint64_t slot_index)
+{
+  if (cb == nil) {
+    return;
+  }
+  front_end_state& fe = front_end_thread_state();
+  if (fe.open && (fe.slot != slot_index)) {
+    std::lock_guard<std::mutex> lock(stats().mutex);
+    close_front_end_group(fe, stats());
+  }
+  if (!fe.open) {
+    fe.slot = slot_index;
+    fe.open = true;
+  }
+  fe.cbs.push_back(cb);
+}
 
 void gpu_lane_probe::register_commit(id<MTLCommandBuffer> cb, stage which)
 {
@@ -237,6 +331,15 @@ void gpu_lane_probe::report()
 {
   lane_stats_t& s = stats();
 
+  // The last front-end group of a run has no successor slot to close it: close it here. (In a leg the
+  // transforms are submitted by the radio thread and this runs on the main one at exit, so the group
+  // that is still open at that moment - the final slot - is the one that may be missed; every earlier
+  // one was closed when its successor arrived.)
+  {
+    std::lock_guard<std::mutex> lock(s.mutex);
+    close_front_end_group(front_end_thread_state(), s);
+  }
+
   std::vector<double> residency;
   std::vector<double> busy;
   std::vector<double> gap;
@@ -249,8 +352,20 @@ void gpu_lane_probe::report()
   uint64_t            dropped        = 0;
   uint64_t            carried        = 0;
   uint64_t            period_dropped = 0;
+  std::vector<double> fe_residency;
+  std::vector<double> fe_busy;
+  std::vector<double> fe_gap;
+  uint64_t            fe_slots   = 0;
+  uint64_t            fe_cbs     = 0;
+  uint64_t            fe_carried = 0;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
+    fe_residency = s.fe_residency_us;
+    fe_busy      = s.fe_busy_us;
+    fe_gap       = s.fe_gap_us;
+    fe_slots     = s.fe_slots;
+    fe_cbs       = s.fe_cbs;
+    fe_carried   = s.fe_carried;
     residency = s.residency_us;
     busy      = s.busy_us;
     gap       = s.gap_us;
@@ -267,8 +382,28 @@ void gpu_lane_probe::report()
     period_dropped = s.period_dropped;
   }
 
+  // The front end has its own series and does not need a lane to be worth reporting: a run of the
+  // demodulator alone (its test) has transforms but no back-end lane at all.
+  const auto print_front_end = [&]() {
+    if (fe_slots == 0) {
+      return;
+    }
+    std::fprintf(stderr,
+                 "[ul_gpu_lane] dft slots=%llu cbs=%llu carried=%llu (front-end queue, one group per slot)\n",
+                 static_cast<unsigned long long>(fe_slots),
+                 static_cast<unsigned long long>(fe_cbs),
+                 static_cast<unsigned long long>(fe_carried));
+    print_series("dft residency", fe_residency);
+    print_series("dft busy", fe_busy);
+    print_series("dft gap", fe_gap);
+  };
+
   if (lanes == 0) {
-    std::fprintf(stderr, "[ul_gpu_lane] no lanes recorded\n");
+    if (fe_slots == 0) {
+      std::fprintf(stderr, "[ul_gpu_lane] no lanes recorded\n");
+    } else {
+      print_front_end();
+    }
     return;
   }
 
@@ -286,6 +421,8 @@ void gpu_lane_probe::report()
   print_series("busy", busy);
   print_series("gap", gap);
   print_series("period", period);
+
+  print_front_end();
 
   std::fprintf(stderr, "[ul_gpu_lane] busy split:");
   double busy_total = 0;

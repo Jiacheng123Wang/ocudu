@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_dft_metal_engine.h"
+#include "ocudu_metal_lane_probe.h"
 
 #include "ocudu_metal_queue.h"
 
@@ -194,7 +195,12 @@ NSString* resolve_dft_metallib_path()
 static constexpr unsigned max_batch_slots = 16;
 
 struct dft_engine_impl {
-  id<MTLCommandBuffer> last_committed_cb = nil; // newest commit (ring bookkeeping)
+  id<MTLCommandBuffer> last_committed_cb = nil;
+  /// Receiving slot the transforms being submitted belong to (see set_lane_slot()), and whether it was
+  /// ever told: without a slot there is nothing to group the transforms by, and the probe is not fed
+  /// (the offline tools submit transforms without a receiving slot at all).
+  uint64_t lane_slot     = 0;
+  bool     has_lane_slot = false;
   /// Command buffer of the newest submission per transform slot (ring pipelining).
   id<MTLCommandBuffer> slot_cb[max_batch_slots <= 16 ? 16 : max_batch_slots] = {};
   bool                 slot_pending[16]                                  = {};
@@ -702,11 +708,23 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   metal::shared_queue::front_end_signal(cmd_buf);
   [cmd_buf commit];
   dft_stats_commit();
+  if (engine->has_lane_slot) {
+    metal::gpu_lane_probe::register_front_end_commit(cmd_buf, engine->lane_slot);
+  }
   metal::shared_queue::notify_commit(cmd_buf, metal::shared_queue::queue_kind::front_end);
   engine->last_committed_cb    = cmd_buf;
   engine->slot_cb[slot]        = cmd_buf;
   engine->slot_pending[slot]   = true;
   return true;
+}
+
+void dft_metal_engine::set_lane_slot(uint64_t slot_index)
+{
+  dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
+  if (engine != nullptr) {
+    engine->lane_slot     = slot_index;
+    engine->has_lane_slot = true;
+  }
 }
 
 uint64_t dft_metal_engine::fence_generation()
@@ -809,6 +827,9 @@ bool dft_metal_engine::submit_at(
   metal::shared_queue::front_end_signal(cmd_buf);
   [cmd_buf commit];
   dft_stats_commit();
+  if (engine->has_lane_slot) {
+    metal::gpu_lane_probe::register_front_end_commit(cmd_buf, engine->lane_slot);
+  }
   // Publish the commit on the front-end chain so wait_all_committed() can drain it: the DFT is the
   // only engine on this queue, and it is a different queue than the back-end stages' (a commit must
   // never be published on the wrong chain, or the wait would target another queue's command buffer

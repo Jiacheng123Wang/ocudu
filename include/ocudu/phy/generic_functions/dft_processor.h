@@ -120,6 +120,13 @@ public:
   /// every earlier submission of every stage sharing the queue, not only this processor's.
   virtual void wait() {}
 
+  /// \brief Tells the processor which receiving slot the transforms it is about to submit belong to.
+  ///
+  /// Instrumentation only: the device probe accounts the GPU time of a slot's transforms, and they are
+  /// submitted by the radio thread while the rest of the chain runs on another one, so the slot is the
+  /// identity that lets the two timelines be compared. A processor without a device probe ignores it.
+  virtual void set_lane_slot(uint64_t /*slot_index*/) {}
+
   /// \brief Waits for the transform submitted in \c slot.
   ///
   /// Releases the caller's input slot for reuse without stalling on newer submissions, which is

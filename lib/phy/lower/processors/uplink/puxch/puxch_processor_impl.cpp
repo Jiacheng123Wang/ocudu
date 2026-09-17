@@ -114,6 +114,12 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
 
     // Update slot.
     current_slot = context.slot;
+    // Tell the device backend which slot the transforms it is about to receive belong to: the probe
+    // accounts them as one group per slot, which is the front end's half of the device timeline (the
+    // back-end lane of the same slot is filled by another thread).
+    if (demodulator != nullptr) {
+      demodulator->set_lane_slot(context.slot.to_uint());
+    }
 
     // Exchange an empty request with the current slot with a stored request.
     auto request = requests.exchange({context.slot, shared_resource_grid()});
