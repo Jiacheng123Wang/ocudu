@@ -137,11 +137,17 @@ void lower_phy_baseband_processor::start(baseband_gateway_timestamp init_time, b
   // to the uplink processor, and one that does not describe it (a test double, or a build without one)
   // keeps the historical whole-slot blocks. Decided per stream, when the configuration is final.
   rx_symbol_grid_known = uplink_processor.locate_symbols(0, 1).nof_samples != 0;
-  // How many symbols one block covers. The environment override exists to A/B the front end's overlap
-  // against the radio's per-call cost on air without a rebuild: 0 restores the whole-slot blocks.
+  // How many symbols one block covers: 0 keeps the whole-slot blocks, which is the DEFAULT and the only
+  // policy whose shutdown has been seen to complete cleanly on air. The symbol-grained policy (S-7g-13) is
+  // experimental and opt-in through OCUDU_UL_RX_SYMBOLS=N: it is functionally green (contract MET 7/7,
+  // assembled=0, gaps=0) but its shutdown still trips a DU teardown race, and its latency benefit cannot be
+  // judged with [ul_pipeline]/[ul_time_frequency] because those series start at the first RECEIVED block -
+  // the slot's END under the whole-slot policy and its BEGINNING under the symbol one. Set the default back
+  // to 14 (= a slot's worth of symbols, i.e. the same request the whole-slot policy makes) only after the
+  // DU race is fixed and the policy has a judge whose endpoints do not move.
   {
     const char* env       = std::getenv("OCUDU_UL_RX_SYMBOLS");
-    nof_symbols_per_block = (env == nullptr) ? 1U : static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+    nof_symbols_per_block = (env == nullptr) ? 0U : static_cast<unsigned>(std::strtoul(env, nullptr, 10));
   }
   // A stream that starts here has to establish its phase again: the first block only closes the gap to
   // the next slot (whole-slot policy) or symbol (symbol-grained policy) boundary and is not processed
