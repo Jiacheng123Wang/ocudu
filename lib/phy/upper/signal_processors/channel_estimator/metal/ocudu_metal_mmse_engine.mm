@@ -11,6 +11,7 @@
 #import <Metal/Metal.h>
 
 #include "ocudu_metal_lane_probe.h"
+#include "ocudu_metal_burst.h"
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
@@ -233,6 +234,9 @@ struct mmse_phase_timer {
 };
 
 struct mmse_engine_impl {
+  /// \brief Encode this engine's dispatches into the shared burst of the deferred chain instead of
+  /// their own command buffer (see mmse_engine::set_fused_burst).
+  bool fused_burst = false;
   id<MTLDevice>                  device      = nil;
   id<MTLCommandQueue>            queue       = nil;
   id<MTLLibrary>                 library     = nil;
@@ -391,6 +395,77 @@ struct mmse_engine_impl {
     return weights_matrix_pipe != nil && apply_matrix_pipe != nil;
   }
 };
+
+/// \brief Encoder one engine stage writes through: its own command buffer, or the shared burst.
+///
+/// The stages of one slot used to open, commit and WAIT a command buffer each (the synchronous contract at
+/// the top of the header). In the deferred PUSCH chain that leaves two command buffers per lane on the same
+/// queue with a host wait between them: Metal only orders the STARTS of a queue's command buffers, so the
+/// equalizer's dispatches are not ordered after the estimates they read unless the host waits - and that
+/// wait is what the fused lane removes (measured on air: 346us per call as [mmse_time_sum] gpu_wait, on top
+/// of the 559us the deferred chain waits for its own command buffer).
+///
+/// In burst mode the stage encodes into the command buffer the chained stages share (see shared_burst): the
+/// barrier that shared_burst::encoder() inserts when the pipeline changes orders it after the previous
+/// stage, the lane's single commit covers it, and wait_pending() has nothing left to wait for. Failure paths
+/// encode nothing further and leave the burst open; a stage that failed after encoding part of its work is
+/// the one case burst mode cannot undo (the historical path simply does not commit its command buffer).
+struct stage_encoder {
+  id<MTLCommandBuffer>         cb    = nil;
+  id<MTLComputeCommandEncoder> enc   = nil;
+  bool                         burst = false;
+};
+
+/// Opens a stage: the shared burst when the caller asked for it, its own command buffer otherwise.
+static stage_encoder begin_stage(mmse_engine_impl* e, id<MTLComputePipelineState> first_pipeline)
+{
+  stage_encoder s;
+  if (e->fused_burst) {
+    s.enc   = ocudu::metal::shared_burst::encoder(first_pipeline);
+    s.burst = (s.enc != nil);
+    if (s.burst) {
+      return s;
+    }
+    // The burst could not be opened: fall through to the stage's own command buffer, which is what the
+    // caller gets when the fusion is off - a slow lane, never a wrong one.
+  }
+  s.cb  = [e->queue commandBuffer];
+  s.enc = [s.cb computeCommandEncoder];
+  return s;
+}
+
+/// Closes a stage: commits and waits on its own command buffer, or leaves the dispatches in the burst.
+static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded)
+{
+  if (s.burst) {
+    if (!encoded) {
+      return false;
+    }
+    ocudu::metal::shared_burst::count_dispatch(ocudu::metal::shared_burst::stage::channel_estimator);
+    // No endEncoding (the burst owns its encoder), no commit, no wait: the lane's single commit covers it.
+    return true;
+  }
+
+  [s.enc endEncoding];
+  if (!encoded) {
+    return false;
+  }
+  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
+  ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
+  [s.cb commit];
+  mmse_stats_commit();
+  ocudu::metal::gpu_lane_probe::register_commit(s.cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
+  [s.cb waitUntilCompleted];
+  mmse_stats_wait();
+
+  if (s.cb.status != MTLCommandBufferStatusCompleted || s.cb.error != nil) {
+    return false;
+  }
+  if (s.cb.GPUStartTime != 0 && s.cb.GPUEndTime != 0) {
+    e->last_gpu_us = (s.cb.GPUEndTime - s.cb.GPUStartTime) * 1e6;
+  }
+  return true;
+}
 
 // Appends the K3 gather (the equalizer's per-symbol estimates) to an encoder that has just run
 // K2 over h. Shared by run() and run_weights_only() so both inversion paths produce it.
@@ -811,8 +886,9 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     p.pilot_re[k] = s.pilot_re[k];
   }
 
-  id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
-  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  stage_encoder                st  = begin_stage(e, e->pilots_lse_pipe);
+  id<MTLCommandBuffer>         cb  = st.cb;
+  id<MTLComputeCommandEncoder> enc = st.enc;
 
   [enc setComputePipelineState:e->pilots_lse_pipe];
   [enc setBuffer:grid_buf offset:0 atIndex:0];
@@ -893,16 +969,8 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     }
   }
 
-  [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
-  [cb commit];
-  mmse_stats_commit();
-  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
-  [cb waitUntilCompleted];
-  mmse_stats_wait();
 
-  return (cb.status == MTLCommandBufferStatusCompleted) && (cb.error == nil);
+  return end_stage(e, st, true);
 }
 
 /// Must match mmse_corr_params in ocudu_mmse_corr.metal.
@@ -1013,30 +1081,18 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
   if ((e == nullptr) || (e->device == nil)) {
     return false;
   }
-  id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
-  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  stage_encoder                st  = begin_stage(e, e->corr_a_pipe);
+  id<MTLCommandBuffer>         cb  = st.cb;
+  id<MTLComputeCommandEncoder> enc = st.enc;
   if (!encode_corr(e, enc, c, nof_systems)) {
-    [enc endEncoding];
-    mmse_stats_corr_build_failure();
+      mmse_stats_corr_build_failure();
     return false;
   }
   [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
-  [cb commit];
-  mmse_stats_commit();
   mmse_stats_corr_build();
-  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
-  [cb waitUntilCompleted];
-  mmse_stats_wait();
 
-  if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
-    return false;
-  }
-  if (cb.GPUStartTime != 0 && cb.GPUEndTime != 0) {
-    e->last_gpu_us = (cb.GPUEndTime - cb.GPUStartTime) * 1e6;
-  }
-  return true;
+  mmse_stats_corr_build();
+  return end_stage(e, st, true);
 }
 
 /// Threadgroup geometry of the K1 (block Gauss-Jordan) dispatch, as (column, row) threads.
@@ -1086,9 +1142,10 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
   }
   const auto t_wrap1 = std::chrono::steady_clock::now();
 
-  id<MTLCommandBuffer> cb = [e->queue commandBuffer];
+  stage_encoder                st  = begin_stage(e, e->inv_pipe);
+  id<MTLCommandBuffer>         cb  = st.cb;
   const auto t_cb1 = std::chrono::steady_clock::now();
-  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  id<MTLComputeCommandEncoder> enc = st.enc;
   [enc setComputePipelineState:e->inv_pipe];
   [enc setBuffer:a_buf offset:0 atIndex:0];
   [enc setBytes:&n length:sizeof(unsigned) atIndex:1];
@@ -1102,22 +1159,8 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
     [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1)
         threadsPerThreadgroup:MTLSizeMake(tgx, tgy, 1)];
   }
-  [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
-  [cb commit];
-  mmse_stats_commit();
-  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
-  [cb waitUntilCompleted];
-  mmse_stats_wait();
 
-  if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
-    return false;
-  }
-  if (cb.GPUStartTime != 0 && cb.GPUEndTime != 0) {
-    e->last_gpu_us = (cb.GPUEndTime - cb.GPUStartTime) * 1e6;
-  }
-  return true;
+  return end_stage(e, st, true);
 }
 
 bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout, unsigned L, unsigned nof_systems,
@@ -1147,8 +1190,9 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
     uint32_t nof_blocks;
   } params{nout, L, nof_systems, nof_blocks};
 
-  id<MTLCommandBuffer> cb = [e->queue commandBuffer];
-  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  stage_encoder                st  = begin_stage(e, e->apply_pipe);
+  id<MTLCommandBuffer>         cb  = st.cb;
+  id<MTLComputeCommandEncoder> enc = st.enc;
   [enc setComputePipelineState:e->apply_pipe];
   [enc setBuffer:w_buf offset:0 atIndex:0];
   [enc setBuffer:y_buf offset:0 atIndex:1];
@@ -1156,22 +1200,8 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
   [enc setBytes:&params length:sizeof(params) atIndex:3];
   [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
-  [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
-  [cb commit];
-  mmse_stats_commit();
-  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
-  [cb waitUntilCompleted];
-  mmse_stats_wait();
 
-  if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
-    return false;
-  }
-  if (cb.GPUStartTime != 0 && cb.GPUEndTime != 0) {
-    e->last_gpu_us = (cb.GPUEndTime - cb.GPUStartTime) * 1e6;
-  }
-  return true;
+  return end_stage(e, st, true);
 }
 
 bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, float* h, unsigned nout,
@@ -1408,7 +1438,7 @@ bool mmse_engine::run_async(float*       a,
   [enc endEncoding];
   phase.encoded();
   // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
+  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end);
   [cb commit];
   phase.committed();
   mmse_stats_commit();
@@ -1417,10 +1447,21 @@ bool mmse_engine::run_async(float*       a,
   return true;
 }
 
+void mmse_engine::set_fused_burst(bool enabled)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if (e != nullptr) {
+    e->fused_burst = enabled;
+  }
+}
+
 bool mmse_engine::wait_pending()
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if ((e == nullptr) || (e->pending_cb == nil)) {
+    // In burst mode nothing of this engine is outstanding: its dispatches live in the caller's command
+    // buffer, whose commit and wait belong to the lane (see set_fused_burst). The stages call this at their
+    // boundaries and must be told yes without a wait.
     return true;
   }
   id<MTLCommandBuffer> cb = e->pending_cb;
@@ -1620,7 +1661,7 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   [enc endEncoding];
   phase.encoded();
   // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
+  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end);
   [cb commit];
   phase.committed();
   mmse_stats_commit();
@@ -1728,7 +1769,7 @@ bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const 
 
   [enc endEncoding];
   // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
+  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end);
   [cb commit];
   mmse_stats_commit();
   gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);

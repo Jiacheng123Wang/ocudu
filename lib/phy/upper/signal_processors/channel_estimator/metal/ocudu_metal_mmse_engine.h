@@ -486,6 +486,21 @@ public:
                  const pilots_scatter* scatter     = nullptr,
                  unsigned              nof_scatter = 0);
 
+  /// \brief Encodes this engine's dispatches into the shared burst of the deferred chain.
+  ///
+  /// Off (the default): every stage opens, commits and waits its own command buffer - the synchronous
+  /// contract this engine was built with, and what the callers that read the estimates on the host need.
+  ///
+  /// On: the stages of the deferred PUSCH chain encode into the burst the equalizer and the demapper share
+  /// (see shared_burst), the CE -> equalizer order comes from the barrier the burst inserts when the pipeline
+  /// changes, and no stage commits or waits: the lane's single commit covers the estimator too, which removes
+  /// one of the two host waits a lane used to pay ([mmse_time_sum] gpu_wait).
+  ///
+  /// \param[in] enabled Whether the following stages encode into the shared burst.
+  /// \note Only sound while the caller owns a burst: without one, begin_stage() falls back to the stage's own
+  ///       command buffer - a slow lane, never a wrong one.
+  void set_fused_burst(bool enabled);
+
   /// \brief Waits for the submission of run_async() and reports whether it completed.
   /// \return True when there was nothing pending, or when the pending submission succeeded.
   bool wait_pending();

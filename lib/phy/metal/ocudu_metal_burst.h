@@ -34,7 +34,7 @@ public:
   /// Stage that appended a dispatch. The engines taking part in a burst also keep their own
   /// commit/wait counters, but those only account for their synchronous per-call path, so the burst
   /// probe attributes each dispatch to its stage to make the split visible.
-  enum class stage { equalizer, demapper, other };
+  enum class stage { equalizer, demapper, channel_estimator, other };
 
   /// \brief Opens the burst if needed and returns its encoder, switching to \c pipeline.
   ///

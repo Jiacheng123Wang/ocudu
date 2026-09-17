@@ -57,6 +57,7 @@ struct burst_stats_t {
   std::atomic<uint64_t> dispatches{0};
   std::atomic<uint64_t> eq_dispatches{0};
   std::atomic<uint64_t> demap_dispatches{0};
+  std::atomic<uint64_t> ce_dispatches{0};
 };
 
 burst_stats_t& stats()
@@ -71,13 +72,14 @@ void burst_stats_report()
   const burst_stats_t& s = stats();
   std::fprintf(stderr,
                "[metal_stats] burst commits=%llu waits=%llu max_in_flight=%llu dispatches=%llu "
-               "(equalizer=%llu demapper=%llu)\n",
+               "(equalizer=%llu demapper=%llu channel_estimator=%llu)\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.dispatches.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.eq_dispatches.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.demap_dispatches.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.demap_dispatches.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.ce_dispatches.load(std::memory_order_relaxed)));
 }
 
 void burst_stats_commit()
@@ -291,6 +293,9 @@ void shared_burst::count_dispatch(stage which)
       break;
     case stage::demapper:
       s.demap_dispatches.fetch_add(1, std::memory_order_relaxed);
+      break;
+    case stage::channel_estimator:
+      s.ce_dispatches.fetch_add(1, std::memory_order_relaxed);
       break;
     case stage::other:
       break;
