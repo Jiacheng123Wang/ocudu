@@ -23,6 +23,31 @@
 namespace ocudu {
 namespace metal {
 
+/// \brief Where the estimator's deferred hop puts its dispatches, and how the lane is ordered after them.
+///
+/// The receiving chain encodes the estimation of a hop, then the equalization and the demapping of the
+/// same group, and the equalizer reads what the estimation wrote (the weights, the per-symbol estimates,
+/// the noise variance). Three ways to get that order, and they differ in WHEN the estimator's command
+/// buffer is committed - which is what decides whether its GPU work overlaps the host encoding the rest
+/// of the lane:
+///
+///  * \c event      - the estimator's own command buffer, committed as soon as its dispatches are
+///                    encoded, with the lane burst waiting on it through the back-end stage fence
+///                    (shared_queue::backend_stage_wait()). Overlap AND ordering, no host wait: this is
+///                    the default (S-7g-19, Step 1').
+///  * \c host_wait  - the same own command buffer, waited for by the host before the lane is encoded.
+///                    The historical route: correct, and the reason the lane used to pay ~125us of
+///                    [ul_equalization_demod] (the host blocked while the estimator's GPU work ran
+///                    instead of encoding the equalization). Kept as the escape hatch.
+///  * \c burst      - the estimator's dispatches join the lane's shared command buffer (S-7g-16, Step
+///                    1b): one submission for the whole lane, at the price of the estimator's GPU work
+///                    no longer overlapping the host's encoding (the +125us debt Step 1' came to pay
+///                    back) and of the estimator's own command buffer not existing at all.
+///
+/// \note The three orders are byte-identical by construction; the unit test compares them on the same
+///       input, and the air legs judge which one is faster.
+enum class ce_lane_order { event, host_wait, burst };
+
 /// Synchronous single-instance MMSE compute engine.
 class mmse_engine
 {
@@ -486,29 +511,31 @@ public:
                  const pilots_scatter* scatter     = nullptr,
                  unsigned              nof_scatter = 0);
 
-  /// \brief Encodes this engine's dispatches into the shared burst of the deferred chain.
+  /// \brief Selects where the following stages put their dispatches and how the lane is ordered after
+  /// them (see ce_lane_order).
   ///
-  /// Off (the default): every stage opens, commits and waits its own command buffer - the synchronous
-  /// contract this engine was built with, and what the callers that read the estimates on the host need.
+  /// The order is per hop, and the adapter sets it on EVERY hop both ways: the adapter outlives the hop,
+  /// and an engine left in \c burst mode would silently dispatch a later synchronous hop into a burst
+  /// nobody owns.
   ///
-  /// On: the stages of the deferred PUSCH chain encode into the burst the equalizer and the demapper share
-  /// (see shared_burst), the CE -> equalizer order comes from the barrier the burst inserts when the pipeline
-  /// changes, and no stage commits or waits: the lane's single commit covers the estimator too, which removes
-  /// one of the two host waits a lane used to pay ([mmse_time_sum] gpu_wait).
+  /// The default of a fresh engine is \c host_wait - the behaviour every caller of this engine had before
+  /// the lane orders existed, which is what a caller that does not know about them must keep. The
+  /// receiving chain passes \c event (see port_channel_estimator_metal_mmse_impl::ce_lane_order_from_env()).
   ///
-  /// \param[in] enabled Whether the following stages encode into the shared burst.
-  /// \note Only sound while the caller owns a burst: without one, begin_stage() falls back to the stage's own
-  ///       command buffer - a slow lane, never a wrong one.
-  void set_fused_burst(bool enabled);
+  /// \param[in] order The order the following deferred stages use.
+  void set_lane_order(ce_lane_order order);
+
+  /// The order this engine's stages currently use.
+  ce_lane_order lane_order() const;
 
   /// \brief Waits for the submission of run_async() and reports whether it completed.
   /// \return True when there was nothing pending, or when the pending submission succeeded.
   bool wait_pending();
 
-  /// \brief Completes the dispatches a burst-mode stage left in the shared burst, and reports success.
+  /// \brief Completes the dispatches a \c burst-order stage left in the shared burst, and reports success.
   ///
-  /// A burst-mode stage (set_fused_burst(true)) leaves its dispatches in the command buffer the rest of
-  /// the receiving chain shares, so that the lane's own commit and wait cover them: by the time the
+  /// In \c burst order (set_lane_order()) the estimator leaves its dispatches in the command buffer the
+  /// rest of the receiving chain shares, so that the lane's own commit and wait cover them: by the time the
   /// estimator is asked to complete the hop, this call normally finds nothing outstanding and returns at
   /// once. The callers that read the hop's results BEFORE the lane commits are the ones that need it to do
   /// the work - the demodulator on the route that syncs the estimates to host memory (OCUDU_CE_CPU_CE),
@@ -516,12 +543,30 @@ public:
   /// then holds this engine's dispatches alone (no other stage has encoded into it yet), so committing it
   /// here gives up the overlap, never the ordering the burst exists for.
   ///
-  /// \note This is the burst-mode counterpart of wait_pending(): that one completes the engine's own command
-  ///       buffer, this one the shared burst, and the engine has nothing of its own pending in burst mode.
-  ///       The caller knows which one it left behind (see
-  ///       port_channel_estimator_metal_mmse_impl::pending_fused_burst).
+  /// \note In \c event and \c host_wait order the hop's dispatches are in the ENGINE's own command buffer,
+  ///       and the counterpart of this call is wait_pending(). The caller knows which one it left behind
+  ///       (see port_channel_estimator_metal_mmse_impl::pending_fused_burst).
   /// \return True when everything the calling thread's lane holds completed successfully.
   bool complete_fused_burst();
+
+  /// \brief Self-test of the back-end stage fence (S-7g-19): encodes the very wait the lane burst encodes,
+  /// on a command buffer of its own, and waits for it.
+  ///
+  /// This is what lets the unit test judge the ordering mechanism instead of only its result: a lane that
+  /// waits for a generation nobody signalled would otherwise be invisible until it read stale weights on
+  /// air. It opens a back-end command buffer, calls the same shared_queue::backend_stage_wait() that
+  /// shared_burst uses, commits it and waits for it - so a wait that names a generation no command buffer
+  /// will ever signal shows up here as a command buffer that never completes.
+  ///
+  /// \param[out] waited True when a wait was encoded (i.e. an estimator commit had been signalled).
+  /// \return True when the command buffer completed successfully.
+  static bool lane_fence_selftest(bool& waited);
+
+  /// Diagnostics of the back-end stage fence, for the unit test and the [metal_stats] line.
+  static uint64_t lane_fence_generation();
+  static uint64_t lane_fence_nof_signals();
+  static uint64_t lane_fence_nof_waits();
+  static uint64_t lane_fence_nof_skipped_waits();
 
   /// \brief Diagnostics: whether the calling thread's receiving chain has a burst open, and how many
   /// dispatches it holds.

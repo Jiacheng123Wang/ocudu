@@ -158,6 +158,45 @@ public:
   static uint64_t front_end_nof_waits();
   static uint64_t front_end_nof_skipped_waits();
 
+  /// \brief Back-end stage fence (S-7g-19, Step 1'): relates the channel estimator's own command buffer
+  /// to the lane burst that reads what it wrote.
+  ///
+  /// The estimator commits its weights into a command buffer of its own as soon as they are encoded, so
+  /// that its GPU work overlaps the host encoding the equalization and the demapping of the same group -
+  /// the overlap the shared-burst route gave up (measured on air as +125us of [ul_equalization_demod]).
+  /// Its consumer, the lane burst, is a SECOND command buffer on the SAME queue, and one queue only
+  /// orders the STARTS of its command buffers: nothing guarantees that the equalizer's dispatches, which
+  /// read the weights and the noise variance the estimator wrote, run after the estimator's. This event
+  /// is that guarantee, and it is the EXACT dependency: the lane burst waits for the estimator command
+  /// buffer it reads, not for "the newest work on the back end" (the mistake the front-end fence made,
+  /// see 48.189(f)).
+  ///
+  /// Same generation discipline as the front-end fence above: the estimator takes the generation and
+  /// encodes its signal immediately before committing, so a signalled generation always has a command
+  /// buffer on its way; the lane burst waits for the newest generation that existed when it was created,
+  /// so it can never wait for a signal nobody will send. A burst created with no estimator commit at all
+  /// (the unit tests, the replay tool, or a route whose estimator runs synchronously) encodes no wait.
+  ///
+  /// \note Only the route that commits early signals (see mmse_engine::set_lane_order()): a route that
+  /// waits for its own command buffer has already ordered itself, and a wait for a stale generation is
+  /// a no-op rather than an over-wait.
+  static uint64_t backend_stage_signal(id<MTLCommandBuffer> command_buffer);
+
+  /// \brief Encodes a wait for the newest COMMITTED estimator generation on \p command_buffer.
+  ///
+  /// Must be called while no encoder of that command buffer is open (it is a command-buffer level API),
+  /// which is why the lane burst does it right after creating its command buffer.
+  /// \return True when a wait was encoded; false when nothing was signalled yet.
+  static bool backend_stage_wait(id<MTLCommandBuffer> command_buffer);
+
+  /// The newest estimator generation whose signal has been encoded (0 before the first one).
+  static uint64_t backend_stage_generation();
+
+  /// Diagnostics: signals encoded, waits encoded, and waits skipped because nothing was signalled.
+  static uint64_t backend_stage_nof_signals();
+  static uint64_t backend_stage_nof_waits();
+  static uint64_t backend_stage_nof_skipped_waits();
+
   /// \brief Waits for every command buffer committed through \p kind's queue so far.
   ///
   /// \note Command buffers of one queue complete in submission order, so waiting for the most

@@ -128,6 +128,14 @@ static bool burst_ensure_open(burst_state& s)
   // level API requires, and it covers every dispatch encoded into this burst afterwards.
   if (s.cb != nil) {
     shared_queue::front_end_wait(s.cb);
+    // Back-end stage fence (S-7g-19, Step 1'): the lane burst reads what the ESTIMATOR wrote - the
+    // weights, the per-symbol estimates and the noise variance - and the estimator wrote it into a
+    // command buffer of its own, committed as soon as it was encoded so that its GPU work overlaps
+    // the host encoding this burst. Two command buffers of one queue only have their STARTS ordered,
+    // so without this wait the equalizer could read the estimator's memory before it is written. The
+    // wait covers the whole burst, and it targets the estimator command buffer of THIS hop, which was
+    // committed before this burst (the receiving chain estimates first, then demodulates).
+    shared_queue::backend_stage_wait(s.cb);
   }
   s.enc = (s.cb != nil) ? [s.cb computeCommandEncoder] : nil;
   if (s.enc == nil) {

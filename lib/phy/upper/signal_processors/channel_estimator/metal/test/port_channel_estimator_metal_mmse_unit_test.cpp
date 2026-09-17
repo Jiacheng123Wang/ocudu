@@ -193,10 +193,11 @@ dmrs_symbol_list make_pilots(unsigned n_prb = 51, unsigned nof_symbols = 2)
 
 int main()
 {
-  // The fused lane is the DEFAULT route now (OCUDU_CE_FUSED_BURST=0 is the escape hatch), and Test 13
-  // pins the knob in both directions: clearing it here keeps every other test on the default whatever
-  // the caller's environment says. It changes nothing for them - they all go through compute(), which
-  // completes the hop it submits and therefore never fuses.
+  // The lane order is the DEFAULT route now (OCUDU_CE_LANE_ORDER=wait is the escape hatch), and Test 13
+  // pins it in all three directions: clearing it here keeps every other test on the default whatever the
+  // caller's environment says. It changes nothing for them - they all go through compute(), which
+  // completes the hop it submits and therefore never takes a deferred order.
+  unsetenv("OCUDU_CE_LANE_ORDER");
   unsetenv("OCUDU_CE_FUSED_BURST");
 
   std::mt19937 rng(1234);
@@ -1922,25 +1923,34 @@ int main()
   }
 
   // -----------------------------------------------------------------------------------
-  // Test 13 (S-7g-16, Step 1b): the FUSED lane produces the synchronous result, byte for byte.
+  // Test 13 (S-7g-19, Step 1'): the three lane orders reproduce the synchronous result, byte for byte.
   //
-  // With OCUDU_CE_FUSED_BURST=1 a hop the caller leaves running (port_channel_estimator::submit())
-  // encodes its dispatches into the command buffer the equalizer and the demapper share, and reads
-  // two scalars back out of it when the hop completes (the device's sigma2 and pilots_power). Both
-  // halves can fail SILENTLY - dispatches nobody committed are read as the previous hop's memory,
-  // and a completion that ran before its command buffer did is indistinguishable from a good one -
-  // so the gate is that every published value is byte-identical to the synchronous route the air
-  // path was verified with. This test also pins the two completion orders the receiving chain has:
-  //   * the lane commits the shared burst first, then the estimator completes the hop - the
-  //     in-place route, where the equalizer reads the estimates where the GPU wrote them;
-  //   * the estimator completes before anyone committed - the host-read route (OCUDU_CE_CPU_CE, the
-  //     debug capture): the completion has to commit the burst itself;
-  // and that a hop that must NOT fuse (compute(), which completes what it submits) runs on the
-  // engine's own command buffer even after a fused hop has switched the adapter over.
+  // A hop the caller leaves running (port_channel_estimator::submit()) produces the weights, the
+  // per-symbol estimates and the noise variance the equalizer and the demapper read, and it can put them
+  // in one of three places (metal::ce_lane_order):
+  //   * event      - the engine's own command buffer, committed as soon as it is encoded, with the lane
+  //                  burst ordered after it by the back-end stage fence. The DEFAULT;
+  //   * host_wait  - the same own command buffer, waited for by the host before the lane is encoded;
+  //   * burst      - the command buffer the equalizer and the demapper share.
+  // All of them can fail SILENTLY - dispatches nobody committed are read as the previous hop's memory, a
+  // completion that ran before its command buffer did is indistinguishable from a good one, and a lane
+  // wait that names a generation nobody will signal hangs the GPU rather than reporting anything - so the
+  // gate is that every published value is byte-identical to the synchronous route the air path was
+  // verified with, PLUS the mechanism assertions that say which route really ran: whose command buffer
+  // carried the dispatches, that the estimator armed the fence, and that the lane's own wait (the very
+  // wait the burst encodes, see lane_fence_selftest()) is satisfied by a signalled generation.
+  //
+  // Both completion orders the receiving chain has are covered for each route:
+  //   * the lane commits/waits first, then the estimator completes the hop - the in-place route, where the
+  //     equalizer reads the estimates where the GPU wrote them;
+  //   * the estimator completes before anyone committed - the host-read route (OCUDU_CE_CPU_CE, the debug
+  //     capture): in burst order the completion has to commit the burst itself;
+  // and that a hop that must NOT take a deferred order (compute(), which completes what it submits) runs
+  // on the engine's own command buffer even after a burst-order hop switched the adapter over.
   // -----------------------------------------------------------------------------------
   {
-    // One instance for the whole test: the fused/synchronous decision is per-hop state of the
-    // adapter, and a stale one is precisely what the last part of this test looks for.
+    // One instance for the whole test: the order is per-hop state of the adapter, and a stale one is
+    // precisely what the last part of this test looks for.
     auto mmse = std::make_unique<port_channel_estimator_metal_mmse_impl>(
         create_interpolator(),
         make_ta_estimator(),
@@ -2033,17 +2043,23 @@ int main()
       }
     };
 
-    /// The knob the adapter reads per hop, so both routes can be compared inside this one process.
-    /// "off" is an explicit 0, not an unset variable: the fusion is the DEFAULT now, and the routes
-    /// below are the A/B of it.
-    const auto set_knob = [](bool on) { setenv("OCUDU_CE_FUSED_BURST", on ? "1" : "0", 1); };
+    /// The knob the adapter reads per hop, so every route can be compared inside this one process.
+    /// "wait" is an explicit value, not an unset variable: the event order is the DEFAULT now, and the
+    /// routes below are the A/B of it.
+    const auto set_order = [](const char* value) {
+      if (value == nullptr) {
+        unsetenv("OCUDU_CE_LANE_ORDER");
+        return;
+      }
+      setenv("OCUDU_CE_LANE_ORDER", value, 1);
+    };
 
     const std::array<std::pair<unsigned, unsigned>, 4> shapes = {{{51, 2}, {25, 2}, {4, 3}, {12, 4}}};
     unsigned                                           n_checked = 0;
     for (const auto& [n_prb, n_sym] : shapes) {
       // A hopping slot is not covered here: only the LAST hop is left running, hop 0 completes
-      // inside do_submit() and therefore never fuses (see do_submit()), which is exactly the
-      // behaviour the air path shows.
+      // inside do_submit() and therefore never takes a deferred order (see do_submit()), which is
+      // exactly the behaviour the air path shows.
       const unsigned    nof_layers = 1;
       const std::string label      = std::to_string(n_prb) + " PRB " + std::to_string(n_sym) + " DMRS";
 
@@ -2052,24 +2068,25 @@ int main()
       // are read-only inputs of a const-correct interface.)
       hop_input in(n_prb, n_sym, rng);
 
-      set_knob(false);
+      set_order("wait");
       const auto ref = read_back(mmse->compute(in.grid, 0, in.pilots, in.cfg), in.nof_subc, nof_layers);
 
-      // --- Route 0 (the control): the deferred entry point WITHOUT the knob, i.e. exactly the route the
-      // air path runs today (submit() ... finish(), every stage in its own command buffer). It has to
-      // match the synchronous route as well, and keeping it here separates "the deferred route is wrong"
-      // from "the fusion is wrong" when one of the comparisons below fails.
+      // --- Route 0 (the control): the deferred entry point in host_wait order, i.e. exactly the route
+      // the air path ran before S-7g-16 (submit() ... finish(), every stage in its own command buffer,
+      // the estimator's waited by the host). It has to match the synchronous route as well, and keeping
+      // it here separates "the deferred route is wrong" from "an order is wrong" when one of the
+      // comparisons below fails.
       {
         const port_channel_estimator_results& res_ctl = mmse->submit(in.grid, 0, in.pilots, in.cfg);
         if (metal::mmse_engine::burst_is_open()) {
-          std::printf("Test 13 FAIL (%s): the deferred route opened a burst with the knob off\n", label.c_str());
+          std::printf("Test 13 FAIL (%s): the deferred hop opened a burst in host_wait order\n", label.c_str());
           return -1;
         }
-        const bool      ctl_ok = mmse->finish(in.pilots);
+        const bool      ctl_ok  = mmse->finish(in.pilots);
         const published control = read_back(res_ctl, in.nof_subc, nof_layers);
         if (!ctl_ok || !(control == ref)) {
-          std::printf("Test 13 FAIL (%s): the deferred route WITHOUT the knob already differs from the "
-                      "synchronous one (noise variance %.9e vs %.9e) - this is not the fusion\n",
+          std::printf("Test 13 FAIL (%s): the deferred route in host_wait order already differs from the "
+                      "synchronous one (noise variance %.9e vs %.9e) - this is not an order\n",
                       label.c_str(),
                       static_cast<double>(control.noise_var),
                       static_cast<double>(ref.noise_var));
@@ -2077,35 +2094,42 @@ int main()
         }
       }
 
-      // --- Route 1: the synchronous entry point. It must not fuse, and it must still produce the
-      // same values with the knob OFF as with it ON (the knob may only change WHOSE command buffer
-      // carries the work) and after a fused hop has switched the adapter over.
-      set_knob(true);
+      // --- Route 1: the synchronous entry point. It must never hand its work to the shared burst, and it
+      // must still produce the same values in every order (the order may only change WHOSE command buffer
+      // carries the work) and after a burst-order hop switched the adapter over.
+      set_order("burst");
       const published      sync_on_knob = read_back(mmse->compute(in.grid, 0, in.pilots, in.cfg), in.nof_subc, nof_layers);
       if (!(sync_on_knob == ref)) {
-        std::printf("Test 13 FAIL (%s): compute() changed with OCUDU_CE_FUSED_BURST set - the "
+        std::printf("Test 13 FAIL (%s): compute() changed with OCUDU_CE_LANE_ORDER=burst set - the "
                     "synchronous route must never hand its work to the shared burst\n",
                     label.c_str());
         return -1;
       }
 
-      // --- Route 2: deferred, completed by the estimator BEFORE the lane commits. This is the
-      // host-read route, and the completion has to commit the burst: without that, the two scalars
+      // --- Route 2 (burst order): deferred, completed by the estimator BEFORE the lane commits. This is
+      // the host-read route, and the completion has to commit the burst: without that, the two scalars
       // below come from memory the GPU has not written.
       // submit() hands back the results interface, which is the only handle to it (the results base
       // class is private).
       const port_channel_estimator_results& res_c = mmse->submit(in.grid, 0, in.pilots, in.cfg);
       if (!metal::mmse_engine::burst_is_open()) {
-        std::printf("Test 13 FAIL (%s): the fused hop left no burst open - the knob did not reach "
+        std::printf("Test 13 FAIL (%s): the burst-order hop left no burst open - the order did not reach "
                     "the engine, so this test would prove nothing\n",
                     label.c_str());
         return -1;
       }
-      const unsigned fused_dispatches = metal::mmse_engine::burst_dispatch_count();
+      const unsigned burst_dispatches = metal::mmse_engine::burst_dispatch_count();
       const bool     finish_ok        = mmse->finish(in.pilots);
       const published host_read       = read_back(res_c, in.nof_subc, nof_layers);
       if (!finish_ok) {
-        std::printf("Test 13 FAIL (%s): the fused hop's completion reported a failed command buffer\n", label.c_str());
+        std::printf("Test 13 FAIL (%s): the burst-order hop's completion reported a failed command buffer\n",
+                    label.c_str());
+        return -1;
+      }
+      if (metal::mmse_engine::burst_is_open()) {
+        std::printf("Test 13 FAIL (%s): the completion left the burst open - it did not take the burst "
+                    "route, so nothing waited for this hop's dispatches\n",
+                    label.c_str());
         return -1;
       }
       if (!(host_read == ref)) {
@@ -2116,10 +2140,10 @@ int main()
           }
           return a;
         };
-        std::printf("Test 13 FAIL (%s): the fused hop that completed before the lane committed does "
+        std::printf("Test 13 FAIL (%s): the burst-order hop that completed before the lane committed does "
                     "not match the synchronous route\n"
                     "  ref    : nv %.9e snr %.6f epre %.6e rsrp %.6e grid %.6e\n"
-                    "  fused  : nv %.9e snr %.6f epre %.6e rsrp %.6e grid %.6e\n",
+                    "  burst  : nv %.9e snr %.6f epre %.6e rsrp %.6e grid %.6e\n",
                     label.c_str(),
                     static_cast<double>(ref.noise_var),
                     static_cast<double>(ref.snr),
@@ -2134,8 +2158,8 @@ int main()
         return -1;
       }
 
-      // --- Route 3: deferred, with the lane's commit in between - what the demodulator does when
-      // the equalizer reads the estimates where the GPU wrote them. The completion must then find
+      // --- Route 3 (burst order): deferred, with the lane's commit in between - what the demodulator does
+      // when the equalizer reads the estimates where the GPU wrote them. The completion must then find
       // nothing to do (a commit of its own would cut the lane's single command buffer in two).
       const port_channel_estimator_results& res_d = mmse->submit(in.grid, 0, in.pilots, in.cfg);
       const unsigned lane_dispatches = metal::mmse_engine::burst_dispatch_count();
@@ -2153,7 +2177,7 @@ int main()
         return -1;
       }
       if (!(in_place == ref)) {
-        std::printf("Test 13 FAIL (%s): the fused hop completed after the lane's commit does not "
+        std::printf("Test 13 FAIL (%s): the burst-order hop completed after the lane's commit does not "
                     "match the synchronous route (noise variance %.9e vs %.9e)\n",
                     label.c_str(),
                     static_cast<double>(in_place.noise_var),
@@ -2161,45 +2185,90 @@ int main()
         return -1;
       }
 
-      // --- Route 4: a synchronous hop AFTER a fused one. The adapter must have put the engine back
-      // on its own command buffer, or this hop's work would sit in a burst nobody commits.
+      // --- Route 4 (event order, the DEFAULT): the estimator commits its OWN command buffer and arms the
+      // back-end stage fence, the lane burst then waits for it, and the host never waits in between. The
+      // three assertions are the mechanism: no burst was dragged open by the estimator, the fence
+      // generation moved, and the lane's own wait - the very wait shared_burst encodes, replayed here by
+      // lane_fence_selftest() - is satisfied by that signalled generation (a wait for a generation nobody
+      // signals would never complete).
+      set_order(nullptr);   // the default has to be the event order
+      const uint64_t fence_before = metal::mmse_engine::lane_fence_generation();
+      const port_channel_estimator_results& res_e = mmse->submit(in.grid, 0, in.pilots, in.cfg);
+      if (metal::mmse_engine::burst_is_open()) {
+        std::printf("Test 13 FAIL (%s): the default (event) hop dragged the lane's burst open - it must "
+                    "own its command buffer\n",
+                    label.c_str());
+        return -1;
+      }
+      const uint64_t fence_after = metal::mmse_engine::lane_fence_generation();
+      if (fence_after <= fence_before) {
+        std::printf("Test 13 FAIL (%s): the default (event) hop did not arm the back-end stage fence "
+                    "(generation %llu -> %llu), so the lane would have no way to order itself after it\n",
+                    label.c_str(),
+                    static_cast<unsigned long long>(fence_before),
+                    static_cast<unsigned long long>(fence_after));
+        return -1;
+      }
+      bool       lane_waited = false;
+      const bool lane_ok     = metal::mmse_engine::lane_fence_selftest(lane_waited);
+      if (!lane_ok || !lane_waited) {
+        std::printf("Test 13 FAIL (%s): the lane's fence wait %s (completed=%d) - the estimator's command "
+                    "buffer is not ordered against the lane\n",
+                    label.c_str(),
+                    lane_waited ? "did not complete" : "was not encoded",
+                    lane_ok ? 1 : 0);
+        return -1;
+      }
+      const bool      event_ok     = mmse->finish(in.pilots);
+      const published event_inplace = read_back(res_e, in.nof_subc, nof_layers);
+      if (!event_ok || !(event_inplace == ref)) {
+        std::printf("Test 13 FAIL (%s): the event-order hop does not match the synchronous route "
+                    "(noise variance %.9e vs %.9e, completion %d)\n",
+                    label.c_str(),
+                    static_cast<double>(event_inplace.noise_var),
+                    static_cast<double>(ref.noise_var),
+                    event_ok ? 1 : 0);
+        return -1;
+      }
+
+      // --- Route 5 (event order, host-read completion): the estimator completes the hop before anyone
+      // committed anything on the lane. The engine has to collect its own command buffer here - the
+      // completion is the ONLY thing that waits for it on this route (OCUDU_CE_CPU_CE, the dump).
+      const port_channel_estimator_results& res_e2 = mmse->submit(in.grid, 0, in.pilots, in.cfg);
+      const bool      event_ok2  = mmse->finish(in.pilots);
+      const published event_host = read_back(res_e2, in.nof_subc, nof_layers);
+      if (!event_ok2 || !(event_host == ref)) {
+        std::printf("Test 13 FAIL (%s): the event-order hop completed before the lane's commit does not "
+                    "match the synchronous route (noise variance %.9e vs %.9e, completion %d)\n",
+                    label.c_str(),
+                    static_cast<double>(event_host.noise_var),
+                    static_cast<double>(ref.noise_var),
+                    event_ok2 ? 1 : 0);
+        return -1;
+      }
+
+      // --- Route 6: a synchronous hop AFTER a deferred one of every order. The adapter must have put the
+      // engine back on its own command buffer, or this hop's work would sit in a burst nobody commits.
       const published sync_after = read_back(mmse->compute(in.grid, 0, in.pilots, in.cfg), in.nof_subc, nof_layers);
       if (!(sync_after == ref) || metal::mmse_engine::burst_is_open()) {
-        std::printf("Test 13 FAIL (%s): a synchronous hop after a fused one did not return to the "
+        std::printf("Test 13 FAIL (%s): a synchronous hop after a deferred one did not return to the "
                     "engine's own command buffer\n",
                     label.c_str());
         return -1;
       }
 
-      // --- Route 5: the DEFAULT. With the environment untouched the deferred hop must fuse: the fused
-      // lane is the route the chain takes now (S-7g-16's goal), and OCUDU_CE_FUSED_BURST=0 - what the
-      // routes above set - is the escape hatch. A default that silently drifted back to the unfused
-      // route would leave every other check in this test green, so it is pinned here.
-      unsetenv("OCUDU_CE_FUSED_BURST");
-      const port_channel_estimator_results& res_def = mmse->submit(in.grid, 0, in.pilots, in.cfg);
-      if (!metal::mmse_engine::burst_is_open()) {
-        std::printf("Test 13 FAIL (%s): the DEFAULT route did not fuse (OCUDU_CE_FUSED_BURST unset)\n",
-                    label.c_str());
-        return -1;
-      }
-      const bool      def_ok     = mmse->finish(in.pilots);
-      const published by_default = read_back(res_def, in.nof_subc, nof_layers);
-      if (!def_ok || !(by_default == ref)) {
-        std::printf("Test 13 FAIL (%s): the default (fused) route does not match the synchronous one\n",
-                    label.c_str());
-        return -1;
-      }
-
-      std::printf("Test 13 (%s): fused hop matches the synchronous route bit for bit "
-                  "(%u dispatches in the burst, host-read and in-place orders, and by default)\n",
+      std::printf("Test 13 (%s): all three lane orders reproduce the synchronous route bit for bit "
+                  "(%u dispatches in the burst for the burst order, host-read and in-place completions, "
+                  "and the default arms the lane fence)\n",
                   label.c_str(),
-                  fused_dispatches);
-      n_checked += fused_dispatches;
+                  burst_dispatches);
+      n_checked += burst_dispatches;
     }
-    set_knob(false);   // leave the process on the explicit escape-hatch value; the default is on anyway
-    std::printf("Test 13 PASS: the fused lane reproduces the synchronous result byte for byte over "
-                "%u shapes (%u estimator dispatches carried by the shared burst), for both completion "
-                "orders, and a synchronous hop still owns its command buffer\n",
+    set_order("wait");   // leave the process on the explicit escape-hatch value; the default is event anyway
+    std::printf("Test 13 PASS: the lane orders (event by default, host_wait and burst) reproduce the "
+                "synchronous result byte for byte over %u shapes (%u estimator dispatches carried by the "
+                "shared burst in burst order), for both completion orders, and a synchronous hop still "
+                "owns its command buffer\n",
                 static_cast<unsigned>(shapes.size()),
                 n_checked);
   }

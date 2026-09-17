@@ -234,9 +234,12 @@ struct mmse_phase_timer {
 };
 
 struct mmse_engine_impl {
-  /// \brief Encode this engine's dispatches into the shared burst of the deferred chain instead of
-  /// their own command buffer (see mmse_engine::set_fused_burst).
-  bool fused_burst = false;
+  /// \brief Where this engine's deferred stages put their dispatches, and how the lane is ordered after
+  /// them (see mmse_engine::set_lane_order() and ce_lane_order).
+  ///
+  /// \c host_wait, not \c event: a caller that knows nothing about the lane orders gets the behaviour this
+  /// engine has always had. The receiving chain selects \c event per hop.
+  metal::ce_lane_order lane_order = metal::ce_lane_order::host_wait;
   id<MTLDevice>                  device      = nil;
   id<MTLCommandQueue>            queue       = nil;
   id<MTLLibrary>                 library     = nil;
@@ -514,6 +517,13 @@ static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded)
 /// shares, and the lane's commit covers them - so the engine must publish NOTHING: a pending_cb left behind
 /// would make the caller believe a submission of its own is in flight, and wait_pending() would wait for a
 /// command buffer that does not exist.
+///
+/// In \c event order the own command buffer is additionally ARMED for the lane burst (the back-end stage
+/// fence): it carries the weights, the per-symbol estimates and the noise variance the equalizer and the
+/// demapper read, and those readers are in a DIFFERENT command buffer of the same queue - whose command
+/// buffers only have their starts ordered. The signal is encoded here, immediately before the commit, so a
+/// generation the lane burst can pick up always has a command buffer on its way (see
+/// shared_queue::backend_stage_signal()).
 static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded)
 {
   if (s.burst) {
@@ -528,12 +538,53 @@ static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded)
   if (!encoded) {
     return false;
   }
+  if (e->lane_order == metal::ce_lane_order::event) {
+    (void)ocudu::metal::shared_queue::backend_stage_signal(s.cb);
+  }
   // The GPU-time probe must be armed before commit (Metal asserts otherwise).
   ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
   [s.cb commit];
   mmse_stats_commit();
   ocudu::metal::gpu_lane_probe::register_commit(s.cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
   e->pending_cb = s.cb;
+  return true;
+}
+
+/// \brief Closes an asynchronous stage and collects what its order says this caller must collect.
+///
+/// The three orders of ce_lane_order differ in exactly this, and nowhere else:
+///  * \c burst     - the dispatches are in the lane's burst, which the lane commits and waits: this call
+///                   returns \p encoded and waits for nothing (end_stage_async() published no pending
+///                   command buffer, so there is nothing of the engine's to collect);
+///  * \c event     - the dispatches are in the engine's own command buffer, committed as soon as they were
+///                   encoded, so that the estimator's GPU work overlaps the host encoding the equalization
+///                   and the demapping. The lane burst waits for it through the back-end stage fence, and
+///                   the command buffer stays the engine's pending submission, collected by wait_pending()
+///                   when the hop completes (which the receiving chain does after the lane, on its in-place
+///                   route). Waiting here is precisely the overlap this order exists to restore - it used
+///                   to cost ~125us of [ul_equalization_demod];
+///  * \c host_wait - the same own command buffer, waited for HERE and now: the behaviour this engine had
+///                   before the lane orders, kept as the escape hatch.
+static bool collect_async_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded)
+{
+  if (s.burst || (e->lane_order == metal::ce_lane_order::event)) {
+    return encoded;
+  }
+  if (!encoded) {
+    // Nothing was committed (see end_stage_async()): waiting for this command buffer would wait for a
+    // submission that does not exist.
+    return false;
+  }
+
+  [s.cb waitUntilCompleted];
+  mmse_stats_wait();
+
+  if (s.cb.status != MTLCommandBufferStatusCompleted || s.cb.error != nil) {
+    return false;
+  }
+  if (s.cb.GPUStartTime != 0 && s.cb.GPUEndTime != 0) {
+    e->last_gpu_us = (s.cb.GPUEndTime - s.cb.GPUStartTime) * 1e6;
+  }
   return true;
 }
 
@@ -1295,11 +1346,63 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
   return end_stage(e, st, true);
 }
 
+/// \brief Waits for the engine's own outstanding submission (the body of mmse_engine::wait_pending()).
+///
+/// A free function because the encode helpers below are file statics (they serve two public entry points
+/// each): the wait belongs to the engine, not to the caller that happens to hold the public object.
+static bool wait_pending_impl(mmse_engine_impl* e);
+
+/// \brief Encodes the weights-and-apply hop (K0-d prefix -> K1 -> K2 -> K3/K4) for run() and run_async().
+/// \param[in] wait_for_completion True for the synchronous run(), false for run_async(). It decides
+///            NOTHING about the encode except whether this hop may join the lane's burst: a synchronous
+///            caller has to leave with its results ready, and only a command buffer of its own can promise
+///            that (see run() for the defect that made this a parameter).
+static bool encode_run(mmse_engine_impl*                  e,
+                       float*                             a,
+                       const float*                       r_hp,
+                       float*                             w,
+                       const float*                       y,
+                       float*                             h,
+                       unsigned                           nout,
+                       unsigned                           L,
+                       unsigned                           nof_systems,
+                       unsigned                           nof_blocks,
+                       const mmse_engine::reformat_stage* reformat,
+                       const mmse_engine::corr_stage*     corr,
+                       const mmse_engine::pilots_scatter* scatter,
+                       unsigned                           nof_scatter,
+                       bool                               wait_for_completion);
+
 bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, float* h, unsigned nout,
                       unsigned L, unsigned nof_systems, unsigned nof_blocks, const reformat_stage* reformat,
                       const pilots_scatter* scatter, unsigned nof_scatter)
 {
-  return run_async(a, r_hp, w, y, h, nout, L, nof_systems, nof_blocks, reformat, nullptr, scatter, nof_scatter) &&
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if (e == nullptr || e->device == nil) {
+    return false;
+  }
+  // WHICH ENTRY POINT the encode below serves, as a parameter and not as a property of the caller: run()
+  // used to be "run_async() && wait_pending()", and the encode therefore could not tell a synchronous
+  // caller from an asynchronous one. It made no difference while the fuse flag was the ADAPTER's to set
+  // (it cleared it for every non-deferred hop), but the moment the flag became an engine-side order
+  // (S-7g-19), a synchronous hop could join the lane's burst: its dispatches then went into a command
+  // buffer no lane owns, end_stage() left them uncommitted, and the estimator returned ZEROS. The
+  // synchronous contract is a property of this entry point, so it is enforced here.
+  return encode_run(e,
+                    a,
+                    r_hp,
+                    w,
+                    y,
+                    h,
+                    nout,
+                    L,
+                    nof_systems,
+                    nof_blocks,
+                    reformat,
+                    nullptr,
+                    scatter,
+                    nof_scatter,
+                    /*wait_for_completion=*/true) &&
          wait_pending();
 }
 
@@ -1397,32 +1500,30 @@ static bool encode_scatter(mmse_engine_impl* e, stage_encoder& st,
   return true;
 }
 
-bool mmse_engine::run_async(float*       a,
-                            const float* r_hp,
-                            float*       w,
-                            const float* y,
-                            float*       h,
-                            unsigned     nout,
-                            unsigned     L,
-                            unsigned     nof_systems,
-                            unsigned     nof_blocks,
-                            const reformat_stage* reformat,
-                            const corr_stage*     corr,
-                            const pilots_scatter* scatter,
-                            unsigned              nof_scatter)
+static bool encode_run(mmse_engine_impl*     e,
+                       float*                a,
+                       const float*          r_hp,
+                       float*                w,
+                       const float*          y,
+                       float*                h,
+                       unsigned              nout,
+                       unsigned              L,
+                       unsigned              nof_systems,
+                       unsigned              nof_blocks,
+                       const mmse_engine::reformat_stage* reformat,
+                       const mmse_engine::corr_stage*     corr,
+                       const mmse_engine::pilots_scatter* scatter,
+                       unsigned              nof_scatter,
+                       bool                  wait_for_completion)
 {
-  auto* e = static_cast<mmse_engine_impl*>(impl);
-  if (e == nullptr || e->device == nil) {
-    return false;
-  }
   // At most one submission in flight: the previous one must have completed before the staging
   // buffers it was reading can be overwritten.
   {
     mmse_guard_timer guard(e->pending_cb != nil);
-    (void)wait_pending();
+    (void)wait_pending_impl(e);
   }
 
-  mmse_phase_timer phase("run_async");
+  mmse_phase_timer phase(wait_for_completion ? "run" : "run_async");
   id<MTLBuffer> a_buf  = e->wrap(a, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
   id<MTLBuffer> rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
   id<MTLBuffer> w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
@@ -1448,11 +1549,12 @@ bool mmse_engine::run_async(float*       a,
     uint32_t nof_blocks;
   } aparams{nout, L, nof_systems, nof_blocks};
 
-  // One command buffer, three ordered dispatches (K1 -> K1b -> K2), single commit/wait - or, in burst
-  // mode, the same dispatches in the command buffer the deferred chain shares, committed and waited by
-  // the lane (see set_fused_burst()). This is the path the air interface takes on every deferred hop, so
-  // it is the one that carries the [mmse_time_sum] gpu_wait the fused lane removes; the four standalone
-  // stages wired first (K0-a, K0-d, K1, K2) are the other command buffers of the same hop.
+  // One command buffer, three ordered dispatches (K1 -> K1b -> K2), single commit/wait - or, in \c burst
+  // order, the same dispatches in the command buffer the deferred chain shares, committed and waited by
+  // the lane (see set_lane_order()). This is the path the air interface takes on every deferred hop: in
+  // \c host_wait order it carries the [mmse_time_sum] gpu_wait the fused lane removed, and in \c event
+  // order it is the command buffer the lane burst waits for through the back-end stage fence. The four
+  // standalone stages wired first (K0-a, K0-d, K1, K2) are the other command buffers of the same hop.
   const bool use_rl = (e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr);
   // The first pipeline the stage will encode with: begin_stage() hands it to shared_burst::encoder() so
   // that the barrier ordering this stage after the previous one (K0-a's, in the fused lane) is inserted
@@ -1464,7 +1566,7 @@ bool mmse_engine::run_async(float*       a,
   if ((nof_scatter != 0) && (e->pilots_scatter_pipe != nil)) {
     first_pipe = e->pilots_scatter_pipe;
   }
-  stage_encoder                st  = begin_stage(e, first_pipe, /*fuse=*/e->fused_burst);
+  stage_encoder st = begin_stage(e, first_pipe, /*fuse=*/(e->lane_order == ce_lane_order::burst) && !wait_for_completion);
   id<MTLComputeCommandEncoder> enc = st.enc;
   phase.created();
   if (enc == nil) {
@@ -1555,28 +1657,73 @@ bool mmse_engine::run_async(float*       a,
   encode_reformat(st, e, h_buf, reformat, nout, nof_blocks);
 
   phase.encoded();
+  if (wait_for_completion) {
+    const bool ok = end_stage(e, st, true);
+    phase.committed();
+    return ok;
+  }
   const bool ok = end_stage_async(e, st, true);
   phase.committed();
-  return ok;
+  return collect_async_stage(e, st, ok);
 }
 
-void mmse_engine::set_fused_burst(bool enabled)
+bool mmse_engine::run_async(float*       a,
+                            const float* r_hp,
+                            float*       w,
+                            const float* y,
+                            float*       h,
+                            unsigned     nout,
+                            unsigned     L,
+                            unsigned     nof_systems,
+                            unsigned     nof_blocks,
+                            const reformat_stage* reformat,
+                            const corr_stage*     corr,
+                            const pilots_scatter* scatter,
+                            unsigned              nof_scatter)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if (e == nullptr || e->device == nil) {
+    return false;
+  }
+  return encode_run(e,
+                    a,
+                    r_hp,
+                    w,
+                    y,
+                    h,
+                    nout,
+                    L,
+                    nof_systems,
+                    nof_blocks,
+                    reformat,
+                    corr,
+                    scatter,
+                    nof_scatter,
+                    /*wait_for_completion=*/false);
+}
+
+void mmse_engine::set_lane_order(ce_lane_order order)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e != nullptr) {
-    e->fused_burst = enabled;
+    e->lane_order = order;
   }
 }
 
-bool mmse_engine::wait_pending()
+ce_lane_order mmse_engine::lane_order() const
 {
-  auto* e = static_cast<mmse_engine_impl*>(impl);
+  const auto* e = static_cast<const mmse_engine_impl*>(impl);
+  return (e != nullptr) ? e->lane_order : ce_lane_order::host_wait;
+}
+
+static bool wait_pending_impl(mmse_engine_impl* e)
+{
   if ((e == nullptr) || (e->pending_cb == nil)) {
-    // In burst mode nothing of this engine is outstanding: its dispatches live in the caller's command
-    // buffer, whose commit and wait belong to the lane (see set_fused_burst). The stages call this at their
-    // boundaries and must be told yes without a wait - and the GPU-time probe has to say ZERO rather than
-    // repeat the last own-command-buffer measurement, which is the very [mmse_time_sum] gpu_wait the fusion
-    // exists to remove.
+    // Nothing of this engine's is outstanding. Two routes reach this: \c burst order, where the dispatches
+    // live in the caller's command buffer and whose commit and wait belong to the lane, and the hops that
+    // were already collected. The stages call this at their boundaries and must be told yes without a wait
+    // - and the GPU-time probe has to say ZERO rather than repeat the last own-command-buffer measurement,
+    // which is the very [mmse_time_sum] gpu_wait a shared burst removes.
     if (e != nullptr) {
       e->last_gpu_us = 0.0;
     }
@@ -1594,6 +1741,11 @@ bool mmse_engine::wait_pending()
     e->last_gpu_us = (cb.GPUEndTime - cb.GPUStartTime) * 1e6;
   }
   return true;
+}
+
+bool mmse_engine::wait_pending()
+{
+  return wait_pending_impl(static_cast<mmse_engine_impl*>(impl));
 }
 
 bool mmse_engine::has_pending() const
@@ -1625,6 +1777,44 @@ bool mmse_engine::burst_commit_and_wait()
 {
   (void)ocudu::metal::shared_burst::commit();
   return ocudu::metal::shared_burst::wait_committed();
+}
+
+bool mmse_engine::lane_fence_selftest(bool& waited)
+{
+  id<MTLCommandQueue> queue = ocudu::metal::shared_queue::backend_queue();
+  if (queue == nil) {
+    return false;
+  }
+  id<MTLCommandBuffer> cb = [queue commandBuffer];
+  if (cb == nil) {
+    return false;
+  }
+  // The lane burst's own wait, on a command buffer that does nothing else: if it names a generation no
+  // command buffer will ever signal, the wait below never returns.
+  waited = ocudu::metal::shared_queue::backend_stage_wait(cb);
+  [cb commit];
+  [cb waitUntilCompleted];
+  return (cb.status == MTLCommandBufferStatusCompleted) && (cb.error == nil);
+}
+
+uint64_t mmse_engine::lane_fence_generation()
+{
+  return ocudu::metal::shared_queue::backend_stage_generation();
+}
+
+uint64_t mmse_engine::lane_fence_nof_signals()
+{
+  return ocudu::metal::shared_queue::backend_stage_nof_signals();
+}
+
+uint64_t mmse_engine::lane_fence_nof_waits()
+{
+  return ocudu::metal::shared_queue::backend_stage_nof_waits();
+}
+
+uint64_t mmse_engine::lane_fence_nof_skipped_waits()
+{
+  return ocudu::metal::shared_queue::backend_stage_nof_skipped_waits();
 }
 
 namespace {
@@ -1727,10 +1917,10 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   } aparams{nout, L, nof_systems, nof_blocks};
 
   // The same two shapes as run_async(): this stage's own command buffer (single commit and - for the
-  // synchronous entry point - single wait), or, in burst mode, the command buffer the deferred chain
-  // shares. Only the ASYNC entry point may fuse: a synchronous caller has to leave with its results
-  // ready, and the engine can only promise that with a command buffer of its own.
-  const bool                   burst_ok   = e->fused_burst && !wait_for_completion;
+  // synchronous entry point - single wait), or, in \c burst order, the command buffer the deferred chain
+  // shares. Only the ASYNC entry point may join the burst: a synchronous caller has to leave with its
+  // results ready, and the engine can only promise that with a command buffer of its own.
+  const bool                    burst_ok   = (e->lane_order == ce_lane_order::burst) && !wait_for_completion;
   id<MTLComputePipelineState>  first_pipe = e->inv_pipe;
   if (corr != nullptr) {
     first_pipe = e->corr_a_pipe;
@@ -1829,21 +2019,7 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   }
   const bool ok = end_stage_async(e, st, true);
   phase.committed();
-  if (st.burst) {
-    // Nothing of this engine's is outstanding: the lane's commit covers these dispatches, and the caller
-    // must not be left waiting for a command buffer that does not exist (see end_stage_async()).
-    return ok;
-  }
-  [st.cb waitUntilCompleted];
-  mmse_stats_wait();
-
-  if (st.cb.status != MTLCommandBufferStatusCompleted || st.cb.error != nil) {
-    return false;
-  }
-  if (st.cb.GPUStartTime != 0 && st.cb.GPUEndTime != 0) {
-    e->last_gpu_us = (st.cb.GPUEndTime - st.cb.GPUStartTime) * 1e6;
-  }
-  return true;
+  return collect_async_stage(e, st, ok);
 }
 } // namespace
 

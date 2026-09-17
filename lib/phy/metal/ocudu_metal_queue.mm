@@ -33,6 +33,16 @@ struct shared_queue_state {
   std::atomic<uint64_t>    fence_waits{0};
   std::atomic<uint64_t>    fence_skipped_waits{0};
 
+  /// Back-end stage fence (see the header): the estimator's own command buffer against the lane burst.
+  /// The same shape as the front-end fence above, with a generation of its own - the two relate
+  /// different producers and must never share a counter (a lane burst waiting for a front-end
+  /// generation would be waiting for the wrong queue's work).
+  id<MTLSharedEvent>       stage_fence_event = nil;
+  std::atomic<uint64_t>    stage_fence_generation{0};
+  std::atomic<uint64_t>    stage_fence_signals{0};
+  std::atomic<uint64_t>    stage_fence_waits{0};
+  std::atomic<uint64_t>    stage_fence_skipped_waits{0};
+
   /// One no-copy wrap: the buffer, the host range it covers, and the allocation it was made for.
   ///
   /// Address containment alone is not sound. The allocator hands the pages of a released block to
@@ -135,6 +145,22 @@ void shared_queue_stats_report()
                static_cast<unsigned long long>(s.wrap_failures),
                static_cast<unsigned long long>(s.wrap_misaligned.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.wrap_purges));
+  // The two fences between the stages of the receiving chain: the front-end DFTs against the back-end
+  // grid consumers, and the estimator's own command buffer against the lane burst. Both are printed
+  // unconditionally (a zero line says "this run had no such producer", which is how a leg tells a
+  // mechanism that is off from one that never fired).
+  std::fprintf(stderr,
+               "[metal_stats] front_end fence signals=%llu waits=%llu skipped=%llu generation=%llu\n",
+               static_cast<unsigned long long>(s.fence_signals.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.fence_waits.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.fence_skipped_waits.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.fence_generation.load(std::memory_order_relaxed)));
+  std::fprintf(stderr,
+               "[metal_stats] lane fence signals=%llu waits=%llu skipped=%llu generation=%llu\n",
+               static_cast<unsigned long long>(s.stage_fence_signals.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.stage_fence_waits.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.stage_fence_skipped_waits.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.stage_fence_generation.load(std::memory_order_relaxed)));
   // GPU busy time, measured on the command buffers themselves (GPUStartTime/GPUEndTime in their
   // completion handlers): this is the one time measurement that keeps its meaning once the stages are
   // fused into a single command buffer, where the per-stage host timestamps say nothing any more.
@@ -495,6 +521,77 @@ uint64_t shared_queue::front_end_nof_waits()
 uint64_t shared_queue::front_end_nof_skipped_waits()
 {
   return state().fence_skipped_waits.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::backend_stage_signal(id<MTLCommandBuffer> command_buffer)
+{
+  if (command_buffer == nil) {
+    return 0;
+  }
+  shared_queue_state& s = state();
+  if (s.stage_fence_event == nil) {
+    // Under the lock, unlike the front-end event: two threads that each created their own event would
+    // signal one and wait on the other, and the wait would never fire. Costs one lock per estimator
+    // hop, i.e. nothing next to the commit it belongs to. (device() does not take this mutex, so
+    // calling it here cannot deadlock.)
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (s.stage_fence_event == nil) {
+      id<MTLDevice> device = shared_queue::device();
+      if (device == nil) {
+        return 0;
+      }
+      s.stage_fence_event = [device newSharedEvent];
+      if (s.stage_fence_event == nil) {
+        return 0;
+      }
+    }
+  }
+  // Taken and encoded immediately before the commit of the command buffer that carries the work, for
+  // the reason the front-end fence documents: a generation that has been handed out always has a
+  // signaller on its way, so a wait for it can never hang.
+  const uint64_t generation = s.stage_fence_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+  [command_buffer encodeSignalEvent:s.stage_fence_event value:generation];
+  s.stage_fence_signals.fetch_add(1, std::memory_order_relaxed);
+  return generation;
+}
+
+uint64_t shared_queue::backend_stage_generation()
+{
+  return state().stage_fence_generation.load(std::memory_order_acquire);
+}
+
+bool shared_queue::backend_stage_wait(id<MTLCommandBuffer> command_buffer)
+{
+  if (command_buffer == nil) {
+    return false;
+  }
+  shared_queue_state& s          = state();
+  const uint64_t      generation = s.stage_fence_generation.load(std::memory_order_acquire);
+  if ((generation == 0) || (s.stage_fence_event == nil)) {
+    // No estimator has committed in this process (the unit tests that drive the engine directly, the
+    // replay tool, a configuration whose estimator ran synchronously): there is no signaller, and a
+    // wait for a value nobody will signal would hang the command buffer.
+    s.stage_fence_skipped_waits.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  [command_buffer encodeWaitForEvent:s.stage_fence_event value:generation];
+  s.stage_fence_waits.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+uint64_t shared_queue::backend_stage_nof_signals()
+{
+  return state().stage_fence_signals.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::backend_stage_nof_waits()
+{
+  return state().stage_fence_waits.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::backend_stage_nof_skipped_waits()
+{
+  return state().stage_fence_skipped_waits.load(std::memory_order_relaxed);
 }
 
 bool shared_queue::wait_all_committed(queue_kind kind)

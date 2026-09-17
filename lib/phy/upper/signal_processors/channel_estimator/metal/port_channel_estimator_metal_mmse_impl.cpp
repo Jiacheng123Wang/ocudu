@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <map>
 #include <algorithm>
 #include <mutex>
@@ -778,39 +779,79 @@ cf_t port_channel_estimator_metal_mmse_impl::ls_pilot(const fd_td_estimation_sta
   return scaled ? v * scale : v;
 }
 
-bool port_channel_estimator_metal_mmse_impl::fused_burst_enabled()
+metal::ce_lane_order port_channel_estimator_metal_mmse_impl::ce_lane_order_from_env()
 {
-  // DEFAULT ON, like the other device stages: keeping the whole IQ -> LLR chain inside the GPU is the
-  // goal of S-7g-16, so the fused route is the route, and OCUDU_CE_FUSED_BURST=0 is the escape hatch
-  // (it is what the estimator's unit test uses for the unfused comparison, and what a leg would set if
-  // the fusion ever had to be taken out of the data path without a revert). The first on-air legs put
-  // the pipeline ~110us per slot ABOVE the unfused route - the cost of the estimator's GPU work no
-  // longer overlapping the host's equalization/demodulation encoding - and that is a LATENCY DEBT to
-  // pay back later (see the design document, 48.188(i).3), not a reason to keep the fusion out of the
-  // data path.
-  const char* env = std::getenv("OCUDU_CE_FUSED_BURST");
-  return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  // DEFAULT event (S-7g-19, Step 1'): the estimator's deferred hop commits its own command buffer as soon
+  // as its dispatches are encoded, and the lane burst waits for it through the back-end stage fence. That
+  // is the fusion the goal asks for - nothing on the host waits in the middle of the lane any more - while
+  // the estimator's GPU work still overlaps the host encoding the equalization and the demapping.
+  //
+  // The two other orders are the escape hatches, and they are what the earlier legs measured:
+  //   * host_wait - the estimator's own command buffer, waited for by the host right after the commit. This
+  //     was the route until S-7g-16 and it is why the lane used to pay ~125us of [ul_equalization_demod]:
+  //     the host sat waiting for the estimator instead of encoding the equalization;
+  //   * burst - the estimator's dispatches ride the lane's shared command buffer (S-7g-16, Step 1b). One
+  //     submission for the whole lane, but the estimator cannot start before the group is fully encoded,
+  //     which cost the same ~125us as a LATENCY DEBT (the design document's 48.188(i).3 called for paying
+  //     it back; this order is where that happened).
+  // All three are byte-identical by construction (the estimator's unit test compares them), so the choice
+  // is purely "how much of the estimator's GPU work overlaps the host's encoding".
+  const char* order = std::getenv("OCUDU_CE_LANE_ORDER");
+  if (order != nullptr) {
+    const std::string value(order);
+    if (value == "event") {
+      return metal::ce_lane_order::event;
+    }
+    if ((value == "wait") || (value == "host_wait")) {
+      return metal::ce_lane_order::host_wait;
+    }
+    if (value == "burst") {
+      return metal::ce_lane_order::burst;
+    }
+    // A typo must not silently select a route: say so once, loudly, and run the default.
+    static const bool warned = []() {
+      ocudulog::fetch_basic_logger("PHY").error(
+          "PUSCH: unknown OCUDU_CE_LANE_ORDER value (expected event, wait or burst) - using event");
+      return true;
+    }();
+    (void)warned;
+    return metal::ce_lane_order::event;
+  }
+  // Deprecated numeric alias of the S-7g-16 knob, kept because the legs, the A/B script and the design
+  // document refer to it: 1 meant "the estimator's dispatches ride the lane burst", 0 "the estimator keeps
+  // its own command buffer". Read ONLY when the new name is unset, so a leg can set either one.
+  if (const char* legacy = std::getenv("OCUDU_CE_FUSED_BURST"); legacy != nullptr) {
+    return (std::strtoul(legacy, nullptr, 10) != 0) ? metal::ce_lane_order::burst : metal::ce_lane_order::host_wait;
+  }
+  return metal::ce_lane_order::event;
 }
 
 void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
 {
-  // ---- S-7g-16 (fused lane), Step 1b: WHOSE command buffer this hop's dispatches go into ---------
-  // A hop the caller left running may encode its dispatches into the command buffer the equalizer and
-  // the demapper share (see ocudu_metal_burst.h), so that the lane's single commit covers the
-  // estimator too - that is what removes the [mmse_time_sum] gpu_wait a lane used to pay. The gate is
-  // the base class's answer to "will this hop be completed AFTER the rest of the chain has had its
-  // turn" (args.deferred); it is FALSE for a hop that completes inside its own submit, where nothing
-  // would commit the burst before complete_fd_td_estimation_stage() reads the hop's scalars back.
+  // ---- S-7g-19 (fused lane), Step 1': WHOSE command buffer this hop's dispatches go into -------------
+  // The order is decided per hop and handed to the engine (see ce_lane_order in the engine's header):
+  // event commits the estimator's own command buffer early and lets the lane burst wait for it through the
+  // back-end stage fence, host_wait waits for it here, burst encodes it into the lane's shared command
+  // buffer. The gate is the base class's answer to "will this hop be completed AFTER the rest of the chain
+  // has had its turn" (args.deferred); it is FALSE for a hop that completes inside its own submit, where
+  // nobody would commit a burst before complete_fd_td_estimation_stage() reads the hop's scalars back.
   //
-  // Set on EVERY hop, both ways: the adapter outlives the hop, and an engine left in burst mode would
+  // Set on EVERY hop, both ways: the adapter outlives the hop, and an engine left in burst order would
   // silently dispatch a later synchronous hop into a burst nobody owns.
   //
-  // The knob defaults OFF (opt-in until an on-air leg confirms it, like every other new strategy
-  // here). It is read per hop instead of cached in a static because the A/B has to be switchable
-  // inside one process: the Metal estimator's unit test compares both routes on the same input.
-  fused_burst_hop = fused_burst_enabled() && args.deferred;
+  // Read per hop instead of cached in a static because the A/B has to be switchable inside one process:
+  // the Metal estimator's unit test compares the orders on the same input.
+  const metal::ce_lane_order order = ce_lane_order_from_env();
+  fused_burst_hop                  = args.deferred && (order == metal::ce_lane_order::burst);
   if (engine != nullptr) {
-    engine->set_fused_burst(fused_burst_hop);
+    // A hop the caller left running takes the selected order. A hop that COMPLETES INSIDE ITS OWN SUBMIT
+    // never joins the lane's burst, whatever the knob says, and the engine cannot make that call: its
+    // asynchronous entry point serves both (the inline route submits without waiting and completes the
+    // stage in the same call, see stage_pending), so "which entry point ran" does not answer "may these
+    // dispatches live in the lane's burst". Only this adapter knows whether the hop is complete, so the
+    // gate is here. Handing a non-deferred hop to the burst leaves its dispatches in a command buffer
+    // nobody commits: measured as an all-zero estimator output on every hop of the inline route.
+    engine->set_lane_order(args.deferred ? order : metal::ce_lane_order::host_wait);
   }
 
   const unsigned nof_layers = args.dmrs_patterns.size();
@@ -2706,16 +2747,20 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     if (engine == nullptr) {
       return true;
     }
-    // Fused lane (S-7g-16, Step 1b): the hop's dispatches are in the command buffer the equalizer and
-    // the demapper share. Normally the lane committed it before the estimator is asked to complete the
-    // hop, and both calls below are then no-ops. A caller that reads the estimates on the HOST is the
-    // exception, and the reason this is not just a wait: the demodulator completes the estimation
-    // BEFORE it submits the equalization on its not-in-place route (OCUDU_CE_CPU_CE, a missing device
-    // view), and so does the debug capture - nobody has committed the burst yet, and completing it here
-    // is what makes the two scalars below (sigma2, pilots_power) come from memory the GPU has written
-    // instead of from the previous hop's. Those dispatches are this engine's own - no other stage has
-    // encoded into the burst at either call site - so the early commit costs the overlap, not the
-    // ordering (see mmse_engine::complete_fused_burst()).
+    // The route this hop's dispatches took decides what completes them (S-7g-19):
+    //  * burst: they are in the command buffer the equalizer and the demapper share. Normally the lane
+    //    committed it before the estimator is asked to complete the hop, and both calls below are then
+    //    no-ops. A caller that reads the estimates on the HOST is the exception, and the reason this is
+    //    not just a wait: the demodulator completes the estimation BEFORE it submits the equalization on
+    //    its not-in-place route (OCUDU_CE_CPU_CE, a missing device view), and so does the debug capture -
+    //    nobody has committed the burst yet, and completing it here is what makes the two scalars below
+    //    (sigma2, pilots_power) come from memory the GPU has written instead of from the previous hop's.
+    //    Those dispatches are this engine's own - no other stage has encoded into the burst at either
+    //    call site - so the early commit costs the overlap, not the ordering;
+    //  * event and host_wait: they are in the engine's OWN command buffer, committed as soon as they were
+    //    encoded. wait_pending() collects it, and on the in-place route (the lane burst waited for it
+    //    through the back-end stage fence) it has long completed: the two scalars are then read from
+    //    memory the GPU wrote, without the host having waited for it in the middle of the lane.
     return pending_fused_burst ? engine->complete_fused_burst() : engine->wait_pending();
   }();
   // Temporary experiment (OCUDU_CE_NV_OVERRIDE): replace the device noise variance with a known

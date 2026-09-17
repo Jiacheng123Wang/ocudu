@@ -501,15 +501,16 @@ private:
   /// \brief Whether the hop being staged hands its dispatches to the shared burst (S-7g-16, Step 1b).
   ///
   /// Set at the top of apply_fd_td_estimation_stage() and constant for that hop. True only for a hop
-  /// the caller left running (see fd_td_estimation_stage_args::deferred) and only with the
-  /// OCUDU_CE_FUSED_BURST knob set; every other hop keeps the engine's own commit-and-wait, which is
-  /// what the host consumers of the estimates need.
+  /// the caller left running (see fd_td_estimation_stage_args::deferred) and only in ce_lane_order::burst;
+  /// every other hop keeps a command buffer of the engine's own, which is what the host consumers of the
+  /// estimates need.
   bool fused_burst_hop = false;
 
-  /// Whether the hop encodes into the lane's shared burst (S-7g-16). DEFAULT ON: the fused lane is the
-  /// goal, not an experiment - OCUDU_CE_FUSED_BURST=0 is the escape hatch that puts the estimator back
-  /// on its own command buffer. See fused_burst_enabled() for the measured latency debt.
-  static bool fused_burst_enabled();
+  /// The order this adapter hands to the engine for a deferred hop: OCUDU_CE_LANE_ORDER, whose default is
+  /// ce_lane_order::event (the estimator commits into its own command buffer as soon as it is encoded and
+  /// the lane burst waits for it through the back-end stage fence). See ce_lane_order for the three
+  /// orders and what each costs, and ce_lane_order_from_env() for the escape hatches.
+  static metal::ce_lane_order ce_lane_order_from_env();
 
   /// \brief Unpack of the last hop, kept so a HOST consumer of the estimates can still be served.
   ///
