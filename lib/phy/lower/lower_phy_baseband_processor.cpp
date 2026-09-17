@@ -145,6 +145,8 @@ void lower_phy_baseband_processor::start(baseband_gateway_timestamp init_time, b
   // the next slot (whole-slot policy) or symbol (symbol-grained policy) boundary and is not processed
   // (see ul_process).
   rx_slot_aligned   = false;
+  // A stream that starts here is running again (see ul_process).
+  rx_stop_requested.store(false, std::memory_order_release);
   // Blocks the stream may drop while it establishes its phase: the first block of a stream, and the
   // partial one that follows it when the start time of the RU and the radio disagree (see ul_process).
   nof_phase_blocks  = 0;
@@ -163,6 +165,10 @@ void lower_phy_baseband_processor::start(baseband_gateway_timestamp init_time, b
 
 void lower_phy_baseband_processor::stop()
 {
+  // Read by ul_process() to tell "the executor refused a task because we are going down" (expected, the
+  // application may stop the executor before this receive chain has drained) from "it refused while the
+  // stream was supposed to be running" (a defect that must not pass silently).
+  rx_stop_requested.store(true, std::memory_order_release);
   rx_state.request_stop();
   tx_state.request_stop();
   rx_state.wait_stop();
@@ -510,7 +516,7 @@ void lower_phy_baseband_processor::ul_process()
   // goes out of scope here and returns to the pool (see rx_buffer_pool) - under the symbol-grained policy
   // the slot buffer stays ours and the dropped samples are simply overwritten by the next block.
   if (!establishes_phase) {
-    report_fatal_error_if_not(
+    const bool deferred =
         uplink_executor.defer([this,
                                ul_buffer = std::move(rx_buffer),
                                rx_metadata,
@@ -528,8 +534,25 @@ void lower_phy_baseband_processor::ul_process()
           uplink_processor.process(ul_samples, apply_timestamp_sfn0_ref(rx_metadata.ts), std::move(ul_buffer));
 
           ru_tracer << trace_event("uplink_baseband", ul_tp);
-        }),
-        "Failed to execute uplink processing task.");
+        });
+    if (!deferred) {
+      // A refused task is fatal while the stream runs: the executor is gone and no symbol of this block
+      // would ever be processed, silently. During shutdown it is expected - the executor refuses tasks
+      // while the application takes the sectors down, and the drain that follows only guarantees that
+      // everything ALREADY enqueued runs (see stop()) - and aborting there takes the process down during
+      // its own shutdown, which also loses the exit reports every probe prints at exit, i.e. the whole
+      // leg's evidence. The chain is not cut short either way: it ends through the FSM's countdown, which
+      // is what wait_stop() waits for.
+      if (!rx_stop_requested.load(std::memory_order_acquire)) {
+        report_fatal_error("Failed to execute uplink processing task.");
+      }
+      static std::atomic<bool> refused_logged{false};
+      bool                     expected = false;
+      if (refused_logged.compare_exchange_strong(expected, true)) {
+        ocudulog::fetch_basic_logger("PHY").warning(
+            "Uplink processing task refused while stopping: {} samples dropped", nof_samples);
+      }
+    }
   }
 
   // Enqueue next iteration if it is running.

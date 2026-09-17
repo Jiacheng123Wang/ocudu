@@ -249,6 +249,12 @@ private:
   internal_fsm                                                               tx_state;
   internal_fsm                                                               rx_state;
   std::atomic<baseband_gateway_timestamp>                                    last_rx_timestamp;
+  /// \brief Set by stop(): the receive chain is going down (see ul_process).
+  ///
+  /// Used to tell a task refused because the application is taking the sector down - expected, and not a
+  /// reason to abort the process during its own shutdown - from one refused while the stream was supposed
+  /// to be running, which is a defect and stays fatal.
+  std::atomic<bool>                                                          rx_stop_requested{false};
   /// \brief Whether the receive blocks have been slot aligned since the stream started.
   ///
   /// The radio starts streaming at a sample the PHY does not choose, so the first blocks of a stream do
