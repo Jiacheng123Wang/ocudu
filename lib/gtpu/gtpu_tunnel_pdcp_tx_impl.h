@@ -87,7 +87,7 @@ public:
   }
 
 private:
-  pdcp_pdu_number_packing pdcp_pdu_number_packer;
+  gtpu::pdcp_pdu_number_packing pdcp_pdu_number_packer;
 
   const gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_tx_config cfg;
   gtpu_teid_t                                               current_peer_teid = {};

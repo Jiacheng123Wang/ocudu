@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 using namespace ocudu;
+using namespace ocudu::gtpu;
 
 namespace {
 

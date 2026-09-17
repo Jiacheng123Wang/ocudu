@@ -281,7 +281,7 @@ protected:
   }
 
 private:
-  pdcp_pdu_number_packing                   pdcp_pdu_number_packer;
+  gtpu::pdcp_pdu_number_packing             pdcp_pdu_number_packer;
   gtpu_tunnel_pdcp_rx_lower_layer_notifier& lower_dn;
   bool                                      stopped = false;
 

@@ -5,7 +5,7 @@
 #include "pdcp_pdu_number_packing.h"
 #include "ocudu/support/bit_encoding.h"
 
-using namespace ocudu;
+using namespace ocudu::gtpu;
 
 /// Macro used to check a read/unpack operation and log an error message if the validation fails.
 #define VERIFY_READ(cond)                                                                                              \

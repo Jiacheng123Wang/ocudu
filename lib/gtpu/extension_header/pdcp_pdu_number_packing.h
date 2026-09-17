@@ -7,9 +7,9 @@
 #include "ocudu/adt/byte_buffer.h"
 #include "ocudu/ocudulog/logger.h"
 
-namespace ocudu {
+namespace ocudu::gtpu {
 
-/// Packing and unpacking of PDCP PDU number
+/// Packing and unpacking of GTP-U extension header 'PDCP PDU number'.
 ///
 /// Ref: TS 29.281 Sec. 5.2.2.2
 class pdcp_pdu_number_packing
@@ -23,4 +23,4 @@ public:
 private:
   ocudulog::basic_logger& logger;
 };
-} // namespace ocudu
+} // namespace ocudu::gtpu
