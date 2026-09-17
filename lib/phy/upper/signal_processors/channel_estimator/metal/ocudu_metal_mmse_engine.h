@@ -505,6 +505,43 @@ public:
   /// \return True when there was nothing pending, or when the pending submission succeeded.
   bool wait_pending();
 
+  /// \brief Completes the dispatches a burst-mode stage left in the shared burst, and reports success.
+  ///
+  /// A burst-mode stage (set_fused_burst(true)) leaves its dispatches in the command buffer the rest of
+  /// the receiving chain shares, so that the lane's own commit and wait cover them: by the time the
+  /// estimator is asked to complete the hop, this call normally finds nothing outstanding and returns at
+  /// once. The callers that read the hop's results BEFORE the lane commits are the ones that need it to do
+  /// the work - the demodulator on the route that syncs the estimates to host memory (OCUDU_CE_CPU_CE),
+  /// which completes the estimation before it submits the equalization, and the debug capture. The burst
+  /// then holds this engine's dispatches alone (no other stage has encoded into it yet), so committing it
+  /// here gives up the overlap, never the ordering the burst exists for.
+  ///
+  /// \note This is the burst-mode counterpart of wait_pending(): that one completes the engine's own command
+  ///       buffer, this one the shared burst, and the engine has nothing of its own pending in burst mode.
+  ///       The caller knows which one it left behind (see
+  ///       port_channel_estimator_metal_mmse_impl::pending_fused_burst).
+  /// \return True when everything the calling thread's lane holds completed successfully.
+  bool complete_fused_burst();
+
+  /// \brief Diagnostics: whether the calling thread's receiving chain has a burst open, and how many
+  /// dispatches it holds.
+  ///
+  /// The burst is thread local and shared by the stages of one lane (see shared_burst), so these answer
+  /// for the CALLING THREAD rather than for this engine instance. That is what makes them usable from
+  /// outside the Objective-C++ layer - the estimator's unit test checks that a fused hop really handed
+  /// its dispatches over, and that a synchronous one did not, because a comparison of the published
+  /// values alone cannot tell a route that works from a knob that never arrived.
+  static bool     burst_is_open();
+  static unsigned burst_dispatch_count();
+
+  /// \brief Diagnostics: the receiving chain's own synchronization point - commit the open burst (if any)
+  /// and wait for everything this thread's lane holds.
+  ///
+  /// This is what the lane does when it collects a group of demodulated symbols; the unit test uses it to
+  /// put the estimator's completion in the order the air path has (lane first, completion after), instead
+  /// of only in the order the host-read route has (completion first).
+  static bool burst_commit_and_wait();
+
   /// Whether a submission from run_async() is still outstanding.
   bool has_pending() const;
 

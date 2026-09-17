@@ -54,7 +54,12 @@ public:
   /// \return True when all of them completed successfully.
   static bool wait_committed();
 
-  /// Number of dispatches encoded in the open burst (diagnostics).
+  /// \brief Number of dispatches encoded in the open burst (diagnostics, and the mechanism check of the
+  /// estimator's fused-lane unit test).
+  ///
+  /// Zero when no burst is open, and reset when the next one opens. It counts dispatches, not stages: the
+  /// engine stages that call count_dispatch() once per stage are counted once, the equalizer and the
+  /// demapper once per dispatch.
   static unsigned size();
 
   /// Accounts one dispatch appended to the burst (diagnostics).

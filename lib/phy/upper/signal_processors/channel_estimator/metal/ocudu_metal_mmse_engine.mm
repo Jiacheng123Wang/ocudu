@@ -416,11 +416,23 @@ struct stage_encoder {
   bool                         burst = false;
 };
 
-/// Opens a stage: the shared burst when the caller asked for it, its own command buffer otherwise.
-static stage_encoder begin_stage(mmse_engine_impl* e, id<MTLComputePipelineState> first_pipeline)
+/// \brief Opens a stage: the shared burst when \p fuse, the stage's own command buffer otherwise.
+///
+/// WHICH ENTRIES MAY FUSE is a correctness question, not a performance one: the fused lane's commit
+/// belongs to the receiving chain, so anything the HOST reads before that commit must not be encoded
+/// into the burst. That leaves exactly the two whole-hop weight entries (run_async(),
+/// run_weights_only_async()): their outputs (the estimates, the equalizer's per-symbol copies, the device
+/// noise variance) are read either on the device by the later stages of the same lane or by the
+/// estimator's completion, which runs after the lane committed. Every other entry - the K0-a extraction,
+/// the standalone correlation build, the standalone inversion and apply - publishes something its caller
+/// reads INSIDE the hop (gpu_ls_cfo / gpu_ls_sigma2 / the LSE, or A itself for the host inversion), and
+/// those pass fuse = false.
+static stage_encoder begin_stage(mmse_engine_impl*          e,
+                                 id<MTLComputePipelineState> first_pipeline,
+                                 bool                        fuse)
 {
   stage_encoder s;
-  if (e->fused_burst) {
+  if (fuse) {
     s.enc   = ocudu::metal::shared_burst::encoder(first_pipeline);
     s.burst = (s.enc != nil);
     if (s.burst) {
@@ -432,6 +444,28 @@ static stage_encoder begin_stage(mmse_engine_impl* e, id<MTLComputePipelineState
   s.cb  = [e->queue commandBuffer];
   s.enc = [s.cb computeCommandEncoder];
   return s;
+}
+
+/// \brief Selects the pipeline of the next dispatch, keeping the shared burst's stage tracking right.
+///
+/// In burst mode the switch has to GO THROUGH shared_burst::encoder(): that is what inserts the memory
+/// barrier which orders this stage's dispatches after the previous stage's (the two write and read the
+/// same memory through different buffer objects, so the command queue cannot order them). Calling
+/// setComputePipelineState: directly would leave the burst believing no stage had changed and the
+/// barrier would be missing - a silent ordering defect, not a slow path.
+static id<MTLComputeCommandEncoder> stage_pipeline(mmse_engine_impl*          e,
+                                                   stage_encoder&             s,
+                                                   id<MTLComputePipelineState> pipe)
+{
+  if (!s.burst) {
+    [s.enc setComputePipelineState:pipe];
+    return s.enc;
+  }
+  id<MTLComputeCommandEncoder> enc = ocudu::metal::shared_burst::encoder(pipe);
+  if (enc != nil) {
+    s.enc = enc;
+  }
+  return s.enc;
 }
 
 /// Closes a stage: commits and waits on its own command buffer, or leaves the dispatches in the burst.
@@ -467,15 +501,50 @@ static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded)
   return true;
 }
 
+/// \brief Closes a stage whose caller collects the work later (the *_async() entries) instead of waiting in it.
+///
+/// The own-command-buffer form is what those entries have always done: commit, publish the command buffer as
+/// the engine's pending submission, and let the caller's wait_pending() collect it. In burst mode there is
+/// nothing of the engine's own to collect - the dispatches are in the command buffer the deferred chain
+/// shares, and the lane's commit covers them - so the engine must publish NOTHING: a pending_cb left behind
+/// would make the caller believe a submission of its own is in flight, and wait_pending() would wait for a
+/// command buffer that does not exist.
+static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded)
+{
+  if (s.burst) {
+    if (!encoded) {
+      return false;
+    }
+    ocudu::metal::shared_burst::count_dispatch(ocudu::metal::shared_burst::stage::channel_estimator);
+    return true;
+  }
+
+  [s.enc endEncoding];
+  if (!encoded) {
+    return false;
+  }
+  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
+  ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
+  [s.cb commit];
+  mmse_stats_commit();
+  ocudu::metal::gpu_lane_probe::register_commit(s.cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
+  e->pending_cb = s.cb;
+  return true;
+}
+
 // Appends the K3 gather (the equalizer's per-symbol estimates) to an encoder that has just run
 // K2 over h. Shared by run() and run_weights_only() so both inversion paths produce it.
-static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
+static void encode_reformat(stage_encoder&                             s,
                             mmse_engine_impl*                          e,
                             id<MTLBuffer>                              h_buf,
                             const ocudu::metal::mmse_engine::reformat_stage* reformat,
                             unsigned                                   nout,
                             unsigned                                   nof_blocks)
 {
+  // The encoder of the stage: encode_reformat() covers two optional dispatches (K3 and K4) with a
+  // pipeline of its own each, so it carries the stage rather than one encoder object.
+  id<MTLComputeCommandEncoder> enc = s.enc;
+
   // K3 (optional): gather the equalizer's per-symbol estimates out of the h K2 has just written,
   // in the same command buffer so the hop still costs one commit and one wait.
   if (reformat != nullptr && e->reformat_pipe != nil && (reformat->dst != nullptr) &&
@@ -516,9 +585,12 @@ static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
                 reformat->dmrs_sym_bits};
       // K3 reads what K2 wrote: the one stage boundary in this command buffer where a write must
       // be made visible to a later dispatch (K1 -> K1b -> K2 have always shared an encoder and
-      // rely on its in-order execution).
-      [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-      [enc setComputePipelineState:e->reformat_pipe];
+      // rely on its in-order execution). In burst mode stage_pipeline() inserts that barrier with
+      // the stage change itself.
+      if (!s.burst) {
+        [s.enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+      }
+      enc = stage_pipeline(e, s, e->reformat_pipe);
       [enc setBuffer:h_buf offset:0 atIndex:0];
       [enc setBytes:reformat->offsets
              length:static_cast<NSUInteger>(reformat->nof_symbols + 1) * sizeof(uint32_t)
@@ -593,8 +665,10 @@ static void encode_reformat(id<MTLComputeCommandEncoder>              enc,
       for (unsigned i = 0; i != 4; ++i) {
         nparams.dmrs_slots[i] = noise.dmrs_slots[i];
       }
-      [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-      [enc setComputePipelineState:e->noise_pipe];
+      if (!s.burst) {
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+      }
+      enc = stage_pipeline(e, s, e->noise_pipe);
       [enc setBuffer:h_buf offset:0 atIndex:0];
       [enc setBuffer:pilots_buf offset:0 atIndex:1];
       [enc setBuffer:rx_buf offset:0 atIndex:2];
@@ -886,7 +960,11 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     p.pilot_re[k] = s.pilot_re[k];
   }
 
-  stage_encoder                st  = begin_stage(e, e->pilots_lse_pipe);
+  // NOT fused, deliberately: this stage's outputs are read by the HOST inside the same hop - the CFO
+  // (gpu_ls_cfo), the noise variance and the pilots' power (gpu_ls_sigma2) feed the statistics and the
+  // noise reformat that this very hop still encodes, and the LS check reads the LSE - so the command
+  // buffer has to be committed and waited here (see begin_stage()).
+  stage_encoder                st  = begin_stage(e, e->pilots_lse_pipe, /*fuse=*/false);
   id<MTLCommandBuffer>         cb  = st.cb;
   id<MTLComputeCommandEncoder> enc = st.enc;
 
@@ -1000,10 +1078,10 @@ static_assert(sizeof(mmse_corr_params_t) == 124, "mmse_corr_params_t must match 
 
 /// Encodes the two correlation dispatches of \p c into \p enc: the caller owns the command buffer,
 /// so the same encoding serves the standalone entry point and the prefix of an engine call.
-static bool encode_corr(mmse_engine_impl* e, id<MTLComputeCommandEncoder> enc, const mmse_engine::corr_stage& c,
+static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine::corr_stage& c,
                         unsigned nof_systems)
 {
-  if ((e == nullptr) || (enc == nil) || (e->corr_a_pipe == nil) || (e->corr_rhp_pipe == nil)) {
+  if ((e == nullptr) || (s.enc == nil) || (e->corr_a_pipe == nil) || (e->corr_rhp_pipe == nil)) {
     return false;
   }
   if ((c.a == nullptr) || (c.r_hp == nullptr) || (nof_systems == 0) || (c.l == 0) || (c.npf == 0) ||
@@ -1062,12 +1140,14 @@ static bool encode_corr(mmse_engine_impl* e, id<MTLComputeCommandEncoder> enc, c
     return false;
   }
 
-  [enc setComputePipelineState:e->corr_a_pipe];
+  // Two pipelines in a row: in burst mode each switch goes through the stage's pipeline selection, so
+  // the barrier that orders the A build against K1 (and the R_hp build against K2) is the burst's.
+  id<MTLComputeCommandEncoder> enc = stage_pipeline(e, s, e->corr_a_pipe);
   [enc setBuffer:a_buf offset:0 atIndex:0];
   [enc setBytes:&p length:sizeof(p) atIndex:1];
   [enc dispatchThreads:MTLSizeMake(a_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
-  [enc setComputePipelineState:e->corr_rhp_pipe];
+  enc = stage_pipeline(e, s, e->corr_rhp_pipe);
   [enc setBuffer:rhp_buf offset:0 atIndex:0];
   [enc setBytes:&p length:sizeof(p) atIndex:1];
   [enc dispatchThreads:MTLSizeMake(rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -1081,17 +1161,23 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
   if ((e == nullptr) || (e->device == nil)) {
     return false;
   }
-  stage_encoder                st  = begin_stage(e, e->corr_a_pipe);
-  id<MTLCommandBuffer>         cb  = st.cb;
-  id<MTLComputeCommandEncoder> enc = st.enc;
-  if (!encode_corr(e, enc, c, nof_systems)) {
-      mmse_stats_corr_build_failure();
+  // NOT fused, deliberately: this entry point exists for the route where the HOST inverts what the
+  // device built (the order is above K1's limit, so the host reads A out of the slots right after this
+  // call). Its dispatches must therefore be complete when it returns - and a caller that only needs them
+  // on the device (the prefix form inside run_async()) encodes them into its own buffer instead.
+  stage_encoder st = begin_stage(e, e->corr_a_pipe, /*fuse=*/false);
+  if (!encode_corr(e, st, c, nof_systems)) {
+    mmse_stats_corr_build_failure();
     return false;
   }
-  [enc endEncoding];
   mmse_stats_corr_build();
-
-  mmse_stats_corr_build();
+  // end_stage() is the ONLY place that closes the encoder: it ends it and commits the stage's own
+  // command buffer, or leaves the shared burst open for the lane to commit. Ending it here as well
+  // aborted the process with "endEncoding has already been called" on every route that builds the
+  // correlation matrices standalone - the OCUDU_CE_GPU_INVERT=0 escape hatch, and the whole
+  // metal_nn_mmse path - and would have closed the SHARED encoder in burst mode, i.e. cut the lane's
+  // single command buffer in two behind the barrier that orders its stages. It also counted the
+  // build twice (the duplicate call above it).
   return end_stage(e, st, true);
 }
 
@@ -1142,7 +1228,7 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
   }
   const auto t_wrap1 = std::chrono::steady_clock::now();
 
-  stage_encoder                st  = begin_stage(e, e->inv_pipe);
+  stage_encoder                st  = begin_stage(e, e->inv_pipe, /*fuse=*/false);
   id<MTLCommandBuffer>         cb  = st.cb;
   const auto t_cb1 = std::chrono::steady_clock::now();
   id<MTLComputeCommandEncoder> enc = st.enc;
@@ -1190,7 +1276,7 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
     uint32_t nof_blocks;
   } params{nout, L, nof_systems, nof_blocks};
 
-  stage_encoder                st  = begin_stage(e, e->apply_pipe);
+  stage_encoder                st  = begin_stage(e, e->apply_pipe, /*fuse=*/false);
   id<MTLCommandBuffer>         cb  = st.cb;
   id<MTLComputeCommandEncoder> enc = st.enc;
   [enc setComputePipelineState:e->apply_pipe];
@@ -1252,7 +1338,7 @@ static_assert(sizeof(mmse_scatter_params_t) == 36, "mmse_scatter_params_t must m
 /// encoder, so a buffer barrier closes the encode - exactly as the correlation prefix does.
 /// \return False when nothing was encoded; the caller must then not commit (the host staging was
 ///         skipped in favour of this write, so a silent failure would leave stale pilots in y).
-static bool encode_scatter(mmse_engine_impl* e, id<MTLComputeCommandEncoder> enc,
+static bool encode_scatter(mmse_engine_impl* e, stage_encoder& st,
                            const mmse_engine::pilots_scatter& s, id<MTLBuffer> y_buf,
                            const float* y_base, std::size_t y_buf_bytes)
 {
@@ -1291,13 +1377,17 @@ static bool encode_scatter(mmse_engine_impl* e, id<MTLComputeCommandEncoder> enc
   p.Ls          = s.Ls;
   p.inv_beta    = s.inv_beta;
 
-  [enc setComputePipelineState:e->pilots_scatter_pipe];
+  id<MTLComputeCommandEncoder> enc = stage_pipeline(e, st, e->pilots_scatter_pipe);
   [enc setBuffer:lse_buf offset:0 atIndex:0];
   [enc setBuffer:y_buf offset:static_cast<NSUInteger>(y_off) atIndex:1];
   [enc setBytes:&p length:sizeof(p) atIndex:2];
   [enc dispatchThreads:MTLSizeMake(s.Ls, s.n_blk_slots, s.nof_layers)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-  [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+  // In burst mode the next stage's pipeline change inserts this barrier (see stage_pipeline()); the own
+  // command buffer has no such tracking, hence the explicit one.
+  if (!st.burst) {
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+  }
   mmse_stats_pilots_scatter();
   return true;
 }
@@ -1353,10 +1443,28 @@ bool mmse_engine::run_async(float*       a,
     uint32_t nof_blocks;
   } aparams{nout, L, nof_systems, nof_blocks};
 
-  // One command buffer, three ordered dispatches (K1 -> K1b -> K2), single commit/wait.
-  id<MTLCommandBuffer> cb = [e->queue commandBuffer];
+  // One command buffer, three ordered dispatches (K1 -> K1b -> K2), single commit/wait - or, in burst
+  // mode, the same dispatches in the command buffer the deferred chain shares, committed and waited by
+  // the lane (see set_fused_burst()). This is the path the air interface takes on every deferred hop, so
+  // it is the one that carries the [mmse_time_sum] gpu_wait the fused lane removes; the four standalone
+  // stages wired first (K0-a, K0-d, K1, K2) are the other command buffers of the same hop.
+  const bool use_rl = (e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr);
+  // The first pipeline the stage will encode with: begin_stage() hands it to shared_burst::encoder() so
+  // that the barrier ordering this stage after the previous one (K0-a's, in the fused lane) is inserted
+  // there. It must be a REAL pipeline: the burst would be told nil otherwise.
+  id<MTLComputePipelineState> first_pipe = use_rl ? e->inv_rl_pipe : e->inv_pipe;
+  if (corr != nullptr) {
+    first_pipe = e->corr_a_pipe;
+  }
+  if ((nof_scatter != 0) && (e->pilots_scatter_pipe != nil)) {
+    first_pipe = e->pilots_scatter_pipe;
+  }
+  stage_encoder                st  = begin_stage(e, first_pipe, /*fuse=*/e->fused_burst);
+  id<MTLComputeCommandEncoder> enc = st.enc;
   phase.created();
-  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (enc == nil) {
+    return false;
+  }
 
   // Glue #2 (S-7f-5u): the pilot vectors of this batch, written by the DEVICE out of K0-a's output.
   // Encoded FIRST because K2 is the reader and nothing else in this buffer touches y: the host
@@ -1364,8 +1472,10 @@ bool mmse_engine::run_async(float*       a,
   // descriptor over), so a failure here has to abort the whole submission rather than commit a
   // buffer whose weights would read the previous hop's pilots.
   for (unsigned i = 0; i != nof_scatter; ++i) {
-    if (!encode_scatter(e, enc, scatter[i], y_buf, y, y_bytes_used)) {
-      [enc endEncoding];
+    if (!encode_scatter(e, st, scatter[i], y_buf, y, y_bytes_used)) {
+      if (!st.burst) {
+        [st.enc endEncoding];
+      }
       return false;
     }
   }
@@ -1383,8 +1493,10 @@ bool mmse_engine::run_async(float*       a,
     // The stage may cover FEWER systems than the batch (corr_stage::nof_systems): a merged batch
     // builds its standard group here while the edge group's slots belong to another geometry.
     const unsigned corr_systems = (corr->nof_systems != 0) ? corr->nof_systems : nof_systems;
-    if (!encode_corr(e, enc, *corr, corr_systems)) {
-      [enc endEncoding];
+    if (!encode_corr(e, st, *corr, corr_systems)) {
+      if (!st.burst) {
+        [st.enc endEncoding];
+      }
       mmse_stats_corr_build_failure();
       return false;
     }
@@ -1393,12 +1505,14 @@ bool mmse_engine::run_async(float*       a,
     // this prefix took the work with it but left the counter behind, so a phone leg of a working
     // device build reported device_corr_builds=0 - the very number the acceptance criteria read.
     mmse_stats_corr_build();
-    // Same encoder: the correlation writes must be visible to K1's reads.
-    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    // Same encoder: the correlation writes must be visible to K1's reads. In burst mode the pipeline
+    // change to K1 below inserts that barrier with the stage switch (see stage_pipeline()).
+    if (!st.burst) {
+      [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    }
   }
 
-  const bool use_rl = (e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr);
-  [enc setComputePipelineState:use_rl ? e->inv_rl_pipe : e->inv_pipe];
+  enc = stage_pipeline(e, st, use_rl ? e->inv_rl_pipe : e->inv_pipe);
   [enc setBuffer:a_buf offset:0 atIndex:0];
   [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
@@ -1414,7 +1528,7 @@ bool mmse_engine::run_async(float*       a,
         threadsPerThreadgroup:MTLSizeMake(tgx, tgy, 1)];
   }
 
-  [enc setComputePipelineState:e->weights_pipe];
+  enc = stage_pipeline(e, st, e->weights_pipe);
   [enc setBuffer:rp_buf offset:0 atIndex:0];
   [enc setBuffer:a_buf offset:0 atIndex:1];
   [enc setBuffer:w_buf offset:0 atIndex:2];
@@ -1425,7 +1539,7 @@ bool mmse_engine::run_async(float*       a,
     [enc dispatchThreadgroups:MTLSizeMake(nof_systems * w_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
   }
 
-  [enc setComputePipelineState:e->apply_pipe];
+  enc = stage_pipeline(e, st, e->apply_pipe);
   [enc setBuffer:w_buf offset:0 atIndex:0];
   [enc setBuffer:y_buf offset:0 atIndex:1];
   [enc setBuffer:h_buf offset:0 atIndex:2];
@@ -1433,18 +1547,12 @@ bool mmse_engine::run_async(float*       a,
   [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
 
-  encode_reformat(enc, e, h_buf, reformat, nout, nof_blocks);
+  encode_reformat(st, e, h_buf, reformat, nout, nof_blocks);
 
-  [enc endEncoding];
   phase.encoded();
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end);
-  [cb commit];
+  const bool ok = end_stage_async(e, st, true);
   phase.committed();
-  mmse_stats_commit();
-  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
-  e->pending_cb = cb;
-  return true;
+  return ok;
 }
 
 void mmse_engine::set_fused_burst(bool enabled)
@@ -1461,7 +1569,12 @@ bool mmse_engine::wait_pending()
   if ((e == nullptr) || (e->pending_cb == nil)) {
     // In burst mode nothing of this engine is outstanding: its dispatches live in the caller's command
     // buffer, whose commit and wait belong to the lane (see set_fused_burst). The stages call this at their
-    // boundaries and must be told yes without a wait.
+    // boundaries and must be told yes without a wait - and the GPU-time probe has to say ZERO rather than
+    // repeat the last own-command-buffer measurement, which is the very [mmse_time_sum] gpu_wait the fusion
+    // exists to remove.
+    if (e != nullptr) {
+      e->last_gpu_us = 0.0;
+    }
     return true;
   }
   id<MTLCommandBuffer> cb = e->pending_cb;
@@ -1482,6 +1595,31 @@ bool mmse_engine::has_pending() const
 {
   const auto* e = static_cast<const mmse_engine_impl*>(impl);
   return (e != nullptr) && (e->pending_cb != nil);
+}
+
+bool mmse_engine::complete_fused_burst()
+{
+  // Commit and wait, in that order. Both are no-ops when the lane already did them: it commits the
+  // command buffer the stages share, and wait_committed() then finds nothing outstanding. A stage
+  // that completes BEFORE that commit is the case this exists for (see the header).
+  (void)ocudu::metal::shared_burst::commit();
+  return ocudu::metal::shared_burst::wait_committed();
+}
+
+bool mmse_engine::burst_is_open()
+{
+  return ocudu::metal::shared_burst::open();
+}
+
+unsigned mmse_engine::burst_dispatch_count()
+{
+  return ocudu::metal::shared_burst::size();
+}
+
+bool mmse_engine::burst_commit_and_wait()
+{
+  (void)ocudu::metal::shared_burst::commit();
+  return ocudu::metal::shared_burst::wait_committed();
 }
 
 namespace {
@@ -1583,17 +1721,34 @@ bool encode_weights_only(mmse_engine_impl*                  e,
     uint32_t nof_blocks;
   } aparams{nout, L, nof_systems, nof_blocks};
 
-  id<MTLCommandBuffer> cb = [e->queue commandBuffer];
+  // The same two shapes as run_async(): this stage's own command buffer (single commit and - for the
+  // synchronous entry point - single wait), or, in burst mode, the command buffer the deferred chain
+  // shares. Only the ASYNC entry point may fuse: a synchronous caller has to leave with its results
+  // ready, and the engine can only promise that with a command buffer of its own.
+  const bool                   burst_ok   = e->fused_burst && !wait_for_completion;
+  id<MTLComputePipelineState>  first_pipe = e->inv_pipe;
+  if (corr != nullptr) {
+    first_pipe = e->corr_a_pipe;
+  }
+  if ((nof_scatter != 0) && (e->pilots_scatter_pipe != nil)) {
+    first_pipe = e->pilots_scatter_pipe;
+  }
+  stage_encoder                st  = begin_stage(e, first_pipe, burst_ok);
+  id<MTLComputeCommandEncoder> enc = st.enc;
   phase.created();
-  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (enc == nil) {
+    return false;
+  }
 
   // Glue #2 (S-7f-5u): the pilot vectors, written by the DEVICE out of K0-a's output. FIRST, because
   // the apply kernel below is their reader. The host skipped its own staging in favour of this write,
   // so a failure must abort the submission (nothing is committed, the caller falls back to its CPU
   // path) rather than let the weights read the previous hop's pilots.
   for (unsigned i = 0; i != nof_scatter; ++i) {
-    if (!encode_scatter(e, enc, scatter[i], y_buf, y, y_bytes_used)) {
-      [enc endEncoding];
+    if (!encode_scatter(e, st, scatter[i], y_buf, y, y_bytes_used)) {
+      if (!st.burst) {
+        [enc endEncoding];
+      }
       return false;
     }
   }
@@ -1612,8 +1767,10 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   // keeps the whole batch on the device.
   if (corr != nullptr) {
     const unsigned corr_systems = (corr->nof_systems != 0) ? corr->nof_systems : nof_systems;
-    if (!encode_corr(e, enc, *corr, corr_systems)) {
-      [enc endEncoding];
+    if (!encode_corr(e, st, *corr, corr_systems)) {
+      if (!st.burst) {
+        [enc endEncoding];
+      }
       return false;
     }
     // EXPERIMENT (OCUDU_CE_DEV_INVERT=1): invert the freshly built A in this same command buffer, so
@@ -1623,9 +1780,10 @@ bool encode_weights_only(mmse_engine_impl*                  e,
     // the element-wise relative error is 9.7e-1 against the host's 1.7e-1, and Metal has no double
     // to fall back on).
     if (std::getenv("OCUDU_CE_DEV_INVERT") != nullptr) {
-      [enc setComputePipelineState:(e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr)
-                                       ? e->inv_rl_pipe
-                                       : e->inv_pipe];
+      enc = stage_pipeline(e,
+                           st,
+                           ((e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr)) ? e->inv_rl_pipe
+                                                                                               : e->inv_pipe);
       [enc setBuffer:ai_buf offset:0 atIndex:0];
       [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
       [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
@@ -1637,7 +1795,7 @@ bool encode_weights_only(mmse_engine_impl*                  e,
     }
   }
 
-  [enc setComputePipelineState:e->weights_pipe];
+  enc = stage_pipeline(e, st, e->weights_pipe);
   [enc setBuffer:rp_buf offset:0 atIndex:0];
   [enc setBuffer:ai_buf offset:0 atIndex:1];
   [enc setBuffer:w_buf offset:0 atIndex:2];
@@ -1648,7 +1806,7 @@ bool encode_weights_only(mmse_engine_impl*                  e,
     [enc dispatchThreadgroups:MTLSizeMake(nof_systems * w_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
   }
 
-  [enc setComputePipelineState:e->apply_pipe];
+  enc = stage_pipeline(e, st, e->apply_pipe);
   [enc setBuffer:w_buf offset:0 atIndex:0];
   [enc setBuffer:y_buf offset:0 atIndex:1];
   [enc setBuffer:h_buf offset:0 atIndex:2];
@@ -1656,28 +1814,29 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
 
-  encode_reformat(enc, e, h_buf, reformat, nout, nof_blocks);
+  encode_reformat(st, e, h_buf, reformat, nout, nof_blocks);
 
-  [enc endEncoding];
   phase.encoded();
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end);
-  [cb commit];
-  phase.committed();
-  mmse_stats_commit();
-  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
-  if (!wait_for_completion) {
-    e->pending_cb = cb;
-    return true;
+  if (wait_for_completion) {
+    const bool ok = end_stage(e, st, true);
+    phase.committed();
+    return ok;
   }
-  [cb waitUntilCompleted];
+  const bool ok = end_stage_async(e, st, true);
+  phase.committed();
+  if (st.burst) {
+    // Nothing of this engine's is outstanding: the lane's commit covers these dispatches, and the caller
+    // must not be left waiting for a command buffer that does not exist (see end_stage_async()).
+    return ok;
+  }
+  [st.cb waitUntilCompleted];
   mmse_stats_wait();
 
-  if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
+  if (st.cb.status != MTLCommandBufferStatusCompleted || st.cb.error != nil) {
     return false;
   }
-  if (cb.GPUStartTime != 0 && cb.GPUEndTime != 0) {
-    e->last_gpu_us = (cb.GPUEndTime - cb.GPUStartTime) * 1e6;
+  if (st.cb.GPUStartTime != 0 && st.cb.GPUEndTime != 0) {
+    e->last_gpu_us = (st.cb.GPUEndTime - st.cb.GPUStartTime) * 1e6;
   }
   return true;
 }

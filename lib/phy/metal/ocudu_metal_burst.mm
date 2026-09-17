@@ -284,6 +284,14 @@ id<MTLComputePipelineState> shared_burst::flush_pending()
 
 void shared_burst::count_dispatch(stage which)
 {
+  // The OPEN burst's own count: size() is what a stage - and the estimator's unit test - reads to check
+  // that its dispatches really went into the shared command buffer instead of one of its own. Only the
+  // open burst is counted: a dispatch of a stage that runs on its own command buffer is not part of any
+  // lane, and burst_ensure_open() resets the count when the next burst opens anyway.
+  burst_state& bs = state();
+  if (bs.cb != nil) {
+    ++bs.n;
+  }
 #if defined(OCUDU_METAL_STATS)
   burst_stats_t& s = stats();
   s.dispatches.fetch_add(1, std::memory_order_relaxed);

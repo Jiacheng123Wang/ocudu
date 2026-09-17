@@ -60,8 +60,12 @@ public:
                                                 const dmrs_symbol_list&     pilots,
                                                 const configuration&        cfg) override
   {
-    submit(grid, port, pilots, cfg);
-    finish(pilots);
+    cfg_local = cfg;
+    // compute() completes every hop it submits, so no stage is ever left running: a device backend
+    // must not hand its dispatches to a command buffer that someone else commits, because there is
+    // no gap for that commit to happen in (see fd_td_estimation_stage_args::deferred).
+    do_submit(grid, port, pilots, /*deferred=*/false);
+    do_finish(pilots);
     return *this;
   }
 
@@ -72,7 +76,9 @@ public:
                                               const configuration&        cfg) override
   {
     cfg_local = cfg;
-    do_submit(grid, port, pilots);
+    // The caller will collect the last hop through finish(), and the receiving chain runs in
+    // between: that gap is what the deferred stage of a device backend may use.
+    do_submit(grid, port, pilots, /*deferred=*/true);
     return *this;
   }
 
@@ -128,7 +134,13 @@ private:
   /// results exist (see port_channel_estimator::submit()), and holding it back is what lets the rest
   /// of the receiving chain overlap the device work. Every other hop is completed here, so nothing
   /// of the shared staging outlives its own hop.
-  void do_submit(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots);
+  /// \param[in] deferred Whether the caller promises to complete the last hop later, through
+  ///             finish() (port_channel_estimator::submit()) instead of inside this call
+  ///             (port_channel_estimator::compute()). It reaches the estimation stage through
+  ///             fd_td_estimation_stage_args::deferred, and it is FALSE for every hop this method
+  ///             completes itself - including hop 0 of a hopping slot, which the second hop forces
+  ///             to complete here because they share the staging.
+  void do_submit(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots, bool deferred);
 
   /// \brief Second phase of do_compute(): completes the last hop and derives the metrics.
   /// \return False when the deferred stage of the last hop failed (the metrics are then meaningless).
@@ -201,6 +213,16 @@ protected:
     /// argument assembly), in microseconds. Measured only by builds with the channel-estimation phase probe
     /// (OCUDU_CE_TIME); zero otherwise. Reported by [mmse_time]/[mmse_time_sum] as the pre= field.
     double pre_stage_us = 0.0;
+    /// \brief Whether the caller collects this hop later, through finish(), instead of completing it
+    /// inside the call that submits it (see port_channel_estimator::submit() and compute()).
+    ///
+    /// A device backend whose completion is what publishes the hop's results - the Metal MMSE
+    /// estimator reads two scalars back from the command buffer that produces them - may use this to
+    /// encode its dispatches into the command buffer the rest of the receiving chain shares, and let
+    /// the chain's own synchronization cover them (see ocudu_metal_burst.h). It MUST NOT do that when
+    /// this is false: nothing would commit those dispatches before the completion reads them, and the
+    /// hop would be estimated from stale memory - silently.
+    bool deferred = false;
   };
 
   /// \brief FD+TD estimation stage of one hop.
@@ -288,7 +310,13 @@ private:
   ///
   /// The hop is left pending (see \c pending_hop): its estimation stage may not have produced its
   /// outputs yet, and compute_hop_finish() completes it.
-  void compute_hop_submit(const resource_grid_reader& grid, unsigned port, const dmrs_symbol_list& pilots, unsigned hop);
+  /// \param[in] deferred Whether this hop is the one the caller completes later (see do_submit()); it
+  ///             reaches the stage as fd_td_estimation_stage_args::deferred.
+  void compute_hop_submit(const resource_grid_reader& grid,
+                          unsigned                    port,
+                          const dmrs_symbol_list&     pilots,
+                          unsigned                    hop,
+                          bool                        deferred);
 
   /// \brief Second phase of compute_hop(): the hop statistics derived from the filtered pilots.
   ///

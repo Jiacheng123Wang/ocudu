@@ -214,13 +214,14 @@ void port_channel_estimator_average_impl::do_compute(const resource_grid_reader&
                                                      unsigned                    port,
                                                      const dmrs_symbol_list&     pilots)
 {
-  do_submit(grid, port, pilots);
+  do_submit(grid, port, pilots, /*deferred=*/false);
   do_finish(pilots);
 }
 
 void port_channel_estimator_average_impl::do_submit(const resource_grid_reader& grid,
                                                     unsigned                    port,
-                                                    const dmrs_symbol_list&     pilots)
+                                                    const dmrs_symbol_list&     pilots,
+                                                    bool                        deferred)
 {
   re_measurement_dimensions symbols_size = pilots.size();
   unsigned                  nof_layers   = symbols_size.nof_slices;
@@ -243,14 +244,22 @@ void port_channel_estimator_average_impl::do_submit(const resource_grid_reader& 
   // The hops update rsrp, epre, noise_var, time_alignment_s and cfo_normalized. Only the last one is
   // left pending: completing it here would keep the host busy while the device is still working on
   // it (see port_channel_estimator::submit()).
-  compute_hop_submit(grid, port, pilots, /*hop=*/0);
-  if (cfg_local.dmrs_pattern[0].hopping_symbol_index.has_value()) {
+  //
+  // WHICH hop that is depends on the hopping: hop 0 of a hopping slot is completed right below
+  // (the second hop overwrites the staging it was dispatched with), so it is NOT deferred even when
+  // the caller asked for a deferred submission - the promise is about the hop that stays pending,
+  // and a device backend acting on it would leave that hop's work in a command buffer nobody
+  // commits before its completion reads the results back (see
+  // fd_td_estimation_stage_args::deferred).
+  const bool hopping = cfg_local.dmrs_pattern[0].hopping_symbol_index.has_value();
+  compute_hop_submit(grid, port, pilots, /*hop=*/0, deferred && !hopping);
+  if (hopping) {
     // The second hop overwrites the staging the first one was dispatched with, so the first hop must
     // be complete before the second is submitted.
     if (pending_hop.valid) {
       compute_hop_finish(pilots);
     }
-    compute_hop_submit(grid, port, pilots, /*hop=*/1);
+    compute_hop_submit(grid, port, pilots, /*hop=*/1, deferred);
   }
 }
 
@@ -301,14 +310,15 @@ void port_channel_estimator_average_impl::compute_hop(const ocudu::resource_grid
                                                       const dmrs_symbol_list&            pilots,
                                                       unsigned                           hop)
 {
-  compute_hop_submit(grid, port, pilots, hop);
+  compute_hop_submit(grid, port, pilots, hop, /*deferred=*/false);
   (void)compute_hop_finish(pilots);
 }
 
 void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resource_grid_reader& grid,
                                                              unsigned                           port,
                                                              const dmrs_symbol_list&            pilots,
-                                                             unsigned                           hop)
+                                                             unsigned                           hop,
+                                                             bool                               deferred)
 {
 #if defined(OCUDU_CE_TIME)
   // The pre-stage window (pilot extraction from the resource grid, EPRE, LSE and CFO) is what a device-side pilot
@@ -416,6 +426,9 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
       .filtered_pilots_lse_view  = filtered_pilots_lse,
       .enlarged_filtered_pilots_lse = enlarged_filtered_pilots_lse,
       .freq_response             = freq_response,
+      // Whether the caller collects this hop later, instead of completing it in the call that
+      // submits it (see fd_td_estimation_stage_args::deferred).
+      .deferred                  = deferred,
   };
 
   // The host pre-stage: the least-squares pilots, the pilot products and the CFO estimate that goes

@@ -778,8 +778,33 @@ cf_t port_channel_estimator_metal_mmse_impl::ls_pilot(const fd_td_estimation_sta
   return scaled ? v * scale : v;
 }
 
+bool port_channel_estimator_metal_mmse_impl::fused_burst_enabled()
+{
+  const char* env = std::getenv("OCUDU_CE_FUSED_BURST");
+  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+}
+
 void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
 {
+  // ---- S-7g-16 (fused lane), Step 1b: WHOSE command buffer this hop's dispatches go into ---------
+  // A hop the caller left running may encode its dispatches into the command buffer the equalizer and
+  // the demapper share (see ocudu_metal_burst.h), so that the lane's single commit covers the
+  // estimator too - that is what removes the [mmse_time_sum] gpu_wait a lane used to pay. The gate is
+  // the base class's answer to "will this hop be completed AFTER the rest of the chain has had its
+  // turn" (args.deferred); it is FALSE for a hop that completes inside its own submit, where nothing
+  // would commit the burst before complete_fd_td_estimation_stage() reads the hop's scalars back.
+  //
+  // Set on EVERY hop, both ways: the adapter outlives the hop, and an engine left in burst mode would
+  // silently dispatch a later synchronous hop into a burst nobody owns.
+  //
+  // The knob defaults OFF (opt-in until an on-air leg confirms it, like every other new strategy
+  // here). It is read per hop instead of cached in a static because the A/B has to be switchable
+  // inside one process: the Metal estimator's unit test compares both routes on the same input.
+  fused_burst_hop = fused_burst_enabled() && args.deferred;
+  if (engine != nullptr) {
+    engine->set_fused_burst(fused_burst_hop);
+  }
+
   const unsigned nof_layers = args.dmrs_patterns.size();
   const auto&    hop_rb_mask =
       (args.hop == 0) ? args.dmrs_patterns.front().rb_mask : args.dmrs_patterns.front().rb_mask2;
@@ -2628,6 +2653,10 @@ void port_channel_estimator_metal_mmse_impl::defer_unpack(unsigned              
   // The stage is outstanding from this point (not only from the end of the stage call): a batch of
   // the same hop that is submitted later - the split-tail path - must complete this one first.
   stage_pending = true;
+  // ... and WHICH command buffer it went into, so that the completion takes the matching route: the
+  // batch is in the shared burst for a fused hop, in the engine's own command buffer otherwise
+  // (fused_burst_hop is constant for the whole hop, see apply_fd_td_estimation_stage()).
+  pending_fused_burst = fused_burst_hop;
 }
 
 void port_channel_estimator_metal_mmse_impl::pending_fill::fill(
@@ -2665,7 +2694,22 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
 #if defined(OCUDU_CE_TIME)
   const auto t_wait_begin = std::chrono::steady_clock::now();
 #endif
-  const bool ok = (engine == nullptr) || engine->wait_pending();
+  const bool ok = [&] {
+    if (engine == nullptr) {
+      return true;
+    }
+    // Fused lane (S-7g-16, Step 1b): the hop's dispatches are in the command buffer the equalizer and
+    // the demapper share. Normally the lane committed it before the estimator is asked to complete the
+    // hop, and both calls below are then no-ops. A caller that reads the estimates on the HOST is the
+    // exception, and the reason this is not just a wait: the demodulator completes the estimation
+    // BEFORE it submits the equalization on its not-in-place route (OCUDU_CE_CPU_CE, a missing device
+    // view), and so does the debug capture - nobody has committed the burst yet, and completing it here
+    // is what makes the two scalars below (sigma2, pilots_power) come from memory the GPU has written
+    // instead of from the previous hop's. Those dispatches are this engine's own - no other stage has
+    // encoded into the burst at either call site - so the early commit costs the overlap, not the
+    // ordering (see mmse_engine::complete_fused_burst()).
+    return pending_fused_burst ? engine->complete_fused_burst() : engine->wait_pending();
+  }();
   // Temporary experiment (OCUDU_CE_NV_OVERRIDE): replace the device noise variance with a known
   // value, to tell "the estimates are wrong" apart from "only the noise scale is wrong".
   if (const char* nv_env = std::getenv("OCUDU_CE_NV_OVERRIDE"); (nv_env != nullptr) && (gpu_nv != nullptr)) {

@@ -490,6 +490,26 @@ private:
   /// True while a batch submitted by the last stage call is still outstanding.
   bool stage_pending = false;
 
+  /// \brief Whether the outstanding batch was encoded into the command buffer the receiving chain
+  /// shares, rather than into the engine's own (see fused_burst_hop).
+  ///
+  /// Kept beside \c stage_pending and written where that one is written, because the completion has
+  /// to take the matching route: the engine's wait_pending() cannot see a burst, and the burst's
+  /// completion cannot see a command buffer of the engine's own.
+  bool pending_fused_burst = false;
+
+  /// \brief Whether the hop being staged hands its dispatches to the shared burst (S-7g-16, Step 1b).
+  ///
+  /// Set at the top of apply_fd_td_estimation_stage() and constant for that hop. True only for a hop
+  /// the caller left running (see fd_td_estimation_stage_args::deferred) and only with the
+  /// OCUDU_CE_FUSED_BURST knob set; every other hop keeps the engine's own commit-and-wait, which is
+  /// what the host consumers of the estimates need.
+  bool fused_burst_hop = false;
+
+  /// Whether OCUDU_CE_FUSED_BURST asks for the fused lane. Default OFF: the knob stays opt-in until
+  /// an on-air leg has confirmed it (see the design document, 48.185(f)).
+  static bool fused_burst_enabled();
+
   /// \brief Unpack of the last hop, kept so a HOST consumer of the estimates can still be served.
   ///
   /// The device's own estimates are the source of truth while a hop is current: the demodulator
