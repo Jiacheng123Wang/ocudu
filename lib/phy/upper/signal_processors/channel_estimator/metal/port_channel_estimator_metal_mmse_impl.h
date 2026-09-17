@@ -506,8 +506,9 @@ private:
   /// what the host consumers of the estimates need.
   bool fused_burst_hop = false;
 
-  /// Whether OCUDU_CE_FUSED_BURST asks for the fused lane. Default OFF: the knob stays opt-in until
-  /// an on-air leg has confirmed it (see the design document, 48.185(f)).
+  /// Whether the hop encodes into the lane's shared burst (S-7g-16). DEFAULT ON: the fused lane is the
+  /// goal, not an experiment - OCUDU_CE_FUSED_BURST=0 is the escape hatch that puts the estimator back
+  /// on its own command buffer. See fused_burst_enabled() for the measured latency debt.
   static bool fused_burst_enabled();
 
   /// \brief Unpack of the last hop, kept so a HOST consumer of the estimates can still be served.

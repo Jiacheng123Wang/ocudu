@@ -193,8 +193,10 @@ dmrs_symbol_list make_pilots(unsigned n_prb = 51, unsigned nof_symbols = 2)
 
 int main()
 {
-  // The fused lane's knob is opt-in and Test 13 sets it explicitly where it needs it: clearing it here
-  // keeps every other test on the default route whatever the caller's environment says.
+  // The fused lane is the DEFAULT route now (OCUDU_CE_FUSED_BURST=0 is the escape hatch), and Test 13
+  // pins the knob in both directions: clearing it here keeps every other test on the default whatever
+  // the caller's environment says. It changes nothing for them - they all go through compute(), which
+  // completes the hop it submits and therefore never fuses.
   unsetenv("OCUDU_CE_FUSED_BURST");
 
   std::mt19937 rng(1234);
@@ -2032,13 +2034,9 @@ int main()
     };
 
     /// The knob the adapter reads per hop, so both routes can be compared inside this one process.
-    const auto set_knob = [](bool on) {
-      if (on) {
-        setenv("OCUDU_CE_FUSED_BURST", "1", 1);
-      } else {
-        unsetenv("OCUDU_CE_FUSED_BURST");
-      }
-    };
+    /// "off" is an explicit 0, not an unset variable: the fusion is the DEFAULT now, and the routes
+    /// below are the A/B of it.
+    const auto set_knob = [](bool on) { setenv("OCUDU_CE_FUSED_BURST", on ? "1" : "0", 1); };
 
     const std::array<std::pair<unsigned, unsigned>, 4> shapes = {{{51, 2}, {25, 2}, {4, 3}, {12, 4}}};
     unsigned                                           n_checked = 0;
@@ -2173,13 +2171,32 @@ int main()
         return -1;
       }
 
+      // --- Route 5: the DEFAULT. With the environment untouched the deferred hop must fuse: the fused
+      // lane is the route the chain takes now (S-7g-16's goal), and OCUDU_CE_FUSED_BURST=0 - what the
+      // routes above set - is the escape hatch. A default that silently drifted back to the unfused
+      // route would leave every other check in this test green, so it is pinned here.
+      unsetenv("OCUDU_CE_FUSED_BURST");
+      const port_channel_estimator_results& res_def = mmse->submit(in.grid, 0, in.pilots, in.cfg);
+      if (!metal::mmse_engine::burst_is_open()) {
+        std::printf("Test 13 FAIL (%s): the DEFAULT route did not fuse (OCUDU_CE_FUSED_BURST unset)\n",
+                    label.c_str());
+        return -1;
+      }
+      const bool      def_ok     = mmse->finish(in.pilots);
+      const published by_default = read_back(res_def, in.nof_subc, nof_layers);
+      if (!def_ok || !(by_default == ref)) {
+        std::printf("Test 13 FAIL (%s): the default (fused) route does not match the synchronous one\n",
+                    label.c_str());
+        return -1;
+      }
+
       std::printf("Test 13 (%s): fused hop matches the synchronous route bit for bit "
-                  "(%u dispatches in the burst, host-read and in-place orders)\n",
+                  "(%u dispatches in the burst, host-read and in-place orders, and by default)\n",
                   label.c_str(),
                   fused_dispatches);
       n_checked += fused_dispatches;
     }
-    set_knob(false);
+    set_knob(false);   // leave the process on the explicit escape-hatch value; the default is on anyway
     std::printf("Test 13 PASS: the fused lane reproduces the synchronous result byte for byte over "
                 "%u shapes (%u estimator dispatches carried by the shared burst), for both completion "
                 "orders, and a synchronous hop still owns its command buffer\n",

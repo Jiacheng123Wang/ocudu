@@ -780,8 +780,16 @@ cf_t port_channel_estimator_metal_mmse_impl::ls_pilot(const fd_td_estimation_sta
 
 bool port_channel_estimator_metal_mmse_impl::fused_burst_enabled()
 {
+  // DEFAULT ON, like the other device stages: keeping the whole IQ -> LLR chain inside the GPU is the
+  // goal of S-7g-16, so the fused route is the route, and OCUDU_CE_FUSED_BURST=0 is the escape hatch
+  // (it is what the estimator's unit test uses for the unfused comparison, and what a leg would set if
+  // the fusion ever had to be taken out of the data path without a revert). The first on-air legs put
+  // the pipeline ~110us per slot ABOVE the unfused route - the cost of the estimator's GPU work no
+  // longer overlapping the host's equalization/demodulation encoding - and that is a LATENCY DEBT to
+  // pay back later (see the design document, 48.188(i).3), not a reason to keep the fusion out of the
+  // data path.
   const char* env = std::getenv("OCUDU_CE_FUSED_BURST");
-  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
 }
 
 void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
