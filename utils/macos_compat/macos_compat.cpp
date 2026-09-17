@@ -78,7 +78,22 @@ aligned_registry& registry()
   return *r;
 }
 
+/// Observers of aligned_free() (see register_aligned_free_observer).
+std::vector<aligned_free_observer>& free_observers()
+{
+  static std::vector<aligned_free_observer>* observers = new std::vector<aligned_free_observer>();
+  return *observers;
+}
+
 } // namespace
+
+void register_aligned_free_observer(aligned_free_observer observer)
+{
+  if (observer == nullptr) {
+    return;
+  }
+  free_observers().push_back(observer);
+}
 
 void* aligned_alloc(size_t alignment, size_t size)
 {
@@ -108,10 +123,21 @@ void* aligned_alloc(size_t alignment, size_t size)
 
 void aligned_free(void* ptr)
 {
-  if (ptr != nullptr) {
+  if (ptr == nullptr) {
+    return;
+  }
+  {
     aligned_registry& r = registry();
     std::lock_guard<std::mutex> lock(r.mutex);
     r.blocks.erase(ptr);
+  }
+  // The registry no longer describes the block, so the observers run outside the registry lock: a
+  // consumer that keeps state per allocation (the Metal wrap cache) takes its own lock, and nesting
+  // the two in the opposite order to describe_aligned_allocation() would deadlock. They run before
+  // the block is released, so whatever they drop cannot be overtaken by the next allocation that
+  // gets these pages.
+  for (aligned_free_observer observer : free_observers()) {
+    observer(ptr);
   }
   ::free(ptr);
 }

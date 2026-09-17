@@ -68,6 +68,24 @@ void aligned_free(void* ptr);
 /// new allocation: the registry entry is dropped by aligned_free().
 bool describe_aligned_allocation(const void* ptr, void** base, size_t* size);
 
+/// \brief Callback invoked by aligned_free() for the block it is about to release.
+using aligned_free_observer = void (*)(void* base);
+
+/// \brief Registers an observer of aligned_free().
+///
+/// For a consumer that keeps state keyed by the address of an allocation - the Metal no-copy wrap
+/// cache, whose mappings are created per allocation - this is how that state is dropped when the
+/// allocation dies. Without it the state outlives the memory: the pages handed to the next
+/// allocation at the same address are then served by an object created for the previous one, which
+/// is both a contract violation (a mapping must be created once per object) and a mapping whose
+/// length describes a buffer that no longer exists.
+///
+/// Observers are process-wide and are called with \p base, the pointer aligned_alloc() returned,
+/// before the block is released and after the registry entry is dropped. \p observer must not call
+/// aligned_alloc(), aligned_free() or describe_aligned_allocation(): it runs between the two, on the
+/// thread that is releasing the block. Register once, from a static initializer.
+void register_aligned_free_observer(aligned_free_observer observer);
+
 /// \brief Returns the operating system page size (4 KiB on x86 Linux,
 ///        16 KiB on Apple Silicon macOS).
 size_t page_size();
