@@ -409,6 +409,25 @@ void lower_phy_baseband_processor::ul_process()
       nof_samples = position.nof_samples;
     }
   }
+  // T_start of the UL compute pipeline measurement: the moment the samples of this block START arriving, so
+  // the series measures "first sample of the slot in -> CRC OK out" no matter how the receive side asks for
+  // them. Use the same slot reference the FAPI slot_point carries to the PUSCH completion (the
+  // sample-timestamp-derived count modulo the SFN cycle, as computed by the uplink processor): with the plain
+  // absolute count the pairing only matched during the first SFN cycle of the run.
+  //
+  // It used to be recorded AFTER receive() returned, which measures that same thing only for a policy whose
+  // block arrives with its first samples. With whole-slot blocks the radio hands the block over at the slot's
+  // END, so the series started there and excluded the wait for the samples - which is why the symbol-grained
+  // policy (S-7g-13) looked ~400us SLOWER in these series while it is ~600us faster end to end. Series recorded
+  // before this change are not comparable with the ones after it (see the design document).
+  {
+    const uint64_t nof_slots_per_sfn_cycle =
+        (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
+    ul_pipeline_probe::get().record_start(
+        (apply_timestamp_sfn0_ref(last_rx_timestamp.load(std::memory_order_acquire)) / nof_samples_per_slot) %
+        nof_slots_per_sfn_cycle);
+  }
+
   baseband_gateway_buffer_writer_view rx_writer(rx_buffer->get_writer(), rx_offset, nof_samples);
 
   // Receive baseband.
@@ -509,16 +528,6 @@ void lower_phy_baseband_processor::ul_process()
     }
   }
 
-  if (!establishes_phase) {
-    // T_start of the UL compute pipeline measurement (IQ samples just received, UL processing about to start).
-    // Use the same slot reference the FAPI slot_point carries to the PUSCH completion (the sample-timestamp-derived
-    // count modulo the SFN cycle, as computed by the uplink processor): with the plain absolute count the pairing
-    // only matched during the first SFN cycle of the run.
-    const uint64_t nof_slots_per_sfn_cycle =
-        (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
-    ul_pipeline_probe::get().record_start((apply_timestamp_sfn0_ref(rx_metadata.ts) / nof_samples_per_slot) %
-                                          nof_slots_per_sfn_cycle);
-  }
 
   // Queue uplink buffer processing. A block that only establishes the phase is not queued: its buffer
   // goes out of scope here and returns to the pool (see rx_buffer_pool) - under the symbol-grained policy
