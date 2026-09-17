@@ -7,6 +7,7 @@
 #include "../support/prach_buffer_test_doubles.h"
 #include "../support/resource_grid_test_doubles.h"
 #include "lower_phy_test_doubles.h"
+#include <cstdlib>
 #include "processors/downlink/downlink_processor_test_doubles.h"
 #include "processors/uplink/uplink_processor_notifier_test_doubles.h"
 #include "ocudu/adt/format.h"
@@ -985,6 +986,14 @@ TEST_P(LowerPhyFixture, ReceivePhaseBlocksAreDropped)
 TEST_P(LowerPhyFixture, ReceiveBlocksHoldWholeSymbols)
 {
   lower_phy_controller& lphy_controller = lphy->get_controller();
+
+  // The symbol-grained receive policy is opt-in (see lower_phy_baseband_processor::start): the default is
+  // the whole-slot policy, which is what the other cases of this binary assert. Enable it here and restore
+  // the environment whatever happens, so a failure in this case cannot decide for the others.
+  struct symbol_policy_guard {
+    symbol_policy_guard() { setenv("OCUDU_UL_RX_SYMBOLS", "1", 1); }
+    ~symbol_policy_guard() { unsetenv("OCUDU_UL_RX_SYMBOLS"); }
+  } guard;
 
   const unsigned nof_samples_per_slot = srate.to_kHz() / pow2(to_numerology_value(scs));
   const unsigned nof_symbols_per_slot = 16;
