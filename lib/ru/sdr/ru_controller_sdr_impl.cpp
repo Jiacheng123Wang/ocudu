@@ -81,11 +81,22 @@ void ru_controller_sdr_impl::start()
 
 void ru_controller_sdr_impl::stop()
 {
-  radio->stop();
-
+  // Stop the lower PHY - the CONSUMER of the samples - before the radio that produces them.
+  //
+  // The other order leaves the receive chain asking a dying radio for samples for as long as the stream
+  // takes to tear down, and a radio that is going away hands back short or error blocks. Those reach the
+  // uplink processor in the middle of a symbol, which is the one case that takes its ASSEMBLY path, and
+  // that path is where the process crashed (2026-09-17 20:40: a lower_phy_uplink_processor_impl::
+  // process_collecting frame on an uplink worker, with the main thread inside
+  // radio_uhd_rx_stream::stop <- ru_controller_sdr_impl::stop). Stopping the PHY first closes the window
+  // by construction: its receive chain drains while the radio is still streaming, and nothing consumes
+  // the radio afterwards. (It also stops the slot indications the PHY feeds the MAC, so the upper layers
+  // are no longer scheduling slots while they are being taken down.)
   for (auto& sector : lower_phy_sectors) {
     sector->get_controller().stop();
   }
+
+  radio->stop();
 }
 
 void ru_controller_sdr_impl::set_lower_phy_sectors(std::vector<lower_phy_sector*> sectors)
