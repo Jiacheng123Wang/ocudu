@@ -89,11 +89,16 @@ static bool validate_phy_pipeline_config(const du_low_unit_expert_upper_phy_conf
       fmt::print("Invalid configuration: {}.\n", lane_error);
       return false;
     }
-    // The lane itself lands in a later step of the GPU pipeline work. Refuse it loudly instead of running the module
-    // level path under a name that promises a fused one.
-    fmt::print("Invalid configuration: --phy_pipeline gpu (the fused IQ -> LLR GPU pipeline) is not implemented yet; "
-               "use --phy_pipeline cpu_gpu for the module-level offload.\n");
-    return false;
+    // The mode used to be refused here with "not implemented yet", so that the module-level path could
+    // not run under a name promising a fused one. That refusal is gone. It is not what enforced the
+    // claim anyway: the mode resolves to the very backends the module-level legs already pass
+    // explicitly (see phy_pipeline_lane_defaults), so selecting it changes the ORCHESTRATION claim and
+    // nothing else - and a claim is verified by measuring it, not by refusing to run.
+    //
+    // \note The refusal was also why the remaining gap could not be measured: with the mode
+    // unavailable, no leg could state the property it promises ("only two host <-> device data
+    // crossings, the IQ upload and the LLR download" - see phy_pipeline_mode.h), so the runtime
+    // contract had nothing to check in that mode. The contract is what enforces the claim now.
   }
 
   // Cross-check the mode against the module backend knobs (see resolve_phy_pipeline for the rules).
