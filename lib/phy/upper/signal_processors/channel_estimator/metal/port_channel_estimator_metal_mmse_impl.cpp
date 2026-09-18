@@ -2041,7 +2041,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                            matrix_on,
                            gpu_invert,
                            /*slots_filled=*/edge_on_device,
-                           /*pad_y_floats=*/static_cast<unsigned>(nof_layers) * n_std_blocks * 2 * L_std);
+                           /*pad_y_slots=*/true);
       }
       // 3b) OCUDU_CE_EDGE_CHECK=1: compare the edge group's slots against the host's build of the same
       //     geometry, at the LAST moment before the engine consumes them. Same hop, same inputs, one
@@ -2597,7 +2597,7 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
                                                                 bool                               matrix,
                                                                 bool                               gpu_invert,
                                                                 bool                               slots_filled,
-                                                                unsigned                           pad_y_floats)
+                                                                bool                               pad_y_slots)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
   // Pilots of one PRB, and the pilots this group carries per DM-RS symbol. The pilot view of a
@@ -2738,15 +2738,25 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
       //          which means it does not cover the shape where the two can differ - so "the gate
       //          passed" is NOT evidence for this branch. See OCUDU_CE_DEV_Y_PADS below.
     } else {
-      if (pad_y_floats != 0) {
+      if (pad_y_slots) {
         // CROSSING (host -> device): gpu_y is the engine's zero-copy y staging buffer, which the
-        // apply kernel reads. Clearing the tail group's pad slots is geometry rather than matrix
-        // data, but it is still the host writing memory the GPU consumes. Only reached when the host
+        // apply kernel reads. Clearing this group's pad slots is geometry rather than matrix data,
+        // but it is still the host writing memory the GPU consumes. Only reached when the host
         // stages y itself (record_device_y_stage() above returned false).
-        phy_pipeline_crossings::count_host_write(pad_y_floats * sizeof(float));
-        std::memset(gpu_y + static_cast<std::size_t>(nof_layers) * st.n_blk * 2 * st.L,
-                    0,
-                    static_cast<std::size_t>(pad_y_floats) * sizeof(float));
+        //
+        // The extent is derived HERE, from the same st.n_blk / st.L the staging loop and the apply
+        // kernel use - not passed in. The caller's equivalent expression is written in the other
+        // convention (n_std_blocks / L_std) and the two are only equal while st.n_blk == n_std_blocks
+        // and st.L == L_std; taking the caller's number would leave this write and its own base
+        // pointer measuring the region in different units if that ever stopped holding.
+        const std::size_t pad_floats = static_cast<std::size_t>(nof_layers) * (st.n_blk - n_blk) *
+                                       2 * st.L;
+        if (pad_floats != 0) {
+          phy_pipeline_crossings::count_host_write(pad_floats * sizeof(float));
+          std::memset(gpu_y + static_cast<std::size_t>(nof_layers) * st.n_blk * 2 * st.L,
+                      0,
+                      pad_floats * sizeof(float));
+        }
       }
       for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
         for (unsigned b = 0; b != n_blk; ++b) {

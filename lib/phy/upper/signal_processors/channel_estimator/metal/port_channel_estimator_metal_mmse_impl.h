@@ -278,24 +278,20 @@ private:
   ///               the one writing y (glue #2, see record_device_y_stage()), in which case the host
   ///               skips its copy. Deliberately has NO default, so
   ///               every call site has to state which of the two it means.
-  /// \param pad_y_floats When non-zero, the caller asks this function to clear the group's pad
-  ///               SLOTS (every block slot above \c n_blk) of its y region, because the tail systems
-  ///               carry \c st.n_blk slots while only \c n_blk of them are real. The value is the
-  ///               length in floats of the region to clear, which starts one layer-vs-system stride
-  ///               past the standard group.
+  /// \param pad_y_slots When true, this group carries fewer real block slots than its slot
+  ///               geometry (the merged tail: n_blk real slots inside st.n_blk), so the pad slots
+  ///               must hold zeros rather than a previous hop's pilots. Cleared HERE, and only when
+  ///               the HOST is the one staging y: when record_device_y_stage() takes the group, the
+  ///               scatter kernel zeroes those very slots inside the command buffer whose weights
+  ///               read them, so clearing them on the host would be a device crossing spent on memory
+  ///               the device is about to write.
   ///
-  ///               It is cleared HERE, and only when the HOST is the one staging y: when
-  ///               record_device_y_stage() takes the group, the scatter kernel zeroes those very
-  ///               slots (and their pad rows) inside the command buffer whose weights read them, so
-  ///               clearing them on the host would be a device crossing spent on memory the device is
-  ///               about to write.
-  ///
-  ///               \note It cannot be done by the caller, which is where this used to live: the
-  ///               caller has to know the answer BEFORE calling, and the answer is only known inside
-  ///               (it depends on the device-LSE gate, the metallib and the geometry). Asking the
-  ///               caller to predict it would restate the gate in two places and let them drift - the
-  ///               same class of defect as the \c a_rhp_filled flag this file already carries a scar
-  ///               from (2916 of 27216 entries valid, SINR -23 dB).
+  ///               \note It is a FLAG, not an extent, and that is deliberate. The region is derived
+  ///               inside from st.n_blk / st.L - the same strides the staging loop and the apply
+  ///               kernel use. An extent computed by the caller would be written in the caller's
+  ///               convention (n_std_blocks / L_std), and the two are equal only while
+  ///               st.n_blk == n_std_blocks and st.L == L_std: a base pointer in one unit with a
+  ///               length in the other is a silent corruption waiting for the day they diverge.
   void stage_engine_group(const fd_td_estimation_stage_args& args,
                           unsigned                           gb_start,
                           unsigned                           n_blk,
@@ -308,7 +304,7 @@ private:
                           bool                               matrix,
                           bool                               gpu_invert,
                           bool                               slots_filled,
-                          unsigned                           pad_y_floats = 0);
+                          bool                               pad_y_slots = false);
 
   /// \brief Glue #2 (S-7f-5u): records that the DEVICE writes this group's y slots, so that
   /// stage_engine_group() must NOT copy the pilots in from the host.
