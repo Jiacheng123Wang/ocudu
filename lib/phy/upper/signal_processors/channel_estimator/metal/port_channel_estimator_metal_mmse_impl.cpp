@@ -281,18 +281,31 @@ bool k0a_ratio_from_device_enabled()
 /// A/B measures, and it does so without arguing: at zero the values become a fixed zero rather than an
 /// uninitialised read, so the run stays deterministic and comparing the published dumps means
 /// something. Identical dumps prove the reads are dead; any difference says which hop still needs them.
-/// \brief A/B for the last correlation build still on the host: the merged edge block
+/// \brief The last correlation build still on the host: the merged edge block
 /// (OCUDU_CE_TAIL_DEV).
 ///
-/// Unset or zero (the default): a hop whose allocation is not a multiple of the block size merges its
-/// edge block into the standard batch as EXTRA SYSTEMS, and builds that block's correlation matrices
-/// on the HOST - which is why ~15 of the 27 corpus shapes still consume the host's sigma2 (see the
-/// S3 A/B, doc_chinese/phy_pipeline_gpu/wip/S3_ab.md).
+/// Unset or non-zero (THE DEFAULT, and what this line ships): the device builds the edge block's
+/// correlation matrices, in the standard group's own engine call.
 ///
-/// One: the device builds them too. This is the last correlation build out of the host, and with it
-/// the host's last reason to read the extraction's scalars: the S3 A/B is the judge - with this on,
-/// OCUDU_CE_HOST_SCALARS=0 must produce byte-identical dumps on EVERY shape, which is what turns the
-/// crossing count from 3.00 per hop to 0.
+/// Zero: the host builds them and stages them - the route every hop took before. It is kept because it
+/// is the reference the device build is judged against (TAIL_DEV=0 vs 1 must be byte-identical, see
+/// the gate below), and an escape hatch if a device regression ever needs to be isolated.
+///
+/// \note What this used to be, and why the flip is safe NOW. The device build was previously opt-in
+/// because it did not agree with the host's: 6043 differing bytes, confined to the edge region of _h.
+/// The cause was NOT the geometry, the pads or the inversion - it was that encode_corr() sized the
+/// correlation slots' zero-copy mapping by the PACKED block size (l * l and nout * l) while both
+/// kernels write with the SLOT's row stride (Ls), so a block narrower than its slot - exactly the edge
+/// group, L_e into the L_std slots - lost every write past the mapped end. A escaped it by being
+/// square; R_hp did not. Fixed in 93964256aa; see doc_chinese/phy_pipeline_gpu/wip/S7_s4_root_cause.md
+/// for the measurement.
+///
+/// Gate at the flip: 27 of 27 captures byte-identical between TAIL_DEV=0 and the new default, 0
+/// differing bytes (it was 6043); the estimator unit tests pass; the strict and CPU-LS nets are clean.
+///
+/// This is also the last correlation build out of the host, and with it the host's last reason to read
+/// the extraction's scalars: with this on, OCUDU_CE_HOST_SCALARS=0 produces byte-identical dumps on
+/// EVERY shape (the S3 A/B), which is what turns the crossing count from 3.00 per hop to 0.
 ///
 /// \note Why the edge could not simply be handed to the existing device path. The edge rides in the
 /// STANDARD group's slots (strides L_std / nout_std) while its block order is L_e / nout_e, so its
@@ -330,7 +343,7 @@ bool edge_build_on_device()
 {
   static const bool value = []() {
     const char* env = std::getenv("OCUDU_CE_TAIL_DEV");
-    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
   }();
   return value;
 }
