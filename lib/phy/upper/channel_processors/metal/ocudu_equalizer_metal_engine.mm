@@ -19,6 +19,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 
@@ -304,21 +305,71 @@ struct eq_engine_impl {
 /// unreliable (a dispatch read its neighbour's slice). A dedicated buffer per dispatch removes the
 /// offset from the picture entirely; the allocation is a few dozen bytes against a group that
 /// already allocates its staging, so the cost is noise next to the dispatch it describes.
+/// \brief Content-keyed cache for the two host-built tables the device reads.
+///
+/// Both are pure functions of the hop's plan and of the symbol layout, so both are the SAME BYTES
+/// hop after hop for a given allocation. Building one is a Metal buffer allocation plus an upload, a
+/// real host -> device crossing; caching removes it from the steady state, leaving one crossing per
+/// DISTINCT table instead of one per dispatch and per hop.
+///
+/// Keyed by CONTENT, not by the caller's pointer: the plan object is rebuilt every hop, so its
+/// address is not a key, but its bytes are. The hit path is a memcmp over host memory - it touches
+/// no device buffer and waits on no GPU, which is why count_host_write() is deliberately NOT called
+/// on a hit. A hit must leave the crossing count at zero, not "small".
+///
+/// \note Measuring this needs more than one hop: ul_chain_replay --repeat N is the ruler, because a
+///       single-hop replay has a cold cache and cannot tell a cache from no cache at all. That is
+///       exactly how the first attempt at this batch failed to show anything.
+struct eq_table_cache {
+  struct entry {
+    std::vector<unsigned char> key;
+    id<MTLBuffer>              buf = nil;
+  };
+  std::vector<entry> entries;
+};
+
+eq_table_cache& eq_table_cache_of()
+{
+  // Thread local: the engines are per-thread. Never destroyed (the contract report runs at exit).
+  static thread_local eq_table_cache* c = new eq_table_cache();
+  return *c;
+}
+
+id<MTLBuffer> eq_cached_table(id<MTLDevice> device, const void* data, size_t bytes)
+{
+  if ((device == nil) || (data == nullptr) || (bytes == 0)) {
+    return nil;
+  }
+  eq_table_cache&      c = eq_table_cache_of();
+  const unsigned char* p = static_cast<const unsigned char*>(data);
+  for (const eq_table_cache::entry& e : c.entries) {
+    if ((e.key.size() == bytes) && (std::memcmp(e.key.data(), p, bytes) == 0)) {
+      return e.buf; // HIT: nothing was written, so nothing is counted.
+    }
+  }
+  // MISS: the crossing - an allocation and an upload into memory the device reads.
+  phy_pipeline_crossings::count_host_write(bytes);
+  id<MTLBuffer> buf = [device newBufferWithBytes:data
+                                         length:static_cast<NSUInteger>(bytes)
+                                        options:MTLResourceStorageModeShared];
+  if (buf != nil) {
+    eq_table_cache::entry e;
+    e.key.assign(p, p + bytes);
+    e.buf = buf;
+    c.entries.push_back(e);
+  }
+  return buf;
+}
+
 static id<MTLBuffer> eq_make_h_starts(id<MTLDevice> device, const unsigned* starts, unsigned n_run)
 {
   if ((device == nil) || (n_run == 0)) {
     return nil;
   }
-  // CROSSING (host -> device): a table the host builds and the device reads. Audited for batch 0 - a
-  // pure function of (geometry, buffer-pool offsets), neither of which depends on received data or
-  // changes once the flow is running, so it belongs to assembly, not to the stream. Counted here so
-  // the batch that makes it write-once can show the number going to zero.
-  const size_t bytes = static_cast<size_t>(n_run) * sizeof(unsigned);
-  phy_pipeline_crossings::count_host_write(bytes);
-  id<MTLBuffer> buf = [device newBufferWithBytes:starts
-                                         length:static_cast<NSUInteger>(bytes)
-                                        options:MTLResourceStorageModeShared];
-  return buf;
+  // Batch 0: built once per distinct table and reused. The cache keeps a DEDICATED buffer per table,
+  // so the correctness fix this function exists for - a dispatch reading its neighbour's slice when
+  // one shared buffer was sliced with setBuffer:offset: - is untouched.
+  return eq_cached_table(device, starts, static_cast<size_t>(n_run) * sizeof(unsigned));
 }
 
 struct wrapped_buffer {
@@ -721,12 +772,9 @@ static id<MTLBuffer> eq_make_gather_table(const void* data, size_t bytes)
   if ((data == nullptr) || (bytes == 0)) {
     return nil;
   }
-  // CROSSING (host -> device): same class as eq_make_h_starts above - a table the host builds from
-  // the hop's geometry and the device reads. Counted for the same reason.
-  phy_pipeline_crossings::count_host_write(bytes);
-  return [metal::shared_queue::device() newBufferWithBytes:data
-                                                   length:static_cast<NSUInteger>(bytes)
-                                                  options:MTLResourceStorageModeShared];
+  // Batch 0: the tables "describe the allocation" and do not depend on which symbols a dispatch
+  // carries, so the same bytes come back hop after hop for a given plan. Cached instead of rebuilt.
+  return eq_cached_table(metal::shared_queue::device(), data, bytes);
 }
 
 /// \brief The hop's gather tables as Metal buffers, built once and reused by every dispatch of the
