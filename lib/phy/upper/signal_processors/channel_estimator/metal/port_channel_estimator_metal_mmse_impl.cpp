@@ -268,6 +268,35 @@ bool k0a_ratio_from_device_enabled()
 /// A/B measures, and it does so without arguing: at zero the values become a fixed zero rather than an
 /// uninitialised read, so the run stays deterministic and comparing the published dumps means
 /// something. Identical dumps prove the reads are dead; any difference says which hop still needs them.
+/// \brief A/B for the last correlation build still on the host: the merged edge block
+/// (OCUDU_CE_TAIL_DEV).
+///
+/// Unset or zero (the default): a hop whose allocation is not a multiple of the block size merges its
+/// edge block into the standard batch as EXTRA SYSTEMS, and builds that block's correlation matrices
+/// on the HOST - which is why ~15 of the 27 corpus shapes still consume the host's sigma2 (see the
+/// S3 A/B, doc_chinese/phy_pipeline_gpu/wip/S3_ab.md).
+///
+/// One: the device builds them too. This is the last correlation build out of the host, and with it
+/// the host's last reason to read the extraction's scalars: the S3 A/B is the judge - with this on,
+/// OCUDU_CE_HOST_SCALARS=0 must produce byte-identical dumps on EVERY shape, which is what turns the
+/// crossing count from 3.00 per hop to 0.
+///
+/// \note Why the edge could not simply be handed to the existing device path. The edge rides in the
+/// STANDARD group's slots (strides L_std / nout_std) while its block order is L_e / nout_e, so its
+/// slot is OVERSIZED, and run_engine_blocks() only reports the slots as filled when st.L == L. The
+/// pads - A to blockdiag(A, I) and R_hp to zero outside [0,nout)x[0,L) - were therefore written by
+/// stage_engine_group(), which skips the whole staging when the slots are filled. They are geometry,
+/// not matrix data, so they move into build_slots_on_device() and the host stays out of the matrix
+/// business.
+bool edge_build_on_device()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_TAIL_DEV");
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 bool host_reads_device_scalars()
 {
   static const bool value = []() {
@@ -1777,8 +1806,43 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // standard geometry for the WHOLE batch and so wrote over the edge block's slots; the prefix
       // now covers the standard systems only (corr_stage::nof_systems), and the edge group keeps the
       // host build and staging below - one geometry per writer.
-      {
-        // Host construction and staging for the tail systems.
+      // Who builds the edge block's matrices. On the default route it is the host, as it always has
+      // been; with OCUDU_CE_TAIL_DEV=1 the device builds them in its own command buffer and the host
+      // writes only the pads of the oversized slot (see build_slots_on_device) - which is what takes
+      // the host out of the matrix business for good, and with it the reason it reads the extraction's
+      // scalars (see edge_build_on_device()).
+      bool edge_on_device = false;
+      if (edge_build_on_device()) {
+        static_vector<unsigned, MAX_NOF_DMRS_SYMBOLS> edge_dmrs;
+        args.pattern_symbols.for_each(args.first_symbol, args.last_symbol,
+                                      [&](unsigned s) { edge_dmrs.push_back(s); });
+        // Geometry first: correlation_stage() is pure packing, and nout_e / L_e are needed for the
+        // staging and the unpack whether the device builds or the host does. The stride assert inside
+        // it is also the cheapest way to refuse a geometry the slots cannot hold.
+        (void)correlation_stage(stats,
+                                args.dmrs_patterns.front().re_pattern,
+                                rem_prb,
+                                span<const unsigned>(edge_dmrs.begin(), edge_dmrs.size()),
+                                scs_khz,
+                                nof_layers,
+                                nout_e,
+                                L_e,
+                                st.L,
+                                st.nout);
+        edge_on_device = build_slots_on_device(stats,
+                                               args.dmrs_patterns.front().re_pattern,
+                                               rem_prb,
+                                               span<const unsigned>(edge_dmrs.begin(), edge_dmrs.size()),
+                                               scs_khz,
+                                               nof_layers,
+                                               nof_layers,
+                                               st.L,
+                                               st.nout,
+                                               L_e,
+                                               gpu_invert);
+      }
+      if (!edge_on_device) {
+        // Host construction and staging for the tail systems (the route that has always run).
         build_correlation_matrices(stats,
                                    args.dmrs_patterns.front().re_pattern,
                                    rem_prb,
@@ -1806,7 +1870,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                          st,
                          matrix_on,
                          gpu_invert,
-                         false);
+                         /*slots_filled=*/edge_on_device);
       // 4) ONE engine call over both groups, then unpack both. The call is submitted without
       //    waiting when the kernels allow it, so the unpack moves to the completion of the stage
       //    (see complete_fd_td_estimation_stage()).
@@ -2741,6 +2805,39 @@ bool port_channel_estimator_metal_mmse_impl::build_slots_on_device(
   if (!engine->build_correlation(corr_std, nof_systems)) {
     return false;
   }
+  // The pads of an OVERSIZED slot are written here, not by stage_engine_group(): a caller that
+  // reports the slots as filled skips that staging entirely, and the pad region would otherwise still
+  // hold the previous hop. Geometry, not matrix data - which is why the host can write it without
+  // being back in the matrix business. Both loops are no-ops when the slot is exact (a_stride == L,
+  // r_stride == nout_c), which is every route that existed before this.
+  //
+  // A becomes blockdiag(A, I): K1 then inverts one invertible Ls x Ls system and
+  // W = [R_hp | 0] . blockdiag(A^-1, I) = [R_hp . A^-1 | 0], so h = W . y keeps the values of the
+  // unpadded system (the same construction stage_engine_group() makes).
+  for (unsigned sys = 0; sys != nof_systems; ++sys) {
+    float* a_slot = gpu_a + static_cast<std::size_t>(sys_offset + sys) * a_stride * a_stride;
+    float* r_slot = gpu_r_hp + static_cast<std::size_t>(sys_offset + sys) * r_stride * a_stride;
+    for (unsigned r = 0; r != L; ++r) {
+      std::memset(a_slot + static_cast<std::size_t>(r) * a_stride + L, 0,
+                  static_cast<std::size_t>(a_stride - L) * sizeof(float));
+    }
+    for (unsigned k = L; k != a_stride; ++k) {
+      std::memset(a_slot + static_cast<std::size_t>(k) * a_stride, 0,
+                  static_cast<std::size_t>(a_stride) * sizeof(float));
+      a_slot[static_cast<std::size_t>(k) * a_stride + k] = 1.0F;
+    }
+    // R_hp: real values in rows [0, nout) and columns [0, L), zero everywhere else - including the
+    // pad ROWS, which is why the second loop clears whole rows.
+    for (unsigned o = 0; o != nout_c; ++o) {
+      std::memset(r_slot + static_cast<std::size_t>(o) * a_stride + L, 0,
+                  static_cast<std::size_t>(a_stride - L) * sizeof(float));
+    }
+    for (unsigned o = nout_c; o != r_stride; ++o) {
+      std::memset(r_slot + static_cast<std::size_t>(o) * a_stride, 0,
+                  static_cast<std::size_t>(a_stride) * sizeof(float));
+    }
+  }
+
   if (gpu_invert) {
     // The device inverts these slots in the weights command buffer (K1), so this call must leave A
     // in them. Inverting here as well would have K1 invert an A^-1 - the S-7f-3i defect.
