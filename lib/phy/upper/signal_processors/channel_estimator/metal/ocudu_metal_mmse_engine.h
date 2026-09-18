@@ -196,6 +196,33 @@ public:
     float fd_hz      = 0.0F;
     float tau_rms_s  = 0.0F;
     float sigma2     = 0.0F;
+    /// \brief BASE address of the caller's noise-variance buffer, or nullptr to load A's diagonal
+    /// from \c sigma2 (the host's value).
+    ///
+    /// It is the estimator's sigma2 buffer, the one the extraction's own command buffer filled (see
+    /// pilots_stage::sigma2). Pointing at it removes the host from between the received grid and A:
+    /// the kernel reads the loading where the device left it, so a hop whose extraction, correlation
+    /// and weights all run on the device never has the host read a scalar that its own device work
+    /// produced.
+    ///
+    /// \warning It is the BASE of the buffer, NOT the address of the ratio: the kernel indexes it with
+    /// \c sigma2_slot (see there). Handing over the element's own address would make the kernel's
+    /// scalars[slot] land past the end of the buffer.
+    /// \warning The two select the SAME float, and that is a measured property, not a construction:
+    /// the device quotient is bit-identical to \c sigma2 only because ocudu_mmse_pilots.metal is
+    /// compiled with -fno-fast-math (under the default fast math it differed in 28.4% of 2^20 pairs
+    /// and flipped LLR decisions on 27 of 27 captures - see that file and CMakeLists.txt). Anything
+    /// that perturbs the host's ratio (OCUDU_CE_PP_PERTURB) must therefore leave this null.
+    /// \warning Only valid while the extraction buffer holds THIS hop's ratio, and only when the
+    /// extraction stage actually ran for it (pilots_stage::sigma2_done) - a stale pointer would load A
+    /// with the previous hop's noise, which is a silent, small error.
+    const float* sigma2_dev = nullptr;
+    /// \brief Element of \c sigma2_dev the kernels read, or 0 for "use \c sigma2 instead".
+    ///
+    /// The estimators that own the buffer know which slot holds what (the estimator's is 2, the
+    /// noise-to-pilot-power ratio); the engine must not assume it. 0 is the "no device loading" value
+    /// on purpose, which is why the buffer's slot 0 is never used for this.
+    unsigned sigma2_slot = 0;
     /// DM-RS slot symbols of the hop, ascending (npt entries, at most 4).
     unsigned dmrs_slots[4] = {};
     /// Pilot positions within a PRB, ascending (ncomb entries, at most 12).
@@ -245,12 +272,19 @@ public:
     /// estimated from, and the LSE itself must survive (the weights' y vectors are built from it
     /// later, in the engine's own command buffer).
     float* smoothed = nullptr;
-    /// Destination of the hop's noise variance and of the pilots' power sum (TWO floats: [0] sigma2,
-    /// [1] the sum of |LS pilot|^2), or nullptr to skip both. When set, the extra dispatches below
-    /// ride THIS command buffer, so the host reads two scalars after the wait instead of running
-    /// estimate_sigma2() (measured 3.3 us per hop of host time on air) and of walking the pilots for
-    /// their mean power. The power sum is skipped - and left untouched - whenever this whole block is
-    /// (see sigma2_done).
+    /// Destination of the hop's noise variance, of the pilots' power sum, of their mean and of the
+    /// ratio the host computes from them (FOUR floats: [0] sigma2, [1] the sum of |LS pilot|^2,
+    /// [2] sigma2 / max([1] / nof_power_pilots, 1e-30F) - the host's own quotient, bit for bit - and
+    /// [3] the mean [1] / nof_power_pilots), or nullptr to skip all of them. When set, the extra
+    /// dispatches below ride THIS command buffer, so the host reads two scalars after the wait instead
+    /// of running estimate_sigma2() (measured 3.3 us per hop of host time on air) and of walking the
+    /// pilots for their mean power. The power sum and the ratio are skipped - and left untouched -
+    /// whenever this whole block is (see sigma2_done).
+    ///
+    /// \c [2] is what lets the correlation stage - and, through it, the weights and the published
+    /// estimate - be built without the host passing the ratio in: hand this pointer to
+    /// corr_stage::sigma2_dev and A's diagonal loading comes from here. It is the host's float only
+    /// because ocudu_mmse_pilots.metal is compiled with -fno-fast-math (see there).
     float* sigma2 = nullptr;
     /// \brief Set by build_pilots_lse() to whether it actually encoded the noise-variance stage.
     ///
@@ -283,6 +317,12 @@ public:
     /// data scaling (1 / beta) to the LSE pilots"). The device reads the unscaled LSE.
     float    inv_beta       = 1.0F;
     bool     compensate_cfo = false;
+    /// \brief Number of pilots the mean-power reduction divides its sum by, i.e. the caller's own
+    /// nof_power_pilots (nof_layers * nof_dmrs_symbols * nof_symbol_pilots). 0 means "no mean and no
+    /// ratio wanted": both slots are then left at the value the caller's own fallback produces (0).
+    ///
+    /// Only the \c sigma2 buffer's third and fourth slots use it (see there).
+    unsigned nof_power_pilots = 0;
     unsigned nof_dmrs_symb = 0;
     unsigned nof_layers    = 0;
     unsigned nof_pilots    = 0;

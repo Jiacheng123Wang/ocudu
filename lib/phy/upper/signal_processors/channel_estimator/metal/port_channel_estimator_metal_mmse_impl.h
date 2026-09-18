@@ -674,6 +674,27 @@ private:
   /// which is also the A/B of capture_gates.sh sig2), and whether THIS hop got it.
   bool device_sigma2_enabled = false;
   bool device_sigma2_valid   = false;
+  /// \brief BASE of this hop's device noise-variance buffer when the correlation stage may load A's
+  /// diagonal from it, or nullptr when it must use the host's ratio (device LSE off or failed,
+  /// OCUDU_CE_DEV_SIGMA2=0, a metallib without the power kernel, or OCUDU_CE_K0A_RATIO_DEV=0).
+  ///
+  /// It is the ONE value the correlation model wants, and both of its consumers take it from the same
+  /// place: correlation_stage() hands the base and the slot to the kernels (corr_stage::sigma2_dev /
+  /// sigma2_slot) and carries the very same float in corr_stage::sigma2 - the value the host would
+  /// have computed - so the matrix flavor, which stages A on the host, and the device builds all load
+  /// A's diagonal with one identical float.
+  ///
+  /// \warning It is the BASE of gpu_ls_sigma2, NOT &gpu_ls_sigma2[kRatioSlot]: the kernel indexes the
+  /// base with corr_stage::sigma2_slot, so handing over the element's own address makes the kernel
+  /// read past the buffer (that mistake loaded A with no noise loading at all on the first attempt).
+  /// The slot is kRatioSlot (see there).
+  ///
+  /// The device and host ratios really are the same float, and that rests on
+  /// ocudu_mmse_pilots.metal being compiled with -fno-fast-math: without it the quotient rounds
+  /// differently from the host's in 28.4% of 2^20 pairs, and A's diagonal loading is amplified by
+  /// cond_2(A) ~ 2e4 (S-7g-20).
+  /// Reset on every hop before K0-a decides, like the other per-hop device state.
+  const float* device_sigma2_rel = nullptr;
 
   /// \brief Stages the received DM-RS of the hop and the symbol epochs - the arrays the device noise
   /// variance reads, and the same ones K4 reads.

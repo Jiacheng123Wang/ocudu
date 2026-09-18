@@ -120,7 +120,7 @@ esac
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../.." && pwd)
 BIN=$REPO/build/lib/phy/upper/channel_processors/metal/ul_chain_replay
 
-case "$MODE" in k0d|k1|ydev|k0dm|sig2|combos) ;; *) echo "usage: $0 <k0d|k1|ydev|k0dm|sig2|combos> [jobs] [corpus_glob]"; exit 2;; esac
+case "$MODE" in k0d|k1|ydev|k0dm|sig2|ratdev|combos) ;; *) echo "usage: $0 <k0d|k1|ydev|k0dm|sig2|ratdev|combos> [jobs] [corpus_glob]"; exit 2;; esac
 [ -x "$BIN" ] || { echo "no replay tool at $BIN - build the ul_chain_replay target first"; exit 2; }
 
 mapfile -t CAPS < <(ls $GLOB 2>/dev/null | sed -E "$STRIP" | sort -u)
@@ -264,6 +264,16 @@ case "$MODE" in
         VACUOUS_COUNTER="device_corr_builds"; REPORT_COUNTER="";;
   sig2) ENV_A="OCUDU_CE_SIGMA2_CHECK=1"; ENV_B="OCUDU_CE_DEV_SIGMA2=0 OCUDU_CE_SIGMA2_CHECK=1"
         VACUOUS_COUNTER="device_sigma2"; REPORT_COUNTER="";;
+  # S-7g-20: route A loads A's diagonal from the ratio the extraction's own command buffer computed;
+  # route B computes the same ratio on the host. The two must publish byte-identical dumps - that IS
+  # the property, and it is not self-evident: the quotient is bit-exact only while
+  # ocudu_mmse_pilots_power.metal is compiled with -fno-fast-math (without it, 28.4% of 2^20 pairs
+  # round differently and LLR decisions flip on every capture), and the kernel must read the buffer
+  # element the host means (reading past it loaded A with no noise at all). This mode turns both from
+  # "argued" into "gated", so it must keep running with the strict flag in place.
+  ratdev) ENV_A="OCUDU_CE_K0A_RATIO_DEV=1 OCUDU_CE_K0A_RATIO_CHECK=1"
+          ENV_B="OCUDU_CE_K0A_RATIO_DEV=0"
+          VACUOUS_COUNTER=""; REPORT_COUNTER="k0a_ratio";;
   *)    ENV_A=""; ENV_B=""; VACUOUS_COUNTER=""; REPORT_COUNTER="";;
 esac
 
@@ -274,13 +284,22 @@ run_shard() {
     c=${CAPS[$i]}; base=$(basename "$c")
     out_d=$WORK/${id}_${base}_a; out_h=$WORK/${id}_${base}_b
     total=$(( total + 1 ))
-    if [ "$MODE" = k0d ] || [ "$MODE" = ydev ] || [ "$MODE" = k0dm ]; then
+    if [ "$MODE" = k0d ] || [ "$MODE" = ydev ] || [ "$MODE" = k0dm ] || [ "$MODE" = ratdev ]; then
       # stderr of both routes carries the [metal_stats] line (printed at exit): the vacuity check
       # reads the counter that says whether the device path engaged.
       env $ENV_A "$BIN" "$c" --metal --out "$out_d" >/dev/null 2>"$WORK/${id}_${base}.a.err" ||
         { bad="$bad $base(A)"; continue; }
       env $ENV_B "$BIN" "$c" --metal --out "$out_h" >/dev/null 2>"$WORK/${id}_${base}.b.err" ||
         { bad="$bad $base(B)"; continue; }
+      if [ "$REPORT_COUNTER" = "k0a_ratio" ]; then
+        # The ratio probe is a per-hop diagnostic LINE, not a [metal_stats] counter: route A must have
+        # printed at least one, or it never took the device ratio and this would be host against host -
+        # a gate that passes while proving nothing.
+        if ! grep -q "\[k0a_ratio\]" "$WORK/${id}_${base}.a.err"; then
+          echo "$base" >> "$WORK/vac_$id"
+          continue
+        fi
+      fi
       if [ -n "$VACUOUS_COUNTER" ]; then
         local va vb
         va=$(grep -o "$VACUOUS_COUNTER=[0-9]*" "$WORK/${id}_${base}.a.err" | head -1 | cut -d= -f2)
@@ -456,7 +475,17 @@ if [ "$BYTEMIS" -ne 0 ]; then
     fi
     ok=1
     for f in "$WORK/sa"_*; do rel=${f#"$WORK/sa"}; cmp -s "$f" "$WORK/sb$rel" || ok=0; done
-    [ $ok -eq 1 ] || SURVIVORS="$SURVIVORS $(basename "$bc")"
+    if [ $ok -eq 1 ]; then
+      # The parallel phase counted this one as differing; with an idle GPU it does not. Put it back
+      # into the tally, or the summary reads "byte-identical=26 ... MISMATCH:" - which is exactly the
+      # self-contradictory line this pass exists to avoid (the sigma2 pass below has done this from
+      # the start; the byte-comparison modes did not, and a reader cannot tell a cleared candidate
+      # from a live finding).
+      SAME=$(( SAME + 1 ))
+      BYTEMIS=$(( BYTEMIS - 1 ))
+    else
+      SURVIVORS="$SURVIVORS $(basename "$bc")"
+    fi
     rm -f "$WORK/sa"_* "$WORK/sb"_*
   done < "$WORK/badlist"
   BAD="$BAD$SURVIVORS"
@@ -511,6 +540,11 @@ elif [ "$MODE" = ydev ]; then
   echo "mode=ydev captures=$TOTAL byte-identical=$SAME vacuous=$VACUOUS rechecked=$RECHECKED retried=$RETRIED"
 elif [ "$MODE" = k0dm ]; then
   echo "mode=k0dm captures=$TOTAL byte-identical=$SAME vacuous=$VACUOUS rechecked=$RECHECKED retried=$RETRIED"
+elif [ "$MODE" = ratdev ]; then
+  echo "mode=ratdev captures=$TOTAL byte-identical=$SAME vacuous=$VACUOUS rechecked=$RECHECKED retried=$RETRIED"
+  # The device quotient must equal the host's BIT FOR BIT - the mode's whole point - so any byte
+  # difference is a finding, not a tolerance.
+  [ "$SAME" -eq "$TOTAL" ] || BAD="$BAD (device and host ratios disagree)"
 elif [ "$MODE" = sig2 ]; then
   SIG2REL=0; SIG2RAW=0
   for (( j = 0; j < JOBS; j++ )); do

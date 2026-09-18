@@ -26,7 +26,7 @@ ocudu_add_metallib(
     OUTPUT ${MMSE_METALLIB}
     SOURCES ocudu_mmse_inv.metal ocudu_mmse_apply.metal ocudu_mmse_weights.metal
             ocudu_mmse_weights_matrix.metal ocudu_mmse_apply_matrix.metal ocudu_mmse_reformat.metal
-            ocudu_mmse_corr.metal ocudu_mmse_pilots.metal
+            ocudu_mmse_corr.metal ocudu_mmse_pilots.metal ocudu_mmse_pilots_power.metal
     # The correlation kernels are the one place with a BIT-EXACTNESS contract against a host float
     # expression (build_correlation_matrices()): K0-d is only a drop-in for the host staging if A and
     # R_hp come out identical, and a 1-ulp difference is amplified by cond_2(A) ~ 2e4 into ~1% of W
@@ -34,10 +34,17 @@ ocudu_add_metallib(
     # default fast math is free to contract `1 + x * x` into an fma and to reassociate the products,
     # and that is exactly the 1 ulp - so this file is compiled with strict IEEE semantics.
     #
-    # ocudu_mmse_pilots.metal (K0-a) is deliberately NOT in this list: the pilots enter the output
-    # linearly (h = W . y), so a relative error in them has no amplification factor and one ulp is
-    # irrelevant - see that file's header for the rule.
-    IEEE_MATH_SOURCES ocudu_mmse_corr.metal)
+    # ocudu_mmse_pilots_power.metal (K0-a) is strict for the same reason, and it is a file of its own
+    # to keep the strictness to ONE kernel (S-7g-20): its sigma2_rel = out[0] / out[1] is the diagonal
+    # loading of A, so it carries the same cond_2(A) ~ 2e4 amplification as the correlation kernels -
+    # and under the default fast math that divide comes out DIFFERENTLY ROUNDED from the host's in
+    # 28.4% of 2^20 random (sigma2-like, power-like) pairs (298151 differences, both directions),
+    # which flipped LLR decisions on 27 of 27 corpus captures (32613 soft bits). Recompiled with
+    # -fno-fast-math the same sweep is 0 of 2^20: on this GPU the flag is the whole difference, not
+    # the hardware. The flag is per FILE, and ocudu_mmse_pilots.metal's other kernels have no such
+    # contract (the pilots enter h = W . y linearly) - putting them under it as well changed the LSE's
+    # last bits for no benefit, so the mean-power kernel was split out instead.
+    IEEE_MATH_SOURCES ocudu_mmse_corr.metal ocudu_mmse_pilots_power.metal)
 
 # ---- Compiled Core ML model (AI channel estimator; see the training memo) ----
 set(HELENA_MODELC ${CMAKE_CURRENT_SOURCE_DIR}/ai_assets/helena_pusch_ml.mlmodelc)

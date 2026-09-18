@@ -912,12 +912,21 @@ struct mmse_sigma2_params_t {
   uint32_t nof_v_pilots;
   uint32_t filter_len;
   uint32_t nof_cdm;
+  uint32_t nof_power_pilots;
   uint32_t compensate_cfo;
   float    beta;
   float    inv_beta;
   uint32_t dmrs_symb[4];
 };
-static_assert(sizeof(mmse_sigma2_params_t) == 52, "mmse_sigma2_params_t must match mmse_sigma2_params");
+static_assert(sizeof(mmse_sigma2_params_t) == 56, "mmse_sigma2_params_t must match mmse_sigma2_params");
+// The fields the kernels read by name, pinned by OFFSET: a same-size swap of two fields keeps the
+// size assert happy while shifting everything after them (see the corr struct's note below).
+static_assert(offsetof(mmse_sigma2_params_t, nof_cdm) == 20, "must match mmse_sigma2_params::nof_cdm");
+static_assert(offsetof(mmse_sigma2_params_t, nof_power_pilots) == 24,
+              "must match mmse_sigma2_params::nof_power_pilots");
+static_assert(offsetof(mmse_sigma2_params_t, compensate_cfo) == 28,
+              "must match mmse_sigma2_params::compensate_cfo");
+static_assert(offsetof(mmse_sigma2_params_t, beta) == 32, "must match mmse_sigma2_params::beta");
 
 bool mmse_engine::build_pilots_lse(const pilots_stage& s)
 {
@@ -995,9 +1004,14 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     filt_buf     = e->wrap(s.fd_filter,
                            (s.fd_filter_bytes != 0) ? s.fd_filter_bytes : s.fd_filter_len * sizeof(float));
     rx_buf       = e->wrap(s.rx_pilots, s.rx_bytes);
-    // Two floats: [0] the noise variance, [1] the pilots' power sum (see mmse_pilots_power). Wrapped
-    // with its full length here and nowhere else, so the cache never sees a larger request later.
-    sigma2_buf   = e->wrap(s.sigma2, 2 * sizeof(float));
+    // FOUR floats: [0] the noise variance, [1] the pilots' power sum, [2] the noise-to-pilot-power
+    // ratio the device computes and [3] the mean power it derives it from (see mmse_pilots_power).
+    // The length must cover every slot the kernel writes: wrapping two made the kernel's out[2] /
+    // out[3] land past the end of its Metal buffer, which is exactly the kind of out-of-bounds write
+    // that surfaces as a wrong A somewhere else (measured: the CE unit test's NMSE regressed by
+    // 3.9 dB at 20 dB SNR). Wrapped with its full length here and nowhere else, so the cache never
+    // sees a larger request later.
+    sigma2_buf   = e->wrap(s.sigma2, 4 * sizeof(float));
     if ((smoothed_buf == nil) || (filt_buf == nil) || (rx_buf == nil) || (sigma2_buf == nil)) {
       return false;
     }
@@ -1067,6 +1081,10 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     q.nof_v_pilots   = s.nof_v_pilots;
     q.filter_len     = s.fd_filter_len;
     q.nof_cdm        = s.nof_cdm;
+    // The divisor of the mean power, in the host's own order of operations (nof_layers x nof_dmrs_symb
+    // x nof_pilots): the kernel writes the mean into out[3] and the ratio it derives into out[2]. Zero
+    // means the caller asks for neither, and the kernel then leaves both slots at zero.
+    q.nof_power_pilots = s.nof_power_pilots;
     q.compensate_cfo = (s.compensate_cfo ? 1u : 0u);
     q.beta           = s.beta;
     q.inv_beta       = s.inv_beta;
@@ -1129,13 +1147,26 @@ struct mmse_corr_params_t {
   float    tau_rms_s;
   float    sigma2;
   float    ridge;
+  uint32_t sigma2_from_device;
+  uint32_t sigma2_slot;
   uint32_t dmrs_slots[4];
   uint32_t pilot_re[12];
 };
 
 // The kernel side asserts the same size: a field added on one side only would silently shift every
 // field after it (the struct crosses the boundary as opaque setBytes bytes).
-static_assert(sizeof(mmse_corr_params_t) == 124, "mmse_corr_params_t must match mmse_corr_params");
+static_assert(sizeof(mmse_corr_params_t) == 132, "mmse_corr_params_t must match mmse_corr_params");
+// ... and a same-size swap still shifts everything after it, which the size assert cannot see. The
+// fields the kernels read by name are therefore pinned by OFFSET too - the first attempt at the
+// device loading added these two under one name on this side and another on the kernel's, and the
+// kernel then read the wrong word as its switch (it saw "no device loading, use p.sigma2" while the
+// host believed it had asked for the device's value). A mismatch must be a compile error here.
+static_assert(offsetof(mmse_corr_params_t, sigma2) == 52, "must match mmse_corr_params::sigma2");
+static_assert(offsetof(mmse_corr_params_t, ridge) == 56, "must match mmse_corr_params::ridge");
+static_assert(offsetof(mmse_corr_params_t, sigma2_from_device) == 60,
+              "must match mmse_corr_params::sigma2_from_device");
+static_assert(offsetof(mmse_corr_params_t, sigma2_slot) == 64, "must match mmse_corr_params::sigma2_slot");
+static_assert(offsetof(mmse_corr_params_t, dmrs_slots) == 68, "must match mmse_corr_params::dmrs_slots");
 
 /// Encodes the two correlation dispatches of \p c into \p enc: the caller owns the command buffer,
 /// so the same encoding serves the standalone entry point and the prefix of an engine call.
@@ -1182,6 +1213,10 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   p.fd_hz       = c.fd_hz;
   p.tau_rms_s   = c.tau_rms_s;
   p.sigma2      = c.sigma2;
+  // When the caller has a device buffer, A's diagonal is loaded from the extraction's own command
+  // buffer output instead of from the float above, and \c sigma2_slot says which element.
+  p.sigma2_from_device = (c.sigma2_dev != nullptr) ? 1u : 0u;
+  p.sigma2_slot        = c.sigma2_slot;
   // The host's diagonal ridge (build_correlation_matrices(): const float ridge = 1e-6F). Must track
   // it exactly, or the device-built A differs from the host's.
   p.ridge = 1e-6F;
@@ -1206,6 +1241,19 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   id<MTLComputeCommandEncoder> enc = stage_pipeline(e, s, e->corr_a_pipe);
   [enc setBuffer:a_buf offset:0 atIndex:0];
   [enc setBytes:&p length:sizeof(p) atIndex:1];
+  // buffer(2) is only read when p.sigma2_slot says so, but it must be bound for that kernel anyway
+  // (MSL leaves an unbound device pointer undefined, and nil is not an option for a non-nullable
+  // argument). \c c.sigma2_dev is the BASE of the caller's sigma2 buffer and \c p.sigma2_slot the
+  // element the kernel reads, so the two agree on the address by construction - pointing the pointer
+  // at the element instead would make the kernel's scalars[slot] land past the end (which is exactly
+  // how this read a different element and loaded A with no noise at all).
+  if (c.sigma2_dev != nullptr) {
+    id<MTLBuffer> sig_buf = e->wrap(c.sigma2_dev, 4 * sizeof(float));
+    if (sig_buf == nil) {
+      return false;
+    }
+    [enc setBuffer:sig_buf offset:0 atIndex:2];
+  }
   [enc dispatchThreads:MTLSizeMake(a_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
   enc = stage_pipeline(e, s, e->corr_rhp_pipe);

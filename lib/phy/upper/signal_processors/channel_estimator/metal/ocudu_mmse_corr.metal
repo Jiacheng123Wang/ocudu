@@ -50,8 +50,24 @@ struct mmse_corr_params {
     float scs_hz;   // subcarrier spacing in hertz
     float fd_hz;    // maximum Doppler shift (time correlation)
     float tau_rms_s;// RMS delay spread (frequency correlation)
-    float sigma2;   // noise variance (diagonal loading of A)
+    float sigma2;   // noise variance (diagonal loading of A): the host's value, or scalars[2] when asked
     float ridge;    // diagonal ridge, identical to the host's (A's diagonal is 1 + sigma2 + ridge)
+    // When 1, the diagonal loading is read from the DEVICE buffer the A kernel receives as buffer(2)
+    // (its element 2, the ratio the extraction's own command buffer computed) instead of from the
+    // float above. That is what keeps the host out of the chain from the received grid to A: with the
+    // device LSE and the device noise variance, sigma2 and its mean-power divisor are both device
+    // scalars, and the ratio between them is the only thing A's diagonal wants. Only the A kernel
+    // reads it; the R_hp kernel does not depend on the noise.
+    //
+    // scalars[2] is the host's quotient bit for bit, and that is a MEASURED property of the build, not
+    // of the expression: ocudu_mmse_pilots.metal (which computes it) is compiled with -fno-fast-math,
+    // because under Metal's default fast math that divide rounds differently from the host's in 28.4%
+    // of 2^20 pairs - and this loading is amplified by cond_2(A) ~ 2e4 (S-7g-20). See that file.
+    uint  sigma2_from_device;
+    // Which element of that buffer holds the ratio (the estimator's is 2). A caller with no device
+    // buffer says so with sigma2_from_device = 0; the engine binds the buffer either way, because an
+    // unbound device pointer is undefined in MSL.
+    uint  sigma2_slot;
     // Slot symbols carrying DM-RS in this hop, ascending (npt entries).
     uint  dmrs_slots[4];
     // Pilot positions within a PRB, ascending (npf / nprb entries).
@@ -60,7 +76,7 @@ struct mmse_corr_params {
 
 // The host mirrors this layout in mmse_corr_params_t (ocudu_metal_mmse_engine.mm) and passes it with
 // setBytes, so a field added on one side only would silently shift every field after it.
-static_assert(sizeof(mmse_corr_params) == 124, "mmse_corr_params must stay in step with its host mirror");
+static_assert(sizeof(mmse_corr_params) == 132, "mmse_corr_params must stay in step with its host mirror");
 
 /// Two pi, as the float the host's TWOPI constant holds.
 ///
@@ -97,8 +113,17 @@ static inline uint mmse_corr_pilot_subcarrier(constant mmse_corr_params& p, uint
 ///
 /// The slot is assumed to be zeroed by the caller: this writes the L x L block only, and the
 /// diagonal loading is added to the first L diagonal entries.
+///
+/// \c scalars is the caller's sigma2 buffer; the kernel reads \c scalars[p.sigma2_slot] when
+/// \c p.sigma2_from_device is set, and \c p.sigma2 otherwise. The element is the noise-to-pilot-power
+/// ratio the extraction's own command buffer produced, i.e. the same float the host would have passed
+/// in \c p.sigma2 (see mmse_pilots_power) - reading it here is what lets A be built with the host
+/// never having read the hop's noise variance.
+/// \note The buffer is the BASE of the caller's allocation, never the element's own address: the
+/// kernel indexes it with \c sigma2_slot, so an element address would read past the end.
 kernel void mmse_corr_a(device float* a [[buffer(0)]],
                         constant mmse_corr_params& p [[buffer(1)]],
+                        device const float* scalars [[buffer(2)]],
                         uint2 gid [[thread_position_in_grid]])
 {
     // One thread per matrix element of one system: the second grid dimension is the SYSTEM, so the
@@ -123,9 +148,10 @@ kernel void mmse_corr_a(device float* a [[buffer(0)]],
 
     // The host adds the loading to the correlation's own diagonal (R_pp has unit diagonal), so the
     // value there is 1 + sigma2 + ridge.
+    const float sigma2 = (p.sigma2_from_device != 0u) ? scalars[p.sigma2_slot] : p.sigma2;
     float v = rt * rf;
     if (row == col) {
-        v += p.sigma2 + p.ridge;
+        v += sigma2 + p.ridge;
     }
     a_sys[(ulong)row * p.Ls + col] = v;
 }

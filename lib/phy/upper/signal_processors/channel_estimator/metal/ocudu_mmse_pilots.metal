@@ -344,6 +344,16 @@ struct mmse_sigma2_params {
     uint  nof_v_pilots;  // virtual pilots per edge (at most 12)
     uint  filter_len;    // raised-cosine filter length (odd, at most 31)
     uint  nof_cdm;       // CDM groups (the received pilots are indexed by group)
+    // Number of pilots the mean power divides its sum by, i.e. the host's nof_power_pilots
+    // (nof_dmrs_symb * nof_layers * nof_pilots, in that order of operations). 0 means "no mean and no
+    // ratio wanted"; both slots are then left at zero.
+    //
+    // /!\ THIS STRUCT IS MIRRORED, and so are mmse_sigma2_dims and mmse_sigma2_clamp below:
+    // ocudu_mmse_pilots_power.metal (which owns the mean-power kernel and is the file compiled with
+    // -fno-fast-math) carries its own copy, and the host mirror is mmse_sigma2_params_t in
+    // ocudu_metal_mmse_engine.mm. MSL gives these files no shared header, so the three copies are kept
+    // in step BY HAND: the static_asserts pin the size, the host pins the offsets.
+    uint  nof_power_pilots;
     uint  compensate_cfo;
     float beta;          // DM-RS to data amplitude scaling
     float inv_beta;      // 1 / beta: the caller scales the pilots by it BEFORE smoothing (see below)
@@ -351,6 +361,11 @@ struct mmse_sigma2_params {
     // symbol, not the hop-local one).
     uint dmrs_symb[4];
 };
+// The host mirrors this layout in mmse_sigma2_params_t (ocudu_metal_mmse_engine.mm) and passes it with
+// setBytes, so a field added on one side only would silently shift every field after it - and so does
+// a same-size swap, which the size assert below cannot see. The host pins the offsets for that reason.
+static_assert(sizeof(mmse_sigma2_params) == 56, "mmse_sigma2_params must stay in step with its host mirror");
+
 
 /// \brief Complex product of two interleaved pairs.
 ///
@@ -516,50 +531,6 @@ kernel void mmse_pilots_fd_smooth(device const float*          lse      [[buffer
         device float* dst = smoothed + (static_cast<ulong>(i_base) * d.nof_pilots + static_cast<uint>(m)) * 2;
         dst[0]            = acc.x * p.inv_beta;
         dst[1]            = acc.y * p.inv_beta;
-    }
-}
-
-/// \brief Mean-power reference of the hop: one threadgroup reduces the whole hop's LS pilots.
-///
-/// The estimator used to run this reduction on the host (pilots_power), reading the least-squares
-/// pilots back out of the device through ls_pilot() - a host pass over received data whose only
-/// consumer is the noise-to-signal ratio sigma2 / pilots_power that the correlation model needs. The
-/// same command buffer that produces the pilots and sigma2 now also produces their power sum, so the
-/// host reads two scalars and divides them.
-///
-/// out[0] carries sigma2 (written by mmse_pilots_sigma2, this kernel writes out[1]); the caller reads
-/// both after the command buffer completes. The traversal covers exactly the elements the host loop
-/// covered - nof_dmrs_symb x nof_layers x nof_pilots of the [symb][layer][pilot] layout - in a
-/// different order, which is why the sum can differ from the host's in the last bits: measured over
-/// the capture corpus, a relative change of 1e-6 in sigma2_rel does not alter a single published byte
-/// (1e-5 does), and the two sums differ by ~1e-7.
-kernel void mmse_pilots_power(device const float*          lse [[buffer(0)]],
-                              device float*                out [[buffer(1)]],
-                              constant mmse_sigma2_params& p   [[buffer(2)]],
-                              uint                         tid [[thread_position_in_threadgroup]])
-{
-    threadgroup float red[mmse_sigma2_tg_size];
-
-    const mmse_sigma2_dims d = mmse_sigma2_clamp(p);
-    const ulong nof_entries  = static_cast<ulong>(d.nof_dmrs_symb) * d.nof_layers * d.nof_pilots;
-
-    float sum = 0.0F;
-    for (ulong i = tid; i < nof_entries; i += mmse_sigma2_tg_size) {
-        const float re = lse[2 * i];
-        const float im = lse[2 * i + 1];
-        sum += re * re + im * im;
-    }
-
-    red[tid] = sum;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint stride = mmse_sigma2_tg_size / 2; stride != 0; stride >>= 1) {
-        if (tid < stride) {
-            red[tid] += red[tid + stride];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-    if (tid == 0) {
-        out[1] = red[0];
     }
 }
 
