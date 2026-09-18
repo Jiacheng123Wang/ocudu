@@ -93,6 +93,13 @@ struct lane_stats_t {
   /// lane's work at all. A small value here says the remaining gap is the dependency itself (i.e. the
   /// estimator's own pipeline is what to shorten); a large one says the target is submission.
   std::vector<double> start_delay_us;
+  /// \brief The same distance for the weights and the burst command buffers (see close_lane()).
+  ///
+  /// Kept as three series and not one: they are submitted at very different moments of the hop, so
+  /// they see different queue states, and reading them against each other is what separates "the
+  /// device was busy" from "the host handed this buffer over late".
+  std::vector<double> queue_to_weights_us;
+  std::vector<double> queue_to_burst_us;
   std::vector<double> period_us;
 
   /// \brief The device's idle time inside the lane, split by WHERE it sits: the distance between one
@@ -444,27 +451,49 @@ void gpu_lane_probe::close_lane()
   if (metal::lane_clock.handover_us >= 0.0) {
     s.handover_us.push_back(metal::lane_clock.handover_us);
   }
-  // The queue's share of the gap: the estimator's command buffer is the lane's FIRST one (the
-  // receiving chain estimates before it demodulates, so it is committed first), and the difference
-  // between the lane's earliest GPU start and that command buffer's own start is what the device took
-  // to get onto the lane's work after the host had committed it.
+  // ---- When the DEVICE got to each of the lane's command buffers (the queue's share) -------------
   //
-  // \note Read HERE and not at commit: a pending command buffer reports GPUStartTime 0 (the same
-  // reason gpu_lane_probe carries the command buffer objects instead of their timestamps) - capturing
-  // it at commit() recorded a zero and the series came out empty.
-  for (const lane_entry& entry : entries_for_starts) {
-    if (entry.which != stage::channel_estimator) {
-      continue;
-    }
-    const double est_start = entry.cb.GPUStartTime;
-    if (est_start > 0.0) {
-      const double delay = (est_start - first_start) * 1e6;
-      if (delay >= 0.0) {
-        s.start_delay_us.push_back(delay);
+  // This is the quantity the 'gap: commit -> first command buffer starts (queue)' series always
+  // claimed to report, and never did. Its first version differenced the extraction's GPU start
+  // against the lane's EARLIEST GPU start - and the extraction IS the lane's earliest command
+  // buffer, by construction (the receiving chain estimates before it demodulates), so the series was
+  // identically zero. Measured over 1978 air lanes: min = max = 0.0. An identity cannot testify
+  // about the queue, and for a while it was read as "the queue costs nothing".
+  //
+  // What the number has to be is the distance between the host COMMITTING a command buffer and the
+  // device STARTING it - which is exactly where a back-end command buffer waits when the GPU is
+  // busy, and the question this probe exists to answer: the lane's gap is ~200us, its command
+  // buffers are only ~530us of work in a 59s leg, and the front end submits one indivisible 423us
+  // transform per slot (~42% of every 1ms slot), so "the device was late getting to this buffer" is
+  // a live hypothesis that nothing has ever tested.
+  //
+  // \note This is the ONE reading in this file that mixes clocks: GPUStartTime is a host-time-base
+  // reading (CACurrentMediaTime), and commit_time is steady_clock. On Darwin both are
+  // mach_absolute_time, so the difference is meaningful - but a wrong epoch would not look subtle,
+  // it would be off by seconds, which is why the magnitude is its own check. Printed for all three
+  // stages so the three can be read against each other.
+  const auto commit_seconds = [](const lane_entry& entry) {
+    return std::chrono::duration<double>(entry.commit_time.time_since_epoch()).count();
+  };
+  const auto queue_of = [&](stage which, std::vector<double>& series) {
+    for (const lane_entry& entry : entries_for_starts) {
+      if (entry.which != which) {
+        continue;
       }
+      const double start = entry.cb.GPUStartTime;
+      if (start > 0.0) {
+        const double delay = (start - commit_seconds(entry)) * 1e6;
+        // Negative would mean the device started a command buffer before the host committed it,
+        // i.e. the two clocks are not on a shared base: reported as a sample so the leg shows it
+        // instead of hiding it behind a clamp.
+        series.push_back(delay);
+      }
+      break;
     }
-    break;
-  }
+  };
+  queue_of(stage::channel_estimator, s.start_delay_us);
+  queue_of(stage::channel_estimator_weights, s.queue_to_weights_us);
+  queue_of(stage::equalizer_demapper, s.queue_to_burst_us);
   ++s.lanes;
   s.cbs += resolved;
   s.cbs_max         = std::max<uint64_t>(s.cbs_max, resolved);
@@ -500,6 +529,8 @@ void gpu_lane_probe::report()
   std::vector<double> busy;
   std::vector<double> gap;
   std::vector<double> period;
+  std::vector<double> queue_to_weights;
+  std::vector<double> queue_to_burst;
   std::vector<double> hole_to_weights;
   std::vector<double> hole_to_burst;
   std::vector<double> host_to_weights;
@@ -530,6 +561,8 @@ void gpu_lane_probe::report()
     busy      = s.busy_us;
     gap       = s.gap_us;
     period    = s.period_us;
+    queue_to_weights = s.queue_to_weights_us;
+    queue_to_burst   = s.queue_to_burst_us;
     hole_to_weights = s.hole_to_weights_us;
     hole_to_burst   = s.hole_to_burst_us;
     host_to_weights = s.host_to_weights_us;
@@ -588,6 +621,12 @@ void gpu_lane_probe::report()
   // command queue). Printed next to the gap it belongs to instead of being inferred from it.
   print_series("gap: stage entry -> extraction commit (host)", s.handover_us);
   print_series("gap: commit -> first command buffer starts (queue)", s.start_delay_us);
+  // The same distance for the other two command buffers of the lane. The three together say whether
+  // the gap is the device being busy when a buffer arrives (all three large) or one buffer being
+  // handed over late (one large, the others small). See close_lane() for why the first of them used
+  // to read identically zero.
+  print_series("queue: weights commit -> weights start", queue_to_weights);
+  print_series("queue: burst commit -> burst start", queue_to_burst);
   // The lane's gap split by where it sits, with the host's own reading of the same two transitions
   // next to each device hole (see lane_stats_t). The two device figures add up to gap whenever the
   // lane holds one command buffer per stage; the host figures say whether the host had handed that
