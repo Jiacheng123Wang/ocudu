@@ -9,16 +9,33 @@
 
 namespace ocudu::gtpu {
 
-/// Packing and unpacking of GTP-U extension header 'PDCP PDU number'.
+/// \brief Packing and unpacking of GTP-U extension header 'PDCP PDU number'.
 ///
-/// Ref: TS 29.281 Sec. 5.2.2.2
+/// TS 29.281 Sec. 5.2.2.2:
+/// '(...) used during a handover procedure between two NG-RANs at the Xn interface (direct DL data forwarding) or via
+/// the N3 interface (indirect DL data forwarding) (...)'
+/// 'The PDCP PDU number field of the PDCP PDU number extension header has a maximum value which requires 12 bits (...)'
+///
+/// Note: Packs and unpacks only the 'extension header content' field (TS 29.281 Sec 5.2.1 Fig 5.2.1-1).
+/// Excludes leading octet for 'extension header length' and the trailing octet for 'next extension header type'.
 class pdcp_pdu_number_packing
 {
 public:
   pdcp_pdu_number_packing(ocudulog::basic_logger& logger_) : logger(logger_) {}
 
-  bool unpack(uint32_t& pdcp_pdu_number, byte_buffer_view container) const;
-  bool pack(byte_buffer& out_buf, const uint32_t pdcp_pdu_number) const;
+  /// \brief Unpacks the extension header content of GTP-U extension header 'PDCP PDU number'.
+  ///
+  /// \param[out] pdcp_pdu_number A 12-bit PDCP sequence number.
+  /// \param[in] extension_header_content The packed extension header content.
+  /// \return true on success, false otherwise.
+  bool unpack(uint32_t& pdcp_pdu_number, byte_buffer_view extension_header_content) const;
+
+  /// \brief Packs the extension header content of GTP-U extension header 'PDCP PDU number'.
+  ///
+  /// \param[out] extension_header_content The packed extension header content.
+  /// \param[in] pdcp_pdu_number A 12-bit PDCP sequence number.
+  /// \return true on success, false otherwise.
+  bool pack(byte_buffer& extension_header_content, const uint32_t pdcp_pdu_number) const;
 
 private:
   ocudulog::basic_logger& logger;
