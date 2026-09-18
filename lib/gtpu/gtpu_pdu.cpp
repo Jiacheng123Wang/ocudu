@@ -436,8 +436,8 @@ bool ocudu::gtpu_extension_header_comprehension_check(const gtpu_extension_heade
     case gtpu_extension_header_type::service_class_indicator:
     case gtpu_extension_header_type::udp_port:
     case gtpu_extension_header_type::ran_container:
-    case gtpu_extension_header_type::long_pdcp_pdu_number_0:
-    case gtpu_extension_header_type::long_pdcp_pdu_number_1:
+    case gtpu_extension_header_type::long_pdcp_pdu_number:
+    case gtpu_extension_header_type::long_pdcp_pdu_number_legacy:
     case gtpu_extension_header_type::xw_ran_container:
       break;
     case gtpu_extension_header_type::nr_ran_container:
