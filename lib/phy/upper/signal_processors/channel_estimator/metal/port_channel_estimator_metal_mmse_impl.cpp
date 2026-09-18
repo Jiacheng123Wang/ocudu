@@ -8,6 +8,7 @@
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/phy/phy_pipeline_crossings.h"
 #include "ocudu_metal_lane_clock.h"
 #include "ocudu/support/math/math_utils.h"
 #include <atomic>
@@ -309,6 +310,11 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
 {
   ocudu_assert(stats_estimator, "Invalid channel statistics estimator.");
 
+  // The goal of the gpu pipeline mode is a crossing count; this is where the crossings that are left
+  // are counted and reported (see phy_pipeline_crossings.h). Registered here because this estimator
+  // owns the reads: one per concurrent PUSCH thread, and the registration is idempotent.
+  register_phy_pipeline_crossing_check();
+
   // Metal compute engine (K1/K2); the CPU reference math below is the automatic fallback
   // when the engine is unavailable (init failure / stale metallib). Forcing the whole
   // estimator onto the CPU path from the outside is the expert_phy knob:
@@ -524,6 +530,9 @@ float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estima
   // difference between the two CFO estimators - and on a 4-layer capture whose estimates differ by
   // 5e-3 it made the device disagree with this reference by 1.4e-02, while agreeing to 1.3e-07 once
   // the kernel's own CFO was used. On a host-built LSE the host's estimate is the matching one.
+  if (device_ls_valid) {
+    phy_pipeline_crossings::count_host_read(); // CROSSING: device-produced, read by the fallback path.
+  }
   const std::optional<float> cfo_ref =
       device_ls_valid ? std::optional<float>(gpu_ls_cfo[cfo_slot_]) : args.cfo_hop;
 
@@ -1095,12 +1104,17 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // K0-a produced THIS hop's pilots: from here on the device may also write the engine's
         // pilot vectors out of them (glue #2, see record_device_y_stage()).
         device_ls_valid = true;
+        // One device hop, so the crossing total above can be read per hop (see phy_pipeline_crossings).
+        phy_pipeline_crossings::count_device_hop();
         // The CFO that goes with those pilots comes from the device too: the host pre-stage that
         // estimated it did not run for this hop. It is the rotation the statistics have to use with
         // the device's filtered pilots (see account_hop_cfo()), what the caller reports, and - as
         // args.cfo_hop - what the noise reformat below compensates when it reduces the variance the
         // equalizer reads. The kernel reproduces the host's estimate bit for bit (measured: both are
         // the same float on every capture tried), but the host value is not available here.
+        // CROSSING: the device produced this scalar in the extraction's command buffer; taking it
+        // back to the host is one of the legs the fused lane is supposed to remove.
+        phy_pipeline_crossings::count_host_read();
         args.cfo_hop = std::optional<float>(gpu_ls_cfo[cfo_slot_]);
         account_hop_cfo(args.cfo_hop);
         // S-7f-5w: and it computed this hop's noise variance, in the command buffer that just
@@ -1200,6 +1214,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // host turns the sum into the mean instead of reading every pilot back: the loop below is the
     // fallback for the routes without a device reduction (no device LSE, OCUDU_CE_DEV_SIGMA2=0, or a
     // metallib without the kernel), and the tolerance probe's reference.
+    phy_pipeline_crossings::count_host_read(); // CROSSING: device-produced (mmse_pilots_power's out[1]).
     pilots_power = gpu_ls_sigma2[sigma2_base_ + kPowerSum] / static_cast<float>(nof_power_pilots);
   }
   if (!(device_sigma2_valid && device_sigma2_enabled) || (std::getenv("OCUDU_CE_PP_CHECK") != nullptr)) {
@@ -1243,6 +1258,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // Classical noise variance: computed by the DEVICE inside the extraction's command buffer when
   // that path ran (S-7f-5w), by the host otherwise (OCUDU_CE_DEV_SIGMA2=0, no device LSE, or a
   // metallib without the kernels - in which case this is also the CPU-block fallback's value).
+  if (device_sigma2_valid && device_sigma2_enabled) {
+    phy_pipeline_crossings::count_host_read(); // CROSSING: device-produced (out[0]).
+  }
   float sigma2 =
       (device_sigma2_valid && device_sigma2_enabled) ? gpu_ls_sigma2[sigma2_base_ + kSigma2] : estimate_sigma2(args);
   if (std::getenv("OCUDU_CE_SIGMA2_CHECK") != nullptr) {
