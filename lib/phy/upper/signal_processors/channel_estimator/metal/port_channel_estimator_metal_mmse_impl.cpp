@@ -259,15 +259,18 @@ bool k0a_ratio_from_device_enabled()
   return value;
 }
 
-/// \brief A/B for the last host <-> device data crossing of the estimator (OCUDU_CE_HOST_SCALARS).
+/// \brief The host <-> device data crossing this estimator used to make (OCUDU_CE_HOST_SCALARS).
 ///
-/// Unset or non-zero (the default): the host reads the hop's CFO, noise variance and pilots' power sum
-/// out of the command buffer the extraction wrote, exactly as it always has.
+/// Unset or non-zero: the host reads the hop's CFO, noise variance and pilots' power sum out of the
+/// command buffer the extraction wrote, exactly as it always has. This is now the ESCAPE HATCH, kept
+/// because it is the reference the default is judged against and because it isolates a device
+/// regression to one side.
 ///
-/// Zero: it does not. Those three reads are the whole of the crossing the `gpu` pipeline mode forbids
-/// - they are what phy_pipeline_crossings counts, and on air they measured 3.00 per device hop - and
-/// the reason to believe they can go is that the device no longer needs what the host computes from
-/// them:
+/// Zero (THE DEFAULT, and what this line ships): it does not, and those three scalars are taken from
+/// the device or recomputed on the host instead. These reads were the whole of the crossing the `gpu`
+/// pipeline mode forbids - they are what phy_pipeline_crossings counts, and on air they measured 3.00
+/// per device hop against a requirement of 0. The reason they can go is that the device no longer
+/// needs what the host computes from them:
 ///
 ///   * the correlation kernel loads A's diagonal from the DEVICE's own quotient whenever
 ///     corr_stage::sigma2_dev is set (ocudu_mmse_corr.metal: `(p.sigma2_from_device != 0u) ?
@@ -276,11 +279,16 @@ bool k0a_ratio_from_device_enabled()
 ///   * the reformat reads the hop's CFO from the device since the rotating-slot change, so the host's
 ///     value only feeds statistics and the host-route kernel parameter.
 ///
-/// What is left is the possibility that some route still consumes the host's copies - the host-built
-/// correlation matrices, the matrix flavor, the CPU fallback, the merged edge block. That is what this
-/// A/B measures, and it does so without arguing: at zero the values become a fixed zero rather than an
-/// uninitialised read, so the run stays deterministic and comparing the published dumps means
-/// something. Identical dumps prove the reads are dead; any difference says which hop still needs them.
+/// What was left was the possibility that some route still consumed the host's copies. That was
+/// measured, not argued, before this default was flipped: with the device building the merged edge
+/// block too (the TAIL_DEV default), OCUDU_CE_HOST_SCALARS=0 against the reading route is
+/// _llr.bin 0 bytes and _h.bin 0 bytes over all 27 corpus captures, with the whole difference 409
+/// bytes of _ce.txt naming exactly the three scalars this flag stops reading (noise_variance and the
+/// snr derived from it move, cfo_hz becomes na, while rsrp, epre and ta_us do not). The published LLR
+/// does not move, which is what makes the skip safe rather than merely quiet.
+///
+/// \note The values become a fixed zero rather than an uninitialised read, so a run stays
+/// deterministic and comparing dumps still means something.
 /// \brief The last correlation build still on the host: the merged edge block
 /// (OCUDU_CE_TAIL_DEV).
 ///
@@ -352,7 +360,7 @@ bool host_reads_device_scalars()
 {
   static const bool value = []() {
     const char* env = std::getenv("OCUDU_CE_HOST_SCALARS");
-    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
   }();
   return value;
 }
