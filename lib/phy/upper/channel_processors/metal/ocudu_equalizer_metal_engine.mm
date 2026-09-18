@@ -10,6 +10,7 @@
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/phy/phy_pipeline_crossings.h"
 #include "ocudu/support/macos_compat.h"
 
 #include <atomic>
@@ -18,6 +19,20 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+
+namespace {
+
+/// \brief Declares this module as audited for the crossing count.
+///
+/// The equalizer's two inputs are device-fed on the lane route - ch_re_source()/ch_est_source() are
+/// incremented AT the branch points, and on air they read device=10098 host=0 and device=10098
+/// staged=0 - and its host -> device writes are the two table builders, both counted. The zero-copy
+/// fallback does not run: the shared wrap accounting reports 0 failures and 0 misaligned on air.
+struct equalizer_crossing_declaration {
+  equalizer_crossing_declaration() { ocudu::phy_pipeline_crossings::declare_reporter("equalizer"); }
+} equalizer_crossing_declaration_instance;
+
+} // namespace
 #include <vector>
 
 #ifndef OCUDU_EQUALIZER_METALLIB_PATH
@@ -294,8 +309,14 @@ static id<MTLBuffer> eq_make_h_starts(id<MTLDevice> device, const unsigned* star
   if ((device == nil) || (n_run == 0)) {
     return nil;
   }
+  // CROSSING (host -> device): a table the host builds and the device reads. Audited for batch 0 - a
+  // pure function of (geometry, buffer-pool offsets), neither of which depends on received data or
+  // changes once the flow is running, so it belongs to assembly, not to the stream. Counted here so
+  // the batch that makes it write-once can show the number going to zero.
+  const size_t bytes = static_cast<size_t>(n_run) * sizeof(unsigned);
+  phy_pipeline_crossings::count_host_write(bytes);
   id<MTLBuffer> buf = [device newBufferWithBytes:starts
-                                         length:static_cast<NSUInteger>(n_run) * sizeof(unsigned)
+                                         length:static_cast<NSUInteger>(bytes)
                                         options:MTLResourceStorageModeShared];
   return buf;
 }
@@ -700,6 +721,9 @@ static id<MTLBuffer> eq_make_gather_table(const void* data, size_t bytes)
   if ((data == nullptr) || (bytes == 0)) {
     return nil;
   }
+  // CROSSING (host -> device): same class as eq_make_h_starts above - a table the host builds from
+  // the hop's geometry and the device reads. Counted for the same reason.
+  phy_pipeline_crossings::count_host_write(bytes);
   return [metal::shared_queue::device() newBufferWithBytes:data
                                                    length:static_cast<NSUInteger>(bytes)
                                                   options:MTLResourceStorageModeShared];
