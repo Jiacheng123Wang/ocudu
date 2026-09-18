@@ -30,6 +30,14 @@
 
 using namespace ocudu;
 
+/// The lane stage the WEIGHTS command buffer is attributed to (see gpu_lane_probe::stage). The
+/// estimator's INPUT stage keeps its own tag, so the lane report can say WHICH of the two the burst
+/// spends its dependency share waiting for - "ch_est is 85% of the busy time" cannot, because both
+/// command buffers of a hop used to be counted under that one name, and only one of them is what the
+/// burst's equalization actually reads (gpu_h, gpu_ce, gpu_nv).
+static constexpr ocudu::metal::gpu_lane_probe::stage WEIGHTS_STAGE =
+    ocudu::metal::gpu_lane_probe::stage::channel_estimator_weights;
+
 namespace {
 
 // ---- Process-wide dispatch/wait statistics (S-1 audit probe A2) ---------------------------
@@ -478,7 +486,9 @@ static id<MTLComputeCommandEncoder> stage_pipeline(mmse_engine_impl*          e,
 }
 
 /// Closes a stage: commits and waits on its own command buffer, or leaves the dispatches in the burst.
-static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded)
+static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded,
+                      ocudu::metal::gpu_lane_probe::stage which =
+                          ocudu::metal::gpu_lane_probe::stage::channel_estimator)
 {
   if (s.burst) {
     if (!encoded) {
@@ -497,7 +507,7 @@ static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded)
   ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
   [s.cb commit];
   mmse_stats_commit();
-  ocudu::metal::gpu_lane_probe::register_commit(s.cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
+  ocudu::metal::gpu_lane_probe::register_commit(s.cb, which);
   // Diagnostics (ocudu_metal_lane_clock.h): the lane's first command buffer exists from here on. The
   // delta from the stage entry to this commit is the part of the lane's GPU gap the HOST owns - until
   // it exists the back end has nothing queued for this lane, however idle it is.
@@ -529,7 +539,9 @@ static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded)
 /// buffers only have their starts ordered. The signal is encoded here, immediately before the commit, so a
 /// generation the lane burst can pick up always has a command buffer on its way (see
 /// shared_queue::backend_stage_signal()).
-static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded)
+static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded,
+                            ocudu::metal::gpu_lane_probe::stage which =
+                                ocudu::metal::gpu_lane_probe::stage::channel_estimator)
 {
   if (s.burst) {
     if (!encoded) {
@@ -550,7 +562,7 @@ static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded)
   ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
   [s.cb commit];
   mmse_stats_commit();
-  ocudu::metal::gpu_lane_probe::register_commit(s.cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
+  ocudu::metal::gpu_lane_probe::register_commit(s.cb, which);
   e->pending_cb = s.cb;
   return true;
 }
@@ -1716,11 +1728,11 @@ static bool encode_run(mmse_engine_impl*     e,
 
   phase.encoded();
   if (wait_for_completion) {
-    const bool ok = end_stage(e, st, true);
+    const bool ok = end_stage(e, st, true, WEIGHTS_STAGE);
     phase.committed();
     return ok;
   }
-  const bool ok = end_stage_async(e, st, true);
+  const bool ok = end_stage_async(e, st, true, WEIGHTS_STAGE);
   phase.committed();
   return collect_async_stage(e, st, ok);
 }
@@ -2071,11 +2083,11 @@ bool encode_weights_only(mmse_engine_impl*                  e,
 
   phase.encoded();
   if (wait_for_completion) {
-    const bool ok = end_stage(e, st, true);
+    const bool ok = end_stage(e, st, true, WEIGHTS_STAGE);
     phase.committed();
     return ok;
   }
-  const bool ok = end_stage_async(e, st, true);
+  const bool ok = end_stage_async(e, st, true, WEIGHTS_STAGE);
   phase.committed();
   return collect_async_stage(e, st, ok);
 }

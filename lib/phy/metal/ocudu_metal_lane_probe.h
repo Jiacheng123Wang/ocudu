@@ -48,8 +48,16 @@ public:
   enum class stage : unsigned {
     /// Time-frequency transform (per-symbol DFTs; not registered yet, see the file comment).
     dft,
-    /// Channel estimator (weights, apply and the optional equalizer estimates).
+    /// The estimator's INPUT stage: the pilot extraction, its noise variance and the ratio.
     channel_estimator,
+    /// The estimator's WEIGHTS stage: the correlation matrices, the inversion, the weights and the
+    /// y scatter, i.e. the second of the two command buffers one deferred hop commits.
+    ///
+    /// Kept apart from \c channel_estimator on purpose: the lane's GPU gap is the burst waiting for
+    /// the estimator to finish, and the two stages are very different amounts of work, so "ch_est is
+    /// 85% of the busy time" cannot say WHICH of them the 95% dependency share is waiting for. That
+    /// question decides what to shorten next, and the answer has to come from the timeline.
+    channel_estimator_weights,
     /// Equalization and demapping, which share one command buffer per burst.
     equalizer_demapper,
     /// Anything else committed inside the lane.
@@ -91,7 +99,7 @@ public:
 class gpu_lane_probe
 {
 public:
-  enum class stage : unsigned { dft, channel_estimator, equalizer_demapper, other, count };
+  enum class stage : unsigned { dft, channel_estimator, channel_estimator_weights, equalizer_demapper, other, count };
 
   static void register_commit(id<MTLCommandBuffer>, stage) {}
   static void close_lane() {}

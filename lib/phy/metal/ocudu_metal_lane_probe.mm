@@ -141,6 +141,8 @@ const char* stage_name(gpu_lane_probe::stage which)
       return "dft";
     case gpu_lane_probe::stage::channel_estimator:
       return "ch_est";
+    case gpu_lane_probe::stage::channel_estimator_weights:
+      return "ch_wt";
     case gpu_lane_probe::stage::equalizer_demapper:
       return "eq_demap";
     case gpu_lane_probe::stage::other:
