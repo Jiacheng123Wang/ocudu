@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Jiacheng Wang
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
+#include "ocudu_metal_lane_clock.h"
 #include "ocudu_metal_lane_probe.h"
 
 #include <algorithm>
@@ -65,6 +66,26 @@ struct lane_stats_t {
   std::vector<double> residency_us;
   std::vector<double> busy_us;
   std::vector<double> gap_us;
+  /// The part of gap_us the HOST owns, measured on the host clock: "the estimator's stage ran this
+  /// long before the lane's first command buffer was committed". Until that commit exists the back
+  /// end has nothing queued for this lane, however idle it is. What remains of gap_us is the fences
+  /// the lane burst encodes (front_end_wait / backend_stage_wait) plus the command queue's ordering.
+  /// (The other host leg - how long the slot waited before the estimator's stage began - is the
+  /// [ul_channel_estimation] phase; see the note in ocudu_metal_lane_clock.h for why it is not
+  /// measured here.)
+  std::vector<double> handover_us;
+
+  /// \brief How long the lane's first command buffer waited to be STARTED by the device, after the
+  /// host had committed it: its GPUStartTime minus the GPUStartTime of the estimator command buffer
+  /// that carries this lane's work (the earliest one - the first command buffer of a lane, see
+  /// register_commit()).
+  ///
+  /// Unlike "the burst waited on the extraction's fence", this is not a restatement of the gap: the
+  /// fence delay is forced by the dependency (the burst reads what the estimator wrote, so it can
+  /// never start before it ends), while this one is the QUEUE's cost - the device getting to the
+  /// lane's work at all. A small value here says the remaining gap is the dependency itself (i.e. the
+  /// estimator's own pipeline is what to shorten); a large one says the target is submission.
+  std::vector<double> start_delay_us;
   std::vector<double> period_us;
 
   /// Busy time and command buffers per stage (index = stage).
@@ -255,6 +276,9 @@ void gpu_lane_probe::close_lane()
 
   std::vector<lane_entry> carry;
   carry.reserve(ts.pending.size());
+  // The entries this lane actually accounted for, kept so the queue diagnosis below can read the
+  // estimator command buffer's own GPU start (see its comment).
+  std::vector<lane_entry> entries_for_starts;
   for (const lane_entry& entry : ts.pending) {
     if (entry.cb.status != MTLCommandBufferStatusCompleted) {
       // Still running (or scheduled but not started): its timestamps are not final, so it belongs to
@@ -277,6 +301,7 @@ void gpu_lane_probe::close_lane()
       first_start = std::min(first_start, start);
       last_end    = std::max(last_end, end);
     }
+    entries_for_starts.push_back(entry);
     const double span = end - start;
     busy += span;
     stage_busy[idx(entry.which)] += span;
@@ -308,6 +333,32 @@ void gpu_lane_probe::close_lane()
   for (unsigned i = 0; i != static_cast<unsigned>(stage::count); ++i) {
     s.stage_busy_us[i] += stage_busy[i] * 1e6;
     s.stage_cbs[i] += stage_cbs[i];
+  }
+  // The host side of this lane's gap (see ocudu_metal_lane_clock.h). -1 means unmeasured (a route
+  // without the estimator probe), and those samples are left out instead of counted as zero.
+  if (metal::lane_clock.handover_us >= 0.0) {
+    s.handover_us.push_back(metal::lane_clock.handover_us);
+  }
+  // The queue's share of the gap: the estimator's command buffer is the lane's FIRST one (the
+  // receiving chain estimates before it demodulates, so it is committed first), and the difference
+  // between the lane's earliest GPU start and that command buffer's own start is what the device took
+  // to get onto the lane's work after the host had committed it.
+  //
+  // \note Read HERE and not at commit: a pending command buffer reports GPUStartTime 0 (the same
+  // reason gpu_lane_probe carries the command buffer objects instead of their timestamps) - capturing
+  // it at commit() recorded a zero and the series came out empty.
+  for (const lane_entry& entry : entries_for_starts) {
+    if (entry.which != stage::channel_estimator) {
+      continue;
+    }
+    const double est_start = entry.cb.GPUStartTime;
+    if (est_start > 0.0) {
+      const double delay = (est_start - first_start) * 1e6;
+      if (delay >= 0.0) {
+        s.start_delay_us.push_back(delay);
+      }
+    }
+    break;
   }
   ++s.lanes;
   s.cbs += resolved;
@@ -420,6 +471,10 @@ void gpu_lane_probe::report()
   print_series("residency", residency);
   print_series("busy", busy);
   print_series("gap", gap);
+  // The host's share of that gap (see ocudu_metal_lane_clock.h): gap = this + (the fences and the
+  // command queue). Printed next to the gap it belongs to instead of being inferred from it.
+  print_series("gap: stage entry -> extraction commit (host)", s.handover_us);
+  print_series("gap: commit -> first command buffer starts (queue)", s.start_delay_us);
   print_series("period", period);
 
   print_front_end();

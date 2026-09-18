@@ -8,6 +8,7 @@
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu_metal_lane_clock.h"
 #include "ocudu/support/math/math_utils.h"
 #include <atomic>
 #include <cstdio>
@@ -890,6 +891,10 @@ metal::ce_lane_order port_channel_estimator_metal_mmse_impl::ce_lane_order_from_
 
 void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
 {
+  // Diagnostics (see ocudu_metal_lane_clock.h): the earliest host reading of this lane. Paired with
+  // the shared "front end finished" reading and with the extraction's commit, it splits the lane's
+  // GPU gap into "the host had not handed the lane over yet" and "the burst waited on the fence".
+  metal::lane_clock.mark_stage_entry();
   // ---- S-7g-19 (fused lane), Step 1': WHOSE command buffer this hop's dispatches go into -------------
   // The order is decided per hop and handed to the engine (see ce_lane_order in the engine's header):
   // event commits the estimator's own command buffer early and lets the lane burst wait for it through the

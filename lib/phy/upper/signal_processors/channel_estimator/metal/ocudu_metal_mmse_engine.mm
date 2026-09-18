@@ -10,6 +10,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include "ocudu_metal_lane_clock.h"
 #include "ocudu_metal_lane_probe.h"
 #include "ocudu_metal_burst.h"
 #include "ocudu_metal_queue.h"
@@ -497,6 +498,10 @@ static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded)
   [s.cb commit];
   mmse_stats_commit();
   ocudu::metal::gpu_lane_probe::register_commit(s.cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
+  // Diagnostics (ocudu_metal_lane_clock.h): the lane's first command buffer exists from here on. The
+  // delta from the stage entry to this commit is the part of the lane's GPU gap the HOST owns - until
+  // it exists the back end has nothing queued for this lane, however idle it is.
+  ocudu::metal::lane_clock.mark_extraction_commit();
   [s.cb waitUntilCompleted];
   mmse_stats_wait();
 
