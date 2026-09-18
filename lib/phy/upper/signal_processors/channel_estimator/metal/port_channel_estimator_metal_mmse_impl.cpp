@@ -439,6 +439,37 @@ bool host_grid_published()
   return value;
 }
 
+/// \brief Who clears the merged tail group's pad slots in y (OCUDU_CE_DEV_Y_PADS).
+///
+/// Unset or non-zero (THE DEFAULT): the HOST does, with the exact memset the on-air legs have always
+/// run - base nof_layers * n_std_blocks * 2 * L_std, length the same. That expression covers the
+/// tail's first slot and the standard group's slots for the next layer, and the standard group is
+/// re-staged immediately after; only the tail's pad slots survive it.
+///
+/// Zero: the host clears nothing and relies on the DEVICE's pilot scatter to have zeroed the pad
+/// slots (mmse_pilots_scatter_y writes 0 for every slot b >= n_blk_real and every row
+/// k >= nof_symb * npf). Measured: byte-identical over the 27-capture corpus, both nets, and it
+/// removes one host -> device write per hop.
+///
+/// \warning That equivalence is NOT established in general, which is why this is not the default.
+///          The scatter's slot count is the descriptor's own n_blk_slots (st.n_blk) and its dispatch
+///          covers exactly that; the APPLY kernel strides the slots it reads by st.n_blk as well, but
+///          through the caller's separate n_blk argument for this group. The corpus cannot tell the
+///          two apart, so it cannot show that they agree for the merged tail - and if they do not,
+///          this option leaves the memset's region holding the previous hop's pilots.
+///
+/// It exists so the removal can be re-measured on air, where the shapes the corpus does not cover do
+/// occur - and NOT as a default, because a memory state the air legs are known to work in is not
+/// something to change on the strength of a gate that cannot see the failure mode.
+bool device_y_pads_cleared_by_host()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_DEV_Y_PADS");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 } // namespace
 
 port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
@@ -1961,24 +1992,57 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       }
       tail_L = L_e;
       // 3) The tail systems carry n_std_blocks block slots but only block 0 is real: their pad slots
-      //    must hold zeros instead of a previous hop's pilots. WHO clears them is decided inside
-      //    stage_engine_group() - the DEVICE's pilot scatter zeroes exactly those slots when it takes
-      //    the group, so the host only does it on the route where it stages y itself. The clearing
-      //    used to be unconditional here, which cost a host -> device crossing on every hop for
-      //    memory the device was about to write (see the pad_y_floats note in the header).
-      stage_engine_group(args,
-                         n_std_blocks * block_prb,
-                         1,
-                         rem_prb,
-                         npt,
-                         nout_e,
-                         L_e,
-                         nof_layers,
-                         st,
-                         matrix_on,
-                         gpu_invert,
-                         /*slots_filled=*/edge_on_device,
-                         /*pad_y_floats=*/static_cast<unsigned>(nof_layers) * n_std_blocks * 2 * L_std);
+      //    must hold zeros instead of a previous hop's pilots.
+      //
+      // CROSSING (host -> device): gpu_y is the engine's zero-copy y staging buffer, which the apply
+      // kernel reads. Clearing the tail group's pad blocks is geometry rather than matrix data, but it
+      // is still the host writing memory the GPU consumes.
+      //
+      // \note The base is nof_layers * n_std_blocks * 2 * L_std, which is one layer-vs-system stride
+      //       past the tail group's own start (sys_offset * st.n_blk * 2 * st.L with sys_offset =
+      //       nof_layers, n_blk = n_std_blocks, L = L_std). It therefore clears the tail's first slot
+      //       AND the standard group's slots for the next layer, and stage_engine_group() re-stages
+      //       the latter right after. Kept as it is on purpose: this expression is the one the on-air
+      //       legs ran with, and narrowing it is a change to a proven memory state, not a cleanup.
+      //
+      // OCUDU_CE_DEV_Y_PADS=0 experiments with removing it: the device's pilot scatter zeroes the pad
+      // slots it believes it owns, so this write may be dead. The 27-capture corpus is byte-identical
+      // either way, which is exactly why it is an experiment and not the default - the corpus does not
+      // establish that the scatter's slot count and the apply kernel's slot stride agree for the
+      // merged tail group. See the branch in stage_engine_group().
+      if (device_y_pads_cleared_by_host()) {
+        phy_pipeline_crossings::count_host_write(
+            static_cast<uint64_t>(nof_layers) * n_std_blocks * 2 * L_std * sizeof(float));
+        std::memset(gpu_y + static_cast<std::size_t>(nof_layers) * n_std_blocks * 2 * L_std,
+                    0,
+                    static_cast<std::size_t>(nof_layers) * n_std_blocks * 2 * L_std * sizeof(float));
+        stage_engine_group(args,
+                           n_std_blocks * block_prb,
+                           1,
+                           rem_prb,
+                           npt,
+                           nout_e,
+                           L_e,
+                           nof_layers,
+                           st,
+                           matrix_on,
+                           gpu_invert,
+                           /*slots_filled=*/edge_on_device);
+      } else {
+        stage_engine_group(args,
+                           n_std_blocks * block_prb,
+                           1,
+                           rem_prb,
+                           npt,
+                           nout_e,
+                           L_e,
+                           nof_layers,
+                           st,
+                           matrix_on,
+                           gpu_invert,
+                           /*slots_filled=*/edge_on_device,
+                           /*pad_y_floats=*/static_cast<unsigned>(nof_layers) * n_std_blocks * 2 * L_std);
+      }
       // 3b) OCUDU_CE_EDGE_CHECK=1: compare the edge group's slots against the host's build of the same
       //     geometry, at the LAST moment before the engine consumes them. Same hop, same inputs, one
       //     process - so a disagreement is a property of the build, not of the harness. Only meaningful
@@ -2661,10 +2725,18 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
     // byte-identical values, because OCUDU_CE_DEV_Y=0 selects it as the A/B.
     if (record_device_y_stage(args, gb_start, n_blk, b_prb, npt, L, sys_offset, st)) {
       // Glue #2 took this group's y: the device's pilot scatter writes it, and that kernel also
-      // zeroes every slot above n_blk_real and every row above nof_symb * npf - exactly this group's
-      // pad region. The caller asked for those slots to be cleared (pad_y_floats) and there is
-      // nothing left to clear: doing it here would be a host -> device crossing over memory the
-      // device is about to write, once per hop.
+      // zeroes every slot above n_blk_real and every row above nof_symb * npf. This group's pad
+      // region is therefore the device's to clear, and the host clears nothing.
+      //
+      // \warning THE CLAIM ABOVE IS NOT ESTABLISHED, and the default does not rely on it. The scatter
+      //          kernel zeroes slot b for b in [n_blk_real, n_blk_slots), where n_blk_slots is the
+      //          descriptor's field (st.n_blk) - NOT necessarily the slot count the APPLY kernel
+      //          strides over, which is also st.n_blk but derived through the caller's own n_blk
+      //          argument. If the two ever disagree for the merged tail group, the scatter leaves
+      //          exactly the region the host's memset used to clear, and nothing zeroes it. The
+      //          27-capture corpus cannot see the difference (measured: byte-identical either way),
+      //          which means it does not cover the shape where the two can differ - so "the gate
+      //          passed" is NOT evidence for this branch. See OCUDU_CE_DEV_Y_PADS below.
     } else {
       if (pad_y_floats != 0) {
         // CROSSING (host -> device): gpu_y is the engine's zero-copy y staging buffer, which the
