@@ -13,27 +13,29 @@
 
 using namespace ocudu;
 
+namespace {
+
 class gtpu_tunnel_rx_lower_dummy : public gtpu_tunnel_pdcp_rx_lower_layer_notifier
 {
+public:
   void on_new_sdu(byte_buffer tpdu, uint32_t pdcp_pdu_number) final
   {
     last_tpdu            = std::move(tpdu);
     last_pdcp_pdu_number = pdcp_pdu_number;
   }
 
-public:
   byte_buffer last_tpdu;
   uint32_t    last_pdcp_pdu_number;
 };
 class gtpu_tunnel_tx_upper_dummy : public gtpu_tunnel_common_tx_upper_layer_notifier
 {
+public:
   void on_new_pdu(byte_buffer gpdu, const ::sockaddr_storage& dest_addr) final
   {
     last_tx   = std::move(gpdu);
     last_addr = dest_addr;
   }
 
-public:
   byte_buffer      last_tx;
   sockaddr_storage last_addr = {};
 };
@@ -99,7 +101,7 @@ protected:
 };
 
 /// \brief Test correct creation of GTP-U entity.
-TEST_F(gtpu_tunnel_pdcp_test, entity_creation)
+TEST_F(gtpu_tunnel_pdcp_test, entity_creation_pdcp_sn_12bit)
 {
   null_dlt_pcap dummy_pcap;
 
@@ -107,9 +109,34 @@ TEST_F(gtpu_tunnel_pdcp_test, entity_creation)
   gtpu_tunnel_pdcp_creation_message msg = {};
   msg.cfg.rx.lif                        = gtpu_logical_interface::xnu;
   msg.cfg.rx.local_teid                 = gtpu_teid_t{0x1};
+  msg.cfg.rx.pdcp_sn_len                = pdcp_sn_size::size12bits;
   msg.cfg.tx.lif                        = gtpu_logical_interface::xnu;
   msg.cfg.tx.peer_teid                  = gtpu_teid_t{0x2};
   msg.cfg.tx.peer_addr                  = "127.0.0.1";
+  msg.cfg.tx.pdcp_sn_len                = pdcp_sn_size::size12bits;
+  msg.gtpu_pcap                         = &dummy_pcap;
+  msg.rx_lower                          = &gtpu_rx;
+  msg.tx_upper                          = &gtpu_tx;
+  msg.ue_ctrl_timer_factory             = timers;
+  gtpu                                  = create_gtpu_tunnel_pdcp(msg);
+
+  ASSERT_NE(gtpu, nullptr);
+}
+
+/// \brief Test correct creation of GTP-U entity.
+TEST_F(gtpu_tunnel_pdcp_test, entity_creation_pdcp_sn_18bit)
+{
+  null_dlt_pcap dummy_pcap;
+
+  // init GTP-U entity.
+  gtpu_tunnel_pdcp_creation_message msg = {};
+  msg.cfg.rx.lif                        = gtpu_logical_interface::xnu;
+  msg.cfg.rx.local_teid                 = gtpu_teid_t{0x1};
+  msg.cfg.rx.pdcp_sn_len                = pdcp_sn_size::size18bits;
+  msg.cfg.tx.lif                        = gtpu_logical_interface::xnu;
+  msg.cfg.tx.peer_teid                  = gtpu_teid_t{0x2};
+  msg.cfg.tx.peer_addr                  = "127.0.0.1";
+  msg.cfg.tx.pdcp_sn_len                = pdcp_sn_size::size18bits;
   msg.gtpu_pcap                         = &dummy_pcap;
   msg.rx_lower                          = &gtpu_rx;
   msg.tx_upper                          = &gtpu_tx;
@@ -120,7 +147,7 @@ TEST_F(gtpu_tunnel_pdcp_test, entity_creation)
 }
 
 /// \brief Test correct reception of GTP-U packet with PDCP PDU number.
-TEST_F(gtpu_tunnel_pdcp_test, rx)
+TEST_F(gtpu_tunnel_pdcp_test, rx_pdcp_sn_12bit)
 {
   null_dlt_pcap dummy_pcap;
 
@@ -128,9 +155,11 @@ TEST_F(gtpu_tunnel_pdcp_test, rx)
   gtpu_tunnel_pdcp_creation_message msg = {};
   msg.cfg.rx.lif                        = gtpu_logical_interface::xnu;
   msg.cfg.rx.local_teid                 = gtpu_teid_t{0x2};
+  msg.cfg.rx.pdcp_sn_len                = pdcp_sn_size::size12bits;
   msg.cfg.tx.lif                        = gtpu_logical_interface::xnu;
   msg.cfg.tx.peer_teid                  = gtpu_teid_t{0xbc1e3be9};
   msg.cfg.tx.peer_addr                  = "127.0.0.1";
+  msg.cfg.tx.pdcp_sn_len                = pdcp_sn_size::size12bits;
   msg.gtpu_pcap                         = &dummy_pcap;
   msg.rx_lower                          = &gtpu_rx;
   msg.tx_upper                          = &gtpu_tx;
@@ -150,8 +179,41 @@ TEST_F(gtpu_tunnel_pdcp_test, rx)
   ASSERT_EQ(1, gtpu_rx.last_pdcp_pdu_number);
 }
 
+/// \brief Test correct reception of GTP-U packet with PDCP PDU number.
+TEST_F(gtpu_tunnel_pdcp_test, rx_pdcp_sn_18bit)
+{
+  null_dlt_pcap dummy_pcap;
+
+  // init GTP-U entity.
+  gtpu_tunnel_pdcp_creation_message msg = {};
+  msg.cfg.rx.lif                        = gtpu_logical_interface::xnu;
+  msg.cfg.rx.local_teid                 = gtpu_teid_t{0x2};
+  msg.cfg.rx.pdcp_sn_len                = pdcp_sn_size::size18bits;
+  msg.cfg.tx.lif                        = gtpu_logical_interface::xnu;
+  msg.cfg.tx.peer_teid                  = gtpu_teid_t{0xbc1e3be9};
+  msg.cfg.tx.peer_addr                  = "127.0.0.1";
+  msg.cfg.tx.pdcp_sn_len                = pdcp_sn_size::size18bits;
+  msg.gtpu_pcap                         = &dummy_pcap;
+  msg.rx_lower                          = &gtpu_rx;
+  msg.tx_upper                          = &gtpu_tx;
+  msg.ue_ctrl_timer_factory             = timers;
+  gtpu                                  = create_gtpu_tunnel_pdcp(msg);
+
+  sockaddr_storage   orig_addr = {};
+  byte_buffer        orig_vec  = byte_buffer::create(gpdu_tpdu_1_teid_1_long_pdcp_sn_1).value();
+  byte_buffer        strip_vec = byte_buffer::create(gpdu_tpdu_1_teid_1_long_pdcp_sn_1).value();
+  gtpu_dissected_pdu dissected_pdu;
+  bool               read_ok = gtpu_dissect_pdu(dissected_pdu, strip_vec.deep_copy().value(), gtpu_rx_logger);
+  ASSERT_EQ(read_ok, true);
+
+  gtpu_tunnel_common_rx_upper_layer_interface* rx = gtpu->get_rx_upper_layer_interface();
+  rx->handle_pdu(std::move(orig_vec), orig_addr);
+  ASSERT_EQ(gtpu_extract_msg(std::move(dissected_pdu)), gtpu_rx.last_tpdu);
+  ASSERT_EQ(1, gtpu_rx.last_pdcp_pdu_number);
+}
+
 /// \brief Test correct transmission of GTP-U packet with PDCP PDU number.
-TEST_F(gtpu_tunnel_pdcp_test, tx)
+TEST_F(gtpu_tunnel_pdcp_test, tx_pdcp_sn_12bit)
 {
   null_dlt_pcap dummy_pcap;
 
@@ -159,9 +221,11 @@ TEST_F(gtpu_tunnel_pdcp_test, tx)
   gtpu_tunnel_pdcp_creation_message msg = {};
   msg.cfg.rx.lif                        = gtpu_logical_interface::xnu;
   msg.cfg.rx.local_teid                 = gtpu_teid_t{0x1};
+  msg.cfg.rx.pdcp_sn_len                = pdcp_sn_size::size12bits;
   msg.cfg.tx.lif                        = gtpu_logical_interface::xnu;
   msg.cfg.tx.peer_teid                  = gtpu_teid_t{0x2};
   msg.cfg.tx.peer_addr                  = "127.0.0.1";
+  msg.cfg.tx.pdcp_sn_len                = pdcp_sn_size::size12bits;
   msg.gtpu_pcap                         = &dummy_pcap;
   msg.rx_lower                          = &gtpu_rx;
   msg.tx_upper                          = &gtpu_tx;
@@ -175,6 +239,36 @@ TEST_F(gtpu_tunnel_pdcp_test, tx)
   tx->handle_sdu(std::move(tpdu), 1);
   ASSERT_EQ(gpdu, gtpu_tx.last_tx);
 }
+
+/// \brief Test correct transmission of GTP-U packet with PDCP PDU number.
+TEST_F(gtpu_tunnel_pdcp_test, tx_pdcp_sn_18bit)
+{
+  null_dlt_pcap dummy_pcap;
+
+  // init GTP-U entity.
+  gtpu_tunnel_pdcp_creation_message msg = {};
+  msg.cfg.rx.lif                        = gtpu_logical_interface::xnu;
+  msg.cfg.rx.local_teid                 = gtpu_teid_t{0x1};
+  msg.cfg.rx.pdcp_sn_len                = pdcp_sn_size::size18bits;
+  msg.cfg.tx.lif                        = gtpu_logical_interface::xnu;
+  msg.cfg.tx.peer_teid                  = gtpu_teid_t{0x2};
+  msg.cfg.tx.peer_addr                  = "127.0.0.1";
+  msg.cfg.tx.pdcp_sn_len                = pdcp_sn_size::size18bits;
+  msg.gtpu_pcap                         = &dummy_pcap;
+  msg.rx_lower                          = &gtpu_rx;
+  msg.tx_upper                          = &gtpu_tx;
+  msg.ue_ctrl_timer_factory             = timers;
+  gtpu                                  = create_gtpu_tunnel_pdcp(msg);
+
+  byte_buffer tpdu = byte_buffer::create(tpdu_1).value();
+  byte_buffer gpdu = byte_buffer::create(gpdu_tpdu_1_teid_1_long_pdcp_sn_1).value();
+
+  gtpu_tunnel_pdcp_tx_lower_layer_interface* tx = gtpu->get_tx_lower_layer_interface();
+  tx->handle_sdu(std::move(tpdu), 1);
+  ASSERT_EQ(gpdu, gtpu_tx.last_tx);
+}
+
+} // namespace
 
 int main(int argc, char** argv)
 {

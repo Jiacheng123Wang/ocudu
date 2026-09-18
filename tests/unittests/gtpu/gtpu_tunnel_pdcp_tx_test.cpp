@@ -12,15 +12,17 @@
 
 using namespace ocudu;
 
+namespace {
+
 class gtpu_tunnel_tx_upper_dummy : public gtpu_tunnel_common_tx_upper_layer_notifier
 {
+public:
   void on_new_pdu(byte_buffer gpdu, const ::sockaddr_storage& dest_addr) final
   {
     tx_ul_gpdus.push_back(gpdu);
     last_dest_addr = dest_addr;
   }
 
-public:
   void clear()
   {
     tx_ul_gpdus.clear();
@@ -97,6 +99,7 @@ TEST_F(gtpu_tunnel_pdcp_tx_test, entity_creation)
   tx_cfg.lif                                                 = gtpu_logical_interface::xnu;
   tx_cfg.peer_addr                                           = "127.0.0.1";
   tx_cfg.peer_teid                                           = gtpu_teid_t{0x1};
+  tx_cfg.pdcp_sn_len                                         = pdcp_sn_size::size12bits;
 
   tx = std::make_unique<gtpu_tunnel_pdcp_tx_impl>(cu_up_ue_index_t::MIN_CU_UP_UE_INDEX, tx_cfg, dummy_pcap, tx_upper);
 
@@ -111,6 +114,7 @@ TEST_F(gtpu_tunnel_pdcp_tx_test, tx_tpdus)
   tx_cfg.lif                                                 = gtpu_logical_interface::xnu;
   tx_cfg.peer_addr                                           = "127.0.0.1";
   tx_cfg.peer_teid                                           = gtpu_teid_t{0x2};
+  tx_cfg.pdcp_sn_len                                         = pdcp_sn_size::size12bits;
 
   tx = std::make_unique<gtpu_tunnel_pdcp_tx_impl>(cu_up_ue_index_t::MIN_CU_UP_UE_INDEX, tx_cfg, dummy_pcap, tx_upper);
   ASSERT_NE(tx, nullptr);
@@ -152,6 +156,7 @@ TEST_F(gtpu_tunnel_pdcp_tx_test, tx_stop)
   tx_cfg.lif                                                 = gtpu_logical_interface::xnu;
   tx_cfg.peer_addr                                           = "127.0.0.1";
   tx_cfg.peer_teid                                           = gtpu_teid_t{0x2};
+  tx_cfg.pdcp_sn_len                                         = pdcp_sn_size::size12bits;
 
   tx = std::make_unique<gtpu_tunnel_pdcp_tx_impl>(cu_up_ue_index_t::MIN_CU_UP_UE_INDEX, tx_cfg, dummy_pcap, tx_upper);
   ASSERT_NE(tx, nullptr);
@@ -186,6 +191,8 @@ TEST_F(gtpu_tunnel_pdcp_tx_test, tx_stop)
     ASSERT_TRUE(tx_upper.tx_ul_gpdus.empty());
   }
 }
+
+} // namespace
 
 int main(int argc, char** argv)
 {

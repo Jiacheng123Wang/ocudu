@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "extension_header/long_pdcp_pdu_number_packing.h"
 #include "extension_header/pdcp_pdu_number_packing.h"
 #include "gtpu_tunnel_base_rx.h"
 #include "ocudu/gtpu/gtpu_config.h"
@@ -49,6 +50,7 @@ public:
                            timer_factory                                       ue_ctrl_timer_factory_) :
     gtpu_tunnel_base_rx(gtpu_tunnel_log_prefix{cfg.lif, ue_index, cfg.local_teid, "DL"}),
     pdcp_pdu_number_packer(logger.get_basic_logger()),
+    long_pdcp_pdu_number_packer(logger.get_basic_logger()),
     lower_dn(rx_lower_),
     config(cfg),
     rx_window(logger, GTPU_RX_WINDOW_SIZE),
@@ -61,6 +63,9 @@ public:
     logger.log_info("GTP-U PDCP RX configured. {}", config);
     ocudu_assert(
         cfg.lif == gtpu_logical_interface::xnu, "GTP-U PDCP RX node not correctly initialized. lif={}", cfg.lif);
+    ocudu_assert(cfg.pdcp_sn_len == pdcp_sn_size::size12bits || cfg.pdcp_sn_len == pdcp_sn_size::size18bits,
+                 "GTP-U PDCP RX node not correctly initialized. pdcp_sn_len={}",
+                 cfg.pdcp_sn_len);
   }
   ~gtpu_tunnel_pdcp_rx_impl() override = default;
 
@@ -94,6 +99,10 @@ protected:
     for (auto ext_hdr : pdu.hdr.ext_list) {
       switch (ext_hdr.extension_header_type) {
         case gtpu_extension_header_type::pdcp_pdu_number:
+          if (config.pdcp_sn_len != pdcp_sn_size::size12bits) {
+            logger.log_warning("Ignoring 12-bit PDCP PDU number. pdcp_sn_len={}", config.pdcp_sn_len);
+            break;
+          }
           if (!have_pdcp_pdu_number) {
             have_pdcp_pdu_number = pdcp_pdu_number_packer.unpack(pdcp_pdu_number, ext_hdr.container);
             if (!have_pdcp_pdu_number) {
@@ -101,6 +110,21 @@ protected:
             }
           } else {
             logger.log_warning("Ignoring multiple PDCP PDU numbers. pdu_len={}", pdu_len);
+          }
+          break;
+        case gtpu_extension_header_type::long_pdcp_pdu_number:
+        case gtpu_extension_header_type::long_pdcp_pdu_number_legacy:
+          if (config.pdcp_sn_len != pdcp_sn_size::size18bits) {
+            logger.log_warning("Ignoring 18-bit long PDCP PDU number. pdcp_sn_len={}", config.pdcp_sn_len);
+            break;
+          }
+          if (!have_pdcp_pdu_number) {
+            have_pdcp_pdu_number = long_pdcp_pdu_number_packer.unpack(pdcp_pdu_number, ext_hdr.container);
+            if (!have_pdcp_pdu_number) {
+              logger.log_error("Failed to unpack long PDCP PDU number. pdu_len={}", pdu_len);
+            }
+          } else {
+            logger.log_warning("Ignoring multiple long PDCP PDU numbers. pdu_len={}", pdu_len);
           }
           break;
         default:
@@ -282,6 +306,7 @@ protected:
 
 private:
   gtpu::pdcp_pdu_number_packing             pdcp_pdu_number_packer;
+  gtpu::long_pdcp_pdu_number_packing        long_pdcp_pdu_number_packer;
   gtpu_tunnel_pdcp_rx_lower_layer_notifier& lower_dn;
   bool                                      stopped = false;
 

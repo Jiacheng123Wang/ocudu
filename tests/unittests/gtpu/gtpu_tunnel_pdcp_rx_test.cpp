@@ -7,14 +7,15 @@
 #include "lib/gtpu/gtpu_tunnel_pdcp_tx_impl.h"
 #include "ocudu/support/bit_encoding.h"
 #include "ocudu/support/executors/manual_task_worker.h"
-#include "ocudu/support/rate_limiting/token_bucket.h"
 #include "ocudu/support/test_utils.h"
 #include <gtest/gtest.h>
 #include <sys/socket.h>
 
 using namespace ocudu;
 
-static ocudu::log_sink_spy& test_spy = []() -> ocudu::log_sink_spy& {
+namespace {
+
+ocudu::log_sink_spy& test_spy = []() -> ocudu::log_sink_spy& {
   if (!ocudulog::install_custom_sink(
           ocudu::log_sink_spy::name(),
           std::unique_ptr<ocudu::log_sink_spy>(new ocudu::log_sink_spy(ocudulog::get_default_log_formatter())))) {
@@ -33,10 +34,10 @@ class gtpu_pdu_generator
 {
   class gtpu_tunnel_tx_upper_dummy : public gtpu_tunnel_common_tx_upper_layer_notifier
   {
+  public:
     void on_new_pdu(byte_buffer buf, const ::sockaddr_storage& dest_addr) final { parent.gen_pdu = std::move(buf); }
     gtpu_pdu_generator& parent;
 
-  public:
     gtpu_tunnel_tx_upper_dummy(gtpu_pdu_generator& parent_) : parent(parent_) {}
   };
 
@@ -47,6 +48,7 @@ public:
     cfg.lif                                                 = gtpu_logical_interface::xnu;
     cfg.peer_teid                                           = teid;
     cfg.peer_addr                                           = "127.0.0.1";
+    cfg.pdcp_sn_len                                         = pdcp_sn_size::size12bits;
 
     tx = std::make_unique<gtpu_tunnel_pdcp_tx_impl>(
         cu_up_ue_index_t::MIN_CU_UP_UE_INDEX, cfg, dummy_pcap, tx_upper_dummy);
@@ -65,10 +67,11 @@ public:
     hdr.teid                = teid;
     hdr.next_ext_hdr_type   = gtpu_extension_header_type::pdcp_pdu_number;
 
-    // Put PDCP PDU number
+    // Put PDCP PDU number.
     byte_buffer ext_buf;
     bit_encoder encoder{ext_buf};
-    encoder.pack(pdcp_pdu_number, 16); // PDCP PDU number
+    encoder.pack(0, 4);                // Spare.
+    encoder.pack(pdcp_pdu_number, 12); // PDCP PDU number.
 
     gtpu_extension_header ext;
     ext.extension_header_type = gtpu_extension_header_type::pdcp_pdu_number;
@@ -103,13 +106,13 @@ public:
 
 class gtpu_tunnel_rx_lower_dummy : public gtpu_tunnel_pdcp_rx_lower_layer_notifier
 {
+public:
   void on_new_sdu(byte_buffer tpdu, uint32_t pdcp_pdu_number) final
   {
     rx_tpdus.push_back(std::move(tpdu));
     rx_pdcp_pdu_nums.push_back(pdcp_pdu_number);
   }
 
-public:
   void clear()
   {
     rx_tpdus.clear();
@@ -171,6 +174,7 @@ protected:
     rx_cfg.lif                                                 = gtpu_logical_interface::xnu;
     rx_cfg.local_teid                                          = local_teid;
     rx_cfg.t_reordering                                        = std::chrono::milliseconds{10};
+    rx_cfg.pdcp_sn_len                                         = pdcp_sn_size::size12bits;
     rx_cfg.warn_on_drop                                        = warn_on_drop;
 
     rx = std::make_unique<gtpu_tunnel_pdcp_rx_impl>(cu_up_ue_index_t::MIN_CU_UP_UE_INDEX, rx_cfg, rx_lower, timers);
@@ -212,7 +216,7 @@ protected:
 class gtpu_tunnel_pdcp_rx_test_cfg : public gtpu_tunnel_pdcp_rx_test, public ::testing::WithParamInterface<bool>
 {
 public:
-  gtpu_tunnel_pdcp_rx_test_cfg() {}
+  gtpu_tunnel_pdcp_rx_test_cfg() = default;
 };
 
 /// Fixture class for GTP-U tunnel PDCP Rx tests (different configs, different start SN)
@@ -220,7 +224,7 @@ class gtpu_tunnel_pdcp_rx_test_cfg_sn : public gtpu_tunnel_pdcp_rx_test,
                                         public ::testing::WithParamInterface<std::tuple<bool, uint16_t>>
 {
 public:
-  gtpu_tunnel_pdcp_rx_test_cfg_sn() {}
+  gtpu_tunnel_pdcp_rx_test_cfg_sn() = default;
 };
 
 /// \brief Test correct creation of Rx entity
@@ -673,6 +677,8 @@ INSTANTIATE_TEST_SUITE_P(xnu_rx_cfg_sn,
                          ::testing::Combine(::testing::Values(false, true),
                                             ::testing::Values(0, 1, 17000, 33000, 65535)),
                          cfg_sn_test_param_info_to_string);
+
+} // namespace
 
 int main(int argc, char** argv)
 {

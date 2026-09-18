@@ -6,6 +6,7 @@
 
 #include "ocudu/ran/gtpu/gtpu_logical_interface.h"
 #include "ocudu/ran/gtpu/gtpu_teid.h"
+#include "ocudu/ran/pdcp/pdcp_sn_size.h"
 #include "ocudu/support/rate_limiting/token_bucket.h"
 #include "fmt/base.h"
 #include <chrono>
@@ -42,6 +43,7 @@ struct gtpu_tunnel_pdcp_config {
     gtpu_logical_interface    lif = gtpu_logical_interface::invalid;
     gtpu_teid_t               local_teid;
     std::chrono::milliseconds t_reordering = {};
+    pdcp_sn_size              pdcp_sn_len  = pdcp_sn_size::invalid;
     bool                      warn_on_drop = false;
   } rx;
   struct gtpu_tunnel_pdcp_tx_config {
@@ -49,6 +51,7 @@ struct gtpu_tunnel_pdcp_config {
     gtpu_teid_t            peer_teid;
     std::string            peer_addr;
     uint16_t               peer_port;
+    pdcp_sn_size           pdcp_sn_len = pdcp_sn_size::invalid;
   } tx;
 };
 
@@ -86,10 +89,11 @@ struct formatter<ocudu::gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_rx_config> {
   auto format(const ocudu::gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_rx_config& cfg, FormatContext& ctx) const
   {
     return format_to(ctx.out(),
-                     "lif={} local_teid={} t_reordering={} warn_on_drop={}",
+                     "lif={} local_teid={} t_reordering={} pdcp_sn_len={} warn_on_drop={}",
                      cfg.lif,
                      cfg.local_teid,
                      cfg.t_reordering,
+                     cfg.pdcp_sn_len,
                      cfg.warn_on_drop);
   }
 };
@@ -107,11 +111,12 @@ struct formatter<ocudu::gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_tx_config> {
   auto format(const ocudu::gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_tx_config& cfg, FormatContext& ctx) const
   {
     return format_to(ctx.out(),
-                     "lif={} peer_teid={} peer_addr={} peer_port={}",
+                     "lif={} peer_teid={} peer_addr={} peer_port={} pdcp_sn_len={}",
                      cfg.lif,
                      cfg.peer_teid,
                      cfg.peer_addr,
-                     cfg.peer_port);
+                     cfg.peer_port,
+                     cfg.pdcp_sn_len);
   }
 };
 
