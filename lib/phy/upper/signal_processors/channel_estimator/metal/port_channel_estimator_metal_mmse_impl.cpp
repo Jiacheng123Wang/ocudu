@@ -433,6 +433,10 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // are counted and reported (see phy_pipeline_crossings.h). Registered here because this estimator
   // owns the reads: one per concurrent PUSCH thread, and the registration is idempotent.
   register_phy_pipeline_crossing_check();
+  // Audited: four device -> host reads (the extracted scalars, gated by host_reads_device_scalars()),
+  // and the host -> device writes marked CROSSING below. Declaring is what makes the reported zero's
+  // SCOPE visible next to the zero.
+  phy_pipeline_crossings::declare_reporter("channel_estimator");
 
   // Metal compute engine (K1/K2); the CPU reference math below is the automatic fallback
   // when the engine is unavailable (init failure / stale metallib). Forcing the whole
@@ -600,6 +604,9 @@ unsigned port_channel_estimator_metal_mmse_impl::stage_device_noise_inputs(const
   }
   // Symbol start times: the CFO phasors of both the noise reduction and K4 read them.
   for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+    // CROSSING (host -> device): gpu_epochs is a zero-copy mapping the pilots kernel reads as
+    // `const float* epochs`, so this store is device-visible, not local.
+    phy_pipeline_crossings::count_host_write(sizeof(float));
     gpu_epochs[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
   }
   return nof_cdm_hop;
@@ -1132,7 +1139,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         }
       }
       for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
-        gpu_epochs[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
+        // CROSSING (host -> device): gpu_epochs is a zero-copy mapping the pilots kernel reads as
+    // `const float* epochs`, so this store is device-visible, not local.
+    phy_pipeline_crossings::count_host_write(sizeof(float));
+    gpu_epochs[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
       }
 
       // The raised-cosine coefficients of the FD smoothing: they depend on the hop's geometry only, so
@@ -1153,6 +1163,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // CFO must find the last one that could - which is precisely what the single buffer this
       // replaces held, and what the copy reproduces deterministically instead of implicitly.
       cfo_slot_                   = (cfo_slot_ + 1) % kCfoSlots;
+      // CROSSING: a device -> host READ and a host -> device WRITE in one statement - the
+      // carry-forward reads the previous slot of a zero-copy mapping and writes another slot of it.
+      phy_pipeline_crossings::count_host_read();
+      phy_pipeline_crossings::count_host_write(sizeof(float));
       gpu_ls_cfo[cfo_slot_]       = gpu_ls_cfo[(cfo_slot_ + kCfoSlots - 1) % kCfoSlots];
       // The sigma2 block rotates with it, and for the same reason (see kSigma2Blocks). Unlike the CFO
       // it needs no carry-forward: every slot of the block is written unconditionally when the stage
@@ -1924,6 +1938,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       tail_L = L_e;
       // 3) The tail systems carry n_std_blocks block slots but only block 0 is real: clear the
       //    group first so the pad blocks hold zeros instead of a previous hop's pilots.
+      // CROSSING (host -> device): gpu_y is the engine's zero-copy y staging buffer, which the apply
+      // kernel reads. Clearing the tail group's pad blocks is geometry rather than matrix data, but it
+      // is still the host writing memory the GPU consumes.
+      phy_pipeline_crossings::count_host_write(
+          static_cast<uint64_t>(nof_layers) * n_std_blocks * 2 * L_std * sizeof(float));
       std::memset(gpu_y + static_cast<std::size_t>(nof_layers) * n_std_blocks * 2 * L_std,
                   0,
                   static_cast<std::size_t>(nof_layers) * n_std_blocks * 2 * L_std * sizeof(float));

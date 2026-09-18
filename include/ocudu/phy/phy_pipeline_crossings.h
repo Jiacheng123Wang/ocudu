@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 
 namespace ocudu {
@@ -43,10 +44,69 @@ public:
   /// Counts one host read of data the device produced.
   static void count_host_read() { host_reads().fetch_add(1, std::memory_order_relaxed); }
 
+  /// Counts one host write of data the device will consume.
+  ///
+  /// \param[in] bytes How many bytes the host wrote, or 0 when the caller does not know. Only the
+  ///            BYTE total is optional; the COUNT is what the verdict uses, because one host store
+  ///            into a buffer the device reads is a crossing whether it moves one float or a whole
+  ///            slot. The write side is the easy one to miss: the lane's buffers are zero-copy
+  ///            mappings, so a host store into one is an ordinary assignment in the source and a
+  ///            device-visible transfer at runtime, with no memcpy to find.
+  static void count_host_write(uint64_t bytes = 0)
+  {
+    host_writes().fetch_add(1, std::memory_order_relaxed);
+    if (bytes != 0) {
+      host_write_bytes().fetch_add(bytes, std::memory_order_relaxed);
+    }
+  }
+
+  /// \brief Declares that \p module has audited its host <-> device data touches and counts them here.
+  ///
+  /// The report lists the declarers NEXT TO the number, so the scope of a zero is visible with it.
+  /// This is not decoration: the first version of this file counted the channel estimator's four read
+  /// sites and nothing else, while the message said "the fused lane (mode=gpu) allows 0" - and that
+  /// green OK was read (by its author) as "the whole lane is clean". It meant one module of four. A
+  /// check that overstates its scope is worse than no check, because it ends the search.
+  ///
+  /// A module that has NOT audited its touches must not call this.
+  static void declare_reporter(const char* module)
+  {
+    std::lock_guard<std::mutex> lock(reporters_mutex());
+    for (std::size_t i = 0; i != nof_reporters(); ++i) {
+      const char* r = reporters()[i];
+      if ((r != nullptr) && (std::strcmp(r, module) == 0)) {
+        return;
+      }
+    }
+    if (nof_reporters() < kMaxReporters) {
+      reporters()[nof_reporters()] = module;
+    }
+  }
+
+  /// Prints the declarers, comma-separated, to \p out.
+  ///
+  /// Prints rather than returning a std::string on purpose: this header is included from translation
+  /// units that sit INSIDE a namespace, where pulling in <string>/<vector>/<algorithm> makes libc++
+  /// fail with errors like "no template named 'basic_ostream'". Keep this header to
+  /// <atomic>/<cstdint>/<cstdio>/<cstring>/<mutex> and no more.
+  static void print_reporters(std::FILE* out)
+  {
+    std::lock_guard<std::mutex> lock(reporters_mutex());
+    if (nof_reporters() == 0) {
+      std::fprintf(out, "<none>");
+      return;
+    }
+    for (std::size_t i = 0; i != nof_reporters(); ++i) {
+      std::fprintf(out, "%s%s", (i == 0) ? "" : ", ", reporters()[i]);
+    }
+  }
+
   /// Counts one hop that consumed device output, so a total can be read as "per hop".
   static void count_device_hop() { device_hops().fetch_add(1, std::memory_order_relaxed); }
 
   static uint64_t get_host_reads() { return host_reads().load(std::memory_order_relaxed); }
+  static uint64_t get_host_writes() { return host_writes().load(std::memory_order_relaxed); }
+  static uint64_t get_host_write_bytes() { return host_write_bytes().load(std::memory_order_relaxed); }
   static uint64_t get_device_hops() { return device_hops().load(std::memory_order_relaxed); }
 
 private:
@@ -61,6 +121,39 @@ private:
   {
     static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
     return *n;
+  }
+  static std::atomic<uint64_t>& host_writes()
+  {
+    static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
+    return *n;
+  }
+  static std::atomic<uint64_t>& host_write_bytes()
+  {
+    static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
+    return *n;
+  }
+  // Heap-allocated for the same reason as the counters (the report runs from an atexit handler), and
+  // behind a mutex because modules declare from different threads.
+  static constexpr std::size_t kMaxReporters = 8;
+  static const char**          reporters()
+  {
+    static const char** v = new const char*[kMaxReporters]();
+    return v;
+  }
+  /// Declares fill from 0 without holes, so scanning for the first null is exact and needs no second
+  /// counter to keep in step.
+  static std::size_t nof_reporters()
+  {
+    std::size_t n = 0;
+    while ((n != kMaxReporters) && (reporters()[n] != nullptr)) {
+      ++n;
+    }
+    return n;
+  }
+  static std::mutex& reporters_mutex()
+  {
+    static std::mutex* m = new std::mutex();
+    return *m;
   }
 };
 
@@ -78,23 +171,38 @@ inline void register_phy_pipeline_crossing_check()
   std::call_once(once, []() {
     register_phy_pipeline_check(
         {"host device data crossings", []() -> std::optional<bool> {
-           const uint64_t           reads = phy_pipeline_crossings::get_host_reads();
-           const uint64_t           hops  = phy_pipeline_crossings::get_device_hops();
-           const phy_pipeline_mode  mode  = phy_pipeline_mode_registry::get();
+           const uint64_t          reads  = phy_pipeline_crossings::get_host_reads();
+           const uint64_t          writes = phy_pipeline_crossings::get_host_writes();
+           const uint64_t          bytes  = phy_pipeline_crossings::get_host_write_bytes();
+           const uint64_t          hops   = phy_pipeline_crossings::get_device_hops();
+           const phy_pipeline_mode mode   = phy_pipeline_mode_registry::get();
+           const auto              per_hop = [hops](uint64_t n) {
+             return (hops != 0) ? (static_cast<double>(n) / static_cast<double>(hops)) : 0.0;
+           };
            std::fprintf(stderr,
-                        "%llu host read(s) of device-produced data over %llu device hop(s) = %.2f per hop; "
-                        "the fused lane (mode=gpu) allows 0 (its two crossings are the IQ upload and the "
-                        "LLR download, which this does not count)",
+                        "%llu host read(s) and %llu host write(s) (%llu bytes) of device data over %llu "
+                        "device hop(s) = %.2f read(s) + %.2f write(s) per hop; the fused lane (mode=gpu) "
+                        "allows 0 of each (its two crossings are the IQ upload and the LLR download, "
+                        "which this counts neither of)",
                         static_cast<unsigned long long>(reads),
+                        static_cast<unsigned long long>(writes),
+                        static_cast<unsigned long long>(bytes),
                         static_cast<unsigned long long>(hops),
-                        (hops != 0) ? (static_cast<double>(reads) / static_cast<double>(hops)) : 0.0);
+                        per_hop(reads),
+                        per_hop(writes));
+           // The SCOPE of the number, printed with the number. Whoever reads a 0 here has to be able
+           // to see how much of the lane it covers - see declare_reporter().
+           std::fprintf(stderr,
+                        "  counted by the module(s) that audited their host <-> device data touches: ");
+           phy_pipeline_crossings::print_reporters(stderr);
+           std::fprintf(stderr, " (a module NOT listed here is not covered by this number)\n");
            if (!phy_pipeline_mode_registry::is_published() || (hops == 0)) {
              return std::optional<bool>{};
            }
            if (mode != phy_pipeline_mode::gpu) {
              return std::optional<bool>{};
            }
-           return std::optional<bool>(reads == 0);
+           return std::optional<bool>((reads == 0) && (writes == 0));
          }});
   });
 }

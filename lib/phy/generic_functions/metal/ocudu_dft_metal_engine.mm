@@ -11,6 +11,7 @@
 
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/phy_pipeline_contract.h"
+#include "ocudu/phy/phy_pipeline_crossings.h"
 
 #include "ocudu/support/macos_compat.h"
 
@@ -123,6 +124,11 @@ static void dft_stats_report()
 /// int16 samples instead of a host-staged copy (S-7f-6f).
 static void register_dft_contract_check()
 {
+  // Audited: takes its transform input from the radio's buffer by zero-copy mapping when it can,
+  // stages a copy (counted below as a host -> device write) when it cannot, and never reads device
+  // data back.
+  phy_pipeline_crossings::declare_reporter("dft");
+
   register_phy_pipeline_check(
       {"dft radio inputs", []() -> std::optional<bool> {
          const dft_stats_t& s = dft_stats();
@@ -401,6 +407,9 @@ id<MTLBuffer> wrap_buffer(dft_engine_impl* engine, const void* ptr, size_t lengt
   size_t mapped = aligned;
   if (buf == nil) {
     dft_stats_wrap_copy();
+    // The same event in the lane-wide counter. The local one stays because the "dft radio inputs"
+    // check is stated in terms of it.
+    phy_pipeline_crossings::count_host_write(length);
     buf = [dft_resources().device newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
     // The COPY holds `length` bytes, not the page-rounded length: recording `aligned` here would let a
     // later, larger request (<= aligned) hit this cache entry and bind a buffer shorter than it reads -
