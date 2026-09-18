@@ -172,9 +172,25 @@ kernel void mmse_pilots_cfo(device const float*          lse    [[buffer(0)]],
                             device const float*          epochs [[buffer(1)]], // symbol start times
                             device float*                out    [[buffer(2)]], // [1]: the CFO
                             constant mmse_pilots_params& p      [[buffer(3)]],
+                            device const float*          prev   [[buffer(4)]], // previous hop's slot
                             uint                         tid    [[thread_position_in_threadgroup]])
 {
-    if ((p.nof_dmrs_symb < 2) || (tid != 0)) {
+    if (tid != 0) {
+        return;
+    }
+    // A hop the estimator cannot fit - fewer than two DM-RS symbols, so there is no phase ramp to
+    // measure - still has to leave a value behind: its slot is what a later consumer reads, and that
+    // consumer must find the last value that WAS estimated. The host used to guarantee this by
+    // copying the previous slot into this one before every submission: a read and a write per hop
+    // through a host mapping, paid on every hop because it had to happen before this command buffer
+    // was even encoded. Doing the copy here keeps the same invariant on the side that owns the data.
+    //
+    // \note The carry is written UNCONDITIONALLY in this branch, including when there is no previous
+    //       slot to read. "Write what I have, which may be nothing" is the invariant; leaving the
+    //       destination untouched would silently depend on what the slot held before, and the slots
+    //       rotate.
+    if (p.nof_dmrs_symb < 2) {
+        out[0] = (prev != nullptr) ? prev[0] : 0.0F;
         return;
     }
     const uint  nof_groups = (p.nof_layers + 1u) / 2u;

@@ -279,6 +279,21 @@ public:
     float* lse = nullptr;
     /// Destination of the estimated CFO (a single float).
     float* cfo = nullptr;
+    /// \brief The PREVIOUS hop's CFO slot, read by the kernel to carry a value forward (a single
+    /// float), or nullptr when the caller carries it on the host instead.
+    ///
+    /// \c mmse_pilots_cfo can only estimate a CFO from TWO DM-RS symbols, so a hop with one of them
+    /// has nothing to write - and a consumer of this slot must still find the last value that WAS
+    /// estimated. The host used to reproduce that by copying the previous slot into this one before
+    /// submitting, which cost a device -> host read and a host -> device write on EVERY hop (the
+    /// copy ran whether or not the kernel was going to overwrite it, because it has to happen before
+    /// the extraction is submitted).
+    ///
+    /// Handing the previous slot to the kernel lets IT keep the invariant "every slot holds the most
+    /// recently written value" - it writes the carry when it has nothing to estimate - so the host
+    /// no longer touches the array at all. It is the same one-line copy, done on the side that
+    /// already owns the data.
+    const float* cfo_prev = nullptr;
     /// Received DM-RS of the hop, [symbol][cdm][pilot] real/imag interleaved - the same array the
     /// equalizer's noise reduction (K4) reads. The noise variance below needs it.
     const float* rx_pilots = nullptr;

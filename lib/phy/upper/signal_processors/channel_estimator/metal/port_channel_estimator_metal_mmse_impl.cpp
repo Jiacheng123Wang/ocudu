@@ -439,6 +439,34 @@ bool host_grid_published()
   return value;
 }
 
+/// \brief Who carries the CFO forward on a hop that cannot estimate one (OCUDU_CE_CFO_CARRY_HOST).
+///
+/// The kernel estimates the hop's CFO from the phase ramp between TWO DM-RS symbols, so a hop with
+/// one of them has nothing to write - and the invariant every consumer of the rotating slot array
+/// depends on is "every slot holds the most recently written value".
+///
+/// Unset or zero (THE DEFAULT): the DEVICE keeps the invariant. The kernel is handed the previous
+/// slot (pilots_stage::cfo_prev) and writes the carry itself when it has nothing to estimate, so the
+/// host never touches gpu_ls_cfo.
+///
+/// Non-zero: the HOST keeps it, by copying the previous slot into this hop's slot before submitting
+/// the extraction. That is a device -> host read and a host -> device write in one statement, paid on
+/// every hop - the A/B arm, and what every leg before this ran.
+///
+/// \note Both arms must produce the same published output, and the offline corpus can say so (27
+///       captures) - but it CANNOT say whether the device's copy is correct on air, because the copy
+///       only does anything on a hop with a single DM-RS symbol and the corpus has none of those
+///       (all 27 carry dmrs_symbols=2,7,11). That is the same shape of gap that made the y-pad gate
+///       blind, so the on-air A/B is the measurement here, not the corpus.
+bool host_carries_cfo_forward()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_CFO_CARRY_HOST");
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 /// \brief Whether the HOST still clears the merged tail group's pad slots in y (OCUDU_CE_HOST_Y_PADS).
 ///
 /// Unset or zero (THE DEFAULT): it does NOT. The device's pilot scatter (glue #2) owns those slots -
@@ -1211,17 +1239,28 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 
       // ---- This hop's CFO slot (see kCfoSlots in the header) --------------------------------------
       //
-      // Advance the rotation and carry the previous slot's value forward, BOTH on the host and BOTH
-      // before the extraction is submitted: the kernel writes this slot only when the hop has two or
-      // more DM-RS symbols (mmse_pilots_cfo returns early otherwise), so a hop that cannot estimate a
-      // CFO must find the last one that could - which is precisely what the single buffer this
-      // replaces held, and what the copy reproduces deterministically instead of implicitly.
-      cfo_slot_                   = (cfo_slot_ + 1) % kCfoSlots;
-      // CROSSING: a device -> host READ and a host -> device WRITE in one statement - the
-      // carry-forward reads the previous slot of a zero-copy mapping and writes another slot of it.
-      phy_pipeline_crossings::count_host_read();
-      phy_pipeline_crossings::count_host_write(sizeof(float));
-      gpu_ls_cfo[cfo_slot_]       = gpu_ls_cfo[(cfo_slot_ + kCfoSlots - 1) % kCfoSlots];
+      // Advance the rotation. The invariant the consumers depend on is "every slot holds the most
+      // recently written value": the kernel cannot estimate a CFO from fewer than two DM-RS symbols,
+      // so a hop with one of them has nothing to write, and the next consumer of its slot must still
+      // find the last value that WAS estimated.
+      //
+      // WHO keeps that invariant is what this decides (OCUDU_CE_CFO_CARRY_HOST):
+      //   * the DEVICE (the default): the kernel is handed the previous slot (pilots_stage::cfo_prev)
+      //     and writes the carry itself when it has nothing to estimate. The host never touches the
+      //     array, so there is no crossing at all;
+      //   * the HOST (the A/B arm, and what every leg before this ran): copy the previous slot into
+      //     this one before the extraction is submitted. That is a device -> host read and a host ->
+      //     device write in one statement, paid on EVERY hop because it has to happen before the
+      //     command buffer is even encoded - whether or not the kernel was going to overwrite it.
+      cfo_slot_ = (cfo_slot_ + 1) % kCfoSlots;
+      const unsigned cfo_prev_slot = (cfo_slot_ + kCfoSlots - 1) % kCfoSlots;
+      if (host_carries_cfo_forward()) {
+        // CROSSING: the carry-forward reads the previous slot of a zero-copy mapping and writes
+        // another slot of it.
+        phy_pipeline_crossings::count_host_read();
+        phy_pipeline_crossings::count_host_write(sizeof(float));
+        gpu_ls_cfo[cfo_slot_] = gpu_ls_cfo[cfo_prev_slot];
+      }
       // The sigma2 block rotates with it, and for the same reason (see kSigma2Blocks). Unlike the CFO
       // it needs no carry-forward: every slot of the block is written unconditionally when the stage
       // runs at all, and when it does not the caller is told (pilots_stage::sigma2_done) and reads
@@ -1245,6 +1284,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       st.epochs            = gpu_epochs;
       st.lse               = gpu_ls_out;
       st.cfo               = &gpu_ls_cfo[cfo_slot_];
+      // The kernel carries the previous value forward when it has nothing to estimate; only
+      // on the device route, since the host route above has already written this slot.
+      st.cfo_prev          = host_carries_cfo_forward() ? nullptr : &gpu_ls_cfo[cfo_prev_slot];
       // S-7f-5w: the noise variance of this hop, computed in this same command buffer when the host
       // is not the one computing it (OCUDU_CE_DEV_SIGMA2=0).
       st.rx_pilots         = gpu_rx_pilots;

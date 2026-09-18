@@ -1125,6 +1125,11 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   [enc setBuffer:ep_buf offset:0 atIndex:1];
   [enc setBuffer:cfo_buf offset:0 atIndex:2];
   [enc setBytes:&p length:sizeof(p) atIndex:3];
+  // The previous hop's CFO slot, so the kernel carries a value forward itself when this hop has
+  // nothing to estimate (see pilots_stage::cfo_prev). Null means the caller still carries it on the
+  // host, which the kernel then reproduces by writing 0 - see the branch's note.
+  id<MTLBuffer> cfo_prev_buf = (s.cfo_prev != nullptr) ? e->wrap(s.cfo_prev, sizeof(float)) : nil;
+  [enc setBuffer:cfo_prev_buf offset:0 atIndex:4];
   [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
   [enc setComputePipelineState:e->pilots_apply_pipe];
