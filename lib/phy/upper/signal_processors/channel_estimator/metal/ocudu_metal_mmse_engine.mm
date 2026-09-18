@@ -441,7 +441,8 @@ struct stage_encoder {
 /// those pass fuse = false.
 static stage_encoder begin_stage(mmse_engine_impl*          e,
                                  id<MTLComputePipelineState> first_pipeline,
-                                 bool                        fuse)
+                                 bool                        fuse,
+                                 bool                        wait_for_extraction = false)
 {
   stage_encoder s;
   if (fuse) {
@@ -459,6 +460,27 @@ static stage_encoder begin_stage(mmse_engine_impl*          e,
   // encoder opens (command-buffer level API) and targets the newest COMMITTED front-end generation, so
   // it can never wait for a signal that is not already on its way - see shared_queue::front_end_wait().
   ocudu::metal::shared_queue::front_end_wait(s.cb);
+  // Extraction fence (S-7g-22, Step 2): this stage reads what the EXTRACTION's command buffer wrote -
+  // the correlation reads the least-squares pilots and the noise variance, the reformat reads the CFO -
+  // and the two are separate command buffers of one queue, whose STARTS alone are ordered (see
+  // ocudu_metal_burst.mm). The extraction signals this event at its commit. Waiting on the newest
+  // generation can only wait for MORE than this stage needs, never less, so a concurrent lane that
+  // signals in between makes the wait conservative rather than wrong.
+  //
+  // \note Encoded even while the host still waits for the extraction before encoding this stage, which
+  // is what makes the wait itself removable later: with the host waiting, the generation is already
+  // satisfied when this is committed and the fence changes nothing observable - the two are judged
+  // together by the capture nets, which stay byte-identical either way.
+  //
+  // \note Only in \c event order, which is the only order that uses this fence (end_stage() signals it
+  // under the same condition, and the other two orders do not need it: \c burst puts the dispatches in
+  // the command buffer the lane commits, \c host_wait waits on the host). It follows that no OFFLINE
+  // gate covers this: a non-deferred hop is forced to host_wait by the adapter
+  // (set_lane_order(args.deferred ? order : host_wait)), and the replay's hops are not deferred. The
+  // air leg is the only judge - the counters to read are "[metal_stats] lane fence signals/waits".
+  if (wait_for_extraction && (e->lane_order == metal::ce_lane_order::event)) {
+    ocudu::metal::shared_queue::backend_stage_wait(s.cb);
+  }
   s.enc = [s.cb computeCommandEncoder];
   return s;
 }
@@ -488,7 +510,8 @@ static id<MTLComputeCommandEncoder> stage_pipeline(mmse_engine_impl*          e,
 /// Closes a stage: commits and waits on its own command buffer, or leaves the dispatches in the burst.
 static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded,
                       ocudu::metal::gpu_lane_probe::stage which =
-                          ocudu::metal::gpu_lane_probe::stage::channel_estimator)
+                          ocudu::metal::gpu_lane_probe::stage::channel_estimator,
+                      bool signal_extraction_fence = false)
 {
   if (s.burst) {
     if (!encoded) {
@@ -502,6 +525,14 @@ static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded,
   [s.enc endEncoding];
   if (!encoded) {
     return false;
+  }
+  // Extraction fence (S-7g-22): the extraction signals its own completion so the WEIGHTS command
+  // buffer can encode a wait on it - which is what will let the host commit the weights WITHOUT
+  // waiting first. Encoded here, immediately before the commit, for the same reason as the lane
+  // burst's signal in end_stage_async(): a generation a waiting stage picks up always has a command
+  // buffer on its way. Only in \c event order; the other two do not use this fence.
+  if (signal_extraction_fence && (e->lane_order == metal::ce_lane_order::event)) {
+    (void)ocudu::metal::shared_queue::backend_stage_signal(s.cb);
   }
   // The GPU-time probe must be armed before commit (Metal asserts otherwise).
   ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
@@ -1164,8 +1195,11 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     }
   }
 
-
-  return end_stage(e, st, true);
+  // The extraction is the producer the whole rest of the hop is ordered behind, and it is the one
+  // stage whose command buffer the host may later stop waiting for (Step 2): it signals the
+  // extraction fence here so the weights command buffer can wait on it instead.
+  return end_stage(e, st, true, ocudu::metal::gpu_lane_probe::stage::channel_estimator,
+                   /*signal_extraction_fence=*/true);
 }
 
 /// Must match mmse_corr_params in ocudu_mmse_corr.metal.
@@ -1657,7 +1691,9 @@ static bool encode_run(mmse_engine_impl*     e,
   if ((nof_scatter != 0) && (e->pilots_scatter_pipe != nil)) {
     first_pipe = e->pilots_scatter_pipe;
   }
-  stage_encoder st = begin_stage(e, first_pipe, /*fuse=*/(e->lane_order == ce_lane_order::burst) && !wait_for_completion);
+  stage_encoder st = begin_stage(e, first_pipe,
+                                 /*fuse=*/(e->lane_order == ce_lane_order::burst) && !wait_for_completion,
+                                 /*wait_for_extraction=*/true);
   id<MTLComputeCommandEncoder> enc = st.enc;
   phase.created();
   if (enc == nil) {
@@ -2019,7 +2055,7 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   if ((nof_scatter != 0) && (e->pilots_scatter_pipe != nil)) {
     first_pipe = e->pilots_scatter_pipe;
   }
-  stage_encoder                st  = begin_stage(e, first_pipe, burst_ok);
+  stage_encoder                st  = begin_stage(e, first_pipe, burst_ok, /*wait_for_extraction=*/true);
   id<MTLComputeCommandEncoder> enc = st.enc;
   phase.created();
   if (enc == nil) {
