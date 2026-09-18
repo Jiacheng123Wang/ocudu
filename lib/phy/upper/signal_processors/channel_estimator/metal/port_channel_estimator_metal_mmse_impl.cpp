@@ -246,6 +246,37 @@ bool k0a_ratio_from_device_enabled()
   return value;
 }
 
+/// \brief A/B for the last host <-> device data crossing of the estimator (OCUDU_CE_HOST_SCALARS).
+///
+/// Unset or non-zero (the default): the host reads the hop's CFO, noise variance and pilots' power sum
+/// out of the command buffer the extraction wrote, exactly as it always has.
+///
+/// Zero: it does not. Those three reads are the whole of the crossing the `gpu` pipeline mode forbids
+/// - they are what phy_pipeline_crossings counts, and on air they measured 3.00 per device hop - and
+/// the reason to believe they can go is that the device no longer needs what the host computes from
+/// them:
+///
+///   * the correlation kernel loads A's diagonal from the DEVICE's own quotient whenever
+///     corr_stage::sigma2_dev is set (ocudu_mmse_corr.metal: `(p.sigma2_from_device != 0u) ?
+///     scalars[p.sigma2_slot] : p.sigma2`), and OCUDU_CE_K0A_RATIO_DEV is on by default, so the
+///     host's sigma2 never reaches the kernel on that route;
+///   * the reformat reads the hop's CFO from the device since the rotating-slot change, so the host's
+///     value only feeds statistics and the host-route kernel parameter.
+///
+/// What is left is the possibility that some route still consumes the host's copies - the host-built
+/// correlation matrices, the matrix flavor, the CPU fallback, the merged edge block. That is what this
+/// A/B measures, and it does so without arguing: at zero the values become a fixed zero rather than an
+/// uninitialised read, so the run stays deterministic and comparing the published dumps means
+/// something. Identical dumps prove the reads are dead; any difference says which hop still needs them.
+bool host_reads_device_scalars()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_HOST_SCALARS");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 /// \brief Slots of the estimator's sigma2 buffer (gpu_ls_sigma2), all written by the extraction's own
 /// command buffer: the noise variance, the pilots' power sum, their ratio and the mean the ratio is
 /// derived from (see mmse_pilots_power).
@@ -530,11 +561,12 @@ float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estima
   // difference between the two CFO estimators - and on a 4-layer capture whose estimates differ by
   // 5e-3 it made the device disagree with this reference by 1.4e-02, while agreeing to 1.3e-07 once
   // the kernel's own CFO was used. On a host-built LSE the host's estimate is the matching one.
-  if (device_ls_valid) {
+  if (device_ls_valid && host_reads_device_scalars()) {
     phy_pipeline_crossings::count_host_read(); // CROSSING: device-produced, read by the fallback path.
   }
-  const std::optional<float> cfo_ref =
-      device_ls_valid ? std::optional<float>(gpu_ls_cfo[cfo_slot_]) : args.cfo_hop;
+  const std::optional<float> cfo_ref = (device_ls_valid && host_reads_device_scalars())
+                                           ? std::optional<float>(gpu_ls_cfo[cfo_slot_])
+                                           : args.cfo_hop;
 
   // Noise variance from the existing classical estimator, averaged over the CDM layer pairs.
   float    sigma2  = 0.0F;
@@ -1113,9 +1145,15 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // equalizer reads. The kernel reproduces the host's estimate bit for bit (measured: both are
         // the same float on every capture tried), but the host value is not available here.
         // CROSSING: the device produced this scalar in the extraction's command buffer; taking it
-        // back to the host is one of the legs the fused lane is supposed to remove.
-        phy_pipeline_crossings::count_host_read();
-        args.cfo_hop = std::optional<float>(gpu_ls_cfo[cfo_slot_]);
+        // back to the host is one of the legs the fused lane is supposed to remove. The A/B
+        // (OCUDU_CE_HOST_SCALARS=0) reports it as "not measured" instead of reading it, which is what
+        // the mode's own accounting would do - see host_reads_device_scalars().
+        if (host_reads_device_scalars()) {
+          phy_pipeline_crossings::count_host_read();
+          args.cfo_hop = std::optional<float>(gpu_ls_cfo[cfo_slot_]);
+        } else {
+          args.cfo_hop = std::nullopt;
+        }
         account_hop_cfo(args.cfo_hop);
         // S-7f-5w: and it computed this hop's noise variance, in the command buffer that just
         // completed - so the scalar is valid now, with no extra synchronisation. NOT "sigma2 != nullptr":
@@ -1214,8 +1252,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // host turns the sum into the mean instead of reading every pilot back: the loop below is the
     // fallback for the routes without a device reduction (no device LSE, OCUDU_CE_DEV_SIGMA2=0, or a
     // metallib without the kernel), and the tolerance probe's reference.
-    phy_pipeline_crossings::count_host_read(); // CROSSING: device-produced (mmse_pilots_power's out[1]).
-    pilots_power = gpu_ls_sigma2[sigma2_base_ + kPowerSum] / static_cast<float>(nof_power_pilots);
+    if (host_reads_device_scalars()) {
+      phy_pipeline_crossings::count_host_read(); // CROSSING: device-produced (mmse_pilots_power's out[1]).
+      pilots_power = gpu_ls_sigma2[sigma2_base_ + kPowerSum] / static_cast<float>(nof_power_pilots);
+    }
   }
   if (!(device_sigma2_valid && device_sigma2_enabled) || (std::getenv("OCUDU_CE_PP_CHECK") != nullptr)) {
     float host_pilots_power = 0.0F;
@@ -1258,11 +1298,15 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // Classical noise variance: computed by the DEVICE inside the extraction's command buffer when
   // that path ran (S-7f-5w), by the host otherwise (OCUDU_CE_DEV_SIGMA2=0, no device LSE, or a
   // metallib without the kernels - in which case this is also the CPU-block fallback's value).
-  if (device_sigma2_valid && device_sigma2_enabled) {
+  // A/B (OCUDU_CE_HOST_SCALARS=0): a fixed zero, NOT an uninitialised read - the run has to stay
+  // deterministic or the dump comparison stops meaning anything.
+  const bool take_device_sigma2 = device_sigma2_valid && device_sigma2_enabled && host_reads_device_scalars();
+  if (take_device_sigma2) {
     phy_pipeline_crossings::count_host_read(); // CROSSING: device-produced (out[0]).
   }
-  float sigma2 =
-      (device_sigma2_valid && device_sigma2_enabled) ? gpu_ls_sigma2[sigma2_base_ + kSigma2] : estimate_sigma2(args);
+  float sigma2 = take_device_sigma2 ? gpu_ls_sigma2[sigma2_base_ + kSigma2]
+                 : (device_sigma2_valid && device_sigma2_enabled) ? 0.0F
+                                                                  : estimate_sigma2(args);
   if (std::getenv("OCUDU_CE_SIGMA2_CHECK") != nullptr) {
     // Tolerance probe: sigma2 enters A's diagonal with a weight of ~1e-3, so the two are expected to
     // differ in the last bits, not in kind (see ocudu_mmse_pilots.metal).
