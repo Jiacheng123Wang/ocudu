@@ -41,6 +41,18 @@ public:
                       .max_consecutive_ul_kos  = mac_cfg_it->max_consecutive_ul_kos,
                       .max_consecutive_csi_dtx = mac_cfg_it->max_consecutive_csi_dtx};
     }
+    // Say what was ACTUALLY configured, once, at startup. These three numbers decide when the MAC
+    // releases a UE, so a leg that means to test them has to be able to read them back from its own
+    // log: without this, asking for --cell_cfg.pucch.max_consecutive_kos=300 and getting 100 looks
+    // exactly like "the setting had no effect" (measured - the leg ran with the default because the
+    // argument never reached argv, and its log said "Cause: 100 consecutive undecoded CSIs").
+    for (size_t i = 0; i != max_consecutive_kos.size(); ++i) {
+      logger.info("cell={}: RLF thresholds (consecutive KOs) dl={} ul={} csi_dtx={}",
+                  i,
+                  max_consecutive_kos[i].max_consecutive_dl_kos,
+                  max_consecutive_kos[i].max_consecutive_ul_kos,
+                  max_consecutive_kos[i].max_consecutive_csi_dtx);
+    }
   }
 
   void add_ue(du_ue_index_t ue_index, mac_ue_radio_link_notifier& notifier)
