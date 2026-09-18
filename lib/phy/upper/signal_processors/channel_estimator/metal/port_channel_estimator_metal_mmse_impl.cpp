@@ -603,12 +603,7 @@ unsigned port_channel_estimator_metal_mmse_impl::stage_device_noise_inputs(const
     }
   }
   // Symbol start times: the CFO phasors of both the noise reduction and K4 read them.
-  for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
-    // CROSSING (host -> device): gpu_epochs is a zero-copy mapping the pilots kernel reads as
-    // `const float* epochs`, so this store is device-visible, not local.
-    phy_pipeline_crossings::count_host_write(sizeof(float));
-    gpu_epochs[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
-  }
+  upload_symbol_start_epochs(args);
   return nof_cdm_hop;
 }
 
@@ -1138,12 +1133,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           }
         }
       }
-      for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
-        // CROSSING (host -> device): gpu_epochs is a zero-copy mapping the pilots kernel reads as
-    // `const float* epochs`, so this store is device-visible, not local.
-    phy_pipeline_crossings::count_host_write(sizeof(float));
-    gpu_epochs[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
-      }
+      upload_symbol_start_epochs(args);
 
       // The raised-cosine coefficients of the FD smoothing: they depend on the hop's geometry only, so
       // the host hands them over (with how many virtual pilots the edges take, including
@@ -2902,6 +2892,29 @@ void port_channel_estimator_metal_mmse_impl::materialize_host_grid() const
     unpack_engine_group(
         u.gb_start, u.n_blk, u.b_prb, u.nout, u.nof_layers, u.sys_offset, u.st, /*all_symbols=*/true);
   }
+}
+
+void port_channel_estimator_metal_mmse_impl::upload_symbol_start_epochs(
+    const fd_td_estimation_stage_args& args)
+{
+  // The hop's 14 symbol start times, into the zero-copy array the pilots kernel and K4 read as
+  // `const float* epochs`. They are a function of (CP, SCS) alone, so after the first hop of a cell
+  // this is a comparison and nothing else - and a comparison reads host memory, touches no device
+  // buffer and waits on no GPU, so it is not a crossing and is deliberately not counted.
+  std::array<float, MAX_NSYMB_PER_SLOT> want{};
+  for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+    want[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
+  }
+  if (epochs_uploaded_valid && (want == epochs_uploaded)) {
+    return; // nothing is written, so nothing is counted
+  }
+  // CROSSING (host -> device): gpu_epochs is a zero-copy mapping the device reads.
+  phy_pipeline_crossings::count_host_write(MAX_NSYMB_PER_SLOT * sizeof(float));
+  for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+    gpu_epochs[sym] = want[sym];
+  }
+  epochs_uploaded       = want;
+  epochs_uploaded_valid = true;
 }
 
 bool port_channel_estimator_metal_mmse_impl::check_edge_slots(

@@ -451,6 +451,12 @@ private:
   ///            to the STANDARD geometry and exceed the edge block's own L_e / nout_e - which is the
   ///            whole point of the check, so they are passed in rather than derived.
   /// \return True when every element of every edge slot is bit-identical.
+  /// \brief Uploads the hop's symbol start times into gpu_epochs, once per distinct set.
+  ///
+  /// A function of (CP, SCS) alone (initialize_symbol_start_epochs()), so the same 14 floats every
+  /// hop: writing them per hop was a host -> device write of a constant. See epochs_uploaded.
+  void upload_symbol_start_epochs(const fd_td_estimation_stage_args& args);
+
   bool check_edge_slots(const channel_statistics& stats,
                         const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
                         unsigned                                       b_prb,
@@ -687,6 +693,15 @@ private:
   float* gpu_pilots    = nullptr;
   float* gpu_rx_pilots = nullptr;
   float* gpu_epochs    = nullptr;
+  /// The 14 symbol start times last uploaded into gpu_epochs, and whether that upload happened.
+  ///
+  /// args.symbol_start_epochs is a function of (cyclic prefix, subcarrier spacing) alone - it is built
+  /// once by initialize_symbol_start_epochs() - so it is the SAME 14 floats on every hop. Re-uploading
+  /// them per hop is a host -> device write of a constant, which is assembly wearing the clothes of
+  /// per-hop work. Compared before writing: the comparison is host memory only, so it is not a crossing,
+  /// and a hop that finds them equal performs no device write at all.
+  std::array<float, MAX_NSYMB_PER_SLOT> epochs_uploaded{};
+  bool                                  epochs_uploaded_valid = false;
   /// K0-a staging: the transmitted DM-RS of the hop and the device's least-squares pilots, both
   /// [symbol][layer][pilot] real/imag interleaved, plus the CFO scalar it estimates. Page-aligned so
   /// the kernels can be handed them without a copy.
