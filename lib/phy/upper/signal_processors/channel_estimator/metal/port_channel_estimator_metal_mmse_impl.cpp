@@ -439,33 +439,32 @@ bool host_grid_published()
   return value;
 }
 
-/// \brief Who clears the merged tail group's pad slots in y (OCUDU_CE_DEV_Y_PADS).
+/// \brief Whether the HOST still clears the merged tail group's pad slots in y (OCUDU_CE_HOST_Y_PADS).
 ///
-/// Unset or non-zero (THE DEFAULT): the HOST does, with the exact memset the on-air legs have always
-/// run - base nof_layers * n_std_blocks * 2 * L_std, length the same. That expression covers the
-/// tail's first slot and the standard group's slots for the next layer, and the standard group is
-/// re-staged immediately after; only the tail's pad slots survive it.
+/// Unset or zero (THE DEFAULT): it does NOT. The device's pilot scatter (glue #2) owns those slots -
+/// its kernel writes 0 for every slot b >= n_blk_real and every row k >= nof_symb * npf, inside the
+/// command buffer whose weights read them - so the host clearing them again is a host -> device
+/// write per hop spent on memory the device is about to overwrite.
 ///
-/// Zero: the host clears nothing and relies on the DEVICE's pilot scatter to have zeroed the pad
-/// slots (mmse_pilots_scatter_y writes 0 for every slot b >= n_blk_real and every row
-/// k >= nof_symb * npf). Measured: byte-identical over the 27-capture corpus, both nets, and it
-/// removes one host -> device write per hop.
+/// Non-zero: the host clears them, with the memset this line ran for every on-air leg before
+/// 2026-09-19. Kept as the A/B arm.
 ///
-/// \warning That equivalence is NOT established in general, which is why this is not the default.
-///          The scatter's slot count is the descriptor's own n_blk_slots (st.n_blk) and its dispatch
-///          covers exactly that; the APPLY kernel strides the slots it reads by st.n_blk as well, but
-///          through the caller's separate n_blk argument for this group. The corpus cannot tell the
-///          two apart, so it cannot show that they agree for the merged tail - and if they do not,
-///          this option leaves the memset's region holding the previous hop's pilots.
+/// \note The default was flipped on an ON-AIR A/B, not on the corpus gate. The corpus cannot tell the
+///       two apart (27 captures byte-identical), which is exactly why it was never evidence here.
+///       The air can, and did - same commit c1fdd8891d, both legs attach + ping/iperf3 clean,
+///       0 real-time failures, 0 radio-sample gaps:
 ///
-/// It exists so the removal can be re-measured on air, where the shapes the corpus does not cover do
-/// occur - and NOT as a default, because a memory state the air legs are known to work in is not
-/// something to change on the strength of a gate that cannot see the failure mode.
-bool device_y_pads_cleared_by_host()
+///         host clears (OCUDU_CE_HOST_Y_PADS=1): 2.37 read(s) + 1.64 write(s) per hop, n=3106 hops
+///         device clears (default):               2.44 read(s) + 1.31 write(s) per hop, n=2841 hops
+///
+///       The write difference is 0.336/hop with non-overlapping 95% Wilson intervals, and the bytes
+///       per write are the same on both legs (828 vs 830 B) - so a crossing went away, not the size
+///       of a write.
+bool host_clears_y_pads()
 {
   static const bool value = []() {
-    const char* env = std::getenv("OCUDU_CE_DEV_Y_PADS");
-    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+    const char* env = std::getenv("OCUDU_CE_HOST_Y_PADS");
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
   }();
   return value;
 }
@@ -2005,12 +2004,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       //       the latter right after. Kept as it is on purpose: this expression is the one the on-air
       //       legs ran with, and narrowing it is a change to a proven memory state, not a cleanup.
       //
-      // OCUDU_CE_DEV_Y_PADS=0 experiments with removing it: the device's pilot scatter zeroes the pad
+      // OCUDU_CE_HOST_Y_PADS=1 restores it; the DEFAULT is now that the device's pilot scatter zeroes the pad
       // slots it believes it owns, so this write may be dead. The 27-capture corpus is byte-identical
       // either way, which is exactly why it is an experiment and not the default - the corpus does not
       // establish that the scatter's slot count and the apply kernel's slot stride agree for the
       // merged tail group. See the branch in stage_engine_group().
-      if (device_y_pads_cleared_by_host()) {
+      if (host_clears_y_pads()) {
         phy_pipeline_crossings::count_host_write(
             static_cast<uint64_t>(nof_layers) * n_std_blocks * 2 * L_std * sizeof(float));
         std::memset(gpu_y + static_cast<std::size_t>(nof_layers) * n_std_blocks * 2 * L_std,
@@ -2736,7 +2735,7 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
       //          exactly the region the host's memset used to clear, and nothing zeroes it. The
       //          27-capture corpus cannot see the difference (measured: byte-identical either way),
       //          which means it does not cover the shape where the two can differ - so "the gate
-      //          passed" is NOT evidence for this branch. See OCUDU_CE_DEV_Y_PADS below.
+      //          passed" is NOT evidence for this branch. See host_clears_y_pads() below.
     } else {
       if (pad_y_slots) {
         // CROSSING (host -> device): gpu_y is the engine's zero-copy y staging buffer, which the
