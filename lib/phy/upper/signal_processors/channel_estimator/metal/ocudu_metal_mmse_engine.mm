@@ -1494,6 +1494,7 @@ static bool encode_run(mmse_engine_impl*                  e,
                        unsigned                           nof_blocks,
                        const mmse_engine::reformat_stage* reformat,
                        const mmse_engine::corr_stage*     corr,
+                       const mmse_engine::corr_stage*     corr_edge,
                        const mmse_engine::pilots_scatter* scatter,
                        unsigned                           nof_scatter,
                        bool                               wait_for_completion);
@@ -1524,6 +1525,7 @@ bool mmse_engine::run(float* a, const float* r_hp, float* w, const float* y, flo
                     nof_systems,
                     nof_blocks,
                     reformat,
+                    nullptr,
                     nullptr,
                     scatter,
                     nof_scatter,
@@ -1637,6 +1639,7 @@ static bool encode_run(mmse_engine_impl*     e,
                        unsigned              nof_blocks,
                        const mmse_engine::reformat_stage* reformat,
                        const mmse_engine::corr_stage*     corr,
+                       const mmse_engine::corr_stage*     corr_edge,
                        const mmse_engine::pilots_scatter* scatter,
                        unsigned              nof_scatter,
                        bool                  wait_for_completion)
@@ -1685,7 +1688,7 @@ static bool encode_run(mmse_engine_impl*     e,
   // that the barrier ordering this stage after the previous one (K0-a's, in the fused lane) is inserted
   // there. It must be a REAL pipeline: the burst would be told nil otherwise.
   id<MTLComputePipelineState> first_pipe = use_rl ? e->inv_rl_pipe : e->inv_pipe;
-  if (corr != nullptr) {
+  if ((corr != nullptr) || (corr_edge != nullptr)) {
     first_pipe = e->corr_a_pipe;
   }
   if ((nof_scatter != 0) && (e->pilots_scatter_pipe != nil)) {
@@ -1741,6 +1744,28 @@ static bool encode_run(mmse_engine_impl*     e,
     mmse_stats_corr_build();
     // Same encoder: the correlation writes must be visible to K1's reads. In burst mode the pipeline
     // change to K1 below inserts that barrier with the stage switch (see stage_pipeline()).
+    if (!st.burst) {
+      [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    }
+  }
+
+  // The SECOND geometry of a merged batch (the edge block), in this same command buffer. Exactly what
+  // the standard stage above is for, and the reason corr_stage::nof_systems exists: a merged batch
+  // builds its standard group in one geometry and its edge group in another, and both land in the
+  // standard group's slots with different block orders. Building the edge HERE instead of in a
+  // standalone build_correlation() keeps the batch in ONE command buffer - one commit, one wait -
+  // which is what the fused lane is: the standalone form added a command buffer on every hop that had
+  // an edge, and the lane paid a commit/wait pair for it (cbs/lane 3.00 -> 3.28 on air).
+  if (corr_edge != nullptr) {
+    const unsigned corr_edge_systems = (corr_edge->nof_systems != 0) ? corr_edge->nof_systems : nof_systems;
+    if (!encode_corr(e, st, *corr_edge, corr_edge_systems)) {
+      if (!st.burst) {
+        [st.enc endEncoding];
+      }
+      mmse_stats_corr_build_failure();
+      return false;
+    }
+    mmse_stats_corr_build();
     if (!st.burst) {
       [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
     }
@@ -1806,7 +1831,8 @@ bool mmse_engine::run_async(float*       a,
                             const reformat_stage* reformat,
                             const corr_stage*     corr,
                             const pilots_scatter* scatter,
-                            unsigned              nof_scatter)
+                            unsigned              nof_scatter,
+                            const corr_stage*     corr_edge)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e == nullptr || e->device == nil) {
@@ -1824,6 +1850,7 @@ bool mmse_engine::run_async(float*       a,
                     nof_blocks,
                     reformat,
                     corr,
+                    corr_edge,
                     scatter,
                     nof_scatter,
                     /*wait_for_completion=*/false);

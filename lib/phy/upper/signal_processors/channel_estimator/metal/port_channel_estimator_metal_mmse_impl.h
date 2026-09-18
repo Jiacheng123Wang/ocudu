@@ -350,7 +350,8 @@ private:
                   const metal::mmse_engine::reformat_stage* reformat,
                   bool                                     defer,
                   const engine_strides&                    st,
-                  unsigned                                 sys_offset);
+                  unsigned                                 sys_offset,
+                  const metal::mmse_engine::corr_stage*    corr_edge = nullptr);
 
   /// \brief Unpacks the engine outputs of the group staged at \c sys_offset into the grid
   /// (symbol-major within each block; the blocks start at PRB gb_start).
@@ -437,7 +438,8 @@ private:
                              unsigned                                       a_stride,
                              unsigned                                       r_stride,
                              unsigned                                       L,
-                             bool                                           gpu_invert);
+                             bool                                           gpu_invert,
+                             metal::mmse_engine::corr_stage*                fused_corr = nullptr);
 
   /// \param[in] sys_offset  First engine slot of this batch. The standard blocks start at 0; the
   ///                        edge/tail block of a hop sits at nof_layers, and the device build has to

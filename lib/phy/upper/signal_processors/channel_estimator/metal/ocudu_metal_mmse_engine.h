@@ -566,7 +566,8 @@ public:
                  const reformat_stage* reformat    = nullptr,
                  const corr_stage*     corr        = nullptr,
                  const pilots_scatter* scatter     = nullptr,
-                 unsigned              nof_scatter = 0);
+                 unsigned              nof_scatter = 0,
+                 const corr_stage*     corr_edge   = nullptr);
 
   /// \brief Selects where the following stages put their dispatches and how the lane is ordered after
   /// them (see ce_lane_order).

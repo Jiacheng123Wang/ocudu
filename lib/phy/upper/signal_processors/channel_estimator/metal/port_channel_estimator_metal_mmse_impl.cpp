@@ -288,6 +288,31 @@ bool k0a_ratio_from_device_enabled()
 /// stage_engine_group(), which skips the whole staging when the slots are filled. They are geometry,
 /// not matrix data, so they move into build_slots_on_device() and the host stays out of the matrix
 /// business.
+/// \brief A/B for the SECOND correlation prefix of a merged batch (OCUDU_CE_EDGE_FUSE).
+///
+/// Zero (the default, and what this line ships): the edge group's correlation is built by the device
+/// in a command buffer of its OWN (mmse_engine::build_correlation(), the form S4 introduced), and the
+/// merged hop's engine call then runs in a second command buffer.
+///
+/// One: the same kernels, over the same slots, encoded as the merged batch's second corr prefix -
+/// inside the engine's own command buffer, before K1 (see encode_run's corr_edge). That is the fused
+/// form the `gpu` mode's second clause asks for: one command buffer per hop instead of two, and one
+/// host commit/wait pair less. Measured on air, the standalone form costs the lane 0.28 command
+/// buffers per hop (cbs/lane 3.00 -> 3.28).
+///
+/// It is an A/B rather than a default because the two forms must produce BYTE-IDENTICAL dumps, and
+/// the gate that says so has to be able to see both: a fused form that silently computes something
+/// else would otherwise be indistinguishable from a win. \c k0d is the analogue for the standard
+/// group's prefix.
+bool edge_fuse_enabled()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_EDGE_FUSE");
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 bool edge_build_on_device()
 {
   static const bool value = []() {
@@ -1812,6 +1837,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // the host out of the matrix business for good, and with it the reason it reads the extraction's
       // scalars (see edge_build_on_device()).
       bool edge_on_device = false;
+      // The edge group's correlation, to be encoded into the MERGED batch's own command buffer
+      // (see build_slots_on_device). Only filled on the gpu_invert route; the merged engine call
+      // below is handed it as the second prefix.
+      std::optional<metal::mmse_engine::corr_stage> edge_corr;
       if (edge_build_on_device()) {
         static_vector<unsigned, MAX_NOF_DMRS_SYMBOLS> edge_dmrs;
         args.pattern_symbols.for_each(args.first_symbol, args.last_symbol,
@@ -1829,6 +1858,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                 L_e,
                                 st.L,
                                 st.nout);
+        // The place in the merged command buffer this group's correlation will be encoded into, when
+        // the device is the one that inverts it (see build_slots_on_device and corr_stage::nof_systems).
+        metal::mmse_engine::corr_stage* fused_edge =
+            (gpu_invert && edge_fuse_enabled()) ? &edge_corr.emplace() : nullptr;
         edge_on_device = build_slots_on_device(stats,
                                                args.dmrs_patterns.front().re_pattern,
                                                rem_prb,
@@ -1839,7 +1872,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                                st.L,
                                                st.nout,
                                                L_e,
-                                               gpu_invert);
+                                               gpu_invert,
+                                               fused_edge);
       }
       if (!edge_on_device) {
         // Host construction and staging for the tail systems (the route that has always run).
@@ -1898,7 +1932,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                                      nof_layers),
                                         merged_defer,
                                         st,
-                                        0);
+                                        0,
+                                        edge_corr.has_value() ? &edge_corr.value() : nullptr);
 #if defined(OCUDU_CE_TIME)
       submit_us_local += std::chrono::duration<double, std::micro>(steady_clock::now() - t_submit_begin).count();
 #endif
@@ -2560,7 +2595,8 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
                                                         const metal::mmse_engine::reformat_stage* reformat,
                                                         bool     defer,
                                                         const engine_strides& st,
-                                                        unsigned sys_offset)
+                                                        unsigned sys_offset,
+                                                        const metal::mmse_engine::corr_stage* corr_edge)
 {
   // The engine addresses the systems of a batch from the BASE of each staging buffer, while the
   // caller stages them (stage_engine_group()) and unpacks them (unpack_engine_group()) at
@@ -2630,7 +2666,8 @@ bool port_channel_estimator_metal_mmse_impl::engine_run(const metal::mmse_engine
                                                  reformat,
                                                  corr,
                                                  y_scatter,
-                                                 nof_y_scatter)
+                                                 nof_y_scatter,
+                                                 corr_edge)
                              : engine->run(a_slot,
                                            r_slot,
                                            w_slot,
@@ -2791,7 +2828,8 @@ bool port_channel_estimator_metal_mmse_impl::build_slots_on_device(
     unsigned                                      a_stride,
     unsigned                                      r_stride,
     unsigned                                      L,
-    bool                                          gpu_invert)
+    bool                                          gpu_invert,
+    metal::mmse_engine::corr_stage*               fused_corr)
 {
   unsigned nout_c = 0;
   unsigned L_c    = 0;
@@ -2802,7 +2840,27 @@ bool port_channel_estimator_metal_mmse_impl::build_slots_on_device(
   // slots. The pads of an oversized slot are the CALLER's: stage_engine_group() writes them when it
   // stages the group, and a caller that skips it (device-inverted, unpadded slot) has no pad to
   // write.
-  if (!engine->build_correlation(corr_std, nof_systems)) {
+  // K0-a fusion, the SECOND group of a merged batch: when the caller offers a place in its own
+  // command buffer (fused_corr) AND the device is the one that inverts these slots, the correlation
+  // does not need a command buffer of its own. Handing the stage back instead of submitting it here
+  // keeps the merged hop in ONE engine command buffer - the standalone form paid a commit and a wait
+  // on every hop that had an edge (measured on air: cbs/lane 3.00 -> 3.28). The pads below are still
+  // written here: they are geometry, and the region they cover is disjoint from the one the kernels
+  // write, so the host and the device never touch the same bytes.
+  //
+  // The device must NOT be left to invert what it has not built, so the fused form is taken only on
+  // the gpu_invert route; a host inversion (below) needs the A slots to hold A BEFORE this function
+  // returns, which is what the standalone build gives it.
+  if (fused_corr != nullptr && gpu_invert) {
+    *fused_corr = corr_std;
+    // NOT optional: corr_stage::nof_systems is 0 here (correlation_stage() cannot know how many
+    // systems its caller will build) and 0 means "the WHOLE batch" to encode_corr - which for a
+    // merged batch is 2 * nof_layers systems of the EDGE geometry, written over the standard
+    // group's slots. Measured: 51810 differing bytes instead of the host build's 6043, 36527 of
+    // them in the LLR. build_correlation() takes the count as an ARGUMENT for this reason, and the
+    // fused form has to carry it in the stage.
+    fused_corr->nof_systems = nof_systems;
+  } else if (!engine->build_correlation(corr_std, nof_systems)) {
     return false;
   }
   // The pads of an OVERSIZED slot are written here, not by stage_engine_group(): a caller that
