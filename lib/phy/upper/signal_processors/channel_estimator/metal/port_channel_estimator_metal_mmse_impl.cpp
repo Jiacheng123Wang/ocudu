@@ -405,6 +405,40 @@ bool ls_check_enabled()
   return value;
 }
 
+/// \brief A/B for the last device -> host read the lane still makes every hop: the host grid
+/// (OCUDU_CE_HOST_GRID).
+///
+/// Unset or non-zero (THE DEFAULT, and what this line ships): a hop the device covered is unpacked
+/// into grid_est as it completes - the DM-RS symbols eagerly (the hop statistics are derived from
+/// them) and the rest on demand (see materialize_host_grid()).
+///
+/// Zero: the completion unpacks NOTHING. No host consumer has asked for the grid at that point, and
+/// the DM-RS unpack is what makes the lane read the device every hop: unpack_engine_group() copies
+/// gpu_h - the estimates the ENGINE produced - through a host mapping, and it does so on every hop
+/// whether or not a host reader ever appears. Measured at the crossing counter: 3 of the estimator's
+/// 3.10 device -> host reads per hop, and 1280 of its 1420 bytes.
+///
+/// The read is gated rather than deleted because it is the ONE place in this file where the device's
+/// pixels are assumed to have no host consumer, and that assumption is what the A/B measures:
+///   * what a host consumer actually needs (the OCUDU_UL_DUMP capture of the estimates, and any
+///     backend that asks for them through get_symbol_ch_estimate()) still works, because it
+///     materializes the grid on demand exactly as it did for the non-DM-RS symbols - the deferred
+///     descriptors are kept for that, not dropped;
+///   * what stops being computed is the hop statistics that the DM-RS unpack fed: rsrp, the noise
+///     variance and the time alignment of the hop (pending_fill::fill() samples the grid at the
+///     pilot REs). They are REPORTING values - they reach the CSI and _ce.txt and nothing else - so
+///     with this off they go stale rather than wrong-in-place, which is why the knob is an A/B and
+///     not a default: the gate is "does the published LLR or _h move?", and until it has been run
+///     the values a host reporter would read must not silently change.
+bool host_grid_published()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_HOST_GRID");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 } // namespace
 
 port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
@@ -3429,17 +3463,33 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
   // route binds the device's (device=10593 host=0). The slot hopping is the other case: hop 0's
   // estimates must be out before hop 1's batch overwrites the device buffers they would come from.
   //
+  // Whether the grid has to be complete BEFORE this call returns: true whenever a host consumer may
+  // read it, which is exactly when the DEVICE estimates do not cover this hop - the same signal the
+  // demodulator reads (device_results_cover_last_estimate()), and measured: the split-tail route
+  // takes the host route for every estimate it binds (ch_est device=0 staged=11), while the merged
+  // route binds the device's (device=10593 host=0). The slot hopping is the other case: hop 0's
+  // estimates must be out before hop 1's batch overwrites the device buffers they would come from.
+  //
   // Otherwise only the DM-RS symbols are unpacked (the hop statistics read their pilots) and the
   // rest waits for the first get_symbol_ch_estimate() call.
   const bool publish_all_grid = unpack_hopping || !gpu_ce_ready;
-  for (unsigned i = 0; i != nof_pending_unpacks; ++i) {
-    const pending_unpack& u = pending_unpacks[i];
-    unpack_engine_group(
-        u.gb_start, u.n_blk, u.b_prb, u.nout, u.nof_layers, u.sys_offset, u.st, /*all_symbols=*/publish_all_grid);
+  // ... and not even those when the A/B says the lane has no host consumer
+  // (OCUDU_CE_HOST_GRID=0, see host_grid_published()). Nothing is read back then, and the whole grid
+  // is left pending: a consumer that does appear - the OCUDU_UL_DUMP capture of the estimates, a
+  // backend asking for them through get_symbol_ch_estimate() - materializes it on demand, exactly as
+  // it already does for the non-DM-RS symbols on this route.
+  if (host_grid_published()) {
+    for (unsigned i = 0; i != nof_pending_unpacks; ++i) {
+      const pending_unpack& u = pending_unpacks[i];
+      unpack_engine_group(
+          u.gb_start, u.n_blk, u.b_prb, u.nout, u.nof_layers, u.sys_offset, u.st, /*all_symbols=*/publish_all_grid);
+    }
   }
-  nof_host_unpacks  = nof_pending_unpacks;
-  host_unpacks      = pending_unpacks;
-  host_grid_pending = !publish_all_grid;
+  nof_host_unpacks = nof_pending_unpacks;
+  host_unpacks     = pending_unpacks;
+  // "Nothing unpacked yet" - either because only the DM-RS symbols were (the state the others wait
+  // in) or because the A/B skipped all of them. Both are served by the same deferred unpack.
+  host_grid_pending = !host_grid_published() || !publish_all_grid;
 #if defined(OCUDU_CE_TIME)
   mmse_stats().completion_unpack_ns.fetch_add(
       static_cast<uint64_t>(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() -
@@ -3450,8 +3500,12 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
 #endif
   nof_pending_unpacks = 0;
 
-  // The grid is complete now: derive the buffers the hop statistics are computed from.
-  if (deferred_fill.valid) {
+  // The grid is complete now: derive the buffers the hop statistics are computed from. NOT when
+  // nothing was unpacked (OCUDU_CE_HOST_GRID=0): those values would be sampled from the previous
+  // hop's grid - the buffer is shared, and this call no longer materializes it - and a stale rsrp is
+  // worse than a missing one. The hop the lane publishes (the LLR, the estimates the device keeps)
+  // does not depend on them; see host_grid_published().
+  if (deferred_fill.valid && host_grid_published()) {
 #if defined(OCUDU_CE_TIME)
     const auto t_fill_begin = std::chrono::steady_clock::now();
 #endif
