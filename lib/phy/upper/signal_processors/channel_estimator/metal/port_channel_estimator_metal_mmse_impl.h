@@ -428,6 +428,41 @@ private:
   /// \return True when the slots are filled and ready for the weights. False means the caller must
   ///         fall back to its own staging - the return value is the success flag, never a descriptor
   ///         (reading it as one was a defect: the success path used to leave it nullopt).
+  /// \brief Compares the edge group's device-built slots against the host's own build of the same
+  /// geometry, in the SAME process and on the SAME hop (OCUDU_CE_EDGE_CHECK).
+  ///
+  /// The S4 defect was localised by differencing published dumps across runs: 6043 bytes, confined to
+  /// the edge region of _h, and every candidate explanation had to be argued away from the outside.
+  /// That is the wrong instrument - the two builds are available at the same instant, from the same
+  /// inputs, in one process, so they can simply be compared element by element. This is that
+  /// comparison, and it answers the only question that matters first: is the device's edge SLOT the
+  /// host's edge slot, and if not, from which element do they part.
+  ///
+  /// The host build goes into w_r_pp / w_r_hp (which the device route leaves unused) and the device's
+  /// slots are read back through the same mapping the kernels wrote, so the comparison covers the
+  /// whole slot - including the pads, which the host writes in one form and stage_engine_group() in
+  /// the other. That makes a pad disagreement visible instead of silent.
+  ///
+  /// \param[in] nout_e     R_hp rows of the edge block, as correlation_stage() reported them.
+  /// \param[in] L_e        Matrix order of the edge block.
+  /// \param[in] sys_offset First system of the edge group (nof_layers).
+  /// \param[in] nof_systems Systems in the edge group (nof_layers).
+  /// \param[in] a_stride   Slot strides the group lives in (engine_strides::L / ::nout). They belong
+  ///            to the STANDARD geometry and exceed the edge block's own L_e / nout_e - which is the
+  ///            whole point of the check, so they are passed in rather than derived.
+  /// \return True when every element of every edge slot is bit-identical.
+  bool check_edge_slots(const channel_statistics& stats,
+                        const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
+                        unsigned                                       b_prb,
+                        span<const unsigned>                           dmrs_slots,
+                        unsigned                                       scs_khz,
+                        unsigned                                       nout_e,
+                        unsigned                                       L_e,
+                        unsigned                                       sys_offset,
+                        unsigned                                       nof_systems,
+                        unsigned                                       a_stride,
+                        unsigned                                       r_stride);
+
   bool build_slots_on_device(const channel_statistics& stats,
                              const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
                              unsigned                                       b_prb,

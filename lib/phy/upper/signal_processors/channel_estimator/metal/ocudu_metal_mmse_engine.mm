@@ -1261,14 +1261,30 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   // Sizes first: the kernel parameters and the zero-copy mapping both need them.
   const NSUInteger a_per_sys   = static_cast<NSUInteger>(c.l) * c.l;
   const NSUInteger rhp_per_sys = static_cast<NSUInteger>(nout) * c.l;
+  // How much of each slot the KERNELS actually touch. Both write with the SLOT's row stride (Ls, see
+  // mmse_corr_params and the two kernels: `a_sys[...o * p.Ls + col]`), so a block narrower than its
+  // slot - the merged batch's edge group, L_e into the standard group's L_std slots - reaches
+  // (l - 1) * Ls + l and (nout - 1) * Ls + l. The PACKED sizes above are the wrong extent for that
+  // case: they are not what gets written. A zero Ls leaves the packed block (the single-geometry
+  // case, where the two agree exactly).
+  //
+  // Measuring the difference this makes, on syn004_4 (L_e = 18 into Ls = 54, nout = 168): the mapping
+  // was sized for 3024 floats while the kernel wrote up to offset 9035, so every write past the end
+  // was LOST. The slot read back held data only to row 102 - the rest of the edge block's R_hp was
+  // zero - while A (a square l x l block, whose extent 18 * 54 + 18 still fits inside the round-up of
+  // 18 * 18) came out bit-identical. That asymmetry is exactly why k0d, which covers the standard
+  // group where Ls == L, never saw this.
+  const NSUInteger Ls        = (c.a_l_stride != 0) ? c.a_l_stride : c.l;
+  const NSUInteger a_extent   = (static_cast<NSUInteger>(c.l) - 1) * Ls + c.l;
+  const NSUInteger rhp_extent = (static_cast<NSUInteger>(nout) - 1) * Ls + c.l;
   // The batch is mapped by the SYSTEM stride, not by the packed per-system size: with a slot stride
   // wider than the block order the last system reaches past nof_systems * a_per_sys. A zero leaves
   // the packed spacing (the single-geometry case).
   const NSUInteger a_sys   = (c.a_sys_stride != 0) ? c.a_sys_stride : a_per_sys;
   const NSUInteger r_sys   = (c.r_sys_stride != 0) ? c.r_sys_stride : rhp_per_sys;
-  const NSUInteger a_bytes = (static_cast<NSUInteger>(nof_systems - 1) * a_sys + a_per_sys) * sizeof(float);
+  const NSUInteger a_bytes = (static_cast<NSUInteger>(nof_systems - 1) * a_sys + a_extent) * sizeof(float);
   const NSUInteger rhp_bytes =
-      (static_cast<NSUInteger>(nof_systems - 1) * r_sys + rhp_per_sys) * sizeof(float);
+      (static_cast<NSUInteger>(nof_systems - 1) * r_sys + rhp_extent) * sizeof(float);
 
   mmse_corr_params_t p{};
   p.nof_systems = nof_systems;

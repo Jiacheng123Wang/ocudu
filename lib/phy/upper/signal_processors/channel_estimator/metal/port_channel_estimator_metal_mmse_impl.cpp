@@ -237,6 +237,19 @@ bool device_ls_enabled()
 /// OCUDU_CE_K0A_RATIO_DEV=0 keeps the host's quotient: it is the A/B that produced the numbers above,
 /// and the escape hatch for a metallib built without the strict flag (the kernel would then read a
 /// differently rounded value - not a wrong route, but not the measured one either).
+/// \brief Whether the edge-slot comparison (OCUDU_CE_EDGE_CHECK) is armed.
+///
+/// A diagnostic with no effect on any published value: it builds the edge group's matrices on the
+/// host as well and compares them element by element against the device's slots (see
+/// check_edge_slots()). Unset is the product.
+bool edge_slot_check_enabled()
+{
+  static const bool value = []() {
+    return std::getenv("OCUDU_CE_EDGE_CHECK") != nullptr;
+  }();
+  return value;
+}
+
 bool k0a_ratio_from_device_enabled()
 {
   static const bool value = []() {
@@ -1905,6 +1918,28 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                          matrix_on,
                          gpu_invert,
                          /*slots_filled=*/edge_on_device);
+      // 3b) OCUDU_CE_EDGE_CHECK=1: compare the edge group's slots against the host's build of the same
+      //     geometry, at the LAST moment before the engine consumes them. Same hop, same inputs, one
+      //     process - so a disagreement is a property of the build, not of the harness. Only meaningful
+      //     when the DEVICE built them (with edge_on_device false the slots hold the host's own
+      //     staging). It reads the slots, so it must run after every writer: for the device route that
+      //     is build_slots_on_device() above (whose standalone command buffer has already completed),
+      //     and for the staged route stage_engine_group() just below - hence the placement here.
+      //     It does NOT wait for anything and does not touch the published output.
+      if (edge_on_device && edge_slot_check_enabled()) {
+        (void)check_edge_slots(stats,
+                               args.dmrs_patterns.front().re_pattern,
+                               rem_prb,
+                               span<const unsigned>(dmrs_sym.begin(), npt),
+                               scs_khz,
+                               nout_e,
+                               L_e,
+                               nof_layers,
+                               nof_layers,
+                               st.L,
+                               st.nout);
+      }
+
       // 4) ONE engine call over both groups, then unpack both. The call is submitted without
       //    waiting when the kernels allow it, so the unpack moves to the completion of the stage
       //    (see complete_fd_td_estimation_stage()).
@@ -2815,6 +2850,121 @@ void port_channel_estimator_metal_mmse_impl::materialize_host_grid() const
     unpack_engine_group(
         u.gb_start, u.n_blk, u.b_prb, u.nout, u.nof_layers, u.sys_offset, u.st, /*all_symbols=*/true);
   }
+}
+
+bool port_channel_estimator_metal_mmse_impl::check_edge_slots(
+    const channel_statistics&                     stats,
+    const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
+    unsigned                                       b_prb,
+    span<const unsigned>                           dmrs_slots,
+    unsigned                                       scs_khz,
+    unsigned                                       nout_e,
+    unsigned                                       L_e,
+    unsigned                                       sys_offset,
+    unsigned                                       nof_systems,
+    unsigned                                       a_stride,
+    unsigned                                       r_stride)
+{
+  // The host's own build of THIS geometry, into scratch the device route does not use.
+  unsigned    nout_h = 0;
+  unsigned    L_h    = 0;
+  const auto  a_host = span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS);
+  const auto  r_host = span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS);
+  build_correlation_matrices(stats, re_pattern, b_prb, dmrs_slots, scs_khz, a_host, r_host, nout_h, L_h);
+
+  const auto  bits = [](float v) {
+    uint32_t u = 0;
+    std::memcpy(&u, &v, sizeof(u));
+    return u;
+  };
+  // Read the device's slots EXACTLY as the kernels wrote them: the slot footprint is the whole
+  // [a_stride][a_stride] / [r_stride][a_stride] region, pads included, so a pad that the host and
+  // the device disagree about is a difference like any other.
+  std::fprintf(stderr,
+               "[edge_check] geometry: L_e=%u (host %u) nout_e=%u (host %u) a_stride=%u r_stride=%u "
+               "sys_offset=%u n_sys=%u\n",
+               L_e, L_h, nout_e, nout_h, a_stride, r_stride, sys_offset, nof_systems);
+  if ((L_e != L_h) || (nout_e != nout_h)) {
+    std::fprintf(stderr, "[edge_check] GEOMETRY MISMATCH - the two builds do not even describe the same block\n");
+    return false;
+  }
+
+  unsigned nof_a = 0, nof_r = 0, bad_a = 0, bad_r = 0, shown = 0;
+  double   worst = 0.0;
+  for (unsigned sys = 0; sys != nof_systems; ++sys) {
+    const float* a_slot = gpu_a + static_cast<std::size_t>(sys_offset + sys) * a_stride * a_stride;
+    const float* r_slot = gpu_r_hp + static_cast<std::size_t>(sys_offset + sys) * r_stride * a_stride;
+    for (unsigned r = 0; r != a_stride; ++r) {
+      for (unsigned c = 0; c != a_stride; ++c) {
+        const float dev = a_slot[static_cast<std::size_t>(r) * a_stride + c];
+        // Outside [0,L_e) x [0,L_e) the host's scratch has no value (it is packed L_e x L_e), so the
+        // device's pad is compared against what the contract says it must BE instead: zero, or one on
+        // the diagonal of the [L_e, a_stride) block. Anything else is a real disagreement and is
+        // reported as one.
+        float host = 0.0F;
+        if ((r < L_e) && (c < L_e)) {
+          host = a_host[static_cast<std::size_t>(r) * L_e + c];
+        } else if (r == c) {
+          host = 1.0F;
+        }
+        ++nof_a;
+        if (bits(dev) != bits(host)) {
+          ++bad_a;
+          worst = std::max(worst, std::fabs(static_cast<double>(dev) - static_cast<double>(host)));
+          if (shown < 12) {
+            ++shown;
+            std::fprintf(stderr,
+                         "[edge_check] A   sys=%u r=%u c=%u host=%08x (%.9g) dev=%08x (%.9g)%s\n",
+                         sys, r, c, bits(host), host, bits(dev), dev,
+                         ((r < L_e) && (c < L_e)) ? "" : "  <- PAD");
+          }
+        }
+      }
+    }
+    for (unsigned o = 0; o != r_stride; ++o) {
+      for (unsigned j = 0; j != a_stride; ++j) {
+        const float dev  = r_slot[static_cast<std::size_t>(o) * a_stride + j];
+        const float host = ((o < nout_e) && (j < L_e)) ? r_host[static_cast<std::size_t>(o) * L_e + j] : 0.0F;
+        ++nof_r;
+        if (bits(dev) != bits(host)) {
+          ++bad_r;
+          worst = std::max(worst, std::fabs(static_cast<double>(dev) - static_cast<double>(host)));
+          if (shown < 12) {
+            ++shown;
+            std::fprintf(stderr,
+                         "[edge_check] R   sys=%u o=%u j=%u host=%08x (%.9g) dev=%08x (%.9g)%s\n",
+                         sys, o, j, bits(host), host, bits(dev), dev,
+                         ((o < nout_e) && (j < L_e)) ? "" : "  <- PAD");
+          }
+        }
+      }
+    }
+  }
+  // Where the device's data actually STOPS, over the whole slot: the highest non-zero float. A build
+  // that wrote only part of the slot leaves the rest at zero, and this is the number that says how
+  // much of it was written - which distinguishes "never dispatched" from "written elsewhere".
+  long last_nonzero = -1;
+  for (unsigned sys = 0; sys != nof_systems; ++sys) {
+    const float* r_slot = gpu_r_hp + static_cast<std::size_t>(sys_offset + sys) * r_stride * a_stride;
+    for (unsigned o = 0; o != r_stride; ++o) {
+      for (unsigned j = 0; j != a_stride; ++j) {
+        if (r_slot[static_cast<std::size_t>(o) * a_stride + j] != 0.0F) {
+          last_nonzero = static_cast<long>(o) * a_stride + j;
+        }
+      }
+    }
+  }
+  std::fprintf(stderr,
+               "[edge_check] checked A=%u (%u differ) R=%u (%u differ) | worst |dev-host| = %.9g | %s\n",
+               nof_a, bad_a, nof_r, bad_r, worst, ((bad_a == 0) && (bad_r == 0)) ? "IDENTICAL" : "DIFFERENT");
+  std::fprintf(stderr,
+               "[edge_check] R slot: last non-zero element at offset %ld (= row %ld, col %ld) | slot is "
+               "%u rows x %u cols; block wants %u rows x %u cols; packed block size = %u floats\n",
+               last_nonzero,
+               (last_nonzero < 0) ? -1L : last_nonzero / static_cast<long>(a_stride),
+               (last_nonzero < 0) ? -1L : last_nonzero % static_cast<long>(a_stride),
+               r_stride, a_stride, nout_e, L_e, nout_e * L_e);
+  return (bad_a == 0) && (bad_r == 0);
 }
 
 bool port_channel_estimator_metal_mmse_impl::build_slots_on_device(
