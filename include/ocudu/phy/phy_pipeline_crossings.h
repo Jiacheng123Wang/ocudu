@@ -42,7 +42,16 @@ class phy_pipeline_crossings
 {
 public:
   /// Counts one host read of data the device produced.
-  static void count_host_read() { host_reads().fetch_add(1, std::memory_order_relaxed); }
+  ///
+  /// \param[in] bytes How many bytes the host read, or 0 when the caller does not know. As on the
+  ///            write side the COUNT is what the verdict uses and the byte total is context.
+  static void count_host_read(uint64_t bytes = 0)
+  {
+    host_reads().fetch_add(1, std::memory_order_relaxed);
+    if (bytes != 0) {
+      host_read_bytes().fetch_add(bytes, std::memory_order_relaxed);
+    }
+  }
 
   /// Counts one host write of data the device will consume.
   ///
@@ -105,6 +114,7 @@ public:
   static void count_device_hop() { device_hops().fetch_add(1, std::memory_order_relaxed); }
 
   static uint64_t get_host_reads() { return host_reads().load(std::memory_order_relaxed); }
+  static uint64_t get_host_read_bytes() { return host_read_bytes().load(std::memory_order_relaxed); }
   static uint64_t get_host_writes() { return host_writes().load(std::memory_order_relaxed); }
   static uint64_t get_host_write_bytes() { return host_write_bytes().load(std::memory_order_relaxed); }
   static uint64_t get_device_hops() { return device_hops().load(std::memory_order_relaxed); }
@@ -118,6 +128,11 @@ private:
     return *n;
   }
   static std::atomic<uint64_t>& device_hops()
+  {
+    static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
+    return *n;
+  }
+  static std::atomic<uint64_t>& host_read_bytes()
   {
     static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
     return *n;
@@ -179,12 +194,14 @@ inline void register_phy_pipeline_crossing_check()
            const auto              per_hop = [hops](uint64_t n) {
              return (hops != 0) ? (static_cast<double>(n) / static_cast<double>(hops)) : 0.0;
            };
+           const uint64_t          rbytes = phy_pipeline_crossings::get_host_read_bytes();
            std::fprintf(stderr,
-                        "%llu host read(s) and %llu host write(s) (%llu bytes) of device data over %llu "
-                        "device hop(s) = %.2f read(s) + %.2f write(s) per hop; the fused lane (mode=gpu) "
-                        "allows 0 of each (its two crossings are the IQ upload and the LLR download, "
-                        "which this counts neither of)",
+                        "%llu host read(s) (%llu bytes) and %llu host write(s) (%llu bytes) of device data "
+                        "over %llu device hop(s) = %.2f read(s) + %.2f write(s) per hop; the fused lane "
+                        "(mode=gpu) allows 0 of each (its two crossings are the IQ upload and the LLR "
+                        "download, which this counts neither of)",
                         static_cast<unsigned long long>(reads),
+                        static_cast<unsigned long long>(rbytes),
                         static_cast<unsigned long long>(writes),
                         static_cast<unsigned long long>(bytes),
                         static_cast<unsigned long long>(hops),

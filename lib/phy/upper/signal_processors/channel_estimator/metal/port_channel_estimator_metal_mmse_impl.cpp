@@ -2861,6 +2861,18 @@ void port_channel_estimator_metal_mmse_impl::unpack_engine_group(unsigned       
   // the grid is materialized on demand by materialize_host_grid(). Unpacking all fourteen symbols
   // eagerly was most of this function's cost, for a host copy the air path never reads.
   const unsigned nof_unpack_symbols = all_symbols ? MAX_NSYMB_PER_SLOT : unpack_npt;
+  // CROSSING (device -> host): gpu_h is what the ENGINE produced on the device, and the two loops
+  // below read it back through that mapping to fill the host grid. It is the estimator's own output,
+  // not a scalar, so it was never one of host_reads_device_scalars()' four sites - and it happens on
+  // EVERY hop of the lane route, because the hop statistics are computed on the host from these
+  // estimates. Counted once per call with the element count: a caller that narrows all_symbols()
+  // narrows the count with it.
+  //
+  // \note This is why the contract's crossing line is NOT a statement about the whole estimator, let
+  //       alone the whole lane: it is a statement about the sites that call count_host_read(), and
+  //       this one reaches further than any of them.
+  phy_pipeline_crossings::count_host_read(static_cast<uint64_t>(nof_layers) * n_blk *
+                                          nof_unpack_symbols * nf * 2 * sizeof(float));
   for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
     for (unsigned b = 0; b != n_blk; ++b) {
       // Slot addressing uses the BATCH strides: they may exceed the block geometry (the merged
