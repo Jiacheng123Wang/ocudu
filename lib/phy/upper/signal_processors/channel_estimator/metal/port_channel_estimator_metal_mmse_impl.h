@@ -278,6 +278,24 @@ private:
   ///               the one writing y (glue #2, see record_device_y_stage()), in which case the host
   ///               skips its copy. Deliberately has NO default, so
   ///               every call site has to state which of the two it means.
+  /// \param pad_y_floats When non-zero, the caller asks this function to clear the group's pad
+  ///               SLOTS (every block slot above \c n_blk) of its y region, because the tail systems
+  ///               carry \c st.n_blk slots while only \c n_blk of them are real. The value is the
+  ///               length in floats of the region to clear, which starts one layer-vs-system stride
+  ///               past the standard group.
+  ///
+  ///               It is cleared HERE, and only when the HOST is the one staging y: when
+  ///               record_device_y_stage() takes the group, the scatter kernel zeroes those very
+  ///               slots (and their pad rows) inside the command buffer whose weights read them, so
+  ///               clearing them on the host would be a device crossing spent on memory the device is
+  ///               about to write.
+  ///
+  ///               \note It cannot be done by the caller, which is where this used to live: the
+  ///               caller has to know the answer BEFORE calling, and the answer is only known inside
+  ///               (it depends on the device-LSE gate, the metallib and the geometry). Asking the
+  ///               caller to predict it would restate the gate in two places and let them drift - the
+  ///               same class of defect as the \c a_rhp_filled flag this file already carries a scar
+  ///               from (2916 of 27216 entries valid, SINR -23 dB).
   void stage_engine_group(const fd_td_estimation_stage_args& args,
                           unsigned                           gb_start,
                           unsigned                           n_blk,
@@ -289,7 +307,8 @@ private:
                           const engine_strides&              st,
                           bool                               matrix,
                           bool                               gpu_invert,
-                          bool                               slots_filled);
+                          bool                               slots_filled,
+                          unsigned                           pad_y_floats = 0);
 
   /// \brief Glue #2 (S-7f-5u): records that the DEVICE writes this group's y slots, so that
   /// stage_engine_group() must NOT copy the pilots in from the host.

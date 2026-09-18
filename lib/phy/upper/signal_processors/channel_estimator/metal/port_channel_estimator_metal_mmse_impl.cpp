@@ -1960,16 +1960,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                    L_e);
       }
       tail_L = L_e;
-      // 3) The tail systems carry n_std_blocks block slots but only block 0 is real: clear the
-      //    group first so the pad blocks hold zeros instead of a previous hop's pilots.
-      // CROSSING (host -> device): gpu_y is the engine's zero-copy y staging buffer, which the apply
-      // kernel reads. Clearing the tail group's pad blocks is geometry rather than matrix data, but it
-      // is still the host writing memory the GPU consumes.
-      phy_pipeline_crossings::count_host_write(
-          static_cast<uint64_t>(nof_layers) * n_std_blocks * 2 * L_std * sizeof(float));
-      std::memset(gpu_y + static_cast<std::size_t>(nof_layers) * n_std_blocks * 2 * L_std,
-                  0,
-                  static_cast<std::size_t>(nof_layers) * n_std_blocks * 2 * L_std * sizeof(float));
+      // 3) The tail systems carry n_std_blocks block slots but only block 0 is real: their pad slots
+      //    must hold zeros instead of a previous hop's pilots. WHO clears them is decided inside
+      //    stage_engine_group() - the DEVICE's pilot scatter zeroes exactly those slots when it takes
+      //    the group, so the host only does it on the route where it stages y itself. The clearing
+      //    used to be unconditional here, which cost a host -> device crossing on every hop for
+      //    memory the device was about to write (see the pad_y_floats note in the header).
       stage_engine_group(args,
                          n_std_blocks * block_prb,
                          1,
@@ -1981,7 +1977,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                          st,
                          matrix_on,
                          gpu_invert,
-                         /*slots_filled=*/edge_on_device);
+                         /*slots_filled=*/edge_on_device,
+                         /*pad_y_floats=*/static_cast<unsigned>(nof_layers) * n_std_blocks * 2 * L_std);
       // 3b) OCUDU_CE_EDGE_CHECK=1: compare the edge group's slots against the host's build of the same
       //     geometry, at the LAST moment before the engine consumes them. Same hop, same inputs, one
       //     process - so a disagreement is a property of the build, not of the harness. Only meaningful
@@ -2535,7 +2532,8 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
                                                                 const engine_strides&              st,
                                                                 bool                               matrix,
                                                                 bool                               gpu_invert,
-                                                                bool                               slots_filled)
+                                                                bool                               slots_filled,
+                                                                unsigned                           pad_y_floats)
 {
   const unsigned nof_layers = args.dmrs_patterns.size();
   // Pilots of one PRB, and the pilots this group carries per DM-RS symbol. The pilot view of a
@@ -2661,7 +2659,23 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
     // answers for the whole decision (device LSE valid, kernel present, knob, geometry) and is the
     // reason the loop below is skipped; the loop itself is the fallback and must keep producing
     // byte-identical values, because OCUDU_CE_DEV_Y=0 selects it as the A/B.
-    if (!record_device_y_stage(args, gb_start, n_blk, b_prb, npt, L, sys_offset, st)) {
+    if (record_device_y_stage(args, gb_start, n_blk, b_prb, npt, L, sys_offset, st)) {
+      // Glue #2 took this group's y: the device's pilot scatter writes it, and that kernel also
+      // zeroes every slot above n_blk_real and every row above nof_symb * npf - exactly this group's
+      // pad region. The caller asked for those slots to be cleared (pad_y_floats) and there is
+      // nothing left to clear: doing it here would be a host -> device crossing over memory the
+      // device is about to write, once per hop.
+    } else {
+      if (pad_y_floats != 0) {
+        // CROSSING (host -> device): gpu_y is the engine's zero-copy y staging buffer, which the
+        // apply kernel reads. Clearing the tail group's pad slots is geometry rather than matrix
+        // data, but it is still the host writing memory the GPU consumes. Only reached when the host
+        // stages y itself (record_device_y_stage() above returned false).
+        phy_pipeline_crossings::count_host_write(pad_y_floats * sizeof(float));
+        std::memset(gpu_y + static_cast<std::size_t>(nof_layers) * st.n_blk * 2 * st.L,
+                    0,
+                    static_cast<std::size_t>(pad_y_floats) * sizeof(float));
+      }
       for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
         for (unsigned b = 0; b != n_blk; ++b) {
           float* yp = gpu_y + (static_cast<std::size_t>(sys_offset + i_layer) * st.n_blk + b) * 2 * Ls;
