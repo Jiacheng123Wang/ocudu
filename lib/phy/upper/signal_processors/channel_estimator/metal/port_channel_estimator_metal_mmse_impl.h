@@ -658,7 +658,27 @@ private:
       2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * MAX_LAYERS * MAX_NOF_PILOTS_SYMBOL;
   float* gpu_ls_ref    = nullptr;
   float* gpu_ls_out    = nullptr;
-  float* gpu_ls_cfo    = nullptr;
+  /// \brief Rotating slots holding the hop's CFO - one \c kCfoSlots-float buffer, not a single float.
+  ///
+  /// The extraction writes this hop's CFO into the slot \c cfo_slot_ names, and the noise reformat
+  /// reads that same slot back on the DEVICE (see reformat_stage::noise_stage_t::cfo_dev). Reading it
+  /// there instead of handing the value over as a kernel parameter is what keeps the scalar out of the
+  /// host's hands between the extraction and the weights command buffers - and the host reading it is
+  /// what forces it to WAIT for the extraction, which measured 65us of the lane's 211us gap.
+  ///
+  /// \note Why one slot is not enough, and why this is not theoretical. The estimator instances live in
+  /// a pool (one per concurrent PUSCH thread, see concurrent_dependencies in the PUSCH processor) and
+  /// an instance is returned to that pool when the processing call ends - while the lane of the hop it
+  /// just submitted is still in flight, its completion being deferred. A later hop on the same instance
+  /// therefore overwrites the buffer before the earlier hop's K4 has read it, and the kernel then
+  /// rotates by a CFO that belongs to another slot. Measured on air: 207 LLR decision flips on one
+  /// capture of the device route, intermittently. Rotating the slot past every hop that can be in
+  /// flight removes it.
+  static constexpr unsigned kCfoSlots = 8;
+  float*   gpu_ls_cfo     = nullptr;
+  /// Slot the CURRENT hop uses. Starts one before the first hop so that hop 0 lands on slot 0 and
+  /// carries forward from the last (zero-initialised) slot, exactly as the single buffer started at 0.
+  unsigned cfo_slot_      = kCfoSlots - 1;
   bool   gpu_nv_ready  = false;
 
   /// S-7f-5w: the hop's noise variance, computed inside the K0-a command buffer. \c gpu_ls_smoothed

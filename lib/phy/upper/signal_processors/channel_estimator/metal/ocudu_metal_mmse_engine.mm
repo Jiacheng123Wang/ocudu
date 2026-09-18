@@ -689,8 +689,8 @@ static void encode_reformat(stage_encoder&                             s,
       (reformat != nullptr) ? reformat->noise : ocudu::metal::mmse_engine::reformat_stage::noise_stage_t{};
   static const bool k4_enabled = (std::getenv("OCUDU_CE_NO_K4") == nullptr);
   if (k4_enabled && (reformat != nullptr) && (e->noise_pipe != nil) && (noise.nv != nullptr) && (noise.pilots != nullptr) &&
-      (noise.rx_pilots != nullptr) && (noise.symbol_start_epochs != nullptr) && (noise.npt != 0) &&
-      (noise.npf != 0) && (noise.comb_size != 0) && (reformat->nof_layers != 0)) {
+      (noise.rx_pilots != nullptr) && (noise.symbol_start_epochs != nullptr) && (noise.cfo_dev != nullptr) &&
+      (noise.npt != 0) && (noise.npf != 0) && (noise.comb_size != 0) && (reformat->nof_layers != 0)) {
     const NSUInteger pilots_bytes =
         static_cast<NSUInteger>(noise.npt) * reformat->nof_layers * noise.npf * 2 * sizeof(float);
     const NSUInteger rx_bytes =
@@ -698,7 +698,10 @@ static void encode_reformat(stage_encoder&                             s,
     id<MTLBuffer> pilots_buf = e->wrap(noise.pilots, pilots_bytes);
     id<MTLBuffer> rx_buf     = e->wrap(noise.rx_pilots, rx_bytes);
     id<MTLBuffer> nv_buf     = e->wrap_shared(noise.nv, sizeof(float));
-    if (pilots_buf != nil && rx_buf != nil && nv_buf != nil) {
+    // The extraction's CFO, read by the device so the host never has to. It is the hop's own rotating
+    // slot: see reformat_stage::noise_stage_t::cfo_dev for why one slot would not do.
+    id<MTLBuffer> cfo_buf    = e->wrap(noise.cfo_dev, sizeof(float));
+    if (pilots_buf != nil && rx_buf != nil && nv_buf != nil && cfo_buf != nil) {
       struct mmse_noise_params {
         uint32_t nout_stride;
         uint32_t n_blk;
@@ -717,6 +720,7 @@ static void encode_reformat(stage_encoder&                             s,
         float    beta;
         float    cfo;
         uint32_t compensate_cfo;
+        uint32_t cfo_from_device;
         uint32_t nof_dmrs_pilots;
         uint32_t nof_cdm;
         float    min_snr_power;
@@ -737,9 +741,25 @@ static void encode_reformat(stage_encoder&                             s,
                 noise.beta,
                 noise.cfo,
                 noise.compensate_cfo ? 1u : 0u,
+                noise.cfo_from_device ? 1u : 0u,
                 noise.nof_dmrs_pilots,
                 noise.nof_cdm,
                 noise.min_snr_power};
+      // The parameter block is a hand-written mirror of mmse_noise_params in
+      // ocudu_mmse_reformat.metal, and a wrong SIZE cannot be caught here (the kernel receives a
+      // pointer) while a wrong FIELD is invisible to a size assert - both have happened in this file
+      // (see the sigma2 mirror), so the offsets are pinned rather than the size.
+      static_assert(offsetof(mmse_noise_params, beta) == 68, "must match mmse_noise_params::beta");
+      static_assert(offsetof(mmse_noise_params, cfo) == 72, "must match mmse_noise_params::cfo");
+      static_assert(offsetof(mmse_noise_params, compensate_cfo) == 76,
+                    "must match mmse_noise_params::compensate_cfo");
+      static_assert(offsetof(mmse_noise_params, cfo_from_device) == 80,
+                    "must match mmse_noise_params::cfo_from_device");
+      static_assert(offsetof(mmse_noise_params, nof_dmrs_pilots) == 84,
+                    "must match mmse_noise_params::nof_dmrs_pilots");
+      static_assert(offsetof(mmse_noise_params, nof_cdm) == 88, "must match mmse_noise_params::nof_cdm");
+      static_assert(offsetof(mmse_noise_params, min_snr_power) == 92,
+                    "must match mmse_noise_params::min_snr_power");
       for (unsigned i = 0; i != 4; ++i) {
         nparams.dmrs_slots[i] = noise.dmrs_slots[i];
       }
@@ -755,6 +775,7 @@ static void encode_reformat(stage_encoder&                             s,
       [enc setBytes:noise.symbol_start_epochs
              length:static_cast<NSUInteger>(ocudu::MAX_NSYMB_PER_SLOT) * sizeof(float)
              atIndex:5];
+      [enc setBuffer:cfo_buf offset:0 atIndex:6];
       // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (its reduction tree is written for it).
     [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }

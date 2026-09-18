@@ -331,7 +331,10 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   gpu_epochs    = alloc_aligned<float>(MAX_NSYMB_PER_SLOT);
   gpu_ls_ref    = alloc_aligned<float>(k_ls_floats);
   gpu_ls_out    = alloc_aligned<float>(k_ls_floats);
-  gpu_ls_cfo    = alloc_aligned<float>(1);
+  // The hop's CFO, in kCfoSlots rotating slots (see the member's note): the extraction writes the
+  // current one, the noise reformat reads it back on the device, and the slot outlives both because a
+  // later hop on this same pooled instance must not overwrite it before that read happens.
+  gpu_ls_cfo    = alloc_aligned<float>(kCfoSlots);
   // S-7f-5w: the frequency-smoothed copy of the hop's pilots and the noise variance the device
   // leaves behind. Both are read in the SAME command buffer that produces the LSE.
   gpu_ls_smoothed = alloc_aligned<float>(k_ls_floats);
@@ -511,7 +514,8 @@ float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estima
   // difference between the two CFO estimators - and on a 4-layer capture whose estimates differ by
   // 5e-3 it made the device disagree with this reference by 1.4e-02, while agreeing to 1.3e-07 once
   // the kernel's own CFO was used. On a host-built LSE the host's estimate is the matching one.
-  const std::optional<float> cfo_ref = device_ls_valid ? std::optional<float>(gpu_ls_cfo[0]) : args.cfo_hop;
+  const std::optional<float> cfo_ref =
+      device_ls_valid ? std::optional<float>(gpu_ls_cfo[cfo_slot_]) : args.cfo_hop;
 
   // Noise variance from the existing classical estimator, averaged over the CDM layer pairs.
   float    sigma2  = 0.0F;
@@ -1002,6 +1006,16 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         nof_v_pilots = nof_pilots;
       }
 
+      // ---- This hop's CFO slot (see kCfoSlots in the header) --------------------------------------
+      //
+      // Advance the rotation and carry the previous slot's value forward, BOTH on the host and BOTH
+      // before the extraction is submitted: the kernel writes this slot only when the hop has two or
+      // more DM-RS symbols (mmse_pilots_cfo returns early otherwise), so a hop that cannot estimate a
+      // CFO must find the last one that could - which is precisely what the single buffer this
+      // replaces held, and what the copy reproduces deterministically instead of implicitly.
+      cfo_slot_                   = (cfo_slot_ + 1) % kCfoSlots;
+      gpu_ls_cfo[cfo_slot_]       = gpu_ls_cfo[(cfo_slot_ + kCfoSlots - 1) % kCfoSlots];
+
       metal::mmse_engine::pilots_stage st{};
       // The engine skips the noise-variance stage - leaving the destination untouched - for a geometry
       // outside the kernels' contract, and the build still succeeds: see pilots_stage::sigma2_done.
@@ -1018,7 +1032,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       st.buf_bytes         = k_ls_floats * sizeof(float);
       st.epochs            = gpu_epochs;
       st.lse               = gpu_ls_out;
-      st.cfo               = gpu_ls_cfo;
+      st.cfo               = &gpu_ls_cfo[cfo_slot_];
       // S-7f-5w: the noise variance of this hop, computed in this same command buffer when the host
       // is not the one computing it (OCUDU_CE_DEV_SIGMA2=0).
       st.rx_pilots         = gpu_rx_pilots;
@@ -1072,7 +1086,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // args.cfo_hop - what the noise reformat below compensates when it reduces the variance the
         // equalizer reads. The kernel reproduces the host's estimate bit for bit (measured: both are
         // the same float on every capture tried), but the host value is not available here.
-        args.cfo_hop = std::optional<float>(gpu_ls_cfo[0]);
+        args.cfo_hop = std::optional<float>(gpu_ls_cfo[cfo_slot_]);
         account_hop_cfo(args.cfo_hop);
         // S-7f-5w: and it computed this hop's noise variance, in the command buffer that just
         // completed - so the scalar is valid now, with no extra synchronisation. NOT "sigma2 != nullptr":
@@ -1110,7 +1124,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                        nof_layers,
                        max_rel,
                        nof_bad,
-                       static_cast<double>(gpu_ls_cfo[0]),
+                       static_cast<double>(gpu_ls_cfo[cfo_slot_]),
                        args.cfo_hop.has_value() ? static_cast<double>(*args.cfo_hop) : 0.0);
           // Per-symbol/per-pilot detail: a small relative error on EVERY pilot is the signature of a
           // neighbouring-subcarrier read (adjacent channel values are similar), while a rotation-like
@@ -1591,6 +1605,14 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       reformat.noise.dmrs_re_bits        = gpu_ce_dmrs_re_bits;
       reformat.noise.beta                = args.beta_scaling;
       reformat.noise.compensate_cfo      = args.compensate_cfo_flag;
+      // Where K4's rotation takes its CFO from (see noise_stage_t). The extraction wrote this hop's
+      // own estimate into the slot reserved for it, and the kernel reads it there - which is what
+      // keeps the scalar out of the host's hands and lets the weights command buffer be encoded
+      // without waiting for the extraction first. When the device did not build the pilots (the cold
+      // path, or a route without the device extraction) the host pre-stage's answer is the matching
+      // one and travels as a parameter.
+      reformat.noise.cfo_dev         = &gpu_ls_cfo[cfo_slot_];
+      reformat.noise.cfo_from_device = device_ls_valid;
       // The same normalization and SINR ceiling the host applies to the variance it reports.
       reformat.noise.nof_dmrs_pilots     = args.nof_symbol_pilots * npt;
       reformat.noise.nof_cdm             = divide_ceil(nof_layers, 2);

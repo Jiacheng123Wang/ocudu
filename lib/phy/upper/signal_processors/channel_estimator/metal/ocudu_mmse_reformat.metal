@@ -151,8 +151,12 @@ struct mmse_noise_params {
   uint  dmrs_slots[4];    // Slot symbols carrying DM-RS in this hop, ascending (the estimator
                           // produces at most MAX_DMRS_SYMBOLS = 4 per hop).
   float beta;             // DM-RS to data amplitude scaling.
-  float cfo;              // Estimated carrier frequency offset of the hop.
+  float cfo;              // Estimated carrier frequency offset of the hop: the HOST's estimate, used
+                          // when the device did not build the pilots (see cfo_from_device).
   uint  compensate_cfo;   // 0 or 1.
+  uint  cfo_from_device;  // 1: take the CFO out of cfo_dev instead of the field above. The extraction
+                          //    wrote it in the command buffer this stage is ordered after, so the host
+                          //    never has to read that scalar back before this one can be encoded.
   // Finalization of the value the equalizer consumes (identical to the host's).
   uint  nof_dmrs_pilots;  // Pilots of the hop (all DM-RS symbols and layers).
   uint  nof_cdm;          // CDM groups of the transmission (ceil(nof_layers / 2)).
@@ -206,9 +210,17 @@ kernel void mmse_noise(device const float*  h [[buffer(0)]],
                        device float*        nv [[buffer(3)]],        // one value per estimator
                        constant mmse_noise_params& p [[buffer(4)]],
                        constant float*      epochs [[buffer(5)]],    // symbol start times, in symbols
+                       device const float*  cfo_dev [[buffer(6)]],   // this hop's CFO (one value)
                        uint tid [[thread_position_in_threadgroup]],
                        uint tg_size [[threads_per_threadgroup]])
 {
+  // The CFO the rotation below uses, read ONCE up front. On the device route it comes out of the
+  // extraction's own buffer - the slot the estimator reserved for THIS hop, which is what lets the
+  // caller encode this stage without first reading that scalar back to the host; on the host route
+  // the pre-stage's answer arrives in the parameter block. Hoisting it also keeps the load out of
+  // the per-symbol loop.
+  const float cfo = (p.cfo_from_device != 0) ? cfo_dev[0] : p.cfo;
+
   float acc      = 0.0F;
   float rsrp_acc = 0.0F; // SUM |H|^2 over the hop's DM-RS symbols, layers and pilots
 
@@ -246,7 +258,7 @@ kernel void mmse_noise(device const float*  h [[buffer(0)]],
         if (p.compensate_cfo != 0) {
           // The same rotation the host applies: the CFO times the start time of the symbol, the
           // latter being an input (it depends on the cyclic prefix, not on the symbol index).
-          const float phase = 2.0F * M_PI_F * p.cfo * epochs[sym];
+          const float phase = 2.0F * M_PI_F * cfo * epochs[sym];
           const float c     = cos(phase);
           const float s     = sin(phase);
           predicted = float2{predicted.x * c - predicted.y * s, predicted.x * s + predicted.y * c};

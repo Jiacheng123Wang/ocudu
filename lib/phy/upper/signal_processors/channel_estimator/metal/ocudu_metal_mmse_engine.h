@@ -129,6 +129,23 @@ public:
       float    beta                         = 1.0F;
       float    cfo                          = 0.0F;
       bool     compensate_cfo               = false;
+      /// \brief Where the rotation's CFO comes from.
+      ///
+      /// The hop's CFO is produced in one of two places and the kernel has to be told which. When the
+      /// DEVICE built the pilots (K0-a), its own estimate is written into \c cfo_dev inside the
+      /// extraction's command buffer, and this stage - ordered after it - reads it there; when the host
+      /// pre-stage built them instead (the cold path, or a route without the device extraction), the
+      /// host's answer is the matching one and travels as the \c cfo parameter.
+      ///
+      /// \note Why the device's value is not simply read back into \c cfo, which is what this replaces:
+      /// that read cannot happen until the extraction's command buffer has COMPLETED, so the host had
+      /// to wait for it before it could encode this one - and the device then sat idle for the rest of
+      /// that hand-over (measured on air: 65us of a 211us lane gap, of which ~45us is the driver's
+      /// completion wake-up and only ~20us is host work). \c cfo_dev points at the rotating slot THIS
+      /// hop reserved (see port_channel_estimator_metal_mmse_impl.h), so a later hop on the same pooled
+      /// estimator instance cannot overwrite it before this read.
+      const float* cfo_dev         = nullptr;
+      bool         cfo_from_device = false;
       /// Pilots of the hop (all its DM-RS symbols and layers) and the CDM groups of the
       /// transmission, i.e. the sample count the host normalizes the variance by, plus the SINR
       /// ceiling it bounds it with.
