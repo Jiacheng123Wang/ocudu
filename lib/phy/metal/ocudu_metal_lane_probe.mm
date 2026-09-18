@@ -24,6 +24,13 @@ namespace {
 struct lane_entry {
   id<MTLCommandBuffer> cb    = nil;
   gpu_lane_probe::stage which = gpu_lane_probe::stage::other;
+  /// Host reading of this command buffer's commit, on the same clock as the estimator's stage entry
+  /// (see ocudu_metal_lane_clock.h). The GPU timestamps say when a command buffer RAN; only this says
+  /// when the host let it run. The distance between two of these readings is what the host spent
+  /// between the two stages, and read against the device's own span for the same interval it tells
+  /// "the device was busy" apart from "the device had nothing to run yet" - which the gap, being a
+  /// single number, cannot.
+  ocudu::metal::lane_host_clock::clock::time_point commit_time{};
 };
 
 /// Command buffers of the lane this thread is filling. One lane per thread: the chained stages of
@@ -87,6 +94,41 @@ struct lane_stats_t {
   /// estimator's own pipeline is what to shorten); a large one says the target is submission.
   std::vector<double> start_delay_us;
   std::vector<double> period_us;
+
+  /// \brief The device's idle time inside the lane, split by WHERE it sits: the distance between one
+  /// stage's last GPU end and the next stage's first GPU start. Together the two account for the whole
+  /// of gap_us whenever the lane holds one command buffer per stage, which is what every air leg since
+  /// the extraction/weights split measured (3.00 cbs/lane, max 3) - and on air they close it exactly
+  /// (measured: 125.3 + 78.0 = 203.3us).
+  ///
+  /// Why they are kept apart: they do not have the same owner, and the difference decides what to
+  /// shorten.
+  ///
+  ///   * \c hole_to_weights_us is the HOST's. The extraction command buffer is committed, runs its own
+  ///     span, and the device is then idle until the weights command buffer is committed - measured at
+  ///     125.3us, against a 238.3us extraction-commit-to-weights-commit distance and a 116.6us
+  ///     extraction. The queue accounts for ~4us of it, so the hole IS "the host had not handed the
+  ///     second command buffer over yet", and there is a real dependency behind it: the weights
+  ///     command buffer's parameters carry the CFO the host reads OUT of the extraction's buffer, so
+  ///     it cannot be encoded before that command buffer completed (see build_pilots_lse() and
+  ///     reformat_stage::noise_stage_t::cfo);
+  ///   * \c hole_to_burst_us is the DEVICE's. The burst is committed long before the weights command
+  ///     buffer can have finished (measured: 86.5us after the weights' commit, against that command
+  ///     buffer's 340.6us span), so it is already queued and waiting on the fence when the weights
+  ///     command buffer ends.
+  std::vector<double> hole_to_weights_us;
+  std::vector<double> hole_to_burst_us;
+
+  /// \brief The same two transitions on the HOST clock: the extraction's commit to the weights', and
+  /// the weights' to the burst's. Read next to the device figures above, not instead of them.
+  ///
+  /// The comparison that decides the question: the weights command buffer cannot END sooner than its
+  /// own GPU span after its commit, so a burst committed inside that span was handed over before the
+  /// device could possibly have needed it - and a burst committed after it was the device waiting for
+  /// the host. Both readings are host-vs-host and GPU-vs-GPU, so no assumption is made about the two
+  /// clocks sharing a time base.
+  std::vector<double> host_to_weights_us;
+  std::vector<double> host_to_burst_us;
 
   /// Busy time and command buffers per stage (index = stage).
   double   stage_busy_us[static_cast<unsigned>(gpu_lane_probe::stage::count)] = {};
@@ -255,7 +297,7 @@ void gpu_lane_probe::register_commit(id<MTLCommandBuffer> cb, stage which)
   if (cb == nil) {
     return;
   }
-  thread_state().pending.push_back(lane_entry{cb, which});
+  thread_state().pending.push_back(lane_entry{cb, which, ocudu::metal::lane_host_clock::clock::now()});
 }
 
 void gpu_lane_probe::close_lane()
@@ -336,6 +378,67 @@ void gpu_lane_probe::close_lane()
     s.stage_busy_us[i] += stage_busy[i] * 1e6;
     s.stage_cbs[i] += stage_cbs[i];
   }
+
+  // ---- Where the lane's gap actually sits (see the two series' comments in lane_stats_t) ----------
+  //
+  // Per stage, the boundaries of its command buffers: the earliest GPU start, the latest GPU end and
+  // the earliest host commit. Taken from the entries rather than from the running totals above so a
+  // stage that ever commits more than one command buffer still yields one boundary.
+  {
+    const auto   idx_of = [](stage which) { return static_cast<unsigned>(which); };
+    const size_t n      = static_cast<size_t>(stage::count);
+    std::vector<double> stage_start(n, 0.0);
+    std::vector<double> stage_end(n, 0.0);
+    std::vector<double> stage_host(n, 0.0);
+    std::vector<bool>   stage_gpu(n, false);
+
+    // The host reference is the lane's earliest commit - the extraction's, committed first - so every
+    // host reading below is an offset from the instant the 'entry -> extraction commit' series ends at.
+    // entries_for_starts is non-empty here: it is filled in the same branch that sets \c any.
+    lane_host_clock::clock::time_point host_ref = entries_for_starts.front().commit_time;
+    for (const lane_entry& entry : entries_for_starts) {
+      host_ref = std::min(host_ref, entry.commit_time);
+    }
+    const auto host_us = [&](const lane_entry& entry) {
+      return std::chrono::duration<double, std::micro>(entry.commit_time - host_ref).count();
+    };
+
+    for (const lane_entry& entry : entries_for_starts) {
+      const unsigned i     = idx_of(entry.which);
+      const double   start = entry.cb.GPUStartTime;
+      const double   end   = entry.cb.GPUEndTime;
+      if (!stage_gpu[i]) {
+        stage_gpu[i]   = true;
+        stage_start[i] = start;
+        stage_host[i]  = host_us(entry);
+      } else {
+        stage_start[i] = std::min(stage_start[i], start);
+        stage_host[i]  = std::min(stage_host[i], host_us(entry));
+      }
+      stage_end[i] = std::max(stage_end[i], end);
+    }
+
+    const auto transition = [&](stage from, stage to, std::vector<double>& hole,
+                                std::vector<double>& host_span) {
+      const unsigned f = idx_of(from);
+      const unsigned t = idx_of(to);
+      if (!stage_gpu[f] || !stage_gpu[t]) {
+        return;
+      }
+      const double h = (stage_start[t] - stage_end[f]) * 1e6;
+      // A stage's commands may overlap in principle; a negative distance would not be a hole, so it is
+      // left out rather than counted as zero.
+      if (h >= 0.0) {
+        hole.push_back(h);
+      }
+      host_span.push_back(stage_host[t] - stage_host[f]);
+    };
+    transition(stage::channel_estimator, stage::channel_estimator_weights, s.hole_to_weights_us,
+               s.host_to_weights_us);
+    transition(stage::channel_estimator_weights, stage::equalizer_demapper, s.hole_to_burst_us,
+               s.host_to_burst_us);
+  }
+
   // The host side of this lane's gap (see ocudu_metal_lane_clock.h). -1 means unmeasured (a route
   // without the estimator probe), and those samples are left out instead of counted as zero.
   if (metal::lane_clock.handover_us >= 0.0) {
@@ -397,6 +500,10 @@ void gpu_lane_probe::report()
   std::vector<double> busy;
   std::vector<double> gap;
   std::vector<double> period;
+  std::vector<double> hole_to_weights;
+  std::vector<double> hole_to_burst;
+  std::vector<double> host_to_weights;
+  std::vector<double> host_to_burst;
   double              stage_busy[static_cast<unsigned>(stage::count)] = {};
   uint64_t            stage_cbs[static_cast<unsigned>(stage::count)]  = {};
   uint64_t            lanes          = 0;
@@ -423,6 +530,10 @@ void gpu_lane_probe::report()
     busy      = s.busy_us;
     gap       = s.gap_us;
     period    = s.period_us;
+    hole_to_weights = s.hole_to_weights_us;
+    hole_to_burst   = s.hole_to_burst_us;
+    host_to_weights = s.host_to_weights_us;
+    host_to_burst   = s.host_to_burst_us;
     for (unsigned i = 0; i != static_cast<unsigned>(stage::count); ++i) {
       stage_busy[i] = s.stage_busy_us[i];
       stage_cbs[i]  = s.stage_cbs[i];
@@ -477,6 +588,17 @@ void gpu_lane_probe::report()
   // command queue). Printed next to the gap it belongs to instead of being inferred from it.
   print_series("gap: stage entry -> extraction commit (host)", s.handover_us);
   print_series("gap: commit -> first command buffer starts (queue)", s.start_delay_us);
+  // The lane's gap split by where it sits, with the host's own reading of the same two transitions
+  // next to each device hole (see lane_stats_t). The two device figures add up to gap whenever the
+  // lane holds one command buffer per stage; the host figures say whether the host had handed that
+  // command buffer over by then.
+  print_series("gap: extraction end -> weights start (device)", hole_to_weights);
+  print_series("gap: weights end -> burst start (device)", hole_to_burst);
+  print_series("host: extraction commit -> weights commit", host_to_weights);
+  // NOT "extraction commit -> burst commit" - the transition this series is filled from starts at the
+  // WEIGHTS commit, and the two are far apart (measured: 238.3us vs 94.6us on air), which is exactly
+  // the mistake this label spelled out once.
+  print_series("host: weights commit -> burst commit", host_to_burst);
   print_series("period", period);
 
   print_front_end();
