@@ -688,6 +688,9 @@ private:
   /// geometry (a host-side table, see get_fd_smoothing_filter()).
   float*                    gpu_ls_smoothed = nullptr;
   float*                    gpu_ls_sigma2   = nullptr;
+  /// Byte offset (in floats) of THIS hop's sigma2 block within \c gpu_ls_sigma2, which holds
+  /// kSigma2Blocks of them. See kSigma2Blocks in the .cpp for why one block is not enough.
+  unsigned                  sigma2_base_    = 0;
   std::array<float, 32>     fd_filter{};
   unsigned                  fd_filter_len = 0;
   /// Whether the host asks the device for sigma2 (OCUDU_CE_DEV_SIGMA2=0 keeps the host computation,

@@ -267,6 +267,16 @@ enum sigma2_slot : unsigned {
 static_assert(kRatioSlot > 0, "The ratio slot must not be 0: 0 is corr_stage::sigma2_slot's 'host value'.");
 static_assert(kSigma2Slots > kPowerMean, "Every sigma2 slot must fit in the buffer the engine wraps.");
 
+/// \brief How many of those blocks the buffer holds, i.e. how many hops' scalars can be outstanding at
+/// once. The same reason as the CFO's rotating slot (see kCfoSlots in the header), and the same count:
+/// a pooled estimator instance is handed to a later hop while the lane of the hop it just submitted is
+/// still in flight - the estimator's own code says so, it completes the previous batch at the START of
+/// the next hop because "it reads the very staging slots this hop is about to overwrite". The
+/// correlation stage reads this block from the WEIGHTS command buffer, one command buffer after the
+/// extraction wrote it, so with a single block a later hop's extraction overwrites it first.
+static constexpr unsigned kSigma2Blocks = 8;
+static_assert((kSigma2Blocks & (kSigma2Blocks - 1)) == 0, "the block rotation assumes a power of two");
+
 /// OCUDU_CE_LS_CHECK=1 compares the device's least-squares pilots against the host's, so both have
 /// to exist: it needs the host pre-stage (see stage_produces_ls_pilots()).
 bool ls_check_enabled()
@@ -343,7 +353,7 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // from - all four written by the extraction's own command buffer (mmse_pilots_power). The host
   // derives the ratio it uses from [0] and [1]; the device may load A's diagonal straight from
   // kRatioSlot, which is the same float as long as ocudu_mmse_pilots.metal keeps -fno-fast-math.
-  gpu_ls_sigma2   = alloc_aligned<float>(kSigma2Slots);
+  gpu_ls_sigma2   = alloc_aligned<float>(kSigma2Blocks * kSigma2Slots);
 
   // Glue #2 (S-7f-5u): the DEVICE writes the engine's pilot vectors y out of the pilots it just
   // produced (gpu_ls_out), which removes the host's copy of them into the y slots - the last CPU
@@ -1015,6 +1025,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // replaces held, and what the copy reproduces deterministically instead of implicitly.
       cfo_slot_                   = (cfo_slot_ + 1) % kCfoSlots;
       gpu_ls_cfo[cfo_slot_]       = gpu_ls_cfo[(cfo_slot_ + kCfoSlots - 1) % kCfoSlots];
+      // The sigma2 block rotates with it, and for the same reason (see kSigma2Blocks). Unlike the CFO
+      // it needs no carry-forward: every slot of the block is written unconditionally when the stage
+      // runs at all, and when it does not the caller is told (pilots_stage::sigma2_done) and reads
+      // neither the host's copy nor the device's.
+      sigma2_base_                = (sigma2_base_ + kSigma2Slots) % (kSigma2Blocks * kSigma2Slots);
 
       metal::mmse_engine::pilots_stage st{};
       // The engine skips the noise-variance stage - leaving the destination untouched - for a geometry
@@ -1039,7 +1054,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       st.rx_bytes          = 2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * (MAX_LAYERS / 2) *
                              MAX_NOF_PILOTS_SYMBOL * sizeof(float);
       st.smoothed          = gpu_ls_smoothed;
-      st.sigma2            = device_sigma2_enabled ? gpu_ls_sigma2 : nullptr;
+      st.sigma2            = device_sigma2_enabled ? (gpu_ls_sigma2 + sigma2_base_) : nullptr;
       // S-7g-20: the divisor of that stage's mean power, i.e. the host's own nof_power_pilots - the
       // kernel turns it into out[3] (the mean) and out[2] (the device's ratio; see
       // mmse_pilots_power). Only meaningful when the sigma2 block runs at all, and 0 is its "neither
@@ -1185,7 +1200,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // host turns the sum into the mean instead of reading every pilot back: the loop below is the
     // fallback for the routes without a device reduction (no device LSE, OCUDU_CE_DEV_SIGMA2=0, or a
     // metallib without the kernel), and the tolerance probe's reference.
-    pilots_power = gpu_ls_sigma2[kPowerSum] / static_cast<float>(nof_power_pilots);
+    pilots_power = gpu_ls_sigma2[sigma2_base_ + kPowerSum] / static_cast<float>(nof_power_pilots);
   }
   if (!(device_sigma2_valid && device_sigma2_enabled) || (std::getenv("OCUDU_CE_PP_CHECK") != nullptr)) {
     float host_pilots_power = 0.0F;
@@ -1228,7 +1243,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // Classical noise variance: computed by the DEVICE inside the extraction's command buffer when
   // that path ran (S-7f-5w), by the host otherwise (OCUDU_CE_DEV_SIGMA2=0, no device LSE, or a
   // metallib without the kernels - in which case this is also the CPU-block fallback's value).
-  float sigma2 = (device_sigma2_valid && device_sigma2_enabled) ? gpu_ls_sigma2[kSigma2] : estimate_sigma2(args);
+  float sigma2 =
+      (device_sigma2_valid && device_sigma2_enabled) ? gpu_ls_sigma2[sigma2_base_ + kSigma2] : estimate_sigma2(args);
   if (std::getenv("OCUDU_CE_SIGMA2_CHECK") != nullptr) {
     // Tolerance probe: sigma2 enters A's diagonal with a weight of ~1e-3, so the two are expected to
     // differ in the last bits, not in kind (see ocudu_mmse_pilots.metal).
@@ -1268,7 +1284,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                   (nof_power_pilots != 0) && k0a_ratio_from_device_enabled() &&
                                   (std::getenv("OCUDU_CE_PP_PERTURB") == nullptr);
   // The BASE, not the element: the kernel indexes it with corr_stage::sigma2_slot.
-  device_sigma2_rel = sigma2_from_device ? gpu_ls_sigma2 : nullptr;
+  // The base of THIS hop's block, not of the whole buffer: the kernel indexes it with
+  // corr_stage::sigma2_slot, which is an offset within one block.
+  device_sigma2_rel = sigma2_from_device ? (gpu_ls_sigma2 + sigma2_base_) : nullptr;
   // OCUDU_CE_K0A_RATIO_CHECK=1: the two quotients, in bits, with every operand they were computed
   // from - the device's slot against the host's own two operations on the same two scalars. It is
   // what turned "same expression, same operands, so the same float" into the refutation above, and it
@@ -1277,7 +1295,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       (std::getenv("OCUDU_CE_K0A_RATIO_CHECK") != nullptr)) {
     static std::atomic<uint32_t> ratio_checked{0};
     static std::atomic<uint32_t> ratio_mismatch{0};
-    const float                  dev = gpu_ls_sigma2[kRatioSlot];
+    const float                  dev = gpu_ls_sigma2[sigma2_base_ + kRatioSlot];
     const uint32_t               n   = ratio_checked.fetch_add(1, std::memory_order_relaxed) + 1U;
     if (dev != sigma2_rel) {
       ratio_mismatch.fetch_add(1, std::memory_order_relaxed);
@@ -1300,10 +1318,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                    n,
                    ratio_mismatch.load(std::memory_order_relaxed),
                    nof_power_pilots,
-                   bits(gpu_ls_sigma2[kPowerSum]),
+                   bits(gpu_ls_sigma2[sigma2_base_ + kPowerSum]),
                    bits(pilots_power),
-                   bits(gpu_ls_sigma2[kPowerMean]),
-                   bits(gpu_ls_sigma2[kSigma2]),
+                   bits(gpu_ls_sigma2[sigma2_base_ + kPowerMean]),
+                   bits(gpu_ls_sigma2[sigma2_base_ + kSigma2]),
                    bits(host_ratio),
                    bits(dev),
                    (host_ratio == dev) ? "same" : "DIFF");
