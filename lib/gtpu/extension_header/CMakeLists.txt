@@ -3,6 +3,7 @@
 # Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 set(SOURCES
+  long_pdcp_pdu_number_packing.cpp
   pdcp_pdu_number_packing.cpp
 )
 add_library(ocudu_gtpu_extension_header STATIC ${SOURCES})

@@ -17,3 +17,16 @@ target_link_libraries(pdcp_pdu_number_packing_test
   GTest::gtest_main
 )
 gtest_discover_tests(pdcp_pdu_number_packing_test)
+
+add_executable(long_pdcp_pdu_number_packing_test
+  long_pdcp_pdu_number_packing_test.cpp
+)
+target_include_directories(long_pdcp_pdu_number_packing_test PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(long_pdcp_pdu_number_packing_test
+  ocudu_gtpu_extension_header
+  ocudu_support
+  ocudulog
+  GTest::gtest
+  GTest::gtest_main
+)
+gtest_discover_tests(long_pdcp_pdu_number_packing_test)
