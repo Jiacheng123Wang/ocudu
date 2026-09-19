@@ -31,6 +31,21 @@ unsigned capture_budget()
   return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 8U;
 }
 
+/// \brief Allocation-width filter (OCUDU_UL_DUMP_MAX_RB): only receptions whose allocation is at
+/// most this many PRBs are candidates. Unset (or 0) captures any width.
+///
+/// It exists because WHO built a hop's correlation matrices depends on that width: the estimator
+/// works in blocks of block_prb PRBs (3), and a hop NARROWER than one block takes a different route
+/// through the Metal estimator (S13-P1's leg measured 0.10 host writes per hop on those, and the
+/// 2 PRB rows of every air leg decode at 0.0%). The budget-based selection ("the first N
+/// receptions") essentially never picks one of them out of a data-heavy leg, so the route could not
+/// be recorded at all - which is what this filter fixes.
+unsigned capture_max_rb()
+{
+  const char* env = std::getenv("OCUDU_UL_DUMP_MAX_RB");
+  return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 0U;
+}
+
 std::string make_key(slot_point slot, rnti_t rnti)
 {
   return capture_prefix() + "_" + std::to_string(slot.count()) + "_" + std::to_string(to_value(rnti));
@@ -51,14 +66,20 @@ std::set<std::string>& selected()
   return keys;
 }
 
-bool select(slot_point slot, rnti_t rnti)
+bool select(const pusch_processor::pdu_t& pdu)
 {
+  // The width filter runs FIRST and does not spend the budget: a reception it rejects is not a
+  // candidate, so a leg whose traffic is mostly wide still records the narrow hops it is looking for.
+  const unsigned max_rb = capture_max_rb();
+  if ((max_rb != 0) && (pdu.freq_alloc.get_nof_rb() > max_rb)) {
+    return false;
+  }
   static std::atomic<unsigned> count{0};
   std::lock_guard              lock(selected_mutex());
   if (count.fetch_add(1, std::memory_order_relaxed) >= capture_budget()) {
     return false;
   }
-  selected().insert(make_key(slot, rnti));
+  selected().insert(make_key(pdu.slot, pdu.rnti));
   return true;
 }
 
@@ -106,7 +127,7 @@ bool ocudu::ul_capture::llr_enabled()
 
 void ocudu::ul_capture::capture_grid(const resource_grid_reader& grid, const pusch_processor::pdu_t& pdu)
 {
-  if (!enabled() || !pdu.codeword.has_value() || !select(pdu.slot, pdu.rnti)) {
+  if (!enabled() || !pdu.codeword.has_value() || !select(pdu)) {
     return;
   }
   const std::string name = make_key(pdu.slot, pdu.rnti);

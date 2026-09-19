@@ -694,8 +694,18 @@ device_corr_enabled() && !merge_tail && (n_std_blocks != 0)` —— **比一个�
 * **需要的语料**：**真实**的 1–2 PRB 接收（`ul_capture::capture_grid` 的网格 dump），
   不是裁出来的 —— 裁剪会改掉解调器要重新生成的 DM-RS 序列，**CPU 参考在这个语料上也解不出来**
   （−11.6 dB、全 KO），所以它只能当"路径触发器"（`wip/make_narrow_captures.py` 的用途，
-  语料本身 gitignore）。真语料要从腿上来（`OCUDU_UL_DUMP=…`，且需要"按分配宽度选择"的小改动：
-  现在的选择器只按"前 N 次接收"）。
+  语料本身 gitignore）。
+  真语料要从腿上来。捕获选择器原来只有"前 N 次接收"（`OCUDU_UL_DUMP_COUNT`），
+  在数据流量为主的腿里**几乎不可能**挑到 1–2 PRB 的跳，所以这一批给它加了**按分配宽度过滤**：
+  `OCUDU_UL_DUMP_MAX_RB=<n>`（只把 ≤ n PRB 的接收算作候选，且**不消耗预算**）。取语料的命令：
+
+  ```bash
+  mkdir -p /tmp/narrow_cap
+  sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu narrow-cap \
+       OCUDU_UL_DUMP=/tmp/narrow_cap/cap OCUDU_UL_DUMP_MAX_RB=2 OCUDU_UL_DUMP_COUNT=20
+  # 每条捕获三件套：<prefix>_<slot>_<rnti>{.txt,.bin} 是网格（回放用），_ce.txt/_h.bin/_llr.bin 是结果
+  # 回放：build/lib/phy/upper/channel_processors/metal/ul_chain_replay /tmp/narrow_cap/cap_<slot>_<rnti> --metal --out /tmp/x
+  ```
 * **判据草案**：带修法的腿 ⇒ 契约 **8/8**（写 0.00/跳）、2 PRB 分层的 CRC **> 0**、
   1 PRB 不劣化、27 捕获（3 PRB 以上，不受影响）逐字节不变、单测全过。
 
