@@ -10,8 +10,11 @@
 
 ## 1. 一句话状态 + 下一步
 
-**HEAD = `7d968cfb84`**（工作树干净；**已推送**；`build/hashes.h` 戳 = HEAD，`gnb` 已重建
-⇒ **腿可以直接跑**）。Ubuntu 已 pull：**构建 rc=0、`ctest` 7618/7618 全过**（多的一条是新用例，
+**代码 HEAD = `7d968cfb84`**（**已推送**；本文件是它之后的**文档提交**，工作树干净）。
+`build/hashes.h` 的戳**已刷新到实际 HEAD**（本文件所在的那次提交）⇒ **腿可以直接跑**；
+若 `run_leg.sh` 仍然拒绝（例如这之后又有了新提交），照它给的一行修：
+`touch build/hashes.h && cmake --build build --target gnb`。
+Ubuntu 已 pull：**构建 rc=0、`ctest` 7618/7618 全过**（多的一条是新用例，
 在 `ENABLE_FLOW_PROBES=OFF` 下按设计跳过）。
 
 **本会话做完了用户新加的测量（第 1 条）的离线部分**：`mode=gpu` 下多一条
