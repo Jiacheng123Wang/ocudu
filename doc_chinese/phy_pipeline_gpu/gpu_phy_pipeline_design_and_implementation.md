@@ -847,6 +847,30 @@ weights/apply 链）进入。已 `git checkout` 回退，树回到 P0-② 的状
 **下一步（两件，按序）**：① 给探针一块**专用 scratch**（无竞争），把"权重看到了什么"变成可信读数；
 ② 顺着 `lane_order` 线索查 `e->lane_order` 的设置点与权重那一段的提交路径。
 
+**P0-⑦ 结果（2026-09-21）：缺陷在"那一个命令缓冲内部"，不在调用结构上。**
+
+**引擎调用（`OCUDU_CE_ROUTE` 一次性打印，已撤）**：
+
+```
+默认: [run#1] corr=1 corr_edge=0 nsys=2 nblk=1 L=54 nout=504 defer=1     ← 一跳只调一次
+融合: [run#1] corr=1 corr_edge=1 nsys=2 nblk=1 L=54 nout=504 defer=1     ← 只多 corr_edge=1
+```
+
+⇒ 两臂**每跳都只有一次 `run()`**，参数**只差 `corr_edge`**。融合路线的那**一个**命令缓冲里按编码顺序是
+`[corr 标准前缀][barrier][corr 尾组前缀][barrier][求逆][权重][apply][reformat]`，一次提交。
+
+**⇒ 与探针的硬事实合起来**（权重执行时 A 整槽未写）只有一个解释：**这个缓冲里的 dispatch 没有按编码顺序执行/可见**。
+barrier 已经在两处前缀之后（`!st.burst` 时），而"求逆→权重"之间补的那道**也无效**（P0-⑤ 已测）。
+这正是 §5.4 从第一天就记下的那句嫌疑——"**切 pipeline 会顺带插 barrier**"——的适用面问题。
+
+**⚠ 一条未解释的旁证（记在这里，不当作结论）**：`end_stage(..., WEIGHTS_STAGE)` 在一条腿上被调用 **16 次**，
+而 `run()` 只有 1 次；我没有把 `end_stage` 的其它调用者枚举完，所以这 16 次到底是谁**未查**。
+
+**下一步（顺序不变，工具更明确了）**：① 给探针一块**专用 scratch**（引擎自己 `newBufferWithLength` 即可，
+不必改估计器接口），让它能**可信地**记录"权重看到了什么"（是零、是 NaN、还是上一跳的残留）；
+② 顺着"缓冲内顺序"查：**哪个 dispatch 在什么条件下会越过 barrier 的语义**——
+具体要看 `stage_pipeline` 在 `!st.burst` 时如何保持/切换 encoder，以及 Metal 对**同一 encoder 内连续 dispatch** 的排序保证到底给了什么。
+
 **P0-(b) 后端编码依赖前端完成后的什么：答案出人意料——不需要，墙不在依赖上，在队列数上。**
 
 * 车道 burst 机制（`ocudu_metal_burst.mm`）**本来就是"多个 stage 共享一个命令缓冲、一次提交"**：
