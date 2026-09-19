@@ -1810,7 +1810,10 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   const unsigned nout = c.nf * MAX_NSYMB_PER_SLOT;
 
   // Sizes first: the kernel parameters and the zero-copy mapping both need them.
-  const NSUInteger a_per_sys   = static_cast<NSUInteger>(c.l) * c.l;
+  // EXPERIMENT: the A kernel covers the slot (it writes the pad), so its dispatch and mapped extent
+  // are the slot's.
+  const NSUInteger a_ls        = (c.a_l_stride != 0) ? c.a_l_stride : c.l;
+  const NSUInteger a_per_sys   = a_ls * a_ls;
   const NSUInteger rhp_per_sys = static_cast<NSUInteger>(nout) * c.l;
   // How much of each slot the KERNELS actually touch. Both write with the SLOT's row stride (Ls, see
   // mmse_corr_params and the two kernels: `a_sys[...o * p.Ls + col]`), so a block narrower than its
@@ -1825,8 +1828,8 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   // zero - while A (a square l x l block, whose extent 18 * 54 + 18 still fits inside the round-up of
   // 18 * 18) came out bit-identical. That asymmetry is exactly why k0d, which covers the standard
   // group where Ls == L, never saw this.
-  const NSUInteger Ls        = (c.a_l_stride != 0) ? c.a_l_stride : c.l;
-  const NSUInteger a_extent   = (static_cast<NSUInteger>(c.l) - 1) * Ls + c.l;
+  const NSUInteger Ls        = a_ls;
+  const NSUInteger a_extent   = a_ls * a_ls;
   const NSUInteger rhp_extent = (static_cast<NSUInteger>(nout) - 1) * Ls + c.l;
   // The batch is mapped by the SYSTEM stride, not by the packed per-system size: with a slot stride
   // wider than the block order the last system reaches past nof_systems * a_per_sys. A zero leaves

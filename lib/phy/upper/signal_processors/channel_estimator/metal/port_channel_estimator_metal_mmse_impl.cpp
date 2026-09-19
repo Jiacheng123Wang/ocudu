@@ -2056,6 +2056,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         check.nof_systems = nof_layers;
         check.a_stride    = L_std_geom;
         check.r_stride    = nout_std_geom;
+        check.nof_blocks  = n_std_blocks;
         for (unsigned sym : dmrs_sym) {
           check.dmrs_slots.push_back(sym);
         }
@@ -2459,6 +2460,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           check.nof_systems = nof_layers;
           check.a_stride   = st.L;
           check.r_stride   = st.nout;
+          check.nof_blocks = n_std_blocks;
           for (unsigned sym : edge_dmrs) {
             check.dmrs_slots.push_back(sym);
           }
@@ -3668,7 +3670,47 @@ port_channel_estimator_metal_mmse_impl::epoch_geometry_of(const fd_td_estimation
 
 void port_channel_estimator_metal_mmse_impl::run_pending_corr_checks()
 {
+  // TEMPORARY DIAGNOSTIC (OCUDU_CE_CHAIN_MAP): where the NaNs are ALONG THE CHAIN a device-built group
+  // feeds - A (as the inversion left it), W (the weights) and h (after the apply). Comparing the A
+  // slot alone could not tell a symptom from a cause: with a clean A the edge block's h still came out
+  // NaN, so the first NaN along this chain is what identifies the stage to look at.
+  const bool chain_map = (std::getenv("OCUDU_CE_CHAIN_MAP") != nullptr);
+  const auto scan      = [](const float* base, std::size_t n) {
+    std::size_t nan_cnt = 0;
+    std::size_t nz_cnt  = 0;
+    for (std::size_t i = 0; i != n; ++i) {
+      if (std::isnan(base[i])) {
+        ++nan_cnt;
+      }
+      if (base[i] != 0.0F) {
+        ++nz_cnt;
+      }
+    }
+    std::fprintf(stderr, " nan=%zu nz=%zu", nan_cnt, nz_cnt);
+  };
+
   for (const pending_corr_check& c : pending_corr_checks_) {
+    if (chain_map) {
+      for (unsigned sys = 0; sys != c.nof_systems; ++sys) {
+        const std::size_t a_off = static_cast<std::size_t>(c.sys_offset + sys) * c.a_stride * c.a_stride;
+        const std::size_t w_off = static_cast<std::size_t>(c.sys_offset + sys) * c.r_stride * c.a_stride;
+        const std::size_t h_stride = static_cast<std::size_t>(c.nof_blocks) * 2 * c.r_stride;
+        const std::size_t h_off    = static_cast<std::size_t>(c.sys_offset + sys) * h_stride;
+        std::fprintf(stderr, "[chain_map] group=%s sys=%u | A:", c.which, sys);
+        scan(gpu_a + a_off, static_cast<std::size_t>(c.a_stride) * c.a_stride);
+        std::fprintf(stderr, " | W:");
+        scan(gpu_w + w_off, static_cast<std::size_t>(c.r_stride) * c.a_stride);
+        std::fprintf(stderr, " | h:");
+        scan(gpu_h + h_off, h_stride);
+        // y: the staged received pilots the apply reads (W . y). The engine offsets it by the system
+        // stride 2 * n_blk * L (engine_run()'s y_slot).
+        const std::size_t y_stride = static_cast<std::size_t>(c.nof_blocks) * 2 * c.a_stride;
+        const std::size_t y_off    = static_cast<std::size_t>(c.sys_offset + sys) * y_stride;
+        std::fprintf(stderr, " | y:");
+        scan(gpu_y + y_off, y_stride);
+        std::fprintf(stderr, "\n");
+      }
+    }
     std::fprintf(stderr,
                  "[corr_check] group=%s: the device built these slots elsewhere - comparing them with the "
                  "host's own build of the same geometry (L=%u nout=%u sys_offset=%u n_sys=%u strides=%u/%u)\n",

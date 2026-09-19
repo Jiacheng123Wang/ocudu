@@ -561,6 +561,8 @@ private:
     unsigned nof_systems = 0;
     unsigned a_stride    = 0;
     unsigned r_stride    = 0;
+    /// Slot count of the batch, for the h window (engine_strides::n_blk).
+    unsigned nof_blocks = 0;
   };
 
   /// Compares every pending group's device slots against the host's own build of the same geometry,

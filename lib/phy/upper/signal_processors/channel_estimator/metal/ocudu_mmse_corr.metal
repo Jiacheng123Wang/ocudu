@@ -128,13 +128,21 @@ kernel void mmse_corr_a(device float* a [[buffer(0)]],
 {
     // One thread per matrix element of one system: the second grid dimension is the SYSTEM, so the
     // whole batch is one dispatch (a dispatch per system cost more than the host loops it replaces).
-    if ((gid.x >= p.L * p.L) || (gid.y >= p.nof_systems)) {
+    // EXPERIMENT (not committed): the grid covers the whole slot and this kernel writes the
+    // blockdiag identity in the pad, so the pad's writer and the inversion's read are both inside the
+    // command buffer instead of depending on the host store's visibility.
+    const uint Ls = (p.Ls != 0u) ? p.Ls : p.L;
+    if ((gid.x >= Ls * Ls) || (gid.y >= p.nof_systems)) {
         return;
     }
     device float* a_sys = a + (ulong)gid.y * p.a_sys;
     const uint    i     = gid.x;
-    const uint    row   = i / p.L;
-    const uint    col   = i % p.L;
+    const uint    row   = i / Ls;
+    const uint    col   = i % Ls;
+    if ((row >= p.L) || (col >= p.L)) {
+        a_sys[(ulong)row * Ls + col] = (row == col) ? 1.0f : 0.0f;
+        return;
+    }
     const uint t1  = row / p.npf;
     const uint f1  = row % p.npf;
     const uint t2  = col / p.npf;
