@@ -78,6 +78,11 @@ public:
                   const dmrs_pusch_estimator_results& est_results,
                   const configuration&                config) override;
 
+  // See the pusch_demodulator interface for the documentation.
+  bool serves_hop_in_place(const dmrs_pusch_estimator_results& est_results,
+                           unsigned                           nof_ports,
+                           unsigned                           nof_layers) const override;
+
 private:
   /// Data type for representing an RE mask within an OFDM symbol.
   using re_symbol_mask_type = bounded_bitset<MAX_NOF_SUBCARRIERS>;

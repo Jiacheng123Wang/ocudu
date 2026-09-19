@@ -240,6 +240,15 @@ public:
   /// \note The default reports "no", which is the answer for every estimator that runs on the host.
   virtual bool device_results_cover_last_estimate() const { return false; }
 
+  /// \brief Why the device does not cover the last estimation, or nullptr when it does. See
+  /// port_channel_estimator_results::device_shortfall_reason().
+  virtual const char* device_shortfall_reason() const { return nullptr; }
+
+  /// \brief Whether the shortfall is a route the OPERATOR asked for (a knob) rather than the device
+  /// being unable to serve the hop. See
+  /// port_channel_estimator_results::device_shortfall_is_knob_requested().
+  virtual bool device_shortfall_is_knob_requested() const { return false; }
+
   /// \brief Gets the general Channel State Information.
   ///
   /// \param[out] csi Channel State Information object where the CSI parameters are stored.

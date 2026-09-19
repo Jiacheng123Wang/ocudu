@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 
 namespace ocudu {
 namespace metal {
@@ -117,6 +118,31 @@ constexpr const char* to_string(mmse_refusal reason)
   return "unknown";
 }
 
+/// \brief Whether a reason is a KNOB the operator turned, rather than a hop the device cannot serve.
+///
+/// The fused lane treats the two differently (user ruling, 2026-09-20, design document section 1.8):
+/// an arm the operator asked for - `OCUDU_CE_CPU_LS=1`, `OCUDU_CE_DEV_Y=0`, `OCUDU_CE_CORR_DEV=0`,
+/// `OCUDU_CE_DEV_TA=0`, `OCUDU_CE_DEV_SIGMA2=0`, `OCUDU_CE_CPU_CE=1` - keeps its host route, because
+/// that host route IS the arm. A hop the device could not serve is a different finding: in `mode=gpu`
+/// the host must not cover it, so the consumer fails the grant instead (see phy_pipeline_strict.h).
+///
+/// This is the whole classification: the enum's own `*_disabled` entries are knobs, everything else
+/// (geometry, missing kernel, full table, a build that failed) is the device being unable.
+constexpr bool is_knob_refusal(mmse_refusal reason)
+{
+  switch (reason) {
+    case mmse_refusal::ls_disabled:
+    case mmse_refusal::y_disabled:
+    case mmse_refusal::corr_disabled:
+    case mmse_refusal::ta_disabled:
+    case mmse_refusal::sigma2_disabled:
+    case mmse_refusal::k3_disabled:
+      return true;
+    default:
+      return false;
+  }
+}
+
 /// \brief Counters of the estimator's device-path refusals, printed with the engine statistics.
 ///
 /// Never destroyed on purpose: the report runs from an atexit handler, which runs after the static
@@ -128,6 +154,38 @@ public:
   static void count(mmse_refusal reason)
   {
     counters()[static_cast<unsigned>(reason)].fetch_add(1, std::memory_order_relaxed);
+    hop_reasons() |= (1U << static_cast<unsigned>(reason));
+  }
+
+  // ---- The hop-local view -----------------------------------------------------------------------
+  //
+  // WHY it exists: the process-wide counters answer "how many refusals did this run have", which is
+  // the wrong question for a consumer that has to decide about ONE hop - it needs to know WHICH hop
+  // was refused and WHY, and it needs to know whether the refusal was a knob (an arm the operator
+  // asked for) or the device being unable. A delta over the process-wide counters cannot answer that
+  // when several PUSCH workers run at once; a thread_local mask can, because one hop is processed by
+  // one thread.
+  //
+  // WHAT is recorded: the reason with the LOWEST enumerator index, and the enum is ordered by STAGE
+  // (ls -> y -> corr -> ta -> sigma2 -> k3), with the `*_disabled` knob of a stage before its geometry
+  // reasons. So "lowest index" is "earliest stage", which is the ROOT CAUSE: a refused stage cascades
+  // (no device LSE makes the y scatter refuse, which makes the correlation refuse), and a knob that
+  // disabled an early stage explains everything downstream of it. Both matter, because the consumer's
+  // decision is "was this an arm the operator asked for, or a hop the device could not serve".
+
+  /// \brief Marks the start of a hop: clears the thread-local reason mask. Called once per hop.
+  static void begin_hop() { hop_reasons() = 0; }
+
+  /// \brief The first reason counted since begin_hop(), or nullopt when the hop was not refused.
+  static std::optional<mmse_refusal> first_hop_reason()
+  {
+    const uint32_t mask = hop_reasons();
+    for (unsigned i = 0; i != static_cast<unsigned>(mmse_refusal::count); ++i) {
+      if ((mask & (1U << i)) != 0) {
+        return static_cast<mmse_refusal>(i);
+      }
+    }
+    return std::nullopt;
   }
 
   static uint64_t get(mmse_refusal reason)
@@ -190,6 +248,12 @@ private:
   {
     static std::atomic<uint64_t>* v = new std::atomic<uint64_t>[static_cast<unsigned>(mmse_refusal::count)];
     return v;
+  }
+
+  static uint32_t& hop_reasons()
+  {
+    static thread_local uint32_t mask = 0;
+    return mask;
   }
 };
 

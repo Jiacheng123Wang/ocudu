@@ -93,6 +93,22 @@ public:
                           const resource_grid_reader&         grid,
                           const dmrs_pusch_estimator_results& est_results,
                           const configuration&                config) = 0;
+
+  /// \brief Whether demodulate() would read the channel estimates where the ESTIMATOR produced them.
+  ///
+  /// A caller that must not let the host compute the hop - the fused lane's strict policy, see
+  /// phy_pipeline_strict.h - has to know this BEFORE calling demodulate(), because by the time
+  /// demodulate() runs, a host gather has already produced the soft bits. The answer reflects exactly
+  /// what demodulate() will do: the same predicate, not a copy of it.
+  ///
+  /// \note The default reports false, i.e. "the host would do the work": a demodulator that does not
+  ///       answer is not one a strict caller may trust.
+  virtual bool serves_hop_in_place(const dmrs_pusch_estimator_results& est_results,
+                                   unsigned                           nof_ports,
+                                   unsigned                           nof_layers) const
+  {
+    return false;
+  }
 };
 
 } // namespace ocudu

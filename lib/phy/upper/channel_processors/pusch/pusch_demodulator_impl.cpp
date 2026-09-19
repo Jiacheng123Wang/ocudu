@@ -275,6 +275,17 @@ static float filter_infinite_and_accumulate(unsigned& count, span<const float> i
   return sum;
 }
 
+bool pusch_demodulator_impl::serves_hop_in_place(const dmrs_pusch_estimator_results& est_results,
+                                                  unsigned                           nof_ports,
+                                                  unsigned                           nof_layers) const
+{
+  // The three conditions demodulate() checks, in one place: the knob that forces the host, the topology
+  // the equalizer's kernel can read out of the estimator's buffer, and whether the estimator covered the
+  // hop at all.
+  return !force_host_ch_estimates() && equalizer->consumes_device_estimates(nof_ports, nof_layers) &&
+         est_results.device_results_cover_last_estimate();
+}
+
 void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              codeword_buffer,
                                         pusch_demodulator_notifier&         notifier,
                                         const resource_grid_reader&         grid,
@@ -306,7 +317,9 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   const bool force_host_estimates_now = force_host_ch_estimates();
   const bool equalizer_reads_device    = equalizer->consumes_device_estimates(nof_rx_ports, config.nof_tx_layers);
   const bool estimator_published      = est_results.device_results_cover_last_estimate();
-  const bool estimates_read_in_place  = !force_host_estimates_now && equalizer_reads_device && estimator_published;
+  // ONE definition, shared with serves_hop_in_place(): a strict caller asks the demodulator whether the
+  // host would do the work, and the answer has to be what this function actually does.
+  const bool estimates_read_in_place  = serves_hop_in_place(est_results, nof_rx_ports, config.nof_tx_layers);
 #if defined(OCUDU_METAL_STATS)
   // One-shot routing report (info level, so it lands in the log file): reading the estimates where
   // they were produced is what lets the estimation stay deferred, and the three conditions are

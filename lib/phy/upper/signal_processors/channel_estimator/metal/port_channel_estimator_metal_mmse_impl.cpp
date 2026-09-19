@@ -1358,6 +1358,10 @@ metal::ce_lane_order port_channel_estimator_metal_mmse_impl::ce_lane_order_from_
 
 void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)
 {
+  // Start of a hop, for the refusal record: everything counted from here on belongs to THIS hop, so a
+  // consumer that has to decide about it can ask why the device did not cover it (see
+  // mmse_refusals::begin_hop and device_shortfall_reason()).
+  mmse_refusals::begin_hop();
   // Diagnostics (see ocudu_metal_lane_clock.h): the earliest host reading of this lane. Paired with
   // the shared "front end finished" reading and with the extraction's commit, it splits the lane's
   // GPU gap into "the host had not handed the lane over yet" and "the burst waited on the fence".

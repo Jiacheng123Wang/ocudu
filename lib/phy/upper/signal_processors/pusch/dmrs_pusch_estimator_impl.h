@@ -112,6 +112,12 @@ private:
   bool device_results_cover_last_estimate() const override;
 
   // See the dmrs_pusch_estimator_results interface for the documentation.
+  const char* device_shortfall_reason() const override;
+
+  // See the dmrs_pusch_estimator_results interface for the documentation.
+  bool device_shortfall_is_knob_requested() const override;
+
+  // See the dmrs_pusch_estimator_results interface for the documentation.
   bool sync_device_estimates() const override;
 
   // See the dmrs_pusch_estimator_results interface for the documentation.

@@ -19,6 +19,7 @@
 #include "../port_channel_estimator_average_impl.h"
 #include "channel_statistics_estimator.h"
 #include "ocudu_metal_mmse_engine.h"
+#include "ocudu_mmse_refusals.h"
 #include "ocudu/ocudulog/ocudulog.h"
 
 namespace ocudu {
@@ -211,6 +212,31 @@ private:
     // in the device buffers any more, so a consumer must gather those from host memory (and
     // therefore complete the estimation first).
     return gpu_ce_ready && gpu_nv_ready && !last_estimate_hopping;
+  }
+
+  // See the base class documentation. The reason is the FIRST refusal of this hop (see
+  // mmse_refusals::begin_hop), and "no reason at all" is itself a finding: the device did not cover
+  // the hop and nothing said why (frequency hopping is that case today - the earlier hop's buffers
+  // are gone - and a consumer must NOT read it as "fine").
+  const char* device_shortfall_reason() const override
+  {
+    if (device_results_cover_last_estimate()) {
+      return nullptr;
+    }
+    std::optional<metal::mmse_refusal> reason = metal::mmse_refusals::first_hop_reason();
+    return reason.has_value() ? metal::to_string(*reason)
+                              : "unattributed (the device did not cover this hop and no stage said why)";
+  }
+
+  // See the base class documentation: a refusal by a KNOB is an arm the operator asked for, not a hop
+  // the device could not serve.
+  bool device_shortfall_is_knob_requested() const override
+  {
+    if (device_results_cover_last_estimate()) {
+      return false;
+    }
+    std::optional<metal::mmse_refusal> reason = metal::mmse_refusals::first_hop_reason();
+    return reason.has_value() && metal::is_knob_refusal(*reason);
   }
 
   // See the base class documentation.

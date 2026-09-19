@@ -13,6 +13,7 @@
 #include "../ocudu_metal_mmse_engine.h"
 #include "ocudu_dft_metal_engine.h"
 #include "../ocudu_metal_mmse_engine.h"
+#include "../ocudu_mmse_refusals.h"
 #include "port_channel_estimator_helpers.h"
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/phy/support/support_factories.h"
@@ -1055,6 +1056,33 @@ static bool s12_device_ta_chain_matches_host()
   return (n_bad == 0) && (n_place_bad == 0);
 }
 
+/// \brief Checks the strict policy's taxonomy: every `*_disabled` reason is a KNOB (a route the
+/// operator asked for, see phy_pipeline_strict.h) and every other reason is the device being unable.
+///
+/// It runs here, before any device work, because it is a DECISION and not a default: a new refusal
+/// reason added without deciding which side it is on would otherwise be classified silently as
+/// "capability" - and then a knob would start failing grants in mode=gpu, which is the opposite of what
+/// the arms are for.
+static bool strict_taxonomy_check()
+{
+  constexpr const char* suffix = "_disabled";
+  constexpr size_t      len    = 9;
+  bool                  ok     = true;
+  for (unsigned i = 0; i != static_cast<unsigned>(ocudu::metal::mmse_refusal::count); ++i) {
+    const auto        reason = static_cast<ocudu::metal::mmse_refusal>(i);
+    const std::string name   = ocudu::metal::to_string(reason);
+    const bool        named_as_knob = (name.size() > len) && (name.compare(name.size() - len, len, suffix) == 0);
+    if (ocudu::metal::is_knob_refusal(reason) != named_as_knob) {
+      std::fprintf(stderr,
+                   "strict taxonomy: %s is classified as %s\n",
+                   name.c_str(),
+                   ocudu::metal::is_knob_refusal(reason) ? "a knob" : "the device being unable");
+      ok = false;
+    }
+  }
+  return ok;
+}
+
 int main()
 {
   // The lane order is the DEFAULT route now (OCUDU_CE_LANE_ORDER=wait is the escape hatch), and Test 13
@@ -1063,6 +1091,13 @@ int main()
   // completes the hop it submits and therefore never takes a deferred order.
   unsetenv("OCUDU_CE_LANE_ORDER");
   unsetenv("OCUDU_CE_FUSED_BURST");
+
+  // The strict policy's taxonomy first: it needs no device and it decides whether a refusal fails a
+  // grant or is an arm the operator asked for (see strict_taxonomy_check above).
+  if (!strict_taxonomy_check()) {
+    std::fprintf(stderr, "STRICT TAXONOMY FAIL\n");
+    return 1;
+  }
   // The A/B probes below (K5's OCUDU_CE_RSRP_CHECK and K7+K6's OCUDU_CE_TA_CHECK) compare the DEVICE's
   // reporting values against the HOST's own, which needs the host grid: OCUDU_CE_HOST_GRID=1 is the
   // pre-5c behaviour that unpacks it. The SHIPPED default is 0 (batch 5c: a hop whose reporting values

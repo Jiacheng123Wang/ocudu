@@ -20,6 +20,7 @@
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/phy/phy_pipeline_strict.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc.h"
 #include "ocudu/phy/upper/channel_processors/pusch/formatters.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_codeword_buffer.h"
@@ -32,6 +33,43 @@
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 
 using namespace ocudu;
+
+#if defined(OCUDU_METAL_STATS)
+namespace {
+
+/// \brief Grants failed by the fused lane's strict policy, and the reason that caused the first one.
+///
+/// The per-hop ERROR is the event; this is the number, reported at exit like every other measurement
+/// of this line (see the contract in phy_pipeline_contract.h).
+std::atomic<uint64_t>& strict_failure_count()
+{
+  static std::atomic<uint64_t>* v = new std::atomic<uint64_t>(0);
+  return *v;
+}
+
+const char*& strict_first_reason()
+{
+  static const char* reason = nullptr;
+  return reason;
+}
+
+const bool strict_report_registered = []() {
+  std::atexit([]() {
+    const uint64_t n = strict_failure_count().load(std::memory_order_relaxed);
+    if (n == 0) {
+      return;
+    }
+    std::fprintf(stderr,
+                 "[phy_pipeline] strict: %llu grant(s) failed because the device did not cover the hop "
+                 "(mode=gpu; first reason: %s)\n",
+                 static_cast<unsigned long long>(n),
+                 (strict_first_reason() != nullptr) ? strict_first_reason() : "unreported");
+  });
+  return true;
+}();
+
+} // namespace
+#endif
 
 /// \brief Looks at the output of the validator and, if unsuccessful, fills \c msg with the error message.
 ///
@@ -234,6 +272,68 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
   // stage that decides the equalizer's noise variance and hence the soft-bit scale. The key is set
   // again here because this function may run on a different thread than process().
   ul_capture::set_current(pdu.slot, pdu.rnti);
+
+  // ---- The fused lane's strict policy (user ruling, see phy_pipeline_strict.h) -------------------
+  // The host would compute this hop from here on - gather the estimates, equalize, demodulate - and the
+  // CPU would be back in the loop, which is the one thing mode=gpu claims never happens. The ruling is
+  // that this is an ERROR, so the grant fails HERE, before a single soft bit exists: the same shape the
+  // missing-dependencies path in process() uses (an ERROR, an empty SCH result = CRC KO so the MAC
+  // retransmits, and a return). A hop refused by a KNOB is exempt: the A/B arms exist to take the host
+  // route.
+  //
+  // There are TWO ways the host can end up doing the work, and both have to be closed:
+  //   * the estimator did not cover the hop (its refusal reason is what gets reported), or
+  //   * the estimator covered it, but the demodulator cannot read it where it was produced - a topology
+  //     with more than one receive port or layer (see channel_equalizer::consumes_device_estimates).
+  // That second question is asked of the demodulator itself, so the answer cannot drift from what
+  // demodulate() is about to do.
+  if (phy_pipeline_strict_enabled() && !est_results.device_shortfall_is_knob_requested()) {
+    const bool estimator_covered = est_results.device_results_cover_last_estimate();
+    const bool topology_in_place =
+        dependencies->get_demodulator().serves_hop_in_place(est_results, pdu.rx_ports.size(), pdu.nof_tx_layers);
+    if (!estimator_covered || !topology_in_place) {
+      const char* reported = est_results.device_shortfall_reason();
+      const char* cause =
+          estimator_covered
+              ? "the device route does not read this topology in place (more than one port or layer)"
+              : ((reported != nullptr) ? reported : "no stage reported a cause");
+      // Two sinks on purpose, and they are two DIFFERENT files: ocudulog writes the gNB's log (stdout),
+      // while everything this line's measurements are read from goes to stderr - so the operator sees the
+      // error where errors belong, and a leg's analysis (and the criterion for this policy) can grep the
+      // event without parsing the logger's format.
+      logger.error("PUSCH: slot={} rnti={} the device did not cover this hop ({}), and mode=gpu does not let "
+                   "the host compute it - failing the grant",
+                   pdu.slot,
+                   pdu.rnti,
+                   cause);
+      const std::string marker = fmt::format(
+          "[phy_pipeline] strict: slot={} rnti={} the device did not cover the hop ({}) - the PUSCH fails "
+          "instead of being computed on the host\n",
+          pdu.slot,
+          pdu.rnti,
+          cause);
+      std::fprintf(stderr, "%s", marker.c_str());
+#if defined(OCUDU_METAL_STATS)
+      // One number at exit: it turns "the log flooded" into "it happened N times, first because of X".
+      strict_failure_count().fetch_add(1, std::memory_order_relaxed);
+      if (strict_first_reason() == nullptr) {
+        strict_first_reason() = cause;
+      }
+#endif
+      if (pdu.uci.nof_harq_ack != 0) {
+        notifier.on_uci(
+            {.harq_ack = {.payload = uci_payload_type(pdu.uci.nof_harq_ack), .status = uci_status::invalid},
+             .csi_part1 = {},
+             .csi_part2 = {},
+             .csi       = {}});
+      }
+      if (pdu.codeword.has_value()) {
+        notifier.on_sch({});
+      }
+      return;
+    }
+  }
+
   if (ul_capture::enabled()) {
     // The capture reads host copies of the estimator's results, so it needs them complete. With a
     // deferred estimator that costs the overlap the demodulation below would get, which is the

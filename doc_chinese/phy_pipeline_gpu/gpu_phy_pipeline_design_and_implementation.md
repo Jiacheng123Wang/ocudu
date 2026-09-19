@@ -149,7 +149,7 @@ LDPC 端到端性能**只覆盖信号路径**。以下两类**不适用**主判�
      活了很久**——每一次窄跳都记一条 `corr_geometry`（`narrow-cap` 腿 **620 次**）、宿主建 A、出一个
      "成功"的结果，契约只在退出时说"有穿越"。**若 `mode=gpu` 当初就是"拒绝即报错"，这个缺陷会在
      第一次窄跳当场暴露**，而不是等到空口 2 PRB 的 CRC 恒 0 才被追出来。
-   * **待做**：把"可见"升级为"报错"。**响度已定（2026-09-20 用户选择）：该 PUSCH 失败 + 一行 ERROR**
+   * **✅ 已实现**（2026-09-21，判据见 §5.4）：把"可见"升级为"报错"。**响度按用户选择：该 PUSCH 失败 + 一行 ERROR**
      （abort 被否：会带走整台 gNB，且与本线"abort 属于启动期检查"的既有设计相悖）。
      **实现形状已经存在，照抄即可**：`pusch_processor_impl.cpp:143-161` 的"拿不到依赖"路径就是
      **ERROR + `on_sch({})`（CRC KO ⇒ MAC 重传）+ 直接返回**，源码注释原文："Notify the completion of the
@@ -551,14 +551,28 @@ OCUDU_CE_DEV_Y=0       3.10 读 + 2.65 写 /跳   ← 参考臂：宿主 stage y
 （源码注释假定"切 pipeline 会顺带插 barrier"）。**按本线的规矩：读代码验证，别信注释**（§9 坑 14/15 的同类）。
 判据顺序：先解释那 51,810 字节（**先证明"两个形态本就该相同"，再谈合并**），再谈 `cbs/lane` 下降。
 
-- **★ strict 回退策略**（§1.8 第 1 条的待做项，**响度已定**：该 PUSCH 失败 + 一行 ERROR）：
-  1. 判定规则：`*_disabled`（旋钮）不算错误，其余理由（设备不能）在 `mode=gpu` 下报错 —— 见 §1.8；
-  2. **两个兜底层一起堵**：估计器的 16 个 refusal 点 + 解调器的宿主估计路径
-     （`pusch_demodulator_impl.cpp:862`）；
-  3. 失败形状照抄 `pusch_processor_impl.cpp:143-161`（ERROR + `on_sch({})` = CRC KO + 返回）；
-  4. **判据**：`corpus_sparse/` 的两条稀疏语料在 `mode=gpu` 下必须变成"**该 PUSCH 失败 + ERROR**"，
-     而不是"宿主兜底出结果 + 穿越 2.00/1.00"；同时 §5.6.3 的八个旋钮臂**仍然全部可用**（它们只出
-     `*_disabled`）；27 语料 + 20 窄捕获的 dump **逐字节不变**（strict 不改变任何"设备能覆盖"的跳）。
+- **✅ strict 回退策略：已实现，判据全过**（§1.8 的裁定）。`mode=gpu` 下设备覆盖不到的跳**失败**，
+  不再由宿主算完：
+
+  | 决定 | 落点 |
+  |---|---|
+  | 何时 strict | `phy_pipeline_strict_enabled()`（`include/ocudu/phy/phy_pipeline_strict.h`）：`mode==gpu`；**`OCUDU_GPU_STRICT` 可强制**——离线 harness 从不发布 mode，不可测的策略等于没有策略 |
+  | 谁算作"设备不能" | `is_knob_refusal()`：**只认 `*_disabled`**（旋钮＝A/B 臂主动要求），其余都是设备不能 |
+  | 每跳为什么被拒 | `mmse_refusals::begin_hop()` + **枚举序最小者**（枚举按 stage 排序 ⇒ 最小＝最早 stage＝根因；旋钮在几何理由之前）|
+  | 怎么问出来 | `device_results_cover_last_estimate()`（已有）+ 新增 `device_shortfall_reason()` / `device_shortfall_is_knob_requested()`，经 wrapper 聚合到 `dmrs_pusch_estimator_results` |
+  | **第二个兜底层** | 解调器新增 `serves_hop_in_place()`，与 `demodulate()` **共用同一个判据**（不是抄一份）——它覆盖"估计器覆盖了、但这个拓扑读不进设备"（>1 端口或 >1 层）|
+  | 失败形状 | 照抄既有的"拿不到依赖"路径：`logger.error`（→ gNB 主日志 stdout）+ `[phy_pipeline] strict:` 一行（→ stderr，判据 grep 它）+ `on_sch({})`（CRC KO ⇒ MAC 重传）+ 退出时一行总数 |
+  | 防漂移 | 单测 `strict_taxonomy_check()` 钉住不变式：**名字以 `_disabled` 结尾 ⇔ 分类为旋钮**。新增理由而没做决定，单测当场失败 |
+
+  **判据（全过）**：
+
+  | 判据 | 结果 |
+  |---|---|
+  | 稀疏语料（估计器 shortfall）| ✅ `reason=ls_geometry`、`iterations=0`（授权失败，无软比特）|
+  | **多端口语料**（拓扑层，新增 `corpus_strict/topo_2ports`）| ✅ `reason=…does not read this topology in place…`、`iterations=0` |
+  | 连续对照（设备能覆盖）| ✅ 与 strict 关闭时**完全一样** |
+  | 六个旋钮臂在 strict 下 | ✅ **0 条 strict 行**（`CPU_LS` / `DEV_Y` / `CORR_DEV` / `DEV_TA` / `DEV_SIGMA2` / `CPU_CE`）|
+  | **不改变能覆盖的跳** | ✅ 27 语料 + 20 窄捕获共 **235 个 dump 在 strict=1 下与不 strict 逐字节相同**、全批 0 条 strict 行 |
 - **`ab_dumps.sh` 要能分开报"发布判据"与"调试判据"**（见 §9 坑 12）。
 
 ### 5.5 ✅ S13-P2：那条**每跳往返**消掉了（离线判据全过，空中腿待跑）
@@ -1182,6 +1196,12 @@ for s in _llr.bin _h.bin .bin _ce.txt; do echo "$s: $(cmp -l "${fa%_ce.txt}$s" "
 
 ### 6.5 单元测试
 
+**⚠ 一条必须先知道的实测（2026-09-21）：`port_channel_estimator_metal_mmse_unit_test_ta_chain` 有约 10% 的
+SIGBUS 偶发**（崩在 TA 链第一次 dispatch、0.04 s）。**已用基线归因**：带我的改动 10 次跑出 1 次失败、
+**暂存改动后的基线同样 10 次跑出 1 次失败** ⇒ **既有的、与改动无关**（此前只记过"一次偶发、12 次复跑全过"，
+现在有了频率与基线对照）。
+**⇒ 判读规则**：`ctest -R metal` 红了**先单独复跑那一条**；只有复跑也红，才是回归。
+
 ```bash
 ./build/lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_unit_test
 ```
@@ -1279,6 +1299,7 @@ bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh "" "<knob>"
 | 23 | **★ 用 SIGTERM 停 gNB，收尾统计全部丢失** | `gnb.cpp` 对 SIGINT 走正常收尾（打印契约/`[ul_host]`/`[metal_stats]`/`[ul_gpu_lane]`），对 **SIGTERM 只 flush 日志就退出**。腿 `ota-b3a-final_0919_0734` 因此失去全部跨越计数，20 MB 日志里一行都没有，**事后无法恢复** | **腿一律用 Ctrl-C 停**；判定腿有效的第一眼是报告的 `-- device side` / `-- lane` **两段非空** |
 | 24 | **★ `run_leg.sh` 里的 `> >(tee …)` 让 shell 先回到提示符** | 腿 `probe-iq2llr_0919_2216` 的控制台最后一行是 `[ul_rx] blocks=… gaps=0` **直接贴着提示符**（缺 ` gap_samples=0 ts0_blocks=0` 和换行），而 `.stderr` 文件里那一行**完整且有换行**。不是程序少打 `\n`（源码里就有），是**进程替换的 tee 没有被等待**：gnb 一退出 shell 就打印提示符，tee 还没把最后一段抄到终端 | **已修**：`run_leg.sh` 改成 `exec 3> >(tee …)` / `exec 4> >(tee …)` 拿住两个 tee 的 PID，gnb 退出后先 `exec 3>&- 4>&-` 再 `wait` 这两个 PID（**不关 fd 的话 tee 的 stdin 看不到 EOF，`wait` 会挂住**——实测踩过）。判据：控制台与文件必须一致 |
 | 25 | **★ `gtest_discover_tests` 把每个用例注册成独立进程** | 探针的新测试拆成两个用例（cpu / gpu）：**直接跑二进制通过、`ctest -L support` 变红**——每个 ctest 条目是独立进程，gpu 那个用例看不到前一个用例留下的状态，而它断言的样本数依赖那点状态 | 跨用例共享进程级状态（单例、只能发布一次的 mode）的测试**放在同一个用例里**；而且**必须用 `ctest -L <label>` 跑一遍**才算验过，直接跑二进制不算 |
+| 31 | **★ 把一次红的 Metal 单测当成回归** | `port_channel_estimator_metal_mmse_unit_test_ta_chain` 有约 **10% 的 SIGBUS 偶发**（崩在 TA 链第一次 dispatch），**基线同样复现**（各 10 次跑出 1 次失败）⇒ 它与代码改动无关，是既有的 | **单测红了先单独复跑那一条**（`ctest -R <名字> --output-on-failure`）；只有复跑也红才是回归。**要断言"某改动让测试变红"，必须给出基线同项测得的频率**——这条与坑 19 同族：没有对照的"红"不携带信息 |
 | 30 | **★ 把一个表达不了的输入静默改写成另一个** | `ul_chain_replay` 读捕获的 `alloc_prb` **列表**，却只用 `front()` 和 `size()` 重建连续区间的 `make_type1` ⇒ **非连续分配被压平成别的东西**，内核再也看不到那个"洞"，于是所有门都通过、`refusals=<none>`：**一次空结果看起来像一次干净的通过**（§5.7 的阳性对照第一次就是这样白跑的）。与坑 19 同族：**门覆盖不到失败模式时，"通过"不携带信息** | **表达不了就报错，或者明确改写并说出来**：现在非连续的列表会被构造成 type-0 位图，并在 stdout 打印 `allocation: N PRB WITH A HOLE …`。判据：**任何"阴性结果"都要配一个"阳性对照"**（§5.7 的做法）|
 | 29 | **★ 把"臂的名字"当成"臂的身份"** | S13-P2c 的四臂表里有一行叫 `cpu`，它**从来没有跑 `--cpu`**：`ul_chain_replay` 的**默认后端就是 CPU 链**（`:205-207` 三个 `false`），`--cpu` 只是把三个开关置 false（`:246`），包装脚本漏传 `--metal` 时"金属臂"会静默跑成 CPU 臂 —— 而它与 `host` 臂在**20 条里 19 条逐字节相同**，于是"CPU 参考链在窄跳上也全 KO"这条推论被写进了文档（§5.6.7），直到事后核对 footer 才发现那个臂的 footer 写着 `(metal CE, …)` | **每个臂必须留下并核对"身份指纹"，而不是靠脚本里的名字**：`wip/narrow_arms.sh` 现在核对 ① footer 的后端串、② 路由指纹（`device_corr_builds` / `refusals=`）、③ 产物 md5（`dev` 臂必须等于当前构建）；**工具本身也已改成"必须显式给模式"**（不给就报错退出）。同理：**"没跑出来"和"跑的不是它"看起来一模一样** |
 | 28 | **★ 把 `contract MET (8 of 8)` 当成"一项"结论** | 这个里程碑字符串不是一条判据，而是**八条**：其中三条（`cfo compensation`/`baseband metrics`/`host sample assembly`）的通过条件里有一条是"零分子"（守卫式，只保证"发生了就报红"），`radio sample continuity` 把 `ts0_blocks` 印出来却**不判它**，分母 `M` 还是**动态的**（跟着代码路径注册）⇒ 少登记一条会安静地变成 `MET (7 of 7)`。历史上 `a656133d70` 正是靠"8/8"给了一个**后来被撤回**的里程碑（§2.3、§9.2）| **判读三件事**：①先把 8 个**名字**逐个核对齐不齐（**数字不是证据，名字才是**）；②问这条检查**能不能看见它要防的失败**（承重项是第 5 条 `host device data crossings`）；③看到 `N of N` 先确认 `N` 有没有变。逐项规则、通过条件、计数器出生点见 **§3.2** |

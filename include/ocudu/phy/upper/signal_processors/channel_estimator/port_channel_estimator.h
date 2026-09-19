@@ -205,6 +205,25 @@ public:
   /// host.
   virtual bool device_results_cover_last_estimate() const { return false; }
 
+  /// \brief Why the device does not cover the last estimation, or nullptr when it does.
+  ///
+  /// A consumer that must NOT fall back to the host (the fused lane's strict policy, see
+  /// phy_pipeline_strict.h) needs the reason for its error message: "the device did not cover this
+  /// hop" is not actionable, "its geometry was refused" and "the device is switched off" are.
+  ///
+  /// \note The default reports nullptr, which a strict consumer must read as "not covered, cause
+  ///       unknown" and treat as a violation - never as "fine".
+  virtual const char* device_shortfall_reason() const { return nullptr; }
+
+  /// \brief Whether the shortfall is a route the OPERATOR asked for (a knob), not the device being
+  /// unable to serve the hop.
+  ///
+  /// The A/B arms (`OCUDU_CE_CPU_LS=1`, `OCUDU_CE_DEV_Y=0`, `OCUDU_CE_CORR_DEV=0`, ...) take the host
+  /// route by design, so a strict consumer lets them through; every other shortfall fails the grant.
+  ///
+  /// \note The default reports false: an estimator that says nothing is not an authorized arm.
+  virtual bool device_shortfall_is_knob_requested() const { return false; }
+
   /// \brief Gets the device-resident noise variance, when the estimator produces it there.
   ///
   /// The value lives in the same device buffer the estimates do, so a consumer that binds them

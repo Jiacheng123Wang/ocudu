@@ -196,6 +196,36 @@ bool dmrs_pusch_estimator_impl::device_results_cover_last_estimate() const
   return true;
 }
 
+const char* dmrs_pusch_estimator_impl::device_shortfall_reason() const
+{
+  // The first port that has something to say answers for the hop: they all estimate the same hop, so
+  // the first refusal is the root cause for every one of them.
+  for (const port_channel_estimator_results* results : ch_est_result) {
+    if (results == nullptr) {
+      return "no channel estimator results";
+    }
+    if (const char* reason = results->device_shortfall_reason()) {
+      return reason;
+    }
+  }
+  return nullptr;
+}
+
+bool dmrs_pusch_estimator_impl::device_shortfall_is_knob_requested() const
+{
+  // Authorized only if EVERY port says so: one port refused by geometry is enough for the hop to be a
+  // hop the device could not serve.
+  if (ch_est_result.empty()) {
+    return false;
+  }
+  for (const port_channel_estimator_results* results : ch_est_result) {
+    if ((results == nullptr) || !results->device_shortfall_is_knob_requested()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool dmrs_pusch_estimator_impl::sync_device_estimates() const
 {
   if (estimates_complete) {
