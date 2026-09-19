@@ -223,6 +223,16 @@ int main(int argc, char** argv)
   // replay compares like with like: the classical estimator divides the least-squares pilots by the
   // number of DM-RS symbols only under "average", while the Metal one always runs its own MMSE.
   bool td_strategy_average = false;
+  /// \brief Whether the caller named a back end (--cpu / --metal / --metal-cpu-ldpc / ...).
+  ///
+  /// The three \c use_metal_* flags default to FALSE, i.e. to the CPU chain. That is the right default
+  /// for an unadorned run, but it also means a wrapper that DROPS the flag silently replays on the CPU
+  /// while the caller believes it is looking at the device route - and the two agree often enough for
+  /// the mistake to survive a byte comparison. That is not hypothetical: the S13-P2c four-arm table
+  /// carried an arm named "cpu" that never passed \c --cpu, it was a duplicate of the host-built-A arm,
+  /// and the design document's "the CPU reference also fails on every narrow hop" note was that
+  /// artifact. The mode is therefore REQUIRED: a run has to say which back ends it means.
+  bool mode_given = false;
 
   for (int i = 1; i != argc; ++i) {
     std::string arg = argv[i];
@@ -245,15 +255,19 @@ int main(int argc, char** argv)
       td_strategy_average = (std::string(argv[++i]) == "average");
     } else if (arg == "--cpu") {
       use_metal_ce = use_metal_demod = use_metal_decoder = false;
+      mode_given                     = true;
     } else if (arg == "--metal") {
       use_metal_ce = use_metal_demod = use_metal_decoder = true;
+      mode_given                     = true;
     } else if (arg == "--metal-cpu-ldpc") {
       use_metal_ce = use_metal_demod = true;
       use_metal_decoder              = false;
+      mode_given                     = true;
     } else if (arg == "--metal-cpu-demod") {
       use_metal_ce  = true;
       use_metal_demod = false;
       use_metal_decoder = false;
+      mode_given = true;
     } else if (arg == "-h" || arg == "--help") {
       std::printf("usage: %s <capture-base> --out <prefix> [--cpu|--metal|--metal-cpu-ldpc|--metal-cpu-demod]\n"
                   "  <capture-base> is one reception of a capture, e.g. /tmp/C_4352_17921\n",
@@ -269,6 +283,17 @@ int main(int argc, char** argv)
 
   if (prefix.empty() || out_prefix.empty()) {
     std::fprintf(stderr, "usage: %s <capture-base> --out <prefix> [--cpu|--metal]\n", argv[0]);
+    return 1;
+  }
+
+  // A run that does not say which back ends it means would silently be the CPU chain (see mode_given):
+  // refuse it, because the whole point of a replay is to know WHICH chain produced the numbers.
+  if (!mode_given) {
+    std::fprintf(stderr,
+                 "%s: no back end selected. Pass --cpu, --metal, --metal-cpu-ldpc or --metal-cpu-demod.\n"
+                 "        (The back ends default to the CPU chain, so an omitted flag makes a device-route\n"
+                 "         replay run on the host and look plausible.)\n",
+                 argv[0]);
     return 1;
   }
 
