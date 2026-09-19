@@ -20,6 +20,24 @@ void ch_gather_desc::build(const crb_bitmap&                         rb_mask,
   nof_symbols = nof_symbols_;
   nof_entries = 0;
 
+  // The geometry the entries are expanded from, kept for the DEVICE builder (batch 5e): it rebuilds
+  // the same tables from these, and the unit test compares the two implementations byte for byte.
+  geometry = geometry_t{};
+  geometry.first_symbol            = first_symbol;
+  geometry.active_re_per_prb       = active_re_per_prb;
+  geometry.active_re_per_prb_dmrs  = active_re_per_prb_dmrs;
+  geometry.dmrs_sym_bits           = 0;
+  for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+    geometry.dmrs_sym_bits |= (dmrs_symb_pos.test(sym) ? 1U : 0U) << sym;
+  }
+  {
+    const uint64_t* words = rb_mask.data();
+    const unsigned  nof   = (rb_mask.size() + 63) / 64;
+    for (unsigned w = 0; (w != nof) && (w != ch_gather_max_rb_words); ++w) {
+      geometry.rb_words[w] = words[w];
+    }
+  }
+
   // The plan reproduces the demodulator's RE mask element by element: for every OFDM symbol of the
   // hop, the allocation's PRBs in ascending order and, within each of them, the active subcarriers
   // in ascending order. That is exactly the order in which the resource grid's mask reader

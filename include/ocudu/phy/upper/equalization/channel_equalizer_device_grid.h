@@ -40,6 +40,9 @@ static constexpr unsigned ch_gather_max_symbols = MAX_NSYMB_PER_SLOT;
 /// Maximum number of resource blocks a gather plan describes.
 static constexpr unsigned ch_gather_max_prbs = MAX_NOF_PRBS;
 
+/// Number of 64-bit words the allocation mask of a gather plan occupies (MAX_NOF_PRBS bits).
+static constexpr unsigned ch_gather_max_rb_words = (ch_gather_max_prbs + 63) / 64;
+
 /// Maximum number of resource elements one port of a gather plan describes.
 static constexpr unsigned ch_gather_max_entries = ch_gather_max_symbols * ch_gather_max_prbs * NOF_SUBCARRIERS_PER_RB;
 
@@ -134,6 +137,42 @@ public:
   /// The gather entries, grouped by OFDM symbol in hop order. Only the first \ref size() are
   /// meaningful.
   std::array<ch_gather_entry, ch_gather_max_entries> entries{};
+
+  /// \brief The geometry the plan was built from (batch 5e).
+  ///
+  /// The entries above ARE this geometry, expanded: \c entries lists, for every symbol of the hop,
+  /// the subcarrier and destination of every resource element, which is exactly what a device needs to
+  /// know to rebuild them - but a device cannot invert an expanded table back into the masks it came
+  /// from. Keeping the inputs beside the output is therefore what lets the DEVICE build the same tables
+  /// itself (see the equalizer engine's eq_build_gather), which removes the one host -> device upload
+  /// the lane still made on every hop whose allocation changed (26 KB for a 25 PRB hop; design doc 19).
+  ///
+  /// \note The two are built independently and must agree element for element - the device builder is a
+  ///       SECOND implementation of the same mapping, and the unit test compares them byte for byte
+  ///       over the whole shape space rather than trusting the derivation. That is the same rule the
+  ///       twiddle tables and the butterflies follow.
+  struct geometry_t {
+    /// Allocation of the hop, as the bitset's own words.
+    std::array<uint64_t, ch_gather_max_rb_words> rb_words{};
+    /// First OFDM symbol of the hop within the grid.
+    unsigned first_symbol = 0;
+    /// DM-RS symbols of the slot, one bit per symbol.
+    uint32_t dmrs_sym_bits = 0;
+    /// Active subcarriers of a data-only PRB (bit \c n set: subcarrier \c n carries data).
+    uint16_t active_re_per_prb = 0;
+    /// Same, for a PRB of a DM-RS symbol.
+    uint16_t active_re_per_prb_dmrs = 0;
+
+    bool operator==(const geometry_t& o) const
+    {
+      return (rb_words == o.rb_words) && (first_symbol == o.first_symbol) &&
+             (dmrs_sym_bits == o.dmrs_sym_bits) && (active_re_per_prb == o.active_re_per_prb) &&
+             (active_re_per_prb_dmrs == o.active_re_per_prb_dmrs);
+    }
+    bool operator!=(const geometry_t& o) const { return !(*this == o); }
+  };
+  /// What \ref entries was built from. Only meaningful when is_valid().
+  geometry_t geometry{};
 
 private:
   /// Fills \ref symbols, \ref nof_symbols and \ref entries from the demodulator's RE mask.

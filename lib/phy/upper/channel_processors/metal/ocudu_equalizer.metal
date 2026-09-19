@@ -344,6 +344,141 @@ kernel void gather_ch_re(device const ushort2* grid [[buffer(0)]], // resource g
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Batch 5e: build the gather plan ON THE DEVICE.
+//
+// ---- Why ----
+//
+// The plan tables (one tap per symbol, one entry per resource element) were built and uploaded by the
+// host, and cached by content so that only a hop whose allocation CHANGED paid for it. That left one
+// host -> device write per changed hop: 6 uploads and 26612 bytes for a 25 PRB hop, on ~4% of the hops
+// of an air leg - 3.38 MB over 3379 hops, the last host write the fused lane made apart from a 56-byte
+// symbol-epoch table (design doc 19).
+//
+// The tables are pure geometry: which PRBs the hop owns, which of their subcarriers carry data, and
+// which symbols are DM-RS. All of that the lane already hands the device as kernel parameters every
+// hop, and the reformat kernel (K3) computes the very same mapping in the same terms. So the host stops
+// uploading the expansion and the device expands it - once per geometry change, in the command buffer
+// whose gather reads it.
+//
+// ---- Agreement with the host builder ----
+//
+// This is a SECOND implementation of channel_equalizer_device_grid.cpp's build(), and the two must
+// produce the same bytes. The unit test compares them element for element over the shape space
+// (contiguous and holed allocations, DM-RS and data symbols, every active-RE pattern), which is the
+// same rule the twiddle tables and the DFT butterflies follow: two implementations of one mapping are
+// allowed, but only if something checks them against each other.
+//
+// ---- Bounds ----
+//
+// Every loop is bounded by a compile-time constant and the parameters only skip or break (see the note
+// in ocudu_mmse_ta.metal for why: a loop whose termination depends on its inputs fails as a dispatch
+// that never returns, and on macOS that takes the machine down). The indices are bounded by
+// construction: `crb < eq_gather_max_prbs` implies `word < eq_gather_max_words`, and `sym` is inside
+// the slot because the plan is only ever built for symbols of one slot.
+
+/// The allocation mask's width (MAX_NOF_PRBS) and the words it occupies: `crb` indexes the words
+/// directly, which is safe exactly because `crb` is clamped to the first constant.
+constant uint eq_gather_max_prbs    = 275;
+constant uint eq_gather_max_words   = (eq_gather_max_prbs + 63u) / 64u;
+constant uint eq_gather_max_symbols = 14; // MAX_NSYMB_PER_SLOT
+constant uint eq_gather_max_subc    = 12; // NOF_SUBCARRIERS_PER_RB
+
+struct eq_gather_build_params {
+    ulong rb_words[eq_gather_max_words]; // the hop's allocation, as the bitset's own words
+    uint  first_symbol;                  // first OFDM symbol of the hop within the grid
+    uint  nof_symbols;                   // OFDM symbols of the hop
+    uint  dmrs_sym_bits;                 // DM-RS symbols of the slot, one bit per symbol
+    uint  active_re;                     // active subcarriers of a data-only PRB (bit n = carries data)
+    uint  active_re_dmrs;                // same, for a PRB of a DM-RS symbol
+    uint  pad0;
+    uint  pad1;
+    uint  pad2;
+};
+
+/// \brief Expands one hop's geometry into the gather tables the dispatch below reads.
+///
+/// One thread per (allocated PRB, symbol of the hop): the entries of a symbol are its allocated PRBs in
+/// ascending order and, inside each, its active subcarriers in ascending order, so a thread's own run
+/// starts at its rank among the allocated PRBs and needs nothing from its neighbours.
+kernel void eq_build_gather(device gather_tap*   taps [[buffer(0)]],
+                            device gather_entry* entries [[buffer(1)]],
+                            constant eq_gather_build_params& p [[buffer(2)]],
+                            uint2 gid [[thread_position_in_grid]])
+{
+    const uint crb = gid.x;
+    const uint k   = gid.y;
+    if ((crb >= eq_gather_max_prbs) || (k >= eq_gather_max_symbols) || (k >= p.nof_symbols)) {
+        return;
+    }
+    // Is this common resource block part of the hop? `crb` is clamped to the mask's width above, so
+    // the word index cannot leave the table (275 bits = 5 words).
+    const uint word = crb / 64u;
+    const uint bit  = crb % 64u;
+    if (((p.rb_words[word] >> bit) & 1ul) == 0ul) {
+        return;
+    }
+
+    const uint sym = p.first_symbol + k;
+    if (sym >= eq_gather_max_symbols) {
+        return; // a hop symbol outside the slot: a parameter error, and nothing to map
+    }
+    const uint active = (((p.dmrs_sym_bits >> sym) & 1u) != 0u) ? p.active_re_dmrs : p.active_re;
+
+    // How many PRBs the hop owns, and how many resource elements each of them contributes: the tap of
+    // a symbol is their product, and the entry base of a symbol is the sum over the symbols before it.
+    uint nof_prb = 0;
+    for (uint w = 0; w != eq_gather_max_words; ++w) {
+        nof_prb += popcount(p.rb_words[w]);
+    }
+    const uint n_act = popcount(active);
+    uint       base  = 0;
+    for (uint j = 0; j != eq_gather_max_symbols; ++j) {
+        if (j >= k) {
+            break;
+        }
+        const uint sj = p.first_symbol + j;
+        if (sj < eq_gather_max_symbols) {
+            const uint aj = (((p.dmrs_sym_bits >> sj) & 1u) != 0u) ? p.active_re_dmrs : p.active_re;
+            base += nof_prb * popcount(aj);
+        }
+    }
+
+    // This PRB's rank among the allocated ones: its position within the symbol's run of entries.
+    uint rank = 0;
+    for (uint w = 0; w != eq_gather_max_words; ++w) {
+        if (w < word) {
+            rank += popcount(p.rb_words[w]);
+        } else if (w == word) {
+            const ulong below = (bit == 0u) ? 0ul : ((1ul << bit) - 1ul);
+            rank += popcount(p.rb_words[w] & below);
+        }
+    }
+
+    // `dest` counts across the WHOLE symbol, not within this PRB: it is the index of the element
+    // inside the symbol's output region, which is what the gather kernel writes to. Numbering it per
+    // PRB was the one defect this kernel had - every PRB after the first then overwrote the first
+    // one's slots - and the device-vs-host comparison below found it on the first run
+    // ([eq_tables] entry 12: device {subc=12 dest=0} host {subc=12 dest=12}).
+    device gather_entry* dst = entries + base + rank * n_act;
+    uint                 d   = 0;
+    for (uint i = 0; i != eq_gather_max_subc; ++i) {
+        if (((active >> i) & 1u) == 0u) {
+            continue;
+        }
+        dst[d].subc = crb * eq_gather_max_subc + i;
+        dst[d].dest = rank * n_act + d;
+        ++d;
+    }
+    // The symbol's tap, written by its first allocated PRB alone: every thread of the symbol computes
+    // the same value, so letting them all store it would be a race whose result is the same bytes.
+    if (rank == 0u) {
+        taps[k].symbol = sym;
+        taps[k].offset = base;
+        taps[k].nof_re = nof_prb * n_act;
+    }
+}
+
 /// \brief Batched equalizer: the SAME arithmetic as equalize_mxn(), one thread per (resource
 /// element, OFDM symbol) instead of one dispatch per symbol.
 ///

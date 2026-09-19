@@ -150,6 +150,8 @@ struct eq_resources_t {
   id<MTLComputePipelineState> pipeline_batch = nil;
   /// Reads the equalizer's received symbols off the device resource grid (see gather_binding).
   id<MTLComputePipelineState> pipeline_gather = nil;
+  /// Builds the gather tables on the device (batch 5e: eq_build_gather).
+  id<MTLComputePipelineState> pipeline_build_gather = nil;
 };
 
 /// Per-symbol element strides handed to equalize_mxn_batch(); must match struct equalize_strides in
@@ -279,8 +281,47 @@ struct gather_entry_t {
 /// alive until the command buffer that reads it completed - the same rule the staged inputs follow.
 using gather_tables_t = std::vector<uint8_t>;
 
+/// \brief The two gather tables as DEVICE memory, one pair per engine (batch 5e).
+///
+/// Page-aligned and wrapped once, because the builder kernel writes them and the gather kernel reads
+/// them: they are buffers, not uploads, and the wrap is what makes the two dispatches see one object
+/// (Metal orders same-object hazards by itself - see the design doc's note on the batch 5d barriers).
+///
+/// The length is the MAXIMUM a plan can need, so the buffers never move: one tap per symbol of a slot
+/// and one entry per resource element of a 275 PRB allocation. A hop uses the front of both, and the
+/// tap table's own offsets say how far.
+struct eq_device_tables_t {
+  void*         taps_mem       = nullptr;
+  void*         entries_mem    = nullptr;
+  id<MTLBuffer> taps_buf       = nil;
+  id<MTLBuffer> entries_buf    = nil;
+  /// Geometry the buffers hold, and whether they hold one at all. NOT cleared per flush: the tables
+  /// live in device memory across hops, so a hop with the same geometry reuses them and the builder is
+  /// not encoded again.
+  ch_gather_desc::geometry_t geometry{};
+  bool                       valid = false;
+};
+
+/// \brief Whether the gather tables are built on the DEVICE (batch 5e, OCUDU_EQ_DEV_TABLES).
+///
+/// Unset or non-zero (THE DEFAULT): a hop whose allocation changed is expanded by the eq_build_gather
+/// kernel into two buffers of this engine, in the command buffer whose gather reads them, instead of
+/// being built and uploaded by the host. Zero keeps the host builder and its upload - the A/B that
+/// keeps the two implementations honest on air, and the escape hatch if a geometry ever appears that
+/// the device builder refuses.
+bool eq_device_tables_enabled()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_EQ_DEV_TABLES");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 struct eq_engine_impl {
   double last_gpu_us = 0.0;
+  /// The gather tables this engine builds on the device (batch 5e).
+  eq_device_tables_t dev_tables;
   bool   last_call_no_copy = true; // false when any buffer of the last call was copied
   /// Batched group dispatches encoded so far (diagnostics: proves that a group really took the
   /// batched kernel instead of falling back to one dispatch per symbol).
@@ -381,6 +422,9 @@ struct wrapped_buffer {
 /// next to the flush state below; the engine destructor only needs the declaration).
 void eq_pending_release(void* engine);
 
+/// Compares the device-built gather tables against the host's (OCUDU_EQ_TABLE_CHECK).
+void eq_dbg_dump_tables();
+
 wrapped_buffer wrap_buffer(eq_engine_impl* engine, const void* ptr, size_t length)
 {
   // One buffer object per address for every engine: the stages of the chain write and read the same
@@ -427,6 +471,9 @@ static id<MTLBuffer> bind_one_h_start(unsigned start)
 
 equalizer_metal_engine::~equalizer_metal_engine()
 {
+  // The device-built gather tables against the host's (OCUDU_EQ_TABLE_CHECK): the run has waited for
+  // its work by now, which is what makes the comparison meaningful.
+  eq_dbg_dump_tables();
   eq_engine_impl* engine = static_cast<eq_engine_impl*>(impl);
   if (engine != nullptr) {
     // Hand the dispatches this engine still had accumulated in this thread over to the burst: every
@@ -493,6 +540,15 @@ bool equalizer_metal_engine::init()
       return false;
     }
     res.pipeline_gather = [res.device newComputePipelineStateWithFunction:fn_gather error:&error];
+    // Batch 5e: the gather tables built where they are read. Optional like every other stage: a
+    // metallib without it keeps the host-built tables (see eq_gather_tables).
+    id<MTLFunction> fn_build_gather = [library newFunctionWithName:@"eq_build_gather"];
+    if (fn_build_gather != nil) {
+      res.pipeline_build_gather = [res.device newComputePipelineStateWithFunction:fn_build_gather
+                                                                         options:MTLPipelineOptionNone
+                                                                      reflection:nil
+                                                                           error:&error];
+    }
     if (res.pipeline == nil) {
       ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: pipeline creation failed: {}",
                                                 error != nil ? error.localizedDescription.UTF8String : "nil error");
@@ -664,8 +720,30 @@ void eq_pending_release(void* engine)
   }
 }
 /// Recycles the group staging of the previous flush (its command buffer was waited for).
+/// \brief The device-built gather tables against the host's (OCUDU_EQ_TABLE_CHECK, batch 5e).
+///
+/// The device builder is a SECOND implementation of the mapping in
+/// channel_equalizer_device_grid.cpp, and the rule this port follows for duplicated mappings (the
+/// twiddle tables, the DFT butterflies) is that something has to compare them - otherwise "the device
+/// builds the same tables" is a claim, not a fact. This expands the host's blob for each geometry the
+/// engine built on the device and compares the two element for element, reporting the first
+/// differences and a summary line.
+///
+/// \note It reads the device tables at DESTRUCTION, i.e. after the harness has waited for the work:
+///       the dispatches of one hop accumulate in one command buffer, so a comparison made between two
+///       of its flushes reads tables the GPU has not written yet (measured: it reports every entry as
+///       zero, which is the probe's timing and not the kernel's output).
+struct eq_dbg_pending_t {
+  ch_gather_desc::geometry_t geo{};
+  std::vector<uint8_t>       blob;
+};
+static std::vector<eq_dbg_pending_t> g_dbg_queue;
+static eq_engine_impl*               g_dbg_engine = nullptr;
+void eq_dbg_dump_tables();
+
 static void eq_flush_recycle()
 {
+  eq_dbg_dump_tables();
   eq_flush_state_t& st = eq_flush_state();
   for (void* p : st.inflight) {
     compat::aligned_free(p);
@@ -777,6 +855,181 @@ static id<MTLBuffer> eq_make_gather_table(const void* data, size_t bytes)
   return eq_cached_table(metal::shared_queue::device(), data, bytes);
 }
 
+/// \brief Builds the two gather tables on the DEVICE, once per geometry change (batch 5e).
+///
+/// The host used to expand the plan and upload the result: 6 uploads and 26612 bytes for a 25 PRB hop,
+/// on the ~4% of hops whose allocation changed - 3.38 MB over an air leg, and the last host write the
+/// fused lane made apart from a 56-byte table (design doc 19). The expansion is pure geometry, so it
+/// moves to a kernel that reads the same parameters the rest of the chain does.
+///
+/// The dispatch is encoded ONLY when the geometry changed: the tables live in device memory across
+/// hops, so an unchanged geometry reuses them, and the cost of the change is a small dispatch instead
+/// of a 26 KB copy.
+///
+/// \param[in] engine   The engine whose device buffers hold the tables.
+/// \param[in] enc      The encoder whose gather will read them (same command buffer: the kernel writes
+///                     the very buffers the gather binds, and Metal orders that hazard itself).
+/// \param[in] plan     The hop's plan.
+/// \return True when the device buffers hold this plan's tables (built now or already).
+static bool eq_build_gather_on_device(eq_engine_impl* engine, id<MTLComputeCommandEncoder> enc, const ch_gather_desc& plan)
+{
+  {
+    static bool once = false;
+    if (!once) {
+      once = true;
+      std::fprintf(stderr, "[eq_dbg] build called: enc=%d pipe=%d valid=%d dmrs=%#x syms=%u devknob=%d\n",
+                   enc != nil ? 1 : 0, eq_resources().pipeline_build_gather != nil ? 1 : 0,
+                   plan.is_valid() ? 1 : 0, plan.geometry.dmrs_sym_bits, plan.nof_symbols,
+                   eq_device_tables_enabled() ? 1 : 0);
+    }
+  }
+  eq_device_tables_t& t = engine->dev_tables;
+  // From here on, a `false` return means "the device buffers do NOT hold this geometry": the caller
+  // falls back to the host tables, and eq_gather_taps()/eq_gather_entries() must agree with that -
+  // returning a stale geometry's buffers to a gather whose tables were just uploaded would be exactly
+  // the silent wrong-RE defect the content cache exists to prevent.
+  t.valid = false;
+  if ((enc == nil) || (eq_resources().pipeline_build_gather == nil) || !plan.is_valid() ||
+      plan.geometry.dmrs_sym_bits == 0) {
+    return false;
+  }
+  if (t.valid && (t.geometry == plan.geometry) && (t.taps_buf != nil) && (t.entries_buf != nil)) {
+    return true; // the buffers already hold exactly this geometry
+  }
+  // The buffers, allocated once for the MAXIMUM a plan can need (see eq_device_tables_t).
+  if ((t.taps_mem == nullptr) || (t.entries_mem == nullptr)) {
+    const size_t page       = compat::page_size();
+    const size_t taps_bytes = ((static_cast<size_t>(ch_gather_max_symbols) * sizeof(gather_tap_t) + page - 1) / page) * page;
+    const size_t ent_bytes  = ((static_cast<size_t>(ch_gather_max_entries) * sizeof(gather_entry_t) + page - 1) / page) * page;
+    t.taps_mem              = compat::aligned_alloc(page, taps_bytes);
+    t.entries_mem           = compat::aligned_alloc(page, ent_bytes);
+    if ((t.taps_mem == nullptr) || (t.entries_mem == nullptr)) {
+      compat::aligned_free(t.taps_mem);
+      compat::aligned_free(t.entries_mem);
+      t.taps_mem    = nullptr;
+      t.entries_mem = nullptr;
+      return false;
+    }
+    t.taps_buf    = metal::shared_queue::wrap_no_copy(eq_resources().device, t.taps_mem, taps_bytes);
+    t.entries_buf = metal::shared_queue::wrap_no_copy(eq_resources().device, t.entries_mem, ent_bytes);
+    if ((t.taps_buf == nil) || (t.entries_buf == nil)) {
+      return false;
+    }
+  }
+  if ((t.taps_buf == nil) || (t.entries_buf == nil)) {
+    return false;
+  }
+
+  struct eq_gather_build_params {
+    uint64_t rb_words[ch_gather_max_rb_words];
+    uint32_t first_symbol;
+    uint32_t nof_symbols;
+    uint32_t dmrs_sym_bits;
+    uint32_t active_re;
+    uint32_t active_re_dmrs;
+    uint32_t pad0;
+    uint32_t pad1;
+    uint32_t pad2;
+  };
+  static_assert(sizeof(eq_gather_build_params) == 72, "eq_gather_build_params must match the MSL declaration");
+  eq_gather_build_params p{};
+  for (unsigned w = 0; w != ch_gather_max_rb_words; ++w) {
+    p.rb_words[w] = plan.geometry.rb_words[w];
+  }
+  p.first_symbol       = plan.geometry.first_symbol;
+  p.nof_symbols        = plan.nof_symbols;
+  p.dmrs_sym_bits      = plan.geometry.dmrs_sym_bits;
+  p.active_re          = plan.geometry.active_re_per_prb;
+  p.active_re_dmrs     = plan.geometry.active_re_per_prb_dmrs;
+
+  [enc setComputePipelineState:eq_resources().pipeline_build_gather];
+  [enc setBuffer:t.taps_buf offset:0 atIndex:0];
+  [enc setBuffer:t.entries_buf offset:0 atIndex:1];
+  [enc setBytes:&p length:sizeof(p) atIndex:2];
+  // One thread per (common resource block, symbol of the hop), clamped inside the kernel to the mask's
+  // width and the slot's symbols: an unallocated PRB returns immediately, so the grid is the mask's
+  // own width and the cost of a narrow hop is threads that do nothing.
+  [enc dispatchThreads:MTLSizeMake(275, std::max(plan.nof_symbols, 1u), 1)
+      threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+  metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
+  t.geometry = plan.geometry;
+  t.valid    = true;
+  if (std::getenv("OCUDU_EQ_TABLE_CHECK") != nullptr) {
+    // Keep the HOST blob for the same geometry, to be compared against what the kernel wrote once the
+    // command buffer that carries it has completed (see eq_dbg_dump_tables()).
+    eq_dbg_pending_t entry;
+    entry.geo  = plan.geometry;
+    entry.blob = eq_build_gather_tables(plan);
+    g_dbg_queue.push_back(std::move(entry));
+    g_dbg_engine = engine;
+  }
+  return true;
+}
+
+/// See eq_dbg_dump_tables() above: the device-built tables against the host's, byte for byte, once the
+/// command buffer that built them has completed.
+void eq_dbg_dump_tables()
+{
+  if (g_dbg_queue.empty() || (g_dbg_engine == nullptr)) {
+    return;
+  }
+  // Only ever called once the work has completed - from the engine destructor, after the harness waited
+  // - and NOT between two builds of the same hop: the dispatches of one hop accumulate in ONE command
+  // buffer (the burst), so a comparison made between two of its flushes reads tables the GPU has not
+  // written yet and reports a mismatch that is the probe's own timing.
+  const eq_dbg_pending_t    pending = g_dbg_queue.front();
+  g_dbg_queue.erase(g_dbg_queue.begin());
+  const ch_gather_desc::geometry_t& g_dbg_geo = pending.geo;
+  const std::vector<uint8_t>&       g_dbg_host_blob = pending.blob;
+  const eq_device_tables_t& t = g_dbg_engine->dev_tables;
+  if ((t.taps_mem == nullptr) || (t.entries_mem == nullptr)) {
+    return;
+  }
+  const auto* taps    = static_cast<const gather_tap_t*>(t.taps_mem);
+  const auto* entries = static_cast<const gather_entry_t*>(t.entries_mem);
+  const auto* h_taps  = reinterpret_cast<const gather_tap_t*>(g_dbg_host_blob.data());
+  const auto* h_ent   = reinterpret_cast<const gather_entry_t*>(g_dbg_host_blob.data() +
+                                                            14u * sizeof(gather_tap_t));
+  const unsigned nof_sym = 14;
+  unsigned bad_tap = 0;
+  unsigned bad_ent = 0;
+  unsigned first_bad_ent = 0;
+  unsigned nof_ent = 0;
+  for (unsigned k = 0; k != nof_sym; ++k) {
+    if ((taps[k].symbol != h_taps[k].symbol) || (taps[k].offset != h_taps[k].offset) ||
+        (taps[k].nof_re != h_taps[k].nof_re)) {
+      if (bad_tap < 4) {
+        std::fprintf(stderr,
+                     "[eq_tables] tap %u: device {sym=%u off=%u n=%u} host {sym=%u off=%u n=%u}\n",
+                     k, taps[k].symbol, taps[k].offset, taps[k].nof_re,
+                     h_taps[k].symbol, h_taps[k].offset, h_taps[k].nof_re);
+      }
+      ++bad_tap;
+    }
+    nof_ent += h_taps[k].nof_re;
+  }
+  for (unsigned i = 0; i != nof_ent; ++i) {
+    if ((entries[i].subc != h_ent[i].subc) || (entries[i].dest != h_ent[i].dest)) {
+      if (bad_ent < 4) {
+        std::fprintf(stderr, "[eq_tables] entry %u: device {subc=%u dest=%u} host {subc=%u dest=%u}\n",
+                     i, entries[i].subc, entries[i].dest, h_ent[i].subc, h_ent[i].dest);
+      }
+      if (bad_ent == 0) {
+        first_bad_ent = i;
+      }
+      ++bad_ent;
+    }
+  }
+  std::fprintf(stderr,
+               "[eq_tables] geometry first_sym=%u dmrs=%#x active=%#x active_dmrs=%#x words=%llx/%llx | "
+               "taps bad=%u  entries bad=%u of %u (first at %u)\n",
+               g_dbg_geo.first_symbol, g_dbg_geo.dmrs_sym_bits, g_dbg_geo.active_re_per_prb,
+               g_dbg_geo.active_re_per_prb_dmrs,
+               static_cast<unsigned long long>(g_dbg_geo.rb_words[0]),
+               static_cast<unsigned long long>(g_dbg_geo.rb_words[1]),
+               bad_tap, bad_ent, nof_ent, first_bad_ent);
+}
+
 /// \brief The hop's gather tables as Metal buffers, built once and reused by every dispatch of the
 /// hop (see eq_build_gather_tables).
 ///
@@ -786,10 +1039,19 @@ static id<MTLBuffer> eq_make_gather_table(const void* data, size_t bytes)
 /// them per dispatch is a copy of the entry table plus two Metal buffer allocations EACH, which is
 /// what made the device gather cost more on the host than the memcpy it replaces.
 ///
-/// \param[in] plan The hop's plan.
+/// Batch 5e: by DEFAULT the tables are built by the eq_build_gather KERNEL into this engine's own
+/// buffers, and only a geometry change costs anything (see eq_build_gather_on_device). The host path
+/// below stays for the A/B (OCUDU_EQ_DEV_TABLES=0) and for a metallib without the kernel.
+///
+/// \param[in] engine The engine (its device tables are one of the two destinations).
+/// \param[in] enc    The encoder the gather will be encoded into, or nil when there is none yet.
+/// \param[in] plan   The hop's plan.
 /// \return False when the tables could not be built or uploaded.
-static bool eq_gather_tables(const ch_gather_desc& plan)
+static bool eq_gather_tables(eq_engine_impl* engine, id<MTLComputeCommandEncoder> enc, const ch_gather_desc& plan)
 {
+  if (eq_device_tables_enabled() && eq_build_gather_on_device(engine, enc, plan)) {
+    return true;
+  }
   eq_flush_state_t& st = eq_flush_state();
   if (st.hop_tables_valid && (st.hop_tables_plan == reinterpret_cast<uintptr_t>(&plan))) {
     return true;
@@ -814,16 +1076,23 @@ static bool eq_gather_tables(const ch_gather_desc& plan)
   return true;
 }
 
-/// The hop's tap buffer, or nil when eq_gather_tables() has not built one.
-static id<MTLBuffer> eq_gather_taps()
+/// The hop's tap buffer: the engine's device table when the device built it, the uploaded one
+/// otherwise.
+static id<MTLBuffer> eq_gather_taps(eq_engine_impl* engine)
 {
+  if ((engine != nullptr) && engine->dev_tables.valid && (engine->dev_tables.taps_buf != nil)) {
+    return engine->dev_tables.taps_buf;
+  }
   const eq_flush_state_t& st = eq_flush_state();
   return (st.gather_tables.size() >= 2) ? st.gather_tables[st.gather_tables.size() - 2] : nil;
 }
 
-/// The hop's entry table buffer, or nil when eq_gather_tables() has not built one.
-static id<MTLBuffer> eq_gather_entries()
+/// The hop's entry table buffer, from the same two places (see eq_gather_taps).
+static id<MTLBuffer> eq_gather_entries(eq_engine_impl* engine)
 {
+  if ((engine != nullptr) && engine->dev_tables.valid && (engine->dev_tables.entries_buf != nil)) {
+    return engine->dev_tables.entries_buf;
+  }
   const eq_flush_state_t& st = eq_flush_state();
   return st.gather_tables.empty() ? nil : st.gather_tables.back();
 }
@@ -843,12 +1112,17 @@ static bool eq_encode_gather_dispatch(id<MTLComputeCommandEncoder> enc,
                                       unsigned                       n_sym,
                                       unsigned                       nof_ports,
                                       unsigned                       nof_re,
-                                      const gather_tables_t&         tables,
                                       id<MTLBuffer>                  b_taps,
                                       id<MTLBuffer>                  b_entries)
 {
+  // The tables are whichever pair the caller resolved (the device's own, batch 5e's default, or the
+  // host's upload): what this dispatch needs is that BOTH buffers exist. It used to also require the
+  // host blob to be non-empty, which was a proxy for "a table was built" while the host was the only
+  // builder - and it silently disabled the gather once the device built them, so the equalization ran
+  // on a y staging nothing had filled (measured: every gathered run silently lost its dispatch, and
+  // the soft bits moved by ~3%).
   if ((enc == nil) || (b_grid.buffer == nil) || (b_y.buffer == nil) || (b_taps == nil) ||
-      (b_entries == nil) || (tables.empty()) || (n_sym == 0)) {
+      (b_entries == nil) || (n_sym == 0)) {
     return false;
   }
   const gather_params_t p{b_grid.offset,
@@ -982,7 +1256,7 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     // The run's entry point into the hop's tap table: only a gathered run has one.
     const unsigned first_symbol =
         gather_run ? (pending[first].gather.symbol - gather_plan->symbols[0].symbol) : 0u;
-    if (gather_run && !eq_gather_tables(*gather_plan)) {
+    if (gather_run && !eq_gather_tables(engine, enc, *gather_plan)) {
       compat::aligned_free(h_alloc);
       compat::aligned_free(y_alloc);
       compat::aligned_free(s_alloc);
@@ -1078,9 +1352,8 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
                                      n_run,
                                      head.nof_ports,
                                      head.nof_re,
-                                     eq_flush_state().hop_tables,
-                                     eq_gather_taps(),
-                                     eq_gather_entries())) {
+                                     eq_gather_taps(engine),
+                                     eq_gather_entries(engine))) {
         engine->last_call_no_copy = false;
         compat::aligned_free(h_alloc);
         compat::aligned_free(y_alloc);
