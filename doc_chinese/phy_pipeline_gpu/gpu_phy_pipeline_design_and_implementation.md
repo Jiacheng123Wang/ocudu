@@ -352,7 +352,7 @@ K4 的 `gpu_nv` 就是"从同一份 h 归约、结果留在设备、消费者不
 | **5e** | 写侧：等化器的 gather 表改由**设备**建 | ✅ **完成并空中验证**（`6e53109ffa`，腿 `5e-devtables_0919_2000`，§19.3/§19.3a）：**写字节 3.38 MB → 5.5 KB（÷592）**、次数 0.27 → 0.13/跳；其余指标无回归 |
 | **5f** | 写侧：`h_starts` 表与 epoch 表 | **5f-1 完成**（`9e36fef3ed`，§19.5）：`h_starts` 进参数块，replay 写 **5 → 1/跳**；顺带修掉一个**既有批处理缺陷**。**5f-2 未做**：`symbol_start_epochs`（56 B，1 次/配置）仍在宿主上传 ⇒ **契约仍 7/8** |
 | **5g** | 5f-2：epochs 由 kernel 从 (cp, scs) 算 | ✅ **完成并空中验证**（`45fa002d6c`，腿 `5g-epochs_0919_1945`，§19.6.2b）：27 捕获四个 dump 与 HEAD **逐字节相同**；replay 写侧 **1 → 0/跳**、分项表空 ⇒ **写侧清零**；空口 **契约 8/8**、0 RF failure、CRC 79.19%。**⚠ 该"零"只在被审计的站点上成立**：P1 发现一条**每跳**的未计数往返（§19.6.2b 勘误块 + `wip/S13_fallback_coverage.md` §5b）|
-| **S13-P1** | 回退路径的可见性（仪表）| ✅ **全部完成**：第一批（`b3f72deadb`）基类虚钩子 `account_host_grid_read`（默认空 ⇒ CPU 车道不变）+ `ce: rx pilots staged (host)` —— 正是它们**照出了那条每跳往返**；**剩余部分见 §5.6**：`refusals=` 拒绝计数（18 个理由，§5.6.1）+ 读侧分项表 + A/R_hp / y / qy 站点（§5.6.2）+ 八个旋钮臂的自证（§5.6.3，**顺带修掉"设备跳"分母在回退路由上为 0 的缺陷**）。**空中腿待跑** |
+| **S13-P1** | 回退路径的可见性（仪表）| ✅ **全部完成**：第一批（`b3f72deadb`）基类虚钩子 `account_host_grid_read`（默认空 ⇒ CPU 车道不变）+ `ce: rx pilots staged (host)` —— 正是它们**照出了那条每跳往返**；**剩余部分见 §5.6**：`refusals=` 拒绝计数（18 个理由，§5.6.1）+ 读侧分项表 + A/R_hp / y / qy 站点（§5.6.2）+ 八个旋钮臂的自证（§5.6.3，**顺带修掉"设备跳"分母在回退路由上为 0 的缺陷**）；**空中腿 `s13p1b_0919_2322` 通过并当场抓到 §5.6.5 那条窄分配的每跳写** |
 | **S13-P2** | 消掉那条每跳往返（设备自建 `gpu_rx_pilots`，EPRE 由设备发布）| ✅ **完成并空中验证**（`0103795cfe`，腿 `s13p2_0919_2303`，§5.5）：离线 27 捕获 `_llr`/`_h`/`.bin` **0 差异**、`_ce.txt` 只动 `epre`（≤2.3e-07）、`CPU_LS=1` 网四个 dump 逐字节相同；**空口契约 8/8**、跨越 **0.00 读 + 0.00 写/跳、分项表空**、0 RF failure、`[ce_inputs]` = DEVICE、无回退 |
 | **测** | `[ul_gpu_pipeline]`：IQ 进 GPU → LLR 出 GPU（用户要求，只对 `mode=gpu`）| ✅ **完成并空中验证**（`7d968cfb84`，腿 `probe-iq2llr_0919_2216`，§20）：探针 + `leg_report.sh -- latency` + 单测（含反证）+ 27 捕获逐字节不变；**空口 4036 个样本、mean 2677.2 µs**（§20.6）|
 
@@ -631,8 +631,44 @@ P2 把往返消掉了，于是这一批做**剩下的一半**：让"设备这一
 | 4 | 每一个读都能归因 | ✅ 无 "NOT named" 警告（默认臂的 replay 读也已命名）|
 | 5 | 单测 | ✅ `ctest -L phy` **171/171**、`-L support` **562/562**、`ctest -R metal` **9/9** |
 
-**待跑腿（判据最后一条）**：`mode=gpu` 一腿，预期 `[metal_stats] mmse_ce … refusals=<none>`、
-契约 8/8、跨越 **0.00 读 + 0.00 写**/跳且**两张站点表都空**（空口上 replay 那次"宿主网格"读不存在）。
+#### 5.6.5 ★ 空中腿 `s13p1b_0919_2322`（`650ba53d6b`）—— **仪表当场抓到一条从未被数过的每跳写**
+
+**腿形**：62778 slots、878808 符号全部 in-place、**RTF 0**、0 gaps；PUSCH **3748** 次
+（CRC 3030 OK / 718 KO = 80.8%）；lane 3748；`[ce_inputs]` = DEVICE。
+
+```
+[phy_pipeline] host device data crossings: 0 host read(s) (0 bytes) and 368 host write(s) (16579296 bytes)
+               of device data over 3748 device hop(s) = 0.00 read(s) + 0.10 write(s) per hop
+    ce: A/R_hp staged (host)                    368 call(s),   16579296 bytes      -> FAILED
+    <no host read was attributed to a site>
+[metal_stats] mmse_ce … device_sigma2=3748 refusals=corr_geometry=368
+[phy_pipeline] contract NOT MET: 1 of 8 applicable checks failed (mode=gpu)
+```
+
+**读侧是 0（且分项表里没有未归因的读，覆盖率检查没报）**；**写侧 0.10/跳**，**唯一站点**
+`ce: A/R_hp staged (host)`，**拒绝理由唯一**：`corr_geometry=368`。两者数量**精确相等**
+（368 = 368），这就是 S13-P1 要的那种"一个数、一个理由、一个站点"。
+
+**根因（当天离线复现并量清）**：`block_prb = 3`，而 `tail_slots_on_device = std_slots_filled =
+device_corr_enabled() && !merge_tail && (n_std_blocks != 0)` —— **比一个块还窄的跳（1–2 PRB）没有
+"标准组"，这个表达式对它恒为假**，于是宿主自己建相关矩阵并把 A/R_hp 写进设备槽位。
+腿上的 368 = **78 个 1 PRB + 290 个 2 PRB**，与 `prb=[a, b)` 的直方图**逐个对得上**
+（`wip/make_narrow_captures.py` 从 `syn001_3` 裁出 1/2 PRB 语料，离线复现出同一条站点与同一个理由：
+1 PRB 13392 B、2 PRB 53568 B）。
+
+**这条写一直是有的**：s13p2 腿（"0.00 写、分项表空"）里也有 113 个窄跳（24 个 1 PRB + 89 个 2 PRB）
+在写同样的东西，只是**当时还没有这个站点** —— 这批的价值就在这里。
+
+**⇒ `gpu_phy_iq2llr_zero_data_crossings_p2` 那句话的适用范围要跟 tag 的教训一样写清**：
+"零穿越"成立于**每跳分配 ≥ 1 个块（本座台 = 3 PRB）**；**1–2 PRB 的跳仍有一次宿主→设备写**
+（0.10/跳）。这不是 P2 的回归（P2 消的是接收导频那条往返），是 P1 补站点**新看见**的既有路径。
+
+**⚠ 顺手试过的修法不成立（已回退，代码里留了警告注释）**：把窄跳也交给设备建
+（`tail_slots_on_device = std_slots_filled || (n_std_blocks == 0)`）后，**穿越确实归零**
+（0.00 写、`refusals=<none>`），但**发布值整体变了**：两个窄语料上**每一个 h 都不同、最大
+|dev−host| ≈ 1.5**（是"另一个答案"，不是舍入差），`_llr.bin` 差 260/478 字节。
+⇒ **设备对窄几何的相关矩阵构建与宿主不等价**，原因未查清；修法要连 `OCUDU_CE_CORR_DEV=0`
+（"宿主建"）一起考虑（上面那个朴素写法把它也绕过了）。这就是下一批的题目。
 
 ---
 
@@ -1008,6 +1044,7 @@ worst rel 1.137e+00  (host 1.084547639e+00  dev 2.317298651e+00)
 | **`gnb_gpu_5g-epochs_0919_1945`** | **`45fa002d6c`** | ✅ 批次 5g 空中验证：读 **0.00** / 写 **0.00** 每跳、分项表空，3576 跳，RTF 0，gaps 0，**契约 8/8**，CRC 79.19% |
 | **`gnb_gpu_probe-iq2llr_0919_2216`** | **`5455f96094`** | ✅ `[ul_gpu_pipeline]` 空中验证（§20.6）：4036 跳，RTF 0，gaps 0，CRC **79.76%**（3219 OK / 817 KO），契约 **7/8** —— 唯一的 FAILED 是跨越（**1.00 读 + 1.00 写/跳**，站点 `ce: rx pilots staged (host)`）：**P1 那条每跳往返的空口实证** |
 | **`gnb_gpu_s13p2_0919_2303`** | **`80d0ba32ef`** | ✅ **P2 空中验证**（§5.5.3）：1163 跳，RTF 0，gaps 0，CRC **70.94%**（825 OK / 338 KO，**流量/链路形状不同，见 §5.5.3**），**契约 8/8** —— 跨越 **0.00 读 + 0.00 写/跳、分项表空**、无回退（`[ce_inputs]`=DEVICE、`device_sigma2=1163`）|
+| **`gnb_gpu_s13p1b_0919_2322`** | **`650ba53d6b`** | ✅ **P1 剩余空中验证**（§5.6.5）：3748 跳，RTF 0，gaps 0，CRC 80.8%，**读侧 0.00**；**写侧 0.10/跳** —— 全部来自 `ce: A/R_hp staged (host)`（368 call(s)，`refusals=corr_geometry=368`），即**窄分配（1–2 PRB）**的相关矩阵宿主 staging；契约 7/8。**这条写是新仪表才看见的既有路径**，修法见 §5.6.5 |
 
 > **本表的判读在各批次小节**（5a→§17.8、5b→§17.9.7、5c→§17.10、5d→§17.10.5、5e→§19.3a、5g→§19.6.2b、
 > `probe-iq2llr`→§20.6）；表里只记事实。**RTF 数要连腿形读**：5b 的 47 次属于"UE 反复重接"的那条腿，
@@ -2523,6 +2560,13 @@ channel_equalizer_metal_unit_test（默认 + OCUDU_EQ_DEFER_ENCODE=1）: ALL OK
 > 读到 **0.00 read + 0.00 write/跳、分项表空、契约 8/8**。里程碑 tag
 > **`gpu_phy_iq2llr_zero_data_crossings_p2`**（`80d0ba32ef`）—— 本块上面那句
 > "tag 的那句话要等 P2 之后才真正成立"**至此成立**。
+>
+> **⚠ 适用范围（2026-09-19 晚，S13-P1 剩余部分，§5.6.5）**：紧接着的一条腿
+> （`s13p1b_0919_2322`）**带着新补的站点**再量，读侧仍是 0.00，但写侧出现 **0.10/跳**：
+> 全部是 `ce: A/R_hp staged (host)`（368 次，`refusals=corr_geometry=368`），
+> 即**每跳分配窄于一个块（1–2 PRB）时宿主自己建相关矩阵并写回设备**。
+> ⇒ **"零穿越"成立于每跳分配 ≥ 1 个块（本座台 3 PRB）**；窄分配的那条写是 P2 之前就有的既有路径，
+> 新仪表才让它可见。修法（及其已证伪的朴素版本）见 §5.6.5。
 
 ```
 [phy_pipeline] contract (mode=gpu):

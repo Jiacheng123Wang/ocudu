@@ -2607,6 +2607,22 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           // buffer, which one correlation build cannot describe. That is why the device build
           // covered 37.5% of the hops on the air (device_corr_builds=26761 of 71384 in the b22
           // leg): the rest had a remainder and merged.
+          // WHO builds the tail block's matrices. \c std_slots_filled answers for the STANDARD
+          // group's slots, and a hop NARROWER than one block (n_std_blocks == 0) has no standard group
+          // at all - so this reads false for it and every 1-2 PRB hop takes the host build and its
+          // A/R_hp staging. MEASURED, not suspected (S13-P1's new site + refusal counter): 368 of 3748
+          // hops in the air leg s13p1b_0919_2322 (78 of 1 PRB + 290 of 2 PRB - exactly the narrow
+          // allocations), 0.10 host writes per hop, 16.6 MB, invisible until this batch counted it.
+          //
+          // \warning The obvious repair - "let the device build the narrow group too" - DOES NOT WORK
+          //          YET: with `std_slots_filled || (n_std_blocks == 0)` the crossing disappears (0.00
+          //          writes, refusals=<none>) but the published estimates move COMPLETELY (measured on
+          //          the synthetic 1-2 PRB captures: every h value differs, max |dev - host| ~ 1.5 -
+          //          a different answer, not a rounding difference). The device build of this geometry
+          //          is therefore not equivalent to the host's yet, and finding out why is the next
+          //          batch; the synthetic captures are its regression input (see
+          //          wip/make_narrow_captures.py). The repair must also keep OCUDU_CE_CORR_DEV=0
+          //          meaning "the host builds" - the naive form above ignored that knob.
           const bool tail_slots_on_device = std_slots_filled;
           unsigned nout_e = 0;
           unsigned L_e    = 0;
