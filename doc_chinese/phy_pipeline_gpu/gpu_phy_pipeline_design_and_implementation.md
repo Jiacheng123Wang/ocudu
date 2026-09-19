@@ -353,8 +353,8 @@ K4 的 `gpu_nv` 就是"从同一份 h 归约、结果留在设备、消费者不
 | **5f** | 写侧：`h_starts` 表与 epoch 表 | **5f-1 完成**（`9e36fef3ed`，§19.5）：`h_starts` 进参数块，replay 写 **5 → 1/跳**；顺带修掉一个**既有批处理缺陷**。**5f-2 未做**：`symbol_start_epochs`（56 B，1 次/配置）仍在宿主上传 ⇒ **契约仍 7/8** |
 | **5g** | 5f-2：epochs 由 kernel 从 (cp, scs) 算 | ✅ **完成并空中验证**（`45fa002d6c`，腿 `5g-epochs_0919_1945`，§19.6.2b）：27 捕获四个 dump 与 HEAD **逐字节相同**；replay 写侧 **1 → 0/跳**、分项表空 ⇒ **写侧清零**；空口 **契约 8/8**、0 RF failure、CRC 79.19%。**⚠ 该"零"只在被审计的站点上成立**：P1 发现一条**每跳**的未计数往返（§19.6.2b 勘误块 + `wip/S13_fallback_coverage.md` §5b）|
 | **S13-P1** | 回退路径的可见性（仪表）| ✅ **第一批完成**（`b3f72deadb`）：基类虚钩子 `account_host_grid_read`（默认空 ⇒ CPU 车道不变）+ `ce: rx pilots staged (host)` 站点 —— 正是它们**照出了那条每跳往返**。**剩余**：回退门计数 + A/R_hp / y staging 两个站点（`wip/S13_fallback_coverage.md` §4.6）|
-| **S13-P2** | 消掉那条每跳往返（设备自建 `gpu_rx_pilots`，EPRE 由设备发布）| **未做**（下一个数据面批次）；判据：**带着 P1 的站点**契约回到 `0.00 read + 0.00 write`/跳 |
-| **测** | `[ul_gpu_pipeline]`：IQ 进 GPU → LLR 出 GPU（用户要求，只对 `mode=gpu`）| ✅ **离线完成**（§20）：探针 + `leg_report.sh -- latency` + 单测（含反证）。**空中腿待跑** |
+| **S13-P2** | 消掉那条每跳往返（设备自建 `gpu_rx_pilots`，EPRE 由设备发布）| **下一个数据面批次**（落点清单见 §5.5）；判据：**带着 P1 的站点**契约回到 `0.00 read + 0.00 write`/跳 |
+| **测** | `[ul_gpu_pipeline]`：IQ 进 GPU → LLR 出 GPU（用户要求，只对 `mode=gpu`）| ✅ **完成并空中验证**（`7d968cfb84`，腿 `probe-iq2llr_0919_2216`，§20）：探针 + `leg_report.sh -- latency` + 单测（含反证）+ 27 捕获逐字节不变；**空口 4036 个样本、mean 2677.2 µs**（§20.6）|
 
 ### 5.1 批次 2 的三个做法与取舍
 
@@ -428,6 +428,55 @@ OCUDU_CE_DEV_Y=0       3.10 读 + 2.65 写 /跳   ← 参考臂：宿主 stage y
   barrier（注释假定"切 pipeline 会顺带插 barrier"——**按判据要求去读代码验证，别信注释**）。
 - **契约措辞**：主句仍写 "the fused lane (mode=gpu) allows 0"，容易被读成整车道结论。**考虑改措辞。**
 - **`ab_dumps.sh` 要能分开报"发布判据"与"调试判据"**（见 §9 坑 12）。
+
+### 5.5 ★ S13-P2 的落点清单（读代码得到，可直接动手）
+
+**题目**：消掉那条**每跳**往返。**空口实证在 §20.5**：契约唯一的 FAILED 就是它
+（`1.00 read + 1.00 write`/跳、站点 `ce: rx pilots staged (host)`、平均 **2425 B/跳**、4036/4036 跳全中）。
+
+**机理**（handoff-8 §4 / `wip/S13_fallback_coverage.md` §5b）：基类 `compute_hop_submit()`
+**无条件**从资源网格抽本跳的接收 DM-RS 导频（注释原文："it is unconditional: only the least-squares
+pilots and the CFO can be taken over by the stage"）；gpu 车道里那张网格是**前端 DFT 写在设备上**的
+（S-7b）⇒ 宿主读它（`account_host_grid_read` = **读**），紧接着 `stage_device_noise_inputs()` 把这些值
+**原样写回** `gpu_rx_pilots`（= **写**）。
+
+**两个动作**：
+
+1. **消写**：让设备自己建 `gpu_rx_pilots`。**落点**：K0-a 的 `mmse_pilots_lse`
+   （`ocudu_mmse_pilots.metal`）**已经在读同一批 RE** —— `mmse_pilots_read_grid()` 返回的那个 `float2 rx`
+   就是要的值 ⇒ 只需加一个输出 buffer + 一次 store。布局 `[npt][nof_cdm_groups][npf]` complex，
+   而该 kernel 的线程按 `(i_pilot, i_symb * nof_layers + i_layer)` 走 ⇒ **只让偶数 layer 写**
+   （同一 CDM 组的两个 layer 读的是同一个 RE），下标 `(i_symb * nof_cdm + i_layer / 2) * npf + i_pilot`。
+   * ⚠ **该 kernel 是逐元素的（没有长累加）**，按 §19.6.3 的规则**可以**加代码；
+     但它旁边的 `mmse_pilots_cfo` **是**长累加 ⇒ **绝不要动那个 kernel**（§19.6.3 的 1 ulp 就是这么来的）；
+   * ⚠ **绝不能碰** K4 `mmse_noise`（`ocudu_mmse_reformat.metal`）：它的输出（噪声方差）是一个**归约**，
+     给它加"从 LSE 反推 y"这类新算术就会动发布位；y 必须由 K0-a 直接从网格产出；
+   * 顺序上没有问题：`cfo_dev` 就是"K0-a 写、K4 读"的同一个先例（同一个队列里前后两个命令缓冲）。
+2. **消读**：宿主抽导频只为了 (a) **EPRE**（`epre += average_power(rx) * size`，最后 `/nof_dmrs_pilots`，
+   一个**上报值**）与 (b) **回退**（设备覆盖不到这一跳时才自建 LSE/CFO）。
+   ⇒ 设备能覆盖这一跳（`stage_produces_ls_pilots()` 为真）时，宿主**整段抽取 + EPRE 都不该跑**；
+   EPRE 按 5a 的 rsrp 那样**由设备发布**（设备侧已有 `ocudu_mmse_pilots_power.metal` 在归约导频功率 ——
+   **先核对它的定义与宿主 `epre` 是不是同一个量**；不是就得在设备侧补一个同定义的归约，
+   **不能拿"差不多"的量顶**）。
+   * ⚠ **落点难点**：抽取循环发生在 `stage_args` **构造之前**（`rx_pilots` 是 `args` 的成员），
+     而现有钩子 `stage_produces_ls_pilots(args)` 拿不到 args 就答不了 ⇒ 需要一个**更早的虚钩子**，
+     或者把"本跳的输入由设备产生"这件事在基类里上移一层。
+
+**判据**（缺一不可）：
+
+1. **带着 P1 的两个站点**，默认旋钮下契约回到 **`0.00 read + 0.00 write`/跳、分项表空**；
+2. 27 捕获四个 dump 逐字节不变（LSE 线性、rx 是同一批 load，但**必须实测**——CFO/h 是敏感的）；
+3. `ctest -L phy` 172/172（macOS）、Ubuntu 全过；
+4. **一条腿**：契约 8/8、0 RF failure、CRC 与 5g/`probe-iq2llr` 同量级、`[ul_gpu_pipeline]` 无回归；
+5. **回退路径不许变哑**：`OCUDU_CE_CPU_LS=1` 或几何被拒时宿主**仍然**抽取（那是**合法回退**），
+   P1 的站点会把它数出来 —— 那种情况下契约变红是**预期**，不是回归。
+
+**P1 剩余（可与 P2 分开做）**：回退门的**拒绝计数**（`device_ls_refused`（几何被拒，区别于 engine 调用
+失败）/ `device_y_refused`（`record_device_y_stage` 的每个 `return false` 分支分类）/
+`device_corr_refused` / `ta_refused` / `sigma2_refused` / `k3_refused`，打印进 `[metal_stats] mmse_ce` 行）
++ 另外两个盲点的站点（`stage_engine_group()` 里 A/R_hp 的宿主 `memcpy` 写；y staging 的逐导频读+写，
+含 pad 行 memset）。**自证判据**：用现成旋钮强制每条回退（`OCUDU_CE_DEV_Y=0`、`DEV_TA=0`、`DEV_SIGMA2=0`、
+`CORR_DEV=0`、`CPU_LS=1`）⇒ 对应计数**必须动**、契约变红；关掉旋钮 ⇒ 回到 0。
 
 ---
 
@@ -582,6 +631,9 @@ bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh "" "<knob>"
 | 21 | **★ 用一条"采样连续性已坏"的腿去支持/否定代码改动** | 核心网故障窗口里我连做 5 条腿的归因，全部无效：重启前 `965b0f0951` 是 **1265** 次 RT failure + `radio sample continuity` **1 gap / 214030 samples**，重启后同一提交是 **4** 次 + 0 gaps。**代码被冤枉了两轮**（§12.2.2）| **判腿是否有效，第一眼看 `radio sample continuity` 与 `host sample assembly`**；采样连续性坏掉的腿，其 CRC/attach/契约数字一律不能当证据 |
 | 22 | **★ `git reset --hard` 之前没有单独保存未提交的工作树状态** | 准备干净基线时我执行了 `git reset --hard 965b0f0951`，把 `configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml` 里**未提交**的 bench 改动（增益、时钟源、`pusch.max_ue_mcs`、`pucch.max_consecutive_kos: 300`、AMF 地址）**一并清掉**。这些内容 git 里没有、也没备份，**无法找回**，用户只能重配 | **动分支之前先存工作树**：`git stash` 或 `git diff > backup.patch` 或直接复制文件。**屏幕上打印过 diff 不等于备份** |
 | 23 | **★ 用 SIGTERM 停 gNB，收尾统计全部丢失** | `gnb.cpp` 对 SIGINT 走正常收尾（打印契约/`[ul_host]`/`[metal_stats]`/`[ul_gpu_lane]`），对 **SIGTERM 只 flush 日志就退出**。腿 `ota-b3a-final_0919_0734` 因此失去全部跨越计数，20 MB 日志里一行都没有，**事后无法恢复** | **腿一律用 Ctrl-C 停**；判定腿有效的第一眼是报告的 `-- device side` / `-- lane` **两段非空** |
+| 24 | **★ `run_leg.sh` 里的 `> >(tee …)` 让 shell 先回到提示符** | 腿 `probe-iq2llr_0919_2216` 的控制台最后一行是 `[ul_rx] blocks=… gaps=0` **直接贴着提示符**（缺 ` gap_samples=0 ts0_blocks=0` 和换行），而 `.stderr` 文件里那一行**完整且有换行**。不是程序少打 `\n`（源码里就有），是**进程替换的 tee 没有被等待**：gnb 一退出 shell 就打印提示符，tee 还没把最后一段抄到终端 | **已修**：`run_leg.sh` 改成 `exec 3> >(tee …)` / `exec 4> >(tee …)` 拿住两个 tee 的 PID，gnb 退出后先 `exec 3>&- 4>&-` 再 `wait` 这两个 PID（**不关 fd 的话 tee 的 stdin 看不到 EOF，`wait` 会挂住**——实测踩过）。判据：控制台与文件必须一致 |
+| 25 | **★ `gtest_discover_tests` 把每个用例注册成独立进程** | 探针的新测试拆成两个用例（cpu / gpu）：**直接跑二进制通过、`ctest -L support` 变红**——每个 ctest 条目是独立进程，gpu 那个用例看不到前一个用例留下的状态，而它断言的样本数依赖那点状态 | 跨用例共享进程级状态（单例、只能发布一次的 mode）的测试**放在同一个用例里**；而且**必须用 `ctest -L <label>` 跑一遍**才算验过，直接跑二进制不算 |
+| 26 | **`ctest -R "metal_unit_test"` 匹配不到 `…_metal_mmse_unit_test`** | 以为跑了 8 个 GPU 用例，实际只跑 6 个（`session_handoff_2026-09-19-8.md` §7 的命令注释也这么写）| 用 `ctest -R "metal"`（9 个），或把两个 `port_channel_estimator_metal_*` 显式列上 |
 
 ---
 
@@ -791,6 +843,18 @@ worst rel 1.137e+00  (host 1.084547639e+00  dev 2.317298651e+00)
 | **`gnb_gpu_ota-b3a-final2_0919_0744`** | **`0eeb1c1941`** | ✅ **新默认空中验证**：读 2.38 / **写 1.23** 每跳，3889 跳，RTF 3，gaps 0，契约 7/8，RLF 0 |
 | **`gnb_gpu_ota-b3b_0919_0758`** | **`fa2628e018`** | ✅ **批次 3b.1 空中验证**：读 **1.40** / 写 **0.26** 每跳，3616 跳，**RTF 0**，gaps 0，契约 7/8，RLF 0 |
 | **`gnb_gpu_ota-b4_0919_0827`** | **`0e4a24ce57`** | ✅ **批次 4 空中验证**：读 **1.33** / 写 **0.27** 每跳，3383 跳，RTF 1，gaps 0，**申报含 demapper**，契约 7/8 |
+| **`gnb_gpu_5a-pubpath_0919_1230`** | **`94df4144a2`** | ✅ 批次 5a 空中验证：读 **1.39** / 写 0.28 每跳，3201 跳，RTF 0，gaps 0，契约 7/8 |
+| `gnb_gpu_5b-devta_0919_1650` | `1826e01e07` | ✅ 批次 5b 空中验证（**腿形见 §17.9.7**：UE 反复重接、89% 的 lane 挤在最后一分钟）：读 1.39 / 写 0.27 每跳，3326 跳，**RTF 47**（42 underflow + 5 late），gaps 0，契约 7/8 |
+| `gnb_gpu_5c-hostgrid_0919_1730` | `986c991742` | ✅ 批次 5c：读 **0.00** / 写 0.27 每跳，3379 跳，RTF 1（underflow），gaps 0，契约 7/8 |
+| `gnb_gpu_5d-fused_0919_1820` | `503990ca5f` | ✅ 批次 5d：读 0.00 / 写 0.27 每跳，3357 跳，RTF 0，gaps 0，契约 7/8，CRC 81.23% |
+| `gnb_gpu_5d-devtaoff_0919_1900` / `_1920` | `413ef13f94` | 单变量对照臂（`DEV_TA=0`）：读 1.41 / 1.45、写 0.24 / 0.33 每跳，3692 / 2749 跳，RTF 0，gaps 0 —— 用于定位车道的 +38 µs 代价（§17.10.6）|
+| **`gnb_gpu_5e-devtables_0919_2000`** | **`5bd33639ab`** | ✅ 批次 5e 空中验证：读 0.00 / 写 **0.13** 每跳，3752 跳，RTF 0，gaps 0，契约 7/8 |
+| **`gnb_gpu_5g-epochs_0919_1945`** | **`45fa002d6c`** | ✅ 批次 5g 空中验证：读 **0.00** / 写 **0.00** 每跳、分项表空，3576 跳，RTF 0，gaps 0，**契约 8/8**，CRC 79.19% |
+| **`gnb_gpu_probe-iq2llr_0919_2216`** | **`5455f96094`** | ✅ `[ul_gpu_pipeline]` 空中验证（§20.6）：4036 跳，RTF 0，gaps 0，CRC **79.76%**（3219 OK / 817 KO），契约 **7/8** —— 唯一的 FAILED 是跨越（**1.00 读 + 1.00 写/跳**，站点 `ce: rx pilots staged (host)`）：**P1 那条每跳往返的空口实证** |
+
+> **本表的判读在各批次小节**（5a→§17.8、5b→§17.9.7、5c→§17.10、5d→§17.10.5、5e→§19.3a、5g→§19.6.2b、
+> `probe-iq2llr`→§20.6）；表里只记事实。**RTF 数要连腿形读**：5b 的 47 次属于"UE 反复重接"的那条腿，
+> 不是本线的回归。
 
 #### 12.2 ~~❌ `ota-b3a` 失败腿 —— 批次 3a 是原因~~ **此结论已作废，真因是核心网（见 §12.2.2）**
 
@@ -2465,13 +2529,92 @@ DM-RS 符号里 2 个的相位余量发生变化（第 3 个的 cos/sin 恰好�
   **27/27 四个 dump 逐字节相同、0 缺 dump、配对断言通过** —— 探针改动没有碰任何发布位，
   （这条同时把 5g 的"与旧二进制逐字节相同"在新构建上复核了一遍）；
 * 构建 rc=0；`ENABLE_FLOW_PROBES=OFF` 的构建里测试**跳过并说明原因**（不是静默通过）；
-* `ctest -L phy` **172/172 不变**（新测试的 label 是 `support`，不进 phy 计数；`ctest -L support` 562/562）。
+* `ctest -L phy` **172/172 不变**（新测试的 label 是 `support`，不进 phy 计数；`ctest -L support` 562/562）；
+* **Ubuntu（`ENABLE_FLOW_PROBES=OFF`）**：构建 rc=0；`ctest -j12` = **7618/7618，0 failed**（71.9 s，
+  测试数 7617 → 7618 就是新用例），且它**按设计跳过**（`compiled_out_without_flow_probes (Skipped)`）
+  —— 这同时验证了"OFF 构建不是静默通过"。
 
-### 20.5 还缺什么
+> **⚠ 一条没解释的偶发**：上面那次全量 `ctest -L phy` 里 `port_channel_estimator_metal_mmse_unit_test`
+> 失败过 **1 次**，之后单独重跑 8 次、GPU 子集 3 轮、全量 1 次**全部通过**，无法复现。
+> 该测试的二进制**不包含**探针头文件（与本次改动无关），此处如实记录，**不当作已解释**。
+> 教训（§7 坑 26 的补充）：`ctest` 的 `LastTestsFailed.log` 会被**下一次成功运行删掉**，
+> 失败详情要在失败当下用 `--output-on-failure` 存下来，否则只剩文件名。
 
-* **空中腿**：离线判据证明"探针按规格工作"，**不证明空口上它就是这个数**。
-  腿要看的是：`[ul_gpu_pipeline]` 这一行**出现**、样本数与 `[ul_ldpc_decode]` 同量级且**不少于**它、
-  均值落在 `[ul_pipeline]` 之下且相差不大（预期差 = LDPC + FAPI 的量级，5g 腿上 `[ul_ldpc_decode]`
-  mean 13 µs）；同时 `[ul_gpu_lane]` 的 residency/busy/gap 与这个窗口的差要能解释（§20.3 第 3 条）；
-* 用户提出的**第 2 条**（IQ → CRC=OK）不需要新代码，但要在腿报告里与第 1 条并排出现——已做
-  （`leg_report.sh`）。
+### 20.5 ✅ 空中腿 `probe-iq2llr_0919_2216`（`5455f96094`，2026-09-19 22:16）—— 测量成立
+
+**腿形**：79058 个 radio block（0 gaps、0 timestamp-0），1106728 个符号**全部 in-place**；
+**RTF 0**；PUSCH 尝试 **4036** 次（CRC OK **3219** / KO **817** = **79.76%**）；
+lane 4036、cbs/lane 3.41、dropped/carried 0。
+
+```
+[ul_pipeline]     samples=3219 mean=2685.6us median=2657.0us min=1473.0us max=9320.0us p95=3826.0us p99=5107.0us
+[ul_gpu_pipeline] samples=4036 mean=2677.2us median=2652.5us min=1463.9us max=9311.2us p95=3695.4us p99=4998.1us
+[ul_ldpc_decode]  samples=3219 mean=11.9us  median=10.0us  min=3.0us  max=111.0us p95=19.0us  p99=44.0us
+[ul_fapi_mac]     samples=3219 mean=2.0us
+[ul_gpu_lane]     lanes=4036 cbs/lane=3.41 (max=4) dropped=0 carried=0 period_dropped=0
+                  residency mean=849.6us  busy mean=591.8us  gap mean=257.8us
+                  busy split: ch_est=116.6us/lane ch_wt=375.0us/lane eq_demap=100.2us/lane
+[ul_gpu_lane]     dft residency=busy mean=415.7us gap=0 (front-end queue, 14305 slots)
+```
+
+**四条判据逐条对**：
+
+| # | 判据 | 结果 |
+|---|---|---|
+| 1 | 这一行**出现** | ✅ |
+| 2 | `samples` ≥ `[ul_ldpc_decode]`，且等于**解码尝试数** | ✅ **4036 = 3219 + 817**（OK + KO）：`[ul_gpu_pipeline]` 是"每一次尝试"、`[ul_pipeline]`/`[ul_ldpc_decode]` 是"CRC 通过的那个子集"，**设计意图在空口上被精确复现** |
+| 3 | `mean` 小于 `[ul_pipeline]`，差 ≈ LLR 之后的部分 | ✅ 差 **8.4 µs**，`[ul_ldpc_decode]` mean = 11.9 µs；差别来自总体（见下）|
+| 4 | 与 `[ul_gpu_lane]` 的差可解释 | ✅ 窗口 2677.2 vs 车道 residency 849.6（§20.3 第 3 条），差额的构成见下 |
+
+**判据 3 的算术（这一腿最有价值的一步）**：`[ul_pipeline]` 与 `[ul_gpu_pipeline]` 配的是**同一个起点**，
+所以对**同一批 3219 个样本**逐样本有 `pipeline_i = fused_i + ldpc_i`；取均值：
+
+```
+mean(fused | CRC-OK 子集) = 2685.6 − 11.9 = 2673.7 µs      ← [ul_pipeline] − [ul_ldpc_decode]
+mean(fused | 全部 4036)   = 2677.2 µs                       ← 报告值
+⇒ mean(fused | 817 个 CRC-KO 尝试) = (2677.2×4036 − 2673.7×3219) / 817 ≈ 2691.0 µs
+```
+
+即 **CRC-KO 的尝试比 CRC-OK 的在 IQ→LLR 这一段慢约 17 µs**，正是这 817 个样本把报告的均值抬到
+"只比 `[ul_pipeline]` 低 8.4 而不是 11.9 µs"。这条同时验证两件事：
+(a) 逐样本等式成立（均值可加）——三条系列的两端确实是同一对时间戳；
+(b) §20.3 第 2 条那个"两个总体"的口径**不是文字游戏**，它在这条腿上就是 ~17 µs 的量级。
+（前提：3219 这个数在两条系列里相等，支持"配的是同一批样本"。）
+
+**判据 4 的量级分解**（**不是严格相加**，各段在主机墙钟上互相重叠，只用来解释"为什么窗口远大于车道"）：
+
+| 段 | 量级 | 来源 |
+|---|---|---|
+| 等这一 slot 的样本到齐 | **~1 个 slot ≈ 1000 µs**（15 kHz）| 窗口起点是 radio 侧按 `last_rx_timestamp` 派生的时间戳（§20.3 第 3 条）|
+| 前端 DFT（每 slot 一组）| **415.7 µs** | `[ul_gpu_lane] dft residency=busy` |
+| 融合车道 | **849.6 µs**（busy 591.8 + gap 257.8）| `[ul_gpu_lane] residency` |
+| 其余（宿主装配/提交/队列）| ~400 µs | 上面三段的余量 |
+
+**契约：7/8，唯一 FAILED = 跨越** —— 这不是回归，是 P1 的仪表**按设计工作**：
+
+```
+host device data crossings: 4036 host read(s) (9787392 bytes) and 4036 host write(s) (9787392 bytes)
+  over 4036 device hop(s) = 1.00 read(s) + 1.00 write(s) per hop
+    ce: rx pilots staged (host)   4036 call(s),  9787392 bytes        -> FAILED
+```
+
+* 5g 腿（`45fa002d6c`）跑在 **P1 之前**，所以契约 8/8；P1（`b3f72deadb`）插上两个站点之后，
+  **空口直接显示默认路径每个跳都有一条往返**：1.00 读 + 1.00 写/跳，平均 **2425 B/跳**
+  （handoff-8 §4.1 上那个 432 B 是 6 PRB 的捕获，空口的平均分配更大）。
+  这是 handoff-8 §4 的发现与 §19.6.2b 勘误块在**真机上的实证**；
+* ⇒ 里程碑 tag `gpu_phy_iq2llr_zero_data_crossings` 的那句话**在 P2 之前不成立**（文档已勘误）；
+* ⇒ P2 的判据就是**这条线**：带着这两个站点回到 `0.00 read + 0.00 write`/跳、分项表空。
+
+**与 5g 腿的对照（无回归）**：CRC 79.76% vs 79.19%；RTF 0/79058 vs 0/69549；lanes 4036 vs 3576；
+cbs/lane 3.41 vs 3.38；busy split 116.6/375.0/100.2 vs 118.7/379.9/101.1 µs/lane；dropped/carried 0；
+`ce device estimates` 44396 device / 0 host；`zero-copy wraps` 92404 hits / 0 failures / 0 misaligned；
+`dft radio inputs` 200284/200285（一条不是从 radio buffer 读的——与 5g 的 190330/190331 同形）；
+`[epoch_check]` 14/14 bit-identical；`[ta_impl]`/`[eq_impl]`/`[epoch_impl]` 三条自证行都在。
+
+### 20.6 还缺什么
+
+* **这一条测量本身：没有了**（空中判据已过）。用户的两条需求都满足：第 1 条 = `[ul_gpu_pipeline]`；
+  第 2 条 = `[ul_pipeline]`（本来就与模式无关，现在也在腿报告的 `-- latency` 段里并排出现）；
+* **§20.3 的三条口径依旧成立**：这是墙钟窗口、两个总体、与车道 residency 不可直接相减；
+* 唯一遗留的是**探针以外的**事：契约现在在空口上是 **7/8**，而它变红的原因（那条每跳往返）
+  是 P2 的题目（§5.5）。

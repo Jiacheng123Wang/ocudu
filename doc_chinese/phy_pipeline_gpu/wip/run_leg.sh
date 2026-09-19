@@ -121,6 +121,15 @@ cd "$ROOT"
 # the [phy_pipeline] banner is a logger line in the ocudulog file), but a leg must be readable
 # afterwards without asking whoever ran it to paste a console.
 #
+# The two tees are explicit descriptors that are WAITED FOR, not `> >(tee ...)` process
+# substitutions. With the substitution form the shell returns to the prompt as soon as gnb exits and
+# leaves the tee children to finish on their own: the last line of the shutdown report then reaches
+# the console after the prompt. Measured on the `probe-iq2llr` leg (2026-09-19 22:16): the console
+# showed "[ul_rx] blocks=... gaps=0" with the prompt glued to it and the rest of the line arriving
+# later, while the .stderr file - which tee had already read out of the pipe - was complete and
+# newline-terminated. Waiting for the tees is what makes the console and the files agree; closing the
+# descriptors first is what makes the wait return (the tee's stdin then sees EOF).
+#
 # /!\ STOP THE gNB WITH Ctrl-C (SIGINT), NOT WITH kill (SIGTERM).
 # gnb.cpp installs two different handlers: `interrupt_signal_handler` (SIGINT) only clears the
 # running flag, so the app leaves its loop and runs the normal shutdown - which is where the
@@ -130,11 +139,18 @@ cd "$ROOT"
 # only the UHD banner, and a report with every counter line blank - the crossing numbers that are
 # the whole point of the leg were gone. There is no way to recover them after the fact, because
 # nothing writes them to the ocudulog file.
+exec 3> >(tee "$LOG.stdout")
+out_tee=$!
+exec 4> >(tee "$LOG.stderr" >&2)
+err_tee=$!
 ./build/apps/gnb/gnb -c "$CONFIG" \
   "${CLI_ARGS[@]+"${CLI_ARGS[@]}"}" \
   "${MODE_ARGS[@]+"${MODE_ARGS[@]}"}" \
   --expert_phy.phy_pipeline "$MODE" \
   --log.all_level info \
   --log.filename "$LOG" \
-  > >(tee "$LOG.stdout") \
-  2> >(tee "$LOG.stderr" >&2)
+  >&3 2>&4
+rc=$?
+exec 3>&- 4>&-
+wait "$out_tee" "$err_tee"
+exit "$rc"
