@@ -745,11 +745,40 @@ int main(int argc, char** argv)
                                                    .n_scid        = capture.get_unsigned("dmrs_n_scid") != 0,
                                                    .nof_cdm_groups_without_data =
                                                        capture.get_unsigned("dmrs_nof_cdm_groups_without_data", 2)};
-    // Frequency allocation: a type 1 allocation of the recorded RBs (contiguous, as the capture
-    // writes them relative to the BWP).
-    const std::vector<unsigned> alloc_prb = capture.get_list("alloc_prb");
-    const unsigned              rb_start  = alloc_prb.empty() ? bwp_start : bwp_start + alloc_prb.front();
-    pdu.freq_alloc = rb_allocation::make_type1(rb_start, static_cast<unsigned>(alloc_prb.size()), std::nullopt);
+    // Frequency allocation, rebuilt from the PRB LIST the capture writes (ul_capture.cpp:173-179 writes
+    // them relative to the BWP). A list that is a contiguous run - every recorded reception of this line
+    // so far - becomes the type-1 allocation it came from, exactly as before. A list with a HOLE cannot
+    // be written as type 1, and reinterpreting it as "first PRB + count" (what this line used to do)
+    // silently replays a DIFFERENT allocation: nothing downstream ever sees the hole, every gate passes,
+    // and the run looks clean - a vacuous pass of exactly the kind the sparse-RB-mask work (S13 G3a, and
+    // the `ta_stride` / `ls_geometry` refusals) is about. Such a capture becomes a type-0 bitmap and is
+    // announced, so a sparse probe cannot be mistaken for a contiguous one again.
+    const std::vector<unsigned> alloc_prb  = capture.get_list("alloc_prb");
+    const unsigned              rb_start   = alloc_prb.empty() ? bwp_start : bwp_start + alloc_prb.front();
+    const bool                  has_a_hole = [&alloc_prb]() {
+      for (size_t i = 1; i != alloc_prb.size(); ++i) {
+        if (alloc_prb[i] != alloc_prb[i - 1] + 1) {
+          return true;
+        }
+      }
+      return false;
+    }();
+    if (!has_a_hole) {
+      pdu.freq_alloc = rb_allocation::make_type1(rb_start, static_cast<unsigned>(alloc_prb.size()), std::nullopt);
+    } else {
+      const unsigned max_prb = *std::max_element(alloc_prb.begin(), alloc_prb.end());
+      vrb_bitmap     bits(bwp_start + max_prb + 1);
+      for (unsigned i_prb : alloc_prb) {
+        bits.set(bwp_start + i_prb);
+      }
+      pdu.freq_alloc = rb_allocation::make_type0(bits, std::nullopt);
+      std::printf(
+          "allocation: %zu PRB WITH A HOLE (type-0 bitmap, first=%u last=%u) - the device kernels are "
+          "expected to REFUSE this hop and fall back to the host\n",
+          alloc_prb.size(),
+          alloc_prb.front(),
+          alloc_prb.back());
+    }
 
     // Transport block size, as the processor derives it from the MCS and the allocation.
     tbs_calculator_configuration tbs_config = {};

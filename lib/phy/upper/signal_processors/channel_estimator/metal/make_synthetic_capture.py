@@ -13,7 +13,15 @@ whether it looks like a real channel is irrelevant to that comparison. It is NOT
 the recorded corpus: the byte-identity gates (k0d, k0dm, ydev, combos) and any decoding-decision
 measurement still need real receptions.
 
-Usage: make_capture.py <prefix> [bwp_size_rb] [dmrs_symbols] [seed]
+Usage: make_capture.py <prefix> [bwp_size_rb] [dmrs_symbols] [seed] [nof_tx_layers] [nof_rx_ports]
+                       [alloc]
+
+`alloc` names the PRBs of the allocation, e.g. "5,7" or "5-7,10-12" (default: the whole BWP).
+A NON-CONTIGUOUS allocation is a supported input on purpose: it is the applicability limit the device
+kernels refuse (the `ls_geometry` / `ta_stride` refusals), and until this argument existed there was no
+way to synthesize a capture that reaches that gate. The grid covers the whole BWP either way, so the
+allocation only changes what the PDU claims - which is enough for a gate (a refusal counter, the
+crossing count), and NOT enough for a decoding measurement (see the paragraph above).
 """
 import struct
 import sys
@@ -28,7 +36,31 @@ nof_rx_ports = int(sys.argv[6]) if len(sys.argv) > 6 else 1
 
 NOF_SYMB = 14
 NOF_SUBC_PER_RB = 12
-alloc = list(range(bwp_size_rb))
+
+
+def parse_alloc(spec, nof_prb):
+    """\brief The PRB list of the allocation: "5,7", "5-7,10-12" or None for the whole BWP."""
+    if spec is None or spec == "all":
+        return list(range(nof_prb))
+    out = []
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-")
+            out.extend(range(int(lo), int(hi) + 1))
+        else:
+            out.append(int(part))
+    out = sorted(set(out))
+    assert out, "empty allocation"
+    assert (out[0] >= 0) and (out[-1] < nof_prb), f"allocation {spec} does not fit a {nof_prb}-PRB BWP"
+    return out
+
+
+alloc_spec = sys.argv[7] if len(sys.argv) > 7 else None
+alloc = parse_alloc(alloc_spec, bwp_size_rb)
+# A hop whose PRBs are not a contiguous run is the geometry the device kernels refuse, so the caller
+# has to be able to see which kind of capture it just made.
+contiguous = (alloc == list(range(alloc[0], alloc[0] + len(alloc))))
 
 fields = [
     ("slot", 10049),
@@ -78,4 +110,6 @@ with open(prefix + ".bin", "wb") as f:
                 x = c + complex(rng.gauss(0.0, 0.08), rng.gauss(0.0, 0.08))
                 f.write(struct.pack("<ff", x.real, x.imag))
 
-print(f"{prefix}: bwp={bwp_size_rb}PRB dmrs_symbols={dmrs_symbols} layers={nof_tx_layers} ports={nof_rx_ports} grid={NOF_SYMB}x{nof_subc}")
+print(f"{prefix}: bwp={bwp_size_rb}PRB dmrs_symbols={dmrs_symbols} layers={nof_tx_layers} "
+      f"ports={nof_rx_ports} alloc={len(alloc)}PRB[{'contiguous' if contiguous else 'SPARSE'}] "
+      f"grid={NOF_SYMB}x{nof_subc}")
