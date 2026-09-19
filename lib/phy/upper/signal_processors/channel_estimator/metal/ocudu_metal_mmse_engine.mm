@@ -717,6 +717,11 @@ static void encode_reformat(stage_encoder&                             s,
       // and in the same command buffer, so the host never waits for anything to get it. It reads the
       // pilot REs K3 skips, which is why it walks h rather than dst.
       if ((reformat->rsrp.dst != nullptr) && (e->rsrp_pipe != nil) && (reformat->rsrp.n_blk != 0)) {
+        static bool k5_once = false;
+        if (!k5_once && (getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
+          k5_once = true;
+          fprintf(stderr, "[k5] entered, dst=%p n_blk=%u\n", static_cast<void*>(reformat->rsrp.dst), reformat->rsrp.n_blk);
+        }
         struct mmse_rsrp_params {
           uint32_t nout_stride;
           uint32_t n_blk;
@@ -740,18 +745,20 @@ static void encode_reformat(stage_encoder&                             s,
         rpparams.nof_symbols  = reformat->nof_symbols;
         rpparams.dc_sc        = reformat->dc_sc;
         rpparams.dmrs_sym_bits = reformat->dmrs_sym_bits;
-        static bool once = false;
-        if (!once && (getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
-          once = true;
-          fprintf(stderr,
-                  "[rsrp_params] nout_stride=%u n_blk=%u nf_std=%u sc_tail_base=%u nf_tail=%u sys_tail=%u "
-                  "layers=%u symbols=%u dc_sc=%u dmrs_sym_bits=%#x pilot0=%#x pilot1=%#x\n",
-                  rpparams.nout_stride, rpparams.n_blk, rpparams.nf_std, rpparams.sc_tail_base,
-                  rpparams.nf_tail, rpparams.sys_tail, rpparams.nof_layers, rpparams.nof_symbols,
-                  rpparams.dc_sc, rpparams.dmrs_sym_bits, rpparams.pilot_re_bits[0], rpparams.pilot_re_bits[1]);
-        }
         for (unsigned l = 0; l != 4; ++l) {
           rpparams.pilot_re_bits[l] = (l < reformat->nof_layers) ? reformat->rsrp.pilot_re_bits[l] : 0u;
+        }
+        static bool rsrp_param_once = false;
+        if (!rsrp_param_once && (getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
+          rsrp_param_once = true;
+          fprintf(stderr,
+                  "[rsrp_params] nout_stride=%u n_blk=%u nf_std=%u sc_tail_base=%u nf_tail=%u sys_tail=%u "
+                  "layers=%u symbols=%u dc_sc=%u dmrs_sym_bits=%#x pilot0=%#x pilot1=%#x tick=%llu\n",
+                  rpparams.nout_stride, rpparams.n_blk, rpparams.nf_std, rpparams.sc_tail_base,
+                  rpparams.nf_tail, rpparams.sys_tail, rpparams.nof_layers, rpparams.nof_symbols,
+                  rpparams.dc_sc, rpparams.dmrs_sym_bits, rpparams.pilot_re_bits[0],
+                  rpparams.pilot_re_bits[1],
+                  static_cast<unsigned long long>(reformat->rsrp.pilot_re_bits[0]));
         }
         const NSUInteger rsrp_bytes =
             static_cast<NSUInteger>(reformat->rsrp.n_blk) * reformat->nof_layers * 2 * sizeof(float);

@@ -1896,8 +1896,42 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // the union reformat.dmrs_re_bits carries - that union exists so K3 can skip every pilot RE; a
     // layer's power must be reduced over its own pilots only.
     device_rsrp_valid = false;
+    // Per-layer pilot combs for K5, built HERE and not inside device_estimate_offsets(): that
+    // function returns early for a non-contiguous hop, and a comb does not depend on the allocation
+    // being contiguous - it is a property of the DM-RS pattern. (The first K5 run reduced over an
+    // empty mask for exactly that reason.)
+    //
+    // dmrs_re_bits in the reformat is the UNION over the layers, which is right for K3 ("is this RE
+    // a pilot, so data must skip it") and wrong here: a layer's power must be reduced over its OWN
+    // pilots, or a two-layer hop adds the other layer's pilots to it.
+    for (unsigned l = 0; l != gpu_ce_pilot_re_bits.size(); ++l) {
+      unsigned bits = 0;
+      if (l < args.dmrs_patterns.size()) {
+        args.dmrs_patterns[l].re_pattern.for_each(0, args.dmrs_patterns[l].re_pattern.size(), [&](unsigned pos) {
+          bits |= 1u << (pos % NOF_SUBCARRIERS_PER_RB);
+        });
+      }
+      gpu_ce_pilot_re_bits[l] = bits;
+      static bool comb_once = false;
+      if (!comb_once && (std::getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
+        comb_once = true;
+        std::fprintf(stderr,
+                     "[comb] layer=%u npat=%u size=%u bits=%#x syms=%u npt=%u\n",
+                     l,
+                     static_cast<unsigned>(args.dmrs_patterns.size()),
+                     static_cast<unsigned>(args.dmrs_patterns[l].re_pattern.size()),
+                     bits,
+                     static_cast<unsigned>(args.dmrs_patterns[l].symbols.count()),
+                     npt);
+      }
+      if (l < last_stage_layer_re_pattern.size()) {
+        last_stage_layer_re_pattern[l] = args.dmrs_patterns[l].re_pattern;
+      }
+    }
+    last_stage_nof_prb = nof_prb;
     if (device_stats_enabled() && engine->rsrp_available()) {
-      rsrp_base_ = (rsrp_base_ + kRsrpSlots) % (kRsrpBlocks * kRsrpSlots);
+      rsrp_base_      = (rsrp_base_ + kRsrpSlots) % (kRsrpBlocks * kRsrpSlots);
+      rsrp_block_last = rsrp_base_;
       reformat.rsrp.dst     = gpu_rsrp + rsrp_base_;
       for (unsigned l = 0; l != reformat.rsrp.max_layers; ++l) {
         reformat.rsrp.pilot_re_bits[l] = gpu_ce_pilot_re_bits[l];
@@ -3048,23 +3082,11 @@ unsigned port_channel_estimator_metal_mmse_impl::stage_re_masks(const fd_td_esti
   gpu_ce_dmrs_re_bits  = dmrs_re_bits;
   gpu_ce_dmrs_sym_bits = dmrs_sym_bits;
 
-  // Per-layer pilot combs for K5 (batch 5a), in the same 12-bit form. dmrs_re_bits above is the
-  // UNION over the layers, which is the right thing for K3 ("is this RE a pilot, so data must skip
-  // it") and the wrong thing for a per-layer power reduction: layering the union into one layer's
-  // rsrp would add the other layer's pilots to it.
-  for (unsigned l = 0; l != gpu_ce_pilot_re_bits.size(); ++l) {
-    unsigned bits = 0;
-    if (l < args.dmrs_patterns.size()) {
-      args.dmrs_patterns[l].re_pattern.for_each(0, args.dmrs_patterns[l].re_pattern.size(), [&](unsigned pos) {
-        bits |= 1u << (pos % NOF_SUBCARRIERS_PER_RB);
-      });
-    }
-    gpu_ce_pilot_re_bits[l] = bits;
-    if (l < last_stage_layer_re_pattern.size()) {
-      last_stage_layer_re_pattern[l] = args.dmrs_patterns[l].re_pattern;
-    }
-  }
-  last_stage_nof_prb = nof_prb;
+  // \note The per-layer pilot combs K5 needs are NOT built here. This function early-returns 0 for a
+  //       hop whose allocation is not contiguous, and the combs do not depend on that geometry at
+  //       all - they are a property of the DM-RS pattern. Building them on this path is exactly the
+  //       mistake that made the first K5 run reduce over an empty mask; they are derived in
+  //       apply_fd_td_estimation_stage() instead, on every path.
 
   return total;
 }
@@ -3752,7 +3774,7 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
       // must have reduced to zero, which is itself part of what this checks).
       double dev = 0.0;
       for (unsigned b = 0; b != reformat_blocks_last; ++b) {
-        dev += static_cast<double>(gpu_rsrp[(rsrp_base_ + b * kRsrpSlots + l) * 2]);
+        dev += static_cast<double>(gpu_rsrp[(rsrp_block_last + b * kRsrpSlots + l) * 2]);
       }
       // The host's: the same grid_est the statistics are derived from, at the layer's own pilots.
       const auto& pattern = last_stage_layer_re_pattern[l];
@@ -3768,7 +3790,7 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
         }
       }
       host_nre_last = host_nre;
-      const double dev_nre = static_cast<double>(gpu_rsrp[(rsrp_base_ + l) * 2 + 1]);
+      const double dev_nre = static_cast<double>(gpu_rsrp[(rsrp_block_last + l) * 2 + 1]);
       const double rel = (host != 0.0) ? std::fabs(dev - host) / host : 0.0;
       if (dev == host) {
         same.fetch_add(1, std::memory_order_relaxed);
@@ -3785,12 +3807,12 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     // One raw dump of the device block on the FIRST hop, so "the kernel did not run" and "the
     // kernel ran but indexed elsewhere" are told apart instead of guessed at.
     if (checks.load(std::memory_order_relaxed) == 0U) {
-      std::fprintf(stderr, "[rsrp_raw] base=%u blocks=%u layers=%u |", rsrp_base_, reformat_blocks_last, nlay);
+      std::fprintf(stderr, "[rsrp_raw] block=%u blocks=%u layers=%u |", rsrp_block_last, reformat_blocks_last, nlay);
       for (unsigned b = 0; b != reformat_blocks_last; ++b) {
         for (unsigned l = 0; l != nlay; ++l) {
           std::fprintf(stderr, " [%u][%u]=%.6e nre=%.0f", b, l,
-                       static_cast<double>(gpu_rsrp[(rsrp_base_ + b * kRsrpSlots + l) * 2]),
-                       static_cast<double>(gpu_rsrp[(rsrp_base_ + b * kRsrpSlots + l) * 2 + 1]));
+                       static_cast<double>(gpu_rsrp[(rsrp_block_last + b * kRsrpSlots + l) * 2]),
+                       static_cast<double>(gpu_rsrp[(rsrp_block_last + b * kRsrpSlots + l) * 2 + 1]));
         }
       }
       std::fprintf(stderr, "\n");

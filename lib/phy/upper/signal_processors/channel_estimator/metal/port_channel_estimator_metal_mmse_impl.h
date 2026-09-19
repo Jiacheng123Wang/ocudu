@@ -779,6 +779,12 @@ private:
   float*                    gpu_rsrp       = nullptr;
   /// Base of THIS hop's block within gpu_rsrp, advanced once per hop.
   unsigned                  rsrp_base_     = 0;
+  /// The block the hop being COMPLETED reserved. Not rsrp_base_: that one names the hop being
+  /// STAGED, and the completion of an earlier hop runs after later hops have been staged (the
+  /// estimator is pooled and a deferred hop is collected much later), so reading through the
+  /// staging counter looks at whatever block was claimed last. That is what made the first correct
+  /// reduction read back as 0.
+  unsigned                  rsrp_block_last = 0;
   /// Whether the device produced this hop's rsrp (so the host must not reduce the pilots again for
   /// a value it will publish).
   bool                      device_rsrp_valid = false;
