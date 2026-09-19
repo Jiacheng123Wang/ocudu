@@ -700,11 +700,16 @@ device_corr_enabled() && !merge_tail && (n_std_blocks != 0)` —— **比一个�
   `OCUDU_UL_DUMP_MAX_RB=<n>`（只把 ≤ n PRB 的接收算作候选，且**不消耗预算**）。取语料的命令：
 
   ```bash
-  mkdir -p /tmp/narrow_cap
+  # ⚠ 捕获写到 doc_chinese/work_tmp/ 里，不要写 /tmp：空口接收是**不可再生**的，
+  #   而 macOS 会清理 /tmp（这条约定见 §7 坑 27）。work_tmp/ 已被 .gitignore 排除（不入库）。
+  #   run_leg.sh 会先 cd 到仓库根，所以下面这个相对路径就是 $ROOT/doc_chinese/work_tmp/narrow_cap。
+  mkdir -p doc_chinese/work_tmp/narrow_cap
   sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu narrow-cap \
-       OCUDU_UL_DUMP=/tmp/narrow_cap/cap OCUDU_UL_DUMP_MAX_RB=2 OCUDU_UL_DUMP_COUNT=20
+       OCUDU_UL_DUMP=doc_chinese/work_tmp/narrow_cap/cap OCUDU_UL_DUMP_MAX_RB=2 OCUDU_UL_DUMP_COUNT=20
   # 每条捕获三件套：<prefix>_<slot>_<rnti>{.txt,.bin} 是网格（回放用），_ce.txt/_h.bin/_llr.bin 是结果
-  # 回放：build/lib/phy/upper/channel_processors/metal/ul_chain_replay /tmp/narrow_cap/cap_<slot>_<rnti> --metal --out /tmp/x
+  # 回放：
+  build/lib/phy/upper/channel_processors/metal/ul_chain_replay \
+      doc_chinese/work_tmp/narrow_cap/cap_<slot>_<rnti> --metal --out doc_chinese/work_tmp/replay_out/dump
   ```
 * **判据草案**：带修法的腿 ⇒ 契约 **8/8**（写 0.00/跳）、2 PRB 分层的 CRC **> 0**、
   1 PRB 不劣化、27 捕获（3 PRB 以上，不受影响）逐字节不变、单测全过。
@@ -868,6 +873,7 @@ bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh "" "<knob>"
 | 23 | **★ 用 SIGTERM 停 gNB，收尾统计全部丢失** | `gnb.cpp` 对 SIGINT 走正常收尾（打印契约/`[ul_host]`/`[metal_stats]`/`[ul_gpu_lane]`），对 **SIGTERM 只 flush 日志就退出**。腿 `ota-b3a-final_0919_0734` 因此失去全部跨越计数，20 MB 日志里一行都没有，**事后无法恢复** | **腿一律用 Ctrl-C 停**；判定腿有效的第一眼是报告的 `-- device side` / `-- lane` **两段非空** |
 | 24 | **★ `run_leg.sh` 里的 `> >(tee …)` 让 shell 先回到提示符** | 腿 `probe-iq2llr_0919_2216` 的控制台最后一行是 `[ul_rx] blocks=… gaps=0` **直接贴着提示符**（缺 ` gap_samples=0 ts0_blocks=0` 和换行），而 `.stderr` 文件里那一行**完整且有换行**。不是程序少打 `\n`（源码里就有），是**进程替换的 tee 没有被等待**：gnb 一退出 shell 就打印提示符，tee 还没把最后一段抄到终端 | **已修**：`run_leg.sh` 改成 `exec 3> >(tee …)` / `exec 4> >(tee …)` 拿住两个 tee 的 PID，gnb 退出后先 `exec 3>&- 4>&-` 再 `wait` 这两个 PID（**不关 fd 的话 tee 的 stdin 看不到 EOF，`wait` 会挂住**——实测踩过）。判据：控制台与文件必须一致 |
 | 25 | **★ `gtest_discover_tests` 把每个用例注册成独立进程** | 探针的新测试拆成两个用例（cpu / gpu）：**直接跑二进制通过、`ctest -L support` 变红**——每个 ctest 条目是独立进程，gpu 那个用例看不到前一个用例留下的状态，而它断言的样本数依赖那点状态 | 跨用例共享进程级状态（单例、只能发布一次的 mode）的测试**放在同一个用例里**；而且**必须用 `ctest -L <label>` 跑一遍**才算验过，直接跑二进制不算 |
+| 27 | **★ 把要留下的测量数据写进了 `/tmp`** | macOS 会清理 `/tmp`：参考二进制（`/tmp/replay_base`、`/tmp/mmse_*.metallib`）、A/B 留下的 dump、离线语料都会在某次重启后消失；**空口捕获尤其致命 —— 它不可再生，要再跑一条腿** | **要留下的东西一律写 `doc_chinese/work_tmp/`**（已被 `.gitignore` 排除、不进历史）：捕获走 `OCUDU_UL_DUMP=doc_chinese/work_tmp/<dir>/cap`，A/B 的 dump 用 `AB_KEEP=doc_chinese/work_tmp/<dir>`，语料放 `doc_chinese/work_tmp/corpus*/`。`/tmp` 只放**当场可弃**的中间物（比较用的临时目录、`limited_run.sh` 的日志）|
 | 26 | **`ctest -R "metal_unit_test"` 匹配不到 `…_metal_mmse_unit_test`** | 以为跑了 8 个 GPU 用例，实际只跑 6 个（`session_handoff_2026-09-19-8.md` §7 的命令注释也这么写）| 用 `ctest -R "metal"`（9 个），或把两个 `port_channel_estimator_metal_*` 显式列上 |
 
 ---
