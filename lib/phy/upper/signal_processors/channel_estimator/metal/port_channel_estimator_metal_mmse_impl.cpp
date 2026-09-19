@@ -467,6 +467,33 @@ bool host_carries_cfo_forward()
   return value;
 }
 
+/// \brief Whether the hop statistics are reduced on the DEVICE (OCUDU_CE_DEV_STATS).
+///
+/// Unset or non-zero (THE DEFAULT, and the design intent): the device computes them. rsrp comes from
+/// the K5 reduction over the same h the equalizer's estimates come from, the noise variance from K4,
+/// and the host reads one float per layer instead of reading the estimated grid back - which is the
+/// last device -> host crossing the fused lane still makes, and the only reason the host consumed the
+/// whole DM-RS grid every hop.
+///
+/// Zero (the escape hatch): the host computes them from the grid it reads back, exactly as it did
+/// before this existed. It is deliberately ONE switch for all of the statistics: they are published
+/// together, they come from the same pilots, and a half-device configuration would be a state nobody
+/// has a use for. If the device values ever turn out not to be good enough, this is the line that
+/// puts the host back in charge without reverting anything else.
+///
+/// \note The reporting values are what the criterion calls "at the exit": they feed the CSI/FAPI
+///       report and the debug dump, never the LLR path, so moving them does not touch what the lane
+///       publishes. That is exactly why they must be compared against the host rather than assumed -
+///       a wrong rsrp would never show up in _llr or _h.
+bool device_stats_enabled()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_DEV_STATS");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 /// \brief Whether the HOST still clears the merged tail group's pad slots in y (OCUDU_CE_HOST_Y_PADS).
 ///
 /// Unset or zero (THE DEFAULT): it does NOT. The device's pilot scatter (glue #2) owns those slots -
@@ -575,6 +602,9 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // derives the ratio it uses from [0] and [1]; the device may load A's diagonal straight from
   // kRatioSlot, which is the same float as long as ocudu_mmse_pilots.metal keeps -fno-fast-math.
   gpu_ls_sigma2   = alloc_aligned<float>(kSigma2Blocks * kSigma2Slots);
+  // K5 (batch 5a): the hop's per-layer rsrp, reduced on the device. Rotating blocks for the same
+  // reason as the sigma2 block above.
+  gpu_rsrp        = alloc_aligned<float>(kRsrpBlocks * kRsrpSlots);
 
   // Glue #2 (S-7f-5u): the DEVICE writes the engine's pilot vectors y out of the pilots it just
   // produced (gpu_ls_out), which removes the host's copy of them into the y slots - the last CPU
@@ -670,6 +700,7 @@ port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl(
   free_aligned(gpu_ls_cfo);
   free_aligned(gpu_ls_smoothed);
   free_aligned(gpu_ls_sigma2);
+  free_aligned(gpu_rsrp);
 }
 
 unsigned port_channel_estimator_metal_mmse_impl::stage_device_noise_inputs(const fd_td_estimation_stage_args& args,
@@ -1861,6 +1892,18 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
 
     metal::mmse_engine::reformat_stage reformat{};
     reformat.dst         = gpu_ce;
+    // K5 (batch 5a): this hop's rsrp block on the device. The pilot combs are the LAYER's own, not
+    // the union reformat.dmrs_re_bits carries - that union exists so K3 can skip every pilot RE; a
+    // layer's power must be reduced over its own pilots only.
+    device_rsrp_valid = false;
+    if (device_stats_enabled() && engine->rsrp_available()) {
+      rsrp_base_ = (rsrp_base_ + kRsrpSlots) % (kRsrpBlocks * kRsrpSlots);
+      reformat.rsrp.dst     = gpu_rsrp + rsrp_base_;
+      for (unsigned l = 0; l != reformat.rsrp.max_layers; ++l) {
+        reformat.rsrp.pilot_re_bits[l] = gpu_ce_pilot_re_bits[l];
+      }
+      device_rsrp_valid = true;
+    }
     reformat.offsets     = re_offsets.data();
     reformat.nof_symbols = MAX_NSYMB_PER_SLOT;
     reformat.drpp          = gpu_ce_drpp;
@@ -1916,6 +1959,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       reformat.sys_tail = sys_tail;
       reformat.has_tail = (nf_tail != 0);
       reformat.nof_layers = nof_layers;
+      // K5 reduces over the batch's block slots, the same count the apply kernel strides by: the
+      // merged tail group carries the standard count with one real block, and its pad slots reduce to
+      // zero (the kernel detects them and writes 0 rather than summing another block's rows).
+      reformat.rsrp.n_blk   = n_std_blocks;
+      reformat_blocks_last  = n_std_blocks;
       return (nof_re_total != 0) ? &reformat : nullptr;
     };
     if (merge_tail) {
@@ -3000,6 +3048,24 @@ unsigned port_channel_estimator_metal_mmse_impl::stage_re_masks(const fd_td_esti
   gpu_ce_dmrs_re_bits  = dmrs_re_bits;
   gpu_ce_dmrs_sym_bits = dmrs_sym_bits;
 
+  // Per-layer pilot combs for K5 (batch 5a), in the same 12-bit form. dmrs_re_bits above is the
+  // UNION over the layers, which is the right thing for K3 ("is this RE a pilot, so data must skip
+  // it") and the wrong thing for a per-layer power reduction: layering the union into one layer's
+  // rsrp would add the other layer's pilots to it.
+  for (unsigned l = 0; l != gpu_ce_pilot_re_bits.size(); ++l) {
+    unsigned bits = 0;
+    if (l < args.dmrs_patterns.size()) {
+      args.dmrs_patterns[l].re_pattern.for_each(0, args.dmrs_patterns[l].re_pattern.size(), [&](unsigned pos) {
+        bits |= 1u << (pos % NOF_SUBCARRIERS_PER_RB);
+      });
+    }
+    gpu_ce_pilot_re_bits[l] = bits;
+    if (l < last_stage_layer_re_pattern.size()) {
+      last_stage_layer_re_pattern[l] = args.dmrs_patterns[l].re_pattern;
+    }
+  }
+  last_stage_nof_prb = nof_prb;
+
   return total;
 }
 
@@ -3593,6 +3659,71 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
 #if defined(OCUDU_CE_TIME)
   const auto t_unpack2_begin = std::chrono::steady_clock::now();
 #endif
+  // ---- K5 CHECK (OCUDU_CE_RSRP_CHECK, temporary): does the device's sum equal the host's? --------
+  //
+  // 5a's correctness criterion, and the only thing that can say it: the device reduces the SAME h the
+  // host's grid comes from (K3's reformat and the host's unpack both read it), so the two sums must
+  // agree up to summation order - the device reduces in a threadgroup tree, the host sequentially.
+  // A constant ratio here would mean the two are not reducing the same quantity, which is the mistake
+  // that made the first attempt at this (over gpu_ls_smoothed, the SMOOTHED pilots) useless.
+  //
+  // It runs AFTER the host grid exists, so it compares final values rather than intent.
+  if (device_rsrp_valid && (gpu_rsrp != nullptr) && (std::getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
+    const unsigned nlay  = gpu_ce_layers;
+    const unsigned npt_c = unpack_npt;
+    static std::atomic<uint32_t> checks{0};
+    static std::atomic<uint32_t> bad{0};
+    static std::atomic<uint32_t> same{0};
+    static std::atomic<double>   worst{0.0};
+    static std::atomic<float>    worst_dev{0.0F};
+    static std::atomic<float>    worst_host{0.0F};
+    for (unsigned l = 0; l != nlay; ++l) {
+      // The device's sum for this layer: every block slot of the batch, pad slots included (they
+      // must have reduced to zero, which is itself part of what this checks).
+      double dev = 0.0;
+      for (unsigned b = 0; b != reformat_blocks_last; ++b) {
+        dev += static_cast<double>(gpu_rsrp[rsrp_base_ + b * kRsrpSlots + l]);
+      }
+      // The host's: the same grid_est the statistics are derived from, at the layer's own pilots.
+      const auto& pattern = last_stage_layer_re_pattern[l];
+      double host = 0.0;
+      for (unsigned s = 0; s != npt_c; ++s) {
+        span<const cf_t> row = grid_est.get_slice(l * MAX_NSYMB_PER_SLOT + unpack_dmrs_sym[s]);
+        for (unsigned prb = 0; prb != last_stage_nof_prb; ++prb) {
+          pattern.for_each(0, pattern.size(), [&](unsigned pos) {
+            host += std::norm(row[prb * NOF_SUBCARRIERS_PER_RB + pos]);
+          });
+        }
+      }
+      const double rel = (host != 0.0) ? std::fabs(dev - host) / host : 0.0;
+      if (dev == host) {
+        same.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        bad.fetch_add(1, std::memory_order_relaxed);
+      }
+      if (rel > worst.load(std::memory_order_relaxed)) {
+        worst.store(rel, std::memory_order_relaxed);
+        worst_dev.store(static_cast<float>(dev), std::memory_order_relaxed);
+        worst_host.store(static_cast<float>(host), std::memory_order_relaxed);
+      }
+    }
+    const uint32_t n = checks.fetch_add(1, std::memory_order_relaxed) + 1U;
+    if ((n == 1U) || ((n % 500U) == 0U)) {
+      std::fprintf(stderr,
+                   "[rsrp_check] hops=%u layers=%u npt=%u blocks=%u | non-identical %u | bit-identical %u | "
+                   "worst rel %.3e (dev %.9e host %.9e)\n",
+                   n,
+                   nlay,
+                   npt_c,
+                   reformat_blocks_last,
+                   bad.load(std::memory_order_relaxed),
+                   same.load(std::memory_order_relaxed),
+                   worst.load(std::memory_order_relaxed),
+                   static_cast<double>(worst_dev.load(std::memory_order_relaxed)),
+                   static_cast<double>(worst_host.load(std::memory_order_relaxed)));
+    }
+  }
+
   // Which symbols have to be in the host grid NOW: all of them whenever a host consumer may read
   // it, which is exactly when the DEVICE estimates do not cover this hop - the same signal the
   // demodulator reads (device_results_cover_last_estimate()), and measured: the split-tail route

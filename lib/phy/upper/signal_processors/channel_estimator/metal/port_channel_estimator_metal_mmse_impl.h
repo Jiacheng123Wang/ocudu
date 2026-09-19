@@ -692,6 +692,18 @@ private:
   bool                      device_ce_enabled = false;
   uint16_t*                 gpu_ce            = nullptr; // [MAX_LAYERS][MAX_NOF_PRBS * 12 * 14]
   std::array<unsigned, MAX_NSYMB_PER_SLOT + 1> re_offsets{};
+
+  /// Per-layer pilot combs of the last staged hop (K5's input), one 12-bit mask per layer.
+  std::array<unsigned, 4> gpu_ce_pilot_re_bits{};
+
+  /// Block slots the last batch carried (K5's n_blk) and the last hop's PRB count: what the K5 probe
+  /// needs to sum the device's per-block values and to walk the host grid over the same REs.
+  unsigned reformat_blocks_last = 0;
+  unsigned last_stage_nof_prb   = 0;
+  /// Per-layer pilot patterns of the last hop, for the same probe (the combs above are the masks the
+  /// kernel takes; these are what the host walks, and keeping both is what lets the probe compare the
+  /// same REs rather than trusting that two encodings of a comb agree).
+  std::array<bounded_bitset<NOF_SUBCARRIERS_PER_RB>, 4> last_stage_layer_re_pattern{};
   unsigned                  gpu_ce_drpp          = 0;
   unsigned                  gpu_ce_drpp_dmrs     = 0;
   unsigned                  gpu_ce_dmrs_re_bits  = 0;
@@ -742,6 +754,15 @@ private:
   /// capture of the device route, intermittently. Rotating the slot past every hop that can be in
   /// flight removes it.
   static constexpr unsigned kCfoSlots = 8;
+
+  /// \brief Rotating blocks of the device rsrp reduction (K5), one block per hop in flight.
+  ///
+  /// Same reason as kCfoSlots and kSigma2Blocks: the write happens in the extraction's command
+  /// buffer, and the HOST reads it much later - after the wait, in compute_hop_finish() - by which
+  /// time a pooled estimator instance may have started several later hops that overwrite a single
+  /// destination. Each block holds one float per layer, so the block stride is kRsrpSlots.
+  static constexpr unsigned kRsrpBlocks = 16;
+  static constexpr unsigned kRsrpSlots  = 4;
   float*   gpu_ls_cfo     = nullptr;
   /// Slot the CURRENT hop uses. Starts one before the first hop so that hop 0 lands on slot 0 and
   /// carries forward from the last (zero-initialised) slot, exactly as the single buffer started at 0.
@@ -753,6 +774,14 @@ private:
   /// the LSE itself must survive for the weights' y vectors), \c gpu_ls_sigma2 is the single float
   /// the kernels leave behind, and \c fd_filter holds the raised-cosine coefficients of the hop's
   /// geometry (a host-side table, see get_fd_smoothing_filter()).
+  /// \brief Device rsrp reduction (K5): kRsrpBlocks blocks of kRsrpSlots floats, written by the
+  /// reformat's own command buffer when the device stage is on.
+  float*                    gpu_rsrp       = nullptr;
+  /// Base of THIS hop's block within gpu_rsrp, advanced once per hop.
+  unsigned                  rsrp_base_     = 0;
+  /// Whether the device produced this hop's rsrp (so the host must not reduce the pilots again for
+  /// a value it will publish).
+  bool                      device_rsrp_valid = false;
   float*                    gpu_ls_smoothed = nullptr;
   float*                    gpu_ls_sigma2   = nullptr;
   /// Byte offset (in floats) of THIS hop's sigma2 block within \c gpu_ls_sigma2, which holds
