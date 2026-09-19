@@ -2041,6 +2041,26 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       std_corr_prefix->nof_systems = nof_layers;
       ocudu_assert((L_c == L_std_geom) && (nout_c == nout_std_geom),
                    "The block geometry must not depend on who derives it.");
+      // The build rides the engine's command buffer, so its slot comparison is DEFERRED to the hop's
+      // completion (see pending_corr_check): doing it here would read memory the GPU has not written.
+      if (corr_check_enabled()) {
+        pending_corr_check check;
+        check.which       = "standard";
+        check.stats       = stats;
+        check.re_pattern  = args.dmrs_patterns.front().re_pattern;
+        check.b_prb       = block_prb;
+        check.scs_khz     = scs_khz;
+        check.nout        = nout_c;
+        check.l           = L_c;
+        check.sys_offset  = 0;
+        check.nof_systems = nof_layers;
+        check.a_stride    = L_std_geom;
+        check.r_stride    = nout_std_geom;
+        for (unsigned sym : dmrs_sym) {
+          check.dmrs_slots.push_back(sym);
+        }
+        pending_corr_checks_.push_back(check);
+      }
       L_std    = L_c;
       nout_std = nout_c;
     } else {
@@ -2407,6 +2427,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // the device is the one that inverts it (see build_slots_on_device and corr_stage::nof_systems).
         metal::mmse_engine::corr_stage* fused_edge =
             (gpu_invert && edge_fuse_enabled()) ? &edge_corr.emplace() : nullptr;
+        // See pending_corr_check: the fused edge build is dispatched inside the engine's command
+        // buffer, so its comparison waits for the hop's completion. This is the route that had NO
+        // instrument at all before (the older edge check ran before the prefix was dispatched).
+        // ANY device-built edge group is recorded, fused or not: the comparison must happen at ONE
+        // moment (the hop's completion) for both routes, otherwise "the fused one differs" can be an
+        // artefact of checking it after the inversion and the standalone one before it.
+        const bool check_edge_fused = edge_slot_check_enabled();
         edge_on_device = build_slots_on_device(stats,
                                                args.dmrs_patterns.front().re_pattern,
                                                rem_prb,
@@ -2419,6 +2446,24 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                                L_e,
                                                gpu_invert,
                                                fused_edge);
+        if (check_edge_fused) {
+          pending_corr_check check;
+          check.which       = "edge";
+          check.stats       = stats;
+          check.re_pattern = args.dmrs_patterns.front().re_pattern;
+          check.b_prb      = rem_prb;
+          check.scs_khz    = scs_khz;
+          check.nout       = nout_e;
+          check.l          = L_e;
+          check.sys_offset = nof_layers;
+          check.nof_systems = nof_layers;
+          check.a_stride   = st.L;
+          check.r_stride   = st.nout;
+          for (unsigned sym : edge_dmrs) {
+            check.dmrs_slots.push_back(sym);
+          }
+          pending_corr_checks_.push_back(check);
+        }
       }
       if (!edge_on_device) {
         // Host construction and staging for the tail systems (the route that has always run).
@@ -2494,19 +2539,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       //     is build_slots_on_device() above (whose standalone command buffer has already completed),
       //     and for the staged route stage_engine_group() just below - hence the placement here.
       //     It does NOT wait for anything and does not touch the published output.
-      if (edge_on_device && edge_slot_check_enabled()) {
-        (void)check_edge_slots(stats,
-                               args.dmrs_patterns.front().re_pattern,
-                               rem_prb,
-                               span<const unsigned>(dmrs_sym.begin(), npt),
-                               scs_khz,
-                               nout_e,
-                               L_e,
-                               nof_layers,
-                               nof_layers,
-                               st.L,
-                               st.nout);
-      }
+      // The edge group's slot comparison is NOT done here any more: a standalone device build has been
+      // submitted but not necessarily completed, and a fused one has not even been dispatched. Both are
+      // compared at the hop's completion instead (see pending_corr_check), which is also what makes the
+      // two routes comparable at all.
 
       // 4) ONE engine call over both groups, then unpack both. The call is submitted without
       //    waiting when the kernels allow it, so the unpack moves to the completion of the stage
@@ -2713,6 +2749,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // whole hop (standard blocks included).
     last_stage_nn     = false;
     last_stage_merged = false;
+  }
+
+  // Every writer has completed for a hop that was not deferred (the engine's command buffer was waited
+  // for above): this is where a fused correlation gets its slot comparison. A deferred hop runs it in
+  // complete_fd_td_estimation_stage(), where its command buffer completes.
+  if (!stage_pending) {
+    run_pending_corr_checks();
   }
 
 #if defined(OCUDU_CE_TIME)
@@ -3623,6 +3666,36 @@ port_channel_estimator_metal_mmse_impl::epoch_geometry_of(const fd_td_estimation
   return g;
 }
 
+void port_channel_estimator_metal_mmse_impl::run_pending_corr_checks()
+{
+  for (const pending_corr_check& c : pending_corr_checks_) {
+    std::fprintf(stderr,
+                 "[corr_check] group=%s: the device built these slots elsewhere - comparing them with the "
+                 "host's own build of the same geometry (L=%u nout=%u sys_offset=%u n_sys=%u strides=%u/%u)\n",
+                 c.which,
+                 c.l,
+                 c.nout,
+                 c.sys_offset,
+                 c.nof_systems,
+                 c.a_stride,
+                 c.r_stride);
+    // check_edge_slots() rebuilds the host's matrices and compares every element of every slot, pads
+    // included; it keeps its own scratch so a deferred hop's next staging cannot be corrupted.
+    (void)check_edge_slots(c.stats,
+                           c.re_pattern,
+                           c.b_prb,
+                           span<const unsigned>(c.dmrs_slots.begin(), c.dmrs_slots.size()),
+                           c.scs_khz,
+                           c.nout,
+                           c.l,
+                           c.sys_offset,
+                           c.nof_systems,
+                           c.a_stride,
+                           c.r_stride);
+  }
+  pending_corr_checks_.clear();
+}
+
 bool port_channel_estimator_metal_mmse_impl::check_edge_slots(
     const channel_statistics&                     stats,
     const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
@@ -3639,8 +3712,13 @@ bool port_channel_estimator_metal_mmse_impl::check_edge_slots(
   // The host's own build of THIS geometry, into scratch the device route does not use.
   unsigned    nout_h = 0;
   unsigned    L_h    = 0;
-  const auto  a_host = span<float>(w_r_pp.data(), MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS);
-  const auto  r_host = span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS);
+  // OWN scratch, not w_r_pp / w_r_hp: this comparison now runs at the hop's COMPLETION (see
+  // pending_corr_check), where the next hop may already be staging into those - an instrument must not
+  // corrupt the lane it is measuring. thread_local because a PUSCH worker owns its estimator.
+  static thread_local std::array<float, MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS> a_host_scratch;
+  static thread_local std::array<float, MAX_BLOCK_OUT * MAX_BLOCK_PILOTS>    r_host_scratch;
+  const auto  a_host = span<float>(a_host_scratch.data(), a_host_scratch.size());
+  const auto  r_host = span<float>(r_host_scratch.data(), r_host_scratch.size());
   build_correlation_matrices(stats, re_pattern, b_prb, dmrs_slots, scs_khz, a_host, r_host, nout_h, L_h);
 
   const auto  bits = [](float v) {
@@ -4282,6 +4360,12 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     //    memory the GPU wrote, without the host having waited for it in the middle of the lane.
     return pending_fused_burst ? engine->complete_fused_burst() : engine->wait_pending();
   }();
+  // The writers have completed: compare the groups whose build rode another command buffer, before the
+  // unpack below reads the results (see pending_corr_check).
+  if (ok) {
+    run_pending_corr_checks();
+  }
+
   // Temporary experiment (OCUDU_CE_NV_OVERRIDE): replace the device noise variance with a known
   // value, to tell "the estimates are wrong" apart from "only the noise scale is wrong".
   if (const char* nv_env = std::getenv("OCUDU_CE_NV_OVERRIDE"); (nv_env != nullptr) && (gpu_nv != nullptr)) {

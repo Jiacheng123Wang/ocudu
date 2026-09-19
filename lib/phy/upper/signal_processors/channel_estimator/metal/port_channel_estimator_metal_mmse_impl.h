@@ -533,6 +533,40 @@ private:
   ///            to the STANDARD geometry and exceed the edge block's own L_e / nout_e - which is the
   ///            whole point of the check, so they are passed in rather than derived.
   /// \return True when every element of every edge slot is bit-identical.
+  /// \brief One device-built correlation group waiting for its slot comparison (OCUDU_CE_CORR_CHECK /
+  /// OCUDU_CE_EDGE_CHECK).
+  ///
+  /// WHY DEFERRED. A group whose build rides ANOTHER command buffer - the fused prefix of a merged
+  /// batch - has NOT been dispatched when the caller hands it over, so comparing its slots at that
+  /// moment reads memory the GPU has not written yet. That is why the older checks were disabled for
+  /// that route (and the edge one ran only where a standalone build had already completed), which left
+  /// the fused path with no instrument at all: measured on syn004_4, the fused edge block comes out
+  /// NaN and nothing in the build said so (design document, P0 of the control-plane fusion).
+  ///
+  /// The record therefore carries the inputs, and the comparison runs where every writer has finished:
+  /// complete_fd_td_estimation_stage(), before the unpack reads the results.
+  struct pending_corr_check {
+    /// Which group this is, for the report ("standard" / "edge").
+    const char* which = "";
+    /// Inputs of the host's own build of the same geometry.
+    channel_statistics                            stats{};
+    bounded_bitset<NOF_SUBCARRIERS_PER_RB>        re_pattern{};
+    static_vector<unsigned, MAX_NOF_DMRS_SYMBOLS> dmrs_slots;
+    unsigned                                      b_prb       = 0;
+    unsigned                                      scs_khz     = 0;
+    /// What the group occupies.
+    unsigned nout        = 0;
+    unsigned l           = 0;
+    unsigned sys_offset  = 0;
+    unsigned nof_systems = 0;
+    unsigned a_stride    = 0;
+    unsigned r_stride    = 0;
+  };
+
+  /// Compares every pending group's device slots against the host's own build of the same geometry,
+  /// and clears the list. Called where the writers have completed (see pending_corr_check).
+  void run_pending_corr_checks();
+
   bool check_edge_slots(const channel_statistics& stats,
                         const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,
                         unsigned                                       b_prb,
@@ -1094,6 +1128,10 @@ private:
   std::array<cf_t, MAX_NOF_DMRS_SYMBOLS * MAX_NOF_PILOTS_SYMBOL> stats_pilots;
 
   /// Weight-matrix workspace (R_hp, R_pp + sigma2 I and the inverse, W).
+  /// Device-built correlation groups awaiting their slot comparison: at most the standard group and
+  /// the edge group of a merged batch.
+  static_vector<pending_corr_check, 2>                   pending_corr_checks_;
+
   std::array<float, MAX_BLOCK_OUT * MAX_BLOCK_PILOTS>    w_r_hp;
   std::array<float, MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS> w_r_pp;
   std::array<float, MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS> w_a_inv;
