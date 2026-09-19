@@ -207,7 +207,7 @@ void pusch_processor_impl::process(span<uint8_t>                    data,
   // is set.
   ul_capture::set_current(pdu.slot, pdu.rnti);
   {
-    // A debug capture is NOT the CPU participating in the lane (design document, the 2026-09-21
+    // A debug capture is NOT the CPU participating in the lane (design document, the 2026-09-20
     // ruling): whatever host touches it forces are counted as DEBUG and the crossing contract does not
     // judge them - and a release build does not compile the machinery at all (ENABLE_UL_CAPTURE).
     phy_pipeline_crossings::scoped_debug_touches debug_capture;
