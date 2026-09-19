@@ -3871,17 +3871,34 @@ bool port_channel_estimator_metal_mmse_impl::build_slots_on_device(
   // A becomes blockdiag(A, I): K1 then inverts one invertible Ls x Ls system and
   // W = [R_hp | 0] . blockdiag(A^-1, I) = [R_hp . A^-1 | 0], so h = W . y keeps the values of the
   // unpadded system (the same construction stage_engine_group() makes).
+  // TEMPORARY DIAGNOSTIC (OCUDU_CE_PAD_SENTINEL): fill the pad region with a recognisable value
+  // instead of the blockdiag identity, so the completion-time check can tell three things apart:
+  // "the kernels overwrote the pad" (NaN), "the kernels wrote the pad correctly" (0 / 1.0), and
+  // "nobody wrote it" (the sentinel survives). It exists because the fused route's pads come out NaN
+  // and the code claimed the host's pad writes and the kernels' writes do not overlap.
+  static const bool pad_sentinel = (std::getenv("OCUDU_CE_PAD_SENTINEL") != nullptr);
+  const float       pad_zero     = pad_sentinel ? 12345.0F : 0.0F;
+  const float       pad_one      = pad_sentinel ? 12345.0F : 1.0F;
+  const auto        fill_pad     = [](float* base, std::size_t n, float v) {
+    if (v == 0.0F) {
+      std::memset(base, 0, n * sizeof(float));
+      return;
+    }
+    for (std::size_t i = 0; i != n; ++i) {
+      base[i] = v;
+    }
+  };
   for (unsigned sys = 0; sys != nof_systems; ++sys) {
     float* a_slot = gpu_a + static_cast<std::size_t>(sys_offset + sys) * a_stride * a_stride;
     float* r_slot = gpu_r_hp + static_cast<std::size_t>(sys_offset + sys) * r_stride * a_stride;
     for (unsigned r = 0; r != L; ++r) {
-      std::memset(a_slot + static_cast<std::size_t>(r) * a_stride + L, 0,
-                  static_cast<std::size_t>(a_stride - L) * sizeof(float));
+      fill_pad(a_slot + static_cast<std::size_t>(r) * a_stride + L,
+               static_cast<std::size_t>(a_stride - L),
+               pad_zero);
     }
     for (unsigned k = L; k != a_stride; ++k) {
-      std::memset(a_slot + static_cast<std::size_t>(k) * a_stride, 0,
-                  static_cast<std::size_t>(a_stride) * sizeof(float));
-      a_slot[static_cast<std::size_t>(k) * a_stride + k] = 1.0F;
+      fill_pad(a_slot + static_cast<std::size_t>(k) * a_stride, static_cast<std::size_t>(a_stride), pad_zero);
+      a_slot[static_cast<std::size_t>(k) * a_stride + k] = pad_one;
     }
     // R_hp: real values in rows [0, nout) and columns [0, L), zero everywhere else - including the
     // pad ROWS, which is why the second loop clears whole rows.
