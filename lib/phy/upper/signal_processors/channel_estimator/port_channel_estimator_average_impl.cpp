@@ -383,18 +383,27 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
   // This pass extracts the received pilots - the device stages them, and the statistics accumulate
   // their power - and it is unconditional: only the least-squares pilots and the CFO below can be
   // taken over by the stage.
+  unsigned grid_re_read = 0;
   for (unsigned i_layer = 0; i_layer < nof_tx_layers; i_layer += 2U) {
     ocudu_assert((hop == 0) || cfg_local.dmrs_pattern[i_layer].hopping_symbol_index.has_value(),
                  "Frequency hopping requested but not configured.");
 
-    // Extract symbols from resource grid.
-    extract_layer_hop_rx_pilots(rx_pilots, grid, port, cfg_local, hop, i_layer);
+    // Extract symbols from resource grid. The extraction reads the DM-RS PRB spans of every DM-RS
+    // symbol out of the grid - which in a device lane is memory the DEVICE wrote - so the backend is
+    // told how much was read (see account_host_grid_read()).
+    const unsigned nof_hop_prb = ((hop == 0) ? cfg_local.dmrs_pattern[i_layer].rb_mask
+                                             : cfg_local.dmrs_pattern[i_layer].rb_mask2)
+                                     .count();
+    const unsigned nof_read_symb =
+        extract_layer_hop_rx_pilots(rx_pilots, grid, port, cfg_local, hop, i_layer);
+    grid_re_read += nof_read_symb * nof_hop_prb * NOF_SUBCARRIERS_PER_RB;
 
     unsigned i_cdm = i_layer / 2;
     for (unsigned i_dmrs = 0; i_dmrs != nof_dmrs_symbols; ++i_dmrs) {
       epre += ocuduvec::average_power(rx_pilots.get_symbol(i_dmrs, i_cdm)) * rx_pilots.get_symbol(i_dmrs, i_cdm).size();
     }
   }
+  account_host_grid_read(grid_re_read, grid.get_device_view().is_valid());
 
   std::optional<float> cfo_hop = std::nullopt;
 

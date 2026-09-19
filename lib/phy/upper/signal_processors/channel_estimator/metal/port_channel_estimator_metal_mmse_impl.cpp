@@ -812,6 +812,15 @@ unsigned port_channel_estimator_metal_mmse_impl::stage_device_noise_inputs(const
       }
     }
   }
+  // CROSSING (host -> device): these are the SAME received pilots account_host_grid_read() reported
+  // the host taking off the device-written grid, handed straight back into a buffer the noise stage
+  // reads. Only counted when that grid really is the device's: on a host-built grid (a CPU pipeline,
+  // or a lane whose DFT ran on the host) the host is writing its OWN data, which is not a crossing.
+  if (args.grid.get_device_view().is_valid()) {
+    phy_pipeline_crossings::count_host_write_site(
+        "ce: rx pilots staged (host)",
+        static_cast<uint64_t>(npt) * nof_cdm_hop * npf * sizeof(cf_t));
+  }
   // Symbol start times: the CFO phasors of both the noise reduction and K4 read them, but since batch
   // 5g they are not staged - the kernels derive them from (numerology, cp), and the geometry that says
   // which is read where the stages are built.
@@ -1165,6 +1174,15 @@ port_channel_estimator_metal_mmse_impl::ls_geometry_of(const fd_td_estimation_st
             (geom.nof_pilots == args.nof_symbol_pilots) && (geom.nof_pilots <= MAX_NOF_PILOTS_SYMBOL) &&
             args.grid.get_device_view().is_valid();
   return geom;
+}
+
+void port_channel_estimator_metal_mmse_impl::account_host_grid_read(unsigned nof_re, bool device_written)
+{
+  if (device_written) {
+    // CROSSING (device -> host): the received DM-RS resource elements the base class just extracted
+    // were written by the front-end DFT ON THE DEVICE, and the host now holds them in rx_pilots.
+    phy_pipeline_crossings::count_host_read(static_cast<uint64_t>(nof_re) * sizeof(cbf16_t));
+  }
 }
 
 bool port_channel_estimator_metal_mmse_impl::stage_produces_ls_pilots(const fd_td_estimation_stage_args& args) const

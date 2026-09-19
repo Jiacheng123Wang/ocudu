@@ -2271,6 +2271,30 @@ channel_equalizer_metal_unit_test（默认 + OCUDU_EQ_DEFER_ENCODE=1）: ALL OK
 
 #### 19.6.2b ✅ 空中腿 `5g-epochs_0919_1945`（`45fa002d6c`）——**契约第一次 8/8**
 
+> ### ⚠ 勘误（2026-09-19 晚，S13-P1 的第 1 个结果）——"读 0.00"是**未被仪表覆盖**的 0
+>
+> 下面这一腿的 8/8 是**真的**，但它是"**被审计的站点上**为 0"。P1 给"宿主抽导频"这条路径补上站点后，
+> 同一个 replay 立刻显示：**每个跳 1 次设备→宿主读 + 1 次宿主→设备写**，与回退无关（是**默认路径**）：
+>
+> ```
+> 1 捕获、默认旋钮：  2 host read(s) (4464 B) + 1 host write(s) (432 B) over 1 device hop
+>                     = 2.00 read(s) + 1.00 write(s) per hop        （其中 1 读是 replay 工具自己的回读）
+>     ce: rx pilots staged (host)      1 call(s),   432 bytes
+> ```
+>
+> 机理：基类 `compute_hop_submit()` **无条件**地从资源网格抽本跳的接收 DM-RS 导频（"只有 LSE 和 CFO
+> 能被 stage 接管"），而在 gpu 车道里那个网格是**前端 DFT 写在设备上的**（统一内存，S-7b）⇒ 读它 =
+> 契约定义的"host TAKING device-produced data away"；紧接着 `stage_device_noise_inputs()` 把这些值
+> **原样写回** `gpu_rx_pilots`（设备读）⇒ 又是一次"handing device-derived data back"。
+> 两处此前**都没有站点**，所以这是一条**每个跳都在走、而计数器看不见**的往返。
+>
+> 影响面：**这条路径早于 5a–5g**（是上游基类的代码），所以本文件里**所有**"读 0.00/跳"的说法
+> （5c 起的每一次）都应当读作"在被审计的站点上为 0"。**dump 逐字节不受影响**（插仪表不改行为：
+> 27 捕获 A/B 仍 0 差异）——变的只是**数字的含义**。
+>
+> 修法与判据见 `wip/S13_fallback_coverage.md`（P2）：让设备自己从网格建 `gpu_rx_pilots`（消掉写），
+> 并让 EPRE 这类统计量按 5a 的 rsrp 那样由设备发布（消掉读）。判据是**带着新站点**再回到 0.00 + 0.00。
+
 ```
 [phy_pipeline] contract (mode=gpu):
   radio sample continuity: 0 gaps over 69549 blocks, 0 timestamp-0 blocks            -> OK

@@ -131,6 +131,17 @@ private:
   // See the base class documentation.
   bool stage_produces_ls_pilots(const fd_td_estimation_stage_args& args) const override;
 
+  /// \brief Reports the hop's received pilots being read out of the grid HERE, where the grid is the
+  /// DEVICE's (the front-end DFT writes it - S-7b), so the extraction the base class performs on
+  /// every hop is a device -> host read even though no byte crosses a bus (it is unified memory).
+  ///
+  /// It is a crossing by the contract's own definition and the counter could not see it before: the
+  /// extraction is unconditional, and no site was instrumented on it. Together with the write site in
+  /// stage_device_noise_inputs() (which hands the same values back to the device) this makes the
+  /// round trip visible - and it is the reason the "zero crossings" claim is a claim about the
+  /// AUDITED paths and not about the lane.
+  void account_host_grid_read(unsigned nof_re, bool device_written) override;
+
   /// \brief The geometry of the hop, as K0-a sees it (see apply_fd_td_estimation_stage()).
   ///
   /// Factored out because TWO decisions read it now - whether the device builds this hop's

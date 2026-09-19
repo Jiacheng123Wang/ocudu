@@ -332,6 +332,22 @@ protected:
   /// that reaches estimate_noise() and get_cfo_Hz() has to be the matching one.
   void account_hop_cfo(std::optional<float> cfo);
 
+  /// \brief Accounts for the hop's received pilots being read out of the resource grid by the HOST.
+  ///
+  /// Called once per hop by compute_hop_submit(), with the resource elements the extraction touched.
+  /// The default does NOTHING, and that is the point: in the CPU pipelines the grid is host memory,
+  /// so reading it moves no device data. A backend whose lane keeps the grid on the DEVICE overrides
+  /// this and reports the read, because there it IS a host <-> device data crossing by the contract's
+  /// own definition ("the host TAKING device-produced data away") - and nothing else can see it: the
+  /// extraction below is unconditional (only the least-squares pilots and the CFO can be taken over
+  /// by the stage), so it happens on every hop, including the hops whose pilots the device builds.
+  ///
+  /// \param[in] nof_re         Resource elements of the grid the host read (all DM-RS symbols and
+  ///                           every layer's CDM group, the extracted PRB spans).
+  /// \param[in] device_written Whether the DFT that produced this grid ran on the DEVICE, as the
+  ///                           grid's own device view reports. False in every CPU pipeline.
+  virtual void account_host_grid_read(unsigned nof_re, bool device_written) {}
+
   /// \brief Completes the estimation stage of a hop that apply_fd_td_estimation_stage() started.
   ///
   /// The default implementation has nothing to do: a stage that computes inline has already filled
