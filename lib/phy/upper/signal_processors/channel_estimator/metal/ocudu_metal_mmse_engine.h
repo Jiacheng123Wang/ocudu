@@ -142,9 +142,16 @@ public:
       const void* pilots = nullptr;
       /// Received pilots, [npt][nof_cdm_groups][npf] complex, staged by the estimator.
       const void* rx_pilots = nullptr;
-      /// Start time of every slot symbol, in symbol durations (MAX_NSYMB_PER_SLOT entries).
-      const float* symbol_start_epochs = nullptr;
-      unsigned     npt                 = 0;
+      /// \brief Start epoch of each of the hop's DM-RS symbols, in symbol durations (npt entries used).
+      ///
+      /// Batch 5g: these replaced the 14-float array the host used to upload into a device buffer -
+      /// the lane's last host -> device write. They travel as kernel parameters because THIS kernel's
+      /// answer is a reduction and must not be given new arithmetic to compile around: deriving them
+      /// here moved the published noise variance by 2 ulp on 3 of 27 captures (measured; see
+      /// mmse_noise_params::dmrs_epochs in ocudu_mmse_reformat.metal). K0-a's CFO kernels derive the
+      /// same values on the device instead - see ocudu_mmse_epochs.h.
+      float    dmrs_epochs[4] = {};
+      unsigned npt            = 0;
       unsigned     nof_cdm_groups      = 0;
       unsigned     npf                 = 0;
       /// Slot symbols carrying DM-RS in this hop, ascending. The kernel's parameter block hard-codes
@@ -348,8 +355,22 @@ public:
     /// made a fixed buffer look like a growing one: measured on air, 15580 re-maps in one two-minute
     /// leg (0 before K0-a). Always wrap the whole allocation.
     std::size_t buf_bytes = 0;
-    /// Symbol start times of the slot (needed by the CFO phasors).
-    const float* epochs = nullptr;
+    /// \brief The two scalars the kernels derive the symbol start epochs from (batch 5g).
+    ///
+    /// The CFO kernels of this stage used to read a 14-float array the estimator uploaded into a
+    /// device buffer; they now derive the hop's few start times from the numerology and the cyclic
+    /// prefix (see ocudu_mmse_epochs.h), so this stage neither wraps nor binds that buffer.
+    unsigned numerology  = 0;
+    bool     cp_extended = false;
+    /// \brief Start-time span of the hop's first two DM-RS symbols, in symbol durations.
+    ///
+    /// The one epoch-derived number the CFO estimator needs, and the only one it is GIVEN: its answer
+    /// comes out of a 72-term accumulation, so the shape the compiler picks for that accumulation
+    /// decides the published bits, and computing the epochs inside it moved the estimate by 1 ulp
+    /// (measured, batch 5g - see mmse_pilots_cfo). Derived by the estimator from the host array it has
+    /// held all along: epoch[dmrs_symb[1]] - epoch[dmrs_symb[0]], the same expression the host's own
+    /// estimator divides by.
+    float    epoch_span = 0.0F;
     /// Destination of the least-squares pilots, [symbol][layer][pilot] real/imag interleaved.
     float* lse = nullptr;
     /// Destination of the estimated CFO (a single float).
@@ -613,6 +634,20 @@ public:
 
   /// Whether the metallib carries the placement kernel, and the DFT kernel it feeds, for \c dft_size.
   bool ta_place_available(unsigned dft_size);
+
+  /// \brief Batch 5g's self-check: the slot's symbol start epochs, computed by the SHADER.
+  ///
+  /// The kernels derive the epochs from (numerology, CP) instead of reading a 14-float array the host
+  /// uploaded once per configuration - the lane's last host -> device write - so the array they replace
+  /// is the reference, and this returns what the KERNEL computes for one (numerology, CP) pair to
+  /// compare against it. The unit test sweeps both CP types and all five numerologies, which is the
+  /// whole domain; the lane never calls it.
+  ///
+  /// \param[in]  numerology  Numerology index mu (clamped by the kernel to the SCS enum's range).
+  /// \param[in]  cp_extended Non-zero for extended cyclic prefix.
+  /// \param[out] dst         MAX_NSYMB_PER_SLOT (14) floats, every one written.
+  /// \return True when the metallib carries the probe and the dispatch completed.
+  bool run_epoch_probe(unsigned numerology, unsigned cp_extended, float* dst);
 
   /// \brief Whether the metallib carries the FUSED time-alignment chain (batch 5d).
   ///

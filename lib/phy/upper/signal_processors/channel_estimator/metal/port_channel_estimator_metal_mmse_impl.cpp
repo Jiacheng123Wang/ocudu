@@ -5,6 +5,9 @@
 
 #include "port_channel_estimator_metal_mmse_impl.h"
 #include "../port_channel_estimator_helpers.h"
+// Batch 5g: the symbol start epochs the kernels derive are checked against the host array with the
+// very function the kernels compile (see the file's header for why one function and not two).
+#include "ocudu_mmse_epochs.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -623,6 +626,18 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // SCOPE visible next to the zero.
   phy_pipeline_crossings::declare_reporter("channel_estimator");
 
+  // Batch 5g's PROVENANCE, once per process and independent of the route this estimator ends up
+  // taking: the hop's symbol start epochs are no longer uploaded, and a leg's log says which side
+  // produces them. The switch is not cosmetic - the crossing contract's eighth check turns on it.
+  static bool epoch_provenance_printed = false;
+  if (!epoch_provenance_printed) {
+    epoch_provenance_printed = true;
+    std::fprintf(stderr,
+                 "[epoch_impl] symbol start epochs: nothing is uploaded; K0-a's CFO kernels derive them "
+                 "on the device from (numerology, cp), while K4 and the CFO estimator take them as "
+                 "parameters (long accumulations - see design doc 19.6)\n");
+  }
+
   // Metal compute engine (K1/K2); the CPU reference math below is the automatic fallback
   // when the engine is unavailable (init failure / stale metallib). Forcing the whole
   // estimator onto the CPU path from the outside is the expert_phy knob:
@@ -652,7 +667,9 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   static constexpr unsigned MAX_CDM_GROUPS = MAX_LAYERS / 2;
   gpu_rx_pilots = alloc_aligned<float>(2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * MAX_CDM_GROUPS *
                                        MAX_NOF_PILOTS_SYMBOL);
-  gpu_epochs    = alloc_aligned<float>(MAX_NSYMB_PER_SLOT);
+  // Batch 5g: no gpu_epochs buffer. The symbol start epochs are a function of (numerology, cp) and the
+  // kernels derive them; the 56-byte upload that used to fill this array was the lane's last host ->
+  // device write (see epoch_geometry_of and ocudu_mmse_epochs.h).
   gpu_ls_ref    = alloc_aligned<float>(k_ls_floats);
   gpu_ls_out    = alloc_aligned<float>(k_ls_floats);
   // The hop's CFO, in kCfoSlots rotating slots (see the member's note): the extraction writes the
@@ -764,7 +781,6 @@ port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl(
   free_aligned(gpu_nv);
   free_aligned(gpu_pilots);
   free_aligned(gpu_rx_pilots);
-  free_aligned(gpu_epochs);
   free_aligned(gpu_ls_ref);
   free_aligned(gpu_ls_out);
   free_aligned(gpu_ls_cfo);
@@ -796,8 +812,9 @@ unsigned port_channel_estimator_metal_mmse_impl::stage_device_noise_inputs(const
       }
     }
   }
-  // Symbol start times: the CFO phasors of both the noise reduction and K4 read them.
-  upload_symbol_start_epochs(args);
+  // Symbol start times: the CFO phasors of both the noise reduction and K4 read them, but since batch
+  // 5g they are not staged - the kernels derive them from (numerology, cp), and the geometry that says
+  // which is read where the stages are built.
   return nof_cdm_hop;
 }
 
@@ -1327,7 +1344,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           }
         }
       }
-      upload_symbol_start_epochs(args);
+      // The symbol start times used to be uploaded here; since batch 5g the kernels derive them from
+      // the geometry the stage is built with (see epoch_geometry_of).
 
       // The raised-cosine coefficients of the FD smoothing: they depend on the hop's geometry only, so
       // the host hands them over (with how many virtual pilots the edges take, including
@@ -1383,7 +1401,6 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       st.grid_port_stride  = dv.port_stride;
       st.ref               = gpu_ls_ref;
       st.buf_bytes         = k_ls_floats * sizeof(float);
-      st.epochs            = gpu_epochs;
       st.lse               = gpu_ls_out;
       st.cfo               = &gpu_ls_cfo[cfo_slot_];
       // The kernel carries the previous value forward when it has nothing to estimate; only
@@ -1421,6 +1438,22 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       st.port              = args.port;
       for (unsigned k = 0; k != npt; ++k) {
         st.dmrs_symb[k] = dmrs_sym[k];
+      }
+      // Batch 5g: the CFO kernels derive the hop's symbol start epochs from this geometry instead of
+      // reading the array the host used to upload (this call also runs the bit-for-bit check against
+      // that array, once per distinct geometry).
+      const epoch_geometry epochs_geom = epoch_geometry_of(args);
+      st.numerology                    = epochs_geom.numerology;
+      st.cp_extended                   = epochs_geom.cp_extended;
+      // ... except the CFO estimator, which takes the SPAN of its two DM-RS symbols as a parameter:
+      // its answer is a phase read out of a long accumulation, and computing the epochs inside that
+      // kernel recompiled the accumulation and moved the published CFO by 1 ulp. The span is the
+      // difference of two entries of the host array this port has held all along (no restatement), and
+      // it is only used when the hop has two DM-RS symbols at all - the same condition the kernel's
+      // carry branch tests.
+      st.epoch_span = 0.0F;
+      if ((npt >= 2) && (dmrs_sym[1] < args.symbol_start_epochs.size())) {
+        st.epoch_span = args.symbol_start_epochs[dmrs_sym[1]] - args.symbol_start_epochs[dmrs_sym[0]];
       }
       {
         unsigned n = 0;
@@ -1504,7 +1537,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                          "host[1]=(%.6g,%.6g)\n",
                          i_symb,
                          dmrs_sym[i_symb],
-                         static_cast<double>(gpu_epochs[dmrs_sym[i_symb]]),
+                         static_cast<double>(args.symbol_start_epochs[dmrs_sym[i_symb]]),
                          static_cast<double>(d[0]),
                          static_cast<double>(d[1]),
                          static_cast<double>(ref_lse[0].real()),
@@ -2016,10 +2049,19 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // K4 is attached only when the whole hop is covered (same rule as K3) and the pilot inputs were
     // staged: it reads the estimates at the pilot positions out of the same h.
     if ((nof_cdm_groups != 0) && (nof_re_total != 0)) {
-      reformat.noise.nv                  = gpu_nv;
-      reformat.noise.pilots              = gpu_pilots;
-      reformat.noise.rx_pilots           = gpu_rx_pilots;
-      reformat.noise.symbol_start_epochs = gpu_epochs;
+      reformat.noise.nv         = gpu_nv;
+      reformat.noise.pilots     = gpu_pilots;
+      reformat.noise.rx_pilots  = gpu_rx_pilots;
+      // Batch 5g: the start epoch of each of the hop's DM-RS symbols, out of the host array this port
+      // has always held - the array the device used to be fed through a buffer, and the one
+      // epoch_geometry_of() checks the device's own derivation against. K4 takes the values rather
+      // than deriving them because its answer is a reduction (see noise_stage_t::dmrs_epochs).
+      for (unsigned i = 0; i != 4; ++i) {
+        reformat.noise.dmrs_epochs[i] =
+            ((i < npt) && (dmrs_sym[i] < args.symbol_start_epochs.size()))
+                ? args.symbol_start_epochs[dmrs_sym[i]]
+                : 0.0F;
+      }
       reformat.noise.npt                 = npt;
       reformat.noise.nof_cdm_groups      = nof_cdm_groups;
       reformat.noise.npf                 = args.nof_symbol_pilots;
@@ -3250,27 +3292,66 @@ void port_channel_estimator_metal_mmse_impl::materialize_host_grid() const
   }
 }
 
-void port_channel_estimator_metal_mmse_impl::upload_symbol_start_epochs(
-    const fd_td_estimation_stage_args& args)
+port_channel_estimator_metal_mmse_impl::epoch_geometry
+port_channel_estimator_metal_mmse_impl::epoch_geometry_of(const fd_td_estimation_stage_args& args)
 {
-  // The hop's 14 symbol start times, into the zero-copy array the pilots kernel and K4 read as
-  // `const float* epochs`. They are a function of (CP, SCS) alone, so after the first hop of a cell
-  // this is a comparison and nothing else - and a comparison reads host memory, touches no device
-  // buffer and waits on no GPU, so it is not a crossing and is deliberately not counted.
-  std::array<float, MAX_NSYMB_PER_SLOT> want{};
+  epoch_geometry g;
+  g.numerology = to_numerology_value(args.scs);
+  // The CP type comes from the host array's own LENGTH, which is the slot's symbol count: the base
+  // class builds one entry per symbol (initialize_symbol_start_epochs() takes first(get_nsymb_per_slot
+  // (cp))), so extended CP is 12 entries and normal CP is 14. The comparison below is what turns that
+  // inference into something that fails loudly instead of silently: an array of any other length makes
+  // the device's tail disagree with the host's zeros.
+  g.cp_extended = (args.symbol_start_epochs.size() == get_nsymb_per_slot(cyclic_prefix::EXTENDED));
+
+  // One check per distinct geometry: within a cell the array is the same 14 floats on every hop, and
+  // the comparison is host memory only, so repeating it per hop would buy nothing.
+  if (checked_epoch_geometry_valid && (checked_epoch_geometry == g)) {
+    return g;
+  }
+  checked_epoch_geometry       = g;
+  checked_epoch_geometry_valid = true;
+
+  // ---- The check: the DEVICE's derivation against the host array it used to be fed ----------------
+  //
+  // This is the whole criterion of batch 5g, and it is bit for bit rather than a tolerance because
+  // the two sides are supposed to be the same number: the device used to READ this array, so every
+  // CFO phasor in K4 and K0-a must rotate by exactly what it rotated by before. The device side here
+  // is ocudu_mmse_epochs.h compiled by the host C++ compiler, and the kernels compile the same
+  // function with `xcrun metal` - the unit test and the 27-capture byte comparison cover that half.
+  const unsigned nof_slot_symbols = static_cast<unsigned>(args.symbol_start_epochs.size());
+  const auto     bits             = [](float v) {
+    uint32_t u = 0;
+    std::memcpy(&u, &v, sizeof(u));
+    return u;
+  };
+  unsigned mismatches = 0;
   for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
-    want[sym] = (sym < args.symbol_start_epochs.size()) ? args.symbol_start_epochs[sym] : 0.0F;
+    // The retired upload's padding: an index past the array's end was written as zero, and the device
+    // route still produces zero there (see ocudu_mmse_epochs.h), so the tails are compared too.
+    const float host   = (sym < nof_slot_symbols) ? args.symbol_start_epochs[sym] : 0.0F;
+    const float device = ocudu_mmse_symbol_start_epoch(g.numerology, g.cp_extended ? 1u : 0u, sym);
+    if (std::memcmp(&host, &device, sizeof(float)) != 0) {
+      ++mismatches;
+      std::fprintf(stderr,
+                   "[epoch_check] MISMATCH numerology=%u cp=%s sym=%u host=%.9g (0x%08x) device=%.9g (0x%08x)\n",
+                   g.numerology,
+                   g.cp_extended ? "extended" : "normal",
+                   sym,
+                   static_cast<double>(host),
+                   bits(host),
+                   static_cast<double>(device),
+                   bits(device));
+    }
   }
-  if (epochs_uploaded_valid && (want == epochs_uploaded)) {
-    return; // nothing is written, so nothing is counted
-  }
-  // CROSSING (host -> device): gpu_epochs is a zero-copy mapping the device reads.
-  phy_pipeline_crossings::count_host_write_site("ce: symbol start epochs uploaded", MAX_NSYMB_PER_SLOT * sizeof(float));
-  for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
-    gpu_epochs[sym] = want[sym];
-  }
-  epochs_uploaded       = want;
-  epochs_uploaded_valid = true;
+  std::fprintf(stderr,
+               "[epoch_check] numerology=%u cp=%-8s %u of %u slot symbols bit-identical to the host array%s\n",
+               g.numerology,
+               g.cp_extended ? "extended" : "normal",
+               MAX_NSYMB_PER_SLOT - mismatches,
+               MAX_NSYMB_PER_SLOT,
+               (mismatches == 0) ? "" : " - THE DEVICE AND THE HOST DO NOT AGREE");
+  return g;
 }
 
 bool port_channel_estimator_metal_mmse_impl::check_edge_slots(

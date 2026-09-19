@@ -307,6 +307,9 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    pilots_sigma2_pipe = nil;
 
   id<MTLComputePipelineState>    pilots_power_pipe   = nil;
+  // Batch 5g: the symbol start epochs of one (numerology, CP) pair, for the unit test's exhaustive
+  // comparison against the host rule. The lane never dispatches this one (see run_epoch_probe).
+  id<MTLComputePipelineState>    epoch_pipe = nil;
   // Glue #2: the device writes the engine's pilot vectors out of K0-a's output (optional, same
   // metallib - a metallib without it simply keeps the host staging).
   id<MTLComputePipelineState>    pilots_scatter_pipe = nil;
@@ -1096,7 +1099,7 @@ static void encode_reformat(stage_encoder&                             s,
       (reformat != nullptr) ? reformat->noise : ocudu::metal::mmse_engine::reformat_stage::noise_stage_t{};
   static const bool k4_enabled = (std::getenv("OCUDU_CE_NO_K4") == nullptr);
   if (k4_enabled && (reformat != nullptr) && (e->noise_pipe != nil) && (noise.nv != nullptr) && (noise.pilots != nullptr) &&
-      (noise.rx_pilots != nullptr) && (noise.symbol_start_epochs != nullptr) && (noise.cfo_dev != nullptr) &&
+      (noise.rx_pilots != nullptr) && (noise.cfo_dev != nullptr) &&
       (noise.npt != 0) && (noise.npf != 0) && (noise.comb_size != 0) && (reformat->nof_layers != 0)) {
     const NSUInteger pilots_bytes =
         static_cast<NSUInteger>(noise.npt) * reformat->nof_layers * noise.npf * 2 * sizeof(float);
@@ -1131,6 +1134,10 @@ static void encode_reformat(stage_encoder&                             s,
         uint32_t nof_dmrs_pilots;
         uint32_t nof_cdm;
         float    min_snr_power;
+        // Batch 5g: the start epoch of each of the hop's DM-RS symbols (npt entries used), which
+        // replaced the uploaded 14-float array. See mmse_noise_params::dmrs_epochs for why this
+        // kernel is GIVEN them rather than deriving them.
+        float    dmrs_epochs[4];
       } nparams{static_cast<uint32_t>(nout),
                 static_cast<uint32_t>(nof_blocks),
                 reformat->nf_std,
@@ -1151,7 +1158,8 @@ static void encode_reformat(stage_encoder&                             s,
                 noise.cfo_from_device ? 1u : 0u,
                 noise.nof_dmrs_pilots,
                 noise.nof_cdm,
-                noise.min_snr_power};
+                noise.min_snr_power,
+                {}};
       // The parameter block is a hand-written mirror of mmse_noise_params in
       // ocudu_mmse_reformat.metal, and a wrong SIZE cannot be caught here (the kernel receives a
       // pointer) while a wrong FIELD is invisible to a size assert - both have happened in this file
@@ -1167,8 +1175,11 @@ static void encode_reformat(stage_encoder&                             s,
       static_assert(offsetof(mmse_noise_params, nof_cdm) == 88, "must match mmse_noise_params::nof_cdm");
       static_assert(offsetof(mmse_noise_params, min_snr_power) == 92,
                     "must match mmse_noise_params::min_snr_power");
+      static_assert(offsetof(mmse_noise_params, dmrs_epochs) == 96,
+                    "must match mmse_noise_params::dmrs_epochs");
       for (unsigned i = 0; i != 4; ++i) {
         nparams.dmrs_slots[i] = noise.dmrs_slots[i];
+        nparams.dmrs_epochs[i] = noise.dmrs_epochs[i];
       }
       if (!s.burst) {
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
@@ -1179,10 +1190,7 @@ static void encode_reformat(stage_encoder&                             s,
       [enc setBuffer:rx_buf offset:0 atIndex:2];
       [enc setBuffer:nv_buf offset:0 atIndex:3];
       [enc setBytes:&nparams length:sizeof(nparams) atIndex:4];
-      [enc setBytes:noise.symbol_start_epochs
-             length:static_cast<NSUInteger>(ocudu::MAX_NSYMB_PER_SLOT) * sizeof(float)
-             atIndex:5];
-      [enc setBuffer:cfo_buf offset:0 atIndex:6];
+      [enc setBuffer:cfo_buf offset:0 atIndex:5];
       // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (its reduction tree is written for it).
     [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
@@ -1314,6 +1322,15 @@ bool mmse_engine::init(const char* metallib_path)
                                                         reflection:nil
                                                              error:&err];
   }
+  // Batch 5g's self-check (see mmse_epoch_probe): the only pipeline the lane itself never dispatches.
+  // Optional like the rest, and absent from a metallib that predates it - which is what run_epoch_probe
+  // reports instead of guessing.
+  if (id<MTLFunction> epoch_fn = [e->library newFunctionWithName:@"mmse_epoch_probe"]) {
+    e->epoch_pipe = [e->device newComputePipelineStateWithFunction:epoch_fn
+                                                           options:MTLPipelineOptionNone
+                                                        reflection:nil
+                                                             error:&err];
+  }
   // K0-a (the estimator's input stage) is optional for the same reason.
   {
     id<MTLFunction> lse_fn   = [e->library newFunctionWithName:@"mmse_pilots_lse"];
@@ -1390,8 +1407,20 @@ struct mmse_pilots_params_t {
   uint32_t grid_port_stride;
   uint32_t dmrs_symb[4];
   uint32_t pilot_re[12];
+  /// Batch 5g: the symbol start epochs are derived from these two instead of read from an uploaded
+  /// 14-float array (see ocudu_mmse_epochs.h).
+  uint32_t numerology;
+  uint32_t cp_extended;
+  /// Batch 5g: the start-time span of the hop's first two DM-RS symbols, for mmse_pilots_cfo (see the
+  /// note in ocudu_mmse_pilots.metal: that kernel's accumulation must compile exactly as it did).
+  float    epoch_span;
 };
-static_assert(sizeof(mmse_pilots_params_t) == 104, "mmse_pilots_params_t must match mmse_pilots_params");
+static_assert(sizeof(mmse_pilots_params_t) == 116, "mmse_pilots_params_t must match mmse_pilots_params");
+// Same reason as the sigma2 struct below: a same-size swap would shift every field after it, and the
+// kernels read these two by name.
+static_assert(offsetof(mmse_pilots_params_t, numerology) == 104, "must match mmse_pilots_params::numerology");
+static_assert(offsetof(mmse_pilots_params_t, cp_extended) == 108, "must match mmse_pilots_params::cp_extended");
+static_assert(offsetof(mmse_pilots_params_t, epoch_span) == 112, "must match mmse_pilots_params::epoch_span");
 
 /// Must match mmse_sigma2_params in ocudu_mmse_pilots.metal.
 struct mmse_sigma2_params_t {
@@ -1406,8 +1435,14 @@ struct mmse_sigma2_params_t {
   float    beta;
   float    inv_beta;
   uint32_t dmrs_symb[4];
+  /// Batch 5g: the symbol start epochs are derived from these two instead of read from an uploaded
+  /// 14-float array (see ocudu_mmse_epochs.h). This struct is handed to THREE kernels (smooth, sigma2
+  /// and power) plus its mirror in ocudu_mmse_pilots_power.metal, so the fields are appended and the
+  /// offsets below are pinned.
+  uint32_t numerology;
+  uint32_t cp_extended;
 };
-static_assert(sizeof(mmse_sigma2_params_t) == 56, "mmse_sigma2_params_t must match mmse_sigma2_params");
+static_assert(sizeof(mmse_sigma2_params_t) == 64, "mmse_sigma2_params_t must match mmse_sigma2_params");
 // The fields the kernels read by name, pinned by OFFSET: a same-size swap of two fields keeps the
 // size assert happy while shifting everything after them (see the corr struct's note below).
 static_assert(offsetof(mmse_sigma2_params_t, nof_cdm) == 20, "must match mmse_sigma2_params::nof_cdm");
@@ -1416,6 +1451,8 @@ static_assert(offsetof(mmse_sigma2_params_t, nof_power_pilots) == 24,
 static_assert(offsetof(mmse_sigma2_params_t, compensate_cfo) == 28,
               "must match mmse_sigma2_params::compensate_cfo");
 static_assert(offsetof(mmse_sigma2_params_t, beta) == 32, "must match mmse_sigma2_params::beta");
+static_assert(offsetof(mmse_sigma2_params_t, numerology) == 56, "must match mmse_sigma2_params::numerology");
+static_assert(offsetof(mmse_sigma2_params_t, cp_extended) == 60, "must match mmse_sigma2_params::cp_extended");
 
 bool mmse_engine::build_pilots_lse(const pilots_stage& s)
 {
@@ -1424,7 +1461,7 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
       (e->pilots_apply_pipe == nil)) {
     return false;
   }
-  if ((s.grid == nullptr) || (s.grid_bytes == 0) || (s.ref == nullptr) || (s.epochs == nullptr) ||
+  if ((s.grid == nullptr) || (s.grid_bytes == 0) || (s.ref == nullptr) ||
       (s.lse == nullptr) || (s.cfo == nullptr) || (s.nof_dmrs_symb == 0) || (s.nof_dmrs_symb > 4) ||
       (s.nof_layers == 0) || (s.nof_pilots == 0) || (s.ncomb == 0) || (s.nof_prb == 0)) {
     return false;
@@ -1438,8 +1475,7 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   id<MTLBuffer> ref_buf  = e->wrap(s.ref, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
   id<MTLBuffer> lse_buf  = e->wrap(s.lse, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
   id<MTLBuffer> cfo_buf  = e->wrap(s.cfo, sizeof(float));
-  id<MTLBuffer> ep_buf   = e->wrap(s.epochs, MAX_NSYMB_PER_SLOT * sizeof(float));
-  if ((grid_buf == nil) || (ref_buf == nil) || (lse_buf == nil) || (cfo_buf == nil) || (ep_buf == nil)) {
+  if ((grid_buf == nil) || (ref_buf == nil) || (lse_buf == nil) || (cfo_buf == nil)) {
     return false;
   }
 
@@ -1523,6 +1559,12 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   for (unsigned k = 0; k != 12; ++k) {
     p.pilot_re[k] = s.pilot_re[k];
   }
+  // Batch 5g: the three kernels of this stage derive the hop's symbol start epochs from these two
+  // scalars (see ocudu_mmse_epochs.h) - they used to read them out of a host-uploaded 14-float array,
+  // through a device buffer this call no longer wraps or binds.
+  p.numerology  = s.numerology;
+  p.cp_extended = s.cp_extended ? 1u : 0u;
+  p.epoch_span  = s.epoch_span;
 
   // NOT fused, deliberately: this stage's outputs are read by the HOST inside the same hop - the CFO
   // (gpu_ls_cfo), the noise variance and the pilots' power (gpu_ls_sigma2) feed the statistics and the
@@ -1542,21 +1584,19 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
 
   [enc setComputePipelineState:e->pilots_cfo_pipe];
   [enc setBuffer:lse_buf offset:0 atIndex:0];
-  [enc setBuffer:ep_buf offset:0 atIndex:1];
-  [enc setBuffer:cfo_buf offset:0 atIndex:2];
-  [enc setBytes:&p length:sizeof(p) atIndex:3];
+  [enc setBuffer:cfo_buf offset:0 atIndex:1];
+  [enc setBytes:&p length:sizeof(p) atIndex:2];
   // The previous hop's CFO slot, so the kernel carries a value forward itself when this hop has
   // nothing to estimate (see pilots_stage::cfo_prev). Null means the caller still carries it on the
   // host, which the kernel then reproduces by writing 0 - see the branch's note.
   id<MTLBuffer> cfo_prev_buf = (s.cfo_prev != nullptr) ? e->wrap(s.cfo_prev, sizeof(float)) : nil;
-  [enc setBuffer:cfo_prev_buf offset:0 atIndex:4];
+  [enc setBuffer:cfo_prev_buf offset:0 atIndex:3];
   [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
   [enc setComputePipelineState:e->pilots_apply_pipe];
   [enc setBuffer:lse_buf offset:0 atIndex:0];
   [enc setBuffer:cfo_buf offset:0 atIndex:1];
-  [enc setBuffer:ep_buf offset:0 atIndex:2];
-  [enc setBytes:&p length:sizeof(p) atIndex:3];
+  [enc setBytes:&p length:sizeof(p) atIndex:2];
   [enc dispatchThreads:MTLSizeMake(s.nof_layers * s.nof_pilots, s.nof_dmrs_symb, 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
@@ -1582,6 +1622,11 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     q.compensate_cfo = (s.compensate_cfo ? 1u : 0u);
     q.beta           = s.beta;
     q.inv_beta       = s.inv_beta;
+    // Batch 5g: the sigma2 kernel derives its CFO phasors' start epochs from these two (see
+    // ocudu_mmse_epochs.h). The OTHER two kernels that receive this block (smooth, power) ignore
+    // them; the struct has to carry them because all three read the same setBytes bytes.
+    q.numerology     = s.numerology;
+    q.cp_extended    = s.cp_extended ? 1u : 0u;
     for (unsigned k = 0; k != 4; ++k) {
       q.dmrs_symb[k] = s.dmrs_symb[k];
     }
@@ -1601,10 +1646,9 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     [enc setBuffer:smoothed_buf offset:0 atIndex:0];
     [enc setBuffer:ref_buf offset:0 atIndex:1];
     [enc setBuffer:rx_buf offset:0 atIndex:2];
-    [enc setBuffer:ep_buf offset:0 atIndex:3];
-    [enc setBuffer:cfo_buf offset:0 atIndex:4];
-    [enc setBuffer:sigma2_buf offset:0 atIndex:5];
-    [enc setBytes:&q length:sizeof(q) atIndex:6];
+    [enc setBuffer:cfo_buf offset:0 atIndex:3];
+    [enc setBuffer:sigma2_buf offset:0 atIndex:4];
+    [enc setBytes:&q length:sizeof(q) atIndex:5];
     // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (its reduction tree is written for it).
     [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
@@ -1991,6 +2035,42 @@ bool mmse_engine::ta_place_available(unsigned dft_size)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   return (e != nullptr) && (e->ta_place_pipe != nil) && build_ta_tables(e, dft_size);
+}
+
+bool mmse_engine::run_epoch_probe(unsigned numerology, unsigned cp_extended, float* dst)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if ((e == nullptr) || (e->epoch_pipe == nil) || (dst == nullptr)) {
+    return false;
+  }
+
+  // The destination is the caller's own 14 floats: the probe is a comparison of VALUES, not of a
+  // device buffer, so the zero-copy mapping is the shortest path there and needs no copy back.
+  id<MTLBuffer> dst_buf = e->wrap_shared(dst, MAX_NSYMB_PER_SLOT * sizeof(float));
+  if (dst_buf == nil) {
+    return false;
+  }
+
+  struct epoch_params_t {
+    uint32_t numerology;
+    uint32_t cp_extended;
+  } p{static_cast<uint32_t>(numerology), static_cast<uint32_t>(cp_extended != 0 ? 1u : 0u)};
+  static_assert(sizeof(epoch_params_t) == 8, "must match mmse_epoch_params in ocudu_mmse_reformat.metal");
+
+  id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (enc == nil) {
+    return false;
+  }
+  [enc setComputePipelineState:e->epoch_pipe];
+  [enc setBytes:&p length:sizeof(p) atIndex:0];
+  [enc setBuffer:dst_buf offset:0 atIndex:1];
+  [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(static_cast<NSUInteger>(MAX_NSYMB_PER_SLOT), 1, 1)];
+  [enc endEncoding];
+  [cb commit];
+  [cb waitUntilCompleted];
+  return (cb.status == MTLCommandBufferStatusCompleted) && (cb.error == nil);
 }
 
 bool mmse_engine::run_ta_place(const void*         h,

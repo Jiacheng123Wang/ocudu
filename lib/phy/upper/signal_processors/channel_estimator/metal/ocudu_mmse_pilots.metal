@@ -83,6 +83,10 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// The slot's symbol start epochs (batch 5g): the three kernels below used to read them out of a
+// host-uploaded array, and now derive the few they need from the numerology and the CP type.
+#include "ocudu_mmse_epochs.h"
+
 struct mmse_pilots_params {
     uint nof_dmrs_symb;     // DM-RS symbols of the hop (the second grid dimension is symb x layer)
     uint nof_layers;        // Tx layers
@@ -98,6 +102,14 @@ struct mmse_pilots_params {
     uint dmrs_symb[4];
     // Pilot positions within a PRB, ascending (ncomb entries).
     uint pilot_re[12];
+    // Symbol start epochs travel as (numerology, CP type) - see ocudu_mmse_epochs.h - instead of as a
+    // 14-float array the host had to upload (batch 5g). Appended, so the host's offsets are unchanged.
+    uint numerology;        // mu of the transmission (subcarrier_spacing enum value)
+    uint cp_extended;       // 1 for extended cyclic prefix (12 symbols per slot), 0 for normal
+    // The start-time SPAN between the hop's first two DM-RS symbols, in symbol durations - the one
+    // epoch-derived number mmse_pilots_cfo needs (see there for why it arrives as a parameter while
+    // the other three consumers derive the whole array themselves).
+    float epoch_span;
 };
 
 /// Subcarrier of the \c i_pilot -th pilot of the hop: PRB-major, then re_pattern ascending - the
@@ -167,12 +179,11 @@ kernel void mmse_pilots_lse(device const ushort*         grid    [[buffer(0)]],
 /// different number, so the groups are kept separate here.
 ///
 /// One threadgroup, thread 0: the reduction is a few hundred complex MACs and a serial walk keeps
-/// the accumulation order closest to the host's. \c out[0] carries the CFO.
+/// the accumulation order closest to the host's. \c cfo[0] carries the CFO.
 kernel void mmse_pilots_cfo(device const float*          lse    [[buffer(0)]],
-                            device const float*          epochs [[buffer(1)]], // symbol start times
-                            device float*                out    [[buffer(2)]], // [1]: the CFO
-                            constant mmse_pilots_params& p      [[buffer(3)]],
-                            device const float*          prev   [[buffer(4)]], // previous hop's slot
+                            device float*                cfo    [[buffer(1)]], // [1]: the CFO
+                            constant mmse_pilots_params& p      [[buffer(2)]],
+                            device const float*          prev   [[buffer(3)]], // previous hop's slot
                             uint                         tid    [[thread_position_in_threadgroup]])
 {
     if (tid != 0) {
@@ -190,12 +201,25 @@ kernel void mmse_pilots_cfo(device const float*          lse    [[buffer(0)]],
     //       destination untouched would silently depend on what the slot held before, and the slots
     //       rotate.
     if (p.nof_dmrs_symb < 2) {
-        out[0] = (prev != nullptr) ? prev[0] : 0.0F;
+        cfo[0] = (prev != nullptr) ? prev[0] : 0.0F;
         return;
     }
     const uint  nof_groups = (p.nof_layers + 1u) / 2u;
     const ulong sym0_base  = 0;
     const ulong sym1_base  = static_cast<ulong>(p.nof_layers) * p.nof_pilots * 2;
+
+    // The phase ramp between the hop's first two DM-RS symbols. It arrives as a PARAMETER, and that is
+    // deliberate: this kernel's answer is a phase obtained from a 72-term accumulation through atan2,
+    // so it is the one consumer of the epoch for which the COMPILED SHAPE of that accumulation decides
+    // the published bits. Measured (batch 5g): computing the epochs here - identical values, proved -
+    // recompiled the accumulation, and the resulting conditional-multiply contraction moved the CFO by
+    // 1 ulp (0x3BFB5F2E -> 0x3BFB5F2F on a 30 kHz capture), which rotated the LSE of two of the three
+    // DM-RS symbols and flipped single bf16 values of the published grid. The span is a function of the
+    // hop's geometry and the cell's configuration alone, and the host already derives it for its own
+    // estimator (port_channel_estimator_average_impl.cpp: cfo = phase / 2pi / (epoch[s1] - epoch[s0])).
+    // The other three consumers - apply_cfo and sigma2 below, K4 in ocudu_mmse_reformat.metal - derive
+    // the epochs on the device, and their outputs are unchanged by it.
+    const float dt = p.epoch_span;
 
     float cfo_sum = 0.0F;
     for (uint g = 0; g != nof_groups; ++g) {
@@ -210,10 +234,9 @@ kernel void mmse_pilots_cfo(device const float*          lse    [[buffer(0)]],
             }
         }
         const float phase = atan2(acc.y, acc.x);
-        const float dt    = epochs[p.dmrs_symb[1]] - epochs[p.dmrs_symb[0]];
         cfo_sum += (dt != 0.0F) ? (phase / 6.283185307179586F / dt) : 0.0F;
     }
-    out[0] = cfo_sum / static_cast<float>(nof_groups);
+    cfo[0] = cfo_sum / static_cast<float>(nof_groups);
 }
 
 /// \brief Compensates the CFO on EVERY DM-RS symbol's LSE pilots, each at ITS OWN epoch.
@@ -228,14 +251,17 @@ kernel void mmse_pilots_cfo(device const float*          lse    [[buffer(0)]],
 /// while symbol 2 was off by ~6% of its magnitude.
 kernel void mmse_pilots_apply_cfo(device float*                lse    [[buffer(0)]],
                                   device const float*          cfo    [[buffer(1)]], // [1]
-                                  device const float*          epochs [[buffer(2)]],
-                                  constant mmse_pilots_params& p      [[buffer(3)]],
+                                  constant mmse_pilots_params& p      [[buffer(2)]],
                                   uint2                        gid    [[thread_position_in_grid]])
 {
     if ((gid.y >= p.nof_dmrs_symb) || (gid.x >= p.nof_layers * p.nof_pilots)) {
         return;
     }
-    const float  theta = -6.283185307179586F * epochs[p.dmrs_symb[gid.y]] * cfo[0];
+    // The symbol's start epoch is derived from (numerology, CP) here (batch 5g); it used to be a load
+    // from the host-uploaded array. gid.y is below nof_dmrs_symb <= 4, so the index is a real entry of
+    // dmrs_symb, and the helper clamps it anyway.
+    const float  epoch = ocudu_mmse_symbol_start_epoch(p.numerology, p.cp_extended, p.dmrs_symb[gid.y]);
+    const float  theta = -6.283185307179586F * epoch * cfo[0];
     const float2 ph    = float2(cos(theta), sin(theta));
 
     const ulong base = (static_cast<ulong>(gid.y) * p.nof_layers * p.nof_pilots) * 2 + static_cast<ulong>(gid.x) * 2;
@@ -376,11 +402,15 @@ struct mmse_sigma2_params {
     // Slot symbol index of each hop DM-RS symbol (the CFO phasor of estimate_noise() uses the SLOT
     // symbol, not the hop-local one).
     uint dmrs_symb[4];
+    // Symbol start epochs travel as (numerology, CP type) - see ocudu_mmse_epochs.h - instead of as a
+    // 14-float array the host had to upload (batch 5g). Appended, so the host's offsets are unchanged.
+    uint numerology;   // mu of the transmission (subcarrier_spacing enum value)
+    uint cp_extended;  // 1 for extended cyclic prefix (12 symbols per slot), 0 for normal
 };
 // The host mirrors this layout in mmse_sigma2_params_t (ocudu_metal_mmse_engine.mm) and passes it with
 // setBytes, so a field added on one side only would silently shift every field after it - and so does
 // a same-size swap, which the size assert below cannot see. The host pins the offsets for that reason.
-static_assert(sizeof(mmse_sigma2_params) == 56, "mmse_sigma2_params must stay in step with its host mirror");
+static_assert(sizeof(mmse_sigma2_params) == 64, "mmse_sigma2_params must stay in step with its host mirror");
 
 
 /// \brief Complex product of two interleaved pairs.
@@ -558,10 +588,9 @@ kernel void mmse_pilots_fd_smooth(device const float*          lse      [[buffer
 kernel void mmse_pilots_sigma2(device const float*          smoothed [[buffer(0)]],
                                device const float*          ref      [[buffer(1)]],
                                device const float*          rx       [[buffer(2)]],
-                               device const float*          epochs   [[buffer(3)]],
-                               device const float*          cfo      [[buffer(4)]],
-                               device float*                out      [[buffer(5)]],
-                               constant mmse_sigma2_params& p        [[buffer(6)]],
+                               device const float*          cfo      [[buffer(3)]],
+                               device float*                out      [[buffer(4)]],
+                               constant mmse_sigma2_params& p        [[buffer(5)]],
                                uint                         tid      [[thread_position_in_threadgroup]])
 {
     threadgroup float red[mmse_sigma2_tg_size];
@@ -570,6 +599,16 @@ kernel void mmse_pilots_sigma2(device const float*          smoothed [[buffer(0)
     const float            scaling   = (d.nof_dmrs_symb != 0u) ? (p.beta / static_cast<float>(d.nof_dmrs_symb)) : 0.0F;
     const uint             nof_pairs = (d.nof_layers + 1u) / 2u;
     float                  sigma2    = 0.0F;
+
+    // The start epoch of each of the hop's DM-RS symbols, derived once per thread (batch 5g) instead
+    // of loaded from the host-uploaded array inside the pilot loop. The slot symbol index is clamped
+    // exactly as it was at the load site: it comes from the caller, and an out-of-range one must read
+    // the wrong epoch, not memory outside anything.
+    float ep[mmse_max_dmrs_symb];
+    for (uint s = 0; s != mmse_max_dmrs_symb; ++s) {
+        const uint i_slot = min(p.dmrs_symb[s], mmse_max_slot_symb - 1u);
+        ep[s]             = ocudu_mmse_symbol_start_epoch(p.numerology, p.cp_extended, i_slot);
+    }
 
     // Every loop below is bounded by a compile-time constant; the parameters only skip iterations.
     for (uint pair = 0; pair != mmse_max_layers / 2; ++pair) {
@@ -613,11 +652,8 @@ kernel void mmse_pilots_sigma2(device const float*          smoothed [[buffer(0)
                 // (compensate_cfo_and_accumulate()/estimate_noise() both rotate per layer).
                 float2 ph = float2(1.0F, 0.0F);
                 if (p.compensate_cfo != 0u) {
-                    // Clamped like every other index: the slot symbol index comes from the caller, and
-                    // an out-of-range one must read the wrong epoch, not memory outside the buffer.
-                    const uint  i_slot = min(p.dmrs_symb[s], mmse_max_slot_symb - 1u);
-                    const float theta  = 6.283185307179586F * epochs[i_slot] * cfo[0];
-                    ph                 = float2(cos(theta), sin(theta));
+                    const float theta = 6.283185307179586F * ep[s] * cfo[0];
+                    ph                = float2(cos(theta), sin(theta));
                 }
                 float2 predicted = mmse_cmul(float2(ref[2 * ib], ref[2 * ib + 1]), scaled0);
                 predicted        = float2(predicted.x * ph.x - predicted.y * ph.y,

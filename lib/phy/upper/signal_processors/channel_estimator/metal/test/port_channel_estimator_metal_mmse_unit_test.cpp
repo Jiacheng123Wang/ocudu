@@ -799,6 +799,90 @@ static bool l2_k7_placement_only()
   return bad == 0;
 }
 
+/// \brief S12 (batch 5g): the SHADER's symbol start epochs against the rule they restate, whole domain.
+///
+/// The kernels that rotate by 2*pi*cfo*epoch[sym] - K4 and the three CFO kernels of K0-a - used to read
+/// a 14-float array the estimator uploaded once per configuration. They now derive it from (numerology,
+/// cyclic prefix), which removed the lane's last host -> device write: the crossing counter's write side
+/// reads 0.00 per hop, and the contract's eighth check can pass.
+///
+/// The derivation is a RESTATEMENT of initialize_symbol_start_epochs(), written out in
+/// ocudu_mmse_epochs.h because MSL cannot include cyclic_prefix.h (double, std::string, ocudu_assert),
+/// and a restatement is worth exactly as much as the comparison behind it. There are two:
+///
+///   * epoch_geometry_of() (port_channel_estimator_metal_mmse_impl.cpp) compares it against the host
+///     ARRAY on the first hop of every configuration a run actually uses, and prints the verdict;
+///   * this sweeps the whole DOMAIN - both CP types x all five numerologies x every symbol of the slot,
+///     140 values - against cyclic_prefix::get_length(), i.e. the 3GPP rule the host has always used,
+///     and against the recurrence the host builds the array with. Bit for bit, because the two sides
+///     are supposed to be the same number, not merely a close one.
+///
+/// It is a SHADER test and not a host test: the values come out of mmse_epoch_probe(), the same header
+/// compiled by `xcrun metal`, in the same metallib, under the same options as the kernels that use it.
+static bool s12_epochs_match_host_rule()
+{
+  static metal::mmse_engine engine;
+  static bool               init_done = false;
+  if (!init_done) {
+    init_done = engine.init();
+  }
+
+  unsigned checks = 0;
+  unsigned bad    = 0;
+  for (int cp_i = 0; cp_i != 2; ++cp_i) {
+    const cyclic_prefix cp = (cp_i == 0) ? cyclic_prefix::NORMAL : cyclic_prefix::EXTENDED;
+    for (unsigned mu = 0; mu != NOF_NUMEROLOGIES; ++mu) {
+      const subcarrier_spacing scs      = to_subcarrier_spacing(mu);
+      const unsigned           nof_symb = get_nsymb_per_slot(cp);
+
+      // The host's own array, exactly as initialize_symbol_start_epochs() builds it. THIS is the
+      // reference, and it is the array the device read until batch 5g - so the comparison is not
+      // against a re-derivation of the same idea, but against the bytes the lane used to publish.
+      std::array<float, MAX_NSYMB_PER_SLOT> host{};
+      host[0] = cp.get_length(0, scs).to_seconds() * scs_to_khz(scs) * 1000;
+      for (unsigned i = 1; i != nof_symb; ++i) {
+        host[i] = host[i - 1] + cp.get_length(i, scs).to_seconds() * scs_to_khz(scs) * 1000 + 1.0F;
+      }
+
+      std::array<float, MAX_NSYMB_PER_SLOT> dev{};
+      if (!init_done || !engine.run_epoch_probe(mu, (cp_i == 1) ? 1u : 0u, dev.data())) {
+        std::fprintf(stderr, "S12 epoch: init=%d, the metallib does not carry mmse_epoch_probe\n",
+                     init_done ? 1 : 0);
+        return false;
+      }
+
+      unsigned row_bad = 0;
+      for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
+        // Past the slot's symbol count the device route owes the ZERO the retired upload padded its
+        // array with (see ocudu_mmse_epochs.h), so that is what the comparison asks for there too.
+        const float want = (sym < nof_symb) ? host[sym] : 0.0F;
+        ++checks;
+        if (std::memcmp(&want, &dev[sym], sizeof(float)) != 0) {
+          ++bad;
+          ++row_bad;
+          std::fprintf(stderr,
+                       "S12 epoch: MISMATCH cp=%s mu=%u sym=%u host=%.9g device=%.9g\n",
+                       cp.to_string().c_str(),
+                       mu,
+                       sym,
+                       static_cast<double>(want),
+                       static_cast<double>(dev[sym]));
+        }
+      }
+      std::printf("S12 epoch: cp=%-8s mu=%u scs=%3u kHz symbols=%2u : %s   e[0]=%.9g e[last]=%.9g\n",
+                  cp.to_string().c_str(),
+                  mu,
+                  scs_to_khz(scs),
+                  nof_symb,
+                  (row_bad == 0) ? "bit-identical" : "DIFFERS",
+                  static_cast<double>(host[0]),
+                  static_cast<double>(host[nof_symb - 1]));
+    }
+  }
+  std::printf("S12 epoch: %u of %u values bit-identical to the host rule\n", checks - bad, checks);
+  return (bad == 0);
+}
+
 /// \brief S12 (batch 5b): the WHOLE device route - K7 places the pilots out of h, the device IDFT
 /// transforms them, K6 reduces the profile - against the host's estimator, on the same pilots.
 ///
@@ -1008,6 +1092,15 @@ int main()
     return 0;
   }
   const bool run_chain = (std::getenv("OCUDU_CE_TA_CHAIN") != nullptr);
+
+  // Batch 5g FIRST, and unconditionally: it is the cheapest check in this file (one dispatch of one
+  // threadgroup), it needs nothing but the engine, and what it judges - the shader's symbol start
+  // epochs against the rule the host uses - is a fact about every later test's configuration too.
+  if (!s12_epochs_match_host_rule()) {
+    std::fprintf(stderr, "S12 FAIL: the device's symbol start epochs are not the host's\n");
+    return 1;
+  }
+  std::printf("S12 PASS: the device derives the host's symbol start epochs, whole (cp, scs) domain\n");
 
   // S12 (batch 5b): the device IDFT must reproduce the power delay profile the TA estimator reads.
   // Placed first because every later step of the TA port assumes it.

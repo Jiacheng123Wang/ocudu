@@ -30,6 +30,10 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// The slot's symbol start epochs (batch 5g): K4 used to read them out of a host-uploaded array, and
+// now derives them from the numerology and the CP type like every other per-hop parameter.
+#include "ocudu_mmse_epochs.h"
+
 struct mmse_reformat_params {
   uint nout_stride;   // Output positions per block in the batch (row length of h).
   uint n_blk;         // Blocks per system in the batch.
@@ -162,6 +166,17 @@ struct mmse_noise_params {
   uint  nof_cdm;          // CDM groups of the transmission (ceil(nof_layers / 2)).
   float min_snr_power;    // convert_dB_to_power(MAX_SINR_DB): the SINR ceiling the variance is
                           // bounded by (a noiseless-synthetic guard).
+  // The start epoch of each of the hop's DM-RS symbols, in symbol durations (npt entries used).
+  // Batch 5g: they used to arrive as a 14-float array uploaded into a device buffer - the last
+  // host -> device write in the lane - and they now travel as kernel parameters.
+  //
+  // WHY THIS KERNEL IS GIVEN THEM and does not derive them from (numerology, CP) like K0-a's CFO
+  // kernels do: this kernel's answer is a REDUCTION over the hop's pilots (one threadgroup, a tree at
+  // the end), and adding the derivation to it recompiled that reduction - the noise variance moved by
+  // 2 ulp on 3 of 27 captures (measured, batch 5g; the margin is invisible in the LLR, but it is a
+  // published value). The derivation is exact (see ocudu_mmse_epochs.h), it is simply not FREE here:
+  // a kernel whose output comes out of an accumulation must not be given new arithmetic.
+  float dmrs_epochs[4];
 };
 
 /// Subcarrier of the \c sc -th pilot within the hop: pilots are PRB-major, comb ascending.
@@ -209,8 +224,7 @@ kernel void mmse_noise(device const float*  h [[buffer(0)]],
                        device const float2* rx_pilots [[buffer(2)]], // [npt][nof_cdm_groups][npf]
                        device float*        nv [[buffer(3)]],        // one value per estimator
                        constant mmse_noise_params& p [[buffer(4)]],
-                       constant float*      epochs [[buffer(5)]],    // symbol start times, in symbols
-                       device const float*  cfo_dev [[buffer(6)]],   // this hop's CFO (one value)
+                       device const float*  cfo_dev [[buffer(5)]],   // this hop's CFO (one value)
                        uint tid [[thread_position_in_threadgroup]],
                        uint tg_size [[threads_per_threadgroup]])
 {
@@ -244,7 +258,6 @@ kernel void mmse_noise(device const float*  h [[buffer(0)]],
     }
 
     for (uint i_dmrs = 0; i_dmrs != p.npt; ++i_dmrs) {
-      const uint sym = p.dmrs_slots[i_dmrs];
       for (uint g = 0; g != p.nof_cdm_groups; ++g) {
         const uint layer_begin = 2 * g;
         const uint layer_end   = min(layer_begin + 2, p.nof_layers);
@@ -256,9 +269,10 @@ kernel void mmse_noise(device const float*  h [[buffer(0)]],
           predicted += float2{hav.x * x.x - hav.y * x.y, hav.x * x.y + hav.y * x.x};
         }
         if (p.compensate_cfo != 0) {
-          // The same rotation the host applies: the CFO times the start time of the symbol, the
-          // latter being an input (it depends on the cyclic prefix, not on the symbol index).
-          const float phase = 2.0F * M_PI_F * cfo * epochs[sym];
+          // The same rotation the host applies: the CFO times the start time of the symbol, which
+          // travels as a parameter - see mmse_noise_params::dmrs_epochs for why this kernel is given
+          // the values while the CFO kernels of K0-a derive them.
+          const float phase = 2.0F * M_PI_F * cfo * p.dmrs_epochs[i_dmrs];
           const float c     = cos(phase);
           const float s     = sin(phase);
           predicted = float2{predicted.x * c - predicted.y * s, predicted.x * s + predicted.y * c};
@@ -290,4 +304,30 @@ kernel void mmse_noise(device const float*  h [[buffer(0)]],
     const float energy = partial[0].x / (static_cast<float>(p.nof_dmrs_pilots * p.nof_cdm) - 1.0F);
     nv[0]              = max(min_nv, energy);
   }
+}
+
+/// \brief Batch 5g's self-check: the slot's 14 symbol start epochs of ONE (numerology, CP) pair.
+///
+/// A kernel rather than a host expression, because the question it answers is about the SHADER: the
+/// values K4 and the three CFO kernels of K0-a now DERIVE have to be the host array they used to be
+/// fed, bit for bit, and only the compiled kernel can say that. The unit test dispatches it over the
+/// whole domain - both CP types x all five numerologies x every slot symbol - against the host rule
+/// (cyclic_prefix::get_length()). The lane never dispatches it.
+///
+/// It lives in this file because this file is compiled with the same options as every file that
+/// derives an epoch: neither it nor ocudu_mmse_pilots.metal is in IEEE_MATH_SOURCES, so what the probe
+/// proves about ocudu_mmse_symbol_start_epoch() is what those kernels compile.
+struct mmse_epoch_params {
+  uint numerology;
+  uint cp_extended;
+};
+
+kernel void mmse_epoch_probe(constant mmse_epoch_params& p [[buffer(0)]],
+                             device float*               dst [[buffer(1)]],
+                             uint                        tid [[thread_position_in_grid]])
+{
+  if (tid >= 14u) {
+    return;
+  }
+  dst[tid] = ocudu_mmse_symbol_start_epoch(p.numerology, p.cp_extended, tid);
 }

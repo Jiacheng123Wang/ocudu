@@ -62,11 +62,17 @@ struct mmse_sigma2_params {
     // Slot symbol index of each hop DM-RS symbol (the CFO phasor of estimate_noise() uses the SLOT
     // symbol, not the hop-local one).
     uint dmrs_symb[4];
+    // Symbol start epochs travel as (numerology, CP type) instead of as a host-uploaded array (batch
+    // 5g, see ocudu_mmse_epochs.h). This kernel does not use them; the fields are here because the
+    // struct is mirrored and the same bytes are handed to all three kernels that take it. Appended, so
+    // every offset above is unchanged.
+    uint numerology;
+    uint cp_extended;
 };
 // The host mirrors this layout in mmse_sigma2_params_t (ocudu_metal_mmse_engine.mm) and passes it with
 // setBytes, so a field added on one side only would silently shift every field after it - and so does
 // a same-size swap, which the size assert below cannot see. The host pins the offsets for that reason.
-static_assert(sizeof(mmse_sigma2_params) == 56, "mmse_sigma2_params must stay in step with its host mirror");
+static_assert(sizeof(mmse_sigma2_params) == 64, "mmse_sigma2_params must stay in step with its host mirror");
 
 
 /// The parameters as the kernels use them: every field clamped into the compile-time maxima above, so
