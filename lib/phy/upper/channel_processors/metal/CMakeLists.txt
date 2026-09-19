@@ -50,6 +50,22 @@ target_link_libraries(eq_handoff_probe PRIVATE
     ocudu_channel_processors_metal ocudu_channel_modulation_metal ocudu_channel_equalizer ocudu_support)
 
 # ---- Unit-level validation: A/B vs the CPU generic equalizer ----
+
+# ---- ctest registration --------------------------------------------------------------------------
+# Apple-only directory (ENABLE_METAL_EQUALIZER), so this cannot affect a Linux build. The binary has
+# its own main and returns non-zero on failure: the positional add_test form, not gtest_discover_tests.
+# "phy" for the directory keeps "ctest -L phy" meaning the PHY suite on this platform too.
+set_directory_properties(PROPERTIES LABELS "phy")
+
+add_test(channel_equalizer_metal_unit_test channel_equalizer_metal_unit_test)
+# The BATCHED encoding path is a different code path inside the same binary (per-symbol vs the
+# multi-symbol group), and it is where a real defect lived: a staged run kept the caller's estimate
+# offsets while its estimates had been packed, so every symbol after the first read the first one's
+# estimates (11 of 12 symbols wrong with the knob on, 0 with it off). Registering the mode means
+# "make test" covers it, not just the hand-run gate.
+add_test(channel_equalizer_metal_unit_test_defer_encode channel_equalizer_metal_unit_test)
+set_tests_properties(channel_equalizer_metal_unit_test_defer_encode PROPERTIES
+    ENVIRONMENT "OCUDU_EQ_DEFER_ENCODE=1")
 add_executable(channel_equalizer_metal_unit_test test/channel_equalizer_metal_unit_test.cpp)
 target_include_directories(channel_equalizer_metal_unit_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../equalization)

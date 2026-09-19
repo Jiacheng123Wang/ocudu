@@ -79,6 +79,22 @@ target_link_libraries(ocudu_channel_estimator_metal PUBLIC ocuduvec ocudu_phy_su
 target_link_libraries(ocudu_channel_estimator_metal PRIVATE "-framework Metal" "-framework Foundation" "-framework CoreML")
 
 # ---- Unit-level validation (inversion golden + GPU/CPU seam + NMSE vs the cpu estimator) ----
+
+# ---- ctest registration --------------------------------------------------------------------------
+# Apple-only directory (ENABLE_METAL_CHEST), so this cannot affect a Linux build. The binary has its
+# own main and returns non-zero on failure: the positional add_test form, not gtest_discover_tests.
+# "phy" for the directory keeps "ctest -L phy" meaning the PHY suite on this platform too.
+set_directory_properties(PROPERTIES LABELS "phy")
+
+add_test(port_channel_estimator_metal_mmse_unit_test port_channel_estimator_metal_mmse_unit_test)
+# The fused time-alignment chain (batch 5d: placement + IDFT + profile + peak in ONE dispatch) and the
+# per-size IDFT profile checks are gated behind OCUDU_CE_TA_CHAIN, because they are the deepest GPU
+# tests in this binary and were originally run one kernel at a time while K7 was being made safe. The
+# default run covers the rest (including the exhaustive (cp, scs) epoch sweep, which is unconditional);
+# this second entry is what the hand gate used to be, so "make test" now covers it too.
+add_test(port_channel_estimator_metal_mmse_unit_test_ta_chain port_channel_estimator_metal_mmse_unit_test)
+set_tests_properties(port_channel_estimator_metal_mmse_unit_test_ta_chain PROPERTIES
+    ENVIRONMENT "OCUDU_CE_TA_CHAIN=1")
 add_executable(port_channel_estimator_metal_mmse_unit_test test/port_channel_estimator_metal_mmse_unit_test.cpp)
 target_link_libraries(port_channel_estimator_metal_mmse_unit_test PRIVATE ocudu_channel_estimator_metal ocudu_channel_estimator ocudu_phy_support ocuduvec ocudu_dft)
 

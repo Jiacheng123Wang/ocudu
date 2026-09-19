@@ -27,6 +27,17 @@ target_link_libraries(ocudu_channel_modulation_metal
     PRIVATE "-framework Metal" "-framework Foundation")
 
 # ---- Unit-level validation: bit-exact A/B vs the CPU generic demapper ----
+# ---- ctest registration ------------------------------------------------------------------------
+# These binaries are the macOS/Metal half of the PHY test suite: the directories that build them are
+# Apple-only (the ENABLE_METAL_* gates), so registering them here cannot affect a Linux build - which
+# is exactly why they used to be run by hand and were missing from "make test" altogether.
+#
+# They are NOT gtest binaries - each carries its own main and returns non-zero on failure - so this
+# is the positional add_test(<name> <command>) form, not gtest_discover_tests(). The "phy" label is
+# set for the directory so that "ctest -L phy" keeps meaning "the PHY suite" on this platform too.
+set_directory_properties(PROPERTIES LABELS "phy")
+
+add_test(demodulation_mapper_metal_unit_test demodulation_mapper_metal_unit_test)
 add_executable(demodulation_mapper_metal_unit_test test/demodulation_mapper_metal_unit_test.cpp)
 target_include_directories(demodulation_mapper_metal_unit_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..)

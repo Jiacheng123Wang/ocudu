@@ -39,6 +39,18 @@ target_link_libraries(dft_processor_metal_unit_test PRIVATE
     ocudu_dft ocudu_dft_metal ocudu_support ocudu_phy_support ocuduvec)
 
 # ---- Slot-level A/B: batched Metal DFT inside the OFDM demodulator ----
+# ---- ctest registration ------------------------------------------------------------------------
+# These binaries are the macOS/Metal half of the PHY test suite: the directories that build them are
+# Apple-only (the ENABLE_METAL_* gates), so registering them here cannot affect a Linux build - which
+# is exactly why they used to be run by hand and were missing from "make test" altogether.
+#
+# They are NOT gtest binaries - each carries its own main and returns non-zero on failure - so this
+# is the positional add_test(<name> <command>) form, not gtest_discover_tests(). The "phy" label is
+# set for the directory so that "ctest -L phy" keeps meaning "the PHY suite" on this platform too.
+set_directory_properties(PROPERTIES LABELS "phy")
+
+add_test(dft_processor_metal_unit_test dft_processor_metal_unit_test)
+add_test(ofdm_demodulator_metal_batch_test ofdm_demodulator_metal_batch_test)
 add_executable(ofdm_demodulator_metal_batch_test test/ofdm_demodulator_metal_batch_test.cpp)
 target_link_libraries(ofdm_demodulator_metal_batch_test PRIVATE
     ocudu_dft ocudu_dft_metal ocudu_lower_phy_modulation ocudu_phy_support ocudu_support)

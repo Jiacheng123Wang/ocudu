@@ -59,6 +59,17 @@ target_link_libraries(ocudu_ldpc_metal PUBLIC ocudu_ldpc ocudulog ocudu_metal_qu
 target_link_libraries(ocudu_ldpc_metal PRIVATE "-framework Metal" "-framework Foundation")
 
 # ---- Unit-level validation binary (golden H check + decode parity vs the CPU decoder) ----
+# ---- ctest registration ------------------------------------------------------------------------
+# These binaries are the macOS/Metal half of the PHY test suite: the directories that build them are
+# Apple-only (the ENABLE_METAL_* gates), so registering them here cannot affect a Linux build - which
+# is exactly why they used to be run by hand and were missing from "make test" altogether.
+#
+# They are NOT gtest binaries - each carries its own main and returns non-zero on failure - so this
+# is the positional add_test(<name> <command>) form, not gtest_discover_tests(). The "phy" label is
+# set for the directory so that "ctest -L phy" keeps meaning "the PHY suite" on this platform too.
+set_directory_properties(PROPERTIES LABELS "phy")
+
+add_test(ldpc_metal_unit_test ldpc_metal_unit_test)
 add_executable(ldpc_metal_unit_test test/ldpc_metal_unit_test.cpp)
 target_link_libraries(ldpc_metal_unit_test PRIVATE ocudu_channel_coding ocudu_ldpc_metal)
 
