@@ -155,14 +155,19 @@ struct eq_resources_t {
 };
 
 /// Per-symbol element strides handed to equalize_mxn_batch(); must match struct equalize_strides in
-/// the shader source.
+/// the shader source. h_starts is the run's own per-symbol starts in h (batch 5f: carried here rather
+/// than uploaded as a Metal buffer - see the shader's comment).
+static constexpr unsigned eq_max_run_symbols = 14; // MAX_NSYMB_PER_SLOT
 struct eq_strides_t {
   unsigned nof_symbols;
   unsigned h_stride;
   unsigned y_stride;
   unsigned eq_stride;
   unsigned nv_stride;
+  unsigned h_starts[eq_max_run_symbols];
 };
+static_assert(sizeof(eq_strides_t) == 5 * sizeof(unsigned) + eq_max_run_symbols * sizeof(unsigned),
+              "eq_strides_t must match the MSL equalize_strides declaration");
 static eq_resources_t& eq_resources()
 {
   static eq_resources_t r;
@@ -622,11 +627,19 @@ bool equalizer_metal_engine::enqueue(const ch_est_binding& h,
   const equalize_params_t params =
       make_params(h, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling);
   id<MTLComputeCommandEncoder> enc = engine->batch_enc;
-  id<MTLBuffer> b_start = bind_one_h_start(h.offset);
-  if (b_start == nil) {
-    return false;
-  }
-  [enc setBuffer:b_start offset:0 atIndex:7];
+  // The single-symbol kernel (equalize_mxn) reads its estimates at the offset h is bound at and never
+  // touches the strides block: batch 5f removed the one-entry start table this path used to upload
+  // (the kernel never read it - only the batched one did).
+  // The single-symbol kernel reads everything it needs from `params`; the strides block is bound only
+  // because the encoder carries the binding over (see setBytes in eq_encode_batch_dispatch), and its
+  // values are the packed layout this path already uses.
+  eq_strides_t single_strides{};
+  single_strides.nof_symbols = 1;
+  single_strides.y_stride    = static_cast<unsigned>(nof_ports) * nof_re;
+  single_strides.eq_stride   = nof_re * nof_layers;
+  single_strides.nv_stride   = nof_re * nof_layers;
+  single_strides.h_starts[0] = h.offset;
+  [enc setBytes:&single_strides length:sizeof(single_strides) atIndex:6];
   [enc setBuffer:b_h.buffer offset:b_h.offset atIndex:0];
   [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
   [enc setBuffer:b_eq.buffer offset:b_eq.offset atIndex:2];
@@ -783,7 +796,6 @@ static id<MTLComputePipelineState> eq_encode_batch_dispatch(id<MTLComputeCommand
                                                            const wrapped_buffer&         b_eq,
                                                            const wrapped_buffer&         b_nv,
                                                            const wrapped_buffer&         b_s,
-                                                           id<MTLBuffer>                 b_starts,
                                                            const equalize_params_t&      params,
                                                            const eq_strides_t&           strides,
                                                            size_t                        h_base_bytes,
@@ -791,7 +803,7 @@ static id<MTLComputePipelineState> eq_encode_batch_dispatch(id<MTLComputeCommand
                                                            unsigned                      n_run)
 {
   if ((enc == nil) || (b_h.buffer == nil) || (b_y.buffer == nil) || (b_eq.buffer == nil) ||
-      (b_nv.buffer == nil) || (b_s.buffer == nil) || (b_starts == nil)) {
+      (b_nv.buffer == nil) || (b_s.buffer == nil)) {
     return nil;
   }
   id<MTLComputePipelineState> pipeline = (n_run > 1) ? eq_resources().pipeline_batch : eq_resources().pipeline;
@@ -802,12 +814,9 @@ static id<MTLComputePipelineState> eq_encode_batch_dispatch(id<MTLComputeCommand
   [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:3];
   [enc setBytes:&params length:sizeof(params) atIndex:4];
   [enc setBuffer:b_s.buffer offset:b_s.offset atIndex:5];
-  if (n_run > 1) {
-    [enc setBytes:&strides length:sizeof(strides) atIndex:6];
-    [enc setBuffer:b_starts offset:0 atIndex:7];
-  } else {
-    [enc setBuffer:b_starts offset:0 atIndex:7];
-  }
+  // The per-symbol starts travel in the strides block for BOTH kernels (batch 5f): the single-symbol
+  // one reads h_starts[0], which is the offset it was bound at, i.e. a plain zero step.
+  [enc setBytes:&strides length:sizeof(strides) atIndex:6];
   [enc dispatchThreads:MTLSizeMake(nof_re, n_run, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
   return pipeline;
@@ -1291,11 +1300,27 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
                                                  head.noise_var,
                                                  head.tx_scaling,
                                                  head.h_scaling);
-    const eq_strides_t strides{n_run,
-                               static_cast<unsigned>(h_stride),
-                               static_cast<unsigned>(y_stride),
-                               eq_stride_elems,
-                               nv_stride_elems};
+    eq_strides_t strides{};
+    strides.nof_symbols = n_run;
+    strides.h_stride    = static_cast<unsigned>(h_stride);
+    strides.y_stride    = static_cast<unsigned>(y_stride);
+    strides.eq_stride   = eq_stride_elems;
+    strides.nv_stride   = nv_stride_elems;
+    for (unsigned k = 0; k != n_run; ++k) {
+      if (k >= eq_max_run_symbols) {
+        break; // a run never spans more symbols than the table holds (the flush batches at most 14)
+      }
+      // WHERE this symbol's estimates are, which depends on who produced them (batch 5f found this;
+      // the table used to carry the caller's offsets in both cases):
+      //   * a run read on the DEVICE is read where the estimator published it - the absolute start of
+      //     its own RE layout, which is what the caller's binding names;
+      //   * a run STAGED on the host was copied into the packed run buffer by the loop above, one
+      //     symbol after another, so its symbols step by h_stride - NOT by the offsets they had in
+      //     the caller's buffers. Using those made every symbol of a batched run read the FIRST one's
+      //     estimates (measured: 11 of 12 symbols differ from the per-symbol path in the unit test).
+      strides.h_starts[k] = h_device_run ? pending[first + k].h.offset
+                                         : (static_cast<unsigned>(k) * static_cast<unsigned>(h_stride));
+    }
     std::memcpy(s_alloc, head.sigma2, head.nof_ports * sizeof(float));
 
     // The estimates are wrapped where they live: the host staging of a staged run, or the buffer the
@@ -1321,21 +1346,13 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     const size_t eq_bytes = ((static_cast<size_t>(n_run) - 1) * eq_stride_elems + static_cast<size_t>(head.nof_re) * head.nof_layers) * 2 * sizeof(float);
     const size_t nv_bytes = ((static_cast<size_t>(n_run) - 1) * nv_stride_elems + static_cast<size_t>(head.nof_re) * head.nof_layers) * sizeof(float);
 
-    std::vector<uint32_t> h_starts(n_run, 0);
-    for (unsigned k = 0; k != n_run; ++k) {
-      h_starts[k] = pending[first + k].h.offset;
-    }
-    wrapped_buffer b_starts{};
-    if (n_run > 1) {
-      b_starts.buffer = eq_bind_h_starts(h_starts.data(), n_run);
-    }
     wrapped_buffer b_h = wrap_buffer(engine, h_run_binding.buffer, h_bytes);
     wrapped_buffer b_y = wrap_buffer(engine, y_alloc, y_bytes);
     wrapped_buffer b_s = wrap_buffer(engine, s_alloc, s_bytes);
     wrapped_buffer b_eq = wrap_buffer(engine, head.eq, eq_bytes);
     wrapped_buffer b_nv = wrap_buffer(engine, head.nv, nv_bytes);
     if ((b_h.buffer == nil) || (b_y.buffer == nil) || (b_s.buffer == nil) || (b_eq.buffer == nil) ||
-        (b_nv.buffer == nil) || ((n_run > 1) && (b_starts.buffer == nil))) {
+        (b_nv.buffer == nil)) {
       engine->last_call_no_copy = false;
       compat::aligned_free(h_alloc);
       compat::aligned_free(y_alloc);
@@ -1375,20 +1392,15 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     // validates, while the batched kernel is the one that has to prove itself with a group.
     id<MTLComputePipelineState> run_pipeline = (n_run > 1) ? eq_resources().pipeline_batch : eq_resources().pipeline;
     // The estimates are bound at the buffer base and p.h_offset carries the run's first estimate:
-    // the table's starts are absolute within h_run_binding.buffer, and the kernel subtracts
-    // p.h_offset from each. Binding h_run_binding.offset HERE as well applied that base twice, so
-    // every run whose first estimate was not at 0 read its estimates from the wrong place.
-    id<MTLBuffer> b_starts_run = (n_run > 1) ? b_starts.buffer : bind_one_h_start(head.h.offset);
-    if (b_starts_run == nil) {
-      return nil;
-    }
+    // the starts in the strides block are absolute within h_run_binding.buffer, and the kernel
+    // subtracts p.h_offset from each. Binding h_run_binding.offset HERE as well applied that base
+    // twice, so every run whose first estimate was not at 0 read its estimates from the wrong place.
     used_pipeline = eq_encode_batch_dispatch(enc,
                                              b_h,
                                              b_y,
                                              b_eq,
                                              b_nv,
                                              b_s,
-                                             b_starts_run,
                                              params,
                                              strides,
                                              0u,
@@ -1622,20 +1634,21 @@ bool equalizer_metal_engine::enqueue_burst_batch_at(const ch_est_binding& h,
   engine->last_call_no_copy          = true;
   const equalize_params_t params =
       make_params(h, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling);
-  eq_strides_t strides{nof_symbols, 0u, y_symbol_stride, eq_symbol_stride, nv_symbol_stride};
+  eq_strides_t strides{};
+  strides.nof_symbols = nof_symbols;
+  strides.y_stride    = y_symbol_stride;
+  strides.eq_stride   = eq_symbol_stride;
+  strides.nv_stride   = nv_symbol_stride;
+  for (unsigned k = 0; k != nof_symbols; ++k) {
+    strides.h_starts[k] = (k < eq_max_run_symbols) ? h_starts[k] : 0u;
+  }
   [enc setBuffer:b_h.buffer offset:b_h.offset atIndex:0];
   [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
   [enc setBuffer:b_eq.buffer offset:b_eq.offset atIndex:2];
   [enc setBuffer:b_nv.buffer offset:b_nv.offset atIndex:3];
   [enc setBytes:&params length:sizeof(params) atIndex:4];
   [enc setBuffer:b_s.buffer offset:b_s.offset atIndex:5];
-  id<MTLBuffer> b_starts = eq_bind_h_starts(h_starts.data(), nof_symbols);
-  if (b_starts == nil) {
-    engine->last_call_no_copy = false;
-    return false;
-  }
   [enc setBytes:&strides length:sizeof(strides) atIndex:6];
-  [enc setBuffer:b_starts offset:0 atIndex:7];
   [enc dispatchThreads:MTLSizeMake(nof_re, nof_symbols, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
   ++engine->batch_dispatches;

@@ -264,13 +264,32 @@ kernel void equalize_mxn(device const ushort2* h [[buffer(0)]], // cbf16 [port][
     }
 }
 
+/// Maximum number of OFDM symbols a run may span: the width of the run's start table and the bound
+/// its index is clamped by. It is the shader's own constant - MSL does not see the host's
+/// MAX_NSYMB_PER_SLOT -, and the C++ side asserts that its struct matches this declaration.
+constant uint eq_max_run_symbols = 14; // MAX_NSYMB_PER_SLOT
+
 /// \brief Per-symbol strides of a batched dispatch, in elements of the bound buffers.
+///
+/// \c h_starts is the one field that is not a stride: the symbols of a run are NOT evenly spaced in
+/// the estimate buffer (a DM-RS symbol holds fewer data REs, so the estimator publishes its slices at
+/// irregular starts - 72, 108, 72, ... elements), so the run carries them. They are ABSOLUTE offsets
+/// within the bound estimate buffer, and \c equalize_params::h_offset is the first symbol's own start
+/// (the offset the dispatch bound h at), hence the subtraction in the kernel.
+///
+/// \note Batch 5f carries them IN THIS PARAMETER BLOCK instead of in a per-run Metal buffer. They are
+///       geometry - the estimator's RE layout, derived on its host side from the allocation and
+///       already handed to the reformat kernel the same way (reformat_stage::offsets is a kernel
+///       parameter too) - so passing them here is consistent with how the chain passes every other
+///       piece of geometry, and it removes the last per-run host -> device write the lane made
+///       (design doc 19.3b: 500 uploads of 4..8 bytes per air leg).
 struct equalize_strides {
     uint nof_symbols;
     uint h_stride;   // cbf16 elements per symbol
     uint y_stride;   // cbf16 elements per symbol
     uint eq_stride;  // float2 elements per symbol
     uint nv_stride;  // float elements per symbol
+    uint h_starts[eq_max_run_symbols]; // absolute start of each symbol of the run in h
 };
 
 /// \brief Where one OFDM symbol of the HOP starts in the gather plan.
@@ -494,7 +513,6 @@ kernel void equalize_mxn_batch(device const ushort2* h [[buffer(0)]], // cbf16 [
                                constant equalize_params& p [[buffer(4)]],
                                device const float* sigma2 [[buffer(5)]],
                                constant equalize_strides& st [[buffer(6)]],
-                               device const uint*   h_start [[buffer(7)]],
                                uint2 gid [[thread_position_in_grid]])
 {
     const uint re  = gid.x;
@@ -502,12 +520,10 @@ kernel void equalize_mxn_batch(device const ushort2* h [[buffer(0)]], // cbf16 [
     if (re >= p.nof_re || sym >= st.nof_symbols) {
         return;
     }
-    // The symbols of a run are NOT evenly spaced in the estimate buffer: a symbol carrying DM-RS
-    // holds fewer data REs, so the estimator publishes its slices at irregular starts (its offsets
-    // step by 72, 108, 72, ... elements). One stride cannot describe them, so the run carries the
-    // per-symbol starts. h_start is absolute within the bound buffer and p.h_offset is the first
-    // symbol's start - which the dispatch already bound - hence the subtraction.
-    h += h_start[sym] - p.h_offset;
+    // Where this symbol's estimates start (see equalize_strides::h_starts): absolute within the bound
+    // buffer, minus the offset the dispatch bound h at. `sym` is bounded by nof_symbols, which the
+    // caller refuses above eq_max_run_symbols - and the loop-free index is clamped by construction.
+    h += st.h_starts[min(sym, eq_max_run_symbols - 1u)] - p.h_offset;
     y += sym * st.y_stride;
     eq += sym * st.eq_stride;
     nv += sym * st.nv_stride;
