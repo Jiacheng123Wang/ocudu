@@ -549,6 +549,15 @@ bool equalizer_metal_engine::init()
                                                                       reflection:nil
                                                                            error:&error];
     }
+    // PROVENANCE, once per process: which builder the gather tables come from. The metallib is loaded
+    // from the source tree at runtime, so the binary's commit stamp says nothing about it - and the
+    // first question a leg that measures the write side raises is exactly this one.
+    std::fprintf(stderr,
+                 "[eq_impl] gather tables: %s\n",
+                 (res.pipeline_build_gather != nil)
+                     ? (eq_device_tables_enabled() ? "built on the device (eq_build_gather)"
+                                                   : "built on the host, device builder OFF (OCUDU_EQ_DEV_TABLES=0)")
+                     : "built on the host (no eq_build_gather in the metallib)");
     if (res.pipeline == nil) {
       ocudulog::fetch_basic_logger("PHY").error("Metal equalizer: pipeline creation failed: {}",
                                                 error != nil ? error.localizedDescription.UTF8String : "nil error");
