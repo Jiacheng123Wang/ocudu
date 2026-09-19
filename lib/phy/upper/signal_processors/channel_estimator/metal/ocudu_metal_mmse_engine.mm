@@ -1288,6 +1288,18 @@ bool mmse_engine::init(const char* metallib_path)
                                                                 error:&err];
   }
   // K6 (the hop's time alignment) is optional for the same reason as K5.
+  // PROVENANCE, once per process and unconditionally: WHICH time-alignment implementation this
+  // metallib carries. The question "did that leg really run the fused kernel?" has already been asked
+  // of a leg's numbers once, and answering it took a chain of inference (the metallib's mtime, the
+  // function names inside it, and the read count proving the stage was attached). One line at startup
+  // answers it instead - and a stale metallib, which this port has been bitten by before, would say so
+  // here rather than in a wrong number.
+  std::fprintf(stderr,
+               "[ta_impl] %s\n",
+               (e->ta_chain_pipe != nil) ? "fused chain: mmse_ta_chain, one dispatch (batch 5d)"
+                                         : ((e->ta_place_pipe != nil) && (e->ta_pipe != nil))
+                                               ? "three dispatches: mmse_ta_place + dft_dit + mmse_ta_profile"
+                                               : "none: no TA kernel in the metallib, the host estimates it");
   id<MTLFunction> ta_fn = [e->library newFunctionWithName:@"mmse_ta_profile"];
   if (ta_fn != nil) {
     e->ta_pipe = [e->device newComputePipelineStateWithFunction:ta_fn
