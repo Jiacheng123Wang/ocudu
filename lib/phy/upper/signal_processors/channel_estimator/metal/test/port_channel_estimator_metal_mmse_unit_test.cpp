@@ -906,6 +906,14 @@ int main()
   // completes the hop it submits and therefore never takes a deferred order.
   unsetenv("OCUDU_CE_LANE_ORDER");
   unsetenv("OCUDU_CE_FUSED_BURST");
+  // The A/B probes below (K5's OCUDU_CE_RSRP_CHECK and K7+K6's OCUDU_CE_TA_CHECK) compare the DEVICE's
+  // reporting values against the HOST's own, which needs the host grid: OCUDU_CE_HOST_GRID=1 is the
+  // pre-5c behaviour that unpacks it. The SHIPPED default is 0 (batch 5c: a hop whose reporting values
+  // the device produced is not read back), and that default is exercised by the offline replay A/B
+  // (wip/ab_ta.sh, both arms over the corpus) rather than here - the knob is read once per process, so
+  // one test process can only have one value of it, and forcing the probe's arm is what keeps these
+  // comparisons meaningful.
+  setenv("OCUDU_CE_HOST_GRID", "1", 1);
 
   std::mt19937 rng(1234);
 

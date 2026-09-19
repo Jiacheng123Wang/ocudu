@@ -427,36 +427,29 @@ bool ls_check_enabled()
   return value;
 }
 
-/// \brief A/B for the last device -> host read the lane still makes every hop: the host grid
-/// (OCUDU_CE_HOST_GRID).
+/// \brief Whether the host still reads the estimated grid back for a REPORTING value (OCUDU_CE_HOST_GRID).
 ///
-/// Unset or non-zero (THE DEFAULT, and what this line ships): a hop the device covered is unpacked
-/// into grid_est as it completes - the DM-RS symbols eagerly (the hop statistics are derived from
-/// them) and the rest on demand (see materialize_host_grid()).
+/// Zero or unset (THE DEFAULT since batch 5c): a hop whose reporting values the DEVICE produced -
+/// rsrp (K5), the noise variance (K4) and the time alignment (K7+K6) - is not unpacked, and the grid
+/// is left pending for whoever asks for the estimates themselves (see materialize_host_grid()).
+/// That is the whole point of batches 5a/5b/5c: the DM-RS unpack (unpack_engine_group() copying gpu_h
+/// through a host mapping) is the lane's last device -> host read, 3 of the estimator's 3.10 reads and
+/// 1280 of its 1420 bytes per hop, and every value it fed is now produced where the estimates live.
 ///
-/// Zero: the completion unpacks NOTHING. No host consumer has asked for the grid at that point, and
-/// the DM-RS unpack is what makes the lane read the device every hop: unpack_engine_group() copies
-/// gpu_h - the estimates the ENGINE produced - through a host mapping, and it does so on every hop
-/// whether or not a host reader ever appears. Measured at the crossing counter: 3 of the estimator's
-/// 3.10 device -> host reads per hop, and 1280 of its 1420 bytes.
+/// Non-zero: the pre-5c behaviour, and the A/B that keeps it honest - every covered hop is unpacked
+/// into grid_est as it completes. It is ALSO needed by the two probes (OCUDU_CE_RSRP_CHECK and
+/// OCUDU_CE_TA_CHECK), which compare the device's value against the host's and therefore need the host
+/// grid to exist.
 ///
-/// The read is gated rather than deleted because it is the ONE place in this file where the device's
-/// pixels are assumed to have no host consumer, and that assumption is what the A/B measures:
-///   * what a host consumer actually needs (the OCUDU_UL_DUMP capture of the estimates, and any
-///     backend that asks for them through get_symbol_ch_estimate()) still works, because it
-///     materializes the grid on demand exactly as it did for the non-DM-RS symbols - the deferred
-///     descriptors are kept for that, not dropped;
-///   * what stops being computed is the hop statistics that the DM-RS unpack fed: rsrp, the noise
-///     variance and the time alignment of the hop (pending_fill::fill() samples the grid at the
-///     pilot REs). They are REPORTING values - they reach the CSI and _ce.txt and nothing else - so
-///     with this off they go stale rather than wrong-in-place, which is why the knob is an A/B and
-///     not a default: the gate is "does the published LLR or _h move?", and until it has been run
-///     the values a host reporter would read must not silently change.
+/// \note The gate is per HOP, not global: a hop the device did not cover for either value
+/// (device_reports in complete_fd_td_estimation_stage()) keeps its read-back whatever this says, so
+/// switching the default over cannot turn a published value into a stale one - at worst it costs a
+/// read.
 bool host_grid_published()
 {
   static const bool value = []() {
     const char* env = std::getenv("OCUDU_CE_HOST_GRID");
-    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
   }();
   return value;
 }
@@ -4141,7 +4134,7 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     }
   }
   if (device_rsrp_valid && (rsrp_slot_completed != kNoRsrpBlock) && (gpu_rsrp != nullptr) &&
-      (std::getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
+      host_grid_wanted && (std::getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
     const unsigned nlay  = gpu_ce_layers;
     const unsigned npt_c = unpack_npt;
     static std::atomic<uint32_t> checks{0};

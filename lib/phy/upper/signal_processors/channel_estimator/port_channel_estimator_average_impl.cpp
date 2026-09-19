@@ -288,9 +288,20 @@ bool port_channel_estimator_average_impl::do_finish(const dmrs_symbol_list& pilo
   float    rsrp_avg      = ocuduvec::mean(span<float>(rsrp).first(nof_tx_layers));
   float    datarp        = rsrp_avg * nof_tx_layers / cfg_local.scaling / cfg_local.scaling;
 
-  // Normalize the noise variance and bound it from below (this is needed mostly in synthetic testing environments with
-  // almost no noise).
-  noise_var /= static_cast<float>(nof_dmrs_pilots * nof_cdm - 1);
+  // The hop's noise variance: the DEVICE's when a backend reduced one where the estimates already
+  // live (the Metal MMSE estimator does, K4 - see get_device_noise_variance()), the host's
+  // accumulation otherwise. It is the same quantity with the same normalization and the same SINR
+  // bound - the kernel is handed nof_dmrs_pilots, nof_cdm and min_snr_power for exactly that reason -
+  // so which one runs does not change what is published. What it DOES change is where the value comes
+  // from: the host's accumulation reads the pilots of the estimated grid, which a fused backend stops
+  // unpacking once every reporting value is produced on the device (batch 5c).
+  if (const float* device_noise_variance = get_device_noise_variance(); device_noise_variance != nullptr) {
+    noise_var = *device_noise_variance;
+  } else {
+    // Normalize the noise variance and bound it from below (this is needed mostly in synthetic testing environments with
+    // almost no noise).
+    noise_var /= static_cast<float>(nof_dmrs_pilots * nof_cdm - 1);
+  }
   float min_noise_variance = rsrp_avg / convert_dB_to_power(MAX_SINR_DB);
   noise_var                = std::max(min_noise_variance, noise_var);
 
