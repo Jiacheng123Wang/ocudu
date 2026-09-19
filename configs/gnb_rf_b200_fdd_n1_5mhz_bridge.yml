@@ -14,9 +14,9 @@
 
 cu_cp:
   amf:
-    addr: 192.168.100.127
+    addr: 192.168.64.3
     port: 38412
-    bind_addr: 192.168.100.125
+    bind_addr: 192.168.64.1
     supported_tracking_areas:
       - tac: 7
         plmn_list:
@@ -42,6 +42,30 @@ cell_cfg:
   plmn: "00101"
   tac: 7
   pci: 1
+  # PUCCH, and one MAC/RLF threshold that lives in this section.
+  #
+  # Why the six resource values are spelled out here: on a 5 MHz cell the default PUCCH resource
+  # configuration occupies more than the 50% of the BWP PRBs the validator allows, so the translator
+  # substitutes a reduced profile - but ONLY while the PUCCH configuration is still
+  # du_high_unit_pucch_config{} (the "the user has not touched PUCCH" sentinel, which compares the
+  # whole struct field by field). Setting ANY pucch key, including max_consecutive_kos below, makes
+  # that sentinel false, and the cell is then refused with "the number of PRBs for PUCCH exceeds the
+  # 50% of the BWP PRBs" - which is exactly what a pucch block holding only max_consecutive_kos does.
+  # The values are the upstream narrow-bandwidth profile, verbatim and in full from
+  # configs/cell_cfg_pucch_narrow_bw.yml - keep them in step with that file.
+  pucch:
+    resource_set_size: 7
+    nof_cell_res_set_configs: 1
+    f1_nof_cyclic_shifts: 1
+    f1_enable_occ: true
+    nof_cell_sr_res: 7
+    nof_cell_csi_res: 7
+    # Maximum number of consecutive undecoded CSIs before the DU declares a radio link failure and
+    # starts its release timer. This key maps to the MAC's max_consecutive_csi_dtx
+    # (du_high_config_translators.cpp:1282); the counterpart DL and UL counters live under
+    # cell_cfg.pdsch / cell_cfg.pusch. The startup line
+    # "RLF thresholds (consecutive KOs) dl=.. ul=.. csi_dtx=.." prints what actually took effect.
+    max_consecutive_kos: 300
 
 log:
   filename: /tmp/gnb.log
