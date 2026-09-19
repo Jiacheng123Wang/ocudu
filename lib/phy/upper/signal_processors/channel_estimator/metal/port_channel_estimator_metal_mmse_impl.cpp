@@ -3708,6 +3708,32 @@ void port_channel_estimator_metal_mmse_impl::run_pending_corr_checks()
         const std::size_t y_off    = static_cast<std::size_t>(c.sys_offset + sys) * y_stride;
         std::fprintf(stderr, " | y:");
         scan(gpu_y + y_off, y_stride);
+        // The DECISIVE question for the weights stage: recompute a few W elements ON THE HOST from the
+        // slots AS THEY ARE NOW (post-inversion A and R_hp) and print them next to what the device
+        // wrote. A finite host value against a NaN device value means the kernel did not read THIS
+        // data - the stage's inputs were different when it ran.
+        {
+          const std::size_t L      = c.a_stride;
+          const std::size_t nout   = c.r_stride;
+          const float*      a_inv  = gpu_a + a_off;
+          const float*      r_hp   = gpu_r_hp + static_cast<std::size_t>(c.sys_offset + sys) * nout * L;
+          const float*      w_dev  = gpu_w + w_off;
+          for (unsigned row : {0u, 7u, static_cast<unsigned>(nout / 2)}) {
+            for (unsigned col : {0u, 3u}) {
+              double acc = 0.0;
+              for (std::size_t k = 0; k != L; ++k) {
+                acc += static_cast<double>(r_hp[static_cast<std::size_t>(row) * L + k]) *
+                       static_cast<double>(a_inv[k * L + col]);
+              }
+              std::fprintf(stderr,
+                           "\n[chain_map]   W[%u][%u]: host=%.6g dev=%.6g",
+                           row,
+                           col,
+                           acc,
+                           static_cast<double>(w_dev[static_cast<std::size_t>(row) * L + col]));
+            }
+          }
+        }
         std::fprintf(stderr, "\n");
       }
     }
