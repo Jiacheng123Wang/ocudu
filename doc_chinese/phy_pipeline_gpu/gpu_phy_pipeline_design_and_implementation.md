@@ -730,6 +730,14 @@ device_corr_enabled() && !merge_tail && (n_std_blocks != 0)` —— **比一个�
 **按宽度分层（这条腿）**：1 PRB **91.1%**（56 次）；**2 PRB 仍然 0.0%（564 次）**；3–25 PRB 73–100%。
 在这条普遍 95% 的腿上，2 PRB 的 0% 把问题指得非常明确。
 
+**判据用到的产物（都在工作树里，见 §7 坑 27；`work_tmp/README.md` 的登记表有本机条目）**：
+
+| 路径 | 是什么 |
+|---|---|
+| `doc_chinese/work_tmp/narrow_cap/` | 20 条真实 1–2 PRB 捕获（**不可再生**）：`<prefix>{.txt,.bin}` 网格 + `_ce.txt/_h.bin/_llr.bin` = **腿上的结果** |
+| `doc_chinese/work_tmp/narrow_cmp/<capture>/{host,dev,cpu,hostsc}/` | 四个臂的回放 dump 与日志：宿主建 A、设备建 A、`--cpu`、未修二进制 + `OCUDU_CE_HOST_SCALARS=1`（机制证明）|
+| `doc_chinese/work_tmp/ref/replay_narrow_hostA`、`ref/replay_narrow_devA` | 修法前后的两个二进制（kernels 相同）|
+
 **离线判定（同一条捕获、两个构建、外加 CPU 参考）**：
 
 | 臂 | 2 PRB（16 条）| 1 PRB（4 条）|
