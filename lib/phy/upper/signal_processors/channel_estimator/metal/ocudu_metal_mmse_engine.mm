@@ -740,11 +740,21 @@ static void encode_reformat(stage_encoder&                             s,
         rpparams.nof_symbols  = reformat->nof_symbols;
         rpparams.dc_sc        = reformat->dc_sc;
         rpparams.dmrs_sym_bits = reformat->dmrs_sym_bits;
+        static bool once = false;
+        if (!once && (getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
+          once = true;
+          fprintf(stderr,
+                  "[rsrp_params] nout_stride=%u n_blk=%u nf_std=%u sc_tail_base=%u nf_tail=%u sys_tail=%u "
+                  "layers=%u symbols=%u dc_sc=%u dmrs_sym_bits=%#x pilot0=%#x pilot1=%#x\n",
+                  rpparams.nout_stride, rpparams.n_blk, rpparams.nf_std, rpparams.sc_tail_base,
+                  rpparams.nf_tail, rpparams.sys_tail, rpparams.nof_layers, rpparams.nof_symbols,
+                  rpparams.dc_sc, rpparams.dmrs_sym_bits, rpparams.pilot_re_bits[0], rpparams.pilot_re_bits[1]);
+        }
         for (unsigned l = 0; l != 4; ++l) {
           rpparams.pilot_re_bits[l] = (l < reformat->nof_layers) ? reformat->rsrp.pilot_re_bits[l] : 0u;
         }
         const NSUInteger rsrp_bytes =
-            static_cast<NSUInteger>(reformat->rsrp.n_blk) * reformat->nof_layers * sizeof(float);
+            static_cast<NSUInteger>(reformat->rsrp.n_blk) * reformat->nof_layers * 2 * sizeof(float);
         id<MTLBuffer> rsrp_buf = e->wrap_shared(reformat->rsrp.dst, rsrp_bytes);
         if (rsrp_buf != nil) {
           // K5 reads h, which K2 wrote and K3 also read: same producer, so the barrier K3 needed

@@ -3659,71 +3659,6 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
 #if defined(OCUDU_CE_TIME)
   const auto t_unpack2_begin = std::chrono::steady_clock::now();
 #endif
-  // ---- K5 CHECK (OCUDU_CE_RSRP_CHECK, temporary): does the device's sum equal the host's? --------
-  //
-  // 5a's correctness criterion, and the only thing that can say it: the device reduces the SAME h the
-  // host's grid comes from (K3's reformat and the host's unpack both read it), so the two sums must
-  // agree up to summation order - the device reduces in a threadgroup tree, the host sequentially.
-  // A constant ratio here would mean the two are not reducing the same quantity, which is the mistake
-  // that made the first attempt at this (over gpu_ls_smoothed, the SMOOTHED pilots) useless.
-  //
-  // It runs AFTER the host grid exists, so it compares final values rather than intent.
-  if (device_rsrp_valid && (gpu_rsrp != nullptr) && (std::getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
-    const unsigned nlay  = gpu_ce_layers;
-    const unsigned npt_c = unpack_npt;
-    static std::atomic<uint32_t> checks{0};
-    static std::atomic<uint32_t> bad{0};
-    static std::atomic<uint32_t> same{0};
-    static std::atomic<double>   worst{0.0};
-    static std::atomic<float>    worst_dev{0.0F};
-    static std::atomic<float>    worst_host{0.0F};
-    for (unsigned l = 0; l != nlay; ++l) {
-      // The device's sum for this layer: every block slot of the batch, pad slots included (they
-      // must have reduced to zero, which is itself part of what this checks).
-      double dev = 0.0;
-      for (unsigned b = 0; b != reformat_blocks_last; ++b) {
-        dev += static_cast<double>(gpu_rsrp[rsrp_base_ + b * kRsrpSlots + l]);
-      }
-      // The host's: the same grid_est the statistics are derived from, at the layer's own pilots.
-      const auto& pattern = last_stage_layer_re_pattern[l];
-      double host = 0.0;
-      for (unsigned s = 0; s != npt_c; ++s) {
-        span<const cf_t> row = grid_est.get_slice(l * MAX_NSYMB_PER_SLOT + unpack_dmrs_sym[s]);
-        for (unsigned prb = 0; prb != last_stage_nof_prb; ++prb) {
-          pattern.for_each(0, pattern.size(), [&](unsigned pos) {
-            host += std::norm(row[prb * NOF_SUBCARRIERS_PER_RB + pos]);
-          });
-        }
-      }
-      const double rel = (host != 0.0) ? std::fabs(dev - host) / host : 0.0;
-      if (dev == host) {
-        same.fetch_add(1, std::memory_order_relaxed);
-      } else {
-        bad.fetch_add(1, std::memory_order_relaxed);
-      }
-      if (rel > worst.load(std::memory_order_relaxed)) {
-        worst.store(rel, std::memory_order_relaxed);
-        worst_dev.store(static_cast<float>(dev), std::memory_order_relaxed);
-        worst_host.store(static_cast<float>(host), std::memory_order_relaxed);
-      }
-    }
-    const uint32_t n = checks.fetch_add(1, std::memory_order_relaxed) + 1U;
-    if ((n == 1U) || ((n % 500U) == 0U)) {
-      std::fprintf(stderr,
-                   "[rsrp_check] hops=%u layers=%u npt=%u blocks=%u | non-identical %u | bit-identical %u | "
-                   "worst rel %.3e (dev %.9e host %.9e)\n",
-                   n,
-                   nlay,
-                   npt_c,
-                   reformat_blocks_last,
-                   bad.load(std::memory_order_relaxed),
-                   same.load(std::memory_order_relaxed),
-                   worst.load(std::memory_order_relaxed),
-                   static_cast<double>(worst_dev.load(std::memory_order_relaxed)),
-                   static_cast<double>(worst_host.load(std::memory_order_relaxed)));
-    }
-  }
-
   // Which symbols have to be in the host grid NOW: all of them whenever a host consumer may read
   // it, which is exactly when the DEVICE estimates do not cover this hop - the same signal the
   // demodulator reads (device_results_cover_last_estimate()), and measured: the split-tail route
@@ -3788,6 +3723,97 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
         std::memory_order_relaxed);
 #endif
   }
+
+  // ---- K5 CHECK (OCUDU_CE_RSRP_CHECK, temporary): does the device's sum equal the host's? --------
+  //
+  // 5a's correctness criterion, and the only thing that can say it: the device reduces the SAME h the
+  // host's grid comes from (K3's reformat and the host's unpack both read it), so the two sums must
+  // agree up to summation order - the device reduces in a threadgroup tree, the host sequentially.
+  // A constant ratio here would mean the two are not reducing the same quantity, which is the mistake
+  // that made the first attempt at this (over gpu_ls_smoothed, the SMOOTHED pilots) useless.
+  //
+  // It MUST run after the host grid has been unpacked and filled - BEFORE that, grid_est is the
+  // previous hop's contents and the host sum reads 0, which is how this probe first reported a
+  // failure that was entirely its own (the same ordering mistake as the earlier gpu_ls_smoothed
+  // probe, wip/S11_batch2_recon.md 8.2).
+  if (device_rsrp_valid && (gpu_rsrp != nullptr) && (std::getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
+    const unsigned nlay  = gpu_ce_layers;
+    const unsigned npt_c = unpack_npt;
+    static std::atomic<uint32_t> checks{0};
+    static std::atomic<uint32_t> bad{0};
+    static std::atomic<uint32_t> same{0};
+    static std::atomic<double>   worst{0.0};
+    static std::atomic<float>    worst_dev{0.0F};
+    static std::atomic<float>    worst_host{0.0F};
+    static std::atomic<double>   worst_nre{0.0};
+    unsigned host_nre_last = 0;
+    for (unsigned l = 0; l != nlay; ++l) {
+      // The device's sum for this layer: every block slot of the batch, pad slots included (they
+      // must have reduced to zero, which is itself part of what this checks).
+      double dev = 0.0;
+      for (unsigned b = 0; b != reformat_blocks_last; ++b) {
+        dev += static_cast<double>(gpu_rsrp[(rsrp_base_ + b * kRsrpSlots + l) * 2]);
+      }
+      // The host's: the same grid_est the statistics are derived from, at the layer's own pilots.
+      const auto& pattern = last_stage_layer_re_pattern[l];
+      double host = 0.0;
+      unsigned host_nre = 0;
+      for (unsigned s = 0; s != npt_c; ++s) {
+        span<const cf_t> row = grid_est.get_slice(l * MAX_NSYMB_PER_SLOT + unpack_dmrs_sym[s]);
+        for (unsigned prb = 0; prb != last_stage_nof_prb; ++prb) {
+          pattern.for_each(0, pattern.size(), [&](unsigned pos) {
+            host += std::norm(row[prb * NOF_SUBCARRIERS_PER_RB + pos]);
+            ++host_nre;
+          });
+        }
+      }
+      host_nre_last = host_nre;
+      const double dev_nre = static_cast<double>(gpu_rsrp[(rsrp_base_ + l) * 2 + 1]);
+      const double rel = (host != 0.0) ? std::fabs(dev - host) / host : 0.0;
+      if (dev == host) {
+        same.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        bad.fetch_add(1, std::memory_order_relaxed);
+      }
+      if (rel > worst.load(std::memory_order_relaxed)) {
+        worst.store(rel, std::memory_order_relaxed);
+        worst_dev.store(static_cast<float>(dev), std::memory_order_relaxed);
+        worst_host.store(static_cast<float>(host), std::memory_order_relaxed);
+        worst_nre.store(dev_nre, std::memory_order_relaxed);
+      }
+    }
+    // One raw dump of the device block on the FIRST hop, so "the kernel did not run" and "the
+    // kernel ran but indexed elsewhere" are told apart instead of guessed at.
+    if (checks.load(std::memory_order_relaxed) == 0U) {
+      std::fprintf(stderr, "[rsrp_raw] base=%u blocks=%u layers=%u |", rsrp_base_, reformat_blocks_last, nlay);
+      for (unsigned b = 0; b != reformat_blocks_last; ++b) {
+        for (unsigned l = 0; l != nlay; ++l) {
+          std::fprintf(stderr, " [%u][%u]=%.6e nre=%.0f", b, l,
+                       static_cast<double>(gpu_rsrp[(rsrp_base_ + b * kRsrpSlots + l) * 2]),
+                       static_cast<double>(gpu_rsrp[(rsrp_base_ + b * kRsrpSlots + l) * 2 + 1]));
+        }
+      }
+      std::fprintf(stderr, "\n");
+    }
+    const uint32_t n = checks.fetch_add(1, std::memory_order_relaxed) + 1U;
+    if ((n == 1U) || ((n % 500U) == 0U)) {
+      std::fprintf(stderr,
+                   "[rsrp_check] hops=%u layers=%u npt=%u blocks=%u | non-identical %u | bit-identical %u | "
+                   "worst rel %.3e (dev %.9e host %.9e) | host_nre %u dev_nre %.0f\n",
+                   n,
+                   nlay,
+                   npt_c,
+                   reformat_blocks_last,
+                   bad.load(std::memory_order_relaxed),
+                   same.load(std::memory_order_relaxed),
+                   worst.load(std::memory_order_relaxed),
+                   static_cast<double>(worst_dev.load(std::memory_order_relaxed)),
+                   static_cast<double>(worst_host.load(std::memory_order_relaxed)),
+                   host_nre_last,
+                   static_cast<double>(worst_nre.load(std::memory_order_relaxed)));
+    }
+  }
+
   return true;
 }
 
