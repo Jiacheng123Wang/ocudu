@@ -261,11 +261,11 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
   //       check still read 0. A silent fallback is the shape of defect these counters exist to
   //       refuse, so the fallback is measured, not assumed absent.
   if (!sym_direct) {
-    phy_pipeline_crossings::count_host_write(sym_bytes);
+    phy_pipeline_crossings::count_host_write_site("demapper: equalized symbols staged (host)", sym_bytes);
     entry->sym_staged += sym_bytes;
   }
   if (!nv_direct) {
-    phy_pipeline_crossings::count_host_write(nv_bytes);
+    phy_pipeline_crossings::count_host_write_site("demapper: noise variances staged (host)", nv_bytes);
     entry->nv_staged += nv_bytes;
   }
 

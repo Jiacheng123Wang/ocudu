@@ -69,6 +69,87 @@ public:
     }
   }
 
+  /// \brief Counts one host write and attributes it to \p site (batch 5e).
+  ///
+  /// The TOTAL is what the contract judges; this says WHICH store it was. "0.27 writes per hop" is not
+  /// actionable on its own - the four live write sites have nothing in common (a pad memset, a scalar
+  /// copy, a 56-byte table upload, and a demapper fallback that only fires when a buffer is not
+  /// page-aligned), and moving the wrong one is a batch of work for nothing. Bounded table, no
+  /// allocation on the path, and it increments the same total as count_host_write(), so the breakdown
+  /// can never disagree with the verdict.
+  static void count_host_write_site(const char* site, uint64_t bytes = 0)
+  {
+    count_host_write(bytes);
+    if (site == nullptr) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(sites_mutex());
+    const std::size_t           n = nof_sites();
+    std::size_t                 i = 0;
+    for (; i != n; ++i) {
+      const char* name = sites()[i].name;
+      if ((name != nullptr) && (std::strcmp(name, site) == 0)) {
+        break;
+      }
+    }
+    if (i == n) {
+      if (n == kMaxSites) {
+        return; // the table is full: the total still counted it, the breakdown just does not name it
+      }
+      sites()[n].name = site;
+      ++nof_sites_stored();
+    }
+    sites()[i].count.fetch_add(1, std::memory_order_relaxed);
+    if (bytes != 0) {
+      sites()[i].bytes.fetch_add(bytes, std::memory_order_relaxed);
+    }
+  }
+
+  /// Prints the per-site write breakdown, biggest first, to \p out.
+  ///
+  /// Printed under the crossings line so the byte totals there can be read as "which store", which is
+  /// the question batch 5e starts from. A site that never fired is not printed.
+  static void print_write_sites(std::FILE* out)
+  {
+    std::lock_guard<std::mutex> lock(sites_mutex());
+    const std::size_t           n = nof_sites();
+    bool                        any = false;
+    // Selection sort over at most kMaxSites entries, and only ever from the report: the path that
+    // counts stays a fetch_add.
+    bool printed[kMaxSites] = {};
+    for (std::size_t round = 0; round != n; ++round) {
+      std::size_t best     = kMaxSites;
+      uint64_t    best_cnt = 0;
+      for (std::size_t i = 0; i != n; ++i) {
+        if (printed[i]) {
+          continue;
+        }
+        const uint64_t c = sites()[i].count.load(std::memory_order_relaxed);
+        if (c == 0) {
+          printed[i] = true;
+          continue;
+        }
+        if ((best == kMaxSites) || (c > best_cnt)) {
+          best     = i;
+          best_cnt = c;
+        }
+      }
+      if (best == kMaxSites) {
+        break;
+      }
+      printed[best] = true;
+      any           = true;
+      std::fprintf(out,
+                   "\n    %-34s %8llu call(s), %10llu bytes",
+                   sites()[best].name,
+                   static_cast<unsigned long long>(best_cnt),
+                   static_cast<unsigned long long>(sites()[best].bytes.load(std::memory_order_relaxed)));
+    }
+    if (!any) {
+      std::fprintf(out, "\n    <no host write was attributed to a site>");
+    }
+  }
+
   /// \brief Declares that \p module has audited its host <-> device data touches and counts them here.
   ///
   /// The report lists the declarers NEXT TO the number, so the scope of a zero is visible with it.
@@ -147,6 +228,30 @@ private:
     static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
     return *n;
   }
+  /// One named write site (see count_host_write_site()).
+  struct write_site {
+    const char*           name = nullptr;
+    std::atomic<uint64_t> count{0};
+    std::atomic<uint64_t> bytes{0};
+  };
+  static constexpr std::size_t kMaxSites = 8;
+  static write_site* sites()
+  {
+    static write_site* v = new write_site[kMaxSites];
+    return v;
+  }
+  static std::size_t& nof_sites_stored()
+  {
+    static std::size_t* n = new std::size_t(0);
+    return *n;
+  }
+  static std::size_t nof_sites() { return nof_sites_stored(); }
+  static std::mutex& sites_mutex()
+  {
+    static std::mutex* m = new std::mutex();
+    return *m;
+  }
+
   // Heap-allocated for the same reason as the counters (the report runs from an atexit handler), and
   // behind a mutex because modules declare from different threads.
   static constexpr std::size_t kMaxReporters = 8;
@@ -212,7 +317,11 @@ inline void register_phy_pipeline_crossing_check()
            std::fprintf(stderr,
                         "  counted by the module(s) that audited their host <-> device data touches: ");
            phy_pipeline_crossings::print_reporters(stderr);
-           std::fprintf(stderr, " (a module NOT listed here is not covered by this number)\n");
+           std::fprintf(stderr, " (a module NOT listed here is not covered by this number)");
+           // WHICH store, when a module named itself (batch 5e). A breakdown that does not add up to
+           // the total above is itself a finding: it means a write site is still anonymous.
+           phy_pipeline_crossings::print_write_sites(stderr);
+           std::fprintf(stderr, "\n");
            if (!phy_pipeline_mode_registry::is_published() || (hops == 0)) {
              return std::optional<bool>{};
            }

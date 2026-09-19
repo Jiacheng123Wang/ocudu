@@ -409,7 +409,7 @@ id<MTLBuffer> wrap_buffer(dft_engine_impl* engine, const void* ptr, size_t lengt
     dft_stats_wrap_copy();
     // The same event in the lane-wide counter. The local one stays because the "dft radio inputs"
     // check is stated in terms of it.
-    phy_pipeline_crossings::count_host_write(length);
+    phy_pipeline_crossings::count_host_write_site("dft: input copied to the device (wrap refused)", length);
     buf = [dft_resources().device newBufferWithBytes:ptr length:length options:MTLResourceStorageModeShared];
     // The COPY holds `length` bytes, not the page-rounded length: recording `aligned` here would let a
     // later, larger request (<= aligned) hit this cache entry and bind a buffer shorter than it reads -

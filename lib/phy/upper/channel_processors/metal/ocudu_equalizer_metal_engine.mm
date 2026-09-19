@@ -348,7 +348,7 @@ id<MTLBuffer> eq_cached_table(id<MTLDevice> device, const void* data, size_t byt
     }
   }
   // MISS: the crossing - an allocation and an upload into memory the device reads.
-  phy_pipeline_crossings::count_host_write(bytes);
+  phy_pipeline_crossings::count_host_write_site("equalizer: table uploaded (cache miss)", bytes);
   id<MTLBuffer> buf = [device newBufferWithBytes:data
                                          length:static_cast<NSUInteger>(bytes)
                                         options:MTLResourceStorageModeShared];

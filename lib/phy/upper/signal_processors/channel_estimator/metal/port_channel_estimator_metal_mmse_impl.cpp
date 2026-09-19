@@ -1360,7 +1360,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // CROSSING: the carry-forward reads the previous slot of a zero-copy mapping and writes
         // another slot of it.
         phy_pipeline_crossings::count_host_read();
-        phy_pipeline_crossings::count_host_write(sizeof(float));
+        phy_pipeline_crossings::count_host_write_site("ce: cfo slot carried forward (host)", sizeof(float));
         gpu_ls_cfo[cfo_slot_] = gpu_ls_cfo[cfo_prev_slot];
       }
       // The sigma2 block rotates with it, and for the same reason (see kSigma2Blocks). Unlike the CFO
@@ -2228,7 +2228,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // establish that the scatter's slot count and the apply kernel's slot stride agree for the
       // merged tail group. See the branch in stage_engine_group().
       if (host_clears_y_pads()) {
-        phy_pipeline_crossings::count_host_write(
+        phy_pipeline_crossings::count_host_write_site(
+            "ce: y pad slots cleared (host)",
             static_cast<uint64_t>(nof_layers) * n_std_blocks * 2 * L_std * sizeof(float));
         std::memset(gpu_y + static_cast<std::size_t>(nof_layers) * n_std_blocks * 2 * L_std,
                     0,
@@ -2971,7 +2972,7 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
         const std::size_t pad_floats = static_cast<std::size_t>(nof_layers) * (st.n_blk - n_blk) *
                                        2 * st.L;
         if (pad_floats != 0) {
-          phy_pipeline_crossings::count_host_write(pad_floats * sizeof(float));
+          phy_pipeline_crossings::count_host_write_site("ce: y pad rows cleared (host)", pad_floats * sizeof(float));
           std::memset(gpu_y + static_cast<std::size_t>(nof_layers) * st.n_blk * 2 * st.L,
                       0,
                       pad_floats * sizeof(float));
@@ -3264,7 +3265,7 @@ void port_channel_estimator_metal_mmse_impl::upload_symbol_start_epochs(
     return; // nothing is written, so nothing is counted
   }
   // CROSSING (host -> device): gpu_epochs is a zero-copy mapping the device reads.
-  phy_pipeline_crossings::count_host_write(MAX_NSYMB_PER_SLOT * sizeof(float));
+  phy_pipeline_crossings::count_host_write_site("ce: symbol start epochs uploaded", MAX_NSYMB_PER_SLOT * sizeof(float));
   for (unsigned sym = 0; sym != MAX_NSYMB_PER_SLOT; ++sym) {
     gpu_epochs[sym] = want[sym];
   }
