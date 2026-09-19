@@ -353,7 +353,7 @@ K4 的 `gpu_nv` 就是"从同一份 h 归约、结果留在设备、消费者不
 | **5f** | 写侧：`h_starts` 表与 epoch 表 | **5f-1 完成**（`9e36fef3ed`，§19.5）：`h_starts` 进参数块，replay 写 **5 → 1/跳**；顺带修掉一个**既有批处理缺陷**。**5f-2 未做**：`symbol_start_epochs`（56 B，1 次/配置）仍在宿主上传 ⇒ **契约仍 7/8** |
 | **5g** | 5f-2：epochs 由 kernel 从 (cp, scs) 算 | ✅ **完成并空中验证**（`45fa002d6c`，腿 `5g-epochs_0919_1945`，§19.6.2b）：27 捕获四个 dump 与 HEAD **逐字节相同**；replay 写侧 **1 → 0/跳**、分项表空 ⇒ **写侧清零**；空口 **契约 8/8**、0 RF failure、CRC 79.19%。**⚠ 该"零"只在被审计的站点上成立**：P1 发现一条**每跳**的未计数往返（§19.6.2b 勘误块 + `wip/S13_fallback_coverage.md` §5b）|
 | **S13-P1** | 回退路径的可见性（仪表）| ✅ **第一批完成**（`b3f72deadb`）：基类虚钩子 `account_host_grid_read`（默认空 ⇒ CPU 车道不变）+ `ce: rx pilots staged (host)` 站点 —— 正是它们**照出了那条每跳往返**。**剩余**：回退门计数 + A/R_hp / y staging 两个站点（`wip/S13_fallback_coverage.md` §4.6）|
-| **S13-P2** | 消掉那条每跳往返（设备自建 `gpu_rx_pilots`，EPRE 由设备发布）| ✅ **离线完成**（§5.5）：27 捕获 `_llr`/`_h`/`.bin` **0 差异**、`_ce.txt` 只动 `epre`（≤2.3e-07）；replay 写侧 **1.00 → 0.00**/跳、**分项表空**；`CPU_LS=1` 网四个 dump **全新逐字节相同**。**空中腿待跑（契约预期 8/8）** |
+| **S13-P2** | 消掉那条每跳往返（设备自建 `gpu_rx_pilots`，EPRE 由设备发布）| ✅ **完成并空中验证**（`0103795cfe`，腿 `s13p2_0919_2303`，§5.5）：离线 27 捕获 `_llr`/`_h`/`.bin` **0 差异**、`_ce.txt` 只动 `epre`（≤2.3e-07）、`CPU_LS=1` 网四个 dump 逐字节相同；**空口契约 8/8**、跨越 **0.00 读 + 0.00 写/跳、分项表空**、0 RF failure、`[ce_inputs]` = DEVICE、无回退 |
 | **测** | `[ul_gpu_pipeline]`：IQ 进 GPU → LLR 出 GPU（用户要求，只对 `mode=gpu`）| ✅ **完成并空中验证**（`7d968cfb84`，腿 `probe-iq2llr_0919_2216`，§20）：探针 + `leg_report.sh -- latency` + 单测（含反证）+ 27 捕获逐字节不变；**空口 4036 个样本、mean 2677.2 µs**（§20.6）|
 
 ### 5.1 批次 2 的三个做法与取舍
@@ -489,19 +489,64 @@ stage"）；gpu 车道里那张网格是**前端 DFT 写在设备上**的（S-7b
 无法复现。已如实记录，**不当作已解释**（与 §20.4 那次 Metal 单测偶发同类）。
 默认臂（本轮真正要改的路由）**从未出现**这类差异。
 
-#### 5.5.3 待跑的腿（判据的最后一条）
+#### 5.5.3 ✅ 空中腿 `s13p2_0919_2303`（`80d0ba32ef`）—— **契约 8/8，那条往返消失了**
 
-`mode=gpu` 一腿，二进制已按提交戳重建：
+**腿形**：74293 个 radio block（0 gaps、0 timestamp-0）、1040018 个符号全部 in-place；**RTF 0**；
+PUSCH **1163** 次（CRC OK **825** / KO **338** = **70.94%**）；lane 1163。
 
-```bash
-sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s13p2
-bash doc_chinese/phy_pipeline_gpu/wip/leg_report.sh \
-     doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_s13p2_*.log.stderr
+```
+[phy_pipeline] host device data crossings: 0 host read(s) (0 bytes) and 0 host write(s) (0 bytes)
+               of device data over 1163 device hop(s) = 0.00 read(s) + 0.00 write(s) per hop
+    <no host write was attributed to a site>                              -> OK
+[phy_pipeline] contract MET (8 of 8 checks applicable)
 ```
 
-要盯：**契约 8/8**（跨越 = `0.00 read + 0.00 write`/跳、**分项表空**）、`0 RF failure`、
-CRC 与 `5g-epochs` / `probe-iq2llr` 同量级、`[ul_gpu_lane]` 的 dropped/carried = 0、
-`[ce_inputs]` 那行说 **DEVICE**、`[ul_gpu_pipeline]` 相比 `probe-iq2llr` 无回归。
+* **这是 P1 的站点在场时，读数第一次真的是 `0.00 + 0.00`**：`probe-iq2llr` 腿（P1 之后、P2 之前）
+  同一条线是 `1.00 read + 1.00 write`/跳、平均 2425 B/跳、4036/4036 跳全中；
+* **分项表是空的**（`<no host write was attributed to a site>`）⇒ 不是"有写但没命名"，是**没有写**；
+* **没有任何回退**：`[ce_inputs] received pilots: built on the DEVICE …`、`device_sigma2=1163`（= 每一跳）
+  ⇒ 宿主既没抽导频、也没跑经典噪声估计；否则那两次读会被 P1 的站点数出来；
+* 其余 7 项全 OK：continuity 0/74293、dft radio inputs 179368/179369、zero-copy 26583 hits / 0 failures、
+  ce device estimates 12793 device / 0 host、cfo 0 round trips、assembly 1040018/1040018、metrics 0。
+
+**自证与设备侧计数**：`[epoch_check] numerology=0 cp=normal 14 of 14 bit-identical`；
+`[epoch_impl]`/`[ta_impl]`/`[eq_impl]` 三条自证行都在；18 MB 日志里**没有**一条 `MISMATCH` /
+`build failed` / `noise variance skipped` / warning。`[metal_stats] mmse_ce`：commits=waits=**3179**、
+`guard=0/1165`、`corr_build_fail=0`、`y_write_fail=0`、`device_sigma2=1163`；
+`burst`：commits=waits=1163、dispatches=15119 = **13.0/lane**（5g 13.0、`probe-iq2llr` 13.0 ⇒ 结构没变）；
+`lane fence` 2326 = 2×lanes ✓。
+
+**`[ul_gpu_pipeline]`（用户要的那条测量）第二次上腿**：`samples=1163 = 825 + 338` —— 又是"每一次解码
+尝试"，而 `[ul_pipeline]`/`[ul_ldpc_decode]` 的 825 是 CRC 通过的那个子集；`mean=2885.7 µs`
+vs `[ul_pipeline]` **2909.2 µs**、`[ul_ldpc_decode]` **23.1 µs**。用 §20.3 的逐样本等式反解：
+CRC-KO 的那 338 次 ≈ **2884.7 µs**，与 CRC-OK 的 2886.1 **几乎相同**
+（`probe-iq2llr` 上那 17 µs 的总体差是波动，不是规律）。
+
+**⚠ 聚合 CRC 70.94% 与前两腿的 79.19 / 79.76% 不可直接比，也不是本批的回归** —— 这一腿的**流量与链路
+都换了形状**：
+
+| 量 | `5g-epochs` | `probe-iq2llr` | **`s13p2`** |
+|---|---|---|---|
+| PUSCH 次数 | 3576 | 4036 | **1163** |
+| PUSCH SINR 中位数 | 4.3 dB | 3.0 dB | **20.2 dB** |
+| 主导宽度 | 24 PRB（42% 的流量，97% OK）| 24 PRB（40%，99%）| **7 PRB（33%，90%）** |
+| 25 PRB | 206 / 97% | 258 / 94% | 141 / **96%** |
+| 2 PRB | 255 / **0%** | 285 / **0%** | 89 / **0%**（**三腿全 0%**，既有现象）|
+
+* 上行好约 16 dB ⇒ 调度器换 MCS/宽度（同一个 TBS 用更少 PRB）：主导宽度从 24 PRB 变成 7 PRB，
+  而 7 PRB 在前两腿只有 16% / 10%（低 SINR 下高 MCS 本来就解不出），在这一腿是 **90%**；
+* 逐宽度看差异**两个方向都有**（5 PRB：67% vs 29/39%；7 PRB：90% vs 16/10%；而 1/3/9/10/17 PRB 更低），
+  且这些宽度的样本只有 20–50 次 —— **两条基线腿之间**在同样宽度上的差别就是同量级
+  （6 PRB 77% vs 64%、21 PRB 100% vs 79%、9 PRB 85% vs 73%）。
+  **⇒ 聚合 CRC 的差是流量结构的差。** 本批的判据是"数据面逐字节不变 + 契约 + 0 RF failure"，三条都过。
+* 唯一的结构性差异是**每条 lane 的设备侧忙时更高**（ch_est 141.0 / ch_wt 434.0 / eq_demap 114.2 µs，
+  前两腿 116.6/375.0/100.2 与 118.7/379.9/101.1；residency 1016.8 µs）：`cbs/lane` 从 1.41 升到 **1.73**、
+  `device_corr_builds` 从 1.3/hop 升到 **1.63/hop** —— 同样来自宽度分布（7 PRB 的跳 = 1 个标准块
+  + 1 个尾块，每个命令缓冲的固定开销摊不开）。**与 P2 无关**（P2 不碰 block 切分）。
+
+**⇒ 里程碑 tag 的那句话到这里才真正成立**：本批另打 annotated tag
+**`gpu_phy_iq2llr_zero_data_crossings_p2`**（指向 `80d0ba32ef`，即本次验证的二进制戳），
+**旧 tag 不移动**（已发布的 tag 不改写；§19.6.2b 的勘误块指向新 tag）。
 
 **P1 剩余（下一步，与本批分开）**：回退门的**拒绝计数**（`device_ls_refused`（几何被拒，区别于 engine
 调用失败）/ `device_y_refused`（`record_device_y_stage` 的每个 `return false` 分支分类）/
@@ -883,6 +928,7 @@ worst rel 1.137e+00  (host 1.084547639e+00  dev 2.317298651e+00)
 | **`gnb_gpu_5e-devtables_0919_2000`** | **`5bd33639ab`** | ✅ 批次 5e 空中验证：读 0.00 / 写 **0.13** 每跳，3752 跳，RTF 0，gaps 0，契约 7/8 |
 | **`gnb_gpu_5g-epochs_0919_1945`** | **`45fa002d6c`** | ✅ 批次 5g 空中验证：读 **0.00** / 写 **0.00** 每跳、分项表空，3576 跳，RTF 0，gaps 0，**契约 8/8**，CRC 79.19% |
 | **`gnb_gpu_probe-iq2llr_0919_2216`** | **`5455f96094`** | ✅ `[ul_gpu_pipeline]` 空中验证（§20.6）：4036 跳，RTF 0，gaps 0，CRC **79.76%**（3219 OK / 817 KO），契约 **7/8** —— 唯一的 FAILED 是跨越（**1.00 读 + 1.00 写/跳**，站点 `ce: rx pilots staged (host)`）：**P1 那条每跳往返的空口实证** |
+| **`gnb_gpu_s13p2_0919_2303`** | **`80d0ba32ef`** | ✅ **P2 空中验证**（§5.5.3）：1163 跳，RTF 0，gaps 0，CRC **70.94%**（825 OK / 338 KO，**流量/链路形状不同，见 §5.5.3**），**契约 8/8** —— 跨越 **0.00 读 + 0.00 写/跳、分项表空**、无回退（`[ce_inputs]`=DEVICE、`device_sigma2=1163`）|
 
 > **本表的判读在各批次小节**（5a→§17.8、5b→§17.9.7、5c→§17.10、5d→§17.10.5、5e→§19.3a、5g→§19.6.2b、
 > `probe-iq2llr`→§20.6）；表里只记事实。**RTF 数要连腿形读**：5b 的 47 次属于"UE 反复重接"的那条腿，
@@ -2393,6 +2439,11 @@ channel_equalizer_metal_unit_test（默认 + OCUDU_EQ_DEFER_ENCODE=1）: ALL OK
 >
 > 修法与判据见 `wip/S13_fallback_coverage.md`（P2）：让设备自己从网格建 `gpu_rx_pilots`（消掉写），
 > 并让 EPRE 这类统计量按 5a 的 rsrp 那样由设备发布（消掉读）。判据是**带着新站点**再回到 0.00 + 0.00。
+>
+> **✅ 已关闭（2026-09-19，S13-P2，§5.5）**：`0103795cfe` 做完，腿 `s13p2_0919_2303` 带着这两个站点
+> 读到 **0.00 read + 0.00 write/跳、分项表空、契约 8/8**。里程碑 tag
+> **`gpu_phy_iq2llr_zero_data_crossings_p2`**（`80d0ba32ef`）—— 本块上面那句
+> "tag 的那句话要等 P2 之后才真正成立"**至此成立**。
 
 ```
 [phy_pipeline] contract (mode=gpu):
