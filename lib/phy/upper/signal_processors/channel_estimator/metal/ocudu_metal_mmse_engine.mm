@@ -307,6 +307,10 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    pilots_sigma2_pipe = nil;
 
   id<MTLComputePipelineState>    pilots_power_pipe   = nil;
+  // S13-P2: the received pilots' EPRE sum, reduced from the array mmse_pilots_lse() writes. Optional
+  // on its own: a metallib without it leaves the host to accumulate its own statistic (which also
+  // means the hop keeps the host extraction - see the base class's stage_produces_hop_inputs()).
+  id<MTLComputePipelineState>    pilots_epre_pipe = nil;
   // Batch 5g: the symbol start epochs of one (numerology, CP) pair, for the unit test's exhaustive
   // comparison against the host rule. The lane never dispatches this one (see run_epoch_probe).
   id<MTLComputePipelineState>    epoch_pipe = nil;
@@ -1358,6 +1362,8 @@ bool mmse_engine::init(const char* metallib_path)
     // The pilots' power sum rides the sigma2 block (it reduces the same pilots), so a metallib
     // without it simply does not offer the second scalar and the host keeps its own reduction.
     id<MTLFunction> power_fn = [e->library newFunctionWithName:@"mmse_pilots_power"];
+    // S13-P2: the EPRE reduction over the received pilots mmse_pilots_lse() stores (see there).
+    id<MTLFunction> epre_fn = [e->library newFunctionWithName:@"mmse_pilots_epre"];
     if (smooth_fn != nil && sigma2_fn != nil) {
       e->pilots_smooth_pipe = [e->device newComputePipelineStateWithFunction:smooth_fn
                                                                      options:MTLPipelineOptionNone
@@ -1373,6 +1379,12 @@ bool mmse_engine::init(const char* metallib_path)
                                                                   reflection:nil
                                                                        error:&err];
       }
+    }
+    if (epre_fn != nil) {
+      e->pilots_epre_pipe = [e->device newComputePipelineStateWithFunction:epre_fn
+                                                                    options:MTLPipelineOptionNone
+                                                                 reflection:nil
+                                                                      error:&err];
     }
   }
 
@@ -1422,6 +1434,14 @@ static_assert(offsetof(mmse_pilots_params_t, numerology) == 104, "must match mms
 static_assert(offsetof(mmse_pilots_params_t, cp_extended) == 108, "must match mmse_pilots_params::cp_extended");
 static_assert(offsetof(mmse_pilots_params_t, epoch_span) == 112, "must match mmse_pilots_params::epoch_span");
 
+/// Must match mmse_epre_params in ocudu_mmse_pilots.metal (S13-P2: the received pilots' EPRE sum).
+struct mmse_epre_params_t {
+  uint32_t nof_dmrs_symb;
+  uint32_t nof_cdm;
+  uint32_t nof_pilots;
+};
+static_assert(sizeof(mmse_epre_params_t) == 12, "mmse_epre_params_t must match mmse_epre_params");
+
 /// Must match mmse_sigma2_params in ocudu_mmse_pilots.metal.
 struct mmse_sigma2_params_t {
   uint32_t nof_dmrs_symb;
@@ -1462,8 +1482,13 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     return false;
   }
   if ((s.grid == nullptr) || (s.grid_bytes == 0) || (s.ref == nullptr) ||
-      (s.lse == nullptr) || (s.cfo == nullptr) || (s.nof_dmrs_symb == 0) || (s.nof_dmrs_symb > 4) ||
-      (s.nof_layers == 0) || (s.nof_pilots == 0) || (s.ncomb == 0) || (s.nof_prb == 0)) {
+      // S13-P2: the received pilots' destination is not optional any more. The extraction kernel stores
+      // what it reads into it (mmse_pilots_lse), unconditionally, so a null one would be a null store on
+      // the device rather than a missing feature.
+      (s.rx_pilots == nullptr) || (s.lse == nullptr) || (s.cfo == nullptr) ||
+      (s.nof_dmrs_symb == 0) || (s.nof_dmrs_symb > 4) ||
+      (s.nof_layers == 0) || (s.nof_layers > 4) || (s.nof_pilots == 0) || (s.nof_pilots > 3324) ||
+      (s.ncomb == 0) || (s.nof_prb == 0)) {
     return false;
   }
 
@@ -1528,7 +1553,6 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     smoothed_buf = e->wrap(s.smoothed, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
     filt_buf     = e->wrap(s.fd_filter,
                            (s.fd_filter_bytes != 0) ? s.fd_filter_bytes : s.fd_filter_len * sizeof(float));
-    rx_buf       = e->wrap(s.rx_pilots, s.rx_bytes);
     // FOUR floats: [0] the noise variance, [1] the pilots' power sum, [2] the noise-to-pilot-power
     // ratio the device computes and [3] the mean power it derives it from (see mmse_pilots_power).
     // The length must cover every slot the kernel writes: wrapping two made the kernel's out[2] /
@@ -1537,7 +1561,29 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     // 3.9 dB at 20 dB SNR). Wrapped with its full length here and nowhere else, so the cache never
     // sees a larger request later.
     sigma2_buf   = e->wrap(s.sigma2, 4 * sizeof(float));
-    if ((smoothed_buf == nil) || (filt_buf == nil) || (rx_buf == nil) || (sigma2_buf == nil)) {
+    if ((smoothed_buf == nil) || (filt_buf == nil) || (sigma2_buf == nil)) {
+      return false;
+    }
+  }
+  // S13-P2: the received pilots. They are an INPUT on the host-extraction routes and the extraction
+  // kernel's OUTPUT on the device ones, so this buffer is wrapped whenever the caller passes one - not
+  // only when the sigma2 block runs. The EPRE reduction below reads it, and so does K4 later.
+  if (s.rx_pilots != nullptr) {
+    rx_buf = e->wrap(s.rx_pilots, s.rx_bytes);
+    if (rx_buf == nil) {
+      return false;
+    }
+  }
+  id<MTLBuffer> epre_buf = nil;
+  if (s.epre != nullptr) {
+    if ((rx_buf == nil) || (e->pilots_epre_pipe == nil)) {
+      // A caller that asked for the reduction without the array to reduce, or against a metallib
+      // without the kernel, would otherwise read a destination the device never wrote: refuse the
+      // whole stage, which the caller handles as the host-extraction fallback.
+      return false;
+    }
+    epre_buf = e->wrap(s.epre, sizeof(float));
+    if (epre_buf == nil) {
       return false;
     }
   }
@@ -1579,6 +1625,11 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   [enc setBuffer:ref_buf offset:0 atIndex:1];
   [enc setBuffer:lse_buf offset:0 atIndex:2];
   [enc setBytes:&p length:sizeof(p) atIndex:3];
+  // The received pilots the kernel reads on its way to the product, stored into the array the noise
+  // stage and K4 consume (S13-P2). A null buffer is bound when the caller passes no destination: the
+  // kernel's own bounds check on it is what keeps that from being a write, and the caller then keeps
+  // the host extraction.
+  [enc setBuffer:rx_buf offset:0 atIndex:4];
   [enc dispatchThreads:MTLSizeMake(s.nof_pilots, s.nof_dmrs_symb * s.nof_layers, 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
@@ -1662,6 +1713,29 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
       [enc setBytes:&q length:sizeof(q) atIndex:2];
       [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
+  }
+
+  // S13-P2: the received pilots' EPRE sum, reduced from what the LSE kernel above stored. It reads
+  // rx_buf, so it goes AFTER the barrier the sigma2 block already puts between the extraction and its
+  // consumers - and it runs whenever the caller asked for it, sigma2 block or not (the EPRE statistic
+  // does not depend on the noise variance).
+  if (epre_buf != nil) {
+    if (!sigma2_ok) {
+      // The barrier above is encoded inside the sigma2 block: without it, the store the LSE kernel
+      // just made would not be ordered against this reduction.
+      [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    }
+    mmse_epre_params_t e_params{};
+    e_params.nof_dmrs_symb = s.nof_dmrs_symb;
+    e_params.nof_cdm       = (s.nof_layers + 1) / 2;
+    e_params.nof_pilots    = s.nof_pilots;
+    [enc setComputePipelineState:e->pilots_epre_pipe];
+    [enc setBuffer:rx_buf offset:0 atIndex:0];
+    [enc setBuffer:epre_buf offset:0 atIndex:1];
+    [enc setBytes:&e_params length:sizeof(e_params) atIndex:2];
+    // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (the kernel's reduction tree is written
+    // for it, and its walk strides by that constant).
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   }
 
   // The extraction is the producer the whole rest of the hop is ordered behind, and it is the one
@@ -2022,6 +2096,12 @@ bool mmse_engine::scatter_available() const
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   return (e != nullptr) && (e->pilots_scatter_pipe != nil);
+}
+
+bool mmse_engine::epre_available() const
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  return (e != nullptr) && (e->pilots_epre_pipe != nil);
 }
 
 bool mmse_engine::rsrp_available() const

@@ -676,6 +676,11 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // current one, the noise reformat reads it back on the device, and the slot outlives both because a
   // later hop on this same pooled instance must not overwrite it before that read happens.
   gpu_ls_cfo    = alloc_aligned<float>(kCfoSlots);
+  // S13-P2: the hop's EPRE sum, reduced by the extraction's own command buffer from the received
+  // pilots that same buffer produces. Rotating slots for the same reason as the CFO's above: the host
+  // reads it much later, when the hop completes, by which time a pooled instance may have started
+  // later hops.
+  gpu_ls_epre   = alloc_aligned<float>(kEpreSlots);
   // S-7f-5w: the frequency-smoothed copy of the hop's pilots and the noise variance the device
   // leaves behind. Both are read in the SAME command buffer that produces the LSE.
   gpu_ls_smoothed = alloc_aligned<float>(k_ls_floats);
@@ -759,6 +764,10 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
         gpu_rx_pilots,
         2 * static_cast<std::size_t>(MAX_DMRS_SYMBOLS) * (MAX_LAYERS / 2) * MAX_NOF_PILOTS_SYMBOL * sizeof(float));
     (void)engine->reserve_shared_buffer(gpu_nv, sizeof(float));
+    // S13-P2: the EPRE sum the extraction's command buffer writes, and the HOST reads when the hop
+    // completes. Reserved for the same reason as the two above: the wrap cache is pointer-keyed and a
+    // request larger than its cached entry re-maps it.
+    (void)engine->reserve_shared_buffer(gpu_ls_epre, kEpreSlots * sizeof(float));
   }
 
   // The matrix kernels need their own warm-up (JIT + zero-copy cache entry sized
@@ -784,6 +793,7 @@ port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl(
   free_aligned(gpu_ls_ref);
   free_aligned(gpu_ls_out);
   free_aligned(gpu_ls_cfo);
+  free_aligned(gpu_ls_epre);
   free_aligned(gpu_ls_smoothed);
   free_aligned(gpu_ls_sigma2);
   free_aligned(gpu_rsrp);
@@ -791,7 +801,8 @@ port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl(
 }
 
 unsigned port_channel_estimator_metal_mmse_impl::stage_device_noise_inputs(const fd_td_estimation_stage_args& args,
-                                                                             unsigned                           npt)
+                                                                             unsigned                           npt,
+                                                                             bool device_builds_pilots)
 {
   const unsigned npf         = args.nof_symbol_pilots;
   const unsigned nof_cdm_hop = args.rx_pilots.size().nof_slices;
@@ -801,6 +812,13 @@ unsigned port_channel_estimator_metal_mmse_impl::stage_device_noise_inputs(const
   if ((npf == 0) || (nof_cdm_hop == 0) || (npt == 0) || (npt > MAX_DMRS_SYMBOLS) ||
       (nof_cdm_hop > MAX_LAYERS / 2) || (npf > MAX_NOF_PILOTS_SYMBOL)) {
     return 0;
+  }
+  // The hops the DEVICE builds for are not staged: the extraction kernel stores the received pilots it
+  // reads into this very buffer, in this very layout (S13-P2, see mmse_pilots_lse). Copying the host's
+  // copy in first would be the write half of the round trip the lane is trying to remove - and the
+  // host's copy no longer exists on those hops (the base class skips the extraction entirely).
+  if (device_builds_pilots) {
+    return nof_cdm_hop;
   }
   for (unsigned i_dmrs = 0; i_dmrs != npt; ++i_dmrs) {
     for (unsigned i_group = 0; i_group != nof_cdm_hop; ++i_group) {
@@ -1193,6 +1211,44 @@ bool port_channel_estimator_metal_mmse_impl::stage_produces_ls_pilots(const fd_t
   return ls_geometry_of(args).ok;
 }
 
+bool port_channel_estimator_metal_mmse_impl::stage_produces_hop_inputs(const fd_td_estimation_stage_args& args) const
+{
+  // The same answer as stage_produces_ls_pilots(), plus the EPRE reduction. The base class asks this
+  // one BEFORE it would extract the received pilots, so every host consumer of them must be covered for
+  // the hop it says yes about: the least-squares pilots and the CFO are the stage's own
+  // (stage_produces_ls_pilots()), the noise variance is K4's - its inputs are that same array, built by
+  // that same kernel - and the EPRE sum is mmse_pilots_epre's.
+  //
+  // A metallib without the EPRE kernel therefore keeps the host extraction: the device would build the
+  // pilots but publish no sum, and the base class would have nothing to accumulate the statistic from.
+  const bool device_builds = stage_produces_ls_pilots(args) && (engine != nullptr) && engine->epre_available();
+
+  // Announce the route once per process. WHO extracts the received pilots is the difference between
+  // this batch and the two crossings it removes, and the offline A/B has to be able to see that the two
+  // binaries it compares really took different routes - a mis-paired metallib agrees with itself (see
+  // ab_replay_bins.sh, whose pairing assertion keys on this line for S13-P2). Per-hop refusals are NOT
+  // announced here: a hop that falls back is a hop whose extraction the crossing counter reports.
+  static std::once_flag announced;
+  std::call_once(announced, [device_builds]() {
+    std::fprintf(stderr,
+                 device_builds ? "[ce_inputs] received pilots: built on the DEVICE (the extraction kernel stores them; "
+                                 "the host extracts and stages nothing)\n"
+                               : "[ce_inputs] received pilots: extracted on the HOST (the device build is unavailable: "
+                                 "geometry, knobs or metallib)\n");
+  });
+  return device_builds;
+}
+
+std::optional<float> port_channel_estimator_metal_mmse_impl::get_device_epre_sum() const
+{
+  // Only for a hop the device produced it for: the slot rotates, and the previous hop's value would
+  // otherwise be added to this hop's statistic (see device_epre_valid).
+  if (!device_epre_valid) {
+    return std::nullopt;
+  }
+  return gpu_ls_epre[epre_slot_];
+}
+
 cf_t port_channel_estimator_metal_mmse_impl::ls_pilot(const fd_td_estimation_stage_args& args,
                                                      unsigned                        i_symbol,
                                                      unsigned                        i_layer,
@@ -1322,10 +1378,20 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   host_grid_pending = false;
   nof_host_unpacks  = 0;
 
+  // ---- WHO builds this hop's received pilots ------------------------------------------------------
+  // The same gate that decides the least-squares pilots (stage_produces_ls_pilots() in the base class
+  // reads it through ls_geometry_of()): the extraction kernel reads the grid IN PLACE, so a hop whose
+  // geometry it accepts is a hop whose received pilots the device produces - and the host must then
+  // keep its hands off them (there is nothing to stage, and nothing to extract). Computed here,
+  // BEFORE the staging below and before K0-a's dispatch, because the staging needs the answer.
+  const ls_geometry geom                  = ls_geometry_of(args);
+  const bool        device_builds_pilots  = device_ls_enabled() && geom.ok;
+
   // ---- S-7f-5w: the arrays the device noise variance reads ---------------------------------------
   // Staged BEFORE the extraction, because the noise reduction rides that same command buffer; K4
-  // reads the very same buffers later, and keys its own gate on this call's answer.
-  const unsigned staged_cdm_groups = stage_device_noise_inputs(args, npt);
+  // reads the very same buffers later, and keys its own gate on this call's answer. A hop the device
+  // builds for needs no staging: the array is the extraction kernel's own output (S13-P2).
+  const unsigned staged_cdm_groups = stage_device_noise_inputs(args, npt, device_builds_pilots);
 
   // ---- K0-a: the estimator's INPUT stage, on the device --------------------------------
   // The pilots are recomputed HERE, on the device, when the hop qualifies, and every host consumer
@@ -1343,12 +1409,15 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // descriptors - which would make the engine write y from a buffer that no longer holds its pilots.
   device_ls_valid     = false;
   device_sigma2_valid = false;
+  // S13-P2: whether THIS hop's EPRE sum was reduced by the extraction's command buffer. Reset with
+  // the other per-hop device state, so a hop that fails K0-a cannot hand a later hop's reader a value
+  // from an earlier one.
+  device_epre_valid   = false;
   // S-7g-20: and the device ratio of the previous hop, for the same reason - it addresses the
   // extraction's own output slot, which this hop has not filled yet.
   device_sigma2_rel   = nullptr;
   nof_device_y_stage  = 0;
-  const ls_geometry geom = ls_geometry_of(args);
-  if (device_ls_enabled() && geom.ok) {
+  if (device_builds_pilots) {
     const resource_grid_device_view dv         = args.grid.get_device_view();
     const unsigned                  comb       = geom.ncomb;
     const unsigned                  nof_pilots = geom.nof_pilots;
@@ -1392,6 +1461,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       //     command buffer is even encoded - whether or not the kernel was going to overwrite it.
       cfo_slot_ = (cfo_slot_ + 1) % kCfoSlots;
       const unsigned cfo_prev_slot = (cfo_slot_ + kCfoSlots - 1) % kCfoSlots;
+      // S13-P2: the EPRE slot rotates with it, one per hop in flight (the host reads it when the hop
+      // completes, see get_device_epre_sum()).
+      epre_slot_ = (epre_slot_ + 1) % kEpreSlots;
       if (host_carries_cfo_forward()) {
         // CROSSING: the carry-forward reads the previous slot of a zero-copy mapping and writes
         // another slot of it.
@@ -1439,6 +1511,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                  ? static_cast<unsigned>(static_cast<std::size_t>(nof_layers) *
                                                          args.nof_dmrs_symbols * args.nof_symbol_pilots)
                                  : 0;
+      // S13-P2: the EPRE sum, reduced by this same command buffer from the received pilots the LSE
+      // kernel stores. Only asked for when the base class relied on the device for it - i.e. when it
+      // skipped its own extraction - which is the same hop set this stage is building.
+      st.epre              = device_builds_pilots ? (gpu_ls_epre + epre_slot_) : nullptr;
       st.fd_filter         = fd_filter.data();
       st.fd_filter_bytes   = sizeof(fd_filter);
       st.fd_filter_len     = fd_filter_len;
@@ -1511,6 +1587,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // that pointer stays non-null when the engine skipped the stage, and the buffer then holds the
         // previous hop's value (or nothing). The engine reports it through sigma2_done.
         device_sigma2_valid = (st.sigma2 != nullptr) && sigma2_done;
+        // S13-P2: and the EPRE sum, when this hop asked for it and the engine encoded the kernel (a
+        // build that could not encode it returns false, so reaching here means it did).
+        device_epre_valid   = (st.epre != nullptr);
         // Tolerance probe (OCUDU_CE_LS_CHECK=1): the device LSE against the host's, BEFORE the
         // overwrite. It is what makes stage_produces_ls_pilots() keep the host pre-stage when it is
         // on. Tolerance, not bit-exactness: the pilots enter h = W . y linearly, so a relative error
@@ -1575,7 +1654,15 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // pre-stage (stage_produces_ls_pilots()) and the least-squares pilots and the CFO have to
         // come from the host now - exactly as if the hop had not qualified. It cannot run every
         // hop: the answer above must not depend on this call's outcome.
+        //
+        // S13-P2: the same answer also stopped the base class from extracting the received pilots,
+        // which the host pre-stage reads. They are extracted HERE, after the fact, from the same grid
+        // - the fallback the promise was allowed to have, and the read is reported as the crossing it
+        // is (see extract_hop_rx_pilots()).
         logger.warning("[mmse_ce] device LSE build failed: running the host pre-stage for this hop");
+        if (!host_hop_pilots_ready()) {
+          (void)extract_hop_rx_pilots(args.grid, args.port, args.hop);
+        }
         std::optional<float> host_cfo = run_ls_pre_stage(args);
         account_hop_cfo(host_cfo);
         args.cfo_hop = host_cfo;
@@ -1651,6 +1738,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // metallib without the kernels - in which case this is also the CPU-block fallback's value).
   // A/B (OCUDU_CE_HOST_SCALARS=0): a fixed zero, NOT an uninitialised read - the run has to stay
   // deterministic or the dump comparison stops meaning anything.
+  // S13-P2: the host's own estimate_sigma2() reads the received pilots, and a hop whose pilots the
+  // DEVICE built has none in host memory when the device reduction did not run (the cold path below
+  // covers the failed build; this covers OCUDU_CE_DEV_SIGMA2=0). Extract them after the fact, from the
+  // same grid - the fallback, reported as the host read it is.
+  if (!(device_sigma2_valid && device_sigma2_enabled) && !host_hop_pilots_ready()) {
+    (void)extract_hop_rx_pilots(args.grid, args.port, args.hop);
+  }
   const bool take_device_sigma2 = device_sigma2_valid && device_sigma2_enabled && host_reads_device_scalars();
   if (take_device_sigma2) {
     phy_pipeline_crossings::count_host_read(); // CROSSING: device-produced (out[0]).

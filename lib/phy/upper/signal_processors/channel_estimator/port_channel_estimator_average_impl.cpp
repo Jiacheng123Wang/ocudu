@@ -380,30 +380,6 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
                           nof_symbol_pilots);
 
   // We process layers in groups of two, since the DM-RS for layer 2n and layer 2n+1 are mapped onto the same REs.
-  // This pass extracts the received pilots - the device stages them, and the statistics accumulate
-  // their power - and it is unconditional: only the least-squares pilots and the CFO below can be
-  // taken over by the stage.
-  unsigned grid_re_read = 0;
-  for (unsigned i_layer = 0; i_layer < nof_tx_layers; i_layer += 2U) {
-    ocudu_assert((hop == 0) || cfg_local.dmrs_pattern[i_layer].hopping_symbol_index.has_value(),
-                 "Frequency hopping requested but not configured.");
-
-    // Extract symbols from resource grid. The extraction reads the DM-RS PRB spans of every DM-RS
-    // symbol out of the grid - which in a device lane is memory the DEVICE wrote - so the backend is
-    // told how much was read (see account_host_grid_read()).
-    const unsigned nof_hop_prb = ((hop == 0) ? cfg_local.dmrs_pattern[i_layer].rb_mask
-                                             : cfg_local.dmrs_pattern[i_layer].rb_mask2)
-                                     .count();
-    const unsigned nof_read_symb =
-        extract_layer_hop_rx_pilots(rx_pilots, grid, port, cfg_local, hop, i_layer);
-    grid_re_read += nof_read_symb * nof_hop_prb * NOF_SUBCARRIERS_PER_RB;
-
-    unsigned i_cdm = i_layer / 2;
-    for (unsigned i_dmrs = 0; i_dmrs != nof_dmrs_symbols; ++i_dmrs) {
-      epre += ocuduvec::average_power(rx_pilots.get_symbol(i_dmrs, i_cdm)) * rx_pilots.get_symbol(i_dmrs, i_cdm).size();
-    }
-  }
-  account_host_grid_read(grid_re_read, grid.get_device_view().is_valid());
 
   std::optional<float> cfo_hop = std::nullopt;
 
@@ -418,11 +394,12 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
     stage_hop_offset = pilots.size().nof_symbols - nof_dmrs_symbols;
   }
 
-  // Built BEFORE the pre-stage: the stage is asked whether it produces the least-squares pilots
-  // itself, and that answer decides whether the host pre-stage runs at all (see
-  // stage_produces_ls_pilots()). Everything the arguments carry at this point is hop geometry or
-  // the buffers setup_auxiliary_buffers() has just sized; \c cfo_hop is filled below by whichever
-  // side estimates it.
+  // Hop arguments, built BEFORE the extraction (batch S13-P2). Nothing in them depends on the received
+  // pilots having been extracted: they carry hop geometry and references to buffers
+  // setup_auxiliary_buffers() has already sized. Building them here is what lets the stage be asked -
+  // before the extraction happens - whether it will build this hop's INPUTS on its own
+  // (stage_produces_hop_inputs(), which reads the same geometry the stage does). \c cfo_hop is filled
+  // below by whichever side estimates it.
   fd_td_estimation_stage_args stage_args{
       .grid                      = grid,
       .port                      = port,
@@ -451,6 +428,21 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
       .deferred                  = deferred,
   };
 
+  // The received DM-RS pilots of the hop: this pass extracts them - the device stages them, and the
+  // statistics accumulate their power - UNLESS the stage builds them itself, where they already live
+  // (a device lane: the extraction kernel reads the grid in place, and this extraction would be a read
+  // of device-written memory whose host consumers the device has taken over - see
+  // stage_produces_hop_inputs()). The read is reported through account_host_grid_read() only when it
+  // happens, which is what makes the fallback routes visible rather than silent.
+  //
+  // It is extracted ONCE per hop, and the extraction is also what accumulates the hop's EPRE terms
+  // (see extract_hop_rx_pilots()). Where it does not run, the statistic comes from the DEVICE's
+  // reduction of the same sum instead - decided, exactly once per hop, in compute_hop_finish().
+  pending_hop.host_inputs = false;
+  if (!stage_produces_hop_inputs(stage_args)) {
+    extract_hop_rx_pilots(grid, port, hop);
+  }
+
   // The host pre-stage: the least-squares pilots, the pilot products and the CFO estimate that goes
   // with them. A stage that builds the pilots itself (a device backend, see
   // stage_produces_ls_pilots()) makes this a CPU step with no consumer - the buffer is overwritten
@@ -463,18 +455,64 @@ void port_channel_estimator_average_impl::compute_hop_submit(const ocudu::resour
 
   // Record what the hop statistics need before starting the stage: it may complete this hop much
   // later than it was submitted (see port_channel_estimator::submit()), and everything else they
-  // read is either a member or is derived again from cfg_local.
+  // read is either a member or is derived again from cfg_local. \c grid and \c port are kept for the
+  // same reason: a hop whose inputs the stage was supposed to build and did not can still have its
+  // pilots extracted, after the fact, from the same grid (see compute_hop_finish()).
   pending_hop.valid            = true;
   pending_hop.hop              = hop;
   pending_hop.nof_lse_symbols  = nof_lse_symbols;
   pending_hop.stage_hop_offset = stage_hop_offset;
   pending_hop.beta_scaling     = beta_scaling;
+  pending_hop.grid             = &grid;
+  pending_hop.port             = port;
 
 #if defined(OCUDU_CE_TIME)
   stage_args.pre_stage_us =
       std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - pre_stage_begin).count();
 #endif
   apply_fd_td_estimation_stage(stage_args);
+}
+
+void port_channel_estimator_average_impl::extract_hop_rx_pilots(const resource_grid_reader& grid,
+                                                                unsigned                    port,
+                                                                unsigned                    hop)
+{
+  // A hop's pilots are extracted once. The second caller is a fallback that found, after the fact,
+  // that it needs them after all (see compute_hop_finish()), and the values it would read are the same
+  // ones - the grid of this hop does not change while the hop is in flight.
+  if (pending_hop.host_inputs) {
+    return;
+  }
+  pending_hop.host_inputs = true;
+
+  unsigned nof_tx_layers = cfg_local.dmrs_pattern.size();
+  auto [pattern_symbols, first_symbol, last_symbol, nof_dmrs_symbols] = extract_common_pattern(cfg_local, hop);
+  (void) pattern_symbols;
+
+  // We process layers in groups of two, since the DM-RS for layer 2n and layer 2n+1 are mapped onto the same REs.
+  unsigned grid_re_read = 0;
+  for (unsigned i_layer = 0; i_layer < nof_tx_layers; i_layer += 2U) {
+    ocudu_assert((hop == 0) || cfg_local.dmrs_pattern[i_layer].hopping_symbol_index.has_value(),
+                 "Frequency hopping requested but not configured.");
+
+    // Extract symbols from resource grid. The extraction reads the DM-RS PRB spans of every DM-RS
+    // symbol out of the grid - which in a device lane is memory the DEVICE wrote - so the backend is
+    // told how much was read (see account_host_grid_read()).
+    const unsigned nof_hop_prb =
+        ((hop == 0) ? cfg_local.dmrs_pattern[i_layer].rb_mask : cfg_local.dmrs_pattern[i_layer].rb_mask2).count();
+    const unsigned nof_read_symb = extract_layer_hop_rx_pilots(rx_pilots, grid, port, cfg_local, hop, i_layer);
+    grid_re_read += nof_read_symb * nof_hop_prb * NOF_SUBCARRIERS_PER_RB;
+
+    unsigned i_cdm = i_layer / 2;
+    for (unsigned i_dmrs = 0; i_dmrs != nof_dmrs_symbols; ++i_dmrs) {
+      // Accumulated into the statistic TERM BY TERM, in the order the unconditional extraction used:
+      // a local sum added once at the end would round differently, and the CPU lanes' EPRE has to stay
+      // bit for bit what it was. The device route never runs this (the device reduces the same sum, in
+      // its own order - see get_device_epre_sum()).
+      epre += ocuduvec::average_power(rx_pilots.get_symbol(i_dmrs, i_cdm)) * rx_pilots.get_symbol(i_dmrs, i_cdm).size();
+    }
+  }
+  account_host_grid_read(grid_re_read, grid.get_device_view().is_valid());
 }
 
 std::optional<float> port_channel_estimator_average_impl::run_ls_pre_stage(const fd_td_estimation_stage_args& args)
@@ -556,25 +594,53 @@ bool port_channel_estimator_average_impl::compute_hop_finish(const dmrs_symbol_l
     }
   }
 
-  // Estimate the noise variance.
-  for (unsigned i_layer = 0; i_layer < nof_tx_layers; i_layer += 2U) {
-    const layer_dmrs_pattern& pattern = cfg_local.dmrs_pattern[i_layer];
+  // ---- The hop's EPRE contribution and the pilots the host may still need ------------------------
+  // The received pilots are the input of two statistics: the EPRE sum, which the host accumulated
+  // symbol by symbol as it extracted them (compute_hop_submit()), and the classical noise estimate
+  // below. On a hop whose pilots the DEVICE built (stage_produces_hop_inputs()) the host holds neither
+  // the pilots nor, usually, any need for them: the device reduces the EPRE sum from the array it
+  // built (get_device_epre_sum()) and publishes the noise variance the receiver scales its soft bits
+  // with. When either of those is missing - a device stage that did not run, a geometry it refused, an
+  // older metallib, a knobs combination that keeps one of them on the host - this falls back to the
+  // extraction the host would have made in the first place: same grid, same values, after the fact, and
+  // REPORTED as the host read it is (see account_host_grid_read()), so the routes that still need it
+  // stay visible instead of silently costing nothing.
+  const bool need_host_noise = (get_device_noise_variance() == nullptr);
+  if (!st.host_inputs) {
+    // The host did not extract this hop's pilots: the statistic comes from the device's reduction of
+    // the same sum - unless the classical noise estimate below needs the pilots anyway, in which case
+    // the extraction runs here (after the fact, from the same grid) and contributes the terms itself.
+    const std::optional<float> device_sum = get_device_epre_sum();
+    if (device_sum.has_value() && !need_host_noise) {
+      epre += *device_sum;
+    } else if (st.grid != nullptr) {
+      extract_hop_rx_pilots(*st.grid, st.port, st.hop);
+    }
+  }
 
-    unsigned stop_layer = (i_layer < nof_tx_layers - 1) ? i_layer + 2 : i_layer + 1;
+  // Estimate the noise variance: only when no device backend reduced one for this hop (the device's
+  // value replaces whatever is accumulated here - see do_finish() - so running this on those hops would
+  // be host work whose result is discarded, over pilots the host may not even hold).
+  if (need_host_noise) {
+    for (unsigned i_layer = 0; i_layer < nof_tx_layers; i_layer += 2U) {
+      const layer_dmrs_pattern& pattern = cfg_local.dmrs_pattern[i_layer];
 
-    noise_var += ocudu::estimate_noise(pilots,
-                                       rx_pilots,
-                                       filtered_pilots_lse,
-                                       beta_scaling,
-                                       pattern.symbols,
-                                       cfo_hop,
-                                       symbol_start_epochs,
-                                       compensate_cfo,
-                                       first_symbol,
-                                       last_symbol,
-                                       st.stage_hop_offset,
-                                       i_layer,
-                                       stop_layer);
+      unsigned stop_layer = (i_layer < nof_tx_layers - 1) ? i_layer + 2 : i_layer + 1;
+
+      noise_var += ocudu::estimate_noise(pilots,
+                                         rx_pilots,
+                                         filtered_pilots_lse,
+                                         beta_scaling,
+                                         pattern.symbols,
+                                         cfo_hop,
+                                         symbol_start_epochs,
+                                         compensate_cfo,
+                                         first_symbol,
+                                         last_symbol,
+                                         st.stage_hop_offset,
+                                         i_layer,
+                                         stop_layer);
+    }
   }
 
   // The hop's time alignment: the device's when a backend produced it where the estimates already

@@ -131,6 +131,20 @@ private:
   // See the base class documentation.
   bool stage_produces_ls_pilots(const fd_td_estimation_stage_args& args) const override;
 
+  /// \brief Whether this hop's received pilots are built on the device (S13-P2).
+  ///
+  /// It is the SAME gate as stage_produces_ls_pilots() above - and the same one
+  /// apply_fd_td_estimation_stage() uses to decide whether to stage the received pilots or leave them
+  /// to the extraction kernel - so the three can never disagree: the kernel that builds the
+  /// least-squares pilots reads the received ones on its way and stores them (mmse_pilots_lse).
+  /// \note The one extra condition is the EPRE reduction's kernel: without it the device would build
+  ///       the pilots but publish no EPRE sum, and the base class would have nothing to accumulate on a
+  ///       hop it did not extract. A metallib without it therefore keeps the host extraction.
+  bool stage_produces_hop_inputs(const fd_td_estimation_stage_args& args) const override;
+
+  // See the base class documentation.
+  std::optional<float> get_device_epre_sum() const override;
+
   /// \brief Reports the hop's received pilots being read out of the grid HERE, where the grid is the
   /// DEVICE's (the front-end DFT writes it - S-7b), so the extraction the base class performs on
   /// every hop is a device -> host read even though no byte crosses a bus (it is unified memory).
@@ -847,6 +861,13 @@ private:
   /// flight removes it.
   static constexpr unsigned kCfoSlots = 8;
 
+  /// \brief Rotating slots of the EPRE sum the device reduces from the received pilots (S13-P2).
+  ///
+  /// Same reason and the same count as kCfoSlots above: the value is written inside the extraction's
+  /// command buffer and the HOST reads it much later, when the hop completes - by which time a pooled
+  /// instance may have started later hops that overwrite a single destination.
+  static constexpr unsigned kEpreSlots = kCfoSlots;
+
   /// \brief Rotating slots of the device time alignment (K7+K6), one per hop in flight.
   ///
   /// Same reason as the rsrp ring below: the value is written inside the reformat's command buffer and
@@ -875,9 +896,14 @@ private:
   static constexpr unsigned kRsrpBlocks = 16;
   static constexpr unsigned kRsrpSlots  = 4;
   float*   gpu_ls_cfo     = nullptr;
+  /// The hop's EPRE sum, reduced on the device from the received pilots the extraction kernel built
+  /// (see kEpreSlots).
+  float*   gpu_ls_epre    = nullptr;
   /// Slot the CURRENT hop uses. Starts one before the first hop so that hop 0 lands on slot 0 and
   /// carries forward from the last (zero-initialised) slot, exactly as the single buffer started at 0.
   unsigned cfo_slot_      = kCfoSlots - 1;
+  /// Slot the CURRENT hop's EPRE sum uses. Rotated with the CFO's, one per hop in flight.
+  unsigned epre_slot_     = kEpreSlots - 1;
   bool   gpu_nv_ready  = false;
 
   /// S-7f-5w: the hop's noise variance, computed inside the K0-a command buffer. \c gpu_ls_smoothed
@@ -950,10 +976,23 @@ private:
   /// Reset on every hop before K0-a decides, like the other per-hop device state.
   const float* device_sigma2_rel = nullptr;
 
-  /// \brief Stages the received DM-RS of the hop and the symbol epochs - the arrays the device noise
-  /// variance reads, and the same ones K4 reads.
-  /// \return The number of CDM groups staged, or 0 when the geometry does not fit the buffers.
-  unsigned stage_device_noise_inputs(const fd_td_estimation_stage_args& args, unsigned npt);
+  /// \brief Whether THIS hop's EPRE sum was reduced by the extraction's command buffer (S13-P2).
+  ///
+  /// Set with device_ls_valid, and for the same reason: get_device_epre_sum() reads the rotating slot
+  /// only for a hop the device actually produced it for, and a hop that failed K0-a must not hand its
+  /// reader the previous hop's value.
+  bool device_epre_valid = false;
+
+  /// \brief Stages the received DM-RS of the hop - the array the device noise variance reads, and the
+  /// same one K4 reads - unless the device builds it for this hop.
+  ///
+  /// \param[in] device_builds_pilots Whether the extraction kernel produces this hop's received pilots
+  ///            (the caller's own device_builds_pilots: same gate, computed once). When true there is
+  ///            nothing to stage: the kernel stores what it reads into this very buffer, and the host
+  ///            has no copy of them to stage (S13-P2).
+  /// \return The number of CDM groups the noise stage can read, or 0 when the geometry does not fit
+  ///         the buffers.
+  unsigned stage_device_noise_inputs(const fd_td_estimation_stage_args& args, unsigned npt, bool device_builds_pilots);
 
   /// Glue #2 (S-7f-5u): whether the device writes the engine's pilot vectors y out of gpu_ls_out
   /// instead of the host copying them in. On by default; OCUDU_CE_DEV_Y=0 keeps the host staging,

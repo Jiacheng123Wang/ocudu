@@ -28,6 +28,7 @@
 #     half of the batch-5g criterion (the write side must reach 0 and the site table must be empty).
 #
 # usage: bash ab_replay_bins.sh <binA> <binB> [env] [mode-ARGS] [corpus-glob]
+#   AB_MARKER=<name>   the self-announcement only side B prints (default: epoch_impl, batch 5g's).
 #   e.g. AB_METALLIB_A=/tmp/mmse_head.metallib AB_METALLIB_B=/tmp/mmse_new.metallib \
 #          bash ab_replay_bins.sh /tmp/replay_head build/.../ul_chain_replay
 # Exit: 0 when every capture produced dumps on both sides AND the four dumps are byte-identical;
@@ -39,6 +40,8 @@ ENV=${3:-}
 MODE=${4:---metal}
 ROOT=/Users/jiachengwang/dev/ocudu
 GLOB=${5:-$ROOT/doc_chinese/work_tmp/corpus/*.bin}
+# The pairing marker: a line "[<marker>] ..." the reference build must NOT print and the new one must.
+MARKER=${AB_MARKER:-epoch_impl}
 # The KERNELS are a separate artifact and the engine loads them from the absolute source-tree path
 # baked in at configure time (OCUDU_MMSE_METALLIB_PATH; there is no environment override yet), so a
 # binary and its .metallib can be paired wrongly - which is the trap this port has hit more than once.
@@ -59,6 +62,11 @@ CAPTURES=$(ls $GLOB 2>/dev/null | sed -E 's/\.bin$//')
 if [ -z "$CAPTURES" ]; then echo "no captures match $GLOB" >&2; exit 2; fi
 
 WORK=$(mktemp -d)
+# AB_KEEP=<dir>: copy each side's dumps there, per capture, before WORK is removed. The per-byte diff
+# above says HOW MUCH differs; the dumps are what says WHICH FIELD does (e.g. a reporting value whose
+# reduction moved to the device, S13-P2's epre: the LLR/h/bin dumps are identical and _ce.txt differs
+# in that one field by a few ulps).
+KEEP=${AB_KEEP:-}
 restore() {
   # Put the metallib the tree had back, whatever happened (a missing one would leave the NEXT run
   # loading nothing at all - the failure mode is silent, so it must not depend on the script's exit).
@@ -88,13 +96,14 @@ for c in $CAPTURES; do
   if [ -n "$ML_B" ]; then cp "$ML_B" "$MMSE_ML"; fi
   # shellcheck disable=SC2086
   bash /tmp/limited_run.sh 120 "$b/log" env $ENV "$BIN_B" "$c" $MODE --out "$b/dump"
-  # The pairing, asserted rather than assumed: batch 5g replaced a host-uploaded array with a device
-  # computation, so side A (the reference build) must NOT print [epoch_impl] and side B must. A wrong
-  # pairing agrees with itself and proves nothing.
-  ga=$(grep -c '^\[epoch_impl\]' "$a/log" | tr -d ' ')
-  gb=$(grep -c '^\[epoch_impl\]' "$b/log" | tr -d ' ')
+  # The pairing, asserted rather than assumed: the change under test adds a self-announcement that
+  # side A (the reference build) does NOT print and side B does. A wrong pairing agrees with itself and
+  # proves nothing. The marker is a parameter because each batch has its own: batch 5g's was
+  # [epoch_impl], S13-P2's is [ce_inputs] (the route that extracts the received pilots).
+  ga=$(grep -c "^\[$MARKER\]" "$a/log" | tr -d ' ')
+  gb=$(grep -c "^\[$MARKER\]" "$b/log" | tr -d ' ')
   if [ "$ga" != "0" ] || [ "$gb" = "0" ]; then
-    echo "  PAIRING WRONG: $name  A printed [epoch_impl] $ga time(s), B $gb time(s)"
+    echo "  PAIRING WRONG: $name  A printed [$MARKER] $ga time(s), B $gb time(s)"
     pairing=$((pairing + 1))
   fi
   fa=$(ls "$a"/dump*_ce.txt 2>/dev/null | head -1)
@@ -116,6 +125,11 @@ for c in $CAPTURES; do
     [ "$k" != "0" ] && { echo "  DUMP DIFFERS: $name$suf ($k bytes)"; cap=1; }
   done
   [ "$cap" = "1" ] && badcaps=$((badcaps + 1))
+  if [ -n "$KEEP" ]; then
+    mkdir -p "$KEEP/$name/A" "$KEEP/$name/B"
+    cp "$a"/dump* "$KEEP/$name/A/" 2>/dev/null
+    cp "$b"/dump* "$KEEP/$name/B/" 2>/dev/null
+  fi
   # The instrument half: the crossing line and the write-site table of each side.
   ca=$(grep -oE "= [0-9.]+ read\(s\) \+ [0-9.]+ write\(s\) per hop" "$a/log" | tail -1)
   cb=$(grep -oE "= [0-9.]+ read\(s\) \+ [0-9.]+ write\(s\) per hop" "$b/log" | tail -1)
@@ -125,7 +139,7 @@ for c in $CAPTURES; do
 done
 
 total=$((d_llr + d_h + d_bin + d_ce))
-echo "A = $BIN_A   kernels=${ML_A:-<tree $MMSE_ML>}   env=${ENV:-<default>}  mode=$MODE"
+echo "A = $BIN_A   kernels=${ML_A:-<tree $MMSE_ML>}   env=${ENV:-<default>}  mode=$MODE   pairing-marker=[$MARKER]"
 echo "B = $BIN_B   kernels=${ML_B:-<tree $MMSE_ML>}"
 echo "captures=$n  missing-dumps=$miss  captures-with-differences=$badcaps  total-differing-bytes=$total  pairing-wrong=$pairing"
 printf "  %-10s %s\n" _llr.bin "$d_llr" _h.bin "$d_h" .bin "$d_bin" _ce.txt "$d_ce"

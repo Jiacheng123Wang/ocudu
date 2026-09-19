@@ -87,6 +87,25 @@ using namespace metal;
 // host-uploaded array, and now derive the few they need from the numerology and the CP type.
 #include "ocudu_mmse_epochs.h"
 
+/// Threadgroup sizes of the reduction kernels. Compile-time constants on purpose: they stride the
+/// walks, so a zero here would be an infinite loop.
+constant uint mmse_smooth_tg_size = 128;
+constant uint mmse_sigma2_tg_size = 256;
+
+/// Upper bounds, matching the host's buffers: MAX_V_PILOTS, MAX_FILTER_LENGTH (31), the DM-RS symbol
+/// and layer counts, MAX_NSYMB_PER_SLOT and the per-(symbol, layer) capacity of the LSE buffers
+/// (MAX_NOF_PILOTS_SYMBOL = MAX_NOF_SUBCARRIERS + 2 * MAX_V_PILOTS = 3300 + 24).
+/// \note Declared here, above every kernel that clamps against them: mmse_pilots_lse() needs the
+///       pilot and CDM bounds for the received-pilot store it makes (see there), and a `constant`
+///       has to be declared before the kernel that reads it.
+constant uint mmse_max_v_pilots    = 12;
+constant uint mmse_max_filter_len  = 31;
+constant uint mmse_max_dmrs_symb   = 4;
+constant uint mmse_max_layers      = 4;
+constant uint mmse_max_cdm         = 2;
+constant uint mmse_max_slot_symb   = 14;
+constant uint mmse_max_pilots_symb = 3324;
+
 struct mmse_pilots_params {
     uint nof_dmrs_symb;     // DM-RS symbols of the hop (the second grid dimension is symb x layer)
     uint nof_layers;        // Tx layers
@@ -143,10 +162,19 @@ static inline float2 mmse_pilots_read_grid(device const ushort*          grid,
 /// One thread per (pilot, symbol x layer). This is steps (1) and (2) above; the CFO is applied by
 /// mmse_pilots_apply_cfo() after mmse_pilots_cfo() has estimated it, exactly as the host splits
 /// preprocess_pilots_and_estimate_cfo() from compensate_cfo_and_accumulate().
+///
+/// It ALSO writes the received pilots it read - rx, on the way to the product - into the noise
+/// stage's own layout, \c rx_out. That is what lets the estimator stop extracting them on the host:
+/// the received pilots fed two device consumers all along (the classical noise variance in this same
+/// command buffer, K4 later, and the EPRE reduction below), and the host extraction that produced
+/// them was a read of device-written memory followed by a write of the same values back into a
+/// device buffer - the per-hop round trip of the crossing contract. They are a LOAD this kernel
+/// already makes, so no arithmetic is added to it (see the file header for why that matters here).
 kernel void mmse_pilots_lse(device const ushort*         grid    [[buffer(0)]],
                             device const float*          ref     [[buffer(1)]], // [symb][layer][pilot], cf32
                             device float*                lse     [[buffer(2)]], // [symb][layer][pilot], cf32
                             constant mmse_pilots_params& p       [[buffer(3)]],
+                            device float*                rx_out  [[buffer(4)]], // [symb][cdm][pilot], cf32
                             uint2                        gid     [[thread_position_in_grid]])
 {
     if ((gid.x >= p.nof_pilots) || (gid.y >= p.nof_dmrs_symb * p.nof_layers)) {
@@ -157,6 +185,19 @@ kernel void mmse_pilots_lse(device const ushort*         grid    [[buffer(0)]],
     const uint i_pilot = gid.x;
 
     const float2 rx = mmse_pilots_read_grid(grid, p, i_symb, i_pilot);
+
+    // The received pilots, for the consumers that need the OBSERVATION rather than the estimate. Only
+    // the EVEN layer of each CDM group writes: the group's two layers share their resource elements,
+    // so both threads of a pair hold the same value, and the layout is indexed by group.
+    // The bounds are the buffers' own maxima (see mmse_max_* at the top of this file) - the caller
+    // refuses a wider hop, and this keeps a caller that did not from writing past rx_out.
+    const uint nof_cdm = (p.nof_layers + 1u) / 2u;
+    if (((i_layer & 1u) == 0u) && (p.nof_pilots <= mmse_max_pilots_symb) && (p.nof_dmrs_symb <= mmse_max_dmrs_symb) &&
+        (nof_cdm <= mmse_max_cdm)) {
+        const ulong rx_i = (static_cast<ulong>(i_symb) * nof_cdm + (i_layer / 2u)) * p.nof_pilots + i_pilot;
+        rx_out[2 * rx_i]     = rx.x;
+        rx_out[2 * rx_i + 1] = rx.y;
+    }
 
     const ulong  ref_i = (static_cast<ulong>(gid.y) * p.nof_pilots + i_pilot) * 2;
     const float2 r     = float2(ref[ref_i], ref[ref_i + 1]);
@@ -365,19 +406,8 @@ kernel void mmse_pilots_scatter_y(device const float*           lse [[buffer(0)]
 
 /// Threadgroup sizes of the two kernels below. Compile-time constants on purpose: they stride the
 /// walks, so a zero here would be an infinite loop.
-constant uint mmse_smooth_tg_size = 128;
-constant uint mmse_sigma2_tg_size = 256;
-
-/// Upper bounds, matching the host's buffers: MAX_V_PILOTS, MAX_FILTER_LENGTH (31), the DM-RS symbol
-/// and layer counts, MAX_NSYMB_PER_SLOT and the per-(symbol, layer) capacity of the LSE buffers
-/// (MAX_NOF_PILOTS_SYMBOL = MAX_NOF_SUBCARRIERS + 2 * MAX_V_PILOTS = 3300 + 24).
-constant uint mmse_max_v_pilots    = 12;
-constant uint mmse_max_filter_len  = 31;
-constant uint mmse_max_dmrs_symb   = 4;
-constant uint mmse_max_layers      = 4;
-constant uint mmse_max_cdm         = 2;
-constant uint mmse_max_slot_symb   = 14;
-constant uint mmse_max_pilots_symb = 3324;
+/// \note The sizes and the upper bounds they clamp against are declared at the TOP of this file
+///       (mmse_max_*): mmse_pilots_lse() needs them for the received-pilot store.
 
 struct mmse_sigma2_params {
     uint  nof_dmrs_symb; // DM-RS symbols of the hop
@@ -689,5 +719,67 @@ kernel void mmse_pilots_sigma2(device const float*          smoothed [[buffer(0)
 
     if (tid == 0u) {
         out[0] = (nof_pairs == 0u) ? 0.0F : (sigma2 / static_cast<float>(nof_pairs));
+    }
+}
+
+/// Parameters of the EPRE reduction: the [symbol][CDM group][pilot] extent of the received pilots it
+/// walks. Appended as a struct of its own rather than reusing mmse_sigma2_params because the host
+/// mirror (mmse_epre_params_t in ocudu_metal_mmse_engine.mm) is then trivially small and cannot drift
+/// with a field added for another kernel.
+struct mmse_epre_params {
+    uint nof_dmrs_symb; // DM-RS symbols of the hop
+    uint nof_cdm;       // CDM groups of the hop (the received pilots are indexed by group)
+    uint nof_pilots;    // pilots per (symbol, group)
+};
+
+/// \brief The hop's EPRE sum: SUM of |rx|^2 over the received DM-RS pilots. One threadgroup.
+///
+/// The estimator's base class accumulates its EPRE statistic from the received pilots it extracts
+/// (port_channel_estimator_average_impl::compute_hop_submit()). A hop whose received pilots the DEVICE
+/// builds - mmse_pilots_lse() above writes them - has no host copy to accumulate, so the same sum is
+/// reduced here, in the extraction's own command buffer, from the very array that kernel just wrote
+/// (the host then adds it to the statistic exactly where its own per-symbol terms used to go, and the
+/// final division by the hop's pilot count is unchanged).
+///
+/// It is a REPORTING value (EPRE reaches the channel state information and the debug dump, never the
+/// LLR path), and this reduction is deliberately NOT bit-identical to the host's: that one walks each
+/// DM-RS symbol with ocuduvec::average_power(), a SIMD-vectorized accumulation with its own lane
+/// order, and multiplies the mean back by the length; this is a strided sum with a tree reduction
+/// over the same values. The difference is in the last bits - the acceptance the device RSRP and the
+/// device TA already have. It is a kernel of its own, and not a line in mmse_pilots_sigma2() or in
+/// mmse_pilots_power(), because those two produce DATA-PATH values (the noise variance and the
+/// diagonal loading of A): adding arithmetic there moves the published estimate (see the file header
+/// and mmse_pilots_power.metal).
+kernel void mmse_pilots_epre(device const float*        rx   [[buffer(0)]], // [symb][cdm][pilot], cf32
+                             device float*              epre [[buffer(1)]], // ONE float
+                             constant mmse_epre_params& p    [[buffer(2)]],
+                             uint                       tid  [[thread_position_in_threadgroup]])
+{
+    threadgroup float red[mmse_sigma2_tg_size];
+
+    // Clamped into the buffers' maxima before anything is read: a caller's mistake must be able to
+    // produce a wrong number and nothing else (see the safety note above the constants).
+    const uint ns   = min(p.nof_dmrs_symb, mmse_max_dmrs_symb);
+    const uint ncdm = min(p.nof_cdm, mmse_max_cdm);
+    const uint npf  = min(p.nof_pilots, mmse_max_pilots_symb);
+    // Bounded by MAX_DMRS_SYMBOLS * (MAX_LAYERS / 2) * MAX_NOF_PILOTS_SYMBOL = 26592, and the walk
+    // strides by a compile-time threadgroup size, so the loop always terminates.
+    const uint total = ns * ncdm * npf;
+
+    float acc = 0.0F;
+    for (uint i = tid; i < total; i += mmse_sigma2_tg_size) {
+        acc += rx[2 * i] * rx[2 * i] + rx[2 * i + 1] * rx[2 * i + 1];
+    }
+
+    red[tid] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint step = mmse_sigma2_tg_size / 2; step != 0u; step /= 2u) {
+        if (tid < step) {
+            red[tid] += red[tid + step];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0u) {
+        epre[0] = red[0];
     }
 }

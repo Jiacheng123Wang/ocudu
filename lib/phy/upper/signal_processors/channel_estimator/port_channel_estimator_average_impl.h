@@ -310,6 +310,73 @@ protected:
   /// the pre-stage, which is also the fallback the caller selects with the estimator's own knobs.
   virtual bool stage_produces_ls_pilots(const fd_td_estimation_stage_args& args) const { return false; }
 
+  /// \brief Whether the estimation stage builds this hop's INPUTS itself, on the device.
+  ///
+  /// The hop's received pilots are extracted from the resource grid by the host pre-stage
+  /// (extract_hop_rx_pilots()) and used for three things: the least-squares pilots and the CFO
+  /// (run_ls_pre_stage()), the EPRE statistic, and the classical noise estimate. A device backend
+  /// whose lane keeps the grid on the device can produce the received pilots where they already are -
+  /// the Metal MMSE estimator's extraction kernel reads them in place - and can reduce the two
+  /// statistics that were derived from them (see get_device_epre_sum()). When it answers true here,
+  /// compute_hop_submit() does not extract them at all: the extraction would be a read of
+  /// device-written memory whose values the host then hands straight back to the device, which is the
+  /// per-hop round trip the `gpu` pipeline mode counts and forbids.
+  ///
+  /// It is the same promise stage_produces_ls_pilots() makes about the least-squares pilots, answered
+  /// by the same gate: a backend that builds one builds the other, and a backend that answers true here
+  /// MUST answer true there (the host pre-stage reads the received pilots).
+  ///
+  /// Every host consumer that can still turn up late is served by a FALLBACK that extracts the pilots
+  /// after the fact, from the same grid, and reports the read it costs: the stage's own cold path when
+  /// its device build fails and it needs the host's least-squares pilots after all, and
+  /// compute_hop_finish() when no device noise variance was published for the hop. A hop that takes
+  /// either route is a legitimate fallback and stays visible in the crossing contract.
+  ///
+  /// The default is false: the classical estimator and every host-side backend keep the extraction.
+  virtual bool stage_produces_hop_inputs(const fd_td_estimation_stage_args& args) const
+  {
+    (void) args;
+    return false;
+  }
+
+  /// \brief The sum of |received pilot|^2 over this hop's DM-RS pilots, when a device backend reduced
+  /// it where the pilots live (the Metal MMSE estimator does, see mmse_pilots_epre).
+  ///
+  /// It is the numerator of the EPRE statistic, which is a REPORTING value: it reaches the channel
+  /// state information and the debug dump, never the LLR path. A backend that builds the hop's received
+  /// pilots itself hands the sum over here, so that the host - which no longer has those pilots -
+  /// accumulates the same number it used to accumulate symbol by symbol.
+  ///
+  /// The two reductions walk the same values in different orders (the host's per-symbol accumulation is
+  /// SIMD-vectorized), so they agree to the last bits rather than bit for bit: the same acceptance the
+  /// device RSRP sum and the device time alignment have.
+  ///
+  /// \return The hop's SUM of |rx|^2, or nullopt when the host must produce it itself (no device
+  ///         reduction for this hop, or a stage that did not run).
+  virtual std::optional<float> get_device_epre_sum() const { return std::nullopt; }
+
+  /// \brief Extracts this hop's received pilots from the resource grid on the HOST.
+  ///
+  /// Called by compute_hop_submit() when stage_produces_hop_inputs() answers false, and by the
+  /// fallbacks that find - after the fact - that a host consumer needs the pilots anyway: the stage's
+  /// cold path (its device build failed and it needs the host's least-squares pilots) and
+  /// compute_hop_finish() (no device noise variance was published, so the classical estimate below has
+  /// to run). The second call for a hop is a no-op and returns nullopt.
+  ///
+  /// \note It ALSO accumulates the EPRE statistic, term by term, in the order the unconditional
+  ///       extraction used - so the lanes that extract on the host publish the same bits they did
+  ///       before this batch. The device route never calls it: the device reduces the same sum in its
+  ///       own order and publishes it through get_device_epre_sum().
+  void extract_hop_rx_pilots(const resource_grid_reader& grid, unsigned port, unsigned hop);
+
+  /// \brief Whether the pending hop's received pilots are already in host memory.
+  ///
+  /// Exposed to backends because a backend that promised to build them (stage_produces_hop_inputs())
+  /// can still find - in its own cold path, or where it needs the host's noise variance - that a host
+  /// consumer wants them after all: it then extracts them itself, where the answer is known, through
+  /// extract_hop_rx_pilots().
+  bool host_hop_pilots_ready() const { return pending_hop.host_inputs; }
+
   /// \brief The classical FD smoothing + TD interpolation stage (the default behavior,
   /// factored out of the virtual hook). Derived estimators that need the classical
   /// per-symbol estimates as their input (e.g. the AI channel estimator) call this
@@ -418,6 +485,19 @@ private:
     float                beta_scaling = 0.0F;
     /// Estimated CFO of the pending hop (empty when unavailable).
     std::optional<float> cfo_hop;
+    /// \brief Whether the HOST extracted this hop's received pilots (batch S13-P2).
+    ///
+    /// Set by extract_hop_rx_pilots(), which is called from compute_hop_submit() when the stage does
+    /// not build them (and, as a fallback, from the stage's cold path or from compute_hop_finish()).
+    /// The EPRE statistic and the classical noise estimate both read the pilots, and the two sides must
+    /// not contribute the same hop twice.
+    bool                 host_inputs = false;
+    /// Grid and port the pending hop was submitted with: kept so that a hop whose received pilots the
+    /// stage was supposed to build and did not can still have them extracted, after the fact, from the
+    /// same grid (see compute_hop_finish()). The grid outlives the hop: the caller holds it for the
+    /// whole processing of the slot, which is when the pending hop is completed.
+    const resource_grid_reader* grid = nullptr;
+    unsigned                    port = 0;
     /// Filtered pilot estimates of the pending hop: written by the estimation stage, read by the
     /// statistics. \c filtered_pilots_lse is a view over it and is rebuilt in compute_hop_finish().
     static_re_measurement<cf_t, MAX_NOF_PILOTS_SYMBOL, MAX_NOF_DMRS_SYMBOLS, MAX_LAYERS> enlarged_filtered_pilots_lse;

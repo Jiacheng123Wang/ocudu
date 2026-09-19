@@ -392,9 +392,24 @@ public:
     const float* cfo_prev = nullptr;
     /// Received DM-RS of the hop, [symbol][cdm][pilot] real/imag interleaved - the same array the
     /// equalizer's noise reduction (K4) reads. The noise variance below needs it.
-    const float* rx_pilots = nullptr;
+    ///
+    /// It is an INPUT on the routes where the host extracts the pilots, and the extraction kernel's
+    /// OUTPUT on the routes where the device does (batch S13-P2: mmse_pilots_lse() stores the rx it
+    /// reads into this same buffer, which is what let the host stop extracting - and therefore stop
+    /// reading the device's grid and handing the values straight back).
+    float* rx_pilots = nullptr;
     /// CAPACITY of \c rx_pilots in bytes.
     std::size_t rx_bytes = 0;
+    /// \brief Destination of the hop's EPRE reduction (the SUM of |rx|^2 over \c rx_pilots), ONE
+    /// float, or nullptr to skip it.
+    ///
+    /// EPRE is a REPORTING value the estimator's base class accumulated from the received pilots it
+    /// extracted itself. On a hop whose received pilots the DEVICE builds there is no host copy to
+    /// accumulate, so the same sum is reduced here - in the extraction's own command buffer, right
+    /// after the kernel that produces the values - and the host adds it to the statistic where its
+    /// own per-symbol terms used to go (see mmse_pilots_epre, and
+    /// port_channel_estimator_average_impl::get_device_epre_sum()).
+    float* epre = nullptr;
     /// Destination of the frequency-smoothed pilots, [symbol][layer][pilot] real/imag interleaved.
     /// A scratch buffer of the same size as \c lse: the smoothing is what the noise variance is
     /// estimated from, and the LSE itself must survive (the weights' y vectors are built from it
@@ -523,6 +538,15 @@ public:
   /// Whether the metallib carries the device-side rsrp reduction (mmse_rsrp). When false the caller
   /// must keep reducing the pilots on the host - the same shape as scatter_available().
   bool rsrp_available() const;
+
+  /// \brief Whether the metallib carries the received pilots' EPRE reduction (mmse_pilots_epre).
+  ///
+  /// S13-P2: the estimator stops extracting the received pilots on the hops where the device builds
+  /// them, and the EPRE statistic is then produced here. A metallib that builds the pilots but cannot
+  /// reduce them leaves the caller with no statistic for such a hop, so it must keep the host
+  /// extraction - which is what port_channel_estimator_metal_mmse_impl::stage_produces_hop_inputs()
+  /// asks before answering.
+  bool epre_available() const;
 
   /// Whether the metallib carries the device-side time-alignment reduction (mmse_ta_profile).
   bool ta_available() const;

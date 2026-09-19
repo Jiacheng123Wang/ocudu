@@ -353,7 +353,7 @@ K4 的 `gpu_nv` 就是"从同一份 h 归约、结果留在设备、消费者不
 | **5f** | 写侧：`h_starts` 表与 epoch 表 | **5f-1 完成**（`9e36fef3ed`，§19.5）：`h_starts` 进参数块，replay 写 **5 → 1/跳**；顺带修掉一个**既有批处理缺陷**。**5f-2 未做**：`symbol_start_epochs`（56 B，1 次/配置）仍在宿主上传 ⇒ **契约仍 7/8** |
 | **5g** | 5f-2：epochs 由 kernel 从 (cp, scs) 算 | ✅ **完成并空中验证**（`45fa002d6c`，腿 `5g-epochs_0919_1945`，§19.6.2b）：27 捕获四个 dump 与 HEAD **逐字节相同**；replay 写侧 **1 → 0/跳**、分项表空 ⇒ **写侧清零**；空口 **契约 8/8**、0 RF failure、CRC 79.19%。**⚠ 该"零"只在被审计的站点上成立**：P1 发现一条**每跳**的未计数往返（§19.6.2b 勘误块 + `wip/S13_fallback_coverage.md` §5b）|
 | **S13-P1** | 回退路径的可见性（仪表）| ✅ **第一批完成**（`b3f72deadb`）：基类虚钩子 `account_host_grid_read`（默认空 ⇒ CPU 车道不变）+ `ce: rx pilots staged (host)` 站点 —— 正是它们**照出了那条每跳往返**。**剩余**：回退门计数 + A/R_hp / y staging 两个站点（`wip/S13_fallback_coverage.md` §4.6）|
-| **S13-P2** | 消掉那条每跳往返（设备自建 `gpu_rx_pilots`，EPRE 由设备发布）| **下一个数据面批次**（落点清单见 §5.5）；判据：**带着 P1 的站点**契约回到 `0.00 read + 0.00 write`/跳 |
+| **S13-P2** | 消掉那条每跳往返（设备自建 `gpu_rx_pilots`，EPRE 由设备发布）| ✅ **离线完成**（§5.5）：27 捕获 `_llr`/`_h`/`.bin` **0 差异**、`_ce.txt` 只动 `epre`（≤2.3e-07）；replay 写侧 **1.00 → 0.00**/跳、**分项表空**；`CPU_LS=1` 网四个 dump **全新逐字节相同**。**空中腿待跑（契约预期 8/8）** |
 | **测** | `[ul_gpu_pipeline]`：IQ 进 GPU → LLR 出 GPU（用户要求，只对 `mode=gpu`）| ✅ **完成并空中验证**（`7d968cfb84`，腿 `probe-iq2llr_0919_2216`，§20）：探针 + `leg_report.sh -- latency` + 单测（含反证）+ 27 捕获逐字节不变；**空口 4036 个样本、mean 2677.2 µs**（§20.6）|
 
 ### 5.1 批次 2 的三个做法与取舍
@@ -429,50 +429,82 @@ OCUDU_CE_DEV_Y=0       3.10 读 + 2.65 写 /跳   ← 参考臂：宿主 stage y
 - **契约措辞**：主句仍写 "the fused lane (mode=gpu) allows 0"，容易被读成整车道结论。**考虑改措辞。**
 - **`ab_dumps.sh` 要能分开报"发布判据"与"调试判据"**（见 §9 坑 12）。
 
-### 5.5 ★ S13-P2 的落点清单（读代码得到，可直接动手）
+### 5.5 ✅ S13-P2：那条**每跳往返**消掉了（离线判据全过，空中腿待跑）
 
-**题目**：消掉那条**每跳**往返。**空口实证在 §20.5**：契约唯一的 FAILED 就是它
-（`1.00 read + 1.00 write`/跳、站点 `ce: rx pilots staged (host)`、平均 **2425 B/跳**、4036/4036 跳全中）。
+**题目与机理**：基类 `compute_hop_submit()` **无条件**从资源网格抽本跳的接收 DM-RS 导频
+（旧注释原文："it is unconditional: only the least-squares pilots and the CFO can be taken over by the
+stage"）；gpu 车道里那张网格是**前端 DFT 写在设备上**的（S-7b）⇒ 宿主读它（`account_host_grid_read`
+= **读**），紧接着 `stage_device_noise_inputs()` 把这些值**原样写回** `gpu_rx_pilots`（= **写**）。
+空口上这就是 `1.00 read + 1.00 write`/跳、平均 2425 B/跳（§20.5）。
 
-**机理**（handoff-8 §4 / `wip/S13_fallback_coverage.md` §5b）：基类 `compute_hop_submit()`
-**无条件**从资源网格抽本跳的接收 DM-RS 导频（注释原文："it is unconditional: only the least-squares
-pilots and the CFO can be taken over by the stage"）；gpu 车道里那张网格是**前端 DFT 写在设备上**的
-（S-7b）⇒ 宿主读它（`account_host_grid_read` = **读**），紧接着 `stage_device_noise_inputs()` 把这些值
-**原样写回** `gpu_rx_pilots`（= **写**）。
+#### 5.5.1 怎么做的（两件事）
 
-**两个动作**：
+1. **消写——设备自己建接收导频**。`mmse_pilots_lse`（`ocudu_mmse_pilots.metal`）**已经在读同一批 RE**
+   （`mmse_pilots_read_grid()` 返回的 `float2 rx`），所以它只是**多存一次它已经加载的值**：
+   新的 `rx_out` buffer，布局 `[symb][cdm][pilot]`（K4 与噪声块索引的那个），
+   **只让偶数 layer 写**（同一 CDM 组的两个 layer 读同一个 RE），
+   下标 `(i_symb * nof_cdm + i_layer / 2) * nof_pilots + i_pilot`，越界用编译期上界挡住。
+   * **没有给它加任何算术**：`mmse_pilots_lse` 是逐元素的（没有长累加），按 §19.6.3 这是"可以加"的那一类；
+     `mmse_pilots_cfo`（长累加）与 K4 `mmse_noise`（归约，发布噪声方差）**一个字节都没动**。
+   * 这个文件的两个 `constant` 块（`mmse_smooth/sigma2_tg_size` 与 `mmse_max_*`）
+     **上移到文件顶部**（原来在 smoothing 段之前），因为 LSE kernel 现在要引用那些上界；
+     移动的只有声明，实测**没有动任何发布位**（见 5.5.2 的 `_h.bin` 0 字节）。
+2. **消读——宿主不再抽**。新增基类钩子
+   `virtual bool stage_produces_hop_inputs(const fd_td_estimation_stage_args&)`（默认 false ⇒
+   CPU 车道与所有宿主后端一字不变）：Metal 实现答 `stage_produces_ls_pilots(args) &&
+   engine->epre_available()`。为让它能在抽取**之前**被问到，`stage_args` 的构造**上移**到抽取循环之前
+   （它只装几何与缓冲引用，不依赖抽取结果）。
+   * **EPRE 由设备发布**：新 kernel `mmse_pilots_epre`（同一个 extraction command buffer 的最后一个
+     dispatch，读 `mmse_pilots_lse` 刚写的数组）把 `SUM |rx|^2` 归约到一个旋转 slot；
+     宿主通过新的 `get_device_epre_sum()` 取它，加进 `epre` 的位置与原来它自己的逐符号项完全相同。
+     **注意它是单独一个 kernel，不是塞进 `mmse_pilots_sigma2`/`mmse_pilots_power`**：后两者的输出
+     分别是 A 的对角加载与噪声方差（**数据面**），加算术就会动发布位。
+     `epre` 本身是**上报值**，两条归约的和**顺序不同**（宿主是 SIMD 逐符号，设备是树形），
+     所以两者是"末位一致"而不是逐位相同 —— 与 5a 的 rsrp、5b 的 TA 同一个验收口径（见 5.5.2）。
+3. **关键设计决定：不预测，晚抽**。宿主需要接收导频的地方有三个（自己的预级、EPRE、经典噪声估计），
+   而"设备会不会给出噪声方差/EPRE"要等**stage 内部**才知道（几何、block 切分、knob）。
+   按 §7 坑 16（"不要让调用方预测内部的判定"），基类**不预测**：
+   抽取只有一件事实——"宿主有没有这些导频"（`pending_hop.host_inputs`）——
+   而两条**晚期回退**在答案已知的地方按需抽取，并且**照常计入穿越**：
+   * Metal stage 的**冷路径**（设备 LSE 构建失败 ⇒ 它需要宿主的 LS 导频）；
+   * `compute_hop_finish()`（这一跳**没有**设备噪声方差 ⇒ 宿主的经典噪声估计要跑）；
+   * Metal stage 里 `OCUDU_CE_DEV_SIGMA2=0`（宿主 `estimate_sigma2()` 要读导频）。
+   每跳的 EPRE 只由**一方**贡献：宿主抽过 ⇒ 用宿主自己的逐符号和（**与改动前逐位相同**）；
+   没抽过 ⇒ 用设备归约的和。
 
-1. **消写**：让设备自己建 `gpu_rx_pilots`。**落点**：K0-a 的 `mmse_pilots_lse`
-   （`ocudu_mmse_pilots.metal`）**已经在读同一批 RE** —— `mmse_pilots_read_grid()` 返回的那个 `float2 rx`
-   就是要的值 ⇒ 只需加一个输出 buffer + 一次 store。布局 `[npt][nof_cdm_groups][npf]` complex，
-   而该 kernel 的线程按 `(i_pilot, i_symb * nof_layers + i_layer)` 走 ⇒ **只让偶数 layer 写**
-   （同一 CDM 组的两个 layer 读的是同一个 RE），下标 `(i_symb * nof_cdm + i_layer / 2) * npf + i_pilot`。
-   * ⚠ **该 kernel 是逐元素的（没有长累加）**，按 §19.6.3 的规则**可以**加代码；
-     但它旁边的 `mmse_pilots_cfo` **是**长累加 ⇒ **绝不要动那个 kernel**（§19.6.3 的 1 ulp 就是这么来的）；
-   * ⚠ **绝不能碰** K4 `mmse_noise`（`ocudu_mmse_reformat.metal`）：它的输出（噪声方差）是一个**归约**，
-     给它加"从 LSE 反推 y"这类新算术就会动发布位；y 必须由 K0-a 直接从网格产出；
-   * 顺序上没有问题：`cfo_dev` 就是"K0-a 写、K4 读"的同一个先例（同一个队列里前后两个命令缓冲）。
-2. **消读**：宿主抽导频只为了 (a) **EPRE**（`epre += average_power(rx) * size`，最后 `/nof_dmrs_pilots`，
-   一个**上报值**）与 (b) **回退**（设备覆盖不到这一跳时才自建 LSE/CFO）。
-   ⇒ 设备能覆盖这一跳（`stage_produces_ls_pilots()` 为真）时，宿主**整段抽取 + EPRE 都不该跑**；
-   EPRE 按 5a 的 rsrp 那样**由设备发布**（设备侧已有 `ocudu_mmse_pilots_power.metal` 在归约导频功率 ——
-   **先核对它的定义与宿主 `epre` 是不是同一个量**；不是就得在设备侧补一个同定义的归约，
-   **不能拿"差不多"的量顶**）。
-   * ⚠ **落点难点**：抽取循环发生在 `stage_args` **构造之前**（`rx_pilots` 是 `args` 的成员），
-     而现有钩子 `stage_produces_ls_pilots(args)` 拿不到 args 就答不了 ⇒ 需要一个**更早的虚钩子**，
-     或者把"本跳的输入由设备产生"这件事在基类里上移一层。
+#### 5.5.2 离线判据与结果（全过）
 
-**判据**（缺一不可）：
+| # | 判据 | 结果 |
+|---|---|---|
+| 1 | **契约的写侧归零**（replay 工具，默认旋钮）| ✅ A（HEAD）= `2.00 read + 1.00 write`/跳、站点 1 行 → B（P2）= **`1.00 read + 0.00 write`/跳、站点表空**（剩下的 1 读是 **replay 工具自己回读 h**，空口上没有它 ⇒ 预期 0.00 + 0.00）|
+| 2 | **数据面逐字节不变** | ✅ `_llr.bin` **0**、`_h.bin` **0**、`.bin` **0** 差异字节（27/27 捕获）|
+| 3 | **`_ce.txt` 的差异要能说清** | ✅ 29 字节、**只在 `epre` 字段**（10/27 捕获），最大相对差 **2.3e-07**（float 末位；其余 noise_variance / snr / rsrp / ta_us / cfo_hz **全同**）。工具：`wip/ab_replay_bins.sh` 的 `AB_KEEP` + 逐字段比较 |
+| 4 | **宿主路径逐位不变** | ✅ `OCUDU_CE_CPU_LS=1`（强制宿主预级）下 A/B **四个 dump 全新逐字节相同**（27/27，**包括 `_ce.txt`**）⇒ "宿主 EPRE 逐符号累加"这件事真的保住了 |
+| 5 | **回退旋钮仍然可用** | ✅ `OCUDU_CE_DEV_Y=0` 也是只剩 `epre`（29 字节）；此时宿主**晚抽**（回退），契约照旧显示那次读 —— **合法回退可见，不是静默** |
+| 6 | 单测 | ✅ `ctest -L phy` **171/171**（172 注册，1 disabled）、`ctest -L support` **562/562**；CE 的两个 Metal 用例过 |
+| 7 | A/B 的配对自证 | ✅ 新增一次性自证行 `[ce_inputs] received pilots: built on the DEVICE …`；`ab_replay_bins.sh` 的配对断言改成参数 `AB_MARKER`（5g 是 `epoch_impl`，本轮是 `ce_inputs`），A 不打印/B 打印 ⇒ `pairing-wrong=0` |
 
-1. **带着 P1 的两个站点**，默认旋钮下契约回到 **`0.00 read + 0.00 write`/跳、分项表空**；
-2. 27 捕获四个 dump 逐字节不变（LSE 线性、rx 是同一批 load，但**必须实测**——CFO/h 是敏感的）；
-3. `ctest -L phy` 172/172（macOS）、Ubuntu 全过；
-4. **一条腿**：契约 8/8、0 RF failure、CRC 与 5g/`probe-iq2llr` 同量级、`[ul_gpu_pipeline]` 无回归；
-5. **回退路径不许变哑**：`OCUDU_CE_CPU_LS=1` 或几何被拒时宿主**仍然**抽取（那是**合法回退**），
-   P1 的站点会把它数出来 —— 那种情况下契约变红是**预期**，不是回归。
+**⚠ 一条没解释的偶发**：`OCUDU_CE_DEV_Y=0` 臂的**第一次**比较里 `_h.bin` 差过 28 字节；
+之后**同一比较重跑 1 次、两个二进制各自的 A/A 自洽网各 1 次**（共 4×27 次运行）**全部 0 字节**，
+无法复现。已如实记录，**不当作已解释**（与 §20.4 那次 Metal 单测偶发同类）。
+默认臂（本轮真正要改的路由）**从未出现**这类差异。
 
-**P1 剩余（可与 P2 分开做）**：回退门的**拒绝计数**（`device_ls_refused`（几何被拒，区别于 engine 调用
-失败）/ `device_y_refused`（`record_device_y_stage` 的每个 `return false` 分支分类）/
+#### 5.5.3 待跑的腿（判据的最后一条）
+
+`mode=gpu` 一腿，二进制已按提交戳重建：
+
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s13p2
+bash doc_chinese/phy_pipeline_gpu/wip/leg_report.sh \
+     doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_s13p2_*.log.stderr
+```
+
+要盯：**契约 8/8**（跨越 = `0.00 read + 0.00 write`/跳、**分项表空**）、`0 RF failure`、
+CRC 与 `5g-epochs` / `probe-iq2llr` 同量级、`[ul_gpu_lane]` 的 dropped/carried = 0、
+`[ce_inputs]` 那行说 **DEVICE**、`[ul_gpu_pipeline]` 相比 `probe-iq2llr` 无回归。
+
+**P1 剩余（下一步，与本批分开）**：回退门的**拒绝计数**（`device_ls_refused`（几何被拒，区别于 engine
+调用失败）/ `device_y_refused`（`record_device_y_stage` 的每个 `return false` 分支分类）/
 `device_corr_refused` / `ta_refused` / `sigma2_refused` / `k3_refused`，打印进 `[metal_stats] mmse_ce` 行）
 + 另外两个盲点的站点（`stage_engine_group()` 里 A/R_hp 的宿主 `memcpy` 写；y staging 的逐导频读+写，
 含 pad 行 memset）。**自证判据**：用现成旋钮强制每条回退（`OCUDU_CE_DEV_Y=0`、`DEV_TA=0`、`DEV_SIGMA2=0`、
