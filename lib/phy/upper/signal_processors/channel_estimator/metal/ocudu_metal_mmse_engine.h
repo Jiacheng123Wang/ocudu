@@ -614,6 +614,39 @@ public:
   /// Whether the metallib carries the placement kernel, and the DFT kernel it feeds, for \c dft_size.
   bool ta_place_available(unsigned dft_size);
 
+  /// \brief Whether the metallib carries the FUSED time-alignment chain (batch 5d).
+  ///
+  /// That is the kernel the lane runs: placement, transform, power delay profile and peak in ONE
+  /// dispatch. Bounded by the profile it keeps in threadgroup memory, so \c dft_size must be at most
+  /// 2048 - the largest size the estimator's get_idft() can ask for.
+  bool ta_chain_available(unsigned dft_size) const;
+
+  /// \brief The hop's time alignment in ONE dispatch, out of the reformat's own h.
+  ///
+  /// The same chain run_ta_place() + the DFT engine + run_ta_profile() implement in three, and the one
+  /// the lane encodes (see encode_ta()): the placement and the transform happen inside the same
+  /// threadgroup, so nothing crosses a dispatch boundary and no intermediate buffer exists.
+  ///
+  /// \param[in]  h          the reformat's SOURCE, the buffer K5 also reads.
+  /// \param[in]  geometry   the hop's geometry (see hop_geometry).
+  /// \param[in]  dft_size   Transform size of one slice (<= 2048; the twiddle table is built for it).
+  /// \param[in]  stride     Pilot spacing in subcarriers, as the host's estimator is called with.
+  /// \param[in]  nof_dmrs_symbols The HOP's DM-RS symbol count (the slice count is this times layers).
+  /// \param[in]  dmrs_slots The hop's DM-RS slot symbols, ascending.
+  /// \param[in]  scs_hz     Subcarrier spacing of the hop, in Hz.
+  /// \param[in]  max_ta_samples Half-cyclic-prefix search window, in taps.
+  /// \param[out] ta_seconds The estimate, in SECONDS.
+  /// \return True when the dispatch was encoded and completed.
+  bool run_ta_chain(const void*         h,
+                    const hop_geometry& geometry,
+                    unsigned            dft_size,
+                    unsigned            stride,
+                    unsigned            nof_dmrs_symbols,
+                    const unsigned*     dmrs_slots,
+                    double              scs_hz,
+                    unsigned            max_ta_samples,
+                    void*               ta_seconds);
+
   /// \brief Batched inversion (K1): A_inv = (A)^-1 for each system, in-place Gauss-Jordan.
   ///
   /// \param[in,out] a           [systems][n][n] row-major matrices (overwritten with the inverse).

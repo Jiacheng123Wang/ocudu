@@ -9,6 +9,7 @@
 ///      on synthetic Vehicular-A channels.
 
 #include "../port_channel_estimator_metal_mmse_impl.h"
+#include "ocudu/support/page_aligned_allocator.h"
 #include "../ocudu_metal_mmse_engine.h"
 #include "ocudu_dft_metal_engine.h"
 #include "../ocudu_metal_mmse_engine.h"
@@ -673,6 +674,60 @@ std::vector<float> s12_make_hop_h(PilotOf pilot_of)
   return h;
 }
 
+/// \brief Times a batch of transforms of each size the port uses (OCUDU_CE_DFT_TIME).
+///
+/// The measurement that decides how batch 5b's three dispatches should be made cheaper. On air they
+/// cost the lane's weights command buffer ~50us/lane (ch_wt 352.3us before 5b, 399.8/406.1us after -
+/// design doc 17.10.5), while the arithmetic is nothing: a 128/256-point transform is a few thousand
+/// flops. So the question this answers is WHERE the cost sits - per dispatch, per transform, or in the
+/// kernel's 32 KB static threadgroup scratch (MAX_FFT_N = 4096 complex values, the per-threadgroup
+/// limit, reserved even for a 128-point transform).
+///
+/// The batch sweep is the discriminator: a cost that does not grow with the batch is per DISPATCH
+/// (the fix is then fewer dispatches), a cost that grows with it is per transform, and a cost that
+/// disappears when the scratch shrinks is the threadgroup reservation. The GPU window (GPUEndTime -
+/// GPUStartTime) is printed instead of a wall clock, which is dominated by the driver's round trip.
+static void s12_dft_batch_timing()
+{
+  if (std::getenv("OCUDU_CE_DFT_TIME") == nullptr) {
+    return;
+  }
+  constexpr unsigned reps = 60;
+  for (unsigned size : {128u, 256u, 2048u}) {
+    static metal::dft_metal_engine engine;
+    if (!engine.init(size, /*inverse=*/false)) {
+      std::printf("S12 DFT-TIME %4u: init failed\n", size);
+      continue;
+    }
+    for (unsigned batch : {1u, 2u, 4u, 8u, 16u}) {
+      // Page-aligned on purpose: a misaligned input takes the engine's copy fallback, which would add
+      // a constant to the comparison and blur exactly what is being measured.
+      std::vector<cf_t, ocudu::page_aligned_allocator<cf_t>> in(static_cast<std::size_t>(size) * 16u);
+      std::vector<cf_t, ocudu::page_aligned_allocator<cf_t>> out(static_cast<std::size_t>(size) * 16u);
+      for (std::size_t i = 0; i != in.size(); ++i) {
+        in[i] = cf_t(std::cos(0.01F * static_cast<float>(i)), std::sin(0.01F * static_cast<float>(i)));
+      }
+      if (!engine.run(in.data(), out.data(), batch)) {
+        std::printf("S12 DFT-TIME %4u batch %2u: run failed\n", size, batch);
+        continue;
+      }
+      double gpu = 0.0;
+      for (unsigned r = 0; r != reps; ++r) {
+        if (!engine.run(in.data(), out.data(), batch)) {
+          std::printf("S12 DFT-TIME %4u batch %2u: run failed at rep %u\n", size, batch, r);
+          break;
+        }
+        gpu = std::max(gpu, engine.last_gpu_wait_us());
+      }
+      std::printf("S12 DFT-TIME %4u batch %2u: gpu window %6.2f us (%.2f us/transform)\n",
+                  size,
+                  batch,
+                  gpu,
+                  gpu / static_cast<double>(batch));
+    }
+  }
+}
+
 /// \brief L2 (batch 5b): K7 ALONE - does the placement land where the transform reads it?
 ///
 /// The first dispatch of this kernel never returned and took the machine down (see the incident
@@ -762,14 +817,11 @@ static bool s12_device_ta_chain_matches_host()
     init_done = engine.init();
   }
   {
-    const bool place_ok = engine.ta_place_available(s12_dft_size);
-    const bool k6_ok    = engine.ta_available();
-    if (!init_done || !place_ok || !k6_ok) {
-      std::fprintf(stderr,
-                   "S12 chain: init=%d K7+tab=%d K6=%d (size=%u)\n",
+    const bool chain_ok = engine.ta_chain_available(s12_dft_size);
+    if (!init_done || !chain_ok) {
+      std::fprintf(stderr, "S12 chain: init=%d fused chain=%d (size=%u)\n",
                    init_done ? 1 : 0,
-                   place_ok ? 1 : 0,
-                   k6_ok ? 1 : 0,
+                   chain_ok ? 1 : 0,
                    s12_dft_size);
       return false;
     }
@@ -822,28 +874,55 @@ static bool s12_device_ta_chain_matches_host()
       }
     }
 
-    std::fill(placed.begin(), placed.end(), cf_t(7.5F, -7.5F));
-    if (!engine.run_ta_place(h.data(), s12_hop_geometry(), s12_dft_size, s12_stride, placed.data())) {
-      std::fprintf(stderr, "S12 chain: K7 failed\n");
+    // ---- the DEVICE route, as the lane runs it: ONE fused dispatch ----
+    //
+    // The ladder gates the pieces separately as well (l2_k7_placement_only for the placement, the K6
+    // check for the profile), but THIS is the path the lane encodes: placement, transform, profile and
+    // peak in one threadgroup (ocudu_mmse_ta.metal, batch 5d). Running it here is what makes the
+    // ladder's chain gate say something about the code that ships.
+    float chain_seconds = std::nanf("");
+    if (!engine.run_ta_chain(h.data(),
+                             s12_hop_geometry(),
+                             s12_dft_size,
+                             s12_stride,
+                             s12_npt,
+                             s12_dmrs_syms,
+                             scs_hz,
+                             window,
+                             &chain_seconds)) {
+      std::fprintf(stderr, "S12 chain: run_ta_chain failed\n");
       return false;
     }
+    const double chain_ta = static_cast<double>(chain_seconds);
 
-    // The placement itself, position by position: the pilot of the subcarrier it maps to, zero
-    // everywhere else. Checked on every delay, not only the first: the sentinel makes each of them an
-    // independent witness that the kernel writes the whole slice.
-    for (unsigned s = 0; s != n_symbols; ++s) {
-      for (unsigned j = 0; j != s12_dft_size; ++j) {
-        const cf_t exp = (j < s12_nof_pilots) ? pilot_of(s, j) : cf_t(0.0F, 0.0F);
-        const cf_t got = placed[static_cast<std::size_t>(s) * s12_dft_size + j];
-        if ((got != exp) && (++n_place_bad <= 4)) {
-          std::fprintf(stderr,
-                       "  [chain] placement: slice %u position %u: expected (%f,%f), got (%f,%f)\n",
-                       s,
-                       j,
-                       exp.real(),
-                       exp.imag(),
-                       got.real(),
-                       got.imag());
+    // The three-dispatch route, on the same input, as a cross-check of the fused kernel: the two are
+    // different code paths to the same number, and a fused kernel that disagreed with the composition
+    // it replaces would be a defect either way round.
+    {
+      std::vector<cf_t> placed_sep(static_cast<std::size_t>(n_symbols) * s12_dft_size, cf_t(0.0F, 0.0F));
+      std::vector<cf_t> spectra_sep(static_cast<std::size_t>(n_symbols) * s12_dft_size);
+      std::vector<cf_t> in_sep(s12_dft_size);
+      std::vector<cf_t> out_sep(s12_dft_size);
+      if (engine.run_ta_place(h.data(), s12_hop_geometry(), s12_dft_size, s12_stride, placed_sep.data())) {
+        for (unsigned sl = 0; sl != n_symbols; ++sl) {
+          std::copy(placed_sep.begin() + static_cast<std::size_t>(sl) * s12_dft_size,
+                    placed_sep.begin() + static_cast<std::size_t>(sl + 1) * s12_dft_size,
+                    in_sep.begin());
+          if (!dft.run(in_sep.data(), out_sep.data(), 1)) {
+            std::fprintf(stderr, "S12 chain: the reference IDFT dispatch failed\n");
+            return false;
+          }
+          std::copy(out_sep.begin(), out_sep.end(), spectra_sep.begin() + static_cast<std::size_t>(sl) * s12_dft_size);
+        }
+        const double sep_ta = s12_run_ta_kernel(spectra_sep, s12_dft_size, n_symbols, s12_stride, scs_hz, window);
+        if (!std::isnan(sep_ta)) {
+          const double fused_vs_sep_ns = (chain_ta - sep_ta) * 1e9;
+          if (std::fabs(fused_vs_sep_ns) > 1e-3) { // the same arithmetic: 1 ps is a generous bound
+            std::printf("  S12 chain: fused %.6f us vs the three-dispatch route %.6f us (diff %.3f ns)\n",
+                        chain_ta * 1e6,
+                        sep_ta * 1e6,
+                        fused_vs_sep_ns);
+          }
         }
       }
     }
@@ -865,12 +944,6 @@ static bool s12_device_ta_chain_matches_host()
         return false;
       }
       std::copy(out.begin(), out.end(), spectra.begin() + static_cast<std::size_t>(s) * s12_dft_size);
-    }
-
-    const double chain_ta = s12_run_ta_kernel(spectra, s12_dft_size, n_symbols, s12_stride, scs_hz, window);
-    if (std::isnan(chain_ta)) {
-      std::fprintf(stderr, "S12 chain: K6 failed\n");
-      return false;
     }
 
     const double diff_ns = (host_ta - chain_ta) * 1e9;
@@ -914,6 +987,9 @@ int main()
   // one test process can only have one value of it, and forcing the probe's arm is what keeps these
   // comparisons meaningful.
   setenv("OCUDU_CE_HOST_GRID", "1", 1);
+
+  // The transform dispatch cost (batch 5d): printed first, while the GPU is otherwise idle.
+  s12_dft_batch_timing();
 
   std::mt19937 rng(1234);
 

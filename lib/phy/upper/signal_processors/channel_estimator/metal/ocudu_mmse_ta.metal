@@ -33,6 +33,10 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// The transform the fused chain runs: the very butterflies dft_dit uses, from the DFT engine's own
+// directory, so there is one implementation of them (see the header).
+#include "../../../../generic_functions/metal/ocudu_dft_butterflies.h"
+
 /// ---- Compile-time bounds. NO loop in this file may be bounded by a PARAMETER. ------------------
 ///
 /// A kernel whose termination depends on its inputs does not fail as "a wrong number" - it fails as a
@@ -380,4 +384,218 @@ kernel void mmse_ta_place(device const float*             h [[buffer(0)]],  // [
     slice[2u * j]      = re;
     slice[2u * j + 1u] = im;
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The FUSED chain (batch 5d): placement + transform + profile + peak, in ONE dispatch.
+//
+// ---- Why one kernel instead of three ----
+//
+// The port started as three dispatches (K7 places the pilots, the DFT engine's dft_dit transforms
+// them, K6 reduces the profile), which is the natural decomposition and the one the ladder validates
+// kernel by kernel. On air the three of them cost the lane's weights command buffer ~50us/lane
+// (measured: ch_wt 352.3us before the port, 399.8/406.1us with it - design doc 17.10.5), while the
+// arithmetic is nothing: a 128-point transform is a few thousand flops. Two experiments removed the
+// obvious candidates for that cost - the kernel's 32 KB static threadgroup scratch (a threadgroup
+// ARGUMENT version measured the same GPU window) and the two scope-wide memory barriers (removing
+// them left the offline per-hop delta unchanged) - which leaves the dispatches themselves.
+//
+// So they become one. The whole chain needs ONE threadgroup anyway: production transforms 2..3 slices
+// of 128/256 points, and the peak search is a single thread's scan over ~9 taps. Doing all of it in
+// one threadgroup also removes the intermediate spectra buffer (13 KB per hop that no longer has to be
+// written and read), the two cross-dispatch dependencies, and the switch between two metallibs.
+//
+// ---- Bounds (unchanged discipline, see the note at the top of this file) ----
+//
+// Every loop is bounded by a compile-time constant and the parameters only break or skip. The one
+// place this kernel is narrower than the three-dispatch route is the transform size: the profile it
+// keeps in threadgroup memory is what caps it at mmse_ta_chain_max_size (2048 = the largest size the
+// estimator's get_idft() can ask for, since 275 PRB x 6 pilots scales to exactly 2048). A caller with
+// a wider transform keeps the three-dispatch route (or the host).
+
+constant uint mmse_ta_chain_max_size = 2048;
+
+struct mmse_ta_chain_params {
+  // The hop's geometry, field for field mmse_ta_place_params' leading part (and K5's): the same h is
+  // indexed the same way by every kernel that reads it.
+  uint  nout_stride;
+  uint  n_blk;
+  uint  nf_std;
+  uint  sc_tail_base;
+  uint  nf_tail;
+  uint  sys_tail;
+  uint  nof_layers;
+  uint  nof_symbols;
+  uint  dc_sc;           // unused here (the host's TA input includes the DC comb position)
+  uint  dmrs_sym_bits;   // unused here (the hop's own symbols travel in dmrs_slots)
+  uint  pilot_re_bits[4];
+  uint  size;            // transform size of one slice
+  uint  stride;          // pilot spacing in subcarriers, as the host's estimator is called with
+  uint  nof_dmrs_symbols; // slices = nof_dmrs_symbols x nof_layers
+  uint  dmrs_slots[mmse_ta_max_dmrs];
+  uint  radix2;          // log2(size): the twiddle table is the DFT engine's, built for this size
+  uint  max_ta_samples;  // half-cyclic-prefix search window, in taps
+  float scs_hz;
+  uint  nof_taps;        // 5 or 3: the taps the parabolic refinement fits over
+  uint  pad0;
+  uint  pad1;
+};
+
+kernel void mmse_ta_chain(device const float*              h [[buffer(0)]],  // [nof_systems][n_blk slots][2*nout_stride]
+                          device float*                    out [[buffer(1)]], // one value: seconds
+                          device const float2*             twiddle [[buffer(2)]], // N/2 roots of unity
+                          constant mmse_ta_chain_params&   p [[buffer(3)]],
+                          device const uint*               perm [[buffer(4)]], // digit-reversed input index
+                          uint                             tid [[thread_position_in_threadgroup]])
+{
+  // One threadgroup holds both the transform scratch and the profile. 2048 complex values (16 KB) +
+  // 2048 floats (8 KB) = 24 KB, inside the 32 KB a threadgroup may use on an Apple GPU.
+  threadgroup float2 work[mmse_ta_chain_max_size];
+  threadgroup float  profile[mmse_ta_chain_max_size];
+
+  const uint nof_layers_c = (p.nof_layers <= mmse_ta_max_layers) ? p.nof_layers : 0u;
+  const uint size = ((p.size >= mmse_ta_max_size_min) && (p.size <= mmse_ta_chain_max_size)) ? p.size : 0u;
+  const uint stride = ((p.stride >= 1u) && (p.stride <= mmse_ta_max_stride)) ? p.stride : 0u;
+  const uint nf_std = ((p.nf_std >= 1u) && (p.nf_std <= mmse_ta_max_scr)) ? p.nf_std : 0u;
+  const uint nf_tail = (p.nf_tail <= mmse_ta_max_scr) ? p.nf_tail : 0u;
+  const uint nof_dmrs = (p.nof_dmrs_symbols <= mmse_ta_max_dmrs) ? p.nof_dmrs_symbols : 0u;
+  const uint radix2 = (p.radix2 <= 12u) ? p.radix2 : 0u; // 2^12 = 4096 = the widest table there is
+  if ((nof_layers_c == 0u) || (size == 0u) || (stride == 0u) || (nf_std == 0u) || (nof_dmrs == 0u) ||
+      (radix2 == 0u) || ((1u << radix2) != size)) {
+    if (tid == 0u) {
+      out[0] = 0.0F; // a parameter error publishes a zero, not a stale slot (see mmse_ta_profile)
+    }
+    return; // precedes every barrier below
+  }
+  // The window cannot exceed the profile: the host slices correlation.first(max_ta_samples) off a
+  // buffer of `size` (see mmse_ta_profile, where the same clamp is a correctness requirement of the
+  // parabolic fit's negative indices).
+  const uint window = (p.max_ta_samples < size) ? p.max_ta_samples : size;
+
+  const uint threads = min(size, 1024u);
+  const uint std_sc = p.n_blk * nf_std; // subcarriers covered by the standard blocks
+  const uint tail_end = (nf_tail != 0u) ? (p.sc_tail_base + nf_tail) : 0u;
+  const uint nof_slices = nof_dmrs * nof_layers_c;
+  const float tw_sign = -1.0F; // INVERSE: the estimator's IDFT (see dft_dit's `inverse`)
+
+  if (tid >= threads) {
+    // No barrier below this point's reach: the early return precedes the slice loop's first barrier,
+    // and every barrier in this kernel is inside that loop (all threads of the group reach this test
+    // with the same answer, so the group stays uniform).
+    return;
+  }
+
+  for (uint slice = 0u; slice != mmse_ta_max_slices; ++slice) {
+    if (slice >= nof_slices) {
+      break;
+    }
+    // Slice s is the s-th DM-RS symbol of the HOP (not of the slot: a hopping hop carries a subset)
+    // crossed with the layers, which is the order the host's estimator enumerates them in.
+    const uint lay = slice % nof_layers_c;
+    const uint sym = p.dmrs_slots[slice / nof_layers_c];
+    if (sym >= mmse_ta_max_slot_symb) {
+      break; // a slot symbol index outside the slot: a parameter error, and nothing to read
+    }
+    const uint comb = p.pilot_re_bits[lay];
+    const uint low_bit = (comb != 0u) ? ctz(comb) : 0u;
+
+    // ---- 1) place: element j holds the pilot of subcarrier perm[j]*stride + low_bit, or a zero ----
+    //
+    // The permutation is the one thing the fused kernel must reproduce from the route it replaces:
+    // dft_dit loads its scratch with `buf[i] = in[perm[i]]`, so the butterflies below (the same
+    // function, ocudu_dft_butterflies.h) expect the input to have been gathered that way. Writing the
+    // pilots in natural order - which is what the input BUFFER holds, and what mmse_ta_place writes -
+    // would double-reverse the transform (see mmse_ta_place's note: measured as a flatness of 330
+    // instead of 1).
+    for (uint j = tid; j != mmse_ta_max_size; j += threads) {
+      if (j >= size) {
+        break;
+      }
+      float re = 0.0F;
+      float im = 0.0F;
+      if (comb != 0u) {
+        const uint sc = perm[j] * stride + low_bit;
+        if (sc < std_sc) {
+          const uint b = sc / nf_std;
+          const uint local = sc - b * nf_std;
+          if (((comb >> (local % 12u)) & 1u) != 0u) {
+            device const float* hp = h + (static_cast<ulong>(lay) * p.n_blk + b) * (2u * p.nout_stride) +
+                                     2u * (sym * nf_std + local);
+            re = hp[0];
+            im = hp[1];
+          }
+        } else if ((nf_tail != 0u) && (sc >= p.sc_tail_base) && (sc < tail_end)) {
+          const uint local = sc - p.sc_tail_base;
+          if (((comb >> (local % 12u)) & 1u) != 0u) {
+            device const float* hp = h + (static_cast<ulong>(p.sys_tail + lay) * p.n_blk) * (2u * p.nout_stride) +
+                                     2u * (sym * nf_tail + local);
+            re = hp[0];
+            im = hp[1];
+          }
+        }
+      }
+      work[j] = float2(re, im);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // ---- 2) the transform, in place: the very butterflies dft_dit runs (ocudu_dft_butterflies) ----
+    ocudu_dft_butterflies(work, size, radix2, /*radix3=*/0u, twiddle, tid, threads, tw_sign);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // ---- 3) accumulate the power delay profile ----
+    for (uint i = tid; i != mmse_ta_max_size; i += threads) {
+      if (i >= size) {
+        break;
+      }
+      const float p2 = work[i].x * work[i].x + work[i].y * work[i].y;
+      profile[i] = (slice == 0u) ? p2 : (profile[i] + p2);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  // ---- 4) the half-cyclic-prefix search and the parabolic refinement (one thread) ----
+  if (tid != 0u) {
+    return;
+  }
+  // Delayed taps start the circular profile, advanced taps end it; ties go to the delayed side, as
+  // the host's >= does.
+  uint  delay_idx = 0u;
+  uint  advance_idx = 0u;
+  float delay_best = profile[0];
+  float advance_best = profile[size - window];
+  for (uint tap = 1u; tap != window; ++tap) {
+    if (profile[tap] > delay_best) {
+      delay_best = profile[tap];
+      delay_idx = tap;
+    }
+    const float a = profile[size - window + tap];
+    if (a > advance_best) {
+      advance_best = a;
+      advance_idx = tap;
+    }
+  }
+  const bool delayed_wins = (delay_best >= advance_best);
+  const int  idx = delayed_wins ? static_cast<int>(delay_idx) : -static_cast<int>(window - advance_idx);
+
+  // The refinement, gated exactly as the host gates it: only when the profile is NOT the full
+  // transform (at the full size the integer tap is the resolution by construction).
+  float fractional = 0.0F;
+  if (size != mmse_ta_max_size) {
+    float taps[mmse_ta_max_taps];
+    const uint nof_taps = ((p.nof_taps == 3u) || (p.nof_taps == 5u)) ? p.nof_taps : 0u;
+    const uint nof_half = nof_taps / 2u; // NOTE: not 'half', an MSL builtin type name
+    for (uint i = 0u; i != mmse_ta_max_taps; ++i) {
+      if (i >= nof_taps) {
+        break;
+      }
+      const int t = idx + static_cast<int>(i) - static_cast<int>(nof_half);
+      const int size_i = static_cast<int>(size);
+      const int wrapped = ((t % size_i) + size_i) % size_i;
+      taps[i] = profile[wrapped];
+    }
+    fractional = (nof_taps != 0u) ? mmse_ta_frac_from_taps(taps, nof_taps) : 0.0F;
+  }
+
+  const float rate_hz = static_cast<float>(size) * p.scs_hz * static_cast<float>(stride);
+  out[0] = (rate_hz > 0.0F) ? ((static_cast<float>(idx) + fractional) / rate_hz) : 0.0F;
 }

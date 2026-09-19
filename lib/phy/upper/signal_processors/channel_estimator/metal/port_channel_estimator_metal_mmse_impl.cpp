@@ -3744,7 +3744,11 @@ port_channel_estimator_metal_mmse_impl::ta_attach_stage(const fd_td_estimation_s
   if (dft_size == 0) {
     return stage;
   }
-  if (!engine->ta_place_available(dft_size) || !engine->ta_available()) {
+  // The lane runs the FUSED chain (batch 5d): one dispatch instead of the three the port started
+  // with, which is what the air measurement asked for (design doc 17.10.5). Its transform-size limit
+  // - the profile it keeps in threadgroup memory - is 2048, exactly what get_idft() can ask for; a
+  // wider size keeps the host's route (and its grid read-back, see host_grid_wanted).
+  if (!engine->ta_chain_available(dft_size)) {
     return stage;
   }
 
