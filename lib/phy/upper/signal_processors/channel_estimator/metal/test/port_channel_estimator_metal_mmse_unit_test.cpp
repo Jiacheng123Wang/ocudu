@@ -10,17 +10,22 @@
 
 #include "../port_channel_estimator_metal_mmse_impl.h"
 #include "../ocudu_metal_mmse_engine.h"
+#include "ocudu_dft_metal_engine.h"
+#include "../ocudu_metal_mmse_engine.h"
 #include "port_channel_estimator_helpers.h"
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/phy/support/support_factories.h"
 #include "ocudu/phy/generic_functions/generic_functions_factories.h"
 #include "ocudu/phy/support/time_alignment_estimator/time_alignment_estimator_factories.h"
 #include "ocudu/ran/resource_allocation/rb_bitmap.h"
+#include "ocudu/adt/bf16.h"
+#include "ocudu/support/math/curve_fitting_find_max.h"
 #include "ocudu/support/math/math_utils.h"
 #include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <random>
 #include <vector>
@@ -191,6 +196,708 @@ dmrs_symbol_list make_pilots(unsigned n_prb = 51, unsigned nof_symbols = 2)
 
 } // namespace
 
+/// \brief S12 (batch 5b): does the DEVICE IDFT reproduce the power delay profile the TA estimator
+/// reads?
+///
+/// The hop's time alignment is the peak of the accumulated |IDFT|^2 of the pilot estimates - see
+/// time_alignment_estimator_dft_impl::estimate_ta_correlation(). The whole port rests on that one
+/// transform, so it is checked here, in a harness that already builds and runs the device DFT,
+/// BEFORE any estimator or lane code is touched: a profile that disagrees makes every peak position
+/// meaningless, and a peak search on top of it would hide that.
+///
+/// The reference is the host's own IDFT, on the same input, with the same (unnormalized) convention.
+static bool s12_device_idft_profile_matches(unsigned size, std::mt19937& rng)
+{
+  auto host_dft = create_dft_processor_factory_generic()->create(
+      dft_processor::configuration{size, dft_processor::direction::INVERSE});
+  if (!host_dft) {
+    std::fprintf(stderr, "S12 [%u]: the host has no IDFT of that size\n", size);
+    return false;
+  }
+
+  metal::dft_metal_engine engine;
+  if (!engine.init(size, /*inverse=*/true)) {
+    std::fprintf(stderr, "S12 [%u]: the device has no IDFT of that size (init failed)\n", size);
+    return false;
+  }
+
+  std::normal_distribution<float> nd(0.0F, 1.0F);
+  std::vector<cf_t>               input(size);
+  for (cf_t& v : input) {
+    v = cf_t(nd(rng), nd(rng));
+  }
+
+  // ---- the host's transform ----
+  span<cf_t> host_in = host_dft->get_input();
+  std::copy(input.begin(), input.end(), host_in.begin());
+  span<const cf_t> host_out = host_dft->run();
+
+  std::vector<float> host_profile(size, 0.0F);
+  for (unsigned i = 0; i != size; ++i) {
+    host_profile[i] = std::norm(host_out[i]);
+  }
+
+  // ---- the device's transform ----
+  std::vector<cf_t> dev_out(size);
+  if (!engine.run(input.data(), dev_out.data(), 1)) {
+    std::fprintf(stderr, "S12 [%u]: the device dispatch failed\n", size);
+    return false;
+  }
+
+  // Compare the PROFILES, which is what the estimator consumes - and the peak position, which is the
+  // value it publishes.
+  double worst_rel = 0.0;
+  for (unsigned i = 0; i != size; ++i) {
+    const double h = static_cast<double>(host_profile[i]);
+    const double d = std::norm(dev_out[i]);
+    const double scale = std::max(h, 1e-9);
+    worst_rel = std::max(worst_rel, std::fabs(d - h) / scale);
+  }
+  const unsigned host_peak = static_cast<unsigned>(
+      std::max_element(host_profile.begin(), host_profile.end()) - host_profile.begin());
+  unsigned dev_peak = 0;
+  for (unsigned i = 1; i != size; ++i) {
+    if (std::norm(dev_out[i]) > std::norm(dev_out[dev_peak])) {
+      dev_peak = i;
+    }
+  }
+
+  const bool ok = (worst_rel < 1e-4) && (host_peak == dev_peak);
+  std::printf("S12 [%u] %s: profile worst rel %.2e, peak host %u device %u\n",
+              size,
+              ok ? "PASS" : "FAIL",
+              worst_rel,
+              host_peak,
+              dev_peak);
+  return ok;
+}
+
+/// \brief S12 (batch 5b): the WHOLE time-alignment estimate, computed the way the device will
+/// compute it, against the estimator the host ships.
+///
+/// s12_device_idft_profile_matches() above pins the transform; this pins everything after it - the
+/// accumulation over DM-RS symbols, the half-cyclic-prefix search window (delayed taps at the START
+/// of the circular profile, advanced ones at its END) and the parabolic refinement - by running the
+/// host's TA estimator and the device-side computation on the SAME pilot data, for delays across the
+/// window the estimator can resolve.
+static bool s12_device_ta_matches_host()
+{
+  // The geometry the air path runs, taken from the estimator's own print (S12_batch5b_ta.md 4.5):
+  // 30 kHz, PUSCH comb-2, 6 pilots per PRB, 3 DM-RS symbols. The transform size follows the host's
+  // get_idft() rule, which is why 4 PRB lands on 128.
+  const subcarrier_spacing scs       = subcarrier_spacing::kHz30;
+  const unsigned           nof_prb   = 4;
+  const unsigned           pilots_prb = 6;
+  const unsigned           stride    = 2;
+  const unsigned           n_symbols = 3;
+
+  const unsigned nof_pilots = nof_prb * pilots_prb;
+  constexpr unsigned max_dft_size = 4096;
+  constexpr unsigned min_dft_size = 2048;
+  unsigned scaled = (nof_pilots * max_dft_size) / 3300U;
+  unsigned size   = 1U;
+  while (size < scaled) {
+    size *= 2U;
+  }
+  size = std::max(min_dft_size, size);
+  if (size > max_dft_size) {
+    size = max_dft_size;
+  }
+
+  auto ta_host = make_ta_estimator();
+  metal::dft_metal_engine engine;
+  if (!engine.init(size, /*inverse=*/true)) {
+    std::fprintf(stderr, "S12 TA [%u]: device IDFT init failed\n", size);
+    return false;
+  }
+
+  const double scs_hz   = scs_to_khz(scs) * 1000.0;
+  const double rate_hz  = static_cast<double>(size) * scs_hz * stride;
+  const double half_cp_s = phy_time_unit::from_units_of_kappa(144).to_seconds() / 4.0; // mu = 1
+  unsigned     max_ta_samples = static_cast<unsigned>(std::floor(half_cp_s * rate_hz));
+  max_ta_samples              = std::min(max_ta_samples, size);
+
+  unsigned n_bad  = 0;
+  double   worst  = 0.0;
+  for (double true_ns = -400.0; true_ns <= 400.0; true_ns += 100.0) {
+    const double true_ta = true_ns * 1e-9;
+
+    std::vector<cf_t> pilots(n_symbols * nof_pilots);
+    for (unsigned s = 0; s != n_symbols; ++s) {
+      for (unsigned i = 0; i != nof_pilots; ++i) {
+        const double phase = -2.0 * M_PI * static_cast<double>(i * stride) * scs_hz * true_ta;
+        pilots[s * nof_pilots + i] = cf_t(std::cos(phase), std::sin(phase));
+      }
+    }
+    // The device can reach these pilots two ways, and they are NOT the same numbers: `h` (fp32, the
+    // reformat's source) and the estimates the reformat actually publishes, which are rounded to
+    // bfloat16. The host's TA reads the bf16 ones, so the bf16 rounding must not move the peak -
+    // checked here rather than assumed, because it decides which buffer the kernel reads.
+    // bf16_t is a storage type with no float conversion (see adt/bf16.h): go through its bits, the
+    // way every reader of the published estimates does.
+    const auto bf16_to_float = [](float x) {
+      const bf16_t b = to_bf16(x);
+      const uint32_t bits = static_cast<uint32_t>(b.value()) << 16;
+      float          out;
+      std::memcpy(&out, &bits, sizeof(out));
+      return out;
+    };
+    std::vector<cf_t> pilots_bf16 = pilots;
+    for (cf_t& v : pilots_bf16) {
+      v = cf_t(bf16_to_float(v.real()), bf16_to_float(v.imag()));
+    }
+
+    // ---- the host's estimator ----
+    modular_re_buffer_reader<cf_t, 64> view(n_symbols, nof_pilots);
+    for (unsigned s = 0; s != n_symbols; ++s) {
+      view.set_slice(s, span<const cf_t>(pilots.data() + s * nof_pilots, nof_pilots));
+    }
+    const double host_ta = ta_host->estimate(view, stride, scs).time_alignment;
+
+    // ---- the device route: one IDFT per symbol, |.|^2 accumulated, then the peak search ----
+    std::vector<float> profile(size, 0.0F);
+    std::vector<cf_t>  out(size);
+    for (unsigned s = 0; s != n_symbols; ++s) {
+      std::vector<cf_t> in(size, cf_t(0.0F, 0.0F));
+      for (unsigned i = 0; i != nof_pilots; ++i) {
+        in[i] = pilots[s * nof_pilots + i];
+      }
+      if (!engine.run(in.data(), out.data(), 1)) {
+        std::fprintf(stderr, "S12 TA: dispatch failed\n");
+        return false;
+      }
+      for (unsigned i = 0; i != size; ++i) {
+        profile[i] += std::norm(out[i]);
+      }
+    }
+
+    // Delayed taps at the start, advanced at the end - the profile is circular.
+    unsigned delay_idx   = 0;
+    unsigned advance_idx = 0;
+    for (unsigned i = 0; i != max_ta_samples; ++i) {
+      if (profile[i] > profile[delay_idx]) {
+        delay_idx = i;
+      }
+    }
+    for (unsigned i = 0; i != max_ta_samples; ++i) {
+      const unsigned j = size - max_ta_samples + i;
+      if (profile[j] > profile[size - max_ta_samples + advance_idx]) {
+        advance_idx = i;
+      }
+    }
+    int idx = -static_cast<int>(max_ta_samples - advance_idx);
+    if (profile[delay_idx] >= profile[size - max_ta_samples + advance_idx]) {
+      idx = static_cast<int>(delay_idx);
+    }
+
+    double fractional = 0.0;
+    if (size != max_dft_size) {
+      const unsigned          nof_taps = (max_ta_samples > 2) ? 5U : 3U;
+      static_vector<float, 5> centre(nof_taps);
+      for (unsigned i = 0; i != nof_taps; ++i) {
+        centre[i] = profile[(idx + static_cast<int>(i) + static_cast<int>(size) -
+                             static_cast<int>(nof_taps / 2)) %
+                            static_cast<int>(size)];
+      }
+      fractional = curve_fitting_fractional_max(centre);
+    }
+    const double device_ta = (static_cast<double>(idx) + fractional) / rate_hz;
+
+    // ... and the same device computation on the bf16-rounded pilots the host actually reads.
+    std::vector<float> profile_bf16(size, 0.0F);
+    for (unsigned s = 0; s != n_symbols; ++s) {
+      std::vector<cf_t> in(size, cf_t(0.0F, 0.0F));
+      for (unsigned i = 0; i != nof_pilots; ++i) {
+        in[i] = pilots_bf16[s * nof_pilots + i];
+      }
+      if (!engine.run(in.data(), out.data(), 1)) {
+        return false;
+      }
+      for (unsigned i = 0; i != size; ++i) {
+        profile_bf16[i] += std::norm(out[i]);
+      }
+    }
+    unsigned bf_delay = 0;
+    unsigned bf_adv   = 0;
+    for (unsigned i = 0; i != max_ta_samples; ++i) {
+      if (profile_bf16[i] > profile_bf16[bf_delay]) {
+        bf_delay = i;
+      }
+      const unsigned j = size - max_ta_samples + i;
+      if (profile_bf16[j] > profile_bf16[size - max_ta_samples + bf_adv]) {
+        bf_adv = i;
+      }
+    }
+    int bf_idx = -static_cast<int>(max_ta_samples - bf_adv);
+    if (profile_bf16[bf_delay] >= profile_bf16[size - max_ta_samples + bf_adv]) {
+      bf_idx = static_cast<int>(bf_delay);
+    }
+    double bf_frac = 0.0;
+    if (size != max_dft_size) {
+      const unsigned          nof_taps = (max_ta_samples > 2) ? 5U : 3U;
+      static_vector<float, 5> centre(nof_taps);
+      for (unsigned i = 0; i != nof_taps; ++i) {
+        centre[i] = profile_bf16[(bf_idx + static_cast<int>(i) + static_cast<int>(size) -
+                                  static_cast<int>(nof_taps / 2)) %
+                                 static_cast<int>(size)];
+      }
+      bf_frac = curve_fitting_fractional_max(centre);
+    }
+    const double bf16_ta = (static_cast<double>(bf_idx) + bf_frac) / rate_hz;
+
+    const double diff_ns = (host_ta - device_ta) * 1e9;
+    const double bf16_diff_ns = (host_ta - bf16_ta) * 1e9;
+    const double res_ns  = 1e9 / rate_hz;
+    if (std::fabs(bf16_diff_ns) > res_ns) {
+      std::printf("  S12 TA bf16 true %+7.1f ns | host %+9.2f | bf16 %+9.2f | diff %+7.2f > res %.2f MISMATCH\n",
+                  true_ns, host_ta * 1e9, bf16_ta * 1e9, bf16_diff_ns, res_ns);
+      ++n_bad;
+    }
+    worst                = std::max(worst, std::fabs(diff_ns));
+    const bool ok        = std::fabs(diff_ns) <= res_ns;
+    if (!ok) {
+      ++n_bad;
+    }
+    std::printf("  S12 TA true %+7.1f ns | host %+9.2f | device %+9.2f | diff %+7.2f (res %.2f) %s\n",
+                true_ns,
+                host_ta * 1e9,
+                device_ta * 1e9,
+                diff_ns,
+                res_ns,
+                ok ? "OK" : "MISMATCH");
+  }
+
+  std::printf("S12 TA %s: size=%u max_ta_samples=%u, worst |diff| %.2f ns over 9 delays\n",
+              (n_bad == 0) ? "PASS" : "FAIL",
+              size,
+              max_ta_samples,
+              worst);
+  return n_bad == 0;
+}
+
+/// \brief Runs the K6 (mmse_ta_profile) kernel on a batch of spectra and returns its answer in
+/// seconds, or NaN when it could not be produced.
+///
+/// Goes through mmse_engine::run_ta_profile() - the same entry point the estimator will use - rather
+/// than dispatching Metal here: the test translation unit is C++, and the engine owns the device.
+static double s12_run_ta_kernel(span<const cf_t> spectra,
+                                unsigned         size,
+                                unsigned         nof_slices,
+                                unsigned         stride,
+                                double           scs_hz,
+                                unsigned         window)
+{
+  static metal::mmse_engine engine;
+  static bool               init_done = false;
+  if (!init_done) {
+    init_done = engine.init();
+    if (!init_done || !engine.ta_available()) {
+      std::fprintf(stderr, "S12 TA-K6: the metallib carries no mmse_ta_profile\n");
+      return std::nan("");
+    }
+  }
+  std::vector<float> in_floats(spectra.size() * 2);
+  for (std::size_t i = 0; i != spectra.size(); ++i) {
+    in_floats[2 * i]     = spectra[i].real();
+    in_floats[2 * i + 1] = spectra[i].imag();
+  }
+  float ta = std::nan("");
+  if (!engine.run_ta_profile(in_floats.data(), size, nof_slices, stride, scs_hz, window, ta)) {
+    std::fprintf(stderr, "S12 TA-K6: run_ta_profile failed\n");
+    return std::nan("");
+  }
+  return static_cast<double>(ta);
+}
+
+/// \brief S12 (batch 5b): does the K6 kernel - accumulation, half-CP circular search and parabolic
+/// refinement - reproduce the host's time alignment from the SAME power delay profile?
+///
+/// The transform is validated separately (s12_device_idft_profile_matches above), so this isolates
+/// everything after it. The profile is built on the host from a channel with a known delay, handed to
+/// the device as `nof_slices` spectra (the layout the DFT engine leaves behind), and the two sides are
+/// compared at the resolution the sampling rate sets.
+static bool s12_device_ta_kernel_matches_host()
+{
+  const subcarrier_spacing scs      = subcarrier_spacing::kHz30;
+  const unsigned           nof_prb  = 4;
+  const unsigned           pilots_prb = 6;
+  const unsigned           stride   = 2;
+  const unsigned           n_symbols = 3;
+  const unsigned           nof_pilots = nof_prb * pilots_prb;
+
+  constexpr unsigned max_dft_size = 4096;
+  constexpr unsigned min_dft_size = 2048;
+  unsigned scaled = (nof_pilots * max_dft_size) / 3300U;
+  unsigned size   = 1U;
+  while (size < scaled) {
+    size *= 2U;
+  }
+  size = std::max(min_dft_size, size);
+  if (size > max_dft_size) {
+    size = max_dft_size;
+  }
+
+  auto ta_host = make_ta_estimator();
+  metal::dft_metal_engine engine;
+  if (!engine.init(size, /*inverse=*/true)) {
+    std::fprintf(stderr, "S12 TA-K6 [%u]: device IDFT init failed\n", size);
+    return false;
+  }
+
+  const double scs_hz    = scs_to_khz(scs) * 1000.0;
+  const double rate_hz   = static_cast<double>(size) * scs_hz * stride;
+  const double half_cp_s = phy_time_unit::from_units_of_kappa(144).to_seconds() / 4.0;
+  unsigned     window    = static_cast<unsigned>(std::floor(half_cp_s * rate_hz));
+  window                 = std::min(window, size);
+
+  unsigned n_bad = 0;
+  double   worst = 0.0;
+  for (double true_ns = -400.0; true_ns <= 400.0; true_ns += 100.0) {
+    const double true_ta = true_ns * 1e-9;
+
+    const auto make_pilots = [&](double ta) {
+      std::vector<cf_t> v(n_symbols * nof_pilots);
+      for (unsigned s = 0; s != n_symbols; ++s) {
+        for (unsigned i = 0; i != nof_pilots; ++i) {
+          const double phase = -2.0 * M_PI * static_cast<double>(i * stride) * scs_hz * ta;
+          v[s * nof_pilots + i] = cf_t(std::cos(phase), std::sin(phase));
+        }
+      }
+      return v;
+    };
+
+    // ---- the host's estimator, on the pilots ----
+    std::vector<cf_t> pilots = make_pilots(true_ta);
+    modular_re_buffer_reader<cf_t, 64> view(n_symbols, nof_pilots);
+    for (unsigned s = 0; s != n_symbols; ++s) {
+      view.set_slice(s, span<const cf_t>(pilots.data() + s * nof_pilots, nof_pilots));
+    }
+    const double host_ta = ta_host->estimate(view, stride, scs).time_alignment;
+
+    // ---- the device's spectra: one IDFT per slice, laid out as the engine leaves them ----
+    std::vector<cf_t> spectra(static_cast<std::size_t>(n_symbols) * size);
+    {
+      std::vector<cf_t> in(size);
+      std::vector<cf_t> out(size);
+      for (unsigned s = 0; s != n_symbols; ++s) {
+        std::fill(in.begin(), in.end(), cf_t(0.0F, 0.0F));
+        for (unsigned i = 0; i != nof_pilots; ++i) {
+          in[i] = pilots[s * nof_pilots + i];
+        }
+        if (!engine.run(in.data(), out.data(), 1)) {
+          std::fprintf(stderr, "S12 TA-K6: IDFT dispatch failed\n");
+          return false;
+        }
+        std::copy(out.begin(), out.end(), spectra.begin() + static_cast<std::size_t>(s) * size);
+      }
+    }
+
+    // ---- the kernel under test ----
+    const double k6_ta = s12_run_ta_kernel(spectra, size, n_symbols, stride, scs_hz, window);
+    if (std::isnan(k6_ta)) {
+      std::fprintf(stderr, "S12 TA-K6: the kernel did not run\n");
+      return false;
+    }
+
+    const double diff_ns = (host_ta - k6_ta) * 1e9;
+    const double res_ns  = 1e9 / rate_hz;
+    worst                = std::max(worst, std::fabs(diff_ns));
+    const bool ok        = std::fabs(diff_ns) <= res_ns;
+    if (!ok) {
+      ++n_bad;
+    }
+    std::printf("  S12 K6 true %+7.1f ns | host %+9.2f | K6 %+9.2f | diff %+7.2f (res %.2f) %s\n",
+                true_ns, host_ta * 1e9, k6_ta * 1e9, diff_ns, res_ns, ok ? "OK" : "MISMATCH");
+  }
+
+  std::printf("S12 K6 %s: size=%u window=%u, worst |diff| %.2f ns over 9 delays\n",
+              (n_bad == 0) ? "PASS" : "FAIL", size, window, worst);
+  return n_bad == 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// S12 (batch 5b): the geometry every time-alignment check below speaks.
+//
+// K7 reads the reformat's OWN h - the buffer K5 reduces - so a check of it has to build that layout,
+// not a flat array of pilots: [nof_systems][n_blk][2 * nout_stride] floats, the estimate of (symbol,
+// subcarrier) at 2 * (sym * nf_std + subcarrier). The hop below is the smallest production-like one:
+// 4 PRB, one layer, three DM-RS symbols, the PUSCH comb-2 pattern.
+// ---------------------------------------------------------------------------------------------
+constexpr unsigned s12_nof_prb     = 4;
+constexpr unsigned s12_nf_std      = s12_nof_prb * 12;
+constexpr unsigned s12_nof_symbols = 14;                       // MAX_NSYMB_PER_SLOT
+constexpr unsigned s12_nout        = s12_nof_symbols * s12_nf_std;
+constexpr unsigned s12_comb        = 0x555;                    // re_pattern_pusch_0: every other RE
+constexpr unsigned s12_stride      = 2;
+constexpr unsigned s12_dft_size    = 2048;
+constexpr unsigned s12_dmrs_syms[] = {2, 7, 11};
+constexpr unsigned s12_npt         = 3;
+constexpr unsigned s12_nof_pilots  = s12_nof_prb * 6;          // 24 per symbol
+constexpr unsigned s12_dmrs_bits    = (1u << 2) | (1u << 7) | (1u << 11);
+
+/// The hop above, in the struct the engine and the kernels share.
+metal::mmse_engine::hop_geometry s12_hop_geometry()
+{
+  metal::mmse_engine::hop_geometry geo{};
+  geo.nout_stride      = s12_nout;
+  geo.n_blk            = 1;
+  geo.nf_std           = s12_nf_std;
+  geo.sc_tail_base     = s12_nf_std; // the hop's span: it has no edge block
+  geo.nf_tail          = 0;
+  geo.sys_tail         = 1;
+  geo.nof_layers       = 1;
+  geo.nof_symbols      = s12_nof_symbols;
+  geo.dc_sc            = 1u << 30; // no DC in this hop
+  geo.dmrs_sym_bits    = s12_dmrs_bits;
+  geo.pilot_re_bits[0] = s12_comb;
+  return geo;
+}
+
+/// \brief h with the comb positions of every DM-RS symbol filled by \p pilot_of, zero elsewhere.
+///
+/// Pilot i of DM-RS symbol s sits at subcarrier i * stride + the comb's lowest bit, which is the order
+/// the host's own estimator enumerates the pilots in (ascending subcarrier, PRB by PRB).
+template <typename PilotOf>
+std::vector<float> s12_make_hop_h(PilotOf pilot_of)
+{
+  std::vector<float> h(static_cast<std::size_t>(2) * s12_nout, 0.0F); // one system, one block
+  for (unsigned s = 0; s != s12_npt; ++s) {
+    const unsigned sym = s12_dmrs_syms[s];
+    for (unsigned i = 0; i != s12_nof_pilots; ++i) {
+      const unsigned sc = i * s12_stride;
+      const cf_t     v  = pilot_of(s, i);
+      h[2 * (sym * s12_nf_std + sc)]     = v.real();
+      h[2 * (sym * s12_nf_std + sc) + 1] = v.imag();
+    }
+  }
+  return h;
+}
+
+/// \brief L2 (batch 5b): K7 ALONE - does the placement land where the transform reads it?
+///
+/// The first dispatch of this kernel never returned and took the machine down (see the incident
+/// report). The validation ladder therefore checks it on its own, on the smallest geometry, BEFORE
+/// anything is chained onto it: K7 runs once, its output is read back, and the contract it owes the
+/// transform is checked position by position - the pilot of the subcarrier that position maps to, and
+/// a ZERO everywhere else.
+///
+/// Both halves matter. The pilot half catches a slice written from the wrong DM-RS symbol: the kernel
+/// maps the s-th SET BIT of dmrs_sym_bits to the s-th slice, and h is zero on the symbols that are not
+/// DM-RS. The zero half catches a kernel that only writes the pilots: the host zeroes its transform
+/// input every call, and an input that kept the PREVIOUS hop's pilots would transform those as well -
+/// a wrong estimate that looks like a valid one. The destination is filled with a sentinel, so a
+/// position the kernel leaves alone is a failure rather than an invisible pass.
+static bool l2_k7_placement_only()
+{
+  static metal::mmse_engine engine;
+  static bool               init_done = false;
+  if (!init_done) {
+    init_done = engine.init();
+  }
+  if (!init_done || !engine.ta_place_available(s12_dft_size)) {
+    std::fprintf(stderr, "L2: engine init=%d, K7 unavailable\n", init_done ? 1 : 0);
+    return false;
+  }
+
+  // A distinct value per (symbol, pilot), so a slice written from the wrong symbol cannot pass.
+  const auto pilot_of = [](unsigned s, unsigned i) {
+    return cf_t(static_cast<float>(s * 100 + i + 1), -static_cast<float>(s * 100 + i) - 0.5F);
+  };
+  const std::vector<float> h = s12_make_hop_h(pilot_of);
+
+  std::vector<cf_t> placed(static_cast<std::size_t>(s12_npt) * s12_dft_size, cf_t(7.5F, -7.5F));
+  if (!engine.run_ta_place(h.data(), s12_hop_geometry(), s12_dft_size, s12_stride, placed.data())) {
+    std::fprintf(stderr, "L2: run_ta_place failed\n");
+    return false;
+  }
+
+  unsigned bad     = 0;
+  unsigned n_pilot = 0;
+  unsigned n_zero  = 0;
+  for (unsigned slice = 0; slice != s12_npt; ++slice) {
+    for (unsigned j = 0; j != s12_dft_size; ++j) {
+      const unsigned sc       = j * s12_stride;
+      const bool     is_pilot = (j < s12_nof_pilots) && (((s12_comb >> (sc % 12u)) & 1u) != 0u);
+      const cf_t     exp      = is_pilot ? pilot_of(slice, j) : cf_t(0.0F, 0.0F);
+      (is_pilot ? n_pilot : n_zero) += 1;
+      const cf_t got = placed[static_cast<std::size_t>(slice) * s12_dft_size + j];
+      if ((got != exp) && (++bad <= 4)) {
+        std::fprintf(stderr,
+                     "L2: slice %u position %u: expected (%f,%f), got (%f,%f)\n",
+                     slice,
+                     j,
+                     exp.real(),
+                     exp.imag(),
+                     got.real(),
+                     got.imag());
+      }
+    }
+  }
+
+  std::printf("L2 K7 %s: %u slices x %u positions (%u pilots, %u zeros), %u mismatching\n",
+              (bad == 0) ? "PASS" : "FAIL",
+              s12_npt,
+              s12_dft_size,
+              n_pilot,
+              n_zero,
+              bad);
+  return bad == 0;
+}
+
+/// \brief S12 (batch 5b): the WHOLE device route - K7 places the pilots out of h, the device IDFT
+/// transforms them, K6 reduces the profile - against the host's estimator, on the same pilots.
+///
+/// This is the chain the lane runs, minus the command-buffer plumbing: if the three steps agree with
+/// the host end to end, what is left for the lane is encoding them into one buffer
+/// (S12_batch5b_ta.md 6.4). The pilots are a unit-amplitude tone whose phase ramp is a known delay, so
+/// the host's own estimator is an independent reference for what the answer should be.
+static bool s12_device_ta_chain_matches_host()
+{
+  const subcarrier_spacing scs       = subcarrier_spacing::kHz30;
+  const unsigned           n_symbols = s12_npt;
+
+  static metal::mmse_engine engine;
+  static bool               init_done = false;
+  if (!init_done) {
+    init_done = engine.init();
+  }
+  {
+    const bool place_ok = engine.ta_place_available(s12_dft_size);
+    const bool k6_ok    = engine.ta_available();
+    if (!init_done || !place_ok || !k6_ok) {
+      std::fprintf(stderr,
+                   "S12 chain: init=%d K7+tab=%d K6=%d (size=%u)\n",
+                   init_done ? 1 : 0,
+                   place_ok ? 1 : 0,
+                   k6_ok ? 1 : 0,
+                   s12_dft_size);
+      return false;
+    }
+  }
+  metal::dft_metal_engine dft;
+  if (!dft.init(s12_dft_size, /*inverse=*/true)) {
+    std::fprintf(stderr, "S12 chain: device IDFT init failed\n");
+    return false;
+  }
+
+  auto ta_host = make_ta_estimator();
+  if (ta_host == nullptr) {
+    std::fprintf(stderr, "S12 chain: the host TA estimator could not be created\n");
+    return false;
+  }
+  const double scs_hz  = scs_to_khz(scs) * 1000.0;
+  const double rate_hz = static_cast<double>(s12_dft_size) * scs_hz * s12_stride;
+  const double half_cp_s = phy_time_unit::from_units_of_kappa(144).to_seconds() / 4.0;
+  unsigned     window    = static_cast<unsigned>(std::floor(half_cp_s * rate_hz));
+  window                 = std::min(window, s12_dft_size);
+
+  // Filled with a sentinel, NOT zeroed: K7 owes the transform every position of every slice, and a
+  // position it left alone would otherwise be an invisible zero that happens to be right.
+  std::vector<cf_t> placed(static_cast<std::size_t>(n_symbols) * s12_dft_size, cf_t(7.5F, -7.5F));
+  std::vector<cf_t> spectra(static_cast<std::size_t>(n_symbols) * s12_dft_size);
+  std::vector<cf_t> in(s12_dft_size);
+  std::vector<cf_t> out(s12_dft_size);
+
+  unsigned n_bad     = 0;
+  double   worst     = 0.0;
+  unsigned n_place_bad = 0;
+  for (double true_ns = -400.0; true_ns <= 400.0; true_ns += 100.0) {
+    const double true_ta = true_ns * 1e-9;
+
+    // The pilots as the estimator's own LSE holds them: one slice per DM-RS symbol, ascending
+    // subcarrier. `h` carries them at the comb positions of those symbols - the layout K7 reads.
+    const auto pilot_of = [&](unsigned s, unsigned i) {
+      const double phase = -2.0 * M_PI * static_cast<double>(i * s12_stride) * scs_hz * true_ta;
+      (void)s;
+      return cf_t(std::cos(phase), std::sin(phase));
+    };
+    const std::vector<float> h = s12_make_hop_h(pilot_of);
+
+    // The host's estimator runs on the FLAT pilots (one slice per symbol, contiguous): K7's job is to
+    // arrive at that same transform input from h, and this is the reference for it.
+    std::vector<cf_t> pilots(static_cast<std::size_t>(n_symbols) * s12_nof_pilots);
+    for (unsigned s = 0; s != n_symbols; ++s) {
+      for (unsigned i = 0; i != s12_nof_pilots; ++i) {
+        pilots[static_cast<std::size_t>(s) * s12_nof_pilots + i] = pilot_of(s, i);
+      }
+    }
+
+    std::fill(placed.begin(), placed.end(), cf_t(7.5F, -7.5F));
+    if (!engine.run_ta_place(h.data(), s12_hop_geometry(), s12_dft_size, s12_stride, placed.data())) {
+      std::fprintf(stderr, "S12 chain: K7 failed\n");
+      return false;
+    }
+
+    // The placement itself, position by position: the pilot of the subcarrier it maps to, zero
+    // everywhere else. Checked on every delay, not only the first: the sentinel makes each of them an
+    // independent witness that the kernel writes the whole slice.
+    for (unsigned s = 0; s != n_symbols; ++s) {
+      for (unsigned j = 0; j != s12_dft_size; ++j) {
+        const cf_t exp = (j < s12_nof_pilots) ? pilot_of(s, j) : cf_t(0.0F, 0.0F);
+        const cf_t got = placed[static_cast<std::size_t>(s) * s12_dft_size + j];
+        if ((got != exp) && (++n_place_bad <= 4)) {
+          std::fprintf(stderr,
+                       "  [chain] placement: slice %u position %u: expected (%f,%f), got (%f,%f)\n",
+                       s,
+                       j,
+                       exp.real(),
+                       exp.imag(),
+                       got.real(),
+                       got.imag());
+        }
+      }
+    }
+
+    // ---- the host's estimator, on the same pilots ----
+    modular_re_buffer_reader<cf_t, 64> view(n_symbols, s12_nof_pilots);
+    for (unsigned s = 0; s != n_symbols; ++s) {
+      view.set_slice(s, span<const cf_t>(pilots.data() + static_cast<std::size_t>(s) * s12_nof_pilots, s12_nof_pilots));
+    }
+    const double host_ta = ta_host->estimate(view, s12_stride, scs).time_alignment;
+
+    // ---- the device transform, slice by slice, on what K7 placed ----
+    for (unsigned s = 0; s != n_symbols; ++s) {
+      std::copy(placed.begin() + static_cast<std::size_t>(s) * s12_dft_size,
+                placed.begin() + static_cast<std::size_t>(s + 1) * s12_dft_size,
+                in.begin());
+      if (!dft.run(in.data(), out.data(), 1)) {
+        std::fprintf(stderr, "S12 chain: IDFT dispatch failed\n");
+        return false;
+      }
+      std::copy(out.begin(), out.end(), spectra.begin() + static_cast<std::size_t>(s) * s12_dft_size);
+    }
+
+    const double chain_ta = s12_run_ta_kernel(spectra, s12_dft_size, n_symbols, s12_stride, scs_hz, window);
+    if (std::isnan(chain_ta)) {
+      std::fprintf(stderr, "S12 chain: K6 failed\n");
+      return false;
+    }
+
+    const double diff_ns = (host_ta - chain_ta) * 1e9;
+    const double res_ns  = 1e9 / rate_hz;
+    worst                = std::max(worst, std::fabs(diff_ns));
+    const bool ok        = std::fabs(diff_ns) <= res_ns;
+    if (!ok) {
+      ++n_bad;
+    }
+    std::printf("  S12 chain true %+7.1f ns | host %+9.2f | chain %+9.2f | diff %+7.2f (res %.2f) %s\n",
+                true_ns,
+                host_ta * 1e9,
+                chain_ta * 1e9,
+                diff_ns,
+                res_ns,
+                ok ? "OK" : "MISMATCH");
+  }
+
+  std::printf("S12 chain %s: size=%u window=%u, worst |diff| %.2f ns over 9 delays, %u misplaced\n",
+              ((n_bad == 0) && (n_place_bad == 0)) ? "PASS" : "FAIL",
+              s12_dft_size,
+              window,
+              worst,
+              n_place_bad);
+  return (n_bad == 0) && (n_place_bad == 0);
+}
+
 int main()
 {
   // The lane order is the DEFAULT route now (OCUDU_CE_LANE_ORDER=wait is the escape hatch), and Test 13
@@ -201,6 +908,48 @@ int main()
   unsetenv("OCUDU_CE_FUSED_BURST");
 
   std::mt19937 rng(1234);
+
+  // ---- L2: K7 ALONE first. Every later step is chained onto this one, and the first version of this
+  // kernel is what hung the machine, so it is checked by itself before anything else runs.
+  if (!l2_k7_placement_only()) {
+    std::fprintf(stderr, "L2 FAIL: the K7 placement does not land where the transform reads\n");
+    return 1;
+  }
+  // The remaining S12 checks dispatch K6 and the DFT as well; they run only when asked, so the
+  // ladder can step one kernel at a time (OCUDU_CE_TA_CHAIN=1 for the full chain). With
+  // OCUDU_CE_TA_ONLY set, K7 is the ONLY thing this binary runs - the smallest possible exposure for
+  // a kernel that has already taken the machine down once.
+  if (std::getenv("OCUDU_CE_TA_ONLY") != nullptr) {
+    std::printf("L2: OCUDU_CE_TA_ONLY set, stopping after K7\n");
+    return 0;
+  }
+  const bool run_chain = (std::getenv("OCUDU_CE_TA_CHAIN") != nullptr);
+
+  // S12 (batch 5b): the device IDFT must reproduce the power delay profile the TA estimator reads.
+  // Placed first because every later step of the TA port assumes it.
+  if (run_chain) {
+    bool s12_ok = true;
+    for (unsigned size : {128U, 256U, 2048U}) {
+      s12_ok = s12_device_idft_profile_matches(size, rng) && s12_ok;
+    }
+    if (!s12_ok) {
+      std::fprintf(stderr, "S12 FAIL: the device IDFT does not reproduce the host profile\n");
+      return 1;
+    }
+    std::printf("S12 PASS: the device IDFT reproduces the host power delay profile\n");
+    if (!s12_device_ta_matches_host()) {
+      std::fprintf(stderr, "S12 FAIL: the device-side TA does not reproduce the host's\n");
+      return 1;
+    }
+    if (!s12_device_ta_kernel_matches_host()) {
+      std::fprintf(stderr, "S12 FAIL: the K6 kernel does not reproduce the host's TA\n");
+      return 1;
+    }
+    if (!s12_device_ta_chain_matches_host()) {
+      std::fprintf(stderr, "S12 FAIL: the K7 + IDFT + K6 chain does not reproduce the host's TA\n");
+      return 1;
+    }
+  }
 
   unsigned n_bad = 0;
   // Engine inversion of every matrix size the estimator can ask for: the same kernel serves the
@@ -2054,6 +2803,14 @@ int main()
       setenv("OCUDU_CE_LANE_ORDER", value, 1);
     };
 
+    // Batch 5b's A/B: every hop below also has the HOST's own estimator run on the very pilots the
+    // device reduced, and the difference has to fit in one resolution of the transform (see the probe in
+    // port_channel_estimator_metal_mmse_impl.cpp). It is inside the existing harness on purpose - the
+    // 5a lesson - and it is what makes the published time alignment the DEVICE's value rather than an
+    // unchecked one.
+    setenv("OCUDU_CE_TA_CHECK", "1", 1);
+    const unsigned ta_checks_before = port_channel_estimator_metal_mmse_impl::device_ta_probe_checks();
+
     const std::array<std::pair<unsigned, unsigned>, 4> shapes = {{{51, 2}, {25, 2}, {4, 3}, {12, 4}}};
     unsigned                                           n_checked = 0;
     for (const auto& [n_prb, n_sym] : shapes) {
@@ -2265,6 +3022,22 @@ int main()
       n_checked += burst_dispatches;
     }
     set_order("wait");   // leave the process on the explicit escape-hatch value; the default is event anyway
+    // The device time alignment, judged hop by hop against the host's own estimate of the same pilots.
+    {
+      const unsigned ta_checks = port_channel_estimator_metal_mmse_impl::device_ta_probe_checks() - ta_checks_before;
+      const unsigned ta_bad    = port_channel_estimator_metal_mmse_impl::device_ta_probe_failures();
+      if ((ta_checks == 0) || (ta_bad != 0)) {
+        std::printf("Test 13 FAIL: the device time alignment was %s (%u comparisons, %u outside one "
+                    "resolution)\n",
+                    (ta_checks == 0) ? "never compared against the host's" : "not the host's",
+                    ta_checks,
+                    ta_bad);
+        return -1;
+      }
+      std::printf("Test 13: the device time alignment matches the host's own estimate on %u hops "
+                  "(every difference inside one resolution of the transform)\n",
+                  ta_checks);
+    }
     std::printf("Test 13 PASS: the lane orders (event by default, host_wait and burst) reproduce the "
                 "synchronous result byte for byte over %u shapes (%u estimator dispatches carried by the "
                 "shared burst in burst order), for both completion orders, and a synchronous hop still "

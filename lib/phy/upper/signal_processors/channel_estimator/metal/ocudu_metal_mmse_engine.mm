@@ -4,6 +4,7 @@
 #include "ocudu_metal_mmse_engine.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -16,6 +17,7 @@
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/support/macos_compat.h"
 #include "ocudu/ran/cyclic_prefix.h"
 
 #include <atomic>
@@ -262,6 +264,38 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    reformat_pipe = nil;
   /// K5: the per-layer rsrp reduction over the same h (optional, like K3 and K4).
   id<MTLComputePipelineState>    rsrp_pipe = nil;
+  /// K6 (batch 5b): the hop's time alignment, reduced from the IDFT outputs. Optional like the
+  /// others: a metallib without it leaves the host's own estimator as the only source.
+  id<MTLComputePipelineState>    ta_pipe = nil;
+  /// K7 (batch 5b): places the hop's pilots into a DFT input, digit-reversed. Optional.
+  id<MTLComputePipelineState>    ta_place_pipe = nil;
+  /// Output slot of the K6 reduction. Zero-copy wrapping needs memory that is page-aligned and lives
+  /// as long as the mapping (see shared_queue::wrap_no_copy), which a caller's stack float is not.
+  float                          ta_out = 0.0F;
+  /// ---- batch 5b: the three dispatches that produce the hop's time alignment ---------------------
+  ///
+  /// They run in ONE command buffer - the caller's - because the middle one's output is the last
+  /// one's input, and encoding them apart would put a queue or a wait between them: the DFT engine
+  /// owns the FRONT-END queue while this engine's buffers go to the BACK-END one, and command buffers
+  /// of different queues have no ordering between them.
+  id<MTLComputePipelineState>    ta_dft_pipe   = nil; // dft_dit, out of the DFT metallib
+  id<MTLBuffer>                  ta_twiddle    = nil; // N/2 roots of unity, built for ta_size
+  id<MTLBuffer>                  ta_perm       = nil; // digit-reversed index, built for ta_size
+  unsigned                       ta_size       = 0;   // transform size the tables were built for
+  unsigned                       ta_radix2     = 0;
+  unsigned                       ta_radix3     = 0;
+  /// Transform input (what K7 fills) and the transform output (what K6 reduces), engine-owned so the
+  /// zero-copy wraps have a page-aligned base that outlives the call. Both are one `dft_size` per
+  /// slice, grown on demand.
+  /// Raw pages the table wraps were built from: kept so the destructor can release them (the wrap
+  /// does not, see above). Both are page-rounded allocations from build_ta_tables().
+  void*                          ta_twiddle_mem = nullptr;
+  void*                          ta_perm_mem    = nullptr;
+  float*                         ta_input       = nullptr;
+  size_t                         ta_input_bytes = 0; // in FLOATS: what the wrap's length is derived from
+  float*                         ta_spectra     = nullptr;
+  size_t                         ta_spectra_bytes = 0;
+
   // K4: the equalizer's noise variance, reduced on the device (optional, same metallib).
   id<MTLComputePipelineState>    noise_pipe    = nil;
   // K0-d: the analytic correlation matrices A and R_hp (optional, same metallib).
@@ -290,6 +324,14 @@ struct mmse_engine_impl {
   double                                         last_gpu_us = 0.0;
 
   // All Metal objects are ARC-managed (the translation unit compiles with -fobjc-arc).
+  //
+  // \note The TE tables and the transform scratch are deliberately NOT released here. They are mapped
+  // zero-copy with a nil deallocator, and the process-wide wrap cache (shared_queue) keeps the Metal
+  // buffer objects that describe those pages alive past the engine: releasing them at static
+  // destruction time reaches Metal after its own state is gone, which aborts the process - measured,
+  // as "mutex lock failed: Invalid argument" AFTER "All tests PASSED". The engine is a
+  // process-lifetime object (one per estimator, one for the replay tool), so the pages it holds are
+  // the process's, and the accounting is the OS's.
   ~mmse_engine_impl() = default;
 
   id<MTLBuffer> wrap(const void* ptr, NSUInteger bytes)
@@ -645,6 +687,336 @@ static bool collect_async_stage(mmse_engine_impl* e, stage_encoder& s, bool enco
 
 // Appends the K3 gather (the equalizer's per-symbol estimates) to an encoder that has just run
 // K2 over h. Shared by run() and run_weights_only() so both inversion paths produce it.
+/// \brief Page-aligned float scratch, the only kind a zero-copy wrap can map (see wrap_shared()).
+///
+/// The allocation is page-ROUNDED because a wrap maps a whole number of pages (and
+/// shared_queue::wrap_no_copy refuses a request that reaches past its allocation), and it goes
+/// through compat::aligned_alloc() rather than the C allocator so that the registry knows its size and
+/// so that releasing it purges the wrap cache - a stale mapping kept across a free describes pages the
+/// allocator has since handed to the next allocation (see purge_wrap_cache).
+static float* alloc_page_floats(size_t nof_floats)
+{
+  const size_t page  = static_cast<size_t>(compat::page_size());
+  const size_t bytes = (((nof_floats * sizeof(float)) + page - 1u) / page) * page;
+  return static_cast<float*>(compat::aligned_alloc(page, bytes));
+}
+
+
+/// \brief Builds the twiddle and permutation tables for one transform size (see the header).
+///
+/// The construction is the DFT engine's (dft_metal_engine::init): N/2 roots of unity exp(-2*pi*i*k/N)
+/// and the mixed-radix digit-reversed input order, radix-2 factors first. Reproduced rather than
+/// shared - the two engines own their buffers - so THIS IS THE ONE PLACE THE TWO MUST AGREE.
+static bool build_ta_tables(mmse_engine_impl* e, unsigned size)
+{
+  if ((e->ta_size == size) && (e->ta_twiddle != nil) && (e->ta_perm != nil)) {
+    return true;
+  }
+  if (getenv("OCUDU_CE_TA_CHECK") != nullptr) {
+    fprintf(stderr, "[ta_tables] size=%u pipe=%p\n", size, (__bridge const void*)e->ta_place_pipe);
+  }
+  if ((size < 2u) || ((size & (size - 1u)) != 0u)) {
+    // The JOB's sizes are powers of two (get_idft() rounds up); the 2^k * 3^m family is wider, but
+    // the sizes this port asks for never are.
+    return false;
+  }
+  const unsigned page  = static_cast<unsigned>(compat::page_size());
+  unsigned       radix2 = 0;
+  unsigned       n      = size;
+  while ((n % 2u) == 0u) {
+    n /= 2u;
+    ++radix2;
+  }
+  if (n != 1u) {
+    return false;
+  }
+
+  const unsigned nof_tw     = size / 2u;
+  const size_t   tw_bytes   = static_cast<size_t>(nof_tw) * 2u * sizeof(float);
+  const size_t   tw_rounded = (tw_bytes + page - 1u) / page * page;
+  void*        tw_mem     = compat::aligned_alloc(page, tw_rounded);
+  if (tw_mem == nullptr) {
+    return false;
+  }
+  {
+    auto* tw = static_cast<float*>(tw_mem);
+    for (unsigned k = 0; k != nof_tw; ++k) {
+      const double ang = -2.0 * M_PI * static_cast<double>(k) / static_cast<double>(size);
+      tw[2 * k]        = static_cast<float>(std::cos(ang));
+      tw[2 * k + 1]    = static_cast<float>(std::sin(ang));
+    }
+  }
+
+  const size_t perm_bytes   = static_cast<size_t>(size) * sizeof(uint32_t);
+  const size_t perm_rounded = (perm_bytes + page - 1u) / page * page;
+  void*        perm_mem     = compat::aligned_alloc(page, perm_rounded);
+  if (perm_mem == nullptr) {
+    compat::aligned_free(tw_mem);
+    return false;
+  }
+  {
+    auto* perm = static_cast<uint32_t*>(perm_mem);
+    for (uint32_t i = 0; i != size; ++i) {
+      uint32_t rem       = i;
+      uint32_t rev       = 0;
+      uint32_t remaining = size;
+      for (uint32_t q = 0; q != radix2; ++q) {
+        remaining /= 2u;
+        rev += (rem % 2u) * remaining;
+        rem /= 2u;
+      }
+      perm[i] = rev;
+    }
+  }
+
+  // The previous pair, if any, is dropped BEFORE the new wrap is created: the wrap cache is keyed by
+  // address, and a freed block's pages are handed to the next allocation (see purge_wrap_cache).
+  compat::aligned_free(e->ta_twiddle_mem);
+  compat::aligned_free(e->ta_perm_mem);
+  e->ta_twiddle_mem = tw_mem;
+  e->ta_perm_mem    = perm_mem;
+  e->ta_twiddle     = e->wrap_shared(tw_mem, tw_rounded);
+  e->ta_perm        = e->wrap_shared(perm_mem, perm_rounded);
+  e->ta_radix2      = radix2;
+  e->ta_radix3  = 0u;
+  e->ta_size    = size;
+  if (getenv("OCUDU_CE_TA_CHECK") != nullptr) {
+    fprintf(stderr, "[ta_tables] built: tw=%p perm=%p radix2=%u\n",
+            (__bridge const void*)e->ta_twiddle, (__bridge const void*)e->ta_perm, e->ta_radix2);
+  }
+  return (e->ta_twiddle != nil) && (e->ta_perm != nil);
+}
+
+/// \brief Loads the DFT kernel into this engine (see mmse_engine_impl::ta_dft_pipe).
+///
+/// Optional like every other stage: a missing metallib leaves the host's estimator as the only
+/// source of the hop's time alignment.
+static bool load_ta_dft_pipeline(mmse_engine_impl* e)
+{
+  if (e->ta_dft_pipe != nil) {
+    return true;
+  }
+  NSURL* url = [NSURL fileURLWithPath:@(OCUDU_DFT_METALLIB_PATH)];
+  if (url == nil) {
+    return false;
+  }
+  NSError*       err = nil;
+  id<MTLLibrary> lib = [e->device newLibraryWithURL:url error:&err];
+  if (lib == nil) {
+    return false;
+  }
+  id<MTLFunction> dft_fn = [lib newFunctionWithName:@"dft_dit"];
+  if (dft_fn == nil) {
+    return false;
+  }
+  e->ta_dft_pipe = [e->device newComputePipelineStateWithFunction:dft_fn
+                                                           options:MTLPipelineOptionNone
+                                                        reflection:nil
+                                                             error:&err];
+  return e->ta_dft_pipe != nil;
+}
+
+/// \brief Encodes the hop's time alignment into the caller's command buffer.
+///
+/// Three dispatches, one buffer:
+///   K7 (mmse_ta_place)     - the hop's pilots into the transform input, natural order, zero padding
+///   dft_dit                - one inverse transform per slice
+///   K6 (mmse_ta_profile)   - the power delay profile, the half-CP search and the parabolic fit
+///
+/// The parameters are refused when they exceed the kernels' compile-time constants: those clamps are
+/// a safety net, and letting them truncate a geometry silently would turn a wrong answer into one
+/// that looks valid (S12_incident_gpu_hang_2026-09-19.md 6.3). The three dispatches are encoded into
+/// ONE command buffer - the caller's - because they are a chain: encoding the transform or the
+/// reduction apart would put a queue or a wait between them, and the two Metal queues this process
+/// uses have no ordering between them at all.
+///
+/// \return True when all three dispatches were encoded.
+static bool encode_ta(mmse_engine_impl*                             e,
+                      stage_encoder&                                s,
+                      const ocudu::metal::mmse_engine::reformat_stage::ta_stage_t& ta,
+                      id<MTLBuffer>                                 h_buf,
+                      const ocudu::metal::mmse_engine::hop_geometry&              geo)
+{
+  static constexpr unsigned kernel_max_size   = 4096; // mmse_ta_max_size
+  static constexpr unsigned kernel_max_slices = 16;   // mmse_ta_max_slices
+  static constexpr unsigned kernel_max_tg     = 256;  // mmse_ta_tg_size
+  static constexpr unsigned kernel_max_dmrs   = 4;    // mmse_ta_max_dmrs
+  const unsigned            nof_slices        = ta.nof_dmrs_symbols * geo.nof_layers;
+  if ((h_buf == nil) || (ta.dst == nullptr) || (ta.dft_size == 0u) || (ta.stride == 0u) ||
+      (ta.stride > 3u) || (nof_slices == 0u) || (ta.dft_size > kernel_max_size) ||
+      (nof_slices > kernel_max_slices) || (geo.nof_layers == 0u) || (geo.nof_layers > 4u) ||
+      (ta.nof_dmrs_symbols == 0u) || (ta.nof_dmrs_symbols > kernel_max_dmrs) ||
+      (ta.nof_dmrs_symbols > geo.nof_symbols) || (geo.nf_std == 0u) ||
+      (geo.nf_std > 3300u) || (geo.nf_tail > 3300u) || (ta.max_ta_samples == 0u)) {
+    return false;
+  }
+  for (unsigned i = 0; i != ta.nof_dmrs_symbols; ++i) {
+    // Each slice reads ONE slot symbol: an index outside the slot is a parameter error the kernel
+    // rejects, and refusing here is what keeps it a missing value rather than a wrong one.
+    if ((ta.dmrs_slots[i] >= geo.nof_symbols) || (ta.dmrs_slots[i] >= 14u)) {
+      return false;
+    }
+  }
+  if (!load_ta_dft_pipeline(e) || !build_ta_tables(e, ta.dft_size)) {
+    return false;
+  }
+
+  // The two engine-owned scratch buffers, grown on demand (both are one dft_size per slice). They are
+  // the engine's, not the caller's, because a zero-copy wrap needs a page-aligned base that outlives
+  // the wrap, and the caller's pilots and output are neither.
+  const size_t need_floats = static_cast<size_t>(ta.dft_size) * nof_slices * 2u;
+  if ((e->ta_input == nullptr) || (e->ta_input_bytes < need_floats)) {
+    std::free(e->ta_input);
+    e->ta_input       = alloc_page_floats(need_floats);
+    e->ta_input_bytes = (e->ta_input != nullptr) ? need_floats : 0u;
+  }
+  if ((e->ta_spectra == nullptr) || (e->ta_spectra_bytes < need_floats)) {
+    std::free(e->ta_spectra);
+    e->ta_spectra       = alloc_page_floats(need_floats);
+    e->ta_spectra_bytes = (e->ta_spectra != nullptr) ? need_floats : 0u;
+  }
+  if ((e->ta_input == nullptr) || (e->ta_spectra == nullptr)) {
+    return false;
+  }
+  const NSUInteger wrap_bytes  = static_cast<NSUInteger>(need_floats * sizeof(float));
+  id<MTLBuffer>    in_buf      = e->wrap_shared(e->ta_input, wrap_bytes);
+  id<MTLBuffer>    spectra_buf = e->wrap_shared(e->ta_spectra, wrap_bytes);
+  id<MTLBuffer> out_buf     = e->wrap_shared(ta.dst, sizeof(float));
+  if ((in_buf == nil) || (spectra_buf == nil) || (out_buf == nil)) {
+    return false;
+  }
+
+  // ---- 1) K7: place the hop's pilots into the transform input ---------------------------------
+  {
+    // The kernel's parameter block: the hop's geometry FIRST, field for field the rsrp parameters
+    // (the two kernels index the same buffer the same way), then the transform's own two fields. The
+    // MSL side declares the same struct, and the size assertion is what keeps a field added on one
+    // side from shifting every field after it on the other (full_gpu_chain §48.131).
+    struct mmse_ta_place_params {
+      uint32_t geo[14];
+      uint32_t size;
+      uint32_t stride;
+      uint32_t nof_dmrs_symbols;
+      uint32_t dmrs_slots[4];
+      uint32_t pad0;
+    };
+    static_assert(sizeof(mmse_ta_place_params) == 88,
+                  "mmse_ta_place_params must match the MSL declaration");
+    mmse_ta_place_params p{};
+    const auto           words = geo.words();
+    for (unsigned i = 0; i != 14; ++i) {
+      p.geo[i] = words[i];
+    }
+    p.size             = ta.dft_size;
+    p.stride           = ta.stride;
+    p.nof_dmrs_symbols = ta.nof_dmrs_symbols;
+    for (unsigned i = 0; i != ta.max_dmrs_symbols; ++i) {
+      p.dmrs_slots[i] = (i < ta.nof_dmrs_symbols) ? ta.dmrs_slots[i] : 0u;
+    }
+
+    id<MTLComputeCommandEncoder> enc = stage_pipeline(e, s, e->ta_place_pipe);
+    if (enc == nil) {
+      return false;
+    }
+    // ONE THREADGROUP PER SLICE (DM-RS symbol x layer): the kernel derives its own symbol from the
+    // dispatch position, so the grid is the slice count and nothing else. The threadgroup size is the
+    // kernel's own compile-time constant - never [[threads_per_threadgroup]] (see the kernel).
+    [enc setBuffer:h_buf offset:0 atIndex:0];
+    [enc setBuffer:in_buf offset:0 atIndex:2];
+    [enc setBytes:&p length:sizeof(p) atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(nof_slices, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(kernel_max_tg, 1, 1)];
+  }
+
+  // ---- 2) the transform, one threadgroup per slice --------------------------------------------
+  {
+    const uint32_t radix2  = e->ta_radix2;
+    const uint32_t radix3  = e->ta_radix3;
+    const uint32_t inverse = 1u;
+    const uint32_t base    = 0u;
+    // The grid write, the window and the int16 input are inactive: the kernel reads its flags and
+    // skips them, so the bindings below are never dereferenced.
+    struct grid_write_params {
+      uint32_t active;
+      uint32_t grid_base;
+      uint32_t dst_offset;
+      uint32_t port;
+      uint32_t symbol;
+      uint32_t nof_subc;
+      uint32_t subc_stride;
+      uint32_t symb_stride;
+      uint32_t port_stride;
+      uint32_t dc_position;
+    } gw{};
+    struct input_params {
+      uint32_t is_ci16;
+      uint32_t offset;
+      float    gain;
+      uint32_t pad;
+    } ip{};
+
+    if (!s.burst) {
+      [s.enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    }
+    id<MTLComputeCommandEncoder> enc = stage_pipeline(e, s, e->ta_dft_pipe);
+    if (enc == nil) {
+      return false;
+    }
+    [enc setBuffer:in_buf offset:0 atIndex:0];
+    [enc setBuffer:spectra_buf offset:0 atIndex:1];
+    [enc setBuffer:e->ta_twiddle offset:0 atIndex:2];
+    [enc setBuffer:e->ta_perm offset:0 atIndex:3];
+    [enc setBytes:&radix2 length:sizeof(radix2) atIndex:4];
+    [enc setBytes:&radix3 length:sizeof(radix3) atIndex:5];
+    [enc setBytes:&inverse length:sizeof(inverse) atIndex:6];
+    [enc setBytes:&base length:sizeof(base) atIndex:7];
+    [enc setBuffer:spectra_buf offset:0 atIndex:8]; // unused: grid inactive
+    [enc setBuffer:spectra_buf offset:0 atIndex:9]; // unused: no window
+    [enc setBytes:&gw length:sizeof(gw) atIndex:10];
+    [enc setBytes:&ip length:sizeof(ip) atIndex:11];
+    [enc setBytes:&ip length:sizeof(ip) atIndex:12];
+    // The kernel computes its own thread count (min(n, 1024)) and returns early past it, so the
+    // dispatch size only has to be at least that; it is a compile-time constant here.
+    [enc dispatchThreadgroups:MTLSizeMake(nof_slices, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  }
+
+  // ---- 3) K6: the profile, the half-CP search and the parabolic fit -----------------------------
+  {
+    struct mmse_ta_params {
+      uint32_t size;
+      uint32_t nof_slices;
+      uint32_t stride;
+      float    scs_hz;
+      uint32_t max_ta_samples;
+      uint32_t nof_taps;
+      uint32_t pad0;
+      uint32_t pad1;
+    };
+    static_assert(sizeof(mmse_ta_params) == 32, "mmse_ta_params must match the MSL declaration");
+    mmse_ta_params p{ta.dft_size,
+                     nof_slices,
+                     ta.stride,
+                     ta.scs_hz,
+                     ta.max_ta_samples,
+                     (ta.max_ta_samples > 2u) ? 5u : 3u,
+                     0u,
+                     0u};
+
+    if (!s.burst) {
+      [s.enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    }
+    id<MTLComputeCommandEncoder> enc = stage_pipeline(e, s, e->ta_pipe);
+    if (enc == nil) {
+      return false;
+    }
+    [enc setBuffer:spectra_buf offset:0 atIndex:0];
+    [enc setBuffer:out_buf offset:0 atIndex:1];
+    [enc setBytes:&p length:sizeof(p) atIndex:2];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  }
+  return true;
+}
+
 static void encode_reformat(stage_encoder&                             s,
                             mmse_engine_impl*                          e,
                             id<MTLBuffer>                              h_buf,
@@ -713,6 +1085,30 @@ static void encode_reformat(stage_encoder&                             s,
       const NSUInteger nof_threads = nof_sub * reformat->nof_symbols * reformat->nof_layers;
       [enc dispatchThreads:MTLSizeMake(nof_threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
+      // The hop's geometry, in the ONE struct K5 and the time-alignment placement (K7) share (see
+      // hop_geometry): the two kernels read the SAME h with the same indexing, so they must not be
+      // handed two copies of it. K7 is encoded below, out of this very `geo` - which is what makes
+      // the claim structural rather than a comment.
+      ocudu::metal::mmse_engine::hop_geometry geo{};
+      geo.nout_stride  = nout;
+      geo.n_blk        = reformat->rsrp.n_blk;
+      geo.nf_std       = reformat->nf_std;
+      geo.sc_tail_base = reformat->nf_std * nof_blocks;
+      geo.nf_tail      = reformat->has_tail ? reformat->nf_tail : 0u;
+      geo.sys_tail     = reformat->sys_tail;
+      geo.nof_layers   = reformat->nof_layers;
+      geo.nof_symbols  = reformat->nof_symbols;
+      geo.dc_sc        = reformat->dc_sc;
+      geo.dmrs_sym_bits = reformat->dmrs_sym_bits;
+      for (unsigned l = 0; l != ocudu::metal::mmse_engine::hop_geometry::max_layers; ++l) {
+        geo.pilot_re_bits[l] = (l < reformat->nof_layers) ? reformat->rsrp.pilot_re_bits[l] : 0u;
+      }
+      const std::array<uint32_t, 14> rpparams = geo.words();
+        // The MSL side declares the same fields (ocudu_mmse_rsrp.metal); a mismatch is what turns a
+        // kernel's loop bound into garbage, and a kernel that does not terminate takes the machine
+        // with it (full_gpu_chain §48.131). Assert the size, and dump the fields once on request.
+        static_assert(sizeof(rpparams) == 56, "mmse_rsrp_params must match the MSL declaration");
+
       // K5 (optional): the hop's per-layer rsrp, reduced from the SAME h this reformat just read -
       // and in the same command buffer, so the host never waits for anything to get it. It reads the
       // pilot REs K3 skips, which is why it walks h rather than dst.
@@ -722,46 +1118,30 @@ static void encode_reformat(stage_encoder&                             s,
           k5_once = true;
           fprintf(stderr, "[k5] entered, dst=%p n_blk=%u\n", static_cast<void*>(reformat->rsrp.dst), reformat->rsrp.n_blk);
         }
-        struct mmse_rsrp_params {
-          uint32_t nout_stride;
-          uint32_t n_blk;
-          uint32_t nf_std;
-          uint32_t sc_tail_base;
-          uint32_t nf_tail;
-          uint32_t sys_tail;
-          uint32_t nof_layers;
-          uint32_t nof_symbols;
-          uint32_t dc_sc;
-          uint32_t dmrs_sym_bits;
-          uint32_t pilot_re_bits[4];
-        } rpparams{};
-        rpparams.nout_stride  = static_cast<uint32_t>(nout);
-        rpparams.n_blk        = reformat->rsrp.n_blk;
-        rpparams.nf_std       = reformat->nf_std;
-        rpparams.sc_tail_base = reformat->nf_std * static_cast<uint32_t>(nof_blocks);
-        rpparams.nf_tail      = reformat->has_tail ? reformat->nf_tail : 0u;
-        rpparams.sys_tail     = reformat->sys_tail;
-        rpparams.nof_layers   = reformat->nof_layers;
-        rpparams.nof_symbols  = reformat->nof_symbols;
-        rpparams.dc_sc        = reformat->dc_sc;
-        rpparams.dmrs_sym_bits = reformat->dmrs_sym_bits;
-        for (unsigned l = 0; l != 4; ++l) {
-          rpparams.pilot_re_bits[l] = (l < reformat->nof_layers) ? reformat->rsrp.pilot_re_bits[l] : 0u;
-        }
         static bool rsrp_param_once = false;
         if (!rsrp_param_once && (getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
           rsrp_param_once = true;
           fprintf(stderr,
                   "[rsrp_params] nout_stride=%u n_blk=%u nf_std=%u sc_tail_base=%u nf_tail=%u sys_tail=%u "
                   "layers=%u symbols=%u dc_sc=%u dmrs_sym_bits=%#x pilot0=%#x pilot1=%#x tick=%llu\n",
-                  rpparams.nout_stride, rpparams.n_blk, rpparams.nf_std, rpparams.sc_tail_base,
-                  rpparams.nf_tail, rpparams.sys_tail, rpparams.nof_layers, rpparams.nof_symbols,
-                  rpparams.dc_sc, rpparams.dmrs_sym_bits, rpparams.pilot_re_bits[0],
-                  rpparams.pilot_re_bits[1],
+                  rpparams[0], rpparams[1], rpparams[2], rpparams[3],
+                  rpparams[4], rpparams[5], rpparams[6], rpparams[7],
+                  rpparams[8], rpparams[9], rpparams[10],
+                  rpparams[11],
                   static_cast<unsigned long long>(reformat->rsrp.pilot_re_bits[0]));
         }
-        const NSUInteger rsrp_bytes =
-            static_cast<NSUInteger>(reformat->rsrp.n_blk) * reformat->nof_layers * 2 * sizeof(float);
+        // The region the kernel writes: (standard blocks + edge block slots) * layers * 2 floats.
+        // ocudu_mmse_rsrp.metal lays a block slot out exactly as K2 lays out a block - layer l at
+        // float (b * nof_layers + l) * 2 - so the length is that expression, and the HOST reserves
+        // the same number (rsrp_region_floats()). Sizing the wrap by the standard count alone
+        // TRUNCATED the mapping: the edge block's writes past the first block went nowhere, which
+        // is how its (correct) reduction read back as zero.
+        const unsigned rsrp_tail_slots =
+            (reformat->has_tail && (reformat->nf_std != 0u))
+                ? ((reformat->nf_tail + reformat->nf_std - 1u) / reformat->nf_std)
+                : 0u;
+        const NSUInteger rsrp_bytes = static_cast<NSUInteger>(reformat->rsrp.n_blk + rsrp_tail_slots) *
+                                      reformat->nof_layers * 2u * sizeof(float);
         id<MTLBuffer> rsrp_buf = e->wrap_shared(reformat->rsrp.dst, rsrp_bytes);
         if (rsrp_buf != nil) {
           // K5 reads h, which K2 wrote and K3 also read: same producer, so the barrier K3 needed
@@ -770,8 +1150,47 @@ static void encode_reformat(stage_encoder&                             s,
           [enc setBuffer:h_buf offset:0 atIndex:0];
           [enc setBuffer:rsrp_buf offset:0 atIndex:1];
           [enc setBytes:&rpparams length:sizeof(rpparams) atIndex:2];
-          [enc dispatchThreadgroups:MTLSizeMake(reformat->rsrp.n_blk * reformat->nof_layers, 1, 1)
-              threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+          // One threadgroup per (block slot, layer) of the WHOLE region, edge block included: the
+          // kernel derives its block slot from the subcarrier offset, so the grid must cover the
+          // edge slots as well. Dispatching only the standard count left the edge block's
+          // threadgroups unlaunched - the second half of "the edge block reduces nothing".
+          const NSUInteger rsrp_tg = static_cast<NSUInteger>(reformat->rsrp.n_blk + rsrp_tail_slots) *
+                                     reformat->nof_layers;
+          [enc dispatchThreadgroups:MTLSizeMake(rsrp_tg, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        }
+      }
+
+      // K7 + the transform + K6 (optional, batch 5b): the hop's time alignment, produced entirely on
+      // the device. The three dispatches go into THIS command buffer and nowhere else: the transform
+      // is the DFT engine's kernel but is dispatched from here (its own engine owns the front-end
+      // queue, and command buffers of different queues have no ordering between them), and K6 reads
+      // what it wrote. Two of the three dispatches are the same buffer, so the barriers below are what
+      // makes each one's writes visible to the next - see the header of ocudu_mmse_ta.metal.
+      //
+      // It is a REPORTING value like the rsrp above: it reaches the timing-advance report and the
+      // debug dump, never the LLR path. That is what makes it free to move here, and it is the last
+      // reason the lane still read the estimated grid back to the host on every hop.
+      if ((reformat->ta.dst != nullptr) && (e->ta_place_pipe != nil) && (e->ta_pipe != nil) &&
+          (e->ta_dft_pipe != nil)) {
+        if (encode_ta(e, s, reformat->ta, h_buf, geo)) {
+          static bool ta_once = false;
+          if (!ta_once && (getenv("OCUDU_CE_TA_CHECK") != nullptr)) {
+            ta_once = true;
+            fprintf(stderr,
+                    "[ta_params] size=%u stride=%u scs=%.0f window=%u slices=%u n_blk=%u nf_std=%u "
+                    "tail=%u layers=%u sym_bits=%#x comb0=%#x\n",
+                    reformat->ta.dft_size,
+                    reformat->ta.stride,
+                    static_cast<double>(reformat->ta.scs_hz),
+                    reformat->ta.max_ta_samples,
+                    reformat->ta.nof_dmrs_symbols * reformat->nof_layers,
+                    geo.n_blk,
+                    geo.nf_std,
+                    geo.nf_tail,
+                    geo.nof_layers,
+                    geo.dmrs_sym_bits,
+                    geo.pilot_re_bits[0]);
+          }
         }
       }
     }
@@ -959,6 +1378,23 @@ bool mmse_engine::init(const char* metallib_path)
                                                           options:MTLPipelineOptionNone
                                                        reflection:nil
                                                             error:&err];
+  }
+  // K7 (batch 5b): places the hop's pilots into a DFT input. Optional, like the rest.
+  (void)load_ta_dft_pipeline(e);
+  id<MTLFunction> ta_place_fn = [e->library newFunctionWithName:@"mmse_ta_place"];
+  if (ta_place_fn != nil) {
+    e->ta_place_pipe = [e->device newComputePipelineStateWithFunction:ta_place_fn
+                                                              options:MTLPipelineOptionNone
+                                                           reflection:nil
+                                                                error:&err];
+  }
+  // K6 (the hop's time alignment) is optional for the same reason as K5.
+  id<MTLFunction> ta_fn = [e->library newFunctionWithName:@"mmse_ta_profile"];
+  if (ta_fn != nil) {
+    e->ta_pipe = [e->device newComputePipelineStateWithFunction:ta_fn
+                                                        options:MTLPipelineOptionNone
+                                                     reflection:nil
+                                                          error:&err];
   }
   id<MTLFunction> noise_fn = [e->library newFunctionWithName:@"mmse_noise"];
   if (noise_fn != nil) {
@@ -1637,6 +2073,194 @@ bool mmse_engine::rsrp_available() const
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   return (e != nullptr) && (e->rsrp_pipe != nil);
+}
+
+
+bool mmse_engine::ta_place_available(unsigned dft_size)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  return (e != nullptr) && (e->ta_place_pipe != nil) && build_ta_tables(e, dft_size);
+}
+
+bool mmse_engine::run_ta_place(const void*         h,
+                               const hop_geometry& geometry,
+                               unsigned            dft_size,
+                               unsigned            stride,
+                               void*               dst)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if ((e == nullptr) || (e->ta_place_pipe == nil) || (h == nullptr) || (dst == nullptr) ||
+      (stride == 0) || (stride > 3) || !build_ta_tables(e, dft_size)) {
+    return false;
+  }
+  // The kernel's loops are bounded by compile-time constants, so a geometry wider than them would be
+  // SILENTLY TRUNCATED - a wrong answer that looks like a valid one. Refuse it here instead: the
+  // clamps inside the kernel are the safety net, never the intended limit (full_gpu_chain 48.132(e)).
+  static constexpr unsigned mmse_ta_kernel_max_size   = 4096;
+  static constexpr unsigned mmse_ta_kernel_max_slices = 16;
+  const unsigned            nof_dmrs_symbols =
+      static_cast<unsigned>(__builtin_popcount(geometry.dmrs_sym_bits));
+  const unsigned nof_slices = nof_dmrs_symbols * geometry.nof_layers;
+  if ((dft_size > mmse_ta_kernel_max_size) || (nof_slices == 0) || (nof_slices > mmse_ta_kernel_max_slices) ||
+      (geometry.nof_layers == 0) || (geometry.nof_layers > hop_geometry::max_layers) ||
+      (geometry.nf_std == 0) || (geometry.nf_std > 3300) || (geometry.nf_tail > 3300)) {
+    return false;
+  }
+  struct mmse_ta_place_params {
+    uint32_t geo[14];
+    uint32_t size;
+    uint32_t stride;
+    uint32_t nof_dmrs_symbols;
+    uint32_t dmrs_slots[4];
+    uint32_t pad0;
+  };
+  static_assert(sizeof(mmse_ta_place_params) == 88, "mmse_ta_place_params must match the MSL declaration");
+  mmse_ta_place_params p{};
+  const auto           words = geometry.words();
+  for (unsigned i = 0; i != 14; ++i) {
+    p.geo[i] = words[i];
+  }
+  p.size   = dft_size;
+  p.stride = stride;
+  // This entry is handed a SYNTHETIC hop whose geometry describes it completely, so the hop's DM-RS
+  // symbols are the set bits of dmrs_sym_bits. The lane's own path does not assume that: a hop of a
+  // frequency-hopping slot carries a SUBSET of the slot's DM-RS symbols, and encode_ta() is handed
+  // that subset explicitly (see reformat_stage::ta_stage_t::dmrs_slots).
+  for (unsigned sym = 0; (sym != 14) && (p.nof_dmrs_symbols != 4); ++sym) {
+    if (((geometry.dmrs_sym_bits >> sym) & 1u) != 0u) {
+      p.dmrs_slots[p.nof_dmrs_symbols++] = sym;
+    }
+  }
+  if (p.nof_dmrs_symbols == 0) {
+    return false;
+  }
+
+  // Everything here is a RUN of slices, so each wrap is one range: no per-slice blit, no offsets. The
+  // h buffer is the caller's (the estimator's staging), the destination is its own run of slices.
+  //
+  // The length is the WHOLE batch h can span: nof_systems rows of n_blk block slots, where the edge
+  // block - when the geometry has one - lives in the systems from sys_tail on. Sizing it by the
+  // layers alone would leave the edge rows outside the mapping (that is "the edge block reduces
+  // nothing" again, one kernel over), and over-asking is the safe direction: a wrap that reaches past
+  // its allocation is REFUSED by shared_queue::wrap_no_copy, never silently shortened.
+  const unsigned   n_sys = std::max(geometry.nof_layers,
+                                    (geometry.nf_tail != 0u) ? (geometry.sys_tail + geometry.nof_layers) : 0u);
+  const NSUInteger h_bytes =
+      static_cast<NSUInteger>(n_sys) * geometry.n_blk * 2u * geometry.nout_stride * sizeof(float);
+  id<MTLBuffer> h_buf   = e->wrap_shared(h, h_bytes);
+  id<MTLBuffer> dst_buf = e->wrap_shared(dst, static_cast<NSUInteger>(nof_slices) * dft_size * 2u * sizeof(float));
+  if ((h_buf == nil) || (dst_buf == nil)) {
+    return false;
+  }
+
+  id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (enc == nil) {
+    return false;
+  }
+  [enc setComputePipelineState:e->ta_place_pipe];
+  [enc setBuffer:h_buf offset:0 atIndex:0];
+  // index 1 is unused: the placement is in natural order, so no permutation table is read here.
+  [enc setBuffer:dst_buf offset:0 atIndex:2];
+  [enc setBytes:&p length:sizeof(p) atIndex:3];
+  [enc dispatchThreadgroups:MTLSizeMake(nof_slices, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  [enc endEncoding];
+  [cb commit];
+  [cb waitUntilCompleted];
+  return (cb.status == MTLCommandBufferStatusCompleted) && (cb.error == nil);
+}
+
+bool mmse_engine::ta_available() const
+{
+  auto* e = static_cast<const mmse_engine_impl*>(impl);
+  return (e != nullptr) && (e->ta_pipe != nil);
+}
+
+bool mmse_engine::run_ta_profile(const void* slices,
+                                 unsigned    size,
+                                 unsigned    nof_slices,
+                                 unsigned    stride,
+                                 double      scs_hz,
+                                 unsigned    max_ta_samples,
+                                 float&      ta_seconds)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if ((e == nullptr) || (e->ta_pipe == nil) || (slices == nullptr) || (size == 0) || (nof_slices == 0) ||
+      (stride == 0) || (scs_hz <= 0.0)) {
+    return false;
+  }
+  // See run_ta_place(): refuse a geometry wider than the kernel's constants rather than let the
+  // clamps truncate it silently.
+  static constexpr unsigned mmse_ta_kernel_max_size   = 4096;
+  static constexpr unsigned mmse_ta_kernel_max_slices = 16;
+  if ((size > mmse_ta_kernel_max_size) || (nof_slices > mmse_ta_kernel_max_slices)) {
+    return false;
+  }
+  // The kernel's parameter block, field for field (see ocudu_mmse_ta.metal).
+  struct mmse_ta_params {
+    uint32_t size;
+    uint32_t nof_slices;
+    uint32_t stride;
+    float    scs_hz;
+    uint32_t max_ta_samples;
+    uint32_t nof_taps;
+    uint32_t pad0;
+    uint32_t pad1;
+  };
+  // See the K5 note: these two must agree with ocudu_mmse_ta.metal field for field.
+  static_assert(sizeof(mmse_ta_params) == 32, "mmse_ta_params must match the MSL declaration");
+  mmse_ta_params params{size,
+           nof_slices,
+           stride,
+           static_cast<float>(scs_hz),
+           max_ta_samples,
+           (max_ta_samples > 2u) ? 5u : 3u,
+           0u,
+           0u};
+
+  // float2 per sample, as the DFT engine leaves it.
+  const NSUInteger slices_bytes = static_cast<NSUInteger>(size) * nof_slices * 2u * sizeof(float);
+  id<MTLBuffer>    in_buf       = e->wrap_shared(slices, slices_bytes);
+  id<MTLBuffer>    out_buf       = e->wrap_shared(&e->ta_out, sizeof(float));
+  if (in_buf == nil || out_buf == nil) {
+if (getenv("OCUDU_CE_TA_CHECK") != nullptr) {
+    fprintf(stderr, "[ta_profile] wrap failed: in=%p out=%p bytes=%lu\n",
+            (__bridge const void*)in_buf, (__bridge const void*)out_buf,
+            static_cast<unsigned long>(slices_bytes));
+  }
+    return false;
+  }
+
+  // A command buffer of its own, committed and waited here, on the engine's own queue. It
+  // deliberately does NOT join the lane's burst: the input this reduces is the DFT engine's output,
+  // and that engine owns the FRONT-END queue while this one is the BACK-END queue - command buffers
+  // of different queues have no ordering between them, so a profile encoded into this queue could run
+  // before the transform that produces its input. Joining the burst is therefore part of the
+  // integration, not of this entry point: it needs the transform and the reduction on ONE queue.
+  id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (enc == nil) {
+    return false;
+  }
+  [enc setComputePipelineState:e->ta_pipe];
+  [enc setBuffer:in_buf offset:0 atIndex:0];
+  [enc setBuffer:out_buf offset:0 atIndex:1];
+  [enc setBytes:&params length:sizeof(params) atIndex:2];
+  // One threadgroup: the profile is a per-hop reduction, and its size is the kernel's own constant.
+  [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  [enc endEncoding];
+  [cb commit];
+  [cb waitUntilCompleted];
+  if ((cb.status != MTLCommandBufferStatusCompleted) || (cb.error != nil)) {
+if (getenv("OCUDU_CE_TA_CHECK") != nullptr) {
+    fprintf(stderr, "[ta_profile] cb status=%ld err=%s\n",
+            static_cast<long>(cb.status),
+            (cb.error != nil) ? cb.error.localizedDescription.UTF8String : "none");
+  }
+    return false;
+  }
+  ta_seconds = e->ta_out;
+  return !std::isnan(ta_seconds);
 }
 
 /// Must match mmse_scatter_params in ocudu_mmse_pilots.metal.

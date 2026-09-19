@@ -24,7 +24,7 @@ set(MMSE_METALLIB ${CMAKE_CURRENT_SOURCE_DIR}/ocudu_mmse.metallib)
 ocudu_add_metallib(
     TARGET ocudu_mmse_metallib
     OUTPUT ${MMSE_METALLIB}
-    SOURCES ocudu_mmse_inv.metal ocudu_mmse_apply.metal ocudu_mmse_weights.metal ocudu_mmse_rsrp.metal
+    SOURCES ocudu_mmse_inv.metal ocudu_mmse_apply.metal ocudu_mmse_weights.metal ocudu_mmse_rsrp.metal ocudu_mmse_ta.metal
             ocudu_mmse_weights_matrix.metal ocudu_mmse_apply_matrix.metal ocudu_mmse_reformat.metal
             ocudu_mmse_corr.metal ocudu_mmse_pilots.metal ocudu_mmse_pilots_power.metal
     # The correlation kernels are the one place with a BIT-EXACTNESS contract against a host float
@@ -67,10 +67,13 @@ target_include_directories(ocudu_channel_estimator_metal PUBLIC
 target_compile_definitions(ocudu_channel_estimator_metal PUBLIC
     OCUDU_METAL_CHEST
     OCUDU_MMSE_METALLIB_PATH="${MMSE_METALLIB}"
+    # The batch 5b time-alignment port encodes the DFT kernel into the estimator's own command
+    # buffer, so the estimator loads that metallib too (see load_ta_pipelines()).
+    OCUDU_DFT_METALLIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../../../generic_functions/metal/ocudu_dft.metallib"
     OCUDU_HELENA_MODEL_PATH="${HELENA_MODELC}"
     OCUDU_HELENA_MODEL_PATH_52="${HELENA_MODELC_52}"
     OCUDU_HELENA_MODEL_PATH_106="${HELENA_MODELC_106}")
-add_dependencies(ocudu_channel_estimator_metal ocudu_mmse_metallib)
+add_dependencies(ocudu_channel_estimator_metal ocudu_mmse_metallib ocudu_metallib_dft)
 target_link_libraries(ocudu_channel_estimator_metal PUBLIC ocuduvec ocudu_phy_support ocudulog ocudu_metal_queue)
 target_link_libraries(ocudu_channel_estimator_metal PRIVATE "-framework Metal" "-framework Foundation" "-framework CoreML")
 

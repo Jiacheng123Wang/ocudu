@@ -185,6 +185,49 @@ public:
     /// Left empty (dst == nullptr) when the caller wants the host to keep computing it, which is what
     /// OCUDU_CE_DEV_STATS=0 asks for.
     rsrp_stage_t rsrp;
+
+    /// \brief Optional batch-5b stage: the hop's time alignment, reduced on the DEVICE.
+    ///
+    /// The host derives the hop's timing advance from the pilot estimates in three steps - an inverse
+    /// transform per DM-RS symbol/layer, the accumulation of their |.|^2, and a peak search in half a
+    /// cyclic prefix either side of the resulting profile - and this stage runs all three where the
+    /// estimates already are: K7 places them into a transform input, the DFT kernel transforms each
+    /// slice, K6 reduces the profile to seconds. All three dispatches go into the command buffer this
+    /// stage is encoded into, so the host never waits for an intermediate value.
+    ///
+    /// The input is the reformat's OWN \c h (the buffer K5 reads), not a separate staging: the host's
+    /// TA input is filled out of a host copy of that very buffer (see ocudu_mmse_ta.metal), so reading
+    /// it on the device is what makes the two sides agree RE for RE.
+    struct ta_stage_t {
+      /// Destination: one float, the time alignment in SECONDS. It must be page-aligned: it is bound
+      /// with a zero-copy wrap (a caller's stack float is not, and the wrap would be refused).
+      /// A rotating slot, like the rsrp ring - a pooled estimator may have later hops in flight.
+      float* dst = nullptr;
+      /// Transform size of one slice. The HOST derives it the way the estimator's get_idft() does (the
+      /// next power of two of (nof_re * 4096 / MAX_NOF_SUBCARRIERS), at least 2048), so both sides
+      /// transform the same number of points and resolve the same delay the same way.
+      unsigned dft_size = 0;
+      /// Pilot spacing in subcarriers: 1 PUCCH f1/3/4 (and the sparse-mask route, whose positions are
+      /// the subcarrier offsets themselves), 2 PUSCH, 3 PUCCH f2. It is what turns a tap index into a
+      /// time, so a wrong value scales the estimate rather than failing.
+      unsigned stride = 0;
+      /// Subcarrier spacing of the hop, in Hz.
+      float scs_hz = 0.0F;
+      /// Half-cyclic-prefix search window, in taps of the profile.
+      unsigned max_ta_samples = 0;
+      /// DM-RS symbols OF THE HOP, ascending: slice s of the placement is dmrs_slots[s] crossed with
+      /// the layers, which is the order the host's estimator enumerates its slices in. Not the slot's
+      /// DM-RS symbols (the geometry carries those): a hop of a frequency-hopping slot covers only
+      /// some of them, and using the slot's would transform the other hop's pilots as well.
+      /// MAX_DMRS_SYMBOLS (4) entries; the kernel's parameter block hard-codes that size.
+      static constexpr unsigned max_dmrs_symbols = 4;
+      unsigned                  nof_dmrs_symbols = 0;
+      unsigned                  dmrs_slots[max_dmrs_symbols] = {};
+    };
+
+    /// Left empty (dst == nullptr) when the caller wants the host to keep computing the TA, which is
+    /// what OCUDU_CE_DEV_STATS=0 asks for.
+    ta_stage_t ta;
   };
 
   /// \brief Device-side correlation stage (K0-d): A and R_hp built into the engine's own slots.
@@ -459,6 +502,117 @@ public:
   /// Whether the metallib carries the device-side rsrp reduction (mmse_rsrp). When false the caller
   /// must keep reducing the pilots on the host - the same shape as scatter_available().
   bool rsrp_available() const;
+
+  /// Whether the metallib carries the device-side time-alignment reduction (mmse_ta_profile).
+  bool ta_available() const;
+
+  /// \brief The hop's time alignment, reduced on the device out of the per-symbol IDFTs.
+  ///
+  /// The transform itself is the DFT engine's (see ocudu_dft.metal); this reduces its output the way
+  /// time_alignment_estimator_dft_impl::estimate_ta_correlation() does on the host - accumulate
+  /// |.|^2 over the slices, search half a cyclic prefix either side of the circular profile, refine
+  /// the peak with a parabolic fit - and returns SECONDS, the unit the report is in.
+  ///
+  /// \param[in]  slices  \c nof_slices consecutive transforms of \c size complex values (float
+  ///                     pairs), exactly as the DFT engine lays a batch out.
+  /// \param[in]  size    Transform size of one slice.
+  /// \param[in]  nof_slices DM-RS symbols times layers of the hop.
+  /// \param[in]  stride  Pilot spacing in subcarriers (1 PUCCH f1/3/4, 2 PUSCH, 3 PUCCH f2): it is
+  ///                     what turns the tap index into a time, so it must match the geometry.
+  /// \param[in]  scs_hz  Subcarrier spacing of the hop, in Hz.
+  /// \param[in]  max_ta_samples Half-cyclic-prefix search window, in taps.
+  /// \param[out] ta_seconds The estimate. Untouched when the call fails.
+  /// \return True on success. False when the kernel is unavailable, the geometry is outside its
+  ///         contract, or the dispatch failed - the caller then keeps the host's estimate.
+  bool run_ta_profile(const void* slices,
+                      unsigned    size,
+                      unsigned    nof_slices,
+                      unsigned    stride,
+                      double      scs_hz,
+                      unsigned    max_ta_samples,
+                      float&      ta_seconds);
+
+  /// \brief The geometry of the hop's estimates, as the reformat's own parameters describe them.
+  ///
+  /// K5 (rsrp) and K7 (the time-alignment placement) read the VERY SAME buffer with the same
+  /// indexing - the reformat's source \c h, [nof_systems][n_blk + tail slots][2 * nout_stride] - so
+  /// they are handed the same struct rather than two copies of eleven fields that can drift apart.
+  /// Field for field the leading part of mmse_rsrp_params and mmse_ta_place_params in the metallib.
+  struct hop_geometry {
+    /// Output positions per block in the batch (the row length of h, in complex values).
+    unsigned nout_stride = 0;
+    /// STANDARD blocks per system. The batch's edge block, when it carries one, is the block slots
+    /// from n_blk on: it is block 0 of the systems from sys_tail on, not an out-of-range block.
+    unsigned n_blk = 0;
+    /// Subcarriers per standard block.
+    unsigned nf_std = 0;
+    /// First subcarrier of the edge block (n_blk * nf_std; the hop's span when there is none).
+    unsigned sc_tail_base = 0;
+    /// Subcarriers of the edge block (0 when the hop has none).
+    unsigned nf_tail = 0;
+    /// First system of the edge block (== nof_layers).
+    unsigned sys_tail = 0;
+    unsigned nof_layers = 0;
+    unsigned nof_symbols = 0;
+    /// DC subcarrier of the hop (>= the hop's span when there is none). K5 leaves it out of its sum;
+    /// K7 does not (the host's TA input includes it) - see ocudu_mmse_ta.metal.
+    unsigned dc_sc = 0;
+    /// DM-RS symbols of the slot, one bit per symbol.
+    unsigned dmrs_sym_bits = 0;
+    /// The layer's own pilot comb within a PRB, one 12-bit mask per layer (MAX_LAYERS entries).
+    static constexpr unsigned        max_layers = 4;
+    std::array<unsigned, max_layers> pilot_re_bits{};
+
+    /// \brief The geometry as the kernels' parameter block reads it.
+    ///
+    /// The eleven fields above followed by the four comb masks, in the order BOTH kernels declare them
+    /// (mmse_rsrp_params and mmse_ta_place_params, ocudu_mmse_rsrp.metal / ocudu_mmse_ta.metal). One
+    /// place builds it, so K5 and K7 cannot be handed geometries that disagree about which subcarrier
+    /// is which - they read the very same buffer.
+    std::array<uint32_t, 14> words() const
+    {
+      std::array<uint32_t, 14> w{static_cast<uint32_t>(nout_stride),
+                                 static_cast<uint32_t>(n_blk),
+                                 static_cast<uint32_t>(nf_std),
+                                 static_cast<uint32_t>(sc_tail_base),
+                                 static_cast<uint32_t>(nf_tail),
+                                 static_cast<uint32_t>(sys_tail),
+                                 static_cast<uint32_t>(nof_layers),
+                                 static_cast<uint32_t>(nof_symbols),
+                                 static_cast<uint32_t>(dc_sc),
+                                 static_cast<uint32_t>(dmrs_sym_bits)};
+      for (unsigned i = 0; i != max_layers; ++i) {
+        w[10 + i] = static_cast<uint32_t>(pilot_re_bits[i]);
+      }
+      return w;
+    }
+  };
+
+  /// \brief Places a hop's pilots into a DFT input for the time-alignment port (K7).
+  ///
+  /// The transform that follows is the DFT engine's kernel (dft_dit), which reads its input as
+  /// `in[perm[i]]` - a gather with no subcarrier stride. This scatters the pilots of every DM-RS
+  /// symbol and layer into its own slice of the transform input, at the positions the host's own
+  /// estimator uses, and zeroes the rest of the slice: the hop's alignment can then be reduced on the
+  /// device without the host assembling (and therefore committing and waiting for) the input.
+  ///
+  /// \param[in]  h          the reformat's SOURCE, [nof_systems][n_blk slots][2 * nout_stride] floats,
+  ///                        the buffer K5 also reads.
+  /// \param[in]  geometry   the hop's geometry (see hop_geometry).
+  /// \param[in]  dft_size   Transform size of one slice; the size the twiddle/permutation tables are
+  ///                        built for.
+  /// \param[in]  stride     Pilot spacing in subcarriers, as the host's estimator is called with.
+  /// \param[out] dst        [nof_slices][dft_size] complex pairs, \c nof_slices = nof_symbols x
+  ///                        nof_layers. Every position of every slice is written.
+  /// \return True when the placement was encoded and completed.
+  bool run_ta_place(const void*         h,
+                    const hop_geometry& geometry,
+                    unsigned            dft_size,
+                    unsigned            stride,
+                    void*               dst);
+
+  /// Whether the metallib carries the placement kernel, and the DFT kernel it feeds, for \c dft_size.
+  bool ta_place_available(unsigned dft_size);
 
   /// \brief Batched inversion (K1): A_inv = (A)^-1 for each system, in-place Gauss-Jordan.
   ///

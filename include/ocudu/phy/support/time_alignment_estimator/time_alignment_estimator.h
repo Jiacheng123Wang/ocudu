@@ -22,6 +22,15 @@ public:
   /// It is equal to the maximum number of subcarriers that can be contained in an OFDM symbol.
   static constexpr unsigned max_nof_symbols = MAX_NOF_SUBCARRIERS;
 
+  /// \brief The inverse-transform size this estimator resolves a block of \p nof_re symbols with.
+  ///
+  /// The size is the estimator's own choice (it sets both the delay resolution and whether the
+  /// parabolic refinement applies at all), and a backend that reproduces the estimate elsewhere - a
+  /// device that transforms the pilots where they already live, see ocudu_mmse_ta.metal - has to
+  /// transform the SAME number of points, or the two answers differ by a resolution rather than by
+  /// rounding. It therefore asks instead of re-deriving the formula.
+  virtual unsigned get_idft_size(unsigned nof_re) const = 0;
+
   /// Default destructor.
   virtual ~time_alignment_estimator() = default;
 

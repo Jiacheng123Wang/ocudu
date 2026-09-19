@@ -28,6 +28,9 @@ public:
   /// Maximum DFT size to fit all the channel bandwidth.
   static const unsigned max_dft_size;
 
+  /// The inverse-transform size a block of \p nof_re symbols is resolved with (see get_idft()).
+  unsigned get_idft_size(unsigned nof_re) const override;
+
   /// Collection of DFT processors type.
   using collection_dft_processors = std::unordered_map<unsigned, std::unique_ptr<dft_processor>>;
 

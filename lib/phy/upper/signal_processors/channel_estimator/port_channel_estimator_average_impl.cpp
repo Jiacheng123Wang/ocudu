@@ -516,10 +516,19 @@ bool port_channel_estimator_average_impl::compute_hop_finish(const dmrs_symbol_l
   float    beta_scaling    = st.beta_scaling;
   std::optional<float>& cfo_hop = pending_hop.cfo_hop;
 
-  // RSrp accumulation from the filtered pilot estimates (identical for all estimation paths).
+  // RSrp accumulation. The host walks the filtered pilot estimates it unpacked; a backend that
+  // reduced the same sum where the estimates live hands it over instead (see
+  // get_device_rsrp_sum()), which is what lets a fused lane stop reading the grid back for a
+  // REPORTING value. Both routes accumulate the SAME quantity - the sum of |h|^2 over the hop's
+  // DM-RS REs, times the same normalization - so the published rsrp does not depend on which one
+  // ran, up to floating-point summation order.
   float power_normalization_factor =
       beta_scaling * beta_scaling * static_cast<float>(nof_dmrs_symbols) / static_cast<float>(nof_lse_symbols);
   for (unsigned i_layer = 0; i_layer != nof_tx_layers; ++i_layer) {
+    if (const std::optional<float> device_sum = get_device_rsrp_sum(i_layer); device_sum.has_value()) {
+      rsrp[i_layer] += *device_sum * power_normalization_factor;
+      continue;
+    }
     for (unsigned i_symbol = 0; i_symbol != nof_lse_symbols; ++i_symbol) {
       float avg = ocuduvec::average_power(filtered_pilots_lse.get_symbol(i_symbol, i_layer)) *
                   filtered_pilots_lse.get_symbol(i_symbol, i_layer).size();
@@ -548,8 +557,16 @@ bool port_channel_estimator_average_impl::compute_hop_finish(const dmrs_symbol_l
                                        stop_layer);
   }
 
-  time_alignment_s +=
-      estimate_time_alignment(filtered_pilots_lse, cfg_local.dmrs_pattern.front(), st.hop, cfg_local.scs, *ta_estimator);
+  // The hop's time alignment: the device's when a backend produced it where the estimates already
+  // live (see get_device_ta_seconds()), the host's own estimator otherwise. Both accumulate the SAME
+  // quantity - the hop's alignment in seconds - so what is published does not depend on which one ran,
+  // up to the resolution each side resolves, which the device stage derives with the host's formula.
+  if (const std::optional<float> device_ta = get_device_ta_seconds(); device_ta.has_value()) {
+    time_alignment_s += *device_ta;
+  } else {
+    time_alignment_s +=
+        estimate_time_alignment(filtered_pilots_lse, cfg_local.dmrs_pattern.front(), st.hop, cfg_local.scs, *ta_estimator);
+  }
 
   pending_hop.valid = false;
   return stage_ok;

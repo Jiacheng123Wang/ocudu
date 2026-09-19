@@ -27,6 +27,17 @@ namespace ocudu {
 class port_channel_estimator_metal_mmse_impl : public port_channel_estimator_average_impl
 {
 public:
+  /// \brief How many hops the OCUDU_CE_TA_CHECK probe has judged WRONG (batch 5b's A/B verdict).
+  ///
+  /// A process-wide counter rather than a return value: the probe runs inside the completion, which the
+  /// estimator's own callers drive, and this is what an offline harness (the unit test) reads to make
+  /// the A/B a PASS/FAIL instead of a printout. Zero when the probe never ran - which is not a pass,
+  /// and is why the caller checks that it ran as well (see device_ta_probe_checks()).
+  static unsigned device_ta_probe_failures();
+
+  /// How many hops the OCUDU_CE_TA_CHECK probe has compared.
+  static unsigned device_ta_probe_checks();
+
   /// Maximum block size: 3 PRB x 14 symbols = 504 positions.
   /// Maximum block pilots: 3 PRB x 6 RE (type 1) x 4 DM-RS symbols (PUSCH pos2 + 3 additional
   /// positions - the E2E cell uses {2,7,11}, i.e. 3 symbols, see PLAN.md 7.0.9).
@@ -162,6 +173,11 @@ private:
 
   // See the base class documentation.
   bool complete_fd_td_estimation_stage() override;
+
+  /// Hands the hop's device-side rsrp sum to compute_hop_finish() when the device produced one for
+  /// this hop (see the base class for why this exists: it is what keeps the read-back grid out of
+  /// the reporting path). Nullopt when the device statistics are off or the hop has no reduction.
+  std::optional<float> get_device_rsrp_sum(unsigned i_layer) const override;
 
   // See the base class documentation.
   bool device_results_cover_last_estimate() const override
@@ -529,10 +545,54 @@ private:
     unsigned       nof_layers = 0;
     unsigned       sys_offset = 0;
     engine_strides st{};
+    /// \brief Ring slot of gpu_rsrp this batch's device reduction wrote, or "none".
+    ///
+    /// Kept per BATCH and not in one member of the estimator, because rsrp_base_ names the hop being
+    /// STAGED while the completion of an earlier hop runs after later hops have been staged: reading
+    /// the reduction through the staging counter reads whatever block was claimed last. That is the
+    /// defect that made a correct device reduction read back as 0 (batch 5a), and per-batch is the
+    /// only place the right block is unambiguous.
+    unsigned       rsrp_block = kNoRsrpBlock;
+    /// Block slots that region holds (nullptr-style zero when there is no reduction).
+    unsigned       rsrp_slots = 0;
   };
+
+  /// Value of pending_unpack::rsrp_block when the device produced no reduction for that batch.
+  static constexpr unsigned kNoRsrpBlock = ~0u;
 
   /// A hop has at most two batches (the standard blocks and the tail block, or the merged pair).
   static constexpr unsigned max_pending_unpacks = 2;
+
+  /// \brief Reserves the gpu_rsrp region for one batch and returns the stage that writes it.
+  ///
+  /// One BLOCK SLOT (kRsrpSlots floats) per standard block plus the edge block's own run, because
+  /// the kernel addresses the ring by block slot - and a merged batch gives the standard and the
+  /// edge geometry the same blk, so a single slot would have them overwrite each other.
+  ///
+  /// \param n_blk   Standard blocks per system of this batch (the reformat's n_blk).
+  /// \param nf_std  Subcarriers of a standard block.
+  /// \param nf_tail Subcarriers of the edge block, 0 when the batch carries none.
+  /// \param nof_layers Layers of the batch (a block slot holds two floats per layer).
+  /// \return The stage to hand to engine_run(), with its dst and combs filled in, or an empty one
+  ///         when the device statistics are off.
+  metal::mmse_engine::reformat_stage::rsrp_stage_t rsrp_attach_stage(unsigned n_blk,
+                                                                    unsigned nf_std,
+                                                                    unsigned nf_tail,
+                                                                    unsigned nof_layers);
+
+  /// \brief Builds the optional device time-alignment stage (K7+K6) for the hop being staged.
+  ///
+  /// Derives the transform size, the pilot stride and the search window with the HOST's own formulas
+  /// (time_alignment_estimator_dft_impl::get_idft() and estimate_ta_correlation()), refuses the
+  /// geometries the kernel does not cover (the sparse-mask route and an unrecognised comb), and
+  /// reserves this hop's rotating slot. An empty stage (dst == nullptr) leaves the host's estimator as
+  /// the only source of the value - which then also keeps the grid read-back alive for this hop, since
+  /// the host's route needs the pilots (see host_grid_published()).
+  metal::mmse_engine::reformat_stage::ta_stage_t ta_attach_stage(const fd_td_estimation_stage_args& args);
+
+  /// \brief The hop's device time alignment, for the base class to publish (see the hook's note).
+  std::optional<float> get_device_ta_seconds() const override;
+
 
   /// Records the unpack of a batch submitted without waiting (see engine_run()).
   void defer_unpack(unsigned              gb_start,
@@ -541,7 +601,9 @@ private:
                     unsigned              nout,
                     unsigned              nof_layers,
                     unsigned              sys_offset,
-                    const engine_strides& st);
+                    const engine_strides& st,
+                    unsigned              rsrp_block = kNoRsrpBlock,
+                    unsigned              rsrp_slots = 0);
 
   std::array<pending_unpack, max_pending_unpacks> pending_unpacks{};
   unsigned                                        nof_pending_unpacks = 0;
@@ -704,6 +766,11 @@ private:
   /// kernel takes; these are what the host walks, and keeping both is what lets the probe compare the
   /// same REs rather than trusting that two encodings of a comb agree).
   std::array<bounded_bitset<NOF_SUBCARRIERS_PER_RB>, 4> last_stage_layer_re_pattern{};
+  /// The TA stage of the last hop: the stride and the spacing the probe re-runs the HOST's estimator
+  /// with, and the hops' DM-RS symbols (the slices it must feed it, in the same order).
+  unsigned            ta_probe_stride  = 0;
+  subcarrier_spacing  ta_probe_scs     = subcarrier_spacing::kHz15;
+  unsigned            ta_probe_symbols = 0;
   unsigned                  gpu_ce_drpp          = 0;
   unsigned                  gpu_ce_drpp_dmrs     = 0;
   unsigned                  gpu_ce_dmrs_re_bits  = 0;
@@ -755,12 +822,31 @@ private:
   /// flight removes it.
   static constexpr unsigned kCfoSlots = 8;
 
-  /// \brief Rotating blocks of the device rsrp reduction (K5), one block per hop in flight.
+  /// \brief Rotating slots of the device time alignment (K7+K6), one per hop in flight.
   ///
-  /// Same reason as kCfoSlots and kSigma2Blocks: the write happens in the extraction's command
-  /// buffer, and the HOST reads it much later - after the wait, in compute_hop_finish() - by which
-  /// time a pooled estimator instance may have started several later hops that overwrite a single
-  /// destination. Each block holds one float per layer, so the block stride is kRsrpSlots.
+  /// Same reason as the rsrp ring below: the value is written inside the reformat's command buffer and
+  /// the HOST reads it much later - after the wait, in complete_fd_td_estimation_stage() - by which
+  /// time a pooled estimator instance may have started several later hops.
+  ///
+  /// One PAGE per slot, not one float: the engine binds the destination with a zero-copy wrap, and a
+  /// wrap needs a page-aligned base (a slot at a float offset would be refused and the hop would
+  /// silently fall back to the host - see shared_queue::wrap_no_copy).
+  static constexpr unsigned kTaSlots       = 8;
+  static constexpr unsigned kTaPageFloats  = 4096 / sizeof(float);
+
+  /// \brief Rotating regions of the device rsrp reduction (K5), one region per hop in flight.
+  ///
+  /// Same reason as kCfoSlots and kSigma2Blocks: the write happens in the reformat's command
+  /// buffer, and the HOST reads it much later - after the wait, in complete_fd_td_estimation_stage()
+  /// - by which time a pooled estimator instance may have started several later hops that overwrite
+  /// a single destination.
+  ///
+  /// A region is a run of BLOCK SLOTS, kRsrpSlots floats each, addressed by the kernel as
+  /// [block slot][layer] -> {sum, count}. A hop needs one slot per standard block plus, when the
+  /// batch carries an edge block, ceil(nf_tail / nf_std) more (the merged edge system is strided by
+  /// the standard n_blk, see ocudu_mmse_rsrp.metal). The worst shape the estimator produces is
+  /// MAX_NOF_BLOCKS standard blocks plus a one-slot edge at MAX_LAYERS layers, which is what the
+  /// region is sized for; see rsrp_region_floats().
   static constexpr unsigned kRsrpBlocks = 16;
   static constexpr unsigned kRsrpSlots  = 4;
   float*   gpu_ls_cfo     = nullptr;
@@ -779,15 +865,33 @@ private:
   float*                    gpu_rsrp       = nullptr;
   /// Base of THIS hop's block within gpu_rsrp, advanced once per hop.
   unsigned                  rsrp_base_     = 0;
-  /// The block the hop being COMPLETED reserved. Not rsrp_base_: that one names the hop being
-  /// STAGED, and the completion of an earlier hop runs after later hops have been staged (the
-  /// estimator is pooled and a deferred hop is collected much later), so reading through the
-  /// staging counter looks at whatever block was claimed last. That is what made the first correct
-  /// reduction read back as 0.
-  unsigned                  rsrp_block_last = 0;
+  /// Ring region the hop being STAGED reserved for its own device reduction. defer_unpack() carries
+  /// it to the completion, which must not read through rsrp_base_ (see pending_unpack::rsrp_block).
+  unsigned                  rsrp_stage_ = 0;
+  /// FLOATS that region holds (rsrp_region_floats(), captured with rsrp_stage_).
+  unsigned                  rsrp_stage_slots_ = 0;
   /// Whether the device produced this hop's rsrp (so the host must not reduce the pilots again for
   /// a value it will publish).
   bool                      device_rsrp_valid = false;
+
+  /// \brief The device's time alignment (K7+K6), kTaSlots page-aligned slots of one float each.
+  ///
+  /// \c ta_slot_ is the slot the CURRENT hop reserved. It is an index rather than a pointer because
+  /// ::device_ta_s_ below is the value the completion read out of it - and it is read through
+  /// get_device_ta_seconds() long after the hop that produced it was staged.
+  float*   gpu_ta    = nullptr;
+  unsigned ta_slot_  = kTaSlots - 1; // one before the first so that hop 0 lands on slot 0
+  /// Whether the device produced this hop's time alignment (so the host must not read the grid back
+  /// for a value it will publish).
+  bool     device_ta_valid = false;
+  /// The value read back at completion, or nullopt when the host must estimate the alignment itself.
+  std::optional<float> device_ta_s_{};
+  /// \brief SUM of |h|^2 per layer, read out of the device reduction when the hop completed.
+  ///
+  /// Filled by complete_fd_td_estimation_stage() and answered through get_device_rsrp_sum(), which is
+  /// how the published rsrp stops depending on the read-back grid. Only the first nof_layers entries
+  /// are meaningful; the array is plain storage so an accessor can hand out a value without a lock.
+  std::array<float, 4>      device_rsrp_sums_{};
   float*                    gpu_ls_smoothed = nullptr;
   float*                    gpu_ls_sigma2   = nullptr;
   /// Byte offset (in floats) of THIS hop's sigma2 block within \c gpu_ls_sigma2, which holds

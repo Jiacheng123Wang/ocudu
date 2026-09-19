@@ -169,6 +169,28 @@ using namespace ocudu;
 
 namespace {
 
+/// Number of block slots a hop's device-rsrp region holds: one per standard block, plus the edge
+/// block's own run of ceil(nf_tail / nf_std) slots.
+///
+/// A merged batch gives the standard and the edge geometry the same block index, so the edge needs
+/// slots of its own or the two overwrite each other - and the kernel addresses the ring by block
+/// slot (see ocudu_mmse_rsrp.metal), so the count is what both sides must agree on.
+static unsigned rsrp_region_slots(unsigned n_std, bool has_tail, unsigned nf_std, unsigned nf_tail)
+{
+  const unsigned tail_slots = (has_tail && (nf_std != 0)) ? ((nf_tail + nf_std - 1) / nf_std) : 0;
+  return n_std + tail_slots;
+}
+
+/// Floats a hop's device-rsrp region holds: the block slots times the layers times the two words
+/// ({sum, count}) a slot holds per layer. THIS is the single definition the reservation, the wrap
+/// length in the engine and the readback all use, so "the device wrote past the mapping" and "the
+/// host read the wrong offset" cannot happen one without the other.
+static unsigned rsrp_region_floats(unsigned n_std, bool has_tail, unsigned nf_std, unsigned nf_tail,
+                                   unsigned nof_layers)
+{
+  return rsrp_region_slots(n_std, has_tail, nf_std, nf_tail) * nof_layers * 2U;
+}
+
 /// Real part of the exponential-PDP frequency correlation: 1 / (1 + (2 pi df tau)^2).
 inline float rf_corr(float delta_f_hz, float tau_rms_s)
 {
@@ -494,6 +516,57 @@ bool device_stats_enabled()
   return value;
 }
 
+/// \brief The per-PRB DM-RS combs the TA stride is derived from.
+///
+/// Copies of the patterns port_channel_estimator_helpers.cpp keeps to itself: the host's
+/// estimate_time_alignment() picks the stride by comparing the layer's pattern against exactly these
+/// three, and a device that reproduces the estimate has to make the same choice. A pattern that is
+/// none of them takes the host's SPARSE route, which this port does not cover (see ta_attach_stage()).
+static constexpr bounded_bitset<NOF_SUBCARRIERS_PER_RB> ce_re_pattern_pucch_f2 =
+    {false, true, false, false, true, false, false, true, false, false, true, false};
+static constexpr bounded_bitset<NOF_SUBCARRIERS_PER_RB> ce_re_pattern_pusch_0 =
+    {true, false, true, false, true, false, true, false, true, false, true, false};
+static constexpr bounded_bitset<NOF_SUBCARRIERS_PER_RB> ce_re_pattern_pusch_1 =
+    {false, true, false, true, false, true, false, true, false, true, false, true};
+
+/// \brief The OCUDU_CE_TA_CHECK probe's counters, read by the offline harness.
+///
+/// Function-local statics so that the probe's state is initialized on first use and shared by every
+/// estimator instance of the process: the A/B is about the port, not about one instance.
+std::atomic<uint32_t>& ta_probe_checks()
+{
+  static std::atomic<uint32_t> value{0};
+  return value;
+}
+
+std::atomic<uint32_t>& ta_probe_bad()
+{
+  static std::atomic<uint32_t> value{0};
+  return value;
+}
+
+std::atomic<double>& ta_probe_worst_ns()
+{
+  static std::atomic<double> value{0.0};
+  return value;
+}
+
+/// \brief Whether the device produces the hop's time alignment (OCUDU_CE_DEV_TA).
+///
+/// Unset or non-zero (THE DEFAULT): a hop the device covers has its timing advance computed on the
+/// device (K7 + the DFT kernel + K6, all in the reformat's own command buffer) and published through
+/// get_device_ta_seconds(). Zero: the host's estimator computes it from the pilots as it always has,
+/// which needs the estimated grid - so this knob ALSO keeps the grid read-back alive for every hop
+/// (see the completion), and is the A/B the offline `_ce.txt` comparison runs.
+bool device_ta_enabled()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_DEV_TA");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 /// \brief Whether the HOST still clears the merged tail group's pad slots in y (OCUDU_CE_HOST_Y_PADS).
 ///
 /// Unset or zero (THE DEFAULT): it does NOT. The device's pilot scatter (glue #2) owns those slots -
@@ -605,6 +678,10 @@ port_channel_estimator_metal_mmse_impl::port_channel_estimator_metal_mmse_impl(
   // K5 (batch 5a): the hop's per-layer rsrp, reduced on the device. Rotating blocks for the same
   // reason as the sigma2 block above.
   gpu_rsrp        = alloc_aligned<float>(kRsrpBlocks * kRsrpSlots);
+  // K7+K6 (batch 5b): the hop's time alignment, produced on the device. ONE PAGE PER SLOT, because
+  // the engine binds the destination with a zero-copy wrap and a wrap needs a page-aligned base - a
+  // slot at a float offset would be refused (see the member's note).
+  gpu_ta = alloc_aligned_pages<float>(kTaSlots * kTaPageFloats);
 
   // Glue #2 (S-7f-5u): the DEVICE writes the engine's pilot vectors y out of the pilots it just
   // produced (gpu_ls_out), which removes the host's copy of them into the y slots - the last CPU
@@ -701,6 +778,7 @@ port_channel_estimator_metal_mmse_impl::~port_channel_estimator_metal_mmse_impl(
   free_aligned(gpu_ls_smoothed);
   free_aligned(gpu_ls_sigma2);
   free_aligned(gpu_rsrp);
+  free_aligned(gpu_ta);
 }
 
 unsigned port_channel_estimator_metal_mmse_impl::stage_device_noise_inputs(const fd_td_estimation_stage_args& args,
@@ -1929,14 +2007,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       }
     }
     last_stage_nof_prb = nof_prb;
-    if (device_stats_enabled() && engine->rsrp_available()) {
-      rsrp_base_      = (rsrp_base_ + kRsrpSlots) % (kRsrpBlocks * kRsrpSlots);
-      rsrp_block_last = rsrp_base_;
-      reformat.rsrp.dst     = gpu_rsrp + rsrp_base_;
-      for (unsigned l = 0; l != reformat.rsrp.max_layers; ++l) {
-        reformat.rsrp.pilot_re_bits[l] = gpu_ce_pilot_re_bits[l];
-      }
-      device_rsrp_valid = true;
+    // K5's pilot combs are a property of the DM-RS pattern and every path needs them, so they are
+    // published here; the ring REGION is reserved inside reformat_for(), the first point that knows
+    // the batch's block geometry (see rsrp_attach_stage()).
+    for (unsigned l = 0; l != reformat.rsrp.max_layers; ++l) {
+      reformat.rsrp.pilot_re_bits[l] = gpu_ce_pilot_re_bits[l];
     }
     reformat.offsets     = re_offsets.data();
     reformat.nof_symbols = MAX_NSYMB_PER_SLOT;
@@ -1998,6 +2073,32 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // zero (the kernel detects them and writes 0 rather than summing another block's rows).
       reformat.rsrp.n_blk   = n_std_blocks;
       reformat_blocks_last  = n_std_blocks;
+      // K5's ring region: one block slot per standard block plus the edge block's own run, so the
+      // two geometries of a merged batch cannot land in the same slot (see ocudu_mmse_rsrp.metal
+      // and rsrp_region_slots()). Reserved HERE because this is the first point that knows the
+      // batch's geometry; the kernel parameters are derived from the same fields.
+      device_rsrp_valid = false;
+      reformat.rsrp     = rsrp_attach_stage(n_std_blocks, nf_std, nf_tail, nof_layers);
+      // Same rule for the device time alignment: the flag describes THIS hop, so it is cleared before
+      // the stage that may set it - a hop the kernel does not cover must not inherit its predecessor's
+      // value (the mistake would be a published alignment from another hop, which no counter sees).
+      device_ta_valid   = false;
+      device_ta_s_      = std::nullopt;
+      // K7+K6 (batch 5b): the hop's time alignment, produced in this same command buffer out of the
+      // same h K5 reads. Attached here, next to the rsrp stage, because this is the one place that
+      // knows the batch geometry the kernel indexes h with.
+      reformat.ta       = ta_attach_stage(args);
+      for (unsigned i_dmrs = 0; (i_dmrs != npt) && (i_dmrs != reformat.ta.max_dmrs_symbols); ++i_dmrs) {
+        reformat.ta.dmrs_slots[i_dmrs] = dmrs_sym[i_dmrs];
+      }
+      reformat.ta.nof_dmrs_symbols = (npt <= reformat.ta.max_dmrs_symbols) ? npt : 0u;
+      if (reformat.ta.nof_dmrs_symbols == 0) {
+        // A hop with no DM-RS symbol of its own has no slice to transform. The stage would be refused
+        // by the engine anyway, but the READ-BACK is what has to know: a slot the device never wrote
+        // holds the previous hop's value, and publishing that would be a wrong number nothing counts.
+        reformat.ta.dst = nullptr;
+        device_ta_valid = false;
+      }
       return (nof_re_total != 0) ? &reformat : nullptr;
     };
     if (merge_tail) {
@@ -2233,8 +2334,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         const auto t_unpack_begin = steady_clock::now();
 #endif
         if (merged_defer) {
-          defer_unpack(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st);
-          defer_unpack(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st);
+          // Both unpacks describe ONE merged staging, so both name its one reduction slot. The tail
+          // batch shares the merged command buffer and the same reformat stage.
+          defer_unpack(0, n_std_blocks, block_prb, nout_std, nof_layers, 0, st, rsrp_stage_, rsrp_stage_slots_);
+          defer_unpack(n_std_blocks * block_prb, 1, rem_prb, nout_e, nof_layers, nof_layers, st, rsrp_stage_, rsrp_stage_slots_);
         } else {
           // Inline (non-deferred) route: this is the synchronous fallback, where the caller wants
           // the results now and the host consumers are the point - so the whole grid is unpacked,
@@ -3548,12 +3651,166 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
     return false;
   }
   if (deferred) {
-    defer_unpack(gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st);
+    defer_unpack(gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st, rsrp_stage_, rsrp_stage_slots_);
   } else {
     // Inline route: see the note at the other inline unpack - the whole grid, as before S-7f-6a.
     unpack_engine_group(gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st, /*all_symbols=*/true);
   }
   return true;
+}
+
+metal::mmse_engine::reformat_stage::rsrp_stage_t
+port_channel_estimator_metal_mmse_impl::rsrp_attach_stage(unsigned n_blk,
+                                                         unsigned nf_std,
+                                                         unsigned nf_tail,
+                                                         unsigned nof_layers)
+{
+  metal::mmse_engine::reformat_stage::rsrp_stage_t stage{};
+  if (!device_stats_enabled() || !engine->rsrp_available()) {
+    return stage;
+  }
+  const unsigned rsrp_slots = rsrp_region_floats(n_blk, nf_tail != 0, nf_std, nf_tail, nof_layers);
+  if (rsrp_base_ + rsrp_slots > kRsrpBlocks * kRsrpSlots) {
+    rsrp_base_ = 0;
+  }
+  // The region THIS hop's reduction will write. The completion reads it from the batch that carried
+  // it and not through rsrp_base_, which by then names a later hop (batch 5a's defect).
+  rsrp_stage_       = rsrp_base_;
+  rsrp_stage_slots_ = rsrp_slots;
+  rsrp_base_        = (rsrp_base_ + rsrp_slots) % (kRsrpBlocks * kRsrpSlots);
+  stage.dst         = gpu_rsrp + rsrp_stage_;
+  stage.n_blk       = n_blk;
+  for (unsigned l = 0; l != stage.max_layers; ++l) {
+    stage.pilot_re_bits[l] = gpu_ce_pilot_re_bits[l];
+  }
+  device_rsrp_valid = true;
+  if (std::getenv("OCUDU_CE_RSRP_CHECK") != nullptr) {
+    // The region this batch reserved. Printed because a region that is one slot short is exactly
+    // how the edge block's (correct) reduction read back as garbage: the write landed past the
+    // mapping. See rsrp_region_floats() for the length the engine binds with.
+    std::fprintf(stderr,
+                 "[rsrp_stage] base=%u floats=%u n_blk=%u nf_std=%u nf_tail=%u layers=%u\n",
+                 rsrp_stage_,
+                 rsrp_slots,
+                 n_blk,
+                 nf_std,
+                 nf_tail,
+                 nof_layers);
+  }
+  return stage;
+}
+
+metal::mmse_engine::reformat_stage::ta_stage_t
+port_channel_estimator_metal_mmse_impl::ta_attach_stage(const fd_td_estimation_stage_args& args)
+{
+  metal::mmse_engine::reformat_stage::ta_stage_t stage{};
+  if (!device_stats_enabled() || (engine == nullptr) || !device_ta_enabled()) {
+    return stage;
+  }
+  // The host's own route, reproduced field by field (estimate_time_alignment() and
+  // time_alignment_estimator_dft_impl): the device must transform the same number of points, place the
+  // pilots at the same positions and divide by the same sampling rate, or the two answers would differ
+  // by a scale and a resolution instead of by rounding.
+  const port_channel_estimator::layer_dmrs_pattern& pattern = args.dmrs_patterns.front();
+  const crb_bitmap& hop_rb_mask = (args.hop == 0) ? pattern.rb_mask : pattern.rb_mask2;
+
+  // ---- which of the host's two routes this hop takes ------------------------------------------
+  //
+  // A CONTIGUOUS RB mask with a recognised comb: the pilots sit at every stride-th subcarrier of the
+  // hop, the host hands its estimator the comb spacing as the stride, and this kernel places pilot j
+  // at position j*stride + the comb's lowest bit - the same positions.
+  //
+  // The SPARSE route (a hop whose RB mask has a hole) places them at their subcarrier offsets instead
+  // and passes stride 1, which this kernel also reproduces - but only while the hop's FIRST PRB
+  // carries DM-RS, which is what makes the offset-from-the-lowest-mask-RE equal to the offset from the
+  // comb's lowest bit. No production hop has needed it, and guessing there would be a silent wrong
+  // answer rather than a missing one: the hop keeps the host route (and its grid read-back).
+  unsigned stride = 0;
+  if (hop_rb_mask.is_contiguous()) {
+    if (pattern.re_pattern.all()) {
+      stride = 1; // PUCCH formats 1, 3 and 4
+    } else if ((pattern.re_pattern == ce_re_pattern_pusch_0) ||
+               (pattern.re_pattern == ce_re_pattern_pusch_1)) {
+      stride = 2; // PUSCH, comb-2
+    } else if (pattern.re_pattern == ce_re_pattern_pucch_f2) {
+      stride = 3; // PUCCH format 2, comb-4
+    }
+  }
+  if (stride == 0) {
+    return stage;
+  }
+
+  // ---- the transform size, by the host's get_idft() --------------------------------------------
+  //
+  // time_alignment_estimator_dft_impl::get_idft(): scale the pilot count by max_nof_re, round up to a
+  // power of two, and take at least min_dft_size. Using the constants the host's own class publishes
+  // rather than repeating their values is what keeps the two from drifting apart - a different size
+  // would resolve a different delay and, worse, would gate the parabolic refinement differently (the
+  // host refines only when the size is not the maximum).
+  unsigned dft_size = get_ta_estimator().get_idft_size(args.nof_symbol_pilots);
+  if (dft_size == 0) {
+    return stage;
+  }
+  if (!engine->ta_place_available(dft_size) || !engine->ta_available()) {
+    return stage;
+  }
+
+  // The search window: the same expression estimate_ta_correlation() uses. A zero window would make
+  // the kernel publish zero (a parameter error it refuses), so it is checked here as well.
+  const double scs_hz    = scs_to_khz(args.scs) * 1000.0;
+  const double rate_hz   = static_cast<double>(dft_size) * scs_hz * static_cast<double>(stride);
+  const double half_cp_s = phy_time_unit::from_units_of_kappa(144).to_seconds() /
+                           static_cast<double>(1U << (to_numerology_value(args.scs) + 1U));
+  const unsigned max_ta_samples = static_cast<unsigned>(std::floor(half_cp_s * rate_hz));
+  if (max_ta_samples == 0) {
+    return stage;
+  }
+
+  // The rotating slot: a pooled estimator instance may have later hops in flight, and the completion
+  // of THIS hop reads the value after the wait (see the member's note).
+  // The parameters the A/B probe below re-runs the HOST's estimator with, stashed here because the
+  // completion no longer has them (it works off the grid).
+  ta_probe_stride  = stride;
+  ta_probe_scs     = args.scs;
+  ta_probe_symbols = args.nof_dmrs_symbols;
+
+  ta_slot_ = (ta_slot_ + 1U) % kTaSlots;
+  stage.dst             = gpu_ta + static_cast<std::size_t>(ta_slot_) * kTaPageFloats;
+  stage.dft_size        = dft_size;
+  stage.stride          = stride;
+  stage.scs_hz          = static_cast<float>(scs_hz);
+  stage.max_ta_samples  = max_ta_samples;
+  device_ta_valid       = true;
+  if (std::getenv("OCUDU_CE_TA_CHECK") != nullptr) {
+    std::fprintf(stderr,
+                 "[ta_stage] slot=%u size=%u stride=%u scs=%.0f window=%u pilots=%u hop=%u\n",
+                 ta_slot_,
+                 dft_size,
+                 stride,
+                 scs_hz,
+                 max_ta_samples,
+                 args.nof_symbol_pilots,
+                 args.hop);
+  }
+  return stage;
+}
+
+unsigned port_channel_estimator_metal_mmse_impl::device_ta_probe_failures()
+{
+  return ta_probe_bad().load(std::memory_order_relaxed);
+}
+
+unsigned port_channel_estimator_metal_mmse_impl::device_ta_probe_checks()
+{
+  return ta_probe_checks().load(std::memory_order_relaxed);
+}
+
+std::optional<float> port_channel_estimator_metal_mmse_impl::get_device_ta_seconds() const
+{
+  // Nothing is computed here: the value was read out of the device slot in
+  // complete_fd_td_estimation_stage(), which the base class calls before it asks for it (see
+  // compute_hop_finish()). A hop the device did not cover answers nullopt and keeps the host route.
+  return device_ta_s_;
 }
 
 void port_channel_estimator_metal_mmse_impl::defer_unpack(unsigned              gb_start,
@@ -3562,13 +3819,16 @@ void port_channel_estimator_metal_mmse_impl::defer_unpack(unsigned              
                                                           unsigned              nout,
                                                           unsigned              nof_layers,
                                                           unsigned              sys_offset,
-                                                          const engine_strides& st)
+                                                          const engine_strides& st,
+                                                          unsigned              rsrp_block,
+                                                          unsigned              rsrp_slots)
 {
   ocudu_assert(nof_pending_unpacks < max_pending_unpacks,
                "A hop has at most {} batches pending, this one already has {}.",
                max_pending_unpacks,
                nof_pending_unpacks);
-  pending_unpacks[nof_pending_unpacks++] = pending_unpack{gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st};
+  pending_unpacks[nof_pending_unpacks++] =
+      pending_unpack{gb_start, n_blk, b_prb, nout, nof_layers, sys_offset, st, rsrp_block, rsrp_slots};
   // The stage is outstanding from this point (not only from the end of the stage call): a batch of
   // the same hop that is submitted later - the split-tail path - must complete this one first.
   stage_pending = true;
@@ -3698,12 +3958,20 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
   // Otherwise only the DM-RS symbols are unpacked (the hop statistics read their pilots) and the
   // rest waits for the first get_symbol_ch_estimate() call.
   const bool publish_all_grid = unpack_hopping || !gpu_ce_ready;
-  // ... and not even those when the A/B says the lane has no host consumer
-  // (OCUDU_CE_HOST_GRID=0, see host_grid_published()). Nothing is read back then, and the whole grid
-  // is left pending: a consumer that does appear - the OCUDU_UL_DUMP capture of the estimates, a
-  // backend asking for them through get_symbol_ch_estimate() - materializes it on demand, exactly as
-  // it already does for the non-DM-RS symbols on this route.
-  if (host_grid_published()) {
+  // ... and not even those when every REPORTING value this hop publishes came from the device
+  // (OCUDU_CE_HOST_GRID=0, see host_grid_published()): the hop statistics are the only reason the
+  // DM-RS pilots are unpacked, so with both of them on the device the read-back has no consumer left.
+  // A hop the device did NOT cover for either value keeps it - that is what makes HOST_GRID=0 a
+  // measurement of the covered route rather than a switch that silently stales a value.
+  const bool device_reports  = device_rsrp_valid && device_ta_valid;
+  const bool host_grid_wanted = host_grid_published() || !device_reports;
+  // The device's time alignment, read out of this hop's slot now that the batch that wrote it has
+  // completed (the wait above). The slot is the one ta_attach_stage() reserved for THIS hop, which is
+  // why it is a member and not derived from the rotating index (batch 5a's defect, one value over).
+  if (device_ta_valid && (gpu_ta != nullptr)) {
+    device_ta_s_ = gpu_ta[static_cast<std::size_t>(ta_slot_) * kTaPageFloats];
+  }
+  if (host_grid_wanted) {
     for (unsigned i = 0; i != nof_pending_unpacks; ++i) {
       const pending_unpack& u = pending_unpacks[i];
       unpack_engine_group(
@@ -3714,7 +3982,7 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
   host_unpacks     = pending_unpacks;
   // "Nothing unpacked yet" - either because only the DM-RS symbols were (the state the others wait
   // in) or because the A/B skipped all of them. Both are served by the same deferred unpack.
-  host_grid_pending = !host_grid_published() || !publish_all_grid;
+  host_grid_pending = !host_grid_wanted || !publish_all_grid;
 #if defined(OCUDU_CE_TIME)
   mmse_stats().completion_unpack_ns.fetch_add(
       static_cast<uint64_t>(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() -
@@ -3730,7 +3998,7 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
   // hop's grid - the buffer is shared, and this call no longer materializes it - and a stale rsrp is
   // worse than a missing one. The hop the lane publishes (the LLR, the estimates the device keeps)
   // does not depend on them; see host_grid_published().
-  if (deferred_fill.valid && host_grid_published()) {
+  if (deferred_fill.valid && host_grid_wanted) {
 #if defined(OCUDU_CE_TIME)
     const auto t_fill_begin = std::chrono::steady_clock::now();
 #endif
@@ -3746,6 +4014,91 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
 #endif
   }
 
+  // ---- K7+K6 CHECK (OCUDU_CE_TA_CHECK): does the device's time alignment equal the host's? -------
+  //
+  // Batch 5b's criterion, and the only thing that can say it: the device transforms the pilots it finds
+  // in h (K7 places them, the DFT kernel transforms them, K6 reduces the profile) and the HOST's
+  // estimator transforms the pilots sampled out of the grid those same estimates were unpacked into.
+  // Both read the SAME estimates at the SAME REs, so what is left between them is the two transforms
+  // and the refinement applied to each - which is why the tolerance is the resolution the transform
+  // size, the spacing and the pilot stride set, not an epsilon.
+  //
+  // It MUST run after the host grid has been filled (see the K5 probe below for the same ordering
+  // lesson), and it is only meaningful while the grid IS filled: with OCUDU_CE_HOST_GRID=0 there are no
+  // host pilots to compare against, which is exactly why the device route exists.
+  if (device_ta_valid && device_ta_s_.has_value() && host_grid_wanted && (ta_probe_stride != 0) &&
+      (std::getenv("OCUDU_CE_TA_CHECK") != nullptr)) {
+    const unsigned nlay = (gpu_ce_layers <= 4) ? gpu_ce_layers : 0U;
+    const unsigned npt_p = (ta_probe_symbols <= MAX_NOF_DMRS_SYMBOLS) ? ta_probe_symbols : 0U;
+    if ((nlay != 0U) && (npt_p != 0U) && (last_stage_nof_prb != 0U)) {
+      std::atomic<uint32_t>& checks   = ta_probe_checks();
+      std::atomic<uint32_t>& bad      = ta_probe_bad();
+      std::atomic<double>&   worst_ns = ta_probe_worst_ns();
+      // The host's own input, in the order the estimator enumerates it: symbol-major slices, and
+      // within a slice the pilots of one PRB ascending, one PRB after another - the order
+      // pending_fill::fill() and estimate_time_alignment() both use.
+      std::array<std::vector<cf_t>, 4 * MAX_NOF_DMRS_SYMBOLS> host_pilots;
+      unsigned                                                nof_slices = 0;
+      unsigned                                                nof_pilots = 0;
+      for (unsigned i_layer = 0; i_layer != nlay; ++i_layer) {
+        const auto& pattern = last_stage_layer_re_pattern[i_layer];
+        for (unsigned i_sym = 0; i_sym != npt_p; ++i_sym) {
+          span<const cf_t> row = grid_est.get_slice(i_layer * MAX_NSYMB_PER_SLOT + unpack_dmrs_sym[i_sym]);
+          std::vector<cf_t>& dst = host_pilots[nof_slices++];
+          dst.clear();
+          for (unsigned prb = 0; prb != last_stage_nof_prb; ++prb) {
+            pattern.for_each(0, pattern.size(), [&](unsigned pos) { dst.push_back(row[prb * NOF_SUBCARRIERS_PER_RB + pos]); });
+          }
+          nof_pilots = static_cast<unsigned>(dst.size());
+        }
+      }
+      if ((nof_slices != 0U) && (nof_pilots != 0U)) {
+        modular_re_buffer_reader<cf_t, 64> view(nof_slices, nof_pilots);
+        for (unsigned i = 0; i != nof_slices; ++i) {
+          view.set_slice(i, span<const cf_t>(host_pilots[i].data(), host_pilots[i].size()));
+        }
+        // The HOST's own estimator, on the host's own pilots: the estimate the port published before
+        // batch 5b moved it, which is the only reference that says the device reproduces it.
+        const time_alignment_measurement host_ta =
+            get_ta_estimator().estimate(view, ta_probe_stride, ta_probe_scs);
+        const double dev_s  = static_cast<double>(*device_ta_s_);
+        const double diff_ns = (host_ta.time_alignment - dev_s) * 1e9;
+        const double res_ns  = host_ta.resolution * 1e9;
+        const double adiff = std::fabs(diff_ns);
+        double       prev  = worst_ns.load(std::memory_order_relaxed);
+        while ((adiff > prev) && !worst_ns.compare_exchange_weak(prev, adiff)) {
+        }
+        const unsigned n_check = checks.fetch_add(1, std::memory_order_relaxed);
+        const bool     ta_ok = (adiff <= res_ns);
+        if (!ta_ok) {
+          bad.fetch_add(1, std::memory_order_relaxed);
+        }
+        if ((n_check < 4) || !ta_ok) {
+          std::fprintf(stderr,
+                       "[ta_check] hop %u: device %+9.2f ns host %+9.2f ns diff %+7.2f (res %.2f) slices=%u "
+                       "pilots=%u stride=%u %s\n",
+                       n_check,
+                       dev_s * 1e9,
+                       host_ta.time_alignment * 1e9,
+                       diff_ns,
+                       res_ns,
+                       nof_slices,
+                       nof_pilots,
+                       ta_probe_stride,
+                       ta_ok ? "OK" : "MISMATCH");
+        }
+        // The running verdict, after EVERY comparison: the offline A/B (wip/ab_ta.sh) reads the last
+        // one of these lines, so "how many hops were judged and how many were wrong" does not have to
+        // be reconstructed from a per-hop log that may have been truncated.
+        std::fprintf(stderr,
+                     "[ta_check] total: %u checks, %u outside one resolution, worst %.2f ns\n",
+                     checks.load(std::memory_order_relaxed),
+                     bad.load(std::memory_order_relaxed),
+                     worst_ns.load(std::memory_order_relaxed));
+      }
+    }
+  }
+
   // ---- K5 CHECK (OCUDU_CE_RSRP_CHECK, temporary): does the device's sum equal the host's? --------
   //
   // 5a's correctness criterion, and the only thing that can say it: the device reduces the SAME h the
@@ -3758,7 +4111,37 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
   // previous hop's contents and the host sum reads 0, which is how this probe first reported a
   // failure that was entirely its own (the same ordering mistake as the earlier gpu_ls_smoothed
   // probe, wip/S11_batch2_recon.md 8.2).
-  if (device_rsrp_valid && (gpu_rsrp != nullptr) && (std::getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
+  // The ring slot of the hop being COMPLETED, taken from the batch that carried it. Reading through
+  // rsrp_block_last instead is what made a correct device reduction read back as 0: that member names
+  // the hop being staged, and by now the estimator has staged later ones.
+  const unsigned rsrp_slot_completed =
+      (nof_host_unpacks != 0) ? host_unpacks[nof_host_unpacks - 1].rsrp_block : kNoRsrpBlock;
+  const unsigned rsrp_floats_completed =
+      (nof_host_unpacks != 0) ? host_unpacks[nof_host_unpacks - 1].rsrp_slots : 0U;
+
+  // The hop's per-layer sums the DEVICE reduced, read out of the region the batch that carried them
+  // reserved. compute_hop_finish() publishes these instead of accumulating the read-back grid (see
+  // get_device_rsrp_sum()), which is the whole point of K5: the reporting values stop depending on
+  // the device -> host read of the estimated grid.
+  //
+  // The batch's own region, not rsrp_base_: that member names the hop being STAGED, and a deferred
+  // hop is completed after later ones have been staged (the same defect that made an early probe
+  // read zeros out of a correct reduction).
+  device_rsrp_sums_.fill(0.0F);
+  if (device_rsrp_valid && (rsrp_slot_completed != kNoRsrpBlock) && (gpu_rsrp != nullptr) &&
+      (rsrp_floats_completed != 0U)) {
+    const unsigned nlay = gpu_ce_layers;
+    const unsigned blks = rsrp_floats_completed / (nlay * 2U);
+    for (unsigned l = 0; l != nlay; ++l) {
+      float sum = 0.0F;
+      for (unsigned b = 0; b != blks; ++b) {
+        sum += gpu_rsrp[rsrp_slot_completed + (b * nlay + l) * 2U];
+      }
+      device_rsrp_sums_[l] = sum;
+    }
+  }
+  if (device_rsrp_valid && (rsrp_slot_completed != kNoRsrpBlock) && (gpu_rsrp != nullptr) &&
+      (std::getenv("OCUDU_CE_RSRP_CHECK") != nullptr)) {
     const unsigned nlay  = gpu_ce_layers;
     const unsigned npt_c = unpack_npt;
     static std::atomic<uint32_t> checks{0};
@@ -3772,9 +4155,12 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     for (unsigned l = 0; l != nlay; ++l) {
       // The device's sum for this layer: every block slot of the batch, pad slots included (they
       // must have reduced to zero, which is itself part of what this checks).
+      // Every block slot of this hop's region: the standard blocks and, when the batch carries
+      // one, the edge block's own slot(s). The kernel writes {sum, count} per (block slot, layer)
+      // at region + slot * kRsrpSlots + layer * 2 - see ocudu_mmse_rsrp.metal.
       double dev = 0.0;
-      for (unsigned b = 0; b != reformat_blocks_last; ++b) {
-        dev += static_cast<double>(gpu_rsrp[(rsrp_block_last + b * kRsrpSlots + l) * 2]);
+      for (unsigned b = 0; b != rsrp_floats_completed / (nlay * 2U); ++b) {
+        dev += static_cast<double>(gpu_rsrp[rsrp_slot_completed + (b * nlay + l) * 2U]);
       }
       // The host's: the same grid_est the statistics are derived from, at the layer's own pilots.
       const auto& pattern = last_stage_layer_re_pattern[l];
@@ -3790,7 +4176,11 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
         }
       }
       host_nre_last = host_nre;
-      const double dev_nre = static_cast<double>(gpu_rsrp[(rsrp_block_last + l) * 2 + 1]);
+      double dev_nre = 0.0;
+      for (unsigned b = 0; b != rsrp_floats_completed / (nlay * 2U); ++b) {
+        dev_nre += static_cast<double>(gpu_rsrp[rsrp_slot_completed + (b * nlay + l) * 2U + 1U]);
+      }
+
       const double rel = (host != 0.0) ? std::fabs(dev - host) / host : 0.0;
       if (dev == host) {
         same.fetch_add(1, std::memory_order_relaxed);
@@ -3807,12 +4197,16 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     // One raw dump of the device block on the FIRST hop, so "the kernel did not run" and "the
     // kernel ran but indexed elsewhere" are told apart instead of guessed at.
     if (checks.load(std::memory_order_relaxed) == 0U) {
-      std::fprintf(stderr, "[rsrp_raw] block=%u blocks=%u layers=%u |", rsrp_block_last, reformat_blocks_last, nlay);
-      for (unsigned b = 0; b != reformat_blocks_last; ++b) {
+      std::fprintf(stderr,
+                   "[rsrp_raw] region=%u slots=%u layers=%u |",
+                   rsrp_slot_completed,
+                   rsrp_floats_completed,
+                   nlay);
+      for (unsigned b = 0; b != rsrp_floats_completed / (nlay * 2U); ++b) {
         for (unsigned l = 0; l != nlay; ++l) {
           std::fprintf(stderr, " [%u][%u]=%.6e nre=%.0f", b, l,
-                       static_cast<double>(gpu_rsrp[(rsrp_block_last + b * kRsrpSlots + l) * 2]),
-                       static_cast<double>(gpu_rsrp[(rsrp_block_last + b * kRsrpSlots + l) * 2 + 1]));
+                       static_cast<double>(gpu_rsrp[rsrp_slot_completed + (b * nlay + l) * 2U]),
+                       static_cast<double>(gpu_rsrp[rsrp_slot_completed + (b * nlay + l) * 2U + 1U]));
         }
       }
       std::fprintf(stderr, "\n");
@@ -3837,6 +4231,16 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
   }
 
   return true;
+}
+
+std::optional<float> port_channel_estimator_metal_mmse_impl::get_device_rsrp_sum(unsigned i_layer) const
+{
+  // Only for the hop that just completed: device_rsrp_sums_ is written by
+  // complete_fd_td_estimation_stage(), which compute_hop_finish() runs immediately before it asks.
+  if (!device_rsrp_valid || (i_layer >= device_rsrp_sums_.size())) {
+    return std::nullopt;
+  }
+  return device_rsrp_sums_[i_layer];
 }
 
 std::optional<ch_est_device_view> port_channel_estimator_metal_mmse_impl::get_device_ch_estimates(

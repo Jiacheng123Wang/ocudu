@@ -237,6 +237,64 @@ protected:
     apply_fd_td_estimation_stage_classical(args);
   }
 
+  /// \brief The hop's device-side rsrp sum, when a device backend produced one for this hop.
+  ///
+  /// The hop's rsrp is the mean power of the estimated grid over the pilot resource elements. A
+  /// backend that already reduces that sum where the estimates live (the Metal MMSE estimator does,
+  /// see ocudu_mmse_rsrp.metal) hands it over here so that \c compute_hop_finish() does not have to
+  /// read the whole estimated grid back from the device for a REPORTING value. That read-back is the
+  /// last device -> host crossing a fused lane makes, and the sum it produces is the same quantity
+  /// the host accumulates below - over the same REs, up to floating-point summation order.
+  ///
+  /// \param[in] i_layer Layer index.
+  /// \return SUM of |h|^2 over the hop's DM-RS resource elements of that layer, or nullopt when the
+  ///         host must accumulate the value itself (no device reduction for this hop, or the device
+  ///         statistics are switched off).
+  virtual std::optional<float> get_device_rsrp_sum(unsigned i_layer) const
+  {
+    (void) i_layer;
+    return std::nullopt;
+  }
+
+  /// \brief The hop's device-side time alignment, in SECONDS, when a device backend produced one.
+  ///
+  /// The hop's timing advance is a REPORTING value, like the rsrp above and for the same reason: it
+  /// reaches the timing-advance report and the debug dump, never the LLR path. A backend that
+  /// transforms the pilot estimates where they already live and reduces the power delay profile there
+  /// (the Metal MMSE estimator does, see ocudu_mmse_ta.metal) hands the answer over here, so that
+  /// compute_hop_finish() does not have to read the estimated grid back from the device to derive it
+  /// with estimate_time_alignment() - the LAST device -> host crossing a fused lane makes for a
+  /// reporting value.
+  ///
+  /// The device computes the same quantity the host does (an inverse transform per DM-RS symbol and
+  /// layer, the sum of their |.|^2, the half-cyclic-prefix peak search and the parabolic refinement),
+  /// but the two do NOT agree bit for bit: the transform is a different implementation and the
+  /// refinement is applied to it rather than to the host's. They agree to the resolution the sampling
+  /// rate sets, which is what the offline A/B compares them at.
+  ///
+  /// \return The hop's time alignment in seconds, or nullopt when the host must estimate it itself
+  ///         (no device stage for this hop, or the device statistics are switched off).
+  virtual std::optional<float> get_device_ta_seconds() const { return std::nullopt; }
+
+  /// \brief The time alignment estimator this instance resolves hops with.
+  ///
+  /// Exposed to backends because the estimator's own parameters are part of the answer: a device that
+  /// reproduces the hop's alignment elsewhere must transform the SAME number of points, which is the
+  /// size the estimator would have picked (see time_alignment_estimator::get_idft_size()).
+  const time_alignment_estimator& get_ta_estimator() const
+  {
+    ocudu_assert(ta_estimator, "Invalid TA estimator.");
+    return *ta_estimator;
+  }
+
+  /// The same estimator, mutable: an A/B probe runs the HOST's own estimate on the hop a device
+  /// backend just produced one for, and estimate() is a mutating call (it drives its own transforms).
+  time_alignment_estimator& get_ta_estimator()
+  {
+    ocudu_assert(ta_estimator, "Invalid TA estimator.");
+    return *ta_estimator;
+  }
+
   /// \brief Whether the estimation stage produces the hop's least-squares pilots itself.
   ///
   /// A device backend recomputes them from the resource grid inside the stage and the result is what

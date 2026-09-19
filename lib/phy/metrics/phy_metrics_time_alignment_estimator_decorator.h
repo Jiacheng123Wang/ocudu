@@ -24,6 +24,9 @@ public:
   }
 
   // See interface for documentation.
+  unsigned get_idft_size(unsigned nof_re) const override { return base->get_idft_size(nof_re); }
+
+  // See interface for documentation.
   time_alignment_measurement estimate(span<const cf_t>                       symbols,
                                       const bounded_bitset<max_nof_symbols>& mask,
                                       subcarrier_spacing                     scs,

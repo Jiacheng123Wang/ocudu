@@ -156,6 +156,15 @@ time_alignment_measurement time_alignment_estimator_dft_impl::estimate(span<cons
   return estimate(symbols_view, stride, scs, max_ta);
 }
 
+unsigned time_alignment_estimator_dft_impl::get_idft_size(unsigned nof_re) const
+{
+  // Leave some guards to avoid circular interference.
+  nof_re = (nof_re * max_dft_size) / max_nof_re;
+
+  // Get the next power of 2 DFT size.
+  return std::max(min_dft_size, pow2(log2_ceil(nof_re)));
+}
+
 dft_processor& time_alignment_estimator_dft_impl::get_idft(unsigned nof_required_re)
 {
   // Ensure the number of required RE is smaller than the maximum DFT size.
@@ -164,15 +173,9 @@ dft_processor& time_alignment_estimator_dft_impl::get_idft(unsigned nof_required
                nof_required_re,
                max_nof_re);
 
-  // Leave some guards to avoid circular interference.
-  nof_required_re = (nof_required_re * max_dft_size) / max_nof_re;
-
-  // Get the next power of 2 DFT size.
-  unsigned dft_size = pow2(log2_ceil(nof_required_re));
-  dft_size          = std::max(min_dft_size, dft_size);
-
-  // Select the DFT processor.
-  return *dft_processors[dft_size];
+  // Select the DFT processor the size implies (the sizing is shared with get_idft_size(), so a caller
+  // that asks for it gets exactly what this returns).
+  return *dft_processors[get_idft_size(nof_required_re)];
 }
 
 time_alignment_measurement time_alignment_estimator_dft_impl::estimate_ta_correlation(span<const float>  correlation,
