@@ -82,6 +82,15 @@ private:
     staging                    sym;
     staging                    nv;
     staging                    llr;
+    /// Bytes of each input that had to go through the HOST because the caller's buffer was not
+    /// page-aligned (0 when it was wrapped in place), and the LLR bytes that came back the same way.
+    ///
+    /// Recorded per entry because the copy is only a crossing once it happens, and because the wait()
+    /// that pays for the LLR copy-back is a different call from the one that staged the inputs. These
+    /// are what the pipeline's crossing counters are fed from - see run_demodulate() and wait().
+    size_t sym_staged = 0;
+    size_t nv_staged  = 0;
+    size_t llr_staged = 0;
   };
 
   /// \brief Shared implementation of demodulate_soft() and submit().

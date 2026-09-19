@@ -3,6 +3,7 @@
 
 #include "demodulation_mapper_metal.h"
 #include "ocudu_demod_metal_engine.h"
+#include "ocudu/phy/phy_pipeline_crossings.h"
 #include "ocudu/ran/sch/modulation_scheme.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/macos_compat.h"
@@ -16,6 +17,37 @@
 #include <vector>
 
 using namespace ocudu;
+
+namespace {
+
+/// \brief Declares the demapper's coverage to the fused-lane crossing counter (\c declare_reporter).
+///
+/// Audited 2026-09-19 against the lane route, and the audit found NO host <-> device data movement:
+///
+///   * its inputs are the equalizer's output, consumed in place when the buffers are page-aligned.
+///     The PUSCH demodulator allocates them with page_aligned_allocator (temp_eq_re /
+///     temp_eq_noise_vars) and hands a page-aligned slot per OFDM symbol, so is_page_aligned_buffer()
+///     is true and no copy is staged;
+///   * its output LLRs go to the kernel direct for the same reason (temp_llr is page-aligned too),
+///     so there is no copy-back either;
+///   * the hand-off from the equalization dispatches is a MEMORY BARRIER inside the shared command
+///     buffer, not a wait - see pusch_demodulator_impl::demodulate's fused path;
+///   * the only CPU involvement is the batch commit and the single wait for the group, which is what
+///     the criterion allows.
+///
+/// \note The counters are on the FALLBACKS, not on the happy path, and that is deliberate: the
+///       fallbacks are what a regression would newly exercise. Before this the demapper had no
+///       counter at all, so if the PUSCH demodulator stopped allocating those buffers page-aligned
+///       the entire equalized-symbol stream would cross the host mid-lane and the contract's
+///       crossing check would still have read 0. Now that shows up as a write (the staging) plus a
+///       read (the copy-back) against THIS module's name, which is what makes the number an upper
+///       bound rather than "the modules we happened to look at".
+struct demapper_crossing_declaration {
+  demapper_crossing_declaration() { ocudu::phy_pipeline_crossings::declare_reporter("demapper"); }
+} demapper_crossing_declaration_instance;
+
+} // namespace
+
 
 namespace {
 
@@ -138,6 +170,11 @@ void demodulation_mapper_metal::wait()
     if (!entry->llr_direct) {
       // The kernel wrote the LLRs into the staging buffer: copy them into the caller's span,
       // exactly like the synchronous path does.
+      //
+      // CROSSING (device -> host), counted only when it happens: the LLRs the GPU produced coming
+      // back through host memory while the lane is still running. With the demodulator's
+      // page-aligned LLR slots it does not happen - see the input-side note in run_demodulate().
+      phy_pipeline_crossings::count_host_read(entry->llr_staged);
       std::memcpy(entry->llrs.data(), entry->llr_ptr, entry->llr_sz);
     }
     impl_->pool.push_back(std::move(entry));
@@ -212,6 +249,25 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
   if (!nv_direct) {
     std::memcpy(const_cast<void*>(nv_ptr), noise_vars.data(), nv_bytes);
   }
+  // CROSSING (host -> device), counted only when it HAPPENS: the two memcpys above move the
+  // equalizer's symbols and their noise variances through host memory, and the kernel then reads
+  // what the host wrote. On the fused lane both are page-aligned slots of the PUSCH demodulator's
+  // group buffers (page_aligned_allocator), so this stays zero and the wrap is in place - which is
+  // exactly why it is counted here rather than assumed away.
+  //
+  // \note The demapper had NO crossing counter at all before this, so a PUSCH demodulator that
+  //       stopped allocating those buffers page-aligned would have moved every equalized symbol
+  //       through the host - float data, in the middle of the lane - while the contract's crossing
+  //       check still read 0. A silent fallback is the shape of defect these counters exist to
+  //       refuse, so the fallback is measured, not assumed absent.
+  if (!sym_direct) {
+    phy_pipeline_crossings::count_host_write(sym_bytes);
+    entry->sym_staged += sym_bytes;
+  }
+  if (!nv_direct) {
+    phy_pipeline_crossings::count_host_write(nv_bytes);
+    entry->nv_staged += nv_bytes;
+  }
 
   if (defer) {
     // A group is accumulated and the burst's flush hook encodes a run of its symbols as ONE
@@ -263,6 +319,9 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
     entry->llr_ptr    = llr_ptr;
     entry->llr_sz     = llr_bytes;
     entry->llr_direct = llr_direct;
+    // 0 when the kernel wrote the caller's own page-aligned slot; the byte count when it wrote the
+    // staging buffer, which wait() must then bring back through the host.
+    entry->llr_staged = llr_direct ? 0 : llr_bytes;
     impl_->pending.push_back(std::move(owned));
     return;
   }
@@ -271,6 +330,8 @@ void demodulation_mapper_metal::run_demodulate(span<log_likelihood_ratio> llrs,
   impl_->engine.wait_committed();
 
   if (!llr_direct) {
+    // The same crossing as in wait(), on the route that does not defer.
+    phy_pipeline_crossings::count_host_read(llr_bytes);
     std::memcpy(llrs.data(), llr_ptr, llr_bytes);
   }
 }
