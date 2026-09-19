@@ -24,14 +24,29 @@
 #
 # usage: bash narrow_arms.sh [outdir] [capture-glob]
 #
-# \warning EVERY ARM RUNS SERIALLY, one process at a time, and it must stay that way: the tool's own
+# Arms:
+#   cpu     current build, `--cpu`                       -> the actual CPU reference chain
+#   dev     current build, default                       -> the device builds the narrow hop's A
+#   host    pre-fix binary, default                      -> the host builds it (the S13-P2c symptom)
+#   hostsc  pre-fix binary, OCUDU_CE_HOST_SCALARS=1      -> host build WITH the device's scalars (the
+#                                                           mechanism proof: must equal `dev`)
+#   exactab current build, CORR_DEV=0 + HOST_SCALARS=1   -> the host builds A with the device's scalars.
+#                                                           This is the EXACT A/B of the fix: its three
+#                                                           DATA dumps must be byte-identical to `dev`'s
+#                                                           (asserted below), which is what makes
+#                                                           "the device route == the host route with the
+#                                                           right diagonal loading" a measurement rather
+#                                                           than an argument. Only `_ce.txt` may differ,
+#                                                           and only in its `cfo_hz` field (`na` on the
+#                                                           device route, a number when the host builds).
+#\warning EVERY ARM RUNS SERIALLY, one process at a time, and it must stay that way: the tool's own
 # header (ul_chain_replay.cpp:32-38) records that under heavy parallelism it produces WRONG results -
 # measured, 39 of 980 captures differed between two runs of the SAME configuration. A serial run costs
 # 0.12 s, so there is nothing to gain. For the record: the archived `narrow_cmp/` table took 0.57 s per
 # replay (37 s for 65 dumps), i.e. it was NOT serial, and exactly one of its dumps (cap_3322's host arm,
 # md5 63a9fdd5…, -8.26 dB) cannot be reproduced by either pre-fix binary today - the failure mode this
 # warning describes.
-#   ARMS="cpu dev host hostsc"   which arms to run (default: all four)
+#   ARMS="cpu dev host hostsc exactab"   which arms to run (default: all five)
 #   CMP_TREE=<binary>            the current build      (default: build/.../ul_chain_replay)
 #   BIN_HOSTA=<binary>           the pre-fix reference  (default: doc_chinese/work_tmp/ref/replay_narrow_hostA)
 #
@@ -46,7 +61,7 @@ set -u
 
 OUT=${1:-doc_chinese/work_tmp/narrow_cmp2}
 GLOB=${2:-doc_chinese/work_tmp/narrow_cap/cap_*.bin}
-ARMS=${ARMS:-"cpu dev host hostsc"}
+ARMS=${ARMS:-"cpu dev host hostsc exactab"}
 CMP_TREE=${CMP_TREE:-build/lib/phy/upper/channel_processors/metal/ul_chain_replay}
 BIN_HOSTA=${BIN_HOSTA:-doc_chinese/work_tmp/ref/replay_narrow_hostA}
 
@@ -62,6 +77,9 @@ echo "pre-fix binary: $BIN_HOSTA  md5=$MD5_HOSTA"
 echo
 
 mkdir -p "$OUT"
+AB_N=0
+AB_BAD=0
+CE_N=0
 SUMMARY="$OUT/summary.tsv"
 printf "capture\tnrb\tarm\tcrc\titers\tsinr\tfingerprint\tguard\n" > "$SUMMARY"
 FAILED=0
@@ -81,6 +99,7 @@ for f in $GLOB; do
       dev)    ENV=""                        BIN="$CMP_TREE" ARGS="--metal" ; WANT="(metal CE, metal equalizer/demapper, metal LDPC)" ;;
       host)   ENV=""                        BIN="$BIN_HOSTA" ARGS="--metal"; WANT="(metal CE, metal equalizer/demapper, metal LDPC)" ;;
       hostsc) ENV="OCUDU_CE_HOST_SCALARS=1" BIN="$BIN_HOSTA" ARGS="--metal"; WANT="(metal CE, metal equalizer/demapper, metal LDPC)" ;;
+      exactab) ENV="OCUDU_CE_CORR_DEV=0 OCUDU_CE_HOST_SCALARS=1" BIN="$CMP_TREE" ARGS="--metal"; WANT="(metal CE, metal equalizer/demapper, metal LDPC)" ;;
       *) echo "unknown arm $arm"; exit 2 ;;
     esac
 
@@ -112,6 +131,8 @@ for f in $GLOB; do
               { [ "${corr_builds:-0}" -eq 0 ] && [ "${refusals:-}" != "refusals=<none>" ]; } || guard="ROUTE-MISMATCH" ;;
       hostsc) fp="builds=$corr_builds ${refusals:-refusals=n/a}"
               { [ "${corr_builds:-0}" -eq 0 ] && [ "${refusals:-}" != "refusals=<none>" ]; } || guard="ROUTE-MISMATCH" ;;
+      exactab) fp="builds=$corr_builds ${refusals:-refusals=n/a}"
+              { [ "${corr_builds:-0}" -eq 0 ] && [ "${refusals:-}" = "refusals=corr_disabled=1" ]; } || guard="ROUTE-MISMATCH" ;;
     esac
 
     # --- guard 3: a missing dump must never read as a result ---
@@ -128,11 +149,37 @@ for f in $GLOB; do
       "$cap" "$nrb" "$arm" "${crc:--}" "${iters:--}" "${sinr:--}" "$fp" "$guard" >> "$SUMMARY"
     [ "$guard" = "ok" ] || { FAILED=1; echo "GUARD FAILED: $cap $arm -> $guard"; }
   done
+
+  # --- guard 4: the EXACT A/B. `exactab` (host builds A with the device's scalars) must reproduce
+  #     `dev`'s three DATA dumps byte for byte. Only the scalar text dump may differ, and only in the
+  #     `cfo_hz` field (`na` on the device route, a number when the host builds) - report it, since a
+  #     second differing field would be a finding. ---
+  dev_h=$(ls "$OUT/$cap/"dev_*_h.bin 2>/dev/null | head -1)
+  ab_h=$(ls "$OUT/$cap/"exactab_*_h.bin 2>/dev/null | head -1)
+  if [ -n "$dev_h" ] && [ -n "$ab_h" ]; then
+    AB_N=$((AB_N + 1))
+    for suf in _h.bin _llr.bin .bin; do
+      a=$(ls "$OUT/$cap/"dev_*"$suf" 2>/dev/null | head -1)
+      b=$(ls "$OUT/$cap/"exactab_*"$suf" 2>/dev/null | head -1)
+      cmp -s "$a" "$b" || { echo "AB-MISMATCH: $cap $suf"; AB_BAD=$((AB_BAD + 1)); FAILED=1; }
+    done
+    a=$(ls "$OUT/$cap/"dev_*_ce.txt 2>/dev/null | head -1)
+    b=$(ls "$OUT/$cap/"exactab_*_ce.txt 2>/dev/null | head -1)
+    if ! cmp -s "$a" "$b"; then
+      fields=$(diff <(tr ' ' '\n' < "$a") <(tr ' ' '\n' < "$b") | grep -c '^[<>]')
+      where=$(diff <(tr ' ' '\n' < "$a") <(tr ' ' '\n' < "$b") | grep '^[<>]' | tr '\n' ' ')
+      CE_N=$((CE_N + 1))
+      echo "note: $cap _ce.txt differs in $fields field token(s): $where"
+    fi
+  fi
 done
 
 echo
 column -t -s $'\t' "$SUMMARY"
 echo
+if [ "$AB_N" -ne 0 ]; then
+  echo "exact A/B (CORR_DEV=0 + HOST_SCALARS=1 vs dev): $AB_N capture(s) compared, $AB_BAD data dump(s) different, $CE_N _ce.txt different"
+fi
 if [ "$FAILED" -ne 0 ]; then
   echo "some arm(s) failed their fingerprint - the table above is NOT usable as evidence"
   exit 3
