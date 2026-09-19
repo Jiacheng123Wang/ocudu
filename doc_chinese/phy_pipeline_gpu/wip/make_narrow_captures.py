@@ -14,13 +14,19 @@ Measured on air (leg `s13p1b_0919_2322`, batch S13-P1's new site and refusal cou
 hops, exactly the narrow allocations (78 of 1 PRB + 290 of 2 PRB), 0.10 host writes per hop, 16.6 MB.
 It had been there all along and no counter could see it.
 
-The 27-capture corpus contains no allocation below 3 PRB, so it cannot exercise the path - which is
-why the repair (letting the device build the narrow group) could not be gated when it was first tried:
-with that change the crossing disappears but the published estimates move COMPLETELY (every h value
-differs, max |dev - host| ~ 1.5 on these captures, i.e. a different answer rather than rounding), so
-the device build of this geometry is not yet equivalent to the host's. These two captures are the
-regression input for that work: they must show the host staging NOW (site + `corr_geometry`) and the
-identical dumps AFTER the repair.
+The 27-capture corpus contains no allocation below 3 PRB, so it cannot exercise the path at all.
+
+WARNING - these captures are a PATH TRIGGER, not a numerical corpus. Cropping the 3 PRB grid changes
+the allocation the metadata declares while the samples still carry a 3 PRB transmission, so the DM-RS
+sequence the demodulator regenerates no longer matches the data: the CPU reference chain fails on them
+too (-11.6 dB, every CRC KO). They are good for exactly one thing - making the estimator take the
+narrow path (the site and `corr_geometry` fire) - and for that the determinism they do have is enough.
+
+What they CANNOT do is decide which of the two correlation builds is right for a narrow hop. That
+question (the host's A carries NO diagonal loading on a device route - measured 1.00000095 against the
+device's 1.86681008 on the STANDARD geometry, with R_hp bit-identical) needs a REAL 1-2 PRB reception
+from `ul_capture::capture_grid`, and its criterion is the 2 PRB rows of the air legs, whose CRC is 0.0%
+in every one of them.
 
 ---- How ----
 Both captures are `syn001_3` cropped in frequency: the grid is dumped as one row of

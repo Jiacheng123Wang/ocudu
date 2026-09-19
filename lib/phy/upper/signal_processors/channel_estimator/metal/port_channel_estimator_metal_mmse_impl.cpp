@@ -279,6 +279,13 @@ bool device_ls_enabled()
 /// OCUDU_CE_K0A_RATIO_DEV=0 keeps the host's quotient: it is the A/B that produced the numbers above,
 /// and the escape hatch for a metallib built without the strict flag (the kernel would then read a
 /// differently rounded value - not a wrong route, but not the measured one either).
+/// \brief Whether the device-vs-host correlation comparison (OCUDU_CE_CORR_CHECK) is armed.
+bool corr_check_enabled()
+{
+  static const bool value = []() { return std::getenv("OCUDU_CE_CORR_CHECK") != nullptr; }();
+  return value;
+}
+
 /// \brief Whether the edge-slot comparison (OCUDU_CE_EDGE_CHECK) is armed.
 ///
 /// A diagnostic with no effect on any published value: it builds the edge group's matrices on the
@@ -2607,22 +2614,31 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           // buffer, which one correlation build cannot describe. That is why the device build
           // covered 37.5% of the hops on the air (device_corr_builds=26761 of 71384 in the b22
           // leg): the rest had a remainder and merged.
-          // WHO builds the tail block's matrices. \c std_slots_filled answers for the STANDARD
-          // group's slots, and a hop NARROWER than one block (n_std_blocks == 0) has no standard group
-          // at all - so this reads false for it and every 1-2 PRB hop takes the host build and its
-          // A/R_hp staging. MEASURED, not suspected (S13-P1's new site + refusal counter): 368 of 3748
-          // hops in the air leg s13p1b_0919_2322 (78 of 1 PRB + 290 of 2 PRB - exactly the narrow
-          // allocations), 0.10 host writes per hop, 16.6 MB, invisible until this batch counted it.
+          // WHO builds the tail block's matrices. \c std_slots_filled answers for the STANDARD group's
+          // slots, and a hop NARROWER than one block (n_std_blocks == 0) has no standard group at all -
+          // so this reads false for it and every allocation below block_prb takes the host build and its
+          // A/R_hp staging. MEASURED (S13-P1's site and refusal counter, air leg s13p1b_0919_2322): 368
+          // of 3748 hops, exactly the 1-2 PRB allocations, 0.10 host writes per hop, 16.6 MB.
           //
-          // \warning The obvious repair - "let the device build the narrow group too" - DOES NOT WORK
-          //          YET: with `std_slots_filled || (n_std_blocks == 0)` the crossing disappears (0.00
-          //          writes, refusals=<none>) but the published estimates move COMPLETELY (measured on
-          //          the synthetic 1-2 PRB captures: every h value differs, max |dev - host| ~ 1.5 -
-          //          a different answer, not a rounding difference). The device build of this geometry
-          //          is therefore not equivalent to the host's yet, and finding out why is the next
-          //          batch; the synthetic captures are its regression input (see
-          //          wip/make_narrow_captures.py). The repair must also keep OCUDU_CE_CORR_DEV=0
-          //          meaning "the host builds" - the naive form above ignored that knob.
+          // \warning Letting the device build the narrow group too (`tail_slots_on_device =
+          //          std_slots_filled || (device_corr_enabled() && (n_std_blocks == 0))`) removes the
+          //          crossing - 0.00 writes, refusals=<none> - but CHANGES the published estimates on
+          //          that geometry (_h.bin and _llr.bin differ; measured on the synthetic 1-2 PRB
+          //          captures, and NOT a rounding difference on the diagonal of A: see below).
+          //
+          // \warning And the two builds DO differ, on every geometry - which is why the byte-identity
+          //          criterion cannot decide this one. The host's A is built from \c stats.sigma2, and
+          //          on a DEVICE route that value is 0 (OCUDU_CE_HOST_SCALARS=0 takes neither the device
+          //          scalar nor estimate_sigma2()), so the host's diagonal is R_pp + 1e-6 I while the
+          //          device's carries the ratio the kernels use (measured with OCUDU_CE_CORR_CHECK on
+          //          the STANDARD 3 PRB geometry: host 1.00000095 against device 1.86681008, R_hp
+          //          bit-identical). OCUDU_CE_CORR_DEV=0 therefore is NOT the exact A/B it is documented
+          //          to be: on a real capture its h differs from the default route's by 1974 bytes.
+          //          Which of the two is right for a narrow hop is the OPEN question, and the 2 PRB rows
+          //          of every air leg (0.0% CRC in all of them) are the population it concerns; the
+          //          corpus that can answer it is a real 1-2 PRB reception (ul_capture::capture_grid),
+          //          not the cropped captures - cropping a 3 PRB grid changes the DM-RS sequence the
+          //          demodulator regenerates, so the CPU reference fails on them too (-11.6 dB, all KO).
           const bool tail_slots_on_device = std_slots_filled;
           unsigned nout_e = 0;
           unsigned L_e    = 0;
@@ -3940,6 +3956,30 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   // WIDER than the block (the matrix flavor's ceil8 pad) also needs the host's pad rows/columns in
   // their final state - and with st.L == L and st.nout == nout there is no pad to speak of.
   const bool slots_filled = device_built && (st.L == L) && (st.nout == nout);
+  // OCUDU_CE_CORR_CHECK=1: the device's A / R_hp against the host's own build of the SAME geometry,
+  // in the same process and on the same hop. It is the edge probe (OCUDU_CE_EDGE_CHECK, S-4d)
+  // generalized to any batch: without it a geometry the device builds "successfully" AND differently
+  // stays invisible until the published estimates move - which is how the 1-2 PRB case was found
+  // (every h value differs, max |dev - host| ~ 1.5 on the synthetic narrow captures).
+  // \note Only for the STANDALONE build (corr_prefix empty): a batch whose correlation is a prefix of
+  //       the weights' command buffer has not been dispatched yet at this point, so reading its slots
+  //       here would report zeros and look like a device that wrote nothing. Measured - that is exactly
+  //       how the first version of this probe reported "everything differs" on the standard geometry.
+  if (device_built && !corr_prefix.has_value() && (device_stats != nullptr) && corr_check_enabled()) {
+    static_vector<unsigned, MAX_NOF_DMRS_SYMBOLS> check_slots;
+    args.pattern_symbols.for_each(args.first_symbol, args.last_symbol, [&](unsigned sym) { check_slots.push_back(sym); });
+    (void)check_edge_slots(*device_stats,
+                           args.dmrs_patterns.front().re_pattern,
+                           b_prb,
+                           span<const unsigned>(check_slots.begin(), check_slots.size()),
+                           scs_to_khz(args.scs),
+                           nout,
+                           L,
+                           sys_offset,
+                           nof_layers,
+                           st.L,
+                           st.nout);
+  }
   if (device_stats != nullptr && !device_built && !matrix) {
     // S-7f-5v: on this route the caller did NOT build the host arrays - it skipped them precisely
     // because this call was going to fill those slots - so staging "what the host has" would copy
