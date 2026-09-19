@@ -17,6 +17,7 @@
 #pragma once
 
 #include "ocudu/ran/pusch/pusch_constants.h"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -105,6 +106,32 @@ public:
     /// nf_tail when there is none): the gather writes a zero estimate there.
     unsigned dc_sc = ~0u;
 
+    /// \brief Optional K5 stage: the hop's per-layer rsrp, reduced on the DEVICE from the same h.
+    ///
+    /// The reporting values (rsrp, and the SNIR the CSI report derives from it) are the only reason
+    /// the host still reads the estimated grid back after every hop. This stage computes them where
+    /// the estimates already are, so the host reads one float per layer instead of the grid.
+    ///
+    /// It reads h - the reformat's SOURCE, not its destination - because K3 deliberately EXCLUDES the
+    /// pilot resource elements from its layout (they carry no data and the equalizer does not index
+    /// by them), so the pilots are reachable in h and nowhere in dst. The geometry it needs is the
+    /// reformat's own, reused field for field so the two cannot disagree about which subcarrier is
+    /// which.
+    struct rsrp_stage_t {
+      /// Destination: [n_blk][nof_layers] floats, RAW sums of |h|^2 over the hop's pilot REs.
+      /// The host applies the normalization, so the two reductions stay comparable term by term.
+      float* dst = nullptr;
+      /// Number of block slots the batch carries (the reformat's own nof_blocks).
+      unsigned n_blk = 0;
+      /// The layer's own pilot comb within a PRB, one 12-bit mask per layer, in [0, nof_layers).
+      /// NOT the union the reformat uses for its "is this RE a pilot" test: a two-layer hop has two
+      /// combs and each layer's rsrp is reduced over its OWN pilots.
+      /// MAX_LAYERS (4) entries; the kernel's parameter block hard-codes that size, so it
+      /// must stay in step with the estimator's own MAX_LAYERS.
+      static constexpr unsigned      max_layers = 4;
+      std::array<unsigned, max_layers> pilot_re_bits{};
+    };
+
     /// \brief Optional K4 stage: the noise variance the equalizer scales its soft bits with,
     /// reduced from the same h into a device value, so that no consumer of the estimate has to
     /// read the grid before dispatching the equalizer.
@@ -153,6 +180,11 @@ public:
       unsigned nof_cdm         = 0;
       float    min_snr_power   = 1.0F;
     } noise;
+
+    /// See rsrp_stage_t: the hop's per-layer rsrp, reduced on the device from this reformat's own h.
+    /// Left empty (dst == nullptr) when the caller wants the host to keep computing it, which is what
+    /// OCUDU_CE_DEV_STATS=0 asks for.
+    rsrp_stage_t rsrp;
   };
 
   /// \brief Device-side correlation stage (K0-d): A and R_hp built into the engine's own slots.
@@ -423,6 +455,10 @@ public:
   /// Whether the device-side pilot scatter (glue #2) can run: the metallib carries
   /// mmse_pilots_scatter_y. When false the caller keeps staging y on the host.
   bool scatter_available() const;
+
+  /// Whether the metallib carries the device-side rsrp reduction (mmse_rsrp). When false the caller
+  /// must keep reducing the pilots on the host - the same shape as scatter_available().
+  bool rsrp_available() const;
 
   /// \brief Batched inversion (K1): A_inv = (A)^-1 for each system, in-place Gauss-Jordan.
   ///

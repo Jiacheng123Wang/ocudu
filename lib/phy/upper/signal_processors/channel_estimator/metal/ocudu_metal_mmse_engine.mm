@@ -260,6 +260,8 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    apply_pipe  = nil;
   // K3: per-symbol, mask-compressed cbf16 estimates for the equalizer (optional, loaded on demand).
   id<MTLComputePipelineState>    reformat_pipe = nil;
+  /// K5: the per-layer rsrp reduction over the same h (optional, like K3 and K4).
+  id<MTLComputePipelineState>    rsrp_pipe = nil;
   // K4: the equalizer's noise variance, reduced on the device (optional, same metallib).
   id<MTLComputePipelineState>    noise_pipe    = nil;
   // K0-d: the analytic correlation matrices A and R_hp (optional, same metallib).
@@ -710,6 +712,51 @@ static void encode_reformat(stage_encoder&                             s,
           static_cast<NSUInteger>(rparams.sc_tail_base) + (reformat->has_tail ? rparams.nf_tail : 0u);
       const NSUInteger nof_threads = nof_sub * reformat->nof_symbols * reformat->nof_layers;
       [enc dispatchThreads:MTLSizeMake(nof_threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+
+      // K5 (optional): the hop's per-layer rsrp, reduced from the SAME h this reformat just read -
+      // and in the same command buffer, so the host never waits for anything to get it. It reads the
+      // pilot REs K3 skips, which is why it walks h rather than dst.
+      if ((reformat->rsrp.dst != nullptr) && (e->rsrp_pipe != nil) && (reformat->rsrp.n_blk != 0)) {
+        struct mmse_rsrp_params {
+          uint32_t nout_stride;
+          uint32_t n_blk;
+          uint32_t nf_std;
+          uint32_t sc_tail_base;
+          uint32_t nf_tail;
+          uint32_t sys_tail;
+          uint32_t nof_layers;
+          uint32_t nof_symbols;
+          uint32_t dc_sc;
+          uint32_t dmrs_sym_bits;
+          uint32_t pilot_re_bits[4];
+        } rpparams{};
+        rpparams.nout_stride  = static_cast<uint32_t>(nout);
+        rpparams.n_blk        = reformat->rsrp.n_blk;
+        rpparams.nf_std       = reformat->nf_std;
+        rpparams.sc_tail_base = reformat->nf_std * static_cast<uint32_t>(nof_blocks);
+        rpparams.nf_tail      = reformat->has_tail ? reformat->nf_tail : 0u;
+        rpparams.sys_tail     = reformat->sys_tail;
+        rpparams.nof_layers   = reformat->nof_layers;
+        rpparams.nof_symbols  = reformat->nof_symbols;
+        rpparams.dc_sc        = reformat->dc_sc;
+        rpparams.dmrs_sym_bits = reformat->dmrs_sym_bits;
+        for (unsigned l = 0; l != 4; ++l) {
+          rpparams.pilot_re_bits[l] = (l < reformat->nof_layers) ? reformat->rsrp.pilot_re_bits[l] : 0u;
+        }
+        const NSUInteger rsrp_bytes =
+            static_cast<NSUInteger>(reformat->rsrp.n_blk) * reformat->nof_layers * sizeof(float);
+        id<MTLBuffer> rsrp_buf = e->wrap_shared(reformat->rsrp.dst, rsrp_bytes);
+        if (rsrp_buf != nil) {
+          // K5 reads h, which K2 wrote and K3 also read: same producer, so the barrier K3 needed
+          // already stands between them.
+          enc = stage_pipeline(e, s, e->rsrp_pipe);
+          [enc setBuffer:h_buf offset:0 atIndex:0];
+          [enc setBuffer:rsrp_buf offset:0 atIndex:1];
+          [enc setBytes:&rpparams length:sizeof(rpparams) atIndex:2];
+          [enc dispatchThreadgroups:MTLSizeMake(reformat->rsrp.n_blk * reformat->nof_layers, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        }
+      }
     }
   }
 
@@ -886,6 +933,15 @@ bool mmse_engine::init(const char* metallib_path)
                                                               options:MTLPipelineOptionNone
                                                            reflection:nil
                                                                 error:&err];
+  }
+  // K5 (the hop's per-layer rsrp) is optional for the same reason as K3: a metallib without it
+  // leaves the host's own reduction as the only source, which is what the estimator falls back to.
+  id<MTLFunction> rsrp_fn = [e->library newFunctionWithName:@"mmse_rsrp"];
+  if (rsrp_fn != nil) {
+    e->rsrp_pipe = [e->device newComputePipelineStateWithFunction:rsrp_fn
+                                                          options:MTLPipelineOptionNone
+                                                       reflection:nil
+                                                            error:&err];
   }
   id<MTLFunction> noise_fn = [e->library newFunctionWithName:@"mmse_noise"];
   if (noise_fn != nil) {
@@ -1558,6 +1614,12 @@ bool mmse_engine::scatter_available() const
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   return (e != nullptr) && (e->pilots_scatter_pipe != nil);
+}
+
+bool mmse_engine::rsrp_available() const
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  return (e != nullptr) && (e->rsrp_pipe != nil);
 }
 
 /// Must match mmse_scatter_params in ocudu_mmse_pilots.metal.
