@@ -12,11 +12,19 @@ tests/ci/macos_triage/__pycache__/
 # CMake build directory (regenerable)
 /build/
 tmp/
-# doc_chinese/ is DELIBERATELY local-only: it is the session working memory (living design
-# document, plans, handoff memos) and is read from disk by the next session - which git adds
-# nothing to. Do not "helpfully" track it: the operator wants the repository to carry code and
-# code history, not the notes' own churn. See the handoff memo 2026-09-15-2.
-doc_chinese/
+# doc_chinese/ holds the design and planning record of the Apple Silicon / Metal work. It USED to be
+# kept out of the tree ("the notes' own churn"); the policy is now the opposite - the documents are
+# part of the project's history and are tracked, together with the bench scripts that produce the
+# evidence they quote. What is still NOT tracked is the working material those sessions generate:
+# bench logs, IQ captures, gate dumps, reference binaries and worktree backups, which are large,
+# regenerable and meaningless without the machine that produced them. The exclusions live in
+# doc_chinese/.gitignore, next to the tree they apply to.
+#
+# Chinese-language documents belong here and nowhere else: the code, the configs and the scripts
+# carry English comments and English operator messages (see doc_chinese/README.md).
 
 __pycache__/
 *.pyc
+
+# Claude Code's local permission cache: machine-specific, and it embeds absolute paths.
+.claude/settings.local.json

@@ -3,8 +3,8 @@
 > 状态：**v0.3 已评审通过，实施完成**（M0–M3 离线部分全部完成并验证，见 §7.0 实施记录；
 > 剩余：实链三腿 A/B 与探针扩展为实验室依赖的收尾项）
 > 目录：`lib/phy/upper/signal_processors/channel_estimator/metal/`（本目录 = 所有 CE Metal 工作的家）
-> 参照：`lib/phy/upper/channel_coding/ldpc/metal/PLAN.md`（LDPC Metal 范式）
-> 前置背景：同目录 `AI_channel_estimation_implementation_plan.md`（147 篇论文筛选与 AI 路线总规划；
+> 参照：`../metal_ldpc/PLAN.md`（LDPC Metal 范式）
+> 前置背景：`../ai_ce/AI_channel_estimation_implementation_plan.md`（147 篇论文筛选与 AI 路线总规划；
 > 本 PLAN 只覆盖其 L0 阶段 = **MMSE baseline 的 Metal 实现**）
 
 ---
@@ -45,7 +45,7 @@
 ### 1.1 为什么先做 MMSE baseline
 
 - 现有 `port_channel_estimator_average_impl` 是 **LS + FD 平滑（filter/mean/none）+ TD 平均/插值**，
-  **没有 MMSE**。AI 路线规划（`AI_channel_estimation_implementation_plan.md` §5 L0）要求
+  **没有 MMSE**。AI 路线规划（`../ai_ce/AI_channel_estimation_implementation_plan.md` §5 L0）要求
   先建立"实用 MMSE"严格基线，AI 模型（HELENA 等）未来必须在该基线上有增益才允许启用。
 - MMSE 的数学形态（矩阵求逆 + 矩阵乘法）与未来 GPU AI 推理（GEMM 类算子、批量小矩阵、
   Metal 引擎/缓冲/调度骨架）**高度同构**：本次的 Metal 引擎就是 AI CE 的骨架，后续只需替换 kernel 内容。

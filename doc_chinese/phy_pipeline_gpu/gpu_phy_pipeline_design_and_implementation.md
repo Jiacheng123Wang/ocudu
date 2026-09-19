@@ -1,0 +1,2371 @@
+# GPU PHY pipeline — 设计与实现
+
+> **本文是这条线唯一的常驻文档。** 判据、代码地图、口径、数字、批次状态、踩过的坑、
+> **以及"哪些路已经试过且被推翻"**，都写在这里，并且**随工作持续更新**。
+>
+> **会话快照不是本文。** 新会话开工时读的那份现状快照叫
+> `session_handoff_<YYYY-MM-DD>-<序号>.md`（**新会话永远读序号最大的那一份**），
+> 它只回答"现在到哪了、下一步做什么"，**不重复本文的技术内容**。
+> 快照在**新会话开始前**写；**同一会话内不写新快照**——直接更新本文。
+>
+> 目录里更早的 `00_goal_and_gap.md` / `01_plan.md` / `02_ab_protocol.md` 是**立项期**文档，
+> 保留作历史证据，**结论以本文为准**。
+
+---
+
+## 1. 目标与判据
+
+### 1.1 目标（原文在代码里）
+
+> **`gpu` — 融合车道。整条 IQ → LLR 链跑在一条设备侧流水线里，只有两次 host↔device 数据穿越
+> （IQ 上传、LLR 下载）。LDPC 不属于车道。**
+>
+> —— `include/ocudu/phy/phy_pipeline_mode.h`
+
+`cpu_gpu` 是另一个东西：**每个模块边界都保留自己的 host↔device 穿越**。
+**差距不在"拷贝"（那一层已清零），而在"每个模块边界的那次往返"。**
+
+### 1.2 判据（一切裁决的标准，不要重新发明）
+
+> **数据流进入 GPU 之前，CPU 做什么都属于装配，允许；一旦流开始，CPU 只能在出口等，
+> 中间的每一次接触都算——无论它搬的是样本、标量还是索引表。**
+>
+> 主要目的：**一旦 GPU in the loop，CPU 就该靠边站。如果在中间某个时候还是需要 CPU
+> （无论是什么），那把数据流从 CPU 挪到 GPU 的意义就不大。**
+
+**补充裁定（用户原话）**：
+
+> **"即使是'指挥'/控制，也是一次 CPU in the loop，不是真正的 CPU offloading。
+> 真正的 CPU offloading 是 CPU 彻底甩手不管。"**
+
+**完整表述**：一旦数据流进入 GPU，CPU 只做两件事——**提交**（把这一跳的命令缓冲交出去）
+和**在出口等待**。此外任何**逐跳的宿主计算或数据搬运都是缺陷**，不管它搬的是样本、标量还是索引表，
+也不管它叫"数据"还是"控制"。
+
+**唯一物理上不可移除的**：Metal 命令缓冲必须由 CPU `commit`。但那是"提交 + 在出口等"，
+**关键是提交不需要 CPU 知道任何逐跳的内容**。一旦提交前宿主必须算点什么，就是 in the loop。
+
+**⇒ 设计原则**：能预先算的在装配阶段算完；不能预先算的**搬到设备侧算**；
+**不允许**"宿主在中间算完再传给设备"。
+
+**为什么它取代了"控制 vs 数据"**：后者会让我们把索引表、标量、参数块逐个争论归类，
+而结论还会随实现变化。**位置是客观的、可测的**：接触发生在流的中间，就是缺陷。
+
+### 1.3 缓存命中不算
+
+稳态的缓存命中（比较两个 plan key）：**不接触任何设备内存**（按定义不是穿越）、**不等待 GPU**
+（不违反"CPU 靠边站"）。
+
+**⇒ 实现要求**：命中路径**不得调用计数器**——那样稳态下这个数是**字面的 0**，而不是"很小"。
+
+### 1.4 判据的合法形态（每一步都要能单独判对错）
+
+**判据分主次（2026-09-19 用户裁定，见 §1.5）**：
+
+| 层级 | 判据 | 何时用 |
+|---|---|---|
+| **主判据** | **端到端 LDPC 解码性能不劣化超过 0.5 dB**（同等信道条件下，BLER 曲线在目标工作点的水平位移） | 任何**会改变数值**的改动 |
+| 前提 | **信号处理逻辑正确、精度足够** | 所有改动 |
+| **快速网** | 逐字节不变（`_llr` / `_h`） | **会通过时优先用**——便宜、灵敏；**不通过不等于失败**，此时改走主判据 |
+| 结构性判据 | 契约变化 / A/B 可分辨 / 穿越计数下降 | **与数值无关**的改动（搬走宿主接触、改命令缓冲编排） |
+
+**⚠ 延迟、失败率、GPU 占用率仍然都不是判据。**
+
+**为什么保留"逐字节不变"作为快速网**：它抓得住真缺陷且成本极低（27 捕获几十秒）。
+**但它的地位降了一级**——它不再是"必须满足"，只是"能过就先过"。
+本线过去三次误判都有"证据比措辞窄"的影子，**放宽的判据要写清楚适用范围，不能变成"随便变都行"**。
+
+**⇒ 反过来说**：一个改动如果**在逻辑上不是同一件事**（例如精度不足、公式不对、量纲错），
+**即使 LDPC 性能碰巧没掉，也是缺陷**——0.5 dB 是容忍度，不是正确性的替代品。
+
+### 1.5 用户裁定（2026-09-19）：数值不必逐字节复现
+
+> **"只要 `_llr.bin` / `_h.bin` 逐字节不变"这个要求太严格了，没有必要。**
+> **只要精度足够、在信号处理的逻辑上是正确的就 OK，最后输出的 LLR 给 LDPC 解码后的性能差别
+> 不要太多就可以了。也没有必要要求 LDPC 的解码性能也要一样，性能有所提高当然更好，
+> 但是即使差一点，0.5 dB 都是可以接受的。**
+
+**⇒ 这条裁定推翻了本线此前"判据永远是逐字节不变"的硬约束**，带来的直接后果：
+
+| 此前被挡住的做法 | 现在 |
+|---|---|
+| 设备侧归约（树形求和 vs 宿主顺序求和 ⇒ 末位不同） | **可接受**（§8.2 的否定结果**不因此解封**——那是 **2.14 倍**的错，不是精度问题） |
+| 时间提前（TA）搬到设备（无设备实现，要重写估计器） | **可做**——β 路线从"不可能"变成"有代价但可行" |
+| 浮点运算顺序、算法等价改写 | **可接受** |
+
+**仍不被解封的**（必须继续按"逻辑正确"卡）：
+
+* §8.2：`gpu_ls_smoothed` **不是** `filtered_pilots_lse`，差 **2.14 倍**且相位发散——
+  这是**算错了**，不是精度不够；
+* §4.2 那类"以为宿主在算、其实没算"的**位置误判**。
+
+**精度判据的量化口径**（`_h.bin` / `_llr.bin` 是逐捕获快照，做不了曲线）：
+
+* `_h.bin`：`NMSE`（归一化均方误差）与**逐 RE 相对误差的分位数**（p50 / p99 / max）；
+* `_llr.bin`：符号翻转比例、|LLR| 的相对偏差分位数；
+* **最终一句话必须是 SNR 位移**（在目标 BLER 点，如 10%），**带蒙特卡洛误差棒**——
+  0.5 dB 的容忍度小于单次小样本测量的噪声，**没有误差棒的数字不算证据**。
+
+### 1.6 判据的适用范围（不要过度外推）
+
+LDPC 端到端性能**只覆盖信号路径**。以下两类**不适用**主判据：
+
+| 类别 | 例 | 正确判据 |
+|---|---|---|
+| **结构性改动** | 搬走宿主接触、改命令缓冲编排、缓存 | **穿越计数**（数值不变，本来就不进 LDPC 曲线） |
+| **上报量** | `rsrp` / `snr` / `ta_us` / `noise_variance`（走 CSI → FAPI，**不进 LLR 路径**） | **逻辑正确 + 精度足够**（见 §1.7）——它们影响**链路自适应选 MCS**，不影响本 TB 的解码 |
+
+### 1.7 用户裁定：调试产物可以变
+
+> **`_ce.txt` 是调试 dump，可以变——只要 `_llr.bin` / `_h.bin` 逐字节不变。**
+
+（`_ce.txt` 装的是 `noise_variance / snr / rsrp / epre / ta_us / cfo_hz`，见 `ul_capture.cpp:177`。）
+
+**⚠ 2026-09-19 更新**：后半句"只要 `_llr`/`_h` 逐字节不变"**已被 §1.5 放宽**。
+`_ce.txt` 是调试量这一定性**不变**；但它承载的 `rsrp` / `ta_us` 等**不是调试量**——
+它们是喂给链路自适应的上报量，**精度不足会让 MAC 选错 MCS**（吞吐掉，但 BLER 曲线不动）。
+**⇒ 搬它们的时候仍然要求逻辑正确、精度足够，不能因为"是 debug dump"就随便置 0。**
+
+---
+
+## 2. 当前基线
+
+### 2.1 稳态（复现命令见 §6.2）
+
+```bash
+./build/lib/phy/upper/channel_processors/metal/ul_chain_replay \
+    doc_chinese/work_tmp/corpus/syn004_4 --metal --repeat 20 --out /tmp/x 2>&1 >/dev/null \
+  | grep -a "crossings" -A1
+```
+
+| 配置 | 读/跳 | 字节/跳 | 写/跳 | 字节/跳 |
+|---|---|---|---|---|
+| **默认（离线）** | **2.10** | 1420 | **0.65** | 446 |
+| **默认（空中实测，`fa2628e018`）** | **1.40** | — | **0.26** | — |
+| **`OCUDU_CE_HOST_GRID=0`（两个门都开）** | **0.10** | 269 | **0.65** | 446 |
+| `OCUDU_CE_CFO_CARRY_HOST=1`（宿主进位）| 3.10 | 1420 | 0.65 | 446 |
+| `OCUDU_CE_HOST_Y_PADS=1`（宿主清 pad）| 2.10 | 1420 | 1.65 | 882 |
+| 三个宿主开关全开 | 3.10 | 1420 | 2.65 | 882 |
+
+**写侧历史**：36.00（批次 0 前）→ 30.60（批次 0）→ 2.65（批次 1）→ **1.65**（批次 3a）。
+
+申报模块：`equalizer, dft, channel_estimator`（**`demapper` 未申报 ⇒ 所有数字都是下界**，§5 批次 4）。
+
+### 2.2 逐跳读的精确构成（实测 `3N+2`）
+
+| # | 位置 | 内容 | 归属 |
+|---|---|---|---|
+| 1 | `impl.cpp:1192-1194` | `gpu_ls_cfo[slot] = gpu_ls_cfo[prev]` 进位（宿主手工步进设备数组，**1 读 + 1 写**） | 批次 3 |
+| 2 | `impl.cpp:1382-1383` | `pilots_power = gpu_ls_sigma2[kPowerSum] / nof_power_pilots` | 批次 3 |
+| 3 | `impl.cpp:2898` × **2 次/跳** | `unpack_engine_group()` → `grid_est`（2 层 × 10 PRB × 1 符号 × 8 B = 1280 B） | 批次 2 |
+
+**2 次/跳的原因**：合并批次 `defer_unpack()` 两次（标准组 `:2052` + edge 组 `:2053`），
+完成时 `complete_fd_td_estimation_stage()` 按 `nof_pending_unpacks` 循环回读。
+
+**⚠ 批次 2 只能把读降到 1.10/跳，不是 0。** 到 0 必须连批次 3 的两个点一起做。
+
+### 2.3 契约状态
+
+`mode=gpu` 的契约**当前是 FAILED**，这是**正确的**（读侧还有 2.37/跳，§2.5）。
+历史腿 `gnb_gpu_s5_crossings0_0918_2135`（`a656133d70`）曾报 `contract MET (8 of 8)`，
+**那个里程碑已撤回**（检查当时只覆盖一个模块，见 `wip/S8_contract_met.md` 顶部）。**不恢复。**
+
+### 2.4 ⚠ 空中数字与离线数字不可直接比较
+
+**两套数字出自不同的计数器版本和不同的几何**，只有**同一版计数器内的前后腿**才能相减：
+
+| 差异 | 说明 |
+|---|---|
+| **计数器口径** | `0d88781e22` 之后才计**写入方向**，`dbe0686fb8` 才计入 `unpack_engine_group`，`addf5a436b` 才计入均衡器建表；**更早的腿只数"宿主读设备标量"**（所以 `a656133d70` 的 `0.00 per hop` 是**四种点**的 0，不是车道的 0） |
+| **审计模块** | 申报制：`s5` 腿只有 `channel_estimator`，`ota-b2-recon` 腿有 `dft, equalizer, channel_estimator`。申报的模块越多，数字越大 |
+| **几何** | 离线 `syn004_4` = 4 PRB / 3 DM-RS / 1 层；空中 = 5 MHz / 273 PRB 的分配，合并批次会走 edge 组 |
+| **分母** | 空中是 `device hop(s)`（2189），离线是 `--repeat` 的跳数 |
+
+**⇒ 规则**：报告里引用任何穿越数字时，**必须同时给出腿名/提交号**；
+**跨腿比较只能比较"同一份构建内 A/B 两臂的差"**，不能比较绝对值。
+
+### 2.5 ★ 空中基线（`965b0f0951`，腿 `gnb_gpu_ota-b2-recon_0919_0516`）
+
+| 项 | 值 |
+|---|---|
+| **跨越（当前默认）** | **2.44 读 + 1.31 写 / 跳**（腿 `ab-devypads`，2841 跳，commit `c1fdd8891d`）|
+| 跨越（`OCUDU_CE_HOST_Y_PADS=1`）| 2.37 读 + 1.64 写 / 跳（腿 `ab-default`，3106 跳，同一 commit）|
+| 跨越（`965b0f0951` 那条腿，历史）| 2.37 读 + 1.75 写 / 跳（2189 跳）|
+| 契约 | **NOT MET：8 条中 7 条过**，唯一 FAILED 的是跨越检查（**已知、预期**）|
+| 审计模块 | `dft, equalizer, channel_estimator`（**`demapper` 未申报 ⇒ 仍是下界**）|
+| `ce device estimates` | **24079 device / 0 host**（车道用设备估计，宿主兜底没被用到）|
+| zero-copy wraps | 45956 hits / 17529 creates / **0 failures / 0 misaligned** |
+| `device_sigma2` | 2189（= 2189 跳，每跳都有）|
+| `device_corr_builds` | 2177，`corr_build_fail=0`；`device_y_writes=2988`，`y_write_fail=0` |
+| Real-time failures | **2 / 85293 slots**（与历史腿 1~2 同量级）|
+| `cbs/lane` | **3.37**（max 4）；拆分 `ch_est=1.37`、`ch_wt=1.00`、`eq_demap=1.00` |
+| 真机功能 | **ping / iperf3 通过**（用户实测）|
+
+**⚠ 读侧 2.37 的构成**（按 §2.2 的逐点表外推，**空中尚未逐点确认**）：
+`unpack_engine_group`（批次 2，目标）+ `gpu_ls_cfo` 进位 + `pilots_power`（批次 3）。
+**批次 2 的探针默认是 1（行为不变），所以这条腿量的是"默认路径"，不是批次 2 的效果。**
+**要量批次 2 的空中效果，必须再跑一条 `OCUDU_CE_HOST_GRID=0` 的腿**（A/B，见 §6.6）。
+
+**`ch_est=1.37 cbs/lane` 是子句 B 的现状**（§5.4）：比 1.00 多出的 0.37 就是 edge 组的独立命令缓冲。
+
+---
+
+## 3. 代码地图
+
+```
+include/ocudu/phy/phy_pipeline_mode.h              ← 模式定义（"two host<->device data crossings"）
+include/ocudu/phy/phy_pipeline_crossings.h         ← 计数器 + 申报制 + 契约检查（本线的度量核心）
+lib/phy/upper/signal_processors/channel_estimator/
+    metal/channel_statistics_estimator.h           ← ★ fixed 实现：tau_rms/fd 是常量、不消费 pilots
+    metal/port_channel_estimator_metal_mmse_impl.{h,cpp}
+        :1192  CFO 进位（读+写）                     ← 批次 3
+        :1382  pilots_power 读                       ← 批次 3
+        :2898  unpack_engine_group 的计数器
+        :3356  pending_fill::fill()                  ← 回读网格的唯一消费者链
+        :3475  publish_all_grid
+        :433   host_grid_published()（批次 2 网关的判定）
+        :3492  host_grid_pending                     ← 曾悬空，已修（§7 坑 11）
+    metal/ocudu_metal_mmse_engine.{h,mm}           ← 引擎：encode_run / encode_corr / corr_stage / pilots_stage
+    metal/ocudu_mmse_pilots.metal                  ← K0-a：mmse_pilots_lse / fd_smooth / cfo / apply_cfo / sigma2
+    metal/ocudu_mmse_pilots_power.metal            ← 均值功率（-fno-fast-math）
+    metal/ocudu_mmse_corr.metal                    ← 相关矩阵 kernel
+lib/phy/upper/channel_processors/metal/
+    ocudu_equalizer_metal_engine.mm                ← 均衡器（批次 0 的 eq_cached_table）
+    test/ul_chain_replay.cpp                       ← 离线回放 harness
+lib/phy/upper/channel_modulation/metal/
+    ocudu_demod_metal_engine.mm                    ← 解调器（**仍未经审计**，批次 4）
+lib/phy/generic_functions/metal/
+    ocudu_dft_metal_engine.mm                      ← DFT
+lib/phy/upper/channel_processors/pusch/
+    ul_capture.cpp                                 ← 四个 dump：_llr.bin / _h.bin / .bin / _ce.txt
+    pusch_demodulator_impl.cpp                     ← 宿主消费估计的**唯一**分岔点（:829 / :862）
+```
+
+### 3.1 计数器 API（`phy_pipeline_crossings.h`）
+
+```cpp
+count_host_read(bytes = 0)      // 宿主读设备产出的数据；命中缓存时**不要调**
+count_host_write(bytes = 0)     // 宿主写设备要读的数据；命中缓存时**不要调**
+count_device_hop()              // 分母（每跳一次）
+declare_reporter("module-name") // 模块**审过之后**才申报，名字会打印在计数下面
+print_reporters(FILE*)          // 命中路径不涉及
+```
+
+**硬性要求**：
+- **申报 = "我审过了"**。没审过**不许**申报——否则 `0` 会被读成"整条车道"。
+- **缓存命中路径不得调用计数器**——稳态必须是**字面的 0**。
+- **头文件必须保持轻量**：只能用 `<atomic> <cstdint> <cstdio> <cstring> <mutex>`。
+  加 `<vector>/<string>/<algorithm>` 会让若干"位于命名空间内"的包含点炸
+  （`no template named 'basic_ostream'`）。要打字符串就直接 `fprintf`。
+
+---
+
+## 4. 已确立的技术事实
+
+> 这一节是**知识的沉淀**：不是"现在到哪了"，而是"这个系统是什么样"。
+> 每条都带证据。**推翻其中的结论时，连同证据一起改写，并把它移到 §8。**
+
+### 4.1 宿主路径与设备路径在解调器处分岔
+
+`pusch_demodulator_impl.cpp:829` 先问 `est_results.get_device_ch_estimates(i_symbol, i_port, i_layer)`；
+只有拿不到（设备结果不覆盖本跳）时才走 `:862` 的 `get_symbol_ch_estimate(...)`（宿主网格）。
+
+⇒ **车道路线上发布的估计来自设备，宿主网格只是兜底** —— 与 §4.4 的实测一致。
+
+### 4.2 信道"统计量"不是从回读的网格算出来的
+
+| 事实 | 位置 |
+|---|---|
+| 唯一接线的实现是 `channel_statistics_estimator_fixed` | `factories.cpp:66` |
+| `tau_rms_s` / `fd_hz` 是**构造期常量**，`estimate()` 只是把 `input.sigma2` 传出去 | `channel_statistics_estimator.h:83-89` |
+| **`consumes_pilots()` 返回 false** ⇒ `stats_in.pilots_lse` 被**故意置空** | `channel_statistics_estimator.h:93`、`impl.cpp:1601` |
+| `sigma2` 默认（`OCUDU_CE_HOST_SCALARS=0`）取固定 0；A 的对角加载来自**设备自己的** `kRatioSlot`（`OCUDU_CE_K0A_RATIO_DEV` 默认 1） | `impl.cpp:1429`、`:1477` |
+
+**⇒ `stats_estimator->estimate()` 不会让宿主读任何网格。**
+（曾经的判断"宿主回读 h → 算 3 个统计量 → 传回设备"是错的，见 §8.1。）
+
+### 4.3 回读网格的真实消费者只有一条链
+
+```
+unpack_engine_group() → grid_est → pending_fill::fill() (:3356)
+    → filtered_pilots_lse → rsrp / noise_var / time_alignment   (average_impl.cpp:519-552)
+    → get_channel_state_information() → CSI → FAPI 上报
+    → _ce.txt（调试 dump）
+```
+
+**`filtered_pilots_lse` 是"估计网格在 DM-RS 导频 RE 上的采样"**（`pending_fill::fill()`），
+**不是** LSE 本身。这一点决定了 §8.2 的否定结果。
+
+### 4.4 发布路径对回读网格零依赖（实测）
+
+`OCUDU_CE_HOST_GRID=0` 关掉整个回读后：
+
+| 网 | `_llr.bin` | `_h.bin` | `.bin` | `_ce.txt` |
+|---|---|---|---|---|
+| 默认（27 捕获） | **0** | **0** | **0** | 1058 |
+| 严格网 `OCUDU_CE_CPU_LS=1` | **0** | **0** | **0** | 1226 |
+| 跨跳 `repeat 1` vs `20` | **0** | **0** | **0** | **0** |
+
+设备上写 `_ce.txt` 的字段里：`epre` / `cfo_hz` **不变**（从 `rx_pilots` / 设备 CFO 来），
+`rsrp` / `snr` / `ta_us` 变 0，`noise_variance` 从"上一跳残留"变成"按需物化后的本跳值"。
+
+### 4.5 设备侧已经具备的东西
+
+| 设备上的量 | kernel | 说明 |
+|---|---|---|
+| `gpu_ls_out`（LSE） | `mmse_pilots_lse` | `rx · conj(ref)`，`[symb][layer][pilot]`，**未乘 beta、未做 CFO 补偿** |
+| `gpu_ls_smoothed` | `mmse_pilots_fd_smooth` | 对 LSE 做宿主 `apply_fd_smoothing()` 的升余弦卷积，**补了 `inv_beta`** |
+| `gpu_ls_sigma2[4]` | `mmse_pilots_power` | 每跳 4 个 float：`[0]` sigma2、`[1]` 功率和、`[2]` 设备自己的商、`[3]` 均值 |
+| `gpu_ls_cfo[8]` | `mmse_pilots_cfo` | 每跳一个槽，**轮转**（8 个，防止在飞的跳互相覆盖） |
+| `gpu_nv`（1 float） | K4（`run_weights_only` 的 reformat） | 从**同一份 h** 归约出的设备噪声方差，**均衡器直接用** |
+| `gpu_ce`（cbf16） | K3 | 逐符号估计，`get_device_ch_estimates()` 暴露给解调器/均衡器 |
+
+**`compensate_cfo` 的默认是 `false`**（`du_low_config.h:103`）。
+
+### 4.6 设备侧归约是有先例的
+
+K4 的 `gpu_nv` 就是"从同一份 h 归约、结果留在设备、消费者不问宿主"的先例
+（`ocudu_metal_mmse_engine.h:108-113`）。**批次 2 的设备侧上报量应当照这个形状做。**
+
+---
+
+## 5. 批次计划与状态
+
+> **通用纪律**：每批一个 commit、一次判据；**先量再改**。
+> 判据按 §1.4 的主次：**结构性改动看穿越计数**；**动数值的改动看端到端 LDPC（≤0.5 dB）**；
+> `_llr`/`_h` 逐字节不变是**能过就先过的快速网**，不是门槛。
+
+| 批次 | 内容 | 状态 |
+|---|---|---|
+| **0** | 均衡器两张宿主建表改成**按内容缓存、只写一次** | **完成** `929fc4a3d5`；写 36.00 → 30.60/跳 |
+| **1** | `gpu_epochs`（符号起始时刻，只是 (CP,SCS) 的函数）**只在变化时上传** | **完成** `76fc488385`；写 30.60 → **2.65**/跳 |
+| **2-侦察** | `OCUDU_CE_HOST_GRID` 探针：证明回读只喂上报量 | **完成** `965b0f0951`；读 3.10 → **1.00**/跳（旋钮关闭时，默认不变） |
+| **2** | 把上报量搬到设备侧，断掉 `dev→host→dev` | **α 第一步已试、判据不成立、已回退**（§8.2）；γ 随时可落 |
+| **3a** | `gpu_y` 尾块 memset（1 写/跳）| ✅ **完成并空中验证**（`0eeb1c1941`）：默认改为**设备清 pad**，空中 **写 1.64 → 1.31/跳**（95% CI 不重叠，两腿都 attach + ping/iperf3 通过、RT failure 0、gaps 0）。曾被误判为回归，真因是核心网（§12.2.2）|
+| **3b.1** | `gpu_ls_cfo` 进位（1 读 + 1 写）搬到设备侧 | ✅ **完成** `fa2628e018`：读 3.10→**2.10**、写 1.65→**0.65**；用单 DM-RS 捕获验证（§15.1）|
+| **3b.2** | `pilots_power` 读（1 读）| **⚠ 不在默认路径上**：该读取在 `host_reads_device_scalars()` 门后（默认关），所以默认路径**没有这次读**；开着它是 3.10→5.10 的一部分。**无需改动** |
+| **4** | 审 `demapper` 并申报（唯一未申报模块） | ✅ **完成** `0e4a24ce57`：**它一次都不穿越**，且现在**自己申报**。数字从「下界」变成**上界** |
+| **5a** | hop 统计量（rsrp）搬到设备 + **接发布路径** | ✅ **完成并空中验证**（`94df4144a2`，腿 `5a-pubpath_0919_1230`，§17.8）：设备归约 == 宿主（7 种语料，误差 ~1e-8）；`DEV_STATS=1` + `HOST_GRID=0` 时**读 2.10 → 0.10/跳**；`_llr`/`_h`/`.bin` **逐字节不变**；空口 **0 gaps、RT failure 0、rsrp 无跳变、读数/跳 1.39（未回归）** |
+| **5b** | TA 搬到设备 | ✅ **完成并空中验证**（`1826e01e07`，腿 `5b-devta_0919_1650`，§17.9）：27 捕获 A/B `ta_us` **逐位相同**、三个 dump 全 0 差异；空口 **TA 命令无跳变**（30 条，步长 ≤1.6 µs）、设备覆盖每一跳（36586/0）|
+| **5c** | 把 `OCUDU_CE_HOST_GRID` 默认改 0（γ）| ✅ **完成**（2026-09-19，§17.10）：**读侧 1.39 → 0.00/跳（0 字节）**，空中腿 `5c-hostgrid_0919_1730` 通过；顺带修掉一个上报缺陷（`noise_variance` 发的是宿主值，LLR 用的是设备值）。契约仍 7/8：**剩下的是写侧 0.27/跳** |
+| **5d** | TA 链**合并成一条 dispatch** + 定位它的车道代价 | ✅ **完成**（`503990ca5f` + `413ef13f94`，腿 `5d-fused_0919_1820`）：CRC **81.23%**（本线最高）、RF failure **0**；代价 **+38 µs/lane** 经单变量腿定位为**尾延迟**并接受（§17.10.5–17.10.7）|
+| **5e** | 写侧：等化器的 gather 表改由**设备**建 | ✅ **完成并空中验证**（`6e53109ffa`，腿 `5e-devtables_0919_2000`，§19.3/§19.3a）：**写字节 3.38 MB → 5.5 KB（÷592）**、次数 0.27 → 0.13/跳；其余指标无回归 |
+| **5f** | 写侧：`h_starts` 表与 epoch 表 | **5f-1 完成**（`9e36fef3ed`，§19.5）：`h_starts` 进参数块，replay 写 **5 → 1/跳**；顺带修掉一个**既有批处理缺陷**。**5f-2 未做**：`symbol_start_epochs`（56 B，1 次/配置）仍在宿主上传 ⇒ **契约仍 7/8** |
+| **5g** | 5f-2：epochs 由 kernel 从 (cp, scs) 算 | ✅ **离线完成**（§19.6）：27 捕获四个 dump 与 HEAD **逐字节相同**；replay 写侧 **1 → 0/跳**、分项表空 ⇒ **写侧清零**。单测 140/140（GPU 全定义域）+ `All tests PASSED`。**空中腿待跑（契约预期 8/8）** |
+
+### 5.1 批次 2 的三个做法与取舍
+
+| | 内容 | 代价 / 状态 |
+|---|---|---|
+| **α** | 设备归约 rsrp + 复用设备噪声方差；宿主只读标量；`ta_us` 显式不可用 | **先要解决"设备上 rsrp 的参考是什么"**（§8.2）；不能复用 `gpu_ls_smoothed`。**判据放宽（§1.5）不解封这里**——§8.2 是算错不是精度 |
+| **β** | α + 时间提前也搬到设备 | 要重写 `time_alignment_estimator`，大得多 |
+| **γ** | 直接把 `OCUDU_CE_HOST_GRID=0` 变默认，上报量置 0 / 不可用 | **零新代码，判据已全过**；FAPI 的 rsrp/ta 上报变 0 |
+
+**γ 的价值不只是省事**：它把"rsrp / ta 上报在 `mode=gpu` 下算什么"这个问题从实现细节
+逼成产品决定。**α 应当等这个问题有答案之后再动。**
+
+### 5.2 批次 2 的判据（三条，缺一不可）
+
+1. **读计数 → 1.10 或更低**（现 3.10；关网关已是 1.00）；
+2. **数值可接受**：优先看逐字节不变（27 捕获 + 严格网 + `--repeat 1` vs `20`）；
+   若确实变了，按 §1.4 走**端到端 LDPC ≤ 0.5 dB**，并给出 `_h` 的 NMSE 分位数与误差棒；
+3. **设备侧的量与宿主值逐值对照**——**这是新 kernel 的正确性判据**，
+   不设这条就又是一个空门（§9.1 的教训）。
+
+### 5.3 批次 3 的具体点
+
+| 点 | 现状 | 状态 / 按判据该怎么做 |
+|---|---|---|
+| **`gpu_y` 尾块 memset** | 合并跳上清尾组的 pad 块，**1 写/跳** | ✅ **完成**（`f4dce0e95b`，批次 3a）。**不是"搬"而是"删"**——见下 |
+| `gpu_ls_cfo` 进位（`:1192`） | **1 读 + 1 写**，宿主手工步进设备数组 | 未做。**进位是承重的**（`mmse_pilots_cfo` 在 `nof_dmrs_symb < 2` 时提前返回、**不写** `out[0]`），所以不能只删；要让 kernel 读上一槽并在提前返回时也写 |
+| `pilots_power` 读（`:1382`） | **1 读** | 未做。设备已有 `kPowerMean`，但宿主要的是**自己**的商（设备除法浮点不同，见 `k0a_ratio_from_device_enabled()`） |
+
+#### 5.3.1 ✅ 批次 3a：尾组 pad 槽由设备清（`f4dce0e95b`）
+
+**结论：那次 memset 一直是空转的，直接删掉。** 两条理由（都读代码验证过）：
+
+1. **设备已经在清**。`record_device_y_stage()` 成功时（设备建了 LSE，默认路线），
+   `mmse_pilots_scatter_y` 的 kernel **已经**清 `b >= n_blk_real` 的槽和 `k >= nof_symb*npf` 的行
+   （它自己的字段注释就写 *"the remaining slots are zeroed"*）。尾组是 `n_blk_slots = st.n_blk` vs
+   `n_blk_real = 1` ⇒ **正是那些 pad 槽**，而且在**读它的那条命令缓冲里**清的。
+   ⇒ 宿主是在清**设备在同一次提交里就要覆盖**的内存。
+2. **那次 memset 还清宽了**：基址是 `gpu_y + nof_layers * n_std_blocks * 2 * L_std`，
+   **多偏了一个"层 vs 系统"的步长**，所以它清的是**标准组的 y**，而
+   `stage_engine_group()` 紧接着又把它重新 stage 一遍。**只有尾组的 pad 槽活了下来。**
+   ⇒ **把一次冗余的写变窄不等于消除穿越**，所以修复键在"谁写 y"，不在"清多大"。
+
+**实现**：**不让调用方预测**——这个文件已经为同类错误留过疤（`a_rhp_filled`，2916/27216，SINR −23 dB）。
+pad 区域作为 `pad_y_floats` 传进 `stage_engine_group()`，在
+`record_device_y_stage()` 答"否"的那个分支里清 —— **只有那一处知道答案**。
+
+**判据**：
+
+```
+默认（设备 stage y）：   3.10 读 + 1.65 写 /跳
+OCUDU_CE_DEV_Y=0       3.10 读 + 2.65 写 /跳   ← 参考臂：宿主 stage y、不 zero pad、仍然需要 memset
+```
+
+| 门 | 结果 |
+|---|---|
+| 默认 vs `OCUDU_CE_DEV_Y=0`（27 捕获） | `_llr` **0** `_h` **0** `.bin` **0** `_ce` **0** |
+| 严格网 `CPU_LS=1`，同一 A/B | 四个产物 **0** |
+| 跨跳 `repeat 1` vs `20` | 四个产物 **0** |
+| 单元测试 | **All tests PASSED** |
+
+**⚠ 这个 A/B 的分辨力要说清楚**：两臂差的是 **memset + y 的写者**两件事，
+所以它是**关于 memset 的证据**——因为**改动前的代码就跑过同一个参考臂、带 memset**，
+而 27 个捕获分辨不出"带 memset"与"不带"。**⇒ 在这 27 个捕获覆盖的几何上，memset 是空转的。**
+
+**写侧因此从 2.65 → 1.65/跳**（相对批次 0 之前是 **36.00 → 1.65**）。
+
+### 5.4 长期项
+
+- **子句 B（融合程度）**：`cbs/lane` **3.11**（曾 3.00）。`OCUDU_CE_EDGE_FUSE=1` 与独立形态仍差
+  **51810 字节**，**未解决**。下一个嫌疑：`encode_run` 在 `st.burst` 时跳过 corr ↔ K1 之间那道
+  barrier（注释假定"切 pipeline 会顺带插 barrier"——**按判据要求去读代码验证，别信注释**）。
+- **契约措辞**：主句仍写 "the fused lane (mode=gpu) allows 0"，容易被读成整车道结论。**考虑改措辞。**
+- **`ab_dumps.sh` 要能分开报"发布判据"与"调试判据"**（见 §9 坑 12）。
+
+---
+
+## 6. 判据工具（每次改动的标准流程）
+
+### 6.1 构建（**必须显式指定 target**）
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+cmake --build build --target ul_chain_replay
+cmake --build build --target port_channel_estimator_metal_mmse_unit_test
+```
+
+**⚠ `cmake --build build`（不带 target）不会重建这两个**，会得到"新 metallib + 旧宿主"的假结果。
+**这是本线踩过两次的坑。**
+
+### 6.2 稳态计数（**唯一的性能判据**）
+
+```bash
+./build/lib/phy/upper/channel_processors/metal/ul_chain_replay \
+    doc_chinese/work_tmp/corpus/syn004_4 --metal --repeat 20 --out /tmp/x 2>&1 >/dev/null \
+  | grep -a "crossings" -A1
+```
+
+**⚠ 必须带 `--repeat N`（N≥20）**：单跳回放的缓存是冷的，分不出"有缓存"和"没缓存"。
+`--rotate` 可以在一进程内轮换多个形状（soak across ALLOCATIONS），用于验证分配键缓存不失效。
+
+### 6.3 数据不变（**每批必过**）
+
+```bash
+# 当前默认（比的是两个 σ² 来源相同的臂）
+bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh \
+  "OCUDU_CE_TAIL_DEV=0 OCUDU_CE_HOST_SCALARS=1" "OCUDU_CE_HOST_SCALARS=1"
+# 期望：captures=27  missing-dumps=0  captures-with-differences=0  total-differing-bytes=0
+
+# 批次 2 侦察的 A/B
+bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh "" "OCUDU_CE_HOST_GRID=0"
+# 期望：captures=27  missing-dumps=0  _llr.bin 0  _h.bin 0  .bin 0  _ce.txt 1058
+```
+
+**⚠ 两个臂必须钉在同一个 σ² 来源上。** S5（`a656133d70`）之后
+`TAIL_DEV=0` vs 默认**不再是合法的等价参考**（那时的 12930 字节是**预期差异不是缺陷**），
+所以两个臂都要带 `OCUDU_CE_HOST_SCALARS=1`。
+
+### 6.4 跨跳稳定（**批次 0 起新增，必过**）
+
+```bash
+W=$(mktemp -d); R=build/lib/phy/upper/channel_processors/metal/ul_chain_replay
+C=doc_chinese/work_tmp/corpus/syn004_4
+$R $C --metal --repeat 1  --out $W/a >/dev/null 2>&1
+$R $C --metal --repeat 20 --out $W/b >/dev/null 2>&1
+fa=$(ls $W/a*_ce.txt|head -1); fb=$(ls $W/b*_ce.txt|head -1)
+for s in _llr.bin _h.bin .bin _ce.txt; do echo "$s: $(cmp -l "${fa%_ce.txt}$s" "${fb%_ce.txt}$s" 2>/dev/null|wc -l)"; done
+```
+
+**任何"按内容/分配做 key 的缓存"都必须过这一关**——单跳门看不到跨跳失效。
+
+### 6.5 单元测试
+
+```bash
+./build/lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_unit_test
+```
+期望 `All tests PASSED`（含 Test 11 合并/拆分、Test 12 设备估计与宿主逐值对照、Test 13 三种 lane 序）。
+
+### 6.6 空口腿（需要 root + B210 + 手机）
+
+```bash
+touch build/hashes.h && cmake --build build --target gnb
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label>
+bash doc_chinese/phy_pipeline_gpu/wip/leg_report.sh \
+  doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_<label>_*.log
+```
+
+`run_leg.sh` 会**校验二进制戳记 == HEAD**，不等就 `exit 2`。
+**为什么**：曾出现"先改、再构建、后提交"，导致二进制是**新代码却带旧 commit 戳**，报告骗人。
+
+**每完成一个批次要向用户要一次 OTA（ping/iperf3）确认功能正确**——这是用户定的流程。
+
+### 6.7 语料
+
+`doc_chinese/work_tmp/corpus/*.bin`（27 个）。**同名 `.txt` 是元数据，传给回放时不要带扩展名**
+（传 `foo.bin` 会报 `cannot read foo.bin.txt`）。
+
+### 6.8 ★ 端到端 LDPC 判据（主判据，§1.4）怎么测
+
+**判据原文**：同等信道条件下，**LLR → LDPC 解码**的 BLER 曲线在目标工作点的水平位移 **≤ 0.5 dB**。
+
+#### 6.8.1 现成工具
+
+| 工具 | 状态 | 能干什么 | 缺什么 |
+|---|---|---|---|
+| **`pxsch_bler_test`** | **已构建**：`build/tests/integrationtests/phy/upper/channel_processors/pxsch_bler_test` | **链路级仿真**：信道模拟器（时延剖面 / 衰落）+ 完整 PUSCH 接收链 + LDPC 解码 + CRC，扫 SINR 出 BLER；**`-c` 选信道估计后端**（`cpu` / `metal_mmse`…）⇒ **可以做成 CPU vs GPU 的两条 BLER 曲线** | 无置信区间、无 CSV 输出；扫描脚本要自己搭 |
+| `ldpc_metal_bler_test` + `plot_bler.py` | 已存在（`lib/phy/upper/channel_coding/ldpc/metal/test/`） | **SNR 扫描 + CSV + 95% Wilson 置信带绘图**的成熟范式（**只比解码器本身**，不经过 PHY 链） | 不覆盖 IQ→LLR 这一段 |
+| `ul_chain_replay` | 已构建 | 27 个**真实空口捕获**过完整接收链；打印每捕获 `crc=OK/KO`、`sinr`、`epre`、`rsrp` | 是**回放**不是扫描——只能看"有没有从 OK 变 KO"，做不出曲线 |
+| 根目录 `bler_metal_bg1_z64_r*.csv` | 已存在 | LDPC 解码器 CPU vs GPU 的既有结果（**不是本线的**） | — |
+
+**⇒ 推荐组合**：**`pxsch_bler_test` 出曲线（主判据）+ 抄 `plot_bler.py` 的 Wilson 置信带**。
+
+#### 6.8.2 怎么算"位移"
+
+1. 同一组信道配置下各扫一条 BLER(SNR) 曲线：`-c cpu` vs `-c metal_mmse`（其余参数**逐字相同**）；
+2. 取**目标工作点**（约定 **BLER = 10%**，必要时同时报 1%）；
+3. 在各自曲线上求该 BLER 对应的 SINR（对数域插值），**差值就是位移**；
+4. **带误差棒**：每个点要足够多的 trials（1000 槽起步），用 Wilson 区间把 BLER 的不确定度
+   传到 SINR 上。**0.5 dB 的容忍度小于小样本测量的噪声——没有误差棒的数字不算证据**（§7 坑 15）。
+
+**报告里必须同时给出**（否则"≤0.5 dB"无法复核）：
+
+* 两条曲线的**原始点**（SNR、trials、crc_error 数）；
+* 目标 BLER 处的**位移与 95% 区间**；
+* `_h.bin` 的 **NMSE** 与逐 RE 相对误差分位数（p50 / p99 / max）——曲线之外的第二条证据。
+
+#### 6.8.3 已有的"快速网"（优先用，便宜）
+
+```bash
+# 回放：任何捕获从 OK 变 KO 都要解释
+./build/lib/phy/upper/channel_processors/metal/ul_chain_replay <capture> --metal --out /tmp/x 2>&1 | grep -E "crc=|rsrp|sinr"
+# 逐字节（27 捕获，几十秒）——能过就先过
+bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh "" "<knob>"
+```
+
+**⚠ `ul_chain_replay` 的并发警告**（文件头 `:31`）：**大量并行实例下它会给出错误结果**——
+实测 980 个捕获里有 39 个在同一配置的两次运行间不同，SINR 在 7.3~48.9 dB 之间跳。
+**发现差异必须串行复跑确认**，"任何作为测量结果的运行都要低并发"。
+
+---
+
+## 7. 踩过的坑（**都还在，别再踩**）
+
+| # | 坑 | 症状 | 正解 |
+|---|---|---|---|
+| 1 | **陈旧二进制** | `cmake --build build` 不重建 `ul_chain_replay` / Metal 自测 | **显式 `--target`** |
+| 2 | **陈旧 commit 戳** | 先改→构建→后提交 ⇒ 二进制是新代码、戳是旧 commit | `touch build/hashes.h && cmake --build build --target gnb` |
+| 3 | **门的语义会变** | `TAIL_DEV=0` vs 默认在 S5 之后不再是合法参考 | 用旧门之前**先问它在比什么** |
+| 4 | **单跳冷缓存** | 单跳回放分不出"有缓存/没缓存" | **`--repeat 20`** |
+| 5 | **括号不配平** | 改文件尾部时截掉 `} // namespace ocudu` ⇒ 后续头文件报 `no template named 'basic_ostream'` | **先检查括号配平**，不要猜 include 顺序 |
+| 6 | **头文件过重** | `phy_pipeline_crossings.h` 加 `<vector>/<string>` ⇒ 命名空间内的包含点炸 | 只用 `<atomic> <cstdint> <cstdio> <cstring> <mutex>` |
+| 7 | **申报范围 ≠ 实际范围** | 检查只覆盖一个模块却写"the fused lane allows 0" ⇒ 误判里程碑达成 | 看**打印出来的申报模块** |
+| 8 | **注释当依据** | 引用注释来论断行为 | **读代码逻辑** |
+| 9 | **`ab_dumps.sh` 的参数** | 把 `OCUDU_*` 旋钮写在第三个参数（mode）里 ⇒ 不生效 | 旋钮放**第 1 或第 2** 个参数 |
+| 10 | **离线回放要传不带扩展名的路径** | 传 `foo.bin` ⇒ 报 `cannot read foo.bin.txt` | 传 `foo` |
+| 11 | **悬空状态必须显式维护** | `host_grid_pending` 曾写成 `!publish_all_grid`，与"是否真回读了"无关；关掉回读后按需物化也不发生 ⇒ 宿主消费者读到**上一跳的残留网格**（`_h.bin` 差 **201278 字节**） | `host_grid_pending = !host_grid_published() \|\| !publish_all_grid` |
+| 12 | **`_ce.txt` 的 1058 字节不是回归** | §6.3 的脚本把调试上报算进"差异" | 读计数是主判据；`_llr`/`_h` 变了则按 §1.4 走 LDPC |
+| 14 | **把"逐字节不变"当门槛会误杀** | 判据曾硬性要求逐字节，导致设备侧归约、TA 搬设备等**逻辑正确但末位不同**的做法被挡 | 逐字节是**快速网**（§1.4）；变数值时用 **LDPC ≤0.5 dB** 判 |
+| 15 | **拿单次小样本数字谈 0.5 dB** | 0.5 dB 小于小样本 BLER 测量的噪声 | **必须带蒙特卡洛误差棒**，否则不是证据 |
+| 13 | **改完要回退干净** | 探针代码留在树里会污染后续测量 | 实验性探针**验证完就 `git checkout` 掉**，把代码形状记进本文 |
+| 16 | **让调用方「预测」内部的判定** | 判定的前提（设备 LSE 是否有效、metallib 有没有 kernel、几何是否合法）只有被调函数知道；让调用方复述一遍必然漂移。本文件已为此留过疤（`a_rhp_filled`：2916/27216 项有效，SINR −23 dB）| **把动作交给知道答案的那一层**（如批次 3a 的 `pad_y_floats`），不要让上层拿一个「预测值」自己动手 |
+| 17 | **一次大括号不配平的 edit 会连坏几十个函数** | 删掉一段 `else if` 的主体后，编译器报的是后面几十个函数 “function definition is not allowed here”，指向的位置离真正的破坏处很远 | 改控制流前先打印 `{`/`}` 计数；一旦失衡，**`git checkout` 重来**比逐处猜快得多 |
+| 18 | **★ 归因环境之前没有先查自己的 diff** | `ota-b3a` 失败时我用"上行弱 20 dB"下了"环境问题"的结论，**错**——真凶就是那一次的代码改动（§12.2）。用户为此专门纠正：**"以前因为出现过，并不是你前面所说的原因，是代码修改所导致的"** | **腿失败时第一步永远是 `git diff <上一条通过腿的提交>..HEAD`**；环境因素只有在排除代码之后才谈 |
+| 19 | **★ 把"离线门全过"当成改动安全的证据** | 批次 3a 的论证假设了 scatter 的槽数与 apply 的槽 stride 相等，**没有任何东西证明**；而 27 捕获的 A/B 两臂逐字节相同——**这恰恰说明门看不见这个差异** | 判据输出为 0 时，先问 **"它能不能看见这种失败？"**，再问"它过了吗"。**覆盖不到失败模式的门，通过等于没测** |
+| 20 | **统计失败时只 grep 一种失败类型** | 只数 `Real-time failure in RF: underflow` 得 15，实际是 `underflow` 86 + `late` 18 = **104**，低估 7 倍 | 枚举**全部**失败类型再下结论（`grep -c "Real-time failure"` 打底，再分类）|
+| 21 | **★ 用一条"采样连续性已坏"的腿去支持/否定代码改动** | 核心网故障窗口里我连做 5 条腿的归因，全部无效：重启前 `965b0f0951` 是 **1265** 次 RT failure + `radio sample continuity` **1 gap / 214030 samples**，重启后同一提交是 **4** 次 + 0 gaps。**代码被冤枉了两轮**（§12.2.2）| **判腿是否有效，第一眼看 `radio sample continuity` 与 `host sample assembly`**；采样连续性坏掉的腿，其 CRC/attach/契约数字一律不能当证据 |
+| 22 | **★ `git reset --hard` 之前没有单独保存未提交的工作树状态** | 准备干净基线时我执行了 `git reset --hard 965b0f0951`，把 `configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml` 里**未提交**的 bench 改动（增益、时钟源、`pusch.max_ue_mcs`、`pucch.max_consecutive_kos: 300`、AMF 地址）**一并清掉**。这些内容 git 里没有、也没备份，**无法找回**，用户只能重配 | **动分支之前先存工作树**：`git stash` 或 `git diff > backup.patch` 或直接复制文件。**屏幕上打印过 diff 不等于备份** |
+| 23 | **★ 用 SIGTERM 停 gNB，收尾统计全部丢失** | `gnb.cpp` 对 SIGINT 走正常收尾（打印契约/`[ul_host]`/`[metal_stats]`/`[ul_gpu_lane]`），对 **SIGTERM 只 flush 日志就退出**。腿 `ota-b3a-final_0919_0734` 因此失去全部跨越计数，20 MB 日志里一行都没有，**事后无法恢复** | **腿一律用 Ctrl-C 停**；判定腿有效的第一眼是报告的 `-- device side` / `-- lane` **两段非空** |
+
+---
+
+## 8. 否定结果台账（**已经试过并被推翻的路，不要重走**）
+
+> 这一节和 §7 一样重要：**它省下的是下一个会话的时间**。
+> 每条都写"为什么被推翻"和"证据在哪"。
+
+### 8.1 ❌ "宿主回读 h 是为了算 3 个信道统计量"
+
+**曾有过的判断**：读侧的往返链是 `设备 h → 宿主回读 → 算 fd_hz/tau_rms_s/sigma2 → 作为 kernel 参数传回`。
+
+**被推翻**：`channel_statistics_estimator_fixed` 的 `tau_rms_s`/`fd_hz` 是构造期常量，
+`consumes_pilots()` 为 false，`stats_in.pilots_lse` 被故意置空（§4.2）。
+**宿主根本没有从回读网格算统计量。**
+
+**教训**：**交接快照里的"关键代码位置"是线索，不是结论；开工时仍要读实现。**
+
+### 8.2 ❌ "设备已有 `filtered_pilots_lse` 的对应物（`gpu_ls_smoothed`），只差一个归约"
+
+**曾有过的判断**：`mmse_pilots_fd_smooth` 写的 `gpu_ls_smoothed` 就是宿主的 `filtered_pilots_lse`
+（两者都做升余弦平滑、都补 `inv_beta`），所以设备侧 rsrp 只差一个逐层归约 kernel。
+
+**被推翻（实测）**：加了宿主侧对照探针 `OCUDU_CE_RSRP_CHECK`，同一次归约分别读
+`grid_est` 的导频 RE 与 `gpu_ls_smoothed`，逐值比较（`syn004_4`，4 PRB / 3 DM-RS / comb 6，层 0，DM-RS 符号 1）：
+
+```
+host s1[0]=1.090623e-01,1.124588e-01   dev s1[0]=1.030267e-01,9.965159e-02   ← 几乎相同
+host s1[1]=1.011895e-01,9.099488e-02   dev s1[1]=7.489450e-02,1.152473e-01
+host s1[2]=8.799541e-02,6.880812e-02   dev s1[2]=2.642789e-02,1.141723e-01
+host s1[3]=7.028382e-02,5.257165e-02   dev s1[3]=-9.347606e-03,1.121275e-01
+
+layers=1 npt=3 npf=24 comb=6 lse_sym=3 | non-identical 1 | bit-identical 0
+worst rel 1.137e+00  (host 1.084547639e+00  dev 2.317298651e+00)
+```
+
+**判读**：两者**相关但不同**——第 0 个导频几乎相同，之后逐步发散；实部包络一个递减、一个振荡。
+**既不是错位，也不是纯相位旋转。**
+
+**原因（已确认一半）**：设备的 `gpu_ls_out` 是 **LSE 原始值**（`rx · conj(ref)`，未乘 beta、
+未做 CFO 补偿），`gpu_ls_smoothed` 只补了 `inv_beta`；而宿主的 `filtered_pilots_lse` 是
+**估计网格**在导频 RE 上的采样（`pending_fill::fill()`），走的是**另一条路**。
+`compensate_cfo` 默认 false，所以相位旋转**不是** CFO 补偿造成的——**发散原因尚未定位**。
+
+**⇒ 结论**：**设备侧 rsrp 需要自己的参考推导**（在设备上重算宿主那条网格路径，或给 rsrp 定一个
+新的、可独立验证的定义）。**没有这个对照就写 kernel = 空门。**
+
+**⚠ 2026-09-19 判据放宽（§1.5）不解封这一条。** 2.14 倍是**算错了**，不是"末位不同"——
+它会让链路自适应选错 MCS，也可能让 CSI 失真。**"LDPC 性能没掉"不能拿来给一个错误的量背书**
+（而且这个量根本不进 LLR 路径，LDPC 曲线看不见它）。
+
+**代码形状（重做时不必重新摸）**：探针需要四个量——
+`unpack_npf`（= `ls_geometry::nof_pilots`，K0-a 暂存缓冲的步长）、`unpack_npt`、
+`last_stage_re_pattern`（层 0 的 comb，用来定位导频 RE）、以及归一化因子
+`beta² * npt / nof_lse_symbols`（本 backend 强制 `interpolate` 策略 ⇒ `nof_lse_symbols == npt`，
+见 `port_channel_estimator_metal_mmse_impl.cpp` 构造函数）。
+**`pending_hop` 是基类私有的**，`nof_lse_symbols` / `beta_scaling` 要在暂存时自己存一份。
+**探针必须放在 `unpack_engine_group` 之后**——它读 `grid_est`，放前面拿到的是全 0。
+
+### 8.3 ❌ 用序 A/B（`ab_fused_lane.sh`）的红绿当判据
+
+它本身 flaky：量过**基线 2/24 轮、改动后 3/28 轮**出现假不匹配（Fisher p≈1.0），
+失败总落在不同捕获/不同序，而它比的是**默认跑 vs 显式 `event` 跑（同一条代码路径）**。
+**不要用它当判据。**
+
+---
+
+## 9. 三个"证据比措辞窄"的教训（本线的核心教训）
+
+### 9.1 S4 的空门
+`k0d` 门的证据是空的：`OCUDU_CE_GPU_INVERT=0` 时 `device_corr_builds` 在**两个臂里都是 0**
+（即宿主对宿主），而门自带的覆盖计数器 `REPORT_COUNTER="device_corr_builds"` 没被读。
+**⇒ 每个门都要问："它的覆盖计数器说了什么？"**
+
+### 9.2 撤回的里程碑
+`0 host read(s) -> OK` 被当成"车道干净"并宣布达成。实际它只是**一个模块里 4 个标量点**的状态；
+`unpack_engine_group()` 每跳回读 `gpu_h` **从未被计数**。已在 `wip/S8_contract_met.md` 顶部撤回。
+**⇒ 宣布里程碑之前先问：这条检查覆盖了哪些模块、哪些方向？**
+
+### 9.3 两次"注释/推测代替代码"
+- 引用解调器注释论 staging（实际未触发）；
+- 说"`gpu_epochs` 在嵌套 pilot 循环里"（实际是 14 符号循环）。
+**⇒ 用户明确要求："不要只看注释，要直接从代码逻辑进行判断，因为注释的信息不一定准确。"**
+
+---
+
+## 10. 用户交互约定
+
+### 10.1 ★ OTA 停机规则（**硬性，不可跳过**）
+
+> **用户原话**："每当完成一个阶段性的任务（例如总的穿越次数减少一次），要停下来，
+> 等我的手机 OTA 测试。"
+>
+> **补充（2026-09-19）**："为了确保工作过程中的代码正确性，**在一个阶段性的任务完成后，
+> 要停下来等待我做实际的手机 OTA 测试（ping/iperf3），再继续下一步**。"
+
+**这是流程的一部分，不是礼貌性的确认**：离线判据（逐字节 / 穿越计数 / LDPC 曲线）
+**都不能替代真机**——它们看不见射频、时序、实时性、协议栈交互这些只在空中暴露的问题。
+
+#### 什么算"阶段性任务完成"（触发停机）
+
+**满足任一条就要停**：
+
+| 触发条件 | 例 |
+|---|---|
+| **穿越次数变化** | 批次 0（写 36→30.6）、批次 1（30.6→2.65）、批次日后的读侧下降 |
+| **一个批次落地** | 批次 2 / 3 / 4 各自完成（**无论该批次的旋钮默认是否改变行为**） |
+| **默认路径的行为被改变** | 翻转任何 `OCUDU_CE_*` 的默认值、改变数据路径 |
+| **新的设备侧计算/数据进入信号路径** | 新 kernel 进入 LLR 或信道估计的生产路径 |
+| **契约状态变化** | 某条检查 FAIL→OK（或反向） |
+
+**不需要停机**（但要说清楚为什么不需要）：纯文档、纯探针且**已回退**、
+重构且**数值与穿越计数都不变**。
+
+#### ⚠ 两个曾经的误判（不要重复）
+
+* **"默认值没变，所以不用测"是错的。** 批次 2 的网关 `OCUDU_CE_HOST_GRID` 默认是 1（保持现状），
+  但"批次 2 侦察"**本身就是一个阶段性任务**——`965b0f0951` 修掉了 `host_grid_pending` 的悬空状态，
+  那是一处**真实的缺陷修复**。**必须停。**
+* **"离线判据全过，所以不用测"是错的。** 离线判据是**必要条件不是充分条件**（见上）。
+
+#### 停机时该交付什么（让 OTA 可执行、可判读）
+
+停下来时**一次性报清楚**：
+
+1. **提交号 + 分支**，以及**要测的二进制怎么构建**（含 `touch build/hashes.h` 的戳记要求，§6.6）；
+2. **这一阶段改了什么**（一句话）与**预期现象**；
+3. **要跑哪条腿**：`run_leg.sh <mode> <label>` 的完整命令，以及**推荐先跑的配置**；
+4. **离线证据摘要**（穿越计数、`_llr`/`_h`、LDPC 位移——按 §1.4 的主次）；
+5. **要重点盯什么**：`Real-time failures`、契约行、`device_sigma2 == lanes` 等；
+6. **回退方式**（`git revert <hash>` / 翻回旋钮）。
+
+**收到 OTA 结果之后**：把结果（含失败）写进本文 §12 的历史提交表旁边或 `wip/` 的证据文件，
+**然后**才开始下一步。
+
+### 10.2 其余约定
+
+1. **判据不成立就不要说成功**（§9）；**判据已按 §1.4/§1.5 分主次，不要再用旧的硬性逐字节口径**。
+2. **先补判据再动手。** 没有判据的改动**不该进树**——已回退过一次（批次 0 第一次尝试）。
+3. **代码 > 注释。**
+4. 用户会追问"这个和最终目标什么关系"——**回答要落到判据上，不要落到延迟上。**
+
+---
+
+## 11. 文档分工
+
+| 文档 | 角色 | 何时写 |
+|---|---|---|
+| **本文** | **常驻**：判据、代码地图、事实、口径、批次状态、坑、否定结果台账 | **随工作持续更新**，同一会话内反复更新 |
+| `session_handoff_<日期>-<序号>.md` | **快照**：只回答"现在到哪了 / 下一步做什么"，**不重复本文** | **新会话开始前**写；**同一会话内不写新快照** |
+| `wip/S*.md` | **过程证据**：某一步的完整测量、命令、原始数据 | 该步完成时 |
+| `wip/ab_dumps.sh`、`run_leg.sh`、`leg_report.sh` | 判据工具 | — |
+| `00_goal_and_gap.md`、`01_plan.md`、`02_ab_protocol.md` | **立项期**文档，历史证据 | 不再更新，结论以本文为准 |
+
+**快照命名**：`session_handoff_<YYYY-MM-DD>-<序号>.md`，序号从 1 起，同一天多次交接递增，
+**新会话永远读序号最大的那一份**，旧的**保留不删**（它们记录了当时的判断，包括后来被推翻的那些）。
+
+---
+
+## 12. 关键历史提交（`apple-silicon`）
+
+| 提交 | 内容 |
+|---|---|
+| `e1bd5dbd70` | 修复队列探针 |
+| `2eca4a7965` | S1 步骤1：CFO 经轮转槽在设备侧读 |
+| `e0bbc34c9f` | sigma2 在 8 个块上轮转 |
+| `832832c442` | 抽取阶段发出 lane fence 信号；权重 CB 等待 |
+| `c69167dfdb` | S1：解锁 `--phy_pipeline gpu` |
+| `ca9760b104` | S2：穿越计数器 + 契约检查 |
+| `861a4feeb3` | S3：`OCUDU_CE_HOST_SCALARS` A/B |
+| `532a231782` | S4：`OCUDU_CE_TAIL_DEV`（当时默认关）|
+| `93964256aa` | **S4 根因**：`encode_corr()` 用**打包尺寸**申请映射，kernel 按**槽位行距 `Ls`** 写 ⇒ 块比槽位窄时超出部分全丢。判据：`TAIL_DEV=0` vs `1` 由 6043 字节 → **0** |
+| `7524a9f80c` | `TAIL_DEV` 默认打开（设备建 edge 矩阵）|
+| `a656133d70` | S5：宿主不再回读那 3 个标量（里程碑**已撤回**）|
+| `0d88781e22` | 计数写入方向 + **申报制**（打印覆盖范围）|
+| `dbe0686fb8` | 计入 `unpack_engine_group` 的宿主回读 + **撤回里程碑** |
+| `addf5a436b` | 计入均衡器的两张宿主建表 + 申报 `equalizer` |
+| `929fc4a3d5` | **批次 0**：均衡器的表按内容缓存、只写一次 |
+| `76fc488385` | **批次 1**：`gpu_epochs` 只在变化时上传 |
+| `965b0f0951` | **批次 2-侦察**：`OCUDU_CE_HOST_GRID` 探针 + 修 `host_grid_pending` 悬空状态 |
+| `f4dce0e95b` | **批次 3a**：尾组 pad 槽改由设备清（**曾被误判为回归**，真因是核心网）|
+| `3ca0ccd6e4` | **回退批次 3a 的默认**：宿主重新清尾组 pad 槽（基于当时误判的回归）|
+| `c1fdd8891d` | 把 pad 区域改成在 `stage_engine_group()` 内按 `st.n_blk`/`st.L` 推导，消除"基址与长度单位不一致"的缺口 |
+| `0eeb1c1941` | **批次 3a 落地**：默认改为设备清尾组 pad（旋钮更名 `OCUDU_CE_HOST_Y_PADS`，unset/0 = 宿主不清）；空中 A/B 判据见 §14 |
+| `fa2628e018` | **批次 3b.1**：CFO 进位搬到设备侧（读 3.10→**2.10**、写 1.65→**0.65**）；新增单 DM-RS 捕获验证进位分支（§15.1）|
+| `0e4a24ce57` | **批次 4**：审 `demapper` —— 零穿越 + 申报；把它的 staging 兜底接进计数器（§16）|
+
+### 12.1 空中腿台账（**只记事实：腿名 / 提交 / 结果**）
+
+| 腿 | 提交 | 结果 |
+|---|---|---|
+| `gnb_fence_0918_1805` | — | `mode=cpu_gpu`，契约 7/7（**日志不在 `wip/logs/`**，数字引自立项期文档）|
+| `gnb_cpu_gpu_baseline_0918_1911` | `c69167dfdb` | `cpu_gpu` 基线 |
+| `gnb_gpu_s1_0918_1913` | `c69167dfdb` | S1：`mode=gpu` 解锁，gNB 起得来 |
+| `gnb_gpu_s2_0918_1929` | `ca9760b104` | S2：穿越计数器 + 契约检查上线 |
+| `gnb_gpu_s3_0918_1944` / `_1946` | `861a4feeb3` | S3：`OCUDU_CE_HOST_SCALARS` A/B |
+| `gnb_gpu_s4_0918_2004` | `532a231782` | S4：`TAIL_DEV` 探针 |
+| `gnb_gpu_s6_fusedefault_0918_2116` | `edf21dd778` | `EDGE_FUSE` 探针（**该提交不在当前历史表里**）|
+| `gnb_gpu_s7_taildev_on_0918_2128` | `93964256aa` | 读 **3.00/跳**（旧口径）；契约 7/8 |
+| `gnb_gpu_s5_crossings0_0918_2135` | `a656133d70` | 读 **0.00/跳**（**旧口径，只数 4 个标量点**）；契约 8/8 —— **里程碑已撤回** |
+| **`gnb_gpu_ota-b2-recon_0919_0516`** | **`965b0f0951`** | **读 2.37 / 写 1.75 每跳**（新口径，含 dft）；契约 **7/8**（唯一 FAILED = 跨越，已知）；**ping/iperf3 通过**；RT failures 2/85293 |
+| `gnb_gpu_ota-b3a_0919_0616` | `f4dce0e95b` | **❌ attach 失败：代码回归**（RT failures **104** = 86 underflow + 18 late，上一腿 2）。**已回退** `3ca0ccd6e4`，见 §12.2 |
+| `gnb_gpu_ota-b3a-r2_0919_0624` | `f4dce0e95b` | **❌ 同一症状复现**（用户重跑确认，跑到 slot 94 中止）|
+| `gnb_gpu_ab-devypads_0919_0720` | `c1fdd8891d` | ✅ 设备清 pad（实验臂）：读 2.44 / **写 1.31** 每跳，2841 跳，RTF 0，gaps 0 |
+| `gnb_gpu_ab-default_0919_0723` | `c1fdd8891d` | ✅ 宿主清 pad（对照臂）：读 2.37 / **写 1.64** 每跳，3106 跳，RTF 0，gaps 0 |
+| `gnb_gpu_ota-b3a-final_0919_0734` | `0eeb1c1941` | ⚠️ **被 SIGTERM 停，统计丢失，该腿作废**（见 §14.1 末尾）|
+| **`gnb_gpu_ota-b3a-final2_0919_0744`** | **`0eeb1c1941`** | ✅ **新默认空中验证**：读 2.38 / **写 1.23** 每跳，3889 跳，RTF 3，gaps 0，契约 7/8，RLF 0 |
+| **`gnb_gpu_ota-b3b_0919_0758`** | **`fa2628e018`** | ✅ **批次 3b.1 空中验证**：读 **1.40** / 写 **0.26** 每跳，3616 跳，**RTF 0**，gaps 0，契约 7/8，RLF 0 |
+| **`gnb_gpu_ota-b4_0919_0827`** | **`0e4a24ce57`** | ✅ **批次 4 空中验证**：读 **1.33** / 写 **0.27** 每跳，3383 跳，RTF 1，gaps 0，**申报含 demapper**，契约 7/8 |
+
+#### 12.2 ~~❌ `ota-b3a` 失败腿 —— 批次 3a 是原因~~ **此结论已作废，真因是核心网（见 §12.2.2）**
+
+> **⚠ 本节第一版把原因错误地归给"环境/射频"，已被用户驳回并推翻。**
+> **保留这段记录，因为误判本身就是证据**：我拿"上行弱 20 dB"当结论，
+> 而真正该做的是**先查自己的改动**。用户原话："以前因为出现过，并不是你前面所说的原因，
+> 是代码修改所导致的。"
+
+**推翻的过程（硬数字）**：
+
+| 腿 | 提交 | `Real-time failure in RF` | attach |
+|---|---|---|---|
+| `ota-b2-recon_0919_0516` | **`965b0f0951`** | **2** | ✅ 通过 |
+| `ota-b3a_0919_0616` | **`f4dce0e95b`** | **86 underflow + 18 late = 104** | ❌ 注册循环 |
+| `ota-b3a-r2_0919_0624` | `f4dce0e95b` | 22（跑到 slot 94 就中止） | ❌ 同样症状 |
+
+**~~⇒ 就是批次 3a。~~（**此推断已作废**，见 §12.2.2）我第一版只 grep 了 `Real-time failure in RF: underflow`（15 行是因为
+那次 grep 的锚点不对），漏掉了 `late` 这一类，也漏了真实总数 104。**低估了 7 倍。**
+
+**真实原因：我的论证本身不成立（与结果无关）**
+
+批次 3a 的论证是"设备侧的 scatter kernel 已经把 pad 槽清成 0，所以宿主那次 memset 是死的"。
+它**假设**了两件事相等：
+
+* scatter 的槽数 = 描述符自己的 `n_blk_slots`（`= st.n_blk`），而它的 dispatch **恰好**覆盖这么多；
+* apply kernel 读取时跨的槽 stride 也是 `st.n_blk`。
+
+**但 apply 那条 stride 是经由调用方给这一组的另一个 `n_blk` 参数到达的。**
+**没有任何东西证明这两者相等。** 如果它们在合并尾组上不一致，scatter 就**恰好漏掉**
+宿主 memset 覆盖的那片区域——而**没有任何东西再清它**。
+
+**27 捕获的 A/B 两臂逐字节相同**（`OCUDU_CE_DEV_Y_PADS=0` vs 默认），
+**这恰恰证明它从来不是这条分支的证据**——语料覆盖不到两者可能不一致的形状。
+
+**已做**：`3ca0ccd6e4` 把 memset **原样**恢复为默认（同一基址
+`nof_layers * n_std_blocks * 2 * L_std`、同一长度；它同时清掉标准组下一层的槽，
+而 `stage_engine_group()` 紧接着重新 stage，所以只有尾组 pad 槽留存）。
+去除版留在 `OCUDU_CE_DEV_Y_PADS=0`，只用于**上空口重测**。
+
+**教训（新增，最重要的一条）**：
+
+* **"离线门全过"不等于改动安全**——门看不见的形状才是风险所在，
+  而**判据输出为 0 时，必须先问"它能不能看见失败"**，而不是"它过了"；
+* 归因环境之前，**先把自己的 diff 当成第一嫌疑**（用户为此专门纠正过一次）；
+* 统计失败时要**枚举全部失败类型**（`underflow` 和 `late` 是两类），
+  只 grep 一类会把 104 低估成 15。
+
+#### 12.2.2 ★★ 结论再翻转：**不是代码，是核心网**（2026-09-19 07:04）
+
+**决定性证据**：**同一个提交 `965b0f0951`**，核心网重启前后两次腿：
+
+| 腿 | 提交 | RT failures | 契约 | `radio sample continuity` |
+|---|---|---|---|---|
+| `gnb_gpu_ota-b2-recon_0919_0516`（重启前）| `965b0f0951` | 2 | 7/8 | 0 gaps |
+| **`gnb_gpu_baseline-965b0f0951_0919_0647`**（重启前）| `965b0f0951` | **1265** / 196269 | **6/8** | **1 gap / 214030 samples** ❌ |
+| **`gnb_gpu_baseline-965b0f0951_0919_0704`**（**重启后**）| `965b0f0951` | **4** / 62261 | **7/8** | **0 gaps** ✅ |
+
+**同一份二进制、同一份配置，重启核心网后就正常了。**
+
+**⇒ 因此以下归因全部作废**：
+
+* ❌ "批次 3a 造成空中回归"——`ota-b3a` 那几条腿（06:11 之后）全部落在**核心网故障窗口内**；
+* ❌ "回退没解决所以问题更早"——`3ca0ccd6e4`（21 次）同样在窗口内；
+* ❌ 我第一版的"上行弱 20 dB 是环境"——**结论碰巧对了一半**（环境是真因），
+  但**推理过程是错的**（我把区间内所有腿都当成有效对照）。
+
+**真实的失败形态**（重启前 0647 腿）：`radio sample continuity: 1 gaps / 214030 samples missing`
+—— **射频采样连续性断了 21 万个样本**。这才是 RT failure 1265 的直接来源，
+而它**与通道估计/GPU 车道的代码无关**。**这一条判据本来就该在第一眼看到**。
+
+**⚠ 最重要的一条流程教训**：**判断"某条腿是否有效"必须先看它的契约完整性**
+（尤其 `radio sample continuity` 与 `host sample assembly`），
+再看 RT failures 与 attach。**采样连续性坏掉的腿，其一切数字（CRC、attach、contract）
+都不能用来支持或否定任何代码改动。** 我在这个窗口里连续做了 5 条腿的归因，
+没有一条先检查这个门。
+
+
+### 12.4 座台上一次可用配置的**有效值**（供重配参考）
+
+`configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml` 的未提交改动**已丢失**（§7 坑 22），
+以下是从**腿日志里回读**的有效值（不是从文件里，文件已恢复成仓库版本）：
+
+```yaml
+cu_cp:
+  amf:
+    addr: 192.168.64.3          # 仓库版本是 192.168.100.127
+    bind_addr: 192.168.64.1     # 仓库版本是 192.168.100.125
+ru_sdr:
+  device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=internal,time_source=internal,gpsdo=0
+  tx_gain: 70                 # 仓库版本是 80
+  rx_gain: 55                 # 仓库版本是 70
+  clock: internal             # 仓库版本是 gpsdo
+cell_cfg:
+  pusch:
+    max_ue_mcs: 20
+  pucch:
+    resource_set_size: 7
+    nof_cell_res_set_configs: 1
+    f1_enable_occ: true
+    nof_cell_sr_res: 7
+    nof_cell_csi_res: 7
+    max_consecutive_kos: 300    # ← 见下方更正
+```
+
+**⚠ 更正（2026-09-19 07:30，读代码核实）**：上面这个键名/位置**我写错了**。真实的映射在
+`du_high_config_translators.cpp:1280-1282`：
+
+| RLF 计数器（`rlf_detector` 用的）| 来自 config 的 | 作用 |
+|---|---|---|
+| `max_consecutive_dl_kos` | `cell_cfg.pdsch.max_consecutive_kos` | 连续 DL HARQ-ACK KO |
+| `max_consecutive_ul_kos` | `cell_cfg.pusch.max_consecutive_kos` | 连续 UL CRC KO |
+| **`max_consecutive_csi_dtx`** | **`cell_cfg.pucch.max_consecutive_kos`** | **连续未解码 CSI** ← 本座台真正相关的那个 |
+
+**三者的默认都是 100**（`include/ocudu/mac/mac_config.h:26-30`）。**A/B 腿的启动行**是
+`RLF thresholds (consecutive KOs) dl=100 ul=100 csi_dtx=1`——`csi_dtx=1` 说明**当时配置里
+`cell_cfg.pucch.max_consecutive_kos` 是 1**，而 `csi1=1111` 表示 CSI 是解出来的，
+所以那条 "100 consecutive undecoded CSIs" 走的是另一个计数器（`ul_kos`）。
+
+**⇒ 重配时该写的是**：
+
+```yaml
+cell_cfg:
+  pucch:
+    max_consecutive_kos: 300     # CSI DTX 阈值（本座台最相关）
+  # pdsch / pusch 的 max_consecutive_kos 默认 100，本线用不到就不写
+```
+
+`rlf_detector.h:46` 的注释**恰好**描述了这个坑：*"asking for
+`--cell_cfg.pucch.max_consecutive_kos=300` and getting 100 looks exactly like
+'the setting had no effect'（实测：那条腿跑了默认值，因为参数根本没到 argv）"*。
+
+
+**⚠ 这只是一条腿的日志回读值，不保证等于原件。**
+**`max_consecutive_kos: 300` 是其中影响最大的一项**：它决定 CSI 连续解不出多少次才判 RLF；
+默认 100 在该座台（CSI SINR 中位数 −4 dB）会频繁释放 UE，表现为多秒级 ping 抖动。
+
+**⇒ 重配后请立刻把该文件纳入版本控制或单独备份**（`git add` 或复制一份到 `wip/`），
+否则下一次 `reset --hard` 会再次丢掉。
+
+#### 12.3 🔬 批次 3a 及其回退已被整段移除，用于做干净基准（2026-09-19 06:44）
+
+**已回退到 `965b0f0951`**（就是 05:16 那条通过 OTA 的提交），`lib/` 与 `include/` 与该提交
+**逐字节相同**，`build/hashes.h` 戳记 = HEAD = `965b0f0951`，gnb 已重建（06:44）。
+
+**为什么整段移除而不是保留 knob**：回退腿（`3ca0ccd6e4`，21 次 RT failure）与成功腿
+（`965b0f0951`，2 次）**代码语义等价却结果不同**，所以要把变量降到最低——现在是"同一份源码、
+同一份配置"的干净复现。
+
+**备份（随时可恢复）**：
+
+| 形式 | 位置 |
+|---|---|
+| 分支 | `backup/batch2-3a-probe-3ca0ccd6e4` |
+| 补丁 | `wip/backup_3ca0ccd6e4_relative_to_965b0f0951.patch`（359 行，含两个提交）|
+
+**被移除的探针代码形状（恢复时照此）**：
+
+1. `device_y_pads_cleared_by_host()`（匿名 namespace）：读 `OCUDU_CE_DEV_Y_PADS`，
+   **缺省或无环境变量时为 true**（真 = 宿主清 pad = 原行为）；
+2. 尾部 pad 清理点：`if (device_y_pads_cleared_by_host()) { count_host_write(...); memset(gpu_y + nof_layers*n_std_blocks*2*L_std, 0, nof_layers*n_std_blocks*2*L_std*sizeof(float)); stage_engine_group(..., edge_on_device); } else { stage_engine_group(..., edge_on_device, /*pad_y_floats=*/nof_layers*n_std_blocks*2*L_std); }`
+3. `stage_engine_group` 增末位参数 `unsigned pad_y_floats = 0`，在
+   `record_device_y_stage()` **答否**的分支里清 `pad_y_floats` 个 float（基址
+   `gpu_y + nof_layers*st.n_blk*2*st.L`）。
+
+**⚠ 恢复时必须先修的一处（我当时没修）**：第 2/3 步里**长度用 `st.n_blk`/`st.L` 算，却由调用方
+按 `n_std_blocks`/`L_std` 传入**。两者若不相等，宿主清的区域与它想清的区域就不是一回事。
+**这是"等价性论证"里我没验证的一环**，恢复时应当直接用调用方的表达式，或断言两者相等。
+
+**顺带恢复的一处非代码内容**：`configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml` 的未提交改动
+（`tx_gain 80→70`、`rx_gain 70→55`、`clock_source=gpsdo→internal`、`pusch.max_ue_mcs: 20`、
+`pucch.max_consecutive_kos: 300` 及其说明注释、AMF 地址）在 `git reset --hard` 时被我一起清掉，
+**已按当时打印的 diff 重建并 dryrun 通过**。**教训：`reset --hard` 之前要先把未提交的工作树状态
+单独存一份（本次只有 diff 打印，靠它重建）。**
+
+#### 12.2.1 第一版（被推翻）的环境分析——保留原文
+
+> 以下是当时的推理，**结论错误**，保留以便不重复这个错误。
+
+**当时的现象**：手机反复 注册 → 立即 Deregistration；gNB 侧 28 次 RACH。
+
+**现象**：手机反复 注册 → 立即 Deregistration（AMF 侧 `Update SM context(N2-RELEASED)` /
+`(N1-RELEASED)` 紧跟在会话建立之后）；gNB 侧 28 次 RACH、C-RNTI 一路新分配到 `0x461c`；
+`Real-time failure in RF: underflow` **15 次**（上一腿 2 次）。
+
+**逐条排查（都是日志实测）**：
+
+| 观察 | 数值 | 判读 |
+|---|---|---|
+| **上行 RSRP（跑热后）** | 本腿 **−24.5 ~ −24.8 dB** / 上一腿 **−5.1 ~ −5.2 dB** | **上行弱了约 20 dB** ← 主导因素 |
+| PUSCH CRC 与 SINR 的关系 | `crc=OK` 平均 SINR **+25.4 dB**；`crc=KO` 平均 **−12.2 dB** | **解码器行为正确**，弱信号就该错 |
+| **MSG3（`rnti=0x4601`）** | **两腿完全相同**：16 行、5 次接收、**5 次 KO**；SINR `inf / −19.4 / −19.9 / −19.4 / −26.8 dB` | **不是回归**——上一腿（OTA 通过）一模一样 |
+| `sinr=infdB`（首次 MSG3） | 解码器返回 inf | 接收缓冲区是**零**——那一刻**根本没收到信号**，不是算错 |
+| **RRC/NAS 转发** | gNB 转发 `UplinkNASTransport` **25 次** | **MSG3 在某些尝试里成功了**，RRC 建立过 ⇒ 解码链**能工作** |
+| underflow 与 RACH 的先后 | 首次 RACH 在 slot **512.6**；首次 underflow 在 **22:17:22**（RACH 起始后约 2.2 s） | **underflow 是结果不是原因**（风暴把系统压垮）|
+
+**⇒ 结论**：这一腿的失败**与批次 3a 无关**。上行比上一腿弱约 20 dB，弱到 MSG3 反复解不出来；
+UE 在 RACH 风暴里升级功率、后来把 RSRP 拉到 −25 dB，但那时核心网侧的会话已经被拆掉，
+UE 自己发 Deregistration 重来。
+
+**批次 3a 改动本身的安全性（读代码 + 门，三重确认）**：
+
+1. scatter 的 dispatch 是 `MTLSizeMake(Ls, n_blk_slots, nof_layers)` —— 覆盖**每一个 (行, 块槽, 层)**；
+   kernel 对 `b >= n_blk_real`（**全部 pad 槽**）、`k >= nof_symb*npf`（**全部 pad 行**）
+   以及越界线程**都写 0** ⇒ pad 区域**完整**；
+2. 尾组是 `n_blk_slots = st.n_blk` vs `n_blk_real = 1`、`Ls >= nof_symb*npf`，正是这些条件；
+3. **旧 memset 的基址还错了一个 stride**（清的是标准组的 y，随后又被 `stage_engine_group()`
+   重新 stage），所以它连"覆盖尾组 pad"都没做到；
+4. 门：27 捕获（默认 vs `DEV_Y=0`、严格网 `CPU_LS=1`）四个产物 **全 0**、跨跳 **全 0**、
+   单元测试 **All tests PASSED**。
+
+**⇒ 需要做的**：**重跑一次 OTA**（先确认射频/天线/手机位置，让上行回到上一腿的量级）。
+**若重跑仍失败**，再做 A/B：`git checkout 965b0f0951` → 构建 → 跑同一标签的腿，
+用"同一 bench 上两版二进制"把代码与射频分开。
+
+**⚠ 教训（新）**：**腿的数字要连着"上行质量"一起读**。同样的 `crc=KO` 在 RSRP −5 dB 与
+−25 dB 下含义完全不同；以后报告腿时**必须同时给出 PUCCH/PUSCH 的 RSRP/SINR 量级**，
+否则"CRC 差"会被误读成代码问题。
+
+**⚠ 上表跨行不可直接比较**——口径与申报模块随提交变化，见 §2.4。
+
+---
+
+## 13. 环境变量台账（A/B 旋钮）
+
+| 旋钮 | 默认 | 作用 |
+|---|---|---|
+| `OCUDU_CE_TAIL_DEV` | **1** | 设备侧建 edge 组的相关矩阵（0 = 宿主建，判据的参考臂）|
+| `OCUDU_CE_HOST_SCALARS` | **0** | 1 = 宿主回读设备标量（sigma2/cfo/pilots_power）——历史上的逃生口与参考臂 |
+| `OCUDU_CE_K0A_RATIO_DEV` | **1** | A 的对角加载取自设备自己的商（0 = 用宿主的 `stats.sigma2`）|
+| `OCUDU_CE_CORR_DEV` | **1** | 设备填标准组的相关矩阵槽位 |
+| `OCUDU_CE_EDGE_FUSE` | **0** | 合并批次的第二个 corr 前缀（**默认关，开启后仍差 51810 字节**）|
+| `OCUDU_CE_HOST_GRID` | **1** | **批次 2 侦察新增**：0 = 完全不回读宿主网格（发布路径零影响，见 §4.4）|
+| `OCUDU_CE_HOST_Y_PADS` | **0** | **批次 3a**：非 0 = 宿主清尾组 pad 槽（旧行为，多 1 写/跳）；默认 0 = 设备清 |
+| `OCUDU_CE_CFO_CARRY_HOST` | **0** | **批次 3b.1**：非 0 = 宿主做 CFO 进位（旧行为，多 1 读 + 1 写/跳）；默认 0 = 设备进位 |
+| `OCUDU_CE_CPU_LS` | 未设 | 1 = 强制宿主预置 LSE（严格网的臂）|
+| `OCUDU_CE_LANE_ORDER` | `event` | 三种 lane 序：`event` / `host_wait` / `burst` |
+| `OCUDU_CE_DEV_SIGMA2` | **1** | 0 = 宿主算噪声方差 |
+| `OCUDU_CE_TIME` | 编译期 | 打开逐相耗时统计 |
+| `OCUDU_CE_LS_CHECK` / `OCUDU_CE_SIGMA2_CHECK` / `OCUDU_CE_PP_CHECK` / `OCUDU_CE_K0A_RATIO_CHECK` | 未设 | 容差对照探针（设备值 vs 宿主值）|
+| `OCUDU_CE_RSRP_CHECK` | — | **已回退**：§8.2 的对照探针（重做时按 §8.2 的代码形状恢复）|
+
+### 14.1 ✅ 默认翻转的空中验证（腿 `ota-b3a-final2`，commit `0eeb1c1941`）
+
+**这一腿证明"设备清尾组 pad"作为默认在空中成立。**
+
+| 项 | 值 |
+|---|---|
+| 规模 | **3889** device hops / 77039 slots / 3889 PUSCH receptions |
+| **写/跳** | **1.23**（4779 写 / 3889 跳）← **判据达成** |
+| 读/跳 | 2.38（9258 读）|
+| RT failures | **3**（全部 RF underflow，无 late）|
+| `radio sample continuity` | **0 gaps** / 77039 blocks ✅ |
+| `host sample assembly` | 1078462 / 1078462，**0 copied** ✅ |
+| `ce device estimates` | **42779 device / 0 host** ✅ |
+| zero-copy wraps | 81656 hits / 31129 creates / **0 failures / 0 misaligned** ✅ |
+| `device_corr_builds` / `write_fail` | 4962 / **0**；`device_y_writes` 5369，`y_write_fail` **0** |
+| 契约 | **7/8**（唯一 FAILED = 跨越，**已知且是本线要修的那条**）|
+| `cbs/lane` | 3.38 |
+| RLF | **0 detected / 0 release**（`csi_dtx=300` 生效）|
+
+**写侧对照（同一套计数器口径）**：
+
+| 腿 | 宿主是否清 pad | 写/跳 | 跳数 |
+|---|---|---|---|
+| `gnb_gpu_ota-b2-recon_0919_0516`（历史）| **是** | 1.75 | 2189 |
+| `ab-default_0919_0723`（A/B 对照臂）| **是** | 1.64 | 3106 |
+| `ab-devypads_0919_0720`（A/B 实验臂）| 否 | 1.31 | 2841 |
+| **`ota-b3a-final2_0919_0744`（新默认）** | **否** | **1.23** | **3889** |
+
+**四腿一致**：宿主不再清 pad 后，写侧稳定落在 **1.23~1.31/跳**；宿主清时是 **1.64~1.75/跳**。
+**⇒ 默认翻转的效果在空中得到确认，且量级与 A/B 预测一致。**
+
+**⚠ 本腿与 A/B 两腿不是可比对照**：本腿用的是重配后的 config
+（`gpsdo`、`tx_gain 80`、`rx_gain 70`，PUCCH fmt2 在 `prb=[23,24)`），
+A/B 两腿是旧配置（`internal`、`55`/`70`，fmt2 在 `prb=[1,2)`）。因此：
+
+* **跨越计数可比**（宿主侧计数，与 RF 无关）——这是本腿的判据；
+* **CRC / SINR / RSRP 不可比**——见下。
+
+**上行质量观察（未定论，留给下次）**：本腿 PUSCH 平均 SINR **4.4 dB**、
+PUCCH fmt2 平均 RSRP **−36.0 dB**（n=3381，全程稳定）；而 A/B 两腿是
+SINR 6.2/8.3 dB、RSRP −3.8/−2.9 dB。**差约 30 dB，且不是逐渐恶化。**
+CRC 通过率 78%（3044/845），仍高于 A/B 两腿的 68%/72%，
+**说明这个 RSRP 差的含义不是简单的"信号弱 30 dB"**——两者都需要单独查。
+**下一次碰 RF 配置时优先核这件事**。
+
+**⚠ 一个流程坑（已写进 `run_leg.sh`）**：腿必须用 **Ctrl-C（SIGINT）** 停。
+`gnb.cpp` 对 SIGINT 走正常收尾（打印契约与全部计数器），对 **SIGTERM 只 flush 日志就退出**，
+**跳过全部统计**。前一腿（`ota-b3a-final_0919_0734`）就是被 SIGTERM 停的：
+20 MB 日志、空 stdout、stderr 只有 UHD 横幅，**跨越计数全部丢失且事后无法恢复**。
+
+---
+
+## 14. 批次 3a 的空中 A/B 判据全文（2026-09-19 07:23）
+
+**这是本线第一次在健康核心网下做的空中 A/B**，也是"离线门看不见"的典型样本。
+
+| | `ab-devypads`（设备清 pad，**新默认**）| `ab-default`（`OCUDU_CE_HOST_Y_PADS=1`，宿主清）|
+|---|---|---|
+| commit | `c1fdd8891d` | `c1fdd8891d` |
+| 跳数 | 2841 | 3106 |
+| **读/跳** | **2.44** | 2.37 |
+| **写/跳** | **1.31** | 1.64 |
+| 写/跳 95% Wilson | [1.305, 1.305] | [1.642, 1.642] |
+| 字节/写 | 828 B | 830 B |
+| RT failures | **0** | **0** |
+| `radio sample continuity` | **0 gaps** | **0 gaps** |
+| 契约 | 7/8（唯一 FAILED = 跨越，已知）| 同 |
+| `cbs/lane` | 3.44 | 3.37 |
+| attach + ping/iperf3 | ✅ | ✅ |
+
+**判据**：写侧 **−0.336/跳**，两区间**不重叠** ⇒ 显著；**字节/写两腿相同（828 vs 830）**
+⇒ 消失的是**一次穿越**，不是"更小的写"。读侧 +0.064/跳 在两腿跳数差异下不显著（读计数本身是
+`read` 事件的整数计数，不做流量归因）。
+
+**⇒ 结论**：批次 3a **在空中成立**。它当初写对了，被冤枉了两轮（§12.2.2）。
+
+**⚠ 离线门对这件事的作用**：**零**。27 捕获 A/B 两臂逐字节相同——**它看不见这个差异**。
+这条对比本身就是"覆盖不到失败模式的门，通过等于没测"（坑 19）的最好例证：
+**这次是门看不见"收益"而不是"缺陷"，但道理相同——门的通过与否都不能替代空中测量。**
+
+### 15.4 ✅ 批次 3b.1 的空中验证（腿 `ota-b3b`，commit `fa2628e018`）
+
+| 项 | 值 |
+|---|---|
+| 规模 | **3616** device hops / 64519 slots |
+| **读/跳** | **1.40**（5071 读）← 离线预测 2.10，**空中更好** |
+| **写/跳** | **0.26**（926 写）← 离线预测 0.65，**空中更好** |
+| **RT failures** | **0** ✅ |
+| `radio sample continuity` | **0 gaps** / 64519 blocks ✅ |
+| `host sample assembly` | 903182 / 903182，**0 copied** ✅ |
+| `ce device estimates` | **39776 device / 0 host** ✅ |
+| zero-copy | 75923 hits / 28945 creates / **0 failures / 0 misaligned** ✅ |
+| `corr_build_fail` / `y_write_fail` | **0 / 0** |
+| 契约 | **7/8**（唯一 FAILED = 跨越，**已知且正是本线要修的那条**）|
+| `cbs/lane` | 3.40 |
+| RLF | **0 detected / 0 release** |
+
+**三腿连测（同一条 KPIs，越来越干净）**：
+
+| 腿 | 宿主进位? | 宿主清 pad? | 读/跳 | **写/跳** | RTF | gaps |
+|---|---|---|---|---|---|---|
+| `ota-b2-recon_0919_0516` | 是 | 是 | 2.37 | 1.75 | 2 | 0 |
+| `ota-b3a-final2_0919_0744` | 是 | 否 | 2.38 | 1.23 | 3 | 0 |
+| **`ota-b3b_0919_0758`** | **否** | **否** | **1.40** | **0.26** | **0** | **0** |
+
+**写侧 b3b − b3a-final2 = −0.973/跳，95% Wilson 区间不重叠 ⇒ 显著。**
+写侧自批次 0 之前累计：**36.00 → 0.26/跳**。
+
+#### ⚠ 空中比离线更干净，这本身是一条信息
+
+离线（`syn004_4 --repeat 20`）预测 2.10 读 / 0.65 写，空中是 **1.40 / 0.26**。
+两者都是同一套计数器，差异来自**几何与路径**：离线是 4 PRB / 3 DM-RS / 1 层，
+空中是合并批次的 273-PRB BWP 上的实际分配，且部分项的每次跳计数不同
+（例如进位只在特定跳上省，网格回读在合并批次里是 2 次而不是离线那样摊成 1 次）。
+
+**⇒ 教训**：**离线数字是"方向与量级的预测"，不是"空中数值的预测"。**
+两者不一致时**以空中为准**，并把差异当线索（这次差异对我们有利，但方向不保证）。
+
+#### 读侧 1.40 的归属（外推，**空中尚未逐点确认**）
+
+按 §15.3 的分解，读侧现在应当是：**回读宿主网格 ≈1.00（批次 2，γ 控制）+ 其余 ≈0.40**
+（DFT / 均衡器的残余）。**⇒ γ 落地后读侧预计降到 ≈0.4/跳或更低。**
+
+**⚠ 这一节是外推，不是实测**：`OCUDU_CE_HOST_GRID=0` 的空中腿**从未跑过**（γ 未落）。
+按本线的老账，**外推必须标成外推**。
+
+**字节/写 从 692 B 升到 3953 B**：这不是"写变大"，而是**分母塌了**——
+926 次写里大部分是少量大块写（均衡器建表/DFT），少量标量写消失后均值被抬高。
+**判据看次数，不看这个均值。**
+
+---
+
+## 15. 批次 3b 的判据（2026-09-19）
+
+### 15.1 ✅ 3b.1：CFO 进位搬到设备侧（`fa2628e018`）
+
+**问题**：`gpu_ls_cfo` 是轮转槽数组，不变量是"每个槽都持有最近写入的值"。
+`mmse_pilots_cfo` 只能从**两个** DM-RS 符号估 CFO，所以只有**一个**符号的跳**什么都不写**——
+而**频率跳变恰好制造这种跳**：捕获里 `dmrs_symbols=2,7,11`，第二个 hop 就是 `{11}`。
+
+**原来谁维持不变量**：宿主的 `gpu_ls_cfo[cfo_slot_] = gpu_ls_cfo[prev]`。
+一句赋值，源和目的都在零拷贝映射里，**每一跳都付**——因为拷贝必须发生在命令缓冲编码**之前**，
+不管 kernel 后面会不会覆盖它。**1 读 + 1 写/跳**。
+
+**现在**：kernel 拿到上一槽（`pilots_stage::cfo_prev`），没有可估的时候自己写进位，
+宿主完全不再碰这个数组。默认翻转；`OCUDU_CE_CFO_CARRY_HOST=1` 恢复宿主拷贝作为 A/B 臂。
+
+**判据**：
+
+```
+默认（设备进位）:          2.10 read(s) + 0.65 write(s) per hop
+OCUDU_CE_CFO_CARRY_HOST=1: 3.10 read(s) + 1.65 write(s) per hop
+```
+
+**正好各减 1**，与那句赋值预测的一致。
+
+#### ⚠ 语料覆盖不到这个分支——所以另造了一个捕获
+
+**27 个捕获全部是 `dmrs_symbols=2,7,11`**，即每跳都能估 CFO，**进位分支从不执行**。
+所以"27 捕获逐字节相同"只证明这个改动**在那批数据上是惰性的**，不证明新分支正确。
+
+**⇒ 造了一个能触发它的捕获**：14 符号的网格 + 元数据改成 `dmrs_symbols=2`
+（1 个 DM-RS 符号 ⇒ 单符号跳），存在 `wip/test_captures/one_dmrs_symbol.{bin,txt}`。
+在这个捕获上：**进位真正执行**，两臂 **`_llr` / `_h` / `.bin` / `_ce.txt` 全 0**
+（`--repeat 1` 与 `20` 都测）。
+
+**⚠ 这个捕获是"单符号跳"，不是"跳变对"**——它触发的是**进位分支**（这是要测的东西），
+但**没有复现 hop 切分本身**。这一点写在这里，免得它被当成"语料已覆盖"。
+
+#### 全部离线门（27 捕获）
+
+| 门 | 结果 |
+|---|---|
+| 默认 vs `OCUDU_CE_CFO_CARRY_HOST=1` | `_llr` **0** `_h` **0** `.bin` **0** `_ce` **0** |
+| 严格网 `CPU_LS=1`，同一 A/B | 四个产物 **0** |
+| 跨跳 `repeat 1` vs `20` | 四个产物 **0** |
+| **单 DM-RS 捕获**（唯一触发进位的现场）| 四个产物 **0** |
+| 单元测试 | **All tests PASSED** |
+
+### 15.2 ⛔ 3b.2 `pilots_power`：**不在默认路径上，无需改动**
+
+设计文档此前把它列为"1 读/跳"。**读代码后确认它不会在默认路径上执行**：
+那次读取在 `if (host_reads_device_scalars())` 门后，而该门的默认是**假**。
+
+实测（`--repeat 20`，读侧分解）：
+
+| 配置 | 读/跳 |
+|---|---|
+| 默认 | 2.10 |
+| `OCUDU_CE_HOST_SCALARS=1` | **5.10**（+3.00）|
+| `OCUDU_CE_HOST_SCALARS=1` + `CFO_CARRY_HOST=1` | **6.10**（+3.00，与进位独立的 1 相加）|
+
+**⇒ 那 3.00 是三个标量读取点**（`estimate_sigma2` 的 CFO、`pilots_power`、`sigma2`），
+**全部由 `OCUDU_CE_HOST_SCALARS` 控制，默认关闭**。**所以默认路径上根本没有这次读，
+3b.2 是伪任务。** 真正的默认读侧只剩"回读网格"一项（批次 2 的门）。
+
+### 15.3 ★★ 读侧的完整账（本批之后）
+
+**读侧 3.10/跳的归属，逐项实测**：
+
+| 项 | 读/跳 | 谁控制 | 状态 |
+|---|---|---|---|
+| **回读宿主网格**（批次 2）| **2.00** | `OCUDU_CE_HOST_GRID`（默认 1）| ⛔ **等 γ 的产品决定**（会让上行 rsrp/ta 上报失效）|
+| **CFO 进位**（批次 3b.1）| **1.00** | `OCUDU_CE_CFO_CARRY_HOST`（默认 0）| ✅ **已去除** |
+| 三个标量读取 | **3.00** | `OCUDU_CE_HOST_SCALARS`（默认 0）| ✅ 默认就不在路径上 |
+| **合计（默认）** | **2.10** | | |
+| **合计（`OCUDU_CE_HOST_GRID=0`）** | **0.10** | | ← **读侧实际已清零** |
+
+**⇒ 关键结论：读侧现在**只剩 γ 一个决定**。**
+
+```
+默认:                    2.10 read(s) + 0.65 write(s) per hop
+OCUDU_CE_HOST_GRID=0:    0.10 read(s) + 0.65 write(s) per hop   ← 读侧实际为 0
+```
+
+（`0.10` 是 `--repeat 20` 下"最后一次跳的按需物化"摊出来的余数，不是稳态读。）
+
+**写侧 0.65/跳** 的剩余项：尾组 pad 清理由设备做（批次 3a 已确认），
+其余来自均衡器建表与 DFT；**均不在本批范围**。
+
+**⇒ 批次 3 到此收口。** 读侧到 0 的唯一障碍是 γ，而 γ 是**产品决定**（§1.6/§1.7），
+**不是实现问题**——这也是为什么它一直被标成"不要自行落"。
+
+### 16.5 ✅ 批次 4 的空中验证（腿 `ota-b4_0919_0827`，commit `0e4a24ce57`）
+
+| 项 | 值 |
+|---|---|
+| 规模 | **3383** device hops / 75294 slots |
+| **读/跳** | **1.33** |
+| **写/跳** | **0.27** |
+| **申报模块** | **demapper**, dft, equalizer, channel_estimator ← **四个全到** |
+| RT failures | **1** |
+| `radio sample continuity` | **0 gaps** / 75294 ✅ |
+| `host sample assembly` | 1054032 / 1054032，**0 copied** ✅ |
+| `ce device estimates` | **37213 device / 0 host** ✅ |
+| zero-copy | 71030 hits / 27081 creates / **0 failures / 0 misaligned** ✅ |
+| `corr_build_fail` / `y_write_fail` | **0 / 0** |
+| 契约 | **7/8**（唯一 FAILED = 跨越，已知）|
+| RLF | **0** |
+
+**四腿连测（申报范围逐腿扩大，数字逐腿更可信）**：
+
+| 腿 | 读/跳 | 写/跳 | 申报模块 |
+|---|---|---|---|
+| `ota-b2-recon` | 2.37 | 1.75 | dft, equalizer, channel_estimator |
+| `ota-b3a-final2` | 2.38 | 1.23 | 同上 |
+| `ota-b3b` | 1.40 | 0.26 | 同上 |
+| **`ota-b4`** | **1.33** | **0.27** | **+ demapper** |
+
+**⇒ 批次 4 在空中成立**：`demapper` 申报生效，且它**贡献 0**（读 1.40→1.33、写 0.26→0.27
+都在噪声内）。**数字现在是上界。**
+
+---
+
+## 16. 批次 4：`demapper` 审计（`0e4a24ce57`）
+
+### 16.1 结论：**它一次都不穿越**，而且融合本来就是好的
+
+**用户先前的记忆是对的**——均衡器与解调器很早就融合了。逐条核实（读代码）：
+
+| 环节 | 事实 |
+|---|---|
+| **输入**（均衡器输出）| `demodulation_mapper_metal.cpp` 在 `is_page_aligned_buffer()` 为真时**原地 wrap**，不 staging |
+| 分配方 | PUSCH 解调器用 `page_aligned_allocator` 分配 `temp_eq_re` / `temp_eq_noise_vars`，**每个 OFDM 符号交出一个页对齐槽** |
+| **输出**（LLR）| 同样：`temp_llr` 也是 `page_aligned_allocator` ⇒ kernel **直接写调用方的槽**，**没有 copy-back** |
+| **均衡→解调的交接** | 共享命令缓冲里的**内存屏障**，不是 wait（`pusch_demodulator_impl` 的 fused 路径）|
+| CPU 参与 | 仅**提交**批次与**一次**组等待——正是判据允许的两件事 |
+
+### 16.2 但"没有计数器"本身是个洞 —— 已补
+
+审计之前 `demapper` **一个计数器都没有**。这意味着：
+
+> 如果 PUSCH 解调器哪天不再页对齐分配那些 buffer，**整条均衡符号流会以 float 数据的形式
+> 在车道中间穿一次宿主**，而契约的跨越检查**仍然读 0**。
+
+**⇒ 补法不是给 happy path 加计数器（那里没有穿越），而是：**
+
+1. **申报**（`declare_reporter("demapper")`）——让数字覆盖范围包含它；
+2. **给兜底路径加计数器**——因为**回归会新走到兜底**：
+   * 输入 staging 的 `memcpy` ⇒ **`count_host_write`**（宿主写设备要读的数据）；
+   * LLR copy-back ⇒ **`count_host_read`**（设备产出、宿主读回）。
+
+**"静默兜底"正是本线计数器存在的意义**，所以兜底要**被测**，不能靠假设它不发生。
+
+### 16.3 判据
+
+```
+2.10 read(s) + 0.65 write(s) per hop
+counted by: channel_estimator, demapper, dft, equalizer    ← demapper 两项都贡献 0
+```
+
+| 门 | 结果 |
+|---|---|
+| 27 捕获 A/B | 四个产物 **0** |
+| `demodulation_mapper_metal_unit_test` | **ALL OK**，含 `3 staged submits in flight + single wait`（**唯一触发新计数器那条兜底**的用例）|
+
+### 16.4 ⇒ 数字的性质变了
+
+**在此之前**：`demapper` 未申报 ⇒ 所有数字是**下界**（可能藏着穿越）。
+**在此之后**：四个模块全部申报 ⇒ **数字是上界**——**未覆盖的模块已经不存在了**。
+
+**⚠ 仍然存在的一个认识边界**（不是缺陷，是契约的口径）：跨越计数**按定义不含**
+"IQ 上传"与"LLR 下载"两次穿越（检查的打印句明写 *"which this counts neither of"*）。
+所以 `reads==0 && writes==0` 的含义是**"已审计模块在流的中间没有接触"**，
+而**不是**"全程只有两次穿越"——后者**没有独立判据**。
+**宣布最终目标达成时，必须把这句话说清楚**（本线 §9.2 撤回里程碑的教训）。
+
+---
+
+## 17. 批次 5a：把 hop 统计量搬到设备（**判据通过，发布路径已接**）
+
+### 17.1 为什么做这个（用户批准的方向）
+
+> **用户原话要点**：rsrp/ta 可以**在 GPU 内部算好**；**用一个 config 包起来**，
+> **default 要坚持设计初衷（CPU 不能介入，即不执行包裹里的路径）**；
+> 如果最后找不到替代方案，**再放出来**。
+
+**⇒ 这取代了原先的 γ（把上报量置 0）**：γ 会让 `mode=gpu` 下上行 rsrp/ta 上报失效
+（喂链路自适应），而本方案是**把上报量换个地方算**，且**可逆**。
+
+**根因**：宿主每跳回读整个 DM-RS 网格（≈1.00 读/跳），**只是为了算上报量**
+（`pending_fill::fill()` → `filtered_pilots_lse` → rsrp/noise/TA）。
+上报量**不进 LLR 路径**，所以搬到设备对车道零代价。
+
+### 17.2 关键判断修正：`gpu_ce`/`h`，不是 `gpu_ls_smoothed`
+
+早先测出 `gpu_ls_smoothed` 与宿主 `filtered_pilots_lse` **差 2.14 倍**，据此否掉了那条路。
+**那不是缺陷，是选错了源**：
+
+| 量 | 是什么 |
+|---|---|
+| 宿主 rsrp 用的 | **估计网格**在导频 RE 上的取值（`pending_fill::fill()`）|
+| `gpu_ls_smoothed` | **平滑后的 LSE**（`mmse_pilots_fd_smooth`）——**不是同一个量** |
+| **设备上对应"估计网格"的** | **K3 的 `h`**（`gpu_ce` 的来源）|
+
+### 17.3 K5 的设计（`ocudu_mmse_rsrp.metal`）
+
+* **读 `h`，不是 `gpu_ce`**：K3 **故意排除**导频 RE（只留数据 RE）⇒ 导频
+  **在 `h` 里可达、在 `gpu_ce` 里不存在**。
+* **复用 `mmse_reformat_params` 的几何字段** ⇒ 两个 kernel 不可能对"哪个子载波是哪个"分歧。
+* **`pilot_re_bits` 必须是每层独立的**，**不能**用 reformat 的 `dmrs_re_bits`：
+  后者是**各层并集**（K3 用它跳过导频 RE），用并集会**把另一层的导频算进本层功率**。
+* **输出 `{sum, count}` 两个 float**（每 (块槽, 层)）：**单看功率比值分不清
+  "RE 取错了"与"RE 对了但缩放错了"**。count 一出来立刻定位了问题。
+* **encode 在与 reformat 同一条命令缓冲**（紧跟其后）⇒ **取这个值不需要宿主等待**。
+
+### 17.4 宿主侧
+
+* **轮转块** `kRsrpBlocks=16` × `kRsrpSlots=4`（仿 `gpu_ls_sigma2`）：写在抽取的命令缓冲里，
+  宿主在 wait 之后才读，那时池化实例可能已跑过后续跳。
+* **`rsrp_base_` 与 `rsrp_block_last` 必须分开**：前者是**正在 staging** 的那一跳的块，
+  后者是**正在 completion** 的那一跳预留的块。两者不同 —— **混用会让正确的归约读回 0**
+  （这是本轮实际踩的坑）。
+* **`OCUDU_CE_DEV_STATS`**：**默认 1 = 设备算**（设计初衷）；**0 = 宿主算（退路）**。
+  一个开关管全部统计量：它们**一起发布、来自同一批导频**，半设备的配置没人需要。
+
+### 17.5 已踩的坑（**两个都是我自己的诊断在骗我**）
+
+| # | 坑 | 症状 | 正解 |
+|---|---|---|---|
+| 1 | **comb 建在 `device_estimate_offsets()` 里** | 该函数**几何不连续时 `return 0` 早退** ⇒ comb 从没被写 ⇒ kernel 空转。dump 显示 `pilot0=0` 而 `dmrs_sym_bits=0x884` 正确 | comb 是 **DM-RS pattern 的属性，与那个几何无关** ⇒ 建在**实际使用点**、**每条路径都建** |
+| 2 | **诊断打印放在填数据的循环之前** | `[rsrp_params]` 永远打 0 ⇒ **把我引向宿主侧白查一轮** | 打印必须放在**它要观察的写入之后** |
+| 3 | **探针用 staging 计数器读 completion 的块** | 读到别的跳的块 ⇒ 正确的归约显示为 0 | staging 与 completion 的块索引**分开记** |
+| 4 | **`device float2*` 却写 `out[idx]`** | `float2` 指针 `[]` **按 8 字节跨步** ⇒ 写到错误位置、读出来是 0 | 用 `device float*` + `out[2*i]`/`out[2*i+1]` |
+
+**⚠ 这轮的教训**：**"参数看起来对"不等于"kernel 在按那些参数做事"**。
+四次排查里有三次是我的**观测手段**错了，不是被测对象错了。
+**先让观察可信，再下结论**（与本线 §9 的"证据比措辞窄"是同一类错误）。
+
+### 17.6 ★★ 2026-09-19：**5a 的对照探针通过**（六个缺陷全部定位并修复）
+
+`session_handoff_2026-09-19-3.md` 的结论（"设备归约写 0"、"剩余假设收窄到 kernel 自身"）
+**两条都已被推翻**。真正的原因有四个，**三个在宿主侧、一个是观测手段**：
+
+| # | 缺陷 | 表现 | 正解 |
+|---|---|---|---|
+| **A** | **metallib 增量构建不可靠** | 改了 `.metal` 后 `cmake --build` **不重编**，跑的是旧 kernel、宿主是新代码 ⇒ **"参数收到了" 与 "参数读到 0" 同时成立** | 改 `.metal` 后**必须** `rm -f .../ocudu_mmse.metallib` 再 build，并**看到 `Linking Metal library`**；`.metal` 编译失败时 metallib **静默保持旧版** |
+| **B** | **ring 步长两侧不一致** | kernel 按 `nof_layers` 跨步写、宿主按 `kRsrpSlots` 读（或反之）⇒ 值在，读出来是 0。**`nof_layers == kRsrpSlots` 只在 4 层时成立** | kernel 用 `kRsrpSlots`（与宿主同一常量），`out[(blk * kRsrpSlots + lay) * 2]` |
+| **C** | **绑定长度按标准块数算** | 只按 `n_blk` 算字节数 ⇒ **边块的 slot 写到映射之外、静默丢弃** | `(n_blk + ceil(nf_tail / nf_std)) * kRsrpSlots * sizeof(float)` |
+| **D** | **边块 threadgroup 一个都没发** | grid 只发 `n_blk * nof_layers`；且 kernel 早退判据 `blk >= n_blk` 把边块全拒（边块在 `sys_tail` 起的**系统**里，`blk` 仍是 0，而 `n_blk` 只数标准块） | grid 发 `(n_blk + tail_slots) * nof_layers`；kernel 按 **block slot** 判边块 |
+| **E** | **`h` 的行索引用错了变量** | 边块把 GRID 的 block slot（`n_blk + k`）当成了**系统内的 block 号**用进 `(sys * n_blk + blk)` ⇒ 读到边块**下一行**（K2 从未写的内存）⇒ 边块归约**加的是 0**，而 RE 计数却是对的（计数不看 `h`）。宿主侧 K3 用的是 `b=0`，所以只有 K5 错 | 新增 `blk_in_sys = is_std ? blk : 0`，**只用它算 `h` 的行**；`sc0`/slot 仍用 grid 的 `blk` |
+| **F** | **ring 的 slot 布局两侧不一致** | kernel 按 `blk * kRsrpSlots + lay` 写（slot 1 → 偏移 8），宿主按 `b * kRsrpSlots` 读（slot 1 → 偏移 4），**而且保留长度只够偏移 0..7** ⇒ 边块的写**落到映射之外被静默丢弃** | 统一用 **K2 的块布局** `(blk * nof_layers + lay) * 2`（kernel 写、engine 绑、宿主读**同一个表达式**），长度 = `(n_blk + tail_slots) * nof_layers * 2` 个 float |
+
+**⇒ 由此得出一条纪律**：**"设备算出来是 0" 这个观测，先怀疑观测链（构建是否新鲜、两侧步长是否一致、
+映射是否够长），再怀疑 kernel。** 本轮 5 次误判里 4 次是观测链的问题。
+
+**当前实测（`OCUDU_CE_RSRP_CHECK=1`，**新 metallib**）**：
+
+```
+[rsrp_stage] base=0 slots=2 n_blk=1 nf_std=36 nf_tail=12    ← 区域预留正确
+[rsrp_raw]   region=0 slots=2 layers=1
+             [0][0]=3.325204e-01 nre=54                     ← 标准块：✅ 非零，与宿主同量级
+             [1][0]=0.000000e+00 nre=0                      ← 边块：❌ 仍为 0
+[rsrp_check] host_nre 72 dev_nre 54                         ← 差 18 个 RE
+```
+
+**★ 2026-09-19 续二：缺陷 F 已定位，探针通过。**
+F 是最后一块：kernel 写 slot 1 在偏移 8，宿主读偏移 4，且绑定长度只到偏移 7
+⇒ 边块的正确结果**落在映射之外**。统一成 K2 的块布局后：
+
+```
+[rsrp_stage] base=0 floats=4 n_blk=1 nf_std=36 nf_tail=12 layers=1
+[rsrp_raw]   region=0 slots=4 layers=1
+             [0][0]=3.325204e-01 nre=54     ← 标准块
+             [1][0]=2.110410e-01 nre=18     ← 边块
+[rsrp_check] worst rel 5.354e-09 (dev 5.435613990e-01 host 5.435613990e-01)
+             host_nre 72 dev_nre 72         ← ✅ 通过
+```
+
+**七种语料形状全部通过**（1/2/4/6/8 个标准块，54/72/144/216/324/450 个 RE）：
+
+| 语料 | 标准块 | host_nre | dev_nre | worst rel |
+|---|---|---|---|---|
+| syn001_3 | 1 | 54 | 54 | 3.4e-08 |
+| syn004_4 | 1 | 72 | 72 | 5.4e-09 |
+| syn012_8 | 2 | 144 | 144 | 3.0e-08 |
+| syn018_12 | 4 | 216 | 216 | 2.6e-09 |
+| syn022_18 | 6 | 324 | 324 | 2.0e-08 |
+| syn025_25 | 8 | 450 | 450 | 2.0e-08 |
+| syn027_25 | 8 | 450 | 450 | 2.2e-08 |
+
+误差全部在 float32 **重结合底线**（~1e-8）；`--repeat` 多跳重复运行数值完全一致
+⇒ ring 的区域划分跨跳无别名。**5a 的判据（§3.4 第 4 步）达成。**
+
+**★ 2026-09-19 续一：缺陷 E 已定位。** 逐个回读内层循环取到的 `local_sc`（`0,0,0` @ `sym=2,7,11`）
+证明**循环本身是对的**——每个线程只负责 `local_sc == tid` 的那一个 RE，54 和 18 都是**线程组树归约**的和，
+所以"每符号只贡献 1 个 RE"是**记录方式**的错觉，不是循环的问题。
+真正的问题是**边块读 `h` 的行**（缺陷 E）：它加的是 K2 从未写过的内存 ⇒ 和 = 0，而 RE 计数正常。
+**修正后边块开始产出真实值**：`sum = 2.110410e-01`、`nre = 18`（标准块 54 + 边块 18 = **72**，与宿主一致）。
+
+**当时以为"完成点读不到"**，实为**缺陷 F**：绑定长度不够 + 两侧偏移不一致，
+写落在映射之外。**不是可见性问题，也不是等待问题**——把长度和布局对齐后立刻读到。
+
+**⚠ 未做**：发布路径尚未接（设备值算出来了也不影响任何上报）⇒ **默认行为与所有计数器
+在 5a 全部五步里始终未变**（2.10 读 + 0.65 写/跳），**退路完好**；单元测试全过。
+
+---
+
+### 17.7 发布路径（2026-09-19 接上）
+
+宿主原来在 `port_channel_estimator_average_impl.cpp:compute_hop_finish()` 里
+**从回读的 grid 累加 rsrp**（`filtered_pilots_lse` 的逐符号平均功率 × 归一化因子）。
+这条累加**就是回读网格的唯一理由**。
+
+**接法**：加一个后端钩子
+
+```cpp
+// port_channel_estimator_average_impl.h —— 默认 nullopt：宿主自己算（其它后端不受影响）
+virtual std::optional<float> get_device_rsrp_sum(unsigned i_layer) const;
+
+// compute_hop_finish() 的循环里
+if (const auto dev = get_device_rsrp_sum(i_layer); dev.has_value()) {
+  rsrp[i_layer] += *dev * power_normalization_factor;   // 设备已经把同一个和算好了
+  continue;
+}
+// ...原来的宿主累加
+```
+
+Metal 侧在 `complete_fd_td_estimation_stage()` 里把设备归约按 batch 自己的区域读出来
+（`(b * nof_layers + l) * 2`），存进 `device_rsrp_sums_`，由 `get_device_rsrp_sum()` 交出。
+
+**两侧是同一个量**：宿主累加的是 `Σ|h|²` over DM-RS pilots（`average_power × size` 就是和），
+设备 K5 归约的也是它，乘上**同一个** `power_normalization_factor`。
+
+#### 判据（全部已跑）
+
+| 检查 | 结果 |
+|---|---|
+| 设备归约 == 宿主归约 | 7 种语料全对，误差 2.6e-09 ~ 3.4e-08（§17.6）|
+| **上报的 rsrp 不因来源而变** | `DEV_STATS=1` 与 `=0` 的 `_ce.txt` **rsrp 完全相同**（1.506316196e-02）|
+| 数据不变（27 捕获） | `_llr.bin` / `_h.bin` / `.bin` **全 0 差异**；只有 `_ce.txt` 变 |
+| 严格网 `CPU_LS=1` | 同上，0 / 0 / 0 |
+| 单元测试 | 全过 |
+
+#### 四个旋钮组合（实测，`--repeat 20`）
+
+| `DEV_STATS` | `HOST_GRID` | 读/跳 | rsrp | 说明 |
+|---|---|---|---|---|
+| 1 | 1 | 2.10 | ✅ 设备值 | **当前默认**（安全，行为未变）|
+| **1** | **0** | **0.10** | ✅ 设备值 | **目标配置**：回读断掉，rsrp 仍然正确 |
+| 0 | 1 | 2.10 | ✅ 宿主值 | 退路（完好）|
+| 0 | 0 | 0.10 | ❌ 0 | 组合无意义：没有人算它 |
+
+剩下的 0.10 读是 **demapper 的 LLR 拷贝**（`llr_direct` 为假时，即调用方缓冲未页对齐时），
+属设计允许的两次穿越之一，不是本批的目标。
+
+#### ⚠ 为什么 `HOST_GRID` 的默认还没翻
+
+同一次回读还喂 `noise_variance` 与 `ta_us`（`pending_fill::fill()`）。
+5a 之后 **rsrp 已经不依赖它**，但另两个还依赖 ⇒ 关掉回读它们会取到上一跳残留。
+`ta_us` 要等 **5b（TA 搬设备）**。所以：
+
+1. 先跑一条**空中腿**，确认 `DEV_STATS=1` 的上报值与历史腿一致（§10.1 停机规则）；
+2. 5b 做完 TA；
+3. **再**把 `HOST_GRID` 默认改 0（那时读侧才真正落到 0.10）。
+
+---
+
+### 17.8 ✅ 批次 5a 的空中验证（腿 `5a-pubpath_0919_1230`，2026-09-19 12:30）
+
+**要验证的**：发布路径接上之后，设备算的 rsrp **在空口上不产生跳变**。
+
+| 项 | `ota-b4_0919_0827`（前）| `5a-pubpath_0919_1230`（本批）| 判读 |
+|---|---|---|---|
+| commit | `0e4a24ce57` | `94df4144a2` | 本批代码 |
+| **读数/跳** | **1.33** | **1.39** | **未回归**（+4%，腿间正常波动）|
+| 写数/跳 | 0.27 | 0.28 | 未回归 |
+| 契约 | 7/8 | 7/8 | 同 |
+| `radio sample continuity` | 0 gaps | **0 gaps / 75521 blocks** | ✅ 腿有效 |
+| `host sample assembly` | OK | **OK（1057210/1057210）** | ✅ 收尾统计完整（SIGINT 停）|
+| `ce device estimates` | 37213 device / 0 host | 35211 device / 0 host | ✅ |
+| `Real-time failures` | 1 | **0 / 75521 slots** | ✅ |
+| **rsrp 中位数** | **−5.0 dB** | **−8.5 dB** | ✅ 在四腿波动范围内 |
+| rsrp p75 | −4.4 dB | −4.5 dB | ✅ |
+| CRC 通过率 | 78.51% | 73.35% | ⚠ 见下 |
+
+**CRC 那一项的判读**：5.16 pp 的差异**统计上显著**（z=4.90），
+但**不是本批造成的**，两条独立证据：
+
+1. **解码器的输入逐字节不变**：离线 27 捕获 A/B（`HOST_GRID=1` vs `0`）
+   `_llr.bin` / `_h.bin` / `.bin` **全 0 差异**；
+2. **这条线的 CRC 腿间波动本来就是 69%–79%**：
+   `b3b` 69.05% / `5a` 73.35% / `b4` 78.51% / `b3a-final2` 78.27%。
+   两腿都落在常态范围内。
+
+**⇒ 5a 的空中判据通过**：上报的 rsrp 无跳变，计数器无回归，腿有效。
+
+**⚠ 契约仍是 7/8**（`host device data crossings` FAILED，1.39 读/跳）。
+这是**预期的**：本腿跑**默认配置**（`OCUDU_CE_HOST_GRID=1`），回读仍在。
+把 `HOST_GRID` 默认改 0 后读数才落到 **0.10**（离线已实测），而那要等 **5b（TA）**——
+因为同一次回读还喂 `noise_variance` 与 `ta_us`（§17.7）。
+
+### 17.9 ✅ 批次 5b：把 TA 搬到设备（**离线判据通过**，2026-09-19）
+
+**要解决的**：`ta_us` 是回读网格喂的最后一个上报量。做完它，`OCUDU_CE_HOST_GRID=0`
+才有意义（§17.7），读侧才落到 **0.10/跳**。
+
+#### 17.9.1 算法本体比交接说的短
+
+宿主 236 行里大部分是 DFT 脚手架；本体只有三段：导频补零进 IDFT → 逐 slice IDFT 后累加
+`|·|²`（功率延迟谱）→ 半 CP 环形窗口找峰 + 5 点抛物线插值，除以采样率。
+设备已经有 IDFT kernel（`dft_dit`），所以只需要 **摆放 + 归约** 两个 kernel（K7、K6）。
+
+#### 17.9.2 ★ 输入是 `h`，不是另一份 LSE staging
+
+宿主 TA 的输入 `filtered_pilots_lse` 在这个后端里就是 `pending_fill::fill(grid_est)` 从
+**估计网格**里按 comb 采样出来的——而那份网格是 `h`（K3 的源、K5 读的同一个 buffer）的宿主副本。
+**⇒ 设备侧的 TA 输入就是 `h`**，K7 用 K5 的同一套几何索引它。这一条把"要不要再造一份
+staging / 要不要跨队列搬运"整类问题都消掉了，也是 5b 能变小的原因。
+
+#### 17.9.3 三条 dispatch，一个命令缓冲
+
+```
+K7 (mmse_ta_place)  读 h 的 comb 位置 → 写变换输入（自然序、每位都写：导频或 0）
+dft_dit             每个 slice 一次 N 点 IDFT（DFT 引擎的 kernel，但从这条命令缓冲里发）
+K6 (mmse_ta_profile) 谱累加 + 半 CP 找峰 + 抛物线插值 → 秒
+```
+**为什么不能借 DFT 引擎自己的入口**：它持 front-end 队列，本引擎持 back-end 队列，
+**两个队列之间没有顺序**；三条必须进同一条命令缓冲，靠 encoder 顺序 + 两次
+`memoryBarrierWithScope`。⇒ `mmse_engine::encode_ta()`，在 `encode_reformat()` 里紧挨 K5 调用。
+
+#### 17.9.4 五件"必须是同一份"的东西（每一条都是静默错值的来源）
+
+| # | 量 | 怎么保证一致 |
+|---|---|---|
+| 1 | 几何（h 的行/块/子载波索引） | `hop_geometry` 一个结构体，K5 与 K7 由 `words()` 各取一份——**同一个 `geo` 变量** |
+| 2 | 变换尺寸 | 新增接口 `time_alignment_estimator::get_idft_size(nof_re)`：设备**问宿主**要尺寸，不再自己推公式。⚠ 修正：`min_dft_size` 是 **128**，不是交接里写的 2048（§4.5 的实测值才是对的）|
+| 3 | 导频摆放位置 | `position = (sc − comb 最低位) / stride`，`stride` 用宿主 `estimate_time_alignment()` 的同一条选择规则（连续 RB 掩码 1/2/3；稀疏掩码这条路**暂不覆盖**，回退宿主）|
+| 4 | slice 顺序 | slice = **本跳的** DM-RS 符号 × 层。⚠ `dmrs_sym_bits` 是**时隙**的，频率跳频时本跳只占其中一部分 ⇒ `ta_stage_t` 单独带 `dmrs_slots[]` |
+| 5 | 搜索窗 | `floor(半CP × size × scs × stride)`，与 `estimate_ta_correlation()` 同式；K6 里 `size != 4096` 才插值，与宿主同一条件 |
+
+#### 17.9.5 发布路径（与 5a 同形）
+
+* 结果写进 `gpu_ta` 的 **8 个页对齐槽**（零拷贝 wrap 要求页对齐，`float` 偏移会被拒）；
+  槽在**暂存时**定下，完成时按槽读回（5a 的"读到 0"就是拿错了槽）；
+* 新虚函数 `get_device_ta_seconds()`，`compute_hop_finish()` 优先用它，否则走
+  `estimate_time_alignment()`（宿主路线）；
+* **回读按跳判定**：`host_grid_wanted = HOST_GRID || !(device_rsrp_valid && device_ta_valid)`。
+  设备没覆盖的几何照样回读，宿主照旧算 —— 这让 `HOST_GRID=0` 从"全局开关"变成
+  "覆盖到的跳不回读"，不会把某一跳的上报值切换成陈旧值。
+
+#### 17.9.6 判据与结果
+
+| 层级 | 判据 | 结果 |
+|---|---|---|
+| 算法（L2/L3）| K7 摆放逐位正确；K7→IDFT→K6 与宿主估计器一致 | `L2 K7 PASS: 3 slices x 2048 positions (72 pilots, 6072 zeros), 0 mismatching`；`S12 chain PASS: worst 4.39 ns over 9 delays, 0 misplaced`（分辨率 8.14 ns）|
+| 数据（27 捕获 A/B，`OCUDU_CE_DEV_TA=1` vs `=0`）| `_llr.bin`/`_h.bin`/`.bin` 全 0 差异；`_ce.txt` 除 `ta_us` 外逐字节相同 | **全 27 捕获通过**，`ta_us` 差值 **0.000000 µs**（`wip/ab_ta.sh`）|
+| 接进真实调用路径 | 设备值 == 宿主值（同跳、同一份导频），容差 = 1 分辨率 | 单测 **32 跳全部 OK**，最大偏差 **5.45 ns / 65.10 ns 分辨率**；`[ta_stage] size=256 stride=2 scs=30000 window=18` 与 §4.5 实测常量**逐项吻合** |
+| 空口 | 上报无跳变、计数器无回归 | ✅ **通过**（腿 `5b-devta_0919_1650`，§17.9.7）|
+
+**⚠ 一个必须记住的宿主侧新坑**：引擎的析构里**不要**释放那些被零拷贝 wrap 映射过的页。
+进程级 wrap cache 活得比引擎长，在静态析构期碰 Metal 会在 `All tests PASSED` **之后**
+abort（`mutex lock failed: Invalid argument`，实测）。这段话写在
+`~mmse_engine_impl()` 的注释里。
+
+**⚠ 判据的边界（诚实记录）**：设备 TA 只覆盖**连续 RB 掩码 + 已识别的 comb 图案**
+（PUSCH comb-2 / PUCCH f1,3,4 / PUCCH f2）。稀疏掩码那条路（宿主把导频摆在子载波偏移上、
+stride=1）kernel 的公式其实也覆盖，但要求本跳第一个 PRB 带 DM-RS；没有生产几何用到过它，
+**猜错是静默错值，不猜是缺值** ⇒ 拒绝，回退宿主（连带保留那一跳的回读）。
+
+#### 17.9.7 ✅ 5b 的空中腿（`gnb_gpu_5b-devta_0919_1650_0919_1644`，commit `1826e01e07`）
+
+**腿的形态**：跑 **9 分 18 秒**（543470 radio blocks、0 gaps、assembly 7608496/7608496 → **腿有效**），
+但**流量极不均匀**：89% 的 lane（2962/3326）集中在**最后一分钟**，前面 8 分钟是 UE **反复重接**
+（67 次 PRACH、68 个 tc-rnti、210 次 `Discarding UL HARQ`）——手机在小区边缘掉了又接。
+
+| 项 | 5a 腿（79 s，连续流量）| **5b 腿**（9m18s，最后一分钟才是流量）| 判读 |
+|---|---|---|---|
+| commit | `94df4144a2` | **`1826e01e07`** | 本批 |
+| 读数/跳 | 1.39 | **1.39** | ✅ **按设计不变**（`HOST_GRID` 仍为 1）|
+| 写数/跳 | 0.28 | 0.27 | ✅ |
+| `ce device estimates` | 35211 device / 0 host | **36586 device / 0 host** | ✅ 全跳走设备 |
+| 零拷贝 wrap | — | **82658 hits / 0 failures / 0 misaligned** | ✅ 页对齐槽设计成立 |
+| 契约 | 7/8 | **7/8**（唯一 FAILED = 跨越，预期）| ✅ |
+| **TA 命令（空口）** | 1 条（`ta_cmd=30`）| **30 条，27–34，\|步长\| 均值 0.33 µs、最大 1.6 µs** | ✅ **无跳变** |
+| **CRC 通过率** | 73.35% | 全腿 66.63%，**流量那一分钟 73.90%** | ✅ **同流量下一致** |
+| RF underflow | 0 | 42（散布全腿，集中在重接/空闲段）| ⚠ 见下 |
+
+**CRC 那 6.7 pp 的差额：不是本批，是流量结构**。按**分配宽度**分层后两条腿几乎重合
+（24 PRB 97.7% vs 97.1%；14 PRB 97.4% vs 92.8%；7 PRB 14.0% vs 20.9%；2 PRB **0% vs 0%**，n≈300），
+用 5a 的分层率回代 5b 的混合 → 预测 70.44%；而**只看真正跑流量的那一分钟**：
+5b **73.90%** vs 5a **73.35%**。差额全部来自重接期的 0% 小分配（width=3）。
+
+**42 次 RF underflow 的判读（诚实版）**：它们散布在全腿、并伴随 PRACH 重接，
+没有可比的基线（此前没有任何一条腿跑过 9 分钟 + 68 次重接）；而**本批的 GPU 侧证据是反方向的**：
+5b 新增的三条 dispatch 属于 ch_est 阶段，而 `ch_est=119.4us/lane` 与 5a 的 124.3us **基本不变**。
+唯一变大的是 **`gpu_wait` +47 µs（ch_wt 352→400 µs/lane）**——那不是 5b 改动的阶段，
+更像环境（本机当时负载 4–6）或队列压力。**⇒ 5c 的腿要继续盯这两个数**。
+
+**⇒ 5b 的空中判据通过**：TA 上报无跳变、设备覆盖每一跳、wrap 无失败、契约无回归。
+**跨越数不变是预期的**——读数要在 5c 翻 `HOST_GRID=0` 之后才落。
+
+### 17.10 ✅ 批次 5c：`OCUDU_CE_HOST_GRID` 默认改 0（**离线判据通过**，2026-09-19）
+
+**要解决的**：5a（rsrp）+ 5b（TA）之后，"回读估计网格"这件事**只剩它自己**。
+回读按跳判定（`host_grid_wanted = HOST_GRID || !(device_rsrp_valid && device_ta_valid)`），
+默认翻成 0 后：设备覆盖到的跳不回读，没覆盖的（稀疏掩码、分裂尾块）照旧回读。
+
+#### 17.10.1 ★ 翻默认之前先量它——量出一个上报缺陷
+
+按纪律"+1 之前先离线 A/B"，改默认**之前**先跑 `HOST_GRID=1` vs `=0`（27 捕获中的 3 个），
+结果 `noise_variance` **变了 8–13%**：
+
+```
+syn004_4  HG=1: noise_variance=1.696761549e-01 snr=0.044493   ta_us=-0.034587
+          HG=0: noise_variance=1.474540234e-01 snr=0.051199   ta_us=-0.034587
+```
+
+**根因**：`_ce.txt` 里的 `noise_variance` 是基类 **宿主累加**的 `estimate_noise(...)` 结果，
+而**解调器用的是设备 K4 的值**（`get_device_noise_variance()`，`pusch_demodulator_impl.cpp:506`）。
+回读一关，宿主的输入（`filtered_pilots_lse`）就没了 ⇒ 发布了一个既不是设备值、也不是宿主真值的数。
+（旁证：`OCUDU_CE_NO_K4=1` 强制走宿主时，宿主的累加给出 **1.5e-12**，也就是它的下限——
+说明在这条路上宿主的 `estimate_noise` 本来就没有有效输入。）
+
+**修法**（与 5a/5b 同形）：基类 `do_finish()` 里优先用 `get_device_noise_variance()`；
+宿主只在自己没有设备值时才累加。**`_llr.bin`/`_h.bin` 逐字节不变**（实测，改前 vs 改后 0 差异）——
+变的是"报告现在写的是 LLR 实际用的那个数"。
+
+#### 17.10.2 判据（`wip/ab_ta.sh`，27 捕获，三个臂）
+
+| 臂 | 环境 | 比什么 |
+|---|---|---|
+| A | `HOST_GRID=1 TA_CHECK=1` | 探针判据（设备 TA vs 宿主）+ 参考 dump |
+| B | `DEV_TA=0` | `ta_us` 的设备/宿主数值 |
+| C | **默认**（`HOST_GRID=0`）| 与 A 逐字节比 —— 这就是 5c 的判据 |
+
+```
+captures=27  missing-dumps=0  dump-differences=0  ce-differences-outside-ta=0
+             probe-failures=0  host-grid-differences=0
+worst |ta_us difference| = 0 us
+PASSED: ... neither the TA switch nor the OCUDU_CE_HOST_GRID flip (batch 5c) moved a single published byte
+```
+
+**跨越数（replay 的 module 路线，离线）**：`syn025_25` **4.00 → 2.00 读/跳**、`syn023_18` 2.00 → 1.00
+（replay 自己还有固定的读，所以看不到车道那个 1.39 → 0.10；那个数只能在空口上量）。
+
+#### 17.10.3 单测的口径（重要）
+
+`OCUDU_CE_HOST_GRID` 是**每进程读一次**的 static ⇒ 一个测试进程只能有一个值。
+5a/5b 的两个探针（`OCUDU_CE_RSRP_CHECK` / `OCUDU_CE_TA_CHECK`）都需要宿主网格，
+所以**单测在 `main()` 开头显式 setenv `HOST_GRID=1`**（并在注释里写明为什么），
+而**出厂默认（0）由离线 replay A/B 覆盖**——那本来也是 5c 判据所在的地方。
+K5 的探针也一并加了 `host_grid_wanted` 门（否则它会拿陈旧的网格比对）。
+
+#### 17.10.4 ✅ 5c 的空中腿（`gnb_gpu_5c-hostgrid_0919_1730_0919_1711`，commit `986c991742`）
+
+**84 秒、80059 blocks、0 gaps、assembly 1120742/1120742、6 次 PRACH** —— 形态与 5a 腿相当，
+是一条干净可比的腿。
+
+| 项 | 5a（1.39r）| 5b（1.39r）| **5c（本次）** |
+|---|---|---|---|
+| **读数/跳** | 1.39 | 1.39 | **0.00（0 字节）** ✅ |
+| 写数/跳 | 0.28 | 0.27 | 0.27（903 次 / 3.38 MB，与 5b **同数**：未被 5b/5c 改动）|
+| 契约 | 7/8 | 7/8 | **7/8**（FAILED 项从"读"换成"写"）|
+| `ce device estimates` | 35211 / 0 | 36586 / 0 | **37169 / 0** ✅ |
+| 零拷贝 wrap | — | 0 failures | **0 failures / 0 misaligned** ✅ |
+| **CRC** | 73.35% | 66.63%（流量分钟 73.90%）| **80.08%** ✅ 本线最好 |
+| RF underflow | 0 | 42 | **1** ✅ |
+| lower PHY late | 0 | 1 | **0** ✅ |
+| **TA 命令** | 1 条 | 30 条（步长 ≤1.6 µs）| **19 条，29–33，步长 ≤1.07 µs** ✅ 无跳变 |
+| lane residency | 791.5 µs | 905.7 µs | **862.2 µs**（比 5b 好 43 µs）|
+| lane gap | 239.4 µs | 311.7 µs | **258.2 µs**（比 5b 好 53 µs）|
+| `cpl_unpack`/`cpl_fill` | 0.5 / 0.3 µs | 0.6 / 0.3 µs | **0.1 / 0.0 µs** ✅ 回读没了 |
+| `ch_est` busy | 124.3 µs | 119.4 µs | **123.6 µs** ✅ 与 5a 持平 |
+
+**逐宽度 CRC**（三条腿在同一张表上）：
+
+| width | 5a | 5b | **5c** |
+|---|---|---|---|
+| 24 | 98% (1266) | 97% (1025) | **98% (1318)** |
+| 2 | 0% (295) | 0% (315) | **0% (285)** |
+| 14 | 97% | 93% | **96%** |
+| 25 | 97% | 93% | **99%** |
+| 3 | 48% (88) | 12% (394) | **66% (90)** |
+| 7 | 14% | 21% | **24%** |
+
+⇒ 5c 在**每一个宽度**上都不差于前两条腿，聚合 80.08% 是这条线的最高值；
+5b 那次 66.63% 的低点确认是它自己的**流量结构**（重接期），不是代码。
+
+**⇒ 5c 的空中判据通过**：设备→宿主的数据读**归零**（1.39 → 0.00，0 字节），
+上报量一个没动（离线 27 捕获四个 dump 逐字节相同），契约只剩写好侧那一项。
+`host_grid_published()` 的注释里写明了它的**每跳**语义：设备没覆盖的几何照旧回读——
+所以这个默认翻过去不会把任何一跳的值变成陈旧值。
+
+**写侧是下一批（5d）的全部内容**：903 次写、3.38 MB、0.27/跳，5b 与 5c 同数（未被这两批改动）。
+
+#### 17.10.5 ✅ 5b 的车道代价（+50 µs/lane）：两个假设被实验否掉，正解是**合并 dispatch**
+
+四条腿的 `ch_wt`（载重放+权重的命令缓冲）对照，断点非常干净：
+
+| 腿 | 有 5b？| `ch_est` | **`ch_wt`** |
+|---|---|---|---|
+| `ota-b4_0919_0827` | 否 | 123.2 µs | **339.2 µs** |
+| `5a-pubpath_0919_1230` | 否 | 124.3 µs | **352.3 µs** |
+| `5b-devta_0919_1650` | **是** | 119.4 µs | **399.8 µs** |
+| `5c-hostgrid_0919_1730` | **是** | 123.6 µs | **406.1 µs** |
+
+`ch_est` 四条腿不动（±2%），`ch_wt` **只在带 5b 的两条腿上 +50 µs（+14%）**，`gpu_wait` 同步 +47 µs
+⇒ 是那三条 dispatch（K7 / `dft_dit` / K6）的代价。**算术不是原因**：128 点变换只有几千次浮点。
+
+**❌ 假设一：`dft_dit` 的 32 KB 静态线程组内存**（`threadgroup float2 buf[MAX_FFT_N]`，MAX_FFT_N=4096，
+正好顶到 Apple GPU 的每线程组上限，128 点变换也照占）。
+**实验**：把 scratch 改成 threadgroup **参数**（`setThreadgroupMemoryLength` 按实际 n 声明，三处 dispatch 全改），
+用单测里新加的 `OCUDU_CE_DFT_TIME` 探针测同一个 GPU 窗口：
+
+```
+128 点 x16: 加固前 gpu 24.83us -> 改后 25.25us
+256 点 x16: 30.83 -> 31.37      2048 点 x16: 92.25 -> 92.12
+```
+**GPU 时间一动不动** ⇒ 否掉。**改动已撤回**（它没带来收益，却给最热的前端 DFT 路径加了"长度算错就越界"的风险）。
+
+**❌ 假设二：两次 `memoryBarrierWithScope:MTLBarrierScopeBuffers`**（K7→dft、dft→K6 之间）。
+**实验**：删掉两次 barrier，用 27 捕获的**配对**测量（`OCUDU_CE_TIME` 的 `gpu_path`，DEV_TA=1 减 DEV_TA=0）：
+**+32 µs（有 barrier）→ +28 µs（无 barrier）** ⇒ 也否掉（而且那两个 barrier 本来就不必要：三条 dispatch 绑定的是
+**同一个 MTLBuffer 对象**，Metal 自己会排序；本文件里其它显式 barrier 处理的是"两个 stage 通过**不同** buffer
+对象访问同一块内存"的情形）。
+
+**✅ 正解：把三条 dispatch 合成一条。** 既然代价在 dispatch 本身，就减少它们。新的
+`mmse_ta_chain`（`ocudu_mmse_ta.metal`）**一个线程组一次 dispatch** 做完：摆放 → 变换 → 功率延迟谱 → 找峰 + 插值。
+- 变换用的是**同一个** `ocudu_dft_butterflies()`（抽到 `ocudu_dft_butterflies.h`，`dft_dit` 与它共用）⇒ 只有一份蝶形实现；
+- 顺带消掉：中间 spectra 缓冲（每跳 13 KB 不再写+读）、两次跨 dispatch 依赖、**两个 metallib 之间的 pipeline 切换**；
+- 代价：变换尺寸受线程组内存限制（`mmse_ta_chain_max_size = 2048` = `profiles[2048]`+`work[2048]`=24 KB）——
+  而 2048 **正好是** `get_idft()` 能要到的最大值（275 PRB × 6 导频），更宽的尺寸走宿主路线（连带保留回读）。
+
+**判据（全部通过）**：
+
+```
+S12 chain PASS: size=2048 window=144, worst |diff| 4.39 ns over 9 delays, 0 misplaced   ← 融合 kernel
+        （并与"三条 dispatch"路线逐点对拍：差 < 1 ps，未打印任何不一致行）
+Test 13: the device time alignment matches the host's own estimate on 32 hops            ← 真实调用路径
+ab_ta.sh 27 捕获: dump-differences=0  ce-differences-outside-ta=0  probe-failures=0
+                  host-grid-differences=0  worst |ta_us| = 0 us
+L2 K7 PASS / S12 K6 PASS / All tests PASSED / recoveryCount=0
+配对离线代价: gpu_path 增量  +32us（3 dispatch）→ +22us（1 dispatch）
+```
+
+**⚠ 一个必须记住的坑**：融合 kernel 里**摆放时必须过 `perm` 表**。`dft_dit` 的蝶形假定输入**已经**是
+数字反转序（它的 load 是 `buf[i] = in[perm[i]]`）；融合 kernel 自己摆放，如果按自然序写，就会**二次反转**
+（第一次跑出来恒等于 ~0，与宿主差 200–530 ns）。自然序是**输入缓冲**的序，不是**蝶形**的序。
+
+**⚠ 仍未解释的部分**：三条 → 一条只拿回约 1/3 的离线代价（+32 → +22 µs），而不是 2/3。
+
+#### 17.10.6 ❌ 第三个数：空中腿 `5d-fused_0919_1820` —— **`ch_wt` 一点没动**
+
+| 腿 | TA 的实现 | `ch_est` | **`ch_wt`** | CRC | RT failure |
+|---|---|---|---|---|---|
+| `ota-b4` | 无 | 123.2 | **339.2** | 78.51% | 1 |
+| `5a-pubpath` | 无 | 124.3 | **352.3** | 73.35% | 0 |
+| `5b-devta` | 3 dispatch + 2 barrier（32 KB 变换 scratch）| 119.4 | **399.8** | 66.63% | 42 |
+| `5c-hostgrid` | 同上 | 123.6 | **406.1** | 80.08% | 1 |
+| **`5d-fused`** | **1 dispatch（24 KB 融合 kernel）** | 121.4 | **404.4** | **81.23%** | **0** |
+
+**把 3 条 dispatch 合成 1 条、去掉两次 barrier、去掉中间缓冲、去掉跨 metallib 切换之后，`ch_wt` 一动不动。**
+⇒ 三个结构性假设（线程组内存 / barrier / dispatch 条数）**全部被证伪**。代价不是 TA 的"工作量"，
+而是一个**与实现形态无关的固定量**（~+50 µs，三种形态都一样）。
+
+**剩下两个候选**：
+1. **命令缓冲级的线程组内存预算**：驱动可能按"缓冲内所有 dispatch 的最大线程组内存"给整条命令缓冲
+   定调度模式，于是新加一个 16–32 KB 的 dispatch 会**拖累同缓冲里 K1/K2/K3/K5 那些宽 dispatch 的并发**。
+   这能解释"三种形态都是 +50"（三者都要 16–32 KB），也能解释**为什么孤立的微基准看不到**（那里所有
+   dispatch 都一样大）。若成立，把生产尺寸（128/256）的融合 kernel 压到 **3 KB** 应该能拿回大部分；
+2. **5b 提交里除 dispatch 之外的某处**（宿主侧已排除：`submit` +3.8 µs、`stage` +0.01 µs）。
+
+**⇒ 下一步是决定性的单变量腿：同一个二进制（`503990ca5f`）跑 `OCUDU_CE_DEV_TA=0`。**
+若 `ch_wt` 回到 ~352 ⇒ TA 确认是原因，接着做 3 KB 变体；若仍是 ~404 ⇒ TA 被洗清，
+代价来自 5b 提交的别处，改在离线二分。
+
+**腿本身的品质（顺带）**：CRC **81.23%（本线最高）**、**RF failure 0**（四条腿里唯一）、0 gaps、
+assembly 938350/938350、读 **0.00/跳**、写 0.27（未动）、`ce device estimates` 36927/0、wrap 0 失败。
+**⇒ 融合 kernel 在空口上是正确且更健康的**，`ch_wt` 那笔账与它无关。
+
+#### 17.10.7 ✅ 决定性单变量腿：`5d-devtaoff_0919_1920`（同二进制，`OCUDU_CE_DEV_TA=0`）
+
+**腿自己报了 provenance**（新加的那行，说明它加载的是哪种实现）：
+
+```
+[ta_impl] fused chain: mmse_ta_chain, one dispatch (batch 5d)
+```
+
+| 腿 | TA | `ch_est` | **`ch_wt`** | `busy` | `residency` | 读/跳 | CRC | RT fail |
+|---|---|---|---|---|---|---|---|---|
+| `5a-pubpath` | 无（5b 之前）| 124.3 | **352.3** | 552.1 | 791.5 | 1.39 | 73.35% | 0 |
+| `5b-devta` | 3 dispatch | 119.4 | **399.8** | 594.0 | 905.7 | 1.39 | 66.63% | 42 |
+| `5c-hostgrid` | 3 dispatch | 123.6 | **406.1** | 604.0 | 862.2 | **0.00** | 80.08% | 1 |
+| `5d-fused` | **1 dispatch** | 121.4 | **404.4** | 598.4 | 854.0 | **0.00** | **81.23%** | **0** |
+| **`5d-devtaoff`** | **关掉** | 130.9 | **366.2** | 572.9 | 825.4 | 1.45 | **81.34%** | **0** |
+
+**⇒ TA 确认是原因：`ch_wt` 404.4（开）vs 366.2（关）= +38.2 µs/lane。**
+
+**但这个数不是"工作量"，是"延迟"。** 融合成**一条** dispatch 之后仍然是 +38 µs —— 算术只有几千次浮点、
+一个线程组、一次 dispatch。所以代价是**把一条短的依赖链挂在命令缓冲末尾所延长的那段 GPU 窗口
+（launch/drain 延迟）**，不是它的吞吐。这也解释了为什么三种形态（3 dispatch / 1 dispatch /
+不同线程组内存）量出来是同一个 +38~50：**它们都是同一段尾延迟**。
+
+**⚠ 一个与 TA 无关的 +14 µs**：关掉 TA 的这条腿是 366.2，而 5a（当时还没有 TA 代码）是 352.3。
+这条腿的形态略有不同（`ch_est` 130.9 vs 124.3、`cbs/lane` 1.45 vs 1.39），所以更像腿间波动，不再追。
+
+**⇒ 结论与取舍（决定：接受这 38 µs，记录在案）**
+* 代价：GPU busy +38 µs/lane（≈6%），residency +29 µs（825 → 854）；
+* 收益：**设备→宿主读 1.45 → 0.00/跳**（2749 跳少传 13.5 MB）、宿主的 unpack 消失
+  （`cpl_unpack` 0.6 → 0.2 µs、`cpl_fill` 0.3 → 0.0）、**契约读侧那一半达标**；
+* 空口无代价：两条腿 CRC **81.34% vs 81.23%**（统计上相同）、**RF failure 都是 0**、TA 命令同样平滑
+  （宿主路线 25 条 29–33）。**⇒ 车道有余量，这 38 µs 没有换来任何可测的伤害。**
+
+**若要把这 38 µs 也拿掉（未做，记录备选）**：把它移出 ch_wt 的关键路径——单独一条命令缓冲、
+排在重放之后提交，用 `MTLFence`/event 保证"重放写 h → TA 读 h"的顺序（**同一队列的两条命令缓冲
+只保证 commit 顺序、执行可以重叠**，直接拆开是错的），完成侧的等待本来就会覆盖它。
+这是一个真正的设计改动（多一个新的顺序失效模式），需要自己的阶梯；相对收益只有 6% busy，
+**当前不动**。
+
+---
+
+## 18. 阶段总结：批次 5b + 5c + 5d（2026-09-19）——**上报量全部搬到设备，读侧归零**
+
+### 18.1 一句话
+
+融合车道**最后一个设备→宿主的数据读**（为了算 rsrp / noise_variance / ta_us 而回读整张估计网格）
+在 5c 之后**归零（1.39 → 0.00 读/跳，0 字节）**；三个上报量现在都在设备上算、都在设备上发布；
+TA 为此付出的代价是 **+38 µs/lane 的 GPU 尾延迟**，已用单变量腿定位到性质并**接受**
+（空口无可测伤害：CRC 与关掉 TA 时相同、RF failure 都是 0）。
+
+### 18.2 三个批次各自解决什么
+
+| 批次 | 提交 | 解决的问题 | 关键判据 |
+|---|---|---|---|
+| **5b** | `1826e01e07` | `ta_us` 还在读回网格（宿主 236 行 DFT 估计器的输入来自回读）| 27 捕获 `ta_us` 设备==宿主（**0.000000 µs**）；三个 dump 全 0 差异；空口 TA 命令无跳变 |
+| **5c** | `986c991742` | 回读本身（`OCUDU_CE_HOST_GRID` 默认翻 0）| 27 捕获默认 vs `HOST_GRID=1` **四个 dump 逐字节相同**；空口 **读 0.00/跳** |
+| **5d** | `503990ca5f`、`413ef13f94` | 5b 引入的 +50 µs/lane 车道代价 | 融合成一条 dispatch；单变量腿定位为尾延迟；CRC 81.23%、RF failure 0 |
+
+### 18.3 关键设计决定（每条一句话 + 为什么）
+
+1. **TA 的输入是 `h`，不是另一份 staging**。宿主 TA 的输入 `filtered_pilots_lse` 在这个后端里就是
+   网格（= `h` 的宿主副本）按 comb 采样出来的 ⇒ 设备直接读 K5 读的同一个 buffer，几何与 K5 共用
+   `hop_geometry`。**这一条消掉了"再造一份 staging / 跨队列搬运"整类问题。**
+2. **三条 dispatch 编进重放自己的命令缓冲**（5b）→ **后来合成一条**（5d）。原因：两个队列之间没有顺序；
+   而三个结构的代价一样 ⇒ 代价在"把短链挂在命令缓冲末尾"的尾延迟，不在结构。
+3. **变换实现只有一份**（`ocudu_dft_butterflies.h`，`dft_dit` 与融合 kernel 共用）。
+   复制一份蝶形 = 复制 twiddle 约定 / 数字反转序 / N/2 回绕这三处最容易漂移的地方。
+4. **摆放必须过 `perm` 表**：蝶形假定输入已是数字反转序（`dft_dit` 的 load 是 gather）。
+   自然序是**输入缓冲**的序，不是**蝶形**的序——第一版就是在这里二次反转、恒定读回 ~0。
+5. **发布路径与 5a 同形**（页对齐旋转槽 + 虚函数钩子 + 按跳判定的回读门）。
+   5c 顺手修掉一个真缺陷：`_ce.txt` 的 `noise_variance` 一直是**宿主**累加值，而 LLR 用的是设备 K4 值。
+6. **设备侧宁缺勿错**：稀疏 RB 掩码、>2048 的变换、设备没覆盖的几何 ⇒ **拒绝并回退宿主**
+   （连带保留那一跳的回读）。猜错是静默错值，不猜是缺值。
+
+### 18.4 判据证据链（可复跑）
+
+```
+单测（真实调用路径）: L2 K7 PASS / S12 chain PASS（4.39 ns of 8.14 ns，且与三条 dispatch 逐点差 <1 ps）
+                      Test 12 PASS / Test 13 PASS（设备 TA == 宿主，32 跳全部 <1 分辨率）
+                      All tests PASSED / recoveryCount=0
+离线 A/B（27 捕获）:  bash wip/ab_ta.sh
+                      captures=27 missing-dumps=0 dump-differences=0 ce-differences-outside-ta=0
+                      probe-failures=0 host-grid-differences=0  worst |ta_us| = 0 us
+空口                 : 见 18.5 的数字表；每腿先看 radio sample continuity(=0 gaps) 与 host sample assembly(全量)
+```
+
+### 18.5 五条空中腿的数字
+
+| 腿 | 提交 | TA | 读/跳 | 写/跳 | 契约 | CRC | RF failure | `ch_est` | **`ch_wt`** |
+|---|---|---|---|---|---|---|---|---|---|
+| `5a-pubpath_0919_1230` | `94df4144a2` | 宿主 | 1.39 | 0.28 | 7/8 | 73.35% | 0 | 124.3 | 352.3 |
+| `5b-devta_0919_1650` | `1826e01e07` | 3 dispatch | 1.39 | 0.27 | 7/8 | 66.63%(a) | 42(b) | 119.4 | 399.8 |
+| `5c-hostgrid_0919_1730` | `986c991742` | 3 dispatch | **0.00** | 0.27 | 7/8 | 80.08% | 1 | 123.6 | 406.1 |
+| `5d-fused_0919_1820` | `503990ca5f` | **1 dispatch** | **0.00** | 0.27 | 7/8 | **81.23%** | **0** | 121.4 | 404.4 |
+| `5d-devtaoff_0919_1920` | `413ef13f94` | **关** | 1.45 | 0.33 | 7/8 | 81.34% | **0** | 130.9 | **366.2** |
+
+(a) 这条腿前 8 分钟是 UE 反复重接（67 次 PRACH），只看真正跑流量的那一分钟是 **73.90%**（§17.9.7）；
+(b) 42 次 underflow 全部伴随重接/长空闲，无可比基线。
+
+**契约 7/8 的唯一 FAILED 项已经从"读"换成"写"**：判据要求读 0 **且**写 0，
+现在读是 **0.00**，写是 **0.27/跳（903 次 / 3.38 MB）** ——**5b/5c/5d 三批都没动过写侧**，
+它就是下一批（5e）的全部内容。
+
+### 18.6 未做的边界（诚实清单）
+
+| # | 边界 | 现状 |
+|---|---|---|
+| 1 | **写侧 0.27/跳** | 下一批（5e）。活着的计数点：估计器的 y pad 行 memset、14 符号 epoch 上传（56 B）、demapper 的 `sym_staged`/`nv_staged`（`demodulation_mapper_metal.cpp:264/268`，只在缓冲非页对齐时才走宿主）。**先量清各占多少** |
+| 2 | 稀疏 RB 掩码（非连续分配）| 设备不覆盖 ⇒ 回退宿主（kernel 公式其实支持，但要求本跳第一个 PRB 带 DM-RS；没有生产几何用到过）|
+| 3 | 变换尺寸 > 2048 | 融合 kernel 的线程组内存上限；`get_idft()` 的最大值正好是 2048，所以生产够用，更宽回退 |
+| 4 | 分裂尾块几何 | 重放本身就不挂，TA 自然不挂 |
+| 5 | `nof_layers > 1` | 只在单测里出现过（几何带每层 comb）|
+| 6 | TA 的 38 µs | **接受**；若要拿掉见 18.7 |
+| 7 | 5a 的 K5 加固 | 只在 `syn025_25`/`syn004_4` 上回归过，另外 5 种形状没跑 |
+
+### 18.7 备选：把 TA 移出关键路径的 "fence 实验"（未做）
+
+见 §18.7 的展开（同一节，下文）。**结论先行**：收益 38 µs（≈6% busy），代价是引入一个新的
+**顺序失效模式**（用错方向就是"间歇性错的 TA"），而当前这 38 µs 没有换来任何可测伤害
+（CRC 81.23% vs 81.34%、RF failure 都是 0）。**记录在案，等真的缺余量时再做。**
+
+#### 18.7.1 要解决的问题
+
+今天的结构是：重放（K2 写 `h`、K3/K5 读 `h`）与 TA 链**在同一条命令缓冲**里，末尾追加。
+这带来两个后果：
+1. **谁等这条命令缓冲，就等了 TA 的 38 µs**。融合车道里，这条缓冲是估计器自己提交的
+   （`event` 顺序），车道通过 back-end stage fence 等它（`lane fence signals/waits=6758/6758`）——
+   也就是说**车道的 LLR 路径在等一个它根本不需要的上报量**（TA 的输出只有发布路径读）；
+2. 宿主的 `finish()`/完成路径也在等同一段。
+
+#### 18.7.2 为什么不能简单拆开
+
+* **同一队列的两条命令缓冲只保证 commit 顺序**：Metal 保证"先 commit 的先开始"，但它们的**执行可以重叠**。
+  直接把 TA 拆成第二条缓冲，TA 可能**在 K2 写完 `h` 之前**就去读 `h` ⇒ 静默错的 TA（间歇性，最难查）；
+* **不同队列之间连 commit 顺序都没有**（这正是 5b 把三条 dispatch 放进同一条缓冲的原因）；
+* 所以拆开**必须**有一个设备侧的显式依赖。
+
+#### 18.7.3 fence / event 是什么
+
+Metal 提供两个 GPU 侧的同步原语（都不需要宿主往返）：
+
+| 原语 | 作用域 | 用法 |
+|---|---|---|
+| `MTLFence` | **同一队列内** | 写侧 encoder `updateFence:`；读侧 encoder `waitForFence:` |
+| `MTLEvent` | **跨队列**（同一 device）| `encodeSignalEvent:value:` / `encodeWaitForEvent:value:` |
+
+本实验只需要前者：在重放的命令缓冲里、**最后一个写 `h` 的 dispatch 之后** `updateFence:fence`；
+在 TA 自己的命令缓冲里、TA dispatch **之前** `waitForFence:fence`。这样：
+* TA 一定在 K2 之后读 `h`（顺序由 GPU 保证，不需要宿主等待）；
+* 两条缓冲可以**并行提交**，TA 的尾延迟不再落在重放那条缓冲的窗口里。
+
+#### 18.7.4 期望收益与代价
+
+* **收益**：`ch_wt` 从 404.4 回到 ~366（甚至更低，如果 TA 与后续 stage 重叠），
+  车道的 fence 等待不再包含上报量；
+* **代价 / 新风险**：
+  1. **每跳多一次 commit**：宿主的 commit 成本是 ~10–45 µs（`submit`/`gpu_wait` 量级），
+     很可能吃掉一部分甚至全部 38 µs —— **必须实测**；
+  2. **值的读回必须重新推导**：完成路径要等的是"哪条缓冲写了这个槽"。今天是同一条缓冲，
+     所以"等批次"就等于"等 TA"；拆开之后必须在完成时**额外等 TA 那条缓冲**（引擎的
+     `wait_pending()` 等的是队列上**最新提交**的那条，所以提交顺序决定它等谁——顺序错了就是读到上一跳的值）；
+  3. **burst 模式的交互**：融合车道把估计器的 dispatch 放进共享 burst 由车道提交，
+     TA 拆出去后就不可能待在 burst 里，fence 必须跨"burst → TA"；
+  4. 失败模式是**间歇性错值**（时序相关），恰恰是本项目最贵的一类缺陷；
+* **判据（如果做）**：`ch_wt` 与 `lane fence waits` 的差值、`ta_us` 与宿主逐跳对比（`OCUDU_CE_TA_CHECK`）、
+  27 捕获 dump 全 0 差异、空中腿 CRC/RT 与 5d/5d-devtaoff 同量级。
+
+#### 18.7.5 决定
+
+**不做。** 理由：38 µs 是 lane busy 的 ~6%，而 5d/5d-devtaoff 两腿证明它**没有换来任何可测伤害**
+（CRC 81.23% vs 81.34%、RF failure 0/0、TA 命令同样平滑）；换来的是一个间歇性错值的可能性和
+一条新的阶梯。**等真的缺余量（例如车道加了新的 stage）时再拿出来。**
+
+---
+
+## 19. 批次 5e + 5f + 5g：写侧从 0.27/跳 一路做到 **0**（2026-09-19）
+
+### 19.0 结果一览（写侧）
+
+| 阶段 | 提交 | 空中写次数/腿 | 空中写字节/腿 | 剩余写点 |
+|---|---|---|---|---|
+| 5d（起点）| `503990ca5f` | 903（0.27/跳）| 3 288 328 B | 等化器 gather 表 6 次/几何变化 + `h_starts` 4 次/跳 + epoch 1 次 |
+| **5e**（设备建 gather 表）| `6e53109ffa` | **501**（0.13/跳）| **5 556 B** | `h_starts` + epoch |
+| **5f**（starts 进参数块，`9e36fef3ed`）| `9e36fef3ed` | 待空中腿（replay 5 → **1**/跳）| 待空中腿（预计 ~56 B）| **只剩 epoch 表（1 次/配置）** |
+| **5g**（epochs 设备自算，§19.6）| `45fa002d6c` | **0**（空口腿 `5g-epochs`：`0.00 write(s)/跳`、分项表空）| **0** | **无** |
+
+**⚠ 契约要的是 0**：5g 之后写侧真的到 0（`<no host write was attributed to a site>`），
+契约的第八项才可能第一次通过——**空中腿待跑**（§19.6 末尾）。
+
+### 19.0b 细节：5e 第一步——**写侧 0.27/跳 是谁**（2026-09-19，离线量清）
+
+### 19.1 先装仪表（提交见下）
+
+`phy_pipeline_crossings` 原来只有总数（读/写各一个计数器）。5e 要的是**哪一个 store**，
+所以加了按站点记账：`count_host_write_site("name", bytes)`——**它内部仍然调用
+`count_host_write()`**，所以"分项"不可能和"判据用的那个总数"对不上；分项表印在契约那一行下面，
+按次数排序。八个活着的写点全部挂了名字：
+
+| 站点 | 触发条件 |
+|---|---|
+| `equalizer: table uploaded (cache miss)` | gather 表内容变了（分配变了）|
+| `ce: y pad rows cleared (host)` | **仅在宿主自己 staging y 时**（`record_device_y_stage()` 返回 false）|
+| `ce: y pad slots cleared (host)` | `OCUDU_CE_HOST_Y_PADS=1`（默认关）|
+| `ce: symbol start epochs uploaded` | 14 个符号起始时刻变了（56 B）|
+| `ce: cfo slot carried forward (host)` | `OCUDU_CE_CFO_CARRY_HOST`（默认关）|
+| `demapper: equalized symbols staged (host)` | 它的缓冲**不是**页对齐时的回退 |
+| `demapper: noise variances staged (host)` | 同上 |
+| `dft: input copied to the device (wrap refused)` | 零拷贝 wrap 被拒（`wrap_copies`）|
+
+### 19.2 量出来的结果
+
+**离线（27 捕获的 replay，冷缓存 ⇒ 每次都上传）**：
+
+| 捕获 | `equalizer: table uploaded` | `epochs` |
+|---|---|---|
+| `syn001_3` | 6 次 / 3 380 B | 1 次 / 56 B |
+| `syn004_4` | 6 次 / 4 436 B | 1 / 56 |
+| `syn013_10` | 6 次 / 10 772 B | 1 / 56 |
+| `syn023_18` | 6 次 / 19 220 B | 1 / 56 |
+| `syn025_25` | **6 次 / 26 612 B** | 1 / 56 |
+
+**⇒ 分配越大，gather 表越大（≈1065 B/PRB）**，其它站点一个都没响。
+
+**空中腿的 903 次写 / 3 379 988 B 对得上**：`903 / 7 = 129` 个"上传事件"，
+`129 × 26 612 = 3.43 MB` + `129 × 56 = 7.2 KB` ≈ **3.44 MB vs 实测 3.38 MB（差 2%）**
+——差额来自那 129 个事件的几何不都是 25 PRB（日志里也有 24/23/14/1 PRB）。
+**⇒ 写侧 = 等化器 gather 表的 6 次上传 + CE 的 epoch 表 1 次，发生在"分配变了"的那 ~4% 的跳上。**
+
+**被排除的（有证据）**：
+
+| 站点 | 排除依据 |
+|---|---|
+| `ce: y pad rows cleared` | `[metal_stats] mmse_ce … device_y_writes=4724 y_write_fail=0` ⇒ 每一组都由**设备**写 y，宿主路径没走到 |
+| `ce: y pad slots cleared` | 默认关（批次 3a 已把 tail pad 交给设备）|
+| `demapper: … staged` | 缓冲是 `page_aligned_allocator` ⇒ `sym_direct`/`nv_direct` 为真（replay 里也没响）|
+| `dft: input copied` | `[metal_stats] dft … wrap_copies=0`（四条腿全是 0）|
+| `ce: cfo slot carried forward` | 默认由设备进位（`OCUDU_CE_CFO_CARRY_HOST` 未设）|
+
+**为什么是 ~4% 的跳**：gather 表**描述分配**（注释原话："the tables describe the allocation and do
+not depend on which symbols a dispatch carries"），缓存按**内容**命中；调度器换一次授予的 PRB
+（日志里 `prb=[0,25) / [11,25) / [0,1) / [0,14) …` 一直在变）就 miss 一次 ⇒ 3379 跳里 129 次。
+
+### 19.3 ✅ 5e 已做：设备侧建表（2026-09-19）
+
+**做法**与 §19.3 原计划一致：新 kernel **`eq_build_gather`**（`ocudu_equalizer.metal`）
+一个线程一个 (分配 PRB, 跳内符号) 把 tap 表和 entry 表**在设备上展开**——几何就是
+`rb_words[]` / `first_symbol` / `nof_symbols` / `dmrs_sym_bits` / `active_re(_dmrs)`，
+全部每跳本来就作为 kernel 参数进设备（控制，不是数据）。
+
+* 计划对象 `ch_gather_desc` 新增 **`geometry`**（它本来就是"展开"的来源，只是之前没留下来）；
+* 表写在**引擎自己的两个页对齐缓冲**里（按最大尺寸一次分配：14 tap + 46200 entry ≈ 370 KB），
+  由零拷贝 wrap 成 Metal buffer，**只在几何变化时**才重新编码 builder dispatch
+  （设备缓冲跨跳保留，所以几何不变就白拿）；
+* 判据用的"表存在"信号从"宿主 blob 非空"改成"两个 buffer 非 nil"——**这里踩了一个坑**
+  （见下）。
+
+**判据（全部通过）**：
+
+```
+1) 两条实现逐字节一致（OCUDU_EQ_TABLE_CHECK，27 捕获 × 每个几何）:
+   captures with identical device-built vs host-built tables: 27  mismatching: 0
+2) 27 捕获 A/B（默认 vs OCUDU_EQ_DEV_TABLES=0）: 四个 dump（_llr/_h/.bin/_ce.txt）全 0 差异
+3) 写入/跳: 7 → 5（replay 的 module 路线）
+4) 等化器单测 ALL OK；信道估计单测 All tests PASSED；recoveryCount=0
+```
+
+**⇒ 26 KB 的那次上传没了**（空中腿的写字节数应从 3.38 MB 掉到 ~0.3 MB），
+但**写次数还留着 5/跳**：4 × `h_starts`（每符号估计的起始偏移表，4–8 B）+ 1 × epoch 表（56 B）。
+按契约"次数才是判据"的口径，**写侧还没到 0**。
+
+**★ 这一批踩到的两个坑（都值得记）**：
+
+| # | 坑 | 症状 | 正解 |
+|---|---|---|---|
+| 1 | **entry 的 `dest` 写成了"PRB 内序号"** | 每个 PRB 之后的元素都盖掉第一个 PRB 的槽位；`_llr` 差 ~3%，`.bin` 却仍相同（解码没翻） | `dest` 是**符号内**的序号：`rank * n_act + d`。**是设备/宿主逐字节对拍第一次跑就抓到的** |
+| 2 | **`eq_encode_gather_dispatch()` 用"宿主 blob 非空"当作"表已建"的代理** | 设备路径不建宿主 blob ⇒ gather dispatch **根本没编码**，等化跑在一个没人填的 y 上（`_llr` 又差 ~3%） | 判据改成"两个 buffer 非 nil"；并且 builder 失败时必须把 `valid` 清掉，否则 `eq_gather_taps()` 会把**上一个几何**的表交给刚上传了宿主表的那次 gather |
+
+**⇒ 两条教训**：(a) 这个端口里"XX 非空"当代理判断的地方，一旦换了实现就会静默失效；
+(b) **两个实现的逐字节对拍要在写代码的同一步就装上**——上面两个坑都是它抓的，
+而且第二个坑只有它能抓（`.bin` 都没变）。
+
+### 19.3a ✅ 5e 的空中腿（`5e-devtables_0919_2000_0919_1838`，commit `5bd33639ab`）
+
+**腿自己报了 provenance**（两行，正是为这种问题加的）：
+
+```
+[ta_impl] fused chain: mmse_ta_chain, one dispatch (batch 5d)
+[eq_impl] gather tables: built on the device (eq_build_gather)
+```
+
+| 项 | 5d（等化表由宿主上传）| **5e（设备建表）** |
+|---|---|---|
+| **写字节/腿** | **3 288 328 B** | **5 556 B**（**÷592**）|
+| 写次数/跳 | 0.27（903 次）| **0.13（501 次）** |
+| 写侧分项（腿自己印的）| — | `equalizer: table uploaded` **500 次 / 5 500 B**（= 每 run 的 `h_starts`，平均 11 B）+ `ce: symbol start epochs` **1 次 / 56 B** |
+| 读/跳 | 0.00 | **0.00** |
+| 契约 | 7/8 | 7/8（唯一 FAILED 仍是写侧）|
+| CRC | 81.23% | 79.24%（逐宽度一致：w24 99→98、w14 96→98、w23 97→99、w2 0→0）|
+| RF failure | 0 | **0** |
+| `ce device estimates` | 36927/0 | **41272 / 0** |
+| wrap | 0 失败 | **0 失败 / 0 misaligned** |
+| `ch_est` / `ch_wt` | 121.4 / 404.4 | **115.8 / 385.9**（本批不动 TA，属腿间波动）|
+
+**⇒ 26 KB 的 gather 表上传确实没了**：写字节从 3.38 MB 掉到 5.5 KB（99.8%），
+剩下的正好是我预测的两个点。**注意空中与 replay 的差别**：replay 里 `h_starts` 是 5 次/跳
+（冷缓存），空中是 **0.13/跳**——因为它按**内容**缓存，同一个几何的偏移表反复命中；
+只有分配变化时才真的上传。⇒ **"按内容缓存 + 小表"让它在空中几乎免费，但按次数判据仍是 500 次。**
+
+**⇒ 5e 的空中判据通过**：写字节数掉两个数量级，其余指标无回归（0 gaps、0 RT、读数 0、设备估计覆盖每一跳）。
+
+### 19.3b 剩余写点（下一步）
+
+| 站点 | 次数/跳 | 大小 | 说明 |
+|---|---|---|---|
+| `equalizer: h_starts 表上传` | 4 | 4–8 B | 每个 run 的"每符号估计起始偏移"表；**内容是几何**（估计器宿主侧算的偏移），可由设备从 `re_offsets` 类几何算出 |
+| `ce: symbol start epochs 上传` | 1 | 56 B | 14 个符号起始时刻；由 cp+scs 决定，同样可在设备算 |
+
+两者都小（~88 B/跳），但**按次数判据它们和 26 KB 一样重**。下一批（5f）把它们也搬到设备，
+写侧才可能真正到 0。
+
+**方向：让设备自己建这 6 张表**，而不是宿主每次分配变化就上传 ~26 KB。
+表的内容是**纯几何**——`taps[k] = {symbol, entry_base, nof_entries}`、
+`entries[k] = {subc, dest}`——正是 K3（reformat）在设备上**已经在算**的那套映射
+（`re_offsets` / `dmrs_re_bits` / DC 位置），而几何本来就每跳作为 kernel 参数送进设备
+（那是"控制"，不是"数据"，契约不管）。
+
+* **收益**：写侧从 **0.27 → ~0.00/跳**（剩下的只有 epoch 表，56 B，同样可由 cp+scs 在设备算）；
+* **风险**：这条路径在 **LLR 关键路径**上（等化器的 gather 是数据通路），
+  改它必须过完整判据：27 捕获 `_llr` 逐字节 + BLER/集成测试 + 单测 + 空中腿；
+* **代价**：新 kernel（本质是 K3 的逆映射）+ 宿主接线 + 阶梯，规模与 5a/5b 相当。
+
+### 19.4 判据（每个会话都能看到的仪表）
+
+装了仪表之后，**任何一腿的契约行下面都会自己印出写侧分项**（按次数排序），
+所以"写侧还剩谁"不再需要靠算术反推：
+
+```
+[phy_pipeline]   host device data crossings: … = 0.00 read(s) + 0.27 write(s) per hop; …
+    equalizer: table uploaded (cache miss)        129 call(s),   3433000 bytes
+    ce: symbol start epochs uploaded              129 call(s),      7224 bytes
+```
+（上表是 5c 腿的数字按 19.2 的算术还原出来的形态；下一次跑腿会印真实值。）
+
+**一个副产品**：分项之和不等于总数时，脚本/读日志的人立刻能看出"还有一个匿名写点"——
+这正是第一次量的时候发生的事（当时只认出 1/7，后来才找到等化器与 DFT 两处）。
+
+
+### 19.5 ✅ 5f：`h_starts` 进参数块 + **修掉一个既有的批处理缺陷**（`9e36fef3ed`）
+
+**做法**：每 run 的小表（4–8 B）不再上传成 Metal buffer，而是**放进 `equalize_strides`
+参数块**（`uint h_starts[14]`）。理由是它本来就是**几何**——估计器的每符号 RE 布局，宿主侧算出来的，
+而且**已经用同样的方式（kernel 参数）送给重放 kernel**（`reformat_stage::offsets` 就是 setBytes）。
+顺带：单符号 kernel（`equalize_mxn`）**根本不读这张表**（它在 h 绑定的偏移上读），
+所以它那次一条目的上传是纯浪费，一并去掉。
+
+**★ 改这个表暴露了一个既有缺陷**（**先 stash 我的改动、在基线上复现，确认不是自己引入的**）：
+
+* 症状：单测 `OCUDU_EQ_DEFER_ENCODE=1` 的 **12 符号批处理** → `bad symbols: 11 of 12`；
+* 根因：**宿主 staging 的 run** 会把估计 memcpy 进自己的紧凑 run 缓冲（步长 `h_stride`），
+  但起始表里填的却是**调用方原来的偏移** ⇒ 批处理里每个符号都读了**第一个符号**的估计；
+* 正解：起始表现在说的是"符号真正在哪"——staged run 用 `k * h_stride`（紧凑副本），
+  device run 用估计器的绝对起始；
+* 影响面：**车道自身不受影响**（它读设备上的估计，起始本来就是对的），
+  但**任何批处理宿主 staging 估计的路线**都受影响（单测一开阀门就现形）。
+
+**判据**：
+
+```
+channel_equalizer_metal_unit_test（OCUDU_EQ_DEFER_ENCODE=1）: bad symbols 11 -> 0，ALL OK
+channel_equalizer_metal_unit_test（默认模式）: ALL OK
+port_channel_estimator_metal_mmse_unit_test: All tests PASSED / recoveryCount=0
+27 捕获 A/B（设备表 vs OCUDU_EQ_DEV_TABLES=0）: 四个 dump 全 0 差异
+replay 写入/跳: 5 -> 1（只剩 epoch 表）
+```
+
+**⇒ 5f-2（已做，见 §19.6）**：把 `symbol_start_epochs`（14 floats = 56 B，由 cp+scs 决定）搬到设备——
+它被 K4（噪声）与 K0-a 的三个 CFO kernel 读取，做法是**由 kernel 从 (cp, scs) 直接算**，
+而不是再传一张表。做完它写侧为 0，契约的第八项才有机会通过。
+
+### 19.6 ✅ 5g：epochs 由设备从 (cp, scs) 算——**写侧真的到 0**（`45fa002d6c`，2026-09-19）
+
+**目标**：`upload_symbol_start_epochs()` 那一次 56 B 的 host→device 写是契约停在 7/8 的唯一原因。
+四个读者（K4 `mmse_noise`、`mmse_pilots_cfo`、`mmse_pilots_apply_cfo`、`mmse_pilots_sigma2`）需要的
+只是"某个 slot 符号的起始时刻"，而这个值是 **(numerology, cyclic prefix) 的函数**——宿主能算，设备也能算。
+
+#### 19.6.1 做法
+
+1. **新头文件 `ocudu_mmse_epochs.h`**：把宿主公式（`initialize_symbol_start_epochs()`）用
+   **纯 C++ 与 MSL 都能编译**的形式写一遍。MSL 无法 include `cyclic_prefix.h`（double、std::string、
+   `ocudu_assert`），所以 CP 长度规则必须在这里重述一次；**"重述必须有对拍"**，于是：
+   * 本文件的 `epoch_geometry_of()` 在每个配置的第一跳上把它与**宿主自己的数组**逐位比较并打印
+     `[epoch_check] numerology=… 14 of 14 slot symbols bit-identical to the host array`；
+   * 单测把**整个定义域**（2 种 CP × 5 种 numerology × 每个 slot 符号 = **140 个值**）与
+     `cyclic_prefix::get_length()` 逐位比较，并且**是 GPU 算的**——为此加了一个探针 kernel
+     `mmse_epoch_probe`（`ocudu_mmse_reformat.metal`，与三个真 kernel 同编译选项）。
+2. **K4、`apply_cfo`、`sigma2` 三个 kernel 自己算**：`(numerology, cp_extended)` 两个标量追加进各自的
+   参数结构（`mmse_noise_params` / `mmse_pilots_params` / `mmse_sigma2_params`——后者在
+   `ocudu_mmse_pilots_power.metal` 里还有一份镜像，一起改），宿主 mirror 的 sizeof/offset 全部钉住。
+3. **CFO 估计 kernel 例外**：它拿的是两个 DM-RS 符号起始时刻之**差**（`epoch_span`，一个 float）；
+   **K4 也例外**：它拿的是本跳每个 DM-RS 符号的起始时刻（`dmrs_epochs[4]`）。
+   两处的原因都是量出来的，见 19.6.3——**把"设备自算"塞进一个输出来自长累加的 kernel，会动发布位**。
+   真正在设备上自算的是 K0-a 的 `apply_cfo` 与 `sigma2`（这两者的输出经 27 捕获 A/B 逐字节确认不变）。
+4. 删掉 `gpu_epochs`（分配 + 上传 + `count_host_write_site("ce: symbol start epochs uploaded")`）。
+
+**为什么设备能逐位复现宿主的 float**（写在头文件里，也是这个做法成立的前提）：
+宿主 `cp.get_length(i).to_seconds() * scs_to_khz(scs) * 1000`
+= `cp_len_kappa × 64/(480000×4096) × scs_khz × 1000` = `cp_len_kappa × scs_khz / 30720`，
+而 `scs_khz = 15 << mu`、`30720 = 15 × 2048` ⇒ **恰好是 `(cp_len_kappa << mu) / 2048`**：
+分子是 ≤512 的整数（float 精确），分母是 2 的幂（除法精确），逐项累加也精确
+（所有值都是 2⁻¹¹ 的倍数且 < 16）——**这一步没有任何舍入**，所以 fast math 也无从改变结果。
+
+#### 19.6.2 判据（离线，全部通过）
+
+```
+port_channel_estimator_metal_mmse_unit_test（OCUDU_CE_TA_CHAIN=1）:
+    S12 epoch: 140 of 140 values bit-identical to the host rule   ← GPU 探针，全定义域
+    All tests PASSED / recoveryCount=0
+channel_equalizer_metal_unit_test（默认 + OCUDU_EQ_DEFER_ENCODE=1）: ALL OK
+27 捕获 HEAD-二进制/HEAD-kernels vs 新二进制/新-kernels（wip/ab_replay_bins.sh）:
+    四个 dump _llr.bin/_h.bin/.bin/_ce.txt 逐字节相同（0 差异，27/27 捕获）
+    写侧 1.00 → 0.00/跳；分项表：A 一个站点 → B `<no host write was attributed to a site>`
+    读数不变（1–2 次/捕获：那是 replay 工具自己回读 host grid，不是车道的）
+    配对断言通过（A 无 `[epoch_impl]`、B 有）
+每条腿的日志自带两行证据：
+    [epoch_impl] symbol start epochs: nothing is uploaded; K0-a's CFO kernels derive them on the
+                 device from (numerology, cp), while K4 and the CFO estimator take them as parameters
+    [epoch_check] numerology=…  cp=…  14 of 14 slot symbols bit-identical to the host array
+```
+
+#### 19.6.2b ✅ 空中腿 `5g-epochs_0919_1945`（`45fa002d6c`）——**契约第一次 8/8**
+
+```
+[phy_pipeline] contract (mode=gpu):
+  radio sample continuity: 0 gaps over 69549 blocks, 0 timestamp-0 blocks            -> OK
+  dft radio inputs:        190330 of 190331 transforms read the radio buffer        -> OK
+  zero-copy wraps:         81860 hits, 31353 creates, 0 failures, 0 misaligned      -> OK
+  ce device estimates:     39336 device, 0 host                                      -> OK
+  host device data crossings: 0 read(s) (0 B) + 0 write(s) (0 B) over 3576 device hop(s)
+                              = 0.00 read(s) + 0.00 write(s) per hop   <no host write was attributed to a site>  -> OK
+  cfo compensation:        0 round trips over 973602 symbols, 0 commands             -> OK
+  baseband metrics:        0 symbols measured for 973602 processed                   -> OK
+  host sample assembly:    973602 of 973602 read where the radio put them, 0 copied  -> OK
+[phy_pipeline] contract MET (8 of 8 checks applicable)
+```
+
+**⇒ 车道的两个 crossing 判据第一次完全达成**（读侧 5c 清零、写侧 5g 清零），写侧历史：
+903 次（5d）→ 501 次（5e）→ 1 次（5f）→ **0 次**（5g）。
+
+**这一腿同时补上了 5f-1 的空中判据**（该提交此前只有离线判据）。
+
+| 指标 | `5g-epochs` | 对照（`5e-devtables`）|
+|---|---|---|
+| 契约 | **8/8 MET** | 7/8（写侧未过）|
+| 读/写 每跳 | **0.00 / 0.00** | 0.00 / 0.13 |
+| CRC 总 | 2832/3576 = **79.19%** | 79.24% |
+| RT failure | **0 / 69549** slots | 0 |
+| gaps / assembly | 0 / 973602 全量 | 0 / 全量 |
+| 设备估计覆盖 | 39336 device / 0 host | 41272 / 0 |
+| `busy split` | ch_est **118.7** / ch_wt **379.9** / eq_demap **101.1** µs | 115.8 / 385.9 / — |
+| lanes | 3576，cbs/lane 3.38，dropped/carried 0 | 3752，3.39，0 |
+| 设备侧失败计数 | corr_build_fail 0 / y_write_fail 0 / eq staged 0 | 全 0 |
+
+**CRC 按分配宽度分层**（聚合值会被流量结构骗，所以逐层看）——两条腿同型：
+
+| 宽度 | 5g n / OK% | 5e n / OK% |
+|---|---|---|
+| 2 | 255 / 0.00% | 280 / 0.00%（**既有现象**，两腿相同）|
+| 3 | 134 / 44.03% | 124 / 51.61% |
+| 5 | 129 / 29.46% | 160 / 34.38% |
+| 7 | 183 / 16.39% | 175 / 13.71% |
+| 14 | 250 / 95.60% | 261 / 97.70% |
+| **24**（数据流量主体）| **1501 / 97.20%** | 1606 / 97.95% |
+| 25 | 206 / 97.09% | 186 / 89.78% |
+| 最忙的一分钟 | 3549 次 / **79.6%** | 3672 次 / 80.1% |
+
+差异在两个方向上都出现（25 PRB 这一腿反而好 7.3 pp），且总 CRC 与"最忙一分钟"几乎相同
+⇒ **不是本批引入的回归，是空口条件/流量结构的噪声**。
+
+自证行（每条腿都印）：`[epoch_impl] …` + `[epoch_check] numerology=0 cp=normal 14 of 14 slot
+symbols bit-identical to the host array`；日志里没有一条 `MISMATCH`/`device LSE build failed`/
+`noise variance skipped`。
+
+#### 19.6.3 ★ 一次 1-ULP 的追查：**epoch 值没错，是"长累加"的两个 kernel 被重编译了**
+
+第一次 27 捕获 A/B 的结果是：`_llr.bin` 与 `.bin` **27/27 逐字节相同**，但
+`_h.bin` 有 **2/27** 差 14 B、`_ce.txt` 的 `rsrp` 有 **9/27** 差第 8 位有效数字
+（差的那 14 B 是**同一个子载波、14 个符号各 1 个 bf16 ULP**）。这类"几乎全对"的差异必须定位，否则
+它就是一颗不知道什么时候会响的雷。追查链（每一步都是测量，不是推测）：
+
+| # | 实验 | 结果 | 排除/指向 |
+|---|---|---|---|
+| 1 | 同一二进制、同一 kernels 跑两遍（A/A 与 B/B）| 0 差异 | 差异是**确定性**的，不是竞态 |
+| 2 | `OCUDU_CE_CPU_LS=1`（宿主建 LSE）| 差异**消失** | 载波在设备 K0-a 这条路上 |
+| 3 | `DEV_SIGMA2=0` / `NO_K4=1` / `DEV_Y=0` / `HOST_GRID=1` / `LANE_ORDER=wait` | 差异都在 | 不是 sigma2/K4/y staging/回读/车道顺序 |
+| 4 | 逐 kernel 反汇编（LLVM IR，HEAD vs 新）| `pilots_lse`、`fd_smooth`、`scatter_y`、`reformat` **逐指令相同**；改过的三个 kernel **浮点算子序列相同** | 不是"算术被改了" |
+| 5 | `[y_check]`、`[k0a_ratio]`（power sum / sigma2 / ratio 的十六进制）| 全同 | 不是 y、不是 sigma2 |
+| 6 | 把 kernel 用的 `epoch/dmrs_symb/cfo/theta/cos/sin` **写进 lse 的 pad 槽**再由宿主 dump 出来（两边都插同一段探针）| **epoch 完全相同**（2.2265625 / 7.578125 / 11.859375），**cfo 差 1 ULP**（`0x3BFB5F2E` vs `0x3BFB5F2F`）| **就是它** |
+
+**第一处（CFO）**：在 `mmse_pilots_cfo` 里加"算 epoch"这段代码（值完全正确），改变了编译器对**那个
+72 项导频累加**的编译结果（fast math 的乘法收缩/FMA），CFO 估计因此动了 1 ULP：这个 1 ULP 让 3 个
+DM-RS 符号里 2 个的相位余量发生变化（第 3 个的 cos/sin 恰好舍入到同一个 float），于是 LSE 整体转了
+1 ULP，`rsrp` 与个别 bf16 跟着动。
+
+**修法**：该 kernel 改拿 `epoch_span`（两个 DM-RS 符号起始时刻之差，一个 float 参数）——
+这个差宿主一直有，而且**宿主自己的估计器用的就是同一个表达式**
+（`cfo = phase / 2π / (epoch[s1] - epoch[s0])`）。改完 `_h.bin` 27/27 逐字节相同。
+
+**第二处（K4）**：`_h.bin` 干净之后还剩 `_ce.txt` 的 `noise_variance` 在 **3/27** 差 1–2 ULP
+（`1.258405298e-01` vs `1.258405149e-01`）——同样的机理，同一个文件里 K4 的那个**线程组归约**被重编译。
+**修法**：K4 改拿本跳每个 DM-RS 符号的起始时刻（`dmrs_epochs[4]`，16 B 参数），kernel 里不再算任何新东西；
+改完 27 捕获四个 dump **全部逐字节相同**。
+
+> **一般教训**（已写进 §6 硬纪律）：把一个"设备自算"塞进一个已经存在的 kernel 之前，先问
+> **它的输出是不是从一个长累加里出来的**。是的话，它的发布位对**编译形状**敏感，改动它会动发布位——
+> 要么把该值作为参数给它，要么把累加单独抽成一个不随上下文重编译的函数。
+> "值一样"不等于"字节一样"：只要这个值参与的是一个对编译形状敏感的累加。
+
+#### 19.6.4 这个过程里踩到的三个"测量工具"的坑（都在 §6/§7 里）
+
+1. **`--out` 指向不存在的目录**：`ul_capture::capture_h()` 的 `fopen` 失败就**提前 return**，于是
+   `get_symbol_ch_estimate()` 根本不被调用，host grid 的回读消失——契约行会显示"读 0.00"，
+   看起来像"又清掉一个穿越"。**这就是第一次量到"读也变 0"的原因**（见 `ab_replay_bins.sh` 的注释）。
+2. **metallib 是运行时文件**：`OCUDU_MMSE_METALLIB_PATH` 是 configure 时写死的**源码树路径**，
+   两个二进制默认读**同一个文件**——所以"旧二进制"必须配"旧 kernels"，用 A/B 与 B/A 混跑会得出
+   完全错误的结论（本轮真的踩了一次：`replay_head` 跑新 kernels）。`ab_replay_bins.sh` 因此要求
+   显式给出两边的 metallib，并把 `[epoch_impl]` 的**有无**当作配对断言。
+3. **改源码后 `rm metallib` 与 `cmake --build` 必须在同一次执行里看到"Linking Metal library"**——
+   有一次只看到 `Built target ul_chain_replay`，metallib 其实没重链（md5 不变），白跑一轮对比。
+

@@ -3,11 +3,11 @@
 > Status: kicked off 2026-08-30. This document records the high-level OCUDU roadmap on Apple
 > Silicon and is the common reference for the Metal porting work of the individual PHY modules
 > (FFT / Channel Estimation / Equalization / MIMO Detection / LDPC ...). The implementation-level
-> records of each module live in its own `metal/PLAN.md`
-> (CE: `lib/phy/upper/signal_processors/channel_estimator/metal/Metal_MMSE_Channel_Estimator_PLAN.md`,
-> LDPC: `lib/phy/upper/channel_coding/ldpc/metal/PLAN.md`).
+> records of each module are collected under `doc_chinese/`
+> (CE: `doc_chinese/metal_ce/Metal_MMSE_Channel_Estimator_PLAN.md`,
+> LDPC: `doc_chinese/metal_ldpc/PLAN.md`, AI CE: `doc_chinese/ai_ce/`).
 >
-> Chinese original: `doc_chinese/apple_silicon_heterogeneous_gnb_plan.md` (kept out of the git tree).
+> Chinese original: `doc_chinese/apple_silicon_heterogeneous_gnb_plan.md`.
 
 ## 0. The two meanings of "heterogeneous"
 
@@ -170,7 +170,8 @@ pure x86 solutions - this is OCUDU's core competitiveness route on Apple Silicon
   first-slot per-thread tax (dummy submission from the executor thread at start-up); replace the
   synchronous wait of each module with callback attachment (the mechanism of §3.1).
 - **Next task**: **AI based channel estimation** (HELENA/MPSGraph, see
-  `AI_channel_estimation_implementation_plan.md` - the L0 baseline (metal_mmse) is ready, so this
+  `doc_chinese/ai_ce/AI_channel_estimation_implementation_plan.md` - the L0 baseline (metal_mmse) is
+  ready, so this
   goes straight to the G1 latency-prototype gate).
 - **Long term**: Metal porting of FFT / Equalization / MIMO Detection (reusing the engine
   paradigm and lessons of CE/LDPC: occupancy first, construction-time warm-up, authoritative

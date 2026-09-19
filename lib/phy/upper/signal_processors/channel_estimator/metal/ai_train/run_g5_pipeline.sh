@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# G-5 离线管线 sidecar：采集目录 → 配对 → 标签重建 → 划分 → 微调 → 转换。
-# 白天采数后一条命令走完夜间训练前半段；A/B 实机测试仍按手册 §8 手动执行。
+# G-5 offline pipeline sidecar: capture directory -> pairing -> label rebuild -> split -> fine-tune -> convert.
+# One command runs the first half of the nightly training after a day of captures; the A/B on the real
+# machine is still run by hand, as the manual's section 8 describes.
 #
-# 用法:
-#   run_g5_pipeline.sh <采集目录> [--prb 52|106] [--init <SavedModel>]
+# usage:
+#   run_g5_pipeline.sh <capture dir> [--prb 52|106] [--init <SavedModel>]
 #                       [--epochs N] [--lr R] [--no-convert]
 #
-# 依赖: python3 venv（numpy + tensorflow + tf-keras；转换另需 macOS coremltools
-#       + xcrun coremlcompiler）。venv 用 VENV_PY 指定，默认系统 python3。
-# 自包含：脚本按自身所在目录找 ai_train 工具，不依赖 ~/ai_ce_work。
+# Requires: a python3 venv (numpy + tensorflow + tf-keras; conversion additionally needs the macOS
+#           coremltools + xcrun coremlcompiler). Point VENV_PY at the venv; defaults to the system python3.
+# Self-contained: the script finds the ai_train tools relative to its own directory, no ~/ai_ce_work needed.
 set -euo pipefail
 
 AI_TRAIN=$(cd "$(dirname "$0")" && pwd)
@@ -37,7 +38,7 @@ echo "== [2/5] DD label rebuild (content-verified candidates) =="
 "$PY" "$AI_TRAIN/build_labels.py" "$CAP" --pairs "$CAP/pairs_v2.npz" \
   --out "$CAP/labels_all.npz" "${BUCKET[@]}"
 
-echo "== [3/5] train/val split (10% holdout, seed 42; GATE env 可收紧) =="
+echo "== [3/5] train/val split (10% holdout, seed 42; tighten with the GATE env) =="
 "$PY" "$AI_TRAIN/split_labels.py" "$CAP/labels_all.npz" "$CAP/realtrain.npz" \
   --gate "${GATE:--10}"
 
@@ -54,7 +55,7 @@ if [[ "$CONVERT" == "1" ]]; then
   rm -rf "$CAP/mlc_out"
   xcrun coremlcompiler compile "$CAP/helena_pusch${PRB}_real.mlpackage" "$CAP/mlc_out"
   echo "modelc -> $CAP/mlc_out/helena_pusch${PRB}_real.mlmodelc"
-  echo "（入库/上线按 AI_CE_G5_manual.md §7/§9 执行）"
+  echo "(install/rollout per AI_CE_G5_manual.md sections 7/9)"
 else
   echo "skipped (--no-convert)"
 fi

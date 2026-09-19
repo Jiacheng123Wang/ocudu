@@ -1,0 +1,42 @@
+# What is NOT tracked under doc_chinese/
+#
+# The documents ARE tracked (see the note in the root .gitignore): the design document, the plans,
+# the handoff memos, the audit reports and the bench scripts that produce the evidence they quote.
+# Everything below is WORKING MATERIAL: large, regenerable, and only meaningful on the machine that
+# produced it. Keep it out of the history.
+#
+# The rule of thumb: if a file is something a session wrote to run a measurement (a gnb console log,
+# an IQ capture, a gate's dumps, a metallib snapshot, a tarball of the tree), it belongs here; if it
+# is something a human reads to understand the port, it is tracked.
+
+# Bench logs and run output (tens of MB each).
+*.log
+*.stderr
+*.stdout
+*/logs/
+**/logs/
+*/air_logs/
+*/air_logs_*/
+**/air_logs/
+**/air_logs_*/
+
+# Scratch trees: corpora, gate dumps, reference binaries, scratch tables.
+work_tmp/
+**/work_tmp/
+*/gates/
+*/ref/
+*/corpus/
+
+# Worktree backups (patches + copies of the tracked files at a point in time).
+worktree_backups/
+**/worktree_backups/
+
+# Binary captures and compiled shader snapshots.
+*.bin
+*.metallib
+*.tar.gz
+*.tgz
+
+# Nothing above 2 MB is a document: the largest tracked file here is a design document of ~1 MB.
+# (Git cannot express a size rule; this block is the manual equivalent - see the table in
+# doc_chinese/README.md for what is expected to be tracked.)

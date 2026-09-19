@@ -1,0 +1,41 @@
+# doc_chinese/ - the design and planning record of the Apple Silicon work
+
+This is where the **Chinese** documents of the OCUDU Apple Silicon / Metal port live: the long-term
+plan, the per-module plans and memos, the audits, and the session handoffs that carry the state from
+one working session to the next. A few of them have English translations under `docs/`
+(`docs/apple_silicon_heterogeneous_gnb_plan_english.md`, `docs/build_macOS_note_english.md`).
+
+Two rules the tree is kept by:
+
+* **Chinese belongs here and nowhere else.** Code, configs, CMake and bench scripts carry English
+  comments and English operator messages - including the scripts that used to narrate their progress
+  in Chinese (`lib/.../channel_estimator/metal/ai_train/**/*.sh`). If a Chinese document shows up in
+  `lib/`, `tests/` or `configs/`, it belongs in one of the directories below.
+* **Documents are tracked; working material is not.** Bench logs, IQ captures, gate dumps, reference
+  binaries, worktree backups and scratch tables stay out of the history - see `.gitignore` in this
+  directory for the exact exclusions and the reasoning. Up to 2026-09-19 the whole tree was
+  deliberately untracked; that policy was reversed when the documents became the record the
+  repository should carry.
+
+## What is here
+
+| Directory | Content | Entry point |
+|---|---|---|
+| `phy_pipeline_gpu/` | The fused-lane port (batch 5a-5g: the whole IQ -> LLR chain in one device pipeline, with **zero host <-> device data crossings** measured on air). Living design document, goal/gap, A/B protocol, per-batch work docs, session handoffs. | `phy_pipeline_gpu/README.md`, then `phy_pipeline_gpu/gpu_phy_pipeline_design_and_implementation.md` |
+| `full_gpu_chain/` | The first full-chain GPU/UMA zero-copy attempt (before the fused lane): plan, S2 design, audit, session handoffs. | `full_gpu_chain/s2_full_chain_design.md` |
+| `metal_ldpc/` | Metal LDPC decoder: the first module ported, and the paradigm the others followed. | `metal_ldpc/PLAN.md` |
+| `metal_ce/` | Metal MMSE channel estimator (the 2D MMSE engine, K1/K2/K3/K4/K5, the TA port). | `metal_ce/Metal_MMSE_Channel_Estimator_PLAN.md` |
+| `ai_ce/` | The AI (HELENA) channel estimator: implementation plan, 20 MHz plan, training and G-5 online-adaptation memos, plus `ai_train/` (the operator's manual and README for the training tooling that lives in `lib/.../channel_estimator/metal/ai_train/`). | `ai_ce/AI_channel_estimation_implementation_plan.md` |
+| `macos_compat_refactor/` | macOS compatibility work: phase reports, and `NOT_RUN_AUDIT.md` - why each test that does not run on macOS is disabled and what would enable it. | `macos_compat_refactor/phase0_audit_report.md` |
+| `test_environment/` | The bench: OAI UE over ZMQ + UHD end-to-end memo, the Hong Kong test environment and phone-attach notes, the VoNR/IMS interop plan. | `test_environment/OAI_UE_ZMQ_UHD_E2E_memo.md` |
+
+Root-level documents: `apple_silicon_heterogeneous_gnb_plan.md` (the long-term plan, English version
+in `docs/`), `build_macOS_note.md` (building on macOS, English version in `docs/`), and the two
+phone-connectivity notes of 2026-09-05/06.
+
+## Not tracked here
+
+`*/work_tmp/`, `*/logs/`, `*/air_logs*/`, `*/worktree_backups/`, `*/gates/`, `*/ref/`, `*/corpus/`
+and every `*.log` / `*.bin` / `*.metallib`: they are the bench's working material (see the note at
+the top of `doc_chinese/.gitignore`). `work_tmp/README.md` documents the convention those scratch
+directories follow.

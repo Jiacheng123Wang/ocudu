@@ -1,5 +1,6 @@
-# Build wiring for the Metal channel estimators (see Metal_MMSE_Channel_Estimator_PLAN.md
-# and AI_channel_estimation_implementation_plan.md in this directory).
+# Build wiring for the Metal channel estimators. The design records are the Chinese documents the
+# port kept as it went: doc_chinese/metal_ce/Metal_MMSE_Channel_Estimator_PLAN.md (this estimator)
+# and doc_chinese/ai_ce/ (the AI/HELENA estimator); doc_chinese/phy_pipeline_gpu/ is the lane.
 #
 # The library is only built when ENABLE_METAL_CHEST is ON (default ON for Apple Silicon,
 # OFF elsewhere - Linux keeps the upstream byte-for-byte). The MSL shaders are compiled

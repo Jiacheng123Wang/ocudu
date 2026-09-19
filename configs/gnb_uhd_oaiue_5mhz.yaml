@@ -5,7 +5,7 @@
 # Based on configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml (verified with a commercial phone),
 # with the TX power fixes required for the OAI UE on the remote B210:
 #   - amplitude_control.tx_gain_backoff: 0  (the default 12 dB back-off plus the DFT normalization
-#     would put the RF output below the remote receiver's noise floor, see OAI_UE_ZMQ_UHD_E2E_memo.md)
+#     would put the RF output below the remote receiver's noise floor, see doc_chinese/test_environment/OAI_UE_ZMQ_UHD_E2E_memo.md)
 #   - tx_gain raised to the B210 maximum
 #
 # Frequency: DL 2152.5 MHz (ARFCN 430500). UL auto-derived (UL = DL - 190 MHz for n1).

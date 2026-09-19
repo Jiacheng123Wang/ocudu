@@ -7,7 +7,7 @@
 # n78 frequency selection notes (China, 3300-3600 MHz is the licensed range)
 # -----------------------------------------------------------------------------
 # Band plan (China):
-#   3300-3400 MHz  indoor/室分 band (multiple operators, low-power indoor cells possible)
+#   3300-3400 MHz  indoor band (multiple operators, low-power indoor cells possible)
 #   3400-3500 MHz  China Telecom
 #   3500-3600 MHz  China Unicom
 #   3600-3800 MHz  part of 3GPP n78 but NOT licensed for public mobile in China - avoid.

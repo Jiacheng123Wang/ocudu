@@ -69,6 +69,6 @@ expert_phy:
   pusch_ldpc_decoder_type: auto
   pusch_dec_max_iterations: 6
   # Default CE = cpu (classical): the 2026-09-01 hardware A/Bs showed classical
-  # >= helena in every measured regime (see AI_CE_G5_online_adaptation_memo.md).
+  # >= helena in every measured regime (see doc_chinese/ai_ce/AI_CE_G5_online_adaptation_memo.md).
   # helena stays available as opt-in: --pusch_channel_estimator_algo helena.
   pusch_channel_estimator_algo: cpu
