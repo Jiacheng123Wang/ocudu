@@ -230,7 +230,14 @@ cmake --build build --target ul_chain_replay           # 离线 A/B 工具（--m
 cmake --build build --target port_channel_estimator_metal_mmse_unit_test
 cmake --build build --target channel_equalizer_metal_unit_test
 
-# ---- 单测（都限时，跑完查 recoveryCount）----
+# ---- 单测：现在都注册进 ctest 了（`8c87761441`），`make test` 就能跑全 ----
+cd build && ctest -L phy                      # macOS 172 个（含 8 个新增 Metal 用例）；Linux 164 个
+ctest -R "metal_unit_test|ofdm_demodulator_metal_batch"   # 只看 GPU 这 8 个（约 15 s）
+# 8 个用例 = 6 个二进制 + 两个"深模式"变体（下面这两行以前只能手跑）：
+#   port_channel_estimator_metal_mmse_unit_test_ta_chain     ENVIRONMENT OCUDU_CE_TA_CHAIN=1
+#   channel_equalizer_metal_unit_test_defer_encode           ENVIRONMENT OCUDU_EQ_DEFER_ENCODE=1
+
+# ---- 手工单测（要单独跑某个二进制时；都限时，跑完查 recoveryCount）----
 UT=build/lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_unit_test
 OCUDU_CE_TA_CHAIN=1 bash /tmp/limited_run.sh 420 /tmp/ce.log $UT      # 期望 All tests PASSED
 EQ=build/lib/phy/upper/channel_processors/metal/channel_equalizer_metal_unit_test
