@@ -47,9 +47,19 @@ public:
   ///            write side the COUNT is what the verdict uses and the byte total is context.
   static void count_host_read(uint64_t bytes = 0)
   {
+    // The total always counts the touch; inside a DEBUG scope it is ALSO counted as debug, so the
+    // judged number is (total - debug) and the two can never disagree. (An earlier revision routed the
+    // debug touches away from the total instead, which made the subtraction underflow the moment a
+    // capture was on - the totals here are "everything the counters saw", by design.)
     host_reads().fetch_add(1, std::memory_order_relaxed);
     if (bytes != 0) {
       host_read_bytes().fetch_add(bytes, std::memory_order_relaxed);
+    }
+    if (in_debug_scope()) {
+      debug_reads().fetch_add(1, std::memory_order_relaxed);
+      if (bytes != 0) {
+        debug_read_bytes().fetch_add(bytes, std::memory_order_relaxed);
+      }
     }
   }
 
@@ -63,9 +73,17 @@ public:
   ///            device-visible transfer at runtime, with no memcpy to find.
   static void count_host_write(uint64_t bytes = 0)
   {
+    // See count_host_read(): the total counts everything, the debug counter marks the subset that a
+    // development capture caused.
     host_writes().fetch_add(1, std::memory_order_relaxed);
     if (bytes != 0) {
       host_write_bytes().fetch_add(bytes, std::memory_order_relaxed);
+    }
+    if (in_debug_scope()) {
+      debug_writes().fetch_add(1, std::memory_order_relaxed);
+      if (bytes != 0) {
+        debug_write_bytes().fetch_add(bytes, std::memory_order_relaxed);
+      }
     }
   }
 
@@ -88,6 +106,9 @@ public:
       return;
     }
     e->writes.fetch_add(1, std::memory_order_relaxed);
+    if (in_debug_scope()) {
+      e->debug_writes.fetch_add(1, std::memory_order_relaxed);
+    }
     if (bytes != 0) {
       e->write_bytes.fetch_add(bytes, std::memory_order_relaxed);
     }
@@ -111,6 +132,9 @@ public:
       return;
     }
     e->reads.fetch_add(1, std::memory_order_relaxed);
+    if (in_debug_scope()) {
+      e->debug_reads.fetch_add(1, std::memory_order_relaxed);
+    }
     if (bytes != 0) {
       e->read_bytes.fetch_add(bytes, std::memory_order_relaxed);
     }
@@ -181,6 +205,32 @@ public:
     }
   }
 
+  /// \brief Marks every host touch inside its scope as DEBUG, so the contract does not judge it.
+  ///
+  /// A development capture (OCUDU_UL_DUMP) writes device-produced data to a file. That is not the CPU
+  /// participating in the lane - it is a debug aid, and a release build does not even compile the
+  /// machinery (ENABLE_UL_CAPTURE is off by default, see ul_capture.h) - so it must not count as a
+  /// crossing. Dropping it silently would be worse than counting it: "0.00" has to stay checkable, so
+  /// the debug touches are counted SEPARATELY and printed next to the judged number.
+  ///
+  /// The scope is thread-local: a lane is processed by one thread, and a capture opened on that thread
+  /// must not reclassify another thread's lane touches.
+  class scoped_debug_touches
+  {
+  public:
+    scoped_debug_touches() { debug_depth() += 1; }
+    ~scoped_debug_touches() { debug_depth() -= 1; }
+    scoped_debug_touches(const scoped_debug_touches&)            = delete;
+    scoped_debug_touches& operator=(const scoped_debug_touches&) = delete;
+  };
+
+  static bool in_debug_scope() { return debug_depth() != 0; }
+
+  static uint64_t get_debug_reads() { return debug_reads().load(std::memory_order_relaxed); }
+  static uint64_t get_debug_read_bytes() { return debug_read_bytes().load(std::memory_order_relaxed); }
+  static uint64_t get_debug_writes() { return debug_writes().load(std::memory_order_relaxed); }
+  static uint64_t get_debug_write_bytes() { return debug_write_bytes().load(std::memory_order_relaxed); }
+
   /// Counts one hop that consumed device output, so a total can be read as "per hop".
   static void count_device_hop() { device_hops().fetch_add(1, std::memory_order_relaxed); }
 
@@ -191,9 +241,37 @@ public:
   static uint64_t get_device_hops() { return device_hops().load(std::memory_order_relaxed); }
 
 private:
+  /// Thread-local depth of scoped_debug_touches: a capture is opened and closed on the thread that
+  /// writes the file, and one thread's capture must not reclassify another thread's lane touches.
+  static unsigned& debug_depth()
+  {
+    static thread_local unsigned d = 0;
+    return d;
+  }
+
   // Never destroyed: the report runs from an atexit handler, which runs after the static destructors
   // of this translation unit (the same reason ul_host_stats and the lane probe heap-allocate theirs).
   static std::atomic<uint64_t>& host_reads()
+  {
+    static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
+    return *n;
+  }
+  static std::atomic<uint64_t>& debug_reads()
+  {
+    static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
+    return *n;
+  }
+  static std::atomic<uint64_t>& debug_read_bytes()
+  {
+    static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
+    return *n;
+  }
+  static std::atomic<uint64_t>& debug_writes()
+  {
+    static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
+    return *n;
+  }
+  static std::atomic<uint64_t>& debug_write_bytes()
   {
     static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
     return *n;
@@ -225,6 +303,11 @@ private:
     std::atomic<uint64_t> read_bytes{0};
     std::atomic<uint64_t> writes{0};
     std::atomic<uint64_t> write_bytes{0};
+    /// Touches of the same site that a DEBUG scope asked for (see scoped_debug_touches). Kept per site
+    /// so the table can say which store was the capture's - and so the judged total stays checkable
+    /// against the table instead of silently losing a line.
+    std::atomic<uint64_t> debug_reads{0};
+    std::atomic<uint64_t> debug_writes{0};
   };
   static constexpr std::size_t kMaxSites = 8;
   static site_entry* sites()
@@ -286,12 +369,20 @@ private:
       any           = true;
       const uint64_t bytes = reads ? sites()[best].read_bytes.load(std::memory_order_relaxed)
                                    : sites()[best].write_bytes.load(std::memory_order_relaxed);
+      // The debug part of a site is shown NEXT TO it, not merged into it: the judged number above has
+      // to be checkable against this table, and a site that is hit by both the lane and a capture would
+      // otherwise look like a lane cost.
+      const uint64_t dbg = reads ? sites()[best].debug_reads.load(std::memory_order_relaxed)
+                                 : sites()[best].debug_writes.load(std::memory_order_relaxed);
       std::fprintf(out,
                    "\n    %-38s %8llu %s, %10llu bytes",
                    sites()[best].name,
                    static_cast<unsigned long long>(best_cnt),
                    reads ? "read(s)" : "call(s)",
                    static_cast<unsigned long long>(bytes));
+      if (dbg != 0) {
+        std::fprintf(out, "   [%llu of them debug]", static_cast<unsigned long long>(dbg));
+      }
     }
     if (!any) {
       std::fprintf(out, reads ? "\n    <no host read was attributed to a site>"
@@ -349,15 +440,28 @@ inline void register_phy_pipeline_crossing_check()
   std::call_once(once, []() {
     register_phy_pipeline_check(
         {"host device data crossings", []() -> std::optional<bool> {
-           const uint64_t          reads  = phy_pipeline_crossings::get_host_reads();
-           const uint64_t          writes = phy_pipeline_crossings::get_host_writes();
-           const uint64_t          bytes  = phy_pipeline_crossings::get_host_write_bytes();
-           const uint64_t          hops   = phy_pipeline_crossings::get_device_hops();
-           const phy_pipeline_mode mode   = phy_pipeline_mode_registry::get();
-           const auto              per_hop = [hops](uint64_t n) {
+           // WHAT IS JUDGED: the lane's own touches. The debug capture's are subtracted - a capture
+           // (OCUDU_UL_DUMP) writing device-produced data to a file is a development aid, not the CPU
+           // participating in the lane, and a release build does not compile it (ENABLE_UL_CAPTURE).
+           // They are PRINTED rather than dropped: "0.00" has to stay checkable, and a reader has to be
+           // able to see how much was set aside and why.
+           const uint64_t          total_reads  = phy_pipeline_crossings::get_host_reads();
+           const uint64_t          total_writes = phy_pipeline_crossings::get_host_writes();
+           const uint64_t          dbg_reads    = phy_pipeline_crossings::get_debug_reads();
+           const uint64_t          dbg_writes   = phy_pipeline_crossings::get_debug_writes();
+           const uint64_t          reads        = total_reads - dbg_reads;
+           const uint64_t          writes       = total_writes - dbg_writes;
+           // The BYTES are judged on the same split as the counts - a line that said "0 read(s) (5376
+           // bytes)" would be self-contradictory.
+           const uint64_t          bytes = phy_pipeline_crossings::get_host_write_bytes() -
+                                  phy_pipeline_crossings::get_debug_write_bytes();
+           const uint64_t          hops         = phy_pipeline_crossings::get_device_hops();
+           const phy_pipeline_mode mode         = phy_pipeline_mode_registry::get();
+           const auto              per_hop      = [hops](uint64_t n) {
              return (hops != 0) ? (static_cast<double>(n) / static_cast<double>(hops)) : 0.0;
            };
-           const uint64_t          rbytes = phy_pipeline_crossings::get_host_read_bytes();
+           const uint64_t          rbytes = phy_pipeline_crossings::get_host_read_bytes() -
+                                  phy_pipeline_crossings::get_debug_read_bytes();
            std::fprintf(stderr,
                         "%llu host read(s) (%llu bytes) and %llu host write(s) (%llu bytes) of device data "
                         "over %llu device hop(s) = %.2f read(s) + %.2f write(s) per hop; the fused lane "
@@ -370,6 +474,16 @@ inline void register_phy_pipeline_crossing_check()
                         static_cast<unsigned long long>(hops),
                         per_hop(reads),
                         per_hop(writes));
+           if ((dbg_reads + dbg_writes) != 0) {
+             std::fprintf(stderr,
+                          "\n    NOT JUDGED: %llu read(s) (%llu bytes) and %llu write(s) (%llu bytes) are the "
+                          "debug capture's own (OCUDU_UL_DUMP: a development aid, absent from a release "
+                          "build) - see scoped_debug_touches()",
+                          static_cast<unsigned long long>(dbg_reads),
+                          static_cast<unsigned long long>(phy_pipeline_crossings::get_debug_read_bytes()),
+                          static_cast<unsigned long long>(dbg_writes),
+                          static_cast<unsigned long long>(phy_pipeline_crossings::get_debug_write_bytes()));
+           }
            // The SCOPE of the number, printed with the number. Whoever reads a 0 here has to be able
            // to see how much of the lane it covers - see declare_reporter().
            std::fprintf(stderr,
@@ -381,12 +495,14 @@ inline void register_phy_pipeline_crossing_check()
            // is still anonymous. The read table prints its own coverage line for that reason.
            phy_pipeline_crossings::print_write_sites(stderr);
            phy_pipeline_crossings::print_read_sites(stderr);
-           if (reads != phy_pipeline_crossings::get_named_reads()) {
+           // Compared against the TOTAL, debug included: the named sites cover the debug touches too,
+           // so this line keeps meaning "every read is attributable" rather than "the judged ones are".
+           if (total_reads != phy_pipeline_crossings::get_named_reads()) {
              std::fprintf(stderr,
                           "\n    (%llu of the %llu read(s) above are NOT named by a site - every read the "
                           "lane makes has to be attributable)",
-                          static_cast<unsigned long long>(reads - phy_pipeline_crossings::get_named_reads()),
-                          static_cast<unsigned long long>(reads));
+                          static_cast<unsigned long long>(total_reads - phy_pipeline_crossings::get_named_reads()),
+                          static_cast<unsigned long long>(total_reads));
            }
            std::fprintf(stderr, "\n");
            if (!phy_pipeline_mode_registry::is_published() || (hops == 0)) {

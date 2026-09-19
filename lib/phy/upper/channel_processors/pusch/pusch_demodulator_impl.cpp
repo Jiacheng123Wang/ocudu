@@ -7,6 +7,7 @@
 
 #include "pusch_demodulator_impl.h"
 #include "ocudu/phy/phy_pipeline_contract.h"
+#include "ocudu/phy/phy_pipeline_crossings.h"
 
 #include "ul_capture.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -679,8 +680,12 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
         }
 
         // Notify a new processed block.
-        // Debug capture of the soft bits (no-op unless OCUDU_UL_DUMP_LLR is set).
-        ul_capture::capture_llr(codeword);
+        // Debug capture of the soft bits (no-op unless OCUDU_UL_DUMP_LLR is set, and not judged by the
+        // crossing contract - see the design document's ruling on debug captures).
+        {
+          phy_pipeline_crossings::scoped_debug_touches debug_capture;
+          ul_capture::capture_llr(codeword);
+        }
 
         codeword_buffer.on_new_block(codeword, scrambling_seq);
       }

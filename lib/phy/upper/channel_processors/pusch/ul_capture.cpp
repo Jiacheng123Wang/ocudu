@@ -17,6 +17,13 @@
 
 using namespace ocudu;
 
+// Compiled out by default (ENABLE_UL_CAPTURE): a release build then contains none of the capture
+// machinery - no buffers, no file I/O, no environment lookups - only the no-op API at the bottom of
+// this file, so that no call site changes. The host touches a capture would cause therefore cannot
+// happen, which is why the pipeline contract never has to reason about them (see
+// phy_pipeline_crossings::scoped_debug_touches for the builds where the capture IS compiled in).
+#if defined(OCUDU_UL_CAPTURE)
+
 namespace {
 
 std::string capture_prefix()
@@ -109,7 +116,6 @@ std::string make_key()
 }
 
 } // namespace
-
 bool ocudu::ul_capture::enabled()
 {
   static const bool on = (std::getenv("OCUDU_UL_DUMP") != nullptr);
@@ -280,3 +286,39 @@ void ocudu::ul_capture::capture_llr(span<const log_likelihood_ratio> llr)
   std::fwrite(data.data(), sizeof(int8_t), data.size(), f);
   std::fclose(f);
 }
+
+#else // !OCUDU_UL_CAPTURE
+
+// Compiled out (ENABLE_UL_CAPTURE, off by default): a release build has no capture machinery at all -
+// no buffers, no file I/O, no environment lookups - and the API stays so that no call site changes.
+// The host touches a capture would cause therefore cannot happen, which is why the pipeline contract
+// never has to reason about them (see phy_pipeline_crossings::scoped_debug_touches for the builds
+// where the capture IS compiled in).
+
+bool ocudu::ul_capture::enabled()
+{
+  return false;
+}
+
+bool ocudu::ul_capture::llr_enabled()
+{
+  return false;
+}
+
+void ocudu::ul_capture::capture_grid(const resource_grid_reader& grid, const pusch_processor::pdu_t& pdu) {}
+
+void ocudu::ul_capture::capture_ce(const dmrs_pusch_estimator_results& est_results,
+                                   const pusch_processor::pdu_t&      pdu)
+{
+}
+
+void ocudu::ul_capture::set_current(slot_point slot, rnti_t rnti) {}
+
+void ocudu::ul_capture::capture_h(const dmrs_pusch_estimator_results& est_results,
+                                  const pusch_processor::pdu_t&      pdu)
+{
+}
+
+void ocudu::ul_capture::capture_llr(span<const log_likelihood_ratio> llr) {}
+
+#endif // OCUDU_UL_CAPTURE

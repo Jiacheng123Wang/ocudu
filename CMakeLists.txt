@@ -32,6 +32,15 @@ if(ENABLE_CE_TIME)
     add_definitions(-DOCUDU_CE_TIME)
 endif()
 
+# The PUSCH reception capture (OCUDU_UL_DUMP): a development aid that writes whole receptions to
+# files so two configurations can be compared bit by bit. It is NOT part of the data path - the CPU
+# work it causes is counted as debug and is not judged by the pipeline contract (see
+# phy_pipeline_crossings::scoped_debug_touches) - and a release build leaves it out entirely.
+option(ENABLE_UL_CAPTURE "Enable the PUSCH reception capture into files (OCUDU_UL_DUMP, debug aid, off by default)" OFF)
+if(ENABLE_UL_CAPTURE)
+    add_definitions(-DOCUDU_UL_CAPTURE)
+endif()
+
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     set(METAL_LDPC_DEFAULT ON)
 else()

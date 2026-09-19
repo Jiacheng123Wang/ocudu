@@ -20,6 +20,7 @@
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/phy/phy_pipeline_crossings.h"
 #include "ocudu/phy/phy_pipeline_strict.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc.h"
 #include "ocudu/phy/upper/channel_processors/pusch/formatters.h"
@@ -205,7 +206,13 @@ void pusch_processor_impl::process(span<uint8_t>                    data,
   // Debug capture of the received grid and the PDU (see ul_capture): no-op unless OCUDU_UL_DUMP
   // is set.
   ul_capture::set_current(pdu.slot, pdu.rnti);
-  ul_capture::capture_grid(grid, pdu);
+  {
+    // A debug capture is NOT the CPU participating in the lane (design document, the 2026-09-21
+    // ruling): whatever host touches it forces are counted as DEBUG and the crossing contract does not
+    // judge them - and a release build does not compile the machinery at all (ENABLE_UL_CAPTURE).
+    phy_pipeline_crossings::scoped_debug_touches debug_capture;
+    ul_capture::capture_grid(grid, pdu);
+  }
 
   // Get RB mask relative to Point A. It assumes PUSCH is never interleaved.
   crb_bitmap rb_mask = pdu.freq_alloc.get_crb_mask(pdu.bwp_start_rb, pdu.bwp_size_rb);
@@ -338,6 +345,7 @@ void pusch_processor_impl::process_data(span<uint8_t>                          d
     // The capture reads host copies of the estimator's results, so it needs them complete. With a
     // deferred estimator that costs the overlap the demodulation below would get, which is the
     // right trade for a debug capture - and it is why this is gated instead of unconditional.
+    phy_pipeline_crossings::scoped_debug_touches debug_capture;
     est_results.sync_device_estimates();
     ul_capture::capture_ce(est_results, pdu);
     ul_capture::capture_h(est_results, pdu);

@@ -180,6 +180,36 @@ LDPC 端到端性能**只覆盖信号路径**。以下两类**不适用**主判�
    **⇒ 本线的下一步就是这张表的第二行**（§5.4 的"子句 B"）：把 `ch_wt` / `eq_demap`（以及 `ch_est` 的
    尾组那 0.73）**并进最开始的同一次 commit**，让 CPU 提交完就走开。
 
+### 1.9 用户裁定（2026-09-21）：**dump 不是 CPU in the loop**
+
+> **"dump 应该是开发阶段的中间产物，于我们的 GPU PHY pipeline 没有关系。所以如果某处需要 CPU 参与的
+> 'dump'，应该不算 'CPU in the loop'，因为一旦开发完成，我们可以去除这部分。或者用 debug config
+> 条件包裹，真正的 release 就没有了。"**
+
+**⇒ 两条后果（判据 + 构建），都已实现：**
+
+1. **判据**：debug 捕获引起的宿主接触**不进契约判据**——但**必须单独打印**，不能悄悄丢掉：
+   ```
+   host device data crossings: 0 host read(s) (0 bytes) ... = 0.00 read(s) + 0.00 write(s) per hop
+       NOT JUDGED: 2 read(s) (5376 bytes) ... are the debug capture's own (OCUDU_UL_DUMP: a development
+                   aid, absent from a release build)
+       ce: host grid materialized from the device    2 read(s),  5376 bytes   [2 of them debug]
+   ```
+   * 机制：`phy_pipeline_crossings::scoped_debug_touches`（**线程局部**作用域，捕获写在哪个线程就只影响哪个线程）；
+   * **总数始终包含它们，debug 是子集** ⇒ `判据数 = 总数 − debug`，两个数不可能不一致。
+     （第一版把 debug 从总数里"路由走"，判据行立刻打印出 `18446744073709551614` —— 下溢。
+     教训写在这里：**要排除的东西必须继续被计数并标记，而不是不被计数**；否则"0.00"就不再可核对。）
+   * 仍被计、仍进判据的：**真正的回退**（设备拒绝 ⇒ 宿主兜底）**不在** debug 作用域里，所以这个改动
+     **不会**掩盖真问题；而 §1.8 的 strict 已经把真回退变成失败。
+2. **构建**：`ENABLE_UL_CAPTURE`（CMake，**默认 OFF**，与本线其它 debug aid 同模式）⇒ **release 构建里
+   没有捕获机制**（无缓冲、无文件 I/O、无环境变量读取，只剩 no-op API，调用点一行都不用改）。
+   本机开发构建显式 `-DENABLE_UL_CAPTURE=ON`（见 §6.1）。
+   * **⇒ 结论**：release 形态下"捕获造成的宿主接触"**物理上不可能发生**；开发形态下它**被计数但不被判**。
+     两条路都满足裁定。
+
+**对已有记录的影响**：腿 `narrow-cap` 的 59 次读（开 dump 抓窄分配的既定代价）**从来就不该算穿越**；
+§5.6.7 那句"59 次全是 capture 自己要宿主网格"现在有了机制上的对应物。
+
 ---
 
 ## 2. 基线（历史 + 现行）
@@ -362,6 +392,8 @@ print_reporters(FILE*)          // 命中路径不涉及
   同一行的后半句（`a module NOT listed here is not covered by this number`），且 IQ 上传与 LLR 下载
   **不计**（`phy_pipeline_crossings.h:363-365`）⇒ **读这句必须连读后半句**（§5.4 的措辞项）；
 * **不等于数值正确**：8 条全是结构性计数，没有一条看 LLR 内容或 CRC；数值判据是另一套（§1.2、§6.8）；
+* **第 5 条判的不是总数**：`判据数 = 计数总数 − debug 捕获自己的部分`（§1.9 的裁定）。判据行会把
+  `NOT JUDGED: N ...` 单独打印出来，**这一行不为空是正常的**（开了 dump 的开发腿），要看的是它前面的那个数；
 * **不等于"无回退"有第二条独立来源**：`refusals=<none>` 与分项表空读的是同一批计数器、同一个回退分支；
 * **跨腿不可比**：口径与申报模块都会变，只有同一份构建内 A/B 两臂的差可比（§2.4）。
 
@@ -1212,6 +1244,11 @@ cd /Users/jiachengwang/dev/ocudu
 cmake --build build --target ul_chain_replay
 cmake --build build --target port_channel_estimator_metal_mmse_unit_test
 ```
+
+**⚠ 开发构建的 configure 必须带这几个开关**（它们默认 OFF，是"debug aid"；本机 `build/` 已经带上）：
+`-DENABLE_METAL_STATS=ON -DENABLE_FLOW_PROBES=ON -DENABLE_CE_TIME=ON -DENABLE_UL_CAPTURE=ON`。
+**`ENABLE_UL_CAPTURE` 少了会直接坏掉判据链**：`ab_dumps.sh` / `ab_replay_bins.sh` 依赖 dump，
+它们会以 `missing-dumps` **报错退出**（这是设计好的：没有数据的比较必须失败，不能静默通过）。
 
 **⚠ `cmake --build build`（不带 target）不会重建这两个**，会得到"新 metallib + 旧宿主"的假结果。
 **这是本线踩过两次的坑。**
