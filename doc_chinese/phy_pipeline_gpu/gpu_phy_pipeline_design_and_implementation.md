@@ -351,7 +351,10 @@ K4 的 `gpu_nv` 就是"从同一份 h 归约、结果留在设备、消费者不
 | **5d** | TA 链**合并成一条 dispatch** + 定位它的车道代价 | ✅ **完成**（`503990ca5f` + `413ef13f94`，腿 `5d-fused_0919_1820`）：CRC **81.23%**（本线最高）、RF failure **0**；代价 **+38 µs/lane** 经单变量腿定位为**尾延迟**并接受（§17.10.5–17.10.7）|
 | **5e** | 写侧：等化器的 gather 表改由**设备**建 | ✅ **完成并空中验证**（`6e53109ffa`，腿 `5e-devtables_0919_2000`，§19.3/§19.3a）：**写字节 3.38 MB → 5.5 KB（÷592）**、次数 0.27 → 0.13/跳；其余指标无回归 |
 | **5f** | 写侧：`h_starts` 表与 epoch 表 | **5f-1 完成**（`9e36fef3ed`，§19.5）：`h_starts` 进参数块，replay 写 **5 → 1/跳**；顺带修掉一个**既有批处理缺陷**。**5f-2 未做**：`symbol_start_epochs`（56 B，1 次/配置）仍在宿主上传 ⇒ **契约仍 7/8** |
-| **5g** | 5f-2：epochs 由 kernel 从 (cp, scs) 算 | ✅ **离线完成**（§19.6）：27 捕获四个 dump 与 HEAD **逐字节相同**；replay 写侧 **1 → 0/跳**、分项表空 ⇒ **写侧清零**。单测 140/140（GPU 全定义域）+ `All tests PASSED`。**空中腿待跑（契约预期 8/8）** |
+| **5g** | 5f-2：epochs 由 kernel 从 (cp, scs) 算 | ✅ **完成并空中验证**（`45fa002d6c`，腿 `5g-epochs_0919_1945`，§19.6.2b）：27 捕获四个 dump 与 HEAD **逐字节相同**；replay 写侧 **1 → 0/跳**、分项表空 ⇒ **写侧清零**；空口 **契约 8/8**、0 RF failure、CRC 79.19%。**⚠ 该"零"只在被审计的站点上成立**：P1 发现一条**每跳**的未计数往返（§19.6.2b 勘误块 + `wip/S13_fallback_coverage.md` §5b）|
+| **S13-P1** | 回退路径的可见性（仪表）| ✅ **第一批完成**（`b3f72deadb`）：基类虚钩子 `account_host_grid_read`（默认空 ⇒ CPU 车道不变）+ `ce: rx pilots staged (host)` 站点 —— 正是它们**照出了那条每跳往返**。**剩余**：回退门计数 + A/R_hp / y staging 两个站点（`wip/S13_fallback_coverage.md` §4.6）|
+| **S13-P2** | 消掉那条每跳往返（设备自建 `gpu_rx_pilots`，EPRE 由设备发布）| **未做**（下一个数据面批次）；判据：**带着 P1 的站点**契约回到 `0.00 read + 0.00 write`/跳 |
+| **测** | `[ul_gpu_pipeline]`：IQ 进 GPU → LLR 出 GPU（用户要求，只对 `mode=gpu`）| ✅ **离线完成**（§20）：探针 + `leg_report.sh -- latency` + 单测（含反证）。**空中腿待跑** |
 
 ### 5.1 批次 2 的三个做法与取舍
 
@@ -2393,3 +2396,82 @@ DM-RS 符号里 2 个的相位余量发生变化（第 3 个的 cos/sin 恰好�
 3. **改源码后 `rm metallib` 与 `cmake --build` 必须在同一次执行里看到"Linking Metal library"**——
    有一次只看到 `Built target ul_chain_replay`，metallib 其实没重链（md5 不变），白跑一轮对比。
 
+
+---
+
+## 20. 测量：`[ul_gpu_pipeline]` —— IQ 进 GPU → LLR 出 GPU（2026-09-19，用户提出）
+
+### 20.1 需求
+
+1. **IQ 进 GPU → LLR 出 GPU 的总时间**，**只对 `--expert_phy.phy_pipeline gpu`**
+   （cpu / cpu_gpu 已经有分模块的测量）；
+2. 类似 cpu/cpu_gpu 的 **`[ul_pipeline]`：IQ samples → MAC PDU CRC=OK**，
+   "实际上就是前面的那个测量加上 LDPC 的时间"。
+
+**第 2 条本来就有**：`[ul_pipeline]` **与模式无关**（`record_start()` 在
+`lower_phy_baseband_processor` 收到一个 slot 的 IQ 后调用、`record_end_crc_ok()` 在 TB CRC 通过时调用，
+见 `pusch_processor_notifier_adaptor::on_sch_data`），`5g-epochs` 那条腿就打了
+`samples=2832 mean=2768.0us`。要补的只是**腿报告里把它显示出来**：`wip/leg_report.sh` 现在多了一段
+`-- latency (shutdown series)`（`[ul_pipeline]` / `[ul_gpu_pipeline]` / 三个分段 / `[ul_ldpc_decode]` /
+`[ul_fapi_mac]`）。
+
+### 20.2 第 1 条的实现：同一个探针里的第二个端点
+
+`[ul_gpu_pipeline]` = **第一个码块解码调用时刻 − 该 slot 的 IQ 到达时刻**。两端本来都在
+`ul_pipeline_probe` 里，只是在 `mode=gpu` 下被**丢掉**了（`records_phase_segments()` 为假时
+`record_ldpc_start()` 直接 return）。
+
+* **终点**：`record_ldpc_start()`（`pusch_decoder_impl::cb_process_task` 里 `cb_id == 0` 时调用，
+  即 LDPC 解码器被调用前一刻）。这一刻 **LLR 已经就绪**：等化器的 deferred 链在
+  `pusch_demodulator_impl` 的 **single synchronization point**（`demapper->wait()` 连带覆盖等化器）
+  同步过，LLR 是宿主可读的——这正是 `[ul_equalization_demod]` 在车道外结束的同一个边界；
+* **只在 `phy_pipeline_mode::gpu` 记录与打印**：`report()` 里这条系列**替代**三个分段，而不是与它们并列。
+  车道上那三个边界不存在，报出来就是 §18 反复说的"工作搬出测量窗口 ⇒ 看起来变快"的错觉；
+* **配对**：与 `[ul_pipeline]` 用**同一个** `find_fresh(pending_starts, slot, now)`（容差 slot / slot−1 /
+  slot−2），且**不消费**那条 entry（`record_end_crc_ok()` 之后还要用它）⇒ 两条系列数的是**同一个起点**。
+
+### 20.3 三条口径（读数字之前先读这三条）
+
+1. **等式**：`[ul_gpu_pipeline]` ≡ 车道外三个分段之和（`[ul_time_frequency]` +
+   `[ul_channel_estimation]` + `[ul_equalization_demod]`）——同一对端点，逐样本相等。
+   所以它不是"新增一个测量"，而是那三个测量**在融合车道里的替代物**；
+2. **人口不同（设计选择）**：`[ul_gpu_pipeline]` 在**每一次解码尝试**记录；
+   `[ul_pipeline]` / `[ul_ldpc_decode]` **只在 CRC 通过时**记录。
+   79% CRC 的腿里前者比后者多约 21% 的样本 ⇒ **两个均值之差 ≈ LLR 之后的部分**
+   （速率匹配 + LDPC + CRC + FAPI），但那是**两个总体**的均值差，不是逐样本配对差。
+   这样选的理由：**全解不出来的腿**（§12.2.1 那种 RSRP −25 dB 的腿）里 `[ul_pipeline]` 是空的，
+   而 `[ul_gpu_pipeline]` 仍然回答"IQ→LLR 这一段是好的"——那正是最需要它的时候；
+3. **墙钟，不是设备时间**：窗口里包含**宿主提交**与**队列空洞**，而且起点是
+   `ul_process()` 顶部用 `last_rx_timestamp` 派生的那个时间戳（整 slot 块时它对应**上一个块**的到达），
+   所以窗口里还有"等这一 slot 的样本到齐"的那一段。
+   ⇒ 它必然 **≥ `[ul_gpu_lane]` 的 residency**（5g 腿上 residency 856.8 µs vs `[ul_pipeline]` 2768 µs），
+   两者回答的不是同一个问题；要把"GPU 忙"与"宿主在环里"分开，必须和
+   `[ul_gpu_lane] lanes / busy split`（以及 `dft` 那一段）一起读。
+
+### 20.4 判据（离线，已过）
+
+* **新增单测** `tests/unittests/support/executors/ul_pipeline_probe_test.cpp`（注册进 ctest，label `support`）。
+  它**按操作员的方式读**：把 `stderr` 重定向进临时文件，再解析 `report()` 打出来的行：
+  * **cpu（未发布模式）**：三个分段各 1 个样本、`[ul_gpu_pipeline]` **整行不存在**；
+  * **gpu**：`[ul_gpu_pipeline]` = 1 个样本、均值 ≥ 注入的 30 ms、`[ul_pipeline]` = 2 个样本、
+    三个分段**不打印**（不是"打印 0"，是没有这一行）；
+  * 这两个模式**必须在同一个用例里、按这个顺序**检查：`phy_pipeline_mode_registry::set()` 是进程级且**不可回退**，
+    而非融合的那一半只能在注册表还是默认值（cpu）时跑；**而且** `gtest_discover_tests` 把每个用例注册成
+    **独立的 ctest 条目（独立进程）**，拆成两个用例就会变成"各查各的、互相看不到对方留下的状态"
+    ——这不是假设：第一版就是这么写的，直接跑二进制通过、`ctest -L support` **变红**；
+* **反证（做过了）**：把 fused 分支改成不可达（`records_phase_segments()` 恒真）后重跑，
+  测试**变红**（实测 `1 FAILED TEST`）⇒ 它确实会抓"探针不再报这条系列"；
+* **行为不变（27 捕获）**：`ab_replay_bins.sh`（A = 5f 的二进制 + 它的 kernels，B = 当前树 + 树里的 kernels）
+  **27/27 四个 dump 逐字节相同、0 缺 dump、配对断言通过** —— 探针改动没有碰任何发布位，
+  （这条同时把 5g 的"与旧二进制逐字节相同"在新构建上复核了一遍）；
+* 构建 rc=0；`ENABLE_FLOW_PROBES=OFF` 的构建里测试**跳过并说明原因**（不是静默通过）；
+* `ctest -L phy` **172/172 不变**（新测试的 label 是 `support`，不进 phy 计数；`ctest -L support` 562/562）。
+
+### 20.5 还缺什么
+
+* **空中腿**：离线判据证明"探针按规格工作"，**不证明空口上它就是这个数**。
+  腿要看的是：`[ul_gpu_pipeline]` 这一行**出现**、样本数与 `[ul_ldpc_decode]` 同量级且**不少于**它、
+  均值落在 `[ul_pipeline]` 之下且相差不大（预期差 = LDPC + FAPI 的量级，5g 腿上 `[ul_ldpc_decode]`
+  mean 13 µs）；同时 `[ul_gpu_lane]` 的 residency/busy/gap 与这个窗口的差要能解释（§20.3 第 3 条）；
+* 用户提出的**第 2 条**（IQ → CRC=OK）不需要新代码，但要在腿报告里与第 1 条并排出现——已做
+  （`leg_report.sh`）。

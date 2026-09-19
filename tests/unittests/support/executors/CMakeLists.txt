@@ -13,3 +13,10 @@ add_executable(task_worker_test
         fork_limit_executor_test.cpp)
 target_link_libraries(task_worker_test ocudulog ocudu_support GTest::gtest ocudu_gtest_main)
 gtest_discover_tests(task_worker_test PROPERTIES LABELS "tsan")
+
+# The UL pipeline probe's report shapes (see the test's file comment). Header-only and inert unless
+# ENABLE_FLOW_PROBES is on: the test skips itself in a build without the probes rather than asserting
+# on no-ops.
+add_executable(ul_pipeline_probe_test ul_pipeline_probe_test.cpp)
+target_link_libraries(ul_pipeline_probe_test ocudulog ocudu_support GTest::gtest ocudu_gtest_main)
+gtest_discover_tests(ul_pipeline_probe_test PROPERTIES LABELS "support")

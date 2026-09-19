@@ -66,7 +66,23 @@ struct ul_phase_durations {
 /// The phase-segment series (time-frequency / channel estimation / equalization+demodulation) measure the CPU side of
 /// the module boundaries, so they are meaningless once the whole IQ -> LLR chain runs inside the fused device-side
 /// lane: in phy_pipeline_mode::gpu neither their recording nor their report happens (the lane reports its own
-/// 'into the GPU -> out of the GPU' residency and busy/gap split instead).
+/// 'into the GPU -> out of the GPU' residency and busy/gap split instead). What the fused lane reports instead is
+/// their TOTAL, as a single series: [ul_gpu_pipeline], from the arrival of the slot's first IQ samples to the moment
+/// the LLRs are handed to the decoder - the span the lane owns end to end (IQ upload, per-symbol transforms, channel
+/// estimation, equalization and demapping, and the LLR transfer back). Its two ends are the same two instants that
+/// bound the phase segments (record_start() and the first codeblock decode invocation), so it equals their sum by
+/// construction, and [ul_pipeline] - [ul_gpu_pipeline] is what follows the LLRs (rate matching, LDPC decode, CRC
+/// check and the FAPI completion).
+///
+/// \note The two edge series do not have the same population: [ul_pipeline] is completed only by a CRC-OK transport
+///       block (see record_end_crc_ok), while [ul_gpu_pipeline] is recorded at every decode attempt, so the fused
+///       series stays visible in a run whose decodes all fail. In a healthy run the difference is the failed
+///       attempts (e.g. ~21% more samples at a 79% CRC-OK rate), which is a caveat on comparing their means, not on
+///       either series.
+///
+/// \note [ul_gpu_pipeline] is a wall-clock window, not device execution time: it covers the host submission work and
+///       any queueing between the lane's stages. Read it together with the gpu_lane_probe report, whose residency /
+///       busy / gap split says how much of it the device was actually executing.
 class ul_pipeline_probe
 {
 public:
@@ -100,6 +116,9 @@ public:
 
   /// Records the start of the LDPC decoder (call right before the first codeblock decode of a transport block).
   /// \param[in] slot Slot number of the PUSCH (same reference as record_end_crc_ok).
+  ///
+  /// \note In the fused-lane mode this call is ALSO the end of the [ul_gpu_pipeline] series (the LLRs are ready
+  ///       here); outside it, it is the end of the equalization+demodulation phase segment. See the class comment.
   void record_ldpc_start(uint64_t slot)
   {
     std::lock_guard<std::mutex> lock(mutex);
@@ -110,6 +129,21 @@ public:
     evict_oldest(pending_ldpc_starts);
 
     if (!records_phase_segments()) {
+      // Fused lane (phy_pipeline_mode::gpu): the module boundaries the phase segments measure do not exist here, so
+      // record the span they would have covered together instead - IQ arrival -> LLR ready. It ends at this very
+      // instant (the LLRs are what this decode is about to consume), which is the boundary [ul_equalization_demod]
+      // ends at outside the lane. The start entry is NOT consumed: the pipeline series reads the same one at the
+      // CRC-OK completion, so both series pair the same start. Every decode attempt is recorded, CRC-OK or not (see
+      // the class comment for the population difference against [ul_pipeline]).
+      const auto start_it = find_fresh(pending_starts, slot, now);
+      if (start_it != pending_starts.end()) {
+        const int64_t iq_to_llr_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now - start_it->second.tp).count();
+        // Negative durations can only come from a mismatched (shifted-slot) pairing: drop the sample.
+        if (iq_to_llr_ns >= 0) {
+          gpu_pipeline_latencies_us.push_back(static_cast<double>(iq_to_llr_ns) / 1e3);
+        }
+      }
       return;
     }
 
@@ -264,42 +298,22 @@ public:
     std::vector<double> sorted_t2f;
     std::vector<double> sorted_ce;
     std::vector<double> sorted_eqdem;
+    std::vector<double> sorted_gpu_pipeline;
     std::vector<double> sorted_fapi_mac;
     {
       std::lock_guard<std::mutex> lock(mutex);
-      sorted_pipeline  = latencies_us;
-      sorted_ldpc      = ldpc_latencies_us;
-      sorted_pdu_sizes = mac_pdu_sizes_bytes;
-      sorted_t2f       = t2f_latencies_us;
-      sorted_ce        = ce_latencies_us;
-      sorted_eqdem     = eqdem_latencies_us;
-      sorted_fapi_mac  = fapi_mac_latencies_us;
-    }
-    if (sorted_pipeline.empty()) {
-      std::fprintf(stderr, "[ul_pipeline] no CRC-OK samples recorded\n");
-      return;
-    }
-    std::sort(sorted_pipeline.begin(), sorted_pipeline.end());
-    double sum = 0;
-    for (double v : sorted_pipeline) {
-      sum += v;
+      sorted_pipeline     = latencies_us;
+      sorted_ldpc         = ldpc_latencies_us;
+      sorted_pdu_sizes    = mac_pdu_sizes_bytes;
+      sorted_t2f          = t2f_latencies_us;
+      sorted_ce           = ce_latencies_us;
+      sorted_eqdem        = eqdem_latencies_us;
+      sorted_gpu_pipeline = gpu_pipeline_latencies_us;
+      sorted_fapi_mac     = fapi_mac_latencies_us;
     }
     auto pct = [](const std::vector<double>& sorted, double p) {
       return sorted[static_cast<size_t>((sorted.size() - 1) * p)];
     };
-    // Report to stderr (guaranteed to be visible at the shutdown, unlike the logging backend) and to the logs.
-    std::fprintf(stderr,
-                 "[ul_pipeline] samples=%zu mean=%.1fus median=%.1fus min=%.1fus max=%.1fus p95=%.1fus p99=%.1fus\n",
-                 sorted_pipeline.size(),
-                 sum / static_cast<double>(sorted_pipeline.size()),
-                 pct(sorted_pipeline, 0.5),
-                 sorted_pipeline.front(),
-                 sorted_pipeline.back(),
-                 pct(sorted_pipeline, 0.95),
-                 pct(sorted_pipeline, 0.99));
-
-    // Phase-segment series, printed in pipeline order. Recorded in lockstep with the [ul_ldpc_decode] series
-    // (CRC-OK completions only), so their sample counts always match it.
     auto print_series = [&pct](const char* name, std::vector<double>& sorted) {
       if (sorted.empty()) {
         std::fprintf(stderr, "[%s] no samples recorded\n", name);
@@ -321,14 +335,46 @@ public:
                    pct(sorted, 0.95),
                    pct(sorted, 0.99));
     };
+
+    double sum = 0;
+    // Report to stderr (guaranteed to be visible at the shutdown, unlike the logging backend) and to the logs.
+    // The series are independent: a run with no CRC-OK transport block still reports the ones it did record (the
+    // fused-lane span below in particular, which is recorded per decode attempt rather than per successful one).
+    if (sorted_pipeline.empty()) {
+      std::fprintf(stderr, "[ul_pipeline] no CRC-OK samples recorded\n");
+    } else {
+      std::sort(sorted_pipeline.begin(), sorted_pipeline.end());
+      sum = 0;
+      for (double v : sorted_pipeline) {
+        sum += v;
+      }
+      std::fprintf(stderr,
+                   "[ul_pipeline] samples=%zu mean=%.1fus median=%.1fus min=%.1fus max=%.1fus p95=%.1fus "
+                   "p99=%.1fus\n",
+                   sorted_pipeline.size(),
+                   sum / static_cast<double>(sorted_pipeline.size()),
+                   pct(sorted_pipeline, 0.5),
+                   sorted_pipeline.front(),
+                   sorted_pipeline.back(),
+                   pct(sorted_pipeline, 0.95),
+                   pct(sorted_pipeline, 0.99));
+    }
+
+    // Outside the fused lane: the phase-segment series, printed in pipeline order. Recorded in lockstep with the
+    // [ul_ldpc_decode] series (CRC-OK completions only), so their sample counts always match it. Their sum is the
+    // same span the fused lane reports as one number below.
+    // Inside the fused lane: that single span instead. The per-module boundaries the three segments measure do not
+    // exist there, so their numbers would be CPU-side artifacts; what the lane does cover end to end is exactly
+    // 'IQ samples in -> LLRs out' (read it together with the gpu_lane_probe residency / busy / gap split, which
+    // says how much of that window the device was actually executing).
     if (records_phase_segments()) {
       print_series("ul_time_frequency", sorted_t2f);
       print_series("ul_channel_estimation", sorted_ce);
       print_series("ul_equalization_demod", sorted_eqdem);
+    } else {
+      print_series("ul_gpu_pipeline", sorted_gpu_pipeline);
     }
-    // In the fused-lane mode these three segments are not reported: the per-module boundaries they measure do not
-    // exist anymore, so their numbers would be CPU-side artifacts (the lane reports 'into the GPU -> out of the GPU'
-    // residency with its busy/gap split instead). The series printed below cross both modes unchanged.
+    // The series printed below cross both modes unchanged.
     // FAPI->MAC tail (CRC-OK -> MAC UL task enqueue): recorded in lockstep with the CRC-OK completions, so its
     // sample count tracks [ul_ldpc_decode] (minus PDUs dropped at the per-UE queue).
     print_series("ul_fapi_mac", sorted_fapi_mac);
@@ -381,7 +427,8 @@ private:
   /// meaningful in the current effective pipeline mode. They measure the CPU side of the module boundaries, which the
   /// fused lane (phy_pipeline_mode::gpu) removes altogether: recording them there would only add probe overhead to the
   /// lane, and reporting them would revive the "it got faster" illusion (the work merely moved out of the measured
-  /// window). The mode is published once at startup by the application (see phy_pipeline_mode_registry).
+  /// window). What replaces them there is the single span they add up to ([ul_gpu_pipeline], see
+  /// record_ldpc_start()). The mode is published once at startup by the application (see phy_pipeline_mode_registry).
   static bool records_phase_segments() { return phy_pipeline_mode_registry::get() != phy_pipeline_mode::gpu; }
 
   /// Registry entry: start timestamp plus a monotonic insertion sequence (the slot key wraps every SFN cycle,
@@ -488,6 +535,10 @@ private:
   std::vector<double> t2f_latencies_us;
   std::vector<double> ce_latencies_us;
   std::vector<double> eqdem_latencies_us;
+  /// Fused-lane IQ -> LLR spans (µs): the arrival of the slot's IQ samples -> the LLRs are ready for the decoder.
+  /// Recorded instead of the three segments above when the effective mode is phy_pipeline_mode::gpu, at every
+  /// decode attempt (see record_ldpc_start()).
+  std::vector<double> gpu_pipeline_latencies_us;
   /// FAPI->MAC tail latencies of the CRC-OK completions (µs): CRC-OK -> MAC UL task enqueue.
   std::vector<double> fapi_mac_latencies_us;
 };

@@ -65,5 +65,16 @@ for p in "$@"; do
   echo "-- lane (present when the fused lane ran)"
   grep -a "^\[ul_gpu_lane\] lanes" "$err" 2>/dev/null | sed 's/^/  /' | tail -1
   grep -a "^\[ul_gpu_lane\] busy split" "$err" 2>/dev/null | sed 's/^/  /' | tail -1
+
+  # The shutdown latency series. They are not a verdict on the crossing contract - that is the block
+  # above - but a leg is the only place they are produced (the replay tools do not print them), and
+  # [ul_gpu_pipeline] is the fused lane's own number: IQ samples in -> LLRs out. The phase-segment
+  # series only exist outside the lane (they are the same span, split); inside it, [ul_pipeline] minus
+  # [ul_gpu_pipeline] is what follows the LLRs (rate matching, LDPC, CRC, FAPI).
+  echo "-- latency (shutdown series)"
+  for pat in '^\[ul_pipeline\]' '^\[ul_gpu_pipeline\]' '^\[ul_time_frequency\]' '^\[ul_channel_estimation\]' \
+             '^\[ul_equalization_demod\]' '^\[ul_ldpc_decode\]' '^\[ul_fapi_mac\]'; do
+    grep -a "$pat" "$err" 2>/dev/null | sed 's/^/  /' | tail -1
+  done
   echo
 done
