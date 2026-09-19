@@ -2639,7 +2639,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           //          corpus that can answer it is a real 1-2 PRB reception (ul_capture::capture_grid),
           //          not the cropped captures - cropping a 3 PRB grid changes the DM-RS sequence the
           //          demodulator regenerates, so the CPU reference fails on them too (-11.6 dB, all KO).
-          const bool tail_slots_on_device = std_slots_filled;
+          const bool tail_slots_on_device = std_slots_filled || (device_corr_enabled() && (n_std_blocks == 0));
           unsigned nout_e = 0;
           unsigned L_e    = 0;
           build_correlation_matrices(stats,
