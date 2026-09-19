@@ -128,7 +128,12 @@ LDPC 端到端性能**只覆盖信号路径**。以下两类**不适用**主判�
 
 ---
 
-## 2. 当前基线
+## 2. 基线（历史 + 现行）
+
+> **⚠ 现行状态（HEAD `90e2deda03`，2026-09-20）**：默认空中腿 **读 0.00 + 写 0.00 / 跳、两张分项表
+> 皆空、契约 8/8、0 RF failure**（§5.5.3 S13-P2、§5.6.8 S13-P2c，腿台账 §12.1）。
+> **本节 §2.1–§2.5 记的是 2026-09-19 的历史基线**（`ota-b2-recon`/`b3b`/`b4` 那一代计数器口径），
+> 保留它是为了 §2.2 的逐跳构成与 §2.4 的口径警告。**引用"当前"数字请引用 §5.5.3 / §5.6.8，不要引用本节。**
 
 ### 2.1 稳态（复现命令见 §6.2）
 
@@ -164,11 +169,16 @@ LDPC 端到端性能**只覆盖信号路径**。以下两类**不适用**主判�
 
 **⚠ 批次 2 只能把读降到 1.10/跳，不是 0。** 到 0 必须连批次 3 的两个点一起做。
 
-### 2.3 契约状态
+### 2.3 契约状态（**历史**：2026-09-19 中途）
 
-`mode=gpu` 的契约**当前是 FAILED**，这是**正确的**（读侧还有 2.37/跳，§2.5）。
+> **现行状态是契约 8/8**（§5.6.8，`6742e2f271`）。这一段保留下来，是为了 §3.2 第 2 条限定
+> （"曾经有过一次被撤回的 8/8"）有据可查。
+
+09-19 的默认路径上 `mode=gpu` 的契约是 **NOT MET：8 条中 7 条过**，唯一 FAILED 的是跨越检查
+（读侧还有 2.37/跳，§2.5）—— **那个 FAILED 是正确的判读**。
 历史腿 `gnb_gpu_s5_crossings0_0918_2135`（`a656133d70`）曾报 `contract MET (8 of 8)`，
-**那个里程碑已撤回**（检查当时只覆盖一个模块，见 `wip/S8_contract_met.md` 顶部）。**不恢复。**
+**那个里程碑已撤回**（检查当时只覆盖一个模块的四个标量点，见 `wip/S8_contract_met.md` 顶部）。**不恢复。**
+8 条检查逐项、通过规则，以及"今天这个 `8/8` 与那个 `8/8` 差在哪"，见 **§3.2**。
 
 ### 2.4 ⚠ 空中数字与离线数字不可直接比较
 
@@ -257,6 +267,52 @@ print_reporters(FILE*)          // 命中路径不涉及
 - **头文件必须保持轻量**：只能用 `<atomic> <cstdint> <cstdio> <cstring> <mutex>`。
   加 `<vector>/<string>/<algorithm>` 会让若干"位于命名空间内"的包含点炸
   （`no template named 'basic_ostream'`）。要打字符串就直接 `fprintf`。
+
+### 3.2 契约的 8 条检查（逐项、通过规则、计数器出生点）
+
+机制在 `phy_pipeline_contract.h`：每条检查由**拥有那些计数器的探针**自己登记
+（`register_phy_pipeline_check`，第一条登记时挂 `atexit`），退出时逐条打印
+`[phy_pipeline]   <名字>: <探针自己打印的证据> -> OK / FAILED / not applicable`。
+判定是三态 `std::optional<bool>`：`true`=OK、`false`=FAILED、**`nullopt`=不适用且不进分母**。
+汇总行 `contract MET (N of M checks applicable)` 里 **M = `checks.size()` = 登记了几条**、
+`N` = 其中适用的条数。**契约不 abort** —— 它是报告，不是门禁。
+
+| # | 检查 | 断言（所选模式声称的性质）| 通过规则 | `nullopt`（不适用）| 计数器与注册点 |
+|---|---|---|---|---|---|
+| 1 | `radio sample continuity` | 这一腿的采样是连续的 | `blocks ≥ 2 && gaps == 0` | `blocks < 2` | `lower_phy_baseband_processor.cpp:65-82`；`:480` `blocks`、`:468` `gaps` |
+| 2 | `dft radio inputs` | DFT 从无线电缓冲零拷贝取输入 | `radio*100 ≥ transforms*99`（≥99%）| `transforms == 0` / 未发布 / `mode == cpu` | `ocudu_dft_metal_engine.mm:125-152`（首次用到引擎才注册）；`:83` `transforms`、`:97` `radio_inputs` |
+| 3 | `zero-copy wraps` | 映射建一次、永不替换 | `replaces == 0 && failures == 0 && misaligned == 0` | `creates == 0 && hits == 0` | `ocudu_metal_queue.mm:187-205` |
+| 4 | `ce device estimates` | 估计由设备做，宿主没有**同时**再做一遍 | `mode == cpu` ⇒ `host > 0 && device == 0`；offloaded ⇒ `device > 0` | 两者皆 0 / 未发布 | `pusch_demodulator_impl.cpp:773-799`；`:844` device、`:850` host |
+| 5 | **★ `host device data crossings`** | `mode=gpu` 下宿主对设备数据零读零写 | `published && hops > 0 && mode == gpu` ⇒ `reads == 0 && writes == 0` | 未发布 / `hops == 0` / `mode != gpu` | `phy_pipeline_crossings.h:346-401`，由 `port_channel_estimator_metal_mmse_impl.cpp:647` 注册 |
+| 6 | `cfo compensation`（守卫）| 没有偏移在生效时不做往返 | `round_trips == 0 \|\| cfo_hz != 0` | **无**（永远适用）| `uplink_processor_impl.cpp:190-206`（构造时一次注册 `:278-282`）；`count_round_trip()` `:518` |
+| 7 | `baseband metrics`（守卫）| 只为读它的应用测度量 | `measured == 0 \|\| consumed` | **无** | 同上 `:209-220`；`count_metrics()` `:556` |
+| 8 | `host sample assembly`（守卫）| 样本在电波放的地方就地读，不拷进符号缓冲 | `assembled*100 ≤ symbols`（≤1%）| 未发布 / `symbols == 0` | 同上 `:228-249`；`count_in_place()` `:478`、`count_assembled()` `:492` |
+
+**三条必须先说清的限定**（否则 `8/8` 会被读成比它实际更强的东西）：
+
+1. **分母是动态的。** `M` 是"到目前为止登记了几条"，不是固定的 8：注册跟着**代码路径**走
+   （第 2 条只在首次用到 Metal DFT 引擎时登记，第 5 条只在 Metal MMSE 估计器被构造时登记），
+   被编译掉或从未触发就会缩成 7 而照样打印 `MET (7 of 7)`。
+   **⇒ 证据是打印出来的那 8 个名字，不是数字 8**；判读一条腿先核对名字齐不齐。
+2. **曾经有过一次被撤回的 `8/8`。** 腿 `gnb_gpu_s5_crossings0_0918_2135`（`a656133d70`）也报过
+   `contract MET (8 of 8)`，§2.3 明确"**里程碑已撤回，不恢复**"——当时第 5 条只覆盖**一个模块的四个标量点**。
+   要判断今天这个 `8/8` 与它的差别，看四件事：申报模块扩到 4 个、读侧有分项表 + 未命名覆盖行、
+   有逐跳 `refusals` 理由计数、设备跳计数器修掉了"回退路由上分母为 0"的缺陷（§5.6.4）。
+3. **第 6/7/8 条是"零分子即通过"的守卫**（`round_trips == 0`、`measured == 0`、`assembled == 0`
+   各是它们通过条件的一条），价值在"发生了就报红"，**不构成本线的正面证据**；承重项是第 5 条。
+   另有一处小诚实项：第 1 条把 `ts0_blocks` 打印出来但**不参与判定**（`:79` 只判 `gaps == 0`）。
+
+**`8/8` 不等于什么**：
+
+* **不等于"整条车道零穿越"**：第 5 条只数**申报过**的模块在其**命名站点**上的读/写，scope 就打印在
+  同一行的后半句（`a module NOT listed here is not covered by this number`），且 IQ 上传与 LLR 下载
+  **不计**（`phy_pipeline_crossings.h:363-365`）⇒ **读这句必须连读后半句**（§5.4 的措辞项）；
+* **不等于数值正确**：8 条全是结构性计数，没有一条看 LLR 内容或 CRC；数值判据是另一套（§1.2、§6.8）；
+* **不等于"无回退"有第二条独立来源**：`refusals=<none>` 与分项表空读的是同一批计数器、同一个回退分支；
+* **跨腿不可比**：口径与申报模块都会变，只有同一份构建内 A/B 两臂的差可比（§2.4）。
+
+**两次打印**：契约在**收到停止请求时**与**真正退出时**各打一块（两块只差"停机请求到退出之间又处理掉的
+块数"），`leg_report.sh` 取**最后一个完整块**（表头必须含 `(mode=…)`，终止符匹配 `MET` / `NOT MET`）。
 
 ---
 
@@ -427,7 +483,8 @@ OCUDU_CE_DEV_Y=0       3.10 读 + 2.65 写 /跳   ← 参考臂：宿主 stage y
 - **子句 B（融合程度）**：`cbs/lane` **3.11**（曾 3.00）。`OCUDU_CE_EDGE_FUSE=1` 与独立形态仍差
   **51810 字节**，**未解决**。下一个嫌疑：`encode_run` 在 `st.burst` 时跳过 corr ↔ K1 之间那道
   barrier（注释假定"切 pipeline 会顺带插 barrier"——**按判据要求去读代码验证，别信注释**）。
-- **契约措辞**：主句仍写 "the fused lane (mode=gpu) allows 0"，容易被读成整车道结论。**考虑改措辞。**
+- **契约措辞**：主句仍写 "the fused lane (mode=gpu) allows 0"，容易被读成整车道结论。**代码措辞未改**
+  （scope 就紧跟在同一行的后半句）；**读法已写进 §3.2**：读这句必须连读后半句的申报模块列表。
 - **`ab_dumps.sh` 要能分开报"发布判据"与"调试判据"**（见 §9 坑 12）。
 
 ### 5.5 ✅ S13-P2：那条**每跳往返**消掉了（离线判据全过，空中腿待跑）
@@ -793,6 +850,37 @@ const bool tail_slots_on_device = std_slots_filled || (device_corr_enabled() && 
 * `device_corr_builds = device_y_writes = 27840 = 1.73/lane` ⇒ 每一个批（含窄跳）都由**设备**建矩阵；
 * 切换前后对比：`narrow-cap` 腿 620 次 `ce: A/R_hp staged (host)`（0.04 写/跳）→ 本腿 **0 次、0 字节**。
 
+**★ 8 条检查的完整证据**（退出时那一块的原文；通过规则与计数器出生点见 §3.2）：
+
+```
+[phy_pipeline]   radio sample continuity: 0 gaps over 91337 blocks (0 samples missing or repeated), 0 timestamp-0 blocks -> OK
+[phy_pipeline]   dft radio inputs: 383866 of 383867 transforms read the radio buffer -> OK
+[phy_pipeline]   zero-copy wraps: 369231 hits, 136281 creates, 0 replaces, 0 failures, 0 misaligned -> OK
+[phy_pipeline]   ce device estimates: 176737 device, 0 host -> OK
+[phy_pipeline]   cfo compensation: 0 round trips over 1278634 symbols, 0 commands, offset 0.000 Hz -> OK
+[phy_pipeline]   baseband metrics: 0 symbols measured for 1278634 processed (metrics disabled) -> OK
+[phy_pipeline]   host sample assembly: 1278634 of 1278634 symbols read where the radio put them, 0 copied into a symbol buffer (mode=gpu) -> OK
+[phy_pipeline] contract MET (8 of 8 checks applicable)
+```
+
+（第 5 条 `host device data crossings` 的原文见上，占 4 行。）
+
+**契约行不是自证的：同一批数字在本日志里有独立打印点。**
+
+| 契约数字 | 本日志里的独立佐证 |
+|---|---|
+| `91337 blocks` | `[ul_rx] blocks=91337 samples=701468153 gaps=0 gap_samples=0 ts0_blocks=0`（同一对计数器的另一打印点）|
+| `383866 / 383867` | `[metal_stats] dft commits=27420 transforms=383867 waits=27420 slots_in_flight=0 radio_inputs=383866 wrap_copies=0`（顺带证明 DFT 输入**一次宿主拷贝都没发生**）|
+| `369231 / 136281 / 0 · 0 · 0` | `[metal_stats] wrap hits=369231 creates=136281 replaces=0 failures=0 misaligned=0 purges=136191`；hits/creates ≈ **2.7** ⇒ 确实是"建一次反复用" |
+| `176737 device / 0 host` | `[metal_stats] pusch_demod ch_est device=176737 host=0` **和** `[metal_stats] equalizer ch_est device=176737 staged=0` —— **三个打印点同一个数** |
+| `16067 device hop(s)` | `[mmse_time_sum] … device_hops=16067`、`[ul_gpu_lane] lanes=16067`、`device_sigma2=16067`、`demod_batch flushes=16067`、`eq_batch flushes=16067` —— **六处一致** |
+| 两张分项表皆空 | 无事可归因；且**没有**打印 `N of M read(s) above are NOT named by a site`（那条只在总数 ≠ 命名和时出现）⇒ 命名和 == 总数（0 == 0）|
+| 无回退 | `[metal_stats] mmse_ce … device_corr_builds=27840 corr_build_fail=0 device_y_writes=27840 y_write_fail=0 device_sigma2=16067 refusals=<none>`：18 个 `mmse_refusal` 理由一个都没触发；`27840/16067 = 1.73/lane > 1` ⇒ **含窄跳在内每个批都由设备建矩阵** |
+| `1278634`（第 6/7/8 条共用）| `[ul_host] symbols=1278634 in_place=1278634 cfo_round_trips=0 cfo_commands=0 cfo_hz=0.000 metrics=0 assembled=0` |
+
+**两次打印的差不是矛盾**：请求停止时那一块写 `91333 blocks`、退出时写 `91337` —— 差值 4 = 停机请求到
+真正退出之间又处理掉 4 块；**8 条判定两次完全相同**，契约行不受影响（§3.2）。
+
 **★ 判据的核心：按宽度分层**（同一座台、同一部手机，三条腿）
 
 | 宽度 | `s13p1b` | `narrow-cap` | **`narrow-fix`** |
@@ -998,6 +1086,7 @@ bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh "" "<knob>"
 | 23 | **★ 用 SIGTERM 停 gNB，收尾统计全部丢失** | `gnb.cpp` 对 SIGINT 走正常收尾（打印契约/`[ul_host]`/`[metal_stats]`/`[ul_gpu_lane]`），对 **SIGTERM 只 flush 日志就退出**。腿 `ota-b3a-final_0919_0734` 因此失去全部跨越计数，20 MB 日志里一行都没有，**事后无法恢复** | **腿一律用 Ctrl-C 停**；判定腿有效的第一眼是报告的 `-- device side` / `-- lane` **两段非空** |
 | 24 | **★ `run_leg.sh` 里的 `> >(tee …)` 让 shell 先回到提示符** | 腿 `probe-iq2llr_0919_2216` 的控制台最后一行是 `[ul_rx] blocks=… gaps=0` **直接贴着提示符**（缺 ` gap_samples=0 ts0_blocks=0` 和换行），而 `.stderr` 文件里那一行**完整且有换行**。不是程序少打 `\n`（源码里就有），是**进程替换的 tee 没有被等待**：gnb 一退出 shell 就打印提示符，tee 还没把最后一段抄到终端 | **已修**：`run_leg.sh` 改成 `exec 3> >(tee …)` / `exec 4> >(tee …)` 拿住两个 tee 的 PID，gnb 退出后先 `exec 3>&- 4>&-` 再 `wait` 这两个 PID（**不关 fd 的话 tee 的 stdin 看不到 EOF，`wait` 会挂住**——实测踩过）。判据：控制台与文件必须一致 |
 | 25 | **★ `gtest_discover_tests` 把每个用例注册成独立进程** | 探针的新测试拆成两个用例（cpu / gpu）：**直接跑二进制通过、`ctest -L support` 变红**——每个 ctest 条目是独立进程，gpu 那个用例看不到前一个用例留下的状态，而它断言的样本数依赖那点状态 | 跨用例共享进程级状态（单例、只能发布一次的 mode）的测试**放在同一个用例里**；而且**必须用 `ctest -L <label>` 跑一遍**才算验过，直接跑二进制不算 |
+| 28 | **★ 把 `contract MET (8 of 8)` 当成"一项"结论** | 这个里程碑字符串不是一条判据，而是**八条**：其中三条（`cfo compensation`/`baseband metrics`/`host sample assembly`）的通过条件里有一条是"零分子"（守卫式，只保证"发生了就报红"），`radio sample continuity` 把 `ts0_blocks` 印出来却**不判它**，分母 `M` 还是**动态的**（跟着代码路径注册）⇒ 少登记一条会安静地变成 `MET (7 of 7)`。历史上 `a656133d70` 正是靠"8/8"给了一个**后来被撤回**的里程碑（§2.3、§9.2）| **判读三件事**：①先把 8 个**名字**逐个核对齐不齐（**数字不是证据，名字才是**）；②问这条检查**能不能看见它要防的失败**（承重项是第 5 条 `host device data crossings`）；③看到 `N of N` 先确认 `N` 有没有变。逐项规则、通过条件、计数器出生点见 **§3.2** |
 | 27 | **★ 把要留下的测量数据写进了 `/tmp`** | macOS 会清理 `/tmp`：参考二进制（`/tmp/replay_base`、`/tmp/mmse_*.metallib`）、A/B 留下的 dump、离线语料都会在某次重启后消失；**空口捕获尤其致命 —— 它不可再生，要再跑一条腿** | **要留下的东西一律写 `doc_chinese/work_tmp/`**（已被 `.gitignore` 排除、不进历史）：捕获走 `OCUDU_UL_DUMP=doc_chinese/work_tmp/<dir>/cap`，A/B 的 dump 用 `AB_KEEP=doc_chinese/work_tmp/<dir>`，语料放 `doc_chinese/work_tmp/corpus*/`。`/tmp` 只放**当场可弃**的中间物（比较用的临时目录、`limited_run.sh` 的日志）|
 | 26 | **`ctest -R "metal_unit_test"` 匹配不到 `…_metal_mmse_unit_test`** | 以为跑了 8 个 GPU 用例，实际只跑 6 个（`session_handoff_2026-09-19-8.md` §7 的命令注释也这么写）| 用 `ctest -R "metal"`（9 个），或把两个 `port_channel_estimator_metal_*` 显式列上 |
 
