@@ -481,7 +481,7 @@ stage"）；gpu 车道里那张网格是**前端 DFT 写在设备上**的（S-7b
 | 3 | **`_ce.txt` 的差异要能说清** | ✅ 29 字节、**只在 `epre` 字段**（10/27 捕获），最大相对差 **2.3e-07**（float 末位；其余 noise_variance / snr / rsrp / ta_us / cfo_hz **全同**）。工具：`wip/ab_replay_bins.sh` 的 `AB_KEEP` + 逐字段比较 |
 | 4 | **宿主路径逐位不变** | ✅ `OCUDU_CE_CPU_LS=1`（强制宿主预级）下 A/B **四个 dump 全新逐字节相同**（27/27，**包括 `_ce.txt`**）⇒ "宿主 EPRE 逐符号累加"这件事真的保住了 |
 | 5 | **回退旋钮仍然可用** | ✅ `OCUDU_CE_DEV_Y=0` 也是只剩 `epre`（29 字节）；此时宿主**晚抽**（回退），契约照旧显示那次读 —— **合法回退可见，不是静默** |
-| 6 | 单测 | ✅ `ctest -L phy` **171/171**（172 注册，1 disabled）、`ctest -L support` **562/562**；CE 的两个 Metal 用例过 |
+| 6 | 单测 | ✅ macOS：`ctest -L phy` **171/171**（172 注册，1 disabled）、`ctest -L support` **562/562**，CE 的两个 Metal 用例过；**Ubuntu**（`ENABLE_FLOW_PROBES=OFF`）：构建 rc=0、`ctest -j12` **7618/7618、0 failed** |
 | 7 | A/B 的配对自证 | ✅ 新增一次性自证行 `[ce_inputs] received pilots: built on the DEVICE …`；`ab_replay_bins.sh` 的配对断言改成参数 `AB_MARKER`（5g 是 `epoch_impl`，本轮是 `ce_inputs`），A 不打印/B 打印 ⇒ `pairing-wrong=0` |
 
 **⚠ 一条没解释的偶发**：`OCUDU_CE_DEV_Y=0` 臂的**第一次**比较里 `_h.bin` 差过 28 字节；
