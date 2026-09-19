@@ -58,6 +58,9 @@ for p in "$@"; do
   grep -a "^\[ul_host\]" "$err" 2>/dev/null | sed 's/^/  /' | tail -1
 
   echo "-- device side (who did the work)"
+  # The mmse_ce line ends with "refusals=...": WHY a device stage did not run on a hop (batch S13-P1).
+  # "<none>" is the shape a leg is expected to show - it means every hop took the device route - and it
+  # is printed rather than omitted so that "no line" cannot be mistaken for "no refusals".
   for pat in '^\[metal_stats\] mmse_ce' '^\[metal_stats\] burst' '^\[metal_stats\] lane fence' '^\[metal_stats\] dft'; do
     grep -a "$pat" "$err" 2>/dev/null | sed 's/^/  /' | tail -1
   done

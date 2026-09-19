@@ -83,71 +83,61 @@ public:
     if (site == nullptr) {
       return;
     }
-    std::lock_guard<std::mutex> lock(sites_mutex());
-    const std::size_t           n = nof_sites();
-    std::size_t                 i = 0;
-    for (; i != n; ++i) {
-      const char* name = sites()[i].name;
-      if ((name != nullptr) && (std::strcmp(name, site) == 0)) {
-        break;
-      }
+    site_entry* e = site_for(site);
+    if (e == nullptr) {
+      return;
     }
-    if (i == n) {
-      if (n == kMaxSites) {
-        return; // the table is full: the total still counted it, the breakdown just does not name it
-      }
-      sites()[n].name = site;
-      ++nof_sites_stored();
-    }
-    sites()[i].count.fetch_add(1, std::memory_order_relaxed);
+    e->writes.fetch_add(1, std::memory_order_relaxed);
     if (bytes != 0) {
-      sites()[i].bytes.fetch_add(bytes, std::memory_order_relaxed);
+      e->write_bytes.fetch_add(bytes, std::memory_order_relaxed);
     }
   }
 
-  /// Prints the per-site write breakdown, biggest first, to \p out.
+  /// \brief Counts one host read and attributes it to \p site (batch S13-P1).
+  ///
+  /// The mirror of count_host_write_site(), and it exists for the same reason the write table does:
+  /// the read side has MORE sites than the write side (the extraction of the received pilots, the y
+  /// staging out of the device's least-squares pilots, the fallback sigma2), they have nothing in
+  /// common, and "1.00 read per hop" does not say which of them a lane is paying for. It increments
+  /// the same total as count_host_read(), so the breakdown can never disagree with the verdict.
+  static void count_host_read_site(const char* site, uint64_t bytes = 0)
+  {
+    count_host_read(bytes);
+    if (site == nullptr) {
+      return;
+    }
+    site_entry* e = site_for(site);
+    if (e == nullptr) {
+      return;
+    }
+    e->reads.fetch_add(1, std::memory_order_relaxed);
+    if (bytes != 0) {
+      e->read_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    }
+  }
+
+  /// Prints the per-site WRITE breakdown, biggest first, to \p out.
   ///
   /// Printed under the crossings line so the byte totals there can be read as "which store", which is
   /// the question batch 5e starts from. A site that never fired is not printed.
-  static void print_write_sites(std::FILE* out)
+  static void print_write_sites(std::FILE* out) { print_sites(out, /*reads=*/false); }
+
+  /// Prints the per-site READ breakdown (batch S13-P1), in the same shape as the write one.
+  static void print_read_sites(std::FILE* out) { print_sites(out, /*reads=*/true); }
+
+  /// \brief How many reads the named sites account for.
+  ///
+  /// The crossings line prints the TOTAL; the table below it lists the named ones. A total larger than
+  /// this sum means a read nobody has named yet - which is a finding, not a rounding difference, and
+  /// is why both numbers are printed.
+  static uint64_t get_named_reads()
   {
     std::lock_guard<std::mutex> lock(sites_mutex());
-    const std::size_t           n = nof_sites();
-    bool                        any = false;
-    // Selection sort over at most kMaxSites entries, and only ever from the report: the path that
-    // counts stays a fetch_add.
-    bool printed[kMaxSites] = {};
-    for (std::size_t round = 0; round != n; ++round) {
-      std::size_t best     = kMaxSites;
-      uint64_t    best_cnt = 0;
-      for (std::size_t i = 0; i != n; ++i) {
-        if (printed[i]) {
-          continue;
-        }
-        const uint64_t c = sites()[i].count.load(std::memory_order_relaxed);
-        if (c == 0) {
-          printed[i] = true;
-          continue;
-        }
-        if ((best == kMaxSites) || (c > best_cnt)) {
-          best     = i;
-          best_cnt = c;
-        }
-      }
-      if (best == kMaxSites) {
-        break;
-      }
-      printed[best] = true;
-      any           = true;
-      std::fprintf(out,
-                   "\n    %-34s %8llu call(s), %10llu bytes",
-                   sites()[best].name,
-                   static_cast<unsigned long long>(best_cnt),
-                   static_cast<unsigned long long>(sites()[best].bytes.load(std::memory_order_relaxed)));
+    uint64_t                    sum = 0;
+    for (std::size_t i = 0; i != nof_sites(); ++i) {
+      sum += sites()[i].reads.load(std::memory_order_relaxed);
     }
-    if (!any) {
-      std::fprintf(out, "\n    <no host write was attributed to a site>");
-    }
+    return sum;
   }
 
   /// \brief Declares that \p module has audited its host <-> device data touches and counts them here.
@@ -228,17 +218,85 @@ private:
     static std::atomic<uint64_t>* n = new std::atomic<uint64_t>(0);
     return *n;
   }
-  /// One named write site (see count_host_write_site()).
-  struct write_site {
+  /// One named crossing site: a host read or a host write of device data (batches 5e and S13-P1).
+  struct site_entry {
     const char*           name = nullptr;
-    std::atomic<uint64_t> count{0};
-    std::atomic<uint64_t> bytes{0};
+    std::atomic<uint64_t> reads{0};
+    std::atomic<uint64_t> read_bytes{0};
+    std::atomic<uint64_t> writes{0};
+    std::atomic<uint64_t> write_bytes{0};
   };
   static constexpr std::size_t kMaxSites = 8;
-  static write_site* sites()
+  static site_entry* sites()
   {
-    static write_site* v = new write_site[kMaxSites];
+    static site_entry* v = new site_entry[kMaxSites];
     return v;
+  }
+
+  /// Finds (or adds) the entry of \p site, or nullptr when the table is full - in which case the
+  /// caller's total has already counted the crossing and only the breakdown loses the name.
+  static site_entry* site_for(const char* site)
+  {
+    std::lock_guard<std::mutex> lock(sites_mutex());
+    const std::size_t           n = nof_sites();
+    std::size_t                 i = 0;
+    for (; i != n; ++i) {
+      const char* name = sites()[i].name;
+      if ((name != nullptr) && (std::strcmp(name, site) == 0)) {
+        return &sites()[i];
+      }
+    }
+    if (i == kMaxSites) {
+      return nullptr;
+    }
+    sites()[i].name = site;
+    ++nof_sites_stored();
+    return &sites()[i];
+  }
+
+  /// Shared printer of the two tables: same shape, different counter (see print_write_sites()).
+  static void print_sites(std::FILE* out, bool reads)
+  {
+    std::lock_guard<std::mutex> lock(sites_mutex());
+    const std::size_t           n     = nof_sites();
+    bool                        any   = false;
+    bool                        printed[kMaxSites] = {};
+    for (std::size_t round = 0; round != n; ++round) {
+      std::size_t best     = kMaxSites;
+      uint64_t    best_cnt = 0;
+      for (std::size_t i = 0; i != n; ++i) {
+        if (printed[i]) {
+          continue;
+        }
+        const uint64_t c = reads ? sites()[i].reads.load(std::memory_order_relaxed)
+                                 : sites()[i].writes.load(std::memory_order_relaxed);
+        if (c == 0) {
+          printed[i] = true;
+          continue;
+        }
+        if ((best == kMaxSites) || (c > best_cnt)) {
+          best     = i;
+          best_cnt = c;
+        }
+      }
+      if (best == kMaxSites) {
+        break;
+      }
+      printed[best] = true;
+      any           = true;
+      const uint64_t bytes = reads ? sites()[best].read_bytes.load(std::memory_order_relaxed)
+                                   : sites()[best].write_bytes.load(std::memory_order_relaxed);
+      std::fprintf(out,
+                   "\n    %-38s %8llu %s, %10llu bytes",
+                   sites()[best].name,
+                   static_cast<unsigned long long>(best_cnt),
+                   reads ? "read(s)" : "call(s)",
+                   static_cast<unsigned long long>(bytes));
+    }
+    if (!any) {
+      std::fprintf(out, reads ? "\n    <no host read was attributed to a site>"
+                              : "\n    <no host write was attributed to a site>");
+    }
   }
   static std::size_t& nof_sites_stored()
   {
@@ -318,9 +376,18 @@ inline void register_phy_pipeline_crossing_check()
                         "  counted by the module(s) that audited their host <-> device data touches: ");
            phy_pipeline_crossings::print_reporters(stderr);
            std::fprintf(stderr, " (a module NOT listed here is not covered by this number)");
-           // WHICH store, when a module named itself (batch 5e). A breakdown that does not add up to
-           // the total above is itself a finding: it means a write site is still anonymous.
+           // WHICH store, when a module named itself (batch 5e), and WHICH read (batch S13-P1). A
+           // breakdown that does not add up to the total above is itself a finding: it means a site
+           // is still anonymous. The read table prints its own coverage line for that reason.
            phy_pipeline_crossings::print_write_sites(stderr);
+           phy_pipeline_crossings::print_read_sites(stderr);
+           if (reads != phy_pipeline_crossings::get_named_reads()) {
+             std::fprintf(stderr,
+                          "\n    (%llu of the %llu read(s) above are NOT named by a site - every read the "
+                          "lane makes has to be attributable)",
+                          static_cast<unsigned long long>(reads - phy_pipeline_crossings::get_named_reads()),
+                          static_cast<unsigned long long>(reads));
+           }
            std::fprintf(stderr, "\n");
            if (!phy_pipeline_mode_registry::is_published() || (hops == 0)) {
              return std::optional<bool>{};

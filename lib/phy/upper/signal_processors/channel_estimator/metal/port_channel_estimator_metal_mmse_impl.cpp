@@ -8,6 +8,10 @@
 // Batch 5g: the symbol start epochs the kernels derive are checked against the host array with the
 // very function the kernels compile (see the file's header for why one function and not two).
 #include "ocudu_mmse_epochs.h"
+#include "ocudu_mmse_refusals.h"
+
+using ocudu::metal::mmse_refusal;
+using ocudu::metal::mmse_refusals;
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -237,6 +241,19 @@ void free_aligned(T* p)
 
 /// The device's pilot-extraction stage (K0-a). OCUDU_CE_CPU_LS=1 forces the host pre-stage: the
 /// escape hatch, and the A/B of the tolerance probe.
+/// Whether the DEVICE builds the correlation matrices (K0-d). Unset or non-zero: it does (the
+/// default); zero (OCUDU_CE_CORR_DEV=0) keeps the host build and its staging, which is the A/B arm of
+/// the two builders. File scope because two functions ask: the stage that decides, and the refusal
+/// counter that names WHY the host had to build them (S13-P1).
+bool device_corr_enabled()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_CORR_DEV");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 bool device_ls_enabled()
 {
   static const bool value = (std::getenv("OCUDU_CE_CPU_LS") == nullptr);
@@ -867,6 +884,15 @@ float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estima
   // like the classical FD stage, so here they only need smoothing. estimate_noise() reconstructs the
   // received (unscaled) pilots from this buffer and beta, and returns the residual in the received
   // domain. ls_pilot() applies that scaling per element, from whichever side built the pilots.
+  // CROSSING (device -> host): every pilot below comes out of ls_pilot(), i.e. out of the DEVICE's
+  // least-squares buffer when the device built them. This is the host's sigma2 fallback
+  // (OCUDU_CE_DEV_SIGMA2=0, or a geometry the device reduction refused), and the read is named so a
+  // fallback hop can be attributed to it (S13-P1).
+  if (device_ls_valid) {
+    phy_pipeline_crossings::count_host_read_site(
+        "ce: sigma2 from the device LSE",
+        static_cast<uint64_t>(nof_layers) * nof_dmrs_symbols * nof_symbol_pilots * sizeof(cf_t));
+  }
   for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
     for (unsigned i_symbol = 0; i_symbol != nof_dmrs_symbols; ++i_symbol) {
       span<cf_t> dst = tmp_lse.get_symbol(i_symbol, i_layer);
@@ -890,7 +916,8 @@ float port_channel_estimator_metal_mmse_impl::estimate_sigma2(const fd_td_estima
   // 5e-3 it made the device disagree with this reference by 1.4e-02, while agreeing to 1.3e-07 once
   // the kernel's own CFO was used. On a host-built LSE the host's estimate is the matching one.
   if (device_ls_valid && host_reads_device_scalars()) {
-    phy_pipeline_crossings::count_host_read(); // CROSSING: device-produced, read by the fallback path.
+    phy_pipeline_crossings::count_host_read_site("ce: cfo scalar (host read)",
+                                                 sizeof(float)); // CROSSING: device-produced.
   }
   const std::optional<float> cfo_ref = (device_ls_valid && host_reads_device_scalars())
                                            ? std::optional<float>(gpu_ls_cfo[cfo_slot_])
@@ -1199,7 +1226,10 @@ void port_channel_estimator_metal_mmse_impl::account_host_grid_read(unsigned nof
   if (device_written) {
     // CROSSING (device -> host): the received DM-RS resource elements the base class just extracted
     // were written by the front-end DFT ON THE DEVICE, and the host now holds them in rx_pilots.
-    phy_pipeline_crossings::count_host_read(static_cast<uint64_t>(nof_re) * sizeof(cbf16_t));
+    // NAMED since S13-P1: it is the read a fallback hop pays (the device builds these pilots on every
+    // hop it covers), so the read table has to say which one it was.
+    phy_pipeline_crossings::count_host_read_site("ce: rx pilots extracted (host)",
+                                                 static_cast<uint64_t>(nof_re) * sizeof(cbf16_t));
   }
 }
 
@@ -1384,8 +1414,24 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // geometry it accepts is a hop whose received pilots the device produces - and the host must then
   // keep its hands off them (there is nothing to stage, and nothing to extract). Computed here,
   // BEFORE the staging below and before K0-a's dispatch, because the staging needs the answer.
+  // One device hop: the data of this hop lives on the device (the front-end DFT wrote the grid), so
+  // the crossing counts can be read per hop. It used to be incremented only when the DEVICE BUILT THE
+  // LEAST-SQUARES PILOTS - which made the denominator zero on exactly the routes where a host fallback
+  // produces crossings: with OCUDU_CE_CPU_LS=1 the line read "over 0 device hop(s) = 0.00 read(s) +
+  // 0.00 write(s) per hop" while the sites below it named a read and a write, and the check came out
+  // NOT APPLICABLE instead of FAILED. Found by S13-P1's forced-fallback self-check, which is what that
+  // check is for. Per hop, and the stage runs once per hop.
+  if (args.grid.get_device_view().is_valid()) {
+    phy_pipeline_crossings::count_device_hop();
+  }
   const ls_geometry geom                  = ls_geometry_of(args);
   const bool        device_builds_pilots  = device_ls_enabled() && geom.ok;
+  // WHY the device did not build them, when it did not (batch S13-P1): a knob is a deliberate arm and
+  // a refused geometry is an applicability limit - two different findings that "the device did not
+  // run" would merge. Counted once per hop, here, where all three answers exist.
+  if (!device_builds_pilots) {
+    mmse_refusals::count(!device_ls_enabled() ? mmse_refusal::ls_disabled : mmse_refusal::ls_geometry);
+  }
 
   // ---- S-7f-5w: the arrays the device noise variance reads ---------------------------------------
   // Staged BEFORE the extraction, because the noise reduction rides that same command buffer; K4
@@ -1559,12 +1605,14 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         }
       }
 
-      if (engine->build_pilots_lse(st)) {
+      const bool ls_ok = engine->build_pilots_lse(st);
+      if (!ls_ok) {
+        mmse_refusals::count(mmse_refusal::ls_build);
+      }
+      if (ls_ok) {
         // K0-a produced THIS hop's pilots: from here on the device may also write the engine's
         // pilot vectors out of them (glue #2, see record_device_y_stage()).
         device_ls_valid = true;
-        // One device hop, so the crossing total above can be read per hop (see phy_pipeline_crossings).
-        phy_pipeline_crossings::count_device_hop();
         // The CFO that goes with those pilots comes from the device too: the host pre-stage that
         // estimated it did not run for this hop. It is the rotation the statistics have to use with
         // the device's filtered pilots (see account_hop_cfo()), what the caller reports, and - as
@@ -1576,7 +1624,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // (OCUDU_CE_HOST_SCALARS=0) reports it as "not measured" instead of reading it, which is what
         // the mode's own accounting would do - see host_reads_device_scalars().
         if (host_reads_device_scalars()) {
-          phy_pipeline_crossings::count_host_read();
+          phy_pipeline_crossings::count_host_read_site("ce: cfo scalar (host read)", sizeof(float));
           args.cfo_hop = std::optional<float>(gpu_ls_cfo[cfo_slot_]);
         } else {
           args.cfo_hop = std::nullopt;
@@ -1587,6 +1635,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         // that pointer stays non-null when the engine skipped the stage, and the buffer then holds the
         // previous hop's value (or nothing). The engine reports it through sigma2_done.
         device_sigma2_valid = (st.sigma2 != nullptr) && sigma2_done;
+        // WHY there is no device noise variance for this hop (batch S13-P1): the knob, or a geometry
+        // the engine refused (it logs the geometry once - this counts it on every hop).
+        if (!device_sigma2_valid) {
+          mmse_refusals::count(!device_sigma2_enabled ? mmse_refusal::sigma2_disabled
+                                                      : mmse_refusal::sigma2_geometry);
+        }
         // S13-P2: and the EPRE sum, when this hop asked for it and the engine encoded the kernel (a
         // build that could not encode it returns false, so reaching here means it did).
         device_epre_valid   = (st.epre != nullptr);
@@ -1691,7 +1745,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // fallback for the routes without a device reduction (no device LSE, OCUDU_CE_DEV_SIGMA2=0, or a
     // metallib without the kernel), and the tolerance probe's reference.
     if (host_reads_device_scalars()) {
-      phy_pipeline_crossings::count_host_read(); // CROSSING: device-produced (mmse_pilots_power's out[1]).
+      phy_pipeline_crossings::count_host_read_site("ce: pilots power scalar (host read)",
+                                                   sizeof(float)); // CROSSING: device-produced.
       pilots_power = gpu_ls_sigma2[sigma2_base_ + kPowerSum] / static_cast<float>(nof_power_pilots);
     }
   }
@@ -1747,7 +1802,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   }
   const bool take_device_sigma2 = device_sigma2_valid && device_sigma2_enabled && host_reads_device_scalars();
   if (take_device_sigma2) {
-    phy_pipeline_crossings::count_host_read(); // CROSSING: device-produced (out[0]).
+    phy_pipeline_crossings::count_host_read_site("ce: sigma2 scalar (host read)",
+                                                 sizeof(float)); // CROSSING: device-produced.
   }
   float sigma2 = take_device_sigma2 ? gpu_ls_sigma2[sigma2_base_ + kSigma2]
                  : (device_sigma2_valid && device_sigma2_enabled) ? 0.0F
@@ -1886,18 +1942,16 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                  (std::getenv("OCUDU_CE_TAIL_CPU") != nullptr);
   const bool merge_tail = (rem_prb != 0) && (n_std_blocks != 0) && !matrix_on && !tail_on_cpu &&
                           (2 * nof_layers <= MAX_LAYERS) && (std::getenv("OCUDU_CE_SPLIT_TAIL") == nullptr);
-  static const bool device_corr_enabled = []() {
-    const char* env = std::getenv("OCUDU_CE_CORR_DEV");
-    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
-  }();
+  // (device_corr_enabled() is a file-scope helper: the refusal counter in run_engine_blocks() asks
+  // the same question, and two copies of a knob could drift.)
   // The device fills the standard group's slots on the non-merged routes through run_engine_blocks()
   // (prefix when the device also inverts, standalone build otherwise). Unchanged.
-  const bool std_slots_filled = device_corr_enabled && !merge_tail && (n_std_blocks != 0);
+  const bool std_slots_filled = device_corr_enabled() && !merge_tail && (n_std_blocks != 0);
   // ... and on the merged route, which needs the device to invert for the same reason every prefix
   // does: with a host inversion the host has to READ the device's A before K1, so the build cannot
   // ride the engine's command buffer.
   const bool gpu_invert_std = !matrix_on && device_inverts(L_std_geom);
-  const bool dev_corr_std_merged = device_corr_enabled && merge_tail && gpu_invert_std;
+  const bool dev_corr_std_merged = device_corr_enabled() && merge_tail && gpu_invert_std;
   // Whether the host still builds the standard matrices: only when it also stages them. The matrix
   // flavor always does (its slots are ceil8-padded, so the device's packed block is not the whole
   // slot), and any route without the device build does.
@@ -2010,7 +2064,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // then take over.
   // S-5c: the tail block no longer costs a second engine call - it is merged into the standard
   // batch as an extra padded system (see merge_tail above), so a hop is one command buffer.
-  // \note matrix_on / defer / tail_on_cpu / merge_tail / device_corr_enabled / std_slots_filled are
+  // \note matrix_on / defer / tail_on_cpu / merge_tail / device_corr_enabled() / std_slots_filled are
   //       computed further up: the standard block's host build is skipped when the device fills
   //       those slots, so those decisions have to exist before the build (S-7f-5v).
   nof_pending_unpacks = 0;
@@ -2038,7 +2092,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // covers the standard systems only (corr_stage::nof_systems) - the edge group keeps the host
     // build and staging. See dev_corr_std_merged above.
     //
-    // device_corr_enabled is ON by default since the equivalence defect was found and fixed: the
+    // device_corr_enabled() is ON by default since the equivalence defect was found and fixed: the
     // host batch stages A^-1 itself, so K1 must NOT run on it, and run_engine_blocks() keys that
     // decision on this stage's presence instead of on the order (see the gpu_invert note there).
     // OCUDU_CE_CORR_DEV=0 keeps the host build for A/B.
@@ -2062,6 +2116,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     unsigned nof_re_total = 0;
     if (device_ce_enabled && (nof_prb != 0) && !matrix_on) {
       nof_re_total = stage_re_masks(args, nof_prb, hop_rb_mask.find_lowest());
+    }
+    // WHY the equalizer does not read this hop's estimates from the device (batch S13-P1): the knob,
+    // or a hop the legacy kernels do not cover (no allocation, the matrix flavor, or an RE layout the
+    // demodulator's masks cannot describe). Per hop.
+    if (nof_re_total == 0) {
+      mmse_refusals::count(!device_ce_enabled ? mmse_refusal::k3_disabled : mmse_refusal::k3_geometry);
     }
     // The DC subcarrier carries no data: the equalizer erases that resource element, so the
     // device buffer must hold a zero there (K3 writes it - the host path zeroes the value it
@@ -2900,9 +2960,19 @@ bool port_channel_estimator_metal_mmse_impl::record_device_y_stage(const fd_td_e
 {
   // The gates, in the order in which they can fail. Every one of them falls back to the host
   // staging, which is the pre-glue-#2 behaviour and stays bit-for-bit equivalent, so a false here
-  // is never a correctness risk - only a missed removal.
-  if (!device_y_enabled || !device_ls_valid || !engine_ready || (engine == nullptr) ||
-      !engine->scatter_available()) {
+  // is never a correctness risk - only a missed removal. Each one NAMES itself (batch S13-P1): this
+  // is the stage the host then pays a read of the device's pilots and a write of gpu_y for, so
+  // "the host staged y" has to say which gate sent it there.
+  if (!device_y_enabled) {
+    mmse_refusals::count(mmse_refusal::y_disabled);
+    return false;
+  }
+  if (!device_ls_valid) {
+    mmse_refusals::count(mmse_refusal::y_no_ls);
+    return false;
+  }
+  if (!engine_ready || (engine == nullptr) || !engine->scatter_available()) {
+    mmse_refusals::count(mmse_refusal::y_no_kernel);
     return false;
   }
   const unsigned nof_layers = args.dmrs_patterns.size();
@@ -2918,7 +2988,12 @@ bool port_channel_estimator_metal_mmse_impl::record_device_y_stage(const fd_td_e
   if ((comb == 0) || (nof_hop_pilots == 0) || (nof_hop_pilots != args.nof_symbol_pilots) || (npf == 0) ||
       (npt == 0) || (npt > MAX_DMRS_SYMBOLS) || (nof_layers == 0) || (nof_layers > MAX_LAYERS) ||
       (n_blk == 0) || (st.n_blk == 0) || (st.L == 0) || (L == 0) || (L > MAX_BLOCK_PILOTS) ||
-      (st.L > MAX_BLOCK_PILOTS) || (npt * npf > st.L) || (nof_device_y_stage >= device_y_stage.size())) {
+      (st.L > MAX_BLOCK_PILOTS) || (npt * npf > st.L)) {
+    mmse_refusals::count(mmse_refusal::y_geometry);
+    return false;
+  }
+  if (nof_device_y_stage >= device_y_stage.size()) {
+    mmse_refusals::count(mmse_refusal::y_capacity);
     return false;
   }
   // The destination must fit the buffer the engine call binds: the group's systems start at
@@ -2926,6 +3001,7 @@ bool port_channel_estimator_metal_mmse_impl::record_device_y_stage(const fd_td_e
   const std::size_t y_floats =
       static_cast<std::size_t>(MAX_LAYERS) * max_blocks * 2 * MAX_BLOCK_PILOTS;
   if ((static_cast<std::size_t>(sys_offset) + nof_layers) * st.n_blk * 2 * st.L > y_floats) {
+    mmse_refusals::count(mmse_refusal::y_capacity);
     return false;
   }
 
@@ -2999,8 +3075,16 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
   //
   // The pilot staging below is outside the gate: y/qy is the host's either way (the device build
   // knows the matrices, not the received pilots).
+  // CROSSING (host -> device): the two buffers below are the engine's zero-copy staging slots for A
+  // and R_hp, which the weights and K1 kernels read. When the device built them (K0-d) this loop does
+  // not run at all; when it does - a knob, or a geometry K0-d refused - the host hands its own
+  // matrices back into device memory, which is the write half of a `dev -> host -> dev` round trip and
+  // was the last write site with no count (S13-P1 blind spot 1). Counted per system, with the bytes
+  // the two copies actually move.
+  uint64_t arhp_bytes = 0;
   for (unsigned sys = 0; !slots_filled && (sys != nof_layers); ++sys) {
     float* a_slot = gpu_a + static_cast<std::size_t>(sys_offset + sys) * Ls * Ls;
+    arhp_bytes += (static_cast<uint64_t>(Ls) * Ls + static_cast<uint64_t>(Ns) * Ls) * sizeof(float);
     if (gpu_invert) {
       if (Ls == L) {
         std::memcpy(a_slot, w_r_pp.data(), static_cast<std::size_t>(L) * L * sizeof(float));
@@ -3055,6 +3139,14 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
       }
     }
   }
+  if (arhp_bytes != 0) {
+    // Only counted when this really is a device lane: on a host-built grid (a unit test, or a CPU
+    // pipeline that happens to run the Metal backend) the grid and these buffers are the host's own
+    // memory and no data crosses - the same rule the received-pilot staging site follows.
+    if (args.grid.get_device_view().is_valid()) {
+      phy_pipeline_crossings::count_host_write_site("ce: A/R_hp staged (host)", arhp_bytes);
+    }
+  }
 
   // Pilot vectors of all layers and blocks [gb_start, gb_start + n_blk).
   // Matrix flavor: quad-interleaved qy [layer][nquads][Ls][8] (cols = 2*(b%4)+{re,im}; pad rows
@@ -3089,6 +3181,15 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
           }
         }
       }
+    }
+    // The matrix flavor's qy packing is the same crossing as the legacy y staging above (it is the
+    // same loop, into a quad-interleaved layout): only the metal_nn_mmse backend takes it, so it is
+    // counted with its own site rather than folded into the other one.
+    if (device_ls_valid && args.grid.get_device_view().is_valid()) {
+      phy_pipeline_crossings::count_host_read_site(
+          "ce: qy staged from the device LSE", static_cast<uint64_t>(nof_layers) * n_blk * L * sizeof(cf_t));
+      phy_pipeline_crossings::count_host_write_site(
+          "ce: qy staged (host)", static_cast<uint64_t>(nof_layers) * n_blk * L * sizeof(cf_t));
     }
   } else {
     // Glue #2 (S-7f-5u): the DEVICE is the writer of these slots whenever it can be - it re-indexes
@@ -3132,12 +3233,23 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
                       pad_floats * sizeof(float));
         }
       }
+      // CROSSING (device -> host -> device): this loop is the host's y fallback (S13-P1 blind spot 3).
+      // Every pilot comes out of ls_pilot(), i.e. out of the DEVICE's least-squares buffer when the
+      // device built them, and goes straight into gpu_y, which the apply kernel reads. Neither leg had
+      // a count: the read is a "host TAKING device-produced data away" and the write is "handing
+      // device-derived data back". Counted only when the source really is the device (device_ls_valid)
+      // and the destination really is a device lane (the grid's device view), so the CPU pipelines and
+      // the unit tests keep reading their own memory at no cost to the contract.
+      const bool y_from_device = device_ls_valid && args.grid.get_device_view().is_valid();
+      uint64_t   y_read_bytes  = 0;
+      uint64_t   y_write_bytes = 0;
       for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
         for (unsigned b = 0; b != n_blk; ++b) {
           float* yp = gpu_y + (static_cast<std::size_t>(sys_offset + i_layer) * st.n_blk + b) * 2 * Ls;
           // Pad rows k in [L, Ls) stay zero: their weights are exactly zero, but a non-finite value
           // left there would reach h through 0 * inf = NaN.
           if (Ls > L) {
+            y_write_bytes += static_cast<uint64_t>(Ls - L) * 2 * sizeof(float);
             std::memset(yp + 2 * L, 0, static_cast<std::size_t>(Ls - L) * 2 * sizeof(float));
           }
           for (unsigned i_symbol = 0; i_symbol != npt; ++i_symbol) {
@@ -3148,7 +3260,13 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
               yp[2 * (i_symbol * npf + j) + 1] = v.imag();
             }
           }
+          y_read_bytes += static_cast<uint64_t>(npt) * npf * sizeof(cf_t);
+          y_write_bytes += static_cast<uint64_t>(npt) * npf * sizeof(cf_t);
         }
+      }
+      if (y_from_device) {
+        phy_pipeline_crossings::count_host_read_site("ce: y staged from the device LSE", y_read_bytes);
+        phy_pipeline_crossings::count_host_write_site("ce: y staged (host)", y_write_bytes);
       }
     }
   }
@@ -3371,8 +3489,11 @@ void port_channel_estimator_metal_mmse_impl::unpack_engine_group(unsigned       
   // \note This is why the contract's crossing line is NOT a statement about the whole estimator, let
   //       alone the whole lane: it is a statement about the sites that call count_host_read(), and
   //       this one reaches further than any of them.
-  phy_pipeline_crossings::count_host_read(static_cast<uint64_t>(nof_layers) * n_blk *
-                                          nof_unpack_symbols * nf * 2 * sizeof(float));
+  // NAMED since S13-P1 (it was the one unnamed read left in the estimator): the replay tool forces
+  // the host grid to dump it, and a hop with OCUDU_CE_HOST_GRID=1 pays it on air too.
+  phy_pipeline_crossings::count_host_read_site("ce: host grid materialized from the device",
+                                               static_cast<uint64_t>(nof_layers) * n_blk *
+                                                   nof_unpack_symbols * nf * 2 * sizeof(float));
   for (unsigned i_layer = 0; i_layer != nof_layers; ++i_layer) {
     for (unsigned b = 0; b != n_blk; ++b) {
       // Slot addressing uses the BATCH strides: they may exceed the block geometry (the merged
@@ -3752,6 +3873,13 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
   // other three keep the standalone build - with a host inversion the host must read the device's A
   // to invert it in place, so the build has to complete first.
   std::optional<metal::mmse_engine::corr_stage> corr_prefix;
+  // WHY the device did not build this batch's A / R_hp (batch S13-P1). The host then builds and
+  // stages them, which is a host -> device WRITE of matrices (see stage_engine_group(), which counts
+  // it under "ce: A/R_hp staged (host)"), so the refusal has to be attributable: the knob, or a hop
+  // without the device statistics the kernels reduce the matrices from.
+  if (device_stats == nullptr) {
+    mmse_refusals::count(device_corr_enabled() ? mmse_refusal::corr_geometry : mmse_refusal::corr_disabled);
+  }
   if (device_stats != nullptr) {
     // DM-RS slot symbols, rebuilt from the stage's own pattern: this function works from the block
     // geometry (npt), while the descriptor needs the slot INDICES (the time correlation depends on
@@ -3892,6 +4020,7 @@ port_channel_estimator_metal_mmse_impl::ta_attach_stage(const fd_td_estimation_s
 {
   metal::mmse_engine::reformat_stage::ta_stage_t stage{};
   if (!device_stats_enabled() || (engine == nullptr) || !device_ta_enabled()) {
+    mmse_refusals::count(mmse_refusal::ta_disabled);
     return stage;
   }
   // The host's own route, reproduced field by field (estimate_time_alignment() and
@@ -3924,6 +4053,10 @@ port_channel_estimator_metal_mmse_impl::ta_attach_stage(const fd_td_estimation_s
     }
   }
   if (stride == 0) {
+    // A hop the kernel does not reproduce: an RB mask with a hole, or a comb that is not one of the
+    // three the host's estimator hands a stride for. Per hop, and the one HOST-side estimator that
+    // then reads the grid back for a reported value.
+    mmse_refusals::count(mmse_refusal::ta_stride);
     return stage;
   }
 
@@ -3936,6 +4069,7 @@ port_channel_estimator_metal_mmse_impl::ta_attach_stage(const fd_td_estimation_s
   // host refines only when the size is not the maximum).
   unsigned dft_size = get_ta_estimator().get_idft_size(args.nof_symbol_pilots);
   if (dft_size == 0) {
+    mmse_refusals::count(mmse_refusal::ta_geometry);
     return stage;
   }
   // The lane runs the FUSED chain (batch 5d): one dispatch instead of the three the port started
@@ -3943,6 +4077,9 @@ port_channel_estimator_metal_mmse_impl::ta_attach_stage(const fd_td_estimation_s
   // - the profile it keeps in threadgroup memory - is 2048, exactly what get_idft() can ask for; a
   // wider size keeps the host's route (and its grid read-back, see host_grid_wanted).
   if (!engine->ta_chain_available(dft_size)) {
+    // The transform the host estimator would use is wider than the fused chain keeps in threadgroup
+    // memory (> 2048) - the applicability limit of section 3's G3b. Per hop.
+    mmse_refusals::count(mmse_refusal::ta_dft_too_wide);
     return stage;
   }
 
@@ -3954,6 +4091,7 @@ port_channel_estimator_metal_mmse_impl::ta_attach_stage(const fd_td_estimation_s
                            static_cast<double>(1U << (to_numerology_value(args.scs) + 1U));
   const unsigned max_ta_samples = static_cast<unsigned>(std::floor(half_cp_s * rate_hz));
   if (max_ta_samples == 0) {
+    mmse_refusals::count(mmse_refusal::ta_geometry);
     return stage;
   }
 

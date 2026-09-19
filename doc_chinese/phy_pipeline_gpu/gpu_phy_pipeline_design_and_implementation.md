@@ -352,7 +352,7 @@ K4 的 `gpu_nv` 就是"从同一份 h 归约、结果留在设备、消费者不
 | **5e** | 写侧：等化器的 gather 表改由**设备**建 | ✅ **完成并空中验证**（`6e53109ffa`，腿 `5e-devtables_0919_2000`，§19.3/§19.3a）：**写字节 3.38 MB → 5.5 KB（÷592）**、次数 0.27 → 0.13/跳；其余指标无回归 |
 | **5f** | 写侧：`h_starts` 表与 epoch 表 | **5f-1 完成**（`9e36fef3ed`，§19.5）：`h_starts` 进参数块，replay 写 **5 → 1/跳**；顺带修掉一个**既有批处理缺陷**。**5f-2 未做**：`symbol_start_epochs`（56 B，1 次/配置）仍在宿主上传 ⇒ **契约仍 7/8** |
 | **5g** | 5f-2：epochs 由 kernel 从 (cp, scs) 算 | ✅ **完成并空中验证**（`45fa002d6c`，腿 `5g-epochs_0919_1945`，§19.6.2b）：27 捕获四个 dump 与 HEAD **逐字节相同**；replay 写侧 **1 → 0/跳**、分项表空 ⇒ **写侧清零**；空口 **契约 8/8**、0 RF failure、CRC 79.19%。**⚠ 该"零"只在被审计的站点上成立**：P1 发现一条**每跳**的未计数往返（§19.6.2b 勘误块 + `wip/S13_fallback_coverage.md` §5b）|
-| **S13-P1** | 回退路径的可见性（仪表）| ✅ **第一批完成**（`b3f72deadb`）：基类虚钩子 `account_host_grid_read`（默认空 ⇒ CPU 车道不变）+ `ce: rx pilots staged (host)` 站点 —— 正是它们**照出了那条每跳往返**。**剩余**：回退门计数 + A/R_hp / y staging 两个站点（`wip/S13_fallback_coverage.md` §4.6）|
+| **S13-P1** | 回退路径的可见性（仪表）| ✅ **全部完成**：第一批（`b3f72deadb`）基类虚钩子 `account_host_grid_read`（默认空 ⇒ CPU 车道不变）+ `ce: rx pilots staged (host)` —— 正是它们**照出了那条每跳往返**；**剩余部分见 §5.6**：`refusals=` 拒绝计数（18 个理由，§5.6.1）+ 读侧分项表 + A/R_hp / y / qy 站点（§5.6.2）+ 八个旋钮臂的自证（§5.6.3，**顺带修掉"设备跳"分母在回退路由上为 0 的缺陷**）。**空中腿待跑** |
 | **S13-P2** | 消掉那条每跳往返（设备自建 `gpu_rx_pilots`，EPRE 由设备发布）| ✅ **完成并空中验证**（`0103795cfe`，腿 `s13p2_0919_2303`，§5.5）：离线 27 捕获 `_llr`/`_h`/`.bin` **0 差异**、`_ce.txt` 只动 `epre`（≤2.3e-07）、`CPU_LS=1` 网四个 dump 逐字节相同；**空口契约 8/8**、跨越 **0.00 读 + 0.00 写/跳、分项表空**、0 RF failure、`[ce_inputs]` = DEVICE、无回退 |
 | **测** | `[ul_gpu_pipeline]`：IQ 进 GPU → LLR 出 GPU（用户要求，只对 `mode=gpu`）| ✅ **完成并空中验证**（`7d968cfb84`，腿 `probe-iq2llr_0919_2216`，§20）：探针 + `leg_report.sh -- latency` + 单测（含反证）+ 27 捕获逐字节不变；**空口 4036 个样本、mean 2677.2 µs**（§20.6）|
 
@@ -548,12 +548,91 @@ CRC-KO 的那 338 次 ≈ **2884.7 µs**，与 CRC-OK 的 2886.1 **几乎相同*
 **`gpu_phy_iq2llr_zero_data_crossings_p2`**（指向 `80d0ba32ef`，即本次验证的二进制戳），
 **旧 tag 不移动**（已发布的 tag 不改写；§19.6.2b 的勘误块指向新 tag）。
 
-**P1 剩余（下一步，与本批分开）**：回退门的**拒绝计数**（`device_ls_refused`（几何被拒，区别于 engine
-调用失败）/ `device_y_refused`（`record_device_y_stage` 的每个 `return false` 分支分类）/
-`device_corr_refused` / `ta_refused` / `sigma2_refused` / `k3_refused`，打印进 `[metal_stats] mmse_ce` 行）
-+ 另外两个盲点的站点（`stage_engine_group()` 里 A/R_hp 的宿主 `memcpy` 写；y staging 的逐导频读+写，
-含 pad 行 memset）。**自证判据**：用现成旋钮强制每条回退（`OCUDU_CE_DEV_Y=0`、`DEV_TA=0`、`DEV_SIGMA2=0`、
-`CORR_DEV=0`、`CPU_LS=1`）⇒ 对应计数**必须动**、契约变红；关掉旋钮 ⇒ 回到 0。
+### 5.6 ✅ S13-P1 剩余：回退的**拒绝计数**与最后两个盲点（离线判据全过，空中腿待跑）
+
+**题目**：S13 的 G1 —— "对每一条'设备→宿主回退'与'宿主 staging 设备缓冲'的路径，**要么有计数/日志**，
+要么有理由说明它不构成穿越"。P1 的第一批（`b3f72deadb`）只做了两个站点，正是它们照出了那条每跳往返；
+P2 把往返消掉了，于是这一批做**剩下的一半**：让"设备这一跳为什么没跑"和"宿主这次碰的是哪块设备内存"
+都能被点名。
+
+#### 5.6.1 拒绝计数（为什么设备侧那一段没跑）
+
+新头文件 **`ocudu_mmse_refusals.h`**：一个 `mmse_refusal` 枚举（18 个理由）+ 计数 + 打印，
+由 engine 的 `[metal_stats] mmse_ce` 行末尾输出 `refusals=…`（**非零才列出，全零打印 `<none>`**
+——"没有这一行"与"没有拒绝"必须能区分）。理由按**门**分，不按 stage 分："设备 LSE 没跑"不可行动，
+而"几何被拒"（适用范围的边界）与"旋钮关掉了"（故意的 A/B 臂）是两个不同的发现：
+
+| 门 | 理由 | 粒度 |
+|---|---|---|
+| K0-a 设备 LSE | `ls_disabled`（`OCUDU_CE_CPU_LS=1`）/ `ls_geometry`（几何被拒）/ `ls_build`（几何合格但 engine 调用拒绝）| 每跳 |
+| glue #2 设备 y | `y_disabled`（`OCUDU_CE_DEV_Y=0`）/ `y_no_ls` / `y_no_kernel` / `y_geometry` / `y_capacity`（描述符表满）| 每组 |
+| K0-d 设备相关矩阵 | `corr_disabled`（`OCUDU_CE_CORR_DEV=0`）/ `corr_geometry`（这一跳没有设备统计量）| 每组 |
+| K6+K7 设备 TA | `ta_disabled`（`OCUDU_CE_DEV_TA=0`）/ `ta_stride`（RB 掩码不连续或 comb 不认识）/ **`ta_dft_too_wide`**（`get_idft() > 2048`，即 §3 的 G3b 适用范围）/ `ta_geometry` | 每跳 |
+| K2/K4 设备噪声方差 | `sigma2_disabled`（`OCUDU_CE_DEV_SIGMA2=0`）/ `sigma2_geometry`（engine 跳过了这一块）| 每跳 |
+| K3 设备估计 | `k3_disabled`（`OCUDU_CE_CPU_CE=1`）/ `k3_geometry`（RE 掩码/矩阵形态/空分配）| 每跳 |
+
+#### 5.6.2 站点（宿主这次碰的是哪块设备内存）
+
+读侧此前**只有总数、没有名字**（写侧 5e 就有分项表）。这一批给 `phy_pipeline_crossings` 加了
+**读侧分项表**（与写侧同一张表、同一个形状）并在契约行下面打印；**总数大于命名之和会明确打印
+"（N of M read(s) above are NOT named by a site）"** —— 一个没人认领的读是**发现**，不是舍入差。
+命名后按名字可查的读：
+
+| 站点 | 何时 | 谁在碰 |
+|---|---|---|
+| `ce: rx pilots extracted (host)` | 设备不建接收导频的跳（含 P2 的晚期回退）| 基类抽取循环读设备网格 |
+| `ce: host grid materialized from the device` | `OCUDU_CE_HOST_GRID=1`，或**回退路径**需要宿主网格时（replay 工具为了 dump 也会实例化）| 把设备写的 `gpu_h` 读回宿主网格 |
+| `ce: y staged from the device LSE` | `OCUDU_CE_DEV_Y=0` 等 ⇒ 宿主 stage y | 逐导频读设备的 LSE（**P1 盲点 3 的读半边**）|
+| `ce: qy staged from the device LSE` | 矩阵（`metal_nn_mmse`）形态的同一件事 | 同上 |
+| `ce: sigma2 from the device LSE` | `OCUDU_CE_DEV_SIGMA2=0` 等 ⇒ 宿主 `estimate_sigma2()` | 逐导频读设备的 LSE |
+| `ce: cfo scalar` / `ce: pilots power scalar` / `ce: sigma2 scalar` | 只在 `OCUDU_CE_HOST_SCALARS=1`（非默认）| 读设备标量 |
+
+写侧新增：**`ce: A/R_hp staged (host)`**（`stage_engine_group()` 把宿主算出的 A/A⁻¹ 与 R_hp 写进
+`gpu_a`/`gpu_r_hp`——**P1 盲点 1**）、**`ce: y staged (host)`**（同一段 y staging 的写半边，
+含 pad 行 memset——**P1 盲点 3 的写半边**）、`ce: qy staged (host)`。
+
+#### 5.6.3 ★ 自证（这一批真正的判据）
+
+每个回退都用**现成旋钮**强制触发一次，看**对应的理由是否出现、穿越是否按预期变红**；
+关掉旋钮一切回到 `<none>` 与 0.00（replay 工具，`syn001_3`，1 跳）：
+
+| 臂 | `refusals=` | 跨越/跳 | 被点名的站点 |
+|---|---|---|---|
+| **默认** | **`<none>`** | 1.00 读 + **0.00 写** | 只有 replay 自己的 `ce: host grid materialized from the device` |
+| `OCUDU_CE_CPU_LS=1` | `ls_disabled=1 y_no_ls=1` | **2.00 读 + 1.00 写** | `rx pilots extracted` + `rx pilots staged` |
+| `OCUDU_CE_DEV_Y=0` | `y_disabled=1` | **2.00 读 + 1.00 写** | `y staged from the device LSE` + `y staged` |
+| `OCUDU_CE_DEV_TA=0` | `ta_disabled=1` | **2.00 读** | `host grid materialized from the device`（TA 的宿主估计需要宿主网格）|
+| `OCUDU_CE_DEV_SIGMA2=0` | `sigma2_disabled=1` | **3.00 读** | `rx pilots extracted` + `sigma2 from the device LSE` |
+| `OCUDU_CE_CORR_DEV=0` | `corr_disabled=1` | 1.00 读 + **1.00 写（120528 B）** | `A/R_hp staged (host)` |
+| `OCUDU_CE_CPU_CE=1` | `k3_disabled=1` | **2.00 读** | `rx pilots extracted`（K4 随 K3 一起消失 ⇒ 宿主补噪声估计，**回退可见**）|
+| `OCUDU_CE_HOST_SCALARS=1` | `<none>` | **4.00 读** | 四个标量站点各自点名 |
+
+**零个 "NOT named" 警告**（除默认臂那条 replay 自己的读，且它现在**有名字**）
+⇒ 在这些臂上**每一个穿越都能归因**。
+
+**★ 自证抓到的一个真缺陷（已修）**：`count_device_hop()` 原来只在**设备 LSE 构建成功**时自增，
+于是"每跳"的分母在**恰好会产生回退穿越的路由上是 0**：`CPU_LS=1` 那条臂读出来是
+`over 0 device hop(s) = 0.00 read(s) + 0.00 write(s) per hop`，而它下面的站点表明明列着一次读和一次写，
+**契约检查还会判成"不适用"而不是 FAILED**（G2 的判据因此本来是空的）。修法：一个"设备跳"= **这一跳的
+数据在设备上**（网格有设备视图），与哪一段设备构建成功无关 —— 默认路由的分母一个不变（空口上
+1163 = 每一跳），回退路由的分母变成 1，比率与判据都恢复意义。
+
+**⚠ 契约"变红"这件事在 replay 里看不到**：工具从不发布 `phy_pipeline_mode`（按设计不判分），
+所以契约行在这些臂上都是"checks applicable"里不含跨越项。**G2（回退 ⇒ 契约 FAILED）的判据只能在 gNB 上取**
+—— 与 S13 的 P4 一致。
+
+#### 5.6.4 判据与结果
+
+| # | 判据 | 结果 |
+|---|---|---|
+| 1 | 每个回退旋钮 ⇒ 对应理由出现、穿越按预期变红 | ✅ 见 5.6.3 表 |
+| 2 | 关掉旋钮 ⇒ `<none>` 与 0.00 写 | ✅ 默认臂 `refusals=<none>`、0.00 写 |
+| 3 | **行为不变** | ✅ 27 捕获 A/B（基线 vs 本批）：`_llr.bin`/`_h.bin`/`.bin` **0 差异**、`_ce.txt` 仍是 29 字节且只在 `epre`（29 字节只出现在 10 个捕获；本批没碰数据面）|
+| 4 | 每一个读都能归因 | ✅ 无 "NOT named" 警告（默认臂的 replay 读也已命名）|
+| 5 | 单测 | ✅ `ctest -L phy` **171/171**、`-L support` **562/562**、`ctest -R metal` **9/9** |
+
+**待跑腿（判据最后一条）**：`mode=gpu` 一腿，预期 `[metal_stats] mmse_ce … refusals=<none>`、
+契约 8/8、跨越 **0.00 读 + 0.00 写**/跳且**两张站点表都空**（空口上 replay 那次"宿主网格"读不存在）。
 
 ---
 

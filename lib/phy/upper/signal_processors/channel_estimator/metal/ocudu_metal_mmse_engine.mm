@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_metal_mmse_engine.h"
+#include "ocudu_mmse_refusals.h"
+
+using ocudu::metal::mmse_refusals;
 
 #include <chrono>
 #include <cmath>
@@ -179,7 +182,7 @@ static void mmse_stats_report()
   std::fprintf(stderr,
                "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu guard=%llu/%llu "
                "guard_mean=%.1fus guard_max=%.1fus device_corr_builds=%llu corr_build_fail=%llu "
-               "device_y_writes=%llu y_write_fail=%llu device_sigma2=%llu\n",
+               "device_y_writes=%llu y_write_fail=%llu device_sigma2=%llu refusals=",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
@@ -192,6 +195,11 @@ static void mmse_stats_report()
                static_cast<unsigned long long>(s.pilots_scatters.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.pilots_scatter_failures.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.pilots_sigma2.load(std::memory_order_relaxed)));
+  // Batch S13-P1: WHY a device stage did not run on a hop, when one did not. Printed on the same line
+  // as the counts of what DID run, because the two are read together: "device_sigma2 == hops" and
+  // "refusals=<none>" are the two halves of "every hop took the device route".
+  mmse_refusals::print(stderr);
+  std::fprintf(stderr, "\n");
 }
 #else  // OCUDU_METAL_STATS
 static void mmse_stats_commit() {}
