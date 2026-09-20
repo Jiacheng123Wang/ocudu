@@ -442,6 +442,7 @@ public:
     }
     return (v > max_slot_trace) ? static_cast<unsigned>(max_slot_trace) : v;
   }
+  /// Whether the per-slot timeline is on (public so the lower PHY can gate its own diagnostics on it).
   static bool slot_trace_enabled() { return slot_trace_limit() != 0; }
 
   /// \brief Adds one landmark of a traced slot to its entry (see fill_slot_trace() for the deltas).

@@ -468,6 +468,35 @@ void lower_phy_baseband_processor::ul_process()
     // its LAST sample, not its first: for a block that straddles a boundary those are different slots, and that
     // difference is the whole reason the distributions could not be decomposed.
     const baseband_gateway_timestamp block_end = rx_metadata.ts + nof_samples;
+    // TEMPORARY DIAGNOSTIC (remove once the trace is trusted): why a half-slot leg captures no slot. Prints the
+    // first few blocks' geometry and, once per second, the current one - enough to see whether the block end ever
+    // lands on a slot boundary and, if not, by how much it misses.
+    if (ul_pipeline_probe::slot_trace_enabled()) {
+      static std::atomic<unsigned> diag_blocks{0};
+      static std::atomic<int64_t>  diag_last_s{-1};
+      const unsigned               n = diag_blocks.fetch_add(1, std::memory_order_relaxed);
+      const int64_t                sec = recv_us / 1000000;
+      if ((n < 8) || (sec != diag_last_s.exchange(sec, std::memory_order_relaxed))) {
+        // ts = the timestamp the radio REPORTED for this block, last_rx = the host's own idea of where the
+        // stream is (they must agree for a contiguous stream); rx_off/rx_fill = where the block lands inside the
+        // slot buffer, and sym = the configured block size in symbols - together they say whether the
+        // symbol-block path or the whole-buffer path is being taken (sym=0 means the knob never reached here).
+        std::fprintf(stderr,
+                     "[ul_slot_diag] blk=%u ts=%llu last_rx=%llu n=%u end=%llu end%%sps=%llu sps=%u "
+                     "sym=%u rx_off=%u rx_fill=%u\n",
+                     n,
+                     static_cast<unsigned long long>(rx_metadata.ts),
+                     static_cast<unsigned long long>(last_rx_timestamp.load(std::memory_order_acquire)),
+                     nof_samples,
+                     static_cast<unsigned long long>(block_end),
+                     static_cast<unsigned long long>(block_end % nof_samples_per_slot),
+                     nof_samples_per_slot,
+                     nof_symbols_per_block,
+                     rx_offset,
+                     rx_fill);
+        std::fflush(stderr);
+      }
+    }
     if ((nof_samples != 0) && (block_end % nof_samples_per_slot == 0)) {
       const uint64_t slots_per_sfn_cycle = (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
       const uint64_t done_slot =
