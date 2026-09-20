@@ -508,3 +508,27 @@ sigma2 每个 layer pair 重来 ⇒ 10~20 道/kernel）改成 `simd_sum()`（寄
 python3 doc_chinese/phy_pipeline_gpu/wip/value_net.py           # 门
 N=9 /tmp/ratio.sh    # 比值法：抽取/(2*K1)（脚本见 §12 的说明）
 ```
+
+---
+
+## 14. K1 的 barrier 斜率（空口腿对，§5.8.24）
+
+| 腿 | `OCUDU_CE_INV_BARRIERS` | `ch_wt` | `eq_demap` | CRC | RTF |
+|---|---|---|---|---|---|
+| `s14-k1-bar0_0920_1830` | 关 | **329.7** | 68.1 | 13536/1812 | 1 |
+| `s14-k1-bar8_0920_1831` | 8 | **464.6** | 76.7 | 13400/2247 | 0 |
+
+探针每跳给 K1 加 **8 × 54 = 432 道** barrier（保值）。
+
+* **原始斜率** `(464.6 − 329.7)/432` = **0.312 µs/道**；
+* **`eq_demap` 是不含 K1 的对照通道**，它 +12.6% ⇒ 负载校正后探针自身 **+93.4 µs** ⇒ **0.216 µs/道**；
+* ⇒ **空口 0.22–0.31**，与离线同一区块内的 **0.29–0.30** 一致 ⇒ 可信。
+
+**⇒ K1 的 122 道 = 27–38 µs/跳 = `ch_wt` 的 8–12%；K1 总量（按 31.5% 份额折算）≈104 µs
+⇒ barrier 只占 K1 的 26–37%，逐元素工作占 63–74%（≈66–77 µs）。**
+
+**⇒ 靶子是逐元素工作，不是 barrier。** Newton–Schulz（30× 算术）与"少 barrier 同工作"都不做。
+方向：**多 dispatch 的分块求逆**（一个 block column 一次 dispatch，矩阵进设备内存，
+grid 铺满 GPU），目标 K1 ~104 → ~35–50 µs（未实测）。
+
+**复跑**：`bash wip/k1_barrier_slope.sh <bar0.log> <bar8.log>`（注意读 `busy split` 要取 `.log.stderr`）。

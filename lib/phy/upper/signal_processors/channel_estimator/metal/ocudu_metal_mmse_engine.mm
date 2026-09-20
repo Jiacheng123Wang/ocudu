@@ -488,7 +488,18 @@ struct mmse_engine_impl {
   {
     const char*  env = std::getenv("OCUDU_CE_INV_BARRIERS");
     const unsigned v = (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 0u;
-    return (v > 64u) ? 64u : v;
+    const unsigned clamped = (v > 64u) ? 64u : v;
+    // Say it ONCE, on stderr, into the leg's own artifact: a probe leg whose reading is taken from the
+    // device MUST carry the evidence that the probe was actually set - the runner's console is not part
+    // of the leg (run_leg.sh dumps the environment to ITS stderr, which the leg does not keep).
+    if (clamped != 0u) {
+      static const bool said = []() {
+        std::fprintf(stderr, "[inv_barriers] OCUDU_CE_INV_BARRIERS is set - K1 carries extra barriers\n");
+        return true;
+      }();
+      (void)said;
+    }
+    return clamped;
   }
   static unsigned weights_repeat() { return stage_repeat("OCUDU_CE_W_REPEAT"); }
   /// Everything encode_reformat() encodes (K3, the rSRP reduction, the noise variance and the TA chain).
