@@ -371,27 +371,33 @@ bool k0a_ratio_from_device_enabled()
 /// stage_engine_group(), which skips the whole staging when the slots are filled. They are geometry,
 /// not matrix data, so they move into build_slots_on_device() and the host stays out of the matrix
 /// business.
-/// \brief A/B for the SECOND correlation prefix of a merged batch (OCUDU_CE_EDGE_FUSE).
+/// \brief The SECOND correlation prefix of a merged batch, now THE DEFAULT (OCUDU_CE_EDGE_FUSE).
 ///
-/// Zero (the default, and what this line ships): the edge group's correlation is built by the device
-/// in a command buffer of its OWN (mmse_engine::build_correlation(), the form S4 introduced), and the
-/// merged hop's engine call then runs in a second command buffer.
+/// Unset or non-zero (THE DEFAULT, and what this line ships): the edge group's correlation is encoded
+/// as the merged batch's second corr prefix - inside the engine's own command buffer, before K1 (see
+/// encode_run's corr_edge). That is the fused form the `gpu` mode's second clause asks for: one command
+/// buffer per hop instead of two, and one host commit/wait pair less. Measured on air, the standalone
+/// form cost the lane 0.28 command buffers per hop (cbs/lane 3.00 -> 3.28 for the released leg, 3.00 vs
+/// 4.00 for the merged hop alone).
 ///
-/// One: the same kernels, over the same slots, encoded as the merged batch's second corr prefix -
-/// inside the engine's own command buffer, before K1 (see encode_run's corr_edge). That is the fused
-/// form the `gpu` mode's second clause asks for: one command buffer per hop instead of two, and one
-/// host commit/wait pair less. Measured on air, the standalone form costs the lane 0.28 command
-/// buffers per hop (cbs/lane 3.00 -> 3.28).
+/// Zero: the edge group's correlation is built by the device in a command buffer of its OWN
+/// (mmse_engine::build_correlation(), the form S4 introduced), and the merged hop's engine call then
+/// runs in a second command buffer. Kept as the one-line rollback (S13-P1's plan: every phase keeps an
+/// independent way back) and as the reference the fused form is judged against - the two forms must
+/// produce BYTE-IDENTICAL dumps, which is checked on every capture
+/// (`ab_dumps.sh "OCUDU_CE_EDGE_FUSE=0" ""`: 27 corpus + 20 narrow, 0 differing bytes).
 ///
-/// It is an A/B rather than a default because the two forms must produce BYTE-IDENTICAL dumps, and
-/// the gate that says so has to be able to see both: a fused form that silently computes something
-/// else would otherwise be indistinguishable from a win. \c k0d is the analogue for the standard
-/// group's prefix.
+/// \note Why the flip waited (2026-09-20). While this was an A/B the fused form computed NaN on its
+/// edge group, and the cause was not in this code: the engine's zero-copy cache created a SECOND
+/// MTLBuffer object over memory the batch's mapping already covered, and Metal orders memory per
+/// MTLBuffer OBJECT - so the edge prefix's writes were unordered against the inversion that reads them
+/// (see mmse_engine_impl::wrap(), and wip/metal_alias_order.mm for the measurement in isolation). With
+/// one object per region the fused form reproduces the standalone form byte for byte.
 bool edge_fuse_enabled()
 {
   static const bool value = []() {
     const char* env = std::getenv("OCUDU_CE_EDGE_FUSE");
-    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
   }();
   return value;
 }
