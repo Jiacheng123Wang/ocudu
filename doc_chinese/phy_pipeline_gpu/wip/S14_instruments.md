@@ -344,3 +344,49 @@ cmake --build build --target k1_check -j 10
 **⇒ 结论**：在"逐元素运算次序不变"（235/235 逐字节）的约束下，K1 的临界路径
 （逐 pivot 的串行依赖 + 每 pivot 一道必需的 barrier）**无法再缩短**；
 要真砍掉它必须**改数值契约**（换算法），那是用户裁定的问题。见 §5.8.16 ⑦。
+
+---
+
+## 10. `ch_wt` 分段重做（空口几何 `syn027_25`，25 PRB）——§5.8.17 的原始数据
+
+协议：`--repeat 1`、一个进程一跳、**N=7 取中位数**。**每个臂都复验了保值性**（同捕获，四个 dump）。
+
+**保值性：**
+
+| 臂 | 差字节 |
+|---|---|
+| `CORR_REPEAT=2` / `W_REPEAT=2` / `REFORMAT_REPEAT=2` / `DEV_TA=0` | **0** |
+| `INV_REPEAT=3` | 5 |
+| `CPU_LS=1` | 24（`_h.bin` 14 + `_ce.txt` 10）|
+| `DEV_Y=0` | **21703**（`_h.bin` 16772）—— 不是外科臂：`rsrp=0 ta_us=0` |
+
+**读数（中位 `ch_wt`，µs）：**
+
+| 臂 | 中位 | Δ | 含义 |
+|---|---|---|---|
+| base | **627.0** | — | |
+| `CPU_LS=1` | **464.3** | **−162.7** | **导频抽取（K0-a）** |
+| `INV_REPEAT=3` | — | +395 / 2 = **+197.5** | K1 |
+| `REFORMAT_REPEAT=2` | — | **+116.9** | 重排一趟 |
+| `DEV_TA=0` | 568.6（base 648.7 那次）| **−80.1** | TA 链 |
+| `W_REPEAT=2` | — | **+35.6** | K2 |
+| `CORR_REPEAT=2` | — | **+35.3** | K0-d 一趟（std+edge）|
+
+**分解闭合（`CPU_INVERT=1`，`cbs/lane=4.00`）：**
+`ch_est=196.5（2 cb）` + `ch_wt=252.9` + K1 ≈ 659 ≈ base 的 `ch_wt`。
+
+**两个旋钮陷阱：**
+
+1. `OCUDU_CE_DEV_INVERT` **不存在**（真名 `OCUDU_CE_GPU_INVERT` / `OCUDU_CE_CPU_INVERT`）——
+   拼错的旋钮是静默空操作，测出来 Δ=−5.0 µs 差点被当成结论。
+2. `OCUDU_CE_DEV_Y=0` 会把设备 rSRP/TA 一起关掉 ⇒ **不能当"y scatter 成本"用**。
+
+**复跑：**
+
+```bash
+BIN=./build/lib/phy/upper/channel_processors/metal/ul_chain_replay
+CAP=doc_chinese/work_tmp/corpus/syn027_25
+med() { sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'; }
+for i in $(seq 1 7); do $BIN $CAP --metal --out /tmp/a 2>&1 | grep -o 'ch_wt=[0-9.]*' | cut -d= -f2; done | med
+for i in $(seq 1 7); do OCUDU_CE_CPU_LS=1 $BIN $CAP --metal --out /tmp/b 2>&1 | grep -o 'ch_wt=[0-9.]*' | cut -d= -f2; done | med
+```
