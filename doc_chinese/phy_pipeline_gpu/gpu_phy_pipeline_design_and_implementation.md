@@ -2404,7 +2404,10 @@ UE 自己发 Deregistration 重来。
 | `OCUDU_CE_HOST_Y_PADS` | **0** | **批次 3a**：非 0 = 宿主清尾组 pad 槽（旧行为，多 1 写/跳）；默认 0 = 设备清 |
 | `OCUDU_CE_CFO_CARRY_HOST` | **0** | **批次 3b.1**：非 0 = 宿主做 CFO 进位（旧行为，多 1 读 + 1 写/跳）；默认 0 = 设备进位 |
 | `OCUDU_CE_CPU_LS` | 未设 | 1 = 强制宿主预置 LSE（严格网的臂）|
-| `OCUDU_CE_LANE_ORDER` | `event` | **四种** lane 序：`event`（默认，估计器两次提交）/ `host_wait`（旧路线，宿主中途等）/ `burst`（估计器进 lane burst，但提取仍自己提交 ⇒ 3 次）/ **`merged`（S13-P3：整跳一次提交，见 §5.8.9；腿验完再翻默认）** |
+| `OCUDU_CE_LANE_ORDER` | `event` | **四种** lane 序：`event`（默认，估计器两次提交）/ `host_wait`（旧路线，宿主中途等）/ `burst`（估计器进 lane burst，但提取仍自己提交 ⇒ 3 次）/ **`merged`（S13-P3：整跳一次提交，见 §5.8.9；已验但未翻默认）** |
+| `OCUDU_UL_PHASE_SEGMENTS` | 未设 | **1 = 在融合车道里也记录/打印三段分解**（`ul_time_frequency` / `ul_channel_estimation` / `ul_equalization_demod`，`ul_pipeline_probe.h`）：它们的两端就是 `[ul_gpu_pipeline]` 的两端，三段之和**按构造等于**它；车道里这三段**含设备执行与排队**，不是「CPU 工作」——所以默认关，按诊断读（§5.8.11 的链条分段就是它）|
+| `OCUDU_METAL_GPU_TIME` | 未设 | 1 = 每条命令缓冲装一个完成回调，报**每队列**的 GPU busy/window（`[metal_stats] gpu busy (front_end/back_end)`）。**它会扰动被测对象**（每槽几十个回调），只作诊断，别读它的绝对延迟 |
+| `OCUDU_UL_FRONTEND_FENCE` | **0**（关）| 1 = 用共享事件把"前端 DFT 写完网格"与后端读者连起来（`shared_queue::front_end_wait()`）。**默认关**意味着**宿主每槽仍要等 DFT 完成**（`ofdm_demodulator_impl::finish_symbol` 的 `wait_slot`）⇒ 这是链条上的一段候选，见 §5.8.11 |
 | `OCUDU_CE_DEV_SIGMA2` | **1** | 0 = 宿主算噪声方差 |
 | `OCUDU_CE_TIME` | 编译期 | 打开逐相耗时统计 |
 | `OCUDU_CE_LS_CHECK` / `OCUDU_CE_SIGMA2_CHECK` / `OCUDU_CE_PP_CHECK` / `OCUDU_CE_K0A_RATIO_CHECK` | 未设 | 容差对照探针（设备值 vs 宿主值）|
