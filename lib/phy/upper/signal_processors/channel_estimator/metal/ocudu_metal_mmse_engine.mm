@@ -249,6 +249,33 @@ struct mmse_guard_timer {
 };
 #endif // OCUDU_METAL_STATS
 
+// ---- Wait trace (OCUDU_CE_WAIT_TRACE=1) -----------------------------------------------------
+// "Which of this engine's eleven waitUntilCompleted sites actually collects the submission of a
+// deferred hop" was open for a whole session (the counter instrument was armed on three sites that
+// this path does not visit, so it printed nothing; see the design document's 5.8.14). The engine has
+// one pending slot and several entries that can close it, and reading the code cannot answer it -
+// the route depends on the hop's lane order, on whether the extraction held its buffer open, and on
+// whether a previous batch was still outstanding. So it is traced instead, by pointer: the publish
+// (end_stage_async) and every collection site name the command buffer, and the pair that matches is
+// the route this hop took.
+static void ce_wait_trace(const char* site, id<MTLCommandBuffer> cb)
+{
+  static const bool on = (std::getenv("OCUDU_CE_WAIT_TRACE") != nullptr);
+  if (on) {
+    std::fprintf(stderr, "[ce_wait] %s cb=%p\n", site, (__bridge void*)cb);
+  }
+}
+
+/// Same, for the events that are not a wait but decide which one will be: the pending-slot publish and
+/// the routes that deliberately do not wait.
+static void ce_wait_trace_note(const char* what)
+{
+  static const bool on = (std::getenv("OCUDU_CE_WAIT_TRACE") != nullptr);
+  if (on) {
+    std::fprintf(stderr, "[ce_wait] %s\n", what);
+  }
+}
+
 // Debug phase timer (OCUDU_MMSE_DEBUG=1): the estimator statistics show that the HOST side of an
 // engine call dominates its GPU time, and this splits that host time into its parts (buffer
 // wrapping, command buffer creation, encoding, commit, and the wait for the GPU).
@@ -779,6 +806,7 @@ static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded,
   // delta from the stage entry to this commit is the part of the lane's GPU gap the HOST owns - until
   // it exists the back end has nothing queued for this lane, however idle it is.
   ocudu::metal::lane_clock.mark_extraction_commit();
+  ce_wait_trace("end_stage", s.cb);
   [s.cb waitUntilCompleted];
   mmse_stats_wait();
 
@@ -816,6 +844,7 @@ static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded,
       return false;
     }
     ocudu::metal::shared_burst::count_dispatch(ocudu::metal::shared_burst::stage::channel_estimator);
+    ce_wait_trace_note("end_stage_async: burst order, nothing published");
     return true;
   }
 
@@ -838,6 +867,7 @@ static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded,
     ocudu::metal::lane_clock.mark_extraction_commit();
   }
   e->pending_cb = s.cb;
+  ce_wait_trace("end_stage_async: published as pending", s.cb);
   return true;
 }
 
@@ -861,6 +891,7 @@ static bool close_held_buffer(mmse_engine_impl* e)
   mmse_stats_commit();
   ocudu::metal::gpu_lane_probe::register_commit(cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
   ocudu::metal::lane_clock.mark_extraction_commit();
+  ce_wait_trace("close_held_buffer", cb);
   [cb waitUntilCompleted];
   mmse_stats_wait();
   if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
@@ -891,6 +922,7 @@ static void abandon_stage(mmse_engine_impl* e, stage_encoder& s, bool adopted_he
     mmse_stats_commit();
     ocudu::metal::gpu_lane_probe::register_commit(s.cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
     ocudu::metal::lane_clock.mark_extraction_commit();
+    ce_wait_trace("abandon_stage", s.cb);
     [s.cb waitUntilCompleted];
     mmse_stats_wait();
   }
@@ -951,6 +983,8 @@ static stage_encoder begin_weights_stage(mmse_engine_impl*           e,
 static bool collect_async_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded)
 {
   if (s.burst || (e->lane_order == metal::ce_lane_order::event)) {
+    ce_wait_trace_note(s.burst ? "collect_async_stage: burst order, the lane commits and waits"
+                               : "collect_async_stage: event order, collected later by wait_pending()");
     return encoded;
   }
   if (!encoded) {
@@ -959,6 +993,7 @@ static bool collect_async_stage(mmse_engine_impl* e, stage_encoder& s, bool enco
     return false;
   }
 
+  ce_wait_trace("collect_async_stage", s.cb);
   [s.cb waitUntilCompleted];
   mmse_stats_wait();
   // The engine's own submission is COLLECTED now, so it must stop counting as outstanding: end_stage_async()
@@ -2467,6 +2502,7 @@ bool mmse_engine::run_epoch_probe(unsigned numerology, unsigned cp_extended, flo
       threadsPerThreadgroup:MTLSizeMake(static_cast<NSUInteger>(MAX_NSYMB_PER_SLOT), 1, 1)];
   [enc endEncoding];
   [cb commit];
+  ce_wait_trace("run_epoch_probe", cb);
   [cb waitUntilCompleted];
   return (cb.status == MTLCommandBufferStatusCompleted) && (cb.error == nil);
 }
@@ -2560,6 +2596,7 @@ bool mmse_engine::run_ta_place(const void*         h,
   [enc dispatchThreadgroups:MTLSizeMake(nof_slices, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   [enc endEncoding];
   [cb commit];
+  ce_wait_trace("run_ta_place", cb);
   [cb waitUntilCompleted];
   return (cb.status == MTLCommandBufferStatusCompleted) && (cb.error == nil);
 }
@@ -2659,6 +2696,7 @@ bool mmse_engine::run_ta_chain(const void*         h,
   [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
   [enc endEncoding];
   [cb commit];
+  ce_wait_trace("run_ta_chain", cb);
   [cb waitUntilCompleted];
   return (cb.status == MTLCommandBufferStatusCompleted) && (cb.error == nil);
 }
@@ -2748,6 +2786,7 @@ if (getenv("OCUDU_CE_TA_CHECK") != nullptr) {
   [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   [enc endEncoding];
   [cb commit];
+  ce_wait_trace("run_ta_profile", cb);
   [cb waitUntilCompleted];
   if ((cb.status != MTLCommandBufferStatusCompleted) || (cb.error != nil)) {
 if (getenv("OCUDU_CE_TA_CHECK") != nullptr) {
@@ -3161,6 +3200,7 @@ static bool wait_pending_impl(mmse_engine_impl* e, bool close_held)
   }
   id<MTLCommandBuffer> cb = e->pending_cb;
   e->pending_cb            = nil;
+  ce_wait_trace("wait_pending_impl", cb);
   [cb waitUntilCompleted];
   mmse_stats_wait();
 
@@ -3223,6 +3263,7 @@ bool mmse_engine::lane_fence_selftest(bool& waited)
   // command buffer will ever signal, the wait below never returns.
   waited = ocudu::metal::shared_queue::backend_stage_wait(cb);
   [cb commit];
+  ce_wait_trace("lane_fence_selftest", cb);
   [cb waitUntilCompleted];
   return (cb.status == MTLCommandBufferStatusCompleted) && (cb.error == nil);
 }
@@ -3548,6 +3589,7 @@ bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const 
   [cb commit];
   mmse_stats_commit();
   gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);
+  ce_wait_trace("encode_weights_only", cb);
   [cb waitUntilCompleted];
   mmse_stats_wait();
 

@@ -4494,6 +4494,17 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     if (engine == nullptr) {
       return true;
     }
+    // Which of the two completion routes this hop takes (OCUDU_CE_WAIT_TRACE, see the engine's
+    // ce_wait_trace): the fused orders complete the lane's burst, every other route collects the
+    // engine's own pending submission. The two are the whole routing question, and the answer is not
+    // readable off the knob - see the note in complete_fd_td_estimation_stage()'s body.
+    static const bool wait_trace_on = (std::getenv("OCUDU_CE_WAIT_TRACE") != nullptr);
+    if (wait_trace_on) {
+      std::fprintf(stderr,
+                   "[ce_wait] complete_fd_td_estimation_stage: pending_fused_burst=%d has_pending=%d\n",
+                   pending_fused_burst ? 1 : 0,
+                   engine->has_pending() ? 1 : 0);
+    }
     // The route this hop's dispatches took decides what completes them (S-7g-19):
     //  * burst: they are in the command buffer the equalizer and the demapper share. Normally the lane
     //    committed it before the estimator is asked to complete the hop, and both calls below are then
