@@ -73,6 +73,22 @@ containment lookup 同一条规则）。**判据**：235 个归档 dump 0 差异
 （最好的跳也要 2.9× 它的 470 µs）⇒ 是**链条结构**（DFT ~420 µs/槽 → 前端栅栏 → 估计器 → 权重 → 均衡 →
 解映射 → LLR 回读）。
 
+**用户裁定：先补仪表（D）** —— 已做（`2e81c7cd49`）：`OCUDU_UL_PHASE_SEGMENTS=1` 让**融合车道里也记录/打印三段分解**
+（`ul_time_frequency` / `ul_channel_estimation` / `ul_equalization_demod`），它们的两端就是 `[ul_gpu_pipeline]` 的两端、
+三段之和按构造等于它；单测 `ul_pipeline_probe_test` 新增一节（开关必须**追加**总量而不是替换它，且三段必须是**子段**）。
+
+**待跑的两条腿（同一二进制、只差旋钮）**：
+
+```
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s13p4-phases OCUDU_UL_PHASE_SEGMENTS=1
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s13p4-fence  OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_UL_FRONTEND_FENCE=1
+```
+
+**第二条为什么值得跑**：前端栅栏**默认关**（`OCUDU_UL_FRONTEND_FENCE`）⇒ 宿主在 `finish_symbol()` 里
+**每槽等一次 DFT 完成**（`dft->wait_slot`）。打开它之后，后端读者改为等**共享事件**（`front_end_wait`），宿主不必等
+⇒ 若"DFT 那段在关键路径上"成立，这一条腿的 `ul_time_frequency` 与 `[ul_gpu_pipeline]` 应当**同时下降**，
+而契约/穿越/CRC 不变。读数：`[metal_stats] front_end fence signals/waits`（默认腿 0、栅栏腿非 0）。
+
 **三个候选（按数据支持度）**：A 削 `ch_wt`（后端 84%；`OCUDU_INV_RL` / `metal_nn_mmse` 两条现成支路）；
 B 削前端 DFT（~420 µs/槽，在链条最前）；C 把后端一部分**搬到空的前端队列**（不是合并队列，是再平衡；
 两队列间已有 `MTLEvent` 栅栏）。**三者都还只是估算**——现在**没有逐 dispatch 的 GPU 计时**，
