@@ -10,10 +10,12 @@
 
 ## 1. 一句话状态
 
-**HEAD = `7fad3d8d1e`**（本备忘录自己就在这个提交里；**代码**提交是 `b47f8ccad7`）。
+**本会话的代码提交 = `b47f8ccad7`**（`phy: a wait trace for the estimator's submissions, and the route it
+names`）；本备忘录以及 S14 的设计文档/证据都在它之后的 docs 提交里。
+**工作树 HEAD 以 `git log -1 --oneline` 为准**（就是本备忘录所在的那个提交），
+**`build/apps/gnb/gnb` 已按它重戳**——自查：`grep build_info build/hashes.h` 的短哈希 == HEAD。
+**⚠ 之后再有任何提交，戳记就落后了，上腿前按 §9 重戳**（坑 35）。
 工作树只剩用户自己的 `configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml`，**别动它**。
-**`build/apps/gnb/gnb` 已按 `7fad3d8d1e` 重戳**（`hashes.h` 里的 `build_info[]` 与 HEAD 一致）
-——**改这个文件之后再提交，戳记就会落后，上腿前按 §9 重戳**。
 门：27 语料 + 20 窄捕获 **235/235 逐字节**、`ctest -R metal` **9/9**（重链之后复跑过）。
 tag 未变：**`gpu_lane_commit_p1`**、**`gpu_lane_commit_p2`**。
 
