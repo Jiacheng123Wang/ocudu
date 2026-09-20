@@ -1,0 +1,270 @@
+# S14：离线 GPU 时间仪器的三件事（计数器不可用 / 等待点实测 / `busy split` 的可用协议）
+
+> 过程证据。结论已进设计文档 §5.8.15。原始数据与命令都在这里，可复跑。
+
+---
+
+## 1. 逐 dispatch 计数器：**这台设备上不可能**（已实测，永久关闭这条路）
+
+### 1.1 先撞到的是一句断言，不是"没打印"
+
+上一会话留下的状态是"采样缓冲建得起来、采样点在编、但 `[disp_time]` 一行都没打"，于是下一步被定为
+"查清延迟提交在哪儿被等，再把解析钩子挂过去"。把那个仪器按同样的做法重写一遍（`MTLCounterSampleBuffer`
++ `sampleCountersInBuffer:atSampleIndex:withBarrier:YES`，钩子改成挂在命令缓冲自己的完成回调上，
+**所以与"谁等它"完全无关**）之后，拿到的是：
+
+```
+-[AGXG16XFamilyComputeContext sampleCountersInBuffer:atSampleIndex:withBarrier:]:1018:
+    failed assertion `MTLComputeCommandEncoder:sampleCountersInBuffer:atSampleIndex:withBarrier
+    not supported on this device'
+...
+Abort trap: 6      (exit 134)
+```
+
+**它不只是沉默，它把进程打死。** 也就是说"钩子挂哪儿"从来不是（唯一的）问题。
+
+### 1.2 原因：设备没有那个采样点（`wip/metal_counter_caps.mm`）
+
+```
+device: Apple M4 Pro (registryID=4294968347)
+  supportsCounterSampling:AtStageBoundary    = YES
+  supportsCounterSampling:AtDrawBoundary     = no
+  supportsCounterSampling:AtBlitBoundary     = no
+  supportsCounterSampling:AtDispatchBoundary = no
+counterSets:
+  timestamp (1 counters)
+      GPUTimestamp
+sample buffer: built
+```
+
+- `sampleCountersInBuffer:` 要求调用点所在的**采样点**被支持；四个点里这台机器只有
+  **`AtStageBoundary`**（那是 render encoder 里"两个 pipeline 阶段之间"的概念）。
+  **没有 dispatch boundary、也没有 blit boundary** ⇒ 一条纯 compute 的链上**没有任何地方**能放采样点。
+- **"有计数器集合"与"能在某处采样"是两个独立的问题**，而上一会话只问了前一个
+  （`supported=1` 说的是 `[device counterSets]` 里有 `timestamp`），于是得出了"设备支持"的结论。
+  采样缓冲确实建得起来（上面 `sample buffer: built`）——这也正是这个坑难看见的原因。
+
+### 1.3 结论
+
+设计文档 §5.8.14 结尾那条建议（"换仪器：`MTLCounterSampleBuffer` 的逐 dispatch GPU 时间戳"）
+**在这台硬件上不成立，不要再按那个写法重试**。同一句话的后半条
+（"把被测段单独编成一条命令缓冲隔离测量"）才是这里能走的路——`[ul_gpu_lane]` 的 `busy split` 是
+用 `MTLCommandBuffer` 自己的 `GPUStartTime`/`GPUEndTime` 算的，**不需要任何计数器采样缓冲**。
+
+复跑：
+
+```bash
+xcrun clang++ -std=c++17 -fobjc-arc -framework Metal -framework Foundation \
+    -o /tmp/metal_counter_caps doc_chinese/phy_pipeline_gpu/wip/metal_counter_caps.mm && /tmp/metal_counter_caps
+```
+
+---
+
+## 2. "延迟提交在哪儿被等"：**实测有答案了**（`OCUDU_CE_WAIT_TRACE=1`）
+
+读代码读不出来（一个 pending 槽、多个入口能收它，路线取决于 lane order、提取有没有 hold 住缓冲、
+以及上一批是否还没收），所以改成打点：**引擎的 11 个 `waitUntilCompleted` 站点全部命名**，
+发布点也命名，配对的 cb 指针就是这一跳走的路。
+
+### 2.1 离线回放根本不走延迟路线
+
+`ul_chain_replay` 走的是 `compute()`（`do_submit(..., deferred=false)`），
+trace 全程只有 `end_stage`（16 次）⇒ **`ul_chain_replay` 无法回答这个问题**。
+
+### 2.2 单测走（Test 13 用 `submit()`/`finish()`）
+
+```bash
+OCUDU_CE_WAIT_TRACE=1 ./build/lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_unit_test
+```
+
+| trace 行 | 次数 |
+|---|---|
+| `end_stage_async: published as pending` | 5774 |
+| `collect_async_stage`（host_wait 路线：就地等）| 5766 |
+| `collect_async_stage: event order, collected later by wait_pending()` | 8 |
+| `complete_fd_td_estimation_stage: pending_fused_burst=… has_pending=…` | 2782 |
+| **`wait_pending_impl`** | **8** |
+| `end_stage_async: burst order, nothing published` | 8 |
+| `collect_async_stage: burst order, the lane commits and waits` | 8 |
+| `lane_fence_selftest` / `encode_weights_only` / `run_epoch_probe` / `run_ta_place` | 4 / 26 / 10 / 1 |
+
+配对（原始日志 16097–16100 行，默认 `event` 序）：
+
+```
+[ce_wait] end_stage_async: published as pending cb=0xb4475c000
+[ce_wait] collect_async_stage: event order, collected later by wait_pending()
+[ce_wait] complete_fd_td_estimation_stage: pending_fused_burst=0 has_pending=1
+[ce_wait] wait_pending_impl cb=0xb4475c000          <-- 同一个 cb
+```
+
+**⇒ 三条路线的收集点：**
+
+| 路线 | 发布 | 收集 |
+|---|---|---|
+| `event`（默认）| `end_stage_async` 发布为 pending | **`wait_pending_impl`**（由 `complete_fd_td_estimation_stage` 调用）|
+| `host_wait` | 同上 | `collect_async_stage`（就地等）|
+| `burst` / `merged` | **什么都不发布** | 没有——lane 的 `shared_burst` 自己 commit + wait |
+
+**⇒ 默认路线上，上一会话挂的三个钩子里 `wait_pending_impl` 本来就是对的。**
+仪器沉默与"挂错地方"无关（§1 已给出真正原因）。
+
+trace 还顺带把入口守卫看清楚了：`end_stage_async` 发布 X 之后，紧接着的
+`wait_pending_impl` 常常报的是**另一个 cb**——那是**上一跳**的 pending 被守卫收掉。
+
+---
+
+## 3. `busy split` 的撤回是对的，但**原因和协议都要改写**
+
+### 3.1 上一会话的散布是真的（`--repeat 20`）
+
+同一捕获 `syn004_4`、默认配置、`--repeat 20`、12 次：
+
+```
+544.4 545.0 545.3 548.0 550.1 301.7 278.7 547.2 553.0 545.1 545.6 371.7   (ch_wt µs/lane)
+```
+
+**双峰**：3 次落在 279–372，9 次落在 544–553。§4.1 记的 571/554/**203**/606/625/**142** 就是这一族。
+
+### 3.2 但同一配置 `--repeat 1`（一个进程一跳）是稳的
+
+同一捕获、默认配置、`--repeat 1`、12 次：
+
+```
+553.7 555.3 554.4 557.1 559.7 554.7 553.7 556.3 570.7 553.5 555.1 555.8
+```
+
+12/12 落在 **553.5–570.7（±1.5%）**。后来 9 次一组的复测是 **553.9–561.5（±0.7%）**。
+
+**两次运行的工作量完全相同**：低值那次 `device_corr_builds=40`、`cbs/lane=2.00`、`carried=0`，
+与高值那次逐项相同——变的只是**被测出来的 GPU 跨度**。这就是 §4.1 说的那个机制
+（离线回放不按 slot 节拍喂数据 ⇒ 相邻跳、以及前端 DFT 队列与后端车道在设备上重叠），
+**它污染的是"某个命令缓冲的 GPU 跨度"，而 `--repeat 1` 把这个重叠固定住了**。
+
+### 3.3 ⇒ 可用协议（写进设计文档）
+
+> **`--repeat 1`，一个进程一跳，取 N≥9 次的【中位数】。**
+> 不要用 `--repeat 20` 读这个量；中位数用来挡掉残余的向上离群（实测 ~1/9 次）。
+
+在这个协议下，§7 的保值重复探针才**真的**能用：斜率 = 该段多编一次的 GPU 成本。
+
+---
+
+## 4. ★ 第一次量出 `ch_wt`（≈554 µs）里各段各占多少
+
+捕获 `syn004_4`，`--repeat 1`，每个臂 **9 次**，取中位数（µs）：
+
+| 臂 | 9 次原始值 | 中位 | Δ |
+|---|---|---|---|
+| **base** | 554.3 555.0 561.5 554.4 553.9 555.8 554.3 554.4 555.5 | **554.4** | — |
+| `OCUDU_CE_CORR_REPEAT=2` | 592.5 589.4 591.2 589.1 589.3 588.9 591.0 591.2 602.5 | 591.0 | **+36.6** |
+| `OCUDU_CE_INV_REPEAT=3` | 953.5 950.2 949.7 951.0 952.7 952.8 951.0 949.2 952.9 | 951.0 | **+396.6（2 次 ⇒ 198.3/次）** |
+| `OCUDU_CE_W_REPEAT=2` | 617.8 615.0 613.8 613.9 614.8 613.4 614.2 612.4 615.5 | 614.2 | **+59.8** |
+| `OCUDU_CE_REFORMAT_REPEAT=2` | 648.8 650.9 651.9 657.6 651.1 650.9 669.3 649.1 662.1 | 651.1 | **+96.7** |
+| `OCUDU_CE_DEV_TA=0` | 497.9 497.7 495.9 498.3 496.0 502.3 **648.8** 498.8 497.9 | 497.9 | **−56.5** |
+
+| 段 | µs | 占 `ch_wt` |
+|---|---|---|
+| **K1 求逆** | **198.3** | **35.8%** |
+| 重排（`encode_reformat` 全部：K3 + rSRP + 噪声方差 + TA 链）| 96.7 | 17.4% |
+| 　其中 TA 链（`DEV_TA=0`）| 56.5 | 10.2% |
+| K2 权重 | 59.8 | 10.8% |
+| 相关矩阵前缀（K0-d：A + R_hp 一趟）| 36.6 | 6.6% |
+| **已量出的合计** | **391.4** | **70.6%** |
+| 未归属（y scatter、barrier、编码/发射开销）| 163.0 | 29.4% |
+
+**头条：最大单项是 K1 求逆（~198 µs，36%），不是相关矩阵前缀（~37 µs，6.6%）。**
+这正好把 §5.8.13/§5.8.14 作废的那张 bisection 表的两个数分开判了：
+`CORR_DEV=0 −445` 是噪声（真值 37）；`INV_RL −153` 方向是对的（真值 ~198，同一量级）。
+
+### 4.1 保值性复验（每个臂与 base 逐字节比）
+
+| 臂 | `_h.bin`+`_llr.bin`+捕获 | `_ce.txt` |
+|---|---|---|
+| `CORR_REPEAT=2` | **0** | 0 |
+| `INV_REPEAT=3` | **0** | **7**（`noise_variance` 1.258405298e-01→1.258405447e-01、`rsrp` 1.506316196e-02→1.506313402e-02，末位）|
+| `W_REPEAT=2` | **0** | 0 |
+| `REFORMAT_REPEAT=2` | **0** | 0 |
+| `DEV_TA=0` | **0** | 0 |
+
+---
+
+## 5. ★★ 顺带发现的缺陷：`OCUDU_CE_INV_REPEAT` **不是保值的**
+
+`mmse_inv`（K1）是**原地** Gauss-Jordan：每多编一次就在 `A` 与 `A⁻¹` 之间翻一次面。所以
+
+```
+INV_REPEAT=2  h.bin diff=2688  llr.bin diff=914  ce.txt diff=34     <-- 数值全错
+INV_REPEAT=3  h.bin diff=   0  llr.bin diff=  0  ce.txt diff= 7     <-- 数据逐位同，两个标量末位
+INV_REPEAT=4  h.bin diff=2688  llr.bin diff=914  ce.txt diff=32     <-- 数值全错
+INV_REPEAT=5  h.bin diff=   0  llr.bin diff=  0  ce.txt diff= 8
+```
+
+`INV_REPEAT=2` 的 `_ce.txt`：`noise_variance` **1.258e-01 → 4.601e+03**、`rsrp` **1.506e-02 → 4.548e+03**。
+
+- **偶数次是错的**（把 A 反了回来）；
+- 奇数次（≥3）数据逐位相同，但**两个发布标量差 ~1e-7 相对**（往返不是逐位可逆）；
+- 上一会话"n=4 逐位不变"的验证**不成立**（n=4 正是错的那一侧），所以
+  §5.8.14 里"每一段都保值、已实测"这句话**对 `_INV_` 是错的**；
+- **任何用偶数 `INV_REPEAT` 读到的数都是无效的**（包括本会话第一版表里的 `INV_REPEAT=2`）。
+
+**正确的用法（本次采用）**：`INV_REPEAT=3`（或任何 ≥3 的奇数），并把 `_ce.txt` 的 7 字节差
+当成"已知且已解释"；**别用 2**。要一个真正干净的求逆探针，得让重复**恢复原状**
+（例如 K1 编两次算一次"重复"，或先把 A 存一份）——那是下一次的候选改动。
+
+---
+
+## 6. 复跑清单
+
+```bash
+# 设备能力（§1）
+xcrun clang++ -std=c++17 -fobjc-arc -framework Metal -framework Foundation \
+  -o /tmp/metal_counter_caps doc_chinese/phy_pipeline_gpu/wip/metal_counter_caps.mm && /tmp/metal_counter_caps
+
+# 等待点（§2）——必须用单测，回放工具不走延迟路线
+OCUDU_CE_WAIT_TRACE=1 ./build/lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_unit_test 2>&1 | grep -o 'ce_wait\] [a-z_ :,]*' | sort | uniq -c | sort -rn
+
+# 稳定性协议（§3）：--repeat 1，N=9，读中位数
+for i in $(seq 1 9); do
+  ./build/lib/phy/upper/channel_processors/metal/ul_chain_replay doc_chinese/work_tmp/corpus/syn004_4 --metal --out /tmp/b 2>&1 | grep -o 'ch_wt=[0-9.]*'
+done
+
+# 分段（§4）：把上面那条加上 env 前缀，逐臂替换
+OCUDU_CE_CORR_REPEAT=2 / OCUDU_CE_INV_REPEAT=3 / OCUDU_CE_W_REPEAT=2 / OCUDU_CE_REFORMAT_REPEAT=2 / OCUDU_CE_DEV_TA=0
+
+# 门（本会话全过）
+bash doc_chinese/phy_pipeline_gpu/wip/neutral_vs_baseline.sh      # 235/235、0 字节
+ctest --test-dir build -R metal                                    # 9/9
+```
+
+---
+
+## 7. 交叉验证没做成：`OCUDU_CE_INVERT_FIRST=1` 现在产出 NaN（第二个缺陷）
+
+想用树里现成的"把 K1 放进独立命令缓冲"旋钮独立验证 §4 的 198 µs：
+
+```
+OCUDU_CE_INVERT_FIRST=1 → [ul_gpu_lane] lanes=1 cbs/lane=4.00 (max=4)
+   busy split: ch_est=305.6us/lane (46%, cbs/lane=2.00) ch_wt=246.4us/lane (37%) eq_demap=107.0us/lane (16%)
+```
+
+读数很漂亮（`ch_wt` 554.4 → 246.4），**但值不能用**：
+
+```
+_h.bin diff=2688   _llr.bin diff=914   ce.txt diff=72
+port=0 noise_variance=nan snr=0.000000 rsrp=nan epre=1.454060674e-01 ta_us=-1.171875 cfo_hz=na
+```
+
+原因（代码顺序）：`engine_run()` 里
+
+```cpp
+if (gpu_invert && (std::getenv("OCUDU_CE_INVERT_FIRST") != nullptr)) {
+    if (!engine->invert(gpu_a, L, nof_systems)) { ... }     // <-- 这时 A 还没被建出来
+}
+const bool k1_inline = gpu_invert && (std::getenv("OCUDU_CE_INVERT_FIRST") == nullptr);
+```
+
+相关矩阵前缀（K0-d）是 P1 时代**搬进 `encode_run()`** 的，也就是说 `A` 是在那次 `invert()` **之后**
+才被写进 `gpu_a` 的 ⇒ 它反的是上一跳/垃圾矩阵，而 `k1_inline` 又被关掉 ⇒ 权重拿到 NaN 而不是 `A⁻¹`。
+**⇒ 这个旋钮在"设备建相关矩阵"的路由上已经坏了**（注释仍写着它是可用的 TEMPORARY experiment）。
+
+⇒ **198 µs 只有重复探针一个来源**；交叉验证要等这个旋钮修好（未做）。
