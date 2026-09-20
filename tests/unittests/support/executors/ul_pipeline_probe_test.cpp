@@ -169,8 +169,7 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
   constexpr uint64_t traced_slot = 400;
   probe.record_start(traced_slot);
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  probe.record_slot_samples_complete(traced_slot, std::chrono::high_resolution_clock::now());
-  probe.record_rx_wait_for_slot(traced_slot, 9000000); // 9 ms
+  probe.record_slot_samples_complete(traced_slot, 3840, 9000000, std::chrono::high_resolution_clock::now());
   std::this_thread::sleep_for(std::chrono::milliseconds(1));
   probe.record_t2f_end(traced_slot);
   std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -305,6 +304,49 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
   }
   unsetenv("OCUDU_UL_PHASE_SEGMENTS");
 
+  // ---- the offset stream, which is what made the first half-slot leg capture nothing ------------------------
+  //
+  // On air the stream carries a fixed offset from the slot grid (measured 2026-09-21: seven samples, exactly the
+  // configured symbol-block size), so NO block ever ends on a slot boundary - the slot's last sample merely falls
+  // INSIDE one. A completion test written as "the block ends on a boundary" therefore captures nothing at all,
+  // on the whole leg, while looking correct in review. This case pins the shape that does work: the caller says
+  // "this block carries the slot's last sample", which it decides from the slot's span, not from the block's end.
+  setenv("OCUDU_UL_SLOT_TRACE", "4", 1);
+  // The phase pieces are RECORDED only outside the fused lane unless the decomposition is forced - the mode is
+  // already gpu by now (it cannot be set back, see the file comment), so without this the decode start would be
+  // the only landmark and this case would assert about a t2f that the probe deliberately never took.
+  setenv("OCUDU_UL_PHASE_SEGMENTS", "1", 1);
+  constexpr uint64_t offset_slot = 500;
+  probe.record_start(offset_slot);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  // 3840 samples carrying the slot's LAST sample, i.e. a block that crosses the slot boundary.
+  probe.record_slot_samples_complete(offset_slot, 3840, 1500000, std::chrono::high_resolution_clock::now());
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  probe.record_t2f_end(offset_slot);
+  probe.record_ldpc_start(offset_slot);
+  probe.record_end_crc_ok(offset_slot, 42);
+  {
+    const std::string report = capture_report();
+    const size_t      pos    = report.find("  500 ");
+    ASSERT_NE(pos, std::string::npos) << report;
+    const std::string line = report.substr(pos, report.find('\n', pos) - pos);
+    std::istringstream    is(line);
+    std::string           tok;
+    std::vector<double>   nums;
+    while (is >> tok) {
+      try {
+        nums.push_back(std::stod(tok));
+      } catch (...) {
+      }
+    }
+    ASSERT_GE(nums.size(), 8u) << line;
+    EXPECT_NEAR(nums[0], 500.0, 1.0) << line;     // the slot
+    EXPECT_NEAR(nums[1], 1500.0, 300.0) << line;  // its receive wait, carried by the same call
+    EXPECT_GE(nums[2], 500.0) << line;            // t2f from the completion, not from the slot's start
+    EXPECT_LT(nums[2], 5000.0) << line;
+  }
+  unsetenv("OCUDU_UL_SLOT_TRACE");
+  unsetenv("OCUDU_UL_PHASE_SEGMENTS");
 }
 
 #endif // OCUDU_FLOW_PROBES

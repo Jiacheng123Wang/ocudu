@@ -375,49 +375,37 @@ public:
     rx_wait_us.push_back(static_cast<double>(wait_ns) / 1e3);
   }
 
-  /// \brief Attaches a block's receive wait to the slot that block COMPLETED, for the traced timeline.
+  /// \brief Records that a received block completed \p slot, i.e. its samples carry the slot's LAST sample.
   ///
-  /// Separate from record_rx_wait() because the two key the same number differently: the series is per block and
-  /// keyless, while the trace needs "the wait that ended with this slot's last sample". A block that does not
-  /// complete a slot is not attached to anything (there is no slot whose samples it finished).
-  void record_rx_wait_for_slot(uint64_t slot, int64_t wait_ns)
-  {
-    if (wait_ns < 0) {
-      return;
-    }
-    std::lock_guard<std::mutex> lock(mutex);
-    // The wait belongs to this slot even when no landmark has been recorded yet: the caller reports it right
-    // after the block arrives, which is BEFORE the slot's first landmark (the FFT can only finish afterwards).
-    // Remember it in the same map the trace lives in rather than looking one up, so the order of the two calls
-    // cannot lose the number - it is attached to the entry when that entry is created (see trace_slot()).
-    if (!slot_trace_enabled()) {
-      return;
-    }
-    slot_trace_pre_wait[slot] = static_cast<double>(wait_ns) / 1e3;
-    auto it                  = slot_trace.find(slot);
-    if (it != slot_trace.end()) {
-      it->second.rx_wait_us = static_cast<double>(wait_ns) / 1e3;
-    }
-  }
-
-  /// \brief Records that the samples COMPLETING \p slot have just arrived (the block whose last sample is the
-  /// slot's last), which is the earliest instant anything downstream of the radio could possibly run on it.
-  ///
-  /// \param[in] slot Slot whose samples are now all in.
-  /// \param[in] now  The host timestamp of that arrival.
+  /// \param[in] slot       Slot whose samples are now all in.
+  /// \param[in] block_size Number of samples the block delivered.
+  /// \param[in] wait_ns    How long that block's receive blocked.
+  /// \param[in] now        Host timestamp of that arrival.
   ///
   /// Only recorded while the [ul_slot_trace] switch is on (OCUDU_UL_SLOT_TRACE=N), because it is the ONE instant
   /// none of the other series needs: they all start earlier, at the first sample of the slot. With it, the trace
   /// separates "the front end's work on the samples" from "waiting for the samples", which is exactly the pair
   /// the operator of §5.8.30 could not read out of the distributions.
-  void record_slot_samples_complete(uint64_t slot, std::chrono::high_resolution_clock::time_point now)
+  ///
+  /// The block's SAMPLE RANGE is taken as the input rather than a "which block completed the slot" answer,
+  /// because the caller cannot always tell: the receiving chain's stream carries a fixed offset from the slot
+  /// grid (measured on air: 7 samples, matching the symbol-block size), so no block ever ENDS on a slot boundary
+  /// - the slot's last sample merely falls INSIDE one. Asking the caller to test "ends on a boundary" is what
+  /// made a half-slot leg capture nothing at all while looking perfectly reasonable in review.
+  void record_slot_samples_complete(uint64_t                                      slot,
+                                    unsigned                                      block_size,
+                                    int64_t                                       wait_ns,
+                                    std::chrono::high_resolution_clock::time_point now)
   {
-    if (!slot_trace_enabled()) {
+    if (!slot_trace_enabled() || (block_size == 0)) {
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
     if (slot_samples_done.size() < max_slot_trace) {
       slot_samples_done[slot] = now;
+      if (wait_ns >= 0) {
+        slot_trace_pre_wait[slot] = static_cast<double>(wait_ns) / 1e3;
+      }
     }
   }
 

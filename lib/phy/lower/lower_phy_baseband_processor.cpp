@@ -459,51 +459,26 @@ void lower_phy_baseband_processor::ul_process()
     // starts it - and that difference is why per-slot questions cannot be answered from those series.
     //
     // "Completes a slot" is exact: the block's samples are contiguous and end at rx_metadata.ts + nof_samples,
-    // so a block completes a slot iff that end lands on a slot boundary. The slot it completes is the one
-    // holding its LAST sample (not the one holding its first: the two differ for every straddling block).
-    // "Completes a slot" is a property of WHERE the block ENDS, not of its size: the samples are contiguous, so a
-    // block completes a slot iff its end lands on a slot boundary. Testing the block's SIZE instead (which is what
-    // this did first) is right only for whole-slot blocks and silently captures nothing at any other size - the
-    // half-slot leg printed "slots captured=0" for exactly that reason. The slot it completes is the one holding
-    // its LAST sample, not its first: for a block that straddles a boundary those are different slots, and that
-    // difference is the whole reason the distributions could not be decomposed.
-    const baseband_gateway_timestamp block_end = rx_metadata.ts + nof_samples;
-    // TEMPORARY DIAGNOSTIC (remove once the trace is trusted): why a half-slot leg captures no slot. Prints the
-    // first few blocks' geometry and, once per second, the current one - enough to see whether the block end ever
-    // lands on a slot boundary and, if not, by how much it misses.
-    if (ul_pipeline_probe::slot_trace_enabled()) {
-      static std::atomic<unsigned> diag_blocks{0};
-      static std::atomic<int64_t>  diag_last_s{-1};
-      const unsigned               n = diag_blocks.fetch_add(1, std::memory_order_relaxed);
-      const int64_t                sec = recv_us / 1000000;
-      if ((n < 8) || (sec != diag_last_s.exchange(sec, std::memory_order_relaxed))) {
-        // ts = the timestamp the radio REPORTED for this block, last_rx = the host's own idea of where the
-        // stream is (they must agree for a contiguous stream); rx_off/rx_fill = where the block lands inside the
-        // slot buffer, and sym = the configured block size in symbols - together they say whether the
-        // symbol-block path or the whole-buffer path is being taken (sym=0 means the knob never reached here).
-        std::fprintf(stderr,
-                     "[ul_slot_diag] blk=%u ts=%llu last_rx=%llu n=%u end=%llu end%%sps=%llu sps=%u "
-                     "sym=%u rx_off=%u rx_fill=%u\n",
-                     n,
-                     static_cast<unsigned long long>(rx_metadata.ts),
-                     static_cast<unsigned long long>(last_rx_timestamp.load(std::memory_order_acquire)),
-                     nof_samples,
-                     static_cast<unsigned long long>(block_end),
-                     static_cast<unsigned long long>(block_end % nof_samples_per_slot),
-                     nof_samples_per_slot,
-                     nof_symbols_per_block,
-                     rx_offset,
-                     rx_fill);
-        std::fflush(stderr);
-      }
-    }
-    if ((nof_samples != 0) && (block_end % nof_samples_per_slot == 0)) {
+    // The per-slot timeline (OCUDU_UL_SLOT_TRACE) needs the ONE instant the other series take for granted: the
+    // arrival of the samples that COMPLETE a slot. Everything else in the probe starts at the slot's FIRST
+    // sample, which is a different instant whenever the block carrying a slot's tail is not the block that
+    // starts it - and that difference is why per-slot questions cannot be answered from those series.
+    //
+    // "Completes a slot" is asked as "does this block's sample range carry the slot's LAST sample", and NOT as
+    // "does the block end on a slot boundary". The stream is allowed to carry a fixed offset from the slot grid
+    // - and on air it does (measured 2026-09-21: seven samples, exactly the configured symbol-block size, so no
+    // block ever ends on a boundary and a boundary test captures NOTHING, silently, on the whole leg). The
+    // range test holds for any offset: it only needs the slot's span, which is arithmetic on the sample count.
+    if (nof_samples != 0) {
       const uint64_t slots_per_sfn_cycle = (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
-      const uint64_t done_slot =
-          (apply_timestamp_sfn0_ref(block_end - 1) / nof_samples_per_slot) % slots_per_sfn_cycle;
-      auto& probe = ul_pipeline_probe::get();
-      probe.record_slot_samples_complete(done_slot, std::chrono::high_resolution_clock::now());
-      probe.record_rx_wait_for_slot(done_slot, recv_us * 1000);
+      const baseband_gateway_timestamp block_end = rx_metadata.ts + nof_samples;
+      // The slot holding the block's LAST sample, and where that slot's last sample sits in absolute terms.
+      const uint64_t last_slot      = apply_timestamp_sfn0_ref(block_end - 1) / nof_samples_per_slot;
+      const uint64_t last_slot_last = last_slot * nof_samples_per_slot + (nof_samples_per_slot - 1);
+      if ((last_slot_last >= rx_metadata.ts) && (last_slot_last < block_end)) {
+        ul_pipeline_probe::get().record_slot_samples_complete(
+            last_slot % slots_per_sfn_cycle, nof_samples, recv_us * 1000, std::chrono::high_resolution_clock::now());
+      }
     }
     if (recv_us > 20000) {
       static auto& probe_log = ocudulog::fetch_basic_logger("ALL");
