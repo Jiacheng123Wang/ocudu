@@ -349,6 +349,42 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
     EXPECT_GE(nums[2], 500.0) << line;            // t2f from the completion, not from the slot's start
     EXPECT_LT(nums[2], 5000.0) << line;
   }
+  // ---- the bounded ring keeps the NEWEST slots, and an untraced slot produces no row -----------------------
+  //
+  // Both halves are regressions for the same on-air failure. The cap used to REFUSE new keys once full, so the
+  // maps held the run's first milliseconds - the attach phase, where most slots are idle - while the landmarks
+  // came from the whole run; and fill_slot_trace() used to fall back to a default-constructed time_point for a
+  // missing base, which is not a sentinel on a clock whose epoch is boot. Together they printed a confident
+  // "one slot" of microseconds (71680) for slots that were never traced at all.
+  {
+    // A slot whose landmarks were recorded but whose samples-complete never was must NOT appear as a row.
+    constexpr uint64_t untraced_slot = 900;
+    probe.record_start(untraced_slot);
+    probe.record_t2f_end(untraced_slot);
+    probe.record_ldpc_start(untraced_slot);
+    probe.record_end_crc_ok(untraced_slot, 42);
+    const std::string after = capture_report();
+    EXPECT_EQ(after.find("  900 "), std::string::npos)
+        << "a slot with no samples-complete instant must not be reported as a timeline row";
+
+    // The cap keeps the NEWEST completions: trace MORE slots than it allows and the first must fall out while
+    // the last stays. Refusing new keys instead (the on-air defect) leaves exactly the opposite - the run's first
+    // few milliseconds, which on an air leg is the attach phase. The number here must exceed the real cap, or the
+    // assertion is vacuous (which is how this test was written the first time).
+    constexpr uint64_t first_slot = 1000;
+    constexpr unsigned overflow   = 520; // > max_slot_trace (512), so eviction definitely happens
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    for (uint64_t i = first_slot; i != first_slot + overflow; ++i) {
+      probe.record_start(i);
+      probe.record_slot_samples_complete(i, 3840, 100, std::chrono::high_resolution_clock::now());
+      probe.record_t2f_end(i);
+    }
+    const std::string ring = capture_report();
+    EXPECT_EQ(ring.find(" 1000 "), std::string::npos)
+        << "the oldest traced slot must be evicted once the cap is exceeded";
+    EXPECT_NE(ring.find(" 1519 "), std::string::npos) << "the newest traced slot must be kept";
+  }
+
   unsetenv("OCUDU_UL_SLOT_TRACE");
   unsetenv("OCUDU_UL_PHASE_SEGMENTS");
 }

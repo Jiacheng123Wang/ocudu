@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <cstdlib>
 #include <limits>
 #include <map>
@@ -401,11 +402,22 @@ public:
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
-    if (slot_samples_done.size() < max_slot_trace) {
-      slot_samples_done[slot] = now;
-      if (wait_ns >= 0) {
-        slot_trace_pre_wait[slot] = static_cast<double>(wait_ns) / 1e3;
-      }
+    // A bounded map that REFUSES new keys once full keeps the oldest entries - which here means the slots of the
+    // first few milliseconds of the run, when the phone is still attaching and most slots are idle. The trace
+    // then looks up bases for slots from the whole run, finds none, and reports a span measured from wherever it
+    // fell back to (see fill_slot_trace). What is wanted is the NEWEST max_slot_trace completions: evict the
+    // oldest insertion when full.
+    if (slot_samples_done.size() >= max_slot_trace) {
+      auto oldest = slot_trace_order.begin();
+      slot_samples_done.erase(*oldest);
+      slot_trace_pre_wait.erase(*oldest);
+      slot_trace.erase(*oldest);
+      slot_trace_order.erase(oldest);
+    }
+    slot_samples_done[slot] = now;
+    slot_trace_order.push_back(slot);
+    if (wait_ns >= 0) {
+      slot_trace_pre_wait[slot] = static_cast<double>(wait_ns) / 1e3;
     }
   }
 
@@ -456,34 +468,21 @@ public:
     }
   }
 
-  /// \brief The instant the samples COMPLETING \p slot arrived, if this slot is being traced.
-  ///
-  /// Used by the phase assembly to express every landmark as a delta from the one instant the other series take
-  /// for granted (they start at the slot's FIRST sample, which is a different thing whenever the block that
-  /// carries the tail of a slot is not the block that starts it).
-  static std::chrono::high_resolution_clock::time_point
-  find_slot_samples_done(const std::map<uint64_t, std::chrono::high_resolution_clock::time_point>& done, uint64_t slot)
-  {
-    auto it = done.find(slot);
-    return (it == done.end()) ? std::chrono::high_resolution_clock::time_point{} : it->second;
-  }
-
   static void fill_slot_trace(slot_trace_entry&                                     e,
                               const std::map<uint64_t, std::chrono::high_resolution_clock::time_point>& done,
                               uint64_t                                              slot,
                               std::chrono::high_resolution_clock::time_point        at)
   {
-    const auto base = find_slot_samples_done(done, slot);
-    // "Not traced" must be tested with the map, not by comparing a time_point against a default-constructed one:
-    // on this platform high_resolution_clock IS steady_clock, whose epoch is BOOT, so a default-constructed
-    // time_point is a perfectly ordinary instant ~10 minutes into the machine's life - and the missing-base case
-    // would have silently produced "the landmark happened 71680us after 1970" (which is what the first on-air leg
-    // of this trace printed, 71680us being exactly one 7680-sample slot). Comparing against a sentinel that real
-    // values can hold is the defect; asking the map is the fix.
-    if (done.find(slot) == done.end()) {
-      return; // this slot is not traced
+    // The base is looked up ONCE, and a missing one aborts: there is no sentinel. Returning a default-constructed
+    // time_point for "absent" is what produced a confident 71680us (exactly one slot's worth of microseconds) on
+    // air - on this platform high_resolution_clock IS steady_clock, whose epoch is BOOT, so a default time_point
+    // is an ordinary instant and the subtraction silently succeeds.
+    const auto base_it = done.find(slot);
+    if (base_it == done.end()) {
+      return; // this slot has no samples-complete instant on record: it is not traced
     }
-    auto us = [&base](const std::chrono::high_resolution_clock::time_point& tp) {
+    const auto base = base_it->second;
+    auto       us   = [&base](const std::chrono::high_resolution_clock::time_point& tp) {
       return std::chrono::duration_cast<std::chrono::nanoseconds>(tp - base).count() / 1e3;
     };
     switch (e.what) {
@@ -877,6 +876,10 @@ private:
   /// Receive waits reported before their slot had a trace entry (see record_rx_wait_for_slot): the receive
   /// happens before any landmark of the slot it completes, so the wait always arrives first.
   std::map<uint64_t, double> slot_trace_pre_wait;
+  /// Traced slots in ARRIVAL order, so the bounded maps above can evict the oldest instead of refusing the
+  /// newest (see record_slot_samples_complete): refusing means keeping the run's first milliseconds, which on an
+  /// air leg is the attach phase, i.e. exactly the slots that carry no PUSCH.
+  std::deque<uint64_t> slot_trace_order;
   /// The newest landmark instant per traced slot, kept only so the report can print it next to the base.
   std::map<uint64_t, std::chrono::high_resolution_clock::time_point> slot_trace_landmark;
 };
