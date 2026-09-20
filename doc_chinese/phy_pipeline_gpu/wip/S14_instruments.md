@@ -483,3 +483,28 @@ for i in $(seq 1 9); do
   echo "$a $b" | awk '{printf "%.1f\n", $1-$2}'
 done
 ```
+
+---
+
+## 13. SIMD 归约（§5.8.21）：抽取 171.3 → ~118 µs（−31%）
+
+**改动**：`mmse_pilots_sigma2` / `mmse_pilots_epre` 的 256 项 threadgroup 树（每级一道 barrier，
+sigma2 每个 layer pair 重来 ⇒ 10~20 道/kernel）改成 `simd_sum()`（寄存器内合并，零 barrier）+
+一道 barrier 合并 8 个 SIMD 组部分和。`red[]` 从 256 项缩到 8 项。
+
+**收益（配对 + 比值两法，5% 内一致）**
+
+| 阶段 | 抽取 | 抽取/(2×K1) |
+|---|---|---|
+| 起点 | 171.3 µs | 0.4255 |
+| +CFO 并行化 | 152.6 | 0.3778 |
+| **+SIMD 归约** | **117.7**（配对，−158.5…−97.7）/ 123.7（比值）| **0.3072** |
+
+**逐字节信息（全 46 捕获合计）**：`_llr.bin` **0 字节**、`_h.bin` **28 字节**、`_ce.txt` 24 个捕获一个标量。
+**新门：47 捕获 0 问题；`--self-test` 8/8；`ctest -R metal` 9/9。**
+
+**复跑**：
+```bash
+python3 doc_chinese/phy_pipeline_gpu/wip/value_net.py           # 门
+N=9 /tmp/ratio.sh    # 比值法：抽取/(2*K1)（脚本见 §12 的说明）
+```

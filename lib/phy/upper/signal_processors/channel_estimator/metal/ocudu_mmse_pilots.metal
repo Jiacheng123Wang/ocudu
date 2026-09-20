@@ -656,9 +656,11 @@ kernel void mmse_pilots_sigma2(device const float*          smoothed [[buffer(0)
                                device const float*          cfo      [[buffer(3)]],
                                device float*                out      [[buffer(4)]],
                                constant mmse_sigma2_params& p        [[buffer(5)]],
-                               uint                         tid      [[thread_position_in_threadgroup]])
+                               uint                         tid      [[thread_position_in_threadgroup]],
+                               uint                         lane     [[thread_index_in_simdgroup]],
+                               uint                         sgi      [[simdgroup_index_in_threadgroup]])
 {
-    threadgroup float red[mmse_sigma2_tg_size];
+    threadgroup float red[mmse_sigma2_tg_size / 32u]; // one partial per SIMD group (see below)
 
     const mmse_sigma2_dims d         = mmse_sigma2_clamp(p);
     const float            scaling   = (d.nof_dmrs_symb != 0u) ? (p.beta / static_cast<float>(d.nof_dmrs_symb)) : 0.0F;
@@ -736,19 +738,28 @@ kernel void mmse_pilots_sigma2(device const float*          smoothed [[buffer(0)
                 energy += n.x * n.x + n.y * n.y;
             }
         }
-        red[tid] = energy;
+        // ---- The hop's energy for this layer pair, reduced ------------------------------------------
+        // SIMD-group reduction (2026-09-20, under the ruling that took the line off the byte-exact
+        // gate, design document 5.8.19). This used to be a 256-entry threadgroup tree: eight stages,
+        // each with its own threadgroup_barrier, ten barriers per layer pair. simd_sum() combines the
+        // 32 lanes of a SIMD group IN REGISTERS - no barrier, no threadgroup memory - so only ONE
+        // partial per SIMD group has to be published and the tree over those is a second shuffle. Two
+        // barriers replace ten. The order changes, which the gate now allows and the value net judges.
+        const float v = simd_sum(energy);
+        if (lane == 0u) {
+            red[sgi] = v;
+        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint step = mmse_sigma2_tg_size / 2; step != 0u; step /= 2u) {
-            if (tid < step) {
-                red[tid] += red[tid + step];
+        if (sgi == 0u) {
+            float t = (lane < (mmse_sigma2_tg_size / 32u)) ? red[lane] : 0.0F;
+            t       = simd_sum(t);
+            if (lane == 0u) {
+                const float total = t;
+                const bool  ok    = isfinite(total) && (total != 0.0F);
+                sigma2 += ok ? (total / static_cast<float>(d.nof_pilots * d.nof_dmrs_symb * (l1 - l0))) : 0.0F;
             }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-        if (tid == 0u) {
-            const float total = red[0];
-            const bool  ok    = isfinite(total) && (total != 0.0F);
-            sigma2 += ok ? (total / static_cast<float>(d.nof_pilots * d.nof_dmrs_symb * (l1 - l0))) : 0.0F;
-        }
+        // Before the next pair publishes into red[] again.
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
@@ -788,9 +799,11 @@ struct mmse_epre_params {
 kernel void mmse_pilots_epre(device const float*        rx   [[buffer(0)]], // [symb][cdm][pilot], cf32
                              device float*              epre [[buffer(1)]], // ONE float
                              constant mmse_epre_params& p    [[buffer(2)]],
-                             uint                       tid  [[thread_position_in_threadgroup]])
+                             uint                       tid  [[thread_position_in_threadgroup]],
+                             uint                       lane [[thread_index_in_simdgroup]],
+                             uint                       sgi  [[simdgroup_index_in_threadgroup]])
 {
-    threadgroup float red[mmse_sigma2_tg_size];
+    threadgroup float red[mmse_sigma2_tg_size / 32u]; // one partial per SIMD group (see below)
 
     // Clamped into the buffers' maxima before anything is read: a caller's mistake must be able to
     // produce a wrong number and nothing else (see the safety note above the constants).
@@ -806,15 +819,19 @@ kernel void mmse_pilots_epre(device const float*        rx   [[buffer(0)]], // [
         acc += rx[2 * i] * rx[2 * i] + rx[2 * i + 1] * rx[2 * i + 1];
     }
 
-    red[tid] = acc;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint step = mmse_sigma2_tg_size / 2; step != 0u; step /= 2u) {
-        if (tid < step) {
-            red[tid] += red[tid + step];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    // SIMD-group reduction for the same reason as mmse_pilots_sigma2() above: ten threadgroup barriers
+    // become two, and the lanes combine in registers. The comment above already accepts a different
+    // summation order for this reduction, so this only shortens the barrier chain.
+    const float v = simd_sum(acc);
+    if (lane == 0u) {
+        red[sgi] = v;
     }
-    if (tid == 0u) {
-        epre[0] = red[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgi == 0u) {
+        float t = (lane < (mmse_sigma2_tg_size / 32u)) ? red[lane] : 0.0F;
+        t       = simd_sum(t);
+        if (lane == 0u) {
+            epre[0] = t;
+        }
     }
 }
