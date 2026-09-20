@@ -77,7 +77,13 @@ containment lookup 同一条规则）。**判据**：235 个归档 dump 0 差异
 （`ul_time_frequency` / `ul_channel_estimation` / `ul_equalization_demod`），它们的两端就是 `[ul_gpu_pipeline]` 的两端、
 三段之和按构造等于它；单测 `ul_pipeline_probe_test` 新增一节（开关必须**追加**总量而不是替换它，且三段必须是**子段**）。
 
-**待跑的两条腿（同一二进制、只差旋钮）**：
+**两条仪器腿已跑完并判读（§5.8.12）**：接收之后那 ~1 ms 的分解是 **DFT ~40% + 估计器权重链 ~40%**，
+宿主侧**任何等待都不是瓶颈**（前端栅栏开着跑的读数 `signals=26371 waits=31660`，延迟**没变** ⇒ 假设被证伪）；
+权重链里最大的一项是**相关矩阵前缀（K0-d）**：同一捕获上 `ch_wt` 620.7 µs 里它占 **~445 µs（72%）**
+（K4 66、TA 125、求逆 153 作对比）⇒ 下一步的靶子是**相关 kernel 的算法结构**（预计算 rt/rf 向量再逐元素相乘，
+每个元素少两个除法，**逐位相同**），而**降低每跳 GPU 工作也是让 P3 的 1.00 变得可负担的前提**。
+
+**（历史记录）当时准备的两条腿命令**：
 
 ```
 sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s13p4-phases OCUDU_UL_PHASE_SEGMENTS=1
