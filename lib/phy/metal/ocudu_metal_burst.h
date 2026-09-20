@@ -54,6 +54,27 @@ public:
   /// \return True when all of them completed successfully.
   static bool wait_committed();
 
+  /// \brief Continues in a command buffer a stage already opened, instead of creating one (S13-P2/P3).
+  ///
+  /// The estimator's extraction opens the hop's command buffer and holds it for the rest of the hop
+  /// (see mmse_engine's pilots_stage::hold_for_weights). With this call the stages that follow - the
+  /// weights, then the equalizer and the demapper - go on encoding into THAT buffer, so the whole hop is
+  /// ONE submission rather than one per stage group, and the lane's commit() covers all of them.
+  ///
+  /// Only the command buffer is taken over, and only when no burst is open yet:
+  ///
+  ///  * its encoder is opened by the first encoder() call, which is also where the stage barrier that
+  ///    orders the adopter after the buffer's previous dispatches is inserted;
+  ///  * the command-buffer-level FENCES that burst_ensure_open() would otherwise encode (the front-end
+  ///    wait, and the back-end stage wait) are NOT encoded for an adopted buffer: it already carries the
+  ///    fences of the stages inside it, and those stages are exactly what this burst would have waited
+  ///    for.
+  ///
+  /// \param[in] cb The command buffer to continue in; it must not be committed yet.
+  /// \return False when \p cb is nil or a burst is already open (the caller must then either encode into
+  ///         that one or commit it first).
+  static bool adopt(id<MTLCommandBuffer> cb);
+
   /// \brief Number of dispatches encoded in the open burst (diagnostics, and the mechanism check of the
   /// estimator's fused-lane unit test).
   ///

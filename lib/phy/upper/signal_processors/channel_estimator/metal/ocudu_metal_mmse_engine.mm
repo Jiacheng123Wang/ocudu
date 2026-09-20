@@ -3013,6 +3013,32 @@ static bool encode_run(mmse_engine_impl*     e,
     phase.committed();
     return ok;
   }
+  // \c merged order (S13-P3): this buffer does not go to the queue yet. The lane's own stages
+  // (equalization, then demapping) continue in it - shared_burst::adopt() - and the lane's single commit
+  // covers the whole hop, which is what takes the hop's submission count to one. Nothing is published as
+  // pending: there is no submission of the engine's to collect, exactly as in \c burst order, and the
+  // caller completes the hop through complete_fused_burst() (see the impl's pending_fused_burst).
+  if ((e->lane_order == metal::ce_lane_order::merged) && adopted_held) {
+    [st.enc endEncoding];
+    // Arm the back-end stage fence BEFORE handing the buffer over, exactly as the event order does
+    // before its commit: the signal is encoded in this command buffer and fires when it completes, so a
+    // burst created LATER on this route (the CPU-CE path completes the estimation early and the
+    // equalization then opens a burst of its own) still waits for this hop's work rather than for a
+    // stale generation. Inside the same buffer nothing waits - the lane's stages are ordered by being
+    // encoded after ours.
+    (void)ocudu::metal::shared_queue::backend_stage_signal(st.cb);
+    if (!ocudu::metal::shared_burst::adopt(st.cb)) {
+      // The lane already had a burst open (another engine on this thread got there first): fall back to
+      // committing this one, or the hop's dispatches would never be submitted.
+      ocudu::metal::shared_queue::arm_gpu_time(st.cb, ocudu::metal::shared_queue::queue_kind::back_end);
+      [st.cb commit];
+      mmse_stats_commit();
+      ocudu::metal::gpu_lane_probe::register_commit(st.cb, WEIGHTS_STAGE);
+    }
+    phase.committed();
+    return true;
+  }
+
   // \c adopted_held decides whether this submission IS the lane's first command buffer: when it is, the
   // host-gap reading belongs on its commit rather than on an extraction commit of its own (see
   // end_stage_async()).

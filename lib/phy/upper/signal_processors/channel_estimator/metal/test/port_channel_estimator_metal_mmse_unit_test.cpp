@@ -3226,9 +3226,47 @@ int main()
         return -1;
       }
 
-      std::printf("Test 13 (%s): all three lane orders reproduce the synchronous route bit for bit "
+      // --- Route 5 (merged order, S13-P3): what a hop the HOLD does not cover looks like. Every hop in
+      // this test feeds the estimator a HOST grid, so the extraction cannot hand its command buffer over
+      // (pilots_stage::hold_for_weights needs the device-built pilots and a valid device grid view): the
+      // weights then keep their own command buffer, and the completion must WAIT for it - the merged
+      // order's completion takes the burst route otherwise, and a hop that committed its own buffer would
+      // then be read without anyone having waited for it. The three assertions are the mechanism: the
+      // values match the synchronous route, no burst was dragged open, and nothing is left pending.
+      set_order("merged");
+      const port_channel_estimator_results& res_m = mmse->submit(in.grid, 0, in.pilots, in.cfg);
+      if (metal::mmse_engine::burst_is_open()) {
+        std::printf("Test 13 FAIL (%s): a merged-order hop whose extraction could NOT be held dragged the "
+                    "lane's burst open - it must keep its own command buffer\n",
+                    label.c_str());
+        return -1;
+      }
+      const bool     finish_ok3 = mmse->finish(in.pilots);
+      const published merged    = read_back(res_m, in.nof_subc, nof_layers);
+      if (!finish_ok3) {
+        std::printf("Test 13 FAIL (%s): the merged-order hop's completion reported a failed command buffer\n",
+                    label.c_str());
+        return -1;
+      }
+      if (mmse->engine_submission_pending()) {
+        std::printf("Test 13 FAIL (%s): the merged-order completion left the estimator's own submission "
+                    "uncollected - the host would read results nobody waited for\n",
+                    label.c_str());
+        return -1;
+      }
+      if (!(merged == ref)) {
+        std::printf("Test 13 FAIL (%s): the merged-order hop that kept its own command buffer does not "
+                    "match the synchronous route (noise variance %.9e vs %.9e)\n",
+                    label.c_str(),
+                    static_cast<double>(merged.noise_var),
+                    static_cast<double>(ref.noise_var));
+        return -1;
+      }
+
+      std::printf("Test 13 (%s): all four lane orders reproduce the synchronous route bit for bit "
                   "(%u dispatches in the burst for the burst order, host-read and in-place completions, "
-                  "and the default arms the lane fence)\n",
+                  "the default arms the lane fence, and a merged hop the hold does not cover keeps its "
+                  "own submission)\n",
                   label.c_str(),
                   burst_dispatches);
       n_checked += burst_dispatches;
@@ -3250,10 +3288,10 @@ int main()
                   "(every difference inside one resolution of the transform)\n",
                   ta_checks);
     }
-    std::printf("Test 13 PASS: the lane orders (event by default, host_wait and burst) reproduce the "
-                "synchronous result byte for byte over %u shapes (%u estimator dispatches carried by the "
-                "shared burst in burst order), for both completion orders, and a synchronous hop still "
-                "owns its command buffer\n",
+    std::printf("Test 13 PASS: the lane orders (event by default, host_wait, burst and merged) reproduce "
+                "the synchronous result byte for byte over %u shapes (%u estimator dispatches carried by "
+                "the shared burst in burst order), for both completion orders, a synchronous hop still owns "
+                "its command buffer, and a merged-order hop the hold does not cover keeps its own\n",
                 static_cast<unsigned>(shapes.size()),
                 n_checked);
   }

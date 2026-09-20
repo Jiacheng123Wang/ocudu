@@ -1363,6 +1363,9 @@ metal::ce_lane_order port_channel_estimator_metal_mmse_impl::ce_lane_order_from_
     if (value == "burst") {
       return metal::ce_lane_order::burst;
     }
+    if (value == "merged") {
+      return metal::ce_lane_order::merged;
+    }
     // A typo must not silently select a route: say so once, loudly, and run the default.
     static const bool warned = []() {
       ocudulog::fetch_basic_logger("PHY").error(
@@ -1405,7 +1408,11 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // Read per hop instead of cached in a static because the A/B has to be switchable inside one process:
   // the Metal estimator's unit test compares the orders on the same input.
   const metal::ce_lane_order order = ce_lane_order_from_env();
-  fused_burst_hop                  = args.deferred && (order == metal::ce_lane_order::burst);
+  // \c merged (S13-P3) rides the lane's burst too - the difference is WHICH command buffer that
+  // burst continues in (the extraction's, held open for the weights: see
+  // pilots_stage::hold_for_weights) - so the completion is the same one.
+  fused_burst_hop = args.deferred && ((order == metal::ce_lane_order::burst) ||
+                                      (order == metal::ce_lane_order::merged));
   if (engine != nullptr) {
     // A hop the caller left running takes the selected order. A hop that COMPLETES INSIDE ITS OWN SUBMIT
     // never joins the lane's burst, whatever the knob says, and the engine cannot make that call: its
@@ -4402,6 +4409,11 @@ unsigned port_channel_estimator_metal_mmse_impl::device_ta_probe_checks()
   return ta_probe_checks().load(std::memory_order_relaxed);
 }
 
+bool port_channel_estimator_metal_mmse_impl::engine_submission_pending() const
+{
+  return (engine != nullptr) && engine->has_pending();
+}
+
 std::optional<float> port_channel_estimator_metal_mmse_impl::get_device_ta_seconds() const
 {
   // Nothing is computed here: the value was read out of the device slot in
@@ -4432,7 +4444,15 @@ void port_channel_estimator_metal_mmse_impl::defer_unpack(unsigned              
   // ... and WHICH command buffer it went into, so that the completion takes the matching route: the
   // batch is in the shared burst for a fused hop, in the engine's own command buffer otherwise
   // (fused_burst_hop is constant for the whole hop, see apply_fd_td_estimation_stage()).
-  pending_fused_burst = fused_burst_hop;
+  //
+  // "Fused hop" is not enough to know where the dispatches went, and asking the ENGINE is what makes
+  // this answer follow the code instead of the knob: in \c merged order (S13-P3) the weights ride the
+  // lane's burst only when the extraction actually handed its command buffer over (see
+  // pilots_stage::hold_for_weights - a hop the host reads earlier, or one whose geometry refused the
+  // hold, keeps its own submission), and the engine is the one that knows: has_pending() is exactly
+  // "there is a submission of my own to collect". A hop that committed its own buffer must take the
+  // wait_pending() route below, or the host would read results nobody has waited for.
+  pending_fused_burst = fused_burst_hop && (engine == nullptr || !engine->has_pending());
 }
 
 void port_channel_estimator_metal_mmse_impl::pending_fill::fill(

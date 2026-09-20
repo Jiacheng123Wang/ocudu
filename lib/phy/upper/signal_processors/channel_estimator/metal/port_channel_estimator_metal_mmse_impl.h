@@ -39,6 +39,15 @@ public:
   /// How many hops the OCUDU_CE_TA_CHECK probe has compared.
   static unsigned device_ta_probe_checks();
 
+  /// \brief Whether the engine still holds a submission this hop has not collected (S13-P2/P3).
+  ///
+  /// The completion takes the route that MATCHES where the dispatches went (see pending_fused_burst):
+  /// the lane's shared burst, or the engine's own command buffer. A hop that took the wrong one would
+  /// either read results nobody waited for or wait for a submission that does not exist, and neither
+  /// shows up in a value comparison - so the unit test asks this directly after completing a hop in
+  /// merged order, where which route applies depends on whether the extraction could be held.
+  bool engine_submission_pending() const;
+
   /// Maximum block size: 3 PRB x 14 symbols = 504 positions.
   /// Maximum block pilots: 3 PRB x 6 RE (type 1) x 4 DM-RS symbols (PUSCH pos2 + 3 additional
   /// positions - the E2E cell uses {2,7,11}, i.e. 3 symbols, see PLAN.md 7.0.9).

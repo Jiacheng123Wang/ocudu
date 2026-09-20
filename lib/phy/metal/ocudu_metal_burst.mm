@@ -115,6 +115,18 @@ void burst_stats_wait() {}
 static bool burst_ensure_open(burst_state& s)
 {
   if (s.cb != nil) {
+    // An ADOPTED command buffer (shared_burst::adopt()): it exists, its fences are already encoded, and
+    // this is where its encoder opens - the point where encoder() also inserts the stage barrier.
+    if (s.enc == nil) {
+      s.enc = [s.cb computeCommandEncoder];
+      if (s.enc == nil) {
+        s.cb       = nil;
+        s.pipeline = nil;
+        return false;
+      }
+      s.pipeline = nil;
+      s.n        = 0;
+    }
     return true;
   }
   id<MTLCommandQueue> queue = shared_queue::backend_queue();
@@ -188,6 +200,22 @@ bool shared_burst::open()
   // A stage that accumulated dispatches (instead of encoding them) counts as an open burst even
   // before its first dispatch exists: the caller's wait() must still close and commit it.
   return (s.cb != nil) || (s.flush_hook != nullptr);
+}
+
+bool shared_burst::adopt(id<MTLCommandBuffer> cb)
+{
+  burst_state& s = state();
+  if ((cb == nil) || (s.cb != nil)) {
+    return false;
+  }
+  // The buffer only: the encoder opens on the first encoder() call, which is also where the stage
+  // barrier lands (see burst_ensure_open()), and its command-buffer-level fences stay as the stages
+  // inside it encoded them.
+  s.cb       = cb;
+  s.enc      = nil;
+  s.pipeline = nil;
+  s.n        = 0;
+  return true;
 }
 
 unsigned shared_burst::size()

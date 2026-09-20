@@ -44,10 +44,17 @@ namespace metal {
 ///                    1b): one submission for the whole lane, at the price of the estimator's GPU work
 ///                    no longer overlapping the host's encoding (the +125us debt Step 1' came to pay
 ///                    back) and of the estimator's own command buffer not existing at all.
+///  * \c merged     - S13-P2/P3: the EXTRACTION opens the hop's command buffer and holds it
+///                    (pilots_stage::hold_for_weights), the weights continue in it (a second encoder),
+///                    and the lane's own stages (equalization, demapping) continue in it as well
+///                    (shared_burst::adopt()). One submission carries the whole hop, committed and
+///                    waited by the lane. It pays the same non-overlap price as \c burst, and it needs
+///                    the caller's promise that nothing on the host reads the extraction's results
+///                    before the lane commits - which is what pilots_stage::hold_for_weights states.
 ///
-/// \note The three orders are byte-identical by construction; the unit test compares them on the same
+/// \note All four orders are byte-identical by construction; the unit test compares them on the same
 ///       input, and the air legs judge which one is faster.
-enum class ce_lane_order { event, host_wait, burst };
+enum class ce_lane_order { event, host_wait, burst, merged };
 
 /// Synchronous single-instance MMSE compute engine.
 class mmse_engine
