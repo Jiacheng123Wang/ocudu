@@ -50,9 +50,15 @@ constant uint MAX_N  = 54;  // maximum matrix order
 constant uint MAX_N2 = 108; // 2 * MAX_N
 constant uint BLK    = 8;   // block size of the elimination
 
-kernel void mmse_inv(device float*       a           [[buffer(0)]],  // [nof_systems][n][n] row-major
-                     constant uint&      n           [[buffer(1)]],
-                     constant uint&      nof_systems [[buffer(2)]],
+kernel void mmse_inv(device float*       a             [[buffer(0)]],  // [nof_systems][n][n] row-major
+                     constant uint&      n             [[buffer(1)]],
+                     constant uint&      nof_systems   [[buffer(2)]],
+                     // DIAGNOSTIC (OCUDU_CE_INV_BARRIERS): extra threadgroup barriers inserted at the
+                     // end of every pivot step, and nothing else. They are idempotent, so the published
+                     // values are unchanged; what they measure is the MARGINAL COST OF A BARRIER in
+                     // this kernel's own context, which is the one number the whole "is K1
+                     // barrier-bound" question turns on. See the design document's 5.8.16/5.8.23.
+                     constant uint&      barrier_probe [[buffer(3)]],
                      uint2               tid         [[thread_position_in_threadgroup]],
                      uint2               tgs         [[threads_per_threadgroup]],
                      uint2               tgid        [[threadgroup_position_in_grid]])
@@ -109,6 +115,9 @@ kernel void mmse_inv(device float*       a           [[buffer(0)]],  // [nof_sys
         }
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
+      for (uint bp = 0; bp != barrier_probe; ++bp) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+      }
     }
 
     // --- B) Save the multipliers of the rows outside the block ---------------------------------

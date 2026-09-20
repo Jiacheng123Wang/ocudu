@@ -475,6 +475,21 @@ struct mmse_engine_impl {
   /// (the same inputs, the same in-place output), so the dumps stay byte-identical and the slope of the
   /// lane's GPU window is that stage's cost - dispatch overhead included.
   static unsigned inv_repeat() { return stage_repeat("OCUDU_CE_INV_REPEAT"); }
+  /// \brief DIAGNOSTIC: extra idempotent threadgroup barriers per K1 pivot step (OCUDU_CE_INV_BARRIERS).
+  ///
+  /// The published values do not change (a barrier on its own orders nothing that is not already
+  /// ordered), so this can be measured on the shipped configuration. Its slope is the marginal cost of
+  /// a threadgroup barrier inside K1, which is what decides whether an algorithm with fewer barriers -
+  /// or a formulation that spreads the matrix over more threadgroups - can be worth anything. Design
+  /// document 5.8.23: the two "fewer barriers" counterexamples this line had recorded were both wrong
+  /// (K1b has 108 barriers, not 14; the scratch-row rewrite's slowdown is confounded by its own extra
+  /// traffic), so the question was never actually measured.
+  static unsigned inv_barriers()
+  {
+    const char*  env = std::getenv("OCUDU_CE_INV_BARRIERS");
+    const unsigned v = (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 0u;
+    return (v > 64u) ? 64u : v;
+  }
   static unsigned weights_repeat() { return stage_repeat("OCUDU_CE_W_REPEAT"); }
   /// Everything encode_reformat() encodes (K3, the rSRP reduction, the noise variance and the TA chain).
   static unsigned reformat_repeat() { return stage_repeat("OCUDU_CE_REFORMAT_REPEAT"); }
@@ -2353,6 +2368,10 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
   [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:0];
   [enc setBytes:&n length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
+  {
+    const unsigned barrier_probe = mmse_engine_impl::inv_barriers();
+    [enc setBytes:&barrier_probe length:sizeof(unsigned) atIndex:3];
+  }
   // One threadgroup per system, laid out as (column, row) so that the elimination of a pivot
   // column spreads over the whole block (see ocudu_mmse_inv.metal).
   {
@@ -3072,6 +3091,10 @@ static bool encode_run(mmse_engine_impl*     e,
   [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:0];
   [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
+  {
+    const unsigned barrier_probe = mmse_engine_impl::inv_barriers();
+    [enc setBytes:&barrier_probe length:sizeof(unsigned) atIndex:3];
+  }
   // Same (column, row) threadgroup layout AND the same geometry as invert(): the pivot-column
   // elimination spreads over the block instead of one thread walking a whole row, and the row
   // dimension is what S-5a measured to matter most (see mmse_inv_threadgroup()). Hardcoding (32,4)
