@@ -1630,6 +1630,74 @@ cmake --build build --target k1_check -j 10 && \
   `cfo` / `sigma2` / `power` 是长累加/归约（属于要当心的那一类）；
 * 重排（116.9，其中 TA 80.1）是第三块；§18.7 的 TA fence 实验现在有了它的价码。
 
+#### 5.8.18 ★★ 导频抽取逐 dispatch 拆开：**96% 的 171 µs 集中在四个"1 个线程 ~ 1 个线程组"的 dispatch 上**，而并行良好的那个只要 1.5 µs
+
+> 承 §5.8.17：抽取是空口 `ch_wt` 的第二大项（162.7 µs，25.9%），而它此前**没有名字**。
+> 本条给它的每个 dispatch 一个名字。协议仍是 §5.8.15 的 `--repeat 1`、一个进程一跳、N=7，
+> 但**读数方式改了**（见 ①，这一点比数字本身重要）。
+
+**① ★ 方法修正：离线 `ch_wt` 的"低模式"是【按分钟成段】出现的，所以臂与臂必须【配对】测**
+
+§5.8.15 已经记过这个量是双峰的。本会话发现**它成段出现**：`OCUDU_CE_POWER_REPEAT=2` 那一臂
+**7 次的中位数**是 **247.8 µs**（整个臂都落在低模式里），而几分钟后同一条命令单跑是 **647.0 µs**。
+⇒ **"先跑完 base 再跑各臂、然后比较中位数"是错的**：臂与 base 落在不同的时间块里就不可比。
+
+**改用配对**：base 与臂**逐次交替**跑，报**每一对差值的中位数**。本文下面所有数字都是配对读数，
+并且用两条已知量自证：`CPU_LS=1` 给 **−171.3**（§5.8.17 是 −162.7）、`INV_REPEAT=3` 给 **402.6/2 = 201.3**
+（§5.8.16 是 197.5）——**两套读数在 5% 内一致**。
+
+**② 仪表：抽取的六个逐 dispatch 重复探针**（`ocudu_metal_mmse_engine.mm`，全部**实测 0 字节**）
+
+`OCUDU_CE_{LSE,CFO,SMOOTH,SIGMA2,POWER,EPRE}_REPEAT`：同一个 dispatch 编 N 次，
+输入输出不变 ⇒ 斜率 = 该 dispatch 的 GPU 成本（含发射开销）。**`apply_cfo` 故意没有**：
+它是**原地**旋转（编两次就转两次），给它做重复探针要写到别处，那是换内核而不是重复。
+
+**③ 拆开的结果（空口几何 `syn027_25`，配对，N=7）**
+
+| dispatch | 并行度 | Δ（配对中位）| 占抽取 |
+|---|---|---|---|
+| `mmse_pilots_lse` | **全 grid**（450×3，64/组）| **+1.5 µs** | **0.9%** |
+| **`mmse_pilots_cfo`** | **1 个线程**（`if (tid != 0) return`）| **+72.8 µs** | **42%** |
+| `mmse_pilots_apply_cfo` | 全 grid | 无旋钮；由闭合差推 ≈ **0** | ≈0 |
+| `mmse_pilots_fd_smooth` | 3 组 × 128 | **+27.5 µs** | 16% |
+| `mmse_pilots_sigma2` | **1 组 × 256**（树归约）| **+46.6 µs** | 27% |
+| `mmse_pilots_power` | 1 组 × 256 | −5.2（≈0）| ≈0 |
+| `mmse_pilots_epre` | **1 组 × 256**（树归约）| **+25.2 µs** | 15% |
+| **六个之和** | | **173.6 µs** | |
+| **整段（`OCUDU_CE_CPU_LS=1`）** | | **−171.3 µs** | |
+
+**⇒ 闭合差 1.3%，分解成立。**
+
+**⇒ 头条：抽取的 171 µs 里，96% 落在四个"1 个线程 ~ 1 个线程组"的 dispatch 上；
+而唯一并行良好的那个（LSE，450×3 线程）只要 1.5 µs。**
+
+**④ 为什么它们不能简单地并行化 —— 代码自己写着**
+
+`mmse_pilots_cfo` 的第一句是 `if (tid != 0) { return; }`：**它是一个单线程内核**，
+72.8 µs 是**一个线程**跑完整个串行累加（里面有逐元素的 `atan2`）。而它的注释解释了为什么必须这样：
+
+> this kernel's answer is a phase obtained from a **72-term accumulation through atan2**, so it is the one
+> consumer of the epoch for which **the COMPILED SHAPE of that accumulation decides the published bits**.
+> Measured (batch 5g): computing the epochs here - identical values, proved - **recompiled the accumulation**,
+> and the resulting conditional-multiply contraction **moved the CFO by 1 ulp** (0x3BFB5F2E → 0x3BFB5F2F),
+> which rotated the LSE of two of the three DM-RS symbols and **flipped single bf16 values of the published grid**.
+
+`sigma2` / `epre` 是 `threadgroup float red[256]` 的树归约、`fd_smooth` 按 128 步进——三者的树尺寸都是
+**编译期常量**（注释写明"按 256/128 写的"）⇒ 换树 = 换舍入 ⇒ **大概率同样被钉住（未实测）**。
+
+**⑤ ⇒ 这条线的问题已经变了**
+
+被量到的三大项 —— **K1 197.5 + 抽取 171.3 + 重排 116.9 = 485.7 µs**，即空口 `ch_wt`（≈644 µs）的 **75%** ——
+**贵的都不是"算术量"，而是"低并行度的串行/延迟"，而那个串行次序本身就是发布位的一部分**：
+
+* K1：逐 pivot 的串行依赖，微调四条全部量掉（§5.8.16）；
+* 抽取：单线程的 72 项 atan2 累加 + 三个单线程组归约（本条）；
+* 而**并行良好的部分已经基本免费**（LSE 1.5 µs，占抽取 0.9%）。
+
+**⇒ 所以下一个决策不再是"优化哪个 kernel"，而是"要不要保留逐字节契约"**：
+在这个契约下，能并行的都已经并行完了，剩下的 75% 是**用发布位换来的**。
+（这与 §5.8.16 ⑦ 对 K1 的结论是同一件事，现在它覆盖了 `ch_wt` 的四分之三。）
+
 #### 5.8.3 每个阶段之后要停下来做什么（用户要求）
 
 1. **离线先全过**（逐字节 + 提交数 + 单测），再上腿；

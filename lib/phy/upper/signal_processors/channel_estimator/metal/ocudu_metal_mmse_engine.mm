@@ -478,6 +478,23 @@ struct mmse_engine_impl {
   static unsigned weights_repeat() { return stage_repeat("OCUDU_CE_W_REPEAT"); }
   /// Everything encode_reformat() encodes (K3, the rSRP reduction, the noise variance and the TA chain).
   static unsigned reformat_repeat() { return stage_repeat("OCUDU_CE_REFORMAT_REPEAT"); }
+  /// \brief Per-dispatch repeat probes of the PILOT EXTRACTION (K0-a).
+  ///
+  /// The extraction used to be a command buffer of its own and had a name in the lane's busy split;
+  /// S13-P2 merged it into the weights command buffer, so its 162.7us (design document 5.8.17, the
+  /// second largest item in ch_wt) has no name any more. These knobs give each of its dispatches one:
+  /// the same inputs and the same output encoded N times, so the dumps stay byte-identical (verified)
+  /// and the slope of the lane's GPU span is that dispatch's cost - dispatch overhead included.
+  ///
+  /// SIX of the seven are here. \c mmse_pilots_apply_cfo is deliberately NOT: it rotates the
+  /// least-squares pilots IN PLACE, so encoding it twice rotates them twice - a repeat probe for it
+  /// would have to write somewhere else, which is a different kernel rather than a repeat.
+  static unsigned lse_repeat() { return stage_repeat("OCUDU_CE_LSE_REPEAT"); }
+  static unsigned cfo_repeat() { return stage_repeat("OCUDU_CE_CFO_REPEAT"); }
+  static unsigned smooth_repeat() { return stage_repeat("OCUDU_CE_SMOOTH_REPEAT"); }
+  static unsigned sigma2_repeat() { return stage_repeat("OCUDU_CE_SIGMA2_REPEAT"); }
+  static unsigned power_repeat() { return stage_repeat("OCUDU_CE_POWER_REPEAT"); }
+  static unsigned epre_repeat() { return stage_repeat("OCUDU_CE_EPRE_REPEAT"); }
 
   /// \brief A mapping of host memory as the GPU sees it: the MTLBuffer object that owns the region and
   ///        the byte offset of the requested pointer inside it.
@@ -1955,8 +1972,10 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   // kernel's own bounds check on it is what keeps that from being a write, and the caller then keeps
   // the host extraction.
   [enc setBuffer:rx_buf.buf offset:rx_buf.offset atIndex:4];
-  [enc dispatchThreads:MTLSizeMake(s.nof_pilots, s.nof_dmrs_symb * s.nof_layers, 1)
-      threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+  for (unsigned rep = 0; rep != mmse_engine_impl::lse_repeat(); ++rep) {
+    [enc dispatchThreads:MTLSizeMake(s.nof_pilots, s.nof_dmrs_symb * s.nof_layers, 1)
+        threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+  }
 
   [enc setComputePipelineState:e->pilots_cfo_pipe];
   [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
@@ -1968,7 +1987,9 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   mmse_engine_impl::mapped cfo_prev_buf =
       (s.cfo_prev != nullptr) ? e->wrap(s.cfo_prev, sizeof(float)) : mmse_engine_impl::mapped{};
   [enc setBuffer:cfo_prev_buf.buf offset:cfo_prev_buf.offset atIndex:3];
-  [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  for (unsigned rep = 0; rep != mmse_engine_impl::cfo_repeat(); ++rep) {
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+  }
 
   [enc setComputePipelineState:e->pilots_apply_pipe];
   [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
@@ -2015,8 +2036,10 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     [enc setBuffer:filt_buf.buf offset:filt_buf.offset atIndex:2];
     [enc setBytes:&q length:sizeof(q) atIndex:3];
     // 128 = mmse_smooth_tg_size in ocudu_mmse_pilots.metal (the kernel strides its walk by it).
-    [enc dispatchThreadgroups:MTLSizeMake(s.nof_dmrs_symb * s.nof_layers, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    for (unsigned rep = 0; rep != mmse_engine_impl::smooth_repeat(); ++rep) {
+      [enc dispatchThreadgroups:MTLSizeMake(s.nof_dmrs_symb * s.nof_layers, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    }
     [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
     [enc setComputePipelineState:e->pilots_sigma2_pipe];
@@ -2027,7 +2050,9 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     [enc setBuffer:sigma2_buf.buf offset:sigma2_buf.offset atIndex:4];
     [enc setBytes:&q length:sizeof(q) atIndex:5];
     // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (its reduction tree is written for it).
-    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    for (unsigned rep = 0; rep != mmse_engine_impl::sigma2_repeat(); ++rep) {
+      [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    }
 
     // The pilots' mean power rides the same block: out[1] of the same buffer the sigma2 kernel wrote
     // out[0] of, so the host reads both scalars after the wait (see mmse_pilots_power).
@@ -2037,7 +2062,9 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
       [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
       [enc setBuffer:sigma2_buf.buf offset:sigma2_buf.offset atIndex:1];
       [enc setBytes:&q length:sizeof(q) atIndex:2];
-      [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+      for (unsigned rep = 0; rep != mmse_engine_impl::power_repeat(); ++rep) {
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+      }
     }
   }
 
@@ -2061,7 +2088,9 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     [enc setBytes:&e_params length:sizeof(e_params) atIndex:2];
     // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (the kernel's reduction tree is written
     // for it, and its walk strides by that constant).
-    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    for (unsigned rep = 0; rep != mmse_engine_impl::epre_repeat(); ++rep) {
+      [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    }
   }
 
   // The extraction is the producer the whole rest of the hop is ordered behind, and it is the one

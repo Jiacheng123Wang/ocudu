@@ -390,3 +390,49 @@ med() { sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'; }
 for i in $(seq 1 7); do $BIN $CAP --metal --out /tmp/a 2>&1 | grep -o 'ch_wt=[0-9.]*' | cut -d= -f2; done | med
 for i in $(seq 1 7); do OCUDU_CE_CPU_LS=1 $BIN $CAP --metal --out /tmp/b 2>&1 | grep -o 'ch_wt=[0-9.]*' | cut -d= -f2; done | med
 ```
+
+---
+
+## 11. 导频抽取逐 dispatch 拆开（§5.8.18 的原始数据）
+
+**仪表**：`OCUDU_CE_{LSE,CFO,SMOOTH,SIGMA2,POWER,EPRE}_REPEAT`（同一个 dispatch 编 N 次）。
+保值性：**六个全部 0 字节**（同捕获四 dump 逐字节比）。`apply_cfo` 无旋钮（**原地**旋转，编两次转两次）。
+
+**★ 方法修正（比数字重要）**：`OCUDU_CE_POWER_REPEAT=2` 那一臂 **7 次的中位数 = 247.8 µs**
+（整臂落在低模式），几分钟后单跑 = **647.0 µs**。⇒ **低模式按分钟成段出现**，
+"先 base 后各臂再比中位数"是错的。**必须 base/臂逐次交替配对，报每对差值的中位数。**
+
+**配对读数（`syn027_25`，N=7，单位 µs）**
+
+| 臂 | Δ 中位 | base 中位 | 臂 中位 |
+|---|---|---|---|
+| `LSE_REPEAT=2` | **+1.5** | 650.3 | 651.8 |
+| `CFO_REPEAT=2` | **+72.8** | 626.6 | 706.5 |
+| `SMOOTH_REPEAT=2` | **+27.5** | 639.3 | 663.3 |
+| `SIGMA2_REPEAT=2` | **+46.6** | 634.9 | 684.9 |
+| `POWER_REPEAT=2` | −5.2 | 656.3 | 651.1 |
+| `EPRE_REPEAT=2` | **+25.2** | 644.7 | 648.5 |
+| `CPU_LS=1` | **−171.3** | 644.2 | 474.6 |
+| `INV_REPEAT=3` | **402.6**（⇒ K1 = 201.3）| 653.9 | 1048.1 |
+
+六个之和 **173.6** vs 整段 **171.3** ⇒ **闭合差 1.3%**。
+
+**并行度（读代码）**：`lse` 全 grid（450×3，64/组）· **`cfo` 单线程**（`if (tid != 0) return`）·
+`apply_cfo` 全 grid · `smooth` 3 组 × 128 · `sigma2`/`power`/`epre` 各 **1 组 × 256**（`red[256]` 树）。
+
+**`mmse_pilots_cfo` 为什么必须是单线程**：它的注释（原文见设计文档 §5.8.18 ④）说明其答案是
+一次 **72 项 atan2 串行累加**，而**那个累加的编译形态本身决定发布位**——批 5g 实测过一次：
+epoch 的算法一挪，累加被重编译，CFO 移 1 ulp，翻转了发布网格的单精度值。
+
+**复跑：**
+
+```bash
+BIN=./build/lib/phy/upper/channel_processors/metal/ul_chain_replay
+CAP=doc_chinese/work_tmp/corpus/syn027_25
+med() { sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'; }
+for i in $(seq 1 7); do
+  b=$($BIN $CAP --metal --out /tmp/p 2>&1 | grep -o 'ch_wt=[0-9.]*' | cut -d= -f2)
+  a=$(OCUDU_CE_CFO_REPEAT=2 $BIN $CAP --metal --out /tmp/p 2>&1 | grep -o 'ch_wt=[0-9.]*' | cut -d= -f2)
+  echo "$a $b" | awk '{printf "%.1f\n", $1-$2}'
+done | med        # => ~72.8
+```
