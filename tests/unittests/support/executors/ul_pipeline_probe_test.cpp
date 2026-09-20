@@ -119,6 +119,10 @@ double mean_us(const std::string& report, const std::string& name)
 ///       of them asserted about what the other had recorded would hold when the binary is run whole and fail under
 ///       ctest. (That is not hypothetical: it is how this test failed its first ctest run.) The mode is published
 ///       process-wide and cannot be taken back either, so the non-fused half has to come first inside one case.
+
+///       process-wide and cannot be taken back either, so the non-fused half has to come first inside one case.
+
+///       process-wide and cannot be taken back either, so the non-fused half has to come first inside one case.
 TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
 {
   constexpr uint64_t cpu_slot = 100;

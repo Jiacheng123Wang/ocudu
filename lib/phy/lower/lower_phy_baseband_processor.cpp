@@ -458,27 +458,17 @@ void lower_phy_baseband_processor::ul_process()
     // sample, which is a different instant whenever the block carrying a slot's tail is not the block that
     // starts it - and that difference is why per-slot questions cannot be answered from those series.
     //
-    // "Completes a slot" is exact: the block's samples are contiguous and end at rx_metadata.ts + nof_samples,
-    // The per-slot timeline (OCUDU_UL_SLOT_TRACE) needs the ONE instant the other series take for granted: the
-    // arrival of the samples that COMPLETE a slot. Everything else in the probe starts at the slot's FIRST
-    // sample, which is a different instant whenever the block carrying a slot's tail is not the block that
-    // starts it - and that difference is why per-slot questions cannot be answered from those series.
-    //
-    // "Completes a slot" is asked as "does this block's sample range carry the slot's LAST sample", and NOT as
-    // "does the block end on a slot boundary". The stream is allowed to carry a fixed offset from the slot grid
-    // - and on air it does (measured 2026-09-21: seven samples, exactly the configured symbol-block size, so no
-    // block ever ends on a boundary and a boundary test captures NOTHING, silently, on the whole leg). The
-    // range test holds for any offset: it only needs the slot's span, which is arithmetic on the sample count.
+    // NOTE (2 of 2, 2026-09-21): this test is right only for a stream whose blocks END on the slot grid, which
+    // the whole-slot policy satisfies. The symbol-grained policy does NOT: measured on air, its timestamp
+    // advances 7680 samples per block while only 3840 arrive, so NO block carries a slot's last sample and this
+    // captures nothing. That inconsistency is in the receive path, not here - see design document 5.8.31 (8).
     if (nof_samples != 0) {
       const uint64_t slots_per_sfn_cycle = (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
       const baseband_gateway_timestamp block_end = rx_metadata.ts + nof_samples;
-      // The slot holding the block's LAST sample, and where that slot's last sample sits in absolute terms.
-      const uint64_t last_slot      = apply_timestamp_sfn0_ref(block_end - 1) / nof_samples_per_slot;
-      const uint64_t last_slot_last = last_slot * nof_samples_per_slot + (nof_samples_per_slot - 1);
-      if ((last_slot_last >= rx_metadata.ts) && (last_slot_last < block_end)) {
-        ul_pipeline_probe::get().record_slot_samples_complete(
-            last_slot % slots_per_sfn_cycle, nof_samples, recv_us * 1000, std::chrono::high_resolution_clock::now());
-      }
+      const uint64_t done_slot =
+          (apply_timestamp_sfn0_ref(block_end - 1) / nof_samples_per_slot) % slots_per_sfn_cycle;
+      ul_pipeline_probe::get().record_slot_samples_complete(
+          done_slot, nof_samples, recv_us * 1000, std::chrono::high_resolution_clock::now());
     }
     if (recv_us > 20000) {
       static auto& probe_log = ocudulog::fetch_basic_logger("ALL");
