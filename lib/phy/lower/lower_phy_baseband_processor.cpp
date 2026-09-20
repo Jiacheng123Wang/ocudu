@@ -463,12 +463,46 @@ void lower_phy_baseband_processor::ul_process()
     // advances 7680 samples per block while only 3840 arrive, so NO block carries a slot's last sample and this
     // captures nothing. That inconsistency is in the receive path, not here - see design document 5.8.31 (8).
     if (nof_samples != 0) {
+      // ── FRAME-INDEPENDENT slot completion ──────────────────────────────────────────────────────────────
+      // A block completes a slot iff the first slot boundary at or after its start lies INSIDE it. Written that
+      // way, the test needs no knowledge of where the frame begins: `a` is the block's own offset inside a slot,
+      // so the next boundary is `S - a` samples ahead (or 0 when the block starts on one). Three earlier forms
+      // failed on air because they derived a position from the SFN0-referenced slot index and then compared it
+      // against absolute timestamps - a frame mix whose difference is start_time_sfn0, which is not zero and not
+      // knowable from here. This form cannot have that bug: the only absolute quantity left is the block length.
       const uint64_t slots_per_sfn_cycle = (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
-      const baseband_gateway_timestamp block_end = rx_metadata.ts + nof_samples;
-      const uint64_t done_slot =
-          (apply_timestamp_sfn0_ref(block_end - 1) / nof_samples_per_slot) % slots_per_sfn_cycle;
-      ul_pipeline_probe::get().record_slot_samples_complete(
-          done_slot, nof_samples, recv_us * 1000, std::chrono::high_resolution_clock::now());
+      const uint64_t block_begin_ref     = apply_timestamp_sfn0_ref(rx_metadata.ts);
+      const uint64_t offset_in_slot      = block_begin_ref % nof_samples_per_slot;
+      // STRICTLY greater than the block's start: a boundary exactly at the block's first sample belongs to the
+      // PREVIOUS slot (the one that ends there), and crediting it to this block would report that slot twice.
+      const uint64_t to_next_boundary    = nof_samples_per_slot - offset_in_slot;
+      if (ul_pipeline_probe::slot_trace_enabled()) {
+        static std::atomic<unsigned> diag_blocks{0};
+        static std::atomic<int64_t>  diag_last_s{-1};
+        const unsigned               dn  = diag_blocks.fetch_add(1, std::memory_order_relaxed);
+        const int64_t                sec = recv_us / 1000000;
+        if ((dn < 8) || (sec != diag_last_s.exchange(sec, std::memory_order_relaxed))) {
+          std::fprintf(stderr,
+                       "[ul_slot_diag] blk=%u ts=%llu begin_ref=%llu sfn0=%llu off_in_slot=%llu to_boundary=%llu "
+                       "n=%u sps=%u completes=%s slot_ref=%llu\n",
+                       dn,
+                       static_cast<unsigned long long>(rx_metadata.ts),
+                       static_cast<unsigned long long>(block_begin_ref),
+                       static_cast<unsigned long long>(start_time_sfn0),
+                       static_cast<unsigned long long>(offset_in_slot),
+                       static_cast<unsigned long long>(to_next_boundary),
+                       nof_samples,
+                       nof_samples_per_slot,
+                       (to_next_boundary < nof_samples) ? "YES" : "no",
+                       static_cast<unsigned long long>((block_begin_ref + to_next_boundary) / nof_samples_per_slot));
+          std::fflush(stderr);
+        }
+      }
+      if (to_next_boundary < nof_samples) {
+        const uint64_t done_slot = ((block_begin_ref + to_next_boundary) / nof_samples_per_slot) % slots_per_sfn_cycle;
+        ul_pipeline_probe::get().record_slot_samples_complete(
+            done_slot, nof_samples, recv_us * 1000, std::chrono::high_resolution_clock::now());
+      }
     }
     if (recv_us > 20000) {
       static auto& probe_log = ocudulog::fetch_basic_logger("ALL");
