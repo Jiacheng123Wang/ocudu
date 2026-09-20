@@ -2161,9 +2161,34 @@ const bool = args.deferred ? order : host_wait;   // compute() 的跳不是 defe
 * **融合本身成功**：提交数 1.00、估计器 0 次自己的提交、lane gap 0、契约 8/8、穿越 0 —— 目标控制面达成；
 * **代价是同负载口径下中位 +471 µs（+24.7%）**，其中 ~131 µs 是 GPU 跨度、~340 µs 是排队，
   外加一个**机制上说得通但尚未单变量隔离**的重传代价；
-* **⇒ 这是一个真正的取舍，需要用户裁定**：目标控制面（少一次 CPU 提交/跳）值不值 ~470 µs 的延迟？
+* **✅ 用户裁定（2026-09-20）：保留 `merged`，不回退。** 原话：虽然付 ~471 µs 中位延迟，
+  但主要目标达到了——**在保证功能正确的前提下融合 commit，最终达到一次 commit**。
+  ⇒ `merged` 就是**现行默认**；`OCUDU_CE_LANE_ORDER=event` 作为一行回退保留。
+* **⇒ 于是"砍每跳 GPU 工作"（§5.8.25）从"可选优化"变成【唯一能继续压低这项代价的手段】**：
+  它同时打 +131 µs 的 GPU 跨度与 ~340 µs 的排队。
+* （原取舍文本，保留为决策记录）：目标控制面（少一次 CPU 提交/跳）值不值 ~470 µs 的延迟？
   * 若要保留：K1 那条"把每跳 GPU 工作砍下去"的路（§5.8.25）是**唯一**能把 +131 µs 的 GPU 跨度与排队一起压下来的手段；
   * 若要回退：`OCUDU_CE_LANE_ORDER=event` 一行，回到 P2（2.00 提交、中位 1907.5 µs）。
+
+**⑤ 计数器口径（`merged` 下怎么读那几个 commits）**
+
+用户问过"整跳一次提交，估计器怎么还提交了 2 次"。**不矛盾**：`commit` 是**谁调用**的动作，
+而每个引擎各记自己的账。一跳 `merged` 的顺序是：
+
+```
+① 提取打开 cb 并【hold 住，不提交】  ② 权重在同一条 cb 上开第二个 encoder  ③ 拉 back-end fence 并
+shared_burst::adopt(cb)   ④ 均衡/解映射继续编进【同一条 cb】   ⑤ lane 提交它——【一次】
+```
+
+* **`burst commits` = 15102 ≈ 一跳一次**、**`cbs/lane` 1.00（max 1）** ⇒ 控制面的"一次提交"在这里；
+* **`mmse_ce commits` = 2 / 15104 跳**：估计器的计数器只在**它自己** `[cb commit]` 的地方自增
+  （`end_stage()` / `end_stage_async()` / `close_held_buffer()` / `abandon_stage()` / 几个独立入口），
+  而这些在 `merged` 的延迟跳上**一个都没走到** ⇒ 它记 0（那 2 次来自非延迟路径，量级 0.013%）；
+* `equalizer`/`demapper commits` = 0 同理（它们的注释本来就说 deferred 的 dispatch 由 `burst` 记）；
+* **`dft commits` = 27668 ≈ 1/槽**：那是**前端队列**，**还没搬进车道**（设计差距 D1）。
+* **⚠ 仪表缺口**：`burst dispatches` 行里的 `channel_estimator=0` **不是"估计器没干活"**，
+  而是 `merged` 分支提前返回、没走到 `end_stage_async()` 里那次 `count_dispatch(channel_estimator)`。
+  要修就给 merged 分支补一次计数（纯计数，不影响行为）。
 
 #### 5.8.3 每个阶段之后要停下来做什么（用户要求）
 
