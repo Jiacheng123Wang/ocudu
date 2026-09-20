@@ -477,13 +477,36 @@ public:
     unsigned dmrs_symb[4] = {};
     /// Pilot positions within a PRB, ascending (at most 12).
     unsigned pilot_re[12] = {};
+
+    /// \brief Whether build_pilots_lse() may leave its command buffer OPEN for the weights stage, so
+    ///        that the hop has ONE estimator submission instead of two (batch S13-P2).
+    ///
+    /// False (the default, and what every caller that reads the extraction's results needs):
+    /// build_pilots_lse() ends, commits and WAITS its command buffer before returning, so the host may
+    /// read the least-squares pilots, the CFO, the noise-variance block and the EPRE sum right away.
+    ///
+    /// True: the caller PROMISES that nothing on the host reads any of those before it encodes the
+    /// weights stage (run()/run_async()/run_weights_only*()). The buffer is then held in the engine and
+    /// adopted by that call, which opens a SECOND encoder on it and commits once for both stages. Two
+    /// encoders of one command buffer ARE ordered - measured, not assumed: case F of
+    /// doc_chinese/phy_pipeline_gpu/wip/metal_alias_order.mm passes 200/200 with the same MTLBuffer
+    /// object and no barrier between the encoders, while an ALIASED pair fails 200/200 even across
+    /// encoders (case G). That is why this promise only holds together with wrap()'s
+    /// one-object-per-region rule.
+    ///
+    /// A held buffer that the weights never adopt is committed and waited by wait_pending(), so an
+    /// abandoned hop still publishes its extraction rather than losing it. Not honoured in \c burst
+    /// lane order, where the weights join the lane's shared command buffer instead (there is nothing
+    /// for the extraction's own buffer to be adopted by).
+    bool hold_for_weights = false;
   };
 
   /// \brief Runs the estimator's input stage (K0-a) on the device: pilot extraction from the
   /// device-resident grid, least-squares estimates, CFO estimation and compensation.
   ///
   /// The host consumes \c lse right afterwards (it is the estimator's input), so this completes
-  /// synchronously - the asynchronous form is a separate step (see the plan).
+  /// synchronously - unless the caller promises otherwise (pilots_stage::hold_for_weights), in which
+  /// case the buffer is held open for the weights stage and the two share one submission.
   /// \return True on success; on failure the caller keeps its own host pre-stage.
   bool build_pilots_lse(const pilots_stage& s);
 

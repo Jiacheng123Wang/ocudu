@@ -420,6 +420,25 @@ bool host_reads_device_scalars()
   return value;
 }
 
+/// \brief Whether the extraction's command buffer may be held open for the weights stage (S13-P2, P2).
+///
+/// Unset or non-zero (THE DEFAULT, and what this line ships): the two estimator stages of a deferred hop
+/// share ONE submission - the weights stage opens a second encoder on the extraction's command buffer
+/// (see pilots_stage::hold_for_weights for the promise that makes this safe, and mmse_engine_impl::
+/// held_cb for who closes it when the weights never come).
+///
+/// Zero: the pre-P2 behaviour - the extraction ends, commits and waits its own command buffer, so the hop
+/// has two estimator submissions. It is phase P2's rollback (one line, like P1's OCUDU_CE_EDGE_FUSE=0)
+/// and the arm its criterion is read against: commits per reception 2.00 (default) vs 3.00 (this).
+bool hold_extraction_for_weights()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_HOLD_EXTRACTION");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 /// \brief Slots of the estimator's sigma2 buffer (gpu_ls_sigma2), all written by the extraction's own
 /// command buffer: the noise variance, the pilots' power sum, their ratio and the mean the ratio is
 /// derived from (see mmse_pilots_power).
@@ -1578,6 +1597,26 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // kernel stores. Only asked for when the base class relied on the device for it - i.e. when it
       // skipped its own extraction - which is the same hop set this stage is building.
       st.epre              = device_builds_pilots ? (gpu_ls_epre + epre_slot_) : nullptr;
+      // ---- S13-P2 (phase P2): hand the extraction's command buffer to the weights stage -------------
+      //
+      // The condition is exactly "nothing on the host reads what this call produces before the weights
+      // stage is encoded", and it is a PROMISE, not an optimization: see pilots_stage::hold_for_weights.
+      // The three conjuncts:
+      //   * device_builds_pilots - the host pre-stage did not run, the received pilots were not extracted
+      //     on the host, and ls_geometry_of() (which this shares through stage_produces_ls_pilots()) has
+      //     already required a VALID device grid view, so stage_engine_group() stages y from the device
+      //     instead of reading ls_pilot() for it;
+      //   * !ls_check_enabled() - the tolerance probe reads the device LSE against the host's right after
+      //     the call, and the probe also forces the host pre-stage (see stage_produces_ls_pilots());
+      //   * !host_reads_device_scalars() - the CFO escape hatch reads the device's slot on the spot.
+      //
+      // Everything else the host consumes from the extraction (the noise variance, the pilots' power, the
+      // EPRE sum, the LSE in the fallback paths) is read at the hop's COMPLETION, by which time the
+      // weights have committed the buffer - and on a hop whose weights never come, wait_pending() commits
+      // it (see mmse_engine_impl::held_cb). What this buys: two estimator submissions per hop become one
+      // (measured on air in phase P2). OCUDU_CE_HOLD_EXTRACTION=0 is the phase's rollback and its A/B arm.
+      st.hold_for_weights  = hold_extraction_for_weights() && device_builds_pilots && !ls_check_enabled() &&
+                            !host_reads_device_scalars();
       st.fd_filter         = fd_filter.data();
       st.fd_filter_bytes   = sizeof(fd_filter);
       st.fd_filter_len     = fd_filter_len;

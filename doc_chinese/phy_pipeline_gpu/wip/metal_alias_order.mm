@@ -19,6 +19,15 @@
 //   B slice-write   - writer binds the PAGE-ALIGNED slice, reader the whole    (the engine's shape)
 //   C interior      - writer binds base + 11664 (NOT page-aligned), reader the whole
 //   D slice-read    - writer binds the whole, reader the page-aligned slice    (the other direction)
+//   E interior-read - writer binds the whole, reader binds base + 11664
+//
+// and, because S13-P2 asks the second question - "may the two stages be two ENCODERS of one command
+// buffer, or must they share one encoder?":
+//
+//   F two encoders  - same object, writer in the FIRST encoder, reader in the SECOND encoder of one
+//                     command buffer (the shape a "hold the extraction's buffer open for the weights"
+//                     would produce)
+//   G two enc., alias - same, but the writer binds the page-aligned slice (an aliased pair)
 //
 // Each case runs `repeat` times in one process. "PASS" = the reader read the value the writer wrote
 // (1.0) in every repetition; "FAIL" = it read the pre-write content (0.0).
@@ -147,6 +156,48 @@ int main()
     run_case("C interior (base+11664) write, whole read", buf_inner, buf_whole);
     run_case("D whole write, page-aligned slice read", buf_whole, buf_page);
     run_case("E whole write, interior (base+11664) read", buf_whole, buf_inner);
+
+    // ---- F/G: two ENCODERS of one command buffer, with no barrier between them -------------------
+    // The extraction / weights split (S13-P2) would put the two stages in one command buffer; whether
+    // they may be two encoders or must share one is a property of Metal, not of the engine.
+    const auto run_two_encoder_case = [&](const char* name, id<MTLBuffer> writer_view, id<MTLBuffer> reader_view) {
+      unsigned fails = 0;
+      float    last  = -1.0F;
+      for (unsigned it = 0; it != repeat; ++it) {
+        std::memset(raw, 0, whole_bytes);
+        float* out = (float*)buf_out.contents;
+        out[0]     = -1.0F;
+        @autoreleasepool {
+          id<MTLCommandBuffer> cb = [queue commandBuffer];
+          {
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:wpipe];
+            [enc setBuffer:writer_view offset:0 atIndex:0];
+            [enc setBytes:&idx length:sizeof(idx) atIndex:1];
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+            [enc endEncoding];
+          }
+          {
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:rpipe];
+            [enc setBuffer:reader_view offset:0 atIndex:0];
+            [enc setBuffer:buf_out offset:0 atIndex:1];
+            [enc setBytes:&idx length:sizeof(idx) atIndex:2];
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+            [enc endEncoding];
+          }
+          [cb commit];
+          [cb waitUntilCompleted];
+        }
+        last = out[0];
+        if (last != 1.0F) {
+          ++fails;
+        }
+      }
+      results.push_back({name, fails == 0, last});
+    };
+    run_two_encoder_case("F two encoders, one object", buf_whole, buf_whole);
+    run_two_encoder_case("G two encoders, aliased pair", buf_page, buf_whole);
 
     std::fprintf(stderr, "[alias] %u repetitions per case, barrier = memoryBarrierWithScope(Buffers)\n", repeat);
     for (const case_result& r : results) {

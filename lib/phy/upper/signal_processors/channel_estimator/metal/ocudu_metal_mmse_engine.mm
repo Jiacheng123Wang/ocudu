@@ -358,6 +358,20 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    pilots_scatter_pipe = nil;
   /// Submission of run_async() that has not been waited for yet (at most one, see the header).
   id<MTLCommandBuffer>           pending_cb    = nil;
+  /// \brief The extraction's command buffer, held open for the weights stage (S13-P2).
+  ///
+  /// build_pilots_lse() normally commits and waits its own command buffer, because the host consumes
+  /// its results right afterwards. When the caller promises it will not (pilots_stage::
+  /// hold_for_weights), the buffer is left open here instead: the weights stage opens a SECOND encoder
+  /// on it (encode_run() adopts it) and the one commit then carries both stages, which is what removes
+  /// the hop's middle submission. Two encoders of one command buffer are ordered - measured, see the
+  /// header - and only the ALIASED-pair trap of wrap() could break that, which is why a held buffer is
+  /// only ever adopted by a stage that binds the same objects the extraction did.
+  ///
+  /// A held buffer is never left behind: encode_run() adopts it, and every other entry point that could
+  /// be reached instead closes it (close_held_buffer(), called from wait_pending_impl() and from the
+  /// entries that need their own command buffer).
+  id<MTLCommandBuffer>           held_cb       = nil;
   // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
   id<MTLComputePipelineState>    weights_matrix_pipe = nil;
   id<MTLComputePipelineState>    apply_matrix_pipe  = nil;
@@ -616,7 +630,16 @@ struct stage_encoder {
   bool                         burst = false;
 };
 
+static bool close_held_buffer(mmse_engine_impl* e);
+
 /// \brief Opens a stage: the shared burst when \p fuse, the stage's own command buffer otherwise.
+///
+/// A HELD extraction buffer (pilots_stage::hold_for_weights) is closed first, unconditionally: it is only
+/// ever ADOPTED by the weights entry point (begin_weights_stage()), and every other entry that opens a
+/// command buffer here would otherwise leave the extraction's dispatches uncommitted while ITS OWN
+/// dispatches - which may depend on the extraction - are already on their way to the GPU (the standalone
+/// correlation build reads the extraction's noise-variance slot, so this is an ordering rule and not a
+/// tidiness one).
 ///
 /// WHICH ENTRIES MAY FUSE is a correctness question, not a performance one: the fused lane's commit
 /// belongs to the receiving chain, so anything the HOST reads before that commit must not be encoded
@@ -632,6 +655,7 @@ static stage_encoder begin_stage(mmse_engine_impl*          e,
                                  bool                        fuse,
                                  bool                        wait_for_extraction = false)
 {
+  (void)close_held_buffer(e);
   stage_encoder s;
   if (fuse) {
     s.enc   = ocudu::metal::shared_burst::encoder(first_pipeline);
@@ -760,7 +784,8 @@ static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded,
 /// shared_queue::backend_stage_signal()).
 static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded,
                             ocudu::metal::gpu_lane_probe::stage which =
-                                ocudu::metal::gpu_lane_probe::stage::channel_estimator)
+                                ocudu::metal::gpu_lane_probe::stage::channel_estimator,
+                            bool mark_extraction_commit = false)
 {
   if (s.burst) {
     if (!encoded) {
@@ -782,8 +807,106 @@ static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded,
   [s.cb commit];
   mmse_stats_commit();
   ocudu::metal::gpu_lane_probe::register_commit(s.cb, which);
+  if (mark_extraction_commit) {
+    // This submission carries the EXTRACTION too (it adopted the buffer build_pilots_lse() held open,
+    // see pilots_stage::hold_for_weights), so it is the lane's first command buffer and the host-gap
+    // reading belongs here - exactly where end_stage() puts it when the extraction commits its own.
+    ocudu::metal::lane_clock.mark_extraction_commit();
+  }
   e->pending_cb = s.cb;
   return true;
+}
+
+/// \brief Commits (and waits for) an extraction command buffer that was held open for the weights stage.
+///
+/// The counterpart of pilots_stage::hold_for_weights. While a buffer is held, the extraction's results
+/// exist for the host only after this call - so it commits AND waits, because whoever reaches it (a hop
+/// boundary, or an entry point that needs a command buffer of its own) is about to read them. The
+/// accounting mirrors end_stage()'s for the extraction: arm the GPU-time probe before the commit, count
+/// the submission, register it with the lane probe as the estimator's input stage, mark the lane's first
+/// commit. \return False only when the command buffer failed.
+static bool close_held_buffer(mmse_engine_impl* e)
+{
+  if (e->held_cb == nil) {
+    return true;
+  }
+  id<MTLCommandBuffer> cb = e->held_cb;
+  e->held_cb              = nil;
+  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end);
+  [cb commit];
+  mmse_stats_commit();
+  ocudu::metal::gpu_lane_probe::register_commit(cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
+  ocudu::metal::lane_clock.mark_extraction_commit();
+  [cb waitUntilCompleted];
+  mmse_stats_wait();
+  if (cb.status != MTLCommandBufferStatusCompleted || cb.error != nil) {
+    return false;
+  }
+  if (cb.GPUStartTime != 0 && cb.GPUEndTime != 0) {
+    e->last_gpu_us = (cb.GPUEndTime - cb.GPUStartTime) * 1e6;
+  }
+  return true;
+}
+
+/// \brief Gives up on a weights stage that failed part-way through its encode.
+///
+/// The buffer this stage holds may ALSO carry the extraction, which already succeeded - so an adopted
+/// buffer is committed and waited for here instead of being dropped uncommitted: everything the caller
+/// may still read (the least-squares pilots, the noise variance, the EPRE sum) must be the values THIS
+/// hop's extraction produced, not the previous hop's. The partial weights dispatches run as well; the
+/// caller is told the call failed and does not read their outputs (the same contract the historical
+/// "encoded part of its work, never committed it" failure path had).
+static void abandon_stage(mmse_engine_impl* e, stage_encoder& s, bool adopted_held)
+{
+  if (!s.burst) {
+    [s.enc endEncoding];
+  }
+  if (adopted_held) {
+    ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
+    [s.cb commit];
+    mmse_stats_commit();
+    ocudu::metal::gpu_lane_probe::register_commit(s.cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
+    ocudu::metal::lane_clock.mark_extraction_commit();
+    [s.cb waitUntilCompleted];
+    mmse_stats_wait();
+  }
+}
+
+/// \brief Opens the encoder the weights stage encodes into.
+///
+/// Two shapes, decided by whether the extraction left a command buffer held open for this stage
+/// (pilots_stage::hold_for_weights):
+///
+///  * ADOPTED - a SECOND encoder on the EXTRACTION's command buffer, so the hop's two estimator stages
+///    are one submission (S13-P2). The caller must pass \p adopted on to end_stage_async(), which marks
+///    the lane's first commit on it. The fences the extraction encoded when it opened that buffer (the
+///    front-end wait, and the burst's own if it had one) cover the whole buffer, and the boundary
+///    between the two encoders is itself the ordering the weights need after the extraction - Metal
+///    provides it for one command buffer (measured: case F of wip/metal_alias_order.mm, 200/200);
+///  * otherwise - the stage's own command buffer, or the lane's shared burst in \c burst order
+///    (begin_stage()). A held buffer that cannot be adopted (a nil encoder, or \c burst order, whose
+///    command buffer belongs to the lane) is CLOSED AND WAITED first: the extraction-before-weights
+///    order is not something this stage may skip.
+static stage_encoder begin_weights_stage(mmse_engine_impl*           e,
+                                         id<MTLComputePipelineState> first_pipe,
+                                         bool                        fuse,
+                                         bool*                       adopted)
+{
+  *adopted = false;
+  if ((e->held_cb != nil) && !fuse) {
+    id<MTLComputeCommandEncoder> held_enc = [e->held_cb computeCommandEncoder];
+    if (held_enc != nil) {
+      stage_encoder st;
+      st.cb      = e->held_cb;
+      st.enc     = held_enc;
+      st.burst   = false;
+      e->held_cb = nil; // this stage owns the commit now
+      *adopted   = true;
+      return st;
+    }
+  }
+  (void)close_held_buffer(e);
+  return begin_stage(e, first_pipe, fuse, /*wait_for_extraction=*/true);
 }
 
 /// \brief Closes an asynchronous stage and collects what its order says this caller must collect.
@@ -1885,6 +2008,19 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   // The extraction is the producer the whole rest of the hop is ordered behind, and it is the one
   // stage whose command buffer the host may later stop waiting for (Step 2): it signals the
   // extraction fence here so the weights command buffer can wait on it instead.
+  //
+  // S13-P2: when the caller promised that nothing on the host reads these results before the weights
+  // stage is encoded (pilots_stage::hold_for_weights), the buffer is handed over INSTEAD of committed:
+  // the weights open a second encoder on it and the hop then has one estimator submission rather than
+  // two. Everything end_stage() does for a commit moves to whoever closes it - encode_run() (the usual
+  // case) or close_held_buffer() (a hop whose weights never came) - so a held buffer is never lost and
+  // never counted twice. Not honoured in \c burst order: there the weights join the lane's shared
+  // command buffer, which cannot adopt this one.
+  if (s.hold_for_weights && (e->lane_order != metal::ce_lane_order::burst)) {
+    [st.enc endEncoding];
+    e->held_cb = st.cb;
+    return true;
+  }
   return end_stage(e, st, true, ocudu::metal::gpu_lane_probe::stage::channel_estimator,
                    /*signal_extraction_fence=*/true);
 }
@@ -2181,7 +2317,9 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
 ///
 /// A free function because the encode helpers below are file statics (they serve two public entry points
 /// each): the wait belongs to the engine, not to the caller that happens to hold the public object.
-static bool wait_pending_impl(mmse_engine_impl* e);
+/// \param[in] close_held See the definition: false only for the weights stage's own entry guard,
+///            which is about to adopt the buffer a held extraction left open.
+static bool wait_pending_impl(mmse_engine_impl* e, bool close_held = true);
 
 /// \brief Encodes the weights-and-apply hop (K0-d prefix -> K1 -> K2 -> K3/K4) for run() and run_async().
 /// \param[in] wait_for_completion True for the synchronous run(), false for run_async(). It decides
@@ -2284,6 +2422,11 @@ bool mmse_engine::run_epoch_probe(unsigned numerology, unsigned cp_extended, flo
   } p{static_cast<uint32_t>(numerology), static_cast<uint32_t>(cp_extended != 0 ? 1u : 0u)};
   static_assert(sizeof(epoch_params_t) == 8, "must match mmse_epoch_params in ocudu_mmse_reformat.metal");
 
+  // This entry builds its own command buffer without begin_stage(), so it has to close a held
+  // extraction buffer itself (see begin_stage(): a held buffer is only ever adopted by the weights
+  // entry point, and anything else must commit it FIRST or the extraction's dispatches would land
+  // after work that depends on them).
+  (void)close_held_buffer(e);
   id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   if (enc == nil) {
@@ -2371,6 +2514,11 @@ bool mmse_engine::run_ta_place(const void*         h,
     return false;
   }
 
+  // This entry builds its own command buffer without begin_stage(), so it has to close a held
+  // extraction buffer itself (see begin_stage(): a held buffer is only ever adopted by the weights
+  // entry point, and anything else must commit it FIRST or the extraction's dispatches would land
+  // after work that depends on them).
+  (void)close_held_buffer(e);
   id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   if (enc == nil) {
@@ -2463,6 +2611,11 @@ bool mmse_engine::run_ta_chain(const void*         h,
     return false;
   }
 
+  // This entry builds its own command buffer without begin_stage(), so it has to close a held
+  // extraction buffer itself (see begin_stage(): a held buffer is only ever adopted by the weights
+  // entry point, and anything else must commit it FIRST or the extraction's dispatches would land
+  // after work that depends on them).
+  (void)close_held_buffer(e);
   id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   if (enc == nil) {
@@ -2549,6 +2702,11 @@ if (getenv("OCUDU_CE_TA_CHECK") != nullptr) {
   // of different queues have no ordering between them, so a profile encoded into this queue could run
   // before the transform that produces its input. Joining the burst is therefore part of the
   // integration, not of this entry point: it needs the transform and the reduction on ONE queue.
+  // This entry builds its own command buffer without begin_stage(), so it has to close a held
+  // extraction buffer itself (see begin_stage(): a held buffer is only ever adopted by the weights
+  // entry point, and anything else must commit it FIRST or the extraction's dispatches would land
+  // after work that depends on them).
+  (void)close_held_buffer(e);
   id<MTLCommandBuffer>         cb  = [e->queue commandBuffer];
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   if (enc == nil) {
@@ -2689,10 +2847,12 @@ static bool encode_run(mmse_engine_impl*     e,
                        bool                  wait_for_completion)
 {
   // At most one submission in flight: the previous one must have completed before the staging
-  // buffers it was reading can be overwritten.
+  // buffers it was reading can be overwritten. NOT the extraction this stage may be about to adopt
+  // (pilots_stage::hold_for_weights) - that one is this hop's own work, and closing it here would
+  // commit it separately, which is exactly the submission this stage exists to merge away.
   {
     mmse_guard_timer guard(e->pending_cb != nil);
-    (void)wait_pending_impl(e);
+    (void)wait_pending_impl(e, /*close_held=*/false);
   }
 
   mmse_phase_timer phase(wait_for_completion ? "run" : "run_async");
@@ -2738,9 +2898,10 @@ static bool encode_run(mmse_engine_impl*     e,
   if ((nof_scatter != 0) && (e->pilots_scatter_pipe != nil)) {
     first_pipe = e->pilots_scatter_pipe;
   }
-  stage_encoder st = begin_stage(e, first_pipe,
-                                 /*fuse=*/(e->lane_order == ce_lane_order::burst) && !wait_for_completion,
-                                 /*wait_for_extraction=*/true);
+  stage_encoder st;
+  bool          adopted_held = false;
+  const bool    fuse         = (e->lane_order == ce_lane_order::burst) && !wait_for_completion;
+  st                         = begin_weights_stage(e, first_pipe, fuse, &adopted_held);
   id<MTLComputeCommandEncoder> enc = st.enc;
   phase.created();
   if (enc == nil) {
@@ -2754,9 +2915,7 @@ static bool encode_run(mmse_engine_impl*     e,
   // buffer whose weights would read the previous hop's pilots.
   for (unsigned i = 0; i != nof_scatter; ++i) {
     if (!encode_scatter(e, st, scatter[i], y_buf, y, y_bytes_used)) {
-      if (!st.burst) {
-        [st.enc endEncoding];
-      }
+      abandon_stage(e, st, adopted_held);
       return false;
     }
   }
@@ -2775,9 +2934,7 @@ static bool encode_run(mmse_engine_impl*     e,
     // builds its standard group here while the edge group's slots belong to another geometry.
     const unsigned corr_systems = (corr->nof_systems != 0) ? corr->nof_systems : nof_systems;
     if (!encode_corr(e, st, *corr, corr_systems)) {
-      if (!st.burst) {
-        [st.enc endEncoding];
-      }
+      abandon_stage(e, st, adopted_held);
       mmse_stats_corr_build_failure();
       return false;
     }
@@ -2803,9 +2960,7 @@ static bool encode_run(mmse_engine_impl*     e,
   if (corr_edge != nullptr) {
     const unsigned corr_edge_systems = (corr_edge->nof_systems != 0) ? corr_edge->nof_systems : nof_systems;
     if (!encode_corr(e, st, *corr_edge, corr_edge_systems)) {
-      if (!st.burst) {
-        [st.enc endEncoding];
-      }
+      abandon_stage(e, st, adopted_held);
       mmse_stats_corr_build_failure();
       return false;
     }
@@ -2858,7 +3013,10 @@ static bool encode_run(mmse_engine_impl*     e,
     phase.committed();
     return ok;
   }
-  const bool ok = end_stage_async(e, st, true, WEIGHTS_STAGE);
+  // \c adopted_held decides whether this submission IS the lane's first command buffer: when it is, the
+  // host-gap reading belongs on its commit rather than on an extraction commit of its own (see
+  // end_stage_async()).
+  const bool ok = end_stage_async(e, st, true, WEIGHTS_STAGE, /*mark_extraction_commit=*/adopted_held);
   phase.committed();
   return collect_async_stage(e, st, ok);
 }
@@ -2914,9 +3072,23 @@ ce_lane_order mmse_engine::lane_order() const
   return (e != nullptr) ? e->lane_order : ce_lane_order::host_wait;
 }
 
-static bool wait_pending_impl(mmse_engine_impl* e)
+/// \param[in] close_held Whether a held extraction buffer (pilots_stage::hold_for_weights) is closed
+///            here. True for every caller that is NOT the weights entry point about to adopt it: a held
+///            buffer that nothing adopts still has to reach the GPU, so it is committed, waited for and
+///            counted - which is how a hop whose weights never came still publishes its extraction, and
+///            why the extraction's results are readable by whoever called this. False only for the
+///            weights stage's own entry guard (encode_run(): it is about to adopt that very buffer), and
+///            the guard's job there is the PREVIOUS hop's submission (\c pending_cb), which is what the
+///            staging buffers it is about to overwrite must be free of.
+static bool wait_pending_impl(mmse_engine_impl* e, bool close_held)
 {
-  if ((e == nullptr) || (e->pending_cb == nil)) {
+  if (e == nullptr) {
+    return true;
+  }
+  if (close_held && !close_held_buffer(e)) {
+    return false;
+  }
+  if (e->pending_cb == nil) {
     // Nothing of this engine's is outstanding. Two routes reach this: \c burst order, where the dispatches
     // live in the caller's command buffer and whose commit and wait belong to the lane, and the hops that
     // were already collected. The stages call this at their boundaries and must be told yes without a wait
@@ -3282,6 +3454,11 @@ bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const 
   // One command buffer, two ordered dispatches (W = R_hp . A^-1, then h = W . Y).
   // One SIMD-group (32 threads) computes one 8x8 output tile in both kernels; the tile
   // grids are ceil(nout/8) x ceil(L/8), so any dims are covered by the zero padding.
+  // This entry builds its own command buffer without begin_stage(), so it has to close a held
+  // extraction buffer itself (see begin_stage(): a held buffer is only ever adopted by the weights
+  // entry point, and anything else must commit it FIRST or the extraction's dispatches would land
+  // after work that depends on them).
+  (void)close_held_buffer(e);
   id<MTLCommandBuffer> cb = [e->queue commandBuffer];
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
