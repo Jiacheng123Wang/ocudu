@@ -1279,6 +1279,18 @@ N 次，输入与输出都不变 ⇒ 235 dump 逐位不变，**已实测**：n=4
 * `ch_wt` 在**空中**非常稳：383.1 / 384.9 / 379.0 / 394.5 µs（四条腿，±2%）✓；
 * "宿主不是瓶颈"（`defer_wait` 665–887 µs vs 宿主 ~16 µs 的活；前端栅栏开着也无效）✓。
 
+**逐 dispatch 计数器仪器的尝试（同日，未成）**：按用户选择写了 `OCUDU_METAL_DISPATCH_TIME=1` 的
+`MTLCounterSampleBuffer` 计时（`MTLCounters.h`，`sampleCountersInBuffer:atSampleIndex:withBarrier:YES`，
+在 `encode_run` 的 scatter / corr_std / corr_edge / inv / weights / apply / reformat 处各打一个采样点，
+命令缓冲完成后 `resolveCounterRange:` 打印每段 GPU 时间）。**实测到的**：设备支持
+（`supported=1`）、采样缓冲**建得起来**（`begin: enabled=1 supported=1 buf=0x…`）、
+`[disp_time]` 没有任何输出 ⇒ **采样点在编，但解析/打印的钩子在这条（延迟）路径上没有被走到**
+（钩子挂在 `end_stage` / `collect_async_stage` / `wait_pending_impl` 三处；日志显示只有构造期的
+`run` 同步路径命中，**跳本身那次 `run_async` 的收集点不在这三处**）。
+⇒ **未验证的代码已整块回退**（只保留已提交的保值重复探针）。下一次要接着做的话，第一步是
+**把"这条延迟提交到底在哪儿被等"查清**（`pending_fused_burst`/`has_pending()`/`wait_pending()` 的实际走向，
+本会话已经在这上面栽过一次），然后把钩子挂到真正的那一处。
+
 **⇒ 教训（写进坑表）**：**判据要先自证可重复**。在拿一个量做 A/B 之前，先用**同一配置连跑 N 次**看散布；
 散布大于要判的效果，这个量就还不能用（与坑 19"门要能看见失败"、坑 31"红要有基线"同族）。
 **空中腿的 `busy split` 是稳的，离线回放的不是** —— 所以 GPU 优化的 A/B **要么上空口腿，要么换仪器**
