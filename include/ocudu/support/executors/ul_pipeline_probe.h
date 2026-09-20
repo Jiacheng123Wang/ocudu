@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -102,6 +105,15 @@ struct ul_phase_durations {
 /// \note [ul_gpu_pipeline] is a wall-clock window, not device execution time: it covers the host submission work and
 ///       any queueing between the lane's stages. Read it together with the gpu_lane_probe report, whose residency /
 ///       busy / gap split says how much of it the device was actually executing.
+///
+/// \note [ul_slot_trace] (see record_slot_samples_complete() and the OCUDU_UL_SLOT_TRACE switch) is a PER-SLOT
+///       TIMELINE, not a distribution, and it exists because every series above is one. A distribution cannot
+///       answer "when did THIS slot's samples all arrive, and when did the work that reads them start": their
+///       medians come from different populations, and their slot attribution differs when a receive block
+///       straddles a slot boundary (record_start() keeps the FIRST block's sample timestamp, so a block carrying
+///       the tail of slot N and the head of slot N+1 is charged to slot N+1). The trace records the one instant
+///       the other series take for granted - the arrival of the samples that COMPLETE a slot - and prints the
+///       deltas from it to those same landmarks.
 class ul_pipeline_probe
 {
 public:
@@ -110,6 +122,28 @@ public:
     static ul_pipeline_probe instance;
     return instance;
   }
+
+  /// Which landmark of a traced slot a timestamp belongs to (see fill_slot_trace()).
+  enum class slot_trace_what { t2f, ce, ldpc_start, crc_ok };
+
+  /// Bound on the traced slots: the trace is for reading single slots by eye, so a small map is the right size
+  /// and an unbounded one on the hot path would not be.
+  static constexpr size_t max_slot_trace = 64;
+
+  /// One traced slot: every landmark as a DELTA from the arrival of the samples that completed it (µs).
+  /// A field left at NaN means "this landmark was not reached for this slot" (a CRC failure has no crc_ok, a
+  /// slot with no PUSCH has no ce/ldpc_start) - which is why they default to NaN rather than to 0.
+  struct slot_trace_entry {
+    uint64_t        slot   = 0;
+    /// Which landmark the value being written belongs to; read by fill_slot_trace() and not reported.
+    slot_trace_what what   = slot_trace_what::t2f;
+    double          t2f_us        = std::numeric_limits<double>::quiet_NaN();
+    double          ce_us         = std::numeric_limits<double>::quiet_NaN();
+    double          ldpc_start_us = std::numeric_limits<double>::quiet_NaN();
+    double          crc_ok_us     = std::numeric_limits<double>::quiet_NaN();
+    double          rx_wait_us    = std::numeric_limits<double>::quiet_NaN();
+    double          pipeline_us   = std::numeric_limits<double>::quiet_NaN();
+  };
 
   /// Records the start of the UL processing of a slot (call from the lower PHY baseband processor).
   /// \param[in] slot Slot number (SFN-referenced slot count, matching the FAPI slot indications).
@@ -142,6 +176,7 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex);
     const auto now = std::chrono::high_resolution_clock::now();
+    trace_slot(slot, slot_trace_what::ldpc_start, now);
     pending_ldpc_starts[slot] = {now, next_start_seq++};
     // Bound the registry by insertion order (see record_start): unmatched entries belong to TBs that ended
     // without a CRC-OK completion (or with one in a shifted slot).
@@ -201,8 +236,10 @@ public:
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
-    pending_t2f_ends[slot] = {std::chrono::high_resolution_clock::now(), next_start_seq++};
+    const auto now         = std::chrono::high_resolution_clock::now();
+    pending_t2f_ends[slot] = {now, next_start_seq++};
     evict_oldest(pending_t2f_ends);
+    trace_slot(slot, slot_trace_what::t2f, now);
   }
 
   /// Records the completion of the PUSCH channel estimation: the channel estimates of all the data symbols of
@@ -214,8 +251,10 @@ public:
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
-    pending_ce_ends[slot] = {std::chrono::high_resolution_clock::now(), next_start_seq++};
+    const auto now        = std::chrono::high_resolution_clock::now();
+    pending_ce_ends[slot] = {now, next_start_seq++};
     evict_oldest(pending_ce_ends);
+    trace_slot(slot, slot_trace_what::ce, now);
   }
 
   /// Returns the phase-segment durations assembled for a PUSCH (see record_ldpc_start()), if any.
@@ -245,6 +284,7 @@ public:
     std::chrono::time_point<std::chrono::high_resolution_clock> now = std::chrono::high_resolution_clock::now();
 
     std::lock_guard<std::mutex> lock(mutex);
+    trace_slot(slot, slot_trace_what::crc_ok, now);
     // CRC-OK completion timestamp for the FAPI->MAC tail-latency series (see record_fapi_mac_end): recorded
     // unconditionally, this method is only ever called for CRC-OK TBs.
     pending_crc_ok_ends[slot] = {now, next_start_seq++};
@@ -253,6 +293,12 @@ public:
     if (it != pending_starts.end()) {
       double latency_us =
           static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(now - it->second.tp).count());
+      // Carry the span into the slot's timeline while the start is still in hand (the trace's whole point is to
+      // print it next to the landmark deltas, for the SAME slot - see print_slot_trace()).
+      auto trace_it = slot_trace.find(slot);
+      if (trace_it != slot_trace.end()) {
+        trace_it->second.pipeline_us = latency_us;
+      }
       pending_starts.erase(it);
       latencies_us.push_back(latency_us);
     }
@@ -327,6 +373,188 @@ public:
     }
     std::lock_guard<std::mutex> lock(mutex);
     rx_wait_us.push_back(static_cast<double>(wait_ns) / 1e3);
+  }
+
+  /// \brief Attaches a block's receive wait to the slot that block COMPLETED, for the traced timeline.
+  ///
+  /// Separate from record_rx_wait() because the two key the same number differently: the series is per block and
+  /// keyless, while the trace needs "the wait that ended with this slot's last sample". A block that does not
+  /// complete a slot is not attached to anything (there is no slot whose samples it finished).
+  void record_rx_wait_for_slot(uint64_t slot, int64_t wait_ns)
+  {
+    if (wait_ns < 0) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    // The wait belongs to this slot even when no landmark has been recorded yet: the caller reports it right
+    // after the block arrives, which is BEFORE the slot's first landmark (the FFT can only finish afterwards).
+    // Remember it in the same map the trace lives in rather than looking one up, so the order of the two calls
+    // cannot lose the number - it is attached to the entry when that entry is created (see trace_slot()).
+    if (!slot_trace_enabled()) {
+      return;
+    }
+    slot_trace_pre_wait[slot] = static_cast<double>(wait_ns) / 1e3;
+    auto it                  = slot_trace.find(slot);
+    if (it != slot_trace.end()) {
+      it->second.rx_wait_us = static_cast<double>(wait_ns) / 1e3;
+    }
+  }
+
+  /// \brief Records that the samples COMPLETING \p slot have just arrived (the block whose last sample is the
+  /// slot's last), which is the earliest instant anything downstream of the radio could possibly run on it.
+  ///
+  /// \param[in] slot Slot whose samples are now all in.
+  /// \param[in] now  The host timestamp of that arrival.
+  ///
+  /// Only recorded while the [ul_slot_trace] switch is on (OCUDU_UL_SLOT_TRACE=N), because it is the ONE instant
+  /// none of the other series needs: they all start earlier, at the first sample of the slot. With it, the trace
+  /// separates "the front end's work on the samples" from "waiting for the samples", which is exactly the pair
+  /// the operator of §5.8.30 could not read out of the distributions.
+  void record_slot_samples_complete(uint64_t slot, std::chrono::high_resolution_clock::time_point now)
+  {
+    if (!slot_trace_enabled()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (slot_samples_done.size() < max_slot_trace) {
+      slot_samples_done[slot] = now;
+    }
+  }
+
+  /// \brief Whether the per-slot timeline is on (OCUDU_UL_SLOT_TRACE=N, N bounded), and its bound.
+  ///
+  /// Off by default: the trace keeps a per-slot timestamp map, which the hot path must not pay for in a normal
+  /// run. This is the one switch here whose absence is not silent - report() prints a line saying whether the
+  /// trace was on and how many slots it captured - because a leg is expensive and "the trace was off" must not
+  /// look like "the trace found nothing".
+  static unsigned slot_trace_limit()
+  {
+    const char* env = std::getenv("OCUDU_UL_SLOT_TRACE");
+    if (env == nullptr) {
+      return 0;
+    }
+    const unsigned v = static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+    return (v > max_slot_trace) ? max_slot_trace : v;
+  }
+  static bool slot_trace_enabled() { return slot_trace_limit() != 0; }
+
+  /// \brief Adds one landmark of a traced slot to its entry (see fill_slot_trace() for the deltas).
+  ///
+  /// Does nothing unless the slot is traced, i.e. unless its samples-complete instant was recorded - so the hot
+  /// path pays one map lookup, and only while OCUDU_UL_SLOT_TRACE is on.
+  void trace_slot(uint64_t slot, slot_trace_what what, std::chrono::high_resolution_clock::time_point at)
+  {
+    auto done_it = slot_samples_done.find(slot);
+    if (done_it == slot_samples_done.end()) {
+      return;
+    }
+    slot_trace_entry& e = slot_trace[slot];
+    e.slot              = slot;
+    e.what              = what;
+    fill_slot_trace(e, slot_samples_done, slot, at);
+    // The receive wait was reported before this slot had any landmark (see record_rx_wait_for_slot): attach it
+    // now, so the printed timeline carries the wait that ended with this slot's last sample.
+    auto wait_it = slot_trace_pre_wait.find(slot);
+    if (wait_it != slot_trace_pre_wait.end()) {
+      e.rx_wait_us = wait_it->second;
+    }
+  }
+
+  /// \brief The instant the samples COMPLETING \p slot arrived, if this slot is being traced.
+  ///
+  /// Used by the phase assembly to express every landmark as a delta from the one instant the other series take
+  /// for granted (they start at the slot's FIRST sample, which is a different thing whenever the block that
+  /// carries the tail of a slot is not the block that starts it).
+  static std::chrono::high_resolution_clock::time_point
+  find_slot_samples_done(const std::map<uint64_t, std::chrono::high_resolution_clock::time_point>& done, uint64_t slot)
+  {
+    auto it = done.find(slot);
+    return (it == done.end()) ? std::chrono::high_resolution_clock::time_point{} : it->second;
+  }
+
+  static void fill_slot_trace(slot_trace_entry&                                     e,
+                              const std::map<uint64_t, std::chrono::high_resolution_clock::time_point>& done,
+                              uint64_t                                              slot,
+                              std::chrono::high_resolution_clock::time_point        at)
+  {
+    const auto base = find_slot_samples_done(done, slot);
+    if (base == std::chrono::high_resolution_clock::time_point{}) {
+      return; // this slot is not traced
+    }
+    auto us = [&base](const std::chrono::high_resolution_clock::time_point& tp) {
+      return std::chrono::duration_cast<std::chrono::nanoseconds>(tp - base).count() / 1e3;
+    };
+    switch (e.what) {
+      case slot_trace_what::t2f:
+        e.t2f_us = us(at);
+        break;
+      case slot_trace_what::ce:
+        e.ce_us = us(at);
+        break;
+      case slot_trace_what::ldpc_start:
+        e.ldpc_start_us = us(at);
+        break;
+      case slot_trace_what::crc_ok:
+        e.crc_ok_us = us(at);
+        break;
+    }
+  }
+
+  /// \brief Prints the per-slot timelines captured by OCUDU_UL_SLOT_TRACE.
+  ///
+  /// One line per slot, every landmark expressed as a delta in microseconds from "the slot's last sample
+  /// arrived". The line also carries the slot's [ul_time_frequency] and, when it was recorded, the receive wait
+  /// of the block that completed it, so the two decompositions can be read against each other for the SAME slot
+  /// rather than across populations.
+  void print_slot_trace()
+  {
+    std::vector<slot_trace_entry> trace;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      for (const auto& kv : slot_trace) {
+        trace.push_back(kv.second);
+      }
+    }
+    if (!slot_trace_enabled() && trace.empty()) {
+      return; // the switch was off and nothing was captured: stay silent (the run does not ask for this)
+    }
+    // The slot list is printed whenever it is non-empty, even if the switch has been turned off since (the report
+    // runs at shutdown, and the environment it echoes is the CURRENT one - the test toggles it inside one
+    // process). Saying "OCUDU_UL_SLOT_TRACE=0, slots captured=1" would read as a contradiction; naming the
+    // captured count and, when the switch is still on, the bound, says what actually happened.
+    if (slot_trace_enabled()) {
+      std::fprintf(stderr, "[ul_slot_trace] OCUDU_UL_SLOT_TRACE=%u, slots captured=%zu\n",
+                   slot_trace_limit(),
+                   trace.size());
+    } else {
+      std::fprintf(stderr, "[ul_slot_trace] slots captured=%zu (switch now off)\n", trace.size());
+    }
+    if (trace.empty()) {
+      std::fprintf(stderr, "[ul_slot_trace] no slot completed on record (see record_slot_samples_complete())\n");
+      return;
+    }
+    std::fprintf(stderr,
+                 "  %-8s %10s %10s %10s %10s %10s %10s %10s\n",
+                 "slot",
+                 "rxwait",
+                 "t2f",
+                 "ce",
+                 "ldpc",
+                 "crc_ok",
+                 "tf_from_done",
+                 "pipeline");
+    for (const auto& e : trace) {
+      std::fprintf(stderr,
+                   "  %-8llu %10.1f %10.1f %10.1f %10.1f %10.1f %10.1f %10.1f\n",
+                   static_cast<unsigned long long>(e.slot),
+                   e.rx_wait_us,
+                   e.t2f_us,
+                   e.ce_us,
+                   e.ldpc_start_us,
+                   e.crc_ok_us,
+                   e.t2f_us,
+                   e.pipeline_us);
+    }
   }
 
   /// Prints the statistics of the recorded latencies. Called once during the application shutdown.
@@ -420,6 +648,7 @@ public:
     // The receive's own series, and the only one whose count is per BLOCK rather than per slot or per TB (see
     // record_rx_wait). Printed next to the pipeline it is part of, because [ul_time_frequency] includes it.
     print_series("ul_rx_wait", sorted_rx_wait);
+    print_slot_trace();
     // The series printed below cross both modes unchanged.
     // FAPI->MAC tail (CRC-OK -> MAC UL task enqueue): recorded in lockstep with the CRC-OK completions, so its
     // sample count tracks [ul_ldpc_decode] (minus PDUs dropped at the per-UE queue).
@@ -619,6 +848,13 @@ private:
   /// Receive wait times (µs), one per received BLOCK (see record_rx_wait): the span the host spent blocked inside
   /// receiver.receive(). The only series with no pairing: the two clock reads bracket a single call.
   std::vector<double> rx_wait_us;
+  /// The instant the samples completing each traced slot arrived (see record_slot_samples_complete()).
+  std::map<uint64_t, std::chrono::high_resolution_clock::time_point> slot_samples_done;
+  /// One entry per traced slot, keyed by slot: the per-slot timeline printed by print_slot_trace().
+  std::map<uint64_t, slot_trace_entry> slot_trace;
+  /// Receive waits reported before their slot had a trace entry (see record_rx_wait_for_slot): the receive
+  /// happens before any landmark of the slot it completes, so the wait always arrives first.
+  std::map<uint64_t, double> slot_trace_pre_wait;
 };
 
 #else // not OCUDU_FLOW_PROBES: no-op implementation with zero overhead.

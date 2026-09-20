@@ -453,6 +453,22 @@ void lower_phy_baseband_processor::ul_process()
     const auto recv_us =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t_recv_begin).count();
     ul_pipeline_probe::get().record_rx_wait(recv_us * 1000);
+    // The per-slot timeline (OCUDU_UL_SLOT_TRACE) needs the ONE instant the other series take for granted: the
+    // arrival of the samples that COMPLETE a slot. Everything else in the probe starts at the slot's FIRST
+    // sample, which is a different instant whenever the block carrying a slot's tail is not the block that
+    // starts it - and that difference is why per-slot questions cannot be answered from those series.
+    //
+    // "Completes a slot" is exact: the block's samples are contiguous and end at rx_metadata.ts + nof_samples,
+    // so a block completes a slot iff that end lands on a slot boundary. The slot it completes is the one
+    // holding its LAST sample (not the one holding its first: the two differ for every straddling block).
+    if ((nof_samples != 0) && (nof_samples % nof_samples_per_slot == 0)) {
+      const uint64_t slots_per_sfn_cycle = (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
+      const uint64_t done_slot =
+          (apply_timestamp_sfn0_ref(rx_metadata.ts + nof_samples - 1) / nof_samples_per_slot) % slots_per_sfn_cycle;
+      auto& probe = ul_pipeline_probe::get();
+      probe.record_slot_samples_complete(done_slot, std::chrono::high_resolution_clock::now());
+      probe.record_rx_wait_for_slot(done_slot, recv_us * 1000);
+    }
     if (recv_us > 20000) {
       static auto& probe_log = ocudulog::fetch_basic_logger("ALL");
       probe_log.info("[zmq-probe] ul recv-wait={}us", recv_us);

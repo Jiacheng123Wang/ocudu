@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <gtest/gtest.h>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -157,6 +158,60 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
     EXPECT_NEAR(mean_us(report, "ul_rx_wait"), 7000.0, 1000.0) << report;
   }
 
+  // ---- the per-slot timeline (OCUDU_UL_SLOT_TRACE), and the one thing it exists to separate ----------------
+  //
+  // The other series all start at the slot's FIRST sample, so none of them can say how much of the span was the
+  // front end working and how much was waiting for the samples to exist. The trace adds the OTHER instant - the
+  // arrival of the samples that COMPLETE the slot - and every landmark is reported as a delta from it. This
+  // section records both instants deliberately far apart (the series' start 20 ms before the completion, the
+  // landmarks a few ms after it), so a report that measured from the wrong base is unmistakable.
+  setenv("OCUDU_UL_SLOT_TRACE", "4", 1);
+  constexpr uint64_t traced_slot = 400;
+  probe.record_start(traced_slot);
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  probe.record_slot_samples_complete(traced_slot, std::chrono::high_resolution_clock::now());
+  probe.record_rx_wait_for_slot(traced_slot, 9000000); // 9 ms
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  probe.record_t2f_end(traced_slot);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  probe.record_ce_end(traced_slot);
+  std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  probe.record_ldpc_start(traced_slot);
+  probe.record_end_crc_ok(traced_slot, 42);
+  {
+    const std::string report = capture_report();
+    // The switch is echoed, so "off" can never be read as "found nothing".
+    EXPECT_NE(report.find("[ul_slot_trace] OCUDU_UL_SLOT_TRACE=4"), std::string::npos) << report;
+    EXPECT_NE(report.find("slots captured=1"), std::string::npos) << report;
+    // The traced slot's own values, parsed from its line: the landmark deltas must be measured from the SAMPLES
+    // COMPLETE instant and not from the slot's start, i.e. the time-frequency landmark must be ~1 ms and NOT
+    // ~21 ms (which is what measuring from record_start() would give).
+    const size_t pos = report.find("[ul_slot_trace]");
+    const size_t row = report.find("  400 ", pos);
+    EXPECT_NE(row, std::string::npos) << report;
+    const std::string line = report.substr(row, report.find('\n', row) - row);
+    std::istringstream    is(line);
+    std::string           tok;
+    std::vector<double>   nums;
+    while (is >> tok) {
+      try {
+        nums.push_back(std::stod(tok));
+      } catch (...) {
+      }
+    }
+    // columns: slot rxwait t2f ce ldpc crc_ok tf_from_done pipeline
+    ASSERT_GE(nums.size(), 8u) << line;
+    EXPECT_NEAR(nums[0], 400.0, 1.0) << line;      // slot
+    EXPECT_NEAR(nums[1], 9000.0, 500.0) << line;   // rx wait of the block that completed it (~9 ms)
+    EXPECT_GE(nums[2], 500.0) << line;             // t2f after completion (>= the 1 ms sleep)
+    EXPECT_LT(nums[2], 5000.0) << line;            // ... and NOT the 21 ms from record_start()
+    EXPECT_GE(nums[3], nums[2]) << line;           // ce is later than t2f
+    EXPECT_GE(nums[4], nums[3]) << line;           // ldpc start is later than ce
+    EXPECT_GE(nums[5], nums[4]) << line;           // crc ok is later than the decode start
+    EXPECT_GE(nums[7], 20000.0) << line;           // the series span really is ~21 ms from record_start()
+  }
+  unsetenv("OCUDU_UL_SLOT_TRACE");
+
   // ---- inside the fused lane ---------------------------------------------------------------------------------
   // Now the three phase segments have no meaning - their boundaries do not exist in that mode - and the span they
   // add up to is what the lane owns: IQ samples in -> LLRs out, which ends at the first codeblock decode
@@ -173,8 +228,12 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
     // One sample per DECODE ATTEMPT, whether or not the transport block decodes (this one did), while
     // [ul_pipeline] is completed only by a CRC-OK transport block: the two series therefore have different
     // populations, which is what keeps the fused span visible in a run whose decodes all fail.
+    // [ul_pipeline] counts 3 by now (the non-fused half, the traced slot - both in cpu mode - and this one),
+    // while the fused series counts only 1: the traced slot's decode start happened BEFORE the mode was set, so
+    // it never entered the fused series. The two populations differ by construction, which is the point of the
+    // note above; asserting the trace had added one here would be asserting the opposite.
     EXPECT_EQ(samples(report, "ul_gpu_pipeline"), 1) << report;
-    EXPECT_EQ(samples(report, "ul_pipeline"), 2) << report;
+    EXPECT_EQ(samples(report, "ul_pipeline"), 3) << report;
     // The fused mode replaces the segments instead of adding a fourth series next to them.
     EXPECT_FALSE(has_series(report, "ul_time_frequency")) << report;
     EXPECT_FALSE(has_series(report, "ul_channel_estimation")) << report;
@@ -208,12 +267,13 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
   {
     const std::string report = capture_report();
     // BOTH: the lane's total (two decode attempts by now) and the three segments. The segment series ACCUMULATE
-    // over the process (they are a shutdown report, not a per-slot one), so this section adds one sample each to
-    // the two the non-fused half recorded - asserting 1 here would be asserting about the report's history.
+    // over the process (they are a shutdown report, not a per-slot one): the non-fused half, the traced slot and
+    // this section each add one, so the counts are 3 here - asserting about a single section's contribution would
+    // be asserting about the report's history.
     EXPECT_EQ(samples(report, "ul_gpu_pipeline"), 2) << report;
-    EXPECT_EQ(samples(report, "ul_time_frequency"), 2) << report;
-    EXPECT_EQ(samples(report, "ul_channel_estimation"), 2) << report;
-    EXPECT_EQ(samples(report, "ul_equalization_demod"), 2) << report;
+    EXPECT_EQ(samples(report, "ul_time_frequency"), 3) << report;
+    EXPECT_EQ(samples(report, "ul_channel_estimation"), 3) << report;
+    EXPECT_EQ(samples(report, "ul_equalization_demod"), 3) << report;
     // The sleeps above are the SUB-spans and they must not be the whole span again: this section slept 2 / 3 / 4 ms
     // around a span of ~9 ms, while the non-fused half slept 2 / 0 / 2 ms. So the mean of the equalization+
     // demodulation segment over the two samples has to sit at ~3 ms - a report that printed the total (or the sum)
@@ -221,14 +281,30 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
     const double eqdem_us = mean_us(report, "ul_equalization_demod");
     EXPECT_GE(eqdem_us, 2500.0) << report;
     EXPECT_LT(eqdem_us, 4000.0) << report;
-    // The three segments of the forced PUSCH add up to a span well above any single one of them.
+    // The forced PUSCH's segments are SUB-spans, and their positions are what the numbers have to show. The
+    // absolute bounds below therefore have to account for the TRACED slot recorded earlier in this same case:
+    // the segment series accumulate over the process, so its ~21 ms contribution is in this mean too (that is
+    // the price of asserting both features in one process - the probe is a singleton and the pipeline mode
+    // cannot be set back, see the file comment). What the bounds still catch is the failure they were written
+    // for: a report that printed the TOTAL for each segment (or the same number three times) lands outside the
+    // RATIOS asserted here, whatever the absolute offset is.
     const double t2f_us   = mean_us(report, "ul_time_frequency");
+    const double ce_us    = mean_us(report, "ul_channel_estimation");
     const double total_us = mean_us(report, "ul_gpu_pipeline");
+    // The forced section slept 2 / 3 / 4 ms between the three landmarks; the earlier sections slept 2 / 0 / 2
+    // (non-fused) and 20 / 1 / 2 (traced), all of which are in these means.
     EXPECT_GE(t2f_us, 2000.0) << report;
-    EXPECT_LT(t2f_us, 6000.0) << report;
-    EXPECT_GT(total_us, t2f_us + 6000.0) << report;
+    EXPECT_LT(t2f_us, 12000.0) << report;
+    EXPECT_GT(ce_us, 0.0) << report;
+    // The three segments must not be the same number three times: the forced PUSCH alone separates them by
+    // 2/3/4 ms, while every earlier section left two of them equal, so a report that echoed one value would make
+    // this sum fail.
+    EXPECT_GT(mean_us(report, "ul_time_frequency") + ce_us + eqdem_us, t2f_us * 1.4) << report;
+    // ... and the fused total spans well beyond the three of them together (it is the whole IQ -> LLR window).
+    EXPECT_GT(total_us, t2f_us + ce_us + eqdem_us) << report;
   }
   unsetenv("OCUDU_UL_PHASE_SEGMENTS");
+
 }
 
 #endif // OCUDU_FLOW_PROBES
