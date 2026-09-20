@@ -10,9 +10,13 @@
 
 ## 1. 一句话状态
 
-**工作树 HEAD = `5a1f8b2f67`**（S15 的 `ddc09868e4` 之后本会话的 4 个提交，见 §7），
-**`build/apps/gnb/gnb` 已按它重戳**——自查：**`grep build_info build/hashes.h` 的短哈希必须 == `git rev-parse --short=10 HEAD`**。
-**之后再有任何提交，上腿前按 §9 重戳**（坑 35）。
+**工作树 HEAD**：本会话在 S15 的 `ddc09868e4` 之后加了 5 个提交（见 §7 的 `git log ddc09868e4..HEAD`）。
+**开工第一件事就是自查戳记**：
+```bash
+git rev-parse --short=10 HEAD && grep build_info build/hashes.h
+```
+**两个短哈希必须相同**（不同就 `touch build/hashes.h && cmake --build build --target gnb`，坑 35）。
+**本会话末已重戳且一致**；若你（新会话）看到不一致，说明有提交没重戳。
 工作树只剩**用户自己的两个 config**（`gnb_rf_b200_fdd_n1_5mhz_bridge.yml`、`gnb_rf_b200_tdd_n78_20mhz.yml`），**别动**。
 
 **门（与 S15 相同，本会话未改门）**：
