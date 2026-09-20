@@ -91,6 +91,14 @@ dump 逐位不变 ✓）第一次就暴露了**仪器本身**：同一配置连�
 "宿主不是瓶颈"。要重开这条线，**先换仪器**（`MTLCounterSampleBuffer` 逐 dispatch 时间戳，或把被测段隔离成单独命令缓冲），
 **或者只用空口腿做 A/B**。
 
+**逐 dispatch 计数器仪器（用户选的 A）：写过、没验通、已回退**（§5.8.14 末段）。**实测到的**：
+设备支持（`supported=1`）、`MTLCounterSampleBuffer` **建得起来**、采样点编得进去（scatter/corr_std/corr_edge/inv/
+weights/apply/reformat），但 **`[disp_time]` 一行都没打** ⇒ 解析钩子（挂在 `end_stage`/`collect_async_stage`/
+`wait_pending_impl`）**在这条延迟路径上没被走到**（日志显示只有构造期的同步 `run` 命中）。
+**⇒ 未验证的代码已回退**（只留已提交的保值重复探针）。
+**下一次的第一步**：先查清"这条延迟提交到底在哪儿被等"（`pending_fused_burst` / `has_pending()` /
+`wait_pending()` 的实际走向——本会话已经在这上面栽过一次），再把钩子挂到那一处；或者干脆**只用空口腿做 A/B**（已验证稳定）。
+
 **P5（相关矩阵优化）试过一次，失败了，已整块回退**（§5.8.13）：把 rt/rf 预算成四张小表（本应逐位相同）
 ⇒ 数值错（`noise_variance` 0.126 → 3.6e4、27 条语料全不同），**dump 网当场抓住，已 `git checkout` 回退**
 （回退后 235/235）。**⇒ "ch_wt 620.7 → 597.0 µs" 那个读数作废**（输入是错的），**"那 445 µs 花在哪"仍无证据**。
