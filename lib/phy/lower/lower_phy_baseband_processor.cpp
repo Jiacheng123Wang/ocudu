@@ -461,10 +461,17 @@ void lower_phy_baseband_processor::ul_process()
     // "Completes a slot" is exact: the block's samples are contiguous and end at rx_metadata.ts + nof_samples,
     // so a block completes a slot iff that end lands on a slot boundary. The slot it completes is the one
     // holding its LAST sample (not the one holding its first: the two differ for every straddling block).
-    if ((nof_samples != 0) && (nof_samples % nof_samples_per_slot == 0)) {
+    // "Completes a slot" is a property of WHERE the block ENDS, not of its size: the samples are contiguous, so a
+    // block completes a slot iff its end lands on a slot boundary. Testing the block's SIZE instead (which is what
+    // this did first) is right only for whole-slot blocks and silently captures nothing at any other size - the
+    // half-slot leg printed "slots captured=0" for exactly that reason. The slot it completes is the one holding
+    // its LAST sample, not its first: for a block that straddles a boundary those are different slots, and that
+    // difference is the whole reason the distributions could not be decomposed.
+    const baseband_gateway_timestamp block_end = rx_metadata.ts + nof_samples;
+    if ((nof_samples != 0) && (block_end % nof_samples_per_slot == 0)) {
       const uint64_t slots_per_sfn_cycle = (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
       const uint64_t done_slot =
-          (apply_timestamp_sfn0_ref(rx_metadata.ts + nof_samples - 1) / nof_samples_per_slot) % slots_per_sfn_cycle;
+          (apply_timestamp_sfn0_ref(block_end - 1) / nof_samples_per_slot) % slots_per_sfn_cycle;
       auto& probe = ul_pipeline_probe::get();
       probe.record_slot_samples_complete(done_slot, std::chrono::high_resolution_clock::now());
       probe.record_rx_wait_for_slot(done_slot, recv_us * 1000);

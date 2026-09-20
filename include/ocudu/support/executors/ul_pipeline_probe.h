@@ -128,7 +128,7 @@ public:
 
   /// Bound on the traced slots: the trace is for reading single slots by eye, so a small map is the right size
   /// and an unbounded one on the hot path would not be.
-  static constexpr size_t max_slot_trace = 64;
+  static constexpr size_t max_slot_trace = 512;
 
   /// One traced slot: every landmark as a DELTA from the arrival of the samples that completed it (µs).
   /// A field left at NaN means "this landmark was not reached for this slot" (a CRC failure has no crc_ok, a
@@ -433,8 +433,14 @@ public:
     if (env == nullptr) {
       return 0;
     }
+    // "OCUDU_UL_SLOT_TRACE=1" (or any non-numeric value) means "on, with the default number of slots": an
+    // operator asking for the trace should not have to know a good count, and strtoul() would read "1" as one
+    // slot - which is not enough to see a pattern and looks like a broken instrument.
     const unsigned v = static_cast<unsigned>(std::strtoul(env, nullptr, 10));
-    return (v > max_slot_trace) ? max_slot_trace : v;
+    if (v <= 1) {
+      return (max_slot_trace <= 128) ? static_cast<unsigned>(max_slot_trace) : 128U;
+    }
+    return (v > max_slot_trace) ? static_cast<unsigned>(max_slot_trace) : v;
   }
   static bool slot_trace_enabled() { return slot_trace_limit() != 0; }
 
@@ -478,7 +484,13 @@ public:
                               std::chrono::high_resolution_clock::time_point        at)
   {
     const auto base = find_slot_samples_done(done, slot);
-    if (base == std::chrono::high_resolution_clock::time_point{}) {
+    // "Not traced" must be tested with the map, not by comparing a time_point against a default-constructed one:
+    // on this platform high_resolution_clock IS steady_clock, whose epoch is BOOT, so a default-constructed
+    // time_point is a perfectly ordinary instant ~10 minutes into the machine's life - and the missing-base case
+    // would have silently produced "the landmark happened 71680us after 1970" (which is what the first on-air leg
+    // of this trace printed, 71680us being exactly one 7680-sample slot). Comparing against a sentinel that real
+    // values can hold is the defect; asking the map is the fix.
+    if (done.find(slot) == done.end()) {
       return; // this slot is not traced
     }
     auto us = [&base](const std::chrono::high_resolution_clock::time_point& tp) {
