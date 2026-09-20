@@ -3154,14 +3154,28 @@ int main()
         return -1;
       }
 
-      // --- Route 4 (event order, the DEFAULT): the estimator commits its OWN command buffer and arms the
+      // --- Route 4 (event order): the estimator commits its OWN command buffer and arms the
       // back-end stage fence, the lane burst then waits for it, and the host never waits in between. The
       // three assertions are the mechanism: no burst was dragged open by the estimator, the fence
       // generation moved, and the lane's own wait - the very wait shared_burst encodes, replayed here by
       // lane_fence_selftest() - is satisfied by that signalled generation (a wait for a generation nobody
       // signals would never complete).
-      set_order(nullptr);   // the default has to be the event order
-      const uint64_t fence_before = metal::mmse_engine::lane_fence_generation();
+      //
+      // It used to be the route the knob-less default selected; since S13-P3 the default is \c merged, so
+      // this route is an explicit A/B like the other three. Nothing else changes: the mechanism asserted
+      // here is the event route's, and it is the one that keeps the fence honest - the merged route's own
+      // fallback path (a hop whose extraction could not be held) commits through end_stage_async() and
+      // needs the SAME signal, which is how this assertion found that gap.
+      // The knob-less default is what the air legs judge, so pin it HERE instead of inferring it from a
+      // route's mechanism: merged (S13-P3), the order that makes the whole deferred hop one submission.
+      // A default nobody asserts is one that can be flipped back silently.
+      set_order(nullptr);
+      if (port_channel_estimator_metal_mmse_impl::ce_lane_order_from_env() != metal::ce_lane_order::merged) {
+        std::printf("Test 13 FAIL (%s): the default lane order is not merged (S13-P3)\n", label.c_str());
+        return -1;
+      }
+
+      set_order("event");      const uint64_t fence_before = metal::mmse_engine::lane_fence_generation();
       const port_channel_estimator_results& res_e = mmse->submit(in.grid, 0, in.pilots, in.cfg);
       if (metal::mmse_engine::burst_is_open()) {
         std::printf("Test 13 FAIL (%s): the default (event) hop dragged the lane's burst open - it must "

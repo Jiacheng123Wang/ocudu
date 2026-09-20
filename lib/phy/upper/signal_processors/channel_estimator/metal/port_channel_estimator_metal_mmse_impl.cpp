@@ -1336,21 +1336,33 @@ cf_t port_channel_estimator_metal_mmse_impl::ls_pilot(const fd_td_estimation_sta
 
 metal::ce_lane_order port_channel_estimator_metal_mmse_impl::ce_lane_order_from_env()
 {
-  // DEFAULT event (S-7g-19, Step 1'): the estimator's deferred hop commits its own command buffer as soon
-  // as its dispatches are encoded, and the lane burst waits for it through the back-end stage fence. That
-  // is the fusion the goal asks for - nothing on the host waits in the middle of the lane any more - while
-  // the estimator's GPU work still overlaps the host encoding the equalization and the demapping.
+  // DEFAULT merged (S13-P3, flipped 2026-09-20): the whole deferred hop - the extraction, the weights,
+  // and then the equalization and the demapping - is ONE submission, so the receiving chain's control
+  // plane has exactly one commit per reception and the host does not take part in the middle of the lane
+  // at all. That is the goal's control-plane half (design document 5.8.2, P3), and it is what the count
+  // reads: cbs/lane 1.00 (max 1), mmse_ce commits per hop 1.000, lane gap 0.
   //
-  // The two other orders are the escape hatches, and they are what the earlier legs measured:
-  //   * host_wait - the estimator's own command buffer, waited for by the host right after the commit. This
-  //     was the route until S-7g-16 and it is why the lane used to pay ~125us of [ul_equalization_demod]:
-  //     the host sat waiting for the estimator instead of encoding the equalization;
-  //   * burst - the estimator's dispatches ride the lane's shared command buffer (S-7g-16, Step 1b). One
-  //     submission for the whole lane, but the estimator cannot start before the group is fully encoded,
-  //     which cost the same ~125us as a LATENCY DEBT (the design document's 48.188(i).3 called for paying
-  //     it back; this order is where that happened).
-  // All three are byte-identical by construction (the estimator's unit test compares them), so the choice
-  // is purely "how much of the estimator's GPU work overlaps the host's encoding".
+  // It was implemented and verified on air a session earlier and deliberately left off by default,
+  // because its price is latency: the merged submission cannot start the equalizer until the whole hop
+  // is encoded, and under a bursty uplink one larger submission queues longer than two overlappable
+  // ones. Measured then as +1650us on the median, but CONFOUNDED - the two legs ran under different
+  // load. The flip is therefore paired with a leg pair (event against the new default, back to back) so
+  // the price is finally read under the same load, and with the same escape hatch as every other stage:
+  //
+  //   OCUDU_CE_LANE_ORDER=event   -> one line back to the P2 route (2.00 submissions per hop).
+  //
+  // The other orders, kept because the legs that measured them are the line's history:
+  //   * event  - the estimator commits its own command buffer and the lane burst waits for it through the
+  //     back-end stage fence. P2's route: 2.00 submissions, and the estimator's GPU work overlaps the
+  //     host encoding the equalization and the demapping;
+  //   * host_wait - the same own command buffer, waited for by the host right after the commit. The route
+  //     until S-7g-16, and the reason the lane used to pay ~125us of [ul_equalization_demod];
+  //   * burst - the estimator's dispatches ride the lane's shared command buffer (S-7g-16, Step 1b).
+  //     One submission for the whole lane as well, but the estimator cannot start before the group is
+  //     fully encoded, which cost the same ~125us as a latency debt.
+  // All four are byte-identical by construction (the estimator's unit test compares them), so the choice
+  // is purely "how much of the estimator's GPU work overlaps the host's encoding, and how many
+  // submissions the control plane pays for".
   const char* order = std::getenv("OCUDU_CE_LANE_ORDER");
   if (order != nullptr) {
     const std::string value(order);
@@ -1369,11 +1381,11 @@ metal::ce_lane_order port_channel_estimator_metal_mmse_impl::ce_lane_order_from_
     // A typo must not silently select a route: say so once, loudly, and run the default.
     static const bool warned = []() {
       ocudulog::fetch_basic_logger("PHY").error(
-          "PUSCH: unknown OCUDU_CE_LANE_ORDER value (expected event, wait or burst) - using event");
+          "PUSCH: unknown OCUDU_CE_LANE_ORDER value (expected merged, event, wait or burst) - using merged");
       return true;
     }();
     (void)warned;
-    return metal::ce_lane_order::event;
+    return metal::ce_lane_order::merged;
   }
   // Deprecated numeric alias of the S-7g-16 knob, kept because the legs, the A/B script and the design
   // document refer to it: 1 meant "the estimator's dispatches ride the lane burst", 0 "the estimator keeps
@@ -1381,7 +1393,7 @@ metal::ce_lane_order port_channel_estimator_metal_mmse_impl::ce_lane_order_from_
   if (const char* legacy = std::getenv("OCUDU_CE_FUSED_BURST"); legacy != nullptr) {
     return (std::strtoul(legacy, nullptr, 10) != 0) ? metal::ce_lane_order::burst : metal::ce_lane_order::host_wait;
   }
-  return metal::ce_lane_order::event;
+  return metal::ce_lane_order::merged;
 }
 
 void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_estimation_stage_args& args)

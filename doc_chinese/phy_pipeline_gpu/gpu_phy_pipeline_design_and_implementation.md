@@ -2056,6 +2056,65 @@ dispatch 边界天然提供跨线程组同步（这正是单个 dispatch 内做�
 **⑤ 建议**：先走 **B**（K1 的账已经记清楚了：31.5% 的 `ch_wt`，其中 26–37% 是 barrier；剩下的部分等一台安静机器或按 A 的方式做），
 把用户排的第二件事——**融合**——做掉；K1 的替换等有可信计时再谈，或者按 A 的方式用空口腿对逐个原型去试。
 
+#### 5.8.26 ★★ P3（`merged`）翻成默认：**翻之前，门抓到了一个真缺陷**
+
+**① 裁定与改动**：用户选择"按 B 走"——**把 P3 的 `merged` 翻成默认**（`ce_lane_order_from_env()`
+的最后 `return` 从 `event` 改成 `merged`；回退是**一行**：`OCUDU_CE_LANE_ORDER=event`）。
+默认从此是**整跳一次提交**：`cbs/lane` 1.00、`mmse_ce commits`/跳 1.000、lane gap 0 —— 目标的**控制面那一半**。
+
+**② ★ 门抓到的东西（这才是本条的重点）**
+
+翻完默认、重建之后 `ctest -R metal` **立刻 2/9 红**：
+
+```
+Test 13 FAIL (51 PRB 2 DMRS): the default (event) hop did not arm the back-end stage fence
+(generation 0 -> 0), so the lane would have no way to order itself after it
+```
+
+查下去是**真缺陷**，不是测试写错：`end_stage_async()` 只在 `lane_order == event` 时
+`backend_stage_signal()`（`ocudu_metal_mmse_engine.mm:898`）。而 `merged` 序下有一条**回退路径**：
+
+* 正常情况下 `encode_run()` 让权重接着在提取那条命令缓冲上编，然后把缓冲交给 lane burst
+  （`shared_burst::adopt()`），并在交付**之前**拉一道 fence ✓；
+* **但提取没能 hold 住缓冲时**（几何拒绝 hold、或宿主更早读过导频），这个分支整条跳过，
+  跳到 `end_stage_async()` 提交**自己的**命令缓冲 —— 而它按条件**不拉 fence**，
+  可 lane burst 那边 `burst_ensure_open()` 是**无条件** `backend_stage_wait()` 的
+  ⇒ **均衡器被排在一个永远不会被 signal 的 generation 后面** ⇒ 它可以**在估计器写 h 之前就读 h**。
+  这是**静默错数据**，不是慢。
+
+**修法**：`end_stage_async()` 的 fence 条件加上 `merged`（正常 merged 跳走不到这里，所以只有回退路径受影响）。
+注释里写明了它是被这条断言抓出来的。
+
+**③ 顺带加了一条"钉住默认"的断言**（否则没人拦得住它被静默翻回去）：
+把 `ce_lane_order_from_env()` 提为 **public**（与 `device_inverts()` 等既有 static 缝一致），
+Test 13 里在 Route 4 之前显式断言 `set_order(nullptr)` 之后它必须答 `merged`。
+Route 4 本身从 `set_order(nullptr)` 改成 `set_order("event")`——它本来就是 **event 路线**的机制断言
+（变量名 `res_e`/`event_ok`、注释都这么写），之前只是蹭了"event 是默认"这件事。
+
+**④ 离线判据**（翻默认**离线读不出来**，因为适配器把非延迟跳强制成 `host_wait`：
+
+```
+const bool = args.deferred ? order : host_wait;   // compute() 的跳不是 deferred
+```
+
+⇒ 离线回放与语料**完全不受影响**）：
+
+| 门 | 结果 |
+|---|---|
+| `value_net.py` | **47 捕获 0 问题** ✅ |
+| `ctest -R metal` | **9/9** ✅（含 Test 13 的四条路线 + 新默认断言）|
+| 逐字节（信息）| 131 字节，**与翻默认前同一个数**（那是抽取那次的末位）⇒ 确认翻默认对离线零影响 |
+
+**⑤ ⇒ 翻默认的判据只能来自空口，而且这次要**成对**跑**（这正是开放项 E：P3 的延迟代价从来没有同负载口径）：
+
+| 腿 | 旋钮 | 预期结构计数 |
+|---|---|---|
+| 对照（P2 路线）| `OCUDU_CE_LANE_ORDER=event` | `cbs/lane` **2.00（max 2）**、`mmse_ce commits`/跳 **2.000**、lane gap ~86 µs |
+| 默认（本条）| 不设 | `cbs/lane` **1.00（max 1）**、`mmse_ce commits`/跳 **1.000**、lane gap **0** |
+
+两条背靠背、同一手机同一业务 ⇒ `[ul_gpu_pipeline]` 的中位差就是**同负载口径**下的 P3 代价（开放项 E 关门）。
+四条标准两条腿都要过；**CRC 按调制分层比**（§5.8.22 的更正）。
+
 #### 5.8.3 每个阶段之后要停下来做什么（用户要求）
 
 1. **离线先全过**（逐字节 + 提交数 + 单测），再上腿；

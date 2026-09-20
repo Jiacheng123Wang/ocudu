@@ -716,12 +716,20 @@ private:
   /// estimates need.
   bool fused_burst_hop = false;
 
-  /// The order this adapter hands to the engine for a deferred hop: OCUDU_CE_LANE_ORDER, whose default is
-  /// ce_lane_order::event (the estimator commits into its own command buffer as soon as it is encoded and
-  /// the lane burst waits for it through the back-end stage fence). See ce_lane_order for the three
-  /// orders and what each costs, and ce_lane_order_from_env() for the escape hatches.
+public:
+  /// \brief The lane order this adapter hands to the engine for a deferred hop: OCUDU_CE_LANE_ORDER.
+  ///
+  /// The DEFAULT is ce_lane_order::merged (S13-P3, flipped 2026-09-20): the whole deferred hop is ONE
+  /// submission, which is the goal's control-plane half. Each of the other three orders is an explicit
+  /// value of the knob and a one-line rollback; \c event is the P2 route the fused lane ran before.
+  /// See ce_lane_order for what each costs, and ce_lane_order_from_env() for the whole table.
+  ///
+  /// Public, like device_inverts() and the other static seams this adapter exposes, because the
+  /// estimator's unit test pins the default here rather than inferring it from a route's mechanism -
+  /// a default nobody asserts is a default that can be flipped back silently.
   static metal::ce_lane_order ce_lane_order_from_env();
 
+private:
   /// \brief Unpack of the last hop, kept so a HOST consumer of the estimates can still be served.
   ///
   /// The device's own estimates are the source of truth while a hop is current: the demodulator

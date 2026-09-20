@@ -895,7 +895,18 @@ static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded,
   if (!encoded) {
     return false;
   }
-  if (e->lane_order == metal::ce_lane_order::event) {
+  // The back-end stage fence: the lane burst orders itself after this submission through it. \c event
+  // needs it by definition, and so does \c merged - not for the usual merged hop, which continues in
+  // THIS command buffer (encode_run() adopts it and signals the fence right before handing it over), but
+  // for the merged hop whose extraction could NOT be held (a geometry that refuses the hold, or a caller
+  // that reads the pilots earlier): that hop falls back to committing its own buffer through here, while
+  // the lane burst still encodes shared_burst::burst_ensure_open()'s backend_stage_wait(). Without the
+  // signal that wait names a generation nobody will ever signal, so the equalization would be ordered
+  // after nothing at all and could read h before the estimator wrote it.
+  //
+  // Found by the estimator's unit test the moment the default was flipped to merged (Test 13's route 4:
+  // "the default hop did not arm the back-end stage fence"), which is exactly what that assertion is for.
+  if ((e->lane_order == metal::ce_lane_order::event) || (e->lane_order == metal::ce_lane_order::merged)) {
     (void)ocudu::metal::shared_queue::backend_stage_signal(s.cb);
   }
   // The GPU-time probe must be armed before commit (Metal asserts otherwise).
