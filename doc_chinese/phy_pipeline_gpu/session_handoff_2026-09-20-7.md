@@ -10,9 +10,9 @@
 
 ## 1. 一句话状态
 
-**工作树 HEAD = `ddc09868e4`**，但**本会话的改动还没提交**（见 §7"交付物"）。
-**`build/apps/gnb/gnb` 已按 HEAD 重戳并在本会话重建过**（本会话改了 `.mm`/`.metal`，
-所以 gnb 是最新的；自查：`grep build_info build/hashes.h` 的短哈希 == HEAD）。
+**工作树 HEAD = `87593ea2cc`**（= S15 的 `ddc09868e4` + **本会话这一个提交**），
+**`build/apps/gnb/gnb` 已按 `87593ea2cc` 重戳**——自查：`grep build_info build/hashes.h` 的短哈希 == HEAD。
+**之后再有任何提交，上腿前按 §9 重戳**（坑 35）。
 工作树只剩**用户自己的两个 config**（`gnb_rf_b200_fdd_n1_5mhz_bridge.yml`、`gnb_rf_b200_tdd_n78_20mhz.yml`），**别动**。
 
 **门（与 S15 相同，本会话未改门）**：
@@ -112,9 +112,13 @@ D1 才是**剩下的目标性差距**（§9 用户裁定 ⑤）。
 
 ---
 
-## 7. 交付物与提交状态（**新会话第一件事**）
+## 7. 交付物与提交状态
 
-**本会话的改动：**
+**✅ 已提交：`87593ea2cc`**（`phy+docs: K1 path A run - the answer is that K1 is at its floor, and it is a refutation`）。
+**tag**：本会话**没有新 tag**（没有可发布的阶段——路 A 的产出是否证性结论，不是新阶段）。
+**⚠ 未推送**（本会话只提交到本地工作树，没有 `git push`）。
+
+**该提交包含：**
 ```
 doc_chinese/phy_pipeline_gpu/gpu_phy_pipeline_design_and_implementation.md   §5.8.28（新增）
 doc_chinese/phy_pipeline_gpu/wip/value_net.py                                --env / --env-passthrough
