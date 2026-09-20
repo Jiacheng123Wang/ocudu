@@ -13,6 +13,10 @@
 # A measurement tool has to make both impossible rather than rely on the person writing the loop:
 #   * every run gets its OWN directory (`mktemp -d`), removed on exit - nothing can be reused across
 #     captures, legs or runs;
+#   * a *.bin glob can also match a leg's own RESULT dumps: doc_chinese/work_tmp/narrow_cap/ holds
+#     `<capture>.bin` (the grid) beside `<capture>_h.bin` (that leg's estimates), so the narrow corpus
+#     read as 40 captures of which 20 existed on neither side (measured). `_h.bin` / `_llr.bin` are
+#     results, never captures, and are filtered out below;
 #   * a dump that is MISSING is counted and the script FAILS LOUDLY. "No data" must never read as
 #     "equal", which is exactly what failure (2) looked like.
 #
@@ -37,7 +41,7 @@ GLOB=${4:-$( [ -d "$ROOT/doc_chinese/work_tmp/corpus" ] && echo "$ROOT/doc_chine
 NEW=$ROOT/build/lib/phy/upper/channel_processors/metal/ul_chain_replay
 
 if [ ! -x "$NEW" ]; then echo "missing $NEW (build it first)" >&2; exit 2; fi
-CAPTURES=$(ls $GLOB 2>/dev/null | sed -E 's/\.bin$//')
+CAPTURES=$(ls $GLOB 2>/dev/null | grep -vE '_(h|llr)\.bin$' | sed -E 's/\.bin$//')
 if [ -z "$CAPTURES" ]; then echo "no captures match $GLOB" >&2; exit 2; fi
 
 WORK=$(mktemp -d)

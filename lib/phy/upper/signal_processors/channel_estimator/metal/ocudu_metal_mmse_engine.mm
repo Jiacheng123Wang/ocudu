@@ -84,6 +84,14 @@ struct mmse_stats_t {
   // kernels are ENCODED (the same command buffer that extracts the pilots), so it is the observable
   // that says whether the host gave up estimate_sigma2() at all.
   std::atomic<uint64_t> pilots_sigma2{0};
+  // Zero-copy mappings answered by an EXISTING mapping instead of a new MTLBuffer object: every one of
+  // them is a place where the cache used to create a second object over memory the first one already
+  // covered, i.e. a dispatch pair whose ordering a barrier could not provide (see wrap()). The second
+  // count is the subset that needed a NON-ZERO offset - the interior-pointer requests, which is exactly
+  // the set that used to produce the aliased pair. A run that shows 0 there has nothing left to fix in
+  // this cache; a run that shows a number is a route the barrier cannot order.
+  std::atomic<uint64_t> wrap_covered{0};
+  std::atomic<uint64_t> wrap_covered_offset{0};
 };
 
 static mmse_stats_t& mmse_stats()
@@ -124,6 +132,19 @@ static void mmse_stats_pilots_sigma2()
 {
 #if defined(OCUDU_METAL_STATS)
   mmse_stats().pilots_sigma2.fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
+/// Counts a wrap answered by an existing mapping (see mmse_stats_t::wrap_covered).
+static void mmse_stats_wrap_covered(bool nonzero_offset)
+{
+#if defined(OCUDU_METAL_STATS)
+  mmse_stats().wrap_covered.fetch_add(1, std::memory_order_relaxed);
+  if (nonzero_offset) {
+    mmse_stats().wrap_covered_offset.fetch_add(1, std::memory_order_relaxed);
+  }
+#else
+  (void)nonzero_offset;
 #endif
 }
 
@@ -199,6 +220,15 @@ static void mmse_stats_report()
   // as the counts of what DID run, because the two are read together: "device_sigma2 == hops" and
   // "refusals=<none>" are the two halves of "every hop took the device route".
   mmse_refusals::print(stderr);
+  // One MTLBuffer object per region of memory (see wrap()): `wrap_cover` counts the mappings an
+  // existing mapping already covered - each one used to be a SECOND object over the same bytes, i.e. a
+  // write/read pair no barrier in the same command buffer can order. `wrap_cover_off` is the subset with
+  // a non-zero offset: the interior-pointer requests, which is the set that produced the fused route's
+  // NaN. Both are printed next to the hops so an air leg can read them without a second run.
+  std::fprintf(stderr,
+               " wrap_cover=%llu wrap_cover_off=%llu",
+               static_cast<unsigned long long>(s.wrap_covered.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.wrap_covered_offset.load(std::memory_order_relaxed)));
   std::fprintf(stderr, "\n");
 }
 #else  // OCUDU_METAL_STATS
@@ -209,6 +239,7 @@ static void mmse_stats_corr_build_failure() {}
 static void mmse_stats_pilots_scatter() {}
 static void mmse_stats_pilots_scatter_failure() {}
 static void mmse_stats_pilots_sigma2() {}
+static void mmse_stats_wrap_covered(bool) {}
 
 /// Stats off: the guard still has to be a non-trivially-destructible object, so that the explicit
 /// scope around it does not look like an unused variable to the compiler.
@@ -345,21 +376,99 @@ struct mmse_engine_impl {
   // the process's, and the accounting is the OS's.
   ~mmse_engine_impl() = default;
 
-  id<MTLBuffer> wrap(const void* ptr, NSUInteger bytes)
+  /// \brief TEMPORARY DIAGNOSTIC (OCUDU_CE_WRAP_MAP): what Metal actually mapped for a zero-copy request.
+  ///
+  /// The zero-copy wrap is the one place where the HOST's pointer and the GPU's view of it could part
+  /// ways, and the fused route is the first one to wrap INTERIOR pointers on the packet path: the merged
+  /// batch's edge group starts one A slot into gpu_a and one R_hp slot into gpu_r_hp (see
+  /// correlation_stage()), so its base is gp + 2916 floats, not a page boundary. Metal's
+  /// newBufferWithBytesNoCopy: documents that the base must be page-aligned - what it does with one that
+  /// is not has to be a READING, not an assumption (the single-geometry routes never asked).
+  ///
+  /// One line per call: the request, the mapping handed back, and the byte offset of the request inside
+  /// it. `via=cover` with a non-zero offset is a request that would have created a SECOND MTLBuffer over
+  /// memory another object already covers - the shape that must never reach a dispatch pair (see wrap()).
+  static bool wrap_map_enabled()
   {
+    static const bool value = (std::getenv("OCUDU_CE_WRAP_MAP") != nullptr);
+    return value;
+  }
+  void report_wrap(const void* ptr, NSUInteger bytes, id<MTLBuffer> buf, NSUInteger offset,
+                   const char* how) const
+  {
+    if (!wrap_map_enabled()) {
+      return;
+    }
+    const long delta = (buf != nil) ? static_cast<long>(reinterpret_cast<const char*>(buf.contents) -
+                                                       reinterpret_cast<const char*>(ptr))
+                                    : 0;
+    std::fprintf(stderr,
+                 "[wrap_map] %s ptr=%p bytes=%llu -> contents=%p length=%llu offset=%llu delta=%+ld%s\n",
+                 how,
+                 ptr,
+                 static_cast<unsigned long long>(bytes),
+                 (buf != nil) ? buf.contents : nullptr,
+                 (buf != nil) ? static_cast<unsigned long long>(buf.length) : 0ULL,
+                 static_cast<unsigned long long>(offset),
+                 delta + static_cast<long>(offset),
+                 (offset != 0) ? "  <- bound as an OFFSET into an existing mapping" : "");
+  }
+
+  /// \brief A mapping of host memory as the GPU sees it: the MTLBuffer object that owns the region and
+  ///        the byte offset of the requested pointer inside it.
+  ///
+  /// Callers MUST bind BOTH - `setBuffer:m.buf offset:m.offset atIndex:i`. The offset is not a
+  /// convenience: Metal's ordering is per MTLBuffer OBJECT, not per memory address (see wrap()).
+  struct mapped {
+    id<MTLBuffer> buf    = nil;
+    NSUInteger    offset = 0;
+  };
+
+  /// \brief Maps host memory zero-copy, guaranteeing ONE MTLBuffer object per region of that memory.
+  ///
+  /// \section why_one_object Why one object per region is a correctness rule
+  ///
+  /// `memoryBarrierWithScope:MTLBarrierScopeBuffers` orders a write and a later read **only when both go
+  /// through the same MTLBuffer object**. Two objects over the same bytes - whatever their bases and
+  /// lengths - carry no ordering at all: the writer and the reader are free to run in either order, no
+  /// matter how they were encoded or where the barrier sits between them. Measured in isolation, 200
+  /// repetitions per case, both directions (doc_chinese/phy_pipeline_gpu/wip/metal_alias_order.mm):
+  /// writer and reader on ONE object PASS, on an aliased pair FAIL every time.
+  ///
+  /// That is what kept the fused route (OCUDU_CE_EDGE_FUSE) computing NaN: a merged batch rides its edge
+  /// group in the STANDARD group's slots, so its correlation prefix starts `sys_offset` strides into
+  /// gpu_a / gpu_r_hp (correlation_stage()) and asked for an interior pointer. Keyed by pointer, the
+  /// cache answered with a second MTLBuffer over memory the batch's own mapping already covered, so the
+  /// inversion - reading the slots through the FIRST object, in the same command buffer, after a barrier -
+  /// read them BEFORE that prefix's writes landed. The weights then read the NaN the inversion wrote, and
+  /// the completion-time check saw the finished prefix, because by then the writes had landed (design doc
+  /// 5.8.5, P0).
+  ///
+  /// So a request that an existing mapping COVERS is answered with that mapping plus an offset. The
+  /// construction-time warm-up (reserve_buffer()/run_weights_only() over the staging buffers at their
+  /// capacity) means the interior pointers of the matrix chain are all covered by the first mapping of
+  /// each allocation, so no second object is created for them at all.
+  mapped wrap(const void* ptr, NSUInteger bytes)
+  {
+    const char* p = static_cast<const char*>(ptr);
     {
       std::lock_guard<std::mutex> lock(cache_mutex);
+      for (const auto& entry : buffer_cache) {
+        const auto* base = static_cast<const char*>(entry.first);
+        if ((p >= base) && (p + bytes <= base + entry.second.second)) {
+          const auto offset = static_cast<NSUInteger>(p - base);
+          mmse_stats_wrap_covered(offset != 0);
+          report_wrap(ptr, bytes, entry.second.first, offset, "cover");
+          return {entry.second.first, offset};
+        }
+      }
       auto it = buffer_cache.find(ptr);
       if (it != buffer_cache.end()) {
-        if (bytes <= it->second.second) {
-          return it->second.first;
-        }
-        // Larger request than the cached wrap: re-wrap instead of silently handing back a
-        // too-short buffer (S-1 audit fix). The construction-time warm-up wraps the maximum
-        // sizes first, so this should never happen on the packet path - but it must not
-        // truncate the GPU's view if it does.
+        // Same base, larger request: no cached mapping covers it, so this region has to be mapped
+        // again. The entry is REPLACED (emplace() silently kept the old one, so the S-1 audit's
+        // "larger request" path never took effect and every later call re-created the object).
         ocudulog::fetch_basic_logger("PHY").warning(
-            "MMSE engine: zero-copy cache hit with a larger request ({} > cached {}): re-wrapping the buffer",
+            "MMSE engine: zero-copy mapping has to grow past its cached extent ({} > {}): re-mapping",
             static_cast<unsigned long long>(bytes),
             static_cast<unsigned long long>(it->second.second));
       }
@@ -370,10 +479,12 @@ struct mmse_engine_impl {
                                             deallocator:nil];
     if (buf != nil) {
       std::lock_guard<std::mutex> lock(cache_mutex);
-      buffer_cache.emplace(ptr, std::make_pair(buf, bytes));
+      buffer_cache.insert_or_assign(ptr, std::make_pair(buf, bytes));
     }
-    return buf;
+    report_wrap(ptr, bytes, buf, 0, (buf != nil) ? "new  " : "FAIL ");
+    return {buf, 0};
   }
+
 
   /// \brief Zero-copy mapping of a buffer that another engine consumes (see
   /// reserve_shared_buffer()).
@@ -385,7 +496,29 @@ struct mmse_engine_impl {
   /// allocated page-rounded and reserved at capacity once, at construction.
   id<MTLBuffer> wrap_shared(const void* ptr, NSUInteger bytes)
   {
-    id<MTLBuffer> buf = metal::shared_queue::wrap_no_copy(device, ptr, static_cast<size_t>(bytes));
+    // \note The process-wide cache (shared_queue::wrap_no_copy) answers a request that an existing
+    // mapping ever so slightly contains with that mapping PLUS AN OFFSET, and this entry point drops
+    // that offset: it can only hand back a buffer to bind at 0. Every call site below therefore
+    // depends on the request being the mapping's own base - the estimator reserves its exported
+    // buffers at capacity first (see reserve_shared_buffer) so their first wrap is the whole
+    // allocation, but the ROTATING slots (gpu_rsrp + slot, gpu_ta + slot) are interior pointers and
+    // are the ones this would bite. The offset is logged once here rather than assumed: a non-zero
+    // one is a binding to the WRONG address, and this is the line that says whether it happens.
+    size_t        shared_offset = 0;
+    id<MTLBuffer> buf = metal::shared_queue::wrap_no_copy(device, ptr, static_cast<size_t>(bytes), &shared_offset);
+    if (buf != nil && shared_offset != 0) {
+      static std::atomic<bool> offset_logged{false};
+      bool                     expected = false;
+      if (offset_logged.compare_exchange_strong(expected, true)) {
+        ocudulog::fetch_basic_logger("PHY").error(
+            "MMSE engine: the shared zero-copy cache served {} ({} bytes) as an OFFSET ({}) into an "
+            "existing mapping, which this entry point cannot express: the binding below would use the "
+            "mapping's base instead",
+            ptr,
+            static_cast<unsigned long long>(bytes),
+            static_cast<unsigned long long>(shared_offset));
+      }
+    }
     if (buf == nil) {
       ocudulog::fetch_basic_logger("PHY").warning(
           "MMSE engine: zero-copy wrap of the exported buffer {} ({} bytes) failed",
@@ -837,14 +970,14 @@ static bool load_ta_dft_pipeline(mmse_engine_impl* e)
 static bool encode_ta(mmse_engine_impl*                             e,
                       stage_encoder&                                s,
                       const ocudu::metal::mmse_engine::reformat_stage::ta_stage_t& ta,
-                      id<MTLBuffer>                                 h_buf,
+                      mmse_engine_impl::mapped                      h_buf,
                       const ocudu::metal::mmse_engine::hop_geometry&              geo)
 {
   static constexpr unsigned kernel_max_size   = 2048; // mmse_ta_chain_max_size
   static constexpr unsigned kernel_max_slices = 16;   // mmse_ta_max_slices
   static constexpr unsigned kernel_max_dmrs   = 4;    // mmse_ta_max_dmrs
   const unsigned            nof_slices        = ta.nof_dmrs_symbols * geo.nof_layers;
-  if ((h_buf == nil) || (ta.dst == nullptr) || (ta.dft_size == 0u) || (ta.stride == 0u) ||
+  if ((h_buf.buf == nil) || (ta.dst == nullptr) || (ta.dft_size == 0u) || (ta.stride == 0u) ||
       (ta.stride > 3u) || (nof_slices == 0u) || (ta.dft_size > kernel_max_size) ||
       (nof_slices > kernel_max_slices) || (geo.nof_layers == 0u) || (geo.nof_layers > 4u) ||
       (ta.nof_dmrs_symbols == 0u) || (ta.nof_dmrs_symbols > kernel_max_dmrs) ||
@@ -910,7 +1043,7 @@ static bool encode_ta(mmse_engine_impl*                             e,
   if (enc == nil) {
     return false;
   }
-  [enc setBuffer:h_buf offset:0 atIndex:0];
+  [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:0];
   [enc setBuffer:out_buf offset:0 atIndex:1];
   [enc setBuffer:e->ta_twiddle offset:0 atIndex:2];
   [enc setBytes:&p length:sizeof(p) atIndex:3];
@@ -927,7 +1060,7 @@ static bool encode_ta(mmse_engine_impl*                             e,
 
 static void encode_reformat(stage_encoder&                             s,
                             mmse_engine_impl*                          e,
-                            id<MTLBuffer>                              h_buf,
+                            mmse_engine_impl::mapped                   h_buf,
                             const ocudu::metal::mmse_engine::reformat_stage* reformat,
                             unsigned                                   nout,
                             unsigned                                   nof_blocks)
@@ -982,7 +1115,7 @@ static void encode_reformat(stage_encoder&                             s,
         [s.enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
       }
       enc = stage_pipeline(e, s, e->reformat_pipe);
-      [enc setBuffer:h_buf offset:0 atIndex:0];
+      [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:0];
       [enc setBytes:reformat->offsets
              length:static_cast<NSUInteger>(reformat->nof_symbols + 1) * sizeof(uint32_t)
              atIndex:1];
@@ -1055,7 +1188,7 @@ static void encode_reformat(stage_encoder&                             s,
           // K5 reads h, which K2 wrote and K3 also read: same producer, so the barrier K3 needed
           // already stands between them.
           enc = stage_pipeline(e, s, e->rsrp_pipe);
-          [enc setBuffer:h_buf offset:0 atIndex:0];
+          [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:0];
           [enc setBuffer:rsrp_buf offset:0 atIndex:1];
           [enc setBytes:&rpparams length:sizeof(rpparams) atIndex:2];
           // One threadgroup per (block slot, layer) of the WHOLE region, edge block included: the
@@ -1117,13 +1250,13 @@ static void encode_reformat(stage_encoder&                             s,
         static_cast<NSUInteger>(noise.npt) * reformat->nof_layers * noise.npf * 2 * sizeof(float);
     const NSUInteger rx_bytes =
         static_cast<NSUInteger>(noise.npt) * noise.nof_cdm_groups * noise.npf * 2 * sizeof(float);
-    id<MTLBuffer> pilots_buf = e->wrap(noise.pilots, pilots_bytes);
-    id<MTLBuffer> rx_buf     = e->wrap(noise.rx_pilots, rx_bytes);
-    id<MTLBuffer> nv_buf     = e->wrap_shared(noise.nv, sizeof(float));
+    mmse_engine_impl::mapped pilots_buf = e->wrap(noise.pilots, pilots_bytes);
+    mmse_engine_impl::mapped rx_buf     = e->wrap(noise.rx_pilots, rx_bytes);
+    id<MTLBuffer>          nv_buf       = e->wrap_shared(noise.nv, sizeof(float));
     // The extraction's CFO, read by the device so the host never has to. It is the hop's own rotating
     // slot: see reformat_stage::noise_stage_t::cfo_dev for why one slot would not do.
-    id<MTLBuffer> cfo_buf    = e->wrap(noise.cfo_dev, sizeof(float));
-    if (pilots_buf != nil && rx_buf != nil && nv_buf != nil && cfo_buf != nil) {
+    mmse_engine_impl::mapped cfo_buf = e->wrap(noise.cfo_dev, sizeof(float));
+    if (pilots_buf.buf != nil && rx_buf.buf != nil && nv_buf != nil && cfo_buf.buf != nil) {
       struct mmse_noise_params {
         uint32_t nout_stride;
         uint32_t n_blk;
@@ -1197,12 +1330,12 @@ static void encode_reformat(stage_encoder&                             s,
         [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
       }
       enc = stage_pipeline(e, s, e->noise_pipe);
-      [enc setBuffer:h_buf offset:0 atIndex:0];
-      [enc setBuffer:pilots_buf offset:0 atIndex:1];
-      [enc setBuffer:rx_buf offset:0 atIndex:2];
+      [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:0];
+      [enc setBuffer:pilots_buf.buf offset:pilots_buf.offset atIndex:1];
+      [enc setBuffer:rx_buf.buf offset:rx_buf.offset atIndex:2];
       [enc setBuffer:nv_buf offset:0 atIndex:3];
       [enc setBytes:&nparams length:sizeof(nparams) atIndex:4];
-      [enc setBuffer:cfo_buf offset:0 atIndex:5];
+      [enc setBuffer:cfo_buf.buf offset:cfo_buf.offset atIndex:5];
       // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (its reduction tree is written for it).
     [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
@@ -1502,13 +1635,15 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
 
   const NSUInteger pilots = static_cast<NSUInteger>(s.nof_dmrs_symb) * s.nof_layers * s.nof_pilots;
 
-  id<MTLBuffer> grid_buf = e->wrap(s.grid, s.grid_bytes);
-  // Whole allocations, never the per-hop length: the wrap cache is pointer-keyed and a request
-  // larger than its cached entry forces a re-map (see pilots_stage::buf_bytes).
-  id<MTLBuffer> ref_buf  = e->wrap(s.ref, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
-  id<MTLBuffer> lse_buf  = e->wrap(s.lse, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
-  id<MTLBuffer> cfo_buf  = e->wrap(s.cfo, sizeof(float));
-  if ((grid_buf == nil) || (ref_buf == nil) || (lse_buf == nil) || (cfo_buf == nil)) {
+  mmse_engine_impl::mapped grid_buf = e->wrap(s.grid, s.grid_bytes);
+  // Whole allocations, never the per-hop length: a request larger than the mapped extent forces a
+  // re-map (see pilots_stage::buf_bytes).
+  mmse_engine_impl::mapped ref_buf =
+      e->wrap(s.ref, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
+  mmse_engine_impl::mapped lse_buf =
+      e->wrap(s.lse, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
+  mmse_engine_impl::mapped cfo_buf = e->wrap(s.cfo, sizeof(float));
+  if ((grid_buf.buf == nil) || (ref_buf.buf == nil) || (lse_buf.buf == nil) || (cfo_buf.buf == nil)) {
     return false;
   }
 
@@ -1553,10 +1688,10 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
           s.nof_pilots);
     }
   }
-  id<MTLBuffer> smoothed_buf = nil;
-  id<MTLBuffer> filt_buf     = nil;
-  id<MTLBuffer> rx_buf       = nil;
-  id<MTLBuffer> sigma2_buf   = nil;
+  mmse_engine_impl::mapped smoothed_buf;
+  mmse_engine_impl::mapped filt_buf;
+  mmse_engine_impl::mapped rx_buf;
+  mmse_engine_impl::mapped sigma2_buf;
   if (sigma2_ok) {
     smoothed_buf = e->wrap(s.smoothed, (s.buf_bytes != 0) ? s.buf_bytes : pilots * 2 * sizeof(float));
     filt_buf     = e->wrap(s.fd_filter,
@@ -1566,10 +1701,10 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     // The length must cover every slot the kernel writes: wrapping two made the kernel's out[2] /
     // out[3] land past the end of its Metal buffer, which is exactly the kind of out-of-bounds write
     // that surfaces as a wrong A somewhere else (measured: the CE unit test's NMSE regressed by
-    // 3.9 dB at 20 dB SNR). Wrapped with its full length here and nowhere else, so the cache never
-    // sees a larger request later.
-    sigma2_buf   = e->wrap(s.sigma2, 4 * sizeof(float));
-    if ((smoothed_buf == nil) || (filt_buf == nil) || (sigma2_buf == nil)) {
+    // 3.9 dB at 20 dB SNR). Wrapped with its full length here and nowhere else, so no larger request
+    // for it can arrive later.
+    sigma2_buf = e->wrap(s.sigma2, 4 * sizeof(float));
+    if ((smoothed_buf.buf == nil) || (filt_buf.buf == nil) || (sigma2_buf.buf == nil)) {
       return false;
     }
   }
@@ -1578,20 +1713,20 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   // only when the sigma2 block runs. The EPRE reduction below reads it, and so does K4 later.
   if (s.rx_pilots != nullptr) {
     rx_buf = e->wrap(s.rx_pilots, s.rx_bytes);
-    if (rx_buf == nil) {
+    if (rx_buf.buf == nil) {
       return false;
     }
   }
-  id<MTLBuffer> epre_buf = nil;
+  mmse_engine_impl::mapped epre_buf;
   if (s.epre != nullptr) {
-    if ((rx_buf == nil) || (e->pilots_epre_pipe == nil)) {
+    if ((rx_buf.buf == nil) || (e->pilots_epre_pipe == nil)) {
       // A caller that asked for the reduction without the array to reduce, or against a metallib
       // without the kernel, would otherwise read a destination the device never wrote: refuse the
       // whole stage, which the caller handles as the host-extraction fallback.
       return false;
     }
     epre_buf = e->wrap(s.epre, sizeof(float));
-    if (epre_buf == nil) {
+    if (epre_buf.buf == nil) {
       return false;
     }
   }
@@ -1629,32 +1764,33 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   id<MTLComputeCommandEncoder> enc = st.enc;
 
   [enc setComputePipelineState:e->pilots_lse_pipe];
-  [enc setBuffer:grid_buf offset:0 atIndex:0];
-  [enc setBuffer:ref_buf offset:0 atIndex:1];
-  [enc setBuffer:lse_buf offset:0 atIndex:2];
+  [enc setBuffer:grid_buf.buf offset:grid_buf.offset atIndex:0];
+  [enc setBuffer:ref_buf.buf offset:ref_buf.offset atIndex:1];
+  [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:2];
   [enc setBytes:&p length:sizeof(p) atIndex:3];
   // The received pilots the kernel reads on its way to the product, stored into the array the noise
   // stage and K4 consume (S13-P2). A null buffer is bound when the caller passes no destination: the
   // kernel's own bounds check on it is what keeps that from being a write, and the caller then keeps
   // the host extraction.
-  [enc setBuffer:rx_buf offset:0 atIndex:4];
+  [enc setBuffer:rx_buf.buf offset:rx_buf.offset atIndex:4];
   [enc dispatchThreads:MTLSizeMake(s.nof_pilots, s.nof_dmrs_symb * s.nof_layers, 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
   [enc setComputePipelineState:e->pilots_cfo_pipe];
-  [enc setBuffer:lse_buf offset:0 atIndex:0];
-  [enc setBuffer:cfo_buf offset:0 atIndex:1];
+  [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
+  [enc setBuffer:cfo_buf.buf offset:cfo_buf.offset atIndex:1];
   [enc setBytes:&p length:sizeof(p) atIndex:2];
   // The previous hop's CFO slot, so the kernel carries a value forward itself when this hop has
   // nothing to estimate (see pilots_stage::cfo_prev). Null means the caller still carries it on the
   // host, which the kernel then reproduces by writing 0 - see the branch's note.
-  id<MTLBuffer> cfo_prev_buf = (s.cfo_prev != nullptr) ? e->wrap(s.cfo_prev, sizeof(float)) : nil;
-  [enc setBuffer:cfo_prev_buf offset:0 atIndex:3];
+  mmse_engine_impl::mapped cfo_prev_buf =
+      (s.cfo_prev != nullptr) ? e->wrap(s.cfo_prev, sizeof(float)) : mmse_engine_impl::mapped{};
+  [enc setBuffer:cfo_prev_buf.buf offset:cfo_prev_buf.offset atIndex:3];
   [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
   [enc setComputePipelineState:e->pilots_apply_pipe];
-  [enc setBuffer:lse_buf offset:0 atIndex:0];
-  [enc setBuffer:cfo_buf offset:0 atIndex:1];
+  [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
+  [enc setBuffer:cfo_buf.buf offset:cfo_buf.offset atIndex:1];
   [enc setBytes:&p length:sizeof(p) atIndex:2];
   [enc dispatchThreads:MTLSizeMake(s.nof_layers * s.nof_pilots, s.nof_dmrs_symb, 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
@@ -1692,9 +1828,9 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     // The CFO phasors use the estimate THIS command buffer just produced (cfo_buf): the host's own
     // estimate is not known yet, and the two agree to the precision the pilots do.
     [enc setComputePipelineState:e->pilots_smooth_pipe];
-    [enc setBuffer:lse_buf offset:0 atIndex:0];
-    [enc setBuffer:smoothed_buf offset:0 atIndex:1];
-    [enc setBuffer:filt_buf offset:0 atIndex:2];
+    [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
+    [enc setBuffer:smoothed_buf.buf offset:smoothed_buf.offset atIndex:1];
+    [enc setBuffer:filt_buf.buf offset:filt_buf.offset atIndex:2];
     [enc setBytes:&q length:sizeof(q) atIndex:3];
     // 128 = mmse_smooth_tg_size in ocudu_mmse_pilots.metal (the kernel strides its walk by it).
     [enc dispatchThreadgroups:MTLSizeMake(s.nof_dmrs_symb * s.nof_layers, 1, 1)
@@ -1702,11 +1838,11 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
     [enc setComputePipelineState:e->pilots_sigma2_pipe];
-    [enc setBuffer:smoothed_buf offset:0 atIndex:0];
-    [enc setBuffer:ref_buf offset:0 atIndex:1];
-    [enc setBuffer:rx_buf offset:0 atIndex:2];
-    [enc setBuffer:cfo_buf offset:0 atIndex:3];
-    [enc setBuffer:sigma2_buf offset:0 atIndex:4];
+    [enc setBuffer:smoothed_buf.buf offset:smoothed_buf.offset atIndex:0];
+    [enc setBuffer:ref_buf.buf offset:ref_buf.offset atIndex:1];
+    [enc setBuffer:rx_buf.buf offset:rx_buf.offset atIndex:2];
+    [enc setBuffer:cfo_buf.buf offset:cfo_buf.offset atIndex:3];
+    [enc setBuffer:sigma2_buf.buf offset:sigma2_buf.offset atIndex:4];
     [enc setBytes:&q length:sizeof(q) atIndex:5];
     // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (its reduction tree is written for it).
     [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -1716,8 +1852,8 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     if (e->pilots_power_pipe != nil) {
       [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
       [enc setComputePipelineState:e->pilots_power_pipe];
-      [enc setBuffer:lse_buf offset:0 atIndex:0];
-      [enc setBuffer:sigma2_buf offset:0 atIndex:1];
+      [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
+      [enc setBuffer:sigma2_buf.buf offset:sigma2_buf.offset atIndex:1];
       [enc setBytes:&q length:sizeof(q) atIndex:2];
       [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
@@ -1727,7 +1863,7 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   // rx_buf, so it goes AFTER the barrier the sigma2 block already puts between the extraction and its
   // consumers - and it runs whenever the caller asked for it, sigma2 block or not (the EPRE statistic
   // does not depend on the noise variance).
-  if (epre_buf != nil) {
+  if (epre_buf.buf != nil) {
     if (!sigma2_ok) {
       // The barrier above is encoded inside the sigma2 block: without it, the store the LSE kernel
       // just made would not be ordered against this reduction.
@@ -1738,8 +1874,8 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
     e_params.nof_cdm       = (s.nof_layers + 1) / 2;
     e_params.nof_pilots    = s.nof_pilots;
     [enc setComputePipelineState:e->pilots_epre_pipe];
-    [enc setBuffer:rx_buf offset:0 atIndex:0];
-    [enc setBuffer:epre_buf offset:0 atIndex:1];
+    [enc setBuffer:rx_buf.buf offset:rx_buf.offset atIndex:0];
+    [enc setBuffer:epre_buf.buf offset:epre_buf.offset atIndex:1];
     [enc setBytes:&e_params length:sizeof(e_params) atIndex:2];
     // 256 = mmse_sigma2_tg_size in ocudu_mmse_pilots.metal (the kernel's reduction tree is written
     // for it, and its walk strides by that constant).
@@ -1872,16 +2008,16 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   // ONE dispatch per matrix for the whole batch: the second grid dimension selects the system, so
   // the batch's matrices are contiguous and the kernel indexes them itself. A dispatch per system
   // measured 628us of GPU time on a 25 PRB hop - more than the host loops it replaces.
-  id<MTLBuffer> a_buf   = e->wrap(c.a, a_bytes);
-  id<MTLBuffer> rhp_buf = e->wrap(c.r_hp, rhp_bytes);
-  if ((a_buf == nil) || (rhp_buf == nil)) {
+  mmse_engine_impl::mapped a_buf   = e->wrap(c.a, a_bytes);
+  mmse_engine_impl::mapped rhp_buf = e->wrap(c.r_hp, rhp_bytes);
+  if ((a_buf.buf == nil) || (rhp_buf.buf == nil)) {
     return false;
   }
 
   // Two pipelines in a row: in burst mode each switch goes through the stage's pipeline selection, so
   // the barrier that orders the A build against K1 (and the R_hp build against K2) is the burst's.
   id<MTLComputeCommandEncoder> enc = stage_pipeline(e, s, e->corr_a_pipe);
-  [enc setBuffer:a_buf offset:0 atIndex:0];
+  [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:0];
   [enc setBytes:&p length:sizeof(p) atIndex:1];
   // buffer(2) is only read when p.sigma2_slot says so, but it must be bound for that kernel anyway
   // (MSL leaves an unbound device pointer undefined, and nil is not an option for a non-nullable
@@ -1890,16 +2026,16 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   // at the element instead would make the kernel's scalars[slot] land past the end (which is exactly
   // how this read a different element and loaded A with no noise at all).
   if (c.sigma2_dev != nullptr) {
-    id<MTLBuffer> sig_buf = e->wrap(c.sigma2_dev, 4 * sizeof(float));
-    if (sig_buf == nil) {
+    mmse_engine_impl::mapped sig_buf = e->wrap(c.sigma2_dev, 4 * sizeof(float));
+    if (sig_buf.buf == nil) {
       return false;
     }
-    [enc setBuffer:sig_buf offset:0 atIndex:2];
+    [enc setBuffer:sig_buf.buf offset:sig_buf.offset atIndex:2];
   }
   [enc dispatchThreads:MTLSizeMake(a_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
   enc = stage_pipeline(e, s, e->corr_rhp_pipe);
-  [enc setBuffer:rhp_buf offset:0 atIndex:0];
+  [enc setBuffer:rhp_buf.buf offset:rhp_buf.offset atIndex:0];
   [enc setBytes:&p length:sizeof(p) atIndex:1];
   [enc dispatchThreads:MTLSizeMake(rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
@@ -1973,8 +2109,8 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
   const bool   debug_en = (std::getenv("OCUDU_MMSE_DEBUG") != nullptr);
   const auto   t_wrap0  = std::chrono::steady_clock::now();
   const NSUInteger bytes = static_cast<NSUInteger>(nof_systems) * n * n * sizeof(float);
-  id<MTLBuffer>    a_buf = e->wrap(a, bytes);
-  if (a_buf == nil) {
+  mmse_engine_impl::mapped a_buf = e->wrap(a, bytes);
+  if (a_buf.buf == nil) {
     return false;
   }
   const auto t_wrap1 = std::chrono::steady_clock::now();
@@ -1984,7 +2120,7 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
   const auto t_cb1 = std::chrono::steady_clock::now();
   id<MTLComputeCommandEncoder> enc = st.enc;
   [enc setComputePipelineState:e->inv_pipe];
-  [enc setBuffer:a_buf offset:0 atIndex:0];
+  [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:0];
   [enc setBytes:&n length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
   // One threadgroup per system, laid out as (column, row) so that the elimination of a pivot
@@ -2013,10 +2149,10 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
     return false;
   }
 
-  id<MTLBuffer> w_buf = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
-  id<MTLBuffer> y_buf = e->wrap(y, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * L * sizeof(float));
-  id<MTLBuffer> h_buf = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
-  if (w_buf == nil || y_buf == nil || h_buf == nil) {
+  mmse_engine_impl::mapped w_buf = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
+  mmse_engine_impl::mapped y_buf = e->wrap(y, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * L * sizeof(float));
+  mmse_engine_impl::mapped h_buf = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
+  if (w_buf.buf == nil || y_buf.buf == nil || h_buf.buf == nil) {
     return false;
   }
 
@@ -2031,9 +2167,9 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
   id<MTLCommandBuffer>         cb  = st.cb;
   id<MTLComputeCommandEncoder> enc = st.enc;
   [enc setComputePipelineState:e->apply_pipe];
-  [enc setBuffer:w_buf offset:0 atIndex:0];
-  [enc setBuffer:y_buf offset:0 atIndex:1];
-  [enc setBuffer:h_buf offset:0 atIndex:2];
+  [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
+  [enc setBuffer:y_buf.buf offset:y_buf.offset atIndex:1];
+  [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:2];
   [enc setBytes:&params length:sizeof(params) atIndex:3];
   [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
@@ -2474,10 +2610,10 @@ static_assert(sizeof(mmse_scatter_params_t) == 36, "mmse_scatter_params_t must m
 /// \return False when nothing was encoded; the caller must then not commit (the host staging was
 ///         skipped in favour of this write, so a silent failure would leave stale pilots in y).
 static bool encode_scatter(mmse_engine_impl* e, stage_encoder& st,
-                           const mmse_engine::pilots_scatter& s, id<MTLBuffer> y_buf,
+                           const mmse_engine::pilots_scatter& s, mmse_engine_impl::mapped y_buf,
                            const float* y_base, std::size_t y_buf_bytes)
 {
-  if ((e->pilots_scatter_pipe == nil) || (s.lse == nullptr) || (s.y == nullptr) || (y_buf == nil) ||
+  if ((e->pilots_scatter_pipe == nil) || (s.lse == nullptr) || (s.y == nullptr) || (y_buf.buf == nil) ||
       (y_base == nullptr) || (s.lse_bytes == 0) || (s.nof_layers == 0) || (s.nof_symb == 0) ||
       (s.nof_pilots == 0) || (s.npf == 0) || (s.n_blk_slots == 0) || (s.n_blk_real == 0) ||
       (s.n_blk_real > s.n_blk_slots) || (s.Ls == 0) || (s.nof_symb * s.npf > s.Ls)) {
@@ -2493,10 +2629,18 @@ static bool encode_scatter(mmse_engine_impl* e, stage_encoder& st,
     mmse_stats_pilots_scatter_failure();
     return false;
   }
+  // The binding is the mapping's OWN offset plus the group's position inside the batch: the y buffer
+  // may be a view into a mapping the batch base started (see wrap()), and binding only y_off would
+  // write the group's pilots that many bytes away from where the apply kernel reads them.
+  const NSUInteger y_bind = y_buf.offset + static_cast<NSUInteger>(y_off);
+  if ((y_bind + y_len) > y_buf.buf.length) {
+    mmse_stats_pilots_scatter_failure();
+    return false;
+  }
   // The source (K0-a's own output) is wrapped as the engine wraps it there: same pointer, same
   // capacity, so the cache hands back the same object and the two stages stay related.
-  id<MTLBuffer> lse_buf = e->wrap(s.lse, s.lse_bytes);
-  if (lse_buf == nil) {
+  mmse_engine_impl::mapped lse_buf = e->wrap(s.lse, s.lse_bytes);
+  if (lse_buf.buf == nil) {
     mmse_stats_pilots_scatter_failure();
     return false;
   }
@@ -2513,8 +2657,8 @@ static bool encode_scatter(mmse_engine_impl* e, stage_encoder& st,
   p.inv_beta    = s.inv_beta;
 
   id<MTLComputeCommandEncoder> enc = stage_pipeline(e, st, e->pilots_scatter_pipe);
-  [enc setBuffer:lse_buf offset:0 atIndex:0];
-  [enc setBuffer:y_buf offset:static_cast<NSUInteger>(y_off) atIndex:1];
+  [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
+  [enc setBuffer:y_buf.buf offset:y_bind atIndex:1];
   [enc setBytes:&p length:sizeof(p) atIndex:2];
   [enc dispatchThreads:MTLSizeMake(s.Ls, s.n_blk_slots, s.nof_layers)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
@@ -2552,16 +2696,16 @@ static bool encode_run(mmse_engine_impl*     e,
   }
 
   mmse_phase_timer phase(wait_for_completion ? "run" : "run_async");
-  id<MTLBuffer> a_buf  = e->wrap(a, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
-  id<MTLBuffer> rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
-  id<MTLBuffer> w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
+  mmse_engine_impl::mapped a_buf  = e->wrap(a, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
+  mmse_engine_impl::mapped rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
+  mmse_engine_impl::mapped w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
   // The length the engine BINDS y with, and therefore the extent the scatter's offsets are checked
   // against. wrap() may hand back a larger cached buffer; the batch's own slots are what matters.
   const std::size_t y_bytes_used = static_cast<std::size_t>(nof_systems) * nof_blocks * 2 * L * sizeof(float);
-  id<MTLBuffer>     y_buf        = e->wrap(y, static_cast<NSUInteger>(y_bytes_used));
-  id<MTLBuffer> h_buf  = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
+  mmse_engine_impl::mapped y_buf = e->wrap(y, static_cast<NSUInteger>(y_bytes_used));
+  mmse_engine_impl::mapped h_buf  = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
   phase.wrapped();
-  if (a_buf == nil || rp_buf == nil || w_buf == nil || y_buf == nil || h_buf == nil) {
+  if (a_buf.buf == nil || rp_buf.buf == nil || w_buf.buf == nil || y_buf.buf == nil || h_buf.buf == nil) {
     return false;
   }
 
@@ -2672,7 +2816,7 @@ static bool encode_run(mmse_engine_impl*     e,
   }
 
   enc = stage_pipeline(e, st, use_rl ? e->inv_rl_pipe : e->inv_pipe);
-  [enc setBuffer:a_buf offset:0 atIndex:0];
+  [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:0];
   [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
   // Same (column, row) threadgroup layout AND the same geometry as invert(): the pivot-column
@@ -2688,9 +2832,9 @@ static bool encode_run(mmse_engine_impl*     e,
   }
 
   enc = stage_pipeline(e, st, e->weights_pipe);
-  [enc setBuffer:rp_buf offset:0 atIndex:0];
-  [enc setBuffer:a_buf offset:0 atIndex:1];
-  [enc setBuffer:w_buf offset:0 atIndex:2];
+  [enc setBuffer:rp_buf.buf offset:rp_buf.offset atIndex:0];
+  [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:1];
+  [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:2];
   [enc setBytes:&wparams length:sizeof(wparams) atIndex:3];
   // One thread per output element: nof_systems * ceil(nout * L / 128) threadgroups.
   {
@@ -2699,9 +2843,9 @@ static bool encode_run(mmse_engine_impl*     e,
   }
 
   enc = stage_pipeline(e, st, e->apply_pipe);
-  [enc setBuffer:w_buf offset:0 atIndex:0];
-  [enc setBuffer:y_buf offset:0 atIndex:1];
-  [enc setBuffer:h_buf offset:0 atIndex:2];
+  [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
+  [enc setBuffer:y_buf.buf offset:y_buf.offset atIndex:1];
+  [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:2];
   [enc setBytes:&aparams length:sizeof(aparams) atIndex:3];
   [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
@@ -2945,16 +3089,16 @@ bool encode_weights_only(mmse_engine_impl*                  e,
                          bool                               wait_for_completion)
 {
   mmse_phase_timer phase(wait_for_completion ? "run_weights_only" : "run_weights_only_async");
-  id<MTLBuffer> ai_buf = e->wrap(a_inv, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
-  id<MTLBuffer> rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
-  id<MTLBuffer> w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
+  mmse_engine_impl::mapped ai_buf = e->wrap(a_inv, static_cast<NSUInteger>(nof_systems) * L * L * sizeof(float));
+  mmse_engine_impl::mapped rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
+  mmse_engine_impl::mapped w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * nout * L * sizeof(float));
   // The length the engine BINDS y with, and therefore the extent the scatter's offsets are checked
   // against. wrap() may hand back a larger cached buffer; the batch's own slots are what matters.
   const std::size_t y_bytes_used = static_cast<std::size_t>(nof_systems) * nof_blocks * 2 * L * sizeof(float);
-  id<MTLBuffer>     y_buf        = e->wrap(y, static_cast<NSUInteger>(y_bytes_used));
-  id<MTLBuffer> h_buf  = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
+  mmse_engine_impl::mapped y_buf = e->wrap(y, static_cast<NSUInteger>(y_bytes_used));
+  mmse_engine_impl::mapped h_buf  = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
   phase.wrapped();
-  if (ai_buf == nil || rp_buf == nil || w_buf == nil || y_buf == nil || h_buf == nil) {
+  if (ai_buf.buf == nil || rp_buf.buf == nil || w_buf.buf == nil || y_buf.buf == nil || h_buf.buf == nil) {
     return false;
   }
 
@@ -3033,7 +3177,7 @@ bool encode_weights_only(mmse_engine_impl*                  e,
                            st,
                            ((e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr)) ? e->inv_rl_pipe
                                                                                                : e->inv_pipe);
-      [enc setBuffer:ai_buf offset:0 atIndex:0];
+      [enc setBuffer:ai_buf.buf offset:ai_buf.offset atIndex:0];
       [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
       [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
       unsigned tgx = 0;
@@ -3045,9 +3189,9 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   }
 
   enc = stage_pipeline(e, st, e->weights_pipe);
-  [enc setBuffer:rp_buf offset:0 atIndex:0];
-  [enc setBuffer:ai_buf offset:0 atIndex:1];
-  [enc setBuffer:w_buf offset:0 atIndex:2];
+  [enc setBuffer:rp_buf.buf offset:rp_buf.offset atIndex:0];
+  [enc setBuffer:ai_buf.buf offset:ai_buf.offset atIndex:1];
+  [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:2];
   [enc setBytes:&wparams length:sizeof(wparams) atIndex:3];
   // One thread per output element: nof_systems * ceil(nout * L / 128) threadgroups.
   {
@@ -3056,9 +3200,9 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   }
 
   enc = stage_pipeline(e, st, e->apply_pipe);
-  [enc setBuffer:w_buf offset:0 atIndex:0];
-  [enc setBuffer:y_buf offset:0 atIndex:1];
-  [enc setBuffer:h_buf offset:0 atIndex:2];
+  [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
+  [enc setBuffer:y_buf.buf offset:y_buf.offset atIndex:1];
+  [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:2];
   [enc setBytes:&aparams length:sizeof(aparams) atIndex:3];
   [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
@@ -3112,12 +3256,12 @@ bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const 
   const uint32_t Np     = (nout + 7u) & ~7u; // ceil8(nout)
   const uint32_t nquads = (nof_blocks + 3u) / 4u; // 4 blocks per quad, tail quad may be partial
 
-  id<MTLBuffer> ai_buf = e->wrap(a_inv, static_cast<NSUInteger>(nof_systems) * Lp * Lp * sizeof(float));
-  id<MTLBuffer> rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * Np * Lp * sizeof(float));
-  id<MTLBuffer> w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * Np * Lp * sizeof(float));
-  id<MTLBuffer> qy_buf = e->wrap(qy, static_cast<NSUInteger>(nof_systems) * nquads * Lp * 8 * sizeof(float));
-  id<MTLBuffer> h_buf  = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
-  if (ai_buf == nil || rp_buf == nil || w_buf == nil || qy_buf == nil || h_buf == nil) {
+  mmse_engine_impl::mapped ai_buf = e->wrap(a_inv, static_cast<NSUInteger>(nof_systems) * Lp * Lp * sizeof(float));
+  mmse_engine_impl::mapped rp_buf = e->wrap(r_hp, static_cast<NSUInteger>(nof_systems) * Np * Lp * sizeof(float));
+  mmse_engine_impl::mapped w_buf  = e->wrap(w, static_cast<NSUInteger>(nof_systems) * Np * Lp * sizeof(float));
+  mmse_engine_impl::mapped qy_buf = e->wrap(qy, static_cast<NSUInteger>(nof_systems) * nquads * Lp * 8 * sizeof(float));
+  mmse_engine_impl::mapped h_buf  = e->wrap(h, static_cast<NSUInteger>(nof_systems) * nof_blocks * 2 * nout * sizeof(float));
+  if (ai_buf.buf == nil || rp_buf.buf == nil || w_buf.buf == nil || qy_buf.buf == nil || h_buf.buf == nil) {
     return false;
   }
 
@@ -3142,9 +3286,9 @@ bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const 
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
   [enc setComputePipelineState:e->weights_matrix_pipe];
-  [enc setBuffer:rp_buf offset:0 atIndex:0];
-  [enc setBuffer:ai_buf offset:0 atIndex:1];
-  [enc setBuffer:w_buf offset:0 atIndex:2];
+  [enc setBuffer:rp_buf.buf offset:rp_buf.offset atIndex:0];
+  [enc setBuffer:ai_buf.buf offset:ai_buf.offset atIndex:1];
+  [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:2];
   [enc setBytes:&wm length:sizeof(wm) atIndex:3];
   {
     const NSUInteger w_tgs = static_cast<NSUInteger>(nof_systems) * (Np / 8) * (Lp / 8);
@@ -3152,9 +3296,9 @@ bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const 
   }
 
   [enc setComputePipelineState:e->apply_matrix_pipe];
-  [enc setBuffer:w_buf offset:0 atIndex:0];
-  [enc setBuffer:qy_buf offset:0 atIndex:1];
-  [enc setBuffer:h_buf offset:0 atIndex:2];
+  [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
+  [enc setBuffer:qy_buf.buf offset:qy_buf.offset atIndex:1];
+  [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:2];
   [enc setBytes:&am length:sizeof(am) atIndex:3];
   {
     const NSUInteger a_tgs = static_cast<NSUInteger>(nof_systems) * nquads * (Np / 8);
@@ -3185,7 +3329,7 @@ bool mmse_engine::reserve_buffer(const void* ptr, std::size_t bytes)
   if ((e == nullptr) || (e->device == nil) || (ptr == nullptr) || (bytes == 0)) {
     return false;
   }
-  return e->wrap(ptr, static_cast<NSUInteger>(bytes)) != nil;
+  return e->wrap(ptr, static_cast<NSUInteger>(bytes)).buf != nil;
 }
 
 bool mmse_engine::reserve_shared_buffer(const void* ptr, std::size_t bytes)
