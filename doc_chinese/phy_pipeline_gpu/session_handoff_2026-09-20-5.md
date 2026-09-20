@@ -154,6 +154,12 @@ K1 是**原地**求逆，每多编一次在 `A`/`A⁻¹` 之间翻面：
   然后 `sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label> [OCUDU_*=…]`
   —— **sudo 由用户执行**（把命令以纯文本贴给用户）；**Ctrl+C 停**（SIGTERM 丢统计）；
   判读 `bash doc_chinese/phy_pipeline_gpu/wip/leg_report.sh <log>`。
+* **★ 上腿之前先关掉手机的 WiFi**（2026-09-20 定案）：**手机开 WiFi 时会自己拆掉蜂窝的 PDU 会话**
+  （表现为"连上就 release"，日志里是 `Rx PDUsessionResourceReleaseCommand`，它前面 4.4 ms 有一条
+  手机发出的上行 NAS）⇒ 会白跑一条腿。完整判读方法见 `wip/S14_phone_drops.md`。
+* **★ 判读一条腿之前先看 `Real-time failures`**：磁盘上所有腿的规律是 **RTF=0 ⇒ CRC ≥ 85%**、
+  **RTF ≥ 200 ⇒ CRC ≈ 30%**。RTF 不为 0 的腿**不算腿**（判据第 3 条就是"RF failure 0"），
+  先查主机负载/USB，别拿它做 A/B。
 * **用户裁定（长期有效）**：① `mode=gpu` 不允许宿主兜底（设备覆盖不到 ⇒ 该 PUSCH 失败 + 一行 ERROR）；
   ② dump 不算 CPU in the loop（debug 接触单独打印、不进判据）；③ **控制面融合分阶段做、每阶段一次 OTA**
   （腿通过就 `git tag -a` 并推送，不过就回滚到上一个 tag）。
