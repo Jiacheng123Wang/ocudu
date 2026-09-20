@@ -128,7 +128,7 @@ public:
     // without a CRC-OK completion (or with one in a shifted slot).
     evict_oldest(pending_ldpc_starts);
 
-    if (!records_phase_segments()) {
+    if (in_fused_lane()) {
       // Fused lane (phy_pipeline_mode::gpu): the module boundaries the phase segments measure do not exist here, so
       // record the span they would have covered together instead - IQ arrival -> LLR ready. It ends at this very
       // instant (the LLRs are what this decode is about to consume), which is the boundary [ul_equalization_demod]
@@ -144,7 +144,11 @@ public:
           gpu_pipeline_latencies_us.push_back(static_cast<double>(iq_to_llr_ns) / 1e3);
         }
       }
-      return;
+      // ... and the segments too when the diagnostic switch asks for them (OCUDU_UL_PHASE_SEGMENTS=1): the
+      // total above is what the lane's criteria read, the segments are its decomposition.
+      if (!phase_segments_forced()) {
+        return;
+      }
     }
 
     // Assemble the per-slot phase durations now that all the timestamps of this PUSCH are available (the
@@ -367,12 +371,13 @@ public:
     // exist there, so their numbers would be CPU-side artifacts; what the lane does cover end to end is exactly
     // 'IQ samples in -> LLRs out' (read it together with the gpu_lane_probe residency / busy / gap split, which
     // says how much of that window the device was actually executing).
+    if (in_fused_lane()) {
+      print_series("ul_gpu_pipeline", sorted_gpu_pipeline);
+    }
     if (records_phase_segments()) {
       print_series("ul_time_frequency", sorted_t2f);
       print_series("ul_channel_estimation", sorted_ce);
       print_series("ul_equalization_demod", sorted_eqdem);
-    } else {
-      print_series("ul_gpu_pipeline", sorted_gpu_pipeline);
     }
     // The series printed below cross both modes unchanged.
     // FAPI->MAC tail (CRC-OK -> MAC UL task enqueue): recorded in lockstep with the CRC-OK completions, so its
@@ -423,13 +428,42 @@ public:
 private:
   ul_pipeline_probe() = default;
 
+  /// \brief Whether the phase segments are FORCED on (OCUDU_UL_PHASE_SEGMENTS=1), for diagnostics.
+  ///
+  /// The question the three segments answer - "which part of the IQ -> LLR span is which" - is the same
+  /// one inside the fused lane, and inside it they are the only decomposition of that span this probe can
+  /// produce: their ends are the same instants that bound [ul_gpu_pipeline], so the three add up to it by
+  /// construction. What they do NOT mean in the lane is "CPU work": the lane's segments contain device
+  /// execution and queueing, and the module boundaries they are named after do not exist there (see
+  /// records_phase_segments()). So the switch is off by default and this is a diagnostic, to be read
+  /// together with the gpu_lane_probe residency / busy / gap report.
+  /// Whether the effective mode is the fused lane. Read where a decision has to follow the MODE rather than
+  /// records_phase_segments(): the diagnostic switch changes the latter but must not change what the lane records.
+  static bool in_fused_lane() { return phy_pipeline_mode_registry::get() == phy_pipeline_mode::gpu; }
+
+  static bool phase_segments_forced()
+  {
+    // Read per call rather than cached in a static: the switch is consulted a few times per slot - not per
+    // dispatch - and the unit test has to be able to toggle it inside one process (the same reason
+    // shared_queue::front_end_fence_enabled() reads its own switch on every call).
+    const char* env = std::getenv("OCUDU_UL_PHASE_SEGMENTS");
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  }
+
   /// Whether the per-module phase segments (time-frequency / channel estimation / equalization+demodulation) are
-  /// meaningful in the current effective pipeline mode. They measure the CPU side of the module boundaries, which the
-  /// fused lane (phy_pipeline_mode::gpu) removes altogether: recording them there would only add probe overhead to the
-  /// lane, and reporting them would revive the "it got faster" illusion (the work merely moved out of the measured
-  /// window). What replaces them there is the single span they add up to ([ul_gpu_pipeline], see
-  /// record_ldpc_start()). The mode is published once at startup by the application (see phy_pipeline_mode_registry).
-  static bool records_phase_segments() { return phy_pipeline_mode_registry::get() != phy_pipeline_mode::gpu; }
+  /// recorded. They measure the CPU side of the module boundaries, which the fused lane (phy_pipeline_mode::gpu)
+  /// removes altogether: recording them there would only add probe overhead to the lane, and reporting them would
+  /// revive the "it got faster" illusion (the work merely moved out of the measured window). What replaces them there
+  /// is the single span they add up to ([ul_gpu_pipeline], see record_ldpc_start()). The mode is published once at
+  /// startup by the application (see phy_pipeline_mode_registry).
+  ///
+  /// \note In the lane the override does NOT replace [ul_gpu_pipeline]: both series are recorded and both are
+  ///       printed (see record_ldpc_start() and report()), because the total is what the lane's criteria read and
+  ///       the segments are only its decomposition.
+  static bool records_phase_segments()
+  {
+    return phase_segments_forced() || (phy_pipeline_mode_registry::get() != phy_pipeline_mode::gpu);
+  }
 
   /// Registry entry: start timestamp plus a monotonic insertion sequence (the slot key wraps every SFN cycle,
   /// so it cannot serve as the age order for the bounded-registry eviction).

@@ -178,6 +178,46 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
     EXPECT_GE(measured_us, 30000.0) << report;
     EXPECT_LT(measured_us, 1000000.0) << report;
   }
+
+  // ---- inside the fused lane, with the diagnostic decomposition switched on (OCUDU_UL_PHASE_SEGMENTS=1) --------
+  // The question "which part of the IQ -> LLR span is which" is the same one inside the lane, and there the three
+  // segments are the ONLY decomposition of that span the probe can produce (their ends are the instants that bound
+  // [ul_gpu_pipeline], so they add up to it by construction). The switch must therefore ADD the segments without
+  // replacing the total the lane's criteria read - and the values have to be the sub-spans, not the total again.
+  setenv("OCUDU_UL_PHASE_SEGMENTS", "1", 1);
+  constexpr uint64_t forced_slot = 300;
+  probe.record_start(forced_slot);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  probe.record_t2f_end(forced_slot);
+  std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  probe.record_ce_end(forced_slot);
+  std::this_thread::sleep_for(std::chrono::milliseconds(4));
+  probe.record_ldpc_start(forced_slot);
+  probe.record_end_crc_ok(forced_slot, 42);
+  {
+    const std::string report = capture_report();
+    // BOTH: the lane's total (two decode attempts by now) and the three segments. The segment series ACCUMULATE
+    // over the process (they are a shutdown report, not a per-slot one), so this section adds one sample each to
+    // the two the non-fused half recorded - asserting 1 here would be asserting about the report's history.
+    EXPECT_EQ(samples(report, "ul_gpu_pipeline"), 2) << report;
+    EXPECT_EQ(samples(report, "ul_time_frequency"), 2) << report;
+    EXPECT_EQ(samples(report, "ul_channel_estimation"), 2) << report;
+    EXPECT_EQ(samples(report, "ul_equalization_demod"), 2) << report;
+    // The sleeps above are the SUB-spans and they must not be the whole span again: this section slept 2 / 3 / 4 ms
+    // around a span of ~9 ms, while the non-fused half slept 2 / 0 / 2 ms. So the mean of the equalization+
+    // demodulation segment over the two samples has to sit at ~3 ms - a report that printed the total (or the sum)
+    // three times lands far above, and one that printed the same number three times lands at ~4.5 ms or ~0.
+    const double eqdem_us = mean_us(report, "ul_equalization_demod");
+    EXPECT_GE(eqdem_us, 2500.0) << report;
+    EXPECT_LT(eqdem_us, 4000.0) << report;
+    // The three segments of the forced PUSCH add up to a span well above any single one of them.
+    const double t2f_us   = mean_us(report, "ul_time_frequency");
+    const double total_us = mean_us(report, "ul_gpu_pipeline");
+    EXPECT_GE(t2f_us, 2000.0) << report;
+    EXPECT_LT(t2f_us, 6000.0) << report;
+    EXPECT_GT(total_us, t2f_us + 6000.0) << report;
+  }
+  unsetenv("OCUDU_UL_PHASE_SEGMENTS");
 }
 
 #endif // OCUDU_FLOW_PROBES
