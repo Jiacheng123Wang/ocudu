@@ -579,10 +579,15 @@ OCUDU_CE_DEV_Y=0       3.10 读 + 2.65 写 /跳   ← 参考臂：宿主 stage y
 | **中途等待** | `extraction commit → weights commit` **301 µs**（p95 434）、`weights commit → burst commit` **70 µs**（p95 105）| 0（CPU 提交完只在出口等）|
 | 分解 | `ch_est` 的 1.73 = 1 个标准组 + **0.73 个尾组/edge 的 commit-wait 对**（`ocudu_metal_mmse_engine.mm:2655`："an edge, and the lane paid a commit/wait pair for it (cbs/lane 3.00 → 3.28 on air)"）| 尾组并进同一命令缓冲 |
 
-**入口点与嫌疑（写在这里免得重新找）**：`OCUDU_CE_EDGE_FUSE=1` 就是朝这个方向做的尝试，但它与独立形态
-**差 51,810 字节、未解决**。下一个嫌疑是 `encode_run` 在 `st.burst` 时**跳过 corr ↔ K1 之间那道 barrier**
-（源码注释假定"切 pipeline 会顺带插 barrier"）。**按本线的规矩：读代码验证，别信注释**（§9 坑 14/15 的同类）。
-判据顺序：先解释那 51,810 字节（**先证明"两个形态本就该相同"，再谈合并**），再谈 `cbs/lane` 下降。
+**进度（2026-09-20）**：
+
+| 阶段 | 状态 |
+|---|---|
+| **P0** | ✅ **结束**：病因 = "同一段内存两个 `MTLBuffer` 对象 ⇒ 没有顺序"，已修（`8890d283f6`）；机制测量与判据见 §5.8.5 P0-(c) |
+| **P1** | ✅ **离线判据全过**（`ba4cd9f781`：融合路线转正；235/235 dump 逐字节不变；合并跳提交数 4.00 → **3.00**）；**⏳ 空口腿待跑**（头条：`cbs/lane` 3.73 → ≈3.00）|
+| P2 / P3 | ⏳ 未开始；P3 的形状仍待 §5.8.5 P0-(b) 的选项 1/2 决策 |
+
+**入口点**：P1 的旋钮是 `OCUDU_CE_EDGE_FUSE`（**默认 1 = 融合**，`=0` 回退到独立形态）。
 
 - **✅ strict 回退策略：已实现，判据全过**（§1.8 的裁定）。`mode=gpu` 下设备覆盖不到的跳**失败**，
   不再由宿主算完：
@@ -645,7 +650,7 @@ OCUDU_CE_DEV_Y=0       3.10 读 + 2.65 写 /跳   ← 参考臂：宿主 stage y
 | 阶段 | 目标 | 改什么 | 离线判据（**OTA 之前必须全过**）| 空中判据（该腿的**头条数字**）| 回滚 |
 |---|---|---|---|---|---|
 | **P0**（调查，无改动）| 解释 `OCUDU_CE_EDGE_FUSE=1` 与独立形态差的 **51,810 字节**；回答"后端编码需要前端完成后的什么" | 无（只读代码 + replay）| 无需（不改行为，**不需要 OTA**）| — | — |
-| **P1** | 消掉**尾组**那次提交（②）| `EDGE_FUSE` 那条路线转正（尾组的 corr build 编进标准组同一个缓冲）。**⚠ 被 §5.8.5 挡住：融合今天算坏（边组 NaN），先修 + 先让判据能看见它** | 27 语料 + 20 窄捕获 **dump 逐字节不变**；每次接收提交数 4.00 → **3.00** | `cbs/lane` **3.73 → ≈3.00**；契约 8/8、0 穿越、RF failure 0、CRC 不劣化 | 旋钮默认关 ⇒ 一行回退 |
+| **P1** | 消掉**尾组**那次提交（②）| ✅ **已做（离线判据全过，`ba4cd9f781`）：`EDGE_FUSE` 那条路线转正**（尾组的 corr build 编进标准组同一个缓冲，`OCUDU_CE_EDGE_FUSE=0` 是一行回退）。**挡住它的融合缺陷已在 `8890d283f6` 修掉**（见 §5.8.5 P0-(c)）| 27 语料 + 20 窄捕获 **dump 逐字节不变** ✅（235/235）；每次接收提交数 4.00 → **3.00** ✅（`mmse_ce commits` 19→18、busy split `ch_est` 2.00→1.00）| **⏳ 待跑**：`cbs/lane` **3.73 → ≈3.00**；契约 8/8、0 穿越、RF failure 0、CRC 不劣化 | 旋钮 `OCUDU_CE_EDGE_FUSE=0` ⇒ 一行回退 |
 | **P2** | 消掉**权重**那次提交（③）| 权重 dispatch 编进估计器那个缓冲（同一缓冲内 Metal 天然有序）| 同上逐字节不变；提交数 3.00 → **2.00**；`extraction commit → weights commit` 系列**消失** | `cbs/lane` **≈3.00 → ≈2.00**；上述四条 + 该间隔系列为空 | 独立旋钮（默认关）|
 | **P3** | 前端与后端并成**一次**提交（①+③+④ → 1）| 估计器/权重与 eq_demap 编进**同一个**命令缓冲，开头提交一次。**⚠ 形状未定：需要 §5.8.5 的决策（合并两个队列 = 丢跨 slot 并行，还是"每队列一次"=2.00）** | 逐字节不变；提交数 2.00 → **1.00** | `cbs/lane` **1.00（max=1）**；上述四条 **+ `[ul_gpu_pipeline]` mean/median 与基线（3493.5/2799.6 µs）的差 ≤ 约定预算**（这一步理论上要付"估计器等整条 lane 编码完"的延迟）| 旋钮切回两段式 |
 | **P4** | 收尾 | 退役 escape hatch；清理 `if (!st.burst) barrier` 那族假定（`ocudu_metal_mmse_engine.mm:2644/2659/2666`）；把 probe 的"lane"定义改回**一跳一条** | `cbs/lane` 与提交数一致（不再有 40-vs-20 的假象）；单测全过 | 只跑**回归**（不引入新行为）：契约 8/8、0 穿越、CRC 不劣化 | 纯清理，可 revert |
@@ -658,7 +663,7 @@ OCUDU_CE_DEV_Y=0       3.10 读 + 2.65 写 /跳   ← 参考臂：宿主 stage y
 * 每个阶段都有**独立回滚路径**（旋钮或切回上一段式），不需要 revert 掉前面已经验证过的阶段；
 * 阶段之间**不共享未验证的机制**：P2 依赖 P1 已证明的"同缓冲内有序"这一事实，P3 依赖 P2 已证明的同一事实。
 
-#### 5.8.5 ★ P0 结果（2026-09-20）：两件事，一件**挡住 P1**，一件**要你决策**
+#### 5.8.5 ★ P0 结果（2026-09-20）：病因找到并修掉了（P0-(c)），P3 的形状仍要你决策（P0-(b)）
 
 **P0-(a) `EDGE_FUSE` 那 51,810 字节：不是"精度差"，是融合**算坏了**（NaN）。**
 
@@ -897,6 +902,47 @@ barrier 已经在两处前缀之后（`!st.burst` 时），而"求逆→权重"�
 * **不管选哪个，先量**：`burst` 序的跨 slot 并行损失，用**一条空口腿**就能给出（`[ul_gpu_pipeline]` 的
   mean/median 与 `event` 对比，16k 样本）。**这是 P1 之前就该做的一条腿**，因为它是选项 1/2 的共同前提。
 
+**P0-(c) 结论（2026-09-20，`8890d283f6`）：P0 结束了——病因是"同一段内存上有两个 `MTLBuffer` 对象"，已修，融合路线与独立路线逐字节相同。**
+
+**病因**（不是 barrier 的位置，也不是 dispatch 的顺序）：**Metal 的访存顺序按 `MTLBuffer` 对象成立，不按地址**。
+引擎的零拷贝缓存**按指针**建映射，于是合并批次的**边组**（它的 A/R_hp 槽位从 `gpu_a`/`gpu_r_hp` 里
+`sys_offset` 个 stride 处开始，见 `correlation_stage()`）拿到了**第二个对象**，而那个对象覆盖的内存
+**批次的映射早就覆盖了**。融合路线是第一条**在同一个命令缓冲里**从一个对象写、从另一个对象读的路线 ⇒
+corr 前缀的写与 K1 的读之间**没有顺序**（barrier 在中间也没用）：K1 读到未写的槽 → 算出 NaN → 权重读到 NaN → W/h 全 NaN。
+**而宿主在完成时刻看到的是写好的槽**（那些写最终落地了，只是晚于读）——这就是为什么"槽位检查说 A 是干净的，而 W 是 NaN"
+看起来自相矛盾（P0-②/P0-④ 的"缺陷②"其实是同一个缺陷）。
+
+**机制（隔离测量）**：`wip/metal_alias_order.mm` —— 一个 writer kernel + 一个 barrier + 一个 reader kernel，
+四种组合各 200 次：**同对象 PASS/200，别名对（页对齐切片、非页对齐 interior、两个方向）FAIL/200**。
+
+**修法**（`mmse_engine_impl::wrap()` 返回 `mapped{buf, offset}`）：**一段内存一个对象**——任何"已被现有映射覆盖"的
+请求都返回**该映射 + 偏移**，所有绑定一律 `setBuffer:m.buf offset:m.offset`。构造期的 warm-up
+（`reserve_buffer()` / 那次 `run_weights_only()` 按容量建映射）保证矩阵链的 interior pointer
+**全都被每个分配的第一个映射接住**。这与进程级缓存 `shared_queue::wrap_no_copy()` 早就在做的
+containment lookup 是同一条规则（**引擎私有缓存是唯一没做的那个**）。
+
+**判据（全过）**：
+
+| 判据 | 结果 |
+|---|---|
+| **融合 == 独立**（P1 的离线门）| ✅ `EDGE_FUSE=1` 与 `TAIL_DEV=1` 四个 dump **逐字节相同**：27 语料 + **20 条真实窄捕获**（`ab_dumps.sh`）|
+| **既有路线不动**（中性）| ✅ **235 个基线 dump**（27 语料 × 5 + 20 窄捕获 × 5）与 `determinism/a/`、`narrow_cmp2/*/dev_*` **0 差异**（`wip/neutral_vs_baseline.sh`）|
+| 单测 | ✅ `ctest -R metal` **9/9**；估计器单测连跑 **0/20** 红（其已知偶发见坑 31/35）|
+| 读数 | ✅ `[metal_stats] wrap_cover / wrap_cover_off` 计数"被现有映射接住"的请求（融合 syn004_4 跳：**17 / 2**，即边组的 A 与 R_hp）|
+
+**⇒ P0 的两步"下一步"这样收尾**：
+
+1. **"给读探针一块专用 scratch"（交接的 §5.A）不再需要**：它要回答的问题（"权重那一跳究竟读到了什么"）
+   已经有了**更强**的答案——不是一次读数，而是**融合路线与独立路线逐字节相同**，加上一个 30 行程序的机制测量。
+   而且原计划要修的"记录与累加器共用地址"那个竞争，只是**症状**的一个特例（真正的病灶是别名映射本身）。
+2. **"一个命令缓冲内部的顺序"（§5.B）已答复**：那个缓冲里的 dispatch **是**按编码顺序执行的，
+   barrier 也**在**；缺的不是"顺序"而是"**同一个资源**"——所以补 barrier 无效（P0-⑤ 的阴性结果至此有了正确解释）。
+   §5.4 从第一天记的那句嫌疑（"切 pipeline 会顺带插 barrier"）**结案**：barrier 够用，只要对象是同一个。
+
+**顺带发现（已记档，未修）**：进程级缓存 `shared_queue::wrap_no_copy()` **也会**发布非零偏移，而引擎的
+`wrap_shared()` **丢掉它**——那会是一次"绑到映射基址"的静默错址。它**在 27 语料与单测上不触发**（现在会打一行
+ERROR 如果触发）。要修就得像 `wrap()` 一样把偏移传到绑定处（9 个调用点）；**单开一次改动**，别混进这里。
+
 #### 5.8.3 每个阶段之后要停下来做什么（用户要求）
 
 1. **离线先全过**（逐字节 + 提交数 + 单测），再上腿；
@@ -912,8 +958,9 @@ barrier 已经在两处前缀之后（`!st.burst` 时），而"求逆→权重"�
   latency debt（见 `ce_lane_order_from_env()` 的注释）。**判据里必须带 `[ul_gpu_pipeline]` 的预算**，
   否则会把"少提交一次"换来的延迟当成白赚；
 * **barrier 假定**：`if (!st.burst) { memoryBarrier... }` 那族假定"切 pipeline 会顺带插 barrier"。
-  P3 之后所有 dispatch 在**一个**缓冲里，**这道 barrier 到底还需不需要、在哪需要，必须读代码确认，不能信注释**
-  （§9 的规矩）；
+  **P0-(c) 之后这条已经查清**：那道 barrier **在、而且够用**——但**只在同一段内存只有一个 `MTLBuffer` 对象时**
+  （坑 36）。P3 把所有 dispatch 放进一个缓冲之后，要复查的是"**这一段内存有没有被两个对象绑过**"
+  （读数：`[metal_stats] wrap_cover_off`），而不是"barrier 放够了没有"；
 * **`cbs/lane` 的口径**：见 5.8.1 的陷阱，P4 之前一律用"每次接收的提交数"。
 
 ---
@@ -1506,15 +1553,25 @@ cmake --build build --target port_channel_estimator_metal_mmse_unit_test
 ### 6.3 数据不变（**每批必过**）
 
 ```bash
-# 当前默认（比的是两个 σ² 来源相同的臂）
+# ① 与**归档基线**逐字节比（这是"这次改动没有移动任何已发布的字节"的那张网，2026-09-20 起）：
+bash doc_chinese/phy_pipeline_gpu/wip/neutral_vs_baseline.sh
+# 期望：files-compared=235  differing-bytes=0  captures-with-differences=0  missing=0
+#   （27 条合成语料的 5 个 dump = 135，比 determinism/a/；20 条真实窄捕获 = 100，比 narrow_cmp2/*/dev_*）
+#   某一侧缺文件 ⇒ 退出码 2，"没有数据"绝不读成"相等"。
+
+# ② 两个环境臂之间的 A/B（当前默认：P1 的融合路线 vs 它的一行回退）
+bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh "OCUDU_CE_EDGE_FUSE=0" ""
+# 期望：captures=27  missing-dumps=0  captures-with-differences=0  total-differing-bytes=0
+
+# ③ 历史 A/B（比的是两个 σ² 来源相同的臂）
 bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh \
   "OCUDU_CE_TAIL_DEV=0 OCUDU_CE_HOST_SCALARS=1" "OCUDU_CE_HOST_SCALARS=1"
 # 期望：captures=27  missing-dumps=0  captures-with-differences=0  total-differing-bytes=0
-
-# 批次 2 侦察的 A/B
-bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh "" "OCUDU_CE_HOST_GRID=0"
-# 期望：captures=27  missing-dumps=0  _llr.bin 0  _h.bin 0  .bin 0  _ce.txt 1058
 ```
+
+**⚠ 语料目录里可能混着"上一腿的结果 dump"**：`doc_chinese/work_tmp/narrow_cap/` 同时有 `<cap>.bin`
+（网格）与 `<cap>_h.bin`（那一腿的估计），`*.bin` 会把两者都匹配上（实测读出 40 条"捕获"、20 条两边都缺）。
+`ab_dumps.sh` 现在过滤 `_h.bin` / `_llr.bin`；`neutral_vs_baseline.sh` 走 `*.txt` 并跳过 `_ce.txt`。
 
 **⚠ 两个臂必须钉在同一个 σ² 来源上。** S5（`a656133d70`）之后
 `TAIL_DEV=0` vs 默认**不再是合法的等价参考**（那时的 12930 字节是**预期差异不是缺陷**），
@@ -1648,6 +1705,9 @@ bash doc_chinese/phy_pipeline_gpu/wip/ab_dumps.sh "" "<knob>"
 | 23 | **★ 用 SIGTERM 停 gNB，收尾统计全部丢失** | `gnb.cpp` 对 SIGINT 走正常收尾（打印契约/`[ul_host]`/`[metal_stats]`/`[ul_gpu_lane]`），对 **SIGTERM 只 flush 日志就退出**。腿 `ota-b3a-final_0919_0734` 因此失去全部跨越计数，20 MB 日志里一行都没有，**事后无法恢复** | **腿一律用 Ctrl-C 停**；判定腿有效的第一眼是报告的 `-- device side` / `-- lane` **两段非空** |
 | 24 | **★ `run_leg.sh` 里的 `> >(tee …)` 让 shell 先回到提示符** | 腿 `probe-iq2llr_0919_2216` 的控制台最后一行是 `[ul_rx] blocks=… gaps=0` **直接贴着提示符**（缺 ` gap_samples=0 ts0_blocks=0` 和换行），而 `.stderr` 文件里那一行**完整且有换行**。不是程序少打 `\n`（源码里就有），是**进程替换的 tee 没有被等待**：gnb 一退出 shell 就打印提示符，tee 还没把最后一段抄到终端 | **已修**：`run_leg.sh` 改成 `exec 3> >(tee …)` / `exec 4> >(tee …)` 拿住两个 tee 的 PID，gnb 退出后先 `exec 3>&- 4>&-` 再 `wait` 这两个 PID（**不关 fd 的话 tee 的 stdin 看不到 EOF，`wait` 会挂住**——实测踩过）。判据：控制台与文件必须一致 |
 | 25 | **★ `gtest_discover_tests` 把每个用例注册成独立进程** | 探针的新测试拆成两个用例（cpu / gpu）：**直接跑二进制通过、`ctest -L support` 变红**——每个 ctest 条目是独立进程，gpu 那个用例看不到前一个用例留下的状态，而它断言的样本数依赖那点状态 | 跨用例共享进程级状态（单例、只能发布一次的 mode）的测试**放在同一个用例里**；而且**必须用 `ctest -L <label>` 跑一遍**才算验过，直接跑二进制不算 |
+| 36 | **★★ Metal 的访存顺序是"按 `MTLBuffer` 对象"的，不是"按地址"的** | 同一段**宿主内存**上的**两个** `MTLBuffer` 对象之间**没有任何顺序**：`memoryBarrierWithScope:MTLBarrierScopeBuffers` 排不了它们——不管 barrier 放在哪、dispatch 怎么编、三种车道序都一样。S13-P0 查了一天半的"融合路线 NaN"就是它：边组的 corr 前缀**写**在一个对象上，K1/权重**读**在另一个对象上（同一个命令缓冲、中间还有 barrier）⇒ K1 读到的槽还没被写，算出 NaN 给权重，而**宿主在完成时刻看到的是写好的槽**（写最终落地了，只是晚于读）。**症状是"读数随时序漂移"**：每个探针都指认一个不同的嫌疑人（pad、槽位、`lane_order`、`w_params`），因为**探针自己也走同一套别名映射**（坑 34） | **一段内存只能有一个 `MTLBuffer` 对象**：`mmse_engine_impl::wrap()` 现在对任何"已被现有映射覆盖"的请求返回**该映射 + 偏移**（`mapped{buf, offset}`），所有绑定一律 `setBuffer:m.buf offset:m.offset`——包括两个自己会加偏移的 helper（`encode_scatter` 的 y 组内位置、`encode_reformat`/`encode_ta` 的 h）。这与进程级缓存 `shared_queue::wrap_no_copy()` 早就在做的 containment lookup 是同一条规则（它的注释："a stale small mapping must not shadow the group-wide one, or the stages would bind different objects again"）——**引擎私有的那个缓存是唯一没做这件事的**。判据：`[metal_stats] wrap_cover / wrap_cover_off`（修复前这些请求会各建一个对象；融合 syn004_4 跳上是 17 / 2，即边组的 A 与 R_hp）。机制测法见 `wip/metal_alias_order.mm`（同对象 200/200 PASS，别名对 200/200 FAIL，两个方向都测） |
+| 35 | **★ `ctest` 不构建：它跑的是上一次链接出来的二进制** | 只重建 `--target ul_chain_replay`（它只重链自己）之后直接 `ctest -R metal`，跑的仍是**上一会话留在 build 里的**测试二进制；它与**刚被重建的 `.metallib`** 组成一对**版本不匹配的 host/kernel**，于是 `port_channel_estimator_metal_mmse_unit_test` 报 `Test 12 device noise variance nan`、Test 11 打出 `NMSE merged nan`——看起来像"刚做的改动把数值弄坏了"。同一份源码**重新链接后** 0/15、0/20 全过（`NMSE merged` 也全部有限），坑 31 的那条偶发（§20.4 记过一次、未解释）频率也远低于此 ⇒ **那两次红是构建产物的问题，不是代码的问题** | **判读任何 `ctest` 结果之前先全量 `cmake --build build`**（与坑 32 同一条纪律的第二种表现）；看到"测试红了而离线 dump 全绿"时，第一步是确认那个测试二进制与 metallib **是同一次构建的产物** |
+| 34 | **★ 把"某个探针的读数"当成"缺陷的位置"** | P0 的探针一个接一个地指认了 pad、A 槽位、`lane_order`、`w_param` 几何，每个都被下一个推翻；真正的事实只有一句"kernel 读到的 A 未写"，而它的**成因**（两个 `MTLBuffer` 对象之间没有顺序，见坑 35）在任何一个探针里都看不见——**因为探针本身也走同一套（别名）映射** | 当多个读数互相矛盾时，**先怀疑"测量所依赖的前提"**（这里的"同一段内存 = 同一个资源"根本不成立），再去加下一个探针：`wip/metal_alias_order.mm` 就是这一步——它把被测机制搬到没有其它变量的 30 行程序里 |
 | 33 | **★ 拿"另一个可疑臂"当参照** | P0-③ 里我把"设备自己写 pad"的改动判成 PASS，因为 `EDGE_FUSE=1` 与 `TAIL_DEV=1` 的四个 dump 逐字节相同——但**两个臂都不正常**（改动把原本正常的路线也弄坏了），它们只是"一致地错"。换成**已知正确的参照**（改动前的基线 dump）立刻现形：45/135 不同 | **判据的参照必须是已知正确的一方**（基线 dump / 出厂的默认路线 / CPU 参考），**不能是另一个同样可疑的臂**；"两臂一致"只说明它们同源，不说明它们对 |
 | 32 | **★ 改过被广泛包含的头之后，只用 `--target` 增量构建** | 给估计器结果接口加了两个虚函数之后，只重建 `ul_chain_replay`：27 个捕获的 **`_llr.bin` 全部不同**，看起来像一次真实回归（连 `_h.bin` 都相同，只有 LLR 变）——**全量 `cmake --build build` 之后 0/135 差异**。陈旧对象会制造"有代码改动"的假象。
 **同一个坑在本会话里踩了第二次**（P0-③→P0-④）：改 `.metal` 后只重建 `ul_chain_replay`，得到"45/135 被弄坏"的结论，
@@ -2113,7 +2173,7 @@ UE 自己发 Deregistration 重来。
 | `OCUDU_CE_HOST_SCALARS` | **0** | 1 = 宿主回读设备标量（sigma2/cfo/pilots_power）——历史上的逃生口与参考臂 |
 | `OCUDU_CE_K0A_RATIO_DEV` | **1** | A 的对角加载取自设备自己的商（0 = 用宿主的 `stats.sigma2`）|
 | `OCUDU_CE_CORR_DEV` | **1** | 设备填标准组的相关矩阵槽位 |
-| `OCUDU_CE_EDGE_FUSE` | **0** | 合并批次的第二个 corr 前缀（**默认关，开启后仍差 51810 字节**）|
+| `OCUDU_CE_EDGE_FUSE` | **1** | **S13-P1：合并批次的第二个 corr 前缀（融合）= 现行默认**；`=0` 回退到独立形态（自己一个命令缓冲）。两者在 27 语料 + 20 窄捕获上**逐字节相同**，融合少一次 commit（§5.8.5 P0-(c)、§5.8.2 P1）|
 | `OCUDU_CE_HOST_GRID` | **1** | **批次 2 侦察新增**：0 = 完全不回读宿主网格（发布路径零影响，见 §4.4）|
 | `OCUDU_CE_HOST_Y_PADS` | **0** | **批次 3a**：非 0 = 宿主清尾组 pad 槽（旧行为，多 1 写/跳）；默认 0 = 设备清 |
 | `OCUDU_CE_CFO_CARRY_HOST` | **0** | **批次 3b.1**：非 0 = 宿主做 CFO 进位（旧行为，多 1 读 + 1 写/跳）；默认 0 = 设备进位 |
