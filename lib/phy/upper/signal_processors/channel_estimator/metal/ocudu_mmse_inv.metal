@@ -159,6 +159,124 @@ kernel void mmse_inv(device float*       a             [[buffer(0)]],  // [nof_s
 }
 
 // ---------------------------------------------------------------------------------------------
+// K1m: EXPERIMENT ONLY - K1 with the barrier's memory fence replaced by mem_none.
+//
+// WHY THIS EXISTS. Measured on this tree (2026-09-20, interleaved A/B in one process, n=54):
+//     K1 at n = 8, 16, 27, 36, 54  ->  26.6, 44.3, 73.2, 106.1, 206.0 us
+// A least-squares line through that is ~3.9 us per unit of n on a ~26 us floor, and the pivot count is
+// 2n. So the cost is LINEAR IN THE PIVOT COUNT (2n barriers) with a large per-pivot constant, not
+// quadratic in the arithmetic: the rank-8 sweeps together are only ~55 us of the 206 at n=54.
+//
+// The margin probe (OCUDU_CE_INV_BARRIERS, extra idempotent barriers) has a slope of 16.2 us/barrier
+// measured back-to-back, which is the cost of a barrier with NOTHING to overlap it - an upper bound,
+// not the in-context cost. This kernel is the other end of that bracket: same arithmetic, same number
+// of barriers, same threadgroup geometry, but the barrier no longer orders threadgroup memory
+// (mem_none instead of mem_threadgroup).
+//
+// It is NOT a candidate: with the fence gone, thread A's write to gj and thread B's read of it are no
+// longer ordered, so the RESULT IS UNDEFINED. It exists to answer one question - "is the 2 us per pivot
+// the FENCE, or the synchronization?" - because the answer decides which algorithm to write:
+//   * fence-bound  -> the fix is fewer/cheaper barriers, or fewer live threadgroup stores across them;
+//   * sync-bound   -> the fix is more threadgroups (overlap two threadgroups' stalls) or a
+//                     warp-local formulation, and a rewrite that only reduces the fence traffic is worth
+//                     nothing.
+// Reached only through mmse_engine's OCUDU_INV_MEMNONE knob, and it must never be made the default.
+//
+// ★ THE ANSWER (S15, 2026-09-20): SYNC-BOUND, and the fence costs nothing at all. Interleaved A/B in one
+// process, n=54, 15 reps x 4 blocks, medians of per-arm medians:
+//     K1 (mem_threadgroup) 207.0 us     K1m (mem_none) 207.1 us     ratio 1.000x
+// So the barrier's memory ordering is free and every microsecond attributed to "122 barriers" is the
+// threadgroup-wide SYNCHRONIZATION. That kills the whole family of "make the barrier cheaper" changes
+// and leaves only "have fewer of them", which is what S15 tried and could not buy - see the design
+// document 5.8.28, where the three attempts are recorded with the measurements that refuted them.
+kernel void mmse_inv_memnone(device float*  a           [[buffer(0)]],
+                             constant uint& n           [[buffer(1)]],
+                             constant uint& nof_systems [[buffer(2)]],
+                             uint2          tid         [[thread_position_in_threadgroup]],
+                             uint2          tgs         [[threads_per_threadgroup]],
+                             uint2          tgid        [[threadgroup_position_in_grid]])
+{
+  if (tgid.x >= nof_systems) {
+    return;
+  }
+
+  threadgroup float gj[MAX_N][MAX_N2];
+  threadgroup float mult[MAX_N][BLK];
+
+  device float* src = a + tgid.x * n * n;
+
+  const uint tid_lin = tid.y * tgs.x + tid.x;
+  const uint nthr    = tgs.x * tgs.y;
+
+  for (uint r = tid.y; r < n; r += tgs.y) {
+    for (uint c = tid.x; c < 2 * n; c += tgs.x) {
+      gj[r][c] = (c < n) ? src[r * n + c] : (((c - n) == r) ? 1.0F : 0.0F);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_none);
+
+  for (uint bs = 0; bs < n; bs += BLK) {
+    const uint be  = min(bs + BLK, n);
+    const uint blk = be - bs;
+
+    for (uint p = bs; p < be; ++p) {
+      if (tid.y == 0) {
+        const float inv_pivot = 1.0F / gj[p][p];
+        for (uint c = p + tid.x; c < 2 * n; c += tgs.x) {
+          gj[p][c] *= inv_pivot;
+        }
+      }
+      threadgroup_barrier(mem_flags::mem_none);
+
+      for (uint i = tid.y; i < blk; i += tgs.y) {
+        const uint r = bs + i;
+        if (r == p) {
+          continue;
+        }
+        const float factor = gj[r][p];
+        for (uint c = p + tid.x; c < 2 * n; c += tgs.x) {
+          gj[r][c] -= factor * gj[p][c];
+        }
+      }
+      threadgroup_barrier(mem_flags::mem_none);
+    }
+
+    for (uint idx = tid_lin; idx < (n - blk) * BLK; idx += nthr) {
+      const uint i = idx >> 3;
+      const uint l = idx & 7u;
+      const uint r = (i < bs) ? i : (i + blk);
+      mult[i][l] = (l < blk) ? gj[r][bs + l] : 0.0F;
+    }
+    threadgroup_barrier(mem_flags::mem_none);
+
+    for (uint idx = tid_lin; idx < (n - blk) * BLK; idx += nthr) {
+      const uint i = idx >> 3;
+      const uint l = idx & 7u;
+      if (l < blk) {
+        gj[(i < bs) ? i : (i + blk)][bs + l] = 0.0F;
+      }
+    }
+    for (uint idx = tid_lin; idx < (n - blk) * (2 * n - be); idx += nthr) {
+      const uint i = idx / (2 * n - be);
+      const uint c = be + (idx % (2 * n - be));
+      const uint r = (i < bs) ? i : (i + blk);
+      float      acc = gj[r][c];
+      for (uint l = 0; l < BLK; ++l) {
+        acc -= mult[i][l] * gj[bs + l][c];
+      }
+      gj[r][c] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_none);
+  }
+
+  for (uint r = tid.y; r < n; r += tgs.y) {
+    for (uint c = tid.x; c < n; c += tgs.x) {
+      src[r * n + c] = gj[r][n + c];
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // K1b: the same inverse, right-looking.
 //
 // K1 above updates the trailing submatrix once per BLOCK column (a rank-8 sweep) and reduces the

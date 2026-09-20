@@ -324,6 +324,10 @@ struct mmse_engine_impl {
   // K1b: the right-looking form of the same inversion (see ocudu_mmse_inv.metal). Used when it is
   // available; K1 stays as the fallback for a metallib that has only the block form.
   id<MTLComputePipelineState>    inv_rl_pipe = nil;
+  // K1m: EXPERIMENT ONLY, K1 with the barrier's memory fence dropped (OCUDU_INV_MEMNONE). Not a
+  // candidate - its result is undefined - it exists to split "the barrier's FENCE" from "the
+  // barrier's synchronization" as the cause of K1's ~2us-per-pivot cost. See ocudu_mmse_inv.metal.
+  id<MTLComputePipelineState>    inv_memnone_pipe = nil;
   id<MTLComputePipelineState>    weights_pipe = nil;
   id<MTLComputePipelineState>    apply_pipe  = nil;
   // K3: per-symbol, mask-compressed cbf16 estimates for the equalizer (optional, loaded on demand).
@@ -1620,6 +1624,13 @@ bool mmse_engine::init(const char* metallib_path)
   NSError* err    = nil;
   id<MTLFunction> inv_fn = [e->library newFunctionWithName:@"mmse_inv"];
   id<MTLFunction> inv_rl_fn = [e->library newFunctionWithName:@"mmse_inv_rl"];
+  id<MTLFunction> inv_memnone_fn = [e->library newFunctionWithName:@"mmse_inv_memnone"];
+  if (inv_memnone_fn != nil) {
+    e->inv_memnone_pipe = [e->device newComputePipelineStateWithFunction:inv_memnone_fn
+                                                                options:MTLPipelineOptionNone
+                                                             reflection:nil
+                                                                  error:&err];
+  }
   if (inv_rl_fn != nil) {
     e->inv_rl_pipe = [e->device newComputePipelineStateWithFunction:inv_rl_fn
                                                             options:MTLPipelineOptionNone
@@ -2354,6 +2365,48 @@ static void mmse_inv_threadgroup(unsigned& tgx, unsigned& tgy)
   tgy = (envy != nullptr) ? static_cast<unsigned>(std::strtoul(envy, nullptr, 10)) : 16;
 }
 
+/// \brief Say ONCE, on stderr, that a non-default K1 kernel was selected - and which.
+///
+/// Pitfall 4 of this line is a knob that does not exist (or is misspelled, or selects a kernel the
+/// metallib does not carry) acting as a SILENT no-op: that run looks exactly like "this candidate changes
+/// nothing", which is the one reading a candidate search must never confuse with "this candidate is not
+/// faster". The barrier probe already prints its own banner for this reason (OCUDU_CE_INV_BARRIERS);
+/// every K1 selector does now. The banner goes to stderr so it lands in the leg's own artifact.
+static void k1_selected_banner(const char* which)
+{
+  static const char* said = nullptr;
+  if (said == which) {
+    return;
+  }
+  said = which;
+  std::fprintf(stderr, "[inv_kernel] K1 is running the %s kernel (non-default)\n", which);
+}
+
+/// \brief The pipeline K1 should run with, honouring the experimental K1 knobs.
+///
+/// ONE definition for every K1 dispatch, because there are THREE of them - the standalone entry point
+/// (mmse_engine::invert(), which is what k1_check drives) plus the two inline ones in the weights stages -
+/// and they used to disagree: OCUDU_INV_RL was honoured only by run_async()'s inline dispatch, so the
+/// isolated bench that exists to judge K1 could not see the knob at all (design document 5.8.25 4.1,
+/// open item 2, closed here).
+///
+/// K1m (OCUDU_INV_MEMNONE) is an EXPERIMENT, not a candidate: dropping the barrier's memory fence leaves
+/// the result UNDEFINED. It answers one question - is K1's ~2us-per-pivot cost the FENCE or the
+/// SYNCHRONIZATION - and both arms of that comparison must be run in the SAME session, because the host
+/// GUI moves absolute readings by 2-4x (5.8.20). The answer is in 5.8.28: the fence is free.
+static id<MTLComputePipelineState> mmse_inv_pipeline(const mmse_engine_impl* e)
+{
+  if ((e->inv_memnone_pipe != nil) && (std::getenv("OCUDU_INV_MEMNONE") != nullptr)) {
+    k1_selected_banner("mmse_inv_memnone (experiment: UNORDERED, THE RESULT IS UNDEFINED)");
+    return e->inv_memnone_pipe;
+  }
+  if ((e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr)) {
+    k1_selected_banner("mmse_inv_rl (K1b: NUMERICALLY WRONG at this order)");
+    return e->inv_rl_pipe;
+  }
+  return e->inv_pipe;
+}
+
 bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
 {
   {
@@ -2386,7 +2439,11 @@ bool mmse_engine::invert(float* a, unsigned n, unsigned nof_systems)
   id<MTLCommandBuffer>         cb  = st.cb;
   const auto t_cb1 = std::chrono::steady_clock::now();
   id<MTLComputeCommandEncoder> enc = st.enc;
-  [enc setComputePipelineState:e->inv_pipe];
+  // The knob decides WHICH kernel runs here, and that is the whole point of this entry point's
+  // existence in path A: it is K1's isolated bench (k1_check drives it), so a candidate that the knob
+  // selects must be the candidate this bench measures.
+  id<MTLComputePipelineState> inv_pipe = mmse_inv_pipeline(e);
+  [enc setComputePipelineState:inv_pipe];
   [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:0];
   [enc setBytes:&n length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
@@ -3026,11 +3083,10 @@ static bool encode_run(mmse_engine_impl*     e,
   // \c host_wait order it carries the [mmse_time_sum] gpu_wait the fused lane removed, and in \c event
   // order it is the command buffer the lane burst waits for through the back-end stage fence. The four
   // standalone stages wired first (K0-a, K0-d, K1, K2) are the other command buffers of the same hop.
-  const bool use_rl = (e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr);
-  // The first pipeline the stage will encode with: begin_stage() hands it to shared_burst::encoder() so
-  // that the barrier ordering this stage after the previous one (K0-a's, in the fused lane) is inserted
-  // there. It must be a REAL pipeline: the burst would be told nil otherwise.
-  id<MTLComputePipelineState> first_pipe = use_rl ? e->inv_rl_pipe : e->inv_pipe;
+  // One definition for every K1 dispatch (see mmse_inv_pipeline()): the standalone entry point and both
+  // inline ones must select the same kernel, or the bench that judges K1 measures something the air
+  // interface does not run.
+  id<MTLComputePipelineState> first_pipe = mmse_inv_pipeline(e);
   if ((corr != nullptr) || (corr_edge != nullptr)) {
     first_pipe = e->corr_a_pipe;
   }
@@ -3109,7 +3165,7 @@ static bool encode_run(mmse_engine_impl*     e,
     }
   }
 
-  enc = stage_pipeline(e, st, use_rl ? e->inv_rl_pipe : e->inv_pipe);
+  enc = stage_pipeline(e, st, mmse_inv_pipeline(e));
   [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:0];
   [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
@@ -3468,7 +3524,7 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   // shares. Only the ASYNC entry point may join the burst: a synchronous caller has to leave with its
   // results ready, and the engine can only promise that with a command buffer of its own.
   const bool                    burst_ok   = (e->lane_order == ce_lane_order::burst) && !wait_for_completion;
-  id<MTLComputePipelineState>  first_pipe = e->inv_pipe;
+  id<MTLComputePipelineState>  first_pipe = mmse_inv_pipeline(e);
   if (corr != nullptr) {
     first_pipe = e->corr_a_pipe;
   }
@@ -3522,10 +3578,7 @@ bool encode_weights_only(mmse_engine_impl*                  e,
     // the element-wise relative error is 9.7e-1 against the host's 1.7e-1, and Metal has no double
     // to fall back on).
     if (std::getenv("OCUDU_CE_DEV_INVERT") != nullptr) {
-      enc = stage_pipeline(e,
-                           st,
-                           ((e->inv_rl_pipe != nil) && (std::getenv("OCUDU_INV_RL") != nullptr)) ? e->inv_rl_pipe
-                                                                                               : e->inv_pipe);
+      enc = stage_pipeline(e, st, mmse_inv_pipeline(e));
       [enc setBuffer:ai_buf.buf offset:ai_buf.offset atIndex:0];
       [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
       [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];

@@ -34,7 +34,15 @@ floors matter: `ta_us` is a time in microseconds and `cfo_hz` a frequency in her
 tolerance is the right shape there, while the powers and the noise variance take a relative one.
 
 usage: python3 wip/value_net.py [--bin PATH] [--what both|corpus|narrow] [--quiet]
+                                [--env OCUDU_X=1 ...] [--env-passthrough]
 exit:  0 every capture within tolerance; 1 something exceeded; 2 a dump is missing (NOT evidence).
+
+---- Why --env exists (path A, design document 5.8.25) ----
+A candidate that replaces a stage is wired as a DEFAULT-OFF knob, so the factory path is untouched. That
+means the net, to judge the candidate's VALUES, has to run the replay tool with the knob SET - otherwise
+it re-verifies the factory path and says nothing about the thing under test. `--env K=V` does exactly
+that. Use `--env-passthrough` to hand the whole current environment to the child instead (for a knob
+that is already exported, or for a set of them).
 """
 
 import argparse
@@ -198,6 +206,35 @@ def check_llr(base, new, label, problems, report):
         problems.append("%s: LLR moved by %d steps" % (label, maxd))
 
 
+def parse_env(pairs):
+    """--env K=V, repeatable. Returns (env_dict, error).
+
+    A malformed pair is an ERROR rather than a silently ignored one: pitfall 4 of this line is a knob
+    that does not exist (or is misspelled) acting as a silent no-op, which makes a measurement look
+    like "this stage costs nothing". The same failure shape here would make the net report a clean
+    pass for a candidate that never ran.
+    """
+    out = {}
+    for p in pairs or []:
+        if "=" not in p:
+            return None, "--env %r is missing '='; expected --env NAME=VALUE" % p
+        k, v = p.split("=", 1)
+        if not k:
+            return None, "--env %r has an empty name" % p
+        out[k] = v
+    return out, None
+
+
+def env_report(env, passthrough):
+    if env is None:
+        return "inherited"
+    if passthrough:
+        return "inherited + " + " ".join("%s=%s" % kv for kv in sorted(env.items()))
+    if not env:
+        return "CLEARED (empty environment)"
+    return " ".join("%s=%s" % kv for kv in sorted(env.items()))
+
+
 def compare(bin_path, base_base, new_base, label, report, quiet):
     problems = []
     check_ce(read_ce(base_base + "_ce.txt"), read_ce(new_base + "_ce.txt"), label, problems)
@@ -302,10 +339,42 @@ def main():
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--report-only", action="store_true", help="print the metrics, never fail")
     ap.add_argument("--self-test", action="store_true", help="inject the known failure modes and check the net sees them")
+    ap.add_argument(
+        "--env",
+        action="append",
+        metavar="K=V",
+        help="run the replay tool with this environment variable set (repeatable). THIS is how a "
+        "default-OFF candidate knob gets exercised: without it the net only ever re-verifies the "
+        "factory path.",
+    )
+    ap.add_argument(
+        "--env-passthrough",
+        action="store_true",
+        help="hand the whole current environment to the child as well as --env pairs",
+    )
     args = ap.parse_args()
 
     if args.self_test:
         return self_test()
+
+    extra_env, err = parse_env(args.env)
+    if err is not None:
+        print(err, file=sys.stderr)
+        return 2
+    if args.env_passthrough:
+        run_env = dict(os.environ)
+        run_env.update(extra_env)
+    elif extra_env:
+        # A CLEARED environment plus exactly the requested knobs. Measured on this tree: the replay tool
+        # itself is fine with an empty environment (every path it is handed is absolute), and clearing is
+        # what makes the two arms differ by exactly the --env list and nothing else - a knob left exported
+        # in the shell would otherwise ride along invisibly.
+        run_env = dict(extra_env)
+    else:
+        run_env = None  # inherit, exactly as before this option existed
+
+    if not args.quiet:
+        print("[env] %s" % env_report(run_env, args.env_passthrough))
 
     if not os.access(args.bin, os.X_OK):
         print("missing %s (build it first)" % args.bin, file=sys.stderr)
@@ -332,7 +401,7 @@ def main():
                 continue
             out = os.path.join(work, kind, name)
             os.makedirs(os.path.dirname(out), exist_ok=True)
-            subprocess.run([args.bin, stem, "--metal", "--out", out], capture_output=True)
+            subprocess.run([args.bin, stem, "--metal", "--out", out], capture_output=True, env=run_env)
             fresh = glob.glob(out + "*_ce.txt")
             if not fresh:
                 all_problems.append("%s: NO DUMP" % name)
