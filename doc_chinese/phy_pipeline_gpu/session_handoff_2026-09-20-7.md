@@ -10,9 +10,8 @@
 
 ## 1. 一句话状态
 
-**工作树 HEAD = `541c690e49`**（= S15 的 `ddc09868e4` + **本会话两个提交**：
-`87593ea2cc` 是代码与文档正文，`541c690e49` 只改本文件的提交哈希），
-**`build/apps/gnb/gnb` 已按 `541c690e49` 重戳**——自查：`grep build_info build/hashes.h` 的短哈希 == HEAD。
+**工作树 HEAD = `5a1f8b2f67`**（S15 的 `ddc09868e4` 之后本会话的 4 个提交，见 §7），
+**`build/apps/gnb/gnb` 已按它重戳**——自查：**`grep build_info build/hashes.h` 的短哈希必须 == `git rev-parse --short=10 HEAD`**。
 **之后再有任何提交，上腿前按 §9 重戳**（坑 35）。
 工作树只剩**用户自己的两个 config**（`gnb_rf_b200_fdd_n1_5mhz_bridge.yml`、`gnb_rf_b200_tdd_n78_20mhz.yml`），**别动**。
 
@@ -115,8 +114,9 @@ D1 才是**剩下的目标性差距**（§9 用户裁定 ⑤）。
 
 ## 7. 交付物与提交状态
 
-**✅ 已提交**：`87593ea2cc`（`phy+docs: K1 path A run - the answer is that K1 is at its floor, and it is a refutation`）
-+ `541c690e49`（只改本文件的哈希）。
+**✅ 已全部提交**（`git log --oneline ddc09868e4..HEAD` 可看全；文档类的 3 个提交只改本文件/README 的指向，
+**代码与设计文档全在第一个**）：
+`87593ea2cc` phy+docs: K1 path A run - the answer is that K1 is at its floor, and it is a refutation
 **tag**：本会话**没有新 tag**（没有可发布的阶段——路 A 的产出是否证性结论，不是新阶段）。
 **⚠ 未推送**（本会话只提交到本地工作树，没有 `git push`）。
 
