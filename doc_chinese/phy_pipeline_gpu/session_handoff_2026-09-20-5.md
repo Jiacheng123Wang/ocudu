@@ -10,7 +10,10 @@
 
 ## 1. 一句话状态
 
-**HEAD = `b47f8ccad7`**（工作树只剩用户自己的 `configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml`，**别动它**）。
+**HEAD = `7fad3d8d1e`**（本备忘录自己就在这个提交里；**代码**提交是 `b47f8ccad7`）。
+工作树只剩用户自己的 `configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml`，**别动它**。
+**`build/apps/gnb/gnb` 已按 `7fad3d8d1e` 重戳**（`hashes.h` 里的 `build_info[]` 与 HEAD 一致）
+——**改这个文件之后再提交，戳记就会落后，上腿前按 §9 重戳**。
 门：27 语料 + 20 窄捕获 **235/235 逐字节**、`ctest -R metal` **9/9**（重链之后复跑过）。
 tag 未变：**`gpu_lane_commit_p1`**、**`gpu_lane_commit_p2`**。
 
