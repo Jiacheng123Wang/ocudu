@@ -268,3 +268,48 @@ const bool k1_inline = gpu_invert && (std::getenv("OCUDU_CE_INVERT_FIRST") == nu
 **⇒ 这个旋钮在"设备建相关矩阵"的路由上已经坏了**（注释仍写着它是可用的 TEMPORARY experiment）。
 
 ⇒ **198 µs 只有重复探针一个来源**；交叉验证要等这个旋钮修好（未做）。
+
+---
+
+## 8. K1 画像（§5.8.16 的原始数据）
+
+协议：`--repeat 1`、一个进程一跳、N=7–9、取中位数。**空口几何 = 25 PRB，所以离线该用 `syn027_25`。**
+
+**K1 = Δ(ch_wt) / 2，臂 `OCUDU_CE_INV_REPEAT=3`：**
+
+| 捕获 | 分配 | n | base | INV_REPEAT=3 | K1 |
+|---|---|---|---|---|---|
+| `narrow_cap/cap_3139_17922` | 1 PRB | 18 | 291.0 | 371.8 | **40.4** |
+| `narrow_cap/cap_3322_17922` | 2 PRB | 36 | 360.1 | 561.8 | **100.9** |
+| `corpus/syn004_4` | 4 PRB | 54 | 556.8 | 951.4 | **197.3** |
+| `corpus/syn013_10` | 10 PRB | 54 | 569.2 | 965.8 | **198.3** |
+| `corpus/syn027_25` | 25 PRB | 54 | 629.4 | 1024.3 | **197.5** |
+
+（n 的由来：块固定 3 PRB，`n = npt(3) × block_prb × comb(6)`；1 PRB 与 2 PRB 的跳没有标准块，
+整跳走 tail ⇒ n = 3×1×6 = 18 / 3×2×6 = 36。`dmrs_symbols=2,7,11`、`cdm_groups_without_data=2`。）
+
+**几何 sweep（`syn004_4`，每格 9 次中位）**：见 §5.8.16 ②。保值性：7 种几何 × 4 dump = **0 字节**。
+
+**两个否证：**
+
+1. **2→1 barrier/pivot（逐位保值）反而更慢**，两次尝试都回退：
+   `syn004_4` base 556.8 → 606.7（无 `tid.y==0` 保护）→ 581.6（加保护）；
+   `syn027_25` base 629.4 → 677.9 → 649.1。K1 197.3 → 216.2 / 197.5 → 217.6。
+2. **K1b（`OCUDU_INV_RL=1`，~14 barriers）比 K1（~122 barriers）贵 2.1 倍**：
+   `syn004_4`，`OCUDU_INV_RL=1` base = 765.0、`+INV_REPEAT=3` = 1609.1 ⇒ K1b = **422.1 µs**。
+
+**结构事实**：`mmse_inv` grid = `MTLSizeMake(nof_systems,1,1)`；调用点传 `2 * nof_layers`
+⇒ 单层 UE **2 个线程组**。**固定 n 扫 `nof_systems`** 是下一步最省的实验。
+
+**复跑：**
+
+```bash
+BIN=./build/lib/phy/upper/channel_processors/metal/ul_chain_replay
+CAP=doc_chinese/work_tmp/corpus/syn027_25          # 空口几何
+for i in $(seq 1 9); do $BIN $CAP --metal --out /tmp/a 2>&1 | grep -o 'ch_wt=[0-9.]*'; done
+for i in $(seq 1 9); do OCUDU_CE_INV_REPEAT=3 $BIN $CAP --metal --out /tmp/b 2>&1 | grep -o 'ch_wt=[0-9.]*'; done
+# K1 = (median_b - median_a) / 2
+
+# 几何 sweep：加 OCUDU_INV_TGX=… OCUDU_INV_TGY=…
+# K1b：OCUDU_INV_RL=1（数值是错的，只用它的时间）
+```
