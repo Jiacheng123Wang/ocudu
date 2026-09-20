@@ -436,3 +436,50 @@ for i in $(seq 1 7); do
   echo "$a $b" | awk '{printf "%.1f\n", $1-$2}'
 done | med        # => ~72.8
 ```
+
+---
+
+## 12. 新门之下的第一个改动（§5.8.20）：CFO 并行化 + **双峰根因 = 宿主 GUI 抢 GPU**
+
+**改动**：`mmse_pilots_cfo` 从 `if (tid != 0) return;`（单线程、~600 次串行 device 访存）改成
+线程组内分 stride 部分和 + 树形合并，只有 thread 0 做 `atan2`。算法不变，求和次序变。
+
+**新门**：`python3 wip/value_net.py` → **47 捕获 0 问题**；`--self-test` 8/8；`ctest -R metal` 9/9。
+**逐字节（现在是信息）**：235 文件里 93 字节不同 = 18 个窄捕获的 `_ce.txt`，**只动 `noise_variance`**
+（6.468808651e-01 → 6.468809247e-01，相对 9.2e-8 ≈ 1.5 ULP）；**`_h.bin`/`_llr.bin`/`.bin` 全 0 字节**。
+
+**收益：抽取 171.3 → ~152 µs（−11%）**，两条模式无关的路子互证：
+
+| 路子 | 读数 |
+|---|---|
+| 配对 `CPU_LS=1` | **−152.6**（旧 −171.3）|
+| 比值 抽取/(2×K1) | **0.3778**（旧 0.4255）⇒ 171.3 × 0.888 = **152.1** |
+
+**⚠ 重复探针的口径**：`CFO_REPEAT=2` 斜率 72.8 → **23.7**，与整段 −19 对不上 ⇒
+**它是"边际成本（上界）"，不是"份额"**；第一份的一部分能被前后 dispatch 藏住。
+
+**★★ 双峰根因（本会话最终定案）**：空臂（base vs base，N=9）宽度 **−248.8 … +319.8 µs**，
+与任何臂的效应同宽 ⇒ 该时段什么都测不出。进程表：
+
+```
+Google Chrome (GPU process)  37–44% CPU
+WindowServer                 32.1% CPU
+```
+
+⇒ **macOS 在进程间分时 GPU，宿主自己的 GUI 就是干扰源。**
+推论：① §4.1 那张撤掉的 bisection（4× 散布）与 §5.8.15 的"双峰"主因在此，不在"回放节拍"；
+② **绝对值模式相关、比值不相关** ⇒ 只报份额，绝对 µs 要声明时段；
+③ **跑 A/B 前先跑空臂**，空臂宽度 ≥ 效应 ⇒ 读数作废；④ 要绝对 µs 就把 GUI 关掉或用空口腿。
+
+**复跑：**
+
+```bash
+python3 doc_chinese/phy_pipeline_gpu/wip/value_net.py            # 门
+python3 doc_chinese/phy_pipeline_gpu/wip/value_net.py --self-test # 门自证看得见失败
+# 空臂（判据自证）：
+for i in $(seq 1 9); do
+  b=$(./build/lib/phy/upper/channel_processors/metal/ul_chain_replay doc_chinese/work_tmp/corpus/syn027_25 --metal --out /tmp/n 2>&1 | grep -o 'ch_wt=[0-9.]*' | cut -d= -f2)
+  a=$(./build/lib/phy/upper/channel_processors/metal/ul_chain_replay doc_chinese/work_tmp/corpus/syn027_25 --metal --out /tmp/n 2>&1 | grep -o 'ch_wt=[0-9.]*' | cut -d= -f2)
+  echo "$a $b" | awk '{printf "%.1f\n", $1-$2}'
+done
+```

@@ -1987,8 +1987,10 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   mmse_engine_impl::mapped cfo_prev_buf =
       (s.cfo_prev != nullptr) ? e->wrap(s.cfo_prev, sizeof(float)) : mmse_engine_impl::mapped{};
   [enc setBuffer:cfo_prev_buf.buf offset:cfo_prev_buf.offset atIndex:3];
+  // 256 = mmse_cfo_tg_size in ocudu_mmse_pilots.metal: the reduction is a threadgroup tree now, so the
+  // dispatch has to match the array it combines (it used to be 32 with only thread 0 working).
   for (unsigned rep = 0; rep != mmse_engine_impl::cfo_repeat(); ++rep) {
-    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   }
 
   [enc setComputePipelineState:e->pilots_apply_pipe];

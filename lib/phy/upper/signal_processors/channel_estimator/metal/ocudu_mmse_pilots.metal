@@ -91,6 +91,11 @@ using namespace metal;
 /// walks, so a zero here would be an infinite loop.
 constant uint mmse_smooth_tg_size = 128;
 constant uint mmse_sigma2_tg_size = 256;
+/// Threads of mmse_pilots_cfo's reduction, and therefore the size of its partial-sum array. The kernel
+/// is memory-latency bound (one stride of ~600 device loads per thread instead of 600 serial ones), so
+/// the count only has to be large enough to cover the hop's pilots - 25 PRB gives 150 per symbol pair,
+/// and the guard is the loop's own `i < nof_pilots`.
+constant uint mmse_cfo_tg_size    = 256;
 
 /// Upper bounds, matching the host's buffers: MAX_V_PILOTS, MAX_FILTER_LENGTH (31), the DM-RS symbol
 /// and layer counts, MAX_NSYMB_PER_SLOT and the per-(symbol, layer) capacity of the LSE buffers
@@ -219,17 +224,30 @@ kernel void mmse_pilots_lse(device const ushort*         grid    [[buffer(0)]],
 /// divides, divide_ceil(nof_tx_layers, 2))`). Taking arg() once over a sum of all layers would be a
 /// different number, so the groups are kept separate here.
 ///
-/// One threadgroup, thread 0: the reduction is a few hundred complex MACs and a serial walk keeps
-/// the accumulation order closest to the host's. \c cfo[0] carries the CFO.
+/// One threadgroup: the reduction is a few hundred complex MACs.
+///
+/// PARALLELISED 2026-09-20 (the user's ruling that took the line off the byte-exact gate, design
+/// document 5.8.19). It used to run on thread 0 alone - `if (tid != 0) return;` - and that is 72.8us per
+/// hop, the single most expensive dispatch of the whole pilot extraction (42% of it, 11.6% of ch_wt).
+/// The cost was never the arithmetic: for a 25 PRB hop there are nof_pilots = 150 complex MACs per
+/// symbol pair, but the operands live in a DEVICE buffer, so one thread issues ~600 scalar loads whose
+/// latencies it cannot overlap - roughly 600 x 120 cycles, which is the measured 72.8us.
+///
+/// Now each thread accumulates a stride of the pilots and the threadgroup combines the partials in a
+/// tree before thread 0 (only) takes the atan2 and the per-group average. The SUM'S ORDER CHANGES, so
+/// the published CFO can move in its last bits and the pilots are rotated by a very slightly different
+/// phasor - which is exactly what the new gate allows and what the value net (wip/value_net.py) judges:
+/// the phase is a well-conditioned function of a sum whose terms are ~1e-6 relative, so the CFO moves by
+/// ~1e-3 Hz against a 1 Hz tolerance, and the LLR decisions are untouched.
 kernel void mmse_pilots_cfo(device const float*          lse    [[buffer(0)]],
                             device float*                cfo    [[buffer(1)]], // [1]: the CFO
                             constant mmse_pilots_params& p      [[buffer(2)]],
                             device const float*          prev   [[buffer(3)]], // previous hop's slot
                             uint                         tid    [[thread_position_in_threadgroup]])
 {
-    if (tid != 0) {
-        return;
-    }
+    // Partial sums of one CDM group, combined in a tree (see the header note).
+    threadgroup float2 red[mmse_cfo_tg_size];
+
     // A hop the estimator cannot fit - fewer than two DM-RS symbols, so there is no phase ramp to
     // measure - still has to leave a value behind: its slot is what a later consumer reads, and that
     // consumer must find the last value that WAS estimated. The host used to guarantee this by
@@ -240,44 +258,61 @@ kernel void mmse_pilots_cfo(device const float*          lse    [[buffer(0)]],
     // \note The carry is written UNCONDITIONALLY in this branch, including when there is no previous
     //       slot to read. "Write what I have, which may be nothing" is the invariant; leaving the
     //       destination untouched would silently depend on what the slot held before, and the slots
-    //       rotate.
+    //       rotate. One thread writes it now that the rest of the threadgroup is here.
     if (p.nof_dmrs_symb < 2) {
-        cfo[0] = (prev != nullptr) ? prev[0] : 0.0F;
+        if (tid == 0) {
+            cfo[0] = (prev != nullptr) ? prev[0] : 0.0F;
+        }
         return;
     }
     const uint  nof_groups = (p.nof_layers + 1u) / 2u;
     const ulong sym0_base  = 0;
     const ulong sym1_base  = static_cast<ulong>(p.nof_layers) * p.nof_pilots * 2;
 
-    // The phase ramp between the hop's first two DM-RS symbols. It arrives as a PARAMETER, and that is
-    // deliberate: this kernel's answer is a phase obtained from a 72-term accumulation through atan2,
-    // so it is the one consumer of the epoch for which the COMPILED SHAPE of that accumulation decides
-    // the published bits. Measured (batch 5g): computing the epochs here - identical values, proved -
-    // recompiled the accumulation, and the resulting conditional-multiply contraction moved the CFO by
-    // 1 ulp (0x3BFB5F2E -> 0x3BFB5F2F on a 30 kHz capture), which rotated the LSE of two of the three
-    // DM-RS symbols and flipped single bf16 values of the published grid. The span is a function of the
-    // hop's geometry and the cell's configuration alone, and the host already derives it for its own
-    // estimator (port_channel_estimator_average_impl.cpp: cfo = phase / 2pi / (epoch[s1] - epoch[s0])).
-    // The other three consumers - apply_cfo and sigma2 below, K4 in ocudu_mmse_reformat.metal - derive
-    // the epochs on the device, and their outputs are unchanged by it.
+    // The phase ramp between the hop's first two DM-RS symbols. It arrives as a PARAMETER: this
+    // kernel's answer is a phase obtained from an accumulation through atan2, and batch 5g measured
+    // that changing how that accumulation COMPILES moves the CFO by 1 ulp (0x3BFB5F2E -> 0x3BFB5F2F),
+    // which rotated the LSE of two of the three DM-RS symbols and flipped published bf16 values. Under
+    // the old byte-exact gate that made the epoch's provenance untouchable; it is still a parameter,
+    // because the host already derives the span for its own estimator
+    // (port_channel_estimator_average_impl.cpp) and moving it here would be a second change on top of
+    // this one with no benefit.
     const float dt = p.epoch_span;
 
     float cfo_sum = 0.0F;
     for (uint g = 0; g != nof_groups; ++g) {
+        const uint l0 = 2 * g;
+        const uint l1 = min(2 * g + 2u, p.nof_layers);
+
         float2 acc = float2(0.0F, 0.0F);
-        for (uint l = 2 * g; (l != 2 * g + 2) && (l != p.nof_layers); ++l) {
+        for (uint l = l0; l != l1; ++l) {
             const ulong lb = static_cast<ulong>(l) * p.nof_pilots * 2;
-            for (uint i = 0; i != p.nof_pilots; ++i) {
+            for (uint i = tid; i < p.nof_pilots; i += mmse_cfo_tg_size) {
                 const float2 a = float2(lse[sym1_base + lb + 2 * i], lse[sym1_base + lb + 2 * i + 1]);
                 const float2 b = float2(lse[sym0_base + lb + 2 * i], lse[sym0_base + lb + 2 * i + 1]);
                 // dot_prod(a, b) = SUM a . conj(b) (ocuduvec/dot_prod.h).
                 acc += float2(a.x * b.x + a.y * b.y, a.y * b.x - a.x * b.y);
             }
         }
-        const float phase = atan2(acc.y, acc.x);
-        cfo_sum += (dt != 0.0F) ? (phase / 6.283185307179586F / dt) : 0.0F;
+
+        red[tid] = acc;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = mmse_cfo_tg_size / 2; s != 0u; s >>= 1) {
+            if (tid < s) {
+                red[tid] += red[tid + s];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        if (tid == 0) {
+            const float phase = atan2(red[0].y, red[0].x);
+            cfo_sum += (dt != 0.0F) ? (phase / 6.283185307179586F / dt) : 0.0F;
+        }
+        // Before the next group overwrites red[].
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    cfo[0] = cfo_sum / static_cast<float>(nof_groups);
+    if (tid == 0) {
+        cfo[0] = cfo_sum / static_cast<float>(nof_groups);
+    }
 }
 
 /// \brief Compensates the CFO on EVERY DM-RS symbol's LSE pilots, each at ITS OWN epoch.
