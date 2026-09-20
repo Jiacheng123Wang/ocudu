@@ -17,14 +17,20 @@
 （`memoryBarrierWithScope` 排不了别名对，隔离测量 200/200）；② **修掉**（引擎零拷贝缓存改成"一段内存一个对象"，
 interior pointer 走偏移绑定）；③ **P1 落地**：`EDGE_FUSE` 转正为默认，离线判据全过。
 
-**下一步只有一件：P1 的空口腿**（§5.8.3 的流程）：
+**P1 的空口腿已经跑完并通过（§5.8.6）**：tag **`gpu_lane_commit_p1`**。受控 A/B（同一二进制 `21e0b11e39`，只差 `OCUDU_CE_EDGE_FUSE`）：
 
-| | |
-|---|---|
-| 腿的头条 | `cbs/lane` **3.73 → ≈3.00**（离线已量到合并跳 4.00 → 3.00、`mmse_ce commits` 19 → 18）|
-| 四条标准 | 契约 **8/8**、`host device data crossings` **0.00 读 + 0.00 写/跳**、**RF failure 0**、**CRC 不劣于 `narrow-fix`** |
-| 回滚 | `OCUDU_CE_EDGE_FUSE=0`（一行，无需 revert 代码）|
-| 通过后 | `git tag -a gpu_lane_commit_p1` + 推送，然后进 **P2** |
+| | `EDGE_FUSE=0` | 默认（融合）|
+|---|---|---|
+| **`cbs/lane`** | 3.71（max 4）| **3.00（max 3）** |
+| busy split `ch_est` | 1.71 | **1.00** |
+| `mmse_ce commits`÷lane | 2.706 | **2.000** |
+| CRC / RF failure | 98.51% / **5 underflow** | 98.24% / **0** |
+| 契约 / 穿越 | 8/8 / 0.00+0.00 | 8/8 / 0.00+0.00 |
+
+**下一步：P2**（消掉**权重**那次提交：把权重 dispatch 编进估计器那个缓冲）——离线判据同 P1
+（**逐字节不变 + 提交数 3.00 → 2.00**；注意 P2 的机制是"同一缓冲内 Metal 天然有序"，而 §5.8.5 P0-(c)
+已经证明**这条只在同一段内存只有一个 `MTLBuffer` 对象时成立**，所以 P2 的每一步都要盯 `wrap_cover_off`），
+然后一次 OTA（用户流程：每阶段一腿）。
 
 > ⚠ 本会话**没有**改 `.metal`、也没有改任何被广泛包含的头：三个提交都是宿主侧（`.mm` / `.cpp` / 文档）。
 > 但按纪律**全量 `cmake --build build` 已跑过**，`ctest -R metal` 9/9。
