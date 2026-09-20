@@ -446,6 +446,7 @@ public:
     slot_trace_entry& e = slot_trace[slot];
     e.slot              = slot;
     e.what              = what;
+    slot_trace_landmark[slot] = at;
     fill_slot_trace(e, slot_samples_done, slot, at);
     // The receive wait was reported before this slot had any landmark (see record_rx_wait_for_slot): attach it
     // now, so the printed timeline carries the wait that ended with this slot's last sample.
@@ -535,7 +536,7 @@ public:
       return;
     }
     std::fprintf(stderr,
-                 "  %-8s %10s %10s %10s %10s %10s %10s %10s\n",
+                 "  %-8s %10s %10s %10s %10s %10s %10s %10s %12s %12s\n",
                  "slot",
                  "rxwait",
                  "t2f",
@@ -543,10 +544,28 @@ public:
                  "ldpc",
                  "crc_ok",
                  "tf_from_done",
-                 "pipeline");
+                 "pipeline",
+                 "base_since_boot",
+                 "landmark_since_boot");
     for (const auto& e : trace) {
+      // The two raw instants, in seconds since the CLOCK's own epoch: they are what says whether a delta is a
+      // real span or a difference between two unrelated origins. A delta of "one slot" that shows up next to a
+      // base of 0 is a base that was never set, and no amount of staring at the delta will reveal that.
+      double base_s = 0.0;
+      double mark_s = 0.0;
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto                        b = slot_samples_done.find(e.slot);
+        if (b != slot_samples_done.end()) {
+          base_s = std::chrono::duration<double>(b->second.time_since_epoch()).count();
+        }
+        auto t = slot_trace_landmark.find(e.slot);
+        if (t != slot_trace_landmark.end()) {
+          mark_s = std::chrono::duration<double>(t->second.time_since_epoch()).count();
+        }
+      }
       std::fprintf(stderr,
-                   "  %-8llu %10.1f %10.1f %10.1f %10.1f %10.1f %10.1f %10.1f\n",
+                   "  %-8llu %10.1f %10.1f %10.1f %10.1f %10.1f %10.1f %10.1f %12.3f %12.3f\n",
                    static_cast<unsigned long long>(e.slot),
                    e.rx_wait_us,
                    e.t2f_us,
@@ -554,7 +573,9 @@ public:
                    e.ldpc_start_us,
                    e.crc_ok_us,
                    e.t2f_us,
-                   e.pipeline_us);
+                   e.pipeline_us,
+                   base_s,
+                   mark_s);
     }
   }
 
@@ -856,6 +877,8 @@ private:
   /// Receive waits reported before their slot had a trace entry (see record_rx_wait_for_slot): the receive
   /// happens before any landmark of the slot it completes, so the wait always arrives first.
   std::map<uint64_t, double> slot_trace_pre_wait;
+  /// The newest landmark instant per traced slot, kept only so the report can print it next to the base.
+  std::map<uint64_t, std::chrono::high_resolution_clock::time_point> slot_trace_landmark;
 };
 
 #else // not OCUDU_FLOW_PROBES: no-op implementation with zero overhead.
