@@ -428,6 +428,30 @@ struct mmse_engine_impl {
                  (offset != 0) ? "  <- bound as an OFFSET into an existing mapping" : "");
   }
 
+  /// \brief How many times each dispatch of the correlation prefix is encoded (OCUDU_CE_CORR_REPEAT).
+  ///
+  /// A MEASUREMENT knob, and the only honest way found so far to ask what one stage of this chain costs
+  /// on the GPU: the dispatches recompute the SAME values, so repeating them changes nothing about the
+  /// result (the 235-dump net stays byte-identical - checked) and the growth of the lane's GPU window
+  /// per repetition IS that stage's cost, dispatch overhead included. It was written after an attempt to
+  /// optimize these very kernels failed on values (design document 5.8.13): the lesson was to measure the
+  /// stage before deciding what makes it expensive.
+  static unsigned stage_repeat(const char* env_name)
+  {
+    const char*  env = std::getenv(env_name);
+    const unsigned v = (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 1u;
+    return (v == 0u) ? 1u : ((v > 64u) ? 64u : v);
+  }
+  static unsigned corr_repeat() { return stage_repeat("OCUDU_CE_CORR_REPEAT"); }
+  /// The inversion (K1) and the weights (K2): separate knobs because they are the two candidates the
+  /// chain decomposition left open (design document 5.8.12/5.8.13). Repeating either is value-preserving
+  /// (the same inputs, the same in-place output), so the dumps stay byte-identical and the slope of the
+  /// lane's GPU window is that stage's cost - dispatch overhead included.
+  static unsigned inv_repeat() { return stage_repeat("OCUDU_CE_INV_REPEAT"); }
+  static unsigned weights_repeat() { return stage_repeat("OCUDU_CE_W_REPEAT"); }
+  /// Everything encode_reformat() encodes (K3, the rSRP reduction, the noise variance and the TA chain).
+  static unsigned reformat_repeat() { return stage_repeat("OCUDU_CE_REFORMAT_REPEAT"); }
+
   /// \brief A mapping of host memory as the GPU sees it: the MTLBuffer object that owns the region and
   ///        the byte offset of the requested pointer inside it.
   ///
@@ -2168,12 +2192,16 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
     }
     [enc setBuffer:sig_buf.buf offset:sig_buf.offset atIndex:2];
   }
-  [enc dispatchThreads:MTLSizeMake(a_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
+    [enc dispatchThreads:MTLSizeMake(a_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  }
 
   enc = stage_pipeline(e, s, e->corr_rhp_pipe);
   [enc setBuffer:rhp_buf.buf offset:rhp_buf.offset atIndex:0];
   [enc setBytes:&p length:sizeof(p) atIndex:1];
-  [enc dispatchThreads:MTLSizeMake(rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
+    [enc dispatchThreads:MTLSizeMake(rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+  }
 
   return true;
 }
@@ -2982,8 +3010,10 @@ static bool encode_run(mmse_engine_impl*     e,
     unsigned tgx = 0;
     unsigned tgy = 0;
     mmse_inv_threadgroup(tgx, tgy);
-    [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(tgx, tgy, 1)];
+    for (unsigned rep = 0; rep != mmse_engine_impl::inv_repeat(); ++rep) {
+      [enc dispatchThreadgroups:MTLSizeMake(nof_systems, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(tgx, tgy, 1)];
+    }
   }
 
   enc = stage_pipeline(e, st, e->weights_pipe);
@@ -2994,7 +3024,9 @@ static bool encode_run(mmse_engine_impl*     e,
   // One thread per output element: nof_systems * ceil(nout * L / 128) threadgroups.
   {
     const NSUInteger w_tgs = (static_cast<NSUInteger>(nout) * static_cast<NSUInteger>(L) + 127) / 128;
-    [enc dispatchThreadgroups:MTLSizeMake(nof_systems * w_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    for (unsigned rep = 0; rep != mmse_engine_impl::weights_repeat(); ++rep) {
+      [enc dispatchThreadgroups:MTLSizeMake(nof_systems * w_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    }
   }
 
   enc = stage_pipeline(e, st, e->apply_pipe);
@@ -3005,7 +3037,9 @@ static bool encode_run(mmse_engine_impl*     e,
   [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
 
-  encode_reformat(st, e, h_buf, reformat, nout, nof_blocks);
+  for (unsigned rep = 0; rep != mmse_engine_impl::reformat_repeat(); ++rep) {
+    encode_reformat(st, e, h_buf, reformat, nout, nof_blocks);
+  }
 
   phase.encoded();
   if (wait_for_completion) {
