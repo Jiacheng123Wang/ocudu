@@ -313,3 +313,34 @@ for i in $(seq 1 9); do OCUDU_CE_INV_REPEAT=3 $BIN $CAP --metal --out /tmp/b 2>&
 # 几何 sweep：加 OCUDU_INV_TGX=… OCUDU_INV_TGY=…
 # K1b：OCUDU_INV_RL=1（数值是错的，只用它的时间）
 ```
+
+---
+
+## 9. K1 隔离台架（`k1_check`）——§5.8.16 ⑥⑦ 的原始数据
+
+`test/k1_check.cpp` 的**默认模式**（不带参数）已经同时扫 n 与 `nof_systems`，
+读 `last_gpu_wait_us()`（`invert()` 自己那条命令缓冲的 `GPUEndTime − GPUStartTime`，纯 GPU 时间）。
+它没有进默认构建，要显式建：
+
+```bash
+cmake --build build --target k1_check -j 10
+./build/lib/phy/upper/signal_processors/channel_estimator/metal/k1_check
+```
+
+**结果（µs/call，每格 20 次均值）：**
+
+| n | 1 system | 2 | 4 | 6 | 8 |
+|---|---|---|---|---|---|
+| **18** | 55.0 | 52.3 | 49.6 | 50.4 | 49.8 |
+| **54** | **202.8** | 208.9 | 207.5 | 202.8 | **203.4** |
+
+* **`nof_systems` 1→8 完全免费** ⇒ 并行度不是瓶颈，**一个线程组的临界路径才是**；
+* **交叉验证**：隔离台架 n=54 = **203 µs**，真实跳里 `INV_REPEAT=3` 的斜率 = **197.3 µs** ⇒
+  两套独立仪器差 **3%**；
+* 成本随 n 超线性：18→54（3×）涨 **4.06×** ⇒ 约 **n^1.27**；折算 **≈3.7 µs/pivot**（n=54）；
+* 数值仍好：n=54 `max_rel=1.324e-06`、bad=0/2916（n=18：5.628e-07、0/324）——即这个工具
+  在计时之外仍然守着它原来的数值判据。
+
+**⇒ 结论**：在"逐元素运算次序不变"（235/235 逐字节）的约束下，K1 的临界路径
+（逐 pivot 的串行依赖 + 每 pivot 一道必需的 barrier）**无法再缩短**；
+要真砍掉它必须**改数值契约**（换算法），那是用户裁定的问题。见 §5.8.16 ⑦。
