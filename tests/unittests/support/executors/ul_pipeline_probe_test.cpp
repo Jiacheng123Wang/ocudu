@@ -137,6 +137,10 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
   std::this_thread::sleep_for(std::chrono::milliseconds(2));
   probe.record_ldpc_start(cpu_slot);
   probe.record_end_crc_ok(cpu_slot, 42);
+  // The receive wait is the one series with no pairing at all - the caller brackets a single receive() - so it is
+  // recorded and reported in EVERY mode, the fused lane included (a receive still waits for samples there).
+  // Recorded as a whole span, so a report that echoed another series into it would show up.
+  probe.record_rx_wait(std::chrono::nanoseconds(std::chrono::milliseconds(7)).count());
 
   {
     const std::string report = capture_report();
@@ -147,6 +151,10 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
     // The fused-lane series is a property of the fused lane only: the mode that has module boundaries must not
     // report a span whose name claims it does not.
     EXPECT_FALSE(has_series(report, "ul_gpu_pipeline")) << report;
+    // Reported next to the segments, and it is ITS OWN number: [ul_time_frequency] is a few ms here because it
+    // includes the wait, while [ul_rx_wait] is the 7 ms recorded above and nothing else.
+    EXPECT_EQ(samples(report, "ul_rx_wait"), 1) << report;
+    EXPECT_NEAR(mean_us(report, "ul_rx_wait"), 7000.0, 1000.0) << report;
   }
 
   // ---- inside the fused lane ---------------------------------------------------------------------------------
@@ -171,6 +179,9 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
     EXPECT_FALSE(has_series(report, "ul_time_frequency")) << report;
     EXPECT_FALSE(has_series(report, "ul_channel_estimation")) << report;
     EXPECT_FALSE(has_series(report, "ul_equalization_demod")) << report;
+    // ... but NOT the receive wait: a receive still blocks for samples in the fused lane, and this series is the
+    // only one that says for how long. It survives the mode change (the segments do not).
+    EXPECT_EQ(samples(report, "ul_rx_wait"), 1) << report;
 
     // The reported span is the one between the two timestamps above, not an artifact: it has to be at least the
     // sleep, and it cannot be a whole slot's worth of something else.

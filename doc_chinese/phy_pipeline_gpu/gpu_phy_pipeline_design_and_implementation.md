@@ -2272,6 +2272,86 @@ shared_burst::adopt(cb)   ④ 均衡/解映射继续编进【同一条 cb】   �
 * **仍然欠空口的那一小步**（低成本、可做可不做）：每块列收尾那道 barrier 的理论性移除（6%）。
   我没有为它上空口腿，因为它**低于一条腿对的分辨率**（~27 µs ≈ 13%）。
 
+#### 5.8.29 ★★ `[ul_time_frequency]` 为什么是 ~1000 µs 而不是几十 µs：**探针起点被移到 `receive()` 之前，于是它把"等样本"算了进来**；新增 `[ul_rx_wait]` 把这一项单独量出来
+
+> **本条是一次"用户发现异常 → 反推到两次提交 → 找到同设备的历史对照 → 补上缺失的仪表"的完整记录。**
+> 起因：CPU 路径（`sudo ./build/apps/gnb/gnb -c configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml`，无附加参数）
+> 的一次运行里，`[ul_time_frequency]` 报 **1002.1 µs**，而用户的记忆是"几十 µs"。
+
+**① 先排除三种可能（都不是）**
+
+| 可能 | 结论 | 依据 |
+|---|---|---|
+| 计算 bug | ❌ | `[ul_pipeline]` 1059.5 ≈ `[ul_time_frequency]` 1002.1 + CE 18.1 + EQ 17.3 + LDPC 21.9 + FAPI 5.0，**算术自洽** |
+| slot 键错配 | ❌ | 三段在 `record_ldpc_start()` **同一时刻组装**；若配对错，CE/EQ 不会恰好正常 |
+| 探针放错地方 | ❌（但**定义变了**）| 见 ② |
+
+**② 根因：两次提交的组合，把两条序列的起点移到了"索要样本"而不是"拿到样本"**
+
+| 提交 | 做了什么 |
+|---|---|
+| `c5c71c229e` | **整 slot 收包改回默认**（`nof_symbols_per_block = 0`）⇒ **一块 = 一整个 slot** |
+| `690b086679` | **`record_start()` 移到 `receiver.receive()` 之前**，起点改用 `last_rx_timestamp`（**正要索要的**那块的第一个样本），原先是 `rx_metadata.ts`（**已经收到的**那块） |
+
+两者叠加：`[ul_time_frequency]` 现在是"**索要一整个 slot 的样本 → 拿到 → 做完 FFT**"，
+而**等样本的时间**（整 slot 收包下**结构性 ≥ 一个 slot**）被算进来了。
+`690b086679` 的动机是正当的（旧端点让 `[ul_pipeline]` 在两种收包策略下测的不是同一件事，
+于是真实的赢家 S-7g-13 在读数上反而"慢了 ~400 µs"），**代价就是这一条**。
+
+**③ 同设备历史对照（决定性证据）**
+
+`doc_chinese/full_gpu_chain/pipeline_audit_2026-09.md` §6.2 —— **同一条 OTA 腿**（B200 FDD n1 5 MHz + OnePlus 8T）：
+
+| 序列 | 旧口径（改动前）| 用户的新读数 |
+|---|---|---|
+| `[ul_pipeline]` | 1967.0 µs | 1139.0 µs |
+| **`[ul_time_frequency]`** | **15.5 µs** | **1087.2 µs** |
+| `[ul_channel_estimation]` | **791.9 µs** | **17.0 µs** |
+| `[ul_equalization_demod]` | 13.4 µs | 17.4 µs |
+
+**`[ul_channel_estimation]` 从 791.9 掉到 17.0 是交叉验证的关键**：它的两个端点**一个都没动**，
+所以它变小的唯一解释是**原来落在 `record_t2f_end → record_ce_end` 之间的那 ~780 µs（估计器那条链）
+现在跑到了 `record_t2f_end` 之前**，也就是进了 `[ul_time_frequency]`。
+⇒ 1002 µs 里既有"等样本"，也**吸收了原先记在 CE 名下的那一段**。
+
+**④ 新增 `[ul_rx_wait]`（本条的交付物）**
+
+* 位置：`lower_phy_baseband_processor::ul_process()`，**包住 `receiver.receive()` 的两次时钟读取**
+  ——复用**已有的** `t_recv_begin`（原先只用于 >20 ms 的 `[zmq-probe]` 告警），所以增量成本≈0；
+* 它是**全探针里唯一没有配对**的序列（不涉 slot 键、不需要 staleness 闸、没有负值错配的情况）；
+* **不计入任何门**：与 `[ul_fapi_mac]` 同级，两条模式都打印（融合车道里也照样有收包等待）；
+* 读法：**`[ul_time_frequency] − [ul_rx_wait]` = 前端自己花在样本上的时间**（旧口径 15.5 µs 测的就是它）；
+* 样本数**按块**（整 slot 策略下 ≈ 1/槽），不是按槽或按 TB；
+* 它同时是**"宿主领先/落后采样前沿多少"**的度量——这个量此前完全不可见。
+
+**⑤ ★ 关于"等样本"的物理含义（用户提出的核心问题）**
+
+采样时间轴由 ADC 按固定速率产生（7.68 Msps），宿主**能算多快就多快**，两者没有机械同步：
+
+* **宿主落后**采样前沿 ⇒ 样点已在 UHD 缓冲里 ⇒ `receive()` 立即返回，**等待 ≈ 0**；
+* **宿主领先**采样前沿 ⇒ 样点还没产生 ⇒ `receive()` **阻塞**，等待 = 领先量。
+
+整 slot 收包下，**前端必须拿到整个 slot 的样点才能开始**（最后一个符号在 slot 末尾），
+所以等待**结构性 ≥ 一个 slot**。**这正是 S-7g-13（整符号收包）要消掉的那部分**——
+`ru_sdr_config_translator.cpp` 里已经写明这笔代价：*"The cost is that the first symbol of a slot is
+processed up to one slot later."*
+
+**⑥ ⚠ 一个必须一起读的硬约束（与 D1 直接冲突）**
+
+`lower_phy_factory.cpp` 有一条 `report_fatal_error_if_not`：**`mode=gpu` 必须有"能装一整个 slot"的收包缓冲**，
+理由是"**一个 OFDM 符号不能被切成两块**"。而 GPU 模式正是数据面目标形态、也是 D1 的落地模式。
+⇒ **整符号收包这条优化，在 GPU 模式下需要先解决"符号跨越两块"**，否则只能用于 CPU 模式。
+
+**⑦ 下一步（已与用户定好）**：**先加本仪表（已做），再花两条腿量出"结构等待"到底值多少**，
+拿到数据再规划。测法：
+```bash
+# 对照（默认：整 slot 收包）
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label> [OCUDU_*=…]
+# 探针（整符号收包；注意这是实验性策略，有已知的停机竞态）
+OCUDU_UL_RX_SYMBOLS=7 sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label> [OCUDU_*=…]
+```
+读 `[ul_rx_wait]` / `[ul_time_frequency]` / `[ul_pipeline]` 三个数。
+
 #### 5.8.3 每个阶段之后要停下来做什么（用户要求）
 
 1. **离线先全过**（逐字节 + 提交数 + 单测），再上腿；

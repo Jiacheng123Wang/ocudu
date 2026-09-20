@@ -158,6 +158,25 @@ sudo ./build-probes/apps/gnb/gnb -c configs/gnb_uhd_oaiue.yaml \
 
 ## 6. 基线快照归档（2026-09-11 实机采集）
 
+> ### ⚠️ 2026-09-20 补记：**§6.1 / §6.2 的 `[ul_time_frequency]` 已不能与现在的读数直接比较**
+>
+> `[ul_pipeline]` 与 `[ul_time_frequency]` 的**起点被移到了 `receiver.receive()` 之前**
+> （提交 `690b086679`，*"probe: the UL pipeline series starts when the samples start arriving, not when the
+> block is handed over"*）。改动前起点是**已经收到的**那块数据的第一个样本，改动后是**正要索要**的那块。
+>
+> 后果：**这两条序列现在包含"等样本"的时间**。在整 slot 收包策略下（当前默认，见提交 `c5c71c229e`）
+> 一块就是一整个 slot，于是 `[ul_time_frequency]` **必然不少于一个 slot**（实测 ~1000 µs），
+> 而本表记的 **15.5 µs** 是"只算 FFT 尾巴"的旧口径。**两者不是同一个量。**
+>
+> 交叉验证：本表同一条腿的 `[ul_channel_estimation]` = **791.9 µs**，而现在同一配置只有 ~17 µs ——
+> 这条序列的两个端点**一个都没动**，唯一的解释是原来夹在 `record_t2f_end → record_ce_end` 之间的
+> ~780 µs 现在跑到了 `record_t2f_end` **之前**，即进了 `[ul_time_frequency]`。
+>
+> **⇒ 读本表时**：`[ul_pipeline]` / `[ul_time_frequency]` 两行按旧口径理解（**不含**等样本）；
+> 现在的运行请用新增的 **`[ul_rx_wait]`** 序列把等待单独读出来，
+> **`[ul_time_frequency] − [ul_rx_wait]` 才是"前端自己花在样本上的时间"**，那也正是本表 15.5 µs 所测的东西。
+> 机制与代码位置见 `doc_chinese/phy_pipeline_gpu/gpu_phy_pipeline_design_and_implementation.md` §5.8.29。
+
 ### 6.1 ZMQ 腿（srsRAN UE，时延压测口径）
 
 > 采集配置：`build-probes` = `ENABLE_FLOW_PROBES=ON + ENABLE_METAL_STATS=ON + ENABLE_CE_TIME=ON`

@@ -63,6 +63,25 @@ struct ul_phase_durations {
 /// which is only ever called for CRC-OK TBs) and are matched by exact slot number, with the same staleness gate.
 /// A start left behind when the PDU is dropped (e.g. the per-UE queue full) is simply evicted later.
 ///
+/// A fifth series, [ul_rx_wait], measures how long the RECEIVE blocked (record_rx_wait(), called by the lower PHY
+/// baseband processor around its receiver.receive()). It is the one series with no pairing at all: the two clock
+/// reads bracket a single call, so nothing about slot keys or staleness can go wrong in it.
+///
+/// WHY IT EXISTS, AND WHY IT IS NOT REDUNDANT WITH [ul_time_frequency]. Since the UL pipeline series starts when the
+/// samples START ARRIVING (record_start() before receive()), it now includes the wait for them - so a series whose
+/// name says "time-frequency" reports a whole slot of receive time plus the transforms. That was the deliberate
+/// price of making the series comparable across receive policies (see lower_phy_baseband_processor::ul_process and
+/// the design document), and this series is what makes the split visible instead of implied:
+///
+///     [ul_time_frequency] = [ul_rx_wait] + (the front end's own work on the samples)
+///
+/// It also measures the host's LEAD OR LAG against the radio's sample timeline, which is otherwise invisible: the
+/// samples are produced by the ADC at a fixed rate and the host consumes them as fast as it can, so a host that is
+/// ahead BLOCKS for the samples to exist, and one that is behind returns immediately with data the radio had
+/// already buffered. Under the whole-slot receive policy a block is a whole slot, so the wait cannot be shorter
+/// than "until the slot's last sample exists" - which is the structural latency that a symbol-grained receive
+/// policy exists to remove (S-7g-13). Read together with the receive policy in force.
+///
 /// The phase-segment series (time-frequency / channel estimation / equalization+demodulation) measure the CPU side of
 /// the module boundaries, so they are meaningless once the whole IQ -> LLR chain runs inside the fused device-side
 /// lane: in phy_pipeline_mode::gpu neither their recording nor their report happens (the lane reports its own
@@ -293,6 +312,23 @@ public:
     }
   }
 
+  /// Records how long the receive blocked: the two calls bracket ONE receiver.receive(), so unlike every other
+  /// series here there is no pairing to get wrong (no slot key, no staleness gate, no negative-duration case).
+  /// \param[in] wait Nanoseconds the host spent inside receive(). Negative values are dropped (they can only come
+  ///                 from a caller that mixed the two ends up).
+  ///
+  /// \note Counted per BLOCK, not per slot: the block size is the receive policy's (see ul_process), so under the
+  ///       whole-slot policy this series has one sample per slot and under the symbol-grained one it has one per
+  ///       block. Compare its counts against the policy in force, not against [ul_pipeline]'s.
+  void record_rx_wait(int64_t wait_ns)
+  {
+    if (wait_ns < 0) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    rx_wait_us.push_back(static_cast<double>(wait_ns) / 1e3);
+  }
+
   /// Prints the statistics of the recorded latencies. Called once during the application shutdown.
   void report()
   {
@@ -304,6 +340,7 @@ public:
     std::vector<double> sorted_eqdem;
     std::vector<double> sorted_gpu_pipeline;
     std::vector<double> sorted_fapi_mac;
+    std::vector<double> sorted_rx_wait;
     {
       std::lock_guard<std::mutex> lock(mutex);
       sorted_pipeline     = latencies_us;
@@ -314,6 +351,7 @@ public:
       sorted_eqdem        = eqdem_latencies_us;
       sorted_gpu_pipeline = gpu_pipeline_latencies_us;
       sorted_fapi_mac     = fapi_mac_latencies_us;
+      sorted_rx_wait      = rx_wait_us;
     }
     auto pct = [](const std::vector<double>& sorted, double p) {
       return sorted[static_cast<size_t>((sorted.size() - 1) * p)];
@@ -379,6 +417,9 @@ public:
       print_series("ul_channel_estimation", sorted_ce);
       print_series("ul_equalization_demod", sorted_eqdem);
     }
+    // The receive's own series, and the only one whose count is per BLOCK rather than per slot or per TB (see
+    // record_rx_wait). Printed next to the pipeline it is part of, because [ul_time_frequency] includes it.
+    print_series("ul_rx_wait", sorted_rx_wait);
     // The series printed below cross both modes unchanged.
     // FAPI->MAC tail (CRC-OK -> MAC UL task enqueue): recorded in lockstep with the CRC-OK completions, so its
     // sample count tracks [ul_ldpc_decode] (minus PDUs dropped at the per-UE queue).
@@ -575,6 +616,9 @@ private:
   std::vector<double> gpu_pipeline_latencies_us;
   /// FAPI->MAC tail latencies of the CRC-OK completions (µs): CRC-OK -> MAC UL task enqueue.
   std::vector<double> fapi_mac_latencies_us;
+  /// Receive wait times (µs), one per received BLOCK (see record_rx_wait): the span the host spent blocked inside
+  /// receiver.receive(). The only series with no pairing: the two clock reads bracket a single call.
+  std::vector<double> rx_wait_us;
 };
 
 #else // not OCUDU_FLOW_PROBES: no-op implementation with zero overhead.
@@ -593,6 +637,7 @@ public:
   void record_ce_end(uint64_t /*slot*/) {}
   void record_end_crc_ok(uint64_t /*slot*/, size_t /*mac_pdu_bytes*/) {}
   void record_fapi_mac_end(uint64_t /*slot*/) {}
+  void record_rx_wait(int64_t /*wait_ns*/) {}
   std::optional<ul_phase_durations> get_phase_durations(uint64_t /*slot*/) { return std::nullopt; }
   void report() {}
 

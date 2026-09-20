@@ -437,10 +437,22 @@ void lower_phy_baseband_processor::ul_process()
 #endif
   baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_writer);
 #if defined(OCUDU_FLOW_PROBES)
-  // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES).
+  // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES), plus the [ul_rx_wait] series.
+  //
+  // The wait is recorded from THIS call's own two clock reads - the same ones the 20 ms notice above uses -
+  // so the series costs one more conversion and nothing else. It answers a question no other series can:
+  // [ul_pipeline] and [ul_time_frequency] start before this receive (see record_start()), so they INCLUDE
+  // this wait, and a name like "time-frequency" that reports a whole slot is only readable next to it.
+  //
+  // What the number means: the radio produces samples at the ADC's fixed rate and the host consumes them as
+  // fast as it can, so a host that is AHEAD of the sample timeline blocks here for the samples to exist, and
+  // one that is behind returns immediately with data the radio had already buffered. Under the whole-slot
+  // policy this block is a whole slot, so the wait cannot be shorter than "until the slot's last sample
+  // exists" - the structural latency a symbol-grained receive policy exists to remove (S-7g-13).
   {
-    auto recv_us =
+    const auto recv_us =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t_recv_begin).count();
+    ul_pipeline_probe::get().record_rx_wait(recv_us * 1000);
     if (recv_us > 20000) {
       static auto& probe_log = ocudulog::fetch_basic_logger("ALL");
       probe_log.info("[zmq-probe] ul recv-wait={}us", recv_us);
