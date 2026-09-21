@@ -4010,6 +4010,35 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s43-d1-phases OCUDU
 ~0.2–1 ms；判据：该段 p95 回落、`ul_pipeline` p95 回落、中位不变、其余门不变（开工告警 0、契约 8/8、
 `UL processor is busy` 0、提交/时隙 ~1.02、`grid_wait_unencoded==0`）。
 
+#### 5.9.34 ★★ 修 `s43` 定位的那截：**把 PUSCH 解码器与 SRS 移出车道所在的池**（一行半，待 `s44` 判）
+
+**① 改动**（`lib/du/du_low/du_low_executor_mapper.cpp`，flexible 分支）：
+
+```cpp
+phy_config.pusch_decoder_executor = flexible.non_rt_low_prio_exec;   // 原：pusch_srs_execs[2]（中优先级池的第三个视图）
+phy_config.srs_executor           = flexible.non_rt_low_prio_exec;   // 同上
+```
+
+* 原来 `pusch_ch_estimator_executor` / `pusch_executor` / `pusch_decoder_executor` / `srs_executor` 是
+  **同一个中优先级线程池的三个 fork-limiter 视图**（同一个 `non_rt_medium_prio_exec` + 同一个并发上限）；
+  融合车道的各段跑在 `pusch_executor` 里 ⇒ **一次解码就占掉车道要用的名额**；
+* 低优先级池（`low_prio_exec`）**本来就存在**、上行侧没用它 ⇒ 这是**在已有线程之间搬活**，不新增线程。
+
+**② 判据（`s44`，两臂都带 `OCUDU_UL_PHASE_SEGMENTS=1`）**
+
+| 判据 | 期望 | `s43` 武装实测 |
+|---|---|---|
+| **`ul_channel_estimation` p95** | **回到 ~0.2–1 ms** | **3387 µs**（对照 205）|
+| `ul_pipeline` p95 | 回落（~对照量级）| 6310 µs（对照 5472）|
+| `ul_pipeline` 中位 | 不变或更好 | 1872 µs（对照 2071）✓ |
+| `ul_time_frequency` | 不变（它已经比对照好）| 1098 / p95 1142 ✓ |
+| `ul_equalization_demod` p95 | 不变或更好 | 1936（对照 3505）✓ |
+| 不变的门 | 开工告警 0、契约 8/8、`UL processor is busy` **0**、提交/时隙 ~1.02、`grid_devwaited>0`、`grid_wait_unencoded==0`、`timeouts==0`、CRC 分层与对照同形 | ✓ |
+
+**③ 若 `ul_channel_estimation` 的 p95 没下来**：说明排队不在"解码 vs 车道"这一对，而在**车道自身对同一跳的串行**
+（一跳的估计器/均衡/解调要顺序执行，而 `[ul_gpu_lane] residency` 显示设备工作有界）——
+那时下一步是看 `[ul_gpu_lane] gap`（阶段之间的空档）与 `defer_wait`，而不是继续加线程。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。

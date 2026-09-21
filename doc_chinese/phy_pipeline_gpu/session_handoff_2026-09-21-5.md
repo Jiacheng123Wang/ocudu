@@ -102,7 +102,10 @@ git push origin gpu_phy_d1_handover    # 若这条线要推送
 ⇒ 尾巴 = "**上层任务派发 + 车道起步**"那一截（**不是设备执行**，也**不是前端**）；
 所有中位都更好（总 1872 vs 2071）。
 
-**★ 下一步：把车道的执行与解码池分开**（`lib/du/du_low/du_low_executor_mapper.cpp:78/124`
+**★ 下一步（已做，等 `s44` 判）**：`pusch_decoder_executor` 与 `srs_executor` 从中优先级池（车道所在的、三个视图同一池）
+**移到低优先级池**（`lib/du/du_low/du_low_executor_mapper.cpp`，两行 + 注释）——低优先级池本来就在、上行没用它 ⇒ 在已有线程间搬活。
+判据（两臂都带 `OCUDU_UL_PHASE_SEGMENTS=1`）：**`ul_channel_estimation` p95 从 3387 回到 ~0.2–1 ms**、`ul_pipeline` p95 回落、
+中位不变、其余门不变（§5.9.34）。
 把 `pusch_executor` 指向 `pusch_srs_execs[…]`，车道的各段与 LDPC/SRS 共用一池）。
 判据：`ul_channel_estimation` p95 回到 ~0.2–1 ms、`ul_pipeline` p95 回落、中位不变、其余门不变。
 

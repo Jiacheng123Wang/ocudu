@@ -122,8 +122,16 @@ public:
                                                       max_pusch_batch_size);
       phy_config.pusch_ch_estimator_executor = pusch_srs_execs[0];
       phy_config.pusch_executor              = pusch_srs_execs[1];
-      phy_config.pusch_decoder_executor      = pusch_srs_execs[2];
-      phy_config.srs_executor                = pusch_srs_execs[2];
+      // The PUSCH decoder and the SRS go to the NON-REAL-TIME LOW PRIORITY pool instead of the third view of the
+      // medium-priority one. The fused uplink lane - the estimator, the equalizer and the demapper of one hop, which
+      // the PUSCH task above runs - shares the medium pool with them, and a decode occupying one of its slots makes
+      // the LANE wait for a thread: measured with the phase segments (s43), the lane's start, from the front end
+      // handing its grid over to the estimator stage completing, has a p95 of 3387us against the control arm's
+      // 205us, while a hop's own device work is bounded (lane residency p95 1084us, max 2581us). Both pools already
+      // exist and the low priority one is otherwise idle on the uplink, so this moves work between them rather than
+      // adding threads (design document 5.9.33).
+      phy_config.pusch_decoder_executor = flexible.non_rt_low_prio_exec;
+      phy_config.srs_executor           = flexible.non_rt_low_prio_exec;
     }
 
     ocudu_assert(phy_config.pdcch_executor.is_valid(), "Invalid PDCCH executor.");
