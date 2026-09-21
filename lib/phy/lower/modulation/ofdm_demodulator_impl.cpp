@@ -73,7 +73,15 @@ bool host_reads_the_grid()
 /// D1 rather than something an operator arms.
 bool grid_has_host_consumers()
 {
-  return true;
+  // False since D1-A was wired: the host readers of this grid - the PUCCH (all formats) and the SRS - now
+  // ask for its production on their own executor before they read it (grid_ready_hook::wait(), wired in
+  // uplink_processor_impl::process_pucch()/process_pucch_f1()/process_srs()). The wait covers both shapes
+  // of a slot: the lane's commit when a hop claimed the block, and a commit the CONSUMER performs when
+  // nobody did - a PUCCH-only slot, where nothing else would ever write that grid.
+  //
+  // It is a statement about the CHAIN, so it is checked rather than assumed: the hook is what makes it
+  // true, and a build or a run without it (no Metal hand-over) never asks.
+  return false;
 }
 
 bool handover_allowed()

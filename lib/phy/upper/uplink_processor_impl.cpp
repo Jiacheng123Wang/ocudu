@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "uplink_processor_impl.h"
+#include "ocudu/phy/phy_pipeline_grid_ready.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/instrumentation/traces/du_traces.h"
@@ -345,6 +346,19 @@ void uplink_processor_impl::process_pucch(const uplink_pdu_slot_repository::pucc
   bool success = task_executors.pucch_executor.defer([this, &pdu]() {
     trace_point tp = l1_ul_tracer.now();
 
+    // D1-A (design document 5.9.13): the grid this PUCCH reads may be produced at the LANE's commit rather
+    // than at the end of the receiving slot, and this is a HOST reader - so it waits for the production
+    // here, on its own executor (the PUCCH pool is not the pool the PUSCH lane runs on, so waiting cannot
+    // starve the producer). No hand-over in this build or run: a no-op.
+    if (!grid_ready_hook::wait(grid->get_reader().get_device_view().base)) {
+      logger.error(current_slot.sfn(),
+                   current_slot.slot_index(),
+                   "PUCCH: the resource grid was not produced in time; discarding the PDU.");
+      state_machine.on_finish_processing_pdu();
+      notify_discard_pucch(pdu);
+      return;
+    }
+
     pucch_processor_result proc_result;
     // Process the PUCCH.
     switch (pdu.context.format) {
@@ -401,6 +415,16 @@ void uplink_processor_impl::process_pucch_f1(const uplink_pdu_slot_repository_im
   }
 
   bool success = task_executors.pucch_executor.defer([this, &collection]() {
+    // Same wait as the other formats (see process_pucch()): a HOST reader of the grid.
+    if (!grid_ready_hook::wait(grid->get_reader().get_device_view().base)) {
+      logger.error(current_slot.sfn(),
+                   current_slot.slot_index(),
+                   "PUCCH format 1: the resource grid was not produced in time; discarding the collection.");
+      state_machine.on_finish_processing_pdu();
+      notify_discard_pucch(collection);
+      return;
+    }
+
     trace_point tp = l1_ul_tracer.now();
 
     // Process all PUCCH Format 1 in one go.
@@ -460,6 +484,19 @@ void uplink_processor_impl::process_srs(const uplink_pdu_slot_repository::srs_pd
 
   bool success = task_executors.srs_executor.defer([this, &pdu]() {
     trace_point tp = l1_ul_tracer.now();
+
+    // D1-A: another HOST reader of the grid (see process_pucch()). NOTE: the SRS executor shares its pool
+    // with the PUSCH decoder's, while the producer of the grid - the lane - runs on the PUSCH executor: a
+    // wait here can therefore occupy a thread the producer needs if that pool is ever saturated. The wait
+    // is bounded (grid_ready_hook::wait), so the worst case is a discarded SRS estimate, not a hang - and
+    // the leg is what says whether the pool needs separating (design document 5.9.13 ⑥).
+    if (!grid_ready_hook::wait(grid->get_reader().get_device_view().base)) {
+      logger.error(pdu.context.slot.sfn(),
+                   pdu.context.slot.slot_index(),
+                   "SRS: the resource grid was not produced in time; discarding the PDU.");
+      state_machine.on_finish_processing_pdu();
+      return;
+    }
 
     ul_srs_results result;
     result.context          = pdu.context;

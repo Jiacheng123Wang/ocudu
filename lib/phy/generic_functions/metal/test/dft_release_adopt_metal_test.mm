@@ -35,6 +35,8 @@
 #include "ocudu_metal_burst.h"
 #include "ocudu_metal_queue.h"
 
+#include "ocudu/phy/phy_pipeline_grid_ready.h"
+
 #include "ocudu/support/macos_compat.h"
 
 #import <Foundation/Foundation.h>
@@ -635,6 +637,14 @@ int main()
     }
 
     // ---- Arm 6: a HOST reader is served (D1-A, 5.9.13) --------------------------------------------
+    // The upper PHY's host readers (the PUCCH, the SRS) reach the registry through a hook, so that a build
+    // without Metal links without it. The metal side is what installs it: assert that here, or the whole
+    // wiring would be a function nobody calls.
+    if (!grid_ready_hook::installed()) {
+      std::fprintf(stderr, "FAIL: the grid-ready hook was never installed by the Metal side\n");
+      return 1;
+    }
+
     // Two shapes, and both must end with the grid WRITTEN and the input given back:
     //  * nobody claims the block (a slot no hop runs for - a PUCCH-only slot in the receiving chain):
     //    ensure_grid_produced() has to commit it, or the grid is never written at all;

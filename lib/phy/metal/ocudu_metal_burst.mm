@@ -6,6 +6,7 @@
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/phy/phy_pipeline_grid_ready.h"
 
 #include <atomic>
 #include <cstdio>
@@ -366,6 +367,20 @@ static void forget_handed(id<MTLCommandBuffer> cb)
   }
   (void)released_after_unlock;
 }
+
+/// The Metal end of the host-reader hook (include/ocudu/phy/phy_pipeline_grid_ready.h): a host consumer of
+/// the resource grid - the PUCCH, the SRS - asks here, and the answer covers both shapes of a slot (see
+/// ensure_grid_produced()).
+bool grid_ready_wait_hook(const void* storage, uint32_t timeout_ms)
+{
+  (void)timeout_ms; // the bound lives in ensure_grid_produced(); the registry owns the production fence
+  return shared_burst::ensure_grid_produced(storage);
+}
+
+const bool grid_ready_hook_installed = []() {
+  grid_ready_hook::install(&grid_ready_wait_hook);
+  return true;
+}();
 
 /// How many deposits are kept. The steady state is one per slot in flight, and a deposit is claimed by the
 /// hop that reads its grid, so this is generous - it exists so that a hop that never runs (a slot with no
