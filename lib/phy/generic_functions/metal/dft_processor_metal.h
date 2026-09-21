@@ -102,6 +102,18 @@ public:
     return (engine != nullptr) && (engine->release_block(grid_base) != nullptr);
   }
 
+  bool defers_transform_execution() const override
+  {
+    // The release path is what defers them: a block that is handed over runs at the lane's commit, which is
+    // after the receiving chain's finish_symbol() returned (see the header).
+    return (engine != nullptr) && engine->block_release_enabled();
+  }
+
+  bool retain_input(void (*release)(void* context), void* context) override
+  {
+    return (engine != nullptr) && engine->retain_for_block({release, context});
+  }
+
   void set_lane_slot(uint64_t slot_index) override
   {
     if (engine != nullptr) {

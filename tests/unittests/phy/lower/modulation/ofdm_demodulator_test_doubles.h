@@ -82,6 +82,42 @@ public:
     finished_slots.push_back(pipeline_slots[slot]);
   }
 
+  // ---- A backend that runs its transforms LATER than finish_symbol() (D1, design document 5.9.7) -----
+  //
+  // The fused lane's single submission does exactly this: the slot's transforms are encoded into the hop's
+  // command buffer, which the LANE commits - so the samples they read have to outlive finish_symbol(), and
+  // that call is what tells the radio they may be recycled. The spy records the tokens the puxch hands over
+  // and can run them ("the block completed"), so a test judges the lifetime instead of the mechanism.
+  bool defers_transform_execution() const override { return defers_execution; }
+
+  bool retain_input(void (*release)(void* context), void* context) override
+  {
+    if (!defers_execution) {
+      return false;
+    }
+    retained.push_back({release, context});
+    return true;
+  }
+
+  /// Number of tokens handed over so far.
+  unsigned nof_retained() const { return static_cast<unsigned>(retained.size()); }
+
+  /// Whether any token is still held (i.e. a receive buffer the radio cannot use again).
+  bool has_retained() const { return !retained.empty(); }
+
+  /// Runs every token's release exactly once, as the deferred block's completion would.
+  void complete_deferred_block()
+  {
+    std::vector<token_entry> tokens;
+    tokens.swap(retained);
+    for (const token_entry& token : tokens) {
+      token.release(token.context);
+    }
+  }
+
+  /// Makes this backend defer its transforms (see the interface documentation).
+  bool defers_execution = false;
+
   /// Number of notifications reported to the upper PHY through finished symbols (cumulative, so a
   /// test can compare it across calls even when the notifier spy is cleared).
   unsigned get_nof_notifications() const { return nof_notifications; }
@@ -120,6 +156,14 @@ private:
     unsigned port_index   = 0;
     unsigned symbol_index = 0;
   };
+
+  /// One piece of input the backend holds until its deferred block completes (see retain_input()).
+  struct token_entry {
+    void (*release)(void* context);
+    void* context;
+  };
+
+  std::vector<token_entry> retained;
 
   std::mt19937                          rgen;
   std::uniform_real_distribution<float> dist;

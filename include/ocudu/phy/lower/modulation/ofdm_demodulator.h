@@ -147,6 +147,22 @@ public:
   /// \brief Waits for the transform submitted in \c slot and writes its symbol into the grid.
   virtual void finish_symbol(resource_grid_writer& grid, unsigned slot) { (void)grid; (void)slot; }
 
+  /// \brief Whether a submitted transform may be EXECUTED after finish_symbol() returned (D1, 5.9.7).
+  ///
+  /// The receiving chain's samples live in the radio's receive buffer, and finish_symbol() returning is what
+  /// tells the radio they may be recycled (puxch_processor_impl::finish_oldest_symbol() retires the buffer's
+  /// handle right after it). That is safe for a demodulator that has waited for its transform there. One
+  /// that defers its dispatches - the fused lane's single submission - answers true, and the caller then
+  /// hands the samples over with retain_input() instead of relying on the wait.
+  virtual bool defers_transform_execution() const { return false; }
+
+  /// \brief Hands the samples a submitted transform reads over to the block that will run it (D1, 5.9.7).
+  ///
+  /// Attach one per transform, after the submission it belongs to. See dft_processor::retain_input() for the
+  /// release contract (exactly once, possibly on a completion thread).
+  /// \return True when the backend took ownership of \p context; false when it did not.
+  virtual bool retain_input(void (* /*release*/)(void* /*context*/), void* /*context*/) { return false; }
+
   virtual void demodulate_batch(resource_grid_writer& grid,
                                 span<const ci16_t>    input,
                                 unsigned              port_index,

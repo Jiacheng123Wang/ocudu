@@ -572,6 +572,82 @@ TEST_P(LowerPhyUplinkProcessorFixture, SymbolSamplesAreKeptAliveUntilTheirTransf
   }
 }
 
+/// \brief The same contract when the backend runs its transforms LATER than finish_symbol() (D1, 5.9.7).
+///
+/// A backend that defers - the fused lane's single submission does - cannot rely on the pipeline's own
+/// references: those are dropped when the slot drains, and the transforms have not run yet. The samples then
+/// have to be held by the BACKEND and given back when its block completes. This is the guard the air leg
+/// lacked: without it the transforms read samples the radio had already overwritten, measured as
+/// `crc=KO 942 / OK 46` at `sinr=37.6 dB` (design document 5.9.7).
+///
+/// Two-sided on purpose, like the test above: samples held for too short corrupt the transform, and samples
+/// held for too long starve the radio's pool of four.
+TEST_P(LowerPhyUplinkProcessorFixture, DeferredTransformsKeepTheirSamplesUntilTheirBlockCompletes)
+{
+  const unsigned     nof_rx_ports = std::get<0>(GetParam());
+  sampling_rate      srate        = std::get<1>(GetParam());
+  subcarrier_spacing scs          = std::get<2>(GetParam());
+  cyclic_prefix      cp           = std::get<3>(GetParam());
+
+  const unsigned base_symbol_size     = srate.get_dft_size(scs);
+  const unsigned nof_symbols_per_slot = get_nsymb_per_slot(cp);
+
+  ofdm_demod_spy->pipeline_depth   = 2;
+  ofdm_demod_spy->defers_execution = true;
+
+  puxch_processor_notifier_spy puxch_proc_notifier_spy;
+  puxch_proc->connect(puxch_proc_notifier_spy);
+
+  resource_grid_context rg_context;
+  rg_context.slot   = slot_point(to_numerology_value(scs), 0);
+  rg_context.sector = dist_sector_id(rgen);
+  puxch_proc->get_request_handler().handle_request(shared_rg_spy.get_grid(), rg_context);
+  ofdm_demod_spy->clear_pipeline();
+
+  std::vector<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>> owners;
+  for (unsigned i_symbol = 0, i_symbol_subframe = 0; i_symbol != nof_symbols_per_slot;
+       ++i_symbol, ++i_symbol_subframe) {
+    const unsigned cp_size = cp.get_length(i_symbol_subframe, scs).to_samples(srate.to_Hz());
+
+    auto owner = std::make_shared<baseband_gateway_buffer_dynamic_aligned>(nof_rx_ports, 2 * base_symbol_size);
+    owner->resize(cp_size + base_symbol_size);
+    for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
+      span<ci16_t> port_buffer = (*owner)[i_port];
+      std::generate(port_buffer.begin(), port_buffer.end(), []() {
+        return to_ci16(cf_t(dist_sample(rgen) * INT16_MAX, dist_sample(rgen) * INT16_MAX));
+      });
+    }
+
+    lower_phy_rx_symbol_context puxch_context;
+    puxch_context.slot        = rg_context.slot;
+    puxch_context.sector      = rg_context.sector;
+    puxch_context.nof_symbols = i_symbol;
+
+    unsigned buffer_index = puxch_proc->get_baseband().acquire_symbol_buffer();
+    puxch_proc->get_baseband().process_symbol(owner->get_reader(), puxch_context, buffer_index, owner);
+
+    owners.push_back(std::move(owner));
+  }
+
+  // The backend was handed one token per transform, and it is holding every symbol's samples: the slot has
+  // drained, so nothing else does.
+  ASSERT_EQ(ofdm_demod_spy->nof_retained(), nof_symbols_per_slot * nof_rx_ports)
+      << "the backend that defers was not handed a token per transform";
+  for (unsigned i_symbol = 0; i_symbol != owners.size(); ++i_symbol) {
+    ASSERT_GT(owners[i_symbol].use_count(), 1)
+        << "the samples of symbol " << i_symbol << " were let go at the slot's end, while the deferred "
+           "transforms that read them had not run yet";
+  }
+
+  // The block completes: the samples go back to the radio, all of them.
+  ofdm_demod_spy->complete_deferred_block();
+  EXPECT_FALSE(ofdm_demod_spy->has_retained()) << "the backend still holds a token after its block completed";
+  for (unsigned i_symbol = 0; i_symbol != owners.size(); ++i_symbol) {
+    ASSERT_EQ(owners[i_symbol].use_count(), 1)
+        << "the samples of symbol " << i_symbol << " are still held after the deferred block completed";
+  }
+}
+
 TEST_P(LowerPhyUplinkProcessorFixture, LateRequest)
 {
   unsigned           sector_id    = dist_sector_id(rgen);

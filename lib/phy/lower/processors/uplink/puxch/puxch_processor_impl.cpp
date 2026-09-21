@@ -68,6 +68,39 @@ public:
   }
 };
 
+/// \brief Drops one retain_input() token: the samples of a transform whose block is done with them.
+///
+/// This may run on the DEVICE's completion thread, which is why the token is a plain `shared_ptr` copy of the
+/// receive buffer handle: dropping the last reference runs the pool's deleter, which locks the pool's weak
+/// pointer and pushes the buffer back into a `blocking_queue` - both thread-safe by construction
+/// (lower_phy_baseband_processor.h, rx_buffer_pool). No state of this processor is touched here.
+void release_symbol_input(void* context)
+{
+  delete static_cast<uplink_processor_baseband::rx_buffer_handle*>(context);
+}
+
+/// \brief Hands the samples a transform reads over to the backend, when that backend runs it LATER (D1, 5.9.7).
+///
+/// `finish_symbol()` returning is what tells the radio a symbol's buffer may be recycled
+/// (finish_oldest_symbol() retires the handle right after it), so a backend that defers its dispatches past
+/// that point has to hold the samples itself. One reference per transform, exactly like the in-flight
+/// entry's own copy: whichever outlives the other keeps the radio's buffer alive, and the last release
+/// returns it to the pool. A backend that does not defer (and every backend whose block is closed) is not
+/// asked at all, so the historical lifetime rule is untouched.
+void retain_symbol_input(ofdm_symbol_demodulator& demodulator, const uplink_processor_baseband::rx_buffer_handle& owner)
+{
+  if ((owner == nullptr) || !demodulator.defers_transform_execution()) {
+    // Nothing to keep alive: the samples were never assembled into a buffer of ours, or the backend waits
+    // for the transform itself (see the interface documentation).
+    return;
+  }
+  auto* held = new uplink_processor_baseband::rx_buffer_handle(owner);
+  if (!demodulator.retain_input(&release_symbol_input, held)) {
+    // The backend refused after all (no block open any more): the entry's own copy is the lifetime, as before.
+    delete held;
+  }
+}
+
 } // namespace
 
 unsigned puxch_processor_impl::acquire_symbol_buffer()
@@ -173,6 +206,10 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
       span<const ci16_t> td_samples = samples.get_channel_buffer(i_port);
       td_capture::capture(context.slot, symbol_index_subframe, i_port, td_samples);
       demodulator->submit_symbol(current_grid.get().get_writer(), td_samples, i_port, symbol_index_subframe, slot);
+      // D1 (5.9.7): if the backend runs this transform LATER than finish_symbol() - the fused lane's single
+      // submission does - the samples it reads have to outlive that call, which is what tells the radio this
+      // buffer may be recycled. The token is per transform, like the in-flight entry's own reference below.
+      retain_symbol_input(*demodulator, owner);
       in_flight[(in_flight_begin + nof_in_flight) % max_in_flight_symbols] = {
           .context      = context,
           .slot         = slot,

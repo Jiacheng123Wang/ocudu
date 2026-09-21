@@ -167,6 +167,21 @@ public:
   }
 
   // See interface for documentation.
+  bool defers_transform_execution() const override
+  {
+    // A block that is open is a block whose transforms have been encoded but not committed, and the release
+    // path is what makes them run later than finish_symbol(). Both have to hold: the block alone (the
+    // factory path) still commits and is waited for at the slot's last symbol.
+    return block_open && (dft != nullptr) && dft->defers_transform_execution();
+  }
+
+  // See interface for documentation.
+  bool retain_input(void (*release)(void* context), void* context) override
+  {
+    return (dft != nullptr) && dft->retain_input(release, context);
+  }
+
+  // See interface for documentation.
   void set_center_frequency(double center_frequency_Hz) override
   {
     next_center_freq_Hz.store(center_frequency_Hz, std::memory_order_relaxed);

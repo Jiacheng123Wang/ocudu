@@ -151,6 +151,30 @@ public:
   ///         one whose release path is not armed.
   virtual bool release_block(const void* /*grid_base*/) { return false; }
 
+  /// \brief Whether a transform this processor accepted may be EXECUTED after the caller's wait returned.
+  ///
+  /// The receiving chain's samples live in the radio's receive buffer, and what tells the radio that they
+  /// may be recycled is `finish_symbol()` returning (puxch_processor_impl::finish_oldest_symbol() retires
+  /// the buffer's handle right after it). A backend that answers true here defers its dispatches past that
+  /// point - the fused lane's single submission does - and the caller must then hand the input over with
+  /// retain_input() instead of relying on the wait. False (the default, and every backend that waits) keeps
+  /// the historical lifetime exactly as it was.
+  virtual bool defers_transform_execution() const { return false; }
+
+  /// \brief Hands the input a submitted transform reads over to the block that will run it (D1, 5.9.7).
+  ///
+  /// Attach one per piece of input (the receiving chain attaches the samples a symbol was demodulated
+  /// from), after the corresponding submission and only while defers_transform_execution() is true.
+  ///
+  /// \param[in] release Called EXACTLY ONCE with \p context - when the block that carries the transform
+  ///            completes on the device, or when that block is definitively dropped. It may run on a
+  ///            completion thread: the caller's release must be thread-safe, or must only hand the work
+  ///            back to the thread that owns the state.
+  /// \param[in] context Opaque; owned by this processor once this returns true.
+  /// \return True when the input is now this processor's to release; false when it did not take it (the
+  ///         caller then keeps its own lifetime rule, which is what every non-deferring path does).
+  virtual bool retain_input(void (* /*release*/)(void* /*context*/), void* /*context*/) { return false; }
+
   /// \brief Tells the processor which receiving slot the transforms it is about to submit belong to.
   ///
   /// Instrumentation only: the device probe accounts the GPU time of a slot's transforms, and they are

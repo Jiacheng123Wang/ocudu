@@ -3008,7 +3008,57 @@ bool retain_for_block(const keep_alive& token);   // 挂到"当前打开的那�
 
 **⑥ ⇒ 下一小步（第 3 步的第 2/3 小步，需要腿）**：低层 PHY 在交出时把接收缓冲的凭据交出去
 （`puxch_processor_impl`：`finish_oldest_symbol()` 现在**无条件** `owner.reset()`，要改成"已经交出的符号由引擎还"），
-并把低层 PHY 的 `release_block()` 调用点接回来（`7fa657794c` 撤掉的那处）。
+并把低层 PHY的 `release_block()` 调用点接回来（`7fa657794c` 撤掉的那处）。
+
+#### 5.9.9 ✅ 第 3 步的第 2 小步：**接收缓冲的凭据真的交出去了**（低层 PHY 侧 + 一条离线可判的守卫测试）
+
+**① 关键事实：`rx_buffer_handle` 就是 `std::shared_ptr`，而池子的归还路径是线程安全的**
+
+| 事实 | 出处 |
+|---|---|
+| `using rx_buffer_handle = std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>` | `uplink_processor_baseband.h:36` |
+| 池子的 deleter：`pool.lock()` + `buffers.push_blocking(...)` | `lower_phy_baseband_processor.h` 的 `rx_buffer_pool::deleter` |
+| `blocking_queue` **文档原话 "thread-safe"**（有 mutex + condvar）| `include/ocudu/adt/blocking_queue.h:437` |
+
+**⇒ 完成回调（Metal 线程）上直接放掉 `shared_ptr` 是安全的**，不需要"置标志 + 回自己线程回收"的绕路。
+
+**② 接口（两处虚函数，纯 C++，默认 `false`）**
+
+```cpp
+// dft_processor / ofdm_symbol_demodulator：
+virtual bool defers_transform_execution() const { return false; }   // 便宜的问句
+virtual bool retain_input(void (*release)(void*), void* context) { return false; }  // 交凭据
+```
+
+**③ 低层 PHY 的做法（`puxch_processor_impl`）**
+
+```cpp
+demodulator->submit_symbol(...);
+retain_symbol_input(*demodulator, owner);   // 每个变换一份引用，和 in-flight entry 自己那份并列
+```
+* `retain_symbol_input()`：**先问 `defers_transform_execution()`**——不问就不分配、不交接，
+  **未武装时出厂路径连一次 `new` 都没有**（这是"零影响"的字面含义）；
+* 凭据是 `new rx_buffer_handle(owner)`，释放函数是 `delete`——**完成线程上跑的只有 `shared_ptr` 的析构**，
+  它不碰这个处理器的任何状态。
+
+**④ ★ 离线判据：扩展现成的那条守卫测试（它本来就是为这件事存在的）**
+
+`puxch_processor_test.cpp` 里原本就有
+`SymbolSamplesAreKeptAliveUntilTheirTransformIsFinished`（**"两次都判"**：留太少 ⇒ 变换读到被覆盖的样本；
+留太久 ⇒ 4 个缓冲的池子饿死）。本步加了它的**延迟版**：
+
+| 断言 | 含义 |
+|---|---|
+| `nof_retained() == 每槽符号数 × 端口数` | 延迟后端**每个变换都拿到了一份凭据** |
+| 槽排空后**每个 owner 的 `use_count() > 1`** | **样本没有在槽末被放掉**（这正是空口腿缺的那条保证）|
+| `complete_deferred_block()` 之后**每个 owner 的 `use_count() == 1`** | 块完成后**全部还回电台**（池子不会饿死）|
+
+**⑤ ★ 这条测试做过"反向验证"**：把 `retain_symbol_input()` 的第一个条件临时改成恒真
+（＝**根本不交接凭据**），该测试**立刻失败**（`FAILED ... DeferredTransforms.../0`），
+改回来 216/216 全过。**⇒ 它不是空洞断言。**
+
+**⑥ 门（旋钮关）**：`value_net` **47/0**、`ctest -R metal` **10/10**、
+`ctest -R "ul_pipeline_probe|puxch|lower_phy"` **5/5**、`neutral_vs_baseline` **131**（同数）。
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
