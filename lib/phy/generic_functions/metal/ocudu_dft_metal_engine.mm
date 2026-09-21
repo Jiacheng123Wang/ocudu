@@ -242,7 +242,7 @@ static const bool dft_contract_registered = []() {
 void dft_handover_heartbeat(const char* where)
 {
   static std::atomic<uint64_t> counter{0};
-  constexpr uint64_t           period = 256;
+  constexpr uint64_t           period = 32;
   if ((counter.fetch_add(1, std::memory_order_relaxed) % period) != 0) {
     return;
   }
@@ -1047,8 +1047,22 @@ void* dft_metal_engine::release_block(const void* grid_base)
   // The input tokens travel with it: armed on the completion (the adopter commits the buffer, and that is
   // when the transforms finally read the radio's samples), and released by the registry if the deposit is
   // DROPPED instead - a handover nobody claimed is never committed, so its completion would never come.
+  const size_t nof_tokens = engine->open_tokens.size();
   std::shared_ptr<block_token_set> tokens = arm_tokens_on_complete(cb, std::move(engine->open_tokens));
   metal::shared_burst::deposit_released(grid_base, cb, [tokens]() { release_block_tokens(tokens); });
+  // Per-deposit line, keyed by the grid the hop will look up: this and the take-side line in the estimator
+  // are what say whether the two ends name the SAME address (D1 diagnostics, 5.9.11). Rate-limited, because
+  // a healthy run has one per slot.
+  {
+    static std::atomic<unsigned> logged{0};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+      std::fprintf(stderr,
+                   "[d1_handover] deposit grid=%p tokens=%zu (block %llu of the receiving chain)\n",
+                   grid_base,
+                   nof_tokens,
+                   static_cast<unsigned long long>(nof));
+    }
+  }
   dft_handover_heartbeat("release");
   return (__bridge void*) cb;
 }

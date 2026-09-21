@@ -1057,6 +1057,15 @@ static stage_encoder begin_stage_on_handed(mmse_engine_impl* e)
     return s;
   }
   id<MTLCommandBuffer> handed = ocudu::metal::shared_burst::take_released(e->hop_grid);
+  // Take-side line of the D1 diagnostics: the hop names the grid it reads, and this is where the two ends
+  // are compared. A MISS here is the whole finding when it happens - the receiving chain's transforms are
+  // then in a buffer nobody commits, so the grid is never written AND its input is never given back.
+  {
+    static std::atomic<unsigned> logged{0};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+      std::fprintf(stderr, "[d1_handover] hop grid=%p -> %s\n", e->hop_grid, (handed != nil) ? "TAKEN" : "MISS");
+    }
+  }
   if (handed == nil) {
     return s;
   }
