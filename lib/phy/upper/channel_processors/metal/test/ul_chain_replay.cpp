@@ -363,6 +363,16 @@ int main(int argc, char** argv)
   /// chain really deposited. That is what puts the fused chain (front end + channel estimation +
   /// equalization + demapping in ONE submission) inside an offline A/B.
   unsigned hop_td_slots = 0;
+  /// \brief How many hops read ONE slot's grid (--hop-pdus K, default 1): the multi-PUSCH shape, i.e. one
+  ///        slot carrying several UEs' allocations.
+  ///
+  /// The hand-over's registry is keyed by (storage, slot) and `take_released()` refuses a block that is
+  /// already claimed, so of K hops on one grid exactly ONE can adopt the front end's block and the other
+  /// K-1 MISS - structurally, not as a race. Two things follow, and both are what this switch exists for:
+  /// the cliff is measurable (a slot's CPU submissions go from 1 to K), and the MISS path's device-side
+  /// wait becomes LOAD-BEARING, because the consumer the missing hop has to wait for is now a DEVICE
+  /// consumer whose commit may still be in flight. With one hop it never is (5.9.39).
+  unsigned hop_pdus = 1;
   bool        use_metal_ce     = false;
   bool        use_metal_demod  = false;
   bool        use_metal_decoder = false;
@@ -424,6 +434,8 @@ int main(int argc, char** argv)
       device_grid = true;
     } else if ((arg == "--hop-td") && (i + 1 < argc)) {
       hop_td_slots = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
+    } else if ((arg == "--hop-pdus") && (i + 1 < argc)) {
+      hop_pdus = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
     } else if ((arg == "--td-strategy") && (i + 1 < argc)) {
       td_strategy_average = (std::string(argv[++i]) == "average");
     } else if (arg == "--cpu") {
@@ -491,11 +503,11 @@ int main(int argc, char** argv)
     setenv("OCUDU_UL_DUMP_LLR", "1", 1);
   }
   // The capture budget: one reception is what a single-reception replay wants (its stages are the point),
-  // but the L1b harness replays a SLOT SEQUENCE and compares the LLRs of every slot, so the budget has to
-  // cover it. Measured with the budget left at 1: the A/B compared a single slot and reported a difference
-  // it could not attribute - the other seven receptions were never captured.
+  // but the L1b harness replays a slot sequence and compares the LLRs of every slot, so the budget has to
+  // cover it. It counts RECEPTIONS (hops), not slots - with --hop-pdus K there are K per slot, and a budget
+  // of one-per-slot silently captured only the first slots of the corpus.
   setenv("OCUDU_UL_DUMP_COUNT",
-         std::to_string((hop_td_slots != 0) ? hop_td_slots : 1U).c_str(),
+         std::to_string((hop_td_slots != 0) ? hop_td_slots * hop_pdus : 1U).c_str(),
          1);
 
   // --------------------------------------------------------------------------------------------
@@ -1317,33 +1329,61 @@ int main(int argc, char** argv)
     const unsigned       nof_codeblocks = compute_nof_codeblocks(units::bits(tbs), base_graph);
     std::vector<uint8_t> data(tbs);
 
-    // Run the receiver and report. The processor is asynchronous, so it stays alive until its
+    // Run the receiver(s) and report. The processor is asynchronous, so each one stays alive until its
     // notifier fires.
-    result_spy       spy;
-    unique_rx_buffer buffer =
-        buffer_pool->get_pool().reserve(pdu.slot, trx_buffer_identifier(pdu.rnti, 0), nof_codeblocks, true);
-    if (!buffer) {
-      std::fprintf(stderr, "cannot reserve a receive buffer\n");
-      return 1;
+    //
+    // ALL of this slot's hops are SUBMITTED BEFORE ANY OF THEM IS WAITED FOR, and that is the whole point
+    // of the multi-PUSCH arm (--hop-pdus K). Waiting in between would let the first hop's commit complete
+    // before the second hop looks the block up, and a MISS whose commit has already finished needs no
+    // ordering at all - which is exactly why every single-hop arm failed to falsify the device-side wait
+    // (5.9.39). Submitted together, the second hop MISSES while the first hop's commit is still in flight,
+    // so the wait it encodes is the only thing ordering its read against a DEVICE consumer's writes.
+    const unsigned nof_pdus = (hop_td_slots != 0) ? hop_pdus : 1U;
+    // One pdu_t PER HOP, reserved up front so nothing reallocates under a reference the processor may be
+    // holding: the hops differ only in their RNTI, which the receive buffer pool keys its reservations by
+    // (and the staged capture keys its files by) - K hops of one slot need K identifiers to stay apart.
+    std::vector<pusch_processor::pdu_t>               hop_pdu;
+    std::vector<std::unique_ptr<result_spy>>          spies;
+    std::vector<std::unique_ptr<pusch_processor>>     receivers;
+    hop_pdu.reserve(nof_pdus);
+    spies.reserve(nof_pdus);
+    receivers.reserve(nof_pdus);
+    const uint16_t base_rnti = to_value(pdu.rnti);
+    for (unsigned k = 0; k != nof_pdus; ++k) {
+      hop_pdu.push_back(pdu);
+      hop_pdu.back().rnti = to_rnti(static_cast<uint16_t>(base_rnti + k));
+      auto spy            = std::make_unique<result_spy>();
+      unique_rx_buffer buffer = buffer_pool->get_pool().reserve(
+          hop_pdu.back().slot, trx_buffer_identifier(hop_pdu.back().rnti, 0), nof_codeblocks, true);
+      if (!buffer) {
+        std::fprintf(stderr, "cannot reserve a receive buffer\n");
+        return 1;
+      }
+      auto receiver = proc_factory->create();
+      check(receiver, "pusch processor");
+      receiver->process(data, std::move(buffer), *spy, grid->get_reader(), hop_pdu.back());
+      spies.push_back(std::move(spy));
+      receivers.push_back(std::move(receiver));
     }
-    std::unique_ptr<pusch_processor> receiver = proc_factory->create();
-    check(receiver, "pusch processor");
-    receiver->process(data, std::move(buffer), spy, grid->get_reader(), pdu);
-    for (unsigned wait = 0; (wait != 5000) && !spy.done; ++wait) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    for (std::unique_ptr<result_spy>& spy : spies) {
+      for (unsigned wait = 0; (wait != 5000) && !spy->done; ++wait) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
     }
-
-    std::printf("  [%u] tbs=%u slot=%u rnti=%u %s: crc=%s iterations=%u sinr=%.2f dB epre=%.2f dB rsrp=%.2f dB\n",
-                i,
-                tbs,
-                pdu.slot.count(),
-                pdu.rnti,
-                capture.get_string("modulation", "?").c_str(),
-                spy.crc_ok ? "OK" : "KO",
-                spy.nof_iters,
-                spy.sinr_db,
-                spy.epre_db,
-                spy.rsrp_db);
+    for (unsigned k = 0; k != nof_pdus; ++k) {
+      const result_spy& spy = *spies[k];
+      std::printf("  [%u] tbs=%u slot=%u rnti=%u %s: crc=%s iterations=%u sinr=%.2f dB epre=%.2f dB rsrp=%.2f dB\n",
+                  i,
+                  tbs,
+                  hop_pdu[k].slot.count(),
+                  hop_pdu[k].rnti,
+                  capture.get_string("modulation", "?").c_str(),
+                  spy.crc_ok ? "OK" : "KO",
+                  spy.nof_iters,
+                  spy.sinr_db,
+                  spy.epre_db,
+                  spy.rsrp_db);
+    }
     ++replayed;
     }
   }
@@ -1364,12 +1404,13 @@ int main(int argc, char** argv)
       const char* env = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
       return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
     }();
-    std::printf("[l1_hop] installed=%d armed=%d host_first=%d claim_only=%d slots=%u handed=%llu taken=%llu "
-                "fallback=%llu late=%llu not_found=%llu unproduced=%llu ready_timeouts=%llu\n",
+    std::printf("[l1_hop] installed=%d armed=%d host_first=%d claim_only=%d pdus=%u slots=%u handed=%llu "
+                "taken=%llu fallback=%llu late=%llu not_found=%llu unproduced=%llu ready_timeouts=%llu\n",
                 hs.installed ? 1 : 0,
                 release_armed ? 1 : 0,
                 host_first ? 1 : 0,
                 claim_only ? 1 : 0,
+                hop_pdus,
                 hop_td_slots,
                 static_cast<unsigned long long>(hs.handed),
                 static_cast<unsigned long long>(hs.taken),
@@ -1419,6 +1460,36 @@ int main(int argc, char** argv)
     if (hs.ready_timeouts != 0) {
       std::fprintf(stderr, "FAIL: %llu wait(s) timed out\n", static_cast<unsigned long long>(hs.ready_timeouts));
       return 1;
+    }
+    // The multi-PUSCH arm: of K hops on one grid, the registry lets exactly ONE adopt the front end's block
+    // (take_released() refuses a claimed one), so the other K-1 MUST miss. That is the structural cliff -
+    // not a race - and this is where it is measured instead of argued about.
+    if (hop_pdus > 1) {
+      const uint64_t expected_taken = release_armed && !host_first && !claim_only ? hop_td_slots : 0;
+      if (hs.taken != expected_taken) {
+        std::fprintf(stderr,
+                     "FAIL: %u hops per slot but %llu adopted (expected %llu) - the multi-PUSCH cliff did "
+                     "not behave structurally\n",
+                     hop_pdus,
+                     static_cast<unsigned long long>(hs.taken),
+                     static_cast<unsigned long long>(expected_taken));
+        return 1;
+      }
+      // `handed` counts DEPOSITS, one per receiving slot, not hops: the hops that missed are the ones no
+      // deposit was left for.
+      const uint64_t nof_hops = static_cast<uint64_t>(hop_pdus) * hop_td_slots;
+      const uint64_t misses   = nof_hops - hs.taken;
+      std::printf("[l1_multi] %u hops per slot x %u slot(s): adopted=%llu missed=%llu "
+                  "(a slot's submissions go from 1 to %u unless the rest can share the block)\n",
+                  hop_pdus,
+                  hop_td_slots,
+                  static_cast<unsigned long long>(hs.taken),
+                  static_cast<unsigned long long>(misses),
+                  hop_pdus);
+      if (release_armed && (misses == 0)) {
+        std::fprintf(stderr, "FAIL: no hop missed, so the multi-PUSCH shape was not exercised\n");
+        return 1;
+      }
     }
   }
 

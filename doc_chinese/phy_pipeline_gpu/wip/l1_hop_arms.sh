@@ -21,11 +21,11 @@
 #
 # WHAT THIS HARNESS CANNOT DO (measured, design document 5.9.39): it cannot falsify the MISS path's
 # device-side wait. `claim` and `claimnowait` differ by exactly that wait (grid_devwaited=16 vs 0) and
-# produce identical soft bits and identical estimator scalars - 5 repetitions of 16 slots each. The reason
-# is that the fallback commit and the hop's own command buffer are submitted to ONE queue from ONE thread,
-# so the GPU runs them in submission order anyway. That wait is load-bearing only when the commit and the
-# reader are genuinely concurrent - a DEVICE consumer that claimed the block, i.e. two hops on one slot's
-# grid (the multi-PUSCH cliff). Until that construction exists, §4.3 step 4(ii) stays open.
+# produce identical soft bits and identical estimator scalars - 5 repetitions of 16 slots each. Neither
+# does the MISS hop of a two-hop slot (L1_HOP_PDUS=2: exactly one hop adopts it, the other misses). The
+# hazard is real but cross-QUEUE - the front end writes the grid on the front-end queue, the hop reads it
+# on the backend queue - and on an IDLE machine the commit has long completed before the back-end reader
+# runs, so the window is never hit. Falsifying that wait needs a LOADED GPU. §4.3 step 4(ii) stays OPEN.
 #
 # Usage: doc_chinese/phy_pipeline_gpu/wip/l1_hop_arms.sh [slots] [pdu-capture] [workdir]
 set -u
@@ -52,11 +52,13 @@ run_arm() {
   local name="$1"; shift
   ( cd "$REPO" && "$@" ) >"$WORK/$name.log" 2>&1
   local rc=$?
-  printf '%-10s rc=%d  %s\n' "$name" "$rc" "$(grep -m1 '^\[l1_hop\]' "$WORK/$name.log")"
+  printf '%-12s rc=%d  %s\n' "$name" "$rc" "$(grep -m1 '^\[l1_hop\]' "$WORK/$name.log")"
+  grep -m1 '^\[l1_multi\]' "$WORK/$name.log" | sed 's/^/             /'
   return $rc
 }
 
-ARM=(--metal --device-grid --hop-td "$SLOTS")
+PDUS="${L1_HOP_PDUS:-1}"
+ARM=(--metal --device-grid --hop-td "$SLOTS" --hop-pdus "$PDUS")
 
 run_arm ref "$TOOL" "$PDU" --out "$WORK/ref" "${ARM[@]}" || echo "  ^ ref arm FAILED" >&2
 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_GPU_STRICT=1 \
@@ -110,9 +112,13 @@ else
   echo "FAIL: see above"
 fi
 echo "OPEN: the device-side wait is NOT falsifiable here. The claim arms differ by exactly that wait"
-echo "      (grid_devwaited>0 vs 0) and agree bit for bit - one queue, one thread, so the GPU runs the"
-echo "      commit and the hop in submission order regardless. It needs a second, genuinely concurrent"
-echo "      consumer: two hops on one slot's grid (the multi-PUSCH cliff, 5.9.39)."
+echo "      (grid_devwaited>0 vs 0) and agree bit for bit, and so does the MISS hop of a two-hop slot"
+echo "      (L1_HOP_PDUS=2: exactly one hop adopts, the other misses) - 5.9.39/5.9.40."
+echo "      The hazard is real but cross-QUEUE: the front end writes the grid on the front-end queue and"
+echo "      the hop reads it on the backend queue, so nothing orders the two except that wait. On an IDLE"
+echo "      machine the front end's commit has long completed before the back-end queue reaches the"
+echo "      reader, so the window is never hit. Reproducing it needs a LOADED GPU - which is what the air"
+echo "      legs have and this harness does not."
 # NOTE deliberately NOT compared here: the OCUDU_UL_DUMP *grid* capture (<prefix>_<slot>_<rnti>.bin).
 # It is a HOST read of the grid, and in an arm where the hop ADOPTS the block the grid is produced at that
 # hop's commit - so the capture reads memory nobody has written yet and differs for reasons that have
