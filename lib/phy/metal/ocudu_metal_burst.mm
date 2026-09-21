@@ -10,6 +10,8 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <mutex>
 #include <vector>
 
 using namespace ocudu;
@@ -287,6 +289,95 @@ bool shared_burst::wait_committed()
   // with it: the lane's metrics are final now.
   gpu_lane_probe::close_lane();
   return ok;
+}
+
+namespace {
+
+/// A command buffer handed over by an earlier stage and not claimed yet (see shared_burst::deposit_released).
+struct handed_entry {
+  const void*          grid_base = nullptr;
+  id<MTLCommandBuffer> cb        = nil;
+};
+
+/// Process-wide, because the two ends are two threads: the lower PHY (the radio thread) releases the block
+/// its transforms went into, the upper PHY claims it when it starts the hop that reads that grid.
+struct handed_state {
+  std::mutex                mutex;
+  std::deque<handed_entry>  entries; // oldest first
+  uint64_t                  handed  = 0;
+  uint64_t                  taken   = 0;
+  uint64_t                  dropped = 0;
+};
+
+handed_state& handed()
+{
+  // Never destroyed on purpose: the report runs from an atexit handler (see burst_stats_report), which runs
+  // after the static destructors of this translation unit.
+  static handed_state* s = new handed_state();
+  return *s;
+}
+
+/// How many deposits are kept. The steady state is one per slot in flight, and a deposit is claimed by the
+/// hop that reads its grid, so this is generous - it exists so that a hop that never runs (a slot with no
+/// grant) cannot grow the list without bound.
+constexpr size_t max_handed = 8;
+
+} // namespace
+
+void shared_burst::deposit_released(const void* grid_base, id<MTLCommandBuffer> cb)
+{
+  if ((grid_base == nullptr) || (cb == nil)) {
+    return;
+  }
+  handed_state&               h = handed();
+  std::lock_guard<std::mutex> lock(h.mutex);
+
+  // One deposit per address: the same storage can come back through the grid pool for a LATER slot, and
+  // that slot's own deposit is the one its consumer must take. The entry it replaces belongs to a slot
+  // whose grid nobody is reading any more.
+  for (auto it = h.entries.begin(); it != h.entries.end(); ++it) {
+    if (it->grid_base == grid_base) {
+      it->cb = cb;
+      ++h.handed;
+      ++h.dropped;
+      return;
+    }
+  }
+  h.entries.push_back(handed_entry{grid_base, cb});
+  ++h.handed;
+  while (h.entries.size() > max_handed) {
+    // The oldest is the one whose consumer is least likely to still come; the caller reads `dropped` and
+    // the [metal_stats] line says the number, so a hop that lost its buffer this way is visible.
+    h.entries.pop_front();
+    ++h.dropped;
+  }
+}
+
+id<MTLCommandBuffer> shared_burst::take_released(const void* grid_base)
+{
+  if (grid_base == nullptr) {
+    return nil;
+  }
+  handed_state&               h = handed();
+  std::lock_guard<std::mutex> lock(h.mutex);
+  for (auto it = h.entries.begin(); it != h.entries.end(); ++it) {
+    if (it->grid_base == grid_base) {
+      id<MTLCommandBuffer> cb = it->cb;
+      h.entries.erase(it);
+      ++h.taken;
+      return cb;
+    }
+  }
+  return nil;
+}
+
+void shared_burst::handed_stats(uint64_t& handed_over, uint64_t& taken, uint64_t& dropped)
+{
+  handed_state&               h = handed();
+  std::lock_guard<std::mutex> lock(h.mutex);
+  handed_over = h.handed;
+  taken       = h.taken;
+  dropped     = h.dropped;
 }
 
 void shared_burst::set_flush_hook(void* context, flush_hook_t hook)

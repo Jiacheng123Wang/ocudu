@@ -4,6 +4,7 @@
 #include "ocudu_dft_metal_engine.h"
 #include "ocudu_metal_lane_probe.h"
 
+#include "ocudu_metal_burst.h"
 #include "ocudu_metal_queue.h"
 
 #import <Foundation/Foundation.h>
@@ -146,6 +147,26 @@ static void dft_stats_report()
                // OCUDU_DFT_RELEASE_BLOCK, and released_waits must stay 0 even then (see the struct).
                static_cast<unsigned long long>(s.released.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.released_waits.load(std::memory_order_relaxed)));
+
+  // D1 step 2: the handover's own counters, printed by the ENGINE rather than by the registry's own
+  // translation unit: the engine is in every build that can arm the release, so an armed leg always sees
+  // the line - and a line with handed=0 is then a finding (the demodulator's guard refused, or no slot
+  // reached its last symbol), not an absent instrument. A run that did not arm it and never handed
+  // anything over stays silent.
+  uint64_t handed = 0;
+  uint64_t taken  = 0;
+  uint64_t dropped = 0;
+  metal::shared_burst::handed_stats(handed, taken, dropped);
+  const char* armed = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
+  const bool  release_armed = (armed != nullptr) && (std::strtoul(armed, nullptr, 10) != 0);
+  if (release_armed || (handed != 0) || (taken != 0) || (dropped != 0)) {
+    std::fprintf(stderr,
+                 "[metal_stats] dft handover handed=%llu taken=%llu dropped=%llu (armed=%d)\n",
+                 static_cast<unsigned long long>(handed),
+                 static_cast<unsigned long long>(taken),
+                 static_cast<unsigned long long>(dropped),
+                 static_cast<int>(release_armed));
+  }
 }
 /// \brief Registers the transform input requirement: the transforms of this run read the radio's
 /// int16 samples instead of a host-staged copy (S-7f-6f).
@@ -832,7 +853,7 @@ bool dft_metal_engine::block_release_enabled()
   return block_release_requested();
 }
 
-void* dft_metal_engine::release_block()
+void* dft_metal_engine::release_block(const void* grid_base)
 {
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
   // DEFAULT OFF: without the knob this answers nullptr and NOTHING else happens - not even the encoder
@@ -843,8 +864,8 @@ void* dft_metal_engine::release_block()
   }
   id<MTLCommandBuffer> cb = engine->open_cb;
   const uint64_t       nof = engine->open_transforms;
-  // Close the encoder before handing over: the adopter opens its own (shared_burst::adopt() takes the
-  // buffer only), and the boundary between the two encoders is what orders the adopter's first dispatch
+  // Close the encoder before handing over: the adopter opens its own (shared_burst::take_released() takes
+  // the buffer only), and the boundary between the two encoders is what orders the adopter's first dispatch
   // after this block's dispatches for the SAME buffer object (see wrap_grid()).
   if (engine->open_enc != nil) {
     [engine->open_enc endEncoding];
@@ -870,6 +891,10 @@ void* dft_metal_engine::release_block()
   // NOT commit_front_end(): no commit, no front-end fence signal, no front-end chain publication, no
   // dft commit counter. The caller submits this buffer, and everything a commit owes moves with it
   // (see the header).
+  //
+  // The deposit is what actually carries the buffer to its consumer, which runs on another thread and
+  // looks it up by the grid it is about to read (shared_burst::deposit_released()).
+  metal::shared_burst::deposit_released(grid_base, cb);
   return (__bridge void*) cb;
 }
 

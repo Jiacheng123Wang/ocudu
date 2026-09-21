@@ -9,6 +9,7 @@
 #include "ocudu/ocuduvec/prod.h"
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/ocuduvec/zero.h"
+#include "ocudu/phy/phy_pipeline_strict.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/ran/frame_types.h"
 #include "ocudu/ran/subcarrier_spacing.h"
@@ -17,6 +18,51 @@
 #include <cstdlib>
 
 using namespace ocudu;
+
+namespace {
+
+/// \brief Whether some stage of the receiving chain gathers the resource grid on the HOST.
+///
+/// The block handover (finish_symbol()) makes the slot's command buffer the HOP's own: the grid's producer
+/// is inside it and nothing commits it before the hop ends. A stage that reads the grid on the HOST would
+/// therefore read memory nobody has written yet - silently, because the host read is not ordered against a
+/// buffer that is committed later - so the handover is refused while one of these arms is on.
+///
+/// This is the counterpart of the estimator's own `hold_extraction_for_weights()`: that predicate is the
+/// same statement for the extraction's PRODUCTS (the host must not read them inside the hop either), and
+/// the two share their reasons - a host least-squares pre-stage reads the received pilots out of the grid,
+/// the LS comparison needs that same host build, and the CPU estimator is a host reader by definition.
+/// None of them may be combined with the handover; each is an A/B arm an operator turns ON PURPOSE.
+bool host_reads_the_grid()
+{
+  static const char* const host_route_arms[] = {
+      "OCUDU_CE_CPU_CE",   // the whole channel estimation on the host: it gathers the grid
+      "OCUDU_CE_CPU_LS",   // the host pre-stage gathers the received pilots out of the grid
+      "OCUDU_CE_LS_CHECK", // needs the host's own least-squares build to compare the device's against
+  };
+  for (const char* arm : host_route_arms) {
+    const char* env = std::getenv(arm);
+    if ((env != nullptr) && (std::strtoul(env, nullptr, 10) != 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// \brief Whether the slot's block may be handed over at all (the knob is a separate, later answer).
+///
+/// Both conditions are about the RUN, not about this slot: the deployment must have declared that the grid
+/// is consumed on the device (the same declaration the front-end fence route needs, and the reason
+/// `wait_per_slot` is what calls this), no host reader may be armed, and the run must claim that the device
+/// serves every hop (phy_pipeline_strict_enabled()) - in mode=gpu a hop the device cannot serve FAILS the
+/// grant instead of being covered by the host, so a device refusal cannot silently become a host read of a
+/// grid nobody wrote.
+bool handover_allowed()
+{
+  return !host_reads_the_grid() && phy_pipeline_strict_enabled();
+}
+
+} // namespace
 
 ofdm_symbol_demodulator_impl::ofdm_symbol_demodulator_impl(const ofdm_demodulator_configuration& ofdm_config,
                                                            ofdm_demodulator_dependencies         dependencies) :
@@ -318,15 +364,52 @@ void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, uns
   // the slot's LAST symbol: fourteen host waits for one consumer become one. Every earlier symbol is
   // complete by then anyway - one queue completes its command buffers in submission order.
   // The slot's transforms were encoded into one command buffer (see set_lane_slot()): its last symbol is
-  // where the block ends, so the command buffer is committed here - before the wait below, which would
+  // where the block ends, so the command buffer is closed here - before the wait below, which would
   // otherwise find nothing to wait for.
+  const bool wait_per_slot = pipeline_slots[slot].device_write && grid_consumed_on_device;
+  // D1 step 2: instead of committing the slot's block, HAND IT OVER to the hop that will read this grid.
+  // The upper PHY's first back-end stage adopts it (same command buffer, its own encoder), so the slot's
+  // transforms, the channel estimation, the equalization and the demapping are ONE submission - which is
+  // what takes the hop from 2.83 CPU submissions to 1.00 (design document 5.9.4), and what makes the
+  // grid's producer the buffer's own first dispatch: no front-end fence is needed for it, and the host
+  // wait below is not either.
+  //
+  // ARMED ONLY WHERE A CONSUMER IS GUARANTEED. The handover makes the slot's block the HOP's command
+  // buffer: the grid's producer is inside it and nothing commits it before the hop's own end. Two ways
+  // that can go wrong, both SILENT, and both therefore refused here instead of assumed away:
+  //
+  //  * a stage that GATHERS the grid on the HOST would read memory nobody has written yet - the block is
+  //    committed later and a host read is not ordered against it at all. Those are the estimator's own
+  //    host-route arms (the counterpart of hold_extraction_for_weights()), and they are listed below;
+  //  * a hop the DEVICE cannot serve would be covered by the host - which is the same read. In mode=gpu
+  //    that hop fails the grant instead of being covered (phy_pipeline_strict_enabled()), so requiring the
+  //    claim is what keeps a device refusal loud rather than a wrong grid. Without the claim (cpu_gpu, a
+  //    replay that publishes no mode) the handover stays off, and OCUDU_GPU_STRICT=1 is the override the
+  //    offline harnesses use.
+  //
+  // The answer is taken, not assumed: a processor whose release path is off (or that has no block open)
+  // answers false and the block is committed exactly as before - one call site, one decision.
+  bool released = false;
   if (block_open && last_symbol_of_slot) {
-    (void)dft->end_block();
+    released = wait_per_slot && handover_allowed() && dft->release_block(grid.get_device_view().base);
+    if (!released) {
+      (void)dft->end_block();
+    }
     block_open = false;
   }
 
-  const bool wait_per_slot = pipeline_slots[slot].device_write && grid_consumed_on_device;
-  if (!wait_per_slot || last_symbol_of_slot) {
+  if (released) {
+    // The transforms of this slot are not this engine's submission any more: the adopter commits them, and
+    // waiting here would name a buffer this engine does not own (wait_slot() says so and refuses). The
+    // ordering the wait used to provide is inside the adopted buffer now.
+    static bool reported_release = false;
+    if (!reported_release) {
+      reported_release = true;
+      ocudulog::fetch_basic_logger("PHY").info(
+          "OFDM demodulator: the slot's transforms are handed over to the fused lane instead of being "
+          "committed and waited for (D1 step 2) - the hop commits them once, with its own stages");
+    }
+  } else if (!wait_per_slot || last_symbol_of_slot) {
     dft->wait_slot(slot);
   } else {
     // The host wait for this symbol is gone: the back end is ordered by the fence event instead. Said

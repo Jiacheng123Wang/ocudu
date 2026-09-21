@@ -134,6 +134,23 @@ public:
   /// \brief Closes the block opened by begin_block(): commits the command buffer its transforms went into.
   virtual bool end_block() { return false; }
 
+  /// \brief Closes the block opened by begin_block() and HANDS ITS COMMAND BUFFER OVER, uncommitted (D1).
+  ///
+  /// The counterpart of end_block() for the fused lane: instead of committing the slot's transforms, the
+  /// engine deposits the command buffer under the resource grid that block wrote, and the hop that reads
+  /// that grid adopts it - so the transforms, the extraction, the weights, the equalization and the
+  /// demapping are ONE submission that the lane commits once (see dft_metal_engine::release_block()).
+  ///
+  /// The caller owes what a commit owed: nothing else may read those transforms, and whoever adopts the
+  /// buffer commits it. It is therefore called only where a consumer of that grid is guaranteed - the
+  /// receiving chain's device-consumed path.
+  ///
+  /// \param[in] grid_base Storage base of the resource grid the block wrote
+  ///            (resource_grid_device_view::base), i.e. the key its consumer takes it by.
+  /// \return True when a block was handed over. False for every processor without such a path, and for
+  ///         one whose release path is not armed.
+  virtual bool release_block(const void* /*grid_base*/) { return false; }
+
   /// \brief Tells the processor which receiving slot the transforms it is about to submit belong to.
   ///
   /// Instrumentation only: the device probe accounts the GPU time of a slot's transforms, and they are

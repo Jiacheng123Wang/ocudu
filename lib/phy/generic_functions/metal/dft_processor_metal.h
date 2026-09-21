@@ -95,6 +95,13 @@ public:
 
   bool end_block() override { return (engine != nullptr) && engine->commit_open(); }
 
+  bool release_block(const void* grid_base) override
+  {
+    // The engine deposits the buffer under the grid it wrote (shared_burst::deposit_released()), which is
+    // how the consumer - on another thread - finds it (see dft_metal_engine::release_block()).
+    return (engine != nullptr) && (engine->release_block(grid_base) != nullptr);
+  }
+
   void set_lane_slot(uint64_t slot_index) override
   {
     if (engine != nullptr) {

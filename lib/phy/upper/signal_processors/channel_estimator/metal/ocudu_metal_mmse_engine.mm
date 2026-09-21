@@ -403,6 +403,16 @@ struct mmse_engine_impl {
   /// be reached instead closes it (close_held_buffer(), called from wait_pending_impl() and from the
   /// entries that need their own command buffer).
   id<MTLCommandBuffer>           held_cb       = nil;
+
+  /// \name D1 step 2: adopting the receiving chain's block (see set_hop_grid()).
+  ///
+  /// The grid of the hop the adapter is about to run. It is CONSUMED by the first stage that opens a
+  /// command buffer (build_pilots_lse()) and cleared there: a hop adopts at most one block, and a hop the
+  /// adapter did not announce cannot inherit the previous hop's key.
+  ///@{
+  const void* hop_grid = nullptr;
+  ///@}
+
   // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
   id<MTLComputePipelineState>    weights_matrix_pipe = nil;
   id<MTLComputePipelineState>    apply_matrix_pipe  = nil;
@@ -1021,6 +1031,49 @@ static stage_encoder begin_weights_stage(mmse_engine_impl*           e,
   }
   (void)close_held_buffer(e);
   return begin_stage(e, first_pipe, fuse, /*wait_for_extraction=*/true);
+}
+
+/// \brief Adopts the block the receiving chain handed over for this hop's grid, if there is one (D1 step 2).
+///
+/// Called by the hop's FIRST stage (build_pilots_lse()), once per hop: the deposit is looked up by the grid
+/// the hop reads, which is what makes the pairing exact - the buffer that wrote THIS grid
+/// (shared_burst::deposit_released(), keyed by resource_grid_device_view::base). The adopted buffer needs no
+/// fences: its first dispatches ARE the transforms that produced the grid this hop is about to read, which
+/// is the ordering the front-end fence exists to provide between two buffers.
+///
+/// EVERY route adopts, not only the fused ones. The buffer carries the receiving chain's transforms, so a
+/// hop that left it alone would leave a grid nobody ever wrote; what differs per route is only WHO commits
+/// it - the lane's burst (\c merged, \c burst) or the extraction's own end_stage() (\c event, \c host_wait,
+/// a non-deferred hop) - and every one of those paths already handles a buffer this engine opened itself.
+/// The fused routes are the ones that gain the single submission; the others are the reason a deposit is
+/// never dropped.
+///
+/// \return The stage encoder to encode into; a default-constructed one (nil \c cb) when nothing was
+///         deposited for this hop, in which case the caller opens its own command buffer as before.
+static stage_encoder begin_stage_on_handed(mmse_engine_impl* e)
+{
+  stage_encoder s;
+  if (e->hop_grid == nullptr) {
+    return s;
+  }
+  id<MTLCommandBuffer> handed = ocudu::metal::shared_burst::take_released(e->hop_grid);
+  if (handed == nil) {
+    return s;
+  }
+  id<MTLComputeCommandEncoder> encoder = [handed computeCommandEncoder];
+  if (encoder == nil) {
+    // The buffer cannot be encoded into: commit it here rather than losing the receiving chain's
+    // transforms - a hop that dropped them would read a grid nobody ever wrote, silently.
+    ocudu::metal::shared_queue::arm_gpu_time(handed, ocudu::metal::shared_queue::queue_kind::back_end);
+    [handed commit];
+    ocudulog::fetch_basic_logger("PHY").error(
+        "Metal MMSE: the handed-over block could not be encoded into; committed it without this hop");
+    return s;
+  }
+  s.cb    = handed;
+  s.enc   = encoder;
+  s.burst = false;
+  return s;
 }
 
 /// \brief Closes an asynchronous stage and collects what its order says this caller must collect.
@@ -2006,7 +2059,16 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   // (gpu_ls_cfo), the noise variance and the pilots' power (gpu_ls_sigma2) feed the statistics and the
   // noise reformat that this very hop still encodes, and the LS check reads the LSE - so the command
   // buffer has to be committed and waited here (see begin_stage()).
-  stage_encoder                st  = begin_stage(e, e->pilots_lse_pipe, /*fuse=*/false);
+  //
+  // ... UNLESS the receiving chain handed this hop's grid over (D1 step 2): the extraction is then encoded
+  // into THAT buffer, which already carries the transforms that wrote the grid, and hold_for_weights()
+  // keeps it open for the weights exactly as it does for a buffer opened here. The two "host reads it
+  // inside the hop" conditions above are the same promise hold_for_weights() already needs, so a hop that
+  // adopts is a hop that holds (see the adapter's hold_extraction_for_weights()).
+  stage_encoder st = begin_stage_on_handed(e);
+  if (st.cb == nil) {
+    st = begin_stage(e, e->pilots_lse_pipe, /*fuse=*/false);
+  }
   id<MTLCommandBuffer>         cb  = st.cb;
   id<MTLComputeCommandEncoder> enc = st.enc;
 
@@ -3296,6 +3358,15 @@ void mmse_engine::set_lane_order(ce_lane_order order)
     e->lane_order = order;
   }
 }
+
+void mmse_engine::set_hop_grid(const void* grid_base)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if (e != nullptr) {
+    e->hop_grid = grid_base;
+  }
+}
+
 
 ce_lane_order mmse_engine::lane_order() const
 {

@@ -1434,6 +1434,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // gate is here. Handing a non-deferred hop to the burst leaves its dispatches in a command buffer
     // nobody commits: measured as an all-zero estimator output on every hop of the inline route.
     engine->set_lane_order(args.deferred ? order : metal::ce_lane_order::host_wait);
+    // D1 step 2: tell the engine WHICH grid this hop reads, so its extraction can adopt the receiving
+    // chain's block if one was handed over for it (see mmse_engine::set_hop_grid()). Per hop, both ways:
+    // the engine does not keep the key, and a hop that follows one which adopted must not inherit its grid.
+    // Only a device-addressable grid could have been written by a device block at all.
+    const resource_grid_device_view hop_grid = args.grid.get_device_view();
+    engine->set_hop_grid(hop_grid.is_valid() ? hop_grid.base : nullptr);
   }
 
   const unsigned nof_layers = args.dmrs_patterns.size();

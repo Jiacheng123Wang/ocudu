@@ -233,8 +233,12 @@ int main()
         std::fprintf(stderr, "FAIL: submit_slot_grid_write() refused with the release path off\n");
         return 1;
       }
-      if (engine.release_block() != nullptr) {
+      if (engine.release_block(grid_base) != nullptr) {
         std::fprintf(stderr, "FAIL: release_block() handed a block over while OCUDU_DFT_RELEASE_BLOCK is unset\n");
+        return 1;
+      }
+      if (metal::shared_burst::take_released(grid_base) != nil) {
+        std::fprintf(stderr, "FAIL: a block was deposited while OCUDU_DFT_RELEASE_BLOCK is unset\n");
         return 1;
       }
       if (!engine.commit_open()) {
@@ -305,13 +309,30 @@ int main()
           return 1;
         }
 
-        // THE HANDOVER. Nothing is committed by the engine here.
-        void* handle = engine.release_block();
+        // THE HANDOVER, through the entry points the receiving chain and the lane actually use:
+        // release_block() deposits the buffer under the grid it wrote, and the consumer takes it back by
+        // that same address (shared_burst::take_released()). Nothing is committed by the engine here.
+        void* handle = engine.release_block(grid_base);
         if (handle == nullptr) {
           std::fprintf(stderr, "FAIL: release_block() refused an open block (rep %u)\n", rep);
           return 1;
         }
         id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)handle;
+        if (metal::shared_burst::take_released(grid_base) != cb) {
+          std::fprintf(stderr,
+                       "FAIL: the deposit did not come back for the grid it was keyed by (rep %u) - the "
+                       "handover is not addressable by the consumer\n",
+                       rep);
+          return 1;
+        }
+        if (metal::shared_burst::take_released(grid_base) != nil) {
+          std::fprintf(stderr, "FAIL: a deposit was handed out twice (rep %u)\n", rep);
+          return 1;
+        }
+        if (metal::shared_burst::take_released(static_cast<const char*>(grid_alloc)) != nil) {
+          std::fprintf(stderr, "FAIL: a deposit was handed out for an address nothing was deposited for\n");
+          return 1;
+        }
         if (cb.status != MTLCommandBufferStatusNotEnqueued) {
           std::fprintf(stderr,
                        "FAIL: the released buffer is already %lu - release_block() committed it\n",
@@ -328,6 +349,8 @@ int main()
         }
 
         // The lane's stage that follows: a reader that binds the grid the way the real consumers do.
+        // The deposit was TAKEN above (that is what the estimator's extraction does with it) and adopted
+        // here (that is what the lane does with it).
         id<MTLComputeCommandEncoder> encoder = metal::shared_burst::encoder(reader);
         if (encoder == nil) {
           std::fprintf(stderr, "FAIL: the adopted burst did not give an encoder\n");

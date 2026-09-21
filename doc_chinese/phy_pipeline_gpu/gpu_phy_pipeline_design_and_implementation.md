@@ -2849,6 +2849,60 @@ if (!wait_per_slot || last_symbol_of_slot) {
 
 **⇒ 记为"已知的偶发"，不是回归。**（下次有人碰到时，把它改成对**记录值**的断言而不是对 `sleep` 的断言。）
 
+#### 5.9.6 ★★ D1 第 2 步的接线已完成（S18 续）：**一跳一条缓冲的机制接通了，默认关闭时逐字节零影响；而"什么时候才允许交出"是一组必须显式成立的条件，不是一句"应该没问题"**
+
+**① 改了什么（两线程、四处，一处一个决定）**
+
+| 处 | 改动 |
+|---|---|
+| **`shared_burst`（新增跨线程登记处）** | `deposit_released(grid_base, cb)` / `take_released(grid_base)` / `handed_stats()`。**按资源网格的存储基址为键**、**有界（8 条、淘汰最旧、计数 `dropped`）**、`std::mutex` 保护（**两端是两个线程**：低层 PHY 的射频线程交，上层 PHY 的线程取）|
+| **DFT 侧（C++ 桥）** | `dft_processor::release_block(const void* grid_base)`（默认返回 false）→ `dft_processor_metal` → 引擎 `release_block(grid_base)`（结束 encoder、**不提交**、deposit）。**这是 §4.3-3 那座"ObjC++ 接缝"的落点** |
+| **低层 PHY** | `ofdm_demodulator_impl::finish_symbol()`：槽末**交出**而不是 `end_block()`；**跳过宿主等待**（`wait_slot()` 对交出去的槽位本来就拒绝）|
+| **上层 PHY** | `mmse_engine::set_hop_grid(grid_base)`（适配器每跳一次，用**同一个** `get_device_view().base`）+ `build_pilots_lse()` **认领并 adopt**（`begin_stage_on_handed()`）|
+
+**② 键为什么是"网格基址"**：两端本来就各自握着它（写侧 `resource_grid_writer::get_device_view().base`，
+读侧 `resource_grid_reader::get_device_view().base`，**同一个 `rg_buffer.get_data()`**）。
+用它做键，"这一跳认领的缓冲"就**按构造**等于"写了它正在读的那份网格的缓冲"——不是靠时间或槽号猜的。
+
+**③ ★ "什么时候允许交出"= 三条必须显式成立的条件（`finish_symbol()` 里的 `handover_allowed()`）**
+
+| 条件 | 为什么 |
+|---|---|
+| `wait_per_slot`（= `device_write && grid_consumed_on_device`）| 配置**声明**过网格由设备消费（前端栅栏路线用的同一句声明）|
+| **没有宿主网格读取臂**（`OCUDU_CE_CPU_CE` / `OCUDU_CE_CPU_LS` / `OCUDU_CE_LS_CHECK`）| 这些臂让**宿主**去读网格，而交出去的缓冲在跳末之前没人提交 ⇒ 宿主读到没人写过的内存 |
+| **`phy_pipeline_strict_enabled()`**（mode=gpu，或 `OCUDU_GPU_STRICT=1`）| 设备服务不了的跳在 `gpu` 下**失败**（响），而不是被宿主悄悄兜底 |
+
+**⇒ 缺任何一条，交出去就是 P0 的签名（deposit 没人取 ⇒ 网格永远没人写 ⇒ 静默错数据），所以宁可退回"提交 + 等待"。**
+（`cpu_gpu`、以及**不发布模式的离线回放**都因此拿不到这条路径——这正是 `OCUDU_GPU_STRICT` 存在的理由。）
+
+**④ 认领是每一条路线都做的，不只是融合路线**：缓冲里装着接收链的变换，
+**任何**路线不认领就等于让那份网格永远没人写。区别只在**谁提交**：`merged`/`burst` 由车道的 burst 提交（这才是 D1 要的那一次提交），
+`event`/`host_wait`/非延迟跳由提取自己的 `end_stage()` 提交并等待——**两条路的机制都早就存在**，所以"总是认领"比"只在融合路线认领"更安全，而不是更激进。
+
+**⑤ 本步已验（全部离线，S18 续）**
+
+| 判据 | 结果 |
+|---|---|
+| `python3 wip/value_net.py` | **47 捕获 0 问题** |
+| `ctest --test-dir build -R metal` | **10/10** |
+| `wip/neutral_vs_baseline.sh` | **131 differing-bytes**（= S15/S17/S18 同数；235 个 dump）|
+| **机制单测（走真入口）** | `release_block(grid_base)` → `take_released(grid_base)` → `adopt()` → 消费者读到网格：**shared 20/20**、**private 20/20 读到写前内容（陷阱复现）**、`handed=40 taken=40 dropped=0` |
+| **★ 旋钮武装 + 无 deposit 的回放 A/B** | 网格捕获模式下 DFT 根本不跑 ⇒ 上层认领路径**每跳都走到、空手而归**，5 个 dump **逐字节相同** ⇒ "接上但不改行为"是读数 |
+| **守卫负例** | `ofdm_demodulator_metal_batch_test`（**宿主读网格**的配置）武装旋钮 + strict：**ALL OK**，且 `handed=0 (armed=1)` ⇒ 守卫确实挡下了 |
+| 仪表 | `[metal_stats] dft handover handed= taken= dropped= (armed=)`：**武装了就一定打这一行**（`handed=0` 是发现，不是"没接线"）|
+
+**⑥ ⚠ 未验清单（诚实，且这就是下一步空口腿要判的东西）**
+
+| # | 未验的 | 为什么 |
+|---|---|---|
+| 1 | **"DFT 真的交出、车道真的认领"这条组合**，离线**跑不了** | `ul_chain_replay --dft` 在写完网格后 `return 0`（不进上层链），而**本机没有 TD 语料**（`*_td.txt` 一个都没有）；网格捕获模式又根本不跑 DFT ⇒ **空口腿是唯一的判据** |
+| 2 | 跨线程时序（deposit 早于 take）| 依赖**已有的**网格交接 happens-before（`ocudu_metal_queue.h` 的前端栅栏注释原话："the receiving chain hands the grid over at the slot boundary"）——同一条假设前端栅栏路线已经在用，但本步**没有单独证过** |
+| 3 | 真机上的提交数与延迟 | §4.4 的腿判据 |
+
+**⑦ ⚠ 残余风险（写下来，不靠记忆）**：设备服务不了的一跳（现实来源：**稀疏 RB 分配**的
+`ls_geometry`）在 strict 模式下会**失败**（响），但宿主的 LS 预级**仍会先读一次网格** ⇒ 读到未写内容；
+因为那次 grant 随后会失败、结果被丢弃，**不会变成错的 LLR**。非 strict 时不会发生（守卫直接拒绝交出）。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。

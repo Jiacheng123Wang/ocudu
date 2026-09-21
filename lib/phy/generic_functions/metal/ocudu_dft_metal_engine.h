@@ -96,36 +96,44 @@ public:
   /// buffer belongs to the queue that created it, and the lane commits on that one - see init()).
   static bool block_release_enabled();
 
-  /// \brief Hands the open block's command buffer over, UNCOMMITTED, to the caller (D1 step 1).
+  /// \brief Hands the open block's command buffer over, UNCOMMITTED, to whoever reads \p grid_base (D1).
   ///
   /// The counterpart of commit_open(): the block is closed exactly the same way - the encoder is ended, so
   /// the dispatches encoded so far are complete and the adopter opens its own encoder - but the buffer is
-  /// not committed. The caller becomes its submitter, which in the intended use is the lane:
-  /// \c shared_burst::adopt() takes it and the stages that follow (the extraction, the weights, the
-  /// equalization, the demapping) are encoded into it, so the whole hop is ONE submission.
+  /// not committed. The caller becomes its submitter, which in the intended use is the lane: the buffer is
+  /// deposited under the resource grid the block wrote (shared_burst::deposit_released()), the hop that
+  /// reads that grid takes it by the same address, and the stages that follow (the extraction, the weights,
+  /// the equalization, the demapping) are encoded into it - so the whole hop is ONE submission.
+  ///
+  /// \param[in] grid_base Storage base of the resource grid this block wrote
+  ///            (resource_grid_device_view::base): the key its consumer takes it by. The two sides name the
+  ///            same address by construction (the writer's and the reader's device views describe one
+  ///            storage), which is what makes the pairing exact instead of lucky.
   ///
   /// \note What the engine stops doing, and what the caller therefore owes:
   ///  * the buffer is not committed, not counted in \c [metal_stats] \c dft \c commits, and not published
   ///    on the front-end chain - so \c wait_all() does not cover it any more;
-  ///  * no front-end fence is signalled on it: whoever commits it owns its fences (the release path is
-  ///    one command buffer per hop, so the order the fence exists to provide is inside that buffer);
+  ///  * no front-end fence is signalled on it: whoever commits it owns its fences (the release path is one
+  ///    command buffer per hop, so the order the fence exists to provide is INSIDE that buffer - the grid's
+  ///    producer is its first dispatch);
   ///  * \c wait_slot() cannot be honoured for the slots it carries, and says so instead of pretending
-  ///    (the caller promised that nothing on the host reads those transforms' output - that promise is
-  ///    the whole point of the release).
+  ///    (the caller promised that nothing on the host reads those transforms' output - that promise is the
+  ///    whole point of the release);
+  ///  * **a deposit nobody takes is never committed by anyone.** The caller must therefore release only
+  ///    where a consumer for that grid is guaranteed (see ofdm_demodulator_impl::finish_symbol()).
   ///
   /// \note The grid of the released block is mapped through the PROCESS-WIDE cache
-  ///       (shared_queue::wrap_no_copy), not through this engine's private one, so the stages that read
-  ///       it through the same cache bind the SAME \c MTLBuffer object. That is not tidiness: two objects
-  ///       over one address are unordered to Metal (no barrier and no encoder boundary fixes it; see
-  ///       5.9.5 and wip/metal_alias_order.mm case G), so two objects here would be a silent wrong-data
-  ///       path. A grid that cannot be mapped that way is REFUSED by submit_slot_grid_write() rather
-  ///       than copied.
+  ///       (shared_queue::wrap_no_copy), not through this engine's private one, so the stages that read it
+  ///       through the same cache bind the SAME \c MTLBuffer object. That is not tidiness: two objects over
+  ///       one address are unordered to Metal (no barrier and no encoder boundary fixes it; see 5.9.5 and
+  ///       wip/metal_alias_order.mm case G), so two objects here would be a silent wrong-data path. A grid
+  ///       that cannot be mapped that way is REFUSED by submit_slot_grid_write() rather than copied.
   ///
   /// \return The command buffer as an opaque handle (an \c id&lt;MTLCommandBuffer&gt;, usable from
   ///         Objective-C++ only), or nullptr when the release path is not armed or no block is open. The
   ///         engine holds the most recently released buffer alive until it releases the next one, which is
   ///         the handle's lifetime.
-  void* release_block();
+  void* release_block(const void* grid_base);
 
   /// \brief Tells the engine which receiving slot the transforms it is about to submit belong to.
   ///

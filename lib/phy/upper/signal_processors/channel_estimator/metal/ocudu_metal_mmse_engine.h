@@ -913,6 +913,22 @@ public:
   /// The order this engine's stages currently use.
   ce_lane_order lane_order() const;
 
+  /// \brief Tells the engine which resource grid the next hop reads, so it can ADOPT the DFT's block (D1).
+  ///
+  /// The receiving chain opens one command buffer per slot for that slot's transforms and hands it over
+  /// UNCOMMITTED, keyed by the resource grid it wrote (see dft_metal_engine::release_block() and
+  /// shared_burst::deposit_released()). The estimator's extraction - the hop's first back-end stage - is
+  /// where that buffer is claimed: with this key set, build_pilots_lse() adopts it instead of opening a
+  /// command buffer of its own, and the hop becomes ONE submission whose first dispatches are the
+  /// transforms that produced the grid it is about to read.
+  ///
+  /// Not a hint and not a knob: the ADAPTER passes the grid of the hop it is about to run, once per hop
+  /// (the engine does not keep it), and a hop whose grid has nothing deposited behaves exactly as before.
+  ///
+  /// \param[in] grid_base Storage base of the grid the next hop reads
+  ///            (resource_grid_reader::get_device_view().base), or nullptr for a hop that must not adopt.
+  void set_hop_grid(const void* grid_base);
+
   /// \brief Waits for the submission of run_async() and reports whether it completed.
   /// \return True when there was nothing pending, or when the pending submission succeeded.
   bool wait_pending();

@@ -83,6 +83,37 @@ public:
   /// demapper once per dispatch.
   static unsigned size();
 
+  /// \brief Hands a command buffer over to the stage that will read the memory it wrote (D1 step 2).
+  ///
+  /// The DFT opens ONE command buffer per receiving slot, writes that slot's resource grid in it, and hands
+  /// it over UNCOMMITTED (dft_metal_engine::release_block()). Its consumer - the channel estimator's
+  /// extraction, the first back-end stage of the hop - runs on ANOTHER thread (the lower PHY's radio thread
+  /// submits the transforms, the upper PHY's thread consumes the grid), so the two ends cannot meet in this
+  /// thread's burst state. They meet here instead, keyed by the storage the buffer wrote: the resource
+  /// grid's own base address.
+  ///
+  /// The key is what makes the pairing exact rather than lucky - a hop adopts the buffer that wrote the
+  /// grid IT is about to read - and it is the same address on both sides by construction
+  /// (resource_grid_writer::get_device_view() and resource_grid_reader::get_device_view() describe one
+  /// storage).
+  ///
+  /// \note The registry is BOUNDED and keeps ONE deposit per address (a newer one replaces the older): a
+  ///       deposit nobody takes is DROPPED, and that buffer is then never committed by anyone. It is
+  ///       therefore armed only where a taker is guaranteed (see ofdm_demodulator_impl::finish_symbol():
+  ///       the release needs the grid to be declared device-consumed) - a dropped deposit whose grid IS
+  ///       read would be the P0 signature, not a slow hop. Both counts are reported (see handed_stats()).
+  static void deposit_released(const void* grid_base, id<MTLCommandBuffer> cb);
+
+  /// \brief Takes the command buffer deposited for \p grid_base, removing the deposit (nil when none).
+  ///
+  /// The caller becomes its submitter: it encodes its own stages into it (a second encoder - the deposit
+  /// already carries the DFT's, ended) and commits it. No fences are encoded on it by this call: the
+  /// buffer's FIRST dispatches are the ones that produced what the caller reads, which is the ordering.
+  static id<MTLCommandBuffer> take_released(const void* grid_base);
+
+  /// \brief Deposits handed over, taken, and dropped (superseded or over the bound), for the diagnostics.
+  static void handed_stats(uint64_t& handed, uint64_t& taken, uint64_t& dropped);
+
   /// Accounts one dispatch appended to the burst (diagnostics).
   static void count_dispatch(stage which = stage::other);
 
