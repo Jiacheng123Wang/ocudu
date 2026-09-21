@@ -272,5 +272,16 @@ private:
   /// Internal alternative instance to avoid exposing \c handle_rx_symbol() and \c discard_slot() in slots that do not
   /// contain any receive requests.
   uplink_slot_processor_alt_impl alternative_processor;
+  /// \brief PUSCH hops counted so far in \c hop_count_slot, and which slot that is (see
+  ///        ul_slot_hop_counts).
+  ///
+  /// Per INSTANCE, not per thread or process-wide, and that is what makes the count right: one instance
+  /// serves one cell and its symbols are serialized by the state machine's handle_rx_symbol lock, so a
+  /// slot's hops are accumulated where nothing else can be counting, and two cells cannot mix their
+  /// slots. The sentinel is deliberately not 0: slot 0 is a legal first slot, and treating it as "no slot
+  /// yet" would drop its first hop.
+  static constexpr uint64_t hop_count_no_slot = UINT64_MAX;
+  uint64_t                  hop_count_slot   = hop_count_no_slot;
+  uint64_t                  hop_count_hops   = 0;
 };
 } // namespace ocudu

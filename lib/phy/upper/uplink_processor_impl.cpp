@@ -4,6 +4,7 @@
 
 #include "uplink_processor_impl.h"
 #include "ocudu/phy/phy_pipeline_grid_ready.h"
+#include "ocudu/phy/phy_pipeline_ul_slot_plan.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/instrumentation/traces/du_traces.h"
@@ -229,9 +230,22 @@ void uplink_processor_impl::process_symbol_pdus(unsigned end_symbol_index)
   // one is starting - the upper PHY is the only place that knows, and it is what merging a slot's hops into
   // ONE submission needs. Layer 1 of the change is plumbing only: nothing consumes it yet, so behaviour is
   // unchanged (the plan is recorded and ignored).
+  //
+  // The same call site counts, because open item #1 turns on a TRAFFIC number nobody had: how many slots
+  // carry more than one PUSCH hop, i.e. how much of the lane's per-slot cost merging would actually
+  // remove (design document 5.9.44 ⑤ step 0). The running count is kept on THIS instance and not derived
+  // from `pusch_pdus.size()`: this function runs once per end symbol, so a slot whose PDUs end on
+  // different symbols reaches it more than once, and a per-call count would report a two-hop slot as two
+  // one-hop slots.
   for (unsigned i_pusch = 0; i_pusch != pusch_pdus.size(); ++i_pusch) {
     if (!pusch_pdus.empty()) {
-      slot_hop_plan_hook::set(current_slot.to_uint(), static_cast<unsigned>(pusch_pdus.size()), i_pusch);
+      const uint64_t slot_id = current_slot.to_uint();
+      if (hop_count_slot != slot_id) {
+        hop_count_slot = slot_id;
+        hop_count_hops = 0;
+      }
+      slot_hop_plan_hook::set(slot_id, static_cast<unsigned>(pusch_pdus.size()), i_pusch);
+      ul_slot_hop_counts::note(++hop_count_hops);
     }
     process_pusch(pusch_pdus[i_pusch]);
   }

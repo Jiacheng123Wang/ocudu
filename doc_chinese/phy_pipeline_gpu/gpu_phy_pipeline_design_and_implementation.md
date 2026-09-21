@@ -4420,7 +4420,7 @@ this hop submits"*）：**另一个消费者的提交在本跳提交之后才发
 harness 五条臂（认领/错过/宿主先/claim/claimnowait）全部 0 差异、rc=0，
 `L1_HOP_PDUS=2` 时悬崖 `adopted=1 / missed=K−1` 结构性成立（§5.9.40）。
 
-#### 5.9.43 ★★★ 开放项 #1 的实修：**侦察已定案（同线程顺序执行），修法与判据在此**
+#### 5.9.43 ⚠ ~~★★★ 开放项 #1 的实修：**侦察已定案（同线程顺序执行），修法与判据在此**~~ **① 与 ③/⑤-0 已被 §5.9.44 实测推翻**（悬崖为真；"同线程"与"只需推迟 commit"都不成立）
 
 §5.9.40 量出悬崖：一槽 K 个跳只有第一个能认领前端块，其余 K−1 必 MISS ⇒ **每槽 K 次提交**。
 这一节是动手前的决定性侦察，**结论：合并是可行的，而且缺的只是一件上层早就知道的信息。**
@@ -4485,6 +4485,285 @@ for (const auto& pdu : pusch_pdus) { process_pusch(pdu); }   // 同一个线程�
 **⑤ 风险 / 必须先想清楚的**：合并后**第一个跳的 LLR 要等最后一个跳编码完才提交**
 （延迟 = K−1 个跳的**编码**时间，不是 GPU 时间）。K 大时要确认这不触碰 FAPI 截止；
 必要时给 K 设上限（超过则退回今天的形状，MISS 但不阻塞）。
+
+---
+
+#### 5.9.44 ⛔ §5.9.43 的侦察被本轮**实测推翻**：**#1 的第 2+3 层不能落地**（三条独立证据；#1 重开）
+
+> **本节更正 §5.9.43。** 悬崖（1 认领 + K−1 必 MISS）为真，**但它的"可行性侦察"是错的**：
+> ①（"K 个跳在同一条车道线程上顺序跑"）**在判据所用的那台 harness 上不成立**，
+> ③ 的第 1 层输入**在那台 harness 上从不出现**，
+> 而 ⑤-0 的"只需推迟 commit"**即使前提修好也会让本跳的结果被读于未写内存**。
+> ⇒ **#1 回到 OPEN，且前置条件比 §5.9.43 写的多两条**（见 ⑤）。
+>
+> **⚠ 读入口快照时的注意事项**：入口快照 `session_handoff_2026-09-22-1.md` 的 **§4（"下一刀 = #1 第 2+3 层"）
+> 与 §5 开放项 1 已被本节推翻**。快照是**会话交接时的状态记录、按约定不在开发过程中改动**，
+> 所以那里的过时判断**保留原样**——**凡与本节冲突，以本节为准**。
+
+**证据 0（方法与可复现性）**：下面三处都在 `ul_chain_replay` 上实测，与 §4.4 判据同一台工具：
+临时给 `shared_burst::commit()` / `shared_burst::adopt()` / `slot_hop_plan_set_hook` 各加一行
+`tid=` 追踪（`<pthread.h>` + `pthread_self()`），跑
+`--metal --device-grid --hop-td N --hop-pdus 2`。
+**追踪与池子实验均已 `git checkout --` 还原**，工作树只剩用户那两个 config。
+
+**① ✗ §5.9.43 ① 的"同线程"在判据 harness 上不成立：一槽的 K 个跳跑在【两条】车道线程上**
+
+`ul_chain_replay.cpp:959` 建的是 **2 线程**池，并把它当 PUSCH 执行器：
+
+```cpp
+std::make_unique<task_worker_pool<concurrent_queue_policy::locking_mpmc>>("replay", 2, 1024);
+```
+
+实测（8 槽 × 2 跳）：两条 tid **9 / 9 平分**，hop 0（TAKEN）与 hop 1（MISS）**各在一条**，
+而且互相交错 —— hop 0 的车道提交**先于** hop 1 的 ADOPT：
+
+```
+[d1_handover] hop grid=0x... slot=1 -> TAKEN
+[c_trace] ADOPT  tid=0x16e183000 cb=0x...2300
+[c_trace] COMMIT tid=0x16e183000 cb=0x...2300 n=0     ← hop 0 估计器
+[d1_handover] hop grid=0x... slot=1 -> MISS
+[c_trace] COMMIT tid=0x16e183000 cb=0x...2680 n=13    ← hop 0 车道（**先于 hop 1 的 ADOPT**）
+[c_trace] ADOPT  tid=0x16f18f000 cb=0x...2a00
+[c_trace] COMMIT tid=0x16f18f000 cb=0x...2a00 n=0     ← hop 1 估计器
+[c_trace] COMMIT tid=0x16f18f000 cb=0x...2680 n=13    ← hop 1 车道
+```
+
+⇒ `burst_state` 是 **thread-local**（这正是它存在的理由），所以 §5.9.43 ⑤-0 第 1 步的
+`slot_hops_remaining` 与 `adopted_grid` / `adopted_slot` **都是每线程的**；hop 1 那条线程两样都没有
+⇒ **第 3 步（"本线程已为这个 (grid, slot) 认领过块"）在判据 harness 上永远不会命中**。
+§5.9.43 ⑤-0 的"死锁坑"论证**同样**建立在"同一条 burst"上，一并失效。
+
+**为什么侦察会错**：§5.9.43 ① 引的是**字段默认值** `du_low_executor_mapper.h:78 = 1`，
+但那个默认属于 `single` 执行器配置；harness 用 **2**，真机走 `concurrency_auto`
+→ `derive_pusch_and_srs_concurrency()`（`du_low_config_translator.cpp:359`），**也不是 1**。
+⇒ **"并发为 1"在这条线上从来不是一个可以默认的前提**（这条与 §5.9.36 的"开工前先纠正错记录"同源）。
+
+**② ✗ §5.9.43 ③ 的第 1 层输入在判据 harness 上从不出现**
+
+`slot_hop_plan_hook::set()` 全仓**只有一个**调用点：
+
+```
+lib/phy/upper/uplink_processor_impl.cpp:234
+    slot_hop_plan_hook::set(current_slot.to_uint(), static_cast<unsigned>(pusch_pdus.size()), i_pusch);
+```
+
+而 harness 是**直接驱动 `pusch_processor`**、循环 K 次（`ul_chain_replay.cpp:1352-1367`），
+**从不构造 `uplink_processor_impl`**。实测：给 `slot_hop_plan_set_hook` 加追踪后，
+K=2 一整轮 **0 次调用**。
+⇒ 第 1 层（`d9f4a2029f`）**在 §4.4 所用的那台判据 harness 里是惰性的**，
+§5.9.43 ⑤-0 第 4 步（`hop_index == 0`）**拿不到 `hop_count`**。
+
+**③ ✗ 结构性：即使前提修好，也【没有】可以推迟提交的安全窗口**
+
+实测 K=1 的每跳形状：**恰好两次提交，而且两次的结果都在【本跳内】被宿主读走**：
+
+| # | 提交者 | `n` | 谁提交 | 提交之后**立即**发生什么 |
+|---|---|---|---|---|
+| 1 | 估计器 burst（hop 0 就是交出的那块 A）| 0 | `complete_fused_burst()` ← `complete_fd_td_estimation_stage()` | 紧随其后读 `sigma2` / `pilots_power`（`port_channel_estimator_metal_mmse_impl.cpp:4540` 之后）|
+| 2 | 车道 burst（均衡 + 解映射）| 13 | `demodulation_mapper_metal::wait()` / `channel_equalizer_metal::wait()` | 紧随其后把 LLR `memcpy` 进调用方的 span（`demodulation_mapper_metal.cpp:165-178`）|
+
+而 **hop 0 的第 2 次提交【先于】hop 1 的 ADOPT**（见 ① 的实测序列）。
+⇒ §5.9.43 ⑤-0 第 2 步的"减一并且不提交（burst 保持打开）"会让
+`burst_wait_committed()` **无物可等**（被推迟的 cb 还没进 `outstanding`），
+于是 hop 0 的 LLR / `sigma2` 从 **GPU 还没写过的内存**里读出来 ——
+**这不是 §5.9.43 ⑤ 写的"延迟"，是静默的数据错误**，§4.4 的"每跳 soft bits 逐字节相同"判据会红。
+
+⇒ **要让一块网格服务 K 个跳，必须连"宿主读取"一起推后**（估计器标量、LLR 都算；
+即读侧也要延后到那一次提交之后）。那是**接收链的结构改动**，
+不是 §5.9.43 ⑤-0 的四行。**§5.9.43 ⑤ 把它记成"风险/延迟"是低估。**
+
+**④ 顺带：§5.9.43 ③.2 的算术与"两次提交/跳"对不上**
+
+`slot_hops_remaining` 是**按 commit 调用**递减的，而一跳有 **2** 次 commit（③ 的表），
+所以"**每结束一个跳减一**"与"**每 commit 减一**"不是一回事。按 `hop_count = K` 设定时，
+两种读法分别给出 K=1 也被吸收一次（17 → ~9，K=1 基线自己就动了）
+或 K=2 只吸收掉一半（→ 25），**都不是 §4.4 的 17**。
+⇒ 计数器必须**按跳**记账，而"这次 commit 属于哪一跳"**今天没有任何标识**。
+
+**⑤ 结论与重开**
+
+| | §5.9.43 的判断 | 本轮的实测 |
+|---|---|---|
+| 前提 | K 个跳同线程串行 | **✗ 判据 harness 上是 2 条线程**；真机 `auto` 也不保证 1 |
+| 输入 | 第 1 层提供 `hop_count` / `hop_index` | **✗ 判据 harness 里钩子 0 次调用** |
+| 可行性 | 只需推迟 commit | **✗ 推迟 commit 会让本跳结果被读于未写内存** |
+| 判据（33 → 17、soft bits 不动）| 有效 | **✗ 该数字离线原理上读不出来（⑥），且指标跨路线不可比（⑦）** |
+
+**#1 重开为 OPEN。下一步的推荐顺序（⑥ 之后已改）：**
+
+0. **先数，再决定值不值得做**（与 §5 开放项 #9 同一条纪律）。
+   #1 的收益 = "一槽 K 个跳的提交数不再随 K 增长"。**先量 K≥2 的槽在空口上到底占多少**：
+   若同槽多 PUSCH 是少数事件，省下的是 2×(K−1) 次提交/这样的槽，**要拿一个接收链结构改动去换**，
+   账要先算清。**动手前先出这个数。**
+1. **把判据搬到空中，或先承认离线判不了**。⑥ 已证明：达到 §4.4 的 17 需要把
+   （a）估计器标量、（b）LLR 两次中途读**都**推后，而这正是 §5.8 P3 说"离线读不出来、只能在空中读"的同一件事。
+   ⇒ **不要再用 `l1_hop_arms.sh` 的 17/33 当 #1 的成败判据**；它能判的只是
+   "合并有没有把数据改坏"（soft bits 逐字节），**判不了"提交数降下来"**。
+2. **若决定做，改法是"读侧推后"，不是"提交推后"**：把一跳拆成"读网格阶段"与"消费阶段"，
+   让 K 个跳的同名阶段并起来（这才是真正的设计工作，触及估计器/解调器/pusch processor）。
+3. **顺带把 harness 的三个已知缺陷修掉**（即使 #1 不做，它们也会误导下一个人）：
+   车道池 2 → 1 线程（已验证不改数字）、驱动 `uplink_processor_impl` 让第 1 层真的触发、
+   把"提交数"指标改成含估计器自有缓冲的全口径（⑦）。
+   **`slot_hops_remaining` 按跳记账**（④）是实现细节，等 2 定了再说。
+
+**仍未判的**（不要当成已知）：K 个跳在 1 线程下是否真能共享**一条**命令缓冲
+（同线程顺序执行 ⇒ 编码上可以，但那要等第 2 条的设计出来才谈得上）；
+以及 #1 与 §5 开放项 #4（`max_pusch_and_srs_concurrency` 1 → 2）的交互
+—— **#4 会主动破坏"同线程"这个前提**，两者的顺序不能反。
+
+**⑥ ★★ §4.4 的判据（17）在离线【原理上】读不出来 —— 而这条文档里早就写过**
+
+上一条（③）说"没有可以推迟提交的安全窗口"，**它的根因不是 #1 的机制，而是离线 harness 的性质**，
+而这一点在 **§5.8 的 P3 行（本文档 657 行）已经写明**：
+
+> **P3 …** 本阶段的头条**离线读不出来**（**离线 harness 都会在中途读估计结果，
+> 于是必须早提交、跳被劈成两半**），所以 `merged` 先作为可选项，空口腿判完再翻默认；
+> **提交数 2.00 → 1.00 只能在空中读**（离线 `mmse_ce commits` 17 → 16 是它的指纹）。
+
+本轮用调用点追踪**把这句"劈成两半"落到了实测**（merged + deferred，K=1，2 槽）：
+
+```
+[d1_handover] hop grid=0x... slot=1 -> TAKEN
+[c_trace] -- complete_fused_burst (estimator completion) --     ← 提交 1：估计器（中途读标量逼出来的早提交）
+[c_trace] -- demod wait (burst_open=1) --                       ← 提交 2：车道 burst（随后 memcpy LLR）
+[c_trace] -- eq wait  (burst_open=0) --                         ← 空操作（解映射已关掉 burst）
+```
+
+⇒ **一跳 2 次提交 = 1 次"估计器中途读"逼出的早提交 + 1 次车道提交**，与并发度无关。
+**于是 §4.4 的"33 → 17"要求 K=2 的两跳也各自只花 1 次提交**
+（17 = 8 槽 × 2：每槽 2 次，而 K=2 是每槽 2 跳）——
+**这等于要求把上面那两次中途读【都】延后**，即
+（a）估计器标量（`sigma2`/`pilots_power`）与（b）LLR 的宿主读取都要推后到那一次提交之后。
+**这正是 §5.8 P3 说"只能在空中读"的同一件事。**
+⇒ **§4.4 的 17 不是一个可以在本 harness 上达成的目标**；
+把它当判据会**把一个结构性改动的成败，寄托在一个原理上读不出它的仪器上**。
+
+**⑦ 顺带：§4.4 用的"提交数"指标本身依赖路线（实测）**
+
+harness 打印的 `total = dft commits + burst commits`，而 `burst commits` **只数
+`shared_burst::commit()`**。`event` / `wait` 两条车道序里估计器提交的是**自己的**命令缓冲
+（走 `mmse_stats_commit()`），**不进这个计数**。实测（同为 2 槽、K=1）：
+
+| `OCUDU_CE_LANE_ORDER` | `pending_fused_burst` | `burst commits` |
+|---|---|---|
+| `<unset>`（= `merged`）| 1 | **4** |
+| `burst` | 1 | **4** |
+| `event` | 0（`has_pending=1`）| **2** |
+| `wait` | 0 | **2** |
+
+⇒ 同一个"提交数"在四条车道序上不同口径，**跨路线不可比**。
+要留作判据必须先把它改成"每次接收的**全部**提交"（含估计器自有缓冲），
+否则"路线换了、数变小了"会被读成"提交变少了"——**与 §5.8 那个 `cbs/lane` 分子分母陷阱同源**。
+
+
+#### 5.9.45 ★★ #1 的第 0 步落地：**"每槽几个 PUSCH"现在会被数出来**（`ul_slot_hop_counts`）
+
+§5.9.44 ⑤ 把 #1 的下一步定成"**先数，再决定值不值得做**"：收益是"一槽 K 个跳的提交数不再随 K 增长"，
+而**这个 K 从未被测量过**。本节是那件测量工具的落地与离线验证；**空口数待腿**（见 ⑤）。
+
+**① 为什么原来数不出来**
+
+车道上的每一个计数器数的都是**跳**，不是**槽**：
+
+| 计数器 | 实测（`s44-d1-lanepool`，mode=gpu）| 口径 |
+|---|---|---|
+| `[ul_gpu_lane] lanes` | 13978 | 跳 |
+| `[metal_stats] burst commits` | 13978 | 跳 |
+| `[mmse_time_sum] calls / hops_gpu` | 13978 / 13978 | 跳 |
+| `[ul_gpu_lane] cbs/lane` | **1.00（max=1）** | 每跳提交数 |
+
+⇒ **"一跳 ≈ 一槽"这个假设从来没有被验证过**，而 #1 的全部收益都押在它上面。
+（顺带：`cbs/lane=1.00` 是**空口**的实测，与 §5.9.44 ⑥ 的"离线 2 次提交/跳"正好互为对照——
+**离线 harness 读不出 1.00，只有空口能**，那条结论在这里又得了一次独立确认。）
+
+**② 落点：`include/ocudu/phy/phy_pipeline_ul_slot_plan.h`（新），在既有钩子旁边数**
+
+计数点就在第 1 层已经运行的那一行（`uplink_processor_impl::process_symbol_pdus()`）：
+
+```cpp
+slot_hop_plan_hook::set(slot_id, static_cast<unsigned>(pusch_pdus.size()), i_pusch);
+ul_slot_hop_counts::note(++hop_count_hops);
+```
+
+**槽的累计计数放在 `uplink_processor_impl` 的实例成员里**（`hop_count_slot` / `hop_count_hops`），
+这不是随手的选择，而是它唯一正确的地方：
+
+* `process_symbol_pdus()` **按 end symbol 分组调用**，一个槽的 PUSCH PDU 会分几次经过这里
+  ⇒ 在任何单一调用点数 `pusch_pdus.size()`，会把**一个两跳槽报成两个一跳槽**，
+  **恰好把这个工具要找的那件事系统性低估**；
+* 每个实例服务**一个小区**，且 `handle_rx_symbol()` 已被状态机锁串行化
+  ⇒ 槽的累计不需要额外加锁，多小区也不会互相串味（比 thread-local 或全局锁都更准）；
+* 哨兵用 `UINT64_MAX` 而**不是 0**：槽 0 是合法的首个槽，把 0 当"还没有槽"会吞掉它的第一跳。
+
+**③ 桶是每个跳即时移动的，不是"槽结束时写一次"**
+
+一个槽的跳数只有到**最后一个跳**才定，所以"槽结束时记账"既晚（run 的最后一个槽要靠线程退出析构，
+而其与 atexit 报告的先后顺序**并非每个平台都保证**）又在运行中读不到。
+这里改成：第一跳进 1 号桶，**每多一跳就把这个槽从 k−1 桶移到 k 桶**，
+`kMaxTracked=4` 以上进 `>4` 桶（两个下标相同 ⇒ 移动是空操作，槽仍只算一次）。
+⇒ `counts()` 在**任何时刻**都是自洽的读数。
+
+**④ 离线验证（判据必须确认会被触发）**
+
+新增两个用例，`tests/unittests/phy/upper/uplink_processor_test.cpp`：
+
+| 用例 | 断言 |
+|---|---|
+| `ul_slot_hop_counts_sees_a_two_hop_slot` | 同槽 2 个 PUSCH PDU（同末符号）⇒ `slots +1`、`hops +2`、**`by_hops[2] +1`**、**`by_hops[1] +0`**、`multi_hop_slots() +1` |
+| `ul_slot_hop_counts_keeps_a_one_hop_slot_at_one` | 单跳槽 ⇒ `by_hops[1] +1`、`multi_hop_slots() +0` |
+
+第二条不是凑数：没有它，一个"把每个槽都报成两跳"的探针也能让第一条通过。
+实测：`uplink_processor_test` **23/23 通过**（21 原有 + 2 新增），退出时打印
+
+```
+[phy_pipeline] ul slots by PUSCH hops: 1:9 2:1 3:0 4:0 >4:0  (pusch slots=10 hops=11 mean=1.10 hops/slot, multi-hop slots=1 = 10.0%)
+```
+
+**⑤ 空口腿（待用户执行）——判据是这一行**
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+touch build/hashes.h && cmake --build build --target gnb -j 6
+python3 doc_chinese/phy_pipeline_gpu/wip/value_net.py | tail -1        # 必须 captures=47 problems=0
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label>
+```
+
+跑完在新腿的 `.log.stderr` 里找这一行（探针在**每个 mode** 都打，不需要额外开关）：
+
+```
+[phy_pipeline] ul slots by PUSCH hops: 1:<a> 2:<b> 3:<c> 4:<d> >4:<e>  (pusch slots=S hops=H mean=X hops/slot, multi-hop slots=M = Y%)
+```
+
+**判读口径（先写下来，避免事后挪门槛）**：
+
+| 量 | 含义 | 对 #1 的意义 |
+|---|---|---|
+| `multi-hop slots` 的 **Y%** | 有多少比例的 PUSCH 槽会被 #1 变便宜 | Y 很小 ⇒ **不值得**改接收链 |
+| `mean` hops/slot | 与 `[ul_gpu_lane] lanes ÷ pusch slots` 应一致 | 对不上 ⇒ 探针与车道口径不一致，先查 |
+| `hops` | 应与同腿的 `[ul_gpu_lane] lanes` **接近相等** | 差得多 ⇒ 有一方数错了 |
+
+⇒ **判据本身是中性的**：`Y` 小是"这个优化不值得做"的**结论**，
+不是"探针失败了"。本条要的是**一个数**，不是"数要大"。
+
+**⑥ 顺带记一条（未解）**：入口快照 §0 的门列里有一项 `--self-test 8/8`，
+但**本机已构建的二进制里没有接受 `--self-test` 的那个**
+（`ul_chain_replay` 与 `eq_batch_kernel_probe` 是本目录仅有的两个解析 argv 的探针，
+两者都不认这个选项；gtest 二进制会把未知选项透传，所以"能跑"不算证据）。
+本轮以 **`ctest -R "metal|ul_pipeline_probe|puxch|lower_phy|du_low|o_du"` 35/35** 作为对应覆盖
+（`dft_release_adopt_metal_test` 等 metal 用例都在其中）。**下次交接前请把这门的确切命令补上。**
+
+**⑦ 本轮全部离线门的实测结果**
+
+| 门 | 结果 |
+|---|---|
+| `value_net` | `captures=47 problems=0` ✅ |
+| `ctest -R "metal\|ul_pipeline_probe\|puxch\|lower_phy\|du_low\|o_du"` | **35/35** ✅ |
+| `uplink_processor_test`（含 2 个新用例）| **23/23** ✅ |
+| `l1_handover_arms.sh 32` | **4 PASS**（含反向臂会红）✅ |
+| `l1_hop_arms.sh 16` | **rc=0**、四条臂 soft bits 全部 `differing=0` ✅ |
+| `l1_hop_arms.sh 8`（K=1 / K=2）| **17 / 33** 不变 ✅ |
+
+
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 

@@ -14,6 +14,7 @@
 #include "signal_processors/srs/srs_estimator_test_doubles.h"
 #include "upper_phy_rx_results_notifier_test_doubles.h"
 #include "ocudu/adt/format.h"
+#include "ocudu/phy/phy_pipeline_ul_slot_plan.h"
 #include "ocudu/phy/upper/channel_coding/ldpc/ldpc.h"
 #include <gtest/gtest.h>
 
@@ -263,6 +264,60 @@ TEST_F(UplinkProcessorFixture, pusch_normal_workflow)
   ASSERT_TRUE(pusch_spy->has_process_method_been_called());
   ASSERT_TRUE(results_notifier.has_pusch_data_result_been_notified());
   ASSERT_TRUE(results_notifier.has_pusch_uci_result_been_notified());
+}
+
+// D1 multi-PUSCH (design document 5.9.44 ⑤ step 0): the count that decides whether open item #1 is worth
+// doing has to SEE a two-hop slot. A probe that is added but never fires is the failure mode 5.9.19 and
+// 5.9.44 are both about ("judging a mechanism without confirming the judgement fires"), so this asserts
+// the histogram moves for a slot that really carries two hops AND that it moves the SLOT, not each hop.
+TEST_F(UplinkProcessorFixture, ul_slot_hop_counts_sees_a_two_hop_slot)
+{
+  const ul_slot_hop_counts::counts_t before = ul_slot_hop_counts::counts();
+
+  // Two PUSCH PDUs of the SAME slot, with the same last symbol - the shape a multi-UE or multi-TB slot
+  // has. The repository keys its PUSCH PDUs by end symbol, so both reach process_symbol_pdus() in ONE
+  // call and the slot's hop plan is published with hop_count = 2.
+  unique_uplink_pdu_slot_repository repository = ul_processor->get_pdu_slot_repository(slot);
+  repository->add_pusch_pdu(pusch_pdu);
+  uplink_pdu_slot_repository::pusch_pdu second = pusch_pdu;
+  second.pdu.rnti                               = to_rnti(8324);
+  repository->add_pusch_pdu(second);
+  shared_resource_grid grid = repository.release();
+
+  const unsigned end_symbol_index = pusch_pdu.pdu.start_symbol_index + pusch_pdu.pdu.nof_symbols - 1;
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, true);
+  pusch_executor.run_pending_tasks();
+
+  const ul_slot_hop_counts::counts_t after = ul_slot_hop_counts::counts();
+
+  // ONE more slot with TWO hops ...
+  ASSERT_EQ(after.slots - before.slots, 1U);
+  ASSERT_EQ(after.hops - before.hops, 2U);
+  ASSERT_EQ(after.by_hops[2] - before.by_hops[2], 1U);
+  ASSERT_EQ(after.multi_hop_slots() - before.multi_hop_slots(), 1U);
+  // ... and NOT two slots of one hop, which is what counting `pusch_pdus.size()` per call would say.
+  ASSERT_EQ(after.by_hops[1] - before.by_hops[1], 0U);
+}
+
+// The other half of the same judgement: a single-hop slot must NOT be counted as multi-hop. Without this
+// the test above passes for a probe that reports every slot as two hops.
+TEST_F(UplinkProcessorFixture, ul_slot_hop_counts_keeps_a_one_hop_slot_at_one)
+{
+  const ul_slot_hop_counts::counts_t before = ul_slot_hop_counts::counts();
+
+  unique_uplink_pdu_slot_repository repository = ul_processor->get_pdu_slot_repository(slot);
+  repository->add_pusch_pdu(pusch_pdu);
+  shared_resource_grid grid = repository.release();
+
+  const unsigned end_symbol_index = pusch_pdu.pdu.start_symbol_index + pusch_pdu.pdu.nof_symbols - 1;
+  ul_processor->get_slot_processor(slot).handle_rx_symbol(end_symbol_index, true);
+  pusch_executor.run_pending_tasks();
+
+  const ul_slot_hop_counts::counts_t after = ul_slot_hop_counts::counts();
+  ASSERT_EQ(after.slots - before.slots, 1U);
+  ASSERT_EQ(after.hops - before.hops, 1U);
+  ASSERT_EQ(after.by_hops[1] - before.by_hops[1], 1U);
+  ASSERT_EQ(after.multi_hop_slots() - before.multi_hop_slots(), 0U);
 }
 
 TEST_F(UplinkProcessorFixture, rx_symbol_bad_order)
