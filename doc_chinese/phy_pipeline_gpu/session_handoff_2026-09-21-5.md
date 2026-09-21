@@ -1,4 +1,4 @@
-# 交接（入口） — S26：**`s40` 全过（⑥ 距地板 3%）；⑦ 剩的那一档已按"放宽处理器复用周期"改好（一行），等 `s41` 腿判**
+# 交接（入口） — S27：**`s41` 判据全过：爬坡丢时隙 716→91（对照臂 84→0）、提交/时隙 1.036（地板 1.00）、数据不劣 ⇒ D1 这一阶段可以 tag**
 
 > **本文件是新会话的唯一入口**：读完它就能开工。
 > **本会话（S25）的就一件事**：读 `s40` + 更正上一轮对停顿的误判。设计文档 **§5.9.25** = 完整读数与机制。
@@ -63,33 +63,24 @@ git rev-parse --short=10 HEAD && grep build_info build/hashes.h
 
 ---
 
-## 3. ★★★ 下一步：上 `s41` 腿对（判"放宽上行处理器复用周期"是否消掉饱和爬坡的丢时隙）
+## 3. ★★★ 现在的状态与下一步
 
-**本会话已实现（设计文档 §5.9.26）**：`du_low_config_translator.cpp` 里
-`ul_pipeline_depth = nof_slots_per_frame` → **`3 * nof_slots_per_frame`**（复用周期 10 ms → 30 ms）。
-理由：`s40` 的 716 次 "UL processor is busy"（对照 84）发生在**话务爬到饱和**那 11–14 秒，
-是"该处理器上一个槽的任务还在飞"；⚠ 同时更正了上一轮的一个推断——`Failed to allocate UL resource grid = 0`
-**不能**排除网格引用被占（翻译器先打 "busy" 就 `return` 了）；判 (b) 靠的是反向证据：**对照臂更晚放开网格却拒收得少**。
-代价：每处理器一份网格 + payload 池（25 PRB ~34 KB / 51 PRB ~280 KB）；**每时隙提交数不变**。
+**`s41` 判据全过**（设计文档 §5.9.27）：`UL processor is busy` **716 → 91**（同一改动让对照臂 84 → **0**）、
+提交/上行时隙 **1.53 → 1.036**（地板 1.00）、中位端到端 **1869 µs**（对照 1997）、
+`grid_devwaited=919`（= 跳数−`taken`，精确）、`grid_wait_unencoded=0`、`timeouts=0`、契约 8/8、
+CRC 87.6% vs 对照 87.9%（分层：QPSK/16QAM 更高，64QAM 81% vs 33%）。
+
+**⇒ 建议：按用户裁定 ③ 打 tag**（tag 与推送由用户执行）：
 
 ```bash
-sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s41-d1-ulsupply-base
-sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s41-d1-ulsupply OCUDU_DFT_RELEASE_BLOCK=1
+git tag -a gpu_phy_d1_handover -m "D1: one command buffer per hop - the block hand-over, judged on air (s38-s41)"
+git push origin gpu_phy_d1_handover    # 若这条线要推送
 ```
 
-**★ 上腿后第一件事**：`grep -c "will NOT exercise D1" <候选臂日志>` 必须是 0。
-
-| 判据 | 期望 | `s40` 实测 |
-|---|---|---|
-| **`UL processor is busy`** | **回到对照量级（~84 或更低）** | 716（对照 84）❌ |
-| `[ul_pipeline]` 中位 / 最坏 | ~1.9 ms / ≤ ~50 ms | 1851 µs / 50.9 ms ✓ |
-| 提交 / 上行时隙 | ~**1.03**（不因处理器变多而变）| 1.03 ✓ |
-| `grid_devwaited>0`、`grid_wait_unencoded==0`、`timeouts==0` | 成立 | 843 / 0 / 0 ✓ |
-| 开工告警 | 0 | 0 ✓ |
-| CRC 按调制分层 + KO 的 sinr 中位 | 与对照同形 | 91.5% OK ✓ |
-
-**★ 若丢时隙不降**：归因错，下一件是**结构性**的——给 `uplink_processor_impl` 按槽拥有 PDU 仓库与网格（§5.9.19 那个改动，
-理由从"正确性"改成"余量"）。**⇒ 那就先回滚这一行再动结构。**
+**tag 之后仍然开放的两件（都是"余量"，不是机制）**：
+1. 爬坡时仍拒收 **91** 个上行时隙（对照 **0**）⇒ 要么再加一档 `nof_ul_rg`（一行），
+   要么做结构性那件：**`uplink_processor_impl` 按槽拥有 PDU 仓库与网格**（§5.9.19 那个改动，理由=余量）；
+2. 爬坡瞬间最坏端到端 **71.6 ms**（对照 13.7），与 1 同源。
 
 ## 4. 未解 / 开放项（按建议顺序）
 
@@ -115,8 +106,7 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s41-d1-ulsupply OCU
 
 ## 6. 一句话给新会话
 
-**`s40` 全过**：设备侧等待（`grid_devwaited=843`、`grid_wait_unencoded=0`）、中位 1851 µs、94% 跳认领、
-最坏 162→51 ms、CRC 91.5%（对照 84.6%）；**⑥ 提交/上行时隙 1.50 → 1.03（地板 1.00，距地板 3%）**。
-**⑦ 只剩饱和爬坡那一档**：`UL processor is busy` 716（对照 84），两个臂都发生在"话务爬到饱和"的 11–14 秒。
-**本会话把它改成一行**：上行处理器复用周期 1 帧 → **3 帧**（`nof_ul_rg`）。**`s41` 判它**：
-"UL processor is busy" 是否回到 ~84，而提交/时隙仍 ~1.03。若判不过，就回滚这一行，转做**按槽拥有的仓库/网格**那条结构路。
+**D1 判完了**：一跳一条命令缓冲的交接在空口上成立——数据与对照持平或更好（对象唯一性缺陷已修），
+**每上行时隙的 CPU 提交从 1.53 降到 1.036（地板 1.00）**，每跳 2.89 → 2.01，端到端中位 1869 µs（对照 1997）。
+唯一残留是**话务爬到饱和那十几秒**里仍拒收 **91** 个时隙（对照 0）——3 帧处理器余量把它从 716 压下来的，
+再压就要么加余量、要么把 PDU 仓库与网格按槽拥有。**可以 tag；tag 后先做那 91 个。**
