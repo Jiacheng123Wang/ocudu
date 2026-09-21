@@ -21,7 +21,7 @@
 
 ## 1. 一句话状态
 
-**工作树 HEAD = `5f749c7220`**（= 第 2 步接线 + 回滚 + **第 3 步第 1 小步**；快照提交跟在它后面）。
+**工作树 HEAD = `6f81e25b2b`**（= 第 2 步接线 + 回滚 + **第 3 步的 1/2 小步**；交出点接回与快照提交跟在它后面）。
 **开机第一件事就是自查戳记**：
 ```bash
 git rev-parse --short=10 HEAD && grep build_info build/hashes.h
@@ -105,37 +105,43 @@ in_flight[in_flight_begin].owner.reset();      // ← 接收缓冲引用在这�
 
 ## 4. ★★★ 下一步：**把输入的生命期搬到"被认领缓冲的完成"上**
 
-> **本会话已完成 4.1 的【第 1 步】**（引擎侧的 keep-alive，见 §5.9.8 与 `5f749c7220`）。
-> **⇒ 下一会话从【第 2 步】开始。**
+> **本会话已完成 4.1 的【第 1、2、4 步】**（引擎侧 keep-alive §5.9.8、低层 PHY 交接 §5.9.9、
+> **交出点接回 §5.9.10**）。
+> **⇒ 下一会话：直接跑腿对（§4.3）**，判"输入生命期接上之后，交出行不行"。
 
 ### 4.1 要做什么
 
 | 步 | 内容 | 判据 | 状态 |
 |---|---|---|---|
-| **1** | **DFT 引擎接受一个 keep-alive**：`retain_for_block()` 把凭据挂到当前打开的块上；引擎在缓冲完成时释放；被顶掉/淘汰/丢弃时也释放 | **机制单测五条臂全过**（含"没人认领也要还"与"提交路径也要还"）| ✅ **已完成** |
-| **2** | **低层 PHY 在交出时把接收缓冲的凭据交出去**：`puxch_processor_impl::finish_oldest_symbol()` 现在**无条件** `owner.reset()`，要改成"**已经交出的符号由引擎还**" | 离线：不武装时逐字节不变；武装时凭据不在 `finish_symbol` 里放掉 | ⬜ **下一步** |
-| **3** | **池深实测**：接收循环会不会被"多留一两个缓冲"挡住 | 空口腿：`Real-time failures`、`ul_rx blocks`、CRC | ⬜ |
-| **4** | 再把低层 PHY 的 `release_block()` 调用点接回来（`7fa657794c` 撤掉的那处）| 空口腿对（§4.3）| ⬜ |
+| **1** | **DFT 引擎接受一个 keep-alive**：`retain_for_block()` 把凭据挂到当前打开的块上；引擎在缓冲完成时释放；被顶掉/淘汰/丢弃时也释放 | **机制单测五条臂全过**（含"没人认领也要还"与"提交路径也要还"）| ✅ |
+| **2** | **低层 PHY 把接收缓冲的凭据交出去**：`retain_symbol_input()` + `defers_transform_execution()`；**先问再分配**（不延迟的后端连一次 `new` 都没有）| **守卫测试的延迟版**（`DeferredTransformsKeepTheirSamplesUntilTheirBlockCompletes`，已做反向验证）| ✅ |
+| **3** | **池深实测**：接收循环会不会被"多留一两个缓冲"挡住 | 空口腿：`Real-time failures`、`ul_rx blocks`、CRC | ⬜ **= 下一会话的腿** |
+| **4** | **把低层 PHY 的 `release_block()` 调用点接回来**（`7fa657794c` 撤掉的那处）| 空口腿对（§4.3）| ✅（**腿待跑**）|
 
-### 4.1b 第 2 步的接口已经就绪（怎么用）
+### 4.1b 现在这条链长什么样（判读时要能背出来）
 
-```cpp
-// 引擎侧（已完成，纯 C++）：
-metal::dft_metal_engine::keep_alive token{&my_release, my_context};
-engine->retain_for_block(token);     // 必须在 begin_block() 与 release_block()/commit_open() 之间
 ```
-**⇒ 第 2 步要做的**：把 `rx_buffer_handle` 包成一个 `keep_alive`（`context` 指向一个能在 Metal 线程上安全释放的
-容器——或者只置一个原子标志、由 puxch 自己的线程回收，见 4.2），在**每个符号的变换被提交进块**时挂上去，
-并在 `finish_oldest_symbol()` 里**跳过**已经交出去的那些 `owner`。
+武装时：demodulator->defers_transform_execution() == true
+     ⇒ puxch 对【每个变换】调用 retain_symbol_input()：new 一份 rx_buffer_handle + retain_input()
+     ⇒ 引擎把它挂在"当前打开的块"上
+     ⇒ 块在槽末被 release_block() 交出 ⇒ 凭据跟着缓冲走
+     ⇒ 车道认领并提交 ⇒ 【缓冲完成时】凭据放掉 ⇒ 样本回电台池子
+没人认领时：deposit 被顶掉/淘汰 ⇒ on_drop 钩子 ⇒ 立刻放掉（§5.9.8 的 arm 3）
+```
+**★ 未武装时**：`defers_transform_execution()` 假 ⇒ **不分配、不交接**，与改动前逐字节相同（131 同数）。
 
-### 4.2 ⚠ 第 1 步的两条设计约束（先想清楚再写）
+**★ 什么时候会出现"多留一个缓冲"**：凭据从"槽末"延长到"车道提交完成"（≈1 个槽），
+所以同时被持有的槽缓冲从 ~1 个变成 ~2 个，池子是 4 个 ⇒ **余量应当够，但这就是第 3 步要量的东西**。
 
-1. **回调在 Metal 的完成线程上跑**，而凭据（`rx_buffer_handle`）属于低层 PHY 的池子 ⇒
-   **释放必须是线程安全的**，或者把回调做成"只置一个标志、由低层 PHY 在它自己的线程上回收"；
-2. **一次提交可能承载多个符号的输入**（一个槽 14 个符号）⇒ keep-alive 必须能**挂多个**，
-   或者低层 PHY 每个槽只挂一个（一个槽的样本在同一个接收缓冲里时）。
+### 4.2 ⚠ 两条设计约束（**已解决，留档**）
 
-### 4.3 腿法（**恢复接线之后**；模式必须是 `gpu`）
+1. **回调在 Metal 的完成线程上跑** ⇒ 结论：**可以直接放**。`rx_buffer_handle` 就是 `std::shared_ptr`，
+   池子的 deleter 走 `weak_ptr::lock()` + `push_blocking()`（`blocking_queue` **文档原话 thread-safe**），
+   **不碰 puxch 的任何状态**（`puxch_processor_impl.cpp` 的 `release_symbol_input()` 就是一句 `delete`）。
+2. **一次提交承载多个符号的输入** ⇒ 结论：**每个变换一份凭据**（与 in-flight entry 自己那份并列），
+   `shared_ptr` 的引用计数决定谁最后放手。
+
+### 4.3 腿法（**接线已恢复**；模式必须是 `gpu`）
 
 ```bash
 sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s33-d1-input-lifetime-base
@@ -241,5 +247,5 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s33-d1-input-lifeti
 
 **腿判了：D1 第 2 步的接线是错的——不是慢，是静默错数据（`sinr=37.6 dB` 却 942/46 的 CRC），
 因为被交出去的变换会晚于"接收缓冲被回收"才执行，而那次宿主等待正是回收的依据；已回滚。**
-**第 3 步的第 1 小步（引擎侧 keep-alive）已完成并离线验过；下一步是第 2 小步：
-把接收缓冲的凭据真的交出去（§4.1b），并把低层 PHY 的交出点接回来。**
+**第 3 步的 1/2/4 小步都已完成并离线验过（引擎 keep-alive + 低层 PHY 交接 + 交出点接回），
+未武装时逐字节不变；下一步是跑 §4.3 的 `gpu` 腿对，量"多留一个接收缓冲"会不会挡住接收循环（＝第 3 小步）。**

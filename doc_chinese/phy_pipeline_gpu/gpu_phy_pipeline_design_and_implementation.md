@@ -3060,6 +3060,30 @@ retain_symbol_input(*demodulator, owner);   // 每个变换一份引用，和 in
 **⑥ 门（旋钮关）**：`value_net` **47/0**、`ctest -R metal` **10/10**、
 `ctest -R "ul_pipeline_probe|puxch|lower_phy"` **5/5**、`neutral_vs_baseline` **131**（同数）。
 
+#### 5.9.10 ✅ 第 3 步的第 3 小步：**交出点接回来了——而"输入生命期"这条从"要记住的风险"变成了"按构造成立"**
+
+**① 做法**：把 `7fa657794c` 撤掉的 `ofdm_demodulator_impl::finish_symbol()` 里那处调用恢复
+（连同它的两条守卫：设备消费声明 + 无宿主网格读取臂 + strict）。
+
+**② ★ 与上次的区别（这次是本步存在的理由）**：上次那条路上有**三条**会静默出错的岔口，
+代码里只防住了两条（宿主读网格、设备服务不了的跳被兜底），第三条——**样本被提前回收**——只写在文档里、
+**依赖人记住**。现在它是**机制**：
+
+```
+武装时：demodulator->defers_transform_execution() == true
+     ⇒ puxch 对【每个变换】调用 retain_symbol_input()（§5.9.9）
+     ⇒ 引擎把凭据挂在被交出的块上，块完成（＝车道的提交完成）时才还
+     ⇒ 变换读到的是仍然有效的电台样本
+```
+**⇒ 同一处调用点，这次它脚下的三块地板都是代码，不是承诺。**
+
+**③ 门（旋钮关，出厂路径）**：`value_net` **47/0**、`ctest -R metal` **10/10**、
+`ctest -R "ul_pipeline_probe|puxch|lower_phy"` **5/5**、`neutral_vs_baseline` **131**（同数）。
+**⇒ 旋钮没武装时那条路仍然一步都不走**（`defers_transform_execution()` 假 ⇒ 连一次 `new` 都没有）。
+
+**④ ⇒ 现在可以上腿了**（判据在交接文件 §4.3；关键三条：
+`handed>0`、`evicted==0`、**`keepalives` 两数相等**，然后是 CRC 分层比与 `real-time failures`）。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。
