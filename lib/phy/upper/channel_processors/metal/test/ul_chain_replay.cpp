@@ -164,6 +164,125 @@ bool parse_capture(const std::string& base, capture_t& out)
   return true;
 }
 
+/// \brief The receiving chain's front end, for the L1b harness (design document 5.9.38).
+///
+/// The upper half of the L1 harness (`--dft`) judges the FRONT END: it produces a slot's grid and, as the
+/// grid's host consumer, asks for its production. It never builds a PUSCH receiver, so the other half of
+/// the hand-over - the HOP that ADOPTS the front end's block and appends its own dispatches to the very
+/// same command buffer - is not in it at all. That half is what makes D1's headline property (front end,
+/// channel estimation, equalization and demapping are ONE submission), and until it can be replayed
+/// offline the property can only be judged on air.
+///
+/// This class is that front end for a replay: it takes SYNTHETIC time-domain input (the criterion is "the
+/// same input through the same pipeline twice", so the content is irrelevant - see --synth) and produces
+/// each slot's resource grid on the DEVICE, handing the slot's block over uncommitted when the hand-over
+/// is armed, exactly as the lower PHY does - with no radio, no slot FSM and no capture file.
+class hop_front_end
+{
+public:
+  /// \param[in] dft_metal     Run the transform on the device (the hand-over needs the Metal engine).
+  /// \param[in] device_grid   Write the grid from the device (the shape the hand-over exists for).
+  /// \param[in] nof_prb       Width of the grid, in PRBs.
+  /// \param[in] scs           Subcarrier spacing of the corpus.
+  bool init(bool dft_metal, bool device_grid, unsigned nof_prb, subcarrier_spacing scs)
+  {
+    dft_size = 1;
+    while (dft_size < (nof_prb * NOF_SUBCARRIERS_PER_RB)) {
+      dft_size *= 2;
+    }
+    sampling_rate_Hz = to_sampling_rate_Hz(scs, dft_size);
+    bw_rb            = nof_prb;
+
+    ofdm_factory_generic_configuration ofdm_config = {
+        .dft_factory = dft_metal ? create_dft_processor_factory_metal() : create_dft_processor_factory()};
+    std::shared_ptr<ofdm_demodulator_factory> factory = create_ofdm_demodulator_factory_generic(ofdm_config);
+    if (factory == nullptr) {
+      return false;
+    }
+    ofdm_demodulator_configuration config = {};
+    config.numerology                = 0;
+    config.bw_rb                     = nof_prb;
+    config.dft_size                  = dft_size;
+    config.cp                        = cyclic_prefix::NORMAL;
+    config.nof_samples_window_offset = 0;
+    config.scale                     = 1.0F;
+    config.center_freq_Hz            = 0.0;
+    config.device_grid_write         = device_grid;
+    // The same declaration the receiving chain makes: the grid's consumers read it on the DEVICE, and a
+    // host reader of it waits. Without it the release path is not even reached.
+    config.grid_consumed_on_device   = true;
+    demodulator                      = factory->create_ofdm_symbol_demodulator(config);
+    grid_factory                     = create_resource_grid_factory();
+    return (demodulator != nullptr) && (grid_factory != nullptr);
+  }
+
+  /// \brief Produces \p slot 's grid from synthetic samples, on the device, and returns it.
+  ///
+  /// The samples are generated from a seed derived from the slot, so the corpus is reproducible and both
+  /// arms of an A/B get byte-identical input. The slot is handed to the device backend
+  /// (set_lane_slot) because it is HALF OF THE HAND-OVER KEY: the hop looks the block up by
+  /// (grid storage, receiving slot), and a producer that did not say which slot it was depositing for
+  /// would leave the hop looking for a key nobody used (see the harness's assertions).
+  std::shared_ptr<resource_grid> produce(uint64_t slot)
+  {
+    std::shared_ptr<resource_grid> grid = grid_factory->create(1, MAX_NSYMB_PER_SLOT, bw_rb * NOF_SUBCARRIERS_PER_RB);
+    if (grid == nullptr) {
+      return nullptr;
+    }
+    demodulator->set_lane_slot(slot);
+
+    std::mt19937                       rng(20260921 + slot);
+    std::uniform_int_distribution<int> dist(-2000, 2000);
+    const unsigned                     depth    = demodulator->get_pipeline_depth();
+    const cyclic_prefix                dft_cp   = cyclic_prefix::NORMAL;
+    std::vector<ci16_t>                samples;
+    for (unsigned symbol = 0; symbol != MAX_NSYMB_PER_SLOT; ++symbol) {
+      const unsigned cp_len = dft_cp.get_length(symbol, subcarrier_spacing::kHz15).to_samples(sampling_rate_Hz);
+      samples.resize(cp_len + dft_size);
+      for (ci16_t& sample : samples) {
+        sample = ci16_t(static_cast<int16_t>(dist(rng)), static_cast<int16_t>(dist(rng)));
+      }
+      if (depth > 1) {
+        // The ring is kept at `depth` transforms in flight, exactly as the receiving chain does: the slot
+        // about to be reused holds the oldest one.
+        if (in_flight.size() == depth) {
+          demodulator->finish_symbol(grid->get_writer(), in_flight.front());
+          in_flight.erase(in_flight.begin());
+        }
+        const unsigned ring_slot = ring++ % depth;
+        demodulator->submit_symbol(grid->get_writer(), samples, 0, symbol, ring_slot);
+        in_flight.push_back(ring_slot);
+      } else {
+        demodulator->demodulate(grid->get_writer(), samples, 0, symbol);
+      }
+    }
+    // Close the slot: the last finish_symbol() is what ends the block - and, when the hand-over is armed,
+    // what hands it over. Nothing is committed here; the hop that reads this grid commits it.
+    while (!in_flight.empty()) {
+      demodulator->finish_symbol(grid->get_writer(), in_flight.front());
+      in_flight.erase(in_flight.begin());
+    }
+    ring = 0;
+    return grid;
+  }
+
+  /// The slot's grid storage, i.e. the first half of the hand-over key (the other half is the slot).
+  static const void* storage(const std::shared_ptr<resource_grid>& grid)
+  {
+    const resource_grid_device_view view = grid->get_writer().get_device_view();
+    return view.is_valid() ? view.base : nullptr;
+  }
+
+private:
+  std::unique_ptr<ofdm_symbol_demodulator> demodulator;
+  std::shared_ptr<resource_grid_factory>   grid_factory;
+  std::vector<unsigned>                    in_flight;
+  unsigned                                 ring             = 0;
+  unsigned                                 dft_size         = 0;
+  unsigned                                 bw_rb            = 0;
+  unsigned                                 sampling_rate_Hz = 0;
+};
+
 /// Captures the result of one PUSCH processing.
 class result_spy : public pusch_processor_result_notifier
 {
@@ -236,6 +355,14 @@ int main(int argc, char** argv)
   /// gives every slot a distinct storage address and therefore hides the whole reason the hand-over key
   /// needs a slot half at all.
   bool reuse_grid = false;
+  /// \brief Number of slots the L1b harness replays through the FRONT END and a real receiver
+  ///        (--hop-td N). 0 = the ordinary replay, whose grid comes from the capture.
+  ///
+  /// The capture then supplies the PDU CONFIGURATION only (its .bin is ignored): the grid is produced by
+  /// the front end from synthetic time-domain input, so the hop under test adopts a block the receiving
+  /// chain really deposited. That is what puts the fused chain (front end + channel estimation +
+  /// equalization + demapping in ONE submission) inside an offline A/B.
+  unsigned hop_td_slots = 0;
   bool        use_metal_ce     = false;
   bool        use_metal_demod  = false;
   bool        use_metal_decoder = false;
@@ -295,6 +422,8 @@ int main(int argc, char** argv)
       reuse_grid = true;
     } else if (arg == "--device-grid") {
       device_grid = true;
+    } else if ((arg == "--hop-td") && (i + 1 < argc)) {
+      hop_td_slots = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
     } else if ((arg == "--td-strategy") && (i + 1 < argc)) {
       td_strategy_average = (std::string(argv[++i]) == "average");
     } else if (arg == "--cpu") {
@@ -361,7 +490,13 @@ int main(int argc, char** argv)
   if (std::getenv("OCUDU_UL_DUMP_LLR") == nullptr) {
     setenv("OCUDU_UL_DUMP_LLR", "1", 1);
   }
-  setenv("OCUDU_UL_DUMP_COUNT", "1", 1);
+  // The capture budget: one reception is what a single-reception replay wants (its stages are the point),
+  // but the L1b harness replays a SLOT SEQUENCE and compares the LLRs of every slot, so the budget has to
+  // cover it. Measured with the budget left at 1: the A/B compared a single slot and reported a difference
+  // it could not attribute - the other seven receptions were never captured.
+  setenv("OCUDU_UL_DUMP_COUNT",
+         std::to_string((hop_td_slots != 0) ? hop_td_slots : 1U).c_str(),
+         1);
 
   // --------------------------------------------------------------------------------------------
   // Time-domain replay: rebuild the resource grid of each recorded slot with the selected DFT
@@ -958,8 +1093,36 @@ int main(int argc, char** argv)
   for (const std::string& extra : rotate) {
     prefixes.push_back(extra);
   }
+  // ------------------------------------------------------------------------------------------------
+  // L1b: the front end that feeds the hop (see --hop-td). Created before the loop because it outlives
+  // one reception: it is the receiving chain's front end, and its device state is per slot.
+  // ------------------------------------------------------------------------------------------------
+  hop_front_end front_end;
+  if (hop_td_slots != 0) {
+    if (!front_end.init(use_metal_demod, device_grid, nof_prb, subcarrier_spacing::kHz15)) {
+      std::fprintf(stderr, "cannot create the front end for --hop-td\n");
+      return 1;
+    }
+    std::printf("hop-td: %u slot(s) from slot %u through the front end (%s DFT, grid write %s), PDU from %s\n",
+                hop_td_slots,
+                synth_first_slot,
+                use_metal_demod ? "metal" : "cpu",
+                device_grid ? "device" : "host",
+                prefix.c_str());
+  }
+  /// Whether the HOST reads the grid BEFORE the hop does (OCUDU_L1_HOST_FIRST=1, design document 5.9.38).
+  /// It decides which half of the hand-over the hop exercises: normally the hop is the first consumer and
+  /// ADOPTS the block (taken>0), while with this set the host consumer claims and commits it first and the
+  /// hop MISSES - taking the device-side wait path instead (not_found/fallback, see the MMSE engine's
+  /// pending_grid_wait). Both orders have to produce the same LLRs.
+  const bool host_first = []() {
+    const char* env = std::getenv("OCUDU_L1_HOST_FIRST");
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  }();
+
   for (const std::string& capture_prefix : prefixes) {
-    for (unsigned rep = 0; rep != repeat; ++rep) {
+    // In hop mode the round index IS the slot offset: one round per slot the front end produces.
+    for (unsigned rep = 0; rep != ((hop_td_slots != 0) ? hop_td_slots : repeat); ++rep) {
     unsigned  i       = 0;
     capture_t capture;
     report("parsing");
@@ -973,21 +1136,56 @@ int main(int argc, char** argv)
     const unsigned    nof_subc  = bwp_size * NOF_SUBCARRIERS_PER_RB;
     const std::string bin_path  = capture_prefix + ".bin";
 
-    report("rebuilding the grid");
-    // Rebuild the grid.
-    std::shared_ptr<resource_grid> grid = grid_factory->create(nof_ports, MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS);
-    {
-      std::ifstream bin(bin_path, std::ios::binary);
-      if (!bin.is_open()) {
-        std::fprintf(stderr, "cannot open %s\n", bin_path.c_str());
+    if (hop_td_slots != 0) {
+      if ((bwp_start + bwp_size) > nof_prb) {
+        std::fprintf(stderr,
+                     "--hop-td: the PDU needs PRB %u..%u but the front end produces %u PRB "
+                     "(raise --nof-prb)\n",
+                     bwp_start,
+                     bwp_start + bwp_size,
+                     nof_prb);
         return 1;
       }
-      std::vector<cf_t> symbol(nof_subc);
-      const auto        ports = capture.get_list("rx_ports");
-      for (unsigned i_port = 0; i_port != nof_ports; ++i_port) {
-        for (unsigned i_symbol = 0; i_symbol != MAX_NSYMB_PER_SLOT; ++i_symbol) {
-          bin.read(reinterpret_cast<char*>(symbol.data()), static_cast<std::streamsize>(symbol.size() * sizeof(cf_t)));
-          grid->get_writer().put(ports[i_port], i_symbol, bwp_start * NOF_SUBCARRIERS_PER_RB, symbol);
+    }
+
+    report("rebuilding the grid");
+    std::shared_ptr<resource_grid> grid;
+    /// The RECEIVING SLOT this grid belongs to: half of the hand-over key, and in hop mode the number the
+    /// front end was told (set_lane_slot) and the PDU is stamped with. All three have to be the same
+    /// number or the hop looks up a block nobody deposited (the fail-open trap of memo 4.2).
+    unsigned receiving_slot = 0;
+    if (hop_td_slots != 0) {
+      // The grid comes from the FRONT END, not from the capture: the capture supplies the PDU only.
+      receiving_slot = synth_first_slot + rep;
+      grid           = front_end.produce(receiving_slot);
+      if (grid == nullptr) {
+        std::fprintf(stderr, "cannot produce the grid of slot %u\n", receiving_slot);
+        return 1;
+      }
+      if (host_first) {
+        // The host consumer goes FIRST, so the hop finds the block already claimed and has to take the
+        // MISS path. Its wait is the one the PUCCH makes in the receiving chain.
+        if (!grid_ready_hook::wait(hop_front_end::storage(grid), receiving_slot)) {
+          std::fprintf(stderr, "slot %u: the grid was not produced in time\n", receiving_slot);
+          return 1;
+        }
+      }
+    } else {
+      // Rebuild the grid from the capture.
+      grid = grid_factory->create(nof_ports, MAX_NSYMB_PER_SLOT, MAX_NOF_SUBCARRIERS);
+      {
+        std::ifstream bin(bin_path, std::ios::binary);
+        if (!bin.is_open()) {
+          std::fprintf(stderr, "cannot open %s\n", bin_path.c_str());
+          return 1;
+        }
+        std::vector<cf_t> symbol(nof_subc);
+        const auto        ports = capture.get_list("rx_ports");
+        for (unsigned i_port = 0; i_port != nof_ports; ++i_port) {
+          for (unsigned i_symbol = 0; i_symbol != MAX_NSYMB_PER_SLOT; ++i_symbol) {
+            bin.read(reinterpret_cast<char*>(symbol.data()), static_cast<std::streamsize>(symbol.size() * sizeof(cf_t)));
+            grid->get_writer().put(ports[i_port], i_symbol, bwp_start * NOF_SUBCARRIERS_PER_RB, symbol);
+          }
         }
       }
     }
@@ -995,10 +1193,18 @@ int main(int argc, char** argv)
     report("rebuilding the PDU");
     // Rebuild the PDU.
     pusch_processor::pdu_t pdu = {};
-    pdu.slot                   = slot_point(to_scs(capture.get_unsigned("scs_khz", 15)), capture.get_unsigned("slot"));
-    // A repetition is a NEW reception: it must not reuse the recorded slot, or the receive buffer
-    // pool would hand the same HARQ slot to a second reservation and the two would collide.
-    pdu.slot += rep * 40;
+    if (hop_td_slots != 0) {
+      // In hop mode the capture supplies the CONFIGURATION and the front end supplies the grid, so the
+      // slot is the front end's - not the one the capture was recorded at. This is also the value the PDU
+      // hands the channel estimator (ch_est_config.slot = pdu.slot), i.e. the key the hop looks its block
+      // up by, so it MUST be the number the front end was told (set_lane_slot, front_end.produce()).
+      pdu.slot = slot_point(to_scs(capture.get_unsigned("scs_khz", 15)), receiving_slot);
+    } else {
+      pdu.slot = slot_point(to_scs(capture.get_unsigned("scs_khz", 15)), capture.get_unsigned("slot"));
+      // A repetition is a NEW reception: it must not reuse the recorded slot, or the receive buffer
+      // pool would hand the same HARQ slot to a second reservation and the two would collide.
+      pdu.slot += rep * 40;
+    }
     pdu.rnti                   = to_rnti(static_cast<uint16_t>(capture.get_unsigned("rnti")));
     pdu.harq_id                = static_cast<harq_id_t>(capture.get_unsigned("harq_id"));
     pdu.bwp_size_rb            = bwp_size;
@@ -1124,6 +1330,76 @@ int main(int argc, char** argv)
   std::printf("replayed %u reception(s); staged capture written to %s_<slot>_<rnti>{,.bin,_ce.txt,_llr.bin}\n",
               replayed,
               out_prefix.c_str());
+
+  // ------------------------------------------------------------------------------------------------
+  // L1b: what the hop half of the hand-over did (see --hop-td). The comparison the driver script makes
+  // is between the LLRs of the arms; these counters are what say each arm exercised what it meant to -
+  // a hop that MISSED when it should have ADOPTED still produces plausible LLRs (see 5.9.19).
+  // ------------------------------------------------------------------------------------------------
+  if (hop_td_slots != 0) {
+    grid_handover_counts hs;
+    grid_ready_hook::counts(hs);
+    const bool release_armed = []() {
+      const char* env = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
+      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    }();
+    std::printf("[l1_hop] installed=%d armed=%d host_first=%d slots=%u handed=%llu taken=%llu fallback=%llu "
+                "late=%llu not_found=%llu unproduced=%llu ready_timeouts=%llu\n",
+                hs.installed ? 1 : 0,
+                release_armed ? 1 : 0,
+                host_first ? 1 : 0,
+                hop_td_slots,
+                static_cast<unsigned long long>(hs.handed),
+                static_cast<unsigned long long>(hs.taken),
+                static_cast<unsigned long long>(hs.fallback_commits),
+                static_cast<unsigned long long>(hs.late_commits),
+                static_cast<unsigned long long>(hs.not_found),
+                static_cast<unsigned long long>(hs.unproduced),
+                static_cast<unsigned long long>(hs.ready_timeouts));
+    if (!release_armed) {
+      // The reference arm: the front end commits its own block, so the hop adopts nothing and is right not
+      // to. A hand-over here would mean this arm is not the reference it claims to be.
+      if (hs.handed != 0) {
+        std::fprintf(stderr,
+                     "FAIL: the hand-over happened (%llu) without OCUDU_DFT_RELEASE_BLOCK - this arm is not "
+                     "the reference it claims to be\n",
+                     static_cast<unsigned long long>(hs.handed));
+        return 1;
+      }
+    } else {
+      if (hs.handed == 0) {
+        std::fprintf(stderr, "FAIL: --hop-td handed NOTHING over - the hop read a grid the front end "
+                             "committed itself, so the fused chain was not exercised\n");
+        return 1;
+      }
+      // Which half each order MUST exercise: the hop that goes first adopts the block, and the hop that
+      // runs after the host consumer cannot (the block is claimed) and has to take the MISS path.
+      if (host_first) {
+        if (hs.taken != 0) {
+          std::fprintf(stderr,
+                       "FAIL: the host consumed the grid first yet the hop still ADOPTED (%llu) - the MISS "
+                       "path was not exercised\n",
+                       static_cast<unsigned long long>(hs.taken));
+          return 1;
+        }
+        if (hs.fallback_commits == 0) {
+          std::fprintf(stderr, "FAIL: the host consumer committed nothing - no fallback happened\n");
+          return 1;
+        }
+      } else if (hs.taken == 0) {
+        std::fprintf(stderr, "FAIL: the hop ADOPTED nothing (%llu handed, %llu taken) - the fused single-"
+                             "submission chain was not exercised\n",
+                     static_cast<unsigned long long>(hs.handed),
+                     static_cast<unsigned long long>(hs.taken));
+        return 1;
+      }
+    }
+    if (hs.ready_timeouts != 0) {
+      std::fprintf(stderr, "FAIL: %llu wait(s) timed out\n", static_cast<unsigned long long>(hs.ready_timeouts));
+      return 1;
+    }
+  }
+
   worker_pool->stop();
   return (replayed == 0) ? 1 : 0;
 }
