@@ -57,48 +57,76 @@ bool host_reads_the_grid()
 /// serves every hop (phy_pipeline_strict_enabled()) - in mode=gpu a hop the device cannot serve FAILS the
 /// grant instead of being covered by the host, so a device refusal cannot silently become a host read of a
 /// grid nobody wrote.
-/// \brief Whether the resource grid has consumers that read it on the HOST - which the hand-over cannot
-///        serve, and which is why the hand-over is OFF today.
+/// \brief Whether the resource grid has consumers that read it on the HOST and cannot be ordered after the
+///        hand-over's commit. FALSE since 5.9.20: the consumers wait, and both reasons that kept this true
+///        have been withdrawn.
 ///
 /// THE PUCCH IS ONE, and it is configured in every deployment that carries control information:
 /// pucch_processor_impl reads the grid through resource_grid_reader and has NO device view at all, and the
 /// upper PHY processes it as soon as the slot is handed over. A hand-over produces the grid at the LANE's
-/// commit instead - a slot later - so a host reader reads memory nobody has written yet. Measured on air:
-/// every PUCCH report came out `metric=nan sinr=-inf` (10924 healthy ones in the control arm), the attach
-/// never completed, and 53135 real-time failures followed (design document 5.9.12).
+/// commit instead - a slot later - so a host reader would read memory nobody has written yet. Measured on
+/// air when nothing waited: every PUCCH report came out `metric=nan sinr=-inf`, the attach never completed,
+/// and 53135 real-time failures followed (design document 5.9.12).
 ///
-/// It returns a constant on purpose: this is not a knob and not a per-hop property, it is the SHAPE of the
-/// receiving chain. It becomes false when the grid's host consumers are ordered after the lane's completion
-/// - the wait belongs at the consumer that needs the data, not at the producer - which is the next piece of
-/// D1 rather than something an operator arms.
+/// That is answered by the WAIT, not by refusing the hand-over: the host consumers call
+/// grid_ready_hook::wait() on their own executor, and the registry answers them by committing a block nobody
+/// claimed (the fallback a hand-over owes) or by waiting for the generation of the block that was claimed.
+/// The hand-over is refused only while a route that would read the grid on the host WITHOUT waiting is
+/// armed (see host_reads_the_grid()), which in mode=gpu is not a configuration but an A/B arm.
 bool grid_has_host_consumers()
 {
-  // TRUE again, and the reason is a DEFECT the armed leg found, not a missing consumer (5.9.15):
+  // FALSE since 5.9.20. The two reasons that kept it true are both withdrawn, and the paragraphs are kept
+  // so the record of what was believed is not lost:
   //
-  // The host readers do wait now (grid_ready_hook::wait() in uplink_processor_impl::process_pucch()/
-  // process_pucch_f1()/process_srs()), but the registry they ask is keyed by the grid's STORAGE ADDRESS -
-  // and the grid pool hands that address back as soon as the upper PHY drops its reference, which happens
-  // when the NEXT slot's grid arrives. So a consumer that asks one slot late finds the LATER slot's block,
-  // commits and waits for THAT one - and the grid it is about to read was never written at all. Measured:
-  // PUCCH sinr median -14.9 dB with only 28% of the reports usable, and the PUSCH at -22.9 dB.
+  // (1) "the registry is keyed by the grid's STORAGE ADDRESS, so a consumer asking one slot late is served
+  //      the NEXT slot's block" (5.9.15) - FIXED. The key is (storage, slot), and the case that used to
+  //      break is the one the key refuses: a reader that asks about ITS OWN slot can no longer be handed
+  //      another slot's block, and an unclaimed block is committed by whoever needs the grid first.
   //
-  // TRUE again, and for a defect that is NOT in this hand-over (5.9.18): the upper PHY's PUCCH and SRS tasks
-  // capture [this, &pdu] and read the slot-scoped member `grid` and the slot repository's PDU WHEN THEY RUN.
-  // A host reader that has to WAIT for the grid's production - which is what this hand-over makes it do -
-  // therefore runs past its slot boundary and reads the NEXT slot's grid. The control arm is fine only
-  // because its tasks keep up (its PUCCH is 65% good, so the race is latent there too).
+  // (2) "the upper PHY's PUCCH/SRS tasks capture [this, &pdu] and read the slot-scoped member `grid` WHEN
+  //      THEY RUN, so a task that has to WAIT for the production runs past its slot boundary and reads the
+  //      NEXT slot's grid" (5.9.18) - WITHDRAWN, and the reason is in the FSM, not in the hand-over:
+  //
+  //        * uplink_processor_fsm::start_new_slot() only transitions out of IDLE, and the pending-PDU count
+  //          is zero only when every PDU of the previous slot has called on_finish_processing_pdu() - which
+  //          each task does at the END of its body, after its wait. So get_pdu_slot_repository() cannot
+  //          configure a new slot on this processor (and pdu_repository.clear_queues() cannot run) while a
+  //          task of the previous slot is still in flight: `&pdu` names storage that is alive by the FSM's
+  //          own invariant, and the wait is INSIDE the task, so the invariant covers the wait too.
+  //        * the grid is not slot-scoped either: each uplink_processor_impl owns ONE grid
+  //          (uplink_processor_impl.cpp) and a cell has nof_ul_rg of them (upper_phy_factories.cpp), so a
+  //          processor's grid is rewritten only when THAT processor is given another slot - which the FSM
+  //          above forbids until the tasks are done. Measured window: the slot-to-slot reuse of one grid is
+  //          ~nof_ul_rg UL requests (20 in this configuration, ~10 ms), not one slot. (This is the same
+  //          misreading that 5.9.19 made and 5.9.20 withdrew.)
+  //
+  // What the armed leg DID find, and what the refusal was really hiding, is the object-identity defect of
+  // 5.9.20: the estimator's DMRS extraction - the first device reader of the handed block - bound an
+  // MTLBuffer object of its own while the front end wrote the grid through the process-wide one, and Metal
+  // relates two accesses through the object, never through the address. That is fixed (wrap_grid()), and it
+  // is what made the armed arm read `crc=KO` at 20-38 dB of sinr instead of failing structurally.
   //
   // The grid production itself is proven correct offline: the armed section of
   // ofdm_demodulator_metal_batch_test hands a slot over uncommitted, has the test act as the host consumer,
   // and the resulting grid is byte-identical to the host reference (0 of 17808 RE mismatching).
-  //
-  // ⇒ The hand-over stays refused until those tasks OWN their slot's grid and PDU.
-  return true;
+  return false;
 }
 
 bool handover_allowed()
 {
   return !grid_has_host_consumers() && !host_reads_the_grid() && phy_pipeline_strict_enabled();
+}
+
+/// \brief Whether this run ARMED the hand-over knob (OCUDU_DFT_RELEASE_BLOCK=1).
+///
+/// The engine reads the same variable for its own decision (see dft_metal_engine::block_release_enabled(),
+/// the knob's owner); this is the operator's half, read here so that the two answers can be compared at
+/// startup without the lower PHY depending on a Metal header - a build without Metal has no engine and
+/// therefore no hand-over at all.
+bool block_release_armed()
+{
+  const char* env = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
+  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
 }
 
 } // namespace
@@ -170,6 +198,21 @@ ofdm_symbol_demodulator_impl::ofdm_symbol_demodulator_impl(const ofdm_demodulato
       device_grid_write = false;
       grid_write         = nullptr;
     }
+  }
+
+  // The KNOB and the CHAIN'S PERMISSION are two different answers, and a leg that sets the knob while the
+  // chain refuses it exercises NOTHING: it reads exactly like the control arm, its counters come out
+  // `handed=0 released=0`, and the mistake is only visible after the OTA cycle has been spent on it (it was:
+  // one whole pair, s37). Said HERE, once per demodulator, before the radio starts - the log is the only
+  // place an operator can still see it in time, and the predicates that refused are named.
+  if (block_release_armed() && !handover_allowed()) {
+    ocudulog::fetch_basic_logger("PHY").warning(
+        "OFDM demodulator: OCUDU_DFT_RELEASE_BLOCK is set but this receiving chain refuses the block "
+        "hand-over (grid_has_host_consumers={}, host_reads_the_grid={}, strict={}) - this run will NOT "
+        "exercise D1 (expect handed=0 released=0)",
+        grid_has_host_consumers(),
+        host_reads_the_grid(),
+        phy_pipeline_strict_enabled());
   }
 }
 

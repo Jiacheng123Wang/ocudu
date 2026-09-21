@@ -3541,6 +3541,40 @@ bool success = task_executors.pucch_executor.defer([this, &pdu]() {     // ← 3
 > 其余判据不变：`crc=OK/KO` 按调制分层不劣化、`sinr` 分布回到对照臂的形状、`taken>0`、`timeouts=0`、
 > `keepalives` 两侧相等、`RF late` 不劣化。
 
+---
+
+#### 5.9.21 ★★ `s37` 腿对：**两条腿都健康，但这一对什么都没判** —— 交出在代码里还是关的；**已重新武装**（+ 一条开工告警）
+
+**① `s37` 的事实（两条腿都干净跑完，UE 都接上并跑了 iperf/ping）**
+
+| 读数 | `…-base`（对照）| `…`（旋钮已设）|
+|---|---|---|
+| CRC | 9984 OK / 2933 KO | 9187 OK / 4195 KO |
+| OK 的 `sinr` 中位 | 17.2 dB | 17.6 dB |
+| `handed` / `taken` / `released` | 0 / 0 / 0 | **0 / 0 / 0** |
+| `dft commits` / `transforms` | 25559 / 357813 | 30411 / 425741 |
+| `grid_shared` / `grid_failed` | 12917 / 0 | 13382 / 0 |
+| `hops`（`burst commits`）| 12917 | 13382 |
+
+**⇒ 候选臂 `handed=0 released=0`：`OCUDU_DFT_RELEASE_BLOCK=1` 设了，但链子拒绝了交出**（`grid_has_host_consumers()`
+当时还是常量 `true`）⇒ **这一对退化成两次对照臂**，D1 一次都没被触发。
+**唯一的收获**：新计数成立（`grid_shared == hops`，`grid_failed=0`），且在**未武装**路径上它也不受影响。
+
+**② 为什么"关着"的理由已经不成立（逐条，代码）**
+
+| 当初的理由 | 现在 |
+|---|---|
+| 键只有地址 ⇒ 晚一个槽的消费者被喂下一个槽的块（5.9.15）| **已修**：键是 `(存储, 槽)`；未认领的块由需要它的人兜底提交 |
+| "上层 PHY 的任务读**按槽复用**的 `grid`/PDU，一'等'就跨槽"（5.9.18）| **撤回**：<br>① `uplink_processor_fsm::start_new_slot()` **只能从 IDLE 转移**，而 pending 计数只有在上一个槽的**每个** PDU 都调用过 `on_finish_processing_pdu()`（在各任务体的**末尾**、**等待之后**）才归零 ⇒ **任务在飞时不可能配置新槽**，`clear_queues()` 也就不可能动到 `&pdu`；<br>② 网格**不是**槽作用域的：每个 `uplink_processor_impl` 一个网格、每小区 `nof_ul_rg`(20) 个 ⇒ 同一份网格 ~20 次 UL 请求才被改写（就是被 §5.9.20 撤回的那个误读）|
+| 估计器读网格绑私有对象（5.9.20）| **已修**（`wrap_grid()`），这正是武装臂当初"高 sinr + CRC 全错"的原因 |
+
+**⇒ 结论：重新武装**（`grid_has_host_consumers()` → `false`）。
+
+**③ 新增一条"开工告警"**（防止再花一对腿去跑一个什么都没触发的臂）
+
+`ofdm_symbol_demodulator_impl` 构造时：**若旋钮被设而链子拒绝**，就打一条 WARNING，并把三个谓词的取值一起打出来
+（`grid_has_host_consumers=… host_reads_the_grid=… strict=…`），并明说 *"this run will NOT exercise D1
+(expect handed=0 released=0)"*。**⇒ 上腿前先 grep 这条**（比事后读 `handed=0` 早一个 OTA 周期）。
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
