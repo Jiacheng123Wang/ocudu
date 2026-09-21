@@ -2705,6 +2705,59 @@ if (!wait_per_slot || last_symbol_of_slot) {
 * **`wait_all()` 的语义被队列旋钮破坏**（它 drain 的是 front-end 链，而 DFT 提交到了后端）——
   这是**实验旋钮的已知局限**，若将来要让 DFT 常驻后端队列，`wait_all()` 必须一起改。
 
+#### 5.9.4 ★★★ D1 的可行性已确认：**"GPU 一旦发动就不停顿"当前唯一的断点是 DFT 的命令缓冲归属**
+
+**① 用户的判据（本会话新裁定，长期有效）**
+
+> "只要 GPU 一旦发动，就可以暂时不关心 CPU 在干什么" —— 即 **GPU 必须能不停顿地跑完 IQ → LLR**；
+> 中途若还需要 CPU 才能继续，那一点就算**参与点**。
+
+**② 按这条判据逐点核实：一跳之内，宿主已经【不再】需要读设备数据**
+
+| 检查 | 结果 |
+|---|---|
+| **权重是宿主算的吗** | ❌ **不是**。`gpu_invert` 为真时**设备自己求逆**（K1），宿主不参与；`gauss_jordan_invert` 只在 `!gpu_invert`（矩阵变体/超阶）的**回退**路径 |
+| **提取结果要回宿主吗** | ❌ **不要**。`hold_for_weights` 的设计承诺原话：*"Everything else the host consumes from the extraction … is read at the hop's COMPLETION, by which time the weights have committed the buffer"*，且 `stage_engine_group()` **改为从设备暂存 y**（不读 `ls_pilot()`）|
+| **宿主缩放量**（`host_reads_device_scalars`）| ❌ **默认关**（`OCUDU_CE_HOST_SCALARS` 未设 ⇒ false）。它一开，`hold_for_weights` 就自动关闭（两者互斥）|
+| **`ls_pilot()` 的设备读** | 只发生在**回退**（设备 LSE 无效、或 `OCUDU_CE_DEV_SIGMA2=0`）|
+
+**⇒ 一跳的宿主参与点只剩两处**：`[cb commit]` 的**1.83 次 DFT 提交** + **1.00 次车道提交**。
+**中间没有任何"宿主必须读设备数据才能继续"的点** ⇒ **一条 GPU 链是可达的。**
+
+**③ 唯一的断点：DFT 的缓冲归属**
+
+```
+今天：[DFT 缓冲(前端队列) commit] ──宿主等 507µs──→ [网格] → 车道缓冲打开 → 权重 → 均衡 → commit
+目标：[一条缓冲] DFT 14 个变换 → 提取 → 权重 → 均衡 → 解映射 → 【一次 commit】→ GPU 跑到 LLR
+```
+
+**④ 现成机制（都已存在，不需要新发明）**
+
+| 需要的能力 | 现成的 |
+|---|---|
+| DFT 已经"一条缓冲收一整槽变换" | `dft_metal_engine::begin_block()` 里的 `open_cb`/`open_enc`（`OCUDU_DFT_OPEN_BLOCK` 默认开）|
+| "接手别人的命令缓冲继续编" | **`shared_burst::adopt(cb)`**（P3 为估计器做的，注释明确：*"its command-buffer-level FENCES … stay as the stages inside it encoded them"*）|
+| 阶段间的 buffer 级栅栏 | `stage_pipeline()` 在切 kernel 时插 `memoryBarrierWithScope:MTLBuffer` |
+
+**⑤ ⚠ 两条必须先处理的约束**
+
+1. **`adopt()` 不为被接管的缓冲编码前端/后端栅栏**（它假定"缓冲里已有那些阶段的栅栏"）。
+   所以若 DFT 缓冲被接管，**DFT 阶段内部必须自己编码它需要的栅栏**；否则就会走到
+   **P0 的签名（读到没人 signal 的代际 ⇒ 静默错数据）**。§5.8.26 ② 记过同一形状的缺陷。
+2. **`wait_all()` drain 的是 front-end 链**：若 DFT 常驻车道队列，**它必须一起改**
+   （否则退出时的 drain 漏掉 DFT 的工作）。
+
+**⑥ ⇒ 实施步骤（建议顺序，每步都可单独验证）**
+
+| 步 | 做什么 | 判据 |
+|---|---|---|
+| **1** | **DFT 引擎提供"交出未提交的缓冲"**（一个新的 `release_block()`/`detach`），**默认不启用** | 不启用时出厂路径零影响：`value_net` 47/0、`ctest -R metal` 9/9 |
+| **2** | **让车道在槽末（样本到齐）打开缓冲**，把 DFT 编进去，再让提取/权重/均衡接着编（`adopt`）| `dft commits` **→ 0**；`cbs/lane` 仍 **1.00**；契约 `ce device estimates`/`equalizer ch_re` **host=0/0** |
+| **3** | **`wait_all()` 与栅栏归属跟进** | 退出时无悬挂；CRC 不劣化 |
+
+**⑦ 代价已实测为零**（§5.9.3）：`dft residency` 420.2 → 419.6 µs（同队列），**重叠不丢**。
+**⇒ D1 不再有未排除的风险项。**
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。
