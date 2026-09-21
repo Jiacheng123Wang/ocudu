@@ -1,4 +1,4 @@
-# 交接（入口） — S29：**`s42`：拒收这件收口（两臂都 0）；尾部这件被切成两半（IQ→LLR p95 17.8 ms + 一次 LDPC 19.8 ms 离群），下一步是相位分段诊断**
+# 交接（入口） — S30：**`s43` 定住了尾巴的位置：不在前端（前端更快），在"交出→估计器段"那一截 = 共享 PUSCH 池的排队 ⇒ 下一步把车道执行与解码池分开**
 
 > **本文件是新会话的唯一入口**：读完它就能开工。
 > **本会话（S25）的就一件事**：读 `s40` + 更正上一轮对停顿的误判。设计文档 **§5.9.25** = 完整读数与机制。
@@ -87,19 +87,24 @@ git push origin gpu_phy_d1_handover    # 若这条线要推送
 **① ✔ 已收口**：饱和爬坡的**拒收** —— `s42`（6 帧余量）两臂都 **0**（`s41` 0/91、`s40` 84/716），
 实时失败 0，提交/上行时隙 **1.022**（地板 1.00），交接计数全部成立（`grid_devwaited=501` 精确、`grid_wait_unencoded=0`）。
 
-**② ★ 未关：尾部（`s42` 武装臂）**——中位两边一样（1938 vs 1987 µs），尾部全在**解码之前**
-（`[ul_gpu_pipeline]` IQ→LLR p95 **17.8 ms** vs 对照 2.9），且 `[ul_ldpc_decode]`（**按槽精确配对**）
-有一个 **19.8 ms** 离群（对照 max 145 µs）；**拒收 = 0，所以不是它**。设计文档 §5.9.31。
+**② ★ 未关：尾部——`s43` 已定位（设计文档 §5.9.33）**
 
-**★ 下一步（`s43`）：相位分段诊断——开关已存在，无需改代码**（§5.9.32）：
+`s43`（两臂都带 `OCUDU_UL_PHASE_SEGMENTS=1`，µs）：
 
-```bash
-sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s43-d1-phases-base OCUDU_UL_PHASE_SEGMENTS=1
-sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s43-d1-phases OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_DFT_RELEASE_BLOCK=1
-```
-**两条臂都要带开关**（`gpu` 模式下分段默认不记录）。看 `[ul_time_frequency]` / `[ul_channel_estimation]` /
-`[ul_equalization_demod]` 谁的 p95/p99 涨了：前端/交接侧、估计器段、还是均衡解调段（含共享池排队）。
-判读表在 §5.9.32 ③；**在车道里这三段含设备执行与排队，不是 CPU 时间。**
+| 段 | 对照 中位/p95/max | 武装 中位/p95/max |
+|---|---|---|
+| `ul_time_frequency`（IQ→交出）| 1400 / 1667 / 2779 | **1098 / 1142 / 1343** ⇒ **前端不是瓶颈** |
+| **`ul_channel_estimation`**（交出→估计器段完）| 44 / **205** / 1161 | 50 / **3387** / 5774 ⇒ **尾巴在这里（16×）** |
+| `ul_equalization_demod` | 541 / 3505 / 15171 | 685 / **1936** / 66871 |
+| `ul_ldpc_decode` | 57 / 145 / 9825 | 26 / 73 / **26135** |
+| 车道 `residency` | 375 / 690 / 1887 | 495 / 1084 / **2581** ⇒ 设备工作有界 |
+
+⇒ 尾巴 = "**上层任务派发 + 车道起步**"那一截（**不是设备执行**，也**不是前端**）；
+所有中位都更好（总 1872 vs 2071）。
+
+**★ 下一步：把车道的执行与解码池分开**（`lib/du/du_low/du_low_executor_mapper.cpp:78/124`
+把 `pusch_executor` 指向 `pusch_srs_execs[…]`，车道的各段与 LDPC/SRS 共用一池）。
+判据：`ul_channel_estimation` p95 回到 ~0.2–1 ms、`ul_pipeline` p95 回落、中位不变、其余门不变。
 
 **③ 其它开放项**
 1. 前端栅栏代际与被交出块的归属（§5.9.4 ⑤-1）；`wait_all()` 不覆盖交出去的块（§5.9.4 ⑤-2）；
