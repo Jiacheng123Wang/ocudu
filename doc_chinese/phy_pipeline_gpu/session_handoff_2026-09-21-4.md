@@ -21,7 +21,7 @@
 
 ## 1. 一句话状态
 
-**工作树 HEAD = `86febdc1ad`**（= 第 2 步接线 + **回滚提交**；快照提交跟在它后面）。
+**工作树 HEAD = `5f749c7220`**（= 第 2 步接线 + 回滚 + **第 3 步第 1 小步**；快照提交跟在它后面）。
 **开机第一件事就是自查戳记**：
 ```bash
 git rev-parse --short=10 HEAD && grep build_info build/hashes.h
@@ -105,16 +105,28 @@ in_flight[in_flight_begin].owner.reset();      // ← 接收缓冲引用在这�
 
 ## 4. ★★★ 下一步：**把输入的生命期搬到"被认领缓冲的完成"上**
 
+> **本会话已完成 4.1 的【第 1 步】**（引擎侧的 keep-alive，见 §5.9.8 与 `5f749c7220`）。
+> **⇒ 下一会话从【第 2 步】开始。**
+
 ### 4.1 要做什么
 
-| 步 | 内容 | 判据 |
-|---|---|---|
-| **1** | **DFT 引擎接受一个 keep-alive**：调用方把"这段输入在被认领缓冲完成前不能回收"的凭据交给引擎，引擎在被认领的那个命令缓冲上 `addCompletedHandler:`，完成时放掉它 | **机制单测**：交出 → 认领 → adopt → commit → **回调确实在完成时被调用**（且只调一次）；不认领/不完成时不调用 |
-| **2** | **低层 PHY 在交出时把接收缓冲的凭据交出去**（`finish_symbol()` 那条路径），并把"是否已经交出"告诉 `finish_oldest_symbol()`（它现在是**无条件** `owner.reset()`）| 离线：不武装时逐字节不变；武装时 `owner` 不在 `finish_symbol` 里放掉 |
-| **3** | **池深实测**：接收循环会不会被"多留一两个缓冲"挡住 | 空口腿：`Real-time failures`、`ul_rx blocks`、CRC |
-| **4** | 再把低层 PHY 的 `release_block()` 调用点接回来（本次撤掉的那处，见 `7fa657794c` 的 diff）| 空口腿对（§4.3）|
+| 步 | 内容 | 判据 | 状态 |
+|---|---|---|---|
+| **1** | **DFT 引擎接受一个 keep-alive**：`retain_for_block()` 把凭据挂到当前打开的块上；引擎在缓冲完成时释放；被顶掉/淘汰/丢弃时也释放 | **机制单测五条臂全过**（含"没人认领也要还"与"提交路径也要还"）| ✅ **已完成** |
+| **2** | **低层 PHY 在交出时把接收缓冲的凭据交出去**：`puxch_processor_impl::finish_oldest_symbol()` 现在**无条件** `owner.reset()`，要改成"**已经交出的符号由引擎还**" | 离线：不武装时逐字节不变；武装时凭据不在 `finish_symbol` 里放掉 | ⬜ **下一步** |
+| **3** | **池深实测**：接收循环会不会被"多留一两个缓冲"挡住 | 空口腿：`Real-time failures`、`ul_rx blocks`、CRC | ⬜ |
+| **4** | 再把低层 PHY 的 `release_block()` 调用点接回来（`7fa657794c` 撤掉的那处）| 空口腿对（§4.3）| ⬜ |
 
-**第 1 步是自包含的、可以立刻开工**（离线可判），第 2/3 步要腿。
+### 4.1b 第 2 步的接口已经就绪（怎么用）
+
+```cpp
+// 引擎侧（已完成，纯 C++）：
+metal::dft_metal_engine::keep_alive token{&my_release, my_context};
+engine->retain_for_block(token);     // 必须在 begin_block() 与 release_block()/commit_open() 之间
+```
+**⇒ 第 2 步要做的**：把 `rx_buffer_handle` 包成一个 `keep_alive`（`context` 指向一个能在 Metal 线程上安全释放的
+容器——或者只置一个原子标志、由 puxch 自己的线程回收，见 4.2），在**每个符号的变换被提交进块**时挂上去，
+并在 `finish_oldest_symbol()` 里**跳过**已经交出去的那些 `owner`。
 
 ### 4.2 ⚠ 第 1 步的两条设计约束（先想清楚再写）
 
@@ -177,7 +189,7 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s33-d1-input-lifeti
 | 名字 | 说明 |
 |---|---|
 | **`OCUDU_DFT_RELEASE_BLOCK=1`** | 交出路径的旋钮（**默认关**）。**当前已无调用点** ⇒ 武装它也不会交出任何东西（回滚后）|
-| **`[metal_stats] dft handover handed= taken= superseded= evicted= outstanding= (armed=)`** | **武装了就一定打这一行**（**但只在干净退出时**）。`evicted` 必须 0；`superseded` 允许非 0（地址复用，无害）|
+| **`[metal_stats] dft handover handed= taken= superseded= evicted= outstanding= keepalives=released/attached (armed=)`** | **武装了就一定打这一行**（**但只在干净退出时**）。`evicted` 必须 0；`superseded` 允许非 0（地址复用，无害）；**`keepalives` 两个数必须相等**（不相等 = 有接收缓冲没还回去）|
 | `OCUDU_GPU_STRICT=1` | strict 的离线/腿上覆盖口（回放**故意不发布模式**）|
 | **`wip/neutral_vs_baseline.sh`** | **信息网**：逐字节对比归档基线（235 dump，走真的 Metal DFT 路）|
 | `wip/value_net.py` / `wip/run_leg.sh` / `wip/leg_report.sh` | 门 / 跑腿 / 单腿判读 |
@@ -229,5 +241,5 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s33-d1-input-lifeti
 
 **腿判了：D1 第 2 步的接线是错的——不是慢，是静默错数据（`sinr=37.6 dB` 却 942/46 的 CRC），
 因为被交出去的变换会晚于"接收缓冲被回收"才执行，而那次宿主等待正是回收的依据；已回滚。**
-**下一步：把输入的生命期搬到"被认领缓冲的完成"上（§4.1 第 1 步离线可判、可立刻开工），
-它是"一次提交"和"拿掉 507 µs 宿主等待"共同的前提。**
+**第 3 步的第 1 小步（引擎侧 keep-alive）已完成并离线验过；下一步是第 2 小步：
+把接收缓冲的凭据真的交出去（§4.1b），并把低层 PHY 的交出点接回来。**
