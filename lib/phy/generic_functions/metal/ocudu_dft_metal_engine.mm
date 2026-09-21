@@ -62,6 +62,14 @@ struct dft_stats_t {
   /// describe. Counted because a silent copy here is exactly how "the transform reads the radio
   /// buffer" stops being true without any counter saying so.
   std::atomic<uint64_t> wrap_copies{0};
+  /// Blocks HANDED OVER instead of committed (see release_block()). Zero on every run that does not arm
+  /// OCUDU_DFT_RELEASE_BLOCK, which is what makes "the factory path never takes this route" a counter and
+  /// not a reading of the code.
+  std::atomic<uint64_t> released{0};
+  /// wait_slot() calls that named a slot whose transform went out with a released block. A correctly
+  /// wired release run reads 0 here: the host wait it removes is the point of the change, so a non-zero
+  /// value is a wiring defect (the wait was skipped, and the caller's data may not be there yet).
+  std::atomic<uint64_t> released_waits{0};
 };
 
 static dft_stats_t& dft_stats()
@@ -91,6 +99,19 @@ static void dft_stats_wait()
   s.waits.fetch_add(1, std::memory_order_relaxed);
 }
 
+/// Counts one block handed over instead of committed (see release_block()).
+static void dft_stats_release()
+{
+  dft_stats().released.fetch_add(1, std::memory_order_relaxed);
+}
+
+/// Counts one wait that named a slot whose transform went out with a released block: the wait was NOT
+/// honoured, and the caller has to be told (see release_block()).
+static void dft_stats_released_wait()
+{
+  dft_stats().released_waits.fetch_add(1, std::memory_order_relaxed);
+}
+
 /// Counts one transform whose input came straight from the radio's int16 buffer (the zero-copy
 /// path). Wrapped like the commit/wait counters so the call site never names the struct: the
 /// accessor only exists when the probe is compiled in.
@@ -114,13 +135,17 @@ static void dft_stats_report()
                // every transform (see ofdm_demodulator_impl::finish_symbol()), so that difference grows
                // without bound and would read like a backlog that is not there.
                "[metal_stats] dft commits=%llu transforms=%llu waits=%llu slots_in_flight=%llu radio_inputs=%llu "
-               "wrap_copies=%llu\n",
+               "wrap_copies=%llu released=%llu released_waits=%llu\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.transforms.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.radio_inputs.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.wrap_copies.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.wrap_copies.load(std::memory_order_relaxed)),
+               // released / released_waits: the release path of D1 step 1. Both are 0 unless the run armed
+               // OCUDU_DFT_RELEASE_BLOCK, and released_waits must stay 0 even then (see the struct).
+               static_cast<unsigned long long>(s.released.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.released_waits.load(std::memory_order_relaxed)));
 }
 /// \brief Registers the transform input requirement: the transforms of this run read the radio's
 /// int16 samples instead of a host-staged copy (S-7f-6f).
@@ -166,6 +191,8 @@ static void dft_stats_commit(uint64_t /*nof_transforms*/ = 1) {}
 static void dft_stats_wait() {}
 static void dft_stats_wrap_copy() {}
 static void dft_stats_radio_input() {}
+static void dft_stats_release() {}
+static void dft_stats_released_wait() {}
 #endif // OCUDU_METAL_STATS
 
 // ---- Process-wide Metal resources: one device, one queue, one pipeline for all sizes ----
@@ -233,6 +260,20 @@ struct dft_engine_impl {
   id<MTLComputeCommandEncoder> open_enc = nil;
   uint64_t                     open_transforms = 0;
   ///@}
+
+  /// \name D1 step 1: the block handed over instead of committed (see release_block()).
+  ///
+  /// The released buffer is held STRONG until this engine releases the next block: the handle the caller
+  /// gets is a +0 reference (the cast is a __bridge one), so without this the block would be deallocated
+  /// between the release and the adoption that is supposed to take it over.
+  ///@{
+  id<MTLCommandBuffer> released_cb = nil;
+  /// Slots whose transform went out with a released block. \c slot_pending stays SET (the host still must
+  /// not read those outputs), which is what lets wait_slot() recognise the request and refuse it loudly
+  /// rather than return as a satisfied wait.
+  bool slot_released[16] = {};
+  ///@}
+
   /// Command buffer of the newest submission per transform slot (ring pipelining).
   id<MTLCommandBuffer> slot_cb[max_batch_slots <= 16 ? 16 : max_batch_slots] = {};
   bool                 slot_pending[16]                                  = {};
@@ -276,6 +317,31 @@ static bool block_batching_requested()
 static bool block_accumulating(const dft_engine_impl* e)
 {
   return (e != nullptr) && (e->open_cb != nil);
+}
+
+/// \brief Records that \p cb carries the transform of \p slot (the per-slot ring bookkeeping).
+///
+/// One place because the release path adds a third piece of state to the pair: a slot whose transform went
+/// out with a released block has to be recognised by wait_slot() (see release_block()), and a NEW
+/// submission into that slot is precisely what ends that state - the slot no longer names the buffer the
+/// engine handed over.
+static void note_slot_submission(dft_engine_impl* e, unsigned slot, id<MTLCommandBuffer> cb)
+{
+  e->slot_cb[slot]       = cb;
+  e->slot_pending[slot]  = true;
+  e->slot_released[slot] = false;
+}
+
+/// \brief Whether this run asks the open block to be HANDED OVER instead of committed (D1 step 1).
+///
+/// DEFAULT OFF: \c OCUDU_DFT_RELEASE_BLOCK=1 is the only thing that arms it, so the factory chain behaves
+/// exactly as before while nobody asks for the release (see release_block()). Read on every call rather
+/// than cached, so the unit test can arm and disarm it around the arms it compares - which is also what
+/// keeps the caller from having to know that the decision is taken at begin_block() time.
+static bool block_release_requested()
+{
+  const char* env = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
+  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
 }
 
 /// \brief Closes an open block's encoder without committing it, for the paths that drop the engine.
@@ -422,6 +488,32 @@ id<MTLBuffer> wrap_buffer(dft_engine_impl* engine, const void* ptr, size_t lengt
   return buf;
 }
 
+/// \brief Maps the grid a transform writes: the process-wide cache on the release path, this engine's own
+///        private one otherwise.
+///
+/// Why the release path may not use the private cache: two \c MTLBuffer objects over one address are
+/// UNORDERED to Metal - a buffer-scope barrier does not relate them and neither does the encoder boundary
+/// (measured 200/200: cases C..E and case G of wip/metal_alias_order.mm). The stages that adopt a released
+/// block read the grid through \c shared_queue::wrap_no_copy(), which is keyed by address and hands out
+/// the mapping that covers the request, so mapping the grid there too is what makes the adopter bind the
+/// SAME object - and one object with an encoder boundary between the producer and the consumers IS ordered
+/// (case F, 200/200). With the private cache the DFT would write an object nobody reads: the P0 signature,
+/// silent wrong data.
+///
+/// \param[out] offset Byte offset of \p grid_base inside the returned mapping: the shared cache hands out
+///             the mapping of the whole allocation, which may start below the grid.
+/// \return The mapping, or nil when it could not be made - the release path REFUSES the dispatch then
+///         rather than staging a copy, because a copied grid is a grid the GPU writes and the host reads
+///         through a different memory (see wrap_buffer's note on the same trap).
+static id<MTLBuffer> wrap_grid(dft_engine_impl* engine, const void* grid_base, size_t grid_bytes, size_t* offset)
+{
+  *offset = 0;
+  if (!block_release_requested()) {
+    return wrap_buffer(engine, grid_base, grid_bytes);
+  }
+  return metal::shared_queue::wrap_no_copy(metal::shared_queue::device(), grid_base, grid_bytes, offset);
+}
+
 } // namespace
 
 dft_metal_engine::~dft_metal_engine()
@@ -429,6 +521,10 @@ dft_metal_engine::~dft_metal_engine()
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
   if (engine != nullptr) {
     discard_open_block(engine);
+    // A block that was handed over is NOT ours to close: the adopter commits it, and its dispatches are
+    // already encoded (release_block() ended the encoder). Dropping the strong reference here is what the
+    // engine owes - the ladder that adopted it holds it for as long as it needs it.
+    engine->released_cb = nil;
     engine->buffer_cache.clear();
     std::free(engine->warmup_mem);
     std::free(engine->window_mem);
@@ -503,6 +599,17 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
       /// is what is expensive. If the two arms read the same, the fence is free and D1 becomes purely about the
       /// 1.83 CPU commits per hop it removes.
       auto dft_queue = []() {
+        // D1 step 1: a block that may be RELEASED belongs to whoever commits it, and that is the lane, on
+        // the back-end queue - a command buffer is bound to the queue that created it, so a block created
+        // on the front-end queue could not be adopted into the lane's chain. Arming the release therefore
+        // selects the queue as well; the two are one decision, not two knobs to keep in step.
+        if (block_release_requested()) {
+          std::fprintf(stderr,
+                       "[dft_release] D1 step 1: the DFT's open block is handed over uncommitted "
+                       "(OCUDU_DFT_RELEASE_BLOCK=1), so it is created on the BACK-END queue - the queue the "
+                       "lane commits on\n");
+          return metal::shared_queue::backend_queue();
+        }
         const char* env = std::getenv("OCUDU_DFT_BACKEND_QUEUE");
         if ((env != nullptr) && (std::strtoul(env, nullptr, 10) != 0)) {
           std::fprintf(stderr,
@@ -655,8 +762,7 @@ bool dft_metal_engine::submit_slot(const void* in, void* out, unsigned slot)
     // (wait_all() would also wait for the newer submissions and flatten the pipeline).
     dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
     // While a block accumulates, the transform is in the OPEN buffer and nothing was committed yet.
-    engine->slot_cb[slot]      = block_accumulating(engine) ? engine->open_cb : engine->last_committed_cb;
-    engine->slot_pending[slot] = true;
+    note_slot_submission(engine, slot, block_accumulating(engine) ? engine->open_cb : engine->last_committed_cb);
     // The pipeline depth the diagnostic reports: the slots that hold an un-waited transform. It is what
     // "in flight" means for this engine, and it stays bounded by max_batch_slots however few waits the
     // caller pays (see dft_stats_note_depth()).
@@ -721,11 +827,82 @@ bool dft_metal_engine::has_open() const
   return (engine != nullptr) && (engine->open_cb != nil);
 }
 
+bool dft_metal_engine::block_release_enabled()
+{
+  return block_release_requested();
+}
+
+void* dft_metal_engine::release_block()
+{
+  dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
+  // DEFAULT OFF: without the knob this answers nullptr and NOTHING else happens - not even the encoder
+  // is touched, so the factory path cannot be disturbed by the release path existing (D1 step 1's
+  // criterion). The check comes first for exactly that reason.
+  if ((engine == nullptr) || !block_release_requested() || (engine->open_cb == nil)) {
+    return nullptr;
+  }
+  id<MTLCommandBuffer> cb = engine->open_cb;
+  const uint64_t       nof = engine->open_transforms;
+  // Close the encoder before handing over: the adopter opens its own (shared_burst::adopt() takes the
+  // buffer only), and the boundary between the two encoders is what orders the adopter's first dispatch
+  // after this block's dispatches for the SAME buffer object (see wrap_grid()).
+  if (engine->open_enc != nil) {
+    [engine->open_enc endEncoding];
+  }
+  engine->open_enc        = nil;
+  engine->open_cb         = nil;
+  engine->open_transforms = 0;
+  if (nof == 0) {
+    // Nothing was encoded: there is no work to hand over and the buffer is dropped, exactly as
+    // commit_open() drops an empty block.
+    return nullptr;
+  }
+  // The slots keep slot_pending set - the host still must not read their output - and are marked as
+  // released, so a later wait_slot() is recognised and refused instead of quietly satisfied. The command
+  // buffer itself is held STRONG: the handle below is a +0 reference (see the impl struct).
+  for (unsigned i = 0; i != max_batch_slots; ++i) {
+    if (engine->slot_cb[i] == cb) {
+      engine->slot_released[i] = true;
+    }
+  }
+  engine->released_cb = cb;
+  dft_stats_release();
+  // NOT commit_front_end(): no commit, no front-end fence signal, no front-end chain publication, no
+  // dft commit counter. The caller submits this buffer, and everything a commit owes moves with it
+  // (see the header).
+  return (__bridge void*) cb;
+}
+
+/// Reports a wait that cannot be honoured because the slot's transform was handed over. Once, loudly:
+/// the caller that released the block promised the host would not read its output, so this is a wiring
+/// defect and the data the caller is about to read may not be there yet.
+static void report_released_wait(unsigned slot)
+{
+  dft_stats_released_wait();
+  static bool reported = false;
+  if (!reported) {
+    reported = true;
+    ocudulog::fetch_basic_logger("PHY").error(
+        "Metal DFT: wait_slot({}) cannot be honoured - this slot's transform went out with a block that was "
+        "handed over uncommitted (release_block()), so this engine no longer owns its submission. The caller "
+        "that released the block must guarantee nothing on the host reads the slot's output before the "
+        "adopter commits it; the wait is skipped, not satisfied",
+        slot);
+  }
+}
+
 bool dft_metal_engine::wait_slot(unsigned slot)
 {
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
   if ((engine == nullptr) || (slot >= max_batch_slots) || !engine->slot_pending[slot]) {
     return true;
+  }
+  if (engine->slot_released[slot]) {
+    // Handed over (release_block()): there is no command buffer of this engine's to wait for - the
+    // adopter commits it. Refuse instead of returning as a satisfied wait, which is what would let the
+    // caller read a grid the GPU has not written yet without anything saying so.
+    report_released_wait(slot);
+    return false;
   }
   // The transform of this slot may still be sitting in the OPEN command buffer of its block: commit it
   // first, or the wait below would target a buffer that has not been committed at all.
@@ -823,7 +1000,11 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   const size_t  bytes  = static_cast<size_t>(engine->n) * max_batch_slots * 2 * sizeof(float);
   id<MTLBuffer> b_in   = wrap_buffer(engine, in, bytes);
   id<MTLBuffer> b_out  = wrap_buffer(engine, out, bytes);
-  id<MTLBuffer> b_grid = wrap_buffer(engine, write.grid_base, write.grid_bytes);
+  // The grid goes through the cache its CONSUMERS use whenever the block may be handed over (see
+  // wrap_grid): the offset is where the grid starts inside that mapping, and it travels to the kernel as
+  // the buffer binding's offset - the kernel's own dst_offset stays relative to the grid.
+  size_t        grid_off = 0;
+  id<MTLBuffer> b_grid   = wrap_grid(engine, write.grid_base, write.grid_bytes, &grid_off);
   if (b_in == nil || b_out == nil || b_grid == nil) {
     return false;
   }
@@ -887,7 +1068,7 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
   // The grid and its per-element table are only read when the write is active; Metal still requires every buffer the
   // kernel names to be bound, so the transform output and the twiddle table stand in when there is none.
-  [enc setBuffer:b_grid offset:0 atIndex:8];
+  [enc setBuffer:b_grid offset:grid_off atIndex:8];
   [enc setBuffer:(engine->buf_window != nil ? engine->buf_window : engine->buf_tw) offset:0 atIndex:9];
   [enc setBuffer:b_in16 offset:0 atIndex:11];
   [enc setBytes:&input length:sizeof(input) atIndex:12];
@@ -917,14 +1098,12 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
     // the commit happens when the block ends (see commit_open()). The slot still records WHICH command
     // buffer carries its transform, so a wait for it commits the block first.
     ++engine->open_transforms;
-    engine->slot_cb[slot]      = cmd_buf;
-    engine->slot_pending[slot] = true;
+    note_slot_submission(engine, slot, cmd_buf);
     return true;
   }
   [enc endEncoding];
   commit_front_end(engine, cmd_buf, 1);
-  engine->slot_cb[slot]      = cmd_buf;
-  engine->slot_pending[slot] = true;
+  note_slot_submission(engine, slot, cmd_buf);
   return true;
 }
 

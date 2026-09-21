@@ -88,6 +88,45 @@ public:
   /// Whether a block of transforms is currently being accumulated.
   bool has_open() const;
 
+  /// \brief Whether this run asks the open block to be handed over instead of committed (D1 step 1).
+  ///
+  /// \c OCUDU_DFT_RELEASE_BLOCK=1, **default off**. While it is off, nothing in this engine ever releases
+  /// a block: begin_block()/commit_open() behave exactly as they did, and the factory chain cannot reach
+  /// the release path by accident. Arming it also selects the BACK-END queue for the block (a command
+  /// buffer belongs to the queue that created it, and the lane commits on that one - see init()).
+  static bool block_release_enabled();
+
+  /// \brief Hands the open block's command buffer over, UNCOMMITTED, to the caller (D1 step 1).
+  ///
+  /// The counterpart of commit_open(): the block is closed exactly the same way - the encoder is ended, so
+  /// the dispatches encoded so far are complete and the adopter opens its own encoder - but the buffer is
+  /// not committed. The caller becomes its submitter, which in the intended use is the lane:
+  /// \c shared_burst::adopt() takes it and the stages that follow (the extraction, the weights, the
+  /// equalization, the demapping) are encoded into it, so the whole hop is ONE submission.
+  ///
+  /// \note What the engine stops doing, and what the caller therefore owes:
+  ///  * the buffer is not committed, not counted in \c [metal_stats] \c dft \c commits, and not published
+  ///    on the front-end chain - so \c wait_all() does not cover it any more;
+  ///  * no front-end fence is signalled on it: whoever commits it owns its fences (the release path is
+  ///    one command buffer per hop, so the order the fence exists to provide is inside that buffer);
+  ///  * \c wait_slot() cannot be honoured for the slots it carries, and says so instead of pretending
+  ///    (the caller promised that nothing on the host reads those transforms' output - that promise is
+  ///    the whole point of the release).
+  ///
+  /// \note The grid of the released block is mapped through the PROCESS-WIDE cache
+  ///       (shared_queue::wrap_no_copy), not through this engine's private one, so the stages that read
+  ///       it through the same cache bind the SAME \c MTLBuffer object. That is not tidiness: two objects
+  ///       over one address are unordered to Metal (no barrier and no encoder boundary fixes it; see
+  ///       5.9.5 and wip/metal_alias_order.mm case G), so two objects here would be a silent wrong-data
+  ///       path. A grid that cannot be mapped that way is REFUSED by submit_slot_grid_write() rather
+  ///       than copied.
+  ///
+  /// \return The command buffer as an opaque handle (an \c id&lt;MTLCommandBuffer&gt;, usable from
+  ///         Objective-C++ only), or nullptr when the release path is not armed or no block is open. The
+  ///         engine holds the most recently released buffer alive until it releases the next one, which is
+  ///         the handle's lifetime.
+  void* release_block();
+
   /// \brief Tells the engine which receiving slot the transforms it is about to submit belong to.
   ///
   /// Instrumentation: the GPU lane probe accounts the transforms as one group per slot (see

@@ -2758,6 +2758,97 @@ if (!wait_per_slot || last_symbol_of_slot) {
 **⑦ 代价已实测为零**（§5.9.3）：`dft residency` 420.2 → 419.6 µs（同队列），**重叠不丢**。
 **⇒ D1 不再有未排除的风险项。**
 
+#### 5.9.5 ★★★ D1 第 1 步已完成（S18）：**`release_block()` 已就位、默认关闭；而"交出缓冲"真正的门槛不是栅栏——是【一段内存只能有一个 `MTLBuffer` 对象】**
+
+**① 先补上 §5.9.4 ⑤ 漏掉的那条硬约束（本步最重要的产出）**
+
+§5.9.4 ⑤ 列了两条"必须先处理"的约束（`adopt()` 不编码缓冲级栅栏、`wait_all()` 只 drain 前端链）。
+**开工时发现还有第三条，而且它比那两条更硬**：
+
+> **别名对（同一段内存上的两个 `MTLBuffer` 对象）之间没有任何顺序，栅栏也救不了。**
+
+这条**已经在坑 35 里记过**（S13-P0 的融合 NaN：边组的 corr 前缀写在一个对象上、K1/权重读在另一个对象上，
+**同一个命令缓冲、中间还有 barrier**，K1 读到的槽还没被写）。`wip/metal_alias_order.mm` 的 case G
+（两个 encoder、别名对，200/200）与 case F（两个 encoder、**同一对象**，200/200）已经把两个方向都钉死了。
+
+**⇒ 逐引擎核对"谁和谁绑同一个对象"，发现 DFT 是唯一的例外**：
+
+| 引擎 | 网格用哪个 wrap | 结论 |
+|---|---|---|
+| 估计器（`mmse_engine_impl::wrap()`）| `shared_queue::wrap_no_copy()`（**进程级**、按地址、带 containment）| ✅ |
+| 均衡器 / 解映射器 | 同上 | ✅ |
+| **DFT（`dft_engine_impl::wrap_buffer()`）** | **引擎私有 `buffer_cache`**（按指针、无 containment、**不共享**）| ❌ **它写的是没人读的那个对象** |
+
+**今天不出问题，只是因为 DFT 与消费者之间有"命令缓冲级"的同步**（前端栅栏 / 宿主 `wait_slot()`）。
+**一旦 D1 把它们放进同一条缓冲，这层同步就消失了** ⇒ **P0 的签名：静默错数据**（不是变慢，是错）。
+
+**⇒ 第 1 步因此不只是"加一个 detach 接口"**：释放路径必须**同时**换掉网格的 wrap 来源，
+否则交出去的缓冲里，消费者读不到 DFT 写的东西。
+
+**② 做出来的东西**
+
+| 项 | 内容 |
+|---|---|
+| **`dft_metal_engine::release_block()`** | 新增：结束 encoder、**不提交**、把命令缓冲交给调用方（不透明 `void*`，即 `id<MTLCommandBuffer>`）；**不提交、不计数、不发前端栅栏、不进前端链**（提交它的那一方承担这些）|
+| **`OCUDU_DFT_RELEASE_BLOCK`** | 新增旋钮，**默认关**。关闭时 `release_block()` 返回 `nullptr` 且**不碰任何状态**（出厂路径零影响）|
+| **队列随旋钮一起选** | 武装时块建在**后端队列**（缓冲属于创建它的队列，而车道在后端队列提交）——**一个决定，不是两个要人肉对齐的旋钮** |
+| **网格走进程级 cache** | 武装时 `submit_slot_grid_write()` 的网格用 `shared_queue::wrap_no_copy()`（**偏移跟着绑定的 `setBuffer:offset:` 走**）；**映射失败就拒绝这次 dispatch，绝不退化成副本**（副本＝GPU 写、宿主读的两块内存）|
+| **`wait_slot()` 不再假装** | 交出去的槽位：登记 `slot_released[]`，`wait_slot()` **报错并返回 false**（"这个等待给不了"），而不是返回一个被满足的等待 |
+| **仪表** | `[metal_stats] dft ... released=N released_waits=M`：**M 必须是 0**（正确接线时宿主根本不再等），N=0 则说明这条路径没被走到 |
+| **机制单测** | **新增 ctest `dft_release_adopt_metal_test`**（ObjC++，因为机制本身就是 Metal 命令缓冲的交接）|
+
+**③ 机制单测：一个自由变量，两个方向都测（`dft_release_adopt_metal_test`）**
+
+一次循环 20 次，**唯一变量是"读者为网格绑了哪个对象"**：
+
+| 臂 | 读者绑的对象 | 结果 | 说明 |
+|---|---|---|---|
+| **shared** | 消费者的 mapping（`wrap_no_copy`，**DFT 就是写在这个对象上的**）| **20/20 读到块写的值** | ✅ 这就是 D1 第 2 步要的机制 |
+| **private** | 测试自己 `newBufferWithBytesNoCopy` 的**另一个**对象（引擎私有 cache 的形状）| **20/20 读到的还是写前内容**（0/20 侥幸读到）| ✅ **陷阱当场复现** |
+| **arm 0（默认）** | —— | 旋钮没设 ⇒ `release_block()` 拒绝，`commit_open()`/`wait_slot()` 照旧、300 个元素全写对 | ✅ 第 1 步自己的判据 |
+
+**为什么 private 臂不能省**：Metal 的访存顺序是**按对象**的，所以不带这一臂，
+"读者读到了数据"完全可能只是驱动碰巧把两个无关对象串行化了——**空洞断言比没有断言更糟**（坑 4/§5.1 教训 3）。
+
+**其它被钉住的点**（都在同一个二进制里）：
+* 释放后 `cb.status == MTLCommandBufferStatusNotEnqueued` ⇒ **引擎确实没提交它**；
+* 释放后 `engine.has_open() == false`；
+* `wait_slot()` 对交出去的槽位**返回 false**；
+* 网格**绑在非零偏移**上（进程级 cache 交出的是整个 allocation 的 mapping）⇒ `setBuffer:offset:` 那条
+  静默错址的路（§8 开放项 8 记过同族缺陷）被真的走了一遍。
+
+**④ 门（全部在"旋钮关"的出厂路径上重跑，2026-09-21）**
+
+| 门 | 结果 |
+|---|---|
+| `python3 wip/value_net.py` | **47 捕获 0 问题**（与 S17 同）|
+| `python3 wip/value_net.py --self-test` | **8/8** |
+| `ctest --test-dir build -R metal` | **10/10**（9 + 本步新增的那条）|
+| **`wip/neutral_vs_baseline.sh`**（信息网，不是门）| **differing-bytes=131，与 S15/S17 同数** ⇒ 235 个 dump 里没有一个字节因为本步而动 |
+| `ctest -R "ul_pipeline_probe\|puxch\|lower_phy"` | 通过（**⚠ 见 ⑥**）|
+
+**★ 为什么这一条比 `value_net` 更强**：`neutral_vs_baseline.sh` 走的是 **`ul_chain_replay` 的 `gpu`/deferred 跳**
+（即**真的会走 Metal DFT + 网格写**的那条路），逐字节对比归档基线；`value_net` 只看数值。
+**两者都同数 ⇒ "旋钮关 ⇒ 出厂路径零影响"不是推理，是读数。**
+
+**⑤ ⇒ 第 2 步开工前必须知道的三件事（本步留下的功课）**
+
+| # | 事 | 为什么 |
+|---|---|---|
+| 1 | **解绑的缓冲上没有前端栅栏信号** | 前端代际是"每次前端提交 signal 下一代"。块被交出去后，谁提交它谁负责；**代际是否还需要推进、`front_end_wait()` 会不会等一个没人 signal 的代际（P0 的签名），是第 2 步要正面回答的**（§5.9.4 ⑤-1 仍然有效）|
+| 2 | **`wait_all()` 不覆盖它** | 它 drain 的是前端链，而交出去的块在后端队列由车道提交（§5.9.4 ⑤-2）|
+| 3 | **C++ 侧还差一座桥** | `release_block()` 返回的是 ObjC 类型（不透明 `void*`），而 `dft_processor_grid_write` 是纯 C++ 接口。第 2 步要把"取出句柄 → `shared_burst::adopt()`"放进一个 ObjC++ 的接缝里|
+
+**⑥ 一条与本步无关的观察（诚实记录）**：`ctest -R "ul_pipeline_probe|puxch|lower_phy"` 里的
+`ul_pipeline_probe_test.one_report_shape_per_pipeline_mode` 在本步的门里**失败过 2 次**
+（头 4 次运行里 2 次），此后**连续 42 次通过**（含 25 次专门的重跑）。判它不是本步的回归，依据有两条：
+1. **该二进制不链接任何 Metal 库**（`ul_pipeline_probe_test` 的 `link.txt` 里 "metal" 出现 **0** 次，
+   只有 `ocudu_support`/`ocudu_support_math`/`ocudu_macos_compat`/`ocuduvec`/`ocudulog`），
+   而本步只改了 `ocudu_dft_metal`（Metal）与一个新的测试二进制 ⇒ **改动物理上到不了它**；
+2. 它的断言本身是**时序脆的**：`sleep_for(7ms)` 之后要求 `mean_us([ul_rx_wait]) ≈ 7000 ± 1000`。
+
+**⇒ 记为"已知的偶发"，不是回归。**（下次有人碰到时，把它改成对**记录值**的断言而不是对 `sleep` 的断言。）
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。
