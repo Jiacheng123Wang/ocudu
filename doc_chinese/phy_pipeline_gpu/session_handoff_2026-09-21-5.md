@@ -90,10 +90,16 @@ git push origin gpu_phy_d1_handover    # 若这条线要推送
 **② ★ 未关：尾部（`s42` 武装臂）**——中位两边一样（1938 vs 1987 µs），尾部全在**解码之前**
 （`[ul_gpu_pipeline]` IQ→LLR p95 **17.8 ms** vs 对照 2.9），且 `[ul_ldpc_decode]`（**按槽精确配对**）
 有一个 **19.8 ms** 离群（对照 max 145 µs）；**拒收 = 0，所以不是它**。设计文档 §5.9.31。
-**下一步（诊断优先，别猜）**：开探针的**相位分段**（`time_frequency` / `channel_estimation` / `equalization_demod`）
-跑一对腿，**只取稳态饱和窗口**，把 18 ms 落到具体一段：
-落在 `time_frequency` ⇒ 前端/网格产出侧；落在 CE 或 EQ-demap ⇒ 车道（共享 PUSCH 池）排队侧。
-`[ul_ldpc_decode]` 的离群另记（起点就在解码调用之前，所以它在解码器内部）。
+
+**★ 下一步（`s43`）：相位分段诊断——开关已存在，无需改代码**（§5.9.32）：
+
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s43-d1-phases-base OCUDU_UL_PHASE_SEGMENTS=1
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s43-d1-phases OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_DFT_RELEASE_BLOCK=1
+```
+**两条臂都要带开关**（`gpu` 模式下分段默认不记录）。看 `[ul_time_frequency]` / `[ul_channel_estimation]` /
+`[ul_equalization_demod]` 谁的 p95/p99 涨了：前端/交接侧、估计器段、还是均衡解调段（含共享池排队）。
+判读表在 §5.9.32 ③；**在车道里这三段含设备执行与排队，不是 CPU 时间。**
 
 **③ 其它开放项**
 1. 前端栅栏代际与被交出块的归属（§5.9.4 ⑤-1）；`wait_all()` 不覆盖交出去的块（§5.9.4 ⑤-2）；

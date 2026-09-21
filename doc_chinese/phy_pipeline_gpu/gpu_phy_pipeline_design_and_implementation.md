@@ -3940,6 +3940,45 @@ unsigned ul_pipeline_depth = 3 * nof_slots_per_frame;   // 原来是 nof_slots_p
 
 **⇒ 在它判清之前，不建议 tag**（用户裁定 ③）；但**拒收这件已经收口**，方案 A（FSM 拆分）也因此可以按"尾部诊断结果"再决定做不做。
 
+#### 5.9.32 `s43` 的腿法：**相位分段诊断**（开关已存在，无需改代码）
+
+**① 开关**：`OCUDU_UL_PHASE_SEGMENTS=1`（`phase_segments_forced()`）。
+`records_phase_segments()` 在 `gpu` 模式下默认**为假**（分段只在非融合模式下默认记录），
+所以**两条臂都要带这个开关**，否则对照臂没有分段可比。
+带上之后，报告里会**同时**打印总量 `[ul_gpu_pipeline]` 与三段：
+`[ul_time_frequency]` / `[ul_channel_estimation]` / `[ul_equalization_demod]`。
+
+**② 这三段在车道里量的是什么**（探针自己的注解，读之前必须知道）：
+
+| 段 | 起点 → 终点 | 在 `gpu` 车道上它包含什么 |
+|---|---|---|
+| `ul_time_frequency` | 该槽 IQ 样本收完 → **前端把该槽的块交出去**（`puxch` 的 `record_t2f_end`）| 前端自己的提交/交接（**注意：交出 ≠ 网格写完**，写发生在车道的提交里）|
+| `ul_channel_estimation` | 上一段的终点 → **估计器这一段做完**（`pusch_processor_impl` 的 `record_ce_end`）| 估计器这一段（含"等自己认领的那块"）|
+| `ul_equalization_demod` | 上一段的终点 → **第一次 LDPC 解码调用之前** | 均衡/解调那一段（含车道的排队与交给 LDPC 的那一步）|
+| `ul_ldpc_decode` | 解码调用之前 → CRC-OK（**按槽精确配对**）| 解码器内部 |
+
+**⇒ 读法**：三段的**和**应当≈ `[ul_gpu_pipeline]`；哪一段的 p95/p99 涨了，尾巴就在哪一侧。
+同时并列读 `[ul_gpu_lane] residency / busy / gap`（设备实际在执行多少）与 `[ul_rx_wait]`（收包侧）。
+**在车道里这三段含有设备执行与排队**，不是 CPU 时间——探针的注解原文就是这么说的。
+
+**③ 判据（`s43`）**
+
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s43-d1-phases-base OCUDU_UL_PHASE_SEGMENTS=1
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s43-d1-phases OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_DFT_RELEASE_BLOCK=1
+```
+
+| 观察 | 结论 |
+|---|---|
+| 尾巴主要在 **`ul_time_frequency`** | 前端/交接侧（含"交出后由谁提交"）⇒ 对应方案 A 或车道提交次序 |
+| 尾巴主要在 **`ul_channel_estimation`** | 估计器这一段（含等待自己那块被认领/提交）⇒ 与 `fallback/late` 的提交时机有关 |
+| 尾巴主要在 **`ul_equalization_demod`** | 均衡/解调段（含共享 PUSCH 池的排队）⇒ 池子/优先级问题 |
+| 三段都平、只有 `ul_ldpc_decode` 离群 | 与 D1 无关：解码器/调度抖动，单独记账 |
+| 三段的和 ≪ `[ul_gpu_pipeline]` | 说明差额落在**未被分段覆盖**的地方（采样与配对），先查 `ul_rx_wait` 与 `gpu_lane gap` |
+
+**④ 不变的门**：开工告警 0、契约 8/8、`UL processor is busy` 仍 **0**、提交/时隙 ~1.02、
+`grid_devwaited>0`、`grid_wait_unencoded==0`、`timeouts==0`、CRC 分层与对照同形。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。
