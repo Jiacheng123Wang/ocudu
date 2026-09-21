@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -297,6 +298,9 @@ namespace {
 struct handed_entry {
   const void*          grid_base = nullptr;
   id<MTLCommandBuffer> cb        = nil;
+  /// Runs if this entry is dropped instead of claimed (see deposit_released()). Empty when the depositor has
+  /// nothing to let go.
+  std::function<void()> on_drop;
 };
 
 /// Process-wide, because the two ends are two threads: the lower PHY (the radio thread) releases the block
@@ -322,33 +326,54 @@ constexpr size_t max_handed = 8;
 
 } // namespace
 
-void shared_burst::deposit_released(const void* grid_base, id<MTLCommandBuffer> cb)
+void shared_burst::deposit_released(const void* grid_base, id<MTLCommandBuffer> cb, std::function<void()> on_drop)
 {
   if ((grid_base == nullptr) || (cb == nil)) {
     return;
   }
-  handed_state&               h = handed();
-  std::lock_guard<std::mutex> lock(h.mutex);
+  // The drop hooks run OUTSIDE the lock: they belong to the depositors and may do arbitrary work (releasing
+  // a receive buffer, for one), so calling them under the registry's mutex would invite a deadlock.
+  std::vector<std::function<void()>> dropped;
+  {
+    handed_state&               h = handed();
+    std::lock_guard<std::mutex> lock(h.mutex);
 
-  // One deposit per address: the same storage can come back through the grid pool for a LATER slot, and
-  // that slot's own deposit is the one its consumer must take. The entry it replaces belongs to a slot
-  // whose grid nobody read - the pool can only hand the address back once its holder let it go - which is
-  // why this is counted apart from an eviction (see handed_counters).
-  for (auto it = h.entries.begin(); it != h.entries.end(); ++it) {
-    if (it->grid_base == grid_base) {
-      it->cb = cb;
-      ++h.counters.handed;
+    // One deposit per address: the same storage can come back through the grid pool for a LATER slot, and
+    // that slot's own deposit is the one its consumer must take. The entry it replaces belongs to a slot
+    // whose grid nobody read - the pool can only hand the address back once its holder let it go - which is
+    // why this is counted apart from an eviction (see handed_counters).
+    bool replaced = false;
+    for (handed_entry& entry : h.entries) {
+      if (entry.grid_base == grid_base) {
+        if (entry.on_drop) {
+          dropped.push_back(std::move(entry.on_drop));
+        }
+        entry.cb      = cb;
+        entry.on_drop = std::move(on_drop);
+        replaced      = true;
+        break;
+      }
+    }
+    if (!replaced) {
+      h.entries.push_back(handed_entry{grid_base, cb, std::move(on_drop)});
+    }
+    ++h.counters.handed;
+    if (replaced) {
       ++h.counters.superseded;
-      return;
+    }
+
+    while (h.entries.size() > max_handed) {
+      // The oldest is the one whose consumer is least likely to still come. A backlog, not a recycle: the
+      // [metal_stats] line reports it separately so that the expected case cannot hide a defect.
+      if (h.entries.front().on_drop) {
+        dropped.push_back(std::move(h.entries.front().on_drop));
+      }
+      h.entries.pop_front();
+      ++h.counters.evicted;
     }
   }
-  h.entries.push_back(handed_entry{grid_base, cb});
-  ++h.counters.handed;
-  while (h.entries.size() > max_handed) {
-    // The oldest is the one whose consumer is least likely to still come. A backlog, not a recycle: the
-    // [metal_stats] line reports it separately so that the expected case cannot hide a defect.
-    h.entries.pop_front();
-    ++h.counters.evicted;
+  for (const std::function<void()>& hook : dropped) {
+    hook();
   }
 }
 

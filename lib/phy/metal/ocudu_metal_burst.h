@@ -24,6 +24,10 @@
 
 #import <Metal/Metal.h>
 
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+
 namespace ocudu {
 namespace metal {
 
@@ -102,7 +106,14 @@ public:
   ///       therefore armed only where a taker is guaranteed (see ofdm_demodulator_impl::finish_symbol():
   ///       the release needs the grid to be declared device-consumed) - a dropped deposit whose grid IS
   ///       read would be the P0 signature, not a slow hop. Both counts are reported (see handed_stats()).
-  static void deposit_released(const void* grid_base, id<MTLCommandBuffer> cb);
+  ///
+  /// \param[in] on_drop Runs if this deposit is DROPPED instead of claimed - replaced by a newer deposit for
+  ///            the same address, or evicted over the bound. It exists for one job: a handed-over block that
+  ///            nobody claims is never committed, so whatever the block was keeping alive for its dispatches
+  ///            (the receiving chain's INPUT, see dft_metal_engine::retain_for_block()) has to be let go
+  ///            here rather than at a completion that will never come. Called without the registry's lock
+  ///            held, on the thread that dropped it.
+  static void deposit_released(const void* grid_base, id<MTLCommandBuffer> cb, std::function<void()> on_drop = {});
 
   /// \brief Takes the command buffer deposited for \p grid_base, removing the deposit (nil when none).
   ///

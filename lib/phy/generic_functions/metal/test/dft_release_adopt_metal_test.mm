@@ -40,6 +40,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -113,6 +114,30 @@ struct outcome {
   unsigned mismatches    = 0; ///< reader words that differ from the grid's own content
   unsigned reader_poison = 0; ///< reader words that are still the pre-write pattern
   unsigned host_poison   = 0; ///< grid elements the DFT did NOT write (must be 0, or nothing is tested)
+};
+
+/// The keep-alive a hop attaches to a block so the input it reads outlives the dispatches (D1 step 3).
+///
+/// It exists because the release would otherwise be a use-after-free with no failure of its own: the
+/// receiving chain recycles a symbol's samples as soon as finish_symbol() returns, and a handed-over block
+/// runs later (measured on air: crc=KO 942 / OK 46 at sinr=37.6 dB, design document 5.9.7).
+struct keep_alive_probe {
+  std::atomic<unsigned> releases{0};
+  /// Whether the release ran while the adopted command buffer was still incomplete: the one thing that would
+  /// make the token useless (it has to outlive the DISPATCHES, not just the hand-over).
+  std::atomic<bool> released_before_completion{false};
+  id<MTLCommandBuffer> watched = nil;
+
+  static void release(void* context)
+  {
+    auto* probe = static_cast<keep_alive_probe*>(context);
+    probe->releases.fetch_add(1, std::memory_order_acq_rel);
+    if ((probe->watched != nil) && (probe->watched.status != MTLCommandBufferStatusCompleted)) {
+      probe->released_before_completion.store(true, std::memory_order_relaxed);
+    }
+  }
+
+  metal::dft_metal_engine::keep_alive token() { return {&keep_alive_probe::release, this}; }
 };
 
 } // namespace
@@ -309,6 +334,15 @@ int main()
           return 1;
         }
 
+        // D1 step 3: the input's lifetime travels with the block. The receiving chain attaches the handle of
+        // the samples this block reads, and it must come back when the ADOPTED buffer completes - not
+        // earlier (the dispatches have not read it yet) and not later (the radio would starve).
+        keep_alive_probe probe;
+        if (!engine.retain_for_block(probe.token())) {
+          std::fprintf(stderr, "FAIL: retain_for_block() refused while a block was open (rep %u)\n", rep);
+          return 1;
+        }
+
         // THE HANDOVER, through the entry points the receiving chain and the lane actually use:
         // release_block() deposits the buffer under the grid it wrote, and the consumer takes it back by
         // that same address (shared_burst::take_released()). Nothing is committed by the engine here.
@@ -318,6 +352,14 @@ int main()
           return 1;
         }
         id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)handle;
+        probe.watched           = cb;
+        if (probe.releases.load() != 0) {
+          std::fprintf(stderr,
+                       "FAIL: the input token was released by the hand-over itself (rep %u) - the block has "
+                       "not run yet\n",
+                       rep);
+          return 1;
+        }
         if (metal::shared_burst::take_released(grid_base) != cb) {
           std::fprintf(stderr,
                        "FAIL: the deposit did not come back for the grid it was keyed by (rep %u) - the "
@@ -374,6 +416,25 @@ int main()
           std::fprintf(stderr, "FAIL: the adopted buffer completed with status %lu\n",
                        static_cast<unsigned long>(cb.status));
           return 1;
+        }
+        // The token came back, exactly once, and NOT before the buffer completed: that is the whole
+        // contract - the input has to outlive the dispatches, and only the dispatches.
+        {
+          const unsigned releases = probe.releases.load();
+          if (releases != 1) {
+            std::fprintf(stderr,
+                         "FAIL: the input token was released %u times for one completed block (rep %u)\n",
+                         releases,
+                         rep);
+            return 1;
+          }
+          if (probe.released_before_completion.load()) {
+            std::fprintf(stderr,
+                         "FAIL: the input token was released while the adopted buffer was still running "
+                         "(rep %u) - the transforms had not read the input yet\n",
+                         rep);
+            return 1;
+          }
         }
 
         outcome result;
@@ -464,9 +525,118 @@ int main()
       return 1;
     }
 
+    // ---- Arm 3: a hand-over NOBODY CLAIMS must still give the input back ---------------------------
+    // This is not a corner case: the air leg had ~2 blocks per hop, so most blocks have no consumer at all.
+    // Such a block is never committed, so its completion handler never runs - if the token were only
+    // released there, the receiving chain would lose a radio buffer per unconsumed slot and stall. This is
+    // what the registry's on_drop hook is for, and it is asserted here rather than reasoned about.
+    {
+      keep_alive_probe dropped_probe;
+      if (!engine.begin_block()) {
+        std::fprintf(stderr, "FAIL: begin_block() refused on the unconsumed-block arm\n");
+        return 1;
+      }
+      metal::dft_metal_engine::grid_write write;
+      write.grid_base  = grid_base;
+      write.grid_bytes = grid_bytes;
+      write.dst_offset = dst_offset;
+      write.nof_subc   = nof_subc;
+      write.map_offset = transform_size - nof_subc / 2;
+      write.phase_re   = 1.0F;
+      if (!engine.submit_slot_grid_write(in_mem, out_mem, 0, write) ||
+          !engine.retain_for_block(dropped_probe.token())) {
+        std::fprintf(stderr, "FAIL: the unconsumed-block arm could not stage its submission\n");
+        return 1;
+      }
+      if (engine.release_block(grid_base) == nullptr) {
+        std::fprintf(stderr, "FAIL: release_block() refused on the unconsumed-block arm\n");
+        return 1;
+      }
+      // A SECOND block for the same grid, also unconsumed: the first deposit is superseded, and the block it
+      // held can never be committed by anyone - so its input has to come back NOW.
+      if (!engine.begin_block() || !engine.submit_slot_grid_write(in_mem, out_mem, 0, write) ||
+          (engine.release_block(grid_base) == nullptr)) {
+        std::fprintf(stderr, "FAIL: the unconsumed-block arm could not stage its second submission\n");
+        return 1;
+      }
+      if (dropped_probe.releases.load() != 1) {
+        std::fprintf(stderr,
+                     "FAIL: the input of an UNCONSUMED hand-over was released %u times (expected exactly 1 "
+                     "- the deposit it belonged to is gone and its command buffer will never be committed)\n",
+                     dropped_probe.releases.load());
+        return 1;
+      }
+      // The deposit that replaced it is still live, and claims back cleanly.
+      if (metal::shared_burst::take_released(grid_base) == nil) {
+        std::fprintf(stderr, "FAIL: the replacing deposit was not there to claim\n");
+        return 1;
+      }
+      std::fprintf(stderr,
+                   "[dft-release] arm 3: an unconsumed hand-over gave its input back exactly once "
+                   "(superseded by the next block for the same grid)\n");
+    }
+
+    // ---- Arm 4: a token with no block open stays the caller's --------------------------------------
+    // The engine only holds what it was handed while a block was open; without one it must refuse, or a
+    // factory path that never batches would silently lose its input.
+    {
+      keep_alive_probe stray;
+      if (engine.retain_for_block(stray.token())) {
+        std::fprintf(stderr, "FAIL: retain_for_block() accepted a token with no block open\n");
+        return 1;
+      }
+      if (stray.releases.load() != 0) {
+        std::fprintf(stderr, "FAIL: a refused token was released by the engine\n");
+        return 1;
+      }
+    }
+
+    // ---- Arm 5: a block that is COMMITTED (not handed over) gives the input back too ----------------
+    // This is the path every run that does not arm the hand-over takes, and it now arms tokens as well: a
+    // block that is committed rather than released must hold its input for exactly as long as its own
+    // dispatches, which is the behaviour the receiving chain has always depended on.
+    {
+      ::unsetenv("OCUDU_DFT_RELEASE_BLOCK");
+      keep_alive_probe committed_probe;
+      if (!engine.begin_block() ||
+          !engine.retain_for_block(committed_probe.token())) {
+        std::fprintf(stderr, "FAIL: the committed-block arm could not stage its block\n");
+        return 1;
+      }
+      metal::dft_metal_engine::grid_write write;
+      write.grid_base  = grid_base;
+      write.grid_bytes = grid_bytes;
+      write.dst_offset = dst_offset;
+      write.nof_subc   = nof_subc;
+      write.map_offset = transform_size - nof_subc / 2;
+      write.phase_re   = 1.0F;
+      if (!engine.submit_slot_grid_write(in_mem, out_mem, 0, write) || !engine.commit_open()) {
+        std::fprintf(stderr, "FAIL: the committed-block arm could not commit its block\n");
+        return 1;
+      }
+      if (committed_probe.releases.load() != 0) {
+        std::fprintf(stderr, "FAIL: a committed block's input was released before the commit completed\n");
+        return 1;
+      }
+      if (!engine.wait_slot(0)) {
+        std::fprintf(stderr, "FAIL: the committed-block arm's wait failed\n");
+        return 1;
+      }
+      if (committed_probe.releases.load() != 1) {
+        std::fprintf(stderr,
+                     "FAIL: a committed block released its input %u times (expected exactly 1, on the "
+                     "commit's completion)\n",
+                     committed_probe.releases.load());
+        return 1;
+      }
+      std::fprintf(stderr, "[dft-release] arm 5: a committed block gave its input back exactly once, on its completion\n");
+      ::setenv("OCUDU_DFT_RELEASE_BLOCK", "1", 1);
+    }
+
     std::fprintf(stderr,
-                 "[dft-release] PASS: the block was handed over uncommitted, the lane adopted it, and the "
-                 "consumer read the grid it wrote - one command buffer, one commit\n");
+                 "[dft-release] PASS: the block was handed over uncommitted, the lane adopted it, the "
+                 "consumer read the grid it wrote, and the input's lifetime stayed with the block - one "
+                 "command buffer, one commit\n");
     return 0;
   }
 }

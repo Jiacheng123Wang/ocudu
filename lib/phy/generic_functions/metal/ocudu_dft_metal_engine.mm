@@ -24,8 +24,10 @@
 #include <limits>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 #ifndef OCUDU_DFT_METALLIB_PATH
 #define OCUDU_DFT_METALLIB_PATH "ocudu_dft.metallib"
@@ -71,6 +73,11 @@ struct dft_stats_t {
   /// wired release run reads 0 here: the host wait it removes is the point of the change, so a non-zero
   /// value is a wiring defect (the wait was skipped, and the caller's data may not be there yet).
   std::atomic<uint64_t> released_waits{0};
+  /// Tokens the receiving chain attached to a block so its INPUT outlives the dispatches that read it, and
+  /// how many of them have been released. The two must end equal: a token still held at exit is a receive
+  /// buffer the radio cannot use again (see dft_metal_engine::retain_for_block()).
+  std::atomic<uint64_t> keepalives{0};
+  std::atomic<uint64_t> keepalives_released{0};
 };
 
 static dft_stats_t& dft_stats()
@@ -111,6 +118,18 @@ static void dft_stats_release()
 static void dft_stats_released_wait()
 {
   dft_stats().released_waits.fetch_add(1, std::memory_order_relaxed);
+}
+
+/// Counts the tokens attached to a block (see retain_for_block()).
+static void dft_stats_keepalive()
+{
+  dft_stats().keepalives.fetch_add(1, std::memory_order_relaxed);
+}
+
+/// Counts the tokens released - by the block's completion, or by the drop of a handover nobody claimed.
+static void dft_stats_keepalives_released(uint64_t nof)
+{
+  dft_stats().keepalives_released.fetch_add(nof, std::memory_order_relaxed);
 }
 
 /// Counts one transform whose input came straight from the radio's int16 buffer (the zero-copy
@@ -162,12 +181,16 @@ static void dft_stats_report()
   if (release_armed || (hand.handed != 0) || (hand.taken != 0)) {
     std::fprintf(stderr,
                  "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu outstanding=%zu "
-                 "(armed=%d)\n",
+                 "keepalives=%llu/%llu (armed=%d)\n",
                  static_cast<unsigned long long>(hand.handed),
                  static_cast<unsigned long long>(hand.taken),
                  static_cast<unsigned long long>(hand.superseded),
                  static_cast<unsigned long long>(hand.evicted),
                  hand.outstanding,
+                 // keepalives = released/attached: the two must be EQUAL at exit. A token still held is a
+                 // receive buffer the radio cannot use again, i.e. a stall waiting to happen (5.9.7).
+                 static_cast<unsigned long long>(s.keepalives_released.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.keepalives.load(std::memory_order_relaxed)),
                  static_cast<int>(release_armed));
   }
 }
@@ -217,6 +240,8 @@ static void dft_stats_wrap_copy() {}
 static void dft_stats_radio_input() {}
 static void dft_stats_release() {}
 static void dft_stats_released_wait() {}
+static void dft_stats_keepalive() {}
+static void dft_stats_keepalives_released(uint64_t /*nof*/) {}
 #endif // OCUDU_METAL_STATS
 
 // ---- Process-wide Metal resources: one device, one queue, one pipeline for all sizes ----
@@ -298,6 +323,15 @@ struct dft_engine_impl {
   bool slot_released[16] = {};
   ///@}
 
+  /// \name D1 step 3: the input's lifetime travels with the block (see retain_for_block()).
+  ///
+  /// Tokens attached to the block that is open now. They are handed to whoever ends the block - the commit
+  /// path or the handover - which releases them EXACTLY ONCE, on the buffer's completion or when the block
+  /// is definitively dropped.
+  ///@{
+  std::vector<dft_metal_engine::keep_alive> open_tokens;
+  ///@}
+
   /// Command buffer of the newest submission per transform slot (ring pipelining).
   id<MTLCommandBuffer> slot_cb[max_batch_slots <= 16 ? 16 : max_batch_slots] = {};
   bool                 slot_pending[16]                                  = {};
@@ -368,6 +402,59 @@ static bool block_release_requested()
   return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
 }
 
+/// \brief The tokens of one block, released exactly once (see dft_metal_engine::retain_for_block()).
+///
+/// Shared because two things race to release them and must not both win: the command buffer's completion
+/// handler (the normal end), and whoever DROPS the block (a handover nobody claimed - the majority case in
+/// practice: the air leg had ~2 blocks per hop, so most blocks have no consumer at all).
+struct block_token_set {
+  std::mutex                                mutex;
+  bool                                      released = false;
+  std::vector<dft_metal_engine::keep_alive> tokens;
+};
+
+/// Runs every token's release() exactly once, on the calling thread (a Metal completion thread, or the
+/// thread that dropped the block). The callbacks run with the lock RELEASED: a release that calls back into
+/// the engine is legitimate, and holding the mutex across it would deadlock.
+static void release_block_tokens(const std::shared_ptr<block_token_set>& set)
+{
+  if (set == nullptr) {
+    return;
+  }
+  std::vector<dft_metal_engine::keep_alive> tokens;
+  {
+    std::lock_guard<std::mutex> lock(set->mutex);
+    if (set->released) {
+      return;
+    }
+    set->released = true;
+    tokens.swap(set->tokens);
+  }
+  for (const dft_metal_engine::keep_alive& token : tokens) {
+    if (token.release != nullptr) {
+      token.release(token.context);
+    }
+  }
+  dft_stats_keepalives_released(tokens.size());
+}
+
+/// Moves \p tokens into a set and arms it on \p cb: they are released when that command buffer COMPLETES.
+/// Must be called before the commit (Metal asserts on a handler added afterwards).
+/// \return The set, so the caller can keep it (the handover hands it to the registry as its drop hook).
+static std::shared_ptr<block_token_set> arm_tokens_on_complete(id<MTLCommandBuffer>         cb,
+                                                              std::vector<dft_metal_engine::keep_alive>&& tokens)
+{
+  auto set = std::make_shared<block_token_set>();
+  if (tokens.empty()) {
+    return set;
+  }
+  set->tokens = std::move(tokens);
+  [cb addCompletedHandler:^(id<MTLCommandBuffer> /*completed*/) {
+    release_block_tokens(set);
+  }];
+  return set;
+}
+
 /// \brief Closes an open block's encoder without committing it, for the paths that drop the engine.
 ///
 /// Releasing a command encoder without endEncoding ABORTS in the Metal validation layer, and that is not
@@ -384,6 +471,13 @@ static void discard_open_block(dft_engine_impl* e)
     e->open_enc         = nil;
     e->open_cb          = nil;
     e->open_transforms  = 0;
+    // The block is dropped, so the dispatches that would have read its input never run: the tokens go back
+    // to their owners NOW rather than at a completion that will never come.
+    if (!e->open_tokens.empty()) {
+      std::vector<dft_metal_engine::keep_alive> tokens;
+      tokens.swap(e->open_tokens);
+      release_block_tokens(arm_tokens_on_complete(nil, std::move(tokens)));
+    }
   }
 }
 
@@ -419,6 +513,15 @@ static bool encode_into(dft_engine_impl*                                 e,
 /// on the wrong chain would make the wait target another queue's command buffer).
 static void commit_front_end(dft_engine_impl* e, id<MTLCommandBuffer> cb, uint64_t nof_transforms)
 {
+  // The block's input tokens are armed BEFORE the commit (Metal asserts on a handler added afterwards) and
+  // released when this buffer completes: a block that is committed rather than handed over holds its input
+  // for exactly as long as the dispatches that read it, which is the behaviour every run had before the
+  // handover existed.
+  if (!e->open_tokens.empty()) {
+    std::vector<dft_metal_engine::keep_alive> tokens;
+    tokens.swap(e->open_tokens);
+    (void)arm_tokens_on_complete(cb, std::move(tokens));
+  }
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::front_end);
   metal::shared_queue::front_end_signal(cb);
   [cb commit];
@@ -856,6 +959,19 @@ bool dft_metal_engine::block_release_enabled()
   return block_release_requested();
 }
 
+bool dft_metal_engine::retain_for_block(const keep_alive& token)
+{
+  dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
+  // Nothing is retained without an open block: the caller keeps ownership, which is what leaves every path
+  // that does not batch (and every caller that does not know about tokens) exactly as it was.
+  if ((engine == nullptr) || (engine->open_cb == nil) || (token.release == nullptr)) {
+    return false;
+  }
+  engine->open_tokens.push_back(token);
+  dft_stats_keepalive();
+  return true;
+}
+
 void* dft_metal_engine::release_block(const void* grid_base)
 {
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
@@ -897,7 +1013,12 @@ void* dft_metal_engine::release_block(const void* grid_base)
   //
   // The deposit is what actually carries the buffer to its consumer, which runs on another thread and
   // looks it up by the grid it is about to read (shared_burst::deposit_released()).
-  metal::shared_burst::deposit_released(grid_base, cb);
+  //
+  // The input tokens travel with it: armed on the completion (the adopter commits the buffer, and that is
+  // when the transforms finally read the radio's samples), and released by the registry if the deposit is
+  // DROPPED instead - a handover nobody claimed is never committed, so its completion would never come.
+  std::shared_ptr<block_token_set> tokens = arm_tokens_on_complete(cb, std::move(engine->open_tokens));
+  metal::shared_burst::deposit_released(grid_base, cb, [tokens]() { release_block_tokens(tokens); });
   return (__bridge void*) cb;
 }
 

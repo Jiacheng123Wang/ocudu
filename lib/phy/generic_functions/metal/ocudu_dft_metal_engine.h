@@ -88,6 +88,37 @@ public:
   /// Whether a block of transforms is currently being accumulated.
   bool has_open() const;
 
+  /// \brief A piece of host state that has to outlive the dispatch that READS it (D1 step 3, 5.9.7).
+  ///
+  /// The receiving chain's transform input is the RADIO's zero-copy buffer, and what tells the radio that a
+  /// symbol's samples may be recycled is `finish_symbol()` returning: puxch_processor_impl::
+  /// finish_oldest_symbol() retires the receive-buffer handle right after it. That is true today only
+  /// because the host waits for this engine there. A block that is HANDED OVER executes later - at the
+  /// lane's commit - so without a token the transforms would read samples the radio has already
+  /// overwritten. Measured on air: `crc=KO 942 / OK 46` at `sinr=37.6 dB`, i.e. silent wrong data
+  /// (design document 5.9.7).
+  ///
+  /// `release(context)` is called **exactly once**, either when the block's command buffer completes on the
+  /// device or when the block is definitively dropped (it was never claimed, so it will never run). It runs
+  /// on a **Metal completion thread**: the caller's release must be thread-safe, or must only hand the work
+  /// back to the thread that owns the state.
+  struct keep_alive {
+    void (*release)(void* context) = nullptr;
+    void* context                  = nullptr;
+  };
+
+  /// \brief Holds \p token until the block that is open NOW is done with it.
+  ///
+  /// The receiving chain attaches one per piece of input the open block reads - the handle of the samples
+  /// the symbol it is submitting was demodulated from. A token attached to a block that is then COMMITTED
+  /// (rather than handed over) is released on that commit's completion, so both paths hold the input for
+  /// exactly as long as the dispatches that read it.
+  ///
+  /// \note Nothing is retained when no block is open: the caller keeps ownership, which is what leaves the
+  ///       factory path (no block batching) exactly as it was.
+  /// \return True when the token is now this engine's to release.
+  bool retain_for_block(const keep_alive& token);
+
   /// \brief Whether this run asks the open block to be handed over instead of committed (D1 step 1).
   ///
   /// \c OCUDU_DFT_RELEASE_BLOCK=1, **default off**. While it is off, nothing in this engine ever releases
@@ -128,8 +159,9 @@ public:
   ///    commit - so the zero-copy radio input (`grid_write::time_samples`) would be read after the radio
   ///    has overwritten it: measured on air as `crc=KO 942 / OK 46` at `sinr=37.6 dB`, i.e. correct
   ///    samples replaced by stale ones with nothing failing. **The handover is therefore NOT called from
-  ///    the receiving chain** (reverted in 2026-09-21's leg, see 5.9.7): it needs the input's lifetime to
-  ///    be moved onto the adopted buffer's completion first.
+  ///    the receiving chain** (reverted in 2026-09-21's leg, see 5.9.7). What makes it legal again is
+  ///    retain_for_block(): the input's handle travels with the block and is released when the adopted
+  ///    buffer completes.
   ///
   /// \note The grid of the released block is mapped through the PROCESS-WIDE cache
   ///       (shared_queue::wrap_no_copy), not through this engine's private one, so the stages that read it
