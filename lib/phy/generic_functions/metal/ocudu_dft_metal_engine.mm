@@ -180,13 +180,13 @@ static void dft_stats_report()
   const bool release_armed = (armed != nullptr) && (std::strtoul(armed, nullptr, 10) != 0);
   if (release_armed || (hand.handed != 0) || (hand.taken != 0)) {
     std::fprintf(stderr,
-                 "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu outstanding=%zu "
+                 "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu unproduced=%zu "
                  "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu (armed=%d)\n",
                  static_cast<unsigned long long>(hand.handed),
                  static_cast<unsigned long long>(hand.taken),
                  static_cast<unsigned long long>(hand.superseded),
                  static_cast<unsigned long long>(hand.evicted),
-                 hand.outstanding,
+                 hand.unproduced,
                  static_cast<unsigned long long>(hand.fallback_commits),
                  static_cast<unsigned long long>(hand.late_commits),
                  static_cast<unsigned long long>(hand.grid_not_found),
@@ -269,14 +269,14 @@ void dft_handover_heartbeat(const char* where)
   const metal::shared_burst::handed_counters hand = metal::shared_burst::handed_stats();
   const dft_stats_t&                         s    = dft_stats();
   std::fprintf(stderr,
-               "[dft_handover] %s handed=%llu taken=%llu superseded=%llu evicted=%llu outstanding=%zu "
+               "[dft_handover] %s handed=%llu taken=%llu superseded=%llu evicted=%llu unproduced=%zu "
                "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu\n",
                where,
                static_cast<unsigned long long>(hand.handed),
                static_cast<unsigned long long>(hand.taken),
                static_cast<unsigned long long>(hand.superseded),
                static_cast<unsigned long long>(hand.evicted),
-               hand.outstanding,
+               hand.unproduced,
                static_cast<unsigned long long>(hand.fallback_commits),
                static_cast<unsigned long long>(hand.late_commits),
                static_cast<unsigned long long>(hand.grid_not_found),

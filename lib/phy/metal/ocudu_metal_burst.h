@@ -171,15 +171,17 @@ public:
     /// behind producers. This one is the suspicious half, and it is kept apart from `superseded` for
     /// exactly that reason - one number for both would make an expected outcome and a defect read alike.
     uint64_t evicted = 0;
-    /// Deposits still unclaimed: the grid of a slot whose hop has not started (or never will).
-    size_t outstanding = 0;
+    /// Records whose grid has NOT been produced yet (a block waiting for its consumer or its sweep). NOT
+    /// "records held": the registry keeps a record after production so a late reader can be told so.
+    size_t unproduced = 0;
     /// Deposits a host reader found still unclaimed and had to COMMIT itself (see ensure_grid_produced).
     /// Non-zero is normal in a run with PUCCH-only slots; a large number means the consumers are late and
     /// the deposits are being swept, not served.
     uint64_t fallback_commits = 0;
-    /// Blocks COMMITTED LATE by the registry itself: deposits nobody claimed that were about to be dropped
-    /// (the storage came back, or the bound was reached). Each one is a grid that would otherwise never
-    /// have been written at all - so this number is the size of a silence that used to be invisible.
+    /// Blocks COMMITTED LATE by the registry itself: deposits NOBODY claimed at all - either about to be
+    /// dropped (the storage came back, or the bound was reached), or swept once the receiving chain had
+    /// moved more than the sweep window past their slot. Each one is a grid that would otherwise never have
+    /// been written AND a set of input references that would never have been released (5.9.17).
     uint64_t late_commits = 0;
     /// Reads that found NO record for their (storage, slot): either no hand-over is armed, or the record was
     /// produced and evicted long before. A reader that finds nothing cannot wait, so this counts the reads

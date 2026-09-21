@@ -424,7 +424,7 @@ static std::atomic<shared_burst::drop_commit_fn>& drop_committer()
   return fn;
 }
 
-static void commit_dropped(id<MTLCommandBuffer> cb, uint64_t& late_commits)
+static void commit_dropped(id<MTLCommandBuffer> cb)
 {
   if (cb == nil) {
     return;
@@ -434,7 +434,6 @@ static void commit_dropped(id<MTLCommandBuffer> cb, uint64_t& late_commits)
     return;
   }
   commit((__bridge void*)cb);
-  ++late_commits;
 }
 
 } // namespace
@@ -504,15 +503,34 @@ void shared_burst::deposit_released(const void*          grid_base,
       h.entries.erase(h.entries.begin() + static_cast<std::ptrdiff_t>(victim));
       ++h.counters.evicted;
     }
+
+    // ★ NOBODY CLAIMS A SLOT FOREVER. A deposit that no hop and no host reader ever asked for has no
+    // consumer coming - and with the (storage, slot) key it can never be superseded either, because that
+    // key is never deposited twice. Left alone it sits here holding the input tokens of its transforms, so
+    // the receive buffers it keeps alive never come back: measured as handed=64 taken=39 fallback=21 with
+    // keepalives=840/896 (four blocks' worth) and the pool at zero, which stalls the radio (5.9.17).
+    //
+    // The deadline is the receiving chain's own progress: a block whose slot is this far behind the newest
+    // deposit has had its turn - the hop and the host readers of that slot are dispatched within a slot of
+    // the symbols being reported. K = 2 slots is that window with room to spare, and it is the difference
+    // between a pool of eight surviving (2-3 held) and dying.
+    constexpr uint64_t sweep_after_slots = 2;
+    for (handed_entry& entry : h.entries) {
+      if (!entry.claimed && !entry.produced && ((entry.slot + sweep_after_slots) < slot)) {
+        // Claimed here so a late hop cannot adopt a buffer that is about to be committed (encoding into a
+        // committed buffer is an error): it opens one of its own and reads the grid the sweep writes.
+        entry.claimed = true;
+        commit_late.push_back(entry.cb);
+        ++h.counters.late_commits;
+      }
+    }
   }
   // The record lives until the buffer COMPLETES: `no record` has to mean `nothing to wait for`, which is
   // what a host reader relies on (ensure_grid_produced()).
   [cb addCompletedHandler:^(id<MTLCommandBuffer> completed) { mark_handed_produced(completed); }];
 
   for (id<MTLCommandBuffer> late : commit_late) {
-    handed_state&               h = handed();
-    std::lock_guard<std::mutex> lock(h.mutex);
-    commit_dropped(late, h.counters.late_commits);
+    commit_dropped(late);
   }
   for (const std::function<void()>& hook : dropped) {
     hook();
@@ -568,9 +586,9 @@ bool shared_burst::ensure_grid_produced(const void* grid_base, uint64_t slot)
     }
   }
   if (to_commit != nil) {
-    handed_state&               h = handed();
-    std::lock_guard<std::mutex> lock(h.mutex);
-    commit_dropped(to_commit, h.counters.late_commits);
+    // A consumer had to commit it (fallback), which is counted apart from the registry's own late commits:
+    // the first says a host reader found the block nobody claimed, the second that nobody came at all.
+    commit_dropped(to_commit);
   }
   if (produced || !known || (generation == 0)) {
     return true;
@@ -596,7 +614,9 @@ shared_burst::handed_counters shared_burst::handed_stats()
   handed_state&               h = handed();
   std::lock_guard<std::mutex> lock(h.mutex);
   handed_counters out   = h.counters;
-  out.outstanding       = h.entries.size();
+  for (const handed_entry& entry : h.entries) {
+    out.unproduced += entry.produced ? 0u : 1u;
+  }
   return out;
 }
 

@@ -800,6 +800,69 @@ int main()
                    "[dft-release] arm 7: two slots, one storage - each consumer is served its own block\n");
     }
 
+    // ---- Arm 8: a slot NOBODY ever asks about must be swept --------------------------------------
+    // This is the defect the s35 leg found (5.9.17), and it is a consequence of the key being right: with
+    // (storage, slot) a deposit is NEVER superseded, so a block no hop and no host reader ever asked for
+    // would sit in the registry holding its input for good - handed=64 taken=39 fallback=21, keepalives
+    // 840/896, four receive buffers gone and the pool at zero. The sweep commits it once the receiving chain
+    // has moved past its slot, which writes its grid and gives the input back.
+    {
+      keep_alive_probe orphan_probe;
+      constexpr uint64_t orphan_slot = test_slot + 100;
+      engine.set_lane_slot(orphan_slot);
+      metal::dft_metal_engine::grid_write write;
+      write.grid_base  = grid_base;
+      write.grid_bytes = grid_bytes;
+      write.dst_offset = dst_offset;
+      write.nof_subc   = nof_subc;
+      write.map_offset = transform_size - nof_subc / 2;
+      write.phase_re   = 1.0F;
+      for (size_t i = 0; i != alloc_bytes / sizeof(uint16_t); ++i) {
+        reinterpret_cast<uint16_t*>(grid_alloc)[i] = poison;
+      }
+      if (!engine.begin_block() || !engine.submit_slot_grid_write(in_mem, out_mem, 0, write) ||
+          !engine.retain_for_block(orphan_probe.token()) || (engine.release_block(grid_base) == nullptr)) {
+        std::fprintf(stderr, "FAIL: the sweep arm could not stage its block\n");
+        return 1;
+      }
+      if (orphan_probe.releases.load() != 0) {
+        std::fprintf(stderr, "FAIL: the sweep arm released its input before anything swept it\n");
+        return 1;
+      }
+      // The chain moves on: two more slots, which is what the sweep waits for. Nobody ever asks about the
+      // orphan - that is the whole point.
+      for (uint64_t step = 1; step <= 3; ++step) {
+        engine.set_lane_slot(orphan_slot + step);
+        if (!engine.begin_block() || !engine.submit_slot_grid_write(in_mem, out_mem, 0, write) ||
+            (engine.release_block(grid_base) == nullptr)) {
+          std::fprintf(stderr, "FAIL: the sweep arm could not advance the chain\n");
+          return 1;
+        }
+      }
+      // The orphan's grid is written (the sweep committed it) and its input is back.
+      for (unsigned spin = 0; (spin != 2000) && (orphan_probe.releases.load() == 0); ++spin) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      if (orphan_probe.releases.load() != 1) {
+        std::fprintf(stderr,
+                     "FAIL: the input of a slot NOBODY asked about was released %u times (expected 1: the "
+                     "sweep commits it). It is a receive buffer the radio can never have back\n",
+                     orphan_probe.releases.load());
+        return 1;
+      }
+      unsigned unwritten = 0;
+      for (unsigned k = 0; k != nof_subc; ++k) {
+        if (host_word(grid_u16, dst_offset + k) == poison_word) {
+          ++unwritten;
+        }
+      }
+      std::fprintf(stderr,
+                   "[dft-release] arm 8: a slot nobody asked about is swept - its grid is written and its "
+                   "input comes back (%u of %u elements left unwritten by a LATER slot's block)\n",
+                   unwritten,
+                   nof_subc);
+    }
+
     std::fprintf(stderr,
                  "[dft-release] PASS: the block was handed over uncommitted, the lane adopted it, the "
                  "consumer read the grid it wrote, and the input's lifetime stayed with the block - one "
