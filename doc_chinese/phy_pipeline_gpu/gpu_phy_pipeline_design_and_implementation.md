@@ -3258,6 +3258,48 @@ PRACH 池耗尽 ⇒ **UE 连 RACH 都做不了 ⇒ "手机连不上"**。
 PUCCH 的 `metric/sinr`、CRC 分层比、`real-time failures`。
 **⚠ SRS 那条同池的等待是本步唯一未验的风险**：若腿出现 SRS 相关的停滞/丢弃，就是池子需要分开。
 
+#### 5.9.15 ❌❌ `s34` 腿对：**结构性缺陷全部消失（实时失败 53135→1、PRACH 耗尽→0、契约 8/8、干净退出），剩下的是一条【键】的缺陷：注册表用地址做键，而被池子复用的地址把消费者引到了【后一个槽】的块**
+
+**① 腿的结果（`gpu`，`c549713ee9`，对照 `s34-d1-armed-base` / 候选 `s34-d1-armed`）**
+
+| 读数 | 对照 | 候选 |
+|---|---|---|
+| `Real-time failure` | 0 | **1**（曾是 53135）|
+| `PRACH buffer pool depleted` | 0 | **0**（曾是 1812）|
+| 契约 | 8/8 | **8/8 MET** ✅ |
+| `[ul_rx_pool] held` | 2 | **2~3**（池子健康）✅ |
+| `keepalives` | —— | **53228/53228**（凭据全还）✅ |
+| 退出 | 干净 | **干净** ✅ |
+| **PUCCH `sinr` 中位数** | **+24.2 dB** | **−14.9 dB**（仅 **28%** 可用）|
+| **PUSCH `sinr` 中位数** | **+26.2 dB** | **−22.9 dB**（8117 OK → **13 OK**）|
+| `dft commits` | ~2/跳 | **1（只有 warm-up）** ← 合并本身成功了 |
+
+**② ⇒ 每个结构性缺陷都关掉了，而数据仍然错 ⇒ 剩下的是"取错了块"**
+
+```
+[metal_stats] dft handover handed=3802 taken=570 superseded=207 evicted=0 outstanding=0 keepalives=53228/53228
+```
+**3802 次交出，只有 570 次被"跳"认领，约 3025 次由消费者兜底提交。**
+
+**③ ★★ 根因（键 = 地址，而地址会被池子复用）**
+
+`ensure_grid_produced(grid_base)` 与 `take_released(grid_base)` 只用**网格存储地址**做键。而网格池在**上层 PHY 放下引用**（＝下一个槽的网格到达）之后就会把地址还回去。
+**⇒ 消费者只要晚一个槽才来问，找到的就是【后一个槽】的块**：它提交并等待了那一份，而**它自己要读的那份网格从来没被写过**。
+**⇒ 这正好解释 72% 坏 / 28% 好**（28% 是"消费者赢了竞态"的那些槽），也同时解释 PUSCH 与 PUCCH 一起坏。
+
+**④ ⇒ 修法（下一会话，明确到可执行）**
+
+| # | 改动 | 位置 |
+|---|---|---|
+| 1 | **键加上"接收槽"**：`deposit_released(grid, slot, cb, gen, hook)` / `take_released(grid, slot)` / `ensure_grid_produced(grid, slot)` | `shared_burst` |
+| 2 | 交出时带上槽号（引擎本来就有：`set_lane_slot()` 的 `lane_slot`）| `dft_metal_engine::release_block()` |
+| 3 | 消费者带上自己的槽号：PUCCH/SRS 有 `current_slot`；**估计器要把 `config.slot` 补进 `fd_td_estimation_stage_args`**（基类填 args 的地方就是现成的落点）| `grid_ready_hook::wait()` / `mmse_engine::set_hop_grid()` |
+| 4 | **没人认领的块在被替换/淘汰时不许直接丢：提交它**（它的网格至少要写出来；配上键之后，晚到的消费者仍能等到它）| `shared_burst::deposit_released()` |
+| 5 | 记录保留到**产出**（完成）而不是"被取走"，并加计数 `grid_not_found`；**把 `fallback_commits`/`ready_timeouts`/`grid_not_found` 打进仪表**（本次它们没被打印，是仪表缺口）| `shared_burst` + 引擎的报告 |
+
+**⑤ 已再次关掉交出**（`grid_has_host_consumers()` 又返回 `true`），理由写在代码里：
+**"把网格交出去、然后服务错的那一份，比不交更糟"**。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。

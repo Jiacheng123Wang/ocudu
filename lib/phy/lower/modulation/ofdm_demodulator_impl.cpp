@@ -73,15 +73,19 @@ bool host_reads_the_grid()
 /// D1 rather than something an operator arms.
 bool grid_has_host_consumers()
 {
-  // False since D1-A was wired: the host readers of this grid - the PUCCH (all formats) and the SRS - now
-  // ask for its production on their own executor before they read it (grid_ready_hook::wait(), wired in
-  // uplink_processor_impl::process_pucch()/process_pucch_f1()/process_srs()). The wait covers both shapes
-  // of a slot: the lane's commit when a hop claimed the block, and a commit the CONSUMER performs when
-  // nobody did - a PUCCH-only slot, where nothing else would ever write that grid.
+  // TRUE again, and the reason is a DEFECT the armed leg found, not a missing consumer (5.9.15):
   //
-  // It is a statement about the CHAIN, so it is checked rather than assumed: the hook is what makes it
-  // true, and a build or a run without it (no Metal hand-over) never asks.
-  return false;
+  // The host readers do wait now (grid_ready_hook::wait() in uplink_processor_impl::process_pucch()/
+  // process_pucch_f1()/process_srs()), but the registry they ask is keyed by the grid's STORAGE ADDRESS -
+  // and the grid pool hands that address back as soon as the upper PHY drops its reference, which happens
+  // when the NEXT slot's grid arrives. So a consumer that asks one slot late finds the LATER slot's block,
+  // commits and waits for THAT one - and the grid it is about to read was never written at all. Measured:
+  // PUCCH sinr median -14.9 dB with only 28% of the reports usable, and the PUSCH at -22.9 dB.
+  //
+  // The key has to be the receiving SLOT as well (see 5.9.15), and an unclaimed block must be COMMITTED
+  // when it would otherwise be dropped. Until that lands, the hand-over is refused here: handing a grid
+  // over and then serving the wrong one is worse than not handing it over at all.
+  return true;
 }
 
 bool handover_allowed()
