@@ -2556,6 +2556,45 @@ if (last_slot_last >= rx_metadata.ts && last_slot_last < block_end)  // 覆盖�
 在一个纪元是**开机时刻**的时钟上就是**静默错值**——而这条仪表最危险的失败模式恰恰是**基准取错**（见 ④）。
 **下一版上腿前，先用 `probe_demo` 两种情形（有基准 / 无基准）各自验一遍。**
 
+#### 5.9.1 ⚠ D1 的两个前提更正（S16，本会话末）：**`cpu` 模式下 D1 的对象不存在；栅栏默认没武装**
+
+**① `cpu` 模式强制所有后端走 CPU ⇒ 里面没有 Metal DFT ⇒ 没有"前端队列"可搬**
+
+`apps/units/flexible_o_du/o_du_low/du_low_phy_pipeline.h` 的模式解析（第 163–172 行）：
+`phy_pipeline_mode::cpu` 下**任何一个非 CPU 的 `--pusch_dft_type` 都会报冲突并拒绝启动**。
+所以 `mode=cpu` 里 **DFT 是 CPU 实现**：`[ul_dft_wait] no samples`、没有 `dft commits`、没有前端队列。
+
+**⇒ 本会话前面所有以 `cpu` 模式跑的腿（`s17`…`s26`）都测的是【CPU DFT】**——
+它们对"收包粒度 / 等待"的结论**依然有效**（那条链在两种模式下都存在），
+但**它们不能用来判 D1**：D1 的对象（前端队列里的 Metal DFT）在 `cpu` 模式下**不存在**。
+
+**② 前端栅栏是 opt-in（默认关闭）⇒ 默认运行里没有"跨队列栅栏"**
+
+`shared_queue::front_end_fence_enabled()` 读 `OCUDU_UL_FRONTEND_FENCE`，**默认返回 false**。
+默认运行的网格顺序由**宿主每槽一次 `wait_slot()`**提供（`ofdm_demodulator_impl::finish_symbol`：
+`wait_per_slot` 为真时只在槽的最后一个符号等一次）。
+
+**⇒ 两条推论**：
+1. §5.8.12 那次"前端栅栏开关无差别（1392.6 → 1395.2 µs）"**极可能是假阴性**：
+   开关没设，**两臂是同一个未武装配置**——这正是本会话反复踩的"判据没触发却看起来正常"；
+2. **任何以 `OCUDU_UL_FRONTEND_FENCE` 为基础的臂都必须显式设为 1**，否则测的是同一个东西。
+
+**③ D1 真正要消的两样，以及各自的量法**
+
+| D1 想消的 | 量法 | 状态 |
+|---|---|---|
+| **宿主每槽一次 `wait_slot()` 阻塞** | **`[ul_dft_wait]`**（新增：`wait_slot()` 里围绕 `waitUntilCompleted` 计时，**不依赖任何开关**）| 需要在 **`cpu_gpu` 或 `gpu`** 模式下跑 |
+| **跨队列关系** | `OCUDU_DFT_BACKEND_QUEUE=1`（DFT 提交到后端队列）**配合** `OCUDU_UL_FRONTEND_FENCE=1` | 两臂只差"是否跨队列" |
+
+**④ 正确的腿法（`cpu` 模式作废，用 `cpu_gpu`）**
+
+```bash
+# 对照：Metal DFT + 默认（栅栏未武装，宿主每槽 wait_slot 提供顺序）
+sudo -E bash wip/run_leg.sh cpu_gpu s26-d1-base
+# 同队列 + 栅栏武装
+sudo -E bash wip/run_leg.sh cpu_gpu s26-d1-sameq OCUDU_UL_FRONTEND_FENCE=1 OCUDU_DFT_BACKEND_QUEUE=1
+```
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。
