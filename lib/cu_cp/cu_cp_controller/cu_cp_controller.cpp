@@ -63,20 +63,20 @@ void cu_cp_controller::stop()
   amf_mng.stop();
 }
 
-bool cu_cp_controller::handle_du_setup_request(const std::set<plmn_identity>& plmn_ids)
+std::set<plmn_identity> cu_cp_controller::handle_du_setup_request(const std::set<plmn_identity>& plmn_ids)
 {
-  bool success = false;
+  // The CU-CP accepts the DU even when no AMF is connected. The cells that serve only PLMNs without a connected
+  // AMF stay deactivated until their AMF connects.
+  std::set<plmn_identity> connected_plmns;
   for (const auto& plmn : plmn_ids) {
     if (amf_mng.is_amf_connected(plmn)) {
-      success = true;
+      connected_plmns.insert(plmn);
     } else {
       logger.debug("No AMF for PLMN={} is connected", plmn);
     }
   }
 
-  // If AMF is not connected, it either means that the CU-CP is not operational state, there is a CU-CP failure or no
-  // AMF for the PLMN of the DU cells was found.
-  return success;
+  return connected_plmns;
 }
 
 bool cu_cp_controller::request_ue_setup() const

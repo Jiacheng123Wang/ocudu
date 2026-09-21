@@ -132,14 +132,16 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
     return res;
   }
 
-  // Collect PLMN IDs and cell meas config of all served cells.
-  std::set<plmn_identity>                              plmn_ids;
+  // Collect the PLMNs served by the DU cells. These are the PLMNs the CU-CP records per cell, and the ones it
+  // matches when it activates a deactivated cell later on.
+  std::set<plmn_identity> plmn_ids;
+  for (const auto& served_cell : request.gnb_du_served_cells_list) {
+    plmn_ids.insert(served_cell.served_cell_info.served_plmns.begin(), served_cell.served_cell_info.served_plmns.end());
+  }
+
+  // Collect the cell meas config of all served cells.
   std::map<nr_cell_identity, serving_cell_meas_config> meas_config_db;
   for (const auto& [cgi, cell_info] : cell_info_db) {
-    for (const auto& plmn : cell_info.plmn_identity_list) {
-      plmn_ids.insert(plmn);
-    }
-
     // Fill cell meas config.
     serving_cell_meas_config meas_cfg;
     meas_cfg.nci               = cgi.nci;
@@ -158,11 +160,13 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
     meas_config_db.emplace(cgi.nci, meas_cfg);
   }
 
-  // Check if CU-CP can accept a new DU connection.
-  if (!du_setup_notif.on_du_setup_request(plmn_ids)) {
-    res.result = du_setup_result::rejected{f1ap_cause_radio_network_t::plmn_not_served_by_the_gnb_cu,
-                                           "One or more PLMNs are not served by the GNB CU-CP"};
-    return res;
+  // Ask the CU-CP which of the PLMNs of the DU have a connected AMF. A DU whose PLMNs have none is still
+  // accepted: its cells stay deactivated until an AMF that serves one of their PLMNs connects.
+  const std::set<plmn_identity> connected_plmns = du_setup_notif.on_du_setup_request(plmn_ids);
+  if (connected_plmns.empty()) {
+    logger.info("du={}: No AMF is connected for the PLMNs served by this DU. Its cells stay deactivated until an AMF "
+                "for one of them connects",
+                cfg.du_index);
   }
 
   // Validate and update DU configuration.
@@ -185,18 +189,25 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
   rrc->store_cell_info_db(cell_info_db);
 
   // Realize the reported cells as CU-CP logical cells and let the CU-CP decide, per cell, whether it may be
-  // activated (admin-locked cells stay dormant).
+  // activated (admin-locked cells and cells without a connected AMF stay dormant).
   std::vector<du_reported_cell> reported_cells;
   reported_cells.reserve(request.gnb_du_served_cells_list.size());
   for (const auto& served_cell : request.gnb_du_served_cells_list) {
-    reported_cells.push_back({served_cell.served_cell_info.nr_cgi, served_cell.served_cell_info.nr_pci});
+    const auto& cell_info = served_cell.served_cell_info;
+    reported_cells.push_back(
+        {cell_info.nr_cgi,
+         cell_info.nr_pci,
+         std::any_of(cell_info.served_plmns.begin(),
+                     cell_info.served_plmns.end(),
+                     [&connected_plmns](const plmn_identity& plmn) { return connected_plmns.count(plmn) != 0; })});
   }
   std::vector<nr_cell_identity> cells_to_activate = cu_cp_notifier.on_du_cells_reported(cfg.du_index, reported_cells);
 
-  // Record the dormant (admin-locked) cells as deactivated in the DU configuration records, reusing the
-  // same bookkeeping as a command deactivation, so lifecycle lookups treat them exactly like
-  // command-deactivated cells (e.g. the unlock command finds them via the any-state lookup). No F1AP
-  // message is sent here: the update struct is only the vehicle for the configuration handler's records.
+  // Record the dormant cells as deactivated in the DU configuration records, reusing the same bookkeeping as a
+  // command deactivation, so lifecycle lookups treat them exactly like command-deactivated cells (e.g. the
+  // unlock command finds them via the any-state lookup, and the AMF connection activates them through the
+  // deactivated PLMNs it records). No F1AP message is sent here: the update struct is only the vehicle for the
+  // configuration handler's records.
   {
     f1ap_gnb_cu_configuration_update dormant_cells_update;
     for (const du_reported_cell& reported : reported_cells) {
@@ -219,9 +230,9 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
   accepted.gnb_cu_name        = cfg.ran_node_name;
   accepted.gnb_cu_rrc_version = cfg.rrc_version;
 
-  // Accept all cells; activate the ones not administratively locked. Cells omitted from the Cells to be
-  // Activated List remain configured-but-dormant at the DU, and can be activated later via the gNB-CU
-  // Configuration Update procedure (unlock command).
+  // Accept all cells; activate the ones the CU-CP selected. Cells omitted from the Cells to be Activated List
+  // remain configured-but-dormant at the DU, and are activated later via the gNB-CU Configuration Update
+  // procedure (unlock command, or the connection of an AMF that serves one of their PLMNs).
   accepted.cells_to_be_activ_list.reserve(request.gnb_du_served_cells_list.size());
   for (const auto& served_cell : request.gnb_du_served_cells_list) {
     if (std::find(cells_to_activate.begin(), cells_to_activate.end(), served_cell.served_cell_info.nr_cgi.nci) ==

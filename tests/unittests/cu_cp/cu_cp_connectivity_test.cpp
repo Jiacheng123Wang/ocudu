@@ -579,7 +579,7 @@ TEST_F(
   ASSERT_TRUE(ret.has_value());
 }
 
-TEST_F(cu_cp_connectivity_test, when_ng_setup_is_not_successful_then_f1_setup_is_rejected)
+TEST_F(cu_cp_connectivity_test, when_ng_setup_is_not_successful_then_f1_setup_is_accepted_with_no_cell_activated)
 {
   // Enqueue AMF NG Setup Response as an auto reply to CU-CP.
   ngap_message ng_setup_fail = generate_ng_setup_failure();
@@ -596,8 +596,40 @@ TEST_F(cu_cp_connectivity_test, when_ng_setup_is_not_successful_then_f1_setup_is
   f1ap_message f1ap_pdu;
   ASSERT_TRUE(this->wait_for_f1ap_tx_pdu(du_idx, f1ap_pdu, std::chrono::milliseconds{1000}));
 
-  // The CU-CP should reject F1 setup.
-  ASSERT_EQ(f1ap_pdu.pdu.type().value, asn1::f1ap::f1ap_pdu_c::types_opts::unsuccessful_outcome);
+  // The CU-CP accepts the DU, but keeps all of its cells deactivated.
+  ASSERT_EQ(f1ap_pdu.pdu.type().value, asn1::f1ap::f1ap_pdu_c::types_opts::successful_outcome);
+  ASSERT_EQ(f1ap_pdu.pdu.successful_outcome().value.type().value,
+            asn1::f1ap::f1ap_elem_procs_o::successful_outcome_c::types_opts::f1_setup_resp);
+  ASSERT_FALSE(f1ap_pdu.pdu.successful_outcome().value.f1_setup_resp()->cells_to_be_activ_list_present);
+}
+
+TEST_F(cu_cp_connectivity_test, when_amf_connects_after_f1_setup_then_the_cells_of_the_du_are_activated)
+{
+  // Simulate an AMF that is not reachable yet.
+  get_amf().drop_connection();
+  ASSERT_TRUE(get_cu_cp().start());
+
+  // Establish TNL connection between DU and CU-CP and start F1 setup procedure.
+  auto ret = connect_new_du();
+  ASSERT_TRUE(ret.has_value());
+  unsigned du_idx = *ret;
+  get_du(du_idx).push_ul_pdu(test_helpers::generate_f1_setup_request());
+  f1ap_message f1ap_pdu;
+  ASSERT_TRUE(this->wait_for_f1ap_tx_pdu(du_idx, f1ap_pdu, std::chrono::milliseconds{1000}));
+
+  // The CU-CP accepts the DU, but keeps all of its cells deactivated.
+  ASSERT_EQ(f1ap_pdu.pdu.type().value, asn1::f1ap::f1ap_pdu_c::types_opts::successful_outcome);
+  ASSERT_FALSE(f1ap_pdu.pdu.successful_outcome().value.f1_setup_resp()->cells_to_be_activ_list_present);
+
+  // The AMF becomes reachable. The CU-CP must activate the cells that serve its PLMN.
+  ASSERT_TRUE(reconnect_amf(0)) << "CU-CP did not retry the AMF connection";
+  ASSERT_TRUE(this->wait_for_f1ap_tx_pdu(du_idx, f1ap_pdu, std::chrono::milliseconds{1000}))
+      << "gNB-CU Configuration Update not sent to DU after the AMF connected";
+  ASSERT_TRUE(test_helpers::is_valid_gnb_cu_configuration_update(f1ap_pdu));
+  const auto& cu_cfg_upd = f1ap_pdu.pdu.init_msg().value.gnb_cu_cfg_upd();
+  ASSERT_TRUE(cu_cfg_upd->cells_to_be_activ_list_present);
+  ASSERT_EQ(cu_cfg_upd->cells_to_be_activ_list.size(), 1U);
+  get_du(du_idx).push_ul_pdu(test_helpers::generate_gnb_cu_configuration_update_acknowledgement({}));
 }
 
 TEST_F(cu_cp_connectivity_test, when_du_connection_is_lost_then_connected_ues_are_released)

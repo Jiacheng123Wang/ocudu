@@ -314,7 +314,9 @@ std::vector<nr_cell_identity> logical_cell_controller::handle_du_cells_reported(
   std::vector<cell_lifecycle_target> cells_to_bar;
   for (const du_reported_cell& reported : cells) {
     const logical_cell& cell = logical_cells.realize_cell(reported.cgi.nci, du_index);
-    if (cell.admin_state != cell_admin_state::unlocked) {
+    // Keep the cell dormant while the operator locks it, or while no AMF that serves one of its PLMNs is
+    // connected. In the latter case the AMF connection activates the cell.
+    if (cell.admin_state != cell_admin_state::unlocked or not reported.amf_connected) {
       logical_cells.set_operational_state(reported.cgi.nci, cell_operational_state::disabled);
       continue;
     }

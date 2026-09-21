@@ -95,7 +95,7 @@ class du_processor_cu_cp_connection_adapter final : public du_connection_notifie
 public:
   void connect_node_connection_handler(cu_cp_controller& cu_ctrl_) { cu_ctrl = &cu_ctrl_; }
 
-  bool on_du_setup_request(const std::set<plmn_identity>& plmn_ids) override
+  std::set<plmn_identity> on_du_setup_request(const std::set<plmn_identity>& plmn_ids) override
   {
     ocudu_assert(cu_ctrl != nullptr, "CU-CP controller must not be nullptr");
     return cu_ctrl->handle_du_setup_request(plmn_ids);
