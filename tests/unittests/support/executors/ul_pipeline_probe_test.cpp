@@ -188,8 +188,8 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
   {
     const std::string report = capture_report();
     // The switch is echoed, so "off" can never be read as "found nothing".
-    EXPECT_NE(report.find("[ul_slot_trace] OCUDU_UL_SLOT_TRACE=4"), std::string::npos) << report;
-    EXPECT_NE(report.find("slots captured=1"), std::string::npos) << report;
+    EXPECT_NE(report.find("OCUDU_UL_SLOT_TRACE=4"), std::string::npos) << report;
+    EXPECT_NE(report.find("rows=1"), std::string::npos) << report;
     // The traced slot's own values, parsed from its line: the landmark deltas must be measured from the SAMPLES
     // COMPLETE instant and not from the slot's start, i.e. the time-frequency landmark must be ~1 ms and NOT
     // ~21 ms (which is what measuring from record_start() would give).

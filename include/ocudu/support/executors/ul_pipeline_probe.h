@@ -527,12 +527,18 @@ public:
     // runs at shutdown, and the environment it echoes is the CURRENT one - the test toggles it inside one
     // process). Saying "OCUDU_UL_SLOT_TRACE=0, slots captured=1" would read as a contradiction; naming the
     // captured count and, when the switch is still on, the bound, says what actually happened.
+    // The count printed is the number of ROWS, and the bound printed is the current one: the two can disagree
+    // (the switch can be changed, and the test toggles it inside one process), so both are named rather than
+    // presented as a pair. A reader who takes "TRACE=64, captured=512" for a defect is reading it correctly as a
+    // contradiction - so say which is which.
     if (slot_trace_enabled()) {
-      std::fprintf(stderr, "[ul_slot_trace] OCUDU_UL_SLOT_TRACE=%u, slots captured=%zu\n",
-                   slot_trace_limit(),
-                   trace.size());
+      std::fprintf(stderr,
+                   "[ul_slot_trace] rows=%zu (bound now OCUDU_UL_SLOT_TRACE=%u; rows are the slots that carried"
+                   " a PUSCH)\n",
+                   trace.size(),
+                   slot_trace_limit());
     } else {
-      std::fprintf(stderr, "[ul_slot_trace] slots captured=%zu (switch now off)\n", trace.size());
+      std::fprintf(stderr, "[ul_slot_trace] rows=%zu (switch now off)\n", trace.size());
     }
     if (trace.empty()) {
       std::fprintf(stderr, "[ul_slot_trace] no slot completed on record (see record_slot_samples_complete())\n");
