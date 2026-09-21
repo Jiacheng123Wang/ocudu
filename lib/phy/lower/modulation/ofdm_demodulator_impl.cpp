@@ -82,10 +82,11 @@ bool grid_has_host_consumers()
   // commits and waits for THAT one - and the grid it is about to read was never written at all. Measured:
   // PUCCH sinr median -14.9 dB with only 28% of the reports usable, and the PUSCH at -22.9 dB.
   //
-  // The key has to be the receiving SLOT as well (see 5.9.15), and an unclaimed block must be COMMITTED
-  // when it would otherwise be dropped. Until that lands, the hand-over is refused here: handing a grid
-  // over and then serving the wrong one is worse than not handing it over at all.
-  return true;
+  // FALSE again since both halves landed (5.9.15): the registry is keyed by the grid's storage AND the
+  // receiving slot - so a consumer asking one slot late is no longer served the next slot's block - and a
+  // deposit nobody claims is COMMITTED when it would otherwise be dropped, so a grid is never silently left
+  // unwritten. The offline judgement of both is the mechanism test's arms 6 and 7.
+  return false;
 }
 
 bool handover_allowed()

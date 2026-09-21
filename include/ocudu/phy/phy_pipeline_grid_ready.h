@@ -33,9 +33,15 @@ namespace ocudu {
 class grid_ready_hook
 {
 public:
-  /// Waits for the grid at \p storage, at most \p timeout_ms. True when the grid is ready (or nothing was
+  /// \param[in] storage Base of the grid's storage (resource_grid_device_view::base).
+  /// \param[in] slot    The RECEIVING SLOT the grid belongs to. It is half of the key, and the half that
+  ///                    makes it unambiguous: the storage address is handed back by the grid pool as soon
+  ///                    as the next slot's grid arrives, so the address alone would let a late reader be
+  ///                    served the NEXT slot's block (design document 5.9.15).
+  ///
+  /// Waits for the grid at \p storage / \p slot, at most \p timeout_ms. True when the grid is ready (or nothing was
   /// pending), false when the wait timed out - the caller must then NOT trust the grid.
-  using wait_fn = bool (*)(const void* storage, uint32_t timeout_ms);
+  using wait_fn = bool (*)(const void* storage, uint64_t slot, uint32_t timeout_ms);
 
   /// Installs the implementation (called by the Metal engines once, on first use).
   static void install(wait_fn fn) { fn_ref().store(fn, std::memory_order_release); }
@@ -44,10 +50,10 @@ public:
   static bool installed() { return fn_ref().load(std::memory_order_acquire) != nullptr; }
 
   /// See the class documentation.
-  static bool wait(const void* storage, uint32_t timeout_ms = 200)
+  static bool wait(const void* storage, uint64_t slot, uint32_t timeout_ms = 200)
   {
     wait_fn fn = fn_ref().load(std::memory_order_acquire);
-    return (fn == nullptr) || fn(storage, timeout_ms);
+    return (fn == nullptr) || fn(storage, slot, timeout_ms);
   }
 
 private:

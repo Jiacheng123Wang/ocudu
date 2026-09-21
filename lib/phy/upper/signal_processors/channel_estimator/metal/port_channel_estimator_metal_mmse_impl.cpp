@@ -1439,7 +1439,7 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
     // the engine does not keep the key, and a hop that follows one which adopted must not inherit its grid.
     // Only a device-addressable grid could have been written by a device block at all.
     const resource_grid_device_view hop_grid = args.grid.get_device_view();
-    engine->set_hop_grid(hop_grid.is_valid() ? hop_grid.base : nullptr);
+    engine->set_hop_grid(hop_grid.is_valid() ? hop_grid.base : nullptr, args.slot);
   }
 
   const unsigned nof_layers = args.dmrs_patterns.size();

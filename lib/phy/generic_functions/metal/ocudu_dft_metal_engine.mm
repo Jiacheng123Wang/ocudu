@@ -181,12 +181,16 @@ static void dft_stats_report()
   if (release_armed || (hand.handed != 0) || (hand.taken != 0)) {
     std::fprintf(stderr,
                  "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu outstanding=%zu "
-                 "keepalives=%llu/%llu (armed=%d)\n",
+                 "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu (armed=%d)\n",
                  static_cast<unsigned long long>(hand.handed),
                  static_cast<unsigned long long>(hand.taken),
                  static_cast<unsigned long long>(hand.superseded),
                  static_cast<unsigned long long>(hand.evicted),
                  hand.outstanding,
+                 static_cast<unsigned long long>(hand.fallback_commits),
+                 static_cast<unsigned long long>(hand.late_commits),
+                 static_cast<unsigned long long>(hand.grid_not_found),
+                 static_cast<unsigned long long>(hand.ready_timeouts),
                  // keepalives = released/attached: the two must be EQUAL at exit. A token still held is a
                  // receive buffer the radio cannot use again, i.e. a stall waiting to happen (5.9.7).
                  static_cast<unsigned long long>(s.keepalives_released.load(std::memory_order_relaxed)),
@@ -226,9 +230,25 @@ static void register_dft_contract_check()
        }});
 }
 
+/// \brief Commits a handed-over block the registry had to drop (see shared_burst::set_drop_committer()).
+///
+/// The engine knows what a commit owes and the registry does not: the GPU-time probe must be armed right
+/// before the commit. A late block is deliberately NOT published on the front-end chain: it is the receiving
+/// chain's work, whose consumer is gone, and the chain's waiters must not be made to wait for it.
+void commit_late_handed_block(void* command_buffer)
+{
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  if (cb == nil) {
+    return;
+  }
+  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
+  [cb commit];
+}
+
 /// Registered once, on first use of the engine (see register_dft_contract_check()).
 static const bool dft_contract_registered = []() {
   register_dft_contract_check();
+  metal::shared_burst::set_drop_committer(&commit_late_handed_block);
   return true;
 }();
 
@@ -250,13 +270,17 @@ void dft_handover_heartbeat(const char* where)
   const dft_stats_t&                         s    = dft_stats();
   std::fprintf(stderr,
                "[dft_handover] %s handed=%llu taken=%llu superseded=%llu evicted=%llu outstanding=%zu "
-               "keepalives=%llu/%llu\n",
+               "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu\n",
                where,
                static_cast<unsigned long long>(hand.handed),
                static_cast<unsigned long long>(hand.taken),
                static_cast<unsigned long long>(hand.superseded),
                static_cast<unsigned long long>(hand.evicted),
                hand.outstanding,
+               static_cast<unsigned long long>(hand.fallback_commits),
+               static_cast<unsigned long long>(hand.late_commits),
+               static_cast<unsigned long long>(hand.grid_not_found),
+               static_cast<unsigned long long>(hand.ready_timeouts),
                static_cast<unsigned long long>(s.keepalives_released.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.keepalives.load(std::memory_order_relaxed)));
 }
@@ -1064,8 +1088,10 @@ void* dft_metal_engine::release_block(const void* grid_base)
   // generation, because with the hand-over the grid is produced at the LANE's commit and a host read is not
   // ordered against it at all. Armed here, on the buffer that will carry the grid, before it is handed over.
   const uint64_t generation = metal::shared_queue::grid_ready_signal(cb);
+  // The SLOT is half of the key (5.9.15): the grid's storage address alone is reused by the pool from one
+  // slot to the next, and a consumer served the wrong slot's block reads a grid nobody wrote.
   metal::shared_burst::deposit_released(
-      grid_base, cb, generation, [tokens]() { release_block_tokens(tokens); });
+      grid_base, engine->lane_slot, cb, generation, [tokens]() { release_block_tokens(tokens); });
   // Per-deposit line, keyed by the grid the hop will look up: this and the take-side line in the estimator
   // are what say whether the two ends name the SAME address (D1 diagnostics, 5.9.11). Rate-limited, because
   // a healthy run has one per slot.

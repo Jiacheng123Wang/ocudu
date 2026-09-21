@@ -927,7 +927,10 @@ public:
   ///
   /// \param[in] grid_base Storage base of the grid the next hop reads
   ///            (resource_grid_reader::get_device_view().base), or nullptr for a hop that must not adopt.
-  void set_hop_grid(const void* grid_base);
+  /// \param[in] slot      The receiving slot of that grid. The storage ADDRESS is reused by the grid pool
+  ///            from one slot to the next, so it does not identify the block by itself: a hop that names the
+  ///            wrong slot would adopt the wrong block and read a grid nobody wrote (5.9.15).
+  void set_hop_grid(const void* grid_base, uint64_t slot);
 
   /// \brief Waits for the submission of run_async() and reports whether it completed.
   /// \return True when there was nothing pending, or when the pending submission succeeded.

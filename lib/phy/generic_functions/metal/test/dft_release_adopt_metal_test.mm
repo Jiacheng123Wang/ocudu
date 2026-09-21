@@ -74,6 +74,11 @@ kernel void probe_grid_read(device const ushort* grid [[buffer(0)]],
 }
 )MSL";
 
+/// Receiving slot the test's blocks belong to. The registry is keyed by (grid storage, slot) because the
+/// grid pool reuses the storage from one slot to the next (5.9.15), so the test names it exactly as the
+/// receiving chain does: through the engine (set_lane_slot()) and through the consumer's ask.
+constexpr uint64_t test_slot = 4242;
+
 constexpr unsigned transform_size = 512; // 5 MHz cell
 constexpr unsigned nof_subc       = 300; // 25 PRB
 constexpr unsigned dst_offset     = 64;  // the grid element the (port 0, symbol 0) symbol starts at
@@ -157,6 +162,7 @@ int main()
       std::fprintf(stderr, "FAIL: the Metal DFT engine did not initialize\n");
       return 1;
     }
+    engine.set_lane_slot(test_slot);
 
     id<MTLDevice> device = metal::shared_queue::device();
     if (device == nil) {
@@ -265,7 +271,7 @@ int main()
         std::fprintf(stderr, "FAIL: release_block() handed a block over while OCUDU_DFT_RELEASE_BLOCK is unset\n");
         return 1;
       }
-      if (metal::shared_burst::take_released(grid_base) != nil) {
+      if (metal::shared_burst::take_released(grid_base, test_slot) != nil) {
         std::fprintf(stderr, "FAIL: a block was deposited while OCUDU_DFT_RELEASE_BLOCK is unset\n");
         return 1;
       }
@@ -363,18 +369,18 @@ int main()
                        rep);
           return 1;
         }
-        if (metal::shared_burst::take_released(grid_base) != cb) {
+        if (metal::shared_burst::take_released(grid_base, test_slot) != cb) {
           std::fprintf(stderr,
                        "FAIL: the deposit did not come back for the grid it was keyed by (rep %u) - the "
                        "handover is not addressable by the consumer\n",
                        rep);
           return 1;
         }
-        if (metal::shared_burst::take_released(grid_base) != nil) {
+        if (metal::shared_burst::take_released(grid_base, test_slot) != nil) {
           std::fprintf(stderr, "FAIL: a deposit was handed out twice (rep %u)\n", rep);
           return 1;
         }
-        if (metal::shared_burst::take_released(static_cast<const char*>(grid_alloc)) != nil) {
+        if (metal::shared_burst::take_released(static_cast<const char*>(grid_alloc), test_slot) != nil) {
           std::fprintf(stderr, "FAIL: a deposit was handed out for an address nothing was deposited for\n");
           return 1;
         }
@@ -570,7 +576,7 @@ int main()
         return 1;
       }
       // The deposit that replaced it is still live, and claims back cleanly.
-      if (metal::shared_burst::take_released(grid_base) == nil) {
+      if (metal::shared_burst::take_released(grid_base, test_slot) == nil) {
         std::fprintf(stderr, "FAIL: the replacing deposit was not there to claim\n");
         return 1;
       }
@@ -675,7 +681,7 @@ int main()
 
         if (claimed_by_hop != 0) {
           // A hop does what the lane does: take it and commit it in a burst.
-          id<MTLCommandBuffer> cb = metal::shared_burst::take_released(grid_base);
+          id<MTLCommandBuffer> cb = metal::shared_burst::take_released(grid_base, test_slot);
           if (cb == nil) {
             std::fprintf(stderr, "FAIL: the host-reader arm's deposit was not there to take\n");
             return 1;
@@ -688,7 +694,7 @@ int main()
         }
 
         // The host reader: it must not have to know which of the two shapes it is looking at.
-        if (!metal::shared_burst::ensure_grid_produced(grid_base)) {
+        if (!metal::shared_burst::ensure_grid_produced(grid_base, test_slot)) {
           std::fprintf(stderr,
                        "FAIL: ensure_grid_produced() timed out (claimed_by_hop=%u) - a host reader would "
                        "have read a grid nobody wrote\n",
@@ -725,7 +731,7 @@ int main()
           return 1;
         }
         // A second call finds nothing to do - the record is gone with the completion.
-        if (!metal::shared_burst::ensure_grid_produced(grid_base)) {
+        if (!metal::shared_burst::ensure_grid_produced(grid_base, test_slot)) {
           std::fprintf(stderr, "FAIL: ensure_grid_produced() failed on an already produced grid\n");
           return 1;
         }
@@ -733,6 +739,65 @@ int main()
       std::fprintf(stderr,
                    "[dft-release] arm 6: a host reader is served both ways - the unclaimed block is "
                    "committed for it, the claimed one is waited for, and the grid is written either way\n");
+    }
+
+    // ---- Arm 7: the KEY is (storage, slot), not storage alone ------------------------------------
+    // This is the defect the s34 leg found (5.9.15): the grid pool hands a storage address back as soon as
+    // the next slot's grid arrives, so a consumer asking by ADDRESS is served the NEXT slot's block, commits
+    // and waits for that one, and reads a grid nobody ever wrote - 72% of the PUCCH reports were unusable.
+    // Two blocks for the SAME storage in two different slots must stay two different answers.
+    {
+      constexpr uint64_t slot_a = test_slot + 1;
+      constexpr uint64_t slot_b = test_slot + 2;
+      id<MTLCommandBuffer> cb_a  = nil;
+      id<MTLCommandBuffer> cb_b  = nil;
+      metal::dft_metal_engine::grid_write write;
+      write.grid_base  = grid_base;
+      write.grid_bytes = grid_bytes;
+      write.dst_offset = dst_offset;
+      write.nof_subc   = nof_subc;
+      write.map_offset = transform_size - nof_subc / 2;
+      write.phase_re   = 1.0F;
+      for (unsigned which = 0; which != 2; ++which) {
+        engine.set_lane_slot(which == 0 ? slot_a : slot_b);
+        if (!engine.begin_block() || !engine.submit_slot_grid_write(in_mem, out_mem, 0, write)) {
+          std::fprintf(stderr, "FAIL: the key arm could not stage its block\n");
+          return 1;
+        }
+        void* handle = engine.release_block(grid_base);
+        if (handle == nullptr) {
+          std::fprintf(stderr, "FAIL: the key arm's release was refused\n");
+          return 1;
+        }
+        (which == 0 ? cb_a : cb_b) = (__bridge id<MTLCommandBuffer>)handle;
+      }
+      if (cb_a == cb_b) {
+        std::fprintf(stderr, "FAIL: the key arm produced one buffer for two slots\n");
+        return 1;
+      }
+      // Each slot's consumer must be given ITS OWN block - the whole point of the key.
+      if (metal::shared_burst::take_released(grid_base, slot_a) != cb_a) {
+        std::fprintf(stderr,
+                     "FAIL: the consumer of slot %llu was not given its own block - the storage address was "
+                     "reused by a later slot and the key did not tell them apart\n",
+                     static_cast<unsigned long long>(slot_a));
+        return 1;
+      }
+      if (metal::shared_burst::take_released(grid_base, slot_b) != cb_b) {
+        std::fprintf(stderr, "FAIL: the consumer of slot %llu was not given its own block\n",
+                     static_cast<unsigned long long>(slot_b));
+        return 1;
+      }
+      // A slot nothing was handed over for gets nothing (and is counted): a reader must not be served
+      // somebody else's grid.
+      if (metal::shared_burst::take_released(grid_base, slot_b + 1000) != nil) {
+        std::fprintf(stderr, "FAIL: a slot with no hand-over was given a block\n");
+        return 1;
+      }
+      // Both blocks stay uncommitted on purpose: that is the state a deposit is in, and the registry's
+      // records are what the next ask must resolve.
+      std::fprintf(stderr,
+                   "[dft-release] arm 7: two slots, one storage - each consumer is served its own block\n");
     }
 
     std::fprintf(stderr,

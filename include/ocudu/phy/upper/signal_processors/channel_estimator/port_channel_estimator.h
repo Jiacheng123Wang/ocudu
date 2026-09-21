@@ -11,6 +11,7 @@
 #include "ocudu/phy/upper/dmrs_mapping.h"
 #include "ocudu/phy/upper/re_measurement.h"
 #include "ocudu/ran/pusch/pusch_constants.h"
+#include "ocudu/ran/slot_point.h"
 #include "ocudu/ran/subcarrier_spacing.h"
 #include <optional>
 
@@ -81,6 +82,12 @@ public:
 
   /// Estimator configuration parameters.
   struct configuration {
+    /// \brief Receiving slot the estimated channel belongs to (D1, design document 5.9.15).
+    ///
+    /// A device backend that adopts the receiving chain's block for this hop needs it: the block is keyed by
+    /// the grid's storage AND the slot, because the grid pool hands the storage address back as soon as the
+    /// next slot's grid arrives (see mmse_engine::set_hop_grid()).
+    slot_point slot;
     /// Subcarrier spacing of the estimated channel.
     subcarrier_spacing scs = subcarrier_spacing::kHz15;
     /// Cyclic prefix.

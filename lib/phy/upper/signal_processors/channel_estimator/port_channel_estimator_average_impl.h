@@ -164,6 +164,13 @@ protected:
     /// nothing has to be brought over. See ocudu_mmse_pilots.metal (K0-a).
     const resource_grid_reader& grid;
     unsigned                    port;
+    /// \brief The receiving slot this hop belongs to (D1, design document 5.9.15).
+    ///
+    /// It is half of the key that says WHICH block produced the grid this hop reads: the grid's storage
+    /// ADDRESS alone does not identify it, because the grid pool hands the address back as soon as the
+    /// upper PHY drops its reference - i.e. when the next slot's grid arrives. A device backend that adopts
+    /// the receiving chain's block (see mmse_engine::set_hop_grid()) therefore names the slot too.
+    uint64_t slot = 0;
     /// Transmitted pilots (per layer, per DM-RS symbol).
     const dmrs_symbol_list& pilots;
     /// Received pilots (per CDM group, per DM-RS symbol).

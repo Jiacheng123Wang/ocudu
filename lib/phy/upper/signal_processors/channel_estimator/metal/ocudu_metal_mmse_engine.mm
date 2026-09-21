@@ -411,6 +411,8 @@ struct mmse_engine_impl {
   /// adapter did not announce cannot inherit the previous hop's key.
   ///@{
   const void* hop_grid = nullptr;
+  /// Receiving slot of \c hop_grid: the other half of the key (see set_hop_grid()).
+  uint64_t    hop_grid_slot = 0;
   ///@}
 
   // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
@@ -1064,14 +1066,18 @@ static stage_encoder begin_stage_on_handed(mmse_engine_impl* e)
   if (e->hop_grid == nullptr) {
     return s;
   }
-  id<MTLCommandBuffer> handed = ocudu::metal::shared_burst::take_released(e->hop_grid);
+  id<MTLCommandBuffer> handed = ocudu::metal::shared_burst::take_released(e->hop_grid, e->hop_grid_slot);
   // Take-side line of the D1 diagnostics: the hop names the grid it reads, and this is where the two ends
   // are compared. A MISS here is the whole finding when it happens - the receiving chain's transforms are
   // then in a buffer nobody commits, so the grid is never written AND its input is never given back.
   {
     static std::atomic<unsigned> logged{0};
     if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
-      std::fprintf(stderr, "[d1_handover] hop grid=%p -> %s\n", e->hop_grid, (handed != nil) ? "TAKEN" : "MISS");
+      std::fprintf(stderr,
+                   "[d1_handover] hop grid=%p slot=%llu -> %s\n",
+                   e->hop_grid,
+                   static_cast<unsigned long long>(e->hop_grid_slot),
+                   (handed != nil) ? "TAKEN" : "MISS");
     }
   }
   if (handed == nil) {
@@ -3376,11 +3382,12 @@ void mmse_engine::set_lane_order(ce_lane_order order)
   }
 }
 
-void mmse_engine::set_hop_grid(const void* grid_base)
+void mmse_engine::set_hop_grid(const void* grid_base, uint64_t slot)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   if (e != nullptr) {
-    e->hop_grid = grid_base;
+    e->hop_grid      = grid_base;
+    e->hop_grid_slot = slot;
   }
 }
 

@@ -3300,6 +3300,37 @@ PUCCH 的 `metric/sinr`、CRC 分层比、`real-time failures`。
 **⑤ 已再次关掉交出**（`grid_has_host_consumers()` 又返回 `true`），理由写在代码里：
 **"把网格交出去、然后服务错的那一份，比不交更糟"**。
 
+#### 5.9.16 ✅ 键已修好并离线验过（S18 续）：**注册表按【网格存储 + 接收槽】索引；没人认领的块不再被丢，而是【补提交】**
+
+**① 三处改动（就是 §5.9.15 ④ 的那张表）**
+
+| # | 改动 | 落点 |
+|---|---|---|
+| 1 | **键 = (网格存储, 接收槽)**：`deposit_released(grid, slot, cb, gen, hook)` / `take_released(grid, slot)` / `ensure_grid_produced(grid, slot)` | `shared_burst` |
+| 2 | 交出时带槽号 | `dft_metal_engine::release_block()` 用 `lane_slot`（`set_lane_slot()` 早就给了）|
+| 3 | 消费者带自己的槽号 | `grid_ready_hook::wait(storage, slot)`：PUCCH/PUCCH-f1/SRS 传 `current_slot.to_uint()`；**估计器**：把 `slot_point slot` 加进 `port_channel_estimator::configuration`（由 `dmrs_pusch_estimator_impl` 从 `config.slot` 填），再经 `args.slot` 传给 `mmse_engine::set_hop_grid(base, slot)` |
+| 4 | **没人认领的块在"被替换/被淘汰"时【补提交】而不是丢掉**（`commit_dropped()` + 引擎装的 `drop_commit_fn`）| `shared_burst`：这类块没人会提交，丢了就是"网格永远不写 + 凭据永远不还" |
+| 5 | 记录**活到"已产出"**（不再是"被取走"），并把 `fallback` / `late` / `not_found` / `timeouts` 打进仪表 | `handed_entry::produced` + 引擎报告 |
+
+**② 上界从 8 提到 256**：记录现在活到"已产出"，是**给晚到的读者留的历史**（~1000 槽/s ⇒ 256 ≈ 0.25 s，
+远大于消费者可能落后的一个槽），同时仍然挡住"永远不跑的跳"把表撑爆。
+
+**③ 离线判据（机制单测第 7 条臂，专判这个缺陷）**
+
+> **同一段存储、两个槽** ⇒ 两个块必须是**两个不同的答案**：槽 A 的消费者拿到 A 的块、槽 B 拿到 B 的，
+> 而**没人交出的槽**（无论谁来问）拿到 `nil`。
+
+全测：`handed=46 taken=44 superseded=43 evicted=0 outstanding=3 fallback=1 late=2 not_found=0 timeouts=0 keepalives=44/44`。
+（`superseded` 高是因为单测反复用同一个 (存储, 槽)；`late=2` 说明"补提交"那条路真的被走到了 ✓）
+
+**④ 门（旋钮关）**：`value_net` **47/0**、`ctest -R metal` **10/10**、
+`ctest -R "ul_pipeline_probe|puxch|lower_phy"` **5/5**、`neutral_vs_baseline` **131**（同数）。
+
+**⑤ ⇒ 下一步：腿对**（`gpu` 对照 / `gpu` + `OCUDU_DFT_RELEASE_BLOCK=1`）。判读按 §5.9.15 的那张表，
+**先看 PUCCH 的 `sinr` 中位数（对照 +24 dB）与 PUSCH 的（对照 +26 dB）**，
+再看 `handed/taken/`**`fallback`**`/late/not_found/timeouts` 五个计数与 CRC。
+**`not_found` 非 0 说明还有读者落在"记录已被淘汰"的窗口里**（那时它无法等待）；`timeouts` 非 0 说明栅栏没等到。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。

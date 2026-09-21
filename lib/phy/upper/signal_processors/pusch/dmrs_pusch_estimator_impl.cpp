@@ -40,6 +40,7 @@ void dmrs_pusch_estimator_impl::estimate(dmrs_pusch_estimator_notifier& notifier
   // Generate symbols and allocation patterns.
   generate(temp_symbols, coordinates, config);
 
+  est_cfg.slot         = config.slot;
   est_cfg.dmrs_pattern.assign(coordinates.begin(), coordinates.end());
   est_cfg.scs          = to_subcarrier_spacing(config.slot.numerology());
   est_cfg.first_symbol = config.first_symbol;

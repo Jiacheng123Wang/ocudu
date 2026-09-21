@@ -116,9 +116,16 @@ public:
   /// \param[in] generation Grid-production fence generation armed on \p cb (shared_queue::grid_ready_signal),
   ///            or 0 when the depositor armed none - a host reader then has nothing to wait for.
   static void deposit_released(const void*          grid_base,
+                               uint64_t             slot,
                                id<MTLCommandBuffer> cb,
                                uint64_t             generation = 0,
                                std::function<void()> on_drop   = {});
+
+  /// \brief Called to commit a block the registry has to drop - see deposit_released()'s note on late
+  ///        commits. Installed by the engine that deposits (it knows what a commit owes: the GPU-time probe
+  ///        and, for a front-end block, the chain it is published on).
+  using drop_commit_fn = void (*)(void* command_buffer);
+  static void set_drop_committer(drop_commit_fn fn);
 
   /// \brief Takes the command buffer deposited for \p grid_base, or nil when there is none.
   ///
@@ -129,7 +136,7 @@ public:
   /// \note The deposit is NOT removed: it stays registered as CLAIMED until its command buffer completes, so
   ///       a HOST reader of that grid can still wait for its production (see ensure_grid_produced()). A
   ///       second take of the same address returns nil - the buffer belongs to one hop.
-  static id<MTLCommandBuffer> take_released(const void* grid_base);
+  static id<MTLCommandBuffer> take_released(const void* grid_base, uint64_t slot);
 
   /// \brief Makes sure the grid at \p grid_base has been - or will be - WRITTEN, for a host reader (D1-A).
   ///
@@ -147,7 +154,7 @@ public:
   ///       wrote cannot be produced at all. The counter that says it happened is `superseded`.
   /// \return True when the grid is ready (or nothing was pending); false when the wait timed out, which
   ///         means the reader must NOT trust the grid.
-  static bool ensure_grid_produced(const void* grid_base);
+  static bool ensure_grid_produced(const void* grid_base, uint64_t slot);
 
   /// \brief What the registry has seen, for the diagnostics (see the [metal_stats] dft handover line).
   struct handed_counters {
@@ -170,6 +177,14 @@ public:
     /// Non-zero is normal in a run with PUCCH-only slots; a large number means the consumers are late and
     /// the deposits are being swept, not served.
     uint64_t fallback_commits = 0;
+    /// Blocks COMMITTED LATE by the registry itself: deposits nobody claimed that were about to be dropped
+    /// (the storage came back, or the bound was reached). Each one is a grid that would otherwise never
+    /// have been written at all - so this number is the size of a silence that used to be invisible.
+    uint64_t late_commits = 0;
+    /// Reads that found NO record for their (storage, slot): either no hand-over is armed, or the record was
+    /// produced and evicted long before. A reader that finds nothing cannot wait, so this counts the reads
+    /// the key cannot protect.
+    uint64_t grid_not_found = 0;
     /// Host waits that timed out: the grid the caller was about to read was NOT ready.
     uint64_t ready_timeouts = 0;
   };
