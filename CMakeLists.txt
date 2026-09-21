@@ -641,6 +641,20 @@ if (ENABLE_SCHEDTRACE)
     )
 endif (ENABLE_SCHEDTRACE)
 
+find_package(Eigen3 NO_MODULE)
+if (Eigen3_FOUND)
+    message("-- Found Eigen3")
+    sbom_add(
+        PACKAGE            "Eigen3"
+        DOWNLOAD_LOCATION  "https://libeigen.gitlab.io/"
+        SUPPLIER           "The Eigen Authors"
+        LICENSE            "MPL-2.0"
+        VERSION            ${Eigen3_VERSION}
+    )
+else (Eigen3_FOUND)
+    message("-- Could not find Eigen3")
+endif (Eigen3_FOUND)
+
 ########################################################################
 # Instruction Set Architecture setup
 ########################################################################

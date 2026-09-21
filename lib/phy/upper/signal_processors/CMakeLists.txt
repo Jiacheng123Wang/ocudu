@@ -97,3 +97,11 @@ add_to_exported_libs(
     ocudu_srs_estimator
     ocudu_ssb_generators
 )
+
+if (TARGET Eigen3::Eigen)
+    add_library(ocudu_doa_estimator STATIC srs/doa_estimator_eigen.cpp srs/doa_estimator_eigen_factory.cpp)
+
+    target_link_libraries(ocudu_signal_processors INTERFACE ocudu_doa_estimator)
+
+    add_to_exported_libs(ocudu_doa_estimator)
+endif (TARGET Eigen3::Eigen)
