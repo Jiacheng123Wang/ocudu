@@ -1,15 +1,18 @@
-# 交接（入口） — S21：**D1 的拦路石不是"网格每槽复用"，是【网格的 MTLBuffer 对象在跳缓冲里不唯一】**（已修，待腿）
+# 交接（入口） — S21：**`s37` 腿对什么都没判（交出在代码里还是关的）⇒ 已重新武装 + 开工告警**（下一对腿才是 D1 的第一对）
 
 > **本文件是新会话的唯一入口**：读完它就能开工。
 > **⚠ 本文件【撤回】`session_handoff_2026-09-21-4.md` 的 §4.1 第 14/15 行**（那份说"网格是一个对象、每槽复用"，
 > 并据此把"给槽自己的网格"定为下一步——**证据读错了，不是修法**）。`-4.md` 保留不删。
-> **技术细节全在常驻设计文档**：本会话的是 **§5.9.19（已撤回 ①③④）** 与 **§5.9.20（★ 真障碍 + 修法 + 腿判据）**。
+> **技术细节全在常驻设计文档**：**§5.9.19（已撤回 ①③④）**、**§5.9.20（真障碍 + 修法 + 判据）**、
+> **§5.9.21（`s37` 腿对 + 重新武装 + 开工告警）**。
+>
+> **⚠ `s37` 那一对腿【不算数】**：候选臂 `handed=0 released=0`（旋钮设了、链子拒绝了交出）⇒ 两条都是对照臂。
 
 ---
 
 ## 0. 一句话状态
 
-**工作树 HEAD = （见下方 `git log -1`）**，改动：`ocudu_metal_mmse_engine.mm` 一个文件（+自检计数）。
+**工作树 HEAD = `867f3b0adf`**，改动：`ocudu_metal_mmse_engine.mm`、`ofdm_demodulator_impl.cpp`、设计文档 §5.9.20/§5.9.21、本文件。
 **开机第一件事仍是自查戳记**：
 ```bash
 git rev-parse --short=10 HEAD && grep build_info build/hashes.h
@@ -60,26 +63,46 @@ git rev-parse --short=10 HEAD && grep build_info build/hashes.h
 
 ---
 
-## 3. ★★★ 下一步：**上腿对**（`gpu` 模式；交出已武装）
+## 3. ★★★ 下一步：**再上一对腿**（这一次交出**真的会武装**；`s37` 那一对不算数）
 
 ```bash
-sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s37-d1-gridobj-base
-sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s37-d1-gridobj OCUDU_DFT_RELEASE_BLOCK=1
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s38-d1-armed-base
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s38-d1-armed OCUDU_DFT_RELEASE_BLOCK=1
 ```
+
+**★ 上腿后的第一件事（花 5 秒，省一个 OTA 周期）**：确认候选臂日志里**没有**开工告警
+```bash
+grep -c "will NOT exercise D1" <候选臂日志>     # 必须是 0
+```
+非 0 = 链子又拒绝了交出（告警里会点名是哪个谓词）⇒ 那一对又是对照臂，别急着测手机。
 
 **判读（按顺序）**
 
 | 先看 | 期望 |
 |---|---|
-| **`grid_shared == hops`**（`[metal_stats] mmse_ce … grid_shared=NNN grid_failed=0`，与 `calls=` 同量级）| **硬判据**：每一次跳的网格读都绑在生产者写过的那一个对象上 |
-| `crc=OK/KO`（**按调制分层**）| 候选臂**不再劣化**（这是上次唯一真正抓住问题的读数）|
+| **开工告警**（上面那条，0）| 交出这一次真的会发生 |
+| `[metal_stats] dft handover` | **`handed>0`、`taken>0`**、`timeouts==0`、`keepalives` 两侧相等 |
+| **`grid_shared == hops`**（`[metal_stats] mmse_ce … grid_shared=NNN grid_failed=0`，与 `burst commits=` 同量级）| **硬判据**：每一次跳的网格读都绑在生产者写过的那一个对象上 |
+| `Real-time failures` / `RF late` | 不劣化（**先看这一条**）|
+| `crc=OK/KO`（**按调制分层**）| 候选臂**不再劣化**（上次唯一真正抓住问题的读数）|
 | `sinr` 分布 | 回到对照臂形状（**不再有"高 sinr + CRC 全错"**）|
 | UE | 能接入并跑 ping/iperf3（本配置是 n1 5 MHz FDD bridge；手机 WiFi 关掉）|
-| `[metal_stats] dft handover` | `handed>0`、`taken>0`、**`timeouts==0`**、`keepalives` 两侧相等 |
-| `Real-time failures` / `RF late` | 不劣化（先看这一条）|
+| `dft commits` | 从 ~2 次/跳**塌到 ~0**（交出后引擎自己不再提交）|
 
 **★ 若候选臂仍坏**：先比 `grid_shared`——若它 `== hops` 而数据仍错，则"对象唯一性"这条已排除，
-下一个嫌疑是**前端那条写**本身（`wrap_grid()` 在武装时与均衡器的映射是否同一对象，可用 `OCUDU_CE_WRAP_MAP=1` 打出来比对）。
+下一个嫌疑是**前端那条写**本身（武装时它与均衡器的映射是否同一对象，可用 `OCUDU_CE_WRAP_MAP=1` 打出来比对）。
+
+---
+
+## 3b. ★ 本会话已做的两件事（都已提交，HEAD `867f3b0adf`）
+
+1. **修 `MTLBuffer` 对象唯一性**：`mmse_engine_impl::wrap_grid()`（估计器读网格改走进程级缓存、保留 offset）
+   + `grid_shared`/`grid_failed` 计数（见 §2 与设计文档 §5.9.20）；
+2. **重新武装交出**：`grid_has_host_consumers()` → `false`（两条理由逐条撤回，见设计文档 §5.9.21 ②），
+   并加**开工告警**（旋钮设了而链子拒绝时点名告警）。
+   **★ 顺带发现**：关着的那段时间，`ofdm_demodulator_metal_batch_test` 的武装节**也**被 `handover_allowed()`
+   拒了 ⇒ **那条"0/17808"的离线门一度是空判**（它声称在跑武装路径，其实什么都没跑）。重新武装后它又是真的：
+   `handed=1 fallback=1`、`[armed] REs=17808 mismatching=0`。
 
 ---
 
@@ -109,4 +132,6 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s37-d1-gridobj OCUD
 
 **D1 的拦路石是"一跳一条命令缓冲"里 `MTLBuffer` 对象的唯一性被破坏：估计器读网格绑的是自己的私有对象，
 而前端写的是进程级共享对象 ⇒ 两者之间没有任何顺序 ⇒ DMRS 提取读到上一帧的网格（"高 SINR + CRC 全错"就是这个签名）。
-修法是一行 + 一个新计数；判据是空口腿的 `grid_shared == hops` 与 CRC 分层。**
+修法是一行 + 一个新计数（`grid_shared == hops`）。`s37` 那一对腿因为交出在代码里还关着而**什么都没判**
+（`handed=0 released=0`）——现在已重新武装并加了开工告警，**下一对（`s38`）才是 D1 的第一对腿**。
+⚠ 连那条"0/17808"的离线武装门在关着期间也是**空判**，现在恢复为真（`handed=1 fallback=1`）。**
