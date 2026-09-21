@@ -3861,6 +3861,49 @@ unsigned ul_pipeline_depth = 3 * nof_slots_per_frame;   // 原来是 nof_slots_p
 
 **判读约定（写进腿法）**：A/B 比较**取稳态饱和窗口**，避开阶跃后 1–2 s 的自适应瞬态。
 
+---
+
+#### 5.9.30 `s42` 的判据（第二档余量 6 帧）
+
+| 判据 | 期望 | `s41` 实测 |
+|---|---|---|
+| `UL processor is busy`（武装）| **→ 0**（或个位数）| 91（对照 0）|
+| `[ul_pipeline]` 最坏（**只看稳态**）| 回到 ~10 ms 量级 | 71.6 ms（爬坡窗口）|
+| 提交 / 上行时隙 | **仍 ~1.036** | 1.036 ✓ |
+| `grid_devwaited>0`、`grid_wait_unencoded==0`、`timeouts==0` | 成立 | 919 / 0 / 0 ✓ |
+| 开工告警 / 契约 / CRC 分层 | 0 / 8/8 / 与对照同形 | 0 / 8/8 / 87.6% vs 87.9% ✓ |
+| 内存 | 处理器数 = 6 × 每帧时隙数（15 kHz: 60）| 30 |
+
+#### 5.9.29 ★★ 爬坡拒收的**结构性修法**（方案已定，未实现）+ 本轮的**第二档余量**
+
+**① 本轮的处置（已做）**：`nof_ul_rg` 3 帧 → **6 帧**（`du_low_config_translator.cpp`，一行 + 注释）。
+`3` 帧把拒收从 716 压到 91（对照 84→0，§5.9.27）；剩下的 91 次全在**载荷阶跃**那几秒，
+所以再加一档让"阶跃的排队突发"有地方排空。代价：每处理器一份网格 + payload 池
+（25 PRB ~34 KB，51 PRB/2 端口 ~140 KB），**每时隙提交数不变**。判据见 §5.9.30。
+
+**② 根因（一句话）**：`get_pdu_slot_repository()` 要求**上一个槽的 PDU 任务全部结束**才肯配置新槽
+（`uplink_processor_fsm::start_new_slot()` 只能从 IDLE 转移，而 pending 计数在任务体**末尾**才减）。
+任务真正"占着槽"的只有两样东西：**PDU 的配置字段**（`&pdu` 捕获）与**该槽的网格内容**。
+
+**③ 方案 A（便宜、先做）：把"槽作用域的释放"从"任务结束"里拆出来**
+
+| 步 | 内容 | 为什么成立 |
+|---|---|---|
+| 1 | `uplink_processor_fsm` 加第三个计数 `pending_slot_tasks`（与现有的"队列中 / 执行中"并列），并加 `on_release_slot_ownership()` | 现有编码是 `accepting_mask` + `inc_queue` + `inc_exec`，加一位不改变既有语义 |
+| 2 | `start_new_slot()` 的条件改成"**队列中为 0 且 `pending_slot_tasks` 为 0**"（原来要求整个计数为 0）| 这两项才是"上一个槽的存储还有人读" |
+| 3 | `process_pusch()` 的 lambda 在 **`pusch_proc->process(...)` 返回之后**立刻调用 `on_release_slot_ownership()` | 该调用**之后**：`pdu` 不再被解引用（通知适配器已把 rnti/slot/harq_id **拷走**，回调只捕 `[this]`），网格也只在 `process()` 内部被读 |
+| 4 | 回调里的 `on_finish_processing_pdu()` 保持不变（任务真正结束）；`discard_slot()`/`stop()` 仍要求**全部**计数为 0 | 不放松这两条既有关键不变量 |
+
+⇒ 效果：**LDPC 解码（长尾）不再阻止下一个槽被配置**，而"网格与 PDU 的生命期"照样被覆盖。
+**判据（可离线）**：`uplink_processor` 单测新增一条"**解码还在飞时，下一个槽可以被配置**"，
+外加现有 216 条 puxch 单测与 `DeferredTransformsKeepTheirSamplesUntilTheirBlockCompletes` 不变。
+
+**④ 方案 B（更彻底，方案 A 不够时再做）**：给 `uplink_processor_impl` 一个**按槽上下文的小池子**
+（每份：PDU 仓库 + 网格 + `nof_processed_symbols` + 适配器计数 + 自己的 FSM），
+`get_slot_processor(slot)` 返回该上下文的 facade，工厂按处理器创建 K 份网格。
+它让"上一个槽"彻底不参与下一个槽的判据；代价是上层 PHY 的槽生命周期重构（`uplink_processor_impl`、
+`uplink_pdu_slot_repository_impl`、工厂与两处单测）。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。

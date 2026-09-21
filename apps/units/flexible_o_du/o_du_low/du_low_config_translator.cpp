@@ -249,11 +249,18 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
     // for that processor - `Real-time failure in FAPI: UL processor is busy`, measured 716 against the
     // control arm's 84 in the same pair, which drops that slot's grants altogether (design document 5.9.25).
     //
-    // Three frames of slack (30 ms at 15 kHz) is what it takes to keep that off the deadline; the price is
-    // one resource grid plus a payload pool per extra processor (a grid is ~34 KB at 25 PRB), and the number
-    // of CPU submissions per slot does NOT change with it - the hand-over still commits one block per
-    // received slot.
-    unsigned ul_pipeline_depth = 3 * nof_slots_per_frame;
+    // Three frames of slack (30 ms at 15 kHz) took that from 716 refusals to 91 and the control arm's 84 to
+    // 0 (design document 5.9.27). The 91 that were left sit in the same few seconds - the offered load
+    // stepping to one full-bandwidth grant per slot - so this is the SECOND notch: six frames, 60 ms, which
+    // is two orders of magnitude above a task's own lifetime (lane + LDPC ~1-2 ms) and leaves the step's
+    // queueing burst room to drain.
+    //
+    // The price is one resource grid plus a payload pool per extra processor (~34 KB per grid at 25 PRB,
+    // ~140 KB at 51 PRB with two ports), and the number of CPU submissions per slot does NOT change with it:
+    // the hand-over still commits one block per received slot. The DURABLE fix is not this number - it is to
+    // stop serializing a processor's slots behind the previous slot's tasks (design document 5.9.28), and
+    // this notch is what keeps the deadline off the table until that lands.
+    unsigned ul_pipeline_depth = 6 * nof_slots_per_frame;
 
     const prach_configuration prach_cfg =
         prach_configuration_get(cell.freq_range, cell.duplex, cell.prach_config_index);
