@@ -212,7 +212,14 @@ bool shared_burst::open()
 static void d1_trace(const char* what, id<MTLCommandBuffer> cb)
 {
   static std::atomic<unsigned> logged{0};
-  if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+  // Silent unless the hand-over is armed: the lane's burst runs in every mode, and a control arm does not
+  // need one line per hop.
+  const char* armed = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
+  if (((armed == nullptr) || (std::strtoul(armed, nullptr, 10) == 0)) ||
+      (logged.fetch_add(1, std::memory_order_relaxed) >= 64)) {
+    return;
+  }
+  {
     std::fprintf(stderr, "[d1_handover] burst %s cb=%p\n", what, (__bridge const void*)cb);
   }
 }

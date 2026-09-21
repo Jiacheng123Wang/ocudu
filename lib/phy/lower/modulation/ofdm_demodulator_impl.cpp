@@ -57,9 +57,28 @@ bool host_reads_the_grid()
 /// serves every hop (phy_pipeline_strict_enabled()) - in mode=gpu a hop the device cannot serve FAILS the
 /// grant instead of being covered by the host, so a device refusal cannot silently become a host read of a
 /// grid nobody wrote.
+/// \brief Whether the resource grid has consumers that read it on the HOST - which the hand-over cannot
+///        serve, and which is why the hand-over is OFF today.
+///
+/// THE PUCCH IS ONE, and it is configured in every deployment that carries control information:
+/// pucch_processor_impl reads the grid through resource_grid_reader and has NO device view at all, and the
+/// upper PHY processes it as soon as the slot is handed over. A hand-over produces the grid at the LANE's
+/// commit instead - a slot later - so a host reader reads memory nobody has written yet. Measured on air:
+/// every PUCCH report came out `metric=nan sinr=-inf` (10924 healthy ones in the control arm), the attach
+/// never completed, and 53135 real-time failures followed (design document 5.9.12).
+///
+/// It returns a constant on purpose: this is not a knob and not a per-hop property, it is the SHAPE of the
+/// receiving chain. It becomes false when the grid's host consumers are ordered after the lane's completion
+/// - the wait belongs at the consumer that needs the data, not at the producer - which is the next piece of
+/// D1 rather than something an operator arms.
+bool grid_has_host_consumers()
+{
+  return true;
+}
+
 bool handover_allowed()
 {
-  return !host_reads_the_grid() && phy_pipeline_strict_enabled();
+  return !grid_has_host_consumers() && !host_reads_the_grid() && phy_pipeline_strict_enabled();
 }
 
 } // namespace
