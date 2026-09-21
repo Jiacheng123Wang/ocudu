@@ -239,9 +239,21 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
       ++dl_pipeline_depth;
     }
 
-    // The uplink pipeline depth is set equal to the number of slots per frame for reusing uplink processors every
-    // 10 ms.
-    unsigned ul_pipeline_depth = nof_slots_per_frame;
+    // Slots per frame, times the slack the uplink chain needs per processor.
+    //
+    // One slot per frame was the historical choice ("reusing uplink processors every 10 ms"): a processor is
+    // handed a new uplink slot only after the previous one's PDU tasks have all finished, so this number is
+    // the slack between "the task of slot N is still running" and "slot N + depth arrives". The D1 block
+    // hand-over moves the resource grid's production to the LANE's commit, so a hop's task outlives its slot
+    // by a little more than it used to, and at the offered-load ramp the chain then refused the next UL_TTI
+    // for that processor - `Real-time failure in FAPI: UL processor is busy`, measured 716 against the
+    // control arm's 84 in the same pair, which drops that slot's grants altogether (design document 5.9.25).
+    //
+    // Three frames of slack (30 ms at 15 kHz) is what it takes to keep that off the deadline; the price is
+    // one resource grid plus a payload pool per extra processor (a grid is ~34 KB at 25 PRB), and the number
+    // of CPU submissions per slot does NOT change with it - the hand-over still commits one block per
+    // received slot.
+    unsigned ul_pipeline_depth = 3 * nof_slots_per_frame;
 
     const prach_configuration prach_cfg =
         prach_configuration_get(cell.freq_range, cell.duplex, cell.prach_config_index);

@@ -3768,9 +3768,13 @@ nobody commits, so the grid is never written"*。今天（有了兜底/扫掠）
 | 同期 PUSCH 结果 | ~**1000/秒**（= 每时隙一个授权）| ~1000/秒 |
 
 **⇒ 关键更正（推翻上一轮的假设）**：那不是"停顿"，是**话务从稀疏爬到饱和的那十几秒**（日志速率 ×70、每时隙一个 PUSCH）。
-两个臂**都在**这个窗口里拒收时隙，武装臂多 8.5 倍。三条判据把它定位得很准：
-`Failed to allocate UL resource grid` **= 0**（不是网格引用被占）⇒ 是 `start_new_slot()` 拒绝（上一个槽的任务还在飞）；
-716 条**全是** "UL processor is busy"、**没有**一条 "message from slot … late"（消息本身准时到，是处理器忙）。
+两个臂**都在**这个窗口里拒收时隙，武装臂多 8.5 倍。三条判据：
+716 条**全是** "UL processor is busy"、**没有**一条 "message from slot … late"（消息本身准时到，是处理器忙）；
+⚠ **更正**：`Failed to allocate UL resource grid` = 0 **并不能**排除"网格引用还被占"——
+`get_pdu_slot_repository()` 返回空时翻译器**先**打 "busy" 并 `return`（`fapi_to_phy_fastpath_translator.cpp:504-511`），
+那条 "Failed to allocate" 永远走不到。**空仓库有两个原因**：(a) `grid_ref_counter != 0`，(b) `start_new_slot()` 拒绝。
+**判 (b) 的证据是反向的**：对照臂在 `finish_symbol()` 里**等**变换完成，因此它**更晚**才放开网格，
+却只拒收 84 次 ⇒ 武装臂多出来的那 8.5 倍不可能来自网格引用，只能来自"任务还在飞"。
 
 **⇒ 机制**：`nof_ul_rg`(=10) 个处理器轮转，饱和时"该处理器上一个槽的任务"还没跑完就收到了它的下一个请求 ⇒ 拒收该时隙的授权。
 武装臂的每跳成本更高（车道 `residency` 370 → 580 µs，栅格产出被推到消费者），余量更小 ⇒ 爬坡时多丢 8.5 倍。
@@ -3778,6 +3782,28 @@ nobody commits, so the grid is never written"*。今天（有了兜底/扫掠）
 **④ ⇒ 下一步（唯一的杠杆，且是既有缺陷）**：**不要让处理器把它的时隙串行化在任务后面**——
 即让 `uplink_processor_impl` 的 PDU 仓库/网格**按槽拥有**（小池子），这样"上一个槽的任务还在跑"不再阻止配置新槽。
 **这正是 §5.9.19 当初误用的那个改动，现在有了正确的理由：不是为正确性，是为【余量】。**
+
+#### 5.9.26 ★★ 修 `s40` 剩下的那一档：**把上行处理器的复用周期从 1 帧放宽到 3 帧**（`nof_ul_rg`，一行）
+
+**① 依据**：`s40` 的 716 次 "UL processor is busy"（对照 84）发生在**话务爬到饱和的那 11–14 秒**，
+原因是**该处理器上一个槽的任务还没跑完，它的下一个 UL_TTI 就到了**（§5.9.25 ③，判据是反向的：
+对照臂更晚才放开网格却拒收得少得多）。而"一个处理器多久被复用一次"**就是 `nof_ul_rg`**：
+`du_low_config_translator.cpp` 原来写 `nof_ul_rg = nof_slots_per_frame`（"每 10 ms 复用一次"）。
+
+**② 改动**（`apps/units/flexible_o_du/o_du_low/du_low_config_translator.cpp`）：
+
+```cpp
+unsigned ul_pipeline_depth = 3 * nof_slots_per_frame;   // 原来是 nof_slots_per_frame
+```
+
+* 复用周期 10 ms → **30 ms**（15 kHz），远大于一个跳/任务的生命期（车道 + LDPC ≈ 1–2 ms）；
+* **代价**：每个处理器一份资源网格 + 一份 payload 池（25 PRB 时网格 ~34 KB；20 MHz/51 PRB ~280 KB ⇒
+  该配置 60 个处理器约 17 MB）；**每时隙的 CPU 提交数不变**（仍是"每个接收时隙一块"）；
+* **它同时是对诊断的直接检验**：若 `UL processor is busy` 不随之下降，则上面的归因是错的。
+
+**③ `s41` 的判据**：`UL processor is busy` **716 → 回到对照量级（~84 或更低）**；
+`[ul_pipeline]` 中位 ~1.9 ms、最坏 ≤ ~50 ms；提交/上行时隙仍 **~1.03**；
+`grid_devwaited>0`、`grid_wait_unencoded==0`、`timeouts==0`、CRC 按调制分层不变。
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
