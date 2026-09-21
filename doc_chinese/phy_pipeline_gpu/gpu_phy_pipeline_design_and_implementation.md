@@ -3425,9 +3425,16 @@ bool success = task_executors.pucch_executor.defer([this, &pdu]() {     // ← 3
 
 **⑤ ⇒ 交出已再次关掉**（`grid_has_host_consumers()` 返回 `true`），理由写在代码里并附上那条离线证据。
 
-#### 5.9.19 ★★★ D1 的**第五个结构障碍**（也是真正的那个）：**资源网格是【一个对象、每槽复用】** ⇒ 任何"晚于自己槽"的消费者读到的都是**下一个槽的内容**
+#### 5.9.19 ~~★★★ D1 的**第五个结构障碍**（也是真正的那个）：**资源网格是【一个对象、每槽复用】**~~ ⚠ **①③④ 已被 §5.9.20 撤回**（②的现象为真，归因错了）
 
-**① 证据链（全部是代码，不是推测）**
+> **撤回理由（一句话）**：网格**不是每槽复用的同一个对象**——每个 `uplink_processor_impl` 有自己的网格，
+> 而每个小区有 **`nof_ul_rg`（本配置 20）个** `uplink_processor_impl`（`upper_phy_factories.cpp:1019` 的循环 +
+> `processor_pool_helpers.h:43` 的轮转），⇒ 同一份网格的复用周期是 **~20 次 UL 请求（10 ms）**，不是 1 个槽。
+> 下面的 ① 把"每槽等它空出来"读成了"每槽复用同一个对象"，**这是错的**；
+> **真正的障碍是 §5.9.20：网格的 MTLBuffer 对象在"一跳一条命令缓冲"里不唯一。**
+> 保留本节原文（② 的 35% 观察与 ③ 的"离线判据为什么看不见"两条仍然成立，被 §5.9.20 继承）。
+
+**① ~~证据链（全部是代码，不是推测）~~**
 
 | 事实 | 出处 |
 |---|---|
@@ -3454,7 +3461,7 @@ bool success = task_executors.pucch_executor.defer([this, &pdu]() {     // ← 3
 | 机制单测（第 1–8 条臂）| 它只判"交出/认领/兜底/凭据"，网格是它自己的 |
 | `ofdm_demodulator_metal_batch_test` 的武装节（§5.9.18 ②）| 它**同步**跑一个槽：生产、等待、读，全在自己槽内 ⇒ **0/17808 不匹配**（结论仍然有效：交出链**本身**是对的）|
 
-**④ ⇒ 修法（下一会话，唯一能解锁 D1 的方向）**
+**④ ~~⇒ 修法（下一会话，唯一能解锁 D1 的方向）~~ ⚠ 撤回：不是修法（见 §5.9.20）**
 
 > **给槽自己的网格**：把上层 PHY 的"一个网格"变成**一个小池子**（每槽一个实例，像接收缓冲那样按引用计数归还），
 > 让 PUCCH/SRS/跳都**持有自己槽的那一份**，然后在槽末把它还回去。
@@ -3470,8 +3477,70 @@ bool success = task_executors.pucch_executor.defer([this, &pdu]() {     // ← 3
 |---|---|
 | 交出机制（键/凭据/兜底/扫掠/栅栏/输入生命期）| ✅ **已做完并离线验过（八条臂 + 0/17808 网格逐字节）** |
 | 宿主消费者接线（PUCCH/SRS 等待 + 兜底提交）| ✅ 已接线并离线验过 |
-| **网格的槽归属（单对象复用）** | ❌ **未解决 ⇒ 这是 D1 现在唯一的拦路石** |
+| **网格的槽归属（单对象复用）** | ⚠ **撤回**（§5.9.19 ① 的证据读错了，网格本来就每处理器一份、复用周期 ~20 次请求）|
 | 上层的槽作用域捕获（`[this, &pdu]`）| ⚠ 同一个根因的另一半：**任务必须持有自己槽的数据**（与上面一起修才是完整的）|
+| **★ 真障碍：网格的 MTLBuffer 对象在跳缓冲里不唯一** | ✅ **已定位并已修（§5.9.20）——待空口腿判** |
+
+---
+
+#### 5.9.20 ★★★ **真障碍：`MTLBuffer` 对象的唯一性在"一跳一条命令缓冲"里被破坏**——估计器读网格用的是**私有映射**
+
+> **本节撤回 §5.9.19 的 ①③④**（网格不是每槽复用同一个对象：每个 `uplink_processor_impl` 一个网格，
+> 每小区 `nof_ul_rg` 个处理器轮转 —— `upper_phy_factories.cpp:1019`、`processor_pool_helpers.h:43-56`，
+> 本配置 `nof_ul_rg=20` ⇒ 同一份网格 ~20 次 UL 请求才复用一次，窗口 10 ms，**不是 1 个槽**）。
+> **② 的现象（对照臂 PUCCH 65%）保留，但归因改为：候选臂里 UE 根本没接上 ⇒ PUCCH 多为 DTX。**
+
+**① 一句话**
+
+> **一跳 = 一条命令缓冲**（D1 的全部意义）意味着：**前端写网格的 dispatch** 和 **后端读网格的 dispatch
+> 落在同一条命令缓冲里**。Metal **只按 `MTLBuffer` 对象**关联两次访问——同对象才自动插屏障；
+> **两个对象盖同一段内存 ⇒ 两者之间没有任何顺序**（这条本会话早就用 `wip/metal_alias_order.mm` 量过：
+> 同对象 200/200 PASS，别名对 200/200 FAIL，两个方向都是）。
+> **而生产链里，网格的读端有一个仍绑私有对象：信道估计器的 DMRS 提取。**
+
+**② 证据链（代码，逐条可查）**
+
+| 事实 | 出处 |
+|---|---|
+| 前端写网格：**武装后走进程级缓存**（消费者用的那一个）| `ocudu_dft_metal_engine.mm:700-707` `wrap_grid()` → `shared_queue::wrap_no_copy()`（`block_release_requested()` 为真时）|
+| 均衡器读网格：**同一个进程级缓存** | `ocudu_equalizer_metal_engine.mm:432-441` 注释原话："One buffer object per address for every engine … Metal only relates accesses through the resource they are bound to" |
+| **信道估计器读网格：引擎私有缓存** ❌ | `ocudu_metal_mmse_engine.mm` `build_pilots_lse()`：`e->wrap(s.grid, s.grid_bytes)`（私有 `buffer_cache`）|
+| 提取的 dispatch 就编在**被认领的那条缓冲里** | `begin_stage_on_handed()`（同文件）取回交出块，`st.cb` 即该块；`[enc setBuffer:grid_buf.buf …]` 紧接着 `pilots_lse_pipe` |
+| 估计器自己的**导出**张量是走共享缓存的（所以只有网格漏了）| 同文件 `wrap_shared()`（`h`/`dst`/TA 等，~9 个调用点）——**审计时把"导出张量"列全了，漏了"别人的输入"** |
+
+**③ 它一次解释掉候选臂的全部读数**（`s36`，`gpu` 模式）
+
+| 观测 | 解释 |
+|---|---|
+| 大量 `crc=KO` 而 `sinr=20…38 dB`（**好信道、错数据**）| DMRS 提取读到**上一帧同一地址**的网格 ⇒ **信道估计是错的但自洽**（h 与 sigma2 同源）⇒ SINR 看着好；而均衡器 gather 走共享对象、**顺序是对的** ⇒ 用错信道去均衡对的数据 ⇒ **CRC 全错** |
+| `sinr=infdB`（12 次）| 那一格上一帧没写 ⇒ h≈0、sigma2≈0 ⇒ 比值 inf |
+| `sinr=-20…-66 dB` | h 与 sigma2 都小但不同源（半写状态）|
+| 15 条 PUSCH 又好、且**同一 HARQ 重传时而好**（`rv=0` 连发三次：KO、KO、OK）| 纯粹的**竞态**赢/输，不是确定性错址 |
+| PUCCH（宿主读，有栅栏）| 它的读**是有序的**；候选臂 PUCCH 的 −14 dB 是**UE 没接上 ⇒ 多为 DTX**，不是独立缺陷 |
+| `handed=3934 taken=847 fallback=2767 late=320 not_found=318 timeouts=0 keepalives=55076/55076` | 交出机制**本身是好的**（这正是"离线八条臂全绿"说的那件事）|
+
+**⇒ 为什么两条离线判据都看不见它**（§5.9.19 ③ 继承，这里说得更准）：
+
+* 机制单测（`dft_release_adopt_metal_test` 第 1–8 条臂）**恰好量到了这条陷阱**——但它是**负对照**：
+  第 2 条臂 `private` 用的就是"自己 newBufferWithBytesNoCopy 盖同一段内存"，判词是
+  **"the reader must read the PRE-WRITE content instead"**。**生产里，估计器就是那第 2 条臂。**
+* `ofdm_demodulator_metal_batch_test` 的武装节用**宿主**读网格（有栅栏）⇒ 0/17808。
+
+**④ 修法（本会话已做）**
+
+| 改动 | 位置 |
+|---|---|
+| 新增 `wrap_grid()`：网格的读映射**走进程级缓存并保留 offset**（不能走 `wrap_shared()`——它会把非零 offset 丢掉，绑错地址）| `ocudu_metal_mmse_engine.mm`（`mmse_engine_impl`）|
+| `build_pilots_lse()` 的网格映射改用它 | 同文件，一行 + 注释说明为什么"别人的输入"必须共用对象 |
+| 新增两个计数，接在 `[metal_stats] mmse_ce` 行尾 | `grid_shared=` / `grid_failed=` |
+
+**⑤ 腿的判据（新增一条硬的）**
+
+> **`grid_shared == hops`**（`[metal_stats] mmse_ce … grid_shared=NNN grid_failed=0`，与 `calls=` 同行同样大）。
+> 这一条**直接**说明"每一次跳的网格读都绑在生产者写过的那一个对象上"；`grid_failed` 非零 = 那一跳退回了宿主路由。
+> 其余判据不变：`crc=OK/KO` 按调制分层不劣化、`sinr` 分布回到对照臂的形状、`taken>0`、`timeouts=0`、
+> `keepalives` 两侧相等、`RF late` 不劣化。
+
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 

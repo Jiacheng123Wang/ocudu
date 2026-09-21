@@ -92,6 +92,13 @@ struct mmse_stats_t {
   // this cache; a run that shows a number is a route the barrier cannot order.
   std::atomic<uint64_t> wrap_covered{0};
   std::atomic<uint64_t> wrap_covered_offset{0};
+  // The GRID's read mappings (see wrap_grid()): the count that reached the process-wide cache - the object
+  // the front end's grid write binds - and the count that could not be mapped zero-copy. It is the twin of
+  // the counter above, one buffer over: the grid is the only buffer this engine READS and another engine
+  // WRITES, so every hop has to appear in the first count. `grid_failed` non-zero means the hop fell back
+  // to its host route (or refused), and a hop missing from BOTH is a grid read bound to a private object.
+  std::atomic<uint64_t> grid_shared{0};
+  std::atomic<uint64_t> grid_failed{0};
 };
 
 static mmse_stats_t& mmse_stats()
@@ -229,6 +236,13 @@ static void mmse_stats_report()
                " wrap_cover=%llu wrap_cover_off=%llu",
                static_cast<unsigned long long>(s.wrap_covered.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.wrap_covered_offset.load(std::memory_order_relaxed)));
+  // The grid's read mappings (see wrap_grid()): the block hand-over puts the front end's grid write and this
+  // engine's DMRS extraction in ONE command buffer, where only a shared MTLBuffer object relates them. So
+  // `grid_shared == hops` is the invariant an air leg reads, and `grid_failed` says a hop fell back.
+  std::fprintf(stderr,
+               " grid_shared=%llu grid_failed=%llu",
+               static_cast<unsigned long long>(s.grid_shared.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.grid_failed.load(std::memory_order_relaxed)));
   std::fprintf(stderr, "\n");
 }
 #else  // OCUDU_METAL_STATS
@@ -650,6 +664,41 @@ struct mmse_engine_impl {
           static_cast<unsigned long long>(bytes));
     }
     return buf;
+  }
+
+  /// \brief Zero-copy mapping of the RESOURCE GRID: a buffer this engine only READS and another engine -
+  ///        the front end's DFT - writes.
+  ///
+  /// It must be the process-wide mapping (shared_queue::wrap_no_copy), the same one the DFT binds the grid
+  /// write through whenever the block may be handed over (see its wrap_grid()), because with the hand-over
+  /// (D1) the front end's grid write and this engine's DMRS extraction are dispatches of the SAME command
+  /// buffer - and Metal relates two accesses through the MTLBuffer OBJECT they bind, never through the
+  /// address (see the section on wrap() above, and wip/metal_alias_order.mm: one object 200/200 PASS, an
+  /// aliased pair 200/200 FAIL, in both directions).
+  ///
+  /// Measured: this was the ONE device reader of the grid still binding an engine-private object, and its
+  /// extraction is the first consumer of the block - so a whole air leg read the grid BEFORE the front end
+  /// wrote it and equalized the right data with a stale channel estimate (crc=KO at 20-38 dB of sinr, and
+  /// `sinr=inf` where the stale content was empty, design document 5.9.20).
+  ///
+  /// \note The offset is KEPT - the grid is an interior pointer of an allocation the upper PHY owns, and the
+  ///       shared cache answers a contained request with the larger mapping PLUS an offset - so this cannot
+  ///       use wrap_shared(), which drops it (and would bind the wrong address).
+  mapped wrap_grid(const void* ptr, NSUInteger bytes)
+  {
+    size_t        offset = 0;
+    id<MTLBuffer> buf    = metal::shared_queue::wrap_no_copy(device, ptr, static_cast<size_t>(bytes), &offset);
+    if (buf == nil) {
+      // A failed zero-copy mapping here is NOT the usual "stage a copy instead": a host copy of memory the
+      // GPU may still be writing is the same unordered read this mapping exists to avoid. The caller keeps
+      // its host route instead (build_pilots_lse() answers false and the refusal is counted).
+      mmse_stats().grid_failed.fetch_add(1, std::memory_order_relaxed);
+      report_wrap(ptr, bytes, nil, 0, "FAIL ");
+      return {nil, 0};
+    }
+    mmse_stats().grid_shared.fetch_add(1, std::memory_order_relaxed);
+    report_wrap(ptr, bytes, buf, offset, (offset != 0) ? "cover" : "shared");
+    return {buf, static_cast<NSUInteger>(offset)};
   }
 
   bool load_library(const char* path)
@@ -1958,7 +2007,10 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
 
   const NSUInteger pilots = static_cast<NSUInteger>(s.nof_dmrs_symb) * s.nof_layers * s.nof_pilots;
 
-  mmse_engine_impl::mapped grid_buf = e->wrap(s.grid, s.grid_bytes);
+  // The grid is ANOTHER engine's buffer (the front end's DFT writes it, possibly inside the very command
+  // buffer this hop adopts): it goes through the process-wide mapping, not this engine's private one, or
+  // the write and this read are unordered (see wrap_grid()).
+  mmse_engine_impl::mapped grid_buf = e->wrap_grid(s.grid, s.grid_bytes);
   // Whole allocations, never the per-hop length: a request larger than the mapped extent forces a
   // re-map (see pilots_stage::buf_bytes).
   mmse_engine_impl::mapped ref_buf =
