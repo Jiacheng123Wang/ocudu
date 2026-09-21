@@ -151,4 +151,46 @@ private:
   }
 };
 
+/// \brief The slot's HOP PLAN: how many PUSCH hops read a slot's grid, and which one is starting
+///        (D1 multi-PUSCH, design document 5.9.43).
+///
+/// WHY IT IS NEEDED: the hand-over's registry is keyed by (storage, slot) and a block is committed at the
+/// end of the hop that claimed it, so of K hops on one slot's grid only the FIRST can merge with the front
+/// end's block and the other K-1 must open a command buffer of their own - a slot's CPU submissions grow
+/// from 1 to K. Merging them needs one thing nobody has today: the number of hops that share the slot,
+/// known before the first of them commits. The upper PHY is the only place that knows it (`pusch_pdus`
+/// in uplink_processor_impl), and the hops of a slot run IN ORDER ON ONE LANE THREAD
+/// (max_pusch_and_srs_concurrency is 1), so a plain per-thread record is enough.
+///
+/// \note This is the same hook pattern as grid_ready_hook, and for the same reason: the upper PHY is plain
+///       C++ and a build without Metal must still link. No implementation installed - every build without
+///       the hand-over - makes this a no-op.
+class slot_hop_plan_hook
+{
+public:
+  /// \param[in] slot      The RECEIVING slot all these hops read (the same half of the key the registry uses).
+  /// \param[in] hop_count How many PUSCH hops read this slot's grid.
+  /// \param[in] hop_index Which one is about to start, 0-based.
+  using set_fn = void (*)(uint64_t slot, unsigned hop_count, unsigned hop_index);
+
+  static void install(set_fn fn) { fn_ref().store(fn, std::memory_order_release); }
+
+  static bool installed() { return fn_ref().load(std::memory_order_acquire) != nullptr; }
+
+  static void set(uint64_t slot, unsigned hop_count, unsigned hop_index)
+  {
+    set_fn fn = fn_ref().load(std::memory_order_acquire);
+    if (fn != nullptr) {
+      fn(slot, hop_count, hop_index);
+    }
+  }
+
+private:
+  static std::atomic<set_fn>& fn_ref()
+  {
+    static std::atomic<set_fn> fn{nullptr};
+    return fn;
+  }
+};
+
 } // namespace ocudu

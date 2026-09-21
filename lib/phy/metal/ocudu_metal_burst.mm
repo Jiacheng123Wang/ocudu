@@ -69,7 +69,33 @@ uint64_t grid_ready_claim_hook(const void* storage, uint64_t slot)
   return metal::shared_burst::grid_production_generation(storage, slot);
 }
 
+/// \brief The Metal end of the slot's hop plan (see slot_hop_plan_hook).
+///
+/// THREAD-LOCAL, and that is the point: a slot's hops run in order on one lane thread
+/// (max_pusch_and_srs_concurrency is 1), so the plan of the slot being processed is exactly the plan of the
+/// thread processing it. Layer 1 only records it - nothing reads it yet (design document 5.9.43).
+namespace {
+struct slot_hop_plan_t {
+  uint64_t slot      = 0;
+  unsigned hop_count = 0;
+  unsigned hop_index = 0;
+};
+slot_hop_plan_t& slot_hop_plan()
+{
+  static thread_local slot_hop_plan_t plan;
+  return plan;
+}
+} // namespace
+
+void slot_hop_plan_set_hook(uint64_t slot, unsigned hop_count, unsigned hop_index)
+{
+  slot_hop_plan().slot      = slot;
+  slot_hop_plan().hop_count = hop_count;
+  slot_hop_plan().hop_index = hop_index;
+}
+
 const bool grid_ready_hook_installed = []() {
+  slot_hop_plan_hook::install(&slot_hop_plan_set_hook);
   grid_ready_hook::install(&grid_ready_wait_hook);
   grid_ready_hook::install_counts(&grid_handover_counts_hook);
   grid_ready_hook::install_claim(&grid_ready_claim_hook);

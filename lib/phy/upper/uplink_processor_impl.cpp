@@ -225,8 +225,15 @@ void uplink_processor_impl::process_symbol_pdus(unsigned end_symbol_index)
     process_pucch_f1(collection);
   }
 
-  for (const auto& pdu : pusch_pdus) {
-    process_pusch(pdu);
+  // D1 multi-PUSCH (design document 5.9.43): tell the lane how many hops read THIS slot's grid and which
+  // one is starting - the upper PHY is the only place that knows, and it is what merging a slot's hops into
+  // ONE submission needs. Layer 1 of the change is plumbing only: nothing consumes it yet, so behaviour is
+  // unchanged (the plan is recorded and ignored).
+  for (unsigned i_pusch = 0; i_pusch != pusch_pdus.size(); ++i_pusch) {
+    if (!pusch_pdus.empty()) {
+      slot_hop_plan_hook::set(current_slot.to_uint(), static_cast<unsigned>(pusch_pdus.size()), i_pusch);
+    }
+    process_pusch(pusch_pdus[i_pusch]);
   }
 
   for (const auto& pdu : srs_pdus) {
