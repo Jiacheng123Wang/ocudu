@@ -21,7 +21,7 @@
 
 ## 1. 一句话状态
 
-**工作树 HEAD = `6f81e25b2b`**（= 第 2 步接线 + 回滚 + **第 3 步的 1/2 小步**；交出点接回与快照提交跟在它后面）。
+**工作树 HEAD = `55341e7d6b`**（= 第 2 步接线 + 回滚 + 第 3 步的 1/2/4 小步 + **池子泄漏修复** + **再次关掉交出**；快照提交跟在它后面）。
 **开机第一件事就是自查戳记**：
 ```bash
 git rev-parse --short=10 HEAD && grep build_info build/hashes.h
@@ -115,8 +115,10 @@ in_flight[in_flight_begin].owner.reset();      // ← 接收缓冲引用在这�
 |---|---|---|---|
 | **1** | **DFT 引擎接受一个 keep-alive**：`retain_for_block()` 把凭据挂到当前打开的块上；引擎在缓冲完成时释放；被顶掉/淘汰/丢弃时也释放 | **机制单测五条臂全过**（含"没人认领也要还"与"提交路径也要还"）| ✅ |
 | **2** | **低层 PHY 把接收缓冲的凭据交出去**：`retain_symbol_input()` + `defers_transform_execution()`；**先问再分配**（不延迟的后端连一次 `new` 都没有）| **守卫测试的延迟版**（`DeferredTransformsKeepTheirSamplesUntilTheirBlockCompletes`，已做反向验证）| ✅ |
-| **3** | **池深实测**：接收循环会不会被"多留一两个缓冲"挡住 | 空口腿：`Real-time failures`、`ul_rx blocks`、CRC | ⬜ **= 下一会话的腿** |
-| **4** | **把低层 PHY 的 `release_block()` 调用点接回来**（`7fa657794c` 撤掉的那处）| 空口腿对（§4.3）| ✅（**腿待跑**）|
+| **3** | **池深实测**：接收循环会不会被"多留一两个缓冲"挡住 | 空口腿：`Real-time failures`、`ul_rx blocks`、CRC | ✅ **量了：池子被抽干**（§5.9.11）|
+| **4** | **把低层 PHY 的 `release_block()` 调用点接回来**（`7fa657794c` 撤掉的那处）| 空口腿对（§4.3）| ✅ |
+| **5** | **修掉池子泄漏**：`begin_stage_on_handed()` 少了 `close_held_buffer(e)`（那条 "a held buffer is never left behind" 不变量）| `keepalives released == attached`；`[ul_rx_pool] held` 稳定 | ✅ **已修并验证**（§5.9.12 ①）|
+| **6** | **★ 下一件事：把 PUCCH 的网格读取排到车道提交之后**（见 §4.4）| 新的一条腿对 | ⬜ **待用户裁定** |
 
 ### 4.1b 现在这条链长什么样（判读时要能背出来）
 
@@ -141,7 +143,28 @@ in_flight[in_flight_begin].owner.reset();      // ← 接收缓冲引用在这�
 2. **一次提交承载多个符号的输入** ⇒ 结论：**每个变换一份凭据**（与 in-flight entry 自己那份并列），
    `shared_ptr` 的引用计数决定谁最后放手。
 
-### 4.3 腿法（**接线已恢复**；模式必须是 `gpu`）
+### 4.4 ★★★ 现在卡在哪：**网格有宿主消费者（PUCCH），而交出把网格的产出推到车道提交之后**
+
+**这是 D1 的第四条硬约束**（§5.9.4 的逐点核实漏掉的），而且是**结构性**的：
+
+| 事实 | 出处 |
+|---|---|
+| `pucch_processor_impl` 从 `resource_grid_reader` 读网格，**没有任何 device view** | `pucch_processor_impl.cpp:120/143` |
+| 上层 PHY 在槽一交过来就处理它 | 与 PUSCH 同一份 `shared_resource_grid` |
+| 交出把网格的产出推到**车道的提交**（晚一个槽）| 本会话的设计 |
+
+**⇒ 宿主消费者读到还没写的内存**：候选臂 PUCCH **`metric=nan sinr=-inf`** vs 对照 **10924 条 `sinr=24.2dB`**。
+**⇒ 已再次关掉交出**：`handover_allowed()` = `!grid_has_host_consumers() && ...`，而后者**返回常量 `true`**。
+
+**⇒ 待用户裁定（§5.9.12 ⑥）**：
+
+| 选项 | 内容 | 评价 |
+|---|---|---|
+| **A（推荐）** | **把等待从生产者搬到消费者**：宿主网格消费者（PUCCH）在**车道提交完成之后**才读网格 | **不新增参与点**（PUCCH 本来就要等 GPU 写完），且保住"一跳一次提交" |
+| B | 给 PUCCH 一条设备路径 | 大工程 |
+| C | 只融合"网格消费者"，DFT 仍及时提交 | 提交数没有改善 |
+
+### 4.3 腿法（**⚠ 交出当前被关掉**；模式必须是 `gpu`）
 
 ```bash
 sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s33-d1-input-lifetime-base
@@ -247,5 +270,5 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s33-d1-input-lifeti
 
 **腿判了：D1 第 2 步的接线是错的——不是慢，是静默错数据（`sinr=37.6 dB` 却 942/46 的 CRC），
 因为被交出去的变换会晚于"接收缓冲被回收"才执行，而那次宿主等待正是回收的依据；已回滚。**
-**第 3 步的 1/2/4 小步都已完成并离线验过（引擎 keep-alive + 低层 PHY 交接 + 交出点接回），
-未武装时逐字节不变；下一步是跑 §4.3 的 `gpu` 腿对，量"多留一个接收缓冲"会不会挡住接收循环（＝第 3 小步）。**
+**今天两条腿揭出两个缺陷：接收池泄漏（已修，`s33d` 的轨迹证明）与【网格有宿主消费者 PUCCH】——
+后者是结构性的，交出已再次关掉，等用户裁定"把等待搬到消费者"（§4.4 选项 A）再上腿。**
