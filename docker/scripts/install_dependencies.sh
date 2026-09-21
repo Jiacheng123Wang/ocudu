@@ -46,6 +46,7 @@ install_dependencies_debian_ubuntu() {
     esac
     local -a extra_pkgs=(
         libzmq3-dev libuhd-dev uhd-host libboost-program-options-dev libdpdk-dev libelf-dev libdwarf-dev libdw-dev capnproto libcapnp-dev
+        libeigen3-dev
     )
 
     case "$mode" in
@@ -119,7 +120,7 @@ install_dependencies_fedora() {
     )
     local -a extra_pkgs=(
         boost-devel capnproto capnproto-devel cppzmq-devel dpdk-devel uhd-devel elfutils-devel elfutils-libelf-devel
-        libdwarf-devel libusb1-devel numactl-devel zeromq-devel openssl openssl-devel
+        libdwarf-devel libusb1-devel numactl-devel zeromq-devel openssl openssl-devel eigen3-devel
     )
 
     case "$mode" in
@@ -157,7 +158,7 @@ install_dependencies_centos() {
     )
     local -a extra_pkgs=(
         boost-devel capnproto capnproto-devel cppzmq-devel dpdk-devel elfutils-devel elfutils-libelf-devel
-        libdwarf-devel libusb1-devel numactl-devel zeromq-devel
+        libdwarf-devel libusb1-devel numactl-devel zeromq-devel eigen3-devel
     )
 
     case "$mode" in
@@ -194,7 +195,7 @@ install_dependencies_ubi10() {
     )
     local -a extra_pkgs=(
         boost-devel capnproto capnproto-devel cppzmq-devel dpdk-devel elfutils-devel elfutils-libelf-devel
-        libdwarf-devel libusb1-devel numactl-devel zeromq-devel
+        libdwarf-devel libusb1-devel numactl-devel zeromq-devel eigen3-devel
     )
 
     case "$mode" in
@@ -230,7 +231,7 @@ install_dependencies_arch() {
         fftw mbedtls3 yaml-cpp lksctp-tools libcap
     )
     local -a extra_pkgs=(
-        zeromq libuhd boost dpdk libelf libdwarf elfutils capnproto
+        zeromq libuhd boost dpdk libelf libdwarf elfutils capnproto eigen
     )
 
     case "$mode" in
@@ -274,7 +275,7 @@ install_dependencies_rhel() {
         yaml-cpp-devel mbedtls-devel
     )
     local -a extra_pkgs=(
-        cppzmq-devel libusbx-devel boost-devel numactl-devel capnproto capnproto-devel
+        cppzmq-devel libusbx-devel boost-devel numactl-devel capnproto capnproto-devel eigen3-devel
     )
 
     case "$mode" in
