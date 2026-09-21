@@ -310,18 +310,23 @@ void pusch_demodulator_impl::demodulate(pusch_codeword_buffer&              code
   const bool deferred_chain = !force_serial && equalizer->supports_deferred_chain() &&
                               demapper->supports_deferred_chain() && !config.enable_transform_precoding;
 
+  // ONE definition, shared with serves_hop_in_place(): a strict caller asks the demodulator whether the
+  // host would do the work, and the answer has to be what this function actually does.
+  const bool estimates_read_in_place  = serves_hop_in_place(est_results, nof_rx_ports, config.nof_tx_layers);
+#if defined(OCUDU_METAL_STATS)
   // Whether this pass reads the channel estimates and the noise variances where they were produced.
   // When it does, the estimation does not have to complete before the demodulation - the device
   // queue orders the two stages, and running the pass while it finishes is the whole point of
   // deferring the estimation - so the estimator is left running. When it does not, this pass gathers
   // the values from host memory and the estimation must have published them first.
+  //
+  // Read ONLY by the routing report below, which exists only in a Metal-stats build
+  // (ENABLE_METAL_STATS): declaring these unconditionally made a NON-Metal build fail on
+  // -Werror=unused-variable, which is how Linux builds ocudu (measured on the Ubuntu build box,
+  // 2026-09-21).
   const bool force_host_estimates_now = force_host_ch_estimates();
   const bool equalizer_reads_device    = equalizer->consumes_device_estimates(nof_rx_ports, config.nof_tx_layers);
   const bool estimator_published      = est_results.device_results_cover_last_estimate();
-  // ONE definition, shared with serves_hop_in_place(): a strict caller asks the demodulator whether the
-  // host would do the work, and the answer has to be what this function actually does.
-  const bool estimates_read_in_place  = serves_hop_in_place(est_results, nof_rx_ports, config.nof_tx_layers);
-#if defined(OCUDU_METAL_STATS)
   // One-shot routing report (info level, so it lands in the log file): reading the estimates where
   // they were produced is what lets the estimation stay deferred, and the three conditions are
   // indistinguishable from the timings alone.
