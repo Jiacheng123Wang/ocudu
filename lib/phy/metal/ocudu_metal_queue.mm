@@ -28,6 +28,10 @@ struct shared_queue_state {
 
   /// Front-end fence (see the header): one shared event carrying a generation.
   id<MTLSharedEvent>       fence_event   = nil;
+  /// Grid-production fence (see shared_queue::grid_ready_signal): its own event, because it is waited on by
+  /// the HOST while the front-end fence above is waited on by command buffers.
+  id<MTLSharedEvent>       grid_event    = nil;
+  std::atomic<uint64_t>    grid_generation{0};
   std::atomic<uint64_t>    fence_generation{0};
   std::atomic<uint64_t>    fence_signals{0};
   std::atomic<uint64_t>    fence_waits{0};
@@ -482,6 +486,39 @@ uint64_t shared_queue::front_end_signal(id<MTLCommandBuffer> command_buffer)
   [command_buffer encodeSignalEvent:s.fence_event value:generation];
   s.fence_signals.fetch_add(1, std::memory_order_relaxed);
   return generation;
+}
+
+uint64_t shared_queue::grid_ready_signal(id<MTLCommandBuffer> command_buffer)
+{
+  if (command_buffer == nil) {
+    return 0;
+  }
+  shared_queue_state& s = state();
+  if (s.grid_event == nil) {
+    id<MTLDevice> device = shared_queue::device();
+    if (device == nil) {
+      return 0;
+    }
+    s.grid_event = [device newSharedEvent];
+    if (s.grid_event == nil) {
+      return 0;
+    }
+  }
+  const uint64_t generation = s.grid_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+  [command_buffer encodeSignalEvent:s.grid_event value:generation];
+  return generation;
+}
+
+bool shared_queue::grid_ready_wait(uint64_t generation, uint32_t timeout_ms)
+{
+  if (generation == 0) {
+    return true;
+  }
+  shared_queue_state& s = state();
+  if (s.grid_event == nil) {
+    return true;
+  }
+  return [s.grid_event waitUntilSignaledValue:generation timeoutMS:timeout_ms];
 }
 
 uint64_t shared_queue::front_end_generation()

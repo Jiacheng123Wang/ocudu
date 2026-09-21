@@ -45,6 +45,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 
 using namespace ocudu;
 
@@ -631,6 +632,97 @@ int main()
       }
       std::fprintf(stderr, "[dft-release] arm 5: a committed block gave its input back exactly once, on its completion\n");
       ::setenv("OCUDU_DFT_RELEASE_BLOCK", "1", 1);
+    }
+
+    // ---- Arm 6: a HOST reader is served (D1-A, 5.9.13) --------------------------------------------
+    // Two shapes, and both must end with the grid WRITTEN and the input given back:
+    //  * nobody claims the block (a slot no hop runs for - a PUCCH-only slot in the receiving chain):
+    //    ensure_grid_produced() has to commit it, or the grid is never written at all;
+    //  * a hop claims it, so the producer is the lane's commit and the reader waits for that.
+    {
+      for (unsigned claimed_by_hop = 0; claimed_by_hop != 2; ++claimed_by_hop) {
+        // Poison, so "the grid was produced" is a real reading and not leftover data.
+        for (size_t i = 0; i != alloc_bytes / sizeof(uint16_t); ++i) {
+          reinterpret_cast<uint16_t*>(grid_alloc)[i] = poison;
+        }
+        keep_alive_probe host_probe;
+        if (!engine.begin_block()) {
+          std::fprintf(stderr, "FAIL: begin_block() refused on the host-reader arm\n");
+          return 1;
+        }
+        metal::dft_metal_engine::grid_write write;
+        write.grid_base  = grid_base;
+        write.grid_bytes = grid_bytes;
+        write.dst_offset = dst_offset;
+        write.nof_subc   = nof_subc;
+        write.map_offset = transform_size - nof_subc / 2;
+        write.phase_re   = 1.0F;
+        if (!engine.submit_slot_grid_write(in_mem, out_mem, 0, write) ||
+            !engine.retain_for_block(host_probe.token()) || (engine.release_block(grid_base) == nullptr)) {
+          std::fprintf(stderr, "FAIL: the host-reader arm could not stage its block\n");
+          return 1;
+        }
+
+        if (claimed_by_hop != 0) {
+          // A hop does what the lane does: take it and commit it in a burst.
+          id<MTLCommandBuffer> cb = metal::shared_burst::take_released(grid_base);
+          if (cb == nil) {
+            std::fprintf(stderr, "FAIL: the host-reader arm's deposit was not there to take\n");
+            return 1;
+          }
+          if (!metal::shared_burst::adopt(cb) || !metal::shared_burst::commit() ||
+              !metal::shared_burst::wait_committed()) {
+            std::fprintf(stderr, "FAIL: the host-reader arm's hop did not complete\n");
+            return 1;
+          }
+        }
+
+        // The host reader: it must not have to know which of the two shapes it is looking at.
+        if (!metal::shared_burst::ensure_grid_produced(grid_base)) {
+          std::fprintf(stderr,
+                       "FAIL: ensure_grid_produced() timed out (claimed_by_hop=%u) - a host reader would "
+                       "have read a grid nobody wrote\n",
+                       claimed_by_hop);
+          return 1;
+        }
+        unsigned unwritten = 0;
+        for (unsigned k = 0; k != nof_subc; ++k) {
+          if (host_word(grid_u16, dst_offset + k) == poison_word) {
+            ++unwritten;
+          }
+        }
+        if (unwritten != 0) {
+          std::fprintf(stderr,
+                       "FAIL: %u of %u grid elements are unwritten after ensure_grid_produced() "
+                       "(claimed_by_hop=%u)\n",
+                       unwritten,
+                       nof_subc,
+                       claimed_by_hop);
+          return 1;
+        }
+        // And the input comes back, whichever shape it was: the fallback commit owes the same release the
+        // lane's does. WAITED for, not read at once: the fence says the GPU is done with the samples, while
+        // the token is released by a COMPLETION HANDLER, and Metal does not order the two - which is exactly
+        // why the release must not be something a caller can assume the instant the data is readable.
+        for (unsigned spin = 0; (spin != 2000) && (host_probe.releases.load() == 0); ++spin) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (host_probe.releases.load() != 1) {
+          std::fprintf(stderr,
+                       "FAIL: the host-reader arm released its input %u times (claimed_by_hop=%u)\n",
+                       host_probe.releases.load(),
+                       claimed_by_hop);
+          return 1;
+        }
+        // A second call finds nothing to do - the record is gone with the completion.
+        if (!metal::shared_burst::ensure_grid_produced(grid_base)) {
+          std::fprintf(stderr, "FAIL: ensure_grid_produced() failed on an already produced grid\n");
+          return 1;
+        }
+      }
+      std::fprintf(stderr,
+                   "[dft-release] arm 6: a host reader is served both ways - the unclaimed block is "
+                   "committed for it, the claimed one is waited for, and the grid is written either way\n");
     }
 
     std::fprintf(stderr,

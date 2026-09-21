@@ -113,14 +113,41 @@ public:
   ///            (the receiving chain's INPUT, see dft_metal_engine::retain_for_block()) has to be let go
   ///            here rather than at a completion that will never come. Called without the registry's lock
   ///            held, on the thread that dropped it.
-  static void deposit_released(const void* grid_base, id<MTLCommandBuffer> cb, std::function<void()> on_drop = {});
+  /// \param[in] generation Grid-production fence generation armed on \p cb (shared_queue::grid_ready_signal),
+  ///            or 0 when the depositor armed none - a host reader then has nothing to wait for.
+  static void deposit_released(const void*          grid_base,
+                               id<MTLCommandBuffer> cb,
+                               uint64_t             generation = 0,
+                               std::function<void()> on_drop   = {});
 
-  /// \brief Takes the command buffer deposited for \p grid_base, removing the deposit (nil when none).
+  /// \brief Takes the command buffer deposited for \p grid_base, or nil when there is none.
   ///
   /// The caller becomes its submitter: it encodes its own stages into it (a second encoder - the deposit
   /// already carries the DFT's, ended) and commits it. No fences are encoded on it by this call: the
   /// buffer's FIRST dispatches are the ones that produced what the caller reads, which is the ordering.
+  ///
+  /// \note The deposit is NOT removed: it stays registered as CLAIMED until its command buffer completes, so
+  ///       a HOST reader of that grid can still wait for its production (see ensure_grid_produced()). A
+  ///       second take of the same address returns nil - the buffer belongs to one hop.
   static id<MTLCommandBuffer> take_released(const void* grid_base);
+
+  /// \brief Makes sure the grid at \p grid_base has been - or will be - WRITTEN, for a host reader (D1-A).
+  ///
+  /// The consumers of the resource grid that read it on the HOST - the PUCCH is one, and it has no device
+  /// view at all - cannot use a grid whose production the hand-over deferred to the lane's commit. This is
+  /// where they wait, and it covers both shapes of a slot:
+  ///
+  ///  * a slot whose grid a hop CLAIMED: the lane commits it, and this waits for the grid-production fence
+  ///    the release armed on that very buffer;
+  ///  * a slot NOBODY claimed (a PUCCH-only slot, where no hop runs at all): nothing would ever commit it,
+  ///    so this COMMITS it here - the fallback a hand-over owes whenever its consumer is not guaranteed.
+  ///
+  /// \note Call it from the consumer side and PROMPTLY: a deposit nobody claims is dropped when the address
+  ///       comes back through the pool (a later slot's deposit supersedes it), and from then on the grid it
+  ///       wrote cannot be produced at all. The counter that says it happened is `superseded`.
+  /// \return True when the grid is ready (or nothing was pending); false when the wait timed out, which
+  ///         means the reader must NOT trust the grid.
+  static bool ensure_grid_produced(const void* grid_base);
 
   /// \brief What the registry has seen, for the diagnostics (see the [metal_stats] dft handover line).
   struct handed_counters {
@@ -139,6 +166,12 @@ public:
     uint64_t evicted = 0;
     /// Deposits still unclaimed: the grid of a slot whose hop has not started (or never will).
     size_t outstanding = 0;
+    /// Deposits a host reader found still unclaimed and had to COMMIT itself (see ensure_grid_produced).
+    /// Non-zero is normal in a run with PUCCH-only slots; a large number means the consumers are late and
+    /// the deposits are being swept, not served.
+    uint64_t fallback_commits = 0;
+    /// Host waits that timed out: the grid the caller was about to read was NOT ready.
+    uint64_t ready_timeouts = 0;
   };
   static handed_counters handed_stats();
 

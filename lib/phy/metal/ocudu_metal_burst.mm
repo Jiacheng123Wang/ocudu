@@ -322,6 +322,11 @@ struct handed_entry {
   /// Runs if this entry is dropped instead of claimed (see deposit_released()). Empty when the depositor has
   /// nothing to let go.
   std::function<void()> on_drop;
+  /// Grid-production fence generation (see shared_queue::grid_ready_signal), armed by the depositor on the
+  /// buffer that will carry the grid: what a HOST reader waits for (ensure_grid_produced()).
+  uint64_t generation = 0;
+  /// Whether a hop has taken this deposit. An unclaimed one is committed by whoever needs the grid first.
+  bool claimed = false;
 };
 
 /// Process-wide, because the two ends are two threads: the lower PHY (the radio thread) releases the block
@@ -340,6 +345,28 @@ handed_state& handed()
   return *s;
 }
 
+/// Removes the record of \p cb (its grid is produced, or its buffer is gone for good): `no record` has to
+/// mean `nothing to wait for`, which is what a host reader relies on (see ensure_grid_produced()).
+static void forget_handed(id<MTLCommandBuffer> cb)
+{
+  // The record's own reference to \p cb is dropped AFTER the lock, never inside it: this is called from a
+  // completion handler, and releasing the LAST reference to a command buffer runs its completion handlers
+  // (Metal dispatches them from the dealloc, even for one that never completed) - which come back here.
+  id<MTLCommandBuffer> released_after_unlock = nil;
+  {
+    handed_state&               h = handed();
+    std::lock_guard<std::mutex> lock(h.mutex);
+    for (auto it = h.entries.begin(); it != h.entries.end(); ++it) {
+      if (it->cb == cb) {
+        released_after_unlock = it->cb;
+        h.entries.erase(it);
+        break;
+      }
+    }
+  }
+  (void)released_after_unlock;
+}
+
 /// How many deposits are kept. The steady state is one per slot in flight, and a deposit is claimed by the
 /// hop that reads its grid, so this is generous - it exists so that a hop that never runs (a slot with no
 /// grant) cannot grow the list without bound.
@@ -347,7 +374,10 @@ constexpr size_t max_handed = 8;
 
 } // namespace
 
-void shared_burst::deposit_released(const void* grid_base, id<MTLCommandBuffer> cb, std::function<void()> on_drop)
+void shared_burst::deposit_released(const void* grid_base,
+                                   id<MTLCommandBuffer> cb,
+                                   uint64_t             generation,
+                                   std::function<void()> on_drop)
 {
   if ((grid_base == nullptr) || (cb == nil)) {
     return;
@@ -355,6 +385,11 @@ void shared_burst::deposit_released(const void* grid_base, id<MTLCommandBuffer> 
   // The drop hooks run OUTSIDE the lock: they belong to the depositors and may do arbitrary work (releasing
   // a receive buffer, for one), so calling them under the registry's mutex would invite a deadlock.
   std::vector<std::function<void()>> dropped;
+  /// Command buffers this call drops the last reference to (the entry it replaces, and any it evicts). They
+  /// are released AFTER the lock: a command buffer's last release dispatches its completion handlers, and
+  /// those take this registry's lock - which the calling thread would still be holding (measured: the whole
+  /// test hung here, with the stack showing the dealloc running MTLDispatchListApply).
+  std::vector<id<MTLCommandBuffer>> released_after_unlock;
   {
     handed_state&               h = handed();
     std::lock_guard<std::mutex> lock(h.mutex);
@@ -369,14 +404,17 @@ void shared_burst::deposit_released(const void* grid_base, id<MTLCommandBuffer> 
         if (entry.on_drop) {
           dropped.push_back(std::move(entry.on_drop));
         }
-        entry.cb      = cb;
-        entry.on_drop = std::move(on_drop);
+        released_after_unlock.push_back(entry.cb);
+        entry.cb         = cb;
+        entry.on_drop    = std::move(on_drop);
+        entry.generation = generation;
+        entry.claimed    = false;
         replaced      = true;
         break;
       }
     }
     if (!replaced) {
-      h.entries.push_back(handed_entry{grid_base, cb, std::move(on_drop)});
+      h.entries.push_back(handed_entry{grid_base, cb, std::move(on_drop), generation, false});
     }
     ++h.counters.handed;
     if (replaced) {
@@ -389,13 +427,19 @@ void shared_burst::deposit_released(const void* grid_base, id<MTLCommandBuffer> 
       if (h.entries.front().on_drop) {
         dropped.push_back(std::move(h.entries.front().on_drop));
       }
+      released_after_unlock.push_back(h.entries.front().cb);
       h.entries.pop_front();
       ++h.counters.evicted;
     }
   }
+  // The record lives until the buffer COMPLETES: `no record` has to mean `nothing to wait for`, which is
+  // what a host reader relies on (ensure_grid_produced()).
+  [cb addCompletedHandler:^(id<MTLCommandBuffer> completed) { forget_handed(completed); }];
+
   for (const std::function<void()>& hook : dropped) {
     hook();
   }
+  released_after_unlock.clear();
 }
 
 id<MTLCommandBuffer> shared_burst::take_released(const void* grid_base)
@@ -405,15 +449,61 @@ id<MTLCommandBuffer> shared_burst::take_released(const void* grid_base)
   }
   handed_state&               h = handed();
   std::lock_guard<std::mutex> lock(h.mutex);
-  for (auto it = h.entries.begin(); it != h.entries.end(); ++it) {
-    if (it->grid_base == grid_base) {
-      id<MTLCommandBuffer> cb = it->cb;
-      h.entries.erase(it);
+  for (handed_entry& entry : h.entries) {
+    if ((entry.grid_base == grid_base) && !entry.claimed) {
+      entry.claimed = true;
       ++h.counters.taken;
-      return cb;
+      return entry.cb;
     }
   }
   return nil;
+}
+
+bool shared_burst::ensure_grid_produced(const void* grid_base)
+{
+  if (grid_base == nullptr) {
+    return true;
+  }
+  id<MTLCommandBuffer> to_commit = nil;
+  uint64_t             generation = 0;
+  {
+    handed_state&               h = handed();
+    std::lock_guard<std::mutex> lock(h.mutex);
+    for (handed_entry& entry : h.entries) {
+      if (entry.grid_base != grid_base) {
+        continue;
+      }
+      generation = entry.generation;
+      if (!entry.claimed) {
+        // Nobody will ever commit this one (a slot no hop ran for), and a grid nobody produces is a grid the
+        // caller is about to read as garbage: the fallback a hand-over owes.
+        entry.claimed = true;
+        to_commit     = entry.cb;
+        ++h.counters.fallback_commits;
+      }
+      break;
+    }
+  }
+  if (to_commit != nil) {
+    // The same accounting a commit owes, minus the front-end publication: this buffer is not a front-end
+    // submission of the engine's, it is the receiving chain's block that nobody adopted.
+    shared_queue::arm_gpu_time(to_commit, shared_queue::queue_kind::back_end);
+    [to_commit commit];
+  }
+  if (generation == 0) {
+    // No fence was armed (nothing pending, or the depositor is not using one): nothing to wait for.
+    return true;
+  }
+  // Bounded on purpose: a generation nobody signals must not hang the caller for good - and a timeout is
+  // counted, because the caller then knows the grid is NOT trustworthy.
+  constexpr uint32_t ready_timeout_ms = 200;
+  if (!shared_queue::grid_ready_wait(generation, ready_timeout_ms)) {
+    handed_state&               h = handed();
+    std::lock_guard<std::mutex> lock(h.mutex);
+    ++h.counters.ready_timeouts;
+    return false;
+  }
+  return true;
 }
 
 shared_burst::handed_counters shared_burst::handed_stats()

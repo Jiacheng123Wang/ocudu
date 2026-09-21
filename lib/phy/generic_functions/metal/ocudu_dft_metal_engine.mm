@@ -1060,7 +1060,12 @@ void* dft_metal_engine::release_block(const void* grid_base)
   // DROPPED instead - a handover nobody claimed is never committed, so its completion would never come.
   const size_t nof_tokens = engine->open_tokens.size();
   std::shared_ptr<block_token_set> tokens = arm_tokens_on_complete(cb, std::move(engine->open_tokens));
-  metal::shared_burst::deposit_released(grid_base, cb, [tokens]() { release_block_tokens(tokens); });
+  // The grid-production fence (D1-A, 5.9.13): a HOST reader of this grid - the PUCCH - waits on this
+  // generation, because with the hand-over the grid is produced at the LANE's commit and a host read is not
+  // ordered against it at all. Armed here, on the buffer that will carry the grid, before it is handed over.
+  const uint64_t generation = metal::shared_queue::grid_ready_signal(cb);
+  metal::shared_burst::deposit_released(
+      grid_base, cb, generation, [tokens]() { release_block_tokens(tokens); });
   // Per-deposit line, keyed by the grid the hop will look up: this and the take-side line in the estimator
   // are what say whether the two ends name the SAME address (D1 diagnostics, 5.9.11). Rate-limited, because
   // a healthy run has one per slot.

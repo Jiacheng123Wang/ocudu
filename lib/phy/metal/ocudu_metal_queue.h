@@ -204,6 +204,29 @@ public:
   /// buffer failed, and true when there is nothing to wait for.
   static bool wait_all_committed(queue_kind kind);
 
+  /// \brief Grid-production fence: tells a HOST reader of the resource grid when that grid has been written.
+  ///
+  /// With the block hand-over (D1) the resource grid is produced at the LANE's commit instead of at the end
+  /// of the receiving slot, so a consumer that reads the grid on the HOST - the PUCCH is one, with no device
+  /// view at all - would read memory nobody has written yet (measured: `metric=nan sinr=-inf` on every PUCCH
+  /// report, design document 5.9.12). This is the wait those consumers owe: the hand-over's owner arms the
+  /// signal on the command buffer that will carry the grid, and the consumer waits for the generation.
+  ///
+  /// Why an event and not the command buffer: at the moment a consumer asks, the buffer may still be open in
+  /// the lane (encoded into, not committed), so `waitUntilCompleted` would be invalid. A generation wait
+  /// works whenever the commit happens, and it is the same discipline as the front-end fence above.
+  ///
+  /// \param[in] command_buffer The buffer that will produce the grid; must not be committed yet.
+  /// \return The generation to wait for, or 0 when the fence is unavailable (no device).
+  static uint64_t grid_ready_signal(id<MTLCommandBuffer> command_buffer);
+
+  /// \brief Waits (on the HOST, with a bound) for \p generation of the grid-production fence.
+  ///
+  /// \param[in] generation Value returned by grid_ready_signal(); 0 waits for nothing.
+  /// \param[in] timeout_ms Upper bound, so a generation nobody signals cannot hang the caller for good.
+  /// \return True when the generation was reached.
+  static bool grid_ready_wait(uint64_t generation, uint32_t timeout_ms);
+
   /// Number of command buffers committed through the shared queue (diagnostics).
   static uint64_t nof_commits();
 
