@@ -3228,6 +3228,36 @@ PRACH 池耗尽 ⇒ **UE 连 RACH 都做不了 ⇒ "手机连不上"**。
 也就是找到 PUCCH 处理那条路上的调用点（**必须在 PUSCH 之后**，否则等的是同一跳自己要产出的东西 ⇒ 死锁），
 然后把交出重新武装、上腿。**交出当前仍是关的**（`grid_has_host_consumers()` 返回常量 `true`）。
 
+#### 5.9.14 ✅ A 已接线并重新武装（S18 续）：**三个宿主消费者的等待都落在它们自己的执行器上**
+
+**① 消费者是谁、在哪个线程读网格（读代码得到的，不是推测）**
+
+| 消费者 | 在哪读 | 执行器 | 与生产者的关系 |
+|---|---|---|---|
+| PUCCH format 0/2/3/4 | `process_pucch()` 的 defer lambda | `pucch_executor`（`non_rt_hi_prio_exec`）| **不同池** ⇒ 等待不会饿死生产者 ✅ |
+| PUCCH format 1 集合 | `process_pucch_f1()` 的 defer lambda | 同上 | ✅ |
+| SRS | `process_srs()` 的 defer lambda | `srs_executor`（= `pusch_srs_execs[2]`，**与 PUSCH 解码器同池**）| **同池** ⇒ 饱和时可能占住生产者要的线程 ⚠ 已记档 |
+
+**② 为什么是"钩子"而不是直接调用**：消费者在**上层 PHY**，而实现跟 Metal 引擎在一起；
+没有 Metal 的构建也必须能链接。⇒ 头文件 `ocudu/phy/phy_pipeline_grid_ready.h` 里一个 `std::atomic<wait_fn>`，
+**Metal 侧安装**（`ocudu_metal_burst.mm` 的静态初始化）。**没安装 = 没什么可等的**（＝那些构建一贯的行为）。
+机制单测里加了一条断言：**钩子真的被安装过**，否则"接线"就是一个没人调用的函数。
+
+**③ 等待覆盖两种形状**（这是它必须是"注册表 + 兜底提交"而不是一个栅栏的原因）：
+有跳认领 ⇒ 等车道的提交；**没人认领（PUCCH-only 槽）⇒ 消费者自己提交它**，否则网格永不写。
+
+**④ 已重新武装**：`grid_has_host_consumers()` 现在返回 `false`，理由写在它被读的地方——
+**这是对"链的形状"的陈述，由钩子使它为真**。
+
+**⑤ 门（旋钮关）**：`value_net` **47/0**、`ctest -R metal` **10/10**、
+`ctest -R "ul_pipeline_probe|puxch|lower_phy"` **5/5**、`neutral_vs_baseline` **131**（同数）——
+**未武装时钩子走的是"没有记录 ⇒ 立刻返回"这条路**，所以出厂路径仍然逐字节不变。
+
+**⑥ ⇒ 下一件事：上腿对**（`gpu` 对照 / `gpu` + `OCUDU_DFT_RELEASE_BLOCK=1`）。
+判读除了老三条（`handed>0`、`evicted==0`、`keepalives` 相等）之外，**这次第一次能看数据面**：
+PUCCH 的 `metric/sinr`、CRC 分层比、`real-time failures`。
+**⚠ SRS 那条同池的等待是本步唯一未验的风险**：若腿出现 SRS 相关的停滞/丢弃，就是池子需要分开。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。
