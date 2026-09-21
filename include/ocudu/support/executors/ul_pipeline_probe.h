@@ -434,6 +434,28 @@ public:
   /// Whether the per-slot timeline is on (public so the lower PHY can gate its own diagnostics on it).
   static bool slot_trace_enabled() { return slot_trace_limit() != 0; }
 
+  /// \brief How long the host BLOCKED waiting for the front-end DFT of a slot (call from the DFT engine's
+  /// wait_slot(), around its waitUntilCompleted).
+  ///
+  /// This is the one host synchronization D1 exists to remove. In the lane route the grid is device-resident and
+  /// the consumer waits for it on the DEVICE, so the demodulator takes its host wait once per slot instead of once
+  /// per symbol - which makes this series the price of that arrangement, measured rather than assumed:
+  ///
+  ///   * if it is ~0, the host is never actually held up (the DFT is always done by the time the slot's last
+  ///     symbol arrives) and D1's "one submission per hop" is worth only the CPU time it saves;
+  ///   * if it is a large fraction of a slot, the host IS held up every slot, and removing the wait is worth
+  ///     real latency.
+  ///
+  /// Recorded per WAIT, not per slot: a route that waits per symbol records one per symbol (see the demodulator).
+  void record_dft_wait(int64_t wait_ns)
+  {
+    if (wait_ns < 0) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    dft_wait_us.push_back(static_cast<double>(wait_ns) / 1e3);
+  }
+
   /// \brief Remembers one landmark instant of a slot, and CREATES its timeline entry when the landmark proves
   /// the slot carries a PUSCH.
   ///
@@ -602,6 +624,7 @@ public:
     std::vector<double> sorted_gpu_pipeline;
     std::vector<double> sorted_fapi_mac;
     std::vector<double> sorted_rx_wait;
+    std::vector<double> sorted_dft_wait;
     {
       std::lock_guard<std::mutex> lock(mutex);
       sorted_pipeline     = latencies_us;
@@ -613,6 +636,7 @@ public:
       sorted_gpu_pipeline = gpu_pipeline_latencies_us;
       sorted_fapi_mac     = fapi_mac_latencies_us;
       sorted_rx_wait      = rx_wait_us;
+      sorted_dft_wait     = dft_wait_us;
     }
     auto pct = [](const std::vector<double>& sorted, double p) {
       return sorted[static_cast<size_t>((sorted.size() - 1) * p)];
@@ -681,6 +705,7 @@ public:
     // The receive's own series, and the only one whose count is per BLOCK rather than per slot or per TB (see
     // record_rx_wait). Printed next to the pipeline it is part of, because [ul_time_frequency] includes it.
     print_series("ul_rx_wait", sorted_rx_wait);
+    print_series("ul_dft_wait", sorted_dft_wait);
     print_slot_trace();
     // The series printed below cross both modes unchanged.
     // FAPI->MAC tail (CRC-OK -> MAC UL task enqueue): recorded in lockstep with the CRC-OK completions, so its
@@ -881,6 +906,8 @@ private:
   /// Receive wait times (µs), one per received BLOCK (see record_rx_wait): the span the host spent blocked inside
   /// receiver.receive(). The only series with no pairing: the two clock reads bracket a single call.
   std::vector<double> rx_wait_us;
+  /// Host time blocked inside the front-end DFT's wait_slot() (µs), one sample per WAIT (see record_dft_wait).
+  std::vector<double> dft_wait_us;
   /// The instant the samples completing each traced slot arrived (see record_slot_samples_complete()).
   std::map<uint64_t, std::chrono::high_resolution_clock::time_point> slot_samples_done;
   /// One entry per traced slot, keyed by slot: the per-slot timeline printed by print_slot_trace().
@@ -914,6 +941,7 @@ public:
   void record_end_crc_ok(uint64_t /*slot*/, size_t /*mac_pdu_bytes*/) {}
   void record_fapi_mac_end(uint64_t /*slot*/) {}
   void record_rx_wait(int64_t /*wait_ns*/) {}
+  void record_dft_wait(int64_t /*wait_ns*/) {}
   std::optional<ul_phase_durations> get_phase_durations(uint64_t /*slot*/) { return std::nullopt; }
   void report() {}
 

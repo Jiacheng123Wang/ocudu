@@ -13,9 +13,11 @@
 #include "ocudu/phy/phy_pipeline_contract.h"
 #include "ocudu/phy/phy_pipeline_crossings.h"
 
+#include "ocudu/support/executors/ul_pipeline_probe.h"
 #include "ocudu/support/macos_compat.h"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -485,7 +487,32 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
         impl = nullptr;
         return false;
       }
-      res.queue = metal::shared_queue::queue();
+      // rief Which queue the front-end DFT commits on.
+      ///
+      /// DEFAULT: the front-end queue (shared_queue::queue()), which is what this engine has always used - the
+      /// per-symbol producers have a queue of their own so that the DFT of a slot overlaps the back-end lane of
+      /// the previous one.
+      ///
+      /// OCUDU_DFT_BACKEND_QUEUE=1 commits them on the BACK-END queue instead, which is the queue the receiving
+      /// chain's late stages (the estimator and the lane burst) use. That is an EXPERIMENT, not a candidate: with
+      /// both stages on one queue, submission order alone orders the DFT before the lane's burst, so the
+      /// cross-queue fence (shared_queue::front_end_wait, encoded by the burst) stops being what provides the
+      /// ordering - while still being encoded, so the two arms differ ONLY in whether the ordering crosses a
+      /// queue. Its purpose is to price the fence, which is the precondition for design document 5.9's step 1:
+      /// D1 wants the DFT on the lane's queue, and that change is only worth its cost if the cross-queue relation
+      /// is what is expensive. If the two arms read the same, the fence is free and D1 becomes purely about the
+      /// 1.83 CPU commits per hop it removes.
+      auto dft_queue = []() {
+        const char* env = std::getenv("OCUDU_DFT_BACKEND_QUEUE");
+        if ((env != nullptr) && (std::strtoul(env, nullptr, 10) != 0)) {
+          std::fprintf(stderr,
+                       "[dft_queue] EXPERIMENT: the front-end DFT commits on the BACK-END queue "
+                       "(OCUDU_DFT_BACKEND_QUEUE=1)\n");
+          return metal::shared_queue::backend_queue();
+        }
+        return metal::shared_queue::queue();
+      };
+      res.queue = dft_queue();
 
       NSString* lib_path = resolve_dft_metallib_path();
       if (lib_path == nil) {
@@ -711,7 +738,12 @@ bool dft_metal_engine::wait_slot(unsigned slot)
   // Account for the slot wait so [metal_stats] reports the real in-flight depth (the ring keeps
   // up to `pipeline depth` transforms in flight instead of one).
   dft_stats_wait();
+  // [ul_dft_wait]: the host time this wait costs. Records the WHOLE waitUntilCompleted, which is the instant the
+  // synchronization actually occupies the caller - not the GPU span (last_gpu_us) of the buffer it waits for.
+  const auto wait_begin = std::chrono::steady_clock::now();
   [cmd_buf waitUntilCompleted];
+  ul_pipeline_probe::get().record_dft_wait(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_begin).count());
   if (cmd_buf.status != MTLCommandBufferStatusCompleted) {
     ocudulog::fetch_basic_logger("PHY").error("Metal DFT: slot {} command buffer failed with status {}",
                                               slot,
