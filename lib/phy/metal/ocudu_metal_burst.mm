@@ -302,11 +302,9 @@ struct handed_entry {
 /// Process-wide, because the two ends are two threads: the lower PHY (the radio thread) releases the block
 /// its transforms went into, the upper PHY claims it when it starts the hop that reads that grid.
 struct handed_state {
-  std::mutex                mutex;
-  std::deque<handed_entry>  entries; // oldest first
-  uint64_t                  handed  = 0;
-  uint64_t                  taken   = 0;
-  uint64_t                  dropped = 0;
+  std::mutex               mutex;
+  std::deque<handed_entry> entries; // oldest first
+  shared_burst::handed_counters counters;
 };
 
 handed_state& handed()
@@ -334,22 +332,23 @@ void shared_burst::deposit_released(const void* grid_base, id<MTLCommandBuffer> 
 
   // One deposit per address: the same storage can come back through the grid pool for a LATER slot, and
   // that slot's own deposit is the one its consumer must take. The entry it replaces belongs to a slot
-  // whose grid nobody is reading any more.
+  // whose grid nobody read - the pool can only hand the address back once its holder let it go - which is
+  // why this is counted apart from an eviction (see handed_counters).
   for (auto it = h.entries.begin(); it != h.entries.end(); ++it) {
     if (it->grid_base == grid_base) {
       it->cb = cb;
-      ++h.handed;
-      ++h.dropped;
+      ++h.counters.handed;
+      ++h.counters.superseded;
       return;
     }
   }
   h.entries.push_back(handed_entry{grid_base, cb});
-  ++h.handed;
+  ++h.counters.handed;
   while (h.entries.size() > max_handed) {
-    // The oldest is the one whose consumer is least likely to still come; the caller reads `dropped` and
-    // the [metal_stats] line says the number, so a hop that lost its buffer this way is visible.
+    // The oldest is the one whose consumer is least likely to still come. A backlog, not a recycle: the
+    // [metal_stats] line reports it separately so that the expected case cannot hide a defect.
     h.entries.pop_front();
-    ++h.dropped;
+    ++h.counters.evicted;
   }
 }
 
@@ -364,20 +363,20 @@ id<MTLCommandBuffer> shared_burst::take_released(const void* grid_base)
     if (it->grid_base == grid_base) {
       id<MTLCommandBuffer> cb = it->cb;
       h.entries.erase(it);
-      ++h.taken;
+      ++h.counters.taken;
       return cb;
     }
   }
   return nil;
 }
 
-void shared_burst::handed_stats(uint64_t& handed_over, uint64_t& taken, uint64_t& dropped)
+shared_burst::handed_counters shared_burst::handed_stats()
 {
   handed_state&               h = handed();
   std::lock_guard<std::mutex> lock(h.mutex);
-  handed_over = h.handed;
-  taken       = h.taken;
-  dropped     = h.dropped;
+  handed_counters out   = h.counters;
+  out.outstanding       = h.entries.size();
+  return out;
 }
 
 void shared_burst::set_flush_hook(void* context, flush_hook_t hook)

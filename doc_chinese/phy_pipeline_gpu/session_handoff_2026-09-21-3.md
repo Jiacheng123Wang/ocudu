@@ -110,34 +110,76 @@ bash doc_chinese/phy_pipeline_gpu/wip/neutral_vs_baseline.sh      # 131 differin
 
 ## 4. ★★★ 下一步：**空口腿（一次 OTA）**
 
-### 4.1 腿法（**⚠ 模式必须 `cpu_gpu` 或 `gpu`**；旋钮作为**位置参数**传）
+### 4.1 腿法：**两臂都必须是 `gpu` 模式**（旋钮作为**位置参数**传）
 
 ```bash
-# 对照（默认：槽末提交 + 宿主等待）
-sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh cpu_gpu s32-d1-step2-base
+# 对照（gpu 模式，默认：槽末提交 + 宿主等待）
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s32-d1-step2-base
 # 候选（交出 + 认领）
-sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh cpu_gpu s32-d1-step2 OCUDU_DFT_RELEASE_BLOCK=1
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s32-d1-step2 OCUDU_DFT_RELEASE_BLOCK=1
 ```
 
-**⚠ 关于 `mode`**：守卫要求 `phy_pipeline_strict_enabled()`。`cpu_gpu` **不满足**它
-（`gpu` 才满足，或显式 `OCUDU_GPU_STRICT=1`）。
-**⇒ 想判这一步，候选臂应当是 `gpu` 模式（或 `cpu_gpu` + `OCUDU_GPU_STRICT=1`，但那时"没有宿主兜底"这条就不再由模式保证）。**
-**这是本步最需要用户拍板的一点**（见 §4.4 第 0 条）。
+**⇒ 一共 2 次腿（一个腿对），同一个二进制、同一次部署，唯一自由变量是 `OCUDU_DFT_RELEASE_BLOCK`。**
+
+#### ⚠⚠ 为什么候选臂**不能**是 `cpu_gpu`（这一条是本交接文件原先写错、已更正的地方）
+
+守卫（§2.2）要求 **`phy_pipeline_strict_enabled()`**，而它读的是**已发布的流水线模式**：
+
+| 模式 | `strict` | 结果 |
+|---|---|---|
+| `cpu` | ✗ | `cpu` 下 **Metal DFT 根本不存在**，交出对象不存在 |
+| **`cpu_gpu`** | **✗** | **守卫直接拒绝 ⇒ `handed=0` ⇒ 这一腿什么都没判**（而且看起来"跑完了"）|
+| **`gpu`** | **✓** | 守卫通过（`device_resource_grid on` ⇒ `grid_consumed_on_device` ⇒ `wait_per_slot` 也通过）|
+
+**⇒ `cpu_gpu` + 旋钮 = 白跑一条腿**（这正是本线反复踩的"判据没触发却看起来正常"）。
+（`cpu_gpu` + `OCUDU_GPU_STRICT=1` 技术上能让守卫通过，但它**同时打开了严格策略**——
+设备服务不了的跳从"宿主兜底"变成"grant 失败"——**那就是第二个自由变量**，腿对的结论会没法归因。不用它。）
+
+#### ✅ `gpu` 模式是现成的、而且已经验证过
+
+最近一条 `gpu` 腿 `gnb_gpu_s14p3-merged_0920_1847`（commit `a55742c5f8`，就是 P3 翻默认那次）：
+
+| 读数 | 值 |
+|---|---|
+| 契约 | **8 of 8 checks applicable → MET**（`mode=gpu`）|
+| `ce device estimates` | **166122 device, 0 host** → host=0 ✅ |
+| `host device data crossings` | **0 read + 0 write / 15102 hop** ✅ |
+| `[ul_gpu_lane]` | `lanes=15102 **cbs/lane=1.00 (max=1)**` ✅ |
+| **`[metal_stats] dft commits`** | **27668 / 15102 跳 = 1.83 次/跳** ← **这就是 D1 要消掉的那 1.83** |
+| `[metal_stats] dft transforms` | 387339（14 变换/提交 ⇒ 块批处理在跑）|
+| CRC | 14124 OK / 978 KO |
+
+**⇒ 它同时是"对照臂长什么样"的参照，也是"判据会触发"的证明**：候选臂上 `dft commits` 应当**塌下来**（只剩 warm-up 等极少数），
+而 `dft handover` 行应当出现 `handed ≈ 跳数`。
 
 ### 4.2 判读（**先看仪表有没有触发，再看数字**）
 
-| 看什么 | 期望 | 说明 |
-|---|---|---|
-| **`[dft_release]` 横幅** | 候选臂有 | 旋钮真被引擎看到（`grep dft_release <log>`）|
-| **`[metal_stats] dft handover ... (armed=1)`** | 候选臂**必须有这一行** | `handed>0` ⇒ 真交出去了；**`handed=0` 是发现**（守卫拒绝或没有槽走到末符号），**不是"没接线"** |
-| **`taken` 是否等于 `handed`** | 相等 | 不等 ⇒ **有 deposit 没人取**（网格没人写）⇒ 立刻停手 |
-| **`dropped`** | **必须 0** | 非 0 ⇒ 有 deposit 被顶掉/淘汰 ⇒ 同上 |
-| **`[metal_stats] dft commits`** | **显著下降** | 那 1.83 次/跳的 DFT 提交应当消失 |
-| **`[ul_gpu_lane] cbs/lane`** | 仍 **1.00** | 一跳一条缓冲（第 1 步的单测里已经看到过 1.00）|
-| **契约 `ce device estimates` / `equalizer ch_re`** | **host=0 / 0** | 没有宿主消费者漏网 |
-| **`released_waits`** | **0** | 非 0 ⇒ 宿主仍在等交出去的槽位（接线漏了一处）|
-| **CRC（按调制分层比）** | 不劣化 | **最重要的一条** |
-| `Real-time failures` | **0** | 判读前先看它 |
+| 看什么 | 对照臂（`gpu`） | 候选臂（`gpu` + 旋钮）| 说明 |
+|---|---|---|---|
+| **`[dft_release]` 横幅** | 无 | **有** | 旋钮真被引擎看到（`grep dft_release <log>`）|
+| **`[metal_stats] dft handover ... (armed=)`** | **无这一行** | **必须有，且 `armed=1`** | 没有这一行 ⇒ 旋钮没进去 |
+| **`handed`** | —— | **> 0** | **`handed=0` 是发现**（守卫拒绝？没有槽走到末符号？），**不是"没接线"** |
+| **`taken`** | —— | **> 0，且与"跳数"同量级** | 认领真的发生了 |
+| **`superseded`** | —— | **允许非 0** | **无害且预期**：同一个地址又被 deposit（网格经池子回来了）⇒ 说明那个槽**没有跳**、那份网格没人读。**参照数字见下** |
+| **`evicted`** | —— | **必须 0** | 超过 8 条未认领 ⇒ **积压**（消费者落后于生产者）⇒ 这才是可疑的那一半 |
+| **`outstanding`** | —— | 小（≤ 在飞的槽数）| 退出时还没人认领的 |
+| **`[metal_stats] dft commits`** | **1.83/跳**（≈27668）| **塌下来**（≈0，只剩 warm-up）| 这就是本步的目标本身 |
+| `[metal_stats] dft waits` | ≈27668 | 大幅下降 | 宿主不再等 |
+| **`[metal_stats] dft ... released_waits`** | 0 | **必须 0** | 非 0 ⇒ 宿主仍在等交出去的槽位（接线漏了一处）|
+| **`[ul_gpu_lane] cbs/lane`** | **1.00** | **仍 1.00** | 一跳一条缓冲 |
+| **契约**（8/8）| MET | **仍 MET**，尤其 `ce device estimates` **host=0**、`host device data crossings` 0 | 没有宿主消费者漏网 |
+| **CRC（按调制分层比）** | 14124/978 量级 | **不劣化** | **最重要的一条** |
+| `Real-time failures` | 1 / 71788 slots | 不劣化 | **判读前先看它** |
+
+#### ★ 关于 `superseded` 为什么"允许非 0"（**别把它当成失败**）
+
+参照腿里 **DFT 块 ≈ 27667，跳只 ≈ 15102（1.83 块/跳）**——**块比跳多**。
+多出来的那些块的网格**没有跳去读**（那一槽没有成功的上行接收），它们经网格池被下一个槽复用 ⇒ **同一个地址再次 deposit ⇒ `superseded++`**。
+
+**这是可以证明无害的**：网格池只有在**持有者放手之后**才会把地址还回来，而持有者正是那个（还没跑的）跳——
+所以"地址回来了"本身就说明**那个槽没有消费者**，那份网格没人读。
+**⇒ 判据不是"superseded==0"，而是 `evicted==0` + `released_waits==0` + 契约 host=0 + CRC 不劣化。**
+（`superseded` 与 `evicted` 分成两个数就是为了这个：一个数是预期结果，另一个是缺陷，混在一起就没法读。）
 
 ### 4.3 判读入口
 
@@ -146,11 +188,12 @@ bash doc_chinese/phy_pipeline_gpu/wip/leg_report.sh <log>
 grep -E "dft_release|handover|dft commits|released_waits|cbs/lane" <log>
 ```
 
-### 4.4 开工前要拍板/确认的事
+### 4.4 开工前要确认的事
 
-0. **候选臂用哪个模式**（`gpu`？还是 `cpu_gpu` + `OCUDU_GPU_STRICT=1`）——守卫与模式的关系见 §4.1；
+0. **模式 = `gpu`**（理由与证据见 §4.1；**不要用 `cpu_gpu`**）；
 1. **上腿前关掉手机 WiFi**；**先跑对照臂**，空臂宽度 ≥ 要判的效应 ⇒ 该次读数作废；
-2. **只报比值/份额，不报绝对 µs**；`last_gpu_wait_us()` 在单发下是队列跨度不是 kernel 时间。
+2. **只报比值/份额，不报绝对 µs**；`last_gpu_wait_us()` 在单发下是队列跨度不是 kernel 时间；
+3. **臂的顺序**：先对照后候选（同一二进制；两次之间不要改任何东西，包括 config）。
 
 ### 4.5 之后（D1 第 3 步）
 
@@ -191,7 +234,7 @@ grep -E "dft_release|handover|dft commits|released_waits|cbs/lane" <log>
 | 名字 | 说明 |
 |---|---|
 | **`OCUDU_DFT_RELEASE_BLOCK=1`** | **交出路径的旋钮（默认关）**。武装时：块建在**后端队列**、网格走**进程级 wrap**、`release_block()` 才肯交出。**还要过 §2.2 的三条守卫** |
-| **`[metal_stats] dft handover handed= taken= dropped= (armed=)`** | **新增**。**武装了就一定打这一行**；`taken` 必须等于 `handed`、`dropped` 必须 0 |
+| **`[metal_stats] dft handover handed= taken= superseded= evicted= outstanding= (armed=)`** | **新增**。**武装了就一定打这一行**；`evicted` 必须 0（`superseded` 允许非 0，见 §4.2）|
 | **`OCUDU_GPU_STRICT=1`** | 离线/腿上的 strict 覆盖口（离线回放**故意不发布模式**，没它就永远判不了融合路线）|
 | **`[metal_stats] dft ... released= released_waits=`** | 交出的块数 / **给不出的等待**（后者必须 0）|
 | `OCUDU_DFT_OPEN_BLOCK=0` | DFT"每槽 14 变换共用一条缓冲"关掉（默认开）|
@@ -200,7 +243,7 @@ grep -E "dft_release|handover|dft commits|released_waits|cbs/lane" <log>
 | `wip/value_net.py` / `wip/run_leg.sh` / `wip/leg_report.sh` | 门 / 跑腿 / 单腿判读 |
 
 **★ 上腿前的三条自查（长期有效）**：
-1. **模式对吗**（D1 必须 `cpu_gpu`/`gpu`；`cpu` 下 **Metal DFT 不存在**；**strict 守卫要 `gpu` 或 `GPU_STRICT`**）；
+1. **模式对吗**（D1 的腿**必须 `gpu`**：`cpu` 下 Metal DFT 不存在，`cpu_gpu` 下守卫拒绝交出；见 §4.1）；
 2. **判据会触发吗**（`[ul_dft_wait]` 有样本？`handover` 行在？`handed>0`？）；
 3. **开关武装了吗**（依赖 `OCUDU_UL_FRONTEND_FENCE` 的臂必须设 1）。
 
@@ -252,5 +295,7 @@ grep -E "dft_release|handover|dft commits|released_waits|cbs/lane" <log>
 
 **D1 第 1、2 步都接线完成、默认关闭、逐字节零影响（131 = 同数），
 "DFT 交出 + 车道认领"这条组合已经能从代码一路读到仪表——但它离线跑不了，只能空口腿判。**
-**下一步：和用户确认候选臂的模式（§4.1 的守卫要求 `gpu` 或 `OCUDU_GPU_STRICT=1`），跑腿对，
-先看 `handover` 那一行有没有 `handed>0`、`taken==handed`、`dropped==0`，再看 CRC。**
+**下一步：跑一个 `gpu` 模式的腿对（对照 = `gpu`，候选 = `gpu` + `OCUDU_DFT_RELEASE_BLOCK=1`；
+⚠ **不是 `cpu_gpu`**，`cpu_gpu` 下守卫拒绝、`handed=0`，这一腿什么都判不了）。
+先看 `handover` 那一行有没有 `armed=1`、`handed>0`、`taken>0`、**`evicted==0`**（`superseded` 允许非 0），
+再看 `dft commits` 是否从 1.83/跳塌下来，最后比 CRC。**

@@ -111,8 +111,25 @@ public:
   /// buffer's FIRST dispatches are the ones that produced what the caller reads, which is the ordering.
   static id<MTLCommandBuffer> take_released(const void* grid_base);
 
-  /// \brief Deposits handed over, taken, and dropped (superseded or over the bound), for the diagnostics.
-  static void handed_stats(uint64_t& handed, uint64_t& taken, uint64_t& dropped);
+  /// \brief What the registry has seen, for the diagnostics (see the [metal_stats] dft handover line).
+  struct handed_counters {
+    /// Deposits made.
+    uint64_t handed = 0;
+    /// Deposits claimed by the hop that reads that grid - the healthy path.
+    uint64_t taken = 0;
+    /// Deposits replaced because the SAME address was deposited again. The grid came back through the
+    /// pool, which can only happen once its previous holder let it go - so the slot that deposited before
+    /// had no consumer, and the grid nobody read is the reason. HARMLESS, and expected: it is how this
+    /// counter says "that slot produced a block and no hop".
+    uint64_t superseded = 0;
+    /// Deposits dropped because more than max_handed were outstanding: a BACKLOG, i.e. consumers falling
+    /// behind producers. This one is the suspicious half, and it is kept apart from `superseded` for
+    /// exactly that reason - one number for both would make an expected outcome and a defect read alike.
+    uint64_t evicted = 0;
+    /// Deposits still unclaimed: the grid of a slot whose hop has not started (or never will).
+    size_t outstanding = 0;
+  };
+  static handed_counters handed_stats();
 
   /// Accounts one dispatch appended to the burst (diagnostics).
   static void count_dispatch(stage which = stage::other);

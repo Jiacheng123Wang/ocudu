@@ -153,18 +153,21 @@ static void dft_stats_report()
   // the line - and a line with handed=0 is then a finding (the demodulator's guard refused, or no slot
   // reached its last symbol), not an absent instrument. A run that did not arm it and never handed
   // anything over stays silent.
-  uint64_t handed = 0;
-  uint64_t taken  = 0;
-  uint64_t dropped = 0;
-  metal::shared_burst::handed_stats(handed, taken, dropped);
-  const char* armed = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
-  const bool  release_armed = (armed != nullptr) && (std::strtoul(armed, nullptr, 10) != 0);
-  if (release_armed || (handed != 0) || (taken != 0) || (dropped != 0)) {
+  //
+  // superseded and evicted are kept apart on purpose (see handed_counters): the first is the expected
+  // "that slot had no hop, and its grid came back through the pool", the second is a backlog.
+  const metal::shared_burst::handed_counters hand = metal::shared_burst::handed_stats();
+  const char*                              armed = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
+  const bool release_armed = (armed != nullptr) && (std::strtoul(armed, nullptr, 10) != 0);
+  if (release_armed || (hand.handed != 0) || (hand.taken != 0)) {
     std::fprintf(stderr,
-                 "[metal_stats] dft handover handed=%llu taken=%llu dropped=%llu (armed=%d)\n",
-                 static_cast<unsigned long long>(handed),
-                 static_cast<unsigned long long>(taken),
-                 static_cast<unsigned long long>(dropped),
+                 "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu outstanding=%zu "
+                 "(armed=%d)\n",
+                 static_cast<unsigned long long>(hand.handed),
+                 static_cast<unsigned long long>(hand.taken),
+                 static_cast<unsigned long long>(hand.superseded),
+                 static_cast<unsigned long long>(hand.evicted),
+                 hand.outstanding,
                  static_cast<int>(release_armed));
   }
 }
