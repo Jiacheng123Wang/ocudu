@@ -39,8 +39,29 @@ bool grid_ready_wait_hook(const void* storage, uint64_t slot, uint32_t timeout_m
   return shared_burst::ensure_grid_produced(storage, slot);
 }
 
+/// \brief The Metal end of the hand-over's counters (see grid_handover_counts).
+///
+/// The same numbers the exit-time `[metal_stats] dft handover` line prints, but readable WHILE the run is
+/// still going - which is the only way a harness can refuse to believe its own comparison after the
+/// mechanism it meant to exercise did nothing (5.9.19).
+void grid_handover_counts_hook(grid_handover_counts& out)
+{
+  const metal::shared_burst::handed_counters hand = metal::shared_burst::handed_stats();
+  out.installed        = true;
+  out.handed           = hand.handed;
+  out.taken            = hand.taken;
+  out.superseded       = hand.superseded;
+  out.evicted          = hand.evicted;
+  out.fallback_commits = hand.fallback_commits;
+  out.late_commits     = hand.late_commits;
+  out.not_found        = hand.grid_not_found;
+  out.unproduced       = hand.unproduced;
+  out.ready_timeouts   = hand.ready_timeouts;
+}
+
 const bool grid_ready_hook_installed = []() {
   grid_ready_hook::install(&grid_ready_wait_hook);
+  grid_ready_hook::install_counts(&grid_handover_counts_hook);
   return true;
 }();
 

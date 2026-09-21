@@ -19,10 +19,18 @@
 /// Usage:
 ///   ul_chain_replay <capture-prefix> --out <prefix> [--slot N --rnti R] [--index N]
 ///                   [--cpu | --metal | --metal-cpu-ldpc | --metal-cpu-ldpc-cpu-demod]
-///                   [--dft [--device-grid]]   replay a RECORDED TIME-DOMAIN capture (OCUDU_UL_DUMP_TD)
+///                   [--dft [--dft-metal] [--device-grid] [--synth N] [--synth-first-slot S] [--reuse-grid]]
+///                                             replay a RECORDED TIME-DOMAIN capture (OCUDU_UL_DUMP_TD)
 ///                                             through the OFDM demodulator and dump the grids: the
 ///                                             same IQ through two builds is the A/B of the DFT path,
 ///                                             and --device-grid switches the grid write to the device.
+///
+/// --dft is the L1 OFFLINE HARNESS for the D1 hand-over (design document 5.9.37). This tool is the grid's
+/// CONSUMER there: it asks for the grid's production (grid_ready_hook::wait) before it reads one, exactly
+/// as the PUCCH does in the receiving chain, and it ASSERTS that a hand-over actually happened. Run it
+/// twice - with and without OCUDU_DFT_RELEASE_BLOCK=1 - and the two grid dumps must be byte-identical;
+/// the arm that drops the consumer's wait must differ. --synth makes the corpus itself, so the mechanism
+/// can be judged with no recorded capture, no radio and no UE.
 ///
 /// Example (the A/B/C comparison of one recorded over-the-air reception):
 ///   ul_chain_replay /tmp/C --cpu              --out /tmp/replay_cpu
@@ -42,6 +50,9 @@
 #include "ocudu/adt/span.h"
 #include "ocudu/phy/lower/modulation/modulation_factories.h"
 #include "ocudu/phy/lower/modulation/ofdm_demodulator.h"
+// The D1 hand-over as the CONSUMER sees it (see --dft and write_grid()): the hook is a no-op in a build
+// without Metal, which is what keeps this tool usable as a plain replay.
+#include "ocudu/phy/phy_pipeline_grid_ready.h"
 #include "ocudu/phy/support/resource_grid.h"
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
@@ -56,6 +67,8 @@
 
 #include "channel_equalizer_metal_factory.h"
 #include "demodulation_mapper_metal_factory.h"
+
+#include <random>
 
 #include <algorithm>
 #include <thread>
@@ -202,6 +215,27 @@ int main(int argc, char** argv)
   // Write the resource grid from the device (--device-grid): the RX chain's default when
   // the pipeline keeps the grid on the device (see --expert_phy.device_resource_grid on).
   bool device_grid = false;
+  /// \brief Number of slots of SYNTHETIC time-domain input (--synth N), 0 = read a recorded capture.
+  ///
+  /// The D1 hand-over is judged by comparing two runs of the SAME input, so the input's content is
+  /// irrelevant - only that both runs get the same one. Random samples are therefore a complete corpus,
+  /// and making it here is what frees the harness from needing a recorded capture, a radio and a UE
+  /// (which is what the L1 harness exists for). The samples are seeded, so the corpus is reproducible.
+  unsigned synth_slots = 0;
+  /// First slot number of a synthetic corpus (--synth-first-slot). The slot is HALF OF THE HAND-OVER KEY
+  /// (storage, slot), so a harness that got the numbering wrong would ask about a slot nobody deposited
+  /// and be told "ready" (the hook FAILS OPEN) - which is why the run asserts on the registry's counters
+  /// instead of trusting the wait's return value. Deliberately not 0 by default: 0 is the value an
+  /// unset slot has, so a mix-up would be invisible.
+  unsigned synth_first_slot = 1;
+  /// \brief Serve every slot from ONE grid (--reuse-grid) instead of one grid per slot.
+  ///
+  /// This is what the receiving chain does: each uplink_processor_impl owns one grid and a cell has
+  /// nof_ul_rg of them (20 in the air configuration), so one allocation carries ~20 slots' worth of
+  /// receptions. A fresh allocation per slot - the default here, and what a capture replay wants -
+  /// gives every slot a distinct storage address and therefore hides the whole reason the hand-over key
+  /// needs a slot half at all.
+  bool reuse_grid = false;
   bool        use_metal_ce     = false;
   bool        use_metal_demod  = false;
   bool        use_metal_decoder = false;
@@ -245,10 +279,20 @@ int main(int argc, char** argv)
     } else if ((arg == "--also") && (i + 1 < argc)) {
       rotate.emplace_back(argv[++i]);
     } else if (arg == "--dft") {
-      dft_mode = true;
+      dft_mode   = true;
+      // --dft names its back end as much as --cpu/--metal do (the generic CPU DFT, line below), so it
+      // satisfies the "say which chain you mean" rule on its own.
+      mode_given = true;
     } else if (arg == "--dft-metal") {
-      dft_mode = true;
-      dft_metal = true;
+      dft_mode   = true;
+      dft_metal  = true;
+      mode_given = true;
+    } else if ((arg == "--synth") && (i + 1 < argc)) {
+      synth_slots = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
+    } else if ((arg == "--synth-first-slot") && (i + 1 < argc)) {
+      synth_first_slot = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
+    } else if (arg == "--reuse-grid") {
+      reuse_grid = true;
     } else if (arg == "--device-grid") {
       device_grid = true;
     } else if ((arg == "--td-strategy") && (i + 1 < argc)) {
@@ -270,7 +314,10 @@ int main(int argc, char** argv)
       mode_given = true;
     } else if (arg == "-h" || arg == "--help") {
       std::printf("usage: %s <capture-base> --out <prefix> [--cpu|--metal|--metal-cpu-ldpc|--metal-cpu-demod]\n"
-                  "  <capture-base> is one reception of a capture, e.g. /tmp/C_4352_17921\n",
+                  "  <capture-base> is one reception of a capture, e.g. /tmp/C_4352_17921\n"
+                  "  --dft [--dft-metal] [--device-grid] [--synth N] [--synth-first-slot S] [--reuse-grid]\n"
+                  "    replays TIME-DOMAIN input through the OFDM demodulator; with --synth N the input is\n"
+                  "    generated (N slots) instead of read, so no capture is needed.\n",
                   argv[0]);
       return 0;
     } else if (arg[0] != '-') {
@@ -281,8 +328,17 @@ int main(int argc, char** argv)
     }
   }
 
-  if (prefix.empty() || out_prefix.empty()) {
-    std::fprintf(stderr, "usage: %s <capture-base> --out <prefix> [--cpu|--metal]\n", argv[0]);
+  // A synthetic corpus has no capture base: the tool makes the input itself (see --synth).
+  if (out_prefix.empty() || (prefix.empty() && (synth_slots == 0))) {
+    std::fprintf(stderr,
+                 "usage: %s <capture-base> --out <prefix> [--cpu|--metal]\n"
+                 "       %s --out <prefix> --dft [--dft-metal] --synth <slots>   (no capture needed)\n",
+                 argv[0],
+                 argv[0]);
+    return 1;
+  }
+  if ((synth_slots != 0) && !dft_mode) {
+    std::fprintf(stderr, "%s: --synth feeds the time-domain replay only; add --dft or --dft-metal.\n", argv[0]);
     return 1;
   }
 
@@ -313,17 +369,6 @@ int main(int argc, char** argv)
   // pipelined front end with the serial one on the same samples.
   // --------------------------------------------------------------------------------------------
   if (dft_mode) {
-    std::ifstream list(prefix + "_td.txt");
-    if (!list.is_open()) {
-      std::fprintf(stderr, "cannot read %s_td.txt\n", prefix.c_str());
-      return 1;
-    }
-    std::ifstream bin(prefix + "_td.bin", std::ios::binary);
-    if (!bin.is_open()) {
-      std::fprintf(stderr, "cannot read %s_td.bin\n", prefix.c_str());
-      return 1;
-    }
-
     struct entry_t {
       unsigned slot;
       unsigned symbol;
@@ -331,46 +376,105 @@ int main(int argc, char** argv)
       size_t   size;
     };
     std::vector<entry_t> entries;
-    std::set<std::tuple<unsigned, unsigned, unsigned>> seen_transforms;
-    {
-      std::string line;
-      while (std::getline(list, line)) {
-        entry_t      entry = {};
-        std::string  key;
-        std::stringstream stream(line);
-        while (std::getline(stream, key, ' ')) {
-          auto pos = key.find('=');
-          if (pos == std::string::npos) {
+    // All the samples of the corpus, in the order the entries name them.
+    std::vector<ci16_t> samples;
+    // Transform size. A recorded capture does not carry it (its lines give the SYMBOL size), so it is
+    // inferred below from the numerology's cyclic prefix; a synthetic corpus picks it here, which is why
+    // it is a variable and not a constant.
+    unsigned inferred_dft_size = 0;
+
+    if (synth_slots != 0) {
+      // ---- Synthetic corpus (--synth) --------------------------------------------------------------
+      // The hand-over is judged by running the SAME input twice and comparing the grids, so what the
+      // samples ARE is irrelevant - only that both arms get the same ones. Random samples are therefore
+      // a complete corpus for this harness, and generating them here is what removes the harness's
+      // dependency on a recorded capture, a radio and a UE.
+      //
+      // The transform size is the next power of two at or above the occupied bandwidth: the air
+      // configuration is 25 PRB / 5 MHz / 15 kHz / 7.68 Msps, i.e. 300 subcarriers in a 512-point
+      // transform, and 512 = 2^9 is the same choice. Everything else follows from it, so the synthetic
+      // corpus has exactly the shape a capture of that configuration would have.
+      inferred_dft_size = 1;
+      while (inferred_dft_size < (nof_prb * NOF_SUBCARRIERS_PER_RB)) {
+        inferred_dft_size *= 2;
+      }
+      const unsigned sampling_rate_Hz = to_sampling_rate_Hz(subcarrier_spacing::kHz15, inferred_dft_size);
+      const cyclic_prefix cp          = cyclic_prefix::NORMAL;
+
+      std::mt19937                       rng(20260921);
+      std::uniform_int_distribution<int> dist(-2000, 2000);
+      for (unsigned i_slot = 0; i_slot != synth_slots; ++i_slot) {
+        for (unsigned symbol = 0; symbol != MAX_NSYMB_PER_SLOT; ++symbol) {
+          const unsigned cp_len = cp.get_length(symbol, subcarrier_spacing::kHz15).to_samples(sampling_rate_Hz);
+          entry_t        entry  = {.slot   = synth_first_slot + i_slot,
+                                   .symbol = symbol,
+                                   .port   = 0,
+                                   .size   = cp_len + inferred_dft_size};
+          entries.push_back(entry);
+          for (size_t i = 0; i != entry.size; ++i) {
+            samples.emplace_back(static_cast<int16_t>(dist(rng)), static_cast<int16_t>(dist(rng)));
+          }
+        }
+      }
+      std::printf("synth corpus: %u slots from slot %u (%u transforms, %zu samples)\n",
+                  synth_slots,
+                  synth_first_slot,
+                  static_cast<unsigned>(entries.size()),
+                  samples.size());
+      if (reuse_grid) {
+        std::printf("synth corpus: ONE grid serves every slot (--reuse-grid), as the receiving chain does\n");
+      }
+    } else {
+      // ---- A recorded time-domain capture (OCUDU_UL_DUMP_TD) ---------------------------------------
+      std::ifstream list(prefix + "_td.txt");
+      if (!list.is_open()) {
+        std::fprintf(stderr, "cannot read %s_td.txt\n", prefix.c_str());
+        return 1;
+      }
+      std::ifstream bin(prefix + "_td.bin", std::ios::binary);
+      if (!bin.is_open()) {
+        std::fprintf(stderr, "cannot read %s_td.bin\n", prefix.c_str());
+        return 1;
+      }
+
+      std::set<std::tuple<unsigned, unsigned, unsigned>> seen_transforms;
+      {
+        std::string line;
+        while (std::getline(list, line)) {
+          entry_t      entry = {};
+          std::string  key;
+          std::stringstream stream(line);
+          while (std::getline(stream, key, ' ')) {
+            auto pos = key.find('=');
+            if (pos == std::string::npos) {
+              continue;
+            }
+            const std::string name  = key.substr(0, pos);
+            const unsigned    value = static_cast<unsigned>(std::strtoul(key.substr(pos + 1).c_str(), nullptr, 10));
+            if (name == "slot") entry.slot = value;
+            if (name == "symbol") entry.symbol = value;
+            if (name == "port") entry.port = value;
+            if (name == "size") entry.size = value;
+          }
+          // One entry per (slot, symbol, port), the FIRST one recorded: the capture appends the
+          // symbols of a slot every time its slot number comes round again (the counter wraps), so a
+          // long recording of four slots holds each of them several times over, with different
+          // samples. Replaying those as if they were one slot wrote every grid symbol twice and made
+          // the per-slot dump meaningless - the two rounds are different transmissions and only the
+          // first belongs to the slot this capture is about.
+          const auto key_slot = std::make_tuple(entry.slot, entry.symbol, entry.port);
+          if (!seen_transforms.insert(key_slot).second) {
             continue;
           }
-          const std::string name  = key.substr(0, pos);
-          const unsigned    value = static_cast<unsigned>(std::strtoul(key.substr(pos + 1).c_str(), nullptr, 10));
-          if (name == "slot") entry.slot = value;
-          if (name == "symbol") entry.symbol = value;
-          if (name == "port") entry.port = value;
-          if (name == "size") entry.size = value;
+          entries.push_back(entry);
         }
-        // One entry per (slot, symbol, port), the FIRST one recorded: the capture appends the
-        // symbols of a slot every time its slot number comes round again (the counter wraps), so a
-        // long recording of four slots holds each of them several times over, with different
-        // samples. Replaying those as if they were one slot wrote every grid symbol twice and made
-        // the per-slot dump meaningless - the two rounds are different transmissions and only the
-        // first belongs to the slot this capture is about.
-        const auto key_slot = std::make_tuple(entry.slot, entry.symbol, entry.port);
-        if (!seen_transforms.insert(key_slot).second) {
-          continue;
-        }
-        entries.push_back(entry);
       }
-    }
-    if (entries.empty()) {
-      std::fprintf(stderr, "%s_td.txt holds no transform\n", prefix.c_str());
-      return 1;
-    }
+      if (entries.empty()) {
+        std::fprintf(stderr, "%s_td.txt holds no transform\n", prefix.c_str());
+        return 1;
+      }
 
-    // All the samples of the capture, read once.
-    std::vector<ci16_t> samples;
-    {
+      // All the samples of the capture, read once.
       bin.seekg(0, std::ios::end);
       const size_t bytes = static_cast<size_t>(bin.tellg());
       bin.seekg(0);
@@ -397,17 +501,21 @@ int main(int argc, char** argv)
     constexpr unsigned           dft_sampling_rate_Hz = 7680000;
     const unsigned               first_slot           = entries.front().slot;
     const cyclic_prefix          dft_cp               = cyclic_prefix::NORMAL;
-    const unsigned               first_cp_len =
-        dft_cp.get_length(entries.front().symbol, dft_scs).to_samples(dft_sampling_rate_Hz);
-    if (entries.front().size <= first_cp_len) {
-      std::fprintf(stderr,
-                   "%s_td.txt: symbol size %zu does not cover its cyclic prefix %u\n",
-                   prefix.c_str(),
-                   entries.front().size,
-                   first_cp_len);
-      return 1;
+    if (synth_slots == 0) {
+      // A recorded capture carries only the SYMBOL size, so the transform size is inferred from it: the
+      // numerology's cyclic prefix for that symbol is standard, and what is left over is the transform.
+      const unsigned first_cp_len =
+          dft_cp.get_length(entries.front().symbol, dft_scs).to_samples(dft_sampling_rate_Hz);
+      if (entries.front().size <= first_cp_len) {
+        std::fprintf(stderr,
+                     "%s_td.txt: symbol size %zu does not cover its cyclic prefix %u\n",
+                     prefix.c_str(),
+                     entries.front().size,
+                     first_cp_len);
+        return 1;
+      }
+      inferred_dft_size = entries.front().size - first_cp_len;
     }
-    const unsigned inferred_dft_size = entries.front().size - first_cp_len;
 
     ofdm_demodulator_configuration demod_config = {};
     demod_config.numerology                = 0;
@@ -418,6 +526,11 @@ int main(int argc, char** argv)
     demod_config.scale                     = 1.0F;
     demod_config.center_freq_Hz            = 0.0;
     demod_config.device_grid_write         = device_grid;
+    // The declaration the hand-over needs: the consumers of this grid read it on the DEVICE (that is why
+    // --device-grid exists), and the host reader of this harness WAITS for the production - which is
+    // exactly what write_grid() below does. Without it the release path is not even reached
+    // (`wait_per_slot` is false) and the run would arm the knob and exercise nothing.
+    demod_config.grid_consumed_on_device   = true;
     std::shared_ptr<resource_grid_factory> dft_grid_factory = create_resource_grid_factory();
     if (dft_grid_factory == nullptr) {
       std::fprintf(stderr, "cannot create the resource grid factory\n");
@@ -432,13 +545,39 @@ int main(int argc, char** argv)
     const unsigned depth = demodulator->get_pipeline_depth();
 
     std::printf("dft replay %s -> %s (%s DFT, pipeline depth %u, %u PRB, %zu transforms, grid write %s)\n",
-                prefix.c_str(),
+                synth_slots != 0 ? "<synth>" : prefix.c_str(),
                 out_prefix.c_str(),
                 dft_metal ? "metal" : "cpu",
                 depth,
                 nof_prb,
                 entries.size(),
                 device_grid ? "device" : "host");
+    // Whether this run was ASKED to exercise the hand-over. Read from the same variable the engine reads,
+    // so the report below cannot disagree with what the pipeline did.
+    const bool release_armed = []() {
+      const char* env = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
+      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    }();
+    /// The falsification arm of this harness (design document 5.9.37): with this set the harness does NOT
+    /// ask for the grid's production before reading it, i.e. it commits the very mistake the wait exists to
+    /// prevent. It is a switch and not a source edit on purpose - an arm that requires patching the tool is
+    /// an arm nobody re-runs, and this one has to keep proving that the comparison below CAN fail.
+    const bool drop_consumer_wait = []() {
+      const char* env = std::getenv("OCUDU_L1_DROP_CONSUMER_WAIT");
+      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+    }();
+    /// \brief Deliberately ask about a DIFFERENT slot than the one deposited (--consumer slot skew).
+    ///
+    /// The slot is half of the hand-over key, and the two halves are written by two different pieces of
+    /// code: the producer takes it from the receiving chain's slot (set_lane_slot), the consumer from
+    /// whatever numbering its own input uses. If those two bases ever disagree, the consumer is told
+    /// "nothing is pending" and reads the grid anyway - the hook FAILS OPEN. This arm reproduces that, and
+    /// it is the reason the run asserts on the registry's counters (handed / not_found / unproduced) rather
+    /// than on the wait's return value: those counters are what turn a silent fail-open into a red run.
+    const unsigned consumer_slot_skew = []() {
+      const char* env = std::getenv("OCUDU_L1_CONSUMER_SLOT_SKEW");
+      return (env != nullptr) ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 0U;
+    }();
 
     unsigned                cursor = 0;
     std::vector<unsigned>   ring_slots;
@@ -447,7 +586,30 @@ int main(int argc, char** argv)
     unsigned                ring         = 0;
     unsigned                drained      = 0;
 
-    auto write_grid = [&](unsigned slot) {
+    /// Dumps one slot's grid - and is, for the hand-over, the grid's CONSUMER.
+    ///
+    /// With OCUDU_DFT_RELEASE_BLOCK=1 the slot's transforms are handed over UNCOMMITTED: nothing has run
+    /// when the receiving slot ends, and the block is produced at whoever claims it. This tool is that
+    /// whoever - it reads the grid on the host, exactly as the PUCCH does in the receiving chain, and the
+    /// registration it performs here is the same one (grid_ready_hook::wait): it claims an unclaimed block
+    /// and commits it (the fallback a hand-over owes), or waits for the generation of the block that was
+    /// claimed. Reading without this call reads memory the GPU has not written yet - which is not a
+    /// hypothesis but the arm OCUDU_L1_DROP_CONSUMER_WAIT=1 reproduces.
+    ///
+    /// The SLOT is half of the hand-over key (storage, slot), and it must be the very number the producer
+    /// was told (set_lane_slot, in the loop below). A harness that got this wrong would ask about a slot
+    /// nobody deposited and be told "ready" - the hook FAILS OPEN - so the return value alone proves
+    /// nothing: report_handover() below asserts on the registry's own counters instead.
+    auto write_grid = [&](unsigned slot) -> bool {
+      const resource_grid_device_view view = grid->get_writer().get_device_view();
+      if (view.is_valid() && !drop_consumer_wait) {
+        if (!grid_ready_hook::wait(view.base, slot + consumer_slot_skew)) {
+          std::fprintf(stderr,
+                       "slot %u: the grid was not produced in time - refusing to dump what nobody wrote\n",
+                       slot);
+          return false;
+        }
+      }
       const std::string base = out_prefix + "_" + std::to_string(slot) + "_dft";
       if (FILE* f = std::fopen((base + ".txt").c_str(), "w")) {
         std::fprintf(f,
@@ -467,22 +629,44 @@ int main(int argc, char** argv)
         }
         std::fclose(f);
       }
+      return true;
     };
+
+    // One grid per slot, or ONE grid for all of them (--reuse-grid): the receiving chain does the latter,
+    // and it is what makes the slot half of the hand-over key necessary - the storage address comes back
+    // with the next reception, so the address alone cannot say which slot a block belongs to.
+    if (reuse_grid) {
+      grid = dft_grid_factory->create(1, MAX_NSYMB_PER_SLOT, nof_prb * NOF_SUBCARRIERS_PER_RB);
+      if (grid == nullptr) {
+        std::fprintf(stderr, "cannot create the resource grid\n");
+        return 1;
+      }
+    }
+    bool dumps_ok = true;
 
     for (const entry_t& entry : entries) {
       if (entry.slot != current_slot) {
-        // Close the previous slot: finish every transform still in flight.
-        if (grid != nullptr) {
+        // Close the previous slot: finish every transform still in flight. Guarded on a slot having been
+        // STARTED and not merely on the grid existing: with --reuse-grid the grid is created before this
+        // loop, and the first entry would otherwise "close" a slot that was never opened and dump it (its
+        // slot number is still the sentinel).
+        if ((grid != nullptr) && (current_slot != std::numeric_limits<unsigned>::max())) {
           while (drained != ring_slots.size()) {
             demodulator->finish_symbol(grid->get_writer(), ring_slots[drained++]);
           }
-          write_grid(current_slot);
+          dumps_ok = write_grid(current_slot) && dumps_ok;
         }
         current_slot = entry.slot;
         ring_slots.clear();
         drained = 0;
         ring    = 0;
-        grid    = dft_grid_factory->create(1, MAX_NSYMB_PER_SLOT, nof_prb * NOF_SUBCARRIERS_PER_RB);
+        if (!reuse_grid) {
+          grid = dft_grid_factory->create(1, MAX_NSYMB_PER_SLOT, nof_prb * NOF_SUBCARRIERS_PER_RB);
+        }
+        // Tell the device backend which slot the transforms it is about to receive belong to. This is the
+        // producer's half of the hand-over key, and the receiving chain sets it exactly here - when the
+        // slot changes (puxch_processor_impl::process_symbol).
+        demodulator->set_lane_slot(entry.slot);
       }
       const span<const ci16_t> input(samples.data() + cursor, entry.size);
       cursor += entry.size;
@@ -497,14 +681,117 @@ int main(int argc, char** argv)
         demodulator->demodulate(grid->get_writer(), input, entry.port, entry.symbol);
       }
     }
-    if (grid != nullptr) {
+    if ((grid != nullptr) && (current_slot != std::numeric_limits<unsigned>::max())) {
       while (drained != ring_slots.size()) {
         demodulator->finish_symbol(grid->get_writer(), ring_slots[drained++]);
       }
-      write_grid(current_slot);
+      dumps_ok = write_grid(current_slot) && dumps_ok;
     }
+    // ----------------------------------------------------------------------------------------------
+    // The assertion that keeps this harness honest (design document 5.9.37).
+    //
+    // Every comparison this harness makes is "the same input through the same pipeline twice" - and that
+    // comparison PASSES when the mechanism under test did nothing at all. It already happened once in this
+    // project: ofdm_demodulator_metal_batch_test's armed section ran with the knob set and the hand-over
+    // refused (grid_has_host_consumers() was a constant true), so it compared two host-written grids and
+    // reported success (5.9.19, withdrawn). A harness is therefore only allowed to report success when the
+    // hand-over's OWN counters say it happened, and this is where that is decided. They are read through
+    // grid_ready_hook - the accessor that exists for exactly this - and not by parsing the exit-time
+    // `[metal_stats] dft handover` line, which prints after this function has already returned.
+    // ----------------------------------------------------------------------------------------------
+    grid_handover_counts hs;
+    grid_ready_hook::counts(hs);
+    // Every slot of a synthetic corpus deposits exactly once: one block per receiving slot, at its last
+    // symbol. A recorded capture is not required to cover whole slots, so it is not counted here.
+    const uint64_t expected_deposits = (synth_slots != 0) ? synth_slots : 0;
+    std::printf("[l1_handover] installed=%d armed=%d drop_consumer_wait=%d slot_skew=%u slots=%llu handed=%llu "
+                "taken=%llu superseded=%llu evicted=%llu fallback=%llu late=%llu not_found=%llu unproduced=%llu "
+                "ready_timeouts=%llu\n",
+                hs.installed ? 1 : 0,
+                release_armed ? 1 : 0,
+                drop_consumer_wait ? 1 : 0,
+                consumer_slot_skew,
+                static_cast<unsigned long long>(expected_deposits),
+                static_cast<unsigned long long>(hs.handed),
+                static_cast<unsigned long long>(hs.taken),
+                static_cast<unsigned long long>(hs.superseded),
+                static_cast<unsigned long long>(hs.evicted),
+                static_cast<unsigned long long>(hs.fallback_commits),
+                static_cast<unsigned long long>(hs.late_commits),
+                static_cast<unsigned long long>(hs.not_found),
+                static_cast<unsigned long long>(hs.unproduced),
+                static_cast<unsigned long long>(hs.ready_timeouts));
+
+    bool ok = dumps_ok;
+    if (release_armed) {
+      if (!hs.installed) {
+        std::fprintf(stderr,
+                     "FAIL: OCUDU_DFT_RELEASE_BLOCK is set but this run has no hand-over at all (no Metal "
+                     "DFT engine) - the knob did nothing\n");
+        ok = false;
+      } else if (hs.handed == 0) {
+        std::fprintf(stderr,
+                     "FAIL: OCUDU_DFT_RELEASE_BLOCK is set but NOTHING was handed over - this run judged "
+                     "nothing (check the startup warning 'will NOT exercise D1')\n");
+        ok = false;
+      } else if ((expected_deposits != 0) && (hs.handed != expected_deposits)) {
+        std::fprintf(stderr,
+                     "FAIL: %llu slot(s) of corpus but %llu deposit(s) - the corpus and the hand-over "
+                     "disagree about how many blocks there are\n",
+                     static_cast<unsigned long long>(expected_deposits),
+                     static_cast<unsigned long long>(hs.handed));
+        ok = false;
+      }
+      if (drop_consumer_wait) {
+        // This arm exists to fail the byte comparison: the harness read grids it never asked for. The
+        // deposits are still counted - they were made - they simply have no producer of their grid.
+        std::printf("[l1_handover] falsification arm: the consumer wait was dropped on purpose\n");
+      } else {
+        // A wait that finds NO record cannot wait: it is told "nothing pending" and reads the grid anyway
+        // (the hook fails open). Every wait here is prompt and its (storage, slot) was deposited a moment
+        // ago, so a single not-found means the two ends do NOT name the same key - a slot-numbering
+        // mismatch, which is the one way this harness could silently stop testing anything.
+        if (hs.not_found != 0) {
+          std::fprintf(stderr,
+                       "FAIL: %llu consumer wait(s) found no deposit for their (storage, slot) - the producer "
+                       "and the consumer disagree about the key%s\n",
+                       static_cast<unsigned long long>(hs.not_found),
+                       (consumer_slot_skew != 0) ? " (this arm skews the consumer's slot on purpose)" : "");
+          ok = false;
+        }
+        if (hs.unproduced != 0) {
+          std::fprintf(stderr, "FAIL: %llu handed-over block(s) were never produced\n",
+                       static_cast<unsigned long long>(hs.unproduced));
+          ok = false;
+        }
+        if (hs.ready_timeouts != 0) {
+          std::fprintf(stderr, "FAIL: %llu host wait(s) timed out\n",
+                       static_cast<unsigned long long>(hs.ready_timeouts));
+          ok = false;
+        }
+        // In a front-end-only harness there is no PUSCH hop, so nothing TAKES a deposit: every one of them
+        // has to be committed by this tool (the fallback), which is the same path the PUCCH takes in a
+        // PUCCH-only slot. taken==0 here is therefore the correct answer and not a failure - what would be
+        // a failure is a deposit nobody produced, which the two checks above already catch.
+        if ((hs.fallback_commits + hs.late_commits) < hs.handed) {
+          std::fprintf(stderr,
+                       "FAIL: %llu deposit(s) were never committed by anyone (fallback=%llu late=%llu)\n",
+                       static_cast<unsigned long long>(hs.handed - hs.fallback_commits - hs.late_commits),
+                       static_cast<unsigned long long>(hs.fallback_commits),
+                       static_cast<unsigned long long>(hs.late_commits));
+          ok = false;
+        }
+      }
+    } else if (hs.handed != 0) {
+      std::fprintf(stderr,
+                   "FAIL: the hand-over happened (%llu deposit(s)) without OCUDU_DFT_RELEASE_BLOCK - this "
+                   "arm is not the reference it claims to be\n",
+                   static_cast<unsigned long long>(hs.handed));
+      ok = false;
+    }
+
     std::printf("dft replay done: grid dumps written as %s_<slot>_dft{.txt,.bin}\n", out_prefix.c_str());
-    return 0;
+    return ok ? 0 : 1;
   }
 
   // Shared infrastructure. Every factory is checked: a null one means the tool was built without

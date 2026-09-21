@@ -8,6 +8,41 @@
 
 namespace ocudu {
 
+/// \brief What the hand-over actually did, as the registry that performs it counts it.
+///
+/// A hand-over is INVISIBLE when it works: the grid comes out right whether a block was handed over and
+/// claimed, or committed by the front end as it always was. That is what makes it possible for a run to
+/// arm the hand-over, exercise nothing at all, and still compare two correct grids - which happened (the
+/// armed section of ofdm_demodulator_metal_batch_test ran with a constant `grid_has_host_consumers()`
+/// and judged two host-written grids; design document 5.9.19, withdrawn). Anything that means to JUDGE
+/// the hand-over therefore has to read these numbers instead of trusting its own output, and that is what
+/// this accessor is for: a harness asserts `handed > 0` and `unproduced == 0` before it believes a single
+/// one of its own comparisons.
+struct grid_handover_counts {
+  /// Whether these numbers come from an implementation at all. FALSE in a build or a run without the
+  /// hand-over (no Metal engine), where the rest of the fields are all zero - and where arming the
+  /// hand-over is a misconfiguration rather than a hand-over that did nothing.
+  bool     installed = false;
+  /// Deposits made: one per receiving slot's block that was handed over uncommitted.
+  uint64_t handed = 0;
+  /// Deposits claimed by the device consumer that reads that grid - the healthy path.
+  uint64_t taken = 0;
+  /// Deposits replaced because the same storage was deposited again (the grid came back through the pool).
+  uint64_t superseded = 0;
+  /// Deposits dropped for being more than the registry's bound: consumers falling behind producers.
+  uint64_t evicted = 0;
+  /// Deposits a HOST reader found still unclaimed and had to commit itself (grid_ready_hook::wait).
+  uint64_t fallback_commits = 0;
+  /// Blocks the registry itself committed late, because nobody ever claimed them.
+  uint64_t late_commits = 0;
+  /// Reads that found no record for their (storage, slot): they cannot wait, so they prove nothing.
+  uint64_t not_found = 0;
+  /// Records whose grid has not been produced yet: the blocks still waiting for a consumer or the sweep.
+  uint64_t unproduced = 0;
+  /// Host waits that timed out - the caller was about to read a grid that was NOT ready.
+  uint64_t ready_timeouts = 0;
+};
+
 /// \brief Tells a HOST reader of the resource grid to wait until that grid has been produced (D1-A, 5.9.13).
 ///
 /// With the block hand-over the resource grid is produced at the LANE's commit instead of at the end of the
@@ -56,10 +91,32 @@ public:
     return (fn == nullptr) || fn(storage, slot, timeout_ms);
   }
 
+  /// Fills \p out with what the hand-over did so far (see grid_handover_counts). Installed by the same
+  /// implementation as wait(), and read by whatever has to PROVE the hand-over happened - a harness that
+  /// compares its own output cannot tell, because the output is correct either way.
+  using counts_fn = void (*)(grid_handover_counts& out);
+
+  static void install_counts(counts_fn fn) { counts_fn_ref().store(fn, std::memory_order_release); }
+
+  static void counts(grid_handover_counts& out)
+  {
+    counts_fn fn = counts_fn_ref().load(std::memory_order_acquire);
+    out          = grid_handover_counts{};
+    if (fn != nullptr) {
+      fn(out);
+    }
+  }
+
 private:
   static std::atomic<wait_fn>& fn_ref()
   {
     static std::atomic<wait_fn> fn{nullptr};
+    return fn;
+  }
+
+  static std::atomic<counts_fn>& counts_fn_ref()
+  {
+    static std::atomic<counts_fn> fn{nullptr};
     return fn;
   }
 };

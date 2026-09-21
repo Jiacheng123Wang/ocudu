@@ -4119,6 +4119,89 @@ harness 看起来在跑、其实什么都没测。**核对方法**：拿一份�
 4. **反向臂**（这一条决定 harness 有没有资格）：把第 2 步的等待去掉 ⇒ dump **必须不一致**；
    再把设备侧等待（`grid_miss_devwaited`）去掉 ⇒ "跳 MISS"那条臂**必须不一致**。
 
+#### 5.9.37 ★★★ L1 落地：**D1 的机制现在可以在本机判了**（无空口、无 UE、无捕获文件）
+
+§5.9.36 定了落点，这一节是它的执行结果，并**更正 §5.9.36 的两处预估**（都估错了，方向相反）。
+
+**① 更正一：语料根本不用去 Ubuntu 录，也不用合成 OFDM 信号**
+
+§5.9.36 把"备语料"当成第 1 步、并说 `--synth` "工作量更大"。**两条都不对**：
+D1 的判据是"**同一份输入跑两遍，网格必须逐字节相同**"——**输入的内容是什么完全不影响这个判据**，
+只要求两臂拿到**同一份**。而 `ofdm_demodulator_metal_batch_test` 用的本来就是**均匀随机 ci16**
+（第 107–111 行），不是任何真实信号。
+⇒ 合成语料 = **按符号长度灌随机数**，约 30 行，不需要 OFDM 调制器，也不需要那台机器。
+
+新增 `--synth N`（另有 `--synth-first-slot S`、`--reuse-grid`）：符号长度由 numerology 的循环前缀推得
+（`cp.get_length(symbol, kHz15).to_samples(rate) + dft_size`），`dft_size` 取**不小于占用带宽的下一个 2 的幂**
+（25 PRB → 300 子载波 → **512**，与 5 MHz / 7.68 Msps 的空口配置一致）。种子固定 ⇒ 语料可复现。
+**真实空口语料仍然只对"数据正确性"那一半有意义**（它已有频域捕获 `OCUDU_UL_DUMP`），
+对"变换 + 交出的机制"没有增量。
+
+**② 更正二：`--dft` 上要改的不是"加一个等待"，是三个洞**
+
+§5.9.36 的 ③ 只说加"消费者等待"。实测发现**那个等待单独加上去也判不了任何东西**，因为 `--dft` 分支里：
+
+| # | 洞 | 后果 |
+|---|---|---|
+| 1 | `demod_config.grid_consumed_on_device` **没设**（默认 false）| `wait_per_slot = device_write && grid_consumed_on_device` = false ⇒ **`release_block()` 根本走不到**，`handed` 恒为 0 |
+| 2 | **从不调用 `set_lane_slot()`** | 生产者那一半的键是 `engine->lane_slot`（初值 0），消费者无论问哪个槽都配不上 |
+| 3 | 宿主直接读网格 | 武装后读到没人写过的内存（§5.9.36 ② 已指出）|
+
+**⇒ 教训（与 §5.9.19 同源）：判一个"关掉时也正确"的机制，光加判据不够，必须同时确认判据会被触发。**
+三个洞任缺一个，harness 都"在跑"，而且**跑出正确的网格**。
+
+**③ 落地内容**（`ul_chain_replay.cpp`）
+
+* `--synth N` 合成语料；`--reuse-grid` **一块网格服务所有槽**（接收链就是这样：每个
+  `uplink_processor_impl` 一块网格、一个小区 `nof_ul_rg` 块 ⇒ 一块摊销约 20 个槽）。
+  默认仍是每槽新建 —— 那正是**掩盖 `(存储, 槽)` 键为什么必须有槽那一半**的形状；
+* `demod_config.grid_consumed_on_device = true`；槽切换时 `demodulator->set_lane_slot(entry.slot)`；
+* **`write_grid()` 本身就是消费者**：读网格前调 `grid_ready_hook::wait(view.base, slot)`
+  （= 接收链里 PUCCH 的那一次调用），超时 `return 1` 并打错；
+* **断言（这一步才是重点）**：不再"打印/解析 `[metal_stats] dft handover`"——
+  那一行是 **atexit 打的，在本函数返回之后**，解析不到。改为在
+  `include/ocudu/phy/phy_pipeline_grid_ready.h` 给 `grid_ready_hook` 加
+  **`grid_handover_counts` + `counts()`**（与 `wait()` 同一个 hook 模式：实现在 Metal，
+  纯 C++ 消费者可链），由 `ocudu_metal_burst.mm` 的 `grid_handover_counts_hook` 填。
+  武装时要求：`handed > 0`、`handed == 语料槽数`、**`not_found == 0`**、`unproduced == 0`、
+  `ready_timeouts == 0`、`fallback + late >= handed`；未武装时必须 `handed == 0`（否则"对照臂"不是对照臂）。
+
+**④ 判据与实测（`wip/l1_handover_arms.sh`，5 条臂；8 槽与 32 槽都跑过）**
+
+| 臂 | 设置 | `handed/taken/fallback/late/not_found/unproduced` | 与 `ref` 逐字节比 | 工具返回 |
+|---|---|---|---|---|
+| `ref` | 不武装 | `0/0/0/0/32/0` | —（基准）| 0 |
+| `cand` | `RELEASE_BLOCK=1` | `32/0/32/0/0/0` | **differing=0** ✅ | 0 |
+| `nogrid` | 同上 + 每槽新建网格 | `32/0/32/0/0/0` | **differing=0** ✅ | 0 |
+| `drop` | 同上 + **去掉消费者等待** | `32/0/0/29/0/20` | **differing=32**（dump **全 0**）| 0 |
+| `skew` | 同上 + **消费者槽号 +1** | `32/0/0/29/32/20` | differing=32 | **1（拒绝）** |
+
+* **`cand == ref` 且 32 个 dump 全部逐字节相同** ⇒ 交出**没有**改变网格（D1 的机制判据成立）；
+* **非空判据**：脚本另外检查 `ref` 的每个 dump **不是全 0**（全 0 之间也会"相同"——那正是 §5.9.19 的空判）；
+* `drop` 臂的签名**正好是"没等就没人写"**：前 2 槽 dump **全 0**，后面的槽**非 0但与 ref 不同**
+  （扫掠 2 槽后才补交，读到的是错位内容）；
+* `skew` 臂证明 §5.9.36 ④ 那个 **fail-open 的坑现在会变红**：`grid_ready_hook::wait()` 找不到记录
+  **返回 true**（工具不会自己发现），但 `not_found=32` 触发断言 ⇒ **rc=1**。
+  **这就是"断言计数器"而不是"信 wait 的返回值"的理由**。
+
+**⑤ 这一层判了什么、没判什么（别夸大）**
+
+* **判了**：前端交出（`release_block` → deposit）→ 消费者认领并兜底提交 → 网格**逐字节**正确；
+  以及 `(存储, 槽)` 键、`reuse` 形状、fail-open 陷阱。
+* **没判**：**跳（设备消费者）那一条路**。`--dft` 分支在 501 行前就 `return 0`，**根本不建 PUSCH 接收机**，
+  所以 `take_released()` / MISS 的设备侧等待（`pending_grid_wait` → `encodeWaitForEvent`）**不在这条 harness 里**。
+  ⇒ §5.9.36 ④-4 的第二条反向臂（"把 MISS 的设备侧等待去掉 ⇒ 必须不一致"）**需要 L1 第二层**：
+  时域输入 + 一个 PDU 配置 + 真接收机（见 §5 的开放项 12）。
+  **本条 harness 的 `taken` 恒为 0 是正确结果**（前端-only 的槽没有跳，全走兜底提交——
+  与 PUCCH-only 的槽同路径）。
+
+**⑥ 命令**
+
+```bash
+cmake --build build --target ul_chain_replay -j 6
+doc_chinese/phy_pipeline_gpu/wip/l1_handover_arms.sh 32     # rc=0 才算过；四条 PASS
+```
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。
