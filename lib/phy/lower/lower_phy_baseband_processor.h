@@ -231,6 +231,7 @@ private:
       void operator()(baseband_gateway_buffer_dynamic_aligned* buffer) const
       {
         if (std::shared_ptr<rx_buffer_pool> alive = pool.lock()) {
+          lower_phy_baseband_processor::rx_pool_note_return();
           alive->buffers.push_blocking(
               std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>(buffer, *this));
           return;
@@ -239,6 +240,17 @@ private:
       }
     };
   };
+
+  /// \brief Receive-buffer accounting (D1 diagnostics): how many the radio took, and how many came back.
+  ///
+  /// What it exists for: with the block hand-over armed the uplink holds a receive buffer until the command
+  /// buffer carrying its transforms COMPLETES (that is what the input's lifetime token does, design document
+  /// 5.9.7-5.9.10), and the pool is the backpressure the receive loop blocks on. `taken - returned` is
+  /// therefore the number of buffers the whole chain is holding: if it climbs to the pool size and stays
+  /// there, the references are not coming back at all - a completely different defect from a long hold, and
+  /// the two look identical from the outside (real-time failures, a stalled radio).
+  static void rx_pool_note_taken(size_t free_buffers, size_t pool_size);
+  static void rx_pool_note_return();
 
   /// The receive buffers of this sector (see rx_buffer_pool), sized by the configuration.
   std::shared_ptr<rx_buffer_pool> rx_pool;

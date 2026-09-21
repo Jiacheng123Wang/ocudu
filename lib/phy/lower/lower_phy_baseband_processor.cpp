@@ -22,6 +22,47 @@
 
 using namespace ocudu;
 
+namespace {
+
+/// Receive-buffer accounting (see lower_phy_baseband_processor::rx_pool_note_taken).
+struct rx_pool_accounting {
+  std::atomic<uint64_t> taken{0};
+  std::atomic<uint64_t> returned{0};
+};
+
+rx_pool_accounting& rx_pool_accounts()
+{
+  static rx_pool_accounting accounts;
+  return accounts;
+}
+
+} // namespace
+
+void lower_phy_baseband_processor::rx_pool_note_taken(size_t free_buffers, size_t pool_size)
+{
+  rx_pool_accounting& a    = rx_pool_accounts();
+  const uint64_t      took = a.taken.fetch_add(1, std::memory_order_relaxed) + 1;
+  const uint64_t      back = a.returned.load(std::memory_order_relaxed);
+  // Printed every 1024 pops, and ALWAYS while the pool is nearly dry: the interesting number is
+  // `held = taken - returned`, and a run that starves the radio holds it at the pool size.
+  const bool starved = (free_buffers <= 1);
+  if (!starved && ((took % 1024) != 0)) {
+    return;
+  }
+  std::fprintf(stderr,
+               "[ul_rx_pool] taken=%llu returned=%llu held=%lld free=%zu/%zu\n",
+               static_cast<unsigned long long>(took),
+               static_cast<unsigned long long>(back),
+               static_cast<long long>(took - back),
+               free_buffers,
+               pool_size);
+}
+
+void lower_phy_baseband_processor::rx_pool_note_return()
+{
+  rx_pool_accounts().returned.fetch_add(1, std::memory_order_relaxed);
+}
+
 #if defined(OCUDU_METAL_STATS)
 /// \brief Continuity of the sample stream the radio delivers (see ul_process).
 ///
@@ -340,6 +381,7 @@ void lower_phy_baseband_processor::ul_process()
 
   // Get receive buffer.
   std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer = rx_pool->buffers.pop_blocking();
+  rx_pool_note_taken(rx_pool->buffers.size(), rx_pool->buffers.max_size());
 
   // \brief Samples to receive in this call.
   ///

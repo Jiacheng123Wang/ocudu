@@ -3084,6 +3084,45 @@ retain_symbol_input(*demodulator, owner);   // 每个变换一份引用，和 in
 **④ ⇒ 现在可以上腿了**（判据在交接文件 §4.3；关键三条：
 `handed>0`、`evicted==0`、**`keepalives` 两数相等**，然后是 CRC 分层比与 `real-time failures`）。
 
+#### 5.9.11 ❌ 第 3 步的腿（`s33-d1-input-lifetime`，`gpu` + 旋钮）：**交出确实发生了，但接收池被抽干**
+
+**腿对**（2026-09-21 11:21 / 11:22，commit `a9ece03fa8`）：对照臂正常（PUSCH **14502 OK / 639 KO**），
+候选臂**从启动起就崩**：
+
+| 读数 | 对照 | 候选 |
+|---|---|---|
+| `Real-time failure in RF` | **0** | **58927** |
+| `PRACH buffer pool depleted` | **0** | **1239** |
+| PUSCH | 14502 OK / 639 KO | **1 OK / 25 KO** |
+| 退出 | 干净 | 日志被截断（`Emergency flush of the logger`）|
+
+**① 关键：交出**确实**发生了**（log 里有那句 info）：
+```
+OFDM demodulator: the slot's transforms are handed over to the fused lane instead of being committed...
+```
+⇒ `handed>0`（不用等退出就能确认），**这一步的接线本身是通的**。
+
+**② 但接收链被自己拖死了**：`Real-time failure in RF: late` 58927 次 ≈ **74% 的接收调用迟到**，
+PRACH 池耗尽 ⇒ **UE 连 RACH 都做不了 ⇒ "手机连不上"**。
+这正是本步第 3 小步要量的东西（"多留一个缓冲会不会挡住接收循环"），**答案是：会，而且很彻底**。
+
+**③ 池子的真实尺寸**：`lower_phy_factory.cpp` 的 `nof_rx_buffers = max({8U, ...})` —— **不是 4**（4 是单元测试配置），
+注释还写着这条链的**死锁条件**原话：
+> *"a deadlock the moment the pool cannot cover what the pipeline holds: a transform finishes when the pipeline fills or a slot ends, and both need the radio to receive again"*
+
+**⇒ 池子 8 个却瞬间见底 ⇒ 不是"多留一两个"，而是凭据没有回到池子里。**
+
+**④ ⇒ 这一次不再靠猜（§5.3 的教训：坏掉的臂不会干净退出，退出时的仪表正好丢失）**：
+加了两个**带内心跳**，它们**不依赖进程退出**：
+
+| 仪表 | 打印时机 | 读什么 |
+|---|---|---|
+| **`[dft_handover] release handed= taken= superseded= evicted= outstanding= keepalives=released/attached`** | 每 256 个块 | `taken` vs `handed`（认领了吗）；**`keepalives released` vs `attached`（凭据回来了吗）** |
+| **`[ul_rx_pool] taken= returned= held= free=/pool`** | 每 1024 次收包，且**池子见底时每次都打** | **`held = taken - returned`**：**"持有太久"与"永远不还"的唯一区别** |
+
+**⑤ 待判**：候选臂再跑一次（**不需要跑满**，几十秒即可，因为失败是立刻的），
+`keepalives` 与 `held` 两行就能把缺陷定位到"引擎没还"还是"认领方没提交"。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。

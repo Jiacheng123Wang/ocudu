@@ -232,6 +232,34 @@ static const bool dft_contract_registered = []() {
   return true;
 }();
 
+/// \brief One line of the handover's counters, every so many blocks - because an arm that BREAKS the chain
+///        does not exit cleanly, and the exit-time report is then exactly what is missing (5.9.7, and the
+///        second time this happened, see the S18 note on instruments that print at exit).
+///
+/// The two pairs that matter: `taken` against `handed` (is the hop claiming what the receiving chain hands
+/// over?), and `keepalives released` against `attached` (is the input coming back? a leak here starves the
+/// radio's receive pool, which is a hard stall - the pool is the backpressure the receive loop blocks on).
+void dft_handover_heartbeat(const char* where)
+{
+  static std::atomic<uint64_t> counter{0};
+  constexpr uint64_t           period = 256;
+  if ((counter.fetch_add(1, std::memory_order_relaxed) % period) != 0) {
+    return;
+  }
+  const metal::shared_burst::handed_counters hand = metal::shared_burst::handed_stats();
+  const dft_stats_t&                         s    = dft_stats();
+  std::fprintf(stderr,
+               "[dft_handover] %s handed=%llu taken=%llu superseded=%llu evicted=%llu outstanding=%zu "
+               "keepalives=%llu/%llu\n",
+               where,
+               static_cast<unsigned long long>(hand.handed),
+               static_cast<unsigned long long>(hand.taken),
+               static_cast<unsigned long long>(hand.superseded),
+               static_cast<unsigned long long>(hand.evicted),
+               hand.outstanding,
+               static_cast<unsigned long long>(s.keepalives_released.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.keepalives.load(std::memory_order_relaxed)));
+}
 #else  // OCUDU_METAL_STATS
 static void dft_stats_note_depth(uint64_t /*depth*/) {}
 static void dft_stats_commit(uint64_t /*nof_transforms*/ = 1) {}
@@ -242,6 +270,7 @@ static void dft_stats_release() {}
 static void dft_stats_released_wait() {}
 static void dft_stats_keepalive() {}
 static void dft_stats_keepalives_released(uint64_t /*nof*/) {}
+void dft_handover_heartbeat(const char* /*where*/) {}
 #endif // OCUDU_METAL_STATS
 
 // ---- Process-wide Metal resources: one device, one queue, one pipeline for all sizes ----
@@ -522,6 +551,7 @@ static void commit_front_end(dft_engine_impl* e, id<MTLCommandBuffer> cb, uint64
     tokens.swap(e->open_tokens);
     (void)arm_tokens_on_complete(cb, std::move(tokens));
   }
+  dft_handover_heartbeat("commit");
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::front_end);
   metal::shared_queue::front_end_signal(cb);
   [cb commit];
@@ -1019,6 +1049,7 @@ void* dft_metal_engine::release_block(const void* grid_base)
   // DROPPED instead - a handover nobody claimed is never committed, so its completion would never come.
   std::shared_ptr<block_token_set> tokens = arm_tokens_on_complete(cb, std::move(engine->open_tokens));
   metal::shared_burst::deposit_released(grid_base, cb, [tokens]() { release_block_tokens(tokens); });
+  dft_handover_heartbeat("release");
   return (__bridge void*) cb;
 }
 
