@@ -4463,6 +4463,25 @@ for (const auto& pdu : pusch_pdus) { process_pusch(pdu); }   // 同一个线程�
 ⇒ 判据是**两句话**：**提交数回到"每槽 1 次"，而数据一个 bit 都不许动**。
 另外必须同时确认**没有跳回退宿主**（`equalizer ch_re device=N host=0`、`ch_est device=N host=0`）。
 
+**⑤-0 落点已核到行（第 2+3 层是一个原子改动，且有一个会死锁的坑）**
+
+阅读 `begin_stage_on_handed()` 尾部（`ocudu_metal_mmse_engine.mm:1203+`）与 `shared_burst::commit()`
+（`ocudu_metal_burst.mm:347`）后，具体改法是：
+
+1. `burst_state` 加三个字段：`unsigned slot_hops_remaining`、`const void* adopted_grid`、`uint64_t adopted_slot`；
+2. `shared_burst::commit()` **开头**拦截：`slot_hops_remaining != 0` 时**减一并且不提交**（burst 保持打开）；
+3. `begin_stage_on_handed()` 里，**先判"本线程已为这个 (grid, slot) 认领过块"** ⇒ 直接返回同一个 encoder 追加
+   （`adopted_grid/adopted_slot` 就是判据），**不要再走 take/MISS 分支**；
+4. 认领的那个跳（`hop_index == 0`）把 `slot_hops_remaining = hop_count` 并记下 `(grid, slot)`；
+   最后一个跳提交后清掉这两个标记。
+
+**⚠ 会死锁的坑（第 3 步为什么不能省）**：今天第二个跳 MISS 时会
+`pending_grid_wait = grid_production_generation(...)`，而 burst 路由会把它变成
+`shared_burst::set_grid_wait()` ⇒ 那个等待**编码在它自己所在的命令缓冲里**，
+而该缓冲要等的事件**只有它自己提交后才会 signal** ⇒ **自己等自己，挂死**。
+**⇒ 第 2 层与第 3 层必须同一次落地**，任何一半单独上都会死锁或毫无作用。
+落地后判据：§5.9.43 ④ 的 `L1_HOP_PDUS=2` 合计 **33 → 17**、每跳 soft bits 不动、回退宿主为 0。
+
 **⑤ 风险 / 必须先想清楚的**：合并后**第一个跳的 LLR 要等最后一个跳编码完才提交**
 （延迟 = K−1 个跳的**编码**时间，不是 GPU 时间）。K 大时要确认这不触碰 FAPI 截止；
 必要时给 K 设上限（超过则退回今天的形状，MISS 但不阻塞）。
