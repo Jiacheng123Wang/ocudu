@@ -3576,6 +3576,66 @@ bool success = task_executors.pucch_executor.defer([this, &pdu]() {     // ← 3
 （`grid_has_host_consumers=… host_reads_the_grid=… strict=…`），并明说 *"this run will NOT exercise D1
 (expect handed=0 released=0)"*。**⇒ 上腿前先 grep 这条**（比事后读 `handed=0` 早一个 OTA 周期）。
 
+#### 5.9.22 ★★★ `s38` 腿对（**D1 的第一对真腿**）：**交出真的发生了、数据不再坏**；剩下的两件事：**41% 的跳 MISS** 与 **+2.8 ms 端到端**
+
+**① 读数（`gpu` 模式，同一部手机，两腿相隔 ~2 min）**
+
+| 读数 | `…-base` | `…`（武装）|
+|---|---|---|
+| 开工告警 `will NOT exercise D1` | — | **0**（交出真发生了）|
+| `dft commits` / `transforms` | 32338 / 452719 | **1 / 1** |
+| `released` / `dft handover` | 0 | **25754**，`handed=25754 taken=8579 fallback=10095 late=7079 not_found=1208` |
+| `timeouts` / `keepalives` | 0 / 452718:452718 | **0** / 360542:360556（差 14 = 退出时那一块在飞）|
+| `grid_shared` / `grid_failed` / hops | 14247 / 0 / 14247 | **14472 / 0 / 14472** |
+| PUSCH CRC 合计 | 13638 OK / 609 KO | **13657 OK / 815 KO** |
+| QPSK 分层 | 11558 OK / 56 KO（99.5%）| **10876 OK / 55 KO（99.5%）** |
+| PUCCH `sinr` 中位 | −0.7 dB（47% ≥10 dB）| **+11.8 dB（73% ≥10 dB）** |
+| 契约 | 8/8 | **8/8**（`ce device estimates` 159192 device / 0 host、host crossings 0）|
+| `RF` 实时失败 | 6 | 29（**其中 27 条集中在 06:00:51 的 9 ms 内** ⇒ 一次停顿，不是系统性）|
+| `[ul_pipeline]` 端到端（中位）| **1961 µs** | **4797 µs** |
+| 车道 `residency` / `defer_wait` | 366 µs / 631 µs | 663 µs / 1006 µs |
+| UE | 接入 + PDU session + iperf/ping | **接入 + PDU session + iperf/ping** |
+
+**② 判：数据坏这条【已修】**
+
+* 总量与对照**持平**（13657 vs 13638 OK），QPSK **99.5% 两边一样**，PUCCH（宿主读）**反而更好**；
+* **s36 那个签名（"高 sinr + CRC 全错"）不见了**：按调制看 KO 的 sinr 中位都**低于**门限
+  （QPSK KO −20 dB 两边一样 = DTX/没发；64QAM KO 11.6 vs 15.4 dB）；
+* `grid_shared == hops`（14472/14472）、`grid_failed=0`、`timeouts=0` —— 对象唯一性与栅栏都成立。
+
+**★ 64/256QAM 成功率低（11% vs 60%）不是残留缺陷，是那两条腿的链路不同**：武装臂 **UL sinr 整体低 ~5 dB**
+（QPSK OK 中位 5.3 vs 9.4 dB、16QAM 5.5 vs 11.0 dB），于是调度给的 MCS 也低一档（16QAM 成功 1777 vs 1003、
+64/256QAM 只剩 47/29 vs 244/516）。**⇒ 判 A/B 必须比"按调制分层的 sinr 分布"，不能只比总 CRC**（这条写进腿法）。
+
+**③ D1 的提交账（用户判据 ⑥ 的读数）**
+
+| | 提交/跳 | 提交/上行时隙 |
+|---|---|---|
+| 对照 | 30338 前端 + 14247 车道 = **3.27** | ~1.81 |
+| 武装 | 25753 交出块（各自恰好一次）+ 5893 MISS 跳自己的 = **2.19** | **~1.23** |
+
+⇒ **拿到约 1/3 的收益**（前端"每时隙一次提交"确实消失了：`dft commits=1`），
+**剩下的 2/3 卡在 MISS 率上**：只有 59% 的跳认领到块，41% 的跳自开缓冲 ⇒ 那一跳付出**两次**提交。
+
+**④ 新的代价（要如实记账）**
+
+1. **端到端 +2.8 ms**（1961 → 4797 µs）：格产出被推到"谁先要谁提交"，而 41% 的跳 MISS 后**没有任何等待**；
+2. 一次 ~10 ms 停顿（27 条 `UL processor is busy`，对照 6 条）——FSM 在新槽与"上一槽任务还在飞"之间的串行化，
+   被交出的延迟放大了一次；
+3. 退出时 14 个凭据未还（= 在飞的那一块，`unproduced=1`）。
+
+**⑤ ★ 本会话据此修的第二件事：MISS 路径原本是【无保护】的**
+
+`begin_stage_on_handed()` 的 MISS 分支原话就是缺陷本身：*"the receiving chain's transforms are then in a buffer
+nobody commits, so the grid is never written"*。今天（有了兜底/扫掠）MISS 通常意味着**别人已经拿走并会提交**，
+但那是**宿主提交**，与"跳自己那条缓冲"之间**没有任何顺序**（两条都在后端队列上，靠提交先后定序）——
+⇒ **跳可能先跑、读到还没写的网格**。这正是"对象唯一性"要防的那类读，往上挪了一层。
+
+修法：**MISS 时让跳问同一句话**（宿主读网格用的那一句）——
+`grid_ready_hook::wait(hop_grid, hop_grid_slot)`：未认领的块由它自己兜底提交，已认领的等它的代际；
+有界，且不可能与车道互锁（提交是前端创建的那条缓冲的宿主 `[cb commit]`，不需要任何车道阶段）。
+新增两个计数 `grid_miss_waited` / `grid_miss_timeouts`（后者非 0 是发现，不是代价）。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。

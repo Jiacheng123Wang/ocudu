@@ -20,6 +20,7 @@ using ocudu::metal::mmse_refusals;
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/phy/phy_pipeline_grid_ready.h"
 #include "ocudu/support/macos_compat.h"
 #include "ocudu/ran/cyclic_prefix.h"
 
@@ -99,6 +100,12 @@ struct mmse_stats_t {
   // to its host route (or refused), and a hop missing from BOTH is a grid read bound to a private object.
   std::atomic<uint64_t> grid_shared{0};
   std::atomic<uint64_t> grid_failed{0};
+  // The hops that MISSED the handed block (see begin_stage_on_handed()): `grid_miss_waited` is how many of
+  // them had to ask for the grid's production before they could read it from their own command buffer, and
+  // `grid_miss_timeouts` the subset whose ask was not answered in time - those read a grid nobody promised
+  // them, so a non-zero count is a finding, not a cost.
+  std::atomic<uint64_t> grid_miss_waited{0};
+  std::atomic<uint64_t> grid_miss_timeouts{0};
 };
 
 static mmse_stats_t& mmse_stats()
@@ -240,9 +247,11 @@ static void mmse_stats_report()
   // engine's DMRS extraction in ONE command buffer, where only a shared MTLBuffer object relates them. So
   // `grid_shared == hops` is the invariant an air leg reads, and `grid_failed` says a hop fell back.
   std::fprintf(stderr,
-               " grid_shared=%llu grid_failed=%llu",
+               " grid_shared=%llu grid_failed=%llu grid_miss_waited=%llu grid_miss_timeouts=%llu",
                static_cast<unsigned long long>(s.grid_shared.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.grid_failed.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.grid_failed.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.grid_miss_waited.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.grid_miss_timeouts.load(std::memory_order_relaxed)));
   std::fprintf(stderr, "\n");
 }
 #else  // OCUDU_METAL_STATS
@@ -1130,6 +1139,24 @@ static stage_encoder begin_stage_on_handed(mmse_engine_impl* e)
     }
   }
   if (handed == nil) {
+    // A MISS (another consumer of this grid already took the block, or it was never deposited) means this
+    // hop is about to read the grid from ITS OWN command buffer - and whoever commits the block is then a
+    // HOST commit that nothing orders against that buffer. Both ends are on the back-end queue, so the
+    // commit has to happen BEFORE this hop submits; otherwise the hop reads a grid nobody has written yet -
+    // the same unordered read the object-identity rule (wrap_grid()) exists to prevent, one level up, and
+    // one that no local test can see because it is a race between two submissions.
+    //
+    // So the hop makes the SAME ask the host readers of the grid make: it commits an unclaimed block itself
+    // (the fallback a hand-over owes) or waits for the generation of the one that was claimed. Bounded, and
+    // it cannot deadlock on the lane: the commit is a host [cb commit] of a buffer the FRONT END created,
+    // and it needs no lane stage. Measured on the armed air leg (s38): 41% of the hops missed, and their
+    // end-to-end latency carried the whole +2.8 ms the hand-over cost, because the grid they were about to
+    // read was produced by someone else's commit, up to the sweep's 2-slot deadline, at an unordered time.
+    if (!ocudu::grid_ready_hook::wait(e->hop_grid, e->hop_grid_slot)) {
+      mmse_stats().grid_miss_timeouts.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      mmse_stats().grid_miss_waited.fetch_add(1, std::memory_order_relaxed);
+    }
     return s;
   }
   id<MTLComputeCommandEncoder> encoder = [handed computeCommandEncoder];
