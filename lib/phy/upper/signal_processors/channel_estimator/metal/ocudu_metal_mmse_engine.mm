@@ -1053,6 +1053,14 @@ static stage_encoder begin_weights_stage(mmse_engine_impl*           e,
 static stage_encoder begin_stage_on_handed(mmse_engine_impl* e)
 {
   stage_encoder s;
+  // The invariant EVERY other opener keeps (begin_stage()'s first line): a buffer the PREVIOUS hop left held
+  // is closed before this hop opens anything. Without it, a handed-over block that a hop passes over - the
+  // shape of every hop whose weights entry never comes - is dropped UNCOMMITTED, and with the hand-over that
+  // is not a lost optimisation: its dispatches never run (so its grid is never written) AND the input tokens
+  // it carries are never released, so a receive buffer the radio can never have back is gone for good.
+  // Measured on air as the pool draining to zero: 58927 real-time failures, and 14 tokens stuck per leaked
+  // block (5.9.11).
+  (void)close_held_buffer(e);
   if (e->hop_grid == nullptr) {
     return s;
   }

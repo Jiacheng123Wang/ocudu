@@ -440,6 +440,9 @@ struct block_token_set {
   std::mutex                                mutex;
   bool                                      released = false;
   std::vector<dft_metal_engine::keep_alive> tokens;
+  /// The command buffer these tokens belong to, as an opaque id: the lifecycle trace below is what says
+  /// WHICH block's input never came back when one does not (5.9.11).
+  const void* cb = nullptr;
 };
 
 /// Runs every token's release() exactly once, on the calling thread (a Metal completion thread, or the
@@ -465,6 +468,13 @@ static void release_block_tokens(const std::shared_ptr<block_token_set>& set)
     }
   }
   dft_stats_keepalives_released(tokens.size());
+  static std::atomic<unsigned> logged{0};
+  if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+    std::fprintf(stderr,
+                 "[d1_handover] done cb=%p tokens=%zu\n",
+                 set->cb,
+                 tokens.size());
+  }
 }
 
 /// Moves \p tokens into a set and arms it on \p cb: they are released when that command buffer COMPLETES.
@@ -473,7 +483,8 @@ static void release_block_tokens(const std::shared_ptr<block_token_set>& set)
 static std::shared_ptr<block_token_set> arm_tokens_on_complete(id<MTLCommandBuffer>         cb,
                                                               std::vector<dft_metal_engine::keep_alive>&& tokens)
 {
-  auto set = std::make_shared<block_token_set>();
+  auto set   = std::make_shared<block_token_set>();
+  set->cb    = (__bridge const void*)cb;
   if (tokens.empty()) {
     return set;
   }
@@ -1057,7 +1068,8 @@ void* dft_metal_engine::release_block(const void* grid_base)
     static std::atomic<unsigned> logged{0};
     if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
       std::fprintf(stderr,
-                   "[d1_handover] deposit grid=%p tokens=%zu (block %llu of the receiving chain)\n",
+                   "[d1_handover] deposit cb=%p grid=%p tokens=%zu\n",
+                   (__bridge const void*)cb,
                    grid_base,
                    nof_tokens,
                    static_cast<unsigned long long>(nof));

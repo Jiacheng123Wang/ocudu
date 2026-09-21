@@ -205,12 +205,25 @@ bool shared_burst::open()
   return (s.cb != nil) || (s.flush_hook != nullptr);
 }
 
+/// Lifecycle trace of a handed-over block (D1 diagnostics, 5.9.11): which command buffer the lane took over,
+/// and which one it committed. Together with the deposit/done lines of the DFT engine and the take line of
+/// the estimator, a block whose tokens never come back is missing exactly one of them - which is the
+/// difference between "the adopter never committed it" and "it was committed and still did not complete".
+static void d1_trace(const char* what, id<MTLCommandBuffer> cb)
+{
+  static std::atomic<unsigned> logged{0};
+  if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+    std::fprintf(stderr, "[d1_handover] burst %s cb=%p\n", what, (__bridge const void*)cb);
+  }
+}
+
 bool shared_burst::adopt(id<MTLCommandBuffer> cb)
 {
   burst_state& s = state();
   if ((cb == nil) || (s.cb != nil)) {
     return false;
   }
+  d1_trace("adopt", cb);
   // The buffer only: the encoder opens on the first encoder() call, which is also where the stage
   // barrier lands (see burst_ensure_open()), and its command-buffer-level fences stay as the stages
   // inside it encoded them.
@@ -255,6 +268,7 @@ bool shared_burst::commit()
   s.n                              = 0;
 
   [enc endEncoding];
+  d1_trace("commit", cb);
   // The GPU-time probe must be armed before commit (Metal asserts otherwise).
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
   [cb commit];
