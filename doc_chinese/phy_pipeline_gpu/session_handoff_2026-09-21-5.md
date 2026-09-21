@@ -1,8 +1,9 @@
-# 交接（入口） — S24：**"GPU 等"已实现**（MISS 的次序编码进跳自己的命令缓冲，CPU 不再阻塞）——**下一步就是那一对腿（`s40`）**
+# 交接（入口） — S25：**`s40` 判了：设备侧等待全过、⑥ 距地板只剩 3%、⑦ 只剩【饱和爬坡】那一档（对照臂也有）**
 
 > **本文件是新会话的唯一入口**：读完它就能开工。
-> **本会话（S24）的就一件事**：把 `s39` 那次 13 s 停顿的根因（**用宿主线程等**）改掉——MISS 的次序改成
-> **命令缓冲级的 `encodeWaitForEvent`**（CPU 立刻返回，GPU 自己等）。设计文档 **§5.9.24** = 改动 + 判据；**§5.9.23** = `s39` 读数。
+> **本会话（S25）的就一件事**：读 `s40` + 更正上一轮对停顿的误判。设计文档 **§5.9.25** = 完整读数与机制。
+> 一句话：**"GPU 等"全过**（`grid_devwaited=843`、`grid_wait_unencoded=0`、中位 1851 µs、94% 跳认领、最坏 162→51 ms），
+> 但 `UL processor is busy` 是**话务爬到饱和**那一档的事，**对照臂也有（84 vs 武装 716）**。
 > **`s37` 那一对腿不算数**（候选臂 `handed=0 released=0`，交出在代码里还关着）；`-4.md` 的 §4.1 第 14/15 行已被 §5.9.20 撤回。
 
 > **技术细节全在常驻设计文档**：§5.9.19（已撤回 ①③④）、§5.9.20、§5.9.21、**§5.9.22（`s38` 读数 + MISS 修复）**。
@@ -62,34 +63,25 @@ git rev-parse --short=10 HEAD && grep build_info build/hashes.h
 
 ---
 
-## 3. ★★★ 下一步：上 `s40` 腿对（判"GPU 等"是否既保住次序、又消掉停顿）
+## 3. ★★★ 下一步：**让处理器不再把时隙串行化在任务后面**（⑦ 的最后一档；`s40` 已把机制与 ⑥ 判掉）
 
-**已实现（本会话，见设计文档 §5.9.24）**：
-`shared_queue::grid_ready_encode_wait()`（设备侧等待，`generation==0`/无事件 ⇒ 不编码，绝不挂死缓冲）、
-`shared_burst::grid_production_generation()`（与 `ensure_grid_produced()` 共用 `claim_grid_production()`，
-未认领先兜底提交）、`shared_burst::set_grid_wait()` + `burst_ensure_open()` 里与另两个 fence 同处消费、
-`begin_stage_on_handed()` 的 MISS 只记 `pending_grid_wait`、`begin_stage()` 在**开编码器之前**编码它。
-**宿主等待已删除**；计数换成 `grid_devwaited` / `grid_wait_unencoded`。
+**`s40` 的读数（设计文档 §5.9.25）**：
+* 机制判据全过：开工告警 0、`grid_devwaited=843`（≈ 跳数−`taken`）、**`grid_wait_unencoded=0`**、
+  `handed=27005 taken=13516 fallback=11403 late=2085 not_found=1258 timeouts=0`、`grid_shared==hops`、`dft commits=1`；
+* **⑥ 距地板 3%**：提交/上行时隙 **1.50 → 1.03**（地板 1.00）；认领率 **94%**（`s39` 77%）；扫掠 4520 → 2085；
+* 中位端到端 **1851 µs**（对照 1969）、最坏 **162 → 51 ms**（对照 11.4）；
+* CRC **91.5%**（对照 84.6%），QPSK/16QAM 两边 99%，无异常；
+* **⑦ 的剩余**：`UL processor is busy` **716**（对照 **84**）——**两个臂都发生在"话务爬到饱和"的那 11–14 秒**
+  （日志速率 ×70、每时隙一个 PUSCH）；`Failed to allocate UL resource grid` **= 0**、
+  716 条全是 "UL processor is busy"、**没有** "message late" ⇒ **是 `start_new_slot()` 拒收**（上一个槽的任务还在飞），
+  不是网格引用、也不是停顿。**⇒ 上一轮"宿主等待造成停顿"的假设是错的**（设备侧等待仍值得保留：最坏值 162→51 ms）。
 
-```bash
-sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s40-d1-devwait-base
-sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s40-d1-devwait OCUDU_DFT_RELEASE_BLOCK=1
-```
+**下一步（唯一杠杆，且是既有缺陷）**：把 `uplink_processor_impl` 的 **PDU 仓库 + 网格按槽拥有**（小池子、引用计数归还），
+这样"上一槽任务还在飞"不再阻止配置新槽 ⇒ 饱和爬坡时的余量回来。
+**这正是 §5.9.19 当初误用的那个改动，现在的理由是【余量】而不是正确性。**
 
-**★ 上腿后第一件事**：`grep -c "will NOT exercise D1" <候选臂日志>` 必须是 0。
-
-| 先看 | 期望 | `s39` 实测（对照）|
-|---|---|---|
-| 开工告警 | 0 | 0 ✓ |
-| `grid_shared == hops` / `grid_failed==0` | 成立 | 14474 / 0 ✓ |
-| **`grid_devwaited`** | **> 0**（≈ 跳数 − `taken`）| （当时是宿主等待：3387）|
-| **`grid_wait_unencoded`** | **== 0** | — |
-| `dft handover` | `handed>0 taken>0 timeouts==0` | 27022/11087/0 ✓ |
-| **`UL processor is busy`** | **回到 ~20** | **355** ❌ |
-| `[ul_pipeline]` 中位 / **最坏** | ~2 ms / **~10 ms** | 1962 µs / **162 ms** ❌ |
-| CRC 按调制分层 + KO 的 sinr 中位 | 与对照同形 | 97.1% OK、无异常 ✓ |
-
-**★ 若 `grid_wait_unencoded` 非 0**：有一条跳的网格读没有任何次序 —— 那是一条真的缺陷，先别继续加功能。
+**判据（下一对腿 `s41`）**：`UL processor is busy` 从 716 **回到对照量级（~84）**；提交/时隙仍 ~1.03；
+中位/最坏不变；CRC 分层不变；`grid_wait_unencoded==0`。
 
 ## 4. 未解 / 开放项（按建议顺序）
 
@@ -115,7 +107,9 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s40-d1-devwait OCUD
 
 ## 6. 一句话给新会话
 
-**`s39` 把"MISS 要等"这件事判对了（延迟中位回到 1962 µs、认领率 77%、提交/跳 2.10），但"用宿主线程等"制造了一次 13 s 停顿。**
-本会话把这次等待**搬进了 GPU**：MISS 时取"那块的生产代际"，把它作为 `encodeWaitForEvent` 编进**跳自己命令缓冲的第一件事**
-（CPU 立刻返回），未认领的块仍由取代际的那一步兜底提交。**判据是 `s40`：`grid_devwaited>0`、`grid_wait_unencoded==0`、
-`UL processor is busy` 回到 ~20、最坏端到端回到 ~10 ms，而中位延迟与 CRC 分层不变。** 在它判过之前不要 tag。
+**`s40` 判了：设备侧等待（"GPU 等"）全过**——`grid_devwaited=843`、`grid_wait_unencoded=0`、中位 1851 µs、
+94% 的跳认领到块、最坏端到端 162→51 ms、CRC 91.5%（对照 84.6%）。
+**⑥（CPU 参与点）距地板只剩 3%**：提交/上行时隙 **1.50 → 1.03**。
+**⑦ 只剩一档**：`UL processor is busy` 716（对照 84），而**两个臂都在"话务爬到饱和"的 11–14 秒里发生**——
+`Failed to allocate …=0`、没有一条 "message late" ⇒ 是 `start_new_slot()` 把时隙串行化在任务后面。
+**下一步 = 把 PDU 仓库与网格按槽拥有**（§5.9.19 那个改动，理由从"正确性"改成"余量"）。在这之前不要 tag。
