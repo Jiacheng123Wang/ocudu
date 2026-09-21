@@ -124,7 +124,7 @@ public:
     return instance;
   }
 
-  /// Which landmark of a traced slot a timestamp belongs to (see fill_slot_trace()).
+  /// Which landmark of a slot a timestamp belongs to (see trace_slot()).
   enum class slot_trace_what { t2f, ce, ldpc_start, crc_ok };
 
   /// Bound on the traced slots: the trace is for reading single slots by eye, so a small map is the right size
@@ -136,8 +136,6 @@ public:
   /// slot with no PUSCH has no ce/ldpc_start) - which is why they default to NaN rather than to 0.
   struct slot_trace_entry {
     uint64_t        slot   = 0;
-    /// Which landmark the value being written belongs to; read by fill_slot_trace() and not reported.
-    slot_trace_what what   = slot_trace_what::t2f;
     double          t2f_us        = std::numeric_limits<double>::quiet_NaN();
     double          ce_us         = std::numeric_limits<double>::quiet_NaN();
     double          ldpc_start_us = std::numeric_limits<double>::quiet_NaN();
@@ -402,20 +400,11 @@ public:
       return;
     }
     std::lock_guard<std::mutex> lock(mutex);
-    // A bounded map that REFUSES new keys once full keeps the oldest entries - which here means the slots of the
-    // first few milliseconds of the run, when the phone is still attaching and most slots are idle. The trace
-    // then looks up bases for slots from the whole run, finds none, and reports a span measured from wherever it
-    // fell back to (see fill_slot_trace). What is wanted is the NEWEST max_slot_trace completions: evict the
-    // oldest insertion when full.
-    if (slot_samples_done.size() >= max_slot_trace) {
-      auto oldest = slot_trace_order.begin();
-      slot_samples_done.erase(*oldest);
-      slot_trace_pre_wait.erase(*oldest);
-      slot_trace.erase(*oldest);
-      slot_trace_order.erase(oldest);
-    }
+    // NOTE: this map is deliberately NOT capped here. The budget belongs to the slots that CARRY a PUSCH, and
+    // which those are is only known later (see trace_slot) - capping on completion keeps the run's first
+    // milliseconds, which is what an earlier version did and why every printed row had no PUSCH. It grows one
+    // entry per slot for the length of a trace that is opt-in anyway; the traced rows themselves are capped.
     slot_samples_done[slot] = now;
-    slot_trace_order.push_back(slot);
     if (wait_ns >= 0) {
       slot_trace_pre_wait[slot] = static_cast<double>(wait_ns) / 1e3;
     }
@@ -445,59 +434,74 @@ public:
   /// Whether the per-slot timeline is on (public so the lower PHY can gate its own diagnostics on it).
   static bool slot_trace_enabled() { return slot_trace_limit() != 0; }
 
-  /// \brief Adds one landmark of a traced slot to its entry (see fill_slot_trace() for the deltas).
+  /// \brief Remembers one landmark instant of a slot, and CREATES its timeline entry when the landmark proves
+  /// the slot carries a PUSCH.
   ///
-  /// Does nothing unless the slot is traced, i.e. unless its samples-complete instant was recorded - so the hot
-  /// path pays one map lookup, and only while OCUDU_UL_SLOT_TRACE is on.
+  /// Why the entry is created here and not at the samples-complete instant: a slot whose samples are complete is
+  /// not necessarily a slot anyone transmits in. On air the FFT (and so record_t2f_end) runs for slots that carry
+  /// no PUSCH at all, and a trace keyed on completion spends its whole budget on those - measured: the first leg
+  /// with this trace reported 50 rows, ALL of them with no channel estimation, no decode and no CRC, covering
+  /// half a second at the start of the run. Keying on the FIRST CODEBLOCK DECODE INVOCATION instead
+  /// (record_ldpc_start(), which the PUSCH processor calls for every decode attempt) makes the rows the slots the
+  /// operator is asking about, and `ldpc_start_us` cannot be NaN in any of them by construction.
+  ///
+  /// The landmarks of such a slot that arrived BEFORE this one (the FFT end in particular) are already in hand,
+  /// so they are backfilled rather than lost.
   void trace_slot(uint64_t slot, slot_trace_what what, std::chrono::high_resolution_clock::time_point at)
   {
-    auto done_it = slot_samples_done.find(slot);
-    if (done_it == slot_samples_done.end()) {
-      return;
+    if (slot_samples_done.find(slot) == slot_samples_done.end()) {
+      return; // no samples-complete instant on record: this slot cannot be a timeline
+    }
+    slot_landmarks[{slot, what}] = at;
+
+    // A slot becomes a timeline at the landmark that proves it carries a PUSCH - the first codeblock decode
+    // invocation - and STAYS one afterwards: crc_ok arrives last, so a rule that only handled the creating
+    // landmark would leave the CRC column NaN in every row. (It did: an early `what != ldpc_start -> return`
+    // sat in front of the entry write, so crc_ok stored its instant in the landmark map and then returned
+    // before anything read it back. The guard below is the same rule written so that it cannot do that.)
+    //
+    // NO lock here: every caller (record_t2f_end, record_ce_end, record_ldpc_start, record_end_crc_ok) already
+    // holds `mutex` when it calls this. Taking it again deadlocks - the first version of this refactor did, and
+    // the probe test hung instead of failing, which is the failure mode a non-recursive mutex gives you.
+    const bool is_new = (slot_trace.find(slot) == slot_trace.end());
+    if (is_new && (what != slot_trace_what::ldpc_start)) {
+      return; // the landmark that does NOT prove a PUSCH, for a slot that has no timeline to update
+    }
+    // The budget applies to the slots that CARRY a PUSCH: evict the oldest of those when full.
+    if (is_new && (slot_trace.size() >= max_slot_trace)) {
+      auto oldest = slot_trace_order.begin();
+      slot_samples_done.erase(*oldest);
+      slot_trace_pre_wait.erase(*oldest);
+      slot_trace.erase(*oldest);
+      for (auto it = slot_landmarks.begin(); it != slot_landmarks.end();) {
+        it = (it->first.first == *oldest) ? slot_landmarks.erase(it) : std::next(it);
+      }
+      slot_trace_order.erase(oldest);
     }
     slot_trace_entry& e = slot_trace[slot];
     e.slot              = slot;
-    e.what              = what;
-    slot_trace_landmark[slot] = at;
-    fill_slot_trace(e, slot_samples_done, slot, at);
-    // The receive wait was reported before this slot had any landmark (see record_rx_wait_for_slot): attach it
-    // now, so the printed timeline carries the wait that ended with this slot's last sample.
-    auto wait_it = slot_trace_pre_wait.find(slot);
-    if (wait_it != slot_trace_pre_wait.end()) {
-      e.rx_wait_us = wait_it->second;
+    if (is_new) {
+      slot_trace_order.push_back(slot);
     }
-  }
 
-  static void fill_slot_trace(slot_trace_entry&                                     e,
-                              const std::map<uint64_t, std::chrono::high_resolution_clock::time_point>& done,
-                              uint64_t                                              slot,
-                              std::chrono::high_resolution_clock::time_point        at)
-  {
-    // The base is looked up ONCE, and a missing one aborts: there is no sentinel. Returning a default-constructed
-    // time_point for "absent" is what produced a confident 71680us (exactly one slot's worth of microseconds) on
-    // air - on this platform high_resolution_clock IS steady_clock, whose epoch is BOOT, so a default time_point
-    // is an ordinary instant and the subtraction silently succeeds.
-    const auto base_it = done.find(slot);
-    if (base_it == done.end()) {
-      return; // this slot has no samples-complete instant on record: it is not traced
-    }
-    const auto base = base_it->second;
+    // Backfill every landmark of this slot, each measured from its samples-complete instant.
+    const auto base = slot_samples_done.at(slot);
     auto       us   = [&base](const std::chrono::high_resolution_clock::time_point& tp) {
       return std::chrono::duration_cast<std::chrono::nanoseconds>(tp - base).count() / 1e3;
     };
-    switch (e.what) {
-      case slot_trace_what::t2f:
-        e.t2f_us = us(at);
-        break;
-      case slot_trace_what::ce:
-        e.ce_us = us(at);
-        break;
-      case slot_trace_what::ldpc_start:
-        e.ldpc_start_us = us(at);
-        break;
-      case slot_trace_what::crc_ok:
-        e.crc_ok_us = us(at);
-        break;
+    auto assign = [&](slot_trace_what w, double& field) {
+      auto it = slot_landmarks.find({slot, w});
+      if (it != slot_landmarks.end()) {
+        field = us(it->second);
+      }
+    };
+    assign(slot_trace_what::t2f, e.t2f_us);
+    assign(slot_trace_what::ce, e.ce_us);
+    assign(slot_trace_what::ldpc_start, e.ldpc_start_us);
+    assign(slot_trace_what::crc_ok, e.crc_ok_us);
+    auto wait_it = slot_trace_pre_wait.find(slot);
+    if (wait_it != slot_trace_pre_wait.end()) {
+      e.rx_wait_us = wait_it->second;
     }
   }
 
@@ -558,9 +562,11 @@ public:
         if (b != slot_samples_done.end()) {
           base_s = std::chrono::duration<double>(b->second.time_since_epoch()).count();
         }
-        auto t = slot_trace_landmark.find(e.slot);
-        if (t != slot_trace_landmark.end()) {
-          mark_s = std::chrono::duration<double>(t->second.time_since_epoch()).count();
+        // The newest landmark of this slot, out of the per-(slot, landmark) map.
+        for (const auto& kv : slot_landmarks) {
+          if (kv.first.first == e.slot) {
+            mark_s = std::chrono::duration<double>(kv.second.time_since_epoch()).count();
+          }
         }
       }
       std::fprintf(stderr,
@@ -880,8 +886,9 @@ private:
   /// newest (see record_slot_samples_complete): refusing means keeping the run's first milliseconds, which on an
   /// air leg is the attach phase, i.e. exactly the slots that carry no PUSCH.
   std::deque<uint64_t> slot_trace_order;
-  /// The newest landmark instant per traced slot, kept only so the report can print it next to the base.
-  std::map<uint64_t, std::chrono::high_resolution_clock::time_point> slot_trace_landmark;
+  /// Every landmark instant seen so far, keyed by (slot, which). A traced slot's entry is built from these, so
+  /// the landmarks that arrive before the one that proves it carries a PUSCH are not lost.
+  std::map<std::pair<uint64_t, slot_trace_what>, std::chrono::high_resolution_clock::time_point> slot_landmarks;
 };
 
 #else // not OCUDU_FLOW_PROBES: no-op implementation with zero overhead.

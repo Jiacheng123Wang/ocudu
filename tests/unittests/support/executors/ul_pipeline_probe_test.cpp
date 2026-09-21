@@ -22,6 +22,7 @@
 #include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <gtest/gtest.h>
@@ -173,6 +174,9 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
   constexpr uint64_t traced_slot = 400;
   probe.record_start(traced_slot);
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  // Samples complete FIRST, then the landmarks - the order the receiving chain has by construction, and now a
+  // requirement: a landmark that arrives before its slot's samples-complete instant cannot be part of a timeline
+  // (trace_slot() drops it), because the instant the deltas are measured from does not exist yet.
   probe.record_slot_samples_complete(traced_slot, 3840, 9000000, std::chrono::high_resolution_clock::now());
   std::this_thread::sleep_for(std::chrono::milliseconds(1));
   probe.record_t2f_end(traced_slot);
@@ -211,6 +215,13 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
     EXPECT_GE(nums[3], nums[2]) << line;           // ce is later than t2f
     EXPECT_GE(nums[4], nums[3]) << line;           // ldpc start is later than ce
     EXPECT_GE(nums[5], nums[4]) << line;           // crc ok is later than the decode start
+    // ... and it must not be NaN. crc_ok is the LAST landmark of a slot, so a rule that only writes the columns
+    // of the landmark that CREATED the row leaves this one empty in every row - which is exactly what an early
+    // `what != ldpc_start -> return` in front of the entry write did, for two review rounds, while t2f/ce/ldpc
+    // all looked right. Asserting the ORDER (above) is not enough on its own: NaN fails it, but a NaN column in
+    // a row the test does not inspect would not. This asserts the value is there.
+    EXPECT_FALSE(std::isnan(nums[5])) << "the CRC landmark must land in an entry created earlier" << line;
+    EXPECT_GE(nums[5], 0.0) << line;
     EXPECT_GE(nums[7], 20000.0) << line;           // the series span really is ~21 ms from record_start()
   }
   unsetenv("OCUDU_UL_SLOT_TRACE");
@@ -367,6 +378,12 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
     EXPECT_EQ(after.find("  900 "), std::string::npos)
         << "a slot with no samples-complete instant must not be reported as a timeline row";
 
+  // ---- the bounded ring, LAST: it EVICTS the rows every section above recorded -----------------------------
+  //
+  // It has to run after them: exceeding the cap deliberately drops the oldest traced slots, base and all, so any
+  // assertion about an earlier slot must come first. (It did not, and the symptom was a row whose CRC column read
+  // NaN - because the slot's samples-complete instant had been evicted by this very test, while the row itself
+  // survives as an entry with no base left to measure from.)
     // The cap keeps the NEWEST completions: trace MORE slots than it allows and the first must fall out while
     // the last stays. Refusing new keys instead (the on-air defect) leaves exactly the opposite - the run's first
     // few milliseconds, which on an air leg is the attach phase. The number here must exceed the real cap, or the
@@ -378,6 +395,7 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
       probe.record_start(i);
       probe.record_slot_samples_complete(i, 3840, 100, std::chrono::high_resolution_clock::now());
       probe.record_t2f_end(i);
+      probe.record_ldpc_start(i); // this is what makes the slot a TRACED one (it carries a PUSCH)
     }
     const std::string ring = capture_report();
     EXPECT_EQ(ring.find(" 1000 "), std::string::npos)
