@@ -54,6 +54,9 @@ struct burst_state {
   unsigned                          n        = 0;
   void*                             flush_ctx  = nullptr;
   shared_burst::flush_hook_t        flush_hook = nullptr;
+  /// Grid-production fence this thread's NEXT command buffer must wait for, before any of its dispatches
+  /// (see shared_burst::set_grid_wait()). Consumed when the buffer is created.
+  uint64_t                          grid_wait  = 0;
   std::vector<id<MTLCommandBuffer>> outstanding; // committed through this thread, not waited yet
 
   ~burst_state()
@@ -145,6 +148,9 @@ static bool burst_ensure_open(burst_state& s)
     // An ADOPTED command buffer (shared_burst::adopt()): it exists, its fences are already encoded, and
     // this is where its encoder opens - the point where encoder() also inserts the stage barrier.
     if (s.enc == nil) {
+      // A grid wait that is still pending here was set AFTER a buffer was already open, so it cannot be
+      // encoded before this burst's dispatches - the one shape that would silently drop the ordering. It is
+      // left pending for the next buffer and counted by the caller (see mmse_engine's grid_wait_unencoded).
       s.enc = [s.cb computeCommandEncoder];
       if (s.enc == nil) {
         s.cb       = nil;
@@ -175,6 +181,16 @@ static bool burst_ensure_open(burst_state& s)
     // wait covers the whole burst, and it targets the estimator command buffer of THIS hop, which was
     // committed before this burst (the receiving chain estimates first, then demodulates).
     shared_queue::backend_stage_wait(s.cb);
+    // Grid production (D1): this burst may belong to a hop that MISSED the hand-over, in which case the
+    // resource grid it is about to read is produced by a block committed by SOMEONE ELSE (another
+    // consumer's fallback, or the registry's sweep) and the two are only ordered if the commit happens
+    // first (see shared_burst::grid_production_generation()). Encoded here, where the buffer is created and
+    // before any dispatch, because a command-buffer-level wait cannot be expressed inside an encoder - and
+    // because the CPU thread must NOT wait for it (that is the stall of design document 5.9.23).
+    if (s.grid_wait != 0) {
+      (void)shared_queue::grid_ready_encode_wait(s.cb, s.grid_wait);
+      s.grid_wait = 0;
+    }
   }
   s.enc = (s.cb != nil) ? [s.cb computeCommandEncoder] : nil;
   if (s.enc == nil) {
@@ -554,43 +570,55 @@ id<MTLCommandBuffer> shared_burst::take_released(const void* grid_base, uint64_t
   return entry->cb;
 }
 
+/// \brief The production promise of (\p grid_base, \p slot): commits it when nobody claimed it, and returns
+///        the generation that will mark its completion (0 when there is no record, or none was armed).
+///
+/// Shared by the two consumers that need it, which differ only in HOW they wait: a host reader blocks on
+/// the event (ensure_grid_produced()), a device consumer encodes the wait into its own command buffer
+/// (grid_production_generation()). The fallback - a consumer committing a block no hop claimed - is the
+/// same debt in both cases, and so is the counter that records it.
+///
+/// \param[out] to_commit Set to the block this call claimed on the caller's behalf; the caller commits it
+///             OUTSIDE the lock (a commit can run completion handlers, which take this same lock).
+static uint64_t
+claim_grid_production(handed_state& h, const void* grid_base, uint64_t slot, id<MTLCommandBuffer> __strong& to_commit)
+{
+  handed_entry* entry = find_handed(h, grid_base, slot);
+  if (entry == nullptr) {
+    // No record at all: either nothing was ever handed over for this (storage, slot) - no hand-over in this
+    // build or run - or it was produced long enough ago to be evicted. Counted, because a LATE reader that
+    // cannot wait is exactly the case the key was introduced for.
+    ++h.counters.grid_not_found;
+    return 0;
+  }
+  if (!entry->claimed && !entry->produced) {
+    // Nobody will ever commit this one (a slot no hop ran for), and a grid nobody produces is a grid the
+    // caller is about to read as garbage: the fallback a hand-over owes.
+    entry->claimed = true;
+    to_commit      = entry->cb;
+    ++h.counters.fallback_commits;
+  }
+  return entry->generation;
+}
+
 bool shared_burst::ensure_grid_produced(const void* grid_base, uint64_t slot)
 {
   if (grid_base == nullptr) {
     return true;
   }
-  id<MTLCommandBuffer> to_commit = nil;
+  id<MTLCommandBuffer> to_commit  = nil;
   uint64_t             generation = 0;
-  bool                 produced   = false;
-  bool                 known      = false;
   {
     handed_state&               h = handed();
     std::lock_guard<std::mutex> lock(h.mutex);
-    handed_entry*               entry = find_handed(h, grid_base, slot);
-    if (entry != nullptr) {
-      known      = true;
-      produced   = entry->produced;
-      generation = entry->generation;
-      if (!entry->claimed && !produced) {
-        // Nobody will ever commit this one (a slot no hop ran for), and a grid nobody produces is a grid the
-        // caller is about to read as garbage: the fallback a hand-over owes.
-        entry->claimed = true;
-        to_commit      = entry->cb;
-        ++h.counters.fallback_commits;
-      }
-    } else {
-      // No record at all: either nothing was ever handed over for this (storage, slot) - no hand-over in
-      // this build or run - or it was produced long enough ago to be evicted. Counted, because a LATE reader
-      // that cannot wait is exactly the case the key was introduced for.
-      ++h.counters.grid_not_found;
-    }
+    generation = claim_grid_production(h, grid_base, slot, to_commit);
   }
   if (to_commit != nil) {
     // A consumer had to commit it (fallback), which is counted apart from the registry's own late commits:
     // the first says a host reader found the block nobody claimed, the second that nobody came at all.
     commit_dropped(to_commit);
   }
-  if (produced || !known || (generation == 0)) {
+  if (generation == 0) {
     return true;
   }
   // Bounded on purpose: a generation nobody signals must not hang the caller for good - and a timeout is
@@ -605,9 +633,35 @@ bool shared_burst::ensure_grid_produced(const void* grid_base, uint64_t slot)
   return true;
 }
 
-namespace {
+uint64_t shared_burst::grid_production_generation(const void* grid_base, uint64_t slot)
+{
+  if (grid_base == nullptr) {
+    return 0;
+  }
+  id<MTLCommandBuffer> to_commit  = nil;
+  uint64_t             generation = 0;
+  {
+    handed_state&               h = handed();
+    std::lock_guard<std::mutex> lock(h.mutex);
+    generation = claim_grid_production(h, grid_base, slot, to_commit);
+  }
+  if (to_commit != nil) {
+    commit_dropped(to_commit);
+  }
+  // The caller may also learn here that the block was already produced: the generation it gets then names a
+  // value the event has reached, and encoding the wait on it is a satisfied wait rather than a mistake.
+  return generation;
+}
 
-} // namespace
+void shared_burst::set_grid_wait(uint64_t generation)
+{
+  state().grid_wait = generation;
+}
+
+bool shared_burst::grid_wait_pending()
+{
+  return state().grid_wait != 0;
+}
 
 shared_burst::handed_counters shared_burst::handed_stats()
 {

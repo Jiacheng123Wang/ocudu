@@ -3692,6 +3692,46 @@ nobody commits, so the grid is never written"*。今天（有了兜底/扫掠）
 `[ul_pipeline]` 中位仍 ~2 ms 且**最坏值回到 ~10 ms**、CRC 分层不劣化。
 **这条修法同时更符合用户裁定 ⑦**（GPU 一旦发动就跑完，CPU 不参与"等"）。
 
+#### 5.9.24 ★★ MISS 的次序改成【GPU 等】（`s39` 那 13 s 停顿的修法，已实现，待腿 `s40`）
+
+**① 一句话**：MISS 的跳仍然要"块先提交、我才提交"，但**这个等待不再由 CPU 线程承担**——
+它被编码成**命令缓冲级的等待**（`encodeWaitForEvent`，用的正是产出方 `grid_ready_signal()` 武装的那个
+`shared_queue` 网格事件），CPU 立刻返回，GPU 自己在那里等。
+
+**② 四处改动（都在两个文件里）**
+
+| # | 位置 | 内容 |
+|---|---|---|
+| 1 | `shared_queue::grid_ready_encode_wait(cb, generation)`（`.h/.mm`）| 设备侧形式；`generation==0` 或本进程从未武装过网格事件 ⇒ 返回 false（**绝不为一个没人会 signal 的值编码等待，否则缓冲会挂死**）|
+| 2 | `shared_burst::grid_production_generation(storage, slot)`（`.h/.mm`）| 与 `ensure_grid_produced()` 共用新的 `claim_grid_production()`：未认领**先兜底提交**（同一笔债、同一计数 `fallback_commits`），返回该块的 `generation`；无记录返回 0 |
+| 3 | `shared_burst::set_grid_wait(gen)` + `burst_ensure_open()` 消费 | burst 自己创建命令缓冲，调用方无法直接编码 ⇒ 交给 burst，在它编码另两个 fence（`front_end_wait`/`backend_stage_wait`）的同一处、**任何 dispatch 之前**编码 |
+| 4 | `begin_stage_on_handed()` MISS + `begin_stage()` | MISS 时只记 `e->pending_grid_wait`（**不再宿主等待**）；下一个 `begin_stage()` 在**开编码器之前**（紧挨 `front_end_wait`）把它编码进自己的缓冲，然后清掉 |
+
+**③ 唯一编码不了的形状会被计数**：若"等待被设上时 burst 已经开着"，这个等待就无法落在 dispatch 之前
+⇒ burst 把它留给下一个缓冲，并由 `grid_wait_unencoded` 计数（**腿上一旦非 0 就是一条发现**）。
+
+**④ 计数（接在 `[metal_stats] mmse_ce` 行尾）**：`grid_devwaited`（等待被编码进 GPU 的 MISS 跳数）、
+`grid_wait_unencoded`（编码失败的，必须 0）；`grid_miss_waited`/`grid_miss_timeouts` 随之删掉
+（前者现在恒为 0，后者已不适用——**宿主不再等**；宿主读者自己的 `ready_timeouts` 仍在 `dft handover` 行里）。
+
+**⑤ 离线覆盖（诚实说明）**：**没有新增离线门**——能把这条判死的只有空口腿的两个计数。
+现有的离线门全部复跑通过：`value_net` 47/0、`--self-test` 8/8、`ctest -R metal` 10/10、
+`ctest -R "ul_pipeline_probe|puxch|lower_phy"` 5/5、`neutral_vs_baseline` **131**（同数）、
+离线武装节 `handed=1 fallback=1`、`[armed] REs=17808 mismatching=0`、机制单测 8 条臂全绿。
+
+**⑥ `s40` 的判据**
+
+| 先看 | 期望 |
+|---|---|
+| 开工告警 | 0 |
+| `grid_shared == hops`、`grid_failed==0` | 成立 |
+| **`grid_devwaited`** | **> 0**（≈ 跳数 − `taken`）|
+| **`grid_wait_unencoded`** | **== 0** |
+| `dft handover` | `handed>0 taken>0 timeouts==0` |
+| **`UL processor is busy`** | **回到对照量级（~20；`s39` 是 355）** |
+| `[ul_pipeline]` 中位 / 最坏 | ~2 ms / **回到 ~10 ms**（`s39` 最坏 162 ms）|
+| CRC 按调制分层 + KO 的 sinr 中位 | 与对照同形 |
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。

@@ -526,6 +526,21 @@ uint64_t shared_queue::front_end_generation()
   return state().fence_generation.load(std::memory_order_acquire);
 }
 
+bool shared_queue::grid_ready_encode_wait(id<MTLCommandBuffer> command_buffer, uint64_t generation)
+{
+  if ((command_buffer == nil) || (generation == 0)) {
+    return false;
+  }
+  shared_queue_state& s = state();
+  if (s.grid_event == nil) {
+    // The event is created by the SIGNALLER (grid_ready_signal), so no grid production was ever armed in
+    // this process: nothing will signal that value, and encoding the wait would hang the buffer.
+    return false;
+  }
+  [command_buffer encodeWaitForEvent:s.grid_event value:generation];
+  return true;
+}
+
 bool shared_queue::front_end_wait(id<MTLCommandBuffer> command_buffer)
 {
   if (!front_end_fence_enabled() || (command_buffer == nil)) {

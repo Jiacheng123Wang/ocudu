@@ -1,7 +1,8 @@
-# 交接（入口） — S23：**`s39`：MISS 等待把延迟治好了（中位 4797→1962 µs）、认领率 59%→77%、数据不比对照差；代价是一次 13 s 停顿（355 个上行时隙被丢）⇒ 下一步：把"宿主等"换成"GPU 等"**
+# 交接（入口） — S24：**"GPU 等"已实现**（MISS 的次序编码进跳自己的命令缓冲，CPU 不再阻塞）——**下一步就是那一对腿（`s40`）**
 
 > **本文件是新会话的唯一入口**：读完它就能开工。
-> **本会话（S23）的就一件事**：读 `s39` 腿对 + 把 MISS 路径的等待从**宿主**搬到**设备**（见 §3，未做，只有方案与判据）。设计文档 **§5.9.23** 是完整读数。
+> **本会话（S24）的就一件事**：把 `s39` 那次 13 s 停顿的根因（**用宿主线程等**）改掉——MISS 的次序改成
+> **命令缓冲级的 `encodeWaitForEvent`**（CPU 立刻返回，GPU 自己等）。设计文档 **§5.9.24** = 改动 + 判据；**§5.9.23** = `s39` 读数。
 > **`s37` 那一对腿不算数**（候选臂 `handed=0 released=0`，交出在代码里还关着）；`-4.md` 的 §4.1 第 14/15 行已被 §5.9.20 撤回。
 
 > **技术细节全在常驻设计文档**：§5.9.19（已撤回 ①③④）、§5.9.20、§5.9.21、**§5.9.22（`s38` 读数 + MISS 修复）**。
@@ -61,30 +62,34 @@ git rev-parse --short=10 HEAD && grep build_info build/hashes.h
 
 ---
 
-## 3. ★★★ 下一步：**把 MISS 的等待从宿主搬到 GPU**（`s39` 的停顿就是宿主等待造成的）
+## 3. ★★★ 下一步：上 `s40` 腿对（判"GPU 等"是否既保住次序、又消掉停顿）
 
-**`s39` 判了**（设计文档 §5.9.23）：开工告警 0、`grid_shared=14474==hops`、**`grid_miss_waited=3387` 精确等于
-"跳数−`taken`"**、**`grid_miss_timeouts=0`**；端到端中位 **4797→1962 µs**（+2.8 ms 消失）、认领率 **59%→77%**、
-扫掠 7079→4520、提交/跳 2.76→**2.10**；按调制分层 CRC **不比对照差**（16QAM 99.97%、64QAM 63%、256QAM 44%）。
+**已实现（本会话，见设计文档 §5.9.24）**：
+`shared_queue::grid_ready_encode_wait()`（设备侧等待，`generation==0`/无事件 ⇒ 不编码，绝不挂死缓冲）、
+`shared_burst::grid_production_generation()`（与 `ensure_grid_produced()` 共用 `claim_grid_production()`，
+未认领先兜底提交）、`shared_burst::set_grid_wait()` + `burst_ensure_open()` 里与另两个 fence 同处消费、
+`begin_stage_on_handed()` 的 MISS 只记 `pending_grid_wait`、`begin_stage()` 在**开编码器之前**编码它。
+**宿主等待已删除**；计数换成 `grid_devwaited` / `grid_wait_unencoded`。
 
-**代价（新事故）**：06:11:07–06:11:20 **一次 13 s 停顿**——`UL processor is busy` **355** 条（对照 21）、
-实时失败 356（对照 25）、最坏端到端 162 ms；丢的时隙**是连续的**（160.2/160.3/161.2/161.3…）⇒
-不是单个处理器忙，是**整链停顿后 FAPI 成批迟到**。
-**机制假设**：一个 MISS 的跳在 `grid_ready_hook::wait()` 里**占着车道（PUSCH 池）线程**，而它等的块由**另一个车道阶段**提交
-⇒ 池子被等待者占满时没人能推进到"提交"⇒ 级联。（s38 无等待 9 ms/27；s39 有等待 13 s/355。）
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s40-d1-devwait-base
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s40-d1-devwait OCUDU_DFT_RELEASE_BLOCK=1
+```
 
-**修法（照 §5.9.23 ⑤ 的四步做，都在两个文件里）**
+**★ 上腿后第一件事**：`grep -c "will NOT exercise D1" <候选臂日志>` 必须是 0。
 
-| 步 | 内容 |
-|---|---|
-| 1 | `shared_burst::grid_production_generation(storage, slot)`：返回该 (存储,槽) 的生产代际；未认领先兜底提交（照 `ensure_grid_produced()`），已认领返回它的 `generation`，无记录返回 0 |
-| 2 | `shared_queue::grid_ready_encode_wait(cb, generation)`：`[cb encodeWaitForEvent:s.grid_event value:generation]`（0 空操作；同文件已有 `fence_event`/`stage_fence_event` 两处同样写法）|
-| 3 | MISS 时记 `e->pending_grid_wait`，**下一个 `begin_stage()` 打开缓冲后第一件事**编码该等待再清掉 |
-| 4 | 计数 `grid_miss_devwaited`；**删掉宿主等待**（`grid_miss_waited` 那一段）|
+| 先看 | 期望 | `s39` 实测（对照）|
+|---|---|---|
+| 开工告警 | 0 | 0 ✓ |
+| `grid_shared == hops` / `grid_failed==0` | 成立 | 14474 / 0 ✓ |
+| **`grid_devwaited`** | **> 0**（≈ 跳数 − `taken`）| （当时是宿主等待：3387）|
+| **`grid_wait_unencoded`** | **== 0** | — |
+| `dft handover` | `handed>0 taken>0 timeouts==0` | 27022/11087/0 ✓ |
+| **`UL processor is busy`** | **回到 ~20** | **355** ❌ |
+| `[ul_pipeline]` 中位 / **最坏** | ~2 ms / **~10 ms** | 1962 µs / **162 ms** ❌ |
+| CRC 按调制分层 + KO 的 sinr 中位 | 与对照同形 | 97.1% OK、无异常 ✓ |
 
-**判据（下一对腿 `s40`）**：`grid_miss_devwaited > 0`、**`UL processor is busy` 回到 ~20**、
-`[ul_pipeline]` 中位仍 ~2 ms 且**最坏值回到 ~10 ms**、CRC 按调制分层不劣化、`timeouts==0`。
-**这条也更符合裁定 ⑦**（GPU 一旦发动就跑完，CPU 不参与"等"）。
+**★ 若 `grid_wait_unencoded` 非 0**：有一条跳的网格读没有任何次序 —— 那是一条真的缺陷，先别继续加功能。
 
 ## 4. 未解 / 开放项（按建议顺序）
 
@@ -110,9 +115,7 @@ git rev-parse --short=10 HEAD && grep build_info build/hashes.h
 
 ## 6. 一句话给新会话
 
-**`s39` 判了：MISS 等待是对的**（`grid_miss_waited` 精确、`timeouts=0`、端到端中位回到 1962 µs、
-认领率 59%→77%、提交/跳 2.76→2.10、按调制分层的 CRC 不比对照差），
-**但"用宿主线程等"制造了一次 13 s 停顿**（355 个上行时隙被丢、`UL processor is busy` 355 vs 21）——
-一个等待者占着车道线程，而它等的块由另一个车道阶段提交。
-**下一步只有一件事：把这次等待编码进 GPU**（`encodeWaitForEvent` on `shared_queue::grid_event`，四步见 §3），
-判据是 `UL processor is busy` 回到 ~20 而中位延迟不变。**在它判过之前不要 tag。**
+**`s39` 把"MISS 要等"这件事判对了（延迟中位回到 1962 µs、认领率 77%、提交/跳 2.10），但"用宿主线程等"制造了一次 13 s 停顿。**
+本会话把这次等待**搬进了 GPU**：MISS 时取"那块的生产代际"，把它作为 `encodeWaitForEvent` 编进**跳自己命令缓冲的第一件事**
+（CPU 立刻返回），未认领的块仍由取代际的那一步兜底提交。**判据是 `s40`：`grid_devwaited>0`、`grid_wait_unencoded==0`、
+`UL processor is busy` 回到 ~20、最坏端到端回到 ~10 ms，而中位延迟与 CRC 分层不变。** 在它判过之前不要 tag。

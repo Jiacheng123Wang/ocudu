@@ -20,7 +20,6 @@ using ocudu::metal::mmse_refusals;
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
-#include "ocudu/phy/phy_pipeline_grid_ready.h"
 #include "ocudu/support/macos_compat.h"
 #include "ocudu/ran/cyclic_prefix.h"
 
@@ -100,12 +99,13 @@ struct mmse_stats_t {
   // to its host route (or refused), and a hop missing from BOTH is a grid read bound to a private object.
   std::atomic<uint64_t> grid_shared{0};
   std::atomic<uint64_t> grid_failed{0};
-  // The hops that MISSED the handed block (see begin_stage_on_handed()): `grid_miss_waited` is how many of
-  // them had to ask for the grid's production before they could read it from their own command buffer, and
-  // `grid_miss_timeouts` the subset whose ask was not answered in time - those read a grid nobody promised
-  // them, so a non-zero count is a finding, not a cost.
-  std::atomic<uint64_t> grid_miss_waited{0};
-  std::atomic<uint64_t> grid_miss_timeouts{0};
+  // The hops that MISSED the handed block and had to order themselves against the block that writes the grid
+  // (see begin_stage_on_handed()): `grid_devwaited` counts those whose wait was ENCODED INTO THE GPU (the
+  // healthy shape - the CPU thread never blocks), `grid_wait_unencoded` the ones that could not be encoded
+  // (no fence armed, or a burst was already open). The second must stay 0: it means a hop read the grid with
+  // nothing ordering it against the producer.
+  std::atomic<uint64_t> grid_devwaited{0};
+  std::atomic<uint64_t> grid_wait_unencoded{0};
 };
 
 static mmse_stats_t& mmse_stats()
@@ -247,11 +247,11 @@ static void mmse_stats_report()
   // engine's DMRS extraction in ONE command buffer, where only a shared MTLBuffer object relates them. So
   // `grid_shared == hops` is the invariant an air leg reads, and `grid_failed` says a hop fell back.
   std::fprintf(stderr,
-               " grid_shared=%llu grid_failed=%llu grid_miss_waited=%llu grid_miss_timeouts=%llu",
+               " grid_shared=%llu grid_failed=%llu grid_devwaited=%llu grid_wait_unencoded=%llu",
                static_cast<unsigned long long>(s.grid_shared.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.grid_failed.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.grid_miss_waited.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.grid_miss_timeouts.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.grid_devwaited.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.grid_wait_unencoded.load(std::memory_order_relaxed)));
   std::fprintf(stderr, "\n");
 }
 #else  // OCUDU_METAL_STATS
@@ -436,6 +436,9 @@ struct mmse_engine_impl {
   const void* hop_grid = nullptr;
   /// Receiving slot of \c hop_grid: the other half of the key (see set_hop_grid()).
   uint64_t    hop_grid_slot = 0;
+  /// Grid-production fence a MISS of the hand-over left for this hop (see begin_stage_on_handed() and
+  /// begin_stage()): 0 when the hop adopted its block, or when there was nothing to order against.
+  uint64_t    pending_grid_wait = 0;
   ///@}
 
   // metal_nn_mmse: simdgroup_matrix 8x8 pipelines (optional, loaded on demand).
@@ -824,17 +827,43 @@ static stage_encoder begin_stage(mmse_engine_impl*          e,
                                  bool                        wait_for_extraction = false)
 {
   (void)close_held_buffer(e);
+  // The grid production a MISS of the hand-over left behind (see begin_stage_on_handed()): this stage reads
+  // the grid from a command buffer nobody ordered against the block that writes it, so the wait is encoded
+  // HERE - before the encoder opens, which is where a command-buffer-level wait belongs - and the CPU thread
+  // returns immediately. The burst route creates its own buffer, so it takes the generation over instead
+  // (shared_burst::set_grid_wait()) and encodes it with its other fences.
+  const uint64_t pending_grid_wait = e->pending_grid_wait;
+  e->pending_grid_wait             = 0;
   stage_encoder s;
   if (fuse) {
+    if (pending_grid_wait != 0) {
+      ocudu::metal::shared_burst::set_grid_wait(pending_grid_wait);
+    }
     s.enc   = ocudu::metal::shared_burst::encoder(first_pipeline);
     s.burst = (s.enc != nil);
     if (s.burst) {
+      // A burst that was already open cannot carry the wait before its dispatches; the burst keeps it
+      // pending for the next buffer, and this counter is what says it happened (it must stay 0).
+      if (ocudu::metal::shared_burst::grid_wait_pending()) {
+        mmse_stats().grid_wait_unencoded.fetch_add(1, std::memory_order_relaxed);
+      } else if (pending_grid_wait != 0) {
+        mmse_stats().grid_devwaited.fetch_add(1, std::memory_order_relaxed);
+      }
       return s;
     }
     // The burst could not be opened: fall through to the stage's own command buffer, which is what the
     // caller gets when the fusion is off - a slow lane, never a wrong one.
   }
   s.cb  = [e->queue commandBuffer];
+  if (pending_grid_wait != 0) {
+    if (ocudu::metal::shared_queue::grid_ready_encode_wait(s.cb, pending_grid_wait)) {
+      mmse_stats().grid_devwaited.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      // No fence to wait for (no grid production was ever armed): nothing to order against, and encoding a
+      // wait for a value nobody signals would hang the buffer. Counted so it cannot be silent.
+      mmse_stats().grid_wait_unencoded.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
   // Front-end fence (S-7g-17): this stage may read the resource grid the front-end DFTs produce, and a
   // wait on a command buffer of THIS queue says nothing about theirs. The wait is encoded before the
   // encoder opens (command-buffer level API) and targets the newest COMMITTED front-end generation, so
@@ -1141,21 +1170,18 @@ static stage_encoder begin_stage_on_handed(mmse_engine_impl* e)
   if (handed == nil) {
     // A MISS (another consumer of this grid already took the block, or it was never deposited) means this
     // hop is about to read the grid from ITS OWN command buffer - and whoever commits the block is then a
-    // HOST commit that nothing orders against that buffer. Both ends are on the back-end queue, so the
-    // commit has to happen BEFORE this hop submits; otherwise the hop reads a grid nobody has written yet -
-    // the same unordered read the object-identity rule (wrap_grid()) exists to prevent, one level up, and
-    // one that no local test can see because it is a race between two submissions.
+    // HOST commit with nothing ordering it against that buffer. Both ends are on the back-end queue, so the
+    // commit has to happen BEFORE this hop submits, or the hop reads a grid nobody has written yet - the
+    // same unordered read the object-identity rule (wrap_grid()) exists to prevent, one level up.
     //
-    // So the hop makes the SAME ask the host readers of the grid make: it commits an unclaimed block itself
-    // (the fallback a hand-over owes) or waits for the generation of the one that was claimed. Bounded, and
-    // it cannot deadlock on the lane: the commit is a host [cb commit] of a buffer the FRONT END created,
-    // and it needs no lane stage. Measured on the armed air leg (s38): 41% of the hops missed, and their
-    // end-to-end latency carried the whole +2.8 ms the hand-over cost, because the grid they were about to
-    // read was produced by someone else's commit, up to the sweep's 2-slot deadline, at an unordered time.
-    if (!ocudu::grid_ready_hook::wait(e->hop_grid, e->hop_grid_slot)) {
-      mmse_stats().grid_miss_timeouts.fetch_add(1, std::memory_order_relaxed);
-    } else {
-      mmse_stats().grid_miss_waited.fetch_add(1, std::memory_order_relaxed);
+    // The ordering is taken here, but NOT by waiting: the wait is encoded into the command buffer this hop
+    // is about to open (shared_burst::set_grid_wait() for the burst route, begin_stage() for its own), so
+    // the GPU waits and this thread does not. Waiting on the HOST here is what fixed the latency and then
+    // stalled the whole chain: the waiter occupied a lane thread while the commit it waited for needed one
+    // (measured on air: one 13-second incident, 355 dropped uplink slots - design document 5.9.23).
+    if (e->hop_grid != nullptr) {
+      e->pending_grid_wait =
+          ocudu::metal::shared_burst::grid_production_generation(e->hop_grid, e->hop_grid_slot);
     }
     return s;
   }

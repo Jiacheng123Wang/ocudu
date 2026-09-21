@@ -227,6 +227,22 @@ public:
   /// \return True when the generation was reached.
   static bool grid_ready_wait(uint64_t generation, uint32_t timeout_ms);
 
+  /// \brief Encodes a wait on \p generation of the grid-production fence into \p command_buffer.
+  ///
+  /// The DEVICE-side form of grid_ready_wait(), for a consumer whose read of the grid is itself a DISPATCH:
+  /// the dispatches encoded after it do not start until the block that produces that grid has completed, and
+  /// the calling thread returns immediately. It exists because waiting on the host for that production is a
+  /// CPU participation point that also BLOCKS a lane thread while the commit it waits for may need another
+  /// lane stage: measured on air as one 13-second stall with 355 dropped uplink slots (design document
+  /// 5.9.23). Nothing else about the ordering changes - the command buffer is submitted as before, so the
+  /// grid is still produced before it is read.
+  ///
+  /// \param[in] command_buffer Buffer to encode into; must NOT have an encoder open (command-buffer level).
+  /// \param[in] generation Value returned by grid_ready_signal(); 0 encodes nothing.
+  /// \return True when the wait was encoded (false: nothing to wait for, or no fence in this process - a
+  ///         generation nobody will signal must never be waited for, or the command buffer would hang).
+  static bool grid_ready_encode_wait(id<MTLCommandBuffer> command_buffer, uint64_t generation);
+
   /// Number of command buffers committed through the shared queue (diagnostics).
   static uint64_t nof_commits();
 

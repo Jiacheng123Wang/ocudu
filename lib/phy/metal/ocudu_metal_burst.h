@@ -156,6 +156,38 @@ public:
   ///         means the reader must NOT trust the grid.
   static bool ensure_grid_produced(const void* grid_base, uint64_t slot);
 
+  /// \brief The generation whose completion PRODUCES the grid at (\p grid_base, \p slot), for a consumer
+  ///        that orders itself on the DEVICE instead of waiting on the host.
+  ///
+  /// Same record as ensure_grid_produced() and the same fallback - an unclaimed deposit is COMMITTED here,
+  /// because a hand-over whose consumer is not a hop owes that - but what the caller does with the answer
+  /// differs: it encodes the wait into its OWN command buffer (shared_queue::grid_ready_encode_wait) and
+  /// returns. That is the whole point: the ordering is the same, and the CPU thread never blocks.
+  ///
+  /// Why it exists: a hop that MISSES the hand-over reads the grid from its own command buffer while the
+  /// block is committed by someone else (another consumer's fallback, or the registry's sweep). Waiting for
+  /// that on the HOST fixed the correctness and the median latency and then STALLED the lane - the waiter
+  /// occupied a thread of the pool the committing stage runs on (measured: one 13-second incident, 355
+  /// dropped uplink slots, design document 5.9.23).
+  ///
+  /// \return The generation to wait for, or 0 when there is nothing to wait for (no record for that
+  ///         (storage, slot), or no fence armed on the block).
+  static uint64_t grid_production_generation(const void* grid_base, uint64_t slot);
+
+  /// \brief The grid production this thread's NEXT burst must wait for, before any of its dispatches.
+  ///
+  /// The burst creates its own command buffer (see burst_ensure_open()), so a caller that needs a
+  /// command-buffer-level wait cannot encode it itself: it hands the generation over here, and the burst
+  /// encodes it where it encodes its other command-buffer-level fences. Consumed once, when the buffer is
+  /// created; a generation set while a burst is ALREADY open is counted by the caller as unencoded, because
+  /// a wait encoded after dispatches cannot order them.
+  ///
+  /// \param[in] generation Value returned by grid_production_generation(); 0 clears it.
+  static void set_grid_wait(uint64_t generation);
+
+  /// Whether a grid wait is pending for this thread's next burst (diagnostics).
+  static bool grid_wait_pending();
+
   /// \brief What the registry has seen, for the diagnostics (see the [metal_stats] dft handover line).
   struct handed_counters {
     /// Deposits made.
