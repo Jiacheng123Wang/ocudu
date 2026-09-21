@@ -1,4 +1,4 @@
-# 交接（入口） — S30：**`s43` 定住了尾巴的位置：不在前端（前端更快），在"交出→估计器段"那一截 = 共享 PUSCH 池的排队 ⇒ 下一步把车道执行与解码池分开**
+# 交接（入口） — S31：**`s44`：极值全消（max 69.8→7.0 ms、LDPC 26→0.17 ms）、CE 段 p95 没动 ⇒ 那是"单车道排队"；D1 可以 tag**
 
 > **本文件是新会话的唯一入口**：读完它就能开工。
 > **本会话（S25）的就一件事**：读 `s40` + 更正上一轮对停顿的误判。设计文档 **§5.9.25** = 完整读数与机制。
@@ -102,12 +102,17 @@ git push origin gpu_phy_d1_handover    # 若这条线要推送
 ⇒ 尾巴 = "**上层任务派发 + 车道起步**"那一截（**不是设备执行**，也**不是前端**）；
 所有中位都更好（总 1872 vs 2071）。
 
-**★ 下一步（已做，等 `s44` 判）**：`pusch_decoder_executor` 与 `srs_executor` 从中优先级池（车道所在的、三个视图同一池）
-**移到低优先级池**（`lib/du/du_low/du_low_executor_mapper.cpp`，两行 + 注释）——低优先级池本来就在、上行没用它 ⇒ 在已有线程间搬活。
-判据（两臂都带 `OCUDU_UL_PHASE_SEGMENTS=1`）：**`ul_channel_estimation` p95 从 3387 回到 ~0.2–1 ms**、`ul_pipeline` p95 回落、
-中位不变、其余门不变（§5.9.34）。
-把 `pusch_executor` 指向 `pusch_srs_execs[…]`，车道的各段与 LDPC/SRS 共用一池）。
-判据：`ul_channel_estimation` p95 回到 ~0.2–1 ms、`ul_pipeline` p95 回落、中位不变、其余门不变。
+**★ `s44` 判了（§5.9.35）**：`pusch_decoder_executor`/`srs_executor` 移出车道所在池**该保留**——
+`ul_pipeline` max **69794 → 7032**（对照 4884）、p99 17390 → 6310、**LDPC 离群 26135 → 168**、EQ-demap 66.9 → 3.0 ms；
+但 **`ul_channel_estimation` p95 没动（3387 → 3413，对照 241）** ⇒ 那 3.4 ms **不是线程不够**，
+而是"交出 → 估计器段做完"里**等前几跳的车道**——**车道并发按设计=1**（`max_pusch_and_srs_concurrency`，为加速器容量）。**⇒ 单车道固有排队。**
+其余门全绿：拒收两臂 0、契约 8/8、`keepalives=428890/428890` 完全平衡、`grid_shared==hops`、提交/时隙 **1.049**（对照 1.452）、中位 1880（对照 2035）。
+
+**⇒ 现在可以 tag**（裁定 ③，tag/推送由用户执行）：
+```bash
+git tag -a gpu_phy_d1_handover -m "D1: one command buffer per hop - the block hand-over, judged on air (s38-s44)"
+```
+**tag 后仍开放**：CE p95 那 3.4 ms 的两条路（允许更多车道同时在飞 / 接受它），以及下面 ③ 的既有清单。
 
 **③ 其它开放项**
 1. 前端栅栏代际与被交出块的归属（§5.9.4 ⑤-1）；`wait_all()` 不覆盖交出去的块（§5.9.4 ⑤-2）；
