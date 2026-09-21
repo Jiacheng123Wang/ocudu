@@ -4764,6 +4764,113 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label>
 | `l1_hop_arms.sh 8`（K=1 / K=2）| **17 / 33** 不变 ✅ |
 
 
+#### 5.9.46 ⛔ `s45-multipusch` 腿失败——**不是 gNB，不是 §5.9.45 的探针**；故障在核心网的用户面（手机接不上/接入后立即 release）
+
+**腿**：`gnb_gpu_s45-multipusch_0922_0727`（**未武装 D1**，即 `OCUDU_DFT_RELEASE_BLOCK` 未设 ⇒ 无 `dft handover` 行，符合腿法）。
+用户报告：**手机不能稳定接入，接入后立即 release**。本节是判读，**结论：gNB 软件侧无责，根因在核心网或手机的会话处理**。
+
+**① 先回答 §5.9.45 要的那个数——但这一腿的读数【不可用】**
+
+```
+[phy_pipeline] ul slots by PUSCH hops: 1:212 2:0 3:0 4:0 >4:0  (pusch slots=212 hops=212 mean=1.00 hops/slot, multi-hop slots=0 = 0.0%)
+```
+
+**⚠ 不要把它当成 #1 的答案**：这一腿只有 **212 跳**（对比 s44 的 13978、s43 的 13562），
+而"同槽多 PUSCH"需要**多个 UE 同时上行**——本腿连一个 UE 都没能正常工作。
+`0.0%` 在这里只说明"这条腿上没有多 UE 上行"，**不说明真实话务里没有**。
+⇒ **#1 的 traffic 数仍需一条健康腿**（判据见 §5.9.45 ⑤）。
+
+**② 归一化对比：接入次数没变，上行活动掉了 ~60 倍**
+
+| 腿 | 时长 | hops | hops/s | `rrcSetupRequest` |
+|---|---|---|---|---|
+| **s45（本轮）** | 142 s | **212** | **1.5** | 5 |
+| s44-d1-lanepool | 150 s | 13978 | 93 | 4 |
+| s43-d1-phases | 111 s | 13562 | 122 | 2 |
+
+⇒ **手机在重试接入，但几乎没有业务**。
+
+**③ 每一次 release 都是【核心网】发的，不是 gNB**
+
+事件序列（`s45`，ue=0）：
+
+| 时刻 | 事件 |
+|---|---|
+| 23:27:50.07 | `InitialUEMessage` → AMF |
+| 23:27:50.13 | ← `InitialContextSetupRequest` |
+| 23:27:52.094 | ← **`PDUSessionResourceSetupRequest`**（会话建立）|
+| 23:27:52.374 | ← **`PDUSessionResourceReleaseCommand`** —— **建好之后 0.280 s** |
+| 23:27:52.40 | gNB 按令发 `rrcReconfiguration` 拆 DRB（正确反应）|
+| 23:28:43.219 | ← `UEContextReleaseCommand`（51 s 后）|
+
+第二次同样：`PDUSessionResourceSetupRequest` 23:28:50.208 → `PDUSessionResourceReleaseCommand` 23:28:50.577（**0.369 s**）。
+整腿：**5 次 `InitialUEMessage`、2 次 PDU 建立、2 次 PDU 释放、5 次上下文释放**。
+**gNB 全程只做正确反应**（RRC setup → NAS 转发 → 按令建/拆 DRB），
+它的 `[W]/[E]` 一共只有 4 行，其中 2 行是 macOS 没有 `/sys` 的无关告警。
+
+**④ 与昨天健康腿的决定性差别：昨天 release 之后【立刻重建立】，今天没有**
+
+| | 事件顺序 |
+|---|---|
+| **s44（健康）** | `07:55:20` `PDUSessionResourceReleaseCommand` → **同一秒 `PDUSessionResourceSetupRequest`** ⇒ 正常的会话**重建立**，之后业务跑了整条腿（13978 跳）|
+| **s45（故障）** | `PDUSessionResourceSetupRequest` → **0.28 s 后 release**，**没有后续重建立**（两条都是）|
+
+**⑤ 用户面从头到尾没有流量**
+
+| 量 | 实测 | 含义 |
+|---|---|---|
+| DL 调度里 `dl_bo` | **105/108 为 0**（仅 74/74/29 三次非零）| 核心网几乎没往下发数据 |
+| `[ul_mac_pdu_size] total` | **17077 B**（整腿）| 上行也几乎没有载荷 |
+| UE 真发 PUCCH 次数/分钟 | **40 / 39 / 32** | 对比 s44 的 **348 / 8396 / 22** |
+| 真发时的到达功率 `epre` | **−4.5 / −10.3 / +1.2 dB** | **正常甚至偏强**（s44：−12.3 / −12.6 / −12.1）|
+
+⇒ **手机不是"弱发"，是"几乎不发"**；而它发的时候，射频链路是好的。
+**⚠ 更正一条中间判断**：本轮一度用 `sr=yes|ack=1` 过滤，把 DTX 也算成"UE 发了"，
+于是读出"2 分钟内到达功率掉 33 dB"。用 `metric`（DTX 判据）重做后**该结论被推翻**——
+**没有 33 dB 的功率塌陷**，只有"发送次数塌了 200 倍"。
+
+**⑥ PUSCH 的 CRC 失败绝大多数是"UE 根本没应答的授权"**
+
+| | crc=OK | crc=KO | 成功率 | KO 的 sinr 中位 |
+|---|---|---|---|---|
+| **s45** | 56 | 156 | **26%** | **−25.2 dB**（≈ 噪声，即 UE 未发）|
+| s44 | 11556 | 2422 | 83% | 18.6 dB |
+
+⇒ 按 §6 ⑤ 的口径，**今天不是"高 sinr + CRC 全错"那种缺陷签名**；
+低 sinr 那一堆是 gNB 按调度发了授权、手机没回，与 ④ 的"手机没有可用会话"一致。
+
+**⑦ 排除项（都实测过）**
+
+| 排除 | 证据 |
+|---|---|
+| **不是 §5.9.45 的探针**（本轮唯一代码改动）| 它只加计数器与两个 `uint64_t` 成员；且**本腿开局链路是好的**（23:27–23:28 PUSCH 有 +13.5/+22.1 dB 的成功接收、PUCCH `epre`≈−12 dB 与健康腿同级）。**回归不会"开局好、后来坏"。** |
+| 不是 PHY 内部 | `grid_failed=0`、`corr_build_fail=0`、`y_write_fail=0`、`refusals=<none>`、`ready_timeouts=0`、接收缓冲池无泄漏（`held=2` 恒定）、`contract MET (8/8)` |
+| 不是时钟/定时 | `t_align` 中位 s45 **0.61/0.59/0.13 µs** vs s44 **0.70/0.45/0.42 µs**，范围都是 ±2.4 µs ⇒ **无时钟漂移** |
+| 不是 RF 掉线 | `Real-time failure in RF` **1 次**（s44 是 5 次）；`radio continuity 0 gaps` |
+| 不是 D1 相关 | 本腿未武装，且 `will NOT exercise D1` 计数 = 0 |
+| 不是新现象 | 同款"核心网主动释放"在 s43/s44 的日志里同样存在（s44：1 次 PDU 释放、9 次上下文释放、4 次 `rrcSetupRequest`）|
+
+**⑧ 结论与下一步（需要核心网侧的日志，gNB 侧到此为止）**
+
+**根因位置：5G 核心网的会话/用户面（AMF/SMF/UPF，`192.168.64.3`），或手机对会话的处理——不在 gNB。**
+gNB 收到的是一条合法的 `PDUSessionResourceReleaseCommand`，它照做；没有任何 gNB 侧的错误先于它。
+
+**要在 gNB 日志之外才能定案，建议按序查**：
+
+1. **核心网（AMF/SMF/UPF）日志**：`PDUSessionResourceSetupRequest` 之后 0.28 s 就发 release 的原因。
+   常见三类：**UPF/N4 建不起来**（SMF 建会话后 N4 失败即释放）、**签约/策略**（session-AMBR 或 DNN/SSC 不允许）、
+   **UE 主动请求释放**（手机拿不到可用数据面 → 自己发 `PDU Session Release Request`）。
+   —— 判据是**紧邻 release 之前那条 NAS**（本轮日志里对应 `ulInformationTransfer`，gNB 不解 NAS，看不到内容）。
+2. **本次腿是否起了业务脚本**：本腿两个方向都几乎零流量（④⑤）。若业务脚本没起，
+   "没有流量"这部分就被解释了，**但 0.28 s 的会话释放仍然解释不了**——那一条必须由 1 回答。
+3. 若仍要排除代码，**最省的一次 A/B**：在上一提交 `c3203e4edc` 上跑同一条腿。
+   但按 ⑦，本轮证据已足以排除——**回归不会表现为"开局健康、且所有 release 都来自核心网"**。
+
+**⑨ 本轮的连带结论：§5.9.45 的探针本身工作正常**——它在**未武装**的普通腿上就打出了报告行，
+且 `pusch slots=212 hops=212 mean=1.00` 与同腿 `[ul_gpu_lane] lanes=212`、`burst commits=212` **三方一致**。
+（这正是 §5.9.45 ⑤ 预写的"对不上就先查探针"那条口径的实际检验，结果是**对得上**。）
+
+
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
