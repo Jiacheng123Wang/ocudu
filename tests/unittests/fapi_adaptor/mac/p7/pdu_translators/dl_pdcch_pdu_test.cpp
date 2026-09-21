@@ -96,5 +96,6 @@ TEST(mac_fapi_pdcch_pdu_conversor_test, dci_without_a_beam_selects_a_precoding_m
   convert_pdcch_mac_to_fapi(builder, context, payload, mapper, nof_prbs);
 
   ASSERT_TRUE(fapi_pdu.dl_dci.precoding_and_beamforming.prg.beams.empty());
-  ASSERT_EQ(mapper.map(mac_pdcch_precoding_info{}), fapi_pdu.dl_dci.precoding_and_beamforming.prg.pm_index);
+  ASSERT_EQ(mapper.map(mac_pdcch_precoding_info{}),
+            std::get<fapi::precoding_matrix_index>(fapi_pdu.dl_dci.precoding_and_beamforming.prg.precoding));
 }

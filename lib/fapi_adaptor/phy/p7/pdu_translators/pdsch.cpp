@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pdsch.h"
+#include "precoding.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/fapi_adaptor/precoding_codebook_repository.h"
 #include "ocudu/ocudulog/logger.h"
@@ -142,8 +143,8 @@ void ocudu::fapi_adaptor::convert_pdsch_fapi_to_phy(pdsch_processor::pdu_t&     
 
   const fapi::tx_precoding_and_beamforming_pdu::prgs_info& prg = fapi_pdu.precoding_and_beamforming.prg;
   if (prg.beams.empty()) {
-    proc_pdu.precoding_and_beamforming =
-        precoding_beamforming_configuration::make_wideband(pm_repo.get_precoding_config(prg.pm_index));
+    proc_pdu.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(
+        get_precoding_config(fapi_pdu.precoding_and_beamforming, pm_repo));
   } else {
     proc_pdu.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(prg.beams);
   }

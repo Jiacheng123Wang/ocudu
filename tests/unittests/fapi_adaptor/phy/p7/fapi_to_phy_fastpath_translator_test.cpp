@@ -277,7 +277,7 @@ TEST_F(fapi_to_phy_translator_fixture, downlink_processor_is_configured_on_new_d
   fapi::dl_tti_request msg;
   msg.slot = slot;
   // Add a PDU to the message.
-  msg.pdus.emplace_back();
+  msg.pdus.emplace_back().pdu = unittest::build_valid_dl_pdcch_pdu();
 
   translator.send_dl_tti_request(msg);
 
@@ -348,7 +348,7 @@ TEST_F(fapi_to_phy_translator_fixture, receiving_a_dl_tti_request_sends_previous
   fapi::dl_tti_request msg;
   msg.slot = slot;
   // Add a pdu to the message.
-  msg.pdus.emplace_back();
+  msg.pdus.emplace_back().pdu = unittest::build_valid_dl_pdcch_pdu();
 
   // Increase the slots.
   for (unsigned i = 1; i != headroom_in_slots; ++i) {
@@ -407,7 +407,7 @@ TEST_F(fapi_to_phy_translator_fixture, message_received_is_sended_when_a_message
   fapi::dl_tti_request msg;
   msg.slot = slot;
   // Add a PDU to the message.
-  msg.pdus.emplace_back();
+  msg.pdus.emplace_back().pdu = unittest::build_valid_dl_pdcch_pdu();
 
   // Send a DL_TTI.request.
   translator.send_dl_tti_request(msg);

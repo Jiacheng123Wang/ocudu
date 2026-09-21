@@ -261,7 +261,7 @@ ocudu::fapi::dl_prs_pdu unittest::build_valid_dl_prs_pdu()
   // Precoding.
   pdu.precoding_and_beamforming.prg_size = 276;
   // Use identity matrix
-  pdu.precoding_and_beamforming.prg.pm_index = 0;
+  pdu.precoding_and_beamforming.prg.precoding = fapi::precoding_matrix_index{0};
 
   return pdu;
 }
@@ -633,8 +633,8 @@ ocudu::fapi::tx_precoding_and_beamforming_pdu unittest::build_valid_tx_precoding
 {
   ocudu::fapi::tx_precoding_and_beamforming_pdu pdu;
 
-  pdu.prg_size = 1U;
-  pdu.prg      = {3U};
+  pdu.prg_size      = 1U;
+  pdu.prg.precoding = ocudu::fapi::precoding_matrix_index{3U};
 
   return pdu;
 }

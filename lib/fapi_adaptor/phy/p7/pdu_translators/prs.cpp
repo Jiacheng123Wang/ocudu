@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "prs.h"
+#include "precoding.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/fapi_adaptor/precoding_codebook_repository.h"
 #include "ocudu/phy/upper/signal_processors/prs/prs_generator_configuration.h"
@@ -27,5 +28,5 @@ void ocudu::fapi_adaptor::convert_prs_fapi_to_phy(prs_generator_configuration&  
   generator_config.power_offset_dB =
       fapi_pdu.prs_power_offset_db.has_value() ? fapi_pdu.prs_power_offset_db.value() : 0.f;
   generator_config.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(
-      pm_repo.get_precoding_config(fapi_pdu.precoding_and_beamforming.prg.pm_index));
+      get_precoding_config(fapi_pdu.precoding_and_beamforming, pm_repo));
 }

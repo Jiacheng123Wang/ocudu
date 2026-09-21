@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pdcch.h"
+#include "precoding.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/fapi_adaptor/precoding_codebook_repository.h"
 
@@ -41,8 +42,8 @@ static void fill_dci(pdcch_processor::pdu_t&              proc_pdu,
 
   const fapi::tx_precoding_and_beamforming_pdu::prgs_info& prg = fapi_dci.precoding_and_beamforming.prg;
   if (prg.beams.empty()) {
-    dci.precoding_and_beamforming =
-        precoding_beamforming_configuration::make_wideband(pm_repo.get_precoding_config(prg.pm_index));
+    dci.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(
+        get_precoding_config(fapi_dci.precoding_and_beamforming, pm_repo));
   } else {
     dci.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(prg.beams);
   }

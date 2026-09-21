@@ -5,6 +5,7 @@
 #include "pdsch.h"
 #include "ocudu/fapi_adaptor/precoding_codebook_mapper.h"
 #include "ocudu/mac/mac_cell_result.h"
+#include "ocudu/ran/precoding/precoding_codebooks.h"
 #include "ocudu/ran/resource_allocation/vrb_to_prb.h"
 #include "ocudu/ran/sch/sch_constants.h"
 #include "ocudu/scheduler/result/pdsch_info.h"
@@ -93,6 +94,14 @@ static void fill_precoding_and_beamforming(fapi::dl_pdsch_pdu_builder&          
   }
 
   const auto& pmi = std::get<precoding_matrix_indicator>(mac_info);
+
+  // The precoding matrix table cannot hold the Type II codebook matrices, as they are not enumerable at cell creation.
+  // Send the precoding weights instead of a table index.
+  if (std::holds_alternative<pmi_typeII>(pmi)) {
+    pm_bf_builder.set_precoding_weights(make_precoding(pmi, nof_layers));
+
+    return;
+  }
 
   mac_pdsch_precoding_info info;
   // A monostate PMI selects no precoding, which this interface expresses as an omnidirectional matrix.
