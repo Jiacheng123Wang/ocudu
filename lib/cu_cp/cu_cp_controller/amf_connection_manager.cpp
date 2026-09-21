@@ -12,6 +12,7 @@
 #include "ocudu/ngap/ngap.h"
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/support/synchronization/sync_event.h"
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -27,6 +28,10 @@ amf_connection_manager::amf_connection_manager(const amf_connection_manager_depe
   logger(dependencies.logger),
   ng_setup_notifier(dependencies.ng_setup_notifier)
 {
+  // Create an entry for each AMF up front, so that no later update changes the structure of the map.
+  for (const auto& [amf_index, ngap] : ngaps.get_ngaps()) {
+    amfs_connected.emplace(amf_index, false);
+  }
 }
 
 void amf_connection_manager::connect_to_amf(std::promise<bool>* completion_signal, std::chrono::milliseconds retry_time)
@@ -55,7 +60,7 @@ void amf_connection_manager::connect_to_amf(std::promise<bool>* completion_signa
 
 async_task<void> amf_connection_manager::disconnect_amf()
 {
-  if (ngaps.get_ngaps().empty() or amfs_connected.empty()) {
+  if (ngaps.get_ngaps().empty()) {
     return launch_async([](coro_context<async_task<void>>& ctx) {
       CORO_BEGIN(ctx);
       CORO_RETURN();
@@ -67,7 +72,7 @@ async_task<void> amf_connection_manager::disconnect_amf()
 
 void amf_connection_manager::handle_amf_connection_loss(cu_cp_amf_index_t amf_index)
 {
-  amfs_connected.erase(amf_index);
+  set_amf_connected(amf_index, false);
 }
 
 void amf_connection_manager::reconnect_to_amf(cu_cp_amf_index_t         amf_index,
@@ -96,7 +101,7 @@ void amf_connection_manager::reconnect_to_amf(cu_cp_amf_index_t         amf_inde
           if (ue_mng != nullptr) {
             ue_mng->remove_blocked_plmns(ngaps.find_ngap(amf_index)->get_ngap_context().get_supported_plmns());
           }
-          amfs_connected.emplace(amf_index, true);
+          set_amf_connected(amf_index, true);
           // Notify CU-CP about the successful reconnection.
           cu_cp_notifier.handle_amf_reconnection(amf_index);
         } else {
@@ -172,10 +177,22 @@ bool amf_connection_manager::is_amf_connected(cu_cp_amf_index_t amf_index) const
   return amf_connected->second.load(std::memory_order_relaxed);
 }
 
-void amf_connection_manager::handle_connection_setup_result(cu_cp_amf_index_t amf_index, bool success)
+size_t amf_connection_manager::nof_connected_amfs() const
 {
-  // Update AMF connection handler state.
-  amfs_connected.emplace(amf_index, success);
+  return std::count_if(amfs_connected.begin(), amfs_connected.end(), [](const auto& amf_connected) {
+    return amf_connected.second.load(std::memory_order_relaxed);
+  });
+}
+
+void amf_connection_manager::set_amf_connected(cu_cp_amf_index_t amf_index, bool connected)
+{
+  auto amf_connected = amfs_connected.find(amf_index);
+  if (amf_connected == amfs_connected.end()) {
+    logger.error("AMF index {} not found", amf_index);
+    return;
+  }
+
+  amf_connected->second.store(connected, std::memory_order_relaxed);
 }
 
 bool amf_connection_manager::retry_unconnected_amfs(std::chrono::milliseconds retry_time)

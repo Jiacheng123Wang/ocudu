@@ -81,7 +81,7 @@ bool cu_cp_controller::handle_du_setup_request(const std::set<plmn_identity>& pl
 
 bool cu_cp_controller::request_ue_setup() const
 {
-  if (amf_mng.nof_amfs() == 0) {
+  if (amf_mng.nof_connected_amfs() == 0) {
     return false;
   }
 
