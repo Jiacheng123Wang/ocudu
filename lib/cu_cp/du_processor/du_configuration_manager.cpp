@@ -276,17 +276,20 @@ du_configuration_manager::handle_du_config_update(const du_configuration_context
 {
   if (current_ctxt.id != req.gnb_du_id) {
     logger.warning("du_id={}: Failed to update DU. Cause: DU ID mismatch", fmt::underlying(current_ctxt.id));
-    return nullptr;
+    return make_unexpected(
+        du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state, "DU ID mismatch"});
   }
   auto it = dus.find(current_ctxt.id);
   if (it == dus.end()) {
     logger.error("du_id={}: DU config update called for non-existent DU", fmt::underlying(current_ctxt.id));
-    return nullptr;
+    return make_unexpected(du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
+                                                     "DU with the given gNB-DU-Id was not setup"});
   }
 
   // Validate config.
-  if (not validate_du_config_update(req)) {
-    return nullptr;
+  auto result = validate_du_config_update(req);
+  if (not result.has_value()) {
+    return make_unexpected(result.error());
   }
 
   // Update DU config.
@@ -316,8 +319,13 @@ du_configuration_manager::handle_du_config_update(const du_configuration_context
         break;
       }
     }
-    // Note: Existence of a free cell index should be guaranteed during validation.
-    ocudu_assert(cell_idx != INVALID_DU_CELL_INDEX, "Failed to allocate cell index");
+    if (cell_idx == INVALID_DU_CELL_INDEX) {
+      logger.error("du_id={}: Not serving cell nci={}. Cause: The DU serves the maximum number of cells ({})",
+                   fmt::underlying(current_ctxt.id),
+                   cell_to_add.served_cell_info.nr_cgi.nci,
+                   MAX_NOF_DU_CELLS);
+      continue;
+    }
 
     du_context.served_cells.push_back(create_du_cell_config(cell_idx, cell_to_add));
   }

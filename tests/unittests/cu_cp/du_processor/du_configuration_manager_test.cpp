@@ -417,6 +417,22 @@ TEST_F(du_configuration_manager_test, when_the_du_reports_a_cell_twice_then_only
   ASSERT_EQ(served_cells[1].cgi, setup_req.gnb_du_served_cells_list[1].served_cell_info.nr_cgi);
 }
 
+TEST_F(du_configuration_manager_test, when_du_config_update_has_a_du_id_mismatch_then_the_context_is_kept)
+{
+  auto du_cfg_updater = du_cfg_mng.create_du_handler();
+  auto setup_req      = create_basic_du_setup_request();
+  ASSERT_TRUE(du_cfg_updater->handle_new_du_config(setup_req, all_cells_of(setup_req)).has_value());
+
+  du_config_update_request update_req;
+  update_req.gnb_du_id = int_to_gnb_du_id(0x99);
+  auto ret             = du_cfg_updater->handle_du_config_update(update_req);
+  ASSERT_FALSE(ret.has_value()) << "a DU ID mismatch must be reported as an error";
+
+  // The handler must still hold the configuration of the DU.
+  ASSERT_TRUE(du_cfg_updater->has_context());
+  ASSERT_EQ(du_cfg_updater->get_context().served_cells.size(), 1);
+}
+
 TEST_F(du_configuration_manager_test, when_the_du_reports_no_served_cell_then_setup_fails)
 {
   du_setup_request setup_req;
