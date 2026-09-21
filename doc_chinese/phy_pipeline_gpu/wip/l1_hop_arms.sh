@@ -104,6 +104,21 @@ for arm in cand hostfirst claim claimnowait; do
   fi
 done
 
+# ---- submissions per slot: the number item #1 must move ------------------------------
+# The cliff is "a slot's CPU submissions grow from 1 to K", so that is the quantity to print. Both counters
+# are already in the tool's exit report; no new instrumentation. The criterion for the multi-PUSCH fix is
+# RELATIVE and needs no absolute definition of "a submission": K hops must cost no more than one hop does.
+echo
+echo "== submissions per slot (dft commits + burst commits) =="
+for arm in ref cand hostfirst claim claimnowait; do
+  dft=$(grep -o 'dft commits=[0-9]*' "$WORK/$arm.log" | head -1 | cut -d= -f2)
+  burst=$(grep -o 'burst commits=[0-9]*' "$WORK/$arm.log" | head -1 | cut -d= -f2)
+  [[ -z "$dft" || -z "$burst" ]] && continue
+  printf '%-12s dft=%-4s burst=%-5s total=%-5s  per slot=%.2f\n' \
+    "$arm" "$dft" "$burst" "$((dft + burst))" "$(echo "scale=4; ($dft + $burst) / $SLOTS" | bc)"
+done
+echo "criterion for item #1: the armed arm at L1_HOP_PDUS=2 must total the SAME as at L1_HOP_PDUS=1."
+
 echo
 echo "== verdict =="
 if [[ $rc -eq 0 ]]; then
