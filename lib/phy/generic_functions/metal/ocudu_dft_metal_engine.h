@@ -120,7 +120,16 @@ public:
   ///    (the caller promised that nothing on the host reads those transforms' output - that promise is the
   ///    whole point of the release);
   ///  * **a deposit nobody takes is never committed by anyone.** The caller must therefore release only
-  ///    where a consumer for that grid is guaranteed (see ofdm_demodulator_impl::finish_symbol()).
+  ///    where a consumer for that grid is guaranteed (see ofdm_demodulator_impl::finish_symbol());
+  ///  * ⚠ **and the transforms must not outlive their INPUT.** `finish_symbol()` returning is what tells
+  ///    the receiving chain that the samples of that symbol may be recycled (puxch_processor_impl::
+  ///    finish_oldest_symbol() retires the receive-buffer handle right after it), and today that is true
+  ///    only because the host waits for this engine there. A released block executes LATER - at the lane's
+  ///    commit - so the zero-copy radio input (`grid_write::time_samples`) would be read after the radio
+  ///    has overwritten it: measured on air as `crc=KO 942 / OK 46` at `sinr=37.6 dB`, i.e. correct
+  ///    samples replaced by stale ones with nothing failing. **The handover is therefore NOT called from
+  ///    the receiving chain** (reverted in 2026-09-21's leg, see 5.9.7): it needs the input's lifetime to
+  ///    be moved onto the adopted buffer's completion first.
   ///
   /// \note The grid of the released block is mapped through the PROCESS-WIDE cache
   ///       (shared_queue::wrap_no_copy), not through this engine's private one, so the stages that read it
