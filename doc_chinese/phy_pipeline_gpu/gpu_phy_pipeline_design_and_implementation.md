@@ -4420,6 +4420,53 @@ this hop submits"*）：**另一个消费者的提交在本跳提交之后才发
 harness 五条臂（认领/错过/宿主先/claim/claimnowait）全部 0 差异、rc=0，
 `L1_HOP_PDUS=2` 时悬崖 `adopted=1 / missed=K−1` 结构性成立（§5.9.40）。
 
+#### 5.9.43 ★★★ 开放项 #1 的实修：**侦察已定案（同线程顺序执行），修法与判据在此**
+
+§5.9.40 量出悬崖：一槽 K 个跳只有第一个能认领前端块，其余 K−1 必 MISS ⇒ **每槽 K 次提交**。
+这一节是动手前的决定性侦察，**结论：合并是可行的，而且缺的只是一件上层早就知道的信息。**
+
+**① 侦察：一槽的 K 个跳本来就在同一条车道线程上顺序跑**（所以"共享一条命令缓冲"不跨线程）
+
+```cpp
+// lib/phy/upper/uplink_processor_impl.cpp:229
+for (const auto& pdu : pusch_pdus) { process_pusch(pdu); }   // 同一个线程、按序
+```
+每个 `process_pusch` 都 `defer` 到 `task_executors.pusch_executor`，而
+`max_pusch_and_srs_concurrency` **默认 1**（`du_low_executor_mapper.h:78`）⇒ **该执行器并发为 1**，
+任务按提交顺序在一条线程上跑完。⇒ **K 个跳是串行的，不需要跨线程合并。**
+
+**② 那为什么今天只有一个能认领？** 因为**没有任何一方知道"这个槽还有几个跳要来"**：
+认领后的块在**第一个跳结束**时就被提交了（burst 在该跳末尾 commit），
+第二个跳再来时 `take_released()` 只看到 `claimed=true` ⇒ 只能自己开一条。
+**缺的不是机制，是那个计数。**
+
+**③ 修法（三层，按依赖排序）**
+
+1. **上层告诉车道本槽的计划**：`uplink_processor_impl` 的循环里已有 `pusch_pdus.size()` 与下标
+   ⇒ 在循环前/循环内把 `(hop_count, hop_index)` 交给车道（新增一个 lane/estimator 的入口，
+   例如 `set_slot_hop_plan(count, index)`）；
+2. **burst 把提交推迟到最后一个跳**：`burst_state`（已是 thread-local）加
+   `slot_hops_remaining`；认领块的那个跳把它设成 `K`，每结束一个跳减一，
+   **减到 0 才 commit**（K 个跳的 CE/EQ/demap 与前端变换同处一条命令缓冲 ⇒ 一次提交）；
+3. **注册表允许"同一个属主重复取"**：`take_released()` 现在是 `claimed` 即返回 nil；
+   改为**当认领者就是本线程、且块仍被本线程的 burst 持有**时返回同一条 cb，
+   只有**别的线程**认领过才返回 nil（那才是真 MISS）。
+
+**④ 判据（harness 已就位，`L1_HOP_PDUS=K`）**
+
+| 量 | 今天（悬崖）| 修好后 |
+|---|---|---|
+| `[l1_multi] adopted / missed` | `1 / K−1` | **`1 / 0`** |
+| `[metal_stats] dft commits`（武装）| 每槽 1 + (K−1) 条跳缓冲 | **每槽 1** |
+| 每跳 soft bits vs `ref` | 逐字节相同 | **逐字节相同**（不得变） |
+
+⇒ 判据是**两句话**：**提交数回到"每槽 1 次"，而数据一个 bit 都不许动**。
+另外必须同时确认**没有跳回退宿主**（`equalizer ch_re device=N host=0`、`ch_est device=N host=0`）。
+
+**⑤ 风险 / 必须先想清楚的**：合并后**第一个跳的 LLR 要等最后一个跳编码完才提交**
+（延迟 = K−1 个跳的**编码**时间，不是 GPU 时间）。K 大时要确认这不触碰 FAPI 截止；
+必要时给 K 设上限（超过则退回今天的形状，MISS 但不阻塞）。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。
