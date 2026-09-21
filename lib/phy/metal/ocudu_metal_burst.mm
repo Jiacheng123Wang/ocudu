@@ -63,7 +63,7 @@ void grid_handover_counts_hook(grid_handover_counts& out)
 ///
 /// It IS grid_production_generation(): the device consumer's own entry point - claim the block, commit it
 /// when nobody else will, and hand back the generation to encode a wait on. The harness reaches it through
-/// the hook so that a plain C++ tool can build the one shape in which the device-side wait is load-bearing.
+/// the hook so that a plain C++ tool can reach it at all.
 uint64_t grid_ready_claim_hook(const void* storage, uint64_t slot)
 {
   return metal::shared_burst::grid_production_generation(storage, slot);

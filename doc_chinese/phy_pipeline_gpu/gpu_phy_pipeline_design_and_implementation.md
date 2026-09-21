@@ -4361,6 +4361,45 @@ harness 也照 OPEN 打印。**"离线优先"在本项目里第一次碰到一�
 2. `[l1_multi]` 的"错过数"曾用 `handed − taken`，而 `handed` 数的是**每槽一次的交出**、不是跳数
    ⇒ 打印成"错过 0"并误判 FAIL。改为 `跳数 − taken`。
 
+#### 5.9.41 ★★★ 为什么那条等待证伪不了：**交出把前端搬到了 backend queue（同队列 ⇒ 提交序就排好了）**
+
+§5.9.40 把原因写成"跨队列 + 空载"，**那一半是错的**。查 `ocudu_dft_metal_engine.mm` 的队列选择后真相是：
+
+```cpp
+if (block_release_requested()) {          // OCUDU_DFT_RELEASE_BLOCK=1
+  // D1 step 1: a block that may be RELEASED belongs to whoever commits it, and that is the lane, on the
+  // back-end queue - a command buffer is bound to the queue that created it, so a block created on the
+  // front-end queue could not be adopted into the lane's chain.
+  return metal::shared_queue::backend_queue();
+}
+```
+
+**⇒ 一旦武装交出，前端的块就建在 BACK-END queue 上**（与跳同一条队列），这不是巧合而是**必需**：
+命令缓冲绑定创建它的队列，前端块要在车道的链里被认领，就必须生在车道的队列上。
+
+**⇒ 同一条队列上，Metal 的 hazard tracking（网格缓冲是 `newBufferWithBytesNoCopy` +
+`MTLResourceStorageModeShared`，即 tracked）按**提交顺序**就把写与读排好了。**
+所以 `[metal_stats] front_end fence signals=0 waits=0`（harness 里跨队列栅栏压根没武装），
+而设备侧等待**在提交被及时发出时是冗余的** —— 这正是 §5.9.39/§5.9.40 反复量到 0 差异的原因，
+**与机器是否空载无关**。
+
+**⇒ 那条等待真正覆盖的只有一个竞态**（MMSE 引擎注释里写得很准：*"the commit has to happen BEFORE
+this hop submits"*）：**另一个消费者的提交在本跳提交之后才发出** ⇒ 本跳的命令缓冲排在块的前面
+⇒ 只有那个 event 能把读排到写之后。harness 里提交是同步发出的，所以这个竞态永不发生。
+
+**② 一次失败的注入尝试（记下来，别重走）**：按"把提交推迟到本跳提交之后"的思路加了
+`OCUDU_L1_STALL_GRID_COMMIT_MS`——在**另一个线程**上 sleep R 毫秒再 `commit_dropped()`。
+结果：**武装那次（等待在编码）直接段错误 rc=139**；不编码等待那次跑完但 `unproduced=8`（退出时提交还没落地）。
+原因是**前端的提交路径不能脱离它的属主线程**（它要走引擎/线程本地的提交状态），
+而且这个游离线程可能活过它所属的槽。
+⇒ **该实现已回滚**（不留会崩的旋钮）。**下一次的正确做法**：不要在别的线程提交，
+而是**把"认领"与"提交"在同一条 harness 线程上拆开** —— 先认领（让跳 MISS）、**再提交跳**、
+**最后**才提交块；这样既不跨线程，又能让"本跳提交在块提交之前"这一竞态确定发生。
+
+**③ 至此 L1 的账**：§5.9.36 ④-4 第二条反向臂**记 OPEN 并附正确做法**；
+harness 五条臂（认领/错过/宿主先/claim/claimnowait）全部 0 差异、rc=0，
+`L1_HOP_PDUS=2` 时悬崖 `adopted=1 / missed=K−1` 结构性成立（§5.9.40）。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。
