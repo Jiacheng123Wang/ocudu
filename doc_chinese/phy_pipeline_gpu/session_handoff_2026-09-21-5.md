@@ -1,4 +1,4 @@
-# 交接（入口） — S31：**`s44`：极值全消（max 69.8→7.0 ms、LDPC 26→0.17 ms）、CE 段 p95 没动 ⇒ 那是"单车道排队"；D1 可以 tag**
+# 交接（入口） — S32：**L1 harness 的落点已定（含一条错记录的更正）；Ubuntu 构建已修好**
 
 > **本文件是新会话的唯一入口**：读完它就能开工。
 > **本会话（S25）的就一件事**：读 `s40` + 更正上一轮对停顿的误判。设计文档 **§5.9.25** = 完整读数与机制。
@@ -81,6 +81,26 @@ git push origin gpu_phy_d1_handover    # 若这条线要推送
 1. 爬坡时仍拒收 **91** 个上行时隙（对照 **0**）⇒ 要么再加一档 `nof_ul_rg`（一行），
    要么做结构性那件：**`uplink_processor_impl` 按槽拥有 PDU 仓库与网格**（§5.9.19 那个改动，理由=余量）；
 2. 爬坡瞬间最坏端到端 **71.6 ms**（对照 13.7），与 1 同源。
+
+## 3b. ★ L1（离线 harness）开工状态：**落点已定，代码未动**（设计文档 §5.9.36）
+
+* **更正**：`ul_chain_replay --dft` **不是空壳**（842 行，频域回放 + 时域回放两条路都已实现；
+  第 507 行的 `return 0` 是 `--dft` 的正常出口）。**缺的是**：(i) 一份 `OCUDU_UL_DUMP_TD` 语料（本机没有），
+  (ii) **武装的那一半**——工具得**当消费者**（在 `write_grid()` 之前 `grid_ready_hook::wait(base, slot)`），
+  否则交出后没人提交，宿主 dump 读到没写的内存；
+* **落点**：`ul_chain_replay.cpp` 第 497–504 行之间；**外加"交出确实发生"的断言**（`taken>0`），
+  否则会重演"武装节空判"那一课；
+* **先要核对的坑**：replay 的槽号来自捕获文件，而键用的是 `slot_point::to_uint()`
+  （`puxch_processor_impl.cpp:154`）——若基准不同，`wait()` 会 **fail-open** 而静默不测；
+* **步骤**：录语料 → 加消费者等待+断言 → A/B（0 差异、`handed>0`）→ **两条反向臂必须红**（去掉等待 / 去掉 MISS 的设备侧等待）。
+
+## 3c. Ubuntu 构建（已修好）
+
+`pusch_demodulator_impl.cpp` 三个变量只在 `#if defined(OCUDU_METAL_STATS)` 里被读，
+而 Linux 是 `ENABLE_METAL_*=OFF` ⇒ `-Werror=unused-variable` 判失败。修法：把声明搬进同一个守卫内
+（Mac 构建不变）。**Mac 提交 `c4662f3155`**；Ubuntu 上打了同一份补丁并验证：
+`gnb` 目标 exit 0，**默认全量目标 exit 0，0 errors**，`ctest -N` 有 **7618** 个测试。
+Ubuntu 工作树目前那**一个文件**是同一内容（未提交）。
 
 ## 4. 未解 / 开放项
 

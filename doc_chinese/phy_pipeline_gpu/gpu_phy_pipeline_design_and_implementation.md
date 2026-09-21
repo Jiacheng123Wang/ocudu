@@ -4068,6 +4068,57 @@ phy_config.srs_executor           = flexible.non_rt_low_prio_exec;   // 同上
 要再压它只有两条路：**允许更多车道同时在飞**（提高 `max_pusch_and_srs_concurrency`，前提是 GPU 扛得住）
 或**接受它**（它只在饱和段出现，且对照臂同段也有 241 µs–1.4 ms 的同类排队）。
 
+#### 5.9.36 ★★ L1（Mac 上的最小 harness）：**现状更正 + 落点**（开工前先纠正一条错记录）
+
+**① 更正：`ul_chain_replay --dft`【不是空壳】**
+
+早先的交接里写着"`ul_chain_replay --dft` 目前 `return 0`（空壳）"——**这条是错的**。
+`lib/phy/upper/channel_processors/metal/test/ul_chain_replay.cpp` 有 842 行，两条路都实现了：
+
+| 模式 | 输入 | 做什么 |
+|---|---|---|
+| 默认（`--cpu/--metal/--metal-cpu-ldpc/…`）| `OCUDU_UL_DUMP` 的**频域网格捕获** | 用选定后端重放上层链路，并写出分阶段捕获供 `scripts/ul_stage_diff.py` 逐字节比对 |
+| `--dft [--dft-metal] [--device-grid]`（315–507 行）| `OCUDU_UL_DUMP_TD` 的**时域捕获** | 经 OFDM 解调器（可选设备写网格）重放，dump 出网格 |
+
+第 507 行的 `return 0` 是 **`--dft` 模式的正常出口**，不是占位符。**⇒ 这条工具的骨架本来就在，缺的是下面两件。**
+
+**② 真正缺的两件**
+
+1. **语料**：`--dft` 需要一份**空口录的时域捕获**（`OCUDU_UL_DUMP_TD`，构建里 `ENABLE_UL_CAPTURE` 已在），
+   **本机没有**（Ubuntu 那台有 ZMQ/srsUE 台子，可以从那里录一份过来）；
+2. **"武装的那一半"**：`--dft` 现在用**宿主**读网格来 dump。一旦 `OCUDU_DFT_RELEASE_BLOCK=1`，
+   前端把该槽的块**交出但没人提交** ⇒ 宿主 dump 读到的是没写过的内存。
+   ⇒ 工具必须**充当消费者**（这正是接收链里 PUCCH 做的事）。
+
+**③ 落点（精确到行）**
+
+* 位置：`ul_chain_replay.cpp` 的 `--dft` 分支，**在 `write_grid(current_slot)`（第 504 行）之前**、
+  流水线 drain（497–499 行）之后；
+* 动作：取 `grid->get_writer().get_device_view().base`，调用 `grid_ready_hook::wait(base, slot)`
+  （无武装/无 Metal 构建时是空操作 ⇒ 参考路径逐字节不变），超时就 `return 1` 并打错；
+* 另外**必须在同一次运行里断言"交出确实发生了"**（stderr 打 `handed/released`，或直接打印
+  `[metal_stats] dft handover`），否则这条 harness 会像 `ofdm_demodulator_metal_batch_test` 的武装节那样
+  **在交出被关掉的时候空判**（这一课我们付过一对腿）。
+
+**④ 一个必须先确认的细节（否则 harness 会"静默不测"）**
+
+键是 `(网格存储, 接收槽)`，其中"接收槽"在接收链里是 **`slot_point::to_uint()`**
+（`puxch_processor_impl.cpp:154` 把 `context.slot.to_uint()` 交给 `set_lane_slot()`）。
+replay 工具里的槽号来自**捕获文件**（`entry.slot`）——**它是否同一个编号基准必须先核对**；
+若不一致，`grid_ready_hook::wait()` 会"找不到记录"而**直接返回 true（fail-open）**，
+harness 看起来在跑、其实什么都没测。**核对方法**：拿一份真捕获，打印捕获里的槽号与
+`context.slot.to_uint()` 的关系（或在工具里直接打印 `handover` 那一行，`taken` 必须 > 0）。
+
+**⑤ 最小可用版的步骤（下一次会话按此执行）**
+
+1. 录一份 TD 语料（Ubuntu 的 ZMQ/srsUE 台子，或把 `ofdm_demodulator_metal_batch_test` 的合成输入
+   按 `OCUDU_UL_DUMP_TD` 格式写成文件）；
+2. 在 ③ 的位置加"消费者等待" + 断言；
+3. **A/B**：同一份语料跑两次（`--dft --dft-metal --device-grid` 不带/带 `OCUDU_DFT_RELEASE_BLOCK=1`），
+   用 `scripts/ul_stage_diff.py` 比 dump ⇒ **期望 0 差异**，且武装那次 `handed>0`；
+4. **反向臂**（这一条决定 harness 有没有资格）：把第 2 步的等待去掉 ⇒ dump **必须不一致**；
+   再把设备侧等待（`grid_miss_devwaited`）去掉 ⇒ "跳 MISS"那条臂**必须不一致**。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。
