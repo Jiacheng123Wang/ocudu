@@ -114,6 +114,21 @@ static mmse_stats_t& mmse_stats()
   return s;
 }
 
+/// \brief Whether the MISS path's device-side wait is deliberately NOT encoded (OCUDU_L1_DROP_MISS_WAIT).
+///
+/// The falsification arm of the L1b harness (design document 5.9.38). A hop that MISSES the hand-over reads
+/// the grid from a command buffer of its own, and nothing orders that read against the block that writes the
+/// grid unless this wait is encoded - so dropping it is exactly the mistake the wait exists to prevent, and
+/// the harness needs to be able to make that mistake on purpose to show the wait is load-bearing. It is a
+/// knob and not a source edit because an arm that requires patching the engine is an arm nobody re-runs.
+///
+/// Read on every call rather than cached: the same process has to be able to run both arms.
+static bool drop_miss_wait_armed()
+{
+  const char* env = std::getenv("OCUDU_L1_DROP_MISS_WAIT");
+  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+}
+
 static void mmse_stats_corr_build()
 {
 #if defined(OCUDU_METAL_STATS)
@@ -832,7 +847,7 @@ static stage_encoder begin_stage(mmse_engine_impl*          e,
   // HERE - before the encoder opens, which is where a command-buffer-level wait belongs - and the CPU thread
   // returns immediately. The burst route creates its own buffer, so it takes the generation over instead
   // (shared_burst::set_grid_wait()) and encodes it with its other fences.
-  const uint64_t pending_grid_wait = e->pending_grid_wait;
+  const uint64_t pending_grid_wait = drop_miss_wait_armed() ? 0 : e->pending_grid_wait;
   e->pending_grid_wait             = 0;
   stage_encoder s;
   if (fuse) {

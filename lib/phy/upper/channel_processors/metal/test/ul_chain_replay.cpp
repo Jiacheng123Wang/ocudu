@@ -1119,6 +1119,21 @@ int main(int argc, char** argv)
     const char* env = std::getenv("OCUDU_L1_HOST_FIRST");
     return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
   }();
+  /// \brief The host consumer CLAIMS the grid but does NOT wait for its production
+  ///        (OCUDU_L1_CLAIM_ONLY=1, design document 5.9.39).
+  ///
+  /// This is the one construction in which the MISS path's device-side wait is LOAD-BEARING, and the reason
+  /// a host_first arm built on grid_ready_hook::wait() cannot falsify it: wait() returns only after the
+  /// production has completed, so by the time the hop starts there is no ordering left for anybody to
+  /// provide and dropping the device-side wait changes nothing. Here the host claims the block (committing
+  /// it) and returns at once, so the commit is STILL IN FLIGHT when the hop runs: the hop MISSES, reads the
+  /// grid from its own command buffer, and only the device-side wait orders that read after the commit.
+  /// It is the same shape as a DEVICE consumer that claimed the block - which is what happens for real when
+  /// two hops read one slot's grid - reached without having to build the second hop.
+  const bool claim_only = []() {
+    const char* env = std::getenv("OCUDU_L1_CLAIM_ONLY");
+    return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  }();
 
   for (const std::string& capture_prefix : prefixes) {
     // In hop mode the round index IS the slot offset: one round per slot the front end produces.
@@ -1162,9 +1177,15 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "cannot produce the grid of slot %u\n", receiving_slot);
         return 1;
       }
-      if (host_first) {
-        // The host consumer goes FIRST, so the hop finds the block already claimed and has to take the
-        // MISS path. Its wait is the one the PUCCH makes in the receiving chain.
+      if (claim_only) {
+        // Claim + commit, but do NOT wait: the production is still in flight when the hop below runs, so the
+        // hop's own device-side wait is the only thing ordering its read against that commit. The generation
+        // is dropped on purpose - this arm reads nothing from the grid, it only takes the block away.
+        (void)grid_ready_hook::claim(hop_front_end::storage(grid), receiving_slot);
+      } else if (host_first) {
+        // The host consumer goes FIRST and WAITS, so the hop finds the block already claimed and has to take
+        // the MISS path. Its wait is the one the PUCCH makes in the receiving chain. (Note: this arm cannot
+        // falsify the device-side wait - see claim_only above.)
         if (!grid_ready_hook::wait(hop_front_end::storage(grid), receiving_slot)) {
           std::fprintf(stderr, "slot %u: the grid was not produced in time\n", receiving_slot);
           return 1;
@@ -1343,11 +1364,12 @@ int main(int argc, char** argv)
       const char* env = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
       return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
     }();
-    std::printf("[l1_hop] installed=%d armed=%d host_first=%d slots=%u handed=%llu taken=%llu fallback=%llu "
-                "late=%llu not_found=%llu unproduced=%llu ready_timeouts=%llu\n",
+    std::printf("[l1_hop] installed=%d armed=%d host_first=%d claim_only=%d slots=%u handed=%llu taken=%llu "
+                "fallback=%llu late=%llu not_found=%llu unproduced=%llu ready_timeouts=%llu\n",
                 hs.installed ? 1 : 0,
                 release_armed ? 1 : 0,
                 host_first ? 1 : 0,
+                claim_only ? 1 : 0,
                 hop_td_slots,
                 static_cast<unsigned long long>(hs.handed),
                 static_cast<unsigned long long>(hs.taken),
@@ -1373,17 +1395,17 @@ int main(int argc, char** argv)
         return 1;
       }
       // Which half each order MUST exercise: the hop that goes first adopts the block, and the hop that
-      // runs after the host consumer cannot (the block is claimed) and has to take the MISS path.
-      if (host_first) {
+      // runs after another consumer claimed it cannot (the block is taken) and has to take the MISS path.
+      if (host_first || claim_only) {
         if (hs.taken != 0) {
           std::fprintf(stderr,
-                       "FAIL: the host consumed the grid first yet the hop still ADOPTED (%llu) - the MISS "
+                       "FAIL: another consumer took the grid first yet the hop still ADOPTED (%llu) - the MISS "
                        "path was not exercised\n",
                        static_cast<unsigned long long>(hs.taken));
           return 1;
         }
         if (hs.fallback_commits == 0) {
-          std::fprintf(stderr, "FAIL: the host consumer committed nothing - no fallback happened\n");
+          std::fprintf(stderr, "FAIL: the other consumer committed nothing - no fallback happened\n");
           return 1;
         }
       } else if (hs.taken == 0) {

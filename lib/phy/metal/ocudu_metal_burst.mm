@@ -59,9 +59,20 @@ void grid_handover_counts_hook(grid_handover_counts& out)
   out.ready_timeouts   = hand.ready_timeouts;
 }
 
+/// \brief The Metal end of the non-blocking claim (see grid_ready_hook::claim()).
+///
+/// It IS grid_production_generation(): the device consumer's own entry point - claim the block, commit it
+/// when nobody else will, and hand back the generation to encode a wait on. The harness reaches it through
+/// the hook so that a plain C++ tool can build the one shape in which the device-side wait is load-bearing.
+uint64_t grid_ready_claim_hook(const void* storage, uint64_t slot)
+{
+  return metal::shared_burst::grid_production_generation(storage, slot);
+}
+
 const bool grid_ready_hook_installed = []() {
   grid_ready_hook::install(&grid_ready_wait_hook);
   grid_ready_hook::install_counts(&grid_handover_counts_hook);
+  grid_ready_hook::install_claim(&grid_ready_claim_hook);
   return true;
 }();
 

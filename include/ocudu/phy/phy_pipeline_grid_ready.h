@@ -107,6 +107,30 @@ public:
     }
   }
 
+  /// \brief The NON-BLOCKING half of wait(): take responsibility for the grid's production and return the
+  ///        generation that will mark its completion, WITHOUT waiting for it. 0 = nothing to wait for.
+  ///
+  /// This is what a DEVICE consumer does - it claims the block (committing it when nobody else will) and
+  /// encodes the wait into its own command buffer rather than blocking a thread on it. Exposed here for the
+  /// same reason wait() is: the implementation lives with the Metal engines and a harness has to be able to
+  /// reach it.
+  ///
+  /// \note It exists so a harness can reproduce the ONE shape in which the device-side wait is
+  ///       load-bearing: a consumer that claims a block another reader is about to read, while the claim's
+  ///       commit is still in flight. A host reader that WAITS (wait()) has, by the time it returns,
+  ///       already had the production complete - so no ordering is left for anybody else to provide, and an
+  ///       arm built on wait() cannot falsify the device-side wait at all (measured, design document
+  ///       5.9.39).
+  using claim_fn = uint64_t (*)(const void* storage, uint64_t slot);
+
+  static void install_claim(claim_fn fn) { claim_fn_ref().store(fn, std::memory_order_release); }
+
+  static uint64_t claim(const void* storage, uint64_t slot)
+  {
+    claim_fn fn = claim_fn_ref().load(std::memory_order_acquire);
+    return (fn == nullptr) ? 0 : fn(storage, slot);
+  }
+
 private:
   static std::atomic<wait_fn>& fn_ref()
   {
@@ -117,6 +141,12 @@ private:
   static std::atomic<counts_fn>& counts_fn_ref()
   {
     static std::atomic<counts_fn> fn{nullptr};
+    return fn;
+  }
+
+  static std::atomic<claim_fn>& claim_fn_ref()
+  {
+    static std::atomic<claim_fn> fn{nullptr};
     return fn;
   }
 };

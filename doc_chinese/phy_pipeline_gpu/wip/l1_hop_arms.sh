@@ -9,12 +9,23 @@
 #
 #   ref        hand-over OFF. The hop reads a grid the front end committed itself.
 #   cand       hand-over ON, hop goes FIRST -> it ADOPTS the block (taken>0): D1's headline shape.
-#   hostfirst  hand-over ON, the host consumer goes first -> the hop MISSES (taken=0) and takes the
+#   hostfirst  hand-over ON, the host consumer WAITS first -> the hop MISSES (taken=0) and takes the
 #              device-side wait path (grid_devwaited>0).
+#   claim      hand-over ON, another consumer CLAIMS the block but does NOT wait -> the hop MISSES with
+#              the commit still in flight, the shape in which the device-side wait should matter.
+#   claimnowait   the same, with the device-side wait DROPPED (OCUDU_L1_DROP_MISS_WAIT=1).
 #
-# The criterion: the LLRs of every slot must be identical across all three. What each arm EXERCISED is
+# The criterion: the LLRs of every slot must be identical across all of them. What each arm EXERCISED is
 # asserted by the tool itself (see [l1_hop]) - an arm whose counters say it did not take the path it
 # meant to is a failed arm, not a passing comparison.
+#
+# WHAT THIS HARNESS CANNOT DO (measured, design document 5.9.39): it cannot falsify the MISS path's
+# device-side wait. `claim` and `claimnowait` differ by exactly that wait (grid_devwaited=16 vs 0) and
+# produce identical soft bits and identical estimator scalars - 5 repetitions of 16 slots each. The reason
+# is that the fallback commit and the hop's own command buffer are submitted to ONE queue from ONE thread,
+# so the GPU runs them in submission order anyway. That wait is load-bearing only when the commit and the
+# reader are genuinely concurrent - a DEVICE consumer that claimed the block, i.e. two hops on one slot's
+# grid (the multi-PUSCH cliff). Until that construction exists, §4.3 step 4(ii) stays open.
 #
 # Usage: doc_chinese/phy_pipeline_gpu/wip/l1_hop_arms.sh [slots] [pdu-capture] [workdir]
 set -u
@@ -52,11 +63,27 @@ OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_GPU_STRICT=1 \
   run_arm cand "$TOOL" "$PDU" --out "$WORK/cand" "${ARM[@]}" || echo "  ^ cand arm FAILED (see [l1_hop])" >&2
 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_GPU_STRICT=1 OCUDU_L1_HOST_FIRST=1 \
   run_arm hostfirst "$TOOL" "$PDU" --out "$WORK/hostfirst" "${ARM[@]}" || echo "  ^ hostfirst arm FAILED (see [l1_hop])" >&2
+OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_GPU_STRICT=1 OCUDU_L1_CLAIM_ONLY=1 \
+  run_arm claim "$TOOL" "$PDU" --out "$WORK/claim" "${ARM[@]}" || echo "  ^ claim arm FAILED (see [l1_hop])" >&2
+OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_GPU_STRICT=1 OCUDU_L1_CLAIM_ONLY=1 OCUDU_L1_DROP_MISS_WAIT=1 \
+  run_arm claimnowait "$TOOL" "$PDU" --out "$WORK/claimnowait" "${ARM[@]}" || echo "  ^ claimnowait arm FAILED (see [l1_hop])" >&2
+
+# The two claim arms must differ in EXACTLY the device-side wait: if the dropped one still reports the wait
+# as encoded, the arm did not drop anything and the comparison below says nothing about that wait.
+rc=0
+for pair in "claim:encoded" "claimnowait:dropped"; do
+  arm="${pair%%:*}"; want="${pair##*:}"
+  got="$(grep -o 'grid_devwaited=[0-9]*' "$WORK/$arm.log" | head -1)"
+  printf '%-12s %s (expected: %s)\n' "$arm" "$got" "$want"
+  if [[ "$want" == "dropped" && "$got" != "grid_devwaited=0" ]] || [[ "$want" == "encoded" && "$got" == "grid_devwaited=0" ]]; then
+    echo "  ^ the arm did not do what its name says - the falsification below is void" >&2
+    rc=1
+  fi
+done
 
 echo
 echo "== every slot's soft bits, bit for bit =="
-rc=0
-for arm in cand hostfirst; do
+for arm in cand hostfirst claim claimnowait; do
   files=0; differ=0
   for f in "$WORK"/ref_*_llr.bin; do
     [[ -e "$f" ]] || continue
@@ -82,6 +109,10 @@ if [[ $rc -eq 0 ]]; then
 else
   echo "FAIL: see above"
 fi
+echo "OPEN: the device-side wait is NOT falsifiable here. The claim arms differ by exactly that wait"
+echo "      (grid_devwaited>0 vs 0) and agree bit for bit - one queue, one thread, so the GPU runs the"
+echo "      commit and the hop in submission order regardless. It needs a second, genuinely concurrent"
+echo "      consumer: two hops on one slot's grid (the multi-PUSCH cliff, 5.9.39)."
 # NOTE deliberately NOT compared here: the OCUDU_UL_DUMP *grid* capture (<prefix>_<slot>_<rnti>.bin).
 # It is a HOST read of the grid, and in an arm where the hop ADOPTS the block the grid is produced at that
 # hop's commit - so the capture reads memory nobody has written yet and differs for reasons that have
