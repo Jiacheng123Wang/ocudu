@@ -3375,6 +3375,56 @@ fallback=1 late=1 not_found=0 timeouts=0 keepalives=45/45`。
 **⑦ 门（旋钮关）**：`value_net` **47/0**、`ctest -R metal` **10/10**、
 `ctest -R "ul_pipeline_probe|puxch|lower_phy"` **5/5**、`neutral_vs_baseline` **131**（同数）。
 
+#### 5.9.18 ★★★ `s36` 腿对 + 一个**离线决定性实验**：网格产出**已被证明逐字节正确**，剩下的是**上层 PHY 任务读"按槽复用"的状态**（一个 D1 之前就存在的竞态，被"等待"变成必然）
+
+**① 腿对（`gpu`，`fd1ac3c98a`：对照 `s36-d1-swept-base` 正常跑 ping/iperf3；候选 `s36-d1-swept`）**
+
+| 读数 | 对照 | 候选 |
+|---|---|---|
+| `Real-time failure` | 1 | **7**（曾是 29219）✅ |
+| `[ul_rx_pool] held` | 2 | **2（free=6/8）** ✅ 扫掠管用 |
+| `keepalives` | —— | 47474/47488（只差 1 个块）✅ |
+| `timeouts` | —— | **0** ✅ |
+| PUSCH | 14759（13976 OK，95%）| 665（**12 OK**，2%）|
+| PUCCH | 12311（p50 **+16.6 dB**，65% 好）| 2870（p50 **−14.2 dB**，21% 好）|
+| 计数 | —— | `handed=3392 taken=659 evicted=3116 unproduced=1 fallback=2500 late=232 not_found=231` |
+
+⇒ **池子、凭据、栅栏三条全部健康**，而数据仍错 ⇒ 还有**一个不在这条链上**的缺陷。
+
+**② ★ 决定性离线实验：把武装后的交出放进"逐字节对照 CPU 参考"的那个测试里**
+
+`ofdm_demodulator_metal_batch_test` 新增一节（**它自己当宿主消费者**，走 `grid_ready_hook::wait()`——
+即 PUCCH 在真空口链上做的同一件事）：
+
+```
+[armed] hand-over grid vs host write: REs=17808 mismatching=0        ← 逐字节相同
+[metal_stats] dft ... radio_inputs=770 ... released=1 fallback=1     ← 零拷贝电台输入也走到了
+```
+**⇒ 交出路径（键、凭据、兜底提交、栅栏、零拷贝输入）产出的网格是【正确】的。缺陷不在 D1 的这条链上。**
+
+**③ ★★ 那么差在哪：上层 PHY 的消费者任务读的是【按槽复用】的状态**
+
+```cpp
+// uplink_processor_impl.cpp
+bool success = task_executors.pucch_executor.defer([this, &pdu]() {     // ← 316/346/417/485 行同形
+    proc_result = pucch_proc->process(grid->get_reader(), format0);     // ← 成员 grid，运行时才取
+```
+* `uplink_processor_impl.h:255`：`std::unique_ptr<resource_grid> grid;` —— **每个槽被替换**；
+* 任务捕获 `[this, &pdu]`，而 `pdu` 来自**每槽清空**的 `pdu_repository`（`clear_queues()`，第 110 行）。
+
+**⇒ 一个"要等一等"的宿主读者（＝交出路径逼出来的）会跑过自己的槽边界，读到【下一个槽】的网格与 PDU。**
+**⇒ 而对照臂之所以好，只是因为它的任务跟得上**——它的 PUCCH 也只有 **65%** 好，说明**这个竞态在 D1 之前就存在**，只是潜伏。
+
+**④ ⇒ 结论与下一步**
+
+| 事实 | 结论 |
+|---|---|
+| 交出链本身（网格产出）**逐字节正确** | D1 的这一半**做完了** |
+| 缺陷在**任务的槽归属**上，是**既有竞态** | 修它不需要动 D1：**让 PUCCH/SRS 任务【拥有】自己槽的网格与 PDU**（按值捕获，或用 shared 持有），然后重新武装 |
+| 它**可以离线判**（`lower_phy_uplink_processor_test` / 新增一个"任务跨槽"用例）| **下次不必再靠腿来发现** |
+
+**⑤ ⇒ 交出已再次关掉**（`grid_has_host_consumers()` 返回 `true`），理由写在代码里并附上那条离线证据。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。

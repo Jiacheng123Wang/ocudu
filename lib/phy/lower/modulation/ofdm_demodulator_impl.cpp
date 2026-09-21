@@ -82,11 +82,18 @@ bool grid_has_host_consumers()
   // commits and waits for THAT one - and the grid it is about to read was never written at all. Measured:
   // PUCCH sinr median -14.9 dB with only 28% of the reports usable, and the PUSCH at -22.9 dB.
   //
-  // FALSE again since both halves landed (5.9.15): the registry is keyed by the grid's storage AND the
-  // receiving slot - so a consumer asking one slot late is no longer served the next slot's block - and a
-  // deposit nobody claims is COMMITTED when it would otherwise be dropped, so a grid is never silently left
-  // unwritten. The offline judgement of both is the mechanism test's arms 6 and 7.
-  return false;
+  // TRUE again, and for a defect that is NOT in this hand-over (5.9.18): the upper PHY's PUCCH and SRS tasks
+  // capture [this, &pdu] and read the slot-scoped member `grid` and the slot repository's PDU WHEN THEY RUN.
+  // A host reader that has to WAIT for the grid's production - which is what this hand-over makes it do -
+  // therefore runs past its slot boundary and reads the NEXT slot's grid. The control arm is fine only
+  // because its tasks keep up (its PUCCH is 65% good, so the race is latent there too).
+  //
+  // The grid production itself is proven correct offline: the armed section of
+  // ofdm_demodulator_metal_batch_test hands a slot over uncommitted, has the test act as the host consumer,
+  // and the resulting grid is byte-identical to the host reference (0 of 17808 RE mismatching).
+  //
+  // ⇒ The hand-over stays refused until those tasks OWN their slot's grid and PDU.
+  return true;
 }
 
 bool handover_allowed()

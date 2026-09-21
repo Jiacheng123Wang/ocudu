@@ -24,6 +24,7 @@
 #include "ocudu/phy/lower/modulation/ofdm_demodulator.h"
 #include "ocudu/phy/support/resource_grid.h"
 #include "ocudu/phy/support/resource_grid_reader.h"
+#include "ocudu/phy/phy_pipeline_grid_ready.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/phy/support/support_factories.h"
 #include "ocudu/ran/cyclic_prefix.h"
@@ -68,6 +69,13 @@ std::vector<cf_t> grid_to_vector(const resource_grid_reader& grid, unsigned nof_
 
 int main()
 {
+  // D1 (design document 5.9.17): the hand-over has to be ARMED BEFORE the first Metal DFT engine exists -
+  // the engine picks its queue once - so it is armed here for the whole binary. It only changes what the
+  // sections that DECLARE the grid device-consumed do (see the armed section below); every other section
+  // commits normally and compares the same values.
+  ::setenv("OCUDU_DFT_RELEASE_BLOCK", "1", 1);
+  ::setenv("OCUDU_GPU_STRICT", "1", 1);
+
   // Valid size for both backends: 2048 = 2^11, 106 RB grid.
   const unsigned          dft_size = 2048;
   const unsigned          bw_rb    = 106;
@@ -241,6 +249,74 @@ int main()
     if (mismatching != 0) {
       std::fprintf(stderr, "FAIL: the device grid write differs from the host grid write\n");
       ok = false;
+    }
+
+    // ---- The ARMED hand-over (D1, 5.9.17): the grid is produced by a block this test, as the host consumer,
+    // must ask for ---------------------------------------------------------------------------------------
+    //
+    // This is the offline judge the air legs could not be: the receiving chain hands the slot's block over
+    // UNCOMMITTED instead of committing it (OCUDU_DFT_RELEASE_BLOCK, armed above) and the grid is then
+    // produced at whoever claims it. Here nobody claims it - there is no PUSCH hop in a demodulator test -
+    // so the CONSUMER commits it, exactly as the PUCCH path does in the receiving chain
+    // (grid_ready_hook::wait()), and only then is the grid read and compared, byte for byte, against the
+    // host path's. A single differing resource element is a defect in the hand-over itself, with the radio,
+    // the UE and the lane taken out of the picture.
+    {
+      ofdm_demodulator_configuration armed_config = device_config;
+      // The declaration the hand-over needs (it is what says the grid's consumers read it on the device -
+      // and a host reader waits, which is what this section performs).
+      armed_config.grid_consumed_on_device = true;
+
+      auto armed_demod = metal_factory->create_ofdm_symbol_demodulator(armed_config);
+      auto ref_demod   = metal_factory->create_ofdm_symbol_demodulator(config);
+      if ((armed_demod == nullptr) || (ref_demod == nullptr)) {
+        std::fprintf(stderr, "FAIL: demodulator creation for the armed hand-over\n");
+        return 1;
+      }
+      auto grid_armed = grid_factory->create(1, nsymb, rg_size);
+      auto grid_ref   = grid_factory->create(1, nsymb, rg_size);
+      if ((grid_armed == nullptr) || (grid_ref == nullptr)) {
+        std::fprintf(stderr, "FAIL: grid creation for the armed hand-over\n");
+        return 1;
+      }
+      run_pipelined(*armed_demod, *grid_armed);
+      run_pipelined(*ref_demod, *grid_ref);
+
+      // The consumer: the host is about to read this grid, so it asks for its production first. This is the
+      // call the PUCCH and the SRS make in the receiving chain, and its whole point is that nobody else has
+      // committed the block.
+      const resource_grid_device_view armed_view = grid_armed->get_writer().get_device_view();
+      if (!armed_view.is_valid()) {
+        std::fprintf(stderr, "FAIL: the armed section's grid has no device view\n");
+        return 1;
+      }
+      if (!grid_ready_hook::wait(armed_view.base, 1)) {
+        std::fprintf(stderr, "FAIL: the armed hand-over's grid was not produced in time\n");
+        ok = false;
+      }
+
+      std::vector<cf_t> armed_out = grid_to_vector(grid_armed->get_reader(), 1, nsymb, rg_size);
+      std::vector<cf_t> ref_out   = grid_to_vector(grid_ref->get_reader(), 1, nsymb, rg_size);
+      unsigned          armed_mismatching = 0;
+      for (unsigned i = 0; i != armed_out.size(); ++i) {
+        if (armed_out[i] != ref_out[i]) {
+          if (armed_mismatching == 0) {
+            std::fprintf(stderr,
+                         "  armed hand-over: first mismatch at RE %u: armed=(%f,%f) reference=(%f,%f)\n",
+                         i,
+                         armed_out[i].real(),
+                         armed_out[i].imag(),
+                         ref_out[i].real(),
+                         ref_out[i].imag());
+          }
+          ++armed_mismatching;
+        }
+      }
+      std::printf("[armed] hand-over grid vs host write: REs=%zu mismatching=%u\n", armed_out.size(), armed_mismatching);
+      if (armed_mismatching != 0) {
+        std::fprintf(stderr, "FAIL: the grid of the armed hand-over differs from the host grid write\n");
+        ok = false;
+      }
     }
 
     // The RX pipeline does NOT copy the samples: the transform reads the buffer the caller assembled
