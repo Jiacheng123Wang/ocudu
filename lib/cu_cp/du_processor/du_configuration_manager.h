@@ -30,7 +30,8 @@ private:
 
   using validation_result = error_type<du_setup_result::rejected>;
 
-  expected<const du_configuration_context*, du_setup_result::rejected> add_du_config(const du_setup_request& req);
+  expected<const du_configuration_context*, du_setup_result::rejected>
+  add_du_config(const du_setup_request& req, span<const nr_cell_global_id_t> readable_cells);
   expected<const du_configuration_context*, du_setup_result::rejected>
        handle_du_config_update(const du_configuration_context& current_ctxt, const du_config_update_request& req);
   void rem_du(gnb_du_id_t du_id);
@@ -39,6 +40,8 @@ private:
 
   validation_result validate_new_du_config(const du_setup_request& req) const;
   validation_result validate_du_config_update(const du_config_update_request& req) const;
+  /// \brief Check whether the CU-CP can serve a cell reported in a DU setup request.
+  /// \return The rejection cause of the cell if the CU-CP cannot serve it.
   validation_result validate_cell_config_request(const cu_cp_du_served_cells_item& served_cell) const;
 
   du_cell_configuration create_du_cell_config(du_cell_index_t                   cell_idx,

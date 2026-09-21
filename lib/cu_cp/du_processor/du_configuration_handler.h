@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "ocudu/adt/span.h"
 #include "ocudu/cu_cp/du_processor_context.h"
 #include "ocudu/f1ap/cu_cp/du_setup_notifier.h"
 #include "ocudu/f1ap/cu_cp/f1ap_cu_configuration_update.h"
@@ -96,8 +97,16 @@ public:
     return *ctxt;
   }
 
-  /// Add a new DU configuration the CU-CP.
-  virtual error_type<du_setup_result::rejected> handle_new_du_config(const du_setup_request& req) = 0;
+  /// \brief Add a new DU configuration to the CU-CP.
+  ///
+  /// A served cell that the CU-CP cannot serve is left out of the configuration: the DU keeps the cell
+  /// configured, and the CU-CP never activates it. The request is rejected only when no served cell is left,
+  /// or when the DU itself cannot be added.
+  /// \param[in] req The DU setup request.
+  /// \param[in] readable_cells The cells whose RRC containers the CU-CP could read. Cells outside this set are
+  /// left out of the configuration.
+  virtual error_type<du_setup_result::rejected>
+  handle_new_du_config(const du_setup_request& req, span<const nr_cell_global_id_t> readable_cells) = 0;
 
   /// Update the configuration of an existing DU managed by the CU-CP.
   virtual error_type<du_setup_result::rejected> handle_du_config_update(const du_config_update_request& req) = 0;

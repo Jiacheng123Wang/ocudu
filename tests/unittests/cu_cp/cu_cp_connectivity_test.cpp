@@ -6,6 +6,7 @@
 #include "tests/test_doubles/e1ap/e1ap_cu_cp_test_messages.h"
 #include "tests/test_doubles/e1ap/e1ap_test_message_validators.h"
 #include "tests/test_doubles/f1ap/f1ap_test_message_validators.h"
+#include "tests/test_doubles/f1ap/f1ap_test_messages.h"
 #include "tests/test_doubles/ngap/ngap_test_message_validators.h"
 #include "tests/test_doubles/rrc/rrc_test_messages.h"
 #include "tests/unittests/ngap/ngap_test_messages.h"
@@ -451,6 +452,42 @@ TEST_F(cu_cp_connectivity_test, when_new_f1_setup_request_is_received_and_ng_is_
   report = this->get_cu_cp().get_metrics_handler().request_metrics_report();
   ASSERT_EQ(report.dus.size(), 1);
   ASSERT_EQ(report.dus[0].id, du_id);
+  ASSERT_EQ(report.dus[0].cells.size(), 1);
+}
+
+TEST_F(cu_cp_connectivity_test, when_one_cell_of_a_du_has_an_unsupported_plmn_then_only_that_cell_is_not_activated)
+{
+  // Run NG setup to completion.
+  run_ng_setup();
+
+  // A DU with two cells, the second one serving a PLMN the CU-CP does not support.
+  test_helpers::served_cell_item_info served_cell;
+  test_helpers::served_cell_item_info foreign_cell;
+  foreign_cell.plmn_id  = plmn_identity::parse("00102").value();
+  foreign_cell.nci      = nr_cell_identity::create(gnb_id_t{411, 22}, 1).value();
+  foreign_cell.pci      = 7;
+  foreign_cell.sib1_str = test_helpers::create_sib1_hex_string(foreign_cell.plmn_id);
+
+  auto ret = connect_new_du();
+  ASSERT_TRUE(ret.has_value());
+  unsigned du_idx = *ret;
+  get_du(du_idx).push_ul_pdu(
+      test_helpers::generate_f1_setup_request(int_to_gnb_du_id(0x11), {served_cell, foreign_cell}));
+
+  f1ap_message f1ap_pdu;
+  ASSERT_TRUE(this->wait_for_f1ap_tx_pdu(du_idx, f1ap_pdu, std::chrono::milliseconds{1000}));
+
+  // The CU-CP accepts the DU and activates only the cell it can serve.
+  ASSERT_EQ(f1ap_pdu.pdu.type().value, asn1::f1ap::f1ap_pdu_c::types_opts::successful_outcome);
+  const auto& resp = f1ap_pdu.pdu.successful_outcome().value.f1_setup_resp();
+  ASSERT_TRUE(resp->cells_to_be_activ_list_present);
+  ASSERT_EQ(resp->cells_to_be_activ_list.size(), 1U);
+  ASSERT_EQ(resp->cells_to_be_activ_list[0]->cells_to_be_activ_list_item().nr_cgi.nr_cell_id.to_number(),
+            served_cell.nci.value());
+
+  // The CU-CP does not serve the cell with the unsupported PLMN at all.
+  auto report = this->get_cu_cp().get_metrics_handler().request_metrics_report();
+  ASSERT_EQ(report.dus.size(), 1);
   ASSERT_EQ(report.dus[0].cells.size(), 1);
 }
 

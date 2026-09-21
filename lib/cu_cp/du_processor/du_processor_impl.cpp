@@ -124,25 +124,49 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
 {
   du_setup_result res;
 
-  // Extract cell info from served cell list.
+  // Extract cell info from served cell list. A cell whose RRC containers cannot be read is left out, so that
+  // the remaining cells of the DU still come up.
   // TODO: How to handle missing optional freq and timing in meas timing config?
   std::map<nr_cell_global_id_t, rrc_cell_info> cell_info_db = rrc->get_cell_info(request.gnb_du_served_cells_list);
-  if (cell_info_db.empty()) {
-    res.result = du_setup_result::rejected{f1ap_cause_transport_t::unspecified, "Could not extract cell info from DU"};
+  std::vector<nr_cell_global_id_t>             readable_cells;
+  readable_cells.reserve(cell_info_db.size());
+  for (const auto& [cgi, cell_info] : cell_info_db) {
+    readable_cells.push_back(cgi);
+  }
+
+  // Validate and update DU configuration. A cell the CU-CP cannot serve is left out of the DU configuration:
+  // the DU keeps it configured, and the CU-CP never activates it. The DU is rejected only if no cell is left.
+  auto cfg_res = du_cfg_hdlr->handle_new_du_config(request, readable_cells);
+  if (!cfg_res.has_value()) {
+    res.result = cfg_res.error();
     return res;
+  }
+  const du_configuration_context& du_ctxt = du_cfg_hdlr->get_context();
+
+  // Drop the cell info of the cells that the CU-CP does not serve, so that only the served ones reach the RRC
+  // DU and the cell measurement manager.
+  for (auto it = cell_info_db.begin(); it != cell_info_db.end();) {
+    it = du_ctxt.find_cell(it->first) == nullptr ? cell_info_db.erase(it) : std::next(it);
   }
 
   // Collect the PLMNs served by the DU cells. These are the PLMNs the CU-CP records per cell, and the ones it
   // matches when it activates a deactivated cell later on.
   std::set<plmn_identity> plmn_ids;
-  for (const auto& served_cell : request.gnb_du_served_cells_list) {
-    plmn_ids.insert(served_cell.served_cell_info.served_plmns.begin(), served_cell.served_cell_info.served_plmns.end());
+  for (const du_cell_configuration& cell : du_ctxt.served_cells) {
+    plmn_ids.insert(cell.served_plmns.begin(), cell.served_plmns.end());
   }
 
-  // Collect the cell meas config of all served cells.
-  std::map<nr_cell_identity, serving_cell_meas_config> meas_config_db;
+  // Ask the CU-CP which of the PLMNs of the DU have a connected AMF. A DU whose PLMNs have none is still
+  // accepted: its cells stay deactivated until an AMF that serves one of their PLMNs connects.
+  const std::set<plmn_identity> connected_plmns = du_setup_notif.on_du_setup_request(plmn_ids);
+  if (connected_plmns.empty()) {
+    logger.info("du={}: No AMF is connected for the PLMNs served by this DU. Its cells stay deactivated until an AMF "
+                "for one of them connects",
+                cfg.du_index);
+  }
+
+  // Update cell config in cell measurement manager.
   for (const auto& [cgi, cell_info] : cell_info_db) {
-    // Fill cell meas config.
     serving_cell_meas_config meas_cfg;
     meas_cfg.nci               = cgi.nci;
     meas_cfg.gnb_id_bit_length = cfg.gnb_id.bit_length;
@@ -157,28 +181,7 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
       meas_cfg.ssb_scs        = freq_timing.ssb_subcarrier_spacing;
     }
 
-    meas_config_db.emplace(cgi.nci, meas_cfg);
-  }
-
-  // Ask the CU-CP which of the PLMNs of the DU have a connected AMF. A DU whose PLMNs have none is still
-  // accepted: its cells stay deactivated until an AMF that serves one of their PLMNs connects.
-  const std::set<plmn_identity> connected_plmns = du_setup_notif.on_du_setup_request(plmn_ids);
-  if (connected_plmns.empty()) {
-    logger.info("du={}: No AMF is connected for the PLMNs served by this DU. Its cells stay deactivated until an AMF "
-                "for one of them connects",
-                cfg.du_index);
-  }
-
-  // Validate and update DU configuration.
-  auto cfg_res = du_cfg_hdlr->handle_new_du_config(request);
-  if (!cfg_res.has_value()) {
-    res.result = cfg_res.error();
-    return res;
-  }
-
-  // Update cell config in cell measurement manager.
-  for (const auto& [nci, meas_config] : meas_config_db) {
-    if (!cu_cp_notifier.on_cell_config_update_request(nci, meas_config)) {
+    if (!cu_cp_notifier.on_cell_config_update_request(cgi.nci, meas_cfg)) {
       res.result =
           du_setup_result::rejected{f1ap_cause_transport_t::unspecified, "Could not update cell measurement config"};
       return res;
@@ -188,18 +191,17 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
   // Store cell info in RRC DU.
   rrc->store_cell_info_db(cell_info_db);
 
-  // Realize the reported cells as CU-CP logical cells and let the CU-CP decide, per cell, whether it may be
+  // Realize the served cells as CU-CP logical cells and let the CU-CP decide, per cell, whether it may be
   // activated (admin-locked cells and cells without a connected AMF stay dormant).
   std::vector<du_reported_cell> reported_cells;
-  reported_cells.reserve(request.gnb_du_served_cells_list.size());
-  for (const auto& served_cell : request.gnb_du_served_cells_list) {
-    const auto& cell_info = served_cell.served_cell_info;
+  reported_cells.reserve(du_ctxt.served_cells.size());
+  for (const du_cell_configuration& cell : du_ctxt.served_cells) {
     reported_cells.push_back(
-        {cell_info.nr_cgi,
-         cell_info.nr_pci,
-         std::any_of(cell_info.served_plmns.begin(),
-                     cell_info.served_plmns.end(),
-                     [&connected_plmns](const plmn_identity& plmn) { return connected_plmns.count(plmn) != 0; })});
+        {cell.cgi,
+         cell.pci,
+         std::any_of(cell.served_plmns.begin(), cell.served_plmns.end(), [&connected_plmns](const plmn_identity& plmn) {
+           return connected_plmns.count(plmn) != 0;
+         })});
   }
   std::vector<nr_cell_identity> cells_to_activate = cu_cp_notifier.on_du_cells_reported(cfg.du_index, reported_cells);
 
@@ -230,18 +232,18 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
   accepted.gnb_cu_name        = cfg.ran_node_name;
   accepted.gnb_cu_rrc_version = cfg.rrc_version;
 
-  // Accept all cells; activate the ones the CU-CP selected. Cells omitted from the Cells to be Activated List
-  // remain configured-but-dormant at the DU, and are activated later via the gNB-CU Configuration Update
-  // procedure (unlock command, or the connection of an AMF that serves one of their PLMNs).
-  accepted.cells_to_be_activ_list.reserve(request.gnb_du_served_cells_list.size());
-  for (const auto& served_cell : request.gnb_du_served_cells_list) {
-    if (std::find(cells_to_activate.begin(), cells_to_activate.end(), served_cell.served_cell_info.nr_cgi.nci) ==
-        cells_to_activate.end()) {
+  // Activate the cells the CU-CP selected. A cell omitted from the Cells to be Activated List stays inactive at
+  // the DU (TS 38.401 section 8.5), and is activated later via the gNB-CU Configuration Update procedure
+  // (unlock command, or the connection of an AMF that serves one of its PLMNs). A cell the CU-CP does not serve
+  // at all is never activated.
+  accepted.cells_to_be_activ_list.reserve(reported_cells.size());
+  for (const du_reported_cell& reported : reported_cells) {
+    if (std::find(cells_to_activate.begin(), cells_to_activate.end(), reported.cgi.nci) == cells_to_activate.end()) {
       continue;
     }
     auto& activ_item  = accepted.cells_to_be_activ_list.emplace_back();
-    activ_item.nr_cgi = served_cell.served_cell_info.nr_cgi;
-    activ_item.nr_pci = served_cell.served_cell_info.nr_pci;
+    activ_item.nr_cgi = reported.cgi;
+    activ_item.nr_pci = reported.pci;
   }
 
   return res;

@@ -39,13 +39,14 @@ public:
     }
   }
 
-  validation_result handle_new_du_config(const du_setup_request& req) override
+  validation_result handle_new_du_config(const du_setup_request&         req,
+                                         span<const nr_cell_global_id_t> readable_cells) override
   {
     if (this->ctxt != nullptr) {
       return make_unexpected(
           du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state, "DU already configured"});
     }
-    auto ret = parent.add_du_config(req);
+    auto ret = parent.add_du_config(req, readable_cells);
     if (ret.has_value()) {
       this->ctxt = ret.value();
       return {};
@@ -208,12 +209,55 @@ ntn_location_mapping du_configuration_manager::get_location_mapping(const du_cel
 }
 
 expected<const du_configuration_context*, du_setup_result::rejected>
-du_configuration_manager::add_du_config(const du_setup_request& req)
+du_configuration_manager::add_du_config(const du_setup_request& req, span<const nr_cell_global_id_t> readable_cells)
 {
-  // Validate config.
+  // Validate the DU-level configuration.
   auto result = validate_new_du_config(req);
   if (not result.has_value()) {
     return make_unexpected(result.error());
+  }
+
+  // Admit the served cells one by one. A cell that the CU-CP cannot serve is left out of the configuration, so
+  // that the remaining cells of the DU still come up. The first rejection cause is kept: it is reported to the
+  // DU if no cell is admitted, which keeps a single-cell DU rejected with the cause of its only cell.
+  std::vector<du_cell_configuration>       admitted_cells;
+  std::optional<du_setup_result::rejected> first_rejection;
+  for (const auto& served_cell : req.gnb_du_served_cells_list) {
+    const nr_cell_global_id_t& cgi = served_cell.served_cell_info.nr_cgi;
+
+    std::optional<du_setup_result::rejected> rejection;
+    if (std::find(readable_cells.begin(), readable_cells.end(), cgi) == readable_cells.end()) {
+      rejection = du_setup_result::rejected{cause_protocol_t::semantic_error,
+                                            fmt::format("Could not read the RRC containers of cell nci={}", cgi.nci)};
+    } else if (std::any_of(admitted_cells.begin(), admitted_cells.end(), [&cgi](const du_cell_configuration& cell) {
+                 return cell.cgi == cgi;
+               })) {
+      // Keep the first occurrence of a cell the DU reports more than once.
+      rejection = du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
+                                            "The DU reports the served cell CGI more than once"};
+    } else if (auto cell_result = validate_cell_config_request(served_cell); not cell_result.has_value()) {
+      rejection = cell_result.error();
+    }
+
+    if (rejection.has_value()) {
+      logger.warning("du_id={}: Not serving cell nci={}. Cause: {}",
+                     fmt::underlying(req.gnb_du_id),
+                     cgi.nci,
+                     rejection->cause_str);
+      if (not first_rejection.has_value()) {
+        first_rejection = std::move(rejection);
+      }
+      continue;
+    }
+
+    admitted_cells.push_back(create_du_cell_config(to_du_cell_index(admitted_cells.size()), served_cell));
+  }
+
+  if (admitted_cells.empty()) {
+    // A DU setup request carries at least one served cell, so a cause is set here whenever the request has
+    // cells. The fallback covers a caller that passes an empty served cell list.
+    return make_unexpected(first_rejection.value_or(du_setup_result::rejected{
+        cause_protocol_t::semantic_error, "The DU reports no served cell that the CU-CP can serve"}));
   }
 
   // Create new DU config context.
@@ -222,10 +266,7 @@ du_configuration_manager::add_du_config(const du_setup_request& req)
   ctxt.id                        = req.gnb_du_id;
   ctxt.name                      = req.gnb_du_name;
   ctxt.rrc_version               = req.gnb_du_rrc_version;
-  ctxt.served_cells.resize(req.gnb_du_served_cells_list.size());
-  for (unsigned i = 0; i != ctxt.served_cells.size(); ++i) {
-    ctxt.served_cells[i] = create_du_cell_config(to_du_cell_index(i), req.gnb_du_served_cells_list[i]);
-  }
+  ctxt.served_cells              = std::move(admitted_cells);
   return &ctxt;
 }
 
@@ -392,41 +433,11 @@ du_configuration_manager::validate_new_du_config(const du_setup_request& req) co
         du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state, "Too many served cells"});
   }
 
-  // Validate served cell configurations provided in the configuration request.
-  for (const auto& served_cell : req.gnb_du_served_cells_list) {
-    auto ret = validate_cell_config_request(served_cell);
-    if (not ret.has_value()) {
-      return ret;
-    }
-
-    if (std::find(plmns.begin(), plmns.end(), served_cell.served_cell_info.nr_cgi.plmn_id) == plmns.end()) {
-      return make_unexpected(du_setup_result::rejected{f1ap_cause_radio_network_t::plmn_not_served_by_the_gnb_cu,
-                                                       "Served Cell CGI PLMN is not supported by the CU-CP"});
-    }
-
-    if (std::none_of(
-            served_cell.served_cell_info.served_plmns.begin(),
-            served_cell.served_cell_info.served_plmns.end(),
-            [this](const plmn_identity& plmn) { return std::find(plmns.begin(), plmns.end(), plmn) != plmns.end(); })) {
-      return make_unexpected(du_setup_result::rejected{f1ap_cause_radio_network_t::plmn_not_served_by_the_gnb_cu,
-                                                       "None of the served cell PLMNs is available in the CU-CP"});
-    }
-  }
-
-  // Ensure the DU config does not collide with other DUs.
-  for (const auto& [du_id, du_cfg] : dus) {
-    if (du_cfg.id == req.gnb_du_id) {
-      return make_unexpected(
-          du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state, "Duplicate DU ID"});
-    }
-    for (const auto& cell : du_cfg.served_cells) {
-      for (const auto& new_cell : req.gnb_du_served_cells_list) {
-        if (cell.cgi == new_cell.served_cell_info.nr_cgi) {
-          return make_unexpected(du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
-                                                           "Duplicate served cell CGI"});
-        }
-      }
-    }
+  // Ensure the DU config does not collide with another DU. A colliding cell is caught per cell in
+  // validate_cell_config_request.
+  if (dus.find(req.gnb_du_id) != dus.end()) {
+    return make_unexpected(
+        du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state, "Duplicate DU ID"});
   }
 
   return {};
@@ -456,6 +467,27 @@ du_configuration_manager::validate_cell_config_request(const cu_cp_du_served_cel
                     cell_req.served_cell_info.nr_cgi.nci,
                     gnb_id.id,
                     served_gnb_id.id)});
+  }
+
+  if (std::find(plmns.begin(), plmns.end(), cell_req.served_cell_info.nr_cgi.plmn_id) == plmns.end()) {
+    return make_unexpected(du_setup_result::rejected{f1ap_cause_radio_network_t::plmn_not_served_by_the_gnb_cu,
+                                                     "Served Cell CGI PLMN is not supported by the CU-CP"});
+  }
+
+  if (std::none_of(
+          cell_req.served_cell_info.served_plmns.begin(),
+          cell_req.served_cell_info.served_plmns.end(),
+          [this](const plmn_identity& plmn) { return std::find(plmns.begin(), plmns.end(), plmn) != plmns.end(); })) {
+    return make_unexpected(du_setup_result::rejected{f1ap_cause_radio_network_t::plmn_not_served_by_the_gnb_cu,
+                                                     "None of the served cell PLMNs is available in the CU-CP"});
+  }
+
+  // Ensure no other DU already serves the cell.
+  for (const auto& [du_id, du_cfg] : dus) {
+    if (du_cfg.find_cell_any_state(cell_req.served_cell_info.nr_cgi) != nullptr) {
+      return make_unexpected(du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
+                                                       "Duplicate served cell CGI"});
+    }
   }
 
   return {};

@@ -20,17 +20,32 @@ static cu_cp_served_cell_info create_basic_served_cell_info(unsigned du_counter)
   return cell_info;
 }
 
-static du_setup_request create_basic_du_setup_request(unsigned du_counter = 0)
+static void add_served_cell(du_setup_request& req, unsigned cell_counter)
 {
-  du_setup_request req;
-  req.gnb_du_id         = int_to_gnb_du_id(du_counter);
-  req.gnb_du_name       = fmt::format("odu{}", du_counter);
   auto& cell            = req.gnb_du_served_cells_list.emplace_back();
-  cell.served_cell_info = create_basic_served_cell_info(du_counter);
+  cell.served_cell_info = create_basic_served_cell_info(cell_counter);
   cell.gnb_du_sys_info.emplace();
   cell.gnb_du_sys_info->mib_msg  = byte_buffer::create({0x0, 0x1, 0x2}).value();
   cell.gnb_du_sys_info->sib1_msg = byte_buffer::create({0x3, 0x4, 0x5}).value();
+}
+
+static du_setup_request create_basic_du_setup_request(unsigned du_counter = 0)
+{
+  du_setup_request req;
+  req.gnb_du_id   = int_to_gnb_du_id(du_counter);
+  req.gnb_du_name = fmt::format("odu{}", du_counter);
+  add_served_cell(req, du_counter);
   return req;
+}
+
+/// CGIs of all cells of a request. These tests exercise the CU-CP validation, so every cell counts as readable.
+static std::vector<nr_cell_global_id_t> all_cells_of(const du_setup_request& req)
+{
+  std::vector<nr_cell_global_id_t> cgis;
+  for (const auto& served_cell : req.gnb_du_served_cells_list) {
+    cgis.push_back(served_cell.served_cell_info.nr_cgi);
+  }
+  return cgis;
 }
 
 class du_configuration_manager_test : public ::testing::Test
@@ -59,7 +74,7 @@ TEST_F(du_configuration_manager_test, when_du_is_setup_successfully_then_context
 {
   auto du_cfg_updater = du_cfg_mng.create_du_handler();
   auto setup_req      = create_basic_du_setup_request();
-  auto ret            = du_cfg_updater->handle_new_du_config(setup_req);
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req, all_cells_of(setup_req));
   ASSERT_TRUE(ret.has_value()) << "DU setup failed: " << ret.error().cause_str;
   ASSERT_EQ(du_cfg_mng.nof_dus(), 1);
 }
@@ -69,7 +84,7 @@ TEST_F(du_configuration_manager_test, when_du_cfg_handler_goes_out_of_scope_then
   {
     auto du_cfg_updater = du_cfg_mng.create_du_handler();
     auto setup_req      = create_basic_du_setup_request();
-    auto ret            = du_cfg_updater->handle_new_du_config(setup_req);
+    auto ret            = du_cfg_updater->handle_new_du_config(setup_req, all_cells_of(setup_req));
     ASSERT_EQ(du_cfg_mng.nof_dus(), 1);
   }
   ASSERT_EQ(du_cfg_mng.nof_dus(), 0);
@@ -81,11 +96,11 @@ TEST_F(du_configuration_manager_test, when_two_dus_have_valid_configs_then_the_t
   auto setup_req2 = create_basic_du_setup_request(1);
 
   auto du_cfg_updater = du_cfg_mng.create_du_handler();
-  auto ret            = du_cfg_updater->handle_new_du_config(setup_req1);
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req1, all_cells_of(setup_req1));
   ASSERT_TRUE(ret.has_value());
 
   auto du_cfg_updater2 = du_cfg_mng.create_du_handler();
-  ret                  = du_cfg_updater2->handle_new_du_config(setup_req2);
+  ret                  = du_cfg_updater2->handle_new_du_config(setup_req2, all_cells_of(setup_req2));
   ASSERT_TRUE(ret.has_value());
 
   ASSERT_EQ(du_cfg_mng.nof_dus(), 2);
@@ -115,7 +130,7 @@ TEST(du_configuration_manager_ntn_test, a_cell_broadcasting_a_single_tac_keeps_i
 
   auto du_cfg_updater = du_cfg_mng.create_du_handler();
   auto setup_req      = create_basic_du_setup_request();
-  auto ret            = du_cfg_updater->handle_new_du_config(setup_req);
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req, all_cells_of(setup_req));
   ASSERT_TRUE(ret.has_value()) << "DU setup failed: " << ret.error().cause_str;
   ASSERT_EQ(du_cfg_updater->get_context().served_cells.size(), 1);
 
@@ -136,11 +151,11 @@ TEST_F(du_configuration_manager_test, when_du_has_duplicate_du_id_then_setup_fai
   setup_req2.gnb_du_id = setup_req1.gnb_du_id;
 
   auto du_cfg_updater = du_cfg_mng.create_du_handler();
-  auto ret            = du_cfg_updater->handle_new_du_config(setup_req1);
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req1, all_cells_of(setup_req1));
   ASSERT_TRUE(ret.has_value());
 
   auto du_cfg_updater2 = du_cfg_mng.create_du_handler();
-  ret                  = du_cfg_updater2->handle_new_du_config(setup_req2);
+  ret                  = du_cfg_updater2->handle_new_du_config(setup_req2, all_cells_of(setup_req2));
   ASSERT_FALSE(ret.has_value());
 
   ASSERT_EQ(du_cfg_mng.nof_dus(), 1);
@@ -155,11 +170,11 @@ TEST_F(du_configuration_manager_test, when_du_has_duplicate_nci_then_setup_fails
       setup_req1.gnb_du_served_cells_list[0].served_cell_info.nr_cgi;
 
   auto du_cfg_updater = du_cfg_mng.create_du_handler();
-  auto ret            = du_cfg_updater->handle_new_du_config(setup_req1);
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req1, all_cells_of(setup_req1));
   ASSERT_TRUE(ret.has_value());
 
   auto du_cfg_updater2 = du_cfg_mng.create_du_handler();
-  ret                  = du_cfg_updater2->handle_new_du_config(setup_req2);
+  ret                  = du_cfg_updater2->handle_new_du_config(setup_req2, all_cells_of(setup_req2));
   ASSERT_FALSE(ret.has_value());
 
   ASSERT_EQ(du_cfg_mng.nof_dus(), 1);
@@ -172,7 +187,7 @@ TEST_F(du_configuration_manager_test, when_du_has_different_plmn_then_setup_fail
   setup_req.gnb_du_served_cells_list[0].served_cell_info.nr_cgi.plmn_id = plmn_identity::parse("00102").value();
 
   auto du_cfg_updater = du_cfg_mng.create_du_handler();
-  auto ret            = du_cfg_updater->handle_new_du_config(setup_req);
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req, all_cells_of(setup_req));
   ASSERT_FALSE(ret.has_value());
 
   ASSERT_EQ(du_cfg_mng.nof_dus(), 0);
@@ -316,4 +331,101 @@ TEST(du_configuration_context_test, a_mapped_cell_id_equal_to_the_uu_cell_id_of_
   ASSERT_EQ(cells.size(), 2);
   EXPECT_EQ(cells[0]->cgi.nci.value(), 0x66c000) << "the cell the identity names directly";
   EXPECT_EQ(cells[1]->cgi.nci.value(), 0x66c001) << "the cell reporting it as its Mapped Cell ID";
+}
+
+TEST_F(du_configuration_manager_test, when_one_cell_has_an_unsupported_plmn_then_only_that_cell_is_left_out)
+{
+  auto setup_req = create_basic_du_setup_request();
+  add_served_cell(setup_req, 1);
+  setup_req.gnb_du_served_cells_list[0].served_cell_info.nr_cgi.plmn_id = plmn_identity::parse("00102").value();
+  setup_req.gnb_du_served_cells_list[0].served_cell_info.served_plmns   = {plmn_identity::parse("00102").value()};
+
+  auto du_cfg_updater = du_cfg_mng.create_du_handler();
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req, all_cells_of(setup_req));
+  ASSERT_TRUE(ret.has_value()) << "One cell the CU-CP cannot serve must not reject the whole DU";
+
+  ASSERT_EQ(du_cfg_mng.nof_dus(), 1);
+  ASSERT_EQ(du_cfg_updater->get_context().served_cells.size(), 1);
+  ASSERT_EQ(du_cfg_updater->get_context().served_cells[0].cgi,
+            setup_req.gnb_du_served_cells_list[1].served_cell_info.nr_cgi);
+}
+
+TEST_F(du_configuration_manager_test, when_one_cell_is_not_readable_then_only_that_cell_is_left_out)
+{
+  auto setup_req = create_basic_du_setup_request();
+  add_served_cell(setup_req, 1);
+
+  // The caller could not read the RRC containers of the first cell.
+  std::vector<nr_cell_global_id_t> readable_cells = {setup_req.gnb_du_served_cells_list[1].served_cell_info.nr_cgi};
+
+  auto du_cfg_updater = du_cfg_mng.create_du_handler();
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req, readable_cells);
+  ASSERT_TRUE(ret.has_value()) << "One unreadable cell must not reject the whole DU";
+
+  ASSERT_EQ(du_cfg_updater->get_context().served_cells.size(), 1);
+  ASSERT_EQ(du_cfg_updater->get_context().served_cells[0].cgi, readable_cells[0]);
+}
+
+TEST_F(du_configuration_manager_test, when_a_cell_duplicates_another_dus_cell_then_only_that_cell_is_left_out)
+{
+  auto setup_req1 = create_basic_du_setup_request(0);
+  auto setup_req2 = create_basic_du_setup_request(1);
+  add_served_cell(setup_req2, 2);
+  setup_req2.gnb_du_served_cells_list[0].served_cell_info.nr_cgi =
+      setup_req1.gnb_du_served_cells_list[0].served_cell_info.nr_cgi;
+
+  auto du_cfg_updater = du_cfg_mng.create_du_handler();
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req1, all_cells_of(setup_req1));
+  ASSERT_TRUE(ret.has_value());
+
+  auto du_cfg_updater2 = du_cfg_mng.create_du_handler();
+  ret                  = du_cfg_updater2->handle_new_du_config(setup_req2, all_cells_of(setup_req2));
+  ASSERT_TRUE(ret.has_value()) << "One duplicate cell must not reject the whole DU";
+
+  ASSERT_EQ(du_cfg_mng.nof_dus(), 2);
+  ASSERT_EQ(du_cfg_updater2->get_context().served_cells.size(), 1);
+  ASSERT_EQ(du_cfg_updater2->get_context().served_cells[0].cgi,
+            setup_req2.gnb_du_served_cells_list[1].served_cell_info.nr_cgi);
+}
+
+TEST_F(du_configuration_manager_test, when_no_cell_can_be_served_then_the_du_is_rejected_with_the_cause_of_its_cell)
+{
+  auto setup_req                                                        = create_basic_du_setup_request();
+  setup_req.gnb_du_served_cells_list[0].served_cell_info.nr_cgi.plmn_id = plmn_identity::parse("00102").value();
+
+  auto du_cfg_updater = du_cfg_mng.create_du_handler();
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req, all_cells_of(setup_req));
+  ASSERT_FALSE(ret.has_value());
+  ASSERT_EQ(ret.error().cause, f1ap_cause_t{f1ap_cause_radio_network_t::plmn_not_served_by_the_gnb_cu});
+
+  ASSERT_EQ(du_cfg_mng.nof_dus(), 0);
+}
+
+TEST_F(du_configuration_manager_test, when_the_du_reports_a_cell_twice_then_only_the_first_occurrence_is_served)
+{
+  auto setup_req = create_basic_du_setup_request();
+  add_served_cell(setup_req, 1);
+  add_served_cell(setup_req, 0);
+
+  auto du_cfg_updater = du_cfg_mng.create_du_handler();
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req, all_cells_of(setup_req));
+  ASSERT_TRUE(ret.has_value()) << "One duplicate cell must not reject the whole DU";
+
+  const std::vector<du_cell_configuration>& served_cells = du_cfg_updater->get_context().served_cells;
+  ASSERT_EQ(served_cells.size(), 2) << "the repeated cell must be served once";
+  ASSERT_EQ(served_cells[0].cgi, setup_req.gnb_du_served_cells_list[0].served_cell_info.nr_cgi);
+  ASSERT_EQ(served_cells[1].cgi, setup_req.gnb_du_served_cells_list[1].served_cell_info.nr_cgi);
+}
+
+TEST_F(du_configuration_manager_test, when_the_du_reports_no_served_cell_then_setup_fails)
+{
+  du_setup_request setup_req;
+  setup_req.gnb_du_id   = int_to_gnb_du_id(0);
+  setup_req.gnb_du_name = "odu0";
+
+  auto du_cfg_updater = du_cfg_mng.create_du_handler();
+  auto ret            = du_cfg_updater->handle_new_du_config(setup_req, {});
+  ASSERT_FALSE(ret.has_value());
+
+  ASSERT_EQ(du_cfg_mng.nof_dus(), 0);
 }
