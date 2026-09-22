@@ -106,6 +106,11 @@ struct mmse_stats_t {
   // nothing ordering it against the producer.
   std::atomic<uint64_t> grid_devwaited{0};
   std::atomic<uint64_t> grid_wait_unencoded{0};
+  // Stages REFUSED because the shared zero-copy cache answered with an interior offset, which
+  // wrap_shared() cannot express (5.9.54 item 6). A refusal is the correct outcome - the caller takes its
+  // host route - but it must be visible, or "no code ever binds a wrong address" would rest on an assumption
+  // again. Must stay 0: no leg has ever produced one.
+  std::atomic<uint64_t> wrap_shared_refused{0};
 };
 
 static mmse_stats_t& mmse_stats()
@@ -262,11 +267,13 @@ static void mmse_stats_report()
   // engine's DMRS extraction in ONE command buffer, where only a shared MTLBuffer object relates them. So
   // `grid_shared == hops` is the invariant an air leg reads, and `grid_failed` says a hop fell back.
   std::fprintf(stderr,
-               " grid_shared=%llu grid_failed=%llu grid_devwaited=%llu grid_wait_unencoded=%llu",
+               " grid_shared=%llu grid_failed=%llu grid_devwaited=%llu grid_wait_unencoded=%llu "
+               "wrap_shared_refused=%llu",
                static_cast<unsigned long long>(s.grid_shared.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.grid_failed.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.grid_devwaited.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.grid_wait_unencoded.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.grid_wait_unencoded.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.wrap_shared_refused.load(std::memory_order_relaxed)));
   std::fprintf(stderr, "\n");
 }
 #else  // OCUDU_METAL_STATS
@@ -662,27 +669,34 @@ struct mmse_engine_impl {
   id<MTLBuffer> wrap_shared(const void* ptr, NSUInteger bytes)
   {
     // \note The process-wide cache (shared_queue::wrap_no_copy) answers a request that an existing
-    // mapping ever so slightly contains with that mapping PLUS AN OFFSET, and this entry point drops
-    // that offset: it can only hand back a buffer to bind at 0. Every call site below therefore
-    // depends on the request being the mapping's own base - the estimator reserves its exported
-    // buffers at capacity first (see reserve_shared_buffer) so their first wrap is the whole
-    // allocation, but the ROTATING slots (gpu_rsrp + slot, gpu_ta + slot) are interior pointers and
-    // are the ones this would bite. The offset is logged once here rather than assumed: a non-zero
-    // one is a binding to the WRONG address, and this is the line that says whether it happens.
+    // mapping ever so slightly contains with that mapping PLUS AN OFFSET, and this entry point cannot
+    // express one: it hands back a buffer to bind at 0. Every call site below therefore depends on the
+    // request being the mapping's own base - the estimator reserves its exported buffers at capacity
+    // first (see reserve_shared_buffer) so their first wrap is the whole allocation, but the ROTATING
+    // slots (gpu_rsrp + slot, gpu_ta + slot) are interior pointers and are the ones this would bite.
+    //
+    // A NON-ZERO OFFSET IS A REFUSAL, not a warning: it used to be logged once and then ignored, which
+    // bound the mapping's base where the caller had asked for an interior address - a silent wrong
+    // address, and the one outcome this engine must never produce. Returning nil instead sends the
+    // caller down the path it already has for a failed wrap (the host route), so the hop is slower and
+    // never wrong. Measured: no leg ever hit it, so the refusal costs nothing today and is what makes
+    // "the binding is the address the caller asked for" true by construction rather than by hope.
     size_t        shared_offset = 0;
     id<MTLBuffer> buf = metal::shared_queue::wrap_no_copy(device, ptr, static_cast<size_t>(bytes), &shared_offset);
-    if (buf != nil && shared_offset != 0) {
+    if ((buf != nil) && (shared_offset != 0)) {
       static std::atomic<bool> offset_logged{false};
       bool                     expected = false;
       if (offset_logged.compare_exchange_strong(expected, true)) {
         ocudulog::fetch_basic_logger("PHY").error(
             "MMSE engine: the shared zero-copy cache served {} ({} bytes) as an OFFSET ({}) into an "
-            "existing mapping, which this entry point cannot express: the binding below would use the "
-            "mapping's base instead",
+            "existing mapping, which this entry point cannot express: the hand-over's stage is REFUSED "
+            "rather than bound to the mapping's base",
             ptr,
             static_cast<unsigned long long>(bytes),
             static_cast<unsigned long long>(shared_offset));
       }
+      mmse_stats().wrap_shared_refused.fetch_add(1, std::memory_order_relaxed);
+      return nil;
     }
     if (buf == nil) {
       ocudulog::fetch_basic_logger("PHY").warning(
@@ -1337,8 +1351,14 @@ static bool build_ta_tables(mmse_engine_impl* e, unsigned size)
   compat::aligned_free(e->ta_perm_mem);
   e->ta_twiddle_mem = tw_mem;
   e->ta_perm_mem    = perm_mem;
-  e->ta_twiddle     = e->wrap_shared(tw_mem, tw_rounded);
-  e->ta_perm        = e->wrap_shared(perm_mem, perm_rounded);
+  // Refused is a FAILURE here, not a degradation: the tables are read by a dispatch that is about to be
+  // encoded, and a nil one would be a null binding rather than a slow hop (wrap_shared() refuses rather
+  // than bind an interior offset - see there). The caller builds them again on the host route.
+  e->ta_twiddle = e->wrap_shared(tw_mem, tw_rounded);
+  e->ta_perm    = e->wrap_shared(perm_mem, perm_rounded);
+  if ((e->ta_twiddle == nil) || (e->ta_perm == nil)) {
+    return false;
+  }
   e->ta_radix2      = radix2;
   e->ta_radix3  = 0u;
   e->ta_size    = size;
