@@ -75,7 +75,18 @@ for kv in "$@"; do
     --*)                  CLI_ARGS+=("$kv") ;;
     OCUDU_*=*)            export "$kv" ;;
     *=*)                  echo "refusing '$kv': a knob must be OCUDU_*=…, and a gNB option must start with --" >&2; exit 2 ;;
-    *)                    echo "ignoring non-knob argument: $kv" >&2 ;;
+    # REFUSED, not ignored. This branch used to warn and drop the word, which contradicts the rule stated at
+    # the top of this file ("Anything else is refused loudly rather than dropped") and cost a leg: the operator
+    # wrote `--log.phy_level debug` as two words, `debug` was dropped here, gNB was handed `--log.phy_level`
+    # with no value, it consumed the NEXT option as that value and died at startup with
+    #   --phy_level: Log level '--expert_phy.phy_pipeline' not supported
+    # leaving a report in which every counter was zero (measured 2026-09-22 23:15, leg s55-racefix). The
+    # option=value form is this loop's contract, so say the fix instead of dropping the half that matters.
+    *)                    echo "refusing '$kv': neither a knob (OCUDU_*=value) nor a gNB option (--option=value)." >&2
+                          echo "  A bare word here is almost always the VALUE of the option before it: this loop" >&2
+                          echo "  reads one word at a time, so '--log.phy_level debug' arrives as the option plus" >&2
+                          echo "  this word. Join them with '=':   --log.phy_level=debug" >&2
+                          exit 2 ;;
   esac
 done
 

@@ -6414,7 +6414,7 @@ done_slot = (block_begin_ref + nof_samples) / nof_samples_per_slot - 1;
 **先说清一件事，否则会改错**：ocudulog 的级别是 **per-logger** 的，**没有独立的 console/file 电平**
 （`logger_appconfig_cli11_schema.cpp` 只有 `--all_level` / `--lib_level` / `--e2ap_level` / `--config_level`）。
 ⇒ **"改成 `logger.info(...)`"根本不解决控制台问题**（info 级一样打到 console）。
-所以取 debug：默认 info 下 console 与日志都安静，需要时间线时用 `--log.phy_level debug` 单独打开"PHY"这一层。
+所以取 debug：默认 info 下 console 与日志都安静，需要时间线时用 `--log.phy_level=debug` 单独打开"PHY"这一层。
 
 改动（`lib/phy/lower/lower_phy_baseband_processor.cpp`）：
 * 原始的每 1024 次取用 / 饥饿时每取用一行 → **"PHY" logger 的 debug 级**（先查 `debug.enabled()`，默认只付一次 load）。
@@ -6504,7 +6504,7 @@ done_slot = (block_begin_ref + nof_samples) / nof_samples_per_slot - 1;
 `[metal_stats] dft handover handed=28454 taken=14514 … (armed=1)` 这条退出报告**字段完全相同**
 （`ocudu_metal_burst.mm` 的 `burst_stats_report`，一直是每条腿报告的一部分）。
 再加一条 `[dft_handover] final` 就是**两份格式串扛同样十二个计数** —— 那正是"两份会漂移"的坑。
-崩溃腿的代价改为：**诊断时把级别开上去**（`--log.phy_level debug`），而不是让每条腿都淹着。
+崩溃腿的代价改为：**诊断时把级别开上去**（`--log.phy_level=debug`），而不是让每条腿都淹着。
 
 **验证（三条，不是"编译过了"）**：
 1. **默认级别下 `[dft_handover]` 行数 = 0**（`dft_release_adopt_metal_test`，且该测试确实驱动了交棒：
@@ -6646,7 +6646,28 @@ void shared_burst::deposit_released(...)
 **⑤ 一个代价兑现了，记下来**：s54 里 `[dft_handover]` = **0 行**（心跳已在 debug 级）⇒
 **崩溃腿丢掉了那份握手计数** —— 这正是 §5.9.69 ③ 写下的代价，下一条腿就兑现。
 这次补上的是 `.ips` 的栈 + `[d1_handover]` 的 `-> TAKEN` 行，所以诊断没受影响。
-**⇒ 崩溃诊断时请带 `--log.phy_level debug`**（`run_leg.sh` 接受 `--*` 参数并送进 argv）。
+**⇒ 崩溃诊断时请带 `--log.phy_level=debug`**（`run_leg.sh` 把 `--*` 送进 argv）。
+
+**★ 一个必须记下的坑（我自己踩的）**：**必须写成一个词 `--log.phy_level=debug`**。
+`s55-racefix` 的第一条腿就是我把参数写成了两个词（`--log.phy_level debug`）：
+`run_leg.sh` 的参数循环**逐词**读，`debug` 落进"非旋钮"那一支**被忽略**，gNB 拿到一个**没有值**的
+`--log.phy_level`，于是**把下一个选项当成它的值**，启动时直接拒绝：
+
+```
+gNB options   : --log.phy_level        ← 值被丢掉了
+--phy_level: Log level '--expert_phy.phy_pipeline' not supported
+```
+
+⇒ 那条腿的报告**每个计数都是 0**（`contract (mode=cpu)`、`[ul_gpu_lane] no lanes recorded`），
+**没有任何可用数据**，而且因为它照样打印了结构完整的退出报告，**光看报告像是"跑过了"**。
+修法与这个坑本身都记在这里：
+* `run_leg.sh` 的 `*)` 分支**由"警告后忽略"改为"拒绝并 rc=2"**（脚本头部本来就写着
+  "Anything else is refused loudly rather than dropped"，原实现与自己的声明矛盾），
+  拒绝信息直接给出 `--log.phy_level=debug` 这个写法；
+* 已实测：`--log.phy_level=debug` → 作为**单个** argv 词被接受；`--log.phy_level debug` → **rc=2 拒绝**；
+  `OCUDU_*=value` 不受影响。
+* **教训（与 §5.9.68 ⓪ 同一类）**：腿的"报告结构完整"**不等于**"腿有效"。
+  这次是 `contract (mode=cpu)` 与 `no lanes recorded` 两行暴露了它 —— **跑之前先确认 argparse 没报错**。
 
 **⑥ 待 OTA**
 
