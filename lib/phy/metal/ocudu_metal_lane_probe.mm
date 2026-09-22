@@ -194,6 +194,8 @@ const char* stage_name(gpu_lane_probe::stage which)
       return "ch_wt";
     case gpu_lane_probe::stage::equalizer_demapper:
       return "eq_demap";
+    case gpu_lane_probe::stage::merged_hop:
+      return "merged_hop";
     case gpu_lane_probe::stage::other:
       return "other";
     case gpu_lane_probe::stage::count:

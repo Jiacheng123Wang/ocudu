@@ -60,6 +60,14 @@ public:
     channel_estimator_weights,
     /// Equalization and demapping, which share one command buffer per burst.
     equalizer_demapper,
+    /// \brief The MERGED route's single command buffer: the whole hop (the front end's transforms that wrote
+    /// the grid, the estimator, the equalization and the demapping) in ONE submission (5.9.61/5.9.66).
+    ///
+    /// It is a stage of its own because the busy split attributes a command buffer's WHOLE GPU span to one
+    /// stage, and Metal gives no encoder- or dispatch-level timestamps to divide it further. Calling that
+    /// buffer \c equalizer_demapper made `eq_demap` the sum of four stages, which is exactly the number an
+    /// optimization would aim at - so the label has to say what the buffer is.
+    merged_hop,
     /// Anything else committed inside the lane.
     other,
     count

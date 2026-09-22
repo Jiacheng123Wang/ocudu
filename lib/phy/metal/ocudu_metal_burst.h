@@ -24,6 +24,8 @@
 
 #import <Metal/Metal.h>
 
+#include "ocudu_metal_lane_probe.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -53,6 +55,20 @@ public:
   /// \brief Ends the encoder and commits the burst without waiting.
   /// \return True when a burst was committed.
   static bool commit();
+
+  /// \brief What the command buffer this thread's burst commits CARRIES, for the lane probe's busy split.
+  ///
+  /// The split attributes a command buffer's whole GPU span to ONE stage (Metal gives no finer timestamps),
+  /// so the label has to name what is actually in it. On the \c merged route that is the WHOLE hop - the
+  /// front end's transforms, the estimator, the equalization and the demapping, adopted into one buffer -
+  /// and calling it \c equalizer_demapper made `eq_demap` the sum of four stages, i.e. the very number a
+  /// latency optimization would aim at (5.9.61).
+  ///
+  /// \note The default is \c equalizer_demapper, which is the truth on every other route (there the burst
+  ///       really is the equalizer and the demapper). Whoever makes a buffer carry more says so here, at the
+  ///       point where it does: the estimator, where its adopted buffer becomes the lane's burst.
+  /// \note Per thread, like the burst itself, and reset by every commit.
+  static void set_commit_label(gpu_lane_probe::stage which);
 
   /// \brief Waits for every command buffer committed by this thread's bursts.
   /// \return True when all of them completed successfully.

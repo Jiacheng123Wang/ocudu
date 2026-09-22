@@ -6143,8 +6143,70 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s50-batch3
 * 其余照旧：`handed>0 taken>0 timeouts=0 (armed=1)`、`cbs/lane=1.00`、`contract 8/8`、`dropped=0`、
   `will NOT exercise D1`=0、QPSK CRC 与 s49 同形、`channel_estimator = 2×跳数`、`stale` 个位数。
 
-**⑤ 余下**：#5-① 已裁定并落地；**#13 第 1 步**（把路线信息接到 `shared_burst::commit()`，让 `busy split` 的标签不说谎）
-是下一件要动的 PHY；**#16**（Ubuntu 工作树同步）是家务；**#12** 已改判交出。
+#### 5.9.66 ✅✅ `s50-batch3` 确认腿 + **#13 第 1 步落地（`busy split` 的标签不再说谎）**
+
+**① s50：三项新判据全部符合预期**
+
+| 判据 | 预期 | 实测 | |
+|---|---|---|---|
+| `[metal_stats] front_end fence …` | **消失** | 出现 **0** 次 ✅ | 机制已删 |
+| `lane fence` 行 | 仍在且 `signals == lanes` | `signals=15675` == `lanes=15675` ✅ | 后端 stage 栅栏未受影响 |
+| `evicted_unproduced` | 0 | **0** ✅ | 不变量成立 |
+| **`over_bound`**（新）| ≪ 256 | **0** ✅ | **软上界在这条话务上一次都没被触发** |
+
+`handed − evicted = 29918 − 29662 = 256` **恰等于** `handed_capacity` ⇒ 注册表**始终正好停在界上**，
+与 `over_bound=0` 一致 ⇒ **软上界在本话务下零代价**。
+交出账闭合：`taken 13632 + fallback 12304 + late 3981 + unproduced 1 = 29918 = handed` ✅
+
+**其余门**：`will NOT exercise D1`=0、`dft commits=1`、`cbs/lane=1.00`、`contract 8/8`、`dropped=0`、
+**RF 失败 0**、`grid_shared=15675=lanes`、`grid_failed=0`、`channel_estimator=31350=2×15675`、**`stale=0`**（四条腿最好）。
+
+**功能无回归**（四条生产腿的解码同分布）：
+
+| 腿 | PUSCH | 总 KO% | **QPSK KO%** | QPSK sinr 中位 |
+|---|---|---|---|---|
+| s47 | 14524 | 9.3 | 0.5 | 11.3 |
+| s48 | 15605 | 6.4 | 0.6 | 11.3 |
+| s49 | 16198 | 3.6 | 0.4 | 5.4 |
+| **s50** | 15674 | 6.3 | **0.7** | 7.8 |
+
+延迟中位 1905.3 / p95 5514.2 —— 在四条腿的散布内（中位 1841–1905）。
+
+**② #13 第 1 步：`busy split` 现在按【路线】如实标注**
+
+`busy split` **按命令缓冲**归属（一条缓冲的 GPU 跨度记给一个 stage），而 Metal 没有 encoder/dispatch 级时间戳
+⇒ **一条缓冲无法按阶段分时**（§5.9.61 的更正）。所以唯一诚实的做法是**把那条缓冲叫对名字**：
+
+* `gpu_lane_probe::stage` 新增 **`merged_hop`**（+ `stage_name` 里的名字）；
+* `shared_burst` 新增**每线程的 commit 标签** `set_commit_label()`，**默认仍是 `equalizer_demapper`**
+  （其余路线上那是真话），`commit()` 用它并**在下一次 commit 时复位**；
+* **合并路线上由估计器在"接管成功那一刻"置标签** —— 那正是缓冲变成"整跳"的地方。
+
+**实测（同一份语料，只换车道序）**：
+
+| 车道序 | `busy split` |
+|---|---|
+| `merged` | `merged_hop=468.7us/lane (90% of busy)` + `eq_demap=54.3us (10%)` |
+| `event` | `ch_wt=482.6us (87%)` + `eq_demap=70.8us (13%)` —— **无 `merged_hop`** ✅ |
+| `wait` | `ch_wt=847.0us (90%)` + `eq_demap=95.8us (10%)` —— **无 `merged_hop`** ✅ |
+
+⇒ **标签严格跟随路线**，而**以前 `eq_demap` 独吞 100%**（DFT+估计器+均衡+解映射算成一件）——
+那正是"要优化时优化错对象"的根源。**⇒ #13 的前置已补齐，可以进入第 2 步（按 MCS 分层查 residency 的 2.2× 尾巴）。**
+
+**③ 离线门（全绿）**：ctest **36/36**、value_net **47/0**、L1a 5 PASS、L1b **rc=0/differing=0**、
+`dft_release_adopt_metal_test` **PASS**（含 arm 10）。
+
+**④ ⏸ 空口腿（本批次）**
+
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s51-batch4
+```
+**唯一新增要看的一行**：`[ul_gpu_lane] busy split:` 应当出现 **`merged_hop=… (…% of busy)`**
+（因为生产路径就是合并路线），而 `eq_demap` 应当**只剩一个零头**（不再是 100%）。
+**其余判据与 s50 完全相同。**
+
+**⑤ 余下**：**#13 第 2 步**（按 MCS 分层核 residency 尾巴，需要一条带 `OCUDU_UL_PHASE_SEGMENTS=1` 或 slot trace 的腿）；
+**#16**（Ubuntu 工作树同步，家务）；**#12** 已改判交出（数据在 §5.9.59/60）。
 
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**

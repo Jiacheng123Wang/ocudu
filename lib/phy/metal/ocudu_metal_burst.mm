@@ -129,6 +129,8 @@ struct burst_state {
   /// (see shared_burst::set_grid_wait()). Consumed when the buffer is created.
   uint64_t                          grid_wait  = 0;
   std::vector<id<MTLCommandBuffer>> outstanding; // committed through this thread, not waited yet
+  /// What the buffer this burst commits carries, for the lane probe's busy split (see set_commit_label()).
+  ocudu::metal::gpu_lane_probe::stage commit_label = ocudu::metal::gpu_lane_probe::stage::equalizer_demapper;
 
   ~burst_state()
   {
@@ -346,6 +348,11 @@ bool shared_burst::adopt(id<MTLCommandBuffer> cb)
   return true;
 }
 
+void shared_burst::set_commit_label(gpu_lane_probe::stage which)
+{
+  state().commit_label = which;
+}
+
 unsigned shared_burst::size()
 {
   return state().n;
@@ -388,7 +395,9 @@ bool shared_burst::commit()
   // The burst is the command buffer whose completion produces the LLRs, i.e. the last one of the
   // lane: registering it here is what lets gpu_lane_probe attribute the residency to the stages that
   // were committed before it on this thread.
-  gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::equalizer_demapper);
+  gpu_lane_probe::register_commit(cb, s.commit_label);
+  // Consumed: the next burst of this thread is the ordinary one unless it says otherwise again.
+  s.commit_label = gpu_lane_probe::stage::equalizer_demapper;
   s.outstanding.push_back(cb);
   return true;
 }

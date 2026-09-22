@@ -3474,6 +3474,10 @@ static bool encode_run(mmse_engine_impl*     e,
       for (unsigned stage = 0; stage != estimator_stages_carried; ++stage) {
         ocudu::metal::shared_burst::count_dispatch(ocudu::metal::shared_burst::stage::channel_estimator);
       }
+      // ... and the buffer this burst will commit carries the WHOLE hop, not just the equalizer and the
+      // demapper: it was the extraction's held buffer, this stage added the weights, and the lane's own
+      // stages follow. Said HERE because this is where it becomes true (5.9.61/5.9.66).
+      ocudu::metal::shared_burst::set_commit_label(ocudu::metal::gpu_lane_probe::stage::merged_hop);
     }
     phase.committed();
     return true;
