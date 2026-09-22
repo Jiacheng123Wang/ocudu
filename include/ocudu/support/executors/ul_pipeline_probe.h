@@ -575,7 +575,17 @@ public:
       return; // the landmark that does NOT prove a PUSCH, for a slot that has no timeline to update
     }
     // The budget applies to the slots that CARRY a PUSCH: evict the oldest of those when full.
-    if (is_new && (slot_trace.size() >= max_slot_trace)) {
+    //
+    // The bound is the one the OPERATOR asked for, not the internal maximum. It used to compare against
+    // max_slot_trace, so OCUDU_UL_SLOT_TRACE bounded nothing: `=64` printed 512 rows (measured on s57-trace,
+    // 2026-09-22) and the header line then reported a bound it had not applied - "TRACE=64, rows=512" is the
+    // contradiction the printer's own comment says a reader would be right to flag.
+    // A `while`, not an `if`: one eviction per insertion holds the bound steady while it does not move, but it
+    // cannot bring an ALREADY collected set down to a bound that was lowered afterwards, and the trace is a
+    // process-wide singleton whose bound is read from the environment on every call (the test below toggles it
+    // inside one process, which is how this was found). The order list is what says which slot is oldest; if it
+    // were ever empty while the map is not, adding the row is the safe direction to fail in.
+    while (is_new && !slot_trace_order.empty() && (slot_trace.size() >= slot_trace_limit())) {
       auto oldest = slot_trace_order.begin();
       slot_samples_done.erase(*oldest);
       slot_trace_pre_wait.erase(*oldest);

@@ -525,4 +525,37 @@ TEST(ul_pipeline_probe_test, late_samples_are_counted_apart_from_the_series)
   EXPECT_NE(after.find("the uplink HARQ round trip"), std::string::npos) << after;
 }
 
+/// The per-slot timeline honours the bound the OPERATOR asked for.
+///
+/// `OCUDU_UL_SLOT_TRACE=64` is a request to spend 64 rows of a log, and it used to bound nothing: the eviction
+/// compared against the INTERNAL maximum (512) instead of the requested limit, so the run printed 512 rows while
+/// its own header line said "bound now OCUDU_UL_SLOT_TRACE=64" (measured on s57-trace, 2026-09-22). The check
+/// below FAILS under that behaviour - with a bound of 2 and five PUSCH slots it gets 5 rows - which is the point:
+/// an instrument that reports a bound it does not apply is worse than one that reports none.
+TEST(ul_slot_trace_test, the_requested_bound_is_the_one_enforced)
+{
+  ::setenv("OCUDU_UL_SLOT_TRACE", "2", 1);
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+
+  // Five slots that carry a PUSCH, in the PRODUCTION shape: one whole slot per block, starting on the grid. The
+  // samples-complete instant comes first (it is what makes a slot eligible for a timeline at all) and the first
+  // codeblock decode start is what creates the row.
+  for (uint64_t slot = 1000; slot != 1005; ++slot) {
+    uint64_t done = 0;
+    ASSERT_TRUE(ocudu::ul_slot_completed_by_block(slot * 7680, 7680, 7680, done)) << "slot " << slot;
+    EXPECT_EQ(done, slot);
+    probe.record_slot_samples_complete(done, 7680, 0, std::chrono::high_resolution_clock::now());
+    probe.record_ldpc_start(slot);
+  }
+
+  const std::string report = capture_report();
+  static constexpr const char* tag = "[ul_slot_trace] rows=";
+  const size_t                 pos = report.find(tag);
+  ASSERT_NE(pos, std::string::npos) << report;
+  const long rows = std::strtol(report.c_str() + pos + sizeof("[ul_slot_trace] rows=") - 1, nullptr, 10);
+  EXPECT_LE(rows, 2) << "the requested bound was not enforced (rows=" << rows << "):\n" << report;
+
+  ::unsetenv("OCUDU_UL_SLOT_TRACE");
+}
+
 #endif // OCUDU_FLOW_PROBES

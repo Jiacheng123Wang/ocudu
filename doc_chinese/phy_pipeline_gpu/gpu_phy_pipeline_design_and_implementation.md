@@ -6969,6 +6969,91 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s57-trace OCUDU_UL_
 5. 契约 8/8、`cbs/lane=1.00`、`dropped=0`、`gaps=0`、无 Metal 断言、`[ul_rx_pool]` 汇总恰好一行；
 6. `stale` 应为 0（若不为 0，如实记下，别当作回归 —— 见 §5.9.74 ③）。
 
+#### 5.9.76 ★★★ `s57-trace`：#13 第 2 步**有答案了，而且是否定答案** —— 尾巴与这跳的活量**无关**（x1.03），它是**一次 60 ms 的连续卡顿**
+
+**① 六条判据全过**
+
+| 判据 | 实测 |
+|---|---|
+| ① `[ul_slot_diag]` 对齐块报 `completes=YES` | ✅ `blk=2.. off_in_slot=0 n=7680 to_boundary=7680 completes=**YES**`（旧规则在这里恒为 no）|
+| ② `[ul_slot_trace] rows=` = 绑定 64 | ❌ **rows=512** —— **旋钮根本没约束住**，见 ③ |
+| ③ 行的 `tb_bytes` 非 nan | ✅ `96` / `217` / …（与 `[ul_mac_pdu_size]` 中位 145 B、p95 480 B 一致）；首行 nan 是"创建了条目但 PDU 没完成"的那一类，已在字段注释里写明 |
+| ④ **`[ul_by_size]` 表 + 比值行** | ✅ 见 ② |
+| ⑤ 契约/车道/池/断言 | ✅ **MET 8/8**、`lanes=16509 cbs/lane=1.00 dropped=0`、`gaps=0`（83,338 块）、**无 Metal 断言**、`[ul_rx_pool]` 汇总恰好一行（`held_max=7 free_min=1 starved_takes=7 starved_events=6`）|
+| ⑥ `stale` | ✅ **0**（两条序列都是）|
+
+**② ★ #13 第 2 步的答案：与活量无关**
+
+```
+[ul_by_size] the hop's own spans (us) against the transport block it carried - 15746 CRC-OK hop(s)
+  tb_bytes    samples   iq2llr_med   iq2llr_p95     pipe_med     pipe_p95
+  <128B          7837       1866.3       5291.9       1886.0       5312.0
+  128-383B       4058       1820.4       5398.5       1846.0       5428.0
+  384-767B       3631       1814.5       5422.4       1865.0       5463.0
+  >=768B          220       1925.8       5257.9       1994.0       5347.0
+[ul_by_size] iq2llr median: smallest bucket 1866.3us -> largest bucket 1925.8us (x1.03)
+```
+
+**中位数平（1866→1820→1815→1926，x1.03），p95 也平（5292→5399→5422→5258）**，而 TB 字节数跨了 **6 倍以上**。
+⇒ **§5.9.67 ④ 的第二个分支被证伪**："尾巴是这跳自己的 dispatch 数 ⇒ 要压的是那批 dispatch" —— 不是。
+一个 3 字节的跳与一个 1377 字节的跳，中位与 p95 都一样。
+（§5.9.67 ④ 的第一个分支"GPU 队列争用"此前已被 `gap=0` 排除，见 §5.9.75 ⑤。）
+
+**③ ★★ 尾部的真身：一次 60 ms 的连续卡顿**
+
+512 行 trace 每行都带 `base_since_boot`（样本到齐的时刻），把它们按时间排列：
+
+| 量 | 读数 |
+|---|---|
+| 慢槽（`pipeline > 4000 µs`） | **49 / 501 = 10%** |
+| 慢槽的时间跨度 | **6929.02 .. 6929.08 s（60 ms）** |
+| 慢槽的 slot 号 | **连续**（47/48 个相邻间隔 = **1**，只有一处 13）|
+| 其余 452 行 | base 从 6928.81 铺到 6937.66（8.8 s），`pipeline` 全在 4000 以下 |
+
+**⇒ 10% 的慢跳不是散布在整条腿上的随机事件，而是一段 60 ms 里"每个槽都慢"。**
+这与 ②（与活量无关）合起来只剩一个解释：**某个共享的、短时的东西把整条上行路径卡住了约 60 ms**。
+
+**④ 相关物：`defer_wait`（新线索，未证）**
+
+```
+[mmse_time_sum] calls=16509 hops_gpu=16509 ... mean total=17.0us ... gpu_path=16.4us (gpu_wait=0.0us)
+                cpu_blocks=0.0us defer_wait=838.5us | device_hops=16509 max total=174us
+```
+
+`defer_wait` 的均值 **838.5 µs**，而 `total` 只有 17 µs —— 两者量级差 50 倍，说明 `defer_wait` 计的是**另一段**
+（不是每跳一次的那个 17 µs 预算），**它比这跳自己的活量大两个数量级**。这与 ③ 的方向一致：
+钱花在"等"上，不在"算"上。**下一步该数的是 `defer_wait` 的分布与它在那 60 ms 窗口里的值。**
+
+**⑤ 顺带发现并修掉的第二个仪表缺陷：绑定形同虚设**
+
+`OCUDU_UL_SLOT_TRACE=64` 打印出 **512 行**，而表头写着 "bound now OCUDU_UL_SLOT_TRACE=64" ——
+**淘汰判据用的是内部上限 `max_slot_trace`（=512），不是操作员请求的 `slot_trace_limit()`**。
+（表头注释里那句"a reader who takes TRACE=64, captured=512 for a defect is reading it correctly as a
+contradiction"说明作者预见了这个矛盾，但当时选择把它印出来而不是修掉。）
+
+修法两处（都在探针头，`ul_pipeline_probe.h`）：
+1. 淘汰用 `slot_trace_limit()`（**请求的**绑定）；
+2. `if` → **`while`**：一次插入只淘汰一个，只能在上限**不动**时维持住；
+   上限被**调低**后已收集的行不会收敛 —— 测试在单例上跨用例改 env，正好把这个弱点逼了出来（实测 rows=4 而非 2），
+   所以改成 `while`，并在顺序表为空时退出（宁可多留一行，也不要越界）。
+
+新测试 `ul_slot_trace_test.the_requested_bound_is_the_one_enforced`：绑定=2、喂 5 个 PUSCH 槽，
+断言 `rows <= 2`。**它在旧行为下会红**（实测：修 `while` 前 rows=4；完全不修则是 4+5=9）。
+⇒ 探针测试 **4/4**。
+
+**⑥ 一处需要知道的 nan**：本次 512 行里 `t2f` 与 `ce` 两列**全是 nan**。
+原因是这两条阶段序列在**融合车道里本来就不记录**（`records_phase_segments()` 只在非融合模式为真，见 §5.9.75 的注释）。
+⇒ 在 `phy_pipeline_mode::gpu`（也就是我们一直在跑的形态）下，trace 行能用的是
+`rxwait / ldpc / crc_ok / tb_bytes / pipeline`，**不是**全部十列。这不是缺陷，但读的人必须知道。
+
+**⑦ 离线门（全绿）**：`ul_pipeline_probe_test` **4/4**（含两条反向臂）、`lower_phy_test` **528/528**、
+ctest **36/36**、`value_net` **47/0**、`uplink_processor_test` **23/23**、
+`l1_handover_arms 5 PASS`、`l1_hop_arms` 全臂 `differing=0`。
+
+**⑧ 待 OTA（一条短腿即可）**：`sudo -E bash …/run_leg.sh gpu s58-trace64 OCUDU_UL_SLOT_TRACE=64`
+判据：**`rows=64`**（不再是 512）、其余照旧；若同时想看 60 ms 卡顿是否复现，把 `defer_wait` 与
+`[ul_by_size]` 的表一起读下来。
+
 
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
