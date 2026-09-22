@@ -463,7 +463,7 @@ bool ocudu::gtpu_extension_header_comprehension_check(const gtpu_extension_heade
   if (comp_not_needed) {
     logger.log_debug("Extension header not comprehended. type={}", type);
   } else {
-    logger.log_error("Extension header not comprehended. type={}", type);
+    logger.log_warning("Extension header not comprehended. type={}", type);
   }
   return comp_not_needed;
 }
