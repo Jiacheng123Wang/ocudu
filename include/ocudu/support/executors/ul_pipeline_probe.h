@@ -194,6 +194,17 @@ public:
     /// NaN for a slot whose entry was created but whose PDU never completed (the trace is keyed on the first
     /// codeblock decode invocation, so this can only be an aborted or failed hop).
     double          tb_bytes      = std::numeric_limits<double>::quiet_NaN();
+    /// \brief The two raw instants this row's deltas were computed against, SNAPSHOTTED at the row's last
+    /// update rather than looked up when the report is printed.
+    ///
+    /// They exist so a reader can tell a real span from a difference between two unrelated origins (see
+    /// print_slot_trace). Looking them up at print time broke exactly that: the row is keyed by the MODULAR
+    /// slot, a later SFN cycle completes the same key again - overwriting slot_samples_done[slot] - and if that
+    /// repeat carries no PUSCH there is no landmark update to refresh the row, so the printed base belonged to
+    /// the NEW frame while the deltas beside it belonged to the old one. Measured on `s58-trace64`: 40 of 64
+    /// rows, every one of them off by 10.238 s, which is the 10.24 s SFN cycle of this configuration.
+    double          base_epoch_s  = std::numeric_limits<double>::quiet_NaN();
+    double          mark_epoch_s  = std::numeric_limits<double>::quiet_NaN();
   };
 
   /// Records the start of the UL processing of a slot (call from the lower PHY baseband processor).
@@ -620,6 +631,10 @@ public:
     if (wait_it != slot_trace_pre_wait.end()) {
       e.rx_wait_us = wait_it->second;
     }
+    // The raw instants, taken here so that they always describe the same frame as the deltas above (see
+    // slot_trace_entry::base_epoch_s).
+    e.base_epoch_s = std::chrono::duration<double>(base.time_since_epoch()).count();
+    e.mark_epoch_s = std::chrono::duration<double>(at.time_since_epoch()).count();
   }
 
   /// \brief Prints the per-slot timelines captured by OCUDU_UL_SLOT_TRACE.
@@ -677,21 +692,13 @@ public:
       // The two raw instants, in seconds since the CLOCK's own epoch: they are what says whether a delta is a
       // real span or a difference between two unrelated origins. A delta of "one slot" that shows up next to a
       // base of 0 is a base that was never set, and no amount of staring at the delta will reveal that.
-      double base_s = 0.0;
-      double mark_s = 0.0;
-      {
-        std::lock_guard<std::mutex> lock(mutex);
-        auto                        b = slot_samples_done.find(e.slot);
-        if (b != slot_samples_done.end()) {
-          base_s = std::chrono::duration<double>(b->second.time_since_epoch()).count();
-        }
-        // The newest landmark of this slot, out of the per-(slot, landmark) map.
-        for (const auto& kv : slot_landmarks) {
-          if (kv.first.first == e.slot) {
-            mark_s = std::chrono::duration<double>(kv.second.time_since_epoch()).count();
-          }
-        }
-      }
+      //
+      // They come from the ROW, not from a lookup here: the row is keyed by the modular slot, and a later SFN
+      // cycle can overwrite slot_samples_done[slot] without refreshing this row (the repeat carried no PUSCH, so
+      // no landmark update came), which printed a base one SFN cycle away from the deltas beside it. See
+      // slot_trace_entry::base_epoch_s - measured: 40 of 64 rows, all off by 10.238 s.
+      const double base_s = e.base_epoch_s;
+      const double mark_s = e.mark_epoch_s;
       std::fprintf(stderr,
                    "  %-8llu %10.1f %10.1f %10.1f %10.1f %10.1f %10.0f %10.1f %12.3f %12.3f\n",
                    static_cast<unsigned long long>(e.slot),

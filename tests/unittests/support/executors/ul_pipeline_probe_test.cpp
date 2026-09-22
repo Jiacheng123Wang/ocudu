@@ -558,4 +558,57 @@ TEST(ul_slot_trace_test, the_requested_bound_is_the_one_enforced)
   ::unsetenv("OCUDU_UL_SLOT_TRACE");
 }
 
+/// A row's raw instants describe the SAME frame as the deltas printed beside them.
+///
+/// The row is keyed by the MODULAR slot, so a later SFN cycle completes that key again. When the repeat carries no
+/// PUSCH there is no landmark update to refresh the row, and a report that looked the instants up AT PRINT TIME
+/// then printed a base one SFN cycle away from the deltas it was supposed to validate. Measured on
+/// `s58-trace64` (2026-09-23): 40 of 64 rows, every one of them off by 10.238 s - the 10.24 s SFN cycle of that
+/// configuration. The instants are snapshotted into the row now, and this case reproduces the wrap: two
+/// completions of one slot key, one landmark, and the base column must still precede the landmark column, because
+/// a landmark is always measured FROM the samples that came before it.
+TEST(ul_slot_trace_test, the_raw_instants_describe_the_same_frame_as_the_deltas)
+{
+  ::setenv("OCUDU_UL_SLOT_TRACE", "64", 1);
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+  constexpr uint64_t        slot  = 2000;
+
+  uint64_t done = 0;
+  ASSERT_TRUE(ocudu::ul_slot_completed_by_block(slot * 7680, 7680, 7680, done));
+  probe.record_slot_samples_complete(done, 7680, 0, std::chrono::high_resolution_clock::now());
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  // Creates the row; its deltas are measured from the completion above.
+  probe.record_ldpc_start(slot);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  // The next SFN cycle completes the same modular slot with nothing to decode: this overwrites the probe's
+  // per-slot completion instant and must NOT touch the row that is already on record.
+  probe.record_slot_samples_complete(done, 7680, 0, std::chrono::high_resolution_clock::now());
+
+  const std::string report = capture_report();
+  bool              found  = false;
+  double            base   = 0.0;
+  double            mark   = 0.0;
+  std::istringstream lines(report);
+  std::string        line;
+  while (std::getline(lines, line)) {
+    std::istringstream fields(line);
+    std::vector<std::string> tok;
+    std::string              field;
+    while (fields >> field) {
+      tok.push_back(field);
+    }
+    if ((tok.size() == 10) && (tok.front() == std::to_string(slot))) {
+      base  = std::strtod(tok[tok.size() - 2].c_str(), nullptr);
+      mark  = std::strtod(tok.back().c_str(), nullptr);
+      found = true;
+    }
+  }
+  ASSERT_TRUE(found) << "no row for slot " << slot << " in the report:\n" << report;
+  EXPECT_LE(base, mark) << "the row's base (" << base << ") is later than its own landmark (" << mark
+                        << "): the two columns are from different frames\n"
+                        << report;
+
+  ::unsetenv("OCUDU_UL_SLOT_TRACE");
+}
+
 #endif // OCUDU_FLOW_PROBES
