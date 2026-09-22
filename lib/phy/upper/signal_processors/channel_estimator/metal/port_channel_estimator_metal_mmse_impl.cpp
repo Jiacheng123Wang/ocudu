@@ -57,12 +57,24 @@ struct mmse_time_stats {
   std::atomic<uint64_t> corr_us{0};
   std::atomic<uint64_t> deferred_wait_us{0};
   std::atomic<uint64_t> max_total_us{0};
+  /// \brief The deferred wait of every hop, so the report can give its DISTRIBUTION and not only its mean.
+  ///
+  /// Why it matters: this is the one term in this budget big enough to BE a hop's whole span. Measured on
+  /// `s59-stall` (2026-09-23), the median [ul_pipeline] span of 1906us is almost exactly [ul_rx_wait] 1057us plus
+  /// this term's 835.6us, and the leg's slow hops differ from its fast ones in NOTHING else (same rx wait, same
+  /// transport block size, a lane whose own maximum is 1285us, a 71us decode). A mean cannot say whether the
+  /// stalls that make up the tail are waits of this kind; a p95 can.
+  mutable std::mutex   deferred_mutex;
+  std::vector<double>  deferred_wait_samples_us;
 };
 
 mmse_time_stats& mmse_stats()
 {
-  static mmse_time_stats s;
-  return s;
+  // Never destroyed on purpose: the report below runs from an atexit handler, which runs AFTER the static
+  // destructors of this translation unit - the same reasoning as handed() in ocudu_metal_burst.mm. It used to be
+  // trivially destructible (atomics only); the defer_wait distribution is what makes it not.
+  static mmse_time_stats* s = new mmse_time_stats();
+  return *s;
 }
 
 void mmse_stats_register_atexit()
@@ -104,6 +116,35 @@ void mmse_stats_register_atexit()
                    static_cast<unsigned long long>(s.device_hops.load(std::memory_order_relaxed)),
                    static_cast<unsigned long long>(s.max_total_us.load(std::memory_order_relaxed)));
 
+      // The DISTRIBUTION of the deferred wait, not only its mean. It is the one term in this budget large enough
+      // to BE a hop's whole span - measured on `s59-stall` (2026-09-23): the median [ul_pipeline] span of 1906us
+      // is almost exactly [ul_rx_wait] 1057us plus this term's 835.6us, and the leg's slow hops differ from its
+      // fast ones in nothing else (same wait, same transport block, a lane whose own max is 1285us, a 71us
+      // decode). A mean cannot say whether the stalls behind the tail are waits of this kind; this can.
+      {
+        std::vector<double> dw;
+        {
+          std::lock_guard<std::mutex> lock(s.deferred_mutex);
+          dw = s.deferred_wait_samples_us;
+        }
+        if (!dw.empty()) {
+          std::sort(dw.begin(), dw.end());
+          const auto pct = [&dw](double q) { return dw[static_cast<size_t>((dw.size() - 1) * q)]; };
+          double     sum = 0.0;
+          for (double v : dw) {
+            sum += v;
+          }
+          std::fprintf(stderr,
+                       "[mmse_time_sum] defer_wait distribution: samples=%zu mean=%.1fus median=%.1fus p95=%.1fus "
+                       "p99=%.1fus max=%.1fus\n",
+                       dw.size(),
+                       sum / static_cast<double>(dw.size()),
+                       pct(0.5),
+                       pct(0.95),
+                       pct(0.99),
+                       dw.back());
+        }
+      }
     });
   });
 }
@@ -158,6 +199,14 @@ void mmse_stats_accumulate(unsigned nof_prb,
   s.cpu_blocks_us.fetch_add(static_cast<uint64_t>(cpu_blocks_us), std::memory_order_relaxed);
   s.total_us.fetch_add(static_cast<uint64_t>(total_us), std::memory_order_relaxed);
   s.deferred_wait_us.fetch_add(static_cast<uint64_t>(deferred_wait_us), std::memory_order_relaxed);
+  {
+    // One push per hop (about one per millisecond), and bounded: a leg is seconds long, and an unbounded vector
+    // in a probe is what 5.9.68 (4) was about.
+    std::lock_guard<std::mutex> lock(s.deferred_mutex);
+    if (s.deferred_wait_samples_us.size() < 200000) {
+      s.deferred_wait_samples_us.push_back(deferred_wait_us);
+    }
+  }
   uint64_t prev = s.max_total_us.load(std::memory_order_relaxed);
   const auto cur = static_cast<uint64_t>(total_us);
   while (cur > prev && !s.max_total_us.compare_exchange_weak(prev, cur, std::memory_order_relaxed)) {
