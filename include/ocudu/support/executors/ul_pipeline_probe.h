@@ -527,6 +527,50 @@ public:
     }
     return (v > max_slot_trace) ? static_cast<unsigned>(max_slot_trace) : v;
   }
+  /// \brief How much of the timeline's budget is reserved for the SLOWEST rows (see trace_eviction_victim()).
+  static size_t slot_trace_slow_reserve() { return std::max<size_t>(1, slot_trace_limit() / 4); }
+
+  /// \brief Which row to drop when the timeline is full.
+  ///
+  /// The policy used to be "the oldest", i.e. the timeline kept the NEWEST slots that carried a PUSCH - and that
+  /// is blind to the very thing it is now used to find. Measured on `s58-trace64` (2026-09-23): its 64 rows held
+  /// NO slow hop at all (largest pipeline 3115 us) while the same leg reported p95 = 5590 us, and `s57-trace` had
+  /// caught the 60 ms stall only because its 512 rows happened to reach back far enough to still contain it.
+  /// A tail is a TRANSIENT: keeping only the newest rows throws the evidence away as the run goes on.
+  ///
+  /// So a quarter of the budget (`slot_trace_slow_reserve()`, at least one row) is reserved for the slowest rows,
+  /// and the victim is the OLDEST row that is not among them. A slow row can still be displaced - by a slower one,
+  /// which is the point - and if every row is protected (a very small bound) the oldest goes anyway, so the bound
+  /// is never exceeded.
+  uint64_t trace_eviction_victim()
+  {
+    // The reserve, by pipeline span, oldest first on a tie, and rows with no span YET (created but not completed)
+    // last: an incomplete row is not evidence of anything slow.
+    std::vector<std::pair<double, uint64_t>> by_span;
+    by_span.reserve(slot_trace_order.size());
+    for (uint64_t slot : slot_trace_order) {
+      auto         it   = slot_trace.find(slot);
+      const double span = ((it == slot_trace.end()) || std::isnan(it->second.pipeline_us))
+                              ? -std::numeric_limits<double>::infinity()
+                              : it->second.pipeline_us;
+      by_span.emplace_back(span, slot);
+    }
+    // stable_sort keeps the age order on a tie, so the older of two equally slow rows is the one dropped.
+    std::stable_sort(by_span.begin(), by_span.end(), [](const auto& lhs, const auto& rhs) {
+      return lhs.first > rhs.first;
+    });
+    std::vector<uint64_t> kept;
+    for (size_t i = 0; (i != by_span.size()) && (kept.size() != slot_trace_slow_reserve()); ++i) {
+      kept.push_back(by_span[i].second);
+    }
+    for (uint64_t slot : slot_trace_order) {
+      if (std::find(kept.begin(), kept.end(), slot) == kept.end()) {
+        return slot;
+      }
+    }
+    return slot_trace_order.front();
+  }
+
   /// Whether the per-slot timeline is on (public so the lower PHY can gate its own diagnostics on it).
   static bool slot_trace_enabled() { return slot_trace_limit() != 0; }
 
@@ -596,15 +640,20 @@ public:
     // process-wide singleton whose bound is read from the environment on every call (the test below toggles it
     // inside one process, which is how this was found). The order list is what says which slot is oldest; if it
     // were ever empty while the map is not, adding the row is the safe direction to fail in.
-    while (is_new && !slot_trace_order.empty() && (slot_trace.size() >= slot_trace_limit())) {
-      auto oldest = slot_trace_order.begin();
-      slot_samples_done.erase(*oldest);
-      slot_trace_pre_wait.erase(*oldest);
-      slot_trace.erase(*oldest);
+    const auto drop_slot = [&](uint64_t victim) {
+      slot_samples_done.erase(victim);
+      slot_trace_pre_wait.erase(victim);
+      slot_trace.erase(victim);
       for (auto it = slot_landmarks.begin(); it != slot_landmarks.end();) {
-        it = (it->first.first == *oldest) ? slot_landmarks.erase(it) : std::next(it);
+        it = (it->first.first == victim) ? slot_landmarks.erase(it) : std::next(it);
       }
-      slot_trace_order.erase(oldest);
+      auto pos = std::find(slot_trace_order.begin(), slot_trace_order.end(), victim);
+      if (pos != slot_trace_order.end()) {
+        slot_trace_order.erase(pos);
+      }
+    };
+    while (is_new && !slot_trace_order.empty() && (slot_trace.size() >= slot_trace_limit())) {
+      drop_slot(trace_eviction_victim());
     }
     slot_trace_entry& e = slot_trace[slot];
     e.slot              = slot;
@@ -666,9 +715,10 @@ public:
     if (slot_trace_enabled()) {
       std::fprintf(stderr,
                    "[ul_slot_trace] rows=%zu (bound now OCUDU_UL_SLOT_TRACE=%u; rows are the slots that carried"
-                   " a PUSCH)\n",
+                   " a PUSCH, and the slowest %zu of them are kept against age - see trace_eviction_victim())\n",
                    trace.size(),
-                   slot_trace_limit());
+                   slot_trace_limit(),
+                   slot_trace_slow_reserve());
     } else {
       std::fprintf(stderr, "[ul_slot_trace] rows=%zu (switch now off)\n", trace.size());
     }

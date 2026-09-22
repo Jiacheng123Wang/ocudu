@@ -611,4 +611,46 @@ TEST(ul_slot_trace_test, the_raw_instants_describe_the_same_frame_as_the_deltas)
   ::unsetenv("OCUDU_UL_SLOT_TRACE");
 }
 
+/// The slowest rows survive the age bound.
+///
+/// The timeline used to keep the NEWEST slots that carried a PUSCH, which is blind to the thing it is now used
+/// for: measured on `s58-trace64` (2026-09-23), its 64 rows held no slow hop at all (largest pipeline 3115us)
+/// while that same leg reported p95 = 5590us, and `s57-trace` had caught the 60 ms stall only because 512 rows
+/// happened to reach back far enough to contain it. A quarter of the budget is reserved for the slowest rows now.
+///
+/// This case is the reverse arm for that policy: ONE slow row early, then enough fast rows to overflow a bound of
+/// four. Under the age-only policy the slow row is the first thing evicted and this case fails; with the reserve
+/// it is still in the report. The slow row is made slow through the probe's own series (a real span between
+/// record_start() and the CRC-OK completion), not by writing into the row.
+TEST(ul_slot_trace_test, the_slowest_rows_survive_the_age_bound)
+{
+  ::setenv("OCUDU_UL_SLOT_TRACE", "4", 1);
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+
+  const auto trace_one = [&probe](uint64_t slot, std::chrono::milliseconds span) {
+    uint64_t done = 0;
+    ASSERT_TRUE(ocudu::ul_slot_completed_by_block(slot * 7680, 7680, 7680, done)) << "slot " << slot;
+    probe.record_start(slot);
+    std::this_thread::sleep_for(span);
+    probe.record_slot_samples_complete(done, 7680, 0, std::chrono::high_resolution_clock::now());
+    probe.record_ldpc_start(slot);   // creates the row
+    probe.record_end_crc_ok(slot, 100); // ... and gives it its pipeline span
+  };
+
+  // The slow row must be slower than ANY row an earlier case left behind, because the probe is a process-wide
+  // singleton and this case runs last (the same cross-case hazard the file header warns about). The case above
+  // this one records spans of 30 ms on purpose, so 200 ms is unambiguous - with 20 ms this test passed alone and
+  // failed in the binary, which is exactly that hazard and not the policy.
+  trace_one(3000, std::chrono::milliseconds(200)); // the slow one, first, so age alone would evict it
+  for (uint64_t slot = 3001; slot != 3011; ++slot) {
+    trace_one(slot, std::chrono::milliseconds(0));
+  }
+
+  const std::string report = capture_report();
+  EXPECT_NE(report.find(" 3000 "), std::string::npos)
+      << "the slow row was evicted by age - the transient this instrument exists to catch cannot be seen that way:\n"
+      << report;
+  ::unsetenv("OCUDU_UL_SLOT_TRACE");
+}
+
 #endif // OCUDU_FLOW_PROBES
