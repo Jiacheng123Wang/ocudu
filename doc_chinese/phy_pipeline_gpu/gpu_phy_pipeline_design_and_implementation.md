@@ -6823,6 +6823,53 @@ evicted_unproduced=0   over_bound=0   timeouts=0                                
 `.stderr` 的直方图里只剩报告块；带 `--log.phy_level=debug` 时它们应出现在 `.log` 里（与 §5.9.71 ⑤ 对
 `[dft_handover]` 的验证同法），且契约 8/8、`cbs/lane=1.00`、`dropped=0`、记账三项不变。
 
+#### 5.9.74 ✅✅ `s56-quiet`：**console 三族全部收干净、判据全过**；并用数据**关掉** §5.9.72 ⑤ 的 `stale` 线索
+
+**① 判据逐条**
+
+| 判据 | 实测 |
+|---|---|
+| console 只剩报告块 | `[d1_handover]` = **0 行**；直方图最大项是 `[phy_pipeline]` 21 行（契约），`.stderr` 从 22,271 B 降到 **9,103 B** ✅ |
+| 契约 / 车道 | **MET 8/8**、`lanes=15933`、`cbs/lane=1.00`、`dropped=0`、`carried=0`、`period_dropped=0` ✅ |
+| 采样连续性 | `blocks=130417 gaps=0 gap_samples=0 ts0_blocks=0` ✅ |
+| Metal 断言 / 崩溃 | **0 次**，无 `.ips`，干净收尾（`Stopping...` + `Logfile stored in`）✅ |
+| 提交 | `7a86def88c` = HEAD ✅ |
+| 池汇总 | **恰好一行**：`taken=130417 returned=130416 held_end=1 held_max=7 pool=8 free_min=1 starved_takes=71 starved_events=70` ✅ |
+| 接入 | 15 PRACH / 15 RAR / 15 Msg3 授权 / **1 Msg3 到达**（历史同形）✅ |
+
+**② D1 记账第二次精确闭合**
+
+```
+taken + fallback + late + unproduced = 14525 + 10509 + 2883 + 1 = 27918 = handed   ✓
+handed - evicted                     = 27918 - 27662             = 256   = handed_capacity ✓
+evicted_unproduced=0   over_bound=0   timeouts=0                                    ✓
+```
+
+**③ ★ `stale` 线索关闭（这一条是本次最有价值的结论）**
+
+| 腿 | 功能代码 | 跨度 | RLC | GTPU | `stale` |
+|---|---|---|---|---|---|
+| s53（修复前）| 无竞态修复 | 99 s | 76,698 | 23,191 | 0 |
+| s55@2322 | **有竞态修复** | 105 s | 77,185 | 23,782 | **197** |
+| **s56-quiet** | **有竞态修复**（同功能代码：`19f16bae0c → 7a86def88c` 的差异只有 3 个 Metal 文件的日志 sink + 文档）| **134 s** | 74,447 | 22,496 | **0** |
+
+**两条腿跑的是同一份功能代码、流量可比、s56 还跑得更久，而 `stale` 从 197 回到 0。**
+⇒ s55@2322 那 197 个 >8 ms 的样本是**一次瞬态事件**（环境/机器状态），**不是代码属性、也不是负载水平**。
+§5.9.72 ⑤ 里那个"iperf3 与 gnb 同机"的猜测**不必再证**（我既证明不了它，也不需要）：
+结论改为"**一次未复现的瞬态，已知其机制会把它从主序列里摘出去（probe 309-313），所以主序列的 `max` 永远是构造性封顶**"——
+这一点才是长期有用的：**以后看到 `[ul_pipeline] max≈7900` 不要读成"没有超过 8 ms"，要看 `stale`。**
+
+**④ console 三族的最终状态**
+
+| 族 | 处理 | 默认级别 | `--log.phy_level=debug` |
+|---|---|---|---|
+| `[ul_rx_pool]` | §5.9.68 | 一条 shutdown 汇总 | 每次取用（+ 每 1024 次）|
+| `[dft_handover]` | §5.9.69 | **无**（同字段终结行在 `[metal_stats] dft handover …`）| 每 32 次 commit/release |
+| `[d1_handover]` | §5.9.73 | **无** | 每站点 ≤64 行 |
+
+**⑤ 竞态修复的证据累计**：s55@2317（58 hop）→ s55@2322（15,618 hop）→ s56（15,933 hop、130,417 块）
+**三条腿均无断言**，且两次记账精确闭合。判据仍是"多条腿 + 记账闭合"，不因单条腿不崩而下结论。
+
 
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
