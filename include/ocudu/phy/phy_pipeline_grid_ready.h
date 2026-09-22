@@ -5,6 +5,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 
 namespace ocudu {
 
@@ -192,5 +194,54 @@ private:
     return fn;
   }
 };
+
+/// \brief Whether this run asks the receiving chain to HAND OVER its block instead of committing it
+///        (D1's knob, \c OCUDU_DFT_RELEASE_BLOCK).
+///
+/// ONE definition, because four places ask this question and must never disagree: the DFT engine's own
+/// decision (dft_metal_engine's block_release_requested()), the \c armed= field of the counter line that
+/// engine prints, the OFDM demodulator's startup warning (the operator's half - it compares the knob
+/// against the chain's permission so that a leg cannot spend an OTA cycle exercising nothing), and the
+/// burst's D1 trace. Before this they each read the variable themselves: four copies of one default, i.e.
+/// four chances to flip three of them.
+///
+/// ---- The DEFAULT is ON, and moved here from OFF ----
+/// Judged by the \c s46 controlled leg pair (same load, back to back; design document 5.9.49): armed, a
+/// hop costs **1.00** CPU submissions instead of **2.674** and its MEDIAN end-to-end latency improves
+/// (2009.4 -> 1878.3 us), at the price of a longer tail (p95 2865.7 -> 5303.5 us). The submission count is
+/// this line's criterion (README 2.1), so the hand-over is the production path; the tail is a by-product
+/// that has to stay acceptable rather than a reason to refuse - and it did: \c dropped=0 and zero RF
+/// real-time failures on both legs of that pair.
+///
+/// \c OCUDU_DFT_RELEASE_BLOCK=0 is the one-line retreat, and it is what the CONTROL arm of every A/B must
+/// set: leaving it unset no longer means "off", so an unset control arm would silently become a second
+/// candidate arm.
+///
+/// \return True to hand the block over.
+///
+/// \note Still read on EVERY call rather than cached, because the unit tests arm and disarm it around the
+///       arms they compare (see dft_release_adopt_metal_test).
+inline bool grid_handover_armed()
+{
+  const char* env = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
+  if (env == nullptr) {
+    return true;
+  }
+  // A value that is not a number is a TYPO, and a typo must not silently pick a path - the precedent is
+  // OCUDU_CE_LANE_ORDER's own warning. It is said once, and the default is used rather than the value.
+  char*               end   = nullptr;
+  const unsigned long value = std::strtoul(env, &end, 10);
+  if ((end == env) || (*end != '\0')) {
+    static const bool warned = []() {
+      std::fprintf(stderr,
+                   "[phy_pipeline] OCUDU_DFT_RELEASE_BLOCK is not a number - using the default (armed). "
+                   "Use 0 to run the control arm.\n");
+      return true;
+    }();
+    (void)warned;
+    return true;
+  }
+  return value != 0;
+}
 
 } // namespace ocudu

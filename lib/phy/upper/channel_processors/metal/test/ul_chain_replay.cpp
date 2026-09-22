@@ -701,10 +701,10 @@ int main(int argc, char** argv)
                 device_grid ? "device" : "host");
     // Whether this run was ASKED to exercise the hand-over. Read from the same variable the engine reads,
     // so the report below cannot disagree with what the pipeline did.
-    const bool release_armed = []() {
-      const char* env = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
-      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
-    }();
+    // grid_handover_armed() is the knob's ONE definition (5.9.49 moved its default to ON), so the report
+    // cannot disagree with what the pipeline did. The CONTROL arm is now `OCUDU_DFT_RELEASE_BLOCK=0`, not
+    // "unset" - see the arm scripts.
+    const bool release_armed = ocudu::grid_handover_armed();
     /// The falsification arm of this harness (design document 5.9.37): with this set the harness does NOT
     /// ask for the grid's production before reading it, i.e. it commits the very mistake the wait exists to
     /// prevent. It is a switch and not a source edit on purpose - an arm that requires patching the tool is
@@ -931,8 +931,8 @@ int main(int argc, char** argv)
       }
     } else if (hs.handed != 0) {
       std::fprintf(stderr,
-                   "FAIL: the hand-over happened (%llu deposit(s)) without OCUDU_DFT_RELEASE_BLOCK - this "
-                   "arm is not the reference it claims to be\n",
+                   "FAIL: the hand-over happened (%llu deposit(s)) while this arm asked for the CONTROL "
+                   "(OCUDU_DFT_RELEASE_BLOCK=0) - this arm is not the reference it claims to be\n",
                    static_cast<unsigned long long>(hs.handed));
       ok = false;
     }
@@ -1400,10 +1400,10 @@ int main(int argc, char** argv)
   if (hop_td_slots != 0) {
     grid_handover_counts hs;
     grid_ready_hook::counts(hs);
-    const bool release_armed = []() {
-      const char* env = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
-      return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
-    }();
+    // grid_handover_armed() is the knob's ONE definition (5.9.49 moved its default to ON), so the report
+    // cannot disagree with what the pipeline did. The CONTROL arm is now `OCUDU_DFT_RELEASE_BLOCK=0`, not
+    // "unset" - see the arm scripts.
+    const bool release_armed = ocudu::grid_handover_armed();
     std::printf("[l1_hop] installed=%d armed=%d host_first=%d claim_only=%d pdus=%u slots=%u handed=%llu "
                 "taken=%llu fallback=%llu late=%llu not_found=%llu unproduced=%llu ready_timeouts=%llu\n",
                 hs.installed ? 1 : 0,
@@ -1420,8 +1420,9 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(hs.unproduced),
                 static_cast<unsigned long long>(hs.ready_timeouts));
     if (!release_armed) {
-      // The reference arm: the front end commits its own block, so the hop adopts nothing and is right not
-      // to. A hand-over here would mean this arm is not the reference it claims to be.
+      // The CONTROL arm (OCUDU_DFT_RELEASE_BLOCK=0 since 5.9.49 moved the default to ON): the front end
+      // commits its own block, so the hop adopts nothing and is right not to. A hand-over here would mean
+      // this arm is not the reference it claims to be.
       if (hs.handed != 0) {
         std::fprintf(stderr,
                      "FAIL: the hand-over happened (%llu) without OCUDU_DFT_RELEASE_BLOCK - this arm is not "

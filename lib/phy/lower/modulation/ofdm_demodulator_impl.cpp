@@ -9,6 +9,7 @@
 #include "ocudu/ocuduvec/prod.h"
 #include "ocudu/ocuduvec/sc_prod.h"
 #include "ocudu/ocuduvec/zero.h"
+#include "ocudu/phy/phy_pipeline_grid_ready.h"
 #include "ocudu/phy/phy_pipeline_strict.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/ran/frame_types.h"
@@ -117,16 +118,16 @@ bool handover_allowed()
   return !grid_has_host_consumers() && !host_reads_the_grid() && phy_pipeline_strict_enabled();
 }
 
-/// \brief Whether this run ARMED the hand-over knob (OCUDU_DFT_RELEASE_BLOCK=1).
+/// \brief Whether this run ARMED the hand-over knob (see grid_handover_armed(), the knob's owner).
 ///
-/// The engine reads the same variable for its own decision (see dft_metal_engine::block_release_enabled(),
-/// the knob's owner); this is the operator's half, read here so that the two answers can be compared at
-/// startup without the lower PHY depending on a Metal header - a build without Metal has no engine and
-/// therefore no hand-over at all.
+/// The engine reads the same predicate for its own decision; this is the operator's half, read here so
+/// that the two answers can be compared at startup without the lower PHY depending on a Metal header - a
+/// build without Metal has no engine and therefore no hand-over at all. **The knob's default is ON** since
+/// the s46 leg pair (design document 5.9.49), so this is now true on an ordinary run - which is exactly
+/// what makes the warning below useful without anyone asking for it.
 bool block_release_armed()
 {
-  const char* env = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
-  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  return grid_handover_armed();
 }
 
 } // namespace
@@ -200,16 +201,20 @@ ofdm_symbol_demodulator_impl::ofdm_symbol_demodulator_impl(const ofdm_demodulato
     }
   }
 
-  // The KNOB and the CHAIN'S PERMISSION are two different answers, and a leg that sets the knob while the
-  // chain refuses it exercises NOTHING: it reads exactly like the control arm, its counters come out
-  // `handed=0 released=0`, and the mistake is only visible after the OTA cycle has been spent on it (it was:
-  // one whole pair, s37). Said HERE, once per demodulator, before the radio starts - the log is the only
-  // place an operator can still see it in time, and the predicates that refused are named.
+  // The KNOB and the CHAIN'S PERMISSION are two different answers, and a leg that asks for the hand-over
+  // while the chain refuses it exercises NOTHING: it reads exactly like the control arm, its counters come
+  // out `handed=0 released=0`, and the mistake is only visible after the OTA cycle has been spent on it (it
+  // was: one whole pair, s37). Said HERE, once per demodulator, before the radio starts - the log is the
+  // only place an operator can still see it in time, and the predicates that refused are named.
+  //
+  // \note Since the knob's default moved to ON (5.9.49) this fires on an ordinary run, not only on one that
+  //       set a variable - so a chain that cannot hand over now says so without being asked, which is the
+  //       version of this warning that is actually wanted: the run MEANT to exercise D1.
   if (block_release_armed() && !handover_allowed()) {
     ocudulog::fetch_basic_logger("PHY").warning(
-        "OFDM demodulator: OCUDU_DFT_RELEASE_BLOCK is set but this receiving chain refuses the block "
-        "hand-over (grid_has_host_consumers={}, host_reads_the_grid={}, strict={}) - this run will NOT "
-        "exercise D1 (expect handed=0 released=0)",
+        "OFDM demodulator: the block hand-over is armed (OCUDU_DFT_RELEASE_BLOCK unset means armed since "
+        "5.9.49) but this receiving chain refuses it (grid_has_host_consumers={}, host_reads_the_grid={}, "
+        "strict={}) - this run will NOT exercise D1 (expect handed=0 released=0)",
         grid_has_host_consumers(),
         host_reads_the_grid(),
         phy_pipeline_strict_enabled());

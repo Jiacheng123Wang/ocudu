@@ -6,8 +6,9 @@
 # grid's consumer (grid_ready_hook::wait) and it asserts on the hand-over's own counters, so an arm
 # that exercised nothing cannot pass (see ul_chain_replay.cpp, "[l1_handover]").
 #
-#   ref    hand-over OFF (the reference: the front end commits its own block)
-#   cand   hand-over ON  (OCUDU_DFT_RELEASE_BLOCK=1)
+#   ref    hand-over OFF, asked for EXPLICITLY (OCUDU_DFT_RELEASE_BLOCK=0): since 5.9.49 the knob's default
+#          is ON, so "unset" is not the control any more - it would be a second candidate arm
+#   cand   hand-over ON  (the default; OCUDU_DFT_RELEASE_BLOCK=1 is accepted and equivalent)
 #   drop   hand-over ON, consumer wait REMOVED on purpose -> MUST differ (proves cand's pass means something)
 #   nogrid hand-over ON, fresh grid per slot instead of one reused -> the same claim, easier shape
 #
@@ -41,8 +42,10 @@ run_arm() {
 
 BASE=(--dft --dft-metal --device-grid --synth "$SLOTS" --reuse-grid --synth-first-slot 1)
 
-# The reference: the front end commits and waits for its own block, as it always did.
-run_arm ref "$TOOL" "${BASE[@]}" --out "$WORK/ref" || echo "  ^ ref arm FAILED" >&2
+# The CONTROL: the front end commits and waits for its own block. Since 5.9.49 the knob's default is
+# ARMED, so the control has to SAY SO - "unset" is no longer the control, it is a second candidate arm.
+OCUDU_DFT_RELEASE_BLOCK=0 \
+  run_arm ref "$TOOL" "${BASE[@]}" --out "$WORK/ref" || echo "  ^ ref arm FAILED" >&2
 # The candidate: the block is handed over uncommitted and the tool, as the consumer, produces it.
 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_GPU_STRICT=1 \
   run_arm cand "$TOOL" "${BASE[@]}" --out "$WORK/cand" || echo "  ^ cand arm FAILED" >&2

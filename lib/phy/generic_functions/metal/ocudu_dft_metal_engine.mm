@@ -13,6 +13,7 @@
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/phy_pipeline_contract.h"
 #include "ocudu/phy/phy_pipeline_crossings.h"
+#include "ocudu/phy/phy_pipeline_grid_ready.h"
 
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 #include "ocudu/support/macos_compat.h"
@@ -176,8 +177,7 @@ static void dft_stats_report()
   // superseded and evicted are kept apart on purpose (see handed_counters): the first is the expected
   // "that slot had no hop, and its grid came back through the pool", the second is a backlog.
   const metal::shared_burst::handed_counters hand = metal::shared_burst::handed_stats();
-  const char*                              armed = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
-  const bool release_armed = (armed != nullptr) && (std::strtoul(armed, nullptr, 10) != 0);
+  const bool                               release_armed = grid_handover_armed();
   if (release_armed || (hand.handed != 0) || (hand.taken != 0)) {
     std::fprintf(stderr,
                  "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu unproduced=%zu "
@@ -445,14 +445,14 @@ static void note_slot_submission(dft_engine_impl* e, unsigned slot, id<MTLComman
 
 /// \brief Whether this run asks the open block to be HANDED OVER instead of committed (D1 step 1).
 ///
-/// DEFAULT OFF: \c OCUDU_DFT_RELEASE_BLOCK=1 is the only thing that arms it, so the factory chain behaves
-/// exactly as before while nobody asks for the release (see release_block()). Read on every call rather
-/// than cached, so the unit test can arm and disarm it around the arms it compares - which is also what
-/// keeps the caller from having to know that the decision is taken at begin_block() time.
+/// The decision is grid_handover_armed()'s, so that this engine, the counter line it prints, the OFDM
+/// demodulator's startup warning and the burst's trace cannot drift apart. **DEFAULT ON** since the s46
+/// leg pair (design document 5.9.49); \c OCUDU_DFT_RELEASE_BLOCK=0 is the one-line retreat. Read on every
+/// call rather than cached, so the unit test can arm and disarm it around the arms it compares - which is
+/// also what keeps the caller from having to know that the decision is taken at begin_block() time.
 static bool block_release_requested()
 {
-  const char* env = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
-  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  return grid_handover_armed();
 }
 
 /// \brief The tokens of one block, released exactly once (see dft_metal_engine::retain_for_block()).
@@ -798,7 +798,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
         if (block_release_requested()) {
           std::fprintf(stderr,
                        "[dft_release] D1 step 1: the DFT's open block is handed over uncommitted "
-                       "(OCUDU_DFT_RELEASE_BLOCK=1), so it is created on the BACK-END queue - the queue the "
+                       "(the default since 5.9.49), so it is created on the BACK-END queue - the queue the "
                        "lane commits on\n");
           return metal::shared_queue::backend_queue();
         }

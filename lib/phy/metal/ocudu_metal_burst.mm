@@ -310,11 +310,10 @@ bool shared_burst::open()
 static void d1_trace(const char* what, id<MTLCommandBuffer> cb)
 {
   static std::atomic<unsigned> logged{0};
-  // Silent unless the hand-over is armed: the lane's burst runs in every mode, and a control arm does not
-  // need one line per hop.
-  const char* armed = std::getenv("OCUDU_DFT_RELEASE_BLOCK");
-  if (((armed == nullptr) || (std::strtoul(armed, nullptr, 10) == 0)) ||
-      (logged.fetch_add(1, std::memory_order_relaxed) >= 64)) {
+  // Silent under the CONTROL arm only, and capped at 64 lines either way: the lane's burst runs in every
+  // mode, and a control leg does not need one line per hop. Since the knob's default moved to ON (5.9.49)
+  // this trace is on by default - hence the cap, which is what keeps it from drowning an ordinary leg.
+  if (!grid_handover_armed() || (logged.fetch_add(1, std::memory_order_relaxed) >= 64)) {
     return;
   }
   {

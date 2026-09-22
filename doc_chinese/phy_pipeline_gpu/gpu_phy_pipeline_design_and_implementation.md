@@ -2790,7 +2790,7 @@ if (!wait_per_slot || last_symbol_of_slot) {
 | 项 | 内容 |
 |---|---|
 | **`dft_metal_engine::release_block()`** | 新增：结束 encoder、**不提交**、把命令缓冲交给调用方（不透明 `void*`，即 `id<MTLCommandBuffer>`）；**不提交、不计数、不发前端栅栏、不进前端链**（提交它的那一方承担这些）|
-| **`OCUDU_DFT_RELEASE_BLOCK`** | 新增旋钮，**默认关**。关闭时 `release_block()` 返回 `nullptr` 且**不碰任何状态**（出厂路径零影响）|
+| **`OCUDU_DFT_RELEASE_BLOCK`** | 新增旋钮，~~**默认关**~~ **⚠ 默认已翻成【开】（§5.9.51，2026-09-22）**：不设即为武装，**`=0` 才是不武装**（一行回退）。关闭时 `release_block()` 返回 `nullptr` 且**不碰任何状态**（出厂路径零影响）|
 | **队列随旋钮一起选** | 武装时块建在**后端队列**（缓冲属于创建它的队列，而车道在后端队列提交）——**一个决定，不是两个要人肉对齐的旋钮** |
 | **网格走进程级 cache** | 武装时 `submit_slot_grid_write()` 的网格用 `shared_queue::wrap_no_copy()`（**偏移跟着绑定的 `setBuffer:offset:` 走**）；**映射失败就拒绝这次 dispatch，绝不退化成副本**（副本＝GPU 写、宿主读的两块内存）|
 | **`wait_slot()` 不再假装** | 交出去的槽位：登记 `slot_released[]`，`wait_slot()` **报错并返回 false**（"这个等待给不了"），而不是返回一个被满足的等待 |
@@ -5203,7 +5203,66 @@ PRE 是**满带宽 25 PRB / TBS 784** 的业务分配；POST 是 **1–2 PRB / T
 **判据不是"有没有差"，而是"差是否超过同代码重复跑的散布"**（本节的 152–237 µs / 10–13 pt）。
 
 
+#### 5.9.51 ✅ **D1 翻默认（2026-09-22，用户裁定）**：`OCUDU_DFT_RELEASE_BLOCK` 不设即武装；`=0` 是不武装
+
+**裁定依据**：§5.9.49 的受控腿对（提交 **2.674 → 1.000**、中位 **−131 µs**、p95 **+2438 µs**、
+`dropped=0`、RF 失败 0）+ §5.9.50 的回归核查（**没有一项空口差异可归因于最近的修改**）。
+本线口径（README §2.1：判据是**提交次数**，不是微秒）下 ⇒ **目标达成，p95 作为副产品被接受。**
+
+**① 改动：把"是否武装"收敛成【一个定义】**
+
+翻默认不是一行 —— 原先有 **4 处各自读 `getenv`**，翻的时候漏掉任何一处，诊断与判据就会**静默不一致**。
+新增 `grid_handover_armed()`（`include/ocudu/phy/phy_pipeline_grid_ready.h`，纯 C++）作为唯一真相源：
+
+```cpp
+inline bool grid_handover_armed()   // 不设 => true（新默认）；"0" => false；非数字 => 警告一次并取默认
+```
+
+改用它的四处：`dft_metal_engine::block_release_requested()`、引擎打印的 `armed=` 字段、
+`ofdm_demodulator_impl::block_release_armed()`（启动告警的"操作员那一半"）、`d1_trace()`。
+**非数字值（如 `=yes`）按 `OCUDU_CE_LANE_ORDER` 的先例"警告一次并取默认"**，而不是静默选一条路。
+
+**② ⚠ 两个会被翻默认【改错】的地方（都已修，且这正是翻默认的风险面）**
+
+| 位置 | 翻默认前 | 翻默认后若不管 | 已改为 |
+|---|---|---|---|
+| `dft_release_adopt_metal_test` **Arm 5**（"被提交而非交出的块")| `unsetenv` ⇒ 未武装 | 会变成**交出**的臂，**静默停止测它该测的东西** | `setenv("0")` |
+| `l1_handover_arms.sh` / `l1_hop_arms.sh` 的 **`ref` 对照臂** | 不设 env ⇒ 未武装 | 会变成**第二个候选臂**，A/B 变成**自己跟自己比** | `OCUDU_DFT_RELEASE_BLOCK=0` |
+
+`dft_release_adopt_metal_test` 的 Arm 0（原"默认关"的断言）改成两部分：
+**Arm 0 = 显式 `=0` 的对照**（`release_block()` 拒绝、普通提交路径不变），
+**Arm 0b = 新的默认**（`unset` 与 `=yes` 都必须报武装）。
+⇒ **默认现在被断言在二进制里**，不会再被无意翻回去。
+
+**③ 离线门（全部实测，翻默认后）**
+
+| 门 | 结果 |
+|---|---|
+| `dft_release_adopt_metal_test` | **PASS**（含 `arm 0 (knob=0)` 与 `arm 0b (unset/non-numeric)：默认 ARMED`）|
+| **行为直验** | 不带 env ⇒ `armed=1 handed=4`；`=0` ⇒ `armed=0 handed=0` ✅ |
+| `l1_handover_arms.sh 32` | **4 PASS**（`ref armed=0`、`cand armed=1`，对照是真对照）|
+| `l1_hop_arms.sh 16` | **rc=0**、四条臂 soft bits 全 `differing=0` |
+| `value_net` | **captures=47 problems=0** |
+| `uplink_processor_test` | **23/23** |
+| `ctest -R "metal\|ul_pipeline_probe\|puxch\|lower_phy\|du_low\|o_du"` | **35/35** |
+
+**④ 待办：一条确认腿**（不带 env，应自动武装）
+
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s47-d1default
+```
+**判据**：`[metal_stats] dft handover handed>0 taken>0 timeouts=0 (armed=1)`、
+`dft commits` 回到 ~1（每槽一次前端提交消失）、`cbs/lane=1.00`、`contract 8/8`、
+`will NOT exercise D1` 计数 = 0、`dropped=0`。
+**并且要核 §5.9.49 的尾部代价是否可接受**（中位应更好、p95 预期 +2.4 ms 量级）。
+
+**⑤ 回退**：`OCUDU_DFT_RELEASE_BLOCK=0` 一行；或 `git revert` 本节所在的提交。
+
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
+
+> ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，
+> 所以下文"目标 1.00 还没到手"的说法**只适用于当时**——现在生产路径就是武装路径。
 
 > D1 的目标（§5.8.27 ⑤ 原话）：把 DFT 从**前端队列**搬进**车道队列**，消掉"**每槽一次前端 CPU 提交**"。
 

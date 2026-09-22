@@ -7,7 +7,9 @@
 # buffer - is not in it. Here the capture supplies the PDU CONFIGURATION only and the grid comes from the
 # front end, so a real receiver runs on a block the receiving chain really deposited.
 #
-#   ref        hand-over OFF. The hop reads a grid the front end committed itself.
+#   ref        hand-over OFF, asked for EXPLICITLY (OCUDU_DFT_RELEASE_BLOCK=0): since 5.9.49 the knob's
+#              default is ON, so "unset" is not the control any more. The hop reads a grid the front end
+#              committed itself.
 #   cand       hand-over ON, hop goes FIRST -> it ADOPTS the block (taken>0): D1's headline shape.
 #   hostfirst  hand-over ON, the host consumer WAITS first -> the hop MISSES (taken=0) and takes the
 #              device-side wait path (grid_devwaited>0).
@@ -60,7 +62,10 @@ run_arm() {
 PDUS="${L1_HOP_PDUS:-1}"
 ARM=(--metal --device-grid --hop-td "$SLOTS" --hop-pdus "$PDUS")
 
-run_arm ref "$TOOL" "$PDU" --out "$WORK/ref" "${ARM[@]}" || echo "  ^ ref arm FAILED" >&2
+# The CONTROL arm must ask for it: since 5.9.49 the knob's default is ARMED, so leaving it unset would make
+# this a second candidate arm and the comparison below would compare the hand-over with itself.
+OCUDU_DFT_RELEASE_BLOCK=0 \
+  run_arm ref "$TOOL" "$PDU" --out "$WORK/ref" "${ARM[@]}" || echo "  ^ ref arm FAILED" >&2
 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_GPU_STRICT=1 \
   run_arm cand "$TOOL" "$PDU" --out "$WORK/cand" "${ARM[@]}" || echo "  ^ cand arm FAILED (see [l1_hop])" >&2
 OCUDU_DFT_RELEASE_BLOCK=1 OCUDU_GPU_STRICT=1 OCUDU_L1_HOST_FIRST=1 \

@@ -21,10 +21,12 @@
 /// arm, "the reader saw the data" in the first one could just be the driver happening to serialize two
 /// unrelated objects - the hollow assertion this project has been burned by before.
 ///
-/// A third arm checks the DEFAULT, which is D1 step 1's own criterion: with OCUDU_DFT_RELEASE_BLOCK
-/// unset, release_block() refuses, and the ordinary begin_block()/commit_open()/wait_slot() path is
-/// untouched (the gate that the knob is off is value_net 47/0 + ctest -R metal, of which this test is now
-/// one; this arm is the same statement inside the binary).
+/// A third arm checks the CONTROL and the DEFAULT, which are two different statements since 5.9.49 moved
+/// the knob's default to ON: with OCUDU_DFT_RELEASE_BLOCK=0 release_block() refuses and the ordinary
+/// begin_block()/commit_open()/wait_slot() path is untouched, and with the variable UNSET the hand-over is
+/// ARMED (the flip's own criterion, asserted in the same arm so that a default cannot be flipped back by
+/// accident). The gate around both is value_net 47/0 + ctest -R metal, of which this test is one; the arm is
+/// the same statement inside the binary.
 ///
 /// The grid is bound at a NON-ZERO offset in the shared arm: the process-wide cache hands out the mapping
 /// of the whole allocation, so the grid's byte offset travels as the buffer binding's offset. That path is
@@ -240,13 +242,16 @@ int main()
       return 1;
     }
 
-    // ---- Arm 0: the DEFAULT (knob off) ------------------------------------------------------------
-    // D1 step 1's criterion, stated inside the binary: with the knob unset, release_block() refuses - and
+    // ---- Arm 0: the CONTROL, asked for explicitly (knob = 0) --------------------------------------
+    // D1 step 1's criterion, stated inside the binary: with the knob set to 0, release_block() refuses - and
     // the ordinary block path still commits and waits as it always did.
+    //
+    // \note Since 5.9.49 the knob's DEFAULT is armed, so the control has to say so: leaving it UNSET is no
+    //       longer "off". The default's own criterion is asserted right below, after this block.
     {
-      ::unsetenv("OCUDU_DFT_RELEASE_BLOCK");
+      ::setenv("OCUDU_DFT_RELEASE_BLOCK", "0", 1);
       if (metal::dft_metal_engine::block_release_enabled()) {
-        std::fprintf(stderr, "FAIL: the release path reports itself armed with the knob unset\n");
+        std::fprintf(stderr, "FAIL: the release path reports itself armed with the knob set to 0\n");
         return 1;
       }
       for (size_t i = 0; i != alloc_bytes / sizeof(uint16_t); ++i) {
@@ -268,11 +273,11 @@ int main()
         return 1;
       }
       if (engine.release_block(grid_base) != nullptr) {
-        std::fprintf(stderr, "FAIL: release_block() handed a block over while OCUDU_DFT_RELEASE_BLOCK is unset\n");
+        std::fprintf(stderr, "FAIL: release_block() handed a block over with OCUDU_DFT_RELEASE_BLOCK=0\n");
         return 1;
       }
       if (metal::shared_burst::take_released(grid_base, test_slot) != nil) {
-        std::fprintf(stderr, "FAIL: a block was deposited while OCUDU_DFT_RELEASE_BLOCK is unset\n");
+        std::fprintf(stderr, "FAIL: a block was deposited with OCUDU_DFT_RELEASE_BLOCK=0\n");
         return 1;
       }
       if (!engine.commit_open()) {
@@ -293,8 +298,28 @@ int main()
         std::fprintf(stderr, "FAIL: the ordinary block path left %u of %u grid elements unwritten\n", unwritten, nof_subc);
         return 1;
       }
-      std::fprintf(stderr, "[dft-release] arm 0 (knob off): release refused, the ordinary commit path wrote all %u elements\n",
+      std::fprintf(stderr, "[dft-release] arm 0 (knob=0, the control): release refused, the ordinary commit path wrote all %u elements\n",
                    nof_subc);
+
+      // ---- The DEFAULT, also stated inside the binary (5.9.49) ------------------------------------
+      // The knob was flipped from OFF to ON after the s46 controlled leg pair, and the flip's own criterion
+      // is that an UNSET variable now arms the hand-over: a default nobody asserts is a default that can be
+      // flipped back by accident, which is exactly what this arm would have caught before.
+      ::unsetenv("OCUDU_DFT_RELEASE_BLOCK");
+      if (!metal::dft_metal_engine::block_release_enabled()) {
+        std::fprintf(stderr,
+                     "FAIL: the release path reports itself DISARMED with OCUDU_DFT_RELEASE_BLOCK unset - "
+                     "the default is armed since 5.9.49\n");
+        return 1;
+      }
+      // A typo must not silently pick a path either: it warns once and keeps the default.
+      ::setenv("OCUDU_DFT_RELEASE_BLOCK", "yes", 1);
+      if (!metal::dft_metal_engine::block_release_enabled()) {
+        std::fprintf(stderr, "FAIL: a non-numeric knob value did not fall back to the default (armed)\n");
+        return 1;
+      }
+      std::fprintf(stderr, "[dft-release] arm 0b (unset and non-numeric): the default is ARMED\n");
+
       ::setenv("OCUDU_DFT_RELEASE_BLOCK", "1", 1);
       if (!metal::dft_metal_engine::block_release_enabled()) {
         std::fprintf(stderr, "FAIL: the release path does not report itself armed after the knob was set\n");
@@ -601,11 +626,15 @@ int main()
     }
 
     // ---- Arm 5: a block that is COMMITTED (not handed over) gives the input back too ----------------
-    // This is the path every run that does not arm the hand-over takes, and it now arms tokens as well: a
-    // block that is committed rather than released must hold its input for exactly as long as its own
-    // dispatches, which is the behaviour the receiving chain has always depended on.
+    // This is the path a CONTROL run takes, and it now arms tokens as well: a block that is committed rather
+    // than released must hold its input for exactly as long as its own dispatches, which is the behaviour
+    // the receiving chain has always depended on.
+    //
+    // \note The control is asked for explicitly: since 5.9.49 the knob's default is armed, so an UNSET
+    //       variable would put this arm on the HANDED-OVER path and it would silently stop testing the
+    //       committed one.
     {
-      ::unsetenv("OCUDU_DFT_RELEASE_BLOCK");
+      ::setenv("OCUDU_DFT_RELEASE_BLOCK", "0", 1);
       keep_alive_probe committed_probe;
       if (!engine.begin_block() ||
           !engine.retain_for_block(committed_probe.token())) {

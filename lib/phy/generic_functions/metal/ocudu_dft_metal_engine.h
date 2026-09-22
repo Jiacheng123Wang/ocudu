@@ -121,10 +121,14 @@ public:
 
   /// \brief Whether this run asks the open block to be handed over instead of committed (D1 step 1).
   ///
-  /// \c OCUDU_DFT_RELEASE_BLOCK=1, **default off**. While it is off, nothing in this engine ever releases
-  /// a block: begin_block()/commit_open() behave exactly as they did, and the factory chain cannot reach
-  /// the release path by accident. Arming it also selects the BACK-END queue for the block (a command
-  /// buffer belongs to the queue that created it, and the lane commits on that one - see init()).
+  /// \c OCUDU_DFT_RELEASE_BLOCK, **default ON** since the \c s46 controlled leg pair (design document
+  /// 5.9.49): \c =0 is the one-line retreat and is what a CONTROL arm must set, since "unset" now means
+  /// armed. The decision itself is grid_handover_armed()'s, so this engine, the counter line it prints, the
+  /// OFDM demodulator's startup warning and the burst's trace cannot disagree about what the run asked for.
+  ///
+  /// Arming it also selects the BACK-END queue for the block (a command buffer belongs to the queue that
+  /// created it, and the lane commits on that one - see init()), and it puts the whole release path in play:
+  /// a block the receiving chain hands over is committed by whoever claims it, not by this engine.
   static bool block_release_enabled();
 
   /// \brief Hands the open block's command buffer over, UNCOMMITTED, to whoever reads \p grid_base (D1).
