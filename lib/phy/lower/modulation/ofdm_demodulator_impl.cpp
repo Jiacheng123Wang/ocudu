@@ -430,7 +430,7 @@ void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, uns
   // reads memory the GPU produced - but it reads it on the DEVICE here: the estimator extracts the
   // pilots with resource_grid_reader::get_device_view() and the equalizer gathers the received symbols
   // with set_device_grid(). With the front-end fence on, that ordering is established by the shared
-  // event instead (see shared_queue::front_end_wait()), so the host does not have to wait for each
+  // event instead, so the host does not have to wait for each
   // symbol - which is exactly the per-symbol synchronization the fusion removes (design document,
   // 48.189).
   //

@@ -893,11 +893,6 @@ static stage_encoder begin_stage(mmse_engine_impl*          e,
       mmse_stats().grid_wait_unencoded.fetch_add(1, std::memory_order_relaxed);
     }
   }
-  // Front-end fence (S-7g-17): this stage may read the resource grid the front-end DFTs produce, and a
-  // wait on a command buffer of THIS queue says nothing about theirs. The wait is encoded before the
-  // encoder opens (command-buffer level API) and targets the newest COMMITTED front-end generation, so
-  // it can never wait for a signal that is not already on its way - see shared_queue::front_end_wait().
-  ocudu::metal::shared_queue::front_end_wait(s.cb);
   // Extraction fence (S-7g-22, Step 2): this stage reads what the EXTRACTION's command buffer wrote -
   // the correlation reads the least-squares pilots and the noise variance, the reformat reads the CFO -
   // and the two are separate command buffers of one queue, whose STARTS alone are ordered (see

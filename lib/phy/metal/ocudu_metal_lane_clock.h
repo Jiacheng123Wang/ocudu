@@ -14,7 +14,7 @@
 ///   1. the HOST: the time between the estimator's stage entry and the commit of the command buffer
 ///      that carries it (the lane's first). Until that commit exists, the back end has nothing to run
 ///      for this lane, no matter how idle it is;
-///   2. the FENCES the lane burst encodes when it opens (front_end_wait / backend_stage_wait): the
+///   2. the FENCE the lane burst encodes when it opens (backend_stage_wait): the
 ///      burst cannot start before the estimator's own command buffer has completed.
 ///
 /// With a per-hop pair of host timestamps next to the lane's GPU start time, (1) and (2) separate:

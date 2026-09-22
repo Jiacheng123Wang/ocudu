@@ -892,6 +892,67 @@ int main()
                    nof_subc);
     }
 
+    // ---- Arm 10: "no record" must never mean "the write is still in flight" (5.9.62) ----------------
+    // The registry's eviction loop erases entries, and a reader that finds NOTHING cannot wait - so an entry
+    // erased before its block COMPLETED is the one way a hop can read a grid nobody has written. Until
+    // 5.9.62 the loop could do exactly that: with no produced entry to prefer it took the oldest unproduced
+    // one, handed it to the late-commit path and erased it in the same breath.
+    //
+    // The bound is what makes that branch reachable, and at its production value (256) it is NOT reachable
+    // from a test: each entry needs a real command buffer and Metal blocks at about sixty uncommitted ones
+    // (measured). OCUDU_D1_HANDED_BOUND is the diagnostic override that closes that gap, and this arm is why
+    // it exists. What is asserted is the invariant, not the number: nothing vanishes while in flight, and
+    // the pressure is REPORTED (over_bound) instead of being paid for with the hole.
+    {
+      ::setenv("OCUDU_D1_HANDED_BOUND", "4", 1);
+      id<MTLCommandQueue> queue = metal::shared_queue::backend_queue();
+      if (queue == nil) {
+        std::fprintf(stderr, "FAIL: arm 10 has no back-end queue\n");
+        return 1;
+      }
+      // 6 > the bound of 4, and every buffer is real and NEVER committed, so nothing can be produced and
+      // nothing is safe to reclaim.
+      constexpr size_t over    = 6;
+      constexpr uint64_t arm_slot = test_slot + 300;
+      void*            pool    = compat::aligned_alloc(page, page * over);
+      if (pool == nullptr) {
+        std::fprintf(stderr, "FAIL: arm 10 could not allocate its storage pool\n");
+        return 1;
+      }
+      const metal::shared_burst::handed_counters before = metal::shared_burst::handed_stats();
+      for (size_t i = 0; i != over; ++i) {
+        metal::shared_burst::deposit_released(static_cast<const char*>(pool) + i * page, arm_slot, [queue commandBuffer]);
+      }
+      const metal::shared_burst::handed_counters after = metal::shared_burst::handed_stats();
+
+      // 1) Nothing was erased while in flight: the OLDEST entry - the first victim the old loop would have
+      //    taken - is still there to be found.
+      id<MTLCommandBuffer> oldest = metal::shared_burst::take_released(pool, arm_slot);
+      // 2) The counter that says a reader was left with nothing did not move.
+      // 3) The bound is soft, and its pressure is reported.
+      // 4) The invariant counter stayed at zero.
+      if ((oldest == nil) || (after.grid_not_found != before.grid_not_found) ||
+          (after.evicted_unproduced != before.evicted_unproduced) || (after.over_bound <= before.over_bound)) {
+        std::fprintf(stderr,
+                     "FAIL: arm 10 oldest=%p not_found %llu->%llu evicted_unproduced %llu->%llu "
+                     "over_bound %llu->%llu\n",
+                     (__bridge const void*)oldest,
+                     static_cast<unsigned long long>(before.grid_not_found),
+                     static_cast<unsigned long long>(after.grid_not_found),
+                     static_cast<unsigned long long>(before.evicted_unproduced),
+                     static_cast<unsigned long long>(after.evicted_unproduced),
+                     static_cast<unsigned long long>(before.over_bound),
+                     static_cast<unsigned long long>(after.over_bound));
+        return 1;
+      }
+      ::unsetenv("OCUDU_D1_HANDED_BOUND");
+      std::fprintf(stderr,
+                   "[dft-release] arm 10 (soft bound): %zu deposits over a bound of 4 kept every record "
+                   "(oldest still found), evicted_unproduced stayed 0, over_bound=%llu\n",
+                   over,
+                   static_cast<unsigned long long>(after.over_bound - before.over_bound));
+    }
+
     // ---- NOT tested here: the registry's bound, and the two halves of `evicted` (5.9.54 item 14) ------
     // Recorded because the attempt was made and its cost is the finding: the bound cannot be reached from
     // this test cheaply. `deposit_released` refuses a nil command buffer, so every entry needs a REAL one,

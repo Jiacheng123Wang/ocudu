@@ -6073,6 +6073,80 @@ if (released) {
 **⇒ 这是路线选择，不是技术问题，等用户一句话。**
 
 
+#### 5.9.65 ✅ 落地批次 3：**前端栅栏按裁定 A 收掉**；**#2 的三件包落地，且反向臂已证"会红"**
+
+> **⚠ 本批次动了 PHY（队列/DFT 引擎/注册表），按用户裁定：落完即停，等空口腿。**
+
+**① 前端栅栏按裁定 A 收掉（删除，不是停用）**
+
+`OCUDU_UL_FRONTEND_FENCE` 与整条机制**删除**：队列侧的 `front_end_fence_enabled/signal/wait/generation/nof_*`
+七个入口、它的事件与代际状态、报告行 `[metal_stats] front_end fence ...`、DFT 引擎侧的四个包装与 `fence_selftest`、
+`begin_stage()`/`burst_ensure_open()`/`commit_front_end()` 三处调用、单测里那一段（换成说明）。
+`ocudu_metal_queue.h` 里留了一段 NOTE 记录**为什么**：武装成为默认后，DFT 的变换搭在车道缓冲里 ⇒
+① 前端队列没有该槽的提交可供关联，② 网格消费者需要的排序由**网格代际**承担（另一个事件）。
+**⇒ 启用栅栏与默认武装是互斥路线，用户选了后者。**
+
+* **安全性**：它**从来**是 opt-in，**所有腿都是 `signals=0 waits=0 generation=0`** ⇒ 删除**行为中性**；
+  未武装路径的排序由**宿主等待**（`wait_slot`）提供（step 2b 本来要移除的那个），武装路径由**网格代际**提供。
+* **保留**：后端 **stage 栅栏**（`backend_stage_*` 与 `mmse_engine::lane_fence_selftest`）是**另一套**机制，未动。
+* 单测 `dft_processor_metal_unit_test` **ALL OK**。
+
+**② #2 的三件包**
+
+1. **上界旋钮**：`handed_capacity()` 改为**每调用读取** `OCUDU_D1_HANDED_BOUND`（**默认仍是 256**，生产零变化）。
+   它存在的唯一理由就是让反向臂够得到那个分支（生产值下够不到，原因见 §5.9.55 ②）。
+2. **修法（洞本身）**：淘汰循环**只擦除已产出的条目**。
+   旧代码在"没有任何已产出条目"时会取最旧的一条未产出、交给 late 提交**并同一次擦掉** ——
+   那是**唯一**能让读者在写还在飞的时候拿到 `no record` 的路径（supersede 在记录内换 cb，sweep 只置 `claimed`，都不擦）。
+   现在**上界是软的**：没有安全可回收的条目时循环**停下并计数**（新计数 `over_bound`），
+   由完成回调把条目变成可回收 —— **`no record` 因此无条件蕴含"已写完"**。
+   `evicted_unproduced` **按构造恒为 0**，保留它是为了**声明这条不变量**（非 0 就是它破了）。
+3. **反向臂（已证会红）**：`dft_release_adopt_metal_test` 的 **Arm 10** —— 把上界设成 4，投 6 个**真实但从不提交**的块
+   （因此不可能产出、也没有安全可回收的），断言：**最旧的那条记录仍在**（`take_released` 拿得到）、
+   `grid_not_found` 不增、`evicted_unproduced` 不增、`over_bound` 增。
+
+**★ 假设置回旧行为后这条臂确实红了，而且正好复现了那个洞**：
+
+```
+FAIL: arm 10 oldest=0x0 not_found 0->0 evicted_unproduced 0->2 over_bound 0->0
+```
+
+`oldest=0x0` ⇒ **最早的记录已被擦掉**（读者会找不到），`evicted_unproduced 0→2`。
+⇒ **洞是真的、离线可复现、修法能关掉它** —— 这条臂不是摆设。
+
+**③ 离线门（全绿）**
+
+| 门 | 结果 |
+|---|---|
+| `dft_release_adopt_metal_test` | **PASS**（arm 0 / 0b / **10** 全过）|
+| `dft_processor_metal_unit_test` | **ALL OK** |
+| `ctest -R "metal\|ul_pipeline_probe\|puxch\|lower_phy\|du_low\|o_du"` | **36/36** |
+| `value_net` | **47/0** |
+| `l1_handover_arms.sh 32` | 5 条 PASS 行 |
+| `l1_hop_arms.sh 16` | **rc=0**、`differing=0` |
+| `uplink_processor_test` | **23/23** |
+| `ul_pipeline_probe_test` | **2/2** |
+| harness 新字段 | `… evicted=0 evicted_unproduced=0 **over_bound=0** …` ✅ |
+
+**④ ⏸ 空口腿（本批次）**
+
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s50-batch3
+```
+**判据**：
+* **`[metal_stats] front_end fence ...` 这一行应当【消失】**（机制已删）；
+  `lane fence` 那行**仍在**且 `signals == lanes`；
+* `dft handover ... evicted_unproduced=0`、**新增 `over_bound=`** —— **期望远小于 256**
+  （它现在替代 `evicted_unproduced` 作为压力读数；若它接近 `handed`，说明"消费者远远落后"）；
+* `handed − evicted` 仍应 ≈ `handed_capacity`（256）—— **注意**：若某次 deposit 时注册表因软上界停在 256 之上，
+  这个差会偏离 256，**这属于预期**（软上界的代价），**以 `over_bound` 为准**；
+* 其余照旧：`handed>0 taken>0 timeouts=0 (armed=1)`、`cbs/lane=1.00`、`contract 8/8`、`dropped=0`、
+  `will NOT exercise D1`=0、QPSK CRC 与 s49 同形、`channel_estimator = 2×跳数`、`stale` 个位数。
+
+**⑤ 余下**：#5-① 已裁定并落地；**#13 第 1 步**（把路线信息接到 `shared_burst::commit()`，让 `busy split` 的标签不说谎）
+是下一件要动的 PHY；**#16**（Ubuntu 工作树同步）是家务；**#12** 已改判交出。
+
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，

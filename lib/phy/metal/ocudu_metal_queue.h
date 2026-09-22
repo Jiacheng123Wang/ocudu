@@ -119,44 +119,19 @@ public:
   /// this counter is part of the "zero-copy wraps" contract check.
   static void notify_wrap_misaligned();
 
-  /// \brief Front-end fence: relates the DFTs of the front-end queue to the back-end stages that read the grid they produce.
-  ///
-  /// The two queues execute independently - waiting for a command buffer of ONE of them says nothing
-  /// about the other (see wait_all_committed()) - so the grid's producer and its consumers need an
-  /// explicit relation. It is an MTLSharedEvent carrying a GENERATION: every front-end commit signals
-  /// the next generation, and a back-end command buffer that may read the grid waits for the newest
-  /// generation that was committed when that command buffer was created.
-  ///
-  /// Why a generation rather than a one-shot signal: the host builds the back-end command buffer only
-  /// after the front-end work of that slot was committed (the receiving chain hands the grid over at
-  /// the slot boundary), so the value it reads ALWAYS has a committed signaller - a wait can never
-  /// target an event nobody will signal, which would hang the GPU. A back-end command buffer created
-  /// with no front-end commit at all (the estimator's unit tests, the replay tool) gets no wait.
-  ///
-  /// Enabled by OCUDU_UL_FRONTEND_FENCE=1. While the host wait in ofdm_symbol_demodulator_impl::
-  /// finish_symbol() is still in place the fence is REDUNDANT by design - that is step 2a of the design
-  /// document's 48.189(c), whose whole point is to exercise the mechanism with byte-identical results
-  /// before the host wait is taken out (step 2b).
-  static bool front_end_fence_enabled();
-
-  /// \brief Encodes the signal of the next front-end generation on \p command_buffer (before its commit).
-  /// \return The generation that was encoded, or 0 when the fence is off.
-  static uint64_t front_end_signal(id<MTLCommandBuffer> command_buffer);
-
-  /// \brief Encodes a wait for the newest COMMITTED front-end generation on \p command_buffer.
-  ///
-  /// Must be called while no encoder of that command buffer is open (it is a command-buffer level API),
-  /// which is why the callers do it right after creating the command buffer.
-  /// \return True when a wait was encoded; false when the fence is off or nothing was committed yet.
-  static bool front_end_wait(id<MTLCommandBuffer> command_buffer);
-
-  /// The newest front-end generation whose command buffer has been committed (0 before the first one).
-  static uint64_t front_end_generation();
-
-  /// Diagnostics: signals encoded, waits encoded, and waits skipped because nothing was committed.
-  static uint64_t front_end_nof_signals();
-  static uint64_t front_end_nof_waits();
-  static uint64_t front_end_nof_skipped_waits();
+  // NOTE (5.9.65, user ruling A): the FRONT-END fence lived here. It related the front-end queue's DFTs to
+  // the back-end readers of the grid, as step 2a of the design document's 48.189(c) - its whole purpose was
+  // to make the host wait in ofdm_symbol_demodulator_impl::finish_symbol() removable (step 2b).
+  //
+  // It was retired because the hand-over became the DEFAULT: with the block handed over, the DFT's
+  // transforms ride the LANE's command buffer, so (a) the front-end queue has no commit of that slot to
+  // relate anything to, and (b) the ordering a grid consumer needs is carried by the GRID generation
+  // (grid_ready_signal/grid_ready_wait), which is a different mechanism with its own event. Enabling the
+  // fence and shipping the hand-over were therefore mutually exclusive routes, and this one was chosen.
+  //
+  // It was always opt-in and every air leg ever run reports signals=0 waits=0 generation=0, so nothing
+  // ever depended on it: the unarmed path is ordered by the host wait that step 2b would have removed, and
+  // the armed path by the grid generation. The back-end STAGE fence below is unrelated and stays.
 
   /// \brief Back-end stage fence (S-7g-19, Step 1'): relates the channel estimator's own command buffer
   /// to the lane burst that reads what it wrote.

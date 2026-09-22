@@ -26,21 +26,13 @@ struct shared_queue_state {
 
   std::mutex mutex;
 
-  /// Front-end fence (see the header): one shared event carrying a generation.
-  id<MTLSharedEvent>       fence_event   = nil;
   /// Grid-production fence (see shared_queue::grid_ready_signal): its own event, because it is waited on by
-  /// the HOST while the front-end fence above is waited on by command buffers.
+  /// the HOST.
   id<MTLSharedEvent>       grid_event    = nil;
   std::atomic<uint64_t>    grid_generation{0};
-  std::atomic<uint64_t>    fence_generation{0};
-  std::atomic<uint64_t>    fence_signals{0};
-  std::atomic<uint64_t>    fence_waits{0};
-  std::atomic<uint64_t>    fence_skipped_waits{0};
 
-  /// Back-end stage fence (see the header): the estimator's own command buffer against the lane burst.
-  /// The same shape as the front-end fence above, with a generation of its own - the two relate
-  /// different producers and must never share a counter (a lane burst waiting for a front-end
-  /// generation would be waiting for the wrong queue's work).
+  /// Back-end stage fence (see the header): the estimator's own command buffer against the lane burst,
+  /// with a generation of its own.
   id<MTLSharedEvent>       stage_fence_event = nil;
   std::atomic<uint64_t>    stage_fence_generation{0};
   std::atomic<uint64_t>    stage_fence_signals{0};
@@ -149,16 +141,10 @@ void shared_queue_stats_report()
                static_cast<unsigned long long>(s.wrap_failures),
                static_cast<unsigned long long>(s.wrap_misaligned.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.wrap_purges));
-  // The two fences between the stages of the receiving chain: the front-end DFTs against the back-end
-  // grid consumers, and the estimator's own command buffer against the lane burst. Both are printed
-  // unconditionally (a zero line says "this run had no such producer", which is how a leg tells a
-  // mechanism that is off from one that never fired).
-  std::fprintf(stderr,
-               "[metal_stats] front_end fence signals=%llu waits=%llu skipped=%llu generation=%llu\n",
-               static_cast<unsigned long long>(s.fence_signals.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.fence_waits.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.fence_skipped_waits.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.fence_generation.load(std::memory_order_relaxed)));
+  // The fence between the stages of the receiving chain: the estimator's own command buffer against the
+  // lane burst. Printed unconditionally (a zero line says "this run had no such producer", which is how a
+  // leg tells a mechanism that is off from one that never fired). The FRONT-END fence that used to be
+  // printed above it was retired in 5.9.65 - see the note in the header.
   std::fprintf(stderr,
                "[metal_stats] lane fence signals=%llu waits=%llu skipped=%llu generation=%llu\n",
                static_cast<unsigned long long>(s.stage_fence_signals.load(std::memory_order_relaxed)),
@@ -456,37 +442,7 @@ void shared_queue::notify_commit(id<MTLCommandBuffer> command_buffer, queue_kind
   ++s.commits;
 }
 
-bool shared_queue::front_end_fence_enabled()
-{
-  // Read per call rather than cached in a static: the switch is consulted once per command buffer (not
-  // per dispatch), and the unit test has to be able to toggle it inside one process.
-  const char* env = std::getenv("OCUDU_UL_FRONTEND_FENCE");
-  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
-}
 
-uint64_t shared_queue::front_end_signal(id<MTLCommandBuffer> command_buffer)
-{
-  if (!front_end_fence_enabled() || (command_buffer == nil)) {
-    return 0;
-  }
-  shared_queue_state& s = state();
-  if (s.fence_event == nil) {
-    id<MTLDevice> device = shared_queue::device();
-    if (device == nil) {
-      return 0;
-    }
-    s.fence_event = [device newSharedEvent];
-    if (s.fence_event == nil) {
-      return 0;
-    }
-  }
-  // The generation is taken and the signal encoded BEFORE the commit: the host's front_end_generation()
-  // only ever reports a value whose signalling command buffer exists (see the header).
-  const uint64_t generation = s.fence_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
-  [command_buffer encodeSignalEvent:s.fence_event value:generation];
-  s.fence_signals.fetch_add(1, std::memory_order_relaxed);
-  return generation;
-}
 
 uint64_t shared_queue::grid_ready_signal(id<MTLCommandBuffer> command_buffer)
 {
@@ -521,10 +477,6 @@ bool shared_queue::grid_ready_wait(uint64_t generation, uint32_t timeout_ms)
   return [s.grid_event waitUntilSignaledValue:generation timeoutMS:timeout_ms];
 }
 
-uint64_t shared_queue::front_end_generation()
-{
-  return state().fence_generation.load(std::memory_order_acquire);
-}
 
 bool shared_queue::grid_ready_encode_wait(id<MTLCommandBuffer> command_buffer, uint64_t generation)
 {
@@ -541,39 +493,10 @@ bool shared_queue::grid_ready_encode_wait(id<MTLCommandBuffer> command_buffer, u
   return true;
 }
 
-bool shared_queue::front_end_wait(id<MTLCommandBuffer> command_buffer)
-{
-  if (!front_end_fence_enabled() || (command_buffer == nil)) {
-    return false;
-  }
-  shared_queue_state& s = state();
-  const uint64_t      generation = s.fence_generation.load(std::memory_order_acquire);
-  if ((generation == 0) || (s.fence_event == nil)) {
-    // Nothing has been committed on the front end in this process (the estimator's unit tests, the
-    // replay tool, a configuration without the device DFT): there is no signaller to wait for, and
-    // waiting for a value nobody will signal would hang the command buffer.
-    s.fence_skipped_waits.fetch_add(1, std::memory_order_relaxed);
-    return false;
-  }
-  [command_buffer encodeWaitForEvent:s.fence_event value:generation];
-  s.fence_waits.fetch_add(1, std::memory_order_relaxed);
-  return true;
-}
 
-uint64_t shared_queue::front_end_nof_signals()
-{
-  return state().fence_signals.load(std::memory_order_relaxed);
-}
 
-uint64_t shared_queue::front_end_nof_waits()
-{
-  return state().fence_waits.load(std::memory_order_relaxed);
-}
 
-uint64_t shared_queue::front_end_nof_skipped_waits()
-{
-  return state().fence_skipped_waits.load(std::memory_order_relaxed);
-}
+
 
 uint64_t shared_queue::backend_stage_signal(id<MTLCommandBuffer> command_buffer)
 {

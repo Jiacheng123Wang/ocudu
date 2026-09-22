@@ -199,7 +199,14 @@ public:
   ///       fired" means without restating the number: the unit test asserts handed - evicted == this, and
   ///       evicted's own documentation refers to it. Measured on air the registry sits saturated here, so
   ///       that difference is exactly this value on every armed leg.
-  static constexpr size_t handed_capacity = 256;
+  ///
+  /// \note \c OCUDU_D1_HANDED_BOUND overrides it, **for diagnosis only**, and exists for one arm: the
+  ///       eviction branch below is reached on air on every armed leg, but the bound CANNOT be reached from
+  ///       a unit test at its production value - each entry needs a real command buffer and Metal blocks at
+  ///       about sixty uncommitted ones (measured), while the bound is 256. Lowering it is what makes that
+  ///       branch, and the reverse arm that judges what the branch does, reachable offline. The production
+  ///       default is unchanged.
+  static size_t handed_capacity();
 
   /// \brief What the registry has seen, for the diagnostics (see the [metal_stats] dft handover line).
   struct handed_counters {
@@ -221,12 +228,19 @@ public:
     ///       "the suspicious half" - makes every healthy leg look like a permanent backlog. The suspicious
     ///       half is `evicted_unproduced` below.
     uint64_t evicted = 0;
-    /// The subset of `evicted` that was dropped BEFORE anyone claimed or produced it: the grid it wrote was
-    /// never read, and it is the case that owes a LATE COMMIT (see late_commits) - a real backlog, i.e.
-    /// consumers falling behind producers. The rest of `evicted` is the registry working as designed: the
-    /// removal loop prefers an entry that has already been produced, and such an entry is only kept so that
-    /// a late reader can be told the grid was written.
+    /// \brief Entries evicted BEFORE anyone claimed or produced them.
+    ///
+    /// Was the suspicious half of `evicted`; since 5.9.62 it is **0 by construction**, because the removal
+    /// loop only erases entries that have been PRODUCED - erasing an unproduced one is what could leave a
+    /// reader with no record while the write was still in flight. Kept as a counter precisely because it now
+    /// states an invariant: anything but 0 means that invariant broke.
     uint64_t evicted_unproduced = 0;
+    /// \brief Times the registry was over its bound and had NOTHING safe to reclaim (5.9.62).
+    ///
+    /// The bound is soft now: while every outstanding entry is in flight there is nothing to erase without
+    /// opening the hole above, so the loop stops and the completion handlers catch up. This is the pressure
+    /// reading that replaces `evicted_unproduced` - a large value means consumers are far behind producers.
+    uint64_t over_bound = 0;
     /// Records whose grid has NOT been produced yet (a block waiting for its consumer or its sweep). NOT
     /// "records held": the registry keeps a record after production so a late reader can be told so.
     size_t unproduced = 0;

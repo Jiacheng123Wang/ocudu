@@ -181,13 +181,14 @@ static void dft_stats_report()
   if (release_armed || (hand.handed != 0) || (hand.taken != 0)) {
     std::fprintf(stderr,
                  "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu "
-                 "evicted_unproduced=%llu unproduced=%zu "
+                 "evicted_unproduced=%llu over_bound=%llu unproduced=%zu "
                  "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu (armed=%d)\n",
                  static_cast<unsigned long long>(hand.handed),
                  static_cast<unsigned long long>(hand.taken),
                  static_cast<unsigned long long>(hand.superseded),
                  static_cast<unsigned long long>(hand.evicted),
                  static_cast<unsigned long long>(hand.evicted_unproduced),
+                 static_cast<unsigned long long>(hand.over_bound),
                  hand.unproduced,
                  static_cast<unsigned long long>(hand.fallback_commits),
                  static_cast<unsigned long long>(hand.late_commits),
@@ -272,7 +273,7 @@ void dft_handover_heartbeat(const char* where)
   const dft_stats_t&                         s    = dft_stats();
   std::fprintf(stderr,
                "[dft_handover] %s handed=%llu taken=%llu superseded=%llu evicted=%llu "
-               "evicted_unproduced=%llu unproduced=%zu "
+               "evicted_unproduced=%llu over_bound=%llu unproduced=%zu "
                "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu\n",
                where,
                static_cast<unsigned long long>(hand.handed),
@@ -280,6 +281,7 @@ void dft_handover_heartbeat(const char* where)
                static_cast<unsigned long long>(hand.superseded),
                static_cast<unsigned long long>(hand.evicted),
                static_cast<unsigned long long>(hand.evicted_unproduced),
+               static_cast<unsigned long long>(hand.over_bound),
                hand.unproduced,
                static_cast<unsigned long long>(hand.fallback_commits),
                static_cast<unsigned long long>(hand.late_commits),
@@ -592,7 +594,6 @@ static void commit_front_end(dft_engine_impl* e, id<MTLCommandBuffer> cb, uint64
   }
   dft_handover_heartbeat("commit");
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::front_end);
-  metal::shared_queue::front_end_signal(cb);
   [cb commit];
   dft_stats_commit(nof_transforms);
   if (e->has_lane_slot) {
@@ -788,7 +789,7 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
       /// OCUDU_DFT_BACKEND_QUEUE=1 commits them on the BACK-END queue instead, which is the queue the receiving
       /// chain's late stages (the estimator and the lane burst) use. That is an EXPERIMENT, not a candidate: with
       /// both stages on one queue, submission order alone orders the DFT before the lane's burst, so the
-      /// cross-queue fence (shared_queue::front_end_wait, encoded by the burst) stops being what provides the
+      /// cross-queue fence the burst used to encode stops being what provides the
       /// ordering - while still being encoded, so the two arms differ ONLY in whether the ordering crosses a
       /// queue. Its purpose is to price the fence, which is the precondition for design document 5.9's step 1:
       /// D1 wants the DFT on the lane's queue, and that change is only worth its cost if the cross-queue relation
@@ -1357,52 +1358,12 @@ void dft_metal_engine::set_lane_slot(uint64_t slot_index)
   }
 }
 
-uint64_t dft_metal_engine::fence_generation()
-{
-  return metal::shared_queue::front_end_generation();
-}
+/// NOTE (5.9.65, user ruling A): the front-end fence's accessors and its self-test lived here. They were
+/// retired with the mechanism - see the note in ocudu_metal_queue.h. What orders a grid consumer now is the
+/// GRID generation (dft_metal_engine::release_block + shared_queue::grid_ready_*), which is a different
+/// event with its own counters, printed on the [metal_stats] dft handover line.
 
-uint64_t dft_metal_engine::fence_nof_signals()
-{
-  return metal::shared_queue::front_end_nof_signals();
-}
 
-uint64_t dft_metal_engine::fence_nof_waits()
-{
-  return metal::shared_queue::front_end_nof_waits();
-}
-
-uint64_t dft_metal_engine::fence_nof_skipped_waits()
-{
-  return metal::shared_queue::front_end_nof_skipped_waits();
-}
-
-bool dft_metal_engine::fence_selftest(bool& waited)
-{
-  waited = false;
-  id<MTLCommandQueue> queue = metal::shared_queue::backend_queue();
-  if (queue == nil) {
-    return false;
-  }
-  id<MTLCommandBuffer> cb = [queue commandBuffer];
-  if (cb == nil) {
-    return false;
-  }
-  waited = metal::shared_queue::front_end_wait(cb);
-  // A command buffer with only a wait would never run (Metal executes what its encoders encode), so the
-  // test puts one real blit in it: the point is that a buffer carrying a fence wait still completes.
-  id<MTLBuffer> src = [shared_queue::device() newBufferWithLength:64 options:MTLResourceStorageModeShared];
-  id<MTLBuffer> dst = [shared_queue::device() newBufferWithLength:64 options:MTLResourceStorageModeShared];
-  if ((src == nil) || (dst == nil)) {
-    return false;
-  }
-  id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-  [blit copyFromBuffer:src sourceOffset:0 toBuffer:dst destinationOffset:0 size:64];
-  [blit endEncoding];
-  [cb commit];
-  [cb waitUntilCompleted];
-  return cb.status == MTLCommandBufferStatusCompleted;
-}
 
 bool dft_metal_engine::submit_at(
     const void* in, void* out, unsigned nof_transforms, unsigned first_slot, bool wait_for_completion)

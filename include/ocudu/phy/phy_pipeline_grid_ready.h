@@ -33,9 +33,11 @@ struct grid_handover_counts {
   uint64_t superseded = 0;
   /// Deposits dropped for being more than the registry's bound: consumers falling behind producers.
   uint64_t evicted = 0;
-  /// The subset of \c evicted dropped BEFORE anyone claimed or produced it: the real backlog, and the part
-  /// that owes a late commit. The rest is the registry working as designed (see the engine's handed_stats).
+  /// Entries evicted BEFORE anyone claimed or produced them. 0 by construction since 5.9.62 - the registry
+  /// only erases produced entries - so anything but 0 means that invariant broke.
   uint64_t evicted_unproduced = 0;
+  /// Times the registry was over its bound with nothing safe to reclaim (the bound is soft, see 5.9.62).
+  uint64_t over_bound = 0;
   /// Deposits a HOST reader found still unclaimed and had to commit itself (grid_ready_hook::wait).
   uint64_t fallback_commits = 0;
   /// Blocks the registry itself committed late, because nobody ever claimed them.

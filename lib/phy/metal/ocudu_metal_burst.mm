@@ -25,7 +25,18 @@ namespace metal {
 /// reader can be told "already written" rather than "unknown"), which is why this is a few slots of history
 /// rather than a handful of entries: at ~1000 slots/s, 256 covers a quarter of a second - far more than the
 /// one slot a consumer can be late by - and the bound still stops a hop that never runs from growing it.
-constexpr size_t max_handed = shared_burst::handed_capacity;
+///
+/// Read PER CALL rather than cached: OCUDU_D1_HANDED_BOUND is a diagnostic override and the arm that uses it
+/// has to move the bound inside one process (see the header for why the bound cannot be reached otherwise).
+size_t shared_burst::handed_capacity()
+{
+  const char* env = std::getenv("OCUDU_D1_HANDED_BOUND");
+  if (env == nullptr) {
+    return 256;
+  }
+  const unsigned long value = std::strtoul(env, nullptr, 10);
+  return (value != 0) ? static_cast<size_t>(value) : 256;
+}
 
 /// \brief The Metal end of the host-reader hook (include/ocudu/phy/phy_pipeline_grid_ready.h).
 ///
@@ -53,6 +64,7 @@ void grid_handover_counts_hook(grid_handover_counts& out)
   out.superseded       = hand.superseded;
   out.evicted          = hand.evicted;
   out.evicted_unproduced = hand.evicted_unproduced;
+  out.over_bound         = hand.over_bound;
   out.fallback_commits = hand.fallback_commits;
   out.late_commits     = hand.late_commits;
   out.not_found        = hand.grid_not_found;
@@ -226,12 +238,7 @@ static bool burst_ensure_open(burst_state& s)
     return false;
   }
   s.cb  = [queue commandBuffer];
-  // Front-end fence (S-7g-17): the first stage that joins this burst may read the resource grid the
-  // front-end DFTs produce (the equalizer does, and so does the estimator when it is fused into the
-  // lane), and the two queues are independent. Encoded before the encoder opens, as the command-buffer
-  // level API requires, and it covers every dispatch encoded into this burst afterwards.
   if (s.cb != nil) {
-    shared_queue::front_end_wait(s.cb);
     // Back-end stage fence (S-7g-19, Step 1'): the lane burst reads what the ESTIMATOR wrote - the
     // weights, the per-symbol estimates and the noise variance - and the estimator wrote it into a
     // command buffer of its own, committed as soon as it was encoded so that its GPU work overlaps
@@ -558,31 +565,40 @@ void shared_burst::deposit_released(const void*          grid_base,
       ++h.counters.handed;
     }
 
-    while (h.entries.size() > max_handed) {
-      // Prefer an entry that has already been produced: it is only kept so a late reader can be told so.
-      size_t victim = 0;
+    // ★ THE ERASE IS THE HOLE, so only PRODUCED entries are erased (5.9.62).
+    //
+    // "No record" has to mean "nothing to wait for" (see the note at this function's end), and the only way
+    // a reader can be left with nothing while the write is still IN FLIGHT is an entry erased before its
+    // block completed. This loop used to be able to do exactly that: when no produced entry existed it took
+    // the oldest unproduced one, handed it to the late-commit path and erased it in the same breath. Every
+    // other removal path keeps the record (supersede replaces the cb inside it, the sweep only sets
+    // `claimed`), which is why this was the ONLY way the hole could open.
+    //
+    // It is now a SOFT bound: while nothing is produced there is nothing safe to reclaim, so the loop stops
+    // and lets the completion handlers do it - the sweep commits the unclaimed ones (see below), they
+    // complete, `mark_handed_produced` runs, and the next deposit reclaims them. The registry can therefore
+    // sit above the bound for as long as a commit is in flight, which is bounded by the sweep window and
+    // counted: `evicted_unproduced` is now always 0 by construction (kept, because it is what would say the
+    // invariant broke) and `over_bound` says the registry is above the bound with nothing to reclaim - the
+    // pressure reading that replaces it.
+    while (h.entries.size() > shared_burst::handed_capacity()) {
+      size_t victim = SIZE_MAX;
       for (size_t i = 0; i != h.entries.size(); ++i) {
         if (h.entries[i].produced) {
           victim = i;
           break;
         }
       }
+      if (victim == SIZE_MAX) {
+        ++h.counters.over_bound;
+        break;
+      }
       if (h.entries[victim].on_drop) {
         dropped.push_back(std::move(h.entries[victim].on_drop));
-      }
-      // Whether this victim owes a late commit is ALSO what tells the two halves of `evicted` apart: an
-      // entry nobody claimed or produced is a grid nobody read (a real backlog), while a produced one is
-      // the registry working as designed. One decision, two counters - not two places to keep in step.
-      const bool unproduced = !h.entries[victim].claimed && !h.entries[victim].produced;
-      if (unproduced) {
-        commit_late.push_back(h.entries[victim].cb);
       }
       released_after_unlock.push_back(h.entries[victim].cb);
       h.entries.erase(h.entries.begin() + static_cast<std::ptrdiff_t>(victim));
       ++h.counters.evicted;
-      if (unproduced) {
-        ++h.counters.evicted_unproduced;
-      }
     }
 
     // ★ NOBODY CLAIMS A SLOT FOREVER. A deposit that no hop and no host reader ever asked for has no

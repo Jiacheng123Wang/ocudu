@@ -76,7 +76,7 @@ struct lane_stats_t {
   /// The part of gap_us the HOST owns, measured on the host clock: "the estimator's stage ran this
   /// long before the lane's first command buffer was committed". Until that commit exists the back
   /// end has nothing queued for this lane, however idle it is. What remains of gap_us is the fences
-  /// the lane burst encodes (front_end_wait / backend_stage_wait) plus the command queue's ordering.
+  /// the lane burst encodes (backend_stage_wait) plus the command queue's ordering.
   /// (The other host leg - how long the slot waited before the estimator's stage began - is the
   /// [ul_channel_estimation] phase; see the note in ocudu_metal_lane_clock.h for why it is not
   /// measured here.)

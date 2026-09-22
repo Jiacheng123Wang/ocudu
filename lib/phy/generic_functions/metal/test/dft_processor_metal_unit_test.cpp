@@ -649,71 +649,13 @@ int main()
     }
   }
 
-  // ---------------------------------------------------------------------------------------------
-  // Front-end fence (S-7g-17, design document 48.189): the event that relates the DFTs of the
-  // front-end queue to the back-end command buffers that read the grid they produce.
-  //
-  // What can be checked WITHOUT the receiving chain: the generation only counts committed front-end
-  // buffers, a command buffer that carries the wait still completes (the failure mode here is a GPU
-  // hang, not a wrong number), and with the knob off - or with nothing committed yet, which is what
-  // the replay tool and the estimator's own tests look like - no wait is encoded at all. The ordering
-  // itself is judged on air, where the whole chain runs: the leg's LLRs are compared byte for byte
-  // against the archived reference.
-  // ---------------------------------------------------------------------------------------------
-  {
-    // 1) Knob off: no wait may be encoded, whatever the front end has committed.
-    setenv("OCUDU_UL_FRONTEND_FENCE", "0", 1);
-    bool       waited_off = true;
-    const bool off_ok     = metal::dft_metal_engine::fence_selftest(waited_off);
-    if (!off_ok || waited_off) {
-      std::fprintf(stderr, "FAIL: the fence encoded a wait while OCUDU_UL_FRONTEND_FENCE=0\n");
-      ok = false;
-    }
+  // NOTE (5.9.65, user ruling A): this case checked the FRONT-END fence (generation counting committed
+  // front-end buffers, the wait not hanging a command buffer, and no wait with the knob off). The mechanism
+  // was retired because the hand-over became the default: with the block handed over the front-end queue has
+  // no commit of that slot to relate anything to, and the ordering a grid consumer needs is carried by the
+  // GRID generation instead. Every air leg ever run reported that fence at signals=0 waits=0, so nothing is
+  // left untested by dropping this case.
 
-    // 2) Knob on, plus one transform submitted THROUGH the engine: that commit is what the generation
-    // counts, so the back end then has a committed signaller to wait for.
-    setenv("OCUDU_UL_FRONTEND_FENCE", "1", 1);
-    const uint64_t signals_before = metal::dft_metal_engine::fence_nof_signals();
-    const uint64_t gen_before     = metal::dft_metal_engine::fence_generation();
-    {
-      dft_processor_metal fence_metal({128, dft_processor::direction::DIRECT});
-      for (unsigned i = 0; i != 128; ++i) {
-        fence_metal.get_input()[i] = cf_t{dist(rng), dist(rng)};
-      }
-      const auto fence_out = fence_metal.run();
-      if (fence_out.empty() || (metal::dft_metal_engine::fence_generation() <= gen_before)) {
-        std::fprintf(stderr, "FAIL: the front-end commit did not advance the fence generation\n");
-        ok = false;
-      }
-    }
-    const uint64_t gen_after = metal::dft_metal_engine::fence_generation();
-
-    bool       waited_on = false;
-    const bool on_ok     = metal::dft_metal_engine::fence_selftest(waited_on);
-    // Both are asserted: a fence that silently stopped encoding waits would leave the chain unordered
-    // without failing anything else, and the wait itself must not hang the command buffer.
-    if (!on_ok) {
-      std::fprintf(stderr, "FAIL: a backend command buffer carrying the fence wait did not complete\n");
-      ok = false;
-    }
-    if (!waited_on) {
-      std::fprintf(stderr,
-                   "FAIL: the fence encoded no wait although the front end had committed (gen %llu -> %llu)\n",
-                   static_cast<unsigned long long>(gen_before),
-                   static_cast<unsigned long long>(gen_after));
-      ok = false;
-    }
-    if (metal::dft_metal_engine::fence_nof_signals() <= signals_before) {
-      std::fprintf(stderr, "FAIL: the front-end commit encoded no signal\n");
-      ok = false;
-    }
-    std::printf("fence: generation=%llu signals=%llu waits=%llu skipped=%llu (knob off: no wait)\n",
-                static_cast<unsigned long long>(metal::dft_metal_engine::fence_generation()),
-                static_cast<unsigned long long>(metal::dft_metal_engine::fence_nof_signals()),
-                static_cast<unsigned long long>(metal::dft_metal_engine::fence_nof_waits()),
-                static_cast<unsigned long long>(metal::dft_metal_engine::fence_nof_skipped_waits()));
-    unsetenv("OCUDU_UL_FRONTEND_FENCE");
-  }
 
   if (ok) {
     std::printf("ALL OK\n");
