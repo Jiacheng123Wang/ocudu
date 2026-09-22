@@ -10,14 +10,14 @@ using namespace ocudu::gtpu;
 /// Macro used to check a read/unpack operation and log an error message if the validation fails.
 #define VERIFY_READ(cond)                                                                                              \
   if (!(cond)) {                                                                                                       \
-    logger.error("Read failed in {}", __FUNCTION__);                                                                   \
+    logger.error("Read failed in {} line {}", __FUNCTION__, __LINE__);                                                 \
     return false;                                                                                                      \
   }
 
 /// Macro used to check a write/append/pack operation and log an error message if the validation fails.
 #define VERIFY_WRITE(cond)                                                                                             \
   if (!(cond)) {                                                                                                       \
-    logger.error("Write failed in {}", __FUNCTION__);                                                                  \
+    logger.error("Write failed in {} line {}", __FUNCTION__, __LINE__);                                                \
     return false;                                                                                                      \
   }
 
