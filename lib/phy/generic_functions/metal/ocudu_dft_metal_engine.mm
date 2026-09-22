@@ -262,6 +262,21 @@ static const bool dft_contract_registered = []() {
 /// The two pairs that matter: `taken` against `handed` (is the hop claiming what the receiving chain hands
 /// over?), and `keepalives released` against `attached` (is the input coming back? a leak here starves the
 /// radio's receive pool, which is a hard stall - the pool is the backpressure the receive loop blocks on).
+///
+/// It goes to the "PHY" logger at DEBUG level rather than to stderr. At the period below, and one commit plus
+/// one release per hop, it wrote NINE lines a second for the whole of a leg - measured 890 lines over the 99 s
+/// of `s53-poolfix` (2026-09-22), 1205 on `s52-residency` - which is the one thing on a console an operator
+/// cannot read through.
+///
+/// Nothing is lost on a CLEAN leg: the same fields are in the exit report's
+/// `[metal_stats] dft handover ... (armed=...)` line, which has been part of every leg report all along. That
+/// is also why there is deliberately NO second "[dft_handover] final" line here: two format strings carrying
+/// the same twelve counters is how a reader ends up comparing two different quantities without noticing.
+///
+/// The level is checked BEFORE anything is formatted, so a run at the default level pays a relaxed increment
+/// per hop and nothing else. `--log.phy_level debug` brings the timeline back - and that is the recipe for the
+/// case this heartbeat was written for, a leg whose chain breaks and which therefore has no exit report: turn
+/// the level up for the DIAGNOSING leg, rather than flooding every leg to keep the option open.
 void dft_handover_heartbeat(const char* where)
 {
   static std::atomic<uint64_t> counter{0};
@@ -269,26 +284,29 @@ void dft_handover_heartbeat(const char* where)
   if ((counter.fetch_add(1, std::memory_order_relaxed) % period) != 0) {
     return;
   }
+  auto& logger = ocudulog::fetch_basic_logger("PHY");
+  if (!logger.debug.enabled()) {
+    return;
+  }
   const metal::shared_burst::handed_counters hand = metal::shared_burst::handed_stats();
   const dft_stats_t&                         s    = dft_stats();
-  std::fprintf(stderr,
-               "[dft_handover] %s handed=%llu taken=%llu superseded=%llu evicted=%llu "
-               "evicted_unproduced=%llu over_bound=%llu unproduced=%zu "
-               "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu\n",
+  logger.debug("[dft_handover] {} handed={} taken={} superseded={} evicted={} "
+               "evicted_unproduced={} over_bound={} unproduced={} "
+               "fallback={} late={} not_found={} timeouts={} keepalives={}/{}",
                where,
-               static_cast<unsigned long long>(hand.handed),
-               static_cast<unsigned long long>(hand.taken),
-               static_cast<unsigned long long>(hand.superseded),
-               static_cast<unsigned long long>(hand.evicted),
-               static_cast<unsigned long long>(hand.evicted_unproduced),
-               static_cast<unsigned long long>(hand.over_bound),
+               hand.handed,
+               hand.taken,
+               hand.superseded,
+               hand.evicted,
+               hand.evicted_unproduced,
+               hand.over_bound,
                hand.unproduced,
-               static_cast<unsigned long long>(hand.fallback_commits),
-               static_cast<unsigned long long>(hand.late_commits),
-               static_cast<unsigned long long>(hand.grid_not_found),
-               static_cast<unsigned long long>(hand.ready_timeouts),
-               static_cast<unsigned long long>(s.keepalives_released.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.keepalives.load(std::memory_order_relaxed)));
+               hand.fallback_commits,
+               hand.late_commits,
+               hand.grid_not_found,
+               hand.ready_timeouts,
+               s.keepalives_released.load(std::memory_order_relaxed),
+               s.keepalives.load(std::memory_order_relaxed));
 }
 #else  // OCUDU_METAL_STATS
 static void dft_stats_note_depth(uint64_t /*depth*/) {}
