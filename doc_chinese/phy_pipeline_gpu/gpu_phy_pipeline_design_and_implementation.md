@@ -6205,8 +6205,66 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s51-batch4
 （因为生产路径就是合并路线），而 `eq_demap` 应当**只剩一个零头**（不再是 100%）。
 **其余判据与 s50 完全相同。**
 
-**⑤ 余下**：**#13 第 2 步**（按 MCS 分层核 residency 尾巴，需要一条带 `OCUDU_UL_PHASE_SEGMENTS=1` 或 slot trace 的腿）；
-**#16**（Ubuntu 工作树同步，家务）；**#12** 已改判交出（数据在 §5.9.59/60）。
+#### 5.9.67 ✅✅ `s51-batch4` 确认腿：**`busy split` 在生产路径上如实报出 `merged_hop`**，且这是近期最好的一条腿
+
+**① 本批唯一新增的那一行，完全符合预期**
+
+```
+[ul_gpu_lane] busy split: merged_hop=575.6us/lane (100% of busy, cbs/lane=1.00)
+```
+
+**生产腿上整跳【恰好】只有一条缓冲**（`cbs/lane=1.00`）⇒ `merged_hop` 占 **100%**、**`eq_demap` 完全消失**
+（harness 的 merged 臂里两者都在，是因为那条路线多一条早期提交的缓冲）。
+**⇒ 同一行以前会写 `eq_demap=100%`，把 DFT+估计器+均衡+解映射算成一件** ——
+那正是"要优化时优化错对象"的根源，现在读数诚实了。**#13 第 1 步在空口得到确认。**
+
+**② 既有判据（全部通过）**
+
+| 判据 | 实测 |
+|---|---|
+| `front_end fence` 行 | **0 次**（已删）✅ |
+| `lane fence` | `signals=14187 == lanes=14187` ✅ |
+| `dft handover` | `handed=27648 taken=12592 unproduced=1 timeouts=0 (armed=1)` ✅ |
+| `evicted_unproduced` / `over_bound` | **0 / 0** ✅ |
+| `handed − evicted` | **256 = handed_capacity** ✅（注册表正好停在界上）|
+| 交出账 | `12592 + 12129 + 2926 + 1 = 27648` ✅ 闭合 |
+| `dft commits` / `cbs/lane` | **1** / **1.00 (max=1)** ✅ |
+| `contract` | **8 of 8** ✅ |
+| `dropped` / **RF 失败** | **0 / 0** ✅ |
+| `grid_shared` / `grid_failed` | `14187 == lanes` / **0** ✅ |
+| `channel_estimator` | **28374 = 2 × 14187** ✅ |
+| `stale` | **0** ✅ |
+
+**③ 功能与延迟：近期最好的一条**
+
+| 腿 | PUSCH | 总 KO% | **QPSK KO%** | QPSK sinr 中位 | 端到端中位 / p95 |
+|---|---|---|---|---|---|
+| s49 | 16198 | 3.6 | 0.4 | 5.4 | 1849.3 / 5215.7 |
+| s50 | 15674 | 6.3 | 0.7 | 7.8 | 1905.3 / 5514.2 |
+| **s51** | 14186 | **2.5** | **0.3** | 10.1 | **1828.7** / 5375.3 |
+
+⇒ **QPSK 解码同分布（0.3–0.7%）**、契约/`dropped`/RF 全同、中位是五条腿里最低。
+**⇒ 批次 3+4 无功能回归。** 到此**功能潜在组（#2/#5/#6）全部关闭**，剩余项都在性能线或家务线。
+
+**④ 下一步：#13 第 2 步要一条【带 trace 的腿】**
+
+要判"`residency` 的 2.2× 尾巴是否随每跳 dispatch 数/MCS 增长"，需要把**每跳的驻留与它的 MCS 配起来**，
+而现有腿的 `[ul_gpu_lane]` 只有聚合量 ⇒ **需要一条带 per-slot 时间线的腿**：
+
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s52-residency OCUDU_UL_SLOT_TRACE=64
+```
+（`OCUDU_UL_SLOT_TRACE=N`，N ≤ 64，是**已有的**旋钮；它按槽打印时间线 ——
+`residency`、各阶段、以及那槽的 MCS/分配都在同一行里，正好能把尾巴与 MCS 对上。）
+
+**判据（先写下来）**：
+1. 把有 trace 的那些槽按 **MCS/PRB 宽度**分层，看 `residency` 中位是否随它们单调上升；
+2. 若**不随 MCS 上升** ⇒ 尾巴来自 **GPU 队列争用/别的进程**，不是这跳的活 ⇒ 修法与 MCS 无关；
+3. 若**随 MCS 上升** ⇒ 尾巴是**这跳自己的 dispatch 数**（每跳约 12 个均衡 dispatch）⇒ 要压的是那批 dispatch。
+**⇒ 这两种结论指向完全不同的修法，所以第 2 步必须先"数"，不要先改。**
+
+**⑤ 其余**：**#16**（Ubuntu 工作树 `git checkout -- lib/phy/upper/channel_processors/pusch/pusch_demodulator_impl.cpp`，家务，需你那边执行）；
+**#12** 已改判交给调度/解码器侧（数据在 §5.9.59/60）；**#3**（认领率）与 **#4**（并发）仍在性能线待定。
 
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
