@@ -6016,6 +6016,63 @@ Metal 在约 60 个未提交命令缓冲上阻塞；共用缓冲会被重复提�
 **⇒ 建议顺序：#5-②（一行 + 反向臂）→ #2（先证反向臂可构造）→ #5-① 交用户裁定。三项都不必现在动码。**
 
 
+#### 5.9.64 ✅ #5-② **按"已核实"关闭（不需要改码）**；#2 的第 0 步**有答案：反向臂可构造**
+
+**① #5-② 为什么不用改：生产接收链根本不在 `wait_all()` 上**
+
+`wait_all()` 全仓**只有一个调用者** —— `dft_processor_metal::wait()`（`dft_processor_metal.h:91`）；
+而 `dft_processor::wait()` 在 lib/apps/tests 里**只有 DFT 单测调用**（`dft_processor_metal_unit_test.cpp`），
+**下层 PHY 一次都不调**（`ofdm_demodulator_impl.cpp` 里没有任何 `.wait()`；只有 `wait_slot`）。
+
+而**生产路径自己就分叉**了（`ofdm_demodulator_impl.cpp:487-508`）：
+
+```cpp
+released = wait_per_slot && handover_allowed() && dft->release_block(...);
+if (released) {
+  // "The transforms of this slot are not this engine's submission any more: the adopter commits them, and
+  //  waiting here would name a buffer this engine does not own (wait_slot() says so and refuses)."
+} else if (...) { dft->wait_slot(slot); }
+```
+
+**⇒ 交出时它明确【跳过】等待**，并在注释里写明理由。加上头文件 150 行**早就注明** `wait_all()` doesn't cover it
+⇒ **"把 `wait_all()` 读成'网格已写好'"这件事在代码里没有发生，在文档里也没有被允许。**
+**⇒ 不必再把 `wait_all()` 改成认识 `slot_released`**（那会为一个不存在误用点新增第二个真相源）。
+**#5-② 关闭为"已核实，非缺陷"。**
+
+（这也是本轮唯一一条**因为先做设计、再去读码，从而避免了一次无谓的 PHY 改动 + OTA** 的项。）
+
+**② #2 的第 0 步：反向臂【可以】构造，代价是一个诊断旋钮**
+
+约束重述：要打开"未产出条目被上界淘汰"的窗口，需要**多于上界的**条目，
+而每条需要一条**真**命令缓冲（`deposit_released` 拒绝 nil），Metal 在 **~60 条未提交缓冲**上阻塞，
+上界却是 **256** ⇒ 直接压上界做不到（§5.9.55 ② 实测）。
+
+**⇒ 解法：把上界本身变成可覆盖的诊断旋钮**（本仓有大量同类先例：`OCUDU_L1_DROP_MISS_WAIT`、
+`OCUDU_CE_LANE_ORDER`、`OCUDU_CE_HOST_SCALARS`…）：
+
+* `handed_capacity` → 读 `OCUDU_D1_HANDED_BOUND`，**默认仍是 256**（生产路径零变化）；
+* 反向臂把上界设到 **4** ⇒ 只需 **~5 条**命令缓冲 ⇒ **远低于 60** ⇒ 窗口**一定打得开**；
+* 断言两件事：**`evicted_unproduced > 0`**（窗口开了）**且**随后对那个被淘汰的 (storage, slot) 查询
+  **仍能找到记录**（修法生效）——修法之前它会 `not_found`。
+
+**⇒ #2 的改动包（三件，一次性）：**
+1. `handed_capacity` 改成读 `OCUDU_D1_HANDED_BOUND` 的函数（默认 256）；
+2. **修法**：未产出条目被淘汰时，**把擦除推迟到那次 late 提交的完成回调**（`no record` 无条件 ⇒ `nothing to wait for`）；
+3. **反向臂**：上面那条单测用例（上界=4 + 未认领 deposit + 淘汰后查询）。
+**⇒ 三项齐了才动，符合"没有反向臂就不改码"的规矩。**
+
+**③ 仍需用户裁定的一项：#5-①（前端栅栏路线）**
+
+事实（§5.9.63 ①）：前端栅栏是 opt-in、**所有腿里 `signals=0 waits=0 generation=0`**；
+机制本身不会挂死（等的是最新**已提交**的代际）；
+**但武装成为默认后它的语义变空**（前端不提交 ⇒ 代际不推进 ⇒ 等一个陈旧的已满足值 ⇒ 不提供排序）。
+
+**⇒ 两条路线互斥，需要裁定**：
+* **(A) 收掉前端栅栏这条线**：承认"武装即默认"之后它没有对象，删掉 `OCUDU_UL_FRONTEND_FENCE` 与 step 2a/2b 的待办；
+* **(B) 只在该链未武装时保留**：把栅栏的启用条件与 `grid_handover_armed()` 绑定（武装时自动关闭并说明）。
+**⇒ 这是路线选择，不是技术问题，等用户一句话。**
+
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，
