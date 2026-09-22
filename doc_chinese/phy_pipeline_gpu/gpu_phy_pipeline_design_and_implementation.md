@@ -6735,6 +6735,94 @@ s55 是带 **`--log.phy_level=debug`** 跑的（我上一条建议给的参数�
    `gaps=0`，而且 **RX 池是全部腿里最健康的**：`taken=59528 held_end=1 held_max=4 free_min=4 starved_takes=0 starved_events=0`。
    ⇒ 对竞态修复是**弱正向**证据（58 hop 不崩说明不了什么，竞态是概率性的）。
 
+#### 5.9.72 ✅✅ `s55-racefix` 重跑（**默认级别**）：接入成功、ping/iperf3 跑完、无崩溃 —— 竞态修复迄今最强的一次验证
+
+**① 腿本身**
+
+| 量 | 值 |
+|---|---|
+| 提交 | `19f16bae0c`（**已核**：与 `819e1e1f35` 的 C++ 差异为**空** ⇒ 就是竞态修复那份代码）|
+| 跨度 / 日志 | 105 s / **68 MB**（史上最大：77,185 行 RLC、23,782 行 GTPU ⇒ 真有流量）|
+| 契约与车道 | **MET 8/8**、`lanes=15618`、`cbs/lane=1.00`、`dropped=0`、`gaps=0`（101,350 块）|
+| Metal 断言 | **0 次**（`.stderr` 与 `.log` 各 0），无崩溃报告 |
+| 接入序列 | 8 PRACH / 8 RAR / 8 Msg3 授权 / **1 Msg3 到达**（与所有历史腿同形，用户确认接入并跑完 ping/iperf3）|
+| 收尾 | `Stopping...` + `Logfile stored in`，报告完整 |
+
+**② 与 s53（修复前）的车道对照：逐位同量级 ⇒ 修复没有扰动车道**
+
+| 量 | s53 | s55@2322 |
+|---|---|---|
+| `residency` mean / median | 615.1 / 579.6 | **610.4 / 580.0** |
+| `residency` p95 / p99 | 1078.6 / 1098.0 | **1076.6 / 1096.7** |
+| `busy split` | `merged_hop` 100% | `merged_hop` 100% |
+| `cbs/lane` / `dropped` | 1.00 / 0 | 1.00 / 0 |
+
+**③ D1 记账精确闭合**（修复没有破坏交棒簿记的硬证据）：
+
+```
+taken + fallback + late + unproduced = 13847 + 12222 + 4128 + 2 = 30199 = handed   ✓
+handed - evicted                     = 30199 - 29943             = 256   = handed_capacity ✓
+evicted_unproduced=0   over_bound=0   timeouts=0                                    ✓
+```
+
+**④ 池：比 s53 健康约 8 倍，但首次出现 `free_min=0`**
+
+`starved_takes=11 starved_events=10`（s53 是 87/82）、`held_end=2`、`held_max=8`、**`free_min=0`**
+⇒ 满占（8/8）这次真的发生过，但是有界的、短暂的。§5.9.68 ⑤ 那条"池余量为零是独立问题"的判断继续成立。
+
+**⑤ ★ 首次出现的尾部：`stale=197`**
+
+* **机制**（`ul_pipeline_probe.h:309-313`）：超过阈值（`OCUDU_UL_STALE_US`，默认 8000）的样本被**移出主序列**
+  放进 `stale_*`，两者**互斥** ⇒ `[ul_pipeline] max=7960` 是**构造性封顶**，不是"没超过"。
+  真实读数 = **14,955 个 hop 中 197 个（1.3%）端到端 > 8 ms**（stale 序列上界 9971 µs）。
+* 前 5 条腿（s50/s51/s52/s53/s55@2317）`stale` **全为 0** ⇒ 这是第一次。
+* **无解释**：DL/UL 授权量相近（PDSCH 1330 vs 1425）、UL 数据量**更少**（4.09 vs 4.54 MB）、
+  车道分解干净（`gap` 全 0、queue 分项无样本）。
+* 首要嫌疑：**iperf3 与 gnb 同机**（这条腿"跑完了 ping/iperf3"）⇒ 负载生成器与实时线程争 CPU。
+* ⇒ 记入性能线（#13/#3/#4）待查，**不作为回归**。判据：另跑一条不做 iperf3 的腿看 `stale` 是否为 0。
+
+**⑥ 判定**：15,618 个 hop 不崩是迄今最强证据（此前 s53@22:50 与 s54 都崩，且都在 `handed≈2368` 附近就崩）。
+竞态是概率性的，所以判据仍是**"多条腿 + 记账闭合"** —— 这一条的记账已精确闭合。
+
+#### 5.9.73 ✅ `[d1_handover]` 也移到 "PHY" logger 的 debug 级（用户要求：console 上最后一族 raw 行）
+
+**① 为什么还有它**：`[d1_handover]` 是 console 上**最后一族 raw `fprintf`**，四个站点各 64 行上限
+（所以每条腿正好 256 行，这正是 §5.9.72 ① 那个直方图里唯一的大项）：
+
+| 站点 | 文件 | 内容 |
+|---|---|---|
+| `burst` | `ocudu_metal_burst.mm`（`d1_trace`）| `burst {what} cb={cb}`（且**仅在武装臂**打印）|
+| `hop` | `ocudu_metal_mmse_engine.mm` | `hop grid={} slot={} -> TAKEN/MISS`（**认领侧**）|
+| `done` | `ocudu_dft_metal_engine.mm`（token 完成）| `done cb={} tokens={}` |
+| `deposit` | `ocudu_dft_metal_engine.mm`（`release_block`）| `deposit cb={} grid={} tokens={}` |
+
+**② 做法**：与 §5.9.69 ③ **同一方法** —— 只换 sink 与级别。cap 仍是"64 次**调用**"（不是 64 次打印），
+且 `debug.enabled()` 在**格式化之前**检查 ⇒ 默认级别下每次只付一个 relaxed 自增。
+指针用 `fmt::ptr()`（仓库里**没有先例**，已用探针确认它渲染成 `0x…`，与 `%p` 同形）。
+
+**③ 顺带发现并**保留**的一处旧格式错配**：`deposit` 那行**四个实参只对应三个占位符**
+（`nof` 从未被 `%zu` 消费 —— C 可变参数会静默丢弃它）。**保持原来打印的三个字段**
+（`cb`/`grid`/`tokens=nof_tokens`）并在注释里写明：fmt 会拒绝没有占位符的实参，
+而"悄悄多出一个字段"会让跨腿对比的人看到不同的数字。
+
+**④ 验证**
+
+| 检查 | 结果 |
+|---|---|
+| 默认级别下 `[d1_handover]` 行数 | **0**（`dft_release_adopt_metal_test` 确实驱动了交棒：其 `handed=56 taken=45`）✅ |
+| 四条格式串 | 探针渲染与旧 `fprintf` **逐字同形**（`hop grid=0xcb12c0000 slot=9422 -> TAKEN` 等）✅ |
+| handover 记账 | 与改动前**逐字节相同**（`handed=56 taken=45 superseded=43 … unproduced=8`）✅ |
+| `l1_handover_arms.sh 32` | **5 PASS**，无 FAIL ✅ |
+| `l1_hop_arms.sh 16` | 全臂 rc=0，四条比较 `differing=0`，臂计数与改动前相同 ✅ |
+| `value_net` / ctest / `uplink_processor_test` | **47/0** / **36/36** / **23/23** ✅ |
+
+**⑤ 代价（与 §5.9.69 ③ 同一条，再记一次）**：崩溃腿会失去这族行；诊断时用 `--log.phy_level=debug`。
+（s54 那次正是靠 `[d1_handover] hop … -> TAKEN` 看到"认领→挂回调"首尾相接，但 `.ips` 的栈同样足够。）
+
+**⑥ 需要 OTA**：判据 —— console 上不再出现 `[d1_handover]`（`[ul_rx_pool]`、`[dft_handover]` 已在 §5.9.68/69 收掉），
+`.stderr` 的直方图里只剩报告块；带 `--log.phy_level=debug` 时它们应出现在 `.log` 里（与 §5.9.71 ⑤ 对
+`[dft_handover]` 的验证同法），且契约 8/8、`cbs/lane=1.00`、`dropped=0`、记账三项不变。
+
 
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**

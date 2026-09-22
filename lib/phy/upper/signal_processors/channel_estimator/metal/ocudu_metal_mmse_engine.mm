@@ -1184,11 +1184,15 @@ static stage_encoder begin_stage_on_handed(mmse_engine_impl* e)
   {
     static std::atomic<unsigned> logged{0};
     if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
-      std::fprintf(stderr,
-                   "[d1_handover] hop grid=%p slot=%llu -> %s\n",
-                   e->hop_grid,
-                   static_cast<unsigned long long>(e->hop_grid_slot),
-                   (handed != nil) ? "TAKEN" : "MISS");
+      // DEBUG, for the same reason as the deposit side (see d1_trace() in ocudu_metal_burst.mm): 256 lines a
+      // leg across the four sites is small, but it is not something to read a console through.
+      auto& logger = ocudulog::fetch_basic_logger("PHY");
+      if (logger.debug.enabled()) {
+        logger.debug("[d1_handover] hop grid={} slot={} -> {}",
+                     fmt::ptr(e->hop_grid),
+                     static_cast<unsigned long long>(e->hop_grid_slot),
+                     (handed != nil) ? "TAKEN" : "MISS");
+      }
     }
   }
   if (handed == nil) {

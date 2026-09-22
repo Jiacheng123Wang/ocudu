@@ -326,8 +326,16 @@ static void d1_trace(const char* what, id<MTLCommandBuffer> cb)
   if (!grid_handover_armed() || (logged.fetch_add(1, std::memory_order_relaxed) >= 64)) {
     return;
   }
-  {
-    std::fprintf(stderr, "[d1_handover] burst %s cb=%p\n", what, (__bridge const void*)cb);
+  // The PHY logger at DEBUG level, like the rest of this family (5.9.69, 5.9.72): these were the last raw
+  // stderr lines on the console. The cap below still counts CALLS rather than prints, so a leg that never
+  // raises the level spends 64 relaxed increments and nothing else.
+  //
+  // The trade-off, stated where it bites: a leg whose chain breaks has no exit report, and these lines are how
+  // the handshake's two ends were compared (5.9.11). That is what `--log.phy_level=debug` is for - the leg
+  // being DIAGNOSED runs with it, rather than every leg printing 256 lines to keep the option open.
+  auto& logger = ocudulog::fetch_basic_logger("PHY");
+  if (logger.debug.enabled()) {
+    logger.debug("[d1_handover] burst {} cb={}", what, fmt::ptr((__bridge const void*)cb));
   }
 }
 

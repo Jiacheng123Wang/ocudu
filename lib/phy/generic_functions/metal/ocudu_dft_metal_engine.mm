@@ -518,10 +518,11 @@ static void release_block_tokens(const std::shared_ptr<block_token_set>& set)
   dft_stats_keepalives_released(tokens.size());
   static std::atomic<unsigned> logged{0};
   if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
-    std::fprintf(stderr,
-                 "[d1_handover] done cb=%p tokens=%zu\n",
-                 set->cb,
-                 tokens.size());
+    // DEBUG, like the rest of the D1 handshake lines (see d1_trace() in ocudu_metal_burst.mm).
+    auto& logger = ocudulog::fetch_basic_logger("PHY");
+    if (logger.debug.enabled()) {
+      logger.debug("[d1_handover] done cb={} tokens={}", fmt::ptr(set->cb), tokens.size());
+    }
   }
 }
 
@@ -1121,12 +1122,16 @@ void* dft_metal_engine::release_block(const void* grid_base)
   {
     static std::atomic<unsigned> logged{0};
     if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
-      std::fprintf(stderr,
-                   "[d1_handover] deposit cb=%p grid=%p tokens=%zu\n",
-                   (__bridge const void*)cb,
-                   grid_base,
-                   nof_tokens,
-                   static_cast<unsigned long long>(nof));
+      // DEBUG, like the rest of the D1 handshake lines (see d1_trace() in ocudu_metal_burst.mm).
+      //
+      // NOTE: the line printed three fields from four arguments - `nof` was passed and never consumed by the
+      // old %p/%p/%zu. The fields are kept exactly as they were printed (cb, grid, tokens=nof_tokens) rather
+      // than quietly gaining a fourth, because fmt refuses an argument without a placeholder and a reader
+      // comparing this line across legs must see the same three numbers.
+      auto& logger = ocudulog::fetch_basic_logger("PHY");
+      if (logger.debug.enabled()) {
+        logger.debug("[d1_handover] deposit cb={} grid={} tokens={}", fmt::ptr((__bridge const void*)cb), fmt::ptr(grid_base), nof_tokens);
+      }
     }
   }
   dft_handover_heartbeat("release");
