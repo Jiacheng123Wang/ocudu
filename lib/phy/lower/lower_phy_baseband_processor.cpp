@@ -19,15 +19,44 @@
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 #include <cstdlib>
 #include <ctime>
+#include <limits>
 
 using namespace ocudu;
 
 namespace {
 
 /// Receive-buffer accounting (see lower_phy_baseband_processor::rx_pool_note_taken).
+///
+/// The number that matters is `held = taken - returned`: a run that starves the radio holds it at the pool size.
+/// That happens for a WHOLE LEG, not for an instant - measured on `s52-residency` (2026-09-22): 18,409 takes of
+/// 179,495 found the pool at 1 or 0 free buffers, held at 7 of 8 for the last 28% of the run. Printing one line
+/// per take while "nearly dry" therefore degenerated into 1.1 MB of stderr, and made the receive thread pay a
+/// write to a pipe per take at the exact moment it was furthest behind.
+///
+/// So the events are COUNTED here and summarised ONCE at shutdown (rx_pool_report), and the per-take timeline
+/// goes to the "PHY" logger at DEBUG level: off at the default info level, and available with
+/// `--log.phy_level debug` when the timeline itself is the question.
 struct rx_pool_accounting {
   std::atomic<uint64_t> taken{0};
   std::atomic<uint64_t> returned{0};
+  /// Takes that found the pool nearly dry (one or zero free buffers).
+  std::atomic<uint64_t> starved_takes{0};
+  /// Entries INTO that state, i.e. runs of starvation rather than takes. This is the count that separates "the
+  /// pool was starved once, for a minute" from "it was starved a thousand times for an instant" - the summary
+  /// above cannot tell those apart, and the two say different things about the pipeline behind the pool.
+  std::atomic<uint64_t> starved_events{0};
+  /// Whether the previous take was nearly dry, for starved_events. Only this thread's transitions matter, and a
+  /// relaxed atomic is enough: the counter is read at shutdown, not used to order anything.
+  std::atomic<bool> was_starved{false};
+  /// Largest `held` and smallest free count seen. For ONE pool the two agree by construction - the queue holds
+  /// `free` of the `pool_size` buffers it was filled with, so `held = taken - returned = pool_size - free` - and
+  /// printing both lets a reader check that identity instead of trusting it. It does NOT hold across pools:
+  /// these counters are process-global while the pool is per-sector (and, in `lower_phy_test`, per fixture), so
+  /// that test reports `held_max` far above `pool` with tens of buffers never returned, which is the fixture
+  /// swapping pools under one set of counters and not a leak. Measured there: held_max=241, pool=8, free_min=5.
+  std::atomic<uint64_t> held_max{0};
+  std::atomic<size_t>   free_min{std::numeric_limits<size_t>::max()};
+  std::atomic<size_t>   pool_size{0};
 };
 
 rx_pool_accounting& rx_pool_accounts()
@@ -36,6 +65,38 @@ rx_pool_accounting& rx_pool_accounts()
   return accounts;
 }
 
+/// Prints the receive-buffer pool accounting ONCE, next to the other receive counters (see ul_rx_stats_report).
+///
+/// Registered unconditionally, because rx_pool_note_taken() is not behind a build flag, and silent for a run
+/// that never received a block - a leg that never started on air must not print a line of zeroes that reads
+/// like a measurement.
+void rx_pool_report()
+{
+  const rx_pool_accounting& a     = rx_pool_accounts();
+  const uint64_t            taken = a.taken.load(std::memory_order_relaxed);
+  if (taken == 0) {
+    return;
+  }
+  const uint64_t back     = a.returned.load(std::memory_order_relaxed);
+  const size_t   free_min = a.free_min.load(std::memory_order_relaxed);
+  std::fprintf(stderr,
+               "[ul_rx_pool] taken=%llu returned=%llu held_end=%lld held_max=%llu pool=%zu free_min=%lld "
+               "starved_takes=%llu starved_events=%llu\n",
+               static_cast<unsigned long long>(taken),
+               static_cast<unsigned long long>(back),
+               static_cast<long long>(taken - back),
+               static_cast<unsigned long long>(a.held_max.load(std::memory_order_relaxed)),
+               a.pool_size.load(std::memory_order_relaxed),
+               (free_min == std::numeric_limits<size_t>::max()) ? -1LL : static_cast<long long>(free_min),
+               static_cast<unsigned long long>(a.starved_takes.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(a.starved_events.load(std::memory_order_relaxed)));
+}
+
+const bool rx_pool_report_registered = []() {
+  std::atexit(rx_pool_report);
+  return true;
+}();
+
 } // namespace
 
 void lower_phy_baseband_processor::rx_pool_note_taken(size_t free_buffers, size_t pool_size)
@@ -43,19 +104,39 @@ void lower_phy_baseband_processor::rx_pool_note_taken(size_t free_buffers, size_
   rx_pool_accounting& a    = rx_pool_accounts();
   const uint64_t      took = a.taken.fetch_add(1, std::memory_order_relaxed) + 1;
   const uint64_t      back = a.returned.load(std::memory_order_relaxed);
-  // Printed every 1024 pops, and ALWAYS while the pool is nearly dry: the interesting number is
-  // `held = taken - returned`, and a run that starves the radio holds it at the pool size.
-  const bool starved = (free_buffers <= 1);
-  if (!starved && ((took % 1024) != 0)) {
+  const uint64_t      held = took - back;
+
+  // Nearly dry: one free buffer or none. The state is COUNTED (see rx_pool_accounting) - the interesting number
+  // is `held = taken - returned`, and a run that starves the radio holds it at the pool size.
+  const bool nearly_dry = (free_buffers <= 1);
+  if (nearly_dry) {
+    a.starved_takes.fetch_add(1, std::memory_order_relaxed);
+    if (!a.was_starved.exchange(true, std::memory_order_relaxed)) {
+      a.starved_events.fetch_add(1, std::memory_order_relaxed);
+    }
+  } else {
+    a.was_starved.store(false, std::memory_order_relaxed);
+  }
+  a.pool_size.store(pool_size, std::memory_order_relaxed);
+  if (held > a.held_max.load(std::memory_order_relaxed)) {
+    a.held_max.store(held, std::memory_order_relaxed);
+  }
+  if (free_buffers < a.free_min.load(std::memory_order_relaxed)) {
+    a.free_min.store(free_buffers, std::memory_order_relaxed);
+  }
+
+  // The same events as before - every 1024 pops, and every pop while the pool is nearly dry - but on the logger
+  // at DEBUG level rather than on stderr. `enabled()` is checked first so that a run at the default level pays
+  // one load per pop and nothing else. NOTE: while the pool IS nearly dry this is still one line per pop (that
+  // is what a debug timeline is), which at one pop per millisecond is a megabyte a minute - ask for it on
+  // purpose, and read the summary in rx_pool_report() otherwise.
+  if (!nearly_dry && ((took % 1024) != 0)) {
     return;
   }
-  std::fprintf(stderr,
-               "[ul_rx_pool] taken=%llu returned=%llu held=%lld free=%zu/%zu\n",
-               static_cast<unsigned long long>(took),
-               static_cast<unsigned long long>(back),
-               static_cast<long long>(took - back),
-               free_buffers,
-               pool_size);
+  auto& logger = ocudulog::fetch_basic_logger("PHY");
+  if (logger.debug.enabled()) {
+    logger.debug("[ul_rx_pool] taken={} returned={} held={} free={}/{}", took, back, held, free_buffers, pool_size);
+  }
 }
 
 void lower_phy_baseband_processor::rx_pool_note_return()

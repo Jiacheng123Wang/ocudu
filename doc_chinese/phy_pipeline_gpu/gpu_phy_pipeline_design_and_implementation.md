@@ -6266,6 +6266,201 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s52-residency OCUDU
 **⑤ 其余**：**#16**（Ubuntu 工作树 `git checkout -- lib/phy/upper/channel_processors/pusch/pusch_demodulator_impl.cpp`，家务，需你那边执行）；
 **#12** 已改判交给调度/解码器侧（数据在 §5.9.59/60）；**#3**（认领率）与 **#4**（并发）仍在性能线待定。
 
+#### 5.9.68 ★★★ `s52-residency`：**腿是干净的，但 #13 第 2 步仍然问不出来——`OCUDU_UL_SLOT_TRACE` 在生产路径上结构上不可能触发**（4 处缺陷 + 1 处无界状态）；顺带落地 `[ul_rx_pool]` 控制台洪泛的修复
+
+**⓪ 先纠正我自己在本次会话里写错的一条判断（读取时机，不是管线）**
+
+我最初读到的是**还在被写入的文件**，据此写下"这条腿被 SIGTERM 杀了、atexit 报告全缺、slot trace 丢失"。
+用户补充"刚才忘了退出 gnb，现在退出了"之后，同一批文件在**退出那一刻**变化，证据是决定性的：
+
+| 文件 | 我读到 | 退出后 |
+|---|---|---|
+| `.log` | 40,075,264 | 40,227,897 |
+| `.stderr` | 1,126,994 | 1,335,149 |
+| `.stdout` | **0** | **598** |
+
+`.stdout` 在管道上是**块缓冲**的，只有真正 `exit()` 才 flush（`run_leg.sh` 把 stdout 接到 `tee`，是管道）——
+所以**空 stdout 只说明"进程当时还没退出"，不是"被 SIGTERM 杀了"**。退出后的 `.stdout` 内容是干净的收尾：
+
+```
+Making USRP object with args 'type=b200,num_recv_frames=64,...'
+Cell pci=1, bw=5 MHz, 1T1R, dl_arfcn=430500 (n1), ... ul_freq=1962.5 MHz
+N2: Connection to AMF on 192.168.64.3:38412 completed
+=== gNB started ===
+Stopping...          ← 只有 SIGINT(Ctrl-C) 路径会打这一行；SIGTERM 不打
+Logfile stored in .../gnb_gpu_s52-residency_0922_2234.log
+```
+
+⇒ **这条腿是按规矩用 Ctrl-C 停的**，`commit b911f554a1` = HEAD，戳也对；`[phy_pipeline] contract` / `[metal_stats]` /
+`[ul_gpu_lane]` / `[ul_rx]` **一条不缺**（行前缀直方图与 s51 同形）。
+**教训（写给下一次会话）**：腿的日志在**用户说"退出了"之前都不可信**；`ls` 的大小和 `wc -l` 可以互相矛盾，
+因为进程还在写。判"报告缺不缺"之前先确认进程没了（`pgrep`）。
+
+**① 腿本身：里程碑数字复现（生产路径，无 env 旋钮）**
+
+| 量 | s52 | 对照 |
+|---|---|---|
+| `[phy_pipeline] contract` | **MET (8 of 8)** | 同 s47/s50/s51 |
+| 每跳宿主机数据穿越 | **0.00 read + 0.00 write** | 同 |
+| `[ul_gpu_lane]` | `lanes=14677 cbs/lane=1.00 dropped=0 carried=0 period_dropped=0` | s51 `14187` |
+| `residency` | mean **575.4** median 477.4 p95 1077.8 p99 1091.6 max 1365.8 µs | s51 mean **575.6** median 478.5 p95 1077.0 |
+| `busy split` | `merged_hop=575.4us/lane (100% of busy, cbs/lane=1.00)` | s51 同形 |
+| `[ul_rx]` | `blocks=179498 samples=1378544633 gaps=0 gap_samples=0 ts0_blocks=0` | s51 `81057` |
+| `[metal_stats] burst` | `commits=14677 waits=14677 max_in_flight=1 dispatches=220155 (equalizer=176124 demapper=14677 channel_estimator=29354)` | — |
+
+**⇒ trace 开着并没有扰动车道**（575.4 vs 575.6 µs，逐位级一致），这一条很重要：§5.9.61/66/67 的结论不需要撤回。
+
+**② #13 第 2 步：`rows=1`（绑定 64），而原因是结构性的，不是"这条腿没赶上"**
+
+`OCUDU_UL_SLOT_TRACE=64` 确实生效（`rows=1 (bound now OCUDU_UL_SLOT_TRACE=64)`），
+但整条腿只捕获 **1 行**。`[ul_slot_diag]` 把机制直接摊开（`sps=7680`）：
+
+```
+[ul_slot_diag] blk=0 ts=29767687 off_in_slot=7 to_boundary=7673 n=7680 completes=YES slot_ref=3877
+[ul_slot_diag] blk=1 ts=29775367 off_in_slot=7 to_boundary=7673 n=7673 completes=no  slot_ref=3878
+[ul_slot_diag] blk=2 ts=29783040 off_in_slot=0 to_boundary=7680 n=7680 completes=no  slot_ref=3879
+[ul_slot_diag] blk=3..8 同形（off_in_slot=0 n=7680 to_boundary=7680 completes=no）
+```
+
+判据是 `lower_phy_baseband_processor.cpp` 里的 `if (to_next_boundary < nof_samples)`。
+流一旦对齐到 slot 栅格（`off_in_slot=0`、块长 7680），它变成 **`7680 < 7680` ⇒ 恒假**：
+**块正好结束在 slot 栅格上，正是让这个判据失败的条件。**
+⇒ `ul_pipeline_probe.h` 里那条 NOTE 把因果写反了：
+
+> "this test is right only for a stream whose blocks END on the slot grid, **which the whole-slot policy satisfies**"
+
+**"ends on the grid" 不是这个判据成立的前提，而是它失效的前提。**
+⇒ **整个槽级 trace 在生产路径（整槽收包）上是死仪表**，那个 `blocks END on the slot grid` 的性质永远成立、于是永远不触发。
+
+**唯一那一行还是错位的**。`blk=0` 覆盖 `[29767687, 29775367)`：`3877*7680-1 = 29775359` 落在其中 ⇒
+它真正完成的是 **slot 3876**，而代码记的是 `(29767687+7673)/7680 = 3877` ——
+它记的是"**在块内开始**的 slot"，而"样本齐全"的是"**在块内结束**的 slot"。差一位。
+这也正好解释那行退化的数值（`t2f=nan`、`ce=nan`、`ldpc=61441830.5 µs`=61.4 s）：
+
+```
+  slot         rxwait        t2f         ce       ldpc     crc_ok tf_from_done   pipeline base_since_boot landmark_since_boot
+  3877       101894.0        nan        nan 61441830.5 61441856.0        nan     1734.0     2847.436     2908.878
+```
+
+**★ 正确的判据（已推导并逐例验算，一行、无需分类讨论）**：
+slot S 的样本齐全 ⟺ 它的**末样本**已到 ⟺ 流已覆盖 `(S+1)*sps` 个样本，即
+
+```
+done_slot = (block_begin_ref + nof_samples) / nof_samples_per_slot - 1;
+```
+
+* 错位块：`(29767687+7680)/7680 - 1 = 3877-1 = 3876` ✓（正是那块真正完成的 slot）
+* 对齐块：`((K+1)*7680)/7680 - 1 = K` ✓（**对齐块也能触发**，这就是当前判据漏掉的全部情形）
+* 槽内小块：`begin=7,n=100 ⇒ 107/7680 - 1 = -1` ⇒ 不触发 ✓（它的样本确实没齐）
+* 符号粒度流（两块落在同一 slot）会**重复**报同一 slot ⇒ 需要一条"上次已报的 slot"去重。
+
+**③ 就算它触发，也答不了 #13 第 2 步：行里没有 MCS/PRB**
+
+§5.9.67 ④ 的前提是"`OCUDU_UL_SLOT_TRACE=N` … 那槽的 MCS/分配都在同一行里，正好能把尾巴与 MCS 对上"。
+**实际打印的十列里没有任何 MCS/PRB/分配**：`slot rxwait t2f ce ldpc crc_ok tf_from_done pipeline base_since_boot landmark_since_boot`。
+并且 `print_slot_trace()` 第 619 行把 **`e.t2f_us` 同时传给了 `tf_from_done` 列** ⇒ **两列是同一个数**（`ul_pipeline_probe.h:619`）。
+（该函数注释说"also carries the slot's [ul_time_frequency]"，与实现不符。）
+⇒ **#13 第 2 步需要的不只是"修触发"，还要给 trace 条目加上 MCS/PRB 维度**，否则修好了也答不了。
+
+**④ 顺带发现的一处独立缺陷：trace 的两张 map 在接收热路径上无界增长**
+
+`record_slot_samples_complete()` 对**每一个收到的 slot** 做 `slot_samples_done[slot] = now`，
+而该 map 的注释明确写着"deliberately NOT capped"。s52 跑了 179,498 个 slot ⇒ **约 8.6 MB 的 `std::map` 节点**，
+插入点在**接收线程**里、每毫秒一次，且 `slot_trace_pre_wait` 同形。
+（`slot_trace`/`slot_landmarks` 是有界的：淘汰时线性扫 ~256 条，那条路径没问题。）
+**这一条与"能不能触发"无关，是它自己的缺陷**：一个 opt-in 仪表不该在热路径上留无界状态。
+
+**⑤ 副作用发现：RX 池持续饥饿，而它**不在**负载爆发期内（36 条腿里独一份）**
+
+`[ul_rx_pool]` 在 s52 打了 **18,568 行**，其中 **18,409 行是 `free<=1`**（231 行 `free=0`），
+而它在 s51 只有 107 行、s50 172 行。跨 36 条腿普查（`held = taken-returned`）：
+
+| 腿 | 最大块号 | 饥饿行数(held≥7) | held @25/50/75/90% |
+|---|---|---|---|
+| **s52-residency**（trace=64）| 179,495 | **18,409** | 2.2 / 3.0 / **6.7** / **7.0** |
+| s34-d1-armed_0921_1246 | 111,616 | 301 | 2.0 2.0 2.0 2.5 |
+| s46-d1flip_0922_0757 | 72,704 | 138 | 2.5 4.0 3.6 3.6 |
+| s47-d1default_0922_0826 | 90,112 | 114 | 2.0 4.3 4.4 2.5 |
+| s50-batch3_0922_2223 | 101,376 | 73 | 2.5 2.2 2.2 2.0 |
+| s51-batch4_0922_2230 | 80,896 | 28 | 2.5 2.2 3.0 3.0 |
+| **s36-d1-swept_0921_1316** | **201,783** | **0** | 2.0 3.0 2.0 2.0 |
+
+**能下的结论（都有直接读数支撑）**：
+1. **不是"跑得久"**：s36 跑到 201,783 块（比 s52 长）而饥饿行数为 **0**。
+   （但 s36 **不是**对 trace 的对照：它只有 847 hops，且没开 trace ⇒ `slot_trace_enabled()` 在入口就返回，
+   那两张 map 根本不存在。它排除的是"长跑本身饿池子"。）
+2. **不是这次的上行负载爆发**：MAC 的每 PDU `UL rnti=` 行给出真实流量 ——
+   `14:35:09-31` ~10 PDU/s、`14:35:35-46` ~50/s、**`14:35:52-14:36:06` 778~1001/s（15 s，约 11,000 PDU）**、
+   `14:36:07` 之后回落到 ~1-2/s。而池子在爆发期（块 58k~72k）是健康的（held **3~5**），
+   **爆发结束后还恢复过**（块 78,848 / 86,016 / 88,064 时 held=**2**），直到块 **129,507** 才再次退化并卡在 7。
+   ⇒ 起点与爆发相隔约 57,000 个块（≈57 s），而爆发本身只有 15 s 宽 —— **任何时钟偏差都解释不了这个间距**。
+3. **形态是"漂移 + 34 次进入饥饿"**：`held` 的基线随块号单调抬升（2 → 5~6），
+   在它上面叠加 **34 次进入饥饿**（下界；平均每次持续约 541 个已打印取用 ≈ 0.54 s），
+   饥饿段覆盖运行的最后 27.8%。**这不是"一次长饥饿"，是"基线越来越高、越来越频繁地碰顶"。**
+4. **代价被背压吸收了**：`rx_pool->buffers.pop_blocking()` ⇒ 池空**不会丢样本**，而是**阻塞接收线程**
+   （与 `gaps=0` 全腿成立一致）。⇒ 结论是"**余量为零**"：最后一次取用之后池子只剩 0~1 个，
+   再晚一点就是接收停摆（UHD 侧 `num_recv_frames=64` 的缓冲是唯一剩下的余量）。
+
+**⇒ 未解释。** 唯一随运行单调累积、且 s52 独有的是 **trace 的那两张 map（④）与它在接收路径上的互斥量**，
+嫌疑最大，但**机制未证实**，我不据此改码。**判别实验（不需要改码）**：
+开 trace 但让手机**基本不发上行**跑一条同样长的腿 —— 若池子仍然漂移到 7，
+说明代价来自"每 slot 一次 map 插入"（与 hop 无关，因为此时 `trace_slot()` 几乎不被调用）；
+若不漂移，则来自 hop 上的 landmark 路径。**这条腿的判据就是上面的 `held` 剖面与 `starved_events`。**
+
+**⑥ 已落地：`[ul_rx_pool]` 从 stderr 洪泛改为 ocudulog **debug** + 一条 shutdown 汇总**
+
+用户直接要求："gnb 在 console 不停输出 `[ul_rx_pool]`… 如果这些有参考价值，请输出到 OCUDU 的 log 系统，info/debug 由你决定。gnb console 只输出一些重要的信息。"
+
+**先说清一件事，否则会改错**：ocudulog 的级别是 **per-logger** 的，**没有独立的 console/file 电平**
+（`logger_appconfig_cli11_schema.cpp` 只有 `--all_level` / `--lib_level` / `--e2ap_level` / `--config_level`）。
+⇒ **"改成 `logger.info(...)`"根本不解决控制台问题**（info 级一样打到 console）。
+所以取 debug：默认 info 下 console 与日志都安静，需要时间线时用 `--log.phy_level debug` 单独打开"PHY"这一层。
+
+改动（`lib/phy/lower/lower_phy_baseband_processor.cpp`）：
+* 原始的每 1024 次取用 / 饥饿时每取用一行 → **"PHY" logger 的 debug 级**（先查 `debug.enabled()`，默认只付一次 load）。
+  **触发条件一字未改**，只为"去哪儿"而改：语义不变，才敢说这是纯日志改动。
+* 新增计数 `starved_takes` / `starved_events`（进入饥饿的**次数**，把"饿了一次一分钟"与"饿了一千次一瞬"分开）/
+  `held_max` / `free_min` / `pool_size`。
+* 新增 **`rx_pool_report()`（atexit，一条 `[ul_rx_pool]` 汇总）**，与 `[ul_rx]` 同处、同风格，
+  且 `taken==0` 时静默（没上过空的腿不该打一行零，那会被读成一次测量）。
+
+**验证（不是"编译过了"）**：`lower_phy_test` 驱动了真实收包路径（2012 块），实测打出**恰好一行**：
+
+```
+[ul_rx_pool] taken=2012 returned=1772 held_end=240 held_max=241 pool=8 free_min=5 starved_takes=0 starved_events=0
+```
+
+⇒ atexit 注册、`printf` 格式、计数自洽都过了。**并且这一行立刻纠正了我写错的一条注释**：
+我先写了"`held + free == pool size`，两者按构造一致"，而这里 `held_max=241` 配 `pool=8`。
+原因是 `rx_pool_accounts()` 是**进程级**静态、而池是**每扇区/每 fixture** 的：
+`lower_phy_test` 的 528 个 fixture 共用这套计数器 ⇒ 那个 241 是 fixture 换池留下的、**不是泄漏**。
+（单池时该恒等式成立：队列里 `free` 个、共 `pool_size` 个 ⇒ `held = pool_size - free`。）
+注释已按此改写，免得下一个人从这条测试输出里读出错误结论。
+
+**⑦ 离线门（全绿）**
+
+| 门 | 结果 |
+|---|---|
+| `value_net.py` | **captures=47 problems=0** ✅ |
+| `ctest -R "metal\|ul_pipeline_probe\|puxch\|lower_phy\|du_low\|o_du"` | **36/36** ✅ |
+| `uplink_processor_test` | **23/23** ✅ |
+| `lower_phy_test` | **528/528** ✅（并验证了新的汇总行）|
+
+`l1_handover_arms.sh` / `l1_hop_arms.sh` **本轮不适用**：它们驱动 `ul_chain_replay`，
+而该文件对 `lower_phy_baseband_processor` 的引用数为 **0**（已核），本次改动不在其链接范围内。
+
+**⑧ 待裁定 / 下一步**
+
+1. **这条腿改动了 PHY 接收路径的代码 ⇒ 按规矩需要一条 OTA 腿**。判据：
+   `[ul_rx_pool]` 汇总行**恰好出现一次**、`[ul_rx] gaps=0`、契约 8/8、`cbs/lane=1.00`、`dropped=0`，
+   且 console 上**不再出现** `[ul_rx_pool]`。
+2. **#13 第 2 步的前置条件有两件，都不只是"再跑一条腿"**：(a) 修触发判据（②的一行公式 + 去重）；
+   (b) 给 trace 条目加 MCS/PRB 维度（③）。**是否现在落 (a)+(b)，请裁定**——
+   它们同在 `lower_phy_baseband_processor.cpp`（`OCUDU_FLOW_PROBES` 守卫之内），可与第 1 条**共用同一条 OTA 腿**。
+3. **RX 池余量为零（⑤）是独立于 trace 的问题**，建议单独立项：它不问 trace 也会在真实负载下出现
+   （s34 301 行、s46 138 行、s47 114 行），只是没到 s52 那个程度。
+
+
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
