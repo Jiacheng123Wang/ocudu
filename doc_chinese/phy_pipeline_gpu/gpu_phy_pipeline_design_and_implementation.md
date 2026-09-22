@@ -6679,6 +6679,62 @@ sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s55-racefix
 `dropped=0`、`gaps=0`、`[ul_rx_pool]` 汇总恰好一行；且 `[metal_stats] dft handover …` 的四项
 （`evicted_unproduced=0`、`over_bound`、`unproduced`、`fallback`）与 §5.9.69 的读数同量级。
 
+#### 5.9.71 ★★ `s55-racefix`：**"手机接不上"不是回归**（五条腿同形佐证），但这条腿有一个我自己引入的混淆因素
+
+**① 用户的观察与日志的事实**
+
+用户报"手机不能接入，多次开关飞行模式核心网都没有反应"。日志的事实是：**手机接入成功了**，
+`rnti=0x4606`、`RRC Setup Procedure` 完成、DL/UL 都有 `ok` 计数 —— 但发生在**开跑后第 61 秒**，
+腿在第 63 秒被停掉，所以从操作台看就是"一直连不上"。
+
+**② 逐条对照：这个"反复重试、只成功一次"的形态在改动之前就存在**
+
+| 腿 | PRACH 事件 | RAR 调度 | **Msg3 授权** | **Msg3 到达** |
+|---|---|---|---|---|
+| s50-batch3（改动前）| 12 | 12 | 12 | **1** |
+| s51-batch4（改动前）| 6 | 6 | 6 | **1** |
+| s52-residency（改动前）| 14 | 14 | 14 | **1** |
+| s53-poolfix（改动前）| 12 | 12 | 12 | **1** |
+| **s55-racefix** | 6 | 6 | 6 | **1** |
+
+**s55（6/6/6/1）与改动前的 s51（6/6/6/1）逐位相同。** 且每次尝试里 gNB 的三步都做到了：
+
+```
+[SCHED] Processed slot events pci=1: prach(ra-rnti=0xf preamble=11 tc-rnti=0x4601)
+[SCHED] Slot decisions pci=1 t=27us (1 PDSCH, 0 PUSCHs, 0 PUCCHs): RAR: ra-rnti=0xf rb=[0..3) tbs=9
+[SCHED] Slot decisions pci=1 t=1us  (0 PDSCHs, 1 PUSCH, 0 PUCCHs):
+        UL: ue=8192 rnti=0x4601 h_id=0 ss_id=1 rb=[4..7) newtx=true rv=0 tbs=11 msg3_delay=6
+```
+
+⇒ gNB 检测到前导、发了 RAR、**并给了 Msg3 的上行授权**；**是 UE 没有发 Msg3**（没有 `UL rnti=0x4601 subPDUs` 行）。
+失败方向在 **UE 收 RAR（下行）这一侧**，而本仓库的三处改动全在上行
+（RX 池计数、DFT 心跳的 sink、上行交棒的完成回调位置），**结构上碰不到下行**（该配置里 `tx=cpu`）。
+
+**③ 但这条腿同时改了两件事 —— 这一点是我的问题**
+
+s55 是带 **`--log.phy_level=debug`** 跑的（我上一条建议给的参数）：63 s 里 **494 行 `[D]`**，
+其中包含**下行 PDSCH 的多行 dump**（`power_dmrs=` / `precoding=prg_size=275 prg0=…`）与每个 PUSCH 的
+`[mmse_time]` 行 —— 也就是**我们整晚都在从 console 上清掉的那一类热路径日志，被我从后门打开了**。
+⇒ s55 与 s53 之间有**两个**差异（竞态修复 + debug），所以 **s55 不能用来给竞态修复定任何罪，也不能洗清它**。
+
+从数字看"接入耗时"确实更差（s53 首次 PRACH→首个 Msg3 **17 s**，s55 **54 s**），但尝试次数更少（12 vs 6）、
+腿更短（99 s vs 63 s），在这个实验环境里**不足以判定**。
+
+**④ 修正后的操作规约（写在这里免得再犯）**
+
+* **功能腿一律用默认级别**（`--log.all_level info`）：`sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s56-racefix`；
+* **`--log.phy_level=debug` 只用于诊断崩溃**（它换来的正是"崩掉的腿还能看到握手计数"），
+  用过之后**不要**拿那条腿的数据判断功能或性能；
+* 参数必须写成**一个词**（`--log.phy_level=debug`，见 ⑤ 里那个坑）。
+
+**⑤ 这条腿顺带给出的两条正向验证**
+
+1. **`[dft_handover]` 的 debug 路由在空口上生效**：`.log` 里 8 行（而且**带上了时间戳**，比以前更好读）、
+   `.stderr` 里 **0 行** —— 正是 §5.9.69 ③ 的设计；
+2. **没有崩溃**、干净退出（`Stopping...` + `Logfile stored in`）、契约 8/8、`cbs/lane=1.00`、`dropped=0`、
+   `gaps=0`，而且 **RX 池是全部腿里最健康的**：`taken=59528 held_end=1 held_max=4 free_min=4 starved_takes=0 starved_events=0`。
+   ⇒ 对竞态修复是**弱正向**证据（58 hop 不崩说明不了什么，竞态是概率性的）。
+
 
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
