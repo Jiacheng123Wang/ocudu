@@ -542,6 +542,31 @@ void shared_burst::deposit_released(const void*          grid_base,
   if ((grid_base == nullptr) || (cb == nil)) {
     return;
   }
+  // ★ THE HANDLER IS ATTACHED HERE, BEFORE THE ENTRY IS PUBLISHED - and the position is load-bearing.
+  //
+  // Metal REQUIRES a completion handler to be installed BEFORE commit ("Completed handler provided after
+  // commit call" is an assertion, not a warning); the two other sites that install one say so in as many
+  // words (the gpu time probe in ocudu_metal_queue.mm, and arm_tokens_on_complete() in the DFT engine). This
+  // one used to be attached AFTER the locked region, for the good reason that everything which can RUN a
+  // handler has to happen outside the lock (mark_handed_produced() takes this same non-recursive mutex). But
+  // the entry it belongs to is published into h.entries INSIDE that locked region, and the consumer of a
+  // handed buffer runs on ANOTHER THREAD (see the note in release_block: "the adopter commits the buffer").
+  // So between the publish and the attach, that thread could take the entry and commit the buffer, and the
+  // attach then landed on a committed one. Measured on air, twice: gnb aborted with exactly that assertion,
+  // from deposit_released <- dft_metal_engine::release_block <- ofdm_symbol_demodulator_impl::finish_symbol
+  // on lower_phy_ul#0 (5.9.69; the report is in ~/Library/Logs/DiagnosticReports).
+  //
+  // Attaching BEFORE the publish closes that window by construction: while it is being attached the buffer is
+  // not yet reachable by anyone, so nobody can commit it in between. It also stays OUTSIDE the lock, which is
+  // what keeps the worst case safe rather than fatal - a buffer that had somehow been committed already would
+  // run this block inline on THIS thread, where mark_handed_produced() can take the mutex; attaching inside
+  // the locked region would deadlock on it instead. Registering a handler and running one are different
+  // things, and it was moving both out of the lock that put this one on the wrong side of the commit.
+  //
+  // The record lives until the buffer COMPLETES: `no record` has to mean `nothing to wait for`, which is what
+  // a host reader relies on (ensure_grid_produced()).
+  [cb addCompletedHandler:^(id<MTLCommandBuffer> completed) { mark_handed_produced(completed); }];
+
   // Everything that can run a completion handler or drop a last reference happens OUTSIDE the lock (see the
   // two notes on that below): this function collects what to do and does it at the end.
   std::vector<std::function<void()>> dropped;
@@ -631,9 +656,9 @@ void shared_burst::deposit_released(const void*          grid_base,
       }
     }
   }
-  // The record lives until the buffer COMPLETES: `no record` has to mean `nothing to wait for`, which is
-  // what a host reader relies on (ensure_grid_produced()).
-  [cb addCompletedHandler:^(id<MTLCommandBuffer> completed) { mark_handed_produced(completed); }];
+  // NOTE: the completion handler was attached at the TOP of this function, BEFORE the entry was published -
+  // it cannot be attached here, because by now another thread may already have claimed and committed the
+  // buffer (see the note there).
 
   for (id<MTLCommandBuffer> late : commit_late) {
     commit_dropped(late);

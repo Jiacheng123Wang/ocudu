@@ -6571,6 +6571,93 @@ done_slot = (block_begin_ref + nof_samples) / nof_samples_per_slot - 1;
    `[metal_stats] dft handover …` 仍在、契约 8/8、`cbs/lane=1.00`、`dropped=0`、`gaps=0`。
 3. **池饥饿（§5.9.68 ⑤）建议与 ④ 一起看**：现在有了默认路径的定量（82 次进入饥饿 / 99 s，每次约 1 个取用）。
 
+#### 5.9.70 ✅ 落地 §5.9.69 ④ 的竞态修复：**完成回调移到"发布之前、锁之外"**
+
+**① 崩溃复现了，而且 `.ips` 给出了栈（不再靠推理）**
+
+`s54-racefix` 跑在 `30ee38473b` 上，**同一个断言再次出现**（`Abort trap: 6`）。
+`.ips` 存在于 `~/Library/Logs/DiagnosticReports/gnb-2026-09-22-230621.ips`，触发线程是 **`lower_phy_ul#0`**：
+
+```
+-[_MTLCommandBuffer addCompletedHandler:]
+ocudu::metal::shared_burst::deposit_released(void const*, unsigned long long, id<MTLCommandBuffer>)
+ocudu::metal::dft_metal_engine::release_block(void const*)
+ocudu::dft_processor_metal::release_block(void const*)
+ocudu::ofdm_symbol_demodulator_impl::finish_symbol(ocudu::resource_grid_writer&, ...)
+ocudu::puxch_processor_impl::finish_oldest_symbol()
+ocudu::puxch_processor_impl::process_symbol(...)
+ocudu::lower_phy_uplink_processor_impl::process_complete_symbol(...)
+```
+
+⇒ **正是 §5.9.69 ④ 指出的那一行**（`deposit_released` 里挂回调处），不是另外两个挂载点。
+**更强的证据在日志尾部**：断言前最后一行是消费者侧的认领行（`ocudu_metal_mmse_engine.mm:1188`）：
+
+```
+[d1_handover] hop grid=0xaff19c000 slot=8776 -> TAKEN
+-[_MTLCommandBuffer addCompletedHandler:]:1011: failed assertion `Completed handler provided after commit call'
+```
+
+**"hop 刚 TAKEN，前端紧接着挂回调就炸"** —— 竞态的两个角色在时间上首尾相接，与推演完全一致。
+（`handed=2368 superseded=0` 也排除了"同一个 cb 被投放两次"：替换分支从未走过。）
+
+**② 排除我的日志改动：按代码位置，不是按猜测**
+
+* `dft_handover_heartbeat("release")` 在 `ocudu_dft_metal_engine.mm:1132`，而 `deposit_released()` 在 **1116** ——
+  **在它【之后】调用、且同一线程** ⇒ 它的快慢**不可能**进入"发布→挂回调"这个窗口。这一条是确定性的排除。
+* 池改动（§5.9.68 ⑥）移除的是**接收线程**的 stderr I/O。它**不能制造**这条竞态
+  （竞态是"发布与挂回调之间缺一个 happens-before"，与日志无关），
+  但它**可能把窗口露出来** —— 这是诚实的另一半，我不声称已排除。
+* 统计事实：**此前 36 条腿 0 次**，而两条崩溃腿都是新二进制，且崩溃腿里这两处 stderr I/O
+  都按新设计消失了（s54 的 `[dft_handover]` = **0 行**）。⇒ 最可能的解释是**"原来的打印把窗口盖住了"**，
+  但这是解释，不是证据。
+
+**③ 修法：移到函数开头 —— 不是"移到锁内"**
+
+```cpp
+void shared_burst::deposit_released(...)
+{
+  if ((grid_base == nullptr) || (cb == nil)) { return; }
+  // ★ 在【发布之前】挂：此时缓冲对任何线程都还不可达，没人能在中间提交它。
+  [cb addCompletedHandler:^(id<MTLCommandBuffer> completed) { mark_handed_produced(completed); }];
+  ... 取锁、发布（565/573）、淘汰、清扫 ...
+}   // 旧的 636 行删掉，只留一条指向这里的 NOTE
+```
+
+**为什么不是"放进锁内"**：`mark_handed_produced()` 要拿**同一把非递归锁**。正常情形下（缓冲未提交）
+回调不可能内联运行，放锁内也能工作；但只要有人误传一个**已提交**的缓冲，`addCompletedHandler` 会
+**当场内联执行**该 block ⇒ **在持锁线程上自锁死**。放在锁外，同样的病态输入只是"标记没找到条目"，
+不致命。**"注册回调"与"运行回调"是两件事** —— 那句"会跑回调的事都在锁外"的注释防的是后者，
+代码却把前者一起挪了出去。
+
+**先例支持**：另外两个挂载点的注释**原文引用**了这条 Metal 规则 ——
+`ocudu_metal_queue.mm`（"Metal REQUIRES the handler to be installed BEFORE commit()"）与
+`arm_tokens_on_complete()`（"Must be called before the commit"）。只有 `deposit_released()` 这一处越了线。
+
+**④ 验证：这个修复是行为中性的**
+
+| 检查 | 结果 |
+|---|---|
+| `l1_hop_arms.sh 16` 六条臂的每个计数 | 与修复前**逐项相同**（ref `handed=0 taken=0 not_found=16`；cand `handed=16 taken=16`；hostfirst/claim/claimnowait 各 `handed=16 taken=0 fallback=16`）✅ |
+| 三条比较 `differing` | **0 / 0 / 0** ✅ |
+| `dft_release_adopt_metal_test` 的 handover 计数 | 与修复前**逐字节相同**（`handed=56 taken=45 superseded=43 evicted=2 evicted_unproduced=0 over_bound=6 unproduced=8 fallback=1 late=4 not_found=0 timeouts=0 keepalives=45/45 (armed=1)`）—— 含 `unproduced=8`，即"已生产"标记的记账未受影响 ✅ |
+| `l1_handover_arms.sh 32` | **5 PASS**，无 FAIL ✅ |
+| `value_net.py` / ctest / `uplink_processor_test` | **47/0** / **36/36** / **23/23** ✅ |
+
+**⑤ 一个代价兑现了，记下来**：s54 里 `[dft_handover]` = **0 行**（心跳已在 debug 级）⇒
+**崩溃腿丢掉了那份握手计数** —— 这正是 §5.9.69 ③ 写下的代价，下一条腿就兑现。
+这次补上的是 `.ips` 的栈 + `[d1_handover]` 的 `-> TAKEN` 行，所以诊断没受影响。
+**⇒ 崩溃诊断时请带 `--log.phy_level debug`**（`run_leg.sh` 接受 `--*` 参数并送进 argv）。
+
+**⑥ 待 OTA**
+
+这条修复改了 D1 语义，按规矩需要一条 OTA 腿：
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s55-racefix
+```
+判据：**整条腿不再出现 `Completed handler provided after commit call`**、契约 8/8、`cbs/lane=1.00`、
+`dropped=0`、`gaps=0`、`[ul_rx_pool]` 汇总恰好一行；且 `[metal_stats] dft handover …` 的四项
+（`evicted_unproduced=0`、`over_bound`、`unproduced`、`fallback`）与 §5.9.69 的读数同量级。
+
 
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
