@@ -31,6 +31,56 @@
 #include <thread>
 #include <unistd.h>
 
+/// The rule that keys the per-slot timeline: which slot a received block of samples COMPLETES.
+///
+/// This is the one place where a wrong answer is SILENT - the timeline records other slots, or nothing at all,
+/// and both look exactly like a leg in which nothing happened. It was wrong in both halves on the production
+/// path (5.9.68, 5.9.69), and the numbers below are taken from the leg that exposed it (`s52-residency`,
+/// 7680 samples per slot, a stream aligned to the slot grid). The free function is checked here rather than
+/// through a leg, because a leg costs a phone test and this costs nothing.
+TEST(ul_slot_completion_test, the_rule_and_the_one_it_replaced)
+{
+  constexpr unsigned sps = 7680;
+
+  // 1. A whole-slot block that starts ON the grid completes the slot it starts in. This is the PRODUCTION case,
+  //    and the rule it replaces answers "no slot at all" for it: it tested `to_next_boundary < nof_samples`,
+  //    which here is `7680 < 7680`. Measured consequence: the timeline recorded 1 row out of a bound of 64.
+  uint64_t done = 0;
+  ASSERT_TRUE(ocudu::ul_slot_completed_by_block(3876ull * sps, sps, sps, done));
+  EXPECT_EQ(done, 3876u);
+
+  // 2. The measured unaligned block of that leg, [29767687, 29775367), which carries slot 3876's LAST sample
+  //    (29775359). The rule it replaces credits 3877 - the slot that STARTS at the boundary inside the block.
+  ASSERT_TRUE(ocudu::ul_slot_completed_by_block(29767687ull, sps, sps, done));
+  EXPECT_EQ(done, 3876u);
+
+  // 3. A block that ends before the first slot does completes nothing: without this guard a partial block would
+  //    announce slot 0.
+  EXPECT_FALSE(ocudu::ul_slot_completed_by_block(0, 100, sps, done));
+  EXPECT_FALSE(ocudu::ul_slot_completed_by_block(7, 100, sps, done));
+
+  // 4. A block spanning several slots completes only the NEWEST one; the caller announces one slot per block.
+  ASSERT_TRUE(ocudu::ul_slot_completed_by_block(10ull * sps, 3 * sps, sps, done));
+  EXPECT_EQ(done, 12u);
+
+  // ★ REVERSE ARM. The rule this replaced, written out, must DISAGREE with the one above on BOTH measured
+  // cases - so an edit that reintroduces it fails here instead of quietly emptying a leg's timeline.
+  const auto old_rule = [](uint64_t block_begin, unsigned nof_samples, unsigned sps, uint64_t& out) -> bool {
+    const uint64_t offset           = block_begin % sps;
+    const uint64_t to_next_boundary = sps - offset;
+    if (to_next_boundary < nof_samples) {
+      out = (block_begin + to_next_boundary) / sps;
+      return true;
+    }
+    return false;
+  };
+  uint64_t old_done = 0;
+  EXPECT_FALSE(old_rule(3876ull * sps, sps, sps, old_done))
+      << "the old rule fired on an aligned whole-slot block, so this test can no longer tell them apart";
+  ASSERT_TRUE(old_rule(29767687ull, sps, sps, old_done));
+  EXPECT_EQ(old_done, 3877u) << "the old rule did not mis-attribute the unaligned block";
+}
+
 #if !defined(OCUDU_FLOW_PROBES)
 
 TEST(ul_pipeline_probe_test, compiled_out_without_flow_probes)

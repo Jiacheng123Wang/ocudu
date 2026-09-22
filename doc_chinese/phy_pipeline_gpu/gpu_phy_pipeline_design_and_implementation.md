@@ -6870,6 +6870,105 @@ evicted_unproduced=0   over_bound=0   timeouts=0                                
 **⑤ 竞态修复的证据累计**：s55@2317（58 hop）→ s55@2322（15,618 hop）→ s56（15,933 hop、130,417 块）
 **三条腿均无断言**，且两次记账精确闭合。判据仍是"多条腿 + 记账闭合"，不因单条腿不崩而下结论。
 
+#### 5.9.75 ✅ #13 第 2 步的前置落地：**触发判据修好 + 行里有了真实的尺寸维度**；但真正回答那个问题的是新仪表 `[ul_by_size]`（全跳分层，不是 64 行）
+
+**① 为什么不能只"修好那个 trace 然后按 §5.9.67 ④ 跑"**
+
+§5.9.67 ④ 的前提是"`OCUDU_UL_SLOT_TRACE=N` … 它按槽打印时间线 —— `residency`、各阶段、以及那槽的 MCS/分配都在同一行里"。
+**这三样在那一行里一样都没有**（§5.9.68 ③ 已证前两条，本次核出第三条）：
+
+| 前提 | 实际 |
+|---|---|
+| 行里有 `residency` | **没有**。`residency` 是**车道级**的 GPU 时间戳量，在 `ocudu_metal_lane_probe.mm` 自己的 `[ul_gpu_lane]` 报告里，**与槽无关**（`lane_thread_state` 只持命令缓冲列表，**不带 slot**）|
+| 行里有 MCS/分配 | **没有**（十列里无此二者；`tf_from_done` 还是 `t2f` 的副本）|
+| 行数够分层 | **不够**：上限 64 行，而分层需要每个尺寸档都有中位数 |
+
+⇒ 于是按"**先数、且用对的仪器**"的规矩，落地三件：
+
+**② 触发判据修好（`ul_slot_completed_by_block()`）**
+
+从 `lower_phy_baseband_processor.cpp` 里抽成**自由函数**（与 `OCUDU_FLOW_PROBES` 无关 —— 写成类的静态成员时，
+没有该 flag 的构建只有 no-op 类，**那条构建会编译不过**，本次核出并改掉），规则一行、无分类讨论：
+
+```
+completed_slot = (block_begin + nof_samples) / nof_samples_per_slot - 1     (>= 0 时)
+```
+
+调用点同时补上**去重**（`newest_completed` 原子 + 一次 CAS）：块短于一槽时会有多块落在同一槽，
+只有第一块覆盖其末样本的那块完成它；整槽流每块推进一次，代价是一次 relaxed load。
+`[ul_slot_diag]` 的 `completes=` / `slot_ref=` 也**改成与新规则一致**（诊断行报另一套规则正是当初把我带偏的原因）。
+
+**单测 + 反向臂**（`ul_pipeline_probe_test` 3/3，新增 `the_rule_and_the_one_it_replaced`）：
+
+| 用例 | 输入 | 期望 |
+|---|---|---|
+| **生产形态**（对齐整槽）| `begin=3876*sps, n=sps` | **3876** ← 旧规则在这里**恒不触发**（`7680 < 7680`）|
+| 实测错位块 | `begin=29767687, n=sps` | **3876** ← 旧规则给 **3877** |
+| 部分块 | `begin=0/7, n=100` | 不完成任何槽 |
+| 跨多槽块 | `begin=10*sps, n=3*sps` | 只完成**最新**的 12 |
+
+反向臂：把旧规则原样写进测试，断言它在**两个实测用例上都与新规则不一致** ⇒ 若有人改回去，这个测试**会红**。
+
+**③ trace 行：加真实维度、删伪列**
+
+* `slot_trace_entry::tb_bytes` —— **该槽交付的传输块字节数**（"这跳有多少活"的尺寸维度）。
+  来源是 CRC-OK 完成时探针本来就收到的 `mac_pdu_bytes`，**不新增任何跨层管道**。
+  用 TB 字节数而不是 (MCS, nof_prb) 的原因写在字段注释里：**没有任何单一调用点同时握有那两样**，
+  而它们的**乘积**正是解映射产出的 LLR 数与解码跑的码块数的量度。
+* **删掉 `tf_from_done` 列**：它打印的是 `e.t2f_us`，即 `t2f` 的第二个副本（`slot_trace_entry` 里根本没有这个字段）。
+  两个相同的列会让人"对比通过"，这是白送的假证据。
+
+**④ ★ 真正回答问题的新仪表：`[ul_by_size]`**
+
+在 CRC-OK 完成处（探针**同时**握有该槽的两条跨度与它的尺寸），把每跳分层：
+
+| 分层 | 系列 | 为什么是它 |
+|---|---|---|
+| `iq2llr_*` | 融合车道的 IQ→LLR 跨度 | **最接近问题点名的 `residency`** 的宿主侧量 |
+| `pipe_*` | 同一条跳的端到端跨度 | 保留旧口径，便于与 `[ul_pipeline]` 对照 |
+
+输出（4 档 TB 字节：`<128 / 128-383 / 384-767 / >=768`，按实测分布选边界：中位 157 B、p95 640 B、max ~1.1 kB）
+外加一行**事实**而非判词：
+
+```
+[ul_by_size] iq2llr median: smallest bucket X us -> largest bucket Y us (xR)
+```
+
+* 近 1.0 ⇒ 尾巴**不是**这跳自己的活（修法在别处：设备争用/别的进程/机器）；
+* 明显 >1 ⇒ 尾巴**就是**这跳自己的 dispatch 数（修法在压缩车道的 dispatch）。
+* 无样本时**静默**（无 CRC-OK 跳、或非融合车道的构建不该打一张零表，那会被读成一次测量）。
+
+**⑤ 顺带纠正一个此前没写下的判断**：`gap` 在所有腿上**恒为 0**
+（s56：`gap samples=15618 mean=0.0us max=0.0us`）⇒ `residency == busy`，
+**设备侧根本没有排队等待**。所以 §5.9.67 ④ 的两个分支里，"尾巴来自 GPU 队列争用"**已经被排除**，
+剩下的只能是"这跳自己的活" —— 而 `[ul_by_size]` 正是量它的。
+
+**⑥ 离线门（全绿）**
+
+| 门 | 结果 |
+|---|---|
+| `ul_pipeline_probe_test`（含新用例 + 反向臂）| **3/3** ✅ |
+| `lower_phy_test`（驱动真实收包路径）| **528/528** ✅ |
+| `ctest -R "metal\|ul_pipeline_probe\|puxch\|lower_phy\|du_low\|o_du"` | **36/36** ✅ |
+| `value_net.py` | **47/0** ✅ |
+| `uplink_processor_test` | **23/23** ✅ |
+| `l1_handover_arms.sh 32` / `l1_hop_arms.sh 16` | **5 PASS** / 全臂 `differing=0` ✅ |
+
+**⑦ 待 OTA（一条腿同时验三件）**
+
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s57-trace OCUDU_UL_SLOT_TRACE=64
+```
+
+判据（前四条是**新仪表的存活判据**，后四条照旧）：
+
+1. `[ul_slot_diag]` 里**对齐块也报 `completes=YES`**（`off_in_slot=0`、`n=sps`）—— 这是触发判据修好的直接证据；
+2. `[ul_slot_trace] rows=` 应是**绑定值 64**（旧规则下实测 **1**），且行的 `slot` 是互不相同的 PUSCH 槽；
+3. 行的 **`tb_bytes` 列非 nan**，且与该腿 `[ul_mac_pdu_size]` 的量级一致；
+4. **`[ul_by_size]` 表出现**：四档各有多少样本 + 那行 `smallest -> largest (xR)` —— **这一行就是 #13 第 2 步的答案**；
+5. 契约 8/8、`cbs/lane=1.00`、`dropped=0`、`gaps=0`、无 Metal 断言、`[ul_rx_pool]` 汇总恰好一行；
+6. `stale` 应为 0（若不为 0，如实记下，别当作回归 —— 见 §5.9.74 ③）。
+
 
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**

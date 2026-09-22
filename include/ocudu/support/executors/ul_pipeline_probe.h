@@ -5,7 +5,9 @@
 
 #include "ocudu/phy/phy_pipeline_mode.h"
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <deque>
@@ -32,6 +34,46 @@ struct ul_phase_durations {
   /// Equalization + demodulation: channel estimates ready -> per-bit LLRs ready (start of the LDPC decode).
   std::chrono::nanoseconds equalization_demod;
 };
+
+/// \brief The slot a received block of samples COMPLETES, from the stream position alone.
+///
+/// Slot S's samples are complete once its LAST sample has arrived, i.e. once the stream covers `S + 1`
+/// slots' worth of samples. Written that way the rule needs no boundary arithmetic and no case split:
+///
+///     completed = (block_begin + nof_samples) / nof_samples_per_slot - 1     (when that is >= 0)
+///
+/// The rule this replaces (5.9.68, 5.9.69) asked instead whether the next slot boundary fell STRICTLY
+/// INSIDE the block, and credited the slot that STARTS at that boundary. On the production path - a block is
+/// exactly one slot and starts on the grid - both halves were wrong, and measurably so:
+///
+///  * the test became `7680 < 7680`, false for EVERY block, so the per-slot timeline recorded almost nothing
+///    (`rows=1` against a bound of 64, and that one row came from the single UNALIGNED block of the run);
+///  * the one time it did fire it named the slot AFTER the one the block had completed: the block
+///    [29767687, 29775367) carries slot 3876's last sample (29775359) and the old arithmetic answered 3877.
+///
+/// \param[in]  block_begin          Stream position of the block's first sample.
+/// \param[in]  nof_samples          Samples the block carries.
+/// \param[in]  nof_samples_per_slot Samples per slot.
+/// \param[out] done_slot            Completed slot INDEX (absolute, NOT reduced modulo the slots of an SFN
+///                                  cycle) when the function returns true.
+/// \return True when the block completes a slot; false when it ends before the first slot does. A block that
+///         spans several slots completes only the NEWEST one: the caller announces one slot per block, and in
+///         a contiguous stream the older ones were announced by earlier blocks.
+inline bool ul_slot_completed_by_block(uint64_t  block_begin,
+                                       unsigned  nof_samples,
+                                       unsigned  nof_samples_per_slot,
+                                       uint64_t& done_slot)
+{
+  if ((nof_samples_per_slot == 0) || (nof_samples == 0)) {
+    return false;
+  }
+  const uint64_t completed = (block_begin + nof_samples) / nof_samples_per_slot;
+  if (completed == 0) {
+    return false;
+  }
+  done_slot = completed - 1;
+  return true;
+}
 
 #if defined(OCUDU_FLOW_PROBES)
 
@@ -142,6 +184,16 @@ public:
     double          crc_ok_us     = std::numeric_limits<double>::quiet_NaN();
     double          rx_wait_us    = std::numeric_limits<double>::quiet_NaN();
     double          pipeline_us   = std::numeric_limits<double>::quiet_NaN();
+    /// \brief The MAC PDU (transport block) this slot delivered, in bytes - the SIZE of the slot's work.
+    ///
+    /// This is the descriptor a reader needs to tell a slow slot that had a lot to do from a slow slot that had
+    /// almost nothing: without it, a tail in the timeline cannot be attributed (5.9.67 (4) asked for exactly
+    /// that attribution). It is the TRANSPORT BLOCK SIZE rather than (MCS, nof_prb) because that is the quantity
+    /// the probe already receives, at the CRC-OK completion of the same slot - the product the two would give,
+    /// and the one that says how many LLRs the demapper produced and how many codeblocks the decoder ran.
+    /// NaN for a slot whose entry was created but whose PDU never completed (the trace is keyed on the first
+    /// codeblock decode invocation, so this can only be an aborted or failed hop).
+    double          tb_bytes      = std::numeric_limits<double>::quiet_NaN();
   };
 
   /// Records the start of the UL processing of a slot (call from the lower PHY baseband processor).
@@ -201,6 +253,13 @@ public:
             stale_gpu_pipeline_us.push_back(iq_to_llr_us);
           } else {
             gpu_pipeline_latencies_us.push_back(iq_to_llr_us);
+          }
+          // Handed to this slot's CRC-OK completion, which is where the transport block SIZE arrives - the
+          // dimension [ul_by_size] stratifies by (see iq2llr_by_size_us). Bounded like the other registries: an
+          // attempt whose slot never completes would otherwise leave one entry behind per attempt.
+          pending_iq2llr_us[slot] = iq_to_llr_us;
+          if (pending_iq2llr_us.size() > 256) {
+            pending_iq2llr_us.erase(pending_iq2llr_us.begin());
           }
         }
       }
@@ -304,12 +363,27 @@ public:
       auto trace_it = slot_trace.find(slot);
       if (trace_it != slot_trace.end()) {
         trace_it->second.pipeline_us = latency_us;
+        // The slot's SIZE, recorded here because this is the only instant the probe holds both the slot and the
+        // transport block it carried (see slot_trace_entry::tb_bytes).
+        trace_it->second.tb_bytes = static_cast<double>(mac_pdu_bytes);
       }
       pending_starts.erase(it);
       if (latency_us > static_cast<double>(stale_after_us())) {
         stale_pipeline_us.push_back(latency_us);
       } else {
         latencies_us.push_back(latency_us);
+      }
+      // [ul_by_size]: this is the ONE instant the probe holds both the hop's spans and the size of the work it
+      // carried (see iq2llr_by_size_us). The IQ -> LLR span was recorded at the decode start and is waiting in
+      // pending_iq2llr_us under this exact slot.
+      {
+        const size_t bucket = size_bucket_of(mac_pdu_bytes);
+        pipe_by_size_us[bucket].push_back(latency_us);
+        auto iq_it = pending_iq2llr_us.find(slot);
+        if (iq_it != pending_iq2llr_us.end()) {
+          iq2llr_by_size_us[bucket].push_back(iq_it->second);
+          pending_iq2llr_us.erase(iq_it);
+        }
       }
     }
     // LDPC decoder latency: match the start recorded for this TB by EXACT slot number - both ends of this
@@ -585,7 +659,7 @@ public:
                  "ce",
                  "ldpc",
                  "crc_ok",
-                 "tf_from_done",
+                 "tb_bytes",
                  "pipeline",
                  "base_since_boot",
                  "landmark_since_boot");
@@ -609,17 +683,85 @@ public:
         }
       }
       std::fprintf(stderr,
-                   "  %-8llu %10.1f %10.1f %10.1f %10.1f %10.1f %10.1f %10.1f %12.3f %12.3f\n",
+                   "  %-8llu %10.1f %10.1f %10.1f %10.1f %10.1f %10.0f %10.1f %12.3f %12.3f\n",
                    static_cast<unsigned long long>(e.slot),
                    e.rx_wait_us,
                    e.t2f_us,
                    e.ce_us,
                    e.ldpc_start_us,
                    e.crc_ok_us,
-                   e.t2f_us,
+                   // NOT e.t2f_us a second time: this column used to print that, so two of the row's ten
+                   // columns were the same number and a reader comparing them "agreed" for free.
+                   e.tb_bytes,
                    e.pipeline_us,
                    base_s,
                    mark_s);
+    }
+  }
+
+  /// \brief Prints the two per-hop spans stratified by the size of the hop's work (see iq2llr_by_size_us).
+  ///
+  /// Silent when nothing was recorded - a build outside the fused lane has no IQ -> LLR span to stratify, and a
+  /// leg that decoded nothing has no transport blocks, so there is no table to print rather than a table of
+  /// zeroes that reads like a measurement.
+  void print_by_size()
+  {
+    size_t total = 0;
+    for (const std::vector<double>& v : pipe_by_size_us) {
+      total += v.size();
+    }
+    if (total == 0) {
+      return;
+    }
+    std::fprintf(stderr,
+                 "[ul_by_size] the hop's own spans (us) against the transport block it carried - %zu CRC-OK hop(s)\n",
+                 total);
+    std::fprintf(stderr,
+                 "  %-10s %8s %12s %12s %12s %12s\n",
+                 "tb_bytes",
+                 "samples",
+                 "iq2llr_med",
+                 "iq2llr_p95",
+                 "pipe_med",
+                 "pipe_p95");
+    auto pct = [](const std::vector<double>& sorted, double p) {
+      return sorted[static_cast<size_t>((sorted.size() - 1) * p)];
+    };
+    const double nan          = std::numeric_limits<double>::quiet_NaN();
+    double       first_iq_med = nan;
+    double       last_iq_med  = nan;
+    for (size_t i = 0; i != nof_size_buckets; ++i) {
+      std::vector<double> iq = iq2llr_by_size_us[i];
+      std::vector<double> pp = pipe_by_size_us[i];
+      if (pp.empty()) {
+        std::fprintf(stderr, "  %-10s %8s %12s %12s %12s %12s\n", size_bucket_name(i), "0", "-", "-", "-", "-");
+        continue;
+      }
+      std::sort(iq.begin(), iq.end());
+      std::sort(pp.begin(), pp.end());
+      const double iq_med = iq.empty() ? nan : pct(iq, 0.5);
+      if (std::isnan(first_iq_med)) {
+        first_iq_med = iq_med;
+      }
+      last_iq_med = iq_med;
+      std::fprintf(stderr,
+                   "  %-10s %8zu %12.1f %12.1f %12.1f %12.1f\n",
+                   size_bucket_name(i),
+                   pp.size(),
+                   iq_med,
+                   iq.empty() ? nan : pct(iq, 0.95),
+                   pct(pp, 0.5),
+                   pct(pp, 0.95));
+    }
+    // One line for the question the table exists for, as a FACT rather than a verdict: how far the median
+    // IQ -> LLR span moved from the smallest bucket that has samples to the largest. Near 1.0 says the tail is
+    // not this hop's own work; clearly above 1 says it is, and the fix belongs in the lane's dispatch count.
+    if (!std::isnan(first_iq_med) && (first_iq_med > 0.0) && !std::isnan(last_iq_med)) {
+      std::fprintf(stderr,
+                   "[ul_by_size] iq2llr median: smallest bucket %.1fus -> largest bucket %.1fus (x%.2f)\n",
+                   first_iq_med,
+                   last_iq_med,
+                   last_iq_med / first_iq_med);
     }
   }
 
@@ -750,6 +892,7 @@ public:
     print_series("ul_rx_wait", sorted_rx_wait);
     print_series("ul_dft_wait", sorted_dft_wait);
     print_slot_trace();
+    print_by_size();
     // The series printed below cross both modes unchanged.
     // FAPI->MAC tail (CRC-OK -> MAC UL task enqueue): recorded in lockstep with the CRC-OK completions, so its
     // sample count tracks [ul_ldpc_decode] (minus PDUs dropped at the per-UE queue).
@@ -943,6 +1086,55 @@ private:
   std::vector<double> ldpc_latencies_us;
   /// Sizes in bytes of the CRC-OK MAC PDUs (data bursts), recorded together with the LDPC latency samples.
   std::vector<double> mac_pdu_sizes_bytes;
+
+  /// \brief The two spans a hop contributes, bucketed by the SIZE of the work that hop had to do.
+  ///
+  /// WHY THIS EXISTS, and why it is not the per-slot timeline. #13's tail question is "is a slow hop slow because
+  /// of what IT had to do, or because of something shared (queueing, another process)?", and the two answers
+  /// point at different fixes. The per-slot timeline cannot answer it: it is capped at 64 rows, and - measured
+  /// 5.9.68 - it carried neither the lane's residency nor any size descriptor, `tf_from_done` being a second copy
+  /// of `t2f`. These two series can, and over EVERY hop rather than 64 of them:
+  ///
+  ///  * `iq2llr` is the fused lane's own span (IQ arrival -> LLRs ready), the closest thing the host has to the
+  ///    device-side `residency` the question names;
+  ///  * `pipe` is the end-to-end span of the same hop.
+  ///
+  /// If the medians rise with the bucket, a slow hop is a hop with a lot to do, and the fix is in the lane's own
+  /// work. If they are flat, the tail is NOT this hop's work, and the fix is elsewhere (device contention,
+  /// another process, the machine). The SIZE is the transport block in bytes - the product of MCS and bandwidth
+  /// a reader would ask for, and the quantity the probe already receives at the CRC-OK completion of the same
+  /// slot. Population: CRC-OK hops only (a failed decode reports no transport block and would bucket a hop by a
+  /// size it never carried).
+  /// \brief Which size bucket a transport block of \p bytes falls in, and the bucket names the report prints.
+  ///
+  /// Boundaries chosen around what a 5 MHz cell actually shows (measured on the bridge config: median 157 B,
+  /// p95 640 B, max ~1.1 kB), so each bucket collects enough hops to have a median worth reading.
+  static constexpr size_t  nof_size_buckets = 4;
+  static size_t            size_bucket_of(uint64_t bytes)
+  {
+    if (bytes < 128) {
+      return 0;
+    }
+    if (bytes < 384) {
+      return 1;
+    }
+    if (bytes < 768) {
+      return 2;
+    }
+    return 3;
+  }
+  static const char* size_bucket_name(size_t i)
+  {
+    static constexpr const char* names[nof_size_buckets] = {"<128B", "128-383B", "384-767B", ">=768B"};
+    return (i < nof_size_buckets) ? names[i] : "?";
+  }
+
+  std::array<std::vector<double>, nof_size_buckets> iq2llr_by_size_us;
+  std::array<std::vector<double>, nof_size_buckets> pipe_by_size_us;
+  /// Per-slot IQ -> LLR span, waiting for the CRC-OK completion that carries its slot's transport block size
+  /// (see iq2llr_by_size_us). Bounded by insertion order like the other pending registries.
+  std::map<uint64_t, double> pending_iq2llr_us;
+
   /// Slot-keyed timestamps of the whole-slot FFT completions (see record_t2f_end()).
   start_registry   pending_t2f_ends;
   /// Slot-keyed timestamps of the PUSCH channel estimation completions (see record_ce_end()).

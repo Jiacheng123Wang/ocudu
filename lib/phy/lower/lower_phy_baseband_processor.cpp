@@ -596,9 +596,16 @@ void lower_phy_baseband_processor::ul_process()
       const uint64_t slots_per_sfn_cycle = (nof_samples_in_all_hyper_frames / NOF_HYPER_SFNS) / nof_samples_per_slot;
       const uint64_t block_begin_ref     = apply_timestamp_sfn0_ref(rx_metadata.ts);
       const uint64_t offset_in_slot      = block_begin_ref % nof_samples_per_slot;
-      // STRICTLY greater than the block's start: a boundary exactly at the block's first sample belongs to the
-      // PREVIOUS slot (the one that ends there), and crediting it to this block would report that slot twice.
-      const uint64_t to_next_boundary    = nof_samples_per_slot - offset_in_slot;
+      // Kept for the diagnostic line below, which reports the stream's ALIGNMENT: it is what tells an operator
+      // whether the receive policy is delivering whole slots on the grid (offset 0) or blocks that straddle one.
+      const uint64_t to_next_boundary = nof_samples_per_slot - offset_in_slot;
+      // ★ THE COMPLETION RULE. Slot S's samples are complete once its LAST sample has arrived - see
+      // ul_slot_completed_by_block() for the rule itself and for what the form it replaces got
+      // wrong on this very path (it tested `to_next_boundary < nof_samples`, which is `7680 < 7680` - false for
+      // every whole-slot block - and, when it did fire, named the slot AFTER the completed one).
+      uint64_t   completed  = 0;
+      const bool completes  = ul_slot_completed_by_block(
+          block_begin_ref, nof_samples, nof_samples_per_slot, completed);
       if (ul_pipeline_probe::slot_trace_enabled()) {
         static std::atomic<unsigned> diag_blocks{0};
         static std::atomic<int64_t>  diag_last_s{-1};
@@ -616,15 +623,23 @@ void lower_phy_baseband_processor::ul_process()
                        static_cast<unsigned long long>(to_next_boundary),
                        nof_samples,
                        nof_samples_per_slot,
-                       (to_next_boundary < nof_samples) ? "YES" : "no",
-                       static_cast<unsigned long long>((block_begin_ref + to_next_boundary) / nof_samples_per_slot));
+                       completes ? "YES" : "no",
+                       static_cast<unsigned long long>(completes ? completed : 0));
           std::fflush(stderr);
         }
       }
-      if (to_next_boundary < nof_samples) {
-        const uint64_t done_slot = ((block_begin_ref + to_next_boundary) / nof_samples_per_slot) % slots_per_sfn_cycle;
-        ul_pipeline_probe::get().record_slot_samples_complete(
-            done_slot, nof_samples, recv_us * 1000, std::chrono::high_resolution_clock::now());
+      if (completes) {
+        // Announced ONCE per completed slot. That guard is what the rule alone cannot give: a receive policy
+        // whose blocks are shorter than a slot ends several of them inside the same one, and only the block that
+        // first covers its last sample completes it. A whole-slot stream advances this by one per block, so the
+        // test costs a relaxed load and one CAS on the path the real-time uplink depends on.
+        static std::atomic<uint64_t> newest_completed{0};
+        uint64_t                     prev = newest_completed.load(std::memory_order_relaxed);
+        if ((completed > prev) &&
+            newest_completed.compare_exchange_strong(prev, completed, std::memory_order_relaxed)) {
+          ul_pipeline_probe::get().record_slot_samples_complete(
+              completed % slots_per_sfn_cycle, nof_samples, recv_us * 1000, std::chrono::high_resolution_clock::now());
+        }
       }
     }
     if (recv_us > 20000) {
