@@ -892,6 +892,21 @@ int main()
                    nof_subc);
     }
 
+    // ---- NOT tested here: the registry's bound, and the two halves of `evicted` (5.9.54 item 14) ------
+    // Recorded because the attempt was made and its cost is the finding: the bound cannot be reached from
+    // this test cheaply. `deposit_released` refuses a nil command buffer, so every entry needs a REAL one,
+    // and Metal blocks at about sixty uncommitted command buffers per queue (measured: the run hangs inside
+    // -[AGXG16XFamilyCommandQueue commandBuffer], on _dispatch_semaphore_wait) while the bound is 256.
+    // Handing the same buffer to several entries instead is not an option either: the eviction path commits
+    // the victim, so a shared buffer would be committed more than once.
+    //
+    // On air the bound IS reached - every armed leg carries handed - evicted == shared_burst::handed_capacity
+    // exactly - because consumers commit along the way and free those slots. So the split is judged THERE,
+    // by the relation the leg report prints: `evicted` alone is handed - capacity and says nothing, while
+    // `evicted_unproduced` must stay at or below `late` (each of its entries owes a late commit) and well
+    // below `evicted` (the registry prefers to evict an entry that was already produced). A mis-wired split
+    // shows up as `evicted_unproduced == evicted` on a leg that is otherwise healthy.
+
     std::fprintf(stderr,
                  "[dft-release] PASS: the block was handed over uncommitted, the lane adopted it, the "
                  "consumer read the grid it wrote, and the input's lifetime stayed with the block - one "

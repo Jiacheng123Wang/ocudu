@@ -5475,6 +5475,98 @@ s44-armed 30635/30379、s46-armed 27221/26965 —— **差恒为 256**。
 4. 11（TA fence）与 9（已答）按需。
 
 
+#### 5.9.55 ✅ 收口批次 1（记账类）：**#14 / #8 / #7 / #15 已改，另修掉一条 5 次里错 4 次的时序脆断言**
+
+> **⚠ 本批次动了 PHY（Metal 车道注册表、Metal 引擎、UL 探针），按用户裁定：落完即停，等空口腿。**
+
+**① #14 `evicted` 拆分——它此前不携带信息**
+
+`handed − evicted` 在三条武装腿上**恒等于 `max_handed`（256）**（30635/30379、27221/26965、28252/27996）
+⇒ 注册表全程饱和在自己的上界，每个 deposit 恰好淘汰一条。而头文件把它写成"**可疑的那一半（backlog）**"
+⇒ **每条健康腿都显示 `evicted ≈ handed`**。
+
+改成：**`evicted` 仍是总数**（不破坏既有读数，但注释改为"单独看没有信息"），
+**新增 `evicted_unproduced`**（真正积压：被淘汰时**无人认领也无人产出** ⇒ 欠一次补提交）。
+两者用**同一个布尔**判定（移除循环本来就要它来决定 `commit_late`）——一个决定，两个计数器，不是两处要对齐。
+`max_handed` 同时提升为 `shared_burst::handed_capacity`（单一真相源，判据可引用而不必复述数字）。
+两条报告行（`[metal_stats] dft handover` 与 harness 的 `[l1_handover]`）加印 `evicted_unproduced=`。
+
+**② ⚠ #14 的"判据必须会触发"在单测里【够不到】，原因已实测并记在源码里**
+
+注册表的上界**无法在单测里便宜地压到**：`deposit_released()` 拒绝 nil 命令缓冲，
+而 Metal 在**约 60 个未提交命令缓冲**上就阻塞（实测：挂在 `-[AGXG16XFamilyCommandQueue commandBuffer]`
+的 `_dispatch_semaphore_wait`），上界却是 256；让多个条目共用一条缓冲也不行——淘汰路径会提交受害者，重复提交。
+⇒ **该拆分改由空口腿判**，判据已写进测试文件的注释：
+`evicted` 单独看 = `handed − handed_capacity`；**`evicted_unproduced` 必须 ≤ `late`**（每个都欠补提交）
+且**明显小于 `evicted`**（注册表优先淘汰已产出的条目）；接线错了会显示 `evicted_unproduced == evicted`。
+（**这是一处如实记录的缺口**，不是"已验证"。）
+
+**③ #8 `channel_estimator` 归属缺口——补上了**
+
+`count_dispatch(channel_estimator)` 只在 `s.burst == true` 时发生，而**合并路线（现在的默认）**里
+估计器的缓冲**要到之后才被 `adopt` 进车道 burst** ⇒ 归属从未发生。实测 s47：
+`dispatches=188825 (equalizer=174300 demapper=14525 **channel_estimator=0**)`，而估计器跑了 14525 跳。
+修在**接管成功那一刻**（`shared_burst::adopt(st.cb)` 返回 true 的分支），按**两个阶段**计数
+（提取 + 权重，与 burst 路线 `end_stage`/`end_stage_async` 各计一次对齐）。
+实测：8 跳 ⇒ `channel_estimator=16` ✅（此前 0）。
+
+**④ #7 探针 `stale=` 分流——按【跨度】分流（槽距不携带信息，已写明理由）**
+
+`find_fresh()` 只把完成槽与**槽/槽−1/槽−2**配对 ⇒ **槽距天然 ≤2，做分布没有信息**；
+真正会变的、也是 71.6 ms 那个样本来源的，是**跨度**。所以在两条流水线序列上：
+**跨度 > 上行 HARQ RTT 的样本单独计数**（`stale=`/`max_stale=`），**主序列的 `max` 恢复成"最慢的、还有用的那个包"**。
+阈值 `OCUDU_UL_STALE_US`（默认 8000 µs，本配置的 HARQ RTT；别的配置覆盖它而不是改代码），
+**每次调用都读**（此前写成 `static` 缓存 ⇒ 进程内改 env 无效，对腿和单测都是缺陷，已修）。
+
+**⑤ #15 定案**：快照门列里的 `--self-test 8/8` **就是腿上的 `contract MET (8 of 8 checks applicable)`**
+（8 项 = radio continuity / dft radio inputs / zero-copy wraps / ce device estimates /
+**host device data crossings** / cfo compensation / baseband metrics / host sample assembly）。
+**本仓已构建的二进制没有一个接受 `--self-test`**（两个解析 argv 的探针都不认它）。**快照里的写法是误称，不是缺命令。**
+
+**⑥ 顺手修掉：`ul_pipeline_probe_test` 的时序脆断言（清单 #8 的后半）**
+
+`one_report_shape_per_pipeline_mode` 里两条**墙钟绝对界**是 4000/12000 µs，而它们包住的子跨度是 4 ms / 2 ms
+⇒ **没有给调度留任何余量**，实测**5 次里错 4 次**（`4083 µs` 对 `4000 µs` 的界）。
+它们要抓的失败模式是"把总时长当成每段打印"（≈11 ms）⇒ 界放宽到 6000/16000 µs 仍然抓得住，
+**真正的分辨力交给结构断言**（段和 vs 总时长、三段互不相等，那些不依赖墙钟）。
+改后 **6/6 稳定通过**。同时把新加的 stale 用例**移到文件末尾**（它自己用增量断言），
+因为它若排在首位会污染共享单例、让既有的绝对计数断言失败。
+
+**⑦ 本批次的离线门（全绿）**
+
+| 门 | 结果 |
+|---|---|
+| `ctest -R "metal\|ul_pipeline_probe\|puxch\|lower_phy\|du_low\|o_du"` | **36/36**（比上轮多一个：新的 stale 用例）|
+| `value_net` | **captures=47 problems=0** |
+| `l1_handover_arms.sh 32` | 5 条 PASS 行 |
+| `l1_hop_arms.sh 16` | **rc=0**、四条臂 `differing=0` |
+| `uplink_processor_test` | **23/23** |
+| `dft_release_adopt_metal_test` | **PASS**（含 arm 0 / arm 0b）|
+
+**⑧ ⏸ 停在空口腿（用户裁定：动了 PHY 就必须 OTA 确认功能）**
+
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s48-close-batch1
+```
+**新增要看的两处**：
+* `[metal_stats] dft handover ... evicted=… evicted_unproduced=…` ——
+  **`evicted − evicted_unproduced` 应明显大于 0**（已产出的那些），
+  且 **`evicted_unproduced ≤ late`**；若 `evicted_unproduced == evicted` ⇒ 拆分接错。
+* `[ul_pipeline] stale=` / `[ul_gpu_pipeline] stale=` 两行 —— **健康腿应为 0**（或个位数），
+  并印出阈值来源（"the uplink HARQ round trip"）。
+**既有判据照旧**：`handed>0 taken>0 timeouts=0 (armed=1)`、`cbs/lane=1.00`、`contract 8/8`、
+`dropped=0`、`will NOT exercise D1` = 0、`dft commits≈1`、QPSK CRC 与上轮同形。
+* 另：`[metal_stats] burst commits` 行里的 `channel_estimator=` **应等于 2 × 跳数**（不再是 0）。
+
+**⑨ 余下的清单项（未动，等本批次腿过）**
+
+功能潜在：**#2**（`not_found` 无记录即直接读网格）、**#5**（前端栅栏代际 + `wait_all()` 不覆盖交出的块）、
+**#6**（`wrap_shared()` 丢 offset，绊线从未触发）——**三者都要先设计、各配反向臂**。
+需要空口数据/性能：**#3**（认领宽限期）、**#4**（并发，动机已弱）、**#10**（下行同口径记账）、
+**#11**（TA fence 实验）、**#12**（LA 错配，第一优先）、**#13**（pipeline 延迟）。
+家务：**#16**（Ubuntu 工作树 `git checkout -- lib/phy/upper/channel_processors/pusch/pusch_demodulator_impl.cpp`）。
+
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，

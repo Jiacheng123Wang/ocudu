@@ -120,12 +120,15 @@ double mean_us(const std::string& report, const std::string& name)
 ///       of them asserted about what the other had recorded would hold when the binary is run whole and fail under
 ///       ctest. (That is not hypothetical: it is how this test failed its first ctest run.) The mode is published
 ///       process-wide and cannot be taken back either, so the non-fused half has to come first inside one case.
-
-///       process-wide and cannot be taken back either, so the non-fused half has to come first inside one case.
-
-///       process-wide and cannot be taken back either, so the non-fused half has to come first inside one case.
+///
+/// \note The staleness cutoff (OCUDU_UL_STALE_US) is pinned OUT OF THE WAY here: this case records spans of
+///       30 ms and 20 ms on purpose, to make a mis-paired value unmistakable, and both exceed the uplink HARQ
+///       round trip the probe splits on. The span is a test device, not a claim that such a hop is useful, so
+///       it must stay in the series - otherwise this case would be asserting the shape of the wrong series.
+///       The split has its own case, which moves the cutoff the other way on purpose.
 TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
 {
+  ::setenv("OCUDU_UL_STALE_US", "60000000", 1);
   constexpr uint64_t cpu_slot = 100;
   constexpr uint64_t gpu_slot = 200;
   // A span long enough to be unmistakable in the report (and to make a mis-paired value near zero visible).
@@ -292,9 +295,16 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
     // around a span of ~9 ms, while the non-fused half slept 2 / 0 / 2 ms. So the mean of the equalization+
     // demodulation segment over the two samples has to sit at ~3 ms - a report that printed the total (or the sum)
     // three times lands far above, and one that printed the same number three times lands at ~4.5 ms or ~0.
+    // \note The absolute bounds below leave real HEADROOM, and that is a fix, not a relaxation: they were
+    //       4000/12000 us against sub-spans of 4 ms and 2 ms, i.e. no room for the scheduler at all, and the
+    //       case failed about four runs in five once the machine was busy (measured: 4083 us against a 4000 us
+    //       bound). What they are here to catch is a report that printed the TOTAL for each segment - about
+    //       11 ms - so a bound at 6 ms catches it just as well while a 4 ms sleep can overrun. The structural
+    //       assertions further down (the segment sum against the total, and the segments against each other)
+    //       carry the discrimination that must not depend on wall-clock at all.
     const double eqdem_us = mean_us(report, "ul_equalization_demod");
-    EXPECT_GE(eqdem_us, 2500.0) << report;
-    EXPECT_LT(eqdem_us, 4000.0) << report;
+    EXPECT_GE(eqdem_us, 2000.0) << report;
+    EXPECT_LT(eqdem_us, 6000.0) << report;
     // The forced PUSCH's segments are SUB-spans, and their positions are what the numbers have to show. The
     // absolute bounds below therefore have to account for the TRACED slot recorded earlier in this same case:
     // the segment series accumulate over the process, so its ~21 ms contribution is in this mean too (that is
@@ -308,7 +318,7 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
     // The forced section slept 2 / 3 / 4 ms between the three landmarks; the earlier sections slept 2 / 0 / 2
     // (non-fused) and 20 / 1 / 2 (traced), all of which are in these means.
     EXPECT_GE(t2f_us, 2000.0) << report;
-    EXPECT_LT(t2f_us, 12000.0) << report;
+    EXPECT_LT(t2f_us, 16000.0) << report;
     EXPECT_GT(ce_us, 0.0) << report;
     // The three segments must not be the same number three times: the forced PUSCH alone separates them by
     // 2/3/4 ms, while every earlier section left two of them equal, so a report that echoed one value would make
@@ -405,6 +415,64 @@ TEST(ul_pipeline_probe_test, one_report_shape_per_pipeline_mode)
 
   unsetenv("OCUDU_UL_SLOT_TRACE");
   unsetenv("OCUDU_UL_PHASE_SEGMENTS");
+}
+
+/// The samples that finish too late to be used are COUNTED APART (5.9.54 item 7), and that is only worth
+/// having if the split actually fires - which is what this arm shows, with the cutoff moved out of the way
+/// (OCUDU_UL_STALE_US) so that a span this test can afford to sleep for is "stale".
+TEST(ul_pipeline_probe_test, late_samples_are_counted_apart_from_the_series)
+{
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+  // The series accumulates for the whole process (report() does not clear it), so every assertion below is a
+  // DELTA - the same reason the paired values are read as differences and not as absolutes.
+  auto count_of = [](const std::string& report, const std::string& series, const std::string& field) -> long {
+    const std::string line_marker = "[" + series + "] ";
+    const std::size_t line_at     = report.find(line_marker);
+    if (line_at == std::string::npos) {
+      return -1; // the SERIES is missing: that is an error, and the assertions below say so.
+    }
+    const std::size_t field_at = report.find(field, line_at);
+    if (field_at == std::string::npos) {
+      // The line is there but the field is not - "no CRC-OK samples recorded", or a report written before the
+      // split existed. Both read as ZERO of that thing, which is what makes a delta meaningful.
+      return 0;
+    }
+    return std::strtol(report.c_str() + field_at + field.size(), nullptr, 10);
+  };
+
+  const std::string before   = capture_report();
+  const long        samples0 = count_of(before, "ul_pipeline", "samples=");
+  const long        stale0   = count_of(before, "ul_pipeline", "stale=");
+  ASSERT_GE(samples0, 0L) << before;
+  ASSERT_GE(stale0, 0L) << before;
+
+  // Under the cutoff: a normal hop, which must land in the SERIES.
+  constexpr uint64_t fresh_slot = 8100;
+  probe.record_start(fresh_slot);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  probe.record_ldpc_start(fresh_slot);
+  probe.record_end_crc_ok(fresh_slot, 42);
+
+  // Over the cutoff: the same shape with the cutoff moved below it, which must land in `stale`.
+  ::setenv("OCUDU_UL_STALE_US", "1", 1);
+  constexpr uint64_t late_slot = 8200;
+  probe.record_start(late_slot);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  probe.record_ldpc_start(late_slot);
+  probe.record_end_crc_ok(late_slot, 42);
+  ::unsetenv("OCUDU_UL_STALE_US");
+
+  const std::string after   = capture_report();
+  const long        samples1 = count_of(after, "ul_pipeline", "samples=");
+  const long        stale1   = count_of(after, "ul_pipeline", "stale=");
+  ASSERT_GE(samples1, 0L) << after;
+  ASSERT_GE(stale1, 0L) << after;
+
+  EXPECT_EQ(samples1 - samples0, 1L) << after; // only the fresh one joined the series
+  EXPECT_EQ(stale1 - stale0, 1L) << after;     // and only the late one was counted apart
+  // The report has to say WHERE the cutoff was, or a `stale=` count cannot be read: it is the HARQ round trip,
+  // and it is configuration-dependent.
+  EXPECT_NE(after.find("the uplink HARQ round trip"), std::string::npos) << after;
 }
 
 #endif // OCUDU_FLOW_PROBES

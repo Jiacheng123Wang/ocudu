@@ -188,6 +188,19 @@ public:
   /// Whether a grid wait is pending for this thread's next burst (diagnostics).
   static bool grid_wait_pending();
 
+  /// \brief How many deposits the registry holds before it starts dropping them (see handed_counters).
+  ///
+  /// A record lives until its grid has been PRODUCED (so a late reader can be told "already written" rather
+  /// than "unknown"), which is why this is a few slots of history rather than a handful of entries: at
+  /// ~1000 slots/s, 256 covers a quarter of a second - far more than the one slot a consumer can be late by
+  /// - and the bound still stops a hop that never runs from growing it.
+  ///
+  /// \note Exposed rather than kept file-local because a CRITERION has to be able to say what "the bound
+  ///       fired" means without restating the number: the unit test asserts handed - evicted == this, and
+  ///       evicted's own documentation refers to it. Measured on air the registry sits saturated here, so
+  ///       that difference is exactly this value on every armed leg.
+  static constexpr size_t handed_capacity = 256;
+
   /// \brief What the registry has seen, for the diagnostics (see the [metal_stats] dft handover line).
   struct handed_counters {
     /// Deposits made.
@@ -199,10 +212,21 @@ public:
     /// had no consumer, and the grid nobody read is the reason. HARMLESS, and expected: it is how this
     /// counter says "that slot produced a block and no hop".
     uint64_t superseded = 0;
-    /// Deposits dropped because more than max_handed were outstanding: a BACKLOG, i.e. consumers falling
-    /// behind producers. This one is the suspicious half, and it is kept apart from `superseded` for
-    /// exactly that reason - one number for both would make an expected outcome and a defect read alike.
+    /// Deposits the BOUND dropped, i.e. every one that arrived while max_handed were already outstanding.
+    ///
+    /// \note This is a TOTAL, and on its own it says nothing: measured on three armed legs the registry
+    ///       sits permanently saturated at its own bound, so this equals `handed - max_handed` exactly
+    ///       (30635/30379, 27221/26965, 28252/27996 with max_handed = 256) and counts approximately every
+    ///       deposit. Judging a run by it - which an earlier revision of this comment invited, calling it
+    ///       "the suspicious half" - makes every healthy leg look like a permanent backlog. The suspicious
+    ///       half is `evicted_unproduced` below.
     uint64_t evicted = 0;
+    /// The subset of `evicted` that was dropped BEFORE anyone claimed or produced it: the grid it wrote was
+    /// never read, and it is the case that owes a LATE COMMIT (see late_commits) - a real backlog, i.e.
+    /// consumers falling behind producers. The rest of `evicted` is the registry working as designed: the
+    /// removal loop prefers an entry that has already been produced, and such an entry is only kept so that
+    /// a late reader can be told the grid was written.
+    uint64_t evicted_unproduced = 0;
     /// Records whose grid has NOT been produced yet (a block waiting for its consumer or its sweep). NOT
     /// "records held": the registry keeps a record after production so a late reader can be told so.
     size_t unproduced = 0;

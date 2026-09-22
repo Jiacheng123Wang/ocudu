@@ -194,7 +194,14 @@ public:
             std::chrono::duration_cast<std::chrono::nanoseconds>(now - start_it->second.tp).count();
         // Negative durations can only come from a mismatched (shifted-slot) pairing: drop the sample.
         if (iq_to_llr_ns >= 0) {
-          gpu_pipeline_latencies_us.push_back(static_cast<double>(iq_to_llr_ns) / 1e3);
+          const double iq_to_llr_us = static_cast<double>(iq_to_llr_ns) / 1e3;
+          // Too late to be used (see stale_after_us): counted apart so that `max` stays "the slowest packet
+          // that still mattered" instead of being the one number an idle stretch can move by 10x.
+          if (iq_to_llr_us > static_cast<double>(stale_after_us())) {
+            stale_gpu_pipeline_us.push_back(iq_to_llr_us);
+          } else {
+            gpu_pipeline_latencies_us.push_back(iq_to_llr_us);
+          }
         }
       }
       // ... and the segments too when the diagnostic switch asks for them (OCUDU_UL_PHASE_SEGMENTS=1): the
@@ -299,7 +306,11 @@ public:
         trace_it->second.pipeline_us = latency_us;
       }
       pending_starts.erase(it);
-      latencies_us.push_back(latency_us);
+      if (latency_us > static_cast<double>(stale_after_us())) {
+        stale_pipeline_us.push_back(latency_us);
+      } else {
+        latencies_us.push_back(latency_us);
+      }
     }
     // LDPC decoder latency: match the start recorded for this TB by EXACT slot number - both ends of this
     // series carry the same FAPI slot reference (pdu.slot), so the offset tolerance of the pipeline series is
@@ -622,6 +633,8 @@ public:
     std::vector<double> sorted_ce;
     std::vector<double> sorted_eqdem;
     std::vector<double> sorted_gpu_pipeline;
+    std::vector<double> sorted_stale_pipeline;
+    std::vector<double> sorted_stale_gpu_pipeline;
     std::vector<double> sorted_fapi_mac;
     std::vector<double> sorted_rx_wait;
     std::vector<double> sorted_dft_wait;
@@ -634,6 +647,8 @@ public:
       sorted_ce           = ce_latencies_us;
       sorted_eqdem        = eqdem_latencies_us;
       sorted_gpu_pipeline = gpu_pipeline_latencies_us;
+      sorted_stale_pipeline     = stale_pipeline_us;
+      sorted_stale_gpu_pipeline = stale_gpu_pipeline_us;
       sorted_fapi_mac     = fapi_mac_latencies_us;
       sorted_rx_wait      = rx_wait_us;
       sorted_dft_wait     = dft_wait_us;
@@ -663,6 +678,32 @@ public:
                    pct(sorted, 0.99));
     };
 
+    /// \brief The samples the series above LEFT OUT because they are too late to be used.
+    ///
+    /// Printed next to its series rather than folded in, because the two answer different questions: the
+    /// series is "how long does a useful hop take", this is "how often did a hop finish after the MAC had
+    /// already given up on it". A run with a large `stale` count is a run with a stall, and the series'
+    /// `max` is then still the slowest USEFUL packet - which is what makes `max` readable at all.
+    auto print_stale = [](const char* series, const std::vector<double>& stale) {
+      if (stale.empty()) {
+        std::fprintf(stderr, "[%s] stale=0\n", series);
+        return;
+      }
+      double stale_sum = 0;
+      double stale_max = 0;
+      for (double v : stale) {
+        stale_sum += v;
+        stale_max = (v > stale_max) ? v : stale_max;
+      }
+      std::fprintf(stderr,
+                   "[%s] stale=%zu (span > %llu us, the uplink HARQ round trip) mean=%.1fus max_stale=%.1fus\n",
+                   series,
+                   stale.size(),
+                   static_cast<unsigned long long>(stale_after_us()),
+                   stale_sum / static_cast<double>(stale.size()),
+                   stale_max);
+    };
+
     double sum = 0;
     // Report to stderr (guaranteed to be visible at the shutdown, unlike the logging backend) and to the logs.
     // The series are independent: a run with no CRC-OK transport block still reports the ones it did record (the
@@ -685,6 +726,7 @@ public:
                    sorted_pipeline.back(),
                    pct(sorted_pipeline, 0.95),
                    pct(sorted_pipeline, 0.99));
+      print_stale("ul_pipeline", sorted_stale_pipeline);
     }
 
     // Outside the fused lane: the phase-segment series, printed in pipeline order. Recorded in lockstep with the
@@ -696,6 +738,7 @@ public:
     // says how much of that window the device was actually executing).
     if (in_fused_lane()) {
       print_series("ul_gpu_pipeline", sorted_gpu_pipeline);
+      print_stale("ul_gpu_pipeline", sorted_stale_gpu_pipeline);
     }
     if (records_phase_segments()) {
       print_series("ul_time_frequency", sorted_t2f);
@@ -822,6 +865,23 @@ private:
   /// key and produce bogus latencies of one or more whole wrap cycles.
   static constexpr std::chrono::seconds max_entry_age{2};
 
+  /// The span beyond which a completion is too late to be used: the configuration's uplink HARQ round trip,
+  /// after which the transport block has been retransmitted anyway. Default 8 ms, which is what the n78/n1
+  /// configurations this line runs measure (k1 + k2 + the retransmission timers); another configuration
+  /// overrides it with OCUDU_UL_STALE_US rather than editing this.
+  ///
+  /// \note The slot DISTANCE is deliberately not reported next to it: find_fresh() only ever pairs the
+  ///       completion slot with slot, slot-1 or slot-2, so the distance is bounded at two slots by
+  ///       construction and a distribution of it would carry no information. What varies - and what made
+  ///       the 71.6 ms sample - is the SPAN, which is what this splits on.
+  /// \note Read on every call rather than cached in a static: the unit test has to be able to move it, and a
+  ///       probe that reads it once would silently ignore the override for the rest of the process.
+  static uint64_t stale_after_us()
+  {
+    const char* env = std::getenv("OCUDU_UL_STALE_US");
+    return ((env != nullptr) && (std::strtoul(env, nullptr, 10) != 0)) ? std::strtoul(env, nullptr, 10) : 8000UL;
+  }
+
   /// Finds the entry of \c registry for \c slot with the completion-time tolerance (slot, slot-1, slot-2),
   /// skipping entries older than max_entry_age (stale entries from previous slot-count wrap cycles).
   static start_registry::iterator
@@ -901,6 +961,13 @@ private:
   /// Recorded instead of the three segments above when the effective mode is phy_pipeline_mode::gpu, at every
   /// decode attempt (see record_ldpc_start()).
   std::vector<double> gpu_pipeline_latencies_us;
+  /// Samples of the two pipeline series whose span exceeds stale_after_us(): a decode that completes later
+  /// than the uplink HARQ round trip is a REAL measurement and a USELESS packet - the MAC has already
+  /// retransmitted it - so it is counted apart instead of stretching `max` into a number that describes
+  /// nothing. Measured on s41: [ul_pipeline] max 71.6 ms against a control's 13.7 ms, with p95 at 5.57 ms
+  /// and the UL HARQ RTT at about 8 ms for this configuration (5.9.28/5.9.29).
+  std::vector<double> stale_pipeline_us;
+  std::vector<double> stale_gpu_pipeline_us;
   /// FAPI->MAC tail latencies of the CRC-OK completions (µs): CRC-OK -> MAC UL task enqueue.
   std::vector<double> fapi_mac_latencies_us;
   /// Receive wait times (µs), one per received BLOCK (see record_rx_wait): the span the host spent blocked inside

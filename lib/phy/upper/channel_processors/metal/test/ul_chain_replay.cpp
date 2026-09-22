@@ -852,7 +852,7 @@ int main(int argc, char** argv)
     // symbol. A recorded capture is not required to cover whole slots, so it is not counted here.
     const uint64_t expected_deposits = (synth_slots != 0) ? synth_slots : 0;
     std::printf("[l1_handover] installed=%d armed=%d drop_consumer_wait=%d slot_skew=%u slots=%llu handed=%llu "
-                "taken=%llu superseded=%llu evicted=%llu fallback=%llu late=%llu not_found=%llu unproduced=%llu "
+                "taken=%llu superseded=%llu evicted=%llu evicted_unproduced=%llu fallback=%llu late=%llu not_found=%llu unproduced=%llu "
                 "ready_timeouts=%llu\n",
                 hs.installed ? 1 : 0,
                 release_armed ? 1 : 0,
@@ -863,6 +863,7 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(hs.taken),
                 static_cast<unsigned long long>(hs.superseded),
                 static_cast<unsigned long long>(hs.evicted),
+                static_cast<unsigned long long>(hs.evicted_unproduced),
                 static_cast<unsigned long long>(hs.fallback_commits),
                 static_cast<unsigned long long>(hs.late_commits),
                 static_cast<unsigned long long>(hs.not_found),

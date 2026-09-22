@@ -180,12 +180,14 @@ static void dft_stats_report()
   const bool                               release_armed = grid_handover_armed();
   if (release_armed || (hand.handed != 0) || (hand.taken != 0)) {
     std::fprintf(stderr,
-                 "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu unproduced=%zu "
+                 "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu "
+                 "evicted_unproduced=%llu unproduced=%zu "
                  "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu (armed=%d)\n",
                  static_cast<unsigned long long>(hand.handed),
                  static_cast<unsigned long long>(hand.taken),
                  static_cast<unsigned long long>(hand.superseded),
                  static_cast<unsigned long long>(hand.evicted),
+                 static_cast<unsigned long long>(hand.evicted_unproduced),
                  hand.unproduced,
                  static_cast<unsigned long long>(hand.fallback_commits),
                  static_cast<unsigned long long>(hand.late_commits),
@@ -269,13 +271,15 @@ void dft_handover_heartbeat(const char* where)
   const metal::shared_burst::handed_counters hand = metal::shared_burst::handed_stats();
   const dft_stats_t&                         s    = dft_stats();
   std::fprintf(stderr,
-               "[dft_handover] %s handed=%llu taken=%llu superseded=%llu evicted=%llu unproduced=%zu "
+               "[dft_handover] %s handed=%llu taken=%llu superseded=%llu evicted=%llu "
+               "evicted_unproduced=%llu unproduced=%zu "
                "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu\n",
                where,
                static_cast<unsigned long long>(hand.handed),
                static_cast<unsigned long long>(hand.taken),
                static_cast<unsigned long long>(hand.superseded),
                static_cast<unsigned long long>(hand.evicted),
+               static_cast<unsigned long long>(hand.evicted_unproduced),
                hand.unproduced,
                static_cast<unsigned long long>(hand.fallback_commits),
                static_cast<unsigned long long>(hand.late_commits),

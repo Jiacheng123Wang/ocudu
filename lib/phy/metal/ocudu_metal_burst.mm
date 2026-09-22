@@ -25,7 +25,7 @@ namespace metal {
 /// reader can be told "already written" rather than "unknown"), which is why this is a few slots of history
 /// rather than a handful of entries: at ~1000 slots/s, 256 covers a quarter of a second - far more than the
 /// one slot a consumer can be late by - and the bound still stops a hop that never runs from growing it.
-constexpr size_t max_handed = 256;
+constexpr size_t max_handed = shared_burst::handed_capacity;
 
 /// \brief The Metal end of the host-reader hook (include/ocudu/phy/phy_pipeline_grid_ready.h).
 ///
@@ -52,6 +52,7 @@ void grid_handover_counts_hook(grid_handover_counts& out)
   out.taken            = hand.taken;
   out.superseded       = hand.superseded;
   out.evicted          = hand.evicted;
+  out.evicted_unproduced = hand.evicted_unproduced;
   out.fallback_commits = hand.fallback_commits;
   out.late_commits     = hand.late_commits;
   out.not_found        = hand.grid_not_found;
@@ -569,12 +570,19 @@ void shared_burst::deposit_released(const void*          grid_base,
       if (h.entries[victim].on_drop) {
         dropped.push_back(std::move(h.entries[victim].on_drop));
       }
-      if (!h.entries[victim].claimed && !h.entries[victim].produced) {
+      // Whether this victim owes a late commit is ALSO what tells the two halves of `evicted` apart: an
+      // entry nobody claimed or produced is a grid nobody read (a real backlog), while a produced one is
+      // the registry working as designed. One decision, two counters - not two places to keep in step.
+      const bool unproduced = !h.entries[victim].claimed && !h.entries[victim].produced;
+      if (unproduced) {
         commit_late.push_back(h.entries[victim].cb);
       }
       released_after_unlock.push_back(h.entries[victim].cb);
       h.entries.erase(h.entries.begin() + static_cast<std::ptrdiff_t>(victim));
       ++h.counters.evicted;
+      if (unproduced) {
+        ++h.counters.evicted_unproduced;
+      }
     }
 
     // ★ NOBODY CLAIMS A SLOT FOREVER. A deposit that no hop and no host reader ever asked for has no

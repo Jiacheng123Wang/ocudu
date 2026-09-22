@@ -3444,6 +3444,21 @@ static bool encode_run(mmse_engine_impl*     e,
       [st.cb commit];
       mmse_stats_commit();
       ocudu::metal::gpu_lane_probe::register_commit(st.cb, WEIGHTS_STAGE);
+    } else {
+      // THIS is where an estimator's dispatches join the lane's burst on the merged route, and the burst's
+      // dispatch census has to be told: the counting in end_stage()/end_stage_async() happens only when
+      // `s.burst` is already true, and on THIS route the buffer was not a burst yet at that point - it was
+      // the extraction's held buffer, adopted only now. Left out, an armed leg reported
+      // `dispatches=N (equalizer=..., demapper=..., channel_estimator=0)` while the estimator ran on the
+      // device for every one of those hops (measured: 14525 hops, channel_estimator=0 on s47).
+      //
+      // Two stages, because adopted_held means the buffer carries the EXTRACTION and the WEIGHTS - the same
+      // two that end_stage() and end_stage_async() count once each on the burst route, so the two routes
+      // now report the same number per hop.
+      constexpr unsigned estimator_stages_carried = 2;
+      for (unsigned stage = 0; stage != estimator_stages_carried; ++stage) {
+        ocudu::metal::shared_burst::count_dispatch(ocudu::metal::shared_burst::stage::channel_estimator);
+      }
     }
     phase.committed();
     return true;
