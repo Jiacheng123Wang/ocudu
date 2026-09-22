@@ -87,11 +87,6 @@ protected:
   ocudulog::basic_logger& gtpu_logger;
   gtpu_tunnel_logger      gtpu_rx_logger{"GTPU", {gtpu_logical_interface::xnu, {}, gtpu_teid_t{1}, "DL"}};
 
-  // Timers.
-  manual_task_worker worker{64};
-  timer_manager      timers_manager;
-  timer_factory      timers{timers_manager, worker};
-
   // GTP-U tunnel entity.
   std::unique_ptr<gtpu_tunnel_pdcp> gtpu;
 
@@ -117,7 +112,6 @@ TEST_F(gtpu_tunnel_pdcp_test, entity_creation_pdcp_sn_12bit)
   msg.gtpu_pcap                         = &dummy_pcap;
   msg.rx_lower                          = &gtpu_rx;
   msg.tx_upper                          = &gtpu_tx;
-  msg.ue_ctrl_timer_factory             = timers;
   gtpu                                  = create_gtpu_tunnel_pdcp(msg);
 
   ASSERT_NE(gtpu, nullptr);
@@ -140,7 +134,6 @@ TEST_F(gtpu_tunnel_pdcp_test, entity_creation_pdcp_sn_18bit)
   msg.gtpu_pcap                         = &dummy_pcap;
   msg.rx_lower                          = &gtpu_rx;
   msg.tx_upper                          = &gtpu_tx;
-  msg.ue_ctrl_timer_factory             = timers;
   gtpu                                  = create_gtpu_tunnel_pdcp(msg);
 
   ASSERT_NE(gtpu, nullptr);
@@ -163,7 +156,6 @@ TEST_F(gtpu_tunnel_pdcp_test, rx_pdcp_sn_12bit)
   msg.gtpu_pcap                         = &dummy_pcap;
   msg.rx_lower                          = &gtpu_rx;
   msg.tx_upper                          = &gtpu_tx;
-  msg.ue_ctrl_timer_factory             = timers;
   gtpu                                  = create_gtpu_tunnel_pdcp(msg);
 
   sockaddr_storage   orig_addr = {};
@@ -196,7 +188,6 @@ TEST_F(gtpu_tunnel_pdcp_test, rx_pdcp_sn_18bit)
   msg.gtpu_pcap                         = &dummy_pcap;
   msg.rx_lower                          = &gtpu_rx;
   msg.tx_upper                          = &gtpu_tx;
-  msg.ue_ctrl_timer_factory             = timers;
   gtpu                                  = create_gtpu_tunnel_pdcp(msg);
 
   sockaddr_storage   orig_addr = {};
@@ -229,7 +220,6 @@ TEST_F(gtpu_tunnel_pdcp_test, tx_pdcp_sn_12bit)
   msg.gtpu_pcap                         = &dummy_pcap;
   msg.rx_lower                          = &gtpu_rx;
   msg.tx_upper                          = &gtpu_tx;
-  msg.ue_ctrl_timer_factory             = timers;
   gtpu                                  = create_gtpu_tunnel_pdcp(msg);
 
   byte_buffer tpdu = byte_buffer::create(tpdu_1).value();
@@ -257,7 +247,6 @@ TEST_F(gtpu_tunnel_pdcp_test, tx_pdcp_sn_18bit)
   msg.gtpu_pcap                         = &dummy_pcap;
   msg.rx_lower                          = &gtpu_rx;
   msg.tx_upper                          = &gtpu_tx;
-  msg.ue_ctrl_timer_factory             = timers;
   gtpu                                  = create_gtpu_tunnel_pdcp(msg);
 
   byte_buffer tpdu = byte_buffer::create(tpdu_1).value();

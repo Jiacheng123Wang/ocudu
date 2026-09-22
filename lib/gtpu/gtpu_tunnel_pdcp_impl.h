@@ -21,11 +21,10 @@ public:
                         gtpu_tunnel_pdcp_config                     cfg,
                         dlt_pcap&                                   gtpu_pcap,
                         gtpu_tunnel_pdcp_rx_lower_layer_notifier&   rx_lower,
-                        gtpu_tunnel_common_tx_upper_layer_notifier& tx_upper,
-                        timer_factory                               ue_ctrl_timer_factory) :
+                        gtpu_tunnel_common_tx_upper_layer_notifier& tx_upper) :
     logger(ocudulog::fetch_basic_logger("GTPU"))
   {
-    rx = std::make_unique<gtpu_tunnel_pdcp_rx_impl>(ue_index, cfg.rx, rx_lower, ue_ctrl_timer_factory);
+    rx = std::make_unique<gtpu_tunnel_pdcp_rx_impl>(ue_index, cfg.rx, rx_lower);
     tx = std::make_unique<gtpu_tunnel_pdcp_tx_impl>(ue_index, cfg.tx, gtpu_pcap, tx_upper);
   }
   ~gtpu_tunnel_pdcp_impl() override = default;

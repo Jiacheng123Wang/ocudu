@@ -40,11 +40,10 @@ struct gtpu_tunnel_psup_config {
 /// \brief Configurable parameters for GTP-U PDCP tunnels (Xn-U interface)
 struct gtpu_tunnel_pdcp_config {
   struct gtpu_tunnel_pdcp_rx_config {
-    gtpu_logical_interface    lif = gtpu_logical_interface::invalid;
-    gtpu_teid_t               local_teid;
-    std::chrono::milliseconds t_reordering = {};
-    pdcp_sn_size              pdcp_sn_len  = pdcp_sn_size::invalid;
-    bool                      warn_on_drop = false;
+    gtpu_logical_interface lif = gtpu_logical_interface::invalid;
+    gtpu_teid_t            local_teid;
+    pdcp_sn_size           pdcp_sn_len  = pdcp_sn_size::invalid;
+    bool                   warn_on_drop = false;
   } rx;
   struct gtpu_tunnel_pdcp_tx_config {
     gtpu_logical_interface lif = gtpu_logical_interface::invalid;
@@ -89,10 +88,9 @@ struct formatter<ocudu::gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_rx_config> {
   auto format(const ocudu::gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_rx_config& cfg, FormatContext& ctx) const
   {
     return format_to(ctx.out(),
-                     "lif={} local_teid={} t_reordering={} pdcp_sn_len={} warn_on_drop={}",
+                     "lif={} local_teid={} pdcp_sn_len={} warn_on_drop={}",
                      cfg.lif,
                      cfg.local_teid,
-                     cfg.t_reordering,
                      cfg.pdcp_sn_len,
                      cfg.warn_on_drop);
   }

@@ -10,7 +10,6 @@
 #include "ocudu/gtpu/gtpu_tunnel_pdcp_rx.h"
 #include "ocudu/pcap/dlt_pcap.h"
 #include "ocudu/ran/cu_up_types.h"
-#include "ocudu/support/timers.h"
 #include <memory>
 
 /// This factory header file depends on the GTP-U tunnel interfaces (see above include list). It is kept separate as
@@ -23,7 +22,6 @@ struct gtpu_tunnel_pdcp_creation_message {
   dlt_pcap*                                   gtpu_pcap;
   gtpu_tunnel_pdcp_rx_lower_layer_notifier*   rx_lower;
   gtpu_tunnel_common_tx_upper_layer_notifier* tx_upper;
-  timer_factory                               ue_ctrl_timer_factory;
 };
 
 /// Creates an instance of a GTP-U PDCP entity for the Xn-U interface.

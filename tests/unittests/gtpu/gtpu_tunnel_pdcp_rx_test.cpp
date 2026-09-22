@@ -6,7 +6,6 @@
 #include "lib/gtpu/gtpu_tunnel_pdcp_rx_impl.h"
 #include "lib/gtpu/gtpu_tunnel_pdcp_tx_impl.h"
 #include "ocudu/support/bit_encoding.h"
-#include "ocudu/support/executors/manual_task_worker.h"
 #include "ocudu/support/test_utils.h"
 #include <gtest/gtest.h>
 #include <sys/socket.h>
@@ -173,21 +172,10 @@ protected:
     gtpu_tunnel_pdcp_config::gtpu_tunnel_pdcp_rx_config rx_cfg = {};
     rx_cfg.lif                                                 = gtpu_logical_interface::xnu;
     rx_cfg.local_teid                                          = local_teid;
-    rx_cfg.t_reordering                                        = std::chrono::milliseconds{10};
     rx_cfg.pdcp_sn_len                                         = pdcp_sn_size::size12bits;
     rx_cfg.warn_on_drop                                        = warn_on_drop;
 
-    rx = std::make_unique<gtpu_tunnel_pdcp_rx_impl>(cu_up_ue_index_t::MIN_CU_UP_UE_INDEX, rx_cfg, rx_lower, timers);
-  }
-
-  /// \brief Helper to advance the timers
-  /// \param nof_tick Number of ticks to advance timers
-  void tick_all(uint32_t nof_ticks)
-  {
-    for (uint32_t i = 0; i < nof_ticks; i++) {
-      timers_manager.tick();
-      worker.run_pending_tasks();
-    }
+    rx = std::make_unique<gtpu_tunnel_pdcp_rx_impl>(cu_up_ue_index_t::MIN_CU_UP_UE_INDEX, rx_cfg, rx_lower);
   }
 
   gtpu_pdu_generator pdu_generator{gtpu_teid_t{0x1}};
@@ -197,11 +185,6 @@ protected:
 
   // GTP-U logger
   ocudulog::basic_logger& gtpu_logger;
-
-  // Timers
-  manual_task_worker worker{64};
-  timer_manager      timers_manager;
-  timer_factory      timers{timers_manager, worker};
 
   // GTP-U tunnel Rx entity
   std::unique_ptr<gtpu_tunnel_pdcp_rx_impl> rx;
@@ -285,8 +268,7 @@ TEST_P(gtpu_tunnel_pdcp_rx_test_cfg_sn, rx_in_order)
   }
 
   // Check warnings or errors
-  unsigned warnings = warn_on_drop && start_sn != 0 ? 1 : 0;
-  EXPECT_EQ(test_spy.get_warning_counter(), warnings);
+  EXPECT_EQ(test_spy.get_warning_counter(), 0);
   EXPECT_EQ(test_spy.get_error_counter(), 0);
 }
 
@@ -320,9 +302,8 @@ TEST_P(gtpu_tunnel_pdcp_rx_test_cfg_sn, rx_out_of_order)
     gtpu_tunnel_base_rx* rx_base = rx.get();
     rx_base->handle_pdu(std::move(pdu), src_addr);
 
-    EXPECT_TRUE(rx->is_reordering_timer_running());
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1); // nothing was received
+    EXPECT_EQ(rx_lower.rx_tpdus.size(), 2);
+    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 2);
   }
 
   { // SN = 4
@@ -332,172 +313,9 @@ TEST_P(gtpu_tunnel_pdcp_rx_test_cfg_sn, rx_out_of_order)
     gtpu_tunnel_base_rx* rx_base = rx.get();
     rx_base->handle_pdu(std::move(pdu), src_addr);
 
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1); // nothing was received
-  }
-
-  { // SN = 1
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x1));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 1, start_sn + 1);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_TRUE(rx->is_reordering_timer_running()); // it should have been restarted.
     EXPECT_EQ(rx_lower.rx_tpdus.size(), 3);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 3); // all up to sn=2 was delivered.
+    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 3);
   }
-
-  { // SN = 3
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x3));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 3, start_sn + 3);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_FALSE(rx->is_reordering_timer_running()); // nothing out of order, timer must have been stopped.
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 5);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 5); // all was received
-  }
-
-  // Check warnings or errors
-  unsigned warnings = warn_on_drop && start_sn != 0 ? 1 : 0;
-  EXPECT_EQ(test_spy.get_warning_counter(), warnings);
-  EXPECT_EQ(test_spy.get_error_counter(), 0);
-}
-
-/// \brief Test out-of-order reception of PDUs
-/// When there are two holes and they gets filled out-of-order
-/// t-Reordering is stopped correctly
-TEST_P(gtpu_tunnel_pdcp_rx_test_cfg_sn, rx_out_of_order_two_holes)
-{
-  bool     warn_on_drop = std::get<bool>(GetParam());
-  uint16_t start_sn     = std::get<uint16_t>(GetParam());
-  create_gtpu_rx_entity(warn_on_drop);
-  ASSERT_NE(rx, nullptr);
-
-  sockaddr_storage src_addr;
-
-  { // SN = 0
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x0));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 0, start_sn + 0);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums[0], 0);
-    EXPECT_EQ(rx_lower.rx_tpdus[0], sdu);
-  }
-
-  { // SN = 2
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x2));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 2, start_sn + 2);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_TRUE(rx->is_reordering_timer_running());
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1); // nothing was received
-  }
-
-  { // SN = 4
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x4));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 4, start_sn + 4);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1); // nothing was received
-  }
-
-  { // SN = 3
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x3));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 3, start_sn + 3);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_TRUE(rx->is_reordering_timer_running()); // one hole left, timer still running
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1); // nothing was received
-  }
-
-  { // SN = 1
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x1));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 1, start_sn + 1);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_FALSE(rx->is_reordering_timer_running()); // it should have been stopped
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 5);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 5); // all PDUs were delivered.
-  }
-
-  // Check warnings or errors
-  unsigned warnings = warn_on_drop && start_sn != 0 ? 1 : 0;
-  EXPECT_EQ(test_spy.get_warning_counter(), warnings);
-  EXPECT_EQ(test_spy.get_error_counter(), 0);
-}
-
-/// \brief Test t-Reordering expiration
-TEST_P(gtpu_tunnel_pdcp_rx_test_cfg_sn, rx_t_reordering_expiration)
-{
-  bool     warn_on_drop = std::get<bool>(GetParam());
-  uint16_t start_sn     = std::get<uint16_t>(GetParam());
-  create_gtpu_rx_entity(warn_on_drop);
-  ASSERT_NE(rx, nullptr);
-
-  sockaddr_storage src_addr;
-
-  { // SN = 0
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x0));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 0, start_sn + 0);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums[0], 0);
-    EXPECT_EQ(rx_lower.rx_tpdus[0], sdu);
-  }
-
-  { // SN = 2
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x2));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 2, start_sn + 2);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1); // nothing was received
-  }
-
-  { // SN = 4
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x4));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 4, start_sn + 4);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1); // nothing was received
-  }
-
-  tick_all(10);
-
-  EXPECT_EQ(rx_lower.rx_tpdus.size(), 2);
-  EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 2); // reordering timer was triggered and 0 and 2 were received.
-
-  tick_all(10);
-
-  EXPECT_EQ(rx_lower.rx_tpdus.size(), 3);
-  EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 3); // reordering timer was triggered and 0, 2 and 4 were received.
 
   { // SN = 1
     byte_buffer sdu;
@@ -507,60 +325,7 @@ TEST_P(gtpu_tunnel_pdcp_rx_test_cfg_sn, rx_t_reordering_expiration)
     rx_base->handle_pdu(std::move(pdu), src_addr);
 
     EXPECT_EQ(rx_lower.rx_tpdus.size(), 4);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 4); // all was received
-  }
-
-  // Check warnings or errors
-  unsigned warnings = 1 + (warn_on_drop ? 2 : 0) + (warn_on_drop && start_sn != 0 ? 1 : 0);
-  EXPECT_EQ(test_spy.get_warning_counter(), warnings);
-  EXPECT_EQ(test_spy.get_error_counter(), 0);
-}
-
-/// \brief Test t-Reordering expiration
-/// When there are two holes and the second one gets filled before
-/// t-Reordering expires, timer is not restarted.
-TEST_P(gtpu_tunnel_pdcp_rx_test_cfg_sn, rx_t_reordering_two_holes)
-{
-  bool     warn_on_drop = std::get<bool>(GetParam());
-  uint16_t start_sn     = std::get<uint16_t>(GetParam());
-  create_gtpu_rx_entity(warn_on_drop);
-  ASSERT_NE(rx, nullptr);
-
-  sockaddr_storage src_addr;
-
-  { // SN = 0
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x0));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 0, start_sn + 0);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums[0], 0);
-    EXPECT_EQ(rx_lower.rx_tpdus[0], sdu);
-  }
-
-  { // SN = 2
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x2));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 2, start_sn + 2);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1); // nothing was received
-  }
-
-  { // SN = 4
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x4));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 4, start_sn + 4);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1); // nothing was received
+    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 4);
   }
 
   { // SN = 3
@@ -570,34 +335,16 @@ TEST_P(gtpu_tunnel_pdcp_rx_test_cfg_sn, rx_t_reordering_two_holes)
     gtpu_tunnel_base_rx* rx_base = rx.get();
     rx_base->handle_pdu(std::move(pdu), src_addr);
 
-    EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 1); // nothing was received
-  }
-
-  tick_all(10);
-
-  EXPECT_EQ(rx_lower.rx_tpdus.size(), 4);
-  EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 4); // reordering timer was triggered and 0, 2, 3, 4 were received.
-  EXPECT_FALSE(rx->is_reordering_timer_running());
-
-  { // SN = 1
-    byte_buffer sdu;
-    EXPECT_TRUE(sdu.append(0x1));
-    byte_buffer          pdu     = pdu_generator.create_gtpu_pdu(sdu.deep_copy().value(), local_teid, 1, start_sn + 1);
-    gtpu_tunnel_base_rx* rx_base = rx.get();
-    rx_base->handle_pdu(std::move(pdu), src_addr);
-
     EXPECT_EQ(rx_lower.rx_tpdus.size(), 5);
-    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 5); // all was received
+    EXPECT_EQ(rx_lower.rx_pdcp_pdu_nums.size(), 5);
   }
 
   // Check warnings or errors
-  unsigned warnings = (warn_on_drop ? 2 : 1) + (warn_on_drop && start_sn != 0 ? 1 : 0);
-  EXPECT_EQ(test_spy.get_warning_counter(), warnings);
+  EXPECT_EQ(test_spy.get_warning_counter(), 0);
   EXPECT_EQ(test_spy.get_error_counter(), 0);
 }
 
-/// \brief Test in-order reception of PDUs
+/// \brief Test stop
 TEST_P(gtpu_tunnel_pdcp_rx_test_cfg_sn, rx_stop)
 {
   bool     warn_on_drop = std::get<bool>(GetParam());
@@ -617,16 +364,12 @@ TEST_P(gtpu_tunnel_pdcp_rx_test_cfg_sn, rx_stop)
     }
   }
 
-  EXPECT_EQ(rx_lower.rx_tpdus.size(), 1);
-  EXPECT_TRUE(rx->is_reordering_timer_running());
+  EXPECT_EQ(rx_lower.rx_tpdus.size(), 2);
 
   // Stop RX interface
   rx->stop();
   rx_lower.rx_tpdus.clear();
   rx_lower.rx_pdcp_pdu_nums.clear();
-
-  // Timers should have been stopped
-  EXPECT_FALSE(rx->is_reordering_timer_running());
 
   // No more PDUs should flow
   {
@@ -642,8 +385,7 @@ TEST_P(gtpu_tunnel_pdcp_rx_test_cfg_sn, rx_stop)
   }
 
   // Check warnings or errors
-  unsigned warnings = warn_on_drop && start_sn != 0 ? 1 : 0;
-  EXPECT_EQ(test_spy.get_warning_counter(), warnings);
+  EXPECT_EQ(test_spy.get_warning_counter(), 0);
   EXPECT_EQ(test_spy.get_error_counter(), 0);
 }
 
