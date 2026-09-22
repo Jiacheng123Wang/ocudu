@@ -118,7 +118,7 @@ install_dependencies_fedora() {
         fftw-libs-single lksctp-tools yaml-cpp mbedtls libcap
     )
     local -a extra_pkgs=(
-        boost-devel capnproto capnproto-devel cppzmq-devel dpdk-devel elfutils-devel elfutils-libelf-devel
+        boost-devel capnproto capnproto-devel cppzmq-devel dpdk-devel uhd-devel elfutils-devel elfutils-libelf-devel
         libdwarf-devel libusb1-devel numactl-devel zeromq-devel openssl openssl-devel
     )
 
