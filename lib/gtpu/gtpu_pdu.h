@@ -69,24 +69,22 @@ enum class gtpu_extension_header_type : uint8_t {
   /// This type replaces "1000 0010" since v15.3.0 to relax the comprehension requirement in case the end node decides
   /// to ignore the PDCP SN and starts from 0.
   ///
-  /// Ref: WG TDoc C4-184134, CR 0092.
+  /// Ref: TS 29.281 Annex B (informative); Details: WG TDoc C4-184134, CR 0092.
   long_pdcp_pdu_number = 0b00000011,
   /// \brief Service Class Indicator.
   service_class_indicator = 0b00100000,
-  /// \brief UDP Port.
-  ///
-  /// Provides the UDP Source Port of the triggering message.
+  /// \brief UDP Port. Provides the UDP Source Port of the triggering message.
   udp_port = 0b01000000,
   /// \brief RAN Container.
   ran_container = 0b10000001,
   /// \brief Long PDCP PDU Number (legacy).
   ///
-  /// This value shall not be used by a source gNB cpliant with v15.3.0 or later. It may be received from a source eNB
+  /// This value shall not be used by a source gNB compliant with v15.3.0 or later. It may be received from a source eNB
   /// complying with an earlier release.
-  /// This type was replaced by "0000 0011" since v15.3.0 to relax the comprehension requirement in case the end node
-  /// decides to ignore the PDCP SN and starts from 0.
+  /// This type was introduced in v13.1.0 but replaced by "0000 0011" since v15.3.0 to relax the comprehension
+  /// requirement in case the end node decides to ignore the PDCP SN and starts from 0.
   ///
-  /// Ref: WG TDoc C4-184134, CR 0092.
+  /// Ref: TS 29.281 Annex B (informative); Details: WG TDoc C4-184134, CR 0092.
   long_pdcp_pdu_number_legacy = 0b10000010,
   /// \brief Xw RAN Container.
   xw_ran_container = 0b10000011,
