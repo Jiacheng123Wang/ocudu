@@ -8074,6 +8074,45 @@ which is what made the device build look unprofitable"）。**fence 版本比宿
   它不新增提交，但边界会退化成 encoder 边界，而 §5.9.88 ④ 已经量到 encoder 边界**不管用**，
   所以这条只值得一试、不值得期待）。
 
+**⑦ 空口 A/B：判据已预先登记（**离线那个 +28% 不能外推**）**
+
+用户决定**先上空口量真实代价再翻默认**。**离线数字不能外推**，这一点本轮就有了读数：
+
+| | 合成单测 | 空口（`s60-defer` 实测） |
+|---|---|---|
+| CE 跳 `mean total` | ~215 µs | **16.6 µs** |
+| 其中 `submit` | — | 9.4–10.6 µs |
+| `gpu_path` | — | 16.0 µs |
+| `defer_wait` | ~0 | **中位 840 µs / mean 906 µs** |
+
+⇒ 空口上 **CE 自己的活儿很小，尾巴是车道里那段 ~900 µs 的延迟批次等待**（#13）。
+所以"多一条命令缓冲区"的那 ~50 µs **要么是 CE 阶段的 3 倍、要么整段消失在已经 900 µs 的等待里** ——
+**只有腿能回答**。这也解释了为什么单测的 +28% 不能拿去当决策依据。
+
+**两条腿 + 一条比较命令（已写成脚本）：**
+
+```bash
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s61-fenced-off
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s61-fenced-on OCUDU_CE_CORR_FENCED=1
+bash doc_chinese/phy_pipeline_gpu/wip/corr_fenced_ab.sh s61-fenced-off s61-fenced-on
+```
+
+**⚠ 代理跑不了这两条腿**：`sudo` 要密码（本会话不允许提权），且当时 USB 上没有 USRP。
+`run_leg.sh` 的 knob 参数就是 `OCUDU_*=value` 一个词（见其 usage 第 10 行），所以第二条腿的写法是确定的。
+
+**预先登记的判据（读的顺序）**：
+
+1. **契约**：两腿都必须是 **8 个名字齐全**的 `MET`（不是只看 `N of N`）；
+2. **`[mmse_time_sum]`**：`mean total` / `submit` / `gpu_path` 的移动量；
+3. **`[ul_pipeline] stale=` 与 `[ul_pipeline]` 的跨度分布（median/p95）**：**这是"有没有溢出到槽预算"的判据**；
+4. **RT failure 计数与 crc**：腿有效性先看 `radio sample continuity` 与 `host sample assembly`（§12.2.2）。
+
+**决策规则（先写下来，免得事后找理由）**：
+
+* 若 **③ 的 median/p95 与 ④ 都不动** ⇒ 这 ~50 µs 在空口上被 `defer_wait` 吸收，**修法是实际免费的，应当翻默认**；
+* 若 **③ 移动了** ⇒ 取舍是真的，**回到用户决定**（此时 `nv` 的污染（~0.07% 跳、可达 1000×）与 CE 阶段的时间要放在一起权衡）；
+* 无论哪种结果，**`CORR_FENCED=1` 都是一行回滚**（不设该 env 即回到前缀）。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，
