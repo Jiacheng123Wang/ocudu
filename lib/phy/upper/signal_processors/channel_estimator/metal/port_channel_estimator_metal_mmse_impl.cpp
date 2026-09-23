@@ -2176,10 +2176,27 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         check.a_stride    = L_std_geom;
         check.r_stride    = nout_std_geom;
         check.nof_blocks  = n_std_blocks;
+        // The MERGED standard group is built by the device and inverted by the device (this branch is
+        // only reached when gpu_invert_std), so the slot holds A^-1 and the host's rebuild has to be
+        // inverted before the comparison. Leaving this false made every merged hop report "every
+        // element differs", which is how a whole route looked corrupted when it was the probe that was
+        // comparing two different matrices (measured: 1872 of 2806 hops "differing" in a clean run).
+        check.device_inverted = true;
         for (unsigned sym : dmrs_sym) {
           check.dmrs_slots.push_back(sym);
         }
         pending_corr_checks_.push_back(check);
+      }
+      // EXPERIMENT (OCUDU_CE_CORR_FENCED=1): the same build in a command buffer of its OWN, ordered by
+      // the shared back-end fence instead of riding this one (see build_correlation_fenced()). The
+      // MERGED batch is where the air interface spends 74% of its hops, so a fix that only covered the
+      // non-merged route would leave the landmine - and would leave an air leg measuring almost
+      // nothing: it would understate both the benefit and the price. The pending_corr_check above stays
+      // valid either way (it compares the slots at the hop's completion, whoever wrote them).
+      if ((std::getenv("OCUDU_CE_CORR_FENCED") != nullptr) && (engine != nullptr)) {
+        if (engine->build_correlation_fenced(std_corr_prefix.value(), nof_layers) != 0) {
+          std_corr_prefix.reset();
+        }
       }
       L_std    = L_c;
       nout_std = nout_c;
@@ -2580,6 +2597,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
           check.a_stride   = st.L;
           check.r_stride   = st.nout;
           check.nof_blocks = n_std_blocks;
+          // Same reason as the merged standard group above: this route leaves A^-1 in the slot.
+          check.device_inverted = gpu_invert;
           for (unsigned sym : edge_dmrs) {
             check.dmrs_slots.push_back(sym);
           }
@@ -2597,6 +2616,16 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                    span<float>(w_r_hp.data(), MAX_BLOCK_OUT * MAX_BLOCK_PILOTS),
                                    nout_e,
                                    L_e);
+      }
+      // The SECOND correlation group of a merged batch, fenced the same way and for the same reason:
+      // its slots are read by K1 as the extra systems of this batch, so the hazard and the fix are
+      // identical. It is a separate fenced build, hence a separate generation - two command buffers of
+      // one queue have their STARTS alone ordered, which is why encode_corr_fence_waits() keeps a list.
+      if ((std::getenv("OCUDU_CE_CORR_FENCED") != nullptr) && (engine != nullptr) &&
+          edge_corr.has_value()) {
+        if (engine->build_correlation_fenced(edge_corr.value(), nof_layers) != 0) {
+          edge_corr.reset();
+        }
       }
       tail_L = L_e;
       // 3) The tail systems carry n_std_blocks block slots but only block 0 is real: their pad slots
@@ -4466,7 +4495,11 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
                            sys_offset,
                            nof_layers,
                            st.L,
-                           st.nout);
+                           st.nout,
+                           // This immediate check is only reachable with gpu_invert == false, i.e. the
+                           // route where build_slots_on_device() has the HOST write A^-1 over A in
+                           // place (see its header). The slot therefore holds an inverse here too.
+                           /*device_inverted=*/true);
   }
   if (device_stats != nullptr && !device_built && !matrix) {
     // S-7f-5v: on this route the caller did NOT build the host arrays - it skipped them precisely

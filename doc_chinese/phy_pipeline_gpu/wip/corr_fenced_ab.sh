@@ -8,6 +8,12 @@
 # deferred wait. So the same absolute cost is either 3x the CE stage or completely hidden inside a wait
 # that is already 900us long, and only a leg can say which.
 #
+# COVERAGE (checked before sending anyone to run this): the fenced fix is applied on BOTH routes - the
+# non-merged one (run_engine_blocks()) and the merged one, where the air interface spends 74% of its
+# hops (std_corr_prefix plus the edge group's edge_corr). An earlier revision covered only the
+# non-merged route, which would have made this A/B understate both the benefit and the price. The
+# evidence that the merged builds are armed is the lane fence signals counter, 12 to 3102.
+#
 # WHAT TO READ (in this order):
 #   1. the contract block - the leg's verdict, and the first thing to look at (leg_report.sh prints it);
 #   2. [mmse_time_sum] - mean total / submit / gpu_path, and the defer_wait distribution;

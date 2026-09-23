@@ -167,6 +167,15 @@ public:
   /// The newest estimator generation whose signal has been encoded (0 before the first one).
   static uint64_t backend_stage_generation();
 
+  /// \brief Encodes a wait for ONE named estimator generation (not the newest).
+  ///
+  /// Needed when a stage is ordered against SEVERAL submissions that were committed one after another:
+  /// waiting for the newest would only cover the last of them, because two command buffers of one queue
+  /// have their STARTS alone ordered (see backend_stage_wait). Same rule as that one: no encoder may be
+  /// open when this is called, and the caller must have armed the signal already, or the wait hangs.
+  /// \return True when a wait was encoded; false when the event does not exist or the value is 0.
+  static bool backend_stage_wait_generation(id<MTLCommandBuffer> command_buffer, uint64_t generation);
+
   /// Diagnostics: signals encoded, waits encoded, and waits skipped because nothing was signalled.
   static uint64_t backend_stage_nof_signals();
   static uint64_t backend_stage_nof_waits();

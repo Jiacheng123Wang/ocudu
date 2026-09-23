@@ -564,6 +564,23 @@ uint64_t shared_queue::backend_stage_nof_waits()
   return state().stage_fence_waits.load(std::memory_order_relaxed);
 }
 
+bool shared_queue::backend_stage_wait_generation(id<MTLCommandBuffer> command_buffer, uint64_t generation)
+{
+  if ((command_buffer == nil) || (generation == 0)) {
+    return false;
+  }
+  shared_queue_state& s = state();
+  if (s.stage_fence_event == nil) {
+    // Nothing was ever signalled in this process, so a wait for this value would never fire. Counted
+    // the same way backend_stage_wait() counts its skips, and refused rather than encoded.
+    s.stage_fence_skipped_waits.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  [command_buffer encodeWaitForEvent:s.stage_fence_event value:generation];
+  s.stage_fence_waits.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
 uint64_t shared_queue::backend_stage_nof_skipped_waits()
 {
   return state().stage_fence_skipped_waits.load(std::memory_order_relaxed);

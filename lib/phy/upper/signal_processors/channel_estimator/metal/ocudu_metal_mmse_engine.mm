@@ -448,11 +448,15 @@ struct mmse_engine_impl {
   /// be reached instead closes it (close_held_buffer(), called from wait_pending_impl() and from the
   /// entries that need their own command buffer).
   id<MTLCommandBuffer>           held_cb       = nil;
-  /// \brief The fence generation build_correlation_fenced() armed and nobody has waited for yet.
+  /// \brief The fence generations build_correlation_fenced() armed and nobody has waited for yet.
   ///
-  /// Consumed by encode_run() (non-burst), which encodes the wait before its first dispatch. Zero means
-  /// "nothing armed": either no fenced build was asked for or its wait has been encoded.
-  uint64_t                       corr_fence_generation = 0;
+  /// A LIST, not one value: a merged hop carries TWO correlation groups (the standard group and the
+  /// edge block), each in its own fenced command buffer, and two command buffers of one queue have
+  /// their STARTS alone ordered - so waiting for the newest would leave the older one unordered.
+  /// Consumed together, before the encoder of the next submission opens (see begin_weights_stage()).
+  static constexpr unsigned     max_corr_fences = 4;
+  uint64_t                       corr_fence_generation[max_corr_fences] = {};
+  unsigned                       corr_fence_count                      = 0;
 
   /// \name D1 step 2: adopting the receiving chain's block (see set_hop_grid()).
   ///
@@ -852,6 +856,24 @@ struct stage_encoder {
 
 static bool close_held_buffer(mmse_engine_impl* e);
 
+/// Encodes a wait for every fenced correlation build this hop armed (see build_correlation_fenced()).
+/// Defined next to that entry point; declared here because the two stage openers need it.
+static void encode_corr_fence_waits(mmse_engine_impl* e, id<MTLCommandBuffer> cb);
+
+/// Encodes a wait for every armed fenced build on \p cb. MUST be called while no encoder of that
+/// command buffer is open: encodeWaitForEvent: is a command-buffer-level operation and Metal aborts the
+/// process otherwise (measured: Abort trap: 6 on the first hop that took this path).
+static void encode_corr_fence_waits(mmse_engine_impl* e, id<MTLCommandBuffer> cb)
+{
+  if ((e == nullptr) || (cb == nil)) {
+    return;
+  }
+  for (unsigned i = 0; i != e->corr_fence_count; ++i) {
+    (void)ocudu::metal::shared_queue::backend_stage_wait_generation(cb, e->corr_fence_generation[i]);
+  }
+  e->corr_fence_count = 0;
+}
+
 /// \brief Opens a stage: the shared burst when \p fuse, the stage's own command buffer otherwise.
 ///
 /// A HELD extraction buffer (pilots_stage::hold_for_weights) is closed first, unconditionally: it is only
@@ -931,11 +953,11 @@ static stage_encoder begin_stage(mmse_engine_impl*          e,
   // gate covers this: a non-deferred hop is forced to host_wait by the adapter
   // (set_lane_order(args.deferred ? order : host_wait)), and the replay's hops are not deferred. The
   // air leg is the only judge - the counters to read are "[metal_stats] lane fence signals/waits".
-  if (wait_for_extraction &&
-      ((e->lane_order == metal::ce_lane_order::event) || (e->corr_fence_generation != 0))) {
+  if (wait_for_extraction && (e->lane_order == metal::ce_lane_order::event)) {
     (void)ocudu::metal::shared_queue::backend_stage_wait(s.cb);
-    e->corr_fence_generation = 0;
   }
+  // The fenced correlation builds of this hop, if any, are ordered here - before the encoder opens.
+  encode_corr_fence_waits(e, s.cb);
   s.enc = [s.cb computeCommandEncoder];
   return s;
 }
@@ -1158,10 +1180,7 @@ static stage_encoder begin_weights_stage(mmse_engine_impl*           e,
     // be encoded before the encoder opens - encodeWaitForEvent: is a command-buffer-level operation and
     // Metal aborts the process if one is encoded while an encoder is active (measured: Abort trap: 6 on
     // the first hop that took this path).
-    if (e->corr_fence_generation != 0) {
-      (void)ocudu::metal::shared_queue::backend_stage_wait(e->held_cb);
-      e->corr_fence_generation = 0;
-    }
+    encode_corr_fence_waits(e, e->held_cb);
     id<MTLComputeCommandEncoder> held_enc = [e->held_cb computeCommandEncoder];
     if (held_enc != nil) {
       stage_encoder st;
@@ -2656,9 +2675,19 @@ uint64_t mmse_engine::build_correlation_fenced(const corr_stage& c, unsigned nof
   if (generation == 0) {
     return 0;
   }
-  e->corr_fence_generation = generation;
+  if (e->corr_fence_count == mmse_engine_impl::max_corr_fences) {
+    // The list is sized for the two groups a merged hop carries; a third would be a structural change
+    // and must not silently drop a wait. Refused loudly instead - the caller falls back to the prefix.
+    ocudulog::fetch_basic_logger("PHY").error(
+        "MMSE engine: more than {} fenced correlation builds armed in one hop; the extra one is NOT "
+        "ordered",
+        mmse_engine_impl::max_corr_fences);
+    return 0;
+  }
+  e->corr_fence_generation[e->corr_fence_count++] = generation;
   return generation;
 }
+
 
 
 /// Threadgroup geometry of the K1 (block Gauss-Jordan) dispatch, as (column, row) threads.
