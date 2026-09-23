@@ -3371,6 +3371,244 @@ int main()
                 n_checked);
   }
 
+  // -----------------------------------------------------------------------------------
+  // Test 15 (edge-block guard).
+  //
+  // "Edge block" = what is left of a hop's PRBs once they are cut into standard blocks: n_std_blocks =
+  // nof_prb / block_prb, rem_prb = nof_prb % block_prb, and the remainder is packed into the STANDARD
+  // geometry's slot strides (a_stride = L_std, r_stride = nout_std) at system offset nof_layers. The
+  // code marks it as its most delicate path ("Slot strides must cover the block geometry", "one
+  // geometry per writer") and it has been the site of a historical accident in which the standard
+  // group's prefix wrote over the edge block's slots.
+  //
+  // THIS IS THE SECOND IMPLEMENTATION, and it exists because the first one shipped a verdict without a
+  // measurement. That version swept five narrow allocations (1 to 6 PRB, plus a no-edge control) with
+  // ONE realization per level and asserted nv/level^2 stayed within 1.2. It was red in 8 runs of 8,
+  // all five splits, INCLUDING the control that has no edge block - with drifts of 17091, 6813, 12925
+  // and 13415. So it was measuring the variance of the noise estimate itself at 1 to 6 PRB, not the
+  // edge block, and it was reverted. The corrections it earned are applied here: average 40
+  // realizations (what Test 9 needs), sweep the split at WIDEBAND where the noise estimate is well
+  // determined, and treat the rem_prb = 0 control as a SELF-CHECK.
+  //
+  // The limits are the step-1 measurements, not a hope. Sweeping n_prb = 48, 49, 50, 51 (rem 0, 1, 2,
+  // 0) at 1.0, 0.1 and 0.01 of full scale, 40 realizations each:
+  //   * the four allocations' means agree within 1.020 to 1.039 clean, so the registered limit is the
+  //     same 1.10 the fix itself was gated at (criterion (b) below);
+  //   * the per-realization max/min WITHIN one allocation is 1.750 clean and bit-identical in every
+  //     run (fixed seed), while one polluted hop moves it to 14.7, 62.8, 143.0 and 160.1 in the four
+  //     events that were caught. It is asserted at 8.0 because it is the only statistic that sees one
+  //     polluted hop at FULL weight - a mean over 40 realizations dilutes it by 40 (criterion (c));
+  //   * the control pair (48 and 51 PRB, both rem_prb = 0, no edge block) differs by 1.002 to 1.019.
+  //     If IT goes over the limit the case says so and blames itself, because a case whose own noise
+  //     floor is above its limit cannot report a defect in the edge block (criterion (a)).
+  //
+  // What this case CANNOT do is reproduce the fenced/prefix landmine on demand: that is a race that
+  // loses on about 1 hop in 19000 (measured on this geometry), so a 480-hop case catches it in ~2.5%
+  // of runs. Its reverse arm is therefore criterion (d), a STRUCTURAL assertion: the number of waits
+  // encoded for a fenced correlation build is counted, and the prefix form encodes none - 0 by
+  // construction, every run. (a) to (c) catch everything else, including any future defect that shows
+  // up in the numbers this path produces.
+  {
+    const unsigned              block_prb = 3; // the production value (du_low_config.h:121)
+    const std::array<unsigned, 4> allocs   = {48, 49, 50, 51}; // rem 0, 1, 2, 0 with block_prb = 3
+    const std::array<double, 3>   levels   = {1.0, 0.1, 0.01};
+    const double                  snr_db   = 20.0;
+    const unsigned                n_real   = 40;
+    // The two limits and the control's index pair (see the block comment for where they come from).
+    const double alloc_limit = 1.10; // (a) and (b): the bar the fix itself was gated at
+    const double real_limit  = 8.0;  // (c): clean 1.750, a polluted hop 14.7 to 160.1
+    const unsigned ctrl_lo = 0;      // 48 PRB, rem_prb = 0
+    const unsigned ctrl_hi = 3;      // 51 PRB, rem_prb = 0
+
+    // (d) Counts the waits encoded for a fenced correlation build (see the assertion at the end).
+    const uint64_t waits_before = metal::mmse_engine::lane_fence_nof_waits();
+
+    auto mmse = std::make_unique<port_channel_estimator_metal_mmse_impl>(
+        create_interpolator(),
+        make_ta_estimator(),
+        std::make_shared<channel_statistics_estimator_fixed>(370e-9F, 0.0F),
+        block_prb,
+        true);
+
+    std::printf("Test 15 (edge-block guard): nv/level^2 per allocation, block_prb=%u, SNR %.0f dB, "
+                "%u realizations, limits: allocations %.2f, per-realization band %.1f\n",
+                block_prb,
+                snr_db,
+                n_real,
+                alloc_limit,
+                real_limit);
+    double mean_by_alloc[allocs.size()] = {};
+    for (double level : levels) {
+      for (unsigned ia = 0; ia != allocs.size(); ++ia) {
+        const unsigned n_prb = allocs[ia];
+        auto       cfg        = make_config(n_prb, /*two_dmrs_symbols=*/true);
+        auto       pilots     = make_pilots(n_prb, 2);
+        const unsigned nof_subc = n_prb * 12;
+        const double sigma2   = level * level * std::pow(10.0, -snr_db / 10.0);
+        std::normal_distribution<float> gauss(0.0F, static_cast<float>(std::sqrt(sigma2 / 2.0)));
+        double acc  = 0.0;
+        // Per-realization extremes. A mean over n_real realizations dilutes a single polluted hop by
+        // 1/n_real, so the mean is the wrong statistic to hunt a rare blow-up with; the extremes see
+        // every realization at full weight.
+        double vmin = std::numeric_limits<double>::max();
+        double vmax = 0.0;
+        for (unsigned r = 0; r != n_real; ++r) {
+          veha_channel                   ch(rng);
+          grid_fake                      grid(nof_subc);
+          std::vector<cf_t>              rx(nof_subc, cf_t{0.0F, 0.0F});
+          std::vector<std::vector<cf_t>> h_true(MAX_NSYMB_PER_SLOT, std::vector<cf_t>(nof_subc));
+          // Only the two DM-RS symbols are ever read back, and veha_channel::operator() is a pure
+          // function of the taps (no state, no rng draws), so the other twelve rows are pure cost:
+          // filling them would burn 7x the time per realization and change nothing.
+          for (unsigned sym = 0; sym != 2; ++sym) {
+            const unsigned l = (sym == 0) ? 2U : 11U;
+            for (unsigned k = 0; k != nof_subc; ++k) {
+              h_true[l][k] = ch(k);
+            }
+          }
+          for (unsigned sym = 0; sym != 2; ++sym) {
+            const unsigned l = (sym == 0) ? 2U : 11U;
+            std::fill(rx.begin(), rx.end(), cf_t{0.0F, 0.0F});
+            unsigned j = 0;
+            for (unsigned prb = 0; prb != n_prb; ++prb) {
+              for (unsigned pos = 0; pos != 12; pos += 2) {
+                const unsigned k = prb * 12 + pos;
+                rx[k] = h_true[l][k] * pilots.get_symbol(sym, 0)[j] * static_cast<float>(level) +
+                        cf_t{gauss(rng), gauss(rng)};
+                ++j;
+              }
+            }
+            grid.set_symbol(l, rx);
+          }
+          const port_channel_estimator_results& res = mmse->compute(grid, 0, pilots, cfg);
+          const double nv = static_cast<double>(res.get_noise_variance()) / (level * level);
+          acc += nv;
+          vmin = std::min(vmin, nv);
+          vmax = std::max(vmax, nv);
+        }
+        const double mean = acc / static_cast<double>(n_real);
+        mean_by_alloc[ia] = mean;
+        std::printf("  level %-8.3e n_prb=%2u (n_std=%u rem=%u)  nv/l^2 = %.6e  "
+                    "[min %.6e max %.6e max/min %.3f]\n",
+                    level,
+                    n_prb,
+                    n_prb / block_prb,
+                    n_prb % block_prb,
+                    mean,
+                    vmin,
+                    vmax,
+                    vmax / vmin);
+        // (c) One polluted hop is invisible in the mean and unmissable here. Normalized by level^2,
+        // which is what makes the three levels comparable and what lets the band be a constant.
+        if (vmax / vmin > real_limit) {
+          std::printf("Test 15 FAIL: one realization is out of band on the edge geometry "
+                      "(level %.3g, n_prb=%u, n_std=%u, rem=%u: per-realization nv/level^2 runs from "
+                      "%.6e to %.6e, band %.3f > %.1f). The estimator did not estimate that hop.\n",
+                      level,
+                      n_prb,
+                      n_prb / block_prb,
+                      n_prb % block_prb,
+                      vmin,
+                      vmax,
+                      vmax / vmin,
+                      real_limit);
+          return -1;
+        }
+      }
+
+      // (a) SELF-CHECK first: 48 and 51 PRB both divide by block_prb, so neither has an edge block.
+      // They differ only by the number of standard blocks (16 against 17) and by the seed's progress,
+      // so if THEY disagree beyond the limit the case's own noise floor is what is moving - and the
+      // honest verdict is that this case cannot speak about the edge block, not that the estimator
+      // is broken.
+      const double ctrl = std::max(mean_by_alloc[ctrl_lo], mean_by_alloc[ctrl_hi]) /
+                          std::min(mean_by_alloc[ctrl_lo], mean_by_alloc[ctrl_hi]);
+      if (ctrl > alloc_limit) {
+        std::printf("Test 15 SELF-CHECK FAILED (not a defect report): the rem_prb=0 control pair "
+                    "(n_prb=%u and %u, no edge block) differs by %.3f > %.2f at level %.3g "
+                    "(%.6e against %.6e). This case is measuring its own noise floor, not the edge "
+                    "block: fix the case before reading any verdict from it.\n",
+                    allocs[ctrl_lo],
+                    allocs[ctrl_hi],
+                    ctrl,
+                    alloc_limit,
+                    level,
+                    mean_by_alloc[ctrl_lo],
+                    mean_by_alloc[ctrl_hi]);
+        return -1;
+      }
+
+      // (b) The edge criterion: the two allocations that HAVE an edge block (rem_prb = 1 and 2) must
+      // agree with the control pair. Measured clean: 1.020 to 1.039 against a limit of 1.10.
+      unsigned i_max = 0;
+      unsigned i_min = 0;
+      for (unsigned ia = 1; ia != allocs.size(); ++ia) {
+        if (mean_by_alloc[ia] > mean_by_alloc[i_max]) {
+          i_max = ia;
+        }
+        if (mean_by_alloc[ia] < mean_by_alloc[i_min]) {
+          i_min = ia;
+        }
+      }
+      const double spread = mean_by_alloc[i_max] / mean_by_alloc[i_min];
+      if (spread > alloc_limit) {
+        std::printf("Test 15 FAIL: the edge block changes the noise estimate (level %.3g: n_prb=%u "
+                    "n_std=%u rem=%u gives %.6e and n_prb=%u n_std=%u rem=%u gives %.6e, ratio %.3f > "
+                    "%.2f; the rem_prb=0 control pair agrees within %.3f).\n",
+                    level,
+                    allocs[i_max],
+                    allocs[i_max] / block_prb,
+                    allocs[i_max] % block_prb,
+                    mean_by_alloc[i_max],
+                    allocs[i_min],
+                    allocs[i_min] / block_prb,
+                    allocs[i_min] % block_prb,
+                    mean_by_alloc[i_min],
+                    spread,
+                    alloc_limit,
+                    ctrl);
+        return -1;
+      }
+      std::printf("  level %-8.3e allocations agree within %.3f (control pair %.3f, limit %.2f)\n",
+                  level,
+                  spread,
+                  ctrl,
+                  alloc_limit);
+    }
+
+    // (d) The invariant the fix installs, asserted structurally and therefore deterministically.
+    //
+    // Every hop here builds its correlation on the device, and since 5.9.93 that build goes into a
+    // command buffer OF ITS OWN whose completion the hop's weights stage waits for, through the shared
+    // back-end fence. lane_fence_nof_waits() counts the only site in the engine that encodes such a
+    // wait (encode_corr_fence_waits() -> backend_stage_wait_generation(), reached only when
+    // flush_correlations_fenced() armed a generation), so exactly one wait per hop is the signature of
+    // the fenced build, and zero waits is the signature of the prefix form - the form in which K1
+    // inverts a half-written A and the noise variance explodes by up to 1000x (5.9.88 to 5.9.92).
+    //
+    // This is what makes the case's reverse arm deterministic: with OCUDU_CE_CORR_FENCED=0 the counter
+    // cannot move, so the verdict is red in every run instead of in the ~2.5% of runs in which the race
+    // is lost on this geometry. It is a STATEMENT ABOUT THE MECHANISM, not about the numbers: the
+    // numbers are covered by (a) to (c), by Test 9 and by the air legs.
+    const uint64_t nof_hops = static_cast<uint64_t>(levels.size()) * allocs.size() * n_real;
+    const uint64_t waits    = metal::mmse_engine::lane_fence_nof_waits() - waits_before;
+    if (waits != nof_hops) {
+      std::printf("Test 15 FAIL: %llu of %llu hops encoded the wait for their own correlation build. "
+                  "The build must complete in a command buffer of its own that the hop's weights wait "
+                  "for (design 5.9.88 to 5.9.94); a hop that skips that boundary inverts a half-written "
+                  "A. The prefix form (OCUDU_CE_CORR_FENCED=0) is the reverse arm and reports 0 here.\n",
+                  static_cast<unsigned long long>(waits),
+                  static_cast<unsigned long long>(nof_hops));
+      return -1;
+    }
+    std::printf("Test 15 PASS: the edge split does not move the noise estimate (allocations within "
+                "%.2f, per-realization band within %.1f at every level) and all %llu hops waited for a "
+                "fenced correlation build\n",
+                alloc_limit,
+                real_limit,
+                static_cast<unsigned long long>(nof_hops));
+  }
+
   std::printf("All tests PASSED\n");
   return 0;
 }
