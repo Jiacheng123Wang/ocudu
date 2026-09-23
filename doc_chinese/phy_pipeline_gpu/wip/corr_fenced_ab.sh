@@ -59,6 +59,8 @@ show() { # $1 = label, $2 = log
   grep -h "mmse_time_sum" "$2" 2>/dev/null | tail -2 | sed 's/^/   /'
   echo "-- pipeline / rx pool --"
   grep -hE "^\[ul_pipeline\]|^\[ul_rx_pool\]" "$2" 2>/dev/null | tail -3 | sed 's/^/   /'
+  echo "-- lane structure (the extra submission shows up here, whatever the timing does) --"
+  grep -hE "^\[ul_gpu_lane\] lanes=|^\[ul_gpu_lane\] residency" "$2" 2>/dev/null | tail -2 | sed 's/^/   /'
   echo "-- real-time failures --"
   grep -hcE "real.?time|RT failure" "$2" 2>/dev/null | sed 's/^/   lines mentioning real-time failures: /'
 }
