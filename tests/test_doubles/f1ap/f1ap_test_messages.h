@@ -69,6 +69,17 @@ f1ap_message generate_f1_setup_response(const f1ap_message& f1_setup_request, bo
 /// section 8.2.3.3.
 f1ap_message generate_f1_setup_failure(const f1ap_message& f1_setup_request);
 
+/// \brief Generates a GNB-DU CONFIGURATION UPDATE message, sent by the DU to the CU, as per TS 38.473, 8.2.4.1.
+/// \param[in] gnb_du_id The gNB-DU ID the DU reports.
+/// \param[in] cells_to_add The cells the DU starts serving.
+/// \param[in] cells_to_mod The cells the DU reconfigures, each with the identity it had before.
+/// \param[in] cells_to_rem The cells the DU stops serving.
+f1ap_message generate_gnb_du_configuration_update(
+    gnb_du_id_t                                                               gnb_du_id    = int_to_gnb_du_id(0x11),
+    const std::vector<served_cell_item_info>&                                 cells_to_add = {},
+    const std::vector<std::pair<nr_cell_global_id_t, served_cell_item_info>>& cells_to_mod = {},
+    const std::vector<nr_cell_global_id_t>&                                   cells_to_rem = {});
+
 /// \brief Generates dummy GNB-DU CONFIGURATION UPDATE ACKNOWLEDGE message based on the request, sent by the CU to the
 /// DU, as per TS 38.473, 8.2.4.2.
 f1ap_message generate_gnb_du_configuration_update_acknowledge(const f1ap_message& gnb_du_config_update);

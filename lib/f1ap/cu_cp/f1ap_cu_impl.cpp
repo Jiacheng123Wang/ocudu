@@ -7,6 +7,7 @@
 #include "f1ap_asn1_helpers.h"
 #include "f1ap_asn1_utils.h"
 #include "log_helpers.h"
+#include "procedures/du_config_update_procedure.h"
 #include "procedures/f1_removal_procedure.h"
 #include "procedures/f1_setup_procedure.h"
 #include "procedures/f1ap_positioning_activation_procedure.h"
@@ -300,16 +301,7 @@ void f1ap_cu_impl::handle_access_success(const asn1::f1ap::access_success_s& msg
 
 void f1ap_cu_impl::handle_du_cfg_update(const asn1::f1ap::gnb_du_cfg_upd_s& request)
 {
-  f1ap_message f1ap_msg;
-
-  // TODO: for now, always reply with a config update acknowledge.
-  f1ap_msg.pdu.set_successful_outcome().load_info_obj(ASN1_F1AP_ID_GNB_DU_CFG_UPD);
-  auto& resp = f1ap_msg.pdu.successful_outcome().value.gnb_du_cfg_upd_ack();
-
-  resp->transaction_id = request->transaction_id;
-
-  // Send F1AP PDU to DU.
-  tx_pdu_notifier.on_new_message(f1ap_msg);
+  handle_du_config_update_procedure(request, du_ctxt, tx_pdu_notifier, du_processor_notifier, logger);
 }
 
 void f1ap_cu_impl::handle_f1_setup_request(const asn1::f1ap::f1_setup_request_s& request)

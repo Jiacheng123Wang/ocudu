@@ -8,6 +8,7 @@ add_library(ocudu_f1ap_cu
         f1ap_cu_impl.cpp
         f1ap_cu_factory.cpp
         procedures/f1_setup_procedure.cpp
+        procedures/du_config_update_procedure.cpp
         procedures/f1_removal_procedure.cpp
         procedures/f1ap_positioning_information_exchange_procedure.cpp
         procedures/f1ap_positioning_activation_procedure.cpp

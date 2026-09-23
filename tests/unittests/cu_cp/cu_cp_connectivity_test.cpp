@@ -669,6 +669,35 @@ TEST_F(cu_cp_connectivity_test, when_amf_connects_after_f1_setup_then_the_cells_
   get_du(du_idx).push_ul_pdu(test_helpers::generate_gnb_cu_configuration_update_acknowledgement({}));
 }
 
+TEST_F(cu_cp_connectivity_test, when_the_du_deletes_a_cell_then_its_ues_are_released)
+{
+  run_ng_setup();
+
+  auto ret = connect_new_du();
+  ASSERT_TRUE(ret.has_value());
+  unsigned du_idx = *ret;
+  ASSERT_TRUE(this->run_f1_setup(du_idx));
+
+  ret = connect_new_cu_up();
+  ASSERT_TRUE(ret.has_value());
+  ASSERT_TRUE(this->run_e1_setup(*ret));
+
+  gnb_du_ue_f1ap_id_t du_ue_f1ap_id = int_to_gnb_du_ue_f1ap_id(0);
+  rnti_t              crnti         = to_rnti(0x4601);
+  ASSERT_TRUE(connect_new_ue(du_idx, du_ue_f1ap_id, crnti));
+
+  // The DU stops serving the cell the UE camps on.
+  const test_helpers::served_cell_item_info cell;
+  get_du(du_idx).push_ul_pdu(test_helpers::generate_gnb_du_configuration_update(
+      int_to_gnb_du_id(0x11), {}, {}, {nr_cell_global_id_t{cell.plmn_id, cell.nci}}));
+
+  // The CU-CP releases the UE of the deleted cell.
+  f1ap_message f1ap_pdu;
+  ASSERT_TRUE(this->wait_for_f1ap_tx_pdu(du_idx, f1ap_pdu, std::chrono::milliseconds{1000}));
+  ASSERT_TRUE(test_helpers::is_valid_ue_context_release_command(f1ap_pdu))
+      << "the UEs of a deleted cell must be released";
+}
+
 TEST_F(cu_cp_connectivity_test, when_du_connection_is_lost_then_connected_ues_are_released)
 {
   // Run NG setup to completion.

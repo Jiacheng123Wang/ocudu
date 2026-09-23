@@ -169,6 +169,67 @@ f1ap_message ocudu::test_helpers::generate_f1_setup_failure(const f1ap_message& 
   return resp;
 }
 
+f1ap_message ocudu::test_helpers::generate_gnb_du_configuration_update(
+    gnb_du_id_t                                                               gnb_du_id,
+    const std::vector<served_cell_item_info>&                                 cells_to_add,
+    const std::vector<std::pair<nr_cell_global_id_t, served_cell_item_info>>& cells_to_mod,
+    const std::vector<nr_cell_global_id_t>&                                   cells_to_rem)
+{
+  f1ap_message msg;
+  msg.pdu.set_init_msg();
+  msg.pdu.init_msg().load_info_obj(ASN1_F1AP_ID_GNB_DU_CFG_UPD);
+
+  auto& upd              = msg.pdu.init_msg().value.gnb_du_cfg_upd();
+  upd->transaction_id    = 98;
+  upd->gnb_du_id_present = true;
+  upd->gnb_du_id         = (uint64_t)gnb_du_id;
+
+  if (not cells_to_add.empty()) {
+    upd->served_cells_to_add_list_present = true;
+    upd->served_cells_to_add_list.resize(cells_to_add.size());
+    for (unsigned i = 0; i != cells_to_add.size(); ++i) {
+      upd->served_cells_to_add_list[i].load_info_obj(ASN1_F1AP_ID_SERVED_CELLS_TO_ADD_ITEM);
+      auto& item            = upd->served_cells_to_add_list[i].value().served_cells_to_add_item();
+      auto  served          = generate_served_cells_item(cells_to_add[i]);
+      item.served_cell_info = served.served_cell_info;
+      if (served.gnb_du_sys_info_present) {
+        item.gnb_du_sys_info_present = true;
+        item.gnb_du_sys_info         = served.gnb_du_sys_info;
+      }
+    }
+  }
+
+  if (not cells_to_mod.empty()) {
+    upd->served_cells_to_modify_list_present = true;
+    upd->served_cells_to_modify_list.resize(cells_to_mod.size());
+    for (unsigned i = 0; i != cells_to_mod.size(); ++i) {
+      upd->served_cells_to_modify_list[i].load_info_obj(ASN1_F1AP_ID_SERVED_CELLS_TO_MODIFY_ITEM);
+      auto& item              = upd->served_cells_to_modify_list[i].value().served_cells_to_modify_item();
+      item.old_nr_cgi.plmn_id = cells_to_mod[i].first.plmn_id.to_bytes();
+      item.old_nr_cgi.nr_cell_id.from_number(cells_to_mod[i].first.nci.value());
+      auto served           = generate_served_cells_item(cells_to_mod[i].second);
+      item.served_cell_info = served.served_cell_info;
+      if (served.gnb_du_sys_info_present) {
+        item.gnb_du_sys_info_present = true;
+        item.gnb_du_sys_info         = served.gnb_du_sys_info;
+      }
+    }
+  }
+
+  if (not cells_to_rem.empty()) {
+    upd->served_cells_to_delete_list_present = true;
+    upd->served_cells_to_delete_list.resize(cells_to_rem.size());
+    for (unsigned i = 0; i != cells_to_rem.size(); ++i) {
+      upd->served_cells_to_delete_list[i].load_info_obj(ASN1_F1AP_ID_SERVED_CELLS_TO_DELETE_ITEM);
+      auto& item              = upd->served_cells_to_delete_list[i].value().served_cells_to_delete_item();
+      item.old_nr_cgi.plmn_id = cells_to_rem[i].plmn_id.to_bytes();
+      item.old_nr_cgi.nr_cell_id.from_number(cells_to_rem[i].nci.value());
+    }
+  }
+
+  return msg;
+}
+
 f1ap_message
 ocudu::test_helpers::generate_gnb_du_configuration_update_acknowledge(const f1ap_message& gnb_du_config_update)
 {
