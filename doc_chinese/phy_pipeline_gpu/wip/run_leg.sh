@@ -30,7 +30,16 @@ case "$MODE" in
 esac
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-CONFIG=$ROOT/configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml
+# The cell config decides the GEOMETRY every number in the report is relative to: PRB count (5 MHz
+# n1 = 25, 20 MHz n78 = 51) and slot period (15 kHz = 1000us, 30 kHz = 500us), hence both the lane's
+# occupancy and the "余量 = 1 - residency/slot" reading (wip/ul_load.sh). It is therefore part of the
+# evidence, printed below, and overridable - a heavier leg needs a wider cell, and hard-coding one
+# config is how the old run_air_leg.sh could only ever express one mode.
+CONFIG=${LEG_CONFIG:-$ROOT/configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml}
+if [ ! -f "$CONFIG" ]; then
+  echo "REFUSING to run: LEG_CONFIG=$CONFIG is not a file." >&2
+  exit 2
+fi
 LOGDIR=$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs
 # The mode is part of the file name: an A/B across modes must never be able to overwrite one arm
 # with the other, which is the mistake that makes a comparison silently compare a run with itself.
@@ -117,12 +126,21 @@ esac
 echo "pipeline mode : $MODE" >&2
 echo "mode options  : ${MODE_ARGS[*]:-<none: the mode resolves the backends itself>}" >&2
 echo "leg           : $LABEL" >&2
+echo "cell config   : ${CONFIG#$ROOT/}   <- decides PRB count and slot period" >&2
 echo "log (ocudulog): $LOG" >&2
 echo "log (stderr)  : $LOG.stderr   <- [phy_pipeline] contract / [ul_host] / [metal_stats] / [ul_gpu_lane]" >&2
 echo "log (stdout)  : $LOG.stdout   <- the app's banner, the cell line, radio/AMF messages, validator refusals" >&2
 echo "gNB options   : ${CLI_ARGS[*]:-<none>}   <- these reach argv, not the environment" >&2
 env | grep -E '^OCUDU_[A-Z0-9_]+=' | sort | sed 's/^/knob          : /' >&2 || true
 echo >&2
+
+# The same provenance is repeated INTO the leg's own stderr file once the tees are up (see below), so a
+# leg carries the cell geometry and the knobs it ran with even when the console is gone. The geometry is
+# not decoration: "余量" is 1 - residency/slot, and both the PRB count and the slot period come from this
+# file (wip/ul_load.sh reads it back out of the cell line).
+PROVENANCE=$(printf 'pipeline mode : %s\nmode options  : %s\nleg           : %s\ncell config   : %s\ngNB options   : %s\n' \
+  "$MODE" "${MODE_ARGS[*]:-<none>}" "$LABEL" "${CONFIG#$ROOT/}" "${CLI_ARGS[*]:-<none>}")
+PROVENANCE+=$(env | grep -E '^OCUDU_[A-Z0-9_]+=' | sort | sed 's/^/knob          : /' || true)
 
 cd "$ROOT"
 # BOTH streams are teed, and both stay on the terminal. stdout used to go only to the terminal, so a
@@ -154,6 +172,10 @@ exec 3> >(tee "$LOG.stdout")
 out_tee=$!
 exec 4> >(tee "$LOG.stderr" >&2)
 err_tee=$!
+# Repeat the provenance into the leg's own stderr file, so the geometry and the knobs survive the
+# console (see PROVENANCE above). It is printed before gnb's first line, so a reader of the file sees
+# what the run was without asking for the terminal.
+printf '%s\n\n' "$PROVENANCE" >&4
 ./build/apps/gnb/gnb -c "$CONFIG" \
   "${CLI_ARGS[@]+"${CLI_ARGS[@]}"}" \
   "${MODE_ARGS[@]+"${MODE_ARGS[@]}"}" \
