@@ -28,11 +28,13 @@ du_high_unit_base_cell_config derive_cell(unsigned                              
 /// Asserts that the beam of the cell holds the given identifier and coordinates.
 void assert_beam(const du_high_unit_ref_beam_config& beam,
                  unsigned                            ref_beam_id,
+                 unsigned                            i_panel,
                  unsigned                            i_pol,
                  unsigned                            i_beam_dim1,
                  unsigned                            i_beam_dim2)
 {
   ASSERT_EQ(beam.ref_beam_id, ref_beam_id);
+  ASSERT_EQ(beam.i_panel, i_panel);
   ASSERT_EQ(beam.i_pol, i_pol);
   ASSERT_EQ(beam.i_beam_dim1, i_beam_dim1);
   ASSERT_EQ(beam.i_beam_dim2, i_beam_dim2);
@@ -53,24 +55,36 @@ TEST(du_high_ssb_beam_autoderivation_test, single_ssb_candidate_uses_the_first_b
   const du_high_unit_base_cell_config cell = derive_cell(1, {{.ssb_index = 0}});
 
   ASSERT_EQ(cell.ref_beams.size(), 1);
-  assert_beam(cell.ref_beams[0], 0, 0, 0, 0);
+  assert_beam(cell.ref_beams[0], 0, 0, 0, 0, 0);
   ASSERT_EQ(cell.ssb_cfg.beams.size(), 1);
   assert_ssb_beam(cell.ssb_cfg.beams[0], 0, 0);
 }
 
-// TODO: updated antenna topology, fix test.
-#if 0
-TEST(du_high_ssb_beam_autoderivation_test, derived_beams_sweep_the_polarization_before_the_first_dimension)
+TEST(du_high_ssb_beam_autoderivation_test, derived_beams_sweep_the_polarization_before_the_panel)
 {
-  // A four antenna cell uses the 2x1 single-panel topology: two polarizations and eight beams in the first dimension.
+  // A two antenna cell uses one panel with two polarizations, so the sweep exhausts the panel before it advances.
+  const du_high_unit_base_cell_config cell = derive_cell(2, {{.ssb_index = 0}, {.ssb_index = 2}});
+
+  ASSERT_EQ(cell.ref_beams.size(), 2);
+  assert_beam(cell.ref_beams[0], 0, 0, 0, 0, 0);
+  assert_beam(cell.ref_beams[1], 1, 0, 1, 0, 0);
+
+  ASSERT_EQ(cell.ssb_cfg.beams.size(), 2);
+  assert_ssb_beam(cell.ssb_cfg.beams[0], 0, 0);
+  assert_ssb_beam(cell.ssb_cfg.beams[1], 2, 1);
+}
+
+TEST(du_high_ssb_beam_autoderivation_test, derived_beams_sweep_the_panels)
+{
+  // A four antenna cell uses four independent panels of one element, so each candidate takes the next panel.
   const du_high_unit_base_cell_config cell =
       derive_cell(4, {{.ssb_index = 0}, {.ssb_index = 2}, {.ssb_index = 4}, {.ssb_index = 5}});
 
   ASSERT_EQ(cell.ref_beams.size(), 4);
-  assert_beam(cell.ref_beams[0], 0, 0, 0, 0);
-  assert_beam(cell.ref_beams[1], 1, 1, 0, 0);
-  assert_beam(cell.ref_beams[2], 2, 0, 1, 0);
-  assert_beam(cell.ref_beams[3], 3, 1, 1, 0);
+  assert_beam(cell.ref_beams[0], 0, 0, 0, 0, 0);
+  assert_beam(cell.ref_beams[1], 1, 1, 0, 0, 0);
+  assert_beam(cell.ref_beams[2], 2, 2, 0, 0, 0);
+  assert_beam(cell.ref_beams[3], 3, 3, 0, 0, 0);
 
   ASSERT_EQ(cell.ssb_cfg.beams.size(), 4);
   assert_ssb_beam(cell.ssb_cfg.beams[0], 0, 0);
@@ -84,8 +98,8 @@ TEST(du_high_ssb_beam_autoderivation_test, the_sweep_follows_the_ssb_candidate_o
   const du_high_unit_base_cell_config cell = derive_cell(4, {{.ssb_index = 5}, {.ssb_index = 0}});
 
   ASSERT_EQ(cell.ref_beams.size(), 2);
-  assert_beam(cell.ref_beams[0], 0, 0, 0, 0);
-  assert_beam(cell.ref_beams[1], 1, 1, 0, 0);
+  assert_beam(cell.ref_beams[0], 0, 0, 0, 0, 0);
+  assert_beam(cell.ref_beams[1], 1, 1, 0, 0, 0);
 
   ASSERT_EQ(cell.ssb_cfg.beams.size(), 2);
   assert_ssb_beam(cell.ssb_cfg.beams[0], 5, 1);
@@ -94,13 +108,13 @@ TEST(du_high_ssb_beam_autoderivation_test, the_sweep_follows_the_ssb_candidate_o
 
 TEST(du_high_ssb_beam_autoderivation_test, configured_ssb_beams_are_not_derived)
 {
-  const du_high_unit_base_cell_config cell = derive_cell(
-      4, {{.ssb_index = 0, .ref_beam_id = 7}, {.ssb_index = 1}}, {{.ref_beam_id = 7, .i_pol = 1, .i_beam_dim1 = 7}});
+  const du_high_unit_base_cell_config cell =
+      derive_cell(4, {{.ssb_index = 0, .ref_beam_id = 7}, {.ssb_index = 1}}, {{.ref_beam_id = 7, .i_panel = 3}});
 
   // The derived beam is appended after the configured one, which keeps its identifier.
   ASSERT_EQ(cell.ref_beams.size(), 2);
-  assert_beam(cell.ref_beams[0], 7, 1, 7, 0);
-  assert_beam(cell.ref_beams[1], 8, 1, 0, 0);
+  assert_beam(cell.ref_beams[0], 7, 3, 0, 0, 0);
+  assert_beam(cell.ref_beams[1], 8, 1, 0, 0, 0);
 
   assert_ssb_beam(cell.ssb_cfg.beams[0], 0, 7);
   // The configured candidate still takes a position in the sweep.
@@ -112,21 +126,20 @@ TEST(du_high_ssb_beam_autoderivation_test, a_derived_beam_reuses_a_configured_be
   const du_high_unit_base_cell_config cell = derive_cell(4, {{.ssb_index = 0}}, {{.ref_beam_id = 5}});
 
   ASSERT_EQ(cell.ref_beams.size(), 1);
-  assert_beam(cell.ref_beams[0], 5, 0, 0, 0);
+  assert_beam(cell.ref_beams[0], 5, 0, 0, 0, 0);
   assert_ssb_beam(cell.ssb_cfg.beams[0], 0, 5);
 }
 
-TEST(du_high_ssb_beam_autoderivation_test, the_second_dimension_overflows_when_the_grid_runs_out_of_beams)
+TEST(du_high_ssb_beam_autoderivation_test, the_panel_overflows_when_the_grid_runs_out_of_beams)
 {
   // A single antenna cell defines a single beam, so the second candidate falls outside the grid and the configuration
   // validator rejects it.
   const du_high_unit_base_cell_config cell = derive_cell(1, {{.ssb_index = 0}, {.ssb_index = 1}});
 
   ASSERT_EQ(cell.ref_beams.size(), 2);
-  assert_beam(cell.ref_beams[0], 0, 0, 0, 0);
-  assert_beam(cell.ref_beams[1], 1, 0, 0, 1);
+  assert_beam(cell.ref_beams[0], 0, 0, 0, 0, 0);
+  assert_beam(cell.ref_beams[1], 1, 1, 0, 0, 0);
 }
-#endif
 
 TEST(du_high_ssb_beam_autoderivation_test, beams_are_not_derived_when_the_nof_dl_antennas_has_no_topology)
 {

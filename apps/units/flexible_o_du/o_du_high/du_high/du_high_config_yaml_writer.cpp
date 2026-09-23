@@ -838,6 +838,7 @@ static YAML::Node build_cell_entry(const du_high_unit_base_cell_config& config)
   for (const auto& beam : config.ref_beams) {
     YAML::Node beam_node;
     beam_node["ref_beam_id"] = beam.ref_beam_id;
+    beam_node["i_panel"]     = beam.i_panel;
     beam_node["i_pol"]       = beam.i_pol;
     beam_node["i_beam_dim1"] = beam.i_beam_dim1;
     beam_node["i_beam_dim2"] = beam.i_beam_dim2;

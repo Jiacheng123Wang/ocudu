@@ -738,7 +738,7 @@ std::vector<odu::du_cell_config> ocudu::generate_du_cell_config(const du_high_un
                                        });
       out_cell.ran.ssb_cfg.ssb_beams.set_beam(
           ssb_beam.ssb_index,
-          get_beam_id(base_cell.tx_ant_topology, 0, beam.i_pol, beam.i_beam_dim1, beam.i_beam_dim2));
+          get_beam_id(base_cell.tx_ant_topology, beam.i_panel, beam.i_pol, beam.i_beam_dim1, beam.i_beam_dim2));
     }
     out_cell.ran.ssb_cfg.ssb_period      = static_cast<ssb_periodicity>(base_cell.ssb_cfg.ssb_period_msec);
     out_cell.ran.ssb_cfg.ssb_block_power = base_cell.ssb_cfg.ssb_block_power;

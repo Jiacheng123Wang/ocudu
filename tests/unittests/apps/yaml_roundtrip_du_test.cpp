@@ -141,17 +141,19 @@ TEST(du_multiple_ssb_beams_config_test, roundtrip)
   YAML::Node node = YAML::Load(yaml_text);
   YAML::Node ref_beams;
   YAML::Node ssb_beams;
-  for (unsigned i_beam_dim1 : {0U, 3U, 7U}) {
+  // The four antenna cell defines four panels of one element, so each beam selects a panel.
+  for (unsigned i_panel : {0U, 1U, 3U}) {
     YAML::Node cell_beam_node;
-    cell_beam_node["ref_beam_id"] = i_beam_dim1;
-    cell_beam_node["i_pol"]       = 1;
-    cell_beam_node["i_beam_dim1"] = i_beam_dim1;
+    cell_beam_node["ref_beam_id"] = i_panel;
+    cell_beam_node["i_panel"]     = i_panel;
+    cell_beam_node["i_pol"]       = 0;
+    cell_beam_node["i_beam_dim1"] = 0;
     cell_beam_node["i_beam_dim2"] = 0;
     ref_beams.push_back(cell_beam_node);
 
     YAML::Node ssb_beam_node;
-    ssb_beam_node["ssb_index"]   = i_beam_dim1;
-    ssb_beam_node["ref_beam_id"] = i_beam_dim1;
+    ssb_beam_node["ssb_index"]   = i_panel;
+    ssb_beam_node["ref_beam_id"] = i_panel;
     ssb_beams.push_back(ssb_beam_node);
   }
   node["cell_cfg"]["ssb"]["beams"]    = ssb_beams;

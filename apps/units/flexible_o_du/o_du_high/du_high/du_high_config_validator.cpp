@@ -1438,11 +1438,20 @@ static bool validate_ref_beams(const std::vector<du_high_unit_ref_beam_config>& 
     return false;
   }
 
+  const unsigned nof_panels   = get_nof_antenna_panels(topology);
   const unsigned nof_pol      = get_nof_antenna_polarizations(topology);
   const unsigned nof_beams_d1 = get_nof_beams_dim1(topology);
   const unsigned nof_beams_d2 = get_nof_beams_dim2(topology);
 
   for (const auto& beam : beams) {
+    if (beam.i_panel >= nof_panels) {
+      fmt::print("Panel index {} of beam {} is out of range. Antenna topology {} defines {} panels.\n",
+                 beam.i_panel,
+                 beam.ref_beam_id,
+                 to_string(topology),
+                 nof_panels);
+      return false;
+    }
     if (beam.i_pol >= nof_pol) {
       fmt::print("Polarization index {} of beam {} is out of range. Antenna topology {} defines {} polarizations.\n",
                  beam.i_pol,
@@ -1477,11 +1486,13 @@ static bool validate_ref_beams(const std::vector<du_high_unit_ref_beam_config>& 
         fmt::print("Beam identifier {} is configured more than once.\n", beams[i].ref_beam_id);
         return false;
       }
-      if (beams[i].i_pol == beams[j].i_pol and beams[i].i_beam_dim1 == beams[j].i_beam_dim1 and
-          beams[i].i_beam_dim2 == beams[j].i_beam_dim2) {
-        fmt::print("Beams {} and {} select the same beam (polarization {}, first dimension {}, second dimension {}).\n",
+      if (beams[i].i_panel == beams[j].i_panel and beams[i].i_pol == beams[j].i_pol and
+          beams[i].i_beam_dim1 == beams[j].i_beam_dim1 and beams[i].i_beam_dim2 == beams[j].i_beam_dim2) {
+        fmt::print("Beams {} and {} select the same beam (panel {}, polarization {}, first dimension {}, second "
+                   "dimension {}).\n",
                    beams[j].ref_beam_id,
                    beams[i].ref_beam_id,
+                   beams[i].i_panel,
                    beams[i].i_pol,
                    beams[i].i_beam_dim1,
                    beams[i].i_beam_dim2);

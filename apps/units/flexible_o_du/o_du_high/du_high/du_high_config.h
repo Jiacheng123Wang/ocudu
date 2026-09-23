@@ -146,6 +146,8 @@ struct du_high_unit_ref_beam_config {
   /// \brief Identifier that the reference signals of the cell use to select this beam.
   /// \remark Not to be confused with \c beam_identifier, the beam that the RAN and PHY layers transmit on.
   unsigned ref_beam_id = 0;
+  /// Index of the antenna panel that forms the beam.
+  unsigned i_panel = 0;
   /// Beam polarization index.
   unsigned i_pol = 0;
   /// First dimension beam index, parameter \f$l\f$ of TS 38.214 Section 5.2.2.2.

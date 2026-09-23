@@ -557,6 +557,8 @@ static void configure_cli11_ref_beam_args(CLI::App& app, du_high_unit_ref_beam_c
              beam_params.ref_beam_id,
              "Cell reference beam identifier. Used for broadcast signals such as SSB.")
       ->capture_default_str();
+  add_option(app, "--i_panel", beam_params.i_panel, "Index of the antenna panel that forms the beam")
+      ->capture_default_str();
   add_option(app, "--i_pol", beam_params.i_pol, "Polarization index of the beam")->capture_default_str()->range(0, 1);
   add_option(app,
              "--i_beam_dim1",
@@ -3093,12 +3095,14 @@ void ocudu::configure_cli11_with_du_high_config_schema(CLI::App& app, du_high_pa
 ///
 /// Appends a reference beam to \c beams if no beam matches the coordinates.
 static unsigned get_or_add_ref_beam(std::vector<du_high_unit_ref_beam_config>& beams,
+                                    unsigned                                   i_panel,
                                     unsigned                                   i_pol,
                                     unsigned                                   i_beam_dim1,
                                     unsigned                                   i_beam_dim2)
 {
   auto it = std::find_if(beams.begin(), beams.end(), [&](const du_high_unit_ref_beam_config& beam) {
-    return beam.i_pol == i_pol and beam.i_beam_dim1 == i_beam_dim1 and beam.i_beam_dim2 == i_beam_dim2;
+    return beam.i_panel == i_panel and beam.i_pol == i_pol and beam.i_beam_dim1 == i_beam_dim1 and
+           beam.i_beam_dim2 == i_beam_dim2;
   });
   if (it != beams.end()) {
     return it->ref_beam_id;
@@ -3108,7 +3112,7 @@ static unsigned get_or_add_ref_beam(std::vector<du_high_unit_ref_beam_config>& b
   for (const du_high_unit_ref_beam_config& beam : beams) {
     ref_beam_id = std::max(ref_beam_id, beam.ref_beam_id + 1);
   }
-  beams.push_back({ref_beam_id, i_pol, i_beam_dim1, i_beam_dim2});
+  beams.push_back({ref_beam_id, i_panel, i_pol, i_beam_dim1, i_beam_dim2});
 
   return ref_beam_id;
 }
@@ -3116,11 +3120,12 @@ static unsigned get_or_add_ref_beam(std::vector<du_high_unit_ref_beam_config>& b
 /// \brief Assigns a beam to the transmitted SSB candidates that do not configure one.
 ///
 /// The beams sweep the grid that the antenna topology defines, advancing the polarization first, then the first
-/// dimension and last the second dimension. The beams that the sweep needs are added to the cell.
+/// dimension, then the second dimension and last the panel. The beams that the sweep needs are added to the cell.
 static void derive_ssb_beams(du_high_unit_base_cell_config& cell_cfg)
 {
   const unsigned nof_pol      = get_nof_antenna_polarizations(cell_cfg.tx_ant_topology);
   const unsigned nof_beams_d1 = get_nof_beams_dim1(cell_cfg.tx_ant_topology);
+  const unsigned nof_beams_d2 = get_nof_beams_dim2(cell_cfg.tx_ant_topology);
 
   std::vector<du_high_unit_ssb_beam_config*> sorted_beams;
   sorted_beams.reserve(cell_cfg.ssb_cfg.beams.size());
@@ -3136,10 +3141,13 @@ static void derive_ssb_beams(du_high_unit_base_cell_config& cell_cfg)
       continue;
     }
 
-    // The second dimension is not wrapped around, so a grid with fewer beams than SSB candidates is rejected by the
+    // The panel is not wrapped around, so a grid with fewer beams than SSB candidates is rejected by the
     // configuration validator instead of assigning the same beam twice.
-    sorted_beams[i]->ref_beam_id = get_or_add_ref_beam(
-        cell_cfg.ref_beams, i % nof_pol, (i / nof_pol) % nof_beams_d1, i / (nof_pol * nof_beams_d1));
+    sorted_beams[i]->ref_beam_id = get_or_add_ref_beam(cell_cfg.ref_beams,
+                                                       i / (nof_pol * nof_beams_d1 * nof_beams_d2),
+                                                       i % nof_pol,
+                                                       (i / nof_pol) % nof_beams_d1,
+                                                       (i / (nof_pol * nof_beams_d1)) % nof_beams_d2);
   }
 }
 
