@@ -7879,6 +7879,30 @@ memo 自己也记了"corr_dev=0 的 h 与默认路线差 1974 字节"）；**"�
 命名这条缺失的原语（是 `MTLBarrierScopeBuffers` 的作用域、`dispatchThreads` 的非均匀线程组、
 还是这条 encoder 的 dispatch 类型）是下一会话的第一件事。
 
+**⑥ 第 5 个候选也被实测排除：dispatch 类型**（`OCUDU_CE_CORR_UNIFORM=1`）
+
+两个 corr 核用 `dispatchThreads`（**非均匀线程组**），K1/weights 用 `dispatchThreadgroups` ——
+⑤ 把"跨 dispatch 类型可见性"列为最后一个"只改结构、不阻塞宿主"的候选（两个核**本来就有 `gid.x` 守卫**，
+所以把网格补齐到 256 的整数倍是纯 no-op）。同批 30 次：
+
+| 臂 | 失败扫描 | 离群点 | 最坏漂移 |
+|---|---|---|---|
+| baseline | 4/30 | 6 | 18.052 |
+| **`OCUDU_CE_CORR_UNIFORM=1`** | **6/30** | 9 | **49.352** |
+
+⇒ **dispatch 类型也不是**。到此，五个"便宜的结构假设"全部被排除：
+K1 内部栅栏、encoder 边界、dispatch 类型、`wrap()` 别名、CFO。
+**唯一有效的仍然是"命令缓冲区边界（commit+wait）"，而它的代价正是前缀存在的理由。**
+**下一会话应从"前缀的写为什么偶尔没落地"这一侧反推**（例如在前缀之后插一个**读回校验**，
+把"没落地"从结果反推成直接观测），而不是继续枚举 dispatch 形式。
+
+**⑦ 本轮全部旋钮一览（默认全关，都在代码里）**
+
+`OCUDU_CE_CORR_STANDALONE`（候选，0/30 + 0/25 + 0/40）、`OCUDU_CE_CORR_SEGMENT`（排除）、
+`OCUDU_CE_CORR_UNIFORM`（排除）、`OCUDU_CE_GPU_INVERT=0`（既有，排除 K1 之外的解释）、
+`OCUDU_CE_CORR_DEV=0`（既有）、`OCUDU_CE_INV_BARRIERS`（既有）、`OCUDU_CE_CORR_REPEAT`（既有）、
+`OCUDU_CE_NV_CHECK` / `OCUDU_CE_NV_ROUTE`（本轮新增的两条逐跳仪器）、`OCUDU_CE_WRAP_MAP`（既有，现多打 `obj=`）。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，

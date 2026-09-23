@@ -536,6 +536,19 @@ struct mmse_engine_impl {
     return (v == 0u) ? 1u : ((v > 64u) ? 64u : v);
   }
   static unsigned corr_repeat() { return stage_repeat("OCUDU_CE_CORR_REPEAT"); }
+  /// \brief Whether the correlation kernels are dispatched as WHOLE threadgroups (OCUDU_CE_CORR_UNIFORM).
+  ///
+  /// The two correlation kernels use dispatchThreads() (non-uniform threadgroups), while K1 and the
+  /// weights use dispatchThreadgroups(). The landmine's arms leave this as the one structural
+  /// difference that costs nothing: a pure time increase inside the prefix takes the failure rate from
+  /// 27% to 10% and never to zero, so the prefix's writes are not reliably visible to K1, and this is
+  /// what changes the dispatch TYPE without changing the submission, the host's blocking, or the
+  /// values (both kernels already guard gid.x).
+  static bool corr_uniform()
+  {
+    static const bool value = (std::getenv("OCUDU_CE_CORR_UNIFORM") != nullptr);
+    return value;
+  }
   /// The inversion (K1) and the weights (K2): separate knobs because they are the two candidates the
   /// chain decomposition left open (design document 5.8.12/5.8.13). Repeating either is value-preserving
   /// (the same inputs, the same in-place output), so the dumps stay byte-identical and the slope of the
@@ -2533,14 +2546,31 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
     [enc setBuffer:sig_buf.buf offset:sig_buf.offset atIndex:2];
   }
   for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
-    [enc dispatchThreads:MTLSizeMake(a_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    if (mmse_engine_impl::corr_uniform()) {
+      // EXPERIMENT (OCUDU_CE_CORR_UNIFORM=1): whole threadgroups instead of non-uniform ones.
+      // dispatchThreads() creates non-uniform threadgroups (the last one is partial); K1, dispatched
+      // just below out of the same encoder, uses dispatchThreadgroups(). "The prefix's writes are not
+      // reliably visible to K1" is measured (see the landmine's arms: a pure time increase takes it
+      // from 27% to 10% and never to zero), and the dispatch-type mismatch is the one structural
+      // difference left that changes neither the submission nor the host's blocking. Both kernels
+      // already guard gid.x, so padding the grid is a no-op per thread.
+      const NSUInteger tgs = (a_per_sys + 255u) / 256u;
+      [enc dispatchThreadgroups:MTLSizeMake(tgs, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    } else {
+      [enc dispatchThreads:MTLSizeMake(a_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    }
   }
 
   enc = stage_pipeline(e, s, e->corr_rhp_pipe);
   [enc setBuffer:rhp_buf.buf offset:rhp_buf.offset atIndex:0];
   [enc setBytes:&p length:sizeof(p) atIndex:1];
   for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
-    [enc dispatchThreads:MTLSizeMake(rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    if (mmse_engine_impl::corr_uniform()) {
+      const NSUInteger tgs = (rhp_per_sys + 255u) / 256u;
+      [enc dispatchThreadgroups:MTLSizeMake(tgs, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    } else {
+      [enc dispatchThreads:MTLSizeMake(rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    }
   }
 
   return true;
