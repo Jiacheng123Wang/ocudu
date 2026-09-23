@@ -2313,6 +2313,17 @@ int main()
       }
       double ratio() const { return (lo > 0.0) ? hi / lo : std::numeric_limits<double>::infinity(); }
     };
+    // Temporary diagnostic (the landmine): the per-realization noise variance, recorded in locals and
+    // printed ONLY when the sweep fails. An fprintf inside the loop would push the host work around and
+    // can hide the very race this is here to catch, so a clean run pays one store per realization and
+    // nothing else. The question it answers is which realization of the offending level is polluted -
+    // "the whole level moved" is what the mean shows, and that is consistent with several very
+    // different mechanisms (a stale read at a level boundary, one bad hop anywhere in the 40, or a
+    // systematic error that only some levels trigger).
+    std::array<std::array<double, 40>, 8> nv_series_cpu{};
+    std::array<std::array<double, 40>, 8> nv_series_mmse{};
+    unsigned                              i_level = 0;
+
     drift_t dr_nv_cpu;
     drift_t dr_nv_mmse;
     drift_t dr_snr_cpu;
@@ -2323,6 +2334,11 @@ int main()
     double  worst_cross_h  = 0.0;
 
     for (double level : levels) {
+      // Alignment marker for the temporary per-hop diagnostics (OCUDU_CE_NV_CHECK): the estimator
+      // cannot know which sweep level a hop belongs to, so the sweep has to say where each level
+      // starts - otherwise the per-hop lines and the per-realization series cannot be lined up, and
+      // "which hop was the polluted one" stays a guess.
+      std::fprintf(stderr, "[test9] shape=%s level=%.3e realizations=%u\n", shape.name, level, n_real);
       const double sigma2 = level * level * std::pow(10.0, -snr_db / 10.0);
       std::normal_distribution<float> gauss(0.0F, static_cast<float>(std::sqrt(sigma2 / 2.0)));
 
@@ -2361,9 +2377,13 @@ int main()
         }
 
         auto measure = [&](port_channel_estimator& est, double& nv_out, double& snr_out, double& rsrp_out,
-                           double& h_out) {
+                           double& h_out, double* nv_one_out) {
           const port_channel_estimator_results& res = est.compute(grid, 0, pilots, cfg);
-          nv_out += static_cast<double>(res.get_noise_variance());
+          const double nv_this = static_cast<double>(res.get_noise_variance());
+          nv_out += nv_this;
+          if (nv_one_out != nullptr) {
+            *nv_one_out = nv_this;
+          }
           snr_out += static_cast<double>(res.get_snr());
           rsrp_out += static_cast<double>(res.get_rsrp(0));
           std::vector<cbf16_t> est_sym(612);
@@ -2376,8 +2396,12 @@ int main()
           h_out += acc / 612.0;
         };
 
-        measure(*cpu, nv_cpu, snr_cpu, rsrp_cpu, h_cpu);
-        measure(*mmse, nv_mmse, snr_mmse, rsrp_mmse, h_mmse);
+        double nv_one_cpu  = 0.0;
+        double nv_one = 0.0;
+        measure(*cpu, nv_cpu, snr_cpu, rsrp_cpu, h_cpu, &nv_one_cpu);
+        measure(*mmse, nv_mmse, snr_mmse, rsrp_mmse, h_mmse, &nv_one);
+        nv_series_cpu[i_level][r]  = nv_one_cpu;
+        nv_series_mmse[i_level][r] = nv_one;
       }
 
       const double n = static_cast<double>(n_real);
@@ -2416,6 +2440,7 @@ int main()
       if (h_cpu > 0.0) {
         worst_cross_h = std::max(worst_cross_h, std::abs(h_mmse / h_cpu - 1.0));
       }
+      ++i_level;
     }
 
     // A level-dependent estimator shows up as a huge drift of the normalized values (the defect
@@ -2438,6 +2463,20 @@ int main()
     // agree with each other at every level.
     std::printf("Test 9: worst cross-path |h| difference %.3f%%\n", 100.0 * worst_cross_h);
     if ((drift_nv_mmse > 1.5) || (dr_nv_cpu.ratio() > 1.5) || (worst_cross_h > 0.02)) {
+      // The dump this file's per-realization series exists for: only a FAILING sweep pays for it.
+      std::printf("Test 9 [%s] FAILING SWEEP - per-realization nv/level^2, one line per level\n",
+                  shape.name);
+      for (unsigned il = 0; il != levels.size(); ++il) {
+        std::printf("  lvl %.3e cpu :", levels[il]);
+        for (unsigned r = 0; r != n_real; ++r) {
+          std::printf(" %.4e", nv_series_cpu[il][r] / (levels[il] * levels[il]));
+        }
+        std::printf("\n  lvl %.3e mmse:", levels[il]);
+        for (unsigned r = 0; r != n_real; ++r) {
+          std::printf(" %.4e", nv_series_mmse[il][r] / (levels[il] * levels[il]));
+        }
+        std::printf("\n");
+      }
       std::printf("Test 9 FAIL: the estimator results follow the input level instead of the SNR, so "
                   "the soft-bit scale of the uplink depends on the radio gain\n");
       return -1;

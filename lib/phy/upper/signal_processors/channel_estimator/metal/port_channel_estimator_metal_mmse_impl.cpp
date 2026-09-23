@@ -4594,6 +4594,43 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
     run_pending_corr_checks();
   }
 
+  // TEMPORARY DIAGNOSTIC (OCUDU_CE_NV_CHECK=<band>): the published noise variance against the
+  // extraction's OWN sigma2 slot, on the same hop, after the same wait. Both are device reductions of
+  // the same estimator (K4 reduces it from h at the pilot positions, the extraction's kernel from the
+  // smoothed least-squares pilots), so they agree to a fraction of a dB by construction - the unit test
+  // prints the two paths' cross difference as 0.8 to 1.4 dB, and a wild ratio is therefore a fact about
+  // ONE of the two, not about the estimator. Printed only when the ratio leaves the band, so a clean
+  // hop costs one compare and the timing of the hop is not disturbed by a per-hop write. The band IS
+  // the argument so the instrument can be proved to fire (band 1.001 prints nearly every hop) - an
+  // instrument that never speaks has to be shown able to speak before its silence means anything.
+  if (const char* nv_check = std::getenv("OCUDU_CE_NV_CHECK");
+      (nv_check != nullptr) && (gpu_nv != nullptr) && (gpu_ls_sigma2 != nullptr)) {
+    const double band    = std::strtod(nv_check, nullptr);
+    const float  nv_dev  = gpu_nv[0];
+    const float  s2_dev  = gpu_ls_sigma2[sigma2_base_ + kSigma2];
+    const double nv_rat  = (s2_dev > 0.0F) ? (static_cast<double>(nv_dev) / s2_dev) : 1.0;
+    if ((band <= 0.0) || !((nv_rat > 1.0 / band) && (nv_rat < band))) {
+      std::fprintf(stderr,
+                   "[nv_check] prb=%u npt=%u layers=%u | nv=%g sigma2=%g ratio=%.4g | power_sum=%g "
+                   "mean=%g | nv_ready=%d ce_ready=%d published=%d | cfo=%.9g | h=%.6g,%.6g,%.6g\n",
+                   last_stage_nof_prb,
+                   deferred_fill.npt,
+                   deferred_fill.nof_layers,
+                   static_cast<double>(nv_dev),
+                   static_cast<double>(s2_dev),
+                   nv_rat,
+                   static_cast<double>(gpu_ls_sigma2[sigma2_base_ + kPowerSum]),
+                   static_cast<double>(gpu_ls_sigma2[sigma2_base_ + kPowerMean]),
+                   gpu_nv_ready ? 1 : 0,
+                   gpu_ce_ready ? 1 : 0,
+                   (device_noise_variance() != nullptr) ? 1 : 0,
+                   static_cast<double>(gpu_ls_cfo[cfo_slot_]),
+                   static_cast<double>(gpu_h[0]),
+                   static_cast<double>(gpu_h[1]),
+                   static_cast<double>(gpu_h[2]));
+    }
+  }
+
   // Temporary experiment (OCUDU_CE_NV_OVERRIDE): replace the device noise variance with a known
   // value, to tell "the estimates are wrong" apart from "only the noise scale is wrong".
   if (const char* nv_env = std::getenv("OCUDU_CE_NV_OVERRIDE"); (nv_env != nullptr) && (gpu_nv != nullptr)) {

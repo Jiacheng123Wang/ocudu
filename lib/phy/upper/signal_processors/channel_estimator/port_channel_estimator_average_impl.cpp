@@ -295,6 +295,7 @@ bool port_channel_estimator_average_impl::do_finish(const dmrs_symbol_list& pilo
   // so which one runs does not change what is published. What it DOES change is where the value comes
   // from: the host's accumulation reads the pilots of the estimated grid, which a fused backend stops
   // unpacking once every reporting value is produced on the device (batch 5c).
+  const float host_noise_acc = noise_var; // the host's own accumulation, before either branch runs
   if (const float* device_noise_variance = get_device_noise_variance(); device_noise_variance != nullptr) {
     noise_var = *device_noise_variance;
   } else {
@@ -304,6 +305,34 @@ bool port_channel_estimator_average_impl::do_finish(const dmrs_symbol_list& pilo
   }
   float min_noise_variance = rsrp_avg / convert_dB_to_power(MAX_SINR_DB);
   noise_var                = std::max(min_noise_variance, noise_var);
+
+  // TEMPORARY DIAGNOSTIC (OCUDU_CE_NV_ROUTE=<band>): WHICH branch produced the published noise
+  // variance, and out of what. The unit test's landmine shows ONE realization per failing sweep with
+  // an nv 20x to 800x above its neighbours, and the device's own scalar (K4, gpu_nv) has been measured
+  // NORMAL on exactly those hops - so the question is no longer "what did the device compute" but
+  // "which of the two branches was taken, and what did it divide". Printed when the published value
+  // leaves the band around the device's, and unconditionally for band <= 0 (the reverse arm: an
+  // instrument has to be shown able to speak before its silence means anything).
+  if (const char* route_check = std::getenv("OCUDU_CE_NV_ROUTE"); route_check != nullptr) {
+    const double band   = std::strtod(route_check, nullptr);
+    const float* dev_nv = get_device_noise_variance();
+    const bool abnormal = (band <= 0.0) || (dev_nv == nullptr) ||
+                          ((*dev_nv > 0.0F) && (static_cast<double>(noise_var) / *dev_nv > band));
+    if (abnormal) {
+      std::fprintf(stderr,
+                   "[nv_route] device=%d dev_nv=%.6e host_acc=%.6e published=%.6e rsrp_avg=%.6e "
+                   "min_nv=%.3e nof_dmrs_pilots=%u nof_cdm=%u scaling=%.3f\n",
+                   (dev_nv != nullptr) ? 1 : 0,
+                   (dev_nv != nullptr) ? static_cast<double>(*dev_nv) : 0.0,
+                   static_cast<double>(host_noise_acc),
+                   static_cast<double>(noise_var),
+                   static_cast<double>(rsrp_avg),
+                   static_cast<double>(min_noise_variance),
+                   nof_dmrs_pilots,
+                   nof_cdm,
+                   static_cast<double>(cfg_local.scaling));
+    }
+  }
 
   // Determine the linear SNR measurement. The linear SNR is set to zero if the noise variance is zero, NaN or
   // infinity.

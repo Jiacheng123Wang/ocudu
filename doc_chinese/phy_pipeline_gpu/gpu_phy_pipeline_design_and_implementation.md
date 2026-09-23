@@ -7675,6 +7675,129 @@ CPU 的 nv 漂移恒定），**只有 MMSE 的 nv 偶尔炸** ⇒ 这是**非确
 先把"边缘块必须是对的"变成一条**常驻断言**，再去改那条路径（否则修好之后没有任何东西守着它）。
 顺序：**先落本用例（含反向臂）⇒ 看到它红 ⇒ 再修 §5.9.84 的病灶 ⇒ 20 次全绿**。
 
+#### 5.9.86 ★★★ 交接后的第一轮：**§5.9.84 ④ 的"644 vs 715"是早退伪影（判据作废）**，而那颗雷本身**被钉到了设备侧的 `h`/`gpu_nv` 上**
+
+> 本节记录 S36 开局（HEAD `33c26ec070`，交接 memo `session_handoff_2026-09-23-1.md`）的实测。
+> **两件事必须一起读**：判据被推翻（④ 不能再用），但雷是真的（§5.9.83 的结论成立），
+> 只是它成立的**理由**和 memo 里写的不一样。
+
+**① 开机门：先把"我测的是哪份代码"钉住（本轮最大的流程坑）**
+
+`lib/CMakeLists.txt` 第 6 行给整个 `lib/` 设了 `set_directory_properties(PROPERTIES EXCLUDE_FROM_ALL TRUE)`
+⇒ **`cmake --build build`（= `all`）根本不构建 `port_channel_estimator_metal_mmse_unit_test`**。
+交接收割时（`90ca0077ec` 回退快速层）源码 mtime 是 08:27:39、`.o` 是 08:27:17，但 `all` 不含该目标，
+所以 **`build/` 里那颗单测二进制一直是"回退前"的那份**（`strings` 里还有 `Test 14`），
+ctest 于是报 **34/36**（两条 MMSE 用例都红），而 memo §5 说的是"35/36 或 36/36 都算正常"。
+
+* **正确做法**：门里的测试目标**点名构建**——
+  `cmake --build build --target port_channel_estimator_metal_mmse_unit_test lower_phy_test ul_pipeline_probe_test …`；
+* 点名重建后 ctest = **35/36**，唯一红的是 `port_channel_estimator_metal_mmse_unit_test`，
+  失败点是 **Test 9 的 `nv/l²` 漂移 1.885**（`2 DMRS beta=2`），与 memo §3.1 完全一致；
+* 点名单测二进制里**没有** `Test 14`（回退已生效）—— 即"回退是真的，旧二进制是假的"。
+
+**② §5.9.84 ④ 的判据（检查行数 644 vs 715 = "走了另一条路径"）是**早退伪影**，判据作废**
+
+独立复现（`wip/mmse_landmine.sh`，12 次，两把 check 旋钮全开）：
+`715/644` 确实分离（3/12 红），**但差的不是"路径"，是"跑没跑完"**：
+
+| 观察 | 读数 |
+|---|---|
+| `[edge_check] geometry:` 行的**多重集** | 通过态与失败态的**几何种类完全相同**，只是失败态**每种都少一些**（333→302、715→644，比例 ~90%） |
+| 逐块对齐（每个 `[corr_check] group=` 后跟几条几何行） | **前 604 块逐块相同**，失败态在第 604 块处**断掉** |
+| 断在哪 | `(prologue)` 段两边**都是 604**；**失败态 `Test 9` 段 = 0、`Test 13` 段 = 0**（通过态是 44 与 18） |
+| 失败态的进程结尾 | 最后一行就是 `Test 9 FAIL: …`，**从未到达 `Test 13`**（`grep -c "Test 13"` = 0） |
+
+⇒ **Test 9 在第一个 shape 就红并立即 `return -1`**，所以它后面 3 个 shape（以及整个 Test 13）的检查行
+**根本没产生**。"644 里缺的 71 组是边缘块几何"是因为**序列的尾部**恰好是那些几何，不是因为走了另一条路。
+**§4 第 2 步（"找能双向切换 715/644 的旋钮"）的前提不成立，不要再找。**
+
+**③ 那颗雷是真的，而且**就长在设备侧**：逐次实现 + 逐跳 `gpu_nv` 对齐后的读数**
+
+Test 9 每次失败**恰好一次实现**被污染（40 次里 1 次），位置（电平、实现序号）**随机**，
+幅度**连续**（21×…902×）。9 次失败扫描的统计：实现序号 {0,1,5,5,15,16,17,22,37}、电平跨 7 档
+⇒ **不是"换配置/换电平后的第一跳"**（§5.9.83 ③ 的假设被实测推翻）。
+
+对齐方法（**这是本轮最有用的一件工具**）：给每个电平在 **stderr** 上打一行
+`[test9] shape=… level=… realizations=…`，让 `port_channel_estimator_metal_mmse_impl.cpp` 在
+`complete_fd_td_estimation_stage()` 里逐跳打 `[nv_check]`（**也在 stderr**），
+**两边同流才不会因 stdout 块缓冲而错位**（我第一次用 stdout 的形状头对齐，错了 320 个 hop）。
+对齐后：
+
+```
+POLLUTED level=3e-01 real=10 factor=902x
+    hop        gpu_nv  pub          cfo          h[0]   series_raw
+      9  6.284920e-04    1            0     0.0061243  6.98320e-03
+     10  5.614810e-01    1            0       0.7911    6.23870e+00  <<<
+     11  5.989950e-04    1            0    -0.089852  6.65550e-03
+```
+
+* **`gpu_nv`（设备 K4 的输出，宿主内存里读出来的）本身就大 902×**，与测试收到的倍数**逐位吻合**
+  ⇒ **污染在设备侧，不在宿主侧**（宿主两条分支都不是元凶：`MAX_SINR_DB=100` ⇒ `min_nv` 下限恒 ~1e-10，
+  永远不生效；`device=?` 与 `published=` 计数显示设备值确实被采用）；
+* 同一次实现里 **`h[0]` 也大 4–13×**（0.7911 vs 0.006–0.19）⇒ 病灶在 **K4 上游的 `h = W·y`**，
+  K4 只是把上游的错误放大成"残差≈信号"；
+* **CFO 全程为 0**（该 shape 的 `cfo` 统计 min=max=median=0）⇒ "K4 用了错 CFO"这条假设**被排除**；
+* 与 `rsrp` 的读数自洽：早先那次 `rsrp/l²` 只 +24%（40 次均值）⇒ 那一次实现的 rsrp 约 10× 正常 —— 与 `h` 被放大一致。
+
+**④ A/B 速率表（每臂 20–30 次，`wip/mmse_outlier_rate.sh`）**
+
+| 臂 | 失败扫描 | 离群点 | 判读 |
+|---|---|---|---|
+| baseline | 8/20、5/30 | 8、8 | ~25%（与 §3.1 的 26.3% 一致）|
+| `OCUDU_CE_HOLD_EXTRACTION=0` | 8/30 | 13 | **不变** |
+| **`OCUDU_CE_CORR_DEV=0`** | **0/30**（累计 **0/70**）| **0** | 与 §5.9.83 ② 一致，是真隔离 |
+| `OCUDU_CE_LSE_REPEAT=32` | 5/20 | 6 | 不变 |
+| `OCUDU_CE_SIGMA2_REPEAT=32` | 5/20 | 7 | 不变 |
+| `OCUDU_CE_SIGMA2_CHECK=1`（每跳多一次宿主 σ² + 一行 stderr）| **1/15** | 1 | **heisenbug**：宿主多干活就把它挤掉 ⇒ 时序敏感 |
+
+⇒ 结合 ③ 的"`h` 也错"，**病灶在"设备建 A/R_hp（`build_correlation()` 或前缀）→ 求逆 → weights"这条链上**，
+`CORR_DEV=0` 之所以能修，是因为它把这条链整个换成了宿主构建（**它不是干净的 A/B**，
+memo 自己也记了"corr_dev=0 的 h 与默认路线差 1974 字节"）；**"只有 CORR_DEV=0 能修"因此只能读作
+"这条链是必经之路"，不能读作"缺陷就在 A 的元素里"。**
+
+**⑤ 顺带纠正两条被 memo 当成"臂"的空操作（对 Test 9 无效）**
+
+* `args.deferred` 对 Test 9 是 **false** ⇒ `set_lane_order(host_wait)` ⇒
+  **`OCUDU_CE_LANE_ORDER=wait` 与 `FUSED_BURST` 对 Test 9 是空操作**（§5.9.84 ③ 里那两行"臂"等于没做）；
+* Test 9 的 `rem_prb = 0`（51 = 17×3）⇒ **没有边缘组** ⇒ `OCUDU_CE_TAIL_DEV`/`EDGE_FUSE` 也是空操作；
+* Test 9 的构造参数只到第 5 个（`compensate_cfo=true`）⇒ **`use_matrix_engine=false`**，即它跑的是
+  **legacy 内核**；这正是生产默认（融合车道的 `ch_est` 默认 = `metal_mmse`，见 `du_low_phy_pipeline.h`
+  的 `phy_pipeline_lane_defaults`），**所以 Test 9 的路径是生产路径，那颗雷不是"测试专用路径"的雷**。
+
+**⑥ 本轮新增/修正的工具（都在 wip/，都已配反向臂）**
+
+* `wip/mmse_landmine.sh [N] [ENV=…]`：跑 N 次、开两把 check 旋钮，打"判定 / 最坏漂移 / 检查行数"表；
+* `wip/mmse_outlier_rate.sh N [ENV…]`：**速率计**（基线 25%，单臂要 20–30 次才有分辨力）；
+* `port_channel_estimator_metal_mmse_unit_test.cpp`：**逐次实现的 `nv/level²` 序列**，
+  **只在扫描失败时打印**（干净运行只多一次 store，热路径时序不被扰动）；
+* `port_channel_estimator_metal_mmse_impl.cpp` 的 `OCUDU_CE_NV_CHECK=<band>`：
+  逐跳把 `gpu_nv` 与 `gpu_ls_sigma2[kSigma2]` 对比（band ≤ 0 = 无条件打印，**反向臂**）；
+* `port_channel_estimator_average_impl.cpp` 的 `OCUDU_CE_NV_ROUTE=<band>`：
+  `do_finish()` 里把**走了哪条分支**（设备值 vs 宿主累加）、`host_acc`、`rsrp_avg`、`min_nv` 打出来。
+
+**⑦ 本轮踩到并记录在案的仪器坑（两次都是"仪器瞎了"而不是"假设被证伪"）**
+
+1. `OCUDU_CE_NV_CHECK` 第一版拿 `gpu_ls_sigma2[kSigma2]` 当参考，而该槽在 Test 9 的跳上**恒为 0**
+   （设备 σ² 块没跑，`[sigma2_check]` 的 `device=0` 可证），比值被 `s2>0` 的守卫**默认成 1.0**
+   ⇒ **恒在带内、永不发声**。**反向臂（band=1.001 应当每跳都响）第一次就抓到了它**——
+   没有那条反向臂，我会把"仪器沉默"读成"假设被证伪"；
+2. 同一批数据我先用 stdout 的测试表头做锚点对齐 stderr 的逐跳行，**错了 320 个 hop**：
+   stdout 重定向到文件是块缓冲、stderr 无缓冲，**跨流对齐必须改成同流标记**。
+
+**⑧ 下一步（把 ③ 的"h 也错"变成"h 为什么错"）**
+
+判据不变：**改动前稳定复现、改动后连续 20 次全绿且漂移 ≤1.1**。入口按代价排序：
+
+1. **`h` 是一条 `W·y`**：先分清是 `W`（A/R_hp/求逆）还是 `y`（staged 接收导频）——
+   在污染跳上把 `gpu_a`/`gpu_r_hp`/`gpu_w` 的少量元素与宿主对同一几何的重建比对
+   （现成的 `check_edge_slots()` 就是这套机制，`pending_corr_check` 可以直接复用）；
+2. 若 `W` 错：查 `build_correlation()` 的**独立命令缓冲区**与 weights 缓冲区之间的排序
+   （`end_stage()` 是 `commit+waitUntilCompleted`，看似充分，但 `corr_stage` 的 slot 是**宿主零拷贝内存**，
+   `wrap()` 的"一块内存一个 MTLBuffer 对象"不变式要用 `OCUDU_CE_WRAP_MAP=1` 再看一遍
+   —— 本轮查过一次 `wrap_map`（48544 行）**没有**发现同一指针拿到两个对象，但当时没复现到失败态，
+   **要在失败态上重跑这个检查**）；
+3. **不要再花时间在 §5.9.84 ④ 的 715/644 上**（② 已判定为伪影），也不要再找"边缘块那一跳"。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，
