@@ -99,6 +99,24 @@ for kv in "$@"; do
   esac
 done
 
+# Pre-flight: the gNB's own parser is the only authority on which options exist. A leg that dies on
+# "The following argument was not expected: --log.sched_level=debug" costs an operator a phone test and
+# reports nothing (measured 2026-09-23: that option does not exist in this build - the scheduler logger
+# has no per-logger level, see gnb.cpp:133). So the exact argv is handed to the binary with --dryrun,
+# which validates the configuration and exits without touching the radio. Refused here rather than
+# discovered on air.
+if [ ${#CLI_ARGS[@]} -ne 0 ]; then
+  dryrun_log=$(mktemp)
+  if ! "$ROOT/build/apps/gnb/gnb" -c "$CONFIG" "${CLI_ARGS[@]}" "${MODE_ARGS[@]+"${MODE_ARGS[@]}"}" \
+        --expert_phy.phy_pipeline "$MODE" --dryrun >"$dryrun_log" 2>&1; then
+    echo "REFUSING to run: the gNB rejected this argument set (dry run):" >&2
+    grep -E "not expected|Requires|error|Error" "$dryrun_log" | head -5 | sed 's/^/  /' >&2
+    echo "  (dry run log: $dryrun_log)" >&2
+    exit 2
+  fi
+  rm -f "$dryrun_log"
+fi
+
 # The per-module backend knobs are passed for cpu_gpu ONLY, and deliberately not for the other two:
 #
 #   * cpu      - resolve_phy_pipeline() forces every backend to the CPU for this mode;
@@ -176,11 +194,22 @@ err_tee=$!
 # console (see PROVENANCE above). It is printed before gnb's first line, so a reader of the file sees
 # what the run was without asking for the terminal.
 printf '%s\n\n' "$PROVENANCE" >&4
+# --log.all_level is the script's DEFAULT, not its policy: when the caller asked for a level (the
+# scheduler's LA line needs debug, and this build has no per-logger option for it), the caller's value
+# must win - appending it after theirs would silently override it, which is the same class of bug this
+# script's argument loop refuses bare words for.
+LOG_LEVEL_ARGS=(--log.all_level info)
+for kv in "${CLI_ARGS[@]+"${CLI_ARGS[@]}"}"; do
+  case "$kv" in
+    --log.all_level=*) LOG_LEVEL_ARGS=() ;;
+  esac
+done
+
 ./build/apps/gnb/gnb -c "$CONFIG" \
   "${CLI_ARGS[@]+"${CLI_ARGS[@]}"}" \
   "${MODE_ARGS[@]+"${MODE_ARGS[@]}"}" \
   --expert_phy.phy_pipeline "$MODE" \
-  --log.all_level info \
+  "${LOG_LEVEL_ARGS[@]}" \
   --log.filename "$LOG" \
   >&3 2>&4
 rc=$?
