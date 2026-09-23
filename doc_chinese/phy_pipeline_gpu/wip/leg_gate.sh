@@ -128,4 +128,16 @@ for verdict, name, detail in rows:
 red = sum(1 for v, _, _ in rows if v != "PASS")
 print()
 print(f"  {len(rows) - red} of {len(rows)} checks pass" + ("" if red == 0 else f"  --  {red} to explain"))
+
+# ---- INFORMATION, deliberately NOT a tenth row ---------------------------------------------------
+# The milestone table (5.9.54 1) carries the row "dropped slots / RF real-time failures | 0 / 0", and
+# the audit of 5.9.120 found that half of it is a ONE-LEG claim: s47 and s67 read 0, but s62=2, s63=4,
+# s64b=21, s65=8, s66=40 and s69=33 (all `[RF] [W] Real-time failure in RF: underflow|late`). It is
+# printed here rather than judged because NO THRESHOLD IS REGISTERED, and inventing one inside a gate
+# is how a criterion becomes whatever the last person wanted. What it must not do is stay invisible:
+# a leg with 33 of them currently scores 7 of 9 and looks like the one with 0.
+rtf = len(re.findall(r"Real-time failure in RF", leg_txt))
+print()
+print(f"  [INFO           ] RF real-time failures in this leg's .log: {rtf}")
+print(f"                     not a criterion (no threshold registered); 5.9.54's '0 RF failures' row holds only on s47/s67")
 PY

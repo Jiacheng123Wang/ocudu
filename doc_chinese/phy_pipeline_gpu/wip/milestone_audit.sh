@@ -159,17 +159,18 @@ fi
 # `dft_processor_test` - the CPU twin of the metal DFT test). The project already has the right gate:
 # the `phy` LABEL. Three PHY tests carry a different label, so they are topped up by name (disjoint).
 FILTER_LABEL="phy"
-TOPUP="du_low_phy_pipeline_test|baseband_gateway_buffer_metal_smoke_test|pusch_processor_benchmark"
+FORMER_TOPUP="du_low_phy_pipeline_test|baseband_gateway_buffer_metal_smoke_test|pusch_processor_benchmark"
 ctest --test-dir build -L "$FILTER_LABEL" >"$T/ctest" 2>&1
 cl=$(grep -E "tests passed" "$T/ctest" | tail -1)
-check "ctest -L phy (the label gate): 175 runnable (1 disabled)" "175" \
-      "$([ "$cl" = "100% tests passed out of 175" ] && echo PASS || echo "$([ -z "$cl" ] && echo RED || echo FAIL)")" \
+check "ctest -L phy (the label gate): 178 runnable (1 disabled)" "178" \
+      "$([ "$cl" = "100% tests passed out of 178" ] && echo PASS || echo "$([ -z "$cl" ] && echo RED || echo FAIL)")" \
       "${cl:-<unreadable>}  (replaces the name-regex gate: 157 selected, 19 of them substring noise)"
-ctest --test-dir build -R "$TOPUP" >"$T/topup" 2>&1
-tl=$(grep -E "tests passed" "$T/topup" | tail -1)
-check "top-up: the 3 PHY tests the 'phy' label misses" "3" \
-      "$([ "$tl" = "100% tests passed out of 3" ] && echo PASS || echo "$([ -z "$tl" ] && echo RED || echo FAIL)")" \
-      "${tl:-<unreadable>}  labels apps;o_du_low / gateways / none - a 3-line CMake fix makes -L phy == 179"
+# The three PHY tests the label used to miss are inside it now (they were a manual top-up); if one of
+# them loses its label again, this reads RED and the gate silently shrinks - which is the whole lesson.
+n=$(ctest --test-dir build -N -L "$FILTER_LABEL" -R "$FORMER_TOPUP" 2>/dev/null | grep -oE "^Total Tests: [0-9]+" | grep -oE "[0-9]+")
+check "the 3 formerly-mislabelled PHY tests are inside -L phy" "3" \
+      "$([ "$n" = "3" ] && echo PASS || echo FAIL)" \
+      "du_low_phy_pipeline_test / baseband_gateway_buffer_metal_smoke_test / pusch_processor_benchmark: $n of 3"
 
 ./build/tests/unittests/support/executors/ul_pipeline_probe_test >"$T/probe" 2>&1
 pl=$(grep -E "PASSED" "$T/probe" | tail -1)

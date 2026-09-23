@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 
-set_directory_properties(PROPERTIES LABELS "o_du_low;apps")
+# "phy" is not decoration: this is THE pipeline-mode resolver test (phy_pipeline_mode cpu/cpu_gpu/gpu,
+# metal_mmse, device_grid, and the mode-vs-knob conflict rules), and the milestone gate is
+# `ctest -L phy`. Without the label it was invisible to that gate while the old name-regex gate only
+# caught it by accident (`du_low` matched) - the 5.9.120 audit found exactly that asymmetry.
+set_directory_properties(PROPERTIES LABELS "o_du_low;apps;phy")
 
 add_executable(du_low_phy_pipeline_test du_low_phy_pipeline_test.cpp)
 target_include_directories(du_low_phy_pipeline_test PRIVATE ${CMAKE_SOURCE_DIR})

@@ -99,10 +99,23 @@ struct dft_stats_t {
   /// value is a wiring defect (the wait was skipped, and the caller's data may not be there yet).
   std::atomic<uint64_t> released_waits{0};
   /// Tokens the receiving chain attached to a block so its INPUT outlives the dispatches that read it, and
-  /// how many of them have been released. The two must end equal: a token still held at exit is a receive
-  /// buffer the radio cannot use again (see dft_metal_engine::retain_for_block()).
+  /// how many of them have been released (see dft_metal_engine::retain_for_block()).
+  ///
+  /// READING RULE (measured 2026-09-23, milestone audit 5.9.120): `attached - released` is the number of
+  /// tokens held by blocks STILL IN FLIGHT, not a leak - they are released by the adopting command
+  /// buffer's completion handler, which runs on the GPU's clock, so any single reading of the pair is a
+  /// snapshot. On the one leg whose build printed the pair every hop (s47-d1default, 884 prints) the gap
+  /// OSCILLATES between 0 and 84 tokens (histogram 14:375, 28:114, 42:57, 56:292, 70:41, 84:4), with the
+  /// same maximum in the first half of the run as in the second - a leak would grow monotonically with
+  /// the hop count instead. So "the two must end equal" (this comment used to say exactly that) holds
+  /// only when the shutdown happened to drain the pipeline: s62/s64b end 384846/384846 and 301658/301658
+  /// (equal, nothing in flight), while s69 ends 368186/368200 (one slot in flight). The distinguishing
+  /// number is therefore the MAXIMUM GAP over the run - printed next to the pair - and not the pair.
   std::atomic<uint64_t> keepalives{0};
   std::atomic<uint64_t> keepalives_released{0};
+  /// Largest `keepalives - keepalives_released` seen at any attach: the in-flight high-water mark. A leak
+  /// makes the gap grow without bound, so this is what tells "in flight" from "leaked" (see above).
+  std::atomic<uint64_t> keepalives_in_flight_max{0};
 };
 
 static dft_stats_t& dft_stats()
@@ -145,10 +158,15 @@ static void dft_stats_released_wait()
   dft_stats().released_waits.fetch_add(1, std::memory_order_relaxed);
 }
 
-/// Counts the tokens attached to a block (see retain_for_block()).
+/// Counts the tokens attached to a block (see retain_for_block()), and notes how many are in flight.
 static void dft_stats_keepalive()
 {
-  dft_stats().keepalives.fetch_add(1, std::memory_order_relaxed);
+  dft_stats_t& s = dft_stats();
+  const uint64_t attached = s.keepalives.fetch_add(1, std::memory_order_relaxed) + 1;
+  const uint64_t held     = attached - s.keepalives_released.load(std::memory_order_relaxed);
+  uint64_t       prev     = s.keepalives_in_flight_max.load(std::memory_order_relaxed);
+  while (held > prev && !s.keepalives_in_flight_max.compare_exchange_weak(prev, held, std::memory_order_relaxed)) {
+  }
 }
 
 /// Counts the tokens released - by the block's completion, or by the drop of a handover nobody claimed.
@@ -220,7 +238,8 @@ static void dft_stats_report()
     std::fprintf(stderr,
                  "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu "
                  "evicted_unproduced=%llu over_bound=%llu unproduced=%zu "
-                 "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu (armed=%d)\n",
+                 "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu (max in flight "
+                 "%llu) (armed=%d)\n",
                  static_cast<unsigned long long>(hand.handed),
                  static_cast<unsigned long long>(hand.taken),
                  static_cast<unsigned long long>(hand.superseded),
@@ -232,10 +251,15 @@ static void dft_stats_report()
                  static_cast<unsigned long long>(hand.late_commits),
                  static_cast<unsigned long long>(hand.grid_not_found),
                  static_cast<unsigned long long>(hand.ready_timeouts),
-                 // keepalives = released/attached: the two must be EQUAL at exit. A token still held is a
-                 // receive buffer the radio cannot use again, i.e. a stall waiting to happen (5.9.7).
+                 // keepalives = released/attached, plus the in-flight HIGH-WATER MARK. The gap between the
+                 // two is the number of tokens held by blocks still in flight (they are released by the
+                 // adopting buffer's completion handler), NOT a leak: on s47 the pair was printed every hop
+                 // and the gap oscillated 0..84 with the same maximum in both halves of the run, while a
+                 // leak would grow with the hop count. The high-water mark is what separates the two, and
+                 // "equal at exit" only holds when the shutdown happened to drain the pipeline.
                  static_cast<unsigned long long>(s.keepalives_released.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(s.keepalives.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.keepalives_in_flight_max.load(std::memory_order_relaxed)),
                  static_cast<int>(release_armed));
   }
 }
@@ -362,7 +386,7 @@ void dft_handover_heartbeat(const char* where)
   const dft_stats_t&                         s    = dft_stats();
   logger.debug("[dft_handover] {} handed={} taken={} superseded={} evicted={} "
                "evicted_unproduced={} over_bound={} unproduced={} "
-               "fallback={} late={} not_found={} timeouts={} keepalives={}/{}",
+               "fallback={} late={} not_found={} timeouts={} keepalives={}/{} (max in flight {})",
                where,
                hand.handed,
                hand.taken,
@@ -376,7 +400,8 @@ void dft_handover_heartbeat(const char* where)
                hand.grid_not_found,
                hand.ready_timeouts,
                s.keepalives_released.load(std::memory_order_relaxed),
-               s.keepalives.load(std::memory_order_relaxed));
+               s.keepalives.load(std::memory_order_relaxed),
+               s.keepalives_in_flight_max.load(std::memory_order_relaxed));
 }
 #else  // OCUDU_METAL_STATS
 static void dft_stats_note_depth(uint64_t /*depth*/) {}

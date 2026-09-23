@@ -38,5 +38,12 @@ if (APPLE)
     target_link_libraries(baseband_gateway_buffer_metal_smoke_test
         ocudu_macos_compat ocudu_support ocudulog gtest gtest_main
         "-framework Metal" "-framework Foundation")
-    gtest_discover_tests(baseband_gateway_buffer_metal_smoke_test PROPERTIES "LABELS;gateways")
+    # Also labelled "phy": this is the Metal zero-copy wrap contract the fused lane's grid storage
+    # depends on (page-aligned base, whole pages covered), so the milestone gate `ctest -L phy` must
+    # run it - its own module label alone would leave it outside (5.9.120 audit).
+    # NOTE the argument shape (learned the hard way, 5.9.120): gtest_discover_tests expands
+    # PROPERTIES as a LIST, so "LABELS;gateways;phy" as ONE argument defines LABELS=gateways and an
+    # empty property called `phy`, and "LABELS" "gateways;phy" as TWO arguments gets split the same
+    # way when the list is expanded. The escaped semicolon inside one value is what survives.
+    gtest_discover_tests(baseband_gateway_buffer_metal_smoke_test PROPERTIES LABELS "gateways\\;phy")
 endif()

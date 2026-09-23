@@ -8865,18 +8865,18 @@ s64 (n78, 空载) dft radio inputs: 2352 of 51265 transforms read the radio buff
 **登记为待观测项**：下一次某条腿 `free_min` 到 0 时必须**恰好出现一次**该 WARN；到 0 而没打即为缺陷。
 最小强制办法：`--log.phy_level=debug` 跑一条短腿（near-dry 时每 pop 一行会显著拖慢上行侧）。
 
-> ⚠ **2026-09-23 里程碑审计：这条判据已经命中，而且命中的是"缺陷"那一侧 —— 但机制尚未裁决。**
+> ⚠ **2026-09-23 里程碑审计：这条判据已经命中 —— 但命中的那条腿**早于**这条 WARN，所以它是阴性对照，不是缺陷。**
 > 腿 `s63-heavy-ul_0923_1453` 的汇总行是
 > `[ul_rx_pool] taken=92571 returned=92569 held_end=2 held_max=8 pool=8 free_min=0 starved_takes=155 starved_events=51`，
 > 而 `grep -c "receive pool is EMPTY"` 在它的 `.log` / `.log.stderr` / `.log.stdout` **三个文件里都是 0**。
-> 能确定的：`free_min` 与那条 WARN **用的是同一次调用里的同一个实参**（`lower_phy_baseband_processor.cpp:126` 与 `:137`），
-> 所以"`free_min` 记到 0 却没有 WARN"按上面这条判据**就是缺陷**，不是"还没遇到"。
-> **两种情况都还没被判明**：① 首次置零发生在日志接管之前（于是 WARN 被丢掉、`warned_empty` 已经在那个进程里翻过）；
-> ② 实参在"取到最后一个缓冲"时看到的其实不是 0（那 `free_min=0` 就来自另一处）。**二者都没有证据**。
-> **最小裁决办法（离线，不需要腿）**：`lower_phy_baseband_processor` 的池大小来自**公开配置字段**
-> （`lower_phy_baseband_processor.h:39`，建池在 `.cpp:237`；`lower_phy_factory.cpp:182` 的"下限 8"是**调用点策略**，处理器自身没有断言）
-> ⇒ 直接用一个**小池夹具**把池压到 1–2 个缓冲，看 WARN 是否响、响几次。
-> 另注：全库 137 条腿里**只有 `s66-la-n1` 触发过一次**这条 WARN，所以"能响"本身是有正面读数的。
+> **裁决（读提交先后即可）**：这条 WARN 是 5.9.100（`684d102fa6`）加的，而 `s63` 的二进制是 `db8580e30e`、
+> `s61-fenced-off` 是 `0299ad8d19` —— `git merge-base --is-ancestor 684d102fa6 <腿的提交>` **两条都不成立**
+> ⇒ **它们跑的时候还没有这条 WARN**，`free_min=0` 只是把"该响而当时没有仪表"的形态记了下来。
+> **正面读数在带 WARN 的腿上**：`s66-la-n1`（`f2872c4371`）`free_min=0`、`starved_takes=1472`、`starved_events=91`，
+> 而 `.log` 里**恰好一次** `[PHY] [W] [ 0.0] [ul_rx_pool] the receive pool is EMPTY (held=8/8): the next take blocks the receive thread`
+> ⇒ **"正向触发待观测"关闭（已观测，s66）**，`leg_gate.sh` 的池判据在 s66 上 PASS。
+> **读法提醒**：ocudulog 的行只进 **`.log`**、`fprintf` 的探针行只进 **`.stderr`** —— 只翻 `.stderr` 会漏掉每一条 `[PHY] [W]`
+> （本次审计的第一版判读就是这么错的，同一天内被自己用提交先后推翻）。
 
 #### 5.9.101 ★ A1-3（重上行腿的最终形态）+ A1-5（KO/CFO 正式延后，并入 `#12 LA`）
 
@@ -9767,16 +9767,29 @@ PRACH 那 **1200 变换/s** 现在是**每变换一条命令缓冲 + 一次 wait
 
 **⑦ 两条"没人看守的不变量"（本条为本次审计新发现，均有读数）**
 
-1. **keepalive 令牌在退出时没有全部归还**：引擎自己的注释写着 released/attached "**必须相等**"，
-   否则"是一个等着发生的 stall"。实测：`s62 384846/384846` ✅、`s64b 301658/301658` ✅，但
-   `s47 395514/395528`、`s63 392686/392714`、`s65 517664/517692`、`s66 467110/467138`、`s67 280546/280560`、`s69 368186/368200`
-   —— **6/8 条差 14 或 28**（= 1 或 2 个槽的符号数）。**没有任何门检查它**（`leg_gate` 9 条里没有）。
-   ⇒ 要么解释（例如最后一批交出去的块在收尾打印之后才完成）、要么修；**不能继续没人看**。
-2. **RX 池的 EMPTY 告警在它被写出来的那条腿上没有触发**：`s63-heavy-ul` 有 `free_min=0`、`starved_takes=155`、
-   `starved_events=51`、`held_max=8=pool`，而 `grep -c "receive pool is EMPTY"` 在三个文件里都是 **0**。
-   触发条件是 `free_buffers == 0`，参数取的是 `pop_blocking()` **之后**的 `buffers.size()`
-   ⇒ §5.9.100 的"**正向触发待观测**"很可能不是"还没遇到"，而是**这个形状下观测不到**（需要按"取之前"的口径或按 `starved_events` 触发）。
-   注：全库里只有 `s66-la-n1` 触发过一次。
+1. ~~**keepalive 令牌在退出时没有全部归还**~~ → **同一次审计内被自己推翻，而真正的缺陷在仪器一侧**。
+   现象（第一眼）：引擎注释写着 released/attached "**必须相等**"，而 6/8 条最近腿差 14 或 28
+   （`s47 395514/395528`、`s63 392686/392714`、`s65 517664/517692`、`s66 467110/467138`、`s67 280546/280560`、`s69 368186/368200`；`s62`/`s64b` 相等）。
+   **但把全序列读出来就反了**：`s47` 的 `.stderr` 里这一对出现了 **884 次**（那一版每跳打印一次），缺口分布
+   `{0:1, 14:375, 28:114, 42:57, 56:292, 70:41, 84:4}`，且**前半段最大 84、后半段最大 70** ⇒ **振荡、从不累积**
+   （泄漏会随跳数单调增长）⇒ **不是泄漏**：缺口就是"**在飞的令牌数**"（令牌由 adopt 那条命令缓冲的**完成回调**释放，
+   而交棒路径**故意取消了宿主等待**，所以任何一次读数都只是快照；"相等"只在收尾恰好排空时成立）。
+   ⇒ **真缺陷 = 这一行分不清"在飞"与"泄漏"**，而它的注释把"相等"写成要求 —— 一个健康的腿会被读成
+   "a stall waiting to happen"（本次审计自己就先读错了）。**已修（本轮）**：新增
+   `keepalives_in_flight_max` 高水位，两处打印都变成 `keepalives=R/A (max in flight K)`；
+   泄漏让缺口**无界**增长、在飞不会，**K 就是那个把它们分开的量**。
+2. ~~**RX 池的 EMPTY 告警在它被写出来的那条腿上没有触发**~~ → **同样被自己推翻：那不是"没触发"，是"腿比仪表早"。**
+   第一眼：`s63-heavy-ul` 有 `free_min=0`、`starved_takes=155`、`starved_events=51`（`s61-fenced-off` 同形），
+   而 `grep -c "receive pool is EMPTY"` 在三个文件里都是 0 ⇒ 看上去违反 §5.9.100 ④ 自己预登记的判据。
+   **但那条 WARN 是 5.9.100（`684d102fa6`）加的**，而 `s63` 的二进制是 `db8580e30e`、`s61-fenced-off` 是 `0299ad8d19`
+   —— `git merge-base --is-ancestor 684d102fa6 <腿的提交>` **两条都不成立** ⇒ 它们跑的时候**还没有这条 WARN**。
+   而**带 WARN 的腿里它真的响了**：`s66-la-n1` 读到
+   `[ul_rx_pool] taken=142693 … held_max=8 pool=8 free_min=0 starved_takes=1472 starved_events=91`，
+   `.log` 里 **恰好一次** `[PHY] [W] [ 0.0] [ul_rx_pool] the receive pool is EMPTY (held=8/8): the next take blocks the receive thread`，
+   `leg_gate.sh` 的池判据因此 **PASS**。
+   ⇒ **§5.9.100 ④ 的"正向触发待观测"关闭：已观测（s66）。**
+   **顺带一条读法规矩**：ocudulog 的行只进 **`.log`**，`fprintf` 的探针行只进 **`.stderr`** —— `leg_gate` 两个都 grep 是对的，
+   但只翻 `.stderr` 的人会漏掉每一条 `[PHY] [W]`（本条差点就是这么被误判的）。
 
 **⑧ A6：文档/代码一致性（今天已更正 4 处）**
 
@@ -9824,15 +9837,15 @@ PRACH 那 **1200 变换/s** 现在是**每变换一条命令缓冲 + 一次 wait
 
 | # | 项 | 配方 | 成本 |
 |---|---|---|---|
-| 1 | **门改成标签**（最高优先：门漏比被测缺陷更贵）| 三条补标签；此后 `bash wip/milestone_audit.sh` 用 `-L phy`（已改）| 3 行 CMake |
+| ~~1~~ | ~~**门改成标签**~~ **✅ 本轮完成** | 三条补标签（`du_low_phy_pipeline_test` 的目录标签、`baseband_gateway_buffer_metal_smoke_test` 的 `LABELS "gateways\;phy"`、`pusch_processor_benchmark` 的 `set_tests_properties`）；**裸 `ctest -L phy` == 179**，实测 **178/178 全过（21.7 s）**。⚠ 记一个 CMake 坑：`gtest_discover_tests` 把 `PROPERTIES` 当**列表**展开，`"LABELS;gateways;phy"` 会定义成 `LABELS=gateways` + 一个空属性 `phy`（`ctest --show-only=json-v1` 里看得见），必须写成转义分号 `LABELS "gateways\;phy"` | 3 行 CMake |
 | 2 | **一条真正的重上行腿**（n78）| 已登记的阈值 ≥2.0 Mbit/s **且** ≥50% 占槽；它同时给 cbs/穿越/契约"在负载下"的读数 | 1 条腿 |
-| 3 | **归档边缘块双臂输出** | `bash wip/edge_block_arms.sh 6 > wip/logs/edge_block_arms_<date>.txt` | 离线，分钟级 |
+| ~~3~~ | ~~归档边缘块双臂输出~~ **✅ 本轮完成** | `wip/evidence/edge_block_arms_6_0923_2337.txt`（默认 6/6 绿、`=0` 6/6 红、红臂判据组合 `T15-(d) x3, T15-(c)-BAND x1, Test3 x1, Test9 x1`）。⚠ `wip/logs/` 是 **root 属主**（腿用 sudo 建）⇒ 离线证据另立 `wip/evidence/` | 离线，分钟级 |
 | 4 | **A1-2 第二条腿** | `LEG_CONFIG=…n78 bash wip/run_leg.sh gpu s70-a12-n78b` + `a12_attribution_gate.sh`（不同 occasion 数）| 1 条腿 |
-| 5 | **keepalive 不变量** | 先判"收尾顺序"（打印是否早于最后一批的完成）；是则加一条腿级判据，否则修 | 离线可判 |
-| 6 | **RX 池 EMPTY 告警** | 按"取之前"的口径或按 `starved_events` 触发；用 s63 当反向臂 | 离线可判 |
+| ~~5~~ | ~~keepalive 不变量~~ **✅ 本轮完成** | 见 ⑦.1：**不是泄漏**（全序列振荡 0–84），已加 `keepalives_in_flight_max` 高水位并把两处打印都改成 `(max in flight K)` | 离线 |
+| 6 | **RX 池 EMPTY 告警** | 按"取之前"的口径或按 `starved_events` 触发；`leg_gate` **已有该判据**（s63 上就是它红，代号 `P`）⇒ 缺的是裁决与修法，不是判据 | 离线（小池夹具）|
 | 7 | `host sample assembly` 的反向臂 | 让一个符号跨越两个接收块（现有 fixture 就能造）| 离线 |
-| 8 | `-L phy` 里重活的稳定性 | `pxsch_bler_test`、两条 `radio_ssb_zmq_*` 的时长/抖动登记 | 离线 |
-| 9 | 每条腿的 `Real-time failure in RF` 计数入库 | 加进 `leg_gate`（阈值先登记再读）| 1 行脚本 |
+| 8 | `-L phy` 里重活的稳定性 | `pxsch_bler_test`、两条 `radio_ssb_zmq_*` 的时长/抖动登记（本次 179 全套 **21.7 s**，没有异常）| 离线 |
+| ~~9~~ | ~~每条腿的 `Real-time failure in RF` 计数入库~~ **✅ 本轮完成** | `leg_gate.sh` 现在在 9 条判据之后打一行 **INFO**（s69 → 33、s67 → 0）；**故意不做成第 10 条判据**（阈值未登记，不能在门里现编）| 1 行脚本 |
 | 10 | §5.9.54 ① 那张 milestone 表本身 | 把 `cbs/lane=1.00` 等行就地标注"已被 §5.9.93/5.9.96 取代" | 文档 |
 
 

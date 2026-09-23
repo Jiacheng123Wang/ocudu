@@ -1,0 +1,17 @@
+Test 15 edge-block guard: 6 runs per arm
+  default   run  1  rc=0    PASS                 L1.000e+00 spread 1.034 control 1.002; L1.000e-01 spread 1.039 control 1.014; L1.000e-02 spread 1.020 control 1.019
+  default   run  2  rc=0    PASS                 L1.000e+00 spread 1.034 control 1.002; L1.000e-01 spread 1.039 control 1.014; L1.000e-02 spread 1.020 control 1.019
+  default   run  3  rc=0    PASS                 L1.000e+00 spread 1.034 control 1.002; L1.000e-01 spread 1.039 control 1.014; L1.000e-02 spread 1.020 control 1.019
+  default   run  4  rc=0    PASS                 L1.000e+00 spread 1.034 control 1.002; L1.000e-01 spread 1.039 control 1.014; L1.000e-02 spread 1.020 control 1.019
+  default   run  5  rc=0    PASS                 L1.000e+00 spread 1.034 control 1.002; L1.000e-01 spread 1.039 control 1.014; L1.000e-02 spread 1.020 control 1.019
+  default   run  6  rc=0    PASS                 L1.000e+00 spread 1.034 control 1.002; L1.000e-01 spread 1.039 control 1.014; L1.000e-02 spread 1.020 control 1.019
+
+  rollback  run  1  rc=255  T15-(d)-FENCE        0 of 480 hops waited
+  rollback  run  2  rc=255  T15-(c)-BAND         Test 15 FAIL: one realization is out of band on the edge geometry (level 0.
+  rollback  run  3  rc=255  stopped-at-Test3     metal_mmse regresses by more than 1.5 dB at SNR 20.0 dB
+  rollback  run  4  rc=255  stopped-at-Test9     the estimator results follow the input level instead of the SNR, so the soft-bit scale of the uplink depends on the radi
+  rollback  run  5  rc=255  T15-(d)-FENCE        0 of 480 hops waited
+  rollback  run  6  rc=255  T15-(d)-FENCE        0 of 480 hops waited
+
+  default   (green): PASS x6   [rc: rc=0 x6]
+  rollback  (red): T15-(d)-FENCE x3, T15-(c)-BAND x1, stopped-at-Test3 x1, stopped-at-Test9 x1   [rc: rc=255 x6]
