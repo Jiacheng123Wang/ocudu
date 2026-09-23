@@ -1,8 +1,9 @@
 # doc_chinese/ - the design and planning record of the Apple Silicon work
 
 This is where the **Chinese** documents of the OCUDU Apple Silicon / Metal port live: the long-term
-plan, the per-module plans and memos, the audits, and the session handoffs that carry the state from
-one working session to the next. A few of them have English translations under `docs/`
+plan, the per-module plans and memos, the audits, the cross-cutting analyses (architecture
+comparison, competitiveness), and the session handoffs that carry the state from one working session
+to the next. A few of them have English translations under `docs/`
 (`docs/apple_silicon_heterogeneous_gnb_plan_english.md`, `docs/build_macOS_note_english.md`).
 
 Two rules the tree is kept by:
@@ -21,7 +22,7 @@ Two rules the tree is kept by:
 
 | Directory | Content | Entry point |
 |---|---|---|
-| `phy_pipeline_gpu/` | The fused-lane port (batch 5a-5g: the whole IQ -> LLR chain in one device pipeline, with **zero host <-> device data crossings** measured on air). Living design document, goal/gap, A/B protocol, per-batch work docs, session handoffs. | `phy_pipeline_gpu/README.md`, then `phy_pipeline_gpu/gpu_phy_pipeline_design_and_implementation.md` |
+| `phy_pipeline_gpu/` | The fused-lane port (batch 5a-5g: the whole IQ -> LLR chain in one device pipeline). Its contract claims **zero host <-> device data crossings**, measured on air - read that as contract check 5, which counts only the **declared** modules and excludes the IQ upload and the LLR download; the 5.9.120 milestone audit records exactly what the number does and does not cover, and the goal's "exactly two crossings" half has **no counter at all**. Living design document, goal/gap, A/B protocol, per-batch work docs, session handoffs. | `phy_pipeline_gpu/README.md`, then `phy_pipeline_gpu/gpu_phy_pipeline_design_and_implementation.md` |
 | `full_gpu_chain/` | The first full-chain GPU/UMA zero-copy attempt (before the fused lane): plan, S2 design, audit, session handoffs. | `full_gpu_chain/s2_full_chain_design.md` |
 | `metal_ldpc/` | Metal LDPC decoder: the first module ported, and the paradigm the others followed. | `metal_ldpc/PLAN.md` |
 | `metal_ce/` | Metal MMSE channel estimator (the 2D MMSE engine, K1/K2/K3/K4/K5, the TA port). | `metal_ce/Metal_MMSE_Channel_Estimator_PLAN.md` |
@@ -29,9 +30,20 @@ Two rules the tree is kept by:
 | `macos_compat_refactor/` | macOS compatibility work: phase reports, and `NOT_RUN_AUDIT.md` - why each test that does not run on macOS is disabled and what would enable it. | `macos_compat_refactor/phase0_audit_report.md` |
 | `test_environment/` | The bench: OAI UE over ZMQ + UHD end-to-end memo, the Hong Kong test environment and phone-attach notes, the VoNR/IMS interop plan. | `test_environment/OAI_UE_ZMQ_UHD_E2E_memo.md` |
 
-Root-level documents: `apple_silicon_heterogeneous_gnb_plan.md` (the long-term plan, English version
-in `docs/`), `build_macOS_note.md` (building on macOS, English version in `docs/`), and the two
-phone-connectivity notes of 2026-09-05/06.
+Root-level documents:
+
+| Document | Content |
+|---|---|
+| `apple_silicon_heterogeneous_gnb_plan.md` | The long-term plan (English version in `docs/`). |
+| `build_macOS_note.md` | Building on macOS (English version in `docs/`). |
+| `metal_vs_cuda_architecture.md` | Architecture comparison: the upstream CUDA addition is a **lookaside** ADT (isolated device address space, `cudaMalloc`, host spans, explicit copies, host polls/waits), while this port is **inline** on unified memory. It also evaluates the proposed "hardware-neutral device-backend interface layer" against our architecture and finds it wanting (8 of 10 requirements unmet, one of them semantically inverted). Read it together with the two documents it cites. |
+| `apple_silicon_competitiveness_analysis.md` | Independent competitiveness analysis. Derives the binding constraint from first principles (bandwidth is **not** it - the count of times the same data must be moved is), redone at equal price with the correct x86 part (L4/RTX 4000 Ada class, not an H100), and settles the vendor-risk and platform-constraint questions. Also keeps the four mis-comparisons this project has made, so they are not repeated. |
+| The two phone-connectivity notes of 2026-09-05/06. | Bench notes from the Hong Kong test environment. |
+
+> **⚠ Number labelling in `apple_silicon_competitiveness_analysis.md`:** every figure there carries
+> one of **【官方】** (vendor spec), **【实测】** (measured in this repository) or **【推算】**
+> (derived estimate, **must not be quoted as measured**). The Apple GPU TFLOPS figures are
+> **【推算】** - Apple does not publish them - and must be measured before they are cited anywhere.
 
 ## Not tracked here
 
