@@ -9614,6 +9614,19 @@ timeouts=0 keepalives=368186/368200`；`ce device estimates: 85855 device, 0 hos
 `mmse_time_sum: hops_gpu=7805 hops_no_gpu=0 defer_wait mean=1450.5 µs`；`[ul_gpu_lane] cbs/lane=2.00 (max=2) dropped=0`。
 （`not_found ≈ late`、`timeouts=0` 再次与 §5.9.117 的裁决一致。）
 
+**⑦ 登记（本轮不做，按"不许半成品"）：这条读数顺带指出一个**真实但独立的**优化机会**
+
+PRACH 那 **1200 变换/s** 现在是**每变换一条命令缓冲 + 一次 wait**（普通路由），而引擎里已有的 block API
+（`begin_block`/`end_block`，`ofdm_demodulator_impl.h:148-162` 用的就是它）能把**一次 occasion 的 12 个符号并成一条** ——
+这正是 D1"消掉每变换一次 CPU 提交"的同一个目标，只是发生在**另一条链**（PRACH 解调器）上。
+
+* **判据（预先写死，免得事后挑）**：改动后同一条 n78 腿应读到 `plain_with_block ≈ 12×occasions`、
+  `plain_without_block ≈ 1`（只剩预热）、`commits ≈ occasions + 1`（从 1200/s 降到 ~100/s），
+  而 `wrap_copies` 仍为 0、契约仍 8/8、`[metal_stats] dft transforms` 仍 = `12×N+1`（**变换总数不变，只是提交形状变了**）；
+* **可离线驱动**：PRACH 解调器的现有单测就能喂 occasion（不需要空口腿即可做臂与反臂）；
+* **本轮不碰**：它改的是另一条链的提交形状，收益（≈1.5% 单线程时间，§5.9.99 的估算）与风险都要自己的臂，
+  并且与本线当前的题目（默认路径的雷 + 归属）无关。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，
