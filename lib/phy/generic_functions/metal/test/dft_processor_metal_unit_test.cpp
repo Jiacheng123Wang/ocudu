@@ -19,10 +19,14 @@
 #include "ocudu/phy/support/resource_grid.h"
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
+#include "ocudu/phy/phy_pipeline_contract.h"
+#include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/phy/support/support_factories.h"
 #include "ocudu/support/macos_compat.h"
 #include <chrono>
 #include <cmath>
+#include <string>
+#include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
@@ -83,6 +87,110 @@ int main()
   std::printf("CPU reference: %s\n", ref_name);
 
   bool ok = true;
+
+  // ---- the "dft radio inputs" contract check, BOTH arms (5.9.99) --------------------------------
+  //
+  // The claim this check makes is "no transform staged a host copy of its input". Until 5.9.99 it was written
+  // as `radio >= 0.99 * committed` - two DIFFERENT populations (the transforms that came in through the
+  // hand-over route against the ones committed through the plain route), both of which wrap the radio's
+  // buffer zero-copy. That made it pass for the wrong reason on an n1 leg ("392714 of 1 -> OK", the
+  // denominator being a counter only the other route feeds) and fail on an n78 leg whose 158845 plain
+  // submits were just as zero-copy. The arm below is what keeps the corrected form honest.
+  //
+  // The refusal is produced the way the code produces it, not by hoping a pointer is misaligned:
+  // wrap_buffer() stages a copy when the page-rounded space the allocation registry describes cannot cover
+  // the request ("the request really does not fit in the allocation: stage a copy"). So the arm asks for
+  // FOUR transforms out of an allocation sized for ONE - a described, page-aligned buffer, and a pointer the
+  // control has not already wrapped, so no cache entry can answer for it. The control asks the same
+  // allocation for the one transform it holds and must read OK first.
+  {
+    // The check answers only for a PUBLISHED mode (an unpublished process reads "not applicable"), and the
+    // registry publishes process-wide with no way back - which is why this arm is its own ctest entry.
+    phy_pipeline_mode_registry::set(phy_pipeline_mode::gpu);
+
+    auto contract_line = []() -> std::string {
+      // report_phy_pipeline_contract() writes to stderr, so it is captured exactly as the operator reads it.
+      FILE* capture = std::tmpfile();
+      if (capture == nullptr) {
+        return {};
+      }
+      std::fflush(stderr);
+      const int saved = dup(fileno(stderr));
+      if (saved == -1) {
+        return {};
+      }
+      dup2(fileno(capture), fileno(stderr));
+      report_phy_pipeline_contract();
+      std::fflush(stderr);
+      dup2(saved, fileno(stderr));
+      close(saved);
+      std::rewind(capture);
+      std::string text;
+      char        buf[512];
+      while (std::fgets(buf, sizeof(buf), capture) != nullptr) {
+        text += buf;
+      }
+      std::fclose(capture);
+      const std::size_t at = text.find("dft radio inputs:");
+      if (at == std::string::npos) {
+        return {};
+      }
+      const std::size_t end = text.find('\n', at);
+      return text.substr(at, (end == std::string::npos) ? std::string::npos : end - at);
+    };
+
+    constexpr unsigned k_size  = 1536; // the mixed-radix size the rest of this file measures with
+    constexpr unsigned k_batch = 16;   // dft_processor_metal::max_batch: the engine wraps the WHOLE batch
+    const std::size_t  page    = compat::page_size(); // 16 KiB on Apple Silicon, NOT 4 KiB
+    // wrap_buffer() is asked for the whole BATCH, not for the transforms this call submits (measured:
+    // 1536 x 16 x 8 = 196608 bytes for a one-transform run), so a buffer sized for the transforms alone is
+    // refused - which is how this arm first failed its own control. The control allocates what the engine
+    // asks for; the arm allocates one page, so the same request cannot be wrapped and must be staged.
+    const std::size_t wrap_bytes = static_cast<std::size_t>(k_batch) * k_size * sizeof(cf_t);
+    const std::size_t fits_wrap  = ((wrap_bytes + page - 1) / page) * page;
+
+    void* ctrl_in  = compat::aligned_alloc(page, fits_wrap); // what the engine asks for: no copy
+    void* ctrl_out = compat::aligned_alloc(page, fits_wrap);
+    void* arm_in   = compat::aligned_alloc(page, page); // one page: the wrap CANNOT cover the request
+    void* arm_out  = compat::aligned_alloc(page, fits_wrap);
+
+    metal::dft_metal_engine engine;
+    const bool              engine_ok = engine.init(k_size, /*inverse=*/false);
+    if (!engine_ok || (ctrl_in == nullptr) || (ctrl_out == nullptr) || (arm_in == nullptr) || (arm_out == nullptr)) {
+      std::fprintf(stderr, "FAIL: could not set up the dft radio inputs arms (engine=%d)\n", engine_ok ? 1 : 0);
+      ok = false;
+    }
+    else {
+      const bool        control_ran = engine.run(ctrl_in, ctrl_out, 1);
+      const std::string control     = contract_line();
+      if (!control_ran || (control.find("-> OK") == std::string::npos)) {
+        std::fprintf(stderr,
+                     "FAIL: the control transform (one transform in an allocation that holds one) did not read "
+                     "OK: ran=%d line=[%s]\n",
+                     control_ran ? 1 : 0,
+                     control.c_str());
+        ok = false;
+      }
+
+      (void)engine.run(arm_in, arm_out, 4);
+      const std::string armed = contract_line();
+      if (armed.find("-> FAILED") == std::string::npos) {
+        std::fprintf(stderr,
+                     "FAIL: the reverse arm (four transforms asked of an allocation that holds one, so the wrap "
+                     "must be refused and the input staged) did not turn the check red: line=[%s]\n",
+                     armed.c_str());
+        ok = false;
+      }
+      else {
+        std::printf("  dft radio inputs arm: control [%s] -> armed [%s]\n", control.c_str(), armed.c_str());
+      }
+    }
+    compat::aligned_free(ctrl_in);
+    compat::aligned_free(ctrl_out);
+    compat::aligned_free(arm_in);
+    compat::aligned_free(arm_out);
+  }
+
 
   // A/B comparison over the OFDM-relevant 2^k * 3^m sizes, both directions.
   const unsigned sizes[] = {128, 384, 512, 768, 1024, 1536, 2048, 3072, 4096};
@@ -655,7 +763,6 @@ int main()
   // no commit of that slot to relate anything to, and the ordering a grid consumer needs is carried by the
   // GRID generation instead. Every air leg ever run reported that fence at signals=0 waits=0, so nothing is
   // left untested by dropping this case.
-
 
   if (ok) {
     std::printf("ALL OK\n");

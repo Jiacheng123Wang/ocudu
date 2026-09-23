@@ -215,21 +215,45 @@ static void register_dft_contract_check()
          const dft_stats_t& s = dft_stats();
          // TRANSFORMS, not command buffers: a block of them shares one command buffer (begin_block()),
          // so counting commits here printed "240016 of 17145 transforms" on the first batched leg.
-         const uint64_t transforms = s.transforms.load(std::memory_order_relaxed);
-         const uint64_t radio      = s.radio_inputs.load(std::memory_order_relaxed);
+         //
+         // TWO populations, and this check used to compare them: `radio` counts the transforms that came
+         // in through the slot-grid-write (hand-over) route and `committed` the ones committed through the
+         // plain per-transform route, while BOTH wrap the radio's buffer zero-copy. The claim - "the
+         // transform input is the radio's samples, not a host-staged copy" - is therefore neither of those
+         // counts: it is `staged == 0`, incremented exactly where wrap_buffer() has to fall back to
+         // newBufferWithBytes() (and counted as a host write by the crossings audit). Measured before the
+         // correction (5.9.98): an n1 leg printed "392714 of 1 ... -> OK", i.e. it passed by comparing
+         // against a counter only the OTHER route feeds, and an n78 leg printed FAILED while its 158845
+         // plain submits were as zero-copy as the rest. The hand-over SHARE is printed because it is worth
+         // watching, not because it is a verdict: on a TDD cell the slots the lane does not claim take the
+         // plain route by construction (5.9.98 (2)).
+         const uint64_t radio     = s.radio_inputs.load(std::memory_order_relaxed);
+         const uint64_t committed = s.transforms.load(std::memory_order_relaxed);
+         const uint64_t staged    = s.wrap_copies.load(std::memory_order_relaxed);
+         const uint64_t total     = radio + committed;
+         // UNIT CARE: `staged` counts WRAPS (one wrap_buffer() call each), not transforms - a run wraps its
+         // input and its output - so it is reported apart from the transform counts instead of being
+         // subtracted from them. The old form mixed populations; mixing units would be the same mistake.
          std::fprintf(stderr,
-                      "%llu of %llu transforms read the radio buffer",
+                      "%llu transform(s) went through the two submit routes: the hand-over route carried %llu "
+                      "(%.1f%%), the plain route %llu; %llu buffer wrap(s) had to stage a host copy",
+                      static_cast<unsigned long long>(total),
                       static_cast<unsigned long long>(radio),
-                      static_cast<unsigned long long>(transforms));
-         if ((transforms == 0) || !phy_pipeline_mode_registry::is_published() ||
+                      (total == 0) ? 0.0
+                                   : (100.0 * static_cast<double>(radio) / static_cast<double>(total)),
+                      static_cast<unsigned long long>(committed),
+                      static_cast<unsigned long long>(staged));
+         if ((total == 0) || !phy_pipeline_mode_registry::is_published() ||
              (phy_pipeline_mode_registry::get() == phy_pipeline_mode::cpu)) {
            // No Metal transform in this run, or a run that never claimed the offloaded pipeline (a
            // unit test or a tool exercises the engine directly): nothing to require of it.
            return std::nullopt;
          }
-         // A handful of transforms of the same engine belong to other paths (the engine is shared);
-         // none at all means the input is still being staged on the host for the whole run.
-         return radio * 100 >= transforms * 99;
+         // Stated in terms of the COPIES, because that is what the contract claims and what the engine
+         // counts where the decision is made. The reverse arm lives in
+         // dft_processor_metal_unit_test.cpp: an input whose zero-copy wrap is refused (a pointer Metal
+         // will not take without a copy) has to turn this red.
+         return staged == 0;
        }});
 }
 
