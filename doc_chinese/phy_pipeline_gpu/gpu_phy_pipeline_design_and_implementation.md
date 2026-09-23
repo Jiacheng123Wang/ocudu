@@ -9448,6 +9448,79 @@ ctest --test-dir build -R "metal|ul_pipeline_probe|puxch|pusch|lower_phy|du_low|
 那是一次**小设计**，不是一次打点），因为"下行有没有同类的尾巴"今天**连读数都没有**；
 穿越记账**推迟到下行真的有设备侧工作之后**（否则就是给空集记账）。
 
+#### 5.9.118 ★★★ A1-2 归属腿的**预登记**（跑腿之前写死）：三计数 + **第三条分支（另一个引擎实例）** + 速率判据
+
+**① 先纠一处量纲 —— 纯离线，用已有两条 n78 腿就能查**
+
+§5.9.111 ② 把 n78 上"普通路由"的变换读成"**11346 个槽的变换**"（`158845 ≈ 11346 × 14`）。
+这个读法**在跑腿之前就能判为可疑**，两条独立检查：
+
+| 检查 | s64b（`20:55` 那条 158845）| s67（`22:00` 那条 111361）|
+|---|---|---|
+| 是否为 **14** 的整数倍 | `158845 = 14×11346 + 1` | `111361 = 14×7954 + 3` ⇒ **不是** |
+| 是否为 **12** 的整数倍 **+1** | `158845 = 12×13237 + 1` | `111361 = 12×9280 + 1` ⇒ **是，两条都余 1** |
+| **12×N 换算成时间 vs 腿长** | 13237×10 ms = **132.4 s**（腿长 134.6 s，98%）| 9280×10 ms = **92.8 s**（腿长 96.8 s，96%）|
+| 14×N 换算成时间（槽 = 0.5 ms）| 11346×0.5 ms = **5.7 s**（腿长的 4%）| 7954×0.5 ms = **4.0 s**（腿长的 4%）|
+
+⇒ 普通路由的总体**长得像"每 10 ms 12 个变换"**，而不是"每槽 14 个变换"：一旦按 14 读，它只覆盖腿长的 4%，
+而普通路由在整条腿上都在发生（`commits=transforms=waits` 全程递增）。**"11346 个槽"很可能是把 PUSCH 的
+14 符号/槽形状套到了另一个总体上**（§6 纪律 2：统计量/单位选错，守卫等于没有）。
+
+**② 那个"12 与 10 ms"从哪来（n78 的 PRACH 配置 = 腿日志里的配置转储 + 表）**
+
+* n78 腿日志的 `rach-ConfigCommon`：**`prach-ConfigurationIndex: 159`**；
+* `prach_configuration_get_fr1_unpaired(159)`（`lib/ran/prach/prach_configuration.cpp`，TS38.211 表 6.3.3.2-3）
+  = **`{format B4, x=1, y={0}, slots={9}, starting_symbol=0, nof_prach_slots=1, nof_occasions=1, duration=12}`**
+  ⇒ **每 1 个无线帧（10 ms）一次 occasion**；
+* `format B4 → nof_symbols = 12`（`lib/ran/prach/prach_preamble_information.cpp:70-73`），而 PRACH 解调器
+  **每个符号跑一次 `dft.run()`**（`ofdm_prach_demodulator_impl.cpp:159-166`）⇒ **每次 occasion 12 个变换**
+  ⇒ **1200 变换/s**，正好是上表那个"12×N / 10 ms"。
+
+**③ 第三条分支：普通路由的总体是 **PRACH 搜索**（**另一个引擎实例**），不是 PUSCH 的槽**
+
+§5.9.111 ③ 登记了两条分支（"没人告诉槽" / "block 开着没起作用"）。本节的离线读码发现**第三条，而且它不是缺陷**：
+
+| 事实 | 位置 |
+|---|---|
+| PRACH 解调器的 DFT 出自**同一个 metal 工厂**（FR1 每个 RA SCS 建一个）| `modulation_factories.cpp:172-189`（`rx_dft_factory` 在 `lower_phy_factory.cpp:73` 传进来）|
+| 它**只**调 `dft.run()`（= 独占命令缓冲 + 一次 wait，普通路由）| `ofdm_prach_demodulator_impl.cpp:166` |
+| 它**从不**被 `set_lane_slot` 告知槽（唯一生产调用点是 puxch）| `puxch_processor_impl.cpp:154` |
+| ⇒ 它的每个变换**必然**落进 `plain_without_block` **且**落进 `plain_without_lane_slot` | `ocudu_dft_metal_engine.mm:155-166` |
+| n78 RA SCS = `scs_common` = 30 kHz（短前导）⇒ DFT size = 23.04e6/30000 = **768 ≤ max_size 4096** ⇒ **metal** | `ran_cell_config_helper.cpp:210-217`、`ocudu_dft_metal_engine.h:35` |
+| n1（FDD）index **16**（FR1 **paired** 表）= **long format 0**（RA SCS 1.25 kHz）⇒ size = 7.68e6/1250 = **6144 > 4096** ⇒ 工厂**按尺寸回退 CPU** ⇒ **n1 上金属侧 0 个 PRACH 变换** | `prach_configuration.cpp`（paired 表）、`dft_processor_metal.cpp:10-24`、`generic_functions_factories.cpp:133-144` |
+| 那条**恒为 1** 的余数 = **进程级预热**（第一个引擎 init 时跑一次 `run(...,1)`）| `ocudu_dft_metal_engine.mm:1013-1021` |
+
+⇒ 这个分支**解释了全部三个已存在的读数**：n1 三条腿"普通路由 = 1"（PRACH 回退 CPU ⇒ 只剩预热那 1）、
+n78 两条腿"= 12×N+1"（PRACH 1200/s ⇒ 那 1 就是预热）。**它同时预言了本次腿的三个计数**（下面 ④）。
+
+**④ 预登记判据（腿跑完机械求值；读不出按红算）**
+
+| # | 判据 | 依据 / 期望 |
+|---|---|---|
+| **C1** | **恒等式**：`plain_with_block + plain_without_block == 普通路由`（契约行里的"the plain route N"）| 两条分支在 `submit_at` 里互斥且穷尽（`ocudu_dft_metal_engine.mm:1494-1504`）；不等 ⇒ **仪表错**，停 |
+| **C2** | `plain_without_lane_slot ≤ plain_without_block` | 它是后者的子集（`mm:155-166`）|
+| **C3** | `plain_without_lane_slot / plain_without_block ≥ 0.999` **且** `plain_with_block == 0` | **本节的预言**：普通路由几乎全是"另一个从未被告知槽的实例" |
+| **C4** | 速率：`普通路由 ≈ 12 × round(腿长/10 ms) + 1`（±1 occasion）| n78 PRACH = 1 occasion/帧 × 12 符号（②）|
+| **C5** | 腿仍然有效：契约 8/8、`stale=0`、crossings `0.00+0.00/跳`、`leg_gate.sh` 的 9 条 | 与本问题无关，但腿无效则一切作废 |
+
+**⑤ 腿配方**（与 s67 同几何，唯一变量是这个仪表）
+
+```bash
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s69-a12-n78
+# 手机：持续上传 ≥ 60 s；停：Ctrl-C 一次，等收尾块
+grep -E "dft radio inputs|\[metal_stats\] dft commits" \
+  doc_chinese/phy_pipeline_gpu/wip/logs/gnb_gpu_s69-a12-n78_*.log.stderr
+```
+
+**⑥ 结果的含义（**先写死**，免得事后挑解释）**
+
+| 读到的形状 | 裁决 | 下一步 |
+|---|---|---|
+| **C3 成立**（unblocked 占多数 **且** 几乎全无 lane slot）| 普通路由 = **PRACH 搜索 + 1 次预热**；§5.9.111 的"11346 个槽"是**量纲错**，A1-2 的"归属"是**另一个引擎实例，按设计如此** | A1-2 **关闭**（不是缺陷）；把"PRACH 实例的变换永远走普通路由"写成**已知且合法**的一行注释/契约注脚 |
+| **`plain_without_lane_slot ≈ 0`** 而 unblocked 占多数 | 提交来自**被告知过槽的实例**（puxch）却没加入 block ⇒ §5.9.111 ③ **第二分支**（block 没起作用）| 修 block/commit 侧；本节 ③ 的预言被**证伪**，须回写更正 |
+| `plain_with_block` 占多数 | 普通路由**确实在合批**（与 s64b/s67 的 `commits=transforms` 矛盾）⇒ 那些数的读法另有问题 | 回到 s64b/s67 的 `commits/transforms/waits` 定义 |
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，
