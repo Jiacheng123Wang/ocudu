@@ -9313,6 +9313,33 @@ cu/du/fapi/gtpu/hal/lib/mac/ngap/nrppa/ntn/ofh/pdcp/phy/radio/rlc/rohc/rrc/sdap/
 
 ⚠ 注意：**这两条都不再是 LA 环路的问题**，而是**n1 小区的上行射频环境**问题。
 
+#### 5.9.111 ★★ A1-2 的归属**还没落地**（更正 §5.9.99 ① 的机制说法）：需要一个小仪表，而不是继续推断
+
+**① 更正**：§5.9.99 ① 写"n78 上那些独立提交来自**没有 hop 的 UL 槽**（PRACH 槽）"。**这条不成立**：
+**PRACH 链有自己的解调器**（`prach_processor_worker.h`：`std::unique_ptr<ofdm_prach_demodulator>`），
+它**从不碰 rx DFT 引擎**；而 rx DFT 引擎**归 puxch 链所有**（`puxch_processor_impl` 持有 `ofdm_symbol_demodulator`，
+全生产路径**唯一**的 `set_lane_slot` 调用在 `puxch_processor_impl.cpp:154`，就在 `process_symbol` 的"槽变了"分支里，
+每换一个槽都会调用）。⇒ "PRACH 走了另一条路因此逐变换提交"**解释不通**。
+
+**② 站得住的事实（数据 + 代码）**
+
+| 事实 | 来源 |
+|---|---|
+| n78：**11346 个槽的变换**（158845 = 11346×14）走普通提交路由（`commits=transforms=waits`）| s64b 日志 |
+| n78：**21547 个槽**走了槽栅格写/交棒路由（`radio_inputs=301658=21547×14`，`handed=21547 taken=7458 evicted=21291`）| 同上 |
+| n1 忙腿：普通提交路由只有 **1 个变换** | s62/s63 日志 |
+| rx DFT 引擎由 puxch 链持有；`set_lane_slot` 每换槽调用一次 | `puxch_processor_impl.cpp:148-160` |
+| block 累积在 `set_lane_slot()` 里打开，且受 `block_batching_enabled()` 门控（`OCUDU_DFT_OPEN_BLOCK=0` 或 `OCUDU_UL_RX_SYMBOLS!=0` 会关掉）| `ofdm_demodulator_impl.h:138-161` |
+
+⇒ **仍未知**：那 11346 个槽的变换**是谁提交的**（哪条载波/哪种槽；是"没有 lane slot"还是"有 lane slot 但 block 没开"）。
+**继续推断会重犯今天已经犯过三次的错（先比较、后读定义）**，所以本节的收口方式是**加一个仪表**，而不是再猜。
+
+**③ 建议的仪表（小、单变量）**：在引擎里把普通路由的变换按"**提交时是否有一个打开的 block / 是否已被告知 lane slot**"再分一次：
+`transforms_plain_unblocked` vs `transforms_plain_blocked`（外加 `lane_slot_unset` 计数）。
+一次 n78 腿即可判定：**unblocked 占多数 ⇒ 确实是"没人告诉槽"**（那就去修调用侧）；
+**blocked 占多数 ⇒ block 开着却没起作用**（那就去修 block/commit 侧）。
+两个结果的修法完全不同，而这个计数器把它们一次分开。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，
