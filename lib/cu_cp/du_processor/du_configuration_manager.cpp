@@ -353,13 +353,10 @@ void du_configuration_manager::handle_gnb_cu_configuration_update(const f1ap_gnb
         if (std::find(it->served_plmns.begin(), it->served_plmns.end(), updated_plmn) == it->served_plmns.end()) {
           it->served_plmns.push_back(updated_plmn);
         }
-        // If it is in the deactivated PLMN list, remove it from there.
-        if (std::find(it->deactivated_plmns.begin(), it->deactivated_plmns.end(), updated_plmn) ==
-            it->served_plmns.end()) {
-          it->deactivated_plmns.erase(
-              std::remove(it->deactivated_plmns.begin(), it->deactivated_plmns.end(), updated_plmn),
-              it->deactivated_plmns.end());
-        }
+        // The cell serves the PLMN again, so it is no longer deactivated.
+        it->deactivated_plmns.erase(
+            std::remove(it->deactivated_plmns.begin(), it->deactivated_plmns.end(), updated_plmn),
+            it->deactivated_plmns.end());
       }
 
       // If a currently served PLMN is not in the update, add the PLMN to the deactivated.
