@@ -91,8 +91,20 @@ for p in paths:
     r["res_med"]    = fnum(etxt, r"\[ul_gpu_lane\] residency .*?median=([0-9.]+)us")
     r["res_p95"]    = fnum(etxt, r"\[ul_gpu_lane\] residency .*?p95=([0-9.]+)us")
     r["res_p99"]    = fnum(etxt, r"\[ul_gpu_lane\] residency .*?p99=([0-9.]+)us")
+    r["res_mean"]   = fnum(etxt, r"\[ul_gpu_lane\] residency samples=\d+ mean=([0-9.]+)us")
     r["lane_per"]   = fnum(etxt, r"\[ul_gpu_lane\] period .*?median=([0-9.]+)us")
-    r["headroom"]   = (100.0 * (1 - r["res_med"] / slot_us)) if r["res_med"] else None
+    r["lane_per_min"] = fnum(etxt, r"\[ul_gpu_lane\] period samples=\d+ mean=[0-9.]+us median=[0-9.]+us min=([0-9.]+)us")
+    # HEADROOM IS A RATE, NOT A FRACTION OF A SLOT. Dividing one hop's residency by the nominal slot
+    # period reads 44.8% on the 1 ms n1 cell (where a hop arrives about once a slot) and -167% on the
+    # 20 MHz TDD n78 cell, where the uplink duty is 2.8% and a hop arrives every ~18 ms - the same
+    # lane, the same code, a number that means nothing. What a reader needs is: how many hops per
+    # second can this lane serve, and how many was it asked for.
+    n_lanes         = int(r["lanes"]) if r["lanes"] else None
+    r["rate_cap"]   = (1e6 / r["res_mean"]) if r["res_mean"] else None   # hops/s the lane can serve
+    r["rate_act"]   = (n_lanes / r["dur"]) if (n_lanes and r["dur"]) else None
+    r["occ"]        = (100.0 * (n_lanes * r["res_mean"] / (r["dur"] * 1e6))) if (n_lanes and r["res_mean"] and r["dur"]) else None
+    r["headroom"]   = (100.0 * (1 - r["occ"] / 100.0)) if r["occ"] is not None else None
+    r["burst"]      = (100.0 * r["res_med"] / r["lane_per"]) if (r["res_med"] and r["lane_per"]) else None
 
     r["gpu_med"]    = fnum(etxt, r"\[ul_gpu_pipeline\] samples=\d+ mean=[0-9.]+us median=([0-9.]+)us")
     r["gpu_p95"]    = fnum(etxt, r"\[ul_gpu_pipeline\] samples=\d+ mean=[0-9.]+us median=[0-9.]+us min=[0-9.]+us max=[0-9.]+us p95=([0-9.]+)us")
@@ -125,9 +137,26 @@ for r in rows:
           f"merged_hop={show(r['merged_hop'], '{:.1f}', 'us')}/lane")
     print(f"  residency med/p95/p99: {show(r['res_med'], '{:.1f}', 'us')} / "
           f"{show(r['res_p95'], '{:.1f}', 'us')} / {show(r['res_p99'], '{:.1f}', 'us')}")
-    print(f"  lane period median   : {show(r['lane_per'], '{:.1f}', 'us')}   "
-          f"(assumed slot {slot_us:.0f} us)")
-    print(f"  ==> 余量 = 1 - residency_median/slot : {show(r['headroom'], '{:.1f}', '%')}")
+    print(f"  lane period med / min: {show(r['lane_per'], '{:.1f}', 'us')} / {show(r['lane_per_min'], '{:.1f}', 'us')}"
+          f"   (slot {slot_us:.0f} us: a hop every {show((r['lane_per'] or 0)/slot_us, '{:.1f}', ' slots')})")
+    print(f"  ==> lane occupancy = lanes x mean residency / wall : {show(r['occ'], '{:.1f}', '%')}"
+          f"  -> 余量 {show(r['headroom'], '{:.1f}', '%')}")
+    print(f"      rate: can serve {show(r['rate_cap'], '{:.0f}', ' hops/s')}, asked for "
+          f"{show(r['rate_act'], '{:.1f}', ' hops/s')}")
+    print(f"      burst: residency median / period median = {show(r['burst'], '{:.1f}', '%')}"
+          f"   (100% means one hop fills the gap to the next)")
+    # The record's original reading (5.9.92: 478.8 -> 52%, 618.0 -> 38%, 552.0 -> 44.8%) divides one
+    # hop's residency by the SLOT period, which is the right question only when hops arrive about once
+    # per slot. Printed with that condition stated, so the old number stays comparable where it was
+    # meaningful and is not silently transplanted to a cell where it is not.
+    if r["res_med"] and r["lane_per"]:
+        sph = r["lane_per"] / slot_us
+        if 0.75 <= sph <= 1.5:
+            print(f"      within-slot (5.9.92 form): residency median / slot = "
+                  f"{100.0 * r['res_med'] / slot_us:.1f}%  -> 余量 {100.0 * (1 - r['res_med'] / slot_us):.1f}%")
+        else:
+            print(f"      within-slot (5.9.92 form): n/a - a hop arrives every {sph:.1f} slots here, "
+                  f"so residency/slot answers nothing")
     print("-- LATENCY / COST")
     print(f"  [ul_gpu_pipeline]    : median {show(r['gpu_med'], '{:.1f}', 'us')}   p95 {show(r['gpu_p95'], '{:.1f}', 'us')}")
     print(f"  [ul_pipeline]        : median {show(r['ul_pipe_med'], '{:.1f}', 'us')}   stale={r['stale']}")
@@ -149,7 +178,8 @@ if len(rows) == 2:
             s += f"   (x{y / x:.2f})"
         return s
     for k, f in (("ul_mbps", "{:.2f}"), ("ul_duty", "{:.1f}"), ("ul_grants", "{:.0f}"),
-                 ("ul_med", "{:.0f}"), ("res_med", "{:.1f}"), ("headroom", "{:.1f}"),
+                 ("ul_med", "{:.0f}"), ("res_mean", "{:.1f}"), ("occ", "{:.1f}"), ("headroom", "{:.1f}"),
+                 ("rate_act", "{:.1f}"), ("burst", "{:.1f}"),
                  ("ch_wt", "{:.1f}"), ("merged_hop", "{:.1f}"), ("gpu_med", "{:.1f}"),
                  ("defer_med", "{:.1f}"), ("ce_total", "{:.1f}")):
         print(pair(k, f))
