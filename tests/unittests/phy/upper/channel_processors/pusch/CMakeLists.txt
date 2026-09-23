@@ -46,3 +46,8 @@ if(ENABLE_METAL_EQUALIZER AND ENABLE_METAL_DEMODULATION)
             ocudu_channel_modulation_metal)
 endif()
 add_test(pusch_demodulator_deferred_chain_test pusch_demodulator_deferred_chain_test)
+# The contract arm needs a process whose device-estimate counter is still zero (the verdict it has to move
+# is `device > 0`), so it gets its own ctest entry - its own process. The case SKIPS itself, with that
+# reason, when it is run inside the unfiltered binary (design document 5.9.112).
+add_test(pusch_demodulator_ce_contract_arm pusch_demodulator_deferred_chain_test
+         --gtest_filter=*the_device_estimate_contract_arms*)

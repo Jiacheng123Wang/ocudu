@@ -22,6 +22,8 @@
 #include "ocudu/phy/upper/channel_modulation/channel_modulation_factories.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_codeword_buffer.h"
 #include "ocudu/phy/upper/channel_processors/pusch/pusch_demodulator_notifier.h"
+#include "ocudu/phy/phy_pipeline_contract.h"
+#include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/phy/upper/equalization/channel_equalizer.h"
 #include "ocudu/phy/upper/equalization/equalization_factories.h"
 // The Metal back ends only exist in an Apple Silicon build (their targets are gated by the options
@@ -43,6 +45,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <thread>
 #include <atomic>
 #include <gtest/gtest.h>
@@ -935,6 +938,104 @@ private:
 } // namespace
 
 #if defined(OCUDU_HAS_METAL_PUSCH_CHAIN)
+/// The "ce device estimates" contract, BOTH arms.
+///
+/// The check claims the offloaded pipeline estimates on the DEVICE, and the failure it was written for is
+/// S-7f-6a: a run whose device path has gone missing while the host silently covered for it. That is
+/// exactly what a demodulator wired to the GENERIC (host) equalizer does - it exposes no device channel
+/// estimate view, so every symbol is taken from the host copy - and this case drives that deliberately,
+/// with the gpu mode published, and requires the check to go RED. Until this case existed the criterion
+/// was only ever read on legs that passed it (see design document 5.9.102, pass 3).
+///
+/// The CONTROL runs after the arm, in the same case: the same demodulation with the device view available,
+/// which must satisfy the claim. The verdict is `device > 0`, so the ARM is only meaningful while that
+/// counter is still zero - which is why this case is registered as its own ctest entry (see CMakeLists.txt)
+/// and why it SKIPS, loudly, when it is run inside a process where an earlier case already produced device
+/// estimates.
+///
+/// \note Publishing the mode here cannot change what this binary runs: the only FUNCTIONAL reader of the
+///       registry is lower_phy_factory.cpp:111, and this test builds no lower PHY. Every other reader is a
+///       probe (the contract checks themselves).
+TEST_F(pusch_demodulator_deferred_chain_test, the_device_estimate_contract_arms)
+{
+  phy_pipeline_mode_registry::set(phy_pipeline_mode::gpu);
+
+  const phy_pipeline_check* ce_check = nullptr;
+  for (const phy_pipeline_check& check : phy_pipeline_checks()) {
+    if (std::strcmp(check.name, "ce device estimates") == 0) {
+      ce_check = &check;
+    }
+  }
+  ASSERT_NE(ce_check, nullptr) << "the 'ce device estimates' check is not registered";
+
+  const unsigned                     nof_ports   = 2;
+  const unsigned                     nof_layers  = 1;
+  const unsigned                     nof_symbols = 14;
+  const pusch_demodulator::configuration config =
+      make_config(modulation_scheme::QPSK, nof_layers, nof_ports, nof_symbols, 2, false);
+
+  // One demodulation of the same grant, with the fake estimator's DEVICE VIEW switched on or off. The view
+  // is what the demodulator looks for (est_results::get_device_ch_estimates): with it, the claim's device
+  // branch is taken; without it, the host copy is. That is the single variable this case needs, and it
+  // keeps both arms on the same back end, so nothing but the claim itself can differ.
+  auto run = [&](bool device_estimates) {
+    const unsigned     nof_re_per_symbol = max_nof_prb * NOF_SUBCARRIERS_PER_RB;
+    grid_reader_double grid(nof_ports, MAX_NSYMB_PER_SLOT, nof_re_per_symbol);
+    est_results_double est(nof_ports, nof_layers, nof_re_per_symbol, 0.02F);
+    if (device_estimates) {
+      est.enable_device_view(config);
+    }
+    recording_codeword_buffer buffer(2048);
+    notifier_double           notifier;
+    std::unique_ptr<pusch_demodulator> demodulator = make_serial_demodulator();
+    demodulator->demodulate(buffer, notifier, grid, est, config);
+  };
+
+  // Evaluates the check and captures the evidence it prints (the same line the operator reads), so the case
+  // can tell a clean process from one whose counters an earlier case has already moved.
+  auto evaluate = [&]() -> std::pair<std::optional<bool>, std::string> {
+    FILE* capture = std::tmpfile();
+    EXPECT_NE(capture, nullptr);
+    std::fflush(stderr);
+    const int saved = dup(fileno(stderr));
+    EXPECT_NE(saved, -1);
+    dup2(fileno(capture), fileno(stderr));
+    std::optional<bool> verdict = ce_check->evaluate();
+    std::fflush(stderr);
+    dup2(saved, fileno(stderr));
+    close(saved);
+    std::rewind(capture);
+    std::string text;
+    char        buf[256];
+    while (std::fgets(buf, sizeof(buf), capture) != nullptr) {
+      text += buf;
+    }
+    std::fclose(capture);
+    if (capture == nullptr) {
+      verdict = std::nullopt;
+    }
+    return {verdict, text};
+  };
+
+  // ARM: no device view exists, so `device` stays untouched while `host` counts the symbol - the claim
+  // broken, which the check has to report. Skipped, with the reason, in a process that already has device
+  // estimates on the clock: then the verdict could not move no matter what this run does.
+  run(/*device_estimates=*/false);
+  auto [arm, arm_evidence] = evaluate();
+  ASSERT_TRUE(arm.has_value()) << "the check answered 'not applicable' with host estimates on the clock";
+  if (arm_evidence.find("0 device") == std::string::npos) {
+    GTEST_SKIP() << "an earlier case in this binary already produced device estimates (" << arm_evidence
+                 << "): run this case through its own ctest entry for the arm to mean anything";
+  }
+  EXPECT_FALSE(*arm) << "a run with NO device channel estimate must break the gpu-mode claim: " << arm_evidence;
+
+  // CONTROL: the same demodulation with the device view available must satisfy the claim it is judged by.
+  run(/*device_estimates=*/true);
+  auto [control, control_evidence] = evaluate();
+  ASSERT_TRUE(control.has_value()) << control_evidence;
+  EXPECT_TRUE(*control) << "the device path must satisfy the claim it is judged by: " << control_evidence;
+}
+
 TEST_F(pusch_demodulator_deferred_chain_test, metal_back_ends_match_the_cpu_chain)
 {
   // Exact grant shape of the over-the-air failure: 17 PRB starting at PRB 4 of a 25 PRB cell,
