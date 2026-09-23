@@ -69,7 +69,7 @@ cell_cfg:
 
 log:
   filename: /tmp/gnb.log
-  all_level: debug
+  all_level: info
 
 pcap:
   mac_enable: false

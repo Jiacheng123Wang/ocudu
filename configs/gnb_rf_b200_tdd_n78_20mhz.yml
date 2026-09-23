@@ -9,9 +9,9 @@
 
 cu_cp:
   amf:
-    addrs: 192.168.100.127
+    addrs: 192.168.64.3
     port: 38412
-    bind_addrs: 192.168.100.125
+    bind_addrs: 192.168.64.1
     supported_tracking_areas:
       - tac: 7
         plmn_list:
@@ -25,7 +25,7 @@ ru_sdr:
   srate: 23.04
   otw_format: sc12
   tx_gain: 80
-  rx_gain: 40
+  rx_gain: 70
 
 cell_cfg:
 #  dl_arfcn: 632628         # 20M BW, onePlus8T only
