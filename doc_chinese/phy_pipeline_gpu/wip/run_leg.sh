@@ -102,9 +102,17 @@ done
 # Pre-flight: the gNB's own parser is the only authority on which options exist. A leg that dies on
 # "The following argument was not expected: --log.sched_level=debug" costs an operator a phone test and
 # reports nothing (measured 2026-09-23: that option does not exist in this build - the scheduler logger
-# has no per-logger level, see gnb.cpp:133). So the exact argv is handed to the binary with --dryrun,
-# which validates the configuration and exits without touching the radio. Refused here rather than
-# discovered on air.
+# has no per-logger level, see gnb.cpp:133). So the exact argv is handed to the binary with --dryrun and
+# refused here rather than discovered on air.
+#
+# WHAT --dryrun DOES, exactly (verified 2026-09-23, milestone audit): gnb.cpp returns at :281-283
+# IMMEDIATELY after CLI11_PARSE, i.e. BEFORE validate_appconfig() and every on_configuration_validation()
+# at :291-297. So it checks THE PARSER, not the configuration: an unknown option fails the leg here, but
+# a configuration the validators would refuse (e.g. `--phy_pipeline cpu --expert_phy.pusch_dft_type
+# metal`, whose rule lives in du_low_phy_pipeline.h:167) passes this pre-flight. That case is still not
+# an on-air surprise - the validators run at gnb.cpp:291, before the radio is opened - it costs a start,
+# not a phone test. Do not read "the dry run passed" as "the configuration is valid"; the arity of this
+# check is the parser's.
 if [ ${#CLI_ARGS[@]} -ne 0 ]; then
   dryrun_log=$(mktemp)
   if ! "$ROOT/build/apps/gnb/gnb" -c "$CONFIG" "${CLI_ARGS[@]}" "${MODE_ARGS[@]+"${MODE_ARGS[@]}"}" \

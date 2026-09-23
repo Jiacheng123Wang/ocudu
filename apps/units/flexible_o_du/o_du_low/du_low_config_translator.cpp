@@ -63,8 +63,12 @@ static void log_phy_pipeline_config(const du_low_unit_expert_upper_phy_config& c
   // exit (see phy_pipeline_contract.h) and enforced before the run starts: the lower PHY factory refuses
   // the gpu mode with a receive buffer that cannot hold a whole slot, because only then is no OFDM
   // symbol split between two receive blocks (see lower_phy_baseband_processor::ul_process). The startup
-  // warning that used to stand here is gone with the copy it warned about; the mode itself is still
-  // refused by the validator, for a different reason (the fused lane is not implemented yet).
+  // warning that used to stand here is gone with the copy it warned about.
+  //
+  // The mode is NOT refused any more either (corrected 2026-09-23, milestone audit): this comment used to
+  // end with "the mode itself is still refused by the validator ... (the fused lane is not implemented
+  // yet)", which stopped being true when that placeholder refusal was deleted from
+  // du_low_config_validator.cpp - the air legs have run mode=gpu with `contract MET (8 of 8)` since.
   if ((effective.mode == phy_pipeline_mode::cpu_gpu) && is_cpu_phy_backend(effective.dft) &&
       is_cpu_phy_backend(effective.ch_est) && is_cpu_phy_backend(effective.equalizer) &&
       is_cpu_phy_backend(effective.ldpc)) {

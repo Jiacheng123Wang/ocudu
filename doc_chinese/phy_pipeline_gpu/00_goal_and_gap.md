@@ -136,6 +136,11 @@ if (config.phy_pipeline == "gpu") {
 }
 ```
 
+> ⚠ **2026-09-23 里程碑审计更正：上面这段引用的是**当时的**代码，占位拒绝**已经删除**。**
+> 今天 `du_low_config_validator.cpp` 的 `gpu` 分支只保留第一层（后端可用性检查），并在注释里写明
+> "That refusal is gone"；空口腿已在 `mode=gpu` 下跑出 `contract MET (8 of 8)`（s47/s62/s63/s64b/s65/s67/s69）。
+> **本文档 §2、§5 的其余内容描述的是"当时"的状态，读它们时请对照 §5.9.54/§5.9.119 的当前读数。**
+
 - **第一层今天会过**：`check_phy_pipeline_lane_available()` 只要求 Metal 的 DFT / ch_est / equalizer / demapper
   链进来，而空口腿正在用它们。
 - **第二层是纯占位**，注释写着 *"The lane itself lands in a later step of the GPU pipeline work"*。
