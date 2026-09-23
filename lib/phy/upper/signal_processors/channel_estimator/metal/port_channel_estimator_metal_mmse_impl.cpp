@@ -4089,6 +4089,31 @@ bool port_channel_estimator_metal_mmse_impl::check_edge_slots(
   std::fprintf(stderr,
                "[edge_check] checked A=%u (%u differ) R=%u (%u differ) | worst |dev-host| = %.9g | %s\n",
                nof_a, bad_a, nof_r, bad_r, worst, ((bad_a == 0) && (bad_r == 0)) ? "IDENTICAL" : "DIFFERENT");
+  // WHAT THE SLOT ACTUALLY HOLDS, and what the host's own inverse looks like, next to each other.
+  // These two numbers separate the last two mechanisms: a hop whose A is genuinely ill-conditioned
+  // has a HUGE host inverse too (and then K1, which has no pivot floor, is the thing that diverges),
+  // while a slot holding the inverse of a half-written A is huge where the host's inverse is ordinary.
+  {
+    double max_dev = 0.0, max_host = 0.0;
+    for (unsigned sys = 0; sys != nof_systems; ++sys) {
+      const float* a_slot = gpu_a + static_cast<std::size_t>(sys_offset + sys) * a_stride * a_stride;
+      for (unsigned r = 0; r != a_stride; ++r) {
+        for (unsigned c = 0; c != a_stride; ++c) {
+          max_dev = std::max(max_dev, std::fabs(static_cast<double>(a_slot[static_cast<std::size_t>(r) * a_stride + c])));
+        }
+      }
+      for (unsigned r = 0; r != L_e; ++r) {
+        for (unsigned c = 0; c != L_e; ++c) {
+          max_host = std::max(max_host, std::fabs(static_cast<double>(a_host[static_cast<std::size_t>(r) * L_e + c])));
+        }
+      }
+    }
+    std::fprintf(stderr,
+                 "[edge_check] magnitudes: max|slot| = %.6g, max|host A^-1| = %.6g | ratio = %.4g\n",
+                 max_dev,
+                 max_host,
+                 (max_host > 0.0) ? max_dev / max_host : 0.0);
+  }
   // W = R_hp . A^-1, recomputed on the host from the two host matrices the loops above already have.
   // This is the split the A/R comparison cannot make: A^-1 and R_hp can BOTH be right in the slots
   // while the weights the apply kernel reads are wrong, and the channel estimate is h = W . y - so
@@ -4362,6 +4387,18 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
       // The slots WILL hold A and R_hp: the device writes them in this batch's command buffer, so
       // the host must not stage them (it would race the device).
       device_built = true;
+      // EXPERIMENT (OCUDU_CE_CORR_FENCED=1): the same build in a command buffer of its OWN, ordered
+      // against this batch by the shared back-end fence instead of by a host wait. It is the one form
+      // that is both correct and cheap: the prefix is correct-by-luck (the barrier does not order the
+      // prefix's writes against K1's read, measured), and the standalone form buys the ordering with a
+      // waitUntilCompleted that costs 39.5us of a 223us hop. Falls back to the prefix when the fence
+      // could not be armed.
+      if ((std::getenv("OCUDU_CE_CORR_FENCED") != nullptr) && (engine != nullptr)) {
+        if (engine->build_correlation_fenced(corr_prefix.value(), nof_layers) != 0) {
+          corr_prefix.reset();
+          device_built = true;
+        }
+      }
       // The prefix's slot comparison CANNOT run here - the dispatches have not even been committed -
       // so it is deferred to the hop's completion, which is the mechanism the merged route already
       // uses. It is the only instrument this route has ever had, and this route is where the landmine

@@ -448,6 +448,11 @@ struct mmse_engine_impl {
   /// be reached instead closes it (close_held_buffer(), called from wait_pending_impl() and from the
   /// entries that need their own command buffer).
   id<MTLCommandBuffer>           held_cb       = nil;
+  /// \brief The fence generation build_correlation_fenced() armed and nobody has waited for yet.
+  ///
+  /// Consumed by encode_run() (non-burst), which encodes the wait before its first dispatch. Zero means
+  /// "nothing armed": either no fenced build was asked for or its wait has been encoded.
+  uint64_t                       corr_fence_generation = 0;
 
   /// \name D1 step 2: adopting the receiving chain's block (see set_hop_grid()).
   ///
@@ -926,8 +931,10 @@ static stage_encoder begin_stage(mmse_engine_impl*          e,
   // gate covers this: a non-deferred hop is forced to host_wait by the adapter
   // (set_lane_order(args.deferred ? order : host_wait)), and the replay's hops are not deferred. The
   // air leg is the only judge - the counters to read are "[metal_stats] lane fence signals/waits".
-  if (wait_for_extraction && (e->lane_order == metal::ce_lane_order::event)) {
-    ocudu::metal::shared_queue::backend_stage_wait(s.cb);
+  if (wait_for_extraction &&
+      ((e->lane_order == metal::ce_lane_order::event) || (e->corr_fence_generation != 0))) {
+    (void)ocudu::metal::shared_queue::backend_stage_wait(s.cb);
+    e->corr_fence_generation = 0;
   }
   s.enc = [s.cb computeCommandEncoder];
   return s;
@@ -1146,6 +1153,15 @@ static stage_encoder begin_weights_stage(mmse_engine_impl*           e,
 {
   *adopted = false;
   if ((e->held_cb != nil) && !fuse) {
+    // A correlation build that went into a command buffer of its own (build_correlation_fenced()) is
+    // ordered against this hop here, by the shared back-end fence, instead of by a host wait. It MUST
+    // be encoded before the encoder opens - encodeWaitForEvent: is a command-buffer-level operation and
+    // Metal aborts the process if one is encoded while an encoder is active (measured: Abort trap: 6 on
+    // the first hop that took this path).
+    if (e->corr_fence_generation != 0) {
+      (void)ocudu::metal::shared_queue::backend_stage_wait(e->held_cb);
+      e->corr_fence_generation = 0;
+    }
     id<MTLComputeCommandEncoder> held_enc = [e->held_cb computeCommandEncoder];
     if (held_enc != nil) {
       stage_encoder st;
@@ -2601,6 +2617,49 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
   // build twice (the duplicate call above it).
   return end_stage(e, st, true);
 }
+
+uint64_t mmse_engine::build_correlation_fenced(const corr_stage& c, unsigned nof_systems)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if ((e == nullptr) || (e->device == nil) || (e->queue == nil)) {
+    return 0;
+  }
+  // Its OWN command buffer, opened directly and NOT through begin_stage(): begin_stage() closes a held
+  // extraction buffer and waits for it, and holding that buffer is what makes the hop one submission.
+  // A held extraction is none of this build's business - the correlation is a pure function of the
+  // parameters the host hands over, so it depends on nothing the extraction produces.
+  id<MTLCommandBuffer> cb = [e->queue commandBuffer];
+  if (cb == nil) {
+    return 0;
+  }
+  stage_encoder st;
+  st.cb    = cb;
+  st.enc   = [cb computeCommandEncoder];
+  st.burst = false;
+  if (st.enc == nil) {
+    return 0;
+  }
+  if (!encode_corr(e, st, c, nof_systems)) {
+    [st.enc endEncoding];
+    mmse_stats_corr_build_failure();
+    return 0;
+  }
+  [st.enc endEncoding];
+  mmse_stats_corr_build();
+  // The generation is taken and encoded immediately before the commit, so a wait for it can never hang
+  // (the signaller is already on its way) - the discipline the extraction fence keeps.
+  const uint64_t generation = ocudu::metal::shared_queue::backend_stage_signal(cb);
+  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end);
+  [cb commit];
+  mmse_stats_commit();
+  ocudu::metal::gpu_lane_probe::register_commit(cb, WEIGHTS_STAGE);
+  if (generation == 0) {
+    return 0;
+  }
+  e->corr_fence_generation = generation;
+  return generation;
+}
+
 
 /// Threadgroup geometry of the K1 (block Gauss-Jordan) dispatch, as (column, row) threads.
 ///

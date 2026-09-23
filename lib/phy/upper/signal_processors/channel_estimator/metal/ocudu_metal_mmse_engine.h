@@ -341,6 +341,27 @@ public:
   /// \return True on success; on failure the caller falls back to its own construction.
   bool build_correlation(const corr_stage& c, unsigned nof_systems);
 
+  /// \brief The same build, in a command buffer of its own that is committed WITHOUT waiting, plus the
+  ///        back-end stage fence so the caller's next submission can order itself after it.
+  ///
+  /// This is the third form of one build, and it exists for a measured reason. The prefix form (the
+  /// build riding the weights command buffer, correlation_stage() handed to run_async()) is the cheap
+  /// one - one submission - and it is WRONG on about a quarter of the runs: the memory barrier between
+  /// the prefix and K1 does not make the prefix's writes visible to K1, so K1 occasionally inverts a
+  /// half-written A and the noise variance explodes (design document 5.9.88). The standalone form
+  /// (build_correlation()) is right because it commits AND waits, and the wait is what costs: +39.5us
+  /// on a 223us hop. This form keeps the build in its own command buffer and the ordering, but moves
+  /// the wait off the host: the buffer signals the shared back-end fence at its completion and the
+  /// caller encodes a wait for that generation in its own buffer, so the GPU orders itself and the host
+  /// never blocks.
+  ///
+  /// \note Deliberately NOT built on begin_stage(): that closes (and waits for) an extraction buffer
+  ///       held open for the weights stage, and holding it is what makes the hop one submission. This
+  ///       opens its own command buffer directly, so a held extraction is left alone.
+  /// \return The fence generation to wait for, or 0 when nothing was armed (the caller then falls back
+  ///         to the prefix form).
+  uint64_t build_correlation_fenced(const corr_stage& c, unsigned nof_systems);
+
   /// The estimator's INPUT stage of one hop (K0-a): where the pilots come from and where the
   /// least-squares estimates go. Mirrors mmse_pilots_params in ocudu_mmse_pilots.metal.
   struct pilots_stage {

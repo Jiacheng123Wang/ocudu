@@ -8002,6 +8002,78 @@ K1 内部栅栏 / 下游两处栅栏），**只有"命令缓冲区完成（commi
 **缓冲区内的排序原语已全部试完**（§5.9.88 ④），**只有命令缓冲区完成真的排得住** ——
 而它的代价（+39.5 µs/跳、+17.7%）正是前缀存在的理由，所以默认仍未翻。
 
+#### 5.9.89 ★★★ 两种解释被排除、**fenced 修法落地并实测正确**、以及它的**真实代价**（默认仍不翻，这是产品决定）
+
+**① 最后两条"平行解释"也被排除**
+
+* **不是跨跳重叠**：`wait_pending_impl()`（engine 3648–3680）对上一跳的提交做的是
+  `[cb waitUntilCompleted]`（**真完成**，不是调度），所以下一跳的 staging/前缀不可能与上一跳的 K1 重叠；
+* **不是 encoder 的 dispatch 类型**：全工程只出现 `[cb computeCommandEncoder]`
+  （engine 9 处 + burst 2 处），**没有任何 `computeCommandEncoderWithDispatchType:` / `MTLDispatchTypeConcurrent`**
+  ⇒ 这些 encoder 都是 **serial**，两个 dispatch 不可能重叠执行；
+* **不是对象/绑定不一致**：`encode_run()` 与 `encode_corr()` 对 A 的 wrap **同指针、同长度**
+  （`nof_systems*L*L*4` vs `((n-1)*a_sys + a_extent)*4`，Test 9 上都是 5184 字节）⇒ 同一 MTLBuffer、同一 offset。
+* ⇒ **结论只能停在测量上**：在这台 GPU/驱动上，**同一 encoder 内两条 dispatch 之间的
+  `memoryBarrierWithScope` / `memoryBarrierWithResources` 都不保证生产者对消费者的可见性**，
+  而**命令缓冲区边界保证**。这条"经验定律"本树用 6 种方式量过（§5.9.87 ③ + §5.9.88 ④）。
+
+**② 判据升级为"跳是不是病态"，把最后一支也关掉**
+
+`check_edge_slots()` 现在同时打 **`max|slot|` 与 `max|host A^-1|`**：
+
+| hop | nv | `max\|slot\|` | `max\|host A⁻¹\|` | 比值 |
+|---|---|---|---|---|
+| 1508 | 6.39e-4 | 179.8 | 179.8 | 1 |
+| **1509** | **2.17e+01** | **4.645e+05** | **163.7** | **2838** |
+| 1510 | 6.05e-4 | 177.9 | 177.9 | 1 |
+
+⇒ **这一跳并不病态**（宿主自己的 A⁻¹ 幅值与邻居同量级），**槽里却装着大 2838× 的东西** ——
+"这一跳的 A 本来就奇异、K1 没有主元下限所以发散"这一支被实测关掉；**K1 拿到的 A 是坏的**。
+
+**③ fenced 修法（本轮新增，**默认关**）：`OCUDU_CE_CORR_FENCED=1`**
+
+相关矩阵构建走**自己的命令缓冲区**（直接 `[queue commandBuffer]`，**刻意不走 `begin_stage()`** ——
+后者会关掉并等待为 weights 持有的抽取缓冲区，而"持有"正是本跳只有一次提交的原因），
+在 commit 前 `backend_stage_signal()` 取一个 fence 代次；weights 那条缓冲区在
+**encoder 打开之前** `backend_stage_wait()` 等这个代次。**宿主全程不阻塞。**
+
+* **踩到一个 Metal 断言**：第一版把 wait 编在了 `begin_weights_stage()` **之后**（encoder 已打开），
+  `Abort trap: 6`；`encodeWaitForEvent:` 是**命令缓冲区级**操作，必须在 encoder 开之前 ——
+  这与 `begin_stage()` 里"先编 grid wait / extraction fence，再开 encoder"是同一个模式；
+* **正确性**：`0/30` 失败扫描、0 离群点、**最坏漂移 1.054**（与 `CORR_STANDALONE` 同值）；
+* **并且它通过了 Test 13**（event / host_wait / burst / merged 四种 lane order 全覆盖）——
+  这是它能用在**空口拓扑**（merged 是默认顺序）上的证据。
+
+**④ 代价（同一跳集上的配对测量，只取跑完的运行；`calls=2798` 两边一致）**
+
+| 臂 | `mean total`（µs/跳，多次） | 中位 |
+|---|---|---|
+| 默认（前缀） | 233.7 / 208.6 / 204.2 / 213.1 | **~215** |
+| **`CORR_FENCED=1`** | 275.1 / 273.2 / 266.6 / 278.9 / 276.6 / 272.8 | **~275** |
+| `CORR_STANDALONE=1` | 285.3 / 288.7 / 294.7 / 284.0 / 284.0 | **~285** |
+
+⇒ **贵的是"多一条命令缓冲区"（~50 µs），不是"宿主等待"（只再加 ~10 µs）。**
+这与本树自己的历史读数吻合（§5.9.87 引的引擎注释："a whole submission round trip **~70us measured**,
+which is what made the device build look unprofitable"）。**fence 版本比宿主等待版本便宜 ~10 µs（~3.7%）。**
+
+**⑤ 严重性核实：空口默认路线**就在这条前缀上****
+
+`device_inverts(order)` 的门是 `order <= MAX_DEVICE_INVERT_ORDER(=54)`；而空口默认
+`pusch_channel_estimator_mmse_block_prb = 3`（`du_low_config.h:121`）、E2E 小区用 3 个 DM-RS
+（pos2 + additional position 2）⇒ `L_std = npt × block_prb × comb = 3×3×6 = 54` ⇒ **54 ≤ 54 ⇒ 设备求逆 ⇒ 前缀**。
+**所以这颗雷不在"仅测试"的路径上，它在默认空口路径上。**
+
+**⑥ 本轮的决定：仍然不翻默认 —— 这是一次产品取舍，不是技术未决**
+
+* 现在有**两个实测正确的修法**（`CORR_STANDALONE` 0/95、`CORR_FENCED` 0/30，两者最坏漂移都是 1.054），
+  **门（连续 20 次全绿 + 漂移 ≤1.1）在两者上都已满足**；
+* 但它们的价格是 **CE 跳时间 +28%（~215 → ~275 µs）**，而空口是实时预算内的东西；
+  **"多一条命令缓冲区"这个代价无法用旋转旋钮消掉**（6 种缓冲区内原语都量过）；
+* ⇒ **下一会话第一件事是把这个取舍交给用户/项目决定**：接受 +28% 换正确性，
+  还是先做**别的安排**（例如：把 corr 构建挪到"抽取那条命令缓冲区"里再验证一次——
+  它不新增提交，但边界会退化成 encoder 边界，而 §5.9.88 ④ 已经量到 encoder 边界**不管用**，
+  所以这条只值得一试、不值得期待）。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，
