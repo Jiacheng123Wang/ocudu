@@ -8617,6 +8617,30 @@ bash doc_chinese/phy_pipeline_gpu/wip/ul_load.sh --slot-us=500 s64b-heavywide
 **"读不出硬门"看着像"硬门过了"**，正是要堵的那种静默失败。已修：
 现在 s62/s63 都印 `MET (8 of 8 checks applicable) (mode=gpu)`。
 
+**⑥ ⚠ 而这条腿的契约根本没过 —— 失败项是 `dft radio inputs`（与接入失败**无因果**，但这条腿因此不是管线证据）**
+
+s64 的契约块是 **`contract NOT MET: 1 of 8 applicable checks failed (mode=gpu)`**，其余 7 项全 OK
+（`radio sample continuity: 0 gaps over 85459 blocks`、crossings `0.00+0.00`、`host sample assembly` 全部就地读）。
+失败项：
+
+```
+dft radio inputs: 2352 of 51265 transforms read the radio buffer -> FAILED
+[metal_stats] dft handover handed=168 taken=18 ... fallback=143 late=7 not_found=7 keepalives=2352/2352
+```
+
+判据（`ocudu_dft_metal_engine.mm:214`）是 **`radio*100 >= transforms*99`**，即**要求 ≥99% 的 rx DFT 变换
+直接读射电的 int16 缓冲（零拷贝）**；s64 只有 **4.6%** 走了这条路，其余走了暂存路径。
+对照：**同一个二进制**在 s63（n1，忙腿）是 `392686/392714 ≈ 99.99%` → 8-of-8 ✅。
+
+⇒ 三条结论：
+1. **不是本次修法的回归**（同二进制的 s63 是 8/8；§5.9.94 的 s62 也是 8/8）；
+2. **不是"手机接不上"的原因** —— 同一条腿里上行链解出了 **10 个 Msg3**（§②），前导/增益才是那件事的答案；
+3. **但它让 s64 失去"管线证据"资格**（契约不过的腿不能用来谈管线），而且留下一个**独立、尚未开的问题**：
+   **一个几乎空载的 n78 小区为什么把 95% 的 rx DFT 变换走了暂存路径？**
+   已知它伴随 `fallback=143 / handed=168`（交棒几乎次次落空）与极低的 lane 使用（`device hop=18`），
+   但**"空载"与"暂存"谁是因**这条腿分不出来。要钉死需要一条**专门的腿**：修好增益后让 n78 小区**空载**跑一条，
+   再**带话务**跑一条，看这个比值是否跟着话务走 —— 这条腿另记，**不并入接入问题**。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，
