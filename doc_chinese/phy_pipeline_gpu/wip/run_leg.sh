@@ -215,4 +215,40 @@ done
 rc=$?
 exec 3>&- 4>&-
 wait "$out_tee" "$err_tee"
+
+# ---- did the leg actually produce a REPORT? ----------------------------------------------------
+# Every counter this work is judged by - the [phy_pipeline] contract (which carries the dft
+# radio-inputs line and its "Plain route by why:" instrument), [ul_host], [metal_stats],
+# [ul_gpu_lane] - is printed by the SHUTDOWN path and by nothing else. A process that leaves
+# without it (SIGKILL, SIGHUP from a closed terminal, a kill instead of Ctrl-C) leaves a leg
+# whose files look plausible - a big .log, a .stderr with the startup diagnostics - and whose
+# numbers simply DO NOT EXIST: they live in process memory, and nothing recovers them.
+#
+# The check is worth having because the OTHER way to reach the same-looking files is a RACE, and
+# that is what happened on 2026-09-23 (leg s69-a12-n78): the operator stopped the gNB correctly
+# with Ctrl-C, the shutdown report was still draining to the tees, and a reader who looked at
+# .stderr in that window saw the startup lines and nothing else. The reading was retracted a
+# minute later when the block landed - but the same confusion in the other direction ("the file
+# is there, so the numbers are in it") is exactly how a reportless leg gets read as "all zeros".
+#
+# So say it HERE, while the operator is still sitting in front of the terminal, and exit
+# non-zero: a reportless leg is not a leg, and it must not be read later as "the counters were
+# zero" (§5.9.97: "cannot read" is RED, never absent). The startup tees are already closed, so
+# the message goes to the real stderr.
+if ! grep -q "\[phy_pipeline\] contract" "$LOG.stderr" 2>/dev/null; then
+  echo >&2
+  echo "!! THIS LEG HAS NO REPORT - DO NOT READ IT AS A RESULT !!" >&2
+  echo "   $LOG.stderr carries no '[phy_pipeline] contract' line, so the shutdown path never ran:" >&2
+  echo "   every counter (contract, [metal_stats], [ul_host], [ul_gpu_lane]) is printed there and nowhere else." >&2
+  if [ "$rc" -ne 0 ]; then
+    # A non-zero rc with no report is the other shape: the app refused or failed before its own
+    # shutdown (bad config, radio not found, a validator refusal). Say which one it was.
+    echo "   the gNB exited with rc=$rc BEFORE printing a report (startup/run failure, not a kill)" >&2
+  else
+    echo "   usual cause: the gNB was killed instead of interrupted, or its terminal was closed" >&2
+  fi
+  echo "   Fix: re-run and stop it with ONE Ctrl-C, then WAIT for the report block to finish printing." >&2
+  if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+  exit 3
+fi
 exit "$rc"

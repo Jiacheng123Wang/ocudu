@@ -8768,6 +8768,13 @@ s64 (n78, 空载) dft radio inputs: 2352 of 51265 transforms read the radio buff
 * ⇒ **判定：覆盖缺口，不是意图**（意图是每槽一条）；**但它是一条新工作项**（让没有 hop 的 UL 槽也进
   block/release 路径），本轮只做**如实表述**（见 ②），不顺手改。
 
+> ⚠ **本条作废（2026-09-23 更正，§5.9.119，腿 s69-a12-n78 实测）**：普通路由的总体**不是**"没有 hop 的 UL 槽"，
+> 而是 **PRACH 解调器自己的 Metal DFT 实例**（`modulation_factories.cpp:172-189`，**从不**被 `set_lane_slot`）
+> 加上一次进程级预热：`plain_without_block = plain_without_lane_slot = 209941 = 12×17495+1`（PRACH B4，每 10 ms 一次
+> ×12 符号）。而没有 hop 的那些 UL 槽的变换走的是**交棒/槽栅格写**路由：同一条腿 `radio_inputs = 368200 = handed 26300 × 14`
+> （**全部** 26300 个 UL 槽块，含 `taken=7805` 之外的）。⇒ **没有需要修的覆盖缺口**；`commits=transforms=waits`
+> 的相等是"12×N+1"的巧合，不是"14×槽"。
+
 **② A1-1：判据修正 —— 旧式比的是两个不同口径的计数器**
 
 修正前是 `return radio * 100 >= transforms * 99;`，其中 `radio` = `radio_inputs`（**交棒/槽栅格写**路由），
@@ -9334,6 +9341,11 @@ cu/du/fapi/gtpu/hal/lib/mac/ngap/nrppa/ntn/ofh/pdcp/phy/radio/rlc/rohc/rrc/sdap/
 ⇒ **仍未知**：那 11346 个槽的变换**是谁提交的**（哪条载波/哪种槽；是"没有 lane slot"还是"有 lane slot 但 block 没开"）。
 **继续推断会重犯今天已经犯过三次的错（先比较、后读定义）**，所以本节的收口方式是**加一个仪表**，而不是再猜。
 
+> ✅ **已落地并读出（2026-09-23，§5.9.118 预登记 → §5.9.119 结果，腿 s69-a12-n78）**：仪表按下面的建议建成，
+> 一次腿把归属钉死 —— `plain_without_block = plain_without_lane_slot = 209941`、`plain_with_block = 0`，
+> 且 `209941 = 12×17495+1`（PRACH format B4，每 10 ms 一 occasion、每次 12 符号，隐含周期 **10.00 ms**）。
+> ⇒ 归属 = **PRACH 解调器的另一个引擎实例 + 一次进程预热**；**"11346 个槽 × 14"是量纲错**（§5.9.119 ①）。
+
 **③ 建议的仪表（小、单变量）**：在引擎里把普通路由的变换按"**提交时是否有一个打开的 block / 是否已被告知 lane slot**"再分一次：
 `transforms_plain_unblocked` vs `transforms_plain_blocked`（外加 `lane_slot_unset` 计数）。
 一次 n78 腿即可判定：**unblocked 占多数 ⇒ 确实是"没人告诉槽"**（那就去修调用侧）；
@@ -9537,6 +9549,70 @@ grep -E "dft radio inputs|\[metal_stats\] dft commits" \
 
 ⇒ 两条腿**逐位相等**，且隐含周期正好 10.00 ms。**这正是 ③ 的预言**，剩下的只是让 5.9.113 的三个计数
 （而不是算术）把它分开：普通路由的那些提交**是不是来自一个从未被告知槽的实例**（C3）。
+
+#### 5.9.119 ★★★ A1-2 归属**落地**：普通路由 = **PRACH 解调器的另一个引擎实例 + 一次进程预热**；"11346 个槽"是量纲错，**没有覆盖缺口**
+
+**① 腿与判据（§5.9.118 预登记在前，`8bc70bc007`；腿 s69-a12-n78，二进制 `ec8c3ebdd7`）**
+
+```bash
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s69-a12-n78     # 无任何 OCUDU_* 旋钮
+bash doc_chinese/phy_pipeline_gpu/wip/a12_attribution_gate.sh s69-a12-n78    # 5/5
+```
+
+| 判据 | 读数 | 结果 |
+|---|---|---|
+| **C1** `plain_without_block + plain_with_block == 普通路由` | `209941 + 0 = 209941` | **PASS** |
+| **C2** `plain_without_lane_slot <= plain_without_block` | `209941 <= 209941` | **PASS** |
+| **C3** `plain_with_block == 0` 且比值 ≥ 0.999 | `block=0`，比值 **1.0000** | **PASS** |
+| **C4** `普通路由 == 12×round(T/10ms)+1` | T=174.9 s ⇒ 17495 occasions ⇒ **期望 209941，读到 209941**（隐含周期 **10.00 ms**）| **PASS** |
+| **C5** 腿有效（契约 8/8 mode=gpu、stale=0、crossings 0.00+0.00、0 gaps）| 全部满足 | **PASS** |
+
+**② 归属的判决（一次分开，不再推断）**
+
+* **普通路由 100% 来自"从未被告知过槽"的引擎实例**（`plain_without_lane_slot / plain_without_block = 1.0000`）。
+  puxch 那条实例在**第一次提交之前**就已经被 `set_lane_slot` 告知过槽（`puxch_processor_impl.cpp:143-155`
+  先于 `:208` 的 `submit_symbol`）⇒ **puxch 的变换一个都不在这个桶里**，这一条与流量大小无关，是结构性的；
+* 而被计入普通路由的那个实例，按 §5.9.118 ③ 的读码 = **PRACH 解调器自己的 DFT 处理器**
+  （`modulation_factories.cpp:172-189` 每个 RA SCS 建一个，`ofdm_prach_demodulator_impl.cpp:166` 每符号一次 `dft.run()`，
+  **从不** `set_lane_slot`）；那条**恒为 1** 的余数 = **进程级预热**（`ocudu_dft_metal_engine.mm:1013-1021`）；
+* 速率把身份钉死：`T=174.9 s ⇒ 17495 occasions ⇒ 209941`，**隐含周期 10.00 ms**，正是 n78
+  `prach-ConfigurationIndex: 159` = **format B4，每无线帧一次、每次 12 符号**（§5.9.118 ②）。
+  n1 侧同一条账也闭合：index 16 = long format 0 ⇒ DFT size 6144 > `max_size 4096` ⇒ CPU 回退 ⇒ 普通路由 **恒为 1**（三条 n1 腿）。
+
+**③ 因此被推翻的两条旧说法**
+
+| 旧说法 | 位置 | 现状 |
+|---|---|---|
+| "n78 上 11346 个槽的变换走普通提交路由（158845 = 11346×14）" | §5.9.111 ② | **量纲错**：158845 = **12×13237+1**、111361 = **12×9280+1**、209941 = **12×17495+1**（三条腿都逐位相等）；按 14×槽读只覆盖腿长的 4% |
+| "没有 hop 的 UL 槽只能走逐变换路径 ⇒ 覆盖缺口" | §5.9.99 ① | **作废**：那些槽的变换走的是**交棒/槽栅格写**路由 —— 本腿 `radio_inputs = 368200 = handed 26300 × 14`（**全部** 26300 个 UL 槽块，含 `taken=7805` 之外的 18495 个）|
+| "A1-2 = 车道覆盖缺口，新工作项" | §5.9.99 ① / §5.9.103 | **关闭，无工作项**：普通路由里没有 puxch 的变换，**没有东西要修** |
+
+⇒ 结论一句话：**`commits=transforms=waits` 的相等是"12×N+1"的巧合，不是"每槽 14 个变换逐条提交"。**
+
+**④ 这条腿同时暴露的两个**读数陷阱**（都与被测量无关，但会让人读错）**
+
+1. **契约在收尾时打印两次，第一次是"排泄中"的快照**：同一腿第一次印 `plain route 209930 / Plain route by why: 209930`，
+   最后一次印 **209941**（差 11 = 最后一个 PRACH occasion 尚未跑完的符号）。`[metal_stats]`（两次之间）已经是 209941。
+   ⇒ **读最后一次**（`a12_attribution_gate.sh` 与 `leg_gate.sh` 都取最后一次匹配；手读单行会读到快照）；
+2. **报告落盘与"看文件"之间有窗口**：本次操作者用 Ctrl-C 正常停止，而 `.stderr` 在收尾块落盘前仍是"只有启动诊断"的样子
+   （首次读它时 `.stdout` 还是 0 字节），**一度被读成"这条腿没有报告"**。⇒ `run_leg.sh` 现在在退出前**校验收尾块是否存在**，
+   缺失就大声报错并以非零码退出（"读不出"必须显式，§5.9.97）——**但这条腿本身是干净的**，那次误读是读者抢跑。
+
+**⑤ 腿的效力边界（写明，别让它去证明它证明不了的事）**
+
+`leg_gate.sh` 的 9 条里 **7 条过、2 条有效性判据红**：`UL 0.73 Mbit/s`（阈值 2.0）、`UL grant 占槽 2.2%`（阈值 50%）。
+**这条腿是下行重、上行轻**（ocudulog：`PDSCH: 18443` vs `PUSCH: 7807`；操作者看到的 iperf3 高吞吐来自下行方向）。
+⇒ 它**不能**用来支持任何"车道/性能"结论（`cbs/lane`、residency、余量都要重腿），但它**足以**判 A1-2：
+普通路由那条账与 UL 负载**无关**（PRACH 每帧一次，恒速），而"puxch 不在这个桶里"是结构性的（②）。
+契约 8/8、`stale=0`、crossings `0.00+0.00`、`gaps=0`、`cbs/lane=2.00 dropped=0` 在本腿上与 s67 同形。
+
+**⑥ 副产品：这条腿的其它读数（与 s67 同量级，作对照）**
+
+`handed=26300 taken=7805 superseded=0 evicted=26044 over_bound=0 unproduced=1 fallback=16506 late=1988 not_found=1989
+timeouts=0 keepalives=368186/368200`；`ce device estimates: 85855 device, 0 host`；`zero-copy wraps: 0 failures, 0 misaligned`；
+`mmse_time_sum: hops_gpu=7805 hops_no_gpu=0 defer_wait mean=1450.5 µs`；`[ul_gpu_lane] cbs/lane=2.00 (max=2) dropped=0`。
+（`not_found ≈ late`、`timeouts=0` 再次与 §5.9.117 的裁决一致。）
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 

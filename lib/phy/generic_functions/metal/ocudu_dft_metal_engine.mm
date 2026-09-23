@@ -75,6 +75,20 @@ struct dft_stats_t {
   std::atomic<uint64_t> plain_with_block{0};
   std::atomic<uint64_t> plain_without_block{0};
   /// Of the above, the ones submitted before any slot was ever told (see set_lane_slot()).
+  ///
+  /// MEASURED, and it settles an item that was open for two sessions (design document 5.9.99 -> 5.9.111 ->
+  /// 5.9.119, leg s69-a12-n78 on the n78 cell): the plain route on a TDD cell is populated ENTIRELY by the
+  /// PRACH demodulator's OWN engine instances, which are never told a lane slot, plus the one process-wide
+  /// warm-up run() - `plain_without_block == plain_without_lane_slot == 12 x (radio frames) + 1`, the 12
+  /// being PRACH format B4 (index 159: one occasion per 10 ms radio frame, 12 symbols each; the demodulator
+  /// calls run() once per symbol). The puxch instance is told its slot BEFORE its first submit, so not one of
+  /// its transforms can land in this bucket - and none does: every one of them rides the slot-grid-write
+  /// route (`radio_inputs == handed x 14` on that leg, including the slots no hop ever claimed).
+  ///
+  /// So a large value here is NOT the coverage gap 5.9.99 once suspected, and it is not a defect to fix by
+  /// "letting the hop-less UL slots into the block path": they are already there. Read it as "another engine
+  /// instance is doing synchronous transforms by design" - and only a SMALL plain_without_lane_slot next to a
+  /// large plain_without_block would mean a slotted front end failed to open its block.
   std::atomic<uint64_t> plain_without_lane_slot{0};
   /// Blocks HANDED OVER instead of committed (see release_block()). Zero on every run that does not arm
   /// OCUDU_DFT_RELEASE_BLOCK, which is what makes "the factory path never takes this route" a counter and
