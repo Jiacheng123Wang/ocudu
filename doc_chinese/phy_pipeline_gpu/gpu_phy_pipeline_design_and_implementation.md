@@ -8862,6 +8862,11 @@ bash doc_chinese/phy_pipeline_gpu/wip/ul_load.sh s62-default-fenced s65-heavy-ul
 **附带验证两件事**：① 若该腿 `free_min` 到 0，`[ul_rx_pool] the receive pool is EMPTY` 必须**恰好出现一次**（§5.9.100 ④）；
 ② `dft radio inputs` 的新格式（§5.9.99）在真腿上首次出现，顺带确认两条路由占比。
 
+**①b 第 5 遍的判据已脚本化**：`bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh s65-heavy-ul`
+（30 kHz 小区加 `--slot-ms=0.5`）把上面这些判据**逐条机械求值**，并且 **"读不出"按红算**（§5.9.97 的教训：
+硬门印成 `None` 看着像过）。已在 s64b 上验证过它的三种输出：硬门 5/5 过、有效性 FAIL（1.24 < 2.0 Mbit/s、
+2.8% < 50%）、`dft radio inputs` 新格式 FAIL（那条腿在格式变更之前）——全部符合预期。
+
 **② A1-5：n78 KO/CFO 正式延后，并入 `#12 LA`（用户裁定："精度问题，可以延后"）**
 
 * **现象**（§5.9.98 ⑤）：12:57 那一分钟 7209 个 grant、**1025 个 `crc=KO`（14.2%）**，全是 256QAM 大 grant
