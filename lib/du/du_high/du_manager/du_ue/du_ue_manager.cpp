@@ -58,6 +58,12 @@ void du_ue_manager::handle_ue_create_request(const ul_ccch_indication_message& m
     logger.info("rnti={}: UL-CCCH indication dropped. Caused: The DU is being shut down.", msg.tc_rnti);
     return;
   }
+  if (not cell_mng.is_cell_active(msg.cell_index)) {
+    // Note: The MAC would reject the UE creation, as the cell is being stopped.
+    logger.info(
+        "cell={} rnti={}: UL-CCCH indication dropped. Caused: The cell is not active.", msg.cell_index, msg.tc_rnti);
+    return;
+  }
 
   // Enqueue UE creation procedure
   ue_ctrl_loop[ue_idx_candidate].schedule<ue_creation_procedure>(
