@@ -9702,7 +9702,15 @@ PRACH 那 **1200 变换/s** 现在是**每变换一条命令缓冲 + 一次 wait
 * **两条永远适用、且零分子也算过**：`cfo compensation`（`round_trips == 0 || cfo_hz != 0`，判决用**精确** `!= 0.0F` 而打印是 `%.3f`）
   与 `baseband metrics`（`measured == 0 || consumed`，而 `consumed` 是**构造期读的配置位**，不是"有消费者"的观测）。
   ⇒ 它们**不构成本线的正面证据**（承重项是第 5 条 `host device data crossings` 与第 2 条 `dft radio inputs`）。
-* **`host sample assembly` 到今天仍既无臂也无配方**（§5.9.114 给了 3 条臂 + 3 条配方、§5.9.99 给了第 2 条的臂 = **七条**，它是剩下的那一条）。
+* **`host sample assembly` 原本既无臂也无配方**（§5.9.114 给了 3 条臂 + 3 条配方、§5.9.99 给了第 2 条的臂 = **七条**，它是剩下的那一条）
+  —— **本轮已补上，八条现在都有臂**：`lower_phy_uplink_processor_test` 的 `HostSampleAssemblyContractArms`，
+  **自带独立 ctest 入口** `lower_phy_uplink_processor_assembly_arm`（计数器是进程级静态，控制臂必须跑在干净进程里；
+  跑在未过滤二进制里时它**自检并 GTEST_SKIP 说明原因**，照 §5.9.112 的模板）。单变量是**一次 CFO 补偿调度**：
+  整符号喂进去 ⇒ 唯一可能装配的原因就是补偿 ⇒ 控制臂（不调度）判据 `OK`、武装臂（100 Hz）判据 **`FAILED`**
+  （实测读数 `14 of 28 symbols read where the radio put them, 14 copied into a symbol buffer -> FAILED`）。
+  ⚠ **这条臂顺带量出一个"干净"的定义**：判据是**对着累计分母**的比值，所以未过滤二进制里先前用例就地读过的
+  36570 个符号会把本用例的 14 个稀释到 0.92% < 1% ⇒ **"干净"必须是"已装配数 == 0"**，臂自己从判据打印的证据行里解析这个数，
+  不干净就跳过（第一版只查"控制臂是否为 OK"，结果在整跑里红了 4 个参数化——**这是本轮唯一一次臂自己抓到自己**）。
 * **两个口径比名字窄**：第 2 条 `dft radio inputs` 的判决是 `staged == 0`，看不见两条**不计数的拒绝路径**
   （`refuse_time_input` 的 page-align / fit 分支）；第 4 条 `ce device estimates` 在 gpu 下只判 `device > 0`，**容忍任意多宿主回退**（回退率只在 `[mmse_time_sum]` 里）。
 * **第 5 条的申报范围**：打印出来的申报模块正好 4 个（`demapper, dft, equalizer, channel_estimator`）；
@@ -9843,7 +9851,7 @@ PRACH 那 **1200 变换/s** 现在是**每变换一条命令缓冲 + 一次 wait
 | 4 | **A1-2 第二条腿** | `LEG_CONFIG=…n78 bash wip/run_leg.sh gpu s70-a12-n78b` + `a12_attribution_gate.sh`（不同 occasion 数）| 1 条腿 |
 | ~~5~~ | ~~keepalive 不变量~~ **✅ 本轮完成** | 见 ⑦.1：**不是泄漏**（全序列振荡 0–84），已加 `keepalives_in_flight_max` 高水位并把两处打印都改成 `(max in flight K)` | 离线 |
 | 6 | **RX 池 EMPTY 告警** | 按"取之前"的口径或按 `starved_events` 触发；`leg_gate` **已有该判据**（s63 上就是它红，代号 `P`）⇒ 缺的是裁决与修法，不是判据 | 离线（小池夹具）|
-| 7 | `host sample assembly` 的反向臂 | 让一个符号跨越两个接收块（现有 fixture 就能造）| 离线 |
+| ~~7~~ | ~~`host sample assembly` 的反向臂~~ **✅ 本轮完成** | 见 ③ 末条：单变量 = 一次 CFO 补偿调度；独立 ctest 入口 `lower_phy_uplink_processor_assembly_arm`；控制臂 `OK` / 武装臂 `FAILED` 都实测到；**八条契约检查至此全部有臂** | 离线 |
 | 8 | `-L phy` 里重活的稳定性 | `pxsch_bler_test`、两条 `radio_ssb_zmq_*` 的时长/抖动登记（本次 179 全套 **21.7 s**，没有异常）| 离线 |
 | ~~9~~ | ~~每条腿的 `Real-time failure in RF` 计数入库~~ **✅ 本轮完成** | `leg_gate.sh` 现在在 9 条判据之后打一行 **INFO**（s69 → 33、s67 → 0）；**故意不做成第 10 条判据**（阈值未登记，不能在门里现编）| 1 行脚本 |
 | 10 | §5.9.54 ① 那张 milestone 表本身 | 把 `cbs/lane=1.00` 等行就地标注"已被 §5.9.93/5.9.96 取代" | 文档 |

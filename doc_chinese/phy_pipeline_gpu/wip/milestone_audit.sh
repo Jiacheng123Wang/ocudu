@@ -162,8 +162,8 @@ FILTER_LABEL="phy"
 FORMER_TOPUP="du_low_phy_pipeline_test|baseband_gateway_buffer_metal_smoke_test|pusch_processor_benchmark"
 ctest --test-dir build -L "$FILTER_LABEL" >"$T/ctest" 2>&1
 cl=$(grep -E "tests passed" "$T/ctest" | tail -1)
-check "ctest -L phy (the label gate): 178 runnable (1 disabled)" "178" \
-      "$([ "$cl" = "100% tests passed out of 178" ] && echo PASS || echo "$([ -z "$cl" ] && echo RED || echo FAIL)")" \
+check "ctest -L phy (the label gate): 179 runnable (1 disabled)" "179" \
+      "$([ "$cl" = "100% tests passed out of 179" ] && echo PASS || echo "$([ -z "$cl" ] && echo RED || echo FAIL)")" \
       "${cl:-<unreadable>}  (replaces the name-regex gate: 157 selected, 19 of them substring noise)"
 # The three PHY tests the label used to miss are inside it now (they were a manual top-up); if one of
 # them loses its label again, this reads RED and the gate silently shrinks - which is the whole lesson.

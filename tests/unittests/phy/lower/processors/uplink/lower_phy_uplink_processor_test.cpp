@@ -13,11 +13,18 @@
 #include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_reader_view.h"
 #include "ocudu/phy/lower/processors/uplink/uplink_processor_baseband.h"
 #include "ocudu/phy/lower/processors/uplink/uplink_processor_factories.h"
+#include "ocudu/phy/phy_pipeline_contract.h"
+#include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/ran/resource_block.h"
 #include "fmt/ostream.h"
 #include <gtest/gtest.h>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
 #include <memory>
 #include <random>
+#include <regex>
+#include <unistd.h>
 
 using namespace ocudu;
 
@@ -500,6 +507,137 @@ TEST_P(LowerPhyUplinkProcessorFixture, BothSamplePathsHandOverTheSameSamples)
           << "the two paths handed different samples over for symbol " << i_symbol;
     }
   }
+}
+
+/// 5.9.120: the reverse arm for the EIGHTH contract check - `host sample assembly` - which was the only
+/// one of the eight with neither an arm nor even a written recipe (the milestone audit found it; 5.9.114
+/// had covered seven).
+///
+/// The check is `assembled * 100 <= symbols`, and `assembled` is incremented exactly where a symbol's
+/// samples cannot be read where the radio put them: they straddle two receive blocks, OR the CFO
+/// compensation has to modify them (the radio's buffer is read-only). Feeding WHOLE symbols - one per
+/// process() call - removes the first cause, so a single scheduled non-zero CFO command is the only
+/// variable between the two arms:
+///
+///   control (nothing scheduled) -> every symbol in place  -> the check must read OK
+///   armed   (100 Hz scheduled)  -> every symbol assembled -> the check must read FAILED
+///
+/// The counters behind it are process-wide statics, so the control arm needs a process whose counters
+/// are still clean. This case therefore has its OWN ctest entry (see CMakeLists) and, when it runs inside
+/// the unfiltered binary, it self-checks that and SKIPs with the reason - the same shape as the
+/// `ce device estimates` arm (5.9.112). A verdict that cannot move must not look like one that moved.
+TEST_P(LowerPhyUplinkProcessorFixture, HostSampleAssemblyContractArms)
+{
+  const unsigned     nof_rx_ports = std::get<0>(GetParam());
+  sampling_rate      srate        = std::get<1>(GetParam());
+  subcarrier_spacing scs          = std::get<2>(GetParam());
+  cyclic_prefix      cp           = std::get<3>(GetParam());
+
+  phy_pipeline_mode_registry::set(phy_pipeline_mode::gpu);
+
+  const phy_pipeline_check* assembly_check = nullptr;
+  for (const phy_pipeline_check& check : phy_pipeline_checks()) {
+    if (std::strcmp(check.name, "host sample assembly") == 0) {
+      assembly_check = &check;
+    }
+  }
+  ASSERT_NE(assembly_check, nullptr) << "the 'host sample assembly' check is not registered";
+
+  // Evaluates the check and captures the evidence it prints (the same line the operator reads), so both
+  // a failure and a skip can quote what the check saw instead of only its boolean.
+  auto evaluate = [&]() -> std::pair<std::optional<bool>, std::string> {
+    FILE* capture = std::tmpfile();
+    EXPECT_NE(capture, nullptr);
+    std::fflush(stderr);
+    const int saved = dup(fileno(stderr));
+    EXPECT_NE(saved, -1);
+    dup2(fileno(capture), fileno(stderr));
+    std::optional<bool> verdict = assembly_check->evaluate();
+    std::fflush(stderr);
+    dup2(saved, fileno(stderr));
+    close(saved);
+    std::rewind(capture);
+    std::string text;
+    char        buf[256];
+    while (std::fgets(buf, sizeof(buf), capture) != nullptr) {
+      text += buf;
+    }
+    std::fclose(capture);
+    return {verdict, text};
+  };
+
+  const unsigned base_symbol_size     = srate.get_dft_size(scs);
+  const unsigned nof_symbols_per_slot = get_nsymb_per_slot(cp);
+
+  // One slot, symbol by symbol, each process() call carrying exactly one whole symbol (its cyclic prefix
+  // plus its DFT size) - so nothing straddles two blocks. The full-slot notification proves the samples
+  // really went through: a zero assembly count on its own could just mean the run never happened.
+  auto run_one_slot = [&](lower_phy_uplink_processor& processor, bool with_cfo) -> unsigned {
+    uplink_processor_notifier_spy notifier;
+    prach_processor_notifier_spy  prach_notifier;
+    puxch_processor_notifier_spy  puxch_notifier;
+    processor.connect(notifier, prach_notifier, puxch_notifier);
+
+    if (with_cfo) {
+      // A command whose time has already come: the processor picks it up in next_cfo_command(), which it
+      // calls on the slot's first symbol, and every symbol after that has a non-zero CFO to apply.
+      EXPECT_TRUE(processor.get_cfo_control().schedule_cfo_command(
+          std::chrono::system_clock::now() - std::chrono::milliseconds(1), 100.0F));
+    }
+
+    baseband_gateway_buffer_dynamic buffer(nof_rx_ports, 2 * base_symbol_size);
+    baseband_gateway_timestamp      timestamp = 0;
+    for (unsigned i_symbol = 0, i_symbol_subframe = 0; i_symbol != nof_symbols_per_slot;
+         ++i_symbol, ++i_symbol_subframe) {
+      const unsigned cp_size = cp.get_length(i_symbol_subframe, scs).to_samples(srate.to_Hz());
+      buffer.resize(cp_size + base_symbol_size);
+      for (unsigned i_port = 0; i_port != nof_rx_ports; ++i_port) {
+        span<ci16_t> port_buffer = buffer[i_port];
+        std::generate(port_buffer.begin(), port_buffer.end(), []() {
+          return to_ci16(cf_t(dist_sample(rgen) * INT16_MAX, dist_sample(rgen) * INT16_MAX));
+        });
+      }
+      processor.get_baseband().process(buffer.get_reader(), timestamp, nullptr);
+      timestamp += cp_size + base_symbol_size;
+    }
+    return notifier.get_full_slots().size();
+  };
+
+  // ---- control arm: a clean process, nothing scheduled ----
+  std::unique_ptr<lower_phy_uplink_processor> control_processor = ul_proc_factory->create(config);
+  ASSERT_NE(control_processor, nullptr);
+  ASSERT_EQ(run_one_slot(*control_processor, false), 1U) << "the control slot did not complete";
+
+  const auto [control_verdict, control_text] = evaluate();
+  // The arm needs the counters CLEAN, and clean here means exactly zero assemblies so far: the check is a
+  // ratio against a CUMULATIVE denominator, so the thousands of symbols an earlier case read in place
+  // drown this case's fourteen (measured: with 36570 of 36896 already counted the ratio read 0.92% and
+  // the check stayed OK). Self-check against the evidence it just printed, say what was seen, and skip.
+  const std::regex assembled_re(R"((\d+) copied into a symbol buffer)");
+  std::smatch      assembled_match;
+  unsigned         already_assembled = 0;
+  if (std::regex_search(control_text, assembled_match, assembled_re)) {
+    already_assembled = std::stoul(assembled_match[1].str());
+  }
+  if (!control_verdict.has_value() || !control_verdict.value() || (already_assembled != 0)) {
+    GTEST_SKIP() << "the assembly counters are not clean in this process (" << already_assembled
+                 << " symbol(s) already assembled before this case), so this case cannot own the verdict "
+                    "it has to move - run it through its own ctest entry "
+                    "(lower_phy_uplink_processor_assembly_arm). The check read:\n"
+                 << control_text;
+  }
+
+  // ---- armed arm: the same slot, with a CFO command scheduled ----
+  std::unique_ptr<lower_phy_uplink_processor> armed_processor = ul_proc_factory->create(config);
+  ASSERT_NE(armed_processor, nullptr);
+  ASSERT_EQ(run_one_slot(*armed_processor, true), 1U) << "the armed slot did not complete";
+
+  const auto [armed_verdict, armed_text] = evaluate();
+  ASSERT_TRUE(armed_verdict.has_value()) << "the check became not-applicable:\n" << armed_text;
+  EXPECT_FALSE(armed_verdict.value())
+      << "every symbol of that slot had to be assembled on the host (the CFO compensation modifies the "
+         "samples), so 'host sample assembly' has to be RED; it read:\n"
+      << armed_text;
 }
 
 TEST_P(LowerPhyUplinkProcessorFixture, MetricsAreMeasuredOnlyForAConsumer)
