@@ -48,6 +48,10 @@ struct rx_pool_accounting {
   /// Whether the previous take was nearly dry, for starved_events. Only this thread's transitions matter, and a
   /// relaxed atomic is enough: the counter is read at shutdown, not used to order anything.
   std::atomic<bool> was_starved{false};
+  /// Whether the pool has ever been EMPTY (zero free buffers), for the one-shot warning below. Empty is a
+  /// different event from "nearly dry": the next take has nothing to take, so pop_blocking() blocks the receive
+  /// thread and the radio is LATE rather than merely tight (5.9.100).
+  std::atomic<bool> warned_empty{false};
   /// Largest `held` and smallest free count seen. For ONE pool the two agree by construction - the queue holds
   /// `free` of the `pool_size` buffers it was filled with, so `held = taken - returned = pool_size - free` - and
   /// printing both lets a reader check that identity instead of trusting it. It does NOT hold across pools:
@@ -123,6 +127,18 @@ void lower_phy_baseband_processor::rx_pool_note_taken(size_t free_buffers, size_
   }
   if (free_buffers < a.free_min.load(std::memory_order_relaxed)) {
     a.free_min.store(free_buffers, std::memory_order_relaxed);
+  }
+
+  // EMPTY, not "nearly dry": with zero free buffers the next take blocks the receive thread, which is the
+  // event that turns pool pressure into a LATE radio rather than a tight one. Warned once per run at WARNING
+  // level, because the leg this was written for (s63-heavy-ul) drained the pool completely and nothing in the
+  // run said so until the shutdown summary - the summary carries the counts, this carries the ALARM
+  // (5.9.100: 155 nearly-dry takes in 51 episodes, free_min=0, held_max=pool=8).
+  if ((free_buffers == 0) && !a.warned_empty.exchange(true, std::memory_order_relaxed)) {
+    ocudulog::fetch_basic_logger("PHY").warning(
+        "[ul_rx_pool] the receive pool is EMPTY (held={}/{}): the next take blocks the receive thread",
+        held,
+        pool_size);
   }
 
   // The same events as before - every 1024 pops, and every pop while the pool is nearly dry - but on the logger

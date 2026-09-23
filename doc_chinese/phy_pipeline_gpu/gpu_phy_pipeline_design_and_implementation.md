@@ -8801,6 +8801,47 @@ s64 (n78, 空载) dft radio inputs: 2352 of 51265 transforms read the radio buff
 ⚠ **对旧日志的影响**：s62/s63/s64 的契约块是**旧格式**（`N of M transforms read the radio buffer`），
 以后读那些腿时不要拿它和现在的行比较。
 
+#### 5.9.100 ★ A1-4 收口：RX 池的**触发条件与监视阈值**（以及为什么它**没有**反向臂）
+
+**① 判据：从计数器自身定义，不另造阈值**
+
+| 状态 | 判据 | 含义 |
+|---|---|---|
+| **OK** | `free_min ≥ 2` | 池有余量 |
+| **TOUCHED** | `free_min == 1` | "nearly dry" = **设计中的背压边界**（接收循环从这里开始等）|
+| **DRAINED** | `free_min == 0` | **下一次 take 会阻塞接收线程** ⇒ 电台是"迟到"，不是"紧张" |
+
+严重度看 `starved_events`（**进入** near-dry 的**次数**，把"饿了一分钟一次"与"饿了一千次瞬间"分开）与 `held_max/pool`。
+恒等式 `held = taken − returned = pool − free`（同一池内）可当自检；`lower_phy_test` 的 `held_end=240 / pool=8 / free_min=5`
+是**fixture 换池**的已知假象（代码注释里写明），**不是泄漏**。
+
+**② 三条腿按此判据重读（新仪表 `wip/ul_load.sh` 的 `rx pool verdict` 行）**
+
+| 腿 | `free_min` | `starved_events` | 判决 |
+|---|---|---|---|
+| s62-default-fenced | 1 | 1 | TOUCHED（设计边界）|
+| **s63-heavy-ul** | **0** | **51** | **DRAINED** ← 真发现 |
+| s64-heavywide（n78）| 1 | 1 | TOUCHED |
+
+⇒ s63（92.6 s）**把池抽空了 51 次**，而此前**没有任何东西会说这件事** —— 这正是本轮要补的仪表。
+
+**③ 落地的两处**
+
+* **生产侧**（`lower_phy_baseband_processor.cpp` 的 `rx_pool_note_taken()`）：首次 `free_buffers == 0` 时打**一次性 WARNING**：
+  `[ul_rx_pool] the receive pool is EMPTY (held=H/P): the next take blocks the receive thread`。
+  为什么只打一次：shutdown 汇总已有计数，缺的是**运行中第一次发生**；而 near-dry 时 debug 级日志是**每次 pop 一行**
+  （代码注释自述 ~1 MB/分钟），不能当告警用。
+* **工具侧**：`wip/ul_load.sh` 新增 **`rx pool verdict`** 行（OK / TOUCHED / DRAINED），实测见上表。
+
+**④ ⚠ 反向臂：按设计**做不到**（如实记下，不假装）**
+
+池大小**不是配置项**：`lower_phy_factory.cpp:182` 把它取
+`max(8, rx_to_tx_max_delay/rx_buffer_size, (max_pipeline_depth*max_symbol_size)/rx_buffer_size + 8)`，
+注释写明**下限 8 是必需的**（四个缓冲会死锁，实测）⇒ **没有任何旋钮能把池缩小**去逼出 EMPTY。
+⇒ 这条 WARN 的"能响"**无法用单测演示**（照 §6 纪律，这不是省略，而是**写明做不到的原因**）。
+**登记为待观测项**：下一次某条腿 `free_min` 到 0 时必须**恰好出现一次**该 WARN；到 0 而没打即为缺陷。
+最小强制办法：`--log.phy_level=debug` 跑一条短腿（near-dry 时每 pop 一行会显著拖慢上行侧）。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，

@@ -113,6 +113,24 @@ for p in paths:
     r["defer_med"]  = fnum(etxt, r"defer_wait distribution:.*?median=([0-9.]+)us")
     r["ce_total"]   = fnum(etxt, r"\[mmse_time_sum\] calls=.*?mean total=([0-9.]+)us")
     r["pool"]       = num(etxt, r"(\[ul_rx_pool\][^\n]*)")
+    # The pool's VERDICT, from the counters the summary already prints (5.9.100). "Nearly dry" (one free
+    # buffer) is the designed backpressure boundary; EMPTY (zero free) is a different event - the next take
+    # blocks the receive thread, so the radio is LATE rather than tight. It cannot be forced: the pool size
+    # has a floor of eight (lower_phy_factory.cpp: four buffers deadlocked, measured).
+    pf = num(etxt, r"\[ul_rx_pool\].*?free_min=(-?\d+)")
+    ph = num(etxt, r"\[ul_rx_pool\].*?held_max=(\d+)")
+    ps = num(etxt, r"\[ul_rx_pool\].*?pool=(\d+)")
+    pe = num(etxt, r"\[ul_rx_pool\].*?starved_events=(\d+)")
+    if pf is None:
+        r["pool_verdict"] = None
+    elif int(pf) <= 0:
+        r["pool_verdict"] = (f"DRAINED (free_min=0: the receive thread blocked; {pe} episode(s), "
+                             f"held_max={ph}/{ps})")
+    elif int(pf) == 1:
+        r["pool_verdict"] = (f"TOUCHED (nearly dry once; {pe} episode(s), held_max={ph}/{ps}) - "
+                             f"the designed boundary")
+    else:
+        r["pool_verdict"] = f"OK (free_min={pf}, held_max={ph}/{ps}, {pe} episode(s))"
     r["rtf"]        = len(re.findall(r"Real-time failure in RF", txt))
     r["crc_ok"]     = len(re.findall(r"crc=OK", txt))
     r["crc_ko"]     = len(re.findall(r"crc=KO", txt))
@@ -166,6 +184,7 @@ for r in rows:
     print(f"  contract             : {r['contract']}  (mode={r['mode']})")
     print(f"  crc OK/KO, RT fails  : {r['crc_ok']} / {r['crc_ko']},  {r['rtf']}")
     print(f"  rx pool              : {r['pool']}")
+    print(f"  rx pool verdict      : {r['pool_verdict']}")
     print()
 
 if len(rows) == 2:
