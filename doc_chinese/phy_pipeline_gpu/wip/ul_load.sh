@@ -104,7 +104,7 @@ for p in paths:
     r["rtf"]        = len(re.findall(r"Real-time failure in RF", txt))
     r["crc_ok"]     = len(re.findall(r"crc=OK", txt))
     r["crc_ko"]     = len(re.findall(r"crc=KO", txt))
-    r["contract"]   = num(etxt, r"contract ((?:MET|NOT MET) \(\d+ of \d+\))")
+    r["contract"]   = num(etxt, r"contract ((?:MET|NOT MET) \(\d+ of \d+ checks[^)]*\))")
     r["mode"]       = num(etxt, r"contract \(mode=([a-z_]+)\)")
     rows.append(r)
 
