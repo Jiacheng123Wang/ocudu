@@ -108,8 +108,13 @@ public:
   virtual error_type<du_setup_result::rejected>
   handle_new_du_config(const du_setup_request& req, span<const nr_cell_global_id_t> readable_cells) = 0;
 
-  /// Update the configuration of an existing DU managed by the CU-CP.
-  virtual error_type<du_setup_result::rejected> handle_du_config_update(const du_config_update_request& req) = 0;
+  /// \brief Update the configuration of an existing DU managed by the CU-CP.
+  ///
+  /// A cell that the CU-CP cannot serve is left out of the configuration, as in \ref handle_new_du_config.
+  /// \param[in] req The gNB-DU Configuration Update.
+  /// \param[in] readable_cells The cells whose RRC containers the CU-CP could read.
+  virtual error_type<du_config_update_result::rejected>
+  handle_du_config_update(const du_config_update_request& req, span<const nr_cell_global_id_t> readable_cells) = 0;
 
   /// Update the configuration of an existing DU managed by the CU-CP.
   virtual void handle_gnb_cu_configuration_update(const f1ap_gnb_cu_configuration_update& req) = 0;

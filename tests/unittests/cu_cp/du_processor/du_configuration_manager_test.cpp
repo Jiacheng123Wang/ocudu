@@ -425,7 +425,7 @@ TEST_F(du_configuration_manager_test, when_du_config_update_has_a_du_id_mismatch
 
   du_config_update_request update_req;
   update_req.gnb_du_id = int_to_gnb_du_id(0x99);
-  auto ret             = du_cfg_updater->handle_du_config_update(update_req);
+  auto ret             = du_cfg_updater->handle_du_config_update(update_req, {});
   ASSERT_FALSE(ret.has_value()) << "a DU ID mismatch must be reported as an error";
 
   // The handler must still hold the configuration of the DU.
@@ -444,4 +444,121 @@ TEST_F(du_configuration_manager_test, when_the_du_reports_no_served_cell_then_se
   ASSERT_FALSE(ret.has_value());
 
   ASSERT_EQ(du_cfg_mng.nof_dus(), 0);
+}
+
+/// Fixture with a DU that already serves one cell, ready for a gNB-DU Configuration Update.
+class du_configuration_update_test : public du_configuration_manager_test
+{
+public:
+  du_configuration_update_test() : du_cfg_updater(du_cfg_mng.create_du_handler())
+  {
+    setup_req = create_basic_du_setup_request();
+    report_fatal_error_if_not(du_cfg_updater->handle_new_du_config(setup_req, all_cells_of(setup_req)).has_value(),
+                              "DU setup failed");
+  }
+
+  /// Builds an update that adds the cell with the given counter.
+  static du_config_update_request make_add_request(gnb_du_id_t du_id, unsigned cell_counter)
+  {
+    du_setup_request cells;
+    add_served_cell(cells, cell_counter);
+
+    du_config_update_request req;
+    req.gnb_du_id = du_id;
+    req.served_cells_to_add.push_back(std::move(cells.gnb_du_served_cells_list[0]));
+    return req;
+  }
+
+  du_setup_request                          setup_req;
+  std::unique_ptr<du_configuration_handler> du_cfg_updater;
+};
+
+TEST_F(du_configuration_update_test, when_the_du_adds_a_cell_then_it_is_served)
+{
+  du_config_update_request               req       = make_add_request(setup_req.gnb_du_id, 1);
+  const std::vector<nr_cell_global_id_t> readable  = {req.served_cells_to_add[0].served_cell_info.nr_cgi};
+  const nr_cell_global_id_t              added_cgi = readable[0];
+
+  ASSERT_TRUE(du_cfg_updater->handle_du_config_update(req, readable).has_value());
+  ASSERT_EQ(du_cfg_updater->get_context().served_cells.size(), 2);
+  ASSERT_NE(du_cfg_updater->get_context().find_cell(added_cgi), nullptr);
+}
+
+TEST_F(du_configuration_update_test, when_the_added_cell_is_not_readable_then_it_is_left_out)
+{
+  du_config_update_request req = make_add_request(setup_req.gnb_du_id, 1);
+
+  ASSERT_TRUE(du_cfg_updater->handle_du_config_update(req, {}).has_value())
+      << "one cell the CU-CP cannot serve must not reject the update";
+  ASSERT_EQ(du_cfg_updater->get_context().served_cells.size(), 1);
+}
+
+TEST_F(du_configuration_update_test, when_the_added_cell_is_already_served_then_it_is_left_out)
+{
+  du_config_update_request               req      = make_add_request(setup_req.gnb_du_id, 0);
+  const std::vector<nr_cell_global_id_t> readable = {req.served_cells_to_add[0].served_cell_info.nr_cgi};
+
+  ASSERT_TRUE(du_cfg_updater->handle_du_config_update(req, readable).has_value());
+  ASSERT_EQ(du_cfg_updater->get_context().served_cells.size(), 1) << "the cell must not be served twice";
+}
+
+TEST_F(du_configuration_update_test, when_the_du_removes_a_cell_then_it_is_no_longer_served)
+{
+  du_config_update_request req;
+  req.gnb_du_id = setup_req.gnb_du_id;
+  req.served_cells_to_rem.push_back(setup_req.gnb_du_served_cells_list[0].served_cell_info.nr_cgi);
+
+  ASSERT_TRUE(du_cfg_updater->handle_du_config_update(req, {}).has_value());
+  ASSERT_TRUE(du_cfg_updater->get_context().served_cells.empty());
+}
+
+TEST_F(du_configuration_update_test, when_the_du_modifies_a_cell_then_the_new_configuration_is_stored)
+{
+  const nr_cell_global_id_t old_cgi = setup_req.gnb_du_served_cells_list[0].served_cell_info.nr_cgi;
+
+  du_setup_request cells;
+  add_served_cell(cells, 0);
+  cells.gnb_du_served_cells_list[0].served_cell_info.nr_pci = 42;
+
+  du_config_update_request req;
+  req.gnb_du_id = setup_req.gnb_du_id;
+  req.served_cells_to_mod.push_back({old_cgi, std::move(cells.gnb_du_served_cells_list[0])});
+
+  const std::vector<nr_cell_global_id_t> readable = {old_cgi};
+  ASSERT_TRUE(du_cfg_updater->handle_du_config_update(req, readable).has_value());
+  ASSERT_EQ(du_cfg_updater->get_context().served_cells.size(), 1);
+  ASSERT_EQ(du_cfg_updater->get_context().served_cells[0].pci, 42);
+}
+
+TEST_F(du_configuration_update_test, when_a_modified_cell_can_no_longer_be_served_then_it_is_removed)
+{
+  const nr_cell_global_id_t old_cgi = setup_req.gnb_du_served_cells_list[0].served_cell_info.nr_cgi;
+
+  du_setup_request cells;
+  add_served_cell(cells, 0);
+  cells.gnb_du_served_cells_list[0].served_cell_info.served_plmns = {plmn_identity::parse("00102").value()};
+
+  du_config_update_request req;
+  req.gnb_du_id = setup_req.gnb_du_id;
+  req.served_cells_to_mod.push_back({old_cgi, std::move(cells.gnb_du_served_cells_list[0])});
+
+  const std::vector<nr_cell_global_id_t> readable = {old_cgi};
+  ASSERT_TRUE(du_cfg_updater->handle_du_config_update(req, readable).has_value());
+  ASSERT_TRUE(du_cfg_updater->get_context().served_cells.empty())
+      << "a cell the CU-CP cannot serve any more must not stay in the configuration";
+}
+
+TEST_F(du_configuration_update_test, when_the_update_exceeds_the_cell_limit_then_it_is_rejected)
+{
+  du_config_update_request req;
+  req.gnb_du_id = setup_req.gnb_du_id;
+  for (unsigned i = 1; i != MAX_NOF_DU_CELLS + 1; ++i) {
+    du_setup_request cells;
+    add_served_cell(cells, i);
+    req.served_cells_to_add.push_back(std::move(cells.gnb_du_served_cells_list[0]));
+  }
+
+  auto ret = du_cfg_updater->handle_du_config_update(req, {});
+  ASSERT_FALSE(ret.has_value());
+  ASSERT_EQ(du_cfg_updater->get_context().served_cells.size(), 1) << "a rejected update must change nothing";
 }

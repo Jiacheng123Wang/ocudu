@@ -54,15 +54,16 @@ public:
     return make_unexpected(ret.error());
   }
 
-  validation_result handle_du_config_update(const du_config_update_request& req) override
+  error_type<du_config_update_result::rejected>
+  handle_du_config_update(const du_config_update_request& req, span<const nr_cell_global_id_t> readable_cells) override
   {
     if (this->ctxt == nullptr) {
-      return make_unexpected(du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
-                                                       "DU with same gNB-DU-Id was not setup"});
+      return make_unexpected(du_config_update_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
+                                                               "DU with same gNB-DU-Id was not setup"});
     }
 
     // Reconfiguration.
-    auto ret = parent.handle_du_config_update(*this->ctxt, req);
+    auto ret = parent.handle_du_config_update(*this->ctxt, req, readable_cells);
     if (not ret.has_value()) {
       return make_unexpected(ret.error());
     }
@@ -235,7 +236,8 @@ du_configuration_manager::add_du_config(const du_setup_request& req, span<const 
       // Keep the first occurrence of a cell the DU reports more than once.
       rejection = du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
                                             "The DU reports the served cell CGI more than once"};
-    } else if (auto cell_result = validate_cell_config_request(served_cell); not cell_result.has_value()) {
+    } else if (auto cell_result = validate_cell_config_request(served_cell, req.gnb_du_id);
+               not cell_result.has_value()) {
       rejection = cell_result.error();
     }
 
@@ -270,65 +272,148 @@ du_configuration_manager::add_du_config(const du_setup_request& req, span<const 
   return &ctxt;
 }
 
-expected<const du_configuration_context*, du_setup_result::rejected>
+/// Finds a cell of a DU in either of its cell lists.
+static std::vector<du_cell_configuration>::iterator find_cell(std::vector<du_cell_configuration>& cells,
+                                                              const nr_cell_global_id_t&          cgi)
+{
+  return std::find_if(
+      cells.begin(), cells.end(), [&cgi](const du_cell_configuration& item) { return item.cgi == cgi; });
+}
+
+/// Removes a cell from the DU configuration. Returns false if the DU does not serve the cell.
+static bool remove_du_cell(du_configuration_context& ctxt, const nr_cell_global_id_t& cgi)
+{
+  if (auto it = find_cell(ctxt.served_cells, cgi); it != ctxt.served_cells.end()) {
+    ctxt.served_cells.erase(it);
+    return true;
+  }
+  if (auto it = find_cell(ctxt.deactivated_cells, cgi); it != ctxt.deactivated_cells.end()) {
+    ctxt.deactivated_cells.erase(it);
+    return true;
+  }
+  return false;
+}
+
+/// Returns the lowest cell index the DU does not use.
+static du_cell_index_t find_free_cell_index(const du_configuration_context& ctxt)
+{
+  for (unsigned i = 0; i != MAX_NOF_DU_CELLS; ++i) {
+    const du_cell_index_t cell_idx = to_du_cell_index(i);
+    auto in_use = [cell_idx](const du_cell_configuration& item) { return item.cell_index == cell_idx; };
+    if (std::none_of(ctxt.served_cells.begin(), ctxt.served_cells.end(), in_use) and
+        std::none_of(ctxt.deactivated_cells.begin(), ctxt.deactivated_cells.end(), in_use)) {
+      return cell_idx;
+    }
+  }
+  return INVALID_DU_CELL_INDEX;
+}
+
+expected<const du_configuration_context*, du_config_update_result::rejected>
 du_configuration_manager::handle_du_config_update(const du_configuration_context& current_ctxt,
-                                                  const du_config_update_request& req)
+                                                  const du_config_update_request& req,
+                                                  span<const nr_cell_global_id_t> readable_cells)
 {
   if (current_ctxt.id != req.gnb_du_id) {
     logger.warning("du_id={}: Failed to update DU. Cause: DU ID mismatch", fmt::underlying(current_ctxt.id));
     return make_unexpected(
-        du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state, "DU ID mismatch"});
+        du_config_update_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state, "DU ID mismatch"});
   }
   auto it = dus.find(current_ctxt.id);
   if (it == dus.end()) {
     logger.error("du_id={}: DU config update called for non-existent DU", fmt::underlying(current_ctxt.id));
-    return make_unexpected(du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
-                                                     "DU with the given gNB-DU-Id was not setup"});
+    return make_unexpected(du_config_update_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
+                                                             "DU with the given gNB-DU-Id was not setup"});
   }
 
-  // Validate config.
-  auto result = validate_du_config_update(req);
+  auto result = validate_du_config_update(current_ctxt, req);
   if (not result.has_value()) {
     return make_unexpected(result.error());
   }
 
-  // Update DU config.
   du_configuration_context& du_context = it->second;
-  // > Remove cells.
+
+  // Whether the CU-CP can serve the cell the DU reports, given the cells it already serves.
+  auto admit_cell = [this, &du_context, readable_cells](
+                        const cu_cp_du_served_cells_item& cell) -> error_type<du_config_update_result::rejected> {
+    const nr_cell_global_id_t& cgi = cell.served_cell_info.nr_cgi;
+    if (std::find(readable_cells.begin(), readable_cells.end(), cgi) == readable_cells.end()) {
+      return make_unexpected(du_config_update_result::rejected{
+          cause_protocol_t::semantic_error, fmt::format("Could not read the RRC containers of cell nci={}", cgi.nci)});
+    }
+    if (du_context.find_cell_any_state(cgi) != nullptr) {
+      return make_unexpected(du_config_update_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
+                                                               "The DU already serves the cell"});
+    }
+    return validate_cell_config_request(cell, du_context.id);
+  };
+
+  // > Remove the cells the DU stopped serving.
   for (const nr_cell_global_id_t& cgi : req.served_cells_to_rem) {
-    auto cell_it = std::find_if(it->second.served_cells.begin(),
-                                it->second.served_cells.end(),
-                                [&cgi](const du_cell_configuration& item) { return item.cgi == cgi; });
-    if (cell_it != it->second.served_cells.end()) {
-      du_context.served_cells.erase(cell_it);
-    } else {
-      logger.warning("du_id={}: Failed to remove cell nci={}. Cause: It was not previously set",
-                     fmt::underlying(current_ctxt.id),
+    if (not remove_du_cell(du_context, cgi)) {
+      logger.warning("du_id={}: Cannot remove cell nci={}. Cause: The DU does not serve it",
+                     fmt::underlying(du_context.id),
                      cgi.nci);
     }
   }
-  // > Add new cells.
-  for (const auto& cell_to_add : req.served_cells_to_add) {
-    // Allocate cell index.
-    du_cell_index_t cell_idx = INVALID_DU_CELL_INDEX;
-    for (unsigned i = 0; i != MAX_NOF_DU_CELLS; ++i) {
-      if (std::none_of(du_context.served_cells.begin(),
-                       du_context.served_cells.end(),
-                       [i](const du_cell_configuration& item) { return item.cell_index == to_du_cell_index(i); })) {
-        cell_idx = to_du_cell_index(i);
-        break;
-      }
+
+  // > Take over the configuration of the cells the DU changed. A cell the CU-CP can no longer serve is removed,
+  //   so that the CU-CP never picks it for a UE.
+  for (const du_cell_to_modify& cell_to_mod : req.served_cells_to_mod) {
+    const du_cell_configuration* old_cell = du_context.find_cell_any_state(cell_to_mod.old_cgi);
+    if (old_cell == nullptr) {
+      logger.warning("du_id={}: Cannot modify cell nci={}. Cause: The DU does not serve it",
+                     fmt::underlying(du_context.id),
+                     cell_to_mod.old_cgi.nci);
+      continue;
     }
+    const du_cell_index_t cell_idx = old_cell->cell_index;
+    const bool            deactivated =
+        find_cell(du_context.deactivated_cells, cell_to_mod.old_cgi) != du_context.deactivated_cells.end();
+
+    remove_du_cell(du_context, cell_to_mod.old_cgi);
+
+    auto admission = admit_cell(cell_to_mod.cell);
+    if (not admission.has_value()) {
+      logger.warning("du_id={}: Not serving cell nci={} any more. Cause: {}",
+                     fmt::underlying(du_context.id),
+                     cell_to_mod.cell.served_cell_info.nr_cgi.nci,
+                     admission.error().cause_str);
+      continue;
+    }
+
+    du_cell_configuration cell = create_du_cell_config(cell_idx, cell_to_mod.cell);
+    if (deactivated) {
+      // The cell keeps the state the CU-CP gave it, so it stays deactivated until the CU-CP activates it.
+      cell.deactivated_plmns = cell.served_plmns;
+      cell.served_plmns.clear();
+      du_context.deactivated_cells.push_back(std::move(cell));
+    } else {
+      du_context.served_cells.push_back(std::move(cell));
+    }
+  }
+
+  // > Add the cells the DU started serving.
+  for (const cu_cp_du_served_cells_item& cell_to_add : req.served_cells_to_add) {
+    auto admission = admit_cell(cell_to_add);
+    if (not admission.has_value()) {
+      logger.warning("du_id={}: Not serving cell nci={}. Cause: {}",
+                     fmt::underlying(du_context.id),
+                     cell_to_add.served_cell_info.nr_cgi.nci,
+                     admission.error().cause_str);
+      continue;
+    }
+
+    const du_cell_index_t cell_idx = find_free_cell_index(du_context);
     if (cell_idx == INVALID_DU_CELL_INDEX) {
       logger.error("du_id={}: Not serving cell nci={}. Cause: The DU serves the maximum number of cells ({})",
-                   fmt::underlying(current_ctxt.id),
+                   fmt::underlying(du_context.id),
                    cell_to_add.served_cell_info.nr_cgi.nci,
                    MAX_NOF_DU_CELLS);
       continue;
     }
-
     du_context.served_cells.push_back(create_du_cell_config(cell_idx, cell_to_add));
   }
+
   return &it->second;
 }
 
@@ -448,15 +533,31 @@ du_configuration_manager::validate_new_du_config(const du_setup_request& req) co
   return {};
 }
 
-error_type<du_setup_result::rejected>
-du_configuration_manager::validate_du_config_update(const du_config_update_request& req) const
+error_type<du_config_update_result::rejected>
+du_configuration_manager::validate_du_config_update(const du_configuration_context& current_ctxt,
+                                                    const du_config_update_request& req) const
 {
-  // TODO
+  // Count the cells the DU serves once the update is applied. A cell the DU does not serve cannot be removed,
+  // so it keeps counting.
+  size_t nof_cells = current_ctxt.served_cells.size() + current_ctxt.deactivated_cells.size();
+  for (const nr_cell_global_id_t& cgi : req.served_cells_to_rem) {
+    if (current_ctxt.find_cell_any_state(cgi) != nullptr) {
+      --nof_cells;
+    }
+  }
+  nof_cells += req.served_cells_to_add.size();
+
+  if (nof_cells > MAX_NOF_DU_CELLS) {
+    return make_unexpected(du_config_update_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
+                                                             "Too many served cells"});
+  }
+
   return {};
 }
 
 error_type<du_setup_result::rejected>
-du_configuration_manager::validate_cell_config_request(const cu_cp_du_served_cells_item& cell_req) const
+du_configuration_manager::validate_cell_config_request(const cu_cp_du_served_cells_item& cell_req,
+                                                       gnb_du_id_t                       serving_du) const
 {
   auto ret = validate_cell_config(cell_req);
   if (not ret.has_value()) {
@@ -489,6 +590,9 @@ du_configuration_manager::validate_cell_config_request(const cu_cp_du_served_cel
 
   // Ensure no other DU already serves the cell.
   for (const auto& [du_id, du_cfg] : dus) {
+    if (du_id == serving_du) {
+      continue;
+    }
     if (du_cfg.find_cell_any_state(cell_req.served_cell_info.nr_cgi) != nullptr) {
       return make_unexpected(du_setup_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
                                                        "Duplicate served cell CGI"});
