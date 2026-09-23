@@ -94,7 +94,7 @@ int main(int argc, char** argv)
   report_fatal_error_if_not(low_papr_seq_gen_factory, "low_papr_seq_gen_factory");
 
   std::shared_ptr<srs_estimator_factory> srs_est_factory =
-      create_srs_estimator_generic_factory(low_papr_seq_gen_factory, ta_est_factory, MAX_NOF_PRBS);
+      create_srs_estimator_generic_factory(low_papr_seq_gen_factory, ta_est_factory, nullptr, MAX_NOF_PRBS);
 
   std::unique_ptr<srs_estimator> estimator = srs_est_factory->create();
   report_fatal_error_if_not(estimator, "estimator");

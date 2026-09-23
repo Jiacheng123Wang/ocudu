@@ -5,7 +5,6 @@
 #include "du_low_config_cli11_schema.h"
 #include "apps/helpers/logger/logger_appconfig_cli11_utils.h"
 #include "apps/helpers/metrics/metrics_config_cli11_schema.h"
-#include "apps/services/worker_manager/cli11_cpu_affinities_parser_helper.h"
 #include "du_low_config.h"
 #include "ocudu/adt/expected.h"
 #include "ocudu/support/cli11_utils.h"
@@ -257,6 +256,21 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              "PUSCH channel equalizer algorithm: zf and mmse.")
       ->capture_default_str()
       ->check(pusch_channel_equalizer_algorithm_method_check);
+  add_option(app, "--doa_enabled", expert_phy_params.doa_enabled, "Set to true to enable DOA features (default false).")
+      ->capture_default_str();
+  add_option(app,
+             "--doa_antenna_distance_over_wavelength",
+             expert_phy_params.doa_antenna_distance_over_wavelength,
+             "Distance between antenna elements, normalized with respect to the wavelength. Only meaningful if "
+             "doa_enabled is set to true.")
+      ->capture_default_str()
+      ->check(CLI::NonNegativeNumber);
+  add_option(app,
+             "--doa_cross_polarized",
+             expert_phy_params.doa_cross_polarized,
+             "Cross-polarization flag: set to true if the array elements consist of two collocated antennas with "
+             "orthogonal polarizations. Only meaningful if doa_enable is set to true.")
+      ->capture_default_str();
   add_option(app,
              "--max_request_headroom_slots",
              expert_phy_params.nof_slots_request_headroom,

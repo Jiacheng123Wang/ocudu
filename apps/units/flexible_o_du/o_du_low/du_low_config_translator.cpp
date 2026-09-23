@@ -78,6 +78,10 @@ static odu::du_low_config generate_du_low_config(const du_low_unit_config&      
       upper_phy_factory_config.phy_tap_tdd_pattern = cells[0].tdd_pattern;
     }
   }
+  upper_phy_factory_config.doa_enabled = du_low.expert_phy_cfg.doa_enabled;
+  upper_phy_factory_config.doa_antenna_distance_over_wavelength =
+      du_low.expert_phy_cfg.doa_antenna_distance_over_wavelength;
+  upper_phy_factory_config.doa_cross_polarized = du_low.expert_phy_cfg.doa_cross_polarized;
 
   // The flexible PDSCH processor implementation will be used by default.
   const auto& upper_phy_threads_cfg = du_low.expert_execution_cfg.threads;

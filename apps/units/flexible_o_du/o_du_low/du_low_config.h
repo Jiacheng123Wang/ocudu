@@ -63,6 +63,14 @@ struct du_low_unit_expert_upper_phy_config {
   /// - \c zf: use zero-forcing algorithm, or
   /// - \c mmse: use minimum mean square error algorithm.
   std::string pusch_channel_equalizer_algorithm = "mmse";
+  /// Enable DOA features.
+  bool doa_enabled = false;
+  /// Distance between antenna elements, normalized with respect to the wavelength. Only meaningful if \ref doa_enabled
+  /// is set to true.
+  float doa_antenna_distance_over_wavelength = 0.5F;
+  /// Cross-polarization flag: set to true if the array elements consist of two collocated antennas with orthogonal
+  /// polarizations. Only meaningful if \ref doa_enabled is set to true.
+  bool doa_cross_polarized = false;
   /// \brief Request headroom size in slots.
   ///
   /// The request headroom size is the number of delayed slots that the upper physical layer will accept, ie, if the

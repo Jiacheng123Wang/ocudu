@@ -100,8 +100,9 @@ add_to_exported_libs(
 
 if (TARGET Eigen3::Eigen)
     add_library(ocudu_doa_estimator STATIC srs/doa_estimator_eigen.cpp srs/doa_estimator_eigen_factory.cpp)
-
     target_link_libraries(ocudu_signal_processors INTERFACE ocudu_doa_estimator)
-
     add_to_exported_libs(ocudu_doa_estimator)
+else (TARGET Eigen3::Eigen)
+    add_library(doa_estimator_dummy STATIC srs/doa_estimator_dummy_factory.cpp)
+    target_link_libraries(ocudu_signal_processors INTERFACE doa_estimator_dummy)
 endif (TARGET Eigen3::Eigen)

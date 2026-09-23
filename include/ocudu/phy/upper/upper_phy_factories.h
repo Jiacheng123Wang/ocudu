@@ -360,6 +360,14 @@ struct upper_phy_factory_configuration {
   unsigned ul_bw_rb;
   /// Maximum number of layers for PUSCH transmissions.
   unsigned pusch_max_nof_layers;
+  /// Enable DOA features.
+  bool doa_enabled = false;
+  /// Distance between antenna elements, normalized with respect to the wavelength. Only meaningful if \ref doa_enabled
+  /// is set to true.
+  float doa_antenna_distance_over_wavelength = 0.5F;
+  /// Cross-polarization flag: set to true if the array elements consist of two collocated antennas with orthogonal
+  /// polarizations. Only meaningful if \ref doa_enabled is set to true.
+  bool doa_cross_polarized = false;
   /// \brief PDSCH processor type.
   ///
   /// Use of these options:

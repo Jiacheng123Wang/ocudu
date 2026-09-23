@@ -24,6 +24,8 @@
 #include "ocudu/phy/upper/channel_processors/ssb/factories.h"
 #include "ocudu/phy/upper/signal_processors/nzp_csi_rs/factories.h"
 #include "ocudu/phy/upper/signal_processors/prs/factories.h"
+#include "ocudu/phy/upper/signal_processors/srs/doa_estimator_configuration.h"
+#include "ocudu/phy/upper/signal_processors/srs/doa_estimator_factory.h"
 #include "ocudu/phy/upper/signal_processors/srs/srs_estimator_factory.h"
 #include "ocudu/support/error_handling.h"
 #include <algorithm>
@@ -664,8 +666,18 @@ create_ul_processor_factory(const upper_phy_factory_configuration& config,
     report_fatal_error_if_not(prach_factory, "Invalid PRACH detector pool factory.");
   }
 
+  std::shared_ptr<doa_estimator_factory> doa_factory = nullptr;
+  if (config.doa_enabled) {
+    doa_estimator_configuration doa_config = {
+        .nof_antennas                     = config.nof_rx_ports,
+        .antenna_distance_over_wavelength = config.doa_antenna_distance_over_wavelength,
+        .cross_polarized                  = config.doa_cross_polarized,
+    };
+    doa_factory = create_doa_estimator_factory(doa_config);
+    report_fatal_error_if_not(doa_factory, "Invalid DOA estimator factory.");
+  }
   std::shared_ptr<srs_estimator_factory> srs_factory =
-      create_srs_estimator_generic_factory(sequence_factory, ta_est_factory, config.ul_bw_rb);
+      create_srs_estimator_generic_factory(sequence_factory, ta_est_factory, doa_factory, config.ul_bw_rb);
   report_fatal_error_if_not(srs_factory, "Invalid SRS estimator factory.");
 
   // Create SRS estimator pool factory if more than one thread is used.
