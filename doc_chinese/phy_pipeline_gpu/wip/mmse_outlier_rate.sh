@@ -35,8 +35,14 @@ scan() { # $1 = tag, rest = env assignments
 import re, sys, glob, statistics
 tag, fails, runs, out = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 rows = []
+worst_drift = 0.0
 for p in glob.glob(f"{out}/{tag}-*.txt"):
     txt = open(p, errors="replace").read()
+    # The sweep's own verdict line carries the drift even when nothing is wrong - that is the number
+    # the acceptance gate reads ("twenty consecutive runs at or below 1.1"), so it is collected for
+    # every run and not only for the failing ones.
+    for m in re.finditer(r"nv/l\^2 cpu [0-9.]+ mmse ([0-9.]+)", txt):
+        worst_drift = max(worst_drift, float(m.group(1)))
     if "FAILING SWEEP" not in txt:
         continue
     for line in txt[txt.index("FAILING SWEEP"):].splitlines():
@@ -55,7 +61,8 @@ for p in glob.glob(f"{out}/{tag}-*.txt"):
         for i, v in enumerate(vals):
             if v > max(3 * med, 2e-2):
                 rows.append((float(m.group(1)), i, v / med))
-print(f"arm {tag or '(default)':<28} failing_sweeps={fails}/{runs}  outliers={len(rows)}")
+print(f"arm {tag or '(default)':<28} failing_sweeps={fails}/{runs}  outliers={len(rows)}  "
+      f"worst_mmse_drift={worst_drift:.3f}")
 for lvl, i, f in sorted(rows, key=lambda r: -r[2]):
     print(f"      level={lvl:<9.3e} realization={i:<3} factor={f:8.0f}x")
 PY

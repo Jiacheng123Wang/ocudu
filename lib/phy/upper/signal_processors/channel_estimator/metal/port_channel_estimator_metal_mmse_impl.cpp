@@ -4206,7 +4206,7 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
     args.pattern_symbols.for_each(args.first_symbol, args.last_symbol, [&](unsigned s) { dmrs_slots.push_back(s); });
     // The device build writes the L x L / nout x L blocks with the SLOT strides (st.L / st.nout), so
     // the batch's matrices land exactly where the host staging and every consumer expect them.
-    if (gpu_invert) {
+    if (gpu_invert && (std::getenv("OCUDU_CE_CORR_STANDALONE") == nullptr)) {
       unsigned nout_c = 0;
       unsigned L_c    = 0;
       corr_prefix     = correlation_stage(*device_stats,

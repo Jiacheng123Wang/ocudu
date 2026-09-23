@@ -508,7 +508,8 @@ struct mmse_engine_impl {
                                                        reinterpret_cast<const char*>(ptr))
                                     : 0;
     std::fprintf(stderr,
-                 "[wrap_map] %s ptr=%p bytes=%llu -> contents=%p length=%llu offset=%llu delta=%+ld%s\n",
+                 "[wrap_map] %s ptr=%p bytes=%llu -> contents=%p length=%llu offset=%llu delta=%+ld%s "
+                 "obj=%p\n",
                  how,
                  ptr,
                  static_cast<unsigned long long>(bytes),
@@ -516,7 +517,8 @@ struct mmse_engine_impl {
                  (buf != nil) ? static_cast<unsigned long long>(buf.length) : 0ULL,
                  static_cast<unsigned long long>(offset),
                  delta + static_cast<long>(offset),
-                 (offset != 0) ? "  <- bound as an OFFSET into an existing mapping" : "");
+                 (offset != 0) ? "  <- bound as an OFFSET into an existing mapping" : "",
+                 (__bridge void*)buf);
   }
 
   /// \brief How many times each dispatch of the correlation prefix is encoded (OCUDU_CE_CORR_REPEAT).
@@ -3365,6 +3367,20 @@ static bool encode_run(mmse_engine_impl*     e,
     // Same encoder: the correlation writes must be visible to K1's reads. In burst mode the pipeline
     // change to K1 below inserts that barrier with the stage switch (see stage_pipeline()).
     if (!st.burst) {
+      // EXPERIMENT (OCUDU_CE_CORR_SEGMENT=1): close the encoder after the correlation prefix and open
+      // a fresh one for K1 and the weights. This is the SAME command buffer - one commit, one wait, so
+      // the prefix's whole point survives - but the boundary becomes an ENCODER boundary, which is the
+      // ordering this file has actually measured ("two encoders of one command buffer are ordered",
+      // metal_alias_order.mm case F, 200/200, and what begin_weights_stage() relies on for the
+      // extraction-to-weights boundary). The memory barrier below is the weaker of the two claims and
+      // is what the landmine's rate reads: the prefix fails at 28% (17/60) while the same device build
+      // and the same device K1 in a command buffer of their own never do (0/40), and extra barriers
+      // INSIDE K1 change nothing (11/40).
+      if (std::getenv("OCUDU_CE_CORR_SEGMENT") != nullptr) {
+        [enc endEncoding];
+        enc     = [st.cb computeCommandEncoder];
+        st.enc  = enc;
+      }
       [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
     }
   }
