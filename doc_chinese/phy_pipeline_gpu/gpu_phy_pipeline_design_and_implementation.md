@@ -9992,6 +9992,38 @@ cc1plus: all warnings being treated as errors
 （前一条 §5.9.121 ⑥ 记的 `value_net problems=3` 瞬时红属于同一类；那一次没有抓到并发的进程，
 但现在有了机制与实例，**"先查是不是在并行跑"从经验变成了门里的一条硬规矩**。）
 
+**⑥ ★ Ubuntu 上那两条 `Skipped` 不是平台差异，是构建开关差异（已实测）**
+
+用户问："`lower_phy_uplink_processor_assembly_arm` 与 `ul_pipeline_probe_test.compiled_out_without_flow_probes`
+是 macOS 独有的吗？Ubuntu 能不能也跑？" **答案：都不是 macOS 独有，两条都由构建开关决定。**
+实测方式：在 Ubuntu 上开一个**独立** build 目录（不碰用户的 `build/`），四个探针开关全开：
+
+```bash
+cmake -S . -B /tmp/build_probes -DCMAKE_BUILD_TYPE=Release \
+      -DENABLE_METAL_STATS=ON -DENABLE_FLOW_PROBES=ON -DENABLE_UL_CAPTURE=ON -DENABLE_CE_TIME=ON
+cmake --build /tmp/build_probes --target lower_phy_uplink_processor_test ul_pipeline_probe_test -j
+```
+
+| 用例 | `ENABLE_*=OFF`（Ubuntu 默认 configure）| `ENABLE_*=ON`（本机 macOS，见 §6.1）|
+|---|---|---|
+| `ul_pipeline_probe_test.compiled_out_without_flow_probes` | **Skipped（设计如此）**：它在 `#if !defined(OCUDU_FLOW_PROBES)` 里，职责就是"探针被编成 no-op 时**说出来**，而不是静默通过" | **该用例不存在**；取而代之的是 `#else` 分支里的真用例 —— Ubuntu 上实测 **6/6 PASSED**（与 macOS 同一个二进制、同样 6 条）|
+| `lower_phy_uplink_processor_assembly_arm`（本轮新增）| **Skipped**：`host sample assembly` 检查在 `#if defined(OCUDU_METAL_STATS)` 内，未注册 ⇒ 臂无判决可动（跳过理由已打印）| **真跑**：Ubuntu 上实测 `host sample assembly: 14 of 28 … 14 copied into a symbol buffer -> FAILED`、ctest **Passed**（臂确实推动了判决）|
+
+⇒ **两条都不是平台特性**；差别只在**四个开关的默认值**（它们按 §6.1 是"debug aid，默认 OFF"，
+本机 macOS 的 `build/` 是显式打开的）。**若要在 Ubuntu 的常规构建里跑到它们**：configure 时带上这四个开关
+（或像本次一样另建一个探针专用的 build 目录，跑门时用它）。
+
+**⑦ 远端检查（`MILESTONE_AUDIT_REMOTE`）的确切语义（用户问，逐条确认）**
+
+* **不设这个变量 ⇒ 完全不连远端**：脚本里是 `if [ -n "${MILESTONE_AUDIT_REMOTE:-}" ]`，
+  未设时**不发生任何 ssh**，只打一行 INFO：`not checked: set MILESTONE_AUDIT_REMOTE=… to include it`
+  （实测读数见 §5.9.122 ④ 那次不带变量的运行）。**它永远是 INFO，不是判据** ⇒ 无论远端在不在、IP 变没变，
+  **都不会让门变红**、不会影响 `offline acceptance` 的结论。
+* **变量就是为此设计的**：那台机器不总是在线、IP 也可能变，所以远端检查是**每次调用显式开启**的，
+  而不是写死在脚本里（写死会让门在离网时变成"没人跑的门"）。
+* 唯一需要人工保证的是：**远端那棵树要在 `~/work/ocudu`**（脚本里 `cd ~/work/ocudu`），且用 `BatchMode=yes` +
+  `ConnectTimeout=8` ⇒ 连不上会立刻退化成那一行 INFO，**不会挂住**。
+
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，
