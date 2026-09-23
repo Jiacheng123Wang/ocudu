@@ -572,6 +572,12 @@ private:
     unsigned r_stride    = 0;
     /// Slot count of the batch, for the h window (engine_strides::n_blk).
     unsigned nof_blocks = 0;
+    /// Whether the route that built these slots also INVERTED them in the same submission (K1 inside
+    /// the weights command buffer). The comparison then has to invert the host's own A too, or every
+    /// element differs by construction and the probe says nothing - which is exactly why the check
+    /// used to be refused on that route (see run_engine_blocks()). Set on the routes where the
+    /// device's A is inverted before anyone reads it back.
+    bool device_inverted = false;
   };
 
   /// Compares every pending group's device slots against the host's own build of the same geometry,
@@ -588,7 +594,8 @@ private:
                         unsigned                                       sys_offset,
                         unsigned                                       nof_systems,
                         unsigned                                       a_stride,
-                        unsigned                                       r_stride);
+                        unsigned                                       r_stride,
+                        bool                                           device_inverted = false);
 
   bool build_slots_on_device(const channel_statistics& stats,
                              const bounded_bitset<NOF_SUBCARRIERS_PER_RB>& re_pattern,

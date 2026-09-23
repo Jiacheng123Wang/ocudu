@@ -3235,6 +3235,12 @@ bool port_channel_estimator_metal_mmse_impl::record_device_y_stage(const fd_td_e
   return true;
 }
 
+// TEMPORARY DIAGNOSTIC (OCUDU_CE_Y_HASH): the checksum of the y slots as the HOST staged them, kept
+// from stage_engine_group() to the hop's completion so the same region can be summed again as the GPU
+// left it. File scope rather than a member because it is a probe, not estimator state.
+static double   ocudu_ce_y_hash_staged = 0.0;
+static unsigned ocudu_ce_y_hash_len    = 0;
+
 void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_estimation_stage_args& args,
                                                                 unsigned                           gb_start,
                                                                 unsigned                           n_blk,
@@ -3467,6 +3473,21 @@ void port_channel_estimator_metal_mmse_impl::stage_engine_group(const fd_td_esti
       if (y_from_device) {
         phy_pipeline_crossings::count_host_read_site("ce: y staged from the device LSE", y_read_bytes);
         phy_pipeline_crossings::count_host_write_site("ce: y staged (host)", y_write_bytes);
+      }
+      // TEMPORARY DIAGNOSTIC (OCUDU_CE_Y_HASH): a checksum of the y slots as the HOST left them, kept
+      // until the hop's completion and compared there with the same region as the GPU left it. y is
+      // the one input of h = W . y whose producer is the host, so it is the one that can be checked
+      // against a known value; A^-1, R_hp and W have all been compared already and agree, and the
+      // published h still moves on the polluted realization, so "something rewrote y between the
+      // staging and the apply kernel" is the last hypothesis the comparison set leaves open.
+      {
+        const unsigned len = nof_layers * st.n_blk * 2 * st.L;
+        double         acc = 0.0;
+        for (unsigned i = 0; i != len; ++i) {
+          acc += static_cast<double>(gpu_y[i]) * static_cast<double>(i + 1);
+        }
+        ocudu_ce_y_hash_staged = acc;
+        ocudu_ce_y_hash_len    = len;
       }
     }
   }
@@ -3878,7 +3899,8 @@ void port_channel_estimator_metal_mmse_impl::run_pending_corr_checks()
                            c.sys_offset,
                            c.nof_systems,
                            c.a_stride,
-                           c.r_stride);
+                           c.r_stride,
+                           c.device_inverted);
   }
   pending_corr_checks_.clear();
 }
@@ -3894,7 +3916,8 @@ bool port_channel_estimator_metal_mmse_impl::check_edge_slots(
     unsigned                                       sys_offset,
     unsigned                                       nof_systems,
     unsigned                                       a_stride,
-    unsigned                                       r_stride)
+    unsigned                                       r_stride,
+    bool                                           device_inverted)
 {
   // The host's own build of THIS geometry, into scratch the device route does not use.
   unsigned    nout_h = 0;
@@ -3907,6 +3930,36 @@ bool port_channel_estimator_metal_mmse_impl::check_edge_slots(
   const auto  a_host = span<float>(a_host_scratch.data(), a_host_scratch.size());
   const auto  r_host = span<float>(r_host_scratch.data(), r_host_scratch.size());
   build_correlation_matrices(stats, re_pattern, b_prb, dmrs_slots, scs_khz, a_host, r_host, nout_h, L_h);
+  // The device-inverted route leaves A^-1 in the slot (K1 runs inside the weights command buffer),
+  // so the host's own A has to be inverted the same way before the two can be compared element by
+  // element. Without this the probe reports every element as different - which is why this check used
+  // to be refused on that route, and why the landmine had no instrument on the path it lives on.
+  // \note gauss_jordan_invert() wants a row-major [A | I] of 2n COLUMNS, not the packed n x n block
+  //       build_correlation_matrices() produces: handing it the packed block makes it read a
+  //       non-matrix as a singular one and say so (measured - the first version of this probe
+  //       reported "the host's own A is singular" for every hop of every run).
+  if (device_inverted && (L_h != 0)) {
+    static thread_local std::array<float, MAX_BLOCK_PILOTS * 2 * MAX_BLOCK_PILOTS> aug_scratch;
+    const std::size_t n2 = 2u * L_h;
+    for (unsigned r = 0; r != L_h; ++r) {
+      for (unsigned c = 0; c != L_h; ++c) {
+        aug_scratch[r * n2 + c]           = a_host[static_cast<std::size_t>(r) * L_h + c];
+        aug_scratch[r * n2 + L_h + c]     = (r == c) ? 1.0F : 0.0F;
+      }
+    }
+    if (!gauss_jordan_invert(span<float>(aug_scratch.data(), static_cast<std::size_t>(L_h) * n2), L_h)) {
+      std::fprintf(stderr,
+                   "[edge_check] the host's own A (L=%u) is SINGULAR below the inverter's pivot floor "
+                   "- there is no inverse to compare the device's against\n",
+                   L_h);
+      return false;
+    }
+    for (unsigned r = 0; r != L_h; ++r) {
+      for (unsigned c = 0; c != L_h; ++c) {
+        a_host[static_cast<std::size_t>(r) * L_h + c] = aug_scratch[r * n2 + L_h + c];
+      }
+    }
+  }
 
   const auto  bits = [](float v) {
     uint32_t u = 0;
@@ -3993,6 +4046,50 @@ bool port_channel_estimator_metal_mmse_impl::check_edge_slots(
   std::fprintf(stderr,
                "[edge_check] checked A=%u (%u differ) R=%u (%u differ) | worst |dev-host| = %.9g | %s\n",
                nof_a, bad_a, nof_r, bad_r, worst, ((bad_a == 0) && (bad_r == 0)) ? "IDENTICAL" : "DIFFERENT");
+  // W = R_hp . A^-1, recomputed on the host from the two host matrices the loops above already have.
+  // This is the split the A/R comparison cannot make: A^-1 and R_hp can BOTH be right in the slots
+  // while the weights the apply kernel reads are wrong, and the channel estimate is h = W . y - so
+  // "the published h moved" (measured: rsrp x2.24, |h| x1.43 on a polluted realization) is a fact
+  // about W, y, or the apply kernel, and nothing else. Only meaningful on the device-inverted route,
+  // where the slot really holds A^-1 (the host's A was inverted above for exactly that reason).
+  if (device_inverted && (L_e != 0) && (nout_e != 0) && (gpu_w != nullptr)) {
+    unsigned  nof_w = 0, bad_w = 0, shown_w = 0;
+    double    worst_w = 0.0;
+    long long first_bad = -1;
+    for (unsigned sys = 0; sys != nof_systems; ++sys) {
+      const float* w_dev = gpu_w + static_cast<std::size_t>(sys_offset + sys) * nout_e * L_e;
+      for (unsigned o = 0; o != nout_e; ++o) {
+        for (unsigned k = 0; k != L_e; ++k) {
+          double acc = 0.0;
+          for (unsigned j = 0; j != L_e; ++j) {
+            acc += static_cast<double>(r_host[static_cast<std::size_t>(o) * L_e + j]) *
+                   static_cast<double>(a_host[static_cast<std::size_t>(j) * L_e + k]);
+          }
+          const float  dev = w_dev[static_cast<std::size_t>(o) * L_e + k];
+          const double d   = std::fabs(static_cast<double>(dev) - acc);
+          ++nof_w;
+          if (d > 1e-3) {
+            ++bad_w;
+            if (first_bad < 0) {
+              first_bad = static_cast<long long>(o) * L_e + k;
+            }
+            if (shown_w < 6) {
+              ++shown_w;
+              std::fprintf(stderr, "[edge_check] W   sys=%u o=%u k=%u host=%.9g dev=%.9g\n", sys, o, k, acc, static_cast<double>(dev));
+            }
+          }
+          worst_w = std::max(worst_w, d);
+        }
+      }
+    }
+    std::fprintf(stderr,
+                 "[edge_check] W: %u elements, %u differ by more than 1e-3 | worst |dev-host| = %.9g | "
+                 "first at %lld\n",
+                 nof_w,
+                 bad_w,
+                 worst_w,
+                 first_bad);
+  }
   std::fprintf(stderr,
                "[edge_check] R slot: last non-zero element at offset %ld (= row %ld, col %ld) | slot is "
                "%u rows x %u cols; block wants %u rows x %u cols; packed block size = %u floats\n",
@@ -4222,6 +4319,31 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
       // The slots WILL hold A and R_hp: the device writes them in this batch's command buffer, so
       // the host must not stage them (it would race the device).
       device_built = true;
+      // The prefix's slot comparison CANNOT run here - the dispatches have not even been committed -
+      // so it is deferred to the hop's completion, which is the mechanism the merged route already
+      // uses. It is the only instrument this route has ever had, and this route is where the landmine
+      // lives: A is a pure function of the host-supplied parameters, so a wrong A^-1 here can only be
+      // the inverse of a stale or half-written A.
+      if (corr_check_enabled()) {
+        pending_corr_check check;
+        check.which           = "standard";
+        check.stats           = *device_stats;
+        check.re_pattern      = args.dmrs_patterns.front().re_pattern;
+        check.b_prb           = b_prb;
+        check.scs_khz         = scs_to_khz(args.scs);
+        check.nout            = nout_c;
+        check.l               = L_c;
+        check.sys_offset      = sys_offset;
+        check.nof_systems     = nof_layers;
+        check.a_stride        = st.L;
+        check.r_stride        = st.nout;
+        check.nof_blocks      = n_blk;
+        check.device_inverted = gpu_invert;
+        for (unsigned sym : dmrs_slots) {
+          check.dmrs_slots.push_back(sym);
+        }
+        pending_corr_checks_.push_back(check);
+      }
     } else {
       device_built = build_slots_on_device(*device_stats,
                                          args.dmrs_patterns.front().re_pattern,
@@ -4628,6 +4750,31 @@ bool port_channel_estimator_metal_mmse_impl::complete_fd_td_estimation_stage()
                    static_cast<double>(gpu_h[0]),
                    static_cast<double>(gpu_h[1]),
                    static_cast<double>(gpu_h[2]));
+    }
+  }
+
+  // TEMPORARY DIAGNOSTIC (OCUDU_CE_Y_HASH): the y slots as the host left them against the same
+  // region as the GPU left it. Every other input of h = W . y has been compared and agrees (A^-1 and
+  // W against host recomputations, R_hp bit for bit), so if this one reports a difference, whatever
+  // rewrote y is the defect - and if it reports none, y is exonerated too and the apply kernel's own
+  // read is the only thing left.
+  if (const char* y_hash = std::getenv("OCUDU_CE_Y_HASH");
+      (y_hash != nullptr) && (gpu_y != nullptr) && (ocudu_ce_y_hash_len != 0)) {
+    // The argument is a BIAS added to the staged value before the comparison, so the probe can be
+    // shown able to speak: 0 is the measurement, any non-zero value makes it report every hop.
+    const double bias = std::strtod(y_hash, nullptr);
+    double       acc  = 0.0;
+    for (unsigned i = 0; i != ocudu_ce_y_hash_len; ++i) {
+      acc += static_cast<double>(gpu_y[i]) * static_cast<double>(i + 1);
+    }
+    if (acc != ocudu_ce_y_hash_staged + bias) {
+      std::fprintf(stderr,
+                   "[y_hash] prb=%u len=%u staged=%.12e now=%.12e | the y slots the host staged are "
+                   "NOT what the GPU left\n",
+                   last_stage_nof_prb,
+                   ocudu_ce_y_hash_len,
+                   ocudu_ce_y_hash_staged,
+                   acc);
     }
   }
 

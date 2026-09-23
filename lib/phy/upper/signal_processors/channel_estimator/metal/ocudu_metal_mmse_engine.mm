@@ -3411,7 +3411,19 @@ static bool encode_run(mmse_engine_impl*     e,
         enc     = [st.cb computeCommandEncoder];
         st.enc  = enc;
       }
-      [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+      // EXPERIMENT (OCUDU_CE_CORR_FENCE=1): an EXPLICIT per-resource barrier instead of the scope
+      // barrier. MTLBarrierScopeBuffers is the only ordering this boundary has ever had, and the
+      // landmine says it does not hold: the prefix fails at 27% while the same content in a command
+      // buffer of its own never does, and neither an encoder boundary nor the dispatch type changes
+      // it. A resource barrier names the two slots the prefix wrote, which is the narrower and
+      // stronger primitive - and if it holds, the fix costs NOTHING, because it stays inside the one
+      // submission the prefix exists to keep.
+      if (std::getenv("OCUDU_CE_CORR_FENCE") != nullptr) {
+        id<MTLResource> corr_slots[2] = {a_buf.buf, rp_buf.buf};
+        [enc memoryBarrierWithResources:corr_slots count:2];
+      } else if (std::getenv("OCUDU_CE_CORR_BARRIER_AFTER") == nullptr) {
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+      }
     }
   }
 
@@ -3436,6 +3448,15 @@ static bool encode_run(mmse_engine_impl*     e,
   }
 
   enc = stage_pipeline(e, st, mmse_inv_pipeline(e));
+  // EXPERIMENT (OCUDU_CE_CORR_BARRIER_AFTER=1): the barrier AFTER the stage switch instead of before
+  // it. This file's own note on the burst path is that there the barrier arrives WITH the stage change
+  // ("in burst mode the pipeline change to K1 below inserts that barrier with the stage switch"), and
+  // burst is the one order in which the landmine has never been observed. If the ordering primitive is
+  // tied to the pipeline change rather than to the encoder, this is the whole fix - and it costs one
+  // instruction, inside the submission the prefix exists to keep.
+  if ((corr != nullptr) && !st.burst && (std::getenv("OCUDU_CE_CORR_BARRIER_AFTER") != nullptr)) {
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+  }
   [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:0];
   [enc setBytes:&L length:sizeof(unsigned) atIndex:1];
   [enc setBytes:&nof_systems length:sizeof(unsigned) atIndex:2];
@@ -3457,6 +3478,17 @@ static bool encode_run(mmse_engine_impl*     e,
     }
   }
 
+  // EXPERIMENT (OCUDU_CE_WEIGHTS_BARRIER=1): the two boundaries of this command buffer that carry NO
+  // barrier at all in non-burst mode - K1 -> K2 and K2 -> apply. The doctrine written next to the
+  // correlation prefix ("K1 -> K1b -> K2 have always shared an encoder and rely on its in-order
+  // execution") is the same claim the prefix's own comment CONTRADICTS by encoding a barrier there;
+  // and the landmine cannot be separated from it by any arm measured so far. This one is decisive in
+  // both directions: if the rate goes to zero the missing barrier is the defect and the fix costs one
+  // instruction, and if it does not, "in-order execution" is vindicated and the search moves on.
+  const bool weights_barrier = (std::getenv("OCUDU_CE_WEIGHTS_BARRIER") != nullptr);
+  if (weights_barrier && !st.burst) {
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+  }
   enc = stage_pipeline(e, st, e->weights_pipe);
   [enc setBuffer:rp_buf.buf offset:rp_buf.offset atIndex:0];
   [enc setBuffer:a_buf.buf offset:a_buf.offset atIndex:1];
@@ -3470,6 +3502,9 @@ static bool encode_run(mmse_engine_impl*     e,
     }
   }
 
+  if (weights_barrier && !st.burst) {
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+  }
   enc = stage_pipeline(e, st, e->apply_pipe);
   [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
   [enc setBuffer:y_buf.buf offset:y_buf.offset atIndex:1];

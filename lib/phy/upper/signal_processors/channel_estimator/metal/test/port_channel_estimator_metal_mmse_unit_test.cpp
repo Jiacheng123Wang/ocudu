@@ -2322,6 +2322,11 @@ int main()
     // systematic error that only some levels trigger).
     std::array<std::array<double, 40>, 8> nv_series_cpu{};
     std::array<std::array<double, 40>, 8> nv_series_mmse{};
+    // ... and the two OTHER quantities the same realization publishes, for the same reason: the
+    // residual K4 reduces is |rx - predicted(h)|^2, so a wrong h and a wrong rx both explode nv, and
+    // the way to tell them apart is whether rsrp (a reduction over |h|^2) and |h| moved with it.
+    std::array<std::array<double, 40>, 8> rsrp_series_mmse{};
+    std::array<std::array<double, 40>, 8> h_series_mmse{};
     unsigned                              i_level = 0;
 
     drift_t dr_nv_cpu;
@@ -2377,12 +2382,13 @@ int main()
         }
 
         auto measure = [&](port_channel_estimator& est, double& nv_out, double& snr_out, double& rsrp_out,
-                           double& h_out, double* nv_one_out) {
+                           double& h_out, double* one) {
           const port_channel_estimator_results& res = est.compute(grid, 0, pilots, cfg);
           const double nv_this = static_cast<double>(res.get_noise_variance());
           nv_out += nv_this;
-          if (nv_one_out != nullptr) {
-            *nv_one_out = nv_this;
+          if (one != nullptr) {
+            one[0] = nv_this;
+            one[1] = static_cast<double>(res.get_rsrp(0));
           }
           snr_out += static_cast<double>(res.get_snr());
           rsrp_out += static_cast<double>(res.get_rsrp(0));
@@ -2394,14 +2400,19 @@ int main()
             acc += static_cast<double>(std::abs(e));
           }
           h_out += acc / 612.0;
+          if (one != nullptr) {
+            one[2] = acc / 612.0;
+          }
         };
 
-        double nv_one_cpu  = 0.0;
-        double nv_one = 0.0;
-        measure(*cpu, nv_cpu, snr_cpu, rsrp_cpu, h_cpu, &nv_one_cpu);
-        measure(*mmse, nv_mmse, snr_mmse, rsrp_mmse, h_mmse, &nv_one);
-        nv_series_cpu[i_level][r]  = nv_one_cpu;
-        nv_series_mmse[i_level][r] = nv_one;
+        double one_cpu[3] = {0.0, 0.0, 0.0};
+        double one_mmse[3] = {0.0, 0.0, 0.0};
+        measure(*cpu, nv_cpu, snr_cpu, rsrp_cpu, h_cpu, one_cpu);
+        measure(*mmse, nv_mmse, snr_mmse, rsrp_mmse, h_mmse, one_mmse);
+        nv_series_cpu[i_level][r]    = one_cpu[0];
+        nv_series_mmse[i_level][r]   = one_mmse[0];
+        rsrp_series_mmse[i_level][r] = one_mmse[1];
+        h_series_mmse[i_level][r]    = one_mmse[2];
       }
 
       const double n = static_cast<double>(n_real);
@@ -2474,6 +2485,17 @@ int main()
         std::printf("\n  lvl %.3e mmse:", levels[il]);
         for (unsigned r = 0; r != n_real; ++r) {
           std::printf(" %.4e", nv_series_mmse[il][r] / (levels[il] * levels[il]));
+        }
+        // The two companions of every nv above: if the polluted realization's rsrp and |h| moved with
+        // it, the channel estimate is what went wrong and K4 only reported it; if they did not, K4's
+        // residual alone is wrong and the search is inside the noise reduction.
+        std::printf("\n  lvl %.3e mmse rsrp/l^2:", levels[il]);
+        for (unsigned r = 0; r != n_real; ++r) {
+          std::printf(" %.4e", rsrp_series_mmse[il][r] / (levels[il] * levels[il]));
+        }
+        std::printf("\n  lvl %.3e mmse |h|/l   :", levels[il]);
+        for (unsigned r = 0; r != n_real; ++r) {
+          std::printf(" %.4e", h_series_mmse[il][r] / levels[il]);
         }
         std::printf("\n");
       }
