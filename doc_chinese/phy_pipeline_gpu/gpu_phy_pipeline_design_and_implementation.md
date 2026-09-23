@@ -9340,6 +9340,42 @@ cu/du/fapi/gtpu/hal/lib/mac/ngap/nrppa/ntn/ofh/pdcp/phy/radio/rlc/rohc/rrc/sdap/
 **blocked 占多数 ⇒ block 开着却没起作用**（那就去修 block/commit 侧）。
 两个结果的修法完全不同，而这个计数器把它们一次分开。
 
+#### 5.9.114 ★★ B（审计 pass 3 的缺口）：三条契约拿到反向臂，三条写明配方；**门本身漏了 121 个测试**
+
+**① pass 3 的欠账**：§5.9.102 第 3 遍记"其余 6 项契约：未逐项实跑"。本轮补上三条，另三条写明为什么不能离线做。
+
+| 契约项 | 反向臂 | 位置 |
+|---|---|---|
+| **`ce device estimates`** | 同一后端、只切**设备视图**：关 ⇒ `0 device, N host` ⇒ 判 **false**；开 ⇒ `N device` ⇒ **true** | `pusch_demodulator_deferred_chain_test.cpp`（**独立 ctest 入口**，§5.9.112）|
+| **`zero-copy wraps`** | 干净缓存下 **true**；`shared_queue::notify_wrap_misaligned()` 后 ⇒ `1 misaligned -> FAILED` | `dft_release_adopt_metal_test.mm`（**必须**在这里：那个计数在 ObjC++ 专用头后面）|
+| **`host device data crossings`** | 先 `count_device_hop()`（让检查适用）⇒ **true**；再 `count_host_read_site(...)` ⇒ `1.00 read(s)/hop` ⇒ **false** | `dft_processor_metal_unit_test.cpp` |
+
+三条都是走**契约自己的 `evaluate()`**（`phy_pipeline_checks()` 里按名字找），验的是**判决**，不是打印 —— "条件动不了的检查不是检查"。
+
+**② 三条做不到离线（写明配方，不假装）**
+
+| 契约项 | 计数器在哪 | 需要什么才能造 |
+|---|---|---|
+| `radio sample continuity` | `lower_phy_baseband_processor.cpp` 的**文件内** `ul_rx_stats`（`gaps` 在 685 行累加）| 一条**接收流有断点**的腿/夹具（`lower_phy_test` 的 fixture 喂时间戳时留一个洞）|
+| `cfo compensation` | 同一族的宿主计数器（`count_round_trip`）| 一条**真的施加了补偿**的腿：生产上只有 NTN Doppler 命令或 `cfo` 控制台命令会让 `applies_compensation()` 为真 |
+| `baseband metrics` | 同上（`measured` / `consumed`）| 打开度量但**不消费**的配置（判据是 `measured == 0 \|\| consumed`）|
+
+**③ 两个教训（都是"检查的可见性"这一类）**
+1. **计数器的可见性决定能不能做反向臂**：`notify_wrap_misaligned()` 与 `count_host_read_site()` 是公开静态 ⇒ 臂可写；
+   另三条的计数器是 TU 内静态 ⇒ 只能从**真实路径**驱动（腿/夹具）。⇒ 想把契约"逐项证明能红"，就得让计数器可被测试触达，
+   或者接受"用腿证明"。
+2. **臂必须跑在计数器干净的状态**：`ce device estimates` 的判据是 `device > 0` ⇒ 整跑那个二进制时前面用例已经把计数推过 0
+   ⇒ 该用例**自检并 SKIP**（打印它看到的计数），由**独立 ctest 入口**给它一个干净进程；`host device data crossings` 的臂
+   则必须排在**故意暂存拷贝**那条臂**之前**（后者会写一次 host write）。两条都是"先看计数器干不干净，再谈判决"。
+
+**④ ★★ 顺手发现的**门缺口**（比这三条臂更重要）
+审计第 2 遍用的 ctest 过滤器 `metal|ul_pipeline_probe|puxch|lower_phy|du_low|o_du` **匹配 0 个**名字里带 `pusch` 的测试 ——
+而 `pusch` 有 **121** 个（含拥有设备侧信道估计路径的那个二进制，也就是三条契约项所判的东西）。
+把 `pusch` 加进过滤器后是 **157 个测试，全部通过** ⇒ **门是瞎的，不是宽的**。**从今往后用扩展后的过滤器**：
+```bash
+ctest --test-dir build -R "metal|ul_pipeline_probe|puxch|pusch|lower_phy|du_low|o_du"   # 157 项
+```
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，

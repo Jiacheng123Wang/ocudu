@@ -38,6 +38,8 @@
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/phy/phy_pipeline_grid_ready.h"
+#include "ocudu/phy/phy_pipeline_mode.h"
+#include "ocudu/phy/phy_pipeline_contract.h"
 
 #include "ocudu/support/macos_compat.h"
 
@@ -47,7 +49,9 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <thread>
 
@@ -967,6 +971,43 @@ int main()
     // `evicted_unproduced` must stay at or below `late` (each of its entries owes a late commit) and well
     // below `evicted` (the registry prefers to evict an entry that was already produced). A mis-wired split
     // shows up as `evicted_unproduced == evicted` on a leg that is otherwise healthy.
+
+    // ---- the "zero-copy wraps" contract arm (5.9.114) ---------------------------------------------
+    //
+    // Pass 3 of the audit (5.9.102) recorded that six of the eight contract checks had never been driven
+    // red. This is one of them, and it lives HERE because its counter is reached through an
+    // Objective-C++-only header (ocudu_metal_queue.h): the check claims the wrap cache never replaces, fails
+    // or misaligns a mapping, and the cache has a public reporter for the misaligned case. What is verified
+    // is the VERDICT the contract prints, not a message: the control reads it with the counters clean (this
+    // test wraps buffers, so the check is applicable rather than "not applicable"), and the report must
+    // turn it red.
+    {
+      phy_pipeline_mode_registry::set(phy_pipeline_mode::gpu);
+      const phy_pipeline_check* wraps_check = nullptr;
+      for (const phy_pipeline_check& candidate : phy_pipeline_checks()) {
+        if (std::strcmp(candidate.name, "zero-copy wraps") == 0) {
+          wraps_check = &candidate;
+        }
+      }
+      if (wraps_check == nullptr) {
+        std::fprintf(stderr, "[dft-release] FAIL: the 'zero-copy wraps' check is not registered\n");
+        return 1;
+      }
+      const std::optional<bool> control = wraps_check->evaluate();
+      metal::shared_queue::notify_wrap_misaligned();
+      const std::optional<bool> armed = wraps_check->evaluate();
+      if (!control.has_value() || !*control || !armed.has_value() || *armed) {
+        std::fprintf(stderr,
+                     "[dft-release] FAIL: 'zero-copy wraps' did not go red on a misaligned wrap "
+                     "(control=%s, armed=%s)\n",
+                     control.has_value() ? (*control ? "true" : "false") : "n/a",
+                     armed.has_value() ? (*armed ? "true" : "false") : "n/a");
+        return 1;
+      }
+      std::fprintf(stderr,
+                   "[dft-release] PASS: 'zero-copy wraps' reads true on a clean cache and false after a "
+                   "misaligned wrap\n");
+    }
 
     std::fprintf(stderr,
                  "[dft-release] PASS: the block was handed over uncommitted, the lane adopted it, the "

@@ -20,6 +20,7 @@
 #include "ocudu/phy/support/resource_grid_reader.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/phy/phy_pipeline_contract.h"
+#include "ocudu/phy/phy_pipeline_crossings.h"
 #include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/phy/support/support_factories.h"
 #include "ocudu/support/macos_compat.h"
@@ -108,6 +109,68 @@ int main()
     // The check answers only for a PUBLISHED mode (an unpublished process reads "not applicable"), and the
     // registry publishes process-wide with no way back - which is why this arm is its own ctest entry.
     phy_pipeline_mode_registry::set(phy_pipeline_mode::gpu);
+
+    auto evaluate_named = [](const char* name, std::string& evidence) -> std::optional<bool> {
+      const phy_pipeline_check* found = nullptr;
+      for (const phy_pipeline_check& candidate : phy_pipeline_checks()) {
+        if (std::strcmp(candidate.name, name) == 0) {
+          found = &candidate;
+        }
+      }
+      if (found == nullptr) {
+        evidence = "(check not registered)";
+        return std::nullopt;
+      }
+      FILE* capture = std::tmpfile();
+      if (capture == nullptr) {
+        evidence = "(no capture)";
+        return std::nullopt;
+      }
+      std::fflush(stderr);
+      const int saved = dup(fileno(stderr));
+      dup2(fileno(capture), fileno(stderr));
+      const std::optional<bool> verdict = found->evaluate();
+      std::fflush(stderr);
+      dup2(saved, fileno(stderr));
+      close(saved);
+      std::rewind(capture);
+      evidence.clear();
+      char buf[512];
+      while (std::fgets(buf, sizeof(buf), capture) != nullptr) {
+        evidence += buf;
+      }
+      std::fclose(capture);
+      return verdict;
+    };
+
+
+    // (b) host device data crossings: one host read of device data, on a run with a device hop, must break
+    // the gpu-mode claim (0.00 of each per hop).
+    {
+      // The check is registered by the modules that audit themselves, and nothing in this binary does, so
+      // the arm registers it here - deliberately, and names itself as the reporter so the evidence line
+      // says how much of the lane the number covers.
+      register_phy_pipeline_crossing_check();
+      phy_pipeline_crossings::declare_reporter("dft unit test arm");
+      phy_pipeline_crossings::count_device_hop();
+      std::string               evidence;
+      const std::optional<bool> control = evaluate_named("host device data crossings", evidence);
+      phy_pipeline_crossings::count_host_read_site("dft unit test arm", 8);
+      std::string               armed_evidence;
+      const std::optional<bool> armed = evaluate_named("host device data crossings", armed_evidence);
+      if (!control.has_value() || !*control || !armed.has_value() || *armed) {
+        std::fprintf(stderr,
+                     "FAIL: host device data crossings did not go red on a host read (control [%s], armed [%s])\n",
+                     evidence.c_str(),
+                     armed_evidence.c_str());
+        ok = false;
+      }
+      else {
+        std::printf("  host device data crossings arm: control OK -> one host read -> %s\n",
+                    armed_evidence.c_str());
+      }
+    }
+
 
     auto contract_line = []() -> std::string {
       // report_phy_pipeline_contract() writes to stderr, so it is captured exactly as the operator reads it.
@@ -245,6 +308,16 @@ int main()
                     contract_line().c_str());
       }
     }
+
+    // ---- one more contract arm, driven through its own public counter (5.9.114) ---------------------
+    //
+    // Pass 3 of the audit (5.9.102) recorded that six of the eight contract checks had never been driven
+    // red. This closes one of them: the crossings table the lane's modules write into has a public entry
+    // point, so the check can be run through the same evaluate() the contract calls - what is verified is
+    // the VERDICT, because a check whose condition cannot move is not a check. The arm is preceded by a
+    // control that reads it with the counters clean. (`zero-copy wraps` needs the same treatment, but its
+    // misalignment reporter lives behind an Objective-C++-only header, so that arm is in
+    // dft_release_adopt_metal_test.mm instead.)
 
     compat::aligned_free(ctrl_in);
     compat::aligned_free(ctrl_out);
