@@ -3930,6 +3930,49 @@ bool port_channel_estimator_metal_mmse_impl::check_edge_slots(
   const auto  a_host = span<float>(a_host_scratch.data(), a_host_scratch.size());
   const auto  r_host = span<float>(r_host_scratch.data(), r_host_scratch.size());
   build_correlation_matrices(stats, re_pattern, b_prb, dmrs_slots, scs_khz, a_host, r_host, nout_h, L_h);
+  // TEMPORARY DIAGNOSTIC: keep the PREVIOUS hop's raw A (before the inversion below) and its shape,
+  // so the polluted slot can be tested against it. The two mechanisms that produce a wrong A^-1 have
+  // different fixes and look different here: "K1 read a half-written A" gives the inverse of *some*
+  // matrix, while "the correlation prefix never ran" hands K1 the PREVIOUS hop's A^-1 to invert, so
+  // the slot ends up holding the previous hop's RAW A - which is exactly what this comparison reads.
+  static thread_local std::array<float, MAX_BLOCK_PILOTS * MAX_BLOCK_PILOTS> a_host_prev;
+  static thread_local unsigned                                               L_prev    = 0;
+  static thread_local unsigned                                               nout_prev = 0;
+  if (device_inverted && (L_h != 0) && (L_prev == L_h) && (nout_prev == nout_h) && (gpu_a != nullptr)) {
+    unsigned nof_p = 0, bad_p = 0;
+    double   worst_p = 0.0;
+    for (unsigned sys = 0; sys != nof_systems; ++sys) {
+      const float* a_slot = gpu_a + static_cast<std::size_t>(sys_offset + sys) * a_stride * a_stride;
+      for (unsigned r = 0; r != L_h; ++r) {
+        for (unsigned c = 0; c != L_h; ++c) {
+          const double d =
+              std::fabs(static_cast<double>(a_slot[static_cast<std::size_t>(r) * a_stride + c]) -
+                        static_cast<double>(a_host_prev[static_cast<std::size_t>(r) * L_h + c]));
+          ++nof_p;
+          if (d > 1e-3) {
+            ++bad_p;
+          }
+          worst_p = std::max(worst_p, d);
+        }
+      }
+    }
+    std::fprintf(stderr,
+                 "[edge_check] slot vs the PREVIOUS hop's raw A: %u of %u differ by more than 1e-3, "
+                 "worst = %.6g%s\n",
+                 bad_p,
+                 nof_p,
+                 worst_p,
+                 (bad_p == 0) ? "  <- the slot IS the previous hop's A: the prefix never ran" : "");
+  }
+  if (device_inverted && (L_h != 0)) {
+    for (unsigned r = 0; r != L_h; ++r) {
+      for (unsigned c = 0; c != L_h; ++c) {
+        a_host_prev[static_cast<std::size_t>(r) * L_h + c] = a_host[static_cast<std::size_t>(r) * L_h + c];
+      }
+    }
+    L_prev    = L_h;
+    nout_prev = nout_h;
+  }
   // The device-inverted route leaves A^-1 in the slot (K1 runs inside the weights command buffer),
   // so the host's own A has to be inverted the same way before the two can be compared element by
   // element. Without this the probe reports every element as different - which is why this check used
