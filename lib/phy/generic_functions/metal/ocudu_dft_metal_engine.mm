@@ -66,6 +66,16 @@ struct dft_stats_t {
   /// describe. Counted because a silent copy here is exactly how "the transform reads the radio
   /// buffer" stops being true without any counter saying so.
   std::atomic<uint64_t> wrap_copies{0};
+  /// WHY a plain-route transform got a command buffer of its own (5.9.113). The plain route (`submit_at`)
+  /// either joins an OPEN BLOCK - one command buffer per slot, which is the batching the block API exists
+  /// for - or commits a buffer carrying just its own transform. Measuring which of the two happens, and
+  /// whether the engine had even been told a slot, is what separates "nobody told the front end which slot
+  /// these samples belong to" from "a block was open and the transform did not join it": two different
+  /// defects with two different fixes, and no way to tell them apart from the commit count alone.
+  std::atomic<uint64_t> plain_with_block{0};
+  std::atomic<uint64_t> plain_without_block{0};
+  /// Of the above, the ones submitted before any slot was ever told (see set_lane_slot()).
+  std::atomic<uint64_t> plain_without_lane_slot{0};
   /// Blocks HANDED OVER instead of committed (see release_block()). Zero on every run that does not arm
   /// OCUDU_DFT_RELEASE_BLOCK, which is what makes "the factory path never takes this route" a counter and
   /// not a reading of the code.
@@ -139,6 +149,20 @@ static void dft_stats_keepalives_released(uint64_t nof)
 static void dft_stats_radio_input()
 {
   dft_stats().radio_inputs.fetch_add(1, std::memory_order_relaxed);
+}
+
+/// Counts one plain-route transform by WHY it did or did not get a command buffer of its own (5.9.113).
+static void dft_stats_plain_submit(bool with_block, bool with_lane_slot)
+{
+  dft_stats_t& s = dft_stats();
+  if (with_block) {
+    s.plain_with_block.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    s.plain_without_block.fetch_add(1, std::memory_order_relaxed);
+    if (!with_lane_slot) {
+      s.plain_without_lane_slot.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
 }
 
 /// Counts one wrap that had to stage a copy (see dft_stats_t::wrap_copies).
@@ -234,15 +258,23 @@ static void register_dft_contract_check()
          // UNIT CARE: `staged` counts WRAPS (one wrap_buffer() call each), not transforms - a run wraps its
          // input and its output - so it is reported apart from the transform counts instead of being
          // subtracted from them. The old form mixed populations; mixing units would be the same mistake.
+         const uint64_t plain_none  = s.plain_without_block.load(std::memory_order_relaxed);
+         const uint64_t plain_block = s.plain_with_block.load(std::memory_order_relaxed);
+         const uint64_t plain_no_slot = s.plain_without_lane_slot.load(std::memory_order_relaxed);
          std::fprintf(stderr,
                       "%llu transform(s) went through the two submit routes: the hand-over route carried %llu "
-                      "(%.1f%%), the plain route %llu; %llu buffer wrap(s) had to stage a host copy",
+                      "(%.1f%%), the plain route %llu; %llu buffer wrap(s) had to stage a host copy. "
+                      "Plain route by why: %llu got their own command buffer (%llu of those before any slot "
+                      "was told to the engine), %llu joined an open block",
                       static_cast<unsigned long long>(total),
                       static_cast<unsigned long long>(radio),
                       (total == 0) ? 0.0
                                    : (100.0 * static_cast<double>(radio) / static_cast<double>(total)),
                       static_cast<unsigned long long>(committed),
-                      static_cast<unsigned long long>(staged));
+                      static_cast<unsigned long long>(staged),
+                      static_cast<unsigned long long>(plain_none),
+                      static_cast<unsigned long long>(plain_no_slot),
+                      static_cast<unsigned long long>(plain_block));
          if ((total == 0) || !phy_pipeline_mode_registry::is_published() ||
              (phy_pipeline_mode_registry::get() == phy_pipeline_mode::cpu)) {
            // No Metal transform in this run, or a run that never claimed the offloaded pipeline (a
@@ -337,6 +369,7 @@ static void dft_stats_note_depth(uint64_t /*depth*/) {}
 static void dft_stats_commit(uint64_t /*nof_transforms*/ = 1) {}
 static void dft_stats_wait() {}
 static void dft_stats_wrap_copy() {}
+static void dft_stats_plain_submit(bool /*with_block*/, bool /*with_lane_slot*/) {}
 static void dft_stats_radio_input() {}
 static void dft_stats_release() {}
 static void dft_stats_released_wait() {}
@@ -1463,9 +1496,12 @@ bool dft_metal_engine::submit_at(
     // commit_open() - ending it here would close the buffer the next transform still has to encode
     // into). A caller that asked for accumulation must not ask for a completion wait on a single
     // transform either: there is nothing committed to wait for yet.
+    dft_stats_plain_submit(/*with_block=*/true, engine->has_lane_slot);
     ++engine->open_transforms;
     return true;
   }
+  // Its own command buffer: the instrument asks WHY (see dft_stats_t::plain_without_block).
+  dft_stats_plain_submit(/*with_block=*/false, engine->has_lane_slot);
   [enc endEncoding];
   commit_front_end(engine, cmd_buf, nof_transforms);
   if (!wait_for_completion) {

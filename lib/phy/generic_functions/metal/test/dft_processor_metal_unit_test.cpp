@@ -23,6 +23,7 @@
 #include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/phy/support/support_factories.h"
 #include "ocudu/support/macos_compat.h"
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <string>
@@ -185,6 +186,66 @@ int main()
         std::printf("  dft radio inputs arm: control [%s] -> armed [%s]\n", control.c_str(), armed.c_str());
       }
     }
+    // ---- the plain route's own-command-buffer counters, BOTH arms (5.9.113) -----------------------
+    //
+    // The instrument exists to say WHY a transform got a command buffer of its own, because two very
+    // different defects produce the same commit count: "nobody told the front end which slot these samples
+    // belong to, so no block was ever opened" (a caller to fix) and "a block was open and the transform did
+    // not join it" (the block path to fix). The arms drive both states through the engine's own API.
+    auto plain_counts = [&]() -> std::array<long, 2> {
+      const std::string line = contract_line();
+      // "... Plain route by why: N got their own command buffer (M of those before any slot was told to the
+      // engine), K joined an open block"
+      const std::size_t at = line.find("Plain route by why:");
+      if (at == std::string::npos) {
+        return {-1, -1};
+      }
+      const std::size_t own = line.find(" got their own command buffer", at);
+      const std::size_t blk = line.find(" joined an open block", at);
+      auto number_before = [&line](std::size_t pos) -> long {
+        while ((pos > 0) && ((line[pos - 1] == ' ') || ((line[pos - 1] >= '0') && (line[pos - 1] <= '9')))) {
+          --pos;
+        }
+        return std::strtol(line.c_str() + pos, nullptr, 10);
+      };
+      return {number_before(own), number_before(blk)};
+    };
+
+    // ARM 1: no block is open, so the transform must be counted as "its own command buffer".
+    const std::array<long, 2> before_own = plain_counts();
+    (void)engine.run(ctrl_in, ctrl_out, 1);
+    const std::array<long, 2> after_own = plain_counts();
+    if ((before_own[0] < 0) || (after_own[0] < 0) || (after_own[0] != before_own[0] + 1) ||
+        (after_own[1] != before_own[1])) {
+      std::fprintf(stderr,
+                   "FAIL: a transform with no block open was not counted as its own command buffer "
+                   "(before [%ld, %ld], after [%ld, %ld])\n",
+                   before_own[0], before_own[1], after_own[0], after_own[1]);
+      ok = false;
+    }
+
+    // ARM 2: with a block open the same transform must join it instead - and the block must commit.
+    if (!engine.begin_block()) {
+      std::fprintf(stderr, "FAIL: begin_block() refused with the block batching on\n");
+      ok = false;
+    }
+    else {
+      (void)engine.run(ctrl_in, ctrl_out, 1);
+      const std::array<long, 2> after_block = plain_counts();
+      const bool                committed   = engine.commit_open();
+      if (!committed || (after_block[1] != after_own[1] + 1) || (after_block[0] != after_own[0])) {
+        std::fprintf(stderr,
+                     "FAIL: a transform submitted with a block open did not join it (own %ld -> %ld, "
+                     "block %ld -> %ld, commit_open=%d)\n",
+                     after_own[0], after_block[0], after_own[1], after_block[1], committed ? 1 : 0);
+        ok = false;
+      }
+      else {
+        std::printf("  plain route arms: own command buffer +1 with no block, joined block +1 with one -> %s\n",
+                    contract_line().c_str());
+      }
+    }
+
     compat::aligned_free(ctrl_in);
     compat::aligned_free(ctrl_out);
     compat::aligned_free(arm_in);
