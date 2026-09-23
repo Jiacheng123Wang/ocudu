@@ -9934,6 +9934,64 @@ PRACH 那 **1200 变换/s** 现在是**每变换一条命令缓冲 + 一次 wait
 ——"单次绿等于零证据"反过来同样成立：**单次红也不是证据，直到它重复**。
 （同一条规矩已经在 §6.5 的 MMSE 单测偶发上用了很久，这里只是把它扩到门本身。）
 
+#### 5.9.122 ★★ Ubuntu 构建失败（用户报告）：**两个工具链的 `-Wshadow` 覆盖不同**，且"臂假定仪表一定存在"
+
+**① 症状与根因（在 `jwang@192.168.0.106:~/work/ocudu`，树 `8f05577340` 上复现）**
+
+```
+tests/unittests/support/executors/ul_pipeline_probe_test.cpp:68:81:
+  error: declaration of 'sps' shadows a previous local [-Werror=shadow]
+cc1plus: all warnings being treated as errors
+```
+第 68 行是反向臂里的 lambda 形参 `unsigned sps`，它遮蔽了同一函数里第 43 行的 `constexpr unsigned sps = 7680`。
+**这不是语义问题**：根 CMakeLists 对两个工具链都开了 `-Wshadow`（`:313`）与 `-Werror`（`:231`），
+但**两边的覆盖范围不同**。最小复现（同一个文件、同一组开关）：
+
+| 工具链 | `clang++ -Wshadow -Werror`（本机 macOS）| `g++ -Wshadow -Werror`（Ubuntu）|
+|---|---|---|
+| lambda 形参遮蔽外层局部变量 | **不报** | **`error: declaration of 'sps' shadows a previous local`** |
+
+⇒ **macOS 绿不是 Ubuntu 的证据**。修法只能是**改名**（lambda 形参 `sps → samples_per_slot`），
+**不是关掉警告**——严格的那一侧赢。
+
+**② 同一个构建还暴露了第二条（我上一轮引入的）**：`ENABLE_METAL_STATS=OFF` 的构建里
+**契约检查根本不注册**（第 8 条在 `#if defined(OCUDU_METAL_STATS)` 内），而 `host sample assembly` 的臂写了
+`ASSERT_NE(check, nullptr) << "not registered"` ⇒ 在 Linux 上**因为"没有仪表"而失败**。
+两处修正：① 臂改成 **`GTEST_SKIP()` 并说明原因**（"这个构建没把仪表编进来"不是被测代码的判决）；
+② CMake 上给该 ctest 入口加 **`SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]"`**，让 ctest 把它显示成
+**Skipped 而不是 passed** ——"这里没跑"不能长得像"这里过了"（与 §5.9.120 ⑦ 同一条纪律）。
+
+**③ 验证（两侧都留读数）**
+
+| 侧 | 读数 |
+|---|---|
+| Ubuntu `8f05577340` + 本修复 | 全量 `cmake --build build -j` **无错误**；`ctest -L phy` = **100% passed, 0 failed out of 170**，其中 `lower_phy_uplink_processor_assembly_arm` 与既有的 `ul_pipeline_probe_test.compiled_out_without_flow_probes` 显示为 **Skipped**（该构建 `ENABLE_METAL_STATS=OFF`，170 < macOS 的 180 就是这个原因）|
+| macOS（探针开着） | 臂**仍然真的动判据**：`host sample assembly: 14 of 28 … 14 copied into a symbol buffer -> FAILED` 且用例通过；`ul_pipeline_probe_test` **6/6** |
+
+**④ 规矩（本轮新增）**
+
+1. **改共享代码（`lib/`、`tests/`、`apps/`）时，"macOS 门全绿"只说明 Clang 那一侧；
+   必须让 Ubuntu 侧也构建一次**（或至少用 GCC 编一遍动过的 TU），否则这一类错误会一路带到远端。
+   `milestone_audit.sh` 现在有一条**可选**的异工具链 INFO：设 `MILESTONE_AUDIT_REMOTE=jwang@192.168.0.106`
+   就会顺带报一次远端的构建结果（**故意不是判据**：那台机器不总是在线）。
+2. **臂要假定"仪表可能不在"**：契约各项的注册跟着**代码路径 + 构建开关**走（§5.9.120 ③ 已量到 `N` 可缩）。
+   臂在仪表缺失时**跳过并说明**，并且**要在 ctest 层显示为跳过**。
+
+**⑤ ★ 同一天又踩到一次"并行跑"，这次是门自己：已加互斥锁**
+
+我在**前一次审计还没结束时**又启动了第二次 ⇒ **两个 `milestone_audit.sh` 并行 1.7 分钟**
+（00:22:01 起的那次跑到 00:24:32，第二次 00:22:50 起来），两者都在驱动同一个 `ul_chain_replay`。
+结果是**四条相互独立的假失败同时出现**：逐字节网读 `88 字节 / 14 捕获`（登记值是稳定的 131）、
+`ab_dumps` 臂读 **1993 字节**（本来恒为 0）、L1b 四臂全部 `differing>0`（本来四臂全 0）、
+以及 MMSE 速率臂冒出一个 `worst_mmse_drift=395.650` 的**"雷"级离群**。
+**同一份树、串行重跑一遍：23 PASS / 0 FAIL / 0 RED = GREEN** ⇒ 四条全部消失。
+这正是 §6.3 早就写下的那句话（**并行实例会给出错误结果**），只是这次由门自己犯。
+**处置**：门现在**抢一把锁**（`mkdir` 原子锁 + PID 存活检查，死锁自动清理）——
+**已有实例在跑就 `exit 4` 拒绝启动**，并把这条实测（四项假失败的数字）印在拒绝信息里。
+自检：并行启动两次，第二个 `rc=4`、拒绝理由逐条打印。
+（前一条 §5.9.121 ⑥ 记的 `value_net problems=3` 瞬时红属于同一类；那一次没有抓到并发的进程，
+但现在有了机制与实例，**"先查是不是在并行跑"从经验变成了门里的一条硬规矩**。）
+
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，

@@ -18,3 +18,8 @@ add_test(lower_phy_uplink_processor_test lower_phy_uplink_processor_test)
 # skipping the others - which is the honest outcome, not a silent pass.
 add_test(lower_phy_uplink_processor_assembly_arm lower_phy_uplink_processor_test
          --gtest_filter=*HostSampleAssemblyContractArms/0)
+# A build without the probes (ENABLE_METAL_STATS=OFF, the default configure) does not register that check,
+# so the arm has nothing to move and SKIPS itself with that reason. Make ctest show it as skipped rather
+# than as a pass: "the arm did not run here" must not look like "the arm passed here".
+set_tests_properties(lower_phy_uplink_processor_assembly_arm PROPERTIES
+                     SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]")

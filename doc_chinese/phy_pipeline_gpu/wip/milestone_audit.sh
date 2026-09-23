@@ -39,7 +39,31 @@ if [ -z "$LEG" ]; then
   LEG=$(ls -1t "$LOGDIR"/gnb_gpu_*.log.stderr 2>/dev/null | head -1 | xargs -I{} basename {} .log.stderr | sed 's/^gnb_gpu_//')
 fi
 
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d)
+
+# ---------------------------------------------------------------- 0a. RUN ALONE, OR NOT AT ALL
+# Most of this script drives one GPU replay, and this line's own record (6.3) says two replay instances in
+# parallel give WRONG results. Measured 2026-09-24, by accident: two of these audits overlapped for 1.7
+# minutes and produced four false failures - the byte net read 88 bytes over 14 captures, ab_dumps read
+# 1993 differing bytes where it reads 0, all four L1b hop arms reported differences, and the MMSE rate arm
+# produced a "landmine" outlier at drift 395. Every one of them vanished when the same audit ran alone.
+# A gate that can be run twice is a gate that will be run twice, so it refuses instead.
+LOCK=${TMPDIR:-/tmp}/ocudu_milestone_audit.lock
+if ! mkdir "$LOCK" 2>/dev/null; then
+  owner=$(cat "$LOCK/pid" 2>/dev/null || echo "")
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    echo "REFUSING to run: another milestone audit is already running (pid $owner)." >&2
+    echo "  Two of these in parallel drive the same GPU replay and report FALSE failures" >&2
+    echo "  (measured 2026-09-24: byte net 88 bytes/14 captures, ab_dumps 1993 bytes, L1b 4/4 arms," >&2
+    echo "  a 'landmine' outlier at drift 395 - all of which disappear when run alone)." >&2
+    exit 4
+  fi
+  rm -rf "$LOCK"          # the previous run died without cleaning up
+  mkdir "$LOCK" || exit 4
+fi
+echo $$ >"$LOCK/pid"
+trap 'rm -rf "$T" "$LOCK"' EXIT
+
 rows=()
 # check <name> <expected text> <verdict: PASS|FAIL|RED> <detail>
 check() { rows+=("$1|$2|$3|$4"); }
@@ -239,6 +263,25 @@ bash $W/a12_attribution_gate.sh "$LEG" >"$T/a12" 2>&1
 al=$(grep -E "criteria pass" "$T/a12" | tail -1)
 check "leg $LEG: A1-2 attribution gate (5.9.118) 5/5" "5 of 5" \
       "$(echo "$al" | grep -q "5 of 5 criteria pass" && echo PASS || echo "$([ -z "$al" ] && echo RED || echo FAIL)")" "${al:-<unreadable>}"
+
+# ---------------------------------------------------------------- 6. the other toolchain (opt-in, INFO)
+# macOS/Clang and Linux/GCC do NOT share their -Wshadow coverage. Measured 2026-09-24 with the same
+# -Wshadow -Werror: a lambda parameter shadowing an enclosing local is an ERROR under g++ and SILENT
+# under clang++, and that difference is what broke the Ubuntu build while this tree was green (5.9.122).
+# So: a green run here is evidence about Clang, not about Ubuntu. Set MILESTONE_AUDIT_REMOTE=<user@host>
+# (expecting the tree at ~/work/ocudu) and this prints what the other toolchain did. INFORMATION, not a
+# criterion - that machine is not always reachable, and a gate that needs it would be a gate nobody runs.
+if [ -n "${MILESTONE_AUDIT_REMOTE:-}" ]; then
+  if rout=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$MILESTONE_AUDIT_REMOTE" \
+             'cd ~/work/ocudu && printf "HEAD %s | " "$(git rev-parse --short=10 HEAD)" && cmake --build build -j$(nproc) 2>&1 | grep -cE "error:|Error [0-9]" | sed "s/^/errors=/"' 2>&1); then
+    check "[INFO] remote build ($MILESTONE_AUDIT_REMOTE)" "errors=0" INFO "$(echo "$rout" | tr '\n' ' ')"
+  else
+    check "[INFO] remote build ($MILESTONE_AUDIT_REMOTE)" "errors=0" INFO "unreachable/failed: $(echo "$rout" | tail -1)"
+  fi
+else
+  check "[INFO] remote build (other toolchain)" "errors=0" INFO \
+        "not checked: set MILESTONE_AUDIT_REMOTE=jwang@192.168.0.106 to include it - Clang-green is not GCC-green"
+fi
 
 # ---------------------------------------------------------------- report
 echo "milestone audit   (tree $(git rev-parse --short=10 HEAD), leg ${LEG})"

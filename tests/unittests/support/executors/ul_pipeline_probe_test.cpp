@@ -65,11 +65,12 @@ TEST(ul_slot_completion_test, the_rule_and_the_one_it_replaced)
 
   // ★ REVERSE ARM. The rule this replaced, written out, must DISAGREE with the one above on BOTH measured
   // cases - so an edit that reintroduces it fails here instead of quietly emptying a leg's timeline.
-  const auto old_rule = [](uint64_t block_begin, unsigned nof_samples, unsigned sps, uint64_t& out) -> bool {
-    const uint64_t offset           = block_begin % sps;
-    const uint64_t to_next_boundary = sps - offset;
+  const auto old_rule = [](uint64_t block_begin, unsigned nof_samples, unsigned samples_per_slot,
+                           uint64_t& out) -> bool {
+    const uint64_t offset           = block_begin % samples_per_slot;
+    const uint64_t to_next_boundary = samples_per_slot - offset;
     if (to_next_boundary < nof_samples) {
-      out = (block_begin + to_next_boundary) / sps;
+      out = (block_begin + to_next_boundary) / samples_per_slot;
       return true;
     }
     return false;
