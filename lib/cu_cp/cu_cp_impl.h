@@ -268,6 +268,8 @@ private:
                                                          span<const du_reported_cell> cells) override;
   void                          handle_du_cells_removed(span<const nr_cell_identity> cells) override;
 
+  void handle_du_added(cu_cp_du_index_t du_index) override;
+
   void handle_du_removed(cu_cp_du_index_t du_index) override;
 
   async_task<void> handle_transaction_info_loss(const ue_transaction_info_loss_event& ev) override;

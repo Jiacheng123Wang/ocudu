@@ -235,6 +235,9 @@ public:
   /// intent.
   virtual void handle_du_cells_removed(span<const nr_cell_identity> cells) = 0;
 
+  /// \brief Handle the addition of a DU, giving the CU-CP-wide components a route to its F1AP.
+  virtual void handle_du_added(cu_cp_du_index_t du_index) = 0;
+
   /// \brief Handle the removal of a DU, de-realizing its logical cells while keeping operator intent.
   virtual void handle_du_removed(cu_cp_du_index_t du_index) = 0;
 

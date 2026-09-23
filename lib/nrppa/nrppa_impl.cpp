@@ -74,6 +74,26 @@ void nrppa_impl::update_ue_index(cu_cp_ue_index_t         new_ue_index,
   ue_ctxt_list.update_ue_index(new_ue_index, old_ue_index, new_ue_notifier, timers, task_exec);
 }
 
+void nrppa_impl::handle_du_addition(cu_cp_du_index_t du_index, nrppa_f1ap_notifier& f1ap_notifier)
+{
+  if (du_ctxt_list.contains(du_index)) {
+    logger.warning("du={}: NRPPA DU context already exists", du_index);
+    return;
+  }
+
+  du_ctxt_list.add_du(du_index, f1ap_notifier);
+}
+
+void nrppa_impl::handle_du_removal(cu_cp_du_index_t du_index)
+{
+  if (!du_ctxt_list.contains(du_index)) {
+    return;
+  }
+
+  trp_registry.remove_du(du_index);
+  du_ctxt_list.remove_du_context(du_index);
+}
+
 void nrppa_impl::initialize_meas_report_timer(cu_cp_ue_index_t ue_index, std::chrono::milliseconds meas_periodicity_ms)
 {
   if (!ue_ctxt_list.contains(ue_index)) {
@@ -340,7 +360,7 @@ void nrppa_impl::handle_trp_information_request(const asn1::nrppa::trp_info_requ
   fill_trp_information_request(request, msg);
 
   common_task_sched.schedule(launch_async<trp_information_exchange_procedure>(
-      amf_index, request, transaction_id, cu_cp_notifier, trp_id_to_du_idx, du_ctxt_list, logger));
+      amf_index, request, transaction_id, cu_cp_notifier, trp_registry, logger));
 }
 
 void nrppa_impl::handle_positioning_information_request(const asn1::nrppa::positioning_info_request_s& msg,
@@ -427,7 +447,7 @@ void nrppa_impl::handle_measurement_request(const asn1::nrppa::meas_request_s& m
   fill_measurement_request(request, msg);
 
   common_task_sched.schedule(launch_async<measurement_procedure>(
-      amf_index, request, transaction_id, trp_id_to_du_idx, meas_ctxt_list, du_ctxt_list, cu_cp_notifier, logger));
+      amf_index, request, transaction_id, trp_registry, meas_ctxt_list, du_ctxt_list, cu_cp_notifier, logger));
 }
 
 void nrppa_impl::handle_successful_outcome(const successful_outcome_s& outcome)

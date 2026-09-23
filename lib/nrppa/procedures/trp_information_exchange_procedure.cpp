@@ -13,20 +13,17 @@
 using namespace ocudu;
 using namespace ocucp;
 
-trp_information_exchange_procedure::trp_information_exchange_procedure(
-    cu_cp_amf_index_t                     amf_index_,
-    const trp_information_request_t&      request_,
-    uint16_t                              transaction_id_,
-    nrppa_cu_cp_notifier&                 cu_cp_notifier_,
-    std::map<trp_id_t, cu_cp_du_index_t>& trp_id_to_du_idx_,
-    nrppa_du_context_list&                du_ctxt_list_,
-    ocudulog::basic_logger&               logger_) :
+trp_information_exchange_procedure::trp_information_exchange_procedure(cu_cp_amf_index_t                amf_index_,
+                                                                       const trp_information_request_t& request_,
+                                                                       uint16_t                         transaction_id_,
+                                                                       nrppa_cu_cp_notifier&            cu_cp_notifier_,
+                                                                       nrppa_trp_registry&              trp_registry_,
+                                                                       ocudulog::basic_logger&          logger_) :
   amf_index(amf_index_),
   trp_info_request(request_),
   transaction_id(transaction_id_),
   cu_cp_notifier(cu_cp_notifier_),
-  trp_id_to_du_idx(trp_id_to_du_idx_),
-  du_ctxt_list(du_ctxt_list_),
+  trp_registry(trp_registry_),
   logger(logger_)
 {
 }
@@ -54,17 +51,8 @@ void trp_information_exchange_procedure::handle_procedure_outcome()
   } else {
     for (const auto& [du_idx, trp_info_resp] : cu_cp_response.trp_info_responses) {
       for (const auto& trp_info_list_trp_resp_item : trp_info_resp.trp_info_list_trp_resp) {
-        trp_id_to_du_idx.emplace(trp_info_list_trp_resp_item.trp_info.trp_id, du_idx);
+        trp_registry.add_trp(trp_info_list_trp_resp_item.trp_info.trp_id, du_idx);
       }
-
-      if (cu_cp_response.f1ap_notifiers.find(du_idx) == cu_cp_response.f1ap_notifiers.end()) {
-        logger.error("F1AP notifier not found for DU {}", du_idx);
-        trp_info_outcome = create_trp_info_failure(nrppa_cause_protocol_t::unspecified);
-        send_ul_nrppa_pdu(logger, cu_cp_notifier, trp_info_outcome, "TRPInfoResponse", "TRPInfoFailure", amf_index);
-        return;
-      }
-
-      du_ctxt_list.add_du(du_idx, *cu_cp_response.f1ap_notifiers.at(du_idx));
     }
 
     trp_info_outcome = create_trp_info_response();

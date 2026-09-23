@@ -7,6 +7,7 @@
 set(SOURCES
 	nrppa_ue_context_test.cpp
 	nrppa_du_context_test.cpp
+	nrppa_trp_registry_test.cpp
 	nrppa_meas_context_test.cpp
 	nrppa_impl_test.cpp
 	nrppa_asn1_converters_test.cpp

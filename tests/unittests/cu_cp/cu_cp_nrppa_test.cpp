@@ -1159,14 +1159,15 @@ TEST_F(cu_cp_nrppa_test,
       test_ues.at(du_ue_id)));
 }
 
-TEST_F(cu_cp_nrppa_test, when_trp_information_is_not_available_then_positioning_information_request_is_rejected)
+TEST_F(cu_cp_nrppa_test, when_trp_information_is_not_available_then_positioning_information_request_is_forwarded_to_du)
 {
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
-  // Inject positioning information request and await NRPPA positioning information failure.
-  ASSERT_TRUE(send_nrppa_positioning_information_request_and_await_nrppa_positioning_information_failure(
-      test_ues.at(du_ue_id)));
+  // The Positioning Information Exchange procedure addresses the DU serving the UE, so it does not depend on the TRP
+  // Information Exchange procedure having run, as per TS 38.455 section 8.2.6.
+  ASSERT_TRUE(
+      send_nrppa_positioning_information_request_and_await_f1ap_positioning_information_request(test_ues.at(du_ue_id)));
 }
 
 //----------------------------------------------------------------------------------//
@@ -1225,14 +1226,15 @@ TEST_F(cu_cp_nrppa_test,
       send_f1ap_positioning_activation_failure_and_await_nrppa_positioning_activation_failure(test_ues.at(du_ue_id)));
 }
 
-TEST_F(cu_cp_nrppa_test, when_trp_information_is_not_available_then_positioning_activation_request_is_rejected)
+TEST_F(cu_cp_nrppa_test, when_trp_information_is_not_available_then_positioning_activation_request_is_forwarded_to_du)
 {
   // Attach UE.
   ASSERT_TRUE(attach_ue(du_ue_id, crnti, amf_ue_id, cu_up_e1ap_id));
 
-  // Inject positioning activation request and await NRPPA positioning activation failure.
+  // The Positioning Activation procedure addresses the DU serving the UE, so it does not depend on the TRP Information
+  // Exchange procedure having run, as per TS 38.455 section 8.2.9.
   ASSERT_TRUE(
-      send_nrppa_positioning_activation_request_and_await_nrppa_positioning_activation_failure(test_ues.at(du_ue_id)));
+      send_nrppa_positioning_activation_request_and_await_f1ap_positioning_activation_request(test_ues.at(du_ue_id)));
 }
 
 //----------------------------------------------------------------------------------//

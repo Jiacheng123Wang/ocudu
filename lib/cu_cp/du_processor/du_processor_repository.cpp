@@ -78,6 +78,8 @@ cu_cp_du_index_t du_processor_repository::add_du(std::unique_ptr<f1ap_message_no
   ocudu_assert(du != nullptr, "Failed to create DU processor");
   du_ctxt.processor = std::move(du);
 
+  cu_cp_du_handler.handle_du_added(du_index);
+
   return du_index;
 }
 

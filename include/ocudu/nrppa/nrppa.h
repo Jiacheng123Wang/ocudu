@@ -67,7 +67,6 @@ public:
 // TRP information CU-CP response, containing information for all available TRPs at all DUs.
 struct trp_information_cu_cp_response_t {
   std::map<cu_cp_du_index_t, trp_information_response_t> trp_info_responses;
-  std::map<cu_cp_du_index_t, nrppa_f1ap_notifier*>       f1ap_notifiers;
 };
 
 /// Methods used by NRPPa to signal events to the CU-CP.
@@ -128,6 +127,22 @@ public:
                                nrppa_cu_cp_ue_notifier& new_ue_notifier) = 0;
 };
 
+/// Handler of the DU lifecycle events NRPPa tracks.
+class nrppa_du_context_handler
+{
+public:
+  virtual ~nrppa_du_context_handler() = default;
+
+  /// \brief Register a DU, giving NRPPa a route to its F1AP.
+  /// \param[in] du_index The index of the DU.
+  /// \param[in] f1ap_notifier The notifier used to send F1AP messages to the DU.
+  virtual void handle_du_addition(cu_cp_du_index_t du_index, nrppa_f1ap_notifier& f1ap_notifier) = 0;
+
+  /// \brief Drop the context of a DU together with the TRPs it hosts.
+  /// \param[in] du_index The index of the DU to remove.
+  virtual void handle_du_removal(cu_cp_du_index_t du_index) = 0;
+};
+
 /// Combined entry point for the NRPPA object.
 class nrppa_interface
 {
@@ -136,6 +151,7 @@ public:
 
   virtual nrppa_message_handler&            get_nrppa_message_handler()            = 0;
   virtual nrppa_ue_context_removal_handler& get_nrppa_ue_context_removal_handler() = 0;
+  virtual nrppa_du_context_handler&         get_nrppa_du_context_handler()         = 0;
 };
 
 } // namespace ocudu::ocucp

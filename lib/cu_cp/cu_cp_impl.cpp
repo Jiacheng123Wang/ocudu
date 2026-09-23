@@ -1706,7 +1706,7 @@ void cu_cp_impl::handle_ul_nrppa_pdu(const byte_buffer&                         
 async_task<trp_information_cu_cp_response_t>
 cu_cp_impl::handle_trp_information_request(const trp_information_request_t& request)
 {
-  return launch_async<trp_information_exchange_routine>(request, du_db, nrppa_f1ap_ev_notifiers);
+  return launch_async<trp_information_exchange_routine>(request, du_db);
 }
 
 void cu_cp_impl::handle_n2_disconnection(cu_cp_amf_index_t amf_index)
@@ -2258,8 +2258,19 @@ void cu_cp_impl::handle_du_cells_removed(span<const nr_cell_identity> cells)
   }
 }
 
+void cu_cp_impl::handle_du_added(cu_cp_du_index_t du_index)
+{
+  // Give NRPPa a route to the DU's F1AP, so that the positioning procedures can reach it.
+  auto it = nrppa_f1ap_ev_notifiers.emplace(du_index, nrppa_f1ap_adapter{}).first;
+  it->second.connect_f1ap(du_db.get_du_processor(du_index).get_f1ap_handler());
+  nrppa_entity->get_nrppa_du_context_handler().handle_du_addition(du_index, it->second);
+}
+
 void cu_cp_impl::handle_du_removed(cu_cp_du_index_t du_index)
 {
+  nrppa_entity->get_nrppa_du_context_handler().handle_du_removal(du_index);
+  nrppa_f1ap_ev_notifiers.erase(du_index);
+
   cell_ctrl.handle_du_removed(du_index);
 }
 
