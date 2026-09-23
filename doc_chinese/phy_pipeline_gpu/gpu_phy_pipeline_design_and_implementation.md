@@ -9164,6 +9164,52 @@ grep 关键字会命中两类**不是开放项**的行：① **标识符**里的
 * **下一步实验（便宜）**：调度器的 SINR 只在 `--log.phy_level=debug` 的 `UE PUSCH`/`Slot decisions` 里可见
   ⇒ 各跑一条**短 debug 腿**（n1 与 n78 各一条，各 ~20 s）对比**同一个量**，那才是"两小区 UL 谁好"的可比读数。
 
+#### 5.9.108 ★★★ UL 链路自适应的**闭环**找到了（并在同一天第三次更正我自己）
+
+**① 更正 §5.9.107 ⑥**：那里写"调度器的输入是 `ue_event_manager.cpp:740` 的 `||h||²/nv`" —— **错**。
+那一行属于 **SRS 的 TA 反馈**路径（`noise_var = near_zero`，注释写明是"assume some SINR for the TA feedback"），
+**不是** 链路自适应。
+
+**② 真正的链路（代码级，`ue_link_adaptation_controller.cpp:148`）**
+
+```
+mcs = map_snr_to_mcs_ul(get_effective_snr(), mcs_table, tp)      // SNR -> MCS
+mcs = clamp(mcs, ul_mcs.start(), ul_mcs.stop())                   // 默认 {0, 28}
+logger->debug("LA UL MCS: mcs={} pusch_snr={:.1f}dB olla={:+.1f}dB table={} tp={}", ...)
+```
+
+* **`ul_mcs` 默认 `{0, 28}`**（`scheduler_expert_config.h:140`）⇒ **夹取不是 n1 停在 MCS0 的原因**（两小区都用默认，
+  配置里也没有 `ul_mcs` ⇒ 候选 (a) 排除）；
+* `get_effective_snr()` 取的是 **`ue_ch_st.get_pusch_snr()` ＝ 最近一次**上报的 PUSCH SNR + OLLA 偏移，
+  **不是** EMA 平均（源码注释自己警告：UE 停发后它可能过期）；
+* 而这个 SNR 正是 **PHY 每授权上报的 `ul_sinr_dB`** —— 与 §5.9.107 里我从日志读的**是同一个字段**
+  （`ue_channel_state_manager::update_pusch_snr()` 把它推进 `pusch_snr_db` 与 EMA 两条）。
+
+⇒ **于是"为什么 n1 把满缓冲 UE 放在 MCS0"是一个闭环问题**：
+**MCS ← 上一次的读数 ← 该读数又随授权形态/时间而变**。同一腿内实测：25 PRB QPSK 读 5.3 dB、5 PRB 256QAM 读 24.2 dB。
+**读数是否随 MCS 变化，我还没有定论**（n78 同一秒内 64QAM 与 256QAM 在 51 PRB 上读 19.9–24.6 vs 17.1–24.6，**重叠**
+⇒ 这两档不分离；强分离只出现在 QPSK/16QAM 与 64/256QAM 之间，而那也可能是**时间/信道**效应）。
+⇒ **不写成结论**，写成两条待判的机制：**(A) 宽带授权上信道确实差**（频率选择性 + 满缓冲时调度器宁要带宽不要阶数）；
+**(B) 读数本身依赖授权形态/时间，而环路只有一样本记忆 ⇒ 自锁在低/高两个不动点之一**。
+
+**③ 判别器已经精确到位（这就是 A 路线的第一步）**
+
+`LA UL MCS: mcs={} pusch_snr={} olla={}` 这行 **debug 级**日志把**环路的输入**逐次打出来：
+
+```bash
+# 同一手机、同一位置，各跑 ~20 s（debug 只为这一行，不作为性能腿）
+sudo -E bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s66-la-n1  --log.phy_level=debug
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
+     bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu s67-la-n78 --log.phy_level=debug
+```
+读法（三条，任一成立即可定论）：
+1. 若 n1 的 `pusch_snr` **在 5 dB 附近徘徊**、而同一腿里 5 PRB 的授权上报 24 dB ⇒ **机制 B（读数驱动自锁）**；
+2. 若 n1 的 `pusch_snr` **随授权宽度明显变化**（窄高宽低）⇒ **机制 A（宽带信道差）**；
+3. 若两者的 `pusch_snr` 分布接近 ⇒ 差别在 `map_snr_to_mcs_ul`/OLLA 之外（回到表与偏移量的读取）。
+
+⚠ debug 腿的边界：`run_leg.sh` 的注释写明 debug 只用于诊断崩溃（它把 PHY 热路径日志全开）⇒ **这几条腿只用来读这一行，
+不读性能数**（`span`/`residency`/`CE total` 一律作废）。
+
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，
