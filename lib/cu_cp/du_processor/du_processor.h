@@ -110,6 +110,9 @@ public:
   virtual std::vector<nr_cell_identity> on_du_cells_reported(cu_cp_du_index_t             du_index,
                                                              span<const du_reported_cell> cells) = 0;
 
+  /// \brief Notify the CU-CP about the cells a DU stopped serving, so their logical cells are de-realized.
+  virtual void on_du_cells_removed(span<const nr_cell_identity> cells) = 0;
+
   /// \brief Notifies about a successful RRC UE creation.
   /// \param[in] ue_index The index of the UE.
   /// \param[in] rrc_ue_msg_handler The created RRC UE.

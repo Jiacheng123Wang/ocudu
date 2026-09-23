@@ -90,6 +90,7 @@ public:
   std::vector<rrc_plmn_ran_area_cell_t> get_ran_area_cells() override;
 
   void store_cell_info_db(const std::map<nr_cell_global_id_t, rrc_cell_info>& cell_infos) override;
+  void remove_cell_info(nr_cell_identity nci) override;
 
   std::optional<std::chrono::system_clock::time_point> get_ref_time_r16(const byte_buffer& encoded,
                                                                         bool               is_local_clock) override;

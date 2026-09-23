@@ -63,7 +63,7 @@ void cu_cp_controller::stop()
   amf_mng.stop();
 }
 
-std::set<plmn_identity> cu_cp_controller::handle_du_setup_request(const std::set<plmn_identity>& plmn_ids)
+std::set<plmn_identity> cu_cp_controller::get_connected_plmns(const std::set<plmn_identity>& plmn_ids)
 {
   // The CU-CP accepts the DU even when no AMF is connected. The cells that serve only PLMNs without a connected
   // AMF stay deactivated until their AMF connects.

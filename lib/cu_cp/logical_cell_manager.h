@@ -88,7 +88,13 @@ public:
   /// (shutting_down) resolves to locked: the drain cannot complete once the DU is gone.
   void derealize_du_cells(cu_cp_du_index_t du_index);
 
+  /// De-realize the cell with the given NCI, keeping its operator intent.
+  void derealize_cell(nr_cell_identity nci);
+
 private:
+  /// De-realize a realized cell, keeping its operator intent.
+  void derealize(nr_cell_identity nci, logical_cell& cell);
+
   std::map<nr_cell_identity, logical_cell> cells;
 
   /// Whether any cells were declared in configuration. When true, the declared set acts as the activation

@@ -33,6 +33,12 @@ public:
   }
 
   // See interface for documentation.
+  du_config_update_result on_new_du_config_update(const du_config_update_request& msg) override
+  {
+    return parent.handle_du_config_update(msg);
+  }
+
+  // See interface for documentation.
   cu_cp_ue_index_t request_new_ue_creation() override { return parent.ue_mng.add_ue(parent.cfg.du_index); }
 
   // See interface for documentation.
@@ -158,7 +164,7 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
 
   // Ask the CU-CP which of the PLMNs of the DU have a connected AMF. A DU whose PLMNs have none is still
   // accepted: its cells stay deactivated until an AMF that serves one of their PLMNs connects.
-  const std::set<plmn_identity> connected_plmns = du_setup_notif.on_du_setup_request(plmn_ids);
+  const std::set<plmn_identity> connected_plmns = du_setup_notif.on_connected_plmns_required(plmn_ids);
   if (connected_plmns.empty()) {
     logger.info("du={}: No AMF is connected for the PLMNs served by this DU. Its cells stay deactivated until an AMF "
                 "for one of them connects",
@@ -244,6 +250,188 @@ du_setup_result du_processor_impl::handle_du_setup_request(const du_setup_reques
     auto& activ_item  = accepted.cells_to_be_activ_list.emplace_back();
     activ_item.nr_cgi = reported.cgi;
     activ_item.nr_pci = reported.pci;
+  }
+
+  return res;
+}
+
+/// Identities of every cell the DU serves, activated or not.
+static std::vector<du_reported_cell> all_cells_of(const du_configuration_context& du_ctxt)
+{
+  std::vector<du_reported_cell> cells;
+  cells.reserve(du_ctxt.served_cells.size() + du_ctxt.deactivated_cells.size());
+  for (const du_cell_configuration& cell : du_ctxt.served_cells) {
+    cells.push_back({cell.cgi, cell.pci});
+  }
+  for (const du_cell_configuration& cell : du_ctxt.deactivated_cells) {
+    cells.push_back({cell.cgi, cell.pci});
+  }
+  return cells;
+}
+
+void du_processor_impl::release_ue_of_removed_cell(cu_cp_ue& ue)
+{
+  cu_cp_ue_context_release_request release_request;
+  release_request.ue_index = ue.get_ue_index();
+  release_request.cause    = ngap_cause_radio_network_t::cell_not_available;
+
+  ue.get_task_sched().schedule_async_task(
+      launch_async([this, release_request](coro_context<async_task<void>>& ctx) mutable {
+        CORO_BEGIN(ctx);
+        CORO_AWAIT(cu_cp_notifier.on_ue_release_required(release_request));
+        CORO_RETURN();
+      }));
+}
+
+du_config_update_result du_processor_impl::handle_du_config_update(const du_config_update_request& request)
+{
+  du_config_update_result res;
+
+  if (!du_cfg_hdlr->has_context()) {
+    res.result = du_config_update_result::rejected{cause_protocol_t::msg_not_compatible_with_receiver_state,
+                                                   "The DU is not set up"};
+    return res;
+  }
+
+  // Extract cell info from the cells the DU adds or changes. A cell whose RRC containers cannot be read is
+  // left out, so that the rest of the update still takes effect.
+  std::vector<cu_cp_du_served_cells_item> new_cells = request.served_cells_to_add;
+  for (const du_cell_to_modify& cell_to_mod : request.served_cells_to_mod) {
+    new_cells.push_back(cell_to_mod.cell);
+  }
+  std::map<nr_cell_global_id_t, rrc_cell_info> cell_info_db = rrc->get_cell_info(new_cells);
+  std::vector<nr_cell_global_id_t>             readable_cells;
+  readable_cells.reserve(cell_info_db.size());
+  for (const auto& [cgi, cell_info] : cell_info_db) {
+    readable_cells.push_back(cgi);
+  }
+
+  const std::vector<du_reported_cell> cells_before = all_cells_of(du_cfg_hdlr->get_context());
+
+  // Cells the DU has on air before the update. The CU-CP asks the DU to deactivate the ones it stops serving.
+  std::vector<nr_cell_global_id_t> active_cells_before;
+  for (const du_cell_configuration& cell : du_cfg_hdlr->get_context().served_cells) {
+    active_cells_before.push_back(cell.cgi);
+  }
+
+  // Apply the update to the DU configuration records.
+  auto cfg_res = du_cfg_hdlr->handle_du_config_update(request, readable_cells);
+  if (!cfg_res.has_value()) {
+    res.result = cfg_res.error();
+    return res;
+  }
+  const du_configuration_context& du_ctxt = du_cfg_hdlr->get_context();
+
+  // Drop the cell info of the cells that the CU-CP does not serve.
+  for (auto it = cell_info_db.begin(); it != cell_info_db.end();) {
+    it = du_ctxt.find_cell_any_state(it->first) == nullptr ? cell_info_db.erase(it) : std::next(it);
+  }
+
+  // Forget the cells the DU stopped serving, and release the UEs they held. The cells are already off the air
+  // at the DU, so the UEs are released rather than drained.
+  std::vector<nr_cell_identity> removed_cells;
+  for (const du_reported_cell& cell : cells_before) {
+    if (du_ctxt.find_cell_any_state(cell.cgi) != nullptr) {
+      continue;
+    }
+    removed_cells.push_back(cell.cgi.nci);
+    rrc->remove_cell_info(cell.cgi.nci);
+    for (cu_cp_ue* ue : ue_mng.find_ues(cfg.du_index, cell.pci.value())) {
+      release_ue_of_removed_cell(*ue);
+    }
+  }
+  if (!removed_cells.empty()) {
+    cu_cp_notifier.on_du_cells_removed(removed_cells);
+  }
+
+  // Ask the CU-CP which of the PLMNs of the DU have a connected AMF.
+  std::set<plmn_identity> plmn_ids;
+  for (const du_cell_configuration& cell : du_ctxt.served_cells) {
+    plmn_ids.insert(cell.served_plmns.begin(), cell.served_plmns.end());
+  }
+  const std::set<plmn_identity> connected_plmns = du_setup_notif.on_connected_plmns_required(plmn_ids);
+
+  // Update cell config in cell measurement manager.
+  for (const auto& [cgi, cell_info] : cell_info_db) {
+    serving_cell_meas_config meas_cfg;
+    meas_cfg.nci               = cgi.nci;
+    meas_cfg.gnb_id_bit_length = cfg.gnb_id.bit_length;
+    meas_cfg.plmn              = cgi.plmn_id;
+    meas_cfg.pci               = cell_info.nr_pci;
+    meas_cfg.band              = cell_info.band;
+    if (!cell_info.meas_timings.empty() && cell_info.meas_timings.begin()->freq_and_timing.has_value()) {
+      const auto& freq_timing = cell_info.meas_timings.begin()->freq_and_timing.value();
+      meas_cfg.ssb_mtc        = freq_timing.ssb_meas_timing_cfg;
+      meas_cfg.ssb_arfcn      = freq_timing.carrier_freq;
+      meas_cfg.ssb_scs        = freq_timing.ssb_subcarrier_spacing;
+    }
+
+    if (!cu_cp_notifier.on_cell_config_update_request(cgi.nci, meas_cfg)) {
+      // The update is applied to the DU configuration records at this point, so rejecting it would leave the
+      // CU-CP and the DU with different views of the cells. The cell stays without a measurement config.
+      logger.warning("du={}: Could not update the measurement config of cell nci={}", cfg.du_index, cgi.nci);
+    }
+  }
+
+  // Store the cell info of the added and changed cells in the RRC DU.
+  rrc->store_cell_info_db(cell_info_db);
+
+  // Realize the cells the DU started serving. A cell the DU keeps holds on to its logical cell.
+  std::vector<du_reported_cell> reported_cells;
+  for (const du_cell_configuration& cell : du_ctxt.served_cells) {
+    if (std::any_of(cells_before.begin(), cells_before.end(), [&cell](const du_reported_cell& before) {
+          return before.cgi == cell.cgi;
+        })) {
+      continue;
+    }
+    reported_cells.push_back(
+        {cell.cgi,
+         cell.pci,
+         std::any_of(cell.served_plmns.begin(), cell.served_plmns.end(), [&connected_plmns](const plmn_identity& plmn) {
+           return connected_plmns.count(plmn) != 0;
+         })});
+  }
+  std::vector<nr_cell_identity> cells_to_activate = cu_cp_notifier.on_du_cells_reported(cfg.du_index, reported_cells);
+
+  // Record the dormant cells as deactivated in the DU configuration records, as the F1 Setup does.
+  {
+    f1ap_gnb_cu_configuration_update dormant_cells_update;
+    for (const du_reported_cell& reported : reported_cells) {
+      if (std::find(cells_to_activate.begin(), cells_to_activate.end(), reported.cgi.nci) == cells_to_activate.end()) {
+        dormant_cells_update.cells_to_be_deactivated_list.push_back({reported.cgi});
+      }
+    }
+    if (!dormant_cells_update.cells_to_be_deactivated_list.empty()) {
+      du_cfg_hdlr->handle_gnb_cu_configuration_update(dormant_cells_update);
+    }
+  }
+
+  // Notify the CU-CP that the cells served by this DU changed.
+  cu_cp_notifier.on_served_cells_updated();
+
+  // Activate the cells the CU-CP selected, as per TS 38.473, Section 8.2.4.2.
+  auto& accepted = res.result.emplace<du_config_update_result::accepted>();
+  accepted.cells_to_be_activ_list.reserve(reported_cells.size());
+  for (const du_reported_cell& reported : reported_cells) {
+    if (std::find(cells_to_activate.begin(), cells_to_activate.end(), reported.cgi.nci) == cells_to_activate.end()) {
+      continue;
+    }
+    auto& activ_item  = accepted.cells_to_be_activ_list.emplace_back();
+    activ_item.nr_cgi = reported.cgi;
+    activ_item.nr_pci = reported.pci;
+  }
+
+  // Ask the DU to deactivate the cells it still has on air but the CU-CP stopped serving, as per TS 38.473,
+  // Section 8.2.4.2. A cell the DU deleted itself is already gone at the DU, so it needs no deactivation.
+  for (const nr_cell_global_id_t& cgi : active_cells_before) {
+    if (du_ctxt.find_cell_any_state(cgi) != nullptr) {
+      continue;
+    }
+    if (std::find(request.served_cells_to_rem.begin(), request.served_cells_to_rem.end(), cgi) !=
+        request.served_cells_to_rem.end()) {
+      continue;
+    }
+    accepted.cells_to_be_deactiv_list.push_back(cgi);
   }
 
   return res;

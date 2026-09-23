@@ -88,6 +88,11 @@ public:
   /// \param[in] msg The received F1 Setup Request message.
   /// \return Error with time-to-wait in case the F1 Setup should not be accepted by the DU.
   virtual du_setup_result on_new_du_setup_request(const du_setup_request& msg) = 0;
+
+  /// \brief Notifies about the reception of a gNB-DU Configuration Update message.
+  /// \param[in] msg The received gNB-DU Configuration Update message.
+  /// \return The cells the gNB-DU activates, or the cause that rejects the update.
+  virtual du_config_update_result on_new_du_config_update(const du_config_update_request& msg) = 0;
 };
 
 } // namespace ocudu::ocucp

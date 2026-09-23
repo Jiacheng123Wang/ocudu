@@ -113,6 +113,11 @@ private:
   /// \return Response to whether the request was successful or failed.
   du_setup_result handle_du_setup_request(const du_setup_request& req);
 
+  du_config_update_result handle_du_config_update(const du_config_update_request& req);
+
+  /// Releases a UE whose cell the DU stopped serving.
+  void release_ue_of_removed_cell(cu_cp_ue& ue);
+
   /// \brief Handle the reception of a F1AP UE Context Release Request and notify NGAP.
   /// \param[in] request The F1AP UE Context Release Request.
   void handle_du_initiated_ue_context_release_request(const f1ap_ue_context_release_request& request);

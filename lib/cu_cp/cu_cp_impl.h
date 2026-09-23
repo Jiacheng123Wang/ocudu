@@ -266,6 +266,7 @@ private:
 
   std::vector<nr_cell_identity> handle_du_cells_reported(cu_cp_du_index_t             du_index,
                                                          span<const du_reported_cell> cells) override;
+  void                          handle_du_cells_removed(span<const nr_cell_identity> cells) override;
 
   void handle_du_removed(cu_cp_du_index_t du_index) override;
 

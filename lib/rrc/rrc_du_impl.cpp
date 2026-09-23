@@ -175,8 +175,13 @@ std::vector<rrc_plmn_ran_area_cell_t> rrc_du_impl::get_ran_area_cells()
 void rrc_du_impl::store_cell_info_db(const std::map<nr_cell_global_id_t, rrc_cell_info>& cell_infos)
 {
   for (const auto& [cgi, cell_info] : cell_infos) {
-    cell_info_db.emplace(cgi.nci, cell_info);
+    cell_info_db.insert_or_assign(cgi.nci, cell_info);
   }
+}
+
+void rrc_du_impl::remove_cell_info(nr_cell_identity nci)
+{
+  cell_info_db.erase(nci);
 }
 
 std::optional<std::chrono::system_clock::time_point> rrc_du_impl::get_ref_time_r16(const byte_buffer& encoded,

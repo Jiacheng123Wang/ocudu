@@ -2251,6 +2251,13 @@ std::vector<nr_cell_identity> cu_cp_impl::handle_du_cells_reported(cu_cp_du_inde
   return cell_ctrl.handle_du_cells_reported(du_index, cells);
 }
 
+void cu_cp_impl::handle_du_cells_removed(span<const nr_cell_identity> cells)
+{
+  for (nr_cell_identity nci : cells) {
+    cell_ctrl.cells().derealize_cell(nci);
+  }
+}
+
 void cu_cp_impl::handle_du_removed(cu_cp_du_index_t du_index)
 {
   cell_ctrl.handle_du_removed(du_index);
