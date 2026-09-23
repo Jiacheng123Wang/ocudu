@@ -341,26 +341,43 @@ public:
   /// \return True on success; on failure the caller falls back to its own construction.
   bool build_correlation(const corr_stage& c, unsigned nof_systems);
 
-  /// \brief The same build, in a command buffer of its own that is committed WITHOUT waiting, plus the
-  ///        back-end stage fence so the caller's next submission can order itself after it.
+  /// \brief Queues one correlation group for the hop's fenced build (see flush_correlations_fenced()).
   ///
-  /// This is the third form of one build, and it exists for a measured reason. The prefix form (the
-  /// build riding the weights command buffer, correlation_stage() handed to run_async()) is the cheap
-  /// one - one submission - and it is WRONG on about a quarter of the runs: the memory barrier between
-  /// the prefix and K1 does not make the prefix's writes visible to K1, so K1 occasionally inverts a
-  /// half-written A and the noise variance explodes (design document 5.9.88). The standalone form
-  /// (build_correlation()) is right because it commits AND waits, and the wait is what costs: +39.5us
-  /// on a 223us hop. This form keeps the build in its own command buffer and the ordering, but moves
-  /// the wait off the host: the buffer signals the shared back-end fence at its completion and the
-  /// caller encodes a wait for that generation in its own buffer, so the GPU orders itself and the host
-  /// never blocks.
+  /// The build itself is deferred to a FLUSH rather than done here, because a merged batch carries TWO
+  /// groups (the standard group and the edge block) and they write disjoint slots with no order between
+  /// them: one command buffer holds both, so the hop pays one extra submission between them rather than
+  /// one each. Measured on air: one buffer per group gave cbs/lane=2.70 where the default lane is 1.00,
+  /// and 1.70 of that was this (design document 5.9.92).
+  void queue_correlation_fenced(const corr_stage& c);
+
+  /// \brief Whether anything is queued for a fenced build.
+  bool correlation_queue_armed() const;
+
+  /// \brief Drops whatever is queued without building it (the caller kept the prefix form instead).
+  void clear_correlation_queue();
+
+  /// \brief Encodes every queued group into ONE command buffer of its own and commits it WITHOUT
+  ///        waiting, arming the back-end stage fence so the caller's next submission orders itself.
+  ///
+  /// This is the third form of one build, and since 5.9.92 it is THE DEFAULT. The prefix form (the build
+  /// riding the weights command buffer, correlation_stage() handed to run_async()) costs no extra
+  /// submission and is WRONG on about a quarter of the runs: the memory barrier between the prefix and
+  /// K1 does not make the prefix's writes visible to K1, so K1 occasionally inverts a half-written A and
+  /// the noise variance explodes by up to 1000x (design document 5.9.88 to 5.9.92). The standalone form
+  /// (build_correlation()) is right because it commits AND waits, and the host's wait is what costs.
+  /// This form keeps the build in its own command buffer and the ordering, and moves the wait off the
+  /// host: the buffer signals the shared back-end fence at its completion and the caller encodes a wait
+  /// for that generation before its next encoder opens, so the GPU orders itself and the host never
+  /// blocks. Measured on air: CE mean total 16.8 to 28.4us, lane residency p95 +6.4%, and the slot-level
+  /// pipeline span unchanged.
   ///
   /// \note Deliberately NOT built on begin_stage(): that closes (and waits for) an extraction buffer
   ///       held open for the weights stage, and holding it is what makes the hop one submission. This
   ///       opens its own command buffer directly, so a held extraction is left alone.
-  /// \return The fence generation to wait for, or 0 when nothing was armed (the caller then falls back
-  ///         to the prefix form).
-  uint64_t build_correlation_fenced(const corr_stage& c, unsigned nof_systems);
+  /// \return The fence generation to wait for, or 0 when nothing was armed or the queue was empty; the
+  ///         caller then keeps the prefix form, which is correct and merely slower. Queue emptied either
+  ///         way.
+  uint64_t flush_correlations_fenced(unsigned fallback_nof_systems);
 
   /// The estimator's INPUT stage of one hop (K0-a): where the pilots come from and where the
   /// least-squares estimates go. Mirrors mmse_pilots_params in ocudu_mmse_pilots.metal.

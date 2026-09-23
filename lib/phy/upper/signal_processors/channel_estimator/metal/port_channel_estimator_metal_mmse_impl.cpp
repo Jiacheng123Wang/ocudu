@@ -294,6 +294,28 @@ void free_aligned(T* p)
 /// default); zero (OCUDU_CE_CORR_DEV=0) keeps the host build and its staging, which is the A/B arm of
 /// the two builders. File scope because two functions ask: the stage that decides, and the refusal
 /// counter that names WHY the host had to build them (S13-P1).
+/// \brief Whether the correlation build goes into a command buffer of its own, ordered by the shared
+///        back-end fence - THE DEFAULT since 5.9.92 - or rides the weights command buffer as a prefix.
+///
+/// The prefix costs no extra submission and is WRONG on about a quarter of the runs: the memory barrier
+/// between the prefix and K1 does not make the prefix's writes visible to K1, so K1 occasionally inverts
+/// a half-written A and the noise variance comes out up to 1000x too large (design document 5.9.88 to
+/// 5.9.92: A^-1's worst deviation 5049 against a clean 2e-2, the slot holding a value 2838x the host's
+/// own inverse on a hop that is not ill-conditioned). The fenced form is correct and measured on air:
+/// CE mean total 16.8 to 28.4us, lane residency p95 +6.4%, and the slot-level pipeline span UNCHANGED
+/// (p95 and p99 both -0.7%), every contract item passing.
+///
+/// \note OCUDU_CE_CORR_FENCED=0 is the one-line rollback to the prefix, and it is also the A/B arm the
+///       measurements above were taken with.
+bool corr_fenced_enabled()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_CORR_FENCED");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
 bool device_corr_enabled()
 {
   static const bool value = []() {
@@ -2187,16 +2209,14 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
         }
         pending_corr_checks_.push_back(check);
       }
-      // EXPERIMENT (OCUDU_CE_CORR_FENCED=1): the same build in a command buffer of its OWN, ordered by
-      // the shared back-end fence instead of riding this one (see build_correlation_fenced()). The
+      // The same build in a command buffer of its OWN, ordered by
+      // the shared back-end fence instead of riding this one (see corr_fenced_enabled()). The
       // MERGED batch is where the air interface spends 74% of its hops, so a fix that only covered the
       // non-merged route would leave the landmine - and would leave an air leg measuring almost
       // nothing: it would understate both the benefit and the price. The pending_corr_check above stays
       // valid either way (it compares the slots at the hop's completion, whoever wrote them).
-      if ((std::getenv("OCUDU_CE_CORR_FENCED") != nullptr) && (engine != nullptr)) {
-        if (engine->build_correlation_fenced(std_corr_prefix.value(), nof_layers) != 0) {
-          std_corr_prefix.reset();
-        }
+      if (corr_fenced_enabled() && (engine != nullptr)) {
+        engine->queue_correlation_fenced(std_corr_prefix.value());
       }
       L_std    = L_c;
       nout_std = nout_c;
@@ -2621,11 +2641,8 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // its slots are read by K1 as the extra systems of this batch, so the hazard and the fix are
       // identical. It is a separate fenced build, hence a separate generation - two command buffers of
       // one queue have their STARTS alone ordered, which is why encode_corr_fence_waits() keeps a list.
-      if ((std::getenv("OCUDU_CE_CORR_FENCED") != nullptr) && (engine != nullptr) &&
-          edge_corr.has_value()) {
-        if (engine->build_correlation_fenced(edge_corr.value(), nof_layers) != 0) {
-          edge_corr.reset();
-        }
+      if (corr_fenced_enabled() && (engine != nullptr) && edge_corr.has_value()) {
+        engine->queue_correlation_fenced(edge_corr.value());
       }
       tail_L = L_e;
       // 3) The tail systems carry n_std_blocks block slots but only block 0 is real: their pad slots
@@ -2705,6 +2722,18 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // (the air interface's 13 PRB among them) takes - was submitted synchronously while the unpack
       // right below already used merged_defer: the wait showed up as submit=~280us per hop on the
       // air, and every deferred-batch probe (cpl_wait, defer_wait) stayed at zero for it.
+      // The hop's correlation groups, in ONE fenced command buffer committed before this one and
+      // ordered against it by the shared back-end fence (see flush_correlations_fenced()). Both are
+      // dropped from the prefix arguments only when the flush succeeded: otherwise they ride THIS
+      // buffer exactly as they always did, which is correct and merely slower.
+      if (corr_fenced_enabled() && (engine != nullptr) && engine->correlation_queue_armed()) {
+        if (engine->flush_correlations_fenced(nof_layers) != 0) {
+          std_corr_prefix.reset();
+          edge_corr.reset();
+        } else {
+          engine->clear_correlation_queue();
+        }
+      }
       const bool merged_defer = defer;
 #if defined(OCUDU_CE_TIME)
       const auto t_submit_begin = steady_clock::now();
@@ -4416,16 +4445,16 @@ bool port_channel_estimator_metal_mmse_impl::run_engine_blocks(const fd_td_estim
       // The slots WILL hold A and R_hp: the device writes them in this batch's command buffer, so
       // the host must not stage them (it would race the device).
       device_built = true;
-      // EXPERIMENT (OCUDU_CE_CORR_FENCED=1): the same build in a command buffer of its OWN, ordered
-      // against this batch by the shared back-end fence instead of by a host wait. It is the one form
-      // that is both correct and cheap: the prefix is correct-by-luck (the barrier does not order the
-      // prefix's writes against K1's read, measured), and the standalone form buys the ordering with a
-      // waitUntilCompleted that costs 39.5us of a 223us hop. Falls back to the prefix when the fence
-      // could not be armed.
-      if ((std::getenv("OCUDU_CE_CORR_FENCED") != nullptr) && (engine != nullptr)) {
-        if (engine->build_correlation_fenced(corr_prefix.value(), nof_layers) != 0) {
+      // The same build in a command buffer of its OWN, ordered against this batch by the shared
+      // back-end fence instead of by a host wait - see corr_fenced_enabled() and
+      // flush_correlations_fenced(). Falls back to the prefix when the fence could not be armed.
+      if (corr_fenced_enabled() && (engine != nullptr)) {
+        engine->queue_correlation_fenced(corr_prefix.value());
+        if (engine->flush_correlations_fenced(nof_layers) != 0) {
+          // The build has its own command buffer now: the host must NOT stage these slots.
           corr_prefix.reset();
-          device_built = true;
+        } else {
+          engine->clear_correlation_queue();
         }
       }
       // The prefix's slot comparison CANNOT run here - the dispatches have not even been committed -

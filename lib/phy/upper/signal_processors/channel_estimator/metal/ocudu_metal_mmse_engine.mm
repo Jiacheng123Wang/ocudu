@@ -448,15 +448,21 @@ struct mmse_engine_impl {
   /// be reached instead closes it (close_held_buffer(), called from wait_pending_impl() and from the
   /// entries that need their own command buffer).
   id<MTLCommandBuffer>           held_cb       = nil;
-  /// \brief The fence generations build_correlation_fenced() armed and nobody has waited for yet.
+  /// \brief The fence generation flush_correlations_fenced() armed and nobody has waited for yet.
   ///
-  /// A LIST, not one value: a merged hop carries TWO correlation groups (the standard group and the
-  /// edge block), each in its own fenced command buffer, and two command buffers of one queue have
-  /// their STARTS alone ordered - so waiting for the newest would leave the older one unordered.
-  /// Consumed together, before the encoder of the next submission opens (see begin_weights_stage()).
-  static constexpr unsigned     max_corr_fences = 4;
-  uint64_t                       corr_fence_generation[max_corr_fences] = {};
-  unsigned                       corr_fence_count                      = 0;
+  /// ONE value now, not a list: every correlation group of a hop goes into ONE command buffer (the
+  /// queue below), so there is one generation to wait for. Consumed before the encoder of the next
+  /// submission opens (see begin_weights_stage()). Zero means "nothing armed".
+  uint64_t                       corr_fence_generation = 0;
+  /// \brief The correlation groups queued for the NEXT fenced build.
+  ///
+  /// A QUEUE, not one stage: a merged batch carries two groups (the standard group and the edge block)
+  /// and they write disjoint slots with no order between them, so ONE command buffer holds both and the
+  /// hop pays one extra submission between them rather than one each. Measured on air: one buffer per
+  /// group gave cbs/lane=2.70, of which 1.70 was this (design document 5.9.92).
+  static constexpr unsigned     max_corr_queue = 4;
+  ocudu::metal::mmse_engine::corr_stage corr_queue[max_corr_queue] = {};
+  unsigned                       corr_queue_count = 0;
 
   /// \name D1 step 2: adopting the receiving chain's block (see set_hop_grid()).
   ///
@@ -856,7 +862,7 @@ struct stage_encoder {
 
 static bool close_held_buffer(mmse_engine_impl* e);
 
-/// Encodes a wait for every fenced correlation build this hop armed (see build_correlation_fenced()).
+/// Encodes the wait for this hop's fenced correlation build (see flush_correlations_fenced()).
 /// Defined next to that entry point; declared here because the two stage openers need it.
 static void encode_corr_fence_waits(mmse_engine_impl* e, id<MTLCommandBuffer> cb);
 
@@ -868,10 +874,10 @@ static void encode_corr_fence_waits(mmse_engine_impl* e, id<MTLCommandBuffer> cb
   if ((e == nullptr) || (cb == nil)) {
     return;
   }
-  for (unsigned i = 0; i != e->corr_fence_count; ++i) {
-    (void)ocudu::metal::shared_queue::backend_stage_wait_generation(cb, e->corr_fence_generation[i]);
+  if (e->corr_fence_generation != 0) {
+    (void)ocudu::metal::shared_queue::backend_stage_wait_generation(cb, e->corr_fence_generation);
+    e->corr_fence_generation = 0;
   }
-  e->corr_fence_count = 0;
 }
 
 /// \brief Opens a stage: the shared burst when \p fuse, the stage's own command buffer otherwise.
@@ -1175,7 +1181,7 @@ static stage_encoder begin_weights_stage(mmse_engine_impl*           e,
 {
   *adopted = false;
   if ((e->held_cb != nil) && !fuse) {
-    // A correlation build that went into a command buffer of its own (build_correlation_fenced()) is
+    // A correlation build that went into a command buffer of its own (flush_correlations_fenced()) is
     // ordered against this hop here, by the shared back-end fence, instead of by a host wait. It MUST
     // be encoded before the encoder opens - encodeWaitForEvent: is a command-buffer-level operation and
     // Metal aborts the process if one is encoded while an encoder is active (measured: Abort trap: 6 on
@@ -2637,10 +2643,48 @@ bool mmse_engine::build_correlation(const corr_stage& c, unsigned nof_systems)
   return end_stage(e, st, true);
 }
 
-uint64_t mmse_engine::build_correlation_fenced(const corr_stage& c, unsigned nof_systems)
+void mmse_engine::queue_correlation_fenced(const corr_stage& c)
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
-  if ((e == nullptr) || (e->device == nil) || (e->queue == nil)) {
+  if (e == nullptr) {
+    return;
+  }
+  if (e->corr_queue_count == mmse_engine_impl::max_corr_queue) {
+    // Sized for the two groups a merged hop carries. A third is a structural change, and dropping it
+    // silently would leave that group's slots unordered - refused loudly; the caller then keeps the
+    // prefix form for the whole hop, which is correct (only slower).
+    ocudulog::fetch_basic_logger("PHY").error(
+        "MMSE engine: more than {} correlation groups queued for one fenced build; the hop keeps the "
+        "prefix form",
+        mmse_engine_impl::max_corr_queue);
+    return;
+  }
+  e->corr_queue[e->corr_queue_count++] = c;
+}
+
+bool mmse_engine::correlation_queue_armed() const
+{
+  const auto* e = static_cast<const mmse_engine_impl*>(impl);
+  return (e != nullptr) && (e->corr_queue_count != 0);
+}
+
+void mmse_engine::clear_correlation_queue()
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if (e != nullptr) {
+    e->corr_queue_count = 0;
+  }
+}
+
+uint64_t mmse_engine::flush_correlations_fenced(unsigned fallback_nof_systems)
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  if ((e == nullptr) || (e->corr_queue_count == 0)) {
+    return 0;
+  }
+  const unsigned queued = e->corr_queue_count;
+  e->corr_queue_count    = 0;
+  if ((e->device == nil) || (e->queue == nil)) {
     return 0;
   }
   // Its OWN command buffer, opened directly and NOT through begin_stage(): begin_stage() closes a held
@@ -2658,13 +2702,15 @@ uint64_t mmse_engine::build_correlation_fenced(const corr_stage& c, unsigned nof
   if (st.enc == nil) {
     return 0;
   }
-  if (!encode_corr(e, st, c, nof_systems)) {
-    [st.enc endEncoding];
-    mmse_stats_corr_build_failure();
-    return 0;
+  for (unsigned i = 0; i != queued; ++i) {
+    if (!encode_corr(e, st, e->corr_queue[i], fallback_nof_systems)) {
+      [st.enc endEncoding];
+      mmse_stats_corr_build_failure();
+      return 0;
+    }
+    mmse_stats_corr_build();
   }
   [st.enc endEncoding];
-  mmse_stats_corr_build();
   // The generation is taken and encoded immediately before the commit, so a wait for it can never hang
   // (the signaller is already on its way) - the discipline the extraction fence keeps.
   const uint64_t generation = ocudu::metal::shared_queue::backend_stage_signal(cb);
@@ -2675,16 +2721,7 @@ uint64_t mmse_engine::build_correlation_fenced(const corr_stage& c, unsigned nof
   if (generation == 0) {
     return 0;
   }
-  if (e->corr_fence_count == mmse_engine_impl::max_corr_fences) {
-    // The list is sized for the two groups a merged hop carries; a third would be a structural change
-    // and must not silently drop a wait. Refused loudly instead - the caller falls back to the prefix.
-    ocudulog::fetch_basic_logger("PHY").error(
-        "MMSE engine: more than {} fenced correlation builds armed in one hop; the extra one is NOT "
-        "ordered",
-        mmse_engine_impl::max_corr_fences);
-    return 0;
-  }
-  e->corr_fence_generation[e->corr_fence_count++] = generation;
+  e->corr_fence_generation = generation;
   return generation;
 }
 
