@@ -16,7 +16,9 @@ ru_sdr:
   device_driver: uhd
   device_args: type=b200
   clock: external
-  srate: 7.68
+  # 2x oversampling of the 5 MHz cell: a B210 cannot hold the natural 7.68 MHz master clock rate (UHD 4.6
+  # stops clocking the FPGA below ~9.6 MHz, see gnb_rf_b200_fdd_n1_5mhz_bridge.yml).
+  srate: 15.36
   tx_gain: 80
   rx_gain: 70
 

@@ -27,7 +27,8 @@ cu_cp:
 ru_sdr:
   device_driver: uhd
   device_args: type=b200,num_recv_frames=256,num_send_frames=256,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
-  srate: 7.68
+  srate: 15.36                         # 2x oversampling of the 5 MHz cell: a B210 cannot hold the natural
+                                       # 7.68 MHz master clock rate (UHD 4.6 stops clocking the FPGA below ~9.6 MHz)
   otw_format: sc12
   tx_gain: 85                           # max TX: the 2.15 GHz band has strong ambient interference (-56 dBm at RX),
                                         # the gNB signal must stay well above it; back-off (below) avoids UE ADC saturation
