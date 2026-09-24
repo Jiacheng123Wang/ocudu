@@ -13773,3 +13773,25 @@ P0-6 落了 5 个代码文件后，门的 `default leg … the commit it ran, vs
 （`feb6038e7f..HEAD changes 12 file(s), 5 of them under lib/include/apps/tests`）——**这是门在履行职责，不是回归**。
 ⇒ 时延工作每个代码阶段之后都要重新飞腿（P1 的每条臂本来就是腿，所以这个代价是计划内的）；
 `[ul_lane_exec]` 这类**启动即打**的读数不需要腿就能核对。
+
+#### 5.9.137 P0-1 落地：诊断开关 `OCUDU_LANE_DIAG_SPLIT`（默认关），把前端那段从 `merged_hop` 里分出来
+
+**① 形态（一处边界，不是通用拆分）**：`shared_burst::adopt()` 是"前端把命令缓冲交给估计器"的那一点。开关打开时它
+**不再接管**那条缓冲，而是：`encodeSignalEvent` → `arm_gpu_time` → `gpu_lane_probe::register_commit(cb, stage::dft)` → `[cb commit]` →
+新开一条 `encodeWaitForEvent` 的缓冲继续（进程级一个 `MTLSharedEvent` + 世代计数，与既有 `stage_fence` 同形）。
+于是 **`dft` 段第一次有读数** —— 该标签在 `gpu_lane_probe::stage` 里**一直存在**（注释原文 *"per-symbol DFTs; not registered yet"*），只是从未被注册过。
+
+**② 为什么是这一处**：§5.9.136 已查明分组读数其实早有（`event` 路线：`ch_wt≈483 µs` 87% + `eq_demap≈71 µs` 13%），
+缺的只是**前端那 14 个 transform 在 `merged_hop`（≈1030 µs）里占多少**。这一处边界正好把它单独交出去。
+
+**③ 已验证（离线）**：构建通过；`ctest -L phy` **193/193**；新单测 `du_low_executor_mapper_test` **4/4**；
+`ab_dumps.sh "OCUDU_LANE_DIAG_SPLIT=1" ""` ⇒ `captures=27 missing-dumps=0 captures-with-differences=0 total-differing-bytes=0`（数据面中性烟测）。
+
+**④ ⚠ 未能离线验证的部分（诚实登记）**：**CE 单测与 `ul_chain_replay` 都到不了 `adopt()`** ——
+它们的 `busy split` 是 `ch_est`+`ch_wt`（event 路线）而**没有 `merged_hop`**，即前端交棒路径根本没被走到。
+⇒ **`dft=` 段的"可读"只能在完整 gNB 的空口腿上观测**（这也解释了为什么 `merged_hop` 只在腿里出现过）：
+配方 = 加压腿 + `OCUDU_LANE_DIAG_SPLIT=1`，判据 = `[ul_gpu_lane] busy split` 出现 `dft=`，且 `dft + ch_wt(或 merged_hop 部分) + eq_demap` 之和 ≈ 出厂臂的 `merged_hop`（±10%）。
+
+**⑤ 该臂的身份（写死，避免被当成交付）**：打开时一跳是 **2 条命令缓冲**（`cbs/lane≈2`），
+且**前端输入缓冲更早释放**（前端缓冲更早完成）——后者正是 **P2-E** 的题目，所以它是一个**被污染的臂**：
+除了"分组 GPU 时间"以外，**不得**用它读跨度、`cbs/lane`、池或 V1–V5。

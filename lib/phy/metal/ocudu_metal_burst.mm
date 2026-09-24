@@ -339,11 +339,78 @@ static void d1_trace(const char* what, id<MTLCommandBuffer> cb)
   }
 }
 
+/// P0-1 (doc_chinese/phy_latency/01_plan.md): the DIAGNOSTIC SPLIT.
+///
+/// On the production route the whole hop - the front end's transforms, the estimator, the equalization
+/// and the demapping - is ONE command buffer, and Metal hands out GPU timestamps only per command
+/// buffer, so `merged_hop` (~1030us, 97% of the lane's busy time) cannot be separated into its stages.
+/// Per-dispatch counters are not available on this device (5.8.15 (1): only AtStageBoundary is
+/// supported). This knob is the remaining way to read them: it stops adopting the front end's buffer,
+/// COMMITS it as its own submission - so its GPU span is readable as the probe's `dft` stage, a stage
+/// that has existed in gpu_lane_probe but was never registered - and continues the hop in a fresh
+/// buffer ordered after it by a shared event.
+///
+/// OFF by default, and when off nothing about the submission changes. When ON the arm is a DIAGNOSTIC,
+/// not a delivery: a hop then costs two command buffers per lane instead of one (so its `cbs/lane`
+/// reads ~2 and V4 does not apply to it), and the front end's input buffers are released earlier
+/// because its command buffer completes earlier - which is P2-E's subject, so an arm with this knob on
+/// must not be compared against a merged arm for anything except the GPU-time split it exists to read.
+static bool diag_split_enabled()
+{
+  static const bool on = []() {
+    const char* v = std::getenv("OCUDU_LANE_DIAG_SPLIT");
+    return (v != nullptr) && (std::atoi(v) != 0);
+  }();
+  return on;
+}
+
+/// The event the diagnostic split orders its two buffers with: the front end's buffer signals it, the
+/// estimator's buffer waits for it. Process-wide and generation-counted, like the stage fence, because
+/// the split only ever orders a buffer against the one just committed on the SAME thread.
+static id<MTLSharedEvent> diag_split_event()
+{
+  static id<MTLSharedEvent> ev = nil;
+  static std::once_flag     once;
+  std::call_once(once, []() {
+    id<MTLCommandQueue> q = shared_queue::backend_queue();
+    ev                    = (q != nil) ? [q.device newSharedEvent] : nil;
+  });
+  return ev;
+}
+
 bool shared_burst::adopt(id<MTLCommandBuffer> cb)
 {
   burst_state& s = state();
   if ((cb == nil) || (s.cb != nil)) {
     return false;
+  }
+  if (diag_split_enabled()) {
+    id<MTLSharedEvent>  ev = diag_split_event();
+    id<MTLCommandQueue> q  = shared_queue::backend_queue();
+    if ((ev != nil) && (q != nil)) {
+      static std::atomic<uint64_t> gen{0};
+      const uint64_t               value = gen.fetch_add(1, std::memory_order_relaxed) + 1;
+      // Order the two buffers, then commit the front end's one: a command-buffer-level signal has to be
+      // encoded while the buffer is still open, and the GPU-time probe must be armed before the commit.
+      [cb encodeSignalEvent:ev value:value];
+      shared_queue::arm_gpu_time(cb, shared_queue::queue_kind::back_end);
+      gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::dft);
+      [cb commit];
+      burst_stats_commit();
+      s.outstanding.push_back(cb);
+      id<MTLCommandBuffer> nb = [q commandBuffer];
+      if (nb != nil) {
+        [nb encodeWaitForEvent:ev value:value];
+        d1_trace("adopt-split", nb);
+        s.cb       = nb;
+        s.enc      = nil;
+        s.pipeline = nil;
+        s.n        = 0;
+        return true;
+      }
+      // Could not open the second buffer: fall through and adopt the original one. On a diagnostic arm,
+      // degrading to the production shape is better than dropping the hop.
+    }
   }
   d1_trace("adopt", cb);
   // The buffer only: the encoder opens on the first encoder() call, which is also where the stage
