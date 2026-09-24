@@ -117,8 +117,10 @@
 **负载配方（复跑用，缺一不可）**
 
 * **默认工况**（判契约 8/8、`stale=0`、A1-2 5/5；**腿必须自报 `regime=default`**）：
-  `LEG_CONFIG` 用默认的 n1 桥接配置、`run_leg.sh gpu <label>`；UE **接入 + PDU session**，
-  然后 **`ping -c 100` + 10 s 下行 iperf3 + 10 s 上行 iperf3**（用户 2026-09-24 明确的标准配方，腿长约 2 分钟）。
+  `LEG_CONFIG` 用默认的 n1 桥接配置、`run_leg.sh gpu <label>`；UE **接入 + PDU session**，然后
+  **从 CN ping 手机** `ping 10.45.0.10 -i 0.1 -c 100`（**下行** ping，10 Hz × 100 包 = **10 s**）
+  + **10 s 下行 iperf3** + **10 s 上行 iperf3** ⇒ 流量窗口 ≈ **30 s**，之后继续空跑到 ≈ **100 s** 再收尾
+  （历史默认腿总长 `s62` 84.8 s / `s71` 105.8 s）。
   ⚠ **零流量的腿无效**：没有 PUSCH 跳时契约会少判两条（`MET (6 of 6)`，见 `02_measurement.md` §4），
   而里程碑判据要 `MET (8 of 8`。
 * **加压工况**（判 V1–V5；**腿必须自报 `regime=stress`**）：n78 小区、
