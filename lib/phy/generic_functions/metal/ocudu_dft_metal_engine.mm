@@ -36,6 +36,11 @@
 
 using namespace ocudu;
 
+/// \brief P0-2's clock: the same one the lane probe and the estimator's lane clock read
+/// (`std::chrono::steady_clock`, see ocudu_metal_lane_clock.h), named here so a token's hold is comparable
+/// with the [ul_gpu_lane] series without this translation unit taking a dependency on that header.
+using hold_clock = std::chrono::steady_clock;
+
 namespace ocudu {
 namespace metal {
 
@@ -132,12 +137,37 @@ struct dft_stats_t {
   std::atomic<uint64_t> token_early_signals{0};
   std::atomic<uint64_t> token_sets_by_event{0};
   std::atomic<uint64_t> token_sets_by_complete{0};
+
+  /// \name P0-2: HOW LONG the input was held (attach -> release), per token.
+  ///
+  /// The quantity the receive pool actually feels. One token keeps one SYMBOL's samples (and a whole slot's
+  /// buffer is referenced by its 14 tokens, released together), so the hold distribution is what says whether
+  /// the pool was drained by "the hop's own span" (the multi-hold the design accepted, ~ms) or by something
+  /// that kept a block from completing for SECONDS (the stall Q9 is about).
+  ///
+  /// Samples are kept (not only a histogram) so the report can print real percentiles in the same shape as
+  /// every other series here; a 200 s leg at 1 ms slots attaches ~2.8 M tokens, i.e. ~22 MB, which is the
+  /// price of reading the tail by eye instead of guessing it.
+  ///@{
+  std::mutex           token_hold_mutex;
+  std::vector<float>   token_hold_us;
+  double               token_hold_sum_us = 0.0;
+  double               token_hold_max_us = 0.0;
+  uint64_t             token_hold_max_slot = 0;
+  bool                 token_hold_max_has_slot = false;
+  const void*          token_hold_max_cb = nullptr;
+  ///@}
 };
 
 static dft_stats_t& dft_stats()
 {
-  static dft_stats_t s;
-  return s;
+  // NEVER DESTROYED ON PURPOSE, and that is now load-bearing: dft_stats_report() is an atexit handler, so it
+  // runs AFTER this translation unit's static destructors - and P0-2 put a `std::mutex` (and vectors) in this
+  // struct, whose destructor would run first. Measured the moment it was introduced: the metal test aborted at
+  // exit with `mutex lock failed: Invalid argument`. The same reasoning, and the same deliberate leak, as the
+  // lane probe's stats() (lib/phy/metal/ocudu_metal_lane_probe.mm).
+  static dft_stats_t* s = new dft_stats_t();
+  return *s;
 }
 
 static void dft_stats_note_depth(uint64_t depth)
@@ -191,6 +221,48 @@ static void dft_stats_keepalives_released(uint64_t nof)
   dft_stats().keepalives_released.fetch_add(nof, std::memory_order_relaxed);
 }
 
+/// \brief P0-2: folds one block's token holds (attach -> release) into the statistics.
+///
+/// \param[in] attached_at When each token of the set was attached (parallel to the set's token list); a set
+///            whose times do not line up with its tokens is skipped rather than paired by guess - the two are
+///            built together and MUST have the same length.
+/// \param[in] slot        Lane slot the block belonged to (0 when the block never named one).
+///
+/// Called from the release path, which runs on a Metal completion thread or on whoever dropped the block, so
+/// the statistics have their own mutex (the release itself stays outside it - see release_block_tokens()).
+static void
+dft_stats_token_holds(const std::vector<hold_clock::time_point>& attached_at,
+                      uint64_t                                                        slot,
+                      bool                                                            has_slot)
+{
+  if (attached_at.empty()) {
+    return;
+  }
+  const auto                                     now = hold_clock::now();
+  std::vector<float>                             holds;
+  holds.reserve(attached_at.size());
+  double                                         sum = 0.0;
+  double                                         max = 0.0;
+  for (const auto& at : attached_at) {
+    const double us = std::chrono::duration<double, std::micro>(now - at).count();
+    // A negative hold is impossible (monotonic clock, attach before release): clamped rather than dropped, so
+    // a clock mistake shows up as a pile at 0 instead of quietly changing the sample count.
+    const float h = static_cast<float>(us < 0.0 ? 0.0 : us);
+    holds.push_back(h);
+    sum += h;
+    max = (h > max) ? h : max;
+  }
+  dft_stats_t& s = dft_stats();
+  std::lock_guard<std::mutex> lock(s.token_hold_mutex);
+  s.token_hold_us.insert(s.token_hold_us.end(), holds.begin(), holds.end());
+  s.token_hold_sum_us += sum;
+  if (max > s.token_hold_max_us) {
+    s.token_hold_max_us       = max;
+    s.token_hold_max_slot     = slot;
+    s.token_hold_max_has_slot = has_slot;
+  }
+}
+
 /// Counts one early token-release signal ENCODED into a block (P2-E, see release_tokens_early_requested()).
 static void dft_stats_token_early_signal()
 {
@@ -240,7 +312,9 @@ static void dft_stats_wrap_copy()
 
 static void dft_stats_report()
 {
-  const dft_stats_t& s = dft_stats();
+  // NOT const: P0-2's hold statistics live behind a mutex (the release path runs on Metal's completion threads),
+  // and a const reference cannot be locked. Nothing else here writes to the statistics.
+  dft_stats_t& s = dft_stats();
   std::fprintf(stderr,
                // slots_in_flight is the DEPTH OF THE PIPELINE (how many of the max_pipeline_depth slots
                // hold an un-waited transform), not commits minus waits: the wait policy stopped waiting for
@@ -306,6 +380,49 @@ static void dft_stats_report()
     // held for the whole hop" - and a reader who takes a leg's pool numbers as evidence either way without
     // this line would be reading a mechanism that never fired (measured on macOS 26.6.2: a signal encoded
     // after an encoder has been created is published only when the command buffer completes).
+    // P0-2: how long the input was actually held, and the longest one with the slot it belonged to. Printed
+    // with its OWN percentiles (not folded into the handover line) because it is the one reading that says
+    // whether the pool was drained by the hop's own span or by a block that would not complete.
+    {
+      std::vector<float> holds;
+      {
+        std::lock_guard<std::mutex> lock(s.token_hold_mutex);
+        holds = s.token_hold_us;
+      }
+      if (!holds.empty()) {
+        std::sort(holds.begin(), holds.end());
+        const auto pct = [&holds](double p) { return holds[static_cast<size_t>((holds.size() - 1) * p)]; };
+        const double total = s.token_hold_sum_us;
+        std::fprintf(stderr,
+                     "[metal_stats] input hold (P0-2): tokens=%zu mean=%.1fus median=%.1fus p95=%.1fus "
+                     "p99=%.1fus max=%.1fus at slot=%llu (slot named=%d)\n",
+                     holds.size(),
+                     total / static_cast<double>(holds.size()),
+                     pct(0.5),
+                     pct(0.95),
+                     pct(0.99),
+                     holds.back(),
+                     static_cast<unsigned long long>(s.token_hold_max_slot),
+                     static_cast<int>(s.token_hold_max_has_slot));
+        // A hold of seconds is the stall: say it in words, with the count, so a leg cannot be read as
+        // "the hold is the hop's span" when a handful of tokens were held for whole seconds.
+        size_t over_100ms = 0;
+        size_t over_1s    = 0;
+        for (float h : holds) {
+          over_100ms += (h > 100000.0F) ? 1U : 0U;
+          over_1s += (h > 1000000.0F) ? 1U : 0U;
+        }
+        std::fprintf(stderr,
+                     "[metal_stats] input hold (P0-2) tail: over 100ms=%zu (%.4f%%), over 1s=%zu (%.4f%%) of "
+                     "%zu token(s)%s\n",
+                     over_100ms,
+                     100.0 * static_cast<double>(over_100ms) / static_cast<double>(holds.size()),
+                     over_1s,
+                     100.0 * static_cast<double>(over_1s) / static_cast<double>(holds.size()),
+                     holds.size(),
+                     (over_1s != 0) ? " - tokens held for SECONDS: that is the stall, not the hop's span" : "");
+      }
+    }
     const uint64_t early_signals = s.token_early_signals.load(std::memory_order_relaxed);
     const uint64_t by_event      = s.token_sets_by_event.load(std::memory_order_relaxed);
     if ((early_signals != 0) && (by_event == 0)) {
@@ -471,6 +588,11 @@ static void dft_stats_keepalive() {}
 static void dft_stats_keepalives_released(uint64_t /*nof*/) {}
 static void dft_stats_token_early_signal() {}
 static void dft_stats_token_set_released(bool /*by_event*/) {}
+static void dft_stats_token_holds(const std::vector<hold_clock::time_point>&,
+                                  uint64_t,
+                                  bool)
+{
+}
 void dft_handover_heartbeat(const char* /*where*/) {}
 #endif // OCUDU_METAL_STATS
 
@@ -560,6 +682,14 @@ struct dft_engine_impl {
   /// is definitively dropped.
   ///@{
   std::vector<dft_metal_engine::keep_alive> open_tokens;
+  /// \brief P0-2: when each of \c open_tokens was attached, PARALLEL to it (same index).
+  ///
+  /// The hold - attach -> release - is the quantity the receive pool feels (a token keeps a whole slot's
+  /// samples out of the pool, 14 of them per slot), and until now it had no direct reading at all: the plan
+  /// could only infer it from the hop's span. It is recorded per TOKEN rather than per block because the
+  /// tokens of one slot are attached symbol by symbol, and the interesting number is the longest hold, not
+  /// the block's total.
+  std::vector<hold_clock::time_point> open_token_times;
   ///@}
 
   /// Command buffer of the newest submission per transform slot (ring pipelining).
@@ -726,6 +856,15 @@ struct block_token_set {
   /// Whether this set was armed for the EARLY release too (P2-E): it is then racing three ways - the event, the
   /// completion handler and the drop hook - and the counters say which of them won.
   bool early_armed = false;
+  /// \brief P0-2: when each of \c tokens was attached (parallel to it), and the lane slot the block belonged
+  /// to - so the release can account the HOLD and name the slot whose input was held longest.
+  ///
+  /// The hold is the quantity the receive pool feels (one token keeps a whole slot's samples out of the pool),
+  /// and the longest one is what a leg has to be read on: a hold near the hop's span is the multi-hold the
+  /// design accepted, a hold of SECONDS is the stall.
+  std::vector<hold_clock::time_point> attached_at;
+  uint64_t                                                     slot = 0;
+  bool                                                         has_slot = false;
 };
 
 /// Runs every token's release() exactly once, on the calling thread (a Metal completion thread, or the
@@ -749,6 +888,10 @@ static void release_block_tokens(const std::shared_ptr<block_token_set>& set, bo
     set->released = true;
     tokens.swap(set->tokens);
   }
+  // P0-2: account the HOLD (attach -> release) of every token of this set, and remember the longest one with
+  // the slot it belonged to. Done BEFORE the callbacks run: a release callback returns the samples to the
+  // radio's pool and may take locks of its own, and the measurement must not include that.
+  dft_stats_token_holds(set->attached_at, set->slot, set->has_slot);
   for (const dft_metal_engine::keep_alive& token : tokens) {
     if (token.release != nullptr) {
       token.release(token.context);
@@ -777,16 +920,23 @@ static void release_block_tokens(const std::shared_ptr<block_token_set>& set, bo
 ///            so "whichever end comes first" is the whole of the race and no ordering assumption is made.
 ///
 /// \return The set, so the caller can keep it (the handover hands it to the registry as its drop hook).
-static std::shared_ptr<block_token_set> arm_tokens_on_complete(id<MTLCommandBuffer>         cb,
-                                                              std::vector<dft_metal_engine::keep_alive>&& tokens,
-                                                              uint64_t                     early_generation = 0)
+static std::shared_ptr<block_token_set>
+arm_tokens_on_complete(id<MTLCommandBuffer>                                              cb,
+                       std::vector<dft_metal_engine::keep_alive>&&                      tokens,
+                       std::vector<hold_clock::time_point>&&  attached_at,
+                       uint64_t                                                         slot,
+                       bool                                                             has_slot,
+                       uint64_t                                                         early_generation = 0)
 {
-  auto set   = std::make_shared<block_token_set>();
-  set->cb    = (__bridge const void*)cb;
+  auto set     = std::make_shared<block_token_set>();
+  set->cb      = (__bridge const void*)cb;
+  set->slot    = slot;
+  set->has_slot = has_slot;
   if (tokens.empty()) {
     return set;
   }
   set->tokens      = std::move(tokens);
+  set->attached_at = std::move(attached_at);
   set->early_armed = (early_generation != 0);
   [cb addCompletedHandler:^(id<MTLCommandBuffer> /*completed*/) {
     release_block_tokens(set);
@@ -824,9 +974,12 @@ static void discard_open_block(dft_engine_impl* e)
     // The block is dropped, so the dispatches that would have read its input never run: the tokens go back
     // to their owners NOW rather than at a completion that will never come.
     if (!e->open_tokens.empty()) {
-      std::vector<dft_metal_engine::keep_alive> tokens;
+      std::vector<dft_metal_engine::keep_alive>                     tokens;
+      std::vector<hold_clock::time_point> times;
       tokens.swap(e->open_tokens);
-      release_block_tokens(arm_tokens_on_complete(nil, std::move(tokens)));
+      times.swap(e->open_token_times);
+      release_block_tokens(
+          arm_tokens_on_complete(nil, std::move(tokens), std::move(times), e->lane_slot, e->has_lane_slot));
     }
   }
 }
@@ -868,9 +1021,11 @@ static void commit_front_end(dft_engine_impl* e, id<MTLCommandBuffer> cb, uint64
   // for exactly as long as the dispatches that read it, which is the behaviour every run had before the
   // handover existed.
   if (!e->open_tokens.empty()) {
-    std::vector<dft_metal_engine::keep_alive> tokens;
+    std::vector<dft_metal_engine::keep_alive>                     tokens;
+    std::vector<hold_clock::time_point> times;
     tokens.swap(e->open_tokens);
-    (void)arm_tokens_on_complete(cb, std::move(tokens));
+    times.swap(e->open_token_times);
+    (void)arm_tokens_on_complete(cb, std::move(tokens), std::move(times), e->lane_slot, e->has_lane_slot);
   }
   dft_handover_heartbeat("commit");
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::front_end);
@@ -1334,6 +1489,7 @@ bool dft_metal_engine::retain_for_block(const keep_alive& token)
     return false;
   }
   engine->open_tokens.push_back(token);
+  engine->open_token_times.push_back(hold_clock::now());
   dft_stats_keepalive();
   return true;
 }
@@ -1395,8 +1551,14 @@ void* dft_metal_engine::release_block(const void* grid_base)
   const uint64_t early_generation =
       (!engine->open_tokens.empty() && release_tokens_early_requested()) ? encode_token_release_signal(cb) : 0;
   const size_t nof_tokens = engine->open_tokens.size();
-  std::shared_ptr<block_token_set> tokens =
-      arm_tokens_on_complete(cb, std::move(engine->open_tokens), early_generation);
+  std::vector<hold_clock::time_point> token_times;
+  token_times.swap(engine->open_token_times);
+  std::shared_ptr<block_token_set> tokens = arm_tokens_on_complete(cb,
+                                                                  std::move(engine->open_tokens),
+                                                                  std::move(token_times),
+                                                                  engine->lane_slot,
+                                                                  engine->has_lane_slot,
+                                                                  early_generation);
   // The grid-production fence (D1-A, 5.9.13): a HOST reader of this grid - the PUCCH - waits on this
   // generation, because with the hand-over the grid is produced at the LANE's commit and a host read is not
   // ordered against it at all. Armed here, on the buffer that will carry the grid, before it is handed over.

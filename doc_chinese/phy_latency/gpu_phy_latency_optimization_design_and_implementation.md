@@ -724,6 +724,69 @@ UL 数据面停住是因为**池里的缓冲全被"未完成的块"的 token 按
 * ⚠ **代价**：这是**代码**改动 ⇒ 腿 `p05-pair` 的"提交证据"会失效（§5.2 纪律 3）。
   因此**不要零散地做**：与下一条腿（以及 Q13 的配对账输出、P0-2 的直方图）**一起**改、一次重飞。
 
+### 6.7 P0-2 ✅ 落地（2026-09-25）：**持有期直方图 + 池等待时长**（+ Q13 的配对账自解释输出）
+
+> 依据：§6.6 ⑧ 登记的下一步。**这是代码改动** ⇒ 腿 `p05-pair` 的"提交证据"失效（§5.2 纪律 3），
+> 所以三件事**一次做完**：P0-2 的两半 + Q13 的配对账输出。
+
+**① 改了什么**
+
+| # | 位置 | 读数 |
+|---|---|---|
+| **P0-2a** | `ocudu_dft_metal_engine.mm`：`retain_for_block()` 为每个 token 记 attach 时刻（与 `open_tokens` **同下标**并行），`release_block_tokens()` 在**跑回调之前**结算 hold（attach→release） | `[metal_stats] input hold (P0-2): tokens=… mean/median/p95/p99/max µs at slot=S (slot named=…)` + 尾部分布行 `over 100ms=…, over 1s=…`（并明说"SECONDS 就是停顿，不是本跳跨度"）|
+| **P0-2b** | `lower_phy_baseband_processor.cpp`：`ul_process()` 的两处 `pop_blocking()`（取缓冲 + 换填充缓冲）记**等待时长** | `[ul_rx_pool] pop_blocking wait (P0-2): takes=… mean/median/p95/p99/max µs; over 1ms/10ms/100ms/1s=…` |
+| **Q13** | `ul_pipeline_probe::phase_samples_recorded()`（新访问器，**在退出时**读三段序列的真实条数）+ 车道探针的"同 slot 覆盖"计数器 | 配对行新增 `overwritten by a later lane for the same slot=…`；新增自解释行 `[ul_gpu_lane] paired/phase account (P0-5): paired=…, announced=…, series at exit=… -> EXACT MATCH / MISMATCH` |
+
+**② 为什么这两半能判 Q9（先写死的判读）**
+
+* 并发 2 重跑时若 `pop_blocking wait … max ≈ 5 s` / `over 1s ≥ 1`，**且** `input hold` 的 max 也是秒级
+  ⇒ "**块不完成 ⇒ 输入被持有 ⇒ 池空 ⇒ 收包停**"闭合，剩下的问题变成"那个块在等什么"（§6.6 ⑦ 的候选）。
+* 若 `pop_blocking wait` 只有 ms 级，则 5 s 停顿**不在**"池→收包"这条链上 ⇒ Q9 回到电台/驱动侧。
+* `input hold … at slot=S` 给出**最久持有的那一跳的 slot**，这是把它和 `[ul_gpu_lane]` 的
+  5.004 s residency（也按 slot 配对）对上号的钥匙。
+* ⚠ `pop_blocking wait` 是**每次 take** 的（~200k/腿），`input hold` 是**每 token**（~2.8M/腿）
+  ⇒ 两条序列都存样本（分别 ~0.8 MB / ~11 MB），与其它探针同风格（要真分位数，不要直方图猜尾巴）。
+
+**③ 两个自己踩出来的缺陷（都已被测试抓到，已修）**
+
+1. **atexit 与互斥量的顺序**：`dft_stats_t` 与 `rx_pool_accounting` 都是**函数内静态对象**，
+   而它们的报告都是 **atexit** 处理器 —— 报告跑在静态析构**之后**。原来两个结构体里只有原子量（析构无害），
+   P0-2 放进去 `std::mutex` + vector 之后，**金属测试当场在退出时 abort**：
+   `libc++abi: terminating … mutex lock failed: Invalid argument`。
+   ⇒ 两个单例都改成**故意泄漏**（`new`，永不析构），与车道探针的 `stats()` 同一条注释规矩（§6.7 ④）。
+   **教训（写死）**：**任何被 atexit 报告的探针状态，都不许放有析构语义的成员**（mutex/vector/string），
+   除非它自己 `new` 出来。
+2. `phase_samples_recorded()` 的断言第一版拿"本进程累计条数"与"本用例里观察者看到的条数"比（差 3 个样本，
+   那是同进程更早的用例留下的）⇒ 改成**增量**比较（与文件里其它断言同一规矩）。
+
+**④ 离线验证**
+
+| 验证 | 结果 |
+|---|---|
+| `ctest -L phy` | **100% passed out of 193**（含扩展后的金属测试）|
+| `ul_pipeline_probe_test`（含新访问器断言）| **7/7 PASS** |
+| `dft_release_adopt_metal_test` | rc=0；`input hold (P0-2): tokens=45 mean=453.7us median=220.0us p95=842.0us p99=857.0us max=943.5us at slot=4242 (slot named=1)` + 尾部 `over 100ms=0, over 1s=0` |
+| `lower_phy_test`（528 例，池的载体）| **528/528 PASS**；`pop_blocking wait (P0-2): takes=2012 … max=13.0us; over 1ms=0 …` ⇒ 该行确实打印且量级合理 |
+| 与 pristine HEAD 二进制逐字节（3 capture × 4 dump）| **0 differing**（见 §6.7 ⑤）|
+| `l1_handover_arms` / `l1_hop_arms` | 见 §6.7 ⑤ |
+
+**⑤ 值中性（本轮的关键证据）**
+
+| 网 | 结果 |
+|---|---|
+| `ul_chain_replay` 四个 dump vs **pristine HEAD 二进制**（3 capture）| **0 differing**（12 个文件全 0）|
+| `l1_handover_arms` | **5 PASS** |
+| `l1_hop_arms` | 4 臂全部 `differing=0` |
+| `ctest -L phy` | **100% passed out of 193** |
+
+⇒ P0-2 只加读数（每 token 一次 `steady_clock::now()`、每次 take 两次），**不改任何 dispatch、提交数（V4 不变）或数据**。
+
+**⑥ 对腿的影响（必须与结果一起引）**：本提交之后，腿 `p05-pair`（戳 `93c909e423`）到 HEAD 的 diff **触及代码**
+⇒ 按审计门的规矩，它**不再是 HEAD 的证据**；P0-5 的空口读数**本身不受影响**（它已经记录在 §6.3 ⑥），
+但"腿跑的是哪个提交"这一条要等下一条腿。下一条腿的建议配方（写死）：**n1 默认工况 + 并发 2**
+（`--expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2`），读
+`pop_blocking wait (P0-2)` / `input hold (P0-2)` / `paired/phase account` 三行。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
@@ -838,11 +901,11 @@ n1 默认配方 + `OCUDU_UL_PHASE_SEGMENTS=1`：
 | **Q6** | 把 `max_pusch_and_srs_concurrency` 改变能否把 `ce` 的排队项吃掉？代价是什么？ | ✅ **已回答（P1-8，§7.5）**：能（−58~64×），代价是那次 **5 秒收包停顿**（两次复现）⇒ 交付前必须查清 |
 | **Q7** | 符号级收包（S-7g-13）在**负载下**对**跨度**的效果？ | **开放**：§5.8.29 只量过**该段** −1.2%（当时未加压、且当时丢了融合 1 次提交）⇒ 必须在加压腿 + 融合路径上重量一次 |
 | **Q8** | n78/n1 腿上 `max_pusch_and_srs_concurrency` 的生效值？车道是串行 strand 还是 fork limiter？ | ✅ **已收口（§6.1）**：两者**都是 1**、**都是串行 strand**；上限 = 中等池 `max_concurrency = 5`。⚠ 更正手算：n78 的 `ul_ratio` 是 **0.30**（不是 1.0）|
-| **Q9** | 那次 **~5 秒收包停顿**（并发 2 下两次复现）的成因？ | **已收窄，仍开放**（§6.6）：链条已坐实到"池被未完成的块按满 → `pop_blocking` 按住接收线程 5.002 s → 电台溢出丢样点"，**且只有并发 2 付出 5 s**（并发 1 同样 EMPTY，代价 ms 级）；缺的一环是"为什么两条车道在飞时被持有的块 5 s 不完成"，判别靠 P0-2（持有期直方图 + 池等待时长）|
+| **Q9** | 那次 **~5 秒收包停顿**（并发 2 下两次复现）的成因？ | **已收窄 + 仪器已就位**（§6.6/§6.7）：链条已坐实到"池被未完成的块按满 → `pop_blocking` 按住接收线程 5.002 s → 电台溢出丢样点"，**且只有并发 2 付出 5 s**；缺的一环 = "为什么两条车道在飞时被持有的块 5 s 不完成"。**判别读数已可飞**：`pop_blocking wait (P0-2)` + `input hold (P0-2)`（含最久持有的 slot）——下一条腿（n1 + 并发 2）即可判 |
 | **Q10** | 那条 **n1 2.85 倍退化**是否还有 `ce` 之外的成分？ | 已由单变量腿定位（§7.5：`ce` 是主因）；`p05-pair` **配对后**：`ce` 中位 **3278 µs** = 跨度 5248 的 **62%**，而一跳的设备执行只有 **517 µs**（Q14）⇒ `ce` 的排队项就是这条退化的主体。**残余**是 `t2f`（1095 vs 历史 521 量级）——与 Q7 的收样点策略、以及 n1 的 rx_wait（1052 µs）有关，**未单独开臂** |
 | **Q11** | `value_net` 的归档基线陈旧、`ab_dumps` arm1 改前就红 | **待用户裁决**：重建基线（= 承认过期）还是把该网标为"HEAD 不可用"；arm1 需要查清"是否曾经绿过"（§6.5⑤）|
 | **Q12** | `s84b-p0` 的第一次尝试**没有留下任何日志**（本仓与 `ocudu_premerge` 都没有）| **未验证**：最可能是被"戳 ≠ HEAD"拒绝（那种情况**不产生日志**）。要它当证据就得重飞一条；否则按"无效腿"处理（登记，低优先）|
-| **Q13** | 配对账里 **199 行（0.2%）** 既没匹配也没被淘汰 ⇒ 它们是**被同 slot 的后一条车道的插入覆盖**的（`lanes` = 匹配 + 淘汰 + 在等 + 覆盖）。成因未坐实（多跳槽只解释得了 15 行）| **低优先**：不影响 C2（`paired == announced`、零丢失）。**下一次动代码时**给配对账加一行自解释输出（`paired`/`announced`/退出时序列条数）+ 一个"覆盖"计数器，两件事一起做 |
+| **Q13** | 配对账里 **199 行（0.2%）** 既没匹配也没被淘汰 ⇒ 被同 slot 的后一条车道的插入**覆盖** | ✅ **仪器已补（§6.7）**：配对行新增 `overwritten by a later lane for the same slot=`，并有 `paired/phase account` 自解释行；**成因仍待下一条腿**（多跳槽只解释得了 15 行）|
 | **Q14** | 一跳的设备执行在 n1 上到底是多少？ | ✅ **已收口（P0-5 配对）**：**`busy` = 517 µs（中位）**，不是 residency 836，也不是 n78 加压腿的 1125 ⇒ 引用 D 项必须写清"哪条腿的 busy"（§6.3 ⑥）|
 
 ---

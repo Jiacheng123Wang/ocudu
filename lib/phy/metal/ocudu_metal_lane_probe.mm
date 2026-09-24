@@ -206,6 +206,13 @@ struct lane_stats_t {
   std::map<uint64_t, awaiting_lane> awaiting_phase;
   uint64_t awaiting_seq     = 0;
   uint64_t awaiting_evicted = 0;
+  /// \brief Lanes whose slot already had an UNMATCHED row, so this close REPLACED it (Q13).
+  ///
+  /// "Last lane wins" per slot is deliberate (see close_lane()), but it is also the one way a row can disappear
+  /// without being paired or evicted: the account then reads `lanes = matched + evicted + awaiting +
+  /// overwritten`. On `p05-pair` that residual was 199 rows (0.2%) and the multi-hop census explained only 15
+  /// of them, which is why it is counted now instead of inferred.
+  uint64_t paired_overwritten = 0;
   uint64_t lanes_named      = 0; ///< lanes whose slot the estimator's stage entry named
   uint64_t lanes_unnamed    = 0; ///< lanes closed with no slot on record (a tool, or a route with no hop)
   /// busy/residency of EVERY lane, one sample per lane: the population the "~95% of the residency is busy"
@@ -535,6 +542,9 @@ void gpu_lane_probe::close_lane()
       row.busy_us      = busy_us;
       row.seq          = s.awaiting_seq++;
       row.closed_at    = ocudu::metal::lane_host_clock::clock::now();
+      if (s.awaiting_phase.find(lane_slot) != s.awaiting_phase.end()) {
+        ++s.paired_overwritten;
+      }
       s.awaiting_phase[lane_slot] = row;
       // Bound by insertion order, not by key: the key wraps every SFN cycle, so the key order is not an age
       // order (the same rule the pipeline probe's evict_oldest() follows).
@@ -735,6 +745,7 @@ void gpu_lane_probe::report()
   uint64_t            lanes_unnamed     = 0;
   size_t              awaiting_now      = 0;
   uint64_t            awaiting_evicted  = 0;
+  uint64_t            paired_overwritten = 0;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
     fe_residency = s.fe_residency_us;
@@ -779,6 +790,7 @@ void gpu_lane_probe::report()
     lanes_unnamed        = s.lanes_unnamed;
     awaiting_now         = s.awaiting_phase.size();
     awaiting_evicted     = s.awaiting_evicted;
+    paired_overwritten   = s.paired_overwritten;
   }
 
   // The front end has its own series and does not need a lane to be worth reporting: a run of the
@@ -841,7 +853,8 @@ void gpu_lane_probe::report()
     std::fprintf(stderr,
                  "[ul_gpu_lane] paired with the phase segments (P0-5): samples=%llu of phase_samples=%llu"
                  " (no lane for the slot=%llu, lane older than %llds=%llu) over lanes=%llu"
-                 " (slot named=%llu, not named=%llu); awaiting at exit=%zu, evicted=%llu\n",
+                 " (slot named=%llu, not named=%llu); awaiting at exit=%zu, evicted=%llu,"
+                 " overwritten by a later lane for the same slot=%llu\n",
                  static_cast<unsigned long long>(paired_matches),
                  static_cast<unsigned long long>(phase_samples),
                  static_cast<unsigned long long>(paired_no_lane),
@@ -851,7 +864,28 @@ void gpu_lane_probe::report()
                  static_cast<unsigned long long>(lanes_named),
                  static_cast<unsigned long long>(lanes_unnamed),
                  awaiting_now,
-                 static_cast<unsigned long long>(awaiting_evicted));
+                 static_cast<unsigned long long>(awaiting_evicted),
+                 static_cast<unsigned long long>(paired_overwritten));
+
+    // ---- The account, against the SAME counter the pipeline probe announced from (P0-5 + Q13) -----------
+    //
+    // What the criterion is about (paired samples == the phase-segment samples) is only exact if both counts
+    // are read at ONE instant, and the two probes report at different ones: this report runs at exit, while
+    // `ul_pipeline_probe::report()` printed its `[ul_time_frequency] samples=` earlier in the shutdown and the
+    // observer kept counting until now. Measured on `p05-pair`: that line printed 73528 while this probe had
+    // paired 73529 - a reader comparing THOSE two numbers reads a mismatch where there is none. So the count
+    // is taken again here, at exit, and the three numbers are printed together with a verdict.
+    const size_t series_at_exit = ul_pipeline_probe::get().phase_samples_recorded();
+    const bool   account_exact  = (paired_matches == phase_samples) && (phase_samples == series_at_exit);
+    std::fprintf(stderr,
+                 "[ul_gpu_lane] paired/phase account (P0-5): paired=%llu, announced=%llu, series at exit=%zu"
+                 " -> %s; the [ul_time_frequency] line is a SNAPSHOT taken earlier in the shutdown - compare"
+                 " a count against THIS line, not against that one\n",
+                 static_cast<unsigned long long>(paired_matches),
+                 static_cast<unsigned long long>(phase_samples),
+                 series_at_exit,
+                 account_exact ? "EXACT MATCH"
+                              : "MISMATCH (see the counters above: no-lane / stale / overwritten)");
     // The paired series themselves, printed with the same shape as every other series here so the paired and
     // the all-lane populations can be compared line by line (see the header's note on why both are kept).
     print_series("paired residency", paired_residency);

@@ -23,6 +23,7 @@
 #       one population. Read from the SAME line (paired `samples=` vs `phase_samples=`); the `[ul_time_frequency]`
 #       line is a snapshot taken earlier in the shutdown, and C2b reports - and bounds by SIGN - that delta
 #   C2b the printed `[ul_time_frequency]` count is an earlier snapshot of the same counter: printed <= announced
+#       (read against the account line's `series at exit=` once the leg has one; see the 2026-09-25 note below)
 # "Cannot read" is RED, never absent - the lesson of 5.9.97.
 set -u
 
@@ -151,13 +152,29 @@ if [ -n "${knob_ph:-}" ] && [ "${knob_ph:-0}" != "0" ]; then
   # finalized in between (measured on `p05-pair`: 73528 printed against 73529 paired/announced, i.e. ONE sample,
   # 0.0014%). Comparing against it read a false C2 FAIL on a leg whose pairing was exact. The delta is REPORTED
   # below and checked for sign only (the series cannot shrink), so nothing is hidden and no threshold is invented.
-  if [ -z "${n_paired:-}" ] || [ -z "${n_announced:-}" ]; then
+  # The ACCOUNT line (2026-09-25): the lane probe asks the pipeline probe for the series count AT EXIT and
+  # prints paired / announced / series-at-exit together with a verdict. That is the strongest form of the
+  # criterion - all three numbers read at ONE instant - so C2 prefers it and falls back to the pairing line's
+  # own two counts for legs flown before it existed.
+  account=$(grep -a "paired/phase account (P0-5)" "$LEGF" | tail -1)
+  acc_pair=$(printf '%s' "$account" | grep -oE "paired=[0-9]+" | grep -oE "[0-9]+$")
+  acc_ann=$(printf '%s' "$account" | grep -oE "announced=[0-9]+" | grep -oE "[0-9]+$")
+  acc_exit=$(printf '%s' "$account" | grep -oE "series at exit=[0-9]+" | grep -oE "[0-9]+$")
+  acc_verdict=$(printf '%s' "$account" | grep -oE "EXACT MATCH|MISMATCH")
+  if [ -n "$account" ] && [ -n "${acc_pair:-}" ]; then
+    check "C2 (P0-5) paired == announced == the phase series (all read at exit)" "the account line reads EXACT MATCH" \
+          "$([ "${acc_verdict:-}" = "EXACT MATCH" ] && echo PASS || echo FAIL)" \
+          "paired=$acc_pair, announced=$acc_ann, series at exit=${acc_exit:-<none>} -> ${acc_verdict:-<no verdict>}; [ul_time_frequency] printed=${n_phase:-<none>}; $account"
+    check "C2b (P0-5) the printed [ul_time_frequency] line is an EARLIER snapshot of the same counter" "printed <= series at exit" \
+          "$(if [ -z "${n_phase:-}" ] || [ -z "${acc_exit:-}" ]; then echo INFO; elif [ "$n_phase" -le "$acc_exit" ]; then echo PASS; else echo FAIL; fi)" \
+          "printed=${n_phase:-<none>}, series at exit=${acc_exit:-<none>} (delta $(( ${acc_exit:-0} - ${n_phase:-0} )) sample(s) finalized between the two reports, which run at different points of the shutdown)"
+  elif [ -z "${n_paired:-}" ] || [ -z "${n_announced:-}" ]; then
     check "C2 (P0-5) paired samples == the samples announced to the lane probe" "equal (same line, same instant)" RED \
-          "cannot read: paired='${n_paired:-<absent>}' announced='${n_announced:-<absent>}' - the paired line is: ${paired_line:-<none>}"
+          "cannot read: paired='${n_paired:-<absent>}' announced='${n_announced:-<absent>}' and no account line - the paired line is: ${paired_line:-<none>}"
   else
     check "C2 (P0-5) paired samples == the samples announced to the lane probe" "equal (same line, same instant)" \
           "$([ "$n_paired" = "$n_announced" ] && echo PASS || echo FAIL)" \
-          "paired=$n_paired, announced=$n_announced, [ul_time_frequency] printed=${n_phase:-<none>}; $paired_line"
+          "paired=$n_paired, announced=$n_announced, [ul_time_frequency] printed=${n_phase:-<none>} (leg predates the account line); $paired_line"
     # The structural half: the printed series is an earlier snapshot of the same counter, so it can only be
     # SMALLER. The other direction would mean the three series shrank - impossible, hence a real defect.
     if [ -z "${n_phase:-}" ]; then
@@ -166,7 +183,7 @@ if [ -n "${knob_ph:-}" ] && [ "${knob_ph:-0}" != "0" ]; then
     else
       check "C2b (P0-5) the printed phase series is an earlier snapshot of the same counter" "printed <= announced" \
             "$([ "$n_phase" -le "$n_announced" ] && echo PASS || echo FAIL)" \
-            "printed=$n_phase, announced=$n_announced (delta $((n_announced - n_phase)) sample(s) were finalized between the pipeline report and the lane report; the report runs at the start of the shutdown, the lane report at exit)"
+            "printed=$n_phase, announced=$n_announced (delta $((n_announced - n_phase)) sample(s) were finalized between the pipeline report and the lane report)"
     fi
   fi
 else

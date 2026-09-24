@@ -887,6 +887,20 @@ public:
     phase_sample_observer().store(observer, std::memory_order_release);
   }
 
+  /// \brief How many samples the three phase-segment series hold RIGHT NOW.
+  ///
+  /// Exists for the PAIRING ACCOUNT (P0-5, see gpu_lane_probe::note_phase_sample()): report() prints a
+  /// SNAPSHOT of those series taken when it ran, early in the shutdown, while the observer that feeds the lane
+  /// probe keeps counting until the process exits. Measured on `p05-pair`: the series line printed 73528 and
+  /// the lane report (at exit) had 73529 - one sample finalized in between - and a reader comparing those two
+  /// numbers reads a mismatch where there is none. The lane probe therefore asks for this count AT EXIT and
+  /// prints it next to what it paired, so the account can be compared against numbers taken at one instant.
+  size_t phase_samples_recorded()
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    return t2f_latencies_us.size();
+  }
+
   /// Prints the statistics of the recorded latencies. Called once during the application shutdown.
   void report()
   {
@@ -1338,6 +1352,9 @@ public:
   /// counts the samples it was handed, and reports zero rather than inventing a pairing).
   using phase_sample_observer_t = void (*)(uint64_t slot, int64_t t2f_ns, int64_t ce_ns, int64_t eqdem_ns);
   static void set_phase_sample_observer(phase_sample_observer_t /*observer*/) {}
+  /// No phase samples were ever recorded (the probe is compiled out), so the account reads zero - which is
+  /// also what the lane probe reports for a leg whose segments were off.
+  size_t phase_samples_recorded() { return 0; }
   void report() {}
 
 private:

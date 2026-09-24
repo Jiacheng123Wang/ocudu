@@ -250,6 +250,13 @@ private:
   /// there, the references are not coming back at all - a completely different defect from a long hold, and
   /// the two look identical from the outside (real-time failures, a stalled radio).
   static void rx_pool_note_taken(size_t free_buffers, size_t pool_size);
+  /// \brief P0-2: records how long the take BLOCKED (the `pop_blocking()` above it), in microseconds.
+  ///
+  /// The one wait the probe report cannot see: `[ul_rx_wait]` brackets `receiver.receive()`, and the take
+  /// happens before it, so a receive thread parked on an empty pool is invisible in every other series -
+  /// measured on `s88-laneconc2`: EMPTY pool, a 5.002 s park, the USRP queue overflowed and the leg lost
+  /// 2 x ~5 s of samples, while `[ul_rx_wait]` read its usual ~101 ms maximum.
+  static void rx_pool_note_wait(int64_t wait_us);
   static void rx_pool_note_return();
 
   /// The receive buffers of this sector (see rx_buffer_pool), sized by the configuration.

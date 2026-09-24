@@ -800,6 +800,13 @@ TEST(ul_pipeline_probe_test, phase_samples_are_announced_once_each_for_the_pairi
         << report;
   }
 
+  // ---- the count the LANE probe reads at exit (P0-5's account line) ---------------------------------------
+  // `report()` prints a snapshot taken when it ran (early in the shutdown) while the observer keeps counting:
+  // the lane probe asks for THIS count at exit so the account compares numbers taken at one instant. With one
+  // announced sample in this process it must read 1 - and it must track the series, not the observer.
+  EXPECT_EQ(probe.phase_samples_recorded(), static_cast<size_t>(base_t2f_n) + observer_log().slots.size())
+      << "the count read at exit must be the number of samples the three series hold";
+
   // ---- unregistering stops the announcements (and does not stop the recording) ---------------------------
   ocudu::ul_pipeline_probe::set_phase_sample_observer(nullptr);
   constexpr uint64_t slot_d = 2104;

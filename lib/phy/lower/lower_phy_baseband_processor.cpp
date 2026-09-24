@@ -17,9 +17,13 @@
 #include "ocudu/ran/slot_point_extended.h"
 #include "ocudu/support/executors/thread_utils.h" // cpu_relax()
 #include "ocudu/support/executors/ul_pipeline_probe.h"
+#include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <limits>
+#include <mutex>
+#include <vector>
 
 using namespace ocudu;
 
@@ -61,12 +65,33 @@ struct rx_pool_accounting {
   std::atomic<uint64_t> held_max{0};
   std::atomic<size_t>   free_min{std::numeric_limits<size_t>::max()};
   std::atomic<size_t>   pool_size{0};
+
+  /// \brief P0-2: HOW LONG the receive thread waited for a buffer (`pop_blocking()`), per take.
+  ///
+  /// The one wait `[ul_rx_wait]` cannot see: that series brackets `receiver.receive()` and the take happens
+  /// BEFORE it (it is the first line of ul_process()), so a receive thread parked on an empty pool shows up
+  /// nowhere in the probe report today - measured on `s88-laneconc2`: the pool went EMPTY, the take blocked
+  /// for 5.002 s, the USRP's queue overflowed and the leg lost 2 x ~5 s of samples, while `[ul_rx_wait]` read
+  /// its usual ~101 ms maximum. Sampled per take (a 200 s leg takes ~200k times, ~1.6 MB) so the report can
+  /// print real percentiles and the tail counts that matter: how many takes waited more than 1 ms / 10 ms /
+  /// 100 ms / 1 s.
+  std::mutex         wait_mutex;
+  std::vector<float> wait_us;
+  /// Takes that waited longer than the thresholds above, accumulated as they happen (the vector is for the
+  /// percentiles; these are the counters a reader scans for first).
+  std::atomic<uint64_t> waits_over_1ms{0};
+  std::atomic<uint64_t> waits_over_10ms{0};
+  std::atomic<uint64_t> waits_over_100ms{0};
+  std::atomic<uint64_t> waits_over_1s{0};
 };
 
 rx_pool_accounting& rx_pool_accounts()
 {
-  static rx_pool_accounting accounts;
-  return accounts;
+  // NEVER DESTROYED ON PURPOSE, for the reason the DFT engine's stats() spells out: rx_pool_report() is an
+  // atexit handler and runs AFTER the static destructors, and P0-2 put a `std::mutex` (and a vector) in this
+  // struct - locking a destroyed mutex is `mutex lock failed: Invalid argument`, i.e. an abort at exit.
+  static rx_pool_accounting* accounts = new rx_pool_accounting();
+  return *accounts;
 }
 
 /// Prints the receive-buffer pool accounting ONCE, next to the other receive counters (see ul_rx_stats_report).
@@ -76,7 +101,9 @@ rx_pool_accounting& rx_pool_accounts()
 /// like a measurement.
 void rx_pool_report()
 {
-  const rx_pool_accounting& a     = rx_pool_accounts();
+  // NOT const: P0-2's wait distribution lives behind a mutex (the takes happen on the radio thread) and a const
+  // reference cannot be locked. Nothing here writes to the accounting.
+  rx_pool_accounting&       a     = rx_pool_accounts();
   const uint64_t            taken = a.taken.load(std::memory_order_relaxed);
   if (taken == 0) {
     return;
@@ -94,6 +121,39 @@ void rx_pool_report()
                (free_min == std::numeric_limits<size_t>::max()) ? -1LL : static_cast<long long>(free_min),
                static_cast<unsigned long long>(a.starved_takes.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(a.starved_events.load(std::memory_order_relaxed)));
+
+  // P0-2: the wait for a buffer. Its OWN line, because the pool's line above is a census and this one is a
+  // distribution - and because the number that matters (the longest park on an empty pool) has to be readable
+  // without arithmetic. `over 1s=` is the one to look at first: a non-zero count there is a receive stall that
+  // nothing else in the report shows.
+  {
+    std::vector<float> waits;
+    {
+      std::lock_guard<std::mutex> lock(a.wait_mutex);
+      waits = a.wait_us;
+    }
+    if (!waits.empty()) {
+      std::sort(waits.begin(), waits.end());
+      const auto pct = [&waits](double p) { return waits[static_cast<size_t>((waits.size() - 1) * p)]; };
+      double     sum = 0.0;
+      for (float w : waits) {
+        sum += w;
+      }
+      std::fprintf(stderr,
+                   "[ul_rx_pool] pop_blocking wait (P0-2): takes=%zu mean=%.1fus median=%.1fus p95=%.1fus "
+                   "p99=%.1fus max=%.1fus; over 1ms=%llu, over 10ms=%llu, over 100ms=%llu, over 1s=%llu\n",
+                   waits.size(),
+                   sum / static_cast<double>(waits.size()),
+                   pct(0.5),
+                   pct(0.95),
+                   pct(0.99),
+                   waits.back(),
+                   static_cast<unsigned long long>(a.waits_over_1ms.load(std::memory_order_relaxed)),
+                   static_cast<unsigned long long>(a.waits_over_10ms.load(std::memory_order_relaxed)),
+                   static_cast<unsigned long long>(a.waits_over_100ms.load(std::memory_order_relaxed)),
+                   static_cast<unsigned long long>(a.waits_over_1s.load(std::memory_order_relaxed)));
+    }
+  }
 }
 
 const bool rx_pool_report_registered = []() {
@@ -102,6 +162,31 @@ const bool rx_pool_report_registered = []() {
 }();
 
 } // namespace
+
+void lower_phy_baseband_processor::rx_pool_note_wait(int64_t wait_us)
+{
+  if (wait_us < 0) {
+    return;
+  }
+  rx_pool_accounting& a = rx_pool_accounts();
+  {
+    std::lock_guard<std::mutex> lock(a.wait_mutex);
+    a.wait_us.push_back(static_cast<float>(wait_us));
+  }
+  const double us = static_cast<double>(wait_us);
+  if (us > 1000.0) {
+    a.waits_over_1ms.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (us > 10000.0) {
+    a.waits_over_10ms.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (us > 100000.0) {
+    a.waits_over_100ms.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (us > 1000000.0) {
+    a.waits_over_1s.fetch_add(1, std::memory_order_relaxed);
+  }
+}
 
 void lower_phy_baseband_processor::rx_pool_note_taken(size_t free_buffers, size_t pool_size)
 {
@@ -476,8 +561,12 @@ void lower_phy_baseband_processor::ul_process()
     return;
   }
 
-  // Get receive buffer.
+  // Get receive buffer. The wait is measured (P0-2): this is the one place the receive can be parked by the
+  // pool, and it is BEFORE receiver.receive(), so [ul_rx_wait] does not cover it.
+  const auto rx_take_t0 = std::chrono::steady_clock::now();
   std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer = rx_pool->buffers.pop_blocking();
+  rx_pool_note_wait(
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - rx_take_t0).count());
   rx_pool_note_taken(rx_pool->buffers.size(), rx_pool->buffers.max_size());
 
   // \brief Samples to receive in this call.
@@ -539,7 +628,11 @@ void lower_phy_baseband_processor::ul_process()
       if ((position.nof_samples == 0) || ((rx_offset + position.nof_samples) > nof_samples_per_slot)) {
         // The window has no room left for a whole symbol (a grid whose period does not tile it): retire
         // the buffer and start the next one at this boundary instead of splitting a symbol.
-        rx_fill_buffer = rx_pool->buffers.pop_blocking();
+        const auto rx_fill_t0 = std::chrono::steady_clock::now();
+        rx_fill_buffer        = rx_pool->buffers.pop_blocking();
+        rx_pool_note_wait(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                                rx_fill_t0)
+                              .count());
         rx_fill        = 0;
         rx_buffer      = rx_fill_buffer;
         rx_offset      = 0;
