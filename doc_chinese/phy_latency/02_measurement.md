@@ -62,6 +62,9 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
 | **合并后的行号漂移** | 引用主文档行号会指错 | **按句子/章节名检索**，不按行号 |
 | ★ **零流量的腿会"静默少判两条"** | 没有 PUSCH 跳时，契约里 `ce device estimates`（`device==0 && host==0` ⇒ `nullopt`）与 `host sample assembly`（`symbols==0` ⇒ `nullopt`）会**退出 applicable 集合**，于是打印成 `MET (6 of 6 checks applicable)`；而里程碑判据要的是 **`MET (8 of 8`** ⇒ **直接 FAIL**，且看起来像"契约坏了" | **默认腿也必须跑正常流量**：`接入 + PDU session + ping/短 iperf3`（历史默认腿就是这么跑的，`s71` 记录 `[ul_pipeline] samples=7703` / 106 s ≈ **75 跳/s**）。⚠ 只有 PRACH（attach 本身）**不产生**这些跳——PRACH 喂的是 A1-2 的"普通路由"，不是融合车道的计数器 |
 | ★ **别把重上行 A/B 的门用在默认腿上** | `leg_gate.sh` 里有两条 **`VALIDITY`** 判据（`UL >= 2.0 Mbit/s`、`UL grant in >= 50% of slots`）是 **§5.9.96/§5.9.101 为重上行腿预登记**的；拿它去判一条无负载的默认腿，**必然两条红** | 默认腿用 `milestone_audit.sh`（它按**工况**选腿与判据）；`leg_gate.sh` 只用于**加压腿**。这与"判据绑错工况"是同一类错误，只是方向相反 |
+| ★ **判据还有第三个绑定维度：几何** | A1-2 的 C4（`plain route == 12×round(T/10ms)+1`）里那个 **12** 是 **n78 配置的 PRACH 格式（B4）**；在 n1 上 PRACH 的 IDFT **走 CPU 回退**（Metal 工厂对不支持尺寸透明回退，注释点名"the PRACH FFT sizes"）⇒ 该腿 `dft commits=1`、`plain route=1`，**没有可供归属的信号** | `a12_attribution_gate.sh` 现在带 **几何前提**：腿的 `cell config` 必须是登记的 n78 配置**且** `dft commits > 1`；前提不成立 ⇒ **C4 记 "NOT JUDGED" 并给理由**（不进分母），门再把 A1-2 移到能判的腿上。**判据在被判得了的地方判，绝不软化** |
+| ★ **"逐字节相同"可能是空结论** | 用 `cmp -l A B \| wc -l` 比较两个**不存在的文件**得到 **0**（空输出）⇒ 读出"432 次全部相同"，而真实原因是 replay 的 capture 参数**必须剥掉 `.bin` 后缀**，一个 dump 都没产出 | 任何"逐字节相同"**先核验两侧文件存在**（`cmp -s` + 存在性检查）；这也是 `ab_dumps.sh` 文件头警告过的同一类错误 |
+| **偶发读数不许静默重试** | 门的某些臂偶发在**无代码改动**时读红（`ab_dumps` 历史臂：14 次连跑与 432 次已核验比较均为 0，但在完整审计里读到 **551**、在紧跟重 GPU 活动的循环里读到 **2728**；两侧各自在隔离下是确定的）| 门的 **6.5 偶发规则**已落成代码：首次非零时**重跑一次**，通过则 PASS，但 **detail 必须保留首次读数**（`[6.5 flake rule: the FIRST read was 551]`）。**不许**用静默重试把偶发洗成绿 |
 
 
 ## 5. 工况（regime）是**声明**，不是**症状**——加压腿必须自报
