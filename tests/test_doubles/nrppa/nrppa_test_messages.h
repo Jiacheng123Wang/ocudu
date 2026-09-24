@@ -6,8 +6,8 @@
 
 #include "ocudu/adt/byte_buffer.h"
 #include "ocudu/nrppa/nrppa_e_cid.h"
-#include "ocudu/nrppa/nrppa_ue_ids.h"
 #include "ocudu/ran/positioning/measurement_information.h"
+#include "ocudu/ran/positioning/positioning_ids.h"
 
 namespace ocudu::ocucp {
 

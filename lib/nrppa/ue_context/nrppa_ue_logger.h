@@ -4,8 +4,8 @@
 
 #pragma once
 
-#include "ocudu/nrppa/nrppa_ue_ids.h"
 #include "ocudu/ran/cu_cp_types.h"
+#include "ocudu/ran/positioning/positioning_ids.h"
 #include "ocudu/support/format/fmt_to_c_str.h"
 #include "ocudu/support/format/prefixed_logger.h"
 #include "fmt/format.h"
