@@ -92,6 +92,18 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_LANE_DIAG_SPLIT=1
   bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label3> --regime=stress
 ```
 
+**一条命令读完（新工具，只读日志、不碰 GPU）**：
+
+```bash
+bash doc_chinese/phy_pipeline_gpu/wip/p0_gate.sh <腿标签>                    # A1/A2（P0-6）+ B1（拆分臂的 dft=）
+bash doc_chinese/phy_pipeline_gpu/wip/p0_gate.sh <拆分臂> --vs=<出厂臂>       # + B2：各段之和 ≈ 出厂臂 merged_hop（±10%）
+```
+
+判据：**A1** 两行 `[ul_lane_exec]` 存在且"生效值 == `pusch_executor.max_concurrency`"；
+**A2** 形态与值一致（`≤1` ⇒ `STRAND`，`>1` ⇒ `task fork limiter`）；
+**B1** 拆分臂**必须**有 `dft=`（`cbs/lane=1.00`）、出厂臂**必须没有**；
+**B2** 各段之和在出厂臂 `merged_hop` 的 ±10% 内。**"读不出"按 RED 算**（自测：拿 P0-6 之前的旧腿 `s83-tag` 跑，A1/A2 正确地报 RED）。
+
 **读法（一次一条 grep）**
 
 | 目的 | 命令 | 判据 |
