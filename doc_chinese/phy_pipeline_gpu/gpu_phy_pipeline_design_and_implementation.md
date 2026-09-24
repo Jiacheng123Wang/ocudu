@@ -10179,6 +10179,15 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
 `contract NOT MET: 1 of 8 applicable checks failed (mode=gpu)` 时读成 `None` ⇒ 恰好**在契约有话要说时读不出**。
 两处都已改成同时认两种形式（并保留"读不出按红算"）。
 
+**⑦ 准备 A-5 时踩到并已做成工具的坑：`gpu` 腿缺设备内核会**静默回退****
+
+`38bfc6ce02` 的 worktree 建好后**一个 `.metallib` 都没有**——它们是 git-ignored 的构建产物，住在**源目录**里
+（引擎在 configure 时把那些绝对路径烧进二进制，再依次找"可执行文件旁"和 cwd）。
+⇒ 缺了它们，引擎**不加载任何内核、静默走宿主路径，而腿仍然自称 `mode=gpu`**（README 早已为"拷贝参考二进制"记过这条）。
+**处置**：`run_leg.sh` 现在在 `MODE != cpu` 时**预检四个内核**（dft / mmse / equalizer / demod），缺任何一个就
+**拒绝启动**并打印补建命令（`ocudu_metallib_dft ocudu_metallib_demod ocudu_metallib_equalizer ocudu_mmse_metallib`）。
+**顺带的读数**：这四份内核在 HEAD 与合并前**尺寸逐个相同** ⇒ 合并没有改动设备内核，A-5 因此少一个混淆变量。
+
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
 > ⚠ **本节写于 D1 默认关闭的时代**（2026-09-20）。**默认已于 §5.9.51 翻成【开】**，

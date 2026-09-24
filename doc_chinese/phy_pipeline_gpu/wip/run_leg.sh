@@ -78,6 +78,32 @@ if [ "$(id -u)" != "0" ]; then
   exit 2
 fi
 
+# ---- a gpu leg without its DEVICE KERNELS is not a gpu leg --------------------------------
+# The .metallib files are git-ignored build products that live in the SOURCE directories (the engine
+# bakes those absolute paths in at configure time and falls back to "next to the executable", then to
+# the cwd). A checkout or a git worktree therefore has NONE of them until the metallib targets are
+# built, and the failure mode is SILENT: the engine loads no kernel and the run goes down host paths
+# while still calling itself mode=gpu. The design record warns about exactly this for copied reference
+# binaries (doc_chinese/work_tmp/README.md, "参考二进制必须带着它的 .metallib"); met here for real on
+# 2026-09-24 when a fresh worktree was prepared for the pre-merge A/B. Refuse instead of producing a
+# leg that would be evidence about the CPU path.
+if [ "$MODE" != "cpu" ]; then
+  missing=()
+  for k in lib/phy/generic_functions/metal/ocudu_dft.metallib \
+           lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_mmse.metallib \
+           lib/phy/upper/channel_processors/metal/ocudu_equalizer.metallib \
+           lib/phy/upper/channel_modulation/metal/ocudu_demod.metallib; do
+    [ -f "$ROOT/$k" ] || missing+=("$k")
+  done
+  if [ ${#missing[@]} -ne 0 ]; then
+    echo "REFUSING to run a $MODE leg: ${#missing[@]} device kernel(s) missing, so the engines would fall" >&2
+    echo "back to the host paths SILENTLY while the leg still called itself $MODE:" >&2
+    for m in "${missing[@]}"; do echo "  $m" >&2; done
+    echo "  Fix: cmake --build build --target ocudu_metallib_dft ocudu_metallib_demod ocudu_metallib_equalizer ocudu_mmse_metallib" >&2
+    exit 2
+  fi
+fi
+
 CLI_ARGS=()
 for kv in "$@"; do
   case "$kv" in
