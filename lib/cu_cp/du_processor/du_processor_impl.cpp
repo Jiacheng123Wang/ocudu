@@ -614,7 +614,8 @@ du_processor_impl::handle_ue_rrc_context_creation_request(const ue_rrc_context_c
     }
     const pci_t pci = pcell->pci;
 
-    if (!ue_mng.update_ue_context(req.ue_index, du_cfg_hdlr->get_context().id, pci, req.c_rnti, pcell->cell_index)) {
+    if (!ue_mng.update_ue_context(
+            req.ue_index, du_cfg_hdlr->get_context().id, pci, req.c_rnti, pcell->cell_index, pcell->cgi)) {
       logger.warning("ue={}: Could not update UE context", req.ue_index);
       // Schedule UE context release and return error response.
       release_ue(req.ue_index);
