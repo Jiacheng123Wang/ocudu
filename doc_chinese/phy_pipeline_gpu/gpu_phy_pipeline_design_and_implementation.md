@@ -13830,3 +13830,65 @@ residency 也从 44 µs → 172 µs（多一次提交的代价，符合预期，
 理由（实测 2026-09-24）：我为读一行启动打印而短跑的 gNB 没被第一次 kill 杀掉，成了孤儿并持有 `192.168.64.1:2152`，
 于是**下一条腿 15 秒即失败**（`Failed to bind UDP socket … Address already in use` → `Unable to allocate the required NG-U network resources`），
 那条腿没有任何契约报告（审计读成 `0 of 8`）；而且残留 gNB 会**抢 GPU**，让旁边的离线臂读错数（§5.8.20 ④）。
+
+#### 5.9.139 P0-5 落地：相位探针与车道探针**按 slot 配对**（两个探针第一次描述同一批跳）
+
+**① 问题（§5.9.138 之后仍挂着的那条）**：`[ul_time_frequency]`/`[ul_channel_estimation]`/`[ul_equalization_demod]`
+按 **slot** 记、且**只为 CRC-OK 的 TB** 出样本；`gpu_lane_probe` 的 `residency`/`busy` 按 **车道（一跳一条线程的链）** 记、
+且**每一跳都算**。`s85-p0phases` 实测 60389 相位样本 vs 142022 车道样本（比值 **0.425**）⇒
+"residency 里 ~95% 是 busy"、"`eq_demap` ≈ residency" 这两句**是跨两个总体读出来的**，而 D 项预算恰恰要用这个分母。
+
+**② 改法（报告侧，不动数据面）**：
+
+| 侧 | 改动 |
+|---|---|
+| 车道 | `lane_host_clock::lane_slot`/`has_lane_slot`（由 MMSE 适配器在**一跳开始处** `mark_stage_entry(args.slot)` 写入，`ocudu_metal_lane_clock.h`）；`register_commit()` 把 slot 写进**每一个** `lane_entry`（按 entry 取，不按 lane 关时取：carry 过来的 entry 属于上一跳）；`close_lane()` 把关闭的车道按 slot 记进有界表（按插入序淘汰 + 2 s 年龄门，防 10.24 s 的 slot 键回绕） |
+| 相位 | `ul_pipeline_probe::set_phase_sample_observer()`：探针在**把样本写进三段序列的那一支**里把 (slot, t2f, ce, eqdem) 交给观察者，**在释放自己的 mutex 之后**调用（防死锁）；车道探针注册为观察者，命中即配对并弹掉该行 |
+| 报告 | `[ul_gpu_lane] paired with the phase segments (P0-5): samples=… of phase_samples=…（no lane for the slot=…, lane older than 2s=…）over lanes=…`；`paired residency/busy/t2f/ce/eq_demap` 五条序列；`paired ratios (P0-5)`（**busy/residency** 与 **eq_demap/residency**，并给出"全车道自己的 busy/residency"作对照）；`paired reading (P0-5)`（0.95±0.05 / 1.00±0.05 是否复现——**这是描述，不是判据**） |
+
+**③ 判据（先写死，见 `phy_latency/session_handoff_2026-09-24-1.md` §6.0）**：
+(1) 配对样本数 **==** 相位三段样本数；(2) 两个比值在**配对样本上重算**并打印；(3) 零数据面影响（`ab_dumps` 逐字节、
+`value_net`、`l1_*`、`ctest -L phy`、契约 8/8）、**不动提交数**（V4）。
+`p0_gate.sh` 增 **C2**：只对声明 `OCUDU_UL_PHASE_SEGMENTS=1` 的腿判 (1)，读不出按 RED（5.9.97）。
+
+**④ 离线验证（2026-09-25）**：`ctest -L phy` **193/193**；新单测例（`ul_pipeline_probe_test`，标签 `support`，
+不动 193 的计数）钉住 hook 契约：**每个定稿样本恰好通告一次**、携带**与序列相同的三个时长**、
+未组装/未定稿的跳**不通告**、`count(通告) == count(记录)`；`ul_chain_replay` 的 3 capture × 4 dump
+与 pristine HEAD 二进制**逐字节相同**；`l1_handover_arms` 5 PASS、`l1_hop_arms` 4/4 `differing=0`、
+`edge_block_arms` 默认 6/6 绿 + 回退臂 6/6 红、`ab_dumps` arm2 0 B。
+⚠ 两条网在本 HEAD 就已红、且**用 pristine HEAD 二进制复现同一读数**：`value_net`（归档基线 9-20 05:26 陈旧，
+CE 的 `.metal` 源 9-20 10:27–21:41 改过、`.metallib` 9-24 14:51 重建）与 `ab_dumps` arm1
+（`OCUDU_CE_EDGE_FUSE=0` vs 默认，15/27 capture、159068 B）。**两条都不是本次改动**，登记为待处理。
+**那条 n1 腿未飞（未验证）**：配对行与配对数要在腿上读。
+
+#### 5.9.140 ★★ P2-E 的机制**已实现但被平台证伪**：macOS 26.6.2 把"命令缓冲中途的事件信号"推迟到整条缓冲完成
+
+**① 计划与实现**：E-1（`release_block()` 里、最后一次读输入的 dispatch 之后发信号）+ E-2（`notifyListener:atValue:`
+释放 tokens，**保留完成处理器兜底**），开关 `OCUDU_DFT_RELEASE_TOKENS_EARLY`（默认关），
+不新增提交/命令缓冲；新增计数器 `token_early_signals`/`token_sets_by_event`/`token_sets_by_complete`，
+打印在 `[metal_stats] dft handover … (armed=…) tokens_early=signals:N,by_event:M,by_complete:K`。
+
+**② 证伪（同机、三种测法 + 一条对照）**：`MTLSharedEvent` 的信号**一旦编码在"已创建过 encoder"之后**
+（即 encoder 边界之间，正是 E-1 的位置），本平台**只在整条命令缓冲完成时**才发布：
+宿主流轮询 `signaledValue`（97.1 ms 见值 / 97.4 ms 完成）、`notifyListener` 投递时刻（105.8 / 105.9 ms）、
+另一条缓冲 `encodeWaitForEvent`（77.1 / 77.0 ms，GPU 侧也没提前满足）；
+**对照**：信号编码在**第一个 encoder 之前**时 **2.04 ms** 就可见（缓冲 81 ms）⇒ 发布本身是即时的，
+被推迟的是"中途"那一个。这条规则是 `encodeSignalEvent:` 只能在没有活动 encoder 时调用 + 本平台驱动的组合结果，
+**不是**通知投递或宿主读取的问题。
+
+**③ 后果**：token 的释放是**宿主动作**，所以必须有一个宿主可见的时刻；本平台上可选的只有
+(a) 缓冲完成（= 现状 = 整跳）、(b) **前端块自成一次提交**（`cbs/lane` +1：n1/n78 已顶到 2.00 ⇒ **V4 不再满足**）、
+(c) 宿主拷贝输入（破零拷贝契约）、(d) 宿主自旋轮询（RT 路径多一个线程）、
+(e) `commitAndContinue`（**macOS SDK 里不存在**，已查头文件）。
+⇒ **"不新增提交"与"提前释放"在本平台不能同时成立**；P2-E 需要用户裁决（选项见 `phy_latency/05_p2e_platform_finding.md` §5）。
+
+**④ 顺带推论（未验证）**：`shared_queue::grid_ready_signal(cb)` 在合并车道上也是**中途**信号，
+而 PUCCH 的宿主读 `grid_ready_wait()` 等它 ⇒ 本平台上它实际等价于"等整跳完成"（**保守**，不是错误）。
+登记为待验证项：它只影响延迟，不影响正确性。
+
+**⑤ 仪器化（本轮补，重要的是"下次不用再猜"）**：`dft_release_adopt_metal_test` 新增两节——
+(a) **平台前提**每次运行实测并打印判定（本次：`ONLY AT COMPLETION`，margin 0.3 ms）；
+(b) 两条臂（开关 OFF/ON 逐次交替）断言**不变量**：token **恰好释放一次**、**不得在交出之前释放**、
+ON 臂**确实编码了信号**（`token_release_stats()`）；"哪一端赢"只**报告**不断言（平台决定）。
+引擎在"开了开关但 `by_event == 0`"时会自己打一行警告，写明**池数字应读作未变**，
+而不是"持有期不重要"——这正是本轮最容易被误读的地方。

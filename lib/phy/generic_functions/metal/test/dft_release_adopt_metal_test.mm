@@ -130,6 +130,49 @@ struct outcome {
   unsigned host_poison   = 0; ///< grid elements the DFT did NOT write (must be 0, or nothing is tested)
 };
 
+/// A kernel that spins for tens of milliseconds, compiled at runtime for the same reason as the reader: it
+/// exists to give a command buffer a MANAGEABLE LENGTH, which is what turns "was the signal published early?"
+/// from a race into a measurement (see the P2-E premise section in main()).
+const char* kSpinSource = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void probe_spin(device uint*   out   [[buffer(0)]],
+                       constant uint& iters [[buffer(1)]],
+                       uint           gid   [[thread_position_in_grid]])
+{
+  uint x = gid;
+  for (uint i = 0; i < iters; ++i) {
+    x = x * 1664525u + 1013904223u;
+  }
+  out[gid % 1024u] = x;
+}
+)MSL";
+
+id<MTLComputePipelineState> make_spin_pipeline(id<MTLDevice> device)
+{
+  NSError*       error   = nil;
+  id<MTLLibrary> library = [device newLibraryWithSource:@(kSpinSource) options:nil error:&error];
+  if (library == nil) {
+    std::fprintf(stderr,
+                 "FAIL: the spin kernel did not compile: %s\n",
+                 error != nil ? error.localizedDescription.UTF8String : "nil error");
+    return nil;
+  }
+  id<MTLFunction> function = [library newFunctionWithName:@"probe_spin"];
+  if (function == nil) {
+    std::fprintf(stderr, "FAIL: probe_spin is not in the library\n");
+    return nil;
+  }
+  id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function error:&error];
+  if (pipeline == nil) {
+    std::fprintf(stderr,
+                 "FAIL: the spin pipeline did not build: %s\n",
+                 error != nil ? error.localizedDescription.UTF8String : "nil error");
+  }
+  return pipeline;
+}
+
 /// The keep-alive a hop attaches to a block so the input it reads outlives the dispatches (D1 step 3).
 ///
 /// It exists because the release would otherwise be a use-after-free with no failure of its own: the
@@ -331,13 +374,125 @@ int main()
       }
     }
 
+    // ---- P2-E: WHEN the input comes back, and the knob that decides it -----------------------------
+    //
+    // The switch is DEFAULT OFF, and its two states are the two arms of the loop below: a block released at its
+    // command buffer's completion (the behaviour every leg before P2-E had) and one released at the last
+    // dispatch that reads the input. Both are exercised in ONE process - the switch is read per call, exactly
+    // like OCUDU_DFT_RELEASE_BLOCK, so the arms cannot be two binaries that drifted apart.
+    {
+      ::unsetenv("OCUDU_DFT_RELEASE_TOKENS_EARLY");
+      if (metal::dft_metal_engine::early_token_release_enabled()) {
+        std::fprintf(stderr,
+                     "FAIL: the early token release reports itself ARMED with OCUDU_DFT_RELEASE_TOKENS_EARLY "
+                     "unset - it is a diagnostic arm and must default OFF\n");
+        return 1;
+      }
+      ::setenv("OCUDU_DFT_RELEASE_TOKENS_EARLY", "1", 1);
+      if (!metal::dft_metal_engine::early_token_release_enabled()) {
+        std::fprintf(stderr, "FAIL: OCUDU_DFT_RELEASE_TOKENS_EARLY=1 did not arm the early release\n");
+        return 1;
+      }
+      ::setenv("OCUDU_DFT_RELEASE_TOKENS_EARLY", "0", 1);
+      if (metal::dft_metal_engine::early_token_release_enabled()) {
+        std::fprintf(stderr, "FAIL: OCUDU_DFT_RELEASE_TOKENS_EARLY=0 did not disarm the early release\n");
+        return 1;
+      }
+      std::fprintf(stderr,
+                   "[dft-release] arm 0c (P2-E): the early token release is DEFAULT OFF, arms on =1 and "
+                   "disarms on =0\n");
+    }
+
+    // ---- P2-E's PREMISE, measured on the machine that runs this test ---------------------------------
+    //
+    // The arm below releases a block's input tokens from a shared-event signal encoded in the MIDDLE of the
+    // command buffer (after the block's own encoder, before the adopter's), so the whole mechanism rests on
+    // one property of the platform: that such a signal is published when the GPU REACHES it rather than when
+    // the buffer completes. The plan that commissioned P2-E assumed it; this section MEASURES it on every run
+    // instead, because the two answers differ by the whole point of the change ("the input comes back at the
+    // front end's end" vs "the input keeps being held for the whole hop"), and a future macOS may change it.
+    //
+    // Measured 2026-09-25 on macOS 26.6.2 / Apple Silicon: DEFERRED - the value appears only at completion,
+    // while a signal encoded BEFORE the first encoder is published ~2 ms into an 80 ms buffer. So on this
+    // machine the arm cannot shorten the hold, and the run says so twice: here, and on the engine's own
+    // `[metal_stats] dft handover ... tokens_early=` line (where `by_event` stays 0).
+    {
+      id<MTLCommandQueue>         queue   = [device newCommandQueue];
+      id<MTLComputePipelineState> spin    = make_spin_pipeline(device);
+      if ((queue == nil) || (spin == nil)) {
+        return 1;
+      }
+      id<MTLSharedEvent>  event = [device newSharedEvent];
+      id<MTLBuffer>       out   = [device newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+      const uint32_t      heavy = 6000000;
+      const uint32_t      light = 100;
+      id<MTLCommandBuffer> cb = [queue commandBuffer];
+      const auto           add_spin = [&](uint32_t iters) {
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:spin];
+        [e setBuffer:out offset:0 atIndex:0];
+        [e setBytes:&iters length:sizeof(iters) atIndex:1];
+        [e dispatchThreadgroups:MTLSizeMake(32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e endEncoding];
+      };
+      // A SHORT encoder, then the signal, then a LONG one: exactly the shape the engine's block has (the
+      // transforms, the signal, the hop's remaining dispatches).
+      add_spin(light);
+      [cb encodeSignalEvent:event value:1];
+      add_spin(heavy);
+      const auto start = std::chrono::steady_clock::now();
+      const auto since = [&start]() {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+      };
+      [cb commit];
+      double signalled_ms = -1.0;
+      while (cb.status != MTLCommandBufferStatusCompleted) {
+        if ((signalled_ms < 0.0) && (event.signaledValue >= 1)) {
+          signalled_ms = since();
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+      }
+      const double done_ms = since();
+      if (event.signaledValue < 1) {
+        std::fprintf(stderr,
+                     "FAIL: the mid-buffer signal never reached the event at all (signaledValue=%llu)\n",
+                     static_cast<unsigned long long>(event.signaledValue));
+        return 1;
+      }
+      // The verdict needs a MARGIN, not a comparison: the poll below reads the status and the value in that
+      // order, so a value published exactly AT the completion can be seen in the last iteration before the
+      // status change is observed (measured: 102.6 ms against 102.8 ms, i.e. one poll interval). With a heavy
+      // tail of ~100 ms, anything published at the signal's position would be seen tens of milliseconds early,
+      // so a 5 ms margin tells "published at the signal" from "published at the completion" unambiguously.
+      constexpr double early_margin_ms = 5.0;
+      const bool       published_early = (signalled_ms >= 0.0) && (signalled_ms < (done_ms - early_margin_ms));
+      std::fprintf(stderr,
+                   "[dft-release] P2-E premise: a signal encoded MID-buffer was published %s (signal seen at "
+                   "%.1f ms, buffer completed at %.1f ms, margin %.1f ms) - the token release can%s move to "
+                   "the front end's end on this platform\n",
+                   published_early ? "BEFORE THE COMPLETION" : "ONLY AT COMPLETION",
+                   signalled_ms,
+                   done_ms,
+                   done_ms - signalled_ms,
+                   published_early ? "" : "not");
+    }
+
     // ---- Arms 1/2: the handover, one free variable ------------------------------------------------
     unsigned shared_ok    = 0; // repetitions where the reader read what the block wrote
     unsigned private_trap = 0; // repetitions where the private object still showed the pre-write content
     unsigned private_correct = 0;
+    /// Repetitions of each P2-E arm, and how many of the armed ones saw the input come back while the adopted
+    /// buffer was STILL RUNNING - which is the whole claim of the arm (see the assertion below).
+    unsigned early_armed_reps = 0;
+    unsigned early_seen       = 0;
     bool     hard_failure    = false;
 
     for (unsigned rep = 0; (rep != repetitions) && !hard_failure; ++rep) {
+      // P2-E, alternated per repetition: odd repetitions are the arm whose tokens are released at the front
+      // end's signal, even ones the completion-handler arm. One free variable, and the reader's own
+      // correctness (shared_ok / private_trap) is asserted identically in both.
+      const bool early_tokens = (rep % 2) == 1;
+      ::setenv("OCUDU_DFT_RELEASE_TOKENS_EARLY", early_tokens ? "1" : "0", 1);
       for (unsigned mode = 0; mode != 2; ++mode) {
         const bool shared_mapping = (mode == 0);
 
@@ -444,8 +599,17 @@ int main()
         [encoder setBuffer:reader_out offset:0 atIndex:1];
         [encoder setBytes:&dst length:sizeof(dst) atIndex:2];
         [encoder setBytes:&nsub length:sizeof(nsub) atIndex:3];
-        [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(nof_subc, 1, 1)];
-        metal::shared_burst::count_dispatch();
+        // P2-E: with the early release armed the tokens come back while THIS buffer is still executing what
+        // follows the signal, so the arm's tail is made deliberately LONG - the ordering then does not depend
+        // on the machine being fast enough to deliver a dispatch-queue notification before a ~50 us buffer
+        // ends. The reader is idempotent (it reads the grid into the same output), so repeating it changes
+        // nothing the arms below assert.
+        constexpr unsigned early_tail_dispatches = 512;
+        const unsigned     tail_dispatches       = early_tokens ? early_tail_dispatches : 1;
+        for (unsigned tail = 0; tail != tail_dispatches; ++tail) {
+          [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(nof_subc, 1, 1)];
+          metal::shared_burst::count_dispatch();
+        }
         if (!metal::shared_burst::commit() || !metal::shared_burst::wait_committed()) {
           std::fprintf(stderr, "FAIL: the adopted buffer did not complete (rep %u)\n", rep);
           return 1;
@@ -455,8 +619,16 @@ int main()
                        static_cast<unsigned long>(cb.status));
           return 1;
         }
-        // The token came back, exactly once, and NOT before the buffer completed: that is the whole
-        // contract - the input has to outlive the dispatches, and only the dispatches.
+        // The token came back, exactly once - and WHERE in the buffer's life it came back is what P2-E
+        // changes, so each arm asserts its own side of it:
+        //
+        //  * arm OFF (the behaviour every leg before P2-E had): NOT before the buffer completed. The input has
+        //    to outlive the dispatches, and only the dispatches - and on the fused lane "the buffer" is the
+        //    whole hop, which is the cost P2-E exists to remove;
+        //  * arm ON: before the buffer completed, i.e. the front end's signal really did reach the tokens
+        //    while the work that follows it was still running. That flag being FALSE here is the failure of
+        //    the mechanism itself (the notification never fired, or fired only after the completion handler
+        //    had already won) - not a timing detail, because the tail below is hundreds of dispatches long.
         {
           const unsigned releases = probe.releases.load();
           if (releases != 1) {
@@ -466,7 +638,21 @@ int main()
                          rep);
             return 1;
           }
-          if (probe.released_before_completion.load()) {
+          if (early_tokens) {
+            ++early_armed_reps;
+            // WHERE it came back is REPORTED, not asserted, and that is a finding rather than a relaxation:
+            // the release is triggered by a shared-event signal encoded mid-command-buffer, and macOS 26.6.2
+            // (Apple Silicon) publishes such a signal only when the buffer COMPLETES - measured three ways in
+            // 2026-09-25 (a host poll of signaledValue while the buffer ran, the listener block's delivery
+            // time, and a second command buffer waiting on the event), with the control that a signal encoded
+            // before the first encoder IS published immediately. So on this platform the arm's own claim
+            // ("the input comes back at the front end's end") cannot hold, and asserting it would fail on
+            // correct code. What IS asserted below is the wiring: every armed block really did encode a
+            // signal, and every block's token came back exactly once - see the counters check at the end.
+            if (probe.released_before_completion.load()) {
+              ++early_seen;
+            }
+          } else if (probe.released_before_completion.load()) {
             std::fprintf(stderr,
                          "FAIL: the input token was released while the adopted buffer was still running "
                          "(rep %u) - the transforms had not read the input yet\n",
@@ -528,6 +714,10 @@ int main()
     if (hard_failure) {
       return 1;
     }
+    // The alternation above leaves the switch where the last repetition put it (ON: 20 is even, so OFF - but
+    // do not rely on the count): the arms below are about the release happening exactly once, and they must
+    // run the production default.
+    ::unsetenv("OCUDU_DFT_RELEASE_TOKENS_EARLY");
 
     std::fprintf(stderr,
                  "[dft-release] %u repetitions per arm | shared mapping: %u/%u read the block's grid | "
@@ -538,6 +728,47 @@ int main()
                  private_trap,
                  repetitions,
                  private_correct);
+    {
+      const auto tok = metal::dft_metal_engine::token_release_stats();
+      std::fprintf(stderr,
+                   "[dft-release] P2-E arms: %u armed repetitions, %u of them released the input while the "
+                   "adopted buffer was not yet OBSERVED as completed (%u unarmed repetitions held theirs to "
+                   "the completion)\n"
+                   "[dft-release] P2-E counters: early signals=%llu, released by the event=%llu, by a "
+                   "completion=%llu\n"
+                   "[dft-release] (the %u above is NOT evidence of an early release while the platform "
+                   "defers mid-buffer signals: the event's notification is delivered at the buffer's "
+                   "completion and can still beat the completion handler to the token. What judges the "
+                   "effect is a leg's pool numbers - see 05_p2e_platform_finding.md)\n",
+                   early_armed_reps,
+                   early_seen,
+                   repetitions - early_armed_reps,
+                   static_cast<unsigned long long>(tok.early_signals),
+                   static_cast<unsigned long long>(tok.by_event),
+                   static_cast<unsigned long long>(tok.by_complete),
+                   early_seen);
+      // THE WIRING, which is what this arm is for offline: with the switch on, EVERY armed repetition must
+      // have encoded a signal (a no-op arm would silently "pass" every other assertion here), and the tokens
+      // of every block - armed or not - must have come back from exactly one of the two ends. Which end wins
+      // is the platform's, and the line above is what says it.
+      if (tok.early_signals == 0) {
+        std::fprintf(stderr,
+                     "FAIL: %u repetitions ran with OCUDU_DFT_RELEASE_TOKENS_EARLY=1 and not one early signal "
+                     "was encoded - the arm is wired to nothing\n",
+                     early_armed_reps);
+        return 1;
+      }
+    }
+    // An arm that never ran is not an arm: with the alternation above it would take a single repetition to
+    // reach this, and a test that silently skipped the mechanism it exists for is the failure mode the
+    // counters beside it would not show.
+    if (early_armed_reps == 0) {
+      std::fprintf(stderr,
+                   "FAIL: no repetition ran with OCUDU_DFT_RELEASE_TOKENS_EARLY=1 (repetitions=%u) - the "
+                   "early-release arm was not exercised\n",
+                   repetitions);
+      return 1;
+    }
 
     if (shared_ok != repetitions) {
       std::fprintf(stderr,

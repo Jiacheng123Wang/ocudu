@@ -116,8 +116,53 @@ public:
   ///
   /// \note Nothing is retained when no block is open: the caller keeps ownership, which is what leaves the
   ///       factory path (no block batching) exactly as it was.
+  /// \note WHEN it is released is P2-E's question: by default at the command buffer's completion, and with
+  ///       early_token_release_enabled() at the last dispatch that reads it - which on the fused lane is the
+  ///       difference between holding the input for the front end's own work and holding it for the whole hop.
   /// \return True when the token is now this engine's to release.
   bool retain_for_block(const keep_alive& token);
+
+  /// \brief Whether this run releases the block's tokens at the block's LAST INPUT-READING DISPATCH instead of
+  /// at its command buffer's completion (P2-E): \c OCUDU_DFT_RELEASE_TOKENS_EARLY, **default OFF**.
+  ///
+  /// The tokens exist to keep the transform's input alive, and only the FRONT END reads it: the estimator and
+  /// everything after it read the resource grid the front end wrote. The completion they are armed on, though,
+  /// is the COMMAND BUFFER's - and after D1 that buffer is the WHOLE HOP, so the input is held for the whole
+  /// hop's span (design document 5.9.129 (2)): on n1, ~5.25 ms instead of the front end's own few tens of
+  /// microseconds. The receiving chain pays for that hold in the radio's receive pool, which is the
+  /// backpressure its receive loop blocks on (`[ul_rx_pool] held_max/starved_events`).
+  ///
+  /// With the switch on, the block signals a shared event right after its encoder is closed - i.e. after every
+  /// dispatch that reads the input, and before the adopter's first one - and the tokens are released by that
+  /// event. The completion handler STAYS as the fallback, so a block whose signal never arrives (a failed
+  /// buffer, a handover nobody commits) cannot leak its input.
+  ///
+  /// \warning MEASURED INACTIVE ON macOS 26.6.2 / Apple Silicon (2026-09-25). That platform publishes a
+  ///          `MTLSharedEvent` signal encoded after an encoder has been created only when the COMMAND BUFFER
+  ///          completes - measured three ways (a host poll of `signaledValue` while the buffer ran, the
+  ///          delivery time of the listener's block, and a second command buffer waiting on the event), with
+  ///          the control that a signal encoded BEFORE the first encoder is published immediately (~2 ms into
+  ///          an 81 ms buffer). So on this machine the switch encodes the signal and the release still happens
+  ///          at the completion: `token_release_stats()` / the `[metal_stats] dft handover ... tokens_early=`
+  ///          line reports `signals>0, by_event=0, by_complete=N`, and the input keeps being held for the
+  ///          whole hop. The mechanism is kept because it is what the documented semantics promise and it is
+  ///          one environment variable away on a platform that honours them - but DO NOT read a leg's pool
+  ///          numbers as "the hold does not matter" unless `by_event > 0` says the release actually moved.
+  static bool early_token_release_enabled();
+
+  /// \brief How many early token-release signals were encoded, and which end released the tokens (P2-E).
+  ///
+  /// Per SET of tokens (one per block that carried input), not per token: the question these answer is which
+  /// of the two paths won the race for a block, and every token of a block travels together.
+  struct token_release_stats_t {
+    /// Early signals encoded into a block (0 on a run with the switch off).
+    uint64_t early_signals = 0;
+    /// Blocks whose tokens were released by the front end's event - the mechanism working.
+    uint64_t by_event = 0;
+    /// Blocks whose tokens were released by a command buffer's completion (or a drop) instead.
+    uint64_t by_complete = 0;
+  };
+  static token_release_stats_t token_release_stats();
 
   /// \brief Whether this run asks the open block to be handed over instead of committed (D1 step 1).
   ///

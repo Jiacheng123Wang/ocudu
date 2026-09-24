@@ -116,6 +116,22 @@ struct dft_stats_t {
   /// Largest `keepalives - keepalives_released` seen at any attach: the in-flight high-water mark. A leak
   /// makes the gap grow without bound, so this is what tells "in flight" from "leaked" (see above).
   std::atomic<uint64_t> keepalives_in_flight_max{0};
+  /// \name P2-E: WHEN the input tokens come back.
+  ///
+  /// The pair above says whether they come back; these three say from WHICH end of the command buffer, which
+  /// is the whole of P2-E: with `OCUDU_DFT_RELEASE_TOKENS_EARLY=1` the block signals a shared event right
+  /// after its last input-reading dispatch, and the tokens are released by that event instead of by the
+  /// command buffer's completion - which on the fused lane is the END OF THE WHOLE HOP (design document
+  /// 5.9.129 (2)), i.e. an input held for a span in which only its first dispatch reads it.
+  ///
+  /// `token_early_signals` counts the signals ENCODED, `token_sets_by_event` the sets the event actually
+  /// released, `token_sets_by_complete` the sets a completion handler released instead. The last two make the
+  /// mechanism readable on a leg: switch on with `by_event == 0` means the signal was encoded and never
+  /// reached the tokens (a wiring defect the counters say out loud, instead of leaving it to the pool numbers
+  /// to imply), while `by_event > 0` is the direct evidence that the release really moved to the front end.
+  std::atomic<uint64_t> token_early_signals{0};
+  std::atomic<uint64_t> token_sets_by_event{0};
+  std::atomic<uint64_t> token_sets_by_complete{0};
 };
 
 static dft_stats_t& dft_stats()
@@ -173,6 +189,25 @@ static void dft_stats_keepalive()
 static void dft_stats_keepalives_released(uint64_t nof)
 {
   dft_stats().keepalives_released.fetch_add(nof, std::memory_order_relaxed);
+}
+
+/// Counts one early token-release signal ENCODED into a block (P2-E, see release_tokens_early_requested()).
+static void dft_stats_token_early_signal()
+{
+  dft_stats().token_early_signals.fetch_add(1, std::memory_order_relaxed);
+}
+
+/// Counts one token set released, and from which end: the front end's event (P2-E) or a command buffer's
+/// completion. Counted per SET rather than per token because the question is which of the two paths won the
+/// race for a block, and every token of a block travels together.
+static void dft_stats_token_set_released(bool by_event)
+{
+  dft_stats_t& s = dft_stats();
+  if (by_event) {
+    s.token_sets_by_event.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    s.token_sets_by_complete.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 /// Counts one transform whose input came straight from the radio's int16 buffer (the zero-copy
@@ -239,7 +274,7 @@ static void dft_stats_report()
                  "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu "
                  "evicted_unproduced=%llu over_bound=%llu unproduced=%zu "
                  "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu (max in flight "
-                 "%llu) (armed=%d)\n",
+                 "%llu) (armed=%d) tokens_early=signals:%llu,by_event:%llu,by_complete:%llu\n",
                  static_cast<unsigned long long>(hand.handed),
                  static_cast<unsigned long long>(hand.taken),
                  static_cast<unsigned long long>(hand.superseded),
@@ -260,7 +295,27 @@ static void dft_stats_report()
                  static_cast<unsigned long long>(s.keepalives_released.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(s.keepalives.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(s.keepalives_in_flight_max.load(std::memory_order_relaxed)),
-                 static_cast<int>(release_armed));
+                 static_cast<int>(release_armed),
+                 // P2-E: WHEN the input came back. Printed on this line rather than on one of its own so a
+                 // reader comparing two legs sees the release site next to the release count it belongs to.
+                 static_cast<unsigned long long>(s.token_early_signals.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.token_sets_by_event.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.token_sets_by_complete.load(std::memory_order_relaxed)));
+    // ... and, when the switch was on and the event did NOT win, say what that means, because the numbers
+    // above are the only thing that separates "the release moved to the front end" from "the input is still
+    // held for the whole hop" - and a reader who takes a leg's pool numbers as evidence either way without
+    // this line would be reading a mechanism that never fired (measured on macOS 26.6.2: a signal encoded
+    // after an encoder has been created is published only when the command buffer completes).
+    const uint64_t early_signals = s.token_early_signals.load(std::memory_order_relaxed);
+    const uint64_t by_event      = s.token_sets_by_event.load(std::memory_order_relaxed);
+    if ((early_signals != 0) && (by_event == 0)) {
+      std::fprintf(stderr,
+                   "[metal_stats] P2-E: %llu early token-release signal(s) encoded and NOT ONE released a "
+                   "block: this platform publishes a mid-command-buffer signal only at its completion, so the "
+                   "input is still held for the whole hop. Read the pool numbers as UNCHANGED, not as "
+                   "'the hold does not matter'\n",
+                   static_cast<unsigned long long>(early_signals));
+    }
   }
 }
 /// \brief Registers the transform input requirement: the transforms of this run read the radio's
@@ -414,6 +469,8 @@ static void dft_stats_release() {}
 static void dft_stats_released_wait() {}
 static void dft_stats_keepalive() {}
 static void dft_stats_keepalives_released(uint64_t /*nof*/) {}
+static void dft_stats_token_early_signal() {}
+static void dft_stats_token_set_released(bool /*by_event*/) {}
 void dft_handover_heartbeat(const char* /*where*/) {}
 #endif // OCUDU_METAL_STATS
 
@@ -575,6 +632,85 @@ static bool block_release_requested()
   return grid_handover_armed();
 }
 
+/// \brief P2-E: whether the block's INPUT tokens are released at its last input-reading dispatch instead of at
+/// the command buffer's completion (`OCUDU_DFT_RELEASE_TOKENS_EARLY=1`, **DEFAULT OFF**).
+///
+/// WHY IT EXISTS. The tokens exist because the front end's transforms run later than the call that hands the
+/// samples over (see retain_for_block()). They are released by the completion handler, and after D1 the
+/// command buffer they are armed on is the WHOLE HOP: the front-end transforms, the estimator, the
+/// equalization and the demapping are ONE submission, so the input is held for the whole hop's span
+/// (design document 5.9.129 (2)). But only the front end READS it: the estimator and everything after it read
+/// the resource GRID the front end wrote. On n1 that is a hold of ~5.25 ms instead of the front end's own few
+/// tens of microseconds, and the receiving chain pays for it - the radio's receive pool is the backpressure the
+/// receive loop blocks on (measured: the pool drained to `held_max == pool` with `starved_events` in the
+/// thousands, and the 2.85x n1 regression carries a ~5 s receive stall).
+///
+/// HOW. With the switch on, the block encodes a signal on a shared event right after its encoder is closed
+/// (i.e. after every dispatch that reads the input, and before the adopter's first dispatch), and the tokens
+/// are released by a notification on that event. The completion handler STAYS as the fallback: a block whose
+/// signal never arrives - the buffer failed, or the handover was dropped before anyone committed it - must not
+/// leak its input, and releasing twice is impossible by construction (see block_token_set::released).
+///
+/// Read on every call rather than cached, like the two switches above, so the metal test can arm and disarm it
+/// around the arms it compares.
+static bool release_tokens_early_requested()
+{
+  const char* env = std::getenv("OCUDU_DFT_RELEASE_TOKENS_EARLY");
+  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+}
+
+/// \brief The event a block signals once its last input-reading dispatch has run (P2-E).
+///
+/// One event for the whole process, and one monotonically increasing generation per armed block - the same
+/// shape `shared_queue`'s grid-ready and stage-fence events use, and for the same reason: a generation that
+/// has been handed out always has a signaller on its way, so a notification registered for it can never hang.
+///
+/// Created under its own once_flag: two threads that each created their own event would signal one and
+/// listen on the other, and the tokens would then wait for their completion-handler fallback instead.
+static id<MTLSharedEvent> token_release_event()
+{
+  static id<MTLSharedEvent> event = nil;
+  static std::once_flag     once;
+  std::call_once(once, []() {
+    id<MTLDevice> device = dft_resources().device;
+    if (device == nil) {
+      return;
+    }
+    event = [device newSharedEvent];
+  });
+  return event;
+}
+
+/// \brief The dispatch queue the token-release notifications are delivered on.
+///
+/// `init` (rather than `initWithDispatchQueue:`) gives the listener a serial queue of its own, which is what
+/// the release needs: the callback returns a receive buffer to the radio's pool, and doing that from a queue
+/// shared with anything else would put this work behind it.
+static MTLSharedEventListener* token_release_listener()
+{
+  static MTLSharedEventListener* listener = [[MTLSharedEventListener alloc] init];
+  return listener;
+}
+
+/// \brief Encodes the early token-release signal into \p cb and returns its generation (0 = not encoded).
+///
+/// MUST be called with NO encoder open on \p cb: `encodeSignalEvent:value:` is a command-buffer-level call and
+/// Metal aborts the process if one is encoded while an encoder is active (MTLCommandBuffer.h). Encoding it
+/// after the block's encoder is closed is exactly what makes it fire after the block's dispatches: a signal is
+/// ordered after everything encoded before it in the same buffer.
+static uint64_t encode_token_release_signal(id<MTLCommandBuffer> cb)
+{
+  id<MTLSharedEvent> event = token_release_event();
+  if ((cb == nil) || (event == nil)) {
+    return 0;
+  }
+  static std::atomic<uint64_t> generation{0};
+  const uint64_t               value = generation.fetch_add(1, std::memory_order_relaxed) + 1;
+  [cb encodeSignalEvent:event value:value];
+  dft_stats_token_early_signal();
+  return value;
+}
+
 /// \brief The tokens of one block, released exactly once (see dft_metal_engine::retain_for_block()).
 ///
 /// Shared because two things race to release them and must not both win: the command buffer's completion
@@ -587,12 +723,19 @@ struct block_token_set {
   /// The command buffer these tokens belong to, as an opaque id: the lifecycle trace below is what says
   /// WHICH block's input never came back when one does not (5.9.11).
   const void* cb = nullptr;
+  /// Whether this set was armed for the EARLY release too (P2-E): it is then racing three ways - the event, the
+  /// completion handler and the drop hook - and the counters say which of them won.
+  bool early_armed = false;
 };
 
 /// Runs every token's release() exactly once, on the calling thread (a Metal completion thread, or the
 /// thread that dropped the block). The callbacks run with the lock RELEASED: a release that calls back into
 /// the engine is legitimate, and holding the mutex across it would deadlock.
-static void release_block_tokens(const std::shared_ptr<block_token_set>& set)
+///
+/// \param[in] by_event Whether the caller is the front end's release event (P2-E, see
+///            release_tokens_early_requested()) rather than a completion or a drop. Only used for the
+///            counters: the release itself is the same and happens exactly once whichever end wins.
+static void release_block_tokens(const std::shared_ptr<block_token_set>& set, bool by_event = false)
 {
   if (set == nullptr) {
     return;
@@ -612,6 +755,7 @@ static void release_block_tokens(const std::shared_ptr<block_token_set>& set)
     }
   }
   dft_stats_keepalives_released(tokens.size());
+  dft_stats_token_set_released(by_event);
   static std::atomic<unsigned> logged{0};
   if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
     // DEBUG, like the rest of the D1 handshake lines (see d1_trace() in ocudu_metal_burst.mm).
@@ -624,19 +768,40 @@ static void release_block_tokens(const std::shared_ptr<block_token_set>& set)
 
 /// Moves \p tokens into a set and arms it on \p cb: they are released when that command buffer COMPLETES.
 /// Must be called before the commit (Metal asserts on a handler added afterwards).
+///
+/// \param[in] early_generation The value of the early release signal encoded in \p cb (P2-E, see
+///            encode_token_release_signal()), or 0 when this block has no early signal. With one, the tokens
+///            are released by that event as well - and the completion handler below STAYS as the fallback,
+///            because a block whose signal never arrives (a failed buffer, or a handover nobody commits) must
+///            not leak the input it holds. Both paths funnel into release_block_tokens(), which is idempotent,
+///            so "whichever end comes first" is the whole of the race and no ordering assumption is made.
+///
 /// \return The set, so the caller can keep it (the handover hands it to the registry as its drop hook).
 static std::shared_ptr<block_token_set> arm_tokens_on_complete(id<MTLCommandBuffer>         cb,
-                                                              std::vector<dft_metal_engine::keep_alive>&& tokens)
+                                                              std::vector<dft_metal_engine::keep_alive>&& tokens,
+                                                              uint64_t                     early_generation = 0)
 {
   auto set   = std::make_shared<block_token_set>();
   set->cb    = (__bridge const void*)cb;
   if (tokens.empty()) {
     return set;
   }
-  set->tokens = std::move(tokens);
+  set->tokens      = std::move(tokens);
+  set->early_armed = (early_generation != 0);
   [cb addCompletedHandler:^(id<MTLCommandBuffer> /*completed*/) {
     release_block_tokens(set);
   }];
+  if (early_generation != 0) {
+    id<MTLSharedEvent>         event    = token_release_event();
+    MTLSharedEventListener*    listener = token_release_listener();
+    if ((event != nil) && (listener != nil)) {
+      [event notifyListener:listener
+                    atValue:early_generation
+                      block:^(id<MTLSharedEvent> /*signalled*/, uint64_t /*value*/) {
+                        release_block_tokens(set, /*by_event=*/true);
+                      }];
+    }
+  }
   return set;
 }
 
@@ -1144,6 +1309,22 @@ bool dft_metal_engine::block_release_enabled()
   return block_release_requested();
 }
 
+bool dft_metal_engine::early_token_release_enabled()
+{
+  return release_tokens_early_requested();
+}
+
+dft_metal_engine::token_release_stats_t dft_metal_engine::token_release_stats()
+{
+  token_release_stats_t out;
+#if defined(OCUDU_METAL_STATS)
+  out.early_signals = dft_stats().token_early_signals.load(std::memory_order_relaxed);
+  out.by_event      = dft_stats().token_sets_by_event.load(std::memory_order_relaxed);
+  out.by_complete   = dft_stats().token_sets_by_complete.load(std::memory_order_relaxed);
+#endif
+  return out;
+}
+
 bool dft_metal_engine::retain_for_block(const keep_alive& token)
 {
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
@@ -1202,8 +1383,20 @@ void* dft_metal_engine::release_block(const void* grid_base)
   // The input tokens travel with it: armed on the completion (the adopter commits the buffer, and that is
   // when the transforms finally read the radio's samples), and released by the registry if the deposit is
   // DROPPED instead - a handover nobody claimed is never committed, so its completion would never come.
+  //
+  // P2-E (OCUDU_DFT_RELEASE_TOKENS_EARLY=1): the buffer also SIGNALS the moment its last input-reading
+  // dispatch has run, and the tokens are released there instead - because with the hand-over the completion
+  // is the end of the WHOLE HOP, while only this block's transforms read the input (the estimator and
+  // everything after it read the grid they wrote). The signal is encoded HERE, after the encoder was closed
+  // above and before the buffer is handed over: `encodeSignalEvent:` is a command-buffer-level call that
+  // Metal refuses while an encoder is active, and a signal is ordered after everything encoded before it -
+  // which is what puts it after the transforms and before the adopter's first dispatch. Nothing is added to
+  // the submission itself: one extra command in a buffer that already exists (V4: cbs/lane unchanged).
+  const uint64_t early_generation =
+      (!engine->open_tokens.empty() && release_tokens_early_requested()) ? encode_token_release_signal(cb) : 0;
   const size_t nof_tokens = engine->open_tokens.size();
-  std::shared_ptr<block_token_set> tokens = arm_tokens_on_complete(cb, std::move(engine->open_tokens));
+  std::shared_ptr<block_token_set> tokens =
+      arm_tokens_on_complete(cb, std::move(engine->open_tokens), early_generation);
   // The grid-production fence (D1-A, 5.9.13): a HOST reader of this grid - the PUCCH - waits on this
   // generation, because with the hand-over the grid is produced at the LANE's commit and a host read is not
   // ordered against it at all. Armed here, on the buffer that will carry the grid, before it is handed over.
