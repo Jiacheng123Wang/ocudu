@@ -1315,3 +1315,58 @@ f1ap_message ocudu::test_helpers::generate_f1ap_write_replace_warning_response(
 
   return pdu;
 }
+
+f1ap_message ocudu::test_helpers::generate_e_cid_measurement_initiation_response(gnb_du_ue_f1ap_id_t     du_ue_id,
+                                                                                 gnb_cu_ue_f1ap_id_t     cu_ue_id,
+                                                                                 uint16_t                lmf_ue_meas_id,
+                                                                                 uint16_t                ran_ue_meas_id,
+                                                                                 std::optional<uint16_t> azimuth_aoa,
+                                                                                 std::optional<uint16_t> zenith_aoa)
+{
+  f1ap_message pdu = {};
+
+  pdu.pdu.set_successful_outcome();
+  pdu.pdu.successful_outcome().load_info_obj(ASN1_F1AP_ID_E_C_ID_MEAS_INITIATION);
+
+  auto& resp              = pdu.pdu.successful_outcome().value.e_c_id_meas_initiation_resp();
+  resp->gnb_cu_ue_f1ap_id = to_underlying(cu_ue_id);
+  resp->gnb_du_ue_f1ap_id = to_underlying(du_ue_id);
+  resp->lmf_ue_meas_id    = lmf_ue_meas_id;
+  resp->ran_ue_meas_id    = ran_ue_meas_id;
+
+  if (azimuth_aoa.has_value()) {
+    resp->e_c_id_meas_result_present = true;
+
+    asn1::f1ap::e_c_id_measured_results_item_s item;
+    auto&                                      aoa = item.e_c_id_measured_results_value.set_value_angleof_arrival_nr();
+    aoa.azimuth_ao_a                               = azimuth_aoa.value();
+    if (zenith_aoa.has_value()) {
+      aoa.zenith_ao_a_present = true;
+      aoa.zenith_ao_a         = zenith_aoa.value();
+    }
+
+    resp->e_c_id_meas_result.measured_results_list.push_back(item);
+  }
+
+  return pdu;
+}
+
+f1ap_message ocudu::test_helpers::generate_e_cid_measurement_initiation_failure(gnb_du_ue_f1ap_id_t du_ue_id,
+                                                                                gnb_cu_ue_f1ap_id_t cu_ue_id,
+                                                                                uint16_t            lmf_ue_meas_id,
+                                                                                uint16_t            ran_ue_meas_id)
+{
+  f1ap_message pdu = {};
+
+  pdu.pdu.set_unsuccessful_outcome();
+  pdu.pdu.unsuccessful_outcome().load_info_obj(ASN1_F1AP_ID_E_C_ID_MEAS_INITIATION);
+
+  auto& fail                      = pdu.pdu.unsuccessful_outcome().value.e_c_id_meas_initiation_fail();
+  fail->gnb_cu_ue_f1ap_id         = to_underlying(cu_ue_id);
+  fail->gnb_du_ue_f1ap_id         = to_underlying(du_ue_id);
+  fail->lmf_ue_meas_id            = lmf_ue_meas_id;
+  fail->ran_ue_meas_id            = ran_ue_meas_id;
+  fail->cause.set_radio_network() = asn1::f1ap::cause_radio_network_opts::unspecified;
+
+  return pdu;
+}

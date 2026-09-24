@@ -69,6 +69,9 @@ public:
   async_task<expected<measurement_response_t, measurement_failure_t>>
   handle_positioning_measurement_request(const measurement_request_t& request) override;
 
+  async_task<expected<e_cid_measurement_response_t, e_cid_measurement_failure_t>>
+  handle_e_cid_measurement_request(const e_cid_measurement_request_t& request) override;
+
   // f1ap_interface_management_handler functions.
   async_task<f1ap_gnb_cu_configuration_update_response>
   handle_gnb_cu_configuration_update(const f1ap_gnb_cu_configuration_update& request) override;

@@ -10,6 +10,7 @@
 #include "procedures/du_config_update_procedure.h"
 #include "procedures/f1_removal_procedure.h"
 #include "procedures/f1_setup_procedure.h"
+#include "procedures/f1ap_e_cid_measurement_initiation_procedure.h"
 #include "procedures/f1ap_positioning_activation_procedure.h"
 #include "procedures/f1ap_positioning_information_exchange_procedure.h"
 #include "procedures/f1ap_positioning_measurement_procedure.h"
@@ -226,6 +227,27 @@ f1ap_cu_impl::handle_positioning_measurement_request(const measurement_request_t
 {
   logger.info("Handling positioning measurement request");
   return launch_async<f1ap_positioning_measurement_procedure>(cfg, request, ev_mng, tx_pdu_notifier, logger);
+}
+
+async_task<expected<e_cid_measurement_response_t, e_cid_measurement_failure_t>>
+f1ap_cu_impl::handle_e_cid_measurement_request(const e_cid_measurement_request_t& request)
+{
+  if (!ue_ctxt_list.contains(request.ue_index)) {
+    logger.warning("ue={}: Dropping \"ECIDMeasurementInitiationRequest\". UE context does not exist", request.ue_index);
+
+    return launch_async(
+        [request](coro_context<async_task<expected<e_cid_measurement_response_t, e_cid_measurement_failure_t>>>&
+                      ctx) mutable {
+          CORO_BEGIN(ctx);
+          CORO_RETURN(make_unexpected(e_cid_measurement_failure_t{
+              request.lmf_ue_meas_id, request.ran_ue_meas_id, f1ap_cause_t{cause_misc_t::unspecified}}));
+        });
+  }
+
+  f1ap_ue_context& ue_ctxt = ue_ctxt_list[request.ue_index];
+  ue_ctxt.logger.log_info("Handling E-CID measurement initiation request");
+
+  return launch_async<f1ap_e_cid_measurement_initiation_procedure>(cfg, request, ue_ctxt, tx_pdu_notifier, logger);
 }
 
 async_task<f1ap_gnb_cu_configuration_update_response>
@@ -528,6 +550,11 @@ void f1ap_cu_impl::handle_successful_outcome(const asn1::f1ap::successful_outcom
         ue_ctxt->ev_mng.positioning_information_outcome.set(outcome.value.positioning_info_resp());
       }
       break;
+    case asn1::f1ap::f1ap_elem_procs_o::successful_outcome_c::types_opts::e_c_id_meas_initiation_resp:
+      if (auto* ue_ctxt = get_ue_ctxt_in_ue_assoc_msg(outcome)) {
+        ue_ctxt->ev_mng.e_cid_measurement_outcome.set(outcome.value.e_c_id_meas_initiation_resp());
+      }
+      break;
     case asn1::f1ap::f1ap_elem_procs_o::successful_outcome_c::types_opts::positioning_activation_resp:
       if (auto* ue_ctxt = get_ue_ctxt_in_ue_assoc_msg(outcome)) {
         ue_ctxt->ev_mng.positioning_activation_outcome.set(outcome.value.positioning_activation_resp());
@@ -614,6 +641,11 @@ void f1ap_cu_impl::handle_unsuccessful_outcome(const asn1::f1ap::unsuccessful_ou
     case asn1::f1ap::f1ap_elem_procs_o::unsuccessful_outcome_c::types_opts::positioning_info_fail:
       if (auto* ue_ctxt = get_ue_ctxt_in_ue_assoc_msg(outcome)) {
         ue_ctxt->ev_mng.positioning_information_outcome.set(outcome.value.positioning_info_fail());
+      }
+      break;
+    case asn1::f1ap::f1ap_elem_procs_o::unsuccessful_outcome_c::types_opts::e_c_id_meas_initiation_fail:
+      if (auto* ue_ctxt = get_ue_ctxt_in_ue_assoc_msg(outcome)) {
+        ue_ctxt->ev_mng.e_cid_measurement_outcome.set(outcome.value.e_c_id_meas_initiation_fail());
       }
       break;
     case asn1::f1ap::f1ap_elem_procs_o::unsuccessful_outcome_c::types_opts::positioning_activation_fail:

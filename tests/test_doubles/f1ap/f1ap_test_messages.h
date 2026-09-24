@@ -252,6 +252,22 @@ f1ap_message generate_positioning_information_response(gnb_du_ue_f1ap_id_t du_ue
 /// TS 38.473 section 8.13.9.3.
 f1ap_message generate_positioning_information_failure(gnb_du_ue_f1ap_id_t du_ue_id, gnb_cu_ue_f1ap_id_t cu_ue_id);
 
+/// \brief Generates an F1AP E-CID MEASUREMENT INITIATION RESPONSE, as per TS 38.473, Section 9.2.12.21.
+/// \param[in] azimuth_aoa Azimuth Angle of Arrival carried in the E-CID Measurement Result IE, in units of 0.1
+/// degrees. When empty, the message carries no E-CID Measurement Result IE.
+f1ap_message generate_e_cid_measurement_initiation_response(gnb_du_ue_f1ap_id_t     du_ue_id,
+                                                            gnb_cu_ue_f1ap_id_t     cu_ue_id,
+                                                            uint16_t                lmf_ue_meas_id,
+                                                            uint16_t                ran_ue_meas_id,
+                                                            std::optional<uint16_t> azimuth_aoa,
+                                                            std::optional<uint16_t> zenith_aoa = std::nullopt);
+
+/// \brief Generates an F1AP E-CID MEASUREMENT INITIATION FAILURE, as per TS 38.473, Section 9.2.12.22.
+f1ap_message generate_e_cid_measurement_initiation_failure(gnb_du_ue_f1ap_id_t du_ue_id,
+                                                           gnb_cu_ue_f1ap_id_t cu_ue_id,
+                                                           uint16_t            lmf_ue_meas_id,
+                                                           uint16_t            ran_ue_meas_id);
+
 /// \brief Generates dummy F1AP POSITIONING ACTIVATION RESPONSE message, sent by the DU to the CU, as per
 /// TS 38.473 section 8.13.10.2.
 f1ap_message generate_positioning_activation_response(gnb_du_ue_f1ap_id_t du_ue_id, gnb_cu_ue_f1ap_id_t cu_ue_id);
