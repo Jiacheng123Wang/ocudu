@@ -27,16 +27,83 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 W=$ROOT/doc_chinese/phy_pipeline_gpu/wip
 LOGDIR=$W/logs
 LEG=""
+STRESSLEG=""
 QUICK=0
 for a in "$@"; do
   case "$a" in
-    --leg)   shift; LEG=${1:-} ;;
-    --leg=*) LEG=${a#*=} ;;
+    --leg)          shift; LEG=${1:-} ;;
+    --leg=*)        LEG=${a#*=} ;;
+    --stress-leg)   shift; STRESSLEG=${1:-} ;;
+    --stress-leg=*) STRESSLEG=${a#*=} ;;
     --quick) QUICK=1 ;;
   esac
 done
-if [ -z "$LEG" ]; then
-  LEG=$(ls -1t "$LOGDIR"/gnb_gpu_*.log.stderr 2>/dev/null | head -1 | xargs -I{} basename {} .log.stderr | sed 's/^gnb_gpu_//')
+
+# ---------------------------------------------------------------- 0a. TWO REGIMES, TWO SETS OF CRITERIA
+# A leg runs in one of two regimes, and they do NOT share their criteria:
+#
+#   default : no load generator. This is the regime the milestone criteria were written for - the
+#             contract, the crossings, cbs/lane, and the A1-2 attribution gate's C5, whose
+#             pre-registration is literally "the leg is still valid: contract 8/8, stale=0,
+#             crossings 0.00+0.00/hop" (5.9.118 (3)). `stale=0` means no hop crossed 8 ms, the
+#             uplink HARQ round trip.
+#   stress  : a load generator drove the cell (wip/ul_load.sh, wip/wall_ab.sh). Here `stale > 0` is
+#             the PRE-REGISTERED EXPECTATION, not a failure: the wall A/B's criterion R4 reads
+#             "stale > 0 => this leg is of the same kind as s70", PASS (5.9.127). The legs that
+#             carry the L-1 latency decomposition are exactly these (s78/s80/s82).
+#
+# Measured 2026-09-24: this script auto-picked the NEWEST leg, which was s82 - the deliberately
+# overloaded n78 leg run for the latency decomposition - and reported `stale = 0` and the A1-2 gate
+# as FAIL on it. Both were the criterion bound to the wrong regime, not a finding. The defect was
+# invisible before because an earlier HEAD's newest leg was a stress leg that happened to read
+# stale=0, so the default-regime criterion passed on it by luck.
+#
+# A regime is a DECLARATION, never a symptom: classifying a leg by its own `stale` reading would make
+# the criterion unfalsifiable. Hence the two sources below - and run_leg.sh now writes
+# `[leg] regime=` into the leg's own stderr, which is the source of record for every new leg.
+#
+# A leg driven by a load generator MUST declare itself: pass --regime=stress to wip/run_leg.sh, or
+# add its label here WITH the load evidence (for legs that predate that flag).
+STRESS_LEGS="
+s63-n78 s70-heavy-n78 s72-wall-gpu-n78 s73-wall-cpu-n78 s74-wall-gpu-n78-cold
+s75-wall-gpu-n78-hot s76-wall-premerge-n78 s77-wall-cpu-n78 s78-dlcap40-n78 s79-dlcap40-cpu-n78
+s80-ulcap40-n78 s81-ulcap40-cpu-n78 s82-phases-heavy-n78
+"
+# The list above is derived from wip/wall_ab.sh's own header and its 5.9.127 note: "A-1 gpu, the same
+# load recipe as s70" (line 3) and "the uplink-load legs (s70..s75) and the downlink-saturated ones
+# (s76..s79)" (line 129).
+leg_regime() {
+  local label=$1 f line s
+  f="$LOGDIR/gnb_gpu_$label.log.stderr"
+  [ -f "$f" ] || f=$(ls -1t "$LOGDIR"/gnb_*"$label"*.log.stderr 2>/dev/null | head -1)
+  if [ -n "${f:-}" ] && [ -f "$f" ]; then
+    line=$(grep -aoE '\[leg\] regime=[a-z]+' "$f" | tail -1)
+    [ -n "$line" ] && { echo "${line#*=}"; return; }
+  fi
+  for s in $STRESS_LEGS; do case "$label" in *"$s"*) echo stress; return;; esac; done
+  echo default
+}
+leg_labels_newest_first() {
+  ls -1t "$LOGDIR"/gnb_gpu_*.log.stderr 2>/dev/null | xargs -I{} basename {} .log.stderr | sed 's/^gnb_gpu_//'
+}
+# An explicit --leg that names a STRESS leg is redirected, not honoured: honouring it would bind the
+# default-regime criteria to the one regime where they were pre-registered to read the other way.
+if [ -n "$LEG" ] && [ "$(leg_regime "$LEG")" = stress ]; then
+  echo "NOTE: --leg=$LEG is a declared STRESS-regime leg. It is audited as the stress leg; the" >&2
+  echo "      default-regime criteria (stale = 0, A1-2 5/5) are bound to the newest DEFAULT leg." >&2
+  [ -z "$STRESSLEG" ] && STRESSLEG=$LEG
+  LEG=""
+fi
+if [ -z "$LEG" ] || [ -z "$STRESSLEG" ]; then
+  while read -r cand; do
+    [ -n "$cand" ] || continue
+    if [ "$(leg_regime "$cand")" = stress ]; then
+      [ -z "$STRESSLEG" ] && STRESSLEG=$cand
+    else
+      [ -z "$LEG" ] && LEG=$cand
+    fi
+    [ -n "$LEG" ] && [ -n "$STRESSLEG" ] && break
+  done <<<"$(leg_labels_newest_first)"
 fi
 
 T=$(mktemp -d)
@@ -67,6 +134,41 @@ trap 'rm -rf "$T" "$LOCK"' EXIT
 rows=()
 # check <name> <expected text> <verdict: PASS|FAIL|RED> <detail>
 check() { rows+=("$1|$2|$3|$4"); }
+
+# A leg's OWN commit, against HEAD. wip/run_leg.sh refuses to start when the binary's stamp differs from
+# HEAD ("a leg run now would be evidence about $STAMP, not about the commit you are testing"), so a leg
+# is evidence about the commit it ran - but that fact lived only in the console and in the .stdout
+# banner, and nothing here checked it: this script's "binary stamp == HEAD" row is about build/hashes.h,
+# i.e. about the CURRENT build, not about the leg. A leg whose commit differs is still evidence IF the
+# diff between it and HEAD touches no code. Measured 2026-09-24: the newest leg s82 ran 33de116ce3 while
+# HEAD was 4c532a9fb1, and 33de116ce3..HEAD changes 4 files, all under doc_chinese/phy_latency/ - so it
+# is evidence about HEAD's PHY behaviour, and now says so itself instead of a human asserting it.
+leg_commit_check() {   # <label> <leg .stderr path> <kind>
+  local label=$1 f=$2 kind=$3 stdout legc paths nfiles ncode
+  stdout=${f%.stderr}.stdout
+  legc=$(grep -aoE '\(commit [0-9a-f]{7,40}\)' "$stdout" 2>/dev/null | head -1 | grep -oE '[0-9a-f]{7,40}')
+  if [ -z "$legc" ]; then
+    check "$kind leg $label: the commit it ran, vs HEAD" "equal, or a diff that touches no code" RED \
+          "no commit banner in $(basename "$stdout") - cannot tie this leg to a commit"
+    return
+  fi
+  if [ "$legc" = "$head10" ]; then
+    check "$kind leg $label: the commit it ran, vs HEAD" "equal, or a diff that touches no code" PASS \
+          "the leg ran $legc = HEAD"
+    return
+  fi
+  if ! git cat-file -e "${legc}^{commit}" 2>/dev/null; then
+    check "$kind leg $label: the commit it ran, vs HEAD" "equal, or a diff that touches no code" RED \
+          "the leg ran $legc, which is not a commit in this repository"
+    return
+  fi
+  paths=$(git diff --name-only "$legc"..HEAD 2>/dev/null)
+  nfiles=$(printf '%s\n' "$paths" | grep -c .)
+  ncode=$(printf '%s\n' "$paths" | grep -cE '^(lib/|include/|apps/|tests/)')
+  check "$kind leg $label: the commit it ran, vs HEAD" "equal, or a diff that touches no code" \
+        "$([ "${ncode:-0}" = "0" ] && echo PASS || echo FAIL)" \
+        "leg ran $legc; $legc..HEAD changes ${nfiles:-0} file(s), ${ncode:-0} of them under lib/include/apps/tests$([ "${ncode:-0}" != "0" ] && echo '  <- this leg is NOT evidence about HEAD')"
+}
 
 # ---------------------------------------------------------------- 0. the binary under test
 cd "$ROOT"
@@ -222,16 +324,20 @@ ce=$(grep -E "All tests PASSED|FAILED" "$T/ce" | tail -1)
 check "port_channel_estimator_metal_mmse_unit_test (6.5 flake rule: rerun once if red)" "All tests PASSED" \
       "$(echo "$ce" | grep -q "All tests PASSED" && echo PASS || echo "$([ -z "$ce" ] && echo RED || echo FAIL)")" "${ce:-<unreadable>}"
 
-# ---------------------------------------------------------------- 5. the newest leg: NAMES, then numbers
-LEGF="$LOGDIR/gnb_gpu_${LEG}.log.stderr"
-[ -f "$LEGF" ] || LEGF=$(ls -1t "$LOGDIR"/gnb_*"$LEG"*.log.stderr 2>/dev/null | head -1)
+# ---------------------------------------------------------------- 5. the newest DEFAULT leg: NAMES, then numbers
+NAMES="radio sample continuity|dft radio inputs|zero-copy wraps|ce device estimates|host device data crossings|cfo compensation|baseband metrics|host sample assembly"
+got=0
+# An ARRAY, not `for n in $(echo ... | tr '|' '\n')`: the names contain spaces and command
+# substitution splits on every IFS character, so the newline trick still yields words - the check
+# silently read "0 of 8" while looking like it had run (this script's own first run caught it).
+IFS='|' read -r -a NAMEARR <<<"$NAMES"
+LEGF=""
+if [ -n "$LEG" ]; then
+  LEGF="$LOGDIR/gnb_gpu_${LEG}.log.stderr"
+  [ -f "$LEGF" ] || LEGF=$(ls -1t "$LOGDIR"/gnb_*"$LEG"*.log.stderr 2>/dev/null | head -1)
+fi
 if [ -n "${LEGF:-}" ] && [ -f "$LEGF" ]; then
-  NAMES="radio sample continuity|dft radio inputs|zero-copy wraps|ce device estimates|host device data crossings|cfo compensation|baseband metrics|host sample assembly"
-  got=0
-  # An ARRAY, not `for n in $(echo ... | tr '|' '\n')`: the names contain spaces and command
-  # substitution splits on every IFS character, so the newline trick still yields words - the check
-  # silently read "0 of 8" while looking like it had run (this script's own first run caught it).
-  IFS='|' read -r -a NAMEARR <<<"$NAMES"
+  leg_commit_check "$LEG" "$LEGF" "default"
   for n in "${NAMEARR[@]}"; do
     grep -qF "]   $n:" "$LEGF" && got=$((got+1))
   done
@@ -256,12 +362,57 @@ if [ -n "${LEGF:-}" ] && [ -f "$LEGF" ]; then
   check "leg $LEG: stale = 0" "stale=0" \
         "$(echo "$sl" | grep -q "stale=0" && echo PASS || echo "$([ -z "$sl" ] && echo RED || echo FAIL)")" "${sl:-<unreadable>}"
 else
-  check "leg $LEG: readable shutdown report" "8 names / 8 of 8 / 0.00+0.00" RED "no .log.stderr matched '$LEG'"
+  check "leg ${LEG:-<none>}: readable shutdown report (DEFAULT regime)" "8 names / 8 of 8 / 0.00+0.00" RED \
+        "no DEFAULT-regime leg matched '${LEG:-<none>}' in $(basename "$LOGDIR") - a stress leg cannot stand in for one (5.9.127 R4)"
+fi
+
+# ---------------------------------------------------------------- 5b. the newest STRESS leg: only what load cannot change
+# A stressed leg is judged on the properties that are regime-INDEPENDENT - the contract's names,
+# MET + mode=gpu, the crossing count, and gaps - because those are exactly the ones a heavy uplink
+# could break (s78 broke MET and gaps=1). Its regime-DEPENDENT numbers (stale, RF failures, the RX
+# pool) are REPORTED, not judged: the judgement for this regime is the pre-registered V1-V5 set
+# (5.9.130 (5): span <= 2150us, starved_events 0, RF <= 10 and gaps 0, cbs/lane <= 2.00, contract
+# 8/8), which is what the latency workstream is held to - and it is not met yet. That is the work,
+# not a finding of this gate, so this gate must not colour it red here.
+SF=""
+if [ -n "$STRESSLEG" ]; then
+  SF="$LOGDIR/gnb_gpu_${STRESSLEG}.log.stderr"
+  [ -f "$SF" ] || SF=$(ls -1t "$LOGDIR"/gnb_*"$STRESSLEG"*.log.stderr 2>/dev/null | head -1)
+fi
+if [ -n "${SF:-}" ] && [ -f "$SF" ]; then
+  leg_commit_check "$STRESSLEG" "$SF" "stress"
+  sgot=0
+  for n in "${NAMEARR[@]}"; do grep -qF "]   $n:" "$SF" && sgot=$((sgot+1)); done
+  check "stress leg $STRESSLEG: the 8 contract NAMES are all present" "8" \
+        "$([ "$sgot" = "8" ] && echo PASS || echo FAIL)" "found $sgot of 8 in $(basename "$SF")"
+
+  sml=$(grep -aE "contract MET" "$SF" | tail -1)
+  check "stress leg $STRESSLEG: contract MET (8 of 8) and mode=gpu" "MET (8 of 8" \
+        "$(echo "$sml" | grep -q "MET (8 of 8" && grep -q "contract (mode=gpu)" "$SF" && echo PASS || echo "$([ -z "$sml" ] && echo RED || echo FAIL)")" \
+        "${sml:-<unreadable>}"
+
+  sxl=$(grep -aE "= [0-9.]+ read\(s\)" "$SF" | tail -1)
+  check "stress leg $STRESSLEG: crossings 0.00 + 0.00 per hop (load must not add one)" "0.00 + 0.00" \
+        "$(echo "$sxl" | grep -q "= 0.00 read(s) + 0.00 write(s) per hop" && echo PASS || echo "$([ -z "$sxl" ] && echo RED || echo FAIL)")" \
+        "$(echo "${sxl:-<unreadable>}" | grep -oE "over [0-9]+ device hop\(s\) = [0-9.]+ read\(s\) \+ [0-9.]+ write\(s\) per hop" || echo '<unreadable>')"
+
+  sgl=$(grep -aE "^\[ul_rx\] blocks=" "$SF" | tail -1)
+  check "stress leg $STRESSLEG: 0 gaps (the receiver never lost the radio's stream)" "gaps=0" \
+        "$(echo "$sgl" | grep -q "gaps=0 " && echo PASS || echo "$([ -z "$sgl" ] && echo RED || echo FAIL)")" \
+        "$(echo "${sgl:-<unreadable>}" | grep -oE "blocks=[0-9]+ samples=[0-9]+ gaps=[0-9]+" || echo '<unreadable>')"
+
+  ssl=$(grep -aE "\[ul_pipeline\] stale=" "$SF" | tail -1)
+  spl=$(grep -aE "\[ul_rx_pool\]" "$SF" | tail -1)
+  check "stress leg $STRESSLEG: regime-dependent numbers (the V1-V5 target, reported not judged)" \
+        "reported; V1-V5 is the latency workstream's criterion" INFO \
+        "${ssl:-stale <unreadable>}${spl:+  ||  $spl}"
+elif [ -n "$STRESSLEG" ]; then
+  check "stress leg $STRESSLEG: readable shutdown report" "8 names / MET / 0.00+0.00 / gaps=0" RED "no .log.stderr matched '$STRESSLEG'"
 fi
 
 bash $W/a12_attribution_gate.sh "$LEG" >"$T/a12" 2>&1
 al=$(grep -E "criteria pass" "$T/a12" | tail -1)
-check "leg $LEG: A1-2 attribution gate (5.9.118) 5/5" "5 of 5" \
+check "leg ${LEG:-<none>}: A1-2 attribution gate (5.9.118) 5/5" "5 of 5" \
       "$(echo "$al" | grep -q "5 of 5 criteria pass" && echo PASS || echo "$([ -z "$al" ] && echo RED || echo FAIL)")" "${al:-<unreadable>}"
 
 # ---------------------------------------------------------------- 6. the other toolchain (opt-in, INFO)
@@ -284,7 +435,9 @@ else
 fi
 
 # ---------------------------------------------------------------- report
-echo "milestone audit   (tree $(git rev-parse --short=10 HEAD), leg ${LEG})"
+echo "milestone audit   (tree $(git rev-parse --short=10 HEAD))"
+echo "  default-regime leg: ${LEG:-<none>}  <- contract, stale=0, A1-2 5/5  (5.9.118 (3) C5)"
+echo "  stress-regime leg : ${STRESSLEG:-<none>}  <- contract, crossings, gaps; V1-V5 reported (5.9.130 (5))"
 echo
 info=0; red=0; fail=0
 for r in "${rows[@]}"; do

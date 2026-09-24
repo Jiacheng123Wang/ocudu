@@ -105,8 +105,20 @@ if [ "$MODE" != "cpu" ]; then
 fi
 
 CLI_ARGS=()
+REGIME=default
 for kv in "$@"; do
   case "$kv" in
+    # CONSUMED here, not forwarded: this one is a property of the LEG, not a gNB option. It is written
+    # into the leg's own stderr as `[leg] regime=`, which is where wip/milestone_audit.sh reads it back.
+    # Why it must be declared rather than derived: the two regimes do not share their criteria. Under a
+    # load generator `stale > 0` is the PRE-REGISTERED EXPECTATION (wip/wall_ab.sh's R4: "stale > 0 =>
+    # the leg is of the same kind as s70", PASS - 5.9.127), while the default regime's A1-2 C5 demands
+    # `stale=0` (5.9.118 (3)). Measured 2026-09-24: the audit auto-picked the newest leg - the overloaded
+    # s82 - and reported `stale = 0` and C5 as FAIL on it, because the criterion had been bound to the
+    # wrong regime. Classifying a leg by its own `stale` reading would make that criterion unfalsifiable.
+    --regime=default) REGIME=default ;;
+    --regime=stress)  REGIME=stress ;;
+    --regime=*)       echo "refusing '$kv': regime must be default or stress" >&2; exit 2 ;;
     --*)                  CLI_ARGS+=("$kv") ;;
     OCUDU_*=*)            export "$kv" ;;
     *=*)                  echo "refusing '$kv': a knob must be OCUDU_*=…, and a gNB option must start with --" >&2; exit 2 ;;
@@ -178,6 +190,7 @@ esac
 echo "pipeline mode : $MODE" >&2
 echo "mode options  : ${MODE_ARGS[*]:-<none: the mode resolves the backends itself>}" >&2
 echo "leg           : $LABEL" >&2
+echo "regime        : $REGIME   <- default = no load generator (stale=0 is a criterion) / stress = loaded (stale>0 is expected, 5.9.127 R4)" >&2
 echo "cell config   : ${CONFIG#$ROOT/}   <- decides PRB count and slot period" >&2
 echo "log (ocudulog): $LOG" >&2
 echo "log (stderr)  : $LOG.stderr   <- [phy_pipeline] contract / [ul_host] / [metal_stats] / [ul_gpu_lane]" >&2
@@ -190,8 +203,8 @@ echo >&2
 # leg carries the cell geometry and the knobs it ran with even when the console is gone. The geometry is
 # not decoration: "余量" is 1 - residency/slot, and both the PRB count and the slot period come from this
 # file (wip/ul_load.sh reads it back out of the cell line).
-PROVENANCE=$(printf 'pipeline mode : %s\nmode options  : %s\nleg           : %s\ncell config   : %s\ngNB options   : %s\n' \
-  "$MODE" "${MODE_ARGS[*]:-<none>}" "$LABEL" "${CONFIG#$ROOT/}" "${CLI_ARGS[*]:-<none>}")
+PROVENANCE=$(printf '[leg] regime=%s\npipeline mode : %s\nmode options  : %s\nleg           : %s\ncell config   : %s\ngNB options   : %s\n' \
+  "$REGIME" "$MODE" "${MODE_ARGS[*]:-<none>}" "$LABEL" "${CONFIG#$ROOT/}" "${CLI_ARGS[*]:-<none>}")
 PROVENANCE+=$(env | grep -E '^OCUDU_[A-Z0-9_]+=' | sort | sed 's/^/knob          : /' || true)
 
 cd "$ROOT"
