@@ -82,7 +82,7 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_LANE_DIAG_SPLIT=1
 | 目的 | 命令 | 判据 |
 |---|---|---|
 | 生效并发度与形态 | `grep -a ul_lane_exec <leg>.stderr` | n78/n1 都应为 `= 1` + `STRAND`（若 n78 变成 >1，则 C 项归因与 P1-8 都要重写）|
-| **P0-1 的 `dft=` 段** | `grep -a "busy split" <leg3>.stderr` | 出现 `dft=…`，且 **`dft + (合并段) + eq_demap` 之和 ≈ 出厂臂的 `merged_hop`（±10%）** |
+| **P0-1 的 `dft=` 段** | `grep -a "busy split" <leg3>.stderr` | 出现 `dft=…`，且 **`dft + (合并段) + eq_demap` 之和 ≈ 出厂臂的 `merged_hop`（±10%）**。**打印语义（读码核实，`ocudu_metal_lane_probe.mm:647-665`）**：该行**每个"至少注册过一次提交"的段各打一个 token**（`if (stage_cbs[i] == 0) continue;`），`%` 是占**所有段 busy 之和**的比例，`cbs/lane` 是该段每"车道"的提交数 ⇒ 开关 ON 时**必然**多出 `dft=`；OFF 时该段不出现（前端缓冲被接管，没有提交）|
 | P0-1 候选 A / P0-5 配对 | `<leg2>` 的 `busy split` 与三段 | 配对后 `busy split` 三项之和 ≈ `residency`（±10%）|
 | 门 | `bash doc_chinese/phy_pipeline_gpu/wip/milestone_audit.sh` | 新默认腿顶掉无效腿后应回到 GREEN（离线判据本就全绿）|
 
@@ -102,3 +102,14 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml OCUDU_LANE_DIAG_SPLIT=1
 2. **那条预检的第一版用 `pgrep -f`（匹配整条命令行）**，结果**匹配到了正在执行该命令的、我自己的 shell**，
    把用户一条正常腿挡了。⇒ 已改为**按进程名精确匹配**（`pgrep -x gnb` / `pgrep -x ul_chain_replay`）。
    **规则**：进程检查永远按名字；命令行的模糊匹配会把"提到这个名字的人"当成"那个进程"。
+
+## 5. 一条待补的离线确认（一条命令，已按用户要求暂缓）
+
+`dft_release_adopt_metal_test` 在 `OCUDU_LANE_DIAG_SPLIT=1` 下的输出**我只看到了前 12 行**，而 `busy split` 那行在 `print_series(…)`/`print_front_end()` **之后** ⇒ 被 `head -12` 截掉了。
+⇒ **离线确认 `dft=` 只差一条命令**（同一二进制、约 1 秒）：
+
+```bash
+OCUDU_LANE_DIAG_SPLIT=1 build/lib/phy/generic_functions/metal/dft_release_adopt_metal_test 2>&1 | grep -a "busy split"
+```
+
+用户已要求我停手等腿，故**暂不执行**（它虽只有约 1 秒且不占任何 socket，但仍会碰 GPU，若与用户正在飞的腿重叠会污染对方的时延读数）。用户给出口令或腿落地后第一条就补它。
