@@ -12,7 +12,9 @@ add_subdirectory(ue_security_manager)
 set(SOURCES
         cu_cp_factory.cpp
         cu_cp_impl.cpp
+        logical_cell_controller.cpp
         cu_configurator_impl.cpp
+        logical_cell_manager.cpp
         cu_cp_executor_mapper.cpp
         cu_cp_controller/cu_cp_controller.cpp
         cu_cp_controller/amf_connection_manager.cpp
@@ -36,6 +38,7 @@ set(SOURCES
         routines/amf_reconnection_routine.cpp
         routines/cell_activation_routine.cpp
         routines/cell_deactivation_routine.cpp
+        routines/cell_barring_routine.cpp
         routines/cell_lifecycle_target.cpp
         routines/pws_sib_encoder.cpp
         routines/write_replace_warning_routine.cpp

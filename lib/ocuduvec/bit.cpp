@@ -4,6 +4,7 @@
 #include "ocudu/ocuduvec/bit.h"
 #include "ocudu/ocuduvec/copy.h"
 #include "ocudu/ocuduvec/zero.h"
+#include "ocudu/support/math/bit_ops.h"
 #include "ocudu/support/math/math_utils.h"
 #include "ocudu/support/ocudu_assert.h"
 
@@ -455,6 +456,6 @@ void ocudu::ocuduvec::reverse_bit_order_in_bytes(span<uint8_t> output, span<cons
 
   // Process the remaining bytes using a LUT.
   for (; i_byte != nof_bytes; ++i_byte) {
-    output[i_byte] = reverse_byte<uint8_t>(input[i_byte]);
+    output[i_byte] = reverse_byte(input[i_byte]);
   }
 }

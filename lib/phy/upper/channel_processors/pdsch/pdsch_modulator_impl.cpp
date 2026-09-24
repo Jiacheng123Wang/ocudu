@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "pdsch_modulator_impl.h"
+#include "pdsch_processor_helpers.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/phy/support/resource_grid_mapper.h"
 #include "ocudu/phy/upper/dmrs_mapping.h"
@@ -32,12 +33,11 @@ float pdsch_modulator_impl::modulate(span<ci8_t> d_pdsch, const bit_buffer& b_ha
   return modulator->modulate(d_pdsch, b_hat, modulation);
 }
 
-void pdsch_modulator_impl::map(resource_grid_writer&    grid,
-                               span<const ci8_t>        data_re,
-                               unsigned                 i_codeword,
-                               precoding_configuration& precoding,
-                               span<uint8_t>            ports,
-                               const config_t&          config)
+void pdsch_modulator_impl::map(resource_grid_writer&                      grid,
+                               span<const ci8_t>                          data_re,
+                               unsigned                                   i_codeword,
+                               const precoding_beamforming_configuration& precoding,
+                               const config_t&                            config)
 {
   ocudu_assert(config.time_alloc.stop() <= MAX_NSYMB_PER_SLOT,
                "The time allocation of the transmission {} exceeds the slot boundary.",
@@ -67,7 +67,7 @@ void pdsch_modulator_impl::map(resource_grid_writer&    grid,
       .bwp = config.bwp, .freq_alloc = config.freq_allocation, .time_alloc = config.time_alloc};
 
   // Map into the resource grid.
-  mapper->map(grid, buffer_adapter, allocation, reserved, ports, precoding);
+  mapper->map(grid, buffer_adapter, allocation, reserved, precoding);
 }
 
 void pdsch_modulator_impl::modulate(resource_grid_writer&            grid,
@@ -81,14 +81,9 @@ void pdsch_modulator_impl::modulate(resource_grid_writer&            grid,
   ocudu_assert((nof_codewords == 1) || (config.modulation2.has_value()),
                "Missing second codeword modulation in a two-codeword modulation.");
 
-  // Number of ports for precoding - in case of two codewords, each is mapped to a different half.
-  unsigned nof_ports = config.ports.size() / nof_codewords;
-
-  // Total number of transmission layers.
-  unsigned nof_layers = config.precoding.get().get_nof_layers();
-
-  // List of resource grid ports where each codeword is being mapped to.
-  static_vector<uint8_t, precoding_constants::MAX_NOF_PORTS> ports(nof_ports);
+  // The beams that carry the transmission are split among the codewords.
+  ocudu_assert(config.precoding_and_beamforming.get().get_nof_beams() % nof_codewords == 0,
+               "The number of beams must be divisible by the number of codewords.");
 
   for (unsigned i_cw = 0; i_cw != nof_codewords; ++i_cw) {
     modulation_scheme mod = (i_cw == 0) ? config.modulation1 : *config.modulation2;
@@ -108,19 +103,9 @@ void pdsch_modulator_impl::modulate(resource_grid_writer&            grid,
     // Modulate codeword.
     float scaling = modulate(pdsch_symbols, b_hat, mod);
 
-    unsigned nof_layers_cw0 = nof_layers / nof_codewords;
-    unsigned nof_layers_cw1 = nof_layers - nof_layers_cw0;
-
-    // Extract the codeword-specific precoding.
-    precoding_configuration precoding = config.precoding.get().slice(
-        interval<uint8_t>::start_and_len(i_cw * nof_layers_cw0, (i_cw == 0) ? nof_layers_cw0 : nof_layers_cw1),
-        interval<uint8_t>::start_and_len(i_cw * nof_ports, nof_ports));
-
-    // Populate the list of resource grid ports for this codeword. The first codeword is mapped to the first half of
-    // ports, while the second is mapped to the last half.
-    span<const uint8_t> codeword_ports =
-        span(config.ports.data(), config.ports.size()).subspan(i_cw * nof_ports, nof_ports);
-    ocuduvec::copy(ports, codeword_ports);
+    // Extract the precoding and beamforming of the codeword.
+    precoding_beamforming_configuration precoding =
+        pdsch_extract_codeword_precoding(config.precoding_and_beamforming, nof_codewords, i_cw);
 
     // Apply scaling.
     if (std::isnormal(config.scaling)) {
@@ -130,6 +115,6 @@ void pdsch_modulator_impl::modulate(resource_grid_writer&            grid,
     precoding *= scaling;
 
     // Map resource elements.
-    map(grid, pdsch_symbols, i_cw, precoding, ports, config);
+    map(grid, pdsch_symbols, i_cw, precoding, config);
   }
 }

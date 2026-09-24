@@ -19,17 +19,17 @@ namespace {
 
 // Valid PDSCH configuration used as a base for the test cases.
 const prs_generator_configuration base_config = {
-    .slot            = slot_point(),
-    .cp              = cyclic_prefix::NORMAL,
-    .n_id_prs        = 0,
-    .comb_size       = prs_comb_size::twelve,
-    .comb_offset     = 0,
-    .duration        = prs_num_symbols::twelve,
-    .start_symbol    = 0,
-    .prb_start       = 0,
-    .freq_alloc      = {0, 24},
-    .power_offset_dB = 0.0F,
-    .precoding       = precoding_configuration::make_wideband(make_identity(1)),
+    .slot                      = slot_point(),
+    .cp                        = cyclic_prefix::NORMAL,
+    .n_id_prs                  = 0,
+    .comb_size                 = prs_comb_size::twelve,
+    .comb_offset               = 0,
+    .duration                  = prs_num_symbols::twelve,
+    .start_symbol              = 0,
+    .prb_start                 = 0,
+    .freq_alloc                = {0, 24},
+    .power_offset_dB           = 0.0F,
+    .precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(make_identity(1)),
 };
 
 struct test_case_t {
@@ -89,21 +89,19 @@ static const auto prs_generator_validator_test_data = to_array<test_case_t>({
      fmt::format("The PRB start (i.e., 3300) is out of the range [0..2176].")},
     {[] {
        prs_generator_configuration config = base_config;
-       config.precoding                   = precoding_configuration::make_wideband(make_identity(2));
+       config.precoding_and_beamforming   = precoding_beamforming_configuration::make_wideband(make_identity(2));
        return config;
      },
      fmt::format("The number of layers (i.e., 2) must be one.")},
     {[] {
        prs_generator_configuration config = base_config;
-       config.precoding                   = precoding_configuration::make_wideband(make_identity(2));
+       config.precoding_and_beamforming   = precoding_beamforming_configuration::make_wideband(make_identity(2));
        return config;
      },
      fmt::format("The number of layers (i.e., 2) must be one.")},
     {[] {
        prs_generator_configuration config = base_config;
-       config.precoding                   = precoding_configuration(1, 1, 2, 32);
-       config.precoding.set_prg_coefficients(make_identity(1), 0);
-       config.precoding.set_prg_coefficients(make_identity(1), 1);
+       config.precoding_and_beamforming   = precoding_beamforming_configuration(1, 1, 2, 32);
        return config;
      },
      fmt::format("The number of PRG (i.e., 2) must be one.")},

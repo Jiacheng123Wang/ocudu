@@ -36,7 +36,7 @@ public:
     ocudu_assert(prev_proc_notifier == nullptr, "The PDSCH processor is in use.");
 
     // Prepare transmission.
-    start_time                       = std::chrono::high_resolution_clock::now();
+    start_time                       = std::chrono::steady_clock::now();
     elapsed_completion_and_return_ns = {};
     slot                             = pdu.slot;
     tbs                              = units::bytes(data.front().get_buffer().size());
@@ -49,7 +49,7 @@ public:
     }
     self_cpu_usage_ns.store(measurements.duration.count(), std::memory_order_relaxed);
     elapsed_completion_and_return_ns |=
-        std::min<std::chrono::nanoseconds::rep>(std::chrono::nanoseconds(std::chrono::high_resolution_clock::now() - start_time).count(), 0xffffffff);
+        std::min<std::chrono::nanoseconds::rep>(std::chrono::nanoseconds(std::chrono::steady_clock::now() - start_time).count(), 0xffffffff);
 
     report_metrics();
   }
@@ -60,7 +60,7 @@ private:
   {
     // Update elapsed time.
     elapsed_completion_and_return_ns |=
-        std::min<std::chrono::nanoseconds::rep>(std::chrono::nanoseconds(std::chrono::high_resolution_clock::now() - start_time).count(), 0xffffffff)
+        std::min<std::chrono::nanoseconds::rep>(std::chrono::nanoseconds(std::chrono::steady_clock::now() - start_time).count(), 0xffffffff)
         << 32;
 
     // Report metrics.
@@ -95,14 +95,14 @@ private:
     current_proc_notifier->on_finish_processing();
   }
 
-  std::chrono::high_resolution_clock::time_point start_time                       = {};
-  std::atomic<uint64_t>                          elapsed_completion_and_return_ns = {};
-  std::atomic<uint64_t>                          self_cpu_usage_ns                = {};
-  pdsch_processor_notifier*                      processor_notifier               = nullptr;
-  slot_point                                     slot;
-  units::bytes                                   tbs;
-  std::unique_ptr<pdsch_processor>               base;
-  pdsch_processor_metric_notifier&               notifier;
+  std::chrono::steady_clock::time_point start_time                       = {};
+  std::atomic<uint64_t>                 elapsed_completion_and_return_ns = {};
+  std::atomic<uint64_t>                 self_cpu_usage_ns                = {};
+  pdsch_processor_notifier*             processor_notifier               = nullptr;
+  slot_point                            slot;
+  units::bytes                          tbs;
+  std::unique_ptr<pdsch_processor>      base;
+  pdsch_processor_metric_notifier&      notifier;
 
   // Makes sure atomics are lock free.
   static_assert(std::atomic<decltype(elapsed_completion_and_return_ns)>::is_always_lock_free);

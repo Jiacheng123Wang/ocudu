@@ -9,6 +9,7 @@
 #include "xnap_tx_pdu_notifier_with_log.h"
 #include "ocudu/asn1/xnap/xnap_pdu_contents.h"
 #include "ocudu/ran/gnb_id.h"
+#include "ocudu/support/async/manual_event.h"
 #include "ocudu/xnap/xnap.h"
 #include "ocudu/xnap/xnap_configuration.h"
 #include "ocudu/xnap/xnap_message.h"
@@ -57,6 +58,9 @@ public:
   {
     return peer_ctxt.has_value() && peer_ctxt->gnb_id == peer_gnb_id;
   }
+
+  /// \brief Checks whether this peer holds an XNAP UE context for the given UE.
+  bool has_ue_context(cu_cp_ue_index_t ue_index) const { return ue_ctxt_list.contains(ue_index); }
 
   bool has_peer_local_node_id(uint32_t node_id, unsigned nof_node_id_bits) const override
   {
@@ -112,7 +116,7 @@ private:
   /// \param[in] msg The received Retrieve UE Context Request message.
   void handle_retrieve_ue_context_request(const asn1::xnap::retrieve_ue_context_request_s& msg);
 
-  /// \brief Resolve the configuration of a cell served by the XN-C peer.
+  /// \brief Resolve the configuration of a cell served by the Xn-C peer.
   /// \param[in] nci Identity of the served cell.
   /// \return The served cell configuration, or std::nullopt if the peer did not advertise the cell at XN setup.
   std::optional<cu_cp_served_cell_info> find_peer_served_cell(nr_cell_identity nci) const;
@@ -125,6 +129,14 @@ private:
   /// \param[in] outcome The unsuccessful outcome message.
   void handle_unsuccessful_outcome(const asn1::xnap::unsuccessful_outcome_s& outcome);
 
+  /// \brief Wraps a UE-associated procedure so that \ref stop can await its completion.
+  ///
+  /// A procedure suspended on a CU-CP notifier is not resumed by cancelling the XNAP transactions, so without
+  /// this it can outlive the XNAP instance and access its members after they are destroyed.
+  template <typename Result>
+  async_task<Result> track_ue_procedure(async_task<Result> proc);
+  async_task<void>   track_ue_procedure(async_task<void> proc);
+
   ocudulog::basic_logger& logger;
 
   /// Repository of UE Contexts.
@@ -132,7 +144,7 @@ private:
 
   const xnc_peer_index_t xnc_index;
   xnap_configuration     xnap_cfg;
-  /// NR cells this node advertised to the XN-C peer.
+  /// NR cells this node advertised to the Xn-C peer.
   std::vector<cu_cp_served_cell_info> advertised_cells;
   std::optional<xnap_context>         peer_ctxt;
   xnap_cu_cp_notifier&                cu_cp_notifier;
@@ -147,6 +159,12 @@ private:
   /// NG-RAN Node Configuration Update Acknowledge/Failure Event Source.
   protocol_transaction_event_source<asn1::xnap::ngran_node_cfg_upd_ack_s, asn1::xnap::ngran_node_cfg_upd_fail_s>
       cfg_update_outcome;
+
+  /// Number of UE-associated procedures that have not completed yet.
+  unsigned nof_ue_procedures = 0;
+
+  /// Set whenever the number of UE-associated procedures in flight drops to zero.
+  manual_event_flag ue_procedures_done;
 };
 
 } // namespace ocudu::ocucp

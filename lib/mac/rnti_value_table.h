@@ -6,7 +6,6 @@
 
 #include "ocudu/ran/rnti.h"
 #include "ocudu/support/ocudu_assert.h"
-#include "fmt/format.h"
 #include <atomic>
 #include <limits>
 #include <memory>
@@ -23,7 +22,7 @@ class rnti_value_table
 {
   static constexpr rnti_t MIN_CRNTI  = rnti_t::MIN_CRNTI;
   static constexpr rnti_t MAX_CRNTI  = rnti_t::MAX_CRNTI;
-  static constexpr size_t RNTI_RANGE = to_value(rnti_t::MAX_CRNTI) + 1 - to_value(rnti_t::MIN_CRNTI);
+  static constexpr size_t RNTI_RANGE = to_underlying(rnti_t::MAX_CRNTI) + 1 - to_underlying(rnti_t::MIN_CRNTI);
   using array_type                   = std::array<std::atomic<T>, RNTI_RANGE>;
 
 public:
@@ -48,7 +47,7 @@ public:
   bool add_ue(rnti_t crnti, T value, bool is_cs_rnti = false)
   {
     ocudu_assert(is_crnti(crnti), "Invalid c-rnti={}", crnti);
-    ocudu_assert(value != SentinelValue, "Invalid rnti_value_table value={}", fmt::underlying(value));
+    ocudu_assert(value != SentinelValue, "Invalid rnti_value_table value={}", value);
 
     std::atomic<T>& ue_pos      = get(crnti);
     T               prev_ue_idx = ue_pos.exchange(value, std::memory_order_relaxed);
@@ -97,10 +96,13 @@ public:
   }
 
 private:
-  std::atomic<T>& get(rnti_t rnti) { return (*rnti_to_ue_index_map)[to_value(rnti) - to_value(rnti_t::MIN_CRNTI)]; }
+  std::atomic<T>& get(rnti_t rnti)
+  {
+    return (*rnti_to_ue_index_map)[to_underlying(rnti) - to_underlying(rnti_t::MIN_CRNTI)];
+  }
   const std::atomic<T>& get(rnti_t rnti) const
   {
-    return (*rnti_to_ue_index_map)[to_value(rnti) - to_value(rnti_t::MIN_CRNTI)];
+    return (*rnti_to_ue_index_map)[to_underlying(rnti) - to_underlying(rnti_t::MIN_CRNTI)];
   }
 
   /// Table of RNTI -> UE index with size 65535.

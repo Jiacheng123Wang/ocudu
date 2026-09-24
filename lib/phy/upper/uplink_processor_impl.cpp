@@ -239,7 +239,7 @@ void uplink_processor_impl::process_symbol_pdus(unsigned end_symbol_index)
   // one-hop slots.
   for (unsigned i_pusch = 0; i_pusch != pusch_pdus.size(); ++i_pusch) {
     if (!pusch_pdus.empty()) {
-      const uint64_t slot_id = current_slot.to_uint();
+      const uint64_t slot_id = current_slot.count();
       if (hop_count_slot != slot_id) {
         hop_count_slot = slot_id;
         hop_count_hops = 0;
@@ -371,7 +371,7 @@ void uplink_processor_impl::process_pucch(const uplink_pdu_slot_repository::pucc
     // than at the end of the receiving slot, and this is a HOST reader - so it waits for the production
     // here, on its own executor (the PUCCH pool is not the pool the PUSCH lane runs on, so waiting cannot
     // starve the producer). No hand-over in this build or run: a no-op.
-    if (!grid_ready_hook::wait(grid->get_reader().get_device_view().base, current_slot.to_uint())) {
+    if (!grid_ready_hook::wait(grid->get_reader().get_device_view().base, current_slot.count())) {
       logger.error(current_slot.sfn(),
                    current_slot.slot_index(),
                    "PUCCH: the resource grid was not produced in time; discarding the PDU.");
@@ -437,7 +437,7 @@ void uplink_processor_impl::process_pucch_f1(const uplink_pdu_slot_repository_im
 
   bool success = task_executors.pucch_executor.defer([this, &collection]() {
     // Same wait as the other formats (see process_pucch()): a HOST reader of the grid.
-    if (!grid_ready_hook::wait(grid->get_reader().get_device_view().base, current_slot.to_uint())) {
+    if (!grid_ready_hook::wait(grid->get_reader().get_device_view().base, current_slot.count())) {
       logger.error(current_slot.sfn(),
                    current_slot.slot_index(),
                    "PUCCH format 1: the resource grid was not produced in time; discarding the collection.");
@@ -511,7 +511,7 @@ void uplink_processor_impl::process_srs(const uplink_pdu_slot_repository::srs_pd
     // wait here can therefore occupy a thread the producer needs if that pool is ever saturated. The wait
     // is bounded (grid_ready_hook::wait), so the worst case is a discarded SRS estimate, not a hang - and
     // the leg is what says whether the pool needs separating (design document 5.9.13 ⑥).
-    if (!grid_ready_hook::wait(grid->get_reader().get_device_view().base, current_slot.to_uint())) {
+    if (!grid_ready_hook::wait(grid->get_reader().get_device_view().base, current_slot.count())) {
       logger.error(pdu.context.slot.sfn(),
                    pdu.context.slot.slot_index(),
                    "SRS: the resource grid was not produced in time; discarding the PDU.");

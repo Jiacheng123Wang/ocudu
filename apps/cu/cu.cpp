@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "apps/cu/cu_appconfig_cli11_schema.h"
+#include "apps/helpers/config/config_yaml_schema.h"
 #include "apps/helpers/e2/e2_config_translators.h"
 #include "apps/helpers/f1/f1_gateway_helpers.h"
 #include "apps/helpers/f1u/f1u_appconfig.h"
@@ -31,6 +32,7 @@
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/cu_cp/cu_cp_operation_controller.h"
+#include "ocudu/cu_up/cu_up_operation_controller.h"
 #include "ocudu/cu_up/o_cu_up.h"
 #include "ocudu/e1ap/gateways/e1_local_connector_factory.h"
 #include "ocudu/f1ap/gateways/f1c_network_server_factory.h"
@@ -66,8 +68,8 @@ using namespace ocudu;
 /// \brief Application of a Central Unit (CU) with combined CU control-plane (CU-CP) and CU user-plane (CU-UP).
 ///
 /// This application runs a CU without the E1 connection between the CU-CP and CU-UP going over a real SCTP
-/// connection. However, its does expose the F1, N2 and N3 interface to the DU, AMF and UPF over the standard
-/// UDP/SCTP ports.
+/// connection. However, its does expose the F1, NG-C (N2) and NG-U (N3) interface to the DU, AMF and UPF over the
+/// standard UDP/SCTP ports.
 ///
 /// The app serves as an example for an all-integrated CU.
 
@@ -218,6 +220,11 @@ int main(int argc, char** argv)
   // Fill the generic application arguments to parse.
   populate_cli11_generic_args(app);
 
+  // Register the configuration-schema root so the add_* helpers capture the schema as options are declared. The CU
+  // links both the CU-CP and CU-UP units; shared top-level sections (log, metrics, qos, ...) merge into one node.
+  config::schema_node config_schema_root{"OCUDU 5G CU configuration"};
+  app_helpers::register_config_schema(app, config_schema_root, "cu");
+
   // Configure CLI11 with the CU application configuration schema.
   cu_appconfig cu_cfg;
   configure_cli11_with_cu_appconfig_schema(app, cu_cfg);
@@ -356,12 +363,12 @@ int main(int argc, char** argv)
       o_cu_up_app_unit->get_o_cu_up_unit_config(), workers.get_cu_up_pcap_executors(), cleanup_signal_dispatcher);
   auto on_pcap_close_init = make_scope_exit([&cu_logger]() { cu_logger.info("Closing PCAP files..."); });
 
-  // Create XN-C GWs. (TODO cleanup port and PPID args with factory)
+  // Create Xn-C GWs. (TODO cleanup port and PPID args with factory)
   cu_cp_unit_config cp_unit_cfg = o_cu_cp_app_unit->get_o_cu_cp_unit_config().cucp_cfg;
   std::vector<std::unique_ptr<ocucp::xnc_connection_gateway>> xnc_gws;
   for (const auto& gw_cfg : cp_unit_cfg.xnap_config.gateways) {
     sctp_network_gateway_config xnc_sctp_cfg = {};
-    xnc_sctp_cfg.if_name                     = "XN-C";
+    xnc_sctp_cfg.if_name                     = "Xn-C";
     xnc_sctp_cfg.non_blocking_mode           = true;
     xnc_sctp_cfg.bind_addresses              = gw_cfg.bind_addrs;
     fill_sctp_network_gateway_config_socket_params(xnc_sctp_cfg, gw_cfg.sctp);
@@ -394,11 +401,17 @@ int main(int argc, char** argv)
   std::unique_ptr<gtpu_teid_pool> cu_f1u_teid_allocator = create_gtpu_allocator(cu_f1u_alloc_msg);
 
   // > Create GTP-U Demux.
-  gtpu_demux_creation_request cu_f1u_gtpu_msg   = {};
-  cu_f1u_gtpu_msg.cfg.name                      = "CU-NR-U-DEMUX";
-  cu_f1u_gtpu_msg.cfg.warn_on_drop              = true;
-  cu_f1u_gtpu_msg.teid_linger_checker           = cu_f1u_teid_allocator.get();
-  cu_f1u_gtpu_msg.gtpu_pcap                     = cu_up_dlt_pcaps.f1u.get();
+  gtpu_demux_creation_request cu_f1u_gtpu_msg   = {.cfg = gtpu_demux_cfg_t{.lif  = gtpu_logical_interface::f1u_cu_up,
+                                                                           .name = "CU-NR-U-DEMUX",
+                                                                           .warn_on_drop = true,
+                                                                           .test_mode    = false,
+                                                                           .queue_size   = DEFAULT_GTPU_DEMUX_QUEUE_SIZE,
+                                                                           .batch_size   = DEFAULT_GTPU_DEMUX_BATCH_SIZE},
+                                                   .teid_linger_checker = *cu_f1u_teid_allocator,
+                                                   .gtpu_pcap           = *cu_up_dlt_pcaps.f1u,
+                                                   .rate_limiter        = nullptr
+
+  };
   std::unique_ptr<gtpu_demux> cu_f1u_gtpu_demux = create_gtpu_demux(cu_f1u_gtpu_msg);
   // > Create UDP gateway(s).
   gtpu_gateway_maps f1u_gw_maps;
@@ -471,17 +484,17 @@ int main(int argc, char** argv)
   }
 
   // Create O-CU-UP dependencies.
-  o_cu_up_unit_dependencies o_cuup_unit_deps;
-  o_cuup_unit_deps.workers = &workers;
-  o_cuup_unit_deps.e1ap_conn_client.push_back(e1_gw.get());
-  o_cuup_unit_deps.f1u_teid_allocator     = cu_f1u_teid_allocator.get();
-  o_cuup_unit_deps.f1u_gateway            = cu_f1u_conn.get();
-  o_cuup_unit_deps.gtpu_pcap              = cu_up_dlt_pcaps.n3.get();
-  o_cuup_unit_deps.timers                 = cu_timers;
-  o_cuup_unit_deps.io_brk                 = epoll_broker.get();
-  o_cuup_unit_deps.e2_gw                  = e2_gw_cu_up.get();
-  o_cuup_unit_deps.metrics_notifier       = &metrics_notifier_forwarder;
-  o_cuup_unit_deps.remote_metrics_gateway = remote_server_gateway;
+  std::vector<ocuup::e1_connection_client*> e1ap_conn_client({e1_gw.get()});
+  o_cu_up_unit_dependencies                 o_cuup_unit_deps{.workers                = workers,
+                                                             .e2_gw                  = *e2_gw_cu_up,
+                                                             .metrics_notifier       = metrics_notifier_forwarder,
+                                                             .remote_metrics_gateway = remote_server_gateway,
+                                                             .e1ap_conn_client       = std::move(e1ap_conn_client),
+                                                             .f1u_teid_allocator     = *cu_f1u_teid_allocator,
+                                                             .f1u_gateway            = *cu_f1u_conn,
+                                                             .gtpu_pcap              = *cu_up_dlt_pcaps.ngu,
+                                                             .timers                 = *cu_timers,
+                                                             .io_brk                 = *epoll_broker};
 
   // Create O-CU-UP.
   auto            o_cuup_unit = o_cu_up_app_unit->create_o_cu_up_unit(o_cuup_unit_deps);
@@ -511,10 +524,15 @@ int main(int argc, char** argv)
   app_services::cmdline_command_dispatcher command_parser(
       *epoll_broker, workers.get_cmd_line_executor(), o_cucp_unit.commands.cmdline.commands);
 
+  // Register the CU-CP remote WS commands.
+  if (remote_control_server) {
+    remote_control_server->add_commands(o_cucp_unit.commands.remote);
+  }
+
   // Connect E1AP to O-CU-CP.
   e1_gw->attach_cu_cp(o_cucp_obj.get_cu_cp().get_e1_handler());
 
-  // Connect each XN-C gateway to O-CU-CP and start listening for new XN-C connection requests.
+  // Connect each Xn-C gateway to O-CU-CP and start listening for new Xn-C connection requests.
   for (auto& gw : xnc_gws) {
     gw->attach_cu_cp(o_cucp_obj.get_cu_cp().get_xnc_handler());
   }
@@ -524,10 +542,7 @@ int main(int argc, char** argv)
   o_cucp_obj.get_operation_controller().start();
   cu_logger.info("CU-CP started successfully");
 
-  // Check connection to AMF.
-  if (not o_cucp_obj.get_cu_cp().get_ng_handler().amfs_are_connected()) {
-    report_error("CU-CP failed to connect to AMF");
-  }
+  // Note: An AMF that is not reachable on startup is reconnected to in the background.
 
   // Configure the remote commands and start the service.
   if (remote_control_server) {

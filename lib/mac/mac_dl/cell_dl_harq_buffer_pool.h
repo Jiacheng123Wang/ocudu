@@ -106,7 +106,7 @@ public:
   {
     ocudu_sanity_check(is_du_ue_index_valid(ue_index), "Invalid UE index");
     ocudu_assert(cell_buffers[ue_index] != nullptr, "UE has no DL HARQ buffers allocated");
-    ocudu_assert(cell_buffers[ue_index]->size() > h_id, "Invalid HARQ ID={}", fmt::underlying(h_id));
+    ocudu_assert(cell_buffers[ue_index]->size() > h_id, "Invalid HARQ ID={}", h_id);
 
     auto* harq_buffer = (*cell_buffers[ue_index])[h_id];
     if (harq_buffer->ref_cnt.load(std::memory_order_acquire) != 0) {

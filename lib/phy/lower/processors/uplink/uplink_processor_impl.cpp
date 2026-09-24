@@ -267,8 +267,7 @@ lower_phy_uplink_processor_impl::lower_phy_uplink_processor_impl(std::unique_ptr
   current_symbol_index(0),
   prach_proc(std::move(prach_proc_)),
   puxch_proc(std::move(puxch_proc_)),
-  cfo_processor(config.rate),
-  temp_cf_buffer({2 * config.rate.get_dft_size(config.scs), config.nof_rx_ports})
+  cfo_processor(config.rate)
 {
   ocudu_assert(prach_proc, "Invalid PRACH processor.");
   ocudu_assert(puxch_proc, "Invalid PUxCH processor.");
@@ -516,17 +515,9 @@ void lower_phy_uplink_processor_impl::process_complete_symbol(const baseband_gat
     ocudu_assert(symbol_buffer.has_value(), "The compensation modifies the samples: they must be assembled.");
     baseband_gateway_buffer_dynamic_aligned& buffer = symbol_buffers[*symbol_buffer];
     ul_host_counters().count_round_trip();
-    // View over the temporary float-based complex samples for CFO processor.
-    span<cf_t> view;
-    for (unsigned i_channel = 0; i_channel != buffer.get_nof_channels(); ++i_channel) {
-      // The CFO compensation is not currently supported for 16-bit complex integer samples. So, it must convert it to
-      // single-precision complex floating-point samples.
-      span<ci16_t> channel_buffer = buffer.get_writer().get_channel_buffer(i_channel);
-      view                        = temp_cf_buffer.get_view({i_channel}).subspan(0, channel_buffer.size());
-      ocuduvec::convert(view, channel_buffer, ocuduvec::scaling_factor_ci16_to_cf);
-      cfo_processor.process(view);
-      ocuduvec::convert(channel_buffer, view, ocuduvec::scaling_factor_cf_to_ci16);
-    }
+    // The CFO processor takes the integer samples directly (see baseband_cfo_processor::process), so the
+    // symbol buffer is compensated in place with no float copy in between.
+    cfo_processor.process(buffer.get_writer());
   }
   ul_host_counters().count_symbol();
   ul_host_counters().observe(cfo_processor.get_cfo_hz(), cfo_processor.get_nof_scheduled_commands());

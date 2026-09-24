@@ -8,6 +8,7 @@
 #include "ocudu/ran/pusch/pusch_configuration.h"
 #include "ocudu/ran/resource_allocation/resource_allocation_frequency.h"
 #include "ocudu/ran/uci/uci_configuration.h"
+#include "ocudu/support/units.h"
 #include <optional>
 #include <variant>
 

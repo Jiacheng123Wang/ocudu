@@ -20,7 +20,7 @@ public:
     fmt::memory_buffer buffer;
     fmt::format_to(std::back_inserter(buffer),
                    "ue={} ran_ue={} lmf_ue={}: ",
-                   fmt::underlying(ue_index),
+                   ue_index,
                    fmt::underlying(ran_ue_meas_id),
                    fmt::underlying(lmf_ue_meas_id));
     prefix = ocudu::to_c_str(buffer);

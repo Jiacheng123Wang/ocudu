@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "ocudu/ran/precoding/precoding_codebook_helpers.h"
+#include "ocudu/ran/precoding/precoding_codebook_type1_helpers.h"
 
 namespace ocudu {
 namespace fapi_adaptor {

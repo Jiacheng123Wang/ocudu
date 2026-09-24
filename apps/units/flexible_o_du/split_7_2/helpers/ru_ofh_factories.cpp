@@ -26,14 +26,11 @@ std::unique_ptr<radio_unit> ocudu::create_ofh_radio_unit(const ru_ofh_unit_confi
   dependencies.error_notifier     = &ru_dependencies.error_notifier;
 
   // Configure sector.
+  dependencies.sector_dependencies.reserve(ru_cfg.cells.size());
   for (unsigned i = 0, e = ru_cfg.cells.size(); i != e; ++i) {
-    ofh::sector_dependencies& sector_deps = dependencies.sector_dependencies.emplace_back();
-
-    // Note, one executor for transmitter and receiver tasks is shared per two sectors.
-    sector_deps.txrx_executor     = &ofh_exec_map[i].txrx_executor();
-    sector_deps.uplink_executor   = &ofh_exec_map[i].uplink_executor();
-    sector_deps.downlink_executor = &ofh_exec_map[i].downlink_executor();
-    sector_deps.logger            = dependencies.logger;
+    // The sector executor mapper provides the txrx, uplink and downlink executors.
+    dependencies.sector_dependencies.emplace_back(
+        ofh::sector_dependencies{.logger = dependencies.logger, .exec_mapper = ofh_exec_map[i]});
   }
 
   return create_ofh_ru(generate_ru_ofh_config(ru_cfg, ru_config.cells, ru_config.max_processing_delay),

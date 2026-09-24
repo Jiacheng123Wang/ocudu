@@ -5,7 +5,7 @@
 #include "scheduler_test_doubles.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
-#include "ocudu/adt/circular_array.h"
+#include "ocudu/adt/circular_vector.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/scheduler/config/ran_cell_config_helper.h"
 #include "ocudu/scheduler/config/sched_cell_config_helpers.h"
@@ -138,7 +138,7 @@ public:
 
     // Process past UCI results.
     slot_point          sl_rx = next_sl_tx.without_hyper_sfn() - dl_pipeline_delay - uci_process_delay;
-    const sched_result& res   = sched_results[sl_rx.to_uint()];
+    const sched_result& res   = sched_results[sl_rx.count()];
     if (res.success) {
       uci_indication ind;
       ind.slot_rx    = sl_rx;
@@ -233,7 +233,8 @@ private:
   slot_point_extended next_sl_tx;
   const sched_result* result = nullptr;
 
-  circular_array<sched_result, 64> sched_results{};
+  static constexpr size_t             nof_stored_sched_results = 64;
+  circular_vector<sched_result, true> sched_results{nof_stored_sched_results};
 };
 
 void benchmark_tdd(benchmarker& bm, const bench_params& params)

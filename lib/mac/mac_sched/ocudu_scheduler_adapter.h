@@ -70,6 +70,8 @@ public:
 
   void handle_ul_phr_indication(const mac_phr_ce_info& phr) override;
 
+  void handle_ul_ta_report_indication(const mac_ta_report_ce_info& ta_report) override;
+
   void handle_crnti_ce_indication(du_ue_index_t old_ue_index, du_cell_index_t cell_index) override;
 
   std::optional<rnti_t> handle_msga_ccch_sdu(du_cell_index_t        cell_index,
@@ -164,8 +166,8 @@ private:
   /// Handler of RACH indications.
   mac_rach_handler rach_handler;
 
-  std::atomic<slot_point_extended>                            last_slot_point;
-  std::atomic<std::chrono::high_resolution_clock::time_point> last_slot_tp;
+  std::atomic<slot_point_extended>                   last_slot_point;
+  std::atomic<std::chrono::steady_clock::time_point> last_slot_tp;
 
   /// List of event flags used by scheduler to notify that the configuration is complete.
   struct ue_notification_context {

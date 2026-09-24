@@ -7,6 +7,7 @@
 #include "metrics_handler/metrics_handler_impl.h"
 #include "routines/amf_connection_loss_routine.h"
 #include "routines/cell_activation_routine.h"
+#include "routines/cell_barring_routine.h"
 #include "routines/cell_deactivation_routine.h"
 #include "routines/cell_lifecycle_target.h"
 #include "routines/initial_context_setup_routine.h"
@@ -52,6 +53,7 @@
 #include "ocudu/ran/plmn_identity.h"
 #include "ocudu/ran/time/radio_frame.h"
 #include "ocudu/support/async/async_no_op_task.h"
+#include "ocudu/support/async/async_timer.h"
 #include "ocudu/support/async/coroutine.h"
 #include "ocudu/support/synchronization/sync_event.h"
 #include "ocudu/xnap/xnap.h"
@@ -71,7 +73,7 @@ static void assert_cu_cp_configuration_valid(const cu_cp_configuration& cfg)
     ocudu_assert(n2_gw != nullptr, "Invalid N2 GW client handler");
   }
   if (!cfg.xnap.xnaps.empty()) {
-    ocudu_assert(!cfg.xnap.xnc_gws.empty(), "No XN-C gateways configured for XNAP peers");
+    ocudu_assert(!cfg.xnap.xnc_gws.empty(), "No Xn-C gateways configured for XNAP peers");
   }
   ocudu_assert(cfg.services.timers != nullptr, "Invalid timers");
 
@@ -123,6 +125,7 @@ cu_cp_impl::cu_cp_impl(const cu_cp_configuration& config_) :
          ue_manager_dependencies{.timers         = *cfg.services.timers,
                                  .cu_cp_executor = *cfg.services.cu_cp_executor,
                                  .logger         = ocudulog::fetch_basic_logger("CU-UEMNG")}),
+  cell_ctrl(cfg, du_db, ue_mng, common_task_sched, *this),
   cell_meas_mng(cfg.mobility.meas_mgr_config,
                 cell_meas_manager_dependencies{.mobility_mng_notifier = cell_meas_mobility_notifier,
                                                .ue_mng                = ue_mng,
@@ -154,7 +157,14 @@ cu_cp_impl::cu_cp_impl(const cu_cp_configuration& config_) :
                                    .du_conn_notif            = conn_notifier,
                                    .ref_time_report_notifier = ntn_ref_time_store,
                                    .logger                   = logger}),
-  cu_up_db(cu_up_repository_config{cfg, e1ap_ev_notifier, common_task_sched, ocudulog::fetch_basic_logger("CU-CP")}),
+  cu_up_db(cu_up_repository_config{.e1ap           = cfg.e1ap,
+                                   .max_nof_cu_ups = cfg.admission.max_nof_cu_ups,
+                                   .max_nof_ues    = cfg.admission.max_nof_ues},
+           cu_up_repository_dependencies{.cu_cp_executor    = *cfg.services.cu_cp_executor,
+                                         .timers            = *cfg.services.timers,
+                                         .e1ap_ev_notifier  = e1ap_ev_notifier,
+                                         .common_task_sched = common_task_sched,
+                                         .logger            = logger}),
   paging_handler(paging_message_handler_dependencies{.dus = du_db, .logger = logger}),
   ngap_db(ngap_repository_config{.gnb_id                      = cfg.node.gnb_id,
                                  .ran_node_name               = cfg.node.ran_node_name,
@@ -177,14 +187,19 @@ cu_cp_impl::cu_cp_impl(const cu_cp_configuration& config_) :
                                              .ue_mng         = ue_mng,
                                              .cell_meas_mng  = cell_meas_mng,
                                              .logger         = logger}),
-  controller(cfg,
-             get_cu_cp_amf_reconnection_handler(),
-             common_task_sched,
-             ngap_db,
-             cu_up_db,
-             du_db,
-             xnap_db,
-             *cfg.services.cu_cp_executor),
+  controller(
+      cu_cp_controller_config{.max_nof_dus = cfg.admission.max_nof_dus, .max_nof_cu_ups = cfg.admission.max_nof_cu_ups},
+      cu_cp_controller_dependencies{.cu_cp_notifier    = get_cu_cp_amf_reconnection_handler(),
+                                    .common_task_sched = common_task_sched,
+                                    .ngaps             = ngap_db,
+                                    .cu_ups            = cu_up_db,
+                                    .dus               = du_db,
+                                    .xncs              = xnap_db,
+                                    .xnc_gws           = cfg.xnap.xnc_gws,
+                                    .ctrl_exec         = *cfg.services.cu_cp_executor,
+                                    .timers            = timers,
+                                    .logger            = logger,
+                                    .ng_setup_notifier = cfg.ngap.ng_setup_notifier}),
   metrics_hdlr(metrics_handler_impl_dependencies{.cu_cp_exec       = cu_cp_executor,
                                                  .timers           = timers,
                                                  .ue_handler       = ue_mng,
@@ -247,7 +262,7 @@ bool cu_cp_impl::start()
         }
 
         // Start AMF connection procedure.
-        controller.amf_connection_handler().connect_to_amf(&p);
+        controller.amf_connection_handler().connect_to_amf(&p, cfg.ngap.amf_reconnection_retry_time);
       })) {
     report_fatal_error("Failed to initiate CU-CP setup");
   }
@@ -282,8 +297,7 @@ bool cu_cp_impl::start()
           auto gw_it = cfg.xnap.peer_to_gateway.find(peer_idx);
           if (gw_it != cfg.xnap.peer_to_gateway.end() &&
               xnc_gateway_index_to_uint(gw_it->second) < cfg.xnap.xnc_gws.size()) {
-            controller.xnc_connection_handler().register_peer_gateway(
-                peer_idx, cfg.xnap.xnc_gws[xnc_gateway_index_to_uint(gw_it->second)]);
+            controller.xnc_connection_handler().register_peer_gateway(peer_idx, gw_it->second);
           }
           ++xnc_idx;
         }
@@ -997,7 +1011,7 @@ bool cu_cp_impl::handle_handover_request(cu_cp_ue_index_t                  ue_in
     return false;
   }
 
-  if (!ue->get_security_manager().init_security_context(sec_ctxt)) {
+  if (!ue->get_security_manager().init_handover_security_context(sec_ctxt)) {
     logger.info("ue={}: Security context initialization failed", ue_index);
     return false;
   }
@@ -1075,8 +1089,9 @@ cu_cp_impl::handle_new_ue_context_modification_request(const ngap_ue_context_mod
   if (ue->get_rrc_ue() != nullptr) {
     const auto& cell_ctx = ue->get_rrc_ue()->get_cell_context();
     mod_response.user_location_info.emplace();
-    mod_response.user_location_info->nr_cgi = {ue->get_ue_context().plmn, cell_ctx.cgi.nci};
-    mod_response.user_location_info->tai    = {ue->get_ue_context().plmn, cell_ctx.tac};
+    mod_response.user_location_info->nr_cgi   = {ue->get_ue_context().plmn, cell_ctx.cgi.nci};
+    mod_response.user_location_info->tai      = {ue->get_ue_context().plmn, cell_ctx.tac};
+    mod_response.user_location_info->tac_list = cell_ctx.tac_list;
   }
 
   return launch_async(
@@ -1272,11 +1287,12 @@ void cu_cp_impl::handle_transmission_of_handover_required()
   mobility_mng.get_metrics_handler().aggregate_requested_handover_preparation();
 }
 
-async_task<bool> cu_cp_impl::handle_new_rrc_handover_command(cu_cp_ue_index_t                ue_index,
-                                                             byte_buffer                     command,
+async_task<bool> cu_cp_impl::handle_new_rrc_handover_command(cu_cp_rrc_handover_command      command,
                                                              std::optional<xnc_peer_index_t> xnc_index)
 {
   static constexpr std::chrono::milliseconds tng_reloc_overall_timeout{1000};
+
+  const cu_cp_ue_index_t ue_index = command.ue_index;
 
   // Notify mobility manager metrics handler about the successful handover preparation.
   mobility_mng.get_metrics_handler().aggregate_successful_handover_preparation();
@@ -1311,7 +1327,7 @@ async_task<bool> cu_cp_impl::handle_new_rrc_handover_command(cu_cp_ue_index_t   
                                        ngap_cause_radio_network_t::tngrelocoverall_expiry});
 
   return launch_async<inter_cu_handover_source_routine>(
-      ue_index, std::move(command), ue_mng, du_db, cu_up_db, ngap->get_ngap_control_message_handler(), xnap, logger);
+      std::move(command), ue_mng, du_db, cu_up_db, ngap->get_ngap_control_message_handler(), xnap, logger);
 }
 
 async_task<cu_cp_handover_resource_allocation_response>
@@ -1355,8 +1371,8 @@ void cu_cp_impl::handle_handover_cancel_received(cu_cp_ue_index_t ue_index)
   }
 }
 
-void cu_cp_impl::handle_xnap_handover_success_received(cu_cp_ue_index_t  source_ue_index,
-                                                       peer_xnap_ue_id_t winner_peer_xnap_ue_id)
+void cu_cp_impl::handle_xnap_handover_success_received(cu_cp_ue_index_t           source_ue_index,
+                                                       const nr_cell_global_id_t& winner_cgi)
 {
   cu_cp_ue* ue = ue_mng.find_du_ue(source_ue_index);
   if (ue == nullptr || !ue->get_cho_context().has_value()) {
@@ -1364,27 +1380,39 @@ void cu_cp_impl::handle_xnap_handover_success_received(cu_cp_ue_index_t  source_
     return;
   }
 
-  // Stop the CHO execution timer; the UE has already executed CHO.
-  ue->get_cho_context()->cho_execution_timer.stop();
-
-  // Find the winning candidate to get the xnc_index for SN Status Transfer.
+  // Find the winning candidate to get the xnc_index for SN Status Transfer. Match on the target cell: XNAP UE IDs
+  // are only unique per Xn interface, so candidates at different peers routinely share one.
   xnap_interface* winner_xnap = nullptr;
   for (const auto& candidate : ue->get_cho_context()->candidates) {
-    if (candidate.peer_xnap_ue_id == winner_peer_xnap_ue_id && candidate.xnc_index.has_value()) {
+    if (candidate.target_cgi == winner_cgi && candidate.xnc_index.has_value()) {
       winner_xnap = xnap_db.find_xnap(*candidate.xnc_index);
+      if (winner_xnap != nullptr) {
+        // Remember the peer the UE handed over to, so that releasing the source UE also releases its XNAP UE context.
+        // Only one peer is remembered, so release the context at any peer this UE was previously associated with -
+        // otherwise it survives until the process ends.
+        const xnc_peer_index_t previous_xnc_index = ue->get_xnc_peer_index();
+        if (previous_xnc_index != xnc_peer_index_t::invalid and previous_xnc_index != *candidate.xnc_index) {
+          if (xnap_interface* previous_xnap = xnap_db.find_xnap(previous_xnc_index); previous_xnap != nullptr) {
+            previous_xnap->handle_ue_context_release_required(source_ue_index);
+          }
+        }
+        ue->set_xnc_peer_index(*candidate.xnc_index);
+      }
       break;
     }
   }
 
   if (winner_xnap == nullptr) {
-    logger.warning("ue={}: HandoverSuccess: could not find XNAP interface for winner peer_xnap_ue_id={}",
-                   source_ue_index,
-                   winner_peer_xnap_ue_id);
+    logger.warning("ue={}: HandoverSuccess: could not find XNAP interface for winner {}", source_ue_index, winner_cgi);
     return;
   }
 
+  // Only now: the UE has executed CHO and the completion routine takes over. Stopping earlier would disarm the
+  // guard timer on the paths above that bail out, leaving the CHO neither completed nor cancelled.
+  ue->get_cho_context()->cho_execution_timer.stop();
+
   ue->get_task_sched().schedule_async_task(launch_async<inter_cu_conditional_handover_source_completion_routine>(
-      source_ue_index, winner_peer_xnap_ue_id, ue_mng, cu_up_db, winner_xnap, &xnap_db, *this, logger));
+      source_ue_index, winner_cgi, ue_mng, cu_up_db, winner_xnap, &xnap_db, *this, logger));
 }
 
 std::vector<cu_cp_served_cell_info> cu_cp_impl::handle_served_cells_required()
@@ -1470,8 +1498,13 @@ cu_cp_impl::handle_xnap_retrieve_ue_context_request(const xnap_retrieve_ue_conte
                            .get_ssb_arfcn(request.target_cell->meas_timing_cfg);
   }
 
-  return launch_no_op_task(collect_ue_context_for_retrieval(
-      request, *ue, served_guami.value(), ngap->get_amf_ue_id(request.ue_index), target_ssb_arfcn, logger));
+  return launch_no_op_task(collect_ue_context_for_retrieval(request,
+                                                            *ue,
+                                                            served_guami.value(),
+                                                            ngap->get_amf_ue_id(request.ue_index),
+                                                            ngap->get_ngap_context().amf_addr,
+                                                            target_ssb_arfcn,
+                                                            logger));
 }
 
 cu_cp_ue_index_t cu_cp_impl::handle_ue_index_allocation_request(const nr_cell_global_id_t& cgi,
@@ -1569,8 +1602,9 @@ void cu_cp_impl::handle_location_reporting_control_message(cu_cp_ue_index_t     
     const auto& cell_ctx = ue->get_rrc_ue()->get_cell_context();
 
     cu_cp_user_location_info_nr user_location_info;
-    user_location_info.nr_cgi = {ue->get_ue_context().plmn, cell_ctx.cgi.nci};
-    user_location_info.tai    = {ue->get_ue_context().plmn, cell_ctx.tac};
+    user_location_info.nr_cgi   = {ue->get_ue_context().plmn, cell_ctx.cgi.nci};
+    user_location_info.tai      = {ue->get_ue_context().plmn, cell_ctx.tac};
+    user_location_info.tac_list = cell_ctx.tac_list;
     auto report = ue->get_location_manager().get_direct_location_report(ue_index, user_location_info, msg);
 
     auto* ngap = ngap_db.find_ngap(ue->get_ue_context().plmn);
@@ -1598,8 +1632,9 @@ void cu_cp_impl::handle_location_update(cu_cp_ue_index_t ue_index)
   const auto& cell_ctx = ue->get_rrc_ue()->get_cell_context();
 
   cu_cp_user_location_info_nr user_location_info;
-  user_location_info.nr_cgi = {ue->get_ue_context().plmn, cell_ctx.cgi.nci};
-  user_location_info.tai    = {ue->get_ue_context().plmn, cell_ctx.tac};
+  user_location_info.nr_cgi   = {ue->get_ue_context().plmn, cell_ctx.cgi.nci};
+  user_location_info.tai      = {ue->get_ue_context().plmn, cell_ctx.tac};
+  user_location_info.tac_list = cell_ctx.tac_list;
 
   auto opt_report = ue->get_location_manager().get_location_report(ue_index, user_location_info);
   if (!opt_report.has_value()) {
@@ -1676,7 +1711,7 @@ void cu_cp_impl::handle_n2_disconnection(cu_cp_amf_index_t amf_index)
   logger.warning("Handling N2 disconnection. Lost PLMNs: {}", fmt::format("{}", fmt::join(plmns, " ")));
 
   common_task_sched.schedule(launch_async<amf_connection_loss_routine>(
-      amf_index, cfg, std::move(plmns), du_db, *this, ue_mng, controller, logger));
+      amf_index, cfg, std::move(plmns), du_db, cell_ctrl.cells(), *this, ue_mng, controller, logger));
 }
 
 async_task<ngap_write_replace_warning_response>
@@ -1872,14 +1907,33 @@ void cu_cp_impl::handle_amf_reconnection(cu_cp_amf_index_t amf_index)
   std::vector<plmn_identity> served_plmns = ngap_db.find_ngap(amf_index)->get_ngap_context().get_supported_plmns();
 
   // The common task scheduler takes a void task, so wrap the bool-returning activation routine.
-  common_task_sched.schedule(launch_async(
-      [this, targets = resolve_activation_targets(du_db, served_plmns)](coro_context<async_task<void>>& ctx) mutable {
+  // Administratively locked cells are filtered by the resolver: an AMF reconnection must not unlock them.
+  // Cells with barred intent are re-barred after the reactivation: the DU restores its configured
+  // cellBarred on cell restart, which would otherwise discard the runtime CU-commanded bar.
+  std::vector<cell_lifecycle_target> activation_targets =
+      resolve_activation_targets(du_db, cell_ctrl.cells(), served_plmns);
+  std::vector<cell_lifecycle_target> bar_targets;
+  for (const cell_lifecycle_target& target : activation_targets) {
+    if (const logical_cell* cell = cell_ctrl.cells().find_cell(target.cgi.nci); cell != nullptr && cell->barred) {
+      bar_targets.push_back(cell_lifecycle_target{target.du_index, target.cgi, target.pci, {}});
+    }
+  }
+
+  bool scheduled = common_task_sched.schedule(launch_async(
+      [this, targets = std::move(activation_targets), bars = std::move(bar_targets), cells_activated = false](
+          coro_context<async_task<void>>& ctx) mutable {
         CORO_BEGIN(ctx);
-        CORO_AWAIT_VALUE(bool cells_activated,
-                         launch_async<cell_activation_routine>(cfg, std::move(targets), du_db, logger));
-        (void)cells_activated;
+        CORO_AWAIT_VALUE(
+            cells_activated,
+            launch_async<cell_activation_routine>(cfg, std::move(targets), du_db, cell_ctrl.cells(), logger));
+        if (cells_activated && !bars.empty()) {
+          CORO_AWAIT(launch_async<cell_barring_routine>(cfg, std::move(bars), /* barred = */ true, du_db, logger));
+        }
         CORO_RETURN();
       }));
+  if (!scheduled) {
+    logger.warning("Failed to schedule cell reactivation after AMF reconnection. Cause: task queue is full");
+  }
 }
 
 void cu_cp_impl::initialize_handover_ue_release_timer(
@@ -2185,59 +2239,13 @@ void cu_cp_impl::on_statistics_report_timer_expired()
   statistics_report_timer.run();
 }
 
-async_task<cu_cp_cell_command_response> cu_cp_impl::deactivate_cell(const nr_cell_global_id_t& cgi)
+std::vector<nr_cell_identity> cu_cp_impl::handle_du_cells_reported(cu_cp_du_index_t             du_index,
+                                                                   span<const du_reported_cell> cells)
 {
-  // Strict served-cells lookup: a cell that is already deactivated cannot be deactivated again.
-  cu_cp_du_index_t du_index = du_db.find_du(cgi);
-  if (du_index == cu_cp_du_index_t::invalid) {
-    logger.warning("deactivate_cell rejected. Cause: No DU found serving NR-CGI plmn={} nci={:#x}",
-                   cgi.plmn_id.to_string(),
-                   cgi.nci.value());
-    return launch_no_op_task(cu_cp_cell_command_response{});
-  }
-
-  std::vector<cell_lifecycle_target> targets = {cell_lifecycle_target{du_index, cgi, std::nullopt, {}}};
-  // The CU-CP drives the full graceful stop (bar, then release the cell's UEs, then deactivate), rather than
-  // relying on the DU to autonomously bar/drain, so that the behaviour does not depend on DU-specific cell-stop
-  // handling (which is not mandated by F1AP).
-  std::vector<cu_cp_ue_index_t> ues_to_release = collect_ues_on_cell(du_db, ue_mng, du_index, cgi);
-
-  return launch_async([this, targets = std::move(targets), ues_to_release = std::move(ues_to_release)](
-                          coro_context<async_task<cu_cp_cell_command_response>>& ctx) mutable {
-    CORO_BEGIN(ctx);
-    CORO_AWAIT_VALUE(
-        bool success,
-        launch_async<cell_deactivation_routine>(cfg,
-                                                std::move(targets),
-                                                std::move(ues_to_release),
-                                                ngap_cause_t{ngap_cause_radio_network_t::cell_not_available},
-                                                /* bar_cells_first = */ true,
-                                                du_db,
-                                                *this,
-                                                ue_mng,
-                                                logger));
-    CORO_RETURN(cu_cp_cell_command_response{success});
-  });
+  return cell_ctrl.handle_du_cells_reported(du_index, cells);
 }
 
-async_task<cu_cp_cell_command_response> cu_cp_impl::activate_cell(const nr_cell_global_id_t& cgi)
+void cu_cp_impl::handle_du_removed(cu_cp_du_index_t du_index)
 {
-  // Any-state lookup: the cell to activate is currently in the DU's deactivated list, which the strict
-  // served-cells lookup would miss.
-  cu_cp_du_index_t du_index = du_db.find_du_any_state(cgi);
-  if (du_index == cu_cp_du_index_t::invalid) {
-    logger.warning("activate_cell rejected. Cause: No DU found serving NR-CGI plmn={} nci={:#x}",
-                   cgi.plmn_id.to_string(),
-                   cgi.nci.value());
-    return launch_no_op_task(cu_cp_cell_command_response{});
-  }
-
-  std::vector<cell_lifecycle_target> targets = {cell_lifecycle_target{du_index, cgi, std::nullopt, {}}};
-
-  return launch_async(
-      [this, targets = std::move(targets)](coro_context<async_task<cu_cp_cell_command_response>>& ctx) mutable {
-        CORO_BEGIN(ctx);
-        CORO_AWAIT_VALUE(bool success, launch_async<cell_activation_routine>(cfg, std::move(targets), du_db, logger));
-        CORO_RETURN(cu_cp_cell_command_response{success});
-      });
+  cell_ctrl.handle_du_removed(du_index);
 }

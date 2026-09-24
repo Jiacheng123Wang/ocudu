@@ -5,6 +5,7 @@
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/error_handling.h"
 #include <gtest/gtest.h>
+#include <pthread.h>
 
 namespace {
 
@@ -121,6 +122,13 @@ private:
 
 int main(int argc, char** argv)
 {
+#if defined(__APPLE__)
+  // On Linux, pthread_getname_np reports the process name for the main thread; on macOS it reports an empty string
+  // until the thread names itself. Name it here (this main is shared by all unit tests) so that the tests comparing
+  // the main thread name against a named/unnamed unique_thread are meaningful on both platforms.
+  ::pthread_setname_np("main");
+#endif
+
   // Parse --log_level= if it exists to set the default log level.
   setup_default_log_level(argc, argv);
 

@@ -44,13 +44,14 @@ public:
                       nof_symbols_slot));
     }
 
-    if (config.precoding.get_nof_layers() != 1) {
-      return make_unexpected(
-          fmt::format("The number of layers (i.e., {}) must be one.", config.precoding.get_nof_layers()));
+    if (config.precoding_and_beamforming.get_nof_layers() != 1) {
+      return make_unexpected(fmt::format("The number of layers (i.e., {}) must be one.",
+                                         config.precoding_and_beamforming.get_nof_layers()));
     }
 
-    if (config.precoding.get_nof_prg() != 1) {
-      return make_unexpected(fmt::format("The number of PRG (i.e., {}) must be one.", config.precoding.get_nof_prg()));
+    if (config.precoding_and_beamforming.get_nof_prg() != 1) {
+      return make_unexpected(
+          fmt::format("The number of PRG (i.e., {}) must be one.", config.precoding_and_beamforming.get_nof_prg()));
     }
 
     static constexpr interval<unsigned, true> bandwidth_range(24, 276);

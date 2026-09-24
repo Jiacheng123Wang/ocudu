@@ -18,7 +18,7 @@
 using namespace ocudu;
 using namespace ocucp;
 
-/// Fixture for the report of the cells this node serves to an XN-C peer (TS 38.423 section 8.4.1). The fixture leaves
+/// Fixture for the report of the cells this node serves to an Xn-C peer (TS 38.423 section 8.4.1). The fixture leaves
 /// a single DU connected, with the cell it reported at F1 setup advertised to the peer.
 class cu_cp_xn_served_cells_test : public cu_cp_test_environment, public ::testing::Test
 {
@@ -58,7 +58,7 @@ public:
     return true;
   }
 
-  /// Pop the NG-RAN Node Configuration Update the CU-CP sent to the XN-C peer and acknowledge it.
+  /// Pop the NG-RAN Node Configuration Update the CU-CP sent to the Xn-C peer and acknowledge it.
   bool pop_ngran_node_cfg_update(xnap_message& out)
   {
     if (!wait_for_xnap_tx_pdu(xnc_peer_idx, out)) {
@@ -104,17 +104,17 @@ TEST_F(cu_cp_xn_served_cells_test, when_a_cell_is_deactivated_then_it_is_reporte
 
   cu_cp_cell_command_handler& cell_cmd = get_cu_cp().get_command_handler().get_cell_command_handler();
 
-  async_task<cu_cp_cell_command_response>         resp_task = cell_cmd.deactivate_cell(served_cgi);
-  lazy_task_launcher<cu_cp_cell_command_response> launcher(resp_task);
+  launched_cu_cp_task<cu_cp_cell_command_response> deactivation{*this,
+                                                                [&]() { return cell_cmd.deactivate_cell(served_cgi); }};
 
   // Taking a cell down bars it first and deactivates it once the UEs are released, each with its own gNB-CU
   // Configuration Update the DU acknowledges.
   ASSERT_TRUE(ack_gnb_cu_configuration_update()) << "CU-CP did not bar the cell";
   ASSERT_TRUE(ack_gnb_cu_configuration_update()) << "CU-CP did not deactivate the cell";
-  EXPECT_TRUE(wait_for_task_result(launcher).success);
+  EXPECT_TRUE(wait_for_task_result(deactivation).success);
 
   xnap_message cfg_update;
-  ASSERT_TRUE(pop_ngran_node_cfg_update(cfg_update)) << "CU-CP did not report the deactivated cell to the XN-C peer";
+  ASSERT_TRUE(pop_ngran_node_cfg_update(cfg_update)) << "CU-CP did not report the deactivated cell to the Xn-C peer";
 
   const auto& asn1_cells_to_upd = get_served_cells_to_update(cfg_update);
   ASSERT_EQ(asn1_cells_to_upd.served_cells_to_delete_nr.size(), 1);
@@ -127,10 +127,72 @@ TEST_F(cu_cp_xn_served_cells_test, when_a_du_disconnects_then_its_cells_are_repo
   ASSERT_TRUE(drop_du_connection(du_idx));
 
   xnap_message cfg_update;
-  ASSERT_TRUE(pop_ngran_node_cfg_update(cfg_update)) << "CU-CP did not report the cells of the removed DU to the XN-C "
+  ASSERT_TRUE(pop_ngran_node_cfg_update(cfg_update)) << "CU-CP did not report the cells of the removed DU to the Xn-C "
                                                         "peer";
 
   const auto& asn1_cells_to_upd = get_served_cells_to_update(cfg_update);
   ASSERT_EQ(asn1_cells_to_upd.served_cells_to_delete_nr.size(), 1);
   EXPECT_EQ(asn1_cells_to_upd.served_cells_to_delete_nr[0].nr_ci.to_number(), served_cell.nci.value());
+}
+
+/// Fixture with an Xn-C peer and a declared-locked logical cell: the DU reports two cells at F1 setup, one of
+/// which the CU-CP configuration keeps administratively locked.
+class cu_cp_xn_locked_cell_test : public cu_cp_test_environment, public ::testing::Test
+{
+public:
+  cu_cp_xn_locked_cell_test() :
+    cu_cp_test_environment({/* max nof cu-ups */ 8,
+                            /* max nof dus */ 8,
+                            /* max nof ues */ 8192,
+                            /* max nof drbs per ue */ 8,
+                            /* amf config */ {{default_supported_tracking_area}},
+                            /* trigger ho from measurements */ true,
+                            /* enable rrc inactive */ false,
+                            /* enable xnc peer */ true,
+                            /* rrc reject wait time */ std::nullopt,
+                            /* logical cells */
+                            {ocucp::cu_cp_logical_cell_config{nr_cell_identity::create(gnb_id_t{411, 22}, 0).value(),
+                                                              ocucp::cell_admin_state::unlocked,
+                                                              /* barred = */ false},
+                             ocucp::cu_cp_logical_cell_config{nr_cell_identity::create(gnb_id_t{411, 22}, 1).value(),
+                                                              ocucp::cell_admin_state::locked,
+                                                              /* barred = */ false}}})
+  {
+    run_ng_setup();
+    run_xn_setup();
+
+    cell_b_info.nci = nr_cell_identity::create(gnb_id_t{411, 22}, 1).value();
+    cell_b_info.pci = 7;
+  }
+
+  static constexpr unsigned           xnc_peer_idx = 0;
+  test_helpers::served_cell_item_info cell_a_info;
+  test_helpers::served_cell_item_info cell_b_info;
+};
+
+TEST_F(cu_cp_xn_locked_cell_test, when_cell_declared_locked_then_it_is_not_advertised_to_the_peer)
+{
+  // Run the F1 setup manually: the run_f1_setup helper asserts that every reported cell is advertised to the
+  // peer, which is exactly what must not happen for the locked cell.
+  std::optional<unsigned> ret = connect_new_du();
+  ASSERT_TRUE(ret.has_value());
+  unsigned du_idx = ret.value();
+  get_du(du_idx).push_ul_pdu(
+      test_helpers::generate_f1_setup_request(int_to_gnb_du_id(0x11), {cell_a_info, cell_b_info}));
+  f1ap_message f1_resp;
+  ASSERT_TRUE(wait_for_f1ap_tx_pdu(du_idx, f1_resp));
+
+  // The NG-RAN Node Configuration Update advertises only the unlocked cell: the locked cell stays dormant
+  // and must not be announced as served.
+  xnap_message cfg_update;
+  ASSERT_TRUE(wait_for_xnap_tx_pdu(xnc_peer_idx, cfg_update));
+  ASSERT_TRUE(
+      test_helpers::is_pdu_type(cfg_update, asn1::xnap::xnap_elem_procs_o::init_msg_c::types::ngran_node_cfg_upd));
+  const auto& asn1_cells_to_add = cfg_update.pdu.init_msg()
+                                      .value.ngran_node_cfg_upd()
+                                      ->cfg_upd_init_node_choice.gnb()
+                                      .served_cells_to_upd_nr.served_cells_to_add_nr;
+  ASSERT_EQ(asn1_cells_to_add.size(), 1U) << "the locked cell must not be advertised as served over Xn";
+  EXPECT_EQ(asn1_cells_to_add[0].served_cell_info_nr.cell_id.nr_ci.to_number(), cell_a_info.nci.value());
+  get_xnc_cu_cp(xnc_peer_idx).push_tx_pdu(generate_asn1_ngran_node_cfg_update_ack());
 }

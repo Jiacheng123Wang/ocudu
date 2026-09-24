@@ -6,6 +6,7 @@
 ![Build](https://img.shields.io/badge/build-CMake-informational)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause--Open--MPI-blue)](https://spdx.org/licenses/BSD-3-Clause-Open-MPI.html)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/11899/badge)](https://www.bestpractices.dev/projects/11899)
+[![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/ocudu.svg)](https://introspector.oss-fuzz.com/project-profile?project=ocudu)
 [![Coverage](https://gitlab.com/ocudu/ocudu/badges/main/coverage.svg?min_good=98&min_acceptable=60)](https://docs.ocudu.org/coverage/index.html)
 
 <img src="https://srs.io/wp-content/uploads/ocudu_color.png" alt="image" width="50%"/>

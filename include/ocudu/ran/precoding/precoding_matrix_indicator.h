@@ -4,10 +4,9 @@
 
 #pragma once
 
-#include "precoding_codebook_helpers.h"
+#include "precoding_codebook_type2_helpers.h"
 #include "ocudu/adt/static_vector.h"
 #include "ocudu/ran/precoding/precoding_codebook_configuration.h"
-#include <cstdint>
 #include <optional>
 #include <variant>
 
@@ -56,12 +55,12 @@ struct pmi_typeII {
     /// PMI parameter \f$i_{1,3,l}\f$. Strongest-coefficient index, {0, ..., 2L-1}.
     uint8_t i_1_3;
     /// PMI parameter \f$i_{1,4,l}\f$. Wideband amplitude indices, one per beam and polarization.
-    static_vector<uint8_t, max_nof_typeII_beams * 2> i_1_4;
+    static_vector<uint8_t, max_nof_typeII_coefficients> i_1_4;
     /// PMI parameter \f$i_{2,1,l}\f$. Phase coefficient indices, one per beam and polarization.
-    static_vector<uint8_t, max_nof_typeII_beams * 2> i_2_1;
+    static_vector<uint8_t, max_nof_typeII_coefficients> i_2_1;
     /// PMI parameter \f$i_{2,2,l}\f$. Subband amplitude indices, one per beam and polarization. Empty when subband
     /// amplitude reporting is disabled.
-    static_vector<uint8_t, max_nof_typeII_beams * 2> i_2_2;
+    static_vector<uint8_t, max_nof_typeII_coefficients> i_2_2;
   };
 
   /// Type II codebook configuration.
@@ -73,7 +72,7 @@ struct pmi_typeII {
   /// Table 5.2.2.2.3-1. Values: {0,...,C(N_1*N_2, L) - 1}, at most {0,...,1819}.
   uint16_t i_1_2;
   /// Per-layer combining coefficients, one entry per layer. The Type II codebook supports rank 1 or 2.
-  static_vector<layer_coefficients, 2> layers;
+  static_vector<layer_coefficients, max_nof_typeII_layers> layers;
 };
 
 /// Unified Precoding Matrix Indicator (PMI) type.

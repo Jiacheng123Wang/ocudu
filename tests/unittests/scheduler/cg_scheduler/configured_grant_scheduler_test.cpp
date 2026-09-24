@@ -10,6 +10,7 @@
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/test_doubles/scheduler/scheduler_result_finder.h"
+#include "tests/test_doubles/scheduler/scheduler_test_message_validators.h"
 #include "tests/test_doubles/utils/test_rng_seed.h"
 #include "tests/unittests/scheduler/test_utils/result_test_helpers.h"
 #include "tests/unittests/scheduler/test_utils/scheduler_test_simulator.h"
@@ -23,14 +24,22 @@
 
 using namespace ocudu;
 
+namespace {
 /// Helper struct that holds parameters for a single CG test scenario.
 struct cg_test_params {
   cg_configuration::periodicity_t periodicity    = cg_configuration::periodicity_t::sl40;
   unsigned                        period_slots   = 40;
-  unsigned                        nof_rbs        = 10;
   unsigned                        mcs            = 5;
   unsigned                        nof_harq_procs = 4;
+  /// When false, the cell is built without CG configured at cell level, so the CG scheduler is not instantiated.
+  bool cell_cg_enabled = true;
 };
+
+/// Default CG VRB allocation set by the config factory (see make_default_cg_config() in
+/// serving_cell_config_factory.cpp): start_vrb=10, length_vrb=10. The CG resource manager, which would overwrite these
+/// values, is not part of the scheduler config path exercised by this test.
+constexpr unsigned default_cg_start_vrb = 10;
+constexpr unsigned default_cg_nof_rbs   = 10;
 
 struct cg_duplex_test_params {
   std::string                            name;
@@ -45,6 +54,8 @@ void PrintTo(const cg_duplex_test_params& value, ::std::ostream* os)
 {
   *os << fmt::format("{}, default_cg_offset={}", value.name, value.default_cg_offset);
 }
+
+} // namespace
 
 /// Builds cell_config_builder_params from duplex test params.
 static cell_config_builder_params make_cell_builder_params(const cg_duplex_test_params& p)
@@ -62,7 +73,7 @@ class configured_grant_scheduler_test : public scheduler_test_simulator, public 
 {
 protected:
   static constexpr rnti_t ue_crnti = to_rnti(0x4601);
-  /// CS-RNTI assigned to the test UE. Matches the temporary value used in du_cg_res_mng.cpp.
+  /// CS-RNTI assigned to the test UE. Matches the temporary value used in cg_res_mng.cpp.
   static constexpr rnti_t cs_rnti = to_rnti(0xe0ef);
 
   cg_test_params                           cg_params;
@@ -76,13 +87,14 @@ protected:
     cg_params(params_),
     default_cg_offset_(default_offset)
   {
-    cell_req                     = sched_config_helper::make_default_sched_cell_configuration_request(builder_params);
-    cell_req.ran.init_bwp.cg_cfg = cg_builder_params{
-        .periodicity        = cg_params.periodicity,
-        .nof_rbs            = cg_params.nof_rbs,
-        .mcs                = cg_params.mcs,
-        .nof_harq_processes = cg_params.nof_harq_procs,
-    };
+    cell_req = sched_config_helper::make_default_sched_cell_configuration_request(builder_params);
+    if (cg_params.cell_cg_enabled) {
+      cell_req.ran.init_bwp.cg_cfg = cg_builder_params{
+          .periodicity        = cg_params.periodicity,
+          .mcs                = cg_params.mcs,
+          .nof_harq_processes = cg_params.nof_harq_procs,
+      };
+    }
     add_cell(cell_req);
   }
 
@@ -151,7 +163,8 @@ protected:
 
   /// Sends a UE reconfiguration with modified CG parameters.
   void reconf_cg(std::optional<cg_configuration::periodicity_t> new_periodicity = std::nullopt,
-                 std::optional<unsigned>                        new_offset      = std::nullopt)
+                 std::optional<unsigned>                        new_offset      = std::nullopt,
+                 std::optional<unsigned>                        new_mcs         = std::nullopt)
   {
     auto ue_req     = sched_config_helper::create_default_sched_ue_creation_request(cell_req.ran);
     ue_req.ue_index = to_du_ue_index(0);
@@ -160,6 +173,9 @@ protected:
 
     if (new_periodicity.has_value()) {
       cg_cfg.periodicity = new_periodicity.value();
+    }
+    if (new_mcs.has_value()) {
+      cg_cfg.rrc_configured_ul_grant_cfg->mcs = new_mcs.value();
     }
     cg_cfg.rrc_configured_ul_grant_cfg->time_domain_offset = new_offset.value_or(default_cg_offset_);
 
@@ -174,8 +190,24 @@ protected:
     sched->handle_ue_config_applied(to_du_ue_index(0));
   }
 
+  /// Sends a UE reconfiguration that removes the CG configuration (cg_cfg reset to nullopt).
+  void remove_cg_via_reconfig() const
+  {
+    auto ue_req     = sched_config_helper::create_default_sched_ue_creation_request(cell_req.ran);
+    ue_req.ue_index = to_du_ue_index(0);
+    ue_req.crnti    = ue_crnti;
+    ue_req.cfg.cells->front().serv_cell_cfg.ul_config->init_ul_bwp.cg_cfg.reset();
+
+    sched_ue_reconfiguration_message reconf;
+    reconf.ue_index = to_du_ue_index(0);
+    reconf.crnti    = ue_crnti;
+    reconf.cfg      = ue_req.cfg;
+    reconf.cs_rnti  = cs_rnti;
+    sched->handle_ue_reconfiguration_request(reconf);
+  }
+
   /// Sends a CRC indication for a CG PUSCH grant with the given CRC result and SINR.
-  void send_cg_crc(const ul_sched_info& grant, slot_point pusch_slot, bool crc_ok, std::optional<float> sinr_dB)
+  void send_cg_crc(const ul_sched_info& grant, slot_point pusch_slot, bool crc_ok, std::optional<float> sinr_dB) const
   {
     ul_crc_indication crc_ind;
     crc_ind.cell_index = to_du_cell_index(0);
@@ -254,15 +286,15 @@ TEST_P(cg_duplex_test, cg_pusch_symbols_match_td_alloc)
   EXPECT_EQ(grant->pusch_cfg.symbols, pusch_td_list[0].symbols);
 }
 
-/// Test: the VRBs in the CG PUSCH match the configured VRB allocation (start=10, length=nof_rbs).
+/// Test: the VRBs in the CG PUSCH match the configured VRB allocation (start=10, length=10).
 TEST_P(cg_duplex_test, cg_pusch_rbs_match_cg_config)
 {
   add_cg_ue();
   const ul_sched_info* grant = run_until_next_cg_pusch();
   ASSERT_NE(grant, nullptr);
 
-  // The CG config builder sets vrbs = {10, 10 + nof_rbs}.
-  const vrb_interval expected_vrbs{10, 10U + cg_params.nof_rbs};
+  // The CG config factory sets vrbs = {default_cg_start_vrb, default_cg_start_vrb + default_cg_nof_rbs}.
+  constexpr vrb_interval expected_vrbs{default_cg_start_vrb, default_cg_start_vrb + default_cg_nof_rbs};
   ASSERT_TRUE(grant->pusch_cfg.rbs.is_type1()) << "Expected type-1 (contiguous) VRB allocation";
   EXPECT_EQ(grant->pusch_cfg.rbs.type1(), expected_vrbs);
 }
@@ -498,7 +530,7 @@ TEST_P(cg_duplex_test, no_dynamic_pusch_in_cg_slot)
     bool has_cg = std::any_of(puschs.begin(), puschs.end(), [](const ul_sched_info& p) { return p.pusch_cfg.is_cg; });
     bool has_dynamic =
         std::any_of(puschs.begin(), puschs.end(), [](const ul_sched_info& p) { return not p.pusch_cfg.is_cg; });
-    EXPECT_FALSE(has_cg and has_dynamic) << "Slot " << last_result_slot().to_uint()
+    EXPECT_FALSE(has_cg and has_dynamic) << "Slot " << last_result_slot().count()
                                          << ": CG and dynamic PUSCH must not coexist in the same slot";
   }
 }
@@ -512,17 +544,7 @@ TEST_P(cg_duplex_test, cg_removal_via_reconfig_stops_grants)
   ASSERT_NE(run_until_next_cg_pusch(), nullptr) << "Pre-condition: expected at least one CG grant";
 
   // Send a reconfiguration with CG removed (cg_cfg = nullopt).
-  auto ue_req     = sched_config_helper::create_default_sched_ue_creation_request(cell_req.ran);
-  ue_req.ue_index = to_du_ue_index(0);
-  ue_req.crnti    = ue_crnti;
-  ue_req.cfg.cells->front().serv_cell_cfg.ul_config->init_ul_bwp.cg_cfg.reset();
-
-  sched_ue_reconfiguration_message reconf;
-  reconf.ue_index = to_du_ue_index(0);
-  reconf.crnti    = ue_crnti;
-  reconf.cfg      = ue_req.cfg;
-  reconf.cs_rnti  = cs_rnti;
-  sched->handle_ue_reconfiguration_request(reconf);
+  remove_cg_via_reconfig();
 
   // Run 2 periods and verify no more CG grants, while the UE is still present.
   constexpr unsigned safety_margin = 10U;
@@ -531,6 +553,70 @@ TEST_P(cg_duplex_test, cg_removal_via_reconfig_stops_grants)
     EXPECT_EQ(find_ue_pusch(cs_rnti, *last_sched_result()), nullptr)
         << "Unexpected CG PUSCH after CG removal via reconfig";
   }
+}
+
+/// Test: the TBS in the CG PUSCH is consistent with the grant's own PHY parameters (MCS, VRBs, symbols, DMRS).
+/// The scheduler pre-computes the TBS when the UE CG config is added and caches it; this verifies the cached value
+/// against an independent recomputation from the grant fields (see is_valid_ul_sched_info).
+TEST_P(cg_duplex_test, cg_pusch_tbs_is_consistent_with_grant_params)
+{
+  add_cg_ue();
+  const ul_sched_info* grant = run_until_next_cg_pusch();
+  ASSERT_NE(grant, nullptr);
+
+  // The MCS index in the grant must match the configured CG MCS.
+  EXPECT_EQ(grant->pusch_cfg.mcs_index.value(), cg_params.mcs);
+  EXPECT_GT(grant->pusch_cfg.tb_size_bytes.value(), 0U);
+
+  // Recomputes the TBS from the grant's symbols, DMRS, MCS description and RB count, and
+  // checks the effective code rate. A stale or wrongly computed cached TBS would fail this check.
+  EXPECT_TRUE(test_helper::is_valid_ul_sched_info(*grant)) << "CG PUSCH TBS/code-rate inconsistent with grant params";
+}
+
+/// Test: a reconfiguration that changes the CG MCS is reflected in the next grant, including a recomputed TBS.
+TEST_P(cg_duplex_test, cg_reconfig_mcs_change_updates_tbs)
+{
+  auto_crc = true;
+  add_cg_ue();
+
+  const ul_sched_info* g1 = run_until_next_cg_pusch();
+  ASSERT_NE(g1, nullptr) << "No CG PUSCH found before MCS reconfig";
+  ASSERT_EQ(g1->pusch_cfg.mcs_index.value(), cg_params.mcs);
+  const units::bytes tbs_before_mcs_changed = g1->pusch_cfg.tb_size_bytes;
+
+  // Reconfigure: raise the MCS (5 -> 20), which increases the TBS for the same VRB/symbol allocation.
+  constexpr unsigned new_mcs = 20;
+  reconf_cg(std::nullopt, std::nullopt, new_mcs);
+
+  const ul_sched_info* g2 = run_until_next_cg_pusch();
+  ASSERT_NE(g2, nullptr) << "No CG PUSCH found after MCS reconfig";
+  EXPECT_EQ(g2->pusch_cfg.mcs_index.value(), new_mcs);
+  EXPECT_GT(g2->pusch_cfg.tb_size_bytes.value(), tbs_before_mcs_changed.value())
+      << "Cached TBS should be recomputed after the MCS reconfiguration";
+  EXPECT_TRUE(test_helper::is_valid_ul_sched_info(*g2)) << "CG PUSCH TBS/code-rate inconsistent after MCS reconfig";
+}
+
+/// Test: after CG is removed via reconfiguration, a subsequent reconfiguration that re-installs the CG config
+/// makes CG grants resume. Also exercises the CG scheduler add/rem/add bookkeeping (slot wheel and TBS table).
+TEST_P(cg_duplex_test, cg_readd_after_removal_via_reconfig_resumes_grants)
+{
+  add_cg_ue();
+
+  // Confirm at least one CG grant appears.
+  ASSERT_NE(run_until_next_cg_pusch(), nullptr) << "Pre-condition: expected at least one CG grant";
+
+  // Remove CG via reconfig and verify grants stop for one period.
+  remove_cg_via_reconfig();
+  constexpr unsigned safety_margin = 10U;
+  for (unsigned i = 0; i != cg_params.period_slots + safety_margin; ++i) {
+    run_slot();
+    ASSERT_EQ(find_ue_pusch(cs_rnti, *last_sched_result()), nullptr) << "Unexpected CG PUSCH after CG removal";
+  }
+
+  // Re-install the CG config via reconfiguration and verify grants resume.
+  reconf_cg();
+  const ul_sched_info* grant = run_until_next_cg_pusch();
+  EXPECT_NE(grant, nullptr) << "CG grants should resume after CG is re-added via reconfig";
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -666,7 +752,6 @@ protected:
     configured_grant_scheduler_test(cg_test_params{
         .periodicity    = GetParam().periodicity,
         .period_slots   = GetParam().period_slots,
-        .nof_rbs        = 10,
         .mcs            = 5,
         .nof_harq_procs = 8,
     })
@@ -706,7 +791,6 @@ protected:
     configured_grant_scheduler_test(cg_test_params{
         .periodicity    = cg_configuration::periodicity_t::sl40,
         .period_slots   = 40,
-        .nof_rbs        = 10,
         .mcs            = 5,
         .nof_harq_procs = 1,
     })
@@ -763,6 +847,49 @@ TEST_F(cg_dtx_test, cg_no_dtx_when_sinr_missing)
   // HARQ freed by NACK (max_retx=0) — next CG should appear within 1 period.
   const ul_sched_info* next_grant = run_until_next_cg_pusch(cg_params.period_slots + 10);
   EXPECT_NE(next_grant, nullptr) << "CG PUSCH should appear within 1 period when SINR is missing";
+}
+
+/// Test: when the CRC is OK (ACK), the HARQ is freed immediately and the next CG grant appears within one period.
+/// With a single HARQ process, the next grant can only appear if the ACK freed the HARQ (the timeout would take
+/// 4 periods).
+TEST_F(cg_dtx_test, cg_ack_frees_harq_for_next_occasion)
+{
+  add_cg_ue();
+
+  const ul_sched_info* grant = run_until_next_cg_pusch();
+  ASSERT_NE(grant, nullptr) << "No CG PUSCH found";
+
+  // Send ACK: CRC OK.
+  send_cg_crc(*grant, last_result_slot(), true, 15.0f);
+
+  const ul_sched_info* next_grant = run_until_next_cg_pusch(cg_params.period_slots + 10);
+  EXPECT_NE(next_grant, nullptr) << "CG PUSCH should appear within 1 period after ACK (HARQ should be freed)";
+}
+
+/// Test: when no CRC indication ever arrives, CG grants keep appearing every period. With 1 HARQ process and
+/// period=40, the same HARQ ID is needed again one period later, while the HARQ timeout is 4 periods (160 slots);
+/// the HARQ manager must forcibly reuse the still-busy HARQ process (forced-reuse path) instead of stalling.
+TEST_F(cg_dtx_test, cg_grants_continue_when_crc_never_arrives)
+{
+  add_cg_ue();
+
+  const ul_sched_info* first_grant = run_until_next_cg_pusch();
+  ASSERT_NE(first_grant, nullptr) << "No CG PUSCH found";
+  unsigned cg_grant_count = 1;
+
+  // Never send a CRC indication. Run for 8 periods (2 full HARQ-timeout cycles) and count CG grants.
+  const unsigned total_slots = 8 * cg_params.period_slots;
+  for (unsigned i = 0; i != total_slots; ++i) {
+    run_slot();
+    if (find_ue_pusch(cs_rnti, *last_sched_result()) != nullptr) {
+      ++cg_grant_count;
+    }
+  }
+
+  // Expect one grant per period despite the missing CRCs.
+  const unsigned expected_min_grants = total_slots / cg_params.period_slots;
+  EXPECT_GE(cg_grant_count, expected_min_grants)
+      << "CG grants should continue via HARQ forced reuse when the CRC never arrives";
 }
 
 /// Test: stress test sending DTX for every CG grant across multiple cycles. With a single HARQ, every CG occasion
@@ -838,4 +965,201 @@ TEST_F(cg_csi_mux_test, cg_pusch_absorbs_pucch_csi)
     break;
   }
   EXPECT_TRUE(found) << "No CG PUSCH with muxed CSI was observed within 400 slots";
+}
+
+/// Fixture for the multi-bit HARQ-ACK mux test. Uses a DL-heavy TDD pattern (6D1S3U) so that HARQ-ACKs from
+/// multiple PDSCHs fall on the same UL slot, producing UCI payloads with more than one HARQ-ACK bit. The CG offset
+/// targets the first UL slot of the TDD period (slot 7), where most of the PDSCH HARQ-ACKs accumulate.
+class cg_multi_harq_ack_mux_test : public configured_grant_scheduler_test
+{
+protected:
+  cg_multi_harq_ack_mux_test() :
+    configured_grant_scheduler_test(cg_test_params{},
+                                    make_cell_builder_params(cg_duplex_test_params{
+                                        "TDD_6D1S3U",
+                                        duplex_mode::TDD,
+                                        tdd_ul_dl_config_common{subcarrier_spacing::kHz30, {10, 6, 10, 3, 0}},
+                                        7}),
+                                    /*default_offset=*/7)
+  {
+  }
+};
+
+/// Test: a CG PUSCH can absorb more than one HARQ-ACK bit from the PUCCH (no max-1 HARQ-bit constraint for CG).
+TEST_F(cg_multi_harq_ack_mux_test, cg_pusch_absorbs_multiple_harq_ack_bits)
+{
+  auto_uci = true;
+  auto_crc = true;
+  add_cg_ue();
+
+  bool               found               = false;
+  constexpr unsigned nof_periods_to_test = 10U;
+  for (unsigned i = 0; i != static_cast<unsigned>(cg_params.periodicity) * nof_periods_to_test; ++i) {
+    // Keep DL buffer non-empty so the scheduler generates PDSCHs in every DL slot; with 6 DL slots ACKing on 3 UL
+    // slots, several PDSCH HARQ-ACKs accumulate on the CG PUSCH slot.
+    push_dl_buffer_state(dl_buffer_state_indication_message{to_du_ue_index(0), LCID_SRB1, 10000});
+    run_slot();
+
+    const sched_result&  res      = *last_sched_result();
+    const ul_sched_info* cg_pusch = find_ue_pusch_with_harq_ack(cs_rnti, res);
+    if (cg_pusch == nullptr or cg_pusch->uci->harq->harq_ack_nof_bits < 2) {
+      continue;
+    }
+    found = true;
+    // The PUCCH with HARQ-ACK for this UE must have been removed after the mux.
+    EXPECT_EQ(find_ue_pucch_with_harq_ack(ue_crnti, res), nullptr)
+        << "PUCCH HARQ-ACK should be absent after multi-bit UCI mux onto CG PUSCH";
+    break;
+  }
+  EXPECT_TRUE(found) << "No CG PUSCH carrying >=2 HARQ-ACK bits was observed within 400 slots";
+}
+
+/// Fixture for a cell without CG configured at cell level. In this case, the CG scheduler is not instantiated
+/// (nullptr) and the UE scheduler must run all its slot/event paths without it.
+class cg_disabled_cell_test : public configured_grant_scheduler_test
+{
+protected:
+  cg_disabled_cell_test() : configured_grant_scheduler_test(cg_test_params{.cell_cg_enabled = false}) {}
+};
+
+/// Test: a cell built without CG at cell level runs UE creation, reconfiguration and removal without producing
+/// any CG grant and without crashing (the CG scheduler is not instantiated).
+TEST_F(cg_disabled_cell_test, cell_without_cg_config_runs_and_produces_no_cg_grants)
+{
+  // Create the UE. Since the cell has no CG configured, the default UE config carries no CG either.
+  auto ue_req     = sched_config_helper::create_default_sched_ue_creation_request(cell_req.ran);
+  ue_req.ue_index = to_du_ue_index(0);
+  ue_req.crnti    = ue_crnti;
+  ASSERT_FALSE(ue_req.cfg.cells->front().serv_cell_cfg.ul_config->init_ul_bwp.cg_cfg.has_value())
+      << "Pre-condition: UE config should have no CG when the cell has no CG";
+  add_ue(ue_req, /*wait_notification=*/true);
+
+  // Reconfigure the UE (still without CG) — exercises the reconfiguration path with no CG scheduler.
+  sched_ue_reconfiguration_message reconf;
+  reconf.ue_index = to_du_ue_index(0);
+  reconf.crnti    = ue_crnti;
+  reconf.cfg      = ue_req.cfg;
+  sched->handle_ue_reconfiguration_request(reconf);
+  sched->handle_ue_config_applied(to_du_ue_index(0));
+
+  // Run for 2 CG periods and verify no CG PUSCH grant appears.
+  constexpr unsigned safety_margin = 10U;
+  for (unsigned i = 0; i != 2 * cg_params.period_slots + safety_margin; ++i) {
+    run_slot();
+    ASSERT_EQ(find_ue_pusch(cs_rnti, *last_sched_result()), nullptr) << "Unexpected CG PUSCH in a cell without CG";
+  }
+
+  // Remove the UE — exercises the UE deletion path with no CG scheduler.
+  rem_ue(to_du_ue_index(0));
+  for (unsigned i = 0; i != 10; ++i) {
+    run_slot();
+  }
+}
+
+/// Fixture for CG behavior of UEs created via F1AP without RACH (e.g. RRC Reestablishment), which start in fallback
+/// mode awaiting a C-RNTI MAC CE to complete contention resolution (conres_st = pending_conres_crnti_ce).
+class cg_fallback_ue_test : public configured_grant_scheduler_test
+{
+protected:
+  static constexpr du_ue_index_t ue_idx = to_du_ue_index(0);
+
+  /// Creates the UE in fallback via the F1AP path (no UL-CCCH slot, no CFRA), without CG configuration.
+  /// Note: scheduler_test_simulator::add_ue() is bypassed, as it auto-completes contention resolution by sending the
+  /// C-RNTI CE right after the creation request, whereas this fixture must keep the UE awaiting the C-RNTI CE.
+  void add_fallback_crnti_ce_ue()
+  {
+    auto ue_req               = sched_config_helper::create_default_sched_ue_creation_request(cell_req.ran);
+    ue_req.ue_index           = ue_idx;
+    ue_req.crnti              = ue_crnti;
+    ue_req.starts_in_fallback = true;
+    ASSERT_EQ(sched_config_helper::to_ue_creation_mode(ue_req), ue_creation_mode::high_layers);
+    // Create the UE without CG: the CG config is installed via reconfiguration (see add_cg_ue()).
+    ue_req.cfg.cells->front().serv_cell_cfg.ul_config->init_ul_bwp.cg_cfg.reset();
+
+    sched->handle_ue_creation_request(ue_req);
+    notif.last_ue_index_cfg.reset();
+    for (unsigned i = 0; i != 100 and notif.last_ue_index_cfg != ue_idx; ++i) {
+      run_slot();
+    }
+    ASSERT_EQ(notif.last_ue_index_cfg, ue_idx) << "UE creation was not completed";
+  }
+
+  /// Sends a reconfiguration that installs the CG configuration and confirms it was applied by the UE.
+  void install_cg_via_reconf() const
+  {
+    auto ue_req     = sched_config_helper::create_default_sched_ue_creation_request(cell_req.ran);
+    ue_req.ue_index = ue_idx;
+    ue_req.crnti    = ue_crnti;
+    ue_req.cfg.cells->front()
+        .serv_cell_cfg.ul_config->init_ul_bwp.cg_cfg->rrc_configured_ul_grant_cfg->time_domain_offset =
+        default_cg_offset_;
+
+    sched_ue_reconfiguration_message reconf;
+    reconf.ue_index = ue_idx;
+    reconf.crnti    = ue_crnti;
+    reconf.cfg      = ue_req.cfg;
+    reconf.cs_rnti  = cs_rnti;
+    sched->handle_ue_reconfiguration_request(reconf);
+    sched->handle_ue_config_applied(ue_idx);
+  }
+};
+
+/// Test (regression): for an F1AP-created UE awaiting a C-RNTI MAC CE, the CG setup requested via reconfiguration is
+/// deferred until the CE is received. No CG grant may appear before the CE, grants must appear after it, and the UE
+/// must be removed cleanly afterwards (the deferred CG registration must be caught up at CE reception, or the removal
+/// would run for a UE never registered in the CG scheduler).
+TEST_F(cg_fallback_ue_test, cg_setup_is_deferred_until_crnti_ce_and_ue_is_removed_cleanly)
+{
+  add_fallback_crnti_ce_ue();
+
+  // Install the CG config while contention resolution is still pending: the CG scheduler registration is skipped.
+  install_cg_via_reconf();
+
+  // While the C-RNTI CE is pending, no CG PUSCH must be scheduled.
+  ASSERT_EQ(run_until_next_cg_pusch(), nullptr) << "CG PUSCH scheduled while contention resolution is pending";
+
+  // C-RNTI CE received: contention resolution completes and the deferred CG registration is performed.
+  sched->handle_crnti_ce_received(ue_idx);
+
+  // CG grants must now appear with the configured periodicity.
+  const ul_sched_info* g1 = run_until_next_cg_pusch();
+  ASSERT_NE(g1, nullptr) << "No CG PUSCH scheduled after the C-RNTI CE was received";
+  const slot_point sl1 = last_result_slot();
+
+  const ul_sched_info* g2 = run_until_next_cg_pusch();
+  ASSERT_NE(g2, nullptr) << "No second CG PUSCH scheduled after the C-RNTI CE was received";
+  EXPECT_EQ(last_result_slot() - sl1, static_cast<int>(cg_params.period_slots));
+
+  // Remove the UE and wait for the removal to complete.
+  schedule_task(launch_rem_ue_task(ue_idx));
+  run_until_all_pending_tasks_completion();
+}
+
+/// Test: for an F1AP-created UE awaiting a C-RNTI MAC CE that never arrives, the CG setup requested via
+/// reconfiguration stays deferred: no CG grant is ever allocated, and the UE removal completes cleanly (the removal
+/// must not attempt to unregister a UE that was never registered in the CG scheduler).
+TEST_F(cg_fallback_ue_test, when_crnti_ce_never_arrives_no_cg_grant_is_allocated_and_ue_is_removed_cleanly)
+{
+  add_fallback_crnti_ce_ue();
+
+  // Install the CG config while contention resolution is still pending: the CG scheduler registration is skipped.
+  install_cg_via_reconf();
+
+  // The C-RNTI CE never arrives: no CG PUSCH must be scheduled over several CG periods.
+  constexpr unsigned safety_margin = 10U;
+  for (unsigned i = 0; i != 3 * cg_params.period_slots + safety_margin; ++i) {
+    run_slot();
+    ASSERT_EQ(find_ue_pusch(cs_rnti, *last_sched_result()), nullptr)
+        << "CG PUSCH scheduled for a UE whose contention resolution never completed";
+  }
+
+  // Remove the UE while contention resolution is still pending and wait for the removal to complete.
+  schedule_task(launch_rem_ue_task(ue_idx));
+  run_until_all_pending_tasks_completion();
+
+  // After the removal, no CG PUSCH must appear either.
+  for (unsigned i = 0; i != cg_params.period_slots + safety_margin; ++i) {
+    run_slot();
+    ASSERT_EQ(find_ue_pusch(cs_rnti, *last_sched_result()), nullptr) << "CG PUSCH scheduled after the UE was removed";
+  }
 }

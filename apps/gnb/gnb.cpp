@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
+#include "apps/helpers/config/config_yaml_schema.h"
 #include "apps/helpers/e2/e2_config_translators.h"
 #include "apps/helpers/metrics/metrics_helpers.h"
 #include "apps/helpers/network/sctp_config_translators.h"
@@ -33,6 +34,7 @@
 #include "ocudu/adt/format.h"
 #include "ocudu/adt/scope_exit.h"
 #include "ocudu/cu_cp/cu_cp_operation_controller.h"
+#include "ocudu/cu_up/cu_up_operation_controller.h"
 #include "ocudu/du/du_high/du_high_clock_controller.h"
 #include "ocudu/du/du_operation_controller.h"
 #include "ocudu/e1ap/gateways/e1_local_connector_factory.h"
@@ -70,8 +72,8 @@ using namespace ocudu;
 /// \brief Application of a co-located gNB with combined distributed unit (DU) and centralized unit (CU).
 ///
 /// This application runs a gNB without the the F1 connection between CU and DU and without the E1 connection
-/// between the CU-CP and CU-UP going over a real SCTP connection. However, its does expose the N2 and N3 interface
-/// to the AMF and UPF over the standard SCTP ports.
+/// between the CU-CP and CU-UP going over a real SCTP connection. However, its does expose the NG-C (N2) and NG-U (N3)
+/// interface to the AMF and UPF over the standard SCTP ports.
 /// The app serves as an example for a all-integrated, small-cell-style gNB.
 
 static std::string config_file;
@@ -234,6 +236,12 @@ int main(int argc, char** argv)
   app.allow_config_extras(CLI::config_extras_mode::error);
   // Fill the generic application arguments to parse.
   populate_cli11_generic_args(app);
+
+  // Register the configuration-schema root so the add_* helpers capture the schema as options are declared. In the
+  // gNB the CU-CP, CU-UP and DU units all register into this one app; shared top-level sections (log, metrics, qos,
+  // ntn, ...) are merged into a single schema node, mirroring CLI11's merge-aware option handling.
+  config::schema_node config_schema_root{"OCUDU 5G gNB configuration"};
+  app_helpers::register_config_schema(app, config_schema_root, "gnb");
 
   gnb_appconfig gnb_cfg;
   // Configure CLI11 with the gNB application configuration schema.
@@ -419,12 +427,12 @@ int main(int argc, char** argv)
                             workers.get_trace_executor());
   }
 
-  // Create XN-C GWs. (TODO cleanup port and PPID args with factory)
+  // Create Xn-C GWs. (TODO cleanup port and PPID args with factory)
   cu_cp_unit_config cp_unit_cfg = o_cu_cp_app_unit->get_o_cu_cp_unit_config().cucp_cfg;
   std::vector<std::unique_ptr<ocucp::xnc_connection_gateway>> xnc_gws;
   for (const auto& gw_cfg : cp_unit_cfg.xnap_config.gateways) {
     sctp_network_gateway_config xnc_sctp_cfg = {};
-    xnc_sctp_cfg.if_name                     = "XN-C";
+    xnc_sctp_cfg.if_name                     = "Xn-C";
     xnc_sctp_cfg.non_blocking_mode           = true;
     xnc_sctp_cfg.bind_addresses              = gw_cfg.bind_addrs;
     fill_sctp_network_gateway_config_socket_params(xnc_sctp_cfg, gw_cfg.sctp);
@@ -521,17 +529,17 @@ int main(int argc, char** argv)
   }
 
   // Create O-CU-UP dependencies.
-  o_cu_up_unit_dependencies o_cuup_unit_deps;
-  o_cuup_unit_deps.workers = &workers;
-  o_cuup_unit_deps.e1ap_conn_client.push_back(e1_gw.get());
-  o_cuup_unit_deps.f1u_teid_allocator     = cu_f1u_teid_allocator.get();
-  o_cuup_unit_deps.f1u_gateway            = f1u_conn->get_f1u_cu_up_gateway();
-  o_cuup_unit_deps.gtpu_pcap              = cu_up_dlt_pcaps.n3.get();
-  o_cuup_unit_deps.timers                 = cu_timers;
-  o_cuup_unit_deps.io_brk                 = epoll_broker.get();
-  o_cuup_unit_deps.e2_gw                  = e2_gw_cu_up.get();
-  o_cuup_unit_deps.metrics_notifier       = &metrics_notifier_forwarder;
-  o_cuup_unit_deps.remote_metrics_gateway = remote_server_gateway;
+  std::vector<ocuup::e1_connection_client*> e1ap_conn_client({e1_gw.get()});
+  o_cu_up_unit_dependencies                 o_cuup_unit_deps{.workers                = workers,
+                                                             .e2_gw                  = *e2_gw_cu_up,
+                                                             .metrics_notifier       = metrics_notifier_forwarder,
+                                                             .remote_metrics_gateway = remote_server_gateway,
+                                                             .e1ap_conn_client       = std::move(e1ap_conn_client),
+                                                             .f1u_teid_allocator     = *cu_f1u_teid_allocator,
+                                                             .f1u_gateway = f1u_conn->get_f1u_cu_up_gateway(),
+                                                             .gtpu_pcap   = *cu_up_dlt_pcaps.ngu,
+                                                             .timers      = *cu_timers,
+                                                             .io_brk      = *epoll_broker};
 
   // Create O-CU-UP.
   auto            o_cuup_unit = o_cu_up_app_unit->create_o_cu_up_unit(o_cuup_unit_deps);
@@ -593,7 +601,7 @@ int main(int argc, char** argv)
   // Connect E1AP to O-CU-CP.
   e1_gw->attach_cu_cp(o_cucp_obj.get_cu_cp().get_e1_handler());
 
-  // Connect each XN-C gateway to O-CU-CP and start listening for new XN-C connection requests.
+  // Connect each Xn-C gateway to O-CU-CP and start listening for new Xn-C connection requests.
   for (auto& gw : xnc_gws) {
     gw->attach_cu_cp(o_cucp_obj.get_cu_cp().get_xnc_handler());
   }
@@ -603,13 +611,11 @@ int main(int argc, char** argv)
   o_cucp_obj.get_operation_controller().start();
   gnb_logger.info("CU-CP started successfully");
 
-  // Check connection to AMF.
-  if (not o_cucp_obj.get_cu_cp().get_ng_handler().amfs_are_connected()) {
-    report_error("CU-CP failed to connect to AMF");
-  }
+  // Note: An AMF that is not reachable on startup is reconnected to in the background.
 
   // Configure the remote commands and start the service.
   if (remote_control_server) {
+    remote_control_server->add_commands(o_cucp_unit.commands.remote);
     remote_control_server->add_commands(o_du_unit.commands.remote);
     remote_control_server->get_operation_controller().start();
   }

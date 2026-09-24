@@ -72,7 +72,7 @@ static asn1::rrc_nr::dl_cfg_common_sib_s make_asn1_rrc_dl_cfg_common_sib(const d
   for (const auto& dl_band : cfg.freq_info_dl.freq_band_list) {
     nr_multi_band_info_s asn1_band;
     asn1_band.freq_band_ind_nr_present = true;
-    asn1_band.freq_band_ind_nr         = nr_band_to_uint(dl_band.band);
+    asn1_band.freq_band_ind_nr         = to_underlying(dl_band.band);
     out.freq_info_dl.freq_band_list.push_back(asn1_band);
   }
   out.freq_info_dl.offset_to_point_a = cfg.freq_info_dl.offset_to_point_a;
@@ -219,7 +219,7 @@ static asn1::rrc_nr::ul_cfg_common_sib_s make_asn1_rrc_ul_config_common(const ul
   for (const auto& ul_band : cfg.freq_info_ul.freq_band_list) {
     nr_multi_band_info_s asn1_band;
     asn1_band.freq_band_ind_nr_present = true;
-    asn1_band.freq_band_ind_nr         = nr_band_to_uint(ul_band.band);
+    asn1_band.freq_band_ind_nr         = to_underlying(ul_band.band);
     out.freq_info_ul.freq_band_list.push_back(asn1_band);
   }
   out.freq_info_ul.absolute_freq_point_a_present = true;
@@ -253,32 +253,31 @@ static asn1::rrc_nr::serving_cell_cfg_common_sib_s make_asn1_rrc_cell_serving_ce
   cell.ul_cfg_common         = make_asn1_rrc_ul_config_common(du_cfg.ran.ul_cfg_common);
 
   // SSB params.
+  const ssb_bitmap_t ssb_bitmap = du_cfg.ran.ssb_cfg.ssb_beams.get_ssb_bitmap();
   if (frequency_range::FR2 == band_helper::get_freq_range(du_cfg.ran.dl_carrier.band)) {
     // Populate FR2 SSB params based on TS 38.331 section 6.3.2 IE "ServingCellConfigCommonSIB".
     constexpr unsigned nof_bits_group = 8U;
 
     // We assume the SSB bitmap has been checked in the validator.
     for (size_t i = 0; i != nof_bits_group; ++i) {
-      constexpr unsigned nof_groups = 8U;
-      const bool         i_th_ssb_group_has_non_zero_elems =
-          du_cfg.ran.ssb_cfg.ssb_bitmap.extract(i * nof_bits_group, nof_bits_group) != 0U;
+      constexpr unsigned nof_groups                = 8U;
+      const bool i_th_ssb_group_has_non_zero_elems = ssb_bitmap.extract(i * nof_bits_group, nof_bits_group) != 0U;
       cell.ssb_positions_in_burst.group_presence.set(nof_groups - i - 1, i_th_ssb_group_has_non_zero_elems);
     }
 
-    cell.ssb_positions_in_burst.in_one_group.from_number(du_cfg.ran.ssb_cfg.ssb_bitmap.extract(0U, 8U));
+    cell.ssb_positions_in_burst.in_one_group.from_number(ssb_bitmap.extract(0U, 8U));
     cell.ssb_positions_in_burst.group_presence_present = true;
   } else {
     // As per \c inOneGroup, \c ssb-PositionsInBurst, \c ServingCellConfigCommonSIB, TS 38.331, maximum number of
     // SS/PBCH blocks per half frame (i.e., L_max) equals to 4, only 4 left-most bits are valid; if L_max = 8, then all
     // 8 bits are valid.
-    ocudu_assert(du_cfg.ran.ssb_cfg.ssb_bitmap.get_L_max() == 4U or du_cfg.ran.ssb_cfg.ssb_bitmap.get_L_max() == 8U,
+    ocudu_assert(ssb_bitmap.get_L_max() == 4U or ssb_bitmap.get_L_max() == 8U,
                  "For FR1, only L_max = 4 and 8 are supported");
-    cell.ssb_positions_in_burst.in_one_group.from_number(
-        du_cfg.ran.ssb_cfg.ssb_bitmap.extract<uint64_t>(0U, du_cfg.ran.ssb_cfg.ssb_bitmap.get_L_max())
-        << (8U - du_cfg.ran.ssb_cfg.ssb_bitmap.get_L_max()));
+    cell.ssb_positions_in_burst.in_one_group.from_number(ssb_bitmap.extract<uint64_t>(0U, ssb_bitmap.get_L_max())
+                                                         << (8U - ssb_bitmap.get_L_max()));
   }
 
-  asn1::number_to_enum(cell.ssb_periodicity_serving_cell, to_value(du_cfg.ran.ssb_cfg.ssb_period));
+  asn1::number_to_enum(cell.ssb_periodicity_serving_cell, to_underlying(du_cfg.ran.ssb_cfg.ssb_period));
   cell.ss_pbch_block_pwr = du_cfg.ran.ssb_cfg.ssb_block_power;
 
   switch (du_cfg.ran.ta_offset) {
@@ -329,18 +328,49 @@ static asn1::rrc_nr::plmn_id_s make_asn1_plmn_id(const plmn_identity& plmn)
   return asn1_plmn;
 }
 
-static asn1::rrc_nr::plmn_id_info_s
-make_asn1_plmn_id_info(const plmn_identity& plmn, const tac_t& tac, const nr_cell_identity& nci)
+static asn1::rrc_nr::plmn_id_info_s make_asn1_plmn_id_info(const plmn_identity&    plmn,
+                                                           const tac_t&            tac,
+                                                           span<const tac_t>       tac_list,
+                                                           const nr_cell_identity& nci)
 {
   using namespace asn1::rrc_nr;
 
   plmn_id_info_s asn1_plmn_info;
   asn1_plmn_info.plmn_id_list.push_back(make_asn1_plmn_id(plmn));
-  asn1_plmn_info.tac_present = true;
-  asn1_plmn_info.tac.from_number(tac);
+  if (tac_list.empty()) {
+    asn1_plmn_info.tac_present = true;
+    asn1_plmn_info.tac.from_number(tac);
+  } else {
+    // NTN cells only. TS 38.331: trackingAreaList replaces trackingAreaCode; leave tac absent.
+    asn1_plmn_info.tac_present = false;
+    // The field sits in an extension group, only packed when the extension marker is set.
+    asn1_plmn_info.ext = true;
+    asn1_plmn_info.tracking_area_list_r17.set_present();
+    for (tac_t entry : tac_list) {
+      asn1::fixed_bitstring<24> asn1_tac;
+      asn1_tac.from_number(entry);
+      asn1_plmn_info.tracking_area_list_r17->push_back(asn1_tac);
+    }
+  }
   asn1_plmn_info.cell_id.from_number(nci.value());
   asn1_plmn_info.cell_reserved_for_oper.value = plmn_id_info_s::cell_reserved_for_oper_opts::not_reserved;
   return asn1_plmn_info;
+}
+
+/// Whether an SI message only carries a warning, and is therefore no part of the normal operation.
+static bool carries_warning(const si_message_sched_info& si_msg)
+{
+  return std::any_of(
+      si_msg.sib_mapping_info.begin(), si_msg.sib_mapping_info.end(), [](sib_type sib) { return is_pws_sib(sib); });
+}
+
+/// Content configured for a SIB, or nullptr if the cell has none.
+static const sib_type_info* find_sib_content(const si_scheduling_info_config& si_cfg, sib_type sib)
+{
+  const auto it = std::find_if(si_cfg.sibs.begin(), si_cfg.sibs.end(), [sib](const sib_type_info& entry) {
+    return get_sib_info_type(entry.content) == sib;
+  });
+  return it != si_cfg.sibs.end() ? &*it : nullptr;
 }
 
 static asn1::rrc_nr::sib1_s make_asn1_rrc_cell_sib1(const du_cell_config& du_cfg)
@@ -355,7 +385,8 @@ static asn1::rrc_nr::sib1_s make_asn1_rrc_cell_sib1(const du_cell_config& du_cfg
   sib1.cell_sel_info.q_qual_min         = du_cfg.si.cell_sel_info.q_qual_min.value();
 
   auto& asn1_plmn_id_info_list = sib1.cell_access_related_info.plmn_id_info_list;
-  asn1_plmn_id_info_list.push_back(make_asn1_plmn_id_info(du_cfg.nr_cgi.plmn_id, du_cfg.tac, du_cfg.nr_cgi.nci));
+  asn1_plmn_id_info_list.push_back(
+      make_asn1_plmn_id_info(du_cfg.nr_cgi.plmn_id, du_cfg.tac, du_cfg.tac_list, du_cfg.nr_cgi.nci));
   for (auto& add_plmn : du_cfg.si.cell_acc_rel_info.additional_plmns) {
     asn1_plmn_id_info_list[0].plmn_id_list.push_back(make_asn1_plmn_id(add_plmn));
   }
@@ -379,21 +410,21 @@ static asn1::rrc_nr::sib1_s make_asn1_rrc_cell_sib1(const du_cell_config& du_cfg
       }
     }
 
-    // Populate the SI Scheduling info list.
+    // Populate the SI Scheduling info list. The SI messages that carry a warning are left out: the MAC lists one only
+    // while its warning is on air.
     if (!du_cfg.si.si_config->si_sched_info.empty()) {
       bool ret = asn1::number_to_enum(sib1.si_sched_info.si_win_len, du_cfg.si.si_config.value().si_window_len_slots);
       ocudu_assert(ret, "Invalid SI window length");
 
       // For each SI message in the configuration...
       for (const auto& cfg_si : du_cfg.si.si_config->si_sched_info) {
-        // Prepare a SchedulingInfo element. This holds information for an SI message carrying SIBs 2, 6, 7 or 8.
-        // Note: a PWS SI message is only broadcast while a warning is on air, which the MAC signals by repacking this
-        // payload with its si-BroadcastStatus set to broadcasting. Listing it as broadcasting here would advertise a
-        // warning that is not being transmitted.
+        if (carries_warning(cfg_si)) {
+          // The SI messages that carry a warning have parameters of their own, and are listed further down.
+          continue;
+        }
+        // Prepare a SchedulingInfo element.
         sched_info_s asn1_si;
-        asn1_si.si_broadcast_status.value = cfg_si.requires_activation()
-                                                ? sched_info_s::si_broadcast_status_opts::not_broadcasting
-                                                : sched_info_s::si_broadcast_status_opts::broadcasting;
+        asn1_si.si_broadcast_status.value = sched_info_s::si_broadcast_status_opts::broadcasting;
         ret                               = asn1::number_to_enum(asn1_si.si_periodicity, cfg_si.si_period_radio_frames);
         ocudu_assert(ret, "Invalid SI period");
 
@@ -413,8 +444,8 @@ static asn1::rrc_nr::sib1_s make_asn1_rrc_cell_sib1(const du_cell_config& du_cfg
               du_cfg.si.si_config->sibs.begin(),
               du_cfg.si.si_config->sibs.end(),
               [mapping_info](const sib_type_info& sib) { return get_sib_info_type(sib.content) == mapping_info; });
-          if (matching_sib == du_cfg.si.si_config->sibs.end() and not is_pws_sib(mapping_info)) {
-            // No content configured for this SIB and is not a dormant SIB (e.g. PWS).
+          if (matching_sib == du_cfg.si.si_config->sibs.end()) {
+            // No content configured for this SIB.
             continue;
           }
 
@@ -422,16 +453,11 @@ static asn1::rrc_nr::sib1_s make_asn1_rrc_cell_sib1(const du_cell_config& du_cfg
             case sib_type::sib2:
             case sib_type::sib3:
             case sib_type::sib4:
-            case sib_type::sib5:
-            case sib_type::sib6:
-            case sib_type::sib7:
-            case sib_type::sib8: {
-              // Append the SIB type to the schedulingInfo element. A dormant, unconfigured PWS SIB (SIB6/7/8) has no
-              // matching content entry and, therefore, no value tag. However, it is still advertised so the UE knows to
-              // look for it once a Write-Replace Warning activates it.
+            case sib_type::sib5: {
+              // Append the SIB type to the schedulingInfo element.
               sib_type_info_s type_info;
               ret = asn1::number_to_enum(type_info.type, sib_id);
-              if (matching_sib != du_cfg.si.si_config->sibs.end() and matching_sib->value_tag.valid()) {
+              if (matching_sib->value_tag.valid()) {
                 type_info.value_tag_present = true;
                 type_info.value_tag         = matching_sib->value_tag.value();
               }
@@ -463,7 +489,7 @@ static asn1::rrc_nr::sib1_s make_asn1_rrc_cell_sib1(const du_cell_config& du_cfg
             case sib_type::sib1:
             case sib_type::sib_invalid:
             default:
-              ocudu_assertion_failure("Invalid SIB type (i.e., {}) for an SI message", fmt::underlying(mapping_info));
+              ocudu_assertion_failure("Invalid SIB type (i.e., {}) for an SI message", mapping_info);
           }
         }
 
@@ -1026,6 +1052,10 @@ asn1_packer::pack_all_bcch_dl_sch_msgs(const du_cell_config& du_cfg, std::vector
     const auto& sibs = du_cfg.si.si_config.value().sibs;
 
     for (const auto& si_sched : du_cfg.si.si_config.value().si_sched_info) {
+      if (carries_warning(si_sched)) {
+        // The content of an SI message that carries a warning is packed by pack_pws_si_messages.
+        continue;
+      }
       // Pack SI messages that contain multiple SIBs.
       if (si_sched.sib_mapping_info.size() > 1) {
         asn1::rrc_nr::bcch_dl_sch_msg_s msg;
@@ -1039,8 +1069,7 @@ asn1_packer::pack_all_bcch_dl_sch_msgs(const du_cell_config& du_cfg, std::vector
           auto it = std::find_if(sibs.begin(), sibs.end(), [sib_id](const sib_type_info& sib) {
             return get_sib_info_type(sib.content) == sib_id;
           });
-          ocudu_assert(
-              it != sibs.end(), "SIB{} in SIB mapping info has no defined config", static_cast<unsigned>(sib_id));
+          ocudu_assert(it != sibs.end(), "SIB{} in SIB mapping info has no defined config", sib_id);
 
           // Obtain the SIB and make sure it does not hold a segmented message.
           auto sib = make_asn1_rrc_sib_item(it->content);
@@ -1063,22 +1092,7 @@ asn1_packer::pack_all_bcch_dl_sch_msgs(const du_cell_config& du_cfg, std::vector
           return get_sib_info_type(sib.content) == sib_id;
         });
 
-        if (it == sibs.end()) {
-          // Dormant SIB6/7/8 SI-message with no explicitly configured (testing-only) content.
-          // Use a trivial placeholder instead of ASN.1/CBS-encoding anything.
-          ocudu_assert(is_pws_sib(sib_id) and not si_sched.auto_broadcast,
-                       "SIB{} in SIB mapping info has no defined config",
-                       static_cast<unsigned>(sib_id));
-
-          bcch_dl_sch_payload_type packed_sib(1);
-          packed_sib.front() = byte_buffer::create({0x00}).value();
-          msgs.emplace_back(std::move(packed_sib));
-
-          if (bcch_dl_sch_json_msgs != nullptr) {
-            bcch_dl_sch_json_msgs->emplace_back("\"dormant PWS placeholder\"");
-          }
-          continue;
-        }
+        ocudu_assert(it != sibs.end(), "SIB{} in SIB mapping info has no defined config", sib_id);
 
         // Buffer to hold the packed message. It may be necessary to store multiple SI messages (one for each segment).
         bcch_dl_sch_payload_type packed_sib;
@@ -1111,6 +1125,27 @@ asn1_packer::pack_all_bcch_dl_sch_msgs(const du_cell_config& du_cfg, std::vector
   if (bcch_dl_sch_json_msgs != nullptr) {
     ocudu_assert(bcch_dl_sch_json_msgs->size() == msgs.size(),
                  "Unexpected mismatch between packed BCCH-DL-SCH and JSON lists");
+  }
+
+  return msgs;
+}
+
+std::vector<bcch_dl_sch_payload_type> asn1_packer::pack_pws_si_messages(const du_cell_config& du_cfg)
+{
+  std::vector<bcch_dl_sch_payload_type> msgs;
+  if (not du_cfg.si.si_config.has_value()) {
+    return msgs;
+  }
+
+  for (const pws_si_message_config& pws_si_msg : du_cfg.si.si_config->pws_si_messages) {
+    bcch_dl_sch_payload_type packed_sib;
+    // A cell with no content configured for a warning stays silent until a Write-Replace Warning provides it.
+    if (const sib_type_info* content = find_sib_content(*du_cfg.si.si_config, pws_si_msg.sib)) {
+      for (const auto& sib : make_asn1_rrc_sib_item(content->content)) {
+        pack_si_message(packed_sib, sib);
+      }
+    }
+    msgs.push_back(std::move(packed_sib));
   }
 
   return msgs;

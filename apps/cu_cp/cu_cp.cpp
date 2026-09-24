@@ -3,6 +3,7 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "apps/cu_cp/cu_cp_appconfig_cli11_schema.h"
+#include "apps/helpers/config/config_yaml_schema.h"
 #include "apps/helpers/e2/e2_config_translators.h"
 #include "apps/helpers/f1/f1_gateway_helpers.h"
 #include "apps/helpers/metrics/metrics_helpers.h"
@@ -170,6 +171,10 @@ int main(int argc, char** argv)
   // Fill the generic application arguments to parse.
   populate_cli11_generic_args(app);
 
+  // Register the configuration-schema root so the add_* helpers capture the schema as options are declared.
+  config::schema_node config_schema_root{"OCUDU 5G CU-CP configuration"};
+  app_helpers::register_config_schema(app, config_schema_root, "cu-cp");
+
   // Configure CLI11 with the CU application configuration schema.
   cu_cp_appconfig cu_cp_cfg;
   configure_cli11_with_cu_cp_appconfig_schema(app, cu_cp_cfg);
@@ -294,12 +299,12 @@ int main(int argc, char** argv)
       o_cu_cp_app_unit->get_o_cu_cp_unit_config(), workers.get_cu_cp_pcap_executors(), cleanup_signal_dispatcher);
   auto on_pcap_close_init = make_scope_exit([&cu_cp_logger]() { cu_cp_logger.info("Closing PCAP files..."); });
 
-  // Create XN-C GWs. (TODO cleanup port and PPID args with factory)
+  // Create Xn-C GWs. (TODO cleanup port and PPID args with factory)
   cu_cp_unit_config cp_unit_cfg = o_cu_cp_app_unit->get_o_cu_cp_unit_config().cucp_cfg;
   std::vector<std::unique_ptr<ocucp::xnc_connection_gateway>> xnc_gws;
   for (const auto& gw_cfg : cp_unit_cfg.xnap_config.gateways) {
     sctp_network_gateway_config xnc_sctp_cfg = {};
-    xnc_sctp_cfg.if_name                     = "XN-C";
+    xnc_sctp_cfg.if_name                     = "Xn-C";
     xnc_sctp_cfg.non_blocking_mode           = true;
     xnc_sctp_cfg.bind_addresses              = gw_cfg.bind_addrs;
     fill_sctp_network_gateway_config_socket_params(xnc_sctp_cfg, gw_cfg.sctp);
@@ -401,7 +406,7 @@ int main(int argc, char** argv)
   // Connect E1AP to O-CU-CP.
   e1_gw->attach_cu_cp(o_cucp_obj.get_cu_cp().get_e1_handler());
 
-  // Connect each XN-C gateway to O-CU-CP and start listening for new XN-C connection requests.
+  // Connect each Xn-C gateway to O-CU-CP and start listening for new Xn-C connection requests.
   for (auto& gw : xnc_gws) {
     gw->attach_cu_cp(o_cucp_obj.get_cu_cp().get_xnc_handler());
   }
@@ -411,13 +416,11 @@ int main(int argc, char** argv)
   o_cucp_obj.get_operation_controller().start();
   cu_cp_logger.info("CU-CP started successfully");
 
-  // Check connection to AMF.
-  if (not o_cucp_obj.get_cu_cp().get_ng_handler().amfs_are_connected()) {
-    report_error("CU-CP failed to connect to AMF");
-  }
+  // Note: An AMF that is not reachable on startup is reconnected to in the background.
 
   // Configure the remote commands and start the service.
   if (remote_control_server) {
+    remote_control_server->add_commands(o_cucp_unit.commands.remote);
     remote_control_server->get_operation_controller().start();
   }
 

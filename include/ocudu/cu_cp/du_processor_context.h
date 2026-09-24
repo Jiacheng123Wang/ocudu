@@ -25,8 +25,12 @@ struct du_cell_configuration {
   du_cell_index_t cell_index = INVALID_DU_CELL_INDEX;
   /// Global cell ID.
   nr_cell_global_id_t cgi;
-  /// Tracking Area Code
-  tac_t tac;
+  /// Tracking Area Code. Invalid if the gNB-DU did not provide the 5GS TAC of the cell.
+  tac_t tac = INVALID_TAC;
+  /// \brief TACs the cell broadcasts in \c trackingAreaList, TS 38.331. Empty unless several.
+  ///
+  /// Read back from the gNB-DU's SIB1, so it matches what the cell broadcasts, in broadcast order.
+  tac_list_t tac_list;
   /// Physical cell ID
   pci_t pci;
   /// PLMN identitys served by the cell.

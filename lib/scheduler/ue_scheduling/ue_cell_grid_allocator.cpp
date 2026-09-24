@@ -85,8 +85,7 @@ ue_cell_grid_allocator::alloc_dl_pdcch(const ue_cell& ue_cc, const search_space_
   pdcch_dl_information*         pdcch =
       pdcch_sched.alloc_dl_pdcch_ue(pdcch_alloc, crnti, ue_cc.cfg(), ss_info.cfg->get_id(), aggr_lvl);
   if (pdcch == nullptr) {
-    logger.info(
-        "ue={} rnti={}: Failed to allocate PDSCH. Cause: No space in PDCCH.", fmt::underlying(ue_cc.ue_index), crnti);
+    logger.info("ue={} rnti={}: Failed to allocate PDSCH. Cause: No space in PDCCH.", ue_cc.ue_index, crnti);
     // Note: (Implementation-defined) Assuming all UEs share the same CORESET, if there are no more CCEs left in the
     // CORESET, stop attempting to allocate new PDCCHs in the slot.
     unsigned nof_cces_left = ss_info.coreset->cfg().get_nof_cces();
@@ -111,19 +110,18 @@ std::optional<uci_allocation> ue_cell_grid_allocator::alloc_uci(const ue_cell&  
       ss_info.bwp->dl.td_mapper().pdsch_td_resources(ss_info.get_dl_dci_format())[pdsch_td_res_index];
 
   // Allocate UCI. UCI destination (i.e., PUCCH or PUSCH) depends on whether there exist a PUSCH grant for the UE.
-  // NOTE: With PDSCH repetitions, the UE counts k1 from the last repetition occasion, so the UCI is booked relative
+  // NOTE: With PDSCH repetitions, the UE counts k1 from the last transmitted occasion, so the UCI is booked relative
   // to that slot.
   const slot_point    last_pdsch_slot = cell_alloc[pdsch_td_cfg.k0 + last_occasion_offset].slot;
   span<const uint8_t> k1_list =
       cell_alloc.cfg.init_bwp.ul.td_mapper().k1_candidates(ss_info.get_dl_dci_format(), last_pdsch_slot.count());
 
   const pucch_repetition_factor max_rep_factor = ue_cc.link_adaptation_controller().get_recommended_pucch_rep_factor();
-  std::optional<uci_allocation> uci            = uci_alloc.alloc_harq_ack(
-      cell_alloc, ue_cc.cfg(), pdsch_td_cfg.k0 + last_occasion_offset, k1_list, max_rep_factor);
+  std::optional<uci_allocation> uci =
+      uci_alloc.alloc_harq_ack(cell_alloc, ue_cc, pdsch_td_cfg.k0 + last_occasion_offset, k1_list, max_rep_factor);
   if (not uci.has_value()) {
-    logger.debug("ue={} rnti={}: Failed to allocate PDSCH. Cause: UCI allocation failed.",
-                 fmt::underlying(ue_cc.ue_index),
-                 ue_cc.rnti());
+    logger.debug(
+        "ue={} rnti={}: Failed to allocate PDSCH. Cause: UCI allocation failed.", ue_cc.ue_index, ue_cc.rnti());
   }
   return uci;
 }
@@ -205,7 +203,7 @@ ue_cell_grid_allocator::select_pdsch_repetitions(const ue_cell&           ue_cc,
     if (cell_alloc[td_res.k0 + i].result.dl.ue_grants.full()) {
       if (logger.debug.enabled()) {
         logger.debug("ue={} rnti={}: PDSCH repetition deferred at slot={}. Cause: occasion slot={} is full.",
-                     fmt::underlying(ue_cc.ue_index),
+                     ue_cc.ue_index,
                      ue_cc.rnti(),
                      pdsch_slot,
                      pdsch_slot + i);
@@ -220,7 +218,7 @@ ue_cell_grid_allocator::select_pdsch_repetitions(const ue_cell&           ue_cc,
   if (reps.tx_offsets.empty() or reps.tx_offsets.front() != 1) {
     if (logger.debug.enabled()) {
       logger.debug("ue={} rnti={}: PDSCH allocation deferred at slot={}. Cause: less than 2 slots to the special slot.",
-                   fmt::underlying(ue_cc.ue_index),
+                   ue_cc.ue_index,
                    ue_cc.rnti(),
                    pdsch_slot);
     }
@@ -236,11 +234,14 @@ ue_cell_grid_allocator::setup_dl_grant_builder(const slice_ue&                  
                                                std::optional<dl_harq_process_handle> h_dl,
                                                std::optional<dl_repetition_info>     reps) const
 {
-  const bool            is_retx              = h_dl.has_value();
-  const search_space_id ss_id                = params.ss_id;
-  const uint8_t         pdsch_td_res_index   = params.pdsch_td_res_index;
-  const uint8_t         nof_repetitions      = reps.has_value() ? reps->nof_occasions : uint8_t{1};
-  const unsigned        last_occasion_offset = nof_repetitions - 1U;
+  const bool            is_retx            = h_dl.has_value();
+  const search_space_id ss_id              = params.ss_id;
+  const uint8_t         pdsch_td_res_index = params.pdsch_td_res_index;
+  const uint8_t         nof_repetitions    = reps.has_value() ? reps->nof_occasions : uint8_t{1};
+  // The UE counts k1 from the DL slot where the PDSCH reception ends (TS 38.213, 9.2.3). Occasions dropped because
+  // their slot cannot carry the PDSCH symbols are not received at all (TS 38.213, 11.1), so the reference is the last
+  // transmitted occasion, not the last slot of the nominal repetition window.
+  const unsigned last_occasion_offset = reps.has_value() ? reps->tx_offsets.back() : 0U;
 
   // Derive remaining parameters from \c dl_grant_params.
   ue&                                          u           = ues[user.ue_index()];
@@ -292,14 +293,14 @@ ue_cell_grid_allocator::setup_dl_grant_builder(const slice_ue&                  
   pdcch->ctx.context.harq_feedback_timing = k1;
 
   // Both delays are counted from \c pdsch_alloc.slot, the first PDSCH occasion. With PDSCH repetitions, the UE counts
-  // k1 from the last repetition occasion, so \c last_occasion_offset must be added on top.
+  // k1 from the last transmitted occasion, so \c last_occasion_offset must be added on top.
   // In the case of a multi-slot PUCCH repetition burst, the HARQ-ACK feedback can only be considered lost once the
   // last repetition has been transmitted.
   const unsigned ack_delay      = last_occasion_offset + k1 + ue_cell_cfg.cell_cfg_common.ntn_cs_koffset;
   const unsigned last_ack_delay = last_occasion_offset + uci.k1_last_rep + ue_cell_cfg.cell_cfg_common.ntn_cs_koffset;
 
   // Allocate UE DL HARQ.
-  // NOTE: With PDSCH repetitions, the HARQ-ACK is expected k1 slots after the last repetition occasion.
+  // NOTE: With PDSCH repetitions, the HARQ-ACK is expected k1 slots after the last transmitted occasion.
   if (not is_retx) {
     // It is a new tx.
     h_dl = ue_cc.harqs
@@ -381,7 +382,7 @@ ue_cell_grid_allocator::set_pdsch_params(dl_grant_info&                        g
 
       logger.warning("ue={} rnti={}: Failed to derive MCS for PDSCH. Cause: no MCS such that code rate <= 0.95 with "
                      "provided configuration",
-                     fmt::underlying(u.ue_index),
+                     u.ue_index,
                      u.crnti);
     }
     mcs_tbs_info = mcs_or_error.value_or(sch_mcs_tbs{sch_mcs_index{0}, units::bytes{0}});
@@ -393,8 +394,8 @@ ue_cell_grid_allocator::set_pdsch_params(dl_grant_info&                        g
     pdsch_alloc.dl_res_grid.fill(grant_info{scs, pdsch_td_cfg.symbols, crbs.second});
   }
 
-  // Compute TPC for PUCCH. With PDSCH repetitions, the PUCCH takes place k1 slots after the last occasion.
-  const unsigned last_occasion_offset = grant.reps.has_value() ? grant.reps->nof_occasions - 1 : 0;
+  // Compute TPC for PUCCH. With PDSCH repetitions, the PUCCH takes place k1 slots after the last transmitted occasion.
+  const unsigned last_occasion_offset = grant.reps.has_value() ? grant.reps->tx_offsets.back() : 0U;
   const uint8_t  tpc                  = ue_cc.get_pucch_power_controller().compute_tpc_command(
       pdsch_alloc.slot + last_occasion_offset + k1 + ue_cell_cfg.cell_cfg_common.ntn_cs_koffset);
 
@@ -531,7 +532,7 @@ ue_cell_grid_allocator::set_pdsch_params(dl_grant_info&                        g
           rep_alloc.dl_res_grid.collides(scs, pdsch_td_cfg.symbols, crbs.first) or
           (not crbs.second.empty() and rep_alloc.dl_res_grid.collides(scs, pdsch_td_cfg.symbols, crbs.second))) {
         logger.warning("ue={} rnti={}: Skipping PDSCH repetition occasion at slot={}. Cause: No space in the grid.",
-                       fmt::underlying(u.ue_index),
+                       u.ue_index,
                        u.crnti,
                        rep_alloc.slot);
         continue;
@@ -710,7 +711,7 @@ ue_cell_grid_allocator::setup_ul_grant_builder(const slice_ue&                  
   if (uci_alloc.has_harq_ack_on_common_pucch_res(u.crnti, pusch_alloc.slot)) {
     logger.debug("ue={} rnti={}: Failed to allocate PUSCH in slot={}. Cause: UE has PUCCH grant using common PUCCH "
                  "resources scheduled",
-                 fmt::underlying(u.ue_index),
+                 u.ue_index,
                  u.crnti,
                  pusch_alloc.slot);
     return make_unexpected(alloc_status::skip_ue);
@@ -723,7 +724,7 @@ ue_cell_grid_allocator::setup_ul_grant_builder(const slice_ue&                  
   if (uci_alloc.has_pucch_repetition(u.crnti, pusch_alloc.slot)) {
     logger.debug("ue={} rnti={}: Failed to allocate PUSCH in slot={}. Cause: slot is part of a PUCCH repetition burst "
                  "of this UE",
-                 fmt::underlying(u.ue_index),
+                 u.ue_index,
                  u.crnti,
                  pusch_alloc.slot);
     return make_unexpected(alloc_status::skip_ue);
@@ -735,8 +736,7 @@ ue_cell_grid_allocator::setup_ul_grant_builder(const slice_ue&                  
   pdcch_ul_information* pdcch =
       pdcch_sched.alloc_ul_pdcch_ue(pdcch_alloc, u.crnti, ue_cell_cfg, ss_cfg.get_id(), aggr_lvl);
   if (pdcch == nullptr) {
-    logger.info(
-        "ue={} rnti={}: Failed to allocate PUSCH. Cause: No space in PDCCH.", fmt::underlying(u.ue_index), u.crnti);
+    logger.info("ue={} rnti={}: Failed to allocate PUSCH. Cause: No space in PDCCH.", u.ue_index, u.crnti);
     // Note: (Implementation-defined) Assuming all UEs share the same CORESET, if there are no more CCEs left in the
     // CORESET, stop attempting to allocate new PDCCHs in the slot.
     unsigned nof_cces_left = ss_info.coreset->cfg().get_nof_cces();
@@ -834,7 +834,7 @@ void ue_cell_grid_allocator::set_pusch_params(ul_grant_info& grant, const vrb_in
           "ue={} rnti={}: Failed to allocate PUSCH. Cause: {} with this "
           "configuration: mcs={} vrbs={} symbols={} nof_oh={} tb-sc-field={} layers={} pi2bpsk={} "
           "harq_bits={} csi1_bits={} csi2_bits={} mcs_table_idx={} dmrs_A_pos={} is_dmrs_type2={} dmrs_add_pos_idx={}",
-          fmt::underlying(u.ue_index),
+          u.ue_index,
           u.crnti,
           to_string(mcs_tbs_info.error()),
           grant.cfg.recommended_mcs,

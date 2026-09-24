@@ -48,6 +48,12 @@ static mac_cell_creation_request make_mac_cell_config(du_cell_index_t           
       copied_msg.push_back(segment.copy());
     }
   }
+  for (const auto& msg : sys_info.pws_si_messages) {
+    auto& copied_msg = mac_cfg.sys_info.pws_si_messages.emplace_back();
+    for (const byte_buffer& segment : msg) {
+      copied_msg.push_back(segment.copy());
+    }
+  }
   mac_cfg.sys_info.sib1_contains_hypersfn = sys_info.sib1_contains_hypersfn;
   mac_cfg.sys_info.si_sched_cfg           = sys_info.si_sched_cfg;
   mac_cfg.sched_req                       = sched_cell_cfg;
@@ -231,7 +237,7 @@ async_task<f1_setup_result> du_setup_procedure::start_f1_setup_request()
       ctxt.logger.info(serv_cell.du_sys_info.packed_sib1.begin(),
                        serv_cell.du_sys_info.packed_sib1.end(),
                        "SIB1 cell={}: {}",
-                       fmt::underlying(to_du_cell_index(i)),
+                       to_du_cell_index(i),
                        js_str);
 
       log_cell_si_messages(

@@ -160,7 +160,7 @@ TEST_P(PdschProcessorFixture, UnitTest)
   unsigned nof_layers_cw2 = nof_layers - nof_layers_cw1;
 
   // The precoding configuration in the PDSCH processor PDU is the combination of both codewords.
-  pdu.precoding = precoding_configuration::make_wideband(make_identity(nof_layers));
+  pdu.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(make_identity(nof_layers));
 
   // Generate reserved element pattern for DM-RS.
   re_pattern dmrs_reserved_pattern = get_dmrs_pattern(
@@ -252,7 +252,7 @@ TEST_P(PdschProcessorFixture, UnitTest)
     ASSERT_EQ(entry.config.n_id, pdu.n_id);
     ASSERT_NEAR(entry.config.scaling, convert_dB_to_amplitude(-pdu.ratio_pdsch_data_to_sss_dB), amplitude_max_error);
     ASSERT_EQ(entry.config.reserved, pdu.reserved);
-    ASSERT_EQ(entry.config.precoding.get(), pdu.precoding);
+    ASSERT_EQ(entry.config.precoding_and_beamforming.get(), pdu.precoding_and_beamforming);
 
     ASSERT_EQ(entry.grid, &rg_dummy.get_writer());
     for (unsigned codeword = 0; codeword != nof_codewords; ++codeword) {
@@ -278,7 +278,7 @@ TEST_P(PdschProcessorFixture, UnitTest)
     ASSERT_NEAR(entry.config.amplitude, convert_dB_to_amplitude(-pdu.ratio_pdsch_dmrs_to_sss_dB), amplitude_max_error);
     ASSERT_EQ(entry.config.symbols_mask, pdu.dmrs_symbol_mask);
     ASSERT_EQ(entry.config.rb_mask, rb_mask);
-    ASSERT_EQ(entry.config.precoding, pdu.precoding);
+    ASSERT_EQ(entry.config.precoding_and_beamforming, pdu.precoding_and_beamforming);
     ASSERT_EQ(entry.grid, &rg_dummy.get_writer());
   }
 

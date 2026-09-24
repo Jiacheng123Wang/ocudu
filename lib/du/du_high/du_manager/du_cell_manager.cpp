@@ -23,10 +23,21 @@ du_cell_manager::du_cell_manager(const du_manager_params& cfg_) :
 {
 }
 
+/// Size of the largest segment of an SI message, 0 bytes if it carries no content.
+static units::bytes largest_segment_len(const bcch_dl_sch_payload_type& si_msg)
+{
+  size_t len = 0;
+  for (const byte_buffer& segment : si_msg) {
+    len = std::max(len, segment.length());
+  }
+  return units::bytes{static_cast<unsigned>(len)};
+}
+
 static void fill_si_scheduler_config(si_scheduling_config&                si_sched_cfg,
                                      const du_cell_config&                cell_cfg,
                                      const byte_buffer&                   sib1,
-                                     span<const bcch_dl_sch_payload_type> si_messages)
+                                     span<const bcch_dl_sch_payload_type> si_messages,
+                                     span<const bcch_dl_sch_payload_type> pws_si_messages)
 {
   const units::bytes                           sib1_len = units::bytes{static_cast<unsigned>(sib1.length())};
   static_vector<units::bytes, MAX_SI_MESSAGES> si_payload_sizes;
@@ -42,7 +53,12 @@ static void fill_si_scheduler_config(si_scheduling_config&                si_sch
     }
     si_payload_sizes.emplace_back(units::bytes{static_cast<unsigned>(si_msg_len)});
   }
-  si_sched_cfg = make_si_scheduling_info_config(cell_cfg, sib1_len, si_payload_sizes);
+  // A warning message may end in a shorter segment, so its grants are sized off the largest one.
+  static_vector<units::bytes, MAX_PWS_SI_MESSAGES> pws_payload_sizes;
+  for (const auto& pws_si_msg : pws_si_messages) {
+    pws_payload_sizes.emplace_back(largest_segment_len(pws_si_msg));
+  }
+  si_sched_cfg = make_si_scheduling_info_config(cell_cfg, sib1_len, si_payload_sizes, pws_payload_sizes);
 }
 
 void du_cell_manager::add_cell(const du_cell_config& cell_cfg)
@@ -69,10 +85,12 @@ void du_cell_manager::add_cell(const du_cell_config& cell_cfg)
   cell.live_barred      = cell_cfg.cell_barred;
   cell.si_cfg.sib1      = sib1.copy();
   cell.si_cfg.si_messages.assign(si_messages.begin(), si_messages.end());
+  std::vector<bcch_dl_sch_payload_type> pws_msgs = asn1_packer::pack_pws_si_messages(cell_cfg);
+  cell.si_cfg.pws_si_messages.assign(pws_msgs.begin(), pws_msgs.end());
   cell.si_cfg.sib1_contains_hypersfn = cell_cfg.ran.init_bwp.paging.edrx_enabled;
 
   // Generate Scheduler SI scheduling config.
-  fill_si_scheduler_config(cell.si_cfg.si_sched_cfg, cell_cfg, sib1, si_messages);
+  fill_si_scheduler_config(cell.si_cfg.si_sched_cfg, cell_cfg, sib1, si_messages, cell.si_cfg.pws_si_messages);
 }
 
 expected<du_cell_reconfig_result>
@@ -118,12 +136,9 @@ du_cell_manager::handle_cell_reconf_request(const du_cell_param_config_request& 
         // Increment value_tag with wrapping (5-bit field: 0-31).
         sib_it->value_tag = (sib_it->value_tag.value() + 1) % 32;
         si_updated        = true;
-        logger.info("Updated SIB{} in cell {} config, new value_tag={}",
-                    static_cast<int>(type),
-                    cell_index,
-                    sib_it->value_tag.value());
+        logger.info("Updated SIB{} in cell {} config, new value_tag={}", type, cell_index, sib_it->value_tag.value());
       } else {
-        logger.warning("Requested SIB{} update in cell {}, but entry not found.", static_cast<int>(type), cell_index);
+        logger.warning("Requested SIB{} update in cell {}, but entry not found.", type, cell_index);
       }
     }
   }
@@ -197,13 +212,17 @@ du_cell_manager::handle_cell_reconf_request(const du_cell_param_config_request& 
       span<const bcch_dl_sch_payload_type> si_messages =
           span<const bcch_dl_sch_payload_type>(bcch_msgs).last(bcch_msgs.size() - 1);
       cell.si_cfg.si_messages.assign(si_messages.begin(), si_messages.end());
+
+      std::vector<bcch_dl_sch_payload_type> pws_msgs = asn1_packer::pack_pws_si_messages(cell_cfg);
+      cell.si_cfg.pws_si_messages.assign(pws_msgs.begin(), pws_msgs.end());
     } else {
       // Only SSB power changed, repack only SIB1.
       cell.si_cfg.sib1 = asn1_packer::pack_sib1(cell_cfg);
     }
 
     // Update SI scheduling config. The SI version is owned by the MAC.
-    fill_si_scheduler_config(cell.si_cfg.si_sched_cfg, cell_cfg, cell.si_cfg.sib1, cell.si_cfg.si_messages);
+    fill_si_scheduler_config(
+        cell.si_cfg.si_sched_cfg, cell_cfg, cell.si_cfg.sib1, cell.si_cfg.si_messages, cell.si_cfg.pws_si_messages);
   }
 
   result.cell_index           = cell_index;
@@ -259,7 +278,7 @@ async_task<void> du_cell_manager::set_cell_barred(du_cell_index_t cell_index, bo
     CORO_BEGIN(ctx);
 
     if (!has_cell(cell_index)) {
-      logger.warning("cell={}: set_cell_barred called for a cell that does not exist.", fmt::underlying(cell_index));
+      logger.warning("cell={}: set_cell_barred called for a cell that does not exist.", cell_index);
       CORO_EARLY_RETURN();
     }
 
@@ -267,7 +286,7 @@ async_task<void> du_cell_manager::set_cell_barred(du_cell_index_t cell_index, bo
 
     cells[cell_index]->live_barred = barred;
 
-    logger.info("cell={}: MIB cellBarred set to {}", fmt::underlying(cell_index), barred);
+    logger.info("cell={}: MIB cellBarred set to {}", cell_index, barred);
 
     CORO_RETURN();
   });
@@ -276,8 +295,7 @@ async_task<void> du_cell_manager::set_cell_barred(du_cell_index_t cell_index, bo
 async_task<void> du_cell_manager::set_cell_barred_and_wait(du_cell_index_t cell_index) const
 {
   if (!has_cell(cell_index)) {
-    logger.warning("cell={}: set_cell_barred_and_wait called for a cell that does not exist.",
-                   fmt::underlying(cell_index));
+    logger.warning("cell={}: set_cell_barred_and_wait called for a cell that does not exist.", cell_index);
     return launch_no_op_task();
   }
 
@@ -288,15 +306,14 @@ async_task<void> du_cell_manager::set_cell_barred_and_wait(du_cell_index_t cell_
   // guarantees the barred MIB airs at least once before the stop that follows this call halts SSB.
   const bool already_barred = is_cell_barred(cell_index);
   if (already_barred) {
-    logger.debug("cell={}: cell already barred. Skipping re-bar and holding the settling window.",
-                 fmt::underlying(cell_index));
+    logger.debug("cell={}: cell already barred. Skipping re-bar and holding the settling window.", cell_index);
   }
 
   // Derive the settling window from the cell's configured SSB period: the barred MIB only needs to reach the
   // air before released/idle UEs reselect, so hold a couple of SSB periods to guarantee it is transmitted at
   // least once with margin. Meant to run concurrently with the UE drain, so it adds no latency in the common
   // case.
-  const unsigned                  ssb_period_ms = to_value(get_cell_cfg(cell_index).ran.ssb_cfg.ssb_period);
+  const unsigned                  ssb_period_ms = to_underlying(get_cell_cfg(cell_index).ran.ssb_cfg.ssb_period);
   const std::chrono::milliseconds bar_settling_window{2 * ssb_period_ms};
   unique_timer                    settling_timer = cfg.services.timers.create_unique_timer(cfg.services.du_mng_exec);
 

@@ -350,7 +350,7 @@ static expected<ntn_config, std::string> parse_sat_switch_ntn_cfg(const nlohmann
     if (!result) {
       return make_unexpected(result.error());
     }
-    cfg.k_mac = result->get<unsigned>();
+    cfg.k_mac = std::chrono::milliseconds(result->get<unsigned>());
   }
 
   if (json.contains("ntn_ul_sync_validity_dur")) {
@@ -637,7 +637,7 @@ parse_cell_ntn_config(const nlohmann::json&                    json,
   return cell_req;
 }
 
-error_type<std::string> ntn_config_update_remote_command::execute(const nlohmann::json& json)
+expected<nlohmann::json, std::string> ntn_config_update_remote_command::execute(const nlohmann::json& json)
 {
   // Validate cells array presence.
   auto cells_it = json.find("cells");

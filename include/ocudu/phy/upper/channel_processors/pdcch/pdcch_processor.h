@@ -6,11 +6,11 @@
 
 #include "ocudu/adt/expected.h"
 #include "ocudu/adt/static_vector.h"
-#include "ocudu/phy/support/precoding_configuration.h"
 #include "ocudu/ran/cyclic_prefix.h"
 #include "ocudu/ran/pdcch/aggregation_level.h"
 #include "ocudu/ran/pdcch/coreset.h"
 #include "ocudu/ran/pdcch/pdcch_context.h"
+#include "ocudu/ran/precoding_beamforming_configuration.h"
 #include "ocudu/ran/slot_point.h"
 #include <string>
 
@@ -52,8 +52,8 @@ public:
     float data_power_offset_dB;
     /// DCI payload as unpacked bits.
     static_vector<uint8_t, pdcch_constants::MAX_DCI_PAYLOAD_SIZE> payload;
-    /// Precoding configuration.
-    precoding_configuration precoding;
+    /// Precoding and beamforming configuration.
+    precoding_beamforming_configuration precoding_and_beamforming;
   };
 
   /// CCE-to-REG mapping types as per TS38.211 Section 7.3.2.2.

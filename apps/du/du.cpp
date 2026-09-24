@@ -4,6 +4,7 @@
 
 #include "adapters/f1_gateways.h"
 #include "adapters/f1c_test_mode_adapter.h"
+#include "apps/helpers/config/config_yaml_schema.h"
 #include "apps/helpers/e2/e2_config_translators.h"
 #include "apps/helpers/f1/f1_gateway_helpers.h"
 #include "apps/helpers/metrics/metrics_helpers.h"
@@ -169,6 +170,10 @@ int main(int argc, char** argv)
   // Fill the generic application arguments to parse.
   populate_cli11_generic_args(app);
 
+  // Register the configuration-schema root so the add_* helpers capture the schema as the options are declared.
+  config::schema_node config_schema_root{"OCUDU 5G Distributed Unit configuration"};
+  app_helpers::register_config_schema(app, config_schema_root, "du");
+
   du_appconfig du_cfg;
   // Configure CLI11 with the DU application configuration schema.
   configure_cli11_with_du_appconfig_schema(app, du_cfg);
@@ -332,23 +337,25 @@ int main(int argc, char** argv)
   std::unique_ptr<gtpu_teid_pool> du_f1u_teid_allocator = create_gtpu_allocator(du_f1u_alloc_msg);
 
   // > Create GTP-U Demux.
-  gtpu_demux_creation_request du_f1u_gtpu_msg   = {};
-  du_f1u_gtpu_msg.cfg.name                      = "DU-NR-U-DEMUX";
-  du_f1u_gtpu_msg.cfg.warn_on_drop              = true;
-  du_f1u_gtpu_msg.teid_linger_checker           = du_f1u_teid_allocator.get();
-  du_f1u_gtpu_msg.cfg.queue_size                = du_cfg.f1u_cfg.pdu_queue_size;
-  du_f1u_gtpu_msg.gtpu_pcap                     = du_pcaps.f1u.get();
+  gtpu_demux_creation_request du_f1u_gtpu_msg   = {.cfg = gtpu_demux_cfg_t{.lif          = gtpu_logical_interface::f1u_du,
+                                                                           .name         = "DU-NR-U-DEMUX",
+                                                                           .warn_on_drop = true,
+                                                                           .test_mode    = false,
+                                                                           .queue_size   = du_cfg.f1u_cfg.pdu_queue_size,
+                                                                           .batch_size   = DEFAULT_GTPU_DEMUX_BATCH_SIZE},
+                                                   .teid_linger_checker = *du_f1u_teid_allocator,
+                                                   .gtpu_pcap           = *du_pcaps.f1u,
+                                                   .rate_limiter        = nullptr};
   std::unique_ptr<gtpu_demux> du_f1u_gtpu_demux = create_gtpu_demux(du_f1u_gtpu_msg);
 
   // > Create UDP gateway(s).
   gtpu_gateway_maps f1u_gw_maps;
   for (const f1u_socket_appconfig& sock_cfg : du_cfg.f1u_cfg.f1u_sockets.f1u_socket_cfg) {
-    std::unique_ptr<gtpu_gateway> f1u_gw = ocudu::create_f1u_gtpu_gateway(
-        ocudu::f1u_gateway_config{.sock_cfg    = sock_cfg,
-                                  .sockets_cfg = du_cfg.f1u_cfg.f1u_sockets,
-                                  .if_name     = "DU-F1-U",
-                                  .warn_on_drop =
-                                      o_du_app_unit->get_o_du_high_unit_config().du_high_cfg.config.warn_on_drop},
+    std::unique_ptr<gtpu_gateway> f1u_gw = create_f1u_gtpu_gateway(
+        f1u_gateway_config{.sock_cfg     = sock_cfg,
+                           .sockets_cfg  = du_cfg.f1u_cfg.f1u_sockets,
+                           .if_name      = "DU-F1-U",
+                           .warn_on_drop = o_du_app_unit->get_o_du_high_unit_config().du_high_cfg.config.warn_on_drop},
         ocudu::f1u_gateway_dependencies{
             .broker         = *epoll_broker,
             .io_tx_executor = workers.get_du_high_executor_mapper().ue_mapper().mac_ul_pdu_executor(to_du_ue_index(0)),

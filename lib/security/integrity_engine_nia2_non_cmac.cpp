@@ -21,8 +21,18 @@ integrity_engine_nia2_non_cmac::integrity_engine_nia2_non_cmac(sec_128_key      
 {
   std::array<uint8_t, 16> l;
 
+  int ret = crypto_init();
+  if (ret != 0) {
+    report_error("Failure in initializing crypto PSA");
+    return;
+  }
+  ret = aes_setkey_enc(&ctx, k_128_int.data(), 128);
+  if (ret != 0) {
+    report_error("Failure in setting AES security key");
+    return;
+  }
+
   // subkey L generation
-  aes_setkey_enc(&ctx, k_128_int.data(), 128);
   aes_crypt_ecb(&ctx, aes_encrypt, zeros.data(), l.data());
 
   // subkey K1 generation

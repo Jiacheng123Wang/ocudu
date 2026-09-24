@@ -101,7 +101,7 @@ ocudu::ocucp::asn1_utils::get_ue_ctxt_in_ue_assoc_msg(const asn1::xnap::successf
   xnap_ue_context* ue_ctxt = ue_ctxts.find(*local_xnap_ue_id);
   if (ue_ctxt == nullptr) {
     logger.warning("local_xnap_ue={}: Discarding received \"{}\". Cause: UE was not found",
-                   fmt::underlying(*local_xnap_ue_id),
+                   *local_xnap_ue_id,
                    successful_outcome.value.type().to_string());
     return nullptr;
   }
@@ -124,7 +124,7 @@ ocudu::ocucp::asn1_utils::get_ue_ctxt_in_ue_assoc_msg(const asn1::xnap::unsucces
   xnap_ue_context* ue_ctxt = ue_ctxts.find(*local_xnap_ue_id);
   if (ue_ctxt == nullptr) {
     logger.warning("local_xnap_ue={}: Discarding received \"{}\". Cause: UE was not found",
-                   fmt::underlying(*local_xnap_ue_id),
+                   *local_xnap_ue_id,
                    unsuccessful_outcome.value.type().to_string());
     return nullptr;
   }

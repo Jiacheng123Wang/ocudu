@@ -16,6 +16,16 @@ target_link_libraries(timer_test ocudulog ocudu_support GTest::gtest ocudu_gtest
 add_test(timer_test timer_test)
 set_tests_properties(timer_test PROPERTIES LABELS "tsan")
 
+add_executable(config_schema_test config_schema_test.cpp)
+target_link_libraries(config_schema_test ocudu_support GTest::gtest ocudu_gtest_main)
+target_include_directories(config_schema_test PRIVATE ${CMAKE_SOURCE_DIR}/external)
+add_test(config_schema_test config_schema_test)
+
+add_executable(cli11_utils_schema_test cli11_utils_schema_test.cpp)
+target_link_libraries(cli11_utils_schema_test ocudu_support ocudu_yaml_util GTest::gtest ocudu_gtest_main)
+target_include_directories(cli11_utils_schema_test PRIVATE ${CMAKE_SOURCE_DIR}/external)
+add_test(cli11_utils_schema_test cli11_utils_schema_test)
+
 add_executable(function_signature_test function_signature_test.cpp)
 add_test(function_signature_test function_signature_test)
 
@@ -24,16 +34,16 @@ target_link_libraries(async_event_test ocudulog GTest::gtest ocudu_gtest_main)
 add_test(async_event_test async_event_test)
 
 add_executable(async_task_test async_task_test.cpp)
-target_link_libraries(async_task_test ocudulog)
-add_test(async_task_test async_task_test)
+target_link_libraries(async_task_test ocudulog GTest::gtest ocudu_gtest_main)
+gtest_discover_tests(async_task_test)
 
 add_executable(when_all_test when_all_test.cpp)
 target_link_libraries(when_all_test ocudulog GTest::gtest ocudu_gtest_main)
 add_test(when_all_test when_all_test)
 
 add_executable(async_exec_test async_exec_test.cpp)
-target_link_libraries(async_exec_test ocudulog ocudu_support)
-add_test(async_exec_test async_exec_test)
+target_link_libraries(async_exec_test ocudulog ocudu_support GTest::gtest ocudu_gtest_main)
+gtest_discover_tests(async_exec_test)
 
 add_executable(async_queue_test async_queue_test.cpp)
 target_link_libraries(async_queue_test ocudulog ocudu_support GTest::gtest ocudu_gtest_main)
@@ -44,17 +54,16 @@ target_link_libraries(fifo_async_task_scheduler_test ocudulog ocudu_support)
 add_test(fifo_async_task_scheduler_test fifo_async_task_scheduler_test)
 
 add_executable(unique_thread_test unique_thread_test.cpp)
-target_link_libraries(unique_thread_test ocudulog ocudu_support)
-add_test(unique_thread_test unique_thread_test)
-set_tests_properties(unique_thread_test PROPERTIES LABELS "tsan")
+target_link_libraries(unique_thread_test ocudulog ocudu_support GTest::gtest ocudu_gtest_main)
+gtest_discover_tests(unique_thread_test PROPERTIES LABELS "tsan")
 
 add_executable(stats_test stats_test.cpp)
-target_link_libraries(stats_test ocudulog)
-add_test(stats_test stats_test)
+target_link_libraries(stats_test ocudulog GTest::gtest ocudu_gtest_main)
+gtest_discover_tests(stats_test)
 
 add_executable(bit_encoding_test bit_encoding_test.cpp)
-target_link_libraries(bit_encoding_test ocudulog ocudu_support)
-add_test(bit_encoding_test bit_encoding_test)
+target_link_libraries(bit_encoding_test ocudulog ocudu_support GTest::gtest ocudu_gtest_main)
+gtest_discover_tests(bit_encoding_test)
 
 add_executable(async_event_observer_test async_event_observer_test.cpp protocol_transaction_manager_test.cpp)
 target_link_libraries(async_event_observer_test ocudulog ocudu_support GTest::gtest ocudu_gtest_main)
@@ -117,6 +126,6 @@ add_executable(math_test math/mod_math_utils_test.cpp math/curve_fitting_find_ma
 target_link_libraries(math_test ocudu_support_math ocuduvec gtest ocudu_gtest_main)
 add_test(math_test math_test)
 
-add_executable(bit_opts_test math/bit_opts_test.cpp)
-target_link_libraries(bit_opts_test ocudu_support_math gtest ocudu_gtest_main)
-add_test(bit_opts_test bit_opts_test)
+add_executable(bit_ops_test math/bit_ops_test.cpp)
+target_link_libraries(bit_ops_test ocudu_support_math gtest ocudu_gtest_main)
+add_test(bit_ops_test bit_ops_test)

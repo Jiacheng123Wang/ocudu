@@ -101,6 +101,17 @@ public:
   {
     return {};
   }
+  std::vector<nr_cell_identity> handle_du_cells_reported(cu_cp_du_index_t             du_index,
+                                                         span<const du_reported_cell> cells) override
+  {
+    std::vector<nr_cell_identity> activate;
+    activate.reserve(cells.size());
+    for (const du_reported_cell& cell : cells) {
+      activate.push_back(cell.cgi.nci);
+    }
+    return activate;
+  }
+  void             handle_du_removed(cu_cp_du_index_t du_index) override {}
   async_task<void> handle_transaction_info_loss(const ue_transaction_info_loss_event& ev) override
   {
     return launch_no_op_task();

@@ -372,12 +372,7 @@ struct formatter<ocudu::security::preferred_integrity_algorithms> {
   template <typename FormatContext>
   auto format(const ocudu::security::preferred_integrity_algorithms& algos, FormatContext& ctx) const
   {
-    return format_to(ctx.out(),
-                     "NIA{}, NIA{}, NIA{}, NIA{}",
-                     fmt::underlying(algos[0]),
-                     fmt::underlying(algos[1]),
-                     fmt::underlying(algos[2]),
-                     fmt::underlying(algos[3]));
+    return format_to(ctx.out(), "NIA{}, NIA{}, NIA{}, NIA{}", algos[0], algos[1], algos[2], algos[3]);
   }
 };
 
@@ -392,12 +387,7 @@ struct formatter<ocudu::security::preferred_ciphering_algorithms> {
   template <typename FormatContext>
   auto format(const ocudu::security::preferred_ciphering_algorithms& algos, FormatContext& ctx) const
   {
-    return format_to(ctx.out(),
-                     "NEA{}, NEA{}, NEA{}, NEA{}",
-                     fmt::underlying(algos[0]),
-                     fmt::underlying(algos[1]),
-                     fmt::underlying(algos[2]),
-                     fmt::underlying(algos[3]));
+    return format_to(ctx.out(), "NEA{}, NEA{}, NEA{}, NEA{}", algos[0], algos[1], algos[2], algos[3]);
   }
 };
 

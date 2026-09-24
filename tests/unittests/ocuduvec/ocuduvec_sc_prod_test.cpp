@@ -3,7 +3,6 @@
 
 #include "ocudu/adt/format.h"
 #include "ocudu/ocuduvec/sc_prod.h"
-#include "ocudu/support/ocudu_test.h"
 #include <gtest/gtest.h>
 #include <random>
 
@@ -157,6 +156,42 @@ TEST_P(OcuduvecScProdFixture, OcuduvecScProdMixFloatComplexReal)
 
   std::vector<cbf16_t> expected(size);
   std::transform(x.begin(), x.end(), expected.begin(), [h](cf_t value) { return h * to_cf(value); });
+
+  for (size_t i = 0; i != size; i++) {
+    float err = std::abs(to_cf(expected[i]) - to_cf(z[i]));
+    ASSERT_LT(err, ASSERT_MAX_ERROR) << fmt::format("expected={} z={}", expected[i], z[i]);
+  }
+}
+
+TEST_P(OcuduvecScProdFixture, OcuduvecScProdMix2FloatComplex)
+{
+  std::vector<cbf16_t> x = generate_complex_random_data<cbf16_t>();
+  cf_t                 h = get_random_complex_coeff();
+
+  std::vector<cf_t> z(size);
+
+  ocuduvec::sc_prod(z, x, h);
+
+  std::vector<cf_t> expected(size);
+  std::transform(x.begin(), x.end(), expected.begin(), [h](cbf16_t value) { return h * to_cf(value); });
+
+  for (size_t i = 0; i != size; i++) {
+    float err = std::abs(to_cf(expected[i]) - to_cf(z[i]));
+    ASSERT_LT(err, ASSERT_MAX_ERROR) << fmt::format("expected={} z={}", expected[i], z[i]);
+  }
+}
+
+TEST_P(OcuduvecScProdFixture, OcuduvecScProdMix2FloatComplexReal)
+{
+  std::vector<cbf16_t> x = generate_complex_random_data<cbf16_t>();
+  float                h = get_random_real_coeff();
+
+  std::vector<cf_t> z(size);
+
+  ocuduvec::sc_prod(z, x, h);
+
+  std::vector<cf_t> expected(size);
+  std::transform(x.begin(), x.end(), expected.begin(), [h](cbf16_t value) { return h * to_cf(value); });
 
   for (size_t i = 0; i != size; i++) {
     float err = std::abs(to_cf(expected[i]) - to_cf(z[i]));

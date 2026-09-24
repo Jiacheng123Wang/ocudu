@@ -12,6 +12,7 @@
 #include "ue_drx_controller.h"
 #include "ue_fsm_states.h"
 #include "ue_link_adaptation_controller.h"
+#include "ue_ta_report_tracker.h"
 #include "ocudu/scheduler/config/scheduler_expert_config.h"
 #include "ocudu/scheduler/scheduler_feedback_handler.h"
 #include "ocudu/support/memory_pool/free_list_memory_pool.h"
@@ -26,6 +27,8 @@ struct pusch_config_params;
 struct ue_shared_context {
   /// DRX controller.
   ue_drx_controller& drx_ctrl;
+  /// Tracker of the uplink timing advance reported by the UE.
+  ue_ta_report_tracker& ta_report_tracker;
 };
 
 /// State of the UE PCell.
@@ -99,6 +102,14 @@ public:
   {
     return active and cfg().is_dl_enabled(dl_slot) and shared_ctx.drx_ctrl.is_pdcch_enabled();
   }
+  /// \brief Determines whether UL allocations are possible in the provided slot.
+  ///
+  /// Combines the configured uplink timeline with the UE runtime state the uplink measurement gap window depends on,
+  /// the same way \c is_pdcch_enabled combines the DL timeline with the DRX active time.
+  bool is_ul_enabled(slot_point ul_slot) const
+  {
+    return cfg().is_ul_enabled(ul_slot, shared_ctx.ta_report_tracker.last_reported_ul_ta());
+  }
   bool is_pdsch_enabled(slot_point pdcch_slot, slot_point pdsch_slot) const
   {
     // Verify that the DL is activated for the chosen slots (e.g. they are not UL slots in TDD or there is no measGap).
@@ -117,7 +128,7 @@ public:
   {
     // Verify that the DL is activated for the chosen PDCCH slot and UL is activated for the chosen PUSCH slot
     // (e.g the chosen slots fall in DL and UL slots of a TDD pattern respective, and there is no measGap).
-    return is_pdcch_enabled(pdcch_slot) and cfg().is_ul_enabled(pusch_slot) and
+    return is_pdcch_enabled(pdcch_slot) and is_ul_enabled(pusch_slot) and
            // Verify that the order of PUSCHs for the same UE matches the order of PDCCHs and that there is at most one
            // PUSCH per slot. [TS 38.214, 6.1] "For any HARQ process ID(s) in a given scheduled cell, the UE is not
            // expected to transmit a PUSCH that overlaps in time with another PUSCH". [TS 38.214, 6.1] "For any two HARQ

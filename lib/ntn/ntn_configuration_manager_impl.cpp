@@ -13,6 +13,7 @@
 #include "ocudu/support/ocudu_assert.h"
 #include "ocudu/support/synchronization/sync_event.h"
 #include "fmt/chrono.h"
+#include <algorithm>
 #include <cmath>
 #include <thread>
 
@@ -86,7 +87,12 @@ static std::optional<std::chrono::microseconds> compute_ref_location_ul_ta(const
   if (cell_cfg.ntn_cfg->feeder_link_info.has_value() and state.ta_info.has_value()) {
     const double ta_common_offset_us =
         cell_cfg.ntn_cfg->ta_common_offset.value_or(state.ta_info->ta_common_offset.value_or(0.0));
-    const double ta_common_us = state.ta_info->ta_common + ta_common_offset_us;
+    const double k_mac_us =
+        cell_cfg.ntn_cfg->k_mac.has_value()
+            ? static_cast<double>(
+                  std::chrono::duration_cast<std::chrono::microseconds>(*cell_cfg.ntn_cfg->k_mac).count())
+            : 0.0;
+    const double ta_common_us = std::max(0.0, state.ta_info->ta_common - k_mac_us) + ta_common_offset_us;
     ul_ta += std::chrono::microseconds{static_cast<int64_t>(std::lround(ta_common_us))};
   }
   return ul_ta;
@@ -580,8 +586,9 @@ void ntn_configuration_manager_impl::periodic_ntn_config_update_task(const nr_ce
     // SFN wrap (+/-5.12 s) regardless of the configured period.
     epoch_slot = sl;
   }
-  const auto       slot_diff  = epoch_slot - sl;
-  const time_point epoch_time = tp + std::chrono::duration_cast<std::chrono::system_clock::duration>(subframe_aligned_epoch_offset(epoch_slot, slot_diff));
+  const auto       slot_diff = epoch_slot - sl;
+  const time_point epoch_time =
+      std::chrono::time_point_cast<time_point::duration>(tp + subframe_aligned_epoch_offset(epoch_slot, slot_diff));
 
   // Propagate each serving cell satellite using its own OCM.
   ntn_orbital_state serving_ntn_info;
@@ -680,8 +687,6 @@ void ntn_configuration_manager_impl::periodic_ntn_config_update_task(const nr_ce
 
     ntn_sib19_update_request ntn_req;
     ntn_req.nr_cgi             = cell_cfg.nr_cgi;
-    ntn_req.si_msg_idx         = cell_cfg.si_sched->si_msg_idx;
-    ntn_req.sib_idx            = 19;
     ntn_req.slot               = next_si_win_start;
     ntn_req.si_slot_period     = cell_cfg.si_sched->si_period_rf * next_si_win_start.nof_slots_per_frame();
     ntn_req.epoch_time         = epoch_time;

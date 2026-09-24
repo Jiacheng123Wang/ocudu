@@ -218,50 +218,27 @@ bool ocudu::is_trace_file_open()
 }
 
 /// Helper to get an approximation of the system clock timestamp.
-namespace {
-/// 1. Define a simple wrapper that replaces the original make_formattable
-struct trace_date_wrapper {
-  trace_point tp;
-};
-
-/// Helper: returns the wrapper
-inline trace_date_wrapper formatted_date(trace_point start_tp)
+static auto formatted_date(trace_point start_tp)
 {
-  return {start_tp};
-}
-} // namespace
+  /// Caching and mapping of system_clock with trace points for %H:%M:%S formatting.
+  static system_clock::time_point cached_sys_tp   = system_clock::now();
+  static trace_point              cached_trace_tp = trace_clock::now();
 
-namespace fmt {
-/// 2. Specialize the standard fmt::formatter for the wrapper
-template <>
-struct formatter<trace_date_wrapper> {
-  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
-
-  template <typename FormatContext>
-  auto format(const trace_date_wrapper& wrapper, FormatContext& ctx) const
-  {
-    static system_clock::time_point cached_sys_tp   = system_clock::now();
-    static trace_point              cached_trace_tp = trace_clock::now();
-
-    if (wrapper.tp - cached_trace_tp > seconds{1}) {
-      // Recompute the mapping of system clock to trace points to compensate for drifts.
-      cached_sys_tp   = system_clock::now();
-      cached_trace_tp = trace_clock::now();
-    }
-
-    // Retrieve system clock approximation
-    auto systp = cached_sys_tp + (wrapper.tp - cached_trace_tp);
-    
-    // 3. Explicitly cast to the system_clock duration type, fixing the macOS compile error
-    auto systp_cast = std::chrono::time_point_cast<system_clock::duration>(systp);
-    
-    std::tm current_time = fmt::gmtime(system_clock::to_time_t(systp_cast));
-    auto    us_fraction  = std::chrono::duration_cast<microseconds>(systp.time_since_epoch()).count() % 1000000u;
-    
-    return fmt::format_to(ctx.out(), "{:%H:%M:%S}.{:06}", current_time, us_fraction);
+  if (start_tp - cached_trace_tp > seconds{1}) {
+    // Recompute the mapping of system clock to trace points to compensate for drifts.
+    cached_sys_tp   = system_clock::now();
+    cached_trace_tp = trace_clock::now();
   }
-};
-} // namespace fmt
+
+  return make_formattable([start_tp](auto& ctx) {
+    // Retrieve system clock approximation
+    auto    systp = cached_sys_tp + (start_tp - cached_trace_tp);
+    std::tm current_time =
+        fmt::gmtime(system_clock::to_time_t(std::chrono::time_point_cast<system_clock::duration>(systp)));
+    auto us_fraction = std::chrono::duration_cast<microseconds>(systp.time_since_epoch()).count() % 1000000u;
+    return fmt::format_to(ctx.out(), "{:%H:%M:%S}.{:06}", current_time, us_fraction);
+  });
+}
 
 namespace fmt {
 

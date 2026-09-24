@@ -7,6 +7,7 @@
 #include "precoding_matrix_indicator.h"
 #include "ocudu/ran/beamforming/beam_identifier.h"
 #include "ocudu/ran/precoding/precoding_weight_matrix.h"
+#include "ocudu/ran/precoding_beamforming_composite.h"
 
 namespace ocudu {
 
@@ -16,20 +17,6 @@ namespace ocudu {
 /// layers, the precoding uses two different beams, \f$v_{l, m}\f$ and \f$v_{l', m'}\f$, where \f$l \neq l'\f$ and \f$m
 /// \neq m'\f$. In such case, two beams are allocated, each one with two polarizations.
 static constexpr unsigned max_nof_beams_per_pmi = 4;
-
-/// Alias for a list of precoding beams.
-using precoding_beam_list = static_vector<beam_identifier, max_nof_beams_per_pmi>;
-
-/// \brief Composite precoding matrix weights.
-///
-/// The type alias is a tuple that describes a precoding weight matrix composed by a MIMO precoding matrix, and
-/// a list of selected beams.
-///
-/// The MIMO precoding matrix is applied in the upper physical layer in the layer mapping and precoding phase.
-///
-/// The selected beam list describe the coefficients applied for each of the allocated port in the previous phase. These
-/// are applied at the lower physical layer.
-using precoding_mimo_beam_composite = std::tuple<precoding_weight_matrix, precoding_beam_list>;
 
 /// Constructs a precoder configuration for a single transmitter port.
 precoding_weight_matrix make_single_port();
@@ -94,6 +81,17 @@ precoding_weight_matrix make_two_layer_two_ports(unsigned i_codebook);
 /// \return A precoding weight matrix for the given number of layers and the given antenna panel distribution.
 precoding_weight_matrix make_type1_sp_mode1(const precoding_matrix_indicator& pmi, unsigned nof_layers);
 
+/// \brief Constructs a precoding weight matrix for a given number of layers for a Type II precoding codebook.
+///
+/// All weights are derived from TS38.214 Section 5.2.2.2.3, which describe CSI reporting using Type II codebook for one
+/// or two layers. The generated precoding weights for the first half of ports corresponds to the first polarization,
+/// while the second half of ports corresponds to the second polarization.
+///
+/// \param[in] pmi        The Precoding Matrix Indicator (PMI) codebook parameters.
+/// \param[in] nof_layers The number of layers used for the transmission.
+/// \return A precoding weight matrix for the given number of layers and the given antenna panel distribution.
+precoding_weight_matrix make_type2(const precoding_matrix_indicator& pmi, unsigned nof_layers);
+
 /// \brief Derives the MIMO precoding matrix and its beam list from the specified PMI for the given number of layers.
 ///
 /// Returns a \ref mimo_matrix, i.e., the precoding weight matrix together with the list of distinct beams it maps onto.
@@ -108,6 +106,6 @@ precoding_weight_matrix make_type1_sp_mode1(const precoding_matrix_indicator& pm
 ///                       reports.
 /// \param[in] nof_layers Number of transmission layers.
 /// \return The MIMO precoding matrix and beam list derived from the PMI and the number of layers.
-precoding_mimo_beam_composite get_mimo_matrix_from_pmi(const precoding_matrix_indicator& pmi, unsigned nof_layers);
+precoding_beamforming_composite get_mimo_matrix_from_pmi(const precoding_matrix_indicator& pmi, unsigned nof_layers);
 
 } // namespace ocudu

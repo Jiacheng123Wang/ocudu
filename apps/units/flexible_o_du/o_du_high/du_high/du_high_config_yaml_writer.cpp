@@ -135,9 +135,52 @@ static YAML::Node build_du_high_ssb_section(const du_high_unit_ssb_config& confi
 {
   YAML::Node node;
 
+  for (const auto& ssb_beam : config.beams) {
+    YAML::Node beam_node;
+    beam_node["ssb_index"] = ssb_beam.ssb_index;
+    beam_node["beam_id"]   = ssb_beam.beam_id;
+    node["beams"].push_back(beam_node);
+  }
   node["ssb_period"]          = config.ssb_period_msec;
   node["ssb_block_power_dbm"] = config.ssb_block_power;
   node["pss_to_sss_epre_db"]  = config.pss_to_sss_epre == ssb_pss_to_sss_epre::dB_0 ? "0" : "3";
+
+  return node;
+}
+
+static YAML::Node build_du_high_etws_section(const du_high_unit_sib_config::etws_config& config)
+{
+  YAML::Node node;
+
+  node["si_period"] = config.si_period_rf;
+
+  if (config.test.has_value()) {
+    YAML::Node test_node;
+    test_node["message_id"]         = config.test->message_id;
+    test_node["serial_num"]         = config.test->serial_num;
+    test_node["warning_type"]       = config.test->warning_type;
+    test_node["data_coding_scheme"] = config.test->data_coding_scheme;
+    test_node["warning_message"]    = config.test->warning_message;
+    node["test"]                    = test_node;
+  }
+
+  return node;
+}
+
+static YAML::Node build_du_high_cmas_section(const du_high_unit_sib_config::cmas_config& config)
+{
+  YAML::Node node;
+
+  node["si_period"] = config.si_period_rf;
+
+  if (config.test.has_value()) {
+    YAML::Node test_node;
+    test_node["message_id"]         = config.test->message_id;
+    test_node["serial_num"]         = config.test->serial_num;
+    test_node["data_coding_scheme"] = config.test->data_coding_scheme;
+    test_node["warning_message"]    = config.test->warning_message;
+    node["test"]                    = test_node;
+  }
 
   return node;
 }
@@ -171,6 +214,13 @@ static YAML::Node build_du_high_sib_section(const du_high_unit_sib_config& confi
     }
 
     node["si_sched_info"].push_back(si_node);
+  }
+
+  if (config.etws_cfg.has_value()) {
+    node["etws"] = build_du_high_etws_section(config.etws_cfg.value());
+  }
+  if (config.cmas_cfg.has_value()) {
+    node["cmas"] = build_du_high_cmas_section(config.cmas_cfg.value());
   }
 
   return node;
@@ -613,6 +663,39 @@ static YAML::Node build_du_high_csi_section(const du_high_unit_csi_config& confi
   return node;
 }
 
+static YAML::Node build_du_high_prs_section(const du_high_unit_prs_config& config)
+{
+  YAML::Node node;
+
+  for (const auto& res_set : config.resource_sets) {
+    YAML::Node res_set_node;
+    res_set_node["comb_size"]         = static_cast<unsigned>(res_set.comb_size);
+    res_set_node["nof_symbols"]       = static_cast<unsigned>(res_set.nof_symbols);
+    res_set_node["periodicity_slots"] = res_set.periodicity_slots;
+    res_set_node["slot_offset"]       = res_set.slot_offset;
+    res_set_node["repetition_factor"] = res_set.repetition_factor;
+    res_set_node["time_gap"]          = res_set.time_gap;
+    if (res_set.bandwidth_prbs.has_value()) {
+      res_set_node["bandwidth_prbs"] = res_set.bandwidth_prbs.value();
+    }
+    res_set_node["start_prb"]       = res_set.start_prb;
+    res_set_node["power_offset_db"] = res_set.power_offset_db;
+
+    for (const auto& res : res_set.resources) {
+      YAML::Node res_node;
+      res_node["sequence_id"]   = res.sequence_id;
+      res_node["re_offset"]     = res.re_offset;
+      res_node["slot_offset"]   = res.slot_offset;
+      res_node["symbol_offset"] = res.symbol_offset;
+      res_set_node["resources"].push_back(res_node);
+    }
+
+    node["resource_sets"].push_back(res_set_node);
+  }
+
+  return node;
+}
+
 static void fill_du_high_sched_expert_section(YAML::Node& node, const du_high_unit_scheduler_config& config)
 {
   YAML::Node sched_node;
@@ -699,7 +782,14 @@ static YAML::Node build_cell_entry(const du_high_unit_base_cell_config& config)
   if (!config.additional_plmns.empty()) {
     node["additional_plmns"] = config.additional_plmns;
   }
-  node["tac"]          = config.tac;
+  node["tac"] = config.tac;
+  if (!config.additional_tacs.empty()) {
+    YAML::Node additional_tacs_node(YAML::NodeType::Sequence);
+    for (tac_t tac : config.additional_tacs) {
+      additional_tacs_node.push_back(tac);
+    }
+    node["additional_tacs"] = additional_tacs_node;
+  }
   node["q_rx_lev_min"] = config.q_rx_lev_min;
   node["q_qual_min"]   = config.q_qual_min;
   if (config.pcg_cfg.p_nr_fr1.has_value()) {
@@ -749,7 +839,10 @@ static YAML::Node build_cell_entry(const du_high_unit_base_cell_config& config)
 
   node["paging"] = build_du_high_paging_section(config.paging_cfg);
   node["csi"]    = build_du_high_csi_section(config.csi_cfg);
-  node["srs"]    = build_du_high_srs_section(config.srs_cfg);
+  if (not config.prs_cfg.resource_sets.empty()) {
+    node["prs"] = build_du_high_prs_section(config.prs_cfg);
+  }
+  node["srs"] = build_du_high_srs_section(config.srs_cfg);
   if (config.drx_cfg.long_cycle != 0) {
     node["drx"] = build_du_high_drx_section(config.drx_cfg);
   }
@@ -833,7 +926,7 @@ static void fill_du_high_mac_qos_section(YAML::Node node, const du_high_unit_mac
 
 static void fill_du_high_qos_entry(YAML::Node node, const du_high_unit_qos_config& config)
 {
-  node["five_qi"] = five_qi_to_uint(config.five_qi);
+  node["five_qi"] = to_underlying(config.five_qi);
   fill_du_high_rlc_qos_section(node["rlc"], config.rlc);
   fill_du_high_f1u_qos_section(node["f1u_du"], config.f1u_du);
   // The MAC section is only emitted when it carries non-default values (optional triggered UL grant).
@@ -889,14 +982,14 @@ static void fill_custom_freq_bands_section(YAML::Node& node, const std::vector<d
   }
 }
 
-static void build_du_high_sbr_section(YAML::Node& node, const std::map<srb_id_t, du_high_unit_srb_config>& sbrs)
+static void build_du_high_srb_section(YAML::Node& node, const std::vector<du_high_unit_srb_config>& srbs)
 {
-  for (const auto& cell : sbrs) {
+  for (const auto& srb : srbs) {
     YAML::Node entry;
-    entry["srb_id"] = cell.second.srb_id;
-    fill_du_high_am_section(entry["rlc"], cell.second.rlc);
-    if (cell.second.mac.triggered_ul_grant.has_value()) {
-      entry["mac"]["triggered_ul_grant"]["delay"] = cell.second.mac.triggered_ul_grant->delay.count();
+    entry["srb_id"] = srb.srb_id;
+    fill_du_high_am_section(entry["rlc"], srb.rlc);
+    if (srb.mac.triggered_ul_grant.has_value()) {
+      entry["mac"]["triggered_ul_grant"]["delay"] = srb.mac.triggered_ul_grant->delay.count();
     }
     node["srbs"].push_back(entry);
   }
@@ -908,7 +1001,7 @@ static YAML::Node build_du_high_testmode_section(const du_high_unit_test_mode_co
   {
     YAML::Node ue_node;
 
-    ue_node["rnti"]                      = to_value(config.test_ue.rnti);
+    ue_node["rnti"]                      = to_underlying(config.test_ue.rnti);
     ue_node["nof_ues"]                   = config.test_ue.nof_ues;
     ue_node["ue_creation_stagger_slots"] = config.test_ue.ue_creation_stagger_slots;
     if (config.test_ue.auto_ack_indication_delay.has_value()) {
@@ -959,6 +1052,6 @@ void ocudu::fill_du_high_config_in_yaml_schema(YAML::Node& node, const du_high_p
     node["cell_cfg"] = build_cell_entry(parsed_cfg.common_cell_cfg);
   }
   build_du_high_cells_section(node, config.cells_cfg);
-  build_du_high_sbr_section(node, config.srb_cfg);
+  build_du_high_srb_section(node, config.srb_cfg);
   fill_ntn_satellites_in_yaml_schema(node, config.ntn_satellites);
 }

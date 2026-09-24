@@ -9,6 +9,7 @@
 #include "apps/helpers/ntn/ntn_satellite_config.h"
 #include "apps/units/o_cu_cp/cu_cp/cu_cp_unit_pcap_config.h"
 #include "cu_cp_unit_logger_config.h"
+#include "ocudu/cu_cp/cell_state.h"
 #include "ocudu/ran/arfcn.h"
 #include "ocudu/ran/cu_types.h"
 #include "ocudu/ran/gnb_id.h"
@@ -162,6 +163,25 @@ struct cu_cp_unit_cell_config_item {
   /// Vector of cells that are a neighbor of this cell.
   std::vector<cu_cp_unit_neighbor_cell_config_item> ncells;
   // TODO: Add optional SSB parameters.
+};
+
+/// \brief Logical cell configuration item, parsed by the CU-CP from the logical_cells list of the cu_cp section.
+///
+/// Declares a cell to the CU-CP together with its administrative intent. The NR Cell Identity is derived as
+/// gnb_id concatenated with sector_id, matching the DU's NCI derivation, so the entry addresses the DU cell
+/// with the same sector ID. Distinct from the DU's top-level cells section, which carries the radio
+/// configuration.
+struct cu_cp_unit_logical_cell_config {
+  /// Sector ID (4-14 bits), concatenated with the gNB Id to form the NCI. Must match the sector ID of the
+  /// corresponding DU cell.
+  unsigned sector_id = 0;
+  /// Administrative state of the cell: locked (the CU-CP does not activate the cell until unlocked by
+  /// command) or unlocked. Only these two values are accepted at parse; shutting_down is held by the CU-CP
+  /// itself during a graceful stop and cannot be configured.
+  ocucp::cell_admin_state admin_state = ocucp::cell_admin_state::unlocked;
+  /// Intended MIB cellBarred state (same key the DU uses for the initial MIB value; the CU-CP maintains it
+  /// at runtime via the F1AP Cells to be Barred List).
+  bool cell_barred = false;
 };
 
 /// All mobility related configuration parameters.
@@ -507,6 +527,8 @@ struct cu_cp_unit_config {
   /// application this list is shared with the DU (parsed once from the global ntn section); the standalone CU-CP
   /// application parses it from its own ntn section.
   std::vector<ntn_satellite_config> ntn_satellites;
+  /// Logical cells declared to the CU-CP, parsed from the logical_cells list of the cu_cp section.
+  std::vector<cu_cp_unit_logical_cell_config> cells_cfg;
 };
 
 } // namespace ocudu

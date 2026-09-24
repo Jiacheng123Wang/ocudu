@@ -60,11 +60,24 @@ struct fmt::formatter<ocudu::precoding_matrix_indicator> {
   {
     if (const auto* two_ports_pmi = std::get_if<ocudu::pmi_two_antenna_port>(&pmi)) {
       helper.format_always(ctx, "pmi={}", two_ports_pmi->pmi);
-    } else if (const auto* four_ports_pmi = std::get_if<ocudu::pmi_typeI_single_panel>(&pmi)) {
-      helper.format_always(ctx, "i_1_1={}", four_ports_pmi->i_1_1);
-      helper.format_always(ctx, "i_1_2={}", four_ports_pmi->i_1_2);
-      helper.format_always(ctx, "i_1_3={}", four_ports_pmi->i_1_3);
-      helper.format_always(ctx, "i_2={}", four_ports_pmi->i_2);
+    } else if (const auto* typeI_sp_pmi = std::get_if<ocudu::pmi_typeI_single_panel>(&pmi)) {
+      helper.format_always(ctx, "i_1_1={}", typeI_sp_pmi->i_1_1);
+      helper.format_always(ctx, "i_1_2={}", typeI_sp_pmi->i_1_2);
+      helper.format_always(ctx, "i_1_3={}", typeI_sp_pmi->i_1_3);
+      helper.format_always(ctx, "i_2={}", typeI_sp_pmi->i_2);
+    } else if (const auto* typeII_pmi = std::get_if<ocudu::pmi_typeII>(&pmi)) {
+      helper.format_always(ctx, "i_1_1={}", typeII_pmi->i_1_1);
+      helper.format_always(ctx, "i_1_2={}", typeII_pmi->i_1_2);
+
+      for (const ocudu::pmi_typeII::layer_coefficients& layer : typeII_pmi->layers) {
+        helper.format_always(ctx, "i_1_3={}", layer.i_1_3);
+        helper.format_always(ctx, "i_1_4=[{}]", layer.i_1_4);
+        helper.format_always(ctx, "i_2_1=[{}]", layer.i_2_1);
+
+        if (!layer.i_2_2.empty()) {
+          helper.format_always(ctx, "i_2_2=[{}]", layer.i_2_2);
+        }
+      }
     }
 
     return ctx.out();

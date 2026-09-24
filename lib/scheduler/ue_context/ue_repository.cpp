@@ -63,7 +63,7 @@ void ue_repository::slot_indication(slot_point sl_tx)
 
     const du_ue_index_t ue_idx = rem_ev.ue_index();
     if (not ues.contains(ue_idx)) {
-      logger.error("ue={}: Unexpected UE removal from UE repository", fmt::underlying(ue_idx));
+      logger.error("ue={}: Unexpected UE removal from UE repository", ue_idx);
       rem_ev.reset();
       continue;
     }
@@ -81,7 +81,7 @@ void ue_repository::slot_indication(slot_point sl_tx)
     // Marks UE config removal as complete.
     rem_ev.reset();
 
-    logger.debug("ue={} rnti={}: UE has been successfully removed.", fmt::underlying(ue_idx), crnti);
+    logger.debug("ue={} rnti={}: UE has been successfully removed.", ue_idx, crnti);
   }
 
   // In case the elements at the front of the ring has been marked for removal, pop them from the queue.
@@ -111,11 +111,11 @@ void ue_repository::register_cell(ue_cell_repository& cell_ue_repo)
 
 void ue_repository::deregister_cell(du_cell_index_t cell_index)
 {
-  ocudu_sanity_check(cell_ues.contains(cell_index), "Cell index {} not registered", fmt::underlying(cell_index));
+  ocudu_sanity_check(cell_ues.contains(cell_index), "Cell index {} not registered", cell_index);
   // Any UE left in the cell would keep a dangling ue_cell pointer once the cell repository is destroyed.
   ocudu_sanity_check(cell_ues[cell_index]->empty(),
                      "cell={}: Deregistering cell that still holds {} UEs",
-                     fmt::underlying(cell_index),
+                     cell_index,
                      cell_ues[cell_index]->size());
   cell_ues.erase(cell_index);
 }
@@ -168,6 +168,7 @@ void ue_repository::add_ue(const ue_configuration& ue_cfg, const ue_creation_con
                              ue_lc_mng.view(),
                              creation_ctx.ul_ccch_slot_rx,
                              logger);
+  ue_ta_report_trackers.emplace(ue_index);
   auto ue_ta_mgr = ta_mgr_sys.add_ue(
       ue_cfg.pcell_cfg().tag_id(), pcell_cmn.params.ul_cfg_common.init_ul_bwp.generic_params.scs, ue_lc_mng.view());
 
@@ -177,14 +178,23 @@ void ue_repository::add_ue(const ue_configuration& ue_cfg, const ue_creation_con
   for (unsigned i = 0, sz = ue_cfg.nof_cells(); i != sz; ++i) {
     const auto&           cell_cfg   = ue_cfg.ue_cell_cfg(static_cast<serv_cell_index_t>(i));
     const du_cell_index_t cell_index = cell_cfg.cell_cfg_common.cell_index;
-    auto&                 ue_cc      = cell_ues[cell_index]->add_ue(
-        ue_cfg, static_cast<serv_cell_index_t>(i), &ue_fsms[ue_index], ue_drx_controllers[ue_index]);
+    auto&                 ue_cc =
+        cell_ues[cell_index]->add_ue(ue_cfg,
+                                     static_cast<serv_cell_index_t>(i),
+                                     &ue_fsms[ue_index],
+                                     ue_shared_context{ue_drx_controllers[ue_index], ue_ta_report_trackers[ue_index]});
     cell_lookup.du_cells.emplace(cell_index, &ue_cc);
     cell_lookup.ue_cells.push_back(&ue_cc);
   }
 
   // Add UE in the repository.
-  ues.emplace(ue_index, ue_cfg, std::move(ue_lc_mng), ue_drx_controllers[ue_index], std::move(ue_ta_mgr), cell_lookup);
+  ues.emplace(ue_index,
+              ue_cfg,
+              std::move(ue_lc_mng),
+              ue_drx_controllers[ue_index],
+              ue_ta_report_trackers[ue_index],
+              std::move(ue_ta_mgr),
+              cell_lookup);
 
   // Update RNTI -> UE index lookup.
   auto res = rnti_to_ue_index_lookup.insert(std::make_pair(rnti, ue_index));
@@ -193,8 +203,7 @@ void ue_repository::add_ue(const ue_configuration& ue_cfg, const ue_creation_con
 
 void ue_repository::reconfigure_ue(const ue_configuration& new_cfg, sched_ue_config_request::causes cause)
 {
-  ocudu_assert(
-      ues.contains(new_cfg.ue_index), "ue={} : UE not found in the repository", fmt::underlying(new_cfg.ue_index));
+  ocudu_assert(ues.contains(new_cfg.ue_index), "ue={} : UE not found in the repository", new_cfg.ue_index);
   ocudu_sanity_check(new_cfg.nof_cells() > 0, "Creation of a UE requires at least PCell configuration.");
   auto& u      = ues[new_cfg.ue_index];
   auto& lc_mng = u.logical_channels();
@@ -215,6 +224,12 @@ void ue_repository::reconfigure_ue(const ue_configuration& new_cfg, sched_ue_con
     u.drx_controller().reconfigure(new_cfg.drx_cfg());
   }
 
+  // The UE re-acquires its uplink timing through the random access that precedes a reestablishment, so a T_TA reported
+  // before it no longer describes the UE. Discarding it falls back to the cell estimate until the UE reports again.
+  if (cause == sched_ue_config_request::causes::rrc_reconf_after_reest) {
+    ue_ta_report_trackers[new_cfg.ue_index].reset();
+  }
+
   // Update UE cells.
   auto& prev_cell_lookup = ue_cell_lookups[new_cfg.ue_index];
   for (unsigned i = 0, sz = prev_cell_lookup.ue_cells.size(); i != sz; ++i) {
@@ -233,10 +248,11 @@ void ue_repository::reconfigure_ue(const ue_configuration& new_cfg, sched_ue_con
     const du_cell_index_t cell_index = ue_cc_cfg.cell_cfg_common.cell_index;
     if (not prev_cell_lookup.du_cells.contains(cell_index)) {
       // New cell being instantiated.
-      auto& ue_cc = cell_ues[cell_index]->add_ue(new_cfg,
-                                                 static_cast<serv_cell_index_t>(i),
-                                                 i == 0 ? &ue_fsms[new_cfg.ue_index] : nullptr,
-                                                 ue_drx_controllers[new_cfg.ue_index]);
+      auto& ue_cc = cell_ues[cell_index]->add_ue(
+          new_cfg,
+          static_cast<serv_cell_index_t>(i),
+          i == 0 ? &ue_fsms[new_cfg.ue_index] : nullptr,
+          ue_shared_context{ue_drx_controllers[new_cfg.ue_index], ue_ta_report_trackers[new_cfg.ue_index]});
       new_lookup.du_cells.emplace(cell_index, &ue_cc);
       new_lookup.ue_cells.push_back(&ue_cc);
     } else {
@@ -332,6 +348,7 @@ void ue_repository::rem_ue(const ue& u)
 
   // Remove UE components.
   ue_drx_controllers.erase(ue_idx);
+  ue_ta_report_trackers.erase(ue_idx);
   ue_fsms.erase(ue_idx);
 
   // Remove UE from RNTI->UE lookup.
@@ -339,9 +356,7 @@ void ue_repository::rem_ue(const ue& u)
   if (it != rnti_to_ue_index_lookup.end()) {
     rnti_to_ue_index_lookup.erase(it);
   } else {
-    logger.error("ue={} rnti={}: UE with provided c-rnti not found in RNTI-to-UE-index lookup table.",
-                 fmt::underlying(ue_idx),
-                 crnti);
+    logger.error("ue={} rnti={}: UE with provided c-rnti not found in RNTI-to-UE-index lookup table.", ue_idx, crnti);
   }
 
   // Finally, remove UE from the repository.

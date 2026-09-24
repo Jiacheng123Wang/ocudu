@@ -17,7 +17,7 @@ public:
   cu_up_log_prefix(cu_up_ue_index_t ue_index)
   {
     fmt::memory_buffer buffer;
-    fmt::format_to(std::back_inserter(buffer), "ue={}: ", fmt::underlying(ue_index));
+    fmt::format_to(std::back_inserter(buffer), "ue={}: ", ue_index);
     prefix = ocudu::to_c_str(buffer);
   }
   const char* to_c_str() const { return prefix.c_str(); }

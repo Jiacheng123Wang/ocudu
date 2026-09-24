@@ -341,17 +341,40 @@ public:
   std::optional<mac_ue_delete_request>                      last_ue_delete_msg{};
   std::optional<mac_dl_buffer_state_indication_message>     last_dl_bs;
   byte_buffer                                               last_pushed_ul_ccch_msg;
+  msg3_mac_ce_list                                          last_msg3_mac_ces;
   std::optional<du_ue_index_t>                              last_ue_config_applied;
   wait_manual_event_tester<mac_ue_create_response>          wait_ue_create;
   wait_manual_event_tester<mac_ue_reconfiguration_response> wait_ue_reconf;
   wait_manual_event_tester<mac_ue_delete_response>          wait_ue_delete;
   bool                                                      next_ul_ccch_msg_result = true;
+  /// System Information of the last cell created in the MAC.
+  std::optional<mac_cell_creation_request> last_cell_creation_req;
 
   mac_cell_manager&                    get_cell_manager() override { return *this; }
   mac_ue_configurator&                 get_ue_configurator() override { return *this; }
   mac_positioning_measurement_handler& get_positioning_handler() override { return *this; }
 
-  mac_cell_controller&      add_cell(const mac_cell_creation_request& cell_cfg) override { return mac_cell; }
+  mac_cell_controller& add_cell(const mac_cell_creation_request& cell_cfg) override
+  {
+    last_cell_creation_req.emplace();
+    last_cell_creation_req->cell_index                      = cell_cfg.cell_index;
+    last_cell_creation_req->sys_info.si_sched_cfg           = cell_cfg.sys_info.si_sched_cfg;
+    last_cell_creation_req->sys_info.sib1_contains_hypersfn = cell_cfg.sys_info.sib1_contains_hypersfn;
+    last_cell_creation_req->sys_info.sib1                   = cell_cfg.sys_info.sib1.copy();
+    for (const auto& msg : cell_cfg.sys_info.si_messages) {
+      auto& copied = last_cell_creation_req->sys_info.si_messages.emplace_back();
+      for (const byte_buffer& segment : msg) {
+        copied.push_back(segment.copy());
+      }
+    }
+    for (const auto& msg : cell_cfg.sys_info.pws_si_messages) {
+      auto& copied = last_cell_creation_req->sys_info.pws_si_messages.emplace_back();
+      for (const byte_buffer& segment : msg) {
+        copied.push_back(segment.copy());
+      }
+    }
+    return mac_cell;
+  }
   void                      remove_cell(du_cell_index_t cell_index) override {}
   mac_cell_controller&      get_cell_controller(du_cell_index_t cell_index) override { return mac_cell; }
   mac_subframe_time_mapper& get_subframe_time_mapper() override { return sfn_time_mapper; }
@@ -372,9 +395,14 @@ public:
     last_ue_delete_msg = msg;
     return wait_ue_delete.launch();
   }
-  bool handle_ul_ccch_msg(du_ue_index_t ue_index, byte_buffer pdu) override
+  bool handle_ul_ccch_msg(du_ue_index_t    ue_index,
+                          du_cell_index_t  cell_index,
+                          slot_point       slot_rx,
+                          byte_buffer      ul_ccch_msg,
+                          msg3_mac_ce_list mac_ces) override
   {
-    last_pushed_ul_ccch_msg = std::move(pdu);
+    last_pushed_ul_ccch_msg = std::move(ul_ccch_msg);
+    last_msg3_mac_ces       = std::move(mac_ces);
     return next_ul_ccch_msg_result;
   }
   void handle_ue_config_applied(du_ue_index_t ue_index) override { last_ue_config_applied = ue_index; }

@@ -16,6 +16,8 @@
 #include "ocudu/ran/duplex_mode.h"
 #include "ocudu/ran/pdcch/pdcch_candidates.h"
 #include "ocudu/ran/prach/prach_configuration.h"
+#include "ocudu/ran/prs/prs.h"
+#include "ocudu/ran/prs/prs_constants.h"
 #include "ocudu/ran/pucch/pucch_info.h"
 #include "ocudu/ran/pucch/pucch_mapping.h"
 #include "ocudu/ran/sib/cell_reselection.h"
@@ -78,6 +80,48 @@ static trp_position_direct_accuracy_t make_trp_geo_coordinates(const du_high_uni
     return make_trp_geo_coordinates_normal(*cfg);
   }
   return make_trp_geo_coordinates_ha(std::get<du_high_unit_cell_geo_coordinates_ha_config>(geo_cfg));
+}
+
+/// \brief Generates the DL-PRS configuration of a cell.
+///
+/// \param prs_cfg  DL-PRS application configuration of the cell.
+/// \param nof_crbs Number of CRBs of the cell, used to derive the bandwidth of the resource sets that do not set it.
+static prs_config make_prs_config(const du_high_unit_prs_config& prs_cfg, unsigned nof_crbs)
+{
+  prs_config out;
+
+  out.resource_sets.reserve(prs_cfg.resource_sets.size());
+  for (const auto& res_set_cfg : prs_cfg.resource_sets) {
+    prs_resource_set& res_set = out.resource_sets.emplace_back();
+    if (res_set_cfg.bandwidth_prbs.has_value()) {
+      res_set.bandwidth_prbs = static_cast<uint16_t>(res_set_cfg.bandwidth_prbs.value());
+    } else {
+      // The PRS bandwidth is a multiple of the PRB granularity and does not exceed the maximum. A start PRB past the
+      // end of the cell bandwidth results in a null bandwidth, which the DU cell config validator rejects.
+      const unsigned nof_crbs_left = (res_set_cfg.start_prb < nof_crbs) ? (nof_crbs - res_set_cfg.start_prb) : 0U;
+      res_set.bandwidth_prbs       = static_cast<uint16_t>(std::min(
+          prs_constants::MAX_PRBS, (nof_crbs_left / prs_constants::PRB_GRANULARITY) * prs_constants::PRB_GRANULARITY));
+    }
+    res_set.start_prb         = static_cast<uint16_t>(res_set_cfg.start_prb);
+    res_set.comb_size         = static_cast<prs_comb_size>(res_set_cfg.comb_size);
+    res_set.periodicity_slots = res_set_cfg.periodicity_slots;
+    res_set.slot_offset       = res_set_cfg.slot_offset;
+    res_set.repetition_factor = static_cast<prs_repetition_factor>(res_set_cfg.repetition_factor);
+    res_set.time_gap          = static_cast<prs_time_gap>(res_set_cfg.time_gap);
+    res_set.nof_symbols       = static_cast<prs_num_symbols>(res_set_cfg.nof_symbols);
+    res_set.power_offset_db   = static_cast<int8_t>(res_set_cfg.power_offset_db);
+
+    res_set.resources.reserve(res_set_cfg.resources.size());
+    for (const auto& res_cfg : res_set_cfg.resources) {
+      prs_resource& res = res_set.resources.emplace_back();
+      res.sequence_id   = static_cast<uint16_t>(res_cfg.sequence_id);
+      res.re_offset     = static_cast<uint8_t>(res_cfg.re_offset);
+      res.slot_offset   = static_cast<uint16_t>(res_cfg.slot_offset);
+      res.symbol_offset = static_cast<uint8_t>(res_cfg.symbol_offset);
+    }
+  }
+
+  return out;
 }
 
 static tdd_ul_dl_config_common generate_tdd_pattern(subcarrier_spacing scs, const du_high_unit_tdd_ul_dl_config& config)
@@ -216,7 +260,7 @@ static sib5_info create_sib5_info(const du_high_unit_sib_config::sib5_config& co
   return sib5;
 }
 
-static sib6_info create_sib6_info(const du_high_unit_sib_config::etws_config& cfg)
+static sib6_info create_sib6_info(const du_high_unit_sib_config::etws_config::test_config& cfg)
 {
   sib6_info sib6;
 
@@ -227,7 +271,7 @@ static sib6_info create_sib6_info(const du_high_unit_sib_config::etws_config& cf
   return sib6;
 }
 
-static sib7_info create_sib7_info(const du_high_unit_sib_config::etws_config& cfg)
+static sib7_info create_sib7_info(const du_high_unit_sib_config::etws_config::test_config& cfg)
 {
   sib7_info sib7;
 
@@ -239,7 +283,7 @@ static sib7_info create_sib7_info(const du_high_unit_sib_config::etws_config& cf
   return sib7;
 }
 
-static sib8_info create_sib8_info(const du_high_unit_sib_config::cmas_config& cfg)
+static sib8_info create_sib8_info(const du_high_unit_sib_config::cmas_config::test_config& cfg)
 {
   sib8_info sib8;
 
@@ -449,25 +493,55 @@ static ntn_cell_params make_ntn_cell_params(const du_high_unit_ntn_serving_cell_
   ntn.ntn_cfg.ta_report                = cfg.ta_report;
   ntn.ntn_cfg.ephemeris_info           = cfg.sat_ref.ephemeris_info;
 
+  if (cfg.ta_report_offset_threshold.has_value()) {
+    ntn.tar_cfg = tar_config{
+        std::chrono::microseconds{static_cast<int64_t>(std::lround(*cfg.ta_report_offset_threshold * 1000.0F))},
+        cfg.ta_report_sr_enabled};
+  }
+
   // Derived from PUSCH config.
   ntn.ul_harq_mode_b = ul_harq_mode_b;
 
   return ntn;
 }
 
-/// Fill SI-Scheduling Information.
+/// \brief Fills the SI messages that carry a warning, and the content the cell broadcasts them with, if any.
+///
+/// A warning SIB is never mapped together with another SIB, so ETWS takes one SI message for its primary notification
+/// and another for its secondary one. Only a warning configured for testing has content from the start; any other one
+/// waits for a Write-Replace Warning to provide it.
+static void fill_pws_si_messages(si_scheduling_info_config& out, const du_high_unit_sib_config& sib_cfg)
+{
+  if (sib_cfg.etws_cfg.has_value()) {
+    const auto& etws = sib_cfg.etws_cfg.value();
+    out.pws_si_messages.push_back({sib_type::sib6, etws.si_period_rf, etws.test.has_value()});
+    out.pws_si_messages.push_back({sib_type::sib7, etws.si_period_rf, etws.test.has_value()});
+    if (etws.test.has_value()) {
+      out.sibs.push_back({create_sib6_info(etws.test.value()), value_tag_t::min()});
+      out.sibs.push_back({create_sib7_info(etws.test.value()), value_tag_t::min()});
+    }
+  }
+  if (sib_cfg.cmas_cfg.has_value()) {
+    const auto& cmas = sib_cfg.cmas_cfg.value();
+    out.pws_si_messages.push_back({sib_type::sib8, cmas.si_period_rf, cmas.test.has_value()});
+    if (cmas.test.has_value()) {
+      out.sibs.push_back({create_sib8_info(cmas.test.value()), value_tag_t::min()});
+    }
+  }
+}
+
 static std::optional<si_scheduling_info_config> make_si_sched_info_config(const du_high_unit_base_cell_config& cell_cfg)
 {
   const auto& sib_cfg = cell_cfg.sib_cfg;
-  if (sib_cfg.si_sched_info.empty()) {
+  if (sib_cfg.si_sched_info.empty() and not sib_cfg.etws_cfg.has_value() and not sib_cfg.cmas_cfg.has_value()) {
     return std::nullopt;
   }
   si_scheduling_info_config out;
   out.si_window_len_slots = sib_cfg.si_window_len_slots;
+  fill_pws_si_messages(out, sib_cfg);
   // Set SIB mapping info.
   out.si_sched_info.resize(sib_cfg.si_sched_info.size());
   std::vector<uint8_t> sibs_included;
-  auto                 is_pws_sib = [](uint8_t sib_id) { return ocudu::is_pws_sib(static_cast<sib_type>(sib_id)); };
   for (unsigned i = 0; i != sib_cfg.si_sched_info.size(); ++i) {
     auto& out_si                  = out.si_sched_info[i];
     out_si.si_period_radio_frames = sib_cfg.si_sched_info[i].si_period_rf;
@@ -475,16 +549,6 @@ static std::optional<si_scheduling_info_config> make_si_sched_info_config(const 
     out_si.si_window_position = sib_cfg.si_sched_info[i].si_window_position;
 
     const auto& sib_mapping_info = sib_cfg.si_sched_info[i].sib_mapping_info;
-    // An SI-message that carries SIB6/7/8 requires explicit activation before being scheduled: it keeps a reserved
-    // occasion in schedulingInfoList, but has no real content until an F1AP Write-Replace Warning activates it.
-    // Unless its (testing-only) content is explicitly configured, in which case it is broadcast right away,
-    // indefinitely.
-    if (std::any_of(sib_mapping_info.begin(), sib_mapping_info.end(), is_pws_sib)) {
-      out_si.auto_broadcast = std::any_of(sib_mapping_info.begin(), sib_mapping_info.end(), [&sib_cfg](uint8_t sib_id) {
-        return sib_id == 8 ? sib_cfg.cmas_cfg.has_value() : sib_cfg.etws_cfg.has_value();
-      });
-    }
-
     for (unsigned j = 0; j != sib_mapping_info.size(); ++j) {
       const uint8_t sib_id = sib_mapping_info[j];
       sibs_included.push_back(sib_id);
@@ -523,24 +587,6 @@ static std::optional<si_scheduling_info_config> make_si_sched_info_config(const 
                        "the si_sched_info list");
         }
         item = create_sib5_info(sib_cfg.sib5_cfg.value());
-      } break;
-      case 6: {
-        if (!sib_cfg.etws_cfg.has_value()) {
-          continue;
-        }
-        item = create_sib6_info(sib_cfg.etws_cfg.value());
-      } break;
-      case 7: {
-        if (!sib_cfg.etws_cfg.has_value()) {
-          continue;
-        }
-        item = create_sib7_info(sib_cfg.etws_cfg.value());
-      } break;
-      case 8: {
-        if (!sib_cfg.cmas_cfg.has_value()) {
-          continue;
-        }
-        item = create_sib8_info(sib_cfg.cmas_cfg.value());
       } break;
       case 16: {
         if (!sib_cfg.sib16_cfg.has_value()) {
@@ -665,11 +711,22 @@ std::vector<odu::du_cell_config> ocudu::generate_du_cell_config(const du_high_un
     out_cell.nr_cgi.nci     = nr_cell_identity::create(config.gnb_id, base_cell.sector_id.value()).value();
     out_cell.tac            = base_cell.tac;
     out_cell.enabled        = base_cell.enabled;
+    // The list leads with the cell TAC.
+    if (!base_cell.additional_tacs.empty()) {
+      out_cell.tac_list.push_back(base_cell.tac);
+      for (tac_t tac : base_cell.additional_tacs) {
+        out_cell.tac_list.push_back(tac);
+      }
+    }
 
     // > TA offset.
     out_cell.ran.ta_offset = band_helper::get_ta_offset(band, base_cell.eutra_coexistence);
 
     // > SSB.
+    out_cell.ran.ssb_cfg.ssb_beams.reset();
+    for (const auto& ssb_beam : base_cell.ssb_cfg.beams) {
+      out_cell.ran.ssb_cfg.ssb_beams.set_beam(ssb_beam.ssb_index, to_beam_id(ssb_beam.beam_id));
+    }
     out_cell.ran.ssb_cfg.ssb_period      = static_cast<ssb_periodicity>(base_cell.ssb_cfg.ssb_period_msec);
     out_cell.ran.ssb_cfg.ssb_block_power = base_cell.ssb_cfg.ssb_block_power;
     out_cell.ran.ssb_cfg.pss_to_sss_epre = base_cell.ssb_cfg.pss_to_sss_epre;
@@ -757,6 +814,12 @@ std::vector<odu::du_cell_config> ocudu::generate_du_cell_config(const du_high_un
     if (base_cell.geo_coordinates_cfg.has_value()) {
       out_cell.trp_geo_coordinates = make_trp_geo_coordinates(base_cell.geo_coordinates_cfg.value());
     }
+
+    // Number of CRBs of the cell.
+    const unsigned nof_crbs = band_helper::get_n_rbs_from_bw(base_cell.channel_bw_mhz, param.scs_common, freq_range);
+
+    // DL-PRS parameters.
+    out_cell.prs_cfg = make_prs_config(base_cell.prs_cfg, nof_crbs);
 
     // MAC Cell Group Config parameters.
     out_cell.mcg_params = make_mac_cell_group_params(base_cell);
@@ -855,8 +918,7 @@ std::vector<odu::du_cell_config> ocudu::generate_du_cell_config(const du_high_un
     if (base_cell.pdcch_cfg.dedicated.coreset1_rb_start.has_value()) {
       cset1_start_crb = base_cell.pdcch_cfg.dedicated.coreset1_rb_start.value();
     }
-    const unsigned nof_crbs    = band_helper::get_n_rbs_from_bw(base_cell.channel_bw_mhz, param.scs_common, freq_range);
-    unsigned       cset1_l_crb = nof_crbs - cset1_start_crb;
+    unsigned cset1_l_crb = nof_crbs - cset1_start_crb;
     if (base_cell.pdcch_cfg.dedicated.coreset1_l_crb.has_value()) {
       cset1_l_crb = base_cell.pdcch_cfg.dedicated.coreset1_l_crb.value();
     }
@@ -1064,10 +1126,17 @@ std::vector<odu::du_cell_config> ocudu::generate_du_cell_config(const du_high_un
     if (user_cg_cfg.periodicity_slots.has_value()) {
       cg_builder_params du_cg_params{};
       du_cg_params.periodicity = static_cast<cg_configuration::periodicity_t>(user_cg_cfg.periodicity_slots.value());
-      du_cg_params.nof_rbs     = user_cg_cfg.nof_rbs;
       du_cg_params.mcs         = user_cg_cfg.mcs;
       du_cg_params.nof_harq_processes  = user_cg_cfg.nof_harq_processes;
       du_cg_params.max_nof_cell_cg_rbs = user_cg_cfg.max_nof_cell_cg_rbs;
+      // The requested bitrate, when set, takes precedence over the grant size.
+      if (user_cg_cfg.requested_bitrate.has_value()) {
+        // The CLI requested bitrate is passed in kBps, while in the cg_builder_params the corresponding value is in
+        // bytes per seconds.
+        du_cg_params.grant_size_or_bitrate.emplace<units::byterate>(user_cg_cfg.requested_bitrate.value() * 1000U);
+      } else {
+        du_cg_params.grant_size_or_bitrate.emplace<units::bytes>(user_cg_cfg.grant_size);
+      }
       beta_offsets cg_b_offsets{};
       cg_b_offsets.beta_offset_ack_idx_1    = base_cell.pusch_cfg.beta_offset_ack_idx_1;
       cg_b_offsets.beta_offset_ack_idx_2    = base_cell.pusch_cfg.beta_offset_ack_idx_2;
@@ -1217,14 +1286,25 @@ static std::map<five_qi_t, odu::du_qos_config> generate_du_qos_config(const du_h
   return out_cfg;
 }
 
+/// Finds the SRB entry with the given id in the (unordered) SRB list, or nullptr if absent.
+static const du_high_unit_srb_config* find_srb(const std::vector<du_high_unit_srb_config>& srbs, srb_id_t id)
+{
+  for (const auto& srb : srbs) {
+    if (static_cast<srb_id_t>(srb.srb_id) == id) {
+      return &srb;
+    }
+  }
+  return nullptr;
+}
+
 static std::map<srb_id_t, odu::du_srb_config> generate_du_srb_config(const du_high_unit_config& config)
 {
   std::map<srb_id_t, odu::du_srb_config> srb_cfg;
 
   // SRB1
   srb_cfg.insert(std::make_pair(srb_id_t::srb1, odu::du_srb_config{}));
-  if (config.srb_cfg.find(srb_id_t::srb1) != config.srb_cfg.end()) {
-    const auto& in_srb1       = config.srb_cfg.at(srb_id_t::srb1);
+  if (const du_high_unit_srb_config* in_srb1_ptr = find_srb(config.srb_cfg, srb_id_t::srb1)) {
+    const auto& in_srb1       = *in_srb1_ptr;
     auto&       out_srb1      = srb_cfg[srb_id_t::srb1];
     auto&       out_rlc       = out_srb1.rlc;
     out_rlc.mode              = rlc_mode::am;
@@ -1244,10 +1324,10 @@ static std::map<srb_id_t, odu::du_srb_config> generate_du_srb_config(const du_hi
 
   // SRB2
   srb_cfg.insert(std::make_pair(srb_id_t::srb2, odu::du_srb_config{}));
-  if (config.srb_cfg.find(srb_id_t::srb2) != config.srb_cfg.end()) {
+  if (const du_high_unit_srb_config* in_srb2 = find_srb(config.srb_cfg, srb_id_t::srb2)) {
     auto& out_rlc             = srb_cfg[srb_id_t::srb2].rlc;
     out_rlc.mode              = rlc_mode::am;
-    out_rlc.am                = generate_du_rlc_am_config(config.srb_cfg.at(srb_id_t::srb2).rlc);
+    out_rlc.am                = generate_du_rlc_am_config(in_srb2->rlc);
     out_rlc.am.tx.pdcp_sn_len = pdcp_sn_size::size12bits;
   } else {
     srb_cfg.at(srb_id_t::srb2).rlc = make_default_srb_rlc_config();
@@ -1255,10 +1335,10 @@ static std::map<srb_id_t, odu::du_srb_config> generate_du_srb_config(const du_hi
 
   // SRB3
   srb_cfg.insert(std::make_pair(srb_id_t::srb3, odu::du_srb_config{}));
-  if (config.srb_cfg.find(srb_id_t::srb3) != config.srb_cfg.end()) {
+  if (const du_high_unit_srb_config* in_srb3 = find_srb(config.srb_cfg, srb_id_t::srb3)) {
     auto& out_rlc             = srb_cfg[srb_id_t::srb3].rlc;
     out_rlc.mode              = rlc_mode::am;
-    out_rlc.am                = generate_du_rlc_am_config(config.srb_cfg.at(srb_id_t::srb3).rlc);
+    out_rlc.am                = generate_du_rlc_am_config(in_srb3->rlc);
     out_rlc.am.tx.pdcp_sn_len = pdcp_sn_size::size12bits;
   } else {
     srb_cfg.at(srb_id_t::srb3).rlc = make_default_srb_rlc_config();

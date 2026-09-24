@@ -412,6 +412,22 @@ static std::vector<ocucp::supported_tracking_area> get_supported_tas(span<const 
   return supported_tas;
 }
 
+/// Gets the address of the SCTP association with the given AMF.
+static transport_layer_address get_amf_address(const cu_cp_unit_amf_config_item& amf_cfg)
+{
+  if (amf_cfg.ip_addrs.empty()) {
+    report_error("No address configured for the AMF.\n");
+  }
+
+  // TODO: Take the address the SCTP association actually established, which the gateway resolves with
+  // sctp_getpaddrs() but does not expose. The remaining configured addresses are multihoming alternatives of the same
+  // association, so an AMF whose primary path is not the first of them is reported wrongly.
+  transport_layer_address amf_addr = transport_layer_address::create_from_string(amf_cfg.ip_addrs.front());
+  amf_addr.set_port(amf_cfg.port);
+
+  return amf_addr;
+}
+
 /// Generates the NGAP configuration and returns it.
 static ocucp::cu_cp_configuration::ngap_params generate_ngap_conf(const cu_cp_unit_config& cu_cfg)
 {
@@ -419,10 +435,11 @@ static ocucp::cu_cp_configuration::ngap_params generate_ngap_conf(const cu_cp_un
       get_supported_tas(cu_cfg.amf_config.amf.supported_tas);
 
   std::vector<ocucp::cu_cp_configuration::ngap_config> ngaps{
-      ocucp::cu_cp_configuration::ngap_config{amf_supported_tas}};
+      ocucp::cu_cp_configuration::ngap_config{amf_supported_tas, get_amf_address(cu_cfg.amf_config.amf)}};
 
   for (const auto& cfg : cu_cfg.extra_amfs) {
-    ngaps.push_back(ocucp::cu_cp_configuration::ngap_config{get_supported_tas(cfg.supported_tas)});
+    ngaps.push_back(
+        ocucp::cu_cp_configuration::ngap_config{get_supported_tas(cfg.supported_tas), get_amf_address(cfg)});
   }
 
   return ocucp::cu_cp_configuration::ngap_params{
@@ -677,6 +694,16 @@ ocucp::cu_cp_configuration ocudu::generate_cu_cp_config(const cu_cp_unit_config&
                                             .metrics          = generate_metrics_conf(cu_cfg.metrics),
                                             .services         = generate_services_conf(),
                                             .metrics_notifier = nullptr};
+
+  // Logical cells: derive the NCI from the gNB Id and the sector ID, matching the DU's NCI derivation, so
+  // the entry addresses the DU cell with the same sector ID.
+  for (const cu_cp_unit_logical_cell_config& cell : cu_cfg.cells_cfg) {
+    ocucp::cu_cp_logical_cell_config out_cell;
+    out_cell.nci         = nr_cell_identity::create(cu_cfg.gnb_id, cell.sector_id).value();
+    out_cell.admin_state = cell.admin_state;
+    out_cell.barred      = cell.cell_barred;
+    out_cfg.cells.push_back(out_cell);
+  }
 
   if (!config_helpers::is_valid_configuration(out_cfg)) {
     report_error("Invalid CU-CP configuration.\n");

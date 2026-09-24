@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "ocudu/adt/expected.h"
 #include "ocudu/adt/tensor.h"
 #include "ocudu/ocuduvec/fill.h"
 #include "ocudu/ocuduvec/zero.h"
@@ -12,12 +13,13 @@
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/phy/support/shared_resource_grid.h"
 #include "ocudu/support/error_handling.h"
+#include "ocudu/support/math/math_utils.h"
 #include "ocudu/support/ocudu_assert.h"
-#include "ocudu/support/ocudu_test.h"
 #include "fmt/std.h"
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <gtest/gtest.h>
 #include <map>
 #include <tuple>
 
@@ -142,7 +144,7 @@ public:
   /// \param[in] expected_entries Provides a list of golden symbols to assert.
   /// \param[in] scaling Optional parameter that provides a scaling factor to apply on the values.
   /// \note The test is terminated in case of mismatch.
-  void assert_entries(span<const expected_entry_t> expected_entries, float scaling = 1) const
+  error_type<std::string> assert_entries(span<const expected_entry_t> expected_entries, float scaling = 1) const
   {
     // Count the number of writen RE.
     unsigned re_count = std::count_if(data.get_data().begin(), data.get_data().end(), [](cbf16_t value) {
@@ -150,7 +152,13 @@ public:
     });
 
     // Make sure the number of elements match.
-    TESTASSERT_EQ(expected_entries.size(), re_count);
+    if (expected_entries.size() != re_count) {
+      std::string msg =
+          fmt::format("The number of stored elements {} does not match the size of the expected entries {}.",
+                      re_count,
+                      expected_entries.size());
+      return make_unexpected(msg);
+    }
 
     // Iterate each expected entry, check that there is an entry and that the expected value error is below a threshold.
     for (const auto& entry : expected_entries) {
@@ -158,31 +166,43 @@ public:
       const cbf16_t& value_cbf16 = data[{entry.subcarrier, entry.symbol, entry.port}];
 
       // If the entry is zero, not a number or infinite, the value in the position of the grid shall be zero.
-      if (!std::isnormal(entry.value.real()) && !std::isnormal(entry.value.real())) {
-        TESTASSERT(value_cbf16 == cbf16_t());
+      if (!std::isnormal(entry.value.real()) && !std::isnormal(entry.value.imag())) {
+        if (value_cbf16 != cbf16_t()) {
+          std::string msg = fmt::format("Resource element for port={}, symbol={} and subcarrier={} should be zero.",
+                                        entry.port,
+                                        entry.symbol,
+                                        entry.subcarrier);
+          return make_unexpected(msg);
+        }
         continue;
       }
 
       // Verify the value is not the default.
-      TESTASSERT(value_cbf16 != cbf16_t(),
-                 "No resource element was written for port={}, symbol={} and subcarrier={}.",
-                 entry.port,
-                 entry.symbol,
-                 entry.subcarrier);
+      if (value_cbf16 == cbf16_t()) {
+        std::string msg = fmt::format("No resource element was written for port={}, symbol={} and subcarrier={}.",
+                                      entry.port,
+                                      entry.symbol,
+                                      entry.subcarrier);
+        return make_unexpected(msg);
+      }
 
       // Convert value to cf and compare with the expected value.
       cf_t  value = to_cf(value_cbf16) * scaling;
       float error = std::abs(entry.value - value);
       // Calculate maximum error allowed introduced by BFloat16 compression.
       float max_error = std::abs(entry.value) / 128.0;
-      TESTASSERT(error < max_error,
-                 "Mismatched value {} but expected {}. port={} symbol={} subcarrier={}.",
-                 value,
-                 entry.value,
-                 entry.port,
-                 entry.symbol,
-                 entry.subcarrier);
+      if (error >= max_error) {
+        std::string msg = fmt::format("Mismatched value {} (expected {}) at port={}, symbol={}, "
+                                      "subcarrier={}.",
+                                      value,
+                                      entry.value,
+                                      entry.port,
+                                      entry.symbol,
+                                      entry.subcarrier);
+        return make_unexpected(msg);
+      }
     }
+    return default_success_t();
   }
 
   /// Get the number of times a \c put method has been called.
@@ -221,22 +241,22 @@ private:
   void put(uint8_t port, uint8_t symbol, uint16_t subcarrier, cf_t value)
   {
     // Ensure the port, symbol and subcarrier indexes are in range.
-    TESTASSERT(port < max_ports, "Port index {} exceeded maximum {}.", port, max_ports);
-    TESTASSERT(symbol < max_symb, "Symbol index {} exceeded maximum {}.", symbol, max_symb);
-    TESTASSERT(subcarrier < max_prb * NOF_SUBCARRIERS_PER_RB,
-               "Subcarrier index {} exceeded maximum {}.",
-               subcarrier,
-               max_prb * NOF_SUBCARRIERS_PER_RB);
+    report_fatal_error_if_not(port < max_ports, "Port index {} exceeded maximum {}.", port, max_ports);
+    report_fatal_error_if_not(symbol < max_symb, "Symbol index {} exceeded maximum {}.", symbol, max_symb);
+    report_fatal_error_if_not(subcarrier < max_prb * NOF_SUBCARRIERS_PER_RB,
+                              "Subcarrier index {} exceeded maximum {}.",
+                              subcarrier,
+                              max_prb * NOF_SUBCARRIERS_PER_RB);
 
     // Select reference to the resource element.
     cbf16_t& value_cbf16 = data[{subcarrier, symbol, port}];
 
     // Ensure the resource element does not exist.
-    TESTASSERT(value_cbf16 == 0,
-               "Detected resource grid overwrite for port={}, symbol={} and subcarrier={}.",
-               port,
-               symbol,
-               subcarrier);
+    report_fatal_error_if_not(value_cbf16 == 0,
+                              "Detected resource grid overwrite for port={}, symbol={} and subcarrier={}.",
+                              port,
+                              symbol,
+                              subcarrier);
 
     // Write element.
     value_cbf16 = to_cbf16(value);

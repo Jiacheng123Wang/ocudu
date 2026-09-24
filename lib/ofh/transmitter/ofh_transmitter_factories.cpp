@@ -15,6 +15,7 @@
 #include "ocudu/ofh/compression/iq_compressor.h"
 #include "ocudu/ofh/ecpri/ecpri_factories.h"
 #include "ocudu/ofh/ethernet/ethernet_factories.h"
+#include "ocudu/ofh/ofh_sector_executor_mapper.h"
 #include "ocudu/ofh/serdes/ofh_serdes_factories.h"
 
 using namespace ocudu;
@@ -164,7 +165,7 @@ static transmitter_impl_dependencies
 resolve_transmitter_dependencies(const transmitter_config&                               tx_config,
                                  ocudulog::basic_logger&                                 logger,
                                  task_executor&                                          tx_executor,
-                                 task_executor&                                          downlink_executor,
+                                 ofh_sector_executor_mapper&                             exec_mapper,
                                  error_notifier&                                         err_notifier,
                                  std::unique_ptr<ether::transmitter>                     eth_transmitter,
                                  std::shared_ptr<prach_context_repository>               prach_context_repo,
@@ -173,12 +174,7 @@ resolve_transmitter_dependencies(const transmitter_config&                      
                                  std::shared_ptr<uplink_cplane_context_repository>       prach_cp_context_repo,
                                  std::shared_ptr<uplink_notified_grid_symbol_repository> notifier_symbol_repo)
 {
-  transmitter_impl_dependencies dependencies;
-
-  dependencies.logger       = &logger;
-  dependencies.executor     = &tx_executor;
-  dependencies.dl_executor  = &downlink_executor;
-  dependencies.err_notifier = &err_notifier;
+  transmitter_impl_dependencies dependencies{&logger, &err_notifier, &tx_executor, exec_mapper};
 
   dependencies.frame_pool_dl_cp =
       create_eth_frame_pool(tx_config, logger, message_type::control_plane, data_direction::downlink, false);
@@ -191,7 +187,7 @@ resolve_transmitter_dependencies(const transmitter_config&                      
                                     dependencies.frame_pool_dl_cp,
                                     ul_cp_context_repo,
                                     prach_cp_context_repo),
-      downlink_executor,
+      exec_mapper,
       tx_config.sector);
 
   dependencies.frame_pool_dl_up =
@@ -200,7 +196,7 @@ resolve_transmitter_dependencies(const transmitter_config&                      
   dependencies.dl_df_uplane = std::make_unique<data_flow_uplane_downlink_task_dispatcher>(
       logger,
       create_data_flow_uplane_data(tx_config, logger, dependencies.frame_pool_dl_up),
-      downlink_executor,
+      exec_mapper,
       tx_config.sector);
 
   dependencies.frame_pool_ul_cp =
@@ -225,7 +221,7 @@ std::unique_ptr<transmitter>
 ocudu::ofh::create_transmitter(const transmitter_config&                               transmitter_cfg,
                                ocudulog::basic_logger&                                 logger,
                                task_executor&                                          tx_executor,
-                               task_executor&                                          downlink_executor,
+                               ofh_sector_executor_mapper&                             exec_mapper,
                                error_notifier&                                         err_notifier,
                                std::unique_ptr<ether::transmitter>                     eth_transmitter,
                                std::shared_ptr<prach_context_repository>               prach_context_repo,
@@ -238,7 +234,7 @@ ocudu::ofh::create_transmitter(const transmitter_config&                        
                                             resolve_transmitter_dependencies(transmitter_cfg,
                                                                              logger,
                                                                              tx_executor,
-                                                                             downlink_executor,
+                                                                             exec_mapper,
                                                                              err_notifier,
                                                                              std::move(eth_transmitter),
                                                                              std::move(prach_context_repo),

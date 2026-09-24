@@ -6,7 +6,7 @@
 #include "precoding_matrix_repository_builder.h"
 #include "ocudu/adt/slotted_array.h"
 #include "ocudu/fapi_adaptor/precoding_matrix_mapper.h"
-#include "ocudu/ran/precoding/precoding_codebook_helpers.h"
+#include "ocudu/ran/precoding/precoding_codebook_type1_helpers.h"
 #include "ocudu/ran/precoding/precoding_codebooks.h"
 
 using namespace ocudu;
@@ -220,6 +220,11 @@ struct codebook_table_generator {
     }
     mapper_offsets.csi_rs_codebook_offsets.push_back(offset);
     generate_csi_rs(offset, nof_ports, repo_builder);
+  }
+
+  void operator()(const pmi_codebook_typeII&) const
+  {
+    report_fatal_error("Static generation and mapping of Type II precoding matrices is not supported.");
   }
 };
 

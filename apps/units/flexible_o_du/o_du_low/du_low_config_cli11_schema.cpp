@@ -24,26 +24,38 @@ static void configure_cli11_log_args(CLI::App& app, du_low_unit_logger_config& l
              "Enable logging in the physical and MAC layer of broadcast messages and all PRACH opportunities")
       ->always_capture_default();
   app.add_option("--phy_rx_symbols_filename",
-                 log_params.phy_rx_symbols_filename,
+                 log_params.phy_rx_symbol_printer.filename,
                  "Set to a valid file path to print the received symbols.")
       ->always_capture_default();
   app.add_option_function<std::string>(
          "--phy_rx_symbols_port",
          [&log_params](const std::string& value) {
            if (value == "all") {
-             log_params.phy_rx_symbols_port = std::nullopt;
+             log_params.phy_rx_symbol_printer.port = std::nullopt;
            } else {
-             log_params.phy_rx_symbols_port = parse_int<unsigned>(value).value();
+             log_params.phy_rx_symbol_printer.port = parse_int<unsigned>(value).value();
            }
          },
          "Set to a valid receive port number to dump the IQ symbols from that port only, or set to \"all\" to dump the "
          "IQ symbols from all UL receive ports. Only works if \"phy_rx_symbols_filename\" is set.")
       ->default_str("0")
       ->check(CLI::NonNegativeNumber | CLI::IsMember({"all"}));
-  app.add_option("--phy_rx_symbols_prach",
-                 log_params.phy_rx_symbols_prach,
-                 "Set to true to dump the IQ symbols from all the PRACH ports. Only works if "
+  app.add_option(
+         "--phy_rx_symbols_prach_threshold_rssi_dB",
+         log_params.phy_rx_symbol_printer.triggers.prach_threshold_rssi_dB,
+         "Set to a minimum RSSI value in decibels to dump the IQ symbols from all the PRACH ports. Only works if "
+         "\"phy_rx_symbols_filename\" is set.")
+      ->capture_default_str();
+  app.add_option("--phy_rx_symbols_pusch_on_ko",
+                 log_params.phy_rx_symbol_printer.triggers.pusch_on_ko,
+                 "Set to true to dump the uplink resource grid IQ symbols when a PUSCH CRC check fails. Only works if "
                  "\"phy_rx_symbols_filename\" is set.")
+      ->capture_default_str();
+  app.add_option(
+         "--phy_rx_symbols_pusch_threshold_sinr_dB",
+         log_params.phy_rx_symbol_printer.triggers.pusch_threshold_sinr_dB,
+         "Set to a SINR threshold in dB to dump the uplink resource grid IQ symbols when the PUSCH SINR is below this "
+         "value. Only works if \"phy_rx_symbols_filename\" is set.")
       ->capture_default_str();
 
   add_option(app,
@@ -243,13 +255,13 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              expert_phy_params.max_processing_delay_slots,
              "Maximum allowed DL processing delay in slots.")
       ->capture_default_str()
-      ->check(CLI::Range(1, 30));
+      ->range(1, 30);
   add_option(app,
              "--prach_th_correction_factor",
              expert_phy_params.prach_th_correction_factor,
              "Correction factor of the PRACH detection threshold")
       ->capture_default_str()
-      ->check(CLI::NonNegativeNumber);
+      ->non_negative();
   add_option(app,
              "--pusch_dec_max_iterations",
              expert_phy_params.pusch_decoder_max_iterations,
@@ -373,7 +385,7 @@ static void configure_cli11_expert_phy_args(CLI::App& app, du_low_unit_expert_up
              expert_phy_params.nof_slots_request_headroom,
              "Maximum request headroom size in slots.")
       ->capture_default_str()
-      ->check(CLI::Range(0, 30));
+      ->range(0, 30);
   add_option(app,
              "--allow_request_on_empty_uplink_slot",
              expert_phy_params.allow_request_on_empty_uplink_slot,
@@ -396,35 +408,38 @@ static void configure_cli11_hwacc_pdsch_enc_args(CLI::App& app, std::optional<hw
 {
   config.emplace();
 
-  app.add_option("--nof_hwacc", config->nof_hwacc, "Number of hardware-accelerated PDSCH encoding functions")
+  add_option(app, "--nof_hwacc", config->nof_hwacc, "Number of hardware-accelerated PDSCH encoding functions")
       ->capture_default_str()
-      ->check(CLI::Range(0, 64));
-  app.add_option("--cb_mode", config->cb_mode, "Operation mode of the PDSCH encoder (CB = true, TB = false [default])")
+      ->range(0, 64);
+  add_option(app, "--cb_mode", config->cb_mode, "Operation mode of the PDSCH encoder (CB = true, TB = false [default])")
       ->capture_default_str();
-  app.add_option("--max_buffer_size",
-                 config->max_buffer_size,
-                 "Maximum supported buffer size in bytes (CB mode will be forced for larger TBs)")
+  add_option(app,
+             "--max_buffer_size",
+             config->max_buffer_size,
+             "Maximum supported buffer size in bytes (CB mode will be forced for larger TBs)")
       ->capture_default_str();
-  app.add_option("--dedicated_queue",
-                 config->dedicated_queue,
-                 "Hardware queue use for the PDSCH encoder (dedicated = true [default], shared = false)")
+  add_option(app,
+             "--dedicated_queue",
+             config->dedicated_queue,
+             "Hardware queue use for the PDSCH encoder (dedicated = true [default], shared = false)")
       ->capture_default_str();
 }
 static void configure_cli11_hwacc_pusch_dec_args(CLI::App& app, std::optional<hwacc_pusch_appconfig>& config)
 {
   config.emplace();
 
-  app.add_option("--nof_hwacc", config->nof_hwacc, "Number of hardware-accelerated PDSCH encoding functions")
+  add_option(app, "--nof_hwacc", config->nof_hwacc, "Number of hardware-accelerated PDSCH encoding functions")
       ->capture_default_str()
-      ->check(CLI::Range(0, 64));
-  app.add_option("--harq_context_size", config->harq_context_size, "Size of the HARQ context repository")
+      ->range(0, 64);
+  add_option(app, "--harq_context_size", config->harq_context_size, "Size of the HARQ context repository")
       ->capture_default_str();
-  app.add_option(
-         "--force_local_harq", config->force_local_harq, "Force using the host memory to implement the HARQ buffer")
+  add_option(
+      app, "--force_local_harq", config->force_local_harq, "Force using the host memory to implement the HARQ buffer")
       ->capture_default_str();
-  app.add_option("--dedicated_queue",
-                 config->dedicated_queue,
-                 "Hardware queue use for the PUSCH decoder (dedicated = true [default], shared = false)")
+  add_option(app,
+             "--dedicated_queue",
+             config->dedicated_queue,
+             "Hardware queue use for the PUSCH decoder (dedicated = true [default], shared = false)")
       ->capture_default_str();
 }
 
@@ -439,34 +454,36 @@ static void configure_cli11_bbdev_hwacc_args(CLI::App& app, std::optional<bbdev_
 
   config.emplace();
 
-  app.add_option("--hwacc_type", config->hwacc_type, "Type of BBDEV hardware-accelerator")
+  add_option(app, "--hwacc_type", config->hwacc_type, "Type of BBDEV hardware-accelerator")
       ->capture_default_str()
       ->check(hwacc_type_check);
-  app.add_option("--id", config->id, "ID of the BBDEV-based hardware-accelerator.")
+  add_option(app, "--id", config->id, "ID of the BBDEV-based hardware-accelerator.")
       ->capture_default_str()
-      ->check(CLI::Range(0, 65535));
+      ->range(0, 65535);
 
   // (Optional) Hardware-accelerated PDSCH encoding functions configuration.
   CLI::App* hwacc_pdsch_enc_subcmd =
-      app.add_subcommand("pdsch_enc", "Hardware-accelerated PDSCH encoding functions configuration");
+      add_subcommand(app, "pdsch_enc", "Hardware-accelerated PDSCH encoding functions configuration");
   configure_cli11_hwacc_pdsch_enc_args(*hwacc_pdsch_enc_subcmd, config->pdsch_enc);
 
   // (Optional) Hardware-accelerated PUSCH decoding functions configuration.
   CLI::App* hwacc_pusch_dec_subcmd =
-      app.add_subcommand("pusch_dec", "Hardware-accelerated PUSCH decoding functions configuration");
+      add_subcommand(app, "pusch_dec", "Hardware-accelerated PUSCH decoding functions configuration");
   configure_cli11_hwacc_pusch_dec_args(*hwacc_pusch_dec_subcmd, config->pusch_dec);
 
-  app.add_option("--msg_mbuf_size",
-                 config->msg_mbuf_size,
-                 "Size of the mbufs storing unencoded and unrate-matched messages (in bytes)")
+  add_option(app,
+             "--msg_mbuf_size",
+             config->msg_mbuf_size,
+             "Size of the mbufs storing unencoded and unrate-matched messages (in bytes)")
       ->capture_default_str()
-      ->check(CLI::Range(0, 64000));
-  app.add_option("--rm_mbuf_size",
-                 config->rm_mbuf_size,
-                 "Size of the mbufs storing encoded and rate-matched messages (in bytes)")
+      ->range(0, 64000);
+  add_option(app,
+             "--rm_mbuf_size",
+             config->rm_mbuf_size,
+             "Size of the mbufs storing encoded and rate-matched messages (in bytes)")
       ->capture_default_str()
-      ->check(CLI::Range(0, 64000));
-  app.add_option("--nof_mbuf", config->nof_mbuf, "Number of mbufs in the memory pool")->capture_default_str();
+      ->range(0, 64000);
+  add_option(app, "--nof_mbuf", config->nof_mbuf, "Number of mbufs in the memory pool")->capture_default_str();
 }
 
 static void configure_cli11_hal_args(CLI::App& app, std::optional<du_low_unit_hal_config>& config)

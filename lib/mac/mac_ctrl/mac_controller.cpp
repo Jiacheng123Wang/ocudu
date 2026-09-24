@@ -11,7 +11,6 @@
 #include "ocudu/adt/format.h"
 #include "ocudu/mac/mac_clock_controller.h"
 #include "ocudu/ran/tdd/tdd_ul_dl_config.h"
-#include "fmt/base.h"
 
 using namespace ocudu;
 
@@ -35,7 +34,7 @@ mac_cell_controller& mac_controller::add_cell(const mac_cell_creation_request& c
 {
   ocudu_assert(not cells.contains(cell_add_req.cell_index),
                "cell={}: Overwriting an existing cell is invalid",
-               fmt::underlying(cell_add_req.cell_index));
+               cell_add_req.cell_index);
 
   // Add new cell to track timing.
   auto cell_time_source = time_ctrl.add_cell(cell_add_req.cell_index);
@@ -70,7 +69,7 @@ mac_cell_controller& mac_controller::add_cell(const mac_cell_creation_request& c
 
 void mac_controller::remove_cell(du_cell_index_t cell_index)
 {
-  ocudu_assert(cells.contains(cell_index), "cell={}: Accessing non-existent cell", fmt::underlying(cell_index));
+  ocudu_assert(cells.contains(cell_index), "cell={}: Accessing non-existent cell", cell_index);
 
   // > Remove cell from MAC Cell Handler.
   dl_unit.remove_cell(cell_index);
@@ -86,7 +85,7 @@ void mac_controller::remove_cell(du_cell_index_t cell_index)
 
 mac_cell_controller& mac_controller::get_cell_controller(du_cell_index_t cell_index)
 {
-  ocudu_assert(cells.contains(cell_index), "cell={}: Accessing non-existent cell", fmt::underlying(cell_index));
+  ocudu_assert(cells.contains(cell_index), "cell={}: Accessing non-existent cell", cell_index);
   return cells[cell_index];
 }
 
@@ -160,7 +159,7 @@ mac_controller::handle_ue_reconfiguration_request(const mac_ue_reconfiguration_r
 
 void mac_controller::handle_ue_config_applied(du_ue_index_t ue_index)
 {
-  ocudu_assert(ue_db.contains(ue_index), "Invalid ue_index={}", fmt::underlying(ue_index));
+  ocudu_assert(ue_db.contains(ue_index), "Invalid ue_index={}", ue_index);
 
   ul_unit.handle_ue_config_applied(ue_index);
 
@@ -169,7 +168,7 @@ void mac_controller::handle_ue_config_applied(du_ue_index_t ue_index)
 
 rnti_t mac_controller::add_ue(du_ue_index_t ue_index, du_cell_index_t cell_index, rnti_t tc_rnti)
 {
-  ocudu_assert(is_du_ue_index_valid(ue_index), "Invalid ue_index={}", fmt::underlying(ue_index));
+  ocudu_assert(is_du_ue_index_valid(ue_index), "Invalid ue_index={}", ue_index);
 
   if (ue_db.contains(ue_index)) {
     // UE already existed with same ue_index.
@@ -192,8 +191,7 @@ rnti_t mac_controller::add_ue(du_ue_index_t ue_index, du_cell_index_t cell_index
 
   // Update RNTI -> UE index map.
   if (not rnti_table.add_ue(u.rnti, ue_index)) {
-    logger.error(
-        "ue={} rnti={}: The update of the RNTI table overwrote a previous entry", fmt::underlying(ue_index), u.rnti);
+    logger.error("ue={} rnti={}: The update of the RNTI table overwrote a previous entry", ue_index, u.rnti);
     rnti_table.rem_ue(u.rnti);
     return rnti_t::INVALID_RNTI;
   }

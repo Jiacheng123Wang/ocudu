@@ -6,6 +6,7 @@
 
 #include "ocudu/adt/bounded_integer.h"
 #include "ocudu/ran/configured_grant/cg_configuration.h"
+#include "ocudu/support/units.h"
 #include <optional>
 
 namespace ocudu {
@@ -17,8 +18,10 @@ struct cg_builder_params {
   /// 2560, 5120}.
   /// For 12 symbols slots, values={1024, 5120} are not allowed.
   std::optional<cg_configuration::periodicity_t> periodicity = cg_configuration::periodicity_t::sl40;
-  /// Number of RBs that are configured for the UE configured grant.
-  unsigned nof_rbs = 10;
+  /// Grant size in bytes or rate in bytes per second requested for this Configured Grant.
+  /// NOTE: The default of 120 bytes results in 10 PRBs at the default MCS 5, which fits within the default
+  /// \c max_nof_cell_cg_rbs.
+  std::variant<units::bytes, units::byterate> grant_size_or_bitrate{units::bytes{120}};
   /// MCS configured for the UE configured grant. Values: {1,...,27}.
   unsigned mcs = 5;
   /// Number of HARQ processes reserved for configured grant. Values: {1,...,16}.

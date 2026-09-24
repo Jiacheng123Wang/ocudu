@@ -119,28 +119,30 @@ protected:
     cfg.plmns                   = {"00101"};
     cfg.qos[uint_to_five_qi(9)] = {};
 
-    cfg.n3_cfg.gtpu_reordering_timer     = std::chrono::milliseconds(0);
-    cfg.n3_cfg.gtpu_rate_limiting_period = std::chrono::milliseconds(100);
-    cfg.n3_cfg.gtpu_queue_size           = 8192;
-    cfg.n3_cfg.gtpu_batch_size           = 256;
-    cfg.n3_cfg.gtpu_ignore_ue_ambr       = false;
-    cfg.n3_cfg.warn_on_drop              = false;
-    cfg.statistics_report_period         = std::chrono::seconds(1);
+    cfg.ngu_cfg.gtpu_reordering_timer     = std::chrono::milliseconds(0);
+    cfg.ngu_cfg.gtpu_rate_limiting_period = std::chrono::milliseconds(100);
+    cfg.ngu_cfg.gtpu_queue_size           = 8192;
+    cfg.ngu_cfg.gtpu_batch_size           = 256;
+    cfg.ngu_cfg.gtpu_ignore_ue_ambr       = false;
+    cfg.ngu_cfg.warn_on_drop              = false;
+    cfg.statistics_report_period          = std::chrono::seconds(1);
 
     return cfg;
   }
 
   cu_up_dependencies get_default_cu_up_dependencies()
   {
-    cu_up_dependencies deps;
-    deps.gtpu_pcap          = &dummy_pcap;
-    deps.exec_mapper        = exec_pool.get();
-    deps.e1_conn_clients    = {&e1ap_client};
-    deps.f1u_teid_allocator = f1u_teid_allocator.get();
-    deps.f1u_gateway        = f1u_gw.get();
-    ngu_gw                  = create_udp_gtpu_gateway(cu_up_udp_cfg, *broker, *executor, *executor);
-    deps.ngu_gws.push_back(ngu_gw.get());
-    deps.timers = app_timers.get();
+    cu_up_dependencies deps{.exec_mapper          = *exec_pool,
+                            .f1u_teid_allocator   = *f1u_teid_allocator,
+                            .f1u_gateway          = *f1u_gw,
+                            .timers               = *app_timers,
+                            .gtpu_pcap            = dummy_pcap,
+                            .logger               = ocudulog::fetch_basic_logger("TEST"),
+                            .pdcp_metric_notifier = nullptr,
+                            .e1_conn_clients      = {&e1ap_client},
+                            .ngu_gws              = {},
+                            .e1_setup_notifier    = nullptr};
+    deps.ngu_gws.push_back(create_udp_gtpu_gateway(cu_up_udp_cfg, *broker, *executor, *executor));
     return deps;
   }
 
@@ -244,7 +246,7 @@ TEST_F(cu_up_test, dl_data_flow)
   // Initialize UPF simulator on a random port.
   upf_info_t upf_info = init_upf();
   ASSERT_GE(upf_info.sock_fd, 0);
-  cfg.n3_cfg.upf_port = ntohs(upf_info.upf_addr.sin_port);
+  cfg.ngu_cfg.upf_port = ntohs(upf_info.upf_addr.sin_port);
 
   cu_up_dependencies dependencies = get_default_cu_up_dependencies();
 
@@ -285,7 +287,7 @@ TEST_F(cu_up_test, dl_data_flow)
   // Now that the disered buffer size is updated, we push DL PDUs
   sockaddr_in cu_up_addr;
   cu_up_addr.sin_family      = AF_INET;
-  cu_up_addr.sin_port        = htons(cu_up->get_n3_bind_port().value());
+  cu_up_addr.sin_port        = htons(cu_up->get_ngu_bind_port().value());
   cu_up_addr.sin_addr.s_addr = inet_addr(cu_up_udp_cfg.bind_address.c_str());
 
   // DL PDU teid=2, qfi=1
@@ -300,13 +302,13 @@ TEST_F(cu_up_test, dl_data_flow)
   // send message 1
   ret = sendto(upf_info.sock_fd, gtpu_ping_vec, sizeof(gtpu_ping_vec), 0, (sockaddr*)&cu_up_addr, sizeof(cu_up_addr));
   ASSERT_GE(ret, 0) << "Failed to send message via sock_fd=" << upf_info.sock_fd << " to `"
-                    << cu_up_udp_cfg.bind_address << ":" << cu_up->get_n3_bind_port().value() << "` - "
+                    << cu_up_udp_cfg.bind_address << ":" << cu_up->get_ngu_bind_port().value() << "` - "
                     << ::strerror(errno);
 
   // send message 2
   ret = sendto(upf_info.sock_fd, gtpu_ping_vec, sizeof(gtpu_ping_vec), 0, (sockaddr*)&cu_up_addr, sizeof(cu_up_addr));
   ASSERT_GE(ret, 0) << "Failed to send message via sock_fd=" << upf_info.sock_fd << " to `"
-                    << cu_up_udp_cfg.bind_address << ":" << cu_up->get_n3_bind_port().value() << "` - "
+                    << cu_up_udp_cfg.bind_address << ":" << cu_up->get_ngu_bind_port().value() << "` - "
                     << ::strerror(errno);
   ::close(upf_info.sock_fd);
 
@@ -334,8 +336,8 @@ TEST_F(cu_up_test, ul_data_flow)
   cu_up_config cfg = get_default_cu_up_config();
 
   //> Test preamble: listen on a free port
-  upf_info_t upf_info = init_upf();
-  cfg.n3_cfg.upf_port = ntohs(upf_info.upf_addr.sin_port);
+  upf_info_t upf_info  = init_upf();
+  cfg.ngu_cfg.upf_port = ntohs(upf_info.upf_addr.sin_port);
 
   //> Test main part: create CU-UP and transmit data
   cu_up_dependencies dependencies = get_default_cu_up_dependencies();
@@ -395,8 +397,8 @@ TEST_F(cu_up_test, echo_data_flow)
   cu_up_config cfg = get_default_cu_up_config();
 
   //> Test preamble: listen on a free port
-  upf_info_t upf_info = init_upf();
-  cfg.n3_cfg.upf_port = ntohs(upf_info.upf_addr.sin_port);
+  upf_info_t upf_info  = init_upf();
+  cfg.ngu_cfg.upf_port = ntohs(upf_info.upf_addr.sin_port);
 
   //> Test main part: create CU-UP and transmit data
   cu_up_dependencies dependencies = get_default_cu_up_dependencies();
@@ -405,7 +407,7 @@ TEST_F(cu_up_test, echo_data_flow)
   // Now that the disered buffer size is updated, we push DL PDUs
   sockaddr_in cu_up_addr;
   cu_up_addr.sin_family      = AF_INET;
-  cu_up_addr.sin_port        = htons(cu_up->get_n3_bind_port().value());
+  cu_up_addr.sin_port        = htons(cu_up->get_ngu_bind_port().value());
   cu_up_addr.sin_addr.s_addr = inet_addr(cu_up_udp_cfg.bind_address.c_str());
 
   // Send GTP-U echo request test message.
@@ -415,7 +417,7 @@ TEST_F(cu_up_test, echo_data_flow)
   ret = sendto(
       upf_info.sock_fd, gtpu_echo_req_vec, sizeof(gtpu_echo_req_vec), 0, (sockaddr*)&cu_up_addr, sizeof(cu_up_addr));
   ASSERT_GE(ret, 0) << "Failed to send message via sock_fd=" << upf_info.sock_fd << " to `"
-                    << cu_up_udp_cfg.bind_address << ":" << cu_up->get_n3_bind_port().value() << "` - "
+                    << cu_up_udp_cfg.bind_address << ":" << cu_up->get_ngu_bind_port().value() << "` - "
                     << ::strerror(errno);
 
   // Receive GTP-U echo response message and check result.

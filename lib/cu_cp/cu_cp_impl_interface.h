@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "du_processor/du_reported_cell.h"
 #include "ocudu/cu_cp/cell_meas_manager_config.h"
 #include "ocudu/cu_cp/cu_cp_intra_cu_ho_types.h"
 #include "ocudu/e1ap/cu_cp/e1ap_cu_cp_bearer_context_update.h"
@@ -51,13 +52,11 @@ public:
   virtual ~cu_cp_inter_cu_handover_handler() = default;
 
   /// \brief Handle the reception of a new RRC Handover Command.
-  /// \param[in] ue_index The index of the UE that received the RRC Handover Command.
-  /// \param[in] command The received RRC container containing the Handover Command.
-  /// \param[in] xnc_index The XN-C index if the handover is a XN-C handover, std::nullopt otherwise.
+  /// \param[in] command The received Handover Command, including the data forwarding tunnels of the target.
+  /// \param[in] xnc_index The Xn-C index if the handover is a Xn-C handover, std::nullopt otherwise.
   /// \returns True if the RRC Handover Command was successfully handled, false otherwise.
   virtual async_task<bool>
-  handle_new_rrc_handover_command(cu_cp_ue_index_t                ue_index,
-                                  byte_buffer                     command,
+  handle_new_rrc_handover_command(cu_cp_rrc_handover_command      command,
                                   std::optional<xnc_peer_index_t> xnc_index = std::nullopt) = 0;
 
   /// \brief Handles UE index allocation request for N2 handover at target gNB.
@@ -75,7 +74,7 @@ public:
 
   /// \brief Handle the handover execution phase of the inter-CU handover at target gNB.
   /// \param[in] ue_index The index of the UE that is performing the handover.
-  /// \param[in] xnap_ho_target_execution_ctxt If the handover is a XN-C handover, the information required for the
+  /// \param[in] xnap_ho_target_execution_ctxt If the handover is a Xn-C handover, the information required for the
   /// target handover execution is included.
   virtual void handle_inter_cu_target_handover_execution(
       cu_cp_ue_index_t                                             ue_index,
@@ -221,6 +220,19 @@ public:
   /// \param[in] ue_index The index of the UE.
   /// \param[in] rrc_ue The interface of the created RRC UE.
   virtual void handle_rrc_ue_creation(cu_cp_ue_index_t ue_index, rrc_ue_interface& rrc_ue) = 0;
+
+  /// \brief Handle the cells reported by a DU in the F1 Setup procedure.
+  ///
+  /// Realizes the corresponding logical cells and decides, per reported cell, whether the CU-CP activates
+  /// it. Undeclared NCIs get a dynamic logical cell: unlocked when no cells were declared in configuration,
+  /// locked otherwise (the declared set acts as the activation whitelist).
+  /// \return NCIs of the reported cells to include in the F1 Setup Response Cells to be Activated List;
+  /// reported cells absent from it stay dormant (admin-locked).
+  virtual std::vector<nr_cell_identity> handle_du_cells_reported(cu_cp_du_index_t             du_index,
+                                                                 span<const du_reported_cell> cells) = 0;
+
+  /// \brief Handle the removal of a DU, de-realizing its logical cells while keeping operator intent.
+  virtual void handle_du_removed(cu_cp_du_index_t du_index) = 0;
 
   /// \brief Handle a SIB1 request for a given cell.
   /// \param[in] du_index The index of the DU the cell is connected to.
@@ -493,9 +505,9 @@ public:
   /// \brief Handle the reception of a HandoverSuccess message (TS 38.423 section 8.2.4).
   /// Indicates that the source UE has successfully executed CHO to a remote target CU-CP.
   /// \param[in] source_ue_index The source UE index resolved from the XNAP UE ID mapping.
-  /// \param[in] winner_peer_xnap_ue_id The target's XNAP UE ID identifying the winning candidate.
-  virtual void handle_xnap_handover_success_received(cu_cp_ue_index_t  source_ue_index,
-                                                     peer_xnap_ue_id_t winner_peer_xnap_ue_id) = 0;
+  /// \param[in] winner_cgi The cell the UE accessed, identifying the winning candidate.
+  virtual void handle_xnap_handover_success_received(cu_cp_ue_index_t           source_ue_index,
+                                                     const nr_cell_global_id_t& winner_cgi) = 0;
 
   /// \brief Handle the reception of an XNAP UE Context Release message.
   /// \param[in] ue_index The index of the UE to be released.

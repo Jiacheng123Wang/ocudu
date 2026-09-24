@@ -601,7 +601,7 @@ TEST_P(fallback_scheduler_tester, when_conres_and_msg4_srb1_scheduled_separately
   const unsigned            max_test_run_slots = 10U * (1U << current_slot.numerology());
   for (; sl_idx != max_test_run_slots; ++sl_idx) {
     // Set DL grid at slot 1 (the first slot, where the PDSCH will be allocated) busy from RB 3 until the end of the bw;
-    // this will force the scheduler to allocate Conres in isolation. Avoid the first symbols of teh slot to allow the
+    // this will force the scheduler to allocate Conres in isolation. Avoid the first symbols of the slot to allow the
     // PDCCH to be allocated.
     static constexpr unsigned first_dl_allocable_slot = 1U;
     bench->res_grid[first_dl_allocable_slot].dl_res_grid.fill(
@@ -700,7 +700,7 @@ TEST_P(fallback_scheduler_tester, when_msgb_ack_not_yet_sent_ue_doesnt_get_alloc
   // Simulate the RA scheduler having committed the MsgB PDSCH a few slots ahead.
   rach_indication_message::preamble preamble{};
   preamble.tc_rnti = tc_rnti;
-  ASSERT_NE(bench->ra_ue_repo.add_msgb_pending(preamble, prach_slot), nullptr);
+  ASSERT_NE(bench->ra_ue_repo.add_msgb_pending(preamble, prach_slot, ssb_id_t{0}), nullptr);
   ASSERT_TRUE(bench->ra_ue_repo.set_msgb_scheduled(tc_rnti, msgb_slot_tx, msgb_ack_slot_tx));
 
   // UE created right after the successRAR was scheduled, before its PDSCH is transmitted.
@@ -1038,7 +1038,7 @@ TEST_P(fallback_scheduler_head_scheduling, test_ahead_scheduling_for_srb_allocat
 
       // Mark resource grid as occupied.
       fill_resource_grid(current_slot,
-                         check_alloc_slot.to_uint() - current_slot.to_uint(),
+                         check_alloc_slot.count() - current_slot.count(),
                          bench->cell_cfg.params.dl_cfg_common.init_dl_bwp.generic_params.crbs);
     }
 
@@ -1307,7 +1307,7 @@ protected:
           test_logger.debug("rnti={}, slot={}: RLC buffer state update for h_id={} with {} bytes",
                             test_ue.crnti,
                             sl,
-                            fmt::underlying(to_harq_id(h_dl->id())),
+                            to_harq_id(h_dl->id()),
                             pending_srb1_bytes);
           parent->push_buffer_state_to_dl_ue(test_ue.ue_index, sl, pending_srb1_bytes, false, false);
           latest_rlc_update_slot.emplace(sl);
@@ -1343,7 +1343,7 @@ protected:
           test_logger.debug("rnti={}, slot={}: RLC buffer state update for h_id={} with {} bytes",
                             test_ue.crnti,
                             sl,
-                            fmt::underlying(to_harq_id(h_dl->id())),
+                            to_harq_id(h_dl->id()),
                             pending_srb1_bytes);
           parent->push_buffer_state_to_dl_ue(test_ue.ue_index, sl, pending_srb1_bytes, false, false);
         }
@@ -1383,7 +1383,7 @@ protected:
         test_logger.debug("Slot={}, rnti={}: acking process h_id={} with {}",
                           sl,
                           test_ue.crnti,
-                          fmt::underlying(to_harq_id(dl_harq->id())),
+                          to_harq_id(dl_harq->id()),
                           ack ? "ACK" : "NACK");
       }
     }
@@ -1443,7 +1443,7 @@ TEST_P(fallback_scheduler_srb1_segmentation, test_scheduling_srb1_segmentation)
   for (auto& tester : ues_testers) {
     ASSERT_EQ(0, tester.missing_retx);
     ASSERT_FALSE(tester.test_ue.logical_channels().has_dl_pending_bytes())
-        << fmt::format("UE {} has still pending DL bytes", fmt::underlying(tester.test_ue.ue_index));
+        << fmt::format("UE {} has still pending DL bytes", tester.test_ue.ue_index);
   }
 }
 
@@ -1523,7 +1523,7 @@ protected:
       test_logger.info("Slot={}, rnti={}: ACKing process h_id={} with {}",
                        sl,
                        test_ue.crnti,
-                       fmt::underlying(to_harq_id(h_ul.id())),
+                       to_harq_id(h_ul.id()),
                        ack ? "ACK" : "NACK");
       return ack;
     }
@@ -1566,9 +1566,8 @@ TEST_P(ul_fallback_scheduler_tester, all_ul_ue_are_served_and_buffer_gets_emptie
 
   for (auto& tester : ues_testers) {
     ASSERT_TRUE(tester.initied_with_ul_traffic)
-        << fmt::format("No UL traffic generated for UE {}", fmt::underlying(tester.test_ue.ue_index));
-    ASSERT_FALSE(tester.buffer_bytes > 0)
-        << fmt::format("UE {} has still pending UL bytes", fmt::underlying(tester.test_ue.ue_index));
+        << fmt::format("No UL traffic generated for UE {}", tester.test_ue.ue_index);
+    ASSERT_FALSE(tester.buffer_bytes > 0) << fmt::format("UE {} has still pending UL bytes", tester.test_ue.ue_index);
   }
 }
 

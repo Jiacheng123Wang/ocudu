@@ -70,7 +70,7 @@ void ocudu::assert_tdd_pattern_consistency(const cell_configuration& cell_cfg,
   }
 
   ofdm_symbol_range ul_symbols = get_active_tdd_ul_symbols(
-      *cell_cfg.params.tdd_cfg, sl_tx.to_uint(), cell_cfg.params.ul_cfg_common.init_ul_bwp.generic_params.cp);
+      *cell_cfg.params.tdd_cfg, sl_tx.count(), cell_cfg.params.ul_cfg_common.init_ul_bwp.generic_params.cp);
   ASSERT_EQ(ul_symbols.length(), result.ul.nof_ul_symbols);
 
   if (ul_symbols.empty()) {
@@ -666,22 +666,6 @@ void ocudu::test_scheduler_result_consistency(const cell_configuration&      cel
   assert_rar_grant_msg3_pusch_consistency(cell_cfg, cell_res_grid);
 }
 
-/// Helper to determine slot index associated with a RACH indication.
-static unsigned get_ra_slot_index(const cell_configuration& cell_cfg, slot_point rach_slot_rx)
-{
-  // As per Section 5.1.3, TS 38.321, and from Section 5.3.2, TS 38.211, slot_idx uses as the numerology of
-  // reference 15kHz for long PRACH Formats (i.e, slot_idx = subframe index); whereas, for short PRACH formats, it
-  // uses the same numerology as the SCS common (i.e, slot_idx = actual slot index within the frame).
-  return is_long_preamble(
-             prach_configuration_get(
-                 band_helper::get_freq_range(cell_cfg.band()),
-                 band_helper::get_duplex_mode(cell_cfg.band()),
-                 cell_cfg.params.ul_cfg_common.init_ul_bwp.rach_cfg_common->rach_cfg_generic.prach_config_index)
-                 .format)
-             ? rach_slot_rx.subframe_index()
-             : rach_slot_rx.slot_index();
-}
-
 static slot_interval get_rar_window(const cell_configuration& cell_cfg, slot_point rach_slot_rx)
 {
   slot_point rar_win_start;
@@ -796,7 +780,7 @@ void test_helper::ra_scheduler_tracker::on_new_rach_ind(const rach_indication_me
   const rach_config_common& rach_cfg = *cell_cfg.params.ul_cfg_common.init_ul_bwp.rach_cfg_common;
   for (const auto& occ : ind.occasions) {
     const slot_interval rar_window = get_rar_window(cell_cfg, ind.slot_rx);
-    const unsigned      slot_idx   = get_ra_slot_index(cell_cfg, ind.slot_rx);
+    const unsigned      slot_idx   = occ.slot_index;
     for (const auto& preamb : occ.preambles) {
       if (is_msga_preamble(preamb.preamble_id)) {
         const rach_config_common_two_step& two_step_cfg = *rach_cfg.two_step_rach_cfg;
@@ -1101,7 +1085,7 @@ void test_helper::harq_tracker::on_new_result(slot_point /*sl_tx*/, const sched_
       // PDCCH-less PDSCH: only allowed for Rel-16 PDSCH repetition occasions, which re-transmit the TB of a PDSCH
       // scheduled in a preceding slot.
       ASSERT_FALSE(cw.new_data) << fmt::format(
-          "DL UE grant has no matching PDCCH for rnti={} h_id={}", pdsch.rnti, fmt::underlying(pdsch.harq_id));
+          "DL UE grant has no matching PDCCH for rnti={} h_id={}", pdsch.rnti, pdsch.harq_id);
       const auto rep_it = dl_harqs.find(key);
       ASSERT_NE(rep_it, dl_harqs.end()) << "PDSCH repetition occasion but no previous PDSCH for the same HARQ";
       ASSERT_EQ(rep_it->second.tbs, cw.tb_size_bytes) << "TBS mismatch for PDSCH repetition occasion";

@@ -4,14 +4,19 @@
 
 #pragma once
 
-#include "mbedtls/cipher.h"
-#include "mbedtls/cmac.h" // Nested include of MBEDTLS_CMAC_C from either config.h (v2) or mbedtls_config.h (v3)
+#include "mbedtls/version.h"
 #include "ocudu/security/integrity_engine.h"
 #include "ocudu/security/security.h"
+#include "ocudu/security/ssl.h"
 
-namespace ocudu {
-namespace security {
+#if !OCUDU_MBEDTLS_PSA
+#include "mbedtls/cipher.h"
+#include "mbedtls/cmac.h" // Nested include of MBEDTLS_CMAC_C from either config.h (v2) or mbedtls_config.h (v3)
+#endif
 
+namespace ocudu::security {
+
+#if !OCUDU_MBEDTLS_PSA
 #ifdef MBEDTLS_CMAC_C
 
 class integrity_engine_nia2_cmac final : public integrity_engine
@@ -41,6 +46,6 @@ private:
 };
 
 #endif // MBEDTLS_CMAC_C
+#endif
 
-} // namespace security
-} // namespace ocudu
+} // namespace ocudu::security

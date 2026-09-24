@@ -95,8 +95,7 @@ static std::optional<radio_link_monitoring_config> make_default_rlm_config(const
 
   rlm_helper::rlm_builder_params rlm_params;
   if (rlm_type == rlm_resource_type::ssb || rlm_type == rlm_resource_type::ssb_and_csi_rs) {
-    rlm_params =
-        rlm_helper::rlm_builder_params(rlm_type, l_max, cell_cfg.ssb_cfg.ssb_bitmap, cell_cfg.ssb_cfg.beam_ids);
+    rlm_params = rlm_helper::rlm_builder_params(rlm_type, l_max, cell_cfg.ssb_cfg.ssb_beams.get_ssb_bitmap());
   } else {
     rlm_params = rlm_helper::rlm_builder_params(rlm_type, l_max);
   }
@@ -291,7 +290,9 @@ static cg_configuration make_default_cg_config(const cg_builder_params& cg_param
   grant.time_domain_offset     = 0;
   grant.time_domain_allocation = 0;
   grant.mcs                    = static_cast<uint8_t>(cg_params.mcs);
-  grant.freq_domain_res        = ra_frequency_type1_configuration{0, 10, cg_params.nof_rbs};
+  // This is only a default value, which is overwritten by the scheduler when the actual configuration is generated.
+  constexpr unsigned default_nof_rbs = 10U;
+  grant.freq_domain_res              = ra_frequency_type1_configuration{0, 10, default_nof_rbs};
   cfg.rrc_configured_ul_grant_cfg.emplace(grant);
 
   return cfg;

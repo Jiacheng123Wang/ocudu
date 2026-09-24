@@ -9,7 +9,7 @@
 #include "lib/scheduler/pdcch_scheduling/pdcch_resource_allocator.h"
 #include "lib/scheduler/uci_scheduling/uci_allocator.h"
 #include "ocudu/scheduler/scheduler_metrics.h"
-#include "ocudu/support/ocudu_test.h"
+#include "ocudu/support/error_handling.h"
 #include <set>
 
 namespace ocudu {
@@ -32,8 +32,11 @@ public:
                                               search_space_id               ss_id,
                                               aggregation_level             aggr_lvl) override
   {
-    TESTASSERT_EQ(fmt::underlying(ss_id),
-                  fmt::underlying(slot_alloc.cfg.params.dl_cfg_common.init_dl_bwp.pdcch_common.ra_search_space_id));
+    report_fatal_error_if_not(
+        (fmt::underlying(ss_id)) ==
+            (fmt::underlying(slot_alloc.cfg.params.dl_cfg_common.init_dl_bwp.pdcch_common.ra_search_space_id)),
+        "fmt::underlying(ss_id) != "
+        "fmt::underlying(slot_alloc.cfg.params.dl_cfg_common.init_dl_bwp.pdcch_common.ra_search_space_id)");
     if (fail_pdcch_alloc_cond and fail_pdcch_alloc_cond(slot_alloc.slot)) {
       return nullptr;
     }
@@ -107,11 +110,11 @@ public:
   void slot_indication(slot_point sl_tx) override { next_uci_allocation.reset(); }
 
   std::optional<uci_allocation>
-  alloc_harq_ack(cell_resource_allocator&     res_alloc,
-                 const ue_cell_configuration& ue_cell_cfg,
-                 unsigned                     k0,
-                 span<const uint8_t>          k1_list,
-                 pucch_repetition_factor      max_rep_factor = pucch_repetition_factor::n1) override
+  alloc_harq_ack(cell_resource_allocator& res_alloc,
+                 const ue_cell&           ue_cc,
+                 unsigned                 k0,
+                 span<const uint8_t>      k1_list,
+                 pucch_repetition_factor  max_rep_factor = pucch_repetition_factor::n1) override
   {
     return next_uci_allocation;
   }

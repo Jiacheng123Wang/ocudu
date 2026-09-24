@@ -11,7 +11,10 @@
 namespace ocudu {
 namespace ofh {
 
-/// Uplink request handler task dispatcher.
+/// \brief Uplink request handler task dispatcher.
+///
+/// Uplink data and PRACH Control-Plane requests are serialized through a single strand (provided by the executor
+/// mapper), so that per-eAxC eCPRI sequence identifiers are generated in transmission (slot) order.
 class uplink_request_handler_task_dispatcher : public uplink_request_handler, operation_controller
 {
   const unsigned          sector_id;

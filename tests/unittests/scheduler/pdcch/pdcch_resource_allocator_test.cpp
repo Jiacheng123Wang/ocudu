@@ -14,7 +14,6 @@
 #include "ocudu/scheduler/config/scheduler_ue_config_validator.h"
 #include "ocudu/scheduler/config/serving_cell_config_factory.h"
 #include "ocudu/scheduler/scheduler_configurator.h"
-#include "ocudu/support/ocudu_test.h"
 #include "fmt/std.h"
 #include <gtest/gtest.h>
 #include <unordered_map>
@@ -115,7 +114,7 @@ protected:
         << "Invalid N_{ID} (see TS38.211, 7.4.1.3.1)";
     ASSERT_EQ(pdcch_ctx.n_rnti_pdcch_data,
               cs_cfg.get_pdcch_dmrs_scrambling_id().has_value() and (not ss_cfg.is_common_search_space())
-                  ? to_value(u.rnti)
+                  ? to_underlying(u.rnti)
                   : 0)
         << "Invalid n_{RNTI} (see TS38.211, 7.3.2.3)";
     unsigned expected_n_id = cs_cfg.get_pdcch_dmrs_scrambling_id().has_value() and (not ss_cfg.is_common_search_space())
@@ -529,11 +528,11 @@ TEST(pdcch_resource_allocator_test, monitoring_period)
 
           if (expected_result[i]) {
             // Inside PDCCH monitoring window.
-            TESTASSERT(pdcch != nullptr);
-            TESTASSERT(pdcch->ctx.rnti == ra_rnti);
+            ASSERT_TRUE(pdcch != nullptr);
+            ASSERT_TRUE(pdcch->ctx.rnti == ra_rnti);
           } else {
             // Outside PDCCH monitoring window.
-            TESTASSERT(pdcch == nullptr);
+            ASSERT_TRUE(pdcch == nullptr);
           }
 
           sl_tx++;

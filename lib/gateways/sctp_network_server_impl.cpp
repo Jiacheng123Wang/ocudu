@@ -3,6 +3,7 @@
 
 #include "sctp_network_server_impl.h"
 #include "sctp_dtls.h"
+#include "sctp_dtls_ssl.h"
 #include "sctp_socket_backend.h"
 #include "ocudu/gateways/sctp_socket.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -24,13 +25,15 @@ class sctp_network_server_impl::sctp_send_notifier : public sctp_association_sdu
 {
 public:
   sctp_send_notifier(sctp_network_server_impl&                                parent,
-                     const sctp_network_server_impl::sctp_associaton_context& assoc,
+                     const sctp_network_server_impl::sctp_associaton_context& assoc_,
                      ocudulog::basic_logger&                                  logger_) :
     ppid(parent.node_cfg.ppid),
-    fd(assoc.fd),
+    fd(assoc_.fd),
     if_name(parent.node_cfg.if_name),
-    assoc_id(assoc.assoc_id),
+    assoc_id(assoc_.assoc_id),
+    assoc(assoc_),
     client_addr(assoc.addr),
+    ssl_enabled(parent.node_cfg.dtls_cfg.has_value()),
     assoc_shutdown_flag(assoc.association_shutdown_received),
     logger(logger_)
   {
@@ -56,25 +59,26 @@ public:
     span<const uint8_t> pdu_span = to_span(sdu, send_buffer);
 
     transport_layer_address::native_type dest_addr  = client_addr.native();
-    int                                  bytes_sent = ::sctp_sendmsg(fd,
-                                    pdu_span.data(),
-                                    pdu_span.size(),
-                                    const_cast<struct sockaddr*>(dest_addr.addr),
-                                    dest_addr.addrlen,
-                                    htonl(ppid),
-                                    0,
-                                    stream_no,
-                                    0,
-                                    0);
-    if (bytes_sent == -1) {
-      logger.error("{} assoc={}: Closing SCTP association. Cause: Couldn't send {} B of data. errno={}",
-                   if_name,
-                   assoc_id,
-                   pdu_span.size_bytes(),
-                   ::strerror(errno));
+    int                                  bytes_sent = -1;
+    if (not ssl_enabled) {
+      bytes_sent = ::sctp_sendmsg(
+          fd, pdu_span.data(), pdu_span.size(), dest_addr.addr, dest_addr.addrlen, htonl(ppid), 0, stream_no, 0, 0);
+      if (bytes_sent <= 0) {
+        logger.error("{} assoc={}: Closing SCTP association. Cause: Couldn't send {} B of data. errno={}",
+                     if_name,
+                     assoc_id,
+                     pdu_span.size_bytes(),
+                     ::strerror(errno));
+      }
+    } else {
+      bytes_sent = assoc.ssl->write(pdu_span);
+    }
+
+    if (bytes_sent <= 0) {
       close();
       return false;
     }
+
     return true;
   }
 
@@ -106,12 +110,13 @@ private:
     assoc_shutdown_flag->store(true, std::memory_order_relaxed);
   }
 
-  // Note: We copy all the required params by value to avoid race conditions with the server thread.
-  const uint32_t                ppid;
-  const int                     fd;
-  std::string                   if_name;
-  const int                     assoc_id;
-  const transport_layer_address client_addr;
+  const uint32_t                                           ppid;
+  const int                                                fd;
+  std::string                                              if_name;
+  const int                                                assoc_id;
+  const sctp_network_server_impl::sctp_associaton_context& assoc;
+  const transport_layer_address                            client_addr;
+  bool                                                     ssl_enabled;
   // This flag is shared by the server main class and this notifier and is used to signal the association shut down.
   // Note: shared_ptr copy used to avoid the case when the notifier outlives the association.
   std::shared_ptr<std::atomic<bool>> assoc_shutdown_flag;
@@ -133,12 +138,6 @@ sctp_network_server_impl::sctp_network_server_impl(const ocudu::sctp_network_gat
   assoc_factory(assoc_factory_),
   keepalive_token(std::make_shared<bool>(true))
 {
-  if (OCUDU_DTLS_SCTP_SUPPORT) {
-    dtls_ctxt = create_dtls_context();
-    if (not dtls_ctxt->init(node_cfg.if_name)) {
-      report_error("Could not initialize DTLS context in SCTP gateway. if={}", node_cfg.if_name);
-    }
-  }
 }
 
 sctp_network_server_impl::~sctp_network_server_impl()
@@ -158,7 +157,16 @@ void sctp_network_server_impl::stop()
 
 bool sctp_network_server_impl::create_and_bind()
 {
-  return this->create_and_bind_common();
+  if (not this->create_and_bind_common()) {
+    return false;
+  }
+  if (OCUDU_DTLS_SCTP_SUPPORT and node_cfg.dtls_cfg.has_value()) {
+    dtls_ctxt = create_dtls_context(*node_cfg.dtls_cfg);
+    if (not dtls_ctxt->init(socket.fd().value())) {
+      report_error("Could not initialize DTLS context in SCTP gateway. if={}", node_cfg.if_name);
+    }
+  }
+  return true;
 }
 
 void sctp_network_server_impl::receive()
@@ -196,22 +204,20 @@ void sctp_network_server_impl::receive_impl(std::vector<uint8_t>      payload,
                                             sockaddr_storage          msg_src_addr,
                                             socklen_t                 msg_src_addrlen)
 {
-  while (not app_exec.defer([this,
-                             keepalive = keepalive_token,
-                             payload   = std::move(payload),
-                             msg_flags,
-                             sri,
-                             msg_src_addr,
-                             msg_src_addrlen]() {
-    if (!*keepalive) {
-      return;
-    }
-    if (msg_flags & MSG_NOTIFICATION) {
-      handle_notification(payload, sri, reinterpret_cast<const sockaddr&>(msg_src_addr), msg_src_addrlen);
-    } else {
-      handle_data(sri.sinfo_assoc_id, payload);
-    }
-  })) {
+  // The task is rebuilt on every retry, so the payload must survive a failed dispatch: hold it behind a shared_ptr
+  // instead of moving it into the lambda. Costs one small allocation and never copies the payload bytes.
+  auto payload_holder = std::make_shared<const std::vector<uint8_t>>(std::move(payload));
+  while (not app_exec.defer(
+      [this, keepalive = keepalive_token, payload = payload_holder, msg_flags, sri, msg_src_addr, msg_src_addrlen]() {
+        if (!*keepalive) {
+          return;
+        }
+        if (msg_flags & MSG_NOTIFICATION) {
+          handle_notification(*payload, sri, reinterpret_cast<const sockaddr&>(msg_src_addr), msg_src_addrlen);
+        } else {
+          handle_data(sri.sinfo_assoc_id, *payload);
+        }
+      })) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 }
@@ -233,9 +239,11 @@ void sctp_network_server_impl::handle_socket_shutdown(const char* cause)
   }
 }
 
-void sctp_network_server_impl::defer_socket_shutdown(const char* cause, std::optional<scoped_sync_token> token)
+void sctp_network_server_impl::defer_socket_shutdown(const char* cause, const std::optional<scoped_sync_token>& token)
 {
-  while (not app_exec.defer([this, keepalive = keepalive_token, token = std::move(token)]() {
+  // Capture the token by copy rather than by move: defer() consumes the task on failure, so a moved token would be
+  // gone on the next retry. scoped_sync_token is reference counted, so each attempt just bumps the count.
+  while (not app_exec.defer([this, keepalive = keepalive_token, token]() {
     if (*keepalive) {
       *keepalive = false;
       handle_socket_shutdown(nullptr);
@@ -442,31 +450,62 @@ void sctp_network_server_impl::handle_sctp_comm_up(const struct sctp_assoc_chang
     return;
   }
 
+  if (node_cfg.dtls_cfg.has_value()) {
+    auto addr = assoc_ctxt.addr;
+    addr.set_port(0); // Ignore port from peer.
+    auto      mode_it = node_cfg.dtls_cfg->mode_map.find(addr);
+    dtls_mode mode    = (mode_it != node_cfg.dtls_cfg->mode_map.end()) ? mode_it->second : node_cfg.dtls_cfg->mode;
+    assoc_ctxt.ssl    = create_dtls_ssl(dtls_ssl_config{mode}, {*dtls_ctxt});
+    if (not assoc_ctxt.ssl->init(assoc_ctxt.fd)) {
+      logger.error("{} assoc={}: Could not initialize DTLS context for new association", node_cfg.if_name, assoc_id);
+      /// Remove association as if it was lost. Do it directly, as we are running in the app executor already.
+      handle_association_shutdown(assoc_id, "DTLS error");
+      remove_association(assoc_id);
+      return;
+    }
+  }
+
   logger.info("{} assoc={}: New client SCTP association (client_addr={})", node_cfg.if_name, assoc_id, assoc_ctxt.addr);
 
-  // If this was a pending outgoing connection, defer to enqueue the success signal so that any tasks enqueued by the
-  // assoc_factory.create() callback can run before the awaiting coroutine resumes.
-  // Signaling inline here would resume the coroutine within this task, before the enqueued tasks that connect the
-  // notifiers have a chance to finish.
-  while (not app_exec.defer(
-             [this, addr = assoc_ctxt.addr, assoc_fd = std::move(peeled.fd), &assoc_ctxt]() mutable {
-               auto pending_it = std::find_if(pending_connects.begin(),
-                                              pending_connects.end(),
-                                              [&addr](const pending_connect& pending) { return pending.contains(addr); });
-               if (pending_it != pending_connects.end()) {
-                 pending_it->event.set(true);
-               }
-               /// Register peeled-off socket in IO broker (Linux only: there is no peeled-off fd on macOS).
-               if (assoc_fd.is_open()) {
-                 if (not subscribe_association_to_broker(std::move(assoc_fd), assoc_ctxt)) {
-                   logger.error("Connection loss due to IO broker subscription failure");
-                   handle_association_shutdown(assoc_ctxt.assoc_id, "IO broker error");
-                   remove_association(assoc_ctxt.assoc_id);
-                   return;
-                 }
-               }
-             })) {
+  // If this was a pending outgoing connection, defer to enqueue the success signal so that any tasks enqueued by
+  // the assoc_factory.create() callback can run before the awaiting coroutine resumes. Signaling inline here would
+  // resume the coroutine within this task, before the enqueued tasks that connect the notifiers have a chance to
+  // finish. unique_fd is move-only and defer() consumes the task on failure, so moving the fd into the lambda would
+  // close it on the first failed dispatch and leave later retries subscribing an already closed socket. Hold it
+  // behind a shared_ptr so ownership survives until an attempt is actually enqueued.
+  auto fd_holder = std::make_shared<unique_fd>(std::move(peeled.fd));
+  while (not app_exec.defer([this, addr = assoc_ctxt.addr, fd_holder, &assoc_ctxt]() mutable {
+    auto pending_it = std::find_if(pending_connects.begin(),
+                                   pending_connects.end(),
+                                   [&addr](const pending_connect& pending) { return pending.contains(addr); });
+
+    /// If DTLS is not configured, mark connection as complete. Otherwise, wait for the DTLS handshake before
+    /// signaling the connection is set up to upper layers.
+    if (pending_it != pending_connects.end() && !node_cfg.dtls_cfg.has_value()) {
+      pending_it->event.set(true);
+    }
+    /// Register peeled-off socket in IO broker (Linux only: there is no peeled-off fd on macOS).
+    if (fd_holder->is_open() and not subscribe_association_to_broker(std::move(*fd_holder), assoc_ctxt)) {
+      logger.error("Connection loss due to IO broker subscription failure");
+      handle_association_shutdown(assoc_ctxt.assoc_id, "IO broker error");
+      remove_association(assoc_ctxt.assoc_id);
+      return;
+    }
+  })) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+}
+
+void sctp_network_server_impl::mark_connection_as_complete(const transport_layer_address& addr)
+{
+  auto pending_it = std::find_if(pending_connects.begin(),
+                                 pending_connects.end(),
+                                 [&addr](const pending_connect& pending) { return pending.contains(addr); });
+
+  /// If DTLS is not configured, mark connection as complete. Otherwise, wait for the DTLS handshake before
+  /// signaling the connection is set up to upper layers.
+  if (pending_it != pending_connects.end()) {
+    pending_it->event.set(true);
   }
 }
 

@@ -18,10 +18,12 @@ cell_deactivation_routine::cell_deactivation_routine(const cu_cp_configuration& 
                                                      ngap_cause_t                       release_cause_,
                                                      bool                               bar_cells_first_,
                                                      du_processor_repository&           du_db_,
+                                                     logical_cell_manager&              logical_cells_,
                                                      cu_cp_ue_context_release_handler&  ue_release_handler_,
                                                      ue_manager&                        ue_mng_,
                                                      ocudulog::basic_logger&            logger_) :
   du_db(du_db_),
+  logical_cells(logical_cells_),
   ue_release_handler(ue_release_handler_),
   ue_mng(ue_mng_),
   logger(logger_),
@@ -53,12 +55,13 @@ cell_deactivation_routine::cell_deactivation_routine(const cu_cp_configuration& 
   }
 }
 
-void cell_deactivation_routine::operator()(coro_context<async_task<bool>>& ctx)
+void cell_deactivation_routine::operator()(coro_context<async_task<cell_deactivation_result>>& ctx)
 {
   CORO_BEGIN(ctx);
 
   logger.info("\"{}\" started...", name());
   proc_start_tp = std::chrono::steady_clock::now();
+  bars_acked    = !bar_updates.empty();
 
   // Stage 1: bar the cells (TS 38.473 Cells to be Barred List) so idle UEs reselect away and the UEs released in
   // stage 2 do not re-camp on a cell that is about to go down. No settling wait is needed here: the DU holds an
@@ -71,6 +74,7 @@ void cell_deactivation_routine::operator()(coro_context<async_task<bool>>& ctx)
     if (du_proc == nullptr) {
       logger.warning("DU processor not found for index {}", du_update_it->first);
       routine_success = false;
+      bars_acked      = false;
       continue;
     }
 
@@ -82,6 +86,7 @@ void cell_deactivation_routine::operator()(coro_context<async_task<bool>>& ctx)
                       ? fmt::to_string(f1ap_cu_cfg_update_response.cause.value())
                       : "timeout");
       routine_success = false;
+      bars_acked      = false;
     }
   }
 
@@ -114,6 +119,11 @@ void cell_deactivation_routine::operator()(coro_context<async_task<bool>>& ctx)
                       ? fmt::to_string(f1ap_cu_cfg_update_response.cause.value())
                       : "timeout");
       routine_success = false;
+      continue;
+    }
+    // The DU acknowledged the deactivation of this update's cells: record them as operationally disabled.
+    for (const auto& cell : du_update_it->second.cells_to_be_deactivated_list) {
+      logical_cells.set_operational_state(cell.cgi.nci, cell_operational_state::disabled);
     }
   }
 
@@ -122,7 +132,7 @@ void cell_deactivation_routine::operator()(coro_context<async_task<bool>>& ctx)
               routine_success ? "successfully" : "with errors",
               std::chrono::duration<double>(std::chrono::steady_clock::now() - proc_start_tp).count());
 
-  CORO_RETURN(routine_success);
+  CORO_RETURN(cell_deactivation_result{routine_success, bars_acked});
 }
 
 void cell_deactivation_routine::trigger_context_release()

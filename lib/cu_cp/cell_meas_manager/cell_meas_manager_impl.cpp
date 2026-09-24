@@ -148,6 +148,10 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_
             cfg.cells.at(ncell.nci).serving_cell_cfg.ssb_arfcn.value() == ssb_freq) {
           logger.debug("ue={}: Adding neighbor cell nci={:#x} to measurement config", ue_index, ncell.nci);
           for (const auto& report_cfg_id : ncell.report_cfg_ids) {
+            // Skip conditional triggers.
+            if (is_cond_trigger_report_config(cfg, report_cfg_id)) {
+              continue;
+            }
             generate_report_config(cfg, ncell.nci, report_cfg_id, new_cfg, ue_meas_context);
           }
         }
@@ -201,6 +205,11 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_
   quant_cfg.quant_cfg_nr_list.push_back(quant_cfg_nr);
 
   new_cfg.quant_cfg = quant_cfg;
+
+  // Keep in the removal lists only what the new config does not set up again.
+  if (current_meas_config.has_value()) {
+    prune_redundant_rem_list_entries(current_meas_config.value(), new_cfg);
+  }
 
   return meas_cfg;
 }
@@ -519,7 +528,7 @@ static expected<cell_measurement_positioning_info, std::string> generate_measure
   ocudu_assert(ue_meas_context.meas_id_to_meas_context.find(meas_results.meas_id) !=
                    ue_meas_context.meas_id_to_meas_context.end(),
                "ue={}: Measurement result for unknown meas_id={} received",
-               fmt::underlying(ue_index),
+               ue_index,
                fmt::underlying(meas_results.meas_id));
 
   meas_context_t& meas_ctxt = ue_meas_context.meas_id_to_meas_context.at(meas_results.meas_id);

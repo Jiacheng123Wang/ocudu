@@ -144,11 +144,8 @@ void pdsch_processor_flexible_impl::initialize_codeword(unsigned i_cw, shared_tr
   // Extract the modulation scheme.
   modulation_scheme modulation = config.codewords[i_cw].modulation;
 
-  // Number of ports for precoding - in case of two codewords, each is mapped to a different half.
-  unsigned nof_ports = ports.size() / nof_codewords;
-
-  // Number of transmission layers from precoding configuration.
-  unsigned nof_layers = pdu.precoding.get_nof_layers();
+  // Number of transmission layers from the precoding and beamforming configuration.
+  unsigned nof_layers = pdu.precoding_and_beamforming.get_nof_layers();
 
   // The layer mapping per codeword is defined in TS38.211 Table 7.3.1.3-1.
   unsigned base_layers = nof_layers / nof_codewords;
@@ -160,18 +157,14 @@ void pdsch_processor_flexible_impl::initialize_codeword(unsigned i_cw, shared_tr
   unsigned nof_layers_cw      = nof_layers_per_cw[i_cw];
   codeword_context.nof_layers = nof_layers_cw;
 
-  // Get a view of the list of ports where the codeword is being mapped to.
-  codeword_context.ports = span<const uint8_t>(ports.data(), ports.size()).subspan(i_cw * nof_ports, nof_ports);
-
-  // Extract the codeword-specific precoding.
-  codeword_context.precoding =
-      config.precoding.slice(interval<uint8_t>::start_and_len(i_cw * nof_layers_per_cw[0], nof_layers_cw),
-                             interval<uint8_t>::start_and_len(i_cw * nof_ports, nof_ports));
+  // Extract the precoding and beamforming of the codeword.
+  codeword_context.precoding_and_beamforming =
+      pdsch_extract_codeword_precoding(config.precoding_and_beamforming, nof_codewords, i_cw);
 
   // Apply scaling
   float scaling = convert_dB_to_amplitude(-config.ratio_pdsch_data_to_sss_dB);
   scaling *= modulation_mapper::get_modulation_scaling(modulation);
-  codeword_context.precoding *= scaling;
+  codeword_context.precoding_and_beamforming *= scaling;
 
   // Extract redundancy version.
   unsigned rv = config.codewords[i_cw].rv;
@@ -253,16 +246,12 @@ void pdsch_processor_flexible_impl::initialize_new_transmission(
   config        = pdu;
   nof_codewords = data_.size();
 
-  // Ensure the number of ports is valid.
-  ocudu_assert(config.precoding.get_nof_ports() % nof_codewords == 0,
-               "The number of ports must be divisible by the number of codewords.");
+  // The beams that carry the transmission are split among the codewords.
+  ocudu_assert(config.precoding_and_beamforming.get_nof_beams() % nof_codewords == 0,
+               "The number of beams must be divisible by the number of codewords.");
 
   // Calculate the number of resource elements used to map PDSCH on the grid. Common for all codewords.
   nof_re_pdsch = pdsch_compute_nof_data_re(config);
-
-  // Populate the full list of resource grid ports.
-  ports.resize(config.precoding.get_nof_ports());
-  std::iota(ports.begin(), ports.end(), 0);
 
   // If two codewords are transmitted, the processing is asynchronous.
   async_proc = (nof_codewords > 1);
@@ -334,7 +323,7 @@ void pdsch_processor_flexible_impl::sync_pdsch_cb_processing()
       data.get_buffer(), 0, codeword_context.block_config, *segment_buffer, 0, codeword_context.nof_cb);
 
   // Map PDSCH.
-  mapper->map(*grid, grid_buffer, allocation, reserved, codeword_context.ports, codeword_context.precoding);
+  mapper->map(*grid, grid_buffer, allocation, reserved, codeword_context.precoding_and_beamforming);
 
   // Prepare PT-RS configuration and generate.
   if (config.ptrs) {
@@ -419,8 +408,7 @@ void pdsch_processor_flexible_impl::fork_codeword_processing(unsigned i_cw)
                   grid_buffer,
                   allocation,
                   reserved,
-                  codeword_ctx.ports,
-                  codeword_ctx.precoding,
+                  codeword_ctx.precoding_and_beamforming,
                   codeword_ctx.re_offset[first_cb_index]);
 
       // Trace PDSCH.

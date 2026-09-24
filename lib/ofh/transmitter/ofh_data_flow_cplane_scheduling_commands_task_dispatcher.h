@@ -4,7 +4,9 @@
 #pragma once
 
 #include "ofh_data_flow_cplane_scheduling_commands.h"
+#include "ocudu/ofh/ofh_sector_executor_mapper.h"
 #include "ocudu/support/executors/task_executor.h"
+#include "ocudu/support/ocudu_assert.h"
 #include "ocudu/support/rtsan.h"
 #include "ocudu/support/synchronization/stop_event.h"
 #include <memory>
@@ -12,16 +14,18 @@
 namespace ocudu {
 namespace ofh {
 
-/// Open Fronthaul Control-Plane scheduling and beamforming commands data flow task dispatcher implementation.
+/// \brief Open Fronthaul Control-Plane scheduling and beamforming commands data flow task dispatcher implementation.
+///
+/// For a requested task the dispatcher fetches an executor associated with an eAxC.
 class data_flow_cplane_downlink_task_dispatcher : public data_flow_cplane_scheduling_commands,
                                                   public operation_controller
 {
 public:
   data_flow_cplane_downlink_task_dispatcher(ocudulog::basic_logger&                               logger_,
                                             std::unique_ptr<data_flow_cplane_scheduling_commands> data_flow_cplane_,
-                                            task_executor&                                        executor_,
+                                            ofh_sector_executor_mapper&                           exec_mapper_,
                                             unsigned                                              sector_id_) :
-    logger(logger_), data_flow_cplane(std::move(data_flow_cplane_)), executor(executor_), sector_id(sector_id_)
+    logger(logger_), exec_mapper(exec_mapper_), data_flow_cplane(std::move(data_flow_cplane_)), sector_id(sector_id_)
   {
     ocudu_assert(data_flow_cplane, "Invalid data flow");
   }
@@ -44,9 +48,10 @@ public:
       return;
     }
 
-    if (!executor.defer([this, context, tk = std::move(token)]() noexcept OCUDU_RTSAN_NONBLOCKING {
-          data_flow_cplane->enqueue_section_type_1_message(context);
-        })) {
+    if (!exec_mapper.get_dl_cp_executor(context.eaxc)
+             .defer([this, context, tk = std::move(token)]() noexcept OCUDU_RTSAN_NONBLOCKING {
+               data_flow_cplane->enqueue_section_type_1_message(context);
+             })) {
       logger.warning(
           "Sector#{}: failed to dispatch Control-Plane type 1 message for slot '{}'", sector_id, context.slot);
     }
@@ -61,9 +66,12 @@ public:
       return;
     }
 
-    if (!executor.defer([this, context, tk = std::move(token)]() noexcept OCUDU_RTSAN_NONBLOCKING {
-          data_flow_cplane->enqueue_section_type_3_prach_message(context);
-        })) {
+    // Note: PRACH Control-Plane is not part of the downlink flow, it is handled on the uplink request path. So this
+    // method should not be called from downlink data flow.
+    if (!exec_mapper.get_dl_cp_executor(context.eaxc)
+             .defer([this, context, tk = std::move(token)]() noexcept OCUDU_RTSAN_NONBLOCKING {
+               data_flow_cplane->enqueue_section_type_3_prach_message(context);
+             })) {
       logger.warning(
           "Sector#{}: failed to dispatch Control-Plane type 3 message for slot '{}'", sector_id, context.slot);
     }
@@ -77,8 +85,8 @@ public:
 
 private:
   ocudulog::basic_logger&                               logger;
+  ofh_sector_executor_mapper&                           exec_mapper;
   std::unique_ptr<data_flow_cplane_scheduling_commands> data_flow_cplane;
-  task_executor&                                        executor;
   const unsigned                                        sector_id;
   rt_stop_event_source                                  stop_manager;
 };

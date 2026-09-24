@@ -10,6 +10,9 @@ add_subdirectory(cell)
 add_subdirectory(common_scheduling)
 add_subdirectory(ue_context)
 add_subdirectory(ue_scheduling)
+if (ENABLE_SCHEDTRACE)
+    add_subdirectory(trace)
+endif (ENABLE_SCHEDTRACE)
 
 set(SOURCES
         pdcch_scheduling/pdcch_resource_allocator_impl.cpp
@@ -27,6 +30,7 @@ set(SOURCES
         slicing/ran_slice_instance.cpp
         slicing/slice_ue_repository.cpp
         srs/srs_scheduler_impl.cpp
+        cell_event_manager.cpp
         cell_scheduler.cpp
         scheduler_factory.cpp
         scheduler_impl.cpp

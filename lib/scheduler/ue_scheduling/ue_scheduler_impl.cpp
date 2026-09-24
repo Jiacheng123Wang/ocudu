@@ -22,18 +22,14 @@ ue_cell_scheduler* ue_scheduler_impl::do_add_cell(const ue_cell_scheduler_creati
   auto& cell = cells[params.cell_index];
 
   // Create a cell-specific UE event manager.
-  cell.ev_mng = event_mng.add_cell(cell_creation_event{*params.cell_res_alloc,
-                                                       cell.ue_cell_db,
-                                                       cell.fallback_sched,
-                                                       cell.uci_sched,
-                                                       cell.slice_sched,
-                                                       cell.srs_sched,
-                                                       cell.cg_sched.get(),
-                                                       cell.uci_selector,
-                                                       *params.cell_metrics,
-                                                       *params.ev_logger,
-                                                       *params.cell_tracer,
-                                                       *params.ra_ue_repo});
+  cell.ev_handler = event_mng.add_cell(cell_creation_event{*params.cell_res_alloc,
+                                                           cell.ue_cell_db,
+                                                           cell.fallback_sched,
+                                                           *params.uci_sched,
+                                                           cell.slice_sched,
+                                                           *params.srs_sched,
+                                                           cell.cg_sched.get(),
+                                                           *params.ra_ue_repo});
 
   return &cell;
 }
@@ -41,9 +37,6 @@ ue_cell_scheduler* ue_scheduler_impl::do_add_cell(const ue_cell_scheduler_creati
 void ue_scheduler_impl::do_start_cell(du_cell_index_t cell_index)
 {
   ocudu_assert(cells.contains(cell_index), "Cell reference not found in the scheduler");
-
-  // Signal event manager that new events can be processed for this cell.
-  cells[cell_index].ev_mng->start();
 }
 
 void ue_scheduler_impl::do_stop_cell(du_cell_index_t cell_index)
@@ -51,13 +44,8 @@ void ue_scheduler_impl::do_stop_cell(du_cell_index_t cell_index)
   ocudu_assert(cells.contains(cell_index), "Cell reference not found in the scheduler");
   auto& c = cells[cell_index];
 
-  // Halt any pending events associated with this cell.
-  cells[cell_index].ev_mng->stop();
-
   // Stop sub-schedulers.
   c.fallback_sched.stop();
-  c.srs_sched.stop();
-  c.uci_sched.stop();
   if (c.cg_sched != nullptr) {
     c.cg_sched->stop();
   }
@@ -136,20 +124,11 @@ void ue_scheduler_impl::run_slot_impl(slot_point sl_tx)
   }
   last_sl_ind = sl_tx;
 
+  // Update the state of every UE of the cell group. It also updates the state of the UEs of each of its cells.
+  ue_db.slot_indication(sl_tx);
+
   for (auto& group_cell : cells) {
     du_cell_index_t cell_index = group_cell.cell_res_alloc->cfg.cell_index;
-
-    // Process any pending events that are directed at UEs.
-    group_cell.ev_mng->run_slot(sl_tx);
-
-    // Update all UEs state.
-    ue_db.slot_indication(sl_tx);
-
-    // Schedule periodic UCI (SR and CSI) before any UL grants.
-    group_cell.uci_sched.run_slot(*group_cell.cell_res_alloc);
-
-    // Schedule periodic SRS before any UE grants.
-    group_cell.srs_sched.run_slot(*group_cell.cell_res_alloc);
 
     // Schedule configured grant PUSCH opportunities.
     if (group_cell.cg_sched != nullptr) {
@@ -177,9 +156,6 @@ void ue_scheduler_impl::run_slot_impl(slot_point sl_tx)
     // Record UEs needing triggered UL grants based on the finalized DL grant list.
     group_cell.trig_ul_sched.process_dl_results(sl_tx, (*group_cell.cell_res_alloc)[0].result);
 
-    // Update the UCI indication handler after the slot scheduling.
-    group_cell.uci_selector.handle_result(sl_tx, (*group_cell.cell_res_alloc)[0].result);
-
     ocudu_sanity_check(puxch_grant_sanitizer(*group_cell.cell_res_alloc, logger),
                        "PUCCH and PUSCH found for the same UE in the same slot");
   }
@@ -190,7 +166,6 @@ ue_scheduler_impl::cell_context::cell_context(ue_scheduler_impl&                
   parent(parent_),
   cell_res_alloc(params.cell_res_alloc),
   ue_cell_db(*params.ue_cell_db),
-  uci_sched(params.cell_res_alloc->cfg, *params.uci_alloc, parent.ue_db),
   fallback_sched(parent.expert_cfg,
                  params.cell_res_alloc->cfg,
                  *params.pdcch_sched,
@@ -209,18 +184,12 @@ ue_scheduler_impl::cell_context::cell_context(ue_scheduler_impl&                
                     *params.cell_res_alloc,
                     *params.cell_metrics,
                     ocudulog::fetch_basic_logger("SCHED")),
-  srs_sched(params.cell_res_alloc->cfg, parent.ue_db),
   cg_sched(params.cell_res_alloc->cfg.params.init_bwp.cg_cfg.has_value()
                ? std::make_unique<configured_grant_scheduler_impl>(params.cell_res_alloc->cfg,
                                                                    *params.uci_alloc,
                                                                    parent.ue_db)
                : nullptr),
-  trig_ul_sched(parent.ue_db, params.cell_res_alloc->cfg.cell_index, params.cell_res_alloc->cfg.scs_common()),
-  uci_selector(*this,
-               uci_indication_selector::DEFAULT_ACK_TIMEOUT_SLOTS,
-               MAX_PUCCH_PDUS_PER_SLOT,
-               params.cell_res_alloc->cfg.max_nof_ue_contexts,
-               parent.expert_cfg.pucch_sinr_threshold_dB)
+  trig_ul_sched(parent.ue_db, params.cell_res_alloc->cfg.cell_index, params.cell_res_alloc->cfg.scs_common())
 {
 }
 

@@ -12,6 +12,7 @@
 #include "ocudu/ran/pusch/pusch_tpmi_select.h"
 #include "ocudu/ran/rnti.h"
 #include "ocudu/ran/slot_point.h"
+#include "ocudu/ran/ssb/ssb_configuration.h"
 #include "ocudu/scheduler/input/uci_inputs.h"
 #include "ocudu/scheduler/scheduler_configurator.h"
 #include "ocudu/scheduler/scheduler_dl_buffer_state_indication_handler.h"
@@ -30,6 +31,7 @@ public:
     unsigned        preamble_id;
     rnti_t          ra_rnti;
     rnti_t          tc_rnti;
+    ssb_id_t        ssb_index;
     unsigned        ta;
     bool            is_msga;
   };
@@ -59,20 +61,6 @@ public:
     harq_id_t            h_id;
     crc_res_t            crc;
     std::optional<float> ul_sinr_db;
-  };
-  struct bsr_event {
-    du_ue_index_t          ue_index;
-    rnti_t                 rnti;
-    bsr_format             type;
-    ul_bsr_lcg_report_list reported_lcgs;
-    units::bytes           tot_ul_pending_bytes;
-  };
-  struct phr_event {
-    du_ue_index_t                   ue_index;
-    rnti_t                          rnti;
-    du_cell_index_t                 cell_index;
-    ph_db_range                     ph;
-    std::optional<p_cmax_dbm_range> p_cmax;
   };
   struct error_indication_event {
     slot_point                            sl_tx;
@@ -129,13 +117,13 @@ private:
   void enqueue_impl(const error_indication_event& err_ind);
 
   void enqueue_impl(const sr_event& sr);
-  void enqueue_impl(const bsr_event& bsr);
+  void enqueue_impl(const ul_bsr_indication_message& bsr);
   void enqueue_impl(const harq_ack_event& harq_ev);
   void enqueue_impl(const csi_report_event& csi);
   void enqueue_impl(const crc_event& crc_ev);
   void enqueue_impl(const dl_mac_ce_indication& mac_ce);
   void enqueue_impl(const dl_buffer_state_indication_message& bs);
-  void enqueue_impl(const phr_event& phr_ev);
+  void enqueue_impl(const ul_phr_indication_message& phr_ind);
   void enqueue_impl(const srs_indication_event& srs_ev);
   void enqueue_impl(const slice_reconfiguration_event& slice_reconf_ev);
 

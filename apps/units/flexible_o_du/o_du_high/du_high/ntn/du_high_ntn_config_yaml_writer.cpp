@@ -19,7 +19,10 @@ void ocudu::fill_ntn_config_in_yaml_schema(YAML::Node& node, const du_high_unit_
 
     fill_ntn_satellite_in_yaml_schema(ntn_node, serving.sat_ref);
 
-    ntn_node["cell_specific_koffset"]    = static_cast<unsigned>(serving.cell_specific_koffset.count());
+    ntn_node["cell_specific_koffset"] = static_cast<unsigned>(serving.cell_specific_koffset.count());
+    if (serving.k_mac) {
+      ntn_node["k_mac"] = static_cast<unsigned>(serving.k_mac->count());
+    }
     ntn_node["ntn_ul_sync_validity_dur"] = serving.ntn_ul_sync_validity_dur;
 
     if (serving.feeder_link_info) {
@@ -39,6 +42,10 @@ void ocudu::fill_ntn_config_in_yaml_schema(YAML::Node& node, const du_high_unit_
     }
 
     ntn_node["ta_report"] = serving.ta_report;
+    if (serving.ta_report_offset_threshold) {
+      ntn_node["ta_report_offset_threshold"] = *serving.ta_report_offset_threshold;
+      ntn_node["ta_report_sr_enabled"]       = serving.ta_report_sr_enabled;
+    }
 
     if (serving.reference_location) {
       ntn_node["reference_location"] = build_geodetic_yaml_node(*serving.reference_location, false);
@@ -75,7 +82,7 @@ void ocudu::fill_ntn_config_in_yaml_schema(YAML::Node& node, const du_high_unit_
         sat_sw_node["cell_specific_koffset"] = static_cast<unsigned>(sw.cell_specific_koffset->count());
       }
       if (sw.k_mac) {
-        sat_sw_node["k_mac"] = *sw.k_mac;
+        sat_sw_node["k_mac"] = static_cast<unsigned>(sw.k_mac->count());
       }
       if (sw.ta_report) {
         sat_sw_node["ta_report"] = *sw.ta_report;
@@ -109,7 +116,7 @@ void ocudu::fill_ntn_config_in_yaml_schema(YAML::Node& node, const du_high_unit_
         ncell_node["ntn_ul_sync_validity_dur"] = *ncell.ntn_ul_sync_validity_dur;
       }
       if (ncell.k_mac) {
-        ncell_node["k_mac"] = *ncell.k_mac;
+        ncell_node["k_mac"] = static_cast<unsigned>(ncell.k_mac->count());
       }
       if (ncell.polarization) {
         ncell_node["polarization"] = build_ntn_polarization_yaml_node(*ncell.polarization);

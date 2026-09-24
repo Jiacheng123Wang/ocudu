@@ -295,7 +295,7 @@ private:
   std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>                    rx_fill_buffer;
   /// Samples of rx_fill_buffer written by the radio so far.
   unsigned                                                                   rx_fill = 0;
-  std::optional<std::chrono::time_point<std::chrono::high_resolution_clock>> last_tx_time;
+  std::optional<std::chrono::time_point<std::chrono::steady_clock>> last_tx_time;
   unsigned                                                                   last_tx_buffer_size = 0;
   /// Flow instrumentation probe for the DL production rate (debug aid for cross-platform comparison).
   flow_probe dl_probe{"dl_proc"};

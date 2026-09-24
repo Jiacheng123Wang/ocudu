@@ -51,14 +51,14 @@ struct search_space_info {
   /// \brief Retrieve all the PDCCH candidates for a given aggregation level and slot for this SearchSpace.
   span<const uint8_t> get_pdcch_candidates(aggregation_level aggr_lvl, slot_point pdcch_slot) const
   {
-    return ss_pdcch_candidates[pdcch_slot.to_uint() % ss_pdcch_candidates.size()][to_aggregation_level_index(aggr_lvl)];
+    return ss_pdcch_candidates[pdcch_slot.count() % ss_pdcch_candidates.size()][to_aggregation_level_index(aggr_lvl)];
   }
 
   /// \brief Retrieve all the CRBs for a given aggregation level and searchSpace candidate.
   span<const crb_index_list_span> get_crb_list_of_pdcch_candidates(aggregation_level aggr_lvl,
                                                                    slot_point        pdcch_slot) const
   {
-    return crbs_of_candidates[pdcch_slot.to_uint() % crbs_of_candidates.size()][to_aggregation_level_index(aggr_lvl)];
+    return crbs_of_candidates[pdcch_slot.count() % crbs_of_candidates.size()][to_aggregation_level_index(aggr_lvl)];
   }
 
   /// \brief Returns the maximum number of DL layers for which a PDSCH config exists for the given time-domain resource.
@@ -171,8 +171,13 @@ public:
     return true;
   }
 
-  /// Determines whether UL allocations are possible in the provided slot.
-  bool is_ul_enabled(slot_point ul_slot) const;
+  /// \brief Determines whether UL allocations are possible in the provided slot.
+  ///
+  /// \param ul_slot Slot for which the UE uplink is being tested.
+  /// \param reported_ul_ta T_TA last reported by the UE, if any. Tracked outside the configuration, in
+  /// \c ue_ta_report_tracker, and used to place the uplink measurement gap window when the cell has no estimate of its
+  /// own. Callers holding a \c ue_cell should use \c ue_cell::is_ul_enabled, which supplies it.
+  bool is_ul_enabled(slot_point ul_slot, std::optional<std::chrono::microseconds> reported_ul_ta) const;
 
   /// Get CSI-MeasConfig for the UE.
   const csi_meas_config* csi_meas_cfg() const
@@ -284,8 +289,7 @@ public:
   }
   const ue_cell_configuration& ue_cell_cfg(serv_cell_index_t serv_cell_index) const
   {
-    ocudu_assert(
-        serv_cell_index < ue_cell_to_du_cell_index.size(), "Invalid cell_index={}", fmt::underlying(serv_cell_index));
+    ocudu_assert(serv_cell_index < ue_cell_to_du_cell_index.size(), "Invalid cell_index={}", serv_cell_index);
     return ue_cell_cfg(ue_cell_to_du_cell_index[serv_cell_index]);
   }
   const ue_cell_configuration& pcell_cfg() const { return ue_cell_cfg(SERVING_PCELL_IDX); }

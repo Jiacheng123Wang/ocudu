@@ -134,7 +134,7 @@ void e_cid_measurement_initiation_procedure::get_measurement_result()
 {
   ocudu_assert(ue_ctxt->get_cu_cp_ue() != nullptr,
                "ue={} ran_ue={} lmf_ue={}: UE for UE context doesn't exist",
-               fmt::underlying(ue_ctxt->ue_ids.ue_index),
+               ue_ctxt->ue_ids.ue_index,
                fmt::underlying(ue_ctxt->ue_ids.ran_ue_meas_id),
                fmt::underlying(ue_ctxt->ue_ids.lmf_ue_meas_id));
 
@@ -144,7 +144,7 @@ void e_cid_measurement_initiation_procedure::get_measurement_result()
   // Perform sanity checks.
   nrppa_cause_t failure_cause = nrppa_cause_radio_network_t::requested_item_temporarily_not_available;
   if (!ue_measurement_results.has_value() or ue_measurement_results.value().cell_measurements.empty()) {
-    ue_ctxt->logger.log_warning("ue={}: No measurement results available", fmt::underlying(ue_ctxt->ue_ids.ue_index));
+    ue_ctxt->logger.log_warning("ue={}: No measurement results available", ue_ctxt->ue_ids.ue_index);
     e_cid_meas_results = make_unexpected(failure_cause);
     return;
   }
@@ -200,7 +200,7 @@ e_cid_measurement_initiation_procedure::create_e_cid_measurement_initiation_fail
   asn1::nrppa::e_c_id_meas_initiation_fail_s& meas_init_fail =
       asn1_fail.unsuccessful_outcome().value.e_c_id_meas_initiation_fail();
 
-  meas_init_fail->lmf_ue_meas_id = lmf_ue_meas_id_to_uint(ue_ctxt->ue_ids.lmf_ue_meas_id);
+  meas_init_fail->lmf_ue_meas_id = to_underlying(ue_ctxt->ue_ids.lmf_ue_meas_id);
   meas_init_fail->cause          = cause_to_asn1(cause);
 
   return asn1_fail;
@@ -217,8 +217,8 @@ e_cid_measurement_initiation_procedure::create_e_cid_measurement_initiation_resp
   asn1::nrppa::e_c_id_meas_initiation_resp_s& meas_init_resp =
       asn1_resp.successful_outcome().value.e_c_id_meas_initiation_resp();
 
-  meas_init_resp->lmf_ue_meas_id = lmf_ue_meas_id_to_uint(ue_ctxt->ue_ids.lmf_ue_meas_id);
-  meas_init_resp->ran_ue_meas_id = ran_ue_meas_id_to_uint(ue_ctxt->ue_ids.ran_ue_meas_id);
+  meas_init_resp->lmf_ue_meas_id = to_underlying(ue_ctxt->ue_ids.lmf_ue_meas_id);
+  meas_init_resp->ran_ue_meas_id = to_underlying(ue_ctxt->ue_ids.ran_ue_meas_id);
 
   if (on_demand) {
     meas_init_resp->e_c_id_meas_result_present = true;

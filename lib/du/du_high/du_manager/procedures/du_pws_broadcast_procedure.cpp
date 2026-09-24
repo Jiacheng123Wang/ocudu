@@ -15,21 +15,16 @@ using namespace odu;
 
 namespace {
 
-/// Finds the SI-message index at which \c type is statically scheduled in \c cell_cfg, if any. A cell only has a
-/// scheduling slot for SIB6/7/8 if it was configured with the corresponding etws_cfg/cmas_cfg at startup.
-std::optional<unsigned> find_si_msg_idx_for_sib(const du_cell_config& cell_cfg, sib_type type)
+/// Whether the cell is provisioned for a warning carried by \c type, which its ETWS/CMAS configuration decides.
+bool is_provisioned_for_sib(const du_cell_config& cell_cfg, sib_type type)
 {
   if (not cell_cfg.si.si_config.has_value()) {
-    return std::nullopt;
+    return false;
   }
-  const auto& si_sched_info = cell_cfg.si.si_config->si_sched_info;
-  for (unsigned i = 0, e = si_sched_info.size(); i != e; ++i) {
-    const auto& sibs = si_sched_info[i].sib_mapping_info;
-    if (std::find(sibs.begin(), sibs.end(), type) != sibs.end()) {
-      return i;
-    }
-  }
-  return std::nullopt;
+  const auto& pws_si_messages = cell_cfg.si.si_config->pws_si_messages;
+  return std::any_of(pws_si_messages.begin(), pws_si_messages.end(), [type](const pws_si_message_config& pws_si_msg) {
+    return pws_si_msg.sib == type;
+  });
 }
 
 /// \brief Packs a single ASN.1 PER-encoded SIB6/7/8 segment \c sib_msg into a full BCCH-DL-SCH-Message envelope.
@@ -41,25 +36,25 @@ std::optional<unsigned> find_si_msg_idx_for_sib(const du_cell_config& cell_cfg, 
 /// \remark SIB6 is never segmented (always exactly one segment). SIB7/8 may be split into multiple segments by the
 /// CU (see \c write_replace_warning_information::sib_msgs); this function must be called once per segment, and each
 /// resulting BCCH-DL-SCH-Message is transmitted in its own SI-message window occasion, in order.
-expected<byte_buffer> pack_warning_bcch_dl_sch_msg(uint8_t sib_type, const byte_buffer& sib_msg)
+expected<byte_buffer> pack_warning_bcch_dl_sch_msg(sib_type sib_id, const byte_buffer& sib_msg)
 {
   using namespace asn1::rrc_nr;
 
   asn1::cbit_ref bref(sib_msg);
 
   sys_info_ies_s::item_c_ sib_item;
-  switch (sib_type) {
-    case 6:
+  switch (sib_id) {
+    case sib_type::sib6:
       if (sib_item.set_sib6().unpack(bref) != asn1::OCUDUASN_SUCCESS) {
         return make_unexpected(default_error_t{});
       }
       break;
-    case 7:
+    case sib_type::sib7:
       if (sib_item.set_sib7().unpack(bref) != asn1::OCUDUASN_SUCCESS) {
         return make_unexpected(default_error_t{});
       }
       break;
-    case 8:
+    case sib_type::sib8:
       if (sib_item.set_sib8().unpack(bref) != asn1::OCUDUASN_SUCCESS) {
         return make_unexpected(default_error_t{});
       }
@@ -106,21 +101,19 @@ async_task<mac_cell_reconfig_response> du_pws_broadcast_procedure::handle_cell_b
 {
   const du_cell_config& cell_cfg = cell_mng.get_cell_cfg(cell_index);
 
-  std::optional<unsigned> si_msg_idx = find_si_msg_idx_for_sib(cell_cfg, static_cast<sib_type>(request.sib_type));
-  if (not si_msg_idx.has_value()) {
-    logger.warning("cell={}: Discarding Write-Replace Warning. Cause: Cell not provisioned for SIB{}",
-                   cell_index,
-                   request.sib_type);
+  if (not is_provisioned_for_sib(cell_cfg, request.sib_id)) {
+    logger.warning(
+        "cell={}: Discarding Write-Replace Warning. Cause: Cell not provisioned for SIB{}", cell_index, request.sib_id);
     return launch_no_op_task(mac_cell_reconfig_response{});
   }
 
   si_messages.clear();
   si_messages.reserve(request.sib_msgs.size());
   for (const byte_buffer& segment : request.sib_msgs) {
-    expected<byte_buffer> pdu = pack_warning_bcch_dl_sch_msg(request.sib_type, segment);
+    expected<byte_buffer> pdu = pack_warning_bcch_dl_sch_msg(request.sib_id, segment);
     if (not pdu.has_value()) {
       logger.warning(
-          "cell={}: Discarding Write-Replace Warning. Cause: Failed to pack SIB{}", cell_index, request.sib_type);
+          "cell={}: Discarding Write-Replace Warning. Cause: Failed to pack SIB{}", cell_index, request.sib_id);
       return launch_no_op_task(mac_cell_reconfig_response{});
     }
     si_messages.push_back(std::move(pdu.value()));
@@ -128,8 +121,7 @@ async_task<mac_cell_reconfig_response> du_pws_broadcast_procedure::handle_cell_b
 
   mac_cell_reconfig_request req;
   req.new_si_pdu_info = mac_cell_sys_info_pdu_update{
-      .si_msg_idx     = si_msg_idx.value(),
-      .sib_idx        = request.sib_type,
+      .sib_idx        = request.sib_id,
       .slot           = std::nullopt,
       .si_slot_period = std::nullopt,
       .si_messages    = span<byte_buffer>(si_messages),

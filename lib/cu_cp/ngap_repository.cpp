@@ -47,6 +47,7 @@ ngap_interface* ngap_repository::add_ngap(cu_cp_amf_index_t amf_index)
                                               cfg.ran_node_name,
                                               amf_index,
                                               config.supported_tas,
+                                              config.amf_addr,
                                               cfg.procedure_timeout,
                                               cfg.request_pdu_session_timeout};
   std::unique_ptr<ngap_interface> ngap_entity =
@@ -66,7 +67,7 @@ void ngap_repository::update_plmn_lookup(cu_cp_amf_index_t amf_index)
 {
   auto ngap = ngap_db.find(amf_index);
   if (ngap == ngap_db.end()) {
-    logger.error("NGAP not found for AMF index {}", fmt::underlying(amf_index));
+    logger.error("NGAP not found for AMF index {}", amf_index);
     return;
   }
 

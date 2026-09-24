@@ -7,6 +7,7 @@
 #include "ru_sdr_config.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ran/band_helper.h"
+#include <sstream>
 
 using namespace ocudu;
 
@@ -266,20 +267,28 @@ ru_sdr_configuration ocudu::generate_ru_sdr_config(const ru_sdr_unit_config&    
 
 void ocudu::fill_sdr_worker_manager_config(worker_manager_config& config, const ru_sdr_unit_config& ru_cfg)
 {
-  auto& sdr_cfg = config.ru_sdr_cfg.emplace();
+  unsigned nof_cells = ru_cfg.expert_execution_cfg.cell_affinities.size();
 
-  sdr_cfg.nof_cells = ru_cfg.expert_execution_cfg.cell_affinities.size();
-  // The sequential profile serializes receive and transmit processing on a single worker: the receive task blocks
+  // LOCAL DIVERGENCE FROM UPSTREAM: upstream forces the sequential profile whenever the ZMQ driver is selected
+  // ("The ZMQ driver requires sequential lower PHY execution to gurantee the order of the slot processing"). The
+  // sequential profile serializes receive and transmit processing on a single worker: the receive task blocks
   // waiting for UL samples and stalls the DL production behind it. With the ZMQ transport (no real RF pacing), the
   // pull loop collapses to the UL arrival rate (measured ~18-35 slots/s instead of 1000). Use the configured
   // profile (dual: dedicated RX and TX workers) so the DL production is not throttled by the receive blocking.
-  sdr_cfg.profile = static_cast<worker_manager_config::ru_sdr_config::lower_phy_thread_profile>(
-      ru_cfg.expert_execution_cfg.threads.execution_profile);
+  // Revisit once the ZMQ driver's slot ordering is guaranteed upstream.
+  worker_manager_config::ru_sdr_config::lower_phy_thread_profile thread_profile =
+      static_cast<worker_manager_config::ru_sdr_config::lower_phy_thread_profile>(
+          ru_cfg.expert_execution_cfg.threads.execution_profile);
+
+  config.ru_sdr_cfg.emplace(
+      worker_manager_config::ru_sdr_config{.profile                 = thread_profile,
+                                           .nof_cells               = nof_cells,
+                                           .executor_tracing_enable = ru_cfg.tracer.executor_tracing_enable});
 
   ocudu_assert(config.config_affinities.size() == ru_cfg.expert_execution_cfg.cell_affinities.size(),
                "Invalid number of cell affinities");
 
-  for (unsigned i = 0; i != sdr_cfg.nof_cells; ++i) {
+  for (unsigned i = 0; i != nof_cells; ++i) {
     config.config_affinities[i].push_back(ru_cfg.expert_execution_cfg.cell_affinities[i].ru_cpu_cfg);
   }
 }

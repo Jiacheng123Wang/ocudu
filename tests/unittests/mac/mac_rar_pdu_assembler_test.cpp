@@ -4,7 +4,7 @@
 
 #include "lib/mac/mac_dl/rar_pdu_assembler.h"
 #include "mac_test_helpers.h"
-#include "ocudu/adt/circular_array.h"
+#include "ocudu/adt/circular_vector.h"
 #include "ocudu/mac/ue_con_res_id.h"
 #include "ocudu/support/bit_encoding.h"
 #include "ocudu/support/test_utils.h"
@@ -15,7 +15,7 @@ using namespace ocudu;
 
 std::random_device                      rd;
 std::mt19937                            gen(rd());
-std::uniform_int_distribution<unsigned> rnti_dist(to_value(rnti_t::MIN_CRNTI), to_value(rnti_t::MAX_CRNTI));
+std::uniform_int_distribution<unsigned> rnti_dist(to_underlying(rnti_t::MIN_CRNTI), to_underlying(rnti_t::MAX_CRNTI));
 std::uniform_int_distribution<unsigned> rapid_dist(0, 63);
 std::uniform_int_distribution<unsigned> mcs_dist(0, 15);
 std::uniform_int_distribution<unsigned> time_res_dist(0, 15);
@@ -98,7 +98,7 @@ rar_ul_grant decode_ul_grant(span<const uint8_t> rar_subpdu)
   dec.unpack(rnti, 16);
   ret.temp_crnti = to_rnti(rnti);
 
-  TESTASSERT_EQ(RAR_PDU_SIZE, dec.nof_bytes());
+  report_fatal_error_if_not((RAR_PDU_SIZE) == (dec.nof_bytes()), "RAR_PDU_SIZE != dec.nof_bytes()");
 
   return ret;
 }
@@ -133,7 +133,7 @@ struct success_rar_content {
 /// Decode successRAR subPDU (subheader + payload) as per TS 38.321, Figure 6.1.5a-3 and 6.2.3a-2.
 success_rar_content decode_success_rar(span<const uint8_t> rar_subpdu)
 {
-  TESTASSERT_EQ(SUCCESS_RAR_PDU_SIZE, rar_subpdu.size());
+  report_fatal_error_if_not((SUCCESS_RAR_PDU_SIZE) == (rar_subpdu.size()), "SUCCESS_RAR_PDU_SIZE != rar_subpdu.size()");
   success_rar_content ret{};
   std::copy(rar_subpdu.begin() + 1, rar_subpdu.begin() + 1 + UE_CON_RES_ID_LEN, ret.con_res_id.begin());
 
@@ -166,16 +166,17 @@ rar_ul_grant make_random_success_rar_grant()
 /// Tests if the encoded RAR PDU matches the content in the original RAR.
 void test_encoded_rar(const rar_information& original_rar, span<const uint8_t> rar_pdu)
 {
-  TESTASSERT(not rar_pdu.empty());
-  TESTASSERT_EQ(RAR_PDU_SIZE * original_rar.grants.size(), rar_pdu.size());
+  report_fatal_error_if_not(not rar_pdu.empty(), "not rar_pdu.empty()");
+  report_fatal_error_if_not((RAR_PDU_SIZE * original_rar.grants.size()) == (rar_pdu.size()),
+                            "RAR_PDU_SIZE * original_rar.grants.size() != rar_pdu.size()");
 
   for (unsigned i = 0; i < original_rar.grants.size(); ++i) {
     span<const uint8_t> subpdu = rar_pdu.subspan(i * RAR_PDU_SIZE, RAR_PDU_SIZE);
-    TESTASSERT_EQ(is_last_subpdu(subpdu), (i == original_rar.grants.size() - 1), "for index={}", i);
-    TESTASSERT(is_rapid_subpdu(subpdu));
+    report_fatal_error_if_not((is_last_subpdu(subpdu)) == ((i == original_rar.grants.size() - 1)), "for index={}", i);
+    report_fatal_error_if_not(is_rapid_subpdu(subpdu), "is_rapid_subpdu(subpdu)");
 
     rar_ul_grant grant2 = decode_ul_grant(subpdu);
-    TESTASSERT(original_rar.grants[i] == grant2);
+    report_fatal_error_if_not(original_rar.grants[i] == grant2, "original_rar.grants[i] == grant2");
   }
 }
 
@@ -257,13 +258,13 @@ TEST(rar_assembler_test, rar_assembler_maintains_old_results)
   // that the RAR assembler has to keep these results stored.
   static constexpr unsigned MEMORY_RESULT_IN_SLOTS = MAX_RAR_PDUS_PER_SLOT * NOF_SUBFRAMES_PER_FRAME;
 
-  circular_array<span<const uint8_t>, MEMORY_RESULT_IN_SLOTS> previous_pdus;
-  circular_array<rar_information, MEMORY_RESULT_IN_SLOTS>     previous_rars;
+  circular_vector<span<const uint8_t>, true> previous_pdus(MEMORY_RESULT_IN_SLOTS);
+  circular_vector<rar_information, true>     previous_rars(MEMORY_RESULT_IN_SLOTS);
 
-  unsigned nof_slots_tests = MEMORY_RESULT_IN_SLOTS * 64;
+  unsigned nof_slots_tests = previous_pdus.size() * 64;
   for (unsigned i = 0; i < nof_slots_tests; ++i) {
     pdu_pool.tick(i);
-    if (i >= MEMORY_RESULT_IN_SLOTS) {
+    if (i >= previous_pdus.size()) {
       // Test old results to check if they are still valid.
       test_encoded_rar(previous_rars[i], previous_pdus[i]);
     }

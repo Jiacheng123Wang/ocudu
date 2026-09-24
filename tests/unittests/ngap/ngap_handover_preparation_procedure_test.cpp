@@ -61,6 +61,80 @@ TEST_F(ngap_test, when_source_gnb_handover_preparation_triggered_then_ho_command
   ASSERT_TRUE(t.get().success);
 }
 
+/// Test that a UE without a PDU session is not handed over, as the PDU Session Resource List IE of the HANDOVER
+/// REQUIRED carries at least one item (TS 38.413 section 9.2.3.1).
+TEST_F(ngap_test, when_ue_has_no_pdu_session_then_handover_preparation_is_declined)
+{
+  // Setup UE context. No PDU session is added to the UP manager.
+  cu_cp_ue_index_t ue_index = create_ue();
+  run_dl_nas_transport(ue_index); // needed to allocate AMF UE id.
+
+  auto& ue = test_ues.at(ue_index);
+  ue.rrc_ue_handler.set_ho_preparation_message({});
+
+  ngap_handover_preparation_request request =
+      generate_handover_preparation_request(ue_index, {}, nr_cell_identity::create({1, 22}, 1).value(), 22);
+
+  const size_t nof_ngap_msgs_before = n2_gw.last_ngap_msgs.size();
+
+  // Action: Launch HO preparation procedure.
+  async_task<ngap_handover_preparation_response>         t = ngap->handle_handover_preparation_request(request);
+  lazy_task_launcher<ngap_handover_preparation_response> t_launcher(t);
+
+  // The procedure must fail without handing an unpackable Handover Required over for transmission.
+  ASSERT_TRUE(t.ready());
+  ASSERT_FALSE(t.get().success);
+  ASSERT_EQ(n2_gw.last_ngap_msgs.size(), nof_ngap_msgs_before);
+  ASSERT_EQ(n2_gw.nof_unpackable_ngap_msgs, 0);
+}
+
+/// Test that the forwarding tunnels reported per PDU session in the Handover Command are handed to the CU-CP, so that
+/// it can point the source CU-UP at them (TS 38.413 section 9.3.4.10).
+TEST_F(ngap_test, when_handover_command_reports_forwarding_tunnels_then_they_are_forwarded_to_the_cu_cp)
+{
+  cu_cp_ue_index_t ue_index = create_ue();
+  run_dl_nas_transport(ue_index);
+
+  add_pdu_session_to_up_manager(
+      ue_index,
+      uint_to_pdu_session_id(1),
+      pdu_session_type_t::ipv4,
+      up_transport_layer_info{transport_layer_address::create_from_string("127.0.0.1"), int_to_gtpu_teid(1)},
+      uint_to_drb_id(1),
+      uint_to_qos_flow_id(1));
+
+  auto& ue = test_ues.at(ue_index);
+  ue.rrc_ue_handler.set_ho_preparation_message({});
+
+  ngap_handover_preparation_request request =
+      generate_handover_preparation_request(ue_index,
+                                            ue_mng.find_ue(ue_index)->get_up_resource_manager().get_pdu_sessions_map(),
+                                            nr_cell_identity::create({1, 22}, 1).value(),
+                                            22);
+
+  async_task<ngap_handover_preparation_response>         t = ngap->handle_handover_preparation_request(request);
+  lazy_task_launcher<ngap_handover_preparation_response> t_launcher(t);
+
+  // Inject a Handover Command carrying a PDU session level forwarding tunnel.
+  ngap->handle_message(generate_valid_handover_command(ue.amf_ue_id.value(), ue.ran_ue_id.value(), true));
+
+  ASSERT_TRUE(t.ready());
+  ASSERT_TRUE(t.get().success);
+
+  const auto& ho_command = cu_cp_notifier.last_handover_command;
+  ASSERT_EQ(ho_command.ue_index, ue_index);
+  ASSERT_FALSE(ho_command.rrc_container.empty());
+
+  ASSERT_EQ(ho_command.data_forwarding_info_from_target.size(), 1U);
+  const auto& forwarding_info = ho_command.data_forwarding_info_from_target.at(uint_to_pdu_session_id(1));
+
+  ASSERT_TRUE(forwarding_info.pdu_session_level_dl_data_forwarding_info.has_value());
+  ASSERT_EQ(forwarding_info.qos_flows_accepted_for_data_forwarding_list.size(), 1U);
+  EXPECT_EQ(forwarding_info.qos_flows_accepted_for_data_forwarding_list[0], uint_to_qos_flow_id(1));
+
+  EXPECT_TRUE(forwarding_info.data_forwarding_resp_drb_item_list.empty());
+}
+
 /// Test that the Handover Required correctly encodes the target PLMN in the TargetID's Global gNB-ID and in the
 /// Source-to-Target Transparent Container's Target Cell ID, for a target cell belonging to a different PLMN than the
 /// one currently serving the UE.
@@ -165,4 +239,53 @@ TEST_F(ngap_test, when_source_gnb_handover_preparation_triggered_then_drb_to_qos
   EXPECT_EQ(drb_item.drb_id, 1U);
   ASSERT_EQ(drb_item.associated_qos_flow_list.size(), 1U);
   EXPECT_EQ(drb_item.associated_qos_flow_list[0].qos_flow_id, 0U);
+}
+
+/// Test that the Handover Required proposes DL data forwarding for every QoS flow of the UE, so that the 5GC and the
+/// target can set up forwarding tunnels for them (TS 38.413 sections 9.3.1.29 and 9.3.1.33).
+TEST_F(ngap_test, when_source_gnb_handover_preparation_triggered_then_dl_data_forwarding_is_proposed)
+{
+  cu_cp_ue_index_t ue_index = create_ue();
+  run_dl_nas_transport(ue_index);
+
+  add_pdu_session_to_up_manager(
+      ue_index,
+      uint_to_pdu_session_id(1),
+      pdu_session_type_t::ipv4,
+      up_transport_layer_info{transport_layer_address::create_from_string("127.0.0.1"), int_to_gtpu_teid(1)},
+      uint_to_drb_id(1),
+      uint_to_qos_flow_id(0));
+
+  auto& ue = test_ues.at(ue_index);
+  ue.rrc_ue_handler.set_ho_preparation_message({});
+
+  ngap_handover_preparation_request request =
+      generate_handover_preparation_request(ue_index,
+                                            ue_mng.find_ue(ue_index)->get_up_resource_manager().get_pdu_sessions_map(),
+                                            nr_cell_identity::create({1, 22}, 1).value(),
+                                            22);
+
+  async_task<ngap_handover_preparation_response>         t = ngap->handle_handover_preparation_request(request);
+  lazy_task_launcher<ngap_handover_preparation_response> t_launcher(t);
+
+  ASSERT_EQ(n2_gw.last_ngap_msgs.back().pdu.init_msg().value.type().value,
+            asn1::ngap::ngap_elem_procs_o::init_msg_c::types_opts::ho_required);
+  const asn1::ngap::ho_required_s& ho_required = n2_gw.last_ngap_msgs.back().pdu.init_msg().value.ho_required();
+
+  // Every QoS flow of the PDU session is proposed for DL forwarding.
+  asn1::cbit_ref bref(ho_required->source_to_target_transparent_container);
+  asn1::ngap::source_ngran_node_to_target_ngran_node_transparent_container_s transparent_container;
+  ASSERT_EQ(transparent_container.unpack(bref), asn1::OCUDUASN_SUCCESS);
+  ASSERT_EQ(transparent_container.pdu_session_res_info_list.size(), 1U);
+  const auto& qos_flow_info_list = transparent_container.pdu_session_res_info_list[0].qos_flow_info_list;
+  ASSERT_EQ(qos_flow_info_list.size(), 1U);
+  EXPECT_TRUE(qos_flow_info_list[0].dl_forwarding_present);
+  EXPECT_EQ(qos_flow_info_list[0].dl_forwarding.value, asn1::ngap::dl_forwarding_opts::dl_forwarding_proposed);
+
+  // No direct forwarding path is reported, so the 5GC decides how to route the forwarded data.
+  ASSERT_EQ(ho_required->pdu_session_res_list_ho_rqd.size(), 1U);
+  asn1::cbit_ref                     transfer_bref(ho_required->pdu_session_res_list_ho_rqd[0].ho_required_transfer);
+  asn1::ngap::ho_required_transfer_s ho_required_transfer;
+  ASSERT_EQ(ho_required_transfer.unpack(transfer_bref), asn1::OCUDUASN_SUCCESS);
+  EXPECT_FALSE(ho_required_transfer.direct_forwarding_path_availability_present);
 }

@@ -211,7 +211,7 @@ test_bench::test_bench(const test_bench_params& params_) :
   dci_info{make_default_dci(params.n_cces, &cell_cfg.params.dl_cfg_common.init_dl_bwp.pdcch_common.coreset0.value())},
   pucch_alloc{cell_cfg, params.max_pucchs_per_slot, params.max_ul_grants_per_slot},
   uci_alloc(cell_cfg, pucch_alloc),
-  uci_sched{cell_cfg, uci_alloc, ues},
+  uci_sched{cell_cfg, uci_alloc, cell_ues},
   sl_tx{to_numerology_value(cell_cfg.params.dl_cfg_common.init_dl_bwp.generic_params.scs), 0}
 {
   ues.register_cell(cell_ues);
@@ -263,6 +263,8 @@ void test_bench::add_ue()
         ue_req.cfg.cells->back().serv_cell_cfg.csi_meas_cfg.value().csi_report_cfg_list[0].report_cfg_type);
     csi_report.report_slot_offset = params.csi_offset;
   }
+
+  ue_req.cfg.meas_gap_cfg = params.meas_gap;
 
   const ue_configuration* ue_cfg = cfg_mng.add_ue(ue_req);
   ocudu_assert(ue_cfg != nullptr, "Failed to create UE configuration");

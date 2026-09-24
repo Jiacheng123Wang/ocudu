@@ -4,12 +4,16 @@
 
 #pragma once
 
-#include "mbedtls/aes.h"
+#include "mbedtls/version.h"
 #include "ocudu/security/integrity_engine.h"
 #include "ocudu/security/security.h"
+#include "ocudu/security/ssl.h"
 
-namespace ocudu {
-namespace security {
+#if !OCUDU_MBEDTLS_PSA
+#include "mbedtls/aes.h"
+#endif
+
+namespace ocudu::security {
 
 class integrity_engine_nia2_non_cmac final : public integrity_engine
 {
@@ -30,9 +34,9 @@ private:
   uint8_t            bearer_id;
   security_direction direction;
 
-  mbedtls_aes_context ctx;
-  uint8_t             k1[16];
-  uint8_t             k2[16];
+  aes_context ctx;
+  uint8_t     k1[16];
+  uint8_t     k2[16];
 
   std::array<uint8_t, sec_max_pdu_size>    msg_buf;
   static constexpr std::array<uint8_t, 16> zeros = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -41,5 +45,4 @@ private:
   bool                    allow_unprotected = false;
 };
 
-} // namespace security
-} // namespace ocudu
+} // namespace ocudu::security

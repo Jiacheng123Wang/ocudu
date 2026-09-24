@@ -56,6 +56,8 @@ public:
     bool use_early_stop = true;
     /// Flag to denote new data (first HARQ transmission).
     bool new_data = true;
+    /// Flag to denote last repetition (last HARQ transmission in a burst).
+    bool last_repetition = true;
     /// Slot of the PUSCH transmission (used by the UL pipeline probe for slot-keyed matching).
     slot_point slot;
   };

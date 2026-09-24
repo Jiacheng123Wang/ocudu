@@ -50,5 +50,9 @@ error_type<std::string> test_helpers::apply_rrm_policy_reconfiguration(odu::du_c
   std::unique_ptr<app_services::remote_command> remote =
       std::make_unique<rrm_policy_ratio_remote_command>(configurator);
 
-  return remote->execute(req);
+  auto result = remote->execute(req);
+  if (not result.has_value()) {
+    return make_unexpected(result.error());
+  }
+  return {};
 }

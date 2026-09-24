@@ -185,6 +185,11 @@ inline bool fill_cu_cp_pdu_session_resource_setup_item_base(cu_cp_pdu_session_re
 
   setup_item.ul_ngu_up_tnl_info = asn1_to_up_transport_layer_info(asn1_setup_req_transfer->ul_ngu_up_tnl_info);
 
+  // Fill data forwarding not possible.
+  if (asn1_setup_req_transfer->data_forwarding_not_possible_present) {
+    setup_item.data_forwarding_not_possible = true;
+  }
+
   // Fill PDU session type.
   if (!asn1_to_pdu_session_type(setup_item.pdu_session_type, asn1_setup_req_transfer->pdu_session_type)) {
     ocudulog::fetch_basic_logger("NGAP").error(
@@ -654,7 +659,7 @@ inline void fill_asn1_ue_context_release_request(asn1::ngap::ue_context_release_
     asn1_msg->pdu_session_res_list_cxt_rel_req_present = true;
     for (const auto& session_id : msg.pdu_session_res_list_cxt_rel_req) {
       asn1::ngap::pdu_session_res_item_cxt_rel_req_s pdu_session_item;
-      pdu_session_item.pdu_session_id = pdu_session_id_to_uint(session_id);
+      pdu_session_item.pdu_session_id = to_underlying(session_id);
       asn1_msg->pdu_session_res_list_cxt_rel_req.push_back(pdu_session_item);
     }
   }
@@ -781,7 +786,7 @@ inline void fill_asn1_ue_context_release_complete(asn1::ngap::ue_context_release
 
     for (auto pdu_session_id : cu_cp_resp.pdu_session_res_list_cxt_rel_cpl) {
       asn1::ngap::pdu_session_res_item_cxt_rel_cpl_s asn1_rel_item;
-      asn1_rel_item.pdu_session_id = pdu_session_id_to_uint(pdu_session_id);
+      asn1_rel_item.pdu_session_id = to_underlying(pdu_session_id);
       asn1_resp->pdu_session_res_list_cxt_rel_cpl.push_back(asn1_rel_item);
     }
   }
@@ -1056,15 +1061,11 @@ inline bool fill_asn1_handover_resource_allocation_response(asn1::ngap::ho_fail_
 
 /// \brief Fill the Handover Notify to ASN.1 struct.
 /// \param[out] asn1_msg The Handover Notify ASN1 struct to fill.
-/// \param[in] cgi The nr_cell_global_id common type struct of the UE.
-/// \param[in] tac The tac of the UE.
-inline void
-fill_asn1_handover_notify(asn1::ngap::ho_notify_s& asn1_msg, const nr_cell_global_id_t& cgi, const tac_t tac)
+/// \param[in] user_location_info The User Location Information of the UE in the target cell.
+inline void fill_asn1_handover_notify(asn1::ngap::ho_notify_s&           asn1_msg,
+                                      const cu_cp_user_location_info_nr& user_location_info)
 {
-  auto& user_loc_info_nr       = asn1_msg->user_location_info.set_user_location_info_nr();
-  user_loc_info_nr.nr_cgi      = nr_cgi_to_ngap_asn1(cgi);
-  user_loc_info_nr.tai.plmn_id = cgi.plmn_id.to_bytes();
-  user_loc_info_nr.tai.tac.from_number(tac);
+  asn1_msg->user_location_info.set_user_location_info_nr() = cu_cp_user_location_info_to_asn1(user_location_info);
 }
 
 /// \brief Convert the UL RAN Status Transfer struct to ASN.1.
@@ -1078,7 +1079,7 @@ inline void fill_asn1_ul_ran_status_transfer(
       asn1_msg->ran_status_transfer_transparent_container.drbs_subject_to_status_transfer_list;
   for (const cu_cp_drbs_subject_to_status_transfer_item& drb : drb_list) {
     asn1::ngap::drbs_subject_to_status_transfer_item_s asn1_drb_item = {};
-    asn1_drb_item.drb_id                                             = drb_id_to_uint(drb.drb_id);
+    asn1_drb_item.drb_id                                             = to_underlying(drb.drb_id);
     if (drb.drb_status_ul.sn_size == pdcp_sn_size::size12bits) {
       asn1_drb_item.drb_status_ul.set_drb_status_ul12();
       asn1_drb_item.drb_status_ul.drb_status_ul12().ul_count_value.hfn_pdcp_sn12 = drb.drb_status_ul.ul_count.hfn;

@@ -20,6 +20,7 @@
 #include "ocudu/ran/pdcch/search_space.h"
 #include "ocudu/ran/pdsch/pdsch_mcs.h"
 #include "ocudu/ran/prach/prach_configuration.h"
+#include "ocudu/ran/prach/ssb_per_rach_occasions.h"
 #include "ocudu/ran/pucch/pucch_configuration.h"
 #include "ocudu/ran/pucch/pucch_mapping.h"
 #include "ocudu/ran/pusch/pusch_mcs.h"
@@ -134,7 +135,19 @@ struct du_high_unit_drx_config {
   unsigned long_cycle = 0;
 };
 
+/// Beam assigned to one transmitted SSB candidate.
+struct du_high_unit_ssb_beam_config {
+  /// Index of the SSB candidate within the SSB burst, as per TS 38.213 Section 4.1.
+  unsigned ssb_index = 0;
+  /// Beam that carries the SSB candidate.
+  /// \remark An accepted beam ID is not a guarantee that the RU is able to form that beam.
+  unsigned beam_id = 0;
+};
+
 struct du_high_unit_ssb_config {
+  /// \brief Transmitted SSB candidates and the beam assigned to each of them.
+  /// Determines \c ssb-PositionsInBurst, as per TS 38.331.
+  std::vector<du_high_unit_ssb_beam_config> beams = {{}};
   /// SSB period in milliseconds.
   unsigned ssb_period_msec = 10;
   /// \brief \c ss-PBCH-BlockPower, part of \c ServingCellConfigCommonSIB, as per TS 38.331.
@@ -361,7 +374,7 @@ struct du_high_unit_pusch_config {
   /// Minimum PUSCH SINR, in dB, below which a CRC is ignored by the UL OLLA algorithm.
   float olla_min_pusch_snr{-10.0};
   /// Position for additional DM-RS in UL (see TS 38.211, clause 6.4.1.1.3).
-  unsigned dmrs_add_pos{2};
+  unsigned dmrs_add_pos{1};
   /// Minimum number of RBs for resource allocation of UE PUSCHs.
   unsigned min_rb_size = 1;
   /// Maximum number of RBs for resource allocation of UE PUSCHs.
@@ -577,8 +590,16 @@ struct du_high_configured_grants {
   /// For 12 symbol slots, all values above except {1014, 5120}.
   /// \remark Only 14-symbol slot is currently supported.
   std::optional<unsigned> periodicity_slots;
-  /// Number of RBs that are configured for the UE configured grant.
-  unsigned nof_rbs = 10;
+  /// Configured Grant grant size in bytes.
+  /// When \ref requested_bitrate is set, \c grant_size gets ignored.
+  /// \remark The default of 120 bytes results in 10 PRBs at the default MCS 5, which fits within the default
+  /// \ref max_nof_cell_cg_rbs.
+  unsigned grant_size{120};
+  /// Configured Grant requested bitrate. The CLI value is expressed in kBps, while this field stores it normalized in
+  /// bytes per second.
+  /// Setting this automatically makes \ref grant_size be ignored.
+  /// \remark The periodicity doesn't change this bitrate, but it affects the auto-computed grant size per period.
+  std::optional<unsigned> requested_bitrate;
   /// MCS configured for the UE configured grant. Values: {1,...,27}.
   unsigned mcs = 5;
   /// Number of HARQ processes reserved for configured grant. Values: {1,...,16}.
@@ -911,74 +932,90 @@ struct du_high_unit_sib_config {
     std::vector<freq_priority_slicing_config> freq_prio_list_slicing;
   };
 
-  /// \brief Earthquake and Tsunami Warning System (ETWS) message parameters, for testing purposes.
+  /// \brief Earthquake and Tsunami Warning System (ETWS) configuration.
   ///
-  /// ETWS messages are broadcasted over SIB 6 and SIB 7. SIB 6 carries the ETWS primary notification, while SIB-7
-  /// carries the secondary notification.
-  ///
-  /// \remark Only used by cells that schedule SIB6/7 in their \ref si_sched_info. This is a testing aid, not part of
-  /// the real Write-Replace Warning feature: if set, SIB6/7 immediately and permanently broadcast this fixed content,
-  /// instead of staying dormant until an actual F1AP Write-Replace Warning is received.
+  /// ETWS messages are broadcast over SIB 6 and SIB 7. SIB 6 carries the ETWS primary notification, while SIB 7
+  /// carries the secondary notification. A cell only accepts a Write-Replace Warning for them if this is set.
   struct etws_config {
-    /// \brief ETWS message ID (see \ref sib6_info::message_id). Values: {0, ..., 0xffff}
-    /// \remark See TS23.041 Section 9.4.1.2.2 for a list of meaningful values.
-    unsigned message_id = 0x1104;
-    /// \brief ETWS message serial number (see \ref sib6_info::serial_number). Values: {0, ..., 0xffff}
-    /// \remark See TS23.041 Section 9.4.1.2.1 for a list of meaningful values.
-    unsigned serial_num = 0x3000;
-    /// \brief ETWS warning type (see \ref sib6_info::warning_type). Values: {0, ..., 0xffff}
-    /// \remark See TS23.041 Section 9.3.24 for a list of meaningful values.
-    unsigned warning_type = 0x0980;
-    /// \brief CBS Coding scheme used for the warning message. Values: {0, ..., 0xff}.
+    /// \brief Fixed ETWS content that the cell broadcasts from its start, for testing purposes.
     ///
-    /// Supported coding schemes:
-    ///   - 0x00..0x0f: Languages using GSM-7 default alphabet.
-    ///   - 0x40..0x4f: General data coding indication (uncompressed text, no message class meaning).
-    ///     Set bits 3..2 to 0b00 for GSM-7 or 0b10 for UCS-2. Other character sets are not supported.
-    ///   - 0x50..0x5f: General data coding indication (uncompressed text, message class meaning).
-    ///     Set bits 3..2 to 0b00 for GSM-7 or 0b10 for UCS-2. Other character sets are not supported.
-    ///   - 0xf0..0xff: Data coding / message handling.
-    ///     Bit 2 must be set to 0 (GSM-7 encoding).
-    ///
-    /// \remark See TS23.038 Section 5 for a list of meaningful values.
-    unsigned data_coding_scheme = 0x00;
-    /// \brief ETWS warning message.
-    /// \remark Character support depends on the chosen coding scheme (see \ref data_coding_scheme). Must not be
-    /// empty.
-    std::string warning_message = "Test ETWS warning message.";
+    /// This is a testing aid, not part of the real Write-Replace Warning feature.
+    struct test_config {
+      /// \brief ETWS message ID (see \ref sib6_info::message_id). Values: {0, ..., 0xffff}
+      /// \remark See TS23.041 Section 9.4.1.2.2 for a list of meaningful values.
+      unsigned message_id = 0x1104;
+      /// \brief ETWS message serial number (see \ref sib6_info::serial_number). Values: {0, ..., 0xffff}
+      /// \remark See TS23.041 Section 9.4.1.2.1 for a list of meaningful values.
+      unsigned serial_num = 0x3000;
+      /// \brief ETWS warning type (see \ref sib6_info::warning_type). Values: {0, ..., 0xffff}
+      /// \remark See TS23.041 Section 9.3.24 for a list of meaningful values.
+      unsigned warning_type = 0x0980;
+      /// \brief CBS Coding scheme used for the warning message. Values: {0, ..., 0xff}.
+      ///
+      /// Supported coding schemes:
+      ///   - 0x00..0x0f: Languages using GSM-7 default alphabet.
+      ///   - 0x40..0x4f: General data coding indication (uncompressed text, no message class meaning).
+      ///     Set bits 3..2 to 0b00 for GSM-7 or 0b10 for UCS-2. Other character sets are not supported.
+      ///   - 0x50..0x5f: General data coding indication (uncompressed text, message class meaning).
+      ///     Set bits 3..2 to 0b00 for GSM-7 or 0b10 for UCS-2. Other character sets are not supported.
+      ///   - 0xf0..0xff: Data coding / message handling.
+      ///     Bit 2 must be set to 0 (GSM-7 encoding).
+      ///
+      /// \remark See TS23.038 Section 5 for a list of meaningful values.
+      unsigned data_coding_scheme = 0x00;
+      /// \brief ETWS warning message.
+      /// \remark Character support depends on the chosen coding scheme (see \ref data_coding_scheme). Must not be
+      /// empty.
+      std::string warning_message = "Test ETWS warning message.";
+    };
+
+    /// \brief si-Periodicity of the SI messages carrying SIB6 and SIB7, in radio frames.
+    /// \remark Values: {8, 16, 32, 64, 128, 256, 512}.
+    unsigned si_period_rf = 64;
+    /// \brief Content broadcast from the cell start. If unset, SIB6/7 stay dormant until an F1AP Write-Replace
+    /// Warning arrives.
+    std::optional<test_config> test;
   };
 
-  /// \brief Commercial Mobile Alert Service (CMAS) message parameters, for testing purposes.
+  /// \brief Commercial Mobile Alert Service (CMAS) configuration.
   ///
-  /// CMAS messages are broadcasted over SIB 8.
-  ///
-  /// \remark Only used by cells that schedule SIB8 in their \ref si_sched_info. This is a testing aid, not part of the
-  /// real Write-Replace Warning feature: if set, SIB8 immediately and permanently broadcasts this fixed content,
-  /// instead of staying dormant until an actual F1AP Write-Replace Warning is received.
+  /// CMAS messages are broadcast over SIB 8. A cell only accepts a Write-Replace Warning for it if this is set.
   struct cmas_config {
-    /// \brief CMAS message ID (see \ref sib8_info::message_id). Values: {0, ..., 0xffff}
-    /// \remark See TS23.041 Section 9.4.1.2.2 for a list of meaningful values.
-    unsigned message_id = 0x1112;
-    /// \brief CMAS message serial number (see \ref sib8_info::serial_number). Values: {0, ..., 0xffff}
-    /// \remark See TS23.041 Section 9.4.1.2.1 for a list of meaningful values.
-    unsigned serial_num = 0x3003;
-    /// \brief CBS Coding scheme used for the warning message Values: {0, ..., 0xff}.
+    /// \brief Fixed CMAS content that the cell broadcasts from its start, for testing purposes.
     ///
-    /// Supported coding schemes:
-    ///   - 0x00..0x0f: Languages using GSM-7 default alphabet.
-    ///   - 0x40..0x4f: General data coding indication (uncompressed text, no message class meaning).
-    ///     Set bits 3..2 to 0b00 for GSM-7 or 0b10 for UCS-2. Other character sets are not supported.
-    ///   - 0x50..0x5f: General data coding indication (uncompressed text, message class meaning).
-    ///     Set bits 3..2 to 0b00 for GSM-7 or 0b10 for UCS-2. Other character sets are not supported.
-    ///   - 0xf0..0xff: Data coding / message handling.
-    ///     Bit 2 must be set to 0 (GSM-7 encoding).
-    ///
-    /// \remark See TS23.038 Section 5 for a list of meaningful values.
-    unsigned data_coding_scheme = 0x00;
-    /// \brief CMAS warning message.
-    /// \remark Character support depends on the chosen coding scheme (see \ref data_coding_scheme). Must not be
-    /// empty.
-    std::string warning_message = "Test CMAS warning message.";
+    /// This is a testing aid, not part of the real Write-Replace Warning feature.
+    struct test_config {
+      /// \brief CMAS message ID (see \ref sib8_info::message_id). Values: {0, ..., 0xffff}
+      /// \remark See TS23.041 Section 9.4.1.2.2 for a list of meaningful values.
+      unsigned message_id = 0x1112;
+      /// \brief CMAS message serial number (see \ref sib8_info::serial_number). Values: {0, ..., 0xffff}
+      /// \remark See TS23.041 Section 9.4.1.2.1 for a list of meaningful values.
+      unsigned serial_num = 0x3003;
+      /// \brief CBS Coding scheme used for the warning message Values: {0, ..., 0xff}.
+      ///
+      /// Supported coding schemes:
+      ///   - 0x00..0x0f: Languages using GSM-7 default alphabet.
+      ///   - 0x40..0x4f: General data coding indication (uncompressed text, no message class meaning).
+      ///     Set bits 3..2 to 0b00 for GSM-7 or 0b10 for UCS-2. Other character sets are not supported.
+      ///   - 0x50..0x5f: General data coding indication (uncompressed text, message class meaning).
+      ///     Set bits 3..2 to 0b00 for GSM-7 or 0b10 for UCS-2. Other character sets are not supported.
+      ///   - 0xf0..0xff: Data coding / message handling.
+      ///     Bit 2 must be set to 0 (GSM-7 encoding).
+      ///
+      /// \remark See TS23.038 Section 5 for a list of meaningful values.
+      unsigned data_coding_scheme = 0x00;
+      /// \brief CMAS warning message.
+      /// \remark Character support depends on the chosen coding scheme (see \ref data_coding_scheme). Must not be
+      /// empty.
+      std::string warning_message = "Test CMAS warning message.";
+    };
+
+    /// \brief si-Periodicity of the SI message carrying SIB8, in radio frames.
+    /// \remark Values: {8, 16, 32, 64, 128, 256, 512}.
+    unsigned si_period_rf = 64;
+    /// \brief Content broadcast from the cell start. If unset, SIB8 stays dormant until an F1AP Write-Replace Warning
+    /// arrives.
+    std::optional<test_config> test;
   };
 
   struct sib_ue_timers_and_constants {
@@ -1052,6 +1089,57 @@ struct du_high_unit_csi_config {
   int pwr_ctrl_offset = 0;
   /// \brief Type of CSI reporting configuration to use.
   csi_report_type report_type = csi_report_type::periodic;
+};
+
+/// \brief Configuration of a single DL-PRS resource within a PRS Resource Set.
+///
+/// \remark See TS 38.455, Section 9.2.44 and TS 38.211, Section 7.4.1.7.
+struct du_high_unit_prs_resource_config {
+  /// Sequence ID seeding the PRS pseudo-random sequence. Values: {0,...,4095}.
+  unsigned sequence_id = 0;
+  /// RE offset (comb offset) of the resource. Values: {0,...,comb_size - 1}.
+  unsigned re_offset = 0;
+  /// Slot offset of the resource, on top of the slot offset of the resource set. Values: {0,...,511}.
+  unsigned slot_offset = 0;
+  /// First OFDM symbol of the resource within the slot. Values: {0,...,12}.
+  unsigned symbol_offset = 0;
+};
+
+/// \brief Configuration of a DL-PRS Resource Set.
+///
+/// \remark See TS 38.455, Section 9.2.44 and TS 38.211, Section 7.4.1.7.
+struct du_high_unit_prs_resource_set_config {
+  /// \brief PRS bandwidth, in PRBs. It must be a multiple of 4. Values: {24,...,272}.
+  ///
+  /// If not set, it is derived from the cell bandwidth, rounded down to a multiple of 4 PRBs.
+  std::optional<unsigned> bandwidth_prbs;
+  /// Start PRB of the resource set, relative to Point A. Values: {0,...,2176}.
+  unsigned start_prb = 0;
+  /// Comb size, or \f$K_{comb}^{PRS}\f$. Values: {2, 4, 6, 12}.
+  unsigned comb_size = 2;
+  /// \brief Resource set periodicity, or \f$T_{per}^{PRS}\f$, in slots.
+  ///
+  /// Valid values are given by \ref prs_constants::VALID_PERIODICITIES.
+  unsigned periodicity_slots = 160;
+  /// Resource set slot offset within the period, or \f$T_{offset}^{PRS}\f$. Values: {0,...,periodicity - 1}.
+  unsigned slot_offset = 0;
+  /// Resource repetition factor, or \f$T_{rep}^{PRS}\f$. Values: {1, 2, 4, 6, 8, 16, 32}.
+  unsigned repetition_factor = 1;
+  /// Resource time gap between repetitions, or \f$T_{gap}^{PRS}\f$, in slots. Values: {1, 2, 4, 8, 16, 32}.
+  unsigned time_gap = 1;
+  /// Number of OFDM symbols of each resource, or \f$L_{PRS}\f$. Values: {2, 4, 6, 12}.
+  unsigned nof_symbols = 2;
+  /// Transmission power offset of the resource set, in dB. Values: {-60,...,50}.
+  int power_offset_db = 0;
+  /// PRS resources belonging to this resource set. TS 38.455, Section 9.2.44, allows up to 64 resources per set.
+  std::vector<du_high_unit_prs_resource_config> resources;
+  // TODO: Muting (Options 1 and 2) and QCL information.
+};
+
+/// DL-PRS application configuration.
+struct du_high_unit_prs_config {
+  /// PRS resource sets of the cell. TS 38.455, Section 9.2.44, allows up to 8 resource sets per TRP.
+  std::vector<du_high_unit_prs_resource_set_config> resource_sets;
 };
 
 /// MAC Buffer Status Report application configuration.
@@ -1246,6 +1334,9 @@ struct du_high_unit_base_cell_config {
   std::vector<std::string> additional_plmns;
   /// TAC.
   tac_t tac = 7;
+  /// Additional TACs broadcast alongside \c tac in \c trackingAreaList, TS 38.331. NTN cells only; at most
+  /// MAX_NOF_TACS_NTN - 1, since \c tac takes the first.
+  std::vector<tac_t> additional_tacs;
   /// Whether the DU adds this cell to the list of served cells while communicating with the CU-CP or it waits for a
   /// command from the SMO to activate it.
   bool enabled = true;
@@ -1291,6 +1382,8 @@ struct du_high_unit_base_cell_config {
   du_high_unit_paging_config paging_cfg;
   /// CSI configuration.
   du_high_unit_csi_config csi_cfg;
+  /// DL-PRS configuration.
+  du_high_unit_prs_config prs_cfg;
   /// Scheduler radio resource allocation configuration.
   du_high_unit_scheduler_config scheduler_cfg;
   /// Timing Advance MAC CE control-loop management and scheduling configuration.
@@ -1575,8 +1668,9 @@ struct du_high_unit_config {
   std::vector<du_high_unit_qos_config> qos_cfg;
   /// DU high expert execution settings.
   du_high_unit_expert_execution_config expert_execution_cfg;
-  /// SRB configuration.
-  std::map<srb_id_t, du_high_unit_srb_config> srb_cfg;
+  /// SRB configuration. A list of per-SRB entries keyed internally by their srb_id field; converted to the
+  /// srb_id-keyed form during translation.
+  std::vector<du_high_unit_srb_config> srb_cfg;
   /// Globally-defined satellites, referenced by satellite_idx in per-cell NTN configs.
   std::vector<ntn_satellite_config> ntn_satellites;
   /// RLC configuration.

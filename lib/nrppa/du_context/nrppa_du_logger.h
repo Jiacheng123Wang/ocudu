@@ -17,7 +17,7 @@ public:
   nrppa_du_log_prefix(cu_cp_du_index_t du_index)
   {
     fmt::memory_buffer buffer;
-    fmt::format_to(std::back_inserter(buffer), "du={}: ", fmt::underlying(du_index));
+    fmt::format_to(std::back_inserter(buffer), "du={}: ", du_index);
     prefix = ocudu::to_c_str(buffer);
   }
   const char* to_c_str() const { return prefix.c_str(); }

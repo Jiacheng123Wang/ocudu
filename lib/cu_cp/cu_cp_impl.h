@@ -14,6 +14,7 @@
 #include "cu_cp_impl_interface.h"
 #include "cu_up_processor/cu_up_processor_repository.h"
 #include "du_processor/du_processor_repository.h"
+#include "logical_cell_controller.h"
 #include "metrics_handler/metrics_handler_impl.h"
 #include "ngap_repository.h"
 #include "routines/mobility/inter_cu_handover_target_routine.h"
@@ -58,8 +59,7 @@ class cu_cp_impl final : public cu_cp,
                          public cu_cp_ng_handler,
                          public cu_cp_command_handler,
                          public cu_cp_ue_release_command_handler,
-                         public cu_cp_ntn_meas_update_handler,
-                         public cu_cp_cell_command_handler
+                         public cu_cp_ntn_meas_update_handler
 {
 public:
   explicit cu_cp_impl(const cu_cp_configuration& config_);
@@ -137,8 +137,7 @@ public:
   handle_write_replace_warning_request(const ngap_write_replace_warning_request& request) override;
 
   // cu_cp_inter_cu_handover_handler.
-  async_task<bool> handle_new_rrc_handover_command(cu_cp_ue_index_t                ue_index,
-                                                   byte_buffer                     command,
+  async_task<bool> handle_new_rrc_handover_command(cu_cp_rrc_handover_command      command,
                                                    std::optional<xnc_peer_index_t> xnc_index = std::nullopt) override;
   cu_cp_ue_index_t handle_ue_index_allocation_request(const nr_cell_global_id_t& cgi,
                                                       const plmn_identity&       plmn) override;
@@ -153,8 +152,8 @@ public:
   async_task<cu_cp_handover_resource_allocation_response>
                                       handle_xnap_handover_request(const xnap_handover_request& request) override;
   void                                handle_handover_cancel_received(cu_cp_ue_index_t ue_index) override;
-  void                                handle_xnap_handover_success_received(cu_cp_ue_index_t  source_ue_index,
-                                                                            peer_xnap_ue_id_t winner_peer_xnap_ue_id) override;
+  void                                handle_xnap_handover_success_received(cu_cp_ue_index_t           source_ue_index,
+                                                                            const nr_cell_global_id_t& winner_cgi) override;
   void                                handle_xnap_ue_context_release_received(cu_cp_ue_index_t ue_index) override;
   std::vector<cu_cp_served_cell_info> handle_served_cells_required() override;
   cu_cp_ue_index_t handle_xnap_ue_context_id_lookup(const xnap_ue_context_id& ue_context_id) override;
@@ -207,12 +206,10 @@ public:
   cu_cp_mobility_command_handler&   get_mobility_command_handler() override { return mobility_mng; }
   cu_cp_ue_release_command_handler& get_ue_release_command_handler() override { return *this; }
   cu_cp_ntn_meas_update_handler&    get_ntn_meas_update_handler() override { return *this; }
-  cu_cp_cell_command_handler&       get_cell_command_handler() override { return *this; }
+  cu_cp_cell_command_handler&       get_cell_command_handler() override { return cell_ctrl; }
   metrics_handler&                  get_metrics_handler() override { return metrics_hdlr; }
 
-  // cu_cp_cell_command_handler.
-  async_task<cu_cp_cell_command_response> deactivate_cell(const nr_cell_global_id_t& cgi) override;
-  async_task<cu_cp_cell_command_response> activate_cell(const nr_cell_global_id_t& cgi) override;
+  /// Run a cell command's validation+scheduling on the CU-CP executor, blocking for the validation result.
 
   // cu_cp_amf_reconnection_handler.
   void handle_amf_reconnection(cu_cp_amf_index_t amf_index) override;
@@ -242,6 +239,11 @@ private:
   void handle_rrc_ue_creation(cu_cp_ue_index_t ue_index, rrc_ue_interface& rrc_ue) override;
 
   byte_buffer handle_target_cell_sib1_required(cu_cp_du_index_t du_index, nr_cell_global_id_t cgi) override;
+
+  std::vector<nr_cell_identity> handle_du_cells_reported(cu_cp_du_index_t             du_index,
+                                                         span<const du_reported_cell> cells) override;
+
+  void handle_du_removed(cu_cp_du_index_t du_index) override;
 
   async_task<void> handle_transaction_info_loss(const ue_transaction_info_loss_event& ev) override;
 
@@ -285,6 +287,12 @@ private:
   // Components.
   // UE manager.
   ue_manager ue_mng;
+
+  // Controller of the CU-CP's logical cells (operator intent + realization + cell commands). Declared
+  // before du_db: DU teardown is forwarded here, so the controller must outlive the repository. Its
+  // constructor only stores the du_db/scheduler references, so binding them before their construction is
+  // safe.
+  logical_cell_controller cell_ctrl;
 
   // Cell measurement manager.
   cell_meas_manager cell_meas_mng;

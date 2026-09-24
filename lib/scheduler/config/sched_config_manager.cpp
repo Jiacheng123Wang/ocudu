@@ -124,7 +124,7 @@ void sched_config_manager::update_cell(const sched_cell_reconfiguration_request_
 
 void sched_config_manager::update_ntn_ul_ta(const sched_cell_ntn_ul_ta_update& req)
 {
-  ocudu_assert(added_cells.contains(req.cell_index), "cell={} does not exist", fmt::underlying(req.cell_index));
+  ocudu_assert(added_cells.contains(req.cell_index), "cell={} does not exist", req.cell_index);
   added_cells[req.cell_index]->ntn_ref_location_ul_ta = req.ref_location_ul_ta;
 }
 
@@ -191,7 +191,7 @@ ue_config_update_event sched_config_manager::add_ue(const sched_ue_creation_requ
         cfg_req.crnti);
     return ue_config_update_event{cfg_req.ue_index, *this};
   }
-  ocudu_assert(ue_cfg_list[cfg_req.ue_index] == nullptr, "Invalid ue_index={}", fmt::underlying(cfg_req.ue_index));
+  ocudu_assert(ue_cfg_list[cfg_req.ue_index] == nullptr, "Invalid ue_index={}", cfg_req.ue_index);
 
   // Create UE configuration.
   const du_cell_group_index_t target_grp_idx = get_cell_group_index(pcell_index);
@@ -208,7 +208,7 @@ ue_config_update_event sched_config_manager::add_ue(const sched_ue_creation_requ
 
 ue_config_update_event sched_config_manager::update_ue(const sched_ue_reconfiguration_message& cfg_req)
 {
-  ocudu_assert(cfg_req.ue_index < MAX_NOF_DU_UES, "Invalid ue_index={}", fmt::underlying(cfg_req.ue_index));
+  ocudu_assert(cfg_req.ue_index < MAX_NOF_DU_UES, "Invalid ue_index={}", cfg_req.ue_index);
 
   // See if there are any pending events to process out of the critical path.
   flush_ues_to_rem(DEFAULT_FLUSH_REM_UES);
@@ -217,10 +217,10 @@ ue_config_update_event sched_config_manager::update_ue(const sched_ue_reconfigur
   const du_cell_index_t       pcell_index = get_pcell_index(cfg_req.ue_index);
   const du_cell_group_index_t group_idx   = get_cell_group_index(pcell_index);
   if (group_idx == INVALID_DU_CELL_GROUP_INDEX) {
-    logger.error("ue={}: Discarding UE configuration. Cause: UE does not exist", fmt::underlying(cfg_req.ue_index));
+    logger.error("ue={}: Discarding UE configuration. Cause: UE does not exist", cfg_req.ue_index);
     return ue_config_update_event{cfg_req.ue_index, *this};
   }
-  ocudu_assert(ue_cfg_list[cfg_req.ue_index] != nullptr, "Invalid ue_index={}", fmt::underlying(cfg_req.ue_index));
+  ocudu_assert(ue_cfg_list[cfg_req.ue_index] != nullptr, "Invalid ue_index={}", cfg_req.ue_index);
   const ue_configuration& current_ue_cfg = *ue_cfg_list[cfg_req.ue_index];
   if (current_ue_cfg.crnti != cfg_req.crnti) {
     logger.error("ue={} c-rnti={}: Discarding UE configuration. Cause: UE with provided C-RNTI does not exist.",
@@ -242,7 +242,7 @@ ue_config_update_event sched_config_manager::update_ue(const sched_ue_reconfigur
 
 ue_config_delete_event sched_config_manager::remove_ue(du_ue_index_t ue_index)
 {
-  ocudu_assert(ue_index < MAX_NOF_DU_UES, "Invalid ue_index={}", fmt::underlying(ue_index));
+  ocudu_assert(ue_index < MAX_NOF_DU_UES, "Invalid ue_index={}", ue_index);
 
   // See if there are any pending events to process out of the critical path.
   flush_ues_to_rem(DEFAULT_FLUSH_REM_UES);
@@ -251,8 +251,8 @@ ue_config_delete_event sched_config_manager::remove_ue(du_ue_index_t ue_index)
   const du_cell_index_t       pcell_index = get_pcell_index(ue_index);
   const du_cell_group_index_t group_idx   = get_cell_group_index(pcell_index);
   if (group_idx == INVALID_DU_CELL_GROUP_INDEX) {
-    ocudu_assert(ue_cfg_list[ue_index] == nullptr, "Invalid ue_index={}", fmt::underlying(ue_index));
-    logger.error("ue={}: Discarding UE deletion command. Cause: UE does not exist", fmt::underlying(ue_index));
+    ocudu_assert(ue_cfg_list[ue_index] == nullptr, "Invalid ue_index={}", ue_index);
+    logger.error("ue={}: Discarding UE deletion command. Cause: UE does not exist", ue_index);
 
     // Notifies MAC that event is complete.
     // Note: There is no failure path for the deletion of a UE.
@@ -261,7 +261,7 @@ ue_config_delete_event sched_config_manager::remove_ue(du_ue_index_t ue_index)
     return ue_config_delete_event{};
   }
 
-  ocudu_assert(ue_cfg_list[ue_index] != nullptr, "Invalid ue_index={}", fmt::underlying(ue_index));
+  ocudu_assert(ue_cfg_list[ue_index] != nullptr, "Invalid ue_index={}", ue_index);
   du_cell_index_t pcell_idx = ue_cfg_list[ue_index]->pcell_cfg().cell_cfg_common.cell_index;
   return ue_config_delete_event{ue_index, pcell_idx, *this};
 }

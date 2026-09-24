@@ -18,8 +18,7 @@ namespace {
 ntn_cell_config make_base_config()
 {
   ntn_cell_config cfg{};
-  cfg.si_sched = ntn_si_scheduling_info{/*si_msg_idx=*/0,
-                                        /*si_period_rf=*/1,
+  cfg.si_sched = ntn_si_scheduling_info{/*si_period_rf=*/1,
                                         /*si_window_len_slots=*/1,
                                         /*si_window_position=*/1};
 
@@ -27,7 +26,7 @@ ntn_cell_config make_base_config()
   serving.satellite_index          = 1;
   serving.cell_specific_koffset    = std::chrono::milliseconds{10};
   serving.ntn_ul_sync_validity_dur = 30U;
-  serving.k_mac                    = 2U;
+  serving.k_mac                    = std::chrono::milliseconds{2};
   serving.ta_report                = true;
   serving.use_state_vector         = true;
   serving.reference_location       = geodetic_coordinates_t{1.0, 2.0, 3.0};
@@ -131,7 +130,7 @@ TEST(derive_post_switch_config_test, applies_sat_switch_overrides_when_set)
   cfg.sat_switch                           = make_sat_switch(9);
   cfg.sat_switch->ntn_ul_sync_validity_dur = 60U;
   cfg.sat_switch->cell_specific_koffset    = std::chrono::milliseconds{20};
-  cfg.sat_switch->k_mac                    = 4U;
+  cfg.sat_switch->k_mac                    = std::chrono::milliseconds{4};
   cfg.sat_switch->ta_report                = false;
   cfg.sat_switch->use_state_vector         = false;
   cfg.sat_switch->polarization = ntn_polarization_t{ntn_polarization_t::polarization_type::lhcp, std::nullopt};
@@ -140,7 +139,7 @@ TEST(derive_post_switch_config_test, applies_sat_switch_overrides_when_set)
   ASSERT_TRUE(derived.has_value());
   EXPECT_EQ(derived->ntn_cfg->ntn_ul_sync_validity_dur, 60U);
   EXPECT_EQ(derived->ntn_cfg->cell_specific_koffset, std::chrono::milliseconds{20});
-  EXPECT_EQ(*derived->ntn_cfg->k_mac, 4U);
+  EXPECT_EQ(*derived->ntn_cfg->k_mac, std::chrono::milliseconds{4});
   EXPECT_EQ(*derived->ntn_cfg->ta_report, false);
   EXPECT_EQ(*derived->ntn_cfg->use_state_vector, false);
   ASSERT_TRUE(derived->ntn_cfg->polarization.has_value());
@@ -156,7 +155,7 @@ TEST(derive_post_switch_config_test, falls_back_to_current_value_when_sat_switch
   ASSERT_TRUE(derived.has_value());
   EXPECT_EQ(derived->ntn_cfg->ntn_ul_sync_validity_dur, 30U); // unchanged from make_base_config()
   EXPECT_EQ(derived->ntn_cfg->cell_specific_koffset, std::chrono::milliseconds{10});
-  EXPECT_EQ(*derived->ntn_cfg->k_mac, 2U);
+  EXPECT_EQ(*derived->ntn_cfg->k_mac, std::chrono::milliseconds{2});
   EXPECT_EQ(*derived->ntn_cfg->ta_report, true);
   EXPECT_EQ(*derived->ntn_cfg->use_state_vector, true);
 }
@@ -211,8 +210,7 @@ TEST(sat_switch_apply_integration_test, promotes_switch_target_at_t_service_not_
 
   ntn_cell_config cell{};
   // 10ms period -> one timer firing per 10 ticks (si_period_rf == 1).
-  cell.si_sched = ntn_si_scheduling_info{/*si_msg_idx=*/0,
-                                         /*si_period_rf=*/1,
+  cell.si_sched = ntn_si_scheduling_info{/*si_period_rf=*/1,
                                          /*si_window_len_slots=*/1,
                                          /*si_window_position=*/1};
 
@@ -293,8 +291,7 @@ TEST(sat_switch_apply_integration_test, does_not_promote_when_promote_to_serving
   cfg.satellites.push_back(sat1);
 
   ntn_cell_config cell{};
-  cell.si_sched = ntn_si_scheduling_info{/*si_msg_idx=*/0,
-                                         /*si_period_rf=*/1,
+  cell.si_sched = ntn_si_scheduling_info{/*si_period_rf=*/1,
                                          /*si_window_len_slots=*/1,
                                          /*si_window_position=*/1};
 

@@ -66,6 +66,19 @@ void downlink_handler_impl::handle_dl_data(const resource_grid_context& context,
     return;
   }
 
+  // Detect resource grids delivered by the PHY out of slot order.
+  // If the slot N+1 is delivered before slot N, the eCPRI sequence identifiers of the transmitted messages will show a
+  // jump forward and then backward.
+  if (slot_point prev_slot = last_processed_slot.exchange(context.slot, std::memory_order_relaxed); prev_slot.valid()) {
+    if (OCUDU_UNLIKELY(context.slot < prev_slot)) {
+      logger.info("Sector#{}: received out-of-order downlink resource grid for slot '{}' after slot '{}' - "
+                  "eCPRI sequence identifiers may be non-monotonic",
+                  sector_id,
+                  context.slot,
+                  prev_slot);
+    }
+  }
+
   const resource_grid_reader& reader = grid.get_reader();
   ocudu_assert(reader.get_nof_ports() <= dl_eaxc.size(),
                "Number of RU ports is '{}' and must be equal or greater than the number of cell ports which is '{}'",
@@ -81,6 +94,10 @@ void downlink_handler_impl::handle_dl_data(const resource_grid_context& context,
   // Nothing to do on empty resource grids.
   if (reader.is_empty()) {
     return;
+  }
+
+  if (OCUDU_UNLIKELY(logger.debug.enabled())) {
+    logger.debug("Sector#{}: received downlink resource grid for slot {}", sector_id, context.slot);
   }
 
   if (window_checker.is_late(context.slot)) {
@@ -109,8 +126,8 @@ void downlink_handler_impl::handle_dl_data(const resource_grid_context& context,
   uplane_context.symbol_range = cplane_context.symbol_range;
 
   for (unsigned cell_port_id = 0, e = reader.get_nof_ports(); cell_port_id != e; ++cell_port_id) {
-    cplane_context.eaxc = dl_eaxc[cell_port_id];
     // Control-Plane data flow.
+    cplane_context.eaxc = dl_eaxc[cell_port_id];
     data_flow_cplane->enqueue_section_type_1_message(cplane_context);
 
     // User-Plane data flow.

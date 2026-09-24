@@ -7,6 +7,7 @@
 #include "../pdcp/pdcp_ue_context_removal_handler.h"
 #include "du_configuration_handler.h"
 #include "du_metrics_handler.h"
+#include "du_reported_cell.h"
 #include "ocudu/cu_cp/cell_meas_manager_config.h"
 #include "ocudu/f1ap/cu_cp/f1ap_cu.h"
 #include "ocudu/ran/nr_cgi.h"
@@ -69,6 +70,11 @@ public:
   /// activate_cell path needs to find cells that were previously deactivated, hence this variant.
   virtual bool has_cell_any_state(nr_cell_global_id_t cgi) = 0;
 
+  /// \brief PCI-keyed variant of has_cell_any_state(). Lets the mobility path recognize a handover
+  /// target that this CU-CP owns but keeps administratively deactivated, instead of mistaking it
+  /// for another gNB's cell.
+  virtual bool has_cell_any_state(pci_t pci) = 0;
+
   /// \brief Get DU configuration context.
   virtual const du_configuration_context* get_context() const = 0;
 };
@@ -96,6 +102,13 @@ public:
   /// \param[in] nci The cell id of the serving cell to update.
   /// \param[in] serv_cell_cfg_ The serving cell meas config to update.
   virtual bool on_cell_config_update_request(nr_cell_identity nci, const serving_cell_meas_config& serv_cell_cfg_) = 0;
+
+  /// \brief Notify the CU-CP about the cells reported by the DU in the F1 Setup procedure, so the
+  /// corresponding logical cells are realized.
+  /// \return NCIs of the reported cells the CU-CP activates; reported cells absent from it stay dormant
+  /// (admin-locked).
+  virtual std::vector<nr_cell_identity> on_du_cells_reported(cu_cp_du_index_t             du_index,
+                                                             span<const du_reported_cell> cells) = 0;
 
   /// \brief Notifies about a successful RRC UE creation.
   /// \param[in] ue_index The index of the UE.

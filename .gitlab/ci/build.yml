@@ -36,6 +36,7 @@ variables:
   variables:
     TEST_EXECUTION_TIMEOUT: 0
     CTEST_XUNIT_NAME: "ctest"
+    ENABLE_SPLIT_DWARF: "True"
   script:
     - &script_functions |
       build_ocudu_extended() {
@@ -70,7 +71,23 @@ variables:
           && ret=$(cat ${status_file}) || ret=124
 
         if [[ $TEST_MODE = "coverage" ]]; then
-          common_options="-j${CPU_JOBS} \
+          # gcovr must use a gcov tool that matches the compiler that produced
+          # the coverage data. clang emits LLVM-format .gcno/.gcda files that
+          # plain gcov cannot parse, so it needs 'llvm-cov gcov'. gcc uses the
+          # default gcov. gcovr runs the gcov tool as a subprocess (not via the
+          # shell), and $common_options is passed unquoted (word-split), so a
+          # two-word "llvm-cov gcov" value cannot be passed directly. Write a
+          # single-word wrapper executable and point --gcov-executable at it.
+          if [[ "${COMPILER}" == "clang" ]]; then
+            gcov_wrapper="$(mktemp -d)/llvm-cov-gcov"
+            printf '#!/usr/bin/env bash\nexec llvm-cov gcov "$@"\n' > "${gcov_wrapper}"
+            chmod +x "${gcov_wrapper}"
+            GCOV_EXEC="--gcov-executable ${gcov_wrapper}"
+          else
+            GCOV_EXEC=""
+          fi
+
+          common_options="-j${CPU_JOBS} ${GCOV_EXEC} \
             --exclude-unreachable-branches \
             --gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
             --exclude=${CI_PROJECT_DIR}/tests/* \
@@ -100,15 +117,77 @@ variables:
             echo "gcovr FAILED!"
           fi
 
+          # GitLab rejects any single coverage artifact over 10MB. The full
+          # non-phy/scheduler coverage exceeds that once real data is produced,
+          # so it is split into two files along a stable subsystem seam:
+          #   coverage_1.xml - L2/L3 stack and control plane
+          #   coverage_3.xml - everything else (support, ran, ofh, ru, etc.)
+          #   coverage_2.xml - phy and scheduler (largest single subsystems)
+          # Each gcovr run filters to its own subset so no file holds the whole
+          # tree. Keep the seams in sync if a large new lib/ subsystem is added.
+          stack_filters="--filter=${CI_PROJECT_DIR}/lib/du/.* \
+            --filter=${CI_PROJECT_DIR}/lib/cu_cp/.* \
+            --filter=${CI_PROJECT_DIR}/lib/cu_up/.* \
+            --filter=${CI_PROJECT_DIR}/lib/mac/.* \
+            --filter=${CI_PROJECT_DIR}/lib/rlc/.* \
+            --filter=${CI_PROJECT_DIR}/lib/pdcp/.* \
+            --filter=${CI_PROJECT_DIR}/lib/rrc/.* \
+            --filter=${CI_PROJECT_DIR}/lib/f1ap/.* \
+            --filter=${CI_PROJECT_DIR}/lib/f1u/.* \
+            --filter=${CI_PROJECT_DIR}/lib/ngap/.* \
+            --filter=${CI_PROJECT_DIR}/lib/e1ap/.* \
+            --filter=${CI_PROJECT_DIR}/lib/e2/.* \
+            --filter=${CI_PROJECT_DIR}/lib/gtpu/.* \
+            --filter=${CI_PROJECT_DIR}/lib/nru/.* \
+            --filter=${CI_PROJECT_DIR}/lib/sdap/.* \
+            --filter=${CI_PROJECT_DIR}/lib/security/.* \
+            --filter=${CI_PROJECT_DIR}/lib/nrppa/.* \
+            --filter=${CI_PROJECT_DIR}/lib/lpp/.* \
+            --filter=${CI_PROJECT_DIR}/lib/xnap/.* \
+            --filter=${CI_PROJECT_DIR}/lib/psup/.* \
+            --filter=${CI_PROJECT_DIR}/lib/rohc/.*"
+
+          # coverage_1.xml: L2/L3 stack and control plane.
           if ! output=$(gcovr $common_options --xml --print-summary --use-gcov-files --keep \
-            --exclude="${CI_PROJECT_DIR}/lib/phy/.*" \
-            --exclude="${CI_PROJECT_DIR}/lib/scheduler/.*" \
+            $stack_filters \
             -o coverage_1.xml 2>&1); then
             echo "gcovr coverage_1.xml FAILED!"
             echo "$output"
             ret=1
           fi
 
+          # coverage_3.xml: everything not covered by the stack or phy/scheduler.
+          if ! output=$(gcovr $common_options --xml --print-summary --use-gcov-files --keep \
+            --exclude="${CI_PROJECT_DIR}/lib/phy/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/scheduler/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/du/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/cu_cp/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/cu_up/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/mac/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/rlc/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/pdcp/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/rrc/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/f1ap/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/f1u/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/ngap/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/e1ap/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/e2/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/gtpu/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/nru/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/sdap/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/security/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/nrppa/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/lpp/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/xnap/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/psup/.*" \
+            --exclude="${CI_PROJECT_DIR}/lib/rohc/.*" \
+            -o coverage_3.xml 2>&1); then
+            echo "gcovr coverage_3.xml FAILED!"
+            echo "$output"
+            ret=1
+          fi
+
+          # coverage_2.xml: phy and scheduler.
           if ! output=$(gcovr $common_options --xml --print-summary --use-gcov-files --keep \
             --filter="${CI_PROJECT_DIR}/lib/phy/.*" \
             --filter="${CI_PROJECT_DIR}/lib/scheduler/.*" \
@@ -147,6 +226,7 @@ variables:
   after_script:
     - mv ${CI_PROJECT_DIR}/${OCUDU_BUILD_DIR}/coverage_1.xml    ${CI_PROJECT_DIR}/${CI_JOB_ID}_coverage_1.xml           || true
     - mv ${CI_PROJECT_DIR}/${OCUDU_BUILD_DIR}/coverage_2.xml    ${CI_PROJECT_DIR}/${CI_JOB_ID}_coverage_2.xml           || true
+    - mv ${CI_PROJECT_DIR}/${OCUDU_BUILD_DIR}/coverage_3.xml    ${CI_PROJECT_DIR}/${CI_JOB_ID}_coverage_3.xml           || true
     - mv ${CI_PROJECT_DIR}/${OCUDU_BUILD_DIR}/xunit.xml         ${CI_PROJECT_DIR}/${CI_JOB_ID}_${CTEST_XUNIT_NAME}.xml  || true
     - mv ${CI_PROJECT_DIR}/${OCUDU_BUILD_DIR}/ctest_output.log  ${CI_PROJECT_DIR}/${CI_JOB_ID}_ctest_output.log         || true
   artifacts:
@@ -191,6 +271,7 @@ variables:
     ENABLE_ZEROMQ: "True"
     ENABLE_DPDK: "True"
     DPDK_VERSION: "25.11_avx2"
+    ENABLE_SCHEDTRACE: "True"
     TEST_MODE: default
     MARCH: x86-64-v3
     LINKER: mold
@@ -237,6 +318,7 @@ variables:
     ENABLE_DPDK: "True"
     ENABLE_RTSAN: "True"
     DPDK_VERSION: "25.11_avx2"
+    ENABLE_SCHEDTRACE: "True"
     TEST_MODE: rtsan
     MARCH: x86-64-v3
     LINKER: mold
@@ -252,7 +334,6 @@ variables:
     ENABLE_FFTW: "True"
     TEST_MODE: valgrind
     MARCH: x86-64-v3
-    LINKER: lld
 
 .smoke printers:
   extends: .build_and_unit
@@ -279,6 +360,17 @@ variables:
     ENABLE_FFTW: "True"
     ENABLE_EXPORT: "True"
     TEST_MODE: default
+    MARCH: x86-64-v3
+    LINKER: mold
+
+.smoke old clang:
+  extends: .build_and_unit
+  variables:
+    OS: ubuntu-24.04
+    COMPILER: clang
+    CMAKE_BUILD_TYPE: Release
+    ASSERT_LEVEL: NONE
+    TEST_MODE: none
     MARCH: x86-64-v3
 
 # Combinations to use in schedules matrix
@@ -307,9 +399,17 @@ smoke relwithdeb cached:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: never
     - if: $ON_MR
-  variables: &mr_build
-    OCUDU_TARGET: "all"
-    CMAKE_GENERATOR: "Ninja"
+  cache:
+    - *cache_build_get
+
+smoke old clang cached:
+  extends: .smoke old clang
+  rules:
+    - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-old-clang/
+      when: never
+    - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
+      when: never
+    - if: $ON_MR
   cache:
     - *cache_build_get
 
@@ -321,8 +421,6 @@ smoke tsan cached:
     - if: $ON_MR
       when: manual
       allow_failure: true
-  variables:
-    <<: *mr_build
   cache:
     - *cache_build_get
 
@@ -334,8 +432,6 @@ smoke asan cached:
     - if: $ON_MR
       when: manual
       allow_failure: true
-  variables:
-    <<: *mr_build
   cache:
     - *cache_build_get
 
@@ -347,8 +443,6 @@ smoke rtsan cached:
     - if: $ON_MR
       when: manual
       allow_failure: true
-  variables:
-    <<: *mr_build
   cache:
     - *cache_build_get
 
@@ -358,8 +452,6 @@ smoke archlinux cached:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: never
     - if: $ON_MR
-  variables:
-    <<: *mr_build
   cache:
     - *cache_build_get
 
@@ -381,6 +473,13 @@ smoke pretty printers cached:
 smoke relwithdeb clean:
   extends: .smoke relwithdeb
   rules:
+    - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
+
+smoke old clang clean:
+  extends: .smoke old clang
+  rules:
+    - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-old-clang/
+      when: never
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
 
 smoke tsan clean:
@@ -424,8 +523,6 @@ intermediate commits cached:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
       when: never
     - if: $ON_MR
-  variables:
-    <<: *mr_build
   script:
     - *script_functions
     - &fetch_branches |
@@ -475,9 +572,7 @@ intermediate commits clean:
   extends: intermediate commits cached
   rules:
     - if: $CI_MERGE_REQUEST_LABELS =~ /ci-no-cache/
-  variables:
-    OCUDU_TARGET: ""
-    CMAKE_GENERATOR: "Unix Makefiles"
+  cache: []
 
 valgrind changed tests:
   extends: .smoke valgrind

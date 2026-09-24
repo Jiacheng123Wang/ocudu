@@ -88,7 +88,7 @@ bool ocudu::ocucp::is_valid_configuration(
         cfg.report_config_ids.find(cell.second.periodic_report_cfg_id.value()) == cfg.report_config_ids.end()) {
       auto msg = fmt::format("Cell {:#x}: periodic report config id {} not found in configuration",
                              nci,
-                             report_cfg_id_to_uint(cell.second.periodic_report_cfg_id.value()));
+                             to_underlying(cell.second.periodic_report_cfg_id.value()));
       ocudulog::fetch_basic_logger(LOG_CHAN).error("{}", msg);
       fmt::print("CU-CP: {}\n", msg);
       return false;
@@ -106,7 +106,7 @@ bool ocudu::ocucp::is_valid_configuration(
         if (cfg.report_config_ids.find(report_cfg_id) == cfg.report_config_ids.end()) {
           auto msg = fmt::format("Cell {:#x}: report config id {} for neighbor {:#x} not found in configuration",
                                  nci,
-                                 report_cfg_id_to_uint(report_cfg_id),
+                                 to_underlying(report_cfg_id),
                                  ncell_nci.nci);
           ocudulog::fetch_basic_logger(LOG_CHAN).error("{}", msg);
           fmt::print("CU-CP: {}\n", msg);
@@ -163,6 +163,52 @@ void ocudu::ocucp::add_old_meas_config_to_rem_list(const rrc_meas_cfg& old_cfg, 
   }
 }
 
+void ocudu::ocucp::prune_redundant_rem_list_entries(const rrc_meas_cfg& old_cfg, rrc_meas_cfg& new_cfg)
+{
+  // Reusing an id assumes the encoded measObject fully determines the entry: only its delta lists survive a
+  // modification. cellsToAddMod is handled below; excludedCells/allowedCells are never populated. Populating
+  // those, or adding a Need-M field, needs the same handling.
+  for (auto& meas_obj : new_cfg.meas_obj_to_add_mod_list) {
+    const auto old_it = std::find_if(
+        old_cfg.meas_obj_to_add_mod_list.begin(),
+        old_cfg.meas_obj_to_add_mod_list.end(),
+        [&meas_obj](const rrc_meas_obj_to_add_mod& old_obj) { return old_obj.meas_obj_id == meas_obj.meas_obj_id; });
+    if (old_it == old_cfg.meas_obj_to_add_mod_list.end()) {
+      continue;
+    }
+
+    new_cfg.meas_obj_to_rem_list.erase(
+        std::remove(new_cfg.meas_obj_to_rem_list.begin(), new_cfg.meas_obj_to_rem_list.end(), meas_obj.meas_obj_id),
+        new_cfg.meas_obj_to_rem_list.end());
+
+    // Cell lists are applied as a delta, so dropped cells must be removed explicitly.
+    if (!old_it->meas_obj_nr.has_value() || !meas_obj.meas_obj_nr.has_value()) {
+      continue;
+    }
+    const auto& new_cells = meas_obj.meas_obj_nr.value().cells_to_add_mod_list;
+    for (const auto& old_cell : old_it->meas_obj_nr.value().cells_to_add_mod_list) {
+      if (std::none_of(new_cells.begin(), new_cells.end(), [&old_cell](const rrc_cells_to_add_mod& new_cell) {
+            return new_cell.pci == old_cell.pci;
+          })) {
+        meas_obj.meas_obj_nr.value().cells_to_rem_list.push_back(old_cell.pci);
+      }
+    }
+  }
+
+  for (const auto& report_cfg : new_cfg.report_cfg_to_add_mod_list) {
+    new_cfg.report_cfg_to_rem_list.erase(std::remove(new_cfg.report_cfg_to_rem_list.begin(),
+                                                     new_cfg.report_cfg_to_rem_list.end(),
+                                                     report_cfg.report_cfg_id),
+                                         new_cfg.report_cfg_to_rem_list.end());
+  }
+
+  for (const auto& meas_id : new_cfg.meas_id_to_add_mod_list) {
+    new_cfg.meas_id_to_rem_list.erase(
+        std::remove(new_cfg.meas_id_to_rem_list.begin(), new_cfg.meas_id_to_rem_list.end(), meas_id.meas_id),
+        new_cfg.meas_id_to_rem_list.end());
+  }
+}
+
 std::vector<ssb_frequency_t> ocudu::ocucp::generate_measurement_object_list(const cell_meas_manager_config& cfg,
                                                                             nr_cell_identity                serving_nci)
 {
@@ -175,11 +221,15 @@ std::vector<ssb_frequency_t> ocudu::ocucp::generate_measurement_object_list(cons
   if (is_complete(serving_cell.serving_cell_cfg)) {
     ssb_freqs.push_back(serving_cell.serving_cell_cfg.ssb_arfcn.value().value());
   }
-  // Add neighbor cells measurement objects if report is configured.
+  // Add neighbor cells measurement objects if a non-conditional report is configured.
   for (const auto& ncell : serving_cell.ncells) {
     ocudu_assert(cfg.cells.find(ncell.nci) != cfg.cells.end(), "No cell config for nci={:#x}", ncell.nci);
-    const auto& cell_cfg = cfg.cells.at(ncell.nci);
-    if (!ncell.report_cfg_ids.empty() && is_complete(cell_cfg.serving_cell_cfg)) {
+    const auto& cell_cfg               = cfg.cells.at(ncell.nci);
+    const bool  has_regular_report_cfg = std::any_of(
+        ncell.report_cfg_ids.begin(), ncell.report_cfg_ids.end(), [&cfg](const report_cfg_id_t report_cfg_id) {
+          return !is_cond_trigger_report_config(cfg, report_cfg_id);
+        });
+    if (has_regular_report_cfg && is_complete(cell_cfg.serving_cell_cfg)) {
       if (std::find(ssb_freqs.begin(), ssb_freqs.end(), cell_cfg.serving_cell_cfg.ssb_arfcn.value()) ==
           ssb_freqs.end()) {
         ssb_freqs.push_back(cell_cfg.serving_cell_cfg.ssb_arfcn.value().value());
@@ -224,6 +274,14 @@ std::vector<ssb_frequency_t> ocudu::ocucp::generate_cho_measurement_object_list(
   return {freqs.begin(), freqs.end()};
 }
 
+bool ocudu::ocucp::is_cond_trigger_report_config(const cell_meas_manager_config& cfg,
+                                                 const report_cfg_id_t           report_cfg_id)
+{
+  const auto report_cfg_it = cfg.report_config_ids.find(report_cfg_id);
+  return report_cfg_it != cfg.report_config_ids.end() &&
+         std::holds_alternative<rrc_cond_trigger_cfg>(report_cfg_it->second);
+}
+
 void ocudu::ocucp::generate_report_config(const cell_meas_manager_config& cfg,
                                           const nr_cell_identity          nci,
                                           const report_cfg_id_t           report_cfg_id,
@@ -233,7 +291,7 @@ void ocudu::ocucp::generate_report_config(const cell_meas_manager_config& cfg,
   // Add report cfg to add mod
   if (cfg.report_config_ids.find(report_cfg_id) == cfg.report_config_ids.end()) {
     ocudulog::fetch_basic_logger("CU-CP").error("Report config ID {} not found in configuration",
-                                                report_cfg_id_to_uint(report_cfg_id));
+                                                to_underlying(report_cfg_id));
     return;
   }
   rrc_report_cfg_to_add_mod report_cfg_to_add_mod;
@@ -282,7 +340,7 @@ rrc_meas_obj_nr ocudu::ocucp::generate_measurement_object(const serving_cell_mea
   meas_obj_nr.ref_sig_cfg.ssb_cfg_mob.emplace().derive_ssb_idx_from_cell = true;
   meas_obj_nr.nrof_ss_blocks_to_average.emplace()                        = 8; // TODO: remove hardcoded values
   meas_obj_nr.quant_cfg_idx                                              = 1; // TODO: remove hardcoded values
-  meas_obj_nr.freq_band_ind_nr.emplace()                                 = nr_band_to_uint(cfg.band.value());
+  meas_obj_nr.freq_band_ind_nr.emplace()                                 = to_underlying(cfg.band.value());
 
   // TODO: Add optional fields.
 

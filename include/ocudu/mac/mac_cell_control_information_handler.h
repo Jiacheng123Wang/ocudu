@@ -6,6 +6,7 @@
 
 #include "ocudu/adt/bounded_bitset.h"
 #include "ocudu/adt/static_vector.h"
+#include "ocudu/ran/csi_report/csi_report_packed.h"
 #include "ocudu/ran/phy_time_unit.h"
 #include "ocudu/ran/rnti.h"
 #include "ocudu/ran/slot_pdu_capacity_constants.h"
@@ -92,7 +93,7 @@ struct mac_uci_pdu {
       /// Example: If the number of CSI bits is 20, then it is represented as:
       /// [ CSI_bit_19 ... CSI_bit_0 ] => [ MSB ... LSB ].
       /// NOTE: if \c is_valid == false, then the CSI payload will be ignored.
-      bounded_bitset<uci_constants::MAX_NOF_CSI_PART1_OR_PART2_BITS> payload;
+      csi_report_packed payload;
     };
 
     // This user provided constructor is added here to fix a Clang compilation error related to the use of nested types
@@ -198,7 +199,7 @@ struct mac_uci_pdu {
       /// Example: If the number of CSI bits is 20, then it is represented as:
       /// [ CSI_bit_19 ... CSI_bit_0 ] => [ MSB ... LSB ].
       /// NOTE: if \c is_valid == false, then the CSI payload will be ignored.
-      bounded_bitset<uci_constants::MAX_NOF_CSI_PART1_OR_PART2_BITS> payload;
+      csi_report_packed payload;
     };
 
     // This user provided constructor is added here to fix a Clang compilation error related to the use of nested types
@@ -249,6 +250,10 @@ struct mac_srs_pdu {
     std::optional<phy_time_unit> ul_rtoa;
     /// RSRP report in dBFS.
     std::optional<float> ul_rsrp_dBFS;
+    /// Azimuth Angle of Arrival, in degrees. Values: {0,...,359.9}.
+    std::optional<float> azimuth_aoa;
+    /// Zenith Angle of Arrival, in degrees. Values: {0,...,179.9}.
+    std::optional<float> zenith_aoa;
   };
 
   mac_srs_pdu() = default;

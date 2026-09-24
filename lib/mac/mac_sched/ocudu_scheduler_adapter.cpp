@@ -7,7 +7,6 @@
 #include "ocudu/scheduler/scheduler_factory.h"
 #include "ocudu/support/async/async_timer.h"
 #include "ocudu/support/executors/execute_until_success.h"
-#include <type_traits>
 
 using namespace ocudu;
 
@@ -217,24 +216,15 @@ void ocudu_scheduler_adapter::handle_dl_mac_ce_indication(const mac_ce_schedulin
   sched_impl->handle_dl_mac_ce_indication(dl_mac_ce_indication{mac_ce.ue_index, mac_ce.ce_lcid});
 }
 
-template <typename Clock, typename Duration>
-static slot_point chrono_to_slot_point(std::chrono::time_point<Clock, Duration> hol_toa,
-                                       std::chrono::high_resolution_clock::time_point last_slot_tp,
-                                       slot_point                                     last_slot_p)
+static slot_point chrono_to_slot_point(std::chrono::steady_clock::time_point hol_toa,
+                                       std::chrono::steady_clock::time_point last_slot_tp,
+                                       slot_point                            last_slot_p)
 {
   using namespace std::chrono;
   static constexpr microseconds half_system_frame_dur = milliseconds{10240 / 2};
 
-  // Cross-platform clock conversion: handle the mismatch between Clock (system_clock) and high_resolution_clock (steady_clock) on macOS
-  microseconds hol_delay;
-  if constexpr (std::is_same_v<Clock, high_resolution_clock>) {
-    hol_delay = duration_cast<microseconds>(last_slot_tp - hol_toa);
-  } else {
-    auto clock_now                  = Clock::now();
-    auto last_slot_now             = high_resolution_clock::now();
-    auto hol_toa_in_last_slot_clock = last_slot_now + duration_cast<microseconds>(hol_toa - clock_now);
-    hol_delay                      = duration_cast<microseconds>(last_slot_tp - hol_toa_in_last_slot_clock);
-  }
+  // Get delay between last slot indication time point and HOL ToA.
+  microseconds hol_delay = duration_cast<microseconds>(last_slot_tp - hol_toa);
 
   // Bound delay to avoid negative values and slot wrap around ambiguity.
   hol_delay = std::min(std::max(hol_delay, microseconds{0}), half_system_frame_dur);
@@ -257,8 +247,8 @@ void ocudu_scheduler_adapter::handle_dl_buffer_state_update(const mac_dl_buffer_
   bs.bs       = mac_dl_bs_ind.bs;
   if (mac_dl_bs_ind.hol_toa.has_value()) {
     // Check if at least one slot indication has been processed.
-    const high_resolution_clock::time_point sl_tp = last_slot_tp.load(std::memory_order_relaxed);
-    if (sl_tp != high_resolution_clock::time_point{}) {
+    const steady_clock::time_point sl_tp = last_slot_tp.load(std::memory_order_relaxed);
+    if (sl_tp != steady_clock::time_point{}) {
       // Convert HOL TOA from chrono time point to slots.
       bs.hol_toa = chrono_to_slot_point(
           mac_dl_bs_ind.hol_toa.value(), sl_tp, last_slot_point.load(std::memory_order_relaxed).without_hyper_sfn());
@@ -281,6 +271,18 @@ void ocudu_scheduler_adapter::handle_ul_phr_indication(const mac_phr_ce_info& ph
   sched_impl->handle_ul_phr_indication(ind);
 }
 
+void ocudu_scheduler_adapter::handle_ul_ta_report_indication(const mac_ta_report_ce_info& ta_report)
+{
+  // Forward the Timing Advance Report to the scheduler.
+  ul_ta_report_indication_message ind{};
+  ind.cell_index = ta_report.cell_index;
+  ind.ue_index   = ta_report.ue_index;
+  ind.rnti       = ta_report.rnti;
+  ind.slot_rx    = ta_report.slot_rx;
+  ind.ul_ta      = ta_report.ul_ta;
+  sched_impl->handle_ul_ta_report_indication(ind);
+}
+
 void ocudu_scheduler_adapter::handle_crnti_ce_indication(du_ue_index_t old_ue_index, du_cell_index_t cell_index)
 {
   rlf_handler.handle_crnti_ce(old_ue_index);
@@ -293,7 +295,7 @@ const sched_result& ocudu_scheduler_adapter::slot_indication(slot_point_extended
 
   // Mark start of the slot in time (estimate).
   if (last_slot_point.exchange(slot_tx, std::memory_order_relaxed) != slot_tx) {
-    auto slot_tp = high_resolution_clock::now();
+    auto slot_tp = steady_clock::now();
     last_slot_tp.store(slot_tp, std::memory_order_relaxed);
   }
 

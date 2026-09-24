@@ -77,7 +77,7 @@ cu_cp_test_environment::cu_cp_test_environment(cu_cp_test_env_params params_) :
   // Fill NGAP config.
   for (const auto& [amf_index, amf_config] : amf_configs) {
     cu_cp_cfg.ngap.n2_gws.push_back(&*amf_config.amf_stub);
-    cu_cp_cfg.ngap.ngaps.push_back(cu_cp_configuration::ngap_config{amf_config.supported_tas});
+    cu_cp_cfg.ngap.ngaps.push_back(cu_cp_configuration::ngap_config{amf_config.supported_tas, amf_addr});
   }
   // Fill XNAP config. Each peer test stub becomes its own XnAP gateway; record the peer-gateway mapping.
   for (const auto& [_, peer] : xnc_peers) {
@@ -130,11 +130,17 @@ cu_cp_test_environment::cu_cp_test_environment(cu_cp_test_env_params params_) :
         cell_cfg_1.periodic_report_cfg_id             = uint_to_report_cfg_id(1);
         cell_cfg_1.serving_cell_cfg.gnb_id_bit_length = gnb_id1.bit_length;
         cell_cfg_1.serving_cell_cfg.nci               = nci1;
-        cell_cfg_1.ncells.push_back({nci2, {uint_to_report_cfg_id(2)}});
+        // A neighbour that is both a measurement-report neighbour and a CHO candidate carries the regular
+        // event-triggered report config plus the conditional trigger used by condExecutionCond.
+        std::vector<report_cfg_id_t> ncell_report_cfg_ids = {uint_to_report_cfg_id(2)};
+        if (params.add_cho_cond_trigger) {
+          ncell_report_cfg_ids.push_back(uint_to_report_cfg_id(3));
+        }
+        cell_cfg_1.ncells.push_back({nci2, ncell_report_cfg_ids});
         // Add external cells (for inter CU handover tests).
-        cell_cfg_1.ncells.push_back({nci3, {uint_to_report_cfg_id(2)}});
+        cell_cfg_1.ncells.push_back({nci3, ncell_report_cfg_ids});
         if (!xnc_peers.empty()) {
-          cell_cfg_1.ncells.push_back({nci4, {uint_to_report_cfg_id(2)}});
+          cell_cfg_1.ncells.push_back({nci4, ncell_report_cfg_ids});
         }
         meas_mng_cfg.cells.emplace(nci1, cell_cfg_1);
       }
@@ -168,7 +174,7 @@ cu_cp_test_environment::cu_cp_test_environment(cu_cp_test_env_params params_) :
       }
 
       if (!xnc_peers.empty()) {
-        // Create an external XN-C cell.
+        // Create an external Xn-C cell.
         {
           cell_meas_config cell_cfg_4;
           cell_cfg_4.periodic_report_cfg_id             = uint_to_report_cfg_id(1);
@@ -233,6 +239,22 @@ cu_cp_test_environment::cu_cp_test_environment(cu_cp_test_env_params params_) :
 
         meas_mng_cfg.report_config_ids.emplace(uint_to_report_cfg_id(2), rrc_report_cfg_nr{event_trigger_cfg});
       }
+
+      // Add CHO conditional trigger (event A3).
+      if (params.add_cho_cond_trigger) {
+        rrc_cond_trigger_cfg cond_trigger;
+
+        rrc_event_id& cond_event_a3 = cond_trigger.cond_event_id;
+        cond_event_a3.id            = rrc_event_id::event_id_t::a3;
+        cond_event_a3.meas_trigger_quant_thres_or_offset.emplace();
+        cond_event_a3.meas_trigger_quant_thres_or_offset.value().rsrp.emplace() = 6;
+        cond_event_a3.hysteresis                                                = 0;
+        cond_event_a3.time_to_trigger                                           = 100;
+
+        cond_trigger.rs_type = ocucp::rrc_nr_rs_type::ssb;
+
+        meas_mng_cfg.report_config_ids.emplace(uint_to_report_cfg_id(3), rrc_report_cfg_nr{cond_trigger});
+      }
     }
     cu_cp_cfg.mobility.meas_mgr_config = meas_mng_cfg;
   }
@@ -254,6 +276,9 @@ cu_cp_test_environment::cu_cp_test_environment(cu_cp_test_env_params params_) :
   cu_cp_cfg.ue.request_pdu_session_timeout =
       std::chrono::seconds(10); // procedure timeouts should only occur intentionally
   cu_cp_cfg.ue.enable_rrc_inactive = params.enable_rrc_inactive;
+
+  // Fill declared logical cells.
+  cu_cp_cfg.cells = params.logical_cells;
 
   // Create CU-CP instance.
   cu_cp_inst = create_cu_cp(cu_cp_cfg);
@@ -314,35 +339,40 @@ bool cu_cp_test_environment::tick_until(std::chrono::milliseconds    timeout,
   return stop_condition();
 }
 
-bool cu_cp_test_environment::wait_ready_on_cu_cp_worker(std::chrono::milliseconds    timeout,
-                                                        const std::function<bool()>& is_ready)
+void cu_cp_test_environment::run_on_cu_cp_worker(const std::function<void()>& task)
 {
   std::mutex              mutex;
   std::condition_variable cvar;
-  bool                    done  = false;
-  bool                    ready = false;
+  bool                    done = false;
+
+  cu_cp_workers->worker.push_task_blocking([&]() {
+    task();
+
+    std::lock_guard<std::mutex> lock(mutex);
+    done = true;
+    cvar.notify_one();
+  });
+
+  std::unique_lock<std::mutex> lock(mutex);
+  cvar.wait(lock, [&done]() { return done; });
+}
+
+bool cu_cp_test_environment::wait_ready_on_cu_cp_worker(std::chrono::milliseconds    timeout,
+                                                        const std::function<bool()>& is_ready)
+{
+  bool ready = false;
 
   // is_ready is evaluated on the CU-CP worker, alongside the clock tick, so that reading state mutated by the
   // CU-CP worker (e.g. an async task's completion flag) is properly synchronized.
   for (unsigned i = 0; i != timeout.count(); ++i) {
-    done = false;
-    cu_cp_workers->worker.push_task_blocking([&]() {
+    run_on_cu_cp_worker([&]() {
       ready = is_ready();
       if (not ready) {
         // Already running on the CU-CP worker; tick the clock directly rather than via \c tick(), which
         // would try to (and fail to) push a blocking task to this same worker.
         timers.tick();
       }
-
-      std::lock_guard<std::mutex> lock(mutex);
-      done = true;
-      cvar.notify_one();
     });
-
-    {
-      std::unique_lock<std::mutex> lock(mutex);
-      cvar.wait(lock, [&done]() { return done; });
-    }
     if (ready) {
       return true;
     }
@@ -412,7 +442,7 @@ void cu_cp_test_environment::enqueue_procedure_outcome_pdus_and_start_cu_cp()
             nr_cell_global_id_t{plmn_identity::test_value(), xnc_peer_served_nci()}));
   }
 
-  // Attach XN-C handler before starting CU-CP (matching real app startup order).
+  // Attach Xn-C handler before starting CU-CP (matching real app startup order).
   for (auto* gateway : cu_cp_cfg.xnap.xnc_gws) {
     gateway->attach_cu_cp(get_cu_cp().get_xnc_handler());
   }
@@ -470,11 +500,11 @@ void cu_cp_test_environment::run_xn_setup()
   xnap_message xnap_pdu;
   for (const auto& [xnc_peer_idx, xnc_peer] : xnc_peers) {
     report_fatal_error_if_not(wait_for_xnap_tx_pdu(xnc_peer_idx, xnap_pdu),
-                              "CU-CP did not send the XN Setup Request to the XN-C peer CU-CP {}",
+                              "CU-CP did not send the XN Setup Request to the Xn-C peer CU-CP {}",
                               xnc_peer_idx);
     report_fatal_error_if_not(
         test_helpers::is_pdu_type(xnap_pdu, asn1::xnap::xnap_elem_procs_o::init_msg_c::types::xn_setup_request),
-        "CU-CP did not setup the XN-C connection");
+        "CU-CP did not setup the Xn-C connection");
   }
 }
 
@@ -483,11 +513,11 @@ void cu_cp_test_environment::run_ngran_node_cfg_update(span<const test_helpers::
   xnap_message xnap_pdu;
   for (const auto& [xnc_peer_idx, xnc_peer] : xnc_peers) {
     report_fatal_error_if_not(wait_for_xnap_tx_pdu(xnc_peer_idx, xnap_pdu),
-                              "CU-CP did not send the NG-RAN Node Configuration Update to the XN-C peer CU-CP {}",
+                              "CU-CP did not send the NG-RAN Node Configuration Update to the Xn-C peer CU-CP {}",
                               xnc_peer_idx);
     report_fatal_error_if_not(
         test_helpers::is_pdu_type(xnap_pdu, asn1::xnap::xnap_elem_procs_o::init_msg_c::types::ngran_node_cfg_upd),
-        "CU-CP did not report its served cells to the XN-C peer CU-CP {}",
+        "CU-CP did not report its served cells to the Xn-C peer CU-CP {}",
         xnc_peer_idx);
 
     const auto& asn1_cells_to_add = xnap_pdu.pdu.init_msg()
@@ -495,7 +525,7 @@ void cu_cp_test_environment::run_ngran_node_cfg_update(span<const test_helpers::
                                         ->cfg_upd_init_node_choice.gnb()
                                         .served_cells_to_upd_nr.served_cells_to_add_nr;
     report_fatal_error_if_not(asn1_cells_to_add.size() == added_cells.size(),
-                              "CU-CP reported {} added cells to the XN-C peer CU-CP {}, expected {}",
+                              "CU-CP reported {} added cells to the Xn-C peer CU-CP {}, expected {}",
                               asn1_cells_to_add.size(),
                               xnc_peer_idx,
                               added_cells.size());
@@ -507,7 +537,7 @@ void cu_cp_test_environment::run_ngran_node_cfg_update(span<const test_helpers::
                                 added_cells[i].nci,
                                 added_cells[i].pci);
       report_fatal_error_if_not(asn1_cell_info.cell_id.nr_ci.to_number() == added_cells[i].nci.value(),
-                                "CU-CP reported an unexpected cell to the XN-C peer CU-CP {}",
+                                "CU-CP reported an unexpected cell to the Xn-C peer CU-CP {}",
                                 xnc_peer_idx);
     }
 
@@ -549,7 +579,7 @@ bool cu_cp_test_environment::run_f1_setup(unsigned                              
   f1ap_message f1ap_pdu;
   bool         result = this->wait_for_f1ap_tx_pdu(du_idx, f1ap_pdu);
 
-  // The cells of the DU are reported to the XN-C peers.
+  // The cells of the DU are reported to the Xn-C peers.
   run_ngran_node_cfg_update(cells);
 
   return result;

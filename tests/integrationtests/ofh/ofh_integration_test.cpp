@@ -17,6 +17,7 @@
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/phy/support/shared_resource_grid.h"
 #include "ocudu/phy/support/support_factories.h"
+#include "ocudu/ru/ofh/ru_ofh_executor_mapper_factory.h"
 #include "ocudu/ru/ofh/ru_ofh_factory.h"
 #include "ocudu/ru/ru_controller.h"
 #include "ocudu/ru/ru_downlink_plane.h"
@@ -408,7 +409,7 @@ public:
   void on_tti_boundary(const tti_boundary_context& slot_context) override
   {
     if (!slot_synchronized) {
-      slot_val          = (slot_context.slot.without_hyper_sfn() + processing_delay_slots).to_uint();
+      slot_val          = (slot_context.slot.without_hyper_sfn() + processing_delay_slots).count();
       slot_synchronized = true;
       fmt::print("Initial slot set to {}\n", slot_point(slot_context.slot.numerology(), slot_val));
     }
@@ -553,7 +554,7 @@ private:
     // Set compression header.
     uint8_t octet = 0U;
     octet |= uint8_t(compr_params.data_width) << 4U;
-    octet |= uint8_t(to_value(compr_params.type));
+    octet |= uint8_t(to_underlying(compr_params.type));
     frame[30 + offset] = octet;
   }
 
@@ -677,7 +678,7 @@ private:
     static constexpr std::chrono::microseconds sleep_margin = 5us;
 
     for (unsigned test_slot_id = 0; test_slot_id != nof_test_slots; ++test_slot_id) {
-      auto t0 = std::chrono::high_resolution_clock::now();
+      auto t0 = std::chrono::steady_clock::now();
 
       slot_point slot(to_numerology_value(test_params.scs), slot_val);
       unsigned   slot_id    = slot.slot_index() % tdd_pattern.dl_ul_tx_period_nof_slots;
@@ -727,12 +728,12 @@ private:
       }
 
       // Sleep until the end of the slot.
-      auto t1                 = std::chrono::high_resolution_clock::now();
+      auto t1                 = std::chrono::steady_clock::now();
       auto slot_sim_exec_time = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
       if (slot_sim_exec_time < slot_duration_us) {
         std::this_thread::sleep_for(slot_duration_us - slot_sim_exec_time - sleep_margin);
       }
-      slot_val = (++slot).to_uint();
+      slot_val = (++slot).count();
     }
     // Leave time for the uplink slots to be processed.
     auto proc_time = processing_delay_slots * slot_duration_us + (T1a_max_cp_ul * symbol_duration_us) + 100ms;
@@ -968,13 +969,14 @@ struct worker_manager {
     }
   }
 
-  task_execution_manager exec_mng;
-  task_executor*         ru_timing_exec = nullptr;
-  task_executor*         ru_dl_exec;
-  task_executor*         ru_tx_exec;
-  task_executor*         ru_rx_exec;
-  task_executor*         test_du_sim_exec;
-  task_executor*         test_ru_sim_exec;
+  task_execution_manager                  exec_mng;
+  task_executor*                          ru_timing_exec = nullptr;
+  task_executor*                          ru_dl_exec;
+  task_executor*                          ru_tx_exec;
+  task_executor*                          ru_rx_exec;
+  task_executor*                          test_du_sim_exec;
+  task_executor*                          test_ru_sim_exec;
+  std::unique_ptr<ru_ofh_executor_mapper> ofh_exec_mapper;
 };
 } // namespace
 
@@ -1057,22 +1059,29 @@ static ru_ofh_dependencies generate_ru_dependencies(ocudulog::basic_logger&     
   dependencies.rt_timing_executor = workers.ru_timing_exec;
   dependencies.error_notifier     = &error_notifier;
 
-  dependencies.sector_dependencies.emplace_back();
-  auto& sector_deps             = dependencies.sector_dependencies.back();
-  sector_deps.logger            = &logger;
-  sector_deps.downlink_executor = workers.ru_dl_exec;
-  sector_deps.uplink_executor   = workers.ru_rx_exec;
-  sector_deps.txrx_executor     = workers.ru_tx_exec;
+  // Build the sector executor mapper that owns the per-eAxC serialization strands.
+  ru_ofh_executor_mapper_config exec_mapper_cfg;
+  exec_mapper_cfg.dl_eaxc_per_sector = {test_params.dl_port_id};
+  exec_mapper_cfg.downlink_executor  = workers.ru_dl_exec;
+  exec_mapper_cfg.uplink_executor    = workers.ru_rx_exec;
+  exec_mapper_cfg.txrx_executors     = {workers.ru_tx_exec};
+  exec_mapper_cfg.timing_executor    = workers.ru_timing_exec;
+  workers.ofh_exec_mapper            = create_ofh_ru_executor_mapper(exec_mapper_cfg);
 
   // Configure Ethernet gateway.
-  auto gateway                = std::make_unique<test_gateway>();
-  tx_gateway                  = gateway.get();
-  sector_deps.eth_transmitter = std::move(gateway);
+  auto gateway = std::make_unique<test_gateway>();
+  tx_gateway   = gateway.get();
 
   // Configure Ethernet receiver.
-  auto dummy_receiver      = std::make_unique<dummy_eth_receiver>(logger, buffer_pool);
-  eth_receiver             = dummy_receiver.get();
-  sector_deps.eth_receiver = std::move(dummy_receiver);
+  auto dummy_receiver = std::make_unique<dummy_eth_receiver>(logger, buffer_pool);
+  eth_receiver        = dummy_receiver.get();
+
+  dependencies.sector_dependencies.emplace_back(ofh::sector_dependencies{
+      .logger          = &logger,
+      .exec_mapper     = workers.ofh_exec_mapper->get_sector_mapper(0),
+      .eth_transmitter = std::move(gateway),
+      .eth_receiver    = std::move(dummy_receiver),
+  });
 
   return dependencies;
 }

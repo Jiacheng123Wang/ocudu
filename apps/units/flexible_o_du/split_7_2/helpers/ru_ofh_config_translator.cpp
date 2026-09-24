@@ -189,6 +189,12 @@ void ocudu::fill_ofh_worker_manager_config(worker_manager_config& config, const 
   ofh_cfg.ru_timing_cpu   = ru_cfg.expert_execution_cfg.ru_timing_cpu;
   ofh_cfg.txrx_affinities = ru_cfg.expert_execution_cfg.txrx_affinities;
 
+  // Provide the downlink eAxC identifiers per cell, used to create one serialization strand per eAxC.
+  ofh_cfg.dl_eaxc_per_sector.reserve(ru_cfg.cells.size());
+  for (const auto& cell : ru_cfg.cells) {
+    ofh_cfg.dl_eaxc_per_sector.push_back(cell.ru_dl_port_id);
+  }
+
   // If ru_txrx_cpus parameters are not specified, use the affinities of ru_cpus parameters of the cells.
   if (ofh_cfg.txrx_affinities.empty()) {
     for (unsigned i = 0, e = ru_cfg.cells.size(); i != e; ++i) {

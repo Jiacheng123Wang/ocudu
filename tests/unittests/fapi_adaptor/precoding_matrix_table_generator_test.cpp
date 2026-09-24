@@ -3,7 +3,7 @@
 
 #include "ocudu/fapi_adaptor/precoding_matrix_table_generator.h"
 #include "ocudu/ran/precoding/precoding_codebook_configuration.h"
-#include "ocudu/ran/precoding/precoding_codebook_helpers.h"
+#include "ocudu/ran/precoding/precoding_codebook_type1_helpers.h"
 #include "ocudu/ran/precoding/precoding_codebooks.h"
 #include "ocudu/ran/precoding/precoding_weight_matrix_formatters.h"
 #include "fmt/ostream.h"

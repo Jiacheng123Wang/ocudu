@@ -27,7 +27,7 @@ protected:
 
     // create required objects
     gtpu_rx_demux      = std::make_unique<dummy_gtpu_demux_ctrl>();
-    gtpu_n3_allocator  = std::make_unique<dummy_gtpu_teid_pool>();
+    gtpu_ngu_allocator = std::make_unique<dummy_gtpu_teid_pool>();
     gtpu_f1u_allocator = std::make_unique<dummy_gtpu_teid_pool>();
     gtpu_tx_notifier   = std::make_unique<dummy_gtpu_network_gateway_adapter>();
     f1u_gw             = std::make_unique<dummy_f1u_gateway>(f1u_bearer);
@@ -42,14 +42,14 @@ protected:
     ue_cfg = {security::sec_as_config{}, activity_notification_level_t::ue, std::chrono::seconds(0), {}, 1000000000};
 
     // create DUT object
-    ue_mng = std::make_unique<ue_manager>(ue_manager_config{max_nof_ues, n3_config, test_mode_config},
+    ue_mng = std::make_unique<ue_manager>(ue_manager_config{max_nof_ues, ngu_config, test_mode_config},
                                           ue_manager_dependencies{{*e1ap1, *e1ap2},
                                                                   timers,
                                                                   *f1u_gw,
                                                                   *ngu_session_mngr,
                                                                   *pdcp_ctrl_handler,
                                                                   *gtpu_rx_demux,
-                                                                  *gtpu_n3_allocator,
+                                                                  *gtpu_ngu_allocator,
                                                                   *gtpu_f1u_allocator,
                                                                   *cu_up_exec_mapper,
                                                                   gtpu_pcap,
@@ -63,7 +63,7 @@ protected:
   }
 
   std::unique_ptr<gtpu_demux_ctrl>                            gtpu_rx_demux;
-  std::unique_ptr<gtpu_teid_pool>                             gtpu_n3_allocator;
+  std::unique_ptr<gtpu_teid_pool>                             gtpu_ngu_allocator;
   std::unique_ptr<gtpu_teid_pool>                             gtpu_f1u_allocator;
   std::unique_ptr<gtpu_tunnel_common_tx_upper_layer_notifier> gtpu_tx_notifier;
   std::unique_ptr<e1ap_interface>                             e1ap1;
@@ -77,7 +77,7 @@ protected:
   timer_manager                                               timers;
   ue_context_cfg                                              ue_cfg;
   std::unique_ptr<ue_manager_ctrl>                            ue_mng;
-  n3_interface_config                                         n3_config;
+  ngu_interface_config                                        ngu_config;
   cu_up_test_mode_config                                      test_mode_config{};
   ocudulog::basic_logger&                                     test_logger = ocudulog::fetch_basic_logger("TEST", false);
   manual_task_worker                                          worker;
@@ -270,7 +270,7 @@ TEST_F(ue_manager_deferred_task_test, when_ues_are_removed_then_all_of_them_are_
   for (cu_up_ue_index_t ue_index : {ue_indexes[1], ue_indexes[2]}) {
     ue_context* ue_ctxt = ue_mng->find_ue(ue_index);
     ASSERT_NE(ue_ctxt, nullptr);
-    ASSERT_TRUE(ue_ctxt->remove_pending()) << "ue=" << fmt::underlying(ue_index) << " was not flagged for removal";
+    ASSERT_TRUE(ue_ctxt->remove_pending()) << "ue=" << ue_index << " was not flagged for removal";
   }
 
   // A second removal routine for the same UEs must not schedule anything.

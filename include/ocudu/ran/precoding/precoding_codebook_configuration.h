@@ -6,6 +6,7 @@
 
 #include "ocudu/adt/bounded_integer.h"
 #include "ocudu/ran/precoding/precoding_codebook_properties.h"
+#include <string>
 #include <variant>
 
 /// \file
@@ -49,8 +50,11 @@ struct pmi_codebook_typeII {
 };
 
 /// Defines the PMI codebook configuration types.
-using pmi_codebook_config =
-    std::variant<std::monostate, pmi_codebook_one_port, pmi_codebook_two_port, pmi_codebook_typeI_single_panel>;
+using pmi_codebook_config = std::variant<std::monostate,
+                                         pmi_codebook_one_port,
+                                         pmi_codebook_two_port,
+                                         pmi_codebook_typeI_single_panel,
+                                         pmi_codebook_typeII>;
 
 /// \brief PMI codebook configuration identifier.
 ///
@@ -71,9 +75,14 @@ pmi_codebook_id to_pmi_codebook_identifier(const pmi_codebook_config& codebook);
 const pmi_codebook_config& to_pmi_codebook_config(pmi_codebook_id identifier);
 
 /// Converts the PMI codebook configuration to a string.
-const char* to_string(const pmi_codebook_config& codebook);
+std::string to_string(const pmi_codebook_config& codebook);
 
 /// Gets the number of CSI-RS antenna ports from the PMI codebook configuration.
 unsigned get_precoding_codebook_antenna_ports(const pmi_codebook_config& pmi_codebook);
+
+/// \brief Gets the maximum rank that can be reported with the PMI codebook configuration.
+///
+/// It is limited by the number of CSI-RS antenna ports and by the maximum number of layers of the codebook type.
+unsigned get_precoding_codebook_max_rank(const pmi_codebook_config& pmi_codebook);
 
 } // namespace ocudu

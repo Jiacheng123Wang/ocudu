@@ -110,7 +110,7 @@ void scheduler_test_simulator::push_dl_buffer_state(const dl_buffer_state_indica
 
 void scheduler_test_simulator::run_slot(std::optional<du_cell_index_t> cell_idx)
 {
-  ocudu_assert(not cell_idx.has_value() or contains(*cell_idx), "Invalid cellId={}", fmt::underlying(*cell_idx));
+  ocudu_assert(not cell_idx.has_value() or contains(*cell_idx), "Invalid cellId={}", *cell_idx);
   logger.set_context(next_slot.sfn(), next_slot.slot_index());
   test_logger.set_context(next_slot.sfn(), next_slot.slot_index());
 

@@ -3,7 +3,6 @@
 // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
 
 #include "du_ran_resource_manager_impl.h"
-#include "du_cg_res_mng.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/mac/config/mac_cell_group_config_factory.h"
 #include "ocudu/ocudulog/ocudulog.h"
@@ -95,7 +94,7 @@ du_ran_resource_manager_impl::du_ran_resource_manager_impl(span<const du_cell_co
     pucch_res_mng.add_cell(cell_idx, cell.ran);
     srs_res_mng->add_cell(cell_idx, cell.ran);
     if (cell.ran.init_bwp.cg_cfg.has_value()) {
-      cg_res_mng.add_cell(cell_idx, cell);
+      cg_res_mng.add_cell(cell_idx, cell.ran);
     }
 
     // The resource pools of a cell do not change during the lifetime of this class, so the capacity of the cell can be
@@ -121,6 +120,43 @@ du_ran_resource_manager_impl::du_ran_resource_manager_impl(span<const du_cell_co
         max_nof_ue_ctxts_per_cell - max_nof_rejected_ue_ctxts,
         cell_ue_ctxts[cell_idx].max_nof_ue_ctxts());
   }
+}
+
+/// \brief Configures tar-Config for a UE, enabling variation-triggered Timing Advance reporting.
+///
+/// Only an NTN cell configures it, and only for a UE that declares uplink-TA-Reporting-r17 for the band: signalling it
+/// otherwise asks for a procedure the UE does not implement. timingAdvanceSR is dropped separately when the UE cannot
+/// raise an SR for a report, as that is a distinct capability.
+static void update_tar_config(cell_group_config&           cell_grp_cfg,
+                              span<const du_cell_config>   cell_cfg_list,
+                              const ue_capability_summary& ue_caps,
+                              du_ue_index_t                ue_index,
+                              ocudulog::basic_logger&      logger)
+{
+  cell_grp_cfg.mcg_cfg.tar_cfg.reset();
+
+  if (not cell_grp_cfg.cells.contains(SERVING_PCELL_IDX)) {
+    return;
+  }
+
+  const du_cell_config& cell_cfg = cell_cfg_list[cell_grp_cfg.cells.at(SERVING_PCELL_IDX).serv_cell_cfg.cell_index];
+  if (not cell_cfg.ran.ntn_params.has_value() or not cell_cfg.ran.ntn_params->tar_cfg.has_value()) {
+    return;
+  }
+
+  const auto band_it = ue_caps.bands.find(cell_cfg.ran.dl_carrier.band);
+  if (band_it == ue_caps.bands.end() or not band_it->second.ul_ta_reporting_supported) {
+    return;
+  }
+
+  tar_config tar = *cell_cfg.ran.ntn_params->tar_cfg;
+  if (tar.sr_enabled and not ue_caps.sr_triggered_by_ta_report_supported) {
+    // The UE would not raise the SR anyway, so dropping the field is the only correct outcome. Logged because the cell
+    // asked for it and the operator otherwise has no way to tell why the feature ended up off for this UE.
+    logger.info("ue={}: Not signalling timingAdvanceSR. Cause: UE does not support sr-TriggeredBy-TA-Report", ue_index);
+    tar.sr_enabled = false;
+  }
+  cell_grp_cfg.mcg_cfg.tar_cfg.emplace(tar);
 }
 
 unsigned du_ran_resource_manager_impl::get_max_nof_established_ue_contexts(du_cell_index_t cell_index) const
@@ -284,6 +320,7 @@ du_ran_resource_manager_impl::update_context(du_ue_index_t                      
     if (ue_mcg.cell_group.cells.contains(SERVING_PCELL_IDX)) {
       pucch_res_mng.update_resources(ue_mcg.cell_group.cells.at(SERVING_PCELL_IDX), *u.ue_cap_manager.summary());
     }
+    update_tar_config(ue_mcg.cell_group, cell_cfg_list, *u.ue_cap_manager.summary(), ue_index, logger);
   }
 
   // > Update UE SRBs and DRBs.
@@ -305,7 +342,7 @@ du_ran_resource_manager_impl::update_context(du_ue_index_t                      
     if (has_drbs and not cg_was_active) {
       // NOTE: cg_res_mng.alloc_resources returns true if allocation is successful or if the Configured grant resource
       // allocation was not requested (i.e., not set in by the user).
-      if (not cg_res_mng.alloc_resources(ue_mcg.cell_group)) {
+      if (not cg_res_mng.alloc_resources(ue_mcg.cell_group.cells.at(SERVING_PCELL_IDX))) {
         // NOTE: This is ONLY IF CG allocation was requested and failed.
         // Deallocate previously allocated resources on PCell.
         if (pcell_newly_allocated) {
@@ -318,8 +355,8 @@ du_ran_resource_manager_impl::update_context(du_ue_index_t                      
             deallocate_cell_resources(ue_index, sc.serv_cell_index);
           }
         }
-        resp.procedure_error = make_unexpected(
-            fmt::format("Unable to allocate CG resources for ue={} at cell={}", fmt::underlying(ue_index), pcell_idx));
+        resp.procedure_error =
+            make_unexpected(fmt::format("Unable to allocate CG resources for ue={} at cell={}", ue_index, pcell_idx));
       }
       // After this point, allocation succeeded (either CG resources were allocated or allocation was skipped due to CG
       // config not requested).
@@ -332,7 +369,7 @@ du_ran_resource_manager_impl::update_context(du_ue_index_t                      
     }
     // Remove old CG config when DRBs are removed.
     else if (not has_drbs and cg_was_active) {
-      cg_res_mng.dealloc_resources(ue_mcg.cell_group);
+      cg_res_mng.dealloc_resources(ue_mcg.cell_group.cells.at(SERVING_PCELL_IDX));
     }
   }
 
@@ -437,7 +474,7 @@ void du_ran_resource_manager_impl::deallocate_cell_resources(du_ue_index_t ue_in
     srs_res_mng->dealloc_resources(ue_res.cell_group.cells.at(SERVING_PCELL_IDX));
     pdsch_res_mng.dealloc_resources(ue_res.cell_group);
     pusch_res_mng.dealloc_resources(ue_res.cell_group);
-    cg_res_mng.dealloc_resources(ue_res.cell_group);
+    cg_res_mng.dealloc_resources(ue_res.cell_group.cells.at(SERVING_PCELL_IDX));
     ue_res.cell_group.cells.at(SERVING_PCELL_IDX).serv_cell_cfg.cell_index = INVALID_DU_CELL_INDEX;
   } else {
     // TODO: Remove of SCell params.

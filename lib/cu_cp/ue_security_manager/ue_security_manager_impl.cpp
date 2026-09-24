@@ -49,8 +49,8 @@ bool ue_security_manager::init_security_context(const security::security_context
     return false;
   }
   logger.debug("Selected security algorithms integrity=NIA{} ciphering=NEA{}",
-               fmt::underlying(sec_context.sel_algos.integ_algo),
-               fmt::underlying(sec_context.sel_algos.cipher_algo));
+               sec_context.sel_algos.integ_algo,
+               sec_context.sel_algos.cipher_algo);
 
   // Generate K_rrc_enc and K_rrc_int
   sec_context.generate_as_keys();
@@ -60,6 +60,15 @@ bool ue_security_manager::init_security_context(const security::security_context
   sec_context.state = security::security_state::partially_enabled;
 
   return true;
+}
+
+bool ue_security_manager::init_handover_security_context(const security::security_context& sec_ctxt)
+{
+  if (not init_security_context(sec_ctxt)) {
+    return false;
+  }
+
+  return finalize_security_context();
 }
 
 bool ue_security_manager::init_retrieved_security_context(const security::security_context&                  sec_ctxt,
@@ -76,8 +85,8 @@ bool ue_security_manager::init_retrieved_security_context(const security::securi
     return false;
   }
   logger.debug("Selected security algorithms integrity=NIA{} ciphering=NEA{}",
-               fmt::underlying(sec_context.sel_algos.integ_algo),
-               fmt::underlying(sec_context.sel_algos.cipher_algo));
+               sec_context.sel_algos.integ_algo,
+               sec_context.sel_algos.cipher_algo);
 
   // Derive the AS keys from the KgNB* the peer transferred.
   sec_context.generate_as_keys();
@@ -108,6 +117,14 @@ bool ue_security_manager::is_security_enabled() const
 security::security_context ue_security_manager::get_security_context() const
 {
   return sec_context;
+}
+
+security::security_context ue_security_manager::get_handover_security_context(pci_t    target_pci,
+                                                                              unsigned target_ssb_arfcn) const
+{
+  security::security_context target_sec_context = sec_context;
+  target_sec_context.horizontal_key_derivation(target_pci, target_ssb_arfcn);
+  return target_sec_context;
 }
 
 security::sec_selected_algos ue_security_manager::get_security_algos() const

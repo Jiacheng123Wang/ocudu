@@ -5,8 +5,6 @@
 #include "mac_rach_handler.h"
 #include "../rnti_manager.h"
 #include "ocudu/adt/format.h"
-#include "ocudu/ran/band_helper.h"
-#include "ocudu/ran/prach/prach_configuration.h"
 #include "ocudu/ran/prach/ra_helper.h"
 #include "ocudu/scheduler/scheduler_configurator.h"
 #include "ocudu/scheduler/scheduler_rach_handler.h"
@@ -14,27 +12,14 @@
 
 using namespace ocudu;
 
-static bool compute_prach_format_is_long(const rach_config_common& rach_cfg, const ran_cell_config& ran_cfg)
-{
-  const prach_configuration prach_cfg = prach_configuration_get(band_helper::get_freq_range(ran_cfg.dl_carrier.band),
-                                                                band_helper::get_duplex_mode(ran_cfg.dl_carrier.band),
-                                                                rach_cfg.rach_cfg_generic.prach_config_index);
-  return is_long_preamble(prach_cfg.format);
-}
-
-static unsigned get_nof_ssbs_per_ro(const rach_config_common& rach_cfg)
-{
-  return rach_cfg.total_nof_ra_preambles / ra_helper::get_preambles_per_ssb(rach_cfg);
-}
-
 static unsigned get_total_msga_cb_preambles(const rach_config_common& rach_cfg)
 {
-  return ra_helper::get_msga_cb_preambles_per_ssb(rach_cfg) * get_nof_ssbs_per_ro(rach_cfg);
+  return ra_helper::get_msga_cb_preambles_per_ssb(rach_cfg) * get_nof_ssb_per_ro(rach_cfg.nof_ssb_per_ro);
 }
 
 static unsigned get_total_msg1_cfra_preambles(const rach_config_common& rach_cfg)
 {
-  return ra_helper::get_msg1_cfra_preambles_per_ssb(rach_cfg) * get_nof_ssbs_per_ro(rach_cfg);
+  return ra_helper::get_msg1_cfra_preambles_per_ssb(rach_cfg) * get_nof_ssb_per_ro(rach_cfg.nof_ssb_per_ro);
 }
 
 mac_cell_rach_handler_impl::mac_cell_rach_handler_impl(mac_rach_handler&                               parent_,
@@ -42,8 +27,6 @@ mac_cell_rach_handler_impl::mac_cell_rach_handler_impl(mac_rach_handler&        
   parent(parent_),
   cell_index(sched_cfg.cell_index),
   rach_cfg_common(*sched_cfg.ran.ul_cfg_common.init_ul_bwp.rach_cfg_common),
-  prach_format_is_long(
-      compute_prach_format_is_long(*sched_cfg.ran.ul_cfg_common.init_ul_bwp.rach_cfg_common, sched_cfg.ran)),
   msga_tc_rnti_ttl_slots(
       sched_cfg.ran.ul_cfg_common.init_ul_bwp.rach_cfg_common->two_step_rach_cfg.has_value()
           ? static_cast<unsigned>(
@@ -101,11 +84,10 @@ void mac_cell_rach_handler_impl::handle_rach_indication(const mac_rach_indicatio
   for (const auto& occasion : rach_ind.occasions) {
     auto& sched_occasion           = sched_rach.occasions.emplace_back();
     sched_occasion.start_symbol    = occasion.start_symbol;
+    sched_occasion.slot_index      = occasion.slot_index;
     sched_occasion.frequency_index = occasion.frequency_index;
-    const unsigned ra_rnti_slot_idx =
-        prach_format_is_long ? rach_ind.slot_rx.subframe_index() : rach_ind.slot_rx.slot_index();
     const rnti_t occasion_ra_rnti =
-        ra_helper::get_ra_rnti(ra_rnti_slot_idx, occasion.start_symbol, occasion.frequency_index);
+        ra_helper::get_ra_rnti(occasion.slot_index, occasion.start_symbol, occasion.frequency_index);
     for (const auto& preamble : occasion.preambles) {
       rnti_t selected_rnti = rnti_t::INVALID_RNTI;
       if (ra_helper::is_msg1_cf_preamble(rach_cfg_common, preamble.index)) {
@@ -193,7 +175,7 @@ std::optional<rnti_t> mac_cell_rach_handler_impl::handle_msga_ccch_sdu(rnti_t   
 /// owning TC-RNTI, used as a collision-detection tag on resolution.
 static uint64_t pack_con_res_id(rnti_t tc_rnti, const ue_con_res_id_t& con_res_id)
 {
-  uint64_t word = static_cast<uint64_t>(to_value(tc_rnti)) << 48U;
+  uint64_t word = static_cast<uint64_t>(to_underlying(tc_rnti)) << 48U;
   for (unsigned i = 0; i != UE_CON_RES_ID_LEN; ++i) {
     word |= static_cast<uint64_t>(con_res_id[i]) << (8U * i);
   }
@@ -217,7 +199,7 @@ static ue_con_res_id_t unpack_con_res_id(uint64_t word)
 unsigned mac_cell_rach_handler_impl::get_con_res_id_index(rnti_t tc_rnti) const
 {
   ocudu_assert(is_crnti(tc_rnti), "Invalid TC-RNTI={}", tc_rnti);
-  return to_value(tc_rnti) % msga_con_res_ids.size();
+  return to_underlying(tc_rnti) % msga_con_res_ids.size();
 }
 
 void mac_cell_rach_handler_impl::add_msga_con_res_id(rnti_t tc_rnti, const ue_con_res_id_t& con_res_id)

@@ -322,6 +322,8 @@ public:
   ~protocol_transaction_event_source()
   {
     // Automatically cancels any pending transaction.
+    // Note: This is what handles the source being destroyed before its observer, as it detaches the observer, which
+    // would otherwise be left pointing to a destroyed source. It is a no-op if the transaction already completed.
     this->set(protocol_transaction_failure::cancel);
   }
 

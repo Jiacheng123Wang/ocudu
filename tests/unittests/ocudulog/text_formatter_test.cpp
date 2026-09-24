@@ -31,7 +31,7 @@ static std::string strip_timestamp(const std::string& line)
 static detail::log_entry_metadata build_log_entry_metadata(fmt::dynamic_format_arg_store<fmt::format_context>* store)
 {
   // Create a time point 50000us from epoch.
-  using tp_ty = std::chrono::time_point<std::chrono::high_resolution_clock>;
+  using tp_ty = std::chrono::time_point<std::chrono::system_clock>;
   tp_ty tp(std::chrono::microseconds(50000));
 
   if (store) {

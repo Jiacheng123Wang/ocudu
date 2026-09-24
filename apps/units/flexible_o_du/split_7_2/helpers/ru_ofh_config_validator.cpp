@@ -4,6 +4,8 @@
 
 #include "ru_ofh_config_validator.h"
 #include "ocudu/adt/format.h"
+#include "ocudu/ofh/compression/compression_params.h"
+#include "ocudu/ofh/compression/compression_validator.h"
 #include "ocudu/ran/cyclic_prefix.h"
 
 using namespace ocudu;
@@ -69,6 +71,33 @@ static bool validate_ru_ofh_unit_config(span<const ru_ofh_unit_cell_config>     
   for (unsigned i = 0, e = ofh_cells.size(); i != e; ++i) {
     const ru_ofh_unit_cell_config&       ofh_cell = ofh_cells[i];
     const ru_ofh_cell_validation_config& cell_cfg = cell_config[i];
+
+    if (auto result = ofh::validate_compression_params(
+            ofh::ru_compression_params{.type       = ofh::to_compression_type(ofh_cell.cell.compression_method_ul),
+                                       .data_width = ofh_cell.cell.compression_bitwidth_ul});
+        !result.has_value()) {
+      fmt::println("Uplink {}", result.error());
+
+      return false;
+    }
+
+    if (auto result = ofh::validate_compression_params(
+            ofh::ru_compression_params{.type       = ofh::to_compression_type(ofh_cell.cell.compression_method_dl),
+                                       .data_width = ofh_cell.cell.compression_bitwidth_dl});
+        !result.has_value()) {
+      fmt::println("Downlink {}", result.error());
+
+      return false;
+    }
+
+    if (auto result = ofh::validate_compression_params(
+            ofh::ru_compression_params{.type       = ofh::to_compression_type(ofh_cell.cell.compression_method_prach),
+                                       .data_width = ofh_cell.cell.compression_bitwidth_prach});
+        !result.has_value()) {
+      fmt::println("PRACH {}", result.error());
+
+      return false;
+    }
 
     const std::chrono::duration<double, std::micro> symbol_duration(
         (1e3 / (get_nsymb_per_slot(cyclic_prefix::NORMAL) * get_nof_slots_per_subframe(cell_cfg.scs))));

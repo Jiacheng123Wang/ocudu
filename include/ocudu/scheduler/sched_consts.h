@@ -16,10 +16,6 @@ constexpr unsigned NOF_SSB_OFDM_SYMBOLS    = 4;
 /// SIB1 constants.
 /// SIB1 periodicity, see TS 38.331, Section 5.2.1.
 constexpr unsigned SIB1_PERIODICITY = 160;
-/// [Implementation defined] Max numbers of beams, to be used for SIB1 scheduler.
-/// NOTE: This is temporary, and valid only for FR1.
-constexpr unsigned MAX_NUM_BEAMS = 8;
-
 /// [Implementation defined] Maximum allowed slot offset between DCI and its scheduled PDSCH. Values {0,..,32}.
 constexpr unsigned SCHEDULER_MAX_K0 = 15;
 
@@ -48,6 +44,9 @@ constexpr units::bytes SRB1_TRIG_GRANT_SIZE{16};
 /// Maximum value of NTN Cell-specific K-offset. The field is expressed in slots for a subcarrier spacing of 15 kHz.
 /// See TS 38.331.
 constexpr unsigned NTN_CELL_SPECIFIC_KOFFSET_MAX = 1023;
+
+/// Maximum value of NTN k_mac. The field is expressed in slots for a subcarrier spacing of 15 kHz. See TS 38.331.
+constexpr unsigned NTN_K_MAC_MAX = 512;
 
 /// Maximum value of Msg delta. See table 6.1.2.1.1-5, in TS 38.214.
 constexpr unsigned MAX_MSG3_DELTA = 6;

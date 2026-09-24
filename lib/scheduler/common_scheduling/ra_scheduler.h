@@ -9,8 +9,8 @@
 #include "../pdcch_scheduling/pdcch_resource_allocator.h"
 #include "../support/prbs_calculator.h"
 #include "ra_ue_repository.h"
-#include "ocudu/adt/mpmc_queue.h"
 #include "ocudu/ocudulog/ocudulog.h"
+#include "ocudu/ran/prach/ssb_to_ro_mapping.h"
 #include "ocudu/ran/resource_allocation/rb_bitmap.h"
 #include "ocudu/scheduler/config/scheduler_expert_config.h"
 #include "ocudu/scheduler/scheduler_feedback_handler.h"
@@ -22,6 +22,7 @@ class scheduler_event_logger;
 class cell_metrics_handler;
 class pucch_allocator;
 class uci_allocator;
+class ue_cell;
 class ue_cell_repository;
 class ue_cell_configuration;
 struct ul_crc_indication;
@@ -40,16 +41,11 @@ public:
                         cell_metrics_handler&     metrics_handler_);
   ~ra_scheduler();
 
-  /// Enqueue RACH indication coming from lower layers.
-  /// \note Potentially called from a different executor than the cell scheduler executor.
+  /// Handle a RACH indication coming from lower layers.
   void handle_rach_indication(const rach_indication_message& msg);
 
-  /// Handle UL CRC ACKing/NACKing a Msg3 HARQ process.
-  /// \note Potentially called from a different executor than the cell scheduler executor.
+  /// \brief Store the UL CRCs of the indication that ACK/NACK a Msg3 HARQ process, discarding the remaining ones.
   void handle_crc_indication(const ul_crc_indication& crc_ind);
-
-  /// Save an upcoming CFRA UE Ids.
-  void handle_cfra_mapping_update(du_ue_index_t ue_index, rnti_t crnti);
 
   /// Allocate pending RARs + Msg3s
   void run_slot(cell_resource_allocator& res_alloc);
@@ -85,6 +81,12 @@ private:
     bool send_backoff_indicator = false;
   };
 
+  /// Pending MsgB whose registered MsgA preambles still have to be allocated a MsgA PUSCH.
+  struct pending_msga_occasion {
+    rnti_t     msgb_rnti;
+    slot_point prach_slot_rx;
+  };
+
   struct msg3_alloc_candidate {
     uint8_t      pusch_td_res_index;
     rnti_t       rnti_to_alloc;
@@ -99,15 +101,19 @@ private:
       /// CRC outcome for the MsgA PUSCH.
       /// nullopt = indication not yet received; true = CRC OK (SuccessRAR); false = CRC KO (FallbackRAR).
       std::optional<bool> crc_result;
+      /// Set to true once the MsgA PUSCH of this preamble has been allocated in the grid.
+      bool msga_pusch_scheduled = false;
       /// Set to true once the MsgB grant for this preamble has been scheduled.
       bool msgb_scheduled = false;
 
       preamble_ctx(const rach_indication_message::preamble& info_) : info(info_) {}
     };
 
-    rnti_t        msgb_rnti = rnti_t::INVALID_RNTI;
-    rnti_t        ra_rnti   = rnti_t::INVALID_RNTI;
-    slot_point    prach_slot_rx;
+    rnti_t     msgb_rnti = rnti_t::INVALID_RNTI;
+    rnti_t     ra_rnti   = rnti_t::INVALID_RNTI;
+    slot_point prach_slot_rx;
+    /// Frequency domain index of the PRACH occasion that carried the MsgA preambles.
+    uint8_t       frequency_index = 0;
     slot_interval msgb_window;
     /// Last slot at which the scheduler attempted to allocate this MsgB grant.
     slot_point last_sched_try_slot;
@@ -117,19 +123,17 @@ private:
     unique_ue_harq_entity msgb_harq_ent;
   };
 
-  /// Queue type used to store pending RACH indications.
-  using rach_indication_queue = concurrent_queue<rach_indication_message, concurrent_queue_policy::lockfree_mpmc>;
-
-  /// Queue type used to store pending CRC indications.
-  using crc_indication_queue = concurrent_queue<ul_crc_indication, concurrent_queue_policy::lockfree_mpmc>;
-
   /// Pre-compute invariant fields of RAR PDUs (PDSCH, DCI, etc.) for faster scheduling.
   void precompute_rar_fields();
 
   /// Pre-compute invariant fields of Msg3 PDUs (PUSCH, DCI, etc.) for faster scheduling.
   void precompute_msg3_pdus();
 
-  void handle_rach_indication_impl(const rach_indication_message& msg, cell_resource_allocator& res_alloc);
+  /// \brief SS/PBCH block index associated with a preamble detected in the PRACH occasion
+  /// \c (prach_slot_rx, fd_occasion_idx), as per TS 38.213, Section 8.1.
+  /// \return Nullopt if the PRACH occasion is associated with no SS/PBCH block index.
+  std::optional<ssb_id_t>
+  get_preamble_ssb_index(slot_point prach_slot_rx, unsigned fd_occasion_idx, unsigned preamble_id) const;
 
   /// Handle a PRACH occasion carrying Msg1 (4-step RACH) preambles.
   void handle_msg1_occasion(const rach_indication_message::occasion&      occ,
@@ -139,10 +143,20 @@ private:
   /// Handle a PRACH occasion carrying MsgA (2-step RACH) preambles and allocate their PUSCH receptions.
   void handle_msga_occasion(const rach_indication_message::occasion&      occ,
                             span<const rach_indication_message::preamble> preambles,
-                            slot_point                                    prach_slot_rx,
-                            cell_resource_allocator&                      res_alloc);
+                            slot_point                                    prach_slot_rx);
 
-  void handle_pending_crc_indications_impl(cell_resource_allocator& res_alloc);
+  /// Allocate in the grid the MsgA PUSCHs of the PRACH occasions handled so far.
+  void schedule_pending_msgas(cell_resource_allocator& res_alloc);
+
+  /// \brief Allocate in the grid the MsgA PUSCHs of the preambles registered in a pending MsgB.
+  /// \note The preambles that could not be allocated one are removed from the MsgB.
+  void schedule_msga_puschs(rnti_t msgb_rnti, slot_point prach_slot_rx, cell_resource_allocator& res_alloc);
+
+  /// Apply a UL CRC that ACKs/NACKs a Msg3 HARQ process.
+  void handle_ra_crc(const ul_crc_pdu_indication& crc, slot_point sl_rx);
+
+  /// Allocate the Msg3 retransmissions left pending by the CRCs handled so far.
+  void schedule_pending_msg3_retxs(cell_resource_allocator& res_alloc);
 
   /// Marks the MsgA PUSCH CRC outcome for preamble \c rapid under \c ra_rnti, and creates the ra_ue_repository
   /// entry (successRAR placeholder or Msg3 fallback entry).
@@ -181,6 +195,10 @@ private:
 
   /// Returns true if an RAR UL grant can be scheduled for the given UE in the given slot.
   bool can_allocate_rar_ul_grant(rnti_t crnti, const cell_slot_resource_allocator& slot_alloc) const;
+
+  /// \brief Returns the UE cell associated with a C-RNTI that is still undergoing a CFRA.
+  /// \return \c nullptr if the C-RNTI does not belong to a UE of this cell undergoing a CFRA.
+  const ue_cell* find_cfra_ue(rnti_t crnti) const;
 
   /// \brief Returns the dedicated config of a CFRA UE whose pending UCI may be multiplexed into its Msg3 PUSCH.
   /// \return \c nullptr if UCI-on-Msg3 is disabled, the RNTI is not a CFRA UE, or the UE has no dedicated config.
@@ -244,16 +262,20 @@ private:
   pdcch_resource_allocator&         pdcch_sch;
   pucch_allocator&                  pucch_alloc;
   uci_allocator&                    uci_alloc;
-  scheduler_event_logger&           ev_logger;
-  cell_metrics_handler&             metrics_hdlr;
-  ocudulog::basic_logger&           logger = ocudulog::fetch_basic_logger("SCHED");
+  // Shared repository of in-flight RA attempts, keyed by TC-RNTI. It also holds the 2-step RACH
+  // contention-resolution outcome.
+  ra_ue_repository& ra_ue_repo;
+  // UEs configured in this cell.
+  ue_cell_repository&     ue_cell_db;
+  scheduler_event_logger& ev_logger;
+  cell_metrics_handler&   metrics_hdlr;
+  ocudulog::basic_logger& logger = ocudulog::fetch_basic_logger("SCHED");
 
   // -- Derived from args.
 
   /// RA window size in number of slots.
   const unsigned     ra_win_nof_slots;
   const crb_interval ra_crb_lims;
-  const bool         prach_format_is_long;
   /// Duration of a single PRACH occasion in slots.
   const unsigned prach_occasion_duration_slots;
   /// Backoff Indicator value included in the RAR, as per TS38.321 Table 7.2-1, mapped from
@@ -261,6 +283,8 @@ private:
   const uint8_t backoff_indicator_value;
   /// Bitmap of CRBs that might be used for PUCCH transmissions, to avoid scheduling MSG3-PUSCH over them.
   crb_bitmap pucch_crbs;
+  /// Association between SS/PBCH block indexes and PRACH occasions.
+  const prach_helper::ssb_to_ro_mapping ssb_ro_map;
 
   /// Pre-cached information related to RAR for a given PDSCH time resource.
   struct rar_param_cached_data {
@@ -289,31 +313,18 @@ private:
 
   // -- State.
 
-  // RACH indications pending to be processed.
-  rach_indication_queue pending_rachs;
-
-  // CRC indications pending to be processed.
-  crc_indication_queue pending_crcs;
+  // MsgBs whose MsgA PUSCHs are pending to be allocated. Never reallocates, as it is filled up to its reserved
+  // capacity.
+  std::vector<pending_msga_occasion> pending_msgas;
 
   // List of pending RARs to be scheduled.
   std::vector<pending_rar_alloc> pending_rars;
-
-  // Shared repository of in-flight RA attempts (Msg3 grants pending to be scheduled or waiting for a positive
-  // HARQ-ACK, plus 2-step RACH contention-resolution outcome), keyed by TC-RNTI. Owned by the cell scheduler,
-  // read by the UE-dedicated scheduler.
-  ra_ue_repository& ra_ue_repo;
-
-  // UEs configured in this cell, used to retrieve the dedicated config of a CFRA UE.
-  ue_cell_repository& ue_cell_db;
 
   // List of pending MsgBs (2-step RACH responses) to be scheduled.
   std::vector<pending_msgb_alloc> pending_msgbs;
 
   // Marks whether the next slot indication is the first.
   bool first_slot_flag = true;
-
-  // Circular map of RNTIs associated with CFRA.
-  std::vector<std::atomic<rnti_t>> pending_cfra_ues;
 };
 
 } // namespace ocudu

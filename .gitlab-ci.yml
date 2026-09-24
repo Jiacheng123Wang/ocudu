@@ -27,6 +27,9 @@ stages:
 # variables:
 #   SKIP_OCUDU_BUILDING_CONTAINERS_CI: true # set to any value to skip building ocudu containers in CI
 
+variables:
+  FUZZ_IMAGE_VERSION: "1"  # bump when tests/fuzz/Dockerfile changes
+
 ################################################################################
 ## CI MR
 ################################################################################
@@ -273,6 +276,25 @@ include-guards:
         INPUT_IGNORE: "/bundled/"
       - INPUT_PATH: "."
         INPUT_IGNORE: "^\\(include\\|docs\\|external\\)/.*"
+  needs:
+    - job: trigger static
+      optional: true
+      artifacts: false
+
+dependency-checks:
+  extends: .dependency-checks
+  allow_failure: true
+  rules:
+    - if: $ON_MR
+  needs:
+    - job: trigger static
+      optional: true
+      artifacts: false
+
+high-resolution-clock:
+  extends: .high-resolution-clock
+  rules:
+    - if: $ON_MR
   needs:
     - job: trigger static
       optional: true
@@ -590,6 +612,21 @@ doxygen:
       optional: true
       artifacts: false
 
+pages:
+  stage: documentation
+  image: alpine:3.19
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  script:
+    - mkdir -p public
+    - echo "/ocudu https://docs.ocudu.org 301" > public/_redirects
+    - echo "/ocudu/* https://docs.ocudu.org/:splat 301" >> public/_redirects
+    - echo "/ https://docs.ocudu.org 301" >> public/_redirects
+    - echo "/* https://docs.ocudu.org/:splat 301" >> public/_redirects
+  artifacts:
+    paths:
+      - public
+
 ################################################################################
 # post
 ################################################################################
@@ -608,4 +645,86 @@ promotion:
     - git checkout -t origin/main
     - git rebase ${CI_COMMIT_SHA}
     - git push
+  dependencies: []
+
+################################################################################
+# fuzz
+################################################################################
+
+# Build and push the fuzz build-environment image.
+# The image contains only system dependencies (AFL++, clang, cmake, libs);
+# fuzz targets are compiled at job time so this image only needs rebuilding
+# when the Dockerfile itself changes.
+build-fuzz-image:
+  extends: .docker-builder
+  stage: deploy
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      changes:
+        - tests/fuzz/Dockerfile
+    - when: manual
+      allow_failure: true
+  variables:
+    NAME: fuzz-deps
+    CONTEXT: ${CI_PROJECT_DIR}
+    DOCKERFILE: ${CI_PROJECT_DIR}/tests/fuzz
+    VERSION: $FUZZ_IMAGE_VERSION
+    MODE: publish
+  dependencies: []
+
+# Run all fuzz targets for FUZZ_TIMEOUT_EACH seconds each.
+# The findings/ directory is cached between runs so AFL++ resumes from its
+# accumulated queue rather than restarting from the seed corpus each week.
+fuzz:
+  stage: .post
+  image: $CI_REGISTRY_IMAGE/fuzz-deps:$FUZZ_IMAGE_VERSION
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Weekly fuzz/'
+  variables:
+    FUZZ_OUTPUT_DIR: $CI_PROJECT_DIR/findings
+    FUZZ_CORPUS_DIR: $CI_PROJECT_DIR/seed_corpus
+    FUZZ_TIMEOUT_EACH: "7200"
+  cache:
+    key: fuzz-corpus-$CI_DEFAULT_BRANCH
+    paths:
+      - findings/
+  script:
+    - |
+      cmake -S . -B build_fuzz -GNinja \
+        -DCMAKE_C_COMPILER=afl-clang-fast \
+        -DCMAKE_CXX_COMPILER=afl-clang-fast++ \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -DENABLE_FUZZTESTS=ON \
+        -DENABLE_ASAN=ON \
+        -DBUILD_TESTING=OFF \
+        -DENABLE_UHD=OFF \
+        -DENABLE_ZEROMQ=OFF \
+        -DENABLE_FFTW=OFF \
+        -DENABLE_MKL=OFF \
+        -DENABLE_FFTZ=OFF \
+        -DENABLE_ARMPL=OFF \
+        -DENABLE_DPDK=OFF \
+        -DENABLE_LIBNUMA=OFF \
+        -DENABLE_BACKWARD=OFF \
+        -DENABLE_WERROR=OFF
+    - |
+      ninja -C build_fuzz \
+        ofh_uplane_decoder_fuzzer \
+        ofh_ecpri_decoder_fuzzer \
+        ofh_vlan_frame_decoder_fuzzer \
+        ngap_pdu_decoder_fuzzer \
+        ngap_cu_cp_fuzzer
+    - |
+      mkdir -p seed_corpus/ngap_cu_cp
+      cp -r tests/fuzz/ofh/corpus/* seed_corpus/
+      cp -r tests/fuzz/ngap/corpus/* seed_corpus/
+      cp tests/fuzz/ngap/corpus/ngap/* seed_corpus/ngap_cu_cp/
+    - |
+      export PATH="$CI_PROJECT_DIR/build_fuzz/tests/fuzz/ofh:$CI_PROJECT_DIR/build_fuzz/tests/fuzz/ngap:$PATH"
+      tests/fuzz/run_fuzzers.sh
+  artifacts:
+    when: always
+    paths:
+      - findings/
+    expire_in: 4 weeks
   dependencies: []

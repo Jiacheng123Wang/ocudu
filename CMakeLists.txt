@@ -182,6 +182,7 @@ option(ENABLE_BACKWARD       "Enable backward"                              ON)
 option(ENABLE_UHD            "Enable UHD"                                   ON)
 option(ENABLE_SIDEKIQ        "Enable Sidekiq"                               ON)
 option(ENABLE_ZEROMQ         "Enable ZeroMQ"                                ON)
+option(ENABLE_DIFI           "Enable DIFI radio backend"                    ON)
 option(ENABLE_FFTW           "Enable FFTW"                                  ON)
 option(ENABLE_CUDA           "Enable NVIDIA CUDA acceleration"              OFF)
 option(ENABLE_MKL            "Enable Intel MKL"                             ON)
@@ -192,12 +193,15 @@ option(ENABLE_LIBNUMA        "Enable LibNUMA"                               OFF)
 option(ENABLE_EXPORT         "Enable PIC and export libraries"              OFF)
 option(ENABLE_TRX_DRIVER     "Enable Amarisoft TRX driver library"          OFF)
 option(ENABLE_PLUGINS        "Compile plugins in the plugin folder"         ON)
+option(ENABLE_SCHEDTRACE     "Enable the scheduler event tracer"            OFF)
 option(DISABLE_MBEDTLS       "Disable MBEDTLS library and related apps"     OFF)
 option(DISABLE_SCTP          "Disable SCTP library and related apps"        OFF)
 option(BUILD_TESTING         "Compile tests"                                ON)
+option(ENABLE_FUZZTESTS      "Build AFL++/libFuzzer fuzz test harnesses"    OFF)
 option(ENABLE_GPROF          "Enable gprof"                                 OFF)
 option(FORCE_DEBUG_INFO      "Add debug information to Release build"       OFF)
 option(ENABLE_OCUDU_TRACY   "Enable using the tracy profiler if available" OFF)
+option(ENABLE_SPLIT_DWARF    "Emit split DWARF (.dwo) objects to cut linker memory use" OFF)
 if (BUILD_TESTING)
     if (${CMAKE_BUILD_TYPE} STREQUAL "Debug")
         option(TEST_GDB_PRINTERS  "Enable tests for GDB pretty printers"  OFF)
@@ -376,6 +380,11 @@ if (FORCE_DEBUG_INFO)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
 endif (FORCE_DEBUG_INFO)
 
+if (ENABLE_SPLIT_DWARF)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gsplit-dwarf")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -gsplit-dwarf")
+endif (ENABLE_SPLIT_DWARF)
+
 if (ENABLE_GCOV)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fprofile-arcs -ftest-coverage")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-arcs -ftest-coverage")
@@ -419,6 +428,7 @@ endif()
 ########################################################################
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/external/cmake-sbom")
 include(sbom)
+include(add_cuda_test)
 include(copyright)
 include(GNUInstallDirs)
 
@@ -731,6 +741,19 @@ if(SCTP_FOUND)
     )
 endif (SCTP_FOUND)
 
+# FlatBuffers, fetched at build time by the scheduler event tracer. Being fetched, it has no entry in
+# COPYRIGHTS.txt for parse_copyright_file() to pick up, so it is added to the SBOM here.
+if (ENABLE_SCHEDTRACE)
+    set(FLATBUFFERS_VERSION "25.12.19")
+    sbom_add(
+        PACKAGE            "FlatBuffers"
+        DOWNLOAD_LOCATION  "https://github.com/google/flatbuffers"
+        SUPPLIER           "Google LLC"
+        LICENSE            "Apache-2.0"
+        VERSION            ${FLATBUFFERS_VERSION}
+    )
+endif (ENABLE_SCHEDTRACE)
+
 ########################################################################
 # Instruction Set Architecture setup
 ########################################################################
@@ -841,6 +864,10 @@ if (BUILD_TESTING)
         endif (TEST_GDB_PRINTERS)
     endif ()
 endif (BUILD_TESTING)
+
+if (ENABLE_FUZZTESTS)
+    add_subdirectory(tests/fuzz)
+endif (ENABLE_FUZZTESTS)
 
 if (ENABLE_PLUGINS)
     # Discover all subdirectories in the plugin directory (but not recursively)

@@ -7,12 +7,12 @@
 #include "ocudu/adt/expected.h"
 #include "ocudu/adt/static_vector.h"
 #include "ocudu/phy/support/mask_types.h"
-#include "ocudu/phy/support/precoding_configuration.h"
 #include "ocudu/phy/support/rb_allocation.h"
 #include "ocudu/phy/support/re_pattern.h"
 #include "ocudu/phy/support/resource_grid_writer.h"
 #include "ocudu/ran/dmrs/dmrs.h"
 #include "ocudu/ran/pdsch/pdsch_context.h"
+#include "ocudu/ran/precoding_beamforming_configuration.h"
 #include "ocudu/ran/ptrs/ptrs.h"
 #include "ocudu/ran/sch/ldpc_base_graph.h"
 #include "ocudu/ran/sch/modulation_scheme.h"
@@ -154,8 +154,8 @@ public:
     float ratio_pdsch_dmrs_to_sss_dB;
     /// Ratio of PDSCH data EPRE to SSS EPRE in decibels.
     float ratio_pdsch_data_to_sss_dB;
-    /// Precoding configuration.
-    precoding_configuration precoding;
+    /// Precoding and beamforming configuration.
+    precoding_beamforming_configuration precoding_and_beamforming;
   };
 
   /// Default destructor.

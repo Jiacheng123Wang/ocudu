@@ -5,6 +5,7 @@
 #pragma once
 
 #include "cell/resource_grid.h"
+#include "cell_event_manager.h"
 #include "common_scheduling/csi_rs_scheduler.h"
 #include "common_scheduling/paging_scheduler.h"
 #include "common_scheduling/prach_scheduler.h"
@@ -19,11 +20,35 @@
 #include "pdcch_scheduling/pdcch_resource_allocator_impl.h"
 #include "pucch_scheduling/pucch_allocator_impl.h"
 #include "srs/srs_allocator_impl.h"
+#include "srs/srs_scheduler_impl.h"
 #include "uci_scheduling/uci_allocator_impl.h"
+#include "uci_scheduling/uci_indication_selector.h"
+#include "uci_scheduling/uci_scheduler_impl.h"
 #include "ue_context/ue_cell_repository.h"
 #include "ue_scheduling/ue_scheduler.h"
 
 namespace ocudu {
+
+/// \brief Forwards to the cell event manager the UCI grants whose indication did not arrive before the deadline.
+///
+/// It is handed to the UCI indication handler at its creation, which precedes that of the event manager that consumes
+/// the timeouts.
+class cell_uci_timeout_forwarder final : public uci_indication_timeout_notifier
+{
+public:
+  /// Set the event manager that the timeouts are forwarded to.
+  void connect(cell_event_manager& ev_mng_) { ev_mng = &ev_mng_; }
+
+  void on_timeout(slot_point sl_rx, rnti_t crnti, const uci_action& action) override
+  {
+    if (ev_mng != nullptr) {
+      ev_mng->handle_uci_indication_timeout(sl_rx, crnti, action);
+    }
+  }
+
+private:
+  cell_event_manager* ev_mng = nullptr;
+};
 
 /// \brief This class holds all the resources that are specific to a cell.
 /// This includes the SIB and RA scheduler objects, PDCCH scheduler object, the cell resource grid, etc.
@@ -55,20 +80,20 @@ public:
 
   void handle_slice_reconfiguration_request(const du_cell_slice_reconfig_request& slice_reconf_req);
 
-  void handle_cfra_mapping(du_ue_index_t ue_index, rnti_t crnti) { ra_sch.handle_cfra_mapping_update(ue_index, crnti); }
-  void handle_rach_indication(const rach_indication_message& msg) { ra_sch.handle_rach_indication(msg); }
+  void handle_rach_indication(const rach_indication_message& msg) { ev_mng.handle_rach_indication(msg); }
 
   void handle_crc_indication(const ul_crc_indication& crc_ind);
 
-  void handle_paging_information(const sched_paging_information& pi) { pg_sch.handle_paging_information(pi); }
+  void handle_srs_indication(const srs_indication& srs) { ev_mng.handle_srs_indication(srs); }
 
-  scheduler_feedback_handler&         get_feedback_handler() { return ue_sched->get_feedback_handler(); }
-  scheduler_cell_positioning_handler& get_positioning_handler() { return ue_sched->get_positioning_handler(); }
-  scheduler_dl_buffer_state_indication_handler& get_dl_buffer_state_indication_handler()
-  {
-    return ue_sched->get_dl_buffer_state_indication_handler();
-  }
-  sched_ue_configuration_handler& get_ue_configurator() { return ue_sched->get_ue_configurator(); }
+  void handle_uci_indication(const uci_indication& uci) { ev_mng.handle_uci_indication(uci); }
+
+  void handle_paging_information(const sched_paging_information& pi) { ev_mng.handle_paging_information(pi); }
+
+  ue_feedback_handler&                          get_feedback_handler() { return ev_mng; }
+  scheduler_cell_positioning_handler&           get_positioning_handler() { return ev_mng; }
+  scheduler_dl_buffer_state_indication_handler& get_dl_buffer_state_indication_handler() { return ev_mng; }
+  sched_ue_configuration_handler&               get_ue_configurator() { return ev_mng; }
 
   const cell_configuration& cell_cfg;
 
@@ -100,10 +125,25 @@ private:
   ra_scheduler       ra_sch;
   prach_scheduler    prach_sch;
   srs_allocator_impl srs_alloc;
-  paging_scheduler   pg_sch;
+
+  /// Scheduler of the periodic SRS of the UEs of this cell.
+  srs_scheduler_impl srs_sch;
+
+  /// Scheduler of the periodic UCI of the UEs of this cell.
+  uci_scheduler_impl uci_sch;
+
+  /// Forwarder of the UCI timeouts to the event manager of this cell.
+  cell_uci_timeout_forwarder uci_timeout_fwd;
+
+  /// Handler of the UCI indications of this cell.
+  uci_indication_selector uci_sel;
+  paging_scheduler        pg_sch;
 
   /// Reference to UE scheduler whose DU cell group contains this cell.
   ue_scheduler::unique_cell_ptr ue_sched;
+
+  /// Handler of the events of this cell.
+  cell_event_manager ev_mng;
 
   /// Current state of the cell.
   bool active = false;

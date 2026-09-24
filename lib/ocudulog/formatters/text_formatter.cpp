@@ -184,11 +184,7 @@ std::unique_ptr<log_formatter> contextual_text_formatter::clone() const
 void contextual_text_formatter::format_metadata(const detail::log_entry_metadata& metadata, fmt::memory_buffer& buffer)
 {
   // Time stamp data preparation.
-  using system_clock = std::chrono::system_clock;
-  auto sys_tp = std::chrono::time_point_cast<system_clock::duration>(
-      metadata.tp - decltype(metadata.tp)::clock::now() + system_clock::now()
-  );
-  std::tm current_time = fmt::gmtime(system_clock::to_time_t(sys_tp));
+  std::tm current_time = fmt::gmtime(std::chrono::system_clock::to_time_t(metadata.tp));
   auto    us_fraction =
       std::chrono::duration_cast<std::chrono::microseconds>(metadata.tp.time_since_epoch()).count() % 1000000u;
   fmt::format_to(std::back_inserter(buffer), "{:%F}T{:%H:%M:%S}.{:06} ", current_time, current_time, us_fraction);

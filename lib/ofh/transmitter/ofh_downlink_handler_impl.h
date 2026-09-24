@@ -15,6 +15,8 @@
 #include "ocudu/ofh/transmitter/ofh_transmitter_configuration.h"
 #include "ocudu/ran/tdd/tdd_ul_dl_config.h"
 #include "ocudu/support/synchronization/stop_event.h"
+#include <atomic>
+#include <limits>
 
 namespace ocudu {
 namespace ofh {
@@ -93,6 +95,8 @@ private:
   downlink_handler_metrics_collector                    metrics_collector;
   bool                                                  enable_log_warnings_for_lates;
   rt_stop_event_source                                  stop_control;
+  /// Keeps track of the slot of the last downlink resource grid delivered by the PHY.
+  std::atomic<slot_point> last_processed_slot{slot_point{}};
 };
 
 } // namespace ofh

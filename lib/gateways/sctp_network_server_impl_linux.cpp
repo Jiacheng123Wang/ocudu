@@ -15,6 +15,7 @@
 /// these members are declared but never referenced there.
 
 #include "sctp_network_server_impl.h"
+#include "sctp_dtls_ssl.h"
 #include "ocudu/gateways/sctp_socket.h"
 #include "ocudu/ocudulog/ocudulog.h"
 #include <array>
@@ -23,6 +24,15 @@
 using namespace ocudu;
 
 void sctp_network_server_impl::sctp_associaton_context::receive()
+{
+  if (parent.node_cfg.dtls_cfg.has_value()) {
+    receive_dtls();
+  } else {
+    receive_plain();
+  }
+}
+
+void sctp_network_server_impl::sctp_associaton_context::receive_plain()
 {
   struct sctp_sndrcvinfo                            sri       = {};
   int                                               msg_flags = 0;
@@ -61,6 +71,43 @@ void sctp_network_server_impl::sctp_associaton_context::receive()
   /// We pass the actual data and association handling back to the parent, to avoid code duplication.
   auto payload = std::vector<uint8_t>(temp_recv_buffer.begin(), temp_recv_buffer.begin() + rx_bytes);
   parent.receive_impl(std::move(payload), sri, msg_flags, msg_src_addr, msg_src_addrlen);
+}
+
+void sctp_network_server_impl::sctp_associaton_context::receive_dtls()
+{
+  ocudu_assert(parent.node_cfg.dtls_cfg.has_value(), "Receive DTLS called, but no DTLS config provided");
+
+  if (ssl == nullptr) {
+    return;
+  }
+  if (not ssl->is_init_finished()) {
+    if (ssl->handshake()) {
+      while (not parent.app_exec.defer([this, keepalive = parent.keepalive_token]() {
+        if (*keepalive) {
+          parent.mark_connection_as_complete(addr);
+        }
+      })) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
+    return;
+  }
+
+  expected<byte_buffer> plain = ssl->receive();
+  if (not plain.has_value()) {
+    return;
+  }
+
+  auto payload_holder = std::make_shared<byte_buffer>(std::move(*plain));
+  if (plain.has_value()) {
+    while (not parent.app_exec.defer([this, keepalive = parent.keepalive_token, payload_holder]() mutable {
+      if (*keepalive) {
+        sctp_data_recv_notifier->on_new_sdu(std::move(*payload_holder));
+      }
+    })) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
 }
 
 bool sctp_network_server_impl::subscribe_association_to_broker(unique_fd assoc_fd, sctp_associaton_context& assoc_ctxt)

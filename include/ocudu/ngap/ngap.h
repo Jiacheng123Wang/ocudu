@@ -66,6 +66,10 @@ public:
   /// \brief Request a new TNL association to the AMF.
   virtual bool handle_amf_tnl_connection_request() = 0;
 
+  /// \brief Determines whether the TNL association to the AMF is established.
+  /// \remark A new TNL association can only be requested while this is false.
+  [[nodiscard]] virtual bool is_amf_tnl_connected() const = 0;
+
   /// \brief Request the NGAP handler to disconnect from the AMF.
   virtual async_task<void> handle_amf_disconnection_request() = 0;
 
@@ -208,10 +212,9 @@ public:
   virtual void on_transmission_of_handover_required() = 0;
 
   /// \brief Notify about the reception of a new RRC Handover Command (TS 38.331 section 11.2.2).
-  /// \param[in] ue_index The index of the UE.
-  /// \param[in] command The RRC container containing the Handover Command.
+  /// \param[in] command The Handover Command, including the data forwarding tunnels of the target.
   /// \returns True if the Handover command is valid and was successfully handled by the DU.
-  virtual async_task<bool> on_new_rrc_handover_command(cu_cp_ue_index_t ue_index, byte_buffer command) = 0;
+  virtual async_task<bool> on_new_rrc_handover_command(cu_cp_rrc_handover_command command) = 0;
 
   /// \brief Notify the CU-CP to await the RRC Reconfiguration Complete and the DL Status Transfer.
   /// \param[in] ue_index The index of the UE.
@@ -317,8 +320,8 @@ public:
   handle_dl_ran_status_transfer_required(cu_cp_ue_index_t ue_index) = 0;
 
   /// \brief Handle the reception of an inter CU handover related RRC Reconfiguration Complete.
-  virtual void
-  handle_inter_cu_ho_rrc_recfg_complete(cu_cp_ue_index_t ue_index, const nr_cell_global_id_t& cgi, tac_t tac) = 0;
+  virtual void handle_inter_cu_ho_rrc_recfg_complete(cu_cp_ue_index_t                   ue_index,
+                                                     const cu_cp_user_location_info_nr& user_location_info) = 0;
 
   /// \brief Get the supported PLMNs.
   virtual const ngap_context_t& get_ngap_context() const = 0;

@@ -355,11 +355,12 @@ void rrc_ue_impl::handle_security_mode_complete(const asn1::rrc_nr::security_mod
 
 void rrc_ue_impl::handle_ul_info_transfer(const ul_info_transfer_ies_s& ul_info_transfer)
 {
-  cu_cp_ul_nas_transport ul_nas_msg    = {};
-  ul_nas_msg.ue_index                  = context.ue_index;
-  ul_nas_msg.nas_pdu                   = ul_info_transfer.ded_nas_msg.copy();
-  ul_nas_msg.user_location_info.nr_cgi = {context.plmn_id, context.cell.cgi.nci};
-  ul_nas_msg.user_location_info.tai    = {context.plmn_id, context.cell.tac};
+  cu_cp_ul_nas_transport ul_nas_msg      = {};
+  ul_nas_msg.ue_index                    = context.ue_index;
+  ul_nas_msg.nas_pdu                     = ul_info_transfer.ded_nas_msg.copy();
+  ul_nas_msg.user_location_info.nr_cgi   = {context.plmn_id, context.cell.cgi.nci};
+  ul_nas_msg.user_location_info.tai      = {context.plmn_id, context.cell.tac};
+  ul_nas_msg.user_location_info.tac_list = context.cell.tac_list;
 
   if (!ngap_notifier.on_ul_nas_transport_message(ul_nas_msg)) {
     logger.log_info(
@@ -735,7 +736,7 @@ rrc_ue_impl::get_rrc_ue_cond_reconfiguration_context(const rrc_reconfiguration_p
 
           // Add up to 2 measIds.
           for (size_t i = 0; i < std::min(meas_ids.size(), size_t{2}); ++i) {
-            entry.cond_execution_cond_r16.push_back(meas_id_to_uint(meas_ids[i]));
+            entry.cond_execution_cond_r16.push_back(to_underlying(meas_ids[i]));
           }
 
           logger.log_debug("ue={}: CHO candidate cond_recfg_id={} target_nci={:#x} assigned {} measId(s): {}",
@@ -884,8 +885,9 @@ rrc_ue_impl::get_rrc_ue_release_context(bool                                    
 {
   // Prepare location info to return.
   rrc_ue_release_context release_context;
-  release_context.user_location_info.nr_cgi = {context.plmn_id, context.cell.cgi.nci};
-  release_context.user_location_info.tai    = {context.plmn_id, context.cell.tac};
+  release_context.user_location_info.nr_cgi   = {context.plmn_id, context.cell.cgi.nci};
+  release_context.user_location_info.tai      = {context.plmn_id, context.cell.tac};
+  release_context.user_location_info.tac_list = context.cell.tac_list;
 
   if (requires_rrc_message) {
     if (context.pdcp_manager.get_srb_ids().empty()) {
@@ -990,7 +992,7 @@ std::optional<rrc_meas_cfg> rrc_ue_impl::generate_meas_config(const std::optiona
     if (context.meas_cfg.has_value()) {
       for (const auto& meas_obj : context.meas_cfg.value().meas_obj_to_add_mod_list) {
         if (meas_obj.meas_obj_nr.has_value() && meas_obj.meas_obj_nr.value().ssb_freq == context.cell.ssb_arfcn) {
-          context.serving_cell_mo = meas_obj_id_to_uint(meas_obj.meas_obj_id);
+          context.serving_cell_mo = to_underlying(meas_obj.meas_obj_id);
           break;
         }
       }
@@ -1028,7 +1030,7 @@ void rrc_ue_impl::update_meas_config(const rrc_meas_cfg& cfg)
   if (context.meas_cfg.has_value()) {
     for (const auto& meas_obj : context.meas_cfg.value().meas_obj_to_add_mod_list) {
       if (meas_obj.meas_obj_nr.has_value() && meas_obj.meas_obj_nr->ssb_freq == context.cell.ssb_arfcn) {
-        context.serving_cell_mo = meas_obj_id_to_uint(meas_obj.meas_obj_id);
+        context.serving_cell_mo = to_underlying(meas_obj.meas_obj_id);
         break;
       }
     }

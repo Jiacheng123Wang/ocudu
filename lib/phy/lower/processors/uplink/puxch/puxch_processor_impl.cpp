@@ -151,7 +151,7 @@ bool puxch_processor_impl::process_symbol(const baseband_gateway_buffer_reader& 
     // accounts them as one group per slot, which is the front end's half of the device timeline (the
     // back-end lane of the same slot is filled by another thread).
     if (demodulator != nullptr) {
-      demodulator->set_lane_slot(context.slot.to_uint());
+      demodulator->set_lane_slot(context.slot.count());
     }
 
     // Exchange an empty request with the current slot with a stored request.

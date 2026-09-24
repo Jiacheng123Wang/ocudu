@@ -52,6 +52,7 @@
 #include "ocudu/support/test_utils.h"
 #include "ocudu/support/tracing/event_tracing.h"
 #include <pthread.h>
+#include <sstream>
 
 using namespace ocudu;
 using namespace odu;
@@ -877,7 +878,7 @@ public:
     // Mark the UE as fully setup.
     ue_created_flag_list[ue_idx] = true;
 
-    test_logger.info("ue={}: Creation completed successfully", fmt::underlying(ue_idx));
+    test_logger.info("ue={}: Creation completed successfully", ue_idx);
   }
 
   // \brief Push a DL PDUs to DU-high via F1-U interface.
@@ -995,8 +996,8 @@ public:
                (sim_phy.metrics.nof_ul_grants ==
                 sim_phy.metrics.nof_ul_grants + sim_phy.slot_ul_result.ul_res->puschs.size()))) {
             f2.sr_info.emplace();
-            f2.sr_info->resize(sr_nof_bits_to_uint(pucch.uci_bits.sr_bits));
-            f2.sr_info->fill(0, sr_nof_bits_to_uint(pucch.uci_bits.sr_bits), true);
+            f2.sr_info->resize(to_underlying(pucch.uci_bits.sr_bits));
+            f2.sr_info->fill(0, to_underlying(pucch.uci_bits.sr_bits), true);
           }
           if (pucch.csi_rep_cfg.has_value()) {
             f2.csi_part1_info.emplace();

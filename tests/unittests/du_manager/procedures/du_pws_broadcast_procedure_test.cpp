@@ -18,19 +18,28 @@ using namespace odu;
 
 namespace {
 
-/// A cell configured with a reserved (dormant) SI-message occasion for SIB6, but no etws_cfg content -- i.e. the
-/// SI-message requires activation and has no matching entry in si_config->sibs yet.
+/// A cell provisioned for an ETWS primary notification, with no content configured for it -- i.e. it stays dormant
+/// until a Write-Replace Warning provides one.
 du_cell_config make_cell_config_with_dormant_pws_si_message()
 {
   du_cell_config cfg = config_helpers::make_default_du_cell_config();
 
   cfg.si.si_config.emplace();
   cfg.si.si_config->si_window_len_slots = 10;
+  cfg.si.si_config->pws_si_messages.push_back(pws_si_message_config{sib_type::sib6, 32, false});
 
-  si_message_sched_info si_msg;
-  si_msg.sib_mapping_info       = {sib_type::sib6};
-  si_msg.si_period_radio_frames = 32;
-  cfg.si.si_config->si_sched_info.push_back(si_msg);
+  return cfg;
+}
+
+/// A cell whose ETWS configuration carries the content it broadcasts from its start, as test_mode does.
+du_cell_config make_cell_config_with_etws_test_content()
+{
+  du_cell_config cfg = make_cell_config_with_dormant_pws_si_message();
+
+  cfg.si.si_config->pws_si_messages = {pws_si_message_config{sib_type::sib6, 32, true},
+                                       pws_si_message_config{sib_type::sib7, 32, true}};
+  cfg.si.si_config->sibs.push_back(sib_type_info{sib6_info{0x1104, 0x3000, 0x0980}, value_tag_t{0}});
+  cfg.si.si_config->sibs.push_back(sib_type_info{sib7_info{0x1104, 0x3000, "ETWS message", 0x48}, value_tag_t{0}});
 
   return cfg;
 }
@@ -84,7 +93,7 @@ protected:
   std::unique_ptr<du_manager> du_mng;
 };
 
-/// Fixture whose cell has a statically-provisioned, dormant SI-message occasion for SIB6.
+/// Fixture whose cell is provisioned for an ETWS primary notification, with no content configured for it.
 class du_pws_broadcast_procedure_provisioned_test : public du_pws_broadcast_procedure_test
 {
 protected:
@@ -94,18 +103,28 @@ protected:
   }
 };
 
+/// Fixture whose cell broadcasts its configured ETWS content from the cell start.
+class du_pws_broadcast_procedure_test_content_test : public du_pws_broadcast_procedure_test
+{
+protected:
+  du_pws_broadcast_procedure_test_content_test() :
+    du_pws_broadcast_procedure_test(make_cell_config_with_etws_test_content())
+  {
+  }
+};
+
 } // namespace
 
 TEST_F(du_pws_broadcast_procedure_test, when_cell_not_provisioned_for_sib_type_then_it_is_not_accepted)
 {
   write_replace_warning_information req;
-  req.sib_type = 6;
+  req.sib_id = sib_type::sib6;
   req.sib_msgs.push_back(byte_buffer::create({0x1, 0x2, 0x3}).value());
   req.repeat_period            = std::chrono::seconds{60};
   req.nof_broadcasts_requested = 4;
   req.cells                    = {du_cell_index_t::MIN_DU_CELL_INDEX};
 
-  // The default cell config has no static SI window for SIB6/7/8 (no etws_cfg/cmas_cfg provisioned).
+  // The default cell config is not provisioned for any warning (no etws_cfg/cmas_cfg configured).
   async_task<std::vector<du_cell_index_t>> t =
       du_mng->get_f1ap_event_handler().get_pws_handler().handle_write_replace_warning(req);
   lazy_task_launcher<std::vector<du_cell_index_t>> launcher{t};
@@ -115,12 +134,34 @@ TEST_F(du_pws_broadcast_procedure_test, when_cell_not_provisioned_for_sib_type_t
   ASSERT_FALSE(dependencies.mac.mac_cell.last_cell_recfg_req.has_value());
 }
 
+/// \brief Regression test: the content a cell broadcasts for a warning from its start must reach the MAC.
+///
+/// The DU builds the MAC cell configuration by copying each SI message it packed, and the ones carrying a warning are
+/// held apart from the ones of the normal operation. Leaving them behind gives the MAC a warning to broadcast with no
+/// content, which its encoder cannot serve.
+TEST_F(du_pws_broadcast_procedure_test_content_test,
+       when_cell_broadcasts_a_warning_from_its_start_then_its_content_reaches_the_mac)
+{
+  const auto& creation_req = dependencies.mac.last_cell_creation_req;
+  ASSERT_TRUE(creation_req.has_value());
+
+  const auto& pws_si_msgs = creation_req->sys_info.si_sched_cfg.pws_si_messages;
+  ASSERT_EQ(pws_si_msgs.size(), creation_req->sys_info.pws_si_messages.size());
+  for (unsigned i = 0, e = pws_si_msgs.size(); i != e; ++i) {
+    if (not pws_si_msgs[i].test_mode_auto_broadcast) {
+      continue;
+    }
+    ASSERT_FALSE(creation_req->sys_info.pws_si_messages[i].empty())
+        << "SI message " << i << " is broadcast from the cell start with no content";
+  }
+}
+
 /// Regression test: a CU-CP peer that (incorrectly) forwards a Write-Replace Warning with no actual SIB content must
 /// not be accepted, and must not reach the MAC.
 TEST_F(du_pws_broadcast_procedure_provisioned_test, when_sib_content_is_empty_then_broadcast_is_not_accepted)
 {
   write_replace_warning_information req;
-  req.sib_type = 6;
+  req.sib_id = sib_type::sib6;
   req.sib_msgs.push_back(byte_buffer{});
   req.repeat_period            = std::chrono::seconds{60};
   req.nof_broadcasts_requested = 4;
@@ -140,7 +181,7 @@ TEST_F(du_pws_broadcast_procedure_provisioned_test, when_sib_content_is_empty_th
 TEST_F(du_pws_broadcast_procedure_provisioned_test, when_sib_content_is_malformed_then_broadcast_is_not_accepted)
 {
   write_replace_warning_information req;
-  req.sib_type = 6;
+  req.sib_id = sib_type::sib6;
   req.sib_msgs.push_back(byte_buffer::create({0x1, 0x2, 0x3}).value());
   req.repeat_period            = std::chrono::seconds{60};
   req.nof_broadcasts_requested = 4;
@@ -161,7 +202,7 @@ TEST_F(du_pws_broadcast_procedure_provisioned_test, when_sib_content_is_malforme
 TEST_F(du_pws_broadcast_procedure_provisioned_test, when_sib_content_is_valid_then_broadcast_is_accepted)
 {
   write_replace_warning_information req;
-  req.sib_type = 6;
+  req.sib_id = sib_type::sib6;
   req.sib_msgs.push_back(pack_valid_sib6_pdu());
   req.repeat_period            = std::chrono::seconds{60};
   req.nof_broadcasts_requested = 4;

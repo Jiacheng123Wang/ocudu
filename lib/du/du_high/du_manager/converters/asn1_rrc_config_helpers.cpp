@@ -47,7 +47,7 @@ static rlc_bearer_cfg_s make_asn1_rrc_rlc_bearer(const rlc_bearer_config& cfg)
   if (is_srb(cfg.lcid)) {
     out.served_radio_bearer.set_srb_id() = srb_id_to_uint(to_srb_id(cfg.lcid));
   } else {
-    out.served_radio_bearer.set_drb_id() = drb_id_to_uint(*cfg.drb_id);
+    out.served_radio_bearer.set_drb_id() = to_underlying(*cfg.drb_id);
   }
 
   out.rlc_cfg_present = true;
@@ -415,7 +415,7 @@ static asn1::rrc_nr::dl_cfg_common_s make_asn1_rrc_dl_cfg_common(const du_cell_c
   // > frequencyInfoDL   FrequencyInfoDL   OPTIONAL   -- Cond InterFreqHOAndServCellAdd
   out.freq_info_dl_present = true;
   for (const auto& dl_band : cfg.ran.dl_cfg_common.freq_info_dl.freq_band_list) {
-    out.freq_info_dl.freq_band_list.push_back(nr_band_to_uint(dl_band.band));
+    out.freq_info_dl.freq_band_list.push_back(to_underlying(dl_band.band));
   }
   out.freq_info_dl.absolute_freq_ssb_present = true;
   // TODO: Check how to derive this value.
@@ -911,7 +911,7 @@ static asn1::rrc_nr::ul_cfg_common_s make_asn1_rrc_ul_cfg_common(const ul_config
   // > frequencyInfoUL FrequencyInfoUL OPTIONAL, -- Cond InterFreqHOAndServCellAdd
   out.freq_info_ul_present = true;
   for (const auto& ul_band : cfg.freq_info_ul.freq_band_list) {
-    out.freq_info_ul.freq_band_list.push_back(nr_band_to_uint(ul_band.band));
+    out.freq_info_ul.freq_band_list.push_back(to_underlying(ul_band.band));
   }
   out.freq_info_ul.absolute_freq_point_a_present = true;
   out.freq_info_ul.absolute_freq_point_a         = cfg.freq_info_ul.absolute_freq_point_a.value();
@@ -3679,8 +3679,28 @@ static bool calculate_mac_cell_group_config_diff(asn1::rrc_nr::mac_cell_group_cf
 
   out.skip_ul_tx_dyn = dest.skip_uplink_tx_dynamic;
 
+  // tar-Config, in the Rel-17 extension group. Only signalled on a change, like phr_cfg above.
+  if (dest.tar_cfg.has_value() and dest.tar_cfg != src.tar_cfg) {
+    out.tar_cfg_r17.set_present();
+    tar_cfg_r17_s& tar              = out.tar_cfg_r17->set_setup();
+    tar.offset_thres_ta_r17_present = true;
+    // The field is enumerated in milliseconds, with 0.5ms as the smallest step.
+    const float offset_thres_ms = static_cast<float>(dest.tar_cfg->offset_threshold_ta.count()) / 1000.0F;
+    if (not asn1::number_to_enum(tar.offset_thres_ta_r17, offset_thres_ms)) {
+      report_error("Invalid offsetThresholdTA={}ms in tar-Config\n", offset_thres_ms);
+    }
+    tar.timing_advance_sr_r17_present = dest.tar_cfg->sr_enabled;
+  } else if (src.tar_cfg.has_value() and not dest.tar_cfg.has_value()) {
+    out.tar_cfg_r17.set_present();
+    out.tar_cfg_r17->set_release();
+  } else {
+    // Either tar-Config is unchanged, or it was never configured. Nothing to signal.
+    out.tar_cfg_r17.reset();
+  }
+  out.ext = out.ext or out.tar_cfg_r17.is_present();
+
   return out.drx_cfg_present || out.sched_request_cfg_present || out.bsr_cfg_present || out.tag_cfg_present ||
-         out.phr_cfg_present;
+         out.phr_cfg_present || out.tar_cfg_r17.is_present();
 }
 
 static static_vector<rlc_bearer_config, MAX_NOF_RB_LCIDS> fill_rlc_bearers(const du_ue_resource_config& res)
@@ -3746,7 +3766,7 @@ void ocudu::odu::calculate_cell_group_config_diff(asn1::rrc_nr::cell_group_cfg_s
   if (dest.cell_group.pcg_cfg.cs_rnti.has_value() or src.cell_group.pcg_cfg.cs_rnti.has_value()) {
     out.phys_cell_group_cfg.cs_rnti_present = true;
     if (dest.cell_group.pcg_cfg.cs_rnti.has_value()) {
-      out.phys_cell_group_cfg.cs_rnti.set_setup() = to_value(dest.cell_group.pcg_cfg.cs_rnti.value());
+      out.phys_cell_group_cfg.cs_rnti.set_setup() = to_underlying(dest.cell_group.pcg_cfg.cs_rnti.value());
     } else {
       out.phys_cell_group_cfg.cs_rnti.set_release();
     }
@@ -3839,22 +3859,20 @@ bool ocudu::odu::calculate_reconfig_with_sync_diff(asn1::rrc_nr::recfg_with_sync
   // As per \c ssb-PositionsInBurst, in \c ServingCellConfigCommon, TS 38.331, the length of \c ssb-PositionsInBurst
   // needs to be set according to TS 38.213, Section 4.1.
   out.sp_cell_cfg_common.ssb_positions_in_burst_present = true;
-  const uint8_t l_max                                   = du_cell_cfg.ran.ssb_cfg.ssb_bitmap.get_L_max();
+  const ssb_bitmap_t ssb_bitmap                         = du_cell_cfg.ran.ssb_cfg.ssb_beams.get_ssb_bitmap();
+  const uint8_t      l_max                              = ssb_bitmap.get_L_max();
   ocudu_assert(l_max == 4U or l_max == 8U or l_max == 64U, "L_max value {} not valid", l_max);
   if (l_max == 4U) {
-    out.sp_cell_cfg_common.ssb_positions_in_burst.set_short_bitmap().from_number(
-        du_cell_cfg.ran.ssb_cfg.ssb_bitmap.to_uint64());
+    out.sp_cell_cfg_common.ssb_positions_in_burst.set_short_bitmap().from_number(ssb_bitmap.to_uint64());
   } else if (l_max == 8U) {
-    out.sp_cell_cfg_common.ssb_positions_in_burst.set_medium_bitmap().from_number(
-        du_cell_cfg.ran.ssb_cfg.ssb_bitmap.to_uint64());
+    out.sp_cell_cfg_common.ssb_positions_in_burst.set_medium_bitmap().from_number(ssb_bitmap.to_uint64());
   } else {
-    out.sp_cell_cfg_common.ssb_positions_in_burst.set_long_bitmap().from_number(
-        du_cell_cfg.ran.ssb_cfg.ssb_bitmap.to_uint64());
+    out.sp_cell_cfg_common.ssb_positions_in_burst.set_long_bitmap().from_number(ssb_bitmap.to_uint64());
   }
 
   out.sp_cell_cfg_common.ssb_periodicity_serving_cell_present = true;
   asn1::number_to_enum(out.sp_cell_cfg_common.ssb_periodicity_serving_cell,
-                       to_value(du_cell_cfg.ran.ssb_cfg.ssb_period));
+                       to_underlying(du_cell_cfg.ran.ssb_cfg.ssb_period));
 
   out.sp_cell_cfg_common.dmrs_type_a_position.value = du_cell_cfg.ran.dmrs_typeA_pos == dmrs_typeA_position::pos2
                                                           ? serving_cell_cfg_common_s::dmrs_type_a_position_opts::pos2
@@ -3873,7 +3891,7 @@ bool ocudu::odu::calculate_reconfig_with_sync_diff(asn1::rrc_nr::recfg_with_sync
   // ss-PBCH-BlockPower INTEGER (-60..50)
   out.sp_cell_cfg_common.ss_pbch_block_pwr = du_cell_cfg.ran.ssb_cfg.ssb_block_power;
 
-  out.new_ue_id = to_value(rnti);
+  out.new_ue_id = to_underlying(rnti);
 
   asn1::number_to_enum(out.t304, du_cell_cfg.si.ue_timers_and_constants.t304.count());
 

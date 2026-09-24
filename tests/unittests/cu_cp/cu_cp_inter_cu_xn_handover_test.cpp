@@ -21,6 +21,7 @@
 #include "ocudu/ngap/ngap_message.h"
 #include "ocudu/ngap/ngap_types.h"
 #include "ocudu/ran/cu_types.h"
+#include "ocudu/ran/up_transport_layer_info.h"
 #include "ocudu/xnap/xnap_types.h"
 #include <gtest/gtest.h>
 
@@ -82,7 +83,7 @@ public:
     report_fatal_error_if_not(not this->get_cu_up(cu_up_idx).try_pop_rx_pdu(e1ap_pdu),
                               "there are still E1AP messages to pop from CU-UP");
     report_fatal_error_if_not(not this->get_xnc_cu_cp(xnc_peer_idx).try_pop_rx_pdu(xnap_pdu),
-                              "there are still XNAP messages to pop from XN-C peer CU-CP");
+                              "there are still XNAP messages to pop from Xn-C peer CU-CP");
 
     // Inject Handover Request and wait for Bearer Context Setup Request.
     get_xnc_cu_cp(xnc_peer_idx)
@@ -176,7 +177,7 @@ public:
   {
     // Inject UL RRC Message (containing RRC Reconfiguration Complete) and wait for Path Switch Request.
     get_du(du_idx).push_ul_pdu(test_helpers::generate_ul_rrc_message_transfer(
-        du_ue_id, cu_ue_id, srb_id_t::srb1, make_byte_buffer("80000800795ae600").value()));
+        du_ue_id, cu_ue_id, srb_id_t::srb1, make_byte_buffer("800008006cfadbf2").value()));
     return await_path_switch_request();
   }
 
@@ -184,7 +185,7 @@ public:
   {
     // Inject UL RRC Message containing RRC Reconfiguration Complete.
     get_du(du_idx).push_ul_pdu(test_helpers::generate_ul_rrc_message_transfer(
-        du_ue_id, cu_ue_id, srb_id_t::srb1, make_byte_buffer("80000800795ae600").value()));
+        du_ue_id, cu_ue_id, srb_id_t::srb1, make_byte_buffer("800008006cfadbf2").value()));
     return true;
   }
 
@@ -249,6 +250,13 @@ public:
         test_helpers::is_valid_rrc_handover_preparation_info(test_helpers::get_rrc_container(xnap_pdu)),
         "Invalid Handover Preparation Info");
 
+    // The peer has to learn which AMF serves the UE, so that it can address the same one over NG-C
+    // (TS 38.423 section 9.2.1.13).
+    const auto& asn1_ue_context_info = xnap_pdu.pdu.init_msg().value.ho_request()->ue_context_info_ho_request;
+    report_fatal_error_if_not(tla_from_asn1_bitstring(asn1_ue_context_info.cp_tnl_info_source.endpoint_ip_address()) ==
+                                  amf_addr,
+                              "The Handover Request does not carry the address of the AMF association");
+
     local_xnap_ue_id =
         uint_to_local_xnap_ue_id(xnap_pdu.pdu.init_msg().value.ho_request()->source_ng_ra_nnode_ue_xn_ap_id);
     peer_xnap_ue_id =
@@ -266,7 +274,7 @@ public:
 
   [[nodiscard]] bool timeout_handover_command_and_await_handover_cancel()
   {
-    // Fail Handover Preparation (XN-C peer CU-CP doesn't respond) and await Handover Cancel.
+    // Fail Handover Preparation (Xn-C peer CU-CP doesn't respond) and await Handover Cancel.
     if (tick_until(std::chrono::milliseconds(1000), [&]() { return false; })) {
       return false;
     }
@@ -325,7 +333,7 @@ public:
         generate_bearer_context_modification_response_with_pdcp_status(cu_cp_ue_e1ap_id, cu_up_ue_e1ap_id));
 
     report_fatal_error_if_not(this->wait_for_xnap_tx_pdu(xnc_peer_idx, xnap_pdu),
-                              "Failed to transmist XNAP SN Status transfer to XN-C peer CU-CP");
+                              "Failed to transmist XNAP SN Status transfer to Xn-C peer CU-CP");
     report_fatal_error_if_not(test_helpers::is_valid_sn_status_transfer(xnap_pdu), "Invalid XNAP SN Status Transfer");
 
     return true;
@@ -351,7 +359,7 @@ public:
     report_fatal_error_if_not(not this->get_cu_up(cu_up_idx).try_pop_rx_pdu(e1ap_pdu),
                               "there are still E1AP messages to pop from CU-UP");
     report_fatal_error_if_not(not this->get_xnc_cu_cp(xnc_peer_idx).try_pop_rx_pdu(xnap_pdu),
-                              "there are still XNAP messages to pop from XN-C peer CU-CP");
+                              "there are still XNAP messages to pop from Xn-C peer CU-CP");
 
     // Inject XNAP UE Context Release and wait for Bearer Context Release Command.
     get_xnc_cu_cp(xnc_peer_idx).push_tx_pdu(generate_ue_context_release(local_xnap_ue_id, peer_xnap_ue_id));
@@ -391,7 +399,7 @@ public:
   gnb_cu_ue_f1ap_id_t cu_ue_id;
   rnti_t              crnti     = to_rnti(0x4601);
   amf_ue_id_t         amf_ue_id = uint_to_amf_ue_id(
-      test_rng::uniform_int<uint64_t>(amf_ue_id_to_uint(amf_ue_id_t::min), amf_ue_id_to_uint(amf_ue_id_t::max)));
+      test_rng::uniform_int<uint64_t>(to_underlying(amf_ue_id_t::min), to_underlying(amf_ue_id_t::max)));
   gnb_cu_up_ue_e1ap_id_t cu_up_e1ap_id = gnb_cu_up_ue_e1ap_id_t::min;
   gnb_cu_cp_ue_e1ap_id_t cu_cp_e1ap_id;
 
@@ -784,7 +792,7 @@ TEST_F(cu_cp_inter_cu_xn_handover_test, when_zigzag_handover_is_performed_then_h
 
   // ... and now this CU-CP is the source.
 
-  // Pop messages from XN-C peer CU-CP before injecting the RRC Measurement Report.
+  // Pop messages from Xn-C peer CU-CP before injecting the RRC Measurement Report.
   this->get_xnc_cu_cp(xnc_peer_idx).try_pop_rx_pdu(xnap_pdu);
 
   // Inject RRC Measurement Report and await Handover Request.
@@ -793,7 +801,7 @@ TEST_F(cu_cp_inter_cu_xn_handover_test, when_zigzag_handover_is_performed_then_h
       du_ue_id,
       source_local_xnap_ue_id,
       target_peer_xnap_ue_id,
-      make_byte_buffer("000100420004015f741fe0808bf183fce4fc8052").value()));
+      make_byte_buffer("000100420004015f741fe0808bf183fcf868e7c5").value()));
 
   // Inject Handover Request Ack and await UE Context Modification Request (with RRC Reconfiguration).
   ASSERT_TRUE(send_handover_request_ack_and_await_ue_context_modification_request(target_local_xnap_ue_id,

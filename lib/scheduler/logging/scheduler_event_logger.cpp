@@ -34,12 +34,12 @@ using slot_event_buffer = type_list_buffer_stream<cell_creation_event,
                                                   sel::error_indication_event,
                                                   sr_event,
                                                   csi_report_event,
-                                                  sel::bsr_event,
+                                                  ul_bsr_indication_message,
                                                   harq_ack_event,
                                                   sel::crc_event,
                                                   dl_mac_ce_indication,
                                                   dl_buffer_state_indication_message,
-                                                  sel::phr_event,
+                                                  ul_phr_indication_message,
                                                   sel::srs_indication_event,
                                                   sel::slice_reconfiguration_event>;
 
@@ -69,11 +69,12 @@ auto format_info_level(FormatContext& ctx, const Event& ev, bool first)
     fmt::format_to(ctx.out(), "{}Cell creation idx={}", separator, ev.cell_index);
   } else if constexpr (std::is_same_v<Event, sel::prach_event>) {
     fmt::format_to(ctx.out(),
-                   "{}prach({}={} preamble={} tc-rnti={})",
+                   "{}prach({}={} preamble={} ssb={} tc-rnti={})",
                    separator,
                    ev.is_msga ? "msgb-rnti" : "ra-rnti",
                    ev.ra_rnti,
                    ev.preamble_id,
+                   ev.ssb_index,
                    ev.tc_rnti);
   } else if constexpr (std::is_same_v<Event, rach_indication_message>) {
     fmt::format_to(ctx.out(), "{}RACH Ind slot_rx={}", separator, ev.slot_rx);
@@ -128,15 +129,15 @@ void format_debug_level(FormatContext& ctx, const Event& ev)
       }
     }
   } else if constexpr (std::is_same_v<Event, sel::ue_creation_event>) {
-    fmt::format_to(ctx.out(), "\n- UE creation: ue={} rnti={}", fmt::underlying(ev.ue_index), ev.rnti);
+    fmt::format_to(ctx.out(), "\n- UE creation: ue={} rnti={}", ev.ue_index, ev.rnti);
   } else if constexpr (std::is_same_v<Event, sel::ue_reconf_event>) {
-    fmt::format_to(ctx.out(), "\n- UE reconfiguration: ue={} rnti={}", fmt::underlying(ev.ue_index), ev.rnti);
+    fmt::format_to(ctx.out(), "\n- UE reconfiguration: ue={} rnti={}", ev.ue_index, ev.rnti);
   } else if constexpr (std::is_same_v<Event, sched_ue_delete_message>) {
-    fmt::format_to(ctx.out(), "\n- UE removal: ue={} rnti={}", fmt::underlying(ev.ue_index), ev.crnti);
+    fmt::format_to(ctx.out(), "\n- UE removal: ue={} rnti={}", ev.ue_index, ev.crnti);
   } else if constexpr (std::is_same_v<Event, sel::ue_cfg_applied_event>) {
-    fmt::format_to(ctx.out(), "\n- UE dedicated config applied: ue={} rnti={}", fmt::underlying(ev.ue_index), ev.rnti);
+    fmt::format_to(ctx.out(), "\n- UE dedicated config applied: ue={} rnti={}", ev.ue_index, ev.rnti);
   } else if constexpr (std::is_same_v<Event, sel::ue_deactivation_event>) {
-    fmt::format_to(ctx.out(), "\n- UE deactivation: ue={} rnti={}", fmt::underlying(ev.ue_index), ev.rnti);
+    fmt::format_to(ctx.out(), "\n- UE deactivation: ue={} rnti={}", ev.ue_index, ev.rnti);
   } else if constexpr (std::is_same_v<Event, sel::error_indication_event>) {
     fmt::format_to(ctx.out(),
                    "\n- ErrorIndication: slot={}{}{}{}",
@@ -145,9 +146,9 @@ void format_debug_level(FormatContext& ctx, const Event& ev)
                    ev.outcome.pdsch_discarded ? ", PDSCH discarded" : "",
                    ev.outcome.pusch_and_pucch_discarded ? ", PUSCH and PUCCH discarded" : "");
   } else if constexpr (std::is_same_v<Event, sr_event>) {
-    fmt::format_to(ctx.out(), "\n- SR: ue={} rnti={}", fmt::underlying(ev.ue_index), ev.rnti);
+    fmt::format_to(ctx.out(), "\n- SR: ue={} rnti={}", ev.ue_index, ev.rnti);
   } else if constexpr (std::is_same_v<Event, csi_report_event>) {
-    fmt::format_to(ctx.out(), "\n- CSI: ue={} rnti={}: slot_rx={}", fmt::underlying(ev.ue_index), ev.rnti, ev.sl_rx);
+    fmt::format_to(ctx.out(), "\n- CSI: ue={} rnti={}: slot_rx={}", ev.ue_index, ev.rnti, ev.sl_rx);
     if (not ev.csi.first_tb_wideband_cqi.has_value() and not ev.csi.ri.has_value() and not ev.csi.pmi.has_value()) {
       fmt::format_to(ctx.out(), " invalid");
       return;
@@ -161,12 +162,9 @@ void format_debug_level(FormatContext& ctx, const Event& ev)
     if (ev.csi.pmi.has_value()) {
       fmt::format_to(ctx.out(), " {}", *ev.csi.pmi);
     }
-  } else if constexpr (std::is_same_v<Event, sel::bsr_event>) {
-    fmt::format_to(ctx.out(),
-                   "\n- BSR: ue={} rnti={} type=\"{}\" report={{",
-                   fmt::underlying(ev.ue_index),
-                   ev.rnti,
-                   to_string(ev.type));
+  } else if constexpr (std::is_same_v<Event, ul_bsr_indication_message>) {
+    fmt::format_to(
+        ctx.out(), "\n- BSR: ue={} rnti={} type=\"{}\" report={{", ev.ue_index, ev.crnti, to_string(ev.type));
     if (ev.type == bsr_format::LONG_BSR or ev.type == bsr_format::LONG_TRUNC_BSR or ev.reported_lcgs.full()) {
       std::array<int, MAX_NOF_LCGS> report;
       std::fill(report.begin(), report.end(), -1);
@@ -190,14 +188,14 @@ void format_debug_level(FormatContext& ctx, const Event& ev)
                        ev.reported_lcgs[i].nof_bytes);
       }
     }
-    fmt::format_to(ctx.out(), "}} pending_bytes={}", ev.tot_ul_pending_bytes);
+    fmt::format_to(ctx.out(), "}}");
   } else if constexpr (std::is_same_v<Event, harq_ack_event>) {
     fmt::format_to(ctx.out(),
                    "\n- HARQ-ACK: ue={} rnti={} slot_rx={} h_id={} ack={}",
-                   fmt::underlying(ev.ue_index),
+                   ev.ue_index,
                    ev.rnti,
                    ev.sl_ack_rx,
-                   fmt::underlying(ev.h_id),
+                   ev.h_id,
                    (unsigned)ev.ack);
     if (ev.ack == mac_harq_ack_report_status::ack) {
       fmt::format_to(ctx.out(), " tbs={}", ev.tbs);
@@ -206,36 +204,35 @@ void format_debug_level(FormatContext& ctx, const Event& ev)
     if (ev.ul_sinr_db.has_value()) {
       fmt::format_to(ctx.out(),
                      "\n- CRC: ue={} rnti={} rx_slot={} h_id={} crc={} sinr={:.3}dB",
-                     fmt::underlying(ev.ue_index),
+                     ev.ue_index,
                      ev.rnti,
                      ev.sl_rx,
-                     fmt::underlying(ev.h_id),
+                     ev.h_id,
                      to_string(ev.crc),
                      ev.ul_sinr_db.value());
     } else {
       fmt::format_to(ctx.out(),
                      "\n- CRC: ue={} rnti={} rx_slot={} h_id={} crc={} sinr=N/A",
-                     fmt::underlying(ev.ue_index),
+                     ev.ue_index,
                      ev.rnti,
                      ev.sl_rx,
-                     fmt::underlying(ev.h_id),
+                     ev.h_id,
                      to_string(ev.crc));
     }
   } else if constexpr (std::is_same_v<Event, dl_mac_ce_indication>) {
-    fmt::format_to(ctx.out(), "\n- MAC CE: ue={} lcid={}", fmt::underlying(ev.ue_index), ev.ce_lcid.value());
+    fmt::format_to(ctx.out(), "\n- MAC CE: ue={} lcid={}", ev.ue_index, ev.ce_lcid.value());
   } else if constexpr (std::is_same_v<Event, dl_buffer_state_indication_message>) {
-    fmt::format_to(ctx.out(),
-                   "\n- RLC Buffer State: ue={} lcid={} pending_bytes={}",
-                   fmt::underlying(ev.ue_index),
-                   ev.lcid,
-                   ev.bs);
-  } else if constexpr (std::is_same_v<Event, sel::phr_event>) {
-    fmt::format_to(ctx.out(), "\n- PHR: ue={} rnti={} ph={}dB", fmt::underlying(ev.ue_index), ev.rnti, ev.ph);
-    if (ev.p_cmax.has_value()) {
-      fmt::format_to(ctx.out(), " p_cmax={}dBm", ev.p_cmax.value());
+    fmt::format_to(ctx.out(), "\n- RLC Buffer State: ue={} lcid={} pending_bytes={}", ev.ue_index, ev.lcid, ev.bs);
+  } else if constexpr (std::is_same_v<Event, ul_phr_indication_message>) {
+    fmt::format_to(ctx.out(), "\n- PHR: ue={} rnti={}", ev.ue_index, ev.rnti);
+    for (const cell_ph_report& cell_phr : ev.phr.get_phr()) {
+      fmt::format_to(ctx.out(), " scell={} ph={}dB", cell_phr.serv_cell_id, cell_phr.ph);
+      if (cell_phr.p_cmax.has_value()) {
+        fmt::format_to(ctx.out(), " p_cmax={}dBm", cell_phr.p_cmax.value());
+      }
     }
   } else if constexpr (std::is_same_v<Event, sel::srs_indication_event>) {
-    fmt::format_to(ctx.out(), "\n- SRS: ue={} rnti={}", fmt::underlying(ev.ue_index), ev.rnti);
+    fmt::format_to(ctx.out(), "\n- SRS: ue={} rnti={}", ev.ue_index, ev.rnti);
     if (ev.tpmi_info.has_value()) {
       fmt::format_to(ctx.out(), " tpmi_info=[{:;}]", ev.tpmi_info.value());
     }
@@ -421,7 +418,7 @@ void scheduler_event_logger::enqueue_impl(const csi_report_event& csi)
   }
 }
 
-void scheduler_event_logger::enqueue_impl(const bsr_event& bsr)
+void scheduler_event_logger::enqueue_impl(const ul_bsr_indication_message& bsr)
 {
   if (not slot_buffer_writer->push(bsr)) {
     logger.error("Scheduler event log entry exceeded segment size and was dropped");
@@ -456,9 +453,9 @@ void scheduler_event_logger::enqueue_impl(const dl_buffer_state_indication_messa
   }
 }
 
-void scheduler_event_logger::enqueue_impl(const phr_event& phr_ev)
+void scheduler_event_logger::enqueue_impl(const ul_phr_indication_message& phr_ind)
 {
-  if (not slot_buffer_writer->push(phr_ev)) {
+  if (not slot_buffer_writer->push(phr_ind)) {
     logger.error("Scheduler event log entry exceeded segment size and was dropped");
   }
 }

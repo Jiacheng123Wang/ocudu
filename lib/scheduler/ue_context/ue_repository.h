@@ -10,6 +10,7 @@
 #include "ue.h"
 #include "ue_drx_controller.h"
 #include "ue_fsm_states.h"
+#include "ue_ta_report_tracker.h"
 #include "ocudu/adt/ring_buffer.h"
 
 namespace ocudu {
@@ -120,13 +121,17 @@ private:
   /// DRX controllers per UE.
   slotted_id_table<du_ue_index_t, ue_drx_controller, MAX_NOF_DU_UES, false> ue_drx_controllers;
 
+  /// Trackers of the uplink timing advance reported by each UE.
+  slotted_id_table<du_ue_index_t, ue_ta_report_tracker, MAX_NOF_DU_UES, false> ue_ta_report_trackers;
+
   /// UE Timing Advance Manager.
   ta_management_system ta_mgr_sys;
 
   /// Lookup of UE cells per UE.
   slotted_id_table<du_ue_index_t, ue_cell_lookup, MAX_NOF_DU_UES, false> ue_cell_lookups;
 
-  /// Repository of UE objects.
+  /// \brief Repository of UE objects.
+  /// \note Declared after \c ta_mgr_sys, as releasing the TA manager handle of a UE reaches into it.
   ue_list ues;
 
   // Mapping of RNTIs to UE indexes.

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "ocudu/adt/span.h"
 #include "ocudu/adt/static_vector.h"
 #include "ocudu/ran/sib/sib_type.h"
 #include "ocudu/support/units.h"
@@ -54,6 +55,10 @@ struct si_scheduling_config {
   units::bytes sib1_payload_size = units::bytes{0U};
   /// List of SI-messages to schedule.
   static_vector<si_message_scheduling_config, MAX_SI_MESSAGES> si_messages;
+  /// \brief SI messages that carry a warning (SIB6, SIB7 or SIB8).
+  ///
+  /// They are held apart from \c si_messages, as the cell only broadcasts one while its warning is on air.
+  static_vector<si_message_scheduling_config, MAX_PWS_SI_MESSAGES> pws_si_messages;
   /// \brief The length of the SI scheduling window, in slots.
   ///
   /// It is always shorter or equal to the period of the SI message.
@@ -64,9 +69,17 @@ struct si_scheduling_config {
   bool operator==(const si_scheduling_config& other) const
   {
     return sib1_payload_size == other.sib1_payload_size and si_messages == other.si_messages and
-           si_window_len_slots == other.si_window_len_slots;
+           pws_si_messages == other.pws_si_messages and si_window_len_slots == other.si_window_len_slots;
   }
   bool operator!=(const si_scheduling_config& other) const { return not(*this == other); }
 };
+
+/// \brief Derives the SI scheduling configuration of the SI epoch that broadcasts a given set of warnings.
+///
+/// It holds the SI messages that the epoch broadcasts, in the order the SIB1 schedulingInfoList lists them in.
+/// \param cell_si_sched_cfg SI scheduling configuration of the cell, listing every SI message it can broadcast.
+/// \param on_air SI messages carrying a warning. Empty for the epoch of the normal operation.
+si_scheduling_config make_si_epoch_config(const si_scheduling_config& cell_si_sched_cfg,
+                                          span<const sib_type_set>    on_air);
 
 } // namespace ocudu

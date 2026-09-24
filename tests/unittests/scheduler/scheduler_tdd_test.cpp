@@ -505,7 +505,7 @@ protected:
     background_ues.resize(test_params.nof_background_ues);
     for (unsigned i = 0; i != test_params.nof_background_ues; ++i) {
       const du_ue_index_t idx  = to_du_ue_index(i);
-      const rnti_t        rnti = to_rnti(to_value(base_rnti) + i);
+      const rnti_t        rnti = to_rnti(to_underlying(base_rnti) + i);
       add_ue(build_ue_request(idx, rnti, {LCID_MIN_DRB}), false);
       background_ues[i] = background_direction();
     }
@@ -516,7 +516,7 @@ protected:
   {
     for (unsigned i = 0; i != test_params.nof_background_ues; ++i) {
       const du_ue_index_t idx  = to_du_ue_index(i);
-      const rnti_t        rnti = to_rnti(to_value(base_rnti) + i);
+      const rnti_t        rnti = to_rnti(to_underlying(base_rnti) + i);
 
       if (background_ues[i] != background_traffic_direction::ul_only) {
         push_dl_buffer_state(dl_buffer_state_indication_message{idx, LCID_MIN_DRB, huge_buffer});
@@ -548,7 +548,7 @@ protected:
       // Mimic production C-RNTI allocation (rnti_manager): monotonically increasing, independent of the (recycled)
       // ue_index just popped above.
       wave_rntis.push_back(
-          to_rnti(to_value(base_rnti) + test_params.nof_background_ues + next_transient_rnti_offset++));
+          to_rnti(to_underlying(base_rnti) + test_params.nof_background_ues + next_transient_rnti_offset++));
     }
 
     // Inject the RACH for the whole wave in one occasion, so its RAR + Msg3 load lands together (as when a burst of UEs
@@ -576,7 +576,7 @@ protected:
     for (unsigned i = 0, e = wave_ues.size(); i != e; ++i) {
       preambles.push_back(test_helper::create_preamble(i, wave_rntis[i]));
     }
-    sched->handle_rach_indication(test_helper::create_rach_indication(next_slot_rx(), preambles));
+    sched->handle_rach_indication(test_helper::create_rach_indication(cell_cfg(), next_slot_rx(), preambles));
   }
 
   // Async lifecycle of a transient UE: attach in fallback, complete contention resolution before the ConRes timer

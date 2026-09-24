@@ -13,6 +13,7 @@
 #include "ocudu/ran/gnb_id.h"
 #include "ocudu/ran/nr_cgi.h"
 #include "ocudu/ran/plmn_identity.h"
+#include "ocudu/ran/tac.h"
 #include "ocudu/ran/tai.h"
 #include "fmt/base.h"
 #include <cstdint>
@@ -27,12 +28,6 @@ enum class cu_cp_ue_index_t : uint64_t {
   max     = std::numeric_limits<uint64_t>::max() - 1,
   invalid = std::numeric_limits<uint64_t>::max()
 };
-
-/// Convert ue_index type to integer.
-inline uint64_t cu_cp_ue_index_to_uint(cu_cp_ue_index_t index)
-{
-  return static_cast<uint64_t>(index);
-}
 
 /// Convert integer to ue_index type.
 inline cu_cp_ue_index_t uint_to_ue_index(std::underlying_type_t<cu_cp_ue_index_t> index)
@@ -85,28 +80,28 @@ constexpr std::underlying_type_t<cu_cp_amf_index_t> cu_cp_amf_index_to_uint(cu_c
   return static_cast<std::underlying_type_t<cu_cp_amf_index_t>>(amf_index);
 }
 
-/// Maximum number of XN-C peers supported by CU-CP (implementation-defined).
+/// Maximum number of Xn-C peers supported by CU-CP (implementation-defined).
 constexpr uint16_t MAX_NOF_XNC_PEERS    = 65535;
 constexpr uint16_t MAX_NOF_XNC_GATEWAYS = 256;
 
 enum class xnc_peer_index_t : uint16_t { min = 0, max = MAX_NOF_XNC_PEERS - 1, invalid = MAX_NOF_XNC_PEERS };
 
-/// Convert integer to XN-C peer index type.
+/// Convert integer to Xn-C peer index type.
 constexpr xnc_peer_index_t uint_to_xnc_peer_index(std::underlying_type_t<xnc_peer_index_t> index)
 {
   return static_cast<xnc_peer_index_t>(index);
 }
 
-/// XN-C gateway index in `cu_cp_configuration::xnap_params::xnc_gws`.
+/// Xn-C gateway index in `cu_cp_configuration::xnap_params::xnc_gws`.
 enum class xnc_gateway_index_t : uint16_t { min = 0, max = MAX_NOF_XNC_GATEWAYS - 1, invalid = MAX_NOF_XNC_GATEWAYS };
 
-/// Convert integer to XN-C gateway index type.
+/// Convert integer to Xn-C gateway index type.
 constexpr xnc_gateway_index_t uint_to_xnc_gateway_index(std::underlying_type_t<xnc_gateway_index_t> index)
 {
   return static_cast<xnc_gateway_index_t>(index);
 }
 
-/// Convert XN-C gateway index type to integer.
+/// Convert Xn-C gateway index type to integer.
 constexpr std::underlying_type_t<xnc_gateway_index_t> xnc_gateway_index_to_uint(xnc_gateway_index_t gw_index)
 {
   return static_cast<std::underlying_type_t<xnc_gateway_index_t>>(gw_index);
@@ -133,6 +128,9 @@ struct cu_cp_user_location_info_nr {
   nr_cell_global_id_t     nr_cgi;
   tai_t                   tai;
   std::optional<uint64_t> time_stamp;
+  /// TACs broadcast by the serving cell (\c trackingAreaList, TS 38.331), reported as TAC List in NR NTN,
+  /// TS 38.413. Empty unless several.
+  tac_list_t tac_list;
 };
 
 struct cu_cp_initial_ue_message {

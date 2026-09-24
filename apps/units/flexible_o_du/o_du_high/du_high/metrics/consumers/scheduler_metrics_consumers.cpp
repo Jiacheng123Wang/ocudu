@@ -6,6 +6,7 @@
 #include "ocudu/support/engineering_notation.h"
 #include "ocudu/support/format/custom_formattable.h"
 #include "ocudu/support/format/fmt_to_c_str.h"
+#include <cstdio>
 
 using namespace ocudu;
 
@@ -36,6 +37,10 @@ static const char* event_to_string(scheduler_cell_event::event_type ev)
 
 void scheduler_cell_metrics_consumer_stdout::handle_metric(const scheduler_metrics_report& report)
 {
+  if (report.cells.empty()) {
+    return;
+  }
+
   for (const auto& cell : report.cells) {
     if (not cell.report_ue_metrics or cell.ue_metrics.empty()) {
       continue;
@@ -50,7 +55,7 @@ void scheduler_cell_metrics_consumer_stdout::handle_metric(const scheduler_metri
 
     for (const auto& ue : cell.ue_metrics) {
       fmt::print("{:>4}", ue.pci);
-      fmt::print("{:>5x}", to_value(ue.rnti));
+      fmt::print("{:>5x}", to_underlying(ue.rnti));
 
       if (ue.cqi_stats.get_nof_observations() > 0) {
         fmt::print(" | {:>3}", static_cast<unsigned>(std::round(ue.cqi_stats.get_mean())));
@@ -138,6 +143,9 @@ void scheduler_cell_metrics_consumer_stdout::handle_metric(const scheduler_metri
       fmt::print("\n");
     }
   }
+
+  // stdout is fully buffered when not attached to a terminal (e.g. Docker logs); flush so tables appear on time.
+  std::fflush(stdout);
 }
 
 template <typename ResultType>
@@ -282,11 +290,8 @@ void scheduler_cell_metrics_consumer_log::handle_metric(const scheduler_metrics_
       continue;
     }
     for (const auto& ue : cell.ue_metrics) {
-      fmt::format_to(std::back_inserter(buffer),
-                     "Scheduler UE ue={} pci={} rnti={} metrics:",
-                     fmt::underlying(ue.ue_index),
-                     ue.pci,
-                     ue.rnti);
+      fmt::format_to(
+          std::back_inserter(buffer), "Scheduler UE ue={} pci={} rnti={} metrics:", ue.ue_index, ue.pci, ue.rnti);
       if (ue.cqi_stats.get_nof_observations() > 0) {
         fmt::format_to(
             std::back_inserter(buffer), " cqi={}", static_cast<unsigned>(std::round(ue.cqi_stats.get_mean())));

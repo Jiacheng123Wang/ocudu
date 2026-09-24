@@ -188,6 +188,46 @@ e1ap_message ocudu::ocuup::generate_bearer_context_modification_request(unsigned
   return bearer_context_modification_request;
 }
 
+e1ap_message
+ocudu::ocuup::generate_bearer_context_modification_request_with_data_forwarding_info(unsigned      cu_cp_ue_e1ap_id,
+                                                                                     uint32_t      fwd_teid,
+                                                                                     const char*   fwd_addr,
+                                                                                     qos_flow_id_t qos_flow_id)
+{
+  e1ap_message msg = {};
+  msg.pdu.set_init_msg();
+  msg.pdu.init_msg().load_info_obj(ASN1_E1AP_ID_BEARER_CONTEXT_MOD);
+
+  auto& req                                   = msg.pdu.init_msg().value.bearer_context_mod_request();
+  req->gnb_cu_cp_ue_e1ap_id                   = cu_cp_ue_e1ap_id;
+  req->sys_bearer_context_mod_request_present = true;
+  req->sys_bearer_context_mod_request.set_ng_ran_bearer_context_mod_request();
+
+  auto& ng_ran = req->sys_bearer_context_mod_request.ng_ran_bearer_context_mod_request();
+  ng_ran.pdu_session_res_to_modify_list_present = true;
+
+  asn1::e1ap::pdu_session_res_to_modify_item_s item                = {};
+  item.pdu_session_id                                              = 1;
+  item.pdu_session_data_forwarding_info_present                    = true;
+  item.pdu_session_data_forwarding_info.dl_data_forwarding_present = true;
+  auto& gtp = item.pdu_session_data_forwarding_info.dl_data_forwarding.set_gtp_tunnel();
+  gtp.gtp_teid.from_number(fwd_teid);
+  transport_layer_address addr = transport_layer_address::create_from_string(fwd_addr);
+  tla_to_asn1_bitstring(gtp.transport_layer_address, addr);
+
+  // Report the QoS flow carried on that tunnel (TS 37.483 section 9.3.2.6).
+  item.pdu_session_data_forwarding_info.ie_exts_present                                             = true;
+  item.pdu_session_data_forwarding_info.ie_exts.data_forwardingto_ng_ran_qos_flow_info_list_present = true;
+  asn1::e1ap::data_forwardingto_ng_ran_qos_flow_info_list_item_s asn1_qos_flow_item;
+  asn1_qos_flow_item.qos_flow_id = to_underlying(qos_flow_id);
+  item.pdu_session_data_forwarding_info.ie_exts.data_forwardingto_ng_ran_qos_flow_info_list.push_back(
+      asn1_qos_flow_item);
+
+  ng_ran.pdu_session_res_to_modify_list.push_back(item);
+
+  return msg;
+}
+
 e1ap_message ocudu::ocuup::generate_bearer_context_modification_request_with_ng_ul_tnl(unsigned    cu_cp_ue_e1ap_id,
                                                                                        uint32_t    upf_teid,
                                                                                        const char* upf_addr)
@@ -271,11 +311,11 @@ ocudu::ocuup::generate_e1_reset(const std::vector<std::pair<gnb_cu_cp_ue_e1ap_id
 
       if (ue_ids.first != gnb_cu_cp_ue_e1ap_id_t::invalid) {
         conn_item.gnb_cu_cp_ue_e1ap_id_present = true;
-        conn_item.gnb_cu_cp_ue_e1ap_id         = gnb_cu_cp_ue_e1ap_id_to_uint(ue_ids.first);
+        conn_item.gnb_cu_cp_ue_e1ap_id         = to_underlying(ue_ids.first);
       }
       if (ue_ids.second != gnb_cu_up_ue_e1ap_id_t::invalid) {
         conn_item.gnb_cu_up_ue_e1ap_id_present = true;
-        conn_item.gnb_cu_up_ue_e1ap_id         = gnb_cu_up_ue_e1ap_id_to_uint(ue_ids.second);
+        conn_item.gnb_cu_up_ue_e1ap_id         = to_underlying(ue_ids.second);
       }
 
       reset_part_of_e1_interface.push_back(item_container);

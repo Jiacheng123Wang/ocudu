@@ -17,6 +17,7 @@
 #include "ocudu/support/async/async_task.h"
 #include "ocudu/support/async/fifo_async_task_scheduler.h"
 #include <list>
+#include <set>
 #include <variant>
 
 namespace ocudu::ocucp {
@@ -51,6 +52,18 @@ public:
     logger.info("Received a cell config update request for nci={}", nci);
 
     return true;
+  }
+
+  std::vector<nr_cell_identity> on_du_cells_reported(cu_cp_du_index_t             du_index,
+                                                     span<const du_reported_cell> cells) override
+  {
+    // Accept and activate every reported cell, preserving the pre-logical-cell behaviour of these tests.
+    std::vector<nr_cell_identity> activate;
+    activate.reserve(cells.size());
+    for (const du_reported_cell& cell : cells) {
+      activate.push_back(cell.cgi.nci);
+    }
+    return activate;
   }
 
   void on_rrc_ue_created(cu_cp_ue_index_t ue_index, rrc_ue_interface& rrc_ue) override
@@ -213,7 +226,7 @@ private:
 class dummy_du_connection_notifier : public du_connection_notifier
 {
 public:
-  bool on_du_setup_request(cu_cp_du_index_t du_index, const std::set<plmn_identity>& plmn_ids) override { return true; }
+  bool on_du_setup_request(const std::set<plmn_identity>& plmn_ids) override { return true; }
 };
 
 class dummy_cu_cp_ref_time_report_notifier : public cu_cp_ref_time_report_notifier
@@ -322,7 +335,7 @@ public:
 
         // Add a QoS flow.
         e1ap_qos_flow_item qos_item;
-        qos_item.qos_flow_id = uint_to_qos_flow_id(drb_id_to_uint(drb_id)); // QoS flow has same ID like DRB
+        qos_item.qos_flow_id = uint_to_qos_flow_id(to_underlying(drb_id)); // QoS flow has same ID like DRB
         drb_item.flow_setup_list.emplace(qos_item.qos_flow_id, qos_item);
 
         // Add one UP transport item.
@@ -440,9 +453,8 @@ public:
     return launch_no_op_task(ngap_handover_preparation_response{false});
   }
 
-  void handle_inter_cu_ho_rrc_recfg_complete(const cu_cp_ue_index_t     ue_index,
-                                             const nr_cell_global_id_t& cgi,
-                                             const tac_t                tac) override
+  void handle_inter_cu_ho_rrc_recfg_complete(const cu_cp_ue_index_t             ue_index,
+                                             const cu_cp_user_location_info_nr& user_location_info) override
   {
     logger.info("Received a RRC Reconfiguration Complete for Inter-CU Handover");
   }
@@ -904,12 +916,12 @@ struct dummy_cu_cp_xnap_handler : public cu_cp_xnap_handler {
 public:
   dummy_cu_cp_xnap_handler(ue_manager& ue_mng_) : ue_mng(ue_mng_), logger(ocudulog::fetch_basic_logger("TEST")) {}
 
-  async_task<bool> handle_new_rrc_handover_command(cu_cp_ue_index_t                ue_index,
-                                                   byte_buffer                     command,
+  async_task<bool> handle_new_rrc_handover_command(cu_cp_rrc_handover_command      command,
                                                    std::optional<xnc_peer_index_t> xnc_index) override
   {
-    logger.info(
-        "ue={}: Received a new RRC Handover Command for {} handover", ue_index, xnc_index.has_value() ? "XN" : "NG");
+    logger.info("ue={}: Received a new RRC Handover Command for {} handover",
+                command.ue_index,
+                xnc_index.has_value() ? "XN" : "NG");
     last_handover_command = std::move(command);
     return launch_no_op_task(true);
   }
@@ -927,7 +939,7 @@ public:
     ocudu_assert(ue_mng.find_ue(ue_index) != nullptr, "UE must be present");
     logger.info("Received a handover request");
 
-    if (!ue_mng.find_ue(ue_index)->get_security_manager().init_security_context(sec_ctxt)) {
+    if (!ue_mng.find_ue(ue_index)->get_security_manager().init_handover_security_context(sec_ctxt)) {
       logger.info("Failed to initialize security context");
       return false;
     }
@@ -953,7 +965,7 @@ public:
   {
     logger.info("ue={}: Received a new {} request to handle inter-CU target handover execution",
                 ue_index,
-                xnap_ho_target_execution_ctxt.has_value() ? "XN-C" : "NG");
+                xnap_ho_target_execution_ctxt.has_value() ? "Xn-C" : "NG");
   }
 
   void handle_handover_cancel_received(cu_cp_ue_index_t ue_index) override
@@ -961,8 +973,8 @@ public:
     logger.info("ue={}: Received a handover cancel message", ue_index);
   }
 
-  void handle_xnap_handover_success_received(cu_cp_ue_index_t  source_ue_index,
-                                             peer_xnap_ue_id_t winner_peer_xnap_ue_id) override
+  void handle_xnap_handover_success_received(cu_cp_ue_index_t           source_ue_index,
+                                             const nr_cell_global_id_t& winner_cgi) override
   {
     logger.info("ue={}: Received a HandoverSuccess message", source_ue_index);
   }
@@ -987,7 +999,7 @@ public:
     return launch_no_op_task(xnap_retrieve_ue_context_response{});
   }
 
-  byte_buffer                         last_handover_command;
+  cu_cp_rrc_handover_command          last_handover_command;
   std::vector<cu_cp_served_cell_info> served_cells;
 
 private:

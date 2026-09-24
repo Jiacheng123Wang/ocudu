@@ -85,13 +85,13 @@ void pdcch_processor_impl::process(resource_grid_writer& grid, const pdcch_proce
 
   // Populate PDCCH modulator configuration.
   pdcch_modulator::config_t modulator_config;
-  modulator_config.rb_mask            = rb_mask;
-  modulator_config.start_symbol_index = coreset.start_symbol_index;
-  modulator_config.duration           = coreset.duration;
-  modulator_config.n_id               = dci.n_id_pdcch_data;
-  modulator_config.n_rnti             = dci.n_rnti;
-  modulator_config.scaling            = convert_dB_to_amplitude(dci.data_power_offset_dB);
-  modulator_config.precoding          = dci.precoding;
+  modulator_config.rb_mask                   = rb_mask;
+  modulator_config.start_symbol_index        = coreset.start_symbol_index;
+  modulator_config.duration                  = coreset.duration;
+  modulator_config.n_id                      = dci.n_id_pdcch_data;
+  modulator_config.n_rnti                    = dci.n_rnti;
+  modulator_config.scaling                   = convert_dB_to_amplitude(dci.data_power_offset_dB);
+  modulator_config.precoding_and_beamforming = dci.precoding_and_beamforming;
 
   // Modulate.
   modulator->modulate(grid, encoded, modulator_config);
@@ -101,15 +101,15 @@ void pdcch_processor_impl::process(resource_grid_writer& grid, const pdcch_proce
 
   // Populate DMRS for PDCCH configuration.
   dmrs_pdcch_processor::config_t dmrs_pdcch_config;
-  dmrs_pdcch_config.slot                 = pdu.slot;
-  dmrs_pdcch_config.cp                   = pdu.cp;
-  dmrs_pdcch_config.reference_point_k_rb = reference_point_k_rb;
-  dmrs_pdcch_config.rb_mask              = rb_mask;
-  dmrs_pdcch_config.start_symbol_index   = coreset.start_symbol_index;
-  dmrs_pdcch_config.duration             = coreset.duration;
-  dmrs_pdcch_config.n_id                 = dci.n_id_pdcch_dmrs;
-  dmrs_pdcch_config.amplitude            = convert_dB_to_amplitude(dci.dmrs_power_offset_dB);
-  dmrs_pdcch_config.precoding            = dci.precoding;
+  dmrs_pdcch_config.slot                      = pdu.slot;
+  dmrs_pdcch_config.cp                        = pdu.cp;
+  dmrs_pdcch_config.reference_point_k_rb      = reference_point_k_rb;
+  dmrs_pdcch_config.rb_mask                   = rb_mask;
+  dmrs_pdcch_config.start_symbol_index        = coreset.start_symbol_index;
+  dmrs_pdcch_config.duration                  = coreset.duration;
+  dmrs_pdcch_config.n_id                      = dci.n_id_pdcch_dmrs;
+  dmrs_pdcch_config.amplitude                 = convert_dB_to_amplitude(dci.dmrs_power_offset_dB);
+  dmrs_pdcch_config.precoding_and_beamforming = dci.precoding_and_beamforming;
 
   // Generate DMRS.
   dmrs->map(grid, dmrs_pdcch_config);

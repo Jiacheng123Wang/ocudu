@@ -5,6 +5,7 @@
 #include "common/e2ap_asn1_packer.h"
 #include "lib/e2/common/e2ap_asn1_utils.h"
 #include "lib/pcap/dlt_pcap_impl.h"
+#include "tests/test_doubles/f1ap/f1ap_test_messages.h"
 #include "tests/unittests/e2/common/e2_test_helpers.h"
 #include "ocudu/support/executors/task_worker.h"
 #include "ocudu/support/test_utils.h"
@@ -17,6 +18,15 @@ using namespace asn1::e2sm;
 // Helper global variables to pass pcap_writer to all tests.
 bool      g_enable_pcap = false;
 dlt_pcap* g_pcap        = nullptr;
+
+/// Packs an F1AP PDU the way the DU does before handing it to the E2 node component config collector.
+static byte_buffer pack_f1ap_pdu(const f1ap_message& msg)
+{
+  byte_buffer   packed{byte_buffer::fallback_allocation_tag{}};
+  asn1::bit_ref bref(packed);
+  report_error_if_not(msg.pdu.pack(bref) == asn1::OCUDUASN_SUCCESS, "Failed to pack F1AP PDU");
+  return packed;
+}
 
 class e2_entity_test_with_pcap : public e2_test_base_with_pcap
 {
@@ -42,8 +52,15 @@ protected:
     factory                         = timer_factory{timers, task_worker};
     du_rc_param_configurator        = std::make_unique<dummy_du_configurator>();
     node_component_config_collector = std::make_unique<e2_node_component_config_collector>(task_worker, 1);
-    // Pre-deliver a dummy F1 config so the setup coroutine is not blocked awaiting it.
-    node_component_config_collector->deliver(e2_node_component_interface_type::f1, {}, {});
+    // Pre-deliver the F1 setup exchange so the setup coroutine is not blocked awaiting it. The PDUs are packed
+    // like the DU does, so that the E2 Setup Request carries a component configuration that decodes as F1AP.
+    const gnb_du_id_t  gnb_du_id     = int_to_gnb_du_id(0x11);
+    const f1ap_message f1_setup_req  = test_helpers::generate_f1_setup_request(gnb_du_id);
+    const f1ap_message f1_setup_resp = test_helpers::generate_f1_setup_response(f1_setup_req);
+    node_component_config_collector->deliver(e2_node_component_interface_type::f1,
+                                             pack_f1ap_pdu(f1_setup_req),
+                                             pack_f1ap_pdu(f1_setup_resp),
+                                             e2_node_component_id{gnb_du_id});
     e2agent = create_e2_du_agent(
         cfg,
         e2ap_dependencies{.e2_client                      = *e2_client,
@@ -227,7 +244,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style1)
   ASSERT_TRUE(e2sm_kpm_iface->action_supported(ric_action));
   auto report_service = e2sm_kpm_iface->get_e2sm_report_service(ric_action.ric_action_definition);
 
-  TESTASSERT_EQ(false, report_service->is_ind_msg_ready());
+  ASSERT_EQ(false, report_service->is_ind_msg_ready());
   // As E2 is always present and provides valid metrics, there is no need to check if the indication is ready when
   // filled with only no_values.
 
@@ -239,7 +256,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style1)
     report_service->collect_measurements();
   }
 
-  TESTASSERT_EQ(true, report_service->is_ind_msg_ready());
+  ASSERT_EQ(true, report_service->is_ind_msg_ready());
   // Get RIC indication msg content.
   byte_buffer ind_hdr_bytes = report_service->get_indication_header();
   byte_buffer ind_msg_bytes = report_service->get_indication_message();
@@ -252,13 +269,12 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style1)
     return;
   }
 
-  TESTASSERT_EQ(nof_meas_data, ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data.size());
+  ASSERT_EQ(nof_meas_data, ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data.size());
   for (unsigned i = 0; i < nof_meas_data; ++i) {
-    TESTASSERT_EQ(nof_records, ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data[i].meas_record.size());
-    TESTASSERT_EQ(meas_int_values[i],
-                  ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data[i].meas_record[0].integer());
-    TESTASSERT_EQ(meas_real_values[i],
-                  ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data[i].meas_record[1].real().value);
+    ASSERT_EQ(nof_records, ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data[i].meas_record.size());
+    ASSERT_EQ(meas_int_values[i], ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data[i].meas_record[0].integer());
+    ASSERT_EQ(meas_real_values[i],
+              ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data[i].meas_record[1].real().value);
   }
 
   if (g_enable_pcap) {
@@ -319,7 +335,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style2)
   ASSERT_TRUE(e2sm_kpm_iface->action_supported(ric_action));
   auto report_service = e2sm_kpm_iface->get_e2sm_report_service(ric_action.ric_action_definition);
 
-  TESTASSERT_EQ(false, report_service->is_ind_msg_ready());
+  ASSERT_EQ(false, report_service->is_ind_msg_ready());
   // Fill only with no_values and check if indication is ready.
   for (unsigned i = 0; i < nof_meas_data; ++i) {
     // Push dummy metric measurements.
@@ -327,7 +343,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style2)
     // Trigger measurement collection.
     report_service->collect_measurements();
   }
-  TESTASSERT_EQ(false, report_service->is_ind_msg_ready());
+  ASSERT_EQ(false, report_service->is_ind_msg_ready());
 
   for (unsigned i = 0; i < nof_meas_data; ++i) {
     // Push dummy metric measurements.
@@ -336,7 +352,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style2)
     report_service->collect_measurements();
   }
 
-  TESTASSERT_EQ(true, report_service->is_ind_msg_ready());
+  ASSERT_EQ(true, report_service->is_ind_msg_ready());
   // Get RIC indication msg content.
   byte_buffer ind_hdr_bytes = report_service->get_indication_header();
   byte_buffer ind_msg_bytes = report_service->get_indication_message();
@@ -349,14 +365,13 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style2)
     return;
   }
 
-  TESTASSERT_EQ(nof_meas_data, ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data.size());
+  ASSERT_EQ(nof_meas_data, ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data.size());
   for (unsigned i = 0; i < nof_meas_data; ++i) {
-    TESTASSERT_EQ(nof_records, ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data[i].meas_record.size());
+    ASSERT_EQ(nof_records, ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data[i].meas_record.size());
     if (presence[i]) {
-      TESTASSERT_EQ(meas_values[i],
-                    ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data[i].meas_record[0].integer());
+      ASSERT_EQ(meas_values[i], ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data[i].meas_record[0].integer());
     } else {
-      TESTASSERT_EQ(
+      ASSERT_EQ(
           fmt::underlying(meas_record_item_c::types_opts::no_value),
           fmt::underlying(ric_ind_msg.ind_msg_formats.ind_msg_format1().meas_data[i].meas_record[0].type().value));
     }
@@ -425,12 +440,11 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style3)
 
   matching_cond_item_s matching_cond_item2;
   test_cond_info_s     test_cond_info1;
-  test_cond_info1.test_type.set_ul_r_srp().value = test_cond_type_c::ul_r_srp_opts::true_value;
-  test_cond_info1.test_expr_present              = true;
-  test_cond_info1.test_expr                      = test_cond_expression_opts::greaterthan;
-  // TODO: seems that asn1 does not suppport negative numbers.
+  test_cond_info1.test_type.set_ul_r_srp().value                = test_cond_type_c::ul_r_srp_opts::true_value;
+  test_cond_info1.test_expr_present                             = true;
+  test_cond_info1.test_expr                                     = test_cond_expression_opts::greaterthan;
   test_cond_info1.test_value_present                            = true;
-  test_cond_info1.test_value.set_value_int()                    = 50;
+  test_cond_info1.test_value.set_value_int()                    = -110;
   matching_cond_item2.lc_or_present                             = true; // If false use OR, if true then use AND.
   matching_cond_item2.lc_or                                     = lc_or_opts::true_value;
   matching_cond_item2.matching_cond_choice.set_test_cond_info() = test_cond_info1;
@@ -438,12 +452,11 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style3)
 
   matching_cond_item_s matching_cond_item3;
   test_cond_info_s     test_cond_info2;
-  test_cond_info2.test_type.set_ul_r_srp().value = test_cond_type_c::ul_r_srp_opts::true_value;
-  test_cond_info2.test_expr_present              = true;
-  test_cond_info2.test_value_present             = true;
-  test_cond_info2.test_expr                      = test_cond_expression_opts::lessthan;
-  // TODO: seems that asn1 does not suppport negative numbers.
-  test_cond_info2.test_value.set_value_int()                    = 110;
+  test_cond_info2.test_type.set_ul_r_srp().value                = test_cond_type_c::ul_r_srp_opts::true_value;
+  test_cond_info2.test_expr_present                             = true;
+  test_cond_info2.test_value_present                            = true;
+  test_cond_info2.test_expr                                     = test_cond_expression_opts::lessthan;
+  test_cond_info2.test_value.set_value_int()                    = -50;
   matching_cond_item3.lc_or_present                             = false; // If false use OR, if true then use AND.
   matching_cond_item3.matching_cond_choice.set_test_cond_info() = test_cond_info2;
   meas_cond_item.matching_cond.push_back(matching_cond_item3);
@@ -468,7 +481,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style3)
   ASSERT_TRUE(e2sm_kpm_iface->action_supported(ric_action));
   auto report_service = e2sm_kpm_iface->get_e2sm_report_service(ric_action.ric_action_definition);
 
-  TESTASSERT_EQ(false, report_service->is_ind_msg_ready());
+  ASSERT_EQ(false, report_service->is_ind_msg_ready());
   // Fill only with no_values and check if indication is ready.
   for (unsigned i = 0; i < nof_meas_data; ++i) {
     // Push dummy metric measurements.
@@ -476,7 +489,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style3)
     // Trigger measurement collection.
     report_service->collect_measurements();
   }
-  TESTASSERT_EQ(false, report_service->is_ind_msg_ready());
+  ASSERT_EQ(false, report_service->is_ind_msg_ready());
 
   for (unsigned i = 0; i < nof_meas_data; ++i) {
     // Push dummy metric measurements
@@ -485,7 +498,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style3)
     report_service->collect_measurements();
   }
 
-  TESTASSERT_EQ(true, report_service->is_ind_msg_ready());
+  ASSERT_EQ(true, report_service->is_ind_msg_ready());
   // Get RIC indication msg content.
   byte_buffer ind_hdr_bytes = report_service->get_indication_header();
   byte_buffer ind_msg_bytes = report_service->get_indication_message();
@@ -498,9 +511,9 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style3)
     return;
   }
 
-  TESTASSERT_EQ(nof_meas_data, ric_ind_msg.ind_msg_formats.ind_msg_format2().meas_data.size());
+  ASSERT_EQ(nof_meas_data, ric_ind_msg.ind_msg_formats.ind_msg_format2().meas_data.size());
   for (unsigned i = 0; i < nof_meas_data; ++i) {
-    TESTASSERT_EQ(nof_records, ric_ind_msg.ind_msg_formats.ind_msg_format2().meas_data[i].meas_record.size());
+    ASSERT_EQ(nof_records, ric_ind_msg.ind_msg_formats.ind_msg_format2().meas_data[i].meas_record.size());
     for (unsigned j = 0; j < nof_reported_ues; ++j) {
       uint32_t ue_id = ric_ind_msg.ind_msg_formats.ind_msg_format2()
                            .meas_cond_ue_id_list[0]
@@ -510,10 +523,10 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style3)
       std::vector<uint32_t>::iterator it     = std::find(ue_ids.begin(), ue_ids.end(), ue_id);
       uint32_t                        ue_idx = std::distance(ue_ids.begin(), it);
       if (cond_presence[i][ue_idx]) {
-        TESTASSERT_EQ(meas_values[i][ue_idx],
-                      ric_ind_msg.ind_msg_formats.ind_msg_format2().meas_data[i].meas_record[j].integer());
+        ASSERT_EQ(meas_values[i][ue_idx],
+                  ric_ind_msg.ind_msg_formats.ind_msg_format2().meas_data[i].meas_record[j].integer());
       } else {
-        TESTASSERT_EQ(
+        ASSERT_EQ(
             fmt::underlying(meas_record_item_c::types_opts::no_value),
             fmt::underlying(ric_ind_msg.ind_msg_formats.ind_msg_format2().meas_data[i].meas_record[j].type().value));
       }
@@ -573,9 +586,8 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style4)
   matching_ue_cond_item1.test_cond_info.test_expr_present              = true;
   matching_ue_cond_item1.test_cond_info.test_value_present             = true;
   matching_ue_cond_item1.test_cond_info.test_expr                      = test_cond_expression_opts::greaterthan;
-  // TODO: seems that asn1 does not suppport negative numbers.
-  matching_ue_cond_item1.test_cond_info.test_value.set_value_int() = 50;
-  matching_ue_cond_item1.lc_or_present                             = false; // if false use OR, if true then use AND
+  matching_ue_cond_item1.test_cond_info.test_value.set_value_int()     = -110;
+  matching_ue_cond_item1.lc_or_present                                 = false; // if false use OR, if true then use AND
   action_def_f4.matching_ue_cond_list.push_back(matching_ue_cond_item1);
 
   matching_ue_cond_per_sub_item_s matching_ue_cond_item2;
@@ -583,8 +595,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style4)
   matching_ue_cond_item2.test_cond_info.test_expr_present              = true;
   matching_ue_cond_item2.test_cond_info.test_value_present             = true;
   matching_ue_cond_item2.test_cond_info.test_expr                      = test_cond_expression_opts::lessthan;
-  // TODO: seems that asn1 does not suppport negative numbers.
-  matching_ue_cond_item2.test_cond_info.test_value.set_value_int() = 110;
+  matching_ue_cond_item2.test_cond_info.test_value.set_value_int()     = -50;
   action_def_f4.matching_ue_cond_list.push_back(matching_ue_cond_item2);
 
   e2sm_kpm_action_definition_format1_s& subscription_info = action_def_f4.sub_info;
@@ -614,7 +625,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style4)
   ASSERT_TRUE(e2sm_kpm_iface->action_supported(ric_action));
   auto report_service = e2sm_kpm_iface->get_e2sm_report_service(ric_action.ric_action_definition);
 
-  TESTASSERT_EQ(false, report_service->is_ind_msg_ready());
+  ASSERT_EQ(false, report_service->is_ind_msg_ready());
   // Fill only with no_values and check if indication is ready.
   for (unsigned i = 0; i < nof_meas_data; ++i) {
     // Push dummy metric measurements.
@@ -622,7 +633,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style4)
     // Trigger measurement collection.
     report_service->collect_measurements();
   }
-  TESTASSERT_EQ(false, report_service->is_ind_msg_ready());
+  ASSERT_EQ(false, report_service->is_ind_msg_ready());
 
   for (unsigned i = 0; i < nof_meas_data; ++i) {
     // Push dummy metric measurements.
@@ -631,7 +642,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style4)
     report_service->collect_measurements();
   }
 
-  TESTASSERT_EQ(true, report_service->is_ind_msg_ready());
+  ASSERT_EQ(true, report_service->is_ind_msg_ready());
   // Get RIC indication msg content.
   byte_buffer ind_hdr_bytes = report_service->get_indication_header();
   byte_buffer ind_msg_bytes = report_service->get_indication_message();
@@ -644,23 +655,23 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style4)
     return;
   }
 
-  TESTASSERT_EQ(nof_reported_ues, ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list.size());
+  ASSERT_EQ(nof_reported_ues, ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list.size());
   for (unsigned j = 0; j < nof_reported_ues; ++j) {
     uint32_t ue_id =
         ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list[j].ue_id.gnb_du_ue_id().gnb_cu_ue_f1ap_id;
     std::vector<uint32_t>::iterator it     = std::find(ue_ids.begin(), ue_ids.end(), ue_id);
     uint32_t                        ue_idx = std::distance(ue_ids.begin(), it);
-    TESTASSERT_EQ(nof_meas_data,
-                  ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list[j].meas_report.meas_data.size());
+    ASSERT_EQ(nof_meas_data,
+              ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list[j].meas_report.meas_data.size());
     for (unsigned i = 0; i < nof_meas_data; ++i) {
       auto& meas_record =
           ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list[j].meas_report.meas_data[i].meas_record;
-      TESTASSERT_EQ(nof_records, meas_record.size());
+      ASSERT_EQ(nof_records, meas_record.size());
       if (cond_presence[i][ue_idx]) {
-        TESTASSERT_EQ(meas_values[i][ue_idx], meas_record[0].integer());
+        ASSERT_EQ(meas_values[i][ue_idx], meas_record[0].integer());
       } else {
-        TESTASSERT_EQ(fmt::underlying(meas_record_item_c::types_opts::no_value),
-                      fmt::underlying(meas_record[0].type().value));
+        ASSERT_EQ(fmt::underlying(meas_record_item_c::types_opts::no_value),
+                  fmt::underlying(meas_record[0].type().value));
       }
     }
   }
@@ -740,7 +751,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style5)
   ASSERT_TRUE(e2sm_kpm_iface->action_supported(ric_action));
   auto report_service = e2sm_kpm_iface->get_e2sm_report_service(ric_action.ric_action_definition);
 
-  TESTASSERT_EQ(false, report_service->is_ind_msg_ready());
+  ASSERT_EQ(false, report_service->is_ind_msg_ready());
   // Fill only with no_values and check if indication is ready.
   for (unsigned i = 0; i < nof_meas_data; ++i) {
     // Push dummy metric measurements.
@@ -748,7 +759,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style5)
     // Trigger measurement collection.
     report_service->collect_measurements();
   }
-  TESTASSERT_EQ(false, report_service->is_ind_msg_ready());
+  ASSERT_EQ(false, report_service->is_ind_msg_ready());
 
   for (unsigned i = 0; i < nof_meas_data; ++i) {
     // Push dummy metric measurements.
@@ -757,7 +768,7 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style5)
     report_service->collect_measurements();
   }
 
-  TESTASSERT_EQ(true, report_service->is_ind_msg_ready());
+  ASSERT_EQ(true, report_service->is_ind_msg_ready());
   // Get RIC indication msg content.
   byte_buffer ind_hdr_bytes = report_service->get_indication_header();
   byte_buffer ind_msg_bytes = report_service->get_indication_message();
@@ -770,23 +781,23 @@ TEST_P(e2sm_kpm_indication, e2sm_kpm_generates_ric_indication_style5)
     return;
   }
 
-  TESTASSERT_EQ(nof_reported_ues, ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list.size());
+  ASSERT_EQ(nof_reported_ues, ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list.size());
   for (unsigned j = 0; j < nof_reported_ues; ++j) {
     uint32_t ue_id =
         ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list[j].ue_id.gnb_du_ue_id().gnb_cu_ue_f1ap_id;
     std::vector<uint32_t>::iterator it     = std::find(ue_ids.begin(), ue_ids.end(), ue_id);
     uint32_t                        ue_idx = std::distance(ue_ids.begin(), it);
-    TESTASSERT_EQ(nof_meas_data,
-                  ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list[j].meas_report.meas_data.size());
+    ASSERT_EQ(nof_meas_data,
+              ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list[j].meas_report.meas_data.size());
     for (unsigned i = 0; i < nof_meas_data; ++i) {
       auto& meas_record =
           ric_ind_msg.ind_msg_formats.ind_msg_format3().ue_meas_report_list[j].meas_report.meas_data[i].meas_record;
-      TESTASSERT_EQ(nof_records, meas_record.size());
+      ASSERT_EQ(nof_records, meas_record.size());
       if (cond_presence[i][ue_idx]) {
-        TESTASSERT_EQ(meas_values[i][ue_idx], meas_record[0].integer());
+        ASSERT_EQ(meas_values[i][ue_idx], meas_record[0].integer());
       } else {
-        TESTASSERT_EQ(fmt::underlying(meas_record_item_c::types_opts::no_value),
-                      fmt::underlying(meas_record[0].type().value));
+        ASSERT_EQ(fmt::underlying(meas_record_item_c::types_opts::no_value),
+                  fmt::underlying(meas_record[0].type().value));
       }
     }
   }

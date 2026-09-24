@@ -5,6 +5,7 @@
 #include "../test_utils/config_generators.h"
 #include "lib/scheduler/srs/srs_scheduler_impl.h"
 #include "lib/scheduler/ue_context/ue_cell_repository.h"
+#include "lib/scheduler/ue_context/ue_repository.h"
 #include "tests/test_doubles/scheduler/cell_config_builder_profiles.h"
 #include "tests/test_doubles/scheduler/scheduler_config_helper.h"
 #include "tests/test_doubles/utils/test_rng.h"
@@ -139,7 +140,7 @@ public:
     cell_cfg(*cfg_mng.add_cell(cfg_mng.get_default_cell_config_request())),
     cell_ues(cell_cfg, nullptr),
     ues(expert_cfg.ue),
-    srs_sched(cell_cfg, ues),
+    srs_sched(cell_cfg, cell_ues),
     current_sl_tx{to_numerology_value(cell_cfg.params.dl_cfg_common.init_dl_bwp.generic_params.scs), 0}
   {
     ues.register_cell(cell_ues);
@@ -292,7 +293,7 @@ TEST_P(srs_scheduler_tester, test_different_periods)
     // Slots closer than that to UE creation are deliberately skipped by the SRS scheduler, as UL grants for them may
     // already have been scheduled before the UE (and its SRS resource) existed.
     if (sl_cnt >= add_ue_slot + SCHEDULER_MAX_K2) {
-      if (not ues.empty() and (current_sl_tx - get_offset()).to_uint() % srs_period_uint == 0) {
+      if (not ues.empty() and (current_sl_tx - get_offset()).count() % srs_period_uint == 0) {
         ASSERT_EQ(1, res_grid[0].result.ul.srss.size());
         expected<bool, std::string> pdu_test = test_srs_pdu(res_grid[0].result.ul.srss.front());
         ASSERT_TRUE(pdu_test.has_value()) << pdu_test.error();

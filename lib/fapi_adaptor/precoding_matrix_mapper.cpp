@@ -4,7 +4,7 @@
 #include "ocudu/fapi_adaptor/precoding_matrix_mapper.h"
 #include "precoding_matrix_mapper_functions.h"
 #include "ocudu/ocudulog/ocudulog.h"
-#include "ocudu/ran/precoding/precoding_codebook_helpers.h"
+#include "ocudu/ran/precoding/precoding_codebook_type1_helpers.h"
 #include "ocudu/ran/precoding/precoding_matrix_indicator.h"
 #include "ocudu/support/ocudu_assert.h"
 #include "fmt/std.h"
@@ -85,6 +85,9 @@ static unsigned get_pdsch_precoding_matrix_index(unsigned                       
 
     return offset + get_pdsch_single_panel_type1_precoding_matrix_index(param_ranges, report);
   }
+
+  report_fatal_error_if_not(!std::holds_alternative<pmi_typeII>(precoding_info),
+                            "Static generation and mapping of Type II precoding matrices is not supported.");
 
   return 0;
 }

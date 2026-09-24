@@ -39,7 +39,7 @@ static void fill_dci(pdcch_processor::pdu_t&            proc_pdu,
   dci.payload.resize(fapi_dci.payload.size());
   fapi_dci.payload.to_unpacked_bits(span<uint8_t>{dci.payload.data(), dci.payload.size()});
 
-  dci.precoding = precoding_configuration::make_wideband(
+  dci.precoding_and_beamforming = precoding_beamforming_configuration::make_wideband(
       pm_repo.get_precoding_matrix(fapi_dci.precoding_and_beamforming.prg.pm_index));
 
   // Fill PDCCH context for logging.

@@ -40,7 +40,8 @@ const pdsch_processor::pdu_t base_pdu = {.context          = std::nullopt,
                                          .ptrs                        = std::nullopt,
                                          .ratio_pdsch_dmrs_to_sss_dB  = 0,
                                          .ratio_pdsch_data_to_sss_dB  = 0,
-                                         .precoding = precoding_configuration::make_wideband(make_single_port())};
+                                         .precoding_and_beamforming =
+                                             precoding_beamforming_configuration::make_wideband(make_single_port())};
 
 struct test_case_t {
   std::function<pdsch_processor::pdu_t()> get_pdu;

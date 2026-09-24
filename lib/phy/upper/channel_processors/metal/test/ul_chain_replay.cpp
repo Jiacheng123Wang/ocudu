@@ -1350,7 +1350,7 @@ int main(int argc, char** argv)
     hop_pdu.reserve(nof_pdus);
     spies.reserve(nof_pdus);
     receivers.reserve(nof_pdus);
-    const uint16_t base_rnti = to_value(pdu.rnti);
+    const uint16_t base_rnti = to_underlying(pdu.rnti);
     for (unsigned k = 0; k != nof_pdus; ++k) {
       hop_pdu.push_back(pdu);
       hop_pdu.back().rnti = to_rnti(static_cast<uint16_t>(base_rnti + k));

@@ -213,7 +213,7 @@ public:
   void handle_ue_deletion(du_ue_index_t ue_index) override;
 
   /// \brief Register detected PRACH.
-  void handle_rach_indication(const rach_indication_message& msg, slot_point sl_tx);
+  void handle_rach_indication(const rach_indication_message& msg);
 
   /// \brief Register MSG3 CRC indication.
   void handle_msg3_crc_indication(const ul_crc_pdu_indication& crc_pdu);
@@ -263,6 +263,9 @@ public:
 
   /// \brief Handle late UL HARQ indication.
   void handle_late_ul_harqs();
+
+  /// \brief Handle a slot that the scheduler did not run, so that the metrics keep track of the slots that elapsed.
+  void handle_skipped_slot(slot_point_extended sl_tx);
 
   /// \brief Handle results stored in the scheduler result and push new entry.
   void push_result(slot_point_extended       sl_tx,

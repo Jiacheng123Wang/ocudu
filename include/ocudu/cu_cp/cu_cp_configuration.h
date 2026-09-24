@@ -5,6 +5,7 @@
 #pragma once
 
 #include "ocudu/cu_cp/cell_meas_manager_config.h"
+#include "ocudu/cu_cp/cell_state.h"
 #include "ocudu/cu_cp/cu_cp_metrics_notifier.h"
 #include "ocudu/cu_cp/cu_cp_ng_setup_notifier.h"
 #include "ocudu/cu_cp/cu_cp_types.h"
@@ -17,6 +18,7 @@
 #include "ocudu/ran/supported_tracking_area.h"
 #include "ocudu/rrc/rrc_ue_config.h"
 #include "ocudu/support/executors/task_executor.h"
+#include "ocudu/support/io/transport_layer_address.h"
 #include <chrono>
 #include <map>
 #include <optional>
@@ -43,6 +45,23 @@ struct mobility_configuration {
   mobility_manager_config  mobility_mgr_config;
 };
 
+/// Operator-declared configuration of one CU-CP logical cell.
+///
+/// A logical cell is the CU-CP-side managed object for a cell: it carries the operator's administrative
+/// intent and exists independently of any DU connection. It is realized when a connected DU reports the
+/// corresponding NR Cell Identity in the F1 Setup procedure, and the intent below survives DU restarts.
+struct cu_cp_logical_cell_config {
+  /// NR Cell Identity of the cell.
+  nr_cell_identity nci;
+  /// Administrative state: when locked, the CU-CP does not activate the cell (neither at F1 setup nor on
+  /// AMF reconnection) until it is unlocked by command. Configuration declares unlocked or locked;
+  /// shutting_down is held by the CU-CP itself during a graceful stop.
+  cell_admin_state admin_state = cell_admin_state::unlocked;
+  /// Intended MIB cellBarred state: when true, the CU-CP bars the cell (TS 38.473 Cells to be Barred List)
+  /// whenever it is active.
+  bool barred = false;
+};
+
 /// Configuration passed to CU-CP.
 struct cu_cp_configuration {
   struct admission_params {
@@ -65,6 +84,8 @@ struct cu_cp_configuration {
   struct ngap_config {
     // Supported TAs for each AMF.
     std::vector<supported_tracking_area> supported_tas;
+    // Address of the SCTP association with the AMF.
+    transport_layer_address amf_addr = transport_layer_address::create_from_string("127.0.0.1");
   };
 
   struct ngap_params {
@@ -83,7 +104,7 @@ struct cu_cp_configuration {
   };
 
   struct xnap_config {
-    /// XN-C peer addresses. Multiple addresses can be provided for SCTP multihoming.
+    /// Xn-C peer addresses. Multiple addresses can be provided for SCTP multihoming.
     std::vector<transport_layer_address> peer_addrs;
   };
 
@@ -173,6 +194,9 @@ struct cu_cp_configuration {
   ue_configuration ue;
   /// Parameters related with the mobility of UEs.
   mobility_configuration mobility;
+  /// Operator-declared logical cells (see \ref cu_cp_logical_cell_config). Cells reported by DUs that are
+  /// not declared here are added dynamically with default (unlocked, unbarred) intent.
+  std::vector<cu_cp_logical_cell_config> cells;
   /// Parameters related with CU-CP metrics.
   metrics_params metrics;
   /// Public Warning System parameters.

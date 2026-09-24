@@ -107,8 +107,8 @@ void nrppa_impl::handle_e_cid_meas_result(cu_cp_ue_index_t ue_index, const nrppa
   nrppa_msg.init_msg().load_info_obj(ASN1_NRPPA_ID_E_C_ID_MEAS_REPORT);
 
   auto& asn1_report               = nrppa_msg.init_msg().value.e_c_id_meas_report();
-  asn1_report->lmf_ue_meas_id     = lmf_ue_meas_id_to_uint(ue_ctxt.ue_ids.lmf_ue_meas_id);
-  asn1_report->ran_ue_meas_id     = ran_ue_meas_id_to_uint(ue_ctxt.ue_ids.ran_ue_meas_id);
+  asn1_report->lmf_ue_meas_id     = to_underlying(ue_ctxt.ue_ids.lmf_ue_meas_id);
+  asn1_report->ran_ue_meas_id     = to_underlying(ue_ctxt.ue_ids.ran_ue_meas_id);
   asn1_report->e_c_id_meas_result = e_cid_meas_result_to_asn1(result);
 
   byte_buffer nrppa_pdu = pack_into_pdu(nrppa_msg, "E-CID measurement report");
@@ -130,7 +130,7 @@ void nrppa_impl::on_meas_report_timer_expired(cu_cp_ue_index_t ue_index)
   auto* ue = ue_ctxt.get_cu_cp_ue();
   ocudu_assert(ue != nullptr,
                "ue={} ran_ue={} lmf_ue={}: UE for UE context doesn't exist",
-               fmt::underlying(ue_ctxt.ue_ids.ue_index),
+               ue_ctxt.ue_ids.ue_index,
                fmt::underlying(ue_ctxt.ue_ids.ran_ue_meas_id),
                fmt::underlying(ue_ctxt.ue_ids.lmf_ue_meas_id));
 
@@ -295,7 +295,7 @@ void nrppa_impl::handle_e_cid_meas_initiation_request(const asn1::nrppa::e_c_id_
   auto* ue = ue_ctxt.get_cu_cp_ue();
   ocudu_assert(ue != nullptr,
                "ue={} ran_ue={} lmf_ue={}: UE for UE context doesn't exist",
-               fmt::underlying(ue_ctxt.ue_ids.ue_index),
+               ue_ctxt.ue_ids.ue_index,
                fmt::underlying(ue_ctxt.ue_ids.ran_ue_meas_id),
                fmt::underlying(ue_ctxt.ue_ids.lmf_ue_meas_id));
 
@@ -323,7 +323,7 @@ void nrppa_impl::handle_e_cid_meas_termination_command(const asn1::nrppa::e_c_id
   auto* ue = ue_ctxt.get_cu_cp_ue();
   ocudu_assert(ue != nullptr,
                "ue={} ran_ue={} lmf_ue={}: UE for UE context doesn't exist",
-               fmt::underlying(ue_ctxt.ue_ids.ue_index),
+               ue_ctxt.ue_ids.ue_index,
                fmt::underlying(ue_ctxt.ue_ids.ran_ue_meas_id),
                fmt::underlying(ue_ctxt.ue_ids.lmf_ue_meas_id));
 

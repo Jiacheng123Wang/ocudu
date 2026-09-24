@@ -5,6 +5,7 @@
 #include "du_high_config_validator.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ran/duplex_mode.h"
+#include "ocudu/ran/frame_types.h"
 #include "ocudu/ran/nr_cell_identity.h"
 #include "ocudu/ran/pdcch/pdcch_type0_css_coreset_config.h"
 #include "ocudu/ran/pdsch/pdsch_constants.h"
@@ -14,10 +15,12 @@
 #include "ocudu/ran/pucch/pucch_info.h"
 #include "ocudu/ran/pucch/pucch_mapping.h"
 #include "ocudu/ran/rb_id.h"
+#include "ocudu/ran/ssb/ssb_mapping.h"
 #include "ocudu/ran/transform_precoding/transform_precoding_helpers.h"
 #include "ocudu/rlc/rlc_config.h"
 #include "ocudu/support/math/math_utils.h"
 #include <algorithm>
+#include <cmath>
 #include <set>
 #include <unordered_map>
 
@@ -148,26 +151,26 @@ static bool validate_rlc_am_unit_config(id_type id, const du_high_unit_rlc_am_co
 }
 
 /// Validates the given SRB configuration. Returns true on success, otherwise false.
-static bool validate_srb_unit_config(const std::map<srb_id_t, du_high_unit_srb_config>& config)
+static bool validate_srb_unit_config(const std::vector<du_high_unit_srb_config>& config)
 {
   for (const auto& srb : config) {
-    if (srb.first != srb_id_t::srb1 && srb.first != srb_id_t::srb2 && srb.first != srb_id_t::srb3) {
-      fmt::print("Cannot configure {}. Only SRB1, SRB2 and SRB3 can be configured", srb.first);
+    const srb_id_t srb_id = static_cast<srb_id_t>(srb.srb_id);
+    if (srb_id != srb_id_t::srb1 && srb_id != srb_id_t::srb2 && srb_id != srb_id_t::srb3) {
+      fmt::print("Cannot configure {}. Only SRB1, SRB2 and SRB3 can be configured", srb_id);
       return false;
     }
-    if (!validate_rlc_am_unit_config(srb.first, srb.second.rlc)) {
+    if (!validate_rlc_am_unit_config(srb_id, srb.rlc)) {
       return false;
     }
-    if (srb.first != srb_id_t::srb1 && srb.second.mac.triggered_ul_grant.has_value()) {
-      fmt::print("{} can't be configured with triggered UL grant. It's supported only for SBR1\n", srb.first);
+    if (srb_id != srb_id_t::srb1 && srb.mac.triggered_ul_grant.has_value()) {
+      fmt::print("{} can't be configured with triggered UL grant. It's supported only for SBR1\n", srb_id);
       return false;
     }
     // Delay is in ms and capped to bound the pending-grant vector size in the scheduler.
-    if (srb.second.mac.triggered_ul_grant.has_value() &&
-        srb.second.mac.triggered_ul_grant->delay > SCHEDULER_MAX_TRIG_UL_DELAY) {
+    if (srb.mac.triggered_ul_grant.has_value() && srb.mac.triggered_ul_grant->delay > SCHEDULER_MAX_TRIG_UL_DELAY) {
       fmt::print("{} triggered_ul_grant delay={} exceeds maximum of {} ms\n",
-                 srb.first,
-                 srb.second.mac.triggered_ul_grant->delay,
+                 srb_id,
+                 srb.mac.triggered_ul_grant->delay,
                  SCHEDULER_MAX_TRIG_UL_DELAY);
       return false;
     }
@@ -657,6 +660,11 @@ static bool validate_ntn_config(const du_high_unit_cell_ntn_config& ntn_cfg, nr_
     valid = false;
   }
 
+  if (serving.ta_report_sr_enabled and not serving.ta_report_offset_threshold.has_value()) {
+    fmt::print("ntn.ta_report_sr_enabled requires ntn.ta_report_offset_threshold to be set.\n");
+    valid = false;
+  }
+
   if (serving.sat_switch_with_resync) {
     const auto& sw = *serving.sat_switch_with_resync;
     if (!sw.t_service_start.has_value()) {
@@ -681,11 +689,6 @@ static bool validate_ntn_config(const du_high_unit_cell_ntn_config& ntn_cfg, nr_
     }
     if (sw.promote_neighbors && !sw.promote_to_serving) {
       fmt::print("sat_switch_with_resync: promote_neighbors has no effect unless promote_to_serving is enabled.\n");
-      valid = false;
-    }
-    if (sw.ssb_time_offset_sf && *sw.ssb_time_offset_sf % 5 != 0) {
-      fmt::print("sat_switch_with_resync: ssb_time_offset_sf must be 0 or a multiple of 5 subframes, got {}.\n",
-                 *sw.ssb_time_offset_sf);
       valid = false;
     }
     if (sw.sat_ref.satellite_idx) {
@@ -1336,6 +1339,69 @@ static bool validate_tdd_ul_dl_unit_config(const du_high_unit_tdd_ul_dl_config& 
   return true;
 }
 
+static bool validate_ssb_cell_unit_config(const du_high_unit_ssb_config& config,
+                                          nr_band                        band,
+                                          arfcn_t                        dl_arfcn,
+                                          subcarrier_spacing             ssb_scs)
+{
+  if (config.beams.empty()) {
+    fmt::print("At least one SSB candidate must be transmitted.\n");
+    return false;
+  }
+
+  const uint8_t l_max = ssb_get_L_max(ssb_scs, dl_arfcn, band);
+
+  ssb_bitmap_t transmitted_ssbs;
+  transmitted_ssbs.set_L_max(l_max);
+  transmitted_ssbs.reset();
+
+  for (const auto& ssb_beam : config.beams) {
+    if (ssb_beam.ssb_index >= l_max) {
+      fmt::print("SSB index {} is out of range. With band n{} and SSB SCS {}kHz, L_max is {}.\n",
+                 ssb_beam.ssb_index,
+                 fmt::underlying(band),
+                 scs_to_khz(ssb_scs),
+                 l_max);
+      return false;
+    }
+    if (transmitted_ssbs.test(ssb_beam.ssb_index)) {
+      fmt::print("SSB index {} is configured more than once.\n", ssb_beam.ssb_index);
+      return false;
+    }
+    if (!is_beam_id_valid(to_beam_id(ssb_beam.beam_id))) {
+      fmt::print("Beam ID {} of SSB index {} is out of range. Valid range is [0, {}).\n",
+                 ssb_beam.beam_id,
+                 ssb_beam.ssb_index,
+                 max_nof_beams);
+      return false;
+    }
+    transmitted_ssbs.set(ssb_beam.ssb_index);
+  }
+
+  // As per inOneGroup, ssb-PositionsInBurst, ServingCellConfigCommonSIB, TS 38.331, the non-zero groups of 8 bits must
+  // all be equal.
+  if (l_max == 64) {
+    static constexpr uint8_t nof_groups_and_bits_per_gr = 8;
+    std::optional<uint8_t>   first_non_zero_group;
+    for (uint8_t group_idx = 0; group_idx != nof_groups_and_bits_per_gr; ++group_idx) {
+      const auto group_8_bits =
+          transmitted_ssbs.extract<uint8_t>(nof_groups_and_bits_per_gr * group_idx, nof_groups_and_bits_per_gr);
+      if (group_8_bits == 0) {
+        continue;
+      }
+      if (!first_non_zero_group.has_value()) {
+        first_non_zero_group.emplace(group_8_bits);
+      } else if (group_8_bits != *first_non_zero_group) {
+        fmt::print("Invalid set of SSB indexes. With L_max 64, the transmitted SSB indexes must repeat the same "
+                   "pattern in every group of 8 candidates.\n");
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 static bool validate_dl_ul_arfcn_and_band(const du_high_unit_base_cell_config& config)
 {
   const nr_band band = config.band.value_or(band_helper::get_band_from_dl_arfcn(config.dl_f_ref_arfcn));
@@ -1420,19 +1486,44 @@ static bool validate_cell_sib_config(const du_high_unit_base_cell_config& cell_c
 
   const du_high_unit_sib_config& sib_cfg = cell_cfg.sib_cfg;
 
+  // A warning SIB has parameters of its own, in the etws and cmas configuration blocks.
+  for (const auto& si_msg : sib_cfg.si_sched_info) {
+    for (uint8_t sib_it : si_msg.sib_mapping_info) {
+      if (sib_it == 6 || sib_it == 7 || sib_it == 8) {
+        fmt::print("SIB{} cannot be mapped to an SI message of the si_sched_info list. Configure the {} block "
+                   "instead.\n",
+                   sib_it,
+                   sib_it == 8 ? "cmas" : "etws");
+        return false;
+      }
+    }
+  }
+
+  // A cell only broadcasts a warning while it is on air, but its SI window must be reserved from the start, so that
+  // the SI messages of the normal operation keep their own as warnings come and go. ETWS takes one SI message for its
+  // primary notification and another for its secondary one, CMAS takes one.
+  const unsigned nof_pws_si_msgs = (sib_cfg.etws_cfg.has_value() ? 2 : 0) + (sib_cfg.cmas_cfg.has_value() ? 1 : 0);
+
   // Compute how many slots it takes to transmit all SI messages in sequence.
-  const unsigned all_si_msg_slots = sib_cfg.si_sched_info.size() * sib_cfg.si_window_len_slots;
+  const unsigned all_si_msg_slots = (sib_cfg.si_sched_info.size() + nof_pws_si_msgs) * sib_cfg.si_window_len_slots;
 
   // If the SI period of any SI message is shorter than the number of slots required to transmit the SI messages, the
   // configuration is invalid.
-  for (const auto& si_msg : sib_cfg.si_sched_info) {
+  auto si_period_fits_every_window = [&](unsigned si_period_rf) {
     const unsigned si_period_slots =
-        si_msg.si_period_rf * get_nof_slots_per_subframe(cell_cfg.common_scs) * NOF_SUBFRAMES_PER_FRAME;
+        si_period_rf * get_nof_slots_per_subframe(cell_cfg.common_scs) * NOF_SUBFRAMES_PER_FRAME;
     if (all_si_msg_slots > si_period_slots) {
       fmt::print("The SI message period (i.e., {} frames) is too small given the SI window length (i.e., {} slots). "
                  "Increase the SI period or decrease the SI window length.\n",
-                 si_msg.si_period_rf,
+                 si_period_rf,
                  sib_cfg.si_window_len_slots);
+      return false;
+    }
+    return true;
+  };
+
+  for (const auto& si_msg : sib_cfg.si_sched_info) {
+    if (not si_period_fits_every_window(si_msg.si_period_rf)) {
       return false;
     }
 
@@ -1444,15 +1535,12 @@ static bool validate_cell_sib_config(const du_high_unit_base_cell_config& cell_c
       fmt::print("SIB19 cannot be included in the SI messages together with other SIBs.\n");
       return false;
     }
-
-    // Check if SIB6/7/8 (PWS) are included together with any other SIB, which is not allowed.
-    const bool any_pws_sib = std::any_of(si_msg.sib_mapping_info.begin(), si_msg.sib_mapping_info.end(), [](uint8_t t) {
-      return t == 6 || t == 7 || t == 8;
-    });
-    if (any_pws_sib && si_msg.sib_mapping_info.size() > 1) {
-      fmt::print("SIB6/7/8 cannot be included in the SI messages together with other SIBs.\n");
-      return false;
-    }
+  }
+  if (sib_cfg.etws_cfg.has_value() and not si_period_fits_every_window(sib_cfg.etws_cfg->si_period_rf)) {
+    return false;
+  }
+  if (sib_cfg.cmas_cfg.has_value() and not si_period_fits_every_window(sib_cfg.cmas_cfg->si_period_rf)) {
+    return false;
   }
 
   std::vector<uint8_t>  sibs_included;
@@ -1617,20 +1705,54 @@ static bool validate_cell_cg_config(const du_high_configured_grants& cg_cfg, uns
     return false;
   }
 
-  if (cg_cfg.nof_rbs > cg_cfg.max_nof_cell_cg_rbs) {
-    fmt::print(
-        "Number of UE RBs {} for configured grant (CG) exceeds the max number of CG RBs {} allocated to the cell.\n",
-        cg_cfg.nof_rbs,
-        cg_cfg.max_nof_cell_cg_rbs);
-    return false;
-  }
-
   if (cg_cfg.nof_harq_processes >= max_nof_harqs) {
     fmt::print("Too many UE HARQ processes {} reserved for configured grant (CG). Its value shouldn't exceed the total"
                " maximum number of PUSCH HARQ processes {} - 1.\n",
                cg_cfg.nof_harq_processes,
                max_nof_harqs);
     return false;
+  }
+
+  return true;
+}
+
+/// Validates the additional TACs broadcast by a cell in trackingAreaList, TS 38.331.
+static bool validate_additional_tacs(const du_high_unit_base_cell_config& config, bool is_ntn_band)
+{
+  if (config.additional_tacs.empty()) {
+    return true;
+  }
+
+  // TS 38.331: trackingAreaList is only present in an NTN cell.
+  if (!is_ntn_band) {
+    fmt::print("Additional TACs can only be broadcast by NTN cells.\n");
+    return false;
+  }
+
+  // tac takes the first of the TACs allowed per PLMN.
+  if (config.additional_tacs.size() + 1 > MAX_NOF_TACS_NTN) {
+    fmt::print("A cell can broadcast at most {} TACs, but {} are configured.\n",
+               MAX_NOF_TACS_NTN,
+               config.additional_tacs.size() + 1);
+    return false;
+  }
+
+  for (unsigned i = 0, e = config.additional_tacs.size(); i != e; ++i) {
+    const tac_t tac = config.additional_tacs[i];
+    if (!is_valid(tac)) {
+      fmt::print("Invalid TAC '{}' in the additional TACs of the cell.\n", tac);
+      return false;
+    }
+    if (tac == config.tac) {
+      fmt::print("TAC '{}' is repeated in the additional TACs of the cell.\n", tac);
+      return false;
+    }
+    for (unsigned j = i + 1; j != e; ++j) {
+      if (config.additional_tacs[j] == tac) {
+        fmt::print("TAC '{}' is repeated in the additional TACs of the cell.\n", tac);
+        return false;
+      }
+    }
   }
 
   return true;
@@ -1651,6 +1773,14 @@ static bool validate_base_cell_unit_config(const du_high_unit_base_cell_config& 
     fmt::print("The number of UL antennas cannot be zero.\n");
     return false;
   }
+
+  if (config.tac == 0U || config.tac == 0xfffffeU || config.tac > 0xffffffU) {
+    fmt::print("Invalid TAC value {}. Valid TAC values are in [1, 16777215] excluding the reserved value 16777214 "
+               "(0xfffffe).\n",
+               config.tac);
+    return false;
+  }
+
   if (config.common_scs == ocudu::subcarrier_spacing::kHz15 and
       config.channel_bw_mhz > ocudu::bs_channel_bandwidth::MHz50) {
     fmt::print("Maximum Channel BW with SCS common 15kHz is 50MHz.\n");
@@ -1689,10 +1819,17 @@ static bool validate_base_cell_unit_config(const du_high_unit_base_cell_config& 
     return false;
   }
 
+  if (!validate_ssb_cell_unit_config(config.ssb_cfg, band, config.dl_f_ref_arfcn, ssb_scs)) {
+    return false;
+  }
+
   const unsigned nof_crbs =
       band_helper::get_n_rbs_from_bw(config.channel_bw_mhz, config.common_scs, band_helper::get_freq_range(band));
 
   const bool is_ntn_band = band_helper::is_ntn_band(band);
+  if (!validate_additional_tacs(config, is_ntn_band)) {
+    return false;
+  }
   if (config.ntn_cfg) {
     if (is_ntn_band) {
       if (!validate_ntn_config(*config.ntn_cfg, band)) {

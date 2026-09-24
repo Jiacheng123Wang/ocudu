@@ -129,13 +129,12 @@ void ue_fallback_scheduler::stop()
 void ue_fallback_scheduler::handle_dl_buffer_state_indication(du_ue_index_t ue_index)
 {
   if (not ues.contains(ue_index)) {
-    logger.error("ue={}: DL Buffer Occupancy update discarded. UE is not found in the scheduler",
-                 fmt::underlying(ue_index));
+    logger.error("ue={}: DL Buffer Occupancy update discarded. UE is not found in the scheduler", ue_index);
     return;
   }
   ue& u = ues[ue_index];
   if (not u.get_pcell().is_in_fallback_mode()) {
-    logger.error("ue={}: DL Buffer Occupancy update discarded. UE is not in fallback mode", fmt::underlying(ue_index));
+    logger.error("ue={}: DL Buffer Occupancy update discarded. UE is not in fallback mode", ue_index);
     return;
   }
 
@@ -154,7 +153,7 @@ void ue_fallback_scheduler::handle_dl_buffer_state_indication(du_ue_index_t ue_i
 void ue_fallback_scheduler::handle_conres_indication(du_ue_index_t ue_index)
 {
   if (not ues.contains(ue_index)) {
-    logger.error("ue={}: ConRes CE discarded. Cause: UE is not found in the scheduler", fmt::underlying(ue_index));
+    logger.error("ue={}: ConRes CE discarded. Cause: UE is not found in the scheduler", ue_index);
     return;
   }
   auto& u = ues[ue_index];
@@ -162,7 +161,7 @@ void ue_fallback_scheduler::handle_conres_indication(du_ue_index_t ue_index)
     // Note: In Test mode, the UE can skip fallback mode. However, since it was created via UL-CCCH, there is still an
     // attempt to schedule the ConRes CE. If we want to change this log to warning, we need to create test mode UEs
     // in a different manner.
-    logger.info("ue={}: ConRes CE discarded. Cause: UE is not in fallback state", fmt::underlying(ue_index));
+    logger.info("ue={}: ConRes CE discarded. Cause: UE is not in fallback state", ue_index);
     return;
   }
 
@@ -184,7 +183,7 @@ void ue_fallback_scheduler::handle_conres_indication(du_ue_index_t ue_index)
 void ue_fallback_scheduler::handle_ul_bsr_indication(du_ue_index_t ue_index, const ul_bsr_indication_message& bsr_ind)
 {
   if (not ues.contains(ue_index) or not ues[ue_index].get_pcell().is_in_fallback_mode()) {
-    logger.error("ue_index={} not found in the scheduler or not in fallback", fmt::underlying(ue_index));
+    logger.error("ue_index={} not found in the scheduler or not in fallback", ue_index);
     return;
   }
 
@@ -212,7 +211,7 @@ void ue_fallback_scheduler::handle_ul_bsr_indication(du_ue_index_t ue_index, con
 void ue_fallback_scheduler::handle_sr_indication(du_ue_index_t ue_index)
 {
   if (not ues.contains(ue_index) or not ues[ue_index].get_pcell().is_in_fallback_mode()) {
-    logger.error("ue_index={} not found in the scheduler or not in fallback", fmt::underlying(ue_index));
+    logger.error("ue_index={} not found in the scheduler or not in fallback", ue_index);
     return;
   }
 
@@ -289,7 +288,7 @@ bool ue_fallback_scheduler::schedule_dl_new_tx(cell_resource_allocator& res_allo
     if (alloc_type == dl_new_tx_alloc_type::error) {
       // The UE is not in a state for scheduling
       logger.error("ue={}: UE is an inconsistent state in the fallback scheduler. Pending bytes={}",
-                   fmt::underlying(next_ue->ue_index),
+                   next_ue->ue_index,
                    u.logical_channels().dl_pending_bytes());
       next_ue = pending_dl_ues_new_tx.erase(next_ue);
       continue;
@@ -459,7 +458,7 @@ ue_fallback_scheduler::schedule_dl_srb(cell_resource_allocator&              res
     if (pdcch_alloc.result.dl.dl_pdcchs.full() or pdsch_alloc.result.dl.ue_grants.full()) {
       logger.debug("rnti={}: Failed to allocate fallback PDSCH. Cause: No space available in scheduler output list",
                    u.crnti);
-      slots_with_no_pdxch_space[next_slot.to_uint() % FALLBACK_SCHED_RING_BUFFER_SIZE] = true;
+      slots_with_no_pdxch_space[next_slot.count() % FALLBACK_SCHED_RING_BUFFER_SIZE] = true;
       continue;
     }
 
@@ -536,8 +535,7 @@ static std::optional<uci_allocation> allocate_ue_fallback_pucch(ue&             
         filtered_k1.push_back(k1_candidate);
       }
     }
-    std::optional<uci_allocation> uci =
-        uci_alloc.alloc_harq_ack(res_alloc, u.get_pcell().cfg(), pdsch_delay, filtered_k1);
+    std::optional<uci_allocation> uci = uci_alloc.alloc_harq_ack(res_alloc, u.get_pcell(), pdsch_delay, filtered_k1);
     return uci;
   }
 
@@ -627,7 +625,7 @@ ue_fallback_scheduler::alloc_grant(ue&                                   u,
   if (unused_crbs.empty()) {
     logger.debug("rnti={}: Postponed PDU scheduling for slot={}. Cause: No space in PDSCH.", u.crnti, pdsch_alloc.slot);
     // If there is no free PRBs left on this slot for this UE, then this slot should be avoided by the other UEs too.
-    slots_with_no_pdxch_space[pdsch_alloc.slot.to_uint() % FALLBACK_SCHED_RING_BUFFER_SIZE] = true;
+    slots_with_no_pdxch_space[pdsch_alloc.slot.count() % FALLBACK_SCHED_RING_BUFFER_SIZE] = true;
     return {};
   }
 
@@ -678,7 +676,7 @@ ue_fallback_scheduler::alloc_grant(ue&                                   u,
                    chosen_tbs);
       if (only_conres_bytes > 0) {
         // In case not even a ConRes CE can fit, we can start ignoring this slot.
-        slots_with_no_pdxch_space[pdsch_alloc.slot.to_uint() % FALLBACK_SCHED_RING_BUFFER_SIZE] = true;
+        slots_with_no_pdxch_space[pdsch_alloc.slot.count() % FALLBACK_SCHED_RING_BUFFER_SIZE] = true;
       }
       return {};
     }
@@ -711,7 +709,7 @@ ue_fallback_scheduler::alloc_grant(ue&                                   u,
   if (pdcch == nullptr) {
     logger.debug("rnti={}: Postponed PDU scheduling for slot={}. Cause: No space in PDCCH.", u.crnti, pdcch_alloc.slot);
     // If there is no PDCCH space on this slot for this UE, then this slot should be avoided by the other UEs too.
-    slots_with_no_pdxch_space[pdcch_alloc.slot.to_uint() % FALLBACK_SCHED_RING_BUFFER_SIZE] = true;
+    slots_with_no_pdxch_space[pdcch_alloc.slot.count() % FALLBACK_SCHED_RING_BUFFER_SIZE] = true;
     return {};
   }
 
@@ -1164,14 +1162,12 @@ ue_fallback_scheduler::schedule_ul_srb(ue&                                      
 
   // Search for empty HARQ.
   if (not is_retx and not ue_pcell.harqs.has_empty_ul_harqs(true)) {
-    logger.debug(
-        "ue={} rnti={} PUSCH allocation skipped. Cause: no HARQ available", fmt::underlying(u.ue_index), u.crnti);
+    logger.debug("ue={} rnti={} PUSCH allocation skipped. Cause: no HARQ available", u.ue_index, u.crnti);
     return ul_srb_sched_outcome::next_ue;
   }
 
   if (used_crbs.all()) {
-    logger.debug(
-        "ue={} rnti={} PUSCH allocation skipped. Cause: No more RBs available", fmt::underlying(u.ue_index), u.crnti);
+    logger.debug("ue={} rnti={} PUSCH allocation skipped. Cause: No more RBs available", u.ue_index, u.crnti);
     return ul_srb_sched_outcome::next_slot;
   }
 
@@ -1195,7 +1191,7 @@ ue_fallback_scheduler::schedule_ul_srb(ue&                                      
     ue_grant_crbs = rb_helper::find_empty_interval_of_length(used_crbs, final_nof_prbs);
     if (ue_grant_crbs.empty() or ue_grant_crbs.length() < final_nof_prbs) {
       logger.debug("ue={} rnti={} PUSCH SRB allocation for re-tx skipped. Cause: available RBs {} < required RBs {}",
-                   fmt::underlying(u.ue_index),
+                   u.ue_index,
                    u.crnti,
                    ue_grant_crbs.length(),
                    final_nof_prbs);
@@ -1240,7 +1236,7 @@ ue_fallback_scheduler::schedule_ul_srb(ue&                                      
       if (not valid_nof_rbs.has_value()) {
         logger.debug(
             "ue={} rnti={} PUSCH allocation for SRB1 skipped. Cause: not possible to select a valid number of PRBs",
-            fmt::underlying(u.ue_index),
+            u.ue_index,
             u.crnti);
         return ul_srb_sched_outcome::next_slot;
       }
@@ -1248,16 +1244,14 @@ ue_fallback_scheduler::schedule_ul_srb(ue&                                      
     }
 
     if (ue_grant_crbs.empty()) {
-      logger.debug("ue={} rnti={} PUSCH allocation for SRB1 skipped. Cause: no PRBs available",
-                   fmt::underlying(u.ue_index),
-                   u.crnti);
+      logger.debug("ue={} rnti={} PUSCH allocation for SRB1 skipped. Cause: no PRBs available", u.ue_index, u.crnti);
       return ul_srb_sched_outcome::next_slot;
     }
 
     if (ue_grant_crbs.length() <= min_allocable_prbs and mcs < min_mcs_for_1_prb) {
       logger.debug("ue={} rnti={} PUSCH allocation for SRB1 skipped. Cause: the scheduler couldn't allocate the min. "
                    "number of PRBs={} for MCS={}",
-                   fmt::underlying(u.ue_index),
+                   u.ue_index,
                    u.crnti,
                    prbs_tbs.nof_prbs,
                    mcs.value());
@@ -1273,7 +1267,7 @@ ue_fallback_scheduler::schedule_ul_srb(ue&                                      
     // If there is not MCS-TBS info, it means no MCS exists such that the effective code rate is <= 0.95.
     if (not mcs_tbs_info.has_value()) {
       logger.warning("ue={} rnti={}: Failed to allocate PUSCH for SRB1. Cause: no MCS such that code rate <= 0.95",
-                     fmt::underlying(u.ue_index),
+                     u.ue_index,
                      u.crnti);
       return ul_srb_sched_outcome::next_slot;
     }
@@ -1284,8 +1278,7 @@ ue_fallback_scheduler::schedule_ul_srb(ue&                                      
   pdcch_ul_information* pdcch =
       pdcch_sch.alloc_ul_pdcch_common(pdcch_alloc, u.crnti, ss_cfg.get_id(), aggregation_level::n4);
   if (pdcch == nullptr) {
-    logger.info(
-        "ue={} rnti={}: Failed to allocate PUSCH. Cause: No space in PDCCH.", fmt::underlying(u.ue_index), u.crnti);
+    logger.info("ue={} rnti={}: Failed to allocate PUSCH. Cause: No space in PDCCH.", u.ue_index, u.crnti);
     return ul_srb_sched_outcome::stop_ul_scheduling;
   }
 
@@ -1496,7 +1489,7 @@ bool ue_fallback_scheduler::handle_conres_expiry(ue& u, slot_point sl_tx)
   // In this case, the scheduler will stop retransmitting the ConRes CE.
   logger.info("ue={} rnti={}: ra-ContentionResolutionTimer ({}ms{}) expired, but the scheduler never got back a "
               "positive ACK. The scheduler will stop retransmitting the ConRes CE",
-              fmt::underlying(u.ue_index),
+              u.ue_index,
               u.crnti,
               conres_timer,
               make_formattable([k = ntn_cs_koffset](auto& ctx) {
@@ -1532,7 +1525,7 @@ void ue_fallback_scheduler::slot_indication(slot_point sl)
       // UE was removed in the meantime.
       logger.debug(
           "ue={}: will be removed from fallback scheduler. Cause: not present anymore in the scheduler UE repository",
-          fmt::underlying(ue_it->ue_index));
+          ue_it->ue_index);
       auto ue_idx = ue_it->ue_index;
       ue_it       = pending_dl_ues_new_tx.erase(ue_it);
       rem_fallback_ue(ue_idx);
@@ -1543,7 +1536,7 @@ void ue_fallback_scheduler::slot_indication(slot_point sl)
     if (not ue_pcell.is_in_fallback_mode()) {
       // UE exited fallback.
       logger.debug("ue={} rnti={}: will be removed from fallback scheduler. Cause: UE exited fallback mode",
-                   fmt::underlying(ue_it->ue_index),
+                   ue_it->ue_index,
                    u.crnti);
       ue_it = pending_dl_ues_new_tx.erase(ue_it);
       continue;
@@ -1551,7 +1544,7 @@ void ue_fallback_scheduler::slot_indication(slot_point sl)
     if (not u.logical_channels().has_dl_pending_bytes()) {
       // UE has no new txs pending. It can be removed.
       logger.debug("ue={} rnti={}: will be removed from fallback scheduler. Cause: no pending new transmissions",
-                   fmt::underlying(ue_it->ue_index),
+                   ue_it->ue_index,
                    u.crnti);
       ue_it = pending_dl_ues_new_tx.erase(ue_it);
       continue;

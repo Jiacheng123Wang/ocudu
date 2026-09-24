@@ -52,6 +52,9 @@ This will produce the required NTN configuration files (`sat.yml`, `ntn_du.yml`,
 | `--enable-sat-switch-with-resync` | Add a second (target) satellite and a `sat_switch_with_resync` block for handover. |
 | `--ssb-time-offset-sf` | SSB time offset [subframes] for the satellite switch (default 0). |
 | `--add-example-ncells` | Add two example neighbor cells to the DU config (`ntn_du.yml`) and the CU-CP config (`ntn_cu.yml`). |
+| `--ta-report` | Set `ta_report` in the cell NTN config, so that UEs report their timing advance at random access, establishment, resume and handover. |
+| `--ta-report-offset-threshold` | Add `ta_report_offset_threshold` [ms] so that UEs also report on timing advance variation (`0.5` or an integer from 1 to 15). |
+| `--ta-report-sr-enabled` | Set `ta_report_sr_enabled`, letting a triggered report raise an SR. Requires `--ta-report-offset-threshold`. |
 | `--gnb-id` | gNB ID of this CU-CP, used to build the internal serving `nr_cell_id` in `ntn_cu.yml` (default `411`; accepts `0x` hex). |
 | `--gnb-id-bit-length` | gNB ID bit length; the NR Cell Identity is 36 bits (default `22`). |
 
@@ -97,7 +100,12 @@ cell_cfg:
     ntn_ul_sync_validity_dur: 5
     distance_threshold: 50000    # location-based measurement distance [meters]
     t_service: '...'             # time the serving cell stops serving (pass LOS)
-    ta_report: false             # enable timing-advance reporting in SIB19
+    ta_report: false             # enable timing-advance reporting in SIB19 (random access and handover)
+    ta_report_offset_threshold: 1 # optional; ms of T_TA drift that triggers a UE Timing Advance Report.
+                                 # The report resolves whole 15kHz slots (1ms), so values below 1 only add
+                                 # duplicate reports carrying a value the gNB already has.
+    ta_report_sr_enabled: false  # optional; let a triggered report raise an SR when no UL grant is available.
+                                 # Requires the UE to support sr-TriggeredBy-TA-Report-r17.
     reference_location:          # serving cell reference location (= cell center)
       latitude: ...
       longitude: ...
@@ -201,6 +209,35 @@ cu_cp:
       time_to_trigger_ms: 100
       report_interval_ms: 1024
 ```
+
+---
+
+### Broadcasting several TACs in one cell
+
+TS 38.331 lets an NTN cell broadcast up to 12 TACs per PLMN in `trackingAreaList`. Stack
+`multi_tac.yml` on top of `gnb.yml`:
+
+```bash
+sudo $GNB_PATH -c ./gnb.yml -c sat.yml -c ntn_du.yml -c ntn_cu.yml -c zmq.yml -c multi_tac.yml
+```
+
+```yaml
+cell_cfg:
+  tac: 7
+  additional_tacs: [8, 9]           # cell advertises 7, 8 and 9
+
+cu_cp:
+  amf:
+    supported_tracking_areas:       # one entry per broadcast TAC, all known to the core
+      - tac: 7
+        plmn_list: [{ plmn: "00101", tai_slice_support_list: [{ sst: 1 }] }]
+      - tac: 8
+        plmn_list: [{ plmn: "00101", tai_slice_support_list: [{ sst: 1 }] }]
+      - tac: 9
+        plmn_list: [{ plmn: "00101", tai_slice_support_list: [{ sst: 1 }] }]
+```
+
+A later `-c` file replaces a list instead of appending to it, which is why `tac: 7` is repeated.
 
 ---
 

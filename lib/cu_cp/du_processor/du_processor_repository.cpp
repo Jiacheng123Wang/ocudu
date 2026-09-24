@@ -6,7 +6,6 @@
 #include "du_processor_config.h"
 #include "du_processor_factory.h"
 #include "ocudu/adt/format.h"
-#include "ocudu/cu_cp/cu_cp_configuration.h"
 #include "ocudu/cu_cp/cu_cp_configuration_helpers.h"
 #include "ocudu/rrc/rrc_config.h"
 #include "ocudu/support/executors/sync_task_executor.h"
@@ -99,6 +98,10 @@ async_task<void> du_processor_repository::remove_du(cu_cp_du_index_t du_index)
     // Stop DU activity, eliminating pending transactions for the DU and respective UEs.
     CORO_AWAIT(du_db.find(du_index)->second.processor->get_f1ap_handler().stop());
 
+    // De-realize the DU's logical cells, keeping their operator intent (admin lock/barring) so it can be
+    // re-applied when the DU reconnects.
+    cu_cp_du_handler.handle_du_removed(du_index);
+
     // Remove DU
     du_db.erase(du_index);
     logger.info("Removed DU {}", du_index);
@@ -150,6 +153,16 @@ cu_cp_du_index_t du_processor_repository::find_du_any_state(const nr_cell_global
 {
   for (const auto& du : du_db) {
     if (du.second.processor->has_cell_any_state(cgi)) {
+      return du.first;
+    }
+  }
+  return cu_cp_du_index_t::invalid;
+}
+
+cu_cp_du_index_t du_processor_repository::find_du_any_state(pci_t pci)
+{
+  for (const auto& du : du_db) {
+    if (du.second.processor->has_cell_any_state(pci)) {
       return du.first;
     }
   }
@@ -222,7 +235,7 @@ std::vector<cu_cp_metrics_report::du_info> du_processor_repository::handle_du_me
 size_t du_processor_repository::get_nof_f1ap_ues() const
 {
   size_t nof_ues = 0;
-  for (auto& du : du_db) {
+  for (const auto& du : du_db) {
     nof_ues += du.second.processor->get_f1ap_handler().get_nof_ues();
   }
   return nof_ues;
@@ -231,7 +244,7 @@ size_t du_processor_repository::get_nof_f1ap_ues() const
 size_t du_processor_repository::get_nof_rrc_ues() const
 {
   size_t nof_ues = 0;
-  for (auto& du : du_db) {
+  for (const auto& du : du_db) {
     nof_ues += du.second.processor->get_rrc_du_handler().get_nof_ues();
   }
   return nof_ues;

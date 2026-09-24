@@ -9,6 +9,7 @@
 #include "transmitter/ofh_transmitter_factories.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ofh/ethernet/ethernet_factories.h"
+#include "ocudu/ofh/ofh_sector_executor_mapper.h"
 
 #ifdef DPDK_FOUND
 #include "ocudu/ofh/ethernet/dpdk/dpdk_ethernet_factories.h"
@@ -181,7 +182,7 @@ std::unique_ptr<sector> ocudu::ofh::create_ofh_sector(const sector_configuration
   auto eth_txrx = create_txrx(sector_cfg,
                               std::move(sector_deps.eth_transmitter),
                               std::move(sector_deps.eth_receiver),
-                              *sector_deps.txrx_executor,
+                              sector_deps.exec_mapper.get_txrx_executor(),
                               *sector_deps.logger);
 
   ether::transmitter& eth_transmitter = *eth_txrx.first;
@@ -191,7 +192,7 @@ std::unique_ptr<sector> ocudu::ofh::create_ofh_sector(const sector_configuration
   auto rx_config = generate_receiver_config(sector_cfg);
   auto receiver  = create_receiver(rx_config,
                                   *sector_deps.logger,
-                                  *sector_deps.uplink_executor,
+                                  sector_deps.exec_mapper.get_uplink_executor(),
                                   std::move(eth_txrx.second),
                                   sector_deps.notifier,
                                   ul_prach_repo,
@@ -206,8 +207,8 @@ std::unique_ptr<sector> ocudu::ofh::create_ofh_sector(const sector_configuration
   auto tx_config   = generate_transmitter_config(sector_cfg);
   auto transmitter = create_transmitter(tx_config,
                                         *sector_deps.logger,
-                                        *sector_deps.txrx_executor,
-                                        *sector_deps.downlink_executor,
+                                        sector_deps.exec_mapper.get_txrx_executor(),
+                                        sector_deps.exec_mapper,
                                         *sector_deps.err_notifier,
                                         std::move(eth_txrx.first),
                                         ul_prach_repo,

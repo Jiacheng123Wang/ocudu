@@ -29,56 +29,82 @@ cell_scheduler::cell_scheduler(const scheduler_expert_config&                  s
   prach_sch(cell_cfg),
   // The SRS allocator is only used if srs_prohibit_time is set.
   srs_alloc(cell_cfg, sched_cfg.ue.srs_prohibit_time),
-  pg_sch(cell_cfg, pdcch_sch)
+  srs_sch(cell_cfg, ue_cell_db),
+  uci_sch(cell_cfg, uci_alloc, ue_cell_db),
+  uci_sel(uci_timeout_fwd,
+          uci_indication_selector::DEFAULT_ACK_TIMEOUT_SLOTS,
+          MAX_PUCCH_PDUS_PER_SLOT,
+          cell_cfg.max_nof_ue_contexts,
+          sched_cfg.ue.pucch_sinr_threshold_dB),
+  pg_sch(cell_cfg, pdcch_sch),
+  // Note: Created before the event manager, which dispatches to the handler that it owns.
+  ue_sched(ue_sched_.add_cell(ue_cell_scheduler_creation_request{msg.cell_index,
+                                                                 &pdcch_sch,
+                                                                 &pucch_alloc,
+                                                                 &uci_alloc,
+                                                                 &srs_alloc,
+                                                                 &srs_sch,
+                                                                 &uci_sch,
+                                                                 &res_grid,
+                                                                 &metrics,
+                                                                 &event_logger,
+                                                                 &ra_ue_repo,
+                                                                 &ue_cell_db})),
+  ev_mng(cell_cfg,
+         res_grid,
+         ue_cell_db,
+         si_sch,
+         pg_sch,
+         ra_sch,
+         srs_sch,
+         ue_sched->get_event_handler(),
+         ra_ue_repo,
+         uci_sel,
+         metrics,
+         event_logger,
+         *cell_tracer,
+         logger)
 {
-  // Register new cell in the UE scheduler.
-  ue_sched = ue_sched_.add_cell(ue_cell_scheduler_creation_request{msg.cell_index,
-                                                                   &pdcch_sch,
-                                                                   &pucch_alloc,
-                                                                   &uci_alloc,
-                                                                   &srs_alloc,
-                                                                   &res_grid,
-                                                                   &metrics,
-                                                                   &event_logger,
-                                                                   cell_tracer.get(),
-                                                                   &ra_ue_repo,
-                                                                   &ue_cell_db});
+  // The event manager consumes the UCI timeouts detected by the UCI indication handler.
+  uci_timeout_fwd.connect(ev_mng);
 }
 
 void cell_scheduler::handle_pws_si_update_request(const pws_si_scheduling_update_request& msg)
 {
-  si_sch.handle_pws_si_update_request(msg);
+  ev_mng.handle_pws_si_update_request(msg);
 }
 
 void cell_scheduler::handle_si_update_request(const si_scheduling_update_request& msg)
 {
-  si_sch.handle_si_update_request(msg);
+  ev_mng.handle_si_update_request(msg);
 }
 
 void cell_scheduler::handle_slice_reconfiguration_request(const du_cell_slice_reconfig_request& slice_reconf_req)
 {
-  ue_sched->handle_slice_reconfiguration_request(slice_reconf_req);
+  ev_mng.handle_slice_reconfiguration_request(slice_reconf_req);
 }
 
 void cell_scheduler::handle_crc_indication(const ul_crc_indication& crc_ind)
 {
-  // Forward CRCs to RA scheduler. RA scheduler will auto-select the ones associated with the RA procedure.
-  ra_sch.handle_crc_indication(crc_ind);
-  // Forward CRCs to UE scheduler.
-  ue_sched->get_feedback_handler().handle_crc_indication(crc_ind);
+  // The cell event manager selects the CRCs of the RA procedure and those of the UEs of this cell.
+  ev_mng.handle_crc_indication(crc_ind);
 }
 
 void cell_scheduler::run_slot(slot_point_extended sl_tx_ext)
 {
   // Mark the start of the slot.
   slot_point sl_tx         = sl_tx_ext.without_hyper_sfn();
-  auto       slot_start_tp = std::chrono::high_resolution_clock::now();
+  auto       slot_start_tp = std::chrono::steady_clock::now();
 
   // If there are skipped slots, handle them. Otherwise, the cell grid and cached results are not correctly cleared.
   if (OCUDU_LIKELY(res_grid.slot_tx().valid())) {
     while (OCUDU_UNLIKELY(res_grid.slot_tx() + 1 != sl_tx)) {
-      slot_point skipped_slot = res_grid.slot_tx() + 1;
+      const slot_point skipped_slot = res_grid.slot_tx() + 1;
       logger.info("cell={}: Detected skipped slot={}.", cell_cfg.cell_index, skipped_slot);
+
+      // Account for the skipped slot in the metrics.
+      metrics.handle_skipped_slot(sl_tx_ext - static_cast<uint32_t>(sl_tx - skipped_slot));
+
       reset_resource_grid(skipped_slot);
     }
   } else {
@@ -90,6 +116,9 @@ void cell_scheduler::run_slot(slot_point_extended sl_tx_ext)
 
   // > Start with clearing old allocations from the grid.
   reset_resource_grid(sl_tx);
+
+  // > Process the events pending for this cell.
+  ev_mng.run_slot(sl_tx);
 
   // > SSB scheduling.
   ssb_sch.run_slot(res_grid, sl_tx);
@@ -109,11 +138,20 @@ void cell_scheduler::run_slot(slot_point_extended sl_tx_ext)
   // > Schedule Paging.
   pg_sch.run_slot(res_grid, sl_tx_ext.hyper_sfn());
 
+  // > Schedule the periodic UCI (SR and CSI) before any UL grant.
+  uci_sch.run_slot(res_grid);
+
+  // > Schedule the periodic SRS before any UE grant.
+  srs_sch.run_slot(res_grid);
+
   // > Schedule UE DL and UL data.
   ue_sched->run_slot(sl_tx);
 
+  // > Update the UCI indication handler with the UCI grants of the finished slot.
+  uci_sel.handle_result(sl_tx, last_result());
+
   // > Mark stop of the slot processing
-  auto slot_stop_tp = std::chrono::high_resolution_clock::now();
+  auto slot_stop_tp = std::chrono::steady_clock::now();
   auto slot_dur     = std::chrono::duration_cast<std::chrono::microseconds>(slot_stop_tp - slot_start_tp);
 
   // > Log processed events.
@@ -129,7 +167,7 @@ void cell_scheduler::run_slot(slot_point_extended sl_tx_ext)
 
 void cell_scheduler::handle_error_indication(slot_point sl_tx, scheduler_slot_handler::error_outcome event)
 {
-  ue_sched->handle_error_indication(sl_tx, event);
+  ev_mng.handle_error_indication(sl_tx, event);
 }
 
 void cell_scheduler::reset_resource_grid(slot_point sl_tx)
@@ -158,6 +196,7 @@ void cell_scheduler::start()
   active = true;
   logger.info("cell={}: Cell scheduling was activated.", cell_cfg.cell_index);
 
+  ev_mng.start();
   ue_sched->start();
 }
 
@@ -172,6 +211,9 @@ void cell_scheduler::stop()
   active = false;
   logger.info("cell={}: Cell scheduling was deactivated.", cell_cfg.cell_index);
 
+  // Halt any pending events associated with this cell.
+  ev_mng.stop();
+
   // Stop sub-schedulers.
   ssb_sch.stop();
   si_sch.stop();
@@ -179,6 +221,8 @@ void cell_scheduler::stop()
   ra_sch.stop();
   pg_sch.stop();
   ue_sched->stop();
+  srs_sch.stop();
+  uci_sch.stop();
 
   // Reset resource grid and sub-allocators.
   res_grid.stop();

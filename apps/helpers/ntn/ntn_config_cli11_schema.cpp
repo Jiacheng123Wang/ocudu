@@ -65,20 +65,20 @@ CLI::Option* ocudu::add_ntn_timestamp_option(CLI::App&                          
                                              std::optional<std::chrono::system_clock::time_point>& dest,
                                              const std::string&                                    desc)
 {
-  return app
-      .add_option_function<std::string>(
-          name,
-          [&dest, name](const std::string& value) {
-            if (is_number(value)) {
-              const auto ms_since_epoch = parse_int<int64_t>(value);
-              report_fatal_error_if_not(ms_since_epoch.has_value(),
-                                        fmt::format("Invalid {} value '{}'", name, value).c_str());
-              dest = std::chrono::system_clock::time_point(std::chrono::milliseconds(*ms_since_epoch));
-            } else {
-              dest = parse_timestamp_ms(value).value();
-            }
-          },
-          desc)
+  return add_option_function<std::string>(
+             app,
+             name,
+             [&dest, name](const std::string& value) {
+               if (is_number(value)) {
+                 const auto ms_since_epoch = parse_int<int64_t>(value);
+                 report_fatal_error_if_not(ms_since_epoch.has_value(),
+                                           fmt::format("Invalid {} value '{}'", name, value).c_str());
+                 dest = std::chrono::system_clock::time_point(std::chrono::milliseconds(*ms_since_epoch));
+               } else {
+                 dest = parse_timestamp_ms(value).value();
+               }
+             },
+             desc)
       ->check([](const std::string& input) -> std::string {
         return (!is_number(input) && !is_valid_timestamp(input)) ? "Invalid timestamp format" : std::string{};
       });
@@ -86,77 +86,69 @@ CLI::Option* ocudu::add_ntn_timestamp_option(CLI::App&                          
 
 void ocudu::configure_cli11_geodetic_coordinates(CLI::App& app, geodetic_coordinates_t& location, bool with_altitude)
 {
-  add_option(app, "--latitude", location.latitude, "Latitude [degree]")
-      ->capture_default_str()
-      ->check(CLI::Range(-90.0, 90.0));
-  add_option(app, "--longitude", location.longitude, "Longitude [degree]")
-      ->capture_default_str()
-      ->check(CLI::Range(-180.0, 180.0));
+  add_option(app, "--latitude", location.latitude, "Latitude [degree]")->capture_default_str()->range(-90.0, 90.0);
+  add_option(app, "--longitude", location.longitude, "Longitude [degree]")->capture_default_str()->range(-180.0, 180.0);
   if (with_altitude) {
-    add_option(app, "--altitude", location.altitude, "Altitude [m]")
-        ->capture_default_str()
-        ->check(CLI::Range(-1000.0, 20000.0));
+    add_option(app, "--altitude", location.altitude, "Altitude [m]")->capture_default_str()->range(-1000.0, 20000.0);
   }
 }
 
 static void configure_cli11_ta_info(CLI::App& app, ta_info_t& ta_info)
 {
-  add_option(app, "--ta_common", ta_info.ta_common, "TA common")
-      ->capture_default_str()
-      ->check(CLI::Range(0.0, 270730.0));
+  add_option(app, "--ta_common", ta_info.ta_common, "TA common")->capture_default_str()->range(0.0, 270730.0);
   add_option(app, "--ta_common_drift", ta_info.ta_common_drift, "Drift rate of the common TA")
       ->capture_default_str()
-      ->check(CLI::Range(-51.4606, 51.4606));
+      ->range(-51.4606, 51.4606);
   add_option(app, "--ta_common_drift_variant", ta_info.ta_common_drift_variant, "Drift rate variation of the common TA")
       ->capture_default_str()
-      ->check(CLI::Range(0.0, 0.57898));
+      ->range(0.0, 0.57898);
   add_option(app, "--ta_common_offset", ta_info.ta_common_offset, "Constant offset added to TA common")
       ->capture_default_str()
-      ->check(CLI::Range(0.0, 10000.0));
+      ->range(0.0, 10000.0);
 }
 
 static void configure_cli11_ephemeris_info_ecef(CLI::App& app, ecef_coordinates_t& ephemeris_info)
 {
   add_option(app, "--pos_x", ephemeris_info.position_x, "X Position of the satellite [m]")
       ->required()
-      ->check(CLI::Range(-43620761.6, 43620759.3));
+      ->range(-43620761.6, 43620759.3);
   add_option(app, "--pos_y", ephemeris_info.position_y, "Y Position of the satellite [m]")
       ->required()
-      ->check(CLI::Range(-43620761.6, 43620759.3));
+      ->range(-43620761.6, 43620759.3);
   add_option(app, "--pos_z", ephemeris_info.position_z, "Z Position of the satellite [m]")
       ->required()
-      ->check(CLI::Range(-43620761.6, 43620759.3));
+      ->range(-43620761.6, 43620759.3);
   add_option(app, "--vel_x", ephemeris_info.velocity_vx, "X Velocity of the satellite [m/s]")
       ->required()
-      ->check(CLI::Range(-7864.32, 7864.26));
+      ->range(-7864.32, 7864.26);
   add_option(app, "--vel_y", ephemeris_info.velocity_vy, "Y Velocity of the satellite [m/s]")
       ->required()
-      ->check(CLI::Range(-7864.32, 7864.26));
+      ->range(-7864.32, 7864.26);
   add_option(app, "--vel_z", ephemeris_info.velocity_vz, "Z Velocity of the satellite [m/s]")
       ->required()
-      ->check(CLI::Range(-7864.32, 7864.26));
+      ->range(-7864.32, 7864.26);
 }
 
 static void configure_cli11_ephemeris_info_orbital(CLI::App& app, orbital_coordinates_t& ephemeris_info)
 {
   add_option(app, "--semi_major_axis", ephemeris_info.semi_major_axis, "Semi-major axis of the satellite [m]")
       ->required()
-      ->check(CLI::Range(6500000.0, 42998632.07));
+      ->range(6500000.0, 42998632.07);
   add_option(app, "--eccentricity", ephemeris_info.eccentricity, "Eccentricity of the satellite [-]")
       ->required()
-      ->check(CLI::Range(0.0, 0.01500510825));
+      ->range(0.0, 0.01500510825);
   add_option(app, "--periapsis", ephemeris_info.periapsis, "Periapsis of the satellite [rad]")
       ->required()
-      ->check(CLI::Range(0.0, 6.28407400155));
+      ->range(0.0, 6.28407400155);
   add_option(app, "--longitude", ephemeris_info.longitude, "Longitude of the satellites angle of ascending node [rad]")
       ->required()
-      ->check(CLI::Range(0.0, 6.28407400155));
+      ->range(0.0, 6.28407400155);
   add_option(app, "--inclination", ephemeris_info.inclination, "Inclination of the satellite [rad]")
       ->required()
-      ->check(CLI::Range(-1.57101850624, 1.57101848283));
+      ->range(-1.57101850624, 1.57101848283);
   add_option(app, "--mean_anomaly", ephemeris_info.mean_anomaly, "Mean anomaly of the satellite [rad]")
       ->required()
-      ->check(CLI::Range(0.0, 6.28407400155));
+      ->range(0.0, 6.28407400155);
 }
 
 static void add_ephemeris_subcommands(CLI::App& app, std::optional<ntn_ephemeris_info_t>& dest)
@@ -174,25 +166,27 @@ static void add_ephemeris_subcommands(CLI::App& app, std::optional<ntn_ephemeris
 
 void ocudu::configure_cli11_ntn_satellite_args(CLI::App& app, ntn_satellite_config& sat)
 {
-  app.add_option("--satellite_idx",
-                 sat.satellite_idx,
-                 "Satellite index. Required when defining a satellite object; optional when referencing or "
-                 "inline-defining a satellite, in which case it is mutually exclusive with epoch_timestamp, "
-                 "ephemeris_info, gateway_location and ta_info.");
+  add_option(app,
+             "--satellite_idx",
+             sat.satellite_idx,
+             "Satellite index. Required when defining a satellite object; optional when referencing or "
+             "inline-defining a satellite, in which case it is mutually exclusive with epoch_timestamp, "
+             "ephemeris_info, gateway_location and ta_info.");
 
   add_ntn_timestamp_option(app,
                            "--epoch_timestamp",
                            sat.epoch_timestamp,
                            "Epoch timestamp (Unix ms or ISO 8601: YYYY-MM-DDTHH:MM:SS[.mmm])");
 
-  app.add_option_function<std::string>(
-         "--propagator_type",
-         [&sat](const std::string& value) {
-           sat.propagator_type = (value == "keplerian") ? ocudu_ntn::orbit_propagator_type::keplerian
-                                                        : ocudu_ntn::orbit_propagator_type::rk4;
-         },
-         "Orbit propagator: rk4 or keplerian")
-      ->check(CLI::IsMember({"rk4", "keplerian"}));
+  add_option_function<std::string>(
+      app,
+      "--propagator_type",
+      [&sat](const std::string& value) {
+        sat.propagator_type = (value == "keplerian") ? ocudu_ntn::orbit_propagator_type::keplerian
+                                                     : ocudu_ntn::orbit_propagator_type::rk4;
+      },
+      "Orbit propagator: rk4 or keplerian")
+      ->enum_values({"rk4", "keplerian"});
 
   add_ephemeris_subcommands(app, sat.ephemeris_info);
 
@@ -209,20 +203,11 @@ void ocudu::configure_cli11_ntn_satellite_args(CLI::App& app, ntn_satellite_conf
 
 void ocudu::configure_cli11_ntn_satellites_args(CLI::App& app, std::vector<ntn_satellite_config>& ntn_satellites)
 {
-  add_option_cell(
+  add_option_object_list<ntn_satellite_config>(
       app,
       "--satellites",
-      [&ntn_satellites](const std::vector<std::string>& values) {
-        ntn_satellites.resize(values.size());
-        for (unsigned i = 0, e = values.size(); i != e; ++i) {
-          CLI::App subapp("NTN satellite", "satellite #" + std::to_string(i));
-          subapp.config_formatter(create_yaml_config_parser());
-          subapp.allow_config_extras(CLI::config_extras_mode::capture);
-          configure_cli11_ntn_satellite_args(subapp, ntn_satellites[i]);
-          std::istringstream ss(values[i]);
-          subapp.parse_from_stream(ss);
-        }
-      },
+      ntn_satellites,
+      configure_cli11_ntn_satellite_args,
       "Globally-defined NTN satellites referenced by satellite_idx in cell ntn configs");
 }
 
