@@ -81,10 +81,19 @@ mkdir -p "$LOGDIR"     # --log.filename never creates it, and a missing one fail
 # allocate the required NG-U network resources". That leg is worthless (no contract report at all) and
 # the failure looks like a configuration problem. A stray gNB also competes for the GPU, so an offline
 # arm running next to it reads the wrong numbers (5.8.20 (4)). One check here covers both.
-stray=$(pgrep -f "apps/gnb/gnb|ul_chain_replay" 2>/dev/null | head -5)
+# EXACT process names, never a command-line pattern. Measured 2026-09-24, right after this check was
+# added: `pgrep -f "apps/gnb/gnb|ul_chain_replay"` matched the very shell that was RUNNING the pattern
+# (its own command line contains that string), so the check reported a "stale gNB" that was not a gNB
+# and refused a real leg. -x matches the process NAME only, which a shell, an editor, a grep or a
+# history echo can never be.
+stray=""
+for _n in gnb ul_chain_replay; do
+  _p=$(pgrep -x "$_n" 2>/dev/null | head -5)
+  [ -n "$_p" ] && stray="$stray $_p"
+done
 if [ -n "$stray" ]; then
   echo "REFUSING to run: another gNB (or a GPU replay) is already running:" >&2
-  ps -o pid,etime,command -p $(echo $stray | tr '\n' ',' | sed 's/,$//') 2>/dev/null | sed 's/^/  /' >&2
+  ps -o pid,etime,command -p $(echo $stray | tr ' ' ',' | sed 's/^,//;s/,$//') 2>/dev/null | sed 's/^/  /' >&2
   echo "  A stale one holds the GTP-U socket (192.168.64.1:2152) and the GPU:" >&2
   echo "    the next leg dies with 'Failed to bind UDP socket ... Address already in use'," >&2
   echo "    and any offline arm run beside it reads the wrong numbers." >&2
