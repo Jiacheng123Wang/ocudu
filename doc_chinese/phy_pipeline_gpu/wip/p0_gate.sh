@@ -19,7 +19,10 @@
 #   B2  (only with --vs) dft + (the rest) is within +-10% of the factory arm's merged_hop
 #   C1  a leg that declares OCUDU_UL_PHASE_SEGMENTS=1 actually records the phase segments
 #   C2  (P0-5, registered in phy_latency/session_handoff_2026-09-24-1.md 6.0 (1)) the samples the lane probe
-#       could pair with a lane EQUAL the phase-segment samples - the two probes describing one population
+#       could pair with a lane EQUAL the samples the pipeline probe announced to it - the two probes describing
+#       one population. Read from the SAME line (paired `samples=` vs `phase_samples=`); the `[ul_time_frequency]`
+#       line is a snapshot taken earlier in the shutdown, and C2b reports - and bounds by SIGN - that delta
+#   C2b the printed `[ul_time_frequency]` count is an earlier snapshot of the same counter: printed <= announced
 # "Cannot read" is RED, never absent - the lesson of 5.9.97.
 set -u
 
@@ -138,13 +141,33 @@ if [ -n "${knob_ph:-}" ] && [ "${knob_ph:-0}" != "0" ]; then
   # paired population must BE the phase-segment population - a subset would mean the join drops samples, and a
   # superset that it pairs lanes with samples that do not exist. "Cannot read" is RED, never absent (5.9.97):
   # a leg that asked for the segments and printed no pairing line is a failure of the instrument, not a pass.
-  if [ -z "${n_paired:-}" ] || [ -z "${n_phase:-}" ]; then
-    check "C2 (P0-5) paired samples == phase-segment samples" "equal, on a leg with the segments on" RED \
-          "cannot read: paired='${n_paired:-<absent>}' phase='${n_phase:-<absent>}' - the paired line is: ${paired_line:-<none>}"
+  # The counts compared are the ones the SAME line prints: `samples=` (what the lane probe could pair) against
+  # `phase_samples=` (what the pipeline probe announced to it). They are read at the same instant, which is what
+  # makes the criterion exact.
+  #
+  # NOT against the `[ul_time_frequency] samples=` line, and that is a reading rule rather than a relaxation:
+  # gnb.cpp calls ul_pipeline_probe::report() EARLY in the shutdown while the lane probe reports at exit, and the
+  # observer keeps counting until then - so the series line is a SNAPSHOT that can be short by the samples
+  # finalized in between (measured on `p05-pair`: 73528 printed against 73529 paired/announced, i.e. ONE sample,
+  # 0.0014%). Comparing against it read a false C2 FAIL on a leg whose pairing was exact. The delta is REPORTED
+  # below and checked for sign only (the series cannot shrink), so nothing is hidden and no threshold is invented.
+  if [ -z "${n_paired:-}" ] || [ -z "${n_announced:-}" ]; then
+    check "C2 (P0-5) paired samples == the samples announced to the lane probe" "equal (same line, same instant)" RED \
+          "cannot read: paired='${n_paired:-<absent>}' announced='${n_announced:-<absent>}' - the paired line is: ${paired_line:-<none>}"
   else
-    check "C2 (P0-5) paired samples == phase-segment samples" "equal, on a leg with the segments on" \
-          "$([ "$n_paired" = "$n_phase" ] && echo PASS || echo FAIL)" \
-          "paired=$n_paired, phase-segment samples=$n_phase, announced to the lane probe=${n_announced:-<none>}; $paired_line"
+    check "C2 (P0-5) paired samples == the samples announced to the lane probe" "equal (same line, same instant)" \
+          "$([ "$n_paired" = "$n_announced" ] && echo PASS || echo FAIL)" \
+          "paired=$n_paired, announced=$n_announced, [ul_time_frequency] printed=${n_phase:-<none>}; $paired_line"
+    # The structural half: the printed series is an earlier snapshot of the same counter, so it can only be
+    # SMALLER. The other direction would mean the three series shrank - impossible, hence a real defect.
+    if [ -z "${n_phase:-}" ]; then
+      check "C2b (P0-5) the printed phase series is an earlier snapshot of the same counter" "printed <= announced" \
+            INFO "the leg prints no [ul_time_frequency] line (C1 already says whether the segments were on)"
+    else
+      check "C2b (P0-5) the printed phase series is an earlier snapshot of the same counter" "printed <= announced" \
+            "$([ "$n_phase" -le "$n_announced" ] && echo PASS || echo FAIL)" \
+            "printed=$n_phase, announced=$n_announced (delta $((n_announced - n_phase)) sample(s) were finalized between the pipeline report and the lane report; the report runs at the start of the shutdown, the lane report at exit)"
+    fi
   fi
 else
   check "C1 a leg that declares the phase segments actually records them" "OCUDU_UL_PHASE_SEGMENTS=1 -> segments present" INFO \

@@ -13924,3 +13924,47 @@ ON 臂**确实编码了信号**（`token_release_stats()`）；"哪一端赢"只
 
 **③ 顺带更正一处口径**：旧 `00_status.md` §5/§7 与 `01_plan.md` §0 说"V1 = 2675 µs 的 −20% ⇒ ≤ 2150"，
 与 §5.9.130 ⑤ 的登记一致；**阈值一字未改**（判据纪律：不为过关改阈值）。本整理**只搬文档、不动判据**。
+
+#### 5.9.142 P0-5 的**空口读数**（腿 `p05-pair`）：配对精确相等；并作废两个被当"事实"的比例
+
+**① 腿与门**：`gnb_gpu_p05-pair_0925_0034`（n1 默认工况 + `OCUDU_UL_PHASE_SEGMENTS=1`，二进制戳 `93c909e423`，
+到 HEAD 只差文档/脚本）。`p0_gate.sh p05-pair` → **10/10 PASS**。
+
+**② 判据 1（配对 n == 相位 n）：✅ 精确相等**
+
+```
+[ul_gpu_lane] paired with the phase segments (P0-5): samples=73529 of phase_samples=73529
+              (no lane for the slot=0, lane older than 2s=0) over lanes=100224
+              (slot named=100224, not named=0); awaiting at exit=511, evicted=25985
+```
+* 零丢失、100224/100224 条车道都报出了 slot（`lane_host_clock::lane_slot` 在空口上成立）；
+* 配对**值**与三段序列逐位一致（t2f/ce/eq_demap 中位 1095.1/3278.0/907.9）⇒ hook 交出的是同一批样本；
+* 账目：100224 次插入 = 匹配 73529 + 淘汰 25985 + 在等 511 + **被同 slot 后一条车道覆盖 199**（0.2%，登记为 Q13）。
+
+**③ 判据 2：⚠ 两个"指示性"读数在 n1 上都不复现**
+
+* `busy/residency` 中位 **0.643**（全部车道 0.647）⇒ n1 车道的窗口里有 ~260 µs 的**设备空闲**；
+  而 n78 加压腿（`s85`，未配对）是 **0.93** ⇒ **这个比值随腿/负载变，"~95% busy" 不能跨腿引用**。
+* `eq_demap/residency` 中位 **1.086**（n78 上 1231.0/1127.5 = 1.092）⇒ 稳定的是 **≈1.09×**，
+  不是"eq_demap ≈ residency"。
+* ⇒ **D 项（本跳设备执行）在 n1 上是 `busy` = 517 µs（中位）**，不是 residency 836、也不是 n78 的 1125；
+  引用时必须写清哪条腿（Q14）。
+
+**④ 判据 3（零数据面 + 不动提交数）**：`cbs/lane=2.00 (max=2) dropped=0`、`crossings 0.00+0.00/跳`、
+`radio inputs 100% 走交棒`、`zero-copy 0 failures`、`ce device estimates 全 device`；
+离线那半边与 pristine HEAD 二进制**逐字节相同**（开发文档 §6.3 ④）。
+
+**⑤ 这条腿暴露并修掉了门里的一处**读数**缺陷（判据未动）**：C2 原来把车道报告的 `samples=`（atexit）
+与 `[ul_time_frequency] samples=`（收尾开头打印的快照）相比，于是这条腿上读出 **73529 vs 73528 = 假 FAIL**。
+代码事实：`gnb.cpp` 在收尾开头调 `ul_pipeline_probe::report()`，车道探针在 atexit 报告，观察者在这两者之间仍会计数。
+⇒ C2 现在只比**同一行上的两个数**（`samples=` vs `phase_samples=`），并加 **C2b**：打印值必须 **≤ announced**
+（序列只增不减；反向即真缺陷）——**没有引入任何阈值**。复验：`p05-pair` 10/10、**未装仪表的旧腿 `s85` 仍 RED**、
+非相位腿仍 INFO ⇒ 门没有被软化。
+
+**⑥ 腿的效力说明**：契约 **NOT MET (1 of 8)**，红的是 `radio sample continuity: 7 gaps`
+（池 `held_max=8 free_min=0 starved_events=93`、`[ul_gpu_pipeline] stale=933` max_stale 84 ms、
+`[ul_rx_wait] max=101.6 ms`）。**不是 P0-5 带来的**（数据面逐字节相同），且 ~101 ms 的 rx_wait 最大值在
+**三条更早的 n1 腿上都存在**（`s83/s84/s87`：101591/101670/101319 µs，其中两条 gaps=0、stale=0）
+⇒ 停顿时不时落在跳上。另：该腿跑了 **226 s、100233 个 PUSCH 槽（~443 跳/s）**，比历史默认配方（~73 跳/s）重，
+池/stale 不可直接比；**中位数可比**，且与 `s87-n1phases` 几乎逐位相同（residency 836.7 vs 837.3、busy 517.4 vs 517.9、
+t2f 1095.1 vs 1093.0、ce 3278.0 vs 3228.3、`[ul_gpu_pipeline]` 5248.0 vs 5218.0）⇒ **P0-5 没有移动任何中位数**。

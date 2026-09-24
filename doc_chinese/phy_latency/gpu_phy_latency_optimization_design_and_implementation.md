@@ -96,8 +96,8 @@
 
 | 量 | 值 | 读法 |
 |---|---|---|
-| `[ul_gpu_lane] residency` 中位 | **≈1125 µs** | 车道那条命令缓冲的寿命；**与负载几乎无关**（轻载 `s75` 也是 1121）。⚠ 它的**样本总体与相位探针不同**（140204 跳 vs 97331），只能作量级比较——**这一条已由 P0-5 解决**（§6.3：按 slot 配对后同总体）|
-| `[ul_gpu_lane] busy split` | `merged_hop ≈ 1030 µs`（97% of busy）+ `ch_wt ≈ 37 µs` | 车道驻留里约 95% 是 GPU 在执行 ⇒ 车道窗口是**执行受限**，不是排队受限 |
+| `[ul_gpu_lane] residency` 中位 | **≈1125 µs**（n78 加压，`s82`）| 车道那条命令缓冲的寿命；**与负载几乎无关**（轻载 `s75` 也是 1121；n1 默认腿 `p05-pair` 配对后 835.5）。⚠ 它的**样本总体与相位探针不同**（140204 跳 vs 97331）——**这一条已由 P0-5 解决**（§6.3：按 slot 配对后同总体），引用时请用**配对后**的那一组 |
+| `[ul_gpu_lane] busy split` | `merged_hop ≈ 1030 µs`（97% of busy）+ `ch_wt ≈ 37 µs`（n78 加压，`s82`）| ⚠ **2026-09-25 更正（P0-5 的配对读数）**：这里原来写"residency 里 ~95% 是 busy ⇒ 执行受限、不是排队受限"。**配对后该结论只在 n78 加压腿上成立**（`s85-p0phases` 的未配对读数是 0.93），**在 n1 默认腿上不成立**：`p05-pair` 配对后 `busy/residency` 中位 **0.643**（全部车道的同一比值 0.647）⇒ n1 上车道的窗口里有 **~260 µs 的设备空闲**（一跳两条缓冲之间的 fence/排队）。**这个比值随腿/随负载变，必须逐腿读**（§6.3 ⑥）|
 | `mmse_time_sum defer_wait` 中位 | ≈1227 µs | 宿主等"延迟链"的时间；**与 residency 是同一窗口的两个视角，不可相加** |
 | 车道占用 / 余量 | 58.8% / 41.2%（`s82`）| **"可服务 886 跳/s，只要求 520.5"** ⇒ 车道的**吞吐**有余量，紧的是**时延** |
 | `starved_takes` / `starved_events` | 24 / 17（`s82`）| 池饥饿（`held_max=8` 触顶）|
@@ -206,7 +206,7 @@
 | `[ul_gpu_pipeline]` | 同上 | **车道模式下的同一跨度** | 本工作流的 **V1 就用它**（重载基线中位 2675 µs）|
 | `[ul_time_frequency]` / `[ul_channel_estimation]` / `[ul_equalization_demod]` / `[ul_ldpc_decode]` | 同上的 staged probes，`OCUDU_UL_PHASE_SEGMENTS=1` **强制开启**（`gpu` 模式默认关）| 三段 + 解码段 | **三段之和应 ≈ `[ul_gpu_pipeline]`**（实测 2657 vs 2675 = 99.3%）；**它们在时间上顺序相接，不能理解为可重叠的三块**（§2.3.1）|
 | `[ul_gpu_lane] residency` | `lib/phy/metal/ocudu_metal_lane_probe.{h,mm}` | 车道那条命令缓冲的**寿命** | 与负载几乎无关（轻 1121 / 重 1125 µs）|
-| `[ul_gpu_lane] busy split` | 同上 | 按**组**分：`ch_wt`（权重）与 `merged_hop`（合并跳）；诊断拆分臂还多一个 `dft` | **`merged_hop` ≈ 1030 µs = 车道 busy 的 97%**；residency 里 ~95% 是 busy ⇒ **执行受限、不是排队受限**。**内部不可再分**（D1 把一跳做成一条缓冲，Metal 只给整条缓冲的时间）⇒ 见 §6.2 |
+| `[ul_gpu_lane] busy split` | 同上 | 按**组**分：`ch_wt`（权重）与 `merged_hop`（合并跳）；诊断拆分臂还多一个 `dft` | **`merged_hop` ≈ 1030 µs = 车道 busy 的 97%**（n78 加压）。⚠ **2026-09-25 更正**：`residency` 里"~95% 是 busy"**只在 n78 加压腿上成立**；n1 默认腿配对后是 **0.643** ⇒ 别把它当恒等式（§2.4/§6.3 ⑥）。**内部不可再分**（D1 把一跳做成一条缓冲，Metal 只给整条缓冲的时间）⇒ 见 §6.2 |
 | `[ul_gpu_lane] paired … (P0-5)` | 同上（§6.3）| **配对后**的 `residency`/`busy`/三段与两个比值 | 只有这一组才和相位探针**同总体**；`samples=… of phase_samples=…` 是配对的**完整账**（没配上的原因逐项打印）|
 | `[ul_gpu_lane] queue / gap / host` | 同上 | 各阶段之间的**空隙**与排队 | `queue: weights commit → weights start` 等；`gap` 的负值正常（时间基准不同）|
 | `[mmse_time_sum] defer_wait distribution` | `port_channel_estimator_metal_mmse_impl.cpp` | 宿主**等延迟链**的时间分布 | **与 residency 是同一窗口的两个视角**（宿主视角 / 设备视角）⇒ **不可相加** |
@@ -425,6 +425,75 @@ bash doc_chinese/phy_pipeline_gpu/wip/p0_gate.sh <label>        # 读 C2（配�
 ```
 **先写死的判读**：C2 绿 ⇒ 两个探针从此描述同一批跳，D 项（本跳设备执行）的分母可用；
 C2 红 ⇒ 先查 `paired …` 行里的分项（`no lane for the slot` / `lane older than 2s` / `awaiting at exit`），再决定是配对的哪个前提错了。
+
+**⑥ 空口读数（腿 `p05-pair`，n1 默认工况 + `OCUDU_UL_PHASE_SEGMENTS=1`，2026-09-24 夜；⑤ 要的那条腿已飞）**
+
+腿：`gnb_gpu_p05-pair_0925_0034`（二进制戳 `93c909e423`，到当前 HEAD 只差文档；`[leg] regime=default`、
+`cell config = configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml`、`knob OCUDU_UL_PHASE_SEGMENTS=1`）。
+门：`p0_gate.sh p05-pair` → **10/10 PASS**（A1/A2/B1/C1/C2/C2b + INFO）。
+
+**判据 1（配对 n == 相位 n）：✅ 成立，且是精确相等**
+
+```
+[ul_gpu_lane] paired with the phase segments (P0-5): samples=73529 of phase_samples=73529
+              (no lane for the slot=0, lane older than 2s=0) over lanes=100224
+              (slot named=100224, not named=0); awaiting at exit=511, evicted=25985
+```
+
+* `samples == phase_samples`（73529 == 73529）；**配对零丢失**：`no lane for the slot=0`、`lane older than 2s=0`；
+  **100224/100224 条车道都报出了 slot**（`lane_host_clock::lane_slot` 在空口上工作）⇒ 按 slot 配对的接线成立。
+* 配对**值**也对：`paired t2f/ce/eq_demap` 的中位/均值与 `[ul_time_frequency]`/`[ul_channel_estimation]`/`[ul_equalization_demod]`
+  **逐位一致**（1046.9/1095.1、2933.3/3278.0、920.5/907.9）⇒ hook 交出去的是同一批样本，不只是同一个数。
+* 账目：100224 次插入 = 匹配 73529 + 淘汰 25985 + 退出时在等 511 + **199 行被"同 slot 的后一条车道"覆盖**（0.2%，见 §8 Q13）。
+  `evicted` 26% ≈ 非 CRC-OK 的跳（73529/100224 = 73.4% 匹配率），**且一次都没有因为淘汰而配不上**（`no lane=0`）。
+
+**判据 2（在配对样本上重算两个比值）：⚠ 两个"指示性"读数在 n1 上都不复现**
+
+```
+[ul_gpu_lane] paired ratios (P0-5): busy/residency median=0.643 over ALL lanes' own ratio=0.647; eq_demap/residency median=1.086
+[ul_gpu_lane] paired reading (P0-5): "residency is ~95% busy" (0.95 +- 0.05) is NOT reproduced (0.643);
+                                     "eq_demap ~ residency" (1.00 +- 0.05) is NOT reproduced (1.086)
+```
+
+* **`busy/residency` = 0.643**（全部车道的同一比值 0.647，配对子集没有偏）⇒ 在这条 n1 默认腿上，
+  车道 residency（中位 835.5 µs）里**只有 ~64% 是设备在执行**，另外 ~260 µs 是**车道自身窗口里的设备空闲**
+  （一跳两条缓冲：`ch_wt` → `merged_hop`，中间有 fence/等待；`queue: weights commit → weights start` 中位仅 24.2 µs，
+  所以不是提交延迟）。⚠ 而 **n78 加压腿**（`s85-p0phases`，未配对）读到的同一比值是 **0.93**（1047.4/1127.5）
+  ⇒ **这个比值是随腿/随负载变的**，"residency 里 ~95% 是 busy"**不能跨腿引用**（§2.4/§4.1 已按此更正）。
+* **`eq_demap/residency` = 1.086**：`eq_demap` 是**宿主墙钟**窗口（`record_ce_end` → 第一次 LDC 解码调用），
+  比设备侧的 residency **长 ~9%** ⇒ "eq_demap ≈ residency" 不是恒等式。注意这个比值在**两条腿上都 ≈1.09**
+  （n1 1.086；n78 `s85` 1231.0/1127.5 = 1.092）⇒ **稳定的是 eq_demap ≈ 1.09 × residency，不是 ≈ residency**。
+* **对 D 项预算的影响（本节最重要的结论）**：在 n1 默认腿上，**一跳的设备执行 ≈ `busy` = 517 µs（中位）**，
+  不是 residency 836，更不是 n78 加压腿的 1125。⇒ 引用 D 项时必须写清是**哪条腿的 busy**，
+  并且"residency ≈ D"这个等式要换成 **`residency = D + 车道自身的空闲（fence/排队）`**。
+
+**判据 3（零数据面 + 不动提交数）：✅**
+
+* `cbs/lane=2.00 (max=2) dropped=0`（V4 不变）；`crossings 0.00 read(s) + 0.00 write(s) per hop`；
+  `dft radio inputs` 100.0% 走交棒；`zero-copy wraps 0 failures`；`ce device estimates: 1202588 device, 0 host`。
+* （离线那半边见 §6.3 ④：与 pristine HEAD 二进制**逐字节相同**。）
+
+**这条腿同时暴露了一个我自己的读数缺陷（gate 侧，已修，未动判据）**：C2 原来把车道报告的 `samples=`
+（atexit 打印）与 `[ul_time_frequency] samples=`（**收尾一开始**就打印的快照）相比 ⇒ 这条腿上读出
+**73529 vs 73528 = 假 FAIL**。原因是代码事实而非阈值：`gnb.cpp` 在收尾开头调 `ul_pipeline_probe::report()`，
+车道探针在 atexit 报告，而观察者在两者之间还会继续计数（收尾期间完成的那一个样本）。
+⇒ 现修法：**C2 只比同一行上的两个数**（`samples=` vs `phase_samples=`，同一瞬间）；另加 **C2b**：
+`[ul_time_frequency]` 的打印值必须 **≤ announced**（该序列只增不减，反向即真缺陷）——**没有引入任何阈值**。
+复验：`p05-pair` 10/10 PASS；**未装仪表的旧腿 `s85-p0phases` 仍 RED**（`paired='<absent>'`）；
+非相位腿仍记 INFO。⇒ 门没有被软化。
+
+**腿的效力/工况说明（引用这些数字时要一起引）**：契约 **NOT MET (1 of 8)**，红的是 `radio sample continuity: 7 gaps`
+（`[ul_rx_pool] held_max=8 free_min=0 starved_events=93`、`[ul_gpu_pipeline] stale=933` max_stale 84 ms、
+`[ul_rx_wait] max=101.6 ms`）。**这不是 P0-5 带来的**（数据面逐字节相同），且是**已知的间歇收包停顿**：
+~101 ms 的 `[ul_rx_wait]` 最大值在**三条更早的 n1 腿上都存在**（101591 / 101670 / 101319 µs，其中 `s83`/`s87` 的 gaps=0、stale=0）
+⇒ 停顿时不时落在跳上，这次落下的是 gaps/stale。另：这条腿跑了 **226 s、100233 个 PUSCH 槽（≈44% 的槽、~443 跳/s）**，
+比标准的"默认配方"（~73 跳/s）重得多 ⇒ 它的池/stale 数字不能与历史默认腿直接比；**中位数**可以，且与 `s87-n1phases` 几乎逐位相同
+（residency 836.7 vs 837.3、busy 517.4 vs 517.9、t2f 1095.1 vs 1093.0、ce 3278.0 vs 3228.3、eq_demap 907.9 vs 905.5、
+`[ul_gpu_pipeline]` 5248.0 vs 5218.0）⇒ **P0-5 的改动没有移动任何一个中位数**。
+
+**待办（登记，下一次动代码时一起做）**：给"配对账"再加一行**自解释**输出——
+`paired vs announced vs 序列在退出时的条数`（后者需要一个 `ul_pipeline_probe::phase_samples_recorded()` 访问器），
+这样读腿的人不必自己知道"两个报告的快照时刻不同"。**本轮没有动它**：动代码会让这条腿的提交证据失效（判据纪律 3）。
 
 ### 6.4 P2-E ⛔ 输入缓冲寿命解耦：**机制已按计划实现，但被平台证伪**（2026-09-25，提交 `7c40327f81`）
 
@@ -666,14 +735,16 @@ n1 默认配方 + `OCUDU_UL_PHASE_SEGMENTS=1`：
 | **Q2** | `ce` 的 **p95 尾巴 1782 µs** 从哪来？ | **基本收口**（代码判读）：单车道 strand 排队 + 上一跳缓冲回收。**残余未知**是这两者各占多少——`OCUDU_UL_SLOT_TRACE`（P1-6）可补 |
 | **Q3** | `t2f` 的 521 µs 是**14 次 DFT 的 GPU 执行**还是**宿主记账/提交**？ | **已收口（两个都不是）**：≈473 µs 是**收样点等待**，≈48 µs 是宿主。⇒ **`OCUDU_DFT_*` 系列旋钮在这段上无效**（`PIPELINE_DEPTH=1`、`OPEN_BLOCK=0`、`RELEASE_BLOCK=0` 全部**变差**，代码路径无歧义）|
 | **Q4** | 三段**在时间上是否重叠**？ | **已收口**：同一跳内三段是**墙钟划分**（互不重叠，构造决定）；**相邻跳之间**才重叠（跳 N 的 `ce` 覆盖跳 N−1 的 `eq_demap`）。⇒ "把两段重叠"在一个跳内**不存在**这个杠杆；杠杆是**跨跳并发** |
-| **Q5** | residency 里 95% busy 是**必要工作**还是**低效执行**（占用率/线程组配置）？ | **开放**，依赖 Q1；另有已知的贵项（K1 197 µs/跳、抽取 117、重排 117）被"逐字节不变"钉住 |
+| **Q5** | residency 里的 busy 是**必要工作**还是**低效执行**（占用率/线程组配置）？ | **开放**，依赖 Q1；另有已知的贵项（K1 197 µs/跳、抽取 117、重排 117）被"逐字节不变"钉住。⚠ **"~95% busy" 已作废**：n1 默认腿配对后 **0.643**、n78 加压腿 0.93，比值逐腿读（§6.3 ⑥）|
 | **Q6** | 把 `max_pusch_and_srs_concurrency` 改变能否把 `ce` 的排队项吃掉？代价是什么？ | ✅ **已回答（P1-8，§7.5）**：能（−58~64×），代价是那次 **5 秒收包停顿**（两次复现）⇒ 交付前必须查清 |
 | **Q7** | 符号级收包（S-7g-13）在**负载下**对**跨度**的效果？ | **开放**：§5.8.29 只量过**该段** −1.2%（当时未加压、且当时丢了融合 1 次提交）⇒ 必须在加压腿 + 融合路径上重量一次 |
 | **Q8** | n78/n1 腿上 `max_pusch_and_srs_concurrency` 的生效值？车道是串行 strand 还是 fork limiter？ | ✅ **已收口（§6.1）**：两者**都是 1**、**都是串行 strand**；上限 = 中等池 `max_concurrency = 5`。⚠ 更正手算：n78 的 `ul_ratio` 是 **0.30**（不是 1.0）|
 | **Q9** | 那次 **5 秒收包停顿**（并发 2 下两次复现）的成因？ | **开放，且是本线最大的未决项**。P2-E 没能给出答案（它的机制不动持有期，§6.4.5）；下一个嫌疑是"同一 strand 上的邻居任务 / 池与解码线程的互动"，或与并发度无关的第三个因 |
-| **Q10** | 那条 **n1 2.85 倍退化**是否还有 `ce` 之外的成分？ | 已由单变量腿定位（§7.5：`ce` 是主因，三段和 99.2%）；**残余**是 `t2f`（1093 vs 历史 521 量级）——与 §8 Q7 的收样点策略、以及 n1 的 rx_wait（1052 µs）有关，**未单独开臂** |
+| **Q10** | 那条 **n1 2.85 倍退化**是否还有 `ce` 之外的成分？ | 已由单变量腿定位（§7.5：`ce` 是主因）；`p05-pair` **配对后**：`ce` 中位 **3278 µs** = 跨度 5248 的 **62%**，而一跳的设备执行只有 **517 µs**（Q14）⇒ `ce` 的排队项就是这条退化的主体。**残余**是 `t2f`（1095 vs 历史 521 量级）——与 Q7 的收样点策略、以及 n1 的 rx_wait（1052 µs）有关，**未单独开臂** |
 | **Q11** | `value_net` 的归档基线陈旧、`ab_dumps` arm1 改前就红 | **待用户裁决**：重建基线（= 承认过期）还是把该网标为"HEAD 不可用"；arm1 需要查清"是否曾经绿过"（§6.5⑤）|
 | **Q12** | `s84b-p0` 的第一次尝试**没有留下任何日志**（本仓与 `ocudu_premerge` 都没有）| **未验证**：最可能是被"戳 ≠ HEAD"拒绝（那种情况**不产生日志**）。要它当证据就得重飞一条；否则按"无效腿"处理（登记，低优先）|
+| **Q13** | 配对账里 **199 行（0.2%）** 既没匹配也没被淘汰 ⇒ 它们是**被同 slot 的后一条车道的插入覆盖**的（`lanes` = 匹配 + 淘汰 + 在等 + 覆盖）。成因未坐实（多跳槽只解释得了 15 行）| **低优先**：不影响 C2（`paired == announced`、零丢失）。**下一次动代码时**给配对账加一行自解释输出（`paired`/`announced`/退出时序列条数）+ 一个"覆盖"计数器，两件事一起做 |
+| **Q14** | 一跳的设备执行在 n1 上到底是多少？ | ✅ **已收口（P0-5 配对）**：**`busy` = 517 µs（中位）**，不是 residency 836，也不是 n78 加压腿的 1125 ⇒ 引用 D 项必须写清"哪条腿的 busy"（§6.3 ⑥）|
 
 ---
 
