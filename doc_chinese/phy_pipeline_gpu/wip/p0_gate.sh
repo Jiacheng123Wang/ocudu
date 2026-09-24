@@ -71,9 +71,15 @@ fi
 # ---------------------------------------------------------------- P0-1: the split arm's dft group
 split=$(grep -a "busy split" "$LEGF" | tail -1)
 dft=$(printf '%s' "$split" | grep -oE "dft=[0-9.]+us/lane \([0-9]+% of busy, cbs/lane=[0-9.]+\)")
-knob=$(grep -aE "^knob +: OCUDU_LANE_DIAG_SPLIT=" "$LEGF" | tail -1 | sed 's/.*=//')
+# NOT line-anchored: run_leg.sh's provenance glues its 'knob :' lines to the previous line (measured
+# on s82 and s86), so a ^knob grep reads nothing and this criterion silently judges the wrong arm - which
+# is exactly what happened on s86 (a real split arm read as 'knob off').
+knob=$(grep -aoE "OCUDU_LANE_DIAG_SPLIT=[0-9]+" "$LEGF" | tail -1 | sed 's/.*=//')
 if [ -z "$split" ]; then
   check "B1 the split arm gains a dft= token (factory arm does not)" "dft present iff the knob is on" RED "no 'busy split' line"
+elif [ -z "${knob:-}" ] && [ -n "$dft" ]; then
+  check "B1 the split arm gains a dft= token (factory arm does not)" "dft present iff the knob is on" RED \
+        "dft= is present but the leg records no OCUDU_LANE_DIAG_SPLIT at all: either the DEFAULT changed (a real defect) or run_leg.sh failed to record the knob - read how the leg was launched. Read: $dft"
 elif [ "${knob:-0}" != "0" ] && [ -n "${knob:-}" ]; then
   check "B1 the split arm gains a dft= token (factory arm does not)" "dft present iff the knob is on" \
         "$([ -n "$dft" ] && echo PASS || echo FAIL)" \
@@ -110,7 +116,7 @@ fi
 # ---------------------------------------------------------------- P0-5: are the two probes paired?
 # Judged ONLY on a leg that declares the knob, exactly like B1: a leg that never asked for the phase
 # segments cannot be failed for not having them (that is how a criterion gets bound to the wrong arm).
-knob_ph=$(grep -aE "^knob +: OCUDU_UL_PHASE_SEGMENTS=" "$LEGF" | tail -1 | sed 's/.*=//')
+knob_ph=$(grep -aoE "OCUDU_UL_PHASE_SEGMENTS=[0-9]+" "$LEGF" | tail -1 | sed 's/.*=//')
 n_phase=$(grep -ac "ul_time_frequency" "$LEGF")
 n_lane=$(grep -aoE "\[ul_gpu_lane\] residency samples=[0-9]+" "$LEGF" | tail -1 | grep -oE "[0-9]+$")
 if [ -n "${knob_ph:-}" ] && [ "${knob_ph:-0}" != "0" ]; then

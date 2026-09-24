@@ -239,7 +239,11 @@ echo >&2
 # file (wip/ul_load.sh reads it back out of the cell line).
 PROVENANCE=$(printf '[leg] regime=%s\npipeline mode : %s\nmode options  : %s\nleg           : %s\ncell config   : %s\ngNB options   : %s\n' \
   "$REGIME" "$MODE" "${MODE_ARGS[*]:-<none>}" "$LABEL" "${CONFIG#$ROOT/}" "${CLI_ARGS[*]:-<none>}")
-PROVENANCE+=$(env | grep -E '^OCUDU_[A-Z0-9_]+=' | sort | sed 's/^/knob          : /' || true)
+# The LEADING newline is load-bearing: $(printf ...) strips the trailing one, so appending directly
+# glued the first knob line onto the 'gNB options' line - measured on every leg (s82: 'gNB options   :
+# <none>knob          : OCUDU_UL_PHASE_SEGMENTS=1'), which silently defeats any '^knob' grep and made
+# the P0 gate judge a real split arm as 'knob off'.
+PROVENANCE+=$(printf '\n%s' "$(env | grep -E '^OCUDU_[A-Z0-9_]+=' | sort | sed 's/^/knob          : /' || true)")
 
 cd "$ROOT"
 # BOTH streams are teed, and both stay on the terminal. stdout used to go only to the terminal, so a
