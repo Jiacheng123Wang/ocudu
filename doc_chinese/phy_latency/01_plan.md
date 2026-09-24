@@ -58,7 +58,7 @@
 
 | # | 缺口 | 为什么必须有 | 做法 | 判据 |
 |---|---|---|---|---|
-| **P0-1** | **`merged_hop` 内部没有 kernel 级时间** | **部分已由记录回答**（见下），**残余缺口 = 前端那段在 `merged_hop` 里的份额** | **候选 A（不写代码，先做）**：飞一条**加压腿**并同时开 `OCUDU_UL_PHASE_SEGMENTS=1`，把 `[ul_gpu_lane] busy split` 与三段配对读；再用 `OCUDU_CE_LANE_ORDER=event` 跑同一配方，拿 `ch_wt` 与 `eq_demap` 的**分组**GPU 时间。**候选 B（写代码，只有在 A 仍不足时才做）**：在命令缓冲**内部**插两个 `MTLSharedEvent` 信号（前端之后、估计器之后），宿主侧观察信号到达时刻并出分布 ⇒ 不改提交结构、不改输入寿命、不动 V4 | A：配对后 `busy split` 的三项之和 ≈ `residency`（±10%）；B：各段之和 ≈ `merged_hop`（±10%）|
+| **P0-1** | **`merged_hop` 内部没有 kernel 级时间** | ✅ **诊断开关已实现**（`OCUDU_LANE_DIAG_SPLIT=1`，**默认关**）：在 `shared_burst::adopt()` 处**不再接管前端那条缓冲**，而是**提交它**（其 GPU 时间即成为 `gpu_lane_probe` 里那个**早已存在但从未注册过的 `dft` 段**），并为后续阶段开一条用 `MTLSharedEvent` 排序的新缓冲。⚠ **开关打开时该臂是诊断臂**：一跳 2 条缓冲（`cbs/lane`≈2，V4 不管诊断臂），且前端输入缓冲**更早释放**（那是 P2-E 的题目）⇒ **不得**拿该臂与 merged 臂比除「分组 GPU 时间」以外的任何东西 | **已做**：构建 + `ctest -L phy 193/193` + 新单测 4/4 + `ab_dumps`（ON 臂 vs 出厂臂）**0 差异**。**未做/需空口**：CE 单测与 replay **都到不了 `adopt()`**（其 `busy split` 是 `ch_est`+`ch_wt`，没有 `merged_hop`）⇒ **`dft=` 段只能在完整 gNB 的空口腿上读**：`OCUDU_LANE_DIAG_SPLIT=1` + 加压配方，判据 = `busy split` 出现 `dft=` 且各段之和 ≈ 出厂臂 `merged_hop`（±10%）|
 | **P0-2** | **持有期没有直接读数**：现在只能由"跨度"推断 | V2 的"症状消失"要能直接读；且决定"池该多大" | 在 `retain_for_block/release` 的 token 上记**每次持有的时长**（attach→release），打 p50/p95/p99 + 直方图 | 重载腿上持有 p99 ≈ 跨度 p99；轻载腿上持有更短 |
 | **P0-3** | `ce` 段 p95 尾巴（1782 µs / 中位 901）无归因 | ~~尾延迟是饥饿主因~~ **主体已由代码判读收口**：单车道 strand 排队 + 上一跳 held/outstanding 缓冲回收（`00_status.md` §3.1）。**残余缺口**只剩"这两者各占多少" | 用 `OCUDU_UL_SLOT_TRACE`（它**按槽**并排打 `rxwait`/`t2f`）加一个"strand 等待"子探针 | 尾巴落在排队还是回收，逐槽可读 |
 | **P0-4** | 离线回放**能否**产出同样的三段读数 | 能用回放做的实验就不烧空口腿 | 检查 `ul_chain_replay` 是否经过 `ul_pipeline_probe` 的同一路径；若能，写一个"回放版的段报告" | 回放与空口在同一负载点上的三段比例一致（±20%）|
