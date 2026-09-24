@@ -62,11 +62,28 @@ struct lane_host_clock {
   /// ul_pipeline_probe.h), on a clock that pairs the readings by slot. Measure it there, not here.
   double handover_us = -1.0;  ///< this stage's entry -> the extraction's commit
 
-  void mark_stage_entry()
+  /// \brief Receiving slot of the lane being assembled on this thread, and whether it was ever told (P0-5).
+  ///
+  /// This is the KEY the lane probe pairs on. Its residency/busy are per LANE (one thread's chained command
+  /// buffers, one hop), while the phase-segment probe's segments are per SLOT and exist only for a CRC-OK
+  /// transport block - so the two reports describe different populations (measured on `s85-p0phases`: 60389
+  /// phase samples against 142022 lanes) and any ratio read across them is indicatory. The slot is the one
+  /// thing both sides know about the same hop, and the estimator's stage entry is where the lane learns it
+  /// (see mark_stage_entry(), called by the adapter with the slot its configuration was built for).
+  ///
+  /// \c has_lane_slot false means "this thread never named its lane's slot" (a tool that drives the burst
+  /// directly, or a route with no estimator hop): the lane probe reports those lanes apart instead of pairing
+  /// them against slot 0, which is a key a real slot also takes.
+  uint64_t lane_slot     = 0;
+  bool     has_lane_slot = false;
+
+  void mark_stage_entry(uint64_t slot)
   {
     stage_entry       = clock::now();
     extraction_commit = {};
     handover_us       = -1.0;
+    lane_slot         = slot;
+    has_lane_slot     = true;
   }
 
   void mark_extraction_commit()

@@ -1476,7 +1476,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // Diagnostics (see ocudu_metal_lane_clock.h): the earliest host reading of this lane. Paired with
   // the shared "front end finished" reading and with the extraction's commit, it splits the lane's
   // GPU gap into "the host had not handed the lane over yet" and "the burst waited on the fence".
-  metal::lane_clock.mark_stage_entry();
+  // The slot is recorded with it (P0-5): it is the key the lane probe pairs this hop's residency/busy
+  // with the phase-segment sample of the SAME hop, and this call is where a hop's lane begins.
+  metal::lane_clock.mark_stage_entry(args.slot);
   // ---- S-7g-19 (fused lane), Step 1': WHOSE command buffer this hop's dispatches go into -------------
   // The order is decided per hop and handed to the engine (see ce_lane_order in the engine's header):
   // event commits the estimator's own command buffer early and lets the lane burst wait for it through the

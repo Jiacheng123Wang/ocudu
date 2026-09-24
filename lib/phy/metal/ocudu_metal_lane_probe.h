@@ -25,6 +25,16 @@
 /// \note The per-symbol DFTs are not part of the lane yet: they are submitted by the radio thread on
 ///       the front-end queue, so they need a lane identity that crosses threads (the slot). They are
 ///       also the stage that moves onto the lane's queue when the fused pipeline lands.
+///
+/// \note PAIRING WITH THE PHASE SEGMENTS (P0-5). This probe's series are per LANE; the [ul_time_frequency] /
+///       [ul_channel_estimation] / [ul_equalization_demod] series (ul_pipeline_probe) are per SLOT and are
+///       completed only for a CRC-OK transport block. Reading one against the other is reading two different
+///       populations - measured on the leg that exposed it (`s85-p0phases`): 60389 phase samples against
+///       142022 lanes - which is why "residency is ~95% busy" and "eq_demap is the residency" were indicatory.
+///       note_phase_sample() closes that gap: the pipeline probe hands every sample it finalizes to this probe,
+///       this probe holds each closed lane under its slot (lane_host_clock::lane_slot, told at the estimator's
+///       stage entry), and the report recomputes those two ratios on the samples that describe the SAME hop.
+///       It is a report-side join only: no data path, no submission and no command buffer is touched by it.
 
 #pragma once
 
@@ -98,6 +108,26 @@ public:
   /// change closes the previous group.
   static void register_front_end_commit(id<MTLCommandBuffer> cb, uint64_t slot_index);
 
+  /// \brief Pairs one FINALIZED phase sample with the lane that produced it (P0-5).
+  ///
+  /// \param[in] slot     Receiving slot the phase sample belongs to (the same key the lane was told at its
+  ///                     stage entry, see lane_host_clock::lane_slot).
+  /// \param[in] t2f_ns   Time-frequency segment of that sample.
+  /// \param[in] ce_ns    Channel-estimation segment of that sample.
+  /// \param[in] eqdem_ns Equalization+demodulation segment of that sample.
+  ///
+  /// Registered as ul_pipeline_probe's phase-sample observer (see its header) and called once per sample that
+  /// enters the three phase-segment series, i.e. once per CRC-OK transport block while the segments are on.
+  /// This is the other half of the pairing: this probe's residency/busy are per LANE and exist for every hop,
+  /// the segments are per SLOT and exist only for a CRC-OK one, and the two reports were therefore read across
+  /// two populations (measured 0.425 phase samples per lane on `s85-p0phases`). Pairing them on the slot makes
+  /// the two ratios the lane report exists for - busy/residency and eq_demap/residency - measurable on ONE hop
+  /// instead of indicatory across two sets.
+  ///
+  /// A sample with no lane on record for its slot is COUNTED, never dropped silently: the lane report prints how
+  /// many samples it was handed, how many it matched, and why the rest did not match.
+  static void note_phase_sample(uint64_t slot, int64_t t2f_ns, int64_t ce_ns, int64_t eqdem_ns);
+
   /// Prints the accumulated statistics to stderr (registered with atexit).
   static void report();
 };
@@ -112,6 +142,7 @@ public:
   static void register_commit(id<MTLCommandBuffer>, stage) {}
   static void close_lane() {}
   static void register_front_end_commit(id<MTLCommandBuffer>, uint64_t) {}
+  static void note_phase_sample(uint64_t, int64_t, int64_t, int64_t) {}
   static void report() {}
 };
 

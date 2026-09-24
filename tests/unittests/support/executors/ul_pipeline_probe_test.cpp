@@ -21,6 +21,7 @@
 
 #include "ocudu/phy/phy_pipeline_mode.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -652,6 +653,170 @@ TEST(ul_slot_trace_test, the_slowest_rows_survive_the_age_bound)
       << "the slow row was evicted by age - the transient this instrument exists to catch cannot be seen that way:\n"
       << report;
   ::unsetenv("OCUDU_UL_SLOT_TRACE");
+}
+
+namespace {
+
+/// What the phase-sample observer was handed (P0-5). One entry per announcement, in order.
+struct phase_observer_log {
+  std::vector<uint64_t>               slots;
+  std::vector<std::array<int64_t, 3>> ns;
+  void clear()
+  {
+    slots.clear();
+    ns.clear();
+  }
+};
+
+phase_observer_log& observer_log()
+{
+  static phase_observer_log log;
+  return log;
+}
+
+void record_phase_sample(uint64_t slot, int64_t t2f_ns, int64_t ce_ns, int64_t eqdem_ns)
+{
+  observer_log().slots.push_back(slot);
+  observer_log().ns.push_back({t2f_ns, ce_ns, eqdem_ns});
+}
+
+} // namespace
+
+/// \brief P0-5: one announcement per FINALIZED phase sample, carrying the slot and the three durations.
+///
+/// The pairing between this probe's per-slot phase segments and gpu_lane_probe's per-lane residency/busy rests on
+/// this contract, and a hook that got it wrong would be silent on air: it fires from inside the recording path, so
+/// a sample announced twice, not at all, or with another sample's numbers produces a plausible-looking paired
+/// population rather than a failure. The two ways it can be wrong are therefore checked here, offline:
+///
+///  * the COUNT: one announcement per sample that reaches [ul_time_frequency] / [ul_channel_estimation] /
+///    [ul_equalization_demod], which is the equality the paired sample count is judged against (a leg's phase
+///    samples and its paired samples are supposed to be the same number);
+///  * the VALUES: the three durations announced are the ones the series received - not the total, not a cumulative
+///    sum, and not another slot's.
+///
+/// \note The fused-lane mode is published for the whole process and cannot be taken back, so this case sets it at
+///       its start and depends on no other case (gtest_discover_tests runs each case as its own process).
+TEST(ul_pipeline_probe_test, phase_samples_are_announced_once_each_for_the_pairing)
+{
+  // The spans below are a test device, not a claim about a useful hop (same reason as the case above): the cutoff
+  // is moved out of the way so a mis-paired value stays visible in its series.
+  ::setenv("OCUDU_UL_STALE_US", "60000000", 1);
+  // Inside the fused lane the segments are recorded only when the diagnostic switch asks for them, and that is the
+  // arm the pairing exists for (the lane is the mode whose residency those ratios are about).
+  ::setenv("OCUDU_UL_PHASE_SEGMENTS", "1", 1);
+  ocudu::phy_pipeline_mode_registry::set(ocudu::phy_pipeline_mode::gpu);
+
+  ocudu::ul_pipeline_probe& probe = ocudu::ul_pipeline_probe::get();
+  observer_log().clear();
+  ocudu::ul_pipeline_probe::set_phase_sample_observer(&record_phase_sample);
+
+  // The probe is a process-wide singleton and the cases above recorded samples of their own, so every reading
+  // below is a DELTA - the same rule the late-sample case follows and the reason the file header gives for it.
+  // The series are read through (count, mean), which is enough to recover the sample a section just added:
+  // x = mean_after * n_after - mean_before * n_before.
+  const auto series_state = [](const std::string& report, const std::string& series) {
+    const int    n = samples(report, series);
+    const double mean = mean_us(report, series);
+    return std::pair<int, double>{std::max(n, 0), (n > 0) ? mean * n : 0.0};
+  };
+  const std::string baseline_report = capture_report();
+  const auto [base_t2f_n, base_t2f_sum]     = series_state(baseline_report, "ul_time_frequency");
+  const auto [base_ce_n, base_ce_sum]       = series_state(baseline_report, "ul_channel_estimation");
+  const auto [base_eqdem_n, base_eqdem_sum] = series_state(baseline_report, "ul_equalization_demod");
+
+  // ---- a complete hop: announced exactly once, with this slot's three sub-spans -------------------------
+  constexpr uint64_t slot_a = 2101;
+  probe.record_start(slot_a);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  probe.record_t2f_end(slot_a);
+  std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  probe.record_ce_end(slot_a);
+  std::this_thread::sleep_for(std::chrono::milliseconds(4));
+  probe.record_ldpc_start(slot_a);
+  probe.record_end_crc_ok(slot_a, 42);
+
+  ASSERT_EQ(observer_log().slots.size(), 1u)
+      << "a finalized phase sample must be announced exactly once (0 = the pairing would see no samples at all)";
+  EXPECT_EQ(observer_log().slots[0], slot_a) << "the announcement must carry the slot the sample is keyed by";
+  // The three SUB-spans, not the total. Each bound leaves the scheduler room, as the case above explains: what it
+  // catches is an announcement that hands over the ~9 ms TOTAL for each of the three.
+  // ... in NANOSECONDS, the unit the probe records in (the series convert to us at the report).
+  EXPECT_GE(observer_log().ns[0][0], 1500000) << "t2f: 2 ms slept";
+  EXPECT_LT(observer_log().ns[0][0], 7000000);
+  EXPECT_GE(observer_log().ns[0][1], 2500000) << "ce: 3 ms slept";
+  EXPECT_LT(observer_log().ns[0][1], 8000000);
+  EXPECT_GE(observer_log().ns[0][2], 3500000) << "eqdem: 4 ms slept";
+  EXPECT_LT(observer_log().ns[0][2], 10000000);
+  // ... and they are the SAME numbers the series received: the sample these three series grew by, recovered from
+  // their (count, mean), is the one the observer was handed. This is what makes "announced" and "recorded" one
+  // event instead of two that can drift apart - and a hook that handed over the total, or another slot's numbers,
+  // lands outside the tolerance whatever the absolute offset of the series is.
+  {
+    const std::string report = capture_report();
+    const auto [t2f_n, t2f_sum]     = series_state(report, "ul_time_frequency");
+    const auto [ce_n, ce_sum]       = series_state(report, "ul_channel_estimation");
+    const auto [eqdem_n, eqdem_sum] = series_state(report, "ul_equalization_demod");
+    ASSERT_EQ(t2f_n, base_t2f_n + 1) << report;
+    ASSERT_EQ(ce_n, base_ce_n + 1) << report;
+    ASSERT_EQ(eqdem_n, base_eqdem_n + 1) << report;
+    // 2 us of tolerance: each mean is printed with one decimal, so the recovered sample carries at most
+    // 0.05 * n of rounding, and n is a handful of samples here (in a leg it is tens of thousands - which is why
+    // the leg reads the paired MEDIANS and not a recovered single sample).
+    EXPECT_NEAR(t2f_sum - base_t2f_sum, static_cast<double>(observer_log().ns[0][0]) / 1e3, 2.0) << report;
+    EXPECT_NEAR(ce_sum - base_ce_sum, static_cast<double>(observer_log().ns[0][1]) / 1e3, 2.0) << report;
+    EXPECT_NEAR(eqdem_sum - base_eqdem_sum, static_cast<double>(observer_log().ns[0][2]) / 1e3, 2.0) << report;
+  }
+
+  // ---- a hop whose FFT landmark never came: the segments cannot be assembled, so nothing is announced -----
+  constexpr uint64_t slot_b = 2102;
+  probe.record_start(slot_b);
+  probe.record_ce_end(slot_b); // no record_t2f_end(): the assembly needs all three landmarks
+  probe.record_ldpc_start(slot_b);
+  probe.record_end_crc_ok(slot_b, 42);
+  EXPECT_EQ(observer_log().slots.size(), 1u) << "a hop with no time-frequency landmark announced a sample";
+
+  // ---- a hop whose decode start never came: the phases are assembled but never finalized ----------------
+  constexpr uint64_t slot_c = 2103;
+  probe.record_start(slot_c);
+  probe.record_t2f_end(slot_c);
+  probe.record_ce_end(slot_c);
+  probe.record_end_crc_ok(slot_c, 42); // no record_ldpc_start(): the sample never reaches the series
+  EXPECT_EQ(observer_log().slots.size(), 1u) << "a hop with no decode start announced a sample";
+
+  // The count equality the pairing is judged by, stated as this test can see it: the three series grew by exactly
+  // as many samples as the observer was handed - no more (a sample recorded but not announced would pair nothing)
+  // and no fewer (an announcement with no sample would pair a lane with a phase sample that does not exist).
+  {
+    const std::string report = capture_report();
+    EXPECT_EQ(samples(report, "ul_time_frequency") - base_t2f_n,
+              static_cast<int>(observer_log().slots.size()))
+        << report;
+    EXPECT_EQ(samples(report, "ul_channel_estimation") - base_ce_n,
+              static_cast<int>(observer_log().slots.size()))
+        << report;
+    EXPECT_EQ(samples(report, "ul_equalization_demod") - base_eqdem_n,
+              static_cast<int>(observer_log().slots.size()))
+        << report;
+  }
+
+  // ---- unregistering stops the announcements (and does not stop the recording) ---------------------------
+  ocudu::ul_pipeline_probe::set_phase_sample_observer(nullptr);
+  constexpr uint64_t slot_d = 2104;
+  probe.record_start(slot_d);
+  probe.record_t2f_end(slot_d);
+  probe.record_ce_end(slot_d);
+  probe.record_ldpc_start(slot_d);
+  probe.record_end_crc_ok(slot_d, 42);
+  EXPECT_EQ(observer_log().slots.size(), 1u) << "an unregistered observer was still called";
+  {
+    const std::string report = capture_report();
+    // The series grew by the sample that was NOT announced: announcing and recording are separate effects, which is
+    // why the count comparison above has to be made with the observer still registered.
+    EXPECT_EQ(samples(report, "ul_time_frequency") - base_t2f_n, static_cast<int>(observer_log().slots.size()) + 1)
+        << report;
+  }
+  ::unsetenv("OCUDU_UL_PHASE_SEGMENTS");
 }
 
 #endif // OCUDU_FLOW_PROBES

@@ -6,6 +6,7 @@
 #include "ocudu/phy/phy_pipeline_mode.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -157,6 +158,16 @@ inline bool ul_slot_completed_by_block(uint64_t  block_begin,
 ///       the tail of slot N and the head of slot N+1 is charged to slot N+1). The trace records the one instant
 ///       the other series take for granted - the arrival of the samples that COMPLETE a slot - and prints the
 ///       deltas from it to those same landmarks.
+///
+/// \note THE TWO PROBES DO NOT SHARE A SAMPLE POPULATION, and until P0-5 nothing said so. The series above are
+///       keyed by SLOT and completed only for a CRC-OK transport block; the gpu_lane_probe's residency/busy are
+///       keyed by LANE (one thread's chained command buffers) and exist for every hop, PUSCH or not. On the leg
+///       that exposed it (`s85-p0phases`) the phase segments had 60389 samples against 142022 lanes - a ratio of
+///       0.425 - so "95% of the residency is busy" and "eq_demap is the residency" were readings across two
+///       populations, not about one hop. set_phase_sample_observer() is the fix: the probe hands every sample it
+///       FINALIZES (the same instant it pushes it into the three series above) to an observer that can pair it
+///       with its own per-slot data, which is how the lane probe recomputes those two ratios on matched samples
+///       and reports how many samples it could match at all.
 class ul_pipeline_probe
 {
 public:
@@ -359,7 +370,15 @@ public:
   {
     std::chrono::time_point<std::chrono::high_resolution_clock> now = std::chrono::high_resolution_clock::now();
 
-    std::lock_guard<std::mutex> lock(mutex);
+    // The phase sample this call FINALIZES, if any, announced to the observer once the lock is released (see
+    // set_phase_sample_observer()): the announcement must not happen under this probe's mutex, and it must
+    // happen exactly for the samples that reach the three series below - which is what makes the observer's
+    // count equal to their sample count by construction.
+    int64_t observed_ns[3] = {0, 0, 0};
+    bool    observed       = false;
+    // unique_lock rather than lock_guard: the announcement at the end of this function has to happen with the
+    // mutex RELEASED (see the comment above), and this is the one place in the probe that hands anything out.
+    std::unique_lock<std::mutex> lock(mutex);
     trace_slot(slot, slot_trace_what::crc_ok, now);
     // CRC-OK completion timestamp for the FAPI->MAC tail-latency series (see record_fapi_mac_end): recorded
     // unconditionally, this method is only ever called for CRC-OK TBs.
@@ -425,7 +444,23 @@ public:
         t2f_latencies_us.push_back(static_cast<double>(phases_it->second.t2f_ns) / 1e3);
         ce_latencies_us.push_back(static_cast<double>(phases_it->second.ce_ns) / 1e3);
         eqdem_latencies_us.push_back(static_cast<double>(phases_it->second.eqdem_ns) / 1e3);
+        // Handed to the observer below, once the lock is gone. Taken HERE, in the branch that pushes the three
+        // series, so that "announced" and "recorded" cannot drift apart.
+        observed_ns[0] = phases_it->second.t2f_ns;
+        observed_ns[1] = phases_it->second.ce_ns;
+        observed_ns[2] = phases_it->second.eqdem_ns;
+        observed       = true;
         pending_phases.erase(phases_it);
+      }
+    }
+
+    // The announcement, with the mutex RELEASED: an observer that took this probe's mutex would deadlock, and one
+    // whose own lock is held across the call would put its latency inside this probe's.
+    lock.unlock();
+    if (observed) {
+      if (phase_sample_observer_t observer = phase_sample_observer().load(std::memory_order_acquire);
+          observer != nullptr) {
+        observer(slot, observed_ns[0], observed_ns[1], observed_ns[2]);
       }
     }
   }
@@ -832,6 +867,26 @@ public:
     }
   }
 
+  /// \brief Observer of every FINALIZED phase sample (P0-5: the pairing key this probe and the lane probe share).
+  ///
+  /// It is called once per sample that enters [ul_time_frequency] / [ul_channel_estimation] /
+  /// [ul_equalization_demod], with the slot the sample belongs to and the three durations, so a probe that
+  /// measures the same hops from another side (gpu_lane_probe: residency/busy per LANE) can pair its own
+  /// numbers with a sample that is known to describe the SAME hop. Without it the two reports can only be
+  /// compared across populations, which is what made "residency is ~95% busy" and "eq_demap is the residency"
+  /// indicatory rather than measured (see the class comment).
+  ///
+  /// Called with this probe's mutex RELEASED: an observer that wants to take it back would deadlock, and one
+  /// whose own lock is held across the call would put its latency inside this probe's. The call therefore
+  /// happens after the sample is recorded, and every phase sample this probe accepts is announced exactly once.
+  using phase_sample_observer_t = void (*)(uint64_t slot, int64_t t2f_ns, int64_t ce_ns, int64_t eqdem_ns);
+
+  /// Registers the observer (nullptr unregisters). Called once, by the probe that wants the samples.
+  static void set_phase_sample_observer(phase_sample_observer_t observer)
+  {
+    phase_sample_observer().store(observer, std::memory_order_release);
+  }
+
   /// Prints the statistics of the recorded latencies. Called once during the application shutdown.
   void report()
   {
@@ -1029,6 +1084,15 @@ private:
     // shared_queue::front_end_fence_enabled() reads its own switch on every call).
     const char* env = std::getenv("OCUDU_UL_PHASE_SEGMENTS");
     return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+  }
+
+  /// The registered phase-sample observer (see set_phase_sample_observer()). Atomic because it is written once
+  /// at startup by one probe and read on the recording path by another thread: a plain function pointer would be
+  /// a data race the tools that compile this header with a sanitizer would (rightly) refuse.
+  static std::atomic<phase_sample_observer_t>& phase_sample_observer()
+  {
+    static std::atomic<phase_sample_observer_t> observer{nullptr};
+    return observer;
   }
 
   /// Whether the per-module phase segments (time-frequency / channel estimation / equalization+demodulation) are
@@ -1269,6 +1333,11 @@ public:
   void record_rx_wait(int64_t /*wait_ns*/) {}
   void record_dft_wait(int64_t /*wait_ns*/) {}
   std::optional<ul_phase_durations> get_phase_durations(uint64_t /*slot*/) { return std::nullopt; }
+  /// P0-5's pairing hook, compiled out with the rest of the probe: there are no phase samples to announce, so a
+  /// caller that registers an observer is told nothing - which is also what the lane probe's report says (it
+  /// counts the samples it was handed, and reports zero rather than inventing a pairing).
+  using phase_sample_observer_t = void (*)(uint64_t slot, int64_t t2f_ns, int64_t ce_ns, int64_t eqdem_ns);
+  static void set_phase_sample_observer(phase_sample_observer_t /*observer*/) {}
   void report() {}
 
 private:

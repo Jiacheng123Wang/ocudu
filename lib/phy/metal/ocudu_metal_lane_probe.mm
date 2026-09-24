@@ -4,10 +4,15 @@
 #include "ocudu_metal_lane_clock.h"
 #include "ocudu_metal_lane_probe.h"
 
+#include "ocudu/support/executors/ul_pipeline_probe.h"
+
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
+#include <map>
 #include <mutex>
 #include <vector>
 
@@ -20,6 +25,18 @@ namespace metal {
 
 namespace {
 
+/// Bound on the closed lanes waiting for their slot's phase sample (P0-5): the wait is milliseconds (a lane
+/// closes when the burst that produces the LLRs completes, and the sample is finalized when that hop's CRC
+/// check passes), so a few hundred entries are far more than the join ever needs. It is a bound and not a
+/// policy: the entries evicted are the OLDEST, i.e. the ones whose sample is least likely to still arrive.
+constexpr size_t max_awaiting_phase = 512;
+
+/// Age beyond which a remembered lane cannot be the one a phase sample belongs to. The real distance is
+/// milliseconds; the bound exists because the slot key wraps every 10.24 s, so without it a sample of a hop
+/// that produced no lane at all (a CPU fallback route) could be paired with the previous cycle's lane under
+/// the same key - the exact mis-pairing the pipeline probe's own max_entry_age exists to prevent.
+constexpr auto max_pair_age = std::chrono::seconds(2);
+
 /// A command buffer of the open lane, waiting for its GPU timestamps to become valid.
 struct lane_entry {
   id<MTLCommandBuffer> cb    = nil;
@@ -31,6 +48,12 @@ struct lane_entry {
   /// "the device was busy" apart from "the device had nothing to run yet" - which the gap, being a
   /// single number, cannot.
   ocudu::metal::lane_host_clock::clock::time_point commit_time{};
+  /// The lane's slot, read from the shared per-lane state when this command buffer was registered (P0-5).
+  /// Taken PER ENTRY rather than once at the lane close: the carried-over entries of a lane that has not
+  /// completed yet belong to the PREVIOUS hop, whose slot may already have been replaced by the next hop's
+  /// stage entry on this thread.
+  uint64_t slot = 0;
+  bool     has_slot = false;
 };
 
 /// Command buffers of the lane this thread is filling. One lane per thread: the chained stages of
@@ -160,6 +183,47 @@ struct lane_stats_t {
   uint64_t            fe_slots       = 0;
   uint64_t            fe_cbs         = 0;
   uint64_t            fe_carried     = 0;
+
+  /// \name P0-5: pairing the lane's own metrics with the phase-segment samples of the SAME hop.
+  ///
+  /// The two probes count different populations (see the header's note), so the ratios this report exists for
+  /// are only about one hop if the lane and the segments belong to it. The join is one-way and cheap: a lane
+  /// whose thread named its slot is remembered here under that slot when it closes, and the pipeline probe
+  /// hands back the finalized phase sample of that slot a few milliseconds later - by which time the lane has
+  /// closed (the burst's completion is what produces the LLRs the decoder is about to consume).
+  ///@{
+  /// A closed lane waiting for its slot's phase sample.
+  struct awaiting_lane {
+    double   residency_us = 0.0;
+    double   busy_us      = 0.0;
+    uint64_t seq          = 0; ///< insertion order, for the bounded eviction
+    ocudu::metal::lane_host_clock::clock::time_point closed_at{};
+  };
+  /// Closed lanes by slot. Bounded: a hop whose decode never passes CRC leaves its entry behind, and the slot
+  /// key returns only after a whole SFN cycle (10.24 s), so the bound - not the key - is what keeps this map
+  /// finite. The eviction is by INSERTION order (the oldest entry is the one whose sample is least likely to
+  /// still arrive), which is what the pipeline probe's own pending registries do for the same reason.
+  std::map<uint64_t, awaiting_lane> awaiting_phase;
+  uint64_t awaiting_seq     = 0;
+  uint64_t awaiting_evicted = 0;
+  uint64_t lanes_named      = 0; ///< lanes whose slot the estimator's stage entry named
+  uint64_t lanes_unnamed    = 0; ///< lanes closed with no slot on record (a tool, or a route with no hop)
+  /// busy/residency of EVERY lane, one sample per lane: the population the "~95% of the residency is busy"
+  /// reading came from, kept so the paired one can be read AGAINST it rather than in place of it.
+  std::vector<double> busy_ratio;
+  /// What the pipeline probe handed over, and what became of it.
+  uint64_t phase_samples       = 0; ///< phase samples announced (== the three phase series' sample count)
+  uint64_t paired_matches      = 0;
+  uint64_t paired_no_lane      = 0; ///< no closed lane on record for the slot
+  uint64_t paired_stale        = 0; ///< a lane was on record, but too old to be this hop's
+  std::vector<double> paired_residency_us;
+  std::vector<double> paired_busy_us;
+  std::vector<double> paired_t2f_us;
+  std::vector<double> paired_ce_us;
+  std::vector<double> paired_eqdem_us;
+  std::vector<double> paired_busy_ratio;
+  std::vector<double> paired_eqdem_ratio;
+  ///@}
 };
 
 lane_stats_t& stats()
@@ -178,6 +242,15 @@ namespace {
 /// say so (the probe being silent is indistinguishable from the probe not being compiled in).
 const bool report_registered = []() {
   std::atexit(gpu_lane_probe::report);
+  return true;
+}();
+
+/// P0-5: the phase samples the pipeline probe finalizes are handed to this probe, which pairs each one with
+/// the lane that produced it (see gpu_lane_probe::note_phase_sample()). Registered at namespace scope for the
+/// same reason as the report above: a leg whose samples were never announced must say so in its report instead
+/// of looking like a leg in which nothing matched.
+const bool phase_observer_registered = []() {
+  ul_pipeline_probe::set_phase_sample_observer(&gpu_lane_probe::note_phase_sample);
   return true;
 }();
 
@@ -301,12 +374,56 @@ void gpu_lane_probe::register_front_end_commit(id<MTLCommandBuffer> cb, uint64_t
   fe.cbs.push_back(cb);
 }
 
+void gpu_lane_probe::note_phase_sample(uint64_t slot, int64_t t2f_ns, int64_t ce_ns, int64_t eqdem_ns)
+{
+  lane_stats_t& s = stats();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  ++s.phase_samples;
+
+  auto it = s.awaiting_phase.find(slot);
+  if (it == s.awaiting_phase.end()) {
+    // No lane on record for this slot: the hop produced none (a CPU route), its lane was evicted, or its
+    // thread never named its slot. Counted apart - a pairing that silently dropped samples would read as a
+    // smaller population rather than as a missing join (the rule of 5.9.97: "cannot read" is RED, never absent).
+    ++s.paired_no_lane;
+    return;
+  }
+  const double lane_age_s = std::chrono::duration<double>(ocudu::metal::lane_host_clock::clock::now() -
+                                                          it->second.closed_at)
+                                .count();
+  if (lane_age_s > std::chrono::duration<double>(max_pair_age).count()) {
+    // Older than any legitimate lane -> sample distance: this is a previous SFN cycle's lane under the same
+    // key, not this hop's. Drop it rather than pair two hops a whole cycle apart.
+    s.awaiting_phase.erase(it);
+    ++s.paired_stale;
+    return;
+  }
+
+  const lane_stats_t::awaiting_lane row = it->second;
+  s.awaiting_phase.erase(it);
+  ++s.paired_matches;
+  s.paired_residency_us.push_back(row.residency_us);
+  s.paired_busy_us.push_back(row.busy_us);
+  s.paired_eqdem_us.push_back(static_cast<double>(eqdem_ns) / 1e3);
+  s.paired_t2f_us.push_back(static_cast<double>(t2f_ns) / 1e3);
+  s.paired_ce_us.push_back(static_cast<double>(ce_ns) / 1e3);
+  if (row.residency_us > 0.0) {
+    s.paired_busy_ratio.push_back(row.busy_us / row.residency_us);
+    s.paired_eqdem_ratio.push_back((static_cast<double>(eqdem_ns) / 1e3) / row.residency_us);
+  }
+}
+
 void gpu_lane_probe::register_commit(id<MTLCommandBuffer> cb, stage which)
 {
   if (cb == nil) {
     return;
   }
-  thread_state().pending.push_back(lane_entry{cb, which, ocudu::metal::lane_host_clock::clock::now()});
+  // The lane's slot travels with each entry (P0-5): the estimator's stage entry named it for THIS hop, and
+  // reading it here (rather than at the lane close) keeps a carried-over entry attached to its own hop.
+  lane_entry entry{cb, which, ocudu::metal::lane_host_clock::clock::now()};
+  entry.slot     = ocudu::metal::lane_clock.lane_slot;
+  entry.has_slot = ocudu::metal::lane_clock.has_lane_slot;
+  thread_state().pending.push_back(entry);
 }
 
 void gpu_lane_probe::close_lane()
@@ -386,6 +503,56 @@ void gpu_lane_probe::close_lane()
   for (unsigned i = 0; i != static_cast<unsigned>(stage::count); ++i) {
     s.stage_busy_us[i] += stage_busy[i] * 1e6;
     s.stage_cbs[i] += stage_cbs[i];
+  }
+
+  // ---- P0-5: hold this lane under its slot until the phase sample of the SAME hop arrives -------------
+  //
+  // The lane's slot is the one its entries were stamped with, and the lane is remembered as a whole (one hop,
+  // however many command buffers it took). "Last lane wins" for a slot that carries more than one: a slot can
+  // hold a PUSCH hop and another grid consumer, and nothing here can tell which of the two the phase sample
+  // belongs to - the report says what it counted, and the residency of any of them is one distribution (the
+  // unpaired series beside it), so a swapped pair moves a sample within the same population rather than
+  // inventing a number.
+  {
+    uint64_t lane_slot     = 0;
+    bool     lane_has_slot = false;
+    for (const lane_entry& entry : entries_for_starts) {
+      if (entry.has_slot) {
+        lane_slot     = entry.slot;
+        lane_has_slot = true;
+        break;
+      }
+    }
+    if (residency > 0.0) {
+      // The ratio is only defined against a positive residency (a lane whose command buffers overlap to zero
+      // span is not a sample of "how much of the residency is busy", it is a division by zero).
+      s.busy_ratio.push_back(busy_us / residency);
+    }
+    if (lane_has_slot) {
+      ++s.lanes_named;
+      lane_stats_t::awaiting_lane row;
+      row.residency_us = residency;
+      row.busy_us      = busy_us;
+      row.seq          = s.awaiting_seq++;
+      row.closed_at    = ocudu::metal::lane_host_clock::clock::now();
+      s.awaiting_phase[lane_slot] = row;
+      // Bound by insertion order, not by key: the key wraps every SFN cycle, so the key order is not an age
+      // order (the same rule the pipeline probe's evict_oldest() follows).
+      while (s.awaiting_phase.size() > max_awaiting_phase) {
+        auto oldest = std::min_element(s.awaiting_phase.begin(),
+                                       s.awaiting_phase.end(),
+                                       [](const auto& lhs, const auto& rhs) {
+                                         return lhs.second.seq < rhs.second.seq;
+                                       });
+        if (oldest == s.awaiting_phase.end()) {
+          break;
+        }
+        s.awaiting_phase.erase(oldest);
+        ++s.awaiting_evicted;
+      }
+    } else {
+      ++s.lanes_unnamed;
+    }
   }
 
   // ---- Where the lane's gap actually sits (see the two series' comments in lane_stats_t) ----------
@@ -551,6 +718,23 @@ void gpu_lane_probe::report()
   uint64_t            fe_slots   = 0;
   uint64_t            fe_cbs     = 0;
   uint64_t            fe_carried = 0;
+  // P0-5: the paired population and what happened to the samples that did not reach it.
+  std::vector<double> busy_ratio;
+  std::vector<double> paired_residency;
+  std::vector<double> paired_busy;
+  std::vector<double> paired_t2f;
+  std::vector<double> paired_ce;
+  std::vector<double> paired_eqdem;
+  std::vector<double> paired_busy_ratio;
+  std::vector<double> paired_eqdem_ratio;
+  uint64_t            phase_samples     = 0;
+  uint64_t            paired_matches    = 0;
+  uint64_t            paired_no_lane    = 0;
+  uint64_t            paired_stale      = 0;
+  uint64_t            lanes_named       = 0;
+  uint64_t            lanes_unnamed     = 0;
+  size_t              awaiting_now      = 0;
+  uint64_t            awaiting_evicted  = 0;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
     fe_residency = s.fe_residency_us;
@@ -579,6 +763,22 @@ void gpu_lane_probe::report()
     dropped        = s.dropped_cbs;
     carried        = s.carried_over;
     period_dropped = s.period_dropped;
+    busy_ratio           = s.busy_ratio;
+    paired_residency     = s.paired_residency_us;
+    paired_busy          = s.paired_busy_us;
+    paired_t2f           = s.paired_t2f_us;
+    paired_ce            = s.paired_ce_us;
+    paired_eqdem         = s.paired_eqdem_us;
+    paired_busy_ratio    = s.paired_busy_ratio;
+    paired_eqdem_ratio   = s.paired_eqdem_ratio;
+    phase_samples        = s.phase_samples;
+    paired_matches       = s.paired_matches;
+    paired_no_lane       = s.paired_no_lane;
+    paired_stale         = s.paired_stale;
+    lanes_named          = s.lanes_named;
+    lanes_unnamed        = s.lanes_unnamed;
+    awaiting_now         = s.awaiting_phase.size();
+    awaiting_evicted     = s.awaiting_evicted;
   }
 
   // The front end has its own series and does not need a lane to be worth reporting: a run of the
@@ -597,12 +797,89 @@ void gpu_lane_probe::report()
     print_series("dft gap", fe_gap);
   };
 
+  // ---- P0-5: the lane's own metrics against the phase segments of the SAME hop ------------------------
+  //
+  // Everything above is one population (the lanes), and the [ul_time_frequency] / [ul_channel_estimation] /
+  // [ul_equalization_demod] series are another (the CRC-OK hops, one sample per transport block). The two
+  // ratios this report exists for - "how much of the residency the device actually executed" and "does the
+  // equalization+demodulation segment cover the residency" - were therefore read across two populations until
+  // this block existed, and the pairing turns them into statements about one hop. The counts come FIRST and in
+  // full: a paired population that is smaller than the phase series is a fact about the join, and a reader who
+  // only sees the medians cannot tell it from a leg whose phases were half recorded.
+  const auto print_pairing = [&]() {
+    const auto median_of = [](std::vector<double>& v) {
+      if (v.empty()) {
+        return std::numeric_limits<double>::quiet_NaN();
+      }
+      std::sort(v.begin(), v.end());
+      return percentile(v, 0.5);
+    };
+    const double busy_ratio_med    = median_of(busy_ratio);
+    const double paired_busy_med   = median_of(paired_busy_ratio);
+    const double paired_eqdem_med  = median_of(paired_eqdem_ratio);
+    // "Reproduced" here means "within +-0.05 of the value the unpaired reading claimed". This is a DESCRIPTION
+    // of a reading, not a criterion: nothing in this line can fail a leg (no threshold for the pairing was ever
+    // registered), and it exists because a reader who has to do the comparison in their head does not do it.
+    const auto reproduced = [](double ratio, double target) {
+      if (std::isnan(ratio)) {
+        return "NOT READABLE (no paired samples)";
+      }
+      return (std::abs(ratio - target) <= 0.05) ? "REPRODUCED" : "NOT reproduced";
+    };
+
+    if (phase_samples == 0) {
+      std::fprintf(stderr,
+                   "[ul_gpu_lane] paired with the phase segments (P0-5): no phase sample was announced - the"
+                   " phase segments were off (OCUDU_UL_PHASE_SEGMENTS=1 asks for them inside the lane), or the\n"
+                   "               probe that records them is not compiled in (ENABLE_FLOW_PROBES). lanes=%llu"
+                   " (slot named=%llu, not named=%llu)\n",
+                   static_cast<unsigned long long>(lanes),
+                   static_cast<unsigned long long>(lanes_named),
+                   static_cast<unsigned long long>(lanes_unnamed));
+      return;
+    }
+    std::fprintf(stderr,
+                 "[ul_gpu_lane] paired with the phase segments (P0-5): samples=%llu of phase_samples=%llu"
+                 " (no lane for the slot=%llu, lane older than %llds=%llu) over lanes=%llu"
+                 " (slot named=%llu, not named=%llu); awaiting at exit=%zu, evicted=%llu\n",
+                 static_cast<unsigned long long>(paired_matches),
+                 static_cast<unsigned long long>(phase_samples),
+                 static_cast<unsigned long long>(paired_no_lane),
+                 static_cast<long long>(max_pair_age.count()),
+                 static_cast<unsigned long long>(paired_stale),
+                 static_cast<unsigned long long>(lanes),
+                 static_cast<unsigned long long>(lanes_named),
+                 static_cast<unsigned long long>(lanes_unnamed),
+                 awaiting_now,
+                 static_cast<unsigned long long>(awaiting_evicted));
+    // The paired series themselves, printed with the same shape as every other series here so the paired and
+    // the all-lane populations can be compared line by line (see the header's note on why both are kept).
+    print_series("paired residency", paired_residency);
+    print_series("paired busy", paired_busy);
+    print_series("paired t2f (phase segment)", paired_t2f);
+    print_series("paired ce (phase segment)", paired_ce);
+    print_series("paired eq_demap (phase segment)", paired_eqdem);
+    std::fprintf(stderr,
+                 "[ul_gpu_lane] paired ratios (P0-5): busy/residency median=%.3f over ALL lanes' own"
+                 " ratio=%.3f; eq_demap/residency median=%.3f\n",
+                 paired_busy_med,
+                 busy_ratio_med,
+                 paired_eqdem_med);
+    std::fprintf(stderr,
+                 "[ul_gpu_lane] paired reading (P0-5): \"residency is ~95%% busy\" (0.95 +- 0.05) is %s"
+                 " (%.3f); \"eq_demap ~ residency\" (1.00 +- 0.05) is %s (%.3f)\n",
+                 reproduced(paired_busy_med, 0.95),
+                 paired_busy_med,
+                 reproduced(paired_eqdem_med, 1.0),
+                 paired_eqdem_med);
+  };
   if (lanes == 0) {
     if (fe_slots == 0) {
       std::fprintf(stderr, "[ul_gpu_lane] no lanes recorded\n");
     } else {
       print_front_end();
     }
+    print_pairing();
     return;
   }
 
@@ -661,6 +938,8 @@ void gpu_lane_probe::report()
                  static_cast<double>(stage_cbs[i]) / static_cast<double>(lanes));
   }
   std::fprintf(stderr, "\n");
+
+  print_pairing();
 }
 
 #endif // OCUDU_METAL_STATS

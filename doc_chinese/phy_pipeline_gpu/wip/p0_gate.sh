@@ -16,6 +16,9 @@
 #   B1  a split arm's `busy split` gains a `dft=` token whose cbs/lane is 1.00 (the front end's buffer is
 #       its own submission), and a factory arm's does NOT gain one
 #   B2  (only with --vs) dft + (the rest) is within +-10% of the factory arm's merged_hop
+#   C1  a leg that declares OCUDU_UL_PHASE_SEGMENTS=1 actually records the phase segments
+#   C2  (P0-5, registered in phy_latency/session_handoff_2026-09-24-1.md 6.0 (1)) the samples the lane probe
+#       could pair with a lane EQUAL the phase-segment samples - the two probes describing one population
 # "Cannot read" is RED, never absent - the lesson of 5.9.97.
 set -u
 
@@ -117,21 +120,47 @@ fi
 # Judged ONLY on a leg that declares the knob, exactly like B1: a leg that never asked for the phase
 # segments cannot be failed for not having them (that is how a criterion gets bound to the wrong arm).
 knob_ph=$(grep -aoE "OCUDU_UL_PHASE_SEGMENTS=[0-9]+" "$LEGF" | tail -1 | sed 's/.*=//')
-n_phase=$(grep -ac "ul_time_frequency" "$LEGF")
+n_phase=$(grep -aoE "\[ul_time_frequency\] samples=[0-9]+" "$LEGF" | tail -1 | grep -oE "[0-9]+$")
 n_lane=$(grep -aoE "\[ul_gpu_lane\] residency samples=[0-9]+" "$LEGF" | tail -1 | grep -oE "[0-9]+$")
+# The pairing report (P0-5). Its own sample count is the number of phase samples the lane probe could pair with
+# the lane that produced them, and `phase_samples` is what the pipeline probe announced to it - the SAME series
+# the [ul_time_frequency] line above counts, printed side by side so a reader can see the join's own accounting
+# instead of inferring it from two lines that were recorded by different probes.
+paired_line=$(grep -a "\[ul_gpu_lane\] paired with the phase segments" "$LEGF" | tail -1)
+n_paired=$(printf '%s' "$paired_line" | grep -oE "P0-5\): samples=[0-9]+" | grep -oE "[0-9]+$")
+n_announced=$(printf '%s' "$paired_line" | grep -oE "phase_samples=[0-9]+" | grep -oE "[0-9]+$")
 if [ -n "${knob_ph:-}" ] && [ "${knob_ph:-0}" != "0" ]; then
   check "C1 a leg that declares the phase segments actually records them" "OCUDU_UL_PHASE_SEGMENTS=1 -> segments present" \
-        "$([ "${n_phase:-0}" -gt 0 ] && echo PASS || echo FAIL)" \
-        "knob=$knob_ph, phase-segment lines=$n_phase"
+        "$([ -n "${n_phase:-}" ] && [ "${n_phase:-0}" -gt 0 ] && echo PASS || echo FAIL)" \
+        "knob=$knob_ph, phase-segment samples=${n_phase:-<none>}"
+  # C2: the criterion P0-5 was commissioned with (phy_latency/session_handoff_2026-09-24-1.md 6.0 (1)): the
+  # paired population must BE the phase-segment population - a subset would mean the join drops samples, and a
+  # superset that it pairs lanes with samples that do not exist. "Cannot read" is RED, never absent (5.9.97):
+  # a leg that asked for the segments and printed no pairing line is a failure of the instrument, not a pass.
+  if [ -z "${n_paired:-}" ] || [ -z "${n_phase:-}" ]; then
+    check "C2 (P0-5) paired samples == phase-segment samples" "equal, on a leg with the segments on" RED \
+          "cannot read: paired='${n_paired:-<absent>}' phase='${n_phase:-<absent>}' - the paired line is: ${paired_line:-<none>}"
+  else
+    check "C2 (P0-5) paired samples == phase-segment samples" "equal, on a leg with the segments on" \
+          "$([ "$n_paired" = "$n_phase" ] && echo PASS || echo FAIL)" \
+          "paired=$n_paired, phase-segment samples=$n_phase, announced to the lane probe=${n_announced:-<none>}; $paired_line"
+  fi
 else
   check "C1 a leg that declares the phase segments actually records them" "OCUDU_UL_PHASE_SEGMENTS=1 -> segments present" INFO \
         "not a phases leg (knob unset) - C1 does not apply"
+  check "[INFO] C2 (P0-5) is judged only on a leg with the segments on" "OCUDU_UL_PHASE_SEGMENTS=1" INFO \
+        "not a phases leg (knob unset): ${paired_line:-<no pairing line>}"
 fi
-# The pairing itself is REPORTED, never judged: no threshold for "paired" was ever registered, and
-# inventing one inside a gate is how a criterion becomes whatever the last person wanted (5.9.101).
-check "[INFO] P0-5: the two probes' populations (not judged - no threshold registered)" \
+# The ratio the pairing was commissioned to recompute (6.0 (2)): printed, never judged - the criterion says
+# "state whether it is still ~95%", not "fail below it", and inventing a threshold inside a gate is how a
+# criterion becomes whatever the last person wanted (5.9.101).
+ratios_line=$(grep -a "\[ul_gpu_lane\] paired ratios (P0-5)" "$LEGF" | tail -1)
+reading_line=$(grep -a "\[ul_gpu_lane\] paired reading (P0-5)" "$LEGF" | tail -1)
+check "[INFO] P0-5: the paired ratios and whether the reading survives" "reported, not judged" INFO \
+      "${ratios_line:-<no paired ratios line>}  ||  ${reading_line:-<no paired reading line>}"
+check "[INFO] the two probes' populations (not judged - no threshold registered)" \
       "phase samples vs lane residency samples" INFO \
-      "phase-segment lines=${n_phase:-0}, lane residency samples=${n_lane:-<none>}$([ -n "${n_lane:-}" ] && [ "${n_lane:-0}" != "0" ] && awk -v a="${n_phase:-0}" -v b="$n_lane" 'BEGIN{printf "  (ratio %.3f)", a/b}')"
+      "phase-segment samples=${n_phase:-<none>}, lane residency samples=${n_lane:-<none>}$([ -n "${n_lane:-}" ] && [ "${n_lane:-0}" != "0" ] && [ -n "${n_phase:-}" ] && awk -v a="$n_phase" -v b="$n_lane" 'BEGIN{printf "  (unpaired ratio %.3f)", a/b}')"
 
 # ---------------------------------------------------------------- INFO: what else this leg carries
 phase=$(grep -aoE "\[ul_time_frequency\][^\"]{0,40}" "$LEGF" | tail -1)
