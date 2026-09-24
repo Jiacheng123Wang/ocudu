@@ -107,6 +107,26 @@ else
         "busy-split total = ${sum_group:-<unreadable>}us/lane (no --vs given)"
 fi
 
+# ---------------------------------------------------------------- P0-5: are the two probes paired?
+# Judged ONLY on a leg that declares the knob, exactly like B1: a leg that never asked for the phase
+# segments cannot be failed for not having them (that is how a criterion gets bound to the wrong arm).
+knob_ph=$(grep -aE "^knob +: OCUDU_UL_PHASE_SEGMENTS=" "$LEGF" | tail -1 | sed 's/.*=//')
+n_phase=$(grep -ac "ul_time_frequency" "$LEGF")
+n_lane=$(grep -aoE "\[ul_gpu_lane\] residency samples=[0-9]+" "$LEGF" | tail -1 | grep -oE "[0-9]+$")
+if [ -n "${knob_ph:-}" ] && [ "${knob_ph:-0}" != "0" ]; then
+  check "C1 a leg that declares the phase segments actually records them" "OCUDU_UL_PHASE_SEGMENTS=1 -> segments present" \
+        "$([ "${n_phase:-0}" -gt 0 ] && echo PASS || echo FAIL)" \
+        "knob=$knob_ph, phase-segment lines=$n_phase"
+else
+  check "C1 a leg that declares the phase segments actually records them" "OCUDU_UL_PHASE_SEGMENTS=1 -> segments present" INFO \
+        "not a phases leg (knob unset) - C1 does not apply"
+fi
+# The pairing itself is REPORTED, never judged: no threshold for "paired" was ever registered, and
+# inventing one inside a gate is how a criterion becomes whatever the last person wanted (5.9.101).
+check "[INFO] P0-5: the two probes' populations (not judged - no threshold registered)" \
+      "phase samples vs lane residency samples" INFO \
+      "phase-segment lines=${n_phase:-0}, lane residency samples=${n_lane:-<none>}$([ -n "${n_lane:-}" ] && [ "${n_lane:-0}" != "0" ] && awk -v a="${n_phase:-0}" -v b="$n_lane" 'BEGIN{printf "  (ratio %.3f)", a/b}')"
+
 # ---------------------------------------------------------------- INFO: what else this leg carries
 phase=$(grep -aoE "\[ul_time_frequency\][^\"]{0,40}" "$LEGF" | tail -1)
 resid=$(grep -aoE "\[ul_gpu_lane\] residency samples=[0-9]+" "$LEGF" | tail -1)
