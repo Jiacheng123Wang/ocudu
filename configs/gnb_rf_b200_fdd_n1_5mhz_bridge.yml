@@ -26,12 +26,14 @@ cu_cp:
 
 ru_sdr:
   device_driver: uhd
-  device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
+  #device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
+  device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=internal,time_source=internal,gpsdo=0
   srate: 7.68
   otw_format: sc12
   tx_gain: 80
   rx_gain: 70
-  clock: gpsdo
+  #clock: gpsdo
+  clock: internal
   sync: internal
 
 cell_cfg:

@@ -32,6 +32,21 @@ namespace ocudu {
   } while (0)
 #endif
 
+/// \brief Skips the test when the socket's SCTP address list cannot be read back.
+///
+/// macOS has no in-kernel SCTP: the gateway exposes a usrsctp-backed handle, not a kernel SCTP socket. The fd the
+/// shim returns is therefore not an SCTP socket (getsockname() reports AF_UNIX on it), and usrsctp's own
+/// usrsctp_getladdrs() needs the stack's internal socket pointer, which the shim does not expose. The bound port is
+/// still checked on macOS through sctp_socket::get_bound_port(); only the address list is out of reach.
+#if defined(__APPLE__)
+#define OCUDU_SKIP_IF_NO_SCTP_ADDRESS_LIST()                                                                           \
+  GTEST_SKIP() << "the usrsctp shim does not expose the socket's SCTP address list"
+#else
+#define OCUDU_SKIP_IF_NO_SCTP_ADDRESS_LIST()                                                                           \
+  do {                                                                                                                 \
+  } while (0)
+#endif
+
 /// \brief Skips the test when the SCTP stack has no sctp_connectx() with more than one peer address.
 ///
 /// usrsctp only provides usrsctp_connect(): the shim connects to the first address of the list, so tests that check

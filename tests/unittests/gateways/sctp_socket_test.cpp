@@ -56,6 +56,31 @@ protected:
   /// Buffer for an SCTP address list. One entry over the maximum this test binds covers the header, see below.
   using sctp_addr_buf = std::array<sockaddr_storage, 8>;
 
+#if defined(__APPLE__)
+  /// Address-list selectors for \ref get_sctp_addrs.
+  ///
+  /// macOS has no in-kernel SCTP, so the kernel's \c SCTP_GET_LOCAL_ADDRS / \c SCTP_GET_PEER_ADDRS options do not
+  /// exist; the values only keep the callers below platform-independent.
+  enum : int { SCTP_GET_LOCAL_ADDRS = 1, SCTP_GET_PEER_ADDRS = 2 };
+
+  /// \brief macOS: the address list is not reachable, see OCUDU_SKIP_IF_NO_SCTP_ADDRESS_LIST.
+  ///
+  /// The fd the gateway exposes belongs to the usrsctp shim, not to a kernel SCTP socket: getsockname() on it reports
+  /// AF_UNIX, and usrsctp_getladdrs() needs the stack's internal socket pointer, which the shim does not hand out.
+  /// Every caller of this helper skips on macOS, so this only has to keep the callers compiling - and to fail
+  /// visibly if a new caller forgets the skip.
+  ///
+  /// \return Always -1 (the address list could not be retrieved).
+  static int get_sctp_addrs(int fd, int optname, sctp_addr_buf& buf, sockaddr** addrs, sctp_assoc_t assoc_id = 0)
+  {
+    (void)fd;
+    (void)optname;
+    (void)buf;
+    (void)addrs;
+    (void)assoc_id;
+    return -1;
+  }
+#else
   /// \brief Drop-in for \c sctp_getladdrs() / \c sctp_getpaddrs() that reads into a caller-owned \p buf.
   ///
   /// Next to the address list, the kernel writes an \c sctp_getaddrs header in front of it, while the \c optlen it
@@ -74,6 +99,7 @@ protected:
     socklen_t len = sizeof(buf);
     return ::getsockopt(fd, IPPROTO_SCTP, optname, buf.data(), &len) == 0 ? static_cast<int>(getaddrs->addr_num) : -1;
   }
+#endif
 
   /// Verify bound addresses using the SCTP local address list.
   static void verify_bound_address_ipv4(int fd, std::optional<uint16_t> expected_port, in_addr_t expected_addr)
@@ -287,6 +313,9 @@ TEST_F(sctp_socket_test, create_with_all_options)
 /// Test bindx to loopback address with a dynamic port (when port is not set then OS picks the port number).
 TEST_F(sctp_socket_test, bindx_to_loopback_with_dynamic_port)
 {
+  // The address list is not readable through the usrsctp shim on macOS, see OCUDU_SKIP_IF_NO_SCTP_ADDRESS_LIST.
+  OCUDU_SKIP_IF_NO_SCTP_ADDRESS_LIST();
+
   sctp_socket_params params = create_default_params();
 
   auto result = sctp_socket::create(params);
@@ -307,6 +336,9 @@ TEST_F(sctp_socket_test, bindx_to_loopback_with_dynamic_port)
 /// Test bindx to loopback address with a dynamic port (when port is not set then OS picks the port number).
 TEST_F(sctp_socket_test, bindx_to_loopback_with_dynamic_port_ipv6)
 {
+  // The address list is not readable through the usrsctp shim on macOS, see OCUDU_SKIP_IF_NO_SCTP_ADDRESS_LIST.
+  OCUDU_SKIP_IF_NO_SCTP_ADDRESS_LIST();
+
   sctp_socket_params params = create_default_params();
   params.ai_family          = AF_INET6;
 
@@ -422,6 +454,9 @@ TEST_F(sctp_socket_test, bindx_with_empty_list)
 /// Test bindx with a single address.
 TEST_F(sctp_socket_test, bindx_with_single_address)
 {
+  // The address list is not readable through the usrsctp shim on macOS, see OCUDU_SKIP_IF_NO_SCTP_ADDRESS_LIST.
+  OCUDU_SKIP_IF_NO_SCTP_ADDRESS_LIST();
+
   sctp_socket_params params = create_default_params();
   params.reuse_addr         = true;
 
@@ -491,6 +526,10 @@ TEST_F(sctp_socket_test, connectx_fails_with_empty_list)
 /// Test bindx with multiple IPv4 loopback addresses.
 TEST_F(sctp_socket_test, bindx_with_multiple_ipv4_addresses)
 {
+  // The test verifies all three addresses are in the socket's local address list: the usrsctp shim on macOS cannot
+  // bind (nor associate) distinct local addresses, see OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS.
+  OCUDU_SKIP_IF_NO_SCTP_MULTI_LOCAL_ADDRESS();
+
   sctp_socket_params params = create_default_params();
   params.reuse_addr         = true;
 

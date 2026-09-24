@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 /// \file
-/// \brief The two properties that let the uplink processor skip its CFO pass.
+/// \brief The two properties behind the uplink processor's decision to skip the CFO pass.
 ///
-/// uplink_processor_impl wraps the compensation in an int16 -> float -> int16 round trip and only
-/// runs it when baseband_cfo_processor::applies_compensation() is true. With no offset in effect the
-/// pass is therefore a pure round trip, and skipping it is correct only if
+/// uplink_processor_impl hands the assembled symbol to baseband_cfo_processor::process() only when
+/// applies_compensation() is true, so a sector with no offset in effect passes the samples to the PRACH
+/// and PUxCH processors exactly as the radio delivered them. Two properties make that safe:
 ///
-///   1. the round trip is the identity - convert(ci16 -> cf_t, 1/32767) followed by
-///      convert(cf_t -> ci16, 32767) gives back the input for every int16, and
+///   1. the int16 -> float -> int16 scaling the ci16 path applies to every sample is the identity -
+///      convert(ci16 -> cf_t, 1/32767) followed by convert(cf_t -> ci16, 32767) gives back the input for
+///      every int16 - so the pass itself cannot change the samples, and
 ///   2. applies_compensation() is true exactly when process() modifies the samples, so a run that
 ///      skips the pass cannot silently drop a compensation that was due.
 ///
@@ -17,14 +18,33 @@
 /// SIMD conversion (vcvtnq_s32_f32 on Apple Silicon, _mm_cvtps_epi32 / _mm512_cvt_roundps_epi32 on
 /// x86), and property 2 is the contract between the two functions.
 
-#include "ocudu/ocuduvec/conversion.h"
 #include "baseband_cfo_processor.h"
+#include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_dynamic.h"
+#include "ocudu/ocuduvec/conversion.h"
+#include <algorithm>
+#include <cmath>
 #include <gtest/gtest.h>
 #include <random>
 
 using namespace ocudu;
 
 namespace {
+
+/// A single-channel buffer of \c nof_samples integer samples, all set to \p value.
+baseband_gateway_buffer_dynamic make_buffer(unsigned nof_samples, ci16_t value)
+{
+  baseband_gateway_buffer_dynamic buffer(1, nof_samples);
+  span<ci16_t>                    channel = buffer.get_writer().get_channel_buffer(0);
+  std::fill(channel.begin(), channel.end(), value);
+  return buffer;
+}
+
+/// Copies the samples of the first channel of \p buffer.
+std::vector<ci16_t> read_channel(const baseband_gateway_buffer_dynamic& buffer)
+{
+  span<const ci16_t> channel = buffer.get_reader().get_channel_buffer(0);
+  return {channel.begin(), channel.end()};
+}
 
 /// All the values an int16 sample can take, plus the extremes first: the identity has to hold at
 /// -32768 (which the float mapping of a full-scale int16 reaches exactly) as well as at 0.
@@ -71,10 +91,10 @@ TEST(BasebandCfoProcessorTest, CompensationIsAppliedExactlyWhenItIsAnnounced)
   ASSERT_EQ(cfo.get_nof_scheduled_commands(), 0) << "a fresh processor reports a command that was never scheduled";
   ASSERT_FLOAT_EQ(cfo.get_cfo_hz(), 0.0F);
   {
-    std::vector<cf_t>  samples(64, cf_t(0.25F, -0.5F));
-    std::vector<cf_t>  before = samples;
-    cfo.process(span<cf_t>(samples));
-    ASSERT_EQ(samples, before) << "process() modified the samples although it announced no compensation";
+    baseband_gateway_buffer_dynamic samples = make_buffer(64, ci16_t(1000, -2000));
+    const std::vector<ci16_t>       before  = read_channel(samples);
+    cfo.process(samples.get_writer());
+    ASSERT_EQ(read_channel(samples), before) << "process() modified the samples although it announced no compensation";
   }
 
   // A command of 0 Hz leaves no offset in effect either.
@@ -90,19 +110,18 @@ TEST(BasebandCfoProcessorTest, CompensationIsAppliedExactlyWhenItIsAnnounced)
   ASSERT_EQ(cfo.get_nof_scheduled_commands(), 2) << "both accepted commands must be counted (0 Hz included)";
   ASSERT_FLOAT_EQ(cfo.get_cfo_hz(), cfo_hz);
   {
-    std::vector<cf_t> samples(64);
-    std::vector<cf_t> expected(64);
-    for (size_t i = 0; i != samples.size(); ++i) {
-      // First sample of the block is always rotated by exp(j*2*pi*cfo*0) = 1, the rest advance.
-      float phase = TWOPI * (cfo_hz / srate.to_Hz<float>()) * static_cast<float>(i);
-      samples[i]  = cf_t(0.0F, 0.0F);
-      expected[i] = cf_t(std::cos(phase), std::sin(phase));
-    }
-    std::vector<cf_t> input(64, cf_t(1.0F, 0.0F));
-    cfo.process(span<cf_t>(input));
-    for (size_t i = 0; i != input.size(); ++i) {
-      ASSERT_NEAR(input[i].real(), expected[i].real(), 1e-5F);
-      ASSERT_NEAR(input[i].imag(), expected[i].imag(), 1e-5F);
+    const unsigned                  nof_samples = 64;
+    baseband_gateway_buffer_dynamic samples     = make_buffer(nof_samples, ci16_t(32767, 0));
+    cfo.process(samples.get_writer());
+
+    const std::vector<ci16_t> rotated = read_channel(samples);
+    for (unsigned i = 0; i != nof_samples; ++i) {
+      // The first sample of the block is always rotated by exp(j*2*pi*cfo*0) = 1, the rest advance by the normalized
+      // frequency. A full-scale int16 sample is what the ci16 <-> cf_t scaling maps 1.0 to, so the analytic result is
+      // cos/sin scaled by 32767; the tolerance leaves room for the rounding of the SIMD rotation.
+      const float phase = TWOPI * (cfo_hz / srate.to_Hz<float>()) * static_cast<float>(i);
+      EXPECT_NEAR(rotated[i].real(), std::lround(std::cos(phase) * 32767.0F), 2) << "sample " << i;
+      EXPECT_NEAR(rotated[i].imag(), std::lround(std::sin(phase) * 32767.0F), 2) << "sample " << i;
     }
   }
 }

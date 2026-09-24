@@ -283,7 +283,9 @@ TEST_P(OfdmModulatorFixture, ModulatesCorrectly)
 }
 
 /// Meaningful port weight combinations for a complete OFDM modulator line coverage.
-static constexpr auto port_weight_combinations      = to_array<port_weight_list>({{0, 1, 0, 0}, {0.5, 0.1j, 0, 0}});
+/// \note The imaginary weight is written as cf_t(0.0F, 0.1F) instead of the GNU 0.1j literal: libc++ does not accept
+/// the implicit _Complex double -> std::complex<float> conversion the literal relies on.
+static constexpr auto port_weight_combinations = to_array<port_weight_list>({{0, 1, 0, 0}, {0.5, cf_t(0.0F, 0.1F), 0, 0}});
 static const auto     port_allocations_combinations = to_array<static_vector<unsigned, nof_ports>>({{0}, {0, 1}});
 
 /// Pre-compute all valid parameter combinations.
