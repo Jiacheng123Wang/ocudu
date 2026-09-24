@@ -15,6 +15,8 @@
 #include "ocudu/ran/pusch/pusch_constants.h"
 #include "ocudu/support/cpu_architecture_info.h"
 #include <cmath>
+#include <cstdio>
+#include <string>
 
 using namespace ocudu;
 
@@ -399,6 +401,36 @@ void ocudu::fill_du_low_worker_manager_config(worker_manager_config&         con
         }
       }
     }
+  }
+
+  // ---- P0-6 (doc_chinese/phy_latency/01_plan.md): say what this value RESOLVED to, and from what ----
+  // The resolved concurrency decides whether the PUSCH lane's executor is a serialising STRAND (<= 1,
+  // one hop at a time) or an N-way task fork limiter (N hops may overlap). Until this line existed the
+  // value was nowhere in a leg: the config default is `auto`, the YAML dump writes the sentinel back
+  // out, and the only readings that ever named a "single lane" came from n1 legs (5.9.33/5.9.35). So
+  // whether the n78 heavy leg's 901us channel-estimation segment may be attributed to single-lane
+  // queueing was UNANSWERABLE from the record - and the two configurations need not agree, because
+  // derive_pusch_and_srs_concurrency() scales with bandwidth and (for TDD) with the uplink slot ratio.
+  // Printed to stderr, the stream the wip/ gates read a leg's counters from.
+  {
+    std::string inputs;
+    for (const du_low_cell_config& c : cell_params) {
+      inputs += fmt::format(
+          " bw={}MHz layers={} ul_ratio={:.2f};", c.channel_bw_mhz, c.pusch_max_nof_layers, c.ul_ratio);
+    }
+    std::fprintf(stderr,
+                 "[ul_lane_exec] PUSCH/SRS concurrency = %u (%s;%s available cpus=%u)"
+                 "  <- <=1 makes the lane a serialising strand, else an N-way fork limiter"
+                 " (see du_low_executor_mapper.cpp)\n",
+                 max_pusch_and_srs_concurrency,
+                 (unit_cfg.expert_execution_cfg.threads.max_pusch_and_srs_concurrency ==
+                  du_low_unit_expert_threads_config::concurrency_auto)
+                     ? "auto-derived"
+                     : ((max_pusch_and_srs_concurrency == du_low_unit_expert_threads_config::concurrency_unlimited)
+                            ? "configured: no limit"
+                            : "configured"),
+                 inputs.c_str(),
+                 static_cast<unsigned>(cpu_architecture_info::get().get_host_nof_available_cpus()));
   }
 
   du_low_cfg.max_pdsch_concurrency         = max_pdsch_concurrency;

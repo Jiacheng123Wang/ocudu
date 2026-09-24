@@ -26,8 +26,8 @@ cu_cp:
 
 ru_sdr:
   device_driver: uhd
-  #device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
-  device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=internal,time_source=internal,gpsdo=0
+  device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
+  #device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=internal,time_source=internal,gpsdo=0
   # 15.36 MHz is 2x oversampling of this 5 MHz cell. Its natural rate is 7.68 MHz, but a B210 cannot hold its
   # master clock that low: with UHD 4.6 the AD9361 stops clocking the FPGA below ~9.6 MHz and every register write
   # then times out (AssertionError: accum_timeout < _timeout). Measured on the lab B210: 5.0/5.76/7.68 MHz fail,
@@ -37,8 +37,8 @@ ru_sdr:
   otw_format: sc12
   tx_gain: 80
   rx_gain: 70
-  #clock: gpsdo
-  clock: internal
+  clock: gpsdo
+  #clock: internal
   sync: internal
 
 cell_cfg:

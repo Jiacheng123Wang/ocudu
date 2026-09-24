@@ -13702,3 +13702,41 @@ A1-2 在 n78 压力腿上 `5 of 5 judged`（默认腿判不了 C4 —— 其 PRA
 
 **⑤ 一个操作细节**：推 `_p2` 时 GitHub 首次返回 **`Internal Server Error`（HTTP 500）**，重试即成功
 （本地 tag 对象已建好，重试无副作用）。这不是权限或引用冲突。
+
+#### 5.9.135 ★★ P0-6 落地：车道的**生效并发度**第一次可读——**n78 与 n1 都是 1（串行 strand）**，C 项归因坐实，P1-8 有真杠杆
+
+**① 为什么它必须存在**：时延工作流的第一个问题是"`ce` 段 901 µs 能不能归因为**单车道排队**"（`phy_latency/00_status.md` Q8）。
+判它的前提是知道车道执行器的**生效并发度**，而这个值**在任何腿、任何 dump 里都没有**：
+配置默认是 `concurrency_auto`，YAML dump 又把哨兵原样写回（`du_low_config_yaml_writer.cpp:61` 的 `concurrency_to_yaml_value`），
+而历史上所有"单车道"读数（§5.9.33/§5.9.35 的注释与测量）**都来自 n1 腿**——两个配置的推导值本不必相同
+（`derive_pusch_and_srs_concurrency()` 随带宽和 TDD 上行占比变）。
+
+**② 落地（两行 stderr，零数据面影响）**
+
+| 位置 | 打印 |
+|---|---|
+| `apps/units/flexible_o_du/o_du_low/du_low_config_translator.cpp` | `[ul_lane_exec] PUSCH/SRS concurrency = 1 (auto-derived; bw=20MHz layers=1 ul_ratio=0.30; available cpus=14)  <- <=1 makes the lane a serialising strand, else an N-way fork limiter` |
+| `lib/du/du_low/du_low_executor_mapper.cpp` | `[ul_lane_exec] PUSCH lane executor: max_pusch_and_srs_concurrency=1, medium pool max_concurrency=5 -> pusch_executor.max_concurrency=1 (a serialising STRAND: ONE PUSCH hop at a time (5.9.33/5.9.35's 'single lane'))` |
+
+**③ 单测（离线取证 + 把规则钉住）**：`tests/unittests/du_low/du_low_executor_mapper_test.cpp`（4 例，标签 `du_low;du_high`，
+**故意不含 `phy`**，以免改动审计门的 `ctest -L phy` 计数）：`1 → strand`、`3 → 3 路 fork`、`12（=池）→ fork 12`、`0（无限制）→ 池值`。
+⚠ 过程中发现并纠正了我自己的一个错判：限值**大于池子不是"夹取"而是配置错误**（mapper 的 `report_error_if_not` 直接报错），
+真正夹取的 `max_nof_threads > base.max_concurrency` 分支在应用层永远到不了。
+
+**④ ★ 实测结果（2026-09-24，两行在电台打开**之前**打印 ⇒ 短跑一次 `gnb -c <配置>` 即可离线读到）**
+
+| 配置 | 推导输入 | 生效值 | 形态 |
+|---|---|---|---|
+| n78 `configs/gnb_rf_b200_tdd_n78_20mhz.yml` | `bw=20MHz layers=1 ul_ratio=0.30` cpus=14 | **1** | **串行 strand** |
+| n1 `configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml` | `bw=5MHz layers=1 ul_ratio=1.00` cpus=14 | **1** | **串行 strand** |
+
+**⑤ 由它得到的三条结论（修正本轮之前的两处推断）**
+
+1. **C 项（`ce` 901 µs）的"单车道排队"归因成立**——车道确实是串行 strand，一跳占住它 ≈1125 µs（§3.3），
+   而重载下每 ~1.5 ms 要求一跳 ⇒ **排队项与本跳执行是同一条串行链的两半**（`00_status.md` §4 的待确认已消）。
+2. **P1-8 有真实杠杆**：生效值 1，可提到 **2..5**（上限 = 中等池的 `max_concurrency`，本次读到 **5**）。
+   用户已裁决 V4 **只约束交付**（§5.9.132 ①），故该臂作为**纯测量臂**放行。
+3. ⚠ **更正我此前的手算**：我在 §5.9.132 ② 与 `phy_latency/00_status.md` Q8 里推"n78 的 `ul_ratio` 缺省为 1.0 ⇒ 2.5 ⇒ 3 路 fork"。
+   实测是 **0.30**（TDD 图案来自**公共小区**那一层——CLI11 的注释原话是"the cell TDD pattern value equals the common cell TDD pattern"，
+   我只查了小区级而没查公共层），于是 `12.5 × 0.20 × 1 × 0.30 = 0.75 → ceil 1`。
+   **教训**：该值的推导输入必须**读出来**而不是从配置文件的字面缺省推断——这正是本项存在的理由。

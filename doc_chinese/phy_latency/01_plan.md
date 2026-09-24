@@ -63,7 +63,7 @@
 | **P0-3** | `ce` 段 p95 尾巴（1782 µs / 中位 901）无归因 | ~~尾延迟是饥饿主因~~ **主体已由代码判读收口**：单车道 strand 排队 + 上一跳 held/outstanding 缓冲回收（`00_status.md` §3.1）。**残余缺口**只剩"这两者各占多少" | 用 `OCUDU_UL_SLOT_TRACE`（它**按槽**并排打 `rxwait`/`t2f`）加一个"strand 等待"子探针 | 尾巴落在排队还是回收，逐槽可读 |
 | **P0-4** | 离线回放**能否**产出同样的三段读数 | 能用回放做的实验就不烧空口腿 | 检查 `ul_chain_replay` 是否经过 `ul_pipeline_probe` 的同一路径；若能，写一个"回放版的段报告" | 回放与空口在同一负载点上的三段比例一致（±20%）|
 | **P0-5** | **相位探针与车道探针的样本总体不同**（`s82`：97331 vs 140204）⇒ "residency 里 95% 是 busy" 只能算**指示性** | 它是 D 项（1125）唯一的分母，不配对就不能拿它当预算 | 让两者**按同一 key（slot）配对**后再出报告；或让车道探针只统计"有相位读数的跳" | 配对后 `busy/residency` 比例仍 ≈95%（则 D 项坐实），否则重算 |
-| **P0-6** | ★ **`max_pusch_and_srs_concurrency` 的"生效值"在腿上没有任何打印**——它决定车道是**串行 strand** 还是**多路 fork limiter**，因而决定 C 项（901 µs）的归因能否成立 | 该值由 `concurrency_auto` **推导**（`12.5 × bw/100 × 层数 × ul_ratio`，`ul_ratio` 在没有 `tdd_ul_dl_cfg` 时为 **1.0**）⇒ n1 5 MHz 推 **1**（= strand），而 **n78 20 MHz 推 2.5 → ceil 3**（= 三路 fork，**不是** strand）。⚠ 现有"单车道排队"的代码注释与 §5.9.33/35 的读数**都来自 n1 腿** | 在 `du_low_executor_mapper.cpp` 建 limiter/strand 处打**一行 INFO**：解析后的值、推导输入（bw/层数/`ul_ratio`/可用核数）、以及"建成了 strand 还是 N 路 fork" | 下一次腿的 stderr 里能直接读到该值；据此判定 C 项归因（**在此之前，`00_status.md` §3.1 的 C 行按"待确认"读**）|
+| ~~**P0-6**~~ ✅ **已完成** | 打印 `max_pusch_and_srs_concurrency` 的生效值、推导输入与**执行器形态** | 落地：`du_low_config_translator.cpp`（推导值 + 输入）与 `du_low_executor_mapper.cpp`（strand vs N 路 fork）各一行 `[ul_lane_exec]`，走 stderr；附单测 `tests/unittests/du_low/du_low_executor_mapper_test.cpp`（4 例，钉住规则）| **实测**：n78 = **1**（`bw=20MHz layers=1 ul_ratio=0.30`）、n1 = **1**（`ul_ratio=1.00`）⇒ 两者**都是串行 strand**；池上限 = **5**（超过池子直接报配置错误，不夹取）⇒ **C 项归因成立，P1-8 有真杠杆（1→2..5）** |
 
 ## 4. P1 —— 单变量臂（每条一个变量，判据先登记）
 
@@ -84,7 +84,7 @@
 | **P1-5** | `OCUDU_CE_CORR_*` / `OCUDU_CE_INV_BARRIERS`（相关矩阵的 barrier/分片）| 针对 D 项里已知的贵项（K1 串行 pivot、atan2 归约、reformat 链；见 `03_recorded_costs.md`）逐项定量 |
 | **P1-6** | `OCUDU_UL_SLOT_TRACE=N`（配对 `rxwait`/`t2f`/`ce` 的**逐槽**时间线）| 把 B 项（48 µs）拆开：executor 跳 / 14 次 encode / 交棒记账 / notify / 探针各占多少；同时给 P0-3 的残余缺口 |
 | **P1-7** | 符号级收包（S-7g-13；`OCUDU_UL_RX_SYMBOLS`）**在加压腿上** | A 项（473 µs）的唯一候选杠杆。⚠ §5.8.29 只量过该段 −1.2%（未加压、且**丢了融合 1 次提交**）⇒ 本臂必须**同时读跨度与 `cbs/lane`**：若跨度降而提交数升 ⇒ 触 V4，交用户裁决 |
-| **P1-8** | **车道并发度**（`--expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=N`）| C 项（901 µs）的唯一结构杠杆（§5.9.35 ③）。**⚠ 先决条件：P0-6**——不知道 n78 上生效值是多少（可能是 **3**，那就已经是 fork limiter 而非 strand），这条臂可能在 n78 上**根本没东西可改**（那时它变成"**1 vs 现状**"的**反向**臂）。**用户已裁决（§5.2）**：V4 只约束**交付**，因此本臂**可以作为纯测量臂**跑；读数看"跨度 / `cbs/lane` / `dropped` / RF"，**不作为交付** |
+| **P1-8** | **车道并发度**（`--expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=N`）| ✅ **前置条件已满足（P0-6）**：生效值 = **1**（串行 strand），可提到 **2..5**（上限 = 中等池 `max_concurrency`）。读数看"跨度 / `ce` / `cbs/lane` / `dropped` / RF"；⚠ 该池是**非实时中等优先级池**，同池还有别的任务，提并发会同时占用更多池线程 ⇒ 必须与 `[ul_gpu_lane]` 的排队项和 RF 一起读。**用户已裁决（§5.2）**：V4 只约束**交付**，本臂**作为纯测量臂**放行，**不作为交付** |
 
 ## 5. P2 —— 结构/实现改动（按 P1 的结论选一条，不预设）
 

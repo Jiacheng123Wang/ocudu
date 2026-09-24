@@ -10,6 +10,7 @@
 #include "ocudu/support/executors/strand_executor.h"
 #include "ocudu/support/executors/task_fork_limiter.h"
 #include "ocudu/support/ocudu_assert.h"
+#include <cstdio>
 
 using namespace ocudu;
 using namespace odu;
@@ -122,6 +123,22 @@ public:
                                                       max_pusch_batch_size);
       phy_config.pusch_ch_estimator_executor = pusch_srs_execs[0];
       phy_config.pusch_executor              = pusch_srs_execs[1];
+      // ---- P0-6: the SHAPE that value produced, next to the value itself ---------------------------
+      // All three views come from one create_task_fork_limiter(), so they share max_concurrency. A value
+      // of 1 (or less) is not "a limit of one" - it is create_task_fork_limiter() returning a STRAND,
+      // i.e. the PUSCH lane serialises: one hop in it at a time. That distinction is what the latency
+      // workstream opens with (doc_chinese/phy_latency/00_status.md Q8): a long channel-estimation
+      // segment is lane QUEUEING only if the lane really is serial, and the "single lane" readings on
+      // record came from n1 legs whose derived value differs from an n78 cell's.
+      std::fprintf(stderr,
+                   "[ul_lane_exec] PUSCH lane executor: max_pusch_and_srs_concurrency=%u, medium pool "
+                   "max_concurrency=%u -> pusch_executor.max_concurrency=%u (%s)\n",
+                   flexible.max_pusch_and_srs_concurrency,
+                   flexible.non_rt_medium_prio_exec.max_concurrency,
+                   phy_config.pusch_executor.max_concurrency,
+                   (phy_config.pusch_executor.max_concurrency <= 1)
+                       ? "a serialising STRAND: ONE PUSCH hop at a time (5.9.33/5.9.35's 'single lane')"
+                       : "a task fork limiter: that many PUSCH hops may overlap");
       // The PUSCH decoder and the SRS go to the NON-REAL-TIME LOW PRIORITY pool instead of the third view of the
       // medium-priority one. The fused uplink lane - the estimator, the equalizer and the demapper of one hop, which
       // the PUSCH task above runs - shares the medium pool with them, and a decode occupying one of its slots makes
