@@ -269,19 +269,26 @@ wait "$out_tee" "$err_tee"
 # non-zero: a reportless leg is not a leg, and it must not be read later as "the counters were
 # zero" (§5.9.97: "cannot read" is RED, never absent). The startup tees are already closed, so
 # the message goes to the real stderr.
-if ! grep -q "\[phy_pipeline\] contract" "$LOG.stderr" 2>/dev/null; then
+if ! grep -q "\[phy_pipeline\] contract" "$LOG.stderr" 2>/dev/null ||
+   ! grep -q "\[metal_stats\]" "$LOG.stderr" 2>/dev/null; then
   echo >&2
-  echo "!! THIS LEG HAS NO REPORT - DO NOT READ IT AS A RESULT !!" >&2
-  echo "   $LOG.stderr carries no '[phy_pipeline] contract' line, so the shutdown path never ran:" >&2
-  echo "   every counter (contract, [metal_stats], [ul_host], [ul_gpu_lane]) is printed there and nowhere else." >&2
-  if [ "$rc" -ne 0 ]; then
-    # A non-zero rc with no report is the other shape: the app refused or failed before its own
-    # shutdown (bad config, radio not found, a validator refusal). Say which one it was.
-    echo "   the gNB exited with rc=$rc BEFORE printing a report (startup/run failure, not a kill)" >&2
-  else
-    echo "   usual cause: the gNB was killed instead of interrupted, or its terminal was closed" >&2
+  echo "!! THIS LEG HAS NO COMPLETE REPORT - DO NOT READ IT AS A RESULT !!" >&2
+  echo "   required: a '[phy_pipeline] contract' line AND the '[metal_stats]' blocks." >&2
+  echo "   The contract prints EARLY in the shutdown; the counters this line's claims are judged by" >&2
+  echo "   ([metal_stats] dft/handover/burst/mmse_ce, [ul_host], [ul_gpu_lane], [ul_pipeline]) come AFTER" >&2
+  echo "   it. Measured 2026-09-24 (leg s76-wall-premerge-n78): the app did not stop within 5 s, the runner" >&2
+  echo "   forced the exit, the contract line WAS there, and every counter after it was gone - a guard that" >&2
+  echo "   only asked for the contract line called that leg readable." >&2
+  if grep -q "Could not stop application" "$LOG.stderr" 2>/dev/null; then
+    echo "   this leg printed 'Could not stop application after 5 seconds. Forcing exit.'" >&2
+    echo "   (lib/support/signal_handling.cpp) - something did not leave its loop; that is a finding in itself." >&2
   fi
-  echo "   Fix: re-run and stop it with ONE Ctrl-C, then WAIT for the report block to finish printing." >&2
+  if [ "$rc" -ne 0 ]; then
+    echo "   the gNB exited with rc=$rc (startup/run failure, or a forced exit)" >&2
+  else
+    echo "   usual cause: the gNB was killed instead of interrupted, or its shutdown did not complete" >&2
+  fi
+  echo "   Fix: re-run and stop it with ONE Ctrl-C, then WAIT for the whole report block to finish printing." >&2
   if [ "$rc" -ne 0 ]; then exit "$rc"; fi
   exit 3
 fi

@@ -198,7 +198,14 @@ if F2 is not None:
     check(f"P0 load comparability: peak offered rate within 2x ({n1} vs {n2})", ok,
           f"peak {p1} vs {p2} grants/s" + ("" if ok else "  <- THE COMPARISON IS VOID: the loads are not comparable"))
     c1, c2 = F1["rf_total"], F2["rf_total"]
-    if ok:
+    # R5 is registered for a MODE difference (gpu vs cpu) and for nothing else: applying it to two legs of
+    # the same mode would "conclude" a lane-vs-machine split out of run-to-run variance (met 2026-09-24 on
+    # the cold/hot pair, both gpu: 166 vs 18, which says nothing about which side the wall is on).
+    if F1["mode"] == F2["mode"]:
+        check(f"R5 {n2} vs {n1}: which side is the wall on?", None,
+              f"not applicable: both legs are mode={F1['mode']}; R5 needs a gpu leg and a cpu leg "
+              f"(their {c1} vs {c2} difference is run-to-run variance, not a side)")
+    elif ok:
         if c2 <= c1 / 5.0:
             verdict = "LANE/GPU SIDE: cpu mode at the same load is >=5x cleaner"
         elif c2 >= c1 / 2.0:
