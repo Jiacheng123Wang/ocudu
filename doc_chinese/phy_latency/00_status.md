@@ -53,7 +53,7 @@
 | 段 | 窗口里实际发生的事 | 依据 |
 |---|---|---|
 | `t2f` 521 | **≈473 µs 是等本槽最后一个样点**（`receiver.receive()`，整槽收包策略下的结构等待，也就是 `[ul_rx_wait]` 的同一次调用）+ **≈48 µs 前端主机工作**（14 次 `submit_symbol` 的 **encode**、交棒记账、通知入队、探针）。**14 个 DFT/grid-write 只被编码、没有执行** | `lower_phy_baseband_processor.cpp:565`（起点取在 `receive()` **之前**）、`:577`（`receive()` 返回）、`:591`（`[ul_rx_wait]` 量的就是这次调用）；`puxch_processor_impl.cpp:228`；`ofdm_demodulator_impl.cpp:487` → `release_block()` 把命令缓冲**未提交地**寄存给车道（`ocudu_dft_metal_engine.h:148-168`：*"a released block executes LATER - at the lane's commit"*）；腿证据 `[ul_dft_wait] no samples`、`dft commits=323233 = 12×26936`（那是 PRACH 自己的引擎）、`gpu busy (front_end): commits=0`。探针自己写明 `[ul_time_frequency] = [ul_rx_wait] + 前端自己的工作`（`ul_pipeline_probe.h:117-122`）|
-| `ce` 901 | (i) **单车道 strand 排队**：`executor.defer` 进的是与 `pusch_executor` **同一条串行 strand**（`max_pusch_and_srs_concurrency` 默认 1），回调要等当前 strand 任务返回 ⇒ 这段主要是"**等到单车道为我这条跳空出来**"，即等**前一跳**的车道窗口走完；(ii) **上一跳 held/outstanding 命令缓冲的回收**：`close_held_buffer` 在每个 stage 开头**提交并等待**（`[cb waitUntilCompleted]`）。**窗口里没有抓格等待** | `dmrs_pusch_estimator_impl.cpp:68`（defer）；`du_low_executor_mapper.cpp:119-131`、`task_fork_limiter.h:204-220`；`ocudu_metal_mmse_engine.mm:906/1232` → `:1126`（等待点）；`impl:2511/3589/4380` → `engine .mm:3795/3818-3825`；**反证**：`take_released` 只加锁查表（`ocudu_metal_burst.mm:680-694`），MISS 时把顺序等待**编码到设备上**（`ocudu_metal_mmse_engine.mm:912-943`），`impl:1261-1265` 明文写了"**不在宿主上等**"的理由（§5.9.23 那次 13 秒事故）|
+| `ce` 901 | (i) **单车道 strand 排队**：`executor.defer` 进的是与 `pusch_executor` **同一条串行 strand**（`max_pusch_and_srs_concurrency` 默认 1），回调要等当前 strand 任务返回 ⇒ 这段主要是"**等到单车道为我这条跳空出来**"，即等**前一跳**的车道窗口走完；(ii) **上一跳 held/outstanding 命令缓冲的回收**：`close_held_buffer` 在每个 stage 开头**提交并等待**（`[cb waitUntilCompleted]`）。**窗口里没有抓格等待**。⚠ **(i) 待确认**：见 §6 Q8——生效并发度由 `concurrency_auto` **推导**，n78 上可能是 **3**（那就不是 strand），而 §5.9.33/35 与代码注释里的"单车道"读数**都来自 n1 腿**（n1 推 1）| `dmrs_pusch_estimator_impl.cpp:68`（defer）；`du_low_executor_mapper.cpp:119-131`、`task_fork_limiter.h:204-220`；`ocudu_metal_mmse_engine.mm:906/1232` → `:1126`（等待点）；`impl:2511/3589/4380` → `engine .mm:3795/3818-3825`；**反证**：`take_released` 只加锁查表（`ocudu_metal_burst.mm:680-694`），MISS 时把顺序等待**编码到设备上**（`ocudu_metal_mmse_engine.mm:912-943`），`impl:1261-1265` 明文写了"**不在宿主上等**"的理由（§5.9.23 那次 13 秒事故）|
 | `eq_demap` 1234 | **本跳那一次提交与等待**：merged 默认下估计器把**尚未提交**的命令缓冲交给车道（`shared_burst::adopt`，标签 `merged_hop`）⇒ **commit 与 `waitUntilCompleted` 都落在这段**，于是 **DFT+CE+EQ+demap 的整跳设备执行**（residency ≈1125）记在这里；再加 eq/demap 的宿主 encode、Pass-3 的 LLR 出页/解扰/解复用、以及（重 TB 时**跨线程**的）解码 fork。`defer_wait` 也记在本段（**不在** `ce`）| `ocudu_metal_burst.mm:401`（`[cb commit]`）、`:425`（`waitUntilCompleted`）；`ocudu_metal_lane_probe.h:63-70`（`merged_hop` 标签的自我说明）；`pusch_demodulator_impl.cpp:450-698`；`impl:3110-3126` → `:4935-4957`（`defer_wait` 的口径：从 stage 结束到批次完成），其完成点在 `pusch_processor_impl.cpp:561` / `pusch_demodulator_impl.cpp:345`，**都在 `record_ce_end` 之后** |
 
 ### 3.2 ★ 由此得到的两条**读法更正**（本轮最重要的结论）
@@ -96,12 +96,12 @@
   ⇒ **持有期 = 跨度**，而池 **8 个 × 每槽 1 个**：**跨度逼近 4 ms 就开始饿死接收线程**（尾部 max 已 7.9 ms）。
   ⚠ 但"输入只需要活到**最后一个读它的 dispatch**"——估计器/均衡/解映射读的是**网格**，不是输入；
   现在却把它绑在**整条命令缓冲完成**上 ⇒ **多持有**（`01_plan.md` 的 **P2-E** 就是去掉这段多余持有）。
-* **车道的吞吐不是瓶颈，"一次只能有一条跳"才是**：占用 59%、能力是需求的 1.7 倍，
-  但一跳占住车道窗口 ≈1125 µs，而重载下每 ~1.5 ms 就要求一跳
-  ⇒ **排队项（`ce` 901）与"本跳执行"（`eq_demap` 1125）是同一个串行链的两半**。
-  结构杠杆因此只有两个：**并发度**（`max_pusch_and_srs_concurrency`，默认 1；§5.9.35 ③ 指认它是残余 CE p95≈3.4 ms 的成因，
-  但"提高它的前提"从未测过）或**缩短单跳窗口**（= 压低 §3.3 的 1125 µs 执行时间）。
-  两者都会动到 **V4（提交数）**，需要用户裁决——见 `01_plan.md` §5。
+* **车道的吞吐不是瓶颈**：占用 59%、能力是需求的 1.7 倍。**"一次只能有一条跳"这一条待确认（Q8）**：
+  它由生效并发度决定，而该值在 n78 上可能是 3（= 多路 fork，不是串行 strand）——
+  若成立，则 C 项（901 µs）**不能**再归因为"单车道排队"，需按 `ce` 的另两个成分（上一跳缓冲回收 / 宿主阶段）重新归因。
+  已登记 P0-6：在建 limiter 处把生效值打出来。
+  若确认是串行链，结构杠杆只有两个：**并发度**或**缩短单跳窗口**（= 压低 §3.3 的 1125 µs 执行时间）。
+  两者都可能在**交付**上动到 **V4（提交数）**；用户已裁决 V4 **只约束交付**（`01_plan.md` §5.2），故测量臂放行。
 * ⇒ 优化目标不是"让池更大"，而是**把这条串行链上的执行与等待压下来**。
 
 ## 5. 验收判据（任何时延修法都要过；**先写死**）
@@ -128,5 +128,6 @@
 | **Q3** | `t2f` 的 521 µs 是**14 次 DFT 的 GPU 执行**还是**宿主记账/提交**？ | **已收口（两个都不是）**：≈473 µs 是**收样点等待**，≈48 µs 是宿主。⇒ **`OCUDU_DFT_*` 系列旋钮在这段上无效**（`PIPELINE_DEPTH=1`、`OPEN_BLOCK=0`、`RELEASE_BLOCK=0` 全部**变差**，代码路径无歧义）|
 | **Q4** | 三段**在时间上是否重叠**？ | **已收口**：同一跳内三段是**墙钟划分**（互不重叠，这是构造决定的）；**相邻跳之间**才重叠（跳 N 的 `ce` 覆盖跳 N−1 的 `eq_demap`）。⇒ "把两段重叠"在一个跳内**不存在**这个杠杆；杠杆是**跨跳并发** |
 | **Q5** | residency 里 95% busy 是**必要工作**还是**低效执行**（占用率/线程组配置）？ | **开放**，依赖 Q1；另有已知的贵项（K1 197 µs/跳、抽取 117、重排 117，见 `03_recorded_costs.md`）被"逐字节不变"钉住 |
-| **Q6** | 把 `max_pusch_and_srs_concurrency` 1→2 能否把 `ce` 的排队项吃掉？代价是什么？ | **开放，需要用户裁决**：它直接与 V4（`cbs/lane ≤ 2.00`）冲突的可能最高，且 GPU 余量（41%）能否容纳第二条并发跳未测 |
+| **Q6** | 把 `max_pusch_and_srs_concurrency` 改变能否把 `ce` 的排队项吃掉？代价是什么？ | **用户已裁决（2026-09-24）**：V4 只约束**交付** ⇒ 可作为**纯测量臂**跑（`01_plan.md` §5.2）。**但先决条件是 Q8**：若 n78 的生效值已是 3，这条臂在 n78 上无事可做 |
 | **Q7** | 符号级收包（S-7g-13）在**负载下**对**跨度**的效果？ | **开放**：§5.8.29 只量过**该段** −1.2%（当时未加压、且当时丢了融合 1 次提交）⇒ 必须在加压腿 + 融合路径上重量一次 |
+| **Q8** | ★ **n78 腿上 `max_pusch_and_srs_concurrency` 的生效值是多少？车道是串行 strand 还是 3 路 fork limiter？** | **开放，且它决定 C 项（901 µs）的归因能否成立**：该值由 `concurrency_auto` 推导 = `max(1, ceil(12.5 × bw/100 × 层数 × ul_ratio))`，而 `ul_ratio` 在**没有 `tdd_ul_dl_cfg` 时 = 1.0** ⇒ n1 5 MHz → **1**（strand），n78 20 MHz → 2.5 → **ceil = 3**（fork limiter，**不是** strand）。⚠ 现有"单车道"的注释与 §5.9.33/35 的读数**都来自 n1 腿**。**修法：P0-6**（在建 limiter 处打一行 INFO 读出实际值）|

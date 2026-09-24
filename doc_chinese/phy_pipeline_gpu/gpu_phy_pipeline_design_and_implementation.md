@@ -13572,3 +13572,32 @@ landmine 0 failing sweeps、二进制戳 = HEAD。**唯一的 FAIL 见 ③，它
 `OCUDU_DFT_OPEN_BLOCK=0`（每符号提交 + 重新引入 `wait_slot()`，必然变差）、`OCUDU_CE_HOLD_EXTRACTION=0`（把宿主等待塞进 `ce`，必然变差）。
 **`OCUDU_DFT_*` 家族对 A 项（473 µs 等样点）没有杠杆**；A 项的唯一候选是**重叠**（符号级收包，S-7g-13），
 且必须在**加压腿 + 融合路径**上重量跨度与 `cbs/lane`（§5.8.29 只量过该段 −1.2%，未加压、且当时丢了融合的 1 次提交）。
+
+#### 5.9.132 ★★ 用户裁决（V4 的适用范围）+ 一个新发现的**待确认归因**：n78 上车道到底是不是"单车道"
+
+**① 用户裁决（2026-09-24，回答 `phy_latency/01_plan.md` §5.2 的分叉）**：
+
+> **V4（"不许用提交数换时延"）只约束交付；允许把 P1-8（改 `max_pusch_and_srs_concurrency`）作为纯测量臂先跑。**
+
+落地三条：**先做 P0-6**（见 ③）；P1-8 的读数**只用于回答"并发度能否吃掉 C 项（`ce` 901 µs）"**，与 V4 无关；
+**若要把并发度作为交付（P2-F），必须回到用户再裁一次**——本轮裁决不等于预先批准交付。
+
+**② ★ 新发现（本轮查 P1-8 的可实施性时暴露，尚未定论）：`max_pusch_and_srs_concurrency` 的生效值在腿上没有打印，而它由 `concurrency_auto` 推导**
+
+* 配置默认是 `concurrency_auto`（`du_low_config.h:229`），translator 用
+  `derive_pusch_and_srs_concurrency()`（`du_low_config_translator.cpp:328-351`）解析成
+  `max(1, ceil(12.5 × channel_bw_mhz/100 × pusch_max_nof_layers × ul_ratio))`（≥ 可用核数则视为"无限制"）。
+* `ul_ratio` 来自 `derive_ul_ratio(tdd_ul_dl_cfg)`（`split_8_o_du_application_unit_impl.cpp:19-36`），
+  **`tdd_ul_dl_cfg` 缺省时返回 1.0**；而我们的 n78 配置 `configs/gnb_rf_b200_tdd_n78_20mhz.yml` **确实没有** `tdd_ul_dl_cfg`（全文无 `tdd`/`pattern` 字样）。
+* ⇒ 推算：**n1 5 MHz**（FDD，`bw=5`）→ 12.5 × 0.05 × 1 × 1.0 = 0.625 → ceil **1**（= 串行 strand）；
+  **n78 20 MHz** → 12.5 × 0.20 × 1 × 1.0 = 2.5 → ceil **3**（= **三路 fork limiter，不是 strand**）。
+* **后果（重要）**：`du_low_executor_mapper.cpp:119-131` 那段"单车道排队"的注释、以及 §5.9.33/§5.9.35 的
+  "CE p95 3387 µs 是单车道的固有排队"读数，**全部来自 n1 腿**（`s43`/`s44`，n1 推 1）。
+  ⇒ **在 n78 上加压测到的 `ce` 901 µs（`s82`）能否归因为"单车道排队"，取决于 n78 的生效值**：
+  若是 3，则 lane 是三路并发，`ce` 的 901 µs 必须重新归因（候选：上一跳 held/outstanding 缓冲回收、
+  或宿主阶段本身），而 P1-8 在 n78 上**没有"提高并发度"这个动作可做**（那时它变成"**降到 1**"的反向臂）。
+* **⇒ 登记 P0-6（必须先做）**：在 `du_low_executor_mapper.cpp` 建 limiter/strand 处打**一行 INFO**，
+  报出：解析后的值、推导输入（`bw`/层数/`ul_ratio`/可用核数）、以及"**建成了 strand 还是 N 路 fork**"。
+  **在读到该值之前，`phy_latency/00_status.md` §3.1 里 `ce` 行的 (i) 项按"待确认"引用。**
+* 这条也顺带解释了为什么"`s82` 上 CE 段的 p95 只有 1782 µs，而 n1 加压腿上曾读到 3387 µs"——
+  两者可能根本不是同一种执行器排布，**不能跨小区直接比较**（原先没注意到这一点）。
