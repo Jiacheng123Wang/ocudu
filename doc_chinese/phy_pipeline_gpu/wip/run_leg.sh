@@ -73,6 +73,31 @@ elif [ -n "$HEAD_SHORT" ] && [ "$STAMP" != "$HEAD_SHORT" ]; then
 fi
 
 mkdir -p "$LOGDIR"     # --log.filename never creates it, and a missing one fails silently
+
+# ---- REFUSE TO START ON TOP OF A STRAY gNB ----------------------------------------------------------
+# Measured 2026-09-24: a short gNB started only to read a start-up line (the P0-6 verification) did not
+# die on its first kill, stayed as an orphan holding the GTP-U socket, and the next leg failed 15
+# seconds in with "Failed to bind UDP socket to 192.168.64.1:2152. Address already in use / Unable to
+# allocate the required NG-U network resources". That leg is worthless (no contract report at all) and
+# the failure looks like a configuration problem. A stray gNB also competes for the GPU, so an offline
+# arm running next to it reads the wrong numbers (5.8.20 (4)). One check here covers both.
+stray=$(pgrep -f "apps/gnb/gnb|ul_chain_replay" 2>/dev/null | head -5)
+if [ -n "$stray" ]; then
+  echo "REFUSING to run: another gNB (or a GPU replay) is already running:" >&2
+  ps -o pid,etime,command -p $(echo $stray | tr '\n' ',' | sed 's/,$//') 2>/dev/null | sed 's/^/  /' >&2
+  echo "  A stale one holds the GTP-U socket (192.168.64.1:2152) and the GPU:" >&2
+  echo "    the next leg dies with 'Failed to bind UDP socket ... Address already in use'," >&2
+  echo "    and any offline arm run beside it reads the wrong numbers." >&2
+  echo "  Fix: kill them (kill -TERM <pid>, then -9 if it survives), then re-run." >&2
+  exit 2
+fi
+if lsof -nP -iUDP:2152 2>/dev/null | tail -n +2 | grep -q .; then
+  echo "REFUSING to run: UDP 2152 is already bound (that is the gNB's NG-U socket):" >&2
+  lsof -nP -iUDP:2152 2>/dev/null | sed 's/^/  /' >&2
+  echo "  Fix: kill the process holding it, then re-run." >&2
+  exit 2
+fi
+
 if [ "$(id -u)" != "0" ]; then
   echo "run me as root: sudo -E bash $0 $MODE $LABEL $*" >&2
   exit 2

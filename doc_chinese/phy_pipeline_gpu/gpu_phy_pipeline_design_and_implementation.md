@@ -13795,3 +13795,38 @@ P0-6 落了 5 个代码文件后，门的 `default leg … the commit it ran, vs
 **⑤ 该臂的身份（写死，避免被当成交付）**：打开时一跳是 **2 条命令缓冲**（`cbs/lane≈2`），
 且**前端输入缓冲更早释放**（前端缓冲更早完成）——后者正是 **P2-E** 的题目，所以它是一个**被污染的臂**：
 除了"分组 GPU 时间"以外，**不得**用它读跨度、`cbs/lane`、池或 V1–V5。
+
+#### 5.9.138 P0-1 的**离线验证载体找到了**：`dft_release_adopt_metal_test`（并且它暴露了拆分臂的第二重身份）
+
+**① 之前缺的是什么**：P0-1 的开关落在 `shared_burst::adopt()`，而 CE 单测与 `ul_chain_replay` **都到不了那里**
+（它们的 `busy split` 是 `ch_est`+`ch_wt`，没有 `merged_hop`）。真正的载体是
+**`lib/phy/generic_functions/metal/test/dft_release_adopt_metal_test.mm`**（目标 `dft_release_adopt_metal_test`）——
+它专门演练"前端提交未提交的块 → 车道接管 → 消费者读网格"这条路径，并打印 `[ul_gpu_lane]`。
+
+**② 实测对照（同一二进制，只改环境）**
+
+| | `cbs/lane` | 断言 |
+|---|---|---|
+| **OFF（默认）** | **1.00**（max=1）| 两条全 PASS：`'zero-copy wraps' reads true …` + `the block was handed over uncommitted, the lane adopted it, the consumer read the grid it wrote, and the input's lifetime stayed with the block - **one command buffer, one commit**` |
+| **ON（`OCUDU_LANE_DIAG_SPLIT=1`）** | **2.00**（max=2）| **FAIL：`the trap did NOT reproduce (20 of 20 repetitions …)`** |
+
+⇒ **OFF 侧证明出厂形态一字未变**（一跳一次提交、断言全过）；**ON 侧证明拆分确实生效**（2 条缓冲/跳）。
+residency 也从 44 µs → 172 µs（多一次提交的代价，符合预期，诊断臂不管这个）。
+
+**③ ★ 那条 FAIL 是**本轮的新知识**，不是我的 bug**：该测试的"别名陷阱"依赖两次 dispatch 落在**同一条命令缓冲**里
+（坑 36：Metal 的访存顺序按 `MTLBuffer` **对象**排，`memoryBarrier` 排不了两个对象）。
+拆分把它们放进**两条**缓冲**并用 `MTLSharedEvent` 排序** ⇒ **目标顺序变成真实的跨缓冲顺序，陷阱被掩盖**，
+于是测试**正确地拒绝**用它那条"共享臂"下结论。⇒ **拆分臂的第二重身份必须写死**：
+它不只是"同样的活分两条"，它的**ordering 语义比生产路线更严格** ⇒
+**不得**用拆分臂的读数去判生产路线的正确性（那正是它变严格的地方），它只用于**分组 GPU 时间**。
+
+**④ 顺带发现（登记，不改）**：既然跨缓冲事件排序能消掉坑 36 那类别名风险，
+"把一跳拆成两条并用事件排序"在**正确性**上是更强的形态——但它是 P2 级的设计改动（会动 V4 的提交数），
+不在 P0 仪表范围内，也不作为交付建议。
+
+**⑤ 新的腿前预检（本轮补，防的是我自己上一轮犯的错）**：`run_leg.sh` 现在在起腿前**两条硬检查**：
+(a) 有 `apps/gnb/gnb` 或 `ul_chain_replay` 残留进程就**拒绝启动**并列出它们；
+(b) `lsof -nP -iUDP:2152` 已被绑定就**拒绝启动**并打印持有者。
+理由（实测 2026-09-24）：我为读一行启动打印而短跑的 gNB 没被第一次 kill 杀掉，成了孤儿并持有 `192.168.64.1:2152`，
+于是**下一条腿 15 秒即失败**（`Failed to bind UDP socket … Address already in use` → `Unable to allocate the required NG-U network resources`），
+那条腿没有任何契约报告（审计读成 `0 of 8`）；而且残留 gNB 会**抢 GPU**，让旁边的离线臂读错数（§5.8.20 ④）。
