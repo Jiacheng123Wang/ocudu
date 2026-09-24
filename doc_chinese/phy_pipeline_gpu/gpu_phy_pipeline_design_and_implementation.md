@@ -13498,3 +13498,77 @@ cbs/lane 3.41 vs 3.38；busy split 116.6/375.0/100.2 vs 118.7/379.9/101.1 µs/la
 > ⇒ **本节其余内容（`[ul_gpu_pipeline]` 的测量口径、§20.3 的三条限定）仍然有效，只有"7/8"这句作废。**
 > （同时提醒：本文档是追加式的，**绝对行号会随插入漂移** —— §5.9.103/§5.9.115 的更正表用行号作键，
 > 那些键在插入之后不再指向原句；**按句子检索，不要只按行号跳转**。审计记录见 §5.9.120。）
+
+#### 5.9.131 ★★★ 阶段收官：**milestone tag 已打**（`gpu_phy_iq2llr_full_gpu_pipeline`），同时**更正 L-1 的读法**——三段是"墙钟切分"，不是"工作量归属"
+
+**① 用户裁定与动作**：用户要求"在开始时延优化工作**之前**，为'从 IQ 到 LLR 全 GPU PHY 流水线达成'打一个 tag"。
+已执行：注解 tag `gpu_phy_iq2llr_full_gpu_pipeline` → 提交 `e232d16003`，并推送（分支 `apple-silicon` 同步 `7a21fc7ad2..e232d16003`）。
+注解沿用 `gpu_phy_pre_ldpc` 的格式：**腿名 + 二进制出处 + 逐字合同行 + 判据清单 + 8 条预登记排除 + "本 tag 不声称什么"**。
+
+**② 门在 tag 提交上的读数**：`28 PASS / 1 FAIL / 0 RED(cannot read) / 3 INFO (of 32)`；`value_net 47/0`、
+`ctest -L phy 193/193`、`lower_phy_test 528/528`、`probe 6/6`、`ab_dumps 0`、L1a 5 PASS、L1b 4×0、边缘块 6/6 绿 + 6/6 红、
+landmine 0 failing sweeps、二进制戳 = HEAD。**唯一的 FAIL 见 ③，它不是代码发现。**
+
+**③ 门的两条判据被绑到了错误的"工况"上 —— 已修（本轮的第二个实质发现）**
+
+现象（2026-09-24 实测）：门原来**自动取 mtime 最新的腿**；最新腿是**故意加压**的 `s82`，于是它报了两条 FAIL：
+`stale = 0` 与 A1-2 的 `5/5`（C5 含 `stale=0`）。**两条都不是发现**：
+
+* A1-2 的 **C5** 预登记原文是"**腿仍然有效**：契约 8/8、`stale=0`、crossings `0.00+0.00/跳`"（§5.9.118 ③）⇒ **默认工况**判据；
+* 而 wall A/B 的 **R4** 在加压工况下写的是**相反**的话："`stale > 0` ⇒ 与本线同类，**PASS**"（§5.9.127）。
+
+⇒ 之所以一直没暴露：更早一次审计时"最新腿"恰是一条加压但 `stale=0` 的腿，默认判据**靠运气**通过。
+**修法（不动任何阈值）**：`milestone_audit.sh` 现在**同时审计两条腿**——默认腿判"契约 / `stale=0` / A1-2 5/5"，
+压力腿只判**负载改不了的性质**（契约名字、MET+mode=gpu、crossings、`gaps`），压力腿的 `stale`/RF/池数字**只报不判**
+（那一档的判据是预登记的 **V1–V5**，正是本工作流的目标）。**工况是声明，不是症状**：
+`run_leg.sh` 新增 `--regime=default|stress`，并把 `[leg] regime=` 写进腿自己的 stderr（记录源）；
+早于该开关的腿在 `STRESS_LEGS` 里按标签声明并附负载证据来源。**禁止**按腿自己的 `stale` 读数判定工况——那会让判据**不可否证**。
+
+**新增第三条检查："这条腿跑的是哪个提交"**：`run_leg.sh` 在二进制戳 ≠ HEAD 时**拒绝起腿**，
+但该事实过去只留在控制台与腿的 `.stdout` banner 里；门里的 `binary stamp == HEAD` 说的是**当前构建**，不是**这条腿**。
+现在门读腿自己的 commit banner，要求：相等，**或** 该 commit 到 HEAD 的 diff **不触及代码**。
+实测 ⇒ **`s82` 跑 `33de116ce3`，到 tag 提交只差 6 个文件（全在 `doc_chinese/`，0 代码）⇒ 它是本提交的证据**；
+而当时最新的**默认**腿 `s71` 跑 `4c4880012c`，到 HEAD 差 **1526 个文件（1463 个代码）⇒ 它不是**。
+**⇒ 那条 FAIL 的准确含义是："本提交上不存在默认工况的腿"**（自 `s70` 起每条腿都是加压腿），
+而 tag 声明的对象是**流水线的结构达成**，其判据在 `s82` 上**全部成立**。要关掉这一行，只需一条 `run_leg.sh gpu <label>`。
+
+**④ ★ L-1 三段分解的**读法更正**（三个只读代码审查，逐窗口核对；数字不变，**含义变了**）**
+
+| 段 | 中位 | 窗口里**实际**是什么 | 关键依据 |
+|---|---|---|---|
+| `[ul_time_frequency]` | 521 | **≈473 等本槽最后一个样点**（`receiver.receive()`；整槽收包策略。**就是 `[ul_rx_wait]` 的同一次调用**）+ **≈48 前端主机工作**（14 次 encode、交棒记账、通知入队、探针）。**14 个 DFT/grid-write 只被编码、没有执行** | 起点取在 `receive()` **之前**（`lower_phy_baseband_processor.cpp:565`，探针自述 `[ul_time_frequency] = [ul_rx_wait] + 前端自己的工作`）；`release_block()` 把命令缓冲**未提交地**寄存给车道（`ocudu_dft_metal_engine.h`：*"a released block executes LATER - at the lane's commit"*）；腿证据 `[ul_dft_wait] no samples`、`gpu busy (front_end) commits=0`、`dft commits=323233 = 12×26936`（PRACH 自己的引擎）|
+| `[ul_channel_estimation]` | 901 | **单车道 strand 排队**（`executor.defer` 进的是与 `pusch_executor` **同一条串行 strand**，`max_pusch_and_srs_concurrency` 默认 1 ⇒ 回调要等当前 strand 任务返回 = **等前一跳的车道窗口走完**）+ **上一跳 held/outstanding 缓冲的回收**（`close_held_buffer` 在每个 stage 开头**提交并等待**）。**窗口里没有抓格等待** | `du_low_executor_mapper.cpp:119-131`、`task_fork_limiter.h:204-220`、`dmrs_pusch_estimator_impl.cpp:68`；`ocudu_metal_mmse_engine.mm:906/1232 → :1126`、`impl:2511/3589/4380 → engine .mm:3795/3818-3825`；**反证**：`take_released` 只加锁查表，MISS 时把顺序等待**编码到设备上**（`engine .mm:912-943`），`impl:1261-1265` 明文写了"不在宿主上等"的理由（§5.9.23 的 13 秒事故）|
+| `[ul_equalization_demod]` | 1234 | **本跳那一次提交与等待**（merged 默认下估计器把**尚未提交**的缓冲交给车道，`adopt`，标签 `merged_hop`）⇒ **DFT+CE+EQ+demap 的整跳设备执行**（residency ≈1125）记在这里；再加 eq/demap 宿主 encode、Pass-3（LLR 出页/解扰/解复用）、解码 fork。**`defer_wait` 也记在本段**（不在 `ce`） | `ocudu_metal_burst.mm:401`（`[cb commit]`）、`:425`（`waitUntilCompleted`）；`ocudu_metal_lane_probe.h:63-70`；`impl:3110-3126 → :4935-4957`，完成点在 `pusch_processor_impl.cpp:561`/`pusch_demodulator_impl.cpp:345`（**都在 `record_ce_end` 之后**）|
+
+**两条读法更正（必须遵守）**：
+
+1. **三段是墙钟切分，不是工作量归属**：整跳的设备执行记在 `eq_demap`，而 `t2f`/`ce` 两个名字对应的 **GPU 工作并不在那两段里**。
+   `ocudu_metal_lane_probe.h:63-70` 早就警告过：*"把那条缓冲叫 `equalizer_demapper` 会让 `eq_demap` 变成四段之和——而那正是优化会盯上的数字"*。
+   ⇒ **禁止**"哪段最大就砍哪段"。
+2. **§5.9.130 ④ 预登记的读法没有触发**：那条写的是"三段之和 ≪ 跨度 ⇒ 先查 `[ul_rx_wait]` 与 `gpu_lane gap`"；
+   实测三段和 **≈99.3% 跨度**，原因是 **`t2f` 已经包含 `[ul_rx_wait]`**。
+   ⇒ §5.9.130 ② 里"车道外 ≈1460–1560 µs（重载）"**不是**一块独立未归因的开销：≈473 是**收样点等待**（在 `t2f` 内），
+   其余主要是**单车道排队**（在 `ce` 内）。**该行在按新口径重算前不得再引用。**
+
+**⑤ 归属式预算（取代 §5.9.130 ② 的加法口径，单位 µs、中位、腿 `s82`）**
+
+```
+≈473 等本槽最后一个样点（电台时序）      A 结构
++≈ 48 前端主机工作（14 次 encode 等）    B 宿主
++≈901 等到单车道空出来（等前一跳窗口）    C 单车道串行   ★最大可攻击项
++≈1125 本跳设备执行（DFT+CE+EQ+demap，busy 97%）  D GPU 算力  ★第二大
++≈ 110 Pass-3（LLR 出页/解扰/解复用 + fork）      E 宿主
+=≈2657 ≈ 跨度 2675
+```
+⇒ **C 与 D 是同一条串行链的两半**（一跳占住车道窗口 ≈1125 µs，而重载下每 ~1.5 ms 就要求一跳）。
+结构杠杆因此只有两个：**提高并发度**（`max_pusch_and_srs_concurrency`，默认 1；§5.9.35 ③ 指认它是残余 CE p95≈3.4 ms 的成因，
+但"提高它的前提"从未测过）或**缩短单跳窗口**（压 D）。**两者都可能动到 V4（提交数）** ⇒
+已登记为**需要用户裁决的分叉**（`phy_latency/01_plan.md` §5.2）：**在裁决之前不许开工**，也不许由我替用户放宽 V4。
+
+**⑥ 新建的时延工作流目录**：`doc_chinese/phy_latency/`（活文档，可重写；主文档仍是追加式）。四份：
+`README.md`（约定）、`00_status.md`（现象、归属式预算、机制、V1–V5、未决问题 Q1–Q7）、
+`01_plan.md`（P0 仪表 / P1 单变量臂 / P2 结构改动 + §5.2 裁决点）、`02_measurement.md`（仪表手册、复跑配方、坑、**工况声明规矩**）。
+**已由代码判读预先回答、因此从空口清单撤下的三条臂**：`OCUDU_DFT_PIPELINE_DEPTH=1`（走同步路径，必然变差）、
+`OCUDU_DFT_OPEN_BLOCK=0`（每符号提交 + 重新引入 `wait_slot()`，必然变差）、`OCUDU_CE_HOLD_EXTRACTION=0`（把宿主等待塞进 `ce`，必然变差）。
+**`OCUDU_DFT_*` 家族对 A 项（473 µs 等样点）没有杠杆**；A 项的唯一候选是**重叠**（符号级收包，S-7g-13），
+且必须在**加压腿 + 融合路径**上重量跨度与 `cbs/lane`（§5.8.29 只量过该段 −1.2%，未加压、且当时丢了融合的 1 次提交）。
