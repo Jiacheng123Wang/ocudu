@@ -114,10 +114,19 @@
 | **V4** | **不许用提交数换时延** | `cbs/lane ≤ 2.00 (max=2)`、`dropped == 0` | 同上 |
 | **V5** | 不回归 | 契约 8/8、`crossings 0.00+0.00`、CRC KO% 不劣化 | 同上 |
 
-**负载配方（复跑用，缺一不可）**：n78 小区、`LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml`、
-手机**发**、CN **收**、`iperf3 -c <phone> -R -b 40M -P 4 -t 240`（**`-R` 不能省**，否则变成下行负载——见 §5.9.128 ①）、
-`run_leg.sh gpu <label> --regime=stress`（**加压腿必须声明工况**，否则里程碑门会把它按默认工况判，见 `02_measurement.md` §3.4）、
-诊断腿另加 `OCUDU_UL_PHASE_SEGMENTS=1`。
+**负载配方（复跑用，缺一不可）**
+
+* **默认工况**（判契约 8/8、`stale=0`、A1-2 5/5；**腿必须自报 `regime=default`**）：
+  `LEG_CONFIG` 用默认的 n1 桥接配置、`run_leg.sh gpu <label>`；UE **接入 + PDU session**，
+  然后 **`ping -c 100` + 10 s 下行 iperf3 + 10 s 上行 iperf3**（用户 2026-09-24 明确的标准配方，腿长约 2 分钟）。
+  ⚠ **零流量的腿无效**：没有 PUSCH 跳时契约会少判两条（`MET (6 of 6)`，见 `02_measurement.md` §4），
+  而里程碑判据要 `MET (8 of 8`。
+* **加压工况**（判 V1–V5；**腿必须自报 `regime=stress`**）：n78 小区、
+  `LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml`、手机**发**、CN **收**、
+  `iperf3 -c <phone> -R -b 40M -P 4 -t 240`（**`-R` 不能省**，否则变成下行负载——见 §5.9.128 ①）、
+  `run_leg.sh gpu <label> --regime=stress`，诊断腿另加 `OCUDU_UL_PHASE_SEGMENTS=1`。
+* ⚠ **`leg_gate.sh` 只用于加压腿**：它的两条 `VALIDITY` 判据（`UL >= 2.0 Mbit/s`、`占槽 >= 50%`）
+  是给重上行腿预登记的，用在默认腿上必然双红（`02_measurement.md` §4）。
 
 ## 6. 未决问题（计划要回答的）
 
