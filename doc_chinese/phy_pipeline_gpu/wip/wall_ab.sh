@@ -124,21 +124,31 @@ def facts(path, label):
         f["rf_last_quarter"] = sum(1 for t, _ in rf if (secs(t) or 0) >= cut)
     else:
         f["rf_last_quarter"] = None
-    # offered load: PUSCH grants per second, in 10 s windows; the PEAK window is the "offered rate"
+    # offered load: grants per second in 10 s windows, PER DIRECTION, and the PEAK window is the
+    # "offered rate". Both directions are measured because the two regimes are different phenomena
+    # (5.9.127): the uplink-load legs (s70..s75) and the downlink-saturated ones (s76..s79). Judging a
+    # downlink leg by its PUSCH peak - which is what this script did at first - compares the wrong number
+    # and would have called a 6x-lighter downlink "comparable".
     # findall with ONE group returns plain strings, not 1-tuples: unpacking them was this script's first
     # bug, and it took the whole run down (caught by running it on the reference arm, as intended).
-    g = [secs(t) for t in re.findall(r"^(\S+) \[[A-Z-]+\s*\] \[I\].*PUSCH:", txt, re.M)]
-    f["grants"] = len(g)
-    if g:
-        lo = min(g)
+    g  = [secs(t) for t in re.findall(r"^(\S+) \[[A-Z-]+\s*\] \[I\].*PUSCH:", txt, re.M)]
+    gd = [secs(t) for t in re.findall(r"^(\S+) \[[A-Z-]+\s*\] \[I\].*PDSCH:", txt, re.M)]
+    def peak_rate(seq):
+        if not seq:
+            return None
+        lo = min(seq)
         bucket = {}
-        for s in g:
-            bucket[(s - lo) // 10] = bucket.get((s - lo) // 10, 0) + 1
-        f["peak_grants_per_10s"] = max(bucket.values())
-        f["peak_rate"] = f["peak_grants_per_10s"] / 10.0
-        f["last_window"] = bucket[max(bucket)]
-    else:
-        f["peak_rate"] = f["last_window"] = None
+        for x in seq:
+            bucket[(x - lo) // 10] = bucket.get((x - lo) // 10, 0) + 1
+        return max(bucket.values()) / 10.0
+    f["grants"] = len(g)
+    f["grants_dl"] = len(gd)
+    f["peak_rate"] = peak_rate(g)        # uplink
+    f["peak_rate_dl"] = peak_rate(gd)    # downlink
+    # the DOMINANT direction is the load this leg is actually about
+    ul, dl = f["peak_rate"] or 0.0, f["peak_rate_dl"] or 0.0
+    f["direction"] = "downlink" if dl > ul else "uplink"
+    f["peak_dominant"] = max(ul, dl)
     # stale, contract, gaps, crossings, cbs/lane -- from the LAST occurrence (the shutdown prints twice)
     def last(rx, where=err):
         m = re.findall(rx, where)
@@ -193,10 +203,12 @@ check(f"R4 {n1}: stale >= 1 (a hop crossed the 8 ms round trip)", None if F1["st
 
 if F2 is not None:
     hard(F2, n2, F2["mode"] != "cpu")
-    p1, p2 = F1["peak_rate"], F2["peak_rate"]
-    ok = (p1 is not None and p2 is not None and max(p1, p2) <= 2.0 * max(1e-9, min(p1, p2)))
-    check(f"P0 load comparability: peak offered rate within 2x ({n1} vs {n2})", ok,
-          f"peak {p1} vs {p2} grants/s" + ("" if ok else "  <- THE COMPARISON IS VOID: the loads are not comparable"))
+    p1, p2 = F1["peak_dominant"], F2["peak_dominant"]
+    ok = (p1 and p2 and max(p1, p2) <= 2.0 * min(p1, p2))
+    check(f"P0 load comparability: peak offered rate within 2x, dominant direction ({n1} vs {n2})", ok,
+          f"{F1['direction']} {p1} vs {F2['direction']} {p2} grants/s (ul {F1['peak_rate']}/{F2['peak_rate']}, "
+          f"dl {F1['peak_rate_dl']}/{F2['peak_rate_dl']})"
+          + ("" if ok else "  <- THE COMPARISON IS VOID: the loads are not comparable"))
     c1, c2 = F1["rf_total"], F2["rf_total"]
     # R5 is registered for a MODE difference (gpu vs cpu) and for nothing else: applying it to two legs of
     # the same mode would "conclude" a lane-vs-machine split out of run-to-run variance (met 2026-09-24 on
@@ -220,7 +232,8 @@ if F2 is not None:
 print(f"wall A/B (5.9.124):  {os.path.basename(l1)}" + (f"   vs   {os.path.basename(l2)}" if l2 else ""))
 for f, n in ((F1, n1), (F2, n2)):
     if f is None: continue
-    print(f"  {n}: {f['dur']}s, {f['grants']} grants, peak {f['peak_rate']} grants/s, "
+    print(f"  {n}: {f['dur']}s, {f['grants']} ul / {f['grants_dl']} dl grants, peak {f['peak_rate']} ul / "
+          f"{f['peak_rate_dl']} dl grants/s ({f['direction']}-loaded), "
           f"RF {f['rf_total']} ({f['rf_underflow']}u/{f['rf_late']}l), stale={f['stale']}")
 print()
 for v, name, detail in rows:
