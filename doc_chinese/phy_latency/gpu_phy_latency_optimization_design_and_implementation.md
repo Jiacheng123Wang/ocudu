@@ -9,16 +9,17 @@
 > | 类 | 文件 | 性质 |
 > |---|---|---|
 > | **design & implementation** | **本文件** | §1–§5 活（可重写，但更正必须留痕）；**§6 起追加式（只追加，不改历史）** |
-> | **session handoff memo** | `session_handoff_YYYY-MM-DD-N.md` | 一次性快照（新会话开工只读一份）；写完只追加更正 |
+> | **session handoff memo** | `session_handoff_<会话开始日>-<序号>.md`（**日期取会话开始那天，跨午夜不改**；序号是那天的第几份）| 一次性快照（新会话开工只读**序号最大的那一份**）；写完只追加更正 |
 > | **high level status and plan** | `high_level_status_and_plan.md` | 活文档：一句话现状、判据、阶段进度、下一步、待裁决 |
 >
 > 上游（历史）设计记录仍是 `doc_chinese/phy_pipeline_gpu/gpu_phy_pipeline_design_and_implementation.md`（**追加式，不改历史**）；
 > 腿日志在 `doc_chinese/phy_pipeline_gpu/wip/logs/`，腿脚本与门在 `doc_chinese/phy_pipeline_gpu/wip/`。
 > **引用外部时一律用"章节名/腿名"而不是行号**（合并 `origin/main` 之后行号已整体漂移过一次，见主文档 §5.9.123）。
 >
-> **2026-09-25 会话**（P0-5 交付、P2-E 实现并被平台证伪）的内容**已并入本文件**（用户要求：memo 只是快照，
-> 开发过程中要记的东西统一记在这里）——原来的 `session_handoff_2026-09-25-1.md` 已删除，git 历史仍可查到。
-> 会话快照这一类**只保留上一会话的那一份**（`session_handoff_2026-09-24-1.md`）。
+> **2026-09-24 会话（第二段：#1 之后）**（P0-5 交付、P2-E 实现并被平台证伪、文档整理）的内容**已并入本文件**
+> （用户要求：memo 只是快照，开发过程中要记的东西统一记在这里）。**该会话的交接快照是
+> `session_handoff_2026-09-24-2.md`**；曾用名 `session_handoff_2026-09-25-1.md` 是一次**命名错误**
+> （会话开始于 09-24，跨午夜不改日期），该名字**留给下一个会话**。
 >
 > **旧文件名映射**（2026-09-25 整理前 → 本文件）：`00_status.md` → §2/§3/§4 + 高层文档；
 > `01_plan.md` → §3 + §7 + 高层文档；`02_measurement.md` → §4/§5；`03_p0_instrumentation.md` → §6.1/§6.2；
