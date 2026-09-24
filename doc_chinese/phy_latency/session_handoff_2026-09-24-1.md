@@ -10,7 +10,7 @@
 把车道并发度 1→2，`ce` 从 **3228 µs 塌到 ~51 µs**、跨度中位 **5268 → ~2360 µs**、`stale` 5→0、池饥饿 102→35 ——**两次独立复现**。
 **但同一改动也两次复现了一次 ~5 秒的收包停顿**（`radio sample continuity: 2 gaps`，每次丢 ~1.531 亿样点，伴随 5.0004 秒 residency 异常），
 所以并发度目前**只是测量结论、不是交付**。最可能的共因是 **P2-E 要拆的那条链**（输入被持有到整跳完成 → 池抽干 → 接收线程被 `pop_blocking` 卡住）。
-**下一步就是实现 P2-E**（计划已写好：`doc_chinese/phy_latency/04_p2e_plan.md`）。
+**下一步的顺序（用户 2026-09-24 指定）：先做 P0-5**——把相位探针与车道探针**键在同一事件上**（见 **§6.0**），**做完再实现 P2-E**（计划已写好：`doc_chinese/phy_latency/04_p2e_plan.md`，见 §6.1）。
 
 ## 1. 仓库/远端/标签状态
 
@@ -26,9 +26,9 @@
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | 仪表补齐（P0-6 并发度、P0-1 分组 GPU 时间、P0-5 探针配对）| ✅ P0-6/P0-1 完成；**P0-5 未完成**（需改代码把两个探针键在同一事件上）|
+| P0 | 仪表补齐（P0-6 并发度、P0-1 分组 GPU 时间、P0-5 探针配对）| ✅ P0-6/P0-1 完成；**P0-5 未完成 ⇒ 下一会话的第一优先（§6.0）**|
 | P1 | 单变量臂（P1-8 并发度已跑；其余见 `01_plan.md`）| P1-8 已跑出结果（§5.3）|
-| **P2-E** | **输入缓冲寿命解耦** | **← 现在做这一项**（计划：`04_p2e_plan.md`）|
+| **P2-E** | **输入缓冲寿命解耦** | **P0-5 之后做**（计划：`04_p2e_plan.md`，见 §6.1）|
 | P2 其它 | P2-B（砍 D 项）、P2-A（提前启动估计器）、P2-D（按测得持有期定池容量）、P2-F（并发度作为交付）| 未开工；P2-F 需用户二次裁决 |
 | P3 | 验收 V1–V5 | 未开始 |
 
@@ -120,7 +120,38 @@ n1 默认配方 + `OCUDU_UL_PHASE_SEGMENTS=1`：
 `s85-p0phases`（n78 加压 + 相位分段）：三段各 **60389** 样本、中位 524.7 / 908.0 / 1231.0 µs、和 **2663.7** vs `[ul_gpu_pipeline]` **2688.6**（99.1%）；
 但**车道 residency 有 142022 样本 ⇒ 相位/车道 = 0.425** ⇒ "busy ≈ residency / eq_demap ≈ residency"这类比较**仍只能算指示性**。要配对需改代码把两者键在同一事件上。
 
-## 6. 下一步：**实现 P2-E**（`doc_chinese/phy_latency/04_p2e_plan.md` 是完整计划）
+## 6. 下一步（顺序已按用户指示改为：**先 P0-5，再 P2-E**）
+
+### 6.0 ★ 第一优先：**P0-5 —— 把相位探针与车道探针配对**
+
+**要解决的问题**：`[ul_time_frequency]` / `[ul_channel_estimation]` / `[ul_equalization_demod]` 与 `[ul_gpu_lane] residency/busy`
+**不是同一个样本总体**（`s85-p0phases`：三段各 **60389**，车道 residency **142022** ⇒ 比值 **0.425**），
+所以"residency 里 ~95% 是 busy"、"`eq_demap` ≈ residency"这类说法目前**只是指示性**，
+而 D 项（本跳设备执行）的预算恰恰要用这个分母。
+
+**锚点（读码定位）**
+
+| 侧 | 位置 | 现状 |
+|---|---|---|
+| 相位三段 | `include/ocudu/support/executors/ul_pipeline_probe.h`（`record_start` / `record_t2f_end` / `record_ce_end` / `record_ldpc_start`，以及按 slot 的 `pending_*` map；三段在 `record_ldpc_start` 里组装，且**只为 CRC-OK 的 TB 出样本**）| 按 **slot** 记，且被"必须与一次 CRC-OK 配对"过滤 |
+| 车道 | `lib/phy/metal/ocudu_metal_lane_probe.{h,mm}`（`register_commit(cb, stage)` → 本线程 `pending`；`close_lane()` 归属到各段；报告在 `print_*`）| 按**线程/提交**记，每个跳（含未完成/未配对的）都算 |
+
+**做法（形态）**：让两侧**键在同一个事件上**——最直接的是**按 slot 配对**：
+在车道侧为每个 `lane_entry` 记下它所属的 **slot**（`submit_slot_grid_write`/`adopt` 路径已知 slot；若不能，则用"同一线程 + 同一 hop 的提交序列"作键），
+在报告里输出**配对后的**分布（`[ul_gpu_lane] paired with the phase segments: n=… residency median … busy …`），
+并明确打印"配对样本数 / 相位样本数"。
+
+**判据（先写死）**
+1. 配对后的样本数 **== 相位三段的样本数**（同一条腿上，例如 `s85` 型的腿应为 n=60389 量级，而不是 142022）；
+2. `busy/residency` 与 `eq_demap/residency` **在配对样本上重算**并打印（**不预设阈值**，但必须说明是否仍 ≈95%）；
+3. **零数据面影响**：这是**报告/探针改动** ⇒ `ab_dumps`（逐字节）、`value_net`、`l1_*` 臂、`ctest -L phy`、契约 8/8 必须全绿；**不动提交数**（V4）。
+
+**验证**：离线编译 + 上述网；再飞**一条 n1 默认腿 + `OCUDU_UL_PHASE_SEGMENTS=1`**（约 2 分钟，标准流量配方），看是否打出配对行与配对数。
+
+**为什么它应该先做**：P2-E 的预期里"持有期"要用**直接读数**判断，而 P0-5 决定 `busy/residency` 这个分母能不能用；
+且 P0-5 是**报告改动**、风险低、不烧新配方，做完后 P2-E 的判读才不靠指示性数字。
+
+### 6.1 第二优先：**实现 P2-E**（`doc_chinese/phy_latency/04_p2e_plan.md` 是完整计划）
 
 **要解决的问题**：输入缓冲的持有期 = **整跳跨度**（keepalive 挂在整条命令缓冲的完成上，而 D1 之后整条缓冲就是整跳），
 而**只有前端那一段读接收样点**（估计器/均衡/解映射读的是**网格**）⇒ **多持有** → 池抽干 → 接收线程被 `pop_blocking` 卡住（§5.3 那次 5 秒停顿的头号嫌疑）。
@@ -182,15 +213,16 @@ bash doc_chinese/phy_pipeline_gpu/wip/milestone_audit.sh               # 里程�
 | `doc_chinese/phy_latency/01_plan.md` | P0/P1/P2 计划、§5.2 **用户的 V4 裁决**、P1-8 的定义 |
 | `doc_chinese/phy_latency/02_measurement.md` | 仪表手册、复跑配方、**已知的坑**、工况声明规矩 |
 | `doc_chinese/phy_latency/03_p0_instrumentation.md` | P0-6/P0-1 的读数、读法、命名陷阱、臂身份、缺陷与修法 |
-| **`doc_chinese/phy_latency/04_p2e_plan.md`** | **P2-E 的完整实施计划（下一步据此开工）** |
+| **`doc_chinese/phy_latency/session_handoff_2026-09-24-1.md`** | **本 memo（新会话只读这一份即可开工）** |
+| `doc_chinese/phy_latency/04_p2e_plan.md` | P2-E 的完整实施计划（**P0-5 之后**据此开工）|
 | `doc_chinese/phy_pipeline_gpu/gpu_phy_pipeline_design_and_implementation.md` | 主设计文档（**追加式**，§5.9.131–§5.9.138 是本会话记录；行号会漂，按句子检索）|
 | `doc_chinese/phy_pipeline_gpu/wip/` | 门与工具：`milestone_audit.sh`、`p0_gate.sh`、`leg_gate.sh`、`run_leg.sh`、`ab_dumps.sh`、`ul_load.sh`、`wall_ab.sh` |
 
 ## 9. 仍挂着的事（按优先级）
 
-1. **实现 P2-E**（§6）——当前主任务。
-2. **查 §5.3 的 5 秒收包停顿**（并发 2 下两次复现）；P2-E 若修掉它即因果坐实，否则转向"strand 上的邻居任务"。
-3. **P0-5 配对**：把相位探针与车道探针键在同一事件上（否则 D 项的分母只能用指示性数字）。
+1. **P0-5 配对**（§6.0）——**第一优先，用户指定**：把相位探针与车道探针键在同一事件上。
+2. **实现 P2-E**（§6.1）——P0-5 之后。
+3. **查 §5.3 的 5 秒收包停顿**（并发 2 下两次复现）；P2-E 若修掉它即因果坐实，否则转向"strand 上的邻居任务"。
 4. **P2-F（并发度作为交付）需用户二次裁决**（V4 只约束交付，测量已放行）。
 5. **`s84b-p0` 第一次尝试没有留下任何日志**（本仓与 `ocudu_premerge` 都没有）——最可能是被"戳 ≠ HEAD"拒绝（那种情况不产生日志）；用户未提供终端输出，**未验证**。
 6. 里程碑门目前**依赖新腿**转绿：离线判据本来就全绿，红的只有"腿的提交证据"与新腿缺失那一类；本会话末次干净门是 `22 PASS / 3 FAIL / 4 RED`，**全部**来自那条被顶掉的无效腿 `s84-p0_0924_2254`。
