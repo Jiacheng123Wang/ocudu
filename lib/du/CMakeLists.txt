@@ -8,7 +8,12 @@ add_subdirectory(du_low)
 
 set(SOURCES du_cell_config_validation.cpp du_update_config_helpers.cpp)
 add_library(ocudu_du_config_validators STATIC ${SOURCES})
-target_link_libraries(ocudu_du_config_validators sched_config)
+# rrc_nr_asn1 is a real dependency of these sources: the ASN.1 option types they validate expose to_number() as a
+# non-inline member of the generated code (rrc_nr/bwp_cfg.cpp, rrc_nr/sys_info.cpp), which the validation code reaches
+# through the generated headers. Declaring it here is also what gets the archive placed after this one on the link
+# line: GNU ld scans archives in order, so an executable that pulls libocudu_du_config_validators.a in after
+# librrc_nr_asn1.a (as du_cell_config_ssb_validation_test did) fails with an undefined reference to to_number().
+target_link_libraries(ocudu_du_config_validators sched_config rrc_nr_asn1)
 
 add_library(ocudu_o_du STATIC
         o_du_impl.cpp
