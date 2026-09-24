@@ -77,7 +77,10 @@ def check(name, ok, detail):
     verdict = "PASS" if ok is True else ("RED (cannot read)" if ok is None else "FAIL")
     rows.append((verdict, name, detail))
 
-contract = f(leg_err, r"contract ((?:MET|NOT MET) \(\d+ of \d+ checks[^)]*\))")
+# BOTH printed forms (2026-09-24): the reader used to know only "MET (8 of 8 checks applicable)", so a
+# contract that FAILED - "NOT MET: 1 of 8 applicable checks failed (mode=gpu)" - printed as None, i.e. as
+# "cannot read" instead of as the failure it was.
+contract = f(leg_err, r"contract ((?:MET|NOT MET)[^\n]*)")
 mode     = f(leg_err, r"contract \(mode=([a-z_]+)\)")
 check("contract 8 of 8, mode=gpu", (contract is not None) and contract.startswith("MET (8 of 8") and mode == "gpu",
       f"{contract} mode={mode}")

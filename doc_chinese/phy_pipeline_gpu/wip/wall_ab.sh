@@ -145,7 +145,10 @@ def facts(path, label):
         return m[-1] if m else None
     st = last(r"\[ul_pipeline\] stale=(\d+)")
     f["stale"] = int(st) if st is not None else None
-    f["contract"] = last(r"contract ((?:MET|NOT MET) \(\d+ of \d+ checks)")
+    # BOTH printed forms: "MET (8 of 8 checks applicable)" and
+    # "NOT MET: 1 of 8 applicable checks failed (mode=gpu)" - the first version of this reader only knew
+    # the first, so the two legs that actually had something to report read as "cannot read".
+    f["contract"] = last(r"contract ((?:MET|NOT MET)[^\n]*)")
     f["mode"] = last(r"contract \(mode=([a-z_]+)\)")
     f["gaps"] = last(r"radio sample continuity: (\d+) gaps")
     f["cross"] = last(r"= ([0-9.]+) read\(s\) \+ ([0-9.]+) write\(s\) per hop")
