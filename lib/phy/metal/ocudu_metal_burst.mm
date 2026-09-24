@@ -387,7 +387,15 @@ bool shared_burst::adopt(id<MTLCommandBuffer> cb)
   if (diag_split_enabled()) {
     id<MTLSharedEvent>  ev = diag_split_event();
     id<MTLCommandQueue> q  = shared_queue::backend_queue();
-    if ((ev != nil) && (q != nil)) {
+    // The REPLACEMENT buffer is opened BEFORE the front end's is committed. Measured 2026-09-24 by
+    // read-only audit: the first version committed first and created second, so a failure to create the
+    // replacement (resource exhaustion) fell through to the normal path with s.cb holding an
+    // ALREADY-COMMITTED buffer - the caller would encode into it and the lane would commit it a second
+    // time, which is a hard Metal error. The call site's own contract is safe (mmse_engine commits st.cb
+    // only when adopt() returns false), so the defect lived purely on the creation-failure path, and a
+    // diagnostic arm must degrade to the production shape rather than break the hop.
+    id<MTLCommandBuffer> nb = ((ev != nil) && (q != nil)) ? [q commandBuffer] : nil;
+    if (nb != nil) {
       static std::atomic<uint64_t> gen{0};
       const uint64_t               value = gen.fetch_add(1, std::memory_order_relaxed) + 1;
       // Order the two buffers, then commit the front end's one: a command-buffer-level signal has to be
@@ -398,18 +406,13 @@ bool shared_burst::adopt(id<MTLCommandBuffer> cb)
       [cb commit];
       burst_stats_commit();
       s.outstanding.push_back(cb);
-      id<MTLCommandBuffer> nb = [q commandBuffer];
-      if (nb != nil) {
-        [nb encodeWaitForEvent:ev value:value];
-        d1_trace("adopt-split", nb);
-        s.cb       = nb;
-        s.enc      = nil;
-        s.pipeline = nil;
-        s.n        = 0;
-        return true;
-      }
-      // Could not open the second buffer: fall through and adopt the original one. On a diagnostic arm,
-      // degrading to the production shape is better than dropping the hop.
+      [nb encodeWaitForEvent:ev value:value];
+      d1_trace("adopt-split", nb);
+      s.cb       = nb;
+      s.enc      = nil;
+      s.pipeline = nil;
+      s.n        = 0;
+      return true;
     }
   }
   d1_trace("adopt", cb);
