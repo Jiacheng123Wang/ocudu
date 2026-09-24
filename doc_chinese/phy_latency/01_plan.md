@@ -58,7 +58,7 @@
 
 | # | 缺口 | 为什么必须有 | 做法 | 判据 |
 |---|---|---|---|---|
-| **P0-1** | **合并跳内部没有 kernel 级时间**：D1 把一跳做成**一条命令缓冲**，而 Metal 只给*每条命令缓冲*的 `GPUStartTime/GPUEndTime` ⇒ `merged_hop` 的 1030 µs 内部**不可分** | Q1 决定"砍哪个 kernel"还是"改调度"；没有它，P1 只能靠猜 | **诊断臂**：把一跳的 dispatch 分到 2–3 条**诊断用**命令缓冲（只在 `OCUDU_*_DIAG_SPLIT=1` 下生效），读每段 GPU 时间；或 `MTLCounterSampleBuffer` 逐 dispatch 采样 | 拆分后的各段之和 ≈ 原 `merged_hop`（±10%）；**该臂只用于诊断，不进验收**（V4 约束的是修法，不是诊断）|
+| **P0-1** | **`merged_hop` 内部没有 kernel 级时间** | **部分已由记录回答**（见下），**残余缺口 = 前端那段在 `merged_hop` 里的份额** | **候选 A（不写代码，先做）**：飞一条**加压腿**并同时开 `OCUDU_UL_PHASE_SEGMENTS=1`，把 `[ul_gpu_lane] busy split` 与三段配对读；再用 `OCUDU_CE_LANE_ORDER=event` 跑同一配方，拿 `ch_wt` 与 `eq_demap` 的**分组**GPU 时间。**候选 B（写代码，只有在 A 仍不足时才做）**：在命令缓冲**内部**插两个 `MTLSharedEvent` 信号（前端之后、估计器之后），宿主侧观察信号到达时刻并出分布 ⇒ 不改提交结构、不改输入寿命、不动 V4 | A：配对后 `busy split` 的三项之和 ≈ `residency`（±10%）；B：各段之和 ≈ `merged_hop`（±10%）|
 | **P0-2** | **持有期没有直接读数**：现在只能由"跨度"推断 | V2 的"症状消失"要能直接读；且决定"池该多大" | 在 `retain_for_block/release` 的 token 上记**每次持有的时长**（attach→release），打 p50/p95/p99 + 直方图 | 重载腿上持有 p99 ≈ 跨度 p99；轻载腿上持有更短 |
 | **P0-3** | `ce` 段 p95 尾巴（1782 µs / 中位 901）无归因 | ~~尾延迟是饥饿主因~~ **主体已由代码判读收口**：单车道 strand 排队 + 上一跳 held/outstanding 缓冲回收（`00_status.md` §3.1）。**残余缺口**只剩"这两者各占多少" | 用 `OCUDU_UL_SLOT_TRACE`（它**按槽**并排打 `rxwait`/`t2f`）加一个"strand 等待"子探针 | 尾巴落在排队还是回收，逐槽可读 |
 | **P0-4** | 离线回放**能否**产出同样的三段读数 | 能用回放做的实验就不烧空口腿 | 检查 `ul_chain_replay` 是否经过 `ul_pipeline_probe` 的同一路径；若能，写一个"回放版的段报告" | 回放与空口在同一负载点上的三段比例一致（±20%）|
