@@ -10306,6 +10306,26 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
 | **D-2（对照）** | 同上负载 + `--expert_phy.phy_pipeline cpu` | 与 D-1 同量级 ⇒ 与车道无关（进一步支持 ④）；差异大 ⇒ 需重查（但注意这两条腿的上行是轻的，车道的杠杆本应很小）|
 | **D-3（观察项）** | 任一条洪泛腿 | **在洪泛中按一次 Ctrl-C**，记录：多久停下来、`Could not stop application` 是否出现、`.stderr` 是否缺 `[metal_stats]` ⇒ 把"收尾挂死"变成一个可复现的读数 |
 
+**⑦ ★ D-3 已完成（s77 洪泛中 Ctrl-C）：收尾在契约块之后被截断，而契约本身仍是 8/8**
+
+```
+[phy_pipeline]   host sample assembly: 7119910 of 7119910 symbols read where the radio put them, 0 copied ... -> OK
+[phy_pipeline] contract MET (8 of 8 checks applicable)
+Could not stop application after 5 seconds. Forcing exit.          <- lib/support/signal_handling.cpp:30
+2026-09-24T12:43:41.780416 [APP] [E] Emergency flush of the logger  <- 强制退出路径
+```
+* **时间线**：最后一条 RF `late` 在 `12:43:36.819`，强制退出在 `12:43:41.780` ⇒ **恰好 5 秒**（看门狗的固定值）。
+  stdout 完整（`Stopping...` + `Logfile stored in …`，横幅 **`commit 38bfc6ce02`** ⇒ 这次确实是**合并前**的二进制 ✓）。
+* **丢的是什么**：`.stderr` 里 `contract` 有 2 处、`[ul_pipeline]` 有 2 处，**`[metal_stats]` / `[ul_gpu_lane]` / `[ul_host]` 全是 0** ⇒
+  **报告在契约块之后被截断**（那些块由退出阶段更晚的路径打印，进程没走到）。⇒ 该腿**不能支撑任何需要车道/宿主计数的结论**
+  （§5.9.126 ④ 里新加的守卫正是为这种腿写的；只是这个 worktree 的 `run_leg.sh` 还是旧版，所以它没拦——**主工作树的新守卫会拦**）。
+* **★ 顺带拿到两条结论**：
+  1. **洪泛期间融合车道本身是健康的**：契约 **8/8**、`crossings 0.00+0.00`（14449 跳）、`ce device estimates: 158939 device, 0 host`、
+     `host sample assembly: 7119910/7119910 就地读`、`zero-copy wraps: 0 failures` ⇒ 进一步坐实 ④ 的界限（不是车道的性质）。
+  2. **这条腿用的是合并前二进制（`38bfc6ce02`）而它照样洪泛**（s76 = HEAD `7da6b2d953` 也洪泛）⇒
+     **"下行饱和 → 洪泛 + 收尾挂死"不是 `origin/main` 合并引入的**。（§5.9.126 ③ 里"缺少 A-5"这件事对**下行 regime** 而言
+     由此等价地补上了；**上行 regime 的 A-5 仍然缺**，而那才是我原本要对照的那一组。）
+
 **⑥ 顺带确认的两件事**：① 用户问的"挂着的 iperf3"**在 Mac 与 CN 上都没有进程、5201 也没有监听**
 ⇒ 那个"挂住"是**下行停摆的症状**，不是客户端卡死，Ctrl-C 掉即可；② 本轮的日志洪泛把单条腿的 `.log` 推到
 **637 MB**（可用空间 258 GB，未造成磁盘风险），但**日志速率本身值得留意**（洪泛期间 ocudulog 是满速写的）。
