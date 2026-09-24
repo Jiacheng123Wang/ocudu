@@ -10023,6 +10023,54 @@ cmake --build /tmp/build_probes --target lower_phy_uplink_processor_test ul_pipe
   而不是写死在脚本里（写死会让门在离网时变成"没人跑的门"）。
 * 唯一需要人工保证的是：**远端那棵树要在 `~/work/ocudu`**（脚本里 `cd ~/work/ocudu`），且用 `BatchMode=yes` +
   `ConnectTimeout=8` ⇒ 连不上会立刻退化成那一行 INFO，**不会挂住**。
+* **远端地址会变**（实测：`192.168.0.106` → `192.168.31.211`）。这正是"用环境变量按次开启"而非写死的原因。
+
+#### 5.9.123 ★★ 合并 `origin/main` 之后**重新定基**：仪表全部幸存，门在新基线上 GREEN；但"行号"这一层全过期
+
+**① 发生了什么**：`apple-silicon` 合并了 `origin/main`（`3317b327a0`）——**1513 个文件、+54752/−16039**，
+其后用户又做了三个修复：`234a10fc1a`（macOS 全量构建暴露的三个 target）、`48bf4cd21f`（du 校验器链接 rrc_nr_asn1）、
+`b0e8b5703a`（n1 小区 7.68 → **15.36 MHz** 采样：B210 的 AD9361 在 ~9.6 MHz 以下停止给 FPGA 供时钟，
+5.0/5.76/7.68 全部寄存器写超时）。本轮审计的**全部读数锚在合并前的 `38bfc6ce02`**，所以先做这件事。
+
+**② 仪表幸存（逐条核对）**：`plain_without_lane_slot`、`keepalives_in_flight_max`、`Plain route by why`、
+`host device data crossings`、`ce device estimates`、`host sample assembly`、`phy_pipeline_checks` 全部在；
+两条新臂与三个门脚本（`milestone_audit.sh` / `a12_attribution_gate.sh` / `edge_block_arms.sh`）都在；macOS 全量构建 **exit 0**。
+
+**③ 契约仍是同样 8 条**：`grep register_phy_pipeline_check` 现在命中 **9** 处，但第 9 处是
+`phy_pipeline_contract.h:95` 的**函数定义**本身；8 个名字清单逐字未变（`zero-copy wraps` / `ce device estimates` /
+`dft radio inputs` / `radio sample continuity` / `host device data crossings` / `cfo compensation` /
+`baseband metrics` / `host sample assembly`）。⇒ **§5.9.120 ③ 的逐项审计在实质上仍然有效。**
+
+**④ 被合并改过的三个"被审计文件"：契约区**没被动**（用定向 diff 逐条核过）**
+
+| 文件 | 改动量 | 改的是什么 | 契约判决/计数点是否被动 |
+|---|---|---|---|
+| `lower_phy_baseband_processor.cpp` | 3/3 | `high_resolution_clock` → `steady_clock` | **否** |
+| `uplink_processor_impl.cpp` | 4/13 | **CFO 补偿去掉 float 临时缓冲**：`cfo_processor.process(buffer.get_writer())` 对 ci16 就地补偿（"no float copy in between"）| **否**（`return … device > 0` / `count_assembled` / `count_in_place` / `round_trips` / `measured` 均在 diff 里零命中）|
+| `pusch_demodulator_impl.cpp` | 2/2 | 一处 rnti/`c_init` 常量 | **否** |
+
+另外三个关键文件（`ocudu_dft_metal_engine.mm`、`phy_pipeline_crossings.h`、`ocudu_metal_queue.mm`）**逐字未变**。
+
+**⑤ ★ 我的第八条臂正好覆盖了上游重构的那条路径，并且仍然有效**：上游把 CFO 补偿改成 ci16 就地处理，
+而那条臂用"调度一次 CFO 命令"触发装配路径。合并后实测（`lower_phy_uplink_processor_assembly_arm`）：
+
+```
+[phy_pipeline]   cfo compensation: 14 round trips over 28 symbols, 1 commands, offset 100.000 Hz -> OK
+[phy_pipeline]   host sample assembly: 14 of 28 symbols read where the radio put them, 14 copied into a symbol buffer (mode=gpu) -> FAILED
+```
+⇒ **判据仍被推动、用例通过** —— 臂在被上游改过的路径上照样有效。
+
+**⑥ 新基线（合并后实测，门已按此更新）**
+
+| 量 | 合并前 | 合并后 |
+|---|---|---|
+| `ctest -L phy` | 180 标签 / **179 可跑** | **194 标签 / 193 可跑**（`100% tests passed out of 193`）|
+| 契约检查条数 | 8 | **8**（清单不变）|
+| 全门读数 | 23 PASS / 0 FAIL = GREEN（`38bfc6ce02`）| **23 PASS / 0 FAIL / 0 RED / 2 INFO = GREEN**（合并后 HEAD，含远端 `errors=0`）|
+
+**⑦ 因此"过期"的只有一层：绝对行号。** §3.2 的判读表、§5.9.115/§5.9.103 的行号键、§5.9.120 ③ 的 file:line 引用，
+在合并后都需要**按句子重找**（本文件已多次记过这条规矩）。**判决表达式与计数点本身已被定向核对为未变**，
+所以修法是**重锚行号**，不是重做审计。
 
 
 ### 5.9 D1 的范围分析（2026-09-20，S16）：**目标、提交预算、以及一个比预期更硬的排序约束**
