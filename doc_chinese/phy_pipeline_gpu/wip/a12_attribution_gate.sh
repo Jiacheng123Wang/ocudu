@@ -18,9 +18,22 @@
 # "Cannot read" is RED, never absent - the lesson of 5.9.97 (a hard gate printed "None" and looked
 # exactly like a pass).
 #
+# TWO things this gate is bound to, and it now says so instead of judging something else:
+#   * REGIME. C5's pre-registration is the DEFAULT regime's validity ("contract 8/8, stale=0, crossings
+#     0.00+0.00, gaps=0" - 5.9.118 (3)). Under a load generator `stale > 0` is the pre-registered
+#     EXPECTATION (wall_ab's R4, 5.9.127), so --regime=stress drops that one condition from C5.
+#   * GEOMETRY. C4's identity ("plain route == 12*round(T/10ms) + 1") is an empirical law of the n78
+#     PRACH geometry this file was written for: format B4 at one occasion per radio frame, 12 IDFTs
+#     per occasion. It is NOT a law about "PRACH in general" - and on the n1 5 MHz FDD config the
+#     premise is absent outright (measured 2026-09-24: the leg detected preambles, but the Metal DFT
+#     engine's own counter reads `dft commits=1`, i.e. only its warm-up: PRACH's IDFTs fell back to
+#     the CPU implementation, which the Metal factory's comment names as a supported fallback). On
+#     such a leg C4 is NOT JUDGED, and it must not be reported as a failure of A1-2.
+#
 # usage:
 #   bash a12_attribution_gate.sh s69-a12-n78            # newest leg carrying that label
 #   bash a12_attribution_gate.sh --slot-ms=0.5 s69-a12-n78
+#   bash a12_attribution_gate.sh --regime=stress s82-phases-heavy-n78
 #   bash a12_attribution_gate.sh --self-test            # the gate's own arms: can it go red AND green?
 set -u
 
@@ -28,14 +41,17 @@ LEG=""
 SLOT_MS=0.5          # a 30 kHz cell: this gate is written for the n78 PRACH geometry (12 per 10 ms)
 SYMS_PER_SLOT=14
 SELF_TEST=0
+REGIME=default       # C5 keeps `stale=0` here; --regime=stress drops it (5.9.127 R4)
 for a in "$@"; do
   case "$a" in
     --slot-ms=*)        SLOT_MS=${a#*=} ;;
     --symbols-per-slot=*) SYMS_PER_SLOT=${a#*=} ;;
+    --regime=*)         REGIME=${a#*=} ;;
     --self-test)        SELF_TEST=1 ;;
     *)                  LEG=$a ;;
   esac
 done
+case "$REGIME" in default|stress) ;; *) echo "regime must be default or stress" >&2; exit 2 ;; esac
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 LOGDIR=$ROOT/doc_chinese/phy_pipeline_gpu/wip/logs
@@ -53,6 +69,11 @@ if [ "$SELF_TEST" = 1 ]; then
       printf '   radio sample continuity: 0 gaps over 185612 blocks (0 samples missing or repeated), 0 timestamp-0 blocks -> OK\n'
       printf '   dft radio inputs: OK\ncontract (mode=gpu):\ncontract MET (8 of 8 checks applicable)\n'
       printf '[ul_pipeline] stale=0\n'
+      # The GEOMETRY PREMISE C4 needs (see the header): the registered n78 config, and PRACH actually on
+      # the engine (commits > 1, i.e. more than the warm-up). Without these the gate must NOT judge C4 -
+      # and a self-test whose legs lack them would silently stop exercising C4 altogether.
+      printf 'cell config   : configs/gnb_rf_b200_tdd_n78_20mhz.yml\n'
+      printf '[metal_stats] dft commits=111362 transforms=%s waits=1 slots_in_flight=0 radio_inputs=1\n' "$(( $2 + $4 ))"
     } > "$1.stderr"
     : > "$1"
   }
@@ -82,10 +103,10 @@ resolve() {
 [ -n "$LEG" ] || { echo "usage: bash a12_attribution_gate.sh [--slot-ms=N] <leg-label|path>" >&2; exit 2; }
 LEG_LOG=$(resolve "$LEG")
 
-python3 - "$LEG_LOG" "$SLOT_MS" "$SYMS_PER_SLOT" <<'PY'
+python3 - "$LEG_LOG" "$SLOT_MS" "$SYMS_PER_SLOT" "$REGIME" <<'PY'
 import os, re, sys
 
-leg_log, slot_ms, syms_per_slot = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+leg_log, slot_ms, syms_per_slot, regime = sys.argv[1], float(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 err_txt = open(leg_log + ".stderr", errors="replace").read() if os.path.exists(leg_log + ".stderr") else ""
 txt     = open(leg_log, errors="replace").read() if os.path.exists(leg_log) else ""
 
@@ -94,9 +115,16 @@ def f(where, rx):
     return m[-1] if m else None
 
 rows = []
+judged = 0
+not_judged = []
 def check(name, ok, detail):
+    global judged
     verdict = "PASS" if ok is True else ("RED (cannot read)" if ok is None else "FAIL")
+    judged += 1
     rows.append((verdict, name, detail))
+def skip(name, reason):
+    if not not_judged:
+        rows.append(("n/a (not judged)", name, reason))
 
 # ---- the three counters (5.9.113) and the plain-route total they must add up to -------------------
 why = f(err_txt, r"Plain route by why: (\d+) got their own command buffer \((\d+) of those before any slot "
@@ -132,6 +160,24 @@ check("C3 plain_with_block == 0 AND (no-slot / no-block) >= 0.999  <- 5.9.118 (3
       f"block={plain_block}, no-slot/no-block={ratio if ratio is None else round(ratio, 4)}"
       + ("" if (ratio is not None and ratio >= 0.999) else "  <- a slotted instance did NOT join a block: 5.9.111 (3) branch 2"))
 
+# ---- the geometry premise C4 is a law of ---------------------------------------------------------
+leg_cfg  = f(err_txt, r"cell config\s*:\s*(\S+)")
+commits  = f(err_txt, r"\[metal_stats\] dft commits=(\d+)")
+prach_on_engine = None if commits is None else (int(commits) > 1)
+n78_geom = (leg_cfg is not None) and ("tdd_n78" in leg_cfg)
+premise_reason = None
+if leg_cfg is None or commits is None:
+    premise_reason = ("cannot read the premise: " + ("no `cell config` provenance in the leg" if leg_cfg is None else "")
+                      + (" and " if leg_cfg is None and commits is None else "")
+                      + ("no `[metal_stats] dft commits=` line" if commits is None else ""))
+elif not prach_on_engine:
+    premise_reason = (f"PRACH does not run on the Metal DFT engine here (dft commits={commits}: only its warm-up, "
+                      f"so the IDFTs took the CPU fallback the Metal factory documents) - there is no plain-route "
+                      f"signal to attribute")
+elif not n78_geom:
+    premise_reason = (f"leg ran {leg_cfg}, not the registered n78 geometry this identity was measured on "
+                      f"(format B4, 12 IDFTs per occasion, one occasion per radio frame)")
+
 # ---- C4: the PRACH rate. n78 index 159 = format B4 (12 symbols) once per 10 ms radio frame --------
 # T comes from the leg's own symbol count, NOT from the log file's timestamps: the span includes the
 # startup and the shutdown block, which is ~4 s of a ~95 s leg - enough to misjudge a 10 ms period.
@@ -139,11 +185,15 @@ sym = f(err_txt, r"host sample assembly: \d+ of (\d+) symbols")
 T = None if sym is None else int(sym) / syms_per_slot * slot_ms / 1000.0
 occ = None if T is None else int(round(T / 0.010))
 exp = None if occ is None else 12 * occ + 1
-check("C4 plain route == 12*round(T/10ms) + 1  (PRACH B4 at one occasion per radio frame)",
-      None if (exp is None or plain_total is None) else abs(plain_total - exp) <= 12,
-      "no symbol count" if exp is None else
-      f"T={T:.1f}s -> {occ} occasions -> expected {exp}, read {plain_total}"
-      + (f" (implied period {1000.0 * T / occ:.2f} ms)" if occ else ""))
+if premise_reason is None:
+    check("C4 plain route == 12*round(T/10ms) + 1  (PRACH B4 at one occasion per radio frame)",
+          None if (exp is None or plain_total is None) else abs(plain_total - exp) <= 12,
+          "no symbol count" if exp is None else
+          f"T={T:.1f}s -> {occ} occasions -> expected {exp}, read {plain_total}"
+          + (f" (implied period {1000.0 * T / occ:.2f} ms)" if occ else ""))
+else:
+    skip("C4 plain route == 12*round(T/10ms) + 1  (PRACH B4 at one occasion per radio frame)",
+         "NOT JUDGED: " + premise_reason)
 
 # ---- C5: is the leg valid at all ------------------------------------------------------------------
 contract = f(err_txt, r"contract ((?:MET|NOT MET) \(\d+ of \d+ checks[^)]*\))")
@@ -151,9 +201,13 @@ mode     = f(err_txt, r"contract \(mode=([a-z_]+)\)")
 stale    = f(err_txt, r"\[ul_pipeline\] stale=(\d+)")
 cross    = f(err_txt, r"= ([0-9.]+) read\(s\) \+ ([0-9.]+) write\(s\) per hop")
 gaps     = f(err_txt, r"radio sample continuity: (\d+) gaps")
-check("C5 leg valid: contract 8/8 mode=gpu, stale=0, crossings 0.00+0.00, 0 gaps",
+# In the STRESS regime the stale condition is dropped, not relaxed: 5.9.127's R4 pre-registers
+# `stale > 0` as the expectation under load, so requiring 0 here would contradict the registration.
+stale_ok = (stale == "0") if regime == "default" else (stale is not None)
+check("C5 leg valid: contract 8/8 mode=gpu, crossings 0.00+0.00, 0 gaps"
+      + (", stale=0" if regime == "default" else f"  [stress regime: stale={stale} is expected, 5.9.127 R4]"),
       (contract is not None and contract.startswith("MET (8 of 8") and mode == "gpu"
-       and stale == "0" and cross == ("0.00", "0.00") and gaps == "0"),
+       and stale_ok and cross == ("0.00", "0.00") and gaps == "0"),
       f"{contract} mode={mode} stale={stale} crossings={cross} gaps={gaps}")
 
 print(f"A1-2 attribution gate (5.9.118): {os.path.basename(leg_log)}   slot {slot_ms} ms")
@@ -168,8 +222,10 @@ print()
 for verdict, name, detail in rows:
     print(f"  [{verdict:<16}] {name}")
     print(f"                     {detail}")
-red = sum(1 for v, _, _ in rows if v != "PASS")
+red = sum(1 for v, _, _ in rows if v not in ("PASS", "n/a (not judged)"))
 print()
-print(f"  {len(rows) - red} of {len(rows)} criteria pass"
+print(f"  {judged - red} of {judged} criteria pass"
       + ("" if red == 0 else f"  --  {red} to explain (see 5.9.118 (6) for what each shape means)"))
+for _, name, why in not_judged:
+    print(f"  NOT JUDGED: {name.split('  (')[0]} -- {why}")
 PY

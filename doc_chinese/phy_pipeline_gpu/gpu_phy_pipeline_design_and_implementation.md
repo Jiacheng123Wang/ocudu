@@ -13601,3 +13601,70 @@ landmine 0 failing sweeps、二进制戳 = HEAD。**唯一的 FAIL 见 ③，它
   **在读到该值之前，`phy_latency/00_status.md` §3.1 里 `ce` 行的 (i) 项按"待确认"引用。**
 * 这条也顺带解释了为什么"`s82` 上 CE 段的 p95 只有 1782 µs，而 n1 加压腿上曾读到 3387 µs"——
   两者可能根本不是同一种执行器排布，**不能跨小区直接比较**（原先没注意到这一点）。
+
+#### 5.9.133 ★★★ 门第一次**全绿**（29 PASS / 0 FAIL / 0 RED）；同时修掉三处"判据绑错对象"的残留，并记下一条**间歇性读数**
+
+**① 新的默认工况腿 `s83-tag`（用户按标准配方跑，二进制 `feb6038e7f` = 当时的 HEAD；`[leg] regime=default` 自报生效）**
+
+| 项 | 读数 |
+|---|---|
+| 契约 | **`MET (8 of 8 checks applicable)`**（流量够，没有掉到 6/6 —— 见 ②）|
+| `stale` / crossings / gaps | **0** / `0.00 + 0.00` 每跳 / 0 |
+| `ce device estimates` | **143216 device, 0 host** |
+| `host sample assembly` | **1488508/1488508 就地读**，0 拷贝 |
+| 腿的 commit | `feb6038e7f` = **HEAD**（门的"这条腿跑的是哪个提交"判据：相等 ⇒ 最干净的一档）|
+| 标准默认流量配方（用户明确）| **从 CN** `ping 10.45.0.10 -i 0.1 -c 100`（下行 10 Hz，**10 s**）+ 10 s 下行 iperf3 + 10 s 上行 iperf3，之后空跑到 ≈100 s |
+
+**② 零流量的腿会"静默少判两条"（新登记，已写进 `phy_latency/02_measurement.md`）**：
+没有 PUSCH 跳时，契约里 `ce device estimates`（`device==0 && host==0` ⇒ `nullopt`）与
+`host sample assembly`（`symbols==0` ⇒ `nullopt`）会**退出 applicable 集合**，契约打印成 `MET (6 of 6 …)`，
+而里程碑判据是字面的 **`MET (8 of 8`** ⇒ FAIL，且**看起来像"契约坏了"**。
+⇒ 默认腿也必须跑**正常流量**（`ping`/短 iperf3）；**只有 PRACH（attach 本身）不产生这些跳**。
+
+**③ A1-2 的 C4 是**几何特定**的——n1 上 PRACH 根本不走那个 Metal 引擎（第三个"绑错对象"）**
+
+用户在 n1 桥接小区上跑的第一条默认腿，A1-2 读到 **`plain route = 1`**（期望 63793）⇒ C4 红。**不是回归**：
+
+* 该腿的 `[metal_stats] dft commits=1 transforms=1`（**只有预热那一次**），而 n78 腿是 `12 × 帧数 + 1`；
+* 同时日志里**确有 PRACH 检测**（多次 preamble：58/54/34/28…）⇒ PRACH 跑了，只是它的 IDFT **走了 CPU 回退**：
+  机制在代码里写着 —— `dft_processor_factory_metal::create()` 对不支持的尺寸**透明回退**
+  （`generic_functions_factories.cpp:133-135`，注释原文 *"everything else (e.g. **the PRACH FFT sizes**) falls back transparently"*），
+  规则是 `2^k · 3^m` 家族（`dft_processor_metal.cpp:10-22`）；
+* 而 C4 的恒等式里那个 **12 是 n78 配置的 PRACH 格式（B4：一次 occasion 12 个 IDFT，每无线帧一次 occasion）**——
+  `a12_attribution_gate.sh` 的文件头**本来就写着**它"是按 n78 的 PRACH 几何写的"，而门却把 n1 腿喂给了它（连 slot 都没传）。
+
+⇒ **两处修法（都不是放宽判据）**：
+1. `a12_attribution_gate.sh` 新增 **`--regime=default|stress`** 与**几何前提**：
+   前提 = 腿的 `cell config` 是登记的 n78 配置 **且** `dft commits > 1`（PRACH 真在引擎上）。
+   前提不成立时 **C4 记 "NOT JUDGED" 并给出理由**（不进分母），而不是 FAIL；`C5` 的 `stale=0` 只在默认工况要求
+   （加压工况下 §5.9.127 的 R4 预登记的恰好相反）。自测三臂（branch3 5/5、defect 3/5、oldfmt 2/5）重跑通过。
+2. `milestone_audit.sh`：默认腿判不了 C4 时，**把 A1-2 移到能判的腿**（n78 压力腿，`--regime=stress`）上判，
+   并把"为什么换腿"写进 detail。**判据在被判得了的地方判，绝不软化**；没有任何腿能判时才算红。
+
+⇒ 结果：`A1-2 … 5 of 5 judged  |  leg s82-phases-heavy-n78: 5 of 5 criteria pass  [judged on the STRESS leg: the default leg cannot judge C4 …]`。
+
+**④ `ab_dumps: historical arm` 出现一次**间歇性**非零读数 —— 已量化，并因此把"6.5 偶发规则"真正实现**
+
+现象：在完整审计里读到 **551 字节**、在一次循环里读到 **2728 字节**；而**其余全部为 0**：
+
+* 连续 **14 次**脚本运行 = 0；
+* 手工复刻 **432 次存在性已核验的文件比较**（4 轮 × 27 capture × 4 个 dump）= 0；
+* 单 capture 上 A 侧（`TAIL_DEV=0`）6 次自比、B 侧（`HOST_SCALARS=1`）8 次自比、**A×B 36 对交叉**全部逐字节相同
+  ⇒ **两侧各自是确定的**，非确定性只在"某些时刻的 A↔B 比较"上出现；
+* 两次非零都**紧邻重 GPU 活动**（一次在完整审计内、一次紧跟重跑之后）——这正是 §5.8.20 ④ 登记过的本机形状
+  （"绝对值是模式相关的，比值不是"）。
+
+⇒ **处理（不放过、也不谎报）**：门里那条 6.5 偶发规则**过去只写在判据名字里，脚本从不真的重跑**（一个承诺了却没实现的规则）。
+现在 `ab_check()` / `check_rerun()` 把它落成代码：首次非零时**重跑一次**，通过则 PASS，
+但 **detail 里必须保留首次读数**（`[6.5 flake rule: the FIRST read was 551]`）——不许用静默重试把偶发洗成绿。
+⚠ **对 tag 注解的限定**：`gpu_phy_iq2llr_full_gpu_pipeline` 的注解里"两条 ab_dumps 臂 0 差异"是**当时的真实读数**，
+现在按本条理解为"**多数读数**为 0，偶发非零、不可按需复现、两侧各自确定"。tag 不改（已推送），限定以本行为准。
+
+**⑤ 顺带记一个**测量方法**陷阱（我自己踩了）**：手工复刻时我把 `cmp -l` 用在**可能不存在**的文件上，
+输出为空 ⇒ `wc -l` = 0 ⇒ 得到"432 次全部相同"的**空结论**（真实原因是 replay 的 capture 参数**要剥掉 `.bin` 后缀**，
+我传了带后缀的路径 ⇒ 一个 dump 都没产出）。这正是 `ab_dumps.sh` 文件头警告过的同一类错误
+（"a stray DIRECTORY matched the glob, so `cmp` compared two empty streams and reported 0 differences"）。
+**规矩：任何"逐字节相同"的结论必须先核验两侧文件都存在**（`cmp -s` + 存在性检查），否则 0 是空的。已写进 `phy_latency/02_measurement.md`。
+
+**⑥ 门的状态**：`29 PASS, 0 FAIL, 0 RED(cannot read), 3 INFO (of 32)` —— **`offline acceptance: GREEN`**（本轮首次）。
+三条 INFO 是：byte net（自 §5.8.x 起不作为判据）、远程构建（需显式设 `MILESTONE_AUDIT_REMOTE`）、压力腿的工况相关数字（V1–V5 只报不判）。
