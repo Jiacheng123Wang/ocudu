@@ -739,7 +739,8 @@ int main()
                    "[dft-release] (the %u above is NOT evidence of an early release while the platform "
                    "defers mid-buffer signals: the event's notification is delivered at the buffer's "
                    "completion and can still beat the completion handler to the token. What judges the "
-                   "effect is a leg's pool numbers - see 05_p2e_platform_finding.md)\n",
+                   "effect is a leg's pool numbers - see doc_chinese/phy_latency/gpu_phy_latency_optimization_"
+                   "design_and_implementation.md 6.4)\n",
                    early_armed_reps,
                    early_seen,
                    repetitions - early_armed_reps,

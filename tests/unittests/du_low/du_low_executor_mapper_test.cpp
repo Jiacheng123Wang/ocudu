@@ -10,7 +10,7 @@
 using namespace ocudu;
 using namespace odu;
 
-// P0-6 of the latency workstream (doc_chinese/phy_latency/01_plan.md).
+// P0-6 of the latency workstream (doc_chinese/phy_latency/gpu_phy_latency_optimization_design_and_implementation.md 6.1).
 //
 // The resolved PUSCH/SRS concurrency decides whether the uplink LANE's executor is a serialising
 // STRAND or an N-way task fork limiter, and that distinction is the first question the latency work

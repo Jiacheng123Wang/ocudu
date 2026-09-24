@@ -127,7 +127,7 @@ public:
       // All three views come from one create_task_fork_limiter(), so they share max_concurrency. A value
       // of 1 (or less) is not "a limit of one" - it is create_task_fork_limiter() returning a STRAND,
       // i.e. the PUSCH lane serialises: one hop in it at a time. That distinction is what the latency
-      // workstream opens with (doc_chinese/phy_latency/00_status.md Q8): a long channel-estimation
+      // workstream opens with (doc_chinese/phy_latency/high_level_status_and_plan.md, Q8): a long channel-estimation
       // segment is lane QUEUEING only if the lane really is serial, and the "single lane" readings on
       // record came from n1 legs whose derived value differs from an n78 cell's.
       std::fprintf(stderr,

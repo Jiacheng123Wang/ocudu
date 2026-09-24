@@ -403,7 +403,8 @@ void ocudu::fill_du_low_worker_manager_config(worker_manager_config&         con
     }
   }
 
-  // ---- P0-6 (doc_chinese/phy_latency/01_plan.md): say what this value RESOLVED to, and from what ----
+  // ---- P0-6 (doc_chinese/phy_latency/gpu_phy_latency_optimization_design_and_implementation.md 6.1):
+  // say what this value RESOLVED to, and from what ----
   // The resolved concurrency decides whether the PUSCH lane's executor is a serialising STRAND (<= 1,
   // one hop at a time) or an N-way task fork limiter (N hops may overlap). Until this line existed the
   // value was nowhere in a leg: the config default is `auto`, the YAML dump writes the sentinel back

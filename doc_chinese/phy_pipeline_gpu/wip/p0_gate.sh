@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# P0 gate (doc_chinese/phy_latency/03_p0_instrumentation.md): read the P0 instruments out of a leg, and
+# P0 gate (doc_chinese/phy_latency/gpu_phy_latency_optimization_design_and_implementation.md, 6.1-6.3):
+# read the P0 instruments out of a leg, and
 # judge them against the criteria that were written down BEFORE the readings existed.
 #
 # It READS LOG FILES ONLY - it never starts a gNB, a replay or anything that touches the GPU, so it is
@@ -9,7 +10,7 @@
 #   bash p0_gate.sh <leg-label|path>                      # P0-6 (always) + P0-1 (if the leg is a split arm)
 #   bash p0_gate.sh <split-leg> --vs=<factory-leg>        # + the "+-10% of the factory arm's merged_hop" criterion
 #
-# Criteria (registered in 03_p0_instrumentation.md (1) and (2)):
+# Criteria (registered in the latency dev doc 6.1 (P0-6) and 6.2 (P0-1); C2 in 6.3):
 #   A1  the two [ul_lane_exec] lines are present, and the value they report equals the executor's own
 #       max_concurrency (self-consistency: the resolved value and the shape must agree)
 #   A2  the shape follows the rule: <= 1 must read STRAND, > 1 must read "task fork limiter"

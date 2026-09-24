@@ -339,7 +339,7 @@ static void d1_trace(const char* what, id<MTLCommandBuffer> cb)
   }
 }
 
-/// P0-1 (doc_chinese/phy_latency/01_plan.md): the DIAGNOSTIC SPLIT.
+/// P0-1 (doc_chinese/phy_latency/gpu_phy_latency_optimization_design_and_implementation.md 6.2): the DIAGNOSTIC SPLIT.
 ///
 /// On the production route the whole hop - the front end's transforms, the estimator, the equalization
 /// and the demapping - is ONE command buffer, and Metal hands out GPU timestamps only per command
