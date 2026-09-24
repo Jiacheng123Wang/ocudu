@@ -13668,3 +13668,37 @@ landmine 0 failing sweeps、二进制戳 = HEAD。**唯一的 FAIL 见 ③，它
 
 **⑥ 门的状态**：`29 PASS, 0 FAIL, 0 RED(cannot read), 3 INFO (of 32)` —— **`offline acceptance: GREEN`**（本轮首次）。
 三条 INFO 是：byte net（自 §5.8.x 起不作为判据）、远程构建（需显式设 `MILESTONE_AUDIT_REMOTE`）、压力腿的工况相关数字（V1–V5 只报不判）。
+
+#### 5.9.134 ★★ milestone tag 修订 2：**新打一个 `_p2`，而不是移动已发布的 tag**（用户提问的裁决与理由）
+
+**① 用户提问**："在开始时延工作之前，是否应该把 tag 移动到 `6bfc6189dc` 并推送到远端？"
+
+**② 裁决**：**不移动** `gpu_phy_iq2llr_full_gpu_pipeline`（`e232d16003`，已推送），
+改为在同一代码上打 **`gpu_phy_iq2llr_full_gpu_pipeline_p2` → `6bfc6189dc`** 并推送。理由：
+
+* **已发布的 tag 在语义上是不可变引用**：`git fetch` 对**已存在**的 tag **默认拒绝更新**
+  （`! [rejected] … would clobber existing tag`），所以 `--force` 推一个移动后的 tag，
+  会让**每个已取过它的 clone 仍指向旧提交、却顶着同一个名字**——**同一 tag 名对应两个状态**，
+  这正是里程碑 tag 最不能有的性质。（已核查：Ubuntu 上的 clone `b0e8b5703a` **尚未**取到该 tag 对象，
+  所以此刻危害还是理论上的；但推送移动的那一刻就变成真的。）
+* **本项目已有此约定**：`gpu_phy_iq2llr_zero_data_crossings` → `..._p2`（§5.9.120 ⑩ 还点名"照 `_p2` 的格式写注解"）。
+* **旧 tag 的注解不假**：它声明的达成成立，并且注解里**已经写明**"本提交上不存在默认工况腿，
+  一条 `run_leg.sh gpu <label>` 即可关掉那一行"——即它记录的正是"当时已知的证据状态"。
+  改写它等于抹掉"当时知道什么"，而追加一个修订版把两件事都留下。
+* 若将来确实必须移动一个已发布的 tag，**唯一可接受的形态**是：`--force` 推送 **+** 在本文件留一行
+  记录"何人/何时/为何移动"，因为那会打破所有人的本地引用。本次不需要付这个代价。
+
+**③ 两个 tag 的关系**：**PHY 代码完全相同**（可核：`e232d16003..6bfc6189dc` 改 6 个文件，
+**全在 `doc_chinese/` 下**（4 文档 + 2 个 wip 门脚本），`lib/`、`include/`、`apps/`、`tests/` 下 **0 个**）。
+修订 2 增加的是**证据与判gate**，不是代码。
+
+**④ `_p2` 引用的读数（都在 `6bfc6189dc` 上取）**：门 **`29 PASS, 0 FAIL, 0 RED(cannot read), 3 INFO (of 32)` ⇒ GREEN**；
+默认工况腿 `s83-tag_0924_2209` 六行全过（`MET (8 of 8 checks applicable)`、`stale=0`、crossings `0.00+0.00`、
+`ce 143216 device / 0 host`、`host sample assembly 1488508/1488508 就地读`），
+且门的"这条腿跑的是哪个提交"判据读出 `leg ran feb6038e7f; feb6038e7f..HEAD changes 4 file(s), 0 of them under lib/include/apps/tests`；
+A1-2 在 n78 压力腿上 `5 of 5 judged`（默认腿判不了 C4 —— 其 PRACH 不走 Metal 引擎，见 §5.9.133 ③）。
+注解同时保留**未声称项**（含"延迟不由此 tag 声称"与 V1 未达），并逐条列出**自首个 tag 以来已关闭**的排除项
+（A1-2 第二条腿、keepalive 不变量、`host sample assembly` 反向臂、边缘块证据归档）。
+
+**⑤ 一个操作细节**：推 `_p2` 时 GitHub 首次返回 **`Internal Server Error`（HTTP 500）**，重试即成功
+（本地 tag 对象已建好，重试无副作用）。这不是权限或引用冲突。
