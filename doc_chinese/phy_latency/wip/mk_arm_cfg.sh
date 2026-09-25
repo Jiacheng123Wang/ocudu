@@ -7,14 +7,21 @@
 # one variable while it moved several). Generating it and PRINTING THE DIFF puts the variable in the leg's own
 # transcript: `run_leg.sh` copies the config into the leg log, and this script's output shows what was moved.
 #
-# The two arms are the transport-side ones of dev doc 6.54 (C):
-#   bigframe  recv_frame_size=16384  - the SAME waveform, bigger USB transfers: fewer per-transfer costs, and
-#                                      a stall is paid in bigger chunks. The clean transport arm.
+# The transport-side arms of dev doc 6.54 (C), as the bench probe left them (dev doc 6.55 (3)):
 #   sc8       otw_format: sc8        - HALF the wire rate per sample (8-bit I/Q instead of 12). It changes the
-#                                      waveform, so it is judged on the TRANSPORT readings (recv/slip/
-#                                      rx_overflows/load1), never on V1-V5.
+#                                      waveform, so it would be judged on the TRANSPORT readings only - and the
+#                                      probe has since answered its question (the wire is not the constraint),
+#                                      so it is offered, not recommended.
+#   bigframe  RETIRED - REFUSED. `recv_frame_size` above ~8 KB collapses the B200's receive transport on this
+#             host: measured with wip/uhd_rx_health, 6 s each, RX+TX, delivery args otherwise -
+#               8192 / 8200 -> 100% of the time streamed, 0 radio errors
+#               12288       ->  9.8%, every block `overflow`
+#               16360       ->  9.8%, every block `overflow`   (UHD clamps a request of 16384 to 16360)
+#             It was flown once as `p36-n78-bigframe` before it was measured: the UE could not attach at all
+#             (628 RX overflows/s, `PRACH request late`, zero PUSCH/PDSCH), which is exactly what those numbers
+#             predict. A generator that can still produce it is a trap, so it refuses.
 #
-# usage: bash mk_arm_cfg.sh <bigframe|sc8> [output-path]
+# usage: bash mk_arm_cfg.sh <sc8> [output-path]
 #        default output: doc_chinese/work_tmp/arm_<name>.yml   (git-ignored, like the other dev products)
 set -eu
 
@@ -29,9 +36,12 @@ mkdir -p "$(dirname "$OUT")"
 
 case "$ARM" in
   bigframe)
-    # The device args line carries the ring and the frame size; only the frame size moves.
-    sed -E 's/^( *device_args: .*num_send_frames=[0-9]+)(.*)$/\1,recv_frame_size=16384\2/' "$SRC" > "$OUT"
-    want="recv_frame_size=16384"
+    echo "REFUSING arm 'bigframe': recv_frame_size above ~8 KB collapses the B200's receive transport." >&2
+    echo "  Measured (wip/uhd_rx_health, RX+TX, 6 s per point): 8192/8200 -> 100% duty, 0 errors;" >&2
+    echo "  12288 and 16360 -> 9.8% duty with every block an overflow.  It was flown once as p36 and the UE" >&2
+    echo "  could not attach. See dev doc 6.55 (3). Use the ring depth (num_recv_frames) if more margin is" >&2
+    echo "  wanted - 512 and 1024 frames measured healthy." >&2
+    exit 2
     ;;
   sc8)
     sed -E 's/^( *otw_format: *)sc12 *$/\1sc8/' "$SRC" > "$OUT"

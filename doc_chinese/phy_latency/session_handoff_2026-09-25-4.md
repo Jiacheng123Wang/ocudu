@@ -18,10 +18,10 @@
 
 | 判据 | 阈值 | 现状 | 出处 |
 |---|---|---|---|
-| **V1** `[ul_gpu_pipeline]` 中位 | ≤2150 µs | ✅ **1398.6 µs**（`p34`，新最好；基线 2675.1 ⇒ **−47.7%**）| §6.46/§6.48–§6.50/§6.53 |
-| **V2** 池 | `starved_events=0` 且 `held_max<pool` | ⚠ **取决于环**（§6.53）：256 帧 ⇒ `16/0/2`（**读红**，但 `pop_blocking` 249 µs、`dropped=0`）；64 帧 ⇒ `11/5/0` ✅；`p31`/`p32`/`p32b` 为 10–12 / 4–6 / 0 | §6.37–§6.39、§6.53 |
+| **V1** `[ul_gpu_pipeline]` 中位 | ≤2150 µs | ✅ **1398.6 µs**（`p34`，新最好；基线 2675.1 ⇒ **−47.7%**；`p35` 1404.0）| §6.46/§6.48–§6.55 |
+| **V2** 池 | `starved_events=0` 且 `held_max<pool` | ✅ **`p35`（256 帧 + 池 32）：`starved_events=0`、`held_max=11 < 32`、`free_min=21`、`pop_blocking` 26 µs** | §6.37–§6.39、§6.53、§6.55 ① |
 | **V4** 提交数 | `cbs/lane ≤2.00`、`dropped=0` | ✅ `p33` 仍 **2.00 (max=2)**、crossings `0.00+0.00`/跳（第四次确认）| §6.30/§6.46/§6.49/§6.52 ⑤ |
-| **V5** 不回归 | 契约 8/8、0 crossings | ⚠ **同样取决于环**（§6.53）：256 帧 ⇒ **8/8、0 gaps**；64 帧 ⇒ 7/8、**5 gaps（最大 35.3 ms）** | §6.49 ⑤、§6.53 |
+| **V5** 不回归 | 契约 8/8、0 crossings | ✅ **`p35`：契约 MET 8/8、`gaps=0`、`rx_overflows=0`**（64 帧那条是 5 gaps / 最大 35.3 ms，§6.53）| §6.49 ⑤、§6.53、§6.55 ① |
 | **V3** 电台 | RF 失败 ≤10 | ⏸ **另案暂停（用户裁决）**：`p33` 890（`p32` 1013、`p31` 792）；`transmit()` 537 次 >1 ms（max 84 ms）| §6.40–§6.43、§6.52 ⑤ |
 
 **当前状态**：`HEAD = 戳`（见下），**二进制已携带该戳**，工作区干净，**没有腿在跑**。
@@ -39,7 +39,11 @@
 * **A**：池按 P2-D 规则用新测量重算 ⇒ **32**（峰值 16 + 2 + 3 = 21 ⇒ 2 的幂；**启动行现在宣布真实尺寸**），环回到 **256 帧**；
 * **C**：`[ul_rx_timing]` 增加 **`load1`**（overflow 事件自带宿主负载上下文 ⇒ 一次读出"宿主把它们饿着"还是"设备/线在停"）；
   USB 拓扑已实测**没问题**（独立控制器、USB3 5 Gb/s、无共用设备）；两条臂用 **`wip/mk_arm_cfg.sh`** 生成（**只改一行**、拒绝多改、打印 diff）。
-**待飞三条腿**（§3.1d）：`p35-n78-pool32`（A 验收）、`p36-n78-bigframe`（C1）、可选 `p37-n78-sc8`（C2）。
+**裁决结果（§6.55）**：**`p35-n78-pool32` 验收通过** —— **V2（`starved_events=0`、`held_max=11 < 32`、`free_min=21`、`pop_blocking` 26 µs）与 V5（`gaps=0`、契约 8/8）第一次同时绿**，V1 1404.0、V4/D18 不变。
+⚠ **`p36-n78-bigframe` 失败 = 臂本身致命**（`recv_frame_size=16384` 被 UHD 夹到 16360 ⇒ **每块 overflow**、628 次/s、
+PUSCH/PDSCH=0 ⇒ 无 RAR ⇒ **手机被挡在门外**；不是手机的问题）。**该臂已退役**（`mk_arm_cfg.sh` 拒绝生成）。
+⇒ 新增**离线电台台架 `wip/uhd_rx_health.cpp`**（直连 UHD、无手机无 gNB）：**帧长 ≥12 KB 必崩、默认 8200 已贴天花板**；
+**环深可按帧数加深（512/1024 健康）**；**CPU 打满 ⇒ `recv` 拖到 28 ms 而电台零错误** ⇒ **C 的答案在宿主调度侧，`sc8` 臂不再需要**。
 **主线下一步 = §3.2**（解开 `estimates` 断因让 run 覆盖整跳）。
 
 ---
@@ -188,7 +192,7 @@ sudo -E LEG_CONFIG=... bash .../run_leg.sh gpu p34-n78-ring64 --regime=stress OC
 `held_max`/`starved_events`/`pop_blocking`（池的顶格是不是环带来的）。两条合起来才能判"环换来了什么、代价是什么"。
 **若保留深环**：池要按 **P2-D 自己的规则**用新测量重算（16+2+3=21 ⇒ **32**）——那是**改交付参数，要用户裁决**，不是改阈值。
 
-### 3.1d ⏳（三条腿待飞）：A（池 32 + 环 256）与 C（传输根因）
+### 3.1d ✅（A 验收通过；C1 臂致命已退役；C2 不再需要）：A（池 32 + 环 256）与 C（传输根因）
 
 **已落地**（开发文档 **§6.54**，提交 `ab6d2703b5` + `9e1d511548`）：
 * **A**：`lower_phy_factory` 的峰值改 **16**（256 帧环下的实测；旧值 11 是 64 帧环产生的），
@@ -198,11 +202,16 @@ sudo -E LEG_CONFIG=... bash .../run_leg.sh gpu p34-n78-ring64 --regime=stress OC
   USB 拓扑实测**无问题**（独立控制器 / USB3 5 Gb/s / 无共用设备）；
   `wip/mk_arm_cfg.sh <bigframe|sc8>` 生成臂配置（**恰好一行**、否则拒绝、打印 diff）。
 
-| 腿 | 命令要点 | 预登记 |
-|---|---|---|
-| **`p35-n78-pool32`** | 默认配置 | **V2 `starved_events=0` 且 `held_max<32`**、**V5 `gaps=0`**、`rx_overflows=0`、启动行 `size=32`、V1/V4 与 `p33` 同形 |
-| **`p36-n78-bigframe`** | `LEG_CONFIG=doc_chinese/work_tmp/arm_bigframe.yml` | 与 p35 成对：`recv` 的 `>1ms` 计数与 `slip` max 下降、`rx_overflows` 不增、`load1` 同量级 |
-| （可选）**`p37-n78-sc8`** | `LEG_CONFIG=doc_chinese/work_tmp/arm_sc8.yml` | **只判传输读数**（波形变了）；`recv` 尾巴显著变短 ⇒ 带宽是约束，否则是驱动/调度 |
+| 腿 | 结果 |
+|---|---|
+| **`p35-n78-pool32`** | ✅ **通过**：启动行 `size=32`；**V2 + V5 同时绿**（`starved_events=0`、`held_max=11<32`、`free_min=21`、`pop_blocking` 26 µs、`gaps=0`、契约 8/8）；V1 **1404.0 µs**；V4/D18 不变。⚠ 该腿传输**本来就温和**（`slip max` 6.2 ms）⇒ "池 32 是变绿的原因"仍靠 §6.53 的推理 + §6.55 ③ 的台架，不靠这一腿 |
+| **`p36-n78-bigframe`** | ❌ **臂致命**（**不是手机的问题**）：`recv_frame_size=16384`→UHD 夹到 16360 ⇒ **每块 overflow**（628/s）、`PRACH request late` 28,797、**PUSCH/PDSCH=0**（无 RAR ⇒ 接不上）。**已退役**（生成器拒绝）|
+| ~~`p37-n78-sc8`~~ | ⛔ **不再需要**：台架证明**带宽不是约束**（交付配置收发同时 100% 交付、0 错误）|
+
+**新增工具（§6.55 ③）**：`wip/uhd_rx_health.cpp` —— 直连 UHD 的**电台台架**，无手机/无 gNB，6–10 s 一点：
+`8192/8200` 健康、**`12288/16360` 崩（9.8%）**、**`num_recv_frames=512/1024` 健康**、
+**CPU 打满 ⇒ `recv` max 28 ms 而电台 0 错误**（⇒ 停顿在宿主调度、不在电台）。
+构建：`clang++ -std=c++17 -O2 -I /opt/homebrew/include doc_chinese/phy_latency/wip/uhd_rx_health.cpp -L /opt/homebrew/lib -luhd -Wl,-rpath,/opt/homebrew/lib -o /tmp/uhd_rx_health`
 
 ### 3.2 下一步：解开 `estimates` 断因，让 run 覆盖整跳
 
