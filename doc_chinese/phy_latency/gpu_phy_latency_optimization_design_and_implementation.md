@@ -1232,6 +1232,9 @@ PUCCH 资源管理测试里一句无副作用的 `set::count()`），以及 `std
 仍是 **0 differing** ⇒ SDK 变化没有改字节，§6.11/§6.13 的逐字节网仍然可比。
 ⚠ 另注：`ctest -j 6`（整套并行）会让两个 **CE Metal 单测**因 GPU 争用而红（`mmse_landmine.sh` 记录过的那类非确定性），
 **串行跑（`-L phy` / `-R port_channel_estimator_metal_mmse`）2/2 全绿**；我们的网一律按串行读数记。
+**2026-09-25（§6.24 那次）补充**：即使**串行** `ctest -L phy`，只要紧跟在别的 Metal 测试之后跑，
+`port_channel_estimator_metal_mmse_unit_test_ta_chain` 仍可能红一次；**隔几秒重跑即绿**（`--rerun-failed` 通过、随后整套 193/193）。
+⇒ 见到它先按"GPU 争用偶发"处理，但按 §4.4 的偶发规则**必须保留首次读数**，不许静默重试洗绿。
 
 ### 6.14 ✅ Q9-C 落地（2026-09-25，提交 `5f51b0e9fe`）：**车道 burst 等的是"本跳自己的"估计器 generation，不是全局最新**——跨车道栅栏夹死（cross-lane pinch）
 
