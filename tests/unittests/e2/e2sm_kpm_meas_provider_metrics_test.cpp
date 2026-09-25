@@ -4,6 +4,7 @@
 
 #include "lib/e2/e2sm/e2sm_kpm/e2sm_kpm_cu_meas_provider_impl.h"
 #include "lib/e2/e2sm/e2sm_kpm/e2sm_kpm_du_meas_provider_impl.h"
+#include "tests/ocudu_test_requirements.h"
 #include "tests/unittests/e2/common/e2_test_helpers.h"
 #include "ocudu/adt/format.h"
 #include "ocudu/ran/du_types.h"
@@ -640,6 +641,16 @@ protected:
 
 TEST_F(e2sm_kpm_cu_cp_meas_provider_metrics_test, e2sm_kpm_cu_cp_supported_metrics_are_present)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-E2-KPM-4.1",
+                          "CU-E2-KPM-4.2",
+                          "CU-E2-KPM-15.1",
+                          "CU-E2-KPM-15.2",
+                          "CU-E2-KPM-15.3",
+                          "CU-E2-KPM-16.1",
+                          "CU-E2-KPM-16.2",
+                          "CU-E2-KPM-17.1",
+                          "CU-E2-KPM-17.2");
+
   std::vector<std::string> expected_metrics = {"RRC.ConnEstabAtt",
                                                "RRC.ConnEstabSucc",
                                                "RRC.ConnEstabFailCause.NetworkReject",
@@ -683,6 +694,16 @@ TEST_F(e2sm_kpm_cu_cp_meas_provider_metrics_test, e2sm_kpm_cu_cp_returns_zero_wi
 
 TEST_F(e2sm_kpm_cu_cp_meas_provider_metrics_test, e2sm_kpm_cu_cp_returns_expected_rrc_metrics)
 {
+  OCUDU_TEST_REQUIREMENTS("CU-E2-KPM-4.1",
+                          "CU-E2-KPM-4.2",
+                          "CU-E2-KPM-15.1",
+                          "CU-E2-KPM-15.2",
+                          "CU-E2-KPM-15.3",
+                          "CU-E2-KPM-16.1",
+                          "CU-E2-KPM-16.2",
+                          "CU-E2-KPM-17.1",
+                          "CU-E2-KPM-17.2");
+
   cu_cp_metrics_report report;
   report.dus.resize(2);
 
