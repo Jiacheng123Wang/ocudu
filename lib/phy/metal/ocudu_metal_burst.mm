@@ -804,6 +804,27 @@ static void mark_handed_produced(id<MTLCommandBuffer> cb)
   std::lock_guard<std::mutex> lock(h.mutex);
   for (handed_entry& entry : h.entries) {
     if (entry.cb == cb) {
+      // Q9-E: how long after the GPU finished did THIS HANDLER get to run? The input tokens are released by a
+      // completion handler (arm_tokens_on_complete), and so is `produced` below, so a handler dispatched late
+      // holds the receive pool exactly as a buffer that RUNS late does - and P0-7 cannot tell the two apart,
+      // because it timestamps the handler, not the GPU. `GPUEndTime` is the GPU's own end of this buffer, on
+      // the same clock as steady_clock on Darwin (the lane probe differences the two for its queue series), so
+      // `now - GPUEndTime` is the time the host spent before it looked. On `p11/p12-conc2` every slow block's
+      // `commit->completion` was ~5.00 s while the lane buffers of the same slots took ~7 ms: a lag of ~5 s
+      // here means the GPU was DONE and the host was late (handler dispatch), not that the queue was blocked.
+      if (cb.GPUEndTime > 0.0) {
+        const double now_s =
+            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const double delay_us = (now_s - cb.GPUEndTime) * 1e6;
+        if (delay_us > 0.0) {
+          ++h.counters.handler_lag_count;
+          h.counters.handler_lag_sum_us += static_cast<uint64_t>(delay_us);
+          if (static_cast<uint64_t>(delay_us) > h.counters.handler_lag_max_us) {
+            h.counters.handler_lag_max_us   = static_cast<uint64_t>(delay_us);
+            h.counters.handler_lag_max_slot = entry.slot;
+          }
+        }
+      }
       entry.produced = true;
       // P0-7: deposit -> completion, the block's own end-to-end wait (its input tokens were held for this long
       // plus the slot's own time before the deposit).

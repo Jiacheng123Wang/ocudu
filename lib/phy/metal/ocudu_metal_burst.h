@@ -315,6 +315,18 @@ public:
     uint64_t commit_wait_max_us = 0;
     uint64_t commit_wait_sum_us = 0;
     ///@}
+    /// \name Q9-E: the time between the GPU finishing a block and its completion HANDLER running.
+    ///
+    /// The input tokens (and `produced`) are released by a completion handler, so a handler that is dispatched
+    /// late holds the receive pool exactly as a command buffer that runs late does - and `deposit->completion`
+    /// cannot tell the two apart. `GPUEndTime` can: it is the GPU's own end of the buffer, on the same clock as
+    /// the host's steady clock on Darwin. A `max` of seconds here means the GPU was done and the HOST was late.
+    ///@{
+    uint64_t handler_lag_count    = 0;
+    uint64_t handler_lag_max_us   = 0;
+    uint64_t handler_lag_sum_us   = 0;
+    uint64_t handler_lag_max_slot = 0;
+    ///@}
     /// Gauge: the most entries sitting NEITHER claimed NOR produced at once, and the oldest such entry seen.
     ///
     /// The one number that separates "the registry is busy" from "the registry is where the chain parks": a

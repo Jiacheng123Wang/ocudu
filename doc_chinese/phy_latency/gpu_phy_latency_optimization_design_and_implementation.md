@@ -1419,6 +1419,63 @@ bash doc_chinese/phy_latency/wip/p0_gate.sh p12-conc2                      # D1�
 **④ 顺带修掉的判据读数 bug**：`p0_gate.sh` 的 D6 detail 之前把 `commit->completion max` 与 **`wait max`（认领等待）**
 相比，读出来是荒谬的 "210%"；现在与 **`deposit->completion max`** 比（p11 上读作 **100%**：秒全在提交之后）✅。
 
+### 6.17 ⚠ 腿 `p12-conc2`（2026-09-25 11:07，带 Q9-D）：**栅栏被排除**——56054 次设备侧等待**全部**是安全形状；新增 **Q9-E 完成处理器滞后仪**
+
+> 配方与前几条完全相同，上行 `iperf3 -R -t 100`：~49 s 起断流、89 s 起部分恢复。判据 **D1/D3/D4 红**（**D2 这次是绿的**：21.1 ms）。
+
+**① 判决性负结果（Q9-D）**
+
+```
+[metal_stats] fence order (Q9-D): waits=56054 signaller-first=56054 signaller-after=0 max=0.0ms
+[metal_stats] lane fence … own=0 newest=0 cross_lane=0
+```
+
+* **56054 次等待，没有一次**等的 generation 尚未发出 ⇒ **三类设备侧栅栏都不是肇事者**（stage / corr / grid 都被排除）。
+  这正是 §6.16 ③ 表里的第一支；⇒ 问题不在"设备侧事件等待"，而在**队列里的命令缓冲本身**或**主机侧**。
+* `own=0` 再次确认 Q9-C 在默认 `merged` 路径上零执行。
+  ⚠ Q9-D 的**盲区**要写清楚：它比较的是"等待 vs generation **发出**"，而 grid 栅栏的 generation 是在**deposit 时**发出、
+  在**提交时**才生效的（等待者可能比"生产者的提交"更早进队列）——这一支由 §6.17 ③ 的 Q9-F（提交票号）覆盖。
+
+**② 这条腿的形状与 p11 逐项相同**
+
+| 读数 | p11 | p12 |
+|---|---|---|
+| 受害 slot | 1232–1239（连续 8 个 = 一个池）| **3362–3369**（同样连续 8 个）|
+| `commit->completion` max（注册表提交的块）| 5.000026 s | **4.999512 s** |
+| `deposit->completion` max | 5.002964 s | 5.002592 s |
+| 车道 cb 的 `commit -> completion` max | 7.4 ms | **7.5 ms** |
+| `pop_blocking` max / `over 1s` | 4.9946 s / 1 | 4.9942 s / 1 |
+| gap | 1 / 76,547,707 样点 | 1 / 76,538,695 样点 |
+| `[RF] late` / `PUSCH allocation skipped` | 7248 / 2292 | **7248** / 2208 |
+| `dry-pool reaps` | 500 ev / 3 blk | 501 ev / 3 blk |
+
+* 冻结的**起点**（主日志）：`03:09:10.650 [PHY] [W] [ul_rx_pool] the receive pool is EMPTY (held=8/8)` —— 池**先**被按满，
+  0.4 ms 后才有第一个 `RF: late`；也就是说**不是电台先出问题**，而是**8 个块的输入没回来**。
+* 两条腿的事件计数几乎逐位相同（`late=7248` 两次一模一样）⇒ **可复现的机制**，不是随机抖动。
+* 但受害者的**车道 cb 全部只有 7 ms** ⇒ 卡住的**不是**车道那条缓冲，而是**落单的前端（deposit）块**（8 个，正好一个池）。
+
+**③ 新增 Q9-E：完成处理器滞后（`handler lag=`，本次提交）**
+
+输入 token（以及 `produced`）都是在**完成处理器**里释放的 ⇒ **处理器被延迟派发 = 池被按住**，而 P0-7 的时间戳本来就在处理器里，
+所以它**分不清**"缓冲跑得慢"和"处理器来得晚"。Q9-E 用 `GPUEndTime`（GPU 自己的结束时刻，Darwin 上与 `steady_clock` 同一基准）
+算出 `now - GPUEndTime`：
+
+```
+… ; handler lag=<count> max=…us mean=…us at slot=… (Q9-E: GPU done -> handler ran)
+```
+
+离线基线（`dft_release_adopt_metal_test`，本机）：`handler lag=49 max=110.0us mean=65.9us` ⇒ 正常情况处理器在 GPU 结束后 **~66 µs** 就跑。
+
+**④ 下一条腿（同配方）的分支表——一条腿就能定性**
+
+| `handler lag` max | `commit->completion` | 结论 / 下一步 |
+|---|---|---|
+| **≈5 s** | ≈5 s | **GPU 早就跑完了，是主机侧处理器滞后** ⇒ 池是被"没人跑处理器"按住的。下一步：查处理器派发为何被饿（CPU/优先级/驱动线程），以及**让输入释放不依赖处理器派发**（例如在 deposit 路径上轮询 `cb.status`；这会碰到 §6.4.6 那次裁决，需要请你重新裁）|
+| **ms** | ≈5 s | 缓冲**自己**在等 ⇒ D9 已排除设备侧栅栏 ⇒ 只剩**队列次序**：装 **Q9-F 提交票号**（把每个 `[cb commit]` 编上序号，比较"等待者 vs signaller 的提交次序"），它会直接点名排在前面、堵住队列的那个缓冲 |
+| 两者都 ms | 都 ms | 这条腿没复现 ⇒ 继续复跑（单条腿不是证据，§5.2 纪律 2）|
+
+⇒ 因此**下一条腿（`p13-conc2`）同时带 Q9-D/Q9-E**：无论落在哪一支，都能把 5 秒钉到"主机处理器"或"队列次序"上。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

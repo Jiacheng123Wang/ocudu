@@ -34,6 +34,9 @@
 #       another lane's estimator generation under the old rule (dev doc 6.14)
 #   D9  (Q9-D, INFO) signaller-first / signaller-after and the longest such wait: whether a device-side fence
 #       wait named a signal that had not been handed out yet, i.e. which fence (if any) held a queue (6.16)
+#   D10 (Q9-E, INFO) the host's own lag between the GPU finishing a block and its completion handler running:
+#       the input tokens are released by that handler, so this is what separates "the queue held it" from
+#       "the host was late to look" (6.17)
 #       (D1-D4 are the criteria the Q9 fix is confirmed by; a leg flown BEFORE it reads them RED, which is the
 #        point - the same leg is what the fix is measured against)
 # "Cannot read" is RED, never absent - the lesson of 5.9.97.
@@ -324,6 +327,20 @@ if [ -z "${fo_after:-}" ]; then
 else
   check "[INFO] D9 (Q9-D) did a fence wait name a signaller that was not out yet" "reported, not judged" INFO \
         "signaller-first=$fo_before, signaller-after=$fo_after, longest such wait=${fo_maxms:-?}ms$([ "${fo_after:-0}" != "0" ] && printf '  <-- a fence wait named a signal that was not handed out yet: if this leg stalled, THAT is the fence to read' || printf '  (every wait named a signaller that was already out)' )  ||  $fence_line2"
+fi
+# D10 (Q9-E, dev doc 6.17): how long after the GPU FINISHED a block its completion handler ran. The input
+# tokens are released by that handler, so a handler dispatched late holds the pool exactly as a buffer that
+# runs late does - and `deposit->completion` cannot tell the two apart. A large value here says the GPU was
+# done and the HOST was late; a small one, next to a large `commit->completion`, says the buffer itself waited.
+lag_max=$(printf '%s' "$life_line" | grep -oE "handler lag=[0-9]+ max=[0-9.]+us" | grep -oE "max=[0-9.]+us" | grep -oE "[0-9.]+")
+lag_slot=$(printf '%s' "$life_line" | grep -oE "at slot=[0-9]+ \(Q9-E" | grep -oE "[0-9]+")
+if [ -z "${lag_max:-}" ]; then
+  check "[INFO] D10 (Q9-E) GPU finished -> the handler ran" "reported, not judged" INFO \
+        "no 'handler lag=' field: ${life_line:-<absent>} - a leg flown before 6.17 cannot say"
+else
+  lag_note=$(awk -v v="$lag_max" -v d="${life_prod_max:-0}" 'BEGIN{ if (d+0 > 0 && v+0 >= 0.5*d) printf "  <-- the seconds were the HOST side after the GPU was done, not a queue wait"; else printf "  (the host was prompt: a late completion is the buffer own)" }')
+  check "[INFO] D10 (Q9-E) GPU finished -> the handler ran" "reported, not judged" INFO \
+        "max handler lag = $(awk -v v="$lag_max" 'BEGIN{printf "%.1f", v/1000}') ms at slot=${lag_slot:-?}$lag_note  ||  $life_line"
 fi
 reaps_events=$(printf '%s' "$life_line" | grep -oE "dry-pool reaps=[0-9]+" | grep -oE "[0-9]+$")
 reaps_blocks=$(printf '%s' "$life_line" | grep -oE "recovering [0-9]+ block" | grep -oE "[0-9]+")

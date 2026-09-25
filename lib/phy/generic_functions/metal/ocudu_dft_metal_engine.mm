@@ -441,7 +441,8 @@ static void dft_stats_report()
                    "[metal_stats] block lifecycle (P0-7): claimed=%llu wait max=%.1fus mean=%.1fus; produced=%llu "
                    "deposit->completion max=%.1fus mean=%.1fus; unclaimed at once max=%llu, oldest unclaimed "
                    "age max=%.1fus at slot=%llu; registry commit->completion=%llu max=%.1fus mean=%.1fus "
-                   "(Q9-B); dry-pool reaps=%llu recovering %llu block(s)\n",
+                   "(Q9-B); dry-pool reaps=%llu recovering %llu block(s); handler lag=%llu max=%.1fus mean=%.1fus "
+                   "at slot=%llu (Q9-E: GPU done -> handler ran)\n",
                    static_cast<unsigned long long>(hand.claim_count),
                    static_cast<double>(hand.claim_wait_max_us),
                    static_cast<double>(hand.claim_wait_sum_us) / claimed_n,
@@ -460,7 +461,14 @@ static void dft_stats_report()
                    // Q9-A: how often a DRY receive pool drove the sweep itself, and how many unclaimed
                    // blocks that recovered. Events without blocks = the stall was not an unclaimed block.
                    static_cast<unsigned long long>(hand.reaped_by_park_events),
-                   static_cast<unsigned long long>(hand.reaped_by_park_blocks));
+                   static_cast<unsigned long long>(hand.reaped_by_park_blocks),
+                   // Q9-E: the host's own lag after the GPU finished. Read against `deposit->completion`: equal
+                   // maxima mean the seconds were the HOST's, not the queue's.
+                   static_cast<unsigned long long>(hand.handler_lag_count),
+                   static_cast<double>(hand.handler_lag_max_us),
+                   static_cast<double>(hand.handler_lag_sum_us) /
+                       static_cast<double>(std::max<uint64_t>(1, hand.handler_lag_count)),
+                   static_cast<unsigned long long>(hand.handler_lag_max_slot));
       bool printed_header = false;
       for (const auto& slow : hand.slowest) {
         if (slow.used == 0) {
