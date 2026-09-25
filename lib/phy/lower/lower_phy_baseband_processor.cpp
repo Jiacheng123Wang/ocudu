@@ -24,11 +24,152 @@
 #include <ctime>
 #include <limits>
 #include <mutex>
+#include <numeric>
 #include <vector>
 
 using namespace ocudu;
 
 namespace {
+
+/// \brief dev doc 6.41 (V3's S2 step): HOW MUCH TIME THE TRANSMIT HAND-OVER HAD LEFT, in host microseconds.
+///
+/// WHY IT EXISTS. V3's criterion ("RF real-time failures <= 10") is the only one still red, and its 700-1500
+/// events per leg are UHD's TX-side real-time failures (`Real-time failure in RF: underflow` / `late`). They
+/// scale with load and have nothing to do with the uplink's receive pool (`gaps = 0`, `pop_blocking` max 23 us,
+/// `starved_events = 0` on the same leg, dev doc 6.40). The uplink side has a whole family of probes for its own
+/// lateness; the transmit side had NONE, so any change there could only be judged by "the failure count fell" -
+/// and that count moves 700-1500 across identical recipes.
+///
+/// WHAT IT MEASURES, AND WHY IT TAKES TWO CLOCKS. dl_process() hands the radio one slot's samples with
+/// `metadata.ts = timestamp + tx_time_offset`, and an `underflow` means the host did that too late in HOST time.
+/// Radio time alone cannot say that: `(due_ts - last_rx_ts)` is a radio interval, but "how long do I still
+/// have" is a host interval. The probe therefore keeps the map between the two clocks from the receive path -
+/// the newest (radio timestamp, host instant) pair `receiver.receive()` produced - and measures
+///
+///     margin_us = (due_ts - last_rx_ts) / rate  -  (host_now - last_rx_host)
+///
+/// i.e. the radio time still left before those samples must be on the air, converted to host microseconds, with
+/// the radio's own receive buffering removed (both terms contain it, so it cancels). `margin <= 0` means the
+/// hand-over happened AT OR AFTER the deadline: the host-side shape of an `underflow`.
+///
+/// \note The distribution is the point, not the minimum: "the transmit path lives 200 us from the deadline all
+///       the time" and "it is usually 2 ms ahead and occasionally 3 ms late" are different defects, and only the
+///       percentiles tell them apart.
+///
+/// \note WHAT A UNIT FIXTURE READS IS NOT A READING OF THIS QUANTITY. In `lower_phy_test` the "radio" is a mock
+///       whose receive timestamps and whose host pacing have no fixed relation (there is no sample clock to be
+///       late against), so its margins come out negative in bulk - measured: mean -1173 us, 651 of 999 at or
+///       below 0. The probe is there to be read ON AIR, against the same leg's `Real-time failure in RF` count.
+struct tx_slack_accounting {
+  std::atomic<uint64_t> transmissions{0};
+  /// Hand-overs whose remaining margin was below these thresholds (the tail at a glance).
+  std::atomic<uint64_t> below_2ms{0};
+  std::atomic<uint64_t> below_1ms{0};
+  std::atomic<uint64_t> below_500us{0};
+  /// Hand-overs made AT OR AFTER their deadline. This is the number an `underflow` should correspond to: a leg
+  /// with `AT/BELOW 0 = 0` here and UHD failures in its log says the lateness is INSIDE the radio or its
+  /// driver, not in this hand-over.
+  std::atomic<uint64_t> late{0};
+  std::atomic<int64_t>  min_us{std::numeric_limits<int64_t>::max()};
+  /// The transmit timestamp the smallest margin belonged to (the metadata carries no slot index).
+  std::atomic<uint64_t> min_due_ts{0};
+  /// \name The clock map: the newest (radio timestamp, host instant) pair the receive path delivered.
+  /// Written by the receive thread once per receive, read by the transmit thread once per transmit.
+  ///@{
+  std::atomic<uint64_t> rx_ts{0};
+  std::atomic<int64_t>  rx_host_ns{0};
+  std::atomic<bool>     rx_valid{false};
+  ///@}
+  /// The samples of the distribution (capped: 2 M slots is ~17 minutes at 30 kHz, far beyond any leg).
+  std::mutex         mutex;
+  std::vector<float> us;
+  static constexpr size_t max_samples = 2u * 1000u * 1000u;
+};
+
+tx_slack_accounting& tx_slack_accounts()
+{
+  // NEVER DESTROYED ON PURPOSE, for the reason rx_pool_accounts() spells out: the report is an atexit handler.
+  static tx_slack_accounting* a = new tx_slack_accounting();
+  return *a;
+}
+
+/// Records the clock map from the receive path (see tx_slack_accounting). Called after receiver.receive().
+void tx_slack_note_receive(uint64_t radio_ts, int64_t host_ns)
+{
+  tx_slack_accounting& a = tx_slack_accounts();
+  a.rx_host_ns.store(host_ns, std::memory_order_relaxed);
+  a.rx_ts.store(radio_ts, std::memory_order_relaxed);
+  a.rx_valid.store(true, std::memory_order_release);
+}
+
+/// Records one transmit hand-over (dev doc 6.41). Called from dl_process() on the TX executor.
+void tx_slack_note_transmit(int64_t margin_us, uint64_t due_ts)
+{
+  tx_slack_accounting& a = tx_slack_accounts();
+  a.transmissions.fetch_add(1, std::memory_order_relaxed);
+  if (margin_us < 2000) {
+    a.below_2ms.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (margin_us < 1000) {
+    a.below_1ms.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (margin_us < 500) {
+    a.below_500us.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (margin_us <= 0) {
+    a.late.fetch_add(1, std::memory_order_relaxed);
+  }
+  int64_t prev = a.min_us.load(std::memory_order_relaxed);
+  while ((margin_us < prev) && !a.min_us.compare_exchange_weak(prev, margin_us, std::memory_order_relaxed)) {
+  }
+  if (margin_us == a.min_us.load(std::memory_order_relaxed)) {
+    a.min_due_ts.store(due_ts, std::memory_order_relaxed);
+  }
+  std::lock_guard<std::mutex> lock(a.mutex);
+  if (a.us.size() < tx_slack_accounting::max_samples) {
+    a.us.push_back(static_cast<float>(margin_us));
+  }
+}
+
+/// The report: printed at exit and on demand with the other P0 readings (see register_p0_report).
+void tx_slack_report()
+{
+  tx_slack_accounting& a = tx_slack_accounts();
+  const uint64_t       n = a.transmissions.load(std::memory_order_relaxed);
+  if (n == 0) {
+    return; // a run that never transmitted (the unit fixtures) stays silent
+  }
+  std::vector<float> us;
+  {
+    std::lock_guard<std::mutex> lock(a.mutex);
+    us = a.us;
+  }
+  std::sort(us.begin(), us.end());
+  const auto pct = [&us](double p) { return us.empty() ? 0.0F : us[static_cast<size_t>((us.size() - 1) * p)]; };
+  const double mean =
+      us.empty() ? 0.0 : std::accumulate(us.begin(), us.end(), 0.0) / static_cast<double>(us.size());
+  std::fprintf(stderr,
+               "[dl_tx_slack] transmissions=%llu mean=%.1fus median=%.1fus p1=%.1fus p5=%.1fus p25=%.1fus "
+               "min=%lldus (due_ts=%llu); below 2ms=%llu, below 1ms=%llu, below 500us=%llu, AT/BELOW 0=%llu\n",
+               static_cast<unsigned long long>(n),
+               mean,
+               static_cast<double>(pct(0.5)),
+               static_cast<double>(pct(0.01)),
+               static_cast<double>(pct(0.05)),
+               static_cast<double>(pct(0.25)),
+               static_cast<long long>(a.min_us.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(a.min_due_ts.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(a.below_2ms.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(a.below_1ms.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(a.below_500us.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(a.late.load(std::memory_order_relaxed)));
+}
+
+const bool tx_slack_report_registered = []() {
+  std::atexit(tx_slack_report);
+  register_p0_report(tx_slack_report); // dev doc 6.24: joins the on-demand stall dump
+  return true;
+}();
 
 /// Receive-buffer accounting (see lower_phy_baseband_processor::rx_pool_note_taken).
 ///
@@ -514,6 +655,22 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
 #endif
   trace_point tx_tp          = ru_tracer.now();
 
+  // dev doc 6.41 (V3's S2): the host's remaining margin at the transmit hand-over, in the radio's own time
+  // base - the radio time still left before these samples must be on the air (see tx_slack_accounting). It is
+  // measured HERE, after the throttling wait and immediately before the hand-over, because that is the instant
+  // whose lateness UHD reports as `underflow`.
+  if (tx_slack_accounts().rx_valid.load(std::memory_order_acquire)) {
+    const tx_slack_accounting& a          = tx_slack_accounts();
+    const auto                 host_now   = std::chrono::steady_clock::now();
+    const int64_t              radio_us   = static_cast<int64_t>(
+        (static_cast<double>(result.metadata.ts) - static_cast<double>(a.rx_ts.load(std::memory_order_relaxed))) * 1e6 /
+        srate.to_Hz<double>());
+    const int64_t host_elapsed_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(host_now.time_since_epoch()).count() -
+        a.rx_host_ns.load(std::memory_order_relaxed) / 1000;
+    tx_slack_note_transmit(radio_us - host_elapsed_us, static_cast<uint64_t>(result.metadata.ts));
+  }
+
   // Transmit buffer.
   transmitter.transmit(result.buffer->get_reader(), result.metadata);
 
@@ -871,6 +1028,12 @@ void lower_phy_baseband_processor::ul_process()
   const auto t_recv_begin = std::chrono::steady_clock::now();
 #endif
   baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_writer);
+  // dev doc 6.41: the clock map the transmit-side margin needs - the radio timestamp just delivered and the
+  // host instant it was delivered at. One relaxed store each per receive, on the receive thread.
+  tx_slack_note_receive(static_cast<uint64_t>(rx_metadata.ts),
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count());
 #if defined(OCUDU_FLOW_PROBES)
   // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES), plus the [ul_rx_wait] series.
   //

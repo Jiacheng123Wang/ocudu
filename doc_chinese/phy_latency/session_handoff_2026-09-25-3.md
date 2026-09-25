@@ -418,3 +418,19 @@ bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 p22-n78-conc2  #
   最小可用版 = "每次把 DL 样点递给电台时相对时隙截止的余量/迟到量"分布（与 P0-2 同形）。
   然后 **S3 做臂**：同日并发 1 vs 2；纯 UL 负载（去掉下行热身）分离 DL 竞争。
   ⚠ 没有 S2 之前，任何 V3 改动都只能用"失败数变少"来判断，而那个数随链路运气在 700–1500 波动。
+
+---
+
+## 16. 追加更正 #10：V3 的 S2 落地（§6.41）—— TX 侧探针 `[dl_tx_slack]` + 门 **D17**，待飞 `p28`
+
+* **量什么**：`dl_process()` 递交样点那一刻，"**用宿主微秒表示的、距截止还剩多少**"：
+  `margin_us = (due_ts − last_rx_ts)/rate − (host_now − last_rx_host)`（两个时钟的映射来自接收路径，
+  电台自身的收包缓冲延迟被两项相减消掉）。`margin ≤ 0` = **underflow 的宿主侧形状**。
+* **读数**：`[dl_tx_slack] transmissions=N mean=… median=… p1=… p5=… p25=… min=…us (due_ts=…); below 2ms=…, below 1ms=…, below 500us=…, AT/BELOW 0=…`
+  （atexit + 按需 dump）。⚠ **单元夹具里读到的不是这个量**（mock 电台没有采样时钟可晚，成片负值是夹具产物）。
+* **门 D17（INFO）**：把该行与同一条腿的 `Real-time failure in RF` 计数并排读；自测双向已绿；`p27` 现在 **27/27**（D17 读 "cannot say"）。
+* **待飞 `p28`（配方同 p27）预登记——两种结果都是结论**：
+  **A** `AT/BELOW 0 > 0` 且与 RF 失败同窗 ⇒ **宿主在满负载时把 DL 交晚了**（下一步定位线程/相关性，再做并发/负载臂）；
+  **B** `AT/BELOW 0 = 0` 而 RF 失败照旧 ⇒ **迟到在电台或驱动内部**（本机 B200 走 **USB 3**，抖动一号嫌疑），
+  V3 就不是宿主调度问题。**V1/V2/契约/`cbs/lane`/gaps 应全部不变。**
+* 网：`ctest -L phy` 193/193、`lower_phy_test` ✓、metal arms 10–17 ✓、`l1_handover_arms.sh` 5 PASS、门自测 PASS。

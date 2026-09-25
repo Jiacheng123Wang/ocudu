@@ -455,6 +455,34 @@ else
   check "[INFO] D16 (6.30) did the front end batch a slot's transforms into one dispatch" "reported, not judged" INFO \
         "${batch_pair} batch_max=${batch_max} ${batch_src:-} slot_symbols=${slot_syms:-?}: the front end DID defer  <-- compare V1 and the [ul_gpu_lane] front-end window against the control legs; ${batch_pair} is dispatches/transforms"
 fi
+# D17 (dev doc 6.41, INFO): the TRANSMIT side's margin at the hand-over, next to the leg's RF failure count.
+# V3's events are UHD's TX-side real-time failures (6.40), and until this probe the transmit path had no reading
+# at all. `AT/BELOW 0` is the host-side shape of an underflow: a leg with many of those and RF failures says the
+# hand-over is the cause, while a leg with none of those AND RF failures says the lateness is inside the radio
+# or its driver. A leg flown before 6.41 has no line and says so rather than reading as zero.
+tx_slack_line=$(grep -a "\[dl_tx_slack\] transmissions=" "$LEGF" | tail -1)
+tx_late=$(printf '%s' "$tx_slack_line" | grep -oE "AT/BELOW 0=[0-9]+" | grep -oE "[0-9]+$")
+tx_n=$(printf '%s' "$tx_slack_line" | grep -oE "transmissions=[0-9]+" | grep -oE "[0-9]+$")
+tx_min=$(printf '%s' "$tx_slack_line" | grep -oE "min=-?[0-9]+us" | grep -oE "[-0-9]+" | head -1)
+# The RF failure count comes from the leg's merged log (the [RF] lines are UHD's, and only the merged log
+# carries them): the same file wip/leg_gate.sh counts, resolved here so this check stands alone.
+LEGL=$(ls -1t "${LEGF%.stderr}" 2>/dev/null | head -1)
+rf_fail=$(grep -ac "Real-time failure in RF" "$LEGL" 2>/dev/null || echo 0)
+# A leg with no merged log (a fixture, or a run whose stdout was not kept) still gets the reading, just without
+# the RF count next to it - "cannot read" stays honest instead of turning into a zero.
+if [ -z "${LEGL:-}" ]; then
+  rf_fail="?"
+fi
+if [ -z "${tx_slack_line:-}" ]; then
+  check "[INFO] D17 (6.41) did the transmit hand-over have time left" "reported, not judged" INFO \
+        "no '[dl_tx_slack]' line: a leg flown before 6.41 cannot say (the RF failures it does report are UHD's TX-side ones, see 6.40)"
+elif [ "${tx_late:-0}" = "0" ]; then
+  check "[INFO] D17 (6.41) did the transmit hand-over have time left" "reported, not judged" INFO \
+        "transmissions=${tx_n:-?} min=${tx_min:-?}us AT/BELOW 0=0 against ${rf_fail} RF failure(s) in the .log - the hand-over never ran out of time, so those failures are NOT this: look inside the radio/driver, or at the DL load that feeds it"
+else
+  check "[INFO] D17 (6.41) did the transmit hand-over have time left" "reported, not judged" INFO \
+        "transmissions=${tx_n:-?} min=${tx_min:-?}us AT/BELOW 0=${tx_late} against ${rf_fail} RF failure(s) in the .log  <-- the host-side shape of an underflow; read the distribution in the line above it"
+fi
 occ_line=$(grep -a "queue occupancy (Q9-F3): commits=" "$LEGF" | tail -1)
 occ_hole=$(grep -a "hole .*-> next label" "$LEGF" | head -1)
 fe_line=$(grep -a "dft carried blocks (Q9-F2)" "$LEGF" | tail -1)

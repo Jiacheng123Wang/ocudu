@@ -51,6 +51,7 @@ cat >> "$FIXTURE" <<'EOF'
 [ul_gpu_lane] dft carried deposit ->GPU start samples=48123 mean=2211.0us median=1105.0us min=498.1us max=5004688.5us p95=3562.0us p99=8021.0us
 [metal_stats] dft handover handed=48123 taken=27887 superseded=0 evicted=47867 evicted_unproduced=0 over_bound=0 unproduced=0 fallback=18331 late=1905 late_time=12 not_found=1891 timeouts=0 keepalives=673722/673722 (max in flight 112) (armed=1) tokens_early=signals:0,by_event:0,by_complete:48123 handshake=waits:7,timeouts:0,max:412us
 [metal_stats] dft commits=48123 transforms=673722 waits=143878 slots_in_flight=14 radio_inputs=673722 wrap_copies=0 released=48123 released_waits=0 batched=4812/67368 batch_max=14 batch_src=auto slot_symbols=14
+[dl_tx_slack] transmissions=144657 mean=1850.4us median=1900.0us p1=310.0us p5=420.0us p25=1500.0us min=208us (due_ts=99887766); below 2ms=52000, below 1ms=1200, below 500us=40, AT/BELOW 0=0
 EOF
 
 OUT=$(bash "$GATE" "$FIXTURE" 2>&1)
@@ -79,6 +80,7 @@ expect "D15 reads the drop counter when absent" "a leg flown before 6.26 cannot 
 expect "D13 states what a wait would have cost" "the Q9-G window IS reached on air"
 expect "D16 reads the batched pair"          "batched=4812/67368 batch_max=14 batch_src=auto slot_symbols=14"
 expect "D16 states the branch verdict"       "the front end DID defer"
+expect "D17 reads the transmit margin"     "AT/BELOW 0=0"
 
 # The reverse direction: a leg WITHOUT the new lines must say so instead of printing a number (rule 4.3 (3)).
 # (The gate NAMES the line it looked for in that message, so the check is on the verdict, not on the token.)
@@ -92,7 +94,8 @@ if printf '%s' "$D11_OLD" | grep -qF "cannot say" && ! printf '%s' "$D11_OLD" | 
    printf '%s\n' "$OUT_OLD" | grep -A3 "D13 " | grep -qF "cannot say" &&
    printf '%s\n' "$OUT_OLD" | grep -A3 "D14 " | grep -qF "no 'p0 dump' line" &&
    printf '%s\n' "$OUT_OLD" | grep -A3 "D15 " | grep -qF "cannot say" &&
-   printf '%s\n' "$OUT_OLD" | grep -A3 "D16 " | grep -qF "a leg flown before 6.30 cannot say"; then
+   printf '%s\n' "$OUT_OLD" | grep -A3 "D16 " | grep -qF "a leg flown before 6.30 cannot say" &&
+   printf '%s\n' "$OUT_OLD" | grep -A3 "D17 " | grep -qF "a leg flown before 6.41 cannot say"; then
   echo "PASS: a leg without the 6.19 lines reads as 'cannot say' rather than as a number ($(basename "$OLD_LEG"))"
 else
   echo "FAIL: a leg without the 6.19 lines did not read as 'cannot say' ($(basename "$OLD_LEG")):"

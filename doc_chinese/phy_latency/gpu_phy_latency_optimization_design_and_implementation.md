@@ -3085,6 +3085,63 @@ OCUDU_UL_RX_POOL_SIZE=<n>    # 只允许【大于】公式算出的值（更小�
 
 
 
+### 6.41 ★ **V3 的 S2 落地（用户裁决）**：TX 侧的第一个读数——`[dl_tx_slack]`，"递交时距截止还剩多少**宿主**时间"的分布；门加 **D17（INFO）**
+
+> §6.40 的结论：V3 的 700–1500 次失败是 UHD 的 **TX 侧**实时失败、随负载出现，而 TX 侧**一个读数都没有**。
+> 用户裁决：**先补仪器（S2）**。这一节就是它。
+
+#### ① 量什么，以及为什么必须用**两个时钟**
+
+`dl_process()` 在把一整槽样点交给电台之前，手里有三个量：本槽的无线时间 `timestamp`、DL 提前量 `tx_time_offset`
+（`metadata.ts = timestamp + tx_time_offset` 就是"这些样点必须在电台时间轴上出现的时刻"），以及接收侧最新的 `last_rx_timestamp`。
+
+只用无线时间**不够**：`(due_ts − last_rx_ts)` 是"还剩多少**无线**时间"，而 `underflow` 的定义是"宿主交得太晚"——
+**宿主**才是我要量的那一维。所以探针从接收路径保留**两个时钟的映射**（`receiver.receive()` 返回时的
+`(无线时间戳, 宿主时刻)` 对），在递交那一刻算：
+
+```
+margin_us = (due_ts − last_rx_ts) / rate  −  (host_now − last_rx_host)
+```
+
+即"**用宿主微秒表示的、距离截止还剩多少**"，并且把电台自身的收包缓冲延迟**消掉**（两项都含它）。
+`margin ≤ 0` = 递交发生在截止之后 ⇒ **underflow 的宿主侧形状**。
+
+* 读数（atexit + 按需 dump 一起打印）：
+  `[dl_tx_slack] transmissions=N mean=… median=… p1=… p5=… p25=… min=…us (due_ts=…); below 2ms=…, below 1ms=…, below 500us=…, AT/BELOW 0=…`
+* **分布才是重点**："一直贴着截止线 200 µs"和"通常提前 2 ms、偶尔晚 3 ms"是两种不同缺陷，只有分位数能分开。
+* ⚠ **单元夹具里读到的不是这个量**：`lower_phy_test` 的"电台"是 mock，收包时间戳与宿主节奏没有固定关系（没有采样时钟可晚），
+  所以它成片读出负值（实测 mean −1173 µs、651/999 ≤ 0）。**这条探针是给空口腿读的**，要和同一条腿的 `Real-time failure in RF` 计数一起看。
+
+#### ② 门：**D17（INFO）**
+
+```
+[INFO] D17 (6.41) did the transmit hand-over have time left
+   read: transmissions=… min=…us AT/BELOW 0=0 against <N> RF failure(s) in the .log - the hand-over never ran out
+         of time, so those failures are NOT this: look inside the radio/driver, or at the DL load that feeds it
+   read: transmissions=… min=…us AT/BELOW 0=<k> against <N> RF failure(s)  <-- the host-side shape of an underflow
+```
+自测：`p0_gate_selftest.sh` 增加"读到该行"与"6.41 之前的腿读成 cannot say"两个方向（已绿）。
+门对既有腿：`p27` 现在 **27/27**（D17 读成 "a leg flown before 6.41 cannot say"）。
+
+#### ③ 网
+
+`ctest -L phy` **193/193**、`lower_phy_test` ✓、metal arms 10–17 ✓、`l1_handover_arms.sh` **5 PASS**、门自测 **PASS**。
+
+#### ④ 验证腿的预登记（`p28`，配方同 p27）——**两种结果都是结论**
+
+| 读数 | 期望 A（宿主侧成因）| 期望 B（电台/驱动侧成因）|
+|---|---|---|
+| `[dl_tx_slack]` 分布 | 中位正常（~1–3 ms），**尾部越过 0** | 中位正常，**`min > 0`**（从不越过 0）|
+| `AT/BELOW 0` | **> 0**，且与 RF 失败**同量级/同窗口** | **0** |
+| RF 失败 | 700–1500（同 cohort）| 700–1500 |
+| 结论 | **宿主在满负载时把 DL 交晚了** ⇒ 下一步：定位是哪个线程/哪段工作（与 UL 车道负载的相关性）⇒ 再做臂（并发 1 vs 2、纯 UL 负载、线程优先级/亲和性）| **不是这里**：迟到发生在电台或其驱动内部（本机 B200 是 **USB 3** 传输，抖动是一号嫌疑）⇒ 下一步查 USB/时钟/缓冲，而不是宿主调度 |
+
+另外记两条要一起看的：`min` 若长期 < 500 µs ⇒ "一直贴着截止线"（负载能力不足的形态）；
+`below 1ms` / `below 500us` 的比例给出**危险窗口**占多少。
+**V1/V2/契约/`cbs/lane`/gaps 应全部不变**（探针只读不写；一次 `steady_clock::now()` + 一次原子读/槽）。
+
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
