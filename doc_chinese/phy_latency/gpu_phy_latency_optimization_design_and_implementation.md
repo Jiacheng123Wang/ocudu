@@ -3474,6 +3474,56 @@ V4 约束的是 `cbs/lane`（**命令缓冲**数/跳），把一跳内的 12 次
 
 
 
+### 6.47 **①后半的施工方案（已查清、待施工）**：把 `y_gather` 去掉 —— **优先"把网格直接绑成 y"（只动引擎，不改 kernel）**
+
+> 本节是一次**交接性的方案记录**：代码已经查清到"改哪里、判据是什么"，但没有动手（当时会话上下文已近耗尽，
+> 而这是一处要动 kernel/绑定与不变量网的改动，硬塞在最后会违反"先证后改"的纪律）。
+
+#### ① 已经查清的事实
+
+* **`y_gather` 是"纯拷贝"**（其自身注释：*"The device work is a plain copy, and it is encoded in the same command
+  buffer right before the equalization that consumes it"*）：它用 `taps/entries` 表把设备网格里的接收符号**搬到**
+  均衡 kernel 期望的连续布局（`[symbol][port][re]`），**没有算术**，元素类型两侧都是 `cbf16_t`。
+* **均衡派发（`eq_encode_batch_dispatch`）读 y 的方式**：`setBuffer:b_y.buffer offset:b_y.offset atIndex:1` +
+  `strides.y_stride`（每符号步长）⇒ 它**只认一个缓冲区 + 偏移 + 步长**，不关心那个缓冲区是谁。
+* 每次 run 的顺序是：`ch_gather`（建表，已在 §6.45 变成一跳一次）→ **`y_gather`（搬 y）** → `y_batch`（均衡）。
+  空中实测（`p31`）：`sites(ch_gather=1.0 y_gather=3.0 y_batch=3.0)`/跳，均衡派发 **7.0/跳**。
+
+#### ② 两个施工变体（按优先级）
+
+**变体 A（首选，只动引擎、不改 kernel、不改 metallib）**：
+当**这一 run 的 y 在网格里本来就是连续可描述**时（判据候选：`nof_ports == 1`、`subc_stride == 1`、
+且 `y_stride` 与网格的 `symb_stride` 一致），**跳过 `y_gather`**，直接把**网格缓冲**绑成 `b_y`：
+`b_y = b_grid`（偏移 = 该 run 第一个符号在网格里的字节偏移），`strides.y_stride = grid.symb_stride`。
+* **逐字节相同**：读的是同一批 `cbf16_t` 元素、没有转换、没有算术 ⇒ 结果与"搬过去再读"完全一致。
+* 条件不满足时**退回原路径**（照旧发 `y_gather`），所以是"能省则省"，不是"改变语义"。
+* 建议加旋钮（如 `OCUDU_EQ_DIRECT_GRID=1`，默认开）以便 A/B 与反例判读。
+
+**变体 B（后备，要动 kernel）**：给均衡 kernel 加"**读时 gather**"模式（绑定 `taps/entries` + `b_grid`，
+按表寻址 y），适用于多端口等布局不一致的情况。代价是均衡 kernel 内循环多一次表查找，收益同样是省掉一次派发与一次往返。
+
+#### ③ 预登记（施工后飞腿）
+
+| 读数 | 期望 |
+|---|---|
+| `sites(y_gather=)` | **3.0 → 0**（变体 A 命中时）|
+| `burst dispatches`/跳 | **10 → 7**（均衡 7 → 4：1 建表 + 3 均衡）|
+| `merged_hop` / **V1** | 各 **≈ −36 µs**（按 §6.46 校准的 12 µs/派发）|
+| 契约 / `cbs/lane` / gaps / D16 | 8/8 / 2.00 / 0 / `batch_max=14 batch_src=auto` |
+| **不变量** | `channel_equalizer_metal_unit_test`、`ul_chain_replay`（逐字节/容差）、`value_net`、`l1_handover_arms.sh` **全部先绿** |
+| 反例判读 | 若 `sites(y_gather)` 仍 3.0 ⇒ 变体 A 的条件没命中（回退路径被走），先读 `nof_ports`/strides 再谈收益 |
+
+#### ④ 施工第一步（机械动作，给下一次会话）
+
+1. 找到 `ch_gather_desc` 的定义（`ocudu_equalizer_metal_engine` 相关的 metal 头），确认 `nof_ports`/`grid.subc_stride`/
+   `grid.symb_stride` 三个字段与"这一 run 在网格里连续"的判据；
+2. 在 `eq_flush_hook` 里那一处 `if (gather_run && !eq_gather_tables(...))` 与 `y_gather` 调用点之间加判据分支
+   （命中 ⇒ 不发 `y_gather`，把 `b_y` 指向网格、改 `strides.y_stride`）；
+3. 跑 §6.47 ③ 的不变量网（离线）＋ 门自测；**重建戳与 gnb 两者**（§6.44 ⑥ 的教训）；
+4. 交给用户飞一条腿（标签建议 `p32-n78-directgrid`），按 ③ 判读。
+
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
