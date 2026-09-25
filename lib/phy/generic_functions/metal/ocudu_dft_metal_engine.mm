@@ -423,6 +423,50 @@ static void dft_stats_report()
                      (over_1s != 0) ? " - tokens held for SECONDS: that is the stall, not the hop's span" : "");
       }
     }
+    // ---- P0-7: the block's OWN timeline (deposit -> claim -> completion) --------------------------------
+    //
+    // P0-2's `input hold` says how long an input was kept out of the pool; this says WHO kept it: a deposit
+    // that no hop claims has only two ways out (the sweep commits it once the chain has moved on, or the
+    // eviction loop drops it - and only PRODUCED entries are ever evicted), and until then its transforms'
+    // tokens are held. So "the oldest unclaimed block reached N seconds" is the reading that decides whether
+    // the hand-over itself is where the uplink parks (measured on `q9-conc2`: holds up to 61.4 s).
+    if (hand.handed != 0) {
+      const double claimed_n = static_cast<double>(std::max<uint64_t>(1, hand.claim_count));
+      const double produced_n = static_cast<double>(std::max<uint64_t>(1, hand.produced_count));
+      std::fprintf(stderr,
+                   "[metal_stats] block lifecycle (P0-7): claimed=%llu wait max=%.1fus mean=%.1fus; produced=%llu "
+                   "deposit->completion max=%.1fus mean=%.1fus; unclaimed at once max=%llu, oldest unclaimed "
+                   "age max=%.1fus at slot=%llu\n",
+                   static_cast<unsigned long long>(hand.claim_count),
+                   static_cast<double>(hand.claim_wait_max_us),
+                   static_cast<double>(hand.claim_wait_sum_us) / claimed_n,
+                   static_cast<unsigned long long>(hand.produced_count),
+                   static_cast<double>(hand.produced_wait_max_us),
+                   static_cast<double>(hand.produced_wait_sum_us) / produced_n,
+                   static_cast<unsigned long long>(hand.unclaimed_now_max),
+                   static_cast<double>(hand.unclaimed_age_max_us),
+                   static_cast<unsigned long long>(hand.unclaimed_age_max_slot));
+      bool printed_header = false;
+      for (const auto& slow : hand.slowest) {
+        if (slow.used == 0) {
+          continue;
+        }
+        if (!printed_header) {
+          std::fprintf(stderr,
+                       "[metal_stats] block lifecycle (P0-7) slowest deposit->completion "
+                       "(claimed=by a hop, swept=by the registry's sweep):\n");
+          printed_header = true;
+        }
+        std::fprintf(stderr,
+                     "[metal_stats]   slot=%llu claimed=%d swept=%d wait_for_a_claim=%.1fus "
+                     "deposit->completion=%.1fus\n",
+                     static_cast<unsigned long long>(slow.slot),
+                     static_cast<int>(slow.claimed),
+                     static_cast<int>(slow.swept),
+                     static_cast<double>(slow.claim_wait_us),
+                     static_cast<double>(slow.produced_wait_us));
+      }
+    }
     const uint64_t early_signals = s.token_early_signals.load(std::memory_order_relaxed);
     const uint64_t by_event      = s.token_sets_by_event.load(std::memory_order_relaxed);
     if ((early_signals != 0) && (by_event == 0)) {

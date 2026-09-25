@@ -289,6 +289,10 @@ bash doc_chinese/phy_pipeline_gpu/wip/milestone_audit.sh               # 里程�
 
 ### 5.3 仓库与构建状态（每次改代码后必做）
 
+* ⚠ **开发产物一律放 `doc_chinese/work_tmp/`（git 忽略、不进跟踪）**，**不要放 `/tmp`**（macOS 重启会清掉，
+  用户 2026-09-25 明确）。放这里的是"跑出来要看的东西"：腿普查输出、dump 比对、一次性二进制（如
+  `work_tmp/ref/replay_head_pre_p05`）；**门与判据依赖的脚本必须进 `wip/` 并被跟踪**（见 5.4 起）。
+
 * 分支 **`apple-silicon`**。本工作流的提交：`470316ab8d`（P0-6）、`4dcb03e3d5`/`f148808e3d`/`ebf3951920`（P0-1 + 缺陷修复）、
   `747b9d475b`（P0-5）、`7c40327f81`（P2-E），以及 2026-09-25 的文档整理提交。**都已推送到 `origin/apple-silicon`**。
 * ⚠ **戳的纪律**：任何提交之后 `run_leg.sh` 会因为"二进制戳 ≠ HEAD"**拒绝起腿**（这是有意的：腿是关于**二进制**的证据）。
@@ -874,6 +878,65 @@ libc++abi: terminating due to uncaught exception of type std::__1::system_error:
 判读：若"块 X 等的是块 Y 的信号，而 Y 又在等 X（或等一个只有 X 放行才能产生的新块）"⇒ **等待成环**坐实，
 修法是切断环（例如把 grid-ready 的发布点从"缓冲完成"改成"最后一次网格写"——而平台语义（§6.4.3）恰好是这条环的放大器）。
 
+### 6.9 P0-7 ✅ 落地（2026-09-25）：**逐块生命周期**（deposit → 认领 → 完成），与"谁按住了输入"的直接读数
+
+> 依据：§6.8 ⑥。**代码改动** ⇒ 与 P0-2 同理，会在下一次飞腿时统一补证据。
+> 本轮同时按用户要求把**需要留存的开发产物放进 `doc_chinese/work_tmp/`**（git 忽略，见 §6.9 ④）。
+
+**① 要回答的问题**：P0-2 的 `input hold` 说"输入被按住多久"，但**没说被谁按住**。
+一个**没人认领**的 deposit 只有两条出路：**sweep** 在接收链前进 `sweep_after_slots = 2` 之后提交它，
+或淘汰循环丢掉它（而**只有 PRODUCED 的条目才会被淘汰**）。在那一刻到来之前，它的 transforms 持有的
+输入 token **一直不回池** ⇒ "一个没人认领的块坐了几十秒"就是"交接机制自己把上行停住"的形状。
+
+**② 改了什么**（`ocudu_metal_burst.{h,mm}` + 报告在 `ocudu_dft_metal_engine.mm`）
+
+| 位置 | 记什么 |
+|---|---|
+| `deposit_released()` | 每个条目的 `deposited_at`（新条目与 supersede 都重打），并刷新"**未认领且未完成**"的**仪表**（个数 + 最老那一个的年龄与 slot）|
+| `take_released()` | `deposit → 认领` 的等待（count/sum/max）|
+| sweep（`late_commits`）| 同样记等待，并标 `swept=1` ⇒ **认领者是谁**可分（跳 vs 注册表的 sweep）|
+| `mark_handed_produced()`（完成处理器）| `deposit → 完成` 的等待（count/sum/max），并维护**最慢 8 个块**的记录 |
+
+报告（紧跟 `[metal_stats] dft handover` 之后）：
+
+```
+[metal_stats] block lifecycle (P0-7): claimed=N wait max=…us mean=…us; produced=N deposit->completion
+              max=…us mean=…us; unclaimed at once max=N, oldest unclaimed age max=…us at slot=…
+[metal_stats] block lifecycle (P0-7) slowest deposit->completion (claimed=by a hop, swept=by the registry's sweep):
+[metal_stats]   slot=… claimed=0/1 swept=0/1 wait_for_a_claim=…us deposit->completion=…us
+```
+
+**③ 判读（先写死，下一条腿用）**
+
+* `oldest unclaimed age max` 与 `deposit->completion max` 是**两个关键数**：
+  若它们≈ P0-2 的 `input hold` max（本线的 61.4 s）⇒ **按住输入的就是"没人认领/没完成"的块**，
+  即"池干 → 收包停"的**上游**就是交接（hand-over）自己；
+  若它们只有 ms 级，而 `input hold` 仍是秒级 ⇒ 输入不是被"未认领"按住的 ⇒ 要查**已认领但未提交**的路径
+  （认领者拿了缓冲却不提交，例如那条跳的 burst 被丢弃）。
+* `slowest` 行里的 `claimed=0 swept=1` 说明"**是 sweep 救的场**"，`wait_for_a_claim` 就是它干等了多久；
+  `claimed=1 swept=0` 却 `deposit->completion` 很大 ⇒ 是**认领者自己**（那条跳）迟迟不提交。
+* **它仍不能说的**：设备侧等待的目标（stage fence / grid-ready 的 generation 与 signaller 的 slot）。
+  若 ③ 的第一种读数成立，下一步就是把这几个 generation 也记进条目（P0-7b，未做）。
+
+**④ 开发产物的存放（用户 2026-09-25 明确）**：`/tmp` 不可靠（macOS 重启会清），
+**需要留存的开发文件一律放 `doc_chinese/work_tmp/`（git 忽略、不进跟踪）**。本轮已归档：
+
+| 路径 | 内容 |
+|---|---|
+| `doc_chinese/work_tmp/p0_7/leg_census.py` | **腿普查脚本**（UL 静默表 + RF/pool 事件 + 静默窗口里的 DL 活动）——§6.6/§6.8 的表格就是它跑出来的；带用法的 docstring |
+| `doc_chinese/work_tmp/p0_7/q9_conc2_census.txt` | 腿 `q9-conc2` 的普查输出（存档） |
+| `doc_chinese/work_tmp/p0_7/q9_leg_record.md` | §6.8 的原始记录（并入本文之前的稿） |
+| `doc_chinese/work_tmp/ref/replay_head_pre_p05` | **P0-5 之前的 pristine HEAD `ul_chain_replay` 二进制**，用于"与 pristine HEAD 逐字节相同"这条网（每次重新构建较贵，故留一份） |
+| `doc_chinese/work_tmp/p0_7_byte/` | 本轮值中性比对的 dump（h_/m_ 两套） |
+
+⚠ 这些文件**不在 git 里**：门与判据不依赖它们（依赖的必须进 `wip/` 并被跟踪）。
+
+**⑤ 离线验证**：`ctest -L phy` **100% of 193**；`lower_phy_test` **528/528**；
+金属测试 **rc=0** 且新行正常（`block lifecycle (P0-7): claimed=49 wait max=1472.0us …; produced=46
+deposit->completion max=1666.0us …; unclaimed at once max=6, oldest unclaimed age max=1470.0us at slot=4343`，
+最慢 3 行也打印）；`ul_chain_replay` **3 capture × 4 dump 与 pristine HEAD 二进制逐字节相同**（12 个文件全 0）。
+**纯读数改动**：不加 dispatch、不加提交（V4 不变）。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
@@ -988,7 +1051,7 @@ n1 默认配方 + `OCUDU_UL_PHASE_SEGMENTS=1`：
 | **Q6** | 把 `max_pusch_and_srs_concurrency` 改变能否把 `ce` 的排队项吃掉？代价是什么？ | ✅ **已回答（P1-8，§7.5）**：能（−58~64×），代价是那次 **5 秒收包停顿**（两次复现）⇒ 交付前必须查清 |
 | **Q7** | 符号级收包（S-7g-13）在**负载下**对**跨度**的效果？ | **开放**：§5.8.29 只量过**该段** −1.2%（当时未加压、且当时丢了融合 1 次提交）⇒ 必须在加压腿 + 融合路径上重量一次 |
 | **Q8** | n78/n1 腿上 `max_pusch_and_srs_concurrency` 的生效值？车道是串行 strand 还是 fork limiter？ | ✅ **已收口（§6.1）**：两者**都是 1**、**都是串行 strand**；上限 = 中等池 `max_concurrency = 5`。⚠ 更正手算：n78 的 `ul_ratio` 是 **0.30**（不是 1.0）|
-| **Q9** | 并发 2 下 UL 断流 / 收包停顿的成因？ | **第一环已是直接读数（§6.8）**：`input hold` max = **61.4 s**（210 个 token > 1 s），池空 → 接收线程 park，UL 吞吐 −70%、上行 iperf3 中段归零 ~40 s。**新的缺口**：那几十秒里块**在等谁** ⇒ 下一步是 **P0-7**（逐块生命周期 + 设备侧等待目标，§6.8 ⑥）|
+| **Q9** | 并发 2 下 UL 断流 / 收包停顿的成因？ | **第一环已是直接读数（§6.8）**，且**上游的仪器已就位（§6.9，P0-7）**：读取 `block lifecycle (P0-7)` 的 `oldest unclaimed age max` / `deposit->completion max` 即可判"是不是没人认领的块按住了池"。原记录：：`input hold` max = **61.4 s**（210 个 token > 1 s），池空 → 接收线程 park，UL 吞吐 −70%、上行 iperf3 中段归零 ~40 s。**新的缺口**：那几十秒里块**在等谁** ⇒ 下一步是 **P0-7**（逐块生命周期 + 设备侧等待目标，§6.8 ⑥）|
 | **Q10** | 那条 **n1 2.85 倍退化**是否还有 `ce` 之外的成分？ | 已由单变量腿定位（§7.5：`ce` 是主因）；`p05-pair` **配对后**：`ce` 中位 **3278 µs** = 跨度 5248 的 **62%**，而一跳的设备执行只有 **517 µs**（Q14）⇒ `ce` 的排队项就是这条退化的主体。**残余**是 `t2f`（1095 vs 历史 521 量级）——与 Q7 的收样点策略、以及 n1 的 rx_wait（1052 µs）有关，**未单独开臂** |
 | **Q11** | `value_net` 的归档基线陈旧、`ab_dumps` arm1 改前就红 | **待用户裁决**：重建基线（= 承认过期）还是把该网标为"HEAD 不可用"；arm1 需要查清"是否曾经绿过"（§6.5⑤）|
 | **Q12** | `s84b-p0` 的第一次尝试**没有留下任何日志**（本仓与 `ocudu_premerge` 都没有）| **未验证**：最可能是被"戳 ≠ HEAD"拒绝（那种情况**不产生日志**）。要它当证据就得重飞一条；否则按"无效腿"处理（登记，低优先）|

@@ -8,7 +8,9 @@
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/phy_pipeline_grid_ready.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -528,6 +530,16 @@ struct handed_entry {
   /// Set by the completion handler. The record outlives the production so that a LATE reader still finds it
   /// and is told "already produced" instead of "unknown" (see ensure_grid_produced()).
   bool produced = false;
+  /// \name P0-7: this block's own timeline, on the host's steady clock (see handed_counters).
+  ///@{
+  std::chrono::steady_clock::time_point deposited_at{};
+  /// Deposit -> the moment SOMEONE claimed it (a hop, or the sweep), 0 while unclaimed.
+  uint64_t claim_wait_us = 0;
+  /// Whether the sweep (not a hop) was the one that claimed it.
+  bool swept = false;
+  /// Deposit -> completion, 0 while not produced.
+  uint64_t produced_wait_us = 0;
+  ///@}
 };
 
 /// Process-wide, because the two ends are two threads: the lower PHY (the radio thread) releases the block
@@ -545,6 +557,61 @@ handed_state& handed()
   // after the static destructors of this translation unit.
   static handed_state* s = new handed_state();
   return *s;
+}
+
+/// \brief P0-7: refreshes the "unclaimed and unproduced" gauge from the current entry list.
+///
+/// Called with handed()'s mutex HELD, at every deposit and every claim: it is the reading that says whether
+/// the registry is where the chain parks (see handed_counters::unclaimed_now_max), and it costs one pass over
+/// a bounded list per deposit.
+static void p0_note_unclaimed_gauge(handed_state& h)
+{
+  const auto     now = std::chrono::steady_clock::now();
+  uint64_t       sitting = 0;
+  uint64_t       oldest_us = 0;
+  uint64_t       oldest_slot = 0;
+  for (const handed_entry& entry : h.entries) {
+    if (entry.claimed || entry.produced) {
+      continue;
+    }
+    ++sitting;
+    if (entry.deposited_at != std::chrono::steady_clock::time_point{}) {
+      const uint64_t age_us =
+          static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - entry.deposited_at).count());
+      if (age_us > oldest_us) {
+        oldest_us   = age_us;
+        oldest_slot = entry.slot;
+      }
+    }
+  }
+  h.counters.unclaimed_now_max = std::max(h.counters.unclaimed_now_max, sitting);
+  if (oldest_us > h.counters.unclaimed_age_max_us) {
+    h.counters.unclaimed_age_max_us   = oldest_us;
+    h.counters.unclaimed_age_max_slot = oldest_slot;
+  }
+}
+
+/// \brief P0-7: records that a block reached completion, and keeps the slowest ones for the report.
+/// \note Called with handed()'s mutex HELD.
+static void p0_note_produced(handed_state& h, const handed_entry& entry)
+{
+  ++h.counters.produced_count;
+  h.counters.produced_wait_sum_us += entry.produced_wait_us;
+  h.counters.produced_wait_max_us = std::max(h.counters.produced_wait_max_us, entry.produced_wait_us);
+  shared_burst::handed_counters::slow_block* worst = nullptr;
+  for (shared_burst::handed_counters::slow_block& candidate : h.counters.slowest) {
+    if ((worst == nullptr) || (candidate.produced_wait_us < worst->produced_wait_us)) {
+      worst = &candidate;
+    }
+  }
+  if ((worst != nullptr) && (entry.produced_wait_us > worst->produced_wait_us)) {
+    worst->slot             = entry.slot;
+    worst->claim_wait_us    = entry.claim_wait_us;
+    worst->produced_wait_us = entry.produced_wait_us;
+    worst->claimed          = entry.claimed;
+    worst->swept            = entry.swept;
+    worst->used             = 1;
+  }
 }
 
 /// The record of \p grid_base's \p slot, or nullptr.
@@ -569,6 +636,14 @@ static void mark_handed_produced(id<MTLCommandBuffer> cb)
   for (handed_entry& entry : h.entries) {
     if (entry.cb == cb) {
       entry.produced = true;
+      // P0-7: deposit -> completion, the block's own end-to-end wait (its input tokens were held for this long
+      // plus the slot's own time before the deposit).
+      if (entry.deposited_at != std::chrono::steady_clock::time_point{}) {
+        entry.produced_wait_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                           std::chrono::steady_clock::now() - entry.deposited_at)
+                                                           .count());
+        p0_note_produced(h, entry);
+      }
       return;
     }
   }
@@ -665,17 +740,33 @@ void shared_burst::deposit_released(const void*          grid_base,
         commit_late.push_back(entry->cb);
       }
       released_after_unlock.push_back(entry->cb);
-      entry->cb         = cb;
-      entry->on_drop    = std::move(on_drop);
-      entry->generation = generation;
-      entry->claimed    = false;
-      entry->produced   = false;
+      entry->cb          = cb;
+      entry->on_drop     = std::move(on_drop);
+      entry->generation  = generation;
+      entry->claimed     = false;
+      entry->produced    = false;
+      // P0-7: this is a NEW block under the same key, so its timeline starts here (the replaced one never got
+      // claimed - that is what `superseded` counts - and its tokens were released by its drop hook).
+      entry->deposited_at     = std::chrono::steady_clock::now();
+      entry->claim_wait_us    = 0;
+      entry->produced_wait_us = 0;
+      entry->swept            = false;
       ++h.counters.handed;
       ++h.counters.superseded;
     } else {
-      h.entries.push_back(handed_entry{grid_base, slot, cb, std::move(on_drop), generation, false, false});
+      handed_entry entry;
+      entry.grid_base   = grid_base;
+      entry.slot        = slot;
+      entry.cb          = cb;
+      entry.on_drop     = std::move(on_drop);
+      entry.generation  = generation;
+      entry.deposited_at = std::chrono::steady_clock::now();
+      h.entries.push_back(std::move(entry));
       ++h.counters.handed;
     }
+    // P0-7: a new deposit is the instant the "how many blocks are sitting unclaimed" gauge is worth reading
+    // again (and the sweep below may claim some of them).
+    p0_note_unclaimed_gauge(h);
 
     // ★ THE ERASE IS THE HOLE, so only PRODUCED entries are erased (5.9.62).
     //
@@ -729,6 +820,17 @@ void shared_burst::deposit_released(const void*          grid_base,
         // Claimed here so a late hop cannot adopt a buffer that is about to be committed (encoding into a
         // committed buffer is an error): it opens one of its own and reads the grid the sweep writes.
         entry.claimed = true;
+        entry.swept   = true;
+        // P0-7: the sweep IS the claim here, and the wait it took is the number that says how long this block
+        // sat with nobody coming for it (its tokens were held for that whole time).
+        if (entry.deposited_at != std::chrono::steady_clock::time_point{}) {
+          entry.claim_wait_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                           std::chrono::steady_clock::now() - entry.deposited_at)
+                                                           .count());
+          ++h.counters.claim_count;
+          h.counters.claim_wait_sum_us += entry.claim_wait_us;
+          h.counters.claim_wait_max_us = std::max(h.counters.claim_wait_max_us, entry.claim_wait_us);
+        }
         commit_late.push_back(entry.cb);
         ++h.counters.late_commits;
       }
@@ -760,6 +862,16 @@ id<MTLCommandBuffer> shared_burst::take_released(const void* grid_base, uint64_t
   }
   entry->claimed = true;
   ++h.counters.taken;
+  // P0-7: how long this block waited for its consumer. A large value here is the hand-over being late, not
+  // the GPU being slow - and it is the number the sweep's deadline is measured against.
+  if (entry->deposited_at != std::chrono::steady_clock::time_point{}) {
+    entry->claim_wait_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                     std::chrono::steady_clock::now() - entry->deposited_at)
+                                                     .count());
+    ++h.counters.claim_count;
+    h.counters.claim_wait_sum_us += entry->claim_wait_us;
+    h.counters.claim_wait_max_us = std::max(h.counters.claim_wait_max_us, entry->claim_wait_us);
+  }
   return entry->cb;
 }
 

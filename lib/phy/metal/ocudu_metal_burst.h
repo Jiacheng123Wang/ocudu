@@ -251,6 +251,46 @@ public:
     /// reader with no record while the write was still in flight. Kept as a counter precisely because it now
     /// states an invariant: anything but 0 means that invariant broke.
     uint64_t evicted_unproduced = 0;
+    /// \name P0-7: the block's own timeline, in microseconds (deposit -> claim -> produced).
+    ///
+    /// WHY IT EXISTS. The hold measured in `[metal_stats] input hold (P0-2)` says HOW LONG an input was kept
+    /// out of the pool; it cannot say WHO was keeping it. A deposit that no hop claims has exactly two ways
+    /// out: the SWEEP commits it once the receiving chain has moved `sweep_after_slots` past its slot, or the
+    /// eviction loop drops it (and only PRODUCED entries are ever evicted). Until one of those happens its
+    /// transforms' input tokens are held - so "an unclaimed block sat for tens of seconds" is the shape that
+    /// turns the hand-over into a chain that can park the whole uplink, and these are the numbers that say
+    /// whether that is what happened (measured on `q9-conc2`: holds up to 61.4 s).
+    ///@{
+    /// Blocks CLAIMED by a consumer (or by the sweep, which claims what it commits): how long each waited.
+    uint64_t claim_count          = 0;
+    uint64_t claim_wait_max_us    = 0;
+    uint64_t claim_wait_sum_us    = 0;
+    /// Blocks that REACHED completion, and how long that took from the deposit.
+    uint64_t produced_count       = 0;
+    uint64_t produced_wait_max_us = 0;
+    uint64_t produced_wait_sum_us = 0;
+    /// Gauge: the most entries sitting NEITHER claimed NOR produced at once, and the oldest such entry seen.
+    ///
+    /// The one number that separates "the registry is busy" from "the registry is where the chain parks": a
+    /// healthy leg keeps this at a handful of blocks and a few milliseconds; a parked chain grows it until
+    /// the pool is empty.
+    uint64_t unclaimed_now_max      = 0;
+    uint64_t unclaimed_age_max_us   = 0;
+    uint64_t unclaimed_age_max_slot = 0;
+    /// The slowest blocks by deposit -> produced, so a leg can be read without a histogram: 8 is what the
+    /// report prints.
+    static constexpr unsigned nof_slow_blocks = 8;
+    struct slow_block {
+      uint64_t slot            = 0;
+      uint64_t claim_wait_us   = 0;
+      uint64_t produced_wait_us = 0;
+      bool     claimed          = false;
+      bool     swept            = false; ///< claimed by the SWEEP (late_commits), not by a hop
+      uint64_t used             = 0;
+    };
+    slow_block slowest[nof_slow_blocks] = {};
+    ///@}
+
     /// \brief Times the registry was over its bound and had NOTHING safe to reclaim (5.9.62).
     ///
     /// The bound is soft now: while every outstanding entry is in flight there is nothing to erase without
