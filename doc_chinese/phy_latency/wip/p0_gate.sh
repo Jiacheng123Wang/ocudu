@@ -43,6 +43,8 @@
 #   D12 (Q9-F2/F3, INFO) what the device was doing while a waiter waited: the holes in the union of the probed
 #       GPU windows (probe: OCUDU_METAL_GPU_TIME=1) and the front-end blocks that were not final when their own
 #       slot's group closed - the population no earlier instrument reported at all (6.19)
+#   D15 (6.26, INFO) fix B: how many blocks a DRY pool dropped (instead of parking the receive thread and
+#       letting the radio's ring overflow). The criterion it serves is D4 (gaps)
 #   D14 (6.24, INFO) the on-demand P0 dump: printed by the receive thread when it has been parked on a dry pool
 #       for more than 20 ms, i.e. when a stall is HAPPENING - the readings below it are a snapshot from inside it
 #   D13 (6.20/6.21, INFO) the commit handshake: how often a consumer was handed a generation whose carrier had
@@ -394,6 +396,22 @@ fi
 # indication is produced and the whole slot loop stops with it). A leg with a dump here STALLED; a healthy leg
 # never prints one (measured park: 22 us on n1, 486 us at 12.9 Mbit/s on n78). The readings below it are a
 # SNAPSHOT from inside the stall - the same lines the exit report carries.
+# D15 (fix B, dev doc 6.26): the blocks a DRY pool DROPPED instead of parking the radio. `dropped > 0` says the
+# pipeline went dry on this leg (the same event `starved_events` counts) and that the drop is what kept it from
+# becoming lost samples (D4). A leg with `dropped = 0` never had to choose.
+drop_field=$(grep -a "ul_rx_pool\] taken=" "$LEGF" | tail -1)
+drop_n=$(printf '%s' "$drop_field" | grep -oE "dropped=[0-9]+" | grep -oE "[0-9]+$")
+drop_park=$(printf '%s' "$drop_field" | grep -oE "drop_park_max=[0-9]+us" | grep -oE "[0-9]+")
+if [ -z "${drop_n:-}" ]; then
+  check "[INFO] D15 (6.26) did a dry pool drop blocks instead of parking the radio" "reported, not judged" INFO \
+        "no 'dropped=' field: ${drop_field:-<absent>} - a leg flown before 6.26 cannot say"
+elif [ "${drop_n}" = "0" ]; then
+  check "[INFO] D15 (6.26) did a dry pool drop blocks instead of parking the radio" "reported, not judged" INFO \
+        "dropped=0: the pool never stayed dry past the 1 ms budget - no block had to be sacrificed"
+else
+  check "[INFO] D15 (6.26) did a dry pool drop blocks instead of parking the radio" "reported, not judged" INFO \
+        "dropped=$drop_n block(s), longest park before a drop=${drop_park:-?}us  <-- the pool DID go dry; these blocks' samples were discarded so the radio kept streaming (with OCUDU_UL_RX_POOL_DROP=0 the same leg loses them as a `Receive stream discontinuity` instead)"
+fi
 dump_line=$(grep -a "p0 dump #" "$LEGF" | tail -1)
 dump_n=$(grep -ac "p0 dump #" "$LEGF")
 if [ "${dump_n:-0}" = "0" ]; then

@@ -251,7 +251,19 @@ private:
   /// there, the references are not coming back at all - a completely different defect from a long hold, and
   /// the two look identical from the outside (real-time failures, a stalled radio).
   static void rx_pool_note_taken(size_t free_buffers, size_t pool_size);
+  /// Fix B (dev doc 6.26): counts one block a DRY pool dropped instead of parking the radio, with the wait that
+  /// ended in the drop (`drop_park_max_us` keeps the longest).
+  static void rx_pool_note_dropped(uint64_t park_us);
   /// \brief Takes a receive buffer, asking the hand-over to reap while the pool is DRY (Q9-A, dev doc 6.13).
+  ///
+  /// ★ AND THIS IS WHERE A DRY POOL STOPS BEING ABLE TO STOP THE RADIO (fix B, dev doc 6.26). Parking here is
+  /// what the pool's backpressure used to do to the WHOLE lower PHY: with no buffer in hand this thread does not
+  /// call receiver.receive(), so the radio's samples are not consumed - its ring overflows, the samples in it
+  /// are lost (`Receive stream discontinuity`), and in the long form of the stall (dev doc 6.20) the whole slot
+  /// loop starves with it. The wait is therefore BOUNDED: when the pool stays dry past `rx_park_budget`, the
+  /// caller is given the RESERVE buffer instead and told to DROP the block (`dropped = true`) - the radio keeps
+  /// being consumed, and the samples of that block are discarded rather than delayed. Losing one block's
+  /// samples costs one HARQ retransmission; stopping the radio costs every slot in the ring.
   ///
   /// The plain `pop_blocking()` parks this thread until a buffer comes back, and that is exactly the state in
   /// which the hand-over's registry cannot help itself: with the receive thread parked there is no deposit, so
@@ -264,7 +276,7 @@ private:
   /// \note The healthy path is untouched: a pool that has a buffer hands it out through `try_pop()` and pays
   ///       nothing - not even one hook call. A stopped queue returns a null buffer, exactly as the plain
   ///       `pop_blocking()` does.
-  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> pop_rx_buffer_blocking();
+  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> pop_rx_buffer_or_reserve(bool& dropped);
 
   /// \brief How long a dry pool waits before it asks the hand-over to reap again (see pop_rx_buffer_blocking()).
   ///
@@ -272,6 +284,22 @@ private:
   /// commit + completion (~ms), so a healthy pool is never asked twice for one stall and a stalled one is
   /// asked often enough that its buffers come back as soon as the registry can give them.
   static constexpr std::chrono::milliseconds rx_reap_slice{10};
+
+  /// \brief How long a dry pool may park this thread before the block is DROPPED instead (fix B, dev doc 6.26).
+  ///
+  /// The bound has to sit between the two populations this workflow has measured: a healthy pool's worst park is
+  /// 486 us (n78 at 12.9 Mbit/s; 22 us on the n1 leg), while a stall of the kind that lost samples parked the
+  /// thread for 1.3-4.0 ms (p17/p18) and 4997 ms in its long form (p13). 1 ms therefore never fires on a
+  /// healthy leg and always fires on a stalling one - and it stays well inside the radio's own ring, whose
+  /// overflow was measured at ~4.4 ms of park (100938 samples at 23.04 Msps, leg p17).
+  static constexpr std::chrono::microseconds rx_park_budget{1000};
+
+  /// \brief Whether a dry pool drops the block instead of parking the radio (fix B, dev doc 6.26).
+  ///
+  /// ON by default - it is the fix. `OCUDU_UL_RX_POOL_DROP=0` restores the parking behaviour, which is the A/B
+  /// arm that shows what the drop buys: the same leg with it off loses the radio's samples again ([ul_rx_pool]
+  /// `dropped_blocks` stays 0 and `gaps` returns).
+  static bool rx_pool_drop_enabled();
 
   /// \brief P0-2: records how long the take BLOCKED (the `pop_blocking()` above it), in microseconds.
   ///
@@ -284,6 +312,14 @@ private:
 
   /// The receive buffers of this sector (see rx_buffer_pool), sized by the configuration.
   std::shared_ptr<rx_buffer_pool> rx_pool;
+
+  /// \brief One buffer that is NOT part of the pool, for the blocks a dry pool has to DROP (fix B, dev doc 6.26).
+  ///
+  /// The radio is told how many samples to receive by the size of the buffer it is given, so "keep consuming the
+  /// radio while the pool is dry" needs a buffer of its own - this one. It is never handed to the uplink
+  /// processor, never enters the pool and never holds an input token: its samples are read by nobody, which is
+  /// the whole point.
+  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> rx_reserve_buffer;
 
   baseband_gateway_timestamp                                                 tx_time_offset;
   baseband_gateway_timestamp                                                 rx_to_tx_max_delay;

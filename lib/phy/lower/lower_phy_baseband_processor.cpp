@@ -57,6 +57,15 @@ struct rx_pool_accounting {
   /// different event from "nearly dry": the next take has nothing to take, so pop_blocking() blocks the receive
   /// thread and the radio is LATE rather than merely tight (5.9.100).
   std::atomic<bool> warned_empty{false};
+  /// \name Fix B (dev doc 6.26): the blocks a DRY pool dropped instead of parking the radio.
+  ///
+  /// `dropped` counts them; `drop_park_max_us` is the longest wait that ended in a drop. Both are read with the
+  /// pool summary at exit: a leg with `dropped > 0` is a leg whose pipeline went dry (the same event
+  /// `starved_events` counts), and the drop is what kept that from becoming lost samples (`gaps`).
+  ///@{
+  std::atomic<uint64_t> dropped{0};
+  std::atomic<uint64_t> drop_park_max_us{0};
+  ///@}
   /// Largest `held` and smallest free count seen. For ONE pool the two agree by construction - the queue holds
   /// `free` of the `pool_size` buffers it was filled with, so `held = taken - returned = pool_size - free` - and
   /// printing both lets a reader check that identity instead of trusting it. It does NOT hold across pools:
@@ -113,7 +122,7 @@ void rx_pool_report()
   const size_t   free_min = a.free_min.load(std::memory_order_relaxed);
   std::fprintf(stderr,
                "[ul_rx_pool] taken=%llu returned=%llu held_end=%lld held_max=%llu pool=%zu free_min=%lld "
-               "starved_takes=%llu starved_events=%llu\n",
+               "starved_takes=%llu starved_events=%llu dropped=%llu drop_park_max=%lluus\n",
                static_cast<unsigned long long>(taken),
                static_cast<unsigned long long>(back),
                static_cast<long long>(taken - back),
@@ -121,7 +130,10 @@ void rx_pool_report()
                a.pool_size.load(std::memory_order_relaxed),
                (free_min == std::numeric_limits<size_t>::max()) ? -1LL : static_cast<long long>(free_min),
                static_cast<unsigned long long>(a.starved_takes.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(a.starved_events.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(a.starved_events.load(std::memory_order_relaxed)),
+               // Fix B (dev doc 6.26): blocks a DRY pool dropped instead of parking the radio.
+               static_cast<unsigned long long>(a.dropped.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(a.drop_park_max_us.load(std::memory_order_relaxed)));
 
   // P0-2: the wait for a buffer. Its OWN line, because the pool's line above is a census and this one is a
   // distribution - and because the number that matters (the longest park on an empty pool) has to be readable
@@ -187,6 +199,15 @@ void lower_phy_baseband_processor::rx_pool_note_wait(int64_t wait_us)
   }
   if (us > 1000000.0) {
     a.waits_over_1s.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void lower_phy_baseband_processor::rx_pool_note_dropped(uint64_t park_us)
+{
+  rx_pool_accounting& a = rx_pool_accounts();
+  a.dropped.fetch_add(1, std::memory_order_relaxed);
+  uint64_t prev = a.drop_park_max_us.load(std::memory_order_relaxed);
+  while ((park_us > prev) && !a.drop_park_max_us.compare_exchange_weak(prev, park_us, std::memory_order_relaxed)) {
   }
 }
 
@@ -352,6 +373,10 @@ lower_phy_baseband_processor::lower_phy_baseband_processor(const lower_phy_baseb
           rx_buffer_pool::deleter{pool}));
     }
   }
+  // Fix B (dev doc 6.26): ONE buffer of the same shape that is deliberately NOT in the pool. It is where a block
+  // goes when the pool is dry and the wait has run out - so the radio is still consumed and the samples are
+  // dropped, instead of the receive thread parking and the radio's ring overflowing behind it.
+  rx_reserve_buffer = std::make_shared<baseband_gateway_buffer_dynamic_aligned>(config.nof_rx_ports, rx_buffer_size);
 }
 
 void lower_phy_baseband_processor::start(baseband_gateway_timestamp init_time, baseband_gateway_timestamp sfn0_ref_time)
@@ -556,8 +581,19 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
   tx_state.on_process_end();
 }
 
-std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_processor::pop_rx_buffer_blocking()
+bool lower_phy_baseband_processor::rx_pool_drop_enabled()
 {
+  static const bool enabled = []() {
+    const char* v = std::getenv("OCUDU_UL_RX_POOL_DROP");
+    return (v == nullptr) || (std::atoi(v) != 0);
+  }();
+  return enabled;
+}
+
+std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_processor::pop_rx_buffer_or_reserve(
+    bool& dropped)
+{
+  dropped = false;
   std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> buffer{};
   if (rx_pool->buffers.try_pop(buffer)) {
     // The healthy path: nothing to reap, nothing to wait for, and not one hook call.
@@ -589,8 +625,18 @@ std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_proc
       // The queue was stopped: the caller gets the same null buffer the plain pop_blocking() would give it.
       return std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>{};
     }
+    const auto parked_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                                parked_since);
     if ((std::chrono::steady_clock::now() - parked_since) > stall_dump_after) {
       (void)p0_dump_reports("dry-pool park", stall_dump_min_interval_ms);
+    }
+    // ★ FIX B (dev doc 6.26): the wait is BOUNDED. Past the budget the caller gets the RESERVE buffer and is
+    // told to drop the block: the radio keeps being consumed, so its ring does not overflow and the samples of
+    // every LATER slot survive - the price is this one block's samples, i.e. one HARQ retransmission.
+    if (rx_pool_drop_enabled() && (parked_us > rx_park_budget) && (rx_reserve_buffer != nullptr)) {
+      rx_pool_note_dropped(static_cast<uint64_t>(parked_us.count()));
+      dropped = true;
+      return rx_reserve_buffer;
     }
   }
 }
@@ -604,9 +650,12 @@ void lower_phy_baseband_processor::ul_process()
   }
 
   // Get receive buffer. The wait is measured (P0-2): this is the one place the receive can be parked by the
-  // pool, and it is BEFORE receiver.receive(), so [ul_rx_wait] does not cover it.
+  // pool, and it is BEFORE receiver.receive(), so [ul_rx_wait] does not cover it. Since fix B (dev doc 6.26) the
+  // wait is BOUNDED: `dropped` says this call was handed the RESERVE buffer because the pool stayed dry past
+  // rx_park_budget, and the block it receives must be DISCARDED.
   const auto rx_take_t0 = std::chrono::steady_clock::now();
-  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer = pop_rx_buffer_blocking();
+  bool       dropped  = false;
+  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer = pop_rx_buffer_or_reserve(dropped);
   rx_pool_note_wait(
       std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - rx_take_t0).count());
   rx_pool_note_taken(rx_pool->buffers.size(), rx_pool->buffers.max_size());
@@ -671,7 +720,15 @@ void lower_phy_baseband_processor::ul_process()
         // The window has no room left for a whole symbol (a grid whose period does not tile it): retire
         // the buffer and start the next one at this boundary instead of splitting a symbol.
         const auto rx_fill_t0 = std::chrono::steady_clock::now();
-        rx_fill_buffer        = pop_rx_buffer_blocking();
+        bool       retire_dropped = false;
+        rx_fill_buffer        = pop_rx_buffer_or_reserve(retire_dropped);
+        if (retire_dropped) {
+          // Fix B: this path needs a REAL buffer to fill the next window with, and the pool has none. Drop this
+          // block instead (the reserve is not a slot buffer - it must never become one).
+          rx_fill_buffer = nullptr;
+          rx_buffer      = rx_reserve_buffer;
+          dropped        = true;
+        }
         rx_pool_note_wait(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
                                                                                 rx_fill_t0)
                               .count());
@@ -683,6 +740,55 @@ void lower_phy_baseband_processor::ul_process()
       nof_samples = position.nof_samples;
     }
   }
+  // ★ FIX B (dev doc 6.26): a block the pool could not serve is RECEIVED AND DROPPED, never left in the radio.
+  //
+  // What used to happen: the receive thread parked here (in pop_rx_buffer_or_reserve()), and while it was parked
+  // the radio's samples were not consumed - its ring overflowed, every sample in it was lost (`Receive stream
+  // discontinuity`, one 100938-sample gap on leg p17) and, in the long form of the stall (dev doc 6.20), no slot
+  // indication was produced and the whole slot loop starved with it. What happens now: the block is received into
+  // the reserve buffer and thrown away. The radio keeps streaming, the ring stays drained, the LATER slots are
+  // untouched, and the cost is exactly one block's samples - one HARQ retransmission.
+  //
+  // The bookkeeping that must survive the drop is the TIMESTAMP: `last_rx_timestamp` advances by what the radio
+  // actually delivered (below), so the next call computes the same kind of block it would have, and the
+  // symbol/phase alignment is unchanged. The sample count is computed HERE, without a pool buffer, because the
+  // reserve is a buffer of the same size and the two policies only need the timestamp and the symbol grid.
+  if (dropped) {
+    unsigned drop_samples = rx_buffer->get_nof_samples();
+    if (!symbol_blocks) {
+      if (slot_capable) {
+        const unsigned phase =
+            static_cast<unsigned>(last_rx_timestamp.load(std::memory_order_acquire) % nof_samples_per_slot);
+        drop_samples = (phase != 0) ? (nof_samples_per_slot - phase) : nof_samples_per_slot;
+      }
+    } else {
+      const baseband_gateway_timestamp                next_ts = last_rx_timestamp.load(std::memory_order_acquire);
+      const uplink_processor_baseband::symbol_grid_position pos =
+          uplink_processor.locate_symbols(next_ts, nof_symbols_per_block);
+      drop_samples = (pos.nof_samples_to_boundary != 0) ? pos.nof_samples_to_boundary : pos.nof_samples;
+      // The reserve holds one block: never ask the radio for more than it can take (a symbol-grained request is
+      // always smaller than a slot, but the clamp keeps the contract local rather than assumed).
+      drop_samples = std::min(drop_samples, rx_buffer->get_nof_samples());
+    }
+    baseband_gateway_buffer_writer_view drop_writer(rx_buffer->get_writer(), 0, drop_samples);
+    baseband_gateway_receiver::metadata    drop_metadata = receiver.receive(drop_writer);
+    last_rx_timestamp.store(drop_metadata.ts + drop_samples, std::memory_order_release);
+    if (symbol_blocks && (rx_fill_buffer != nullptr)) {
+      // Keep the slot buffer's offsets consistent with the timeline the timestamp describes: the dropped
+      // samples' room is SKIPPED, so everything after them lands where it belongs. Without this the rest of the
+      // slot would be written one drop too early and the whole slot would be garbage; with it the slot has a
+      // hole of stale samples (the samples the radio never gave us) and the rest of the slot is placed
+      // correctly - which is what a radio-side lost block already produces on this path.
+      rx_fill = std::min(rx_fill + drop_samples, nof_samples_per_slot);
+    }
+    // The readings taken while the leg is in trouble: this is the state that used to end in lost samples, so a
+    // drop dumps them (rate-limited, dev doc 6.24) - the samples themselves are discarded by not processing them.
+    (void)p0_dump_reports("dry-pool drop", 2000);
+    report_fatal_error_if_not(rx_executor.defer([this]() { ul_process(); }), "Failed to execute receive task.");
+    rx_state.on_process_end();
+    return;
+  }
+
   // T_start of the UL compute pipeline measurement: the moment the samples of this block START arriving, so
   // the series measures "first sample of the slot in -> CRC OK out" no matter how the receive side asks for
   // them. Use the same slot reference the FAPI slot_point carries to the PUSCH completion (the

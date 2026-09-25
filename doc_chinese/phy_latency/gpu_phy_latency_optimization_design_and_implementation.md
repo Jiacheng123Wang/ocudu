@@ -2135,6 +2135,46 @@ ms 级的那一类由 **D3/D4** 读数覆盖。
 3. 顺带登记的读数：`dft radio inputs` 的 **plain route 仍有 397,993 次变换（84:16）"got their own command buffer"**
    ——占全线变换的 16%，值得单独看一眼是不是绕过了交棒（不阻塞主线）。
 
+### 6.26 ✅ 修复 B 落地（用户裁决 2026-09-25：**(b) 池干时继续收样点、丢弃该槽**）：**干池不再能停住电台**——有界 park + 保留缓冲 + 丢弃计数
+
+> 针对 §6.25 ③ 的残余红（D4/V2/V3）。**判据一字未改**；**不改提交形态**（`cbs/lane` 不变）；改动只在 `lib/phy/lower/lower_phy_baseband_processor.{h,cpp}`。
+
+#### ① 改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `pop_rx_buffer_or_reserve(bool& dropped)`（原 `pop_rx_buffer_blocking`）| park **有界**：`rx_park_budget = 1 ms`；超界 ⇒ 返回**保留缓冲**并置 `dropped=true`。20 ms 的停顿转储（§6.24）保留为兜底 |
+| **保留缓冲** `rx_reserve_buffer` | 与池内缓冲**同形状**（`nof_rx_ports × rx_buffer_size`），但**永不进池、永不交给上行处理器、永不持有输入 token** |
+| `ul_process()` 的丢弃路径 | **照常收样点**（`receiver.receive()` 进保留缓冲）⇒ **推进 `last_rx_timestamp`** ⇒ **不处理**（不打 `process_symbol_boundary`，不做 grid 写、不生成 deposit）⇒ 重新 `defer(ul_process)` 返回 |
+| 符号策略下的 `rx_fill` | 丢弃的样点数被**跳过**（`rx_fill += drop_samples`）⇒ 该槽**只留一个"陈旧样点"的洞**，其余样点位置正确；否则整个槽会整体错位 |
+| 计数与报告 | `[ul_rx_pool] … dropped=%llu drop_park_max=%lluus`；门新增 **D15（INFO）** |
+| 反向臂 | `OCUDU_UL_RX_POOL_DROP=0` 恢复"park 到有缓冲为止"的旧行为 ⇒ A/B 用 |
+
+**为什么 1 ms**：健康腿最坏 park 是 486 µs（n78 @12.9 Mbit/s）/22 µs（n1），而丢样点那一类 park 是 1.3–4.0 ms（p17/p18）、长形态 4997 ms（p13）。
+1 ms 因此**在健康腿上永不触发、在停顿腿上必然触发**，而且远在电台环形缓冲深度之内（实测溢出对应 ~4.4 ms park = 100,938 样点 @23.04 Msps，p17）。
+**代价**：丢一个块 = 一处陈旧样点的洞 ⇒ 该槽 CRC KO ⇒ **一次 HARQ 重传**；换来的是**电台继续被消费**（环形缓冲不溢出、后面的槽全都不受影响）。
+
+#### ② 离线证据（改代码后必跑的那一套）
+
+* `lower_phy_test` **528/528**；报告里 `[ul_rx_pool] … dropped=0 drop_park_max=0us` —— 该 fixture 的池从不干，**所以丢弃路径正确地没有触发**（这是"健康腿不丢"的那一半证据）。
+* `ctest -L phy` **193/193**（首次一条 `port_channel_estimator_metal_mmse_unit_test_ta_chain` 红 = §5.4 记录的 GPU 争用偶发，`--rerun-failed` 通过、整套复跑全绿；**首次读数保留**）、`dft_release_adopt_metal_test` rc=0（arm 10–16）、`l1_handover_arms.sh` 5 PASS。
+* 门 **D15** + 自测（有字段 ⇒ 读回；旧腿 ⇒ "a leg flown before 6.26 cannot say"；p16 上正确显示 `no 'dropped=' field`）。
+
+#### ③ 空口验证：**A/B 两条腿**（同配方、只差一个开关）
+
+| 腿 | 开关 | 期望 |
+|---|---|---|
+| `p19-n78-drop` | 默认（drop 开）| `dropped>0`（因为 p16/p17/p18 都出现 `starved_events=63–114`）、**`gaps=0`（D4 转绿）**、RF late/underflow 显著减少 |
+| `p20-n78-nodrop` | `OCUDU_UL_RX_POOL_DROP=0` | `dropped=0`、**`gaps≥1` 回来**（复现 p17/p18 的 `Receive stream discontinuity`）|
+
+⇒ 两条腿合起来证明"丢块而不是丢样点"这件事**确实由本改动造成**，而不是又一次"没触发"。
+
+#### ④ 边界与未决
+
+* 丢块只影响**当前槽**（洞 + 该槽的 CRC KO）；时间戳照常前进，符号/相位对齐不变。
+* **不解决**：V1（时延，杠杆是 §6.25 ② 的前端 DFT 941 µs）与 V2 的**根因**（池为什么会被抽干：`input hold` 的 20–96 ms 尾巴 = "没人来认领"那一 段）；本修复只把"池干"的**后果**从"电台丢样点"降级为"丢一个块"。
+* `OCUDU_UL_RX_POOL_DROP=0` 是**测量臂**，不是交付选项。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
