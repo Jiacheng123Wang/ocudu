@@ -2765,6 +2765,57 @@ nof_rx_buffers = max( 8,
 
 
 
+### 6.35 ★ **修法 (A) 落地（用户裁决）**：清扫得到**第三个入口点——普通取缓冲**（1 ms 节流），两个调用者用**理由**分开计数
+
+> §6.34 的归因结论：V2 剩下的红 = **池余量为 0**（8 = 在飞 6 + 在收 1 + 刚收 1）× **最多 3–4 个可避免的持有者**（未被认领的块，
+> 20–96 ms），根因是**清扫只有两个入口点**（入池、干池 park），**上行静默窗口里两个都不发生**。用户裁决：先做 (A)。
+
+#### ① 改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `include/ocudu/phy/phy_pipeline_grid_ready.h` | `handover_reap_hook::reap()` → **`reap(reap_reason)`**，`enum class reap_reason { dry_pool, take }`——**调用者的身份成为契约的一部分**，腿因此能把两个入口分开读 |
+| `lib/phy/metal/ocudu_metal_burst.{h,mm}` | `reap_unclaimed_now(reason)`；新增 **`reaped_by_take_events/blocks`**（与 `reaped_by_park_*` 分开）；`block lifecycle` 行加打印 **`take sweeps=N recovering M block(s)`** |
+| `lib/phy/lower/lower_phy_baseband_processor.{h,cpp}` | **普通取缓冲（`try_pop` 成功）也驱动清扫**，节流 **`rx_sweep_interval = 1 ms`**（30 kHz 下约每两个时隙一次），状态 `rx_last_sweep`；干池 park 那处改成 `reap(dry_pool)` |
+| metal 自测 | 原 arm 12 改成 `reap(dry_pool)`；**新增 arm 12b**：一个孤儿块 + **只有 take 形状的一次调用**（无入池、无 park），断言"输入恰好回来一次"且 **take 计数动、park 计数不动** |
+
+**规则一字未改**：一个块仍然只在"链已经把它那个时隙之后的窗口走完"或"过了 10 ms 截止"时才可回收
+⇒ 这个入口点**不可能**抢走一个还有权认领它的跳；改变的是**规则被评估的时刻**（从"下一次入池/下一次干池"变成"≤1 ms 后"）。
+
+**代价**：健康运行每毫秒一次注册表互斥（而不是每次取缓冲一次）；被更早回收的块会产生更早的 `fallback` 提交——**那本来就发生**（`fallback=4191` on `p23`），只是更早。
+
+#### ② 离线自证
+
+```
+[dft-release] arm 12  (Q9-A): a DRY pool reaped an unclaimed block with NO other registry entry point - input released exactly once, dry-pool events 0->1, blocks 0->1, late_time 5->6
+[dft-release] arm 12b (6.34 take-path sweep): an ordinary TAKE reaped an unclaimed block with no deposit and no park, the input came back exactly once, and the TAKE counters moved while the PARK pair stood still (take events 0->1)
+```
+
+#### ③ 网（全绿）
+
+`ctest -L phy` **193/193**（按 §6.31 ⑥ 3 的名单显式重建 7 个依赖 `ocudu_dft*` 的目标之后）、`dft_processor_metal_unit_test` **ALL OK**、
+`ofdm_demodulator_metal_batch_test` ✓、metal **arm 10–17 + 12b 全 PASS**、`lower_phy_test` ✓（`OCUDU_UL_RX_POOL_DROP_FORCE=3` 同）、
+`l1_handover_arms.sh` **5 PASS**、门自测 **PASS**。
+
+#### ④ 验证腿的**预登记**（下一条腿按这个读；两条腿**都要看**，因为 (A) 动的是"何时回收"，不是"回收什么"）
+
+| 读数 | 修前（`p23` 批量 / `p24` 对照）| 预登记（修后）| 说明 |
+|---|---|---|---|
+| **D1** 最长 token 持有 | 20.4 / 96.4 ms | **≤ ~5 ms** | 窗口 2 槽 + 1 ms 节流 + 余量 |
+| **D2** 最久未认领年龄 | 19.9 / 95.5 ms | **≤ ~5 ms** | 同上 |
+| `take sweeps=N recovering M`（新读数）| —（不存在）| **N≈节拍×秒数、M ≥ 1** | **入口点真的回收到了块**；M=0 是"没有可回收的"，不是失败 |
+| `[ul_rx_pool] starved_events` | 38 / 62 | **0–5** | 可避免的持有者回到池里 ⇒ 余量从 0 恢复 |
+| `starved_takes` / `pop_blocking` | 71 / max 321 µs | 下降 | 同上 |
+| `fallback` / `late` / `late_time` | 4191 / 999 / 110 | **可能略升** | 更早回收 ⇒ 更早提交；`late_time` 甚至可能**降**（窗口规则先到，不必等时间截止）。**不是回归** |
+| 契约 / `cbs/lane` / gaps | 8/8 / 2.00 / 0 | **不变** | 硬要求 |
+
+⚠ **一个必须写清的口径**：V2 的判据是 **`starved_events == 0` 且 `held_max < pool`**。修法 (A) 治的是**前半**
+（可避免的持有者），但 **`held_max` 可能仍然是 8**——因为"6 个在飞 + 1 在收 + 1 刚收"是**结构性**的峰值，不是缺陷。
+⇒ 若修后 `starved_events` 回到 0 而 `held_max` 仍 = 8，则 V2 的后半只能由 **(B) P2-D** 回答（给定尺公式一个明确的 margin，
+或把"峰值 = 池"这一事实写成断言/文档），**不要**把 (A) 的成功误读成 V2 未达成。
+
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

@@ -221,13 +221,23 @@ private:
 /// The thread that must not wait for a caller is the one that IS parked: before it blocks on the pool it
 /// asks the registry to reap, and the reaped blocks' commits release the buffers it is waiting for.
 ///
-/// \note Called from the LOWER PHY's receive path only when the pool has nothing to hand out, so a healthy
-///       run pays nothing at all. The implementation never blocks and does nothing when it has nothing to
-///       reap; a build without Metal has no implementation and this is a no-op.
+/// \note The implementation never blocks and does nothing when it has nothing to reap; a build without
+///       Metal has no implementation and this is a no-op.
+///
+/// \note TWO CALLERS SINCE dev doc 6.34, and the REASON is part of the call so a leg can tell them apart:
+///  * `dry_pool` - the thread that is about to PARK (the Q9-A path above);
+///  * `take` - the ordinary SUCCESSFUL take of a receive buffer, throttled by the caller. Without it the
+///    sweep has no entry point in a UL-quiet window (nothing is deposited, and a pool that is not dry parks
+///    nobody), so a block nobody claimed holds its whole-slot buffer for as long as the quiet lasts
+///    (measured: 19.9 ms on `p23`, 96.4 ms on `p24`, 2.79 s on `p19`, 10.4 s on `p22`) - and the pool's
+///    in-flight peak (6 of its 8 buffers, measured) leaves no margin for that.
 class handover_reap_hook
 {
 public:
-  using reap_fn = void (*)();
+  /// Why the registry is being asked to sweep (see the class documentation).
+  enum class reap_reason { dry_pool, take };
+
+  using reap_fn = void (*)(reap_reason);
 
   /// Installs the implementation (called by the Metal engines once, on first use).
   static void install(reap_fn fn) { fn_ref().store(fn, std::memory_order_release); }
@@ -236,11 +246,11 @@ public:
   static bool installed() { return fn_ref().load(std::memory_order_acquire) != nullptr; }
 
   /// See the class documentation. Safe to call when nothing is installed.
-  static void reap()
+  static void reap(reap_reason why)
   {
     reap_fn fn = fn_ref().load(std::memory_order_acquire);
     if (fn != nullptr) {
-      fn();
+      fn(why);
     }
   }
 

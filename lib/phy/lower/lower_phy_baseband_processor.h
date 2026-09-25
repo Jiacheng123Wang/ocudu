@@ -285,6 +285,18 @@ private:
   /// asked often enough that its buffers come back as soon as the registry can give them.
   static constexpr std::chrono::milliseconds rx_reap_slice{10};
 
+  /// \brief dev doc 6.34: how often the ORDINARY take path asks the hand-over registry to sweep.
+  ///
+  /// The sweep's other entry points (a deposit, and the dry-pool park) both need either new work or a dry
+  /// pool, so a UL-quiet window had none and an unclaimed block held its whole-slot buffer for 19.9-96.4 ms
+  /// (and 2.79-10.4 s on two legs). 1 ms is one sweep per couple of slots at 30 kHz: an order of magnitude
+  /// inside the sweep's own 10 ms deadline, and cheap enough that a healthy run pays one registry mutex per
+  /// millisecond. See pop_rx_buffer_or_reserve().
+  static constexpr std::chrono::milliseconds rx_sweep_interval{1};
+
+  /// When the take path last asked for a sweep (see rx_sweep_interval).
+  std::chrono::steady_clock::time_point rx_last_sweep{};
+
   /// \brief How long a dry pool may park this thread before the block is DROPPED instead (fix B, dev doc 6.26).
   ///
   /// The bound has to sit between the two populations this workflow has measured: a healthy pool's worst park is

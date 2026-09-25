@@ -1278,7 +1278,7 @@ int main()
                      "registry at all\n");
         return 1;
       }
-      handover_reap_hook::reap();
+      handover_reap_hook::reap(handover_reap_hook::reap_reason::dry_pool);
       for (unsigned spin = 0; (spin != 2000) && (q9a_probe.releases.load() == 0); ++spin) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
@@ -1315,6 +1315,68 @@ int main()
                    static_cast<unsigned long long>(q9a_before.late_commits_time),
                    static_cast<unsigned long long>(q9a_after.late_commits_time));
     }
+
+      // ---- the SAME contract for the entry point dev doc 6.34 added: the ORDINARY TAKE of a buffer ----------
+      // The sweep's rules are the registry's and do not change; what this asserts is that the two callers are
+      // counted APART, because that is what lets a leg read "the sweep now runs while the pipeline is healthy"
+      // (take) apart from "a stalled pool had to rescue itself" (park). Same shape as above, one orphan, and
+      // the take reason in the call.
+      {
+        keep_alive_probe q9c_probe;
+        constexpr uint64_t q9c_slot = test_slot + 501;
+        const metal::shared_burst::handed_counters q9c_before = metal::shared_burst::handed_stats();
+        // (its own grid_write: `write` in this translation unit is the POSIX one, in scope here)
+        metal::dft_metal_engine::grid_write take_write;
+        take_write.grid_base  = grid_base;
+        take_write.grid_bytes = grid_bytes;
+        take_write.dst_offset = dst_offset;
+        take_write.nof_subc   = nof_subc;
+        take_write.map_offset = transform_size - nof_subc / 2;
+        take_write.phase_re   = 1.0F;
+        engine.set_lane_slot(q9c_slot);
+        if (!engine.begin_block() || !engine.submit_slot_grid_write(in_mem, out_mem, 0, take_write) ||
+            !engine.retain_for_block(q9c_probe.token()) || (engine.release_block(grid_base) == nullptr)) {
+          std::fprintf(stderr, "FAIL: the 6.34 take-path arm could not stage its orphan\n");
+          return 1;
+        }
+        // Past the TIME deadline, and then only the take-shaped call: no deposit, no park, no host read.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        handover_reap_hook::reap(handover_reap_hook::reap_reason::take);
+        for (unsigned spin = 0; (spin != 2000) && (q9c_probe.releases.load() == 0); ++spin) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const metal::shared_burst::handed_counters q9c_after = metal::shared_burst::handed_stats();
+        if (q9c_probe.releases.load() != 1) {
+          std::fprintf(stderr,
+                       "FAIL (6.34): the ordinary TAKE asked for a reap and the input came back %u times, "
+                       "expected 1 - an unclaimed block in a UL-quiet window would keep its whole-slot buffer\n",
+                       q9c_probe.releases.load());
+          return 1;
+        }
+        if ((q9c_after.reaped_by_take_events <= q9c_before.reaped_by_take_events) ||
+            (q9c_after.reaped_by_take_blocks <= q9c_before.reaped_by_take_blocks) ||
+            (q9c_after.reaped_by_park_events != q9c_before.reaped_by_park_events) ||
+            (q9c_after.reaped_by_park_blocks != q9c_before.reaped_by_park_blocks)) {
+          std::fprintf(stderr,
+                       "FAIL (6.34): the take-shaped reap did not move the TAKE counters alone (take events "
+                       "%llu->%llu, take blocks %llu->%llu, park events %llu->%llu, park blocks %llu->%llu)\n",
+                       static_cast<unsigned long long>(q9c_before.reaped_by_take_events),
+                       static_cast<unsigned long long>(q9c_after.reaped_by_take_events),
+                       static_cast<unsigned long long>(q9c_before.reaped_by_take_blocks),
+                       static_cast<unsigned long long>(q9c_after.reaped_by_take_blocks),
+                       static_cast<unsigned long long>(q9c_before.reaped_by_park_events),
+                       static_cast<unsigned long long>(q9c_after.reaped_by_park_events),
+                       static_cast<unsigned long long>(q9c_before.reaped_by_park_blocks),
+                       static_cast<unsigned long long>(q9c_after.reaped_by_park_blocks));
+          return 1;
+        }
+        std::fprintf(stderr,
+                     "[dft-release] arm 12b (6.34 take-path sweep): an ordinary TAKE reaped an unclaimed block "
+                     "with no deposit and no park, the input came back exactly once, and the TAKE counters moved "
+                     "while the PARK pair stood still (take events %llu->%llu)\n",
+                     static_cast<unsigned long long>(q9c_before.reaped_by_take_events),
+                     static_cast<unsigned long long>(q9c_after.reaped_by_take_events));
+      }
 
     // ---- Arm 13 (Q9-D): the fence-order instrument sees a wait that precedes its signaller -----------
     // Leg `p11-conc2` stalled for 5 s with eight receiving slots' front-end command buffers (the whole receive

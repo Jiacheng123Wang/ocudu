@@ -619,7 +619,20 @@ std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_proc
   // Returning the reserve immediately would exercise only the drop's bookkeeping, not the timing that decides it.
   bool force_timeout = rx_pool_drop_forced();
   if (!force_timeout && rx_pool->buffers.try_pop(buffer)) {
-    // The healthy path: nothing to reap, nothing to wait for, and not one hook call.
+    // The healthy path: nothing to wait for. It DOES ask the registry to sweep, though, at a bounded
+    // cadence - dev doc 6.34: the sweep's other two entry points (a deposit, and the park below) both need
+    // either new work or a dry pool, so in a UL-QUIET window neither fires and a block nobody claimed keeps
+    // its whole-slot buffer out of this pool for as long as the quiet lasts (measured: 19.9 ms on p23,
+    // 96.4 ms on p24, 2.79 s on p19, 10.4 s on p22). The sweep's RULES are untouched - a block is reaped
+    // only once the chain has moved its window past its slot, or past the 10 ms deadline - so this cannot
+    // take a block from a hop that is still entitled to claim it; what changes is only WHEN the rules are
+    // evaluated. Throttled to rx_sweep_interval (1 ms, i.e. one sweep per couple of slots at 30 kHz) so a
+    // healthy run pays one registry mutex per millisecond and not one per take.
+    const auto now = std::chrono::steady_clock::now();
+    if ((now - rx_last_sweep) >= rx_sweep_interval) {
+      rx_last_sweep = now;
+      handover_reap_hook::reap(handover_reap_hook::reap_reason::take);
+    }
     return buffer;
   }
   // The pool is DRY, which is the only state in which the hand-over has something to give back - and the
@@ -649,7 +662,7 @@ std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_proc
                                                       rx_park_budget + std::chrono::microseconds(1)))
                              : rx_reap_slice;
   for (;;) {
-    handover_reap_hook::reap();
+    handover_reap_hook::reap(handover_reap_hook::reap_reason::dry_pool);
     // The DIAGNOSTIC arm (OCUDU_UL_RX_POOL_DROP_FORCE) has already "timed out": it skips the wait so the budget
     // and the drop below run for real, on a pool that is in fact healthy.
     const bool simulated_timeout = force_timeout;

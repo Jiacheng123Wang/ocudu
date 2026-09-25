@@ -118,9 +118,9 @@ void slot_hop_plan_set_hook(uint64_t slot, unsigned hop_count, unsigned hop_inde
 /// caller the registry cannot reach on its own: a parked receive thread deposits nothing, so the "check at
 /// every entry point" rule has no entry point to run at, and the blocks holding the pool stay unclaimed for
 /// as long as the stall lasts (measured on `p08-conc2`: 5.945 s).
-void handover_reap_hook_impl()
+void handover_reap_hook_impl(handover_reap_hook::reap_reason why)
 {
-  shared_burst::reap_unclaimed_now();
+  shared_burst::reap_unclaimed_now(why);
 }
 
 const bool grid_ready_hook_installed = []() {
@@ -1300,16 +1300,25 @@ uint64_t shared_burst::grid_production_generation(const void* grid_base, uint64_
   return generation;
 }
 
-void shared_burst::reap_unclaimed_now()
+void shared_burst::reap_unclaimed_now(handover_reap_hook::reap_reason why)
 {
   std::vector<id<MTLCommandBuffer>> commit_late;
   {
     handed_state&               h = handed();
     std::lock_guard<std::mutex> lock(h.mutex);
     // Counted BEFORE the sweep, so a leg can tell "a dry pool asked, and there was nothing to reap" (the
-    // holder is then a CLAIMED block, which the sweep must not touch) from "a dry pool never asked at all".
-    ++h.counters.reaped_by_park_events;
-    h.counters.reaped_by_park_blocks += sweep_unclaimed(h, commit_late);
+    // holder is then a CLAIMED block, which the sweep must not touch) from "a dry pool never asked at all" -
+    // and, since dev doc 6.34, the same pair for the ORDINARY take, which is the entry point a quiet window
+    // needs (see handover_reap_hook).
+    const uint64_t reaped  = sweep_unclaimed(h, commit_late);
+    const bool     by_take = (why == handover_reap_hook::reap_reason::take);
+    if (by_take) {
+      ++h.counters.reaped_by_take_events;
+      h.counters.reaped_by_take_blocks += reaped;
+    } else {
+      ++h.counters.reaped_by_park_events;
+      h.counters.reaped_by_park_blocks += reaped;
+    }
   }
   for (id<MTLCommandBuffer> late : commit_late) {
     commit_dropped(late);

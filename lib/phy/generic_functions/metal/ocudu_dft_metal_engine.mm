@@ -583,7 +583,8 @@ static void dft_stats_report()
                    "[metal_stats] block lifecycle (P0-7): claimed=%llu wait max=%.1fus mean=%.1fus; produced=%llu "
                    "deposit->completion max=%.1fus mean=%.1fus; unclaimed at once max=%llu, oldest unclaimed "
                    "age max=%.1fus at slot=%llu; registry commit->completion=%llu max=%.1fus mean=%.1fus "
-                   "(Q9-B); dry-pool reaps=%llu recovering %llu block(s); handler lag=%llu max=%.1fus mean=%.1fus "
+                   "(Q9-B); dry-pool reaps=%llu recovering %llu block(s); take sweeps=%llu recovering %llu "
+                   "block(s); handler lag=%llu max=%.1fus mean=%.1fus "
                    "at slot=%llu (Q9-E: GPU done -> handler ran)\n",
                    static_cast<unsigned long long>(hand.claim_count),
                    static_cast<double>(hand.claim_wait_max_us),
@@ -604,6 +605,10 @@ static void dft_stats_report()
                    // blocks that recovered. Events without blocks = the stall was not an unclaimed block.
                    static_cast<unsigned long long>(hand.reaped_by_park_events),
                    static_cast<unsigned long long>(hand.reaped_by_park_blocks),
+                   // dev doc 6.34: the sweeps the ORDINARY take path drove. Read with the pair above: the
+                   // take path is the one a UL-quiet window has, and the park path stays the last resort.
+                   static_cast<unsigned long long>(hand.reaped_by_take_events),
+                   static_cast<unsigned long long>(hand.reaped_by_take_blocks),
                    // Q9-E: the host's own lag after the GPU finished. Read against `deposit->completion`: equal
                    // maxima mean the seconds were the HOST's, not the queue's.
                    static_cast<unsigned long long>(hand.handler_lag_count),

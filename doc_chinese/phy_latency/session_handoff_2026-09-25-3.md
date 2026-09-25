@@ -317,3 +317,25 @@ bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 p22-n78-conc2  #
   metal **arm 10–17** 全 PASS、`lower_phy_test` ✓、`l1_handover_arms.sh` 5 PASS、门自测 PASS。
 * **下一步**：①**按对累计 D4/D1/D2**（批量 vs 对照）；②**V2 的容量问题（P2-D）**、**V3（RF 835–1168）**；
   ③ 若要为 **extended CP** 取证，需要一条 extended CP 的腿（当前没有）。
+
+---
+
+## 10. 追加更正 #4：V2 归因（§6.34）+ 修法 (A) 落地（§6.35）
+
+* **归因（零腿，§6.34）**：GPU 模式**强制整槽缓冲**，定尺公式的 `+8` 在整槽下**退化成常量 8**（中间项塌成 0）；
+  需求侧 **在飞峰值 = `keepalives max in flight 84` = 6 个整槽块**，且**批量化前后一模一样（84）**⇒
+  **池 8 = 6 在飞 + 1 在收 + 1 刚收，余量 0**；饥饿是**亚毫秒**的（`pop_blocking` max 321 µs）。
+  可避免的持有者 = **未被认领的块**（同持 3–4 个、19.9–95.5 ms），因为**清扫只有"入池"和"干池 park"两个入口点**，
+  **上行静默窗口里两个都不发生**（p19 2.79 s、p22 10.4 s 同源）。⇒ 两条修法：(A) 加入口点（不需裁决）；(B) P2-D 定尺（需裁决）。
+* **(A) 已实现（提交见下，§6.35）**：`handover_reap_hook::reap(reap_reason{dry_pool,take})`，
+  **普通取缓冲也驱动清扫**（`rx_sweep_interval = 1 ms` 节流），新增 **`reaped_by_take_events/blocks`** 与读数
+  **`take sweeps=N recovering M block(s)`**；**清扫规则一字未改**（窗口 2 槽 / 10 ms 截止）⇒ 不会抢走合法的认领。
+  metal 自测新增 **arm 12b**（只有 take 形状的一次调用：输入恰好回来一次，take 计数动、park 计数不动）。
+  网全绿（`ctest -L phy` 193/193 等，名单同 §6.31 ⑥ 3）。
+* **待飞一条验证腿**（命令与预登记见开发文档 **§6.35 ④**）：配方同 p23/p24（n78 加压、并发 2、批量默认 AUTO、
+  **流量结束后尽快停机**）。预期：**D1/D2 从 20–96 ms 回到 ≤~5 ms**、**`starved_events` 38 → 0–5**、
+  `take sweeps=N recovering M`（M ≥ 1 才算入口点真的回收到了块）、契约 8/8、`cbs/lane` 不变、0 gaps。
+  ⚠ **`held_max` 可能仍是 8**（6 在飞 + 1 在收 + 1 刚收是**结构性**峰值）⇒ 那部分只能由 **(B) P2-D** 回答，
+  别把 (A) 的成功误读成 V2 未达成。
+* **仍挂着**：(B) P2-D 定池尺（**需裁决**）、V3（RF 835–1168）、D4 按对累计、extended CP 取证腿、
+  两条陈旧网、Q12、P1-6、P2-F、MAC 侧 CRC 饥饿恢复。

@@ -24,6 +24,7 @@
 
 #import <Metal/Metal.h>
 
+#include "ocudu/phy/phy_pipeline_grid_ready.h"
 #include "ocudu_metal_lane_probe.h"
 
 #include <cstddef>
@@ -274,9 +275,9 @@ public:
   /// receive thread parked on an empty pool) can break the stall without a consumer coming. It never blocks
   /// and does nothing when there is nothing to reap.
   ///
-  /// \note Tracked by `reaped_by_park_events` / `reaped_by_park_blocks`, because an instrument that fires and
+  /// \note Tracked by `reaped_by_park_*` and `reaped_by_take_*` apart (dev doc 6.34), because an instrument that fires and
   ///       is never counted is how "the fix is in" gets believed without a reading.
-  static void reap_unclaimed_now();
+  static void reap_unclaimed_now(handover_reap_hook::reap_reason why = handover_reap_hook::reap_reason::dry_pool);
 
   /// \brief How many deposits the registry holds before it starts dropping them (see handed_counters).
   ///
@@ -446,6 +447,17 @@ public:
     ///@{
     uint64_t reaped_by_park_events = 0;
     uint64_t reaped_by_park_blocks = 0;
+    ///@}
+    /// \name dev doc 6.34: the sweeps an ORDINARY (successful) take of a receive buffer drove.
+    ///
+    /// The third entry point, and the one that closes the hole the two above leave: in a UL-quiet window
+    /// nothing is deposited and a pool that is not dry parks nobody, so without this an unclaimed block kept
+    /// its whole-slot buffer until the traffic came back. Read next to the park pair: a leg that reaps here
+    /// but not at the park is a leg whose unclaimed blocks are now recovered while the pipeline is HEALTHY,
+    /// which is the whole point (the park path stays as the last resort it was written to be).
+    ///@{
+    uint64_t reaped_by_take_events = 0;
+    uint64_t reaped_by_take_blocks = 0;
     ///@}
   };
   static handed_counters handed_stats();
