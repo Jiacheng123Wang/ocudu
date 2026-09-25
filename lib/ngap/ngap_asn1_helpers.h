@@ -573,38 +573,8 @@ inline bool fill_ngap_pdu_session_resource_modify_item_base(
 
       // Fill QoS flow level QoS parameters.
       if (asn1_flow_item.qos_flow_level_qos_params_present) {
-        if (asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.type() ==
-            asn1::ngap::qos_characteristics_c::types::dyn5qi) {
-          dyn_5qi_descriptor dyn_5qi = {};
-          if (asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.dyn5qi().five_qi_present) {
-            dyn_5qi.five_qi =
-                uint_to_five_qi(asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.dyn5qi().five_qi);
-          }
-          // TODO: Add optional values.
-
-          qos_flow_add_item.qos_flow_level_qos_params.qos_desc = dyn_5qi;
-
-          // TODO: Add optional values.
-
-        } else if (asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.type() ==
-                   asn1::ngap::qos_characteristics_c::types::non_dyn5qi) {
-          non_dyn_5qi_descriptor non_dyn_5qi = {};
-          non_dyn_5qi.five_qi =
-              uint_to_five_qi(asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.non_dyn5qi().five_qi);
-          qos_flow_add_item.qos_flow_level_qos_params.qos_desc = non_dyn_5qi;
-
-          // TODO: Add optional values.
-        }
-
-        // Fill allocation and retention priority.
-        qos_flow_add_item.qos_flow_level_qos_params.alloc_retention_prio.prio_level_arp =
-            asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.prio_level_arp;
-        qos_flow_add_item.qos_flow_level_qos_params.alloc_retention_prio.may_trigger_preemption =
-            asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.pre_emption_cap.value ==
-            asn1::ngap::pre_emption_cap_opts::may_trigger_pre_emption;
-        qos_flow_add_item.qos_flow_level_qos_params.alloc_retention_prio.is_preemptable =
-            asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.pre_emption_vulnerability.value ==
-            asn1::ngap::pre_emption_vulnerability_opts::pre_emptable;
+        qos_flow_add_item.qos_flow_level_qos_params =
+            ngap_asn1_to_qos_flow_level_qos_parameters(asn1_flow_item.qos_flow_level_qos_params);
       }
 
       modify_item.transfer.qos_flow_add_or_modify_request_list.emplace(qos_flow_add_item.qos_flow_id,
