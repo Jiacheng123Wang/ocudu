@@ -106,6 +106,14 @@ public:
   ///
   /// Called right after commit(), which is also when the slot must be told (set_lane_slot()): a slot
   /// change closes the previous group.
+  ///
+  /// \note SINCE 6.19 IT IS ALSO CALLED AT DEPOSIT TIME, by the DFT engine's release_block() - before the
+  ///       commit, because with the hand-over armed (the default) the engine is NOT the one that commits these
+  ///       blocks: the lane commits the adopted buffer, or the registry's sweep commits the dropped one. A
+  ///       block that is not final when its slot's group closes is carried (see the .mm's Q9-F2 block) and
+  ///       reported separately, so a front-end block's own GPU window is readable even when nobody knows which
+  ///       engine committed it - and the group series covers only the blocks that were final at their own
+  ///       group's close.
   static void register_front_end_commit(id<MTLCommandBuffer> cb, uint64_t slot_index);
 
   /// \brief Pairs one FINALIZED phase sample with the lane that produced it (P0-5).

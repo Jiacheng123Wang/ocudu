@@ -1515,6 +1515,147 @@ D9 INFO fence order (Q9-D): waits=27957 signaller-first=27957 signaller-after=0
 比较"等待者 vs signaller 的提交次序"，把 Q9-G 变成读数）＋ **Q9-F2**（把前端 deposit 块也注册进 lane 探针的前端组，
 拿到它们的 GPU 时间）⇒ 一条腿定性：`等待者先提交 > 0` ⇒ 实现 Q9-G 的**提交握手**；`= 0` ⇒ 转 GPU/队列结构。
 
+### 6.19 ✅ Q9-F + Q9-F2（＋Q9-F3）落地（2026-09-25）：**把"等待者 vs signaller"的次序从"发出"改成"提交"，并给**每一个**命令缓冲一条 GPU 窗口**（本机离线已验证，**空口腿待飞**）
+
+> 本节是 §6.18 ③ 的执行记录。配方与 p07–p13 完全相同；**下一条腿的标签建议 `p14-conc2`**，且必须带
+> `OCUDU_METAL_GPU_TIME=1`（Q9-F3 的读数由它打开，见 ⑤ 的腿命令）。
+
+**① 为什么需要 Q9-F：§6.17 ③ 已登记的盲区就是它**
+
+Q9-D（§6.16）比较的是"等待 vs signaller **发出**"（`backend_stage_signal()` / `grid_ready_signal()` 返回 generation
+的那一刻），p12/p13 都读成 `signaller-after=0`——**全部安全形状**。但**发出 ≠ 提交**：信号骑在一条命令缓冲上，
+那条缓冲的提交可能晚得多，而且**可能是另一个线程**提交的：
+
+| 生产者块（带着 grid 信号） | 谁提交 | 何时 |
+|---|---|---|
+| 跳认领了交棒块（`take_released` → `adopt`） | **车道自己**（`shared_burst::commit()`） | 认领后几十 µs，**在等待者之前** |
+| 跳**错过**交棒，注册表 fallback 提交 | 该跳自己（`claim_grid_production` → `commit_dropped`）| 返回 generation **之前** |
+| **sweep** 认领（`deposit_released` / `take_released` / `reap_unclaimed_now`） | **触发 sweep 的那个线程**，`commit_late` 在**解锁之后**才提交 | **可能晚于等待者的提交**（几 µs–几十 µs 的窗口）|
+
+最后一行就是 **Q9-G**：在"锁内认领 → 解锁后提交"的窗口里，另一个线程的跳调 `grid_production_generation()`
+看到 `claimed && !produced` ⇒ **只返回 generation、不自己提交**（fallback 分支要求 `!claimed`），于是它把等待编进
+自己的缓冲并提交——**等待者可能排在生产者前面**。而同一条（串行 start 次序的）队列上，
+**等一个排在自己后面的事件是解不开的**。
+
+**② Q9-F：提交票号与"等待者先提交"（`ocudu_metal_queue.{h,mm}`）**
+
+* `shared_queue::note_commit_order(cb)`：在**每一个可能带设备侧栅栏的 `[cb commit]` 之前**取一个全局递增票号
+  （`burst.mm` 的两处、`mmse_engine.mm` 的 8 处、`dft_metal_engine.mm` 的两处、mmse 的 `handed_direct` 一处）；
+  `note_fence_signal()/note_fence_wait()` 现在**多带一个 cb 参数**，把"这条缓冲将发哪个 generation / 在等哪个 generation"
+  挂到它身上，提交时一次性兑现。
+* 判据（**这就是 Q9-G 的读数**）：等待者提交时，**若已有一条携带 `generation' ≥ generation` 的缓冲提交过** ⇒ 安全
+  （那条缓冲在等待者前面，事件值会先被推过等待值）；**否则记为 `waiter-committed-first`（倒置）**，并在真正的
+  signaller 提交时量出**时长**（等待者提交 → signaller 提交）、**两种队列关系分开计**
+  （**same-queue = 解不开的那一种**，cross-queue = 另一条队列并行跑，只是延迟）。
+* 报告行（`[metal_stats]`，atexit）：
+
+```
+[metal_stats] commit order (Q9-F): commits=… waits=… waiter-committed-first=… (same-queue=… cross-queue=…) max=…ms worst kind=stage|corr|grid slot=…; per kind: stage i/w, corr i/w, grid i/w (inversions/waits)
+```
+
+* ⚠ **票号在 `[cb commit]` 之前一拍取**：票号次序 = 各线程"打算提交"的次序。若线程在票号与提交之间被抢占，
+  真实队列次序可能相反——这种竞态的时长是**亚毫秒**，而缺陷是**秒级**，报告里的 `max` 用来区分（写在头文件注释里）。
+* ⚠ **"读不出"不静默**：`waits still open at exit` 表示**没有任何 ≥ 该值的信号提交过**（signaller 从未提交），
+  在报告行尾点名，不计入 `waits`。
+
+**③ Q9-F2：前端（deposit）块终于有了自己的 GPU 窗口（`ocudu_metal_lane_probe.{h,mm}` + DFT 引擎）**
+
+* `dft_metal_engine::release_block()` 在 `deposit_released()` 之后调 `gpu_lane_probe::register_front_end_commit(cb, slot)`。
+  **为什么这是缺口**：交棒默认开（`grid_handover_armed()`）⇒ deposit 块**不由 DFT 引擎提交**（车道提交，或注册表 sweep 提交），
+  而前端系列此前只由 `commit_front_end()` 喂 ⇒ **空气腿的前端系列是空的**（p13 的 stderr 里没有 `[ul_gpu_lane] dft slots=` 行），
+  受害的却正是这些块。
+* 一个块在自己的槽位分组关闭时还没跑完 ⇒ 不再被丢掉，而是**带着注册时刻（= deposit 时刻）留给报告**；报告里：
+  `dft carried blocks (Q9-F2): resolved=R of T (never committed=…, committed but unfinished at exit=…, no GPU timestamps=…, dropped over the bound=…)`
+  ＋两条系列（`dft carried deposit ->GPU start`、`dft carried GPU start ->end`）＋**按设备时间最慢的 8 块**
+  （`deposit->start` 大 = 在队列里等；`start->end` 大 = **设备真的占着这条块**）。
+  **两个"读不出"分开计**：`never committed` 是交棒自己的缺陷（没人提交的 deposit），`unfinished at exit` 是腿停在停顿里。
+
+**④ Q9-F3：队列占用时间线（`ocudu_metal_queue.{h,mm}`，本次新增，属"§6.2 第二支"的准备）**
+
+Q9-F 只回答"次序对不对"；若倒置为 0，§6.2 的分支要的是 **GPU 侧证据**。`arm_gpu_time()`（既有开关
+`OCUDU_METAL_GPU_TIME=1`）现在**多接一个 `label` 与 `slot`**，并让**每条命令缓冲**在完成处理器里留下一条
+（GPU 窗口、提交时刻、label、slot）记录。报告把**所有窗口求并**，给出：
+
+```
+[metal_stats] queue occupancy (Q9-F3): commits=… busy(union)=…us window=…us holes>100us=… largest=…ms
+[metal_stats] queue occupancy (Q9-F3) slowest commits, by commit -> GPU start (label = what the buffer carries):
+[metal_stats]   label=merged_hop|late_handed|ce_weights|… slot=… commit->start=…us start->end=…us
+[metal_stats]   hole …ms -> next label=… slot=… (nothing was executing on any probed queue for that long)
+```
+
+* **它回答的是"等待期间设备在干什么"**：并集里的**洞**= 那段时间**没有任何**探针队列在执行；
+  洞后第一条的 label/slot = **谁在等**。这是"队列被夹住"与"设备被别的活占着"的唯一分界读数。
+* `[metal_stats] gpu busy (front_end/back_end)`（既有行）**只在开关打开时非零**——它此前一直是 `commits=0`，
+  因为 p07–p13 都没有带这个环境变量（**这是一个此前无人注意的读数空洞**：`gpu busy` 行一直在，值一直是 0）。
+* label 覆盖：`merged_hop`（被采纳的整跳）、`lane_burst`（非采纳）、`late_handed`（注册表迟提交，**此前完全不可见的那些块**）、
+  `ce_stage/ce_weights/ce_held/ce_abandon/ce_weights_fb/ce_commit`、`dft_front_end`、`equalizer`、`demapper`、`split_dft`、`handed_direct`。
+
+**⑤ 离线验证（本机，2026-09-25；判据"改代码后必跑"的那一套）**
+
+* `dft_release_adopt_metal_test` **新增 arm 14（Q9-F 自测）**：用**真实命令缓冲**造出两种次序——
+  (a) signaller 先提交、等待者后提交（**安全形状**，必须不计入倒置）；(b) **等待者先提交**、signaller 25 ms 后提交
+  （**倒置**，且必须计入 `same-queue` 并量出时长）。**注意**：arm 14 **不把 wait 真的编进缓冲**——那正是它要检出的挂起
+  （串行队列过不去），所以它按编码点的调用方式直接驱动簿记。实测输出：
+
+```
+[dft-release] arm 14 (Q9-F): the commit-order instrument counts a waiter that is SUBMITTED before its signaller
+              apart from the safe shape - commits 53->57, waits 0->2, waiter-first 0->1 (same-queue 0->1), longest 25549 us
+[dft-release] arm 14 (Q9-F3): the occupancy probe recorded a GPU window for every one of the arm's four commits (0 -> 4 records)
+[metal_stats] commit order (Q9-F): commits=57 waits=2 waiter-committed-first=1 (same-queue=1 cross-queue=0) max=25.5ms worst kind=stage slot=0
+[metal_stats] queue occupancy (Q9-F3): commits=4 busy(union)=15.6us window=26333.8us holes>100us=3 largest=26.0ms
+```
+
+  arm 14 的四个缓冲**每个都带一条真实（短）dispatch**，所以 GPU 会给它们时间戳、占用探针会留下记录——
+  这让 Q9-F3 的"记录路径"也能**离线自证**，而不是靠相信；`largest=26.0ms` 就是该臂**故意**在等待者与
+  signaller 之间插入的 25 ms 睡眠，是这台仪器自己的演示。
+
+  同一次运行、带 `OCUDU_METAL_GPU_TIME=1` 时 Q9-F3 也自证（真实 GPU 窗口 + 洞）：
+
+```
+[metal_stats] queue occupancy (Q9-F3): commits=53 busy(union)=10382.6us window=267521.3us holes>100us=48 largest=98.8ms
+[metal_stats]   label=dft_front_end slot=0 commit->start=2054.0us start->end=40.0us
+[metal_stats]   hole 98.8ms -> next label=lane_burst slot=0 (nothing was executing on any probed queue for that long)
+```
+
+* Q9-F2 在同一次运行里也给出了读数（测试自己 deposit 的块）：
+  `dft carried blocks (Q9-F2): resolved=5 of 8 (never committed=3, committed but unfinished at exit=0, …)`。
+* **顺带修掉一个 atexit 崩溃**：`state()` 从"函数内静态对象"改为**故意不析构**（`new` + 注释）。
+  理由是本 TU 在**静态初始化期**注册 atexit，而对象在**首次使用**时才构造 ⇒ 处理器**在析构之后**才跑，
+  里面每个 mutex 都已失效。实测：`libc++abi: terminating due to uncaught exception … mutex lock failed: Invalid argument`
+  （Q9-F3 是这段代码里**第一个在报告期加锁**的读数）。lane 探针与交棒注册表早就是同样的写法，这里是同一理由的补齐。
+* `p0_gate.sh` 增加 **D11（Q9-F）/ D12（Q9-F2+F3）**：都是 **INFO（读数，不是判据）**；旧腿读成
+  "a leg flown before 6.19 cannot say"（**"读不出"不静默**）。D1–D4 的阈值**一字未动**。
+* 其余网：`ctest -L phy`、`lower_phy_test`、`l1_handover_arms.sh`、`l1_hop_arms.sh` 见本节提交信息（本机串行跑）。
+
+**⑥ 下一条腿（`p14-conc2`）怎么飞、怎么判（**一条腿定性**）**
+
+```bash
+# 起腿前：pgrep -x gnb / pgrep -x ul_chain_replay / lsof -nP -iUDP:2152 都要干净
+# 构建：本提交已构建（戳 = HEAD）
+sudo -E OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1 \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p14-conc2 \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+# 流量：CN 侧（10.45.0.1）上行 iperf3 -c <gNB-ip> -R -t 100   ← -R 不能省
+# 判读：bash doc_chinese/phy_latency/wip/p0_gate.sh p14-conc2      # D1–D12
+```
+
+> ⚠ **测量臂声明（§3.3）**：`OCUDU_METAL_GPU_TIME=1` 会给**每条命令缓冲**加一个完成处理器
+> （既有注释已警告"不是免费的：驱动为每个处理器派发一个 block"）。本腿是**诊断腿**：D1–D4 仍是判据，
+> 但 `V1/V4` 与 `cbs/lane` **不因它而变**（只加处理器，不改提交），若读数与 p13 差得离谱要**先怀疑探针本身**。
+
+**判读分支表（与 §6.2 的分支表一致，写成读数）**
+
+| `D11 waiter-committed-first` | `D12`（占用/洞/前端块） | 结论 / 下一步 |
+|---|---|---|
+| **> 0 且 `max` ≈ 该腿的停顿（秒级）** | 洞 ≈ 停顿，洞后 label 是 `merged_hop`/`late_handed` | **Q9-G 成立**：实现**提交握手**（§6.2 第一支）——`claimed && !produced` 时，在返回 generation 之前**等它"已经提交"**（新增 `handed_entry::commit_done`，由提交方**在提交之后、锁内**置位；等待**有界**，超界退回今天的行为并计数）。⚠ **不能把 `[cb commit]` 挪进锁内**（完成处理器可能同线程内联 ⇒ 死锁）|
+| **> 0 但 `max` 只有 µs/ms** | 洞小、或前端块 `start->end` 是 ms | 倒置发生了但**没吃到停顿**（竞态窗口没被踩中/被 driver 化解）⇒ 仍建议做握手（便宜且把窗口关死），但**要继续找那 5 s**：看 D12 的 `hole` 后 label 与 `start->end` 最大的块 |
+| **= 0** | 洞 ≈ 5 s 且洞后 label 明确 | **次序不是原因** ⇒ 走 §6.2 第二支：**那条 label 的命令缓冲就是阻塞者**，用它自己的 `commit->start`/`start->end` 定性（等 vs 跑），再谈"前端块独立队列"（结构性改动，**先请用户裁**）|
+| **= 0** | 无洞（`holes>100us=0`）且所有 `start->end` 都是 ms | 设备**一直在跑**别的活 ⇒ 停顿是**吞吐/排队**（回到 §7.1 的 C 项：单车道串行）而不是栅栏 |
+| **读不出**（无 D11/D12 行） | — | 腿没带 `OCUDU_METAL_GPU_TIME=1`，或二进制不是本节提交 ⇒ **按 RED 算**，重飞 |
+
+**⑦ 仍未做（本节边界）**：Q9-G 的**握手本身**（等 D11 的读数）；`[ul_gpu_lane] dft carried` 的**空口基线**
+（本机测试里 resolved=5/8 是测试自己造的 deposit，空气腿的形态要 p14 才知道）；P2-E 的 (b) 选项（§6.4.6 已裁"不做"）。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

@@ -1385,6 +1385,175 @@ int main()
                    static_cast<unsigned long long>(max_after));
     }
 
+    // ---- Arm 14 (Q9-F): the COMMIT order of a fence's two ends, which is Q9-D's measured blind spot -------
+    // Arm 13 shows Q9-D counting a wait whose signaller had not been HANDED OUT yet. That is not the shape a
+    // leg stalls on, or not the only one: `backend_stage_signal()` / `grid_ready_signal()` return a generation
+    // and encode the signal immediately, and the command buffer carrying it is committed LATER - by the same
+    // thread a few instructions on, or by ANOTHER one (the registry's sweep commits a claimed hand-over block
+    // after dropping its lock, see shared_burst::claim_grid_production()). A waiter that is committed before
+    // its signaller is a waiter whose signaller is behind it on a queue that only orders STARTS, which is the
+    // ordering that cannot resolve. This arm builds exactly that order with REAL command buffers (the wait and
+    // the signal go into different buffers, and the buffer that will signal is committed second), so the
+    // instrument is exercised on the object it judges rather than on its own bookkeeping.
+    {
+      using ocudu::metal::shared_queue;
+      id<MTLCommandQueue> queue = metal::shared_queue::backend_queue();
+      if (queue == nil) {
+        std::fprintf(stderr, "FAIL: arm 14 has no back-end queue\n");
+        return 1;
+      }
+      // Q9-F3 rides on the same switch as the busy time (OCUDU_METAL_GPU_TIME=1) and is exercised HERE, on
+      // the four buffers below: they carry one real (short) dispatch each, so the GPU gives them timestamps and
+      // the occupancy handler leaves a record - which is the only way "the probe records windows" can be read
+      // offline instead of being believed.
+      ::setenv("OCUDU_METAL_GPU_TIME", "1", 1);
+      const uint64_t occupancy_before = shared_queue::nof_occupancy_records();
+      id<MTLDevice>               device = shared_queue::device();
+      id<MTLComputePipelineState> spin   = (device != nil) ? make_spin_pipeline(device) : nil;
+      id<MTLBuffer>               out    = (device != nil) ? [device newBufferWithLength:4096
+                                                                                options:MTLResourceStorageModeShared]
+                                                           : nil;
+      if ((device == nil) || (spin == nil) || (out == nil)) {
+        std::fprintf(stderr, "FAIL: arm 14 could not build its spin pipeline\n");
+        return 1;
+      }
+      const auto add_spin = [&](id<MTLCommandBuffer> cb) {
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:spin];
+        [enc setBuffer:out offset:0 atIndex:0];
+        const uint32_t iters = 100;
+        [enc setBytes:&iters length:sizeof(iters) atIndex:1];
+        [enc dispatchThreadgroups:MTLSizeMake(32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [enc endEncoding];
+      };
+      const uint64_t waits_before       = shared_queue::nof_commit_order_waits();
+      const uint64_t inversions_before  = shared_queue::nof_commit_order_waiter_first();
+      const uint64_t same_queue_before  = shared_queue::nof_commit_order_waiter_first_same_queue();
+      const uint64_t commits_before     = shared_queue::nof_commit_order_commits();
+
+      // (a) The SAFE shape, on real buffers: the signaller is committed FIRST, so a wait for its generation has
+      //     a signaller that is already ahead of it - the wait must NOT be counted as an inversion.
+      id<MTLCommandBuffer> signaller_first = [queue commandBuffer];
+      const uint64_t       safe_generation = shared_queue::backend_stage_signal(signaller_first);
+      if (safe_generation == 0) {
+        std::fprintf(stderr, "FAIL: arm 14 could not hand out a stage-fence generation\n");
+        return 1;
+      }
+      add_spin(signaller_first);
+      shared_queue::arm_gpu_time(signaller_first, shared_queue::queue_kind::back_end, "arm14_signaller");
+      shared_queue::note_commit_order(signaller_first);
+      [signaller_first commit];
+      [signaller_first waitUntilCompleted];
+
+      id<MTLCommandBuffer> safe_waiter = [queue commandBuffer];
+      if (shared_queue::backend_stage_wait_generation(safe_waiter, safe_generation)) {
+        add_spin(safe_waiter);
+        shared_queue::arm_gpu_time(safe_waiter, shared_queue::queue_kind::back_end, "arm14_safe_waiter");
+        shared_queue::note_commit_order(safe_waiter);
+        [safe_waiter commit];
+        [safe_waiter waitUntilCompleted];
+      }
+
+      // (b) The INVERSION: the waiter is committed first, and the buffer that will signal its generation second.
+      //     Both go into real command buffers of the same queue; the wait itself is NOT encoded (encoding it
+      //     would hang this test for good - a serial queue does not get past a wait whose signaller is behind
+      //     it, which is the defect the instrument exists to find), so the bookkeeping is driven directly the
+      //     way the encoding sites drive it.
+      id<MTLCommandBuffer> waiter = [queue commandBuffer];
+      const uint64_t       absent = shared_queue::backend_stage_generation() + 1000;
+      shared_queue::note_fence_wait(absent, shared_queue::fence_kind::stage, waiter);
+      add_spin(waiter);
+      shared_queue::arm_gpu_time(waiter, shared_queue::queue_kind::back_end, "arm14_waiter");
+      shared_queue::note_commit_order(waiter);
+      [waiter commit];
+      [waiter waitUntilCompleted];
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+
+      id<MTLCommandBuffer> signaller_second = [queue commandBuffer];
+      shared_queue::note_fence_signal(absent, shared_queue::fence_kind::stage, signaller_second);
+      add_spin(signaller_second);
+      shared_queue::arm_gpu_time(signaller_second, shared_queue::queue_kind::back_end, "arm14_signaller2");
+      shared_queue::note_commit_order(signaller_second);
+      [signaller_second commit];
+      [signaller_second waitUntilCompleted];
+
+      const uint64_t waits_after      = shared_queue::nof_commit_order_waits();
+      const uint64_t inversions_after = shared_queue::nof_commit_order_waiter_first();
+      const uint64_t same_queue_after = shared_queue::nof_commit_order_waiter_first_same_queue();
+      const uint64_t commits_after    = shared_queue::nof_commit_order_commits();
+      if (commits_after != commits_before + 4) {
+        std::fprintf(stderr,
+                     "FAIL (Q9-F): the four armed commits (two signallers, two waiters) did not all take a "
+                     "ticket (%llu -> %llu)\n",
+                     static_cast<unsigned long long>(commits_before),
+                     static_cast<unsigned long long>(commits_after));
+        return 1;
+      }
+      if (waits_after != waits_before + 2) {
+        std::fprintf(stderr,
+                     "FAIL (Q9-F): the two waits that reached a commit were not both judged (waits %llu -> %llu)\n",
+                     static_cast<unsigned long long>(waits_before),
+                     static_cast<unsigned long long>(waits_after));
+        return 1;
+      }
+      if (inversions_after != inversions_before + 1) {
+        std::fprintf(stderr,
+                     "FAIL (Q9-F): the waiter committed before its signaller was not counted as an inversion "
+                     "(waiter-committed-first %llu -> %llu; the safe pair must not add one either)\n",
+                     static_cast<unsigned long long>(inversions_before),
+                     static_cast<unsigned long long>(inversions_after));
+        return 1;
+      }
+      if (same_queue_after != same_queue_before + 1) {
+        std::fprintf(stderr,
+                     "FAIL (Q9-F): the inversion was not attributed to the SAME queue (%llu -> %llu), which is "
+                     "the shape that cannot resolve itself\n",
+                     static_cast<unsigned long long>(same_queue_before),
+                     static_cast<unsigned long long>(same_queue_after));
+        return 1;
+      }
+      const uint64_t occupancy_after = shared_queue::nof_occupancy_records();
+      if (occupancy_after < occupancy_before + 4) {
+        std::fprintf(stderr,
+                     "FAIL (Q9-F3): the occupancy probe recorded %llu of the 4 committed buffers (before=%llu, "
+                     "after=%llu)\n",
+                     static_cast<unsigned long long>(occupancy_after - occupancy_before),
+                     static_cast<unsigned long long>(occupancy_before),
+                     static_cast<unsigned long long>(occupancy_after));
+        return 1;
+      }
+      ::unsetenv("OCUDU_METAL_GPU_TIME");
+      std::fprintf(stderr,
+                   "[dft-release] arm 14 (Q9-F3): the occupancy probe recorded a GPU window for every one of the "
+                   "arm's four commits (%llu -> %llu records)\n",
+                   static_cast<unsigned long long>(occupancy_before),
+                   static_cast<unsigned long long>(occupancy_after));
+      ocudu::metal::shared_queue::fence_kind worst_kind = ocudu::metal::shared_queue::fence_kind::stage;
+      uint64_t                           worst_slot     = 0;
+      const uint64_t worst_us = shared_queue::commit_order_worst_us(worst_kind, worst_slot);
+      if (worst_us < 25000) {
+        std::fprintf(stderr,
+                     "FAIL (Q9-F): the inversion's duration (waiter's commit -> signaller's commit) was not "
+                     "measured (%llu us)\n",
+                     static_cast<unsigned long long>(worst_us));
+        return 1;
+      }
+      std::fprintf(stderr,
+                   "[dft-release] arm 14 (Q9-F): the commit-order instrument counts a waiter that is SUBMITTED "
+                   "before its signaller apart from the safe shape - commits %llu->%llu, waits %llu->%llu, "
+                   "waiter-first %llu->%llu (same-queue %llu->%llu), longest %llu us\n",
+                   static_cast<unsigned long long>(commits_before),
+                   static_cast<unsigned long long>(commits_after),
+                   static_cast<unsigned long long>(waits_before),
+                   static_cast<unsigned long long>(waits_after),
+                   static_cast<unsigned long long>(inversions_before),
+                   static_cast<unsigned long long>(inversions_after),
+                   static_cast<unsigned long long>(same_queue_before),
+                   static_cast<unsigned long long>(same_queue_after),
+                   static_cast<unsigned long long>(worst_us));
+    }
+
     // ---- Arm 10: "no record" must never mean "the write is still in flight" (5.9.62) ----------------
     // The registry's eviction loop erases entries, and a reader that finds NOTHING cannot wait - so an entry
     // erased before its block COMPLETED is the one way a hop can read a grid nobody has written. Until

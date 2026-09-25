@@ -75,9 +75,16 @@ lane_thread_state& thread_state()
 /// Thread local for the same reason as the lane state, and lockless for a stronger one: these
 /// registrations happen on the radio thread, per symbol, on the path the real-time uplink depends on.
 struct front_end_state {
-  uint64_t                         slot = 0;
-  bool                             open = false;
-  std::vector<id<MTLCommandBuffer>> cbs;
+  /// One registered command buffer and the host instant it was registered at. The instant is what the report
+  /// differences against the GPU's own start (Q9-F2): a front-end block that nobody commits until seconds later
+  /// has to be readable as "deposited at T, started at T+5s", and no other instrument reports those blocks.
+  struct entry {
+    id<MTLCommandBuffer> cb           = nil;
+    double               registered_s = 0.0;
+  };
+  uint64_t           slot = 0;
+  bool               open = false;
+  std::vector<entry> cbs;
 };
 
 front_end_state& front_end_thread_state()
@@ -208,6 +215,51 @@ struct lane_stats_t {
   uint64_t            fe_slots       = 0;
   uint64_t            fe_cbs         = 0;
   uint64_t            fe_carried     = 0;
+
+  /// \name Q9-F2 (dev doc 6.19): the front-end blocks a group had to leave behind, and what became of them.
+  ///
+  /// WHY. With the hand-over armed (the default) the front-end blocks are NOT committed by the engine: the lane
+  /// commits them (the adopted buffer), or the registry's sweep does. Reading their GPU window therefore cannot
+  /// happen at the slot's own group close - the block may still be waiting in the queue minutes of slots later -
+  /// and until 6.19 the group accounting simply counted those as `carried` and dropped them. That is exactly the
+  /// population a stall investigation needs: leg `p13-conc2`'s eight victim slots (the whole receive pool) were
+  /// front-end blocks whose window no instrument reported at all.
+  ///
+  /// So a block that is not final when its group closes is KEPT here, with the host instant it was registered
+  /// (the deposit time, i.e. the moment its input tokens were handed to the GPU queue), and DRAINED as soon as
+  /// it can be read - at every later group close, not only at the report (see
+  /// drain_carried_front_end_blocks()). The list therefore holds the blocks still in flight, and the bound below
+  /// is only the backstop for a producer that never commits: `fe_carried_dropped` counts what it had to let go
+  /// of, and what is still unreadable at the exit is counted by WHY - a deposit nobody ever committed is a
+  /// defect of the hand-over, not a slow hop.
+  ///@{
+  struct fe_carried_block {
+    id<MTLCommandBuffer> cb            = nil;
+    uint64_t             slot          = 0;
+    bool                 has_slot      = false;
+    double               registered_s  = 0.0; ///< host steady-clock seconds at registration
+  };
+  std::vector<fe_carried_block> fe_carried_blocks;
+  uint64_t                      fe_carried_blocks_total = 0;
+  uint64_t                      fe_carried_dropped      = 0;
+  /// Deposit -> GPU start and GPU start -> end of the blocks that resolved after their group had closed.
+  std::vector<double> fe_late_deposit_to_start_us;
+  std::vector<double> fe_late_start_to_end_us;
+  static constexpr unsigned nof_slow_fe_carried = 8;
+  struct fe_slow_block {
+    uint64_t slot                = 0;
+    bool     has_slot            = false;
+    bool     used                = false;
+    double   deposit_to_start_us = 0.0;
+    double   start_to_end_us     = 0.0;
+  };
+  fe_slow_block fe_slow[nof_slow_fe_carried] = {};
+  /// Blocks still not readable at the exit, split by why: never committed at all (`NotEnqueued`), or committed
+  /// and still not finished (a block the GPU never got to).
+  uint64_t fe_unresolved_never_committed = 0;
+  uint64_t fe_unresolved_unfinished      = 0;
+  uint64_t fe_unresolved_no_timestamps   = 0;
+  ///@}
 
   /// \name P0-5: pairing the lane's own metrics with the phase-segment samples of the SAME hop.
   ///
@@ -340,10 +392,84 @@ void print_series(const char* name, std::vector<double>& sorted)
 
 } // namespace
 
+/// \brief Resolves the front-end blocks that are no longer carried (Q9-F2).
+///
+/// Called at every group close and once more at the report. It DRAINS: a block that has completed by now
+/// contributes its own window (`deposit -> GPU start` from the HOST clock, `GPU start -> end` from the
+/// device's) and leaves the list, so the list holds only the blocks that are still in flight - a handful, not
+/// the leg's whole history. That is what makes the reading complete: a carried block is resolved as soon as it
+/// can be, whether or not its slot's group is still the current one.
+///
+/// \param[in] final At the exit, the entries that are still not readable are counted apart by WHY: a block that
+///            was never committed at all is a different defect from one the GPU has not reached yet.
+static void drain_carried_front_end_blocks(lane_stats_t& st, bool final)
+{
+  auto block = st.fe_carried_blocks.begin();
+  while (block != st.fe_carried_blocks.end()) {
+    id<MTLCommandBuffer> cb = block->cb;
+    bool                 resolved = false;
+    if (cb == nil) {
+      if (final) {
+        ++st.fe_unresolved_no_timestamps;
+      }
+    } else if (cb.status == MTLCommandBufferStatusNotEnqueued) {
+      // Never committed: no completion will ever come. Kept while the leg runs (the commit may still happen -
+      // the lane has not claimed the slot yet), counted at the exit if it never did.
+      if (final) {
+        ++st.fe_unresolved_never_committed;
+      }
+    } else if (cb.status != MTLCommandBufferStatusCompleted) {
+      if (final) {
+        ++st.fe_unresolved_unfinished;
+      }
+    } else {
+      const double start = cb.GPUStartTime;
+      const double end   = cb.GPUEndTime;
+      if (!(start > 0.0) || !(end >= start)) {
+        if (final) {
+          ++st.fe_unresolved_no_timestamps;
+        }
+      } else {
+        const double deposit_to_start_us = (start - block->registered_s) * 1e6;
+        const double start_to_end_us     = (end - start) * 1e6;
+        st.fe_late_deposit_to_start_us.push_back(deposit_to_start_us);
+        st.fe_late_start_to_end_us.push_back(start_to_end_us);
+        // The slowest by DEVICE time, i.e. "the front-end block itself was the thing holding the queue": that is
+        // the reading that decides between a block that RAN for seconds and one that waited in the queue for
+        // them (the latter shows up in deposit -> start instead).
+        lane_stats_t::fe_slow_block* worst = nullptr;
+        for (lane_stats_t::fe_slow_block& candidate : st.fe_slow) {
+          if ((worst == nullptr) || (candidate.start_to_end_us < worst->start_to_end_us)) {
+            worst = &candidate;
+          }
+        }
+        if ((worst != nullptr) && (start_to_end_us > worst->start_to_end_us)) {
+          worst->slot                = block->slot;
+          worst->has_slot            = block->has_slot;
+          worst->used                = true;
+          worst->deposit_to_start_us = deposit_to_start_us;
+          worst->start_to_end_us     = start_to_end_us;
+        }
+        resolved = true;
+      }
+    }
+    if (resolved) {
+      block = st.fe_carried_blocks.erase(block);
+    } else {
+      ++block;
+    }
+  }
+}
+
+
 /// Accumulates one front-end group (a slot's transforms) into the series. Command buffers that did not
-/// complete are counted as carried, never reported: a half-visible group would read as a gap.
+/// complete are counted as carried and HANDED OVER to the stats (Q9-F2), never reported as gap: a half-visible
+/// group would read as a gap, while the block itself is exactly what a stall investigation is looking for.
 static void close_front_end_group(front_end_state& fe, lane_stats_t& st)
 {
+  // The blocks earlier groups left behind are retried FIRST: a block that has completed since belongs to the
+  // series now, and only the ones still in flight stay carried (see drain_carried_front_end_blocks()).
+  drain_carried_front_end_blocks(st, /*final=*/false);
   if (!fe.open || fe.cbs.empty()) {
     fe.cbs.clear();
     fe.open = false;
@@ -356,9 +482,23 @@ static void close_front_end_group(front_end_state& fe, lane_stats_t& st)
   bool     any         = false;
   uint64_t carried     = 0;
   uint64_t counted     = 0;
-  for (id<MTLCommandBuffer> cb : fe.cbs) {
+  for (const front_end_state::entry& e : fe.cbs) {
+    id<MTLCommandBuffer> cb = e.cb;
     if ((cb == nil) || (cb.status != MTLCommandBufferStatusCompleted)) {
       ++carried;
+      // Kept for the report (Q9-F2): bounded, because a deposit nobody ever commits can never resolve.
+      constexpr size_t max_carried = 1024;
+      if (st.fe_carried_blocks.size() < max_carried) {
+        lane_stats_t::fe_carried_block block;
+        block.cb           = cb;
+        block.slot         = fe.slot;
+        block.has_slot     = true;
+        block.registered_s = e.registered_s;
+        st.fe_carried_blocks.push_back(block);
+        ++st.fe_carried_blocks_total;
+      } else {
+        ++st.fe_carried_dropped;
+      }
       continue;
     }
     const double start = cb.GPUStartTime;
@@ -403,7 +543,13 @@ void gpu_lane_probe::register_front_end_commit(id<MTLCommandBuffer> cb, uint64_t
     fe.slot = slot_index;
     fe.open = true;
   }
-  fe.cbs.push_back(cb);
+  front_end_state::entry entry;
+  entry.cb = cb;
+  // The host instant this block entered the chain: for a deposit that is the moment its transforms were handed
+  // to the queue (and its input tokens with them), which is the origin Q9-F2's `deposit -> GPU start` is read
+  // from. Same clock as the GPU timestamps on Darwin (see the note on the Q9-E lag in ocudu_metal_burst.mm).
+  entry.registered_s = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  fe.cbs.push_back(entry);
 }
 
 void gpu_lane_probe::note_phase_sample(uint64_t slot, int64_t t2f_ns, int64_t ce_ns, int64_t eqdem_ns)
@@ -772,6 +918,9 @@ void gpu_lane_probe::report()
   {
     std::lock_guard<std::mutex> lock(s.mutex);
     close_front_end_group(front_end_thread_state(), s);
+    // Q9-F2: the blocks every group had to leave behind are resolved NOW, for the last time, so their windows
+    // are read against the same population the report prints below - and whatever is left is counted by why.
+    drain_carried_front_end_blocks(s, /*final=*/true);
   }
 
   std::vector<double> residency;
@@ -798,6 +947,15 @@ void gpu_lane_probe::report()
   uint64_t            fe_slots   = 0;
   uint64_t            fe_cbs     = 0;
   uint64_t            fe_carried = 0;
+  // Q9-F2: the blocks the front-end groups had to leave behind, and what became of them.
+  std::vector<double> fe_late_deposit_to_start;
+  std::vector<double> fe_late_start_to_end;
+  lane_stats_t::fe_slow_block fe_slow[lane_stats_t::nof_slow_fe_carried] = {};
+  uint64_t            fe_carried_total          = 0;
+  uint64_t            fe_carried_dropped        = 0;
+  uint64_t            fe_unresolved_never_committed = 0;
+  uint64_t            fe_unresolved_unfinished      = 0;
+  uint64_t            fe_unresolved_no_timestamps   = 0;
   // P0-5: the paired population and what happened to the samples that did not reach it.
   std::vector<double> busy_ratio;
   std::vector<double> paired_residency;
@@ -824,6 +982,16 @@ void gpu_lane_probe::report()
     fe_slots     = s.fe_slots;
     fe_cbs       = s.fe_cbs;
     fe_carried   = s.fe_carried;
+    fe_late_deposit_to_start = s.fe_late_deposit_to_start_us;
+    fe_late_start_to_end     = s.fe_late_start_to_end_us;
+    for (unsigned i = 0; i != lane_stats_t::nof_slow_fe_carried; ++i) {
+      fe_slow[i] = s.fe_slow[i];
+    }
+    fe_carried_total              = s.fe_carried_blocks_total;
+    fe_carried_dropped            = s.fe_carried_dropped;
+    fe_unresolved_never_committed = s.fe_unresolved_never_committed;
+    fe_unresolved_unfinished      = s.fe_unresolved_unfinished;
+    fe_unresolved_no_timestamps   = s.fe_unresolved_no_timestamps;
     residency = s.residency_us;
     busy      = s.busy_us;
     gap       = s.gap_us;
@@ -866,17 +1034,66 @@ void gpu_lane_probe::report()
   // The front end has its own series and does not need a lane to be worth reporting: a run of the
   // demodulator alone (its test) has transforms but no back-end lane at all.
   const auto print_front_end = [&]() {
-    if (fe_slots == 0) {
+    if ((fe_slots == 0) && (fe_carried_total == 0)) {
       return;
     }
+    if (fe_slots != 0) {
+      // NOTE the population: these are the blocks that were ALREADY final when their own slot's group closed.
+      // With the hand-over armed (the default) the lane commits the block, so that is a minority - and a biased
+      // one (the fast blocks). The rest are NOT lost: they are the Q9-F2 carried lines printed right below, and
+      // the two must be read together (never read this series as "the front end's cost" on its own).
+      std::fprintf(stderr,
+                   "[ul_gpu_lane] dft slots=%llu cbs=%llu carried=%llu (front-end queue, one group per slot; "
+                   "these are only the blocks that were final at their own group's close - the rest are the "
+                   "Q9-F2 carried lines below)\n",
+                   static_cast<unsigned long long>(fe_slots),
+                   static_cast<unsigned long long>(fe_cbs),
+                   static_cast<unsigned long long>(fe_carried));
+      print_series("dft residency", fe_residency);
+      print_series("dft busy", fe_busy);
+      print_series("dft gap", fe_gap);
+    }
+    // Q9-F2: the blocks that were still not final when their own slot's group closed. With the hand-over armed
+    // (the default) these are the rule rather than the exception - the LANE commits the block, not the engine -
+    // so this is where a front-end block's own GPU window is finally readable, including the ones the registry's
+    // sweep commits and no other instrument covers.
+    const uint64_t unresolved_total = fe_unresolved_never_committed + fe_unresolved_unfinished +
+                                      fe_unresolved_no_timestamps;
     std::fprintf(stderr,
-                 "[ul_gpu_lane] dft slots=%llu cbs=%llu carried=%llu (front-end queue, one group per slot)\n",
-                 static_cast<unsigned long long>(fe_slots),
-                 static_cast<unsigned long long>(fe_cbs),
-                 static_cast<unsigned long long>(fe_carried));
-    print_series("dft residency", fe_residency);
-    print_series("dft busy", fe_busy);
-    print_series("dft gap", fe_gap);
+                 "[ul_gpu_lane] dft carried blocks (Q9-F2): resolved=%zu of %llu (never committed=%llu, "
+                 "committed but unfinished at exit=%llu, no GPU timestamps=%llu, dropped over the bound=%llu)\n",
+                 fe_late_deposit_to_start.size(),
+                 static_cast<unsigned long long>(fe_carried_total),
+                 static_cast<unsigned long long>(fe_unresolved_never_committed),
+                 static_cast<unsigned long long>(fe_unresolved_unfinished),
+                 static_cast<unsigned long long>(fe_unresolved_no_timestamps),
+                 static_cast<unsigned long long>(fe_carried_dropped));
+    if (!fe_late_deposit_to_start.empty()) {
+      print_series("dft carried deposit ->GPU start", fe_late_deposit_to_start);
+      print_series("dft carried GPU start ->end", fe_late_start_to_end);
+      std::fprintf(stderr,
+                   "[ul_gpu_lane] dft carried slowest by DEVICE time (start -> end; a block that RAN for seconds "
+                   "is the device, one whose deposit -> start is the seconds waited in the queue):\n");
+      for (const lane_stats_t::fe_slow_block& block : fe_slow) {
+        if (!block.used) {
+          continue;
+        }
+        std::fprintf(stderr,
+                     "[ul_gpu_lane]   slot=%llu deposit->start=%.1fus start->end=%.1fus%s\n",
+                     static_cast<unsigned long long>(block.has_slot ? block.slot : 0),
+                     block.deposit_to_start_us,
+                     block.start_to_end_us,
+                     (block.start_to_end_us > 100000.0) ? "  <- the device held THIS block" : "");
+      }
+    }
+    if (unresolved_total != 0) {
+      // Never silent: a block that never resolved is either a deposit nobody committed (a defect) or one the
+      // GPU had not finished at the exit (the leg was stopped inside a stall - which is itself the reading).
+      std::fprintf(stderr,
+                   "[ul_gpu_lane] dft carried blocks still unresolved at exit=%llu - \"cannot read\" is not "
+                   "\"no stall\" (a never-committed deposit is the hand-over's own defect)\n",
+                   static_cast<unsigned long long>(unresolved_total));
+    }
   };
 
   // ---- P0-5: the lane's own metrics against the phase segments of the SAME hop ------------------------
@@ -978,9 +1195,18 @@ void gpu_lane_probe::report()
                  paired_eqdem_med);
   };
   if (lanes == 0) {
-    if (fe_slots == 0) {
+    if ((fe_slots == 0) && (fe_carried_total == 0)) {
       std::fprintf(stderr, "[ul_gpu_lane] no lanes recorded\n");
     } else {
+      // Q9-F2: a run whose front-end blocks were ALL carried (nothing was final at its own group's close) has
+      // fe_slots == 0 and still has something to say - the carried readings are printed by print_front_end().
+      // The one thing it must not do is report silence: "no series" would then read as "no front end".
+      if (fe_slots == 0) {
+        std::fprintf(stderr,
+                     "[ul_gpu_lane] dft: no slot group closed with a final block, but %llu front-end block(s) "
+                     "were carried - see the Q9-F2 lines below\n",
+                     static_cast<unsigned long long>(fe_carried_total));
+      }
       print_front_end();
     }
     print_pairing();

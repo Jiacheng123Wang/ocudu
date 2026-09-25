@@ -37,6 +37,12 @@
 #   D10 (Q9-E, INFO) the host's own lag between the GPU finishing a block and its completion handler running:
 #       the input tokens are released by that handler, so this is what separates "the queue held it" from
 #       "the host was late to look" (6.17)
+#   D11 (Q9-F, INFO) was a WAITER's command buffer COMMITTED before the command buffer carrying the signal it
+#       waits for, and on the same queue: Q9-D compares against the moment a generation was handed out, which
+#       is not when it is submitted - the registry's sweep commits a claimed block from another thread (6.19)
+#   D12 (Q9-F2/F3, INFO) what the device was doing while a waiter waited: the holes in the union of the probed
+#       GPU windows (probe: OCUDU_METAL_GPU_TIME=1) and the front-end blocks that were not final when their own
+#       slot's group closed - the population no earlier instrument reported at all (6.19)
 #       (D1-D4 are the criteria the Q9 fix is confirmed by; a leg flown BEFORE it reads them RED, which is the
 #        point - the same leg is what the fix is measured against)
 # "Cannot read" is RED, never absent - the lesson of 5.9.97.
@@ -341,6 +347,38 @@ else
   lag_note=$(awk -v v="$lag_max" -v d="${life_prod_max:-0}" 'BEGIN{ if (d+0 > 0 && v+0 >= 0.5*d) printf "  <-- the seconds were the HOST side after the GPU was done, not a queue wait"; else printf "  (the host was prompt: a late completion is the buffer own)" }')
   check "[INFO] D10 (Q9-E) GPU finished -> the handler ran" "reported, not judged" INFO \
         "max handler lag = $(awk -v v="$lag_max" 'BEGIN{printf "%.1f", v/1000}') ms at slot=${lag_slot:-?}$lag_note  ||  $life_line"
+fi
+# D11 (Q9-F, dev doc 6.19): Q9-D's blind spot, measured on the COMMIT order instead of the moment a generation
+# was handed out. A signal rides a command buffer, and that buffer can be committed by ANOTHER thread after the
+# waiter's commit (the registry's sweep commits a claimed hand-over block after dropping its lock) - on a queue
+# that only orders starts, a waiter ahead of its signaller is a queue that cannot get past the wait.
+fence_line3=$(grep -a "commit order (Q9-F)" "$LEGF" | tail -1)
+co_waits=$(printf '%s' "$fence_line3" | grep -oE "waits=[0-9]+" | grep -oE "[0-9]+$")
+co_first=$(printf '%s' "$fence_line3" | grep -oE "waiter-committed-first=[0-9]+" | grep -oE "[0-9]+$")
+co_same=$(printf '%s' "$fence_line3" | grep -oE "same-queue=[0-9]+" | grep -oE "[0-9]+$")
+co_cross=$(printf '%s' "$fence_line3" | grep -oE "cross-queue=[0-9]+" | grep -oE "[0-9]+$")
+co_maxms=$(printf '%s' "$fence_line3" | grep -oE "max=[0-9.]+ms" | grep -oE "[0-9.]+")
+co_kind=$(printf '%s' "$fence_line3" | grep -oE "worst kind=[a-z]+" | awk '{print $3}')
+co_slot=$(printf '%s' "$fence_line3" | grep -oE "slot=[0-9]+" | grep -oE "[0-9]+$")
+if [ -z "${co_first:-}" ]; then
+  check "[INFO] D11 (Q9-F) was a WAITER committed before its signaller" "reported, not judged" INFO \
+        "no 'commit order (Q9-F)' line: ${fence_line3:-<absent>} - a leg flown before 6.19 cannot say"
+else
+  check "[INFO] D11 (Q9-F) was a WAITER committed before its signaller" "reported, not judged" INFO \
+        "waits=$co_waits, waiter-committed-first=$co_first (same-queue=${co_same:-?} = the shape that cannot resolve itself, cross-queue=${co_cross:-?}), longest=${co_maxms:-?}ms worst kind=${co_kind:-?} slot=${co_slot:-?}$( [ "${co_first:-0}" != "0" ] && printf '  <-- the Q9-G ordering IS on this leg: if its longest wait is the stall, the fix is the commit handshake' || printf '  (every waiter was committed after a signaller at or above its value: the queue-order hypothesis is NOT confirmed here)' )"
+fi
+# D12 (Q9-F2/Q9-F3, dev doc 6.19): what the DEVICE was doing while a waiter waited. The queue-occupancy union
+# (probe on: OCUDU_METAL_GPU_TIME=1) and the front-end blocks that were not final when their own slot's group
+# closed - with the hand-over armed those are the rule, and no earlier instrument reported them at all.
+occ_line=$(grep -a "queue occupancy (Q9-F3): commits=" "$LEGF" | tail -1)
+occ_hole=$(grep -a "queue occupancy (Q9-F3): commits=" -A2 "$LEGF" | grep -a "hole " | head -1)
+fe_line=$(grep -a "dft carried blocks (Q9-F2)" "$LEGF" | tail -1)
+if [ -z "${occ_line:-}" ] && [ -z "${fe_line:-}" ]; then
+  check "[INFO] D12 (Q9-F2/F3) was the device idle, and what were the front-end blocks doing" "reported, not judged" INFO \
+        "no 'queue occupancy (Q9-F3)' and no 'dft carried blocks (Q9-F2)' line - a leg flown before 6.19 cannot say"
+else
+  check "[INFO] D12 (Q9-F2/F3) was the device idle, and what were the front-end blocks doing" "reported, not judged" INFO \
+        "${occ_line:-<no Q9-F3 line: the occupancy probe is off (OCUDU_METAL_GPU_TIME=1 turns it on)>}${occ_hole:+  ||  ${occ_hole}}  ||  ${fe_line:-<no Q9-F2 line>}"
 fi
 reaps_events=$(printf '%s' "$life_line" | grep -oE "dry-pool reaps=[0-9]+" | grep -oE "[0-9]+$")
 reaps_blocks=$(printf '%s' "$life_line" | grep -oE "recovering [0-9]+ block" | grep -oE "[0-9]+")

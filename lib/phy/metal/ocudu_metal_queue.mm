@@ -7,10 +7,13 @@
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/support/macos_compat.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 using namespace ocudu;
 
@@ -69,6 +72,84 @@ struct shared_queue_state {
   std::atomic<uint64_t>    stage_fence_newest_waits{0};
   std::atomic<uint64_t>    stage_fence_cross_lane{0};
   std::atomic<uint64_t>    stage_fence_skipped_waits{0};
+
+  /// \name Q9-F: the COMMIT order of the device-side fences' two ends (dev doc 6.19).
+  ///
+  /// Q9-D resolves a wait against the moment its signaller's generation was HANDED OUT. That is not when the
+  /// signal is submitted: the signal rides a command buffer, and that buffer may be committed by another
+  /// thread microseconds later (the registry's sweep commits a claimed hand-over block after dropping its
+  /// lock). On a queue whose starts are ordered by submission, a waiter committed before its signaller is a
+  /// waiter whose signaller is behind it - the shape that cannot resolve until a later signal arrives.
+  ///
+  /// The instrument therefore takes a TICKET immediately before every commit that can carry a fence, keeps
+  /// the fences armed on each command buffer until that commit resolves them, and compares:
+  ///  * `order_max_signal_generation` - the highest generation whose carrier has been COMMITTED. A wait for a
+  ///    value at or below it is safe by construction (its signaller is already ahead of it in the queue);
+  ///  * otherwise the wait is an inversion, remembered until a signal reaches it so its DURATION (waiter's
+  ///    commit -> signaller's commit) and the two buffers' queues can be reported.
+  ///@{
+  std::atomic<uint64_t> commit_ticket{0};
+  /// The highest generation whose carrier has been COMMITTED. An event's value only grows, so a wait for a
+  /// value at or below this can be satisfied by a command buffer that is already ahead of the waiter's.
+  std::atomic<uint64_t> order_max_signal_generation{0};
+  std::atomic<uint64_t> order_commits{0};
+  std::atomic<uint64_t> order_waits{0};
+  std::atomic<uint64_t> order_waiter_first{0};
+  std::atomic<uint64_t> order_waiter_first_same_queue{0};
+  std::atomic<uint64_t> order_waiter_first_cross_queue{0};
+  std::atomic<uint64_t> order_worst_us{0};
+  std::atomic<uint64_t> order_worst_slot{0};
+  std::atomic<unsigned> order_worst_kind{0};
+  /// Fences armed on a command buffer that has not been committed yet, keyed by the buffer.
+  struct order_pending_entry {
+    std::vector<uint64_t> signals; ///< generations this buffer will signal (grid / stage / corr)
+    std::vector<uint64_t> waits;   ///< generations this buffer waits for
+    std::vector<shared_queue::fence_kind> wait_kinds;
+    std::vector<uint64_t> wait_slots;
+    std::vector<bool>     wait_has_slot;
+    std::vector<std::chrono::steady_clock::time_point> wait_at;
+  };
+  std::mutex                                   order_mutex;
+  std::unordered_map<const void*, order_pending_entry> order_pending;
+  /// Inversions waiting for their signaller, so the duration can be measured when it commits. Bounded: a
+  /// signaller that never commits must not grow this forever (its count is what `unresolved` reports).
+  struct order_open_wait {
+    uint64_t                              generation = 0;
+    shared_queue::fence_kind              kind       = shared_queue::fence_kind::stage;
+    uint64_t                              slot       = 0;
+    unsigned                              queue      = 0; ///< 0 = front-end, 1 = back-end, 2 = unknown
+    std::chrono::steady_clock::time_point wait_at{};
+  };
+  std::vector<order_open_wait> order_open;
+  /// Inversions the bound did not let the list keep: counted, because a reading that silently drops what it
+  /// cannot hold is how "0 inversions" gets believed (see nof_commit_order_unresolved()).
+  std::atomic<uint64_t>        order_open_overflow{0};
+  std::atomic<uint64_t>        order_kind_waits[static_cast<size_t>(shared_queue::fence_kind::count)]   = {};
+  std::atomic<uint64_t>        order_kind_inversions[static_cast<size_t>(shared_queue::fence_kind::count)] = {};
+  ///@}
+
+  /// \name Q9-F3: one record per command buffer armed with the GPU-time probe (see shared_queue::arm_gpu_time).
+  ///
+  /// The union of these windows, per queue, is what the device actually executed; the holes in it are the
+  /// intervals in which the queue had NOTHING running - and the label/slot of the buffer that starts right
+  /// after a hole is the answer to "what was waiting, and for how long". `commit_ns` is the host time at
+  /// which the probe was armed (i.e. immediately before the commit), so `commit -> start` is the same
+  /// quantity the lane probe's Q9-B table prints per command buffer - here for every commit, including the
+  /// ones no engine registers anywhere.
+  ///@{
+  struct occupancy_record {
+    uint64_t    start_ns  = 0;
+    uint64_t    end_ns    = 0;
+    uint64_t    commit_ns = 0;
+    uint64_t    slot      = 0;
+    bool        has_slot  = false;
+    const char* label     = nullptr;
+  };
+  std::mutex                occupancy_mutex;
+  std::vector<occupancy_record> occupancy;
+  std::atomic<uint64_t>     occupancy_dropped{0};
+  std::atomic<uint64_t>     occupancy_largest_idle_us{0};
+  ///@}
 
   /// One no-copy wrap: the buffer, the host range it covers, and the allocation it was made for.
   ///
@@ -160,6 +241,44 @@ struct shared_queue_state {
 
 shared_queue_state& state();
 
+namespace {
+/// The waiting hop's slot, when the calling thread knows it (Q9-D): the lane clock lives with the Metal lane
+/// probe and the queue does not include it, so a weak accessor is installed by the probe at start-up. Missing
+/// accessor (the unit tests, the replay tool) means "no slot", which the report prints as 0.
+///
+/// Declared at the top of the translation unit's anonymous namespace because the Q9-F/Q9-F3 instruments stamp
+/// their records with the slot as well (see arm_gpu_time and note_commit_order), and those run on the same
+/// threads that name it.
+bool (*lane_has_slot_fn)()  = nullptr;
+uint64_t (*lane_slot_fn)()  = nullptr;
+
+bool lane_has_slot()
+{
+  return (lane_has_slot_fn != nullptr) && lane_has_slot_fn();
+}
+
+uint64_t lane_slot()
+{
+  return (lane_slot_fn != nullptr) ? lane_slot_fn() : 0;
+}
+
+/// The name of a fence kind, for the reports (Q9-D and Q9-F read it the same way).
+const char* fence_kind_name(shared_queue::fence_kind kind)
+{
+  switch (kind) {
+    case shared_queue::fence_kind::stage:
+      return "stage";
+    case shared_queue::fence_kind::correlation:
+      return "corr";
+    case shared_queue::fence_kind::grid:
+      return "grid";
+    case shared_queue::fence_kind::count:
+      break;
+  }
+  return "?";
+}
+} // namespace
+
 #if defined(OCUDU_METAL_STATS)
 void shared_queue_stats_report()
 {
@@ -208,6 +327,161 @@ void shared_queue_stats_report()
                  worst_kind,
                  static_cast<unsigned long long>(worst_slot),
                  (s.fence_pending.empty()) ? "" : " (waits still open at exit: their signaller never came)");
+  }
+  // Q9-F: the same questions as Q9-D, asked of the COMMIT order instead of the moment the generation was
+  // handed out - the blind spot Q9-D documented (a signal handed out early can still be SUBMITTED late, and
+  // the registry's sweep commits a claimed block from another thread after dropping its lock).
+  {
+    shared_queue::fence_kind worst_kind = shared_queue::fence_kind::stage;
+    uint64_t                 worst_slot = 0;
+    const uint64_t           worst_us = shared_queue::commit_order_worst_us(worst_kind, worst_slot);
+    const uint64_t unresolved = shared_queue::nof_commit_order_unresolved();
+    std::fprintf(stderr,
+                 "[metal_stats] commit order (Q9-F): commits=%llu waits=%llu waiter-committed-first=%llu "
+                 "(same-queue=%llu cross-queue=%llu) max=%.1fms worst kind=%s slot=%llu; per kind: "
+                 "stage %llu/%llu, corr %llu/%llu, grid %llu/%llu (inversions/waits)%s\n",
+                 static_cast<unsigned long long>(s.order_commits.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.order_waits.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.order_waiter_first.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.order_waiter_first_same_queue.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.order_waiter_first_cross_queue.load(std::memory_order_relaxed)),
+                 static_cast<double>(worst_us) / 1000.0,
+                 fence_kind_name(worst_kind),
+                 static_cast<unsigned long long>(worst_slot),
+                 static_cast<unsigned long long>(s.order_kind_inversions[0].load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.order_kind_waits[0].load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.order_kind_inversions[1].load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.order_kind_waits[1].load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.order_kind_inversions[2].load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.order_kind_waits[2].load(std::memory_order_relaxed)),
+                 (unresolved == 0)
+                     ? ""
+                     : " (waits still open at exit: no signal at or above them was ever committed, or the "
+                       "open list overflowed - see its comment)");
+  }
+  // Q9-F3: the QUEUE-occupancy timeline (see arm_gpu_time() and the state's records). Q9-F says whether a
+  // waiter is ahead of its signaller; this says what the device was doing while it waited. The union of the
+  // recorded GPU windows, per queue, is what the device actually executed: the HOLES in it are the intervals
+  // in which that queue had nothing running at all, and the label/slot of the buffer that starts right after
+  // a hole is what was waiting for it.
+  //
+  // NOTE the probe this reads is opt-in (OCUDU_METAL_GPU_TIME=1): without it there are no records and this
+  // line reports 0 - which is "not measured", not "no hole".
+  {
+    std::vector<shared_queue_state::occupancy_record> records;
+    uint64_t                                         dropped = 0;
+    {
+      std::lock_guard<std::mutex> lock(s.occupancy_mutex);
+      records = s.occupancy;
+      dropped = s.occupancy_dropped.load(std::memory_order_relaxed);
+    }
+    if (records.empty()) {
+      std::fprintf(stderr,
+                   "[metal_stats] queue occupancy (Q9-F3): no GPU-time records - the probe is off "
+                   "(OCUDU_METAL_GPU_TIME=1 turns it on), so nothing here says whether the queue was idle\n");
+    } else {
+      std::sort(records.begin(), records.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.start_ns < rhs.start_ns;
+      });
+      // The union: walk the windows in start order, keeping the frontier the device has covered.
+      struct hole {
+        uint64_t    start_ns = 0;
+        uint64_t    us       = 0;
+        const char* label    = nullptr;
+        uint64_t    slot     = 0;
+        bool        has_slot = false;
+      };
+      std::vector<hole> holes;
+      uint64_t          frontier   = 0;
+      uint64_t          busy_union = 0;
+      // A hole worth reporting is longer than the ordinary spacing between two submissions (tens of us);
+      // 100 us is the same order the lane probe's D-series uses for "this is not jitter".
+      constexpr uint64_t hole_threshold_ns = 100000;
+      for (const shared_queue_state::occupancy_record& r : records) {
+        if (r.start_ns > frontier) {
+          const uint64_t gap_ns = r.start_ns - frontier;
+          if ((frontier != 0) && (gap_ns > hole_threshold_ns)) {
+            hole h;
+            h.start_ns = frontier;
+            h.us       = gap_ns / 1000;
+            h.label    = r.label;
+            h.slot     = r.slot;
+            h.has_slot = r.has_slot;
+            holes.push_back(h);
+            if (h.us > s.occupancy_largest_idle_us.load(std::memory_order_relaxed)) {
+              s.occupancy_largest_idle_us.store(h.us, std::memory_order_relaxed);
+            }
+          }
+          frontier = r.end_ns;
+          busy_union += r.end_ns - r.start_ns;
+        } else if (r.end_ns > frontier) {
+          busy_union += r.end_ns - frontier;
+          frontier = r.end_ns;
+        }
+      }
+      const uint64_t window_ns = (frontier > records.front().start_ns) ? (frontier - records.front().start_ns) : 0;
+      // The slowest commits by commit -> GPU start: the same reading as the lane probe's Q9-B table, but for
+      // EVERY commit - including the ones no engine registers anywhere (the registry's late hand-over commits,
+      // which is where a stall's waitee can hide).
+      std::vector<size_t> slowest(records.size());
+      for (size_t i = 0; i != records.size(); ++i) {
+        slowest[i] = i;
+      }
+      const size_t nof_slow = std::min<size_t>(8, slowest.size());
+      std::partial_sort(slowest.begin(),
+                        slowest.begin() + static_cast<std::ptrdiff_t>(nof_slow),
+                        slowest.end(),
+                        [&records](size_t lhs, size_t rhs) {
+                          const uint64_t l = (records[lhs].start_ns > records[lhs].commit_ns)
+                                                 ? (records[lhs].start_ns - records[lhs].commit_ns)
+                                                 : 0;
+                          const uint64_t r = (records[rhs].start_ns > records[rhs].commit_ns)
+                                                 ? (records[rhs].start_ns - records[rhs].commit_ns)
+                                                 : 0;
+                          return l > r;
+                        });
+      std::fprintf(stderr,
+                   "[metal_stats] queue occupancy (Q9-F3): commits=%zu busy(union)=%.1fus window=%.1fus "
+                   "holes>100us=%zu largest=%.1fms%s\n",
+                   records.size(),
+                   static_cast<double>(busy_union) / 1e3,
+                   static_cast<double>(window_ns) / 1e3,
+                   holes.size(),
+                   static_cast<double>(shared_queue::occupancy_largest_idle_us()) / 1000.0,
+                   (dropped == 0) ? "" : " (records DROPPED over the bound)");
+      std::fprintf(stderr,
+                   "[metal_stats] queue occupancy (Q9-F3) slowest commits, by commit -> GPU start "
+                   "(label = what the buffer carries):\n");
+      for (size_t i = 0; i != nof_slow; ++i) {
+        const shared_queue_state::occupancy_record& r = records[slowest[i]];
+        if (r.commit_ns == 0) {
+          continue;
+        }
+        const double to_start_us = (r.start_ns > r.commit_ns) ? (static_cast<double>(r.start_ns - r.commit_ns) / 1e3) : 0.0;
+        std::fprintf(stderr,
+                     "[metal_stats]   label=%-12s slot=%llu commit->start=%.1fus start->end=%.1fus\n",
+                     (r.label != nullptr) ? r.label : "?",
+                     static_cast<unsigned long long>(r.has_slot ? r.slot : 0),
+                     to_start_us,
+                     static_cast<double>(r.end_ns - r.start_ns) / 1e3);
+      }
+      // The largest holes, worst first, each named by the commit that waited through it.
+      std::sort(holes.begin(), holes.end(), [](const hole& lhs, const hole& rhs) { return lhs.us > rhs.us; });
+      const size_t nof_holes = std::min<size_t>(4, holes.size());
+      if (nof_holes == 0) {
+        std::fprintf(stderr,
+                     "[metal_stats] queue occupancy (Q9-F3): no hole over 100us in the window - the device was "
+                     "continuously executing something (a stalled waiter is then behind a RUNNING buffer)\n");
+      }
+      for (size_t i = 0; i != nof_holes; ++i) {
+        std::fprintf(stderr,
+                     "[metal_stats]   hole %.1fms -> next label=%s slot=%llu (nothing was executing on any "
+                     "probed queue for that long)\n",
+                     static_cast<double>(holes[i].us) / 1000.0,
+                     (holes[i].label != nullptr) ? holes[i].label : "?",
+                     static_cast<unsigned long long>(holes[i].has_slot ? holes[i].slot : 0));
+      }
+    }
   }
   // GPU busy time, measured on the command buffers themselves (GPUStartTime/GPUEndTime in their
   // completion handlers): this is the one time measurement that keeps its meaning once the stages are
@@ -260,8 +534,14 @@ const bool shared_queue_stats_registered = []() {
 
 shared_queue_state& state()
 {
-  static shared_queue_state s;
-  return s;
+  // Never destroyed on purpose, like every other registry a report reads (see ocudu_metal_lane_probe.mm's
+  // stats() and ocudu_metal_burst.mm's handed()): the [metal_stats] report runs from an atexit handler that
+  // this translation unit registers at STATIC-INITIALIZATION time, while this object is constructed on first
+  // USE - i.e. later - so the handler runs AFTER the object has been destroyed and every mutex in it is gone.
+  // Measured (2026-09-25): `libc++abi: terminating due to uncaught exception ... mutex lock failed: Invalid
+  // argument`, raised by the Q9-F3 report - the first thing in here that locks during a report.
+  static shared_queue_state* s = new shared_queue_state();
+  return *s;
 }
 
 /// \brief Drops the mappings created for an allocation that is about to be released.
@@ -444,7 +724,14 @@ void shared_queue::notify_wrap_misaligned()
 #endif
 }
 
-void shared_queue::arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind kind)
+
+void shared_queue::install_lane_slot_accessors(bool (*has_slot)(), uint64_t (*slot)())
+{
+  lane_has_slot_fn = has_slot;
+  lane_slot_fn     = slot;
+}
+
+void shared_queue::arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind kind, const char* label, uint64_t slot)
 {
 #if defined(OCUDU_METAL_STATS)
   // Opt-in (OCUDU_METAL_GPU_TIME=1). A completion handler per command buffer is not free: the driver
@@ -455,6 +742,8 @@ void shared_queue::arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind 
   if (std::getenv("OCUDU_METAL_GPU_TIME") == nullptr) {
     (void)command_buffer;
     (void)kind;
+    (void)label;
+    (void)slot;
     return;
   }
   // The GPU's own view of the command buffer: GPUStartTime/GPUEndTime are only meaningful once it has
@@ -466,6 +755,14 @@ void shared_queue::arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind 
   // The handler runs on a Metal thread and must not take our lock: the fields are atomics, and the
   // min/max updates are CAS loops.
   shared_queue_state::gpu_time_stats* g = &state().gpu_time[static_cast<size_t>(kind)];
+  // Q9-F3: the same handler leaves one record per command buffer (see the state's note), so the report can
+  // compute the union of the queue's windows and the holes in it. \p label and \p slot travel BY VALUE into
+  // the block: a string literal outlives the process, and the slot is copied because the caller's own table
+  // entry may be gone by the time the GPU is done.
+  const uint64_t       resolved_slot = (slot != no_slot) ? slot : (lane_has_slot() ? lane_slot() : 0);
+  const bool           has_slot      = (slot != no_slot) || lane_has_slot();
+  const double         commit_s =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
     const double start_s = cb.GPUStartTime;
     const double end_s   = cb.GPUEndTime;
@@ -483,10 +780,27 @@ void shared_queue::arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind 
     prev = g->last_end_ns.load(std::memory_order_relaxed);
     while (end_ns > prev && !g->last_end_ns.compare_exchange_weak(prev, end_ns, std::memory_order_relaxed)) {
     }
+    shared_queue_state& st = state();
+    constexpr size_t    max_records = 1u << 21; // ~2M command buffers: a leg records ~1e5
+    std::lock_guard<std::mutex> lock(st.occupancy_mutex);
+    if (st.occupancy.size() < max_records) {
+      shared_queue_state::occupancy_record r;
+      r.start_ns  = start_ns;
+      r.end_ns    = end_ns;
+      r.commit_ns = static_cast<uint64_t>(commit_s * 1e9);
+      r.slot      = resolved_slot;
+      r.has_slot  = has_slot;
+      r.label     = (label != nullptr) ? label : "?";
+      st.occupancy.push_back(r);
+    } else {
+      st.occupancy_dropped.fetch_add(1, std::memory_order_relaxed);
+    }
   }];
 #else
   (void)command_buffer;
   (void)kind;
+  (void)label;
+  (void)slot;
 #endif
 }
 
@@ -520,7 +834,7 @@ uint64_t shared_queue::grid_ready_signal(id<MTLCommandBuffer> command_buffer)
   }
   const uint64_t generation = s.grid_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
   [command_buffer encodeSignalEvent:s.grid_event value:generation];
-  note_fence_signal(generation, fence_kind::grid);
+  note_fence_signal(generation, fence_kind::grid, command_buffer);
   return generation;
 }
 
@@ -549,7 +863,7 @@ bool shared_queue::grid_ready_encode_wait(id<MTLCommandBuffer> command_buffer, u
     return false;
   }
   [command_buffer encodeWaitForEvent:s.grid_event value:generation];
-  note_fence_wait(generation, fence_kind::grid);
+  note_fence_wait(generation, fence_kind::grid, command_buffer);
   return true;
 }
 
@@ -589,7 +903,7 @@ uint64_t shared_queue::backend_stage_signal(id<MTLCommandBuffer> command_buffer)
   s.stage_fence_signals.fetch_add(1, std::memory_order_relaxed);
   // Q9-D: the fence this signal belongs to cannot be told apart here (the stage and the correlation fences
   // share this event and this generation counter), so it is recorded as `stage` and the report says so.
-  note_fence_signal(generation, fence_kind::stage);
+  note_fence_signal(generation, fence_kind::stage, command_buffer);
   return generation;
 }
 
@@ -614,7 +928,7 @@ bool shared_queue::backend_stage_wait(id<MTLCommandBuffer> command_buffer)
   }
   [command_buffer encodeWaitForEvent:s.stage_fence_event value:generation];
   s.stage_fence_waits.fetch_add(1, std::memory_order_relaxed);
-  note_fence_wait(generation, fence_kind::stage);
+  note_fence_wait(generation, fence_kind::stage, command_buffer);
   return true;
 }
 
@@ -628,55 +942,26 @@ uint64_t shared_queue::backend_stage_nof_waits()
   return state().stage_fence_waits.load(std::memory_order_relaxed);
 }
 
-namespace {
-/// The waiting hop's slot, when the calling thread knows it (Q9-D): the lane clock lives with the Metal lane
-/// probe and the queue does not include it, so a weak accessor is installed by the probe at start-up. Missing
-/// accessor (the unit tests, the replay tool) means "no slot", which the report prints as 0.
-bool (*lane_has_slot_fn)()  = nullptr;
-uint64_t (*lane_slot_fn)()  = nullptr;
-} // namespace
-
-void shared_queue::install_lane_slot_accessors(bool (*has_slot)(), uint64_t (*slot)())
-{
-  lane_has_slot_fn = has_slot;
-  lane_slot_fn     = slot;
-}
-
-namespace {
-bool lane_has_slot()
-{
-  return (lane_has_slot_fn != nullptr) && lane_has_slot_fn();
-}
-
-uint64_t lane_slot()
-{
-  return (lane_slot_fn != nullptr) ? lane_slot_fn() : 0;
-}
-
-/// The worst fence wait stays readable after the wait's record is gone (Q9-D): the report asks for its kind.
-const char* fence_kind_name(shared_queue::fence_kind kind)
-{
-  switch (kind) {
-    case shared_queue::fence_kind::stage:
-      return "stage";
-    case shared_queue::fence_kind::correlation:
-      return "corr";
-    case shared_queue::fence_kind::grid:
-      return "grid";
-    case shared_queue::fence_kind::count:
-      break;
-  }
-  return "?";
-}
-} // namespace
-
-void shared_queue::note_fence_signal(uint64_t generation, fence_kind kind)
+void shared_queue::note_fence_signal(uint64_t generation, fence_kind kind, id<MTLCommandBuffer> command_buffer)
 {
   (void)kind;
   if (generation == 0) {
     return;
   }
   shared_queue_state& s = state();
+  // Q9-F: the signal is a fact for the COMMIT order only once the buffer carrying it is committed, so the
+  // pending entry is what note_commit_order() resolves. Recorded before the Q9-D bookkeeping below, which may
+  // take the same mutex: both live under `order_mutex`/`fence_mutex` respectively and are taken one at a time.
+  if (command_buffer != nil) {
+    std::lock_guard<std::mutex> order_lock(s.order_mutex);
+    s.order_pending[(__bridge const void*)command_buffer].signals.push_back(generation);
+    // A command buffer that is never committed (a deposit nobody claims and the registry drops without
+    // committing) would otherwise leave its entry behind forever. The bound is generous next to the handful
+    // of buffers that are armed-but-uncommitted at any instant (measured: 1-2).
+    while (s.order_pending.size() > 512) {
+      s.order_pending.erase(s.order_pending.begin());
+    }
+  }
   std::lock_guard<std::mutex> lock(s.fence_mutex);
   // Resolve every open wait this signal reaches. An event's value only grows, so a signal at G satisfies every
   // wait for a value <= G: resolving them here (rather than at the true GPU instant) keeps the reading on ONE
@@ -706,12 +991,26 @@ void shared_queue::note_fence_signal(uint64_t generation, fence_kind kind)
   }
 }
 
-void shared_queue::note_fence_wait(uint64_t generation, fence_kind kind)
+void shared_queue::note_fence_wait(uint64_t generation, fence_kind kind, id<MTLCommandBuffer> command_buffer)
 {
   if (generation == 0) {
     return;
   }
   shared_queue_state& s = state();
+  // Q9-F: the waiter's side of the record, kept on the buffer it was encoded into until that buffer commits -
+  // which is the instant the question "was the signaller ahead of me?" can be answered at all.
+  if (command_buffer != nil) {
+    std::lock_guard<std::mutex> order_lock(s.order_mutex);
+    shared_queue_state::order_pending_entry& pending = s.order_pending[(__bridge const void*)command_buffer];
+    pending.waits.push_back(generation);
+    pending.wait_kinds.push_back(kind);
+    pending.wait_slots.push_back(lane_has_slot() ? lane_slot() : 0);
+    pending.wait_has_slot.push_back(lane_has_slot());
+    pending.wait_at.push_back(std::chrono::steady_clock::now());
+    while (s.order_pending.size() > 512) {
+      s.order_pending.erase(s.order_pending.begin());
+    }
+  }
   std::lock_guard<std::mutex> lock(s.fence_mutex);
   s.fence_waits.fetch_add(1, std::memory_order_relaxed);
   // Was this generation handed out already? Generations are handed out AT THE MOMENT the signal is encoded
@@ -761,6 +1060,178 @@ const char* shared_queue::fence_wait_after_worst_kind(uint64_t& slot)
   return fence_kind_name(static_cast<fence_kind>(s.fence_wait_after_worst_kind.load(std::memory_order_relaxed)));
 }
 
+namespace {
+/// Which of the two process-wide queues a command buffer belongs to (Q9-F): a command buffer is bound to the
+/// queue that created it, so this is the queue whose STARTS the waiter and its signaller share - and only a
+/// signaller on that same queue can sit behind the waiter in a way the queue cannot resolve.
+/// 0 = front end, 1 = back end, 2 = neither (a tool's own queue, or the device is gone).
+unsigned queue_index_of(id<MTLCommandBuffer> command_buffer)
+{
+  shared_queue_state& s = state();
+  if ((s.queue != nil) && (command_buffer.commandQueue == s.queue)) {
+    return 0;
+  }
+  if ((s.backend_queue != nil) && (command_buffer.commandQueue == s.backend_queue)) {
+    return 1;
+  }
+  return 2;
+}
+} // namespace
+
+void shared_queue::note_commit_order(id<MTLCommandBuffer> command_buffer)
+{
+  if (command_buffer == nil) {
+    return;
+  }
+  shared_queue_state& s      = state();
+  const uint64_t      ticket = s.commit_ticket.fetch_add(1, std::memory_order_acq_rel) + 1;
+  s.order_commits.fetch_add(1, std::memory_order_relaxed);
+  const unsigned queue = queue_index_of(command_buffer);
+  (void)ticket; // the ORDER is what the counters below encode; the number itself is not reported
+
+  std::lock_guard<std::mutex> lock(s.order_mutex);
+  shared_queue_state::order_pending_entry pending;
+  auto                                    it = s.order_pending.find((__bridge const void*)command_buffer);
+  if (it != s.order_pending.end()) {
+    pending = std::move(it->second);
+    s.order_pending.erase(it);
+  }
+
+  // ---- (1) the signals this commit carries: they advance the event, so they resolve every wait at or below
+  //          the highest one - and a wait resolved here is one whose signaller came FIRST --------
+  uint64_t reached = 0;
+  for (uint64_t generation : pending.signals) {
+    reached = std::max(reached, generation);
+  }
+  if (reached != 0) {
+    uint64_t highest = s.order_max_signal_generation.load(std::memory_order_relaxed);
+    while ((reached > highest) &&
+           !s.order_max_signal_generation.compare_exchange_weak(highest, reached, std::memory_order_relaxed)) {
+    }
+    const uint64_t satisfied = s.order_max_signal_generation.load(std::memory_order_relaxed);
+    const auto     now       = std::chrono::steady_clock::now();
+    for (auto wait = s.order_open.begin(); wait != s.order_open.end();) {
+      if (wait->generation > satisfied) {
+        ++wait;
+        continue;
+      }
+      // An inversion that has just been resolved by its signaller: the duration is the number to read against
+      // a leg's stall, and the queue relation says whether it could have deadlocked (same queue) or only
+      // delayed the waiter (the other queue runs concurrently).
+      const uint64_t waited_us = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(now - wait->wait_at).count());
+      if (wait->queue == queue) {
+        s.order_waiter_first_same_queue.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        s.order_waiter_first_cross_queue.fetch_add(1, std::memory_order_relaxed);
+      }
+      if (waited_us > s.order_worst_us.load(std::memory_order_relaxed)) {
+        s.order_worst_us.store(waited_us, std::memory_order_relaxed);
+        s.order_worst_slot.store(wait->slot, std::memory_order_relaxed);
+        s.order_worst_kind.store(static_cast<unsigned>(wait->kind), std::memory_order_relaxed);
+      }
+      wait = s.order_open.erase(wait);
+    }
+  }
+
+  // ---- (2) the waits this commit carries: was a signaller already committed ahead of it? ----------------
+  for (size_t i = 0; i != pending.waits.size(); ++i) {
+    const uint64_t     generation = pending.waits[i];
+    const fence_kind   kind       = (i < pending.wait_kinds.size()) ? pending.wait_kinds[i] : fence_kind::stage;
+    const uint64_t     slot       = (i < pending.wait_slots.size()) ? pending.wait_slots[i] : 0;
+    const bool         has_slot   = (i < pending.wait_has_slot.size()) ? pending.wait_has_slot[i] : false;
+    const auto         wait_at    = (i < pending.wait_at.size()) ? pending.wait_at[i]
+                                                                : std::chrono::steady_clock::time_point{};
+    s.order_waits.fetch_add(1, std::memory_order_relaxed);
+    ++s.order_kind_waits[static_cast<size_t>(kind)];
+    if (s.order_max_signal_generation.load(std::memory_order_relaxed) >= generation) {
+      // The event can already reach this value from a command buffer committed AHEAD of this one: the wait is
+      // satisfied before it starts, whatever the signaller it names does later.
+      continue;
+    }
+    s.order_waiter_first.fetch_add(1, std::memory_order_relaxed);
+    ++s.order_kind_inversions[static_cast<size_t>(kind)];
+    // Remembered so the duration can be measured when (and if) a signaller commits. Bounded: a signal that
+    // never comes must not grow this, and the ones dropped here are counted as unresolved at the exit.
+    if (s.order_open.size() < 512) {
+      shared_queue_state::order_open_wait open;
+      open.generation = generation;
+      open.kind       = kind;
+      open.slot       = slot;
+      open.queue      = queue;
+      open.wait_at    = wait_at;
+      s.order_open.push_back(open);
+    } else {
+      s.order_open_overflow.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+}
+
+uint64_t shared_queue::nof_commit_order_commits()
+{
+  return state().order_commits.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_commit_order_waits()
+{
+  return state().order_waits.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_commit_order_waiter_first()
+{
+  return state().order_waiter_first.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_commit_order_waiter_first_same_queue()
+{
+  return state().order_waiter_first_same_queue.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_commit_order_waiter_first_cross_queue()
+{
+  return state().order_waiter_first_cross_queue.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_commit_order_unresolved()
+{
+  shared_queue_state& s = state();
+  // Read WITHOUT the lock on purpose: this is called from the atexit report, where taking a lock has already
+  // been the cause of one crash (see state()'s note). The size is a gauge, and `order_open` is only appended
+  // to and erased from under that lock by the covering threads - a report that races one of them can be off by
+  // the entry being added at that instant, which changes nothing about "was anything left open".
+  return static_cast<uint64_t>(s.order_open.size()) + s.order_open_overflow.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_commit_order_kind_waits(fence_kind kind)
+{
+  return state().order_kind_waits[static_cast<size_t>(kind)].load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_commit_order_kind_inversions(fence_kind kind)
+{
+  return state().order_kind_inversions[static_cast<size_t>(kind)].load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::commit_order_worst_us(fence_kind& kind, uint64_t& slot)
+{
+  shared_queue_state& s = state();
+  slot                  = s.order_worst_slot.load(std::memory_order_relaxed);
+  kind                  = static_cast<fence_kind>(s.order_worst_kind.load(std::memory_order_relaxed));
+  return s.order_worst_us.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_occupancy_records()
+{
+  shared_queue_state&         s = state();
+  std::lock_guard<std::mutex> lock(s.occupancy_mutex);
+  return static_cast<uint64_t>(s.occupancy.size());
+}
+
+uint64_t shared_queue::occupancy_largest_idle_us()
+{
+  return state().occupancy_largest_idle_us.load(std::memory_order_relaxed);
+}
+
 void shared_queue::note_stage_fence_wait(bool own_generation, bool crossed)
 {
   shared_queue_state& s = state();
@@ -803,7 +1274,7 @@ bool shared_queue::backend_stage_wait_generation(id<MTLCommandBuffer> command_bu
   }
   [command_buffer encodeWaitForEvent:s.stage_fence_event value:generation];
   s.stage_fence_waits.fetch_add(1, std::memory_order_relaxed);
-  note_fence_wait(generation, fence_kind::stage);
+  note_fence_wait(generation, fence_kind::stage, command_buffer);
   return true;
 }
 

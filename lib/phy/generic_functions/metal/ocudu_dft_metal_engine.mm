@@ -579,7 +579,11 @@ void commit_late_handed_block(void* command_buffer)
   if (cb == nil) {
     return;
   }
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
+  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end, "late_handed");
+  // Q9-F: this is the commit the header's blind spot is about - the registry claims a block under its lock and
+  // commits it here, on whichever thread runs the sweep, while the hop that missed the hand-over may already be
+  // encoding a wait for the grid this very buffer produces.
+  metal::shared_queue::note_commit_order(cb);
   [cb commit];
 }
 
@@ -1098,7 +1102,8 @@ static void commit_front_end(dft_engine_impl* e, id<MTLCommandBuffer> cb, uint64
     (void)arm_tokens_on_complete(cb, std::move(tokens), std::move(times), e->lane_slot, e->has_lane_slot);
   }
   dft_handover_heartbeat("commit");
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::front_end);
+  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::front_end, "dft_front_end");
+  metal::shared_queue::note_commit_order(cb);
   [cb commit];
   dft_stats_commit(nof_transforms);
   if (e->has_lane_slot) {
@@ -1637,6 +1642,15 @@ void* dft_metal_engine::release_block(const void* grid_base)
   // slot to the next, and a consumer served the wrong slot's block reads a grid nobody wrote.
   metal::shared_burst::deposit_released(
       grid_base, engine->lane_slot, cb, generation, [tokens]() { release_block_tokens(tokens); });
+  // Q9-F2 (dev doc 6.19): the deposit gets a front-end record of its own. Until this call the front-end series
+  // was fed by commit_front_end() alone, and with the hand-over armed (the default) that function is NOT the
+  // one that commits these blocks - the lane does, or the registry's sweep - so an air leg printed no
+  // front-end timeline at all, exactly for the blocks whose GPU window the stall investigations needed. The
+  // registration is by (slot), i.e. one group per slot as before, and the probe reads the timestamps when the
+  // block completes - which may be long after its slot's group closed (see its carried-block readings).
+  if (engine->has_lane_slot) {
+    metal::gpu_lane_probe::register_front_end_commit(cb, engine->lane_slot);
+  }
   // Per-deposit line, keyed by the grid the hop will look up: this and the take-side line in the estimator
   // are what say whether the two ends name the SAME address (D1 diagnostics, 5.9.11). Rate-limited, because
   // a healthy run has one per slot.

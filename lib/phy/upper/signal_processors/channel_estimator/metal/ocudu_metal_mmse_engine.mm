@@ -1032,8 +1032,12 @@ static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded,
   if (signal_extraction_fence && (e->lane_order == metal::ce_lane_order::event)) {
     (void)signal_stage_fence_for_burst(s.cb);
   }
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
+  // The GPU-time probe must be armed before commit (Metal asserts otherwise), and the commit ticket (Q9-F) is
+  // taken immediately before it: this buffer carries the stage-fence signal (and can carry a grid-production
+  // wait), so the order between its commit and its fences' other ends is what Q9-F reads.
+  const char* stage_label = (which == ocudu::metal::gpu_lane_probe::stage::channel_estimator_weights) ? "ce_weights" : "ce_stage";
+  ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end, stage_label);
+  ocudu::metal::shared_queue::note_commit_order(s.cb);
   [s.cb commit];
   mmse_stats_commit();
   ocudu::metal::gpu_lane_probe::register_commit(s.cb, which);
@@ -1101,8 +1105,12 @@ static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded,
   if ((e->lane_order == metal::ce_lane_order::event) || (e->lane_order == metal::ce_lane_order::merged)) {
     (void)signal_stage_fence_for_burst(s.cb);
   }
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
+  // The GPU-time probe must be armed before commit (Metal asserts otherwise), and the commit ticket (Q9-F) is
+  // taken immediately before it: this buffer carries the stage-fence signal (and can carry a grid-production
+  // wait), so the order between its commit and its fences' other ends is what Q9-F reads.
+  const char* stage_label = (which == ocudu::metal::gpu_lane_probe::stage::channel_estimator_weights) ? "ce_weights" : "ce_stage";
+  ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end, stage_label);
+  ocudu::metal::shared_queue::note_commit_order(s.cb);
   [s.cb commit];
   mmse_stats_commit();
   ocudu::metal::gpu_lane_probe::register_commit(s.cb, which);
@@ -1132,7 +1140,8 @@ static bool close_held_buffer(mmse_engine_impl* e)
   }
   id<MTLCommandBuffer> cb = e->held_cb;
   e->held_cb              = nil;
-  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end);
+  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end, "ce_held");
+  ocudu::metal::shared_queue::note_commit_order(cb);
   [cb commit];
   mmse_stats_commit();
   ocudu::metal::gpu_lane_probe::register_commit(cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
@@ -1163,7 +1172,8 @@ static void abandon_stage(mmse_engine_impl* e, stage_encoder& s, bool adopted_he
     [s.enc endEncoding];
   }
   if (adopted_held) {
-    ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
+    ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end, "ce_abandon");
+    ocudu::metal::shared_queue::note_commit_order(s.cb);
     [s.cb commit];
     mmse_stats_commit();
     ocudu::metal::gpu_lane_probe::register_commit(s.cb, ocudu::metal::gpu_lane_probe::stage::channel_estimator);
@@ -1288,7 +1298,10 @@ static stage_encoder begin_stage_on_handed(mmse_engine_impl* e)
   if (encoder == nil) {
     // The buffer cannot be encoded into: commit it here rather than losing the receiving chain's
     // transforms - a hop that dropped them would read a grid nobody ever wrote, silently.
-    ocudu::metal::shared_queue::arm_gpu_time(handed, ocudu::metal::shared_queue::queue_kind::back_end);
+    ocudu::metal::shared_queue::arm_gpu_time(handed, ocudu::metal::shared_queue::queue_kind::back_end, "handed_direct");
+    // Q9-F: this IS a producer commit (the block carries the grid-production signal), so it takes a ticket
+    // like every other one - a consumer waiting for that grid has to be ordered against exactly this commit.
+    ocudu::metal::shared_queue::note_commit_order(handed);
     [handed commit];
     ocudulog::fetch_basic_logger("PHY").error(
         "Metal MMSE: the handed-over block could not be encoded into; committed it without this hop");
@@ -2729,7 +2742,8 @@ uint64_t mmse_engine::flush_correlations_fenced(unsigned fallback_nof_systems)
   // The generation is taken and encoded immediately before the commit, so a wait for it can never hang
   // (the signaller is already on its way) - the discipline the extraction fence keeps.
   const uint64_t generation = ocudu::metal::shared_queue::backend_stage_signal(cb);
-  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end);
+  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end, "ce_weights");
+  ocudu::metal::shared_queue::note_commit_order(cb);
   [cb commit];
   mmse_stats_commit();
   ocudu::metal::gpu_lane_probe::register_commit(cb, WEIGHTS_STAGE);
@@ -3680,7 +3694,8 @@ static bool encode_run(mmse_engine_impl*     e,
     if (!ocudu::metal::shared_burst::adopt(st.cb)) {
       // The lane already had a burst open (another engine on this thread got there first): fall back to
       // committing this one, or the hop's dispatches would never be submitted.
-      ocudu::metal::shared_queue::arm_gpu_time(st.cb, ocudu::metal::shared_queue::queue_kind::back_end);
+      ocudu::metal::shared_queue::arm_gpu_time(st.cb, ocudu::metal::shared_queue::queue_kind::back_end, "ce_weights_fb");
+      ocudu::metal::shared_queue::note_commit_order(st.cb);
       [st.cb commit];
       mmse_stats_commit();
       ocudu::metal::gpu_lane_probe::register_commit(st.cb, WEIGHTS_STAGE);
@@ -3868,6 +3883,7 @@ bool mmse_engine::lane_fence_selftest(bool& waited)
   // The lane burst's own wait, on a command buffer that does nothing else: if it names a generation no
   // command buffer will ever signal, the wait below never returns.
   waited = ocudu::metal::shared_queue::backend_stage_wait(cb);
+  ocudu::metal::shared_queue::note_commit_order(cb);
   [cb commit];
   ce_wait_trace("lane_fence_selftest", cb);
   [cb waitUntilCompleted];
@@ -4187,8 +4203,10 @@ bool mmse_engine::run_nn(const float* a_inv, const float* r_hp, float* w, const 
   }
 
   [enc endEncoding];
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end);
+  // The GPU-time probe must be armed before commit (Metal asserts otherwise), and the ticket is taken with it
+  // (Q9-F): this commit can carry the estimator's fences too.
+  ocudu::metal::shared_queue::arm_gpu_time(cb, ocudu::metal::shared_queue::queue_kind::back_end, "ce_commit");
+  ocudu::metal::shared_queue::note_commit_order(cb);
   [cb commit];
   mmse_stats_commit();
   gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::channel_estimator);

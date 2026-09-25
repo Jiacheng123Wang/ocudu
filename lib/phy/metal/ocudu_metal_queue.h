@@ -107,7 +107,18 @@ public:
   /// Metal requires a completed handler to be installed before commit() (installing it afterwards is an
   /// assertion failure), so the engines call this immediately before committing and notify_commit()
   /// after. Statistics builds only: without the probe this is a no-op and the submit path pays nothing.
-  static void arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind kind);
+  ///
+  /// \param[in] label What the command buffer CARRIES, for the occupancy report (Q9-F3, dev doc 6.19): a
+  ///            static string such as `burst`, `late_handed`, `ce_weights`. Without it the report can
+  ///            name only a slot, and "which submission held the queue" is the whole question. Must
+  ///            outlive the process (a string literal).
+  /// \param[in] slot Receiving slot the commit belongs to, or \c no_slot to take this thread's lane slot
+  ///            when it has one (the lane's stages name it, see install_lane_slot_accessors()).
+  static constexpr uint64_t no_slot = ~static_cast<uint64_t>(0);
+  static void               arm_gpu_time(id<MTLCommandBuffer> command_buffer,
+                                         queue_kind          kind,
+                                         const char*         label = nullptr,
+                                         uint64_t            slot  = no_slot);
 
   /// \brief Reports a wrap request whose slice offset does not satisfy the alignment its binding needs.
   ///
@@ -192,11 +203,15 @@ public:
   enum class fence_kind : unsigned { stage = 0, correlation = 1, grid = 2, count = 3 };
 
   /// Records that \p generation's signal has just been encoded on the signaller's command buffer.
-  static void note_fence_signal(uint64_t generation, fence_kind kind);
+  ///
+  /// \param[in] command_buffer The buffer the signal was encoded on, i.e. the one that will carry it to the
+  ///            device. Q9-F needs it: the signal only becomes a fact when THAT buffer is COMMITTED, and the
+  ///            commit is what has to be compared against the waiter's commit.
+  static void note_fence_signal(uint64_t generation, fence_kind kind, id<MTLCommandBuffer> command_buffer = nil);
 
   /// Records that a wait for \p generation has just been encoded. See the class note for what the report
   /// makes of the pair.
-  static void note_fence_wait(uint64_t generation, fence_kind kind);
+  static void note_fence_wait(uint64_t generation, fence_kind kind, id<MTLCommandBuffer> command_buffer = nil);
 
   static uint64_t nof_fence_waits();
   /// Installs the "which slot is this thread serving" accessors (the lane clock lives with the lane probe, and
@@ -232,6 +247,75 @@ public:
   static uint64_t nof_stage_fence_own_waits();
   static uint64_t nof_stage_fence_newest_waits();
   static uint64_t nof_stage_fence_cross_lane();
+  ///@}
+
+  /// \name Q9-F: WHEN each device-side fence's two ends were COMMITTED (dev doc 6.19) - Q9-D's measured blind
+  ///       spot.
+  ///
+  /// WHY. Q9-D compares a wait against the moment its signaller was HANDED OUT (`backend_stage_signal()` /
+  /// `grid_ready_signal()` return a generation and encode the signal immediately), and on leg `p13-conc2` that
+  /// read as 27957 waits, all of them the safe shape. But a generation handed out is not a generation
+  /// SUBMITTED: the signal rides a command buffer, and that buffer is committed later - by the same thread a
+  /// few instructions on (the estimator's own commit), or by ANOTHER thread entirely (the registry's sweep
+  /// commits a claimed hand-over block after dropping its lock, see shared_burst::claim_grid_production()).
+  /// On a queue whose command buffers only have their STARTS ordered, a waiter that is COMMITTED before the
+  /// buffer carrying its signal is a waiter whose signaller is behind it: the queue cannot get past the wait,
+  /// and the signaller cannot run until it does - until a later signal pushes the event past the waited value.
+  ///
+  /// WHAT IT RECORDS. Every commit that can carry a fence calls note_commit_order() immediately before
+  /// commit(); a global counter hands out the ticket. The order is then exact rather than inferred:
+  ///
+  ///   * a WAIT is an inversion when, at its commit, NO command buffer carrying a signal at or above its
+  ///     generation had been committed yet (`waiter-committed-first`): the waiter is ahead of its signaller,
+  ///     and the event value can only reach it from behind - or from a signal that was already in front;
+  ///   * whether that is a DEADLOCK or a delay depends on the two buffers' queues, so the two are counted
+  ///     apart: a signaller on the SAME queue cannot get past the waiter (the queue's starts are ordered),
+  ///     a signaller on the other one runs concurrently (`cross-queue`, which is a delay, not a deadlock);
+  ///   * the DURATION of the worst inversion (waiter's commit -> the signaller's commit) and the wait's slot
+  ///     and kind: that is the number to read against a leg's stall.
+  ///
+  /// \note The ticket is taken immediately BEFORE commit(), so ticket order is the order in which the hosts
+  ///       INTENDED to submit; a thread descheduled between the ticket and its commit can still land second,
+  ///       which the report's duration makes visible (a sub-millisecond distance is that race, seconds are
+  ///       the defect).
+  /// \note Commits that can carry no fence (the equalizer's and the demapper's own buffers) deliberately do
+  ///       not call it: this counter is about fences, and `[metal_stats] queue occupancy (Q9-F3)` is the
+  ///       reading that covers EVERY commit.
+  ///@{
+  /// Takes the next commit ticket for \p command_buffer and resolves the fences it carries. Call it right
+  /// before commit().
+  static void note_commit_order(id<MTLCommandBuffer> command_buffer);
+
+  /// Commits that took a ticket (i.e. that could carry a device-side fence).
+  static uint64_t nof_commit_order_commits();
+  /// Waits that reached a commit and could therefore be judged (`waits` in the report).
+  static uint64_t nof_commit_order_waits();
+  /// Waits whose own commit preceded every commit carrying a signal at or above their generation.
+  static uint64_t nof_commit_order_waiter_first();
+  /// The subset whose signaller turned out to be on the SAME queue (the shape that cannot resolve itself).
+  static uint64_t nof_commit_order_waiter_first_same_queue();
+  static uint64_t nof_commit_order_waiter_first_cross_queue();
+  /// Waits at the exit whose ticketing never saw a signaller at all (a fence whose signal never committed).
+  static uint64_t nof_commit_order_unresolved();
+  /// Per fence kind: waits committed and inversions, so a leg names WHICH fence it is (`stage`, `corr`, `grid`).
+  static uint64_t nof_commit_order_kind_waits(fence_kind kind);
+  static uint64_t nof_commit_order_kind_inversions(fence_kind kind);
+  /// The worst inversion: its duration in microseconds, its kind, and the waiting slot.
+  static uint64_t commit_order_worst_us(fence_kind& kind, uint64_t& slot);
+  ///@}
+
+  /// \name Q9-F3: the queue-occupancy timeline (see arm_gpu_time() and the [metal_stats] report).
+  ///
+  /// Q9-F says whether a waiter is AHEAD of its signaller; this says what the device was doing meanwhile -
+  /// the reading that separates "the queue was held" from "the device was busy with something else". Every
+  /// command buffer armed with the GPU-time probe leaves one record (GPU window, label, slot), and the
+  /// report computes the union of the windows per queue: the HOLES in it are the intervals in which nothing
+  /// was executing on that queue at all, and the label and slot of the buffer that started right after a
+  /// hole name what was waiting. Enabled with the same OCUDU_METAL_GPU_TIME=1 switch as the busy time.
+  ///@{
+  static uint64_t nof_occupancy_records();
+  /// The largest hole in the union of the recorded windows (0 when nothing was recorded).
+  static uint64_t occupancy_largest_idle_us();
   ///@}
 
   /// \brief Encodes a wait for ONE named estimator generation (not the newest).

@@ -434,8 +434,9 @@ bool shared_burst::adopt(id<MTLCommandBuffer> cb)
       // Order the two buffers, then commit the front end's one: a command-buffer-level signal has to be
       // encoded while the buffer is still open, and the GPU-time probe must be armed before the commit.
       [cb encodeSignalEvent:ev value:value];
-      shared_queue::arm_gpu_time(cb, shared_queue::queue_kind::back_end);
+      shared_queue::arm_gpu_time(cb, shared_queue::queue_kind::back_end, "split_dft");
       gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::dft);
+      shared_queue::note_commit_order(cb);
       [cb commit];
       burst_stats_commit();
       s.outstanding.push_back(cb);
@@ -499,8 +500,20 @@ bool shared_burst::commit()
 
   [enc endEncoding];
   d1_trace("commit", cb);
-  // The GPU-time probe must be armed before commit (Metal asserts otherwise).
-  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end);
+  // The GPU-time probe must be armed before commit (Metal asserts otherwise), and the commit ticket (Q9-F) is
+  // taken immediately before it: this buffer can carry the stage fence's wait and the grid-production wait, so
+  // the order between its commit and its signaller's is the reading that says whether the wait can resolve.
+  const char* burst_label = "lane_burst";
+#if defined(OCUDU_METAL_STATS)
+  if (s.commit_label == gpu_lane_probe::stage::merged_hop) {
+    // The label names what the buffer CARRIES (Q9-F3's occupancy report reads it against the slots): on the
+    // merged route the adopted block brings the front end's transforms with it, so "the lane's burst" is the
+    // whole hop - the distinction the lane probe's busy split exists for.
+    burst_label = "merged_hop";
+  }
+#endif
+  metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end, burst_label);
+  metal::shared_queue::note_commit_order(cb);
   [cb commit];
   burst_stats_commit();
   // The burst is the command buffer whose completion produces the LLRs, i.e. the last one of the
