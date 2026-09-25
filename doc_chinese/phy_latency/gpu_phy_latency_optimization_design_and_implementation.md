@@ -2339,11 +2339,144 @@ xforms/dispatch   GPU us/dispatch   GPU us/transform
   per-dispatch 计数器（本机不支持，§8 Q1）。
 * 因此 `busy/residency` 低（0.719–0.917）**主要反映重叠/排队**，不是"设备在偷懒"。
 
+### 6.30 ★★ **前端批量化（Q9-F4）：一个时隙的 14 个变换合成 1 次派发**——离线 **159.8 → 10.6 µs/槽（15.1×）**，网格**逐字节相同**；并据此**重核 §7.1 的账**（提交 `a6b2d3f629`）
+
+> 这是 §6.29 ③ 1 的那把刀，也是本工作流**第一次按"修正后的算力账单"动手**。
+> 结论先行：**离线达标（15.1×，判据 `xforms=14` 行保持 ~14 µs 且写侧打开 ⇒ 实测 10.6 µs/槽）**，
+> 在线收益待腿 `p22-n78-batch14`（§6.30 ⑥ 的预登记）。
+
+#### ① 改了什么
+
+1. **kernel**（`ocudu_dft.metal`）：`grid_write_params` 的最后一个字段（原本的 `pad`，**一直是 0**）成为
+   **多变换标志**：`0` = 历史"一次派发一个变换"；`N > 1` = **这次派发携带 N 个变换**（每 threadgroup 一个），
+   **两个参数块都按 `tgid` 索引**。实现是常量地址空间上的三行地址算术
+   （`&gw_block + tgid` / `&ip_block + tgid`），**kernel 的参数列表没有变** ⇒ 所有既有派发点都不用改绑定
+   （这是选 `pad` 而不是加新参数的原因：加参数会让每个派发点都必须改，包括离线工具与别的引擎）。
+2. **引擎**（`ocudu_dft_metal_engine.mm`）：新旋钮 **`OCUDU_DFT_BATCH_SYMBOLS=N`，默认 1 = 关**。
+   `N ≥ 2` 时，**开着的块**里走**电台 int16 输入**的变换被**延迟**，在块结束时用**一次**
+   `MTLSizeMake(N,1,1)` 派发出去。四条正确性要点（都写进了代码注释）：
+   * **延迟对设备不可见**：块在交棒/提交前**不提交**，所以一个时隙的 14 个变换**本来就在同一条命令缓冲里**——
+     移动的只是**宿主编码的时机**，不是设备执行的内容与顺序（这正是"批量化能在交棒默认开的链路上安全落地"的原因；
+     也解释了为什么它**不该**改 `cbs/lane`）。
+   * **只批处理电台输入**（`grid_write::time_samples != nullptr`）：它的 14 个切片是**同一个分配**的 14 个偏移，
+     而块的 keepalive token 已经把这个分配保活；`staged` 的 float2 环可能被调用方在编码前重新填充。
+   * **表项的输入偏移要减去 `tgid × n`**：kernel 读 `ip[tgid].offset + tgid×n + perm[i]`（批布局"一个变换一个步长"），
+     而电台的符号切片是 `cp + n` 一个、且 CP 跳过已经折进偏移 ⇒ 表项 = **切片自身偏移 − 步长**。
+     切片比自己的步长更靠近分配基址（只可能出现在**重叠切片**的调用方）时**不可表达**：关掉当前组，让它做下一组的 0 号。
+   * **组只在绑定相同时扩张**（grid 映射 + 其偏移、电台分配、float2 环、`base`）；**块的三处结束**都会决定它的去向：
+     `commit_open()` 与 `release_block()` 在关编码器**之前**flush，`discard_open_block()` **只清不编码**（缓冲被丢弃，
+     编码了也没人跑）；`begin_block()` 清空；`submit_at()`（plain 路径）在编码前 flush，保证"延迟的先出去"。
+3. **仪器**：`[metal_stats] dft … batched=<dispatches>/<transforms> batch_max=<N>`；
+   `dft_metal_engine::batch_stats()`（离线臂可读）；门 **D16**（INFO：`batch_max=1` = 对照臂；
+   `batch_max>1` 而 `batched=0/0` ⇒ **机制没跑**，这条腿不算 A/B）；metal 自测 **arm 17**。
+4. **顺带修的两处"夹具前提过期"**（是自测的缺陷，不是门的缺陷）：`p0_gate_selftest.sh` 原先拿**最新**腿做夹具，
+   而自 6.19 起**每条腿都带 Q9-F 行** ⇒ 反向判据（"没有新行的腿必须读成 cannot say"）与 D14/D15（p21 真丢了 20 个块、
+   真打了 dump）在 p15 之后**误红**。现在夹具取**最新的、不含 Q9-F 行的腿**（当前 `p14-conc2`），找不到就**带原因 SKIP**；
+   反向判据与 D14/D15/D16 现在一起绿。
+
+#### ② 离线验收（判据先登记：`xforms=14` 那一行保持 ~14 µs，**且写侧打开**）
+
+`wip/dft_kernel_cost.mm`（**加载生产的 `ocudu_dft.metallib`**）新增"**前端自己的形状**"一段：
+14 个符号、**电台 int16 输入**、**grid write 打开**、**每符号各自的 `dst_offset` 与相位补偿**（这正是表路径要支持的东西）：
+
+```
+--- the front end's own shape: 14 symbols, radio int16 input, grid write ACTIVE ---
+14 dispatches x 1 threadgroup (scalar blocks)            159.77 us/slot     ← 前端原样
+ 1 dispatch  x 14 threadgroups (per-tgid tables)          10.61 us/slot     ← 批量化后
+speed-up                                                  15.06x
+the two shapes wrote the same grid                   YES (batched == per-symbol, byte for byte)
+```
+
+* n=512（n1 小区）：**141.62 → 10.35 µs/槽（13.68×）**；n=768（n78）：上表。
+* 与 §6.29 的估计一致（14 × 12.2 ≈ 171 / 13.75 µs），**且逐字节证明表路径没有写错行 / 错相位 / 错切片**
+  （这是"表索引写错"唯一能在离线抓住的地方）。
+* 完整读数留在 `doc_chinese/work_tmp/dft_kernel_cost_q9f4_0925_1412.txt`（git 忽略）。
+
+#### ③ 在线自测（arm 17，走**生产的交棒路径**）
+
+同一个引擎、同样的 14 个符号、同样的每符号参数，跑**两次**（旋钮 1 vs 14），都经
+`begin_block → 14 × submit_slot_grid_write → release_block → take_released → commit → wait`：
+
+```
+[dft-release] arm 17 (6.30 batched front end): the same 14 symbols through the same release path produce a
+BIT-IDENTICAL grid whether they are dispatched one per symbol or all in one dispatch, and the counters say the
+batched arm really deferred them (dispatches 0->1, transforms 0->14, knob=14)
+```
+
+臂里同时断言**对照臂的计数必须是 0/0**（旋钮关时一次批处理都不许发生），以及批处理臂是**恰好 1 次派发**（不是 2 次或 14 次）。
+> 开发这条臂时它先报了 `dispatches=2 transforms=10` ⇒ 抓出**推送路径的一个真实次序缺陷**：绑定记录写在"步长守卫"**之前**，
+> 而守卫关组时会清掉刚记下的绑定 ⇒ 每个新组都从"nil 绑定"开始、第二个变换就再次切组。修法是把绑定记录移到守卫**之后**
+> （代码里以 (1)(2)(3)(4) 标注了必须的顺序）。**另一处**是臂自己的切片尺寸写错（把"复数样点"当成了"int16"，
+> 导致切片重叠），守卫**正确地**把它拆成多组——即守卫按设计工作。
+
+#### ④ 网（全绿；一次 CE Metal flake 按 §5.4"保留第一次读数"记录）
+
+| 网 | 结果 |
+|---|---|
+| `ctest -L phy` | **193/193**（第一次整套跑到 `port_channel_estimator_metal_mmse_unit_test_ta_chain` **Bus error**；单独重跑 **3/3 绿**、整套重跑 **193/193 绿** ⇒ §5.4 记录的争用 flake，第一次读数保留）|
+| `lower_phy_test` | **528/528**（`OCUDU_UL_RX_POOL_DROP_FORCE=3` 同样 528/528）|
+| metal 测试 | **arm 10–17 全 PASS**（`OCUDU_DFT_BATCH_SYMBOLS=14` 时同样 exit 0）|
+| `dft_processor_metal_unit_test` | **ALL OK**（旋钮关 / 开各一次）|
+| `l1_handover_arms.sh` | **5 PASS** |
+| `p0_gate_selftest.sh` | **PASS**（含新 D16 的双向断言）|
+| `p0_gate.sh` 对既有腿 | p16 / p21 仍 **26/26**；D16 在 6.30 之前的腿读成 **"a leg flown before 6.30 cannot say"**（"读不出按 RED"的规矩）|
+
+#### ⑤ §3.2 的产出：重核 §7.1 的账——**C 是"驻留窗口在排队"，不是"算力在排队"**
+
+把 §7.1 的五项**按"窗口 / 算力"重写**（n78 加压、并发 2、中位 ~2430 µs；§6.29 + 本节读数）：
+
+| 项 | 量级 µs | 它**真实**是什么 | 其中的**算力** | 杠杆 |
+|---|---|---|---|---|
+| **A** 等样点 | ≈ 473 | 电台整槽收包的**结构**项 | **0** | P1-7（符号级收包），触 V4 |
+| **B** 前端宿主 | ≈ 48 | 14 × encode + 交棒记账 + notify | 宿主 ≈48 | **本节：encode 从 14 次降到 1 次** |
+| **C** 等车道空出来 | ≈ 901 | **本车道上一跳的"驻留窗口"还没走完**（排队） | **0** | 任何固定窗口缩短都会**超线性**缩小它 |
+| **D** "本跳设备执行" | ≈1125 | **占用窗口**：算力 + **别的缓冲的重叠** | **~300**（前端 ~171 → **10.6**，CE/EQ/demap ~140） | 本节（前端）；其后 CE/EQ/demap |
+| **E** Pass-3 + fork | ≈ 110 | 宿主（LLR 出页/解扰/解复用 + 解码 fork） | 宿主 ≈110 | P1-6（拆 B/E） |
+
+* **车道利用率**：ρ = λ·S/m = **600 跳/s × 2.43 ms / 2 车道 ≈ 0.73**（与 §6.29 ③ 2 的 ~72% 一致；600 跳/s = n78 TDD
+  `ul_ratio=0.30` 的上行槽率，腿的 `lanes=143866` 也印证了它）。
+* ⇒ 缩短一跳的**任何固定窗口**都会**超线性**地缩小 C：一阶放大 **1/(1−ρ) ≈ 3.7**（随机到达的上界；确定性到达下**至少 1×**）。
+* ⇒ **本节的直接收益**：前端窗口 **−149 µs/槽**、宿主 encode **−13 次/槽**。**V1 的预登记预测**（两种结果都要接受）：
+  * **若前端窗口在关键路径上** ⇒ 中位**至少 −149 µs（≈2290）**；叠加 C 的放大后可能 **≈1950–2100**（**可能直接落进 ≤2150**）。
+  * **若中位不动** ⇒ 前端窗口**已被前一跳完全重叠**，关键路径是 **A 与 C** ⇒ 下一个杠杆是 **A（P1-7）**与 CE/EQ/demap 链，
+    **不再**在前端上花时间。
+* **增量账（谁最贵）**：一跳**算力** ~300 → **~150 µs**；而 A（473）+ C（901）= **1374 µs 是零算力的时序/排队项**
+  ⇒ **只砍算力打不到 V1**：2150 = 2675 − 525，本节把这条路的**一大半**走完（含放大可能 −400），
+  剩下的**必须**来自 A 或 C 的**结构项**。这句话是给下一条腿定的性：**p22 若只降 ~150 µs，就该转 A/C，而不是继续砍 kernel。**
+
+#### ⑥ 怎么用（A/B 与腿命令）
+
+```bash
+# B 臂（批量化）：与 p16–p21【逐字相同】的配方 + 一条旋钮；飞前先重建（戳必须 = HEAD）
+cmake --build build --target ocudu_versioning && cmake --build build --target gnb
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p22-n78-batch14 \
+  --regime=stress OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_DFT_BATCH_SYMBOLS=14 \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+#    流量（CN 侧）：iperf3 -c <gNB-ip> -R -b 40M -P 4 -t 240      ← -R 不能省
+#    停机：单次 Ctrl-C，并确认进程真的退出（atexit 才写报告）
+# 判读
+bash doc_chinese/phy_latency/wip/p0_gate.sh p22-n78-batch14                       # D1–D16
+bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 p22-n78-batch14   # V1–V5
+```
+
+* **A 臂 = p16–p21**（默认 `batch_max=1`），无需再飞；**先验条件**：`p0_gate.sh` 的 **D16 必须读成
+  `batched=<d>/<t> batch_max=14`**——`batched=0/0` 表示这条腿**不是** A/B（延迟从未发生），此时不要读 V1。
+* ⚠ **判 V1–V5 的腿一律不带 `OCUDU_METAL_GPU_TIME=1`**（它会扰动提交路径）。
+* 读数：**V1 中位**（对照 2413–2440）、`[ul_gpu_lane]` 前端块窗口（Q9-F2 carried）、契约 8/8、
+  **V4 `cbs/lane` 应当不变**（批量化不改提交数——这一条是本改动的**契约性**断言，不只是性能）。
+
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
 
 > **先读 §2.3.1**：三段的**名字**与**窗口内容**不是一回事。下表是**按工作量归属**重写后的版本——它才是优化要用的一张表。
+>
+> ⚠⚠ **本节的两列数字已被 §6.29 / §6.30 更正，别再按原样读**：下表里的 **D（1125）是"占用窗口"不是算力**
+> （真实算力 ~300 µs/槽，其中前端 ~171 已在 §6.30 批量化到 **10.6**），而 **C（901）是"驻留窗口在排队"**
+> （ρ ≈ 0.73，零算力）。**按"窗口 / 算力"重写后的版本在 §6.30 ⑤ 的表里**（含 A/B/C/D/E 各自的算力与杠杆）。
 
 ```
 一跳的串行链（中位，加总 ≈ 跨度 2675）：
@@ -2392,6 +2525,7 @@ xforms/dispatch   GPU us/dispatch   GPU us/transform
 | 候选 | 形态 | 预期 | 风险 / 状态 |
 |---|---|---|---|
 | **P2-B** | **缩短 D 项（本跳设备执行 1125 µs）**：按 P0-1 的 kernel 拆分，针对最贵 kernel 改线程组/占用率/代数 | 直接砍 D；D 是 busy 97% 的实打实算力 | kernel 改动需逐字节/容差判据（`value_net` + `-L phy`）；⚠ 本机**不支持逐 dispatch 计数器** ⇒ P0-1 必须先做（✅ 已做） |
+| **P2-B′**（新增，§6.30）| **前端批量化**：一个时隙的 14 次单 threadgroup 派发 → **1 次 14-threadgroup 派发**（`OCUDU_DFT_BATCH_SYMBOLS=14`）；离线 **159.8 → 10.6 µs/槽**、网格**逐字节相同** | 砍掉前端那 ~149 µs 的**占用窗口**（并顺带把宿主 encode 从 14 次降到 1 次）；按 §6.30 ⑤ 的 ρ≈0.73，C 项会**超线性**跟着缩 | ✅ **已实现并离线 + 在线自测通过**（提交 `a6b2d3f629`，门 D16）；**空口 A/B 待腿 `p22-n78-batch14`**（预登记见 §6.30 ⑥）|
 | **P2-F** | **车道并发度**（`max_pusch_and_srs_concurrency` 1→2）：让两条跳的设备执行**重叠**，把 C 项（901）吃掉一部分 | 若 GPU 余量（41%）够 ⇒ C 项可大幅下降（§7.5 实测：−55%）| **直接碰 V4**（提交数）⇒ **必须先出测量臂（P1-8）并把结论交用户裁决**（§7.4）。**未开工** |
 | **P2-E** | **输入缓冲寿命解耦**（keepalive token 从"整跳完成"挪到"最后一个读输入的 dispatch"）| **不缩短时延**（V1 不由它达成），只把持有期从跨度压到前端那一段 ⇒ 治 V2（池饥饿）| ✅ 已实现（默认关）；⛔ **被平台证伪**（§6.4），**待用户裁决** |
 | **P2-A** | **把估计器的"提取/权重"提前**：让它在网格 DMRS 符号就绪时就开跑，而不是等到跳尾 | 缩短 C（排队）与 D 的串行部分 | 与交棒次序耦合，需保证顺序正确（有 fence 机制）。**未开工** |
