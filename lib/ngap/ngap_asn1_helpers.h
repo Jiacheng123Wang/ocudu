@@ -162,6 +162,65 @@ inline void fill_asn1_ul_nas_transport(asn1::ngap::ul_nas_transport_s& asn1_msg,
   user_loc_info_nr       = cu_cp_user_location_info_to_asn1(msg.user_location_info);
 }
 
+/// Converts the NGAP ASN.1 QoS Flow Level QoS Parameters IE to common type.
+inline qos_flow_level_qos_parameters
+ngap_asn1_to_qos_flow_level_qos_parameters(const asn1::ngap::qos_flow_level_qos_params_s& asn1_qos_params)
+{
+  qos_flow_level_qos_parameters qos_params;
+
+  if (asn1_qos_params.qos_characteristics.type() == asn1::ngap::qos_characteristics_c::types::dyn5qi) {
+    const auto& asn1_dyn_5qi = asn1_qos_params.qos_characteristics.dyn5qi();
+
+    dyn_5qi_descriptor dyn_5qi  = {};
+    dyn_5qi.qos_prio_level      = qos_prio_level_t{asn1_dyn_5qi.prio_level_qos};
+    dyn_5qi.packet_delay_budget = asn1_dyn_5qi.packet_delay_budget;
+    dyn_5qi.per.exponent        = asn1_dyn_5qi.packet_error_rate.per_exponent;
+    dyn_5qi.per.scalar          = asn1_dyn_5qi.packet_error_rate.per_scalar;
+
+    if (asn1_dyn_5qi.five_qi_present) {
+      dyn_5qi.five_qi = uint_to_five_qi(asn1_dyn_5qi.five_qi);
+    }
+    // The Delay Critical and Averaging Window IEs are only present for GBR QoS flows.
+    if (asn1_dyn_5qi.delay_crit_present) {
+      dyn_5qi.is_delay_critical = asn1_dyn_5qi.delay_crit.value == asn1::ngap::delay_crit_opts::delay_crit;
+    }
+    if (asn1_dyn_5qi.averaging_win_present) {
+      dyn_5qi.averaging_win = asn1_dyn_5qi.averaging_win;
+    }
+    if (asn1_dyn_5qi.max_data_burst_volume_present) {
+      dyn_5qi.max_data_burst_volume = asn1_dyn_5qi.max_data_burst_volume;
+    }
+
+    qos_params.qos_desc = dyn_5qi;
+  } else if (asn1_qos_params.qos_characteristics.type() == asn1::ngap::qos_characteristics_c::types::non_dyn5qi) {
+    non_dyn_5qi_descriptor non_dyn_5qi = {};
+    non_dyn_5qi.five_qi                = uint_to_five_qi(asn1_qos_params.qos_characteristics.non_dyn5qi().five_qi);
+    qos_params.qos_desc                = non_dyn_5qi;
+
+    // TODO: Add optional values.
+  }
+
+  // Fill allocation and retention priority.
+  qos_params.alloc_retention_prio.prio_level_arp         = asn1_qos_params.alloc_and_retention_prio.prio_level_arp;
+  qos_params.alloc_retention_prio.may_trigger_preemption = asn1_qos_params.alloc_and_retention_prio.pre_emption_cap ==
+                                                           asn1::ngap::pre_emption_cap_opts::may_trigger_pre_emption;
+  qos_params.alloc_retention_prio.is_preemptable = asn1_qos_params.alloc_and_retention_prio.pre_emption_vulnerability ==
+                                                   asn1::ngap::pre_emption_vulnerability_opts::pre_emptable;
+
+  // Fill optional parameters.
+  if (asn1_qos_params.add_qos_flow_info_present) {
+    qos_params.add_qos_flow_info = asn1_qos_params.add_qos_flow_info.to_string();
+  }
+  if (asn1_qos_params.gbr_qos_info_present) {
+    qos_params.gbr_qos_info = ngap_asn1_to_gbr_qos_flow_information(asn1_qos_params.gbr_qos_info);
+  }
+  if (asn1_qos_params.reflective_qos_attribute_present) {
+    qos_params.reflective_qos_attribute_subject_to = true;
+  }
+
+  return qos_params;
+}
+
 /// Helper function to fill the CU-CP PDU Session Resource Setup Item for both, PDUSessionResourceSetupItemSUReq and
 /// PDUSessionResourceSetupItemCxtReq. Note that the NAS-PDU is added in separate functions
 /// \param[out] setup_item The cu_cp_pdu_session_res_setup_item struct to fill.
@@ -237,65 +296,8 @@ inline bool fill_cu_cp_pdu_session_resource_setup_item_base(cu_cp_pdu_session_re
     qos_flow_setup_req_item.qos_flow_id = uint_to_qos_flow_id(asn1_flow_item.qos_flow_id);
 
     // Fill QoS flow level QoS parameters.
-    if (asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.type() ==
-        asn1::ngap::qos_characteristics_c::types::dyn5qi) {
-      const auto& asn1_dyn_5qi = asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.dyn5qi();
-
-      dyn_5qi_descriptor dyn_5qi  = {};
-      dyn_5qi.qos_prio_level      = qos_prio_level_t{asn1_dyn_5qi.prio_level_qos};
-      dyn_5qi.packet_delay_budget = asn1_dyn_5qi.packet_delay_budget;
-      dyn_5qi.per.exponent        = asn1_dyn_5qi.packet_error_rate.per_exponent;
-      dyn_5qi.per.scalar          = asn1_dyn_5qi.packet_error_rate.per_scalar;
-
-      if (asn1_dyn_5qi.five_qi_present) {
-        dyn_5qi.five_qi = uint_to_five_qi(asn1_dyn_5qi.five_qi);
-      }
-      // The Delay Critical and Averaging Window IEs are only present for GBR QoS flows.
-      if (asn1_dyn_5qi.delay_crit_present) {
-        dyn_5qi.is_delay_critical = asn1_dyn_5qi.delay_crit.value == asn1::ngap::delay_crit_opts::delay_crit;
-      }
-      if (asn1_dyn_5qi.averaging_win_present) {
-        dyn_5qi.averaging_win = asn1_dyn_5qi.averaging_win;
-      }
-      if (asn1_dyn_5qi.max_data_burst_volume_present) {
-        dyn_5qi.max_data_burst_volume = asn1_dyn_5qi.max_data_burst_volume;
-      }
-
-      qos_flow_setup_req_item.qos_flow_level_qos_params.qos_desc = dyn_5qi;
-    } else if (asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.type() ==
-               asn1::ngap::qos_characteristics_c::types::non_dyn5qi) {
-      non_dyn_5qi_descriptor non_dyn_5qi = {};
-      non_dyn_5qi.five_qi =
-          uint_to_five_qi(asn1_flow_item.qos_flow_level_qos_params.qos_characteristics.non_dyn5qi().five_qi);
-      qos_flow_setup_req_item.qos_flow_level_qos_params.qos_desc = non_dyn_5qi;
-
-      // TODO: Add optional values.
-    }
-
-    // Fill allocation and retention priority.
-    qos_flow_setup_req_item.qos_flow_level_qos_params.alloc_retention_prio.prio_level_arp =
-        asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.prio_level_arp;
-    qos_flow_setup_req_item.qos_flow_level_qos_params.alloc_retention_prio.may_trigger_preemption =
-        asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.pre_emption_cap ==
-        asn1::ngap::pre_emption_cap_opts::may_trigger_pre_emption;
-    qos_flow_setup_req_item.qos_flow_level_qos_params.alloc_retention_prio.is_preemptable =
-        asn1_flow_item.qos_flow_level_qos_params.alloc_and_retention_prio.pre_emption_vulnerability ==
-        asn1::ngap::pre_emption_vulnerability_opts::pre_emptable;
-
-    // Optional parameters.
-    if (asn1_flow_item.qos_flow_level_qos_params.add_qos_flow_info_present) {
-      qos_flow_setup_req_item.qos_flow_level_qos_params.add_qos_flow_info =
-          asn1_flow_item.qos_flow_level_qos_params.add_qos_flow_info.to_string();
-    }
-
-    if (asn1_flow_item.qos_flow_level_qos_params.gbr_qos_info_present) {
-      qos_flow_setup_req_item.qos_flow_level_qos_params.gbr_qos_info =
-          ngap_asn1_to_gbr_qos_flow_information(asn1_flow_item.qos_flow_level_qos_params.gbr_qos_info);
-    }
-
-    if (asn1_flow_item.qos_flow_level_qos_params.reflective_qos_attribute_present) {
-      qos_flow_setup_req_item.qos_flow_level_qos_params.reflective_qos_attribute_subject_to = true;
-    }
+    qos_flow_setup_req_item.qos_flow_level_qos_params =
+        ngap_asn1_to_qos_flow_level_qos_parameters(asn1_flow_item.qos_flow_level_qos_params);
 
     if (asn1_flow_item.erab_id_present) {
       qos_flow_setup_req_item.erab_id = asn1_flow_item.erab_id;
