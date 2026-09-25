@@ -59,6 +59,35 @@ struct error_counts {
   unsigned long long alignment = 0;
   unsigned long long bad_packet = 0;
 
+  // The transmit side reports through the ASYNC message queue, not per send: an underflow there is exactly
+  // what the gNB's `[RF] Real-time failure in RF: underflow` line counts, so the bench can predict it.
+  unsigned long long tx_underflow = 0;
+  unsigned long long tx_sequence = 0;
+  unsigned long long tx_time = 0;
+  unsigned long long tx_burst_ack = 0;
+  unsigned long long tx_other = 0;
+
+  void note_tx(const uhd::async_metadata_t& md)
+  {
+    switch (md.event_code) {
+      case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW:
+        ++tx_underflow;
+        break;
+      case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR:
+        ++tx_sequence;
+        break;
+      case uhd::async_metadata_t::EVENT_CODE_TIME_ERROR:
+        ++tx_time;
+        break;
+      case uhd::async_metadata_t::EVENT_CODE_BURST_ACK:
+        ++tx_burst_ack;
+        break;
+      default:
+        ++tx_other;
+        break;
+    }
+  }
+
   void note(uhd::rx_metadata_t::error_code_t code)
   {
     switch (code) {
@@ -99,6 +128,9 @@ int main(int argc, char** argv)
   std::string otw      = "sc12";    // the leg config's otw_format
   double      block_ms = 0.5;       // one slot at 30 kHz
   bool        with_tx  = false;     // stream TX as well (the leg runs both directions over one USB link)
+  bool        tx_paced = false;     // feed TX one block per block-time, as the gNB does, instead of back-to-back
+  double      tx_hiccup_ms    = 0.0; // every tx_hiccup_every blocks, stall the feeder for this long
+  unsigned    tx_hiccup_every = 200;
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -117,11 +149,18 @@ int main(int argc, char** argv)
       otw = next();
     } else if (a == "--tx") {
       with_tx = true;
+    } else if (a == "--tx-paced") {
+      with_tx   = true;
+      tx_paced  = true;
+    } else if (a == "--tx-hiccup-ms") {
+      tx_hiccup_ms = std::strtod(next().c_str(), nullptr);
+    } else if (a == "--tx-hiccup-every") {
+      tx_hiccup_every = static_cast<unsigned>(std::strtoul(next().c_str(), nullptr, 10));
     } else if (a == "--block-ms") {
       block_ms = std::strtod(next().c_str(), nullptr);
     } else if ((a == "-h") || (a == "--help")) {
       std::printf("usage: %s [--args <device args>] [--seconds N] [--rate Hz] [--freq Hz] [--gain dB] "
-                  "[--otw sc8|sc12|sc16] [--block-ms N] [--tx]\n",
+                  "[--otw sc8|sc12|sc16] [--block-ms N] [--tx] [--tx-paced] [--tx-hiccup-ms N] [--tx-hiccup-every N]\n",
                   argv[0]);
       return 0;
     } else {
@@ -165,6 +204,7 @@ int main(int argc, char** argv)
   // The transmit side is WHAT THE LEG ADDS and this probe otherwise does not: both directions share one USB
   // link, so an RX path that is perfect alone can still overflow while the radio is being fed. Zeros are
   // enough - the question is the transport's load, not the waveform.
+  error_counts                            tx_errors; // written by the TX thread, read after join
   uhd::tx_streamer::sptr                  tx_stream;
   std::atomic<bool>                       tx_run{false};
   std::thread                             tx_thread;
@@ -179,14 +219,34 @@ int main(int argc, char** argv)
     // Its own thread, as the radio's own transmit path has: sending from the receive loop would serialize the
     // two directions and manufacture the very overflow this probe is looking for.
     tx_thread = std::thread([&]() {
-      bool first = true;
+      bool   first = true;
+      auto   next_block = std::chrono::steady_clock::now();
+      unsigned n_blocks = 0;
       while (tx_run.load(std::memory_order_relaxed)) {
+        // Paced mode feeds the radio the way the gNB does - one block per block-time, with the radio's own
+        // clock as the pace - and every `tx_hiccup_every` blocks it stalls for `tx_hiccup_ms`, which is what a
+        // late DL chain (or a late host thread) looks like from the radio's side. That stall is the only way
+        // this bench can make the DEVICE's transmit FIFO run dry, and running the FIFO dry is what the gNB's
+        // `Real-time failure in RF: underflow` counts.
+        if (tx_paced) {
+          next_block += std::chrono::microseconds(static_cast<long long>(block_ms * 1000.0));
+          if ((tx_hiccup_ms > 0.0) && (tx_hiccup_every != 0) && ((n_blocks % tx_hiccup_every) == 0)) {
+            next_block += std::chrono::microseconds(static_cast<long long>(tx_hiccup_ms * 1000.0));
+          }
+          std::this_thread::sleep_until(next_block);
+        }
+        ++n_blocks;
         uhd::tx_metadata_t tx_md;
         tx_md.start_of_burst = first;
         tx_md.end_of_burst   = false;
         tx_md.has_time_spec  = false;
         first                = false;
-        tx_stream->send(tx_buffs, block_samples, tx_md, 1.0);
+        const size_t sent = tx_stream->send(tx_buffs, block_samples, tx_md, 1.0);
+        (void)sent;
+        uhd::async_metadata_t async_md;
+        while (tx_stream->recv_async_msg(async_md, 0.0)) {
+          tx_errors.note_tx(async_md);
+        }
       }
       uhd::tx_metadata_t tx_md;
       tx_md.start_of_burst = false;
@@ -279,6 +339,16 @@ int main(int argc, char** argv)
 
   const bool healthy = (errors.overflow == 0) && (errors.late == 0) && (errors.timeout == 0) &&
                        (errors.broken_chain == 0) && (errors.bad_packet == 0) && (gaps == 0) && (blocks != 0);
+  if (with_tx) {
+    std::fprintf(stderr,
+                 "[uhd_rx_health] tx async: underflow=%llu sequence=%llu time=%llu burst_ack=%llu other=%llu  "
+                 "(underflow is the gNB's `Real-time failure in RF: underflow`)\n",
+                 tx_errors.tx_underflow,
+                 tx_errors.tx_sequence,
+                 tx_errors.tx_time,
+                 tx_errors.tx_burst_ack,
+                 tx_errors.tx_other);
+  }
   std::fprintf(stderr,
                "[uhd_rx_health] VERDICT: %s (%.1f%% of the requested time produced stream: %.1fs of %.1fs)\n",
                healthy ? "the RX transport kept up - no overflow, no late, no gap"

@@ -28,9 +28,21 @@ ru_sdr:
   # So the ring converts a LOST SAMPLE into a DELIVERED BACKLOG; the backlog arrives as a burst, which is why
   # the pool it feeds was re-sized with it (lower_phy_factory: peak 16 + rx path 2 + margin 3 -> 32, dev doc
   # 6.53). What it does NOT do is remove the stall: the stalls are inside receive() itself (dev doc 6.53 (2),
-  # the `[ul_rx_timing] overflow_ctx` of every overflow), i.e. the USB path - the root cause still open.
-  # num_send_frames stays 64: the transmit ring is a separate variable and has not been measured this way.
-  device_args: type=b200,num_recv_frames=256,num_send_frames=64
+  # the `[ul_rx_timing] overflow_ctx` of every overflow), i.e. the host/USB path - the root cause still open.
+  #
+  # 512 frames (dev doc 6.56, ruling B): the margin was sitting ON the worst stall ever measured. At 8200
+  # bytes/frame and sc12 (3 bytes/sample) one frame is 2733 samples, so the ring absorbs
+  #   64 frames = 7.6 ms   256 = 30.4 ms   512 = 60.7 ms
+  # while the measured worst drifts are 33.9 ms (p34, which lost 35.3 ms of samples at 64 frames) and
+  # 28.1 ms (bench, CPU pinned). 256 therefore covers the observed range with ~0 headroom - one 34 ms stall
+  # eats the whole ring - and 512 doubles it. Measured healthy on the bench with RX and TX streaming at once
+  # (wip/uhd_rx_health: 100% duty, 0 radio errors); 1024 is healthy too, for whoever wants 121 ms.
+  # num_send_frames stays 64 ON PURPOSE: the transmit ring is NOT the lever for the RF underflows. They occur
+  # with the hand-over ~1.5 ms EARLY and the host's send ring FULL (p35: transmit() blocked >1 ms 447 times,
+  # `AT/BELOW 0` only 23, against 649 underflows) - i.e. the samples are queued and not moving over the wire,
+  # which no ring depth can fix, and the bench cannot reproduce it either (0 underflows at 64 or 512 frames,
+  # even with 20 ms feeder stalls). See dev doc 6.56 (2) for why arm C was retired rather than flown.
+  device_args: type=b200,num_recv_frames=512,num_send_frames=64
   srate: 23.04
   otw_format: sc12
   tx_gain: 80
