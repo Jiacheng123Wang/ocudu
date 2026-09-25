@@ -4260,6 +4260,64 @@ clang++ -std=c++17 -O2 -I /opt/homebrew/include doc_chinese/phy_latency/wip/uhd_
   逐字节相同是**构造性**的，判据仍然是 §6.48 那套对拍。
 
 
+### 6.59 ★★ **§3.2 施工完成（离线）：把 `h_starts` 搬到 y 上** —— 语料上 **run 4 → 1**、**派发 12 → 4**（均衡 9 → 1），且 **3×135 个 dump 全部逐字节相同**（含与**改前二进制**对拍）
+
+#### ① 改了什么（纯地址，不动算术）
+
+| 处 | 改动 |
+|---|---|
+| `ocudu_equalizer.metal` | `equalize_strides` 去掉 `y_stride`、加 **`y_starts[]`**（逐符号起点，**相对 y 绑定**）；`equalize_mxn_batch` 里 `y += sym * st.y_stride` → **`y += st.y_starts[min(sym, …)]`**（`h_starts` 的写法照搬）|
+| 宿主 `eq_strides_t` | 同步（`static_assert` 更新为 `4*uint + 2*14*uint`）|
+| `eq_flush_hook` | 每个 run 填 `y_starts[k]`：直读 ⇒ `(symbols[run_plan_index[k]].symbol − first_row) * symb_stride`；staged/gathered ⇒ `k * nof_ports * nof_re`（打包布局）|
+| run 谓词 | **设备侧 `same_h`：只要求"同一缓冲 + 偏移不回退"**（原来要求定步长 `offset == prev + h_step`）；**`same_gather`：允许跨越网格空档**，但**前提是"该 run 的每个符号都能原地读"**（否则退回今天的行为，run 在空档处停）|
+| 直读谓词 `eq_direct_grid_run` | **去掉"符号必须连续"**，改为按 run 的**真实符号表**逐个检查（每符号自己的网格行 + 同一 `subc_base` + dense）|
+| 不变量 | flush 里加断言：**非连续的 run 必须是直读 run**（gather 的 tap 表按连续符号索引，否则会读错资源粒子）|
+| 同步路径 / `enqueue_burst_batch_at` | 分别填 `y_starts[0]=0`（绑定即符号区域）与打包步长（调用方给的是打包数组）|
+
+#### ② ★ 施工中我自己踩的**两个同类缺陷**（都由机制计数器当场抓出，值得记下）
+
+两个都源于同一件事：**run 的第 k 个符号不是 `first_symbol + k`**（run 会跨过"从未提交"的 DM-RS 符号），而"计划表"是按**连续网格符号**枚举的。
+
+1. **run 谓词**里我用 `first_plan_index + n_run` 去问"下一个符号能不能原地读" ⇒ 问到了**DM-RS 符号**（不 dense）⇒ run 在空档处照旧断开。
+   **症状**：`runs` 仍 4、`first_break=gather`（不是预期的 `runs=1 / first_break=none`）。
+2. **直读谓词**里我仍按 `plan.symbols[first_symbol + k]` 线性遍历 ⇒ 遍历到了 DM-RS 符号（`nof_entries=0 ≠ nof_re`）⇒ 直读被拒。
+   **症状**：`runs=1` 但 **`y_direct=0 / y_gather=1`、`miss(len=1)`** ⇒ 派发数**没降**（6 而不是 4）。
+
+⇒ 两处都改成**按 run 自己的符号表**（`gather.symbol − symbols[0].symbol`）后，立刻出现预期形状。
+**这就是"先读机制计数器、再看时延"的价值**：两次都不是崩溃、不是数值错，而是"看起来跑了但没省到"。
+
+#### ③ 离线证据（**不变量：逐字节**）
+
+| 项 | 结果 |
+|---|---|
+| 27 条语料 ×2 臂 | **`runs=1`（原 4）、`max_run=11`（原 4）、`first_break=none`（原 `estimates`/`gather`）** |
+| 派发（整条 replay）| **12 → 4**（均衡 **9 → 1**：原 1 建表 + 4 gather + 4 均衡；现 1 次均衡，**无建表、无 gather**）|
+| **逐字节** | 新 ON 对**旧 ON 基线**：**135 文件 0 差异**；新 OFF 对**旧 OFF 基线**：**135 文件 0 差异**；两臂互比：**135 文件 0 差异** |
+| 反例臂（`cdm=1`，DM-RS 符号**带**数据 ⇒ 梳状有洞）| `runs=7` **与改前一致**、`first_break=geometry`；`DIRECT=1` 仍是 **4 直读 + 3 gather**（`miss(holes)`）；dumps **5 文件 0 差异** |
+| 单测 / 探针 | `channel_equalizer_metal_unit_test` **ALL OK**；`eq_batch_kernel_probe` / `metal_chain_probe` / `eq_handoff_probe` rc=0 |
+| `l1_handover_arms.sh` | **全 PASS**（含 drop 臂 8/8 不同 ⇒ 网有齿）|
+| `value_net` | `captures=47 problems=183`，**失败清单与改前逐行相同**（183 条全是归档基线陈旧，**新增 0 条**）|
+| 全套 | **`ctest -L phy` 193/193** ✅（194 个注册、1 个 disabled）。⚠ 过程中我先误用 `cmake --build … --clean-first`（见 ⑤），清掉了包括 `ldpc_metal_unit_test` / `demodulation_mapper_metal_unit_test` 在内的**非默认目标**二进制 ⇒ 一次 ctest 报 "Unable to find executable"×2；**显式重建这两个目标后 193/193 全绿**——这条正是 §4.3 的老纪律（测试可执行文件不在默认构建目标里）|
+
+#### ④ 待飞腿与预登记（`p38-n78-wholehop`）
+
+| 读数 | 今天（`p37`）| 预登记 |
+|---|---|---|
+| `eq_batch runs` / `max_run` / `first_break` | 3.0 / 8 / `estimates` | **1.0 / 12 / `none`** |
+| `sites(y_direct=)` / `(y_gather=)` / `(ch_gather=)` | 3.0 / 0 / 0 | **1.0 / 0 / 0** |
+| `burst dispatches`（均衡）| **6.0**（3.0）| **4.0**（1.0）|
+| `merged_hop` | 555.2 µs | **−13…−19 µs**（≈536–542）|
+| **V1 中位** | 1408.2 µs | **−26…−34 µs ⇒ ≈1375–1382** |
+| 契约 / `cbs/lane` / gaps / D18 | 8/8 / 2.00 / 0 / 不变 | **同** |
+| 反例判读 | — | `runs` 仍 3 ⇒ 谓词没放开；`y_direct` 仍 3 ⇒ 直读判据没放开（看 `miss(...)`）；`y_gather` 变 1 而派发不变 ⇒ 退回 gather（§6.58 ① 的算术）|
+
+#### ⑤ 一条流程教训（记下）
+
+`cmake --build build --target X --clean-first` **不是"只重建 X"**：它先跑 `make clean`（**整个项目**）再建 X。
+本次因此清掉了大部分测试二进制，随后一次 `ctest -L phy` 只见到 75 个测试、报了 67 个 "Not Run"，**看起来像大面积回归**。
+⇒ 要动 `.metal` 让 metallib 重编，用 `--target ocudu_metallib_equalizer`（它有依赖关系，改 `.metal` 会触发重编），**不要用 `--clean-first`**。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

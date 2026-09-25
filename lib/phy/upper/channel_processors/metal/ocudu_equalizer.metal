@@ -286,10 +286,26 @@ constant uint eq_max_run_symbols = 14; // MAX_NSYMB_PER_SLOT
 struct equalize_strides {
     uint nof_symbols;
     uint h_stride;   // cbf16 elements per symbol
-    uint y_stride;   // cbf16 elements per symbol
     uint eq_stride;  // float2 elements per symbol
     uint nv_stride;  // float elements per symbol
     uint h_starts[eq_max_run_symbols]; // absolute start of each symbol of the run in h
+    /// \brief Start of each symbol of the run in y, RELATIVE to the y buffer the dispatch bound.
+    ///
+    /// It exists for the same reason h_starts does, and it replaces the one uniform y stride that used to
+    /// be here (dev doc 6.58): the received symbols of a run are NOT always evenly spaced. A hop whose DM-RS
+    /// symbols carry no data never submits them (the demodulator skips a symbol with no resource elements),
+    /// so the symbols a run carries are consecutive in ITS OWN order but not in the grid - and a run that
+    /// spans such a hole is a run the uniform stride could not express, in the grid OR in the packed
+    /// staging. With a start per symbol the equalization reads each symbol where it actually is, which is
+    /// what lets one dispatch cover the whole hop (three runs before this, one after) and what keeps the
+    /// direct-grid binding (dev doc 6.48) possible for a run with holes - its symbols name their own grid
+    /// row instead of assuming the next one is adjacent.
+    ///
+    /// The values are RELATIVE to the bound y buffer (unlike h_starts, which is absolute within h and is
+    /// rebased by equalize_params::h_offset): y is bound at the run's first symbol, so the first entry is
+    /// always 0 and the single-symbol kernel - which reads y from the binding and never touches this table -
+    /// stays correct unchanged.
+    uint y_starts[eq_max_run_symbols];
 };
 
 /// \brief Where one OFDM symbol of the HOP starts in the gather plan.
@@ -524,7 +540,9 @@ kernel void equalize_mxn_batch(device const ushort2* h [[buffer(0)]], // cbf16 [
     // buffer, minus the offset the dispatch bound h at. `sym` is bounded by nof_symbols, which the
     // caller refuses above eq_max_run_symbols - and the loop-free index is clamped by construction.
     h += st.h_starts[min(sym, eq_max_run_symbols - 1u)] - p.h_offset;
-    y += sym * st.y_stride;
+    // The received symbols are addressed the same way, with the one difference the field documents: their
+    // starts are relative to the y binding, so there is no base to subtract.
+    y += st.y_starts[min(sym, eq_max_run_symbols - 1u)];
     eq += sym * st.eq_stride;
     nv += sym * st.nv_stride;
 

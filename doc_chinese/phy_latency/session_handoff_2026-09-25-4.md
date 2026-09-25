@@ -222,7 +222,7 @@ sudo -E LEG_CONFIG=... bash .../run_leg.sh gpu p34-n78-ring64 --regime=stress OC
 **CPU 打满 ⇒ `recv` max 28 ms 而电台 0 错误**（⇒ 停顿在宿主调度、不在电台）。
 构建：`clang++ -std=c++17 -O2 -I /opt/homebrew/include doc_chinese/phy_latency/wip/uhd_rx_health.cpp -L /opt/homebrew/lib -luhd -Wl,-rpath,/opt/homebrew/lib -o /tmp/uhd_rx_health`
 
-### 3.2 ⏳（**已开工：只读码阶段完成、方案已改、预登记已写**）：把 `h_starts` 搬到 y 上 —— run 3→1、派发 6→4
+### 3.2 ✅（**施工完成、离线全绿，待飞腿**）：把 `h_starts` 搬到 y 上 —— run 3→1、派发 6→4
 
 **读码结论（开发文档 §6.58）：原方案"只解开 `estimates` 断因"今天不值派发** ——
 因为 ① run 还有第二道锁 `same_gather`（要求符号在网格里**连续**），而 DM-RS 符号**不进 pending** ⇒ 合并后的 run 必然跨越空档；
@@ -233,7 +233,12 @@ sudo -E LEG_CONFIG=... bash .../run_leg.sh gpu p34-n78-ring64 --regime=stress OC
 然后同时 ①放开 `same_h`/`same_gather`、②放开直读的"符号连续"（逐符号各自给网格行）。
 **预登记**：`runs` 3→**1**、均衡派发 3→1、**总派发 6→4/跳**、**V1 −26…−34 µs ⇒ ≈1375–1382**、
 `merged_hop` −13…−19 µs、**dump 逐字节相同**（含与**改前二进制**对拍）、`ctest -L phy` 193/193。
-**下一步动作**：改 `.metal`（`y_starts`/`y_offset`）+ 宿主（`eq_strides_t`/谓词/直读判据）→ 重建 metallib 与 7 个依赖目标 → 跑不变量网 → 给你腿命令。
+**已施工完成**（开发文档 **§6.59**）：`.metal` 的 `y_starts[]`（逐符号起点，相对绑定）+ 宿主表 + 三处谓词放开 + 反例断言。
+**离线证据**：27 条语料 ×2 臂 ⇒ **`runs=1`（原 4）、`max_run=11`、`first_break=none`**、**派发 12 → 4（均衡 9 → 1，无建表无 gather）**；
+**3×135 个 dump 逐字节相同**（新 ON vs 旧 ON、新 OFF vs 旧 OFF、两臂互比）；反例臂（`cdm=1`）与改前一致且逐字节相同；单测/探针 rc=0。
+⚠ 施工中我犯过**两个同类索引缺陷**（run 的第 k 个符号不是 `first+k`），两次都被机制计数器当场抓出（`first_break=gather` 而 runs 不变；`runs=1` 但 `y_direct=0`+`miss(len=1)`）。
+**待飞腿 `p38-n78-wholehop`**：预登记 `runs 1.0 / max_run 12 / first_break none`、`y_direct 1.0`、派发 **4.0/跳**、
+`merged_hop` −13…−19 µs、**V1 −26…−34 µs ⇒ ≈1375–1382**、契约 8/8、`cbs/lane 2.00`、0 gaps、D18 不变。
 
 
 `eq_batch first_break=estimates` ⇒ 12 个符号被切成 **3 个 run**（最长 8）。判据要求各符号的估计切片

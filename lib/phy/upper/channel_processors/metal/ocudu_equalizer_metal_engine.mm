@@ -276,18 +276,19 @@ struct eq_resources_t {
 };
 
 /// Per-symbol element strides handed to equalize_mxn_batch(); must match struct equalize_strides in
-/// the shader source. h_starts is the run's own per-symbol starts in h (batch 5f: carried here rather
-/// than uploaded as a Metal buffer - see the shader's comment).
+/// the shader source. h_starts is the run's own per-symbol starts in h (batch 5f) and y_starts the same for
+/// the received symbols (dev doc 6.58) - both carried here rather than uploaded as Metal buffers, so a run
+/// whose symbols are not evenly spaced costs nothing to encode.
 static constexpr unsigned eq_max_run_symbols = 14; // MAX_NSYMB_PER_SLOT
 struct eq_strides_t {
   unsigned nof_symbols;
   unsigned h_stride;
-  unsigned y_stride;
   unsigned eq_stride;
   unsigned nv_stride;
   unsigned h_starts[eq_max_run_symbols];
+  unsigned y_starts[eq_max_run_symbols];
 };
-static_assert(sizeof(eq_strides_t) == 5 * sizeof(unsigned) + eq_max_run_symbols * sizeof(unsigned),
+static_assert(sizeof(eq_strides_t) == 4 * sizeof(unsigned) + 2 * eq_max_run_symbols * sizeof(unsigned),
               "eq_strides_t must match the MSL equalize_strides declaration");
 static eq_resources_t& eq_resources()
 {
@@ -756,10 +757,10 @@ bool equalizer_metal_engine::enqueue(const ch_est_binding& h,
   // values are the packed layout this path already uses.
   eq_strides_t single_strides{};
   single_strides.nof_symbols = 1;
-  single_strides.y_stride    = static_cast<unsigned>(nof_ports) * nof_re;
   single_strides.eq_stride   = nof_re * nof_layers;
   single_strides.nv_stride   = nof_re * nof_layers;
   single_strides.h_starts[0] = h.offset;
+  single_strides.y_starts[0] = 0; // the binding IS the symbol's region (relatives start at the binding)
   [enc setBytes:&single_strides length:sizeof(single_strides) atIndex:6];
   [enc setBuffer:b_h.buffer offset:b_h.offset atIndex:0];
   [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
@@ -1298,12 +1299,43 @@ static bool eq_direct_grid_enabled()
   return enabled;
 }
 
-/// \brief Whether the run starting at \p first_symbol of \p plan can be read in the grid itself.
+/// \brief Whether ONE symbol of a gathered run can be read where the grid wrote it (dev doc 6.58).
 ///
+/// It is the per-symbol half of eq_direct_grid_run(), and it exists for the RUN PREDICATE: a run whose
+/// symbols are not consecutive in the grid - a hop whose DM-RS symbols carry no data never submits them, so
+/// the symbols the run carries skip those rows - can only be expressed on the DIRECT path, because the
+/// gather enters its tap table at the run's first symbol and walks it symbol by symbol. The extension may
+/// therefore cross such a hole only while every symbol of the run stays readable in place.
+///
+/// \note It records NO miss reason on purpose: the histogram belongs to the per-run decision (the run-level
+///       predicate owns it), and counting here would report a knob that is off once per symbol of a hop.
+static bool eq_symbol_direct_readable(const ch_gather_desc& plan,
+                                      unsigned              plan_index,
+                                      unsigned              nof_re,
+                                      unsigned              subc_base)
+{
+  if (!eq_direct_grid_enabled() || (plan.grid.subc_stride != 1) || (plan_index >= plan.nof_symbols)) {
+    return false;
+  }
+  const ch_gather_symbol& sym = plan.symbols[plan_index];
+  return sym.dense && (sym.nof_entries == nof_re) && (sym.subc_base == subc_base) &&
+         (static_cast<size_t>(subc_base) + nof_re <= plan.grid.nof_subc) &&
+         (static_cast<size_t>(sym.symbol) < plan.grid.nof_symb);
+}
+
+/// \brief Whether the run whose plan indices are \p run_plan_index can be read in the grid itself.
+///
+/// \param[in]  run_plan_index Plan index of each symbol of the RUN, in run order. It is NOT
+///             <tt>first_symbol + k</tt>: a run may cross a hole (dev doc 6.58 - a DM-RS symbol a hop never
+///             submits is a grid symbol no run carries), so the run's symbols are the plan entries its own
+///             pending symbols name. Asking the plan about consecutive indices instead of these is a defect
+///             that has already been made twice in this file (the run predicate and this predicate): both
+///             times the answer came back about a DM-RS symbol, which is not dense and holds no resource
+///             elements, and both times the whole hop stayed split into runs.
 /// \param[out] subc_base Grid subcarrier the run's symbols start at, when the answer is true.
 /// \return True when the equalization can read the grid in place (no gather, no y staging).
 static bool eq_direct_grid_run(const ch_gather_desc& plan,
-                               unsigned              first_symbol,
+                               const unsigned*       run_plan_index,
                                unsigned              n_run,
                                unsigned              nof_ports,
                                unsigned              nof_re,
@@ -1324,13 +1356,17 @@ static bool eq_direct_grid_run(const ch_gather_desc& plan,
     eq_direct_note_miss(eq_direct_miss::stride);
     return false;
   }
-  if ((first_symbol + n_run) > plan.nof_symbols) {
+  if ((n_run == 0) || (run_plan_index[0] >= plan.nof_symbols)) {
     eq_direct_note_miss(eq_direct_miss::len);
     return false;
   }
-  const ch_gather_symbol& head = plan.symbols[first_symbol];
+  const ch_gather_symbol& head = plan.symbols[run_plan_index[0]];
   for (unsigned k = 0; k != n_run; ++k) {
-    const ch_gather_symbol& sym = plan.symbols[first_symbol + k];
+    if (run_plan_index[k] >= plan.nof_symbols) {
+      eq_direct_note_miss(eq_direct_miss::len);
+      return false;
+    }
+    const ch_gather_symbol& sym = plan.symbols[run_plan_index[k]];
     // The kernel reads exactly nof_re elements per symbol of the run: a symbol holding a different
     // number of resource elements would make it read its neighbour's row.
     if (sym.nof_entries != nof_re) {
@@ -1341,21 +1377,20 @@ static bool eq_direct_grid_run(const ch_gather_desc& plan,
       eq_direct_note_miss(eq_direct_miss::holes);
       return false;
     }
-    // One base for the whole run, and consecutive grid symbols: the kernel is handed ONE offset and
-    // ONE stride, so the run has to be one row-aligned window of the grid.
+    // One base for the whole run: every symbol of the run reads the grid's subcarriers subc_base, subc_base+1,
+    // ... of ITS OWN row. The rows need NOT be adjacent any more (dev doc 6.58): the batch kernel addresses y
+    // through the run's per-symbol y_starts table, so a run that skips the DM-RS symbols a hop never submits
+    // reads each data symbol where it really is. Before that table existed this clause demanded consecutive
+    // rows, and the whole hop could not be one dispatch.
     if ((k != 0) && (sym.subc_base != head.subc_base)) {
       eq_direct_note_miss(eq_direct_miss::start);
       return false;
     }
-    if (sym.symbol != head.symbol + k) {
-      eq_direct_note_miss(eq_direct_miss::start);
+    if ((static_cast<size_t>(sym.symbol) >= plan.grid.nof_symb) ||
+        (static_cast<size_t>(sym.subc_base) + nof_re > plan.grid.nof_subc)) {
+      eq_direct_note_miss(eq_direct_miss::bounds);
       return false;
     }
-  }
-  if ((static_cast<size_t>(head.subc_base) + nof_re > plan.grid.nof_subc) ||
-      (static_cast<size_t>(head.symbol) + n_run > plan.grid.nof_symb)) {
-    eq_direct_note_miss(eq_direct_miss::bounds);
-    return false;
   }
   subc_base = head.subc_base;
   return true;
@@ -1434,6 +1469,19 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
   diag.symbols.fetch_add(n_sym, std::memory_order_relaxed);
   while (first != n_sym) {
     const eq_pending_t& head = pending[first];
+    // The hop's plan and the plan index of this run's first symbol: a gathered run is described by the plan,
+    // and the extension asks the plan whether a symbol can be read in place (see same_gather).
+    const ch_gather_desc* gather_run_plan = head.gather.is_valid() ? head.gather.desc : nullptr;
+    const unsigned        first_plan_index =
+        (gather_run_plan != nullptr) ? (head.gather.symbol - gather_run_plan->symbols[0].symbol) : 0u;
+    // The subcarrier the run's symbols start at: a property of the hop's ALLOCATION, which the plan carries
+    // (the run's first symbol is the authority - every symbol of a direct run has to agree with it).
+    const unsigned run_subc_base =
+        (gather_run_plan != nullptr) ? gather_run_plan->symbols[first_plan_index].subc_base : 0u;
+    // Whether EVERY symbol this run has taken so far can be read straight out of the grid: the condition
+    // under which the run may keep growing across a hole (see same_gather).
+    bool run_direct_ok = (gather_run_plan != nullptr) &&
+                         eq_symbol_direct_readable(*gather_run_plan, first_plan_index, head.nof_re, run_subc_base);
     // Extend the run while geometry, noise path, scalings, noise variances and output strides match.
     unsigned n_run = 1;
     while (first + n_run != n_sym) {
@@ -1443,17 +1491,17 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
                              (next.nof_layers == head.nof_layers) && (next.mmse == head.mmse) &&
                              (next.noise_var == head.noise_var) && (next.tx_scaling == head.tx_scaling) &&
                              (next.h_scaling == head.h_scaling);
-      // The estimates of the run must be describable by ONE dispatch: the batched kernel reads them
-      // all through one binding, stepping by a fixed number of elements per symbol. A run of device
-      // slices is NOT copied to the host (see eq_flush_hook) - their producer may still be running,
-      // and only the GPU read, ordered through the queue, sees its writes - so it must also share
-      // one buffer and advance by exactly that step, which is what the estimator's offsets do.
-      const unsigned h_step = (head.h.layer_stride != 0) ? head.h.layer_stride : head.nof_re;
-      const unsigned h_want = prev.h.offset + h_step;
-      const bool     same_h = (next.h.layer_stride == head.h.layer_stride) &&
+      // A run of device slices is NOT copied to the host (see eq_flush_hook) - their producer may still be
+      // running, and only the GPU read, ordered through the queue, sees its writes - so the run needs ONE
+      // buffer. It does NOT need evenly spaced slices: the batched kernel reads them through the run's own
+      // per-symbol table (h_starts, batch 5f), which is why the offsets only have to stay in order - h_bytes
+      // reaches through the LAST symbol's start, so an offset below the first one would underflow that
+      // reach. Until dev doc 6.58 this clause also demanded a fixed step, and that demand is what broke a
+      // hop's symbols into three runs at the DM-RS symbols the estimator still publishes slices for.
+      const bool same_h = (next.h.layer_stride == head.h.layer_stride) &&
                           (next.h_on_device == head.h_on_device) &&
                           (!next.h_on_device ||
-                           ((next.h.buffer == head.h.buffer) && (next.h.offset == h_want)));
+                           ((next.h.buffer == head.h.buffer) && (next.h.offset >= prev.h.offset)));
       const bool same_strides =
           (static_cast<const char*>(next.eq) - static_cast<const char*>(prev.eq)) ==
               (static_cast<const char*>(pending[first + 1].eq) - static_cast<const char*>(head.eq)) &&
@@ -1461,14 +1509,28 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
               (static_cast<const char*>(pending[first + 1].nv) - static_cast<const char*>(head.nv)) &&
           (next.eq != nullptr) && (next.nv != nullptr);
       const bool same_sigma = (std::memcmp(next.sigma2, head.sigma2, head.nof_ports * sizeof(float)) == 0);
-      // The received symbols of the run must come from the same place: either every symbol was
-      // staged by the caller, or every one of them is read off the device grid through the same
-      // plan, at the symbol the run's own symbol table describes (the tables are built for
-      // head.gather.symbol + k, so the symbols have to be consecutive in the grid).
-      const bool same_gather = next.gather.is_valid() == head.gather.is_valid() &&
-                               (!head.gather.is_valid() ||
-                                ((next.gather.desc == head.gather.desc) &&
-                                 (next.gather.symbol == head.gather.symbol + n_run)));
+      // The received symbols of the run must come from the same place: either every symbol was staged by the
+      // caller, or every one of them is read off the device grid through the same plan. A GATHERED run must
+      // also be consecutive in the grid (the gather enters the hop's tap table at the run's first symbol and
+      // walks it symbol by symbol), while a run read IN PLACE (dev doc 6.48) names each symbol's own row and
+      // may therefore cross a hole - but only while every symbol of the run stays readable in place
+      // (dev doc 6.58: a hop whose DM-RS symbols carry no data never submits them, so the symbols a run
+      // carries skip those rows, and the hole is what used to end the run).
+      const bool consecutive_sym = (next.gather.symbol == head.gather.symbol + n_run);
+      // NOTE the plan index: `first_plan_index + n_run` is the NEXT SYMBOL OF THE HOP only while the run is
+      // consecutive. Across a hole the pending list skips grid symbols, so the symbol about to join the run
+      // is the one its OWN gather entry names - taking the arithmetic shortcut here asked the plan about a
+      // DM-RS symbol (which is not dense), and the run stopped at every hole with `first_break=gather`
+      // (measured on the corpus before this was fixed).
+      const unsigned next_plan_index =
+          (gather_run_plan != nullptr) ? (next.gather.symbol - gather_run_plan->symbols[0].symbol) : 0u;
+      const bool next_direct_ok =
+          (gather_run_plan != nullptr) &&
+          eq_symbol_direct_readable(*gather_run_plan, next_plan_index, head.nof_re, run_subc_base);
+      const bool same_gather =
+          next.gather.is_valid() == head.gather.is_valid() &&
+          (!head.gather.is_valid() ||
+           ((next.gather.desc == head.gather.desc) && (consecutive_sym || (run_direct_ok && next_direct_ok))));
       if (!same_geom || !same_h || !same_strides || !same_sigma || !same_gather) {
         eq_batch_note_break(!same_geom  ? "geometry"
                             : !same_h   ? "estimates"
@@ -1477,6 +1539,7 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
                                             : "gather");
         break;
       }
+      run_direct_ok = run_direct_ok && next_direct_ok;
       ++n_run;
     }
     diag.runs.fetch_add(1, std::memory_order_relaxed);
@@ -1516,14 +1579,30 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     // gather would copy bytes onto themselves - the equalization reads the grid in place instead, and
     // the run costs one dispatch less. Decided BEFORE the staging is allocated, because a direct run
     // needs no y staging at all.
+    // The plan index of every symbol of the run, in run order (see eq_direct_grid_run: a run may cross a hole,
+    // so these are the entries its own pending symbols name, not first_symbol + k).
+    unsigned run_plan_index[eq_max_run_symbols] = {};
+    if (gather_run) {
+      for (unsigned k = 0; (k != n_run) && (k != eq_max_run_symbols); ++k) {
+        run_plan_index[k] = pending[first + k].gather.symbol - gather_plan->symbols[0].symbol;
+      }
+    }
     unsigned   direct_subc = 0;
     const bool direct_grid = gather_run && eq_direct_grid_run(*gather_plan,
-                                                              first_symbol,
+                                                              run_plan_index,
                                                               n_run,
                                                               head.nof_ports,
                                                               head.nof_re,
                                                               direct_subc);
-    const unsigned direct_first_symbol = direct_grid ? gather_plan->symbols[first_symbol].symbol : 0u;
+    const unsigned direct_first_symbol = direct_grid ? gather_plan->symbols[run_plan_index[0]].symbol : 0u;
+    // The run predicate only lets a run cross a grid hole while every symbol of it is readable in place
+    // (see same_gather), so a run that is NOT consecutive can only be here as a direct run. The gather's tap
+    // table is indexed by consecutive plan symbols, so a gathered run with a hole would read the wrong
+    // symbols - fail loudly rather than quietly equalize the wrong resource elements.
+    for (unsigned k = 1; (k < n_run) && gather_run; ++k) {
+      ocudu_assert(direct_grid || (pending[first + k].gather.symbol == pending[first].gather.symbol + k),
+                   "A gathered run must be consecutive in the grid (see the run predicate).");
+    }
     auto* h_alloc = static_cast<cbf16_t*>(compat::aligned_alloc(compat::page_size(), h_stride * n_run * sizeof(cbf16_t)));
     auto* y_alloc = direct_grid
                         ? nullptr
@@ -1564,12 +1643,23 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     eq_strides_t strides{};
     strides.nof_symbols = n_run;
     strides.h_stride    = static_cast<unsigned>(h_stride);
-    // A direct run steps through the GRID's own symbols: its symbols are consecutive rows, so the
-    // per-symbol stride is the grid's symbol stride and the port spread within a symbol is the
-    // kernel's p.nof_re - which is the grid's subcarrier spread only because the run is single-port.
-    strides.y_stride  = direct_grid ? gather_plan->grid.symb_stride : static_cast<unsigned>(y_stride);
-    strides.eq_stride = eq_stride_elems;
-    strides.nv_stride = nv_stride_elems;
+    strides.eq_stride   = eq_stride_elems;
+    strides.nv_stride   = nv_stride_elems;
+    // WHERE each symbol's received samples start, relative to the y binding (dev doc 6.58):
+    //   * a run read IN PLACE is bound at its first symbol's row and names every later symbol's own row, so
+    //     a run that skips the DM-RS symbols a hop never submits still reads each data symbol where it is
+    //     (before this table the run had ONE stride, and that is what kept such a run from existing);
+    //   * a staged or gathered run is PACKED - one symbol after another in the run's own staging region,
+    //     by nof_ports * nof_re elements (the gather writes exactly that layout: see its kernel).
+    for (unsigned k = 0; k != n_run; ++k) {
+      if (k >= eq_max_run_symbols) {
+        break; // a run never spans more symbols than the table holds (the flush batches at most 14)
+      }
+      strides.y_starts[k] =
+          direct_grid ? (gather_plan->symbols[run_plan_index[k]].symbol - direct_first_symbol) *
+                            gather_plan->grid.symb_stride
+                      : static_cast<unsigned>(k) * static_cast<unsigned>(y_stride);
+    }
     for (unsigned k = 0; k != n_run; ++k) {
       if (k >= eq_max_run_symbols) {
         break; // a run never spans more symbols than the table holds (the flush batches at most 14)
@@ -1928,11 +2018,13 @@ bool equalizer_metal_engine::enqueue_burst_batch_at(const ch_est_binding& h,
       make_params(h, nof_re, nof_ports, nof_layers, mmse, noise_var, tx_scaling, h_scaling);
   eq_strides_t strides{};
   strides.nof_symbols = nof_symbols;
-  strides.y_stride    = y_symbol_stride;
   strides.eq_stride   = eq_symbol_stride;
   strides.nv_stride   = nv_symbol_stride;
   for (unsigned k = 0; k != nof_symbols; ++k) {
     strides.h_starts[k] = (k < eq_max_run_symbols) ? h_starts[k] : 0u;
+    // This entry is handed the caller's own arrays, which are PACKED one symbol after another (see the
+    // contract this method documents), so the per-symbol starts are the uniform stride they always were.
+    strides.y_starts[k] = static_cast<unsigned>(k) * y_symbol_stride;
   }
   [enc setBuffer:b_h.buffer offset:b_h.offset atIndex:0];
   [enc setBuffer:b_y.buffer offset:b_y.offset atIndex:1];
