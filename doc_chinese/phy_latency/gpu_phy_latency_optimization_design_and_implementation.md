@@ -4421,6 +4421,130 @@ clang++ -std=c++17 -O2 -I /opt/homebrew/include doc_chinese/phy_latency/wip/uhd_
 **反例判读**：若 `ce_sites` 计数不变 ⇒ 宿主仍建两组（改动没生效）；若 dumps 有差异 ⇒ 合并批次的几何（`a_l_stride`/块序）用错了。
 
 
+### 6.62 ★★★ 杠杆 C 落地：**K2 直接读 LSE ⇒ `scatter` 派发消失**（−1…−2 次/跳、**覆盖全部跳**）；**第一次 A/B 抓到一处真实的"重结合"缺陷**（fast-math 把 `lse*inv_beta` 提到权重上），改法 = **新 kernel 独立文件 + `-fno-fast-math`**
+
+> 施工对象 = §6.61③ 的首选杠杆 C（"把下游要的布局变成下游自己的寻址"）。本节只记**离线**结论与读数；
+> 空口读数在腿 `p39-n78-noscatter`（§6.62⑤ 给配方与预登记）。
+
+#### ① 机制：scatter 的映射被搬进了 K2 的寻址（没有搬数据）
+
+`mmse_pilots_scatter_y()` 原本做的是一次**重索引 + 一次单精度乘**（`ocudu_mmse_pilots.metal` 的注释就是规范）：
+
+```
+y[(i_layer*n_blk_slots + b)*2*Ls + 2*(i_symb*npf + j)]
+    = lse[2*((i_symb*nof_layers + i_layer)*nof_pilots + pilot_base + b*npf + j)] * inv_beta
+```
+
+外加**两块清零**：行 `i_symb*npf + j >= nof_symb*npf`（合并批里窄尾组的 pad 行）与块槽 `b >= n_blk_real`（尾组没填的槽）。
+新 kernel **`mmse_apply_lse`**（新文件 `ocudu_mmse_apply_lse.metal`）就是把这个等式读出来：
+`i_symb` 外层、`j` 内层（`k = i_symb*npf + j` **升序**，与 K2 原来的单层循环一致），**两块清零区按 `w*0` 项参与求和**（与 scatter 写下的字面 0 同义，非有限权重照样进 h）。
+
+* **派发账**：一个 staged group 一次 scatter ⇒ 无尾跳 **−1**、带尾（合并）跳 **−2**（均值 ≈1.4）；
+  `lse_applies` 每次批调用 +1（合并批两组只发一次 K2）。
+* **系统区间不靠第二份数字**：组的 `sys_lo` 由 **`s.y - y_base` 除以系统步长**得到——正是 `encode_scatter()` 自己算 `y_off` 用的那个差
+  （S-7f-5l 的分尾缺陷就是"同一个数写了两份"）。⇒ 写者与读者不可能对"哪几个 system"有分歧。
+* **门槛**（`build_lse_sources()`，**每一条都只是"退回旧路"，不是正确性风险**）：knob 关、metallib 缺 `mmse_apply_lse`、
+  没有描述符、两组不共用同一个 LSE / 系统区间有洞或重叠 / 几何越界（`nof_symb*npf > L`、`pilot_base + n_blk_real*npf > nof_pilots`、
+  读出 LSE 容量）。每条**各自计数**（`mmse_refusals` 新增 `y_direct_{disabled,no_kernel,no_source,coverage,geometry}`），
+  因为"路没走"和"没有东西可走"是两个结论。
+* **`OCUDU_CE_DEV_Y=0` 保持原义**：那条臂下宿主自己 stage y（没有描述符）⇒ 本路**必然**退回 scatter（计 `y_direct_no_source`），
+  writer 的 A/B 因此原样保留。
+
+#### ② ★ 第一次 A/B 读出 40 字节差异 ⇒ 不是寻址错，是**编译器重结合**（本节最值得记的一条）
+
+按纪律先跑 `ab_dumps.sh "OCUDU_CE_Y_DIRECT=0" ""`（同一二进制两臂、27 语料）：
+
+| 读数（第一次） | 值 |
+|---|---|
+| `_h.bin` / `_llr.bin` / 网格 `.bin` | **0 / 0 / 0**（逐字节相同）|
+| `_ce.txt` | **40 字节，13/27 语料**，且只在 `noise_variance`（及其派生的 `snr`）与 `rsrp` 的**末位** |
+
+`_h.bin` 是 **cbf16** 的估计网格（`ul_capture.cpp` 的 `capture_h()` 走 `get_symbol_ch_estimate`），bf16 只有 8 位尾数 ⇒
+**h 的 1 ulp 差异在它和 LLR 上看不见，却在 float32 的归约（K4 的 `noise_variance`、K5 的 `rsrp`）上现形** ⇒ 差异在 **h 的最后一两位**。
+
+**根因（IR 直读，不是推测）**：新 kernel 原来写在 `ocudu_mmse_apply.metal` 里（该文件是**默认 fast math**），
+`-fno-fast-math` 没加 ⇒ LLVM 的 Reassociate 把 `w * (lse * inv_beta)` 改写成 `(w * inv_beta) * lse`，并**把 inv_beta 提到权重上、一次乘法服务实虚两路**：
+
+```
+%132 = fmul fast float %123, %106      ; %123 = w[k]，%106 = inv_beta   ← 被提出来的那一乘
+%133 = fmul fast float %132, %127      ; (w*inv_beta) * lse_re
+%134 = fadd fast float %133, %117
+```
+
+即 `round(round(w*inv_beta)*lse)` 取代了 `round(round(lse*inv_beta)*w)`——**两次舍入的位置不同，就是不同的浮点数**。
+（这也解释了为什么只有 `_ce.txt` 动：K2 的输出 h 变了 1 ulp，bf16/LLR 级别被量化吃掉，float32 归约没被吃掉。）
+
+**改法（两条一起才成立）**：
+
+1. 新 kernel **独立成文件** `ocudu_mmse_apply_lse.metal`，进 `IEEE_MATH_SOURCES`（**`-fno-fast-math`**，CMake 的 `ocudu_add_metallib` 是**按文件**给这个标志的）；
+   ⇒ 重结合消失，IR 变成两次**无 flag** 的 `fmul` + 一次 `fmuladd`：
+   `%128 = fmul(inv_beta, lse_re)`、`%134 = fmuladd(w, %128, acc)` ⇒ `round(w*round(lse*inv_beta) + acc)`，
+   与 scatter 路线（y 先被舍入存下、K2 再 `fmul+fadd`/FMA）**逐位相同**：t 与 y 是同一个 float，剩下的是同一个表达式。
+2. 旧 `mmse_apply` **留在原文件、保持 fast math 且源码零改动** ⇒ "y 路仍然发布昨天的字节"是**源码性质**，不是测量结论。
+   （先量过才敢这么切的：**把 `ocudu_mmse_apply.metal` 整体编成 strict，27 语料 135 个 dump 文件 0 字节差异** ⇒ 这个文件中
+   快/严数学对**值**无影响；把新 kernel 分出去只是为了不冒"旧 kernel 代码生成漂移"的险。）
+
+**修完复测**：`ab_dumps.sh "OCUDU_CE_Y_DIRECT=0" ""` ⇒ **exit 0、27 语料 0 字节**。**第一次读数（40 字节）按纪律保留在册**：
+它是真实缺陷（不是 flake）——两臂各自确定（`Y_DIRECT=0` 臂连跑 3 次同值）。
+
+#### ③ 不变量网（全部在**最终产物**上重跑）
+
+| 网 | 命令 | 读数 |
+|---|---|---|
+| 本路 vs 旧 scatter（同二进制两臂）| `ab_dumps.sh "OCUDU_CE_Y_DIRECT=0" ""` | ✅ **0 字节 / 27 语料**（四类 dump 全 0）|
+| **与改前二进制对拍**（默认路 = 本路）| `ab_replay_bins.sh ref/replay_pre_c_bc149ab266 build/…/ul_chain_replay`（`AB_MARKER=y_direct`，A 用 `mmse_pre_c_bc149ab266.metallib`、B 用 `mmse_post_c_bc149ab266.metallib`）| ✅ **PASSED**：`pairing-wrong=0`、**0 字节**（配对判据由 `[y_direct]` 自证，见 ④）|
+| 旧 y 路 vs 改前二进制 | 同上 + `ENV=OCUDU_CE_Y_DIRECT=0` | ✅ **0 字节**（第一次读到 4546 字节/`syn009_6`，按 6.5 偶发规则重跑得 0；**隔离复跑** 3 条语料含 `syn009_6` 全 0 ⇒ 归入已登记的 `ab_dumps` 偶发类，见 §6.5⑤/Q11；`pairing-wrong=27` 是该臂的**预期**：knob 关 ⇒ B 侧不打印 `[y_direct]`，缺席本身即断言）|
+| `ctest -L phy` | `ctest --test-dir build -L phy -j 1` | ✅ **193/193 PASS**（`dft_processor_ci16_test` 是 Disabled，未跑）|
+| `value_net` | `python3 …/value_net.py --quiet` 与改前输出逐行对拍 | ✅ **逐行相同**（仍对陈旧归档基线红，= Q11，改前也红）|
+| 机制计数 | `[metal_stats] ce_sites` / `mmse_ce` | ✅ 见 ④ |
+
+**⚠ `ctest -j 4` 会假红（已定位为并行产物，不是本次改动）**：`-j 4` 下 `port_channel_estimator_metal_mmse_unit_test`
+（Test 3：SNR 20 dB 处 NMSE 差 3.13 dB > 1.5 dB 阈值）与 `…_ta_chain` 红。**对照实验**：
+(a) 同一二进制**直接连跑 6 次**（两臂交替）全部 PASS 且**两臂数值完全相同**（+1.14 dB）；
+(b) `OCUDU_CE_Y_DIRECT=0 ctest -j 4` **同样红（且红 2 条）**⇒ 与本次改动无关；
+(c) `-j 1` 全绿。⇒ 与 §4 的"并行跑 ⇒ 假失败"同一条纪律：**判 `ctest` 用串行**。
+
+#### ④ 新仪器（腿上一眼可读）
+
+* `[metal_stats] mmse_ce … device_y_writes=… lse_applies=… refusals=…`：
+  `lse_applies` = 走了本路的 K2 派发数（合并批两组只 +1）；`device_y_writes` 应同时**掉到 0**；`refusals` 应 `<none>`，
+  否则点名是哪条门（`y_direct_coverage` 最常见 = 有 system 没被覆盖）。**两个数要一起读**："宿主自己 stage 了 y"也会让
+  `device_y_writes=0`，只有 `lse_applies` 能把它和本路分开。
+* **`[y_direct] …` 一次性自报**（每进程一行，带首个批的 `systems/blocks/L/groups`）：`ab_replay_bins.sh` 用它做**配对判据**，
+  腿日志里它一句就说清"这一跑是谁在读导频行"。
+* `OCUDU_CE_Y_DIRECT=0` = 本路**精确 A/B**（保留 scatter）。
+* `OCUDU_CE_Y_CHECK=1` 的 `[y_check]` 在本路下**改为打印 `routes=lse_direct` 并跳过比对**：本路没有写 y，
+  拿 y 槽对宿主 staging 只会读上一次的残留并报成缺陷（探针的判据由 ③ 的两条 dump 网承担）。
+
+#### ⑤ 下一步 = 腿 `p39-n78-noscatter`（预登记）+ 之后
+
+```bash
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p39-n78-noscatter \
+  --regime=stress OCUDU_UL_PHASE_SEGMENTS=1 \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+# CN 侧：iperf3 -R -b 40M -P 4 -t 240；单次 Ctrl-C 停
+# 判读：bash doc_chinese/phy_latency/wip/p0_gate.sh p39-n78-noscatter
+#       bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 p39-n78-noscatter
+```
+
+| 读数 | 今天（`p38`）| 预登记 |
+|---|---|---|
+| `ce_sites scatter` | 1.0/跳（无尾）、2.0/跳（有尾）| **0**（按跳均值 ≈1.4 → 0）|
+| `lse_applies` | —（新仪器）| **≈ 设备跳数**（不是组数：合并批两组 = 1）|
+| `device_y_writes` | 组数/跳 | **0** |
+| `refusals` | `<none>` | **`<none>`**（出现 `y_direct_coverage/geometry` ⇒ 有批退回 scatter，先查覆盖）|
+| `[y_direct]` | — | **恰好 1 行**，`groups=2` 出现在带尾跳 |
+| `burst dispatches` | 4.00/跳（车道口径）| **−1…−2/跳**（均值 −1.4）|
+| `merged_hop` | 541.1 µs | −7…−19 µs（按 −1.4 × 13–18 µs/派发）|
+| **V1 中位** | 1371.9 µs | **−15…−35 µs ⇒ ≈1337–1357** |
+| 契约 / V2 / V4 / D18 | 8/8 / 绿 / 2.00 / 不变 | **同** |
+| 反例判读 | — | `scatter` 仍非 0 ⇒ 门没生效（看 `refusals`）；`lse_applies≠` 设备跳数 ⇒ 部分批退回了；V1 不降而 `scatter=0` ⇒ 这次派的省不在关键路径上（回 §6.49③ 的口径问题）|
+
+**之后（§6.61③ 的重排）**：A（标准组 + 尾巴组并成一次派发 —— 需要**逐 system 几何**）、
+`reformat`(K3) 同法消掉、D（`pilots_lse` + `pilots_cfo` 融合）。**§3.3 的单 kernel 离线微基准**仍是"非派发那 ~490 µs"的入口。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
@@ -4479,8 +4603,9 @@ clang++ -std=c++17 -O2 -I /opt/homebrew/include doc_chinese/phy_latency/wip/uhd_
 |---|---|---|---|
 | **P2-B** | **缩短 D 项（本跳设备执行 1125 µs）**：按 P0-1 的 kernel 拆分，针对最贵 kernel 改线程组/占用率/代数 | 直接砍 D；D 是 busy 97% 的实打实算力 | kernel 改动需逐字节/容差判据（`value_net` + `-L phy`）；⚠ 本机**不支持逐 dispatch 计数器** ⇒ P0-1 必须先做（✅ 已做） |
 | **P2-B′**（新增，§6.30）| **前端批量化**：一个时隙的 14 次单 threadgroup 派发 → **1 次 14-threadgroup 派发**（`OCUDU_DFT_BATCH_SYMBOLS=14`）；离线 **159.8 → 10.6 µs/槽**、网格**逐字节相同** | 砍掉前端那 ~149 µs 的**占用窗口**（并顺带把宿主 encode 从 14 次降到 1 次）；按 §6.30 ⑤ 的 ρ≈0.73，C 项会**超线性**跟着缩 | ✅ **空口已验证（§6.31，腿 `p22-n78-batch14`）：V1 中位 2440 → 1513 µs（−38%）、`merged_hop` 1047→625、契约 8/8、`cbs/lane` 不变**；⏳ 待一条**确认腿**；⏳ 旋钮**默认值改 14** 需用户裁决 |
-| **P2-F** | **车道并发度**（`max_pusch_and_srs_concurrency` 1→2）：让两条跳的设备执行**重叠**，把 C 项（901）吃掉一部分 | 若 GPU 余量（41%）够 ⇒ C 项可大幅下降（§7.5 实测：−55%）| **直接碰 V4**（提交数）⇒ **必须先出测量臂（P1-8）并把结论交用户裁决**（§7.4）。**未开工** |
+| **P2-G**（新增，§6.61/§6.62）| **消派发（改寻址）**：把"下游要的布局"变成**下游自己的寻址**，而不是搬一遍数据——`scatter` 已落地（K2 直读 LSE）；`reformat`(K3) 同法；**A**（标准组 + 尾巴组并成一次派发）需**逐 system 几何**；**D**（`pilots_lse`+`pilots_cfo` 融合）需 kernel 重写 | 每去掉 1 次派发 ⇒ V1/跨度 **≈13–18 µs**（**标尺口径见 §6.49③/§6.50③**，不要用 `merged_hop` 降幅反推）| ✅ **`scatter` 离线全绿（§6.62）：−1…−2 次/跳、覆盖全部跳、`ab_dumps` 0 字节、与改前二进制对拍 PASSED**；⏳ 待腿 `p39-n78-noscatter`；⚠ 真实派发账是 **8–11 次/跳**（§6.61②），不是车道口径的 4 |
 | **P2-E** | **输入缓冲寿命解耦**（keepalive token 从"整跳完成"挪到"最后一个读输入的 dispatch"）| **不缩短时延**（V1 不由它达成），只把持有期从跨度压到前端那一段 ⇒ 治 V2（池饥饿）| ✅ 已实现（默认关）；⛔ **被平台证伪**（§6.4），**待用户裁决** |
+| **P2-F** | **车道并发度**（`max_pusch_and_srs_concurrency` 1→2）：让两条跳的设备执行**重叠**，把 C 项（901）吃掉一部分 | 若 GPU 余量（41%）够 ⇒ C 项可大幅下降（§7.5 实测：−55%）| **直接碰 V4**（提交数）⇒ **必须先出测量臂（P1-8）并把结论交用户裁决**（§7.4）。**未开工** |
 | **P2-A** | **把估计器的"提取/权重"提前**：让它在网格 DMRS 符号就绪时就开跑，而不是等到跳尾 | 缩短 C（排队）与 D 的串行部分 | 与交棒次序耦合，需保证顺序正确（有 fence 机制）。**未开工** |
 | **P2-D** | **池按流水线深度定尺**（`size = ceil(hold_p99 / slot) + margin`，而不是固定 8）| 用**测量**而不是拍脑袋定容量；它是"按设计定尺"，不是加大池 | ✅ **已落地（§6.38，用户裁决 B1）**：GPU 模式 = 实测峰值 11 + 收包路径 2 + margin 3 = **16**，依据打印在启动行；⏳ 待确认腿 `p27` |
 | ~~**P2-C**~~ | ~~前端 DFT 的批/深度调优~~ | **撤销**：A 项已查明是"等最后一个样点"而非 DFT 执行 ⇒ `OCUDU_DFT_*` 在这段上**没有可用杠杆**（§8 Q3）| — |
