@@ -272,6 +272,33 @@ else
         "late=$late_n (blocks the registry committed itself), late_time=${late_t:-<absent>} of them by the TIME deadline$( if [ -z "${late_t:-}" ]; then printf '  (the leg predates the fix: it cannot say which trigger reaped)'; elif [ "${late_t:-0}" != "0" ]; then printf '  <-- the SLOT window could not have caught these (the wrap shape Q9 is about)'; else printf '  (the slot window reaped everything)'; fi )"
 fi
 
+# Q9-A / Q9-B (dev doc 6.13): the readings that say WHERE a stall lives. Both INFO by construction - the
+# second is read against the first, and the pair is what picks the next branch (6.13 (4)), not a threshold.
+#   D6  `registry commit->completion=` next to `deposit->completion`: equal maxima = the seconds came AFTER a
+#       commit the registry had already issued; ms against seconds = they came BEFORE it (the holder is the
+#       claim/hold side, not the commit).
+#   D7  `dry-pool reaps=N recovering M block(s)`: events > 0 with blocks = 0 says the pool was held by a
+#       CLAIMED block (the sweep must not touch those) rather than by an unclaimed one - the difference
+#       between "nobody asked the registry" and "the registry had nothing it was allowed to reap".
+life_commit=$(printf '%s' "$life_line" | grep -oE "registry commit->completion=[0-9]+ max=[0-9.]+us" | head -1)
+life_commit_max=$(printf '%s' "$life_commit" | grep -oE "max=[0-9.]+us" | grep -oE "[0-9.]+")
+if [ -z "${life_commit:-}" ]; then
+  check "[INFO] D6 (Q9-B) which half of the completion wait it was" "reported, not judged" INFO \
+        "no 'registry commit->completion=' field: ${life_line:-<absent>} - a leg flown before 6.13 cannot say"
+else
+  check "[INFO] D6 (Q9-B) which half of the completion wait it was" "reported, not judged" INFO \
+        "$life_commit; deposit->completion max=${life_wait:-<none>}us -> $(awk -v a="$life_commit_max" -v b="${life_wait:-0}" 'BEGIN{ if (b+0 <= 0) printf "no completion to compare"; else if (a+0 >= 0.5*b) printf "the seconds came AFTER the registry committed it (%.0f%% of the wait)", 100*a/b; else printf "the seconds came BEFORE the commit (%.0f%% after it) - the holder is the claim/hold side", 100*a/b }')"
+fi
+reaps_events=$(printf '%s' "$life_line" | grep -oE "dry-pool reaps=[0-9]+" | grep -oE "[0-9]+$")
+reaps_blocks=$(printf '%s' "$life_line" | grep -oE "recovering [0-9]+ block" | grep -oE "[0-9]+")
+if [ -z "${reaps_events:-}" ]; then
+  check "[INFO] D7 (Q9-A) did a DRY pool drive the sweep" "reported, not judged" INFO \
+        "no 'dry-pool reaps=' field: ${life_line:-<absent>} - a leg flown before 6.13 cannot say"
+else
+  check "[INFO] D7 (Q9-A) did a DRY pool drive the sweep" "reported, not judged" INFO \
+        "events=$reaps_events recovering ${reaps_blocks:-0} block(s)$( [ "${reaps_events:-0}" != "0" ] && [ "${reaps_blocks:-0}" = "0" ] && printf '  <-- the pool was held by CLAIMED block(s): the sweep is not allowed to touch those, so the holder is the claim/hold side' || true )"
+fi
+
 # The ratio the pairing was commissioned to recompute (6.0 (2)): printed, never judged - the criterion says
 # "state whether it is still ~95%", not "fail below it", and inventing a threshold inside a gate is how a
 # criterion becomes whatever the last person wanted (5.9.101).

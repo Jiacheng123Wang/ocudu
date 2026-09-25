@@ -208,6 +208,8 @@
 | `[ul_gpu_lane] residency` | `lib/phy/metal/ocudu_metal_lane_probe.{h,mm}` | 车道那条命令缓冲的**寿命** | 与负载几乎无关（轻 1121 / 重 1125 µs）|
 | `[ul_gpu_lane] busy split` | 同上 | 按**组**分：`ch_wt`（权重）与 `merged_hop`（合并跳）；诊断拆分臂还多一个 `dft` | **`merged_hop` ≈ 1030 µs = 车道 busy 的 97%**（n78 加压）。⚠ **2026-09-25 更正**：`residency` 里"~95% 是 busy"**只在 n78 加压腿上成立**；n1 默认腿配对后是 **0.643** ⇒ 别把它当恒等式（§2.4/§6.3 ⑥）。**内部不可再分**（D1 把一跳做成一条缓冲，Metal 只给整条缓冲的时间）⇒ 见 §6.2 |
 | `[ul_gpu_lane] paired … (P0-5)` | 同上（§6.3）| **配对后**的 `residency`/`busy`/三段与两个比值 | 只有这一组才和相位探针**同总体**；`samples=… of phase_samples=…` 是配对的**完整账**（没配上的原因逐项打印）|
+| **`[ul_gpu_lane] commit -> completion (Q9-B)`** ＋ **slowest 表** | 同上（§6.13）| 每条命令缓冲的 **`commit->start`（队列）/ `start->end`（设备，含设备侧栅栏等待）/ `commit->end`** | 回答「一个 cb 为什么几秒才完成」：**`commit->start` 大 = 队列**、**`start->end` 大 = 设备侧等待**；表里每行带 slot 与 stage ⇒ 一条腿给一行答案 |
+| **P0-7 行上的 `registry commit->completion=` 与 `dry-pool reaps=`** | `ocudu_metal_burst.{h,mm}`（§6.13）| 前者：注册表**发出提交之后**的完成时长（与 `deposit->completion` 一对读）；后者：**干池驱动的 sweep** 次数与救回的块数 | `commit->completion ≈ deposit->completion` ⇒ 慢在提交之后；前者 ms 而后者秒 ⇒ 慢在**提交之前**（hold/认领）。`reaps` 的 events>0 而 blocks=0 ⇒ 卡池的是 **claimed 的块**，不是没人认领的块 |
 | `[ul_gpu_lane] queue / gap / host` | 同上 | 各阶段之间的**空隙**与排队 | `queue: weights commit → weights start` 等；`gap` 的负值正常（时间基准不同）|
 | `[mmse_time_sum] defer_wait distribution` | `port_channel_estimator_metal_mmse_impl.cpp` | 宿主**等延迟链**的时间分布 | **与 residency 是同一窗口的两个视角**（宿主视角 / 设备视角）⇒ **不可相加** |
 | `[mmse_time_sum]`（其它字段）| 同上 | 估计器宿主阶段：`pre/stage/submit/unpack/cpl_*/corr/gpu_path/cpu_blocks` | 全部**只有几十 µs** ⇒ 估计器的**宿主**工作不是时延主项 |
@@ -1163,6 +1165,68 @@ F6：`late` 5859（p07 3700）——**没有暴涨**；F7：`cbs/lane=2.00 (max=
 | **B** | 查"cb 为什么 5 s 才完成"：**P0-7b**（每条记录 `commit→completion` + 设备侧等待目标：抽取栅栏 / grid-ready 的 generation 及其 signaller 的 slot）＋现成开关 **`OCUDU_CE_WAIT_TRACE=1`**（按指针打印 held cb 的 publish / close 站点，能直接看"谁、隔了多久才 close"）| 纯仪器、不动数据面；需要一条腿 |
 | **C** | **结构性**：让交接块的输入不要依赖"可能跨跳被 hold 的 cb"——前端 DFT 单独一次提交（= P2-E 选项 (b)，用户 2026-09-25 已裁掉）。**新证据是：它不只是时延问题，而是"池被按住 5 s"的机制**；按 `merged` 车道序语义实施会让 V4（`cbs/lane`）需要重新裁决 | 需要用户二次裁决 + 重测 |
 
+### 6.13 ✅ Q9-A + Q9-B 落地（2026-09-25，提交 `5ff8759804`）：**干池的接收线程自己驱动 sweep** ＋ **"这 5 秒在哪里"的两组读数**
+
+> 依据 §6.12 ③/④ 的 A、B 两项（用户 2026-09-25 批准"A + B 一起做"）。**A 是代码改动、B 是纯仪器**；
+> 离线已全绿（见 ③），**等一条腿**（配方与读法见 ④；判据仍是 §6.11 ⑤ 的 F1–F8，**没有新阈值**）。
+
+**① A：把"停在 `pop_blocking` 的接收线程"变成注册表的入口**
+
+| 位置 | 改动 |
+|---|---|
+| `include/ocudu/phy/phy_pipeline_grid_ready.h` | 新增 `handover_reap_hook`（与 `grid_ready_hook` / `slot_hop_plan_hook` 同一套 hook 模式：无 Metal 的构建里是 no-op）|
+| `lib/phy/metal/ocudu_metal_burst.mm` | `shared_burst::reap_unclaimed_now()`：跑**同一个** `sweep_unclaimed()`，**解锁后**才提交；计 `reaped_by_park_events` / `reaped_by_park_blocks`。安装点与其它四个 hook 同一个 `once` lambda |
+| `lower_phy_baseband_processor.{h,cpp}` | 新增 `pop_rx_buffer_blocking()`：**先 `try_pop`**（健康路径一次 hook 都不调）→ 池干时 `reap()` ＋ `pop_wait_for(10 ms)` **分片等待**，超时后再 reap；队列 stop 时返回与原来 `pop_blocking()` 相同的空缓冲。**两个原 `pop_blocking()` 调用点都走它** |
+
+* **为什么必须由"被 park 的那个线程"来问**：§6.11 的规则是"每个入口都查"，而**全停时没有入口**——
+  收包线程停在空池上 ⇒ 没有 deposit；UL 流水线堵在等缓冲的块上 ⇒ 没有 take。腿 `p08-conc2` 的
+  `slot=415` 就是这一支：`wait_for_a_claim = 5.945 s`、认领后 **2.6 ms** 完成 ⇒ 那 5.9 s 全是在等一个**永远不会来的调用者**。
+* **代价**：健康路径不变（`try_pop` 命中即返回）；只有在**池已经干了**的时候才多一次注册表扫描 + 可能几次迟提交
+  （`late_commits` 本来就该发生，只是提前到被 park 的那一刻）。
+  ⚠ 已知风险（写在这里而不是事后解释）：`[cb commit]` 在队列饱和时可能阻塞（§6.9 的 arm 10 注释），而这条路径跑在
+  **收包线程**上——但此时代码本来就要在这个空池上阻塞，所以最坏情况不比改动前更差。
+
+**② B：两组"这 5 秒在哪里"的读数**（纯读数，不加 dispatch、不加提交）
+
+| 读数 | 出处 | 说什么 |
+|---|---|---|
+| `registry commit->completion=N max=… mean=…`（P0-7 行上，Q9-B）| `handed_counters::commit_count/commit_wait_max_us/sum` | 把 `deposit->completion` 切成两半：**注册表已经发出提交之后**又花了多久。若它 ≈ `deposit->completion` 的 max ⇒"提交了、但完成得慢"；若它只有 ms 而后者是秒 ⇒"**提交之前**就慢了"（= 认领者 / hold 那一侧）|
+| `[ul_gpu_lane] commit -> completion (Q9-B, all stages)` ＋ `slowest command buffers by commit -> completion (Q9-B)` 表 | `ocudu_metal_lane_probe.mm`（每条 cb 记 `commit_time`，读 `GPUStartTime/GPUEndTime`）| 每条命令缓冲拆成 **`commit->start`（队列没轮到它）** 与 **`start->end`（设备拿着它——**设备侧栅栏等待就算在这里**）**，并**逐行打印最慢 8 条的 slot + stage** ⇒ 一条腿的答案是一行，不是一个平均值 |
+| `dry-pool reaps=N recovering M block(s)`（P0-7 行上，Q9-A）| `reaped_by_park_events/blocks` | **A 是否真的被触发**。**events>0 而 blocks=0** ⇒ 卡住池的**不是**"没人认领的块"，而是 **`claimed=1` 的块**（sweep 不许碰它——往已提交的缓冲里编码是错误）⇒ 那条腿直接把责任指到 hold/提交一侧，B 的表接着回答是队列还是设备 |
+| （既有、本次只是首次写进手册）`OCUDU_CE_WAIT_TRACE=1` | `ocudu_metal_mmse_engine.mm` | 按**指针**打印 held cb 的 publish / close 站点（`end_stage_async: published as pending` / `close_held_buffer` / `encode_run`）⇒ 谁的 hold 跨了多久，看两行之间隔了多少事件。**stderr 会变大，只在诊断腿上开** |
+
+**③ 离线验证（提交前全部做完，提交 `5ff8759804`）**
+
+| 网 | 读数 |
+|---|---|
+| `dft_release_adopt_metal_test` | **rc=0**；新增 **arm 12（Q9-A）**：`a DRY pool reaped an unclaimed block with NO other registry entry point - input released exactly once, dry-pool events 0->1, blocks 0->1, late_time 5->6`；arm 11（Q9）仍绿；P0-7 行新字段 `registry commit->completion=8 max=731.0us mean=482.0us (Q9-B); dry-pool reaps=1 recovering 1 block(s)`；lane 报告的 `commit -> completion (Q9-B)` 与 slowest 表都打印（本测里 `commit->start≈60–110 µs` / `start->end≈450–560 µs`）|
+| `ring_buffer_test`（adt，编入 `blocking_queue_test.cpp`）| **4/4 PASS**，其中**新增** `pop_wait_for_reports_success_timeout_and_stop` 钉住新循环依赖的三个结果（success / timeout / stopped⇒failed；这一调用在树里此前**没有使用者**）|
+| `ctest -L phy` | **100% passed out of 193** |
+| `lower_phy_test` | **528/528 PASSED** |
+| `ul_pipeline_probe_test`（support）| **3/3** |
+| `l1_handover_arms.sh 8 /tmp/l1_handover_q9ab` | **5 PASS**（`cand vs ref` 8 文件 0 differing；`drop`/`skew` 各 8 不同）|
+| `l1_hop_arms.sh` | **4/4 `differing=0`** |
+| 与 pristine HEAD 二进制（`work_tmp/ref/replay_head_pre_p05`）逐字节 | `cand`+`nogrid` **16 个网格文件 0 differing**；真捕获 `syn004_4` **4 个 dump 0 differing** ⇒ **值中性** |
+
+**④ 下一条腿：配方与"要读什么"（判据不新增）**
+
+```bash
+sudo -E OCUDU_UL_PHASE_SEGMENTS=1 bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label> \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+# 流量同 p08-conc2：上行 iperf3 -R -t 100；读法：p0_gate.sh <label>（F1–F8 一字不改）
+```
+
+| 读 | 若 A 起作用 | 若没有 |
+|---|---|---|
+| `block lifecycle` 的 `wait max` / `oldest unclaimed age max`（**F2**）| 落 **ms 级**（被 park 的线程自己会来 reap）| 仍秒级 ⇒ 读 `dry-pool reaps`：**events>0 而 blocks=0** ⇒ 不是"没人认领"，是 **claimed 的块** ⇒ 看 B 的表 |
+| `[ul_gpu_lane] commit -> completion` 最慢行 | — | **`commit->start` 大** ⇒ 队列（前面有更长的缓冲或等待者）；**`start->end` 大** ⇒ **设备侧等待**（抽取栅栏 / grid-ready），即 hold 那条线 ⇒ 下一步是 §6.12 ④ 的 C，或"让 hold 不跨跳" |
+| `registry commit->completion` 的 max vs `deposit->completion` 的 max | 两者都小 | **同量级且都是秒** ⇒ 提交之后才慢（设备/队列）；**前者 ms、后者秒** ⇒ 提交之前慢（hold/认领）|
+
+**⑤ 环境注记（与本次改动无关，但影响可复现性）**：用户接受 Xcode 许可后，工具链/SDK 换成了 Xcode 那一套，
+`<future>` 把 `future::get()` 标成 `[[nodiscard]]` ⇒ `io_broker.h` 的裸 `fut.get()` 在 `-Werror` 下**编译失败**。
+已按原意补 `(void)`（在提交 `5ff8759804` 内）。**整棵树在改前后各重编一次**，而与 pristine HEAD 二进制的逐字节比对
+（新 SDK 编译）仍是 **0 differing** ⇒ SDK 变化没有改字节，§6.11/§6.13 的逐字节网仍然可比。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
@@ -1304,5 +1368,6 @@ n1 默认配方 + `OCUDU_UL_PHASE_SEGMENTS=1`：
 **离线载体**：`dft_release_adopt_metal_test`（P0-1/P2-E 的 Metal 臂；**arm 11 = Q9 修复的回归臂**，§6.11 ③）、`ul_pipeline_probe_test`（P0-5 的 hook 契约）、
 `tests/unittests/du_low/du_low_executor_mapper_test.cpp`（P0-6 的规则）、`ul_chain_replay`（逐字节/容差网；**与 pristine HEAD 二进制的逐字节比对见 §6.11 ④**）。
 **⏳ 待飞的腿**：**Q9 确认腿**（§6.11 ⑤ 的配方与 F1–F8 判据；飞完在 §9 里补一行，并把 V1–V5 一起读出来）。
+**诊断开关**（都不进判据）：`OCUDU_CE_WAIT_TRACE=1`（held cb 的 publish/close 指针轨迹，§6.13②）、`OCUDU_METAL_GPU_TIME=1`（每队列 GPU 时间）、`OCUDU_D1_HANDED_BOUND`（注册表上界的诊断覆盖）、`OCUDU_DFT_RELEASE_TOKENS_EARLY`（P2-E 仪器，默认关）。
 **门与工具**：本阶段的 `phy_latency/wip/`（`p0_gate.sh`：A1/A2/B1/B2/C1/**C2/C2b** + **D1–D5（Q9，§6.11⑤）**；`leg_census.py`：腿普查）与上一阶段的 `phy_pipeline_gpu/wip/`（`leg_gate.sh`（只用于加压腿）、`milestone_audit.sh`（互斥锁）、
 `ab_dumps.sh`、`value_net.py`、`l1_handover_arms.sh`、`l1_hop_arms.sh`、`edge_block_arms.sh`、`run_leg.sh`。
