@@ -59,6 +59,8 @@ void ru_dummy_impl::start()
 
   stop_control.reset();
 
+  is_stop_requested = false;
+
   // Start each of the sectors.
   for (auto& sector : sectors) {
     sector->start();
@@ -80,6 +82,10 @@ void ru_dummy_impl::start()
 
 void ru_dummy_impl::stop()
 {
+  // Signal the radio loop to stop notifying slots. This prevents the RAN stack from requesting the reception and
+  // transmission of new slots.
+  is_stop_requested = true;
+
   // Stop each of the sectors.
   for (auto& sector : sectors) {
     sector->stop();
@@ -113,17 +119,21 @@ void ru_dummy_impl::run_slot()
     // Increment current slot.
     ++current_slot;
 
-    // Notify new slot boundary.
-    timing_notifier.on_tti_boundary(tti_boundary_context{.slot       = current_slot + max_processing_delay_slots,
-                                                         .time_point = std::chrono::system_clock::now() +
-                                                                       (slot_duration * max_processing_delay_slots)});
-
-    // Notify UL half slot.
+    // Notified slot.
     slot_point slot = current_slot.without_hyper_sfn();
-    timing_notifier.on_ul_half_slot_boundary(slot);
 
-    // Notify UL full slot.
-    timing_notifier.on_ul_full_slot_boundary(slot);
+    if (OCUDU_LIKELY(!is_stop_requested)) {
+      // Notify new slot boundary.
+      timing_notifier.on_tti_boundary(tti_boundary_context{.slot       = current_slot + max_processing_delay_slots,
+                                                           .time_point = std::chrono::system_clock::now() +
+                                                                         (slot_duration * max_processing_delay_slots)});
+
+      // Notify UL half slot.
+      timing_notifier.on_ul_half_slot_boundary(slot);
+
+      // Notify UL full slot.
+      timing_notifier.on_ul_full_slot_boundary(slot);
+    }
 
     // Notify the slot boundary in all the sectors.
     for (auto& sector : sectors) {

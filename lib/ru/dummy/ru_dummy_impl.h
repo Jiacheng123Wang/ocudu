@@ -141,6 +141,8 @@ private:
   std::vector<std::unique_ptr<ru_dummy_sector>> sectors;
   /// RU dummy metrics collector.
   ru_dummy_metrics_collector metrics_collector;
+  /// Whether the RU is being stopped, i.e., it was signaled to stop and is being stopped.
+  std::atomic<bool> is_stop_requested = false;
 };
 
 } // namespace ocudu
