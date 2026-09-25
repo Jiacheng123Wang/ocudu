@@ -173,8 +173,14 @@ class ul_pipeline_probe
 public:
   static ul_pipeline_probe& get()
   {
-    static ul_pipeline_probe instance;
-    return instance;
+    // NEVER DESTROYED ON PURPOSE, and this one is load-bearing for a SECOND reason: gpu_lane_probe's report is
+    // an atexit handler and it READS this probe (`phase_samples_recorded()`, the pairing account of P0-5), so
+    // this object has to outlive the static destructors - a function-local static does not, and locking its
+    // (destroyed) mutex is `libc++abi: terminating ... mutex lock failed: Invalid argument` at exit. Measured
+    // on leg `q9-conc2` (2026-09-25): the last two report lines were lost to exactly that. Same rule and same
+    // deliberate leak as the lane probe's stats() and the DFT engine's dft_stats().
+    static ul_pipeline_probe* instance = new ul_pipeline_probe();
+    return *instance;
   }
 
   /// Which landmark of a slot a timestamp belongs to (see trace_slot()).
@@ -1335,8 +1341,10 @@ class ul_pipeline_probe
 public:
   static ul_pipeline_probe& get()
   {
-    static ul_pipeline_probe instance;
-    return instance;
+    // Leaked for the same reason as the real probe above (symmetry: this variant has no state to lose, but the
+    // rule must not depend on which arm is compiled).
+    static ul_pipeline_probe* instance = new ul_pipeline_probe();
+    return *instance;
   }
   void record_start(uint64_t /*slot*/) {}
   void record_ldpc_start(uint64_t /*slot*/) {}

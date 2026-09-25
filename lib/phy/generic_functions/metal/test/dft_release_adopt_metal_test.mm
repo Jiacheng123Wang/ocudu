@@ -33,6 +33,7 @@
 /// a silent wrong-address defect when it is dropped, so it is exercised here rather than assumed.
 
 #include "dft_processor_metal.h"
+#include "ocudu/support/executors/ul_pipeline_probe.h"
 #include "ocudu_dft_metal_engine.h"
 #include "ocudu_metal_burst.h"
 #include "ocudu_metal_queue.h"
@@ -1239,6 +1240,42 @@ int main()
       std::fprintf(stderr,
                    "[dft-release] PASS: 'zero-copy wraps' reads true on a clean cache and false after a "
                    "misaligned wrap\n");
+    }
+
+    // ---- The EXIT PATH of the two probes (P0-5's pairing account), exercised on purpose ------------------
+    //
+    // gpu_lane_probe's report runs from an atexit handler and READS ul_pipeline_probe's sample count (the
+    // `paired/phase account` line), so the pipeline probe's singleton has to be alive when that report runs.
+    // It used to be a function-local static - destroyed with the static destructors, BEFORE the report - and
+    // leg `q9-conc2` (2026-09-25) lost its last two report lines to `mutex lock failed: Invalid argument`
+    // because of it. Recording one COMPLETE hop for the lane's own slot here is what makes this binary catch a
+    // regression: the sample is finalized, the lane report reaches the account line, and a singleton that dies
+    // too early aborts the process (non-zero exit) instead of printing a verdict.
+    {
+      // The phase segments are recorded in the fused lane only when the diagnostic switch asks for them (this
+      // binary has already published phy_pipeline_mode::gpu by now), so the switch is turned on around the hop
+      // and turned back off - the same way the probe's own test does it.
+      ::setenv("OCUDU_UL_PHASE_SEGMENTS", "1", 1);
+      ocudu::ul_pipeline_probe& phases = ocudu::ul_pipeline_probe::get();
+      phases.record_start(test_slot);
+      phases.record_t2f_end(test_slot);
+      phases.record_ce_end(test_slot);
+      phases.record_ldpc_start(test_slot);
+      phases.record_end_crc_ok(test_slot, 42);
+      ::unsetenv("OCUDU_UL_PHASE_SEGMENTS");
+      if (phases.phase_samples_recorded() == 0) {
+        std::fprintf(stderr,
+                     "[dft-release] FAIL: the phase probe recorded no sample, so the lane report's account line "
+                     "would not be exercised at exit\n");
+        return 1;
+      }
+      std::fprintf(stderr,
+                   "[dft-release] PASS: one phase sample finalized for slot %llu - the lane report's account "
+                   "line (and the probe singleton's lifetime) is exercised at exit. NOTE: that line's verdict "
+                   "is deliberately NOT asserted here - this test's last lane closed more than the pairing "
+                   "window (2 s) ago, so the sample legitimately reads as unpaired; what is exercised is that "
+                   "the report RUNS (a singleton destroyed before it aborts the process instead)\n",
+                   static_cast<unsigned long long>(test_slot));
     }
 
     std::fprintf(stderr,
