@@ -1662,6 +1662,205 @@ sudo -E OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1 \
 **⑦ 仍未做（本节边界）**：Q9-G 的**握手本身**（等 D11 的读数）；`[ul_gpu_lane] dft carried` 的**空口基线**
 （本机测试里 resolved=5/8 是测试自己造的 deposit，空气腿的形态要 p14 才知道）；P2-E 的 (b) 选项（§6.4.6 已裁"不做"）。
 
+### 6.20 ★★★ 根因结案（2026-09-25）：**Metal 对"未被满足的设备侧事件等待"有 5.00 s 硬上界**——那 5 秒 = 一个"等待者先于 signaller **提交**"的栅栏，代价固定 5.000 s，而且**整条队列连同整个 gNB 时隙环一起停**
+
+> 本节的结论是**离线复现**出来的（`wip/metal_wait_timeout_probe.mm`，本机 Apple M4 Pro / macOS 26.6.2），
+> 不依赖任何新腿；p07–p14 的七条腿的读数随后被它一一解释。**触发腿 `p14-conc2`（§6.19 ⑥ 的那条）没有报告**
+> （进程在停机 5 s 宽限内没停下，`[APP] [E] Emergency flush of the logger`），但它的**主日志**给出了本节 ③ 的系统级证据。
+
+#### ① 离线复现（决定性读数）
+
+`wip/metal_wait_timeout_probe.mm`：**每个臂独占一条队列与一个事件**，等待者（`encodeWaitForEvent:value:1`）**先提交**，
+signaller 由另一个线程在 0/200/2000/8000 ms 后提交，最后一个臂**永远不提交**：
+
+```
+device=Apple M4 Pro
+(waiter is committed FIRST in every arm except the last; 'signaller: -1' = never committed)
+A1 signaller at +0 ms (same instant) waiter:  5.001 s (st=5, commit->start=5001187.0 us, run=    0.6 us)   signaller: -1.000 s
+A2 signaller at +200 ms              waiter:  5.001 s (st=5, commit->start=5000667.7 us, run=    0.6 us)   signaller:  5.008 s
+A3 signaller at +2000 ms             waiter:  5.002 s (st=5, commit->start=5001350.1 us, run=    0.4 us)   signaller:  5.008 s
+A4 signaller at +8000 ms             waiter:  5.001 s (st=5, commit->start=5001325.0 us, run=    0.5 us)   signaller:  8.005 s
+A5 NO signaller (event stays 0)      waiter:  5.000 s (st=5, commit->start=5000260.2 us, run=    0.5 us)   signaller: -1.000 s
+B  signaller FIRST                   waiter:  0.206 s (st=4, commit->start=    484.5 us, run=  126.4 us)   signaller:  0.007 s
+```
+
+**两次运行逐位相同。** 三条结论：
+
+1. **未被满足的设备侧等待在 5.00 s 后被驱动"放行"**（`status=5` Completed，**没有错误**）：A5 里事件**从未被 signal**
+   （`event=0`），命令缓冲照样在 5.000 s 后跑完。⇒ 这是 Metal/AGX 驱动的一个**硬上界**，不是我们代码里的任何超时
+   （本节之前查过全仓库：PHY 路径上没有任何 5 s 常量）。
+2. **在那 5 s 之前，整条队列被按住**：A2/A3 里 signaller 只晚提交 200 ms/2 s，但它**直到 5.008 s 才跑**——
+   **生产者被堵在消费者后面整整一个上界**。
+3. **上界之后栅栏是"尽力而为"**：A4 里消费者在 **5.001 s** 放行、生产者到 **8.005 s** 才跑 ⇒
+   **消费者先于生产者执行**，栅栏要保证的次序被破坏。⇒ **设备侧等待只能对"已经提交"的信号编码**。
+
+#### ② 为什么这**就是**那 5 秒：四条独立读数指的是同一个瞬间
+
+| 读数 | 腿 | 值 | 它与本节的关系 |
+|---|---|---|---|
+| lane 探针 `commit->start` | p13 | **5002977.3 µs**，而 `start->end` 只有 **1244.1 µs** | **复现里逐位相同的形状**：`commit->start ≈ 5.0011 s`、`run` 极小 ⇒ "GPU 5 秒没开始它"就是**等待被放行**的时刻 |
+| 注册表 `deposit->completion` | p13 | 5004669 µs（slot 9612） | 同一个块、同一个 5 s |
+| `input hold (P0-2)` max | p13 | 5004.7 ms | 输入 token 在**该命令缓冲的完成处理器**里回池 ⇒ 同一次放行 |
+| `pop_blocking wait (P0-2)` max | p13 | 4997.6 ms | 池在同一次放行后才拿到缓冲 ⇒ 接收线程 park 的时长 = 同一个 5 s |
+
+⇒ 四个"不同层面的 5 秒"其实是**一个**：一个等待者把队列按住了 5.00 s。
+
+#### ③ 空口上的完整因果链（含 p14 为什么变成"再也不恢复"）
+
+```
+(1) 并发 2 下，某个消费者在它的命令缓冲里编码了设备侧栅栏等待，
+    而承载该信号的命令缓冲**尚未提交**（Q9-G 窗口：注册表 sweep 在锁内认领、**解锁后**才提交；
+    另一个线程的跳在窗口里拿到 generation 就编码等待并提交）
+(2) 等待者排在 signaller 前面 ⇒ 队列按住 ⇒ **5.00 s 后驱动才放行**
+(3) 排在其后的**每一个**命令缓冲都被拖住，包括那些完成时才释放接收缓冲的**交棒块**
+(4) 输入 token 不回池 ⇒ 池被抽干（8/8）⇒ `pop_rx_buffer_blocking()` 无事可等
+    —— 它是 `for(;;) { reap(); pop_wait_for(slice); }`，而且**在 `receiver.receive()` 之前**
+    ⇒ **接收线程不再收样点**：`Real-time failure in RF: late` 每槽一次、UHD 环形缓冲溢出
+    （p14 实测 `Receive stream discontinuity … (255773 samples)`）
+(5) **没有样点就没有 slot indication** ⇒ L1/L2 的**整个时隙环停住（下行也停）**
+(6) 5.00 s 后驱动放行 ⇒ UHD 里积压的块被一次排空 ⇒ **追赶突发**
+(7) ⇒ p14 的后果：追赶期间若干 UL 时隙的 **CRC 指示永远没到 MAC** ⇒
+    调度器 `All the UE HARQs are busy waiting for their respective CRC result`（30 s 内 2469 次）⇒
+    该 UE 不再被授 Grant ⇒ 掉线并反复重接（RNTI `0x4603 → 0x4611 → 0x4616 → 0x4617`）⇒ iperf3 上行再也不回来
+```
+
+**p14 主日志的直接证据**（全部来自 `gnb_gpu_p14-conc2_0925_1150.log`，不需要 stderr）：
+
+| 时刻 | 现象 |
+|---|---|
+| `03:52:27–03:52:42` | **完美运行**：`PUSCH` 解码 **1000/s**、`RLC UL SDU` ~1000/s、**RF 失败 0** |
+| `03:52:42.14` | 最后一次成功解码；**258 ms 后**第一声 `Real-time failure in RF: late` |
+| `03:52:43–46` | `PUSCH=0`、`RF late≈1450/s`、`Slot decisions 66→43/s`（正常 1000/s）、`Discarded uplink slot` ≈80/s、`PRACH buffer pool depleted` ≈38/s |
+| `03:52:47` | **追赶突发**：`Slot decisions 3288`、`PUSCH 744`（一秒内把积压排空） |
+| `03:52:49–52` | 再次全停（`Slot decisions = 0`、`PDSCH/PDCCH = 0`）⇒ **下行也停**，证明停的不是"某个 UL 任务"而是**时隙环本身** |
+| `03:52:53` 起 | PHY **空闲**（RF 失败 0、`UL processor busy` 0）：不是 PHY 卡住，而是**该 UE 再也不被授 Grant** |
+| 之后 | `ue=0`（iperf3 的 UE）**3.5 分钟零解码**，反复重接；`ue=1` 仍能被服务（PHY 是好的） |
+| `03:56:34` | `[APP] [E] Emergency flush of the logger`：Ctrl-C 后 5 s 宽限到期 ⇒ **本次报告全部丢失**（§6.19 的仪器因此没用上） |
+
+⚠ **"池先满、电台后错"这一条在本腿同样成立**：`03:52:37.938` 出现 `[ul_rx_pool] the receive pool is EMPTY (held=8/8)`
+（**一次性告警**，全腿只打一行），`03:52:37.952` 才出现第一声 RF late 与 `Receive stream discontinuity`。
+⇒ **池是"因"，电台 late 是"果"**，与 §6.11 的机制一致。
+
+#### ④ 为什么以前五层追查都看不见它
+
+* **Q9-D 比的是"generation 发出"**：信号**编码**在等待之前，但**提交**可以晚（§6.17 ③ 已登记的盲区）⇒ 全读成"安全形状"。
+* **Q9-E 比的是"完成处理器滞后"**：本缺陷里处理器很及时（GPU 一跑完就回池），5 s 在**队列没开始**那一段。
+* **`commit->start` 一直是正确的读法**——只是它同时兼容"队列前面有别的缓冲"与"等事件被放行"两种解释；
+  本节把第二种**离线钉死**了（`commit->start ≈ 5.0011 s` 而事件从未被 signal）。
+* **Q9-F/Q9-F3 本来是为此造的**，但 p14 丢了报告（③ 的表最后一行）⇒ 下一条腿必须保证干净停机（见 ⑥）。
+
+#### ⑤ 修复：两件，分开裁
+
+**A（缺陷本身，推荐立刻做）——"提交握手"：设备侧等待只对已提交的 signaller 编码。**
+`shared_burst` 的 `handed_entry` 增加 `commit_issued`，由**提交方**在 `[cb commit]` **之后**置位
+（提交点：`shared_burst::commit()` 的采纳路径、`commit_dropped()`（sweep/fallback/替代）、mmse 的 `handed_direct`）；
+`grid_production_generation()` 在返回 generation 之前检查它：
+
+* 条目的载体**已提交**（或已 `produced`）⇒ 直接返回 generation（signaller 在队列里排在前面，安全）；
+* 载体**已被别人认领但还没提交** ⇒ **有界等待**（~1–2 ms，轮询；窗口本身只有几微秒，认领者是另一个跳时最长等它一跳）：
+  变成已提交 ⇒ 返回 generation；
+* 等待超界 ⇒ **不再编码设备侧等待**，退回**有界的主机等待**（`ensure_grid_produced()` 的 200 ms 语义）并返回 0，
+  计入 `handshake_timeouts`（罕见、有界、且**正确**——比 5 s 队列冻结 + 栅栏失效好得多）。
+
+**判据（离线可判，见 ⑥）**：`handshake_waits` 计数 >0 说明窗口真的被踩到过；`handshake_timeouts` 应为 0；
+空口腿的 5 s 停顿应消失。
+
+**B（爆炸半径，需用户裁决）——让"池"不能停电台。**
+即使 A 修好，**任何**一次晚完成（或未来任何一个栅栏缺陷）都会再次抽干池 ⇒ 接收线程 park ⇒
+**整个 gNB（含下行）停 5 s，然后该 UE 掉线重接**。池是**上行链路的背压**，不该是**电台的时序源**：
+池干时应**继续收样点**（丢掉缺缓冲那一槽的样点），而不是把整条时隙环停住。这不是"加大池"（治标），
+而是把"背压"与"时序"解耦。**它是结构性改动，必须先请用户裁**（选项：(a) 预留几个只给接收路径用的缓冲；
+(b) 池干时收到临时缓冲并丢弃该槽；(c) 缩短持有期（P2-E 的 (b)）——(c) 只降低概率，不解除耦合）。
+
+#### ⑥ 下一条腿（`p15-conc2`）怎么飞、怎么判
+
+配方与 p07–p14 相同，**外加 `OCUDU_METAL_GPU_TIME=1`**（Q9-F3 的开关）；**跑完必须 Ctrl-C 并确认进程真的退出**
+（p14 的那 5 s 宽限把报告吃掉了）：停机后 `ls -la` 的 `.stderr` 里必须有 `[metal_stats]` 与 `[ul_gpu_lane]` 行。
+
+| 读数 | A 生效时应看到 |
+|---|---|
+| `p0_gate.sh` D1/D3/D4 | **不再有 ~5 s 的 `input hold` / `pop_blocking` / gap**（阈值一字不改）|
+| D11（Q9-F）`waiter-committed-first` | **0**（若 >0 且 `max≈5 s`，A 没覆盖到那条路径——把 `worst kind`/`slot` 交回来）|
+| D12（Q9-F3） | 运行期不再出现 ~5 s 的 **洞**；`dft carried deposit ->GPU start` 的 max 落回 ms 量级 |
+| `handshake_*`（A 新增计数，接在 `[metal_stats] dft handover` 行）| `waits>0` = 窗口被踩到过；`timeouts=0` |
+| 用户侧 iperf3 | 不再断流；即使偶发丢槽，**UE 不再掉线重接** |
+
+#### ⑦ 本节边界
+
+* 本节**没有**改任何判据（D1–D4 阈值不动）；A 的实现在下一小节（§6.21）。
+* 未决：p14 里"该 UE 永久不再被授 Grant"的**恢复路径**（HARQ/CRC 指示丢失后如何自愈）是**另一个**问题（MAC 侧），
+  本节只把它的**触发**去掉了；B 的裁决仍待用户。
+* 复现脚本是**测量**：它花 ~50 s 等每个臂的上界到期，**不能在飞腿时跑**（会碰 GPU）。
+
+### 6.21 ✅ 修复 A 落地（2026-09-25）：**提交握手**——设备侧等待只对"已提交"的 signaller 编码（离线 arm 15 自证）
+
+> 针对 §6.20 的根因。**不改判据**（D1–D4 阈值一字未动）；**不改提交形态**（`cbs/lane` 不变：握手只影响
+> "何时把 generation 交给消费者"，不增加、不移动任何 `[cb commit]`）。
+
+**① 改了什么（`lib/phy/metal/ocudu_metal_burst.{h,mm}` + 一个 mmse 提交点）**
+
+| 位置 | 改动 |
+|---|---|
+| `handed_entry` | 新增 `bool commit_issued`（替代条目时复位）——"承载该块 grid 信号的命令缓冲**已经提交**" |
+| `shared_burst::note_block_commit_issued(cb)` | 新增公开入口，**由提交方在 `[cb commit]` 之后**调用（按 cb 查条目置位；非交棒块是 no-op）|
+| 四个提交点 | `shared_burst::commit()`（车道采纳块）、`commit_dropped()`（注册表 sweep/主机 fallback/替代）、mmse `handed_direct`（交接块无法编码时）、`adopt()` 的诊断拆分前端提交 |
+| `claim_grid_production()` | 多返回一个 `must_wait_for_commit`：条目 **claimed && !produced && !commit_issued** ⇒ 调用方必须先确认提交 |
+| `wait_for_block_commit()` | 新增：**有界（2 ms）轮询**等待该提交（轮询而不是持锁睡眠——提交方要拿同一把锁才能置位）|
+| `grid_production_generation()` | 窗口命中 ⇒ 先等提交：等到 ⇒ 返回 generation（signaller 已排在队列前面，安全）；**等不到 ⇒ 返回 0 并退回 `ensure_grid_produced()` 的 200 ms 主机等待**（有界、正确、计入计数）|
+| 计数器 | `handshake=waits:…,timeouts:…,max:…us` 接在 `[metal_stats] dft handover` 行尾；门新增 **D13**（INFO）|
+
+**为什么"等到提交"就安全**：提交次序 = 队列次序（§6.20 ① 的 B 臂：signaller 先提交时等待立刻满足）。窗口本身只有微秒级
+（sweep"锁内认领 → 解锁后提交"），长尾是"另一个跳正持有该块直到它提交"——而**消费者本来就要等这个块的完成**，
+所以等它的提交不引入新的等待类别。超界（2 ms）说明认领者卡住了：这时**绝不能**编码设备侧等待（那会变成 5 s 队列冻结），
+退回主机等待是**正确**的那一侧。
+
+**② 离线证据（改代码后必跑的那一套）**
+
+* **arm 15（新，三个子例，都用真实块）**：
+  * (a) 载体**已提交** ⇒ 立刻拿回 generation，`waits/timeouts` 都不动；
+  * (b) 另一个线程在 **300 µs 后**提交 ⇒ 消费者的等待**把窗口关掉**（`waits 0->1`，`max 453us`），generation 正常拿回；
+  * (c) 载体**永不提交** ⇒ **不交出 generation**（返回 0）且 `timeouts 0->1`（退回主机等待）。
+  实测打印：
+
+```
+[dft-release] arm 15 (6.20 commit handshake): a committed carrier is handed back at once, a carrier committed
+              DURING the wait is confirmed (waits 0->1, max 453us), and an uncommitted one is never handed out -
+              the consumer falls back to the host wait (timeouts 0->1)
+[metal_stats] dft handover … timeouts=1 … handshake=waits:1,timeouts:1,max:453us
+```
+
+* `ctest -L phy` **193/193**、`lower_phy_test` **528/528**、`dft_release_adopt_metal_test` rc=0（arm 10–15 全过）、
+  `l1_handover_arms.sh` **5 PASS**（`l1_hop_arms.sh` 仍是它自己那句 `OPEN`）。
+* 门的 **D13** 有自测（`p0_gate_selftest.sh`：读回 `waits/timeouts/max`，并断言没有该字段的旧腿读成 "cannot say"）。
+
+**③ 这条修复**不**解决什么（写清楚，免得下一条腿误读）**
+
+* **修复 B（让池不能停电台）仍未做**：握手把"5 s 冻结"的**触发**去掉了，但**任何**一次晚完成（或未来任何栅栏缺陷）
+  仍会抽干池 ⇒ 接收线程 park ⇒ 整个 gNB（含下行）停住。**这是结构性改动，等用户裁**（§6.20 ⑤ B 的三个选项）。
+* **MAC 侧的恢复**没动：p14 里"CRC 指示丢了以后该 UE 再也不被授 Grant、掉线重接"是另一个问题（§6.20 ③ (7)）。
+* **2 ms 界与 200 ms 主机回退**是**新引入的参数**，它们只在窗口命中且认领者卡住时才生效；`timeouts` 必须为 0，
+  非 0 就是"有消费者的载体从未提交"——那本身是一个**新的**缺陷读数。
+
+**④ 下一条腿 `p15-conc2`（回归 + 定性同一条腿）**
+
+```bash
+pgrep -x gnb || echo ok; pgrep -x ul_chain_replay || echo ok      # 起腿前
+sudo -E OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1 \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p15-conc2 \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+# 流量：CN 侧上行 iperf3 -c <gNB-ip> -R -t 100
+# ⚠ 跑完 Ctrl-C 后【确认进程真的退出】：p14 的报告就是被停机 5 s 宽限吃掉的（§6.20 ③ 末行）
+bash doc_chinese/phy_latency/wip/p0_gate.sh p15-conc2      # D1–D13
+```
+
+| 读数 | 通过时应看到 |
+|---|---|
+| D1/D3/D4（判据，阈值不动）| `input hold` / `pop_blocking` / gaps **不再有 ~5 s 的尾巴** |
+| D11（Q9-F）| `waiter-committed-first=0`；若非 0，把 `worst kind`/`slot` 交回来（说明还有一条等待路径没被握手覆盖）|
+| D12（Q9-F3）| 运行期不再出现 ~5 s 的**洞** |
+| **D13（新）**| `handshake waits>0` = 窗口真的被踩到过（这条腿就是旧腿里 5 s 的来源）；`timeouts=0` |
+| 用户侧 iperf3 | 不断流；即使偶发丢槽，**UE 不再掉线重接** |
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

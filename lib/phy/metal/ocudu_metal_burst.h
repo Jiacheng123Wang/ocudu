@@ -186,9 +186,50 @@ public:
   /// occupied a thread of the pool the committing stage runs on (measured: one 13-second incident, 355
   /// dropped uplink slots, design document 5.9.23).
   ///
+  /// \note ★ DEVICE WAITS ARE BOUNDED BY THE DRIVER, AND THE BOUND IS 5 SECONDS (dev doc 6.20, measured
+  ///       offline in wip/metal_wait_timeout_probe.mm): a Metal command buffer whose `encodeWaitForEvent:`
+  ///       has not been satisfied when the queue reaches it is released anyway after 5.00 s, and until then
+  ///       the WHOLE queue is held - the signaller committed behind it cannot run either. That is what seven
+  ///       air legs measured as a 5.000 +- 0.005 s freeze of the entire gNB (the receive pool drains, the
+  ///       receive thread parks, the radio stops being consumed, no slot indication is produced, uplink AND
+  ///       downlink stop), and after the bound the wait is dropped - so a fence encoded this way is
+  ///       best-effort rather than a guarantee. The generation this function returns is therefore only
+  ///       handed out once the command buffer carrying it has been COMMITTED (see
+  ///       note_block_commit_issued()); a consumer that cannot get that guarantee in bounded time is ordered
+  ///       on the HOST instead (0 returned, counted).
+  ///
   /// \return The generation to wait for, or 0 when there is nothing to wait for (no record for that
-  ///         (storage, slot), or no fence armed on the block).
+  ///         (storage, slot), no fence armed on the block) - or when the carrier's commit could not be
+  ///         confirmed in bounded time, in which case the grid has been waited for on the host instead.
   static uint64_t grid_production_generation(const void* grid_base, uint64_t slot);
+
+  /// \brief Marks the handed-over block carried by \p cb as COMMITTED - call it right AFTER `[cb commit]`.
+  ///
+  /// WHY (dev doc 6.20). `grid_production_generation()` hands a consumer the generation of a block that
+  /// someone else claimed, and the consumer encodes a device-side wait for it. Metal holds the whole command
+  /// queue - and releases it only after 5.00 s - when that wait is not yet satisfied, i.e. when the consumer
+  /// was COMMITTED before the buffer that carries the signal. The signal being ENCODED first (what the fence
+  /// instruments check) is not enough: it has to be SUBMITTED first. So the party that commits a handed-over
+  /// block says so here, and the registry only gives a generation away once its carrier is in the queue.
+  ///
+  /// Every commit path of a handed-over block must call it: the lane that adopted the block
+  /// (shared_burst::commit()), the registry's own late commits (commit_dropped(): the sweep, a host reader's
+  /// fallback, a superseded entry), the estimator's direct commit of an unencodable handed block, and the
+  /// diagnostic split's front-end commit. A buffer with no entry is a no-op.
+  static void note_block_commit_issued(id<MTLCommandBuffer> cb);
+
+  /// \brief What the commit handshake above has seen, for the diagnostics (see the dft handover line).
+  struct handshake_counters {
+    /// Times a consumer was handed a generation whose carrier had not been committed yet: the wait is what
+    /// closed the window, and a non-zero value says the window IS reached on air (the Q9-G shape).
+    uint64_t waits = 0;
+    /// Times that wait expired: the consumer was then ordered on the HOST (bounded, counted by
+    /// ready_timeouts) instead of encoding a device wait that could have cost 5 s. Must stay 0.
+    uint64_t timeouts = 0;
+    /// The longest wait for a carrier's commit, in microseconds.
+    uint64_t wait_max_us = 0;
+  };
+  static handshake_counters handshake_stats();
 
   /// \brief The grid production this thread's NEXT burst must wait for, before any of its dispatches.
   ///
@@ -388,6 +429,13 @@ public:
     uint64_t grid_not_found = 0;
     /// Host waits that timed out: the grid the caller was about to read was NOT ready.
     uint64_t ready_timeouts = 0;
+    /// \name Dev doc 6.20: the commit handshake that keeps a consumer from encoding a device-side wait for a
+    /// signal that is not in the queue yet (Metal holds such a wait for 5.00 s and then drops it).
+    ///@{
+    uint64_t handshake_waits       = 0;
+    uint64_t handshake_timeouts    = 0;
+    uint64_t handshake_wait_max_us = 0;
+    ///@}
     /// \name Q9-A: the sweeps a DRY receive pool drove itself (see reap_unclaimed_now()).
     ///
     /// The two are read together and mean different things: `reaped_by_park_events` is how often a thread that

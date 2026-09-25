@@ -1303,6 +1303,8 @@ static stage_encoder begin_stage_on_handed(mmse_engine_impl* e)
     // like every other one - a consumer waiting for that grid has to be ordered against exactly this commit.
     ocudu::metal::shared_queue::note_commit_order(handed);
     [handed commit];
+    // Dev doc 6.20: it is a handed-over block, so its commit is what a consumer of that grid orders against.
+    ocudu::metal::shared_burst::note_block_commit_issued(handed);
     ocudulog::fetch_basic_logger("PHY").error(
         "Metal MMSE: the handed-over block could not be encoded into; committed it without this hop");
     return s;

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -438,6 +439,7 @@ bool shared_burst::adopt(id<MTLCommandBuffer> cb)
       gpu_lane_probe::register_commit(cb, gpu_lane_probe::stage::dft);
       shared_queue::note_commit_order(cb);
       [cb commit];
+      shared_burst::note_block_commit_issued(cb);
       burst_stats_commit();
       s.outstanding.push_back(cb);
       [nb encodeWaitForEvent:ev value:value];
@@ -515,6 +517,9 @@ bool shared_burst::commit()
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end, burst_label);
   metal::shared_queue::note_commit_order(cb);
   [cb commit];
+  // Dev doc 6.20: if this buffer is a handed-over block (the merged route adopts one), its commit is what a
+  // consumer of that grid may order itself against - published here, AFTER the commit.
+  shared_burst::note_block_commit_issued(cb);
   burst_stats_commit();
   // The burst is the command buffer whose completion produces the LLRs, i.e. the last one of the
   // lane: registering it here is what lets gpu_lane_probe attribute the residency to the stages that
@@ -571,6 +576,13 @@ struct handed_entry {
   uint64_t generation = 0;
   /// Whether a hop has taken this deposit. An unclaimed one is committed by whoever needs the grid first.
   bool claimed = false;
+  /// \brief Whether the command buffer that carries this block's grid-production signal has been COMMITTED.
+  ///
+  /// Set by the party that commits the block, right after `[cb commit]` (see
+  /// shared_burst::note_block_commit_issued()). A device-side wait must not be encoded for a generation whose
+  /// carrier is not in the queue yet: Metal releases an unsatisfied wait only after 5.00 s and holds the whole
+  /// queue until then (dev doc 6.20, measured offline).
+  bool commit_issued = false;
   /// Set by the completion handler. The record outlives the production so that a LATE reader still finds it
   /// and is told "already produced" instead of "unknown" (see ensure_grid_produced()).
   bool produced = false;
@@ -890,6 +902,9 @@ static void commit_dropped(id<MTLCommandBuffer> cb)
     return;
   }
   commit((__bridge void*)cb);
+  // Dev doc 6.20: the block is in the queue now, so a consumer may encode a device-side wait for its
+  // generation. Marked AFTER the commit - before it, a consumer could encode its wait and be committed first.
+  shared_burst::note_block_commit_issued(cb);
 }
 
 } // namespace
@@ -897,6 +912,34 @@ static void commit_dropped(id<MTLCommandBuffer> cb)
 void shared_burst::set_drop_committer(drop_commit_fn fn)
 {
   drop_committer().store(fn, std::memory_order_release);
+}
+
+void shared_burst::note_block_commit_issued(id<MTLCommandBuffer> cb)
+{
+  if (cb == nil) {
+    return;
+  }
+  handed_state&               h = handed();
+  std::lock_guard<std::mutex> lock(h.mutex);
+  for (handed_entry& entry : h.entries) {
+    if (entry.cb == cb) {
+      entry.commit_issued = true;
+      return;
+    }
+  }
+  // No entry: the buffer is not a handed-over block (an ordinary burst, a front-end commit, a tool's own
+  // command buffer). Not a finding - the mark only exists for the blocks a consumer can be handed.
+}
+
+shared_burst::handshake_counters shared_burst::handshake_stats()
+{
+  handed_state&               h = handed();
+  std::lock_guard<std::mutex> lock(h.mutex);
+  handshake_counters out;
+  out.waits       = h.counters.handshake_waits;
+  out.timeouts    = h.counters.handshake_timeouts;
+  out.wait_max_us = h.counters.handshake_wait_max_us;
+  return out;
 }
 
 void shared_burst::deposit_released(const void*          grid_base,
@@ -957,8 +1000,9 @@ void shared_burst::deposit_released(const void*          grid_base,
       entry->cb          = cb;
       entry->on_drop     = std::move(on_drop);
       entry->generation  = generation;
-      entry->claimed     = false;
-      entry->produced    = false;
+      entry->claimed       = false;
+      entry->produced      = false;
+      entry->commit_issued = false;
       // P0-7: this is a NEW block under the same key, so its timeline starts here (the replaced one never got
       // claimed - that is what `superseded` counts - and its tokens were released by its drop hook).
       entry->deposited_at     = std::chrono::steady_clock::now();
@@ -1097,10 +1141,14 @@ id<MTLCommandBuffer> shared_burst::take_released(const void* grid_base, uint64_t
 static uint64_t claim_grid_production(handed_state&                      h,
                                       const void*                        grid_base,
                                       uint64_t                           slot,
-                                      std::vector<id<MTLCommandBuffer>>& to_commit)
+                                      std::vector<id<MTLCommandBuffer>>& to_commit,
+                                      bool*                              must_wait_for_commit = nullptr)
 {
   uint64_t      generation = 0;
   handed_entry* entry      = find_handed(h, grid_base, slot);
+  if (must_wait_for_commit != nullptr) {
+    *must_wait_for_commit = false;
+  }
   if (entry == nullptr) {
     // No record at all: either nothing was ever handed over for this (storage, slot) - no hand-over in this
     // build or run - or it was produced long enough ago to be evicted. Counted, because a LATE reader that
@@ -1108,6 +1156,15 @@ static uint64_t claim_grid_production(handed_state&                      h,
     ++h.counters.grid_not_found;
   } else {
     generation = entry->generation;
+    // ★ DEV DOC 6.20: the generation may only be encoded as a DEVICE-side wait once the command buffer that
+    // carries the signal has been COMMITTED. Metal holds the whole queue for 5.00 s on an unsatisfied wait and
+    // then drops it, so a consumer committed before its producer costs 5 s AND loses the ordering. When the
+    // block is claimed but its commit has not been issued yet (the sweep claims under its lock and commits
+    // after unlocking; another lane may still be holding the block), the caller waits for that commit - see
+    // wait_for_block_commit() - instead of trusting the order.
+    if (must_wait_for_commit != nullptr) {
+      *must_wait_for_commit = (generation != 0) && entry->claimed && !entry->produced && !entry->commit_issued;
+    }
     if (!entry->claimed && !entry->produced) {
       // Nobody will ever commit this one (a slot no hop ran for), and a grid nobody produces is a grid the
       // caller is about to read as garbage: the fallback a hand-over owes. Claimed and collected BEFORE the
@@ -1159,20 +1216,82 @@ bool shared_burst::ensure_grid_produced(const void* grid_base, uint64_t slot)
   return true;
 }
 
+/// \brief Dev doc 6.20: waits (bounded) for the command buffer carrying \p grid_base's signal to be committed.
+///
+/// WHY IT IS NEEDED AT ALL. `grid_production_generation()` hands a consumer the generation of a block that
+/// ANOTHER party claimed, and the consumer encodes a device-side wait for it. That wait is only safe - and
+/// only cheap - when the carrier is already in the queue: Metal releases an unsatisfied wait after 5.00 s and
+/// holds the whole queue until then (measured, wip/metal_wait_timeout_probe.mm), and after the bound the wait
+/// is dropped, so the fence stops being a fence.
+///
+/// HOW LONG IT TAKES. The window it closes is the registry's own "claim under the lock, commit after
+/// unlocking" gap (microseconds) or another lane's hop holding the block until it commits (up to that hop's
+/// span). The wait is therefore bounded by \p bound and POLLED: the committer needs the registry's mutex to
+/// publish the mark, so sleeping while holding it would deadlock.
+///
+/// \return True when the carrier is committed (or already produced, which the event has reached by then).
+static bool wait_for_block_commit(const void* grid_base, uint64_t slot, std::chrono::microseconds bound)
+{
+  handed_state&     h        = handed();
+  const auto        deadline = std::chrono::steady_clock::now() + bound;
+  const auto        started  = std::chrono::steady_clock::now();
+  for (;;) {
+    {
+      std::lock_guard<std::mutex> lock(h.mutex);
+      handed_entry*               entry = find_handed(h, grid_base, slot);
+      if ((entry == nullptr) || entry->commit_issued || entry->produced) {
+        const uint64_t waited_us =
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                                        started)
+                                      .count());
+        ++h.counters.handshake_waits;
+        h.counters.handshake_wait_max_us = std::max(h.counters.handshake_wait_max_us, waited_us);
+        return true;
+      }
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(20));
+  }
+}
+
 uint64_t shared_burst::grid_production_generation(const void* grid_base, uint64_t slot)
 {
   if (grid_base == nullptr) {
     return 0;
   }
+  // How long a consumer may wait for the carrier's commit before it gives up on the DEVICE ordering. The
+  // window it closes is microseconds wide (the registry's claim->commit gap); a claiming hop's own span is
+  // the long tail, and the waiter would have to wait for that block's COMPLETION anyway.
+  constexpr std::chrono::microseconds commit_handshake_bound{2000};
+
   std::vector<id<MTLCommandBuffer>> to_commit;
-  uint64_t                          generation = 0;
+  uint64_t                          generation           = 0;
+  bool                              must_wait_for_commit = false;
   {
     handed_state&               h = handed();
     std::lock_guard<std::mutex> lock(h.mutex);
-    generation = claim_grid_production(h, grid_base, slot, to_commit);
+    generation = claim_grid_production(h, grid_base, slot, to_commit, &must_wait_for_commit);
   }
   for (id<MTLCommandBuffer> cb : to_commit) {
     commit_dropped(cb);
+  }
+  if (must_wait_for_commit && !wait_for_block_commit(grid_base, slot, commit_handshake_bound)) {
+    // ★ The carrier's commit did not come: DO NOT hand the generation out (a device-side wait for it can cost
+    // 5 s and is dropped after that), and order the consumer on the HOST instead - the pre-5.9.23 behaviour,
+    // bounded at 200 ms and counted, and correct: the grid the caller is about to read really is produced by
+    // that block. This must stay at 0; a non-zero value is a leg whose consumers had to be ordered on the host.
+    {
+      handed_state&               h = handed();
+      std::lock_guard<std::mutex> lock(h.mutex);
+      ++h.counters.handshake_timeouts;
+    }
+    // Order the consumer on the HOST instead - the pre-5.9.23 behaviour, bounded at 200 ms and counted by
+    // ready_timeouts. It is the correct wait (the grid the caller is about to read really is produced by that
+    // block); what it costs is a blocked consumer, which is strictly better than a queue held for 5 s.
+    (void)ensure_grid_produced(grid_base, slot);
+    return 0;
   }
   // The caller may also learn here that the block was already produced: the generation it gets then names a
   // value the event has reached, and encoding the wait on it is a satisfied wait rather than a mistake.

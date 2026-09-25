@@ -39,6 +39,7 @@ cat >> "$FIXTURE" <<'EOF'
 [metal_stats]   hole 5002.4ms -> next label=merged_hop slot=9612 (nothing was executing on any probed queue for that long)
 [ul_gpu_lane] dft carried blocks (Q9-F2): resolved=48123 of 48123 (never committed=0, committed but unfinished at exit=0, no GPU timestamps=0, dropped over the bound=0)
 [ul_gpu_lane] dft carried deposit ->GPU start samples=48123 mean=2211.0us median=1105.0us min=498.1us max=5004688.5us p95=3562.0us p99=8021.0us
+[metal_stats] dft handover handed=48123 taken=27887 superseded=0 evicted=47867 evicted_unproduced=0 over_bound=0 unproduced=0 fallback=18331 late=1905 late_time=12 not_found=1891 timeouts=0 keepalives=673722/673722 (max in flight 112) (armed=1) tokens_early=signals:0,by_event:0,by_complete:48123 handshake=waits:7,timeouts:0,max:412us
 EOF
 
 OUT=$(bash "$GATE" "$FIXTURE" 2>&1)
@@ -61,6 +62,8 @@ expect "D12 reads the occupancy line"         "queue occupancy (Q9-F3): commits=
 expect "D12 reads the largest hole"           "hole 5002.4ms -> next label=merged_hop slot=9612"
 expect "D12 reads the front-end account"      "dft carried blocks (Q9-F2): resolved=48123 of 48123"
 expect "D12 reads the front-end queue wait"   "dft carried deposit ->GPU start samples=48123"
+expect "D13 reads the handshake waits"        "handshake waits=7 timeouts=0 max=412us"
+expect "D13 states what a wait would have cost" "the Q9-G window IS reached on air"
 
 # The reverse direction: a leg WITHOUT the new lines must say so instead of printing a number (rule 4.3 (3)).
 # (The gate NAMES the line it looked for in that message, so the check is on the verdict, not on the token.)
@@ -68,7 +71,8 @@ OUT_OLD=$(bash "$GATE" "$ARG" 2>&1)
 D11_OLD=$(printf '%s\n' "$OUT_OLD" | grep -A3 "D11 (Q9-F)" | grep "read    :")
 D12_OLD=$(printf '%s\n' "$OUT_OLD" | grep -A3 "D12 " | grep "read    :")
 if printf '%s' "$D11_OLD" | grep -qF "cannot say" && ! printf '%s' "$D11_OLD" | grep -qF "waiter-committed-first=" &&
-   printf '%s' "$D12_OLD" | grep -qF "cannot say"; then
+   printf '%s' "$D12_OLD" | grep -qF "cannot say" &&
+   printf '%s\n' "$OUT_OLD" | grep -A3 "D13 " | grep -qF "cannot say"; then
   echo "PASS: a leg without the 6.19 lines reads as 'cannot say' rather than as a number"
 else
   echo "FAIL: a leg without the 6.19 lines did not read as 'cannot say':"

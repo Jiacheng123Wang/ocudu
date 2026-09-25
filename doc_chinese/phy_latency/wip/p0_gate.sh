@@ -43,6 +43,9 @@
 #   D12 (Q9-F2/F3, INFO) what the device was doing while a waiter waited: the holes in the union of the probed
 #       GPU windows (probe: OCUDU_METAL_GPU_TIME=1) and the front-end blocks that were not final when their own
 #       slot's group closed - the population no earlier instrument reported at all (6.19)
+#   D13 (6.20/6.21, INFO) the commit handshake: how often a consumer was handed a generation whose carrier had
+#       not been committed yet (each of those was a 5.00 s queue hold before the handshake, 6.20) and how often
+#       that confirmation never came (the consumer is then ordered on the HOST; must be 0)
 #       (D1-D4 are the criteria the Q9 fix is confirmed by; a leg flown BEFORE it reads them RED, which is the
 #        point - the same leg is what the fix is measured against)
 # "Cannot read" is RED, never absent - the lesson of 5.9.97.
@@ -370,6 +373,20 @@ fi
 # D12 (Q9-F2/Q9-F3, dev doc 6.19): what the DEVICE was doing while a waiter waited. The queue-occupancy union
 # (probe on: OCUDU_METAL_GPU_TIME=1) and the front-end blocks that were not final when their own slot's group
 # closed - with the hand-over armed those are the rule, and no earlier instrument reported them at all.
+# D13 (dev doc 6.20/6.21): the commit handshake. `waits` > 0 says a consumer was handed a generation whose
+# carrier had not been committed yet - the Q9-G window - and that the handshake closed it; `timeouts` must stay
+# 0 (a non-zero value means a consumer had to be ordered on the HOST because the commit never came).
+shake_line=$(grep -a "handshake=waits:" "$LEGF" | tail -1)
+shake_waits=$(printf '%s' "$shake_line" | grep -oE "handshake=waits:[0-9]+" | grep -oE "[0-9]+$")
+shake_timeouts=$(printf '%s' "$shake_line" | grep -oE "timeouts:[0-9]+" | grep -oE "[0-9]+$")
+shake_max=$(printf '%s' "$shake_line" | grep -oE "max:[0-9]+us" | grep -oE "[0-9]+")
+if [ -z "${shake_waits:-}" ]; then
+  check "[INFO] D13 (6.20) did a consumer meet an uncommitted carrier" "reported, not judged" INFO \
+        "no 'handshake=waits:' field: ${shake_line:-<absent>} - a leg flown before 6.21 cannot say"
+else
+  check "[INFO] D13 (6.20) did a consumer meet an uncommitted carrier" "reported, not judged" INFO \
+        "handshake waits=$shake_waits timeouts=${shake_timeouts:-?} max=${shake_max:-?}us$([ "${shake_waits:-0}" != "0" ] && printf '  <-- the Q9-G window IS reached on air: without the handshake each of those was a 5.00 s queue hold (6.20)' || printf '  (no consumer met an uncommitted carrier)' )$([ "${shake_timeouts:-0}" != "0" ] && printf '  <-- a consumer had to be ordered on the HOST: the carrier was never committed (must be 0)' || true)"
+fi
 occ_line=$(grep -a "queue occupancy (Q9-F3): commits=" "$LEGF" | tail -1)
 occ_hole=$(grep -a "hole .*-> next label" "$LEGF" | head -1)
 fe_line=$(grep -a "dft carried blocks (Q9-F2)" "$LEGF" | tail -1)

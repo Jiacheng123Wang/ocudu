@@ -10,9 +10,14 @@
 
 ---
 
-## 0. 一句话现状
+## 0. 一句话现状（★ 本会话后半段：**根因已结案并已修复 A**）
 
-**上一会话把 5 秒钉在"队列次序"上；本会话把"次序"做成了读数，并补上了三个此前完全看不见的洞——离线全绿，空口腿待飞。**
+**根因 = Metal 对"未被满足的设备侧事件等待"有 5.00 s 硬上界**：一个消费者若在承载其信号的命令缓冲**提交之前**
+就被提交，队列被按住 **5.00 s**（signaller 也跑不了），随后等待被**丢弃**（栅栏失效）。离线复现见
+`wip/metal_wait_timeout_probe.mm`，推导见开发文档 **§6.20**；**修复 A（提交握手）已落地并离线自证（§6.21）**。
+
+> 上一会话把 5 秒钉在"队列次序"上；本会话先做出三条仪器（Q9-F/Q9-F2/Q9-F3，§6.19），
+> 再用离线复现把"那 5 秒是什么"彻底问清（§6.20），并做掉修复 A（§6.21）。**下一条腿 = `p15-conc2`（回归）**。
 
 > p13 的结论（**未变**）：`commit->start = 5.0027 s` 而 `start->end = 1.24 ms` ⇒ 命令缓冲**在队列里等**；
 > Q9-D 排除三类设备侧栅栏、Q9-E 排除主机完成处理器滞后 ⇒ **只剩"排在同一条队列前面的缓冲"**。
@@ -34,6 +39,7 @@
 | 提交 | 内容 | 出处 |
 |---|---|---|
 | `bf33445b89` | **Q9-F + Q9-F2 + Q9-F3** 三条仪器；`state()` 改为**故意不析构**（修 atexit 崩溃）；`p0_gate.sh` 加 D11/D12；metal 测试加 **arm 14**；开发文档 **§6.19**、高层文档同步 | §6.19 |
+| （本会话后续）| **5 秒的根因 + 修复 A**：`wip/metal_wait_timeout_probe.mm` 离线复现 Metal 的 **5.00 s 等待上界**；`handed_entry::commit_issued` + `note_block_commit_issued()`（四个提交点）+ `grid_production_generation()` 的**有界提交握手**（等不到 ⇒ 退回有界主机等待）；metal 测试 **arm 15**（三子例）；门加 **D13** + 自测；开发文档 **§6.20/§6.21** | §6.20/§6.21 |
 
 **离线证据（都在这一条提交里）**：
 
@@ -54,40 +60,61 @@
 | 13 | **`[metal_stats] gpu busy` 行一直是 0**，因为 p07–p13 都没带 `OCUDU_METAL_GPU_TIME=1` | p13 stderr：`gpu busy (front_end): commits=0` / `(back_end): commits=0` | §6.19 ④ |
 | 14 | 报告期加锁会**炸进程**：atexit 处理器在 `state()` 的析构**之后**才跑 | `mutex lock failed: Invalid argument`（修法 = `state()` 故意不析构）| §6.19 ⑤ |
 
-**当前主假设（Q9-G，仍未验证）**：`claim_grid_production()` 对 `claimed && !produced` 的条目**直接返回 generation**、
-不自己提交；而 sweep 是"**锁内认领 → 解锁后提交**"⇒ **等待者可能先提交**，同一条串行队列上等一个排在自己后面的事件。
+**已结案（替代上一份 memo 的"主假设 Q9-G"）**：Q9-G 的窗口是真的（`claim_grid_production()` 会把一个**尚未提交**的
+承载者的 generation 直接交出去），但它的**代价**不是"永远互锁"，而是 **Metal 固定 5.00 s 的等待上界**：
+
+| 离线臂（`wip/metal_wait_timeout_probe.mm`，每臂独占队列/事件）| 等待者完成 | `commit->start` | signaller |
+|---|---|---|---|
+| A2 signaller 在 +200 ms 提交 | **5.001 s** | 5000668 µs | **5.008 s**（被堵在等待者后面）|
+| A4 signaller 在 +8000 ms 提交 | **5.001 s** | 5001325 µs | 8.005 s（⇒ 消费者先跑，**栅栏失效**）|
+| A5 **永不提交**（event=0）| **5.000 s** | 5000260 µs | — |
+| B signaller **先**提交 | 0.206 s | 484 µs | 0.007 s |
+
+四条空口读数（`commit->start=5002977 µs` 而 `start->end=1244 µs`、`deposit->completion=5.0047 s`、
+`input hold=5.0047 s`、`pop_blocking=4.9976 s`）是**同一个 5 秒**；p14 主日志显示停顿期间**整个时隙环（含下行）停住**
+（`Slot decisions` 1000/s → 0，恢复时一秒 3288 条），恢复后该 UE 因 HARQ/CRC 饥饿**再也不被授 Grant**、反复重接
+（`0x4603 → 0x4611 → 0x4616 → 0x4617`）。**修复 A 已落地**：设备侧等待只对"已提交"的承载者编码；
+等不到（>2 ms）⇒ 返回 0 并退回**有界主机等待**，计数 `handshake=waits/timeouts/max`。
 
 ---
 
 ## 3. 下一步（开工清单）
 
-### 3.1 第一件：飞 `p14-conc2`（**用户飞**，我已在离线侧准备好）
+### 3.1 第一件：飞 `p15-conc2`（**用户飞**，已在离线侧准备好）
 
 ```bash
 # 起腿前：pgrep -x gnb / pgrep -x ul_chain_replay / lsof -nP -iUDP:2152 都要干净
 sudo -E OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1 \
-  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p14-conc2 \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p15-conc2 \
   --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
 # 流量：CN 侧（10.45.0.1）上行 iperf3 -c <gNB-ip> -R -t 100      ← -R 不能省
-# 判读：bash doc_chinese/phy_latency/wip/p0_gate.sh p14-conc2      # D1–D12
+# ⚠ 跑完 Ctrl-C 后【确认进程真的退出】（p14 的报告被停机 5 s 宽限吃掉了）
+# 判读：bash doc_chinese/phy_latency/wip/p0_gate.sh p15-conc2      # D1–D13
 ```
 
 > ⚠ **测量臂声明**：`OCUDU_METAL_GPU_TIME=1` 给**每条**命令缓冲加一个完成处理器（诊断腿；不改提交 ⇒ `cbs/lane` 不受影响）。
 
 **分支表（开发文档 §6.19 ⑥ 的简版）**
 
-| D11 | D12 | 下一步 |
-|---|---|---|
-| `waiter-committed-first > 0`、`max` ≈ 停顿（秒级）、worst kind = `grid` | 洞 ≈ 停顿、洞后 label = `merged_hop`/`late_handed` | **Q9-G 成立** ⇒ 做**提交握手**：`claimed && !produced` 时，返回 generation 之前**等它"已提交"**（新增 `handed_entry::commit_done`，提交方在 `commit_dropped()` **之后、锁内**置位；等待**有界**，超界退回今天行为并计数）。**不能把 `[cb commit]` 挪进锁内**（完成处理器可能同线程内联 ⇒ 死锁）|
-| `> 0` 但只有 µs/ms | 洞小 | 倒置有、但没吃到停顿 ⇒ 握手仍推荐（关窗口），**继续找 5 秒**（D12 的洞后 label + `start->end` 最大的块）|
-| `= 0` | **洞 ≈ 5 s**、洞后 label 明确 | 次序**不是**原因 ⇒ 那条 label 的缓冲就是阻塞者，用它自己的 `commit->start`/`start->end` 定性；再谈"前端块独立队列"（**结构性，先请用户裁**）|
-| `= 0` | **无洞**（`holes>100us=0`）| 设备一直在跑别的活 ⇒ 是**吞吐/排队**（§7.1 的 C 项：单车道串行），不是栅栏 |
-| 读不出 | — | 腿没带 `OCUDU_METAL_GPU_TIME=1`，或二进制戳 ≠ HEAD ⇒ **按 RED 算**，重飞 |
+| 读数 | 通过（修复 A 生效）时应看到 |
+|---|---|
+| **D1/D3/D4**（判据，阈值不动）| `input hold` / `pop_blocking` / gaps **不再有 ~5 s 尾巴** |
+| **D13（新）** | `handshake waits>0` = 那条腿里 Q9-G 窗口**真的被踩到**（旧腿的 5 s 来源）；`timeouts` **必须为 0** |
+| D11（Q9-F）| `waiter-committed-first=0`；若非 0 ⇒ 还有一条等待路径没被握手覆盖，把 `worst kind`/`slot` 交回来 |
+| D12（Q9-F3）| 运行期不再有 ~5 s 的**洞** |
+| 用户侧 iperf3 | 不断流；偶发丢槽也不再让 UE 掉线重接 |
+| 读不出 | 腿没带 `OCUDU_METAL_GPU_TIME=1`、或报告被停机吃掉、或戳 ≠ HEAD ⇒ **按 RED 算**，重飞 |
 
 ### 3.2 第二件（可选、便宜）：`OCUDU_CE_LANE_ORDER=event` 臂
 
 让 Q9-C 真正执行（默认 `merged` 路径上它零执行）：`own=` 应显著 >0；`cross_lane>0` 且**无 5 s 停顿**才是 Q9-C 的空口证据。
 **测量臂**（会改提交形态，`cbs/lane` 不保证仍 2.00，必须在腿报告里写清）。
+
+### 3.2b 修复 B（**需用户裁决**，§6.20 ⑤ B）
+
+握手去掉了**触发**，但池一干仍会把**整个 gNB（含下行）**停住 5 s 并把该 UE 打进"掉线重接"。
+池是**上行链路的背压**，不该同时是**电台的时序源**。三个选项：(a) 预留少量只给接收路径的缓冲；
+**(b) 池干时收到临时缓冲并丢弃该槽的样点（建议：背压与时序解耦，不增加提交数）**；(c) 缩短持有期（只降概率）。
 
 ### 3.3 仍挂着的事
 

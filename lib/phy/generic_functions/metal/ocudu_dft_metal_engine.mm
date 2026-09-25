@@ -341,14 +341,16 @@ static void dft_stats_report()
   //
   // superseded and evicted are kept apart on purpose (see handed_counters): the first is the expected
   // "that slot had no hop, and its grid came back through the pool", the second is a backlog.
-  const metal::shared_burst::handed_counters hand = metal::shared_burst::handed_stats();
-  const bool                               release_armed = grid_handover_armed();
+  const metal::shared_burst::handed_counters   hand = metal::shared_burst::handed_stats();
+  const metal::shared_burst::handshake_counters shake = metal::shared_burst::handshake_stats();
+  const bool                                   release_armed = grid_handover_armed();
   if (release_armed || (hand.handed != 0) || (hand.taken != 0)) {
     std::fprintf(stderr,
                  "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu "
                  "evicted_unproduced=%llu over_bound=%llu unproduced=%zu "
                  "fallback=%llu late=%llu late_time=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu (max in flight "
-                 "%llu) (armed=%d) tokens_early=signals:%llu,by_event:%llu,by_complete:%llu\n",
+                 "%llu) (armed=%d) tokens_early=signals:%llu,by_event:%llu,by_complete:%llu "
+                 "handshake=waits:%llu,timeouts:%llu,max:%lluus\n",
                  static_cast<unsigned long long>(hand.handed),
                  static_cast<unsigned long long>(hand.taken),
                  static_cast<unsigned long long>(hand.superseded),
@@ -378,7 +380,14 @@ static void dft_stats_report()
                  // reader comparing two legs sees the release site next to the release count it belongs to.
                  static_cast<unsigned long long>(s.token_early_signals.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(s.token_sets_by_event.load(std::memory_order_relaxed)),
-                 static_cast<unsigned long long>(s.token_sets_by_complete.load(std::memory_order_relaxed)));
+                 static_cast<unsigned long long>(s.token_sets_by_complete.load(std::memory_order_relaxed)),
+                 // Dev doc 6.20: the commit handshake. `waits` > 0 says the Q9-G window IS reached on air (a
+                 // consumer was handed a generation whose carrier had not been committed yet, and the wait is
+                 // what closed it); `timeouts` must stay 0 (a non-zero value means a consumer had to be
+                 // ordered on the HOST because the commit never came).
+                 static_cast<unsigned long long>(shake.waits),
+                 static_cast<unsigned long long>(shake.timeouts),
+                 static_cast<unsigned long long>(shake.wait_max_us));
     // ... and, when the switch was on and the event did NOT win, say what that means, because the numbers
     // above are the only thing that separates "the release moved to the front end" from "the input is still
     // held for the whole hop" - and a reader who takes a leg's pool numbers as evidence either way without

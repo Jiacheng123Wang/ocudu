@@ -1554,6 +1554,146 @@ int main()
                    static_cast<unsigned long long>(worst_us));
     }
 
+    // ---- Arm 15 (dev doc 6.20): the COMMIT HANDSHAKE - a generation whose carrier is not committed is
+    //      never handed out for a DEVICE wait ------------------------------------------------------------
+    // The root cause the air legs measured as a 5.000 s freeze: a consumer that encodes `encodeWaitForEvent`
+    // for a generation whose command buffer has not been COMMITTED yet is committed first, Metal holds the
+    // whole queue for 5.00 s (wip/metal_wait_timeout_probe.mm, measured) and then DROPS the wait - so the
+    // ordering the fence exists for is lost as well. `grid_production_generation()` therefore confirms the
+    // carrier's commit before it hands a generation out (`note_block_commit_issued()`), and falls back to a
+    // HOST wait when that confirmation does not come. Three sub-cases, all on real blocks:
+    //   (a) the carrier is already committed            -> the generation is returned at once, no wait;
+    //   (b) the commit lands WHILE the consumer waits   -> the wait closes the window (the Q9-G shape);
+    //   (c) the commit never comes                      -> the generation is NOT handed out (host fallback).
+    {
+      using ocudu::metal::shared_burst;
+      using ocudu::metal::shared_queue;
+
+      metal::dft_metal_engine::grid_write write_cfg;
+      write_cfg.grid_base  = grid_base;
+      write_cfg.grid_bytes = grid_bytes;
+      write_cfg.dst_offset = dst_offset;
+      write_cfg.nof_subc   = nof_subc;
+      write_cfg.map_offset = transform_size - nof_subc / 2;
+      write_cfg.phase_re   = 1.0F;
+
+      /// Stages one handed-over block for \p slot and returns its command buffer and generation.
+      const auto stage_block = [&](uint64_t slot, id<MTLCommandBuffer>* cb_out, uint64_t* generation_out) {
+        const void* storage = static_cast<const char*>(grid_base) + (slot % 16) * page;
+        engine.set_lane_slot(slot);
+        if (!engine.begin_block() || !engine.submit_slot_grid_write(in_mem, out_mem, 0, write_cfg) ||
+            (engine.release_block(storage) == nullptr)) {
+          return false;
+        }
+        *cb_out = metal::shared_burst::take_released(storage, slot);
+        if (*cb_out == nil) {
+          return false;
+        }
+        // The deposit armed no fence (the test's deposits pass generation = 0): the generation a consumer would
+        // be handed is the one the depositor armed, so this arm has to arm it explicitly - exactly as
+        // dft_metal_engine::release_block() does.
+        *generation_out = 0;
+        return true;
+      };
+
+      // ---- (a) the carrier is committed: no wait, the generation comes straight back ----------------------
+      id<MTLCommandBuffer> cb_a = nil;
+      uint64_t             gen_a = 0;
+      const uint64_t       slot_a = test_slot + 700;
+      if (!stage_block(slot_a, &cb_a, &gen_a)) {
+        std::fprintf(stderr, "FAIL: arm 15(a) could not stage its block\n");
+        return 1;
+      }
+      // NOTE: release_block() already armed the grid generation on this buffer (that is what a depositor
+      // does); the test must not arm a second one - the entry carries the first.
+      [cb_a commit];
+      shared_burst::note_block_commit_issued(cb_a);
+      const shared_burst::handshake_counters hs_a0 = shared_burst::handshake_stats();
+      const uint64_t                        got_a  = shared_burst::grid_production_generation(
+          static_cast<const char*>(grid_base) + (slot_a % 16) * page, slot_a);
+      const shared_burst::handshake_counters hs_a1 = shared_burst::handshake_stats();
+      if ((got_a == 0) || (hs_a1.waits != hs_a0.waits) || (hs_a1.timeouts != hs_a0.timeouts)) {
+        std::fprintf(stderr,
+                     "FAIL (6.20a): a committed carrier must be handed back at once - got generation %llu "
+                     "(0 = refused), handshake waits %llu->%llu timeouts %llu->%llu\n",
+                     static_cast<unsigned long long>(got_a),
+                     static_cast<unsigned long long>(hs_a0.waits),
+                     static_cast<unsigned long long>(hs_a1.waits),
+                     static_cast<unsigned long long>(hs_a0.timeouts),
+                     static_cast<unsigned long long>(hs_a1.timeouts));
+        return 1;
+      }
+
+      // ---- (b) the commit lands WHILE the consumer waits: the wait closes the window -----------------------
+      id<MTLCommandBuffer> cb_b = nil;
+      uint64_t             gen_b = 0;
+      const uint64_t       slot_b = test_slot + 701;
+      if (!stage_block(slot_b, &cb_b, &gen_b)) {
+        std::fprintf(stderr, "FAIL: arm 15(b) could not stage its block\n");
+        return 1;
+      }
+      const shared_burst::handshake_counters hs_b0 = shared_burst::handshake_stats();
+      // Another thread commits the block 300 us from now: the consumer below finds the carrier uncommitted and
+      // has to wait for exactly this - the registry's "claim under the lock, commit after unlocking" window.
+      std::thread([cb_b]() {
+        std::this_thread::sleep_for(std::chrono::microseconds(300));
+        [cb_b commit];
+        metal::shared_burst::note_block_commit_issued(cb_b);
+      }).detach();
+      const uint64_t got_b = shared_burst::grid_production_generation(
+          static_cast<const char*>(grid_base) + (slot_b % 16) * page, slot_b);
+      const shared_burst::handshake_counters hs_b1 = shared_burst::handshake_stats();
+      if ((got_b == 0) || (hs_b1.waits <= hs_b0.waits) || (hs_b1.timeouts != hs_b0.timeouts)) {
+        std::fprintf(stderr,
+                     "FAIL (6.20b): a carrier committed during the wait must be confirmed, not abandoned - got "
+                     "generation %llu (0 = refused), handshake waits %llu->%llu (must grow) timeouts %llu->%llu "
+                     "(must not)\n",
+                     static_cast<unsigned long long>(got_b),
+                     static_cast<unsigned long long>(hs_b0.waits),
+                     static_cast<unsigned long long>(hs_b1.waits),
+                     static_cast<unsigned long long>(hs_b0.timeouts),
+                     static_cast<unsigned long long>(hs_b1.timeouts));
+        return 1;
+      }
+
+      // ---- (c) the commit never comes: NO generation for a device wait (the 5 s trap) ----------------------
+      id<MTLCommandBuffer> cb_c = nil;
+      uint64_t             gen_c = 0;
+      const uint64_t       slot_c = test_slot + 702;
+      if (!stage_block(slot_c, &cb_c, &gen_c)) {
+        std::fprintf(stderr, "FAIL: arm 15(c) could not stage its block\n");
+        return 1;
+      }
+      // The generation was armed by release_block() and this buffer is NEVER committed.
+      const shared_burst::handshake_counters hs_c0 = shared_burst::handshake_stats();
+      const uint64_t got_c = shared_burst::grid_production_generation(
+          static_cast<const char*>(grid_base) + (slot_c % 16) * page, slot_c);
+      const shared_burst::handshake_counters hs_c1 = shared_burst::handshake_stats();
+      if ((got_c != 0) || (hs_c1.timeouts <= hs_c0.timeouts)) {
+        std::fprintf(stderr,
+                     "FAIL (6.20c): an uncommitted carrier must NOT be handed out for a device wait (a Metal "
+                     "wait for it costs 5 s and is then dropped) - got generation %llu, timeouts %llu->%llu\n",
+                     static_cast<unsigned long long>(got_c),
+                     static_cast<unsigned long long>(hs_c0.timeouts),
+                     static_cast<unsigned long long>(hs_c1.timeouts));
+        return 1;
+      }
+      // The block is still claimed by this arm, and the fallback did not commit it (the claim is ours): commit
+      // it here so the registry does not carry an uncommitted block into the later arms.
+      [cb_c commit];
+      shared_burst::note_block_commit_issued(cb_c);
+      std::fprintf(stderr,
+                   "[dft-release] arm 15 (6.20 commit handshake): a committed carrier is handed back at once, a "
+                   "carrier committed DURING the wait is confirmed (waits %llu->%llu, max %lluus), and an "
+                   "uncommitted one is never handed out - the consumer falls back to the host wait (timeouts "
+                   "%llu->%llu)\n",
+                   static_cast<unsigned long long>(hs_b0.waits),
+                   static_cast<unsigned long long>(hs_b1.waits),
+                   static_cast<unsigned long long>(hs_b1.wait_max_us),
+                   static_cast<unsigned long long>(hs_c0.timeouts),
+                   static_cast<unsigned long long>(hs_c1.timeouts));
+    }
+
     // ---- Arm 10: "no record" must never mean "the write is still in flight" (5.9.62) ----------------
     // The registry's eviction loop erases entries, and a reader that finds NOTHING cannot wait - so an entry
     // erased before its block COMPLETED is the one way a hop can read a grid nobody has written. Until
