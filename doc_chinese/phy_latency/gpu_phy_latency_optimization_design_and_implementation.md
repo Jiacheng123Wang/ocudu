@@ -2246,6 +2246,45 @@ drop 关 + FORCE=3： dropped=0   drop_park_max=0us      [ul_rx] blocks=2012（�
 2. **D4 的第二个机制**：需要 3–4 条同配方腿做统计（顺带看 `overflow` 与 park 的关系）；已登记。
 3. **主线不变**：V1 的杠杆是**前端 DFT 941 µs**（§6.25 ②）；V2 的根因是池压力（`starved_events` 90–114，与 20–105 ms 的持有长尾同源，见 ④）。
 
+### 6.28 ✅ 修复 B 的空口验证（腿 `p21-n78-forcedrop`，`OCUDU_UL_RX_POOL_DROP_FORCE=20`，上行 `-t 240`）：**丢弃路径真跑过 20 次，全部哨兵通过；park 被真正界在 1 ms 内**
+
+> 配方同 §6.23（n78 + 并发 2 + `OCUDU_UL_PHASE_SEGMENTS=1`），**强制臂让前 20 次 take 走"池干"路径**
+> （§6.27 ③ 的离线臂搬到空口：真电台 + 真负载）。报告 189 行。
+
+```
+[ul_rx_pool] taken=535170 returned=535150 held_end=20 held_max=28 pool=8 free_min=0
+             starved_takes=85 starved_events=52 dropped=20 drop_park_max=1001us
+[ul_rx_pool] pop_blocking wait (P0-2): takes=535170 … max=950.0us; over 1ms=0, over 10ms=0, over 100ms=0, over 1s=0
+[phy_pipeline]   radio sample continuity: 0 gaps over 535140 blocks -> OK
+[phy_pipeline]   host sample assembly: 7491960 of 7491960 … 0 copied -> OK
+[phy_pipeline] contract MET (8 of 8 checks applicable)
+[ul_host] symbols=7491960 in_place=7491960 … assembled=0
+[ul_gpu_pipeline] samples=123088 mean=2413.0us median=2440.0us p95=3033.9us p99=3125.5us
+[ul_gpu_lane] lanes=143866 cbs/lane=2.00 (max=2) dropped=0 carried=0
+```
+
+| 哨兵 | 结果 |
+|---|---|
+| `dropped=` | **20**（= 强制数）且 `taken − returned = 20` ⇒ **账目逐位自洽**（20 块确实进了保留缓冲、没有回池）|
+| `drop_park_max` | **1001 µs** = 预算整（与离线一致）|
+| `pop_blocking max` | **950 µs**（修复前同配方是 **3969 µs**，p17）⇒ **park 真的被界在 1 ms 内** |
+| **D4 样点连续性** | **0 gaps / 535,140 块** ⇒ 绿（对照 p20 关掉修复时 2 gaps / 163,495 样点）|
+| 契约 | **MET (8 of 8)**；`host sample assembly` 0 copied；`[ul_host] assembled=0` |
+| 对齐哨兵 | **`Unexpected symbol index` 出现 0 次**（20 次丢弃没有破坏时间戳/对齐记账）|
+| V1 | 中位 **2440.0 µs**（p16–p20：2413–2435）⇒ **无惩罚** |
+| V4/V5 | `cbs/lane=2.00 (max=2) dropped=0`、零 crossing |
+
+⇒ **修复 B 收口**：健康腿不触发（p19/p20 `dropped=0`）、触发时行为正确（本腿 20 次）、且**界限生效**（`pop_blocking max` 从 3969 µs 降到 950 µs，
+即使不需要丢弃，短 slice 也把 park 界住了：本腿 `starved_events=52` 全部在 1 ms 内自行解决）。
+
+#### 仍未结的两项（下一阶段）
+
+1. **V1（主线）**：杠杆是**前端 DFT 941 µs**（§6.25 ②）——n78 一跳 ~908–941 µs 的 GPU 时间做 14 个符号的变换（≈65 µs/符号），
+   对一个 1024 点 FFT 而言**慢了一到两个数量级**，是最大的一块钱。下一步先**读码 + 读现有计数器**定位这 941 µs 花在哪
+   （变换本体 / grid 写回 / 分批与 dispatch 开销 / 输入 wrap），**不需要飞腿**；有结论再给测量臂。
+2. **V2 的根因**：池压力（`starved_events` 52–114）来自 20–105 ms 的持有长尾 = "UL 静默期没有注册表入口点"（§6.27 ④）。
+   现在它是**无害的长尾**（单块、池不干），但它是 V2 判据唯一剩下的东西。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
