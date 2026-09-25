@@ -1227,6 +1227,62 @@ sudo -E OCUDU_UL_PHASE_SEGMENTS=1 bash doc_chinese/phy_pipeline_gpu/wip/run_leg.
 已按原意补 `(void)`（在提交 `5ff8759804` 内）。**整棵树在改前后各重编一次**，而与 pristine HEAD 二进制的逐字节比对
 （新 SDK 编译）仍是 **0 differing** ⇒ SDK 变化没有改字节，§6.11/§6.13 的逐字节网仍然可比。
 
+### 6.14 ✅ Q9-C 落地（2026-09-25，提交 `5f51b0e9fe`）：**车道 burst 等的是"本跳自己的"估计器 generation，不是全局最新**——跨车道栅栏夹死（cross-lane pinch）
+
+> 依据 §6.13 ④ 的表：腿 `p09-conc2` 的 B 读数把"这 5 秒"钉在**队列**上。**A 已被证明在工作**（`dry-pool reaps=1471`），
+> 但只救回 9 个块 ⇒ 持有者是 **claimed 的块**（sweep 按设计不能碰）⇒ 顺着 B 的表找到真正的等待者。
+
+**① 腿 `p09-conc2` 的读数（判据 D 组 + 新读数）**
+
+```
+D1 FAIL input hold max = 5004.6 ms            D2 FAIL wait max = 3566.0 ms, unclaimed age max = 3566.0 ms
+D3 FAIL pop_blocking max = 4997.5 ms, over 1s = 3      D4 FAIL 3 gaps / 229,736,932 samples（≈14.9 s）
+D5 INFO late=1278, late_time=11               D6 INFO registry commit->completion=16180 max=5001107.0us
+D7 INFO dry-pool reaps=1471 recovering 9 block(s)
+[ul_gpu_lane] commit -> completion (Q9-B): samples=35515 mean=964.1us median=406.3us p95=1492.4us p99=1831.9us max=5004208.5us
+[ul_gpu_lane]   slot=5252 stage=merged_hop commit->start=5002824.6us start->end=1241.5us commit->end=5004066.1us
+[ul_gpu_lane]   slot=322  stage=merged_hop commit->start=5002582.3us start->end=1243.5us commit->end=5003825.8us
+[ul_gpu_lane]   slot=712  stage=merged_hop commit->start=5002963.6us start->end=1244.9us commit->end=5004208.5us
+```
+
+* **`commit->start ≈ 5.00 s` 而 `start->end ≈ 1.24 ms`** ⇒ 秒在**队列**里，不在设备上；
+  三条（以及同批的 8 条）**`commit->end` 相差不到 400 µs** ⇒ 它们是被**同一个事件**在同一个瞬间放行的；
+  P0-7 的 `slowest` 行里同一批 slot 的 `deposit->completion` 也都是 5.004 s，`registry commit->completion` max = 5.0011 s
+  （**注册表早就提交过了**），`wait_for_a_claim` 只有 3.0 ms（`swept=1`）或几十 µs（`swept=0`）。
+* ⇒ **"一个共享的、晚到的事件"** = 车道 burst 的 **stage fence**（`backend_stage_wait()`）。它的注释写的是
+  "it targets the estimator command buffer of **THIS** hop, which was committed before this burst"，
+  但**实现读的是"此刻的全局最新 generation"**：并发 2 时，最新那条可能属于**另一条车道的估计器**，
+  而 generation 是在它 **commit 之前**发出的 ⇒ 存在一个窗口：**本 burst 等的 signal 走在一条
+  "排在同一条串行后端队列里、却在它后面"的命令缓冲里**。等的值由"排在它后面的"缓冲来发 ⇒ 互锁。
+  （并发 1 时不存在"另一条车道"，所以这条缺陷从来只在并发 2 出现——与 §6.8 起的观察一致。）
+
+**② 改了什么**（`ocudu_metal_burst.{h,mm}`、`ocudu_metal_mmse_engine.mm`、`ocudu_metal_queue.{h,mm}`）
+
+| 位置 | 改动 |
+|---|---|
+| `shared_burst::set_stage_wait(generation)`（新）| 与 `set_grid_wait()` 同形状的**按线程**交接：估计器在提交**本跳自己的**提交物之前把 generation 交出来，本线程**下一个** burst 消费它 |
+| `mmse_engine::signal_stage_fence_for_burst(cb)`（新）| 把三处"为本跳自己的提交物发栅栏"的站点统一：取 generation → 发信号 → **publish**（event 序的抽取、merged 序里 hold 未被采纳而单独提交的抽取、merged 序 hold 交棒前）。**凡是提前提交的路径都经过其中之一**，而且都在"随后跑车道各阶段的同一个线程"上 ⇒ 下一个 burst 必定等到**自己那一跳**的提交物，而它按构造**排在前面** ⇒ 环路不可能形成 |
+| `burst_ensure_open()` | 消费它：`own != 0` ⇒ `backend_stage_wait_generation(cb, own)`；否则回退旧的"全局最新"（并计数）——只有"估计器在别的线程同步跑完/根本没跑"的路径会走到，那时信号早已完成，旧读法无害 |
+| `[metal_stats] lane fence` 行 | 新增 **`own=` / `newest=` / `cross_lane=`**：`cross_lane` 是"全局最新 ≠ 本跳自己的"出现次数，即**旧规则本来会去等一个外来 generation** 的次数（**上界**：外来但已提交的 generation 排在前面，无害）|
+
+**③ 离线验证（提交前全部做完，提交 `5f51b0e9fe`）**
+
+| 网 | 读数 |
+|---|---|
+| `port_channel_estimator_metal_mmse_unit_test` | **All tests PASSED**（含断言"默认 merged 也要挂后端栅栏"的 Test 13），并且**它当场复现了这个夹死**：`lane fence … own=3 newest=5 cross_lane=2` ⇒ 8 次等待里有 2 次在旧规则下会去等外来的 generation |
+| `dft_release_adopt_metal_test` | **rc=0**（arm 11/12 仍绿；新 `lane fence` 行打印）|
+| `ctest -L phy` / `ul_pipeline_probe` / `ring_buffer_test` / `lower_phy_test` | **193 全绿** / **3/3** / **4/4** / **528/528** |
+| `l1_handover_arms` / `l1_hop_arms` | **5 PASS** / **4/4 differing=0** |
+| 与 pristine HEAD 二进制逐字节 | 网格 **16 文件 0 differing**；真捕获 `syn004_4` **4 个 dump 0 differing**（replay 日志里 `own=1 newest=0 cross_lane=0`）|
+
+**④ 下一条腿（判据仍是 F1–F8，无新阈值）**：配方与 `p09-conc2` 完全相同（n1 默认 + 并发 2 + 相位开关 + 上行 `iperf3 -R -t 100`）。
+
+| 读 | 通过的样子 | 若仍然红 |
+|---|---|---|
+| `lane fence … cross_lane=` | **>0 且腿不再有 5 s 停顿** ⇒ 旧规则确实会去等外来 generation，而新规则不（这是"缺陷真的发生过 + 修好了"的同一条读数）| `cross_lane=0` 而仍有 5 s 停顿 ⇒ 等待者不是 stage fence ⇒ 下一个候选是 **grid-ready**（MISS 跳等生产者的 generation，跨队列、本不该成环，但可能被"生产者被拖住"影响）⇒ 用 `grid_devwaited` 与 P0-7 的 `generation` 对齐 |
+| D1–D4（F1–F4）| 落 ms 级 / `gaps=0` | 按 §6.13 ④ 的表继续分支 |
+| D6/D7 | `commit->completion` 与 `dry-pool reaps` 都小 | 若 D7 仍是 events≫blocks，说明池仍被 claimed 的块按住 ⇒ 结合 `own/newest` 与 B 的表看是哪一个等待 |
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

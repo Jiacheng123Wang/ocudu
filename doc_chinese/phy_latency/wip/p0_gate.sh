@@ -29,6 +29,9 @@
 #   D3  (Q9) `pop_blocking wait (P0-2)` max < 10 ms AND `over 1s=0`
 #   D4  (Q9) `radio sample continuity` gaps == 0
 #   D5  (Q9, INFO) the two sweep triggers `late=` / `late_time=`, reported and not judged
+#   D6/D7 (Q9-A/-B, INFO) which half of the completion wait it was, and whether a DRY pool drove the sweep
+#   D8  (Q9-C, INFO) own / newest / cross_lane: how often the burst's stage-fence wait would have named
+#       another lane's estimator generation under the old rule (dev doc 6.14)
 #       (D1-D4 are the criteria the Q9 fix is confirmed by; a leg flown BEFORE it reads them RED, which is the
 #        point - the same leg is what the fix is measured against)
 # "Cannot read" is RED, never absent - the lesson of 5.9.97.
@@ -288,6 +291,20 @@ if [ -z "${life_commit:-}" ]; then
 else
   check "[INFO] D6 (Q9-B) which half of the completion wait it was" "reported, not judged" INFO \
         "$life_commit; deposit->completion max=${life_wait:-<none>}us -> $(awk -v a="$life_commit_max" -v b="${life_wait:-0}" 'BEGIN{ if (b+0 <= 0) printf "no completion to compare"; else if (a+0 >= 0.5*b) printf "the seconds came AFTER the registry committed it (%.0f%% of the wait)", 100*a/b; else printf "the seconds came BEFORE the commit (%.0f%% after it) - the holder is the claim/hold side", 100*a/b }')"
+fi
+# D8 (Q9-C, dev doc 6.14): which generation the lane burst's stage fence named. `cross_lane` is how often the
+# global newest differed from the hop's own at that moment, i.e. how often the OLD rule would have waited for
+# another lane's estimator - an upper bound on the cross-lane pinch, not a count of deadlocks.
+fence_line=$(grep -a "\[metal_stats\] lane fence" "$LEGF" | tail -1)
+own_n=$(printf '%s' "$fence_line" | grep -oE "own=[0-9]+" | grep -oE "[0-9]+$")
+newest_n=$(printf '%s' "$fence_line" | grep -oE "newest=[0-9]+" | grep -oE "[0-9]+$")
+cross_n=$(printf '%s' "$fence_line" | grep -oE "cross_lane=[0-9]+" | grep -oE "[0-9]+$")
+if [ -z "${own_n:-}" ]; then
+  check "[INFO] D8 (Q9-C) which generation the burst's stage fence named" "reported, not judged" INFO \
+        "no own=/newest=/cross_lane= fields: ${fence_line:-<absent>} - a leg flown before 6.14 cannot say"
+else
+  check "[INFO] D8 (Q9-C) which generation the burst's stage fence named" "reported, not judged" INFO \
+        "own=$own_n (waits that named THIS hop's own estimator generation), newest=${newest_n:-?} (fallback to the global newest), cross_lane=${cross_n:-?}$( [ -n "${cross_n:-}" ] && [ "${cross_n:-0}" != "0" ] && printf '  <-- the OLD rule would have waited for another lane %s time(s): the cross-lane pinch of 6.14 happened on this leg' "$cross_n" || printf '  (no cross-lane pinch was seen)' )"
 fi
 reaps_events=$(printf '%s' "$life_line" | grep -oE "dry-pool reaps=[0-9]+" | grep -oE "[0-9]+$")
 reaps_blocks=$(printf '%s' "$life_line" | grep -oE "recovering [0-9]+ block" | grep -oE "[0-9]+")
