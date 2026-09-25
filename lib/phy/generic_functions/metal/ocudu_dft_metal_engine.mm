@@ -85,52 +85,64 @@ static_assert(sizeof(dft_input_block) == 4 * sizeof(uint32_t),
 // ---- Process-wide dispatch/wait statistics (same accounting as the LDPC/MMSE engines) ----
 // Compile-time debug aid (ENABLE_METAL_STATS=ON defines OCUDU_METAL_STATS); off by default
 // with zero overhead. Reported at process exit.
-/// \brief Q9-F4 (dev doc 6.30): how many transforms the front end may put into ONE dispatch.
+/// \brief Q9-F4 (dev doc 6.30/6.31): what `OCUDU_DFT_BATCH_SYMBOLS` OVERRIDES, 0 meaning AUTO.
 ///
-/// `OCUDU_DFT_BATCH_SYMBOLS=N`, **DEFAULT 14 = one slot's worth of symbols since leg `p22-n78-batch14`
-/// (dev doc 6.31)**: the A/B the mechanism was built for measured `[ul_gpu_pipeline]` 2440 -> 1513 us
-/// (-38%, the V1 criterion is <= 2150) with the hop's own command-buffer window down 422 us, its input hold
-/// down 40%, and NO cost anywhere the contract can see (8/8, `cbs/lane` unchanged, 0 gaps). The same 14
-/// transforms cost 171us of device window as 14 dispatches and 13.75us as one OFFLINE
-/// (wip/dft_kernel_cost.mm); on air the saving is larger, because the per-symbol dispatches were SERIALISED
-/// on the hop's critical path (the estimator's first dispatch reads the grid the front end wrote).
+/// * **unset, or 0 -> AUTO**: the front end batches ONE SLOT's transforms, and how many that is comes from
+///   the cell (`set_slot_symbols()`: 14 with a normal cyclic prefix, **12 with an extended one**). This is
+///   the shipped default since the A/B measured `[ul_gpu_pipeline]` 2440 -> 1513/1497 us (-38%, the V1
+///   criterion is <= 2150) with the hop's own command-buffer window down ~430 us, its input hold down 40%,
+///   and no cost anywhere the contract can see (8/8, `cbs/lane` unchanged, 0 gaps).
+/// * **1 -> the per-symbol CONTROL arm** (the historical one-dispatch-per-symbol), which an A/B leg must now
+///   set explicitly.
+/// * **N >= 2 -> an explicit cap** (diagnostic; clamped to max_batch_slots, the ring the transforms are
+///   counted in and the setBytes budget).
 ///
-/// N >= 2 makes the front end DEFER the transforms of an open block (radio-input path only, see
-/// dft_engine_impl) and encode them as one dispatch of N threadgroups, with the two parameter blocks bound
-/// as per-threadgroup tables (the kernel's `pad` field). **`OCUDU_DFT_BATCH_SYMBOLS=1` is the CONTROL arm**
-/// (the historical one-dispatch-per-symbol) and is what an A/B leg must set explicitly.
-///
-/// Clamped to max_batch_slots: the pending tables are bound with setBytes (the limit is 4 KB, i.e. 128
-/// grid-write blocks), and a batch larger than the ring the transforms are counted in would be meaningless.
-static unsigned front_end_batch_requested()
+/// WHY NOT A LITERAL 14 (user correction, dev doc 6.33): the mechanism's unit is one SLOT, and a slot does
+/// not always carry 14 symbols - an extended cyclic prefix carries 12. A constant would be a claim about the
+/// cell's numerology hidden inside the front end; taking the number from the caller that knows the slot keeps
+/// "one slot, one dispatch" true by construction.
+static unsigned front_end_batch_override()
 {
-  /// The default is what the batched front end was verified at (see above); it is NOT "the old behaviour",
-  /// so an arm that wants the old shape has to SAY so (`=1`).
-  static constexpr unsigned default_batch = 14;
-
   const char* env = std::getenv("OCUDU_DFT_BATCH_SYMBOLS");
   if (env == nullptr) {
-    return default_batch;
+    return 0; // AUTO
   }
   char*               end = nullptr;
   const unsigned long v   = std::strtoul(env, &end, 10);
   if ((end == env) || (*end != '\0')) {
-    // Not a number: say so once and use the default, rather than silently reading it as 0 (= the control
-    // arm) - the same choice `grid_handover_armed()` makes for its own knob.
+    // Not a number: say so once and use AUTO, rather than silently reading it as the control arm (=0 is the
+    // AUTO value, but "abc" is not a request for anything) - the same choice `grid_handover_armed()` makes.
     static bool warned = false;
     if (!warned) {
       warned = true;
       std::fprintf(stderr,
-                   "[phy_pipeline] OCUDU_DFT_BATCH_SYMBOLS is not a number - using the default (%u). "
-                   "Use 1 for the per-symbol control arm.\n",
-                   default_batch);
+                   "[phy_pipeline] OCUDU_DFT_BATCH_SYMBOLS is not a number - using AUTO (one slot's own "
+                   "symbol count). Use 1 for the per-symbol control arm.\n");
     }
-    return default_batch;
+    return 0;
   }
-  if (v < 2ul) {
-    return 1;
+  if (v == 0ul) {
+    return 0; // explicit AUTO
+  }
+  if (v == 1ul) {
+    return 1; // the control arm
   }
   return (v > max_batch_slots) ? max_batch_slots : static_cast<unsigned>(v);
+}
+
+/// \brief How many transforms ONE dispatch may carry: the override, or (AUTO) one slot's own symbol count.
+///
+/// \param told_slot_symbols What the receiving chain said one slot carries (`set_slot_symbols()`), 0 when it
+///        never said. **AUTO with no answer does NOT batch**: the unit is a slot, and a front end that was
+///        never told how big a slot is has no basis for choosing a batch - inventing 14 here is exactly the
+///        assumption dev doc 6.33 removed.
+static unsigned front_end_batch_cap(unsigned told_slot_symbols)
+{
+  const unsigned forced = front_end_batch_override();
+  if (forced != 0u) {
+    return forced;
+  }
+  return (told_slot_symbols >= 2u) ? std::min(told_slot_symbols, max_batch_slots) : 1u;
 }
 
 #if defined(OCUDU_METAL_STATS)
@@ -221,6 +233,10 @@ struct dft_stats_t {
   std::atomic<uint64_t> token_early_signals{0};
   std::atomic<uint64_t> token_sets_by_event{0};
   std::atomic<uint64_t> token_sets_by_complete{0};
+
+  /// Q9-F4: what the receiving chain said one slot carries (0 = never told), so the exit report can print
+  /// the EFFECTIVE cap next to the knob that produced it (see set_slot_symbols()).
+  std::atomic<unsigned> slot_symbols{0};
 
   /// \name Q9-F4 (dev doc 6.30): the front end's BATCHED dispatches.
   ///
@@ -425,7 +441,8 @@ static void dft_stats_report()
                // every transform (see ofdm_demodulator_impl::finish_symbol()), so that difference grows
                // without bound and would read like a backlog that is not there.
                "[metal_stats] dft commits=%llu transforms=%llu waits=%llu slots_in_flight=%llu radio_inputs=%llu "
-               "wrap_copies=%llu released=%llu released_waits=%llu batched=%llu/%llu batch_max=%u\n",
+               "wrap_copies=%llu released=%llu released_waits=%llu batched=%llu/%llu batch_max=%u "
+               "batch_src=%s slot_symbols=%u\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.transforms.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
@@ -442,7 +459,12 @@ static void dft_stats_report()
                // radio-input path inside an open block), which is a finding, not a silent no-op.
                static_cast<unsigned long long>(s.batch_dispatches.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.batch_transforms.load(std::memory_order_relaxed)),
-               front_end_batch_requested());
+               // The EFFECTIVE cap and where it came from: `auto` = one slot's own symbol count as the
+               // receiving chain told it, `knob=N` = the diagnostic override, `off` = the control arm.
+               front_end_batch_cap(s.slot_symbols.load(std::memory_order_relaxed)),
+               (front_end_batch_override() == 1u) ? "off"
+                                                  : ((front_end_batch_override() >= 2u) ? "knob" : "auto"),
+               s.slot_symbols.load(std::memory_order_relaxed));
 
   // D1 step 2: the handover's own counters, printed by the ENGINE rather than by the registry's own
   // translation unit: the engine is in every build that can arm the release, so an armed leg always sees
@@ -882,6 +904,9 @@ struct dft_engine_impl {
   id<MTLBuffer> pending_out      = nil;
   /// The kernel's `base` for the group (0 on the radio-input path, which is the only one that batches).
   uint32_t      pending_base     = 0;
+  /// How many OFDM symbols one receiving slot of this cell carries (see set_slot_symbols()), 0 = never told.
+  /// With the knob at AUTO this IS the batch cap: one slot, one dispatch.
+  unsigned      slot_symbols     = 0;
   ///@}
 
   /// \name D1 step 1: the block handed over instead of committed (see release_block()).
@@ -1849,7 +1874,9 @@ dft_metal_engine::token_release_stats_t dft_metal_engine::token_release_stats()
 dft_metal_engine::batch_stats_t dft_metal_engine::batch_stats()
 {
   batch_stats_t out;
-  out.requested = front_end_batch_requested();
+  out.override_value = front_end_batch_override();
+  out.told_symbols   = dft_stats().slot_symbols.load(std::memory_order_relaxed);
+  out.cap            = front_end_batch_cap(out.told_symbols);
 #if defined(OCUDU_METAL_STATS)
   out.dispatches = dft_stats().batch_dispatches.load(std::memory_order_relaxed);
   out.transforms = dft_stats().batch_transforms.load(std::memory_order_relaxed);
@@ -2169,7 +2196,7 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   // the very same dispatches in the very same order), and the input is the RADIO's (its slices are offsets
   // into one allocation the block keeps alive; the staged float2 ring can be overwritten by the caller
   // before a deferred encode would read it).
-  const unsigned batch_max = front_end_batch_requested();
+  const unsigned batch_max = front_end_batch_cap(engine->slot_symbols);
   if ((batch_max > 1u) && (input.is_ci16 != 0u) && block_accumulating(engine)) {
     // (1) A group only ever holds transforms that share the bindings the dispatch cannot vary per
     //     threadgroup - the grid mapping (with its offset), the radio allocation, and the float2 ring the
@@ -2235,6 +2262,17 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   commit_front_end(engine, cmd_buf, 1);
   note_slot_submission(engine, slot, cmd_buf);
   return true;
+}
+
+void dft_metal_engine::set_slot_symbols(unsigned nof_symbols_per_slot)
+{
+  dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
+  if (engine != nullptr) {
+    engine->slot_symbols = nof_symbols_per_slot;
+  }
+#if defined(OCUDU_METAL_STATS)
+  dft_stats().slot_symbols.store(nof_symbols_per_slot, std::memory_order_relaxed);
+#endif
 }
 
 void dft_metal_engine::set_lane_slot(uint64_t slot_index)

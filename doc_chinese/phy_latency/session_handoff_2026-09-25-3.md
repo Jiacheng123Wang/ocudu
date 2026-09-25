@@ -295,3 +295,25 @@ bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 p22-n78-conc2  #
      ⚠ 教训（写给下一位）：`cmake --build build` **不会重链测试可执行文件** ⇒ 改了引擎之后要**显式**构建
      依赖 `ocudu_dft*` 的 7 个目标再跑 `ctest`，否则网的绿是旧二进制说的（§6.31 ⑥ 3 列了名单）。
   3. **V1 之后的最大项**：A（等样点 ~473，零算力，P1-7）与 `merged_hop` 里剩下的 CE/EQ/demap；以及 V2 的容量（P2-D）。
+
+---
+
+## 9. 追加更正 #3：`p23`/`p24`（确认腿 + 同日对照）与 **§6.33 的默认值更正**
+
+* **V1 收口（同一天 A/B，§6.32）**：`p23`（不设旋钮 = 新默认）**1497.2 µs**、`p24`（`OCUDU_DFT_BATCH_SYMBOLS=1` 对照）**2444.1 µs**
+  ⇒ **−946.9 µs（−38.7%）**；`p22` 1513.4 / `p23` 1497.2 互相复现（差 16 µs）⇒ **V1（≤2150）判定为达成且已确认**。
+  机制侧同向：`merged_hop` 1067.6 → 617.6、`residency` 1485.5 → 743.1、`input hold` max **96.4 → 20.4 ms**、`starved 62 → 38`。
+  **代价为零**：`p23` 契约 **8/8**、`cbs/lane=2.00`、**0 gaps**。
+* ⚠ **同日对照的"意外收获"，只算线索不算证据**：`p24` **D4 红（1 gap / 1,283,405 样点，park 1.131 ms）**，
+  而 `p23` 0 gaps（park 0.321 ms）。D4 偶发且每臂仅一条腿 ⇒ 取证方式改为**按对累计**（§6.32 ③）。
+* ⚠⚠ **用户更正了默认值**（§6.33）：`OCUDU_DFT_BATCH_SYMBOLS` **不该固定 14**，应当是"**一个时隙有多少个 OFDM 符号**"
+  （normal CP 14、**extended CP 12**）。已实现：未设/`0` = **AUTO**（= 接收链通过新的
+  `dft_processor::set_slot_symbols()` 告知的值）；`1` = 对照臂；`N≥2` = 诊断覆盖；**AUTO 且未被告知 ⇒ 不批处理**（不猜 14）。
+  读数变为 `batched=<d>/<t> batch_max=<生效上限> batch_src=<auto|knob|off> slot_symbols=<n>`，门 D16 增加
+  "`batch_src=auto` 且 `slot_symbols=0` ⇒ 接线缺陷"这一支路。metal **arm 17 重写**为四子例
+  （14 符号 / 12 符号 / 从未被告知 / 显式覆盖），全部**逐字节网格相同 + 恰好一次派发**。
+  ⇒ `p22`/`p23` 的 V1 结论不受影响（n78 是 normal CP，AUTO 给出的就是 14）。
+* **网**：`ctest -L phy` **193/193**、`dft_processor_metal_unit_test` ALL OK（默认 + `=1`）、`ofdm_demodulator_metal_batch_test` ✓、
+  metal **arm 10–17** 全 PASS、`lower_phy_test` ✓、`l1_handover_arms.sh` 5 PASS、门自测 PASS。
+* **下一步**：①**按对累计 D4/D1/D2**（批量 vs 对照）；②**V2 的容量问题（P2-D）**、**V3（RF 835–1168）**；
+  ③ 若要为 **extended CP** 取证，需要一条 extended CP 的腿（当前没有）。

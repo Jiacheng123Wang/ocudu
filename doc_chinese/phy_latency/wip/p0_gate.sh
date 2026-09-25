@@ -431,18 +431,29 @@ fi
 batch_line=$(grep -a "\[metal_stats\] dft commits=" "$LEGF" | tail -1)
 batch_pair=$(printf '%s' "$batch_line" | grep -oE "batched=[0-9]+/[0-9]+" | head -1)
 batch_max=$(printf '%s' "$batch_line" | grep -oE "batch_max=[0-9]+" | grep -oE "[0-9]+$")
+batch_src=$(printf '%s' "$batch_line" | grep -oE "batch_src=[a-z]+" | head -1)
+slot_syms=$(printf '%s' "$batch_line" | grep -oE "slot_symbols=[0-9]+" | grep -oE "[0-9]+$")
+# 6.33: with the knob at AUTO the cap IS the cell's own symbol count (14 normal CP, 12 extended), told by the
+# demodulator through set_slot_symbols(); AUTO with slot_symbols=0 means NOBODY told the front end how big a
+# slot is, which is a wiring finding (the mechanism is defined on one slot, so it declines to guess).
 if [ -z "${batch_pair:-}" ]; then
   check "[INFO] D16 (6.30) did the front end batch a slot's transforms into one dispatch" "reported, not judged" INFO \
         "no 'batched=' field: ${batch_line:-<absent>} - a leg flown before 6.30 cannot say"
+elif [ "${batch_src:-}" = "batch_src=auto" ] && [ -z "${slot_syms:-}" ]; then
+  check "[INFO] D16 (6.30) did the front end batch a slot's transforms into one dispatch" "reported, not judged" INFO \
+        "${batch_pair} batch_max=${batch_max}: 'batch_src'/'slot_symbols' absent - the build is older than the AUTO default (dev doc 6.33); read batch_max as the knob's own value"
+elif [ "${batch_src:-}" = "batch_src=auto" ] && [ "${slot_syms:-0}" = "0" ]; then
+  check "[INFO] D16 (6.30) did the front end batch a slot's transforms into one dispatch" "reported, not judged" INFO \
+        "${batch_pair} batch_max=${batch_max} batch_src=auto slot_symbols=0: NOBODY TOLD THE FRONT END how many symbols a slot carries, so it did not batch - the demodulator's set_slot_symbols() did not reach the engine (wiring)"
 elif [ "${batch_pair}" = "batched=0/0" ] && [ "${batch_max:-1}" != "1" ]; then
   check "[INFO] D16 (6.30) did the front end batch a slot's transforms into one dispatch" "reported, not judged" INFO \
-        "${batch_pair} batch_max=${batch_max}: THE DEFERRAL NEVER HAPPENED - no radio-input transform was submitted inside an open block, so this leg is not an A/B of the batched front end"
+        "${batch_pair} batch_max=${batch_max} ${batch_src:-} slot_symbols=${slot_syms:-?}: THE DEFERRAL NEVER HAPPENED - no radio-input transform was submitted inside an open block, so this leg is not an A/B of the batched front end"
 elif [ "${batch_max:-1}" = "1" ]; then
   check "[INFO] D16 (6.30) did the front end batch a slot's transforms into one dispatch" "reported, not judged" INFO \
-        "${batch_pair} batch_max=1: this leg asked for the PER-SYMBOL shape (the A/B control arm), as expected"
+        "${batch_pair} batch_max=1 ${batch_src:-}: this leg ran the PER-SYMBOL shape (the A/B control arm), as expected"
 else
   check "[INFO] D16 (6.30) did the front end batch a slot's transforms into one dispatch" "reported, not judged" INFO \
-        "${batch_pair} batch_max=${batch_max}: the front end DID defer  <-- compare this leg's V1 and [ul_gpu_lane] front-end window against the batch_max=1 legs (p16-p21); ${batch_pair} is dispatches/transforms"
+        "${batch_pair} batch_max=${batch_max} ${batch_src:-} slot_symbols=${slot_syms:-?}: the front end DID defer  <-- compare V1 and the [ul_gpu_lane] front-end window against the control legs; ${batch_pair} is dispatches/transforms"
 fi
 occ_line=$(grep -a "queue occupancy (Q9-F3): commits=" "$LEGF" | tail -1)
 occ_hole=$(grep -a "hole .*-> next label" "$LEGF" | head -1)

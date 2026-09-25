@@ -50,7 +50,7 @@ cat >> "$FIXTURE" <<'EOF'
 [ul_gpu_lane] dft carried blocks (Q9-F2): resolved=48123 of 48123 (never committed=0, committed but unfinished at exit=0, no GPU timestamps=0, dropped over the bound=0)
 [ul_gpu_lane] dft carried deposit ->GPU start samples=48123 mean=2211.0us median=1105.0us min=498.1us max=5004688.5us p95=3562.0us p99=8021.0us
 [metal_stats] dft handover handed=48123 taken=27887 superseded=0 evicted=47867 evicted_unproduced=0 over_bound=0 unproduced=0 fallback=18331 late=1905 late_time=12 not_found=1891 timeouts=0 keepalives=673722/673722 (max in flight 112) (armed=1) tokens_early=signals:0,by_event:0,by_complete:48123 handshake=waits:7,timeouts:0,max:412us
-[metal_stats] dft commits=48123 transforms=673722 waits=143878 slots_in_flight=14 radio_inputs=673722 wrap_copies=0 released=48123 released_waits=0 batched=4812/67368 batch_max=14
+[metal_stats] dft commits=48123 transforms=673722 waits=143878 slots_in_flight=14 radio_inputs=673722 wrap_copies=0 released=48123 released_waits=0 batched=4812/67368 batch_max=14 batch_src=auto slot_symbols=14
 EOF
 
 OUT=$(bash "$GATE" "$FIXTURE" 2>&1)
@@ -77,7 +77,7 @@ expect "D13 reads the handshake waits"        "handshake waits=7 timeouts=0 max=
 expect "D14 reads the absence of a stall dump" "the pool never parked the receive thread for 20 ms"
 expect "D15 reads the drop counter when absent" "a leg flown before 6.26 cannot say"
 expect "D13 states what a wait would have cost" "the Q9-G window IS reached on air"
-expect "D16 reads the batched pair"          "batched=4812/67368 batch_max=14"
+expect "D16 reads the batched pair"          "batched=4812/67368 batch_max=14 batch_src=auto slot_symbols=14"
 expect "D16 states the branch verdict"       "the front end DID defer"
 
 # The reverse direction: a leg WITHOUT the new lines must say so instead of printing a number (rule 4.3 (3)).

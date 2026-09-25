@@ -182,6 +182,15 @@ public:
   /// identity that lets the two timelines be compared. A processor without a device probe ignores it.
   virtual void set_lane_slot(uint64_t /*slot_index*/) {}
 
+  /// \brief Tells the processor how many OFDM symbols ONE receiving slot of this cell carries.
+  ///
+  /// 14 with a normal cyclic prefix and 12 with an extended one (the caller that knows the slot - see
+  /// set_lane_slot() - is the one that knows this too). It is the unit the fused lane's batched front end
+  /// works in: the transforms of one slot are handed over as one block, and the front end dispatches them in
+  /// ONE dispatch per slot, so the number it batches by must be the CELL's, not a constant. A processor that
+  /// does not batch ignores this, and one that is never told does not batch at all (rather than guessing).
+  virtual void set_slot_symbols(unsigned /*nof_symbols_per_slot*/) {}
+
   /// \brief Waits for the transform submitted in \c slot.
   ///
   /// Releases the caller's input slot for reuse without stalling on newer submissions, which is

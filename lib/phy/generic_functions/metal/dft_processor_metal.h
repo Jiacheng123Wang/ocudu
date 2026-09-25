@@ -121,6 +121,13 @@ public:
     }
   }
 
+  void set_slot_symbols(unsigned nof_symbols_per_slot) override
+  {
+    if (engine != nullptr) {
+      engine->set_slot_symbols(nof_symbols_per_slot);
+    }
+  }
+
   // See interface for documentation.
   void wait_slot(unsigned slot) override { (void)engine->wait_slot(slot); }
 

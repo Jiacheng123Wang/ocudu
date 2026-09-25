@@ -1752,39 +1752,42 @@ int main()
                    "read while it is stalled\n");
     }
 
-    // ---- Arm 17 (dev doc 6.30): the BATCHED front end - a slot's symbols in ONE dispatch -----------------
-    // The front end used to issue one single-threadgroup dispatch per symbol. A single-threadgroup dispatch
-    // is latency-bound (measured offline: 12.18us of device window for an n=768 transform, and they do not
-    // overlap), so a slot's fourteen transforms cost ~171us of window for arithmetic worth ~14us - while the
-    // same fourteen in ONE dispatch cost 13.75us (wip/dft_kernel_cost.mm).
+    // ---- Arm 17 (dev doc 6.30/6.33): the BATCHED front end - a slot's symbols in ONE dispatch -------------
+    // The front end used to issue one single-threadgroup dispatch per symbol. A single-threadgroup dispatch is
+    // latency-bound (measured offline: 12.18us of device window for an n=768 transform, and they do not
+    // overlap), and on air those dispatches were SERIALISED on the hop's critical path - so a slot's fourteen
+    // transforms cost ~430us of the hop's window for arithmetic worth ~14us (leg p22/p23: -38% of the whole
+    // end-to-end span once they became one dispatch, dev doc 6.31/6.32).
     //
-    // What this arm asserts is the half that can be asserted offline and that the air legs cannot: that the
-    // DEFERRED path produces the SAME GRID, byte for byte, as the historical per-symbol path on the same
-    // engine, the same inputs and the same per-symbol parameters - and that it really did batch (the
-    // counters say one dispatch of fourteen, not fourteen of one). Both runs go through the production
-    // shape: a block that is RELEASED (the flush inside release_block()), taken by its consumer and
-    // committed.
+    // WHAT THIS ARM ASSERTS is the half that can be asserted offline and the air legs cannot:
+    //   (a) the DEFERRED path produces the SAME GRID, byte for byte, as the historical per-symbol path on the
+    //       same engine, the same inputs and the same per-symbol parameters;
+    //   (b) it really deferred (one dispatch of N, not N of one) - for N = 14 AND for N = 12;
+    //   (c) the batch size comes from the CELL's symbol count, which is the user's correction of dev doc
+    //       6.33: an extended cyclic prefix carries 12 symbols per slot, so the front end takes the number
+    //       from set_slot_symbols() instead of a literal 14 - and an engine that was never told does NOT
+    //       batch at all.
+    // Every run goes through the production shape: a block that is RELEASED (the flush inside release_block()),
+    // taken by its consumer and committed.
     {
-      const unsigned symbols   = 14;                                          // OFDM symbols of one slot
-      const unsigned cp_len    = 8;                                           // cyclic-prefix skip
-      const size_t   slice_smp = cp_len + transform_size;                     // complex samples per symbol
-      const size_t   slice_byt = slice_smp * 2 * sizeof(int16_t);             // ... and their bytes
+      const unsigned cp_len    = 8;                       // cyclic-prefix skip
+      const size_t   slice_smp = cp_len + transform_size; // complex samples per symbol slice
+      const size_t   slice_byt = slice_smp * 2 * sizeof(int16_t);
       const size_t   page_sz   = compat::page_size();
+      // Normal CP (14) and extended CP (12) - the two symbol counts a slot can carry.
+      const unsigned cases[2]  = {14u, 12u};
 
-      // The radio's own buffer: ONE page-aligned allocation holding the slot's slices, exactly what
-      // grid_write::time_samples describes. Distinct values per symbol, so a transform that read the wrong
-      // slice (or the wrong offset within it) cannot come out identical by accident.
-      const size_t samples_bytes = ((slice_byt * symbols) + page_sz - 1) / page_sz * page_sz;
+      const size_t samples_bytes = ((slice_byt * cases[0]) + page_sz - 1) / page_sz * page_sz;
       auto*        samples       = static_cast<int16_t*>(compat::aligned_alloc(page_sz, samples_bytes));
-      // The grid of this arm: fourteen rows of nof_subc subcarriers (the test's own grid is one page, too
-      // small for a whole slot).
-      const size_t grid_need = ((static_cast<size_t>(nof_subc) * symbols + dst_offset) * 2 + page_sz - 1) / page_sz * page_sz;
-      void*        arm_grid  = compat::aligned_alloc(page_sz, grid_need);
+      // The grid of this arm: a full slot of rows (14) plus the offset, so both cases fit.
+      const size_t grid_need =
+          ((static_cast<size_t>(nof_subc) * cases[0] + dst_offset) * 2 + page_sz - 1) / page_sz * page_sz;
+      void* arm_grid = compat::aligned_alloc(page_sz, grid_need);
       if ((samples == nullptr) || (arm_grid == nullptr)) {
         std::fprintf(stderr, "FAIL: arm 17 could not allocate its samples / grid\n");
         return 1;
       }
-      for (size_t i = 0; i != slice_smp * 2 * symbols; ++i) {
+      for (size_t i = 0; i != slice_smp * 2 * cases[0]; ++i) {
         samples[i] = static_cast<int16_t>(static_cast<int>((i * 37u + 11u) % 30011u) - 15000);
       }
 
@@ -1797,26 +1800,32 @@ int main()
       w.time_window_start  = 0;
       w.time_gain          = 1.0F / 32767.0F;
 
-      std::vector<uint16_t> per_symbol_grid;
-      std::vector<uint16_t> batched_grid;
-      uint64_t              batched_dispatches = 0;
-      uint64_t              batched_transforms = 0;
-
-      // Runs one slot through the RELEASE path with the knob set to \p batch, and snapshots the grid.
-      const auto run_slot = [&](unsigned batch, uint64_t slot, std::vector<uint16_t>& out) {
-        const std::string knob = std::to_string(batch);
-        ::setenv("OCUDU_DFT_BATCH_SYMBOLS", knob.c_str(), 1);
+      // Runs one slot of \p symbols through the RELEASE path and snapshots the grid.
+      // \p batch: 0 = AUTO (the knob unset: the engine uses what it was TOLD), 1 = the per-symbol control arm,
+      //           N >= 2 = an explicit cap. \p told: what set_slot_symbols() is told (0 = never told).
+      const auto run_slot = [&](unsigned batch,
+                                unsigned told,
+                                unsigned symbols,
+                                uint64_t slot,
+                                std::vector<uint16_t>& out) {
+        if (batch == 0u) {
+          ::unsetenv("OCUDU_DFT_BATCH_SYMBOLS");
+        } else {
+          const std::string knob = std::to_string(batch);
+          ::setenv("OCUDU_DFT_BATCH_SYMBOLS", knob.c_str(), 1);
+        }
         std::memset(arm_grid, 0, grid_need);
         engine.set_lane_slot(slot);
+        engine.set_slot_symbols(told);
         if (!engine.begin_block()) {
           return false;
         }
         for (unsigned s = 0; s != symbols; ++s) {
           // One row per symbol, a per-symbol phase compensation (so a wrong table entry shows up), and the
           // symbol's own slice of the radio buffer.
-          w.dst_offset = dst_offset + s * nof_subc;
-          w.phase_re   = std::cos(0.1F * static_cast<float>(s));
-          w.phase_im   = std::sin(0.1F * static_cast<float>(s));
+          w.dst_offset   = dst_offset + s * nof_subc;
+          w.phase_re     = std::cos(0.1F * static_cast<float>(s));
+          w.phase_im     = std::sin(0.1F * static_cast<float>(s));
           w.time_samples = static_cast<const char*>(static_cast<const void*>(samples)) + s * slice_byt;
           if (!engine.submit_slot_grid_write(in_mem, out_mem, 0, w)) {
             return false;
@@ -1842,64 +1851,118 @@ int main()
         return true;
       };
 
-      const metal::dft_metal_engine::batch_stats_t bs0 = metal::dft_metal_engine::batch_stats();
-      if (!run_slot(1u, test_slot + 910, per_symbol_grid)) {
-        std::fprintf(stderr, "FAIL: arm 17 could not run the per-symbol arm\n");
-        return 1;
-      }
-      const metal::dft_metal_engine::batch_stats_t bs1 = metal::dft_metal_engine::batch_stats();
-      if (!run_slot(symbols, test_slot + 911, batched_grid)) {
-        std::fprintf(stderr, "FAIL: arm 17 could not run the batched arm\n");
-        return 1;
-      }
-      const metal::dft_metal_engine::batch_stats_t bs2 = metal::dft_metal_engine::batch_stats();
-
-      batched_dispatches = bs2.dispatches - bs1.dispatches;
-      batched_transforms = bs2.transforms - bs1.transforms;
-      if ((bs1.dispatches != bs0.dispatches) || (bs1.transforms != bs0.transforms)) {
-        std::fprintf(stderr,
-                     "FAIL (6.30): the per-symbol arm batched %llu dispatch(es) - the knob's control arm must "
-                     "read exactly zero\n",
-                     static_cast<unsigned long long>(bs1.dispatches - bs0.dispatches));
-        return 1;
-      }
-      if ((batched_dispatches != 1u) || (batched_transforms != symbols) || (bs2.requested != symbols)) {
-        std::fprintf(stderr,
-                     "FAIL (6.30): the batched arm did not defer into ONE dispatch - dispatches=%llu "
-                     "transforms=%llu requested=%u (want 1 / %u / %u)\n",
-                     static_cast<unsigned long long>(batched_dispatches),
-                     static_cast<unsigned long long>(batched_transforms),
-                     bs2.requested,
-                     symbols,
-                     symbols);
-        return 1;
-      }
-      if (per_symbol_grid != batched_grid) {
-        size_t first = 0;
-        while ((first != per_symbol_grid.size()) && (per_symbol_grid[first] == batched_grid[first])) {
-          ++first;
+      /// One case: the control arm (per symbol) is the reference, AUTO must match it byte for byte and must
+      /// have deferred the whole slot into exactly ONE dispatch.
+      const auto check_case = [&](unsigned symbols, uint64_t slot_base) -> bool {
+        std::vector<uint16_t>                                       ref;
+        std::vector<uint16_t> auto_grid;
+        const metal::dft_metal_engine::batch_stats_t               b0 = metal::dft_metal_engine::batch_stats();
+        if (!run_slot(1u, symbols, symbols, slot_base + 0, ref)) {
+          std::fprintf(stderr, "FAIL: arm 17 could not run the per-symbol arm (symbols=%u)\n", symbols);
+          return false;
         }
-        std::fprintf(stderr,
-                     "FAIL (6.30): the batched dispatch wrote a DIFFERENT grid (first difference at element "
-                     "%zu: per-symbol=%#x batched=%#x)\n",
-                     first,
-                     first < per_symbol_grid.size() ? per_symbol_grid[first] : 0u,
-                     first < batched_grid.size() ? batched_grid[first] : 0u);
-        return 1;
+        const metal::dft_metal_engine::batch_stats_t b1 = metal::dft_metal_engine::batch_stats();
+        if ((b1.dispatches != b0.dispatches) || (b1.transforms != b0.transforms)) {
+          std::fprintf(stderr,
+                       "FAIL (6.30): the per-symbol arm batched %llu dispatch(es) - the control arm must read "
+                       "exactly zero\n",
+                       static_cast<unsigned long long>(b1.dispatches - b0.dispatches));
+          return false;
+        }
+        // AUTO with the cell's own symbol count: one dispatch, and the same grid as the control.
+        if (!run_slot(0u, symbols, symbols, slot_base + 1, auto_grid)) {
+          std::fprintf(stderr, "FAIL: arm 17 could not run the AUTO arm (symbols=%u)\n", symbols);
+          return false;
+        }
+        const metal::dft_metal_engine::batch_stats_t b2 = metal::dft_metal_engine::batch_stats();
+        if ((b2.cap != symbols) || (b2.told_symbols != symbols) || (b2.override_value != 0u) ||
+            ((b2.dispatches - b1.dispatches) != 1u) || ((b2.transforms - b1.transforms) != symbols)) {
+          std::fprintf(stderr,
+                       "FAIL (6.33): AUTO with %u symbols per slot did not defer into ONE dispatch of %u - "
+                       "cap=%u told=%u override=%u dispatches=%llu transforms=%llu\n",
+                       symbols,
+                       symbols,
+                       b2.cap,
+                       b2.told_symbols,
+                       b2.override_value,
+                       static_cast<unsigned long long>(b2.dispatches - b1.dispatches),
+                       static_cast<unsigned long long>(b2.transforms - b1.transforms));
+          return false;
+        }
+        if (ref != auto_grid) {
+          size_t first = 0;
+          while ((first != ref.size()) && (ref[first] == auto_grid[first])) {
+            ++first;
+          }
+          std::fprintf(stderr,
+                       "FAIL (6.30): the batched dispatch wrote a DIFFERENT grid for %u symbols (first "
+                       "difference at element %zu: per-symbol=%#x batched=%#x)\n",
+                       symbols,
+                       first,
+                       first < ref.size() ? ref[first] : 0u,
+                       first < auto_grid.size() ? auto_grid[first] : 0u);
+          return false;
+        }
+        return true;
+      };
+
+      // (a) the two symbol counts a slot can carry: 14 (normal CP) and 12 (extended CP).
+      for (unsigned symbols : cases) {
+        if (!check_case(symbols, test_slot + 910 + symbols)) {
+          return 1;
+        }
+      }
+
+      // (b) AUTO with NO answer must NOT batch: the unit is a slot, and an engine that was never told how
+      //     big one is has no basis for choosing a batch (dev doc 6.33).
+      {
+        const metal::dft_metal_engine::batch_stats_t b0 = metal::dft_metal_engine::batch_stats();
+        std::vector<uint16_t>                        ignored;
+        if (!run_slot(0u, 0u, 14u, test_slot + 950, ignored)) {
+          std::fprintf(stderr, "FAIL: arm 17 could not run the never-told arm\n");
+          return 1;
+        }
+        const metal::dft_metal_engine::batch_stats_t b1 = metal::dft_metal_engine::batch_stats();
+        if ((b1.cap != 1u) || (b1.dispatches != b0.dispatches) || (b1.transforms != b0.transforms)) {
+          std::fprintf(stderr,
+                       "FAIL (6.33): AUTO without being told still batched - cap=%u dispatches=%llu "
+                       "transforms=%llu (want cap=1 and no change)\n",
+                       b1.cap,
+                       static_cast<unsigned long long>(b1.dispatches - b0.dispatches),
+                       static_cast<unsigned long long>(b1.transforms - b0.transforms));
+          return 1;
+        }
+      }
+
+      // (c) an explicit cap still overrides the cell's count (the diagnostic path).
+      {
+        const metal::dft_metal_engine::batch_stats_t b0 = metal::dft_metal_engine::batch_stats();
+        std::vector<uint16_t>                        ignored;
+        if (!run_slot(12u, 14u, 12u, test_slot + 960, ignored)) {
+          std::fprintf(stderr, "FAIL: arm 17 could not run the explicit-cap arm\n");
+          return 1;
+        }
+        const metal::dft_metal_engine::batch_stats_t b1 = metal::dft_metal_engine::batch_stats();
+        if ((b1.cap != 12u) || (b1.override_value != 12u) || ((b1.dispatches - b0.dispatches) != 1u) ||
+            ((b1.transforms - b0.transforms) != 12u)) {
+          std::fprintf(stderr,
+                       "FAIL (6.33): an explicit cap of 12 did not override the told 14 - cap=%u override=%u "
+                       "dispatches=%llu transforms=%llu\n",
+                       b1.cap,
+                       b1.override_value,
+                       static_cast<unsigned long long>(b1.dispatches - b0.dispatches),
+                       static_cast<unsigned long long>(b1.transforms - b0.transforms));
+          return 1;
+        }
       }
 
       ::unsetenv("OCUDU_DFT_BATCH_SYMBOLS");
       std::fprintf(stderr,
-                   "[dft-release] arm 17 (6.30 batched front end): the same %u symbols through the same "
-                   "release path produce a BIT-IDENTICAL grid whether they are dispatched one per symbol or "
-                   "all in one dispatch, and the counters say the batched arm really deferred them "
-                   "(dispatches %llu->%llu, transforms %llu->%llu, knob=%u)\n",
-                   symbols,
-                   static_cast<unsigned long long>(bs1.dispatches),
-                   static_cast<unsigned long long>(bs2.dispatches),
-                   static_cast<unsigned long long>(bs1.transforms),
-                   static_cast<unsigned long long>(bs2.transforms),
-                   bs2.requested);
+                   "[dft-release] arm 17 (6.30/6.33 batched front end): for BOTH symbol counts a slot can "
+                   "carry (14 normal CP, 12 extended CP) the deferred path produces a BIT-IDENTICAL grid to the "
+                   "per-symbol path and really deferred it into ONE dispatch, the batch size comes from what "
+                   "the cell TOLD the engine (AUTO), and an engine that was never told does not batch at all - "
+                   "the per-symbol control arm reads exactly zero\n");
       compat::aligned_free(samples);
       compat::aligned_free(arm_grid);
     }

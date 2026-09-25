@@ -167,19 +167,22 @@ public:
   /// \brief Q9-F4 (dev doc 6.30): how many front-end dispatches carried MORE THAN ONE transform, and how
   /// many transforms they carried in total.
   ///
-  /// The batched front end (OCUDU_DFT_BATCH_SYMBOLS=N, **DEFAULT 14 since leg p22-n78-batch14**) DEFERS the transforms of an open
+  /// The batched front end (OCUDU_DFT_BATCH_SYMBOLS=N, **DEFAULT AUTO = one slot's own symbol count**) DEFERS the transforms of an open
   /// block and encodes them as one dispatch of N threadgroups: offline the same 14 n=768 transforms cost
   /// 171us of device window as 14 single-threadgroup dispatches and 13.75us as one, because a
   /// single-threadgroup dispatch is latency-bound and does not overlap its neighbours.
   ///
-  /// `requested` is the knob's value for this process (1 = the historical one-dispatch-per-symbol, i.e. the
-  /// CONTROL arm that an A/B leg sets explicitly), so a reading of `requested > 1` next to `dispatches == 0`
-  /// says the deferral never happened - a finding rather than a silent no-op. Read by the self-test (arm 17)
-  /// and printed on the `[metal_stats] dft` line.
+  /// `cap` is the EFFECTIVE number of transforms one dispatch may carry in this process (1 = no batching),
+  /// `told_symbols` what the receiving chain said one slot carries (0 = never told), and `override_value` the
+  /// knob's own value (0 = AUTO, 1 = the per-symbol CONTROL arm, N >= 2 = an explicit cap). A reading of
+  /// `cap > 1` next to `dispatches == 0` says the deferral never happened - a finding rather than a silent
+  /// no-op. Read by the self-test (arm 17) and printed on the `[metal_stats] dft` line.
   struct batch_stats_t {
-    uint64_t dispatches = 0;
-    uint64_t transforms = 0;
-    unsigned requested  = 1;
+    uint64_t dispatches    = 0;
+    uint64_t transforms    = 0;
+    unsigned cap           = 1;
+    unsigned told_symbols  = 0;
+    unsigned override_value = 0;
   };
   static batch_stats_t batch_stats();
 
@@ -250,6 +253,18 @@ public:
   /// gpu_lane_probe::register_front_end_commit()), which is what gives the front end a place in the
   /// device-side timeline the back-end lane is measured on.
   void set_lane_slot(uint64_t slot_index);
+
+  /// \brief Tells the engine how many OFDM symbols one receiving slot of THIS cell carries (Q9-F4).
+  ///
+  /// 14 with a normal cyclic prefix, **12 with an extended one**, and the batched front end's unit is one
+  /// slot: with the knob at its default (AUTO) the front end defers up to that many transforms into one
+  /// dispatch, so the number has to come from the cell's own numerology instead of a literal 14 (user
+  /// correction, dev doc 6.33). An engine that is never told does NOT batch - a slot is the unit the
+  /// mechanism is defined on, and guessing its size is the assumption this rule removes.
+  ///
+  /// The same call site that knows the slot knows this (ofdm_demodulator_impl::set_lane_slot()), so the two
+  /// travel together.
+  void set_slot_symbols(unsigned nof_symbols_per_slot);
 
   // NOTE (5.9.65, user ruling A): the front-end fence's accessors and self-test were declared here and have
   // been retired with the mechanism (see the note in ocudu_metal_queue.h).

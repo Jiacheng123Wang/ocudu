@@ -155,6 +155,10 @@ public:
     }
     if (dft != nullptr) {
       dft->set_lane_slot(slot_index);
+      // ... and how many OFDM symbols that slot carries (14 normal CP, 12 extended): the batched front end
+      // puts ONE SLOT's transforms into one dispatch, so that number is what it batches by (dev doc 6.33).
+      // Told here because this is the one call site that knows both, and it is told BEFORE the block opens.
+      dft->set_slot_symbols(nof_symbols_per_slot);
       if (block_batching_enabled() && dft->begin_block()) {
         block_open = true;
       }
