@@ -1515,7 +1515,7 @@ D9 INFO fence order (Q9-D): waits=27957 signaller-first=27957 signaller-after=0
 比较"等待者 vs signaller 的提交次序"，把 Q9-G 变成读数）＋ **Q9-F2**（把前端 deposit 块也注册进 lane 探针的前端组，
 拿到它们的 GPU 时间）⇒ 一条腿定性：`等待者先提交 > 0` ⇒ 实现 Q9-G 的**提交握手**；`= 0` ⇒ 转 GPU/队列结构。
 
-### 6.19 ✅ Q9-F + Q9-F2（＋Q9-F3）落地（2026-09-25）：**把"等待者 vs signaller"的次序从"发出"改成"提交"，并给**每一个**命令缓冲一条 GPU 窗口**（本机离线已验证，**空口腿待飞**）
+### 6.19 ✅ Q9-F + Q9-F2（＋Q9-F3）落地（2026-09-25，提交 `bf33445b89`）：**把"等待者 vs signaller"的次序从"发出"改成"提交"，并给**每一个**命令缓冲一条 GPU 窗口**（本机离线已验证，**空口腿待飞**）
 
 > 本节是 §6.18 ③ 的执行记录。配方与 p07–p13 完全相同；**下一条腿的标签建议 `p14-conc2`**，且必须带
 > `OCUDU_METAL_GPU_TIME=1`（Q9-F3 的读数由它打开，见 ⑤ 的腿命令）。
@@ -1625,7 +1625,8 @@ Q9-F 只回答"次序对不对"；若倒置为 0，§6.2 的分支要的是 **GP
   （Q9-F3 是这段代码里**第一个在报告期加锁**的读数）。lane 探针与交棒注册表早就是同样的写法，这里是同一理由的补齐。
 * `p0_gate.sh` 增加 **D11（Q9-F）/ D12（Q9-F2+F3）**：都是 **INFO（读数，不是判据）**；旧腿读成
   "a leg flown before 6.19 cannot say"（**"读不出"不静默**）。D1–D4 的阈值**一字未动**。
-* 其余网：`ctest -L phy`、`lower_phy_test`、`l1_handover_arms.sh`、`l1_hop_arms.sh` 见本节提交信息（本机串行跑）。
+* 其余网（本机串行跑，改动后必跑的那一套）：`ctest -L phy` **193/193**、`lower_phy_test` **528/528**、`l1_handover_arms.sh` **5 PASS**；`l1_hop_arms.sh` 保持它自己那句 `OPEN`（该臂在**空闲机器**上不可证伪，5.9.39/5.9.40，与本节无关）。
+* ⚠ **网必须在没有并行构建时跑**：本次有一条腿的网正好撞上 `cmake --build`（二进制被重链接）⇒ 出现一次 `port_channel_estimator_metal_mmse_unit_test_ta_chain (Bus error)` 和一次 `the input token was released 0 times (rep 17)`；**构建结束后串行重跑三次全绿**。这与 §4.4「并行跑 = 假失败」是同一条纪律，**记在这里**。
 
 **⑥ 下一条腿（`p14-conc2`）怎么飞、怎么判（**一条腿定性**）**
 
