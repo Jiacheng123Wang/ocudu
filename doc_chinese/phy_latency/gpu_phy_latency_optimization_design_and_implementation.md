@@ -3522,6 +3522,99 @@ V4 约束的是 `cbs/lane`（**命令缓冲**数/跳），把一跳内的 12 次
 3. 跑 §6.47 ③ 的不变量网（离线）＋ 门自测；**重建戳与 gnb 两者**（§6.44 ⑥ 的教训）；
 4. 交给用户飞一条腿（标签建议 `p32-n78-directgrid`），按 ③ 判读。
 
+### 6.48 ★ **①后半落地（变体 A）**：`y_gather` 不再存在 —— 均衡直接**在网格里读**收到的符号；离线 **27 条语料 ×2 臂 = 135 个 dump 文件逐字节相同**，而派发 **12 → 7**（其中**比预登记多省一次**：不 direct 的跳**连设备侧建表派发都不需要**）
+
+> 本节是 §6.47 的施工结果。**没有飞腿**：这一刀的全部证据是离线取证（逐字节 A/B + 双面证伪臂），
+> 空口读数留给 `p32-n78-directgrid`（§6.48 ⑥ 给出判读表）。
+
+#### ① 先把前提查实（都在离线／已有日志里，不烧腿）
+
+§6.47 把变体 A 的判据写成"`nof_ports==1`、`subc_stride==1`、`y_stride` 与网格 `symb_stride` 一致"。查实后，
+**前两条对每一条 gather run 自动成立，真正的判据只剩"这一 run 的元素在网格里连续"**：
+
+* `channel_equalizer_metal::consumes_gathered_symbols()` 的实现就是 `(nof_ports == 1) && (nof_layers == 1)`
+  （`channel_equalizer_metal.cpp`）⇒ 既然这一跳**有** gather run，端口条件**必然**已满足。
+* `ch_gather_desc::build()` 里 `dest` 是**逐元素自增**的（`0,1,2,…`，每个符号重新从 0 开始）
+  ⇒ 目的地**按构造就是稠密的**，所以"能不能直接读"只取决于**源子载波**是否连续（`entries[i].subc == subc_base + i`）。
+* `subc_stride` 由 `make_resource_grid_device_view()` 写成 1，`symb_stride = 网格子载波数`——两者都是布局常量。
+* **DM-RS 符号有没有数据**决定了"跳里有没有带洞的符号"：`active_re_per_prb_dmrs = ~get_dmrs_prb_mask(type1, nof_cdm_groups_without_data)`，
+  只有 `nof_cdm_groups_without_data = 0` 时它才等于全 12 个子载波。`p31` 的 `eq_batch` 读数**间接证明**空口就是这样：
+  `flushes=143559 symbols=1722628 runs=430757 batched=430757 max_run=8 first_break=estimates`
+  ⇒ **每个 run 都 ≥2 个符号**（`batched == runs`）⇒ **不存在孤立的单符号 run**。
+  若 DM-RS 符号带数据（6 RE/PRB 或 0 RE/PRB），它们与数据符号的 `nof_re` 不同，`same_geom` **必然**把它们切成
+  单符号 run（0 RE 的甚至根本不进 pending，见 `pusch_demodulator_impl.cpp` 的 `if (nof_re_symbol == 0) continue;`）
+  ⇒ 与"无单符号 run"矛盾 ⇒ **空口这一跳里 12 个符号同几何**（14 符号的槽去掉 2 个不带数据的 DM-RS 符号）。
+* **分配是否连续**：`p31` 的腿日志里 **143,561 条 PUSCH 授权中 143,559 条是单一连续区间** `prb=[start, stop)`
+  （`[0,51)` 57897、`[26,51)` 23762、`[3,51)` 18867、`[5,51)` 10817、`[8,51)` 9747 …）⇒ `rb_mask` 连续 ⇒ 入口稠密。
+
+⇒ **预登记的条件在空口上应当 3.0/3.0 命中**（3 个 run 全部 direct）。
+
+#### ② 实现（三处，全部只动宿主侧布局，不动 kernel/metallib）
+
+| 文件 | 改动 |
+|---|---|
+| `include/ocudu/phy/upper/equalization/channel_equalizer_device_grid.h` | `ch_gather_symbol` 增加 `subc_base`（该符号第一个 entry 的网格子载波）与 `dense`（entries 是否**就是**网格本身那一段连续子载波）|
+| `lib/phy/upper/equalization/channel_equalizer_device_grid.cpp` | `build()` 里**从刚建好的 entries 表读出**这两个字段（而不是从掩码重新推导）⇒ "能不能原地读"与"gather 会搬哪些元素"**不可能各自漂移** |
+| `lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm` | 旋钮 `OCUDU_EQ_DIRECT_GRID`（默认开）；判据 `eq_direct_grid_run()`；`eq_flush_hook` 里**在分配 staging 之前**判定 ⇒ direct 的 run **不分配 y**、**不发 gather**、`b_y` 绑定网格、`strides.y_stride = grid.symb_stride`；计数 `y_direct` + `eq_direct miss(…)` 直方图 |
+
+* **为什么"逐字节相同"是构造性的**：gather 用 `taps/entries` 把 `grid[port][sym][subc]` 搬到
+  `y[sym][port][dest]`，元素类型两侧都是 `cbf16_t`、**无算术**；`dest` 稠密 ⇒ 直接绑定时均衡 kernel 读到的
+  就是同一批元素、同一顺序（kernel 只认"一个缓冲 + 偏移 + 每符号步长"，见 `eq_encode_batch_dispatch`）。
+* **顺序保证不变**：gather 与均衡本来就是**同一个融合命令缓冲**里的两次派发，direct 只是让均衡**自己**去读那块网格，
+  跨流水线的屏障关系与原来完全一致（grid 的生产者仍是前端 DFT，同一个队列）。
+* **V4 不受影响**：去掉的是**派发**，不是**命令缓冲**（§6.44 ④ 已证），`cbs/lane` 按构造不动。
+
+#### ③ 离线取证（双面）
+
+| 臂 | 语料/形状 | `y_direct` / `y_gather` | 派发 | 结果 |
+|---|---|---|---|---|
+| **正面** | `work_tmp/corpus` 全部 **27 条**（3…25 PRB，14 符号，DM-RS 不带数据） | **4 / 0**（每条都一样）| `burst dispatches` **12 → 7**、`equalizer` **9 → 4** | **135 个 dump 文件逐字节相同**（`llr.bin`、`h.bin`、grid `.bin`、`_ce.txt`、`.txt`）|
+| **反面（洞来自 DM-RS 梳）** | 同上但把 `dmrs_nof_cdm_groups_without_data` 改成 **1**（DM-RS 符号**带数据** ⇒ 梳状有洞）| **4 / 3**，`miss(holes=3)` | `y_gather` 7 → **3** | 5 个 dump **逐字节相同**；且 4 个数据 run 命中、3 个 DM-RS run **被拒**（判据有齿）|
+| **反面（洞来自分配缺口）** | 直接探针 `ch_gather_desc::build()`（§6.48 ④）| 连续 ⇒ `dense=1`；`{0,1,3}` ⇒ **`dense=0`**；`{0,1,4,5}` ⇒ **`dense=0`** | — | 分配缺口确实清 `dense` |
+| **不变量网** | — | — | — | `ctest -L phy` **193/193**、`l1_handover_arms.sh` **全 PASS（含 drop 臂 8/8 不同）**、`metal_chain_probe`/`eq_handoff_probe` **rc=0** |
+| **`value_net`（容差网）** | 47 条（27 corpus + 20 narrow）| 两臂 | — | 两臂都 `captures=47 problems=183`，**失败清单逐行相同**（⇒ 183 条全是**归档基线陈旧**的老账，Q11；这一刀**新增 0 条**）|
+
+* ⇒ **比预登记多省一次派发**：预登记只算了 3 次 `y_gather`（10 → 7），但一个**全是 direct run** 的跳
+  **根本不需要 gather 表**，于是 `eq_gather_tables()` 不被调用 ⇒ **设备侧建表派发也消失**（`sites(ch_gather)` 1 → **0**）。
+  语料实测 `equalizer` **9 → 4**（=4 次均衡 + 0 建表 + 0 gather）⇒ 按 §6.46 的标尺，空口预计 **−4×12 = −48 µs**
+  （**修正 §6.47 的 −36 µs 预估**：跳内派发 **10 → 6**，不是 7）。
+* **两臂都真的走了各自的路**（不是"网空跑"）：off 臂每条都是 `miss(disabled=4)`、`y_gather=4`；
+  on 臂每条都是 `y_direct=4`、`y_gather=0`。
+
+#### ④ 一路上的两个"实验设计缺陷"（记下来，别重犯）
+
+1. **用 replay 的 `alloc_prb` 带洞语料去证伪 `dense` 是无效的**：replay 为带洞分配建的是
+   `vrb_bitmap(bwp_start + max_prb + 1)`，而 `bwp_size_rb` 仍是 3 ⇒ `get_crb_mask()` 里
+   `coreset_start + vrbs.size() <= bwp_size` **不成立**，`non_interleaved_mapping::vrb_to_crb()` 又在
+   `crb_bitmap(bwp_start + bwp_size)` 上 `fill()` ⇒ **洞在进入 plan 之前就被压平了**（实测该臂
+   `y_direct=4 holes=0`，但 dump 与 3 PRB 连续语料不同 ⇒ 掩码确实变了，只是变成了另一种**连续**掩码）。
+   ⇒ 要测 plan 的判据就**直接测 plan**：`/tmp` 下的独立探针（29 行）构造三种掩码，打印每个符号的
+   `nof_entries/subc_base/dense`，一次就看清（本次已做）。
+2. `eq_handoff_probe` / `metal_chain_probe` **不走 gather**（`ch_re device=0 host=…`，全部宿主 staging）
+   ⇒ 它们对这一刀是**"没动过那条路"的回归网**，**不是** direct 路径的覆盖；direct 路径的离线覆盖
+   只有 **`ul_chain_replay` 语料**（27×4 = 108 次 direct run）。
+
+#### ⑤ 反例判读表（腿 `p32-n78-directgrid` 用）
+
+| 读数 | 含义 |
+|---|---|
+| `y_direct≈3.0/跳`、`y_gather=0`、`burst dispatches` **6.0/跳**、`merged_hop`/V1 各 **≈ −48 µs** | ✅ 预登记（修正版）命中 |
+| `y_direct=0`，`miss(holes=…)` 非零 | 该跳的符号**有洞**：要么 DM-RS 带了数据（`cdm_groups_without_data≠0`），要么调度器给了**多簇**分配 ⇒ 回退，不是"没收益"；先看 miss 直方图再看分配（腿日志的 `PUSCH: … prb=[a, b)` 行）|
+| `y_direct=0`，`miss(ports=…)` 非零 | 这一跳有 **>1 个接收端口** ⇒ 变体 A 不适用（要么回退，要么走变体 B 的 kernel 内 gather）|
+| `y_direct=0`，`miss(disabled=…)` 非零 | **A/B 对照臂**（`OCUDU_EQ_DIRECT_GRID=0`），不是缺陷 |
+| `y_direct` 与 `y_gather` 相加 ≠ `runs` | **仪器坏了**（每个 gathered run 必须落进二者之一）⇒ 按 RED 处理 |
+
+#### ⑥ 下一步
+
+* **要飞的一条腿**：`p32-n78-directgrid`（§6.48 ⑤ 判读）。**它同时是 ①后半的验收腿**：
+  预登记 = `sites(y_direct≈3.0 y_gather=0)`、`sites(ch_gather=0)`、`burst dispatches 6.0/跳`、
+  `merged_hop` **≈ 592 → 544 µs**、**V1 ≈ 1463.5 → 1415 µs**、契约 8/8、`cbs/lane=2.00`、gaps 0、D16 不变。
+* 之后按 §6.46 ③ 的表走：**②**（解开 `estimates` 断因让 run 覆盖整跳，7 → 5，≈ −24 µs）
+  ——注意**②与①后半有交互**：`estimates` 一旦不再断开 run，run 会**跨过 DM-RS 符号**……
+  但空口这一跳的 DM-RS 符号**不带数据、根本不进 pending**，所以 run 里只有数据符号，**①后半仍然命中**；
+  只有在"DM-RS 带数据"的配置里才会由 direct 退回 gather（有 `miss(holes)` 可见）。
+* **③④ 不变**：信道估计的 2 次 + 解映射的 1 次；`merged_hop` 里非派发的 ~470 µs（需要"移除阶段"臂或单 kernel 微基准）。
+
 
 
 ## 7. 杠杆与候选改动（技术账）

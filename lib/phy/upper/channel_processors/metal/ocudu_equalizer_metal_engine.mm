@@ -106,6 +106,7 @@ static void eq_stats_wait() {}
 struct eq_site_diag_t {
   std::atomic<uint64_t> ch_gather{0};   // eq_build_gather_on_device: the per-(rb, symbol) channel gather
   std::atomic<uint64_t> y_gather{0};    // eq_encode_gather_dispatch: the received-symbol gather
+  std::atomic<uint64_t> y_direct{0};    // eq_flush_hook: the received symbols are READ IN THE GRID (no gather)
   std::atomic<uint64_t> y_batch{0};     // eq_encode_batch_dispatch: the batched received-symbol path
   std::atomic<uint64_t> run{0};         // enqueue_burst_batch_at: ONE dispatch per run of symbols
   std::atomic<uint64_t> single{0};      // enqueue_burst: one dispatch for one symbol (the sync path)
@@ -131,6 +132,82 @@ eq_batch_diag_t& eq_batch_diag()
   // Deliberately leaked: this is reported while other static destructors may already have run.
   static eq_batch_diag_t* s = new eq_batch_diag_t();
   return *s;
+}
+
+/// \brief Why a gathered run did NOT read the grid in place (dev doc 6.47 variant A).
+///
+/// One counter per reason, because the pre-registration of the change says what a counterexample
+/// MEANS: "the entries of this symbol skip grid subcarriers". Without the split, a leg that saves
+/// nothing says only "the condition did not hold", and the next step would be another leg to find
+/// out which clause of a five-clause predicate failed.
+enum class eq_direct_miss : unsigned {
+  disabled = 0, ///< The knob turned the direct path off (OCUDU_EQ_DIRECT_GRID=0): the A/B arm.
+  ports,        ///< The run has more than one receive port: y is [port][re] and the grid is not.
+  stride,       ///< The grid is not a contiguous run of subcarriers (grid.subc_stride != 1).
+  len,          ///< A symbol of the run does not hold exactly the run's number of entries.
+  holes,        ///< A symbol's entries skip grid subcarriers (allocation gap or DM-RS comb).
+  start,        ///< The symbols of the run do not start at one subcarrier / are not consecutive.
+  bounds,       ///< The run would read past the grid's subcarriers or symbols.
+  nobuf,        ///< The grid storage could not be wrapped as one Metal buffer.
+  count
+};
+
+#if defined(OCUDU_METAL_STATS)
+/// \brief The name of a miss reason, spelled as the [metal_stats] eq_direct line prints it.
+///
+/// Reported only, and only under the stats probe: it exists for the line below and would be an unused
+/// static function in a build with the probe off (which is -Werror here).
+static const char* eq_direct_miss_name(eq_direct_miss reason)
+{
+  switch (reason) {
+    case eq_direct_miss::disabled:
+      return "disabled";
+    case eq_direct_miss::ports:
+      return "ports";
+    case eq_direct_miss::stride:
+      return "stride";
+    case eq_direct_miss::len:
+      return "len";
+    case eq_direct_miss::holes:
+      return "holes";
+    case eq_direct_miss::start:
+      return "start";
+    case eq_direct_miss::bounds:
+      return "bounds";
+    case eq_direct_miss::nobuf:
+      return "nobuf";
+    case eq_direct_miss::count:
+      break;
+  }
+  return "?";
+}
+#endif // OCUDU_METAL_STATS
+
+/// Counters of the direct-grid path (see eq_direct_miss).
+struct eq_direct_diag_t {
+  std::atomic<uint64_t> direct{0};   ///< Runs whose equalization read the grid where it was written.
+  std::atomic<uint64_t> gathered{0}; ///< Runs that still went through the gather dispatch.
+  std::atomic<uint64_t> miss[static_cast<unsigned>(eq_direct_miss::count)];
+
+  eq_direct_diag_t()
+  {
+    for (auto& m : miss) {
+      m.store(0, std::memory_order_relaxed);
+    }
+  }
+};
+
+eq_direct_diag_t& eq_direct_diag()
+{
+  // Deliberately leaked, like the other reports (read at exit, after other destructors may have run).
+  static eq_direct_diag_t* s = new eq_direct_diag_t();
+  return *s;
+}
+
+/// Records why a gathered run kept its gather dispatch.
+void eq_direct_note_miss(eq_direct_miss reason)
+{
+  eq_direct_diag().miss[static_cast<unsigned>(reason)].fetch_add(1, std::memory_order_relaxed);
 }
 
 /// Records the first predicate that stopped a run from extending.
@@ -168,6 +245,20 @@ const bool eq_batch_diag_registered = []() {
                  static_cast<unsigned long long>(eq_site_diag().y_batch.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(eq_site_diag().run.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(eq_site_diag().single.load(std::memory_order_relaxed)));
+    // The direct-grid split of the received-symbol path (dev doc 6.47 variant A): how many runs read
+    // the grid in place and, for the ones that did not, which clause of the predicate stopped them.
+    const eq_direct_diag_t& g = eq_direct_diag();
+    std::fprintf(stderr, "[metal_stats] eq_direct sites(y_direct=%llu y_gather=%llu) miss(",
+                 static_cast<unsigned long long>(g.direct.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(g.gathered.load(std::memory_order_relaxed)));
+    for (unsigned i = 0; i != static_cast<unsigned>(eq_direct_miss::count); ++i) {
+      std::fprintf(stderr,
+                   "%s%s=%llu",
+                   (i == 0) ? "" : " ",
+                   eq_direct_miss_name(static_cast<eq_direct_miss>(i)),
+                   static_cast<unsigned long long>(g.miss[i].load(std::memory_order_relaxed)));
+    }
+    std::fprintf(stderr, ")\n");
   });
   return true;
 }();
@@ -1171,6 +1262,105 @@ static id<MTLBuffer> eq_gather_entries(eq_engine_impl* engine)
   return st.gather_tables.empty() ? nil : st.gather_tables.back();
 }
 
+/// \brief Whether a run of received symbols may be read WHERE THE GRID WROTE THEM (dev doc 6.47).
+///
+/// The gather exists because the resource elements the equalizer consumes are, in general, not a
+/// contiguous run of the grid: the DM-RS comb and the gaps between allocated PRBs leave holes, so
+/// the elements have to be PACKED into the equalizer's [symbol][port][re] staging. That is a pure
+/// transport (the plan's own header says so: "every element is a cbf16_t copied bit for bit, never
+/// converted"), so when the elements of a whole run happen to be the grid's own consecutive
+/// subcarriers, the packed staging is the grid - and a dispatch that copies bytes onto themselves is
+/// pure launch latency, which is what the hop's window is made of (dev doc 6.44: 12 dispatches in a
+/// 613 us window against ~150 us of arithmetic).
+///
+/// The equalization kernel addresses its y input as "one buffer, one offset, a per-symbol stride"
+/// (see eq_encode_batch_dispatch), so a directly bound run needs exactly three things:
+///   * ONE receive port - the kernel steps by p.nof_re within a symbol, and the grid steps by its
+///     own port stride;
+///   * every symbol of the run holding the grid's consecutive subcarriers c0, c0 + 1, ... (the
+///     plan's per-symbol \c dense flag, which a DM-RS comb or a PRB gap clears);
+///   * the symbols of the run being consecutive grid symbols, which they are by construction.
+/// Then y is the grid at (c0, first symbol), stepped by the grid's own symbol stride - the very
+/// elements, in the very order, the gather would have copied.
+///
+/// \note The dispatch the change removes is NOT a command buffer: both the gather and the
+///       equalization were already dispatches of the hop's one fused command buffer, so the number
+///       of buffers in flight (V4, `cbs/lane`) is untouched by construction (dev doc 6.44 (4)).
+///
+/// Escape hatch: OCUDU_EQ_DIRECT_GRID=0 restores the gather for every run, which is the A/B arm and
+/// the counterexample reading of a leg whose direct count is zero.
+static bool eq_direct_grid_enabled()
+{
+  static const bool enabled = []() {
+    const char* env = std::getenv("OCUDU_EQ_DIRECT_GRID");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return enabled;
+}
+
+/// \brief Whether the run starting at \p first_symbol of \p plan can be read in the grid itself.
+///
+/// \param[out] subc_base Grid subcarrier the run's symbols start at, when the answer is true.
+/// \return True when the equalization can read the grid in place (no gather, no y staging).
+static bool eq_direct_grid_run(const ch_gather_desc& plan,
+                               unsigned              first_symbol,
+                               unsigned              n_run,
+                               unsigned              nof_ports,
+                               unsigned              nof_re,
+                               unsigned&             subc_base)
+{
+  subc_base = 0;
+  if (!eq_direct_grid_enabled()) {
+    eq_direct_note_miss(eq_direct_miss::disabled);
+    return false;
+  }
+  // One port: y within a symbol is [port][re] with a port stride of nof_re, which the grid's port
+  // stride (a whole plane of symbols) is not.
+  if (nof_ports != 1) {
+    eq_direct_note_miss(eq_direct_miss::ports);
+    return false;
+  }
+  if (plan.grid.subc_stride != 1) {
+    eq_direct_note_miss(eq_direct_miss::stride);
+    return false;
+  }
+  if ((first_symbol + n_run) > plan.nof_symbols) {
+    eq_direct_note_miss(eq_direct_miss::len);
+    return false;
+  }
+  const ch_gather_symbol& head = plan.symbols[first_symbol];
+  for (unsigned k = 0; k != n_run; ++k) {
+    const ch_gather_symbol& sym = plan.symbols[first_symbol + k];
+    // The kernel reads exactly nof_re elements per symbol of the run: a symbol holding a different
+    // number of resource elements would make it read its neighbour's row.
+    if (sym.nof_entries != nof_re) {
+      eq_direct_note_miss(eq_direct_miss::len);
+      return false;
+    }
+    if (!sym.dense) {
+      eq_direct_note_miss(eq_direct_miss::holes);
+      return false;
+    }
+    // One base for the whole run, and consecutive grid symbols: the kernel is handed ONE offset and
+    // ONE stride, so the run has to be one row-aligned window of the grid.
+    if ((k != 0) && (sym.subc_base != head.subc_base)) {
+      eq_direct_note_miss(eq_direct_miss::start);
+      return false;
+    }
+    if (sym.symbol != head.symbol + k) {
+      eq_direct_note_miss(eq_direct_miss::start);
+      return false;
+    }
+  }
+  if ((static_cast<size_t>(head.subc_base) + nof_re > plan.grid.nof_subc) ||
+      (static_cast<size_t>(head.symbol) + n_run > plan.grid.nof_symb)) {
+    eq_direct_note_miss(eq_direct_miss::bounds);
+    return false;
+  }
+  subc_base = head.subc_base;
+  return true;
+}
+
 /// \brief Dispatches the gather of the run's received symbols off the device grid.
 ///
 /// One thread per (resource element, OFDM symbol of the run). The device work is a plain copy, and
@@ -1308,15 +1498,6 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
                                              static_cast<const char*>(head.nv)) /
                                             sizeof(float))
                     : 0;
-    auto* h_alloc = static_cast<cbf16_t*>(compat::aligned_alloc(compat::page_size(), h_stride * n_run * sizeof(cbf16_t)));
-    auto* y_alloc = static_cast<cbf16_t*>(compat::aligned_alloc(compat::page_size(), y_stride * n_run * sizeof(cbf16_t)));
-    auto* s_alloc = static_cast<float*>(compat::aligned_alloc(compat::page_size(), head.nof_ports * sizeof(float)));
-    if ((h_alloc == nullptr) || (y_alloc == nullptr) || (s_alloc == nullptr)) {
-      compat::aligned_free(h_alloc);
-      compat::aligned_free(y_alloc);
-      compat::aligned_free(s_alloc);
-      return nil;
-    }
     // A run whose estimates were produced on the device is read THERE, with the per-symbol offset
     // step the kernel applies through h_layer_stride (see the run predicate): copying it to the host
     // would read a buffer whose producing dispatch may not have completed - the host has no wait
@@ -1331,7 +1512,30 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     // The run's entry point into the hop's tap table: only a gathered run has one.
     const unsigned first_symbol =
         gather_run ? (pending[first].gather.symbol - gather_plan->symbols[0].symbol) : 0u;
-    if (gather_run && !eq_gather_tables(engine, enc, *gather_plan)) {
+    // Dev doc 6.47 variant A: when the run's symbols ARE the grid's own consecutive subcarriers, the
+    // gather would copy bytes onto themselves - the equalization reads the grid in place instead, and
+    // the run costs one dispatch less. Decided BEFORE the staging is allocated, because a direct run
+    // needs no y staging at all.
+    unsigned   direct_subc = 0;
+    const bool direct_grid = gather_run && eq_direct_grid_run(*gather_plan,
+                                                              first_symbol,
+                                                              n_run,
+                                                              head.nof_ports,
+                                                              head.nof_re,
+                                                              direct_subc);
+    const unsigned direct_first_symbol = direct_grid ? gather_plan->symbols[first_symbol].symbol : 0u;
+    auto* h_alloc = static_cast<cbf16_t*>(compat::aligned_alloc(compat::page_size(), h_stride * n_run * sizeof(cbf16_t)));
+    auto* y_alloc = direct_grid
+                        ? nullptr
+                        : static_cast<cbf16_t*>(compat::aligned_alloc(compat::page_size(), y_stride * n_run * sizeof(cbf16_t)));
+    auto* s_alloc = static_cast<float*>(compat::aligned_alloc(compat::page_size(), head.nof_ports * sizeof(float)));
+    if ((h_alloc == nullptr) || ((y_alloc == nullptr) && !direct_grid) || (s_alloc == nullptr)) {
+      compat::aligned_free(h_alloc);
+      compat::aligned_free(y_alloc);
+      compat::aligned_free(s_alloc);
+      return nil;
+    }
+    if (gather_run && !direct_grid && !eq_gather_tables(engine, enc, *gather_plan)) {
       compat::aligned_free(h_alloc);
       compat::aligned_free(y_alloc);
       compat::aligned_free(s_alloc);
@@ -1360,9 +1564,12 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     eq_strides_t strides{};
     strides.nof_symbols = n_run;
     strides.h_stride    = static_cast<unsigned>(h_stride);
-    strides.y_stride    = static_cast<unsigned>(y_stride);
-    strides.eq_stride   = eq_stride_elems;
-    strides.nv_stride   = nv_stride_elems;
+    // A direct run steps through the GRID's own symbols: its symbols are consecutive rows, so the
+    // per-symbol stride is the grid's symbol stride and the port spread within a symbol is the
+    // kernel's p.nof_re - which is the grid's subcarrier spread only because the run is single-port.
+    strides.y_stride  = direct_grid ? gather_plan->grid.symb_stride : static_cast<unsigned>(y_stride);
+    strides.eq_stride = eq_stride_elems;
+    strides.nv_stride = nv_stride_elems;
     for (unsigned k = 0; k != n_run; ++k) {
       if (k >= eq_max_run_symbols) {
         break; // a run never spans more symbols than the table holds (the flush batches at most 14)
@@ -1404,12 +1611,29 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     const size_t nv_bytes = ((static_cast<size_t>(n_run) - 1) * nv_stride_elems + static_cast<size_t>(head.nof_re) * head.nof_layers) * sizeof(float);
 
     wrapped_buffer b_h = wrap_buffer(engine, h_run_binding.buffer, h_bytes);
-    wrapped_buffer b_y = wrap_buffer(engine, y_alloc, y_bytes);
+    // The received symbols are bound where they are: for a direct run that is the grid itself, at the
+    // run's first symbol and the allocation's first subcarrier - the very elements the gather would
+    // have copied into the staging buffer, in the very order (see eq_direct_grid_run).
+    wrapped_buffer b_y;
+    bool           y_grid_wrap_failed = false;
+    if (direct_grid) {
+      wrapped_buffer b_grid = wrap_buffer(engine, gather_plan->grid.base, grid_view_bytes(gather_plan->grid));
+      if (b_grid.buffer == nil) {
+        eq_direct_note_miss(eq_direct_miss::nobuf);
+        y_grid_wrap_failed = true;
+      } else {
+        const size_t first_elem = static_cast<size_t>(direct_subc) +
+                                  static_cast<size_t>(direct_first_symbol) * gather_plan->grid.symb_stride;
+        b_y = wrapped_buffer{b_grid.buffer, b_grid.offset + first_elem * sizeof(cbf16_t)};
+      }
+    } else {
+      b_y = wrap_buffer(engine, y_alloc, y_bytes);
+    }
     wrapped_buffer b_s = wrap_buffer(engine, s_alloc, s_bytes);
     wrapped_buffer b_eq = wrap_buffer(engine, head.eq, eq_bytes);
     wrapped_buffer b_nv = wrap_buffer(engine, head.nv, nv_bytes);
-    if ((b_h.buffer == nil) || (b_y.buffer == nil) || (b_s.buffer == nil) || (b_eq.buffer == nil) ||
-        (b_nv.buffer == nil)) {
+    if (y_grid_wrap_failed || (b_h.buffer == nil) || (b_y.buffer == nil) || (b_s.buffer == nil) ||
+        (b_eq.buffer == nil) || (b_nv.buffer == nil)) {
       engine->last_call_no_copy = false;
       compat::aligned_free(h_alloc);
       compat::aligned_free(y_alloc);
@@ -1418,13 +1642,14 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     }
     engine->last_call_no_copy = true;
 
-    // The received symbols: the gather dispatch reads them off the grid into the run's y region,
-    // right before the equalization that consumes them. Both are dispatches of this same command
-    // buffer and the gather has a pipeline of its own, so the burst's barrier between pipelines
-    // orders the two - and the grid's producing FFT is ordered by the queue, since the demodulator
-    // has already waited for every symbol of the slot before it reads the grid on the host for the
-    // channel estimates.
-    if (gather_run) {
+    // The received symbols: when the run is NOT read in the grid, the gather dispatch reads them off
+    // it into the run's y region, right before the equalization that consumes them. Both are
+    // dispatches of this same command buffer and the gather has a pipeline of its own, so the burst's
+    // barrier between pipelines orders the two - and the grid's producing FFT is ordered by the queue,
+    // since the demodulator has already waited for every symbol of the slot before it reads the grid
+    // on the host for the channel estimates. A direct run needs neither the dispatch nor the barrier:
+    // it reads the grid exactly where the gather would have read it.
+    if (gather_run && !direct_grid) {
       wrapped_buffer b_grid = wrap_buffer(engine, gather_plan->grid.base, grid_view_bytes(gather_plan->grid));
       if (b_grid.buffer == nil ||
           !eq_encode_gather_dispatch(enc,
@@ -1443,6 +1668,12 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
         compat::aligned_free(s_alloc);
         return nil;
       }
+    }
+    if (direct_grid) {
+      eq_site_diag().y_direct.fetch_add(1, std::memory_order_relaxed);
+      eq_direct_diag().direct.fetch_add(1, std::memory_order_relaxed);
+    } else if (gather_run) {
+      eq_direct_diag().gathered.fetch_add(1, std::memory_order_relaxed);
     }
 
     // A single-symbol run keeps the per-symbol kernel: it is the path every caller already
@@ -1471,9 +1702,12 @@ static id<MTLComputePipelineState> eq_flush_hook(void* context, id<MTLComputeCom
     }
 
     // The group staging stays alive until the command buffer that reads it completes: it is
-    // recycled by the next flush, which the caller only reaches after waiting (see wait()).
+    // recycled by the next flush, which the caller only reaches after waiting (see wait()). A direct
+    // run has no y staging to keep - its received symbols are the grid's own bytes.
     eq_flush_state().inflight.push_back(h_alloc);
-    eq_flush_state().inflight.push_back(y_alloc);
+    if (y_alloc != nullptr) {
+      eq_flush_state().inflight.push_back(y_alloc);
+    }
     eq_flush_state().inflight.push_back(s_alloc);
     any_batch = true;
     first += n_run;

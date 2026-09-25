@@ -54,7 +54,8 @@ void ch_gather_desc::build(const crb_bitmap&                         rb_mask,
     run.entry_base        = nof_entries;
     run.nof_entries       = 0;
 
-    unsigned dest = 0;
+    const unsigned entry_base = nof_entries;
+    unsigned       dest       = 0;
     for (unsigned prb = rb_mask.find_lowest(), last_prb = rb_mask.find_highest(); prb <= last_prb; ++prb) {
       if (!rb_mask.test(prb)) {
         continue;
@@ -71,5 +72,14 @@ void ch_gather_desc::build(const crb_bitmap&                         rb_mask,
       }
     }
     run.nof_entries = dest;
+
+    // Whether those entries ARE the grid's own run (see ch_gather_symbol::dense): read off the table
+    // just built instead of re-deriving it from the masks, so that "the plan describes the grid in
+    // place" is decided by the SAME elements a gather would copy - the two cannot drift apart.
+    run.dense     = (dest != 0);
+    run.subc_base = (dest != 0) ? entries[entry_base].subc : 0;
+    for (unsigned i = 1; run.dense && (i != dest); ++i) {
+      run.dense = (entries[entry_base + i].subc == static_cast<unsigned>(run.subc_base) + i);
+    }
   }
 }

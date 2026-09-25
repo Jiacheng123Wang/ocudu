@@ -52,6 +52,8 @@
 #   D13 (6.20/6.21, INFO) the commit handshake: how often a consumer was handed a generation whose carrier had
 #       not been committed yet (each of those was a 5.00 s queue hold before the handshake, 6.20) and how often
 #       that confirmation never came (the consumer is then ordered on the HOST; must be 0)
+#   D18 (6.48, INFO) the equalizer's received symbols: read IN THE GRID (one dispatch less per run, plus the
+#       device table build only a gather needs) or still gathered - with the reason the run fell back
 #       (D1-D4 are the criteria the Q9 fix is confirmed by; a leg flown BEFORE it reads them RED, which is the
 #        point - the same leg is what the fix is measured against)
 # "Cannot read" is RED, never absent - the lesson of 5.9.97.
@@ -499,6 +501,30 @@ else
     check "[INFO] D17 (6.41) did the transmit hand-over have time left" "reported, not judged" INFO \
           "transmissions=${tx_n:-?} min=${tx_min:-?}us AT/BELOW 0=${tx_late} against ${rf_fail} RF failure(s) in the .log (the hand-over explains at most $(( tx_late * 100 / (rf_fail > 0 ? rf_fail : 1) ))% of them). ${call_verdict}"
   fi
+fi
+# D18 (dev doc 6.48, INFO): where the equalizer's RECEIVED SYMBOLS came from. The gather dispatch is a pure
+# copy whose only cost is its launch (6.44/6.46: ~12 us per dispatch), so when a run's symbols ARE the grid's own
+# consecutive subcarriers the equalization reads them in place and the hop issues one dispatch less per run - plus
+# the device-side table build that only a gather needs. `y_gather>0` with `y_direct=0` is NOT a defect: it is the
+# fallback, and the miss histogram says which clause declined (holes = the DM-RS comb or a PRB gap). A leg flown
+# before 6.48 has no line and says so instead of reading as zero.
+direct_line=$(grep -a "\[metal_stats\] eq_direct sites(" "$LEGF" | tail -1)
+direct_n=$(printf '%s' "$direct_line" | grep -oE "y_direct=[0-9]+" | grep -oE "[0-9]+$")
+direct_g=$(printf '%s' "$direct_line" | grep -oE "y_gather=[0-9]+" | grep -oE "[0-9]+$")
+direct_miss=$(printf '%s' "$direct_line" | grep -oE "miss\([^)]*\)")
+direct_disabled=$(printf '%s' "$direct_line" | grep -oE "disabled=[0-9]+" | grep -oE "[0-9]+$")
+if [ -z "${direct_line:-}" ]; then
+  check "[INFO] D18 (6.48) did the equalizer read the received symbols in the grid" "reported, not judged" INFO \
+        "no '[metal_stats] eq_direct' line: a leg flown before 6.48 cannot say"
+elif [ "${direct_n:-0}" = "0" ] && [ "${direct_disabled:-0}" != "0" ]; then
+  check "[INFO] D18 (6.48) did the equalizer read the received symbols in the grid" "reported, not judged" INFO \
+        "${direct_miss}: the direct-grid path was DECLINED every time by the knob (OCUDU_EQ_DIRECT_GRID=0) - this is the A/B control arm"
+elif [ "${direct_n:-0}" = "0" ]; then
+  check "[INFO] D18 (6.48) did the equalizer read the received symbols in the grid" "reported, not judged" INFO \
+        "y_direct=0 y_gather=${direct_g:-?} ${direct_miss}: EVERY run kept its gather (the fallback, not a loss) - read the reason before the window: holes = the allocation or the DM-RS comb leaves gaps, ports = more than one receive port"
+else
+  check "[INFO] D18 (6.48) did the equalizer read the received symbols in the grid" "reported, not judged" INFO \
+        "y_direct=${direct_n} y_gather=${direct_g:-0} ${direct_miss}: the equalization read the grid in place  <-- compare 'burst dispatches' and the V1 median against the leg's own control arm (6.48)"
 fi
 occ_line=$(grep -a "queue occupancy (Q9-F3): commits=" "$LEGF" | tail -1)
 occ_hole=$(grep -a "hole .*-> next label" "$LEGF" | head -1)

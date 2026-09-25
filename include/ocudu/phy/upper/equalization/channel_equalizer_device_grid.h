@@ -62,6 +62,20 @@ struct ch_gather_symbol {
   unsigned entry_base = 0;
   /// Number of entries of the symbol, i.e. its number of resource elements.
   unsigned nof_entries = 0;
+  /// \brief Grid subcarrier of the symbol's first entry (only meaningful when \ref dense).
+  unsigned subc_base = 0;
+  /// \brief Whether the symbol's entries ARE the grid's own run of subcarriers, in order.
+  ///
+  /// True when entry \c i of the symbol reads grid subcarrier <tt>subc_base + i</tt> - which is what
+  /// makes the equalizer's input a window of the grid rather than a rearrangement of it: the
+  /// equalizer consumes exactly \ref nof_entries consecutive cbf16_t per symbol, in the order the
+  /// entries list them, so with this flag set the bytes it would be handed by a gather are already
+  /// in place and no gather is needed (dev doc 6.47 variant A).
+  ///
+  /// It is false whenever the symbol's resource elements leave a hole in the grid: the DM-RS comb
+  /// (when the DM-RS symbols carry no data) and a gap between allocated PRBs both make the entries
+  /// skip subcarriers, and the consumer cannot express that with an offset and a stride.
+  bool dense = false;
 };
 
 /// \brief Device gather plan of one hop: which grid elements become the equalizer's input.
