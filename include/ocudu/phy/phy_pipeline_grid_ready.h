@@ -205,6 +205,53 @@ private:
   }
 };
 
+/// \brief The hand-over's PRODUCER-side unstick: "the receive pool is dry - commit whatever nobody claimed,
+///        NOW" (Q9-A, development document 6.13).
+///
+/// WHY IT NEEDS A HOOK AT ALL. A block the registry holds unclaimed keeps the receiving chain's INPUT out of
+/// the receive pool (dft_metal_engine::retain_for_block), so a pool that has run DRY is exactly the state in
+/// which the registry has something to give back. The sweep that reaps those blocks runs at every registry
+/// entry point - but the pathology this exists for is a TOTAL stall, and a total stall has no entry point:
+/// the receive thread is parked on the empty pool (so there is no deposit), and the UL pipeline is blocked
+/// behind the very blocks that are waiting for a buffer. Measured on leg \c p08-conc2: the worst block's
+/// claim arrived **5.945 s** after its deposit - i.e. NOT ONE registry entry point ran for 5.9 s - and its
+/// command buffer then completed in **2.6 ms**, so the whole 5.9 s was the registry waiting for a caller
+/// that never came.
+///
+/// The thread that must not wait for a caller is the one that IS parked: before it blocks on the pool it
+/// asks the registry to reap, and the reaped blocks' commits release the buffers it is waiting for.
+///
+/// \note Called from the LOWER PHY's receive path only when the pool has nothing to hand out, so a healthy
+///       run pays nothing at all. The implementation never blocks and does nothing when it has nothing to
+///       reap; a build without Metal has no implementation and this is a no-op.
+class handover_reap_hook
+{
+public:
+  using reap_fn = void (*)();
+
+  /// Installs the implementation (called by the Metal engines once, on first use).
+  static void install(reap_fn fn) { fn_ref().store(fn, std::memory_order_release); }
+
+  /// Whether an implementation is installed (diagnostics and tests).
+  static bool installed() { return fn_ref().load(std::memory_order_acquire) != nullptr; }
+
+  /// See the class documentation. Safe to call when nothing is installed.
+  static void reap()
+  {
+    reap_fn fn = fn_ref().load(std::memory_order_acquire);
+    if (fn != nullptr) {
+      fn();
+    }
+  }
+
+private:
+  static std::atomic<reap_fn>& fn_ref()
+  {
+    static std::atomic<reap_fn> fn{nullptr};
+    return fn;
+  }
+};
+
 /// \brief Whether this run asks the receiving chain to HAND OVER its block instead of committing it
 ///        (D1's knob, \c OCUDU_DFT_RELEASE_BLOCK).
 ///

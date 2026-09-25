@@ -1243,6 +1243,77 @@ int main()
                    static_cast<unsigned long long>(q9_after.late_commits_time));
     }
 
+    // ---- Arm 12 (Q9-A): a DRY receive pool reaps a block with NO other registry entry point -----------
+    // The sweep runs at every registry entry point - and the pathology it exists for is a stall in which there
+    // is no entry point at all: leg `p08-conc2` had a block claimed 5.945 s after its deposit whose command
+    // buffer then completed in 2.6 ms, i.e. the registry spent 5.9 s waiting for a caller. The thread that is
+    // about to park on an empty pool is the one caller that is always there, so it drives the sweep itself
+    // (handover_reap_hook <- lower_phy_baseband_processor::pop_rx_buffer_blocking()). This arm is its side of
+    // the contract: reap() alone - no deposit, no take, no host read - must reap and give the input back.
+    {
+      keep_alive_probe q9a_probe;
+      constexpr uint64_t q9a_slot = test_slot + 500;
+      const metal::shared_burst::handed_counters q9a_before = metal::shared_burst::handed_stats();
+
+      metal::dft_metal_engine::grid_write write;
+      write.grid_base  = grid_base;
+      write.grid_bytes = grid_bytes;
+      write.dst_offset = dst_offset;
+      write.nof_subc   = nof_subc;
+      write.map_offset = transform_size - nof_subc / 2;
+      write.phase_re   = 1.0F;
+      engine.set_lane_slot(q9a_slot);
+      if (!engine.begin_block() || !engine.submit_slot_grid_write(in_mem, out_mem, 0, write) ||
+          !engine.retain_for_block(q9a_probe.token()) || (engine.release_block(grid_base) == nullptr)) {
+        std::fprintf(stderr, "FAIL: the Q9-A arm could not stage its orphan\n");
+        return 1;
+      }
+      // Past the TIME deadline, and then only the hook: the deposit above was this arm's last registry call.
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      if (!handover_reap_hook::installed()) {
+        std::fprintf(stderr,
+                     "FAIL (Q9-A): no reap hook is installed, so a parked receive thread cannot reach the "
+                     "registry at all\n");
+        return 1;
+      }
+      handover_reap_hook::reap();
+      for (unsigned spin = 0; (spin != 2000) && (q9a_probe.releases.load() == 0); ++spin) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      if (q9a_probe.releases.load() != 1) {
+        std::fprintf(stderr,
+                     "FAIL (Q9-A): the dry pool asked for a reap and the input came back %u times, expected 1 - "
+                     "a receive thread parked on an empty pool would stay parked for good\n",
+                     q9a_probe.releases.load());
+        return 1;
+      }
+      const metal::shared_burst::handed_counters q9a_after = metal::shared_burst::handed_stats();
+      if ((q9a_after.reaped_by_park_events <= q9a_before.reaped_by_park_events) ||
+          (q9a_after.reaped_by_park_blocks <= q9a_before.reaped_by_park_blocks) ||
+          (q9a_after.late_commits_time <= q9a_before.late_commits_time)) {
+        std::fprintf(stderr,
+                     "FAIL (Q9-A): the input came back but the DRY-POOL counters did not move (events %llu->%llu, "
+                     "blocks %llu->%llu, late_time %llu->%llu) - the arm is not measuring the path it claims\n",
+                     static_cast<unsigned long long>(q9a_before.reaped_by_park_events),
+                     static_cast<unsigned long long>(q9a_after.reaped_by_park_events),
+                     static_cast<unsigned long long>(q9a_before.reaped_by_park_blocks),
+                     static_cast<unsigned long long>(q9a_after.reaped_by_park_blocks),
+                     static_cast<unsigned long long>(q9a_before.late_commits_time),
+                     static_cast<unsigned long long>(q9a_after.late_commits_time));
+        return 1;
+      }
+      std::fprintf(stderr,
+                   "[dft-release] arm 12 (Q9-A): a DRY pool reaped an unclaimed block with NO other registry "
+                   "entry point - input released exactly once, dry-pool events %llu->%llu, blocks %llu->%llu, "
+                   "late_time %llu->%llu\n",
+                   static_cast<unsigned long long>(q9a_before.reaped_by_park_events),
+                   static_cast<unsigned long long>(q9a_after.reaped_by_park_events),
+                   static_cast<unsigned long long>(q9a_before.reaped_by_park_blocks),
+                   static_cast<unsigned long long>(q9a_after.reaped_by_park_blocks),
+                   static_cast<unsigned long long>(q9a_before.late_commits_time),
+                   static_cast<unsigned long long>(q9a_after.late_commits_time));
+    }
+
     // ---- Arm 10: "no record" must never mean "the write is still in flight" (5.9.62) ----------------
     // The registry's eviction loop erases entries, and a reader that finds NOTHING cannot wait - so an entry
     // erased before its block COMPLETED is the one way a hop can read a grid nobody has written. Until

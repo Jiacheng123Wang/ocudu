@@ -204,6 +204,18 @@ public:
   /// Whether a grid wait is pending for this thread's next burst (diagnostics).
   static bool grid_wait_pending();
 
+  /// \brief Q9-A: reaps every block nobody has claimed, RIGHT NOW, on behalf of a caller that is about to
+  ///        park (see handover_reap_hook, development document 6.13).
+  ///
+  /// The sweep this runs is the same one every registry entry point runs - claim every block past its window,
+  /// commit it after dropping the lock - so a thread that is itself the reason no entry point is reached (a
+  /// receive thread parked on an empty pool) can break the stall without a consumer coming. It never blocks
+  /// and does nothing when there is nothing to reap.
+  ///
+  /// \note Tracked by `reaped_by_park_events` / `reaped_by_park_blocks`, because an instrument that fires and
+  ///       is never counted is how "the fix is in" gets believed without a reading.
+  static void reap_unclaimed_now();
+
   /// \brief How many deposits the registry holds before it starts dropping them (see handed_counters).
   ///
   /// A record lives until its grid has been PRODUCED (so a late reader can be told "already written" rather
@@ -269,6 +281,19 @@ public:
     uint64_t produced_count       = 0;
     uint64_t produced_wait_max_us = 0;
     uint64_t produced_wait_sum_us = 0;
+    /// \name Q9-B: the part of `deposit -> completion` that came AFTER the registry issued the commit.
+    ///
+    /// Only blocks the REGISTRY committed are counted (the sweep, a host reader's fallback, a superseded
+    /// entry): a block a hop claimed is committed by the lane, and the lane probe's own commit -> completion
+    /// table covers those. The pair is what separates the two ways a block can be late - "nobody committed
+    /// it" (this stays 0 while `produced_wait_us` is huge) from "it was committed at once and still took
+    /// seconds to complete" (this is the seconds) - and on leg `p08-conc2` the answer was the second one:
+    /// claimed at 3.0 ms, committed immediately, completed 5.003 s later.
+    ///@{
+    uint64_t commit_count       = 0;
+    uint64_t commit_wait_max_us = 0;
+    uint64_t commit_wait_sum_us = 0;
+    ///@}
     /// Gauge: the most entries sitting NEITHER claimed NOR produced at once, and the oldest such entry seen.
     ///
     /// The one number that separates "the registry is busy" from "the registry is where the chain parks": a
@@ -284,6 +309,10 @@ public:
       uint64_t slot            = 0;
       uint64_t claim_wait_us   = 0;
       uint64_t produced_wait_us = 0;
+      /// Q9-B: the part of the above the registry's own commit is responsible for, and whether the registry
+      /// was the one that committed this block at all (`registry_commit`).
+      uint64_t commit_wait_us  = 0;
+      bool     registry_commit = false;
       bool     claimed          = false;
       bool     swept            = false; ///< claimed by the SWEEP (late_commits), not by a hop
       uint64_t used             = 0;
@@ -326,6 +355,17 @@ public:
     uint64_t grid_not_found = 0;
     /// Host waits that timed out: the grid the caller was about to read was NOT ready.
     uint64_t ready_timeouts = 0;
+    /// \name Q9-A: the sweeps a DRY receive pool drove itself (see reap_unclaimed_now()).
+    ///
+    /// The two are read together and mean different things: `reaped_by_park_events` is how often a thread that
+    /// was about to park asked the registry to reap, `reaped_by_park_blocks` how many unclaimed blocks that
+    /// recovered. A leg with events but no blocks is a leg whose stalls are NOT unclaimed blocks (the holder
+    /// is then a CLAIMED block, which the sweep must not touch - encoding into a committed buffer is an error),
+    /// and a leg with blocks is a leg where the "nobody asks the registry" hole was the one that mattered.
+    ///@{
+    uint64_t reaped_by_park_events = 0;
+    uint64_t reaped_by_park_blocks = 0;
+    ///@}
   };
   static handed_counters handed_stats();
 

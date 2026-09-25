@@ -4,6 +4,7 @@
 #include "tests/test_doubles/utils/test_rng.h"
 #include "ocudu/adt/blocking_queue.h"
 #include "ocudu/support/test_utils.h"
+#include <chrono>
 #include <gtest/gtest.h>
 
 using namespace ocudu;
@@ -92,4 +93,38 @@ TEST(blocking_queue_test, blocking_push_and_pop_in_batches_in_separate_threads)
 
   queue.stop();
   t.join();
+}
+
+// pop_wait_for() is the bounded wait the LOWER PHY's receive path uses when the pool is dry (Q9-A, dev doc
+// 6.13): it waits at most the given duration, and it must report the three outcomes apart - SUCCESS when an
+// element arrived, TIMEOUT when the duration passed with none, and FAILED when the queue was stopped - because
+// the caller's loop reaps and asks again on TIMEOUT and must give up (returning the same null buffer
+// pop_blocking() would) on FAILED. Nothing else in the tree used the call before that loop, so this is where
+// its contract is pinned.
+TEST(blocking_queue_test, pop_wait_for_reports_success_timeout_and_stop)
+{
+  blocking_queue<int> queue(4);
+
+  // SUCCESS: an element is already there, and the wait costs nothing.
+  ASSERT_TRUE(queue.try_push(7));
+  int          value = 0;
+  const auto   deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+  const auto   success  = queue.pop_wait_for(value, std::chrono::milliseconds(50));
+  ASSERT_EQ(success, decltype(success)::success);
+  ASSERT_EQ(value, 7);
+  ASSERT_LT(std::chrono::steady_clock::now(), deadline);
+
+  // TIMEOUT: empty, and the call returns after its own bound rather than blocking forever.
+  const auto t0      = std::chrono::steady_clock::now();
+  const auto timeout = queue.pop_wait_for(value, std::chrono::milliseconds(20));
+  const auto waited  = std::chrono::steady_clock::now() - t0;
+  ASSERT_EQ(timeout, decltype(timeout)::timeout);
+  ASSERT_GE(waited, std::chrono::milliseconds(20));
+
+  // FAILED: a stopped queue releases the waiter with "failed" (what the receive path turns into the null
+  // buffer), and it does so well before the bound.
+  queue.stop();
+  const auto stopped = queue.pop_wait_for(value, std::chrono::seconds(10));
+  ASSERT_EQ(stopped, decltype(stopped)::failed);
+  ASSERT_LT(std::chrono::steady_clock::now() - t0, std::chrono::seconds(5));
 }

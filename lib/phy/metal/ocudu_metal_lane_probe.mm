@@ -164,6 +164,30 @@ struct lane_stats_t {
   double   stage_busy_us[static_cast<unsigned>(gpu_lane_probe::stage::count)] = {};
   uint64_t stage_cbs[static_cast<unsigned>(gpu_lane_probe::stage::count)]     = {};
 
+  /// \name Q9-B: the slowest command buffers of the run, by commit -> completion.
+  ///
+  /// WHY IT EXISTS. P0-7 says a block was CLAIMED promptly and still released its input seconds later; what
+  /// happens between the two is the command buffer's life, and only the GPU timestamps can split it:
+  /// `commit -> start` is the queue not having started it (the GPU was busy with something ahead of it),
+  /// `start -> end` is the device holding it (a device-side fence wait shows up here, as the GPU keeps the
+  /// buffer), and `commit -> end` is what the hand-over's reader actually paid. On `p08-conc2` the registry's
+  /// claim came in 3.0 ms and the completion 5.003 s later, and no line in the report could say where those
+  /// 5 s were - which is the whole reason this table exists.
+  static constexpr unsigned nof_slow_cbs = 8;
+  struct slow_cb {
+    uint64_t slot               = 0;
+    bool     has_slot           = false;
+    bool     used               = false;
+    unsigned stage              = 0;
+    double   commit_to_start_us = 0.0;
+    double   start_to_end_us    = 0.0;
+    double   commit_to_end_us   = 0.0;
+  };
+  slow_cb slow_cbs[nof_slow_cbs] = {};
+  /// Every resolved command buffer's commit -> completion, for the distribution behind the table above.
+  std::vector<double> commit_to_end_us;
+  ///@}
+
   uint64_t lanes        = 0;
   uint64_t cbs          = 0;
   uint64_t cbs_max      = 0;
@@ -456,6 +480,14 @@ void gpu_lane_probe::close_lane()
   // The entries this lane actually accounted for, kept so the queue diagnosis below can read the
   // estimator command buffer's own GPU start (see its comment).
   std::vector<lane_entry> entries_for_starts;
+  // Q9-B: the same entries with their GPU window, so the commit -> completion table can be maintained
+  // under the stats lock instead of in this loop.
+  struct resolved_entry {
+    lane_entry entry;
+    double     start = 0.0;
+    double     end   = 0.0;
+  };
+  std::vector<resolved_entry> resolved_entries;
   for (const lane_entry& entry : ts.pending) {
     if (entry.cb.status != MTLCommandBufferStatusCompleted) {
       // Still running (or scheduled but not started): its timestamps are not final, so it belongs to
@@ -479,6 +511,7 @@ void gpu_lane_probe::close_lane()
       last_end    = std::max(last_end, end);
     }
     entries_for_starts.push_back(entry);
+    resolved_entries.push_back(resolved_entry{entry, start, end});
     const double span = end - start;
     busy += span;
     stage_busy[idx(entry.which)] += span;
@@ -510,6 +543,30 @@ void gpu_lane_probe::close_lane()
   for (unsigned i = 0; i != static_cast<unsigned>(stage::count); ++i) {
     s.stage_busy_us[i] += stage_busy[i] * 1e6;
     s.stage_cbs[i] += stage_cbs[i];
+  }
+  // Q9-B: commit -> completion, per stage family, plus the slowest command buffers kept by that number.
+  const auto commit_seconds_of = [](const lane_entry& entry) {
+    return std::chrono::duration<double>(entry.commit_time.time_since_epoch()).count();
+  };
+  for (const resolved_entry& r : resolved_entries) {
+    const double commit_s = commit_seconds_of(r.entry);
+    const double to_end   = (r.end - commit_s) * 1e6;
+    s.commit_to_end_us.push_back(to_end);
+    lane_stats_t::slow_cb* worst = nullptr;
+    for (lane_stats_t::slow_cb& candidate : s.slow_cbs) {
+      if ((worst == nullptr) || (candidate.commit_to_end_us < worst->commit_to_end_us)) {
+        worst = &candidate;
+      }
+    }
+    if ((worst != nullptr) && (to_end > worst->commit_to_end_us)) {
+      worst->slot               = r.entry.slot;
+      worst->has_slot           = r.entry.has_slot;
+      worst->used               = true;
+      worst->stage              = static_cast<unsigned>(r.entry.which);
+      worst->commit_to_start_us = (r.start - commit_s) * 1e6;
+      worst->start_to_end_us    = (r.end - r.start) * 1e6;
+      worst->commit_to_end_us   = to_end;
+    }
   }
 
   // ---- P0-5: hold this lane under its slot until the phase sample of the SAME hop arrives -------------
@@ -940,6 +997,34 @@ void gpu_lane_probe::report()
   // to read identically zero.
   print_series("queue: weights commit -> weights start", queue_to_weights);
   print_series("queue: burst commit -> burst start", queue_to_burst);
+  // ---- Q9-B: where a command buffer's life went, for the ones that took the longest ------------------
+  //
+  // The hand-over's reader waits for the whole of `commit -> completion` (P0-7 measures it per BLOCK, and
+  // on `p08-conc2` it was 5.003 s for a block claimed in 3 ms). This splits that into the two things it can
+  // be: the queue not having started the buffer, and the device holding it - and the table names the worst
+  // ones with their slot, so a leg's answer is a row and not an average.
+  print_series("commit -> completion (Q9-B, all stages)", s.commit_to_end_us);
+  {
+    bool printed_header = false;
+    for (const lane_stats_t::slow_cb& slow : s.slow_cbs) {
+      if (!slow.used) {
+        continue;
+      }
+      if (!printed_header) {
+        std::fprintf(stderr,
+                     "[ul_gpu_lane] slowest command buffers by commit -> completion (Q9-B): commit->start is "
+                     "the queue, start->end is the device\n");
+        printed_header = true;
+      }
+      std::fprintf(stderr,
+                   "[ul_gpu_lane]   slot=%llu stage=%s commit->start=%.1fus start->end=%.1fus commit->end=%.1fus\n",
+                   static_cast<unsigned long long>(slow.slot),
+                   stage_name(static_cast<gpu_lane_probe::stage>(slow.stage)),
+                   slow.commit_to_start_us,
+                   slow.start_to_end_us,
+                   slow.commit_to_end_us);
+    }
+  }
   // The lane's gap split by where it sits, with the host's own reading of the same two transitions
   // next to each device hole (see lane_stats_t). The two device figures add up to gap whenever the
   // lane holds one command buffer per stage; the host figures say whether the host had handed that

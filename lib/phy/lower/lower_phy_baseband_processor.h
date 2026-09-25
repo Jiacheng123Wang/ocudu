@@ -10,6 +10,7 @@
 #include "ocudu/gateways/baseband/baseband_gateway_transmitter.h"
 #include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_dynamic.h"
 #include "ocudu/phy/lower/lower_phy_controller.h"
+#include "ocudu/phy/phy_pipeline_grid_ready.h"
 #include "ocudu/phy/lower/processors/downlink/downlink_processor_baseband.h"
 #include "ocudu/phy/lower/processors/uplink/uplink_processor_baseband.h"
 #include "ocudu/phy/lower/sampling_rate.h"
@@ -250,6 +251,28 @@ private:
   /// there, the references are not coming back at all - a completely different defect from a long hold, and
   /// the two look identical from the outside (real-time failures, a stalled radio).
   static void rx_pool_note_taken(size_t free_buffers, size_t pool_size);
+  /// \brief Takes a receive buffer, asking the hand-over to reap while the pool is DRY (Q9-A, dev doc 6.13).
+  ///
+  /// The plain `pop_blocking()` parks this thread until a buffer comes back, and that is exactly the state in
+  /// which the hand-over's registry cannot help itself: with the receive thread parked there is no deposit, so
+  /// none of the registry's entry points runs, and a block nobody claimed keeps the buffer this call is
+  /// waiting for out of the pool. So before parking, this asks the registry to reap (`handover_reap_hook`),
+  /// and it waits in bounded slices so a stall that outlives that one reap asks again. Measured on leg
+  /// `p08-conc2`: the worst block's claim came 5.945 s after its deposit and its command buffer then
+  /// completed in 2.6 ms - the whole 5.9 s was the registry waiting for a caller that never came.
+  ///
+  /// \note The healthy path is untouched: a pool that has a buffer hands it out through `try_pop()` and pays
+  ///       nothing - not even one hook call. A stopped queue returns a null buffer, exactly as the plain
+  ///       `pop_blocking()` does.
+  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> pop_rx_buffer_blocking();
+
+  /// \brief How long a dry pool waits before it asks the hand-over to reap again (see pop_rx_buffer_blocking()).
+  ///
+  /// 10 ms is two orders of magnitude below the stall this exists for (5 s) and far above a reaped block's
+  /// commit + completion (~ms), so a healthy pool is never asked twice for one stall and a stalled one is
+  /// asked often enough that its buffers come back as soon as the registry can give them.
+  static constexpr std::chrono::milliseconds rx_reap_slice{10};
+
   /// \brief P0-2: records how long the take BLOCKED (the `pop_blocking()` above it), in microseconds.
   ///
   /// The one wait the probe report cannot see: `[ul_rx_wait]` brackets `receiver.receive()`, and the take

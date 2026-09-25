@@ -553,6 +553,30 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
   tx_state.on_process_end();
 }
 
+std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_processor::pop_rx_buffer_blocking()
+{
+  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> buffer{};
+  if (rx_pool->buffers.try_pop(buffer)) {
+    // The healthy path: nothing to reap, nothing to wait for, and not one hook call.
+    return buffer;
+  }
+  // The pool is DRY, which is the only state in which the hand-over has something to give back - and the
+  // only state in which this thread is about to become unreachable by every registry entry point (see the
+  // header). Ask, then wait in bounded slices so a reaper that was not enough the first time is asked again.
+  for (;;) {
+    handover_reap_hook::reap();
+    const blocking_queue<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>>::result ret =
+        rx_pool->buffers.pop_wait_for(buffer, rx_reap_slice);
+    if (ret == decltype(ret)::success) {
+      return buffer;
+    }
+    if (ret == decltype(ret)::failed) {
+      // The queue was stopped: the caller gets the same null buffer the plain pop_blocking() would give it.
+      return std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>{};
+    }
+  }
+}
+
 void lower_phy_baseband_processor::ul_process()
 {
   // Check if it is running, notify stop and return without enqueueing more tasks.
@@ -564,7 +588,7 @@ void lower_phy_baseband_processor::ul_process()
   // Get receive buffer. The wait is measured (P0-2): this is the one place the receive can be parked by the
   // pool, and it is BEFORE receiver.receive(), so [ul_rx_wait] does not cover it.
   const auto rx_take_t0 = std::chrono::steady_clock::now();
-  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer = rx_pool->buffers.pop_blocking();
+  std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> rx_buffer = pop_rx_buffer_blocking();
   rx_pool_note_wait(
       std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - rx_take_t0).count());
   rx_pool_note_taken(rx_pool->buffers.size(), rx_pool->buffers.max_size());
@@ -629,7 +653,7 @@ void lower_phy_baseband_processor::ul_process()
         // The window has no room left for a whole symbol (a grid whose period does not tile it): retire
         // the buffer and start the next one at this boundary instead of splitting a symbol.
         const auto rx_fill_t0 = std::chrono::steady_clock::now();
-        rx_fill_buffer        = rx_pool->buffers.pop_blocking();
+        rx_fill_buffer        = pop_rx_buffer_blocking();
         rx_pool_note_wait(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
                                                                                 rx_fill_t0)
                               .count());

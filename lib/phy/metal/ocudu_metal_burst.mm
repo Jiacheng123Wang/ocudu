@@ -110,11 +110,23 @@ void slot_hop_plan_set_hook(uint64_t slot, unsigned hop_count, unsigned hop_inde
   slot_hop_plan().hop_index = hop_index;
 }
 
+/// \brief The Metal end of the pool-dry reap hook (include/ocudu/phy/phy_pipeline_grid_ready.h, Q9-A).
+///
+/// The LOWER PHY calls this from the thread that is about to park on an empty receive pool. It is the one
+/// caller the registry cannot reach on its own: a parked receive thread deposits nothing, so the "check at
+/// every entry point" rule has no entry point to run at, and the blocks holding the pool stay unclaimed for
+/// as long as the stall lasts (measured on `p08-conc2`: 5.945 s).
+void handover_reap_hook_impl()
+{
+  shared_burst::reap_unclaimed_now();
+}
+
 const bool grid_ready_hook_installed = []() {
   slot_hop_plan_hook::install(&slot_hop_plan_set_hook);
   grid_ready_hook::install(&grid_ready_wait_hook);
   grid_ready_hook::install_counts(&grid_handover_counts_hook);
   grid_ready_hook::install_claim(&grid_ready_claim_hook);
+  handover_reap_hook::install(&handover_reap_hook_impl);
   return true;
 }();
 
@@ -540,6 +552,17 @@ struct handed_entry {
   bool swept = false;
   /// Deposit -> completion, 0 while not produced.
   uint64_t produced_wait_us = 0;
+  /// \brief The moment the REGISTRY decided to commit this block (Q9-B), or the zero time when it did not.
+  ///
+  /// The registry commits a block itself in exactly three cases (the sweep, a host reader's fallback, and
+  /// the drop of a superseded entry) and hands the commit to the depositor's committer; a block a HOP claimed
+  /// is committed by the lane and never passes through here, so this stays zero for it. That is what makes
+  /// the pair below readable: a block with a commit time here whose completion was late was late *after* a
+  /// commit the registry had already issued - while a block without one waited for its claimer, which is a
+  /// different defect.
+  std::chrono::steady_clock::time_point commit_issued_at{};
+  /// Commit -> completion, in microseconds, 0 while the registry has not committed it or it is not produced.
+  uint64_t commit_wait_us = 0;
   ///@}
 };
 
@@ -647,9 +670,11 @@ static sweep_reason sweep_due(const handed_entry&                   entry,
 /// \param[out] commit_late Receives the blocks this call claimed, in order. The CALLER commits them AFTER
 ///             unlocking: a commit can run a completion handler (mark_handed_produced()), which takes this
 ///             same mutex - so committing under the lock would deadlock on it.
-static void sweep_unclaimed(handed_state& h, std::vector<id<MTLCommandBuffer>>& commit_late)
+/// \return How many blocks were reaped (the caller counts it - Q9-A's `reaped_by_park_blocks`).
+static size_t sweep_unclaimed(handed_state& h, std::vector<id<MTLCommandBuffer>>& commit_late)
 {
   const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+  size_t                                      reaped = 0;
   for (handed_entry& entry : h.entries) {
     const sweep_reason why = sweep_due(entry, h.newest_slot, now);
     if (why == sweep_reason::not_due) {
@@ -669,14 +694,17 @@ static void sweep_unclaimed(handed_state& h, std::vector<id<MTLCommandBuffer>>& 
       h.counters.claim_wait_sum_us += entry.claim_wait_us;
       h.counters.claim_wait_max_us = std::max(h.counters.claim_wait_max_us, entry.claim_wait_us);
     }
+    entry.commit_issued_at = now;
     commit_late.push_back(entry.cb);
     ++h.counters.late_commits;
+    ++reaped;
     if (why == sweep_reason::time_deadline) {
       // The subset the SLOT rule could not have caught: on a healthy (unwrapped) leg this stays small, and on
       // the leg that closed Q9 it is what says the time deadline is the rule that got the pool back.
       ++h.counters.late_commits_time;
     }
   }
+  return reaped;
 }
 ///@}
 
@@ -729,6 +757,8 @@ static void p0_note_produced(handed_state& h, const handed_entry& entry)
     worst->slot             = entry.slot;
     worst->claim_wait_us    = entry.claim_wait_us;
     worst->produced_wait_us = entry.produced_wait_us;
+    worst->commit_wait_us   = entry.commit_wait_us;
+    worst->registry_commit  = entry.commit_issued_at != std::chrono::steady_clock::time_point{};
     worst->claimed          = entry.claimed;
     worst->swept            = entry.swept;
     worst->used             = 1;
@@ -760,9 +790,19 @@ static void mark_handed_produced(id<MTLCommandBuffer> cb)
       // P0-7: deposit -> completion, the block's own end-to-end wait (its input tokens were held for this long
       // plus the slot's own time before the deposit).
       if (entry.deposited_at != std::chrono::steady_clock::time_point{}) {
-        entry.produced_wait_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                                           std::chrono::steady_clock::now() - entry.deposited_at)
-                                                           .count());
+        const std::chrono::steady_clock::time_point produced_at = std::chrono::steady_clock::now();
+        entry.produced_wait_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(produced_at - entry.deposited_at).count());
+        // Q9-B: how much of that wait came AFTER the registry had already committed the block. P0-7 said
+        // "claimed in 3 ms, completed in 5.003 s" and could not say which half the 5 s was in; this is the
+        // half the registry can see (the lane probe's commit -> completion table is the lane's half).
+        if (entry.commit_issued_at != std::chrono::steady_clock::time_point{}) {
+          entry.commit_wait_us = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::microseconds>(produced_at - entry.commit_issued_at).count());
+          ++h.counters.commit_count;
+          h.counters.commit_wait_sum_us += entry.commit_wait_us;
+          h.counters.commit_wait_max_us = std::max(h.counters.commit_wait_max_us, entry.commit_wait_us);
+        }
         p0_note_produced(h, entry);
       }
       return;
@@ -858,6 +898,7 @@ void shared_burst::deposit_released(const void*          grid_base,
         dropped.push_back(std::move(entry->on_drop));
       }
       if (!entry->claimed && !entry->produced) {
+        entry->commit_issued_at = std::chrono::steady_clock::now();
         commit_late.push_back(entry->cb);
       }
       released_after_unlock.push_back(entry->cb);
@@ -871,6 +912,8 @@ void shared_burst::deposit_released(const void*          grid_base,
       entry->deposited_at     = std::chrono::steady_clock::now();
       entry->claim_wait_us    = 0;
       entry->produced_wait_us = 0;
+      entry->commit_issued_at = std::chrono::steady_clock::time_point{};
+      entry->commit_wait_us   = 0;
       entry->swept            = false;
       ++h.counters.handed;
       ++h.counters.superseded;
@@ -936,7 +979,7 @@ void shared_burst::deposit_released(const void*          grid_base,
     // The sweep is what reaps those blocks, and since Q9 (§6.10) it is armed on TWO triggers - the receiving
     // chain's own progress in slots, and a 10 ms deadline on the host's monotonic clock - and evaluated at
     // EVERY entry point of the registry rather than on deposits alone (see sweep_unclaimed()).
-    sweep_unclaimed(h, commit_late);
+    (void)sweep_unclaimed(h, commit_late);
   }
   // NOTE: the completion handler was attached at the TOP of this function, BEFORE the entry was published -
   // it cannot be attached here, because by now another thread may already have claimed and committed the
@@ -980,7 +1023,7 @@ id<MTLCommandBuffer> shared_burst::take_released(const void* grid_base, uint64_t
     // ★ Q9: this is one of the two entry points that KEEP RUNNING while the radio is parked, so it is where
     // the sweep has to be evaluated (see sweep_unclaimed()). The block this caller came for was claimed ABOVE,
     // so the sweep can only reap what nobody asked for - a consumer that did come is never served a miss by it.
-    sweep_unclaimed(h, commit_late);
+    (void)sweep_unclaimed(h, commit_late);
   }
   for (id<MTLCommandBuffer> late : commit_late) {
     commit_dropped(late);
@@ -1018,7 +1061,8 @@ static uint64_t claim_grid_production(handed_state&                      h,
       // caller is about to read as garbage: the fallback a hand-over owes. Claimed and collected BEFORE the
       // sweep below, for the same reason as in take_released(): the block the caller asked about is served
       // first, and the sweep is only for what nobody came for.
-      entry->claimed = true;
+      entry->claimed          = true;
+      entry->commit_issued_at = std::chrono::steady_clock::now();
       to_commit.push_back(entry->cb);
       ++h.counters.fallback_commits;
     }
@@ -1026,7 +1070,7 @@ static uint64_t claim_grid_production(handed_state&                      h,
   // ★ Q9: the host reader is the other entry point that keeps running while the radio is parked - the PUCCH
   // and the SRS read their grids on the HOST thread, which the receive stall never blocks. This is where the
   // pool gets its buffers back when no deposit is coming (see sweep_unclaimed()).
-  sweep_unclaimed(h, to_commit);
+  (void)sweep_unclaimed(h, to_commit);
   return generation;
 }
 
@@ -1081,6 +1125,22 @@ uint64_t shared_burst::grid_production_generation(const void* grid_base, uint64_
   // The caller may also learn here that the block was already produced: the generation it gets then names a
   // value the event has reached, and encoding the wait on it is a satisfied wait rather than a mistake.
   return generation;
+}
+
+void shared_burst::reap_unclaimed_now()
+{
+  std::vector<id<MTLCommandBuffer>> commit_late;
+  {
+    handed_state&               h = handed();
+    std::lock_guard<std::mutex> lock(h.mutex);
+    // Counted BEFORE the sweep, so a leg can tell "a dry pool asked, and there was nothing to reap" (the
+    // holder is then a CLAIMED block, which the sweep must not touch) from "a dry pool never asked at all".
+    ++h.counters.reaped_by_park_events;
+    h.counters.reaped_by_park_blocks += sweep_unclaimed(h, commit_late);
+  }
+  for (id<MTLCommandBuffer> late : commit_late) {
+    commit_dropped(late);
+  }
 }
 
 void shared_burst::set_grid_wait(uint64_t generation)

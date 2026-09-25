@@ -67,7 +67,10 @@ public:
       std::future<bool>  fut = p.get_future();
 
       bool ret = reset_impl(&p);
-      fut.get();
+      // The call IS the wait (see the note above); the value it returns is the same one reset_impl() gave
+      // back, so ignoring it is deliberate - spelled out because the SDK's <future> marks get() nodiscard,
+      // which turns the bare call into an error under -Werror (Xcode 26's libc++, 2026-09-25).
+      (void)fut.get();
 
       return ret;
     }

@@ -440,7 +440,8 @@ static void dft_stats_report()
       std::fprintf(stderr,
                    "[metal_stats] block lifecycle (P0-7): claimed=%llu wait max=%.1fus mean=%.1fus; produced=%llu "
                    "deposit->completion max=%.1fus mean=%.1fus; unclaimed at once max=%llu, oldest unclaimed "
-                   "age max=%.1fus at slot=%llu\n",
+                   "age max=%.1fus at slot=%llu; registry commit->completion=%llu max=%.1fus mean=%.1fus "
+                   "(Q9-B); dry-pool reaps=%llu recovering %llu block(s)\n",
                    static_cast<unsigned long long>(hand.claim_count),
                    static_cast<double>(hand.claim_wait_max_us),
                    static_cast<double>(hand.claim_wait_sum_us) / claimed_n,
@@ -449,7 +450,17 @@ static void dft_stats_report()
                    static_cast<double>(hand.produced_wait_sum_us) / produced_n,
                    static_cast<unsigned long long>(hand.unclaimed_now_max),
                    static_cast<double>(hand.unclaimed_age_max_us),
-                   static_cast<unsigned long long>(hand.unclaimed_age_max_slot));
+                   static_cast<unsigned long long>(hand.unclaimed_age_max_slot),
+                   // Q9-B: the half of the completion wait that came after the registry had committed the
+                   // block - see handed_counters. Read against `deposit->completion` above: equal maxima mean
+                   // the commit was never the problem and the command buffer's own life was.
+                   static_cast<unsigned long long>(hand.commit_count),
+                   static_cast<double>(hand.commit_wait_max_us),
+                   static_cast<double>(hand.commit_wait_sum_us) / static_cast<double>(std::max<uint64_t>(1, hand.commit_count)),
+                   // Q9-A: how often a DRY receive pool drove the sweep itself, and how many unclaimed
+                   // blocks that recovered. Events without blocks = the stall was not an unclaimed block.
+                   static_cast<unsigned long long>(hand.reaped_by_park_events),
+                   static_cast<unsigned long long>(hand.reaped_by_park_blocks));
       bool printed_header = false;
       for (const auto& slow : hand.slowest) {
         if (slow.used == 0) {
@@ -463,12 +474,14 @@ static void dft_stats_report()
         }
         std::fprintf(stderr,
                      "[metal_stats]   slot=%llu claimed=%d swept=%d wait_for_a_claim=%.1fus "
-                     "deposit->completion=%.1fus\n",
+                     "deposit->completion=%.1fus registry_commit=%d commit->completion=%.1fus\n",
                      static_cast<unsigned long long>(slow.slot),
                      static_cast<int>(slow.claimed),
                      static_cast<int>(slow.swept),
                      static_cast<double>(slow.claim_wait_us),
-                     static_cast<double>(slow.produced_wait_us));
+                     static_cast<double>(slow.produced_wait_us),
+                     static_cast<int>(slow.registry_commit),
+                     static_cast<double>(slow.commit_wait_us));
       }
     }
     const uint64_t early_signals = s.token_early_signals.load(std::memory_order_relaxed);
