@@ -137,6 +137,11 @@ struct mmse_stats_t {
   // up the y staging at all, which is exactly what an A/B against OCUDU_CE_DEV_Y=0 must show.
   std::atomic<uint64_t> pilots_scatters{0};
   std::atomic<uint64_t> pilots_scatter_failures{0};
+  // Lever C (dev doc 6.61): how many K2 dispatches read the LSE DIRECTLY instead of the y slots the
+  // scatter builds. Counted at ENCODE time like the two above, and it is the other half of their
+  // reading: `device_y_writes` falling to 0 is only good news if this took its place, because a batch
+  // that staged no descriptor at all (the host staged y) also reports 0 there.
+  std::atomic<uint64_t> lse_applies{0};
   // S-7f-5w: how many hops had their noise variance computed on the device. Counted where the
   // kernels are ENCODED (the same command buffer that extracts the pilots), so it is the observable
   // that says whether the host gave up estimate_sigma2() at all.
@@ -219,6 +224,14 @@ static void mmse_stats_pilots_scatter_failure()
 #endif
 }
 
+/// Counts one K2 that read the LSE itself (see mmse_stats_t::lse_applies).
+static void mmse_stats_lse_apply()
+{
+#if defined(OCUDU_METAL_STATS)
+  mmse_stats().lse_applies.fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
 static void mmse_stats_pilots_sigma2()
 {
 #if defined(OCUDU_METAL_STATS)
@@ -294,7 +307,7 @@ static void mmse_stats_report()
   std::fprintf(stderr,
                "[metal_stats] mmse_ce commits=%llu waits=%llu max_in_flight=%llu guard=%llu/%llu "
                "guard_mean=%.1fus guard_max=%.1fus device_corr_builds=%llu corr_build_fail=%llu "
-               "device_y_writes=%llu y_write_fail=%llu device_sigma2=%llu refusals=",
+               "device_y_writes=%llu y_write_fail=%llu lse_applies=%llu device_sigma2=%llu refusals=",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.in_flight_max.load(std::memory_order_relaxed)),
@@ -306,6 +319,7 @@ static void mmse_stats_report()
                static_cast<unsigned long long>(s.corr_build_failures.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.pilots_scatters.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.pilots_scatter_failures.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.lse_applies.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.pilots_sigma2.load(std::memory_order_relaxed)));
   // Batch S13-P1: WHY a device stage did not run on a hop, when one did not. Printed on the same line
   // as the counts of what DID run, because the two are read together: "device_sigma2 == hops" and
@@ -432,6 +446,14 @@ struct mmse_engine_impl {
   id<MTLComputePipelineState>    inv_memnone_pipe = nil;
   id<MTLComputePipelineState>    weights_pipe = nil;
   id<MTLComputePipelineState>    apply_pipe  = nil;
+  /// K2 over the LSE (lever C of dev doc 6.61): the same h = W . y, with the pilot rows read from the
+  /// least-squares pilots instead of from the y slots the scatter builds. OPTIONAL on purpose - a
+  /// metallib that predates the route does not carry the symbol, and the engine then keeps encoding
+  /// the scatter (see mmse_engine::last_apply_read_lse(), which reports the route actually taken).
+  id<MTLComputePipelineState>    apply_lse_pipe = nil;
+  /// Whether the LAST weights call took that route (see mmse_engine::last_apply_read_lse): what the
+  /// estimator's y probe reads, and the only thing that tells the two routes' counters apart.
+  bool                           last_apply_lse = false;
   // K3: per-symbol, mask-compressed cbf16 estimates for the equalizer (optional, loaded on demand).
   id<MTLComputePipelineState>    reformat_pipe = nil;
   /// K5: the per-layer rsrp reduction over the same h (optional, like K3 and K4).
@@ -2010,6 +2032,17 @@ bool mmse_engine::init(const char* metallib_path)
                                                          options:MTLPipelineOptionNone
                                                       reflection:nil
                                                            error:&err];
+  // Lever C (dev doc 6.61): K2 that reads the least-squares pilots directly. Optional for the same
+  // reason as K3/K5 below - a metallib that predates the route leaves the scatter as the only reader,
+  // which is exactly the pre-6.62 behaviour. Its parameter struct is mmse_apply's plus a table, so an
+  // older kernel would misread it: the availability check is what keeps the two apart.
+  id<MTLFunction> app_lse_fn = [e->library newFunctionWithName:@"mmse_apply_lse"];
+  if (app_lse_fn != nil) {
+    e->apply_lse_pipe = [e->device newComputePipelineStateWithFunction:app_lse_fn
+                                                               options:MTLPipelineOptionNone
+                                                            reflection:nil
+                                                                 error:&err];
+  }
   // K3 (the equalizer's per-symbol estimates) is optional: a metallib that predates it keeps the
   // estimator working, and the caller then leaves the reformat stage out of the command buffer.
   id<MTLFunction> rfmt_fn = [e->library newFunctionWithName:@"mmse_reformat"];
@@ -2970,6 +3003,9 @@ bool mmse_engine::apply(const float* w, const float* y, float* h, unsigned nout,
   stage_encoder                st  = begin_stage(e, e->apply_pipe, /*fuse=*/false);
   id<MTLCommandBuffer>         cb  = st.cb;
   id<MTLComputeCommandEncoder> enc = st.enc;
+  // This entry point binds y directly and takes no descriptor at all, so it is the y route by
+  // definition - and the estimator's y probe must know that (see last_apply_read_lse).
+  e->last_apply_lse = false;
   [enc setComputePipelineState:e->apply_pipe];
   [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
   [enc setBuffer:y_buf.buf offset:y_buf.offset atIndex:1];
@@ -3049,6 +3085,12 @@ bool mmse_engine::scatter_available() const
 {
   auto* e = static_cast<mmse_engine_impl*>(impl);
   return (e != nullptr) && (e->pilots_scatter_pipe != nil);
+}
+
+bool mmse_engine::last_apply_read_lse() const
+{
+  auto* e = static_cast<mmse_engine_impl*>(impl);
+  return (e != nullptr) && e->last_apply_lse;
 }
 
 bool mmse_engine::epre_available() const
@@ -3502,6 +3544,188 @@ static bool encode_scatter(mmse_engine_impl* e, stage_encoder& st,
   return true;
 }
 
+/// Must match mmse_y_source in ocudu_mmse_apply_lse.metal.
+struct mmse_y_source_t {
+  uint32_t sys_lo;
+  uint32_t sys_hi;
+  uint32_t nof_layers;
+  uint32_t nof_pilots;
+  uint32_t nof_symb;
+  uint32_t pilot_base;
+  uint32_t npf;
+  uint32_t n_blk_real;
+  float    inv_beta;
+};
+static_assert(sizeof(mmse_y_source_t) == 36, "mmse_y_source_t must match mmse_y_source");
+
+/// Capacity of the source table, i.e. mmse_apply_max_sources in ocudu_mmse_apply_lse.metal and
+/// k_max_y_scatter in the estimator: a merged batch stages exactly two groups (the standard blocks
+/// and the narrower edge block), a split one stages one per batch.
+constexpr unsigned k_apply_max_sources = 2;
+
+/// Must match mmse_lse_params in ocudu_mmse_apply_lse.metal (its batch struct is
+/// mmse_apply_lse_batch, field for field mmse_apply_params).
+struct mmse_lse_params_t {
+  uint32_t        nof_sources;
+  mmse_y_source_t sources[k_apply_max_sources];
+};
+static_assert(sizeof(mmse_lse_params_t) == 4 + k_apply_max_sources * 36,
+              "mmse_lse_params_t must match mmse_lse_params");
+
+/// Lever C (dev doc 6.61): K2 reads the least-squares pilots itself instead of the y slots the pilot
+/// scatter builds, which removes that dispatch - one per staged group, so one per hop without an edge
+/// block and two with one.
+///
+/// DEFAULT ON, with OCUDU_CE_Y_DIRECT=0 keeping the scatter. The two routes compute the same values -
+/// the same `lse * inv_beta` product per row, accumulated in the same order, and the scatter's zeroed
+/// regions enter as `w * 0.0F` - so the knob is this route's exact A/B (ab_dumps.sh), and
+/// OCUDU_CE_DEV_Y=0 (the host stages y) remains the A/B of the WRITER. Setting both is refused here on
+/// purpose: with no descriptors there is no geometry to read the LSE with, so DEV_Y=0 always keeps the
+/// scatter (and counts y_direct_no_source).
+static bool y_direct_enabled()
+{
+  static const bool value = []() {
+    const char* env = std::getenv("OCUDU_CE_Y_DIRECT");
+    return (env == nullptr) || (std::strtoul(env, nullptr, 10) != 0);
+  }();
+  return value;
+}
+
+/// \brief Builds the LSE source table mmse_apply_lse() indexes, when this batch can be read that way.
+///
+/// The table is derived from the SAME descriptors the scatter would consume, so the two routes cannot
+/// disagree about a group: everything the kernel needs is a field of mmse_engine::pilots_scatter, and
+/// the group's SYSTEM range comes from the same pointer difference encode_scatter() turns into its
+/// offset (y_off / system stride) rather than from a second copy of the number - the failure mode the
+/// split-tail defect of S-7f-5l was made of.
+///
+/// \param[in] y_base      Start of the y buffer the batch call binds, for that difference.
+/// \param[in] y_buf_bytes The length that buffer was wrapped with (the extent the descriptors'
+///                        offsets are checked against, exactly as encode_scatter() checks them).
+/// \param[out] lse_buf    The LSE's mapping, taken once for the whole batch: every group of a hop
+///                        reads the same K0-a output, and this route binds ONE buffer.
+/// \return The number of sources written (0 = keep the scatter route).
+///
+/// EVERY gate here is a reason to keep the old route, never a correctness risk - the two routes
+/// publish the same values. Each one counts itself under its own mmse_refusal reason (printed with the
+/// engine statistics), because "the route did not engage" and "there was nothing to engage it for" are
+/// different findings and the totals alone cannot tell them apart.
+static unsigned build_lse_sources(mmse_engine_impl*                  e,
+                                  const mmse_engine::pilots_scatter* scatter,
+                                  unsigned                           nof_scatter,
+                                  unsigned                           nof_systems,
+                                  unsigned                           nof_blocks,
+                                  unsigned                           L,
+                                  const float*                       y_base,
+                                  std::size_t                        y_buf_bytes,
+                                  mmse_engine_impl::mapped&          lse_buf,
+                                  mmse_lse_params_t&                 out)
+{
+  out = {};
+  if (!y_direct_enabled()) {
+    mmse_refusals::count(mmse_refusal::y_direct_disabled);
+    return 0;
+  }
+  if ((e->apply_lse_pipe == nil) || (e->pilots_scatter_pipe == nil)) {
+    // The scatter is the fallback, so the route needs BOTH kernels: this one to read the LSE and that
+    // one to write y when a later gate refuses.
+    mmse_refusals::count(mmse_refusal::y_direct_no_kernel);
+    return 0;
+  }
+  if ((nof_scatter == 0) || (scatter == nullptr) || (y_base == nullptr) || (nof_systems == 0) ||
+      (nof_blocks == 0) || (L == 0) || (nof_systems > 32)) {
+    mmse_refusals::count(mmse_refusal::y_direct_no_source);
+    return 0;
+  }
+
+  mmse_lse_params_t tmp{};
+  unsigned          covered = 0; // one bit per system of the batch
+  for (unsigned i = 0; i != nof_scatter; ++i) {
+    const mmse_engine::pilots_scatter& s = scatter[i];
+    // One LSE for the whole batch: the groups of a hop read the same K0-a output, and this route binds
+    // one buffer (the scatter wrapped the source per descriptor; a reader cannot).
+    if ((s.lse == nullptr) || (s.y == nullptr) || (s.lse_bytes == 0) || (s.lse != scatter[0].lse) ||
+        (s.lse_bytes != scatter[0].lse_bytes)) {
+      mmse_refusals::count(mmse_refusal::y_direct_coverage);
+      return 0;
+    }
+    // The system range, from the very difference the scatter's offset is made of.
+    const std::ptrdiff_t y_off = reinterpret_cast<const char*>(s.y) - reinterpret_cast<const char*>(y_base);
+    const std::size_t    sys_stride =
+        static_cast<std::size_t>(nof_blocks) * 2 * static_cast<std::size_t>(L) * sizeof(float);
+    if ((y_off < 0) || (static_cast<std::size_t>(y_off) >= y_buf_bytes) ||
+        ((static_cast<std::size_t>(y_off) % sys_stride) != 0)) {
+      mmse_refusals::count(mmse_refusal::y_direct_coverage);
+      return 0;
+    }
+    const unsigned sys_lo = static_cast<unsigned>(static_cast<std::size_t>(y_off) / sys_stride);
+    const unsigned sys_hi = sys_lo + s.nof_layers;
+    if ((s.nof_layers == 0) || (sys_hi > nof_systems)) {
+      mmse_refusals::count(mmse_refusal::y_direct_coverage);
+      return 0;
+    }
+    // The geometry the kernel indexes with. mmse_apply_lse clamps what it can, but every one of these
+    // is a term of an address, so the contract is enforced here - where the numbers come from the same
+    // gate record_device_y_stage() already applied for the scatter.
+    const unsigned rows = s.nof_symb * s.npf;
+    const std::size_t lse_floats = static_cast<std::size_t>(s.nof_symb) * s.nof_layers * s.nof_pilots * 2;
+    if ((s.npf == 0) || (s.nof_symb == 0) || (s.n_blk_real == 0) || (s.n_blk_real > nof_blocks) ||
+        (rows > L) || (s.nof_pilots == 0) || (s.pilot_base + s.n_blk_real * s.npf > s.nof_pilots) ||
+        (lse_floats * sizeof(float) > s.lse_bytes)) {
+      mmse_refusals::count(mmse_refusal::y_direct_geometry);
+      return 0;
+    }
+    const unsigned mask = ((1U << (sys_hi - sys_lo)) - 1U) << sys_lo;
+    if ((covered & mask) != 0) {
+      // Two groups claiming one system: the table would answer with whichever comes first.
+      mmse_refusals::count(mmse_refusal::y_direct_coverage);
+      return 0;
+    }
+    covered |= mask;
+    mmse_y_source_t& d = tmp.sources[i];
+    d.sys_lo           = sys_lo;
+    d.sys_hi           = sys_hi;
+    d.nof_layers       = s.nof_layers;
+    d.nof_pilots       = s.nof_pilots;
+    d.nof_symb         = s.nof_symb;
+    d.pilot_base       = s.pilot_base;
+    d.npf              = s.npf;
+    d.n_blk_real       = s.n_blk_real;
+    d.inv_beta         = s.inv_beta;
+  }
+  // EVERY system of the batch has to be readable, because K2 is dispatched once for all of them: a
+  // batch with one group the host staged itself (no descriptor) would otherwise leave that group's
+  // systems reading whatever the table's first entry says.
+  if (covered != ((nof_systems == 32) ? 0xFFFFFFFFU : ((1U << nof_systems) - 1U))) {
+    mmse_refusals::count(mmse_refusal::y_direct_coverage);
+    return 0;
+  }
+  lse_buf = e->wrap(scatter[0].lse, scatter[0].lse_bytes);
+  if (lse_buf.buf == nil) {
+    mmse_refusals::count(mmse_refusal::y_direct_coverage);
+    return 0;
+  }
+  // PROVENANCE, once per process: which reader of the pilot rows this run is using, and the geometry
+  // of the first batch that took it. A leg's log has to say it - `ce_sites scatter=0` and
+  // `device_y_writes=0` are also what a run that never staged a group reports, and the offline A/B
+  // (ab_replay_bins.sh) pairs the two binaries BY this line.
+  static bool y_direct_provenance_printed = false;
+  if (!y_direct_provenance_printed) {
+    y_direct_provenance_printed = true;
+    std::fprintf(stderr,
+                 "[y_direct] K2 reads the least-squares pilots themselves: the pilot scatter is not "
+                 "encoded (lever C, dev doc 6.61; OCUDU_CE_Y_DIRECT=0 keeps the scatter). First batch: "
+                 "systems=%u blocks=%u L=%u groups=%u\n",
+                 nof_systems,
+                 nof_blocks,
+                 L,
+                 nof_scatter);
+  }
+  tmp.nof_sources = nof_scatter;
+  out             = tmp;
+  return nof_scatter;
+}
+
 static bool encode_run(mmse_engine_impl*     e,
                        float*                a,
                        const float*          r_hp,
@@ -3567,7 +3791,15 @@ static bool encode_run(mmse_engine_impl*     e,
   if ((corr != nullptr) || (corr_edge != nullptr)) {
     first_pipe = e->corr_a_pipe;
   }
-  if ((nof_scatter != 0) && (e->pilots_scatter_pipe != nil)) {
+  // Lever C (dev doc 6.61): when every system of this batch can be read out of the LSE itself, no
+  // scatter is encoded at all and K2 reads the pilots where K0-a left them. The decision is made HERE,
+  // before the first pipeline is chosen, because that choice is what tells begin_weights_stage() the
+  // buffer's first dispatch (see the barrier it derives from it).
+  mmse_engine_impl::mapped lse_buf;
+  mmse_lse_params_t      lse_params{};
+  const unsigned         nof_lse_sources = build_lse_sources(
+      e, scatter, nof_scatter, nof_systems, nof_blocks, L, y, y_bytes_used, lse_buf, lse_params);
+  if ((nof_scatter != 0) && (nof_lse_sources == 0) && (e->pilots_scatter_pipe != nil)) {
     first_pipe = e->pilots_scatter_pipe;
   }
   stage_encoder st;
@@ -3585,7 +3817,12 @@ static bool encode_run(mmse_engine_impl*     e,
   // deliberately did not stage these slots (the estimator skips its memcpy when it hands a
   // descriptor over), so a failure here has to abort the whole submission rather than commit a
   // buffer whose weights would read the previous hop's pilots.
-  for (unsigned i = 0; i != nof_scatter; ++i) {
+  //
+  // LEVER C (dev doc 6.61): when build_lse_sources() above returned a table, K2 reads K0-a's output
+  // itself and there is nothing to write - the branch is exclusive, so the batch either has a scatter
+  // per group or none at all, and the host staged y for neither (a group it staged has no descriptor,
+  // which is what makes the coverage gate above refuse).
+  for (unsigned i = 0; (nof_lse_sources == 0) && (i != nof_scatter); ++i) {
     if (!encode_scatter(e, st, scatter[i], y_buf, y, y_bytes_used)) {
       abandon_stage(e, st, adopted_held);
       return false;
@@ -3726,13 +3963,29 @@ static bool encode_run(mmse_engine_impl*     e,
   if (weights_barrier && !st.burst) {
     [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
   }
-  enc = stage_pipeline(e, st, e->apply_pipe);
-  [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
-  [enc setBuffer:y_buf.buf offset:y_buf.offset atIndex:1];
-  [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:2];
-  [enc setBytes:&aparams length:sizeof(aparams) atIndex:3];
-  [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
+  // K2: the same kernel contract, one of two readers of the pilot rows. With a source table the batch
+  // reads K0-a's least-squares pilots directly (lever C); without one it reads the y slots, which the
+  // scatter above wrote (glue #2).
+  e->last_apply_lse = (nof_lse_sources != 0);
+  if (nof_lse_sources != 0) {
+    enc = stage_pipeline(e, st, e->apply_lse_pipe);
+    [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
+    [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:1];
+    [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:2];
+    [enc setBytes:&aparams length:sizeof(aparams) atIndex:3];
+    [enc setBytes:&lse_params length:sizeof(lse_params) atIndex:4];
+    [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
+    mmse_stats_lse_apply();
+  } else {
+    enc = stage_pipeline(e, st, e->apply_pipe);
+    [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
+    [enc setBuffer:y_buf.buf offset:y_buf.offset atIndex:1];
+    [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:2];
+    [enc setBytes:&aparams length:sizeof(aparams) atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
+  }
 
   for (unsigned rep = 0; rep != mmse_engine_impl::reformat_repeat(); ++rep) {
     encode_reformat(st, e, h_buf, reformat, nout, nof_blocks);
@@ -4085,7 +4338,13 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   if (corr != nullptr) {
     first_pipe = e->corr_a_pipe;
   }
-  if ((nof_scatter != 0) && (e->pilots_scatter_pipe != nil)) {
+  // Lever C (dev doc 6.61), exactly as in encode_run(): with a source table K2 reads the LSE itself
+  // and no scatter is encoded, which is also what the first pipeline below has to reflect.
+  mmse_engine_impl::mapped lse_buf;
+  mmse_lse_params_t       lse_params{};
+  const unsigned          nof_lse_sources = build_lse_sources(
+      e, scatter, nof_scatter, nof_systems, nof_blocks, L, y, y_bytes_used, lse_buf, lse_params);
+  if ((nof_scatter != 0) && (nof_lse_sources == 0) && (e->pilots_scatter_pipe != nil)) {
     first_pipe = e->pilots_scatter_pipe;
   }
   stage_encoder                st  = begin_stage(e, first_pipe, burst_ok, /*wait_for_extraction=*/true);
@@ -4098,8 +4357,9 @@ bool encode_weights_only(mmse_engine_impl*                  e,
   // Glue #2 (S-7f-5u): the pilot vectors, written by the DEVICE out of K0-a's output. FIRST, because
   // the apply kernel below is their reader. The host skipped its own staging in favour of this write,
   // so a failure must abort the submission (nothing is committed, the caller falls back to its CPU
-  // path) rather than let the weights read the previous hop's pilots.
-  for (unsigned i = 0; i != nof_scatter; ++i) {
+  // path) rather than let the weights read the previous hop's pilots. Skipped entirely on the direct
+  // route (lever C), which is the branch that makes this a choice between two readers.
+  for (unsigned i = 0; (nof_lse_sources == 0) && (i != nof_scatter); ++i) {
     if (!encode_scatter(e, st, scatter[i], y_buf, y, y_bytes_used)) {
       if (!st.burst) {
         [enc endEncoding];
@@ -4158,13 +4418,28 @@ bool encode_weights_only(mmse_engine_impl*                  e,
     [enc dispatchThreadgroups:MTLSizeMake(nof_systems * w_tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
   }
 
-  enc = stage_pipeline(e, st, e->apply_pipe);
-  [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
-  [enc setBuffer:y_buf.buf offset:y_buf.offset atIndex:1];
-  [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:2];
-  [enc setBytes:&aparams length:sizeof(aparams) atIndex:3];
-  [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
+  // K2: one of the two readers of the pilot rows, exactly as in encode_run() - the LSE itself when the
+  // batch has a source table (lever C), the y slots the scatter wrote otherwise (glue #2).
+  e->last_apply_lse = (nof_lse_sources != 0);
+  if (nof_lse_sources != 0) {
+    enc = stage_pipeline(e, st, e->apply_lse_pipe);
+    [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
+    [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:1];
+    [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:2];
+    [enc setBytes:&aparams length:sizeof(aparams) atIndex:3];
+    [enc setBytes:&lse_params length:sizeof(lse_params) atIndex:4];
+    [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
+    mmse_stats_lse_apply();
+  } else {
+    enc = stage_pipeline(e, st, e->apply_pipe);
+    [enc setBuffer:w_buf.buf offset:w_buf.offset atIndex:0];
+    [enc setBuffer:y_buf.buf offset:y_buf.offset atIndex:1];
+    [enc setBuffer:h_buf.buf offset:h_buf.offset atIndex:2];
+    [enc setBytes:&aparams length:sizeof(aparams) atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(nof_blocks * nof_systems, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(nout, 1, 1)];
+  }
 
   encode_reformat(st, e, h_buf, reformat, nout, nof_blocks);
 

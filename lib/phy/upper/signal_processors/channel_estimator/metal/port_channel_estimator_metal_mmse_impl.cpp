@@ -3156,6 +3156,19 @@ bool port_channel_estimator_metal_mmse_impl::probe_device_y_stage(const fd_td_es
   // for: complete it before reading what it wrote.
   (void)complete_fd_td_estimation_stage();
 
+  // Lever C (dev doc 6.61): on this route K2 reads the least-squares pilots itself and NOTHING wrote
+  // the y slots, so comparing them against the host's staging would read the previous hop's leftovers
+  // and report them as a defect. The probe's question ("is what K2 reads equal to what the host would
+  // have staged?") is what the byte-identical dump A/B answers for this route, so say WHICH route ran
+  // and stop rather than print a number that measures nothing.
+  if ((engine != nullptr) && engine->last_apply_read_lse()) {
+    std::fprintf(stderr,
+                 "[y_check] groups=%u routes=lse_direct (the y slots are NOT the reader on this route; "
+                 "see OCUDU_CE_Y_DIRECT / ab_dumps.sh)\n",
+                 nof_device_y_stage_last);
+    return true;
+  }
+
   unsigned nof_bad  = 0;
   unsigned nof_slot = 0;
   double   max_err  = 0.0;

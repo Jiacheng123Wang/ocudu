@@ -46,6 +46,20 @@ enum class mmse_refusal : unsigned {
   y_geometry,
   /// The descriptor table is full (too many groups in flight). Per group.
   y_capacity,
+  /// The direct LSE read (lever C of dev doc 6.61) is switched off (OCUDU_CE_Y_DIRECT=0). Per batch.
+  /// A knob, i.e. the A/B arm of the route that removes the scatter dispatch.
+  y_direct_disabled,
+  /// The metallib does not carry mmse_apply_lse. Per batch.
+  y_direct_no_kernel,
+  /// This batch staged no y descriptor at all, so there is no group geometry to read the LSE with
+  /// (the host staged y itself, or every group was refused above). Per batch.
+  y_direct_no_source,
+  /// The staged groups do not agree on ONE LSE buffer, or their system ranges do not cover this batch
+  /// (a gap, an overlap, or a group that belongs to another batch). Per batch.
+  y_direct_coverage,
+  /// A group's geometry is outside mmse_apply_lse's contract: a zero npf / nof_symb / n_blk_real, a
+  /// block walk leaving the hop's pilots, or a read past the LSE buffer. Per batch.
+  y_direct_geometry,
   /// The device correlation build (K0-d) is switched off (OCUDU_CE_CORR_DEV=0). Per group.
   corr_disabled,
   /// The hop has no device statistics to build the matrices from. Per group.
@@ -92,6 +106,16 @@ constexpr const char* to_string(mmse_refusal reason)
       return "y_geometry";
     case mmse_refusal::y_capacity:
       return "y_capacity";
+    case mmse_refusal::y_direct_disabled:
+      return "y_direct_disabled";
+    case mmse_refusal::y_direct_no_kernel:
+      return "y_direct_no_kernel";
+    case mmse_refusal::y_direct_no_source:
+      return "y_direct_no_source";
+    case mmse_refusal::y_direct_coverage:
+      return "y_direct_coverage";
+    case mmse_refusal::y_direct_geometry:
+      return "y_direct_geometry";
     case mmse_refusal::corr_disabled:
       return "corr_disabled";
     case mmse_refusal::corr_geometry:
@@ -133,6 +157,7 @@ constexpr bool is_knob_refusal(mmse_refusal reason)
   switch (reason) {
     case mmse_refusal::ls_disabled:
     case mmse_refusal::y_disabled:
+    case mmse_refusal::y_direct_disabled:
     case mmse_refusal::corr_disabled:
     case mmse_refusal::ta_disabled:
     case mmse_refusal::sigma2_disabled:

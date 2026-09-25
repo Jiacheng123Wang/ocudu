@@ -603,6 +603,17 @@ public:
   /// mmse_pilots_scatter_y. When false the caller keeps staging y on the host.
   bool scatter_available() const;
 
+  /// \brief Whether the LAST weights call read the pilot rows out of the least-squares pilots instead
+  ///        of out of the y slots (lever C of dev doc 6.61).
+  ///
+  /// The engine decides this per batch, from the descriptors the estimator recorded (see
+  /// build_lse_sources()): when every system of the batch can be read that way, the pilot scatter is
+  /// not encoded at all and K2 reads K0-a's own output. The estimator needs to know it for exactly one
+  /// reason - OCUDU_CE_Y_CHECK compares the y slots against the host's staging, and on this route
+  /// nothing wrote them, so the probe would report a previous hop's leftovers as a defect. It reports
+  /// what the engine DID, so it is read after the call and never as a gate.
+  bool last_apply_read_lse() const;
+
   /// Whether the metallib carries the device-side rsrp reduction (mmse_rsrp). When false the caller
   /// must keep reducing the pilots on the host - the same shape as scatter_available().
   bool rsrp_available() const;

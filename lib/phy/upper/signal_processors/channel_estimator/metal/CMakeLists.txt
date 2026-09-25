@@ -28,6 +28,7 @@ ocudu_add_metallib(
     SOURCES ocudu_mmse_inv.metal ocudu_mmse_apply.metal ocudu_mmse_weights.metal ocudu_mmse_rsrp.metal ocudu_mmse_ta.metal
             ocudu_mmse_weights_matrix.metal ocudu_mmse_apply_matrix.metal ocudu_mmse_reformat.metal
             ocudu_mmse_corr.metal ocudu_mmse_pilots.metal ocudu_mmse_pilots_power.metal
+            ocudu_mmse_apply_lse.metal
     # The correlation kernels are the one place with a BIT-EXACTNESS contract against a host float
     # expression (build_correlation_matrices()): K0-d is only a drop-in for the host staging if A and
     # R_hp come out identical, and a 1-ulp difference is amplified by cond_2(A) ~ 2e4 into ~1% of W
@@ -45,7 +46,15 @@ ocudu_add_metallib(
     # the hardware. The flag is per FILE, and ocudu_mmse_pilots.metal's other kernels have no such
     # contract (the pilots enter h = W . y linearly) - putting them under it as well changed the LSE's
     # last bits for no benefit, so the mean-power kernel was split out instead.
-    IEEE_MATH_SOURCES ocudu_mmse_corr.metal ocudu_mmse_pilots_power.metal)
+    #   - ocudu_mmse_apply_lse.metal (K2 over the LSE, lever C of dev doc 6.61) is strict for a
+    #     third reason: its `lse * inv_beta` product must be ROUNDED where the pilot scatter rounded
+    #     it, i.e. before the weight multiply. Under fast math the compiler reassociated the chain into
+    #     round(round(w * inv_beta) * lse), which is a different float - measured: _h.bin, _llr.bin and
+    #     the grid stayed byte-identical over the 27-capture corpus while the float32 reductions over
+    #     h (noise_variance in K4, rsrp in K5) moved on 13 of them (40 bytes of _ce.txt). It is a file
+    #     of its own so that ocudu_mmse_apply.metal keeps the default fast math and mmse_apply()'s code
+    #     generation stays untouched by this route.
+    IEEE_MATH_SOURCES ocudu_mmse_corr.metal ocudu_mmse_pilots_power.metal ocudu_mmse_apply_lse.metal)
 
 # ---- Compiled Core ML model (AI channel estimator; see the training memo) ----
 set(HELENA_MODELC ${CMAKE_CURRENT_SOURCE_DIR}/ai_assets/helena_pusch_ml.mlmodelc)
