@@ -439,6 +439,114 @@ int main(int argc, char** argv)
           }));
     }
 
+    // ---- WHAT A STAGE BOUNDARY COSTS -----------------------------------------------------------------
+    //
+    // 6.65's finding was that the legs' 10-14 us per REMOVED dispatch is neither the kernel's execution
+    // (1.5-6.5 us for the ones those arms removed) nor the fixed dispatch cost (1.3-1.4 us above). The
+    // candidates for the rest are the three things that separate two dispatches of the estimator's chain
+    // - a memory barrier, a pipeline switch, an encoder boundary - and each one can be priced here by
+    // inserting it between two dispatches of the SAME kernel and reading the growth. This is the unit
+    // the "fewer boundaries" lever (6.65 (4)) is bought in.
+    {
+      const NSUInteger tg = g.blocks * g.systems();
+      const NSUInteger tpt = g.nout();
+      lse_params lp{};
+      lp.nof_sources       = 2;
+      lp.sources[0].sys_lo = 0;
+      lp.sources[0].sys_hi = 1;
+      lp.sources[1].sys_lo = 1;
+      lp.sources[1].sys_hi = 2;
+      for (auto& src : lp.sources) {
+        src.nof_layers = 1;
+        src.nof_pilots = 3u * g.L();
+        src.nof_symb   = g.npt;
+        src.pilot_base = 0;
+        src.npf        = g.npf();
+        src.n_blk_real = 1;
+        src.inv_beta   = 1.0F;
+      }
+      const auto bind_arm = ^(id<MTLComputeCommandEncoder> e) {
+        [e setBuffer:b_w offset:0 atIndex:0];
+        [e setBuffer:b_h offset:0 atIndex:1];
+        [e setBuffer:b_lse offset:0 atIndex:2];
+        [e setBytes:&ap length:sizeof(ap) atIndex:3];
+        [e setBytes:&lp length:sizeof(lp) atIndex:4];
+      };
+
+      const auto time_boundary = [&](int kind) -> double {
+        // kind 0 = back to back, 1 = a buffer barrier, 2 = a pipeline switch, 3 = an encoder boundary.
+        double best = 1e30;
+        for (unsigned round = 0; round != 3; ++round) {
+          id<MTLCommandBuffer> cb = [q commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:p_apply_lse];
+          bind_arm(enc);
+          for (uint32_t r = 0; r != reps; ++r) {
+            [enc dispatchThreadgroups:MTLSizeMake(tg, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpt, 1, 1)];
+            switch (kind) {
+              case 1:
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                break;
+              case 2:
+                [enc setComputePipelineState:p_apply];
+                [enc setComputePipelineState:p_apply_lse];
+                break;
+              case 3:
+                [enc endEncoding];
+                enc = [cb computeCommandEncoder];
+                [enc setComputePipelineState:p_apply_lse];
+                bind_arm(enc);
+                break;
+              default:
+                break;
+            }
+          }
+          [enc endEncoding];
+          [cb commit];
+          [cb waitUntilCompleted];
+          best = std::min(best, (cb.GPUEndTime - cb.GPUStartTime) * 1e6 / static_cast<double>(reps));
+        }
+        return best;
+      };
+
+      // ---- WHAT THE HOST PAYS PER DISPATCH ------------------------------------------------------
+      //
+      // The GPU cannot explain 10-14 us per removed dispatch (execution 1.5-6.5, floor 1.4, and the
+      // three boundaries below measure ~0), so the candidate left is the HOST's own encode - which this
+      // file has so far kept out of every number by keeping the GPU busy. That is the point of this arm:
+      // encode `reps` dispatches and time ONLY the CPU's encoding (no commit, no wait inside the timer).
+      const auto time_encode = [&]() -> double {
+        double best = 1e30;
+        for (unsigned round = 0; round != 5; ++round) {
+          id<MTLCommandBuffer> cb = [q commandBuffer];
+          const double         t0 = CFAbsoluteTimeGetCurrent();
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:p_apply_lse];
+          bind_arm(enc);
+          for (uint32_t r = 0; r != reps; ++r) {
+            [enc dispatchThreadgroups:MTLSizeMake(tg, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpt, 1, 1)];
+          }
+          [enc endEncoding];
+          const double t1 = CFAbsoluteTimeGetCurrent();
+          [cb commit];
+          [cb waitUntilCompleted];
+          best = std::min(best, (t1 - t0) * 1e6 / static_cast<double>(reps));
+        }
+        return best;
+      };
+
+      const double base = time_boundary(0);
+      std::printf("\nstage boundaries (mmse_apply_lse, %u dispatches, at the production geometry):\n", reps);
+      std::printf("%-34s %14s %16s\n", "boundary between dispatches", "us/dispatch", "vs back-to-back");
+      const char* names[] = {"none (back to back)", "buffer barrier", "pipeline switch", "encoder boundary"};
+      for (int k = 0; k != 4; ++k) {
+        const double us = time_boundary(k);
+        std::printf("%-34s %14.3f %16.3f\n", names[k], us, us - base);
+      }
+      std::printf("\nhost cost of one more dispatch (CPU encode only, GPU not waited for): %.3f us\n",
+                  time_encode());
+    }
+
     // ---- how the two block-sized kernels scale with the block -------------------------------------
     std::printf("\nblock-size sweep (same kernels, block_prb = 1 / 2 / 3, npt = %u):\n", g.npt);
     std::printf("%-34s %12s %14s\n", "kernel", "L / nout", "GPU us/dispatch");
