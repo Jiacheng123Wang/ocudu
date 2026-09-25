@@ -1861,6 +1861,70 @@ bash doc_chinese/phy_latency/wip/p0_gate.sh p15-conc2      # D1–D13
 | **D13（新）**| `handshake waits>0` = 窗口真的被踩到过（这条腿就是旧腿里 5 s 的来源）；`timeouts=0` |
 | 用户侧 iperf3 | 不断流；即使偶发丢槽，**UE 不再掉线重接** |
 
+### 6.22 ★★★ 腿 `p15-conc2`（2026-09-25，带修复 A）：**触发条件确实出现过 24 次，一次都没变成停顿**——判据 **23/23 全绿**，契约 **8/8**，**0 gaps**
+
+> 配方与 p07–p14 完全相同（n1 + `max_pusch_and_srs_concurrency=2` + `OCUDU_UL_PHASE_SEGMENTS=1` + `OCUDU_METAL_GPU_TIME=1`），
+> 上行 `iperf3 -R -t 100`，腿长 **315 s**（`04:18:23 → 04:23:38`），**128,393 次交棒 / 105,951 跳**（本系列最大的一条腿）。
+> 报告在进程退出后完整落盘（`gnb_gpu_p15-conc2_0925_1218.log.stderr`，185 行）。
+
+#### ① 决定性读数：**Q9-G 窗口被踩到 24 次，每一次都被握手关掉（≤165 µs）**
+
+```
+[metal_stats] dft handover handed=128393 taken=105886 … fallback=18586 late=3921 late_time=5 not_found=3921
+              timeouts=0 keepalives=1797502/1797502 (max in flight 42) (armed=1) … handshake=waits:24,timeouts:0,max:165us
+[metal_stats] commit order (Q9-F): commits=234414 waits=106016 waiter-committed-first=0 (same-queue=0 cross-queue=0)
+              max=0.0ms worst kind=stage slot=0; per kind: stage 0/105951, corr 0/0, grid 0/65 (inversions/waits)
+[metal_stats] fence order (Q9-D): waits=106016 signaller-first=106016 signaller-after=0 max=0.0ms
+```
+
+* **`handshake waits=24, timeouts=0, max=165 µs`**：24 次"消费者拿到一个**尚未提交**的承载者的 generation"。
+  §6.20 的离线复现说得很清楚——**修复前这 24 次每一次都是 5.00 s 的队列冻结**；现在每一次都在 **≤165 µs** 内关掉窗口，
+  且**没有一次**需要退回主机等待（`timeouts=0`）。
+* **`waiter-committed-first=0` / 106,016 次等待**：没有任何等待者排在 signaller 前面。
+  `per kind: … grid 0/65` 说明"错过交棒 → 编码 grid 等待"这条**唯一存在该窗口的路径**被走了 **65 次**，全部安全。
+* 这两条合起来回答"到底修好了还是没触发"：**触发过（24 次），且没再变成停顿**。这与 §6.15 的 p10 不同——
+  那条全绿腿里 Q9-C **零执行**（`own=0 newest=0`），所以什么都不能证明；本条腿里机制**执行了 24 次**。
+
+#### ② 症状侧：p13/p14 的四个"5 秒"全部消失（同配方对照）
+
+| 读数 | p13（修前，判据红）| p14（修前）| **p15（修后）** |
+|---|---|---|---|
+| `input hold (P0-2)` max | **5004.7 ms** | 无报告 | **17.5 ms**（`over 100ms=0`，`over 1s=0`）|
+| `deposit->completion` max | 5004669 µs | — | **17453 µs** |
+| `registry commit->completion` max | 5001219 µs | — | **4196 µs** |
+| lane `commit -> completion` max | **5004221 µs**（`commit->start=5002977`）| — | **3422 µs**（`commit->start` 最慢 3417 µs）|
+| `pop_blocking wait` max | **4997.6 ms**（`over 1s=2`）| — | **22 µs**（`over 1ms=0`）|
+| `radio sample continuity` | **2 gaps / 9.98 s** | — | **0 gaps / 0 samples**（314,942 块）|
+| 池 `held_max / free_min / starved_events` | 8 / 0 / **2** | — | **4 / 4 / 0** |
+| `dry-pool reaps` | 982 事件 / 6 块 | — | **0 / 0**（接收线程从未 park）|
+| `handler lag` max | 2037 µs | — | **1238 µs** |
+| RF 失败 | **14,520**（late 为主）| **28,082** | **16 条 underflow**（整腿 315 s，0 条 late）|
+| 时隙环冻结（`Slot decisions` 1000/s → ~0）| 2 次 | 3–4 次 | **0 次**（满速段每秒都是 1000）|
+| 满速上行窗口 | ~20 s 后停顿 | ~20 s 后崩溃 | **~105 s 连续 1000 PUSCH/s + ~1000 RLC SDU/s，无停顿** |
+| `p0_gate.sh` | D1/D3/D4 红 | 无报告 | **23/23 全绿**（D1–D4 判据 + D5–D13 读数）|
+
+* 契约 **`MET (8 of 8)`**、`cbs/lane=2.00 (max=2) dropped=0`、P0-5 配对账 **EXACT MATCH**（102,262/102,262）
+  ⇒ **V4 与形状没有回归**（握手不增加、不移动任何提交）。
+* `[ul_gpu_lane] dft carried blocks (Q9-F2): resolved=71735 of 71735 (never committed=0, …)`
+  ⇒ Q9-F2 这条仪器在空气腿上**完整跑通**（此前前端系列在空气腿上是空的，见 §6.19 ③）；
+  前端块自己的 `deposit -> GPU start` max **16.1 ms**、`start -> end` max 1.6 ms——**没有一个是秒级**。
+
+#### ③ 诚实的两条边界（不许把本条腿读成"全都好了"）
+
+1. **仍然是"一条腿"**（§5.2 纪律 2）。本条腿之所以强，是因为**机制被执行了 24 次**而不是"零执行"；
+   要按判据收口仍建议**再飞 1–2 条同配方**（可选更狠的暴露：`iperf3 -R -t 300`，因为旧腿的停顿都出现在负载前 20–100 s 内）。
+2. **`queue occupancy (Q9-F3)` 的"洞"不能单独当停顿读**：它只说"那段时间**没有任何**探针队列在执行"，
+   而**空闲**（未接入、iperf3 结束后的静默）同样是大洞。p15 的 `busy(union)=105.7 s / window=318 s`，
+   最大的三个洞（23.2 s / 11.0 s / 5.2 s）都落在**负载之外**；判断"是不是停顿"必须**同看**池/token 读数
+   （本腿 `input hold max 17.5 ms`、`pop_blocking 22 µs`、`held_max=4/8` 都说明没有停顿）。
+   ⇒ 这一条读法写进本节，避免下一个人把"空闲"读成"冻结"。
+
+#### ④ 仍未做（与本条腿无关，但别忘了）
+
+* **修复 B（让池不能停住电台）**：握手拿掉了**这一类**触发；池作为"电台时序源"的脆弱耦合仍在（§6.20 ⑤ B，**待用户裁**）。
+* **MAC 侧恢复**：p14 里"CRC 指示丢失 ⇒ 该 UE 永不再被授 Grant ⇒ 掉线重接"（§6.20 ③ (7)）——本条腿没有触发，问题仍在。
+* **Q12/P1-6/P2-D** 与两条陈旧网（§8）。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
