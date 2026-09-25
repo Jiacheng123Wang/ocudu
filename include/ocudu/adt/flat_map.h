@@ -120,6 +120,12 @@ struct sort_iter {
   bool operator<=(const sort_iter& other) const { return first <= other.first; }
   bool operator>=(const sort_iter& other) const { return first >= other.first; }
 
+  /// Random access, which `iterator_category` above already promises: the new SDK's libc++ reaches the heap
+  /// routines through `iter[n]` (__algorithm/sift_down.h), so a type that advertises random_access_iterator_tag
+  /// without a subscript operator stops every translation unit that sorts a flat_map from compiling (found
+  /// 2026-09-25, when Xcode 26's SDK replaced the CommandLineTools one).
+  reference operator[](difference_type n) const { return *(*this + n); }
+
   friend void iter_swap(sort_iter it1, sort_iter it2) noexcept
   {
     std::iter_swap(*it1.first, *it2.first);

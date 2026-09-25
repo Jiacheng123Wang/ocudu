@@ -88,7 +88,9 @@ TEST_F(pucch_resource_manager_tester, when_ues_are_added_their_cfg_have_differen
     {
       std::set<unsigned> pucch_res_idxs;
       for (unsigned n = 0; n != ue_pucch_cfg.pucch_res_set[0].resources.size(); ++n) {
-        pucch_res_idxs.count(ue_pucch_cfg.pucch_res_list[n].res_id.ded().cell_res_id);
+        // Dead query kept as-is (it has no side effect; the insert below is what fills the set): the SDK's
+        // libc++ marks set::count() [[nodiscard]], so ignoring it is now spelled out.
+        (void)pucch_res_idxs.count(ue_pucch_cfg.pucch_res_list[n].res_id.ded().cell_res_id);
         pucch_res_idxs.insert(ue_pucch_cfg.pucch_res_list[n].res_id.ded().cell_res_id);
       }
     }

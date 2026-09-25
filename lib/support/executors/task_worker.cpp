@@ -49,7 +49,9 @@ void general_task_worker<QueuePolicy, WaitPolicy>::wait_pending_tasks()
   std::future<void>          fut = pkg_task.get_future();
   push_task_blocking(std::move(pkg_task));
   // blocks for enqueued task to complete.
-  fut.get();
+  // The call IS the wait; the value it returns is what the caller already has. Spelled out because the
+  // SDK's <future> marks get() nodiscard (Xcode 26's libc++, 2026-09-25).
+  (void)fut.get();
 }
 
 template class ocudu::general_task_worker<concurrent_queue_policy::locking_mpsc,
