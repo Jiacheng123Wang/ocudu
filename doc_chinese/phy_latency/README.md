@@ -4,6 +4,13 @@
 > 上游（历史）记录仍是 `doc_chinese/phy_pipeline_gpu/gpu_phy_pipeline_design_and_implementation.md`
 > （**追加式，不改历史**）；腿日志在 `doc_chinese/phy_pipeline_gpu/wip/logs/`，腿脚本与门在 `doc_chinese/phy_pipeline_gpu/wip/`。
 
+## 状态（2026-09-25 结项）
+
+**目标达成**：`[ul_gpu_pipeline]` 中位 **2675.1 → 1495.4–1513.4 µs（−43%，判据 ≤2150）**，
+池 **不再饥饿**（`starved_events=0`、`held_max 10–12 < pool 16`、`pop_blocking` max **23–25 µs**，原 486 µs–5 s），
+且**没有用提交数或契约换**（`cbs/lane=2.00`、契约 8/8）。
+**V3（RF 失败 700–1500）与残留 gap 已另案暂停** —— TX 探针证明宿主侧只解释 ~4%，属电台/USB 传输侧（结项记录：开发文档 **§6.43**）。
+
 ## 为什么有这个工作流（一句话）
 
 重上行空口腿（2026-09-24）量到：**`gpu` 融合车道在 ~14–19 Mbit/s 就把 8 个接收缓冲抽干** ⇒ `pop_blocking()` 阻塞接收线程 ⇒
