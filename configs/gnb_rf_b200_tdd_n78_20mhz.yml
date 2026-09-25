@@ -21,12 +21,16 @@ cu_cp:
 
 ru_sdr:
   device_driver: uhd
-  # num_recv_frames is the radio's RECEIVE RING DEPTH, i.e. how long a stall the host may take before the B200
-  # drops samples. It was 64 from the first air leg on and never questioned - a few milliseconds of margin at
-  # this rate - while every discontinuity the receive path has recorded since the host-side stalls were fixed is
-  # 2-6 ms and lands on a UHD `overflow` event for event (dev doc 6.51). 256 frames costs a couple of megabytes
-  # and nothing else: the ring is drained in order, so a deeper one adds margin against a burst, not latency.
-  device_args: type=b200,num_recv_frames=64,num_send_frames=64
+  # num_recv_frames is the radio's RECEIVE RING DEPTH, i.e. how long a stall the transport may take before the
+  # B200 drops samples. Measured A/B (dev doc 6.53), same binary, this line the only difference:
+  #   64 frames  -> 5 discontinuities (max 35.3 ms of lost uplink samples), pool holds 11/16, starved_events 0
+  #   256 frames -> 0 discontinuities (a 19.5 ms backlog absorbed),        pool holds 16/16, starved_events 2
+  # So the ring converts a LOST SAMPLE into a DELIVERED BACKLOG; the backlog arrives as a burst, which is why
+  # the pool it feeds was re-sized with it (lower_phy_factory: peak 16 + rx path 2 + margin 3 -> 32, dev doc
+  # 6.53). What it does NOT do is remove the stall: the stalls are inside receive() itself (dev doc 6.53 (2),
+  # the `[ul_rx_timing] overflow_ctx` of every overflow), i.e. the USB path - the root cause still open.
+  # num_send_frames stays 64: the transmit ring is a separate variable and has not been measured this way.
+  device_args: type=b200,num_recv_frames=256,num_send_frames=64
   srate: 23.04
   otw_format: sc12
   tx_gain: 80

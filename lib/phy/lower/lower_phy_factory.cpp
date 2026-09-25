@@ -170,14 +170,35 @@ public:
     // i.e. the chain wants about ELEVEN whole-slot buffers at its peak and the 8-buffer pool was CLAMPING it -
     // the receive thread's wait IS the starvation those counters count. The three terms below say that out loud:
     // the measured pipeline peak, the receive path's own two buffers (the one being received and the one just
-    // received), and a margin. The ring's capacity is the next power of two (dev doc 6.37 (2)), which 16
-    // already is; the size is printed at startup so a regression is visible in a leg's own log.
+    // received), and a margin. The size is printed at startup so a regression is visible in a leg's own log.
+    //
+    // ★★ RE-MEASURED (dev doc 6.53): the peak is now SIXTEEN, not eleven, and the measurement that moved it is
+    // the receive ring. `p33-n78-rxring` ran the B200 with `num_recv_frames=256` (64 before it, dev doc 6.51)
+    // and read `held_max=16` = the pool ceiling with `free_min=0` and `starved_events=2`, where the same recipe
+    // with the 64-frame ring reads 11-12 / 4-6 / 0 (`p31`/`p32`/`p32b`). The mechanism is the one 6.53 measured:
+    // a deeper ring does not remove a transport stall, it converts a LOST SAMPLE into a DELIVERED BACKLOG, and
+    // that backlog arrives as a burst which the receive path draws from this pool slot after slot. So the peak
+    // is a LOWER BOUND - it was clamped by the very pool it is used to size - which is what the rounding below
+    // and the margin are for. The ring's capacity is a power of two (dev doc 6.37 (2): `ring_buffer_storage`
+    // rounds up), so the rounding is done HERE, explicitly, and the printed size is the size that will exist.
     const bool     slot_sized_buffers       = (rx_buffer_size >= nof_samples_per_slot);
-    constexpr unsigned slot_pipeline_peak   = 11; // measured (dev doc 6.37 (3))
+    constexpr unsigned slot_pipeline_peak   = 16; // measured with the 256-frame ring (dev doc 6.53)
     constexpr unsigned rx_path_buffers      = 2;  // being received + just received
     constexpr unsigned rx_pool_margin       = 3;
-    const unsigned slot_pipeline_buffers =
+    // The receive ring rounds its capacity up to a power of two wherever it is sized (dev doc 6.37 (2): the
+    // ring buffer's own storage does it), so the same rounding is applied HERE - otherwise the startup line
+    // would announce a size that no leg ever runs with (measured: the 12-buffer diagnostic arm existed as 16).
+    const auto round_up_to_pow2 = [](unsigned sz) {
+      unsigned rounded = 1;
+      while (rounded < sz) {
+        rounded <<= 1;
+      }
+      return rounded;
+    };
+    const unsigned slot_pipeline_unrounded =
         slot_sized_buffers ? (slot_pipeline_peak + rx_path_buffers + rx_pool_margin) : 0U;
+    const unsigned slot_pipeline_buffers =
+        slot_sized_buffers ? round_up_to_pow2(slot_pipeline_unrounded) : 0U;
 
     unsigned nof_rx_buffers = std::max({8U,
                                         rx_to_tx_max_delay / rx_buffer_size,
@@ -185,7 +206,8 @@ public:
                                         slot_pipeline_buffers});
     std::fprintf(stderr,
                  "[ul_rx_pool] size=%u buffers of %u samples (slot=%u, %s): floor 8, radio latency %u, symbol "
-                 "pipeline %u, slot pipeline %u (peak %u + rx path %u + margin %u, dev doc 6.37)\n",
+                 "pipeline %u, slot pipeline %u (peak %u + rx path %u + margin %u = %u, rounded up to a power "
+                 "of two - the ring's capacity, dev doc 6.53)\n",
                  nof_rx_buffers,
                  rx_buffer_size,
                  nof_samples_per_slot,
@@ -195,7 +217,8 @@ public:
                  slot_pipeline_buffers,
                  slot_pipeline_peak,
                  rx_path_buffers,
-                 rx_pool_margin);
+                 rx_pool_margin,
+                 slot_pipeline_unrounded);
     if (const char* pool_env = std::getenv("OCUDU_UL_RX_POOL_SIZE"); pool_env != nullptr) {
       const unsigned long requested = std::strtoul(pool_env, nullptr, 10);
       if (requested > nof_rx_buffers) {
