@@ -114,7 +114,7 @@ PUSCH/PDSCH=0 ⇒ 无 RAR ⇒ **手机被挡在门外**；不是手机的问题�
 | 63 | ★★ **`p38`（§3.2 验收）：run 3.0 → 1.0/跳、派发 6.0 → 4.0/跳（均衡 3.0 → 1.0）、`merged_hop` −14.1 µs、V1 −36.3 µs（1371.9，新最好）**，契约 8/8、`gaps=0`、池 `held_max=10` | `p38` vs `p37` | §6.60 ① |
 | 64 | ★ **口径再确认**：去 2 次派发 ⇒ `merged_hop` **−14.1** 而 **V1 −36.3**（≈18 µs/派发）⇒ 派发省下的**不只是设备 busy 窗口，还有宿主 encode** | 同上 | §6.60 ① |
 | 66 | ★ **更正"还剩 4 次派发"**：车道计数里的 `channel_estimator=2/跳` 是**阶段数**；新增 `ce_sites` 逐站点计数 + 离线 replay 实测 **CE 真实 6 次（无尾）/ 9 次（带尾）kernel 派发/跳** ⇒ 真实账 **8 或 11 次**。尾巴组（`corr_a`+`corr_rhp`+`scatter` 各一次）只因**分配宽度不是 3 PRB 整数倍**而重复 ⇒ 最大的一刀 | `ce_sites` + 7 条语料 | §6.61 ①② |
-| 67 | 候选杠杆排序：**A 尾巴并组**（−3/带尾跳）、B `R_hp` 几何缓存、C `reformat`/`scatter` 改寻址、D LSE+CFO 融合；**先验证 A 是否 kernel 已支持（纯宿主）** | — | §6.61 ③④ |
+| 67 | 机制查实 + 杠杆排序修正：`merge_tail` 只合并槽位布局；两组**同一个提交**（多付的只是派发）；**首选 C = 消掉 `scatter`（改寻址，覆盖全部跳，−1…−2）**；A 需逐 system 几何且撞已知 pad 缺陷；B（`R_hp` 缓存）因含每跳统计而否掉 | `OCUDU_CE_SPLIT_TAIL` 实验 + 读码 | §6.61 ②③ |
 | 65 | **V1 本轮推进**：12 → 10 → 6 → **4 派发/跳**；V1 **1488.6 → 1463.5 → 1411.3 → 1371.9 µs**（基线 −48.7%）| `p29`→`p31`→`p32`→`p38` | §6.60 ① |
 | 56 | ★ **Q17 逐事件定案：传输侧**：`p34` 五次 overflow 的 `overflow_ctx` 全是 `recv_us≈1.5–1.9 ms`、**`loop_us≈2 µs`**；两腿 `loop` 都只有 1 次 >1 ms（615k/790k 次里）⇒ 宿主从不迟到，打宿主调度臂无效 | `p33`/`p34` | §6.53 ② |
 | 52 | **量级已换代**：修复前 gap 是 **76M–229M 样点（3–10 s）**，现在是 **2–56 ms** ⇒ "宿主停顿⇒秒级丢样"那条链已被 §6.11/§6.22/§6.27/§6.38 治好（~~"gap ≠ UL 静默"~~ 已作废：**不存在 UL 静默现象**，见第 57 条）| 各腿日志 + census | §6.51 ①、§6.56 ① |
@@ -248,9 +248,14 @@ sudo -E LEG_CONFIG=... bash .../run_leg.sh gpu p34-n78-ring64 --regime=stress OC
 **⇒ ①已开工（§6.61）**：**更正**——车道里的 "CE 2/跳" 是**阶段数**；补了 `[metal_stats] ce_sites` 逐站点计数后，离线 replay 读出
 **估计器真实是 6 次（无尾）或 9 次（带尾）kernel 派发/跳**（`reformat`+`pilots_lse`+`pilots_cfo`+`corr_a`+`corr_rhp`+`scatter`，
 尾巴组因分配宽度不是 3 PRB 的整数倍而**整体再跑一遍** ⇒ +3）。真实派发账 = **8 或 11 次/跳**，不是 4。
-**候选杠杆（已排序）**：**A 尾巴组并进主组**（−3/带尾跳，≈40% 覆盖 ⇒ 均值 −1.2；结构里已有 `a_sys_stride`/`r_sys_stride`/`nof_systems`
-这套"合并批次"字段 ⇒ **可能是纯宿主改动**）；B `R_hp` 按几何缓存；C `reformat`/`scatter` 改寻址消掉；D `pilots_lse`+`pilots_cfo` 融合。
-**下一步 = 先查 A 是否"kernel 已支持、只差宿主"**（读 `port_channel_estimator_metal_mmse_impl.cpp` 的 `device_y_stage`/`corr`/`corr_edge` 构建）。
+**机制已查实**（读码 + `OCUDU_CE_SPLIT_TAIL` 反例实验）：`merge_tail` 默认**开**，但它合并的是**槽位布局**（SPLIT_TAIL 与默认的 `ce_sites` 完全一样）；
+两次来自 **`build_slots_on_device()` 被调两次**（标准组 + 尾巴组），每次一次 `build_correlation`；
+**两组装在同一个提交里**（`queue_correlation_fenced` 入队、`flush_correlations_fenced` 一次编完一次 commit）⇒ 多付的只是**派发**。
+估计器不用融合形式是**精度**原因（块序 54 时 K1 逆有 1.3e-5 误差 ⇒ 256QAM 24 dB→−18 dB）。
+**候选杠杆（读码后修正）**：**C = 消掉 `scatter`（改寻址）★首选**（纯搬运、覆盖**全部**跳、−1…−2/跳）；
+A = 两组并一次派发（−3/带尾跳，但**不是纯宿主**：几何标量一次调用一份，且 padded 进标准槽位那个形式代码里**已有已知 pad 缺陷**）；
+D = LSE+CFO 融合（−1/全部跳）；**B = R_hp 缓存基本否掉**（含 `sigma2`/`fd_hz`/`tau_rms_s` 每跳统计）。
+**下一步 = 读 `encode_scatter` 与 weights/apply kernel 的 y 寻址**，然后按 §3.2 的做法施工（预登记见 §6.61 ④）。
 `merged_hop` 里**非派发的 ~490 µs** 要靠"移除阶段"臂或**单 kernel 离线微基准**（`dft_kernel_cost.mm` 的形状）；**A 项（≈473 µs）仍需你裁决**（触 V4）。
 
 
