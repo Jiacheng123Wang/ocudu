@@ -631,6 +631,23 @@ smoke rtsan:
   rules:
     - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Nightly/
 
+smoke dtls: # OpenSSL+DTLS only available in fedora now
+  extends: .build_and_unit
+  rules:
+    - if: $CI_PIPELINE_SCHEDULE_DESCRIPTION =~ /Nightly/
+  variables:
+    OS: fedora-44
+    COMPILER: gcc
+    CMAKE_BUILD_TYPE: RelWithDebInfo
+    ASSERT_LEVEL: PARANOID
+    ENABLE_WERROR: "False"
+    MARCH: x86-64-v3
+    TEST_MODE: full
+    CTEST_XUNIT_NAME: xunit
+  tags:
+    - ${OCUDU_RUNNER_TAG}-amd64
+    - sctp
+
 # Packaging
 
 package:
