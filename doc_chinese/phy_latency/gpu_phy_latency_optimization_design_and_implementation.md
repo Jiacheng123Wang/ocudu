@@ -1476,6 +1476,45 @@ bash doc_chinese/phy_latency/wip/p0_gate.sh p12-conc2                      # D1�
 
 ⇒ 因此**下一条腿（`p13-conc2`）同时带 Q9-D/Q9-E**：无论落在哪一支，都能把 5 秒钉到"主机处理器"或"队列次序"上。
 
+### 6.18 ⚠ 腿 `p13-conc2`（2026-09-25 11:17，带 Q9-E）：**"主机处理器滞后"被排除，"队列次序"成为唯一剩下的位置**；交接 memo 见 `session_handoff_2026-09-25-1.md`
+
+> 配方同 p07–p12。用户侧上行 `iperf3 -R -t 100` **两次断流**（~15 s 起与 ~65 s 起），与腿自己的 **2 次 park / 2 个 gap** 一一对应。
+> **本会话到此收口**：更完整的"现状 / 已证明与已证伪 / 下一步"见交接 memo **`session_handoff_2026-09-25-1.md`**（它是本轮的完整快照）。
+
+**① 判据与读数**
+
+```
+D1 FAIL input hold max = 5004.7 ms (slot 9612)      D2 PASS wait max = 19.97 ms
+D3 FAIL pop_blocking max = 4997.6 ms, over 1s = 2   D4 FAIL 2 gaps / 153,152,535 samples (~9.98 s)
+D5 INFO late=3828, late_time=9                      D6 INFO registry commit->completion=20236 max=5001219.0us
+D7 INFO dry-pool reaps=982 recovering 6 block(s)    D8 INFO own=0 newest=0 cross_lane=0
+D9 INFO fence order (Q9-D): waits=27957 signaller-first=27957 signaller-after=0
+       [metal_stats] block lifecycle (P0-7): … handler lag=48123 max=2037.0us mean=53.9us at slot=6143 (Q9-E)
+       [ul_gpu_lane] commit -> completion max = 5004221.4us:
+         slot=9612 stage=merged_hop commit->start=5002977.3us start->end=1244.1us
+         slot=1022 stage=merged_hop commit->start=5002737.0us start->end=1242.6us
+```
+
+* **`commit->start ≈ 5.0027 s` 而 `start->end ≈ 1.24 ms`** ⇒ 缓冲**在队列里等**，一旦开始跑就只要 1.24 ms。
+* **Q9-D：27957 次设备侧栅栏等待全部是"安全形状"**（signaller 早已发出）⇒ 三类栅栏（stage/corr/grid）**全部排除**。
+* **Q9-E：`handler lag` 最大 2.0 ms、均值 53.9 µs** ⇒ **"GPU 早跑完、主机处理器晚"这一支也被排除**（本机基线：metal 测试 110 µs / 66 µs）。
+* 受害块既包含 `swept=1`（sweep 认领后 `commit->completion ≈ 5.0003–5.0012 s`）也包含 `swept=0`（跳认领）；
+  两次停顿的起点都是 `[ul_rx_pool] the receive pool is EMPTY (held=8/8)`（**池先满，随后才是 RF 失败**）。
+
+**② 结论：剩下唯一的位置是"命令缓冲之间的队列次序"**
+
+能"在队列里等 5 秒才开始"的只有一种东西：**排在同一条串行队列前面的某个命令缓冲没跑完**。
+把它与 §6.17 ③ 的盲区合起来，得到**当前主假设 Q9-G**（详见 memo §4）：
+
+> `claim_grid_production()` 对"**已被别人认领但尚未提交**"（`claimed && !produced`）的条目**直接返回 generation**、
+> 不自己提交；跳据此把"等这个生产者"的等待编进自己的缓冲并提交，而**生产者的提交由另一个线程晚几微秒发出**
+> （sweep 在 `deposit_released()` 里"锁内认领 → 解锁后提交"）⇒ **等待者的提交排在生产者之前** ⇒ 队首等一个排在自己后面的事件
+> ⇒ 整条队列冻结，直到**更高 generation** 的生产者完成（≈5 s）把事件值推过等待值。
+
+**③ 下一步（已写进 memo §6；新会话按它开工）**：**Q9-F**（给每个 `[cb commit]` 编提交票号，
+比较"等待者 vs signaller 的提交次序"，把 Q9-G 变成读数）＋ **Q9-F2**（把前端 deposit 块也注册进 lane 探针的前端组，
+拿到它们的 GPU 时间）⇒ 一条腿定性：`等待者先提交 > 0` ⇒ 实现 Q9-G 的**提交握手**；`= 0` ⇒ 转 GPU/队列结构。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
