@@ -745,6 +745,18 @@ struct eq_flush_state_t {
   ///       cache is invalidated when the flush is recycled (see eq_flush_recycle).
   uintptr_t hop_tables_plan  = 0;
   bool      hop_tables_valid = false;
+  /// \brief dev doc 6.45: the same once-per-hop rule for the DEVICE-built tables.
+  ///
+  /// WHY IT EXISTS. The cache above was written for the HOST path, and `eq_gather_tables()` tries the
+  /// device path FIRST and returns as soon as it succeeds - so with the device tables (the default since
+  /// batch 5e) the table was rebuilt on EVERY call, i.e. once per RUN of symbols, and a hop has ~3 runs
+  /// because the run predicate breaks on `estimates`. Measured on air (leg `p30-n78-dispatch2`, 147,075
+  /// hops): `sites(ch_gather=441246 ...)` = 3.0 builds per hop against the documented "one build per hop,
+  /// every dispatch of that hop reads them" (see hop_tables above), and the hop's fused command buffer
+  /// carried 12.0 dispatches (9.0 of them the equalizer's: 3 runs x [build, gather y, equalize]).
+  /// One build per hop is what the device path always intended; this is that cache, not a new mechanism.
+  uintptr_t dev_tables_plan  = 0;
+  bool      dev_tables_valid = false;
 };
 static eq_flush_state_t& eq_flush_state()
 {
@@ -808,6 +820,7 @@ static void eq_flush_recycle()
   // it. Keeping the cache across hops therefore served the previous hop's tables to the new hop,
   // which is worse than a missing cache: the entries name the wrong resource elements.
   st.hop_tables_valid = false;
+  st.dev_tables_valid = false; // dev doc 6.45: the device tables follow the same hop lifetime
 }
 
 /// Encodes every accumulated symbol into the open burst: one batched dispatch per run of symbols
@@ -1099,10 +1112,21 @@ void eq_dbg_dump_tables()
 /// \return False when the tables could not be built or uploaded.
 static bool eq_gather_tables(eq_engine_impl* engine, id<MTLComputeCommandEncoder> enc, const ch_gather_desc& plan)
 {
-  if (eq_device_tables_enabled() && eq_build_gather_on_device(engine, enc, plan)) {
-    return true;
-  }
   eq_flush_state_t& st = eq_flush_state();
+  if (eq_device_tables_enabled()) {
+    // ONE build per hop (dev doc 6.45): the kernel writes tables every dispatch of this hop reads, so a
+    // rebuild per RUN is repeated work - and it is encoded as a dispatch of its own each time, which is
+    // what the air leg counted. The key is the plan's ADDRESS and it is only valid within a hop, exactly
+    // like the host cache below (see hop_tables_plan, and eq_flush_recycle() for the invalidation).
+    if (st.dev_tables_valid && (st.dev_tables_plan == reinterpret_cast<uintptr_t>(&plan))) {
+      return true;
+    }
+    if (eq_build_gather_on_device(engine, enc, plan)) {
+      st.dev_tables_plan  = reinterpret_cast<uintptr_t>(&plan);
+      st.dev_tables_valid = true;
+      return true;
+    }
+  }
   if (st.hop_tables_valid && (st.hop_tables_plan == reinterpret_cast<uintptr_t>(&plan))) {
     return true;
   }

@@ -3375,6 +3375,67 @@ V4 约束的是 `cbs/lane`（**命令缓冲**数/跳），把一跳内的 12 次
 
 
 
+### 6.45 **V1 的下一刀（用户裁决 ①）第一步**：设备侧 gather 表**每次 run 都重建**（与"一跳一次"的注释矛盾）⇒ 加同一跳内的缓存（9 → 7 次派发/跳）
+
+> 腿 `p30-n78-dispatch2` 的站点表把 ① 拆到了可实现的一步：**每跳 9 次均衡派发 = 3 个 run × [建表 + gather y + 均衡]**。
+> 用户裁决：先做 ①（合并 gather）。第一步取其中**最安全、且有注释可对照**的一处。
+
+#### ① 站点表（腿 `p30`，147,075 跳，二进制已携带戳）
+
+```
+[metal_stats] eq_batch flushes=147075 symbols=1764879 runs=441246 batched=441246 max_run=8
+              first_break=estimates sites(ch_gather=441246 y_gather=441246 y_batch=441246 run=0 single=0)
+[metal_stats] burst dispatches=1764963 (equalizer=1323738 demapper=147075 channel_estimator=294150)
+```
+⇒ 每跳：`flushes=1`、`symbols=12.0`、`runs=3.0`（断因 `estimates`）、**`ch_gather=3.0` + `y_gather=3.0` + `y_batch=3.0`**；
+另一条批量路径（`run`/`single`）为 0。总派发 **12.0/跳**（均衡 9 + 信道估计 2 + 解映射 1）。
+这条腿本身：**V1 中位 1488.6**（cohort 最好）、契约 **8/8**、`cbs/lane=2.00`、**0 gaps**。
+
+#### ② 查到的**缺陷**（与注释直接矛盾）
+
+`eq_gather_tables()` 里那条"**一跳一次构建**"的缓存（`hop_tables_valid` + `hop_tables_plan`，注释写着
+"one build per hop, every dispatch of that hop reads them"）**只对宿主路径生效**：函数**先**试设备路径并在成功后**直接 return**，
+于是自 batch 5e（默认走设备 `eq_build_gather`，腿的启动行也这么打印）起，**每个 run 都重建一次表** ⇒ 空中实测 **3.0 次/跳**。
+
+#### ③ 改动（本节的交付）
+
+* `eq_flush_state_t` 增加 `dev_tables_plan/dev_tables_valid`（与宿主缓存的键同一规则：**计划对象的地址**，只在**一跳内**有效）；
+* `eq_gather_tables()` 在设备路径上也先查这个缓存，命中即返回；未命中才 `eq_build_gather_on_device()` 并记下键；
+* `eq_flush_recycle()` 里与宿主缓存一起失效（同一跳生命周期）。
+
+**预期**：`sites(ch_gather=…)` 从 **3.0/跳 → 1.0/跳** ⇒ 总派发 **12 → 10/跳**；
+按离线"单次派发 ~12 µs、依赖链内不重叠"（§6.29/§6.30）⇒ **约 −24 µs** 的跳窗口，若这次重建还带着"写表 → 读表"的屏障代价则更多。
+**不动 V4**（命令缓冲仍 `merged_hop` + `ch_wt` = 2.00/跳）。
+
+#### ④ 正确性论证（为什么安全）
+
+* 表的内容只由 `plan` 决定；**同一跳内**计划对象的**地址**唯一且稳定（demodulator 每跳新建一个 plan 对象）
+  ⇒ 同址即同内容，缓存命中不会把别的跳的表拿来用；
+* **跨跳**一律失效（`eq_flush_recycle()`），与宿主缓存同一条已被验证过的规则（那条注释写明：跨跳复用地址会
+  "把上一跳的表喂给新跳"，比没有缓存更糟）；
+* 不同地址（内容相同）只是不命中 ⇒ 退回逐 run 重建，**不会算错**。
+
+#### ⑤ 网（全绿）
+
+`ctest -L phy` **193/193**（含 `channel_equalizer_metal_unit_test`、`port_channel_estimator_metal_mmse_unit_test`、`ul_chain_replay`）、
+`l1_handover_arms.sh` **5 PASS**、门自测 **PASS**；离线站点读数仍打印（`sites(...)`）。
+
+#### ⑥ 预登记（腿 `p31-n78-eqtable`，标准配方）
+
+| 读数 | 期望 |
+|---|---|
+| `sites(ch_gather=…)` | **1.0/跳**（原 3.0）；`y_gather`/`y_batch` 仍 3.0（这一步不动它们）|
+| `burst dispatches`/跳 | **10.0**（原 12.0）|
+| `busy split merged_hop` | 略降（−24 µs 量级或更多）|
+| **V1 中位** | 不变或略好（≈1490 → 期望 ~1460–1490）|
+| 契约 / `cbs/lane` / gaps / D16 | 8/8 / 2.00 / 0 / `batch_max=14 batch_src=auto` |
+| 反例判读 | 若 `ch_gather` 仍 3.0 ⇒ 缓存没命中（键或失效点写错），先修读数再谈收益 |
+
+**下一步（① 的后半、未做）**：把 `y_gather` 折进均衡派发（3 → 1/run，再省 2 次/跳），
+以及 ②（解开 `estimates` 断因让 run 覆盖整跳）——两者都在 §6.44 ③ 的同一张账上。
+
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
