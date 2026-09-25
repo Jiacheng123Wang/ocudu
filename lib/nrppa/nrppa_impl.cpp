@@ -177,14 +177,16 @@ void nrppa_impl::on_meas_report_timer_expired(cu_cp_ue_index_t ue_index)
   }
 
   // Fill measurement result.
-  auto meas_result = fill_e_cid_measurement_result(
-      ue_ctxt.ue_ids.ue_index, ue_measurement_results.value(), ue_ctxt.meas_quantities, plmn_to_tac.at(plmn));
-  if (!meas_result.has_value()) {
-    logger.warning("{}", meas_result.error());
+  nrppa_e_cid_meas_result meas_result;
+  meas_result.serving_cell_id  = ue_measurement_results.value().serving_cell_id;
+  meas_result.serving_cell_tac = plmn_to_tac.at(plmn);
+  meas_result.measured_results = fill_rrc_measured_results(ue_measurement_results.value(), ue_ctxt.meas_quantities);
+  if (meas_result.measured_results.empty()) {
+    logger.warning("ue={}: No supported measurement quantity requested", ue_index);
     return;
   }
 
-  handle_e_cid_meas_result(ue_index, meas_result.value());
+  handle_e_cid_meas_result(ue_index, meas_result);
 }
 
 void nrppa_impl::handle_new_nrppa_pdu(const byte_buffer&                                nrppa_pdu,
@@ -325,7 +327,7 @@ void nrppa_impl::handle_e_cid_meas_initiation_request(const asn1::nrppa::e_c_id_
   fill_nrppa_e_cid_meas_initiation_request(request, msg);
 
   ue->schedule_async_task(launch_async<e_cid_measurement_initiation_procedure>(
-      ue_index, request, transaction_id, ue_ctxt_list, cu_cp_notifier, plmn_to_tac, *this, logger));
+      ue_index, request, transaction_id, ue_ctxt_list, du_ctxt_list, cu_cp_notifier, plmn_to_tac, *this, logger));
 }
 
 void nrppa_impl::handle_e_cid_meas_termination_command(const asn1::nrppa::e_c_id_meas_termination_cmd_s& msg,

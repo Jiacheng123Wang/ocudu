@@ -6,6 +6,7 @@
 
 #include "ocudu/ran/cu_cp_types.h"
 #include "ocudu/ran/meas_types.h"
+#include "ocudu/ran/positioning/e_cid_measurement.h"
 #include "ocudu/ran/positioning/positioning_messages.h"
 #include "ocudu/support/async/async_task.h"
 #include <map>
@@ -35,6 +36,9 @@ public:
   /// \brief Get the index of the DU where the UE is connected.
   virtual cu_cp_du_index_t get_du_index() const = 0;
 
+  /// \brief Get the global identity of the cell serving the UE.
+  virtual std::optional<nr_cell_global_id_t> get_serving_cell_id() const = 0;
+
   /// \brief Get the measurement results of the UE.
   virtual std::optional<cell_measurement_positioning_info>& on_measurement_results_required() = 0;
 
@@ -62,6 +66,11 @@ public:
   /// \returns The outcome of the procedure.
   virtual async_task<expected<measurement_response_t, measurement_failure_t>>
   on_measurement_information_request(const measurement_request_t& request) = 0;
+
+  /// \brief Notifies the F1AP about an E-CID measurement initiation request.
+  /// \returns The outcome of the procedure.
+  virtual async_task<expected<e_cid_measurement_response_t, e_cid_measurement_failure_t>>
+  on_e_cid_measurement_request(const e_cid_measurement_request_t& request) = 0;
 };
 
 // TRP information CU-CP response, containing information for all available TRPs at all DUs.
