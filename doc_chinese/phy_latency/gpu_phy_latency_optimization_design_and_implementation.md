@@ -1283,6 +1283,68 @@ D7 INFO dry-pool reaps=1471 recovering 9 block(s)
 | D1–D4（F1–F4）| 落 ms 级 / `gaps=0` | 按 §6.13 ④ 的表继续分支 |
 | D6/D7 | `commit->completion` 与 `dry-pool reaps` 都小 | 若 D7 仍是 events≫blocks，说明池仍被 claimed 的块按住 ⇒ 结合 `own/newest` 与 B 的表看是哪一个等待 |
 
+### 6.15 ✅ 第一条**全绿**的腿（`p10-conc2`，n1 + 并发 2，2026-09-25 10:14）：`p0_gate.sh` **18/18**，`gaps=0`，池从未见底——**但 Q9-C 在这条腿上没有被执行，功劳不能记在它头上**
+
+> 腿：`gnb_gpu_p10-conc2_0925_1014`，配方与 `p07/p08/p09` 完全相同（n1 默认 + `max_pusch_and_srs_concurrency=2` +
+> `OCUDU_UL_PHASE_SEGMENTS=1`），上行 `iperf3 -R -t 100`（用户侧：**没有断流**）。跑完由用户 Ctrl-C（atexit 报告完整）。
+
+**① 判据：`p0_gate.sh p10-conc2` → 18 of 18 criteria pass**（第一次全绿）
+
+| 判据 | p07 | p08 | p09 | **p10** |
+|---|---|---|---|---|
+| **D1** `input hold` max | 30.72 s | 5.95 s | 5.00 s | **18.9 ms** ✅ |
+| **D2** `wait max` / `oldest unclaimed age max` | 30.72 s / 77.86 s | 5.95 s / 5.95 s | 3.57 s / 3.57 s | **17.4 ms / 17.4 ms** ✅ |
+| **D3** `pop_blocking` max / `over 1s` | 4.998 s / 2 | 4.997 s / 2 | 4.998 s / 3 | **17 µs / 0** ✅ |
+| **D4** `radio sample continuity` | 2 gaps / 9.97 s | 3 gaps / 9.98 s | 3 gaps / 14.9 s | **0 gaps** ✅ |
+| `[ul_rx_pool]` `taken/returned…` | `starved_events=383`, `held_max=8`, `free_min=0` | 6 / 8 / 0 | 4 / 8 / 0 | **`starved_events=0`, `held_max=4`, `free_min=4`** |
+| `[ul_gpu_lane]` `residency max` | — | 5.004 s | 5.004 s | **2141 µs** |
+| `carried`（关闭时前端 cb 未完成的车道）| 4109 | 16038 | 4457 | **0** |
+| `commit -> completion (Q9-B)` max | — | — | 5.0042 s | **3697 µs** |
+| D6 `registry commit->completion` | — | — | 5.0011 s | **2377 µs** |
+| D7 `dry-pool reaps` | — | — | 1471 ev / 9 blk | **0 / 0**（池从未干） |
+| `[ul_gpu_pipeline]` 中位 / `stale` | 2375.3 µs / 0 | 2328.7 / 2 | 2299.2 / 2 | **2382.7 µs / 0** |
+| `cbs/lane` | 2.00 | 2.00 | 2.00 | **2.00 (max=2) dropped=0** ✅ |
+| 契约 / `paired/phase account` | continuity 红 | continuity 红 | continuity 红 | **8/8 + EXACT MATCH（101289/101289）** ✅ |
+
+**运行期间的实时读数**（用户 iperf 窗口 ≈02:15:30–02:17:10）：**PUSCH = 5000/5 s（1000/s，每个 slot）整 100 s**，
+期间 **0 次 `[RF]` 实时失败、0 次 pool EMPTY、0 次 `PUSCH allocation skipped`、0 次 `PUxCH request late`**、
+**0 次 RX overflow**；全腿 15 次 underflow **全部在 02:17:34 之后**（测试结束之后）。
+普查对照：p09 `PUSCH=17761/228.8 s (77.6/s)`、`PUxCH late=1237`、`overflow=3`、`pool EMPTY=1`、最长静默 23.9 s；
+**p10 `PUSCH=104943/230.4 s (455.6/s)`、`PUxCH late=0`、`overflow=0`、`pool EMPTY=0`、最长静默 9.0 s（在接入阶段）**。
+
+**② ⚠ 归因警告：Q9-C 在这条腿上没有被执行，所以"全绿"不能记成"Q9-C 修好了断流"**
+
+```
+[metal_stats] lane fence signals=209882 waits=104941 skipped=0 generation=209882 own=0 newest=0 cross_lane=0
+```
+* `own=0 newest=0` ⇒ **`burst_ensure_open()` 在这条腿上一次都没有编码过 stage-fence 等待**（否则两支之一必然计数）。
+  ⇒ 默认 `merged` 车道上，车道的 EQ/demap 走的是 **`shared_burst::adopt()`**（与前端块同一条缓冲 ⇒ 构造上就有序），
+  **根本不经过 `burst_ensure_open()`** ⇒ **§6.14 的改动在默认空口路径上是"零执行"的**（它保护的是
+  `merged` 的**回退**路径——几何不允许 hold 时估计器单独提交那一支——以及 `event` 车道序）。
+* 那 104941 次等待来自**另一条**设备侧等待：**corr 栅栏**（`backend_stage_wait_generation(cb, e->corr_fence_generation)`，
+  §6.14 ② 里"不在本次改动范围"的那一条），它的 signaller 是**本跳更早的**提交物 ⇒ 排在前面 ⇒ 不成环。
+* ⇒ **p09→p10 之间唯一的代码差异是 Q9-C，而它没跑** ⇒ 这条腿的干净**只能解释为"这次没触发"**（腿间波动），
+  不能作为"Q9-C 修好了"的证据。**按 §5.2 纪律 2：单条腿不是证据**（p07/p08/p09 三次都有停顿，p10 一次没有）。
+
+**③ 这条腿真正证明了什么**
+
+1. 整条停顿链（没人认领的块 → 池干 → park → 电台溢出）**可以完全不存在**：`starved_events=0`、`held_max=4/8`、
+   `pop_blocking max=17 µs`、`gaps=0`，而且是在**满速上行 100 s（121038 个块）**下取得的——不是"轻载没触发"。
+2. A/Q9-B 的仪器工作正常且自洽：`dry-pool reaps=0`（池没干过 ⇒ 没东西可收）、`registry commit->completion max=2377 µs`
+   （提交之后最长 2.4 ms）。
+3. **触发的间歇性**被摆到明面上：p07/p08/p09 有、p10 没有，而且 p09 的**载荷本身更差**（UE 反复静默/重接、
+   `PUxCH late=1237`）⇒ 停顿与"UE 侧/链路侧的抖动词"相关，而不是与"吞吐量"相关。
+
+**④ 下一步（**重复**才是证据；两条臂）**
+
+| 臂 | 跑法 | 看什么 |
+|---|---|---|
+| **A：同配方复跑 2–3 条**（`p11/p12/p13-conc2`）| 与 p10 完全相同 | 停顿是否复现；若复现，D8 的 `cross_lane`、D6/D7 与 `commit -> completion` 表**直接指出等待者**（是否又是"队列 → 5 s"）|
+| **B：把 Q9-C 真正跑起来**（`p11-event`）| 同配方 + **`OCUDU_CE_LANE_ORDER=event`** | `event` 序下 `burst_ensure_open()` **必然**编码 stage-fence 等待 ⇒ `own=` 应显著 >0；若 `cross_lane>0` 而不再出现 5 s 停顿，才是 Q9-C 的**空口**证据（`cbs/lane` 仍是 2.00，V4 不变）|
+
+若 A 里停顿复现且 D8 显示 `cross_lane=0`、而 B 的表显示 `commit->start` 大 ⇒ 等待者不是 stage fence ⇒
+按 §6.14 ④ 的下一候选（**grid-ready**：MISS 跳等生产者的 generation）继续查。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
