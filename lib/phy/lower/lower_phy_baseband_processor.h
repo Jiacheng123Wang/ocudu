@@ -294,12 +294,22 @@ private:
   /// overflow was measured at ~4.4 ms of park (100938 samples at 23.04 Msps, leg p17).
   static constexpr std::chrono::microseconds rx_park_budget{1000};
 
+  /// The wait slice must never exceed the budget, or the budget is unreachable: `pop_wait_for` waits the WHOLE
+  /// slice, and by the time the drop was decided the radio's ring would already have overflowed. Measured the
+  /// hard way - the first air A/B (p19/p20) ran with a 10 ms slice against a 1 ms budget, so the drop could
+  /// never fire inside the ring's depth. This assertion is what keeps a future edit from re-introducing it.
+  static_assert(rx_park_budget <= rx_reap_slice, "the dry-pool wait slice must not exceed the drop budget");
+
   /// \brief Whether a dry pool drops the block instead of parking the radio (fix B, dev doc 6.26).
   ///
   /// ON by default - it is the fix. `OCUDU_UL_RX_POOL_DROP=0` restores the parking behaviour, which is the A/B
   /// arm that shows what the drop buys: the same leg with it off loses the radio's samples again ([ul_rx_pool]
   /// `dropped_blocks` stays 0 and `gaps` returns).
   static bool rx_pool_drop_enabled();
+
+  /// \brief Whether the next take must be treated as DRY, for the diagnostic arm `OCUDU_UL_RX_POOL_DROP_FORCE`
+  ///        (see the .cpp): it exercises the drop path on a leg whose pool never goes dry.
+  static bool rx_pool_drop_forced();
 
   /// \brief P0-2: records how long the take BLOCKED (the `pop_blocking()` above it), in microseconds.
   ///

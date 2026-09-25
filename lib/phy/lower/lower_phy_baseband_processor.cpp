@@ -590,12 +590,35 @@ bool lower_phy_baseband_processor::rx_pool_drop_enabled()
   return enabled;
 }
 
+bool lower_phy_baseband_processor::rx_pool_drop_forced()
+{
+  // \brief DIAGNOSTIC ARM (like OCUDU_D1_HANDED_BOUND): force the next `OCUDU_UL_RX_POOL_DROP_FORCE=<n>` takes
+  // to be treated as DRY, so the drop path itself is exercised on a leg whose pool never goes dry. A leg flown
+  // with it reports `dropped=<n>` and its `gaps`/contract/decode sentinels then say whether dropping a block is
+  // as harmless as it is meant to be - which is the half no quiet leg can answer.
+  static std::atomic<unsigned> remaining = []() {
+    const char* v = std::getenv("OCUDU_UL_RX_POOL_DROP_FORCE");
+    return (v != nullptr) ? static_cast<unsigned>(std::strtoul(v, nullptr, 10)) : 0u;
+  }();
+  if (remaining.load(std::memory_order_relaxed) == 0) {
+    return false;
+  }
+  unsigned prev = remaining.load(std::memory_order_relaxed);
+  while ((prev != 0) && !remaining.compare_exchange_weak(prev, prev - 1, std::memory_order_relaxed)) {
+  }
+  return prev != 0;
+}
+
 std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_processor::pop_rx_buffer_or_reserve(
     bool& dropped)
 {
   dropped = false;
   std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> buffer{};
-  if (rx_pool->buffers.try_pop(buffer)) {
+  // The DIAGNOSTIC ARM makes the pool look dry for the next N takes WITHOUT taking the buffer, so the whole
+  // path below runs for real: the reap, the sliced wait and (with the drop enabled) the drop after the budget.
+  // Returning the reserve immediately would exercise only the drop's bookkeeping, not the timing that decides it.
+  bool force_timeout = rx_pool_drop_forced();
+  if (!force_timeout && rx_pool->buffers.try_pop(buffer)) {
     // The healthy path: nothing to reap, nothing to wait for, and not one hook call.
     return buffer;
   }
@@ -614,19 +637,38 @@ std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_proc
   constexpr auto stall_dump_after = std::chrono::milliseconds(20);
   constexpr uint64_t stall_dump_min_interval_ms = 2000;
   const auto         parked_since = std::chrono::steady_clock::now();
+  // ★ THE WAIT IS SLICED AT THE BUDGET, and that is not a detail: `pop_wait_for` waits for the WHOLE slice, so a
+  // slice longer than rx_park_budget makes the budget unreachable - the first wait would already have parked for
+  // the slice, and by the time the drop was decided the radio's ring (which overflows at ~4.4 ms of park,
+  // measured) would have lost its samples anyway. With the drop enabled the slice is therefore min(reap slice,
+  // budget): the reap runs ten times as often while the pool is dry (which is what makes the hand-over give its
+  // buffers back sooner) and the drop lands inside the ring. With the drop disabled - the A/B arm - the slice
+  // stays 10 ms, i.e. exactly the behaviour that shipped before this fix.
+  const std::chrono::milliseconds wait_slice =
+      rx_pool_drop_enabled() ? std::min(rx_reap_slice, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                      rx_park_budget + std::chrono::microseconds(1)))
+                             : rx_reap_slice;
   for (;;) {
     handover_reap_hook::reap();
-    const blocking_queue<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>>::result ret =
-        rx_pool->buffers.pop_wait_for(buffer, rx_reap_slice);
-    if (ret == decltype(ret)::success) {
-      return buffer;
+    // The DIAGNOSTIC arm (OCUDU_UL_RX_POOL_DROP_FORCE) has already "timed out": it skips the wait so the budget
+    // and the drop below run for real, on a pool that is in fact healthy.
+    const bool simulated_timeout = force_timeout;
+    force_timeout                = false;
+    if (!simulated_timeout) {
+      const blocking_queue<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>>::result ret =
+          rx_pool->buffers.pop_wait_for(buffer, wait_slice);
+      if (ret == decltype(ret)::success) {
+        return buffer;
+      }
+      if (ret == decltype(ret)::failed) {
+        // The queue was stopped: the caller gets the same null buffer the plain pop_blocking() would give it.
+        return std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>{};
+      }
     }
-    if (ret == decltype(ret)::failed) {
-      // The queue was stopped: the caller gets the same null buffer the plain pop_blocking() would give it.
-      return std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>{};
-    }
-    const auto parked_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
-                                                                                parked_since);
+    const auto parked_us =
+        simulated_timeout
+            ? (std::chrono::duration_cast<std::chrono::microseconds>(rx_park_budget) + std::chrono::microseconds(1))
+            : std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - parked_since);
     if ((std::chrono::steady_clock::now() - parked_since) > stall_dump_after) {
       (void)p0_dump_reports("dry-pool park", stall_dump_min_interval_ms);
     }
