@@ -14,6 +14,7 @@
 #include "ocudu/ran/prach/prach_constants.h"
 #include "ocudu/ran/prach/prach_preamble_information.h"
 #include "ocudu/support/executors/task_worker.h"
+#include "ocudu/support/synchronization/stop_event.h"
 #include <fstream>
 
 namespace ocudu {
@@ -96,13 +97,19 @@ public:
   /// \param slot    Slot point (SFN + slot index) identifying the resource grid to write.
   void on_grid_trigger(unsigned sector, slot_point slot)
   {
+    // Skip if stop was requested.
+    auto token = stop_control.get_token();
+    if (token.is_stop_requested()) {
+      return;
+    }
+
     // Skip if the sector is invalid.
     if (sector >= sectors.size()) {
       return;
     }
 
     // Queue trigger.
-    if (not worker.push_task([this, sector, slot]() {
+    if (not worker.push_task([this, sector, slot, tk = std::move(token)]() {
           // Select resource grid/slot entry.
           slot_entry<shared_resource_grid>& slot_rg =
               sectors[sector].grid_entries[slot.system_slot() % nof_slots_timeout];
@@ -156,6 +163,12 @@ public:
   /// \param context  PRACH buffer context containing sector, slot, format, and PUSCH SCS.
   void on_prach_trigger(unsigned sector, const prach_buffer_context& context)
   {
+    // Skip if stop was requested.
+    auto token = stop_control.get_token();
+    if (token.is_stop_requested()) {
+      return;
+    }
+
     // Skip if the sector identifier is invalid.
     if (context.sector >= sectors.size()) {
       logger.warning(
@@ -174,7 +187,7 @@ public:
     unsigned nof_replicas = prach_info.nof_symbols;
 
     // Queue trigger.
-    if (not worker.push_task([this, sector, slot = context.slot, nof_replicas]() {
+    if (not worker.push_task([this, sector, slot = context.slot, nof_replicas, tk = std::move(token)]() {
           // Select resource grid/slot entry.
           slot_entry<shared_prach_buffer>& slot_rg =
               sectors[sector].prach_entries[slot.system_slot() % nof_slots_timeout];
@@ -237,6 +250,12 @@ public:
   /// \param grid     Shared resource grid for the received slot.
   void handle_rx_symbol(const upper_phy_rx_symbol_context& context, const shared_resource_grid& grid)
   {
+    // Skip if stop was requested.
+    auto token = stop_control.get_token();
+    if (token.is_stop_requested()) {
+      return;
+    }
+
     // Early return if the number of symbols does not reach the configured one or the file is not open.
     if ((context.symbol != (nof_symbols - 1)) || !file.is_open()) {
       return;
@@ -250,7 +269,7 @@ public:
     }
 
     // Queue write request.
-    if (not worker.push_task([this, context, rg = grid.copy()]() mutable {
+    if (not worker.push_task([this, context, rg = grid.copy(), tk = std::move(token)]() mutable {
           slot_entry<shared_resource_grid>& entry =
               sectors[context.sector].grid_entries[context.slot.system_slot() % nof_slots_timeout];
           entry.slot     = context.slot;
@@ -271,6 +290,12 @@ public:
   /// \param buffer   Shared PRACH buffer owned by the caller before this call.
   void handle_rx_prach_window(const prach_buffer_context& context, shared_prach_buffer buffer)
   {
+    // Skip if stop was requested.
+    auto token = stop_control.get_token();
+    if (token.is_stop_requested()) {
+      return;
+    }
+
     // Skip if the sector is invalid.
     if (context.sector >= sectors.size()) {
       logger.warning(
@@ -279,17 +304,44 @@ public:
     }
 
     // Queue write request.
-    if (!worker.push_task(
-            [this, slot = context.slot, sector = context.sector, prach_buff = std::move(buffer)]() mutable {
-              slot_entry<shared_prach_buffer>& entry =
-                  sectors[sector].prach_entries[slot.system_slot() % nof_slots_timeout];
-              entry.slot     = slot;
-              entry.resource = std::move(prach_buff);
-            })) {
+    if (!worker.push_task([this,
+                           slot       = context.slot,
+                           sector     = context.sector,
+                           prach_buff = std::move(buffer),
+                           tk         = std::move(token)]() mutable {
+          slot_entry<shared_prach_buffer>& entry =
+              sectors[sector].prach_entries[slot.system_slot() % nof_slots_timeout];
+          entry.slot     = slot;
+          entry.resource = std::move(prach_buff);
+        })) {
       logger.warning(context.slot.sfn(),
                      context.slot.slot_index(),
                      "RX_PRACH: Failed to save PRACH entry. Cause: task worker queue is full");
     }
+  }
+
+  /// \brief Waits for pending tasks, releases the buffered resources and closes the output file.
+  ///
+  /// Destroying the backend has the same effect. Calling this method releases the resources at a known point,
+  /// independently of the backend lifetime.
+  void stop()
+  {
+    // Wait for all tasks to complete.
+    stop_control.stop();
+
+    // Free buffered resources.
+    for (sector_repository& sector : sectors) {
+      for (slot_entry<shared_resource_grid>& grid : sector.grid_entries) {
+        grid.resource.release();
+      }
+
+      for (slot_entry<shared_prach_buffer>& prach : sector.prach_entries) {
+        prach.resource.reset();
+      }
+    }
+
+    // Flush and close the output file.
+    file.close();
   }
 
 private:
@@ -337,6 +389,8 @@ private:
   unsigned start_port;
   /// Last antenna port to dump (exclusive).
   unsigned end_port;
+  /// Stop control.
+  rt_stop_event_source stop_control;
 };
 
 } // namespace ocudu
