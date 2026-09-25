@@ -190,13 +190,13 @@ variables:
             build.spdx ${ATTESTATION_EXPECTED_FILES}
         fi
 
+        # If we don't clean the attestation, every iteration amends the signature/sbom/grype_report and it can grow unbounded
+        # We clean up the attested files and then re-push everything again
+        echo "=== Cleaning previous signature/attestations ==="
+        cosign clean --type=all --force ${IMAGE_DIGEST}
+
         echo "=== Signing image ==="
         cosign sign ${IMAGE_DIGEST}
-
-        # If we don't clean the attestation, every iteration amends the sbom/grype reporter and it can grow unbounded
-        # We clean up the attested files and then re-push everything again
-        echo "=== Cleaning previous attestations ==="
-        cosign clean --type=attestation --force ${IMAGE_DIGEST}
 
         echo "=== Generating container SPDX ==="
         generate_container_spdx
