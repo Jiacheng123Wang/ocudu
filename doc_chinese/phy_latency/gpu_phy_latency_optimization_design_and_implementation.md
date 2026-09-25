@@ -1091,6 +1091,78 @@ D 组的两条路径都已自测：**在 `p07-conc2` 上 D1–D4 全 FAIL**（30
   失败者名字未能捕获（当时的输出只留了汇总行）；此后**复跑 10 次全绿**，按纪律记为**未复现单发**。
   若在确认腿前的复跑里再出现，就必须先查清再飞腿。）
 
+### 6.12 ⚠ Q9 修复的确认腿（`p08-conc2`，n1 + 并发 2，2026-09-25 09:10）：**修复本身生效，但 UL 断流没消失**——剩下的持有者不是注册表，而是**命令缓冲的完成**
+
+> 腿：`gnb_gpu_p08-conc2_0925_0910`，配方与 `p07-conc2` 完全相同（n1 默认 + `max_pusch_and_srs_concurrency=2` +
+> `OCUDU_UL_PHASE_SEGMENTS=1`），二进制戳 = `bbc2ddf96f`（= §6.11 的修复 + 文档）。腿跑了 **357 s**，用户在
+> 01:13:48–01:15:28 之间跑上行 `iperf3 -R -t 100`：**仍然断流**（19.2–71 s 归零），Retr 6816。
+
+**① 预登记判据（§6.11 ⑤）的读数：F1–F5 全部未过**（`p0_gate.sh p08-conc2` 的 D 组）
+
+```
+D1 FAIL  input hold max = 5947.8 ms   (判据 < 100 ms；p07 是 30723.8 ms)
+D2 FAIL  wait_for_a_claim max = 5945.2 ms, oldest unclaimed age max = 5945.2 ms (p07: 30723 / 77860 ms)
+D3 FAIL  pop_blocking wait max = 4997.4 ms, over 1s = 2      (p07: 4997.6 ms / 2)
+D4 FAIL  radio sample continuity: 3 gaps / 153,257,099 samples (p07: 2 gaps / 153,167,345)
+D5 INFO  late=5859, late_time=15  <- 时间期限确实在工作（它认领了 15 个 slot 规则够不到的块）
+```
+F6：`late` 5859（p07 3700）——**没有暴涨**；F7：`cbs/lane=2.00 (max=2) dropped=0` ✓、契约 8/8 里**只有** continuity 一条红
+（`contract NOT MET: 1 of 8`）；F8：`paired/phase account … EXACT MATCH`（44777/44777）✓。
+⚠ 新出现 `[ul_gpu_pipeline] stale=2`（p07 是 0）；`[ul_gpu_lane] period max = 8.99 s`。
+
+**② 修复本身**确实**把注册表那一侧治好了**（同配方逐项对比）
+
+| 读数 | `p07-conc2`（修复前）| `p08-conc2`（修复后）|
+|---|---|---|
+| `input hold` max | 30.72 s（slot 10226）| **5.95 s**（slot 415）|
+| `input hold` mean | 4523.2 µs | **3118.5 µs** |
+| `block lifecycle` wait max / mean | 30.72 s / 5047.3 µs | **5.95 s / 2206.1 µs** |
+| `oldest unclaimed age max` | **77.86 s** | **5.95 s** |
+| **`[ul_rx_pool] starved_takes / starved_events`** | **415 / 383** | **42 / 6**（**↓64×**）|
+| `held_end` | 4 | **0** |
+| `late` / `late_time` | 3700 / —（无此计数器）| 5859 / **15** |
+| `keepalives` | 880558/880614（差 56）| **1186416/1186416（零差）** |
+| gaps（样点丢失）| 2 / 9.97 s | 3 / **9.98 s** |
+| `pop_blocking` max / >1s | 4.998 s ×2 | 4.997 s ×2 |
+| `[ul_gpu_pipeline]` 中位 | 2375.3 µs | **2328.7 µs** |
+
+⇒ **没有 10.24 s 的整数倍等待了**（Q9 的机制消失），池饥饿事件从 **383 降到 6**，token 零泄漏。
+但**样点丢失一分钟都没少**：因为 **9.98 s ≈ 2 × 4.997 s**——丢样点的时间就是那**两次 5 秒 park**，与"慢性饥饿"无关。
+
+**③ 这条腿把剩下的持有者钉到哪一步了**（P0-7 的 `slowest` 表 + 主日志时间线）
+
+```
+[metal_stats] block lifecycle (P0-7) slowest deposit->completion:
+  slot=4824 claimed=1 swept=1 wait_for_a_claim=3050.0us deposit->completion=5003642.0us
+  slot=4825 claimed=1 swept=1 wait_for_a_claim=3024.0us deposit->completion=5003373.0us
+  slot=404  claimed=1 swept=1 wait_for_a_claim=3015.0us deposit->completion=5002566.0us
+  slot=415  claimed=1 swept=1 wait_for_a_claim=5945247.0us deposit->completion=5947806.0us
+  slot=4823/4826/4822/403 …    同样 ~3.0 ms 认领 / ~5.003 s 完成（4822 是 swept=0，被跳认领，21 µs）
+```
+
+* **认领已经很快**（~3.0 ms；注册表这一侧好了）⇒ 剩下的等待在**块的命令缓冲完成**上：`deposit->completion ≈ 5.003 s`。
+* **输入 token 是在 cb 的完成处理器里回池的**（`arm_tokens_on_complete`）⇒ cb 完成多晚，接收缓冲就被按住多久。
+* 于是链条是：**cb 完成晚 5 s ⇒ 池被按住（`held_max=8, free_min=0`）⇒ `pop_blocking` park 4.997 s ⇒
+  RT 环 `Real-time failure in RF: late`（01:14:39 一秒内数千条）与 underflow（全腿 31 次）⇒ RX overflow 3 次
+  （= 全部 9.98 s 样点丢失）⇒ 调度器 `PUSCH allocation skipped. Cause: All the UE HARQs are busy waiting for their results`
+  ⇒ 不再发 grant ⇒ UE 掉线重接（**每一次静默之后都紧跟一条 `PRACH: … detected_preambles`**）⇒ iperf3 的 ~50 s 断流
+  （其中大部分是 TCP/RLC 恢复与重接时间，不是 gNB 静默时长）。**
+* **第二个洞**：`slot=415` 的 `wait_for_a_claim = 5.945 s`，而认领之后 **2.6 ms 就完成** ⇒ 那 5.9 s 里
+  **没有任何注册表入口被调用**（收包停 ⇒ 没有 deposit；UL 流水线被自己的 cb 堵住 ⇒ 没有 take）
+  ⇒ **§6.11 的"每个入口都查"在"全停"时依然没人来问**。期限再准，也得有人来问。
+* 候选的挂起点（要下一条腿的仪器来判，**不要凭猜**）：`[ul_gpu_lane] lanes=48078 cbs/lane=2.00 carried=16038`
+  （**33% 的车道在关闭时前端 cb 还没完成**）、`lane fence signals=96156 waits=48078`（每个车道都等一次抽取栅栏）、
+  `grid_devwaited=60`。车道序是默认的 `merged`（整个延迟跳一次提交），所以"被 hold 住的抽取 cb 跨跳未提交"
+  与"MISS 跳等一个没被提交的生产者"这两条**都还没有被排除**，**它们都能让一个 cb 在 GPU 里干等几秒**。
+
+**④ 下一步（A/B 不需要裁决，C 需要）**
+
+| 选项 | 内容 | 代价/风险 |
+|---|---|---|
+| **A** | 把**停在 `pop_blocking` 的接收线程**变成 sweep 的入口（一个 hook）：注册表被"没人来问"卡住时，由**被 park 的那个线程自己**去收孤儿 | 小、离线可测；只治第二个洞（`claimed=1` 的块不归 sweep 管——那是编码安全，不能动）|
+| **B** | 查"cb 为什么 5 s 才完成"：**P0-7b**（每条记录 `commit→completion` + 设备侧等待目标：抽取栅栏 / grid-ready 的 generation 及其 signaller 的 slot）＋现成开关 **`OCUDU_CE_WAIT_TRACE=1`**（按指针打印 held cb 的 publish / close 站点，能直接看"谁、隔了多久才 close"）| 纯仪器、不动数据面；需要一条腿 |
+| **C** | **结构性**：让交接块的输入不要依赖"可能跨跳被 hold 的 cb"——前端 DFT 单独一次提交（= P2-E 选项 (b)，用户 2026-09-25 已裁掉）。**新证据是：它不只是时延问题，而是"池被按住 5 s"的机制**；按 `merged` 车道序语义实施会让 V4（`cbs/lane`）需要重新裁决 | 需要用户二次裁决 + 重测 |
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
@@ -1205,7 +1277,7 @@ n1 默认配方 + `OCUDU_UL_PHASE_SEGMENTS=1`：
 | **Q6** | 把 `max_pusch_and_srs_concurrency` 改变能否把 `ce` 的排队项吃掉？代价是什么？ | ✅ **已回答（P1-8，§7.5）**：能（−58~64×），代价是那次 **5 秒收包停顿**（两次复现）⇒ 交付前必须查清 |
 | **Q7** | 符号级收包（S-7g-13）在**负载下**对**跨度**的效果？ | **开放**：§5.8.29 只量过**该段** −1.2%（当时未加压、且当时丢了融合 1 次提交）⇒ 必须在加压腿 + 融合路径上重量一次 |
 | **Q8** | n78/n1 腿上 `max_pusch_and_srs_concurrency` 的生效值？车道是串行 strand 还是 fork limiter？ | ✅ **已收口（§6.1）**：两者**都是 1**、**都是串行 strand**；上限 = 中等池 `max_concurrency = 5`。⚠ 更正手算：n78 的 `ul_ratio` 是 **0.30**（不是 1.0）|
-| **Q9** | 并发 2 下 UL 断流 / 收包停顿的成因？ | ✅ **已结案（§6.10）**：**根因是代码缺陷**——`ocudu_metal_burst.mm` 的 sweep 用**模 10240 的 `slot_point::count()`** 做 `entry.slot + 2 < slot` 比较，跨 hyperframe（10.24 s）环绕即失效 ⇒ 落在环绕末尾的无人认领块要等**一整个 10.24 s 周期**（实测等待是 10.24 s 的整数倍：3.000×/2.000×/1.001×）才被 sweep，其间咬着 14 个输入 token ⇒ 池空 ⇒ 接收线程 park （实测 2 次 ≈4.998 s）⇒ 电台溢出 9.97 s ⇒ UL 归零。**修复已落地（2026-09-25，§6.11，提交 `3d00eafe97`）：sweep 改成「slot 窗口（环绕安全守护）+ 10 ms 单调时钟期限」两个触发，并在每一个注册表入口（deposit / take / 宿主读）都查一遍；离线全绿。⏳ 等用户跑确认腿（§6.11 ⑤ 的 F1–F8，判读分支见 §6.11 ⑥）** |
+| **Q9** | 并发 2 下 UL 断流 / 收包停顿的成因？ | ✅ **已结案（§6.10）**：**根因是代码缺陷**——`ocudu_metal_burst.mm` 的 sweep 用**模 10240 的 `slot_point::count()`** 做 `entry.slot + 2 < slot` 比较，跨 hyperframe（10.24 s）环绕即失效 ⇒ 落在环绕末尾的无人认领块要等**一整个 10.24 s 周期**（实测等待是 10.24 s 的整数倍：3.000×/2.000×/1.001×）才被 sweep，其间咬着 14 个输入 token ⇒ 池空 ⇒ 接收线程 park （实测 2 次 ≈4.998 s）⇒ 电台溢出 9.97 s ⇒ UL 归零。**修复已落地（2026-09-25，§6.11，提交 `3d00eafe97`）：sweep 改成「slot 窗口（环绕安全守护）+ 10 ms 单调时钟期限」两个触发，并在每一个注册表入口（deposit / take / 宿主读）都查一遍。确认腿 `p08-conc2`（§6.12）证明它把注册表那一侧治好了（`starved_events` 383→6、unclaimed age 77.9→5.95 s、无 10.24 s 整数倍等待、token 零泄漏），但 **UL 断流没消失**：剩下的持有者是**命令缓冲的完成**（认领 ~3 ms，`deposit->completion ≈ 5.00 s`，而 token 是在完成处理器里回池）⇒ 见 §6.12 ③/④ 的 A/B/C** |
 | **Q10** | 那条 **n1 2.85 倍退化**是否还有 `ce` 之外的成分？ | 已由单变量腿定位（§7.5：`ce` 是主因）；`p05-pair` **配对后**：`ce` 中位 **3278 µs** = 跨度 5248 的 **62%**，而一跳的设备执行只有 **517 µs**（Q14）⇒ `ce` 的排队项就是这条退化的主体。**残余**是 `t2f`（1095 vs 历史 521 量级）——与 Q7 的收样点策略、以及 n1 的 rx_wait（1052 µs）有关，**未单独开臂** |
 | **Q11** | `value_net` 的归档基线陈旧、`ab_dumps` arm1 改前就红 | **待用户裁决**：重建基线（= 承认过期）还是把该网标为"HEAD 不可用"；arm1 需要查清"是否曾经绿过"（§6.5⑤）|
 | **Q12** | `s84b-p0` 的第一次尝试**没有留下任何日志**（本仓与 `ocudu_premerge` 都没有）| **未验证**：最可能是被"戳 ≠ HEAD"拒绝（那种情况**不产生日志**）。要它当证据就得重飞一条；否则按"无效腿"处理（登记，低优先）|
