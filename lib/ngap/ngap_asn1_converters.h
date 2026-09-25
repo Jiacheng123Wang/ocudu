@@ -369,6 +369,14 @@ inline bool pdu_session_res_modify_response_item_to_asn1(template_asn1_item& asn
     }
   }
 
+  // Fill the QoS flows that failed to be added or modified.
+  for (const auto& qos_flow : resp.transfer.qos_flow_failed_to_add_or_modify_list) {
+    asn1::ngap::qos_flow_with_cause_item_s asn1_item;
+    asn1_item.qos_flow_id = to_underlying(qos_flow.qos_flow_id);
+    asn1_item.cause       = cause_to_asn1(qos_flow.cause);
+    response_transfer.qos_flow_failed_to_add_or_modify_list.push_back(asn1_item);
+  }
+
   // Pack pdu_session_res_modify_resp_transfer_s.
   byte_buffer pdu = pack_into_pdu(response_transfer);
 
