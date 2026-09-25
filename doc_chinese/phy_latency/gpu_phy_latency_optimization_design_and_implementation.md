@@ -4208,6 +4208,58 @@ clang++ -std=c++17 -O2 -I /opt/homebrew/include doc_chinese/phy_latency/wip/uhd_
 * 剩余的真问题只有一个：**偶发的 ~40 ms 宿主停顿**（表现为 13 次 stale / 0.01% 的跳），它的靶子是宿主竞争与线程优先级。
 
 
+### 6.58 **§3.2 开工第一步（只读码）就改了结论**：光"解开 `estimates` 断因"**今天已经不值派发**——要省那 2 次派发，必须**把 `h_starts` 那套办法搬到 y 上**（kernel + 宿主）
+
+> 用户裁决：B + C 之后**继续主线 §3.2**。按纪律先只读码、把方案与预登记写清楚，再动手。**读码的结果是原方案要改**。
+
+#### ① 原方案为什么不再成立（三处代码事实）
+
+1. **断因的机理**（`eq_flush_hook` 的 run 谓词）：设备侧估计走 `same_h` 的强条件
+   `next.h.offset == prev.h.offset + h_step`，而 `h_step = layer_stride ?: nof_re`；
+   本空口是 **1 层** ⇒ `view_ch_est_list.h` 把 `layer_stride` 置 **0** ⇒ 步长就是 `nof_re`，
+   而估计器为**每个符号**（含 DM-RS 符号）都发布了切片 ⇒ 数据符号的偏移**跨过 DM-RS 符号时会跳**
+   ⇒ 在 DM-RS 处断 run（`first_break=estimates`）。
+2. **但 run 还有第二道锁**：`same_gather` 要求 `next.gather.symbol == head.gather.symbol + n_run`，
+   即 **run 的符号必须在网格里连续**；而 DM-RS 符号因 `nof_re_symbol == 0` **根本不进 pending**
+   （`pusch_demodulator_impl.cpp`）⇒ 合并后的 run **必然跨越网格上的空档** ⇒ 这一条**也**会断。
+3. **而"跨越空档的 run"表达不出来**：
+   * **直读网格**（§6.48）要求符号连续（`sym.symbol != head.symbol + k → miss(start)`），因为 kernel 里
+     y 是**统一步长**（`y += sym * st.y_stride`）；
+   * **gather** 的 tap 表按 `taps[first_symbol + sym]` 索引（符号连续）⇒ 同样表达不了；
+   * 唯一现成的"任意偏移"机制是 **`h_starts[]`**（batch 5f 为 h 做的），**y 没有对应物**。
+
+⇒ **算术**：今天一跳的均衡派发 = **3**（= 3 个 run 各 1 次直读，`ch_gather=0`）。
+若只解开谓词、让 1 个 run 覆盖整跳：该 run **必须走 gather** ⇒ 派发变成
+**1 建表 + 1 gather + 1 均衡 = 3** ⇒ **净收益 0**（还与 §6.48 的收益抵消）。
+
+#### ② 改后的方案（**把 `h_starts` 搬到 y 上**，一次改动同时拿下两件事）
+
+| 处 | 改动 |
+|---|---|
+| `ocudu_equalizer.metal`：`equalize_strides` | 增加 **`uint y_starts[eq_max_run_symbols]`**（与 `h_starts` 同形）；`equalize_mxn_batch` 里把 `y += sym * st.y_stride` 换成 `y += st.y_starts[min(sym,…)] - p.y_offset` |
+| `equalize_params` | 增加 **`uint y_offset`**（h 已有 `h_offset`，y 今天靠绑定偏移，没有参数位的对应物）|
+| 宿主 `eq_strides_t` + `eq_encode_batch_dispatch` | 同步加字段（有 `static_assert` 对齐 MSL 结构，照 h 的做法）|
+| `eq_flush_hook` 的 run 谓词 | 设备侧 `same_h`：**只要求同一缓冲**（不再要求定步长——kernel 有逐符号表了）；`same_gather`：**只要求同一 plan**（不再要求符号连续）|
+| `eq_direct_grid_run` | 直读判据去掉"符号连续"，改为**逐符号各自给出网格行**（`subc_base` 仍要求同一起点、每符号 dense）；`y_starts[k] = symbols[first+k].symbol * symb_stride + subc_base` |
+
+**收益（预登记）**：run **3 → 1**；均衡派发 **3 → 1**；总派发 **6 → 4/跳**（2 CE + 1 解映射 + 1 均衡，**无建表、无 gather**）
+⇒ 按 §6.50 修正后的标尺（V1/跨度 13–17 µs/派发）**V1 −26 … −34 µs ⇒ ≈1375–1382 µs**；
+`merged_hop` 按窗口口径（6.5–9.4）**−13 … −19 µs**。
+
+**不变量（必须先离线全绿，照 §6.48 的做法）**：
+* **逐字节**：`ul_chain_replay` 27 条语料 ×2 臂（`OCUDU_EQ_DIRECT_GRID=0/1`）**dump 逐字节相同**；
+  再与**改前二进制**对拍一遍（同一语料，`ab_replay_bins.sh` 的形状）⇒ 这次动的是 kernel，**必须**两边都比；
+* `ctest -L phy`（含 `channel_equalizer_metal_unit_test` 两个注册臂）、`l1_handover_arms.sh`、`value_net`；
+* **金属库要重建**（改了 `.metal`），并且**显式**构建那 7 个依赖目标（§4.3）。
+**反例判读**：若 `runs` 仍 3.0 ⇒ 谓词有一处没放开（看 `first_break` 变成什么）；若 `y_direct` 掉到 0 ⇒ 直读判据被新条件挡住（看 `miss(...)`）。
+
+#### ③ 为什么值得做
+
+* 这是 §6.44 ③ 表里**剩下的唯一"派发级"杠杆**（③ 的 CE 2 次与解映射 1 次是别的模块）；
+* 它把 §6.47 的"**变体 B**"（kernel 侧读时定位）**缩小到一个纯地址改动**：不引入查表、不改算术语义 ⇒
+  逐字节相同是**构造性**的，判据仍然是 §6.48 那套对拍。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

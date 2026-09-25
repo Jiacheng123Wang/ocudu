@@ -222,7 +222,19 @@ sudo -E LEG_CONFIG=... bash .../run_leg.sh gpu p34-n78-ring64 --regime=stress OC
 **CPU 打满 ⇒ `recv` max 28 ms 而电台 0 错误**（⇒ 停顿在宿主调度、不在电台）。
 构建：`clang++ -std=c++17 -O2 -I /opt/homebrew/include doc_chinese/phy_latency/wip/uhd_rx_health.cpp -L /opt/homebrew/lib -luhd -Wl,-rpath,/opt/homebrew/lib -o /tmp/uhd_rx_health`
 
-### 3.2 下一步：解开 `estimates` 断因，让 run 覆盖整跳
+### 3.2 ⏳（**已开工：只读码阶段完成、方案已改、预登记已写**）：把 `h_starts` 搬到 y 上 —— run 3→1、派发 6→4
+
+**读码结论（开发文档 §6.58）：原方案"只解开 `estimates` 断因"今天不值派发** ——
+因为 ① run 还有第二道锁 `same_gather`（要求符号在网格里**连续**），而 DM-RS 符号**不进 pending** ⇒ 合并后的 run 必然跨越空档；
+② 跨越空档的 run **直读表达不了**（kernel 里 y 是**统一步长** `y += sym*st.y_stride`）、**gather 也表达不了**（tap 按 `taps[first+sym]` 索引）；
+⇒ 只解谓词的话，合并后的 run 必须退回 gather ⇒ **1 建表 + 1 gather + 1 均衡 = 3**，与今天（3 次直读）**净收益 0**。
+
+**改后的方案**：把 batch 5f 给 h 做的 **`h_starts[]` 逐符号表照搬到 y**（外加 `p.y_offset`），
+然后同时 ①放开 `same_h`/`same_gather`、②放开直读的"符号连续"（逐符号各自给网格行）。
+**预登记**：`runs` 3→**1**、均衡派发 3→1、**总派发 6→4/跳**、**V1 −26…−34 µs ⇒ ≈1375–1382**、
+`merged_hop` −13…−19 µs、**dump 逐字节相同**（含与**改前二进制**对拍）、`ctest -L phy` 193/193。
+**下一步动作**：改 `.metal`（`y_starts`/`y_offset`）+ 宿主（`eq_strides_t`/谓词/直读判据）→ 重建 metallib 与 7 个依赖目标 → 跑不变量网 → 给你腿命令。
+
 
 `eq_batch first_break=estimates` ⇒ 12 个符号被切成 **3 个 run**（最长 8）。判据要求各符号的估计切片
 **共享一个缓冲且按固定步长前进**（`h_step = head.h.layer_stride ?: nof_re`）⇒ 修**信道估计的输出布局**即可让
