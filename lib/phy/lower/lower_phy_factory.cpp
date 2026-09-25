@@ -167,10 +167,12 @@ public:
       const unsigned long requested = std::strtoul(pool_env, nullptr, 10);
       if (requested > nof_rx_buffers) {
         std::fprintf(stderr,
-                     "[ul_rx_pool] OCUDU_UL_RX_POOL_SIZE=%lu is a DIAGNOSTIC arm (P1-4, dev doc 6.36): the "
-                     "receive pool is %u buffers instead of the computed %u. Read starved_events/held_max "
-                     "AGAINST the legs that used the computed size - a diagnostic proves the causal chain, it "
-                     "is not a delivery option\n",
+                     "[ul_rx_pool] OCUDU_UL_RX_POOL_SIZE=%lu is a DIAGNOSTIC arm (P1-4, dev doc 6.36/6.37): "
+                     "the receive pool is %u buffers instead of the computed %u. NOTE the ring rounds the "
+                     "capacity UP TO A POWER OF TWO (dev doc 6.37 (2)), so the value that exists is 8/16/32: "
+                     "read the effective size in the [ul_rx_pool] ... pool= field at exit. Read "
+                     "starved_events/held_max AGAINST the legs that used the computed size - a diagnostic "
+                     "proves the causal chain, it is not a delivery option\n",
                      requested,
                      static_cast<unsigned>(requested),
                      nof_rx_buffers);
