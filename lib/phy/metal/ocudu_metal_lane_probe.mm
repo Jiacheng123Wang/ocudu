@@ -3,6 +3,7 @@
 
 #include "ocudu_metal_lane_clock.h"
 #include "ocudu_metal_lane_probe.h"
+#include "ocudu_metal_queue.h"
 
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 
@@ -456,6 +457,18 @@ void gpu_lane_probe::register_commit(id<MTLCommandBuffer> cb, stage which)
   entry.has_slot = ocudu::metal::lane_clock.has_lane_slot;
   thread_state().pending.push_back(entry);
 }
+
+namespace {
+/// Q9-D: the queue's fence-order instrument wants the slot of the hop whose wait it is recording, and the lane
+/// clock that knows it lives here. Installed once, so `ocudu_metal_queue.mm` needs no dependency on the probe.
+bool     probe_lane_has_slot() { return ocudu::metal::lane_clock.has_lane_slot; }
+uint64_t probe_lane_slot() { return ocudu::metal::lane_clock.lane_slot; }
+
+const bool lane_slot_accessors_installed = []() {
+  ocudu::metal::shared_queue::install_lane_slot_accessors(&probe_lane_has_slot, &probe_lane_slot);
+  return true;
+}();
+} // namespace
 
 void gpu_lane_probe::close_lane()
 {

@@ -37,6 +37,33 @@ struct shared_queue_state {
   std::atomic<uint64_t>    stage_fence_generation{0};
   std::atomic<uint64_t>    stage_fence_signals{0};
   std::atomic<uint64_t>    stage_fence_waits{0};
+  /// \name Q9-D: the fence waits that are open right now, and what became of them.
+  ///
+  /// A wait is open from the moment it is encoded until a signal REACHES its generation (Metal's shared-event
+  /// wait fires on `value >= generation`). It is therefore resolved by the NEXT signal at or above it, which is
+  /// what makes the duration measurable from the host: the signal sites are host calls (the signal is encoded
+  /// immediately before the commit that will publish it), and their distance from the wait is the number the
+  /// report prints. Bounded, because a wait whose signaller never comes would otherwise grow this forever.
+  ///@{
+  std::mutex            fence_mutex;
+  struct fence_wait {
+    uint64_t                           generation = 0;
+    shared_queue::fence_kind           kind       = shared_queue::fence_kind::stage;
+    uint64_t                           slot       = 0;
+    bool                               has_slot   = false;
+    std::chrono::steady_clock::time_point wait_at{};
+  };
+  std::vector<fence_wait> fence_pending;
+  std::atomic<uint64_t>   fence_waits{0};
+  /// Waits whose signaller had already been encoded: satisfied at once, the shape that can never block.
+  std::atomic<uint64_t>   fence_waits_before{0};
+  std::atomic<uint64_t>   fence_waits_after{0};
+  std::atomic<uint64_t>   fence_wait_after_max_us{0};
+  /// Slot and kind of the longest wait whose signaller came after it (`fence_wait_after_worst_kind`).
+  std::atomic<uint64_t>   fence_wait_after_worst_slot{0};
+  std::atomic<unsigned>   fence_wait_after_worst_kind{0};
+  ///@}
+
   /// Q9-C: which generation the waits named (see shared_queue::note_stage_fence_wait).
   std::atomic<uint64_t>    stage_fence_own_waits{0};
   std::atomic<uint64_t>    stage_fence_newest_waits{0};
@@ -161,6 +188,27 @@ void shared_queue_stats_report()
                static_cast<unsigned long long>(s.stage_fence_own_waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.stage_fence_newest_waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.stage_fence_cross_lane.load(std::memory_order_relaxed)));
+  // Q9-D: the device-side fence waits that named a signaller which had NOT been handed out yet, and how long
+  // they then lasted. A wait is safe when its signaller came first (the stage fence's intended shape, the
+  // correlation fence, a grid producer already committed); when it did not, the signaller's command buffer may
+  // reach the queue after the waiter's, and on a serial queue that ordering cannot be satisfied until the
+  // signaller runs - while the signaller cannot run until the waiter does. `max` is the reading that says
+  // whether a leg's stall sits in a fence at all, and `worst` names which one and for which slot.
+  {
+    uint64_t    worst_slot = 0;
+    const char* worst_kind = shared_queue::fence_wait_after_worst_kind(worst_slot);
+    const double worst_ms  = static_cast<double>(s.fence_wait_after_max_us.load(std::memory_order_relaxed)) / 1000.0;
+    std::fprintf(stderr,
+                 "[metal_stats] fence order (Q9-D): waits=%llu signaller-first=%llu signaller-after=%llu "
+                 "max=%.1fms worst kind=%s slot=%llu%s\n",
+                 static_cast<unsigned long long>(s.fence_waits.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.fence_waits_before.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(s.fence_waits_after.load(std::memory_order_relaxed)),
+                 worst_ms,
+                 worst_kind,
+                 static_cast<unsigned long long>(worst_slot),
+                 (s.fence_pending.empty()) ? "" : " (waits still open at exit: their signaller never came)");
+  }
   // GPU busy time, measured on the command buffers themselves (GPUStartTime/GPUEndTime in their
   // completion handlers): this is the one time measurement that keeps its meaning once the stages are
   // fused into a single command buffer, where the per-stage host timestamps say nothing any more.
@@ -472,6 +520,7 @@ uint64_t shared_queue::grid_ready_signal(id<MTLCommandBuffer> command_buffer)
   }
   const uint64_t generation = s.grid_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
   [command_buffer encodeSignalEvent:s.grid_event value:generation];
+  note_fence_signal(generation, fence_kind::grid);
   return generation;
 }
 
@@ -500,6 +549,7 @@ bool shared_queue::grid_ready_encode_wait(id<MTLCommandBuffer> command_buffer, u
     return false;
   }
   [command_buffer encodeWaitForEvent:s.grid_event value:generation];
+  note_fence_wait(generation, fence_kind::grid);
   return true;
 }
 
@@ -537,6 +587,9 @@ uint64_t shared_queue::backend_stage_signal(id<MTLCommandBuffer> command_buffer)
   const uint64_t generation = s.stage_fence_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
   [command_buffer encodeSignalEvent:s.stage_fence_event value:generation];
   s.stage_fence_signals.fetch_add(1, std::memory_order_relaxed);
+  // Q9-D: the fence this signal belongs to cannot be told apart here (the stage and the correlation fences
+  // share this event and this generation counter), so it is recorded as `stage` and the report says so.
+  note_fence_signal(generation, fence_kind::stage);
   return generation;
 }
 
@@ -561,6 +614,7 @@ bool shared_queue::backend_stage_wait(id<MTLCommandBuffer> command_buffer)
   }
   [command_buffer encodeWaitForEvent:s.stage_fence_event value:generation];
   s.stage_fence_waits.fetch_add(1, std::memory_order_relaxed);
+  note_fence_wait(generation, fence_kind::stage);
   return true;
 }
 
@@ -572,6 +626,139 @@ uint64_t shared_queue::backend_stage_nof_signals()
 uint64_t shared_queue::backend_stage_nof_waits()
 {
   return state().stage_fence_waits.load(std::memory_order_relaxed);
+}
+
+namespace {
+/// The waiting hop's slot, when the calling thread knows it (Q9-D): the lane clock lives with the Metal lane
+/// probe and the queue does not include it, so a weak accessor is installed by the probe at start-up. Missing
+/// accessor (the unit tests, the replay tool) means "no slot", which the report prints as 0.
+bool (*lane_has_slot_fn)()  = nullptr;
+uint64_t (*lane_slot_fn)()  = nullptr;
+} // namespace
+
+void shared_queue::install_lane_slot_accessors(bool (*has_slot)(), uint64_t (*slot)())
+{
+  lane_has_slot_fn = has_slot;
+  lane_slot_fn     = slot;
+}
+
+namespace {
+bool lane_has_slot()
+{
+  return (lane_has_slot_fn != nullptr) && lane_has_slot_fn();
+}
+
+uint64_t lane_slot()
+{
+  return (lane_slot_fn != nullptr) ? lane_slot_fn() : 0;
+}
+
+/// The worst fence wait stays readable after the wait's record is gone (Q9-D): the report asks for its kind.
+const char* fence_kind_name(shared_queue::fence_kind kind)
+{
+  switch (kind) {
+    case shared_queue::fence_kind::stage:
+      return "stage";
+    case shared_queue::fence_kind::correlation:
+      return "corr";
+    case shared_queue::fence_kind::grid:
+      return "grid";
+    case shared_queue::fence_kind::count:
+      break;
+  }
+  return "?";
+}
+} // namespace
+
+void shared_queue::note_fence_signal(uint64_t generation, fence_kind kind)
+{
+  (void)kind;
+  if (generation == 0) {
+    return;
+  }
+  shared_queue_state& s = state();
+  std::lock_guard<std::mutex> lock(s.fence_mutex);
+  // Resolve every open wait this signal reaches. An event's value only grows, so a signal at G satisfies every
+  // wait for a value <= G: resolving them here (rather than at the true GPU instant) keeps the reading on ONE
+  // clock and is exact for the ORDER question, which is the one that matters.
+  const auto now = std::chrono::steady_clock::now();
+  for (auto it = s.fence_pending.begin(); it != s.fence_pending.end();) {
+    if (it->generation > generation) {
+      ++it;
+      continue;
+    }
+    // The signaller was encoded AFTER this wait: the waiter named a signal that had not been handed out yet,
+    // so the two command buffers may reach the queue in that order - see the header.
+    const uint64_t waited_us =
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - it->wait_at).count());
+    s.fence_waits_after.fetch_add(1, std::memory_order_relaxed);
+    if (waited_us > s.fence_wait_after_max_us.load(std::memory_order_relaxed)) {
+      s.fence_wait_after_max_us.store(waited_us, std::memory_order_relaxed);
+      s.fence_wait_after_worst_slot.store(it->slot, std::memory_order_relaxed);
+      s.fence_wait_after_worst_kind.store(static_cast<unsigned>(it->kind), std::memory_order_relaxed);
+    }
+    it = s.fence_pending.erase(it);
+  }
+  // A wait whose signaller comes first never enters this list: it is resolved at the instant it is encoded
+  // (see note_fence_wait), which is the SAFE shape and is counted as such.
+  while (s.fence_pending.size() > 256) {
+    s.fence_pending.erase(s.fence_pending.begin());
+  }
+}
+
+void shared_queue::note_fence_wait(uint64_t generation, fence_kind kind)
+{
+  if (generation == 0) {
+    return;
+  }
+  shared_queue_state& s = state();
+  std::lock_guard<std::mutex> lock(s.fence_mutex);
+  s.fence_waits.fetch_add(1, std::memory_order_relaxed);
+  // Was this generation handed out already? Generations are handed out AT THE MOMENT the signal is encoded
+  // (immediately before the signaller's commit), so a generation at or below the current counter means the
+  // wait is satisfied the instant it is encoded: it can never block the queue, and it is counted as the SAFE
+  // shape instead of being remembered. Only a wait for a generation that does not exist yet is remembered.
+  const uint64_t highest_signalled = (kind == fence_kind::grid)
+                                         ? s.grid_generation.load(std::memory_order_acquire)
+                                         : s.stage_fence_generation.load(std::memory_order_acquire);
+  if (generation <= highest_signalled) {
+    s.fence_waits_before.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  shared_queue_state::fence_wait open;
+  open.generation = generation;
+  open.kind       = kind;
+  open.slot       = lane_has_slot() ? lane_slot() : 0;
+  open.has_slot   = lane_has_slot();
+  open.wait_at    = std::chrono::steady_clock::now();
+  s.fence_pending.push_back(open);
+}
+
+uint64_t shared_queue::nof_fence_waits()
+{
+  return state().fence_waits.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_fence_waits_after_signaller()
+{
+  return state().fence_waits_after.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_fence_waits_before_signaller()
+{
+  return state().fence_waits_before.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::fence_wait_after_max_us()
+{
+  return state().fence_wait_after_max_us.load(std::memory_order_relaxed);
+}
+
+const char* shared_queue::fence_wait_after_worst_kind(uint64_t& slot)
+{
+  shared_queue_state& s = state();
+  slot                  = s.fence_wait_after_worst_slot.load(std::memory_order_relaxed);
+  return fence_kind_name(static_cast<fence_kind>(s.fence_wait_after_worst_kind.load(std::memory_order_relaxed)));
 }
 
 void shared_queue::note_stage_fence_wait(bool own_generation, bool crossed)
@@ -616,6 +803,7 @@ bool shared_queue::backend_stage_wait_generation(id<MTLCommandBuffer> command_bu
   }
   [command_buffer encodeWaitForEvent:s.stage_fence_event value:generation];
   s.stage_fence_waits.fetch_add(1, std::memory_order_relaxed);
+  note_fence_wait(generation, fence_kind::stage);
   return true;
 }
 

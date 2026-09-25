@@ -1314,6 +1314,77 @@ int main()
                    static_cast<unsigned long long>(q9a_after.late_commits_time));
     }
 
+    // ---- Arm 13 (Q9-D): the fence-order instrument sees a wait that precedes its signaller -----------
+    // Leg `p11-conc2` stalled for 5 s with eight receiving slots' front-end command buffers (the whole receive
+    // pool) completing together, and nothing in the report could say WHICH device-side fence held the queue.
+    // One fence wait in a command buffer blocks everything behind it, so the question is the ORDER: a wait whose
+    // signaller was encoded first is satisfied at once, while a wait for a generation nobody has handed out yet
+    // names a signal that may travel in a command buffer reaching the queue AFTER the waiter's - the ordering
+    // that cannot resolve. The instrument is exercised here on its own bookkeeping, because encoding that pair
+    // in real command buffers is precisely the hang it detects (a serial queue does not get past it).
+    {
+      using ocudu::metal::shared_queue;
+      const uint64_t safe_before = shared_queue::nof_fence_waits_before_signaller();
+      const uint64_t after_before = shared_queue::nof_fence_waits_after_signaller();
+      const uint64_t max_before   = shared_queue::fence_wait_after_max_us();
+
+      // (a) the SAFE shape: the signaller is handed out first, so the wait is satisfied the instant it is
+      //     encoded and is never remembered as open.
+      id<MTLCommandQueue> queue = metal::shared_queue::backend_queue();
+      if (queue == nil) {
+        std::fprintf(stderr, "FAIL: arm 13 has no back-end queue\n");
+        return 1;
+      }
+      id<MTLCommandBuffer> signaller = [queue commandBuffer];
+      const uint64_t       generation = shared_queue::backend_stage_signal(signaller);
+      if (generation == 0) {
+        std::fprintf(stderr, "FAIL: arm 13 could not hand out a stage-fence generation\n");
+        return 1;
+      }
+      shared_queue::note_fence_wait(generation, shared_queue::fence_kind::stage);
+      [signaller commit];
+
+      // (b) the shape that can hold a queue: a wait for a generation that does not exist yet. It is remembered,
+      //     and the signal that later reaches it resolves it with its duration - which is what a leg reads.
+      const uint64_t absent = generation + 1000;
+      shared_queue::note_fence_wait(absent, shared_queue::fence_kind::stage);
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      shared_queue::note_fence_signal(absent, shared_queue::fence_kind::stage);
+
+      if (shared_queue::nof_fence_waits_before_signaller() != safe_before + 1) {
+        std::fprintf(stderr,
+                     "FAIL (Q9-D): a wait whose signaller was already handed out was not counted as the safe "
+                     "shape (signaller-first %llu -> %llu)\n",
+                     static_cast<unsigned long long>(safe_before),
+                     static_cast<unsigned long long>(shared_queue::nof_fence_waits_before_signaller()));
+        return 1;
+      }
+      if (shared_queue::nof_fence_waits_after_signaller() != after_before + 1) {
+        std::fprintf(stderr,
+                     "FAIL (Q9-D): a wait that preceded its signaller was not counted (signaller-after %llu -> "
+                     "%llu)\n",
+                     static_cast<unsigned long long>(after_before),
+                     static_cast<unsigned long long>(shared_queue::nof_fence_waits_after_signaller()));
+        return 1;
+      }
+      const uint64_t max_after = shared_queue::fence_wait_after_max_us();
+      if (max_after < 25000) {
+        std::fprintf(stderr, "FAIL (Q9-D): the wait's duration was not measured (%llu us)\n",
+                     static_cast<unsigned long long>(max_after));
+        return 1;
+      }
+      std::fprintf(stderr,
+                   "[dft-release] arm 13 (Q9-D): the fence-order instrument counts the safe shape apart from the "
+                   "one that can hold a queue - signaller-first %llu->%llu, signaller-after %llu->%llu, longest "
+                   "wait %llu->%llu us\n",
+                   static_cast<unsigned long long>(safe_before),
+                   static_cast<unsigned long long>(shared_queue::nof_fence_waits_before_signaller()),
+                   static_cast<unsigned long long>(after_before),
+                   static_cast<unsigned long long>(shared_queue::nof_fence_waits_after_signaller()),
+                   static_cast<unsigned long long>(max_before),
+                   static_cast<unsigned long long>(max_after));
+    }
+
     // ---- Arm 10: "no record" must never mean "the write is still in flight" (5.9.62) ----------------
     // The registry's eviction loop erases entries, and a reader that finds NOTHING cannot wait - so an entry
     // erased before its block COMPLETED is the one way a hop can read a grid nobody has written. Until

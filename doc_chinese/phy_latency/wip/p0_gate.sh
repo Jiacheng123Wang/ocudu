@@ -32,6 +32,8 @@
 #   D6/D7 (Q9-A/-B, INFO) which half of the completion wait it was, and whether a DRY pool drove the sweep
 #   D8  (Q9-C, INFO) own / newest / cross_lane: how often the burst's stage-fence wait would have named
 #       another lane's estimator generation under the old rule (dev doc 6.14)
+#   D9  (Q9-D, INFO) signaller-first / signaller-after and the longest such wait: whether a device-side fence
+#       wait named a signal that had not been handed out yet, i.e. which fence (if any) held a queue (6.16)
 #       (D1-D4 are the criteria the Q9 fix is confirmed by; a leg flown BEFORE it reads them RED, which is the
 #        point - the same leg is what the fix is measured against)
 # "Cannot read" is RED, never absent - the lesson of 5.9.97.
@@ -231,6 +233,9 @@ fi
 
 life_line=$(grep -a "block lifecycle (P0-7):" "$LEGF" | tail -1)
 life_wait=$(printf '%s' "$life_line" | grep -oE "wait max=[0-9.]+us" | grep -oE "[0-9.]+" | tail -1)
+# The DEPOSIT -> completion maximum (not the claim wait): D6 compares the registry's own commit -> completion
+# against THIS, which is the only pair that answers "was the wait before or after the commit".
+life_prod_max=$(printf '%s' "$life_line" | grep -oE "deposit->completion max=[0-9.]+us" | grep -oE "[0-9.]+" | tail -1)
 life_age=$(printf '%s' "$life_line" | grep -oE "oldest unclaimed age max=[0-9.]+us" | grep -oE "[0-9.]+" | tail -1)
 if [ -z "$life_wait" ] || [ -z "$life_age" ]; then
   check "D2 (Q9) an unclaimed block is reaped in ms, not in hyperframes" "wait max < 100 ms AND oldest unclaimed age max < 100 ms" RED \
@@ -290,7 +295,7 @@ if [ -z "${life_commit:-}" ]; then
         "no 'registry commit->completion=' field: ${life_line:-<absent>} - a leg flown before 6.13 cannot say"
 else
   check "[INFO] D6 (Q9-B) which half of the completion wait it was" "reported, not judged" INFO \
-        "$life_commit; deposit->completion max=${life_wait:-<none>}us -> $(awk -v a="$life_commit_max" -v b="${life_wait:-0}" 'BEGIN{ if (b+0 <= 0) printf "no completion to compare"; else if (a+0 >= 0.5*b) printf "the seconds came AFTER the registry committed it (%.0f%% of the wait)", 100*a/b; else printf "the seconds came BEFORE the commit (%.0f%% after it) - the holder is the claim/hold side", 100*a/b }')"
+        "$life_commit; deposit->completion max=${life_prod_max:-<none>}us -> $(awk -v a="$life_commit_max" -v b="${life_prod_max:-0}" 'BEGIN{ if (b+0 <= 0) printf "no completion to compare"; else if (a+0 >= 0.5*b) printf "the seconds came AFTER the registry committed it (%.0f%% of the wait)", 100*a/b; else printf "the seconds came BEFORE the commit (%.0f%% after it) - the holder is the claim/hold side", 100*a/b }')"
 fi
 # D8 (Q9-C, dev doc 6.14): which generation the lane burst's stage fence named. `cross_lane` is how often the
 # global newest differed from the hop's own at that moment, i.e. how often the OLD rule would have waited for
@@ -305,6 +310,20 @@ if [ -z "${own_n:-}" ]; then
 else
   check "[INFO] D8 (Q9-C) which generation the burst's stage fence named" "reported, not judged" INFO \
         "own=$own_n (waits that named THIS hop's own estimator generation), newest=${newest_n:-?} (fallback to the global newest), cross_lane=${cross_n:-?}$( [ -n "${cross_n:-}" ] && [ "${cross_n:-0}" != "0" ] && printf '  <-- the OLD rule would have waited for another lane %s time(s): the cross-lane pinch of 6.14 happened on this leg' "$cross_n" || printf '  (no cross-lane pinch was seen)' )"
+fi
+# D9 (Q9-D, dev doc 6.16): whether any device-side fence wait named a signaller that had NOT been handed out
+# yet - the ordering that can hold a serial queue - and how long such a wait then lasted. This is the reading
+# that decides whether a stall sits in a fence at all, and which one.
+fence_line2=$(grep -a "fence order (Q9-D)" "$LEGF" | tail -1)
+fo_before=$(printf '%s' "$fence_line2" | grep -oE "signaller-first=[0-9]+" | grep -oE "[0-9]+$")
+fo_after=$(printf '%s' "$fence_line2" | grep -oE "signaller-after=[0-9]+" | grep -oE "[0-9]+$")
+fo_maxms=$(printf '%s' "$fence_line2" | grep -oE "max=[0-9.]+ms" | grep -oE "[0-9.]+")
+if [ -z "${fo_after:-}" ]; then
+  check "[INFO] D9 (Q9-D) did a fence wait name a signaller that was not out yet" "reported, not judged" INFO \
+        "no 'fence order (Q9-D)' line: ${fence_line2:-<absent>} - a leg flown before 6.16 cannot say"
+else
+  check "[INFO] D9 (Q9-D) did a fence wait name a signaller that was not out yet" "reported, not judged" INFO \
+        "signaller-first=$fo_before, signaller-after=$fo_after, longest such wait=${fo_maxms:-?}ms$([ "${fo_after:-0}" != "0" ] && printf '  <-- a fence wait named a signal that was not handed out yet: if this leg stalled, THAT is the fence to read' || printf '  (every wait named a signaller that was already out)' )  ||  $fence_line2"
 fi
 reaps_events=$(printf '%s' "$life_line" | grep -oE "dry-pool reaps=[0-9]+" | grep -oE "[0-9]+$")
 reaps_blocks=$(printf '%s' "$life_line" | grep -oE "recovering [0-9]+ block" | grep -oE "[0-9]+")

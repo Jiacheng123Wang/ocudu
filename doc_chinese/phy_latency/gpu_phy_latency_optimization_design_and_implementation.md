@@ -1351,6 +1351,74 @@ D7 INFO dry-pool reaps=1471 recovering 9 block(s)
 若 A 里停顿复现且 D8 显示 `cross_lane=0`、而 B 的表显示 `commit->start` 大 ⇒ 等待者不是 stage fence ⇒
 按 §6.14 ④ 的下一候选（**grid-ready**：MISS 跳等生产者的 generation）继续查。
 
+### 6.16 ⚠ 复跑腿 `p11-conc2`（2026-09-25 10:55）：停顿**复现**了，且**Q9-C 再次零执行** ⇒ 上一个假设被证伪；新增 **Q9-D 栅栏次序仪**（等待 vs signaller 的先后 + 那次等待持续多久）
+
+> 配方与 `p10/p09` 完全相同，上行 `iperf3 -R -t 100`：用户侧 ~68 s 起断流到最后。**14/18 判据**，
+> 失败的是 D1–D4（一条 5 秒停顿）。⇒ **`p10` 的"全绿"确实只是"那次没触发"**（§6.15 ② 的警告成立）。
+
+**① 这条腿的读数**
+
+```
+D3 FAIL pop_blocking max = 4994.6 ms, over 1s = 1        D4 FAIL 1 gaps / 76,547,707 samples（≈4.98 s）
+D6 INFO registry commit->completion=16350 max=5000026.0us  vs  deposit->completion max=5002964.0us
+        -> 100% of the wait came AFTER the registry committed it
+D7 INFO dry-pool reaps=500 recovering 3 block(s)         D8 INFO own=0 newest=0 cross_lane=0
+[metal_stats] block lifecycle (P0-7) slowest:
+  slot=1232 claimed=1 swept=0 wait_for_a_claim=33.0us     deposit->completion=5001452.0us registry_commit=0
+  slot=1233 claimed=1 swept=1 wait_for_a_claim=2937.0us   deposit->completion=5002964.0us registry_commit=1 commit->completion=5000026.0us
+  slot=1234 … 1239                                        同样 ~3 ms 认领 / ~5.000 s 完成（1237/1238/1239 是时间期限在 ~12 ms 收的）
+[ul_gpu_lane] residency max = 5722.3us（**毫秒级！**）  carried=482
+[ul_gpu_lane] commit -> completion (Q9-B) max = 7384.8us（**毫秒级**）  slowest 行: slot=1233 merged_hop commit->start=6923.9us
+```
+
+**两个决定性事实**：
+
+1. **受害者是"落单的前端块"，不是车道缓冲**：`slot=1232…1239` 是**连续 8 个 slot**（正好一个池 8 个缓冲），
+   它们的**前端块 cb** 在 ~3 ms 被认领（多数由 sweep，一个由跳）却在 **~5.000 s** 后才完成；
+   而同一批 slot 的**车道 cb**（`merged_hop`）只有 **7 ms**（`residency max = 5.7 ms`）。
+   ⇒ 停顿发生在**前端/交接那条命令缓冲**上，**不是** §6.14 假设的车道 burst 栅栏。
+2. **Q9-C 再次零执行**（`own=0 newest=0`）⇒ 默认 `merged` 路径上 `burst_ensure_open()` 依然没跑。
+   **§6.14 的"跨车道 stage-fence 夹死"不是这条腿停顿的原因**（它是真缺陷、离线可复现，但不在空口默认路径上）。
+
+时间线（主日志）：iperf 窗口 ≈02:57:15–02:58:55，满速 5000 PUSCH/5 s 直到 **02:58:20**；那一刻起
+`receive pool is EMPTY`、`RF: late`（7248 条）、underflow/overflow、`PUSCH allocation skipped`（2292）、
+`PUxCH request late`（371）一起出现，PUSCH 之后collapse 到 0–38/5 s ⇒ **一次 5 秒停顿毁掉整段 TCP**。
+
+**② 新增仪表 Q9-D（提交在本次）：`[metal_stats] fence order (Q9-D)`**
+
+一条 5 秒的等待究竟挂在**哪一道**设备侧栅栏上，现有计数器答不了（它们数"有多少次等待"，不数"等待的先后"）。
+设备侧等待只有三类（全在 `ocudu_metal_queue.mm`）：**stage 栅栏**、**corr 栅栏**、**grid-ready 栅栏**。
+Q9-D 在 `note_fence_signal()` / `note_fence_wait()` 里成对记录：
+
+| 读数 | 含义 |
+|---|---|
+| `signaller-first=N` | 等待被编码时，它等的 generation **已经发出**（信号已在前面）⇒ 立即满足，**永远不会堵队列**（安全形状）|
+| `signaller-after=K` | 等待被编码时那个 generation **还没发出** ⇒ signaller 的命令缓冲**可能排在等待者后面**（串行队列上这条次序无法自行解开）|
+| `max=…ms worst kind=… slot=…` | 这些"倒序"等待里**最长的那次持续了多久**、属于哪道栅栏、哪个 slot ⇒ **一条腿的答案是一行** |
+| （尾部提示） | 退出时仍挂着未满足的等待 ⇒ signaller 从未到来（真正的挂死）|
+
+离线自测（`dft_release_adopt_metal_test` **arm 13**）：安全的形状与"倒序"的形状被分开计数，
+并实测出那次等待的时长（`signaller-first 0->1, signaller-after 0->1, longest wait 0->26899 us`）；
+`port_channel_estimator_metal_mmse_unit_test` 上 3251 次等待**全部**是安全形状（`signaller-after=0`）。
+⇒ **仪器本身可判**（不是"两条路都打印同一个数"）。
+
+**③ 下一步：一条腿就能定位**
+
+```bash
+sudo -E OCUDU_UL_PHASE_SEGMENTS=1 bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p12-conc2 \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2   # 配方/流量同 p11
+bash doc_chinese/phy_latency/wip/p0_gate.sh p12-conc2                      # D1–D4 判据 + D5–D9 读数
+```
+
+| `fence order (Q9-D)` 的读数 | 结论 |
+|---|---|
+| `signaller-after=0`，而腿**又停**了 | 三类栅栏都不是肇事者 ⇒ 排队等待的**不是设备侧事件**，而是**队列本身/主机提交**（下一步转向 `commit_dropped` 与 lane 的提交顺序、以及 `MTLCommandQueue` 的提交路径）|
+| `signaller-after>0` 且 `max` ≈ 停顿时长，`worst kind=grid` | **grid-ready 栅栏**：MISS 跳等的生产者是**host 读者（fallback）**提交的 ⇒ 因果链是"跳先提交等待、生产者后提交" ⇒ 修法是让 claim 那一刻**同步提交**（已在 `claim_grid_production` 做）或让等待**只在生产者已提交时**才编码 |
+| `worst kind=stage` / `corr` | 对应栅栏的 signaller 与等待者的**跨线程次序**问题（§6.14 的同类，只是发生在另一道栅栏上）⇒ 按同样办法把 generation 绑到"本跳自己的提交物" |
+
+**④ 顺带修掉的判据读数 bug**：`p0_gate.sh` 的 D6 detail 之前把 `commit->completion max` 与 **`wait max`（认领等待）**
+相比，读出来是荒谬的 "210%"；现在与 **`deposit->completion max`** 比（p11 上读作 **100%**：秒全在提交之后）✅。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

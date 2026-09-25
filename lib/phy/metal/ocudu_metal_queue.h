@@ -167,6 +167,49 @@ public:
   /// The newest estimator generation whose signal has been encoded (0 before the first one).
   static uint64_t backend_stage_generation();
 
+  /// \name Q9-D: WHEN each device-side fence wait was encoded against WHEN its signaller was, and how long
+  ///       the wait then lasted (dev doc 6.16).
+  ///
+  /// WHY. Leg `p11-conc2` stalled for 5 s with everything else quiet: eight consecutive receiving slots'
+  /// front-end command buffers - the whole receive pool - were committed at ~3 ms (some by the registry's
+  /// sweep) and completed together 5.000 s later, while the lane command buffers of the same slots were fine.
+  /// A wait in ONE command buffer blocks everything behind it on the same queue, and the only waits on that
+  /// queue are the three device-side fences (the stage fence, the correlation fence and the grid-production
+  /// fence). Which one it was is not answerable from the counters that exist: they count waits, not their
+  /// ORDER against their signaller.
+  ///
+  /// WHAT IT RECORDS. Every wait is remembered with its generation, kind and slot. Every signal resolves
+  /// every remembered wait whose generation it reaches (a Metal event wait fires when the value becomes >=
+  /// the waited one), and the pair that matters is reported:
+  ///   * `after` - waits whose signaller was signalled AFTER the wait was encoded. A wait is *safe* by
+  ///     construction when its signaller came first (the stage fence's intended shape, the correlation fence,
+  ///     a grid producer already committed); when it did not, the signaller's command buffer may reach the
+  ///     queue after the waiter's - the ordering that cannot be satisfied until the signaller runs, and the
+  ///     signaller cannot run until the waiter does;
+  ///   * the DURATION of those waits (`max`), with the kind and slot of the worst one: that is the number
+  ///     that says whether the 5 s of `p11-conc2` sits in a fence at all, and in which one.
+  ///@{
+  enum class fence_kind : unsigned { stage = 0, correlation = 1, grid = 2, count = 3 };
+
+  /// Records that \p generation's signal has just been encoded on the signaller's command buffer.
+  static void note_fence_signal(uint64_t generation, fence_kind kind);
+
+  /// Records that a wait for \p generation has just been encoded. See the class note for what the report
+  /// makes of the pair.
+  static void note_fence_wait(uint64_t generation, fence_kind kind);
+
+  static uint64_t nof_fence_waits();
+  /// Installs the "which slot is this thread serving" accessors (the lane clock lives with the lane probe, and
+  /// this translation unit must not depend on it): called once by the probe at start-up. Without it the slot is
+  /// reported as 0, which is what the unit tests and the replay tool read.
+  static void install_lane_slot_accessors(bool (*has_slot)(), uint64_t (*slot)());
+
+  static uint64_t nof_fence_waits_before_signaller();
+  static uint64_t nof_fence_waits_after_signaller();
+  static uint64_t fence_wait_after_max_us();
+  static const char* fence_wait_after_worst_kind(uint64_t& slot);
+  ///@}
+
   /// \name Q9-C: WHICH generation a stage-fence wait named (dev doc 6.14).
   ///
   /// The measurement that exposed the second stall: the lane burst used to wait for the NEWEST generation
