@@ -728,6 +728,43 @@ TEST_F(ngap_validator_test, when_one_of_two_qos_flows_to_modify_has_incomplete_q
   ASSERT_EQ(failed_qos_flows[invalid_qfi].qos_flow_id, invalid_qfi);
 }
 
+// Test handling of a QoS flow that a modify request adds or modifies and releases at the same time.
+TEST_F(ngap_validator_test, when_qos_flow_is_modified_and_released_in_the_same_request_then_it_fails)
+{
+  pdu_session_id_t psi          = uint_to_pdu_session_id(1);
+  qos_flow_id_t    valid_qfi    = uint_to_qos_flow_id(1);
+  qos_flow_id_t    conflict_qfi = uint_to_qos_flow_id(2);
+  cu_cp_ue_index_t ue_index     = uint_to_ue_index(0);
+  amf_ue_id_t      amf_ue_id    = uint_to_amf_ue_id(0);
+  ran_ue_id_t      ran_ue_id    = uint_to_ran_ue_id(0);
+
+  ngap_message ngap_msg = generate_valid_pdu_session_resource_modify_request_message(
+      amf_ue_id, ran_ue_id, psi, {valid_qfi, conflict_qfi}, {conflict_qfi});
+
+  auto& asn1_request = ngap_msg.pdu.init_msg().value.pdu_session_res_modify_request();
+
+  ngap_pdu_session_resource_modify_request request;
+  fill_ngap_pdu_session_resource_modify_request(request, asn1_request->pdu_session_res_modify_list_mod_req);
+
+  ngap_ue_logger ue_logger{"NGAP", {ue_index, ran_ue_id}};
+  // Verify PDU session resource modify request.
+  auto verification_outcome = verify_pdu_session_resource_modify_request(request, asn1_request, ue_logger);
+
+  // The PDU session is modified without the QoS flow, and the QoS flow is not released.
+  ASSERT_EQ(verification_outcome.response.pdu_session_res_failed_to_modify_list.size(), 0U);
+  ASSERT_EQ(verification_outcome.request.pdu_session_res_modify_items.size(), 1U);
+  const auto& transfer = verification_outcome.request.pdu_session_res_modify_items[psi].transfer;
+  ASSERT_EQ(transfer.qos_flow_add_or_modify_request_list.size(), 1U);
+  ASSERT_TRUE(transfer.qos_flow_add_or_modify_request_list.contains(valid_qfi));
+  ASSERT_TRUE(transfer.qos_flow_to_release_list.empty());
+
+  // The QoS flow is reported as failed to add or modify.
+  const auto& failed_qos_flows =
+      verification_outcome.response.pdu_session_res_modify_list[psi].transfer.qos_flow_failed_to_add_or_modify_list;
+  ASSERT_EQ(failed_qos_flows.size(), 1U);
+  ASSERT_EQ(failed_qos_flows[conflict_qfi].qos_flow_id, conflict_qfi);
+}
+
 // Test handling of valid PDU session resource modification request.
 TEST_F(ngap_validator_test, when_valid_request_received_then_pdu_session_modify_succeeds)
 {

@@ -215,10 +215,8 @@ pdu_session_resource_modify_validation_outcome ocudu::ocucp::verify_pdu_session_
       failed_qos_flows.emplace(failed_qos_flow.qos_flow_id, failed_qos_flow);
     }
 
-    if (failed_qos_flows.empty()) {
-      continue;
-    }
-    if (failed_qos_flows.size() == modify_item.transfer.qos_flow_add_or_modify_request_list.size()) {
+    if (!failed_qos_flows.empty() &&
+        failed_qos_flows.size() == modify_item.transfer.qos_flow_add_or_modify_request_list.size()) {
       // If all QoS flows to add or modify fail, then the whole PDU session fails.
       failed_psis.emplace(psi);
       ngap_pdu_session_res_setup_failed_item failed_item;
@@ -226,6 +224,20 @@ pdu_session_resource_modify_validation_outcome ocudu::ocucp::verify_pdu_session_
       failed_item.unsuccessful_transfer.cause = ngap_cause_radio_network_t::invalid_qos_combination;
       verification_outcome.response.pdu_session_res_failed_to_modify_list.emplace(psi, failed_item);
       continue;
+    }
+
+    // Collect the QoS flows that the request adds or modifies and releases at the same time. The PDU session is
+    // modified without them and they keep their current configuration.
+    for (const auto& qos_flow_item : modify_item.transfer.qos_flow_add_or_modify_request_list) {
+      if (!modify_item.transfer.qos_flow_to_release_list.contains(qos_flow_item.qos_flow_id)) {
+        continue;
+      }
+      ue_logger.log_warning(
+          "{} of {} is added or modified and released in the same request", qos_flow_item.qos_flow_id, psi);
+      ngap_qos_flow_failed_to_setup_item failed_qos_flow;
+      failed_qos_flow.qos_flow_id = qos_flow_item.qos_flow_id;
+      failed_qos_flow.cause       = ngap_cause_radio_network_t::multiple_qos_flow_id_instances;
+      failed_qos_flows.emplace(failed_qos_flow.qos_flow_id, failed_qos_flow);
     }
 
     if (failed_qos_flows.empty()) {
@@ -248,6 +260,11 @@ pdu_session_resource_modify_validation_outcome ocudu::ocucp::verify_pdu_session_
       for (const auto& failed_qos_flow : verification_outcome.response.pdu_session_res_modify_list[psi]
                                              .transfer.qos_flow_failed_to_add_or_modify_list) {
         modify_item.transfer.qos_flow_add_or_modify_request_list.erase(failed_qos_flow.qos_flow_id);
+        // A QoS flow that the request adds or modifies and releases at the same time keeps its current
+        // configuration, so it is not released either.
+        if (failed_qos_flow.cause == ngap_cause_t{ngap_cause_radio_network_t::multiple_qos_flow_id_instances}) {
+          modify_item.transfer.qos_flow_to_release_list.erase(failed_qos_flow.qos_flow_id);
+        }
       }
     }
   }
