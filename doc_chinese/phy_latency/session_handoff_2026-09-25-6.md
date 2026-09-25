@@ -30,9 +30,12 @@
 | **V5** 不回归 | 契约 8/8、0 crossings | ✅ `p39` 契约 **MET 8/8**、**`gaps=0`、`rx_overflows=0`**、`p0_gate` **29/29** | §6.53/§6.63① |
 | **V3** 电台 | RF 失败 ≤10 | ⏸ **另案暂停（用户裁决）**：`p39` 1448（`p38` 1546、`p37` 880）⇒ **逐腿天气不同，比较要成对** | §6.40–§6.43、§6.56③ |
 
-**当前状态**：HEAD = `0a4bea6968`（**含杠杆 C**；`git log --oneline -1`、`build/hashes.h`、`build/apps/gnb/gnb` 的内嵌戳
-**三者已对齐**，腿就是用它飞的）。**工作区干净**（本会话的代码/文档已提交：`5a375cb1ba` 代码、`7db01fa5c8` 文档、
-`0a4bea6968` memo）；**没有腿在跑**，**没有 gNB 在跑**。
+**当前状态**：本会话的提交依次是 **`5a375cb1ba`（代码：杠杆 C）**、`7db01fa5c8`（§6.62 文档）、`0a4bea6968`（本 memo）、
+`045378f2e4`（§6.63 飞腿分析）；**`p39` 就是用它飞的（HEAD `0a4bea6968`）**。
+**别引用本 memo 自己的哈希**；开工前自行对齐：`git log --oneline -1` 与 `grep -oE '[0-9a-f]{10}' build/hashes.h | head -1` 必须相同、且
+`grep -aq "$(grep -oE '[0-9a-f]{10}' build/hashes.h | head -1)" build/apps/gnb/gnb` 为真；不同就重跑
+`cmake --build build --target ocudu_versioning && cmake --build build --target gnb`（**分开两条命令**）。
+**工作区干净**；**没有腿在跑**，**没有 gNB 在跑**。
 ⚠ `ul_chain_replay` **从不内嵌版本戳**（它不链 versioning 目标）⇒ 对它做 `grep -aq "$H"` 判据**恒为假**，别误判成"旧二进制"。
 **交付配置**：接收环 **512 帧**、发送环 64、池 **32**、`otw_format: sc12`、`srate 23.04`（`configs/gnb_rf_b200_tdd_n78_20mhz.yml`）。
 
