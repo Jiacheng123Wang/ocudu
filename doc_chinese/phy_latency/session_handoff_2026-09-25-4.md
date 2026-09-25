@@ -17,22 +17,26 @@
 
 | 判据 | 阈值 | 现状 | 出处 |
 |---|---|---|---|
-| **V1** `[ul_gpu_pipeline]` 中位 | ≤2150 µs | ✅ **1463.5 µs**（`p31`；基线 2675.1 ⇒ **−45%**）| §6.31/§6.32/§6.39/§6.46 |
+| **V1** `[ul_gpu_pipeline]` 中位 | ≤2150 µs | ✅ **1463.5 µs**（`p31`；基线 2675.1 ⇒ **−45%**）；`p32` 待飞（离线预计 **≈1415**）| §6.31/§6.32/§6.39/§6.46/§6.48 |
 | **V2** 池 | `starved_events=0` 且 `held_max<pool` | ✅ `starved_events=0`、`held_max=10–12 < pool=16`、`pop_blocking` max **23–25 µs**（原 486 µs–5 s）| §6.37–§6.39 |
 | **V4** 提交数 | `cbs/lane ≤2.00`、`dropped=0` | ✅ 全程 **2.00 (max=2)**（合并派发**不动**它）| §6.30/§6.46 |
 | **V5** 不回归 | 契约 8/8、0 crossings | ✅ 确认腿 8/8；⚠ **偶发 1–3 gap**（电台侧，见 §3.4）| §6.32/§6.42 |
 | **V3** 电台 | RF 失败 ≤10 | ⏸ **另案暂停（用户裁决）**：700–1500；探针证明**宿主侧只解释 ~4%** | §6.40–§6.42、§6.43 ⑤ |
 
-**当前状态**：`HEAD = 戳 = 3c6ada96b6`，**二进制已携带该戳**（`cmake --build build --target gnb` 为 no-op），工作区干净，**没有腿在跑**。
+**当前状态**：`HEAD = 戳 = 2db3259a9d`，**二进制已携带该戳**（`cmake --build build --target gnb` 为 no-op），工作区干净，**没有腿在跑**。
+**①后半（变体 A，去 `y_gather`）已于本会话落地并离线取证完毕**（§6.48）：**只等 `p32-n78-directgrid` 一条腿**。
 
 ---
 
 ## 1. 本会话（2026-09-25 #4）做了什么
 
-> 本会话是从 `…-3.md` 开工的：它先把**目标收口**（V1/V2 达成、V3 另案），然后按用户裁决**继续压 V1**，中途还修了 Ubuntu 构建。
+> 本会话是从 `…-3.md` 开工的：它先把**目标收口**（V1/V2 达成、V3 另案），然后按用户裁决**继续压 V1**，
+> 中途还修了 Ubuntu 构建；**会话的后半段把 ①后半（变体 A）做完并离线取证**（§6.48）。
 
 | 提交（节选，逆序）| 内容 | 出处 |
 |---|---|---|
+| `2db3259a9d` | `p0_gate.sh` 增加 **D18**（读 direct-grid 分流 + 回退原因），`p0_gate_selftest.sh` 覆盖它的三个分支 | §6.48 |
+| `3b2b1b151d` | **①后半落地**：均衡在网格里直接读收到的符号（`y_gather` 消失、**建表派发也随之消失**），离线 **135 个 dump 逐字节相同**、派发 **12→7** | §6.48 |
 | `3c6ada96b6` | **§6.47**：去掉 `y_gather` 的**施工方案**（变体 A 只动引擎：把网格直接绑成 y；变体 B 动 kernel + 预登记） | §6.47 |
 | `cb6b182885` | **腿 `p31-n78-eqtable` 逐项命中**：设备侧 gather 表 3.0→**1.0/跳**、派发 12→**10/跳**、`merged_hop` **−24.4 µs**、**V1 1488.6→1463.5**；**校准出 ≈12 µs/派发** | §6.46 |
 | `b61ba9b505` | **修**：设备侧 gather 表**每 run 重建**（与"一跳一次"的注释矛盾）⇒ 加同一跳内缓存 | §6.45 |
@@ -43,7 +47,8 @@
 | （更早）`12ca4f86f0`、`0b0c371093`、`de21dcc741`、`dae5811b75`、`501b792d01`、`92fa8a90de`、`a90246143a`、`77e2deda2c` | V2 一整条链：归因（§6.34）→ 清扫第三入口点（§6.35）→ P1-4 证明容量（§6.37）→ P2-D 池定尺 16（§6.38）→ `p27` 确认 V2 达成（§6.39） | §6.34–§6.39 |
 
 **本会话的腿**：`p25`（(A) 验证）、`p26`（P1-4 池 16 ⇒ `starved_events=0`）、`p27`（交付定尺 ⇒ **V2 达成**）、`p28`（TX 探针首读）、
-`p29`（**旧二进制**，仅作基线）、`p30`（站点表）、`p31`（**一跳一次建表 ⇒ V1 1463.5**）。
+`p29`（**旧二进制**，仅作基线）、`p30`（站点表）、`p31`（**一跳一次建表 ⇒ V1 1463.5**）、
+**`p32`（待飞：①后半的验收腿）**。
 
 ---
 
@@ -62,6 +67,11 @@
 | 36 | **设备侧 gather 表每个 run 重建**（3.0/跳），与"一跳一次"的注释矛盾 ⇒ 加缓存后 1.0/跳 | `p30`→`p31` | §6.45 |
 | 37 | **未声明的静态库依赖在 macOS 能链、Linux 不能**：`ocudu_lower_phy`/`gnb_base` 用了 `ocudu_phy_support` 的符号却没声明 | Ubuntu 构建 `undefined reference`；修后 `BUILD=0`、`ctest -L phy` **184/184** | §6.43 ⑦ 7 |
 | 38 | **流程事故（教训）**：只跑 `ocudu_versioning`（刷新戳）而**不重建 `gnb`** ⇒ 守卫（戳=HEAD）通过但二进制是旧的；`p29` 因此白飞 | `hashes.h` 17:22 vs `gnb` 17:05 | §6.44 ⑥ |
+| 39 | **`y_gather` 可以整条去掉**：当一 run 的符号**就是网格本身那一段连续子载波**时，均衡直接**在网格里读**（`b_y`=网格 + 偏移，`y_stride`=网格 `symb_stride`），**逐字节相同**是构造性的（纯拷贝、`dest` 按构造稠密）| 27 条语料 ×2 臂 = **135 个 dump 逐字节相同**；`y_direct=4 y_gather=0` | §6.48 ②③ |
+| 40 | **空口这一跳必然命中变体 A**（离线已证，不靠飞腿）：gather 自己的准入就要求 **1 端口**；`p31` 里 **`batched == runs`** ⇒ 没有单符号 run ⇒ 12 个提交的符号同几何（DM-RS 符号**不带数据**、被 `nof_re_symbol==0` 跳过）；且 **143559/143561 条 PUSCH 授权是单一连续区间** `prb=[start, stop)` | `p31` 的 `eq_batch` + 腿日志的 `PUSCH:` 行 | §6.48 ① |
+| 41 | **比预登记多省一次派发**：一个**全是 direct run** 的跳**根本不需要 gather 表** ⇒ `eq_gather_tables()` 不被调用 ⇒ **设备侧建表派发也消失**（`sites(ch_gather)` 1 → 0）| 语料 `equalizer` **9 → 4**、`burst dispatches` **12 → 7** | §6.48 ③ |
+| 42 | **判据有齿（双面）**：DM-RS 符号带数据的语料 ⇒ 4 个数据 run 命中、**3 个 DM-RS run 被拒**（`miss(holes=3)`）且仍逐字节相同；plan 级探针 ⇒ 缺口/双簇分配 `dense=0` | cdm=1 语料 + `wip/eq_dense_probe.cpp` | §6.48 ③④ |
+| 43 | **两个"实验设计缺陷"**（别重犯）：① replay 的带洞 `alloc_prb` 语料**测不到 plan 判据**（`vrb_bitmap` 比 BWP 宽 ⇒ `get_crb_mask()` 先把洞压平）；② `eq_handoff_probe`/`metal_chain_probe` **不走 gather**（`ch_re device=0`）⇒ 它们不是 direct 路径的覆盖 | 探针输出 + `vrb_to_prb.cpp` 的断言 | §6.48 ④ |
 
 **仍然成立的老结论（别重犯）**：`busy`/`busy split` 是**占用窗口**不是算力（§6.29 ④）；**窗口 ≠ 关键路径代价**（§6.31 ③）；
 池容量是**2 的幂**（§6.37 ②）；`starved_events` 是"进入 nearly-dry 的**次数**"（§6.36 ③）；夹具里的 `[dl_tx_slack]` **不是**空口读数（§6.41）。
@@ -73,36 +83,38 @@
 > **主线 = 继续压 V1**（用户已裁决）。**工具是一把标尺**：跳内每合并 1 次派发 ⇒ **≈ −12 µs**（`p31` 校准），
 > 而**派发 ≠ 命令缓冲** ⇒ 全程**不触 V4**、不需要新裁决。
 
-### 3.1 第一件（**推荐先做**）：去掉 `y_gather` —— 变体 A（只动引擎）
+### 3.1 ✅（本会话已完成，只差一条腿）：去掉 `y_gather` —— 变体 A
 
-**方案已写好：开发文档 §6.47**（含已查清的事实、两个变体、预登记）。要点：
+**已落地**（开发文档 **§6.48**，提交 `3b2b1b151d`）：plan 记 `subc_base`/`dense`（从已建好的 entries 表读出）、
+引擎加 `OCUDU_EQ_DIRECT_GRID`（默认开）与 `eq_direct_grid_run()` 判据、`eq_flush_hook` 在**分配 staging 之前**判定，
+命中则**不分配 y、不发 gather、`b_y` 绑网格、`y_stride = grid.symb_stride`**；派发点计数新增 `y_direct` 与
+`miss(disabled/ports/stride/len/holes/start/bounds/nobuf)`，门里是 **D18**。
 
-* `y_gather` 是**纯拷贝**（自身注释自述 *"a plain copy"*）：用 `taps/entries` 把网格里的接收符号搬进均衡 kernel 期望的
-  连续布局（`[symbol][port][re]`），**无算术**，两侧都是 `cbf16_t`；而均衡派发**只认"一个缓冲 + 偏移 + 每符号步长"**
-  （`setBuffer:b_y … atIndex:1` + `strides.y_stride`）。
-* **变体 A（首选）**：当这一 run 在网格里**本来就连续可描述**（判据候选：`nof_ports==1`、`subc_stride==1`、
-  `y_stride` 与网格 `symb_stride` 一致）⇒ **跳过 `y_gather`，把网格缓冲直接绑成 `b_y`**
-  （偏移 = 该 run 首符号的字节偏移、`y_stride = grid.symb_stride`）。**逐字节相同**（同一批 cbf16、无转换）；
-  条件不满足则**退回原路径**。建议加旋钮 `OCUDU_EQ_DIRECT_GRID`（默认开）便于 A/B。
-* **变体 B（后备，要动 kernel/metallib）**：给均衡 kernel 加"读时 gather"模式（绑定网格 + taps/entries）。
-* **施工第一步**：找到 `ch_gather_desc` 定义 → 在 `eq_flush_hook` 的 `y_gather` 调用点前加判据分支 →
-  跑不变量网 → **重建戳与 `gnb` 两者** → 交给用户飞一条腿。
+**离线证据（已全部拿到）**：27 条语料 ×2 臂 = **135 个 dump 逐字节相同**；两臂各自真的走了自己的路；
+`burst dispatches` **12 → 7**、`equalizer` **9 → 4**（⇒ 空口预计 **−48 µs**，**修正 §6.47 的 −36 µs / 10→7**，实际是 **10 → 6/跳**）；
+`ctest -L phy` **193/193**、`l1_handover_arms.sh` 全 PASS、`value_net` 两臂**逐行相同**（183 条全是归档基线陈旧，Q11）；
+双面证伪：DM-RS 带数据的语料 ⇒ `miss(holes=3)` 且仍逐字节相同；plan 探针 ⇒ 缺口/双簇 `dense=0`。
 
-**预登记（腿 `p32-n78-directgrid`）**：`sites(y_gather=)` **3.0 → 0**、`burst dispatches` **10 → 7/跳**、
-`merged_hop` 与 **V1 各 ≈ −36 µs**、契约 8/8、`cbs/lane=2.00`、gaps 0、D16 `batch_max=14 batch_src=auto`。
-**反例判读**：`y_gather` 仍 3.0 ⇒ 条件没命中（走了回退），先读 `nof_ports`/strides，别当作"没收益"。
+**待飞的一条腿**：`p32-n78-directgrid`（判读表见 §6.48 ⑤）。预登记：
+`sites(y_direct≈3.0 y_gather=0)`、`sites(ch_gather=0)`、`burst dispatches` **6.0/跳**、
+`merged_hop` **≈ 592 → 544 µs**、**V1 ≈ 1463.5 → 1415 µs**、契约 8/8、`cbs/lane=2.00`、gaps 0、D16 不变、D18 报 `y_direct`。
+**反例判读**：`y_direct=0` + `miss(holes=…)` ⇒ 该跳符号有洞（DM-RS 带数据，或调度器给了多簇）⇒ 回退，**不是"没收益"**；
+`miss(ports=…)` ⇒ 该跳 >1 接收端口；`miss(disabled=…)` ⇒ 这是 A/B 对照臂。**`y_direct + y_gather ≠ runs` ⇒ 仪器坏了，按 RED 处理**。
 
-### 3.2 第二件：解开 `estimates` 断因，让 run 覆盖整跳
+### 3.2 第二件（**下一步**）：解开 `estimates` 断因，让 run 覆盖整跳
 
 `eq_batch first_break=estimates` ⇒ 12 个符号被切成 **3 个 run**（最长 8）。判据要求各符号的估计切片
 **共享一个缓冲且按固定步长前进**（`h_step = head.h.layer_stride ?: nof_re`）⇒ 修**信道估计的输出布局**即可让
-run 覆盖整跳：3 → 1 ⇒ 再省 ~2 次派发 ⇒ **≈ −24 µs**（与 3.1 合计 ≈ −60 µs ⇒ V1 ≈ **1400**）。
-**出处**：§6.44 ③、§6.45 ①。
+run 覆盖整跳：3 → 1 ⇒ 再省 ~2 次派发 ⇒ **≈ −24 µs**（与 3.1 合计 ≈ −72 µs ⇒ V1 ≈ **1390**）。
+⚠ **与 3.1 的交互**：run 一旦跨过 DM-RS 符号，**只有在 DM-RS 符号"不带数据"（本空口配置即为如此，它们根本不进 pending）
+时 ①后半才继续命中**；若某个配置里 DM-RS 符号带数据、而它又被并进同一个 run，则该 run 会因 `dense=0` 退回 gather
+（`miss(holes)` 可见，仍正确、只是少省一次）。⇒ **改 ② 之前先看 `first_break` 与 `runs` 是否真的变成 1**。
+**出处**：§6.44 ③、§6.45 ①、§6.48 ⑥。
 
 ### 3.3 第三、四件：剩下 5 次派发，以及"非派发"的那 ~470 µs
 
 * **③**：信道估计的 **2 次**与解映射的 **1 次**能否并/提前（可先读这两处的编码路径）。
-* **④ 最大也最难**：`merged_hop` 592 µs 里除 10 次派发（≈120 µs）之外还有 **~470 µs**（真实算力 + 派发之间的依赖等待 +
+* **④ 最大也最难**：`merged_hop` 592 µs 里除派发（①后半之后只剩 **6 次** ≈72 µs）之外还有 **~520 µs**（真实算力 + 派发之间的依赖等待 +
   宽 kernel 自身窗口）。要拆它只有两条路：**"移除某个阶段"的臂**（现有旋钮：`OCUDU_CE_NO_K4`、`OCUDU_CE_CORR_{FENCE,SEGMENT,UNIFORM,BARRIER_AFTER}`、
   `OCUDU_CE_{WEIGHTS_BARRIER,INV_BARRIERS}`、`OCUDU_EQ_{DEFER_ENCODE,DEV_TABLES}`、`OCUDU_INV_{TGX,TGY,RL,MEMNONE}`）
   或**单 kernel 离线微基准**（§6.29 对 DFT 做过，工具是 `wip/dft_kernel_cost.mm` 的形状）。
@@ -145,17 +157,18 @@ run 覆盖整跳：3 → 1 ⇒ 再省 ~2 次派发 ⇒ **≈ −24 µs**（与 3
 
 | 路径 | 是什么 |
 |---|---|
-| `doc_chinese/phy_latency/gpu_phy_latency_optimization_design_and_implementation.md` | **开发文档（先读这个）**：§3 判据（V1–V5）、§4 仪表手册、§5 跑腿规范、**§6 追加式记录（本会话 = §6.40–§6.47）**、§7 杠杆、§8 未决 |
+| `doc_chinese/phy_latency/gpu_phy_latency_optimization_design_and_implementation.md` | **开发文档（先读这个）**：§3 判据（V1–V5）、§4 仪表手册、§5 跑腿规范、**§6 追加式记录（本会话 = §6.40–§6.48）**、§7 杠杆、§8 未决 |
 | `doc_chinese/phy_latency/high_level_status_and_plan.md` | 高层现状、V1–V5 逐条、下一步、"继续压 V1"的当前路线 |
 | `doc_chinese/phy_latency/README.md` | 三类文档分工 + **结项状态**（2026-09-25）|
-| `doc_chinese/phy_latency/wip/p0_gate.sh` | **P0 门（D1–D17，只读日志）**；`p0_gate_selftest.sh` 是它的双向自测 |
+| `doc_chinese/phy_latency/wip/p0_gate.sh` | **P0 门（D1–D18，只读日志）**；`p0_gate_selftest.sh` 是它的双向自测（D18 覆盖三个分支）|
 | `doc_chinese/phy_pipeline_gpu/wip/run_leg.sh` | 起腿（**戳 + 内容判据双重守卫**）；腿日志在 `…/wip/logs/` |
-| `lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm` | **下一刀的主战场**：`eq_flush_hook`（run 划分）、`eq_gather_tables`/`eq_build_gather_on_device`（表，已一跳一次）、`eq_encode_gather_dispatch`（**`y_gather`，要去掉的那个**）、`eq_encode_batch_dispatch`（均衡派发）、`sites(...)` 计数 |
-| `lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm` | 信道估计（2 次派发/跳；`estimates` 断因的另一端；`OCUDU_CE_*` 旋钮） |
+| `lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm` | **下一刀的主战场**：`eq_flush_hook`（run 划分 + **direct-grid 判定/绑定**）、`eq_direct_grid_run()`（判据）、`eq_direct_miss`/`eq_direct` 计数、`eq_gather_tables`/`eq_build_gather_on_device`（表，一跳一次、**全 direct 的跳不建表**）、`eq_encode_batch_dispatch`（均衡派发）、`sites(...)` |
+| `include/ocudu/phy/upper/equalization/channel_equalizer_device_grid.h` + `lib/phy/upper/equalization/channel_equalizer_device_grid.cpp` | gather plan（`ch_gather_symbol` 的 **`subc_base`/`dense`** 由这里产出）|
+| `lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm` | 信道估计（2 次派发/跳；`estimates` 断因的另一端；`OCUDU_CE_*` 旋钮）**= 下一步 ②** |
 | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.{h,mm}` + `ocudu_dft.metal` | 前端批量化（§6.30/§6.33：`OCUDU_DFT_BATCH_SYMBOLS` AUTO）；`batch_stats()` |
 | `lib/phy/lower/lower_phy_baseband_processor.{h,cpp}` + `lib/phy/lower/lower_phy_factory.cpp` | 接收池（**P2-D 定尺 16**，启动行打印依据）、清扫入口点（§6.35）、TX 探针（§6.41） |
 | `lib/phy/metal/ocudu_metal_burst.{h,mm}` | 交棒注册表、清扫（第三入口点）、`dispatches`/`eq_batch` 计数 |
-| `doc_chinese/phy_latency/wip/dft_kernel_cost.mm` / `metal_wait_timeout_probe.mm` | 两个离线工具（DFT 派发形状 / Metal 5 s 等待上界）；**④ 的"单 kernel 微基准"照第一个的形状做** |
+| `doc_chinese/phy_latency/wip/dft_kernel_cost.mm` / `metal_wait_timeout_probe.mm` / **`eq_dense_probe.cpp`** | 三个离线工具（DFT 派发形状 / Metal 5 s 等待上界 / **plan 的 `dense` 判据**）；**④ 的"单 kernel 微基准"照第一个的形状做** |
 | `lib/phy/generic_functions/metal/test/dft_release_adopt_metal_test.mm` | metal 自测（**arm 10–17**：Q9-F/Q9-F3、握手、按需 dump、批量化 14/12/AUTO、take 清扫） |
 
 ---
@@ -164,10 +177,11 @@ run 覆盖整跳：3 → 1 ⇒ 再省 ~2 次派发 ⇒ **≈ −24 µs**（与 3
 
 > 读 `doc_chinese/phy_latency/session_handoff_2026-09-25-4.md`。
 > **目标（V1/V2）已结项**（开发文档 §6.43），现在在**继续压 V1**：`p31` 已到 **1463.5 µs**，并校准出
-> **"跳内每合并 1 次派发 ≈ −12 µs"**。**下一步 = 开发文档 §6.47 的变体 A**：在
-> `lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm` 的 `eq_flush_hook` 里，
-> 当这一 run 的 y 在网格里连续可描述时**跳过 `y_gather`、把网格缓冲直接绑成 `b_y`**（`strides.y_stride = grid.symb_stride`，
-> 建议加 `OCUDU_EQ_DIRECT_GRID` 旋钮）；先跑不变量网（`channel_equalizer_metal_unit_test`、`ul_chain_replay` 逐字节/容差、
-> `value_net`、`l1_handover_arms.sh`），**再重建 `ocudu_versioning` 与 `gnb` 两样**，然后给我 `p32-n78-directgrid` 的腿命令。
-> 预登记：`sites(y_gather=)` 3.0 → **0**、派发 10 → **7/跳**、`merged_hop` 与 **V1 各 ≈ −36 µs**、契约 8/8、`cbs/lane=2.00`、0 gaps。
+> **"跳内每合并 1 次派发 ≈ −12 µs"**。
+> **①后半（`y_gather` 变体 A）已经做完并离线取证**（开发文档 **§6.48**，提交 `3b2b1b151d`）：
+> 27 条语料 ×2 臂 = **135 个 dump 逐字节相同**、派发 **12 → 7**（`equalizer` 9 → 4）、`ctest -L phy` 193/193、
+> `l1_handover_arms.sh` 全 PASS、`value_net` 两臂逐行相同。**⇒ 第一件事是交给用户飞 `p32-n78-directgrid`**
+> （预登记与反例判读见 §3.1 与开发文档 §6.48 ⑤/⑥）。
+> **等这条腿回来之后**，下一步 = **§3.2**：解开 `estimates` 断因让 run 覆盖整跳（3 → 1，再 ≈ −24 µs）——
+> 主战场是 `ocudu_metal_mmse_engine.mm` 的**估计输出布局**；注意它与 ①后半的交互（见 §3.2 的 ⚠）。
 > **V3 与残留 gap 已另案暂停**（电台/USB 传输侧），不要顺手去动它。
