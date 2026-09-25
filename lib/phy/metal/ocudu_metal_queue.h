@@ -167,6 +167,30 @@ public:
   /// The newest estimator generation whose signal has been encoded (0 before the first one).
   static uint64_t backend_stage_generation();
 
+  /// \name Q9-C: WHICH generation a stage-fence wait named (dev doc 6.14).
+  ///
+  /// The measurement that exposed the second stall: the lane burst used to wait for the NEWEST generation
+  /// that existed when it was created, and with two lane threads the newest can belong to the OTHER lane's
+  /// estimator - whose signal is encoded in a command buffer that may reach the same (serial) back-end queue
+  /// AFTER the burst that is waiting for it. A wait for a value whose signaller is behind it in its own queue
+  /// cannot be satisfied until that signaller runs, and the signaller cannot run until the waiter does: on
+  /// leg `p09-conc2` the lane probe measured the resulting stall as `commit->start = 5.0028 s` with
+  /// `start->end = 1.24 ms` - the queue, not the device - on the merged-hop command buffers of three slots,
+  /// all released within 400 us of each other, while the receive pool stayed empty and the radio parked.
+  ///
+  /// `own` is the count of waits that named the generation the caller's OWN estimator handed out for this
+  /// hop (which by construction was committed before the burst), `newest` the ones that had to fall back to
+  /// the global newest (a hop with no estimator signal of its own on this thread - the synchronous routes),
+  /// and `cross_lane` how often the newest differed from the caller's own at that moment, i.e. how often the
+  /// OLD rule would have waited for a foreign generation. `cross_lane` is an UPPER BOUND on the hazard, not
+  /// a count of deadlocks: a foreign generation that is already committed is ahead in the queue and harmless.
+  ///@{
+  static void     note_stage_fence_wait(bool own_generation, bool crossed);
+  static uint64_t nof_stage_fence_own_waits();
+  static uint64_t nof_stage_fence_newest_waits();
+  static uint64_t nof_stage_fence_cross_lane();
+  ///@}
+
   /// \brief Encodes a wait for ONE named estimator generation (not the newest).
   ///
   /// Needed when a stage is ordered against SEVERAL submissions that were committed one after another:

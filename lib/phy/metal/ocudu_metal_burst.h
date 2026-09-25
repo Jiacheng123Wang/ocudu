@@ -204,6 +204,27 @@ public:
   /// Whether a grid wait is pending for this thread's next burst (diagnostics).
   static bool grid_wait_pending();
 
+  /// \brief Orders this thread's NEXT burst after the estimator submission of the hop it is serving (Q9-C,
+  ///        dev doc 6.14): the generation the caller's own estimator handed out, not the global newest.
+  ///
+  /// The burst used to wait for the NEWEST stage-fence generation at the moment it was created, which the
+  /// code's own comment describes as "the estimator command buffer of THIS hop, which was committed before
+  /// this burst". With two lane threads that description is not what the read does: the newest generation can
+  /// belong to the OTHER lane's estimator, whose signal travels in a command buffer that may reach the same
+  /// serial back-end queue after this burst - a wait for a signaller that is behind it in its own queue, which
+  /// deadlocks the two until something else signals a higher value. Measured on leg `p09-conc2`:
+  /// `commit->start = 5.0028 s` with `start->end = 1.24 ms` on the merged-hop buffers of three slots, all
+  /// released within 400 us of each other, the pool held empty and the radio parked.
+  ///
+  /// The estimator publishes its own generation here immediately before it commits (or, on the merged route,
+  /// before it hands the buffer over), so the wait always names a submission that is already ahead of this
+  /// burst on the same queue - a cycle is impossible by construction. 0 (the default, and what every route
+  /// that runs its estimator synchronously leaves behind) keeps the old behaviour.
+  static void set_stage_wait(uint64_t generation);
+
+  /// Whether a stage wait is pending for this thread's next burst (diagnostics).
+  static bool stage_wait_pending();
+
   /// \brief Q9-A: reaps every block nobody has claimed, RIGHT NOW, on behalf of a caller that is about to
   ///        park (see handover_reap_hook, development document 6.13).
   ///

@@ -143,6 +143,9 @@ struct burst_state {
   /// Grid-production fence this thread's NEXT command buffer must wait for, before any of its dispatches
   /// (see shared_burst::set_grid_wait()). Consumed when the buffer is created.
   uint64_t                          grid_wait  = 0;
+  /// Q9-C: the stage-fence generation THIS thread's hop handed out (see set_stage_wait()). Consumed by the
+  /// next burst_ensure_open(); 0 = nothing published, which keeps the old "newest generation" rule.
+  uint64_t                          stage_wait = 0;
   std::vector<id<MTLCommandBuffer>> outstanding; // committed through this thread, not waited yet
   /// What the buffer this burst commits carries, for the lane probe's busy split (see set_commit_label()).
   ocudu::metal::gpu_lane_probe::stage commit_label = ocudu::metal::gpu_lane_probe::stage::equalizer_demapper;
@@ -263,7 +266,22 @@ static bool burst_ensure_open(burst_state& s)
     // so without this wait the equalizer could read the estimator's memory before it is written. The
     // wait covers the whole burst, and it targets the estimator command buffer of THIS hop, which was
     // committed before this burst (the receiving chain estimates first, then demodulates).
-    shared_queue::backend_stage_wait(s.cb);
+    // Q9-C: wait for THIS hop's own estimator generation when the estimator published one (it always does on
+    // the routes that commit early - see mmse_engine: the signal and set_stage_wait() are issued together,
+    // immediately before the commit that puts it ahead of this burst on the same queue). The global newest is
+    // only the fallback for a route whose estimator ran synchronously on another thread or not at all.
+    {
+      const uint64_t own_generation = s.stage_wait;
+      s.stage_wait                  = 0;
+      if (own_generation != 0) {
+        const bool crossed = shared_queue::backend_stage_generation() != own_generation;
+        (void)shared_queue::backend_stage_wait_generation(s.cb, own_generation);
+        shared_queue::note_stage_fence_wait(/*own_generation=*/true, crossed);
+      } else {
+        (void)shared_queue::backend_stage_wait(s.cb);
+        shared_queue::note_stage_fence_wait(/*own_generation=*/false, /*crossed=*/false);
+      }
+    }
     // Grid production (D1): this burst may belong to a hop that MISSED the hand-over, in which case the
     // resource grid it is about to read is produced by a block committed by SOMEONE ELSE (another
     // consumer's fallback, or the registry's sweep) and the two are only ordered if the commit happens
@@ -1141,6 +1159,16 @@ void shared_burst::reap_unclaimed_now()
   for (id<MTLCommandBuffer> late : commit_late) {
     commit_dropped(late);
   }
+}
+
+void shared_burst::set_stage_wait(uint64_t generation)
+{
+  state().stage_wait = generation;
+}
+
+bool shared_burst::stage_wait_pending()
+{
+  return state().stage_wait != 0;
 }
 
 void shared_burst::set_grid_wait(uint64_t generation)

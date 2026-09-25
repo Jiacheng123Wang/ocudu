@@ -898,6 +898,21 @@ static void encode_corr_fence_waits(mmse_engine_impl* e, id<MTLCommandBuffer> cb
 /// the standalone correlation build, the standalone inversion and apply - publishes something its caller
 /// reads INSIDE the hop (gpu_ls_cfo / gpu_ls_sigma2 / the LSE, or A itself for the host inversion), and
 /// those pass fuse = false.
+/// \brief Signals the back-end stage fence for THIS hop and tells the lane burst which generation to wait for.
+///
+/// Q9-C (dev doc 6.14): the burst used to wait for the NEWEST generation at its creation, which with two lane
+/// threads can belong to the other lane's estimator - a command buffer that may reach the same serial queue
+/// after the burst waiting for it, i.e. a wait whose signaller is behind it. Waiting for the generation this
+/// hop handed out is both exact (that submission wrote what the burst reads) and cycle-free (it was committed
+/// before the burst by construction). The generation is published per THREAD because the lane's stages run on
+/// the thread that just committed: the next burst this thread opens consumes it.
+static uint64_t signal_stage_fence_for_burst(id<MTLCommandBuffer> cb)
+{
+  const uint64_t generation = ocudu::metal::shared_queue::backend_stage_signal(cb);
+  ocudu::metal::shared_burst::set_stage_wait(generation);
+  return generation;
+}
+
 static stage_encoder begin_stage(mmse_engine_impl*          e,
                                  id<MTLComputePipelineState> first_pipeline,
                                  bool                        fuse,
@@ -1015,7 +1030,7 @@ static bool end_stage(mmse_engine_impl* e, stage_encoder& s, bool encoded,
   // burst's signal in end_stage_async(): a generation a waiting stage picks up always has a command
   // buffer on its way. Only in \c event order; the other two do not use this fence.
   if (signal_extraction_fence && (e->lane_order == metal::ce_lane_order::event)) {
-    (void)ocudu::metal::shared_queue::backend_stage_signal(s.cb);
+    (void)signal_stage_fence_for_burst(s.cb);
   }
   // The GPU-time probe must be armed before commit (Metal asserts otherwise).
   ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
@@ -1084,7 +1099,7 @@ static bool end_stage_async(mmse_engine_impl* e, stage_encoder& s, bool encoded,
   // Found by the estimator's unit test the moment the default was flipped to merged (Test 13's route 4:
   // "the default hop did not arm the back-end stage fence"), which is exactly what that assertion is for.
   if ((e->lane_order == metal::ce_lane_order::event) || (e->lane_order == metal::ce_lane_order::merged)) {
-    (void)ocudu::metal::shared_queue::backend_stage_signal(s.cb);
+    (void)signal_stage_fence_for_burst(s.cb);
   }
   // The GPU-time probe must be armed before commit (Metal asserts otherwise).
   ocudu::metal::shared_queue::arm_gpu_time(s.cb, ocudu::metal::shared_queue::queue_kind::back_end);
@@ -3661,7 +3676,7 @@ static bool encode_run(mmse_engine_impl*     e,
     // equalization then opens a burst of its own) still waits for this hop's work rather than for a
     // stale generation. Inside the same buffer nothing waits - the lane's stages are ordered by being
     // encoded after ours.
-    (void)ocudu::metal::shared_queue::backend_stage_signal(st.cb);
+    (void)signal_stage_fence_for_burst(st.cb);
     if (!ocudu::metal::shared_burst::adopt(st.cb)) {
       // The lane already had a burst open (another engine on this thread got there first): fall back to
       // committing this one, or the hop's dispatches would never be submitted.

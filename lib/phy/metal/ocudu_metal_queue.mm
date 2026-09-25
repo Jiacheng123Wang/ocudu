@@ -37,6 +37,10 @@ struct shared_queue_state {
   std::atomic<uint64_t>    stage_fence_generation{0};
   std::atomic<uint64_t>    stage_fence_signals{0};
   std::atomic<uint64_t>    stage_fence_waits{0};
+  /// Q9-C: which generation the waits named (see shared_queue::note_stage_fence_wait).
+  std::atomic<uint64_t>    stage_fence_own_waits{0};
+  std::atomic<uint64_t>    stage_fence_newest_waits{0};
+  std::atomic<uint64_t>    stage_fence_cross_lane{0};
   std::atomic<uint64_t>    stage_fence_skipped_waits{0};
 
   /// One no-copy wrap: the buffer, the host range it covers, and the allocation it was made for.
@@ -146,11 +150,17 @@ void shared_queue_stats_report()
   // leg tells a mechanism that is off from one that never fired). The FRONT-END fence that used to be
   // printed above it was retired in 5.9.65 - see the note in the header.
   std::fprintf(stderr,
-               "[metal_stats] lane fence signals=%llu waits=%llu skipped=%llu generation=%llu\n",
+               "[metal_stats] lane fence signals=%llu waits=%llu skipped=%llu generation=%llu "
+               "own=%llu newest=%llu cross_lane=%llu (Q9-C: own = the wait named THIS hop's own estimator "
+               "generation; cross_lane = the global newest differed, i.e. how often the old rule would have "
+               "waited for another lane's)\n",
                static_cast<unsigned long long>(s.stage_fence_signals.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.stage_fence_waits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.stage_fence_skipped_waits.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.stage_fence_generation.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.stage_fence_generation.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.stage_fence_own_waits.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.stage_fence_newest_waits.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.stage_fence_cross_lane.load(std::memory_order_relaxed)));
   // GPU busy time, measured on the command buffers themselves (GPUStartTime/GPUEndTime in their
   // completion handlers): this is the one time measurement that keeps its meaning once the stages are
   // fused into a single command buffer, where the per-stage host timestamps say nothing any more.
@@ -562,6 +572,34 @@ uint64_t shared_queue::backend_stage_nof_signals()
 uint64_t shared_queue::backend_stage_nof_waits()
 {
   return state().stage_fence_waits.load(std::memory_order_relaxed);
+}
+
+void shared_queue::note_stage_fence_wait(bool own_generation, bool crossed)
+{
+  shared_queue_state& s = state();
+  if (own_generation) {
+    s.stage_fence_own_waits.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    s.stage_fence_newest_waits.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (crossed) {
+    s.stage_fence_cross_lane.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+uint64_t shared_queue::nof_stage_fence_own_waits()
+{
+  return state().stage_fence_own_waits.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_stage_fence_newest_waits()
+{
+  return state().stage_fence_newest_waits.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_stage_fence_cross_lane()
+{
+  return state().stage_fence_cross_lane.load(std::memory_order_relaxed);
 }
 
 bool shared_queue::backend_stage_wait_generation(id<MTLCommandBuffer> command_buffer, uint64_t generation)
