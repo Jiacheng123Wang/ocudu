@@ -1625,6 +1625,11 @@ Q9-F 只回答"次序对不对"；若倒置为 0，§6.2 的分支要的是 **GP
   （Q9-F3 是这段代码里**第一个在报告期加锁**的读数）。lane 探针与交棒注册表早就是同样的写法，这里是同一理由的补齐。
 * `p0_gate.sh` 增加 **D11（Q9-F）/ D12（Q9-F2+F3）**：都是 **INFO（读数，不是判据）**；旧腿读成
   "a leg flown before 6.19 cannot say"（**"读不出"不静默**）。D1–D4 的阈值**一字未动**。
+* **新增 `wip/p0_gate_selftest.sh`（门的 D11/D12 自测）**：拿**真实腿的 stderr** 追加三条合成行（空气腿才会有的形状），
+  断言门把 `waiter-committed-first=` / `same-queue=` / `worst kind=` / 洞后的 label / `dft carried …` 都**读回原值**，
+  再拿**没有这些行的腿**断言它读成 "cannot say" 而不是编一个数。**为什么值得留**：本轮就是这样抓到两个解析缺陷——
+  `worst kind=` 被 `awk '{print $3}'` 读成了 `?`、洞那行因 `-A2` 太短**根本没配上**（§4.3 (3) 与 5.9.125 ⑥ 是同一类错误）。
+  只读文件、不碰 GPU，用户飞腿时也能跑。
 * 其余网（本机串行跑，改动后必跑的那一套）：`ctest -L phy` **193/193**、`lower_phy_test` **528/528**、`l1_handover_arms.sh` **5 PASS**；`l1_hop_arms.sh` 保持它自己那句 `OPEN`（该臂在**空闲机器**上不可证伪，5.9.39/5.9.40，与本节无关）。
 * ⚠ **网必须在没有并行构建时跑**：本次有一条腿的网正好撞上 `cmake --build`（二进制被重链接）⇒ 出现一次 `port_channel_estimator_metal_mmse_unit_test_ta_chain (Bus error)` 和一次 `the input token was released 0 times (rep 17)`；**构建结束后串行重跑三次全绿**。这与 §4.4「并行跑 = 假失败」是同一条纪律，**记在这里**。
 

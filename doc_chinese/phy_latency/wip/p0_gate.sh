@@ -358,7 +358,7 @@ co_first=$(printf '%s' "$fence_line3" | grep -oE "waiter-committed-first=[0-9]+"
 co_same=$(printf '%s' "$fence_line3" | grep -oE "same-queue=[0-9]+" | grep -oE "[0-9]+$")
 co_cross=$(printf '%s' "$fence_line3" | grep -oE "cross-queue=[0-9]+" | grep -oE "[0-9]+$")
 co_maxms=$(printf '%s' "$fence_line3" | grep -oE "max=[0-9.]+ms" | grep -oE "[0-9.]+")
-co_kind=$(printf '%s' "$fence_line3" | grep -oE "worst kind=[a-z]+" | awk '{print $3}')
+co_kind=$(printf '%s' "$fence_line3" | grep -oE "worst kind=[a-z]+" | cut -d= -f2)
 co_slot=$(printf '%s' "$fence_line3" | grep -oE "slot=[0-9]+" | grep -oE "[0-9]+$")
 if [ -z "${co_first:-}" ]; then
   check "[INFO] D11 (Q9-F) was a WAITER committed before its signaller" "reported, not judged" INFO \
@@ -371,14 +371,15 @@ fi
 # (probe on: OCUDU_METAL_GPU_TIME=1) and the front-end blocks that were not final when their own slot's group
 # closed - with the hand-over armed those are the rule, and no earlier instrument reported them at all.
 occ_line=$(grep -a "queue occupancy (Q9-F3): commits=" "$LEGF" | tail -1)
-occ_hole=$(grep -a "queue occupancy (Q9-F3): commits=" -A2 "$LEGF" | grep -a "hole " | head -1)
+occ_hole=$(grep -a "hole .*-> next label" "$LEGF" | head -1)
 fe_line=$(grep -a "dft carried blocks (Q9-F2)" "$LEGF" | tail -1)
+fe_wait=$(grep -a "dft carried deposit ->GPU start" "$LEGF" | tail -1)
 if [ -z "${occ_line:-}" ] && [ -z "${fe_line:-}" ]; then
   check "[INFO] D12 (Q9-F2/F3) was the device idle, and what were the front-end blocks doing" "reported, not judged" INFO \
         "no 'queue occupancy (Q9-F3)' and no 'dft carried blocks (Q9-F2)' line - a leg flown before 6.19 cannot say"
 else
   check "[INFO] D12 (Q9-F2/F3) was the device idle, and what were the front-end blocks doing" "reported, not judged" INFO \
-        "${occ_line:-<no Q9-F3 line: the occupancy probe is off (OCUDU_METAL_GPU_TIME=1 turns it on)>}${occ_hole:+  ||  ${occ_hole}}  ||  ${fe_line:-<no Q9-F2 line>}"
+        "${occ_line:-<no Q9-F3 line: the occupancy probe is off (OCUDU_METAL_GPU_TIME=1 turns it on)>}${occ_hole:+  ||  ${occ_hole}}  ||  ${fe_line:-<no Q9-F2 line>}${fe_wait:+  ||  ${fe_wait}}}"
 fi
 reaps_events=$(printf '%s' "$life_line" | grep -oE "dry-pool reaps=[0-9]+" | grep -oE "[0-9]+$")
 reaps_blocks=$(printf '%s' "$life_line" | grep -oE "recovering [0-9]+ block" | grep -oE "[0-9]+")
