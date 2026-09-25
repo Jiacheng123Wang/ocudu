@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Self-test for the p0_gate.sh readings that a leg can only produce on air (dev doc 6.19): D11 (Q9-F commit
-# order) and D12 (Q9-F2/F3 queue occupancy + front-end blocks).
+# order) and D12 (Q9-F2/F3 queue occupancy + front-end blocks) first, and since then every later INFO reading
+# a fixture can synthesize (D13-D18: the handshake, the on-demand dump, the dry-pool drops, the batched front
+# end, the transmit margin, and the direct-grid split of the received-symbol path).
 #
 # WHY IT EXISTS. A gate parser that silently matches NOTHING prints "cannot read", and "cannot read" is RED -
 # but a parser that silently matches the WRONG token prints a number that looks like a reading (the kind of
 # defect 4.3 (3) and 5.9.125 (6) already cost this workflow twice: the kind field came out as `?` and the hole
 # line was never found, both caught by running the gate on a synthetic leg before believing it).
 #
-# It takes a REAL leg's stderr (default: the newest leg in the logs directory) and APPENDS the three lines the
+# It takes a REAL leg's stderr (default: the newest leg that predates the instruments) and APPENDS the lines the
 # air leg will produce, then asserts the gate reads them back. Nothing touches the GPU: this is a text test.
 #
 # usage: bash p0_gate_selftest.sh [leg-label-or-stderr-path]
@@ -53,20 +55,32 @@ cat >> "$FIXTURE" <<'EOF'
 [metal_stats] dft commits=48123 transforms=673722 waits=143878 slots_in_flight=14 radio_inputs=673722 wrap_copies=0 released=48123 released_waits=0 batched=4812/67368 batch_max=14 batch_src=auto slot_symbols=14
 [dl_tx_slack] transmissions=144657 mean=1850.4us median=1900.0us p1=310.0us p5=420.0us p25=1500.0us min=208us (due_ts=99887766); below 2ms=52000, below 1ms=1200, below 500us=40, AT/BELOW 0=0
 [dl_tx_call] calls=144657 median=19.0us p95=58.0us p99=64.0us max=164us; over 1ms=0, over 5ms=0
+[metal_stats] eq_direct sites(y_direct=430757 y_gather=0) miss(disabled=0 ports=0 stride=0 len=0 holes=0 start=0 bounds=0 nobuf=0)
+EOF
+
+# D18 (6.48) has two branches that must read differently (a run read in the grid vs one that fell back), and
+# the gate reads the LAST eq_direct line of a leg - so the fallback branch gets its own fixture rather than a
+# second line in the one above (which would only ever exercise the last).
+FIXTURE_HOLES="$TMP/selftest_holes.stderr"
+cp "$ARG" "$FIXTURE_HOLES"
+cat >> "$FIXTURE_HOLES" <<'EOF'
+[metal_stats] eq_direct sites(y_direct=0 y_gather=430757) miss(disabled=0 ports=0 stride=0 len=0 holes=430757 start=0 bounds=0 nobuf=0)
 EOF
 
 OUT=$(bash "$GATE" "$FIXTURE" 2>&1)
+OUT_HOLES=$(bash "$GATE" "$FIXTURE_HOLES" 2>&1)
 FAILED=0
-expect() {
-  local what=$1 token=$2
-  if printf '%s' "$OUT" | grep -qF -- "$token"; then
+expect_in() {
+  local out=$1 what=$2 token=$3
+  if printf '%s' "$out" | grep -qF -- "$token"; then
     echo "PASS: $what  [$token]"
   else
     echo "FAIL: $what - the gate did not read '$token'"
-    printf '%s\n' "$OUT" | grep -A3 "D11 \|D12 " | head -12
+    printf '%s\n' "$out" | tail -12
     FAILED=1
   fi
 }
+expect() { expect_in "$OUT" "$1" "$2"; }
 expect "D11 reads the inversion count"        "waiter-committed-first=8"
 expect "D11 reads the same-queue subset"      "same-queue=8 = the shape that cannot resolve itself"
 expect "D11 reads the longest inversion"      "longest=5001.2ms worst kind=grid slot=9612"
@@ -83,6 +97,10 @@ expect "D16 reads the batched pair"          "batched=4812/67368 batch_max=14 ba
 expect "D16 states the branch verdict"       "the front end DID defer"
 expect "D17 reads the transmit margin"     "AT/BELOW 0=0"
 expect "D17 reads the call duration"      "transmit() itself returns at once"
+expect "D18 reads the direct count"       "y_direct=430757 y_gather=0"
+expect "D18 states the branch verdict"    "the equalization read the grid in place"
+expect_in "$OUT_HOLES" "D18 reads a fallback reason" "holes=430757"
+expect_in "$OUT_HOLES" "D18 names the fallback"      "EVERY run kept its gather"
 
 # The reverse direction: a leg WITHOUT the new lines must say so instead of printing a number (rule 4.3 (3)).
 # (The gate NAMES the line it looked for in that message, so the check is on the verdict, not on the token.)
@@ -97,6 +115,7 @@ if printf '%s' "$D11_OLD" | grep -qF "cannot say" && ! printf '%s' "$D11_OLD" | 
    printf '%s\n' "$OUT_OLD" | grep -A3 "D14 " | grep -qF "no 'p0 dump' line" &&
    printf '%s\n' "$OUT_OLD" | grep -A3 "D15 " | grep -qF "cannot say" &&
    printf '%s\n' "$OUT_OLD" | grep -A3 "D16 " | grep -qF "a leg flown before 6.30 cannot say" &&
+   printf '%s\n' "$OUT_OLD" | grep -A3 "D18 " | grep -qF "a leg flown before 6.48 cannot say" &&
    printf '%s\n' "$OUT_OLD" | grep -A3 "D17 " | grep -qF "a leg flown before 6.41 cannot say"; then
   echo "PASS: a leg without the 6.19 lines reads as 'cannot say' rather than as a number ($(basename "$OLD_LEG"))"
 else
