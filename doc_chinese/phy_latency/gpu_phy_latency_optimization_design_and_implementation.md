@@ -3282,6 +3282,10 @@ D17: transmissions=685435 min=-4208us AT/BELOW 0=52 against 1064 RF failure(s) i
 4. **`[ul_rx_pool] starved_events` 的定义**是"取缓冲时 free ≤ 1"的**进入次数**，不是"等了多久"（§6.36 ③）。
 5. 调试陷阱：`cmake --build build` **不重链测试可执行文件** ⇒ 改引擎后必须显式构建依赖 `ocudu_dft*` 的目标（§6.31 ⑥ 3）。
 6. 单元夹具里的 `[dl_tx_slack]` **不是**空口读数（mock 电台没有采样时钟），见 §6.41。
+7. **未声明的静态库依赖在 macOS 上能链、在 Linux 上不能**：`ld64` 不关心归档顺序，GNU ld 单趟解析。
+   本次就踩到：`ocudu_lower_phy` 与 `gnb_base` 用了 `ocudu_phy_support` 的 `register_p0_report`/`p0_dump_reports`
+   却没声明依赖 ⇒ Ubuntu 构建在 `lower_phy_test` 链接处报 `undefined reference`（提交 `f1c7dc1d49` 修：两处显式声明，
+   并把"为什么显式写"记在 CMakeLists 注释里）。**新增使用某库符号的库/可执行文件时，必须在自己的 target 上声明依赖。**
 
 
 
