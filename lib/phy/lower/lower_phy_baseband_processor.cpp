@@ -523,6 +523,18 @@ struct ul_rx_stats {
   static constexpr unsigned max_ovf_ctx = 8;
   std::atomic<uint64_t>     ovf_recv_us[max_ovf_ctx]{};
   std::atomic<uint64_t>     ovf_loop_us[max_ovf_ctx]{};
+  /// The system load average (1 minute, x100) at the moment of each of those overflows, and the largest load
+  /// seen at ANY tail event of the leg (dev doc 6.54, arm C).
+  ///
+  /// Why the load is part of an event's context: the receive path's own thread is never late (loop_us is ~2 us
+  /// at every overflow, dev doc 6.53), so when the transport call blocks for milliseconds the suspicion moves
+  /// to the threads this code does not own - UHD's own receive worker and the USB stack. A saturated host is
+  /// what would starve them, and a device-level stall is what would not; the load at the moment of the event is
+  /// therefore the cheapest thing that tells the two apart, and it rides in the event's own log line instead of
+  /// needing an external sampler correlated by hand. Sampled ONLY on a tail event (a millisecond call, a
+  /// millisecond loop or a radio error), so the steady-state cost is zero.
+  std::atomic<uint64_t>     ovf_load1_x100[max_ovf_ctx]{};
+  std::atomic<uint64_t>     load1_at_tail_max_x100{0};
   std::atomic<unsigned>     ovf_ctx_n{0};
   ///@}
 };
@@ -531,6 +543,20 @@ ul_rx_stats& ul_rx_counters()
 {
   static ul_rx_stats s;
   return s;
+}
+
+/// The host's 1-minute load average, in hundredths (dev doc 6.54, arm C).
+///
+/// It is read only where an event needs a context (see ul_rx_note_call), and it is the reading that separates
+/// the two owners a millisecond transport call can have: a saturated host starves the threads this code does
+/// not own (UHD's own receive worker, the USB stack), while a device or wire stall happens with the host idle.
+int64_t ul_rx_load1_x100()
+{
+  double loads[1] = {0.0};
+  if (getloadavg(loads, 1) != 1) {
+    return -1;
+  }
+  return static_cast<int64_t>(loads[0] * 100.0);
 }
 
 /// Records one `receiver.receive()` call (dev doc 6.51): how long the transport call took, how long the receive
@@ -603,18 +629,30 @@ void ul_rx_note_call(int64_t begin_ns, int64_t return_ns, int64_t air_us, baseba
       break;
     case baseband_gateway_receiver::rx_error::overflow: {
       c.rx_overflows.fetch_add(1, std::memory_order_relaxed);
-      // The context of the first few: what the call and the loop looked like when the radio dropped samples.
+      // The context of the first few: what the call and the loop looked like when the radio dropped samples,
+      // and how loaded the host was (see ovf_load1_x100).
       const unsigned idx = c.ovf_ctx_n.fetch_add(1, std::memory_order_relaxed);
       if (idx < ul_rx_stats::max_ovf_ctx) {
         c.ovf_recv_us[idx].store(static_cast<uint64_t>(recv_us), std::memory_order_relaxed);
         c.ovf_loop_us[idx].store(static_cast<uint64_t>((last_return_ns != 0) ? (begin_ns - last_return_ns) / 1000 : 0),
                                  std::memory_order_relaxed);
+        c.ovf_load1_x100[idx].store(static_cast<uint64_t>(ul_rx_load1_x100()), std::memory_order_relaxed);
       }
       break;
     }
     case baseband_gateway_receiver::rx_error::other:
       c.rx_other.fetch_add(1, std::memory_order_relaxed);
       break;
+  }
+
+  // The host's own load at a tail event, for the reason ovf_load1_x100 gives.
+  if ((recv_us > 1000) || (error != baseband_gateway_receiver::rx_error::none) ||
+      (c.loop_over_1ms.load(std::memory_order_relaxed) != 0)) {
+    const uint64_t load_x100 = static_cast<uint64_t>(ul_rx_load1_x100());
+    uint64_t       load_prev = c.load1_at_tail_max_x100.load(std::memory_order_relaxed);
+    while ((load_x100 > load_prev) &&
+           !c.load1_at_tail_max_x100.compare_exchange_weak(load_prev, load_x100, std::memory_order_relaxed)) {
+    }
   }
 }
 
@@ -662,7 +700,8 @@ void ul_rx_stats_report()
   if (c.calls.load(std::memory_order_relaxed) != 0) {
     std::fprintf(stderr,
                  "[ul_rx_timing] calls=%llu recv(max=%lldus over 1ms=%llu over 5ms=%llu) "
-                 "loop(max=%lldus over 1ms=%llu over 5ms=%llu) slip(max=%lldus over 1ms=%llu)\n",
+                 "loop(max=%lldus over 1ms=%llu over 5ms=%llu) slip(max=%lldus over 1ms=%llu) "
+                 "load1(max at a tail event=%lld.%02lld)\n",
                  static_cast<unsigned long long>(c.calls.load(std::memory_order_relaxed)),
                  static_cast<long long>(c.recv_max_us.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(c.recv_over_1ms.load(std::memory_order_relaxed)),
@@ -671,7 +710,9 @@ void ul_rx_stats_report()
                  static_cast<unsigned long long>(c.loop_over_1ms.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(c.loop_over_5ms.load(std::memory_order_relaxed)),
                  static_cast<long long>(c.slip_max_us.load(std::memory_order_relaxed)),
-                 static_cast<unsigned long long>(c.slip_over_1ms.load(std::memory_order_relaxed)));
+                 static_cast<unsigned long long>(c.slip_over_1ms.load(std::memory_order_relaxed)),
+                 static_cast<long long>(c.load1_at_tail_max_x100.load(std::memory_order_relaxed) / 100),
+                 static_cast<long long>(c.load1_at_tail_max_x100.load(std::memory_order_relaxed) % 100));
     const unsigned n_ctx = c.ovf_ctx_n.load(std::memory_order_relaxed);
     if (n_ctx != 0) {
       // The decisive reading: a large loop_us here says the host was late to ASK (its own scheduling, the
@@ -679,10 +720,12 @@ void ul_rx_stats_report()
       std::fprintf(stderr, "[ul_rx_timing] overflow_ctx=[");
       for (unsigned i = 0; (i != n_ctx) && (i != ul_rx_stats::max_ovf_ctx); ++i) {
         std::fprintf(stderr,
-                     "%srecv_us=%llu,loop_us=%llu",
+                     "%srecv_us=%llu,loop_us=%llu,load1=%lld.%02lld",
                      (i == 0) ? "" : " ",
                      static_cast<unsigned long long>(c.ovf_recv_us[i].load(std::memory_order_relaxed)),
-                     static_cast<unsigned long long>(c.ovf_loop_us[i].load(std::memory_order_relaxed)));
+                     static_cast<unsigned long long>(c.ovf_loop_us[i].load(std::memory_order_relaxed)),
+                     static_cast<long long>(c.ovf_load1_x100[i].load(std::memory_order_relaxed) / 100),
+                     static_cast<long long>(c.ovf_load1_x100[i].load(std::memory_order_relaxed) % 100));
       }
       std::fprintf(stderr, "] (the call that ended in each radio overflow, in order)\n");
     }
