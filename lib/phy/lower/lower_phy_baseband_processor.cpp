@@ -71,6 +71,20 @@ struct tx_slack_accounting {
   /// driver, not in this hand-over.
   std::atomic<uint64_t> late{0};
   std::atomic<int64_t>  min_us{std::numeric_limits<int64_t>::max()};
+  /// \name dev doc 6.42 (4), S2b: HOW LONG THE transmit() CALL ITSELF TAKES.
+  ///
+  /// The margin above says the hand-over is EARLY (median ~1.5 ms), yet the leg reports ~1000 UHD underflows:
+  /// so the lateness is after the hand-over, and the next question is WHOSE. If `transmit()` itself blocks for
+  /// milliseconds, the radio or the USB link is pushing back inside the call (and no host scheduling change can
+  /// help); if it returns at once, the samples are sitting in UHD's own queue and its worker thread is the one
+  /// that is late - which is what CPU contention from the fused lane would look like.
+  ///@{
+  std::atomic<uint64_t> tx_over_1ms{0};
+  std::atomic<uint64_t> tx_over_5ms{0};
+  std::atomic<int64_t>  tx_call_max_us{0};
+  std::mutex            tx_call_mutex;
+  std::vector<float>    tx_call_us;
+  ///@}
   /// The transmit timestamp the smallest margin belonged to (the metadata carries no slot index).
   std::atomic<uint64_t> min_due_ts{0};
   /// \name The clock map: the newest (radio timestamp, host instant) pair the receive path delivered.
@@ -131,6 +145,25 @@ void tx_slack_note_transmit(int64_t margin_us, uint64_t due_ts)
   }
 }
 
+/// Records how long the transmit() call took (dev doc 6.42 (4)).
+void tx_slack_note_call_us(int64_t call_us)
+{
+  tx_slack_accounting& a = tx_slack_accounts();
+  if (call_us > 1000) {
+    a.tx_over_1ms.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (call_us > 5000) {
+    a.tx_over_5ms.fetch_add(1, std::memory_order_relaxed);
+  }
+  int64_t prev = a.tx_call_max_us.load(std::memory_order_relaxed);
+  while ((call_us > prev) && !a.tx_call_max_us.compare_exchange_weak(prev, call_us, std::memory_order_relaxed)) {
+  }
+  std::lock_guard<std::mutex> lock(a.tx_call_mutex);
+  if (a.tx_call_us.size() < tx_slack_accounting::max_samples) {
+    a.tx_call_us.push_back(static_cast<float>(call_us));
+  }
+}
+
 /// The report: printed at exit and on demand with the other P0 readings (see register_p0_report).
 void tx_slack_report()
 {
@@ -163,6 +196,27 @@ void tx_slack_report()
                static_cast<unsigned long long>(a.below_1ms.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(a.below_500us.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(a.late.load(std::memory_order_relaxed)));
+  // S2b (dev doc 6.42 (4)): the CALL's own duration, so "the radio pushed back inside transmit()" and "UHD's
+  // worker was late after an instant return" are told apart by one number.
+  std::vector<float> calls;
+  {
+    std::lock_guard<std::mutex> lock(a.tx_call_mutex);
+    calls = a.tx_call_us;
+  }
+  std::sort(calls.begin(), calls.end());
+  const auto cpct = [&calls](double p) {
+    return calls.empty() ? 0.0F : calls[static_cast<size_t>((calls.size() - 1) * p)];
+  };
+  std::fprintf(stderr,
+               "[dl_tx_call] calls=%llu median=%.1fus p95=%.1fus p99=%.1fus max=%lldus; over 1ms=%llu, "
+               "over 5ms=%llu\n",
+               static_cast<unsigned long long>(calls.size()),
+               static_cast<double>(cpct(0.5)),
+               static_cast<double>(cpct(0.95)),
+               static_cast<double>(cpct(0.99)),
+               static_cast<long long>(a.tx_call_max_us.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(a.tx_over_1ms.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(a.tx_over_5ms.load(std::memory_order_relaxed)));
 }
 
 const bool tx_slack_report_registered = []() {
@@ -671,8 +725,12 @@ void lower_phy_baseband_processor::dl_process(baseband_gateway_timestamp timesta
     tx_slack_note_transmit(radio_us - host_elapsed_us, static_cast<uint64_t>(result.metadata.ts));
   }
 
-  // Transmit buffer.
+  // Transmit buffer (timed: dev doc 6.42 (4), S2b - see tx_slack_accounting::tx_over_1ms).
+  const auto tx_call_begin = std::chrono::steady_clock::now();
   transmitter.transmit(result.buffer->get_reader(), result.metadata);
+  tx_slack_note_call_us(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                              tx_call_begin)
+                            .count());
 
 #if defined(OCUDU_FLOW_PROBES)
   // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES).

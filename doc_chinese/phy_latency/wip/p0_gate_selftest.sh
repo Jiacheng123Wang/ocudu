@@ -52,6 +52,7 @@ cat >> "$FIXTURE" <<'EOF'
 [metal_stats] dft handover handed=48123 taken=27887 superseded=0 evicted=47867 evicted_unproduced=0 over_bound=0 unproduced=0 fallback=18331 late=1905 late_time=12 not_found=1891 timeouts=0 keepalives=673722/673722 (max in flight 112) (armed=1) tokens_early=signals:0,by_event:0,by_complete:48123 handshake=waits:7,timeouts:0,max:412us
 [metal_stats] dft commits=48123 transforms=673722 waits=143878 slots_in_flight=14 radio_inputs=673722 wrap_copies=0 released=48123 released_waits=0 batched=4812/67368 batch_max=14 batch_src=auto slot_symbols=14
 [dl_tx_slack] transmissions=144657 mean=1850.4us median=1900.0us p1=310.0us p5=420.0us p25=1500.0us min=208us (due_ts=99887766); below 2ms=52000, below 1ms=1200, below 500us=40, AT/BELOW 0=0
+[dl_tx_call] calls=144657 median=19.0us p95=58.0us p99=64.0us max=164us; over 1ms=0, over 5ms=0
 EOF
 
 OUT=$(bash "$GATE" "$FIXTURE" 2>&1)
@@ -81,6 +82,7 @@ expect "D13 states what a wait would have cost" "the Q9-G window IS reached on a
 expect "D16 reads the batched pair"          "batched=4812/67368 batch_max=14 batch_src=auto slot_symbols=14"
 expect "D16 states the branch verdict"       "the front end DID defer"
 expect "D17 reads the transmit margin"     "AT/BELOW 0=0"
+expect "D17 reads the call duration"      "transmit() itself returns at once"
 
 # The reverse direction: a leg WITHOUT the new lines must say so instead of printing a number (rule 4.3 (3)).
 # (The gate NAMES the line it looked for in that message, so the check is on the verdict, not on the token.)

@@ -3142,6 +3142,66 @@ margin_us = (due_ts − last_rx_ts) / rate  −  (host_now − last_rx_host)
 
 
 
+### 6.42 ★★ 腿 `p28-n78-txslack`（TX 探针的**第一次空口读数**）：**正常的递交提前 1.5 ms，但 52 次越过 0（最差 −4.2 ms）**——而这条腿有 **1064 次 RF 失败** ⇒ **宿主侧只解释 ~5%，主因在递交之后**（UHD/驱动的传输）
+
+#### ① 探针读数（D17 命中，且是"有越过 0"那一支）
+
+```
+[dl_tx_slack] transmissions=685435 mean=1511.0us median=1512.0us p1=1507.0us p5=1511.0us p25=1511.0us
+              min=-4208us (due_ts=5108659500); below 2ms=685422, below 1ms=503, below 500us=66, AT/BELOW 0=52
+D17: transmissions=685435 min=-4208us AT/BELOW 0=52 against 1064 RF failure(s) in the .log
+```
+
+* **常态非常健康**：中位 **1512 µs**（≈ `tx_time_offset` 1.5 ms = 3 个时隙），p1 都有 1507 µs ⇒ **不是"一直贴着截止线"**。
+* **但有 52 次越过 0**（0.0076%），最差 **−4.2 ms** ⇒ **期望 A 的一半成立：宿主确实偶尔交晚**。
+* **量级对不上**：52 次 vs **1064 次 RF 失败** ⇒ **宿主侧的迟到最多解释 ~5%**；其余 95% 的 `underflow` **发生在递交之后** ——
+  即 **期望 B 为主**：UHD 自己的传输/线程（本机 B200 走 USB 3）没赶上，而不是我们这个 `transmit()` 的时刻。
+* `below 1ms=503`、`below 500us=66`：有 ~500 次余量被压到 1 ms 以内 ⇒ **危险窗口存在但不是常态**。
+* 时间上：`due_ts=5108659500`（无线时间基）≈ 222 s，落在 §6.40 记的"满负载后半段（155–255 s）"窗口内 ✓ 与 RF 失败同时段。
+
+#### ② 同一条腿的其余读数（**V1/V2/V4 不变，V5 这条腿红**）
+
+| 读数 | p28 | 判读 |
+|---|---|---|
+| **V1** 中位 | **1511.4**（mean 1523.6）| ✅ 不变 |
+| **V2** | `starved_takes=0`、`starved_events=0`、`held_max=12`、`free_min=4`、`pool=16` | ✅ 不变 |
+| V4 | `cbs/lane=2.00 (max=2) dropped=0` | ✅ |
+| **V5 / D4** | ❌ **2 gaps / 285,262 样点**、契约 **NOT MET 1/8** | 与 p24（对照）同类；**这条腿 `pop_blocking` max 仅 25 µs、`over 1ms=0`** ⇒ 收线程**没有** park ⇒ **电台侧的第二个机制**（§6.25/§6.27 记过），**与 RF 失败同源**（都在递交之后）|
+| D1 / D2 | 14.7 ms / 11.6–10.0 ms（PASS）| `input hold` p99 **10.9 ms**、`take sweeps` 回收 **1749** 个块 ⇒ 这条腿的**未认领块比 p27 多得多**（长尾 + 流量空档），但仍在 10 ms 截止内被回收 ✓ (A) 在干活 |
+| D3 | `pop_blocking` max **25 µs** | ✅ |
+
+#### ③ 机制收敛（把 V3 与残留 gap 合成一个故事）
+
+三条独立证据指向同一个位置——**`transmit()` 之后**：
+1. 递交**提前 1.5 ms**（中位）却仍有 1064 次 underflow；
+2. 同腿 **2 个 gap / 28.5 万样点**，而收线程**没有 park**（max 25 µs）⇒ 丢样点也**不在宿主收包路径**；
+3. 既有旁证：**cpu 模式同电台 276 s 仅 1 次**、**并发 2 放大 3 倍**、**前端批量化把失败数大致减半**（p16 1490 → p27 707）。
+
+⇒ 最自洽的解释：**递交本身是准时的，但 UHD 的传输线程/USB 通道没有及时把样点送出去**；
+而"GPU 模式"通过**宿主 CPU 争用**（收线程、车道执行器、Metal 驱动线程、CE/EQ/demap 的宿主部分）把它挤晚——
+所以 cpu 模式几乎不出现、并发 2 放大、宿主活儿变少（批量化）就减半。**这不再是"我们晚交"，而是"我们让它晚传"。**
+
+#### ④ 下一步：先用一个**零腿**读数把"UHD 调用阻塞"与"UHD 线程被饿"分开（S2b），再做臂
+
+* **✅ S2b 已落地（提交见下）**：在同一个 `transmit()` 前后加计时，新增第二个读数
+  ```
+  [dl_tx_call] calls=N median=…us p95=…us p99=…us max=…us; over 1ms=…, over 5ms=…
+  ```
+  它把"**调用内部在等**（电台/USB 背压，宿主无关）"与"**瞬间返回、样点躺在 UHD 自己的队列里**（其工作线程被饿）"分开；
+  门 **D17** 现在同时给出**份额**与**归口**：
+  ```
+  read: transmissions=685435 min=-4208us AT/BELOW 0=52 against 1064 RF failure(s) in the .log
+        (the hand-over explains at most 4% of them). transmit() itself returns at once … =>
+        the samples waited in UHD's OWN queue: look at CPU CONTENTION and at the USB path
+  ```
+  （对 6.42 之前的腿，D17 明确写 "a leg flown before this probe cannot say whether transmit() itself blocks"。）
+* **S3（臂，按 S2b 的结果选）**：
+  * 若 `transmit()` 阻塞 ⇒ 查 **USB 传输/缓冲**（UHD 的 `num_send_frames`/`send_frame_size`、USB 3 拥塞），宿主侧无解；
+  * 若是**线程被饿** ⇒ 做**CPU 亲和/优先级**臂（把上层 PHY 的执行器钉到一部分核，给 UHD 的线程留出整核），
+    以及**同日并发 1 vs 2**（复现 3 倍放大）。
+
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

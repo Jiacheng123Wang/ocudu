@@ -476,12 +476,29 @@ fi
 if [ -z "${tx_slack_line:-}" ]; then
   check "[INFO] D17 (6.41) did the transmit hand-over have time left" "reported, not judged" INFO \
         "no '[dl_tx_slack]' line: a leg flown before 6.41 cannot say (the RF failures it does report are UHD's TX-side ones, see 6.40)"
-elif [ "${tx_late:-0}" = "0" ]; then
-  check "[INFO] D17 (6.41) did the transmit hand-over have time left" "reported, not judged" INFO \
-        "transmissions=${tx_n:-?} min=${tx_min:-?}us AT/BELOW 0=0 against ${rf_fail} RF failure(s) in the .log - the hand-over never ran out of time, so those failures are NOT this: look inside the radio/driver, or at the DL load that feeds it"
 else
-  check "[INFO] D17 (6.41) did the transmit hand-over have time left" "reported, not judged" INFO \
-        "transmissions=${tx_n:-?} min=${tx_min:-?}us AT/BELOW 0=${tx_late} against ${rf_fail} RF failure(s) in the .log  <-- the host-side shape of an underflow; read the distribution in the line above it"
+  # S2b (dev doc 6.42 (4)): the transmit() CALL's own duration decides WHOSE lateness the failures are. A call
+  # that blocks for milliseconds means the radio or the USB link is pushing back INSIDE it; an instant call with
+  # the failures unchanged means the samples sat in UHD's own queue and its worker thread was late (host CPU
+  # contention, the shape the fused lane would produce).
+  tx_call_line=$(grep -a "\[dl_tx_call\] calls=" "$LEGF" | tail -1)
+  call_med=$(printf '%s' "$tx_call_line" | grep -oE "median=[0-9.]+us" | grep -oE "[0-9.]+")
+  call_max=$(printf '%s' "$tx_call_line" | grep -oE "max=[0-9]+us" | grep -oE "[0-9]+")
+  call_over1=$(printf '%s' "$tx_call_line" | grep -oE "over 1ms=[0-9]+" | grep -oE "[0-9]+$")
+  if [ -z "${tx_call_line:-}" ]; then
+    call_verdict="(no '[dl_tx_call]' line: a leg flown before this probe cannot say whether transmit() itself blocks)"
+  elif [ "${call_over1:-0}" = "0" ]; then
+    call_verdict="transmit() itself returns at once (median=${call_med:-?}us max=${call_max:-?}us, never over 1 ms) => the samples waited in UHD's OWN queue: the lateness is its worker thread or the USB transfer, i.e. LOOK AT CPU CONTENTION (the fused lane's host threads) and at the USB path"
+  else
+    call_verdict="transmit() ITSELF blocked ${call_over1} time(s) over 1 ms (median=${call_med:-?}us max=${call_max:-?}us) => the radio or the USB link pushed back INSIDE the call; host scheduling is not the lever"
+  fi
+  if [ "${tx_late:-0}" = "0" ]; then
+    check "[INFO] D17 (6.41) did the transmit hand-over have time left" "reported, not judged" INFO \
+          "transmissions=${tx_n:-?} min=${tx_min:-?}us AT/BELOW 0=0 against ${rf_fail} RF failure(s) in the .log - the hand-over never ran out of time, so those failures are NOT this. ${call_verdict}"
+  else
+    check "[INFO] D17 (6.41) did the transmit hand-over have time left" "reported, not judged" INFO \
+          "transmissions=${tx_n:-?} min=${tx_min:-?}us AT/BELOW 0=${tx_late} against ${rf_fail} RF failure(s) in the .log (the hand-over explains at most $(( tx_late * 100 / (rf_fail > 0 ? rf_fail : 1) ))% of them). ${call_verdict}"
+  fi
 fi
 occ_line=$(grep -a "queue occupancy (Q9-F3): commits=" "$LEGF" | tail -1)
 occ_hole=$(grep -a "hole .*-> next label" "$LEGF" | head -1)

@@ -434,3 +434,21 @@ bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 p22-n78-conc2  #
   **B** `AT/BELOW 0 = 0` 而 RF 失败照旧 ⇒ **迟到在电台或驱动内部**（本机 B200 走 **USB 3**，抖动一号嫌疑），
   V3 就不是宿主调度问题。**V1/V2/契约/`cbs/lane`/gaps 应全部不变。**
 * 网：`ctest -L phy` 193/193、`lower_phy_test` ✓、metal arms 10–17 ✓、`l1_handover_arms.sh` 5 PASS、门自测 PASS。
+
+---
+
+## 17. 追加更正 #11：`p28`（TX 探针首次空口读数）+ S2b（§6.42）
+
+* **`[dl_tx_slack]`（空口第一次）**：`transmissions=685435`、中位 **1512 µs**、p1=1507、p25=1511 ⇒ **常态很健康**；
+  但 **`AT/BELOW 0 = 52`**、`min=-4208us`（0.0076% 越过 0，最差晚 4.2 ms）。
+* **量级不匹配**：同腿 **1064 次 RF 失败** ⇒ **宿主侧递交最多解释 ~4%**；同腿还有 **2 gaps / 285,262 样点**，
+  而 `pop_blocking` max **25 µs**、`over 1ms=0` ⇒ **收线程没有 park** ⇒ **两件事都在"递交之后"**（UHD/USB 或其工作线程）。
+* 其余不变：**V1 1511.4**、**V2**（`starved_events=0`、`held_max=12<16`、`free_min=4`）、**V4** `cbs/lane=2.00`；
+  **V5/D4 这条腿红**（2 gaps / 契约 NOT MET 1/8）——与 p24 同类，且**不是**宿主 park。
+  D1 14.7 ms / D2 11.6–10.0 ms 仍 PASS（`input hold` p99 10.9 ms、`take sweeps` 回收 **1749** 个块 ⇒ (A) 在干活）。
+* **S2b 已落地**：`[dl_tx_call] calls=N median/p95/p99/max; over 1ms=…, over 5ms=…` —— 把"**`transmit()` 内部在等**"
+  （电台/USB 背压，宿主无解）与"**瞬间返回、样点躺在 UHD 队列里**"（其工作线程/CPU 争用）分开。
+  门 **D17** 现在同时给**份额**与**归口**（对旧腿明确写 "cannot say whether transmit() itself blocks"）。
+  网：`ctest -L phy` 193/193、`lower_phy_test` ✓、metal arms ✓、`l1_handover_arms.sh` 5 PASS、门自测 PASS。
+* **待飞 `p29`**（配方同 p27/p28）：同时读 `[dl_tx_slack]` + `[dl_tx_call]` ⇒ 定 V3 归口 ⇒ 再选臂
+  （"调用内阻塞" ⇒ 查 USB/缓冲；"瞬间返回" ⇒ **CPU 亲和/优先级**臂 + 同日并发 1 vs 2）。
