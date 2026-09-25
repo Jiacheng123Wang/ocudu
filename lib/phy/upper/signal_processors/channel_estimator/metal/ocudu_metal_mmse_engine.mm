@@ -49,6 +49,63 @@ namespace {
 // Same accounting as the LDPC engine: commits / waits / cross-thread in-flight occupancy of the
 // per-engine command queues. Compile-time debug aid (ENABLE_METAL_STATS=ON defines
 // OCUDU_METAL_STATS); off by default with zero overhead. Reported at process exit.
+/// \brief dev doc 6.61: which KERNEL SITE the channel estimator's dispatches come from.
+///
+/// WHY IT EXISTS. The fused lane counts the estimator as **two dispatches per hop** - that is how many
+/// logical STAGES it contributes to the shared command buffer (the extraction and the weights), and the
+/// count is kept consistent between the burst route and the adopted-block route on purpose. But a stage
+/// count cannot say how many KERNELS those stages launch, and the chain in this file is a reformat (K3), a
+/// pilot LSE, a CFO application, two correlation kernels (A and R_hp) and a scatter: "two dispatches per
+/// hop" could be two kernels or seven. The lever this workflow has been pulling (dev doc 6.44: merging
+/// dispatches, ~12-18 us each on the span) needs the real number first - exactly what the per-site split
+/// did for the equalizer before the y_gather could be removed (dev doc 6.44 (3), 6.48).
+///
+/// It is an instrument only: no behaviour depends on it, and it is reported at exit next to the other
+/// [metal_stats] lines.
+struct ce_site_diag_t {
+  std::atomic<uint64_t> reformat{0};   // encode_reformat: K3
+  std::atomic<uint64_t> pilots_lse{0}; // build_pilots_lse: the pilot least-squares kernel
+  std::atomic<uint64_t> pilots_cfo{0}; // build_pilots_lse: the CFO application kernel
+  std::atomic<uint64_t> corr_a{0};     // encode_corr: the A (Gram) matrix, K1
+  std::atomic<uint64_t> corr_rhp{0};   // encode_corr: R_hp
+  std::atomic<uint64_t> scatter{0};    // encode_scatter: the pilot scatter
+};
+
+ce_site_diag_t& ce_site_diag()
+{
+  // Deliberately leaked, like the other reports (read at exit, after other destructors may have run).
+  static ce_site_diag_t* s = new ce_site_diag_t();
+  return *s;
+}
+
+/// The site names as the report prints them, in report order.
+static const char* ce_site_names[] = {"reformat", "pilots_lse", "pilots_cfo", "corr_a", "corr_rhp", "scatter"};
+
+void ce_site_report()
+{
+  const ce_site_diag_t& d = ce_site_diag();
+  const std::atomic<uint64_t>* const sites[] = {&d.reformat, &d.pilots_lse, &d.pilots_cfo,
+                                                &d.corr_a,   &d.corr_rhp,   &d.scatter};
+  uint64_t total = 0;
+  std::fprintf(stderr, "[metal_stats] ce_sites");
+  for (unsigned i = 0; i != 6; ++i) {
+    const uint64_t n = sites[i]->load(std::memory_order_relaxed);
+    total += n;
+    std::fprintf(stderr, " %s=%llu", ce_site_names[i], static_cast<unsigned long long>(n));
+  }
+  std::fprintf(stderr,
+               " (kernel dispatches, NOT the lane's 2 stages per hop - divide by the leg's hop count; "
+               "dev doc 6.61)\n");
+  (void)total;
+}
+
+#if defined(OCUDU_METAL_STATS)
+const bool ce_site_report_registered = []() {
+  std::atexit(ce_site_report);
+  return true;
+}();
+#endif // OCUDU_METAL_STATS
+
 #if defined(OCUDU_METAL_STATS)
 struct mmse_stats_t {
   std::atomic<uint64_t> commits{0};
@@ -1662,6 +1719,7 @@ static void encode_reformat(stage_encoder&                             s,
       const NSUInteger nof_sub =
           static_cast<NSUInteger>(rparams.sc_tail_base) + (reformat->has_tail ? rparams.nf_tail : 0u);
       const NSUInteger nof_threads = nof_sub * reformat->nof_symbols * reformat->nof_layers;
+      ce_site_diag().reformat.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
       [enc dispatchThreads:MTLSizeMake(nof_threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
       // The hop's geometry, in the ONE struct K5 and the time-alignment placement (K7) share (see
@@ -2331,6 +2389,7 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   // the host extraction.
   [enc setBuffer:rx_buf.buf offset:rx_buf.offset atIndex:4];
   for (unsigned rep = 0; rep != mmse_engine_impl::lse_repeat(); ++rep) {
+    ce_site_diag().pilots_lse.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61 (once per repeat)
     [enc dispatchThreads:MTLSizeMake(s.nof_pilots, s.nof_dmrs_symb * s.nof_layers, 1)
         threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
   }
@@ -2355,6 +2414,7 @@ bool mmse_engine::build_pilots_lse(const pilots_stage& s)
   [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
   [enc setBuffer:cfo_buf.buf offset:cfo_buf.offset atIndex:1];
   [enc setBytes:&p length:sizeof(p) atIndex:2];
+  ce_site_diag().pilots_cfo.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
   [enc dispatchThreads:MTLSizeMake(s.nof_layers * s.nof_pilots, s.nof_dmrs_symb, 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
@@ -2626,8 +2686,10 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
       // difference left that changes neither the submission nor the host's blocking. Both kernels
       // already guard gid.x, so padding the grid is a no-op per thread.
       const NSUInteger tgs = (a_per_sys + 255u) / 256u;
+      ce_site_diag().corr_a.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
       [enc dispatchThreadgroups:MTLSizeMake(tgs, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     } else {
+      ce_site_diag().corr_a.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
       [enc dispatchThreads:MTLSizeMake(a_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
   }
@@ -2638,8 +2700,10 @@ static bool encode_corr(mmse_engine_impl* e, stage_encoder& s, const mmse_engine
   for (unsigned rep = 0; rep != mmse_engine_impl::corr_repeat(); ++rep) {
     if (mmse_engine_impl::corr_uniform()) {
       const NSUInteger tgs = (rhp_per_sys + 255u) / 256u;
+      ce_site_diag().corr_rhp.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
       [enc dispatchThreadgroups:MTLSizeMake(tgs, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     } else {
+      ce_site_diag().corr_rhp.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
       [enc dispatchThreads:MTLSizeMake(rhp_per_sys, nof_systems, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
   }
@@ -3426,6 +3490,7 @@ static bool encode_scatter(mmse_engine_impl* e, stage_encoder& st,
   [enc setBuffer:lse_buf.buf offset:lse_buf.offset atIndex:0];
   [enc setBuffer:y_buf.buf offset:y_bind atIndex:1];
   [enc setBytes:&p length:sizeof(p) atIndex:2];
+  ce_site_diag().scatter.fetch_add(1, std::memory_order_relaxed); // dev doc 6.61
   [enc dispatchThreads:MTLSizeMake(s.Ls, s.n_blk_slots, s.nof_layers)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
   // In burst mode the next stage's pipeline change inserts this barrier (see stage_pipeline()); the own
