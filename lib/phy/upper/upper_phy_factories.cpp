@@ -394,7 +394,7 @@ private:
     // Create notifier.
     std::unique_ptr<upper_phy_rx_results_notifier> notifier =
         std::make_unique<upper_phy_rx_results_notifier_printer_decorator>(
-            config.notifier, backend, config.sector, triggers);
+            config.notifier, *backend, config.sector, triggers);
 
     // Create new configuration and substitute the notifier.
     uplink_processor_config config2{
