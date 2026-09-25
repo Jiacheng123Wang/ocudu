@@ -147,14 +147,19 @@ baseband_gateway_receiver::metadata radio_uhd_rx_stream::receive(baseband_gatewa
         break;
       case uhd::rx_metadata_t::ERROR_CODE_LATE_COMMAND:
         event.type = radio_event_type::LATE;
+        ret.error  = baseband_gateway_receiver::rx_error::late;
         break;
       case uhd::rx_metadata_t::ERROR_CODE_OVERFLOW:
         event.type = radio_event_type::OVERFLOW;
+        // Dev doc 6.51: the receive ring filled and the radio DROPPED samples. The host cannot repair this,
+        // and it is the event the lower PHY's continuity check sees as a gap - so it travels with the block.
+        ret.error = baseband_gateway_receiver::rx_error::overflow;
         break;
       case uhd::rx_metadata_t::ERROR_CODE_BROKEN_CHAIN:
       case uhd::rx_metadata_t::ERROR_CODE_ALIGNMENT:
       case uhd::rx_metadata_t::ERROR_CODE_BAD_PACKET:
         event.type = radio_event_type::OTHER;
+        ret.error  = baseband_gateway_receiver::rx_error::other;
         break;
     }
 

@@ -15,6 +15,7 @@
 #include "ocudu/phy/lower/lower_phy_controller.h"
 #include "ocudu/phy/lower/lower_phy_downlink_handler.h"
 #include "ocudu/phy/lower/lower_phy_factory.h"
+#include "ocudu/phy/phy_pipeline_contract.h"
 #include "ocudu/phy/lower/lower_phy_uplink_request_handler.h"
 #include "ocudu/phy/lower/processors/downlink/downlink_processor_notifier.h"
 #include "ocudu/phy/lower/processors/uplink/uplink_processor_notifier.h"
@@ -931,6 +932,71 @@ TEST_P(LowerPhyFixture, BasebandUplinkFlow)
   // No task should be pending in UL executor.
   ASSERT_FALSE(ul_task_executor.has_pending_tasks());
   ASSERT_TRUE(rx_task_executor.has_pending_tasks());
+}
+
+/// \brief A radio-reported receive OVERFLOW reaches the continuity reading (dev doc 6.51).
+///
+/// The offline arm of the receive-side instrument: the radio's own verdict on a block now travels with it
+/// (baseband_gateway_receiver::metadata::error), so the reading the leg's gate parses can be exercised against
+/// the event it is meant to count instead of against a timestamp jump alone. The assertion is on the REGISTERED
+/// check - the very object `p0_gate.sh` D4 reads - so a probe that stopped reporting, or a metadata field no
+/// radio ever filled in, cannot pass here.
+TEST_P(LowerPhyFixture, RadioReceiveOverflowIsReported)
+{
+  lower_phy_controller& lphy_controller = lphy->get_controller();
+
+  const unsigned nof_samples_per_slot = srate.to_kHz() / pow2(to_numerology_value(scs));
+
+  // The stream starts mid-slot, as the radio's does (the RU rounds its start time to a subframe).
+  bb_gateway_spy.set_receiver_current_timestamp(nof_samples_per_slot / 3 + 7);
+  lphy_controller.start(0);
+
+  // Two clean slots: the reading must be about the event, not about a stream that never established. The
+  // stream starts mid-slot, so the first block only closes the gap to the next boundary and is not processed
+  // (it is dropped while the phase establishes - see ReceivePhaseBlocksAreDropped), and the uplink tasks are
+  // drained as the other flow arms do: a task left pending is a controller that cannot be stopped.
+  for (unsigned i_block = 0; i_block != 2; ++i_block) {
+    bb_gateway_spy.clear_all_entries();
+    ASSERT_TRUE(rx_task_executor.try_run_next());
+    ASSERT_EQ(bb_gateway_spy.get_receive_entries().size(), 1);
+    if (ul_task_executor.has_pending_tasks()) {
+      ASSERT_TRUE(ul_task_executor.try_run_next());
+    }
+  }
+
+  // Now the radio reports an overflow AND the stream jumps, which is the shape measured on air: every
+  // discontinuity the receive path recorded was preceded by one UHD `overflow` - 2-6 ms of samples the radio
+  // dropped because its ring filled. A whole number of slots keeps the next block whole (see ul_process).
+  const baseband_gateway_timestamp expected =
+      bb_gateway_spy.get_receive_entries().back().metadata.ts + nof_samples_per_slot;
+  bb_gateway_spy.set_receiver_current_timestamp(expected + 5 * nof_samples_per_slot);
+  bb_gateway_spy.set_receiver_rx_error(baseband_gateway_receiver::rx_error::overflow);
+
+  bb_gateway_spy.clear_all_entries();
+  ASSERT_TRUE(rx_task_executor.try_run_next());
+  ASSERT_EQ(bb_gateway_spy.get_receive_entries().size(), 1);
+  if (ul_task_executor.has_pending_tasks()) {
+    ASSERT_TRUE(ul_task_executor.try_run_next());
+  }
+  // (What the fixture handed over is asserted through the spy's own entry, since the processor keeps only
+  //  the timestamp.)
+  ASSERT_EQ(bb_gateway_spy.get_receive_entries().back().metadata.error,
+            baseband_gateway_receiver::rx_error::overflow)
+      << "the fixture must hand the receive path a block the radio flagged";
+
+  // The registered continuity check must see it. It prints its own evidence - gap count, gap size and the
+  // radio's overflow count - next to the verdict, which is the line the gate parses.
+  bool evaluated = false;
+  for (const phy_pipeline_check& check : phy_pipeline_checks()) {
+    if (std::string(check.name) != "radio sample continuity") {
+      continue;
+    }
+    evaluated = true;
+    std::optional<bool> verdict = check.evaluate();
+    ASSERT_TRUE(verdict.has_value()) << "the check declined to judge a stream it did receive";
+    EXPECT_FALSE(*verdict) << "a radio-reported overflow did not reach the continuity reading";
+  }
+  ASSERT_TRUE(evaluated) << "no 'radio sample continuity' check is registered";
 }
 
 /// The RU rounds the start time it hands the lower PHY to a subframe (see ru_controller_sdr_impl), while

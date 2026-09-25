@@ -480,12 +480,152 @@ struct ul_rx_stats {
   /// Blocks the radio returned with timestamp 0 (its stop/error path, see ul_process): not part of the
   /// stream, and not a discontinuity.
   std::atomic<uint64_t> ts0_blocks{0};
+  /// \name dev doc 6.51: the radio's OWN verdict on the blocks it delivered (see rx_error).
+  ///
+  /// Why it is here. The continuity check above can say THAT the stream broke, not whether the radio dropped
+  /// the samples or the host merely received them out of order. UHD knows: it classifies every receive, and
+  /// on the air legs the classification and the gap count are the same event - `overflow` is the receive ring
+  /// filling up because nobody drained it in time, and across eleven legs its count equalled the gap count
+  /// event for event. The verdict used to produce a warning line and nothing else, which left the attribution
+  /// to whoever was willing to line up log timestamps by hand.
+  ///@{
+  std::atomic<uint64_t> rx_overflows{0};
+  std::atomic<uint64_t> rx_lates{0};
+  std::atomic<uint64_t> rx_other{0};
+  ///@}
+  /// \name The discontinuities themselves, in µs and in order.
+  ///
+  /// A gap is a RARE event (0-3 per leg), so the list is kept whole instead of summarised: the sizes are what
+  /// separates "one slot's worth" from "the ring drained", and only the FIRST one is logged when it happens.
+  ///@{
+  static constexpr unsigned max_gaps = 16;
+  std::atomic<uint64_t>     gap_us[max_gaps]{};
+  std::atomic<unsigned>     gap_us_n{0};
+  ///@}
+  /// \name The receive-side timing (dev doc 6.51): where the margin went, and what the host was doing when the
+  /// radio gave up. These are the receive twin of `[dl_tx_slack]`/`[dl_tx_call]`, and they exist to tell the
+  /// two hypotheses apart with one leg: a transport that blocks INSIDE the call (USB/radio push-back) against
+  /// a host that is late to ASK (its own scheduling, the fused lane's host threads included).
+  ///@{
+  std::atomic<uint64_t> calls{0};
+  std::atomic<uint64_t> recv_over_1ms{0};
+  std::atomic<uint64_t> recv_over_5ms{0};
+  std::atomic<int64_t>  recv_max_us{0};
+  std::atomic<uint64_t> loop_over_1ms{0};
+  std::atomic<uint64_t> loop_over_5ms{0};
+  std::atomic<int64_t>  loop_max_us{0};
+  std::atomic<uint64_t> slip_over_1ms{0};
+  std::atomic<int64_t>  slip_max_us{0};
+  /// The host instant the previous receive() returned, i.e. where the LOOP time is measured from.
+  std::atomic<int64_t> last_return_ns{0};
+  /// The context of the first overflows: the transport call and the loop that ended in one (see
+  /// ul_rx_note_call). THIS is the reading that decides host against USB.
+  static constexpr unsigned max_ovf_ctx = 8;
+  std::atomic<uint64_t>     ovf_recv_us[max_ovf_ctx]{};
+  std::atomic<uint64_t>     ovf_loop_us[max_ovf_ctx]{};
+  std::atomic<unsigned>     ovf_ctx_n{0};
+  ///@}
 };
 
 ul_rx_stats& ul_rx_counters()
 {
   static ul_rx_stats s;
   return s;
+}
+
+/// Records one `receiver.receive()` call (dev doc 6.51): how long the transport call took, how long the receive
+/// thread spent OUTSIDE it since the previous one, the drift the two add up to, and the radio's own verdict.
+///
+/// \param[in] begin_ns   Host instant the call was issued.
+/// \param[in] return_ns  Host instant it returned.
+/// \param[in] air_us     Air time of the samples the call asked for (the block length at the sample rate).
+/// \param[in] error      What the radio reported about the block (see baseband_gateway_receiver::rx_error).
+///
+/// The three derived numbers, and what each one rules in:
+///   * RECV = \p return_ns - \p begin_ns. Large (milliseconds) means the call itself blocked - the radio or
+///     the USB link pushed back inside it, and no host scheduling change can help - which is exactly the
+///     question `[dl_tx_call]` answered on the transmit side.
+///   * LOOP = this call's begin minus the PREVIOUS call's return: the host's own work plus whatever the OS did
+///     to the thread. Large means the host was late to ASK, i.e. scheduling (the fused lane's host threads).
+///   * SLIP = LOOP + RECV - \p air_us: the drift of the host against the sample timeline for this iteration.
+///     Positive and sustained means the host is falling behind the radio, which is the state that ends in the
+///     ring overflowing.
+///
+/// \note WHAT A UNIT FIXTURE READS IS NOT A READING OF THIS QUANTITY, for the reason the transmit-side probe
+///       spells out: in `lower_phy_test` the "radio" is a mock driven by hand, so its blocks arrive when the
+///       test says so and its `current_timestamp` has no relation to a sample clock - measured there: recv
+///       max 696 us with loop max 1503 us over 318 blocks, which says what the fixture does, nothing about a
+///       radio. The probe is to be read ON AIR, next to the same leg's `[RF] ... overflow` count.
+void ul_rx_note_call(int64_t begin_ns, int64_t return_ns, int64_t air_us, baseband_gateway_receiver::rx_error error)
+{
+  ul_rx_stats& c = ul_rx_counters();
+  c.calls.fetch_add(1, std::memory_order_relaxed);
+
+  const int64_t recv_us = (return_ns - begin_ns) / 1000;
+  if (recv_us > 1000) {
+    c.recv_over_1ms.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (recv_us > 5000) {
+    c.recv_over_5ms.fetch_add(1, std::memory_order_relaxed);
+  }
+  int64_t prev = c.recv_max_us.load(std::memory_order_relaxed);
+  while ((recv_us > prev) && !c.recv_max_us.compare_exchange_weak(prev, recv_us, std::memory_order_relaxed)) {
+  }
+
+  // The loop time needs the previous call's return instant. exchange() makes it one atomic per call, and the
+  // first call of a run has no predecessor (its loop time is not a measurement and is not recorded).
+  const int64_t last_return_ns = c.last_return_ns.exchange(return_ns, std::memory_order_relaxed);
+  if (last_return_ns != 0) {
+    const int64_t loop_us = (begin_ns - last_return_ns) / 1000;
+    if (loop_us > 1000) {
+      c.loop_over_1ms.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (loop_us > 5000) {
+      c.loop_over_5ms.fetch_add(1, std::memory_order_relaxed);
+    }
+    prev = c.loop_max_us.load(std::memory_order_relaxed);
+    while ((loop_us > prev) && !c.loop_max_us.compare_exchange_weak(prev, loop_us, std::memory_order_relaxed)) {
+    }
+    const int64_t slip_us = loop_us + recv_us - air_us;
+    if (slip_us > 1000) {
+      c.slip_over_1ms.fetch_add(1, std::memory_order_relaxed);
+    }
+    prev = c.slip_max_us.load(std::memory_order_relaxed);
+    while ((slip_us > prev) && !c.slip_max_us.compare_exchange_weak(prev, slip_us, std::memory_order_relaxed)) {
+    }
+  }
+
+  switch (error) {
+    case baseband_gateway_receiver::rx_error::none:
+      break;
+    case baseband_gateway_receiver::rx_error::late:
+      c.rx_lates.fetch_add(1, std::memory_order_relaxed);
+      break;
+    case baseband_gateway_receiver::rx_error::overflow: {
+      c.rx_overflows.fetch_add(1, std::memory_order_relaxed);
+      // The context of the first few: what the call and the loop looked like when the radio dropped samples.
+      const unsigned idx = c.ovf_ctx_n.fetch_add(1, std::memory_order_relaxed);
+      if (idx < ul_rx_stats::max_ovf_ctx) {
+        c.ovf_recv_us[idx].store(static_cast<uint64_t>(recv_us), std::memory_order_relaxed);
+        c.ovf_loop_us[idx].store(static_cast<uint64_t>((last_return_ns != 0) ? (begin_ns - last_return_ns) / 1000 : 0),
+                                 std::memory_order_relaxed);
+      }
+      break;
+    }
+    case baseband_gateway_receiver::rx_error::other:
+      c.rx_other.fetch_add(1, std::memory_order_relaxed);
+      break;
+  }
+}
+
+/// Records the size of one discontinuity, in µs (see ul_rx_stats::gap_us).
+void ul_rx_note_gap(int64_t gap_us)
+{
+  ul_rx_stats& c = ul_rx_counters();
+  const unsigned idx = c.gap_us_n.fetch_add(1, std::memory_order_relaxed);
+  if (idx < ul_rx_stats::max_gaps) {
+    c.gap_us[idx].store(static_cast<uint64_t>(gap_us), std::memory_order_relaxed);
+  }
 }
 
 void ul_rx_stats_report()
@@ -495,12 +635,58 @@ void ul_rx_stats_report()
     return;
   }
   std::fprintf(stderr,
-               "[ul_rx] blocks=%llu samples=%llu gaps=%llu gap_samples=%llu ts0_blocks=%llu\n",
+               "[ul_rx] blocks=%llu samples=%llu gaps=%llu gap_samples=%llu ts0_blocks=%llu "
+               "rx_overflows=%llu rx_lates=%llu rx_other=%llu\n",
                static_cast<unsigned long long>(c.blocks.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(c.samples.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(c.gaps.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(c.gap_samples.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(c.ts0_blocks.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(c.ts0_blocks.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(c.rx_overflows.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(c.rx_lates.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(c.rx_other.load(std::memory_order_relaxed)));
+  // The discontinuities themselves: the sizes say which failure it was ("one slot's worth" against "the ring
+  // drained"), and only the first one is logged when it happens.
+  const unsigned n_gaps = c.gap_us_n.load(std::memory_order_relaxed);
+  if (n_gaps != 0) {
+    std::fprintf(stderr, "[ul_rx] gap_us=[");
+    for (unsigned i = 0; (i != n_gaps) && (i != ul_rx_stats::max_gaps); ++i) {
+      std::fprintf(stderr,
+                   "%s%llu",
+                   (i == 0) ? "" : ",",
+                   static_cast<unsigned long long>(c.gap_us[i].load(std::memory_order_relaxed)));
+    }
+    std::fprintf(stderr, "] (in order%s)\n", (n_gaps > ul_rx_stats::max_gaps) ? ", first 16" : "");
+  }
+  // Where the receive margin went: the twin of [dl_tx_slack]/[dl_tx_call] (see ul_rx_note_call).
+  if (c.calls.load(std::memory_order_relaxed) != 0) {
+    std::fprintf(stderr,
+                 "[ul_rx_timing] calls=%llu recv(max=%lldus over 1ms=%llu over 5ms=%llu) "
+                 "loop(max=%lldus over 1ms=%llu over 5ms=%llu) slip(max=%lldus over 1ms=%llu)\n",
+                 static_cast<unsigned long long>(c.calls.load(std::memory_order_relaxed)),
+                 static_cast<long long>(c.recv_max_us.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.recv_over_1ms.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.recv_over_5ms.load(std::memory_order_relaxed)),
+                 static_cast<long long>(c.loop_max_us.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.loop_over_1ms.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.loop_over_5ms.load(std::memory_order_relaxed)),
+                 static_cast<long long>(c.slip_max_us.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(c.slip_over_1ms.load(std::memory_order_relaxed)));
+    const unsigned n_ctx = c.ovf_ctx_n.load(std::memory_order_relaxed);
+    if (n_ctx != 0) {
+      // The decisive reading: a large loop_us here says the host was late to ASK (its own scheduling, the
+      // fused lane's host threads); a large recv_us says the transport blocked INSIDE the call (USB/radio).
+      std::fprintf(stderr, "[ul_rx_timing] overflow_ctx=[");
+      for (unsigned i = 0; (i != n_ctx) && (i != ul_rx_stats::max_ovf_ctx); ++i) {
+        std::fprintf(stderr,
+                     "%srecv_us=%llu,loop_us=%llu",
+                     (i == 0) ? "" : " ",
+                     static_cast<unsigned long long>(c.ovf_recv_us[i].load(std::memory_order_relaxed)),
+                     static_cast<unsigned long long>(c.ovf_loop_us[i].load(std::memory_order_relaxed)));
+      }
+      std::fprintf(stderr, "] (the call that ended in each radio overflow, in order)\n");
+    }
+  }
 }
 
 const bool ul_rx_stats_registered = []() {
@@ -510,11 +696,13 @@ const bool ul_rx_stats_registered = []() {
       {"radio sample continuity", []() -> std::optional<bool> {
          const ul_rx_stats& c = ul_rx_counters();
          std::fprintf(stderr,
-                      "%llu gaps over %llu blocks (%llu samples missing or repeated), %llu timestamp-0 blocks",
+                      "%llu gaps over %llu blocks (%llu samples missing or repeated), %llu timestamp-0 blocks, "
+                      "%llu radio receive overflow(s)",
                       static_cast<unsigned long long>(c.gaps.load(std::memory_order_relaxed)),
                       static_cast<unsigned long long>(c.blocks.load(std::memory_order_relaxed)),
                       static_cast<unsigned long long>(c.gap_samples.load(std::memory_order_relaxed)),
-                      static_cast<unsigned long long>(c.ts0_blocks.load(std::memory_order_relaxed)));
+                      static_cast<unsigned long long>(c.ts0_blocks.load(std::memory_order_relaxed)),
+                      static_cast<unsigned long long>(c.rx_overflows.load(std::memory_order_relaxed)));
          if (c.blocks.load(std::memory_order_relaxed) < 2) {
            return std::nullopt;
          }
@@ -1085,13 +1273,25 @@ void lower_phy_baseband_processor::ul_process()
 #if defined(OCUDU_FLOW_PROBES)
   const auto t_recv_begin = std::chrono::steady_clock::now();
 #endif
+  // dev doc 6.51: the receive side gets the timing probe the transmit side already had ([dl_tx_slack] and
+  // [dl_tx_call]). Two clock reads and one relaxed-store block per slot, because the question - "is the host
+  // late to ASK, or does the transport block INSIDE the call?" - cannot be answered from the timestamps alone,
+  // and it is the question that decides whether the remaining millisecond discontinuities are ours to fix.
+  const auto rx_call_begin = std::chrono::steady_clock::now();
   baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_writer);
+  const auto rx_call_end = std::chrono::steady_clock::now();
   // dev doc 6.41: the clock map the transmit-side margin needs - the radio timestamp just delivered and the
   // host instant it was delivered at. One relaxed store each per receive, on the receive thread.
   tx_slack_note_receive(static_cast<uint64_t>(rx_metadata.ts),
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now().time_since_epoch())
+                            rx_call_end.time_since_epoch())
                             .count());
+  // The air time of the block the call asked for: the reference the receive timing is read against (see
+  // ul_rx_note_call). `srate` is in kHz, so samples * 1000 / kHz is microseconds.
+  ul_rx_note_call(std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_begin.time_since_epoch()).count(),
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_end.time_since_epoch()).count(),
+                  static_cast<int64_t>(nof_samples) * 1000 / static_cast<int64_t>(srate.to_kHz()),
+                  rx_metadata.error);
 #if defined(OCUDU_FLOW_PROBES)
   // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES), plus the [ul_rx_wait] series.
   //
@@ -1201,6 +1401,10 @@ void lower_phy_baseband_processor::ul_process()
                                                                         : (expected - rx_metadata.ts);
       c.gaps.fetch_add(1, std::memory_order_relaxed);
       c.gap_samples.fetch_add(gap, std::memory_order_relaxed);
+      // dev doc 6.51: keep the SIZE of every discontinuity, not just the first one's warning below - the sizes
+      // are what separates "a slot's worth" from "the radio's ring drained", and they belong in the report
+      // next to the radio's own `overflow` count.
+      ul_rx_note_gap(static_cast<int64_t>(gap) * 1000 / static_cast<int64_t>(srate.to_kHz()));
       static std::atomic<bool> gap_logged{false};
       bool                     log_expected = false;
       if (gap_logged.compare_exchange_strong(log_expected, true)) {

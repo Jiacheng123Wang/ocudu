@@ -47,10 +47,11 @@ public:
     }
 
     entries.emplace_back();
-    entry_t& entry    = entries.back();
-    entry.metadata.ts = current_timestamp;
-    entry.data        = data;
-    entry.write_ptr   = (data.get_nof_channels() != 0) ? data[0].data() : nullptr;
+    entry_t& entry       = entries.back();
+    entry.metadata.ts    = current_timestamp;
+    entry.metadata.error = injected_error;
+    entry.data           = data;
+    entry.write_ptr      = (data.get_nof_channels() != 0) ? data[0].data() : nullptr;
 
     current_timestamp += data.get_nof_samples();
 
@@ -58,6 +59,14 @@ public:
   }
 
   void set_current_timestamp(baseband_gateway_timestamp timestamp) { current_timestamp = timestamp; }
+
+  /// \brief Makes every following receive report what a real radio reports about a block (dev doc 6.51).
+  ///
+  /// It is how a test reproduces "the radio's receive ring overflowed and it dropped the samples" without a
+  /// radio: UHD classifies every receive and the classification now travels with the block, so the receive
+  /// path's counters can be exercised against the radio's own verdict instead of against a timestamp jump
+  /// alone (which is all the continuity check could see before).
+  void set_rx_error(baseband_gateway_receiver::rx_error error) { injected_error = error; }
 
   /// Gets all receive entries.
   const std::vector<entry_t>& get_entries() const { return entries; }
@@ -70,6 +79,7 @@ private:
   std::array<cf_t, nof_cached_random_samples> cached_random_samples;
   unsigned                                    i_cached_random_sample = 0;
   baseband_gateway_timestamp                  current_timestamp      = 0;
+  baseband_gateway_receiver::rx_error         injected_error         = baseband_gateway_receiver::rx_error::none;
   std::vector<entry_t>                        entries;
 };
 

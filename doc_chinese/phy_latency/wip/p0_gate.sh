@@ -52,6 +52,8 @@
 #   D13 (6.20/6.21, INFO) the commit handshake: how often a consumer was handed a generation whose carrier had
 #       not been committed yet (each of those was a 5.00 s queue hold before the handshake, 6.20) and how often
 #       that confirmation never came (the consumer is then ordered on the HOST; must be 0)
+#   D19 (6.51, INFO) the receive-side timing: how long the receive() call took, how long the thread spent
+#       OUTSIDE it (host scheduling) and what the radio said - the reading that tells host from USB
 #   D18 (6.48, INFO) the equalizer's received symbols: read IN THE GRID (one dispatch less per run, plus the
 #       device table build only a gather needs) or still gathered - with the reason the run fell back
 #       (D1-D4 are the criteria the Q9 fix is confirmed by; a leg flown BEFORE it reads them RED, which is the
@@ -287,6 +289,41 @@ else
   check "D4 (Q9) the radio lost no sample" "gaps == 0" \
         "$([ "$cont_gaps" = "0" ] && echo PASS || echo FAIL)" \
         "$cont_line"
+fi
+
+# D19 (dev doc 6.51, INFO): WHERE the receive margin went, and what the radio said about the blocks it handed
+# over. D4 only says the stream broke; this says whose it was. The decisive pair is `overflow_ctx`: a large
+# loop_us there means the host was late to ASK (its own scheduling, the fused lane's host threads included), a
+# large recv_us means the transport blocked INSIDE the call (radio or USB push-back). A leg flown before this
+# probe has no lines and says so.
+timing_line=$(grep -a "\[ul_rx_timing\] calls=" "$LEGF" | tail -1)
+ovf_ctx_line=$(grep -a "\[ul_rx_timing\] overflow_ctx=" "$LEGF" | tail -1)
+rx_line=$(grep -a "^\[ul_rx\] blocks=" "$LEGF" | tail -1)
+rx_ovf=$(printf '%s' "$rx_line" | grep -oE "rx_overflows=[0-9]+" | grep -oE "[0-9]+$")
+gap_list=$(grep -a "^\[ul_rx\] gap_us=" "$LEGF" | tail -1)
+if [ -z "${timing_line:-}" ]; then
+  check "[INFO] D19 (6.51) where did the receive margin go" "reported, not judged" INFO \
+        "no '[ul_rx_timing]' line: a leg flown before 6.51 cannot say (D4's gap count is still the reading)"
+else
+  recv_max=$(printf '%s' "$timing_line" | grep -oE "recv\(max=[0-9-]+us" | grep -oE "[0-9-]+")
+  recv_1ms=$(printf '%s' "$timing_line" | grep -oE "recv\(max=[0-9-]+us over 1ms=[0-9]+" | grep -oE "[0-9]+$")
+  loop_max=$(printf '%s' "$timing_line" | grep -oE "loop\(max=[0-9-]+us" | grep -oE "[0-9-]+")
+  loop_1ms=$(printf '%s' "$timing_line" | grep -oE "loop\(max=[0-9-]+us over 1ms=[0-9]+" | grep -oE "[0-9]+$")
+  if [ "${rx_ovf:-0}" = "0" ]; then
+    verdict="no radio receive overflow on this leg, so the gaps (if any) are NOT the ring: read gap_us next to D4"
+  elif [ -z "${ovf_ctx_line:-}" ]; then
+    verdict="the radio overflowed ${rx_ovf} time(s) but no context line - cannot attribute"
+  else
+    ctx_loop=$(printf '%s' "$ovf_ctx_line" | grep -oE "loop_us=[0-9]+" | grep -oE "[0-9]+" | sort -rn | head -1)
+    ctx_recv=$(printf '%s' "$ovf_ctx_line" | grep -oE "recv_us=[0-9]+" | grep -oE "[0-9]+" | sort -rn | head -1)
+    if [ "${ctx_loop:-0}" -gt "${ctx_recv:-0}" ]; then
+      verdict="THE HOST WAS LATE TO ASK (worst loop_us=${ctx_loop} > worst recv_us=${ctx_recv} at an overflow) => host scheduling is the lever: RX thread priority/affinity, or the lane's host load"
+    else
+      verdict="THE TRANSPORT BLOCKED INSIDE THE CALL (worst recv_us=${ctx_recv} >= worst loop_us=${ctx_loop}) => the radio or the USB link pushed back; host scheduling is not the lever"
+    fi
+  fi
+  check "[INFO] D19 (6.51) where did the receive margin go" "reported, not judged" INFO \
+        "${timing_line#*\[ul_rx_timing\] }; rx_overflows=${rx_ovf:-?} rx_lates=$(printf '%s' "$rx_line" | grep -oE "rx_lates=[0-9]+" | grep -oE "[0-9]+$"); ${ovf_ctx_line:+${ovf_ctx_line#*\[ul_rx_timing\] }}; ${gap_list:+${gap_list#*\[ul_rx\] }}  <-- ${verdict}"
 fi
 
 hand_line=$(grep -a "\[metal_stats\] dft handover" "$LEGF" | tail -1)

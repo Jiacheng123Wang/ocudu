@@ -67,6 +67,32 @@ cat >> "$FIXTURE_HOLES" <<'EOF'
 [metal_stats] eq_direct sites(y_direct=0 y_gather=430757) miss(disabled=0 ports=0 stride=0 len=0 holes=430757 start=0 bounds=0 nobuf=0)
 EOF
 
+# D19 (6.51) reads the receive-side timing, and its whole point is that the SAME mechanism (a radio overflow)
+# is attributed to one of two different owners. So both owners get a fixture: one where the LOOP (the host's own
+# time outside the call) dominates at the overflow, and one where the RECV (inside the transport call) does.
+# A parser that always said "host" - or always "USB" - passes one and fails the other.
+for _owner in host usb; do
+  FIX="$TMP/selftest_rx_${_owner}.stderr"
+  cp "$ARG" "$FIX"
+  if [ "$_owner" = "host" ]; then
+    cat >> "$FIX" <<'EOF'
+[ul_rx] blocks=648328 samples=7468737415 gaps=1 gap_samples=139378 ts0_blocks=0 rx_overflows=1 rx_lates=0 rx_other=0
+[ul_rx] gap_us=[6050] (in order)
+[ul_rx_timing] calls=648328 recv(max=910us over 1ms=0 over 5ms=0) loop(max=4300us over 1ms=12 over 5ms=0) slip(max=3800us over 1ms=11)
+[ul_rx_timing] overflow_ctx=[recv_us=880,loop_us=4300] (the call that ended in each radio overflow, in order)
+EOF
+  else
+    cat >> "$FIX" <<'EOF'
+[ul_rx] blocks=648328 samples=7468737415 gaps=1 gap_samples=139378 ts0_blocks=0 rx_overflows=1 rx_lates=0 rx_other=0
+[ul_rx] gap_us=[6050] (in order)
+[ul_rx_timing] calls=648328 recv(max=5200us over 1ms=3 over 5ms=1) loop(max=140us over 1ms=0 over 5ms=0) slip(max=60us over 1ms=0)
+[ul_rx_timing] overflow_ctx=[recv_us=5200,loop_us=90] (the call that ended in each radio overflow, in order)
+EOF
+  fi
+done
+OUT_RX_HOST=$(bash "$GATE" "$TMP/selftest_rx_host.stderr" 2>&1)
+OUT_RX_USB=$(bash "$GATE" "$TMP/selftest_rx_usb.stderr" 2>&1)
+
 OUT=$(bash "$GATE" "$FIXTURE" 2>&1)
 OUT_HOLES=$(bash "$GATE" "$FIXTURE_HOLES" 2>&1)
 FAILED=0
@@ -101,6 +127,10 @@ expect "D18 reads the direct count"       "y_direct=430757 y_gather=0"
 expect "D18 states the branch verdict"    "the equalization read the grid in place"
 expect_in "$OUT_HOLES" "D18 reads a fallback reason" "holes=430757"
 expect_in "$OUT_HOLES" "D18 names the fallback"      "EVERY run kept its gather"
+expect_in "$OUT_RX_HOST" "D19 reads the receive timing"    "loop(max=4300us over 1ms=12"
+expect_in "$OUT_RX_HOST" "D19 reads the radio verdict"     "rx_overflows=1"
+expect_in "$OUT_RX_HOST" "D19 blames the HOST when the loop dominates" "THE HOST WAS LATE TO ASK"
+expect_in "$OUT_RX_USB"  "D19 blames the TRANSPORT when recv dominates" "THE TRANSPORT BLOCKED INSIDE THE CALL"
 
 # The reverse direction: a leg WITHOUT the new lines must say so instead of printing a number (rule 4.3 (3)).
 # (The gate NAMES the line it looked for in that message, so the check is on the verdict, not on the token.)
@@ -116,6 +146,7 @@ if printf '%s' "$D11_OLD" | grep -qF "cannot say" && ! printf '%s' "$D11_OLD" | 
    printf '%s\n' "$OUT_OLD" | grep -A3 "D15 " | grep -qF "cannot say" &&
    printf '%s\n' "$OUT_OLD" | grep -A3 "D16 " | grep -qF "a leg flown before 6.30 cannot say" &&
    printf '%s\n' "$OUT_OLD" | grep -A3 "D18 " | grep -qF "a leg flown before 6.48 cannot say" &&
+   printf '%s\n' "$OUT_OLD" | grep -A3 "D19 " | grep -qF "a leg flown before 6.51 cannot say" &&
    printf '%s\n' "$OUT_OLD" | grep -A3 "D17 " | grep -qF "a leg flown before 6.41 cannot say"; then
   echo "PASS: a leg without the 6.19 lines reads as 'cannot say' rather than as a number ($(basename "$OLD_LEG"))"
 else

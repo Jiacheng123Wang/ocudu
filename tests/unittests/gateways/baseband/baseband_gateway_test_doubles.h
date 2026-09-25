@@ -40,6 +40,9 @@ public:
     receiver.set_current_timestamp(timestamp);
   }
 
+  /// Makes every following receive report what a real radio reports about a block (dev doc 6.51).
+  void set_receiver_rx_error(baseband_gateway_receiver::rx_error error) { receiver.set_rx_error(error); }
+
   /// Clears all types of entries.
   void clear_all_entries()
   {
