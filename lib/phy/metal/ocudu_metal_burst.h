@@ -305,10 +305,21 @@ public:
     /// the deposits are being swept, not served.
     uint64_t fallback_commits = 0;
     /// Blocks COMMITTED LATE by the registry itself: deposits NOBODY claimed at all - either about to be
-    /// dropped (the storage came back, or the bound was reached), or swept once the receiving chain had
-    /// moved more than the sweep window past their slot. Each one is a grid that would otherwise never have
-    /// been written AND a set of input references that would never have been released (5.9.17).
+    /// dropped (the storage came back, or the bound was reached), or swept because they were past their
+    /// window. Each one is a grid that would otherwise never have been written AND a set of input references
+    /// that would never have been released (5.9.17).
     uint64_t late_commits = 0;
+    /// \brief The subset of `late_commits` that the TIME deadline claimed - the blocks the SLOT window did not
+    ///        cover (Q9, dev doc 6.10: this is the counter that says the fix recovered them).
+    ///
+    /// The slot window is evaluated first and fires at 2 slots (~2 ms), so on a leg whose slot counter behaves
+    /// this stays at (or near) zero: everything a hop was going to claim has been claimed or slot-swept long
+    /// before the 10 ms deadline. A NON-zero value is the registry saying "the slot rule could not have caught
+    /// these", which is exactly what happens to a block deposited just before the hyperframe wrap - there
+    /// `slot_point::count()` is modular, so the slot comparison means nothing. On leg `p07-conc2` those blocks
+    /// waited whole 10.24 s cycles instead (30.72 s measured, holding 14 input tokens each until the pool ran
+    /// dry): if this counter is non-zero, the time deadline is the rule that gave the receive pool back.
+    uint64_t late_commits_time = 0;
     /// Reads that found NO record for their (storage, slot): either no hand-over is armed, or the record was
     /// produced and evicted long before. A reader that finds nothing cannot wait, so this counts the reads
     /// the key cannot protect.

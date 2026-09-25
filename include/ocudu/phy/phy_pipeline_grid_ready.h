@@ -42,6 +42,11 @@ struct grid_handover_counts {
   uint64_t fallback_commits = 0;
   /// Blocks the registry itself committed late, because nobody ever claimed them.
   uint64_t late_commits = 0;
+  /// The part of \c late_commits that the TIME deadline claimed, i.e. the blocks the SLOT window did not
+  /// cover (Q9, design document 6.10/6.11). The slot window is evaluated first and fires at 2 slots, so on a
+  /// leg whose slot counter behaves this stays near zero; a NON-zero value is the registry saying "the slot
+  /// rule could not have caught these", which is the shape of a deposit made just before the hyperframe wrap.
+  uint64_t late_commits_time = 0;
   /// Reads that found no record for their (storage, slot): they cannot wait, so they prove nothing.
   uint64_t not_found = 0;
   /// Records whose grid has not been produced yet: the blocks still waiting for a consumer or the sweep.

@@ -347,7 +347,7 @@ static void dft_stats_report()
     std::fprintf(stderr,
                  "[metal_stats] dft handover handed=%llu taken=%llu superseded=%llu evicted=%llu "
                  "evicted_unproduced=%llu over_bound=%llu unproduced=%zu "
-                 "fallback=%llu late=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu (max in flight "
+                 "fallback=%llu late=%llu late_time=%llu not_found=%llu timeouts=%llu keepalives=%llu/%llu (max in flight "
                  "%llu) (armed=%d) tokens_early=signals:%llu,by_event:%llu,by_complete:%llu\n",
                  static_cast<unsigned long long>(hand.handed),
                  static_cast<unsigned long long>(hand.taken),
@@ -358,6 +358,10 @@ static void dft_stats_report()
                  hand.unproduced,
                  static_cast<unsigned long long>(hand.fallback_commits),
                  static_cast<unsigned long long>(hand.late_commits),
+                 // Q9: the part of `late` the TIME deadline claimed, i.e. what the SLOT window did not cover -
+                 // printed next to the total on purpose, because that pair is what says whether the 10 ms
+                 // deadline is doing work or the slot rule is still the one reaping (see handed_counters).
+                 static_cast<unsigned long long>(hand.late_commits_time),
                  static_cast<unsigned long long>(hand.grid_not_found),
                  static_cast<unsigned long long>(hand.ready_timeouts),
                  // keepalives = released/attached, plus the in-flight HIGH-WATER MARK. The gap between the
@@ -602,7 +606,7 @@ void dft_handover_heartbeat(const char* where)
   const dft_stats_t&                         s    = dft_stats();
   logger.debug("[dft_handover] {} handed={} taken={} superseded={} evicted={} "
                "evicted_unproduced={} over_bound={} unproduced={} "
-               "fallback={} late={} not_found={} timeouts={} keepalives={}/{} (max in flight {})",
+               "fallback={} late={} late_time={} not_found={} timeouts={} keepalives={}/{} (max in flight {})",
                where,
                hand.handed,
                hand.taken,
@@ -613,6 +617,7 @@ void dft_handover_heartbeat(const char* where)
                hand.unproduced,
                hand.fallback_commits,
                hand.late_commits,
+               hand.late_commits_time,
                hand.grid_not_found,
                hand.ready_timeouts,
                s.keepalives_released.load(std::memory_order_relaxed),

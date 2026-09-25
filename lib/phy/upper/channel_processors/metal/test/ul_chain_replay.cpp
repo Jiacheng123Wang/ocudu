@@ -852,7 +852,7 @@ int main(int argc, char** argv)
     // symbol. A recorded capture is not required to cover whole slots, so it is not counted here.
     const uint64_t expected_deposits = (synth_slots != 0) ? synth_slots : 0;
     std::printf("[l1_handover] installed=%d armed=%d drop_consumer_wait=%d slot_skew=%u slots=%llu handed=%llu "
-                "taken=%llu superseded=%llu evicted=%llu evicted_unproduced=%llu over_bound=%llu fallback=%llu late=%llu not_found=%llu unproduced=%llu "
+                "taken=%llu superseded=%llu evicted=%llu evicted_unproduced=%llu over_bound=%llu fallback=%llu late=%llu late_time=%llu not_found=%llu unproduced=%llu "
                 "ready_timeouts=%llu\n",
                 hs.installed ? 1 : 0,
                 release_armed ? 1 : 0,
@@ -867,6 +867,7 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(hs.over_bound),
                 static_cast<unsigned long long>(hs.fallback_commits),
                 static_cast<unsigned long long>(hs.late_commits),
+                static_cast<unsigned long long>(hs.late_commits_time),
                 static_cast<unsigned long long>(hs.not_found),
                 static_cast<unsigned long long>(hs.unproduced),
                 static_cast<unsigned long long>(hs.ready_timeouts));
@@ -1407,7 +1408,7 @@ int main(int argc, char** argv)
     // "unset" - see the arm scripts.
     const bool release_armed = ocudu::grid_handover_armed();
     std::printf("[l1_hop] installed=%d armed=%d host_first=%d claim_only=%d pdus=%u slots=%u handed=%llu "
-                "taken=%llu fallback=%llu late=%llu not_found=%llu unproduced=%llu ready_timeouts=%llu\n",
+                "taken=%llu fallback=%llu late=%llu late_time=%llu not_found=%llu unproduced=%llu ready_timeouts=%llu\n",
                 hs.installed ? 1 : 0,
                 release_armed ? 1 : 0,
                 host_first ? 1 : 0,
@@ -1418,6 +1419,7 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(hs.taken),
                 static_cast<unsigned long long>(hs.fallback_commits),
                 static_cast<unsigned long long>(hs.late_commits),
+                static_cast<unsigned long long>(hs.late_commits_time),
                 static_cast<unsigned long long>(hs.not_found),
                 static_cast<unsigned long long>(hs.unproduced),
                 static_cast<unsigned long long>(hs.ready_timeouts));

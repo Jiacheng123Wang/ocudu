@@ -1129,6 +1129,120 @@ int main()
                    nof_subc);
     }
 
+    // ---- Arm 11 (Q9): a block the SLOT rule can no longer reach must still come back --------------------
+    // Leg `p07-conc2` (2026-09-25) closed Q9 with exactly this shape, and it is not a race but arithmetic:
+    // `slot_point::count()` is MODULAR - asserted below nof_slots_per_hyper_system_frame() (10240 slots =
+    // 10.24 s at 15 kHz) and restarting at 0 - so the sweep's `entry.slot + 2 < slot` was FALSE for every
+    // block deposited just before a wrap, and false for good: after the wrap the new deposits carry SMALL
+    // slot numbers while the orphan carries a large one, and the sum can never be smaller again. On air those
+    // blocks waited whole 10.24 s cycles (30.72 s = 3.000x measured) holding 14 input tokens each, the receive
+    // pool went to zero, the receive thread parked in pop_blocking() (4.998 s x2) and the uplink went silent.
+    //
+    // The other half of the defect is that the sweep lived in the DEPOSIT path alone: with the radio parked
+    // there is no next deposit, so the one path that could still have reaped the block was never called. This
+    // arm drives the sweep through a TAKE that finds nothing - a consumer asking about another slot, which is
+    // exactly what keeps running while the radio is parked.
+    //
+    // What is asserted: (1) the wrapped shape really does put the orphan beyond the slot rule (the deposit
+    // that follows the wrap sweeps NOTHING, so the block is stuck on the pre-Q9 code), and (2) it comes back
+    // anyway, within a bounded time, by the TIME deadline - which the counters name.
+    {
+      constexpr uint64_t q9_orphan_slot  = test_slot + 400;
+      // The slot the counter restarts at after a hyperframe (0 in the real one; any small value has the same
+      // shape here): it is SMALLER than the orphan's, which is the one thing a modular comparison cannot say.
+      constexpr uint64_t q9_wrapped_slot = 5;
+
+      // Drain first, so the two assertions below are about THIS arm and not about whatever an earlier arm left
+      // unclaimed: past the deadline, one entry point reaps every leftover there is, and then the registry has
+      // nothing unclaimed but what this arm deposits.
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      if (metal::shared_burst::take_released(grid_base, q9_orphan_slot + 7) != nil) {
+        std::fprintf(stderr, "FAIL: the Q9 arm's drain was served a block\n");
+        return 1;
+      }
+      const metal::shared_burst::handed_counters q9_before = metal::shared_burst::handed_stats();
+
+      keep_alive_probe q9_probe;
+      metal::dft_metal_engine::grid_write write;
+      write.grid_base  = grid_base;
+      write.grid_bytes = grid_bytes;
+      write.dst_offset = dst_offset;
+      write.nof_subc   = nof_subc;
+      write.map_offset = transform_size - nof_subc / 2;
+      write.phase_re   = 1.0F;
+      // Just before the wrap: a block nobody will ever ask about (that is the whole point - it is the missed
+      // hand-over the sweep exists for), and it carries an input token exactly as the receiving chain's does.
+      engine.set_lane_slot(q9_orphan_slot);
+      if (!engine.begin_block() || !engine.submit_slot_grid_write(in_mem, out_mem, 0, write) ||
+          !engine.retain_for_block(q9_probe.token()) || (engine.release_block(grid_base) == nullptr)) {
+        std::fprintf(stderr, "FAIL: the Q9 arm could not stage its orphan\n");
+        return 1;
+      }
+      // ... and the counter wraps: the deposit after it carries a small slot. This is a registry entry point,
+      // and it must reap NOTHING - on the pre-Q9 code it reaps nothing either, which is why the block stayed
+      // stuck for a whole hyperframe.
+      engine.set_lane_slot(q9_wrapped_slot);
+      if (!engine.begin_block() || !engine.submit_slot_grid_write(in_mem, out_mem, 0, write) ||
+          (engine.release_block(grid_base) == nullptr)) {
+        std::fprintf(stderr, "FAIL: the Q9 arm could not stage the deposit that follows the wrap\n");
+        return 1;
+      }
+      const metal::shared_burst::handed_counters q9_stuck = metal::shared_burst::handed_stats();
+      if ((q9_stuck.late_commits != q9_before.late_commits) ||
+          (q9_stuck.late_commits_time != q9_before.late_commits_time)) {
+        std::fprintf(stderr,
+                     "FAIL: the Q9 arm's arena is not the wrapped one - a deposit swept %llu block(s) "
+                     "(late %llu->%llu, by time %llu->%llu), so this arm would prove nothing about the slot "
+                     "rule failing\n",
+                     static_cast<unsigned long long>(q9_stuck.late_commits - q9_before.late_commits),
+                     static_cast<unsigned long long>(q9_before.late_commits),
+                     static_cast<unsigned long long>(q9_stuck.late_commits),
+                     static_cast<unsigned long long>(q9_before.late_commits_time),
+                     static_cast<unsigned long long>(q9_stuck.late_commits_time));
+        return 1;
+      }
+
+      // Past the TIME deadline, and NOT through a deposit: from here the radio is "parked" (this arm deposits
+      // nothing more), so the only entry point left is a consumer's. The hop asking about another slot is
+      // that, and it must find nothing AND give the receive buffer back.
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      if (metal::shared_burst::take_released(grid_base, q9_orphan_slot + 7) != nil) {
+        std::fprintf(stderr, "FAIL: the Q9 arm's probe take was served a block\n");
+        return 1;
+      }
+      for (unsigned spin = 0; (spin != 2000) && (q9_probe.releases.load() == 0); ++spin) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      if (q9_probe.releases.load() != 1) {
+        std::fprintf(stderr,
+                     "FAIL (Q9): a block deposited just before the slot counter wrapped was released %u "
+                     "times, expected 1. Its input token is held for as long as the registry keeps it, so a "
+                     "sweep armed in SLOTS alone leaves a receive buffer gone for a whole hyperframe (10.24 s "
+                     "at 15 kHz, measured as 30.72 s on leg p07-conc2)\n",
+                     q9_probe.releases.load());
+        return 1;
+      }
+      const metal::shared_burst::handed_counters q9_after = metal::shared_burst::handed_stats();
+      if (q9_after.late_commits_time <= q9_before.late_commits_time) {
+        std::fprintf(stderr,
+                     "FAIL (Q9): the block came back but NOT through the time deadline (late_time %llu->%llu) "
+                     "- the arm is not measuring the trigger it claims\n",
+                     static_cast<unsigned long long>(q9_before.late_commits_time),
+                     static_cast<unsigned long long>(q9_after.late_commits_time));
+        return 1;
+      }
+      std::fprintf(stderr,
+                   "[dft-release] arm 11 (Q9): a block deposited before the slot counter wrapped is invisible "
+                   "to the slot rule (wrapped newest slot=%llu < orphan slot=%llu) and is still swept by the "
+                   "TIME deadline - swept nothing at the deposit, swept by a TAKE %.0f ms later "
+                   "(late_time %llu->%llu), input released exactly once\n",
+                   static_cast<unsigned long long>(q9_wrapped_slot),
+                   static_cast<unsigned long long>(q9_orphan_slot),
+                   50.0,
+                   static_cast<unsigned long long>(q9_before.late_commits_time),
+                   static_cast<unsigned long long>(q9_after.late_commits_time));
+    }
+
     // ---- Arm 10: "no record" must never mean "the write is still in flight" (5.9.62) ----------------
     // The registry's eviction loop erases entries, and a reader that finds NOTHING cannot wait - so an entry
     // erased before its block COMPLETED is the one way a hop can read a grid nobody has written. Until

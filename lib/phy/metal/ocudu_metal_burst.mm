@@ -69,6 +69,7 @@ void grid_handover_counts_hook(grid_handover_counts& out)
   out.over_bound         = hand.over_bound;
   out.fallback_commits = hand.fallback_commits;
   out.late_commits     = hand.late_commits;
+  out.late_commits_time = hand.late_commits_time;
   out.not_found        = hand.grid_not_found;
   out.unproduced       = hand.unproduced;
   out.ready_timeouts   = hand.ready_timeouts;
@@ -546,8 +547,12 @@ struct handed_entry {
 /// its transforms went into, the upper PHY claims it when it starts the hop that reads that grid - or the
 /// consumer that reads the grid on the host claims and commits it itself.
 struct handed_state {
-  std::mutex               mutex;
-  std::deque<handed_entry> entries; // oldest first
+  std::mutex                   mutex;
+  std::deque<handed_entry>     entries; // oldest first
+  /// Slot of the newest deposit: the reference the sweep's SLOT window is measured against. Not the entry
+  /// point's own slot - a host reader asks about the slot it READS, which can be several slots behind the
+  /// receiving chain, and a take asks about the hop's slot, which is one behind by construction.
+  uint64_t                     newest_slot = 0;
   shared_burst::handed_counters counters;
 };
 
@@ -558,6 +563,122 @@ handed_state& handed()
   static handed_state* s = new handed_state();
   return *s;
 }
+
+/// \name Q9: the registry's deadline for a block NOBODY claims (dev doc 6.10).
+///
+/// WHY IT EXISTS AT ALL. A deposit no hop and no host reader ever asks for has no consumer coming, and with the
+/// (storage, slot) key it can never be superseded either. It therefore sits in the registry holding the input
+/// tokens of its transforms, so the receive buffers those keep alive never come back - which is why the sweep
+/// below is what stands between one missed hand-over and a stalled radio. It used to be armed in SLOTS alone,
+/// and that is the defect leg `p07-conc2` (2026-09-25) closed: `slot_point::count()` is MODULAR (asserted
+/// < nof_slots_per_hyper_system_frame() = 10240 slots = 10.24 s at 15 kHz), so `entry.slot + 2 < slot` is false
+/// for every slot in the last two of a hyperframe - and false for EVERY entry right after the counter wraps.
+/// The measured waits were exact multiples of 10.24 s (30.72 s = 3.000x), each stuck block held 14 input
+/// tokens, the pool went to zero, the receive thread parked in pop_blocking() for 4.998 s and the uplink went
+/// silent for the whole park.
+///@{
+
+/// \brief How long a deposit may sit unclaimed before the registry commits it itself.
+///
+/// TIME, not slots, and that is the whole point: a deadline in TIME cannot be defeated by a modular counter,
+/// and - see sweep_unclaimed() - it does not need a new deposit to be evaluated. 10 ms is five times the
+/// window the slot rule uses (2 slots = 2 ms at 15 kHz) and several times the hop's own deposit -> claim
+/// latency, so a block whose consumer is on its way is not reaped early.
+constexpr std::chrono::milliseconds sweep_after{10};
+
+/// The receiving chain's own progress, in slots: a block whose slot is this far behind the newest deposit has
+/// had its turn - the hop and the host readers of that slot are dispatched within a slot of the symbols being
+/// reported, and K = 2 is that window with room to spare.
+constexpr uint64_t sweep_after_slots = 2;
+
+/// Why the sweep is due for a block (see sweep_due()).
+enum class sweep_reason {
+  not_due,       ///< a consumer may still come: leave it alone
+  slot_window,   ///< the receiving chain has moved past its slot (the rule that has always run)
+  time_deadline  ///< nobody came within sweep_after: the Q9 trigger, and the one the slot rule cannot replace
+};
+
+/// \brief Q9: is this block past its window, i.e. must the registry claim and commit it itself?
+///
+/// TWO triggers, OR'd, evaluated in this order:
+///
+///  * the SLOT window: the newest deposit is more than `sweep_after_slots` slots past this entry's. The
+///    subtraction is guarded by `entry.slot < newest_slot` FIRST, which is what makes it safe across a
+///    hyperframe wrap WITHOUT the numerology (which this translation unit deliberately does not have): there,
+///    an old entry's slot is LARGER than the new deposit's (10239 against 5), the guard declines, and the
+///    block is caught by the time trigger instead - never by a difference that means nothing. Before a wrap
+///    this is exactly the rule that has always run (measured on `p07-conc2`: 3700 late commits at concurrency
+///    2, i.e. it is the trigger that fires in the healthy case).
+///  * the TIME deadline: the deposit is older than `sweep_after` on the host's monotonic clock. This one needs
+///    no slot at all, and it is the answer to the half of the defect the slot rule cannot fix: a slot rule only
+///    fires when the slot counter moves on, and the pathology is precisely a registry that stops being called.
+///
+/// \note Called with handed()'s mutex HELD (it reads the entry), and with ONE reading of the clock taken by
+///       the caller for the whole pass (see sweep_unclaimed()).
+static sweep_reason sweep_due(const handed_entry&                   entry,
+                              uint64_t                              newest_slot,
+                              std::chrono::steady_clock::time_point now)
+{
+  if (entry.claimed || entry.produced) {
+    return sweep_reason::not_due;
+  }
+  if ((entry.slot < newest_slot) && ((newest_slot - entry.slot) > sweep_after_slots)) {
+    return sweep_reason::slot_window;
+  }
+  if ((entry.deposited_at != std::chrono::steady_clock::time_point{}) && ((now - entry.deposited_at) > sweep_after)) {
+    return sweep_reason::time_deadline;
+  }
+  return sweep_reason::not_due;
+}
+
+/// \brief Q9: claims and collects every block past its window - nobody is coming for it, and its input tokens
+///        have to go back.
+///
+/// ★ IT RUNS AT EVERY ENTRY POINT OF THE REGISTRY (deposit, take, host read), and that is not a detail. The
+/// sweep used to live in the deposit path alone, and the pathology it exists for is a registry that STOPS being
+/// deposited into: the unclaimed blocks hold their input tokens, the receive pool empties, the receive thread
+/// parks in pop_blocking() - and with the radio parked there is no next deposit, so a sweep armed on deposits
+/// can never run again. The two threads that DO keep running while the radio is parked (the hop in
+/// take_released(), a host reader in claim_grid_production()) are where the way out has to be evaluated.
+///
+/// The block the CALLER is asking about is claimed by the caller BEFORE this runs: the sweep is for what nobody
+/// came for, and it must never be the reason a consumer that DID come is served a miss.
+///
+/// \param[out] commit_late Receives the blocks this call claimed, in order. The CALLER commits them AFTER
+///             unlocking: a commit can run a completion handler (mark_handed_produced()), which takes this
+///             same mutex - so committing under the lock would deadlock on it.
+static void sweep_unclaimed(handed_state& h, std::vector<id<MTLCommandBuffer>>& commit_late)
+{
+  const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+  for (handed_entry& entry : h.entries) {
+    const sweep_reason why = sweep_due(entry, h.newest_slot, now);
+    if (why == sweep_reason::not_due) {
+      continue;
+    }
+    // Claimed here so a late hop cannot adopt a buffer that is about to be committed (encoding into a
+    // committed buffer is an error): it opens one of its own and reads the grid the sweep writes.
+    entry.claimed = true;
+    entry.swept   = true;
+    // P0-7: the sweep IS the claim here, and the wait it took is the number that says how long this block sat
+    // with nobody coming for it (its tokens were held for that whole time).
+    if (entry.deposited_at != std::chrono::steady_clock::time_point{}) {
+      entry.claim_wait_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                       now - entry.deposited_at)
+                                                       .count());
+      ++h.counters.claim_count;
+      h.counters.claim_wait_sum_us += entry.claim_wait_us;
+      h.counters.claim_wait_max_us = std::max(h.counters.claim_wait_max_us, entry.claim_wait_us);
+    }
+    commit_late.push_back(entry.cb);
+    ++h.counters.late_commits;
+    if (why == sweep_reason::time_deadline) {
+      // The subset the SLOT rule could not have caught: on a healthy (unwrapped) leg this stays small, and on
+      // the leg that closed Q9 it is what says the time deadline is the rule that got the pool back.
+      ++h.counters.late_commits_time;
+    }
+  }
+}
+///@}
 
 /// \brief P0-7: refreshes the "unclaimed and unproduced" gauge from the current entry list.
 ///
@@ -764,6 +885,8 @@ void shared_burst::deposit_released(const void*          grid_base,
       h.entries.push_back(std::move(entry));
       ++h.counters.handed;
     }
+    // Q9: this deposit is the newest slot the sweep's SLOT window is measured against.
+    h.newest_slot = slot;
     // P0-7: a new deposit is the instant the "how many blocks are sitting unclaimed" gauge is worth reading
     // again (and the sweep below may claim some of them).
     p0_note_unclaimed_gauge(h);
@@ -810,31 +933,10 @@ void shared_burst::deposit_released(const void*          grid_base,
     // the receive buffers it keeps alive never come back: measured as handed=64 taken=39 fallback=21 with
     // keepalives=840/896 (four blocks' worth) and the pool at zero, which stalls the radio (5.9.17).
     //
-    // The deadline is the receiving chain's own progress: a block whose slot is this far behind the newest
-    // deposit has had its turn - the hop and the host readers of that slot are dispatched within a slot of
-    // the symbols being reported. K = 2 slots is that window with room to spare, and it is the difference
-    // between a pool of eight surviving (2-3 held) and dying.
-    constexpr uint64_t sweep_after_slots = 2;
-    for (handed_entry& entry : h.entries) {
-      if (!entry.claimed && !entry.produced && ((entry.slot + sweep_after_slots) < slot)) {
-        // Claimed here so a late hop cannot adopt a buffer that is about to be committed (encoding into a
-        // committed buffer is an error): it opens one of its own and reads the grid the sweep writes.
-        entry.claimed = true;
-        entry.swept   = true;
-        // P0-7: the sweep IS the claim here, and the wait it took is the number that says how long this block
-        // sat with nobody coming for it (its tokens were held for that whole time).
-        if (entry.deposited_at != std::chrono::steady_clock::time_point{}) {
-          entry.claim_wait_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                                           std::chrono::steady_clock::now() - entry.deposited_at)
-                                                           .count());
-          ++h.counters.claim_count;
-          h.counters.claim_wait_sum_us += entry.claim_wait_us;
-          h.counters.claim_wait_max_us = std::max(h.counters.claim_wait_max_us, entry.claim_wait_us);
-        }
-        commit_late.push_back(entry.cb);
-        ++h.counters.late_commits;
-      }
-    }
+    // The sweep is what reaps those blocks, and since Q9 (§6.10) it is armed on TWO triggers - the receiving
+    // chain's own progress in slots, and a 10 ms deadline on the host's monotonic clock - and evaluated at
+    // EVERY entry point of the registry rather than on deposits alone (see sweep_unclaimed()).
+    sweep_unclaimed(h, commit_late);
   }
   // NOTE: the completion handler was attached at the TOP of this function, BEFORE the entry was published -
   // it cannot be attached here, because by now another thread may already have claimed and committed the
@@ -854,25 +956,36 @@ id<MTLCommandBuffer> shared_burst::take_released(const void* grid_base, uint64_t
   if (grid_base == nullptr) {
     return nil;
   }
-  handed_state&               h = handed();
-  std::lock_guard<std::mutex> lock(h.mutex);
-  handed_entry*               entry = find_handed(h, grid_base, slot);
-  if ((entry == nullptr) || entry->claimed) {
-    return nil;
+  handed_state&                     h    = handed();
+  id<MTLCommandBuffer>              taken = nil;
+  std::vector<id<MTLCommandBuffer>> commit_late;
+  {
+    std::lock_guard<std::mutex> lock(h.mutex);
+    handed_entry*               entry = find_handed(h, grid_base, slot);
+    if ((entry != nullptr) && !entry->claimed) {
+      entry->claimed = true;
+      ++h.counters.taken;
+      // P0-7: how long this block waited for its consumer. A large value here is the hand-over being late, not
+      // the GPU being slow - and it is the number the sweep's deadline is measured against.
+      if (entry->deposited_at != std::chrono::steady_clock::time_point{}) {
+        entry->claim_wait_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                         std::chrono::steady_clock::now() - entry->deposited_at)
+                                                         .count());
+        ++h.counters.claim_count;
+        h.counters.claim_wait_sum_us += entry->claim_wait_us;
+        h.counters.claim_wait_max_us = std::max(h.counters.claim_wait_max_us, entry->claim_wait_us);
+      }
+      taken = entry->cb;
+    }
+    // ★ Q9: this is one of the two entry points that KEEP RUNNING while the radio is parked, so it is where
+    // the sweep has to be evaluated (see sweep_unclaimed()). The block this caller came for was claimed ABOVE,
+    // so the sweep can only reap what nobody asked for - a consumer that did come is never served a miss by it.
+    sweep_unclaimed(h, commit_late);
   }
-  entry->claimed = true;
-  ++h.counters.taken;
-  // P0-7: how long this block waited for its consumer. A large value here is the hand-over being late, not
-  // the GPU being slow - and it is the number the sweep's deadline is measured against.
-  if (entry->deposited_at != std::chrono::steady_clock::time_point{}) {
-    entry->claim_wait_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                                     std::chrono::steady_clock::now() - entry->deposited_at)
-                                                     .count());
-    ++h.counters.claim_count;
-    h.counters.claim_wait_sum_us += entry->claim_wait_us;
-    h.counters.claim_wait_max_us = std::max(h.counters.claim_wait_max_us, entry->claim_wait_us);
+  for (id<MTLCommandBuffer> late : commit_late) {
+    commit_dropped(late);
   }
-  return entry->cb;
+  return taken;
 }
 
 /// \brief The production promise of (\p grid_base, \p slot): commits it when nobody claimed it, and returns
@@ -883,27 +996,38 @@ id<MTLCommandBuffer> shared_burst::take_released(const void* grid_base, uint64_t
 /// (grid_production_generation()). The fallback - a consumer committing a block no hop claimed - is the
 /// same debt in both cases, and so is the counter that records it.
 ///
-/// \param[out] to_commit Set to the block this call claimed on the caller's behalf; the caller commits it
-///             OUTSIDE the lock (a commit can run completion handlers, which take this same lock).
-static uint64_t
-claim_grid_production(handed_state& h, const void* grid_base, uint64_t slot, id<MTLCommandBuffer> __strong& to_commit)
+/// \param[out] to_commit Receives the blocks this call claimed on the caller's behalf - the requested one when
+///             nobody had claimed it, plus everything the sweep reaped - in that order. The caller commits
+///             them OUTSIDE the lock (a commit can run completion handlers, which take this same lock).
+static uint64_t claim_grid_production(handed_state&                      h,
+                                      const void*                        grid_base,
+                                      uint64_t                           slot,
+                                      std::vector<id<MTLCommandBuffer>>& to_commit)
 {
-  handed_entry* entry = find_handed(h, grid_base, slot);
+  uint64_t      generation = 0;
+  handed_entry* entry      = find_handed(h, grid_base, slot);
   if (entry == nullptr) {
     // No record at all: either nothing was ever handed over for this (storage, slot) - no hand-over in this
     // build or run - or it was produced long enough ago to be evicted. Counted, because a LATE reader that
     // cannot wait is exactly the case the key was introduced for.
     ++h.counters.grid_not_found;
-    return 0;
+  } else {
+    generation = entry->generation;
+    if (!entry->claimed && !entry->produced) {
+      // Nobody will ever commit this one (a slot no hop ran for), and a grid nobody produces is a grid the
+      // caller is about to read as garbage: the fallback a hand-over owes. Claimed and collected BEFORE the
+      // sweep below, for the same reason as in take_released(): the block the caller asked about is served
+      // first, and the sweep is only for what nobody came for.
+      entry->claimed = true;
+      to_commit.push_back(entry->cb);
+      ++h.counters.fallback_commits;
+    }
   }
-  if (!entry->claimed && !entry->produced) {
-    // Nobody will ever commit this one (a slot no hop ran for), and a grid nobody produces is a grid the
-    // caller is about to read as garbage: the fallback a hand-over owes.
-    entry->claimed = true;
-    to_commit      = entry->cb;
-    ++h.counters.fallback_commits;
-  }
-  return entry->generation;
+  // ★ Q9: the host reader is the other entry point that keeps running while the radio is parked - the PUCCH
+  // and the SRS read their grids on the HOST thread, which the receive stall never blocks. This is where the
+  // pool gets its buffers back when no deposit is coming (see sweep_unclaimed()).
+  sweep_unclaimed(h, to_commit);
+  return generation;
 }
 
 bool shared_burst::ensure_grid_produced(const void* grid_base, uint64_t slot)
@@ -911,17 +1035,18 @@ bool shared_burst::ensure_grid_produced(const void* grid_base, uint64_t slot)
   if (grid_base == nullptr) {
     return true;
   }
-  id<MTLCommandBuffer> to_commit  = nil;
-  uint64_t             generation = 0;
+  std::vector<id<MTLCommandBuffer>> to_commit;
+  uint64_t                          generation = 0;
   {
     handed_state&               h = handed();
     std::lock_guard<std::mutex> lock(h.mutex);
     generation = claim_grid_production(h, grid_base, slot, to_commit);
   }
-  if (to_commit != nil) {
-    // A consumer had to commit it (fallback), which is counted apart from the registry's own late commits:
-    // the first says a host reader found the block nobody claimed, the second that nobody came at all.
-    commit_dropped(to_commit);
+  for (id<MTLCommandBuffer> cb : to_commit) {
+    // A consumer had to commit it (fallback), or the sweep did: both are counted apart from each other, but
+    // the action is the same commit - the first says a host reader found the block nobody claimed, the second
+    // that nobody came at all.
+    commit_dropped(cb);
   }
   if (generation == 0) {
     return true;
@@ -943,15 +1068,15 @@ uint64_t shared_burst::grid_production_generation(const void* grid_base, uint64_
   if (grid_base == nullptr) {
     return 0;
   }
-  id<MTLCommandBuffer> to_commit  = nil;
-  uint64_t             generation = 0;
+  std::vector<id<MTLCommandBuffer>> to_commit;
+  uint64_t                          generation = 0;
   {
     handed_state&               h = handed();
     std::lock_guard<std::mutex> lock(h.mutex);
     generation = claim_grid_production(h, grid_base, slot, to_commit);
   }
-  if (to_commit != nil) {
-    commit_dropped(to_commit);
+  for (id<MTLCommandBuffer> cb : to_commit) {
+    commit_dropped(cb);
   }
   // The caller may also learn here that the block was already produced: the generation it gets then names a
   // value the event has reached, and encoding the wait on it is a satisfied wait rather than a mistake.
