@@ -4,6 +4,7 @@
 #include "ocudu_metal_burst.h"
 #include "ocudu_metal_lane_probe.h"
 #include "ocudu_metal_queue.h"
+#include "ocudu/phy/phy_pipeline_report.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/phy_pipeline_grid_ready.h"
@@ -223,6 +224,7 @@ void burst_stats_wait()
 
 const bool burst_stats_registered = []() {
   std::atexit(burst_stats_report);
+  register_p0_report(burst_stats_report);
   return true;
 }();
 #else

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu/phy/phy_pipeline_contract.h"
+#include "ocudu/phy/phy_pipeline_report.h"
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/ocudulog/ocudulog.h"
@@ -528,6 +529,9 @@ const bool shared_queue_contract_registered = []() {
 
 const bool shared_queue_stats_registered = []() {
   std::atexit(shared_queue_stats_report);
+  // ... and it joins the on-demand dump (dev doc 6.24): a parked receive thread prints every P0 reading while
+  // the stall is happening, which is the one moment an atexit report can never describe.
+  register_p0_report(shared_queue_stats_report);
   return true;
 }();
 #endif

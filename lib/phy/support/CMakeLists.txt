@@ -4,6 +4,7 @@
 
 
 add_library(ocudu_phy_support STATIC
+        phy_pipeline_report.cpp
         interpolator/interpolator_linear_impl.cpp
         time_alignment_estimator/time_alignment_estimator_dft_impl.cpp
         time_alignment_estimator/time_alignment_estimator_factories.cpp

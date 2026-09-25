@@ -12,6 +12,7 @@
 
 #include "ocudu/ocudulog/ocudulog.h"
 #include "ocudu/phy/phy_pipeline_contract.h"
+#include "ocudu/phy/phy_pipeline_report.h"
 #include "ocudu/phy/phy_pipeline_crossings.h"
 #include "ocudu/phy/phy_pipeline_grid_ready.h"
 
@@ -1254,7 +1255,10 @@ bool dft_metal_engine::init(unsigned size, bool inverse)
   // Register the process-exit stats report exactly once (the counters live for the process).
 #if defined(OCUDU_METAL_STATS)
   static std::once_flag stats_atexit_flag;
-  std::call_once(stats_atexit_flag, []() { std::atexit(dft_stats_report); });
+  std::call_once(stats_atexit_flag, []() {
+    std::atexit(dft_stats_report);
+    register_p0_report(dft_stats_report); // dev doc 6.24: joins the on-demand dump
+  });
 #endif
 
   if (size < 2 || size > max_size) {

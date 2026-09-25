@@ -63,6 +63,7 @@ expect "D12 reads the largest hole"           "hole 5002.4ms -> next label=merge
 expect "D12 reads the front-end account"      "dft carried blocks (Q9-F2): resolved=48123 of 48123"
 expect "D12 reads the front-end queue wait"   "dft carried deposit ->GPU start samples=48123"
 expect "D13 reads the handshake waits"        "handshake waits=7 timeouts=0 max=412us"
+expect "D14 reads the absence of a stall dump" "the pool never parked the receive thread for 20 ms"
 expect "D13 states what a wait would have cost" "the Q9-G window IS reached on air"
 
 # The reverse direction: a leg WITHOUT the new lines must say so instead of printing a number (rule 4.3 (3)).
@@ -72,7 +73,8 @@ D11_OLD=$(printf '%s\n' "$OUT_OLD" | grep -A3 "D11 (Q9-F)" | grep "read    :")
 D12_OLD=$(printf '%s\n' "$OUT_OLD" | grep -A3 "D12 " | grep "read    :")
 if printf '%s' "$D11_OLD" | grep -qF "cannot say" && ! printf '%s' "$D11_OLD" | grep -qF "waiter-committed-first=" &&
    printf '%s' "$D12_OLD" | grep -qF "cannot say" &&
-   printf '%s\n' "$OUT_OLD" | grep -A3 "D13 " | grep -qF "cannot say"; then
+   printf '%s\n' "$OUT_OLD" | grep -A3 "D13 " | grep -qF "cannot say" &&
+   printf '%s\n' "$OUT_OLD" | grep -A3 "D14 " | grep -qF "no 'p0 dump' line"; then
   echo "PASS: a leg without the 6.19 lines reads as 'cannot say' rather than as a number"
 else
   echo "FAIL: a leg without the 6.19 lines did not read as 'cannot say':"

@@ -3,6 +3,8 @@
 
 #include "ocudu_metal_lane_clock.h"
 #include "ocudu_metal_lane_probe.h"
+
+#include "ocudu/phy/phy_pipeline_report.h"
 #include "ocudu_metal_queue.h"
 
 #include "ocudu/support/executors/ul_pipeline_probe.h"
@@ -326,6 +328,7 @@ namespace {
 /// say so (the probe being silent is indistinguishable from the probe not being compiled in).
 const bool report_registered = []() {
   std::atexit(gpu_lane_probe::report);
+  register_p0_report(gpu_lane_probe::report);
   return true;
 }();
 

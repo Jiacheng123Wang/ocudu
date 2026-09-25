@@ -51,6 +51,7 @@
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 #include "ocudu/support/macos_compat.h"
 #include "ocudu/phy/phy_pipeline_contract.h"
+#include "ocudu/phy/phy_pipeline_report.h"
 #include "ocudu/support/signal_handling.h"
 #include "ocudu/support/signal_observer.h"
 #include "ocudu/support/sysinfo.h"
@@ -658,6 +659,10 @@ int main(int argc, char** argv)
   // its logfile. Printing here costs nothing and cannot be lost to a later failure.
   ocudu::ul_pipeline_probe::get().report();
   ocudu::report_phy_pipeline_contract();
+  // These two also join the ON-DEMAND dump (dev doc 6.24): a stall that holds the shutdown would otherwise take
+  // the [ul_gpu_pipeline] series (the V1 reading) and the contract with it.
+  ocudu::register_p0_report(ocudu::report_ul_pipeline_probe);
+  ocudu::register_p0_report(ocudu::report_phy_pipeline_contract);
 
   // Stop metrics manager.
   metrics_mngr.stop();

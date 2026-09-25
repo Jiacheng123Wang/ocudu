@@ -33,6 +33,8 @@
 /// a silent wrong-address defect when it is dropped, so it is exercised here rather than assumed.
 
 #include "dft_processor_metal.h"
+
+#include "ocudu/phy/phy_pipeline_report.h"
 #include "ocudu/support/executors/ul_pipeline_probe.h"
 #include "ocudu_dft_metal_engine.h"
 #include "ocudu_metal_burst.h"
@@ -1692,6 +1694,62 @@ int main()
                    static_cast<unsigned long long>(hs_b1.wait_max_us),
                    static_cast<unsigned long long>(hs_c0.timeouts),
                    static_cast<unsigned long long>(hs_c1.timeouts));
+    }
+
+    // ---- Arm 16 (dev doc 6.24): the ON-DEMAND P0 dump - a leg that cannot stop cleanly still yields readings --
+    // Every P0 reading is printed by an atexit handler, and `p14-conc2` - the leg the whole investigation was
+    // about - lost its entire report because the stall also held the SHUTDOWN (the application's five-second
+    // stop grace expired, the logger was flushed, and the process left without running them). The registry
+    // added for that lets the receive thread dump every reading WHILE it is parked on a dry pool (the epicentre
+    // of the stall). This arm exercises the registry itself, because that is the half that can be tested
+    // offline: two reporters, the rate limit, and the count. The POOL trigger cannot be reached from here (it
+    // needs a real dry pool) - its guard is the 20 ms threshold, above every healthy park this workflow has
+    // measured (486 us at 12.9 Mbit/s) and far below the stalls (4997 ms).
+    {
+      static std::atomic<int> ran_a{0};
+      static std::atomic<int> ran_b{0};
+      const auto              reporter_a = []() { ran_a.fetch_add(1, std::memory_order_relaxed); };
+      const auto              reporter_b = []() { ran_b.fetch_add(1, std::memory_order_relaxed); };
+      ocudu::register_p0_report(reporter_a);
+      ocudu::register_p0_report(reporter_b);
+
+      const int      a0 = ran_a.load();
+      const int      b0 = ran_b.load();
+      const uint64_t n0 = ocudu::nof_p0_dumps();
+      // (a) an unthrottled dump runs every registered reporter - including the REAL ones (the metal queue's,
+      //     the registry's, the lane probe's and the DFT engine's), which is what prints the readings of a
+      //     stalled leg; their output is the lines the gate already reads.
+      const bool first = ocudu::p0_dump_reports("selftest", 0);
+      // (b) a throttled one does not: a parked receive thread loops every few hundred microseconds, so without
+      //     this a 5 s stall would print thousands of copies.
+      const bool second = ocudu::p0_dump_reports("selftest-throttled", 60000);
+      // (c) and the throttle is only a delay, not a one-shot: 0 forces the next dump.
+      const bool third = ocudu::p0_dump_reports("selftest-forced", 0);
+      if (!first || second || !third) {
+        std::fprintf(stderr,
+                     "FAIL (6.24): the on-demand dump did not behave - first=%d (must run) second=%d (must be "
+                     "throttled) third=%d (must run)\n",
+                     static_cast<int>(first),
+                     static_cast<int>(second),
+                     static_cast<int>(third));
+        return 1;
+      }
+      if ((ran_a.load() != a0 + 2) || (ran_b.load() != b0 + 2) || (ocudu::nof_p0_dumps() != n0 + 2)) {
+        std::fprintf(stderr,
+                     "FAIL (6.24): the dump ran the wrong number of times - a %d->%d b %d->%d dumps %llu->%llu "
+                     "(two dumps x two reporters)\n",
+                     a0,
+                     ran_a.load(),
+                     b0,
+                     ran_b.load(),
+                     static_cast<unsigned long long>(n0),
+                     static_cast<unsigned long long>(ocudu::nof_p0_dumps()));
+        return 1;
+      }
+      std::fprintf(stderr,
+                   "[dft-release] arm 16 (6.24 on-demand dump): every registered report ran on demand (2 "
+                   "reporters x 2 dumps) and the throttle suppressed the middle one - a stalled leg can now be "
+                   "read while it is stalled\n");
     }
 
     // ---- Arm 10: "no record" must never mean "the write is still in flight" (5.9.62) ----------------

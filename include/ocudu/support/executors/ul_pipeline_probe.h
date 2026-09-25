@@ -1371,4 +1371,10 @@ private:
 
 #endif
 
+/// \brief The pipeline probe's report as a plain function, so it can join the on-demand P0 dump (dev doc 6.24).
+inline void report_ul_pipeline_probe()
+{
+  ul_pipeline_probe::get().report();
+}
+
 } // namespace ocudu

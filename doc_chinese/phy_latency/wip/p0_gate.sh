@@ -43,6 +43,8 @@
 #   D12 (Q9-F2/F3, INFO) what the device was doing while a waiter waited: the holes in the union of the probed
 #       GPU windows (probe: OCUDU_METAL_GPU_TIME=1) and the front-end blocks that were not final when their own
 #       slot's group closed - the population no earlier instrument reported at all (6.19)
+#   D14 (6.24, INFO) the on-demand P0 dump: printed by the receive thread when it has been parked on a dry pool
+#       for more than 20 ms, i.e. when a stall is HAPPENING - the readings below it are a snapshot from inside it
 #   D13 (6.20/6.21, INFO) the commit handshake: how often a consumer was handed a generation whose carrier had
 #       not been committed yet (each of those was a 5.00 s queue hold before the handshake, 6.20) and how often
 #       that confirmation never came (the consumer is then ordered on the HOST; must be 0)
@@ -386,6 +388,20 @@ if [ -z "${shake_waits:-}" ]; then
 else
   check "[INFO] D13 (6.20) did a consumer meet an uncommitted carrier" "reported, not judged" INFO \
         "handshake waits=$shake_waits timeouts=${shake_timeouts:-?} max=${shake_max:-?}us$([ "${shake_waits:-0}" != "0" ] && printf '  <-- the Q9-G window IS reached on air: without the handshake each of those was a 5.00 s queue hold (6.20)' || printf '  (no consumer met an uncommitted carrier)' )$([ "${shake_timeouts:-0}" != "0" ] && printf '  <-- a consumer had to be ordered on the HOST: the carrier was never committed (must be 0)' || true)"
+fi
+# D14 (dev doc 6.24): the ON-DEMAND dump. The receive thread prints every P0 reading when it has been parked on
+# a dry pool for more than 20 ms - which is the stall itself (it stops consuming the radio, so no slot
+# indication is produced and the whole slot loop stops with it). A leg with a dump here STALLED; a healthy leg
+# never prints one (measured park: 22 us on n1, 486 us at 12.9 Mbit/s on n78). The readings below it are a
+# SNAPSHOT from inside the stall - the same lines the exit report carries.
+dump_line=$(grep -a "p0 dump #" "$LEGF" | tail -1)
+dump_n=$(grep -ac "p0 dump #" "$LEGF")
+if [ "${dump_n:-0}" = "0" ]; then
+  check "[INFO] D14 (6.24) did the receive thread park long enough to dump" "reported, not judged" INFO \
+        "no 'p0 dump' line: the pool never parked the receive thread for 20 ms - no stall on this leg"
+else
+  check "[INFO] D14 (6.24) did the receive thread park long enough to dump" "reported, not judged" INFO \
+        "$dump_n snapshot(s), last: ${dump_line:-?}  <-- THIS LEG STALLED: read the lines below the dump as readings taken DURING the stall"
 fi
 occ_line=$(grep -a "queue occupancy (Q9-F3): commits=" "$LEGF" | tail -1)
 occ_hole=$(grep -a "hole .*-> next label" "$LEGF" | head -1)

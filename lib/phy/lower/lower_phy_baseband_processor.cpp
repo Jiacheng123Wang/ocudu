@@ -9,6 +9,7 @@
 #include "ocudu/gateways/baseband/buffer/baseband_gateway_buffer_writer_view.h"
 #include "ocudu/instrumentation/traces/ru_traces.h"
 #include "ocudu/phy/phy_pipeline_contract.h"
+#include "ocudu/phy/phy_pipeline_report.h"
 // fetch_basic_logger(): used by the shutdown path of ul_process (a refused uplink task) as well as by the
 // flow probe, so the include is not tied to OCUDU_FLOW_PROBES any more. It used to be, and the macOS build
 // still compiled because the logger header arrived transitively there - the Linux/GCC build is the one that
@@ -158,6 +159,7 @@ void rx_pool_report()
 
 const bool rx_pool_report_registered = []() {
   std::atexit(rx_pool_report);
+  register_p0_report(rx_pool_report); // dev doc 6.24: joins the on-demand stall dump
   return true;
 }();
 
@@ -287,6 +289,7 @@ void ul_rx_stats_report()
 
 const bool ul_rx_stats_registered = []() {
   std::atexit(ul_rx_stats_report);
+  register_p0_report(ul_rx_stats_report);
   register_phy_pipeline_check(
       {"radio sample continuity", []() -> std::optional<bool> {
          const ul_rx_stats& c = ul_rx_counters();
@@ -563,6 +566,18 @@ std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_proc
   // The pool is DRY, which is the only state in which the hand-over has something to give back - and the
   // only state in which this thread is about to become unreachable by every registry entry point (see the
   // header). Ask, then wait in bounded slices so a reaper that was not enough the first time is asked again.
+  //
+  // ★ AND THIS IS WHERE A STALL DUMPS THE READINGS (dev doc 6.24). Every P0 reading of this workflow is printed
+  // by an atexit handler, so a leg whose shutdown the stall also holds - `p14-conc2`, whose five-second stop
+  // grace expired and whose whole report was lost - produces no evidence at all. THIS thread is the one that
+  // knows the stall is happening (it is parked here because the completion that releases the input tokens is
+  // late, and while it is parked the radio is not consumed, so no slot indication is produced and the whole
+  // slot loop stops), so it is the right place to dump. The dump is rate-limited: a 5 s stall prints one or two
+  // snapshots instead of thousands, and the ordinary park (measured: 486 us at 12.9 Mbit/s, 22 us on the n1
+  // leg) never reaches the threshold at all.
+  constexpr auto stall_dump_after = std::chrono::milliseconds(20);
+  constexpr uint64_t stall_dump_min_interval_ms = 2000;
+  const auto         parked_since = std::chrono::steady_clock::now();
   for (;;) {
     handover_reap_hook::reap();
     const blocking_queue<std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>>::result ret =
@@ -573,6 +588,9 @@ std::shared_ptr<baseband_gateway_buffer_dynamic_aligned> lower_phy_baseband_proc
     if (ret == decltype(ret)::failed) {
       // The queue was stopped: the caller gets the same null buffer the plain pop_blocking() would give it.
       return std::shared_ptr<baseband_gateway_buffer_dynamic_aligned>{};
+    }
+    if ((std::chrono::steady_clock::now() - parked_since) > stall_dump_after) {
+      (void)p0_dump_reports("dry-pool park", stall_dump_min_interval_ms);
     }
   }
 }

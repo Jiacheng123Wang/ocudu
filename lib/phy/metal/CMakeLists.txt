@@ -23,5 +23,5 @@ set_property(TARGET ocudu_metal_queue PROPERTY OBJCXX_STANDARD 17)
 target_compile_options(ocudu_metal_queue PRIVATE -Wno-deprecated-declarations)
 target_include_directories(ocudu_metal_queue PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ocudu_metal_queue
-    PUBLIC ocudulog ocudu_macos_compat
+    PUBLIC ocudulog ocudu_macos_compat ocudu_phy_support
     PRIVATE "-framework Metal" "-framework Foundation")
