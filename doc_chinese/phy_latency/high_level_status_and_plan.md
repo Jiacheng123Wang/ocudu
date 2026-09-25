@@ -34,7 +34,10 @@
 > 依据**打印在启动行**（`[ul_rx_pool] size=16 … slot pipeline 16 (peak 11 + rx path 2 + margin 3, dev doc 6.37)`）；
 > 符号级缓冲的策略行为不变；离线 `lower_phy_test` 已读到 `size=16`。**待一条确认腿 `p27`**（**不带旋钮**）：
 > 预期 `pool=16`、**`starved_events=0`、`free_min>0`、`held_max≈11<16`**、`pop_blocking` ≪1 ms、**V1 ≈1510 不变**、契约/`cbs/lane`/gaps 不变。
-> ⇒ 若成立，**V1–V5 只剩 V3（RF 失败 702–1168）未达**。
+> ⇒ ④✅ **确认腿 `p27-n78-pool16` 已飞（§6.39）：V2 达成** —— 启动行 `size=16 … slot pipeline 16 (peak 11 + rx path 2 + margin 3)`、
+> `pool=16`、**`starved_events=0`/`starved_takes=0`**、`free_min=6`、**`held_max=10 < 16`**、`pop_blocking` max **23 µs**、
+> **V1 1495.4（全部腿最好）**、门 **26/26**、契约 8/8、`cbs/lane=2.00`、0 gaps。
+> ⇒ **V1–V5 只剩 V3（RF 失败 707 vs ≤10）未达**；下一步 = V3 的零腿分类分析（`leg_census.py`：underflow/overflow、发生时段、与 park/gap 的相关性、每 grant 失败率）+ 一条并发 1 对照腿。
 > 前一条：① **V2 已做完零腿归因（§6.34）**：池 8 = **在飞峰值 6（`max in flight 84` = 6 个整槽块，批量化前后不变）
 > + 正在收 1 + 刚收 1** ⇒ **余量 0**；可避免的持有者是**未被认领的块**（3–4 个同持，20–96 ms），因为
 > **清扫只在"入池"与"干池 park"被驱动，普通取缓冲不驱动它**。⇒ 推荐修法 **(A) 给清扫第三个入口点**（不需裁决，
@@ -149,8 +152,8 @@ D11 `waiter-committed-first > 0` 且 `max` ≈ 停顿 ⇒ **Q9-G 成立**，做�
 | # | 判据 | 阈值 | 当前（腿 `p22-n78-batch14`，§6.31）|
 |---|---|---|---|
 | **V1** | `[ul_gpu_pipeline]` 中位跨度 | **≤ 2150 µs**（重载基线 2675 µs，−20%）| ✅ **已确认**：p22 **1513.4**、p23 **1497.2**，同日对照 p24 **2444.1** ⇒ **−38.7%**、p95 1644–1671 |
-| **V2** | 症状消失：接收池 | `starved_events == 0` 且 `held_max < pool` | **根因已证明 + 已修（§6.37/§6.38，用户裁决 B1）**：池 8 ⇒ `starved` 38–107；池 16（P1-4）⇒ **0**、`held_max=11<16`、V1 不变；P2-D 定尺已落地 ⇒ ⏳ 待确认腿 `p27` |
-| **V3** | 电台 | RF 失败 **≤ 10**（cpu 量级 0–1）、`gaps == 0` | ❌ RF 失败 **1241**（同 p16–p21 量级）；✅ `gaps=0` |
+| **V2** | 症状消失：接收池 | `starved_events == 0` 且 `held_max < pool` | ✅ **`p27`：`starved_events=0`、`held_max=10 < pool=16`、`free_min=6`、`pop_blocking` max 23 µs**（V1 1495.4 不变）|
+| **V3** | 电台 | RF 失败 **≤ 10**（cpu 量级 0–1）、`gaps == 0` | ❌ **唯一未达**：`p27` RF 失败 **707**（cohort 700–1500；cpu 模式 276 s 仅 1 次）；✅ `gaps=0` ⇒ 下一步做零腿分类分析 |
 | **V4** | **不许用提交数换时延** | `cbs/lane ≤ 2.00 (max=2)`、`dropped == 0`（用户裁决：**只约束交付**，测量臂放行）| ✅ `cbs/lane=2.00 (max=2) dropped=0`（**批量化没有改提交数**）|
 | **V5** | 不回归 | 契约 8/8、`crossings 0.00+0.00`/跳、CRC KO% 不劣化 | ✅ 契约 8/8、`0.00+0.00`、零拷贝 0 failures/0 misaligned、`ce device estimates 0 host` |
 

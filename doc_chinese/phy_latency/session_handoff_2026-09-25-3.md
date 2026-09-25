@@ -387,3 +387,19 @@ bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 p22-n78-conc2  #
 * **确认腿 `p27`（不带旋钮）预登记**：启动行 `size=16…`、`pool=16`、**`starved_events=0`/`starved_takes=0`**、`free_min>0`、
   `held_max≈11<16`、`pop_blocking` ≪1 ms、**V1 ≈1510 不变**、契约 8/8、`cbs/lane=2.00`、0 gaps。
   ⇒ 成立则 **V1–V5 只剩 V3（RF 失败）未达**。
+
+---
+
+## 14. 追加更正 #8：**V2 达成（§6.39，腿 `p27-n78-pool16`）⇒ V1–V5 只剩 V3**
+
+* **p27（交付定尺，不带旋钮）预登记逐项命中**：启动行 `[ul_rx_pool] size=16 buffers of 11520 samples … slot pipeline 16 (peak 11 + rx path 2 + margin 3, dev doc 6.37)`、
+  退出 `pool=16`、**`starved_takes=0`/`starved_events=0`**、`free_min=6`、**`held_max=10 < 16`**、`pop_blocking` max **23 µs**、
+  **V1 中位 1495.4**（mean 1505.1、p95 1642.7、p99 1728.9 —— 全部腿最好）、契约 **8/8**、`cbs/lane=2.00 (max=2)`、**0 gaps**、
+  D16 `batched=146939/2057146 batch_max=14 batch_src=auto slot_symbols=14`、门 **26/26**。
+* 机制侧：`take sweeps=215479 recovering 229`、**`dry-pool reaps=0`**（(A) 入口点接手后 park 兜底不再使用）、
+  `input hold` 均值 **947.9 µs** / p99 1127.5（基线 1836 / 3010）、`keepalives max in flight 84`（结构性不变）。
+* **V1–V5 现状**：V1 ✅ 1495.4（四点复现：p22 1513.4 / p23 1497.2 / p26 1510.4 / p27 1495.4；同日对照 p24 2444.1 ⇒ −38.7%）、
+  **V2 ✅**（`starved_events=0` **且** `held_max=10 < pool=16`）、V4 ✅、V5 ✅、**V3 ❌（唯一未达，RF 失败 707 vs ≤10）**。
+* **下一步 = V3 的零腿分类分析**：`leg_census.py`（UL 静默表 + RF/pool 事件）把失败分成 `underflow`/`overflow`、
+  定位时段（流量中/静默/启动）、与 `park`/`gap`/`late` 的相关性、每 grant 失败率在 cohort 里的分布（把链路运气与机制分开）；
+  然后一条**同日并发 1 对照腿**（验"并发 2 放大 3 倍"）或 `OCUDU_UL_RX_POOL_DROP=0` 反向臂。

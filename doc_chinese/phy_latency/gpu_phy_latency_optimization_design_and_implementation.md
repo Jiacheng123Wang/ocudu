@@ -2996,6 +2996,56 @@ OCUDU_UL_RX_POOL_SIZE=<n>    # 只允许【大于】公式算出的值（更小�
 
 
 
+### 6.39 ★★★ 确认腿 `p27-n78-pool16`（**交付定尺，不带旋钮**）：**V2 达成** —— `starved_events` **0**、`free_min` **6**、`held_max` **10 < 16**、`pop_blocking` max **23 µs**；V1 **1495.4**（历史最好），门 **26/26** ⇒ **V1–V5 只剩 V3 未达**
+
+#### ① 预登记 vs 实测（逐项命中）
+
+| 读数 | 预登记 | **`p27` 实测** | |
+|---|---|---|---|
+| 启动行 | `size=16 … slot pipeline 16 (peak 11 + rx path 2 + margin 3)` | **`size=16 buffers of 11520 samples (slot=11520, whole-slot buffers, the gpu pipeline mode): floor 8, radio latency 2, symbol pipeline 8, slot pipeline 16 (peak 11 + rx path 2 + margin 3, dev doc 6.37)`** | ✅ |
+| 退出行 `pool=` | 16 | **16** | ✅ |
+| **`starved_takes` / `starved_events`** | 0 / 0 | **0 / 0** | ✅✅ |
+| `free_min` | > 0 | **6** | ✅ |
+| `held_max` | ≈11，< 16 | **10** | ✅ |
+| `pop_blocking` max | ≪ 1 ms | **23 µs**（全部腿里最小）| ✅ |
+| **V1** 中位 | ≈1510 不变 | **1495.4**（mean 1505.1、p95 1642.7、p99 1728.9）| ✅ **全部腿里最好** |
+| 契约 / `cbs/lane` / gaps | 8/8 / 2.00 / 0 | **8/8 / 2.00 (max=2) dropped=0 / 0 gaps** | ✅ |
+| **D16** | `batch_max=14 batch_src=auto` | **`batched=146939/2057146 batch_max=14 batch_src=auto slot_symbols=14`** | ✅ |
+| D1 / D2 / D3 / D4 | — | **12.0 / 10.0 ms / 0.0 ms / 0 gaps** 全 PASS | ✅ |
+| 门 | — | **26 of 26** | ✅ |
+
+* 机制侧：`take sweeps=215479 recovering 229 block(s)`、**`dry-pool reaps=0`**（(A) 的入口点接手后，park 兜底一次都没用上）、
+  `input hold` 均值 **947.9 µs** / p99 1127.5 µs（最初基线是 1836 / 3010）、`keepalives max in flight 84`（结构性，不变）。
+* 流量可比：`[ul_rx] blocks=564735`（282 s）、`lanes=144655`、12.66 Mbit/s、RF 失败 707（同队列量级）。
+
+#### ② 里程碑：**V1–V5 的现状**
+
+| | V1 时延 | V2 池症状 | V3 电台 | V4 提交数 | V5 不回归 |
+|---|---|---|---|---|---|
+| 现状 | ✅ **1495.4 µs**（≤2150；p22/p23/p26/p27 四点复现）| ✅ **`starved_events=0` 且 `held_max=10 < pool=16`** | ❌ **RF 失败 707**（≤10）| ✅ `cbs/lane=2.00 (max=2) dropped=0` | ✅ 契约 8/8、`0.00+0.00`、0 gaps |
+
+* **V1 的两条腿链**：`p22` 1513.4、`p23` 1497.2（同日对照 `p24` 2444.1 ⇒ −38.7%），加上定尺后的 `p26` 1510.4、`p27` 1495.4 ⇒ **四点一致，无回归**。
+* **V2 的两半同时满足**（这正是 §6.34 归因、§6.35 修法 (A)、§6.37 P1-4、§6.38 定尺这一串的结果）：
+  `starved_events == 0`（(A) + 容量）与 `held_max (10) < pool (16)`（容量）。
+* **⇒ 只剩 V3。**
+
+#### ③ 下一步：V3（RF 失败 700–1500/腿，阈值 ≤10）
+
+已知（分散在 §6.23/§6.24/§6.32）：
+* **是"GPU 模式病"**：cpu 模式 276 s 只有 **1** 次；n78 加压 gpu 腿 700–1500 次。
+* **并发 2 放大 ~3 倍**（1.04% vs 0.34–0.38% 的 grant）。
+* 与**池干/收线程 park** 那条链**部分**相关（`p24` 对照组 park 1.131 ms ⇒ 丢 128 万样点；`p20` park 仅 235 µs 也丢 16 万 ⇒ 还有**电台侧**的第二个机制）。
+* 修复之后 park 已基本消失（`p27` max 23 µs、`p25` 335 µs），但 RF 失败仍是 **707** ⇒ **不能**只归因于 park。
+* 观察到的量级走势（同配方）：p16 1490 → p22 1241 → p23 835 → p26 702 → **p27 707**，**可能**是时延减半带来的下降，也可能只是链路运气（每腿的 BLER/MCS 都在变）⇒ **需要按对/按量级先澄清**。
+
+⇒ V3 的第一步同样是**零腿分析**：用 `leg_census.py`（"UL 静默表 + RF/pool 事件"）把失败**分类**：
+`underflow` vs `overflow`、发生在**哪一段**（流量中/静默/启动）、是否与 `park`/`gap`/`late` 同时出现，
+以及**每 grant 的失败率**在 cohort 里的分布（把"链路运气"和"机制"分开）。然后才决定测量臂：
+`--expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=1`（同日对照，验证"并发 2 放大 3 倍"）
+或 `OCUDU_UL_RX_POOL_DROP=0`（反向臂，看丢样点是否回来）。
+
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
