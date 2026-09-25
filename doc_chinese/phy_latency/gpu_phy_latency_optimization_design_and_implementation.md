@@ -937,6 +937,65 @@ deposit->completion max=1666.0us …; unclaimed at once max=6, oldest unclaimed 
 最慢 3 行也打印）；`ul_chain_replay` **3 capture × 4 dump 与 pristine HEAD 二进制逐字节相同**（12 个文件全 0）。
 **纯读数改动**：不加 dispatch、不加提交（V4 不变）。
 
+### 6.10 ★★★ Q9 结案（腿 `p07-conc2`，n1 + 并发 2，2026-09-25 08:17）：根因是**交接注册表的 sweep 用了跨环绕不安全的 slot 比较**
+
+> 腿：`gnb_gpu_p07-conc2_0925_0817`，配方与 `q9-conc2` 相同（n1 默认 + `max_pusch_and_srs_concurrency=2` +
+> `OCUDU_UL_PHASE_SEGMENTS=1`），二进制戳 `78cb3fe0d1`（= P0-7 那个提交）。
+> 用户侧：上行 `iperf3 -R -t 100` **断流两次**（约 19–55 s 与 87.8–100 s 归零），Retr 7536。
+
+**① P0-7 的判读分支一，成立**（开发文档 §6.9 ③ 事先写死的那一支）
+
+```
+[metal_stats] input hold (P0-2): tokens=880558 mean=4523.2us median=1049.2us p95=14987.4us p99=17130.4us
+                                 max=30723776.0us at slot=10226
+[metal_stats] block lifecycle (P0-7): claimed=32605 wait max=30723002.0us mean=5047.3us;
+              produced=62897 deposit->completion max=30723752.0us mean=4512.6us;
+              unclaimed at once max=5, oldest unclaimed age max=77860119.0us at slot=10226
+[ul_rx_pool] pop_blocking wait (P0-2): takes=372639 … max=4997628.0us; over 1ms=2, over 10ms=2,
+                                      over 100ms=2, over 1s=2
+```
+* **`input hold` max = 30.72 s** 与 **`deposit->completion` max = 30.72 s**、其中 **`wait_for_a_claim` = 30.72 s**
+  三者**逐位相同**（30,723,776 / 30,723,752 / 30,723,002 µs）⇒ **输入就是被"没人认领的块"按住的**。
+* `slowest` 行指明**认领者是 sweep**（`claimed=1 swept=1`），而且它干等了整整 30.72 s。
+* `pop_blocking wait`：全腿 372639 次取缓冲里**只有 2 次超过 1 ms**，而这 2 次都**≈4.998 s** ⇒
+  接收线程被 park 的就是这两次（与两次 `RF: overflow` 5.001 s 的配对完全对应）。**这是 §6.6 缺的那条直接读数。**
+
+**② 根因：sweep 的判据在 slot 计数**环绕**处失效**
+
+| 证据 | 内容 |
+|---|---|
+| **等待时长** | `slowest` 里的等待是 **10.24 s 的整数倍**：30.723002 s = **3.000×**、20.483005 = **2.000×**、10.246039 = **1.001×**、10.242983 = **1.000×**、10.242990 = **1.000×**（余数只有 3–6 ms）；另有两条 5.003/5.004 s 是**另一个机制**（接收 park）|
+| **10.24 s 是什么** | 15 kHz 下 `nof_slots_per_hyper_system_frame() = 10 × 1024 = 10240` 个 slot = **10.24 s** |
+| **`slot_point::count()` 是模数** | `include/ocudu/ran/slot_point.h`：`count_val` 是 `uint32_t`，且 `ocudu_assert(count < nof_slots_per_hyper_system_frame())` ⇒ **它是环绕的**，不是绝对计数 |
+| **比较本身** | `ocudu_metal_burst.mm` 的 sweep：`if (!claimed && !produced && ((entry.slot + sweep_after_slots) < slot))` —— **两个模数相减/比较**，跨环绕即失效 |
+| **数值自洽** | 最慢的行都是 `slot=10226`：判据要求新 deposit 的模 slot `> 10228`，而环绕后要等计数爬回 10229 ⇒ 等待 ≈ (10240−10226) + 10228 ≈ **10.242 s** ✓ 与实测逐位吻合 |
+| **危险区** | `slot ≥ 10238` 的条目**永远**不满足该判据（`entry.slot+2` 超出范围）⇒ 只能靠"s同一 (storage, slot) 再次 deposit 时 supersede"或"PRODUCED 后被淘汰"释放（本腿 `superseded=0`、`evicted=62645`）|
+
+⇒ **机制**：并发 2 下 hop 更容易错过交接（`not_found=3696`、`late_commits=3700`、`fallback=30292`），
+于是注册表里积起**没人认领**的条目；**其中落在 hyperframe 末尾的条目要等一整个 10.24 s 周期**才被 sweep
+（甚至永远等不到），这段时间它咬着 14 个输入 token ⇒ 池里的缓冲被按住（本腿 `unclaimed at once max=5`，
+池只有 8）⇒ 接收线程 `pop_blocking` 被 park（实测 4.998 s ×2）⇒ 电台 64 帧队列溢出
+（`2 gaps / 153,167,345 samples ≈ 9.97 s`）⇒ **UL 数据面整段归零**。并发 1 下几乎不产生"没人认领"的条目，
+所以从来没见过这个形状。
+
+**③ 修复方案（待实施，两种）**
+
+| 方案 | 改法 | 代价/风险 |
+|---|---|---|
+| **a1（推荐）时间判据** | 用**单调时钟**做期限：`now - entry.deposited_at > sweep_after`（`sweep_after ≈ 10 ms` = 10 个 slot，而并发 2 下 hop 的自身时延是 ~1–2 ms ⇒ 余量充足），并在**每一个**注册表入口（deposit / take / 宿主读 `ensure_grid_produced`）都检查一遍 | **与环绕无关**，而且**不再依赖"必须有新 deposit"**（当前规则的死结正是"收包停 ⇒ 没有新 deposit ⇒ 永远不 sweep"）。代价：被 sweep 的块由注册表提交 = 多一次提交（已计入 `late_commits`），所以期限要留足，让 `not_found`/`late_commits` 保持低 |
+| **a2（最小改动）环绕安全比较** | 保留 slot 语义，但比较改成环绕安全：`const uint32_t age = static_cast<uint32_t>(slot - entry.slot); if (age > sweep_after_slots && age < nof_slots_per_hyper_system_frame()/2) sweep;` | 修掉 10.24 s 的等待，但**仍要求新 deposit 到来** ⇒ 死结的另一半（"没有新 deposit 就永远不 sweep"）还在 |
+
+**建议 a1 + a2 的环绕安全守护一起做**（a1 负责"不再依赖新 deposit"，a2 的守护负责"不误判跨环绕"），
+并把 `sweep_after` 写成**时间**（`std::chrono::milliseconds`，符合本仓"配置时间参数用强类型"的规矩）。
+
+**④ 顺带确认的三件好事（同一条腿）**
+
+1. **配对账精确**：`paired=24450, announced=24450, series at exit=24450 -> EXACT MATCH`（新自解释行第一次在空口生效）。
+2. **"residency 里 ~95% 是 busy" 在并发 2 下复现**：`busy/residency median=0.916`（全车道 0.919）——
+   与并发 1 的 0.643 对比 ⇒ 这个比值**随负载/并发度变**（§6.3 ⑥ 的结论再次被支持）；`eq_demap/residency = 1.076`（仍不是 1.00）。
+3. **并发 2 的跨度收益第三次复现**：`[ul_gpu_pipeline]` 中位 **2375 µs**（并发 1 是 5248）、`stale=0`、max 5167 µs；
+   `merged_hop=885.3 µs/lane`、`cbs/lane=2.00 (max=2) dropped=0`（V4 不变）。
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
@@ -1051,7 +1110,7 @@ n1 默认配方 + `OCUDU_UL_PHASE_SEGMENTS=1`：
 | **Q6** | 把 `max_pusch_and_srs_concurrency` 改变能否把 `ce` 的排队项吃掉？代价是什么？ | ✅ **已回答（P1-8，§7.5）**：能（−58~64×），代价是那次 **5 秒收包停顿**（两次复现）⇒ 交付前必须查清 |
 | **Q7** | 符号级收包（S-7g-13）在**负载下**对**跨度**的效果？ | **开放**：§5.8.29 只量过**该段** −1.2%（当时未加压、且当时丢了融合 1 次提交）⇒ 必须在加压腿 + 融合路径上重量一次 |
 | **Q8** | n78/n1 腿上 `max_pusch_and_srs_concurrency` 的生效值？车道是串行 strand 还是 fork limiter？ | ✅ **已收口（§6.1）**：两者**都是 1**、**都是串行 strand**；上限 = 中等池 `max_concurrency = 5`。⚠ 更正手算：n78 的 `ul_ratio` 是 **0.30**（不是 1.0）|
-| **Q9** | 并发 2 下 UL 断流 / 收包停顿的成因？ | **第一环已是直接读数（§6.8）**，且**上游的仪器已就位（§6.9，P0-7）**：读取 `block lifecycle (P0-7)` 的 `oldest unclaimed age max` / `deposit->completion max` 即可判"是不是没人认领的块按住了池"。原记录：：`input hold` max = **61.4 s**（210 个 token > 1 s），池空 → 接收线程 park，UL 吞吐 −70%、上行 iperf3 中段归零 ~40 s。**新的缺口**：那几十秒里块**在等谁** ⇒ 下一步是 **P0-7**（逐块生命周期 + 设备侧等待目标，§6.8 ⑥）|
+| **Q9** | 并发 2 下 UL 断流 / 收包停顿的成因？ | ✅ **已结案（§6.10）**：**根因是代码缺陷**——`ocudu_metal_burst.mm` 的 sweep 用**模 10240 的 `slot_point::count()`** 做 `entry.slot + 2 < slot` 比较，跨 hyperframe（10.24 s）环绕即失效 ⇒ 落在环绕末尾的无人认领块要等**一整个 10.24 s 周期**（实测等待是 10.24 s 的整数倍：3.000×/2.000×/1.001×）才被 sweep，其间咬着 14 个输入 token ⇒ 池空 ⇒ 接收线程 park （实测 2 次 ≈4.998 s）⇒ 电台溢出 9.97 s ⇒ UL 归零。**修复方案见 §6.10 ③（待实施）** |
 | **Q10** | 那条 **n1 2.85 倍退化**是否还有 `ce` 之外的成分？ | 已由单变量腿定位（§7.5：`ce` 是主因）；`p05-pair` **配对后**：`ce` 中位 **3278 µs** = 跨度 5248 的 **62%**，而一跳的设备执行只有 **517 µs**（Q14）⇒ `ce` 的排队项就是这条退化的主体。**残余**是 `t2f`（1095 vs 历史 521 量级）——与 Q7 的收样点策略、以及 n1 的 rx_wait（1052 µs）有关，**未单独开臂** |
 | **Q11** | `value_net` 的归档基线陈旧、`ab_dumps` arm1 改前就红 | **待用户裁决**：重建基线（= 承认过期）还是把该网标为"HEAD 不可用"；arm1 需要查清"是否曾经绿过"（§6.5⑤）|
 | **Q12** | `s84b-p0` 的第一次尝试**没有留下任何日志**（本仓与 `ocudu_premerge` 都没有）| **未验证**：最可能是被"戳 ≠ HEAD"拒绝（那种情况**不产生日志**）。要它当证据就得重飞一条；否则按"无效腿"处理（登记，低优先）|
