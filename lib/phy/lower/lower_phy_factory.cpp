@@ -182,7 +182,11 @@ public:
     // and the margin are for. The ring's capacity is a power of two (dev doc 6.37 (2): `ring_buffer_storage`
     // rounds up), so the rounding is done HERE, explicitly, and the printed size is the size that will exist.
     const bool     slot_sized_buffers       = (rx_buffer_size >= nof_samples_per_slot);
-    constexpr unsigned slot_pipeline_peak   = 16; // measured with the 256-frame ring (dev doc 6.53)
+    // Measurements so far: 11 (64-frame ring, p31/p32/p32b), 16 (256-frame ring, p33 - CLAMPED at that leg's
+    // pool, so a lower bound), 13 (512-frame ring, p37, with free_min=19). The constant is the LARGEST of them
+    // because sizing takes the conservative side, and the 16 and the 13 give the SAME pool (21 -> 32 and
+    // 18 -> 32, dev doc 6.57 (2)).
+    constexpr unsigned slot_pipeline_peak   = 16; // measured (dev doc 6.53/6.57)
     constexpr unsigned rx_path_buffers      = 2;  // being received + just received
     constexpr unsigned rx_pool_margin       = 3;
     // The receive ring rounds its capacity up to a power of two wherever it is sized (dev doc 6.37 (2): the
