@@ -1222,10 +1222,16 @@ sudo -E OCUDU_UL_PHASE_SEGMENTS=1 bash doc_chinese/phy_pipeline_gpu/wip/run_leg.
 | `[ul_gpu_lane] commit -> completion` 最慢行 | — | **`commit->start` 大** ⇒ 队列（前面有更长的缓冲或等待者）；**`start->end` 大** ⇒ **设备侧等待**（抽取栅栏 / grid-ready），即 hold 那条线 ⇒ 下一步是 §6.12 ④ 的 C，或"让 hold 不跨跳" |
 | `registry commit->completion` 的 max vs `deposit->completion` 的 max | 两者都小 | **同量级且都是秒** ⇒ 提交之后才慢（设备/队列）；**前者 ms、后者秒** ⇒ 提交之前慢（hold/认领）|
 
-**⑤ 环境注记（与本次改动无关，但影响可复现性）**：用户接受 Xcode 许可后，工具链/SDK 换成了 Xcode 那一套，
-`<future>` 把 `future::get()` 标成 `[[nodiscard]]` ⇒ `io_broker.h` 的裸 `fut.get()` 在 `-Werror` 下**编译失败**。
-已按原意补 `(void)`（在提交 `5ff8759804` 内）。**整棵树在改前后各重编一次**，而与 pristine HEAD 二进制的逐字节比对
-（新 SDK 编译）仍是 **0 differing** ⇒ SDK 变化没有改字节，§6.11/§6.13 的逐字节网仍然可比。
+**⑤ 环境注记（与本次改动无关，但影响可复现性）**：用户接受 Xcode 许可后，工具链/SDK 换成了 **Xcode 26** 那一套，
+它的 libc++ 更严，**四处**把整棵树挡在编译之外（用户 2026-09-25 报"build 错误，无法运行测试"）：
+`future::get()` 变成 `[[nodiscard]]`（`io_broker.h`、`task_worker.cpp` 的"调用本身就是等待"两个站点，以及
+PUCCH 资源管理测试里一句无副作用的 `set::count()`），以及 `std::partial_sort` 现在通过 `iter[n]`
+（`__algorithm/sift_down.h`）取堆元素 —— 而 `flat_map.h` 的 `sort_iter` 声明了 `random_access_iterator_tag`
+却没有下标运算符。已按原意补齐（提交 `2be02bfdb5`）：`(void)` 三处 + `sort_iter::operator[]` 一处。
+修完 `make -k` 全树干净；**整棵树在改前后各重编一次**，而与 pristine HEAD 二进制的逐字节比对（新 SDK 编译）
+仍是 **0 differing** ⇒ SDK 变化没有改字节，§6.11/§6.13 的逐字节网仍然可比。
+⚠ 另注：`ctest -j 6`（整套并行）会让两个 **CE Metal 单测**因 GPU 争用而红（`mmse_landmine.sh` 记录过的那类非确定性），
+**串行跑（`-L phy` / `-R port_channel_estimator_metal_mmse`）2/2 全绿**；我们的网一律按串行读数记。
 
 ### 6.14 ✅ Q9-C 落地（2026-09-25，提交 `5f51b0e9fe`）：**车道 burst 等的是"本跳自己的"估计器 generation，不是全局最新**——跨车道栅栏夹死（cross-lane pinch）
 
