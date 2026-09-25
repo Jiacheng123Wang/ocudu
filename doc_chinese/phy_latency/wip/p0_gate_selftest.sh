@@ -20,10 +20,20 @@ GATE="$HERE/p0_gate.sh"
 
 ARG=${1:-}
 if [ -z "$ARG" ]; then
-  ARG=$(ls -t "$LOGDIR"/*.log.stderr 2>/dev/null | head -1)
+  # The fixture base must be a leg flown BEFORE the instruments whose readings this self-test appends (6.19's
+  # D11/D12, 6.24's D14, 6.26's D15). From leg p15 on every leg carries them, so "the newest log" stopped
+  # being a valid base on 2026-09-25 and turned three checks red for a property of the LOG directory rather
+  # than of the gate (recorded in dev doc 6.30). The newest leg WITHOUT the commit-order line is used instead;
+  # if every leg has it, the self-test says so and skips rather than reporting a false failure.
+  ARG=$(ls -t "$LOGDIR"/*.log.stderr 2>/dev/null | while read -r f; do
+    grep -q 'commit order (Q9-F)' "$f" 2>/dev/null || {
+      printf '%s' "$f"
+      break
+    }
+  done)
 fi
 if [ -z "$ARG" ] || [ ! -f "$ARG" ]; then
-  echo "SKIP: no leg stderr to build the fixture from (looked in $LOGDIR)"
+  echo "SKIP: no pre-6.19 leg stderr to build the fixture from (looked in $LOGDIR; pass one as the 1st argument)"
   exit 0
 fi
 
@@ -40,6 +50,7 @@ cat >> "$FIXTURE" <<'EOF'
 [ul_gpu_lane] dft carried blocks (Q9-F2): resolved=48123 of 48123 (never committed=0, committed but unfinished at exit=0, no GPU timestamps=0, dropped over the bound=0)
 [ul_gpu_lane] dft carried deposit ->GPU start samples=48123 mean=2211.0us median=1105.0us min=498.1us max=5004688.5us p95=3562.0us p99=8021.0us
 [metal_stats] dft handover handed=48123 taken=27887 superseded=0 evicted=47867 evicted_unproduced=0 over_bound=0 unproduced=0 fallback=18331 late=1905 late_time=12 not_found=1891 timeouts=0 keepalives=673722/673722 (max in flight 112) (armed=1) tokens_early=signals:0,by_event:0,by_complete:48123 handshake=waits:7,timeouts:0,max:412us
+[metal_stats] dft commits=48123 transforms=673722 waits=143878 slots_in_flight=14 radio_inputs=673722 wrap_copies=0 released=48123 released_waits=0 batched=4812/67368 batch_max=14
 EOF
 
 OUT=$(bash "$GATE" "$FIXTURE" 2>&1)
@@ -66,20 +77,25 @@ expect "D13 reads the handshake waits"        "handshake waits=7 timeouts=0 max=
 expect "D14 reads the absence of a stall dump" "the pool never parked the receive thread for 20 ms"
 expect "D15 reads the drop counter when absent" "a leg flown before 6.26 cannot say"
 expect "D13 states what a wait would have cost" "the Q9-G window IS reached on air"
+expect "D16 reads the batched pair"          "batched=4812/67368 batch_max=14"
+expect "D16 states the branch verdict"       "the front end DID defer"
 
 # The reverse direction: a leg WITHOUT the new lines must say so instead of printing a number (rule 4.3 (3)).
 # (The gate NAMES the line it looked for in that message, so the check is on the verdict, not on the token.)
-OUT_OLD=$(bash "$GATE" "$ARG" 2>&1)
+# The fixture is the one above, which is by construction a leg without those lines (see the header).
+OLD_LEG=$ARG
+OUT_OLD=$(bash "$GATE" "$OLD_LEG" 2>&1)
 D11_OLD=$(printf '%s\n' "$OUT_OLD" | grep -A3 "D11 (Q9-F)" | grep "read    :")
 D12_OLD=$(printf '%s\n' "$OUT_OLD" | grep -A3 "D12 " | grep "read    :")
 if printf '%s' "$D11_OLD" | grep -qF "cannot say" && ! printf '%s' "$D11_OLD" | grep -qF "waiter-committed-first=" &&
    printf '%s' "$D12_OLD" | grep -qF "cannot say" &&
    printf '%s\n' "$OUT_OLD" | grep -A3 "D13 " | grep -qF "cannot say" &&
    printf '%s\n' "$OUT_OLD" | grep -A3 "D14 " | grep -qF "no 'p0 dump' line" &&
-   printf '%s\n' "$OUT_OLD" | grep -A3 "D15 " | grep -qF "cannot say"; then
-  echo "PASS: a leg without the 6.19 lines reads as 'cannot say' rather than as a number"
+   printf '%s\n' "$OUT_OLD" | grep -A3 "D15 " | grep -qF "cannot say" &&
+   printf '%s\n' "$OUT_OLD" | grep -A3 "D16 " | grep -qF "a leg flown before 6.30 cannot say"; then
+  echo "PASS: a leg without the 6.19 lines reads as 'cannot say' rather than as a number ($(basename "$OLD_LEG"))"
 else
-  echo "FAIL: a leg without the 6.19 lines did not read as 'cannot say':"
+  echo "FAIL: a leg without the 6.19 lines did not read as 'cannot say' ($(basename "$OLD_LEG")):"
   printf '%s\n%s\n' "$D11_OLD" "$D12_OLD"
   FAILED=1
 fi

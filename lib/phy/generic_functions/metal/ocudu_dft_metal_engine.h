@@ -164,6 +164,24 @@ public:
   };
   static token_release_stats_t token_release_stats();
 
+  /// \brief Q9-F4 (dev doc 6.30): how many front-end dispatches carried MORE THAN ONE transform, and how
+  /// many transforms they carried in total.
+  ///
+  /// The batched front end (OCUDU_DFT_BATCH_SYMBOLS=N, default 1 = off) DEFERS the transforms of an open
+  /// block and encodes them as one dispatch of N threadgroups: offline the same 14 n=768 transforms cost
+  /// 171us of device window as 14 single-threadgroup dispatches and 13.75us as one, because a
+  /// single-threadgroup dispatch is latency-bound and does not overlap its neighbours.
+  ///
+  /// `requested` is the knob's value for this process (1 = the historical one-dispatch-per-symbol), so a
+  /// reading of `requested > 1` next to `dispatches == 0` says the deferral never happened - a finding
+  /// rather than a silent no-op. Read by the self-test (arm 17) and printed on the `[metal_stats] dft` line.
+  struct batch_stats_t {
+    uint64_t dispatches = 0;
+    uint64_t transforms = 0;
+    unsigned requested  = 1;
+  };
+  static batch_stats_t batch_stats();
+
   /// \brief Whether this run asks the open block to be handed over instead of committed (D1 step 1).
   ///
   /// \c OCUDU_DFT_RELEASE_BLOCK, **default ON** since the \c s46 controlled leg pair (design document

@@ -47,9 +47,67 @@ namespace metal {
 
 namespace {
 
+/// Transform slots covered by the input/output buffers (dft_processor_metal::max_batch).
+static constexpr unsigned max_batch_slots = 16;
+
+/// \name Q9-F4 (dev doc 6.30): the parameter blocks one dispatch binds, and the batched front end.
+///
+/// The layouts mirror the kernel's `grid_write_params` / `input_params` (ocudu_dft.metal) exactly, because
+/// what the engine writes here is what the kernel reads: a per-element table when the dispatch carries
+/// several transforms (`batch` > 1, the kernel's `pad` field) and a single block when it carries one.
+///@{
+struct dft_grid_write_block {
+  uint32_t active;
+  uint32_t nof_subc;
+  uint32_t dst_offset;
+  uint32_t map_offset;
+  float    phase_re;
+  float    phase_im;
+  uint32_t apply_window;
+  /// Kernel's `pad`: 0 = this dispatch carries ONE transform (the historical form), N > 1 = it carries N
+  /// transforms, one threadgroup each, and both parameter blocks are tables of N entries indexed by the
+  /// threadgroup's position in the grid.
+  uint32_t batch;
+};
+static_assert(sizeof(dft_grid_write_block) == 8 * sizeof(uint32_t),
+              "dft_grid_write_block must match the kernel's grid_write_params");
+
+struct dft_input_block {
+  uint32_t is_ci16;
+  uint32_t offset;
+  float    gain;
+  uint32_t pad;
+};
+static_assert(sizeof(dft_input_block) == 4 * sizeof(uint32_t),
+              "dft_input_block must match the kernel's input_params");
+///@}
+
 // ---- Process-wide dispatch/wait statistics (same accounting as the LDPC/MMSE engines) ----
 // Compile-time debug aid (ENABLE_METAL_STATS=ON defines OCUDU_METAL_STATS); off by default
 // with zero overhead. Reported at process exit.
+/// \brief Q9-F4 (dev doc 6.30): how many transforms the front end may put into ONE dispatch.
+///
+/// `OCUDU_DFT_BATCH_SYMBOLS=N`, **default 1 = the historical one-dispatch-per-symbol**. N >= 2 makes the
+/// front end DEFER the transforms of an open block (radio-input path only, see dft_engine_impl) and encode
+/// them as one dispatch of N threadgroups, with the two parameter blocks bound as per-threadgroup tables
+/// (the kernel's `pad` field). Offline, the same 14 transforms cost 171us as 14 dispatches and 13.75us as
+/// one; on air the knob is what turns "the front end's device window" into an A/B.
+///
+/// Clamped to max_batch_slots: the pending tables are bound with setBytes (the limit is 4 KB, i.e. 128
+/// grid-write blocks), and a batch larger than the ring the transforms are counted in would be meaningless.
+static unsigned front_end_batch_requested()
+{
+  const char* env = std::getenv("OCUDU_DFT_BATCH_SYMBOLS");
+  if (env == nullptr) {
+    return 1;
+  }
+  const unsigned long v = std::strtoul(env, nullptr, 10);
+  if (v < 2ul) {
+    return 1;
+  }
+  return (v > max_batch_slots) ? max_batch_slots : static_cast<unsigned>(v);
+}
+
 #if defined(OCUDU_METAL_STATS)
 struct dft_stats_t {
   std::atomic<uint64_t> commits{0};
@@ -138,6 +196,18 @@ struct dft_stats_t {
   std::atomic<uint64_t> token_early_signals{0};
   std::atomic<uint64_t> token_sets_by_event{0};
   std::atomic<uint64_t> token_sets_by_complete{0};
+
+  /// \name Q9-F4 (dev doc 6.30): the front end's BATCHED dispatches.
+  ///
+  /// `batch_dispatches` counts the dispatches that carried more than one transform (one threadgroup each)
+  /// and `batch_transforms` how many transforms they carried in total. A run with
+  /// OCUDU_DFT_BATCH_SYMBOLS=14 must show `batch_transforms` equal to the transforms of the slots that took
+  /// the radio-input path (roughly 14 per hop) and `batch_dispatches` about a fourteenth of it - which is
+  /// what makes "the front end really batched" a reading rather than a reading of the code. Both stay 0
+  /// with the knob off, and that is the A/B arm's control.
+  std::atomic<uint64_t> batch_dispatches{0};
+  std::atomic<uint64_t> batch_transforms{0};
+  ///@}
 
   /// \name P0-2: HOW LONG the input was held (attach -> release), per token.
   ///
@@ -311,6 +381,14 @@ static void dft_stats_wrap_copy()
   dft_stats().wrap_copies.fetch_add(1, std::memory_order_relaxed);
 }
 
+/// Counts one BATCHED front-end dispatch and the transforms it carried (Q9-F4, dev doc 6.30).
+static void dft_stats_batch(uint64_t nof_transforms)
+{
+  dft_stats_t& s = dft_stats();
+  s.batch_dispatches.fetch_add(1, std::memory_order_relaxed);
+  s.batch_transforms.fetch_add(nof_transforms, std::memory_order_relaxed);
+}
+
 static void dft_stats_report()
 {
   // NOT const: P0-2's hold statistics live behind a mutex (the release path runs on Metal's completion threads),
@@ -322,7 +400,7 @@ static void dft_stats_report()
                // every transform (see ofdm_demodulator_impl::finish_symbol()), so that difference grows
                // without bound and would read like a backlog that is not there.
                "[metal_stats] dft commits=%llu transforms=%llu waits=%llu slots_in_flight=%llu radio_inputs=%llu "
-               "wrap_copies=%llu released=%llu released_waits=%llu\n",
+               "wrap_copies=%llu released=%llu released_waits=%llu batched=%llu/%llu batch_max=%u\n",
                static_cast<unsigned long long>(s.commits.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.transforms.load(std::memory_order_relaxed)),
                static_cast<unsigned long long>(s.waits.load(std::memory_order_relaxed)),
@@ -332,7 +410,14 @@ static void dft_stats_report()
                // released / released_waits: the release path of D1 step 1. Both are 0 unless the run armed
                // OCUDU_DFT_RELEASE_BLOCK, and released_waits must stay 0 even then (see the struct).
                static_cast<unsigned long long>(s.released.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(s.released_waits.load(std::memory_order_relaxed)));
+               static_cast<unsigned long long>(s.released_waits.load(std::memory_order_relaxed)),
+               // Q9-F4 (dev doc 6.30): the batched front-end dispatches / the transforms they carried, and
+               // the knob the run asked for. `batch_max=1` with a zero pair is the A/B control arm; a
+               // `batch_max>1` whose pair is still zero means the deferral never happened (nothing took the
+               // radio-input path inside an open block), which is a finding, not a silent no-op.
+               static_cast<unsigned long long>(s.batch_dispatches.load(std::memory_order_relaxed)),
+               static_cast<unsigned long long>(s.batch_transforms.load(std::memory_order_relaxed)),
+               front_end_batch_requested());
 
   // D1 step 2: the handover's own counters, printed by the ENGINE rather than by the registry's own
   // translation unit: the engine is in every build that can arm the release, so an armed leg always sees
@@ -664,6 +749,7 @@ static void dft_stats_note_depth(uint64_t /*depth*/) {}
 static void dft_stats_commit(uint64_t /*nof_transforms*/ = 1) {}
 static void dft_stats_wait() {}
 static void dft_stats_wrap_copy() {}
+static void dft_stats_batch(uint64_t /*nof_transforms*/) {}
 static void dft_stats_plain_submit(bool /*with_block*/, bool /*with_lane_slot*/) {}
 static void dft_stats_radio_input() {}
 static void dft_stats_release() {}
@@ -720,8 +806,6 @@ NSString* resolve_dft_metallib_path()
   return nil;
 }
 
-/// Transform slots covered by the input/output buffers (dft_processor_metal::max_batch).
-static constexpr unsigned max_batch_slots = 16;
 
 struct dft_engine_impl {
   id<MTLCommandBuffer> last_committed_cb = nil;
@@ -744,6 +828,35 @@ struct dft_engine_impl {
   id<MTLCommandBuffer>         open_cb  = nil;
   id<MTLComputeCommandEncoder> open_enc = nil;
   uint64_t                     open_transforms = 0;
+  ///@}
+
+  /// \name Q9-F4 (dev doc 6.30): the transforms of the open block, DEFERRED into one dispatch.
+  ///
+  /// Why: one threadgroup per dispatch is latency-bound - measured offline, an n=768 transform costs
+  /// 12.18us of device window when it is alone in a dispatch and 0.98us when 14 of them share one (a whole
+  /// slot in 13.75us) - and the front end used to issue exactly one dispatch per symbol, i.e. ~171us of
+  /// window per slot for arithmetic worth ~14us.
+  ///
+  /// The deferral is invisible to every consumer because the block's command buffer is NOT COMMITTED while
+  /// it accumulates (see release_block()): the dispatches of one slot are encoded into one buffer that the
+  /// lane commits later, so moving their ENCODING to the end of the block changes nothing about what the
+  /// device executes or in which order. What it changes is the host's side of it: fourteen encoders
+  /// become one.
+  ///
+  /// WHAT IT MUST NOT DO: defer a transform whose input the caller may overwrite. That is why only the
+  /// RADIO-input path is batched (`grid_write::time_samples`): its fourteen slices are fourteen offsets
+  /// into ONE allocation the block already keeps alive with tokens, while the staged float2 path writes
+  /// each symbol into a ring slot the caller may refill as soon as it thinks the transform was submitted.
+  ///@{
+  std::vector<std::pair<dft_grid_write_block, dft_input_block>> pending_transforms;
+  /// The bindings every pending transform shares - a group is only ever extended while these are equal.
+  id<MTLBuffer> pending_grid     = nil;
+  size_t        pending_grid_off = 0;
+  id<MTLBuffer> pending_in16     = nil;
+  id<MTLBuffer> pending_in       = nil;
+  id<MTLBuffer> pending_out      = nil;
+  /// The kernel's `base` for the group (0 on the radio-input path, which is the only one that batches).
+  uint32_t      pending_base     = 0;
   ///@}
 
   /// \name D1 step 1: the block handed over instead of committed (see release_block()).
@@ -803,6 +916,136 @@ struct dft_engine_impl {
   // Warm-up scratch (page-aligned, engine lifetime; freed by the destructor).
   void* warmup_mem = nullptr;
 };
+
+/// \name Q9-F4 (dev doc 6.30): the batched front end's two entry points.
+///
+/// Declared here because the block's three ends - commit_open(), release_block() and discard_open_block() -
+/// are defined above the encoder they need, and every one of them owes the deferred transforms a decision
+/// BEFORE it touches the encoder.
+///@{
+static void clear_pending_front_end(dft_engine_impl* e);
+static void flush_pending_front_end(dft_engine_impl* e);
+///@}
+
+/// \brief Encodes ONE front-end dispatch: \p nof_transforms threadgroups, each transform reading its own
+/// input slice and writing its own grid symbol (Q9-F4, dev doc 6.30).
+///
+/// \p nof_transforms == 1 binds the two parameter blocks as single structs, which is byte-for-byte what the
+/// front end always encoded (the kernel's `batch` field stays 0 and takes the scalar path). \p
+/// nof_transforms > 1 binds them as TABLES of that many entries, one per threadgroup, and the kernel indexes
+/// them by the threadgroup's position in the grid.
+///
+/// The bindings that are the same for every transform of a batch (the twiddle table, the permutation table,
+/// the radix counts, the input allocation, the grid mapping and its offset) are passed in rather than read
+/// from the entries: a group is only ever extended while they are equal (see the push in
+/// submit_slot_grid_write()).
+static void encode_grid_write_dispatch(dft_engine_impl*                       e,
+                                      id<MTLComputeCommandEncoder>           enc,
+                                      const dft_grid_write_block*            gw_in,
+                                      const dft_input_block*                 ip_in,
+                                      unsigned                               nof_transforms,
+                                      uint32_t                               base,
+                                      id<MTLBuffer>                          b_in,
+                                      id<MTLBuffer>                          b_out,
+                                      id<MTLBuffer>                          b_grid,
+                                      size_t                                 grid_off,
+                                      id<MTLBuffer>                          b_in16)
+{
+  // The tables setBytes() copies into the command buffer. Bounded by max_batch_slots, which is what the
+  // knob is clamped to; both blocks together are 48 bytes per transform, i.e. 768 bytes for a full slot.
+  dft_grid_write_block gw[max_batch_slots];
+  dft_input_block      ip[max_batch_slots];
+  for (unsigned i = 0; i != nof_transforms; ++i) {
+    gw[i] = gw_in[i];
+    ip[i] = ip_in[i];
+    // The kernel's multi-transform flag: 0 keeps the historical single-parameter form, and N > 1 says both
+    // blocks are tables of N entries indexed by the threadgroup's position in the grid.
+    gw[i].batch = (nof_transforms > 1u) ? nof_transforms : 0u;
+  }
+
+  [enc setComputePipelineState:dft_resources().pipeline];
+  [enc setBuffer:b_in offset:0 atIndex:0];
+  [enc setBuffer:b_out offset:0 atIndex:1];
+  [enc setBuffer:e->buf_tw offset:0 atIndex:2];
+  [enc setBuffer:e->buf_perm offset:0 atIndex:3];
+  [enc setBytes:&e->radix2 length:sizeof(uint32_t) atIndex:4];
+  [enc setBytes:&e->radix3 length:sizeof(uint32_t) atIndex:5];
+  [enc setBytes:&e->inverse length:sizeof(uint32_t) atIndex:6];
+  // Element offset of the FIRST transform within the input it reads: the ring slot when the input is the
+  // engine's float2 batch, and ZERO when it is the radio's buffer - that one holds each transform's samples
+  // alone and the per-transform offsets travel in the input table instead (which is what makes a batched
+  // radio-input dispatch possible at all).
+  [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
+  // The grid and its per-element table are only read when the write is active; Metal still requires every buffer the
+  // kernel names to be bound, so the transform output and the twiddle table stand in when there is none.
+  [enc setBuffer:b_grid offset:grid_off atIndex:8];
+  [enc setBuffer:(e->buf_window != nil ? e->buf_window : e->buf_tw) offset:0 atIndex:9];
+  [enc setBytes:gw length:sizeof(dft_grid_write_block) * nof_transforms atIndex:10];
+  [enc setBuffer:b_in16 offset:0 atIndex:11];
+  [enc setBytes:ip length:sizeof(dft_input_block) * nof_transforms atIndex:12];
+
+  [enc dispatchThreadgroups:MTLSizeMake(nof_transforms, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(std::min(e->n, 1024u), 1, 1)];
+}
+
+/// \brief Drops the deferred transforms without encoding them (the block is being discarded).
+///
+/// The command buffer is dropped rather than committed on that path, so its transforms will never run: what
+/// has to go is the state that names a grid and an input allocation, not the dispatches.
+static void clear_pending_front_end(dft_engine_impl* e)
+{
+  if (e == nullptr) {
+    return;
+  }
+  e->pending_transforms.clear();
+  e->pending_grid     = nil;
+  e->pending_grid_off = 0;
+  e->pending_in16     = nil;
+  e->pending_in       = nil;
+  e->pending_out      = nil;
+  e->pending_base     = 0;
+}
+
+/// \brief Encodes every deferred transform as ONE dispatch into the open block's encoder (Q9-F4).
+///
+/// Called at the three places that end a block (commit_open(), release_block(), and - clearing instead of
+/// encoding - discard_open_block()) and whenever the next transform cannot join the open group. Must run
+/// BEFORE `endEncoding`, which is the whole reason it is a separate function: a deferred transform that is
+/// still only a host-side parameter block when the encoder closes would silently never be dispatched.
+static void flush_pending_front_end(dft_engine_impl* e)
+{
+  if ((e == nullptr) || e->pending_transforms.empty()) {
+    return;
+  }
+  const unsigned nof = static_cast<unsigned>(e->pending_transforms.size());
+  if (e->open_enc == nil) {
+    // No encoder to encode into: the block is not open (see the callers - this cannot happen while they hold
+    // their own order), so the deferral has nowhere to go and the transforms are dropped with their state
+    // rather than left to be encoded into somebody else's block.
+    clear_pending_front_end(e);
+    return;
+  }
+
+  dft_grid_write_block gw[max_batch_slots];
+  dft_input_block      ip[max_batch_slots];
+  for (unsigned i = 0; i != nof; ++i) {
+    gw[i] = e->pending_transforms[i].first;
+    ip[i] = e->pending_transforms[i].second;
+  }
+  // NOTE: the individual `batch` fields are set inside the encoder helper, so the pending entries stay
+  // exactly what the caller asked for and a retry (or a later comparison) sees the caller's values.
+  const uint32_t      base   = e->pending_base;
+  const id<MTLBuffer> b_in   = e->pending_in;
+  const id<MTLBuffer> b_out  = e->pending_out;
+  const id<MTLBuffer> b_grid = e->pending_grid;
+  const size_t        off    = e->pending_grid_off;
+  const id<MTLBuffer> b_in16 = e->pending_in16;
+  clear_pending_front_end(e);
+  encode_grid_write_dispatch(e, e->open_enc, gw, ip, nof, base, b_in, b_out, b_grid, off, b_in16);
+  if (nof > 1u) {
+    dft_stats_batch(nof);
+  }
+}
 
 /// \brief Whether this run asks for a block of transforms to share one command buffer.
 ///
@@ -1055,6 +1298,9 @@ static void discard_open_block(dft_engine_impl* e)
     e->open_enc         = nil;
     e->open_cb          = nil;
     e->open_transforms  = 0;
+    // Q9-F4: the deferred transforms of this block are dropped with it - the command buffer is not
+    // committed, so encoding them now would be work nobody ever runs.
+    clear_pending_front_end(e);
     // The block is dropped, so the dispatches that would have read its input never run: the tokens go back
     // to their owners NOW rather than at a completion that will never come.
     if (!e->open_tokens.empty()) {
@@ -1516,6 +1762,10 @@ bool dft_metal_engine::begin_block()
     return false;
   }
   engine->open_transforms = 0;
+  // Q9-F4: a new block starts with an empty deferral. Nothing can be pending here (every end of a block
+  // flushes or clears), and clearing anyway is what keeps a deferred transform from one block out of the
+  // next one's encoder - the one way this mechanism could silently write a grid of the wrong slot.
+  clear_pending_front_end(engine);
   return true;
 }
 
@@ -1525,6 +1775,9 @@ bool dft_metal_engine::commit_open()
   if ((engine == nullptr) || (engine->open_cb == nil) || (engine->open_enc == nil)) {
     return false;
   }
+  // Q9-F4: everything the front end deferred while this block was open is encoded NOW, as one dispatch,
+  // before the encoder closes - after that there is no encoder to put it in.
+  flush_pending_front_end(engine);
   id<MTLCommandBuffer>         cb  = engine->open_cb;
   id<MTLComputeCommandEncoder> enc = engine->open_enc;
   const uint64_t               nof = engine->open_transforms;
@@ -1568,6 +1821,17 @@ dft_metal_engine::token_release_stats_t dft_metal_engine::token_release_stats()
   return out;
 }
 
+dft_metal_engine::batch_stats_t dft_metal_engine::batch_stats()
+{
+  batch_stats_t out;
+  out.requested = front_end_batch_requested();
+#if defined(OCUDU_METAL_STATS)
+  out.dispatches = dft_stats().batch_dispatches.load(std::memory_order_relaxed);
+  out.transforms = dft_stats().batch_transforms.load(std::memory_order_relaxed);
+#endif
+  return out;
+}
+
 bool dft_metal_engine::retain_for_block(const keep_alive& token)
 {
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
@@ -1593,6 +1857,10 @@ void* dft_metal_engine::release_block(const void* grid_base)
   }
   id<MTLCommandBuffer> cb = engine->open_cb;
   const uint64_t       nof = engine->open_transforms;
+  // Q9-F4: the deferred transforms of this block are encoded as one dispatch into it before the encoder is
+  // closed and the buffer handed over - the adopter appends its own dispatches AFTER them, so the grid is
+  // produced before anything that reads it.
+  flush_pending_front_end(engine);
   // Close the encoder before handing over: the adopter opens its own (shared_burst::take_released() takes
   // the buffer only), and the boundary between the two encoders is what orders the adopter's first dispatch
   // after this block's dispatches for the SAME buffer object (see wrap_grid()).
@@ -1799,6 +2067,7 @@ bool dft_metal_engine::set_grid_write_window(const void* window, unsigned nof_en
   return true;
 }
 
+
 bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigned slot, const grid_write& write)
 {
   dft_engine_impl* engine = static_cast<dft_engine_impl*>(impl);
@@ -1826,13 +2095,8 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
   // wrapped - it is the same pointer and the same length for every symbol of the slot, so the
   // mapping is created once - and the slice's offset travels to the kernel. A slice whose
   // allocation is unknown, or that does not fit in it, is refused: the caller stages its own input.
-  struct {
-    uint32_t is_ci16;
-    uint32_t offset;
-    float    gain;
-    uint32_t pad;
-  } input   = {0u, 0u, 1.0F, 0u};
-  id<MTLBuffer> b_in16 = b_in; // a stand-in: the kernel only reads it when is_ci16 = 0
+  dft_input_block input   = {0u, 0u, 1.0F, 0u};
+  id<MTLBuffer>   b_in16  = b_in; // a stand-in: the kernel only reads it when is_ci16 = 0
   if (write.time_samples != nullptr) {
     void*  alloc_base = nullptr;
     size_t alloc_size = 0;
@@ -1860,52 +2124,80 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
     input.gain   = write.time_gain;
   }
 
+  const dft_grid_write_block params = {1u,
+                                       write.nof_subc,
+                                       write.dst_offset,
+                                       write.map_offset % engine->n,
+                                       write.phase_re,
+                                       write.phase_im,
+                                       (write.apply_window && engine->has_window) ? 1u : 0u,
+                                       0u};
+  // Element offset of the transform within the input it reads: the ring slot when the input is the
+  // engine's float2 batch, and ZERO when it is the radio's buffer - that one holds this transform's
+  // samples alone and the per-transform offsets travel in the input table instead.
+  const uint32_t base = (input.is_ci16 != 0u) ? 0u : (slot * engine->n);
+
+  // ---- Q9-F4 (dev doc 6.30): defer this transform into the block's ONE dispatch, or encode it alone ----
+  //
+  // Deferred only when all three hold: the knob asks for it, a block is open (there is an uncommitted
+  // command buffer to defer INTO - with the hand-over armed that is the whole hop, so the device executes
+  // the very same dispatches in the very same order), and the input is the RADIO's (its slices are offsets
+  // into one allocation the block keeps alive; the staged float2 ring can be overwritten by the caller
+  // before a deferred encode would read it).
+  const unsigned batch_max = front_end_batch_requested();
+  if ((batch_max > 1u) && (input.is_ci16 != 0u) && block_accumulating(engine)) {
+    // (1) A group only ever holds transforms that share the bindings the dispatch cannot vary per
+    //     threadgroup - the grid mapping (with its offset), the radio allocation, and the float2 ring the
+    //     kernel ignores while the write is active but still has to be bound. Anything else ends the group.
+    if (!engine->pending_transforms.empty() &&
+        ((engine->pending_grid != b_grid) || (engine->pending_grid_off != grid_off) ||
+         (engine->pending_in16 != b_in16) || (engine->pending_in != b_in) || (engine->pending_out != b_out) ||
+         (engine->pending_base != base))) {
+      flush_pending_front_end(engine);
+    }
+    // (2) The kernel reads the input of threadgroup `tgid` at `ip[tgid].offset + tgid * n + perm[i]` - the
+    //     batch layout, one transform per threadgroup. The RADIO's symbols are not one transform apart:
+    //     each slice is `cp + n` samples and the cyclic-prefix skip is folded into its offset, so a table
+    //     entry is the slice's own offset MINUS that stride. A slice closer to the allocation base than
+    //     its own stride (possible only if a caller handed over overlapping slices) cannot be expressed in
+    //     the batch layout at all: the group is closed and this transform starts the next one, where the
+    //     stride is zero. MUST come before (3): ending a group clears the bindings it was started with.
+    size_t index  = engine->pending_transforms.size();
+    auto   stride = static_cast<uint64_t>(index) * engine->n;
+    if ((index != 0) && (static_cast<uint64_t>(input.offset) < stride)) {
+      flush_pending_front_end(engine);
+      index  = 0;
+      stride = 0;
+    }
+    // (3) A fresh group records the bindings every one of its transforms will be dispatched with.
+    if (engine->pending_transforms.empty()) {
+      engine->pending_grid     = b_grid;
+      engine->pending_grid_off = grid_off;
+      engine->pending_in16     = b_in16;
+      engine->pending_in       = b_in;
+      engine->pending_out      = b_out;
+      engine->pending_base     = base;
+    }
+    // (4) The deferred transform, with its input offset made relative to the stride the kernel adds.
+    dft_input_block entry = input;
+    entry.offset          = static_cast<uint32_t>(static_cast<uint64_t>(entry.offset) - stride);
+    engine->pending_transforms.emplace_back(params, entry);
+    // The accounting stays PER TRANSFORM: the block's own counters, the slot bookkeeping and the wait
+    // protocol all speak of transforms, and only the ENCODING is batched (see flush_pending_front_end).
+    ++engine->open_transforms;
+    note_slot_submission(engine, slot, engine->open_cb);
+    if (engine->pending_transforms.size() >= batch_max) {
+      flush_pending_front_end(engine);
+    }
+    return true;
+  }
+
   id<MTLCommandBuffer>         cmd_buf = nil;
   id<MTLComputeCommandEncoder> enc     = nil;
   if (!encode_into(engine, &cmd_buf, &enc)) {
     return false;
   }
-  [enc setComputePipelineState:dft_resources().pipeline];
-  [enc setBuffer:b_in offset:0 atIndex:0];
-  [enc setBuffer:b_out offset:0 atIndex:1];
-  [enc setBuffer:engine->buf_tw offset:0 atIndex:2];
-  [enc setBuffer:engine->buf_perm offset:0 atIndex:3];
-  [enc setBytes:&engine->radix2 length:sizeof(uint32_t) atIndex:4];
-  [enc setBytes:&engine->radix3 length:sizeof(uint32_t) atIndex:5];
-  [enc setBytes:&engine->inverse length:sizeof(uint32_t) atIndex:6];
-  // Element offset of the transform within the input it reads: the ring slot when the input is the
-  // engine's float2 batch, and ZERO when it is the radio's buffer - that one holds this transform's
-  // samples alone (the RX chain dispatches one transform per symbol), so the slot index does not
-  // apply to it.
-  const uint32_t base = (input.is_ci16 != 0u) ? 0u : (slot * engine->n);
-  [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
-  // The grid and its per-element table are only read when the write is active; Metal still requires every buffer the
-  // kernel names to be bound, so the transform output and the twiddle table stand in when there is none.
-  [enc setBuffer:b_grid offset:grid_off atIndex:8];
-  [enc setBuffer:(engine->buf_window != nil ? engine->buf_window : engine->buf_tw) offset:0 atIndex:9];
-  [enc setBuffer:b_in16 offset:0 atIndex:11];
-  [enc setBytes:&input length:sizeof(input) atIndex:12];
-
-  struct {
-    uint32_t active;
-    uint32_t nof_subc;
-    uint32_t dst_offset;
-    uint32_t map_offset;
-    float    phase_re;
-    float    phase_im;
-    uint32_t apply_window;
-    uint32_t pad;
-  } params = {1u,
-              write.nof_subc,
-              write.dst_offset,
-              write.map_offset % engine->n,
-              write.phase_re,
-              write.phase_im,
-              (write.apply_window && engine->has_window) ? 1u : 0u,
-              0u};
-  [enc setBytes:&params length:sizeof(params) atIndex:10];
-
-  [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
+  encode_grid_write_dispatch(engine, enc, &params, &input, 1u, base, b_in, b_out, b_grid, grid_off, b_in16);
   if (block_accumulating(engine)) {
     // The block's command buffer stays open: the transforms that arrive with it are encoded together and
     // the commit happens when the block ends (see commit_open()). The slot still records WHICH command
@@ -1957,6 +2249,10 @@ bool dft_metal_engine::submit_at(
 
   id<MTLCommandBuffer>         cmd_buf = nil;
   id<MTLComputeCommandEncoder> enc     = nil;
+  // Q9-F4: a plain transform is encoded AFTER whatever the front end deferred, so the order the callers see
+  // is the order the device executes. (The two routes are exclusive for one caller, but "the deferred ones
+  // go first" is the only order that keeps a mixed sequence correct.)
+  flush_pending_front_end(engine);
   if (!encode_into(engine, &cmd_buf, &enc)) {
     return false;
   }
@@ -1980,6 +2276,13 @@ bool dft_metal_engine::submit_at(
   } input = {0u, 0u, 1.0F, 0u};
   [enc setBuffer:b_in offset:0 atIndex:11];
   [enc setBytes:&input length:sizeof(input) atIndex:12];
+  // Q9-F4: the grid-write block is bound EXPLICITLY here (it used to be left unbound on this route, which
+  // only worked because the kernel never reads it with `active = 0`). It has to be bound now: the kernel
+  // reads its multi-transform flag, and the flag of unbound memory is not a value anything can rely on.
+  const dft_grid_write_block no_grid_write = {0u, 0u, 0u, 0u, 1.0F, 0.0F, 0u, 0u};
+  [enc setBuffer:b_out offset:0 atIndex:8];
+  [enc setBuffer:engine->buf_tw offset:0 atIndex:9];
+  [enc setBytes:&no_grid_write length:sizeof(no_grid_write) atIndex:10];
   [enc dispatchThreadgroups:MTLSizeMake(nof_transforms, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(std::min(engine->n, 1024u), 1, 1)];
   if (block_accumulating(engine)) {

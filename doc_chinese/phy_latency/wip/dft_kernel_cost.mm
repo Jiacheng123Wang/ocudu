@@ -84,15 +84,19 @@ tables build_tables(uint32_t n)
 }
 
 /// A grid-write parameter block with the same layout the kernel declares (grid_write_params).
+///
+/// \note The LAST field is the kernel's multi-transform flag (dev doc 6.30): 0 = this block describes ONE
+///       transform, N > 1 = the dispatch carries N transforms and this block is the first entry of a TABLE
+///       of N, indexed by the threadgroup's position in the grid.
 struct grid_write_params {
   uint32_t active;
-  uint32_t dst_offset;
   uint32_t nof_subc;
+  uint32_t dst_offset;
   uint32_t map_offset;
   float    phase_re;
   float    phase_im;
-  uint32_t pad0;
-  uint32_t pad1;
+  uint32_t apply_window;
+  uint32_t batch;
 };
 
 struct input_params {
@@ -215,6 +219,154 @@ int main(int argc, char** argv)
       for (uint32_t x : arms) {
         const arm_result r = run("butterflies only", x, false);
         std::printf("%-28s %10u %14.2f %16.2f\n", "butterflies only (no write)", r.transforms, r.gpu_us_per_dispatch, r.us_per_transform);
+      }
+
+      // ---- THE PRODUCTION FRONT-END SHAPE (dev doc 6.30): one slot, radio int16 input, grid write ON -------
+      //
+      // The table above varies the transforms per dispatch but keeps ONE parameter block and a float2 input.
+      // The front end's own shape is different in both respects, and those are exactly what the batched
+      // dispatch has to support: the input is the RADIO's int16 buffer (one slice per symbol, each with its
+      // own offset), and the grid write is ACTIVE with per-SYMBOL parameters (a different destination row and
+      // a different phase compensation). So this arm measures the two shapes the front end can have:
+      //
+      //   (A) the historical one: 14 dispatches of 1 threadgroup, scalar parameter blocks, one per symbol;
+      //   (B) the batched one:     1 dispatch  of 14 threadgroups, both parameter blocks bound as TABLES
+      //                            indexed by the threadgroup's position in the grid (`batch` = 14).
+      //
+      // It also GRID-COMPARES the two: a batched dispatch whose per-threadgroup parameters were indexed
+      // wrongly (or whose input offsets did not account for the `tgid * n` stride the kernel adds) would
+      // write a different grid, and this arm would say so instead of timing it.
+      {
+        const uint32_t symbols   = 14u;                              // OFDM symbols of one slot
+        const uint32_t cp        = 8u;                               // cyclic-prefix skip
+        const uint32_t slice_smp = cp + n;                           // complex samples per symbol slice
+        const uint32_t row       = nof_subc;                         // one grid row per symbol
+        const uint32_t dst0      = 64u;                              // first row's element offset in the grid
+
+        // The radio's samples: one int16 buffer, the slot's slices laid out one after the other.
+        id<MTLBuffer> b_radio = [device newBufferWithLength:static_cast<NSUInteger>(slice_smp) * symbols * 4u
+                                                    options:MTLResourceStorageModeShared];
+        auto*         radio   = static_cast<int16_t*>(b_radio.contents);
+        for (NSUInteger i = 0; i != b_radio.length / sizeof(int16_t); ++i) {
+          radio[i] = static_cast<int16_t>(static_cast<int>((i * 37u + 11u) % 30011u) - 15000);
+        }
+        // One grid per shape, so the comparison is between what each shape WROTE.
+        const NSUInteger grid_len = static_cast<NSUInteger>(dst0 + row * symbols) * 4u + 4096u;
+        id<MTLBuffer>    b_grid_a = [device newBufferWithLength:grid_len options:MTLResourceStorageModeShared];
+        id<MTLBuffer>    b_grid_b = [device newBufferWithLength:grid_len options:MTLResourceStorageModeShared];
+        std::memset(b_grid_a.contents, 0, grid_len);
+        std::memset(b_grid_b.contents, 0, grid_len);
+
+        const float gain = 1.0F / 32767.0F;
+
+        // (A) 14 dispatches of one threadgroup, scalar blocks - the front end as it was.
+        const auto shape_a = [&](id<MTLBuffer> grid, uint32_t reps) {
+          id<MTLCommandBuffer>         cb  = [q commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          for (uint32_t r = 0; r != reps; ++r) {
+            for (uint32_t s = 0; s != symbols; ++s) {
+              grid_write_params gw{};
+              gw.active       = 1u;
+              gw.nof_subc     = row;
+              gw.dst_offset   = dst0 + s * row;
+              gw.map_offset   = n - row / 2u;
+              gw.phase_re     = std::cos(0.1F * static_cast<float>(s));
+              gw.phase_im     = std::sin(0.1F * static_cast<float>(s));
+              gw.apply_window = 0u;
+              gw.batch        = 0u; // ONE transform per dispatch: the scalar block
+              input_params ip{1u, s * slice_smp, gain, 0u};
+              const uint32_t base = 0u;
+              [enc setComputePipelineState:pipe];
+              [enc setBuffer:b_in offset:0 atIndex:0];
+              [enc setBuffer:b_out offset:0 atIndex:1];
+              [enc setBuffer:b_tw offset:0 atIndex:2];
+              [enc setBuffer:b_perm offset:0 atIndex:3];
+              [enc setBytes:&t.radix2 length:sizeof(uint32_t) atIndex:4];
+              [enc setBytes:&t.radix3 length:sizeof(uint32_t) atIndex:5];
+              const uint32_t inverse = 0u;
+              [enc setBytes:&inverse length:sizeof(uint32_t) atIndex:6];
+              [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
+              [enc setBuffer:grid offset:0 atIndex:8];
+              [enc setBuffer:b_tw offset:0 atIndex:9];
+              [enc setBytes:&gw length:sizeof(gw) atIndex:10];
+              [enc setBuffer:b_radio offset:0 atIndex:11];
+              [enc setBytes:&ip length:sizeof(ip) atIndex:12];
+              [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(std::min(n, 1024u), 1, 1)];
+            }
+          }
+          [enc endEncoding];
+          [cb commit];
+          [cb waitUntilCompleted];
+          return (cb.GPUEndTime - cb.GPUStartTime) * 1e6 / reps;
+        };
+
+        // (B) ONE dispatch of 14 threadgroups, both parameter blocks bound as TABLES.
+        const auto shape_b = [&](id<MTLBuffer> grid, uint32_t reps) {
+          grid_write_params gw[symbols];
+          input_params      ip[symbols];
+          for (uint32_t s = 0; s != symbols; ++s) {
+            gw[s]           = grid_write_params{};
+            gw[s].active    = 1u;
+            gw[s].nof_subc  = row;
+            gw[s].dst_offset = dst0 + s * row;
+            gw[s].map_offset = n - row / 2u;
+            gw[s].phase_re   = std::cos(0.1F * static_cast<float>(s));
+            gw[s].phase_im   = std::sin(0.1F * static_cast<float>(s));
+            gw[s].batch      = symbols; // THE FLAG: this dispatch carries `symbols` transforms
+            // The kernel reads threadgroup tgid at `ip[tgid].offset + tgid * n + perm[i]`, so the entry is
+            // the slice's own offset MINUS that stride - the compensation the engine applies.
+            ip[s] = input_params{1u, s * slice_smp - s * n, gain, 0u};
+          }
+          id<MTLCommandBuffer>         cb  = [q commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          for (uint32_t r = 0; r != reps; ++r) {
+            const uint32_t base = 0u;
+            [enc setComputePipelineState:pipe];
+            [enc setBuffer:b_in offset:0 atIndex:0];
+            [enc setBuffer:b_out offset:0 atIndex:1];
+            [enc setBuffer:b_tw offset:0 atIndex:2];
+            [enc setBuffer:b_perm offset:0 atIndex:3];
+            [enc setBytes:&t.radix2 length:sizeof(uint32_t) atIndex:4];
+            [enc setBytes:&t.radix3 length:sizeof(uint32_t) atIndex:5];
+            const uint32_t inverse = 0u;
+            [enc setBytes:&inverse length:sizeof(uint32_t) atIndex:6];
+            [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
+            [enc setBuffer:grid offset:0 atIndex:8];
+            [enc setBuffer:b_tw offset:0 atIndex:9];
+            [enc setBytes:gw length:sizeof(grid_write_params) * symbols atIndex:10];
+            [enc setBuffer:b_radio offset:0 atIndex:11];
+            [enc setBytes:ip length:sizeof(input_params) * symbols atIndex:12];
+            [enc dispatchThreadgroups:MTLSizeMake(symbols, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(std::min(n, 1024u), 1, 1)];
+          }
+          [enc endEncoding];
+          [cb commit];
+          [cb waitUntilCompleted];
+          return (cb.GPUEndTime - cb.GPUStartTime) * 1e6 / reps;
+        };
+
+        // One warm-up slot each (the first dispatch of a queue pays the pipeline's own setup).
+        (void)shape_a(b_grid_a, 1u);
+        (void)shape_b(b_grid_b, 1u);
+        std::memset(b_grid_a.contents, 0, grid_len);
+        std::memset(b_grid_b.contents, 0, grid_len);
+
+        constexpr uint32_t reps      = 200u;
+        const double       us_a      = shape_a(b_grid_a, reps);
+        const double       us_b      = shape_b(b_grid_b, reps);
+        const bool         identical = (std::memcmp(b_grid_a.contents, b_grid_b.contents, grid_len) == 0);
+        std::printf("\n--- the front end's own shape: %u symbols, radio int16 input, grid write ACTIVE ---\n", symbols);
+        std::printf("%-52s %10.2f us/slot\n", "14 dispatches x 1 threadgroup (scalar blocks)", us_a);
+        std::printf("%-52s %10.2f us/slot\n", " 1 dispatch  x 14 threadgroups (per-tgid tables)", us_b);
+        std::printf("%-52s %10.2fx\n", "speed-up", us_a / us_b);
+        std::printf("%-52s %s\n",
+                    "the two shapes wrote the same grid",
+                    identical ? "YES (batched == per-symbol, byte for byte)" : "NO - THE TABLE PATH IS WRONG");
+        if (!identical) {
+          std::printf("FAIL: the batched dispatch wrote a different grid\n");
+          return 1;
+        }
       }
       (void)q;
     }

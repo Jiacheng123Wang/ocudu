@@ -50,6 +50,16 @@ struct grid_write_params {
   float phase_re;     // per-symbol compensation (phase compensation * scaling), real part
   float phase_im;     // ... imaginary part
   uint  apply_window; // 1 = multiply by the per-element table
+  /// MULTI-TRANSFORM DISPATCH (dev doc 6.30): 0 = this is ONE transform's parameter block, exactly as it
+  /// always was; N > 1 = the dispatch carries N transforms (one threadgroup each) and BOTH parameter blocks
+  /// are TABLES of N entries indexed by the threadgroup's position in the grid.
+  ///
+  /// Why it exists: a whole slot's transforms are independent, and one threadgroup per dispatch is
+  /// LATENCY-bound (measured offline: 12.18us per single-threadgroup dispatch of an n=768 transform, and
+  /// 200 of them in one command buffer do not overlap), while the same 14 transforms in ONE dispatch cost
+  /// 13.75us. The front end used to issue one dispatch per symbol, i.e. ~171us of device window per slot
+  /// for arithmetic worth 14us. The flag lives in the parameter block rather than in a new kernel argument
+  /// so that every existing dispatch site keeps its argument list.
   uint  pad;
 };
 
@@ -121,13 +131,24 @@ kernel void dft_dit(device const float2* in      [[buffer(0)]],
                     constant uint&       base    [[buffer(7)]], // element offset of the first transform
                     device ushort*       grid    [[buffer(8)]], // grid storage (cbf16 pairs), unused when inactive
                     device const float2* window  [[buffer(9)]], // per-element table, unused when inactive
-                    constant grid_write_params& gw [[buffer(10)]],
+                    constant grid_write_params& gw_block [[buffer(10)]],
                     device const short2* in16    [[buffer(11)]], // radio samples, unused when is_ci16 = 0
-                    constant input_params& ip    [[buffer(12)]],
+                    constant input_params& ip_block [[buffer(12)]],
                     uint                 tid     [[thread_position_in_threadgroup]],
                     uint                 tgid    [[threadgroup_position_in_grid]])
 {
     threadgroup float2 buf[MAX_FFT_N];
+
+    // MULTI-TRANSFORM DISPATCH (dev doc 6.30): with gw_block.pad = N > 1 this dispatch carries N
+    // transforms - one threadgroup each - and both parameter blocks are tables indexed by the threadgroup's
+    // position in the grid (bound over the whole array). pad = 0 is the historical single-parameter form,
+    // where the two references below point at entry 0 of a one-entry block and nothing changes.
+    //
+    // The address arithmetic is on the CONSTANT address space the parameters were bound in, so a batched
+    // dispatch needs no second kernel and no new argument: entry tgid is `&gw_block + tgid`.
+    const uint                        batch = gw_block.pad;
+    constant const grid_write_params& gw    = *(&gw_block + ((batch != 0u) ? tgid : 0u));
+    constant const input_params&      ip    = *(&ip_block + ((batch != 0u) ? tgid : 0u));
 
     // N = 2^k * 3^m.
     uint n3 = 1;

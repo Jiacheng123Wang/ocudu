@@ -45,6 +45,8 @@
 #       slot's group closed - the population no earlier instrument reported at all (6.19)
 #   D15 (6.26, INFO) fix B: how many blocks a DRY pool dropped (instead of parking the receive thread and
 #       letting the radio's ring overflow). The criterion it serves is D4 (gaps)
+#   D16 (6.30, INFO) the batched front end: how many front-end dispatches carried more than one transform
+#       (`OCUDU_DFT_BATCH_SYMBOLS=N`) and the knob the run asked for - `batch_max=1` is the A/B control
 #   D14 (6.24, INFO) the on-demand P0 dump: printed by the receive thread when it has been parked on a dry pool
 #       for more than 20 ms, i.e. when a stall is HAPPENING - the readings below it are a snapshot from inside it
 #   D13 (6.20/6.21, INFO) the commit handshake: how often a consumer was handed a generation whose carrier had
@@ -420,6 +422,27 @@ if [ "${dump_n:-0}" = "0" ]; then
 else
   check "[INFO] D14 (6.24) did the receive thread park long enough to dump" "reported, not judged" INFO \
         "$dump_n snapshot(s), last: ${dump_line:-?}  <-- THIS LEG STALLED: read the lines below the dump as readings taken DURING the stall"
+fi
+# D16 (batched front end, dev doc 6.30): the front-end dispatches that carried MORE THAN ONE transform, and the
+# knob the run asked for. `batch_max=1` is the A/B control arm (one dispatch per symbol, the historical shape);
+# `batch_max>1` with `batched=0/0` is a FINDING - the deferral never happened (no slot took the radio-input
+# path inside an open block), not a silent no-op. The reading is INFO: what the batching is worth on air is V1's
+# business, and this line only says whether the mechanism ran.
+batch_line=$(grep -a "\[metal_stats\] dft commits=" "$LEGF" | tail -1)
+batch_pair=$(printf '%s' "$batch_line" | grep -oE "batched=[0-9]+/[0-9]+" | head -1)
+batch_max=$(printf '%s' "$batch_line" | grep -oE "batch_max=[0-9]+" | grep -oE "[0-9]+$")
+if [ -z "${batch_pair:-}" ]; then
+  check "[INFO] D16 (6.30) did the front end batch a slot's transforms into one dispatch" "reported, not judged" INFO \
+        "no 'batched=' field: ${batch_line:-<absent>} - a leg flown before 6.30 cannot say"
+elif [ "${batch_pair}" = "batched=0/0" ] && [ "${batch_max:-1}" != "1" ]; then
+  check "[INFO] D16 (6.30) did the front end batch a slot's transforms into one dispatch" "reported, not judged" INFO \
+        "${batch_pair} batch_max=${batch_max}: THE DEFERRAL NEVER HAPPENED - no radio-input transform was submitted inside an open block, so this leg is not an A/B of the batched front end"
+elif [ "${batch_max:-1}" = "1" ]; then
+  check "[INFO] D16 (6.30) did the front end batch a slot's transforms into one dispatch" "reported, not judged" INFO \
+        "${batch_pair} batch_max=1: this leg asked for the PER-SYMBOL shape (the A/B control arm), as expected"
+else
+  check "[INFO] D16 (6.30) did the front end batch a slot's transforms into one dispatch" "reported, not judged" INFO \
+        "${batch_pair} batch_max=${batch_max}: the front end DID defer  <-- compare this leg's V1 and [ul_gpu_lane] front-end window against the batch_max=1 legs (p16-p21); ${batch_pair} is dispatches/transforms"
 fi
 occ_line=$(grep -a "queue occupancy (Q9-F3): commits=" "$LEGF" | tail -1)
 occ_hole=$(grep -a "hole .*-> next label" "$LEGF" | head -1)
