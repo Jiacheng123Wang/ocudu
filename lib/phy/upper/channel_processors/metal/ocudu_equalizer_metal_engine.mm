@@ -93,6 +93,30 @@ static void eq_stats_wait() {}
 /// Batch diagnostics of the deferred burst (see equalizer_metal_engine::batch_diag). Kept in every
 /// build: the counters cost a few relaxed increments per flush and are the only way to tell a group
 /// that fell back to one dispatch per symbol from one that was batched.
+/// \brief dev doc 6.44 (V1): which DISPATCH SITE the equalizer's dispatches come from.
+///
+/// Why it exists: the hop's fused command buffer carries ~12 dispatches (measured on `p27`: 1,735,995
+/// dispatches over 144,655 hops = 12.0/hop, of which the `stage::equalizer` counter takes 9.0), and its GPU
+/// window is ~613 us while the arithmetic inside it is estimated at ~150 us. `stage::equalizer` lumps FOUR
+/// different kernels together (the two gathers, the table build and the equalize itself), so "the equalizer is
+/// 9 dispatches per hop" cannot say WHICH one to merge - the same blindness the `busy split` had before the
+/// stages were separated. These counters are the per-SITE split: a dispatch is expensive because of its LAUNCH
+/// latency (a single-threadgroup dispatch costs ~12 us of window even when its arithmetic is under a
+/// microsecond, dev doc 6.29/6.30), so the site that issues one dispatch per symbol is the one to batch.
+struct eq_site_diag_t {
+  std::atomic<uint64_t> ch_gather{0};   // eq_build_gather_on_device: the per-(rb, symbol) channel gather
+  std::atomic<uint64_t> y_gather{0};    // eq_encode_gather_dispatch: the received-symbol gather
+  std::atomic<uint64_t> y_batch{0};     // eq_encode_batch_dispatch: the batched received-symbol path
+  std::atomic<uint64_t> run{0};         // enqueue_burst_batch_at: ONE dispatch per run of symbols
+  std::atomic<uint64_t> single{0};      // enqueue_burst: one dispatch for one symbol (the sync path)
+};
+
+eq_site_diag_t& eq_site_diag()
+{
+  static eq_site_diag_t* s = new eq_site_diag_t(); // leaked on purpose, like the other reports
+  return *s;
+}
+
 struct eq_batch_diag_t {
   std::atomic<uint64_t> flushes{0};
   std::atomic<uint64_t> symbols{0};
@@ -131,13 +155,19 @@ const bool eq_batch_diag_registered = []() {
     const eq_batch_diag_t& d = eq_batch_diag();
     const char*            brk = d.first_break.load(std::memory_order_relaxed);
     std::fprintf(stderr,
-                 "[metal_stats] eq_batch flushes=%llu symbols=%llu runs=%llu batched=%llu max_run=%u first_break=%s\n",
+                 "[metal_stats] eq_batch flushes=%llu symbols=%llu runs=%llu batched=%llu max_run=%u "
+                 "first_break=%s sites(ch_gather=%llu y_gather=%llu y_batch=%llu run=%llu single=%llu)\n",
                  static_cast<unsigned long long>(d.flushes.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(d.symbols.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(d.runs.load(std::memory_order_relaxed)),
                  static_cast<unsigned long long>(d.batched_runs.load(std::memory_order_relaxed)),
                  d.max_run.load(std::memory_order_relaxed),
-                 (brk == nullptr) ? "none" : brk);
+                 (brk == nullptr) ? "none" : brk,
+                 static_cast<unsigned long long>(eq_site_diag().ch_gather.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(eq_site_diag().y_gather.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(eq_site_diag().y_batch.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(eq_site_diag().run.load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(eq_site_diag().single.load(std::memory_order_relaxed)));
   });
   return true;
 }();
@@ -819,6 +849,7 @@ static id<MTLComputePipelineState> eq_encode_batch_dispatch(id<MTLComputeCommand
   [enc setBytes:&strides length:sizeof(strides) atIndex:6];
   [enc dispatchThreads:MTLSizeMake(nof_re, n_run, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
+    eq_site_diag().y_batch.fetch_add(1, std::memory_order_relaxed);
   return pipeline;
 }
 
@@ -970,6 +1001,7 @@ static bool eq_build_gather_on_device(eq_engine_impl* engine, id<MTLComputeComma
   [enc dispatchThreads:MTLSizeMake(275, std::max(plan.nof_symbols, 1u), 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
+    eq_site_diag().ch_gather.fetch_add(1, std::memory_order_relaxed);
   t.geometry = plan.geometry;
   t.valid    = true;
   if (std::getenv("OCUDU_EQ_TABLE_CHECK") != nullptr) {
@@ -1159,6 +1191,7 @@ static bool eq_encode_gather_dispatch(id<MTLComputeCommandEncoder> enc,
   [enc setBuffer:b_taps offset:0 atIndex:4];
   [enc dispatchThreads:MTLSizeMake(nof_re, n_sym, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
+    eq_site_diag().y_gather.fetch_add(1, std::memory_order_relaxed);
   return true;
 }
 
@@ -1527,6 +1560,7 @@ bool equalizer_metal_engine::enqueue_burst(const ch_est_binding& h,
     [enc setBuffer:b_s.buffer offset:b_s.offset atIndex:5];
     [enc dispatchThreads:MTLSizeMake(nof_re, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
+    eq_site_diag().single.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
   ///@}
@@ -1651,6 +1685,7 @@ bool equalizer_metal_engine::enqueue_burst_batch_at(const ch_est_binding& h,
   [enc setBytes:&strides length:sizeof(strides) atIndex:6];
   [enc dispatchThreads:MTLSizeMake(nof_re, nof_symbols, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
   metal::shared_burst::count_dispatch(metal::shared_burst::stage::equalizer);
+    eq_site_diag().run.fetch_add(1, std::memory_order_relaxed);
   ++engine->batch_dispatches;
   return true;
 }
