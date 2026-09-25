@@ -28,10 +28,11 @@
 | **V5** 不回归 | 契约 8/8、0 crossings | ✅ `p37`/`p38` 契约 **MET 8/8**、**`gaps=0`、`rx_overflows=0`** | §6.53/§6.57/§6.60 |
 | **V3** 电台 | RF 失败 ≤10 | ⏸ **另案暂停（用户裁决）**：`p38` 1546（`p37` 880、`p35` 710）⇒ **逐腿天气不同，比较要成对** | §6.40–§6.43、§6.56③ |
 
-**当前状态**：写本 memo 时的 HEAD 是 `bc149ab266`（= `-5` 那份 memo 自己的提交），**工作区不干净**（本会话的改动尚未提交，
-见 §5 的文件地图）；`build/hashes.h` = `bc149ab266`，`build/apps/gnb/gnb` 内含该戳（**开工前按老办法自行对齐**：
-`git log --oneline -1` 与 `grep -oE '[0-9a-f]{10}' build/hashes.h | head -1` 必须相同、且
-`grep -aq "$(grep -oE '[0-9a-f]{10}' build/hashes.h | head -1)" build/apps/gnb/gnb` 为真）。
+**当前状态**：写本 memo 时的 HEAD 是 `bc149ab266`（= `-5` 那份 memo 自己的提交）；本会话的**代码提交是 `5a375cb1ba`**
+（"lever C: K2 reads the least-squares pilots itself…"），**本 memo 的提交紧随其后**（所以 HEAD 会再往后一格 —— **别引用本 memo 自己的哈希**，
+按下面的老办法自行对齐即可）。开工前：`git log --oneline -1` 与
+`grep -oE '[0-9a-f]{10}' build/hashes.h | head -1` 必须相同、且
+`grep -aq "$(grep -oE '[0-9a-f]{10}' build/hashes.h | head -1)" build/apps/gnb/gnb` 为真。
 ⚠ `ul_chain_replay` **从不内嵌该戳**（它不链 versioning 目标）⇒ 对它做 `grep -aq` 判据**恒为假**，别误判成"旧二进制"。
 **没有腿在跑**，**没有 gNB 在跑**。
 **交付配置**：接收环 **512 帧**、发送环 64、池 **32**、`otw_format: sc12`、`srate 23.04`（`configs/gnb_rf_b200_tdd_n78_20mhz.yml`）。
