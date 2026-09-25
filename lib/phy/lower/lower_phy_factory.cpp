@@ -152,6 +152,38 @@ public:
     std::unique_ptr<lower_phy_uplink_processor> ul_proc = uplink_proc_factory->create(ul_proc_config);
     ocudu_assert(dl_proc, "Failed to create the UL processor.");
 
+    // dev doc 6.34/6.36: the pool the formula above produces, and the DIAGNOSTIC arm that overrides it.
+    //
+    // P1-4 ("pool capacity, diagnostic"): the workspace's ruling is that ENLARGING the pool is a diagnostic -
+    // it can prove the causal chain (hold -> dry pool -> park -> underflow) but it does not shorten the span -
+    // and that a delivery-side resize has to be P2-D, judged on V1 and V2 together. So this is an ARM, it says
+    // so on stderr when it is armed, and it only ever grows: a SMALLER pool than the formula's is the one
+    // configuration the tests measured deadlocking (four buffers deadlocked, nine passed, see the comment
+    // above), and a diagnostic arm has no business re-opening that.
+    unsigned nof_rx_buffers = std::max({8U,
+                                        rx_to_tx_max_delay / rx_buffer_size,
+                                        (max_pipeline_depth * max_symbol_size) / rx_buffer_size + 8U});
+    if (const char* pool_env = std::getenv("OCUDU_UL_RX_POOL_SIZE"); pool_env != nullptr) {
+      const unsigned long requested = std::strtoul(pool_env, nullptr, 10);
+      if (requested > nof_rx_buffers) {
+        std::fprintf(stderr,
+                     "[ul_rx_pool] OCUDU_UL_RX_POOL_SIZE=%lu is a DIAGNOSTIC arm (P1-4, dev doc 6.36): the "
+                     "receive pool is %u buffers instead of the computed %u. Read starved_events/held_max "
+                     "AGAINST the legs that used the computed size - a diagnostic proves the causal chain, it "
+                     "is not a delivery option\n",
+                     requested,
+                     static_cast<unsigned>(requested),
+                     nof_rx_buffers);
+        nof_rx_buffers = static_cast<unsigned>(requested);
+      } else if (requested != 0ul) {
+        std::fprintf(stderr,
+                     "[ul_rx_pool] OCUDU_UL_RX_POOL_SIZE=%lu is not larger than the computed %u and is "
+                     "IGNORED (a smaller pool is the configuration the tests measured deadlocking)\n",
+                     requested,
+                     nof_rx_buffers);
+      }
+    }
+
     // Prepare processor baseband adaptor configuration.
     lower_phy_baseband_processor_configuration proc_bb_adaptor_config = {
         .srate                  = config.srate,
@@ -179,9 +211,7 @@ public:
         // single-threaded executor that runs the receive loop and the uplink processing on one thread
         // - the unit tests - where a blocked receive task would otherwise starve the very tasks that
         // release it (measured: four buffers deadlocked, nine passed).
-        .nof_rx_buffers         = std::max({8U,
-                                            rx_to_tx_max_delay / rx_buffer_size,
-                                            (max_pipeline_depth * max_symbol_size) / rx_buffer_size + 8U}),
+        .nof_rx_buffers         = nof_rx_buffers,
         .system_time_throttling = config.system_time_throttling,
         .stop_nof_slots         = 2 * config.max_processing_delay_slots};
 
