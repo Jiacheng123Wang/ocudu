@@ -271,7 +271,7 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
 #    ⚠ 加压配方 `iperf3 -c <phone> -R -b 40M -P 4 -t 240`：`-R` 不能省（否则变成下行负载）
 
 # 3) 判据
-bash doc_chinese/phy_pipeline_gpu/wip/p0_gate.sh <腿> [--vs=<出厂臂>]   # P0 读数（只读日志）
+bash doc_chinese/phy_latency/wip/p0_gate.sh <腿> [--vs=<出厂臂>]   # P0 读数（只读日志）
 bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 <腿>    # ⚠ 只用于加压腿
 bash doc_chinese/phy_pipeline_gpu/wip/milestone_audit.sh               # 里程碑门（~3 分钟，互斥锁）
 ```
@@ -425,7 +425,7 @@ OCUDU_LANE_DIAG_SPLIT=1 build/lib/phy/generic_functions/metal/dft_release_adopt_
 ```bash
 # 起腿前：pgrep -x gnb / pgrep -x ul_chain_replay / lsof -nP -iUDP:2152 都要干净
 sudo -E OCUDU_UL_PHASE_SEGMENTS=1 bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label>   # n1 默认配方 + 标准流量
-bash doc_chinese/phy_pipeline_gpu/wip/p0_gate.sh <label>        # 读 C2（配对 n == 相位 n）与 paired ratios/reading
+bash doc_chinese/phy_latency/wip/p0_gate.sh <label>        # 读 C2（配对 n == 相位 n）与 paired ratios/reading
 ```
 **先写死的判读**：C2 绿 ⇒ 两个探针从此描述同一批跳，D 项（本跳设备执行）的分母可用；
 C2 红 ⇒ 先查 `paired …` 行里的分项（`no lane for the slot` / `lane older than 2s` / `awaiting at exit`），再决定是配对的哪个前提错了。
@@ -923,7 +923,7 @@ libc++abi: terminating due to uncaught exception of type std::__1::system_error:
 
 | 路径 | 内容 |
 |---|---|
-| `doc_chinese/work_tmp/p0_7/leg_census.py` | **腿普查脚本**（UL 静默表 + RF/pool 事件 + 静默窗口里的 DL 活动）——§6.6/§6.8 的表格就是它跑出来的；带用法的 docstring |
+| **`doc_chinese/phy_latency/wip/leg_census.py`** | **腿普查脚本**（UL 静默表 + RF/pool 事件）——§6.6/§6.8 的表格就是它跑出来的。⚠ 它**已从 `work_tmp/` 搬进本阶段的 `wip/` 并被跟踪**（用户 2026-09-25：新工具按阶段放本阶段 `wip/`；门与判据只许依赖被跟踪的文件，见 §5.3 与本阶段 `wip/README.md`）|
 | `doc_chinese/work_tmp/p0_7/q9_conc2_census.txt` | 腿 `q9-conc2` 的普查输出（存档） |
 | `doc_chinese/work_tmp/p0_7/q9_leg_record.md` | §6.8 的原始记录（并入本文之前的稿） |
 | `doc_chinese/work_tmp/ref/replay_head_pre_p05` | **P0-5 之前的 pristine HEAD `ul_chain_replay` 二进制**，用于"与 pristine HEAD 逐字节相同"这条网（每次重新构建较贵，故留一份） |
@@ -1077,5 +1077,5 @@ n1 默认配方 + `OCUDU_UL_PHASE_SEGMENTS=1`：
 
 **离线载体**：`dft_release_adopt_metal_test`（P0-1/P2-E 的 Metal 臂）、`ul_pipeline_probe_test`（P0-5 的 hook 契约）、
 `tests/unittests/du_low/du_low_executor_mapper_test.cpp`（P0-6 的规则）、`ul_chain_replay`（逐字节/容差网）。
-**门与工具**：`p0_gate.sh`（A1/A2/B1/B2/C1/**C2**）、`leg_gate.sh`（只用于加压腿）、`milestone_audit.sh`（互斥锁）、
+**门与工具**：本阶段的 `phy_latency/wip/`（`p0_gate.sh`：A1/A2/B1/B2/C1/**C2**/C2b；`leg_census.py`：腿普查）与上一阶段的 `phy_pipeline_gpu/wip/`（`leg_gate.sh`（只用于加压腿）、`milestone_audit.sh`（互斥锁）、
 `ab_dumps.sh`、`value_net.py`、`l1_handover_arms.sh`、`l1_hop_arms.sh`、`edge_block_arms.sh`、`run_leg.sh`。

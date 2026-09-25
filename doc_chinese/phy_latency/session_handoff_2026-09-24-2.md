@@ -72,4 +72,4 @@
   `s85`（P0-5 立项）、`s86`（P0-1 空口）、`s84-p0`（P0-6 空口）。
 * 离线载体：`dft_release_adopt_metal_test`（P0-1/P2-E）、`ul_pipeline_probe_test`（P0-5 hook 契约）、
   `du_low_executor_mapper_test`（P0-6 规则）、`ul_chain_replay`（逐字节/容差网）。
-* 门与工具：`phy_pipeline_gpu/wip/`（`p0_gate.sh` / `leg_gate.sh` / `milestone_audit.sh` / `run_leg.sh` / `ab_dumps.sh` / `value_net.py` / `l1_*_arms.sh` / `edge_block_arms.sh`）。
+* 门与工具：**本阶段** `phy_latency/wip/`（`p0_gate.sh` / `leg_census.py`，2026-09-25 起）；**上一阶段** `phy_pipeline_gpu/wip/`（`run_leg.sh` / `milestone_audit.sh` / `leg_gate.sh` / `ab_dumps.sh` / `value_net.py` / `l1_*_arms.sh` / `edge_block_arms.sh`）。

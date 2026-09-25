@@ -77,7 +77,7 @@
 
 ### P0 读数门（只读日志、**可在用户飞腿时安全运行**）
 
-`bash doc_chinese/phy_pipeline_gpu/wip/p0_gate.sh <腿> [--vs=<出厂臂>]`
+`bash doc_chinese/phy_latency/wip/p0_gate.sh <腿> [--vs=<出厂臂>]`
 判据：**A1** 两行 `[ul_lane_exec]` 存在且"生效值 == `pusch_executor.max_concurrency`"；**A2** 形态与值一致（`≤1`⇒STRAND，`>1`⇒fork）；
 **B1** 拆分臂必须有 `dft=`、出厂臂必须没有；**B2** 各段之和在出厂臂 `merged_hop` 的 ±10% 内；
 **C1**（只在腿自报 `OCUDU_UL_PHASE_SEGMENTS=1` 时判）相位分段确实被记录；P0-5 的配对**只报不判**（没登记过阈值）。
@@ -197,7 +197,7 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
 #    ⚠ 加压配方 `iperf3 -c <phone> -R -b 40M -P 4 -t 240`：`-R` 不能省（否则变成下行负载）
 
 # 3) 判据
-bash doc_chinese/phy_pipeline_gpu/wip/p0_gate.sh <腿> [--vs=<出厂臂>]   # P0 读数（只读日志）
+bash doc_chinese/phy_latency/wip/p0_gate.sh <腿> [--vs=<出厂臂>]   # P0 读数（只读日志）
 bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 <腿>    # ⚠ 只用于加压腿（默认腿上它的两条 VALIDITY 必然红）
 bash doc_chinese/phy_pipeline_gpu/wip/milestone_audit.sh               # 里程碑门（~3 分钟，互斥锁）
 ```
@@ -221,7 +221,7 @@ bash doc_chinese/phy_pipeline_gpu/wip/milestone_audit.sh               # 里程�
 | **`doc_chinese/phy_latency/session_handoff_2026-09-24-1.md`** | **本 memo（新会话只读这一份即可开工）** |
 | 开发文档 §6.4.1 | P2-E 的实施计划原文摘要（实测结果见 §6.4.3）|
 | `doc_chinese/phy_pipeline_gpu/gpu_phy_pipeline_design_and_implementation.md` | 主设计文档（**追加式**，§5.9.131–§5.9.138 是本会话记录；行号会漂，按句子检索）|
-| `doc_chinese/phy_pipeline_gpu/wip/` | 门与工具：`milestone_audit.sh`、`p0_gate.sh`、`leg_gate.sh`、`run_leg.sh`、`ab_dumps.sh`、`ul_load.sh`、`wall_ab.sh` |
+| `doc_chinese/phy_pipeline_gpu/wip/` | 上一阶段的门与工具（仍在用）：`milestone_audit.sh`、`leg_gate.sh`、`run_leg.sh`、`ab_dumps.sh`、`ul_load.sh`、`wall_ab.sh`；**本阶段自己的工具在 `doc_chinese/phy_latency/wip/`**（2026-09-25 迁出 `p0_gate.sh`，并新增 `leg_census.py`）|
 
 ## 9. 仍挂着的事（按优先级）
 
