@@ -35,7 +35,11 @@
    **环的代价 = 池要接住突发**（`held_max` 16 vs 11、`starved_events` 2 vs 0）⇒ **V5 ↔ V2 的交换，已量出**；
    **Q17 逐事件定案：传输侧**（五次 overflow 全是 `recv_us≈1.5–1.9 ms`、`loop_us≈2 µs`；两腿的宿主 `loop` 都只有 1 次 >1 ms）
    ⇒ **打宿主调度臂无效**，目标是 USB/电台。
-**⇒ 需要你裁决**（§6.53 ④）：**A（推荐）= 256 帧 + 池按 P2-D 规则重算（16+2+3 ⇒ 32）**；B = 回 64 帧；C = 打 USB 根因。
+**⇒ 用户已裁决 A + C 并行，两件都已落地**（开发文档 **§6.54**）：
+* **A**：池按 P2-D 规则用新测量重算 ⇒ **32**（峰值 16 + 2 + 3 = 21 ⇒ 2 的幂；**启动行现在宣布真实尺寸**），环回到 **256 帧**；
+* **C**：`[ul_rx_timing]` 增加 **`load1`**（overflow 事件自带宿主负载上下文 ⇒ 一次读出"宿主把它们饿着"还是"设备/线在停"）；
+  USB 拓扑已实测**没问题**（独立控制器、USB3 5 Gb/s、无共用设备）；两条臂用 **`wip/mk_arm_cfg.sh`** 生成（**只改一行**、拒绝多改、打印 diff）。
+**待飞三条腿**（§3.1d）：`p35-n78-pool32`（A 验收）、`p36-n78-bigframe`（C1）、可选 `p37-n78-sc8`（C2）。
 **主线下一步 = §3.2**（解开 `estimates` 断因让 run 覆盖整跳）。
 
 ---
@@ -183,6 +187,22 @@ sudo -E LEG_CONFIG=... bash .../run_leg.sh gpu p34-n78-ring64 --regime=stress OC
 **判读**：`rx_overflows`/`gaps`（64 帧下应回到 ≥1）、`slip` 的 max/`over 1ms`（19.45 ms 那次还在不在）、
 `held_max`/`starved_events`/`pop_blocking`（池的顶格是不是环带来的）。两条合起来才能判"环换来了什么、代价是什么"。
 **若保留深环**：池要按 **P2-D 自己的规则**用新测量重算（16+2+3=21 ⇒ **32**）——那是**改交付参数，要用户裁决**，不是改阈值。
+
+### 3.1d ⏳（三条腿待飞）：A（池 32 + 环 256）与 C（传输根因）
+
+**已落地**（开发文档 **§6.54**，提交 `ab6d2703b5` + `9e1d511548`）：
+* **A**：`lower_phy_factory` 的峰值改 **16**（256 帧环下的实测；旧值 11 是 64 帧环产生的），
+  `16+2+3=21` ⇒ **显式向上取 2 的幂 ⇒ 池 32**，启动行现在打印**真实存在**的尺寸；
+  腿配置 `num_recv_frames` 回 **256**（`num_send_frames` 保持 64）。
+* **C**：`[ul_rx_timing]` 加 `load1`（只在尾事件采样）⇒ `overflow_ctx=[recv_us=…,loop_us=…,load1=…]`；
+  USB 拓扑实测**无问题**（独立控制器 / USB3 5 Gb/s / 无共用设备）；
+  `wip/mk_arm_cfg.sh <bigframe|sc8>` 生成臂配置（**恰好一行**、否则拒绝、打印 diff）。
+
+| 腿 | 命令要点 | 预登记 |
+|---|---|---|
+| **`p35-n78-pool32`** | 默认配置 | **V2 `starved_events=0` 且 `held_max<32`**、**V5 `gaps=0`**、`rx_overflows=0`、启动行 `size=32`、V1/V4 与 `p33` 同形 |
+| **`p36-n78-bigframe`** | `LEG_CONFIG=doc_chinese/work_tmp/arm_bigframe.yml` | 与 p35 成对：`recv` 的 `>1ms` 计数与 `slip` max 下降、`rx_overflows` 不增、`load1` 同量级 |
+| （可选）**`p37-n78-sc8`** | `LEG_CONFIG=doc_chinese/work_tmp/arm_sc8.yml` | **只判传输读数**（波形变了）；`recv` 尾巴显著变短 ⇒ 带宽是约束，否则是驱动/调度 |
 
 ### 3.2 下一步：解开 `estimates` 断因，让 run 覆盖整跳
 

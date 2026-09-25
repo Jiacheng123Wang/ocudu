@@ -3955,6 +3955,77 @@ p29  09:28:00.626260 [RF] … overflow  →  09:28:00.627279 [PHY] … (54500 sa
 
 
 
+### 6.54 **用户裁决 A + C 并行**：池按 P2-D 规则用新测量重算（**16 → 32**）、环回到 **256 帧**（A）；overflow 事件自带**宿主负载**上下文、传输侧两条臂用"只改一行"的生成器做出来（C）
+
+#### ① A（交付侧）：池 = 32，且**打印的就是真实存在的那个数**
+
+* P2-D 的规则（§6.38，用户已批）是"**按测得峰值定尺**"：峰值 + 收包路径 2 + margin 3。**变的是峰值**：
+  `p33`（256 帧）测得 `held_max=16` = 当时的池上限、`free_min=0`（⇒ **测量被池本身夹住了，16 是下界**），
+  而 `p34`（64 帧）同一配方只有 11 ⇒ **11 是旧环产生的数**。
+* ⇒ `16 + 2 + 3 = 21`，接收环容量取 **2 的幂**（§6.37 ②）⇒ **池 = 32**。
+* **同时修掉 §6.37 ② 记下的那个仪器缺陷**：把"向上取到 2 的幂"**显式做在工厂里**，于是启动行宣布的就是腿真正会跑的尺寸
+  （原来旋钮 12 会得到 16，而打印说 12）：
+
+  ```
+  [ul_rx_pool] size=32 buffers of 23040 samples (slot=23040, whole-slot buffers, the gpu pipeline mode):
+  floor 8, radio latency 1, symbol pipeline 8, slot pipeline 32
+  (peak 16 + rx path 2 + margin 3 = 21, rounded up to a power of two - the ring's capacity, dev doc 6.53)
+  ```
+* 腿配置里 `num_recv_frames` **回到 256**（A 的另一半），并把 **64 vs 256 的实测对照写在配置旁边**（不是光写一个数字）。
+  `num_send_frames` **保持 64**（发送环是另一个变量，没这样量过）。
+
+#### ② C（根因侧）：三条新读数 + 两条"只改一行"的臂
+
+**先排除掉最容易的一条**：B200 的 USB 拓扑**没有问题**（`ioreg` 实测）——
+在**独立控制器** `AppleT8132USBXHCI@03000000` 下的 USB3 Gen2 Hub 上，**协商到 5 Gb/s（SuperSpeed）**，
+**同控制器上没有别的设备**（另一台设备在另一个控制器上）⇒ 不是"插错口/共用总线"。
+
+**新读数（事件自带上下文）**：`[ul_rx_timing]` 增加 **`load1`**（宿主 1 分钟负载，**只在尾事件时采样**，稳态零成本）：
+
+```
+[ul_rx_timing] ... load1(max at a tail event=N.NN)
+[ul_rx_timing] overflow_ctx=[recv_us=1769,loop_us=3,load1=2.65 ...]
+```
+
+为什么它决定性：Q17（§6.53）已把毫秒定位在 `receive()` 内部、**我们自己的线程不到 2 µs**，
+于是嫌疑落到**我们不拥有的线程**（UHD 的收包 worker、USB 栈）。**负载高 ⇒ 宿主把它们饿着**；**负载低 ⇒ 设备/线在停**。
+⇒ 下一次 overflow 的 `load1` 一读就知道该往哪边打。
+
+**两条臂**（都是**配置**臂，不是命令行臂——实测 `--otw_format`/`--device_args` 是 `ru_sdr` 的**子命令**选项，
+腿脚本用的全局位置会被 parser 拒绝，dry run 就能拦下）：
+
+| 臂 | 变量 | 判读 |
+|---|---|---|
+| **bigframe**（C1）| `recv_frame_size=16384`（**波形不变**，USB 传输更大块）| 判**传输读数**（`recv`/`slip`/`rx_overflows`/`load1`）|
+| **sc8**（C2）| `otw_format: sc8`（**线上速率减半**，波形会变）| 同样只判传输读数；**不判 V1–V5**（波形/链路变了）|
+
+工具：**`wip/mk_arm_cfg.sh <bigframe|sc8>`** —— 从**交付配置**生成臂配置，**拒绝任何不是"恰好改一行"的结果**，
+并把 diff 打出来（腿日志会带配置，diff 就是这只腿移动的变量）：
+
+```
+# arm 'bigframe' generated from gnb_rf_b200_tdd_n78_20mhz.yml - the variable it moves:
+  -  device_args: type=b200,num_recv_frames=256,num_send_frames=64
+  +  device_args: type=b200,num_recv_frames=256,num_send_frames=64,recv_frame_size=16384
+```
+
+#### ③ 离线验证与预登记
+
+* 池：`lower_phy_test` **576/576**、`ctest -L phy` **193/193**；启动行实测为 `size=32 … = 21 …`。
+* 载荷/上下文：夹具里读得到 `load1(max at a tail event=2.65)` 与 `overflow_ctx=[…,load1=2.65]`
+  （夹具读数是夹具的，空口才算——这条警告已写在代码注释里）。
+* 两条臂配置：`--dryrun` 都通过 parser。
+* **待飞的腿与预登记**：
+
+| 腿 | 变量 | 预登记 |
+|---|---|---|
+| **`p35-n78-pool32`**（A）| 交付配置（256 帧 + 池 32）| **V2：`starved_events=0` 且 `held_max<32`**；**V5：`gaps=0`**；`rx_overflows=0`；V1/V4 与 `p33` 同形；启动行 `size=32` |
+| **`p36-n78-bigframe`**（C1）| `LEG_CONFIG=…/arm_bigframe.yml` | 与 p35 成对：`recv` 的 >1ms 计数与 `slip` max 下降（或至少不变差）、`rx_overflows` 不增；`load1` 同量级 |
+| （可选）`p37-n78-sc8`（C2）| `LEG_CONFIG=…/arm_sc8.yml` | 只判传输读数；若 `recv` 尾巴显著变短 ⇒ **带宽是约束**；若不变 ⇒ 是**驱动/调度**而非带宽 |
+
+**判读要点**：`p35` 若 V2 与 V5 **同时绿**，则 A 成立（环不丢样 + 池按新测量有容量）；
+`p36`/`p37` 的作用是把"根因在 USB 的哪一层"钉下来——**它们是诊断腿，不改变交付配置**。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
