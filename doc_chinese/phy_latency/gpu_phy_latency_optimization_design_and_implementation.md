@@ -3733,6 +3733,102 @@ V4 约束的是 `cbs/lane`（**命令缓冲**数/跳），把一跳内的 12 次
 
 
 
+### 6.51 ★★ **残留 gap 的归属收口**：每一次 gap 都是**电台接收环溢出**（最近 11 条腿 **overflow 次数 == gaps 次数，逐事件对应**）；补上 RX 侧仪器（`rx_overflows` / `[ul_rx_timing]` / 门 **D19**）并把接收环 **64 → 256 帧**
+
+> 用户裁决：先把 gap 讲清楚，再做**加深接收环**与**补 RX 侧仪器**这两件。本节是它们的记录。
+
+#### ① 先把现象定清楚（读码 + 11 条腿）
+
+* **定义**：`lower_phy_baseband_processor.cpp` 每次收块比对"本块 `ts`"与"上一块末尾"，不等即记 1 个 gap，
+  `gap_samples += |差|`（**丢或重复的样点数**）；`ts==0`（电台 stop/error 返回）单列，不算 gap。
+  契约项 `radio sample continuity` = `gaps == 0`（无条件）。
+* **三条日志行**：`[RF] Real-time failure in RF: overflow`（因）、
+  `[PHY] Receive stream discontinuity: block at timestamp … where … was expected (N samples)`（只打**第一条**）、
+  退出时 `radio sample continuity: N gaps over M blocks (K samples missing or repeated)`（判据读它）。
+* **量级**（本配置 `srate=23.04` Msps ⇒ 1 样点 = 43.4 ns）：`p29` 3 gaps/1,048,733 样点（45.5 ms）、
+  `p24` 1/1,283,405（55.7 ms）、`p28` 2/285,262（12.4 ms）、`p32` 1/139,378（6.05 ms）、`p32b` 1/78,288（3.40 ms）。
+  **修复前**是 76M–229M 样点 ≈ **3–10 s** ⇒ **"宿主停顿 ⇒ 秒级丢样"那条链已经治好了**（§6.11/§6.22/§6.27/§6.38），
+  剩下的是**毫秒级**的另一种。
+* **与"UL 静默"是两个现象**（别混）：`p31` **0 gaps** 却有 20 段 >0.3 s 的 PUSCH 静默（最长 **6.48 s**）；
+  `p32` 1 gap 而有 28 段（最长 3.96 s）⇒ 秒级静默不是 gap 造成的，属手机/调度侧。
+
+#### ② 归属：1:1，无例外
+
+| 腿 | RX `overflow` | gaps | | 腿 | RX `overflow` | gaps |
+|---|---|---|---|---|---|---|
+| `p20` | 2 | 2 | | `p26` | 0 | 0 |
+| `p21` | 0 | 0 | | `p27` | 0 | 0 |
+| `p22` | 0 | 0 | | `p28`（另一条同配方腿）| 0 / 2 | 0 / 2 |
+| `p23` | 0 | 0 | | `p29` | 3 | 3 |
+| `p24` | 1 | 1 | | **`p32`** | **1** | **1** |
+| `p25` | 0 | 0 | | **`p32b`** | **1** | **1** |
+
+时间戳也吻合（overflow 之后 ~1 ms 就是 discontinuity）：
+
+```
+p32b 10:42:53.152417 [RF] Real-time failure in RF: overflow
+     10:42:53.153088 [PHY] Receive stream discontinuity: … (78288 samples)
+p32  10:27:57.067232 [RF] … overflow
+     10:27:57.067961 [PHY] … (139378 samples)
+p29  09:28:00.626260 [RF] … overflow  →  09:28:00.627279 [PHY] … (54500 samples)
+```
+
+⇒ **机制链**：**宿主（或 USB 传输）没按时抽干 B200 的接收环 ⇒ 环灌满 ⇒ 电台丢样点（UHD 报 `overflow`）
+⇒ 下一块时间戳往后跳 ⇒ 连续性检查记 1 个 gap**。
+**"宿主还是 USB"当时分不出来**，因为 UHD 已经算好的分类**在 gateway 边界被丢掉了**（`metadata` 只带 `ts`），
+只变成一行 warning。
+
+#### ③ 改了什么（本节落地）
+
+| 处 | 改动 |
+|---|---|
+| `baseband_gateway_receiver::metadata` | 增加 `rx_error {none, late, overflow, other}`：**电台自己对这一块的判词**随块一起交上来（默认 `none`，不填的电台不受影响）|
+| `lib/radio/uhd/radio_uhd_rx_stream.cpp` | 把已有的 `md.error_code` 分类**填进 metadata**（原来只用来发事件/日志）|
+| `lib/phy/lower/lower_phy_baseband_processor.{h,cpp}` | 计数 `rx_overflows/rx_lates/rx_other`、**每个 gap 的大小**（`gap_us=[…]`，原来只记第一条）、以及 **`[ul_rx_timing]`**：每次收块的 **RECV**（`receive()` 调用自身时长，TX 侧 `[dl_tx_call]` 的孪生）、**LOOP**（上一次返回→本次发起之间，宿主自己的活儿与调度）、**SLIP**（`LOOP+RECV−本块空口时长`，跑在时间线后面的漂移量）与**每次 overflow 的上下文** `overflow_ctx=[recv_us=…,loop_us=…]` |
+| `configs/gnb_rf_b200_tdd_n78_20mhz.yml` | `num_recv_frames` **64 → 256**（`num_send_frames` **刻意不动**：下一条腿只差一个变量）。64 帧在这个速率下只有**毫秒量级**余量（见 ⑤），而自宿主停顿被治好以来的每个 gap 都是 **2–6 ms** ⇒ 这是**缓解**：不消除停顿，只消除**丢样** |
+| `doc_chinese/phy_latency/wip/p0_gate.sh` | **D19（INFO）**：读 `[ul_rx_timing]` + `rx_overflows` + `gap_us`，并按 `overflow_ctx` **自动判"宿主迟到"还是"传输内阻塞"**；`p0_gate_selftest.sh` 对**两个归属各有一个夹具**（只喊一边的解析器过不了）|
+
+**判读表（下一条腿）**：
+
+| `overflow_ctx` | 含义 |
+|---|---|
+| `loop_us` 大（≫ `recv_us`）| **宿主没按时来问**（自身调度；融合车道的宿主线程是嫌疑）⇒ 打**优先级/亲和性/并发度**臂 |
+| `recv_us` 大（≥ `loop_us`）| **调用内部被传输顶住**（电台/USB 背压）⇒ 宿主调度不是杠杆，查 USB/端口/线/`otm_format` |
+| `recv_us` 与 `loop_us` 都小，却仍 overflow | 停顿发生在**两次收块之外**（例如 stop/restart、或 UHD 内部线程）⇒ 看 `gap_us` 大小与 census |
+
+#### ④ 验证（离线）
+
+* **事件路径有齿**：接收 spy 新增 `set_rx_error()`；`lower_phy_test` 新臂 `RadioReceiveOverflowIsReported` 注入
+  "overflow + 5 槽时间戳跳变"，断言**已注册的连续性判据**（就是门 D4 读的那个对象）**必须失败**；
+  该次运行的报告自证：`1 gaps over 3 blocks (122887 samples …), 1 radio receive overflow(s)`，
+  并打出 `gap_us=[…]` 与 `overflow_ctx=[recv_us=531,loop_us=2 …]`。
+* `lower_phy_test` **576/576**；`ctest -L phy` **193/193**（**第一次跑有 1 个失败 = 已知 flake
+  `port_channel_estimator_metal_mmse_unit_test`**，`LastTestsFailed.log` 记下名字，重跑绿）；
+  `p0_gate_selftest.sh` 全 PASS（含 D19 两个归属 + "老腿读不出"三个分支）。
+* **夹具读数不是空口读数**（与 TX 探针同一条警告，已写进代码注释）：夹具里 `recv max=696us / loop max=1503us`
+  只说明夹具怎么驱动，不说明电台。
+
+#### ⑤ 环有多深（为什么 64 → 256 是对的量级）
+
+`num_recv_frames=64` 自 9 月 17 日第一条腿就写死、从没被质疑。按 UHD 的 USB 默认帧长与 `otw_format=sc12` 估，
+64 帧在 23.04 Msps 下是**毫秒量级（~5–8 ms）**的余量——而观测到的 gap 正是 **2.4–6 ms**（`p24` 的 55.7 ms 是一次更长的停顿）。
+**"停顿超过环余量 ⇒ 超出的部分被丢"** 与这些数字量级一致。256 帧把余量抬到 **~20–30 ms**，代价是几 MB，
+**稳态不增加时延**（环按序抽干，深环只在突发时提供余量）。
+
+#### ⑥ 预登记（腿 `p33-n78-rxring`，待飞）
+
+| 读数 | 期望 |
+|---|---|
+| `rx_overflows` | **必须等于 `gaps`**，且等于合并日志里 `[RF] … overflow` 的行数（这条等价关系是本次改动能被"就地"读出来的东西）|
+| `gaps` | **0**（256 帧吸收掉 2–6 ms 的停顿）；若仍 >0 ⇒ **停顿比 ~28 ms 更长**，目标转向传输侧（USB/端口/线）|
+| `[ul_rx_timing]` | `recv`/`loop` 的 max 与本轮对照腿同量级；`slip over 1ms` 少量 |
+| 其余（V1/V2/V4/契约/D18）| 与 `p32` 同形，**不应因本条改动而动**（改的是收包余量与仪器）|
+
+**纪律**：`gaps` 仍按"**按对累计**"读（单腿不当红绿）；**不许为提高通过率改 D4 的阈值**——
+若 ⑥ 证明成因在电台环，V5 的"0 gaps"**是否重新定义**要由用户裁决，而不是悄悄调阈值。
+
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
@@ -3860,6 +3956,7 @@ n1 默认配方 + `OCUDU_UL_PHASE_SEGMENTS=1`：
 | **Q14** | 一跳的设备执行在 n1 上到底是多少？ | ✅ **已收口（P0-5 配对）**：**`busy` = 517 µs（中位）**，不是 residency 836，也不是 n78 加压腿的 1125 ⇒ 引用 D 项必须写清"哪条腿的 busy"（§6.3 ⑥）|
 | **Q15** | 并发 2 的收益来自"两个跳重叠"还是在飞缓冲变多？ | ⚠ **初读（§6.8 ②，未单独开臂）**：`busy max = 1.48 ms` 而 `residency max = 5.004 s`、`carried=986` ⇒ residency 的尾巴是**两条缓冲之间的间隔**，不是设备执行；`cbs/lane=2.00` 不变、`merged_hop` busy **888.8** µs/lane（并发 1 是 540）⇒ **收益来自重叠，代价来自等待链变长** |
 | **Q16** | 去掉 4 次派发后，**V1 降 52.2 µs**（≈13 µs/派发）而**设备占用窗口 `merged_hop` 只降 26.2 µs**（≈6.5 µs/派发）——差的那一半是"小派发被遮住"还是"直读更宽的步长稍贵"？ | ⚠ **量级已由 ABA 收口（§6.50）**：V1 **−52.2 … −69.3**（13–17 µs/派发）、窗口 **−26.2 … −37.7**（6.5–9.4）；同臂腿间噪声 **17.1 µs**。**但两种解释仍分不开**（没有第三个臂）。要分开：`metal_chain_probe` 的 device-slice 臂（比 gather-读 vs 网格直读的 kernel 自身耗时），或照 `wip/dft_kernel_cost.mm` 的形状给均衡 kernel 做离线微基准。⚠ **"12 µs/派发"只用于 V1/跨度口径**，不要用 `merged_hop` 的降幅反推派发数 |
+| **Q17** | 残留 gap 的**停顿**到底在宿主还是在 USB？（成因已收口：**电台接收环溢出**，§6.51 ②） | **仪器已就位、等一条腿**（§6.51 ⑥，腿 `p33-n78-rxring`）：`[ul_rx_timing]` 的 `overflow_ctx` 按 `loop_us`（宿主迟到）vs `recv_us`（传输内阻塞）**自动归属**；接收环同时 64 → 256 帧。**判据**：`rx_overflows` 必须 == `gaps` == 日志里 `[RF] … overflow` 行数；若深环之后仍有 overflow ⇒ 停顿 > ~28 ms，目标转向传输侧 |
 
 ---
 

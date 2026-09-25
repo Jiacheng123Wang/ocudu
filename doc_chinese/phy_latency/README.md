@@ -79,8 +79,9 @@
   Q9-E 处理器滞后、**Q9-F 提交次序、Q9-F2/F3 前端块与队列占用**，见 §6.13–§6.19）＋ D13–D18（INFO 读数：
   **提交握手计数（§6.20/§6.21）、按需 dump（§6.24）、修复 B 的 `dropped=`（§6.26）、
   前端批量化计数 `batched=`/`batch_max=`（§6.30）、发送侧余量 `[dl_tx_slack]`/`[dl_tx_call]`（§6.41/§6.42）、
-  均衡的"在网格里直接读 vs 仍走 gather"及其回退原因 `eq_direct`（§6.48）**）**；
-  自测见 **`wip/p0_gate_selftest.sh`**（D11–D18 双向断言）。
+  均衡的"在网格里直接读 vs 仍走 gather"及其回退原因 `eq_direct`（§6.48）、
+  **接收侧余量与电台判词 `[ul_rx_timing]`/`rx_overflows`/`gap_us`（§6.51）**）**；
+  自测见 **`wip/p0_gate_selftest.sh`**（D11–D19 双向断言，D19 对"宿主迟到/传输阻塞"两个归属各一个夹具）。
 * **`wip/leg_census.py`** —— 腿普查：UL 静默表 + RF/pool 事件（定位"UL 在哪一段停住"）。
 * **`wip/metal_wait_timeout_probe.mm`** —— 离线复现 Metal 对"未被满足的设备侧事件等待"的 **5.00 s 上界**（§6.20）。
 * **`wip/eq_dense_probe.cpp`** —— 离线探针：直接问 `ch_gather_desc::build()`"这个符号的 entries **就是**网格那一段吗"

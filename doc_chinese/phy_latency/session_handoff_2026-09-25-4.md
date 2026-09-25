@@ -27,7 +27,10 @@
 **当前状态**：`HEAD = 戳`（见下），**二进制已携带该戳**，工作区干净，**没有腿在跑**。
 **①后半（变体 A，去 `y_gather`）已完成、已离线取证、已空口验收并已做对照腿**（§6.48/§6.49/§6.50）：
 `p32` 机制逐项命中，**ABA（`p31`→`p32`→`p32b`）给出 V1 净效应 ∈ [−52.2, −69.3] µs**、同臂腿间噪声 **17.1 µs**。
-**下一步 = §3.2**（解开 `estimates` 断因让 run 覆盖整跳）。
+**gap 问题已收口成因并补了仪器**（§6.51）：**每一次 gap 都是电台接收环溢出**（11 条腿 `overflow` 次数 == `gaps` 次数），
+缺口**已在 gateway 边界被丢掉**至今才补上 ⇒ 新增 `rx_overflows`/`[ul_rx_timing]`/门 **D19**，并把接收环 **64 → 256 帧**；
+**待飞 `p33-n78-rxring`** 验收（§3.1b）。
+**主线下一步 = §3.2**（解开 `estimates` 断因让 run 覆盖整跳）。
 
 ---
 
@@ -81,6 +84,8 @@
 | 48 | ★ **对照腿 `p32b` 有效且把效果量夹住**（`miss(disabled=436,720)`、派发回到 10.00/跳）：**ABA ⇒ V1 净效应 ∈ [−52.2, −69.3] µs**（中点 ≈ −60）；两臂派发账逐项闭合 | `p31`/`p32`/`p32b` | §6.50 ①② |
 | 49 | ★ **同臂腿间噪声 = 17.1 µs**（`p31` 1463.5 vs `p32b` 1480.6，**同一条采集路径**）⇒ 效应 ≥3× 噪声底线；**标尺修正为 V1/跨度 13–17 µs/派发、设备窗口 6.5–9.4** | 同上 | §6.50 ③ |
 | 50 | **gap 归属收口**：**采集臂也 1 gap**（78,288 样点）⇒ 与这一刀无关（属暂停的 V3 域）；V5 本轮两腿都是 **7/8**，红的永远是同一项 | `p32`/`p32b` | §6.50 ③ |
+| 51 | ★ **gap 的成因 = 电台接收环溢出**：最近 11 条腿 **RX `overflow` 次数 == `gaps` 次数，无例外**（p20 2/2、p24 1/1、p28 2/2、p29 3/3、p32 1/1、p32b 1/1…），且日志里 overflow 与 discontinuity **相隔 ~1 ms** ⇒ 宿主/USB 没按时抽干环 ⇒ 电台丢样点 ⇒ 时间戳跳变 | `[RF] overflow` + `[PHY] Receive stream discontinuity` | §6.51 ② |
+| 52 | **量级已换代**：修复前 gap 是 **76M–229M 样点（3–10 s）**，现在是 **2–56 ms** ⇒ "宿主停顿⇒秒级丢样"那条链已被 §6.11/§6.22/§6.27/§6.38 治好；且 **gap ≠ UL 静默**（`p31` 0 gaps 却有 6.48 s 静默）| 各腿日志 + census | §6.51 ① |
 
 **仍然成立的老结论（别重犯）**：`busy`/`busy split` 是**占用窗口**不是算力（§6.29 ④）；**窗口 ≠ 关键路径代价**（§6.31 ③）；
 池容量是**2 的幂**（§6.37 ②）；`starved_events` 是"进入 nearly-dry 的**次数**"（§6.36 ③）；夹具里的 `[dl_tx_slack]` **不是**空口读数（§6.41）。
@@ -108,6 +113,26 @@
 * ★ **标尺口径**：4 次派发 ⇒ **V1/跨度 13–17 µs/派发**、**设备窗口 6.5–9.4**（§6.50 ③、§8 Q16）。
 * **收益拆段**：`eq_demap` −41.7…−62.7、`ce` −3.4…−4.3、`t2f` −2.5…−3.2。
 * **gap**：**两个臂都 1 gap** ⇒ 与这一刀无关（暂停的 V3 域）；V5 = 7/8，红的永远是同一项。
+
+### 3.1b ✅（仪器/配置已落地，待一条腿）：残留 gap —— 接收环 + RX 侧仪器
+
+**成因已收口**（开发文档 **§6.51**）：最近 11 条腿 **RX `overflow` 次数 == `gaps` 次数，无例外**，
+且日志里两者相隔 ~1 ms ⇒ **gap = 电台接收环溢出**（宿主或 USB 没按时抽干环，电台丢样点）。
+**缺口**：UHD 的分类在 `baseband_gateway_receiver::metadata` 被丢掉，只剩一行 warning。
+
+**已落地**（提交 `9633a4e4f3`）：
+* `metadata` 增加 `rx_error{none,late,overflow,other}`，UHD 填进它，下层 PHY 计数 ⇒
+  `[ul_rx] … rx_overflows=N rx_lates=N rx_other=N` + **每个 gap 的大小** `gap_us=[…]`；
+* **`[ul_rx_timing]`**：`recv`（`receive()` 自身时长）/ `loop`（两次收块之间，宿主自己的活儿）/ `slip`（漂移）
+  + **`overflow_ctx=[recv_us=…,loop_us=…]`** ⇒ **自动分"宿主迟到"与"传输内阻塞"**；
+* 接收环 `num_recv_frames` **64 → 256**（`num_send_frames` 刻意不动，下条腿只差一个变量）；
+* 门加 **D19**（读上面这些并给出归属判词），`p0_gate_selftest.sh` 对**两个归属各有一个夹具**；
+* 离线臂 `lower_phy_test::RadioReceiveOverflowIsReported`（注入 overflow + 时间戳跳变，断言**已注册的连续性判据**必须失败）。
+
+**待飞的一条腿**：`p33-n78-rxring`。**预登记**：`rx_overflows` == `gaps` == 日志里 `[RF] … overflow` 行数；
+`gaps` 期望 **0**（256 帧吸收 2–6 ms 停顿）；若仍 >0 ⇒ **停顿 > ~28 ms**，目标转向**传输侧**（USB/端口/线）；
+V1/V2/V4/契约/D18 应与 `p32` 同形（本条只动收包余量与仪器）。
+**判读表**见 §6.51 ③；**纪律**：gaps 仍按对累计，**不许为过关改 D4 阈值**。
 
 ### 3.2 下一步：解开 `estimates` 断因，让 run 覆盖整跳
 
@@ -168,13 +193,15 @@ run 覆盖整跳：3 → 1 ⇒ 再省 ~2 次派发 ⇒ **≈ −24 µs**（与 3
 | `doc_chinese/phy_latency/gpu_phy_latency_optimization_design_and_implementation.md` | **开发文档（先读这个）**：§3 判据（V1–V5）、§4 仪表手册、§5 跑腿规范、**§6 追加式记录（本会话 = §6.40–§6.48）**、§7 杠杆、§8 未决 |
 | `doc_chinese/phy_latency/high_level_status_and_plan.md` | 高层现状、V1–V5 逐条、下一步、"继续压 V1"的当前路线 |
 | `doc_chinese/phy_latency/README.md` | 三类文档分工 + **结项状态**（2026-09-25）|
-| `doc_chinese/phy_latency/wip/p0_gate.sh` | **P0 门（D1–D18，只读日志）**；`p0_gate_selftest.sh` 是它的双向自测（D18 覆盖三个分支）|
+| `doc_chinese/phy_latency/wip/p0_gate.sh` | **P0 门（D1–D19，只读日志）**；`p0_gate_selftest.sh` 是它的双向自测（D18 三分支、**D19 两个归属 + 读不出**）|
 | `doc_chinese/phy_pipeline_gpu/wip/run_leg.sh` | 起腿（**戳 + 内容判据双重守卫**）；腿日志在 `…/wip/logs/` |
 | `lib/phy/upper/channel_processors/metal/ocudu_equalizer_metal_engine.mm` | **下一刀的主战场**：`eq_flush_hook`（run 划分 + **direct-grid 判定/绑定**）、`eq_direct_grid_run()`（判据）、`eq_direct_miss`/`eq_direct` 计数、`eq_gather_tables`/`eq_build_gather_on_device`（表，一跳一次、**全 direct 的跳不建表**）、`eq_encode_batch_dispatch`（均衡派发）、`sites(...)` |
 | `include/ocudu/phy/upper/equalization/channel_equalizer_device_grid.h` + `lib/phy/upper/equalization/channel_equalizer_device_grid.cpp` | gather plan（`ch_gather_symbol` 的 **`subc_base`/`dense`** 由这里产出）|
 | `lib/phy/upper/signal_processors/channel_estimator/metal/ocudu_metal_mmse_engine.mm` | 信道估计（2 次派发/跳；`estimates` 断因的另一端；`OCUDU_CE_*` 旋钮）**= 下一步 ②** |
 | `lib/phy/generic_functions/metal/ocudu_dft_metal_engine.{h,mm}` + `ocudu_dft.metal` | 前端批量化（§6.30/§6.33：`OCUDU_DFT_BATCH_SYMBOLS` AUTO）；`batch_stats()` |
-| `lib/phy/lower/lower_phy_baseband_processor.{h,cpp}` + `lib/phy/lower/lower_phy_factory.cpp` | 接收池（**P2-D 定尺 16**，启动行打印依据）、清扫入口点（§6.35）、TX 探针（§6.41） |
+| `lib/phy/lower/lower_phy_baseband_processor.{h,cpp}` + `lib/phy/lower/lower_phy_factory.cpp` | 接收池（**P2-D 定尺 16**）、清扫入口点（§6.35）、TX 探针（§6.41）、**RX 侧探针与 gap 归属（§6.51：`rx_overflows`/`gap_us`/`[ul_rx_timing]`）** |
+| `include/ocudu/gateways/baseband/baseband_gateway_receiver.h` + `lib/radio/uhd/radio_uhd_rx_stream.cpp` | **电台对每块的判词**（`rx_error`）从 UHD 一路带到 PHY（§6.51）|
+| `configs/gnb_rf_b200_tdd_n78_20mhz.yml` | 腿的电台配置：**`num_recv_frames=256`**（接收环，§6.51 ⑤）、`srate=23.04`、`otw_format=sc12` |
 | `lib/phy/metal/ocudu_metal_burst.{h,mm}` | 交棒注册表、清扫（第三入口点）、`dispatches`/`eq_batch` 计数 |
 | `doc_chinese/phy_latency/wip/dft_kernel_cost.mm` / `metal_wait_timeout_probe.mm` / **`eq_dense_probe.cpp`** | 三个离线工具（DFT 派发形状 / Metal 5 s 等待上界 / **plan 的 `dense` 判据**）；**④ 的"单 kernel 微基准"照第一个的形状做** |
 | `lib/phy/generic_functions/metal/test/dft_release_adopt_metal_test.mm` | metal 自测（**arm 10–17**：Q9-F/Q9-F3、握手、按需 dump、批量化 14/12/AUTO、take 清扫） |
@@ -190,6 +217,8 @@ run 覆盖整跳：3 → 1 ⇒ 再省 ~2 次派发 ⇒ **≈ −24 µs**（与 3
 > 离线 27 条语料 ×2 臂 = **135 个 dump 逐字节相同**；空口 `p32` `y_direct=3.00/跳`、`y_gather=0`、`ch_gather=0`、
 > **派发 10.00 → 6.00/跳**；**ABA（`p31`→`p32`→`p32b`）⇒ V1 净效应 ∈ [−52.2, −69.3] µs**、同臂腿间噪声 **17.1 µs**；
 > V2/V4 保持、契约 7/8（唯一失败是**电台侧 1 gap，两臂都有**，见 §6.50 ③）。
-> **下一步 = §3.2**：解开 `estimates` 断因让 run 覆盖整跳（3 → 1，预期 **V1 −26…−34 µs ⇒ ≈1385–1390**）——
+> **先飞一条腿 `p33-n78-rxring`**（§3.1b）：验收 **接收环 64→256** 与 **gap 归属仪器**
+> （预登记：`rx_overflows == gaps == [RF] overflow 行数`；`gaps` 期望 0；V1/V2/V4/D18 与 `p32` 同形）。
+> **之后**下一步 = §3.2：解开 `estimates` 断因让 run 覆盖整跳（3 → 1，预期 **V1 −26…−34 µs ⇒ ≈1385–1390**）——
 > 主战场是 `ocudu_metal_mmse_engine.mm` 的**估计输出布局**；注意它与 ①后半的交互（见 §3.2 的 ⚠）。
 > **V3 与残留 gap 已另案暂停**（电台/USB 传输侧），不要顺手去动它。
