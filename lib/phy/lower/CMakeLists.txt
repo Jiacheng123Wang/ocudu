@@ -22,4 +22,10 @@ target_link_libraries(ocudu_lower_phy
         ocudu_lower_phy_puxch_processor
         ocudu_lower_phy_uplink_processor
         ocudu_macos_compat
-        ocudu_support)
+        ocudu_support
+        # dev doc 6.24/6.41: the receive path registers its P0 reports (register_p0_report) and the dry-pool
+        # park dumps them on demand (p0_dump_reports), both defined in ocudu_phy_support. Declared HERE rather
+        # than left to a transitive order: ld64 resolves archives regardless of order, GNU ld does not, so an
+        # undeclared dependency links on macOS and fails on Linux with "undefined reference to
+        # ocudu::p0_dump_reports" (measured on the Ubuntu build, 2026-09-25).
+        ocudu_phy_support)

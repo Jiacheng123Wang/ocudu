@@ -29,6 +29,9 @@ target_link_libraries(gnb_base PRIVATE
         ocudu_e1_gateway
         ocudu_o_cu_cp_app_unit
         ocudu_o_cu_up_app_unit
+        # dev doc 6.24: gnb.cpp registers its own on-demand P0 reports (register_p0_report, in ocudu_phy_support).
+        # Declared explicitly: an undeclared archive dependency links on macOS (ld64) and fails on Linux (GNU ld).
+        ocudu_phy_support
 )
 
 if (DPDK_FOUND)
