@@ -138,6 +138,29 @@ struct reformat_params {          // mmse_reformat_params (ocudu_mmse_reformat.m
 };
 static_assert(sizeof(reformat_params) == 56, "");
 
+struct equalize_params {          // equalize_params (ocudu_equalizer.metal)
+  uint32_t nof_re;
+  uint32_t nof_ports;
+  uint32_t nof_layers;
+  uint32_t algo;
+  float    noise_var;
+  float    tx_scaling;
+  float    h_scaling;
+  uint32_t h_offset;
+  uint32_t h_layer_stride;
+};
+static_assert(sizeof(equalize_params) == 36, "");
+
+struct demod_params {             // demod_params (ocudu_demod.metal)
+  uint32_t nof_symbols;
+  uint32_t nof_re;
+  uint32_t mod;
+  uint32_t sym_stride;
+  uint32_t nv_stride;
+  uint32_t llr_stride;
+};
+static_assert(sizeof(demod_params) == 24, "");
+
 // ---- the production geometry ---------------------------------------------------------------------
 
 /// One estimation block: 3 PRB, dmrs_type=1 with 2 CDM groups, `npt` DM-RS symbols.
@@ -189,6 +212,19 @@ int main(int argc, char** argv)
     id<MTLComputePipelineState> p_corr_a     = pipeline("mmse_corr_a");
     id<MTLComputePipelineState> p_corr_rhp   = pipeline("mmse_corr_r_hp");
     id<MTLComputePipelineState> p_reformat   = pipeline("mmse_reformat");
+    // The equalizer and the demapper live in their own libraries; they are OPTIONAL here (a checkout
+    // that has not built them still gets the CE table).
+    id<MTLLibrary> eq_lib = [device newLibraryWithFile:@"lib/phy/upper/channel_processors/metal/ocudu_equalizer.metallib"
+                                                 error:&err];
+    id<MTLLibrary> dm_lib = [device newLibraryWithFile:@"lib/phy/upper/channel_modulation/metal/ocudu_demod.metallib"
+                                                 error:&err];
+    const auto from_lib = [&](id<MTLLibrary> l, const char* name) -> id<MTLComputePipelineState> {
+      if (l == nil) {
+        return nil;
+      }
+      id<MTLFunction> fn = [l newFunctionWithName:@(name)];
+      return (fn != nil) ? [device newComputePipelineStateWithFunction:fn error:&err] : nil;
+    };
     if (p_weights == nil || p_apply == nil || p_corr_a == nil || p_corr_rhp == nil) {
       std::printf("FAIL: the metallib does not carry the estimator's kernels\n");
       return 1;
@@ -245,6 +281,38 @@ int main(int argc, char** argv)
       // an arm measured once read 21.6 and 58.6 us in two consecutive runs of the SAME binary (the
       // weights kernel). The minimum is the least-disturbed sample, which is what a cost benchmark
       // wants; the spread is printed by the caller when it matters.
+      double best = 1e30;
+      for (unsigned round = 0; round != 3; ++round) {
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        encode(cb, reps);
+        [cb commit];
+        [cb waitUntilCompleted];
+        best = std::min(best, (cb.GPUEndTime - cb.GPUStartTime) * 1e6 / static_cast<double>(reps));
+      }
+      return best;
+    };
+
+    /// The same measurement for the kernels their engines dispatch with `dispatchThreads` (a
+    /// NON-UNIFORM grid, where the grid size IS the thread count). Passing such a kernel through
+    /// time_it() instead multiplies its grid by the threadgroup size - measured: the equalizer read
+    /// 4.0 us for 156 REs, i.e. 25.7 ns per thread, which was 156*256 threads doing nothing.
+    const auto time_it_threads = [&](id<MTLComputePipelineState> pipe, NSUInteger n_threads, NSUInteger tpt,
+                                     void (^bind)(id<MTLComputeCommandEncoder>)) -> double {
+      const auto encode = [&](id<MTLCommandBuffer> cb, uint32_t n) {
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:pipe];
+        bind(enc);
+        for (uint32_t r = 0; r != n; ++r) {
+          [enc dispatchThreads:MTLSizeMake(n_threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpt, 1, 1)];
+        }
+        [enc endEncoding];
+      };
+      {
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        encode(cb, 20);
+        [cb commit];
+        [cb waitUntilCompleted];
+      }
       double best = 1e30;
       for (unsigned round = 0; round != 3; ++round) {
         id<MTLCommandBuffer> cb = [q commandBuffer];
@@ -545,6 +613,73 @@ int main(int argc, char** argv)
       }
       std::printf("\nhost cost of one more dispatch (CPU encode only, GPU not waited for): %.3f us\n",
                   time_encode());
+    }
+
+    // ---- THE EQUALIZER AND THE DEMAPPER (dev doc 8 Q20: completing the compute bill) ----------------
+    //
+    // Their geometry is not a block but the hop's DATA RESOURCE ELEMENTS, which the legs do not print,
+    // so these arms are parameterised by nof_re and swept: the cost is linear in it (one thread per RE),
+    // and whoever needs the hop's own number plugs in the RE count the hop geometry gives. Both use the
+    // air interface's shape: 1 Tx layer, 1 Rx port, QPSK (the corpus' and the legs' modulation) and the
+    // dispatch shape the engines use (dispatchThreads, 256 threads per threadgroup).
+    {
+      id<MTLComputePipelineState> p_eq    = from_lib(eq_lib, "equalize_mxn");
+      id<MTLComputePipelineState> p_demod = from_lib(dm_lib, "demod_soft");
+      if (p_eq == nil) {
+        std::printf("\n(equalizer metallib not found - skipping the equalizer/demapper arms)\n");
+      }
+      const NSUInteger            big_c   = 4u << 20;
+      id<MTLBuffer>               b_hc    = [device newBufferWithLength:big_c options:MTLResourceStorageModeShared];
+      id<MTLBuffer>               b_yc    = [device newBufferWithLength:big_c options:MTLResourceStorageModeShared];
+      id<MTLBuffer>               b_eq    = [device newBufferWithLength:big_c options:MTLResourceStorageModeShared];
+      id<MTLBuffer>               b_nvc   = [device newBufferWithLength:big_c options:MTLResourceStorageModeShared];
+      id<MTLBuffer>               b_llr   = [device newBufferWithLength:big_c options:MTLResourceStorageModeShared];
+      std::memset(b_hc.contents, 0, big_c);
+      std::memset(b_yc.contents, 0, big_c);
+      for (NSUInteger i = 0; i != big_c / sizeof(float); ++i) {
+        static_cast<float*>(b_nvc.contents)[i] = 0.1F; // noise variance > 0 (the equalizer's guard)
+      }
+      if (p_eq != nil) {
+        std::printf("\nequalizer + demapper (1 layer / 1 port / QPSK; the cost is linear in nof_re):\n");
+        std::printf("%-34s %12s %14s %14s\n", "nof_re (data REs)", "threads", "equalize us", "demod us");
+        for (uint32_t re : {156u, 612u, 1224u, 2184u}) {
+          equalize_params ep{};
+          ep.nof_re         = re;
+          ep.nof_ports      = 1;
+          ep.nof_layers     = 1;
+          ep.algo           = 1; // MMSE
+          ep.noise_var      = 0.1F;
+          ep.tx_scaling     = 1.0F;
+          ep.h_scaling      = 1.0F;
+          ep.h_offset       = 0;
+          ep.h_layer_stride = re;
+          const double eq_us = time_it_threads(p_eq, re, 256, ^(id<MTLComputeCommandEncoder> e) {
+            [e setBuffer:b_hc offset:0 atIndex:0];
+            [e setBuffer:b_yc offset:0 atIndex:1];
+            [e setBuffer:b_eq offset:0 atIndex:2];
+            [e setBuffer:b_nvc offset:0 atIndex:3];
+            [e setBytes:&ep length:sizeof(ep) atIndex:4];
+            [e setBuffer:b_nvc offset:0 atIndex:5];
+          });
+          double dem_us = 0.0;
+          if (p_demod != nil) {
+            demod_params dp{};
+            dp.nof_symbols = 1;
+            dp.nof_re      = re;
+            dp.mod         = 0; // MOD_QPSK
+            dp.sym_stride  = 1;
+            dp.nv_stride   = 1;
+            dp.llr_stride  = 2 * re; // QPSK: 2 bits per RE
+            dem_us         = time_it_threads(p_demod, re, 256, ^(id<MTLComputeCommandEncoder> e) {
+              [e setBuffer:b_eq offset:0 atIndex:0];
+              [e setBuffer:b_nvc offset:0 atIndex:1];
+              [e setBuffer:b_llr offset:0 atIndex:2];
+              [e setBytes:&dp length:sizeof(dp) atIndex:3];
+            });
+          }
+          std::printf("%-34u %12u %14.3f %14.3f\n", re, re, eq_us, dem_us);
+        }
+      }
     }
 
     // ---- how the two block-sized kernels scale with the block -------------------------------------
