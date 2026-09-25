@@ -372,3 +372,18 @@ bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 p22-n78-conc2  #
   同一条腿上同时读到 `starved_events=0` 与 `V1=1510.4`。
 * **⏳ 待裁决 (B) P2-D**：**(B1)** 按"实测峰值 11 + 明确 margin"定到 16（V2 转绿；内存 ~1.5 MB；粒度只能取 2 的幂）；
   **(B2)** 保持 8、接受 V2 红；**(B3)** 降峰值（换掉链路前瞻，风险最高）。**建议 (B1)**，且改完要跑网 + 一条确认腿。
+
+---
+
+## 13. 追加更正 #7：(B1) 已落地 —— P2-D 定尺（GPU 模式 16），待确认腿 `p27`（§6.38）
+
+* 用户裁决 **(B1)**：池按测量定尺。实现（`lower_phy_factory.cpp`）：**只在整槽缓冲（GPU 模式）**加一项
+  `slot_pipeline = peak(11) + rx_path(2) + margin(3) = 16`，与地板 8 / 电台时延 / 符号级流水线一起取 max；
+  **符号级策略行为不变**（那一项在整槽下退化为 0+8）。
+* **定尺依据打印在启动行**（腿自己的日志里可读）：
+  `[ul_rx_pool] size=16 buffers of … (whole-slot buffers, the gpu pipeline mode): floor 8, radio latency 1, symbol pipeline 8, slot pipeline 16 (peak 11 + rx path 2 + margin 3, dev doc 6.37)`。
+* 离线：`lower_phy_test` 已读到 `size=16` 且 528/528 通过（⚠ 又踩到"测试可执行文件不在默认构建目标里"，必须先显式构建）。
+  影响面：所有整槽（GPU）配置 8→16（含 n1；n1 实测 `held_max=4/starved=0` 本来够用，真正需要的是加压 n78）；内存 ≈2.9 MB/扇区。
+* **确认腿 `p27`（不带旋钮）预登记**：启动行 `size=16…`、`pool=16`、**`starved_events=0`/`starved_takes=0`**、`free_min>0`、
+  `held_max≈11<16`、`pop_blocking` ≪1 ms、**V1 ≈1510 不变**、契约 8/8、`cbs/lane=2.00`、0 gaps。
+  ⇒ 成立则 **V1–V5 只剩 V3（RF 失败）未达**。

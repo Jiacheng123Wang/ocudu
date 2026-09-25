@@ -160,9 +160,42 @@ public:
     // so on stderr when it is armed, and it only ever grows: a SMALLER pool than the formula's is the one
     // configuration the tests measured deadlocking (four buffers deadlocked, nine passed, see the comment
     // above), and a diagnostic arm has no business re-opening that.
+    // ★ P2-D (dev doc 6.37 (4), user ruling): THE GPU MODE'S POOL IS SIZED FROM A MEASUREMENT, not from the
+    // symbol-based formula below - because in the GPU mode one buffer holds a WHOLE SLOT (the check above),
+    // so `max_pipeline_depth * max_symbol_size` (eight symbols) fits inside a single buffer and that term
+    // collapses to zero: the "+ 8" degenerated into the constant "8 slots", with no relation to how deep the
+    // chain actually runs. Leg `p26-n78-pool12` (P1-4) measured what that constant cost:
+    //   pool 8  -> held_max 8 (= the pool), free_min 0, starved_takes 203 / starved_events 107, pop_blocking max 335 us
+    //   pool 16 -> held_max 11,             free_min 5, starved_takes   0 / starved_events   0, pop_blocking max  49 us
+    // i.e. the chain wants about ELEVEN whole-slot buffers at its peak and the 8-buffer pool was CLAMPING it -
+    // the receive thread's wait IS the starvation those counters count. The three terms below say that out loud:
+    // the measured pipeline peak, the receive path's own two buffers (the one being received and the one just
+    // received), and a margin. The ring's capacity is the next power of two (dev doc 6.37 (2)), which 16
+    // already is; the size is printed at startup so a regression is visible in a leg's own log.
+    const bool     slot_sized_buffers       = (rx_buffer_size >= nof_samples_per_slot);
+    constexpr unsigned slot_pipeline_peak   = 11; // measured (dev doc 6.37 (3))
+    constexpr unsigned rx_path_buffers      = 2;  // being received + just received
+    constexpr unsigned rx_pool_margin       = 3;
+    const unsigned slot_pipeline_buffers =
+        slot_sized_buffers ? (slot_pipeline_peak + rx_path_buffers + rx_pool_margin) : 0U;
+
     unsigned nof_rx_buffers = std::max({8U,
                                         rx_to_tx_max_delay / rx_buffer_size,
-                                        (max_pipeline_depth * max_symbol_size) / rx_buffer_size + 8U});
+                                        (max_pipeline_depth * max_symbol_size) / rx_buffer_size + 8U,
+                                        slot_pipeline_buffers});
+    std::fprintf(stderr,
+                 "[ul_rx_pool] size=%u buffers of %u samples (slot=%u, %s): floor 8, radio latency %u, symbol "
+                 "pipeline %u, slot pipeline %u (peak %u + rx path %u + margin %u, dev doc 6.37)\n",
+                 nof_rx_buffers,
+                 rx_buffer_size,
+                 nof_samples_per_slot,
+                 slot_sized_buffers ? "whole-slot buffers, the gpu pipeline mode" : "symbol-sized buffers",
+                 rx_to_tx_max_delay / rx_buffer_size,
+                 (max_pipeline_depth * max_symbol_size) / rx_buffer_size + 8U,
+                 slot_pipeline_buffers,
+                 slot_pipeline_peak,
+                 rx_path_buffers,
+                 rx_pool_margin);
     if (const char* pool_env = std::getenv("OCUDU_UL_RX_POOL_SIZE"); pool_env != nullptr) {
       const unsigned long requested = std::strtoul(pool_env, nullptr, 10);
       if (requested > nof_rx_buffers) {
