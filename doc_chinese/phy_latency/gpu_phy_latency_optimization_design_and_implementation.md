@@ -2460,8 +2460,9 @@ bash doc_chinese/phy_latency/wip/p0_gate.sh p22-n78-batch14                     
 bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 p22-n78-batch14   # V1–V5
 ```
 
-* **A 臂 = p16–p21**（默认 `batch_max=1`），无需再飞；**先验条件**：`p0_gate.sh` 的 **D16 必须读成
+* **A 臂 = p16–p21**（`batch_max=1`，当年是默认值），无需再飞；**先验条件**：`p0_gate.sh` 的 **D16 必须读成
   `batched=<d>/<t> batch_max=14`**——`batched=0/0` 表示这条腿**不是** A/B（延迟从未发生），此时不要读 V1。
+  ⚠ **自 §6.31 的用户裁决起，默认值就是 14**：B 臂**不需要**旋钮，A 臂必须**显式** `OCUDU_DFT_BATCH_SYMBOLS=1`。
 * ⚠ **判 V1–V5 的腿一律不带 `OCUDU_METAL_GPU_TIME=1`**（它会扰动提交路径）。
 * 读数：**V1 中位**（对照 2413–2440）、`[ul_gpu_lane]` 前端块窗口（Q9-F2 carried）、契约 8/8、
   **V4 `cbs/lane` 应当不变**（批量化不改提交数——这一条是本改动的**契约性**断言，不只是性能）。
@@ -2555,9 +2556,17 @@ read : dry-pool reaps=16 recovering 0 block(s)
    * 用操作者惯常的**热身 + `iperf3 -t 240`**，并在**流量结束后尽快停机**（这次的 110 s 静默尾巴既拉长了腿、
      又制造了 D1/D2 的红）；或者至少**记录**尾巴长度，判读时按流量窗口换算。
    * 建议**同日交替**：`p23-n78-batch14`（旋钮 14）与 `p24-n78-nobatch`（默认 1）各一条 ⇒ 把"当天链路漂移"从 A/B 里消掉。
-3. **旋钮的默认值**：机制已在**离线**（网格逐字节相同）与**在线自测**（arm 17）双重自证，空口收益 **−38%**、
-   代价为零 ⇒ **建议把 `OCUDU_DFT_BATCH_SYMBOLS` 的默认值改成 14**（即"默认开"），把 `=1` 留给对照臂。
-   *⚠ 这是**生产行为的改变**，按 §7.4 的规矩**需要用户裁决**（我不单方面改默认值）。*
+3. **旋钮的默认值 —— ✅ 用户已裁决（2026-09-25）：改成 14（默认开）**。已实现：
+   * `front_end_batch_requested()` 在**未设**时返回 **14**；`=1`（或任何 <2 的值）⇒ **逐符号 = 对照臂**；
+     非数字 ⇒ **一次性警告**并使用默认值（与 `grid_handover_armed()` 对自家旋钮的做法一致）。
+   * ⇒ **B 臂（批量化）现在不需要旋钮**，A 臂（对照）必须**显式**写 `OCUDU_DFT_BATCH_SYMBOLS=1`。
+   * 依据：机制已在**离线**（网格逐字节相同）与**在线自测**（arm 17）双重自证，空口 **V1 −38%**、代价为零（本节的读数）。
+   * 网（默认值改动后重跑）：`ctest -L phy` **193/193**、`dft_processor_metal_unit_test` **ALL OK**（默认与 `=1` 各一次）、
+     metal 测试 **arm 10–17 全 PASS**、`ofdm_demodulator_metal_batch_test` ✓、`l1_handover_arms.sh` 5 PASS、门自测 PASS。
+     ⚠ **注意：测试可执行文件不在默认构建目标里**（`cmake --build build` 不会重链它们）⇒ 改引擎后必须
+     **显式构建依赖 `ocudu_dft*` 的那几个目标**再跑 `ctest`（本次列出的 7 个：`channel_equalizer_*`、`dft_processor_metal_unit_test`、
+     `dft_release_adopt_metal_test`、`helena_head2head_bench`、`ofdm_demodulator_metal_batch_test`、
+     `port_channel_estimator_metal_mmse_unit_test`、`ul_chain_replay`）——**否则网的绿是旧二进制说的**。
 4. **V1 之后的账**：一跳 1513 µs 的组成按 §6.30 ⑤ 的框架重读 —— residency 745（其中 `merged_hop` 625）、
    `deposit->start` 260、A（等样点 ~473，零算力）仍在；⇒ **下一个最大的可攻击项回到 A（P1-7 符号级收包）**
    与 CE/EQ/demap 链（`merged_hop` 625 里的 140+）、以及 **V2 的容量问题（P2-D）**。

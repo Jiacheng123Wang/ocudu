@@ -87,21 +87,46 @@ static_assert(sizeof(dft_input_block) == 4 * sizeof(uint32_t),
 // with zero overhead. Reported at process exit.
 /// \brief Q9-F4 (dev doc 6.30): how many transforms the front end may put into ONE dispatch.
 ///
-/// `OCUDU_DFT_BATCH_SYMBOLS=N`, **default 1 = the historical one-dispatch-per-symbol**. N >= 2 makes the
-/// front end DEFER the transforms of an open block (radio-input path only, see dft_engine_impl) and encode
-/// them as one dispatch of N threadgroups, with the two parameter blocks bound as per-threadgroup tables
-/// (the kernel's `pad` field). Offline, the same 14 transforms cost 171us as 14 dispatches and 13.75us as
-/// one; on air the knob is what turns "the front end's device window" into an A/B.
+/// `OCUDU_DFT_BATCH_SYMBOLS=N`, **DEFAULT 14 = one slot's worth of symbols since leg `p22-n78-batch14`
+/// (dev doc 6.31)**: the A/B the mechanism was built for measured `[ul_gpu_pipeline]` 2440 -> 1513 us
+/// (-38%, the V1 criterion is <= 2150) with the hop's own command-buffer window down 422 us, its input hold
+/// down 40%, and NO cost anywhere the contract can see (8/8, `cbs/lane` unchanged, 0 gaps). The same 14
+/// transforms cost 171us of device window as 14 dispatches and 13.75us as one OFFLINE
+/// (wip/dft_kernel_cost.mm); on air the saving is larger, because the per-symbol dispatches were SERIALISED
+/// on the hop's critical path (the estimator's first dispatch reads the grid the front end wrote).
+///
+/// N >= 2 makes the front end DEFER the transforms of an open block (radio-input path only, see
+/// dft_engine_impl) and encode them as one dispatch of N threadgroups, with the two parameter blocks bound
+/// as per-threadgroup tables (the kernel's `pad` field). **`OCUDU_DFT_BATCH_SYMBOLS=1` is the CONTROL arm**
+/// (the historical one-dispatch-per-symbol) and is what an A/B leg must set explicitly.
 ///
 /// Clamped to max_batch_slots: the pending tables are bound with setBytes (the limit is 4 KB, i.e. 128
 /// grid-write blocks), and a batch larger than the ring the transforms are counted in would be meaningless.
 static unsigned front_end_batch_requested()
 {
+  /// The default is what the batched front end was verified at (see above); it is NOT "the old behaviour",
+  /// so an arm that wants the old shape has to SAY so (`=1`).
+  static constexpr unsigned default_batch = 14;
+
   const char* env = std::getenv("OCUDU_DFT_BATCH_SYMBOLS");
   if (env == nullptr) {
-    return 1;
+    return default_batch;
   }
-  const unsigned long v = std::strtoul(env, nullptr, 10);
+  char*               end = nullptr;
+  const unsigned long v   = std::strtoul(env, &end, 10);
+  if ((end == env) || (*end != '\0')) {
+    // Not a number: say so once and use the default, rather than silently reading it as 0 (= the control
+    // arm) - the same choice `grid_handover_armed()` makes for its own knob.
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      std::fprintf(stderr,
+                   "[phy_pipeline] OCUDU_DFT_BATCH_SYMBOLS is not a number - using the default (%u). "
+                   "Use 1 for the per-symbol control arm.\n",
+                   default_batch);
+    }
+    return default_batch;
+  }
   if (v < 2ul) {
     return 1;
   }
