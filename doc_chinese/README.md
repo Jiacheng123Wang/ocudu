@@ -37,13 +37,15 @@ Root-level documents:
 | `apple_silicon_heterogeneous_gnb_plan.md` | The long-term plan (English version in `docs/`). |
 | `build_macOS_note.md` | Building on macOS (English version in `docs/`). |
 | `metal_vs_cuda_architecture.md` | Architecture comparison: the upstream CUDA addition is a **lookaside** ADT (isolated device address space, `cudaMalloc`, host spans, explicit copies, host polls/waits), while this port is **inline** on unified memory. It also evaluates the proposed "hardware-neutral device-backend interface layer" against our architecture and finds it wanting (8 of 10 requirements unmet, one of them semantically inverted). **Its purpose is NOT to prepare an upstream merge** (see its section 7): the comparison exists to avoid adopting the wrong abstraction and to recognise which engineering practices are genuinely reusable. |
-| `apple_silicon_competitiveness_analysis.md` | Independent competitiveness analysis. **Evaluation criterion: the value created for users - E2E performance in the V2X-style edge scenario where URLLC and eMBB coexist - not reviewer approval.** Derives the binding constraint from first principles (bandwidth is **not** it - the count of times the same data must be moved is), redone at equal price with the correct x86 part (L4/RTX 4000 Ada class, not an H100), and settles the vendor-risk question with the capability-class evidence (unified memory + programmable GPU + integrated NPU is already offered by four vendors, x86 included). Also keeps the four mis-comparisons this project has made, so they are not repeated. |
+| `apple_silicon_competitiveness_analysis.md` | Independent competitiveness analysis (v1.1). **Evaluation criterion: the value created for users - E2E performance in the V2X-style edge scenario where URLLC and eMBB coexist - not reviewer approval.** Derives the binding constraint from first principles (bandwidth is **not** it - the count of times the same data must be moved is), redone at equal price with the correct x86 part (L4/RTX 4000 Ada class, not an H100), and settles the vendor-risk question by **splitting the capability class in half**: the *hardware* half is commoditised (unified memory + programmable GPU + integrated NPU, five vendors), but the *software* half is not - on Linux only Apple has all three engines plus the ability to compile a model locally (AMD is NPU-only with Windows-side model generation, Qualcomm's X1E platform enablement was incomplete enough that a whole laptop project was cancelled, Intel is the closest x86 vendor). Its section 5.3 records that as an explicit **self-correction of v1.0**, which had merged the two halves into one criterion; section 5.3.4 then uses this repository's own Core ML measurements (ANE 191 us vs GPU 559-620 us per grant for the same functional block) to argue that the engine-agnostic dispatch layer is what makes the NPU route discoverable at all. Also keeps the four mis-comparisons this project has made, so they are not repeated. |
 | The two phone-connectivity notes of 2026-09-05/06. | Bench notes from the Hong Kong test environment. |
 
 > **⚠ Number labelling in `apple_silicon_competitiveness_analysis.md`:** every figure there carries
-> one of **【官方】** (vendor spec), **【实测】** (measured in this repository) or **【推算】**
-> (derived estimate, **must not be quoted as measured**). The Apple GPU TFLOPS figures are
-> **【推算】** - Apple does not publish them - and must be measured before they are cited anywhere.
+> one of **【官方】** (vendor spec/vendor documentation, with a source link), **【实测】** (measured in
+> this repository), **【推算】** (derived estimate, **must not be quoted as measured**) or
+> **【待核实】** (no first-party source found yet; **must not enter external material**).
+> The Apple GPU TFLOPS figures are **【推算】** - Apple does not publish them - and must be measured
+> before they are cited anywhere.
 
 ## Not tracked here
 
