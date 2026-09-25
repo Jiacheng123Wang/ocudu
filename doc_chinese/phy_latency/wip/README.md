@@ -7,7 +7,7 @@
 
 | 目录 | 内容 | 进 git？ |
 |---|---|---|
-| **`doc_chinese/phy_latency/wip/`**（本目录）| **时延阶段自己的工具**：`p0_gate.sh`（P0 读数门：P0-6/P0-1/P0-5 的 A1/A2/B1/B2/C1/**C2/C2b**）、`leg_census.py`（腿普查：UL 静默表 + RF/pool 事件）| ✅ 进 |
+| **`doc_chinese/phy_latency/wip/`**（本目录）| **时延阶段自己的工具**：`p0_gate.sh`（P0 读数门：P0-6/P0-1/P0-5 的 A1/A2/B1/B2/C1/**C2/C2b** + **Q9 修复的 D1–D5**，阈值见开发文档 §6.11 ⑤）、`leg_census.py`（腿普查：UL 静默表 + RF/pool 事件）| ✅ 进 |
 | `doc_chinese/phy_pipeline_gpu/wip/` | **上一阶段的门与工具，仍然在用**：`run_leg.sh`（起腿）、`milestone_audit.sh`（里程碑门）、`leg_gate.sh`、`ab_dumps.sh`、`value_net.py`、`l1_*_arms.sh`、`edge_block_arms.sh`、`ul_load.sh`、`wall_ab.sh`，以及**腿日志** `logs/` | ✅ 进 |
 | `doc_chinese/work_tmp/` | **跑出来要看的东西**（git 忽略）：语料 `corpus/`、归档基线 `determinism/`、本阶段的 `p0_7/`（普查输出、原始记录）、`ref/`（一次性二进制）、dump 比对；**`/tmp` 不可靠**（macOS 重启清掉），需要留存的一律放这里 | ❌ 不进 |
 
@@ -18,6 +18,8 @@
 
 ```bash
 # P0 读数门（只读日志，不碰 GPU —— 用户飞腿时可以安全跑）
+# D1–D4 = Q9 确认腿的 F1–F4（input hold < 100ms、block lifecycle < 100ms、pop_blocking < 10ms 且 over 1s=0、gaps=0）
+# D5 = 两个 sweep 触发器 late= / late_time= 的 INFO 读数（判 F6 的"是谁救的场"）
 bash doc_chinese/phy_latency/wip/p0_gate.sh <腿> [--vs=<出厂臂>]
 
 # 腿普查（UL 静默 + RF/pool 事件；停顿时段的定位）
