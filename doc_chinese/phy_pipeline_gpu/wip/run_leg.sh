@@ -71,6 +71,19 @@ elif [ -n "$HEAD_SHORT" ] && [ "$STAMP" != "$HEAD_SHORT" ]; then
   echo "  Fix (then re-run):  touch build/hashes.h && cmake --build build --target gnb" >&2
   exit 2
 fi
+# ---- and the stamp must actually BE IN the binary ---------------------------------------------------------
+# Why this exists (2026-09-25, leg `p29-n78-dispatch`): `cmake --build build --target ocudu_versioning`
+# REGENERATES build/hashes.h without relinking anything, so refreshing the stamp after a code change leaves a
+# binary that CLAIMS the new commit while running the old code - and the check above passes, because it
+# compares the stamp with HEAD, not the binary with the stamp. That leg's new reading was simply absent, and
+# the operator paid for an OTA run to find out (dev doc 6.44 (5)). The stamp string is compiled into the
+# binary (lib/support/versioning), so the honest check is content, not mtime: the binary must carry it.
+if ! grep -aq "$STAMP" "$ROOT/build/apps/gnb/gnb" 2>/dev/null; then
+  echo "REFUSING to run: build/apps/gnb/gnb does not carry the stamp it claims ($STAMP)." >&2
+  echo "  build/hashes.h was regenerated without relinking the binary, so the code is older than the stamp." >&2
+  echo "  Fix (then re-run):  cmake --build build --target ocudu_versioning && cmake --build build --target gnb" >&2
+  exit 2
+fi
 
 mkdir -p "$LOGDIR"     # --log.filename never creates it, and a missing one fails silently
 

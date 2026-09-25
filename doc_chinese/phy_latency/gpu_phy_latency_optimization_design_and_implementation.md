@@ -3352,6 +3352,27 @@ V4 约束的是 `cbs/lane`（**命令缓冲**数/跳），把一跳内的 12 次
 ⇒ 拿到来源表后，**要并的 kernel 就确定了**；届时按 §6.30 的同一套做法做（不变量判据：`value_net` + 逐字节/容差 + metal 单测），
 并用 `busy split`/`residency` 与 V1 判收益。
 
+#### ⑥ ⚠ **流程事故：腿 `p29-n78-dispatch` 是"旧二进制"飞的（我的错）** —— 并已把守卫补强
+
+* **现象**：`p29` 的 `[metal_stats] eq_batch` 行**没有 `sites(...)` 字段**，即这条腿跑的是**加计数器之前**的代码。
+* **原因（可查证）**：我在 17:22 提交了计数器，然后**只跑了 `cmake --build build --target ocudu_versioning`**
+  （它只重新生成 `build/hashes.h`，**不重链任何东西**）⇒ `build/hashes.h` 的 mtime 变成 17:22，
+  而 `build/apps/gnb/gnb` 还是 **17:05** 的旧二进制。`run_leg.sh` 的守卫比的是"戳 = HEAD"⇒ **两边都是 `e3d4658f58`，守卫通过**，
+  腿就这么飞了（17:25 起，17:31 落盘）。
+* **p29 仍然可用**：作为**基线腿**——V1 中位 **1506.5**（cohort 内）、`cbs/lane=2.00`、`merged_hop=616.5 µs`、
+  每跳派发 **12.0**（eq 9.0 + CE 2.0 + demap 1.0）、`eq_batch runs=3.0/跳 max_run=8 first_break=estimates` —— 与 `p27` 逐项一致
+  （即"读数自洽"这一条预登记成立，只是**站点表**缺）。⚠ 这条腿 **`gaps=3`、契约 NOT MET 1/8**（与 p28 同类，电台侧）。
+* **补强守卫（`run_leg.sh`）**：不再只比戳，而是**在二进制里找那个戳字符串**
+  （`lib/support/versioning` 会把 commit 编进二进制）：
+  ```
+  if ! grep -aq "$STAMP" "$ROOT/build/apps/gnb/gnb"; then
+    echo "REFUSING to run: build/apps/gnb/gnb does not carry the stamp it claims ($STAMP)." ...
+  ```
+  这样"刷新戳但不重建"这类事故**在下一次飞腿前就会被拦下**（内容判据，不依赖 mtime；实测该检查 ~0.19 s）。
+* **纪律重申（写进本节的教训）**：改过代码后**必须重建 `gnb`**（`cmake --build build --target ocudu_versioning && cmake --build build --target gnb`）；
+  **单独跑 versioning 只会让守卫说谎**。
+
+
 
 
 ## 7. 杠杆与候选改动（技术账）
