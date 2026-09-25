@@ -26,7 +26,7 @@ ru_sdr:
   # this rate - while every discontinuity the receive path has recorded since the host-side stalls were fixed is
   # 2-6 ms and lands on a UHD `overflow` event for event (dev doc 6.51). 256 frames costs a couple of megabytes
   # and nothing else: the ring is drained in order, so a deeper one adds margin against a burst, not latency.
-  device_args: type=b200,num_recv_frames=256,num_send_frames=64
+  device_args: type=b200,num_recv_frames=64,num_send_frames=64
   srate: 23.04
   otw_format: sc12
   tx_gain: 80
