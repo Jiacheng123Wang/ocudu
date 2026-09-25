@@ -271,7 +271,7 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
 #    ⚠ 加压配方 `iperf3 -c <phone> -R -b 40M -P 4 -t 240`：`-R` 不能省（否则变成下行负载）
 
 # 3) 判据
-bash doc_chinese/phy_latency/wip/p0_gate.sh <腿> [--vs=<出厂臂>]   # P0 读数（只读日志）
+bash doc_chinese/phy_latency/wip/p0_gate.sh <腿> [--vs=<出厂臂>]   # P0 读数（只读日志）：A/B/C + Q9 的 D1-D5
 bash doc_chinese/phy_pipeline_gpu/wip/leg_gate.sh --slot-ms=0.5 <腿>    # ⚠ 只用于加压腿
 bash doc_chinese/phy_pipeline_gpu/wip/milestone_audit.sh               # 里程碑门（~3 分钟，互斥锁）
 ```
@@ -996,6 +996,101 @@ deposit->completion max=1666.0us …; unclaimed at once max=6, oldest unclaimed 
 3. **并发 2 的跨度收益第三次复现**：`[ul_gpu_pipeline]` 中位 **2375 µs**（并发 1 是 5248）、`stale=0`、max 5167 µs；
    `merged_hop=885.3 µs/lane`、`cbs/lane=2.00 (max=2) dropped=0`（V4 不变）。
 
+### 6.11 ✅ Q9 修复落地（2026-09-25，提交 `3d00eafe97`）：**时间期限 + 环绕安全守护 + 每一个注册表入口都查**
+
+> 依据 §6.10 ③ 的 **a1 + a2**。**代码改动** ⇒ 与 P0-2/P0-7 同理，"腿的提交证据"要在**确认腿**上统一补（§5.2 纪律 3）。
+> 用户 2026-09-25 的指示：**修好之后由用户跑一条确认腿**（配方与判据见 ⑤）。
+
+**① 改了什么**（`ocudu_metal_burst.{h,mm}`、`phy_pipeline_grid_ready.h`；报告在 `ocudu_dft_metal_engine.mm`、`ul_chain_replay.cpp`）
+
+| 位置 | 改动 |
+|---|---|
+| **`sweep_due()`**（新，匿名命名空间）| 判"这个块该由注册表自己提交吗"：**先 slot 窗口、后时间期限**，两者 OR。slot 窗口**先守护再相减**：`entry.slot < newest_slot` 且 `newest_slot - entry.slot > sweep_after_slots(=2)`；时间期限 = `now - deposited_at > sweep_after`，`sweep_after = std::chrono::milliseconds{10}`（**强类型**，按本仓"时间参数用 chrono"的规矩）|
+| **`sweep_unclaimed()`**（新）| 把原先内联在 `deposit_released()` 里的 sweep 提成函数，**在每一个注册表入口调用**：`deposit_released()` / `take_released()` / `claim_grid_production()`（后者覆盖宿主读的 `ensure_grid_produced()` 与设备侧 `grid_production_generation()`）。被 sweep 的块收进 `std::vector`，**解锁之后**才 `commit_dropped()`（提交可能跑完成处理器，而完成处理器要拿同一把锁）|
+| `handed_state::newest_slot`（新）| slot 窗口的参考值是**最近一次 deposit 的 slot**；不能用来访者自己的 slot——宿主读的是它要读的那个 slot，可以落后接收链好几拍 |
+| `take_released()` / `claim_grid_production()` | **先服务调用者要的那个块，再 sweep 其余的** ⇒ sweep **永远不会**让"已经来了的消费者"吃 MISS（MISS 会让跳改开自己的命令缓冲 = 多一次提交，撞 V4）|
+| `handed_counters::late_commits_time`（新）| `late_commits` 里**由时间期限**认领的那一部分（slot 窗口先判 ⇒ 不环绕的腿上它≈0）⇒ 以后一条腿能直接读出"**是谁救的场**" |
+| 报告 | `[metal_stats] dft handover … late=… **late_time=…**`（退出报告 + debug 心跳两处同步）、`[l1_handover]` / `[l1_hop]` 各一处；`grid_handover_counts` 同步加字段 |
+
+**② 为什么守护写成 `entry.slot < newest_slot`，而不是 §6.10 ③ a2 里写的 `age < nof_slots_per_hyper_system_frame()/2`**
+
+那是一处**有意偏离**，理由写在代码里也记在这里：`nof_slots_per_hyper_system_frame()` 是 **`slot_point` 的成员**，
+而注册表这一层拿到的是**裸 `uint64_t` slot**（`deposit_released(grid_base, slot, …)`），它**没有 numerology**；
+要用那个模数就得把 numerology 一路传进注册表（改 API + 全部调用点 + 测试），
+而这条判据**本来就不需要 slot 也能做对**（a1）。
+`entry.slot < newest_slot` 是**更强的守护**：只有"同一 hyperframe 内、确实落后"时才做减法，
+跨环绕时**根本不做减法**（旧条目 10239 > 新 deposit 5 ⇒ 直接落到时间期限）。
+⇒ a2 要的"不误判跨环绕"给足（既不会误判、也不会失效），a1 要的"不依赖环绕"由时间期限给足。
+
+**③ 新增的红绿回归臂（`dft_release_adopt_metal_test` 的 arm 11）**
+
+它**造出修复前的形状**，再断言修复后的行为：孤儿块存在 `slot = test_slot + 400`，
+紧接着**一次 slot 更小的 deposit（= 5）模拟计数器环绕**（此后 `entry.slot + 2 < slot` 永不成立），然后
+**(a)** 断言这次 deposit **什么也没 sweep**（`late`/`late_time` 都不动）⇒ 这条臂确实处在"slot 规则够不到"的位置，不是侥幸；
+**(b)** 睡过 10 ms 期限后，**用一次 take（不是 deposit）**驱动注册表，断言孤儿被打扫（`late_time` 3→5）、
+**输入 token 恰好回池一次**。⚠ 修复前这条臂**必然红**：没有任何入口会 sweep 它（sweep 只在 deposit 里，而这条臂不再 deposit）。
+
+**④ 离线验证（提交前全部做完，提交 `3d00eafe97`）**
+
+| 网 | 读数 |
+|---|---|
+| `dft_release_adopt_metal_test` | **rc=0**；arm 11 打印 `… invisible to the slot rule (wrapped newest slot=5 < orphan slot=4642) and is still swept by the TIME deadline - swept nothing at the deposit, swept by a TAKE 50 ms later (late_time 3->5), input released exactly once`；arm 8（老 sweep 臂）、arm 10（软界臂）全绿；新字段在 `dft handover … late=6 late_time=5` 上可见 |
+| `ctest -L phy` | **100% passed out of 193**（复跑 4 次；见 ⑥ 的一次单发红）|
+| `lower_phy_test` | **528/528 PASSED** |
+| `ul_pipeline_probe_test`（support）| **3/3** |
+| `l1_handover_arms.sh 8 /tmp/l1_handover_final` | **5 PASS**（`cand vs ref` 8 个网格逐字节 0；`drop` / `skew` 各 8 个**不同** ⇒ 网非空）|
+| 与 **pristine HEAD 二进制**（`work_tmp/ref/replay_head_pre_p05`）逐字节 | `cand` + `nogrid` 两臂 **16 个网格文件、0 differing 字节**；同一工具复跑两遍之间也 0（⇒ 可复现，差异不是噪声）|
+| `l1_hop_arms.sh` | **4/4 `differing=0`**（cand/hostfirst/claim/claimnowait 各 16 个软比特文件全同；`OPEN` 那条是 5.9.39 的老结论，与本次无关）|
+| `ul_chain_replay` 真捕获 `syn004_4` | 4 个 dump 与 pristine HEAD 二进制**逐字节相同**（0 differing）|
+
+⚠ **一个与本次无关、但会浪费下一次时间的工具坑**（顺带记下）：
+`l1_handover_arms.sh <slots> <workdir>` 若把 `<workdir>` 传成**相对路径**，
+`run_arm()` 里的 `( cd "$WORK" && … --out "$WORK/…" )` 会把 `--out` 变成一个不存在的**嵌套**路径 ⇒ **一个 dump 都不写**，
+脚本于是打印 `files=0 differing=0`（**一条空网**，仍是 PASS 形状），并且 `unproduced` 会偶发 1。
+**传绝对路径**（如 `/tmp/l1_handover_final`）两个现象都消失；用 **pristine HEAD 二进制**在同样的相对路径下**复现同样两条** ⇒
+两者都不是本次改动带来的。⇒ 这条工具用法记在这里：**workdir 传绝对路径，并核对 `files=8`**。
+
+**⑤ 确认腿（用户跑）：配方与预登记判据**
+
+```bash
+# 配方与 p07-conc2 完全相同：n1 默认 + 并发 2 + 相位配对开关；跑 ~100 s ⇒ 跨过 ~10 个 hyperframe（10.24 s）
+sudo -E OCUDU_UL_PHASE_SEGMENTS=1 bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu <label> \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+# 流量：100 s 上行 iperf3（-R，见 §3.2 配方）；起腿前 pgrep -x gnb 干净
+# 判读：bash doc_chinese/phy_latency/wip/p0_gate.sh <label>          # D1–D4 = F1–F4，D5 = F6 的两个计数器
+#       再读 V1–V5（§3）与契约 8/8；普查：python3 doc_chinese/phy_latency/wip/leg_census.py <leg>.log
+```
+
+| # | 判据（**先写死**）| 修复前（`p07-conc2`）| 通过条件 |
+|---|---|---|---|
+| **F1** | `input hold (P0-2)` max | 30.72 s | **< 100 ms** |
+| **F2** | `block lifecycle (P0-7)` 的 `wait max` / `oldest unclaimed age max` | 30.72 s / 77.86 s | **< 100 ms** |
+| **F3** | `pop_blocking wait (P0-2)` max / `over 1s=` | 4.998 s ×2 | **max < 10 ms 且 `over 1s=0`** |
+| **F4** | `radio sample continuity` | 2 gaps / 153,167,345 samples（≈9.97 s）| **`gaps = 0`** |
+| **F5** | 用户侧上行数据面（`iperf3 -R`）| 两次断流，Retr 7536 | **不断流** |
+| **F6** | `late=` / `late_time=` | 3700 / （当时无此计数器）| `late_time` **≪** `late`（期限只做兜底）；`late` 不显著高于 3700 |
+| **F7** | V1–V5（§3）| V4 `cbs/lane=2.00 (max=2)`、`dropped=0` | **不变** |
+| **F8** | 契约 8/8、`paired/phase account … EXACT MATCH` | ✅ | **不变** |
+
+**F1–F5 已写进 `wip/p0_gate.sh` 的 D 组**（`D1`–`D4` 判 F1–F4，`D5` INFO 打印 F6 的两个计数器；阈值就是上表，一字不改），
+⇒ 确认腿飞完一条命令即可：`bash doc_chinese/phy_latency/wip/p0_gate.sh <label>`。
+D 组的两条路径都已自测：**在 `p07-conc2` 上 D1–D4 全 FAIL**（30.72 s / 30.72 s+77.86 s / 4.998 s / 2 gaps）、
+**在 `q9-conc2` 上 D1 FAIL + D2/D3 RED**（该腿缺 P0-7 行、`[ul_rx_pool]` 两行被 atexit 缺陷吃掉）、
+**在一份合成的"修复后"日志上 15/15 PASS**（合成件在 `work_tmp/q9_synth/`，不入 git）。
+⚠ D4 是一条**无条件**判据（`gaps == 0`）：零流量的腿本来就无效（§5.1），所以它不设例外。
+
+**⑥ 判读分支（也先写死）**
+
+* **F1–F4 全绿** ⇒ 修复成立，**Q9 收口**（并发 2 的 ~5 s 停顿不再出现）。
+* F1/F2 仍**秒级**但 `late_time` **很大** ⇒ 期限太松或还有第二个持有者：读 `slowest` 表——
+  `claimed=1 swept=0` 却 `deposit->completion` 很大 = **认领者自己不提交**（那是 P0-7b 的形状，不是注册表的）。
+* F6 的 `late` **明显上涨**（> 2×）或 **V4 变红** ⇒ 期限太紧（10 ms 抢了跳本来要认领的块）。
+  **处置：只改这一个内部期限（10 → 50 ms）再飞一条，两次读数都留着**——**不许改判据**。
+* F4 仍有 gap 而 F1–F3 全绿 ⇒ 断流另有来源：按 §6.6 的普查脚本定位（**不要把这条修复当失败**，也不要把这条腿当通过）。
+* 一次单发红**不算证据**（§5.2 纪律 2）：先复跑一次，保留首次读数。（本次离线阶段 `ctest -L phy` 出现过**一次** 1/193 红，
+  失败者名字未能捕获（当时的输出只留了汇总行）；此后**复跑 10 次全绿**，按纪律记为**未复现单发**。
+  若在确认腿前的复跑里再出现，就必须先查清再飞腿。）
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
@@ -1110,7 +1205,7 @@ n1 默认配方 + `OCUDU_UL_PHASE_SEGMENTS=1`：
 | **Q6** | 把 `max_pusch_and_srs_concurrency` 改变能否把 `ce` 的排队项吃掉？代价是什么？ | ✅ **已回答（P1-8，§7.5）**：能（−58~64×），代价是那次 **5 秒收包停顿**（两次复现）⇒ 交付前必须查清 |
 | **Q7** | 符号级收包（S-7g-13）在**负载下**对**跨度**的效果？ | **开放**：§5.8.29 只量过**该段** −1.2%（当时未加压、且当时丢了融合 1 次提交）⇒ 必须在加压腿 + 融合路径上重量一次 |
 | **Q8** | n78/n1 腿上 `max_pusch_and_srs_concurrency` 的生效值？车道是串行 strand 还是 fork limiter？ | ✅ **已收口（§6.1）**：两者**都是 1**、**都是串行 strand**；上限 = 中等池 `max_concurrency = 5`。⚠ 更正手算：n78 的 `ul_ratio` 是 **0.30**（不是 1.0）|
-| **Q9** | 并发 2 下 UL 断流 / 收包停顿的成因？ | ✅ **已结案（§6.10）**：**根因是代码缺陷**——`ocudu_metal_burst.mm` 的 sweep 用**模 10240 的 `slot_point::count()`** 做 `entry.slot + 2 < slot` 比较，跨 hyperframe（10.24 s）环绕即失效 ⇒ 落在环绕末尾的无人认领块要等**一整个 10.24 s 周期**（实测等待是 10.24 s 的整数倍：3.000×/2.000×/1.001×）才被 sweep，其间咬着 14 个输入 token ⇒ 池空 ⇒ 接收线程 park （实测 2 次 ≈4.998 s）⇒ 电台溢出 9.97 s ⇒ UL 归零。**修复方案见 §6.10 ③（待实施）** |
+| **Q9** | 并发 2 下 UL 断流 / 收包停顿的成因？ | ✅ **已结案（§6.10）**：**根因是代码缺陷**——`ocudu_metal_burst.mm` 的 sweep 用**模 10240 的 `slot_point::count()`** 做 `entry.slot + 2 < slot` 比较，跨 hyperframe（10.24 s）环绕即失效 ⇒ 落在环绕末尾的无人认领块要等**一整个 10.24 s 周期**（实测等待是 10.24 s 的整数倍：3.000×/2.000×/1.001×）才被 sweep，其间咬着 14 个输入 token ⇒ 池空 ⇒ 接收线程 park （实测 2 次 ≈4.998 s）⇒ 电台溢出 9.97 s ⇒ UL 归零。**修复已落地（2026-09-25，§6.11，提交 `3d00eafe97`）：sweep 改成「slot 窗口（环绕安全守护）+ 10 ms 单调时钟期限」两个触发，并在每一个注册表入口（deposit / take / 宿主读）都查一遍；离线全绿。⏳ 等用户跑确认腿（§6.11 ⑤ 的 F1–F8，判读分支见 §6.11 ⑥）** |
 | **Q10** | 那条 **n1 2.85 倍退化**是否还有 `ce` 之外的成分？ | 已由单变量腿定位（§7.5：`ce` 是主因）；`p05-pair` **配对后**：`ce` 中位 **3278 µs** = 跨度 5248 的 **62%**，而一跳的设备执行只有 **517 µs**（Q14）⇒ `ce` 的排队项就是这条退化的主体。**残余**是 `t2f`（1095 vs 历史 521 量级）——与 Q7 的收样点策略、以及 n1 的 rx_wait（1052 µs）有关，**未单独开臂** |
 | **Q11** | `value_net` 的归档基线陈旧、`ab_dumps` arm1 改前就红 | **待用户裁决**：重建基线（= 承认过期）还是把该网标为"HEAD 不可用"；arm1 需要查清"是否曾经绿过"（§6.5⑤）|
 | **Q12** | `s84b-p0` 的第一次尝试**没有留下任何日志**（本仓与 `ocudu_premerge` 都没有）| **未验证**：最可能是被"戳 ≠ HEAD"拒绝（那种情况**不产生日志**）。要它当证据就得重飞一条；否则按"无效腿"处理（登记，低优先）|
@@ -1134,7 +1229,8 @@ n1 默认配方 + `OCUDU_UL_PHASE_SEGMENTS=1`：
 | `s47/s49/s51/s61/s62`（n1，合并前）、`s69/s71`（n78）| n1 2.85 倍退化的历史对照 | 1844–1896 vs **5263–5268** |
 | `s75`（轻载）| residency 与负载无关的对照 | 1121 vs 重载 1125 µs |
 
-**离线载体**：`dft_release_adopt_metal_test`（P0-1/P2-E 的 Metal 臂）、`ul_pipeline_probe_test`（P0-5 的 hook 契约）、
-`tests/unittests/du_low/du_low_executor_mapper_test.cpp`（P0-6 的规则）、`ul_chain_replay`（逐字节/容差网）。
-**门与工具**：本阶段的 `phy_latency/wip/`（`p0_gate.sh`：A1/A2/B1/B2/C1/**C2**/C2b；`leg_census.py`：腿普查）与上一阶段的 `phy_pipeline_gpu/wip/`（`leg_gate.sh`（只用于加压腿）、`milestone_audit.sh`（互斥锁）、
+**离线载体**：`dft_release_adopt_metal_test`（P0-1/P2-E 的 Metal 臂；**arm 11 = Q9 修复的回归臂**，§6.11 ③）、`ul_pipeline_probe_test`（P0-5 的 hook 契约）、
+`tests/unittests/du_low/du_low_executor_mapper_test.cpp`（P0-6 的规则）、`ul_chain_replay`（逐字节/容差网；**与 pristine HEAD 二进制的逐字节比对见 §6.11 ④**）。
+**⏳ 待飞的腿**：**Q9 确认腿**（§6.11 ⑤ 的配方与 F1–F8 判据；飞完在 §9 里补一行，并把 V1–V5 一起读出来）。
+**门与工具**：本阶段的 `phy_latency/wip/`（`p0_gate.sh`：A1/A2/B1/B2/C1/**C2/C2b** + **D1–D5（Q9，§6.11⑤）**；`leg_census.py`：腿普查）与上一阶段的 `phy_pipeline_gpu/wip/`（`leg_gate.sh`（只用于加压腿）、`milestone_audit.sh`（互斥锁）、
 `ab_dumps.sh`、`value_net.py`、`l1_handover_arms.sh`、`l1_hop_arms.sh`、`edge_block_arms.sh`、`run_leg.sh`。

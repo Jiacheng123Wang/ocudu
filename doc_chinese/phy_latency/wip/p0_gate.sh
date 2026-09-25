@@ -24,6 +24,13 @@
 #       line is a snapshot taken earlier in the shutdown, and C2b reports - and bounds by SIGN - that delta
 #   C2b the printed `[ul_time_frequency]` count is an earlier snapshot of the same counter: printed <= announced
 #       (read against the account line's `series at exit=` once the leg has one; see the 2026-09-25 note below)
+#   D1  (Q9, registered in dev doc 6.11 (5)) `input hold (P0-2)` max < 100 ms
+#   D2  (Q9) `block lifecycle (P0-7)` `wait max` AND `oldest unclaimed age max` < 100 ms
+#   D3  (Q9) `pop_blocking wait (P0-2)` max < 10 ms AND `over 1s=0`
+#   D4  (Q9) `radio sample continuity` gaps == 0
+#   D5  (Q9, INFO) the two sweep triggers `late=` / `late_time=`, reported and not judged
+#       (D1-D4 are the criteria the Q9 fix is confirmed by; a leg flown BEFORE it reads them RED, which is the
+#        point - the same leg is what the fix is measured against)
 # "Cannot read" is RED, never absent - the lesson of 5.9.97.
 set -u
 
@@ -192,6 +199,79 @@ else
   check "[INFO] C2 (P0-5) is judged only on a leg with the segments on" "OCUDU_UL_PHASE_SEGMENTS=1" INFO \
         "not a phases leg (knob unset): ${paired_line:-<no pairing line>}"
 fi
+# ---------------------------------------------------------------- Q9: is a block that nobody claims reaped in TIME?
+# The criteria are the ones registered in the dev doc 6.11 (5), written BEFORE the confirmation leg existed:
+#   D1  input hold (P0-2) max                < 100 ms   (was 30.72 s on the leg that closed Q9)
+#   D2  block lifecycle (P0-7) `wait max` AND `oldest unclaimed age max`  < 100 ms  (was 30.72 s / 77.86 s)
+#   D3  pop_blocking wait (P0-2) max         < 10 ms AND `over 1s=0`      (was 4.998 s x2)
+#   D4  radio sample continuity              gaps == 0                    (was 2 gaps / 153,167,345 samples)
+#   D5  the two sweep triggers, reported and NOT judged: `late=` is the total the registry committed itself,
+#       `late_time=` the part the TIME deadline claimed. A non-zero `late_time` means the slot window did not
+#       cover those blocks (the wrap shape Q9 is about); what that costs depends on the leg, so the number is
+#       printed for a person to read rather than compared against a threshold invented here (6.11 (6)).
+# Each one reads the leg's OWN report line, and "cannot read" is RED (5.9.97); the thresholds are copied from
+# 6.11 (5) verbatim - inventing one inside a gate is how a criterion becomes whatever the last person wanted.
+q9_lt() { awk -v v="${1:-}" -v t="$2" 'BEGIN { printf "%d", (v != "" && v+0 < t) ? 1 : 0 }'; }
+q9_us() { printf '%s' "$1" | grep -oE "$2=[0-9.]+us" | grep -oE "[0-9.]+" | tail -1; }
+q9_ms() { awk -v v="$1" 'BEGIN{printf "%.1f", v/1000}'; }
+
+hold_line=$(grep -a "input hold (P0-2):" "$LEGF" | tail -1)
+hold_max=$(q9_us "$hold_line" "max")
+if [ -z "$hold_max" ]; then
+  check "D1 (Q9) the longest token hold is sub-second" "< 100 ms" RED \
+        "cannot read: no 'input hold (P0-2)' line with a max= field - a leg that cannot show the hold cannot show the fix either"
+else
+  check "D1 (Q9) the longest token hold is sub-second" "< 100 ms" \
+        "$([ "$(q9_lt "$hold_max" 100000)" = "1" ] && echo PASS || echo FAIL)" \
+        "max hold = $(q9_ms "$hold_max") ms; $hold_line"
+fi
+
+life_line=$(grep -a "block lifecycle (P0-7):" "$LEGF" | tail -1)
+life_wait=$(printf '%s' "$life_line" | grep -oE "wait max=[0-9.]+us" | grep -oE "[0-9.]+" | tail -1)
+life_age=$(printf '%s' "$life_line" | grep -oE "oldest unclaimed age max=[0-9.]+us" | grep -oE "[0-9.]+" | tail -1)
+if [ -z "$life_wait" ] || [ -z "$life_age" ]; then
+  check "D2 (Q9) an unclaimed block is reaped in ms, not in hyperframes" "wait max < 100 ms AND oldest unclaimed age max < 100 ms" RED \
+        "cannot read: lifecycle line='${life_line:-<absent>}'"
+else
+  check "D2 (Q9) an unclaimed block is reaped in ms, not in hyperframes" "wait max < 100 ms AND oldest unclaimed age max < 100 ms" \
+        "$([ "$(q9_lt "$life_wait" 100000)" = "1" ] && [ "$(q9_lt "$life_age" 100000)" = "1" ] && echo PASS || echo FAIL)" \
+        "wait_for_a_claim max = $(q9_ms "$life_wait") ms, oldest unclaimed age max = $(q9_ms "$life_age") ms; $life_line"
+fi
+
+pop_line=$(grep -a "pop_blocking wait (P0-2):" "$LEGF" | tail -1)
+pop_max=$(q9_us "$pop_line" "max")
+pop_1s=$(printf '%s' "$pop_line" | grep -oE "over 1s=[0-9]+" | grep -oE "[0-9]+$")
+if [ -z "$pop_max" ] || [ -z "${pop_1s:-}" ]; then
+  check "D3 (Q9) the receive thread is not parked" "max < 10 ms AND over 1s=0" RED \
+        "cannot read: pop_blocking line='${pop_line:-<absent>}'"
+else
+  check "D3 (Q9) the receive thread is not parked" "max < 10 ms AND over 1s=0" \
+        "$([ "$(q9_lt "$pop_max" 10000)" = "1" ] && [ "$pop_1s" = "0" ] && echo PASS || echo FAIL)" \
+        "max = $(q9_ms "$pop_max") ms, over 1s = $pop_1s; $pop_line"
+fi
+
+cont_line=$(grep -a "radio sample continuity" "$LEGF" | tail -1)
+cont_gaps=$(printf '%s' "$cont_line" | grep -oE "[0-9]+ gaps over" | grep -oE "[0-9]+")
+if [ -z "${cont_gaps:-}" ]; then
+  check "D4 (Q9) the radio lost no sample" "gaps == 0" RED \
+        "cannot read: no 'radio sample continuity' line in the leg"
+else
+  check "D4 (Q9) the radio lost no sample" "gaps == 0" \
+        "$([ "$cont_gaps" = "0" ] && echo PASS || echo FAIL)" \
+        "$cont_line"
+fi
+
+hand_line=$(grep -a "\[metal_stats\] dft handover" "$LEGF" | tail -1)
+late_n=$(printf '%s' "$hand_line" | grep -oE " late=[0-9]+" | grep -oE "[0-9]+")
+late_t=$(printf '%s' "$hand_line" | grep -oE " late_time=[0-9]+" | grep -oE "[0-9]+")
+if [ -z "${late_n:-}" ]; then
+  check "[INFO] D5 (Q9) which sweep trigger did the work" "reported, not judged" INFO \
+        "no 'dft handover' line with a late= field: ${hand_line:-<absent>}"
+else
+  check "[INFO] D5 (Q9) which sweep trigger did the work" "reported, not judged" INFO \
+        "late=$late_n (blocks the registry committed itself), late_time=${late_t:-<absent>} of them by the TIME deadline$( if [ -z "${late_t:-}" ]; then printf '  (the leg predates the fix: it cannot say which trigger reaped)'; elif [ "${late_t:-0}" != "0" ]; then printf '  <-- the SLOT window could not have caught these (the wrap shape Q9 is about)'; else printf '  (the slot window reaped everything)'; fi )"
+fi
+
 # The ratio the pairing was commissioned to recompute (6.0 (2)): printed, never judged - the criterion says
 # "state whether it is still ~95%", not "fail below it", and inventing a threshold inside a gate is how a
 # criterion becomes whatever the last person wanted (5.9.101).

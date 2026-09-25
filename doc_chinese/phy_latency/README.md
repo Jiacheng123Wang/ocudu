@@ -55,7 +55,8 @@
 
 ## 本阶段的工具（`wip/`，2026-09-25 起）
 
-* **`wip/p0_gate.sh`** —— P0 读数门（只读日志，用户飞腿时可安全跑）：A1/A2（P0-6）、B1/B2（P0-1 拆分臂）、C1/**C2/C2b**（P0-5 配对）。
+* **`wip/p0_gate.sh`** —— P0 读数门（只读日志，用户飞腿时可安全跑）：A1/A2（P0-6）、B1/B2（P0-1 拆分臂）、C1/**C2/C2b**（P0-5 配对）、
+  **D1–D5（Q9 修复的确认判据 F1–F4 + 两个 sweep 触发器的 INFO 读数，阈值见开发文档 §6.11 ⑤）**。
 * **`wip/leg_census.py`** —— 腿普查：UL 静默表 + RF/pool 事件（定位"UL 在哪一段停住"）。
 * **上一阶段的门与工具仍在 `doc_chinese/phy_pipeline_gpu/wip/`**（起腿 `run_leg.sh`、`milestone_audit.sh`、离线网、**腿日志 `logs/`**）；
   跑出来要看的东西在 **`doc_chinese/work_tmp/`（git 忽略）**——`/tmp` 会在重启时被清掉。
