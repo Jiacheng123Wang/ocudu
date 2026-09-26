@@ -7214,7 +7214,9 @@ offline acceptance: GREEN
 * **仍未归属**：一跳窗口里的 ~450–570 µs（平台/空口固有；已从宿主、融合、队列、栅栏、算力、并发六个方向摘除，证据见 §6.88/§6.90/§6.94/§6.97/§6.101），它是**下一个独立项目**的入口，不影响本收口。
 
 
-### 6.112 Linux/GCC 构建修复：`[ul_rx]` 探针的调用点缺了它定义所在的守卫（2026-09-26，提交 `d35272a264`）
+### 6.112 Linux/GCC 构建与测试修复：`[ul_rx]` 采样连续性探针**不该有守卫**（2026-09-26，提交 `d35272a264` + `ee410a9be8`）
+
+> ⚠ **本节的第一版结论是错的，已更正**：我当时把"调用点补上定义所在的守卫"当作修法（`d35272a264`）。真正的错误在**被守卫的那一侧** —— 这个探针是**数据路径判据**（D4/Q9-D4），不是 Metal 调试辅助，Linux 构建（`ENABLE_METAL_STATS=OFF`）本就应该编译它。构建过了之后 `lower_phy_test` 立刻暴露出来。
 
 用户报：Ubuntu（`jwang@192.168.31.211:~/work/ocudu`，Release、`ENABLE_FLOW_PROBES=ON`、`ENABLE_METAL_STATS=OFF`）编译失败：
 
@@ -7236,7 +7238,27 @@ macOS 侧一直编译通过，因为**本机调试开关默认全开**（`ENABLE
 * ★ **对空口构建是零行为变化（机械证明）**：在 macOS（`ENABLE_METAL_STATS=ON`）下，修改前后把同一个 TU 编成目标文件，**`cmp` 逐字节相同**（126024 B）——因为新增的两个 `#if` 在这个配置下都为真、被包住的记号一字未改。
   ⇒ 收口腿对（`p59`/`p60`，跑在 `791864c7d7`）所依据的**空口代码与当前 HEAD 完全一致**；审计的"腿 == HEAD"机械比对会看到一次代码差异，其解释就是本条。
 
-**遗留**：Ubuntu 那棵树上补丁是**工作区未提交**状态（HEAD 仍是 `90a288c26a`，仅电台配置与这一个文件被改）。若要把机械判据也归位，跑一条当前 HEAD 的短腿即可；或在远端把这一个文件提交掉。
+#### 第二半（真正的根因）：探针被守卫掉 ⇒ 单元测试失败
+
+**现象**（Ubuntu 全量 `cmake --build build --target test`）：`5574 - lower_phy_test (Failed)`，48 个用例同一条：
+
+```
+lower_phy_test.cpp:999: Failure  ... "no 'radio sample continuity' check is registered"
+```
+
+**逐步定位**：
+1. 注册点（`register_phy_pipeline_check({"radio sample continuity", …})`）与整个 `[ul_rx]` 块（`ul_rx_stats`、`ul_rx_counters/note_call/note_gap/stats_report`）都在 `#if defined(OCUDU_METAL_STATS)` 里 ⇒ Linux 上**检查根本没注册**；
+2. 把注册放出来后，测试改在 **996 行**失败：`verdict` 是空的（检查"拒绝判定"），它自己打印的证据是 **"0 gaps over 0 blocks"** ⇒ 计数没被喂；
+3. 第二个 `#if defined(OCUDU_METAL_STATS)` 区（`ul_process()` 里，**块/间隙的记账**：`c.blocks/gaps/samples.fetch_add`、`ul_rx_note_gap`）同样被编掉 ⇒ 计数器恒为 0 ⇒ 检查按契约"不在路径上"返回 not applicable。
+
+**修法**：**两处守卫全部删掉**（探针无条件编译），并**撤销** `d35272a264` 的两处调用点补丁 —— 因为定义现在永远存在。判据依据：测试明确要求它注册、`p0_gate.sh` 在**每个平台**都解析这行（D4/Q9-D4）、而空口构建（macOS，`METAL_STATS=ON`）本来就一直在跑它。
+
+**验证**：
+* **Ubuntu**：`cmake --build build -j16` → 100%；`lower_phy_test` → **Passed (1/1)**；**全量 `cmake --build build --target test` → exit 0**（此前是 `Error 8`；标签汇总含 `phy = 184 tests`、`tsan = 1174 tests` 等，唯一一条是 Skipped）；
+* **macOS**：`gnb` 重建、`lower_phy_test` **576/576 PASSED**（退出时那行 `-> FAILED` 是**mock 电台**自己的判词，与改动前逐字相同）；
+* ★ **空口零行为变化（机械证明）**：`ENABLE_METAL_STATS=ON` 下本 TU 的目标文件在改动前后 **`cmp` 逐字节相同** ⇒ 空口二进制不可能变了。
+
+**遗留**：Ubuntu 那棵树上这个文件是**工作区未提交**状态（HEAD 仍是 `90a288c26a`，另有两个电台配置是用户自己的改动）；两边文件已用 sha256 核对一致（`feb620ba…` → 之后为最终版）。
 
 
 ## 7. 杠杆与候选改动（技术账）
