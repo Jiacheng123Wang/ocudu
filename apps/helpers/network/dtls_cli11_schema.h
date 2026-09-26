@@ -11,20 +11,28 @@ namespace ocudu {
 
 struct dtls_appconfig;
 
-/// \brief Adds DTLS option CLI11 parameters to the given application.
+/// \brief Adds DTLS option CLI11 parameters to the given peer-to-peer link.
 ///
 /// Options are added flat (no subcommand), so they appear at the same level as the caller's other options.
-/// Some options like the DTLS mode (server or client) are link specific, thus ommited from this helper. Each link will
-/// need to configure those options independently.
 ///
 /// \param[out] app CLI11 application to configure.
 /// \param[out] config DTLS configuration that stores the parameters.
 void configure_cli11_dtls_peer_args(CLI::App& app, dtls_appconfig& config);
 
-/// TODO docs.
+/// \brief Adds DTLS option CLI11 parameters to the given client link.
+///
+/// Options are added flat (no subcommand), so they appear at the same level as the caller's other options.
+///
+/// \param[out] app CLI11 application to configure.
+/// \param[out] config DTLS configuration that stores the parameters.
 void configure_cli11_dtls_client_args(CLI::App& app, dtls_appconfig& config);
 
-/// TODO docs.
+/// \brief Adds DTLS option CLI11 parameters to the given client link.
+///
+/// Options are added flat (no subcommand), so they appear at the same level as the caller's other options.
+///
+/// \param[out] app CLI11 application to configure.
+/// \param[out] config DTLS configuration that stores the parameters.
 void configure_cli11_dtls_server_args(CLI::App& app, dtls_appconfig& config);
 
 } // namespace ocudu

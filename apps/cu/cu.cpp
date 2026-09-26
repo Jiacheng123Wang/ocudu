@@ -388,8 +388,6 @@ int main(int argc, char** argv)
     xnc_gws.push_back(create_xnc_connection_gateway(xnc_server_cfg));
   }
 
-  // TODO get DTLS config from CLI11.
-  cu_cfg.f1ap_cfg.dtls                                    = dtls_appconfig{};
   std::unique_ptr<ocucp::f1c_connection_server> cu_f1c_gw = ocudu::create_f1c_gateway_server(
       ocudu::f1c_gateway_config{.bind_addrs = cu_cfg.f1ap_cfg.bind_addrs,
                                 .sctp_cfg   = cu_cfg.f1ap_cfg.sctp,

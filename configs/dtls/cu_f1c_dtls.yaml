@@ -8,10 +8,10 @@
 # - cert_filename: our own certificate
 # - key_filename: our own key
 
-f1ap:
-  addrs: 127.0.10.1
-  bind_addrs: 127.0.10.2
-  dtls:
-    cert_filename: "/tmp/client-cert.pem"
-    key_filename: "/tmp/client-key.pem"
-    ca_cert_filename: "/tmp/ca-cert.pem"
+cu_cp:
+  f1ap:
+    bind_addrs: 127.0.10.1
+    dtls:
+      cert_filename: "/tmp/server-cert.pem"
+      key_filename: "/tmp/server-key.pem"
+      ca_cert_filename: "/tmp/ca-cert.pem"
