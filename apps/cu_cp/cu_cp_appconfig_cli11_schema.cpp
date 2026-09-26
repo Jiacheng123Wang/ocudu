@@ -26,6 +26,9 @@ static void configure_cli11_e1ap_args(CLI::App& app, ocucp::e1ap_appconfig& e1ap
              "E1 bind addresses. The '--bind_addr' name is a deprecated alias and should not be used.")
       ->capture_default_str();
   configure_cli11_sctp_socket_args(app, e1ap_params.sctp);
+
+  CLI::App* dtls = add_subcommand(app, "dtls", "DTLS parameters")->configurable();
+  configure_cli11_dtls_server_args(*dtls, e1ap_params.dtls);
 }
 
 static void configure_cli11_f1ap_args(CLI::App& app, ocucp::f1ap_appconfig& f1ap_params)

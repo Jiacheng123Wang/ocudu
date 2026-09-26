@@ -25,6 +25,8 @@ struct e1ap_appconfig {
   std::vector<std::string> bind_addrs = {"127.0.20.1"};
   /// SCTP socket options.
   sctp_appconfig sctp;
+  /// DTLS options.
+  dtls_appconfig dtls;
 };
 
 /// F1AP configuration.

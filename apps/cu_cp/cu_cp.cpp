@@ -342,6 +342,11 @@ int main(int argc, char** argv)
   e1_sctp_cfg.bind_port      = E1AP_PORT;
   e1_sctp_cfg.ppid           = E1AP_PPID;
   fill_sctp_network_gateway_config_socket_params(e1_sctp_cfg, cu_cp_cfg.e1ap_cfg.sctp);
+  if (cu_cp_cfg.e1ap_cfg.dtls.enabled) {
+    e1_sctp_cfg.dtls_cfg.emplace();
+    fill_dtls_network_gateway_config_params(*e1_sctp_cfg.dtls_cfg, cu_cp_cfg.e1ap_cfg.dtls);
+  }
+
   // > Create E1 gateway
   std::unique_ptr<ocucp::e1_connection_server> e1_gw =
       create_e1_gateway_server(e1_cu_cp_sctp_gateway_config{e1_sctp_cfg,
