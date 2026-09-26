@@ -7303,6 +7303,61 @@ lower_phy_test.cpp:999: Failure  ... "no 'radio sample continuity' check is regi
 **遗留**：Ubuntu 那棵树上这个文件是**工作区未提交**状态（HEAD 仍是 `90a288c26a`，另有两个电台配置是用户自己的改动）；两边文件已用 sha256 核对一致（`feb620ba…` → 之后为最终版）。
 
 
+### 6.113 V3 的**复跑计划**（用户裁定：先不改任何参数，按历史 log 的配方重跑 cpu / cpu_gpu / gpu，看现象能否复现）+ 历史基线表（2026-09-26）
+
+> 代码已经改了很多（D1 交棒、批量化、池/环、§6.103–§6.107 的 sigma2 修复…），所以 V3 的第一步不是改传输参数，而是
+> **先证明现象还在不在**。本节把"历史基线"和"要飞的臂"都写成可机械比对的形式；工具：`doc_chinese/phy_pipeline_gpu/wip/repro_compare.py <leg> …`。
+
+#### ① 历史基线（脚本直接读旧腿生成；**绝对数不可跨配置比较，见 ④**）
+
+| 腿（模式/工况）| RF 失败 | 其中 | `[ul_pipeline]` 中位 | `[ul_gpu_pipeline]` 中位 | lane `residency` 中位 | `gaps` | 每 DL 递交失败率 |
+|---|---|---|---|---|---|---|---|
+| `p27`（gpu/stress，ring64+pool16）| **707** | 633 uf + 74 late | 1560 | 1495.4 | 723.7 | 0 | —（无 slack 探针）|
+| `p42`（gpu/stress，ring256+pool32）| **1724** | 1329 uf + 395 late | 1435 | 1366.8 | 543.9 | 0 | **0.2336%** |
+| `p60`（gpu/default，ring512+pool32）| **909** | 757 uf + 152 late | 1476 | **1412.1** | 637.5 | 0 | **0.1628%** |
+| `s79-dlcap40`（cpu）| **0** | — | **670** | 无 | 无 | 0 | — |
+| `s81-ulcap40`（cpu）| **1** | 1 uf | **668** | 无 | 无 | 0 | — |
+| `s73-wall`（cpu）| 51 | 28 uf + 20 late + 3 ovf | **598** | 无 | 无 | **3 / 282199 样点** | — |
+
+两条**与模式无关**的读数（cpu 与 gpu 都有）：`[ul_rx_wait]` 中位 **473 µs**、max **~100.7–101.0 ms**；而两个 gpu 腿的
+`[ul_rx_timing]` 给出去向：**`recv` max ≈100.8 ms、`over 5ms`=20–24，而 `loop` max 只有 1.5–6.5 ms**；
+`[dl_tx_slack]` **中位提前 1512 µs、`AT/BELOW 0` 只有 19–48**（对 909–1724 次失败）⇒ 与 §6.42 一致：**失败在递交之后、传输内部**。
+
+#### ② 要飞的臂（**不改任何数据路径参数**；配置用当前交付配置原样）
+
+| # | 臂 | 命令要点 | 历史对照 | 预期复现 |
+|---|---|---|---|---|
+| A1 | **gpu**（stress）| `run_leg.sh gpu p61-n78-repro-gpu --regime=stress --expert_execution…concurrency=2 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1` | `p42`/`p60` | RF 700–1700、underflow 占 ~80%、`gaps=0`、slack 中位 +1.5 ms & `AT/BELOW 0`≤50、`[dl_tx_call]` over-1ms 数百、`recv max≈100 ms` 而 `loop` 数 ms、V1 1360–1500、`cbs/lane=2.00`、契约 9/9 |
+| A2 | **cpu**（stress，**忠实**：不传任何 gNB 选项 ⇒ 派生并发=1）| `run_leg.sh cpu p62-n78-repro-cpu --regime=stress OCUDU_UL_PHASE_SEGMENTS=1` | `s79`/`s81` | RF 0–5、`gaps=0`、`[ul_pipeline]` 中位 **600–700 µs** |
+| A3 | **cpu + 并发 2**（**混杂对照**，见 ④.2）| 同 A2 但加 `--expert_execution…concurrency=2` | 无（历史 cpu 腿都是派生并发 1）| 若 cpu 在并发 2 下仍 ~0–50 ⇒"GPU 模式病"成立；若 cpu 也上千 ⇒ 归因改为**并发/负载** |
+| A4 | **cpu_gpu + 三个 metal backend**（复现你 profile 的第 1 段）| `run_leg.sh cpu_gpu p64-n78-repro-cpugpu --regime=stress --expert_phy.pusch_dft_type metal --expert_phy.pusch_channel_estimator_algo metal_mmse --expert_phy.pusch_channel_equalizer_backend metal OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1` | **无历史腿**（新基线）| 给出模块级路线的 RF/`crossings`/`cbs/lane`（回答 profile 第 1 段）|
+| A5（可选）| **n1 bridge**（gpu + cpu，手机流量，default）| `LEG_CONFIG=configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml`，无其它选项 | 你的两条 console log | gpu `[ul_pipeline]` ≈1721、cpu ≈1200、两边 `[ul_rx_wait] max`≈101 ms |
+
+#### ③ 判读（跑完一条命令出对照表）
+
+```bash
+python3 doc_chinese/phy_pipeline_gpu/wip/repro_compare.py p61-n78-repro-gpu p62-n78-repro-cpu p63-n78-repro-cpu-conc2 p64-n78-repro-cpugpu
+```
+脚本对每条腿打印：provenance（mode/regime/config/options/knobs）、**RF 失败总数与分类**、`[ul_pipeline]`/`[ul_gpu_pipeline]` 的
+samples/中位/stale、`[ul_rx_wait]`、`[ul_rx_timing]`、`[dl_tx_slack]`、`[dl_tx_call]`、`[ul_rx] gaps/ts0`、`[ul_rx_pool]`、
+`[ul_gpu_lane]`（lanes/cbs/residency）、契约，以及**每 DL 递交的失败率**。
+
+#### ④ 三条必须记住的注意事项
+
+1. **配置已经演进，绝对失败数不可跨配置比**：历史 V3 腿是 ring **64**(`p27`)/**256**(`p42`) + pool **16**(`p27`)/**32**；今天是 **ring 512 + pool 32 + TX ring 64**。
+   ⇒ 只比**率**（failures/DL transmission：`p42` 0.234% vs `p60` 0.163%）与**签名**（underflow/late 比例、负载相关、cpu/gpu 对比）。
+2. **历史 cpu 腿与 gpu 腿的并发不同**：三条 cpu 腿**没有**传 `max_pusch_and_srs_concurrency` ⇒ 派生值是 **1**（§4.1 表：n78 → 1）；而所有 gpu 腿都用 **2**。
+   ⇒ "cpu 0–1 vs gpu 700–1700"**混杂了并发**，所以必须有 **A3（cpu@conc2）**这条对照，否则不能把差别归给模式。
+3. **单条腿不是证据**：A1/A2（以及 A3）各飞 **≥2 条**、同日同负载；工况标签写清（`p27`–`p42` 是 stress，`p60` 是 default）。
+   另外：**`cpu_gpu` 单独用（全 auto）= 全 CPU**，要得到"模块级卸载"必须显式给三个 metal backend 旋钮（A4 就是这么写的）。
+
+#### ⑤ 结果会导向什么
+
+* **现象复现 + cpu/cpu@conc2 仍近零** ⇒ 坐实"GPU 模式病"，下一步按 §6.42 ④ 的 S3 做**宿主亲和/优先级**臂，或按传输侧做参数扫描（那一步才需要动参数，届时请用户批准）；
+* **现象不再复现（RF 大幅下降）** ⇒ 说明代码演进（批量化/D1/池环/sigma2 修复）顺带治好了它 ⇒ 记为"已复现修复"，V3 可重新判定；
+* **cpu 在并发 2 下也变红** ⇒ 归因改为**并发/负载**而非模式，V3 的判据与配方都要重述（§6.113 ④.2）。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
