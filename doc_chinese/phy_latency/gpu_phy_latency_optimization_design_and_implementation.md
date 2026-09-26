@@ -5220,6 +5220,40 @@ host_span.push_back(stage_host[t] - stage_host[f]); // ← host 跨度本不需�
 **同时已能确定的上界**（不依赖那五段）：一跳真正的 GPU 执行 ≈ **~75 µs**（前端 ~10.6/槽 + 算力 ~51 + 派发地板 ~13），
 而 V1 = 1364.2 ⇒ **~95% 的跨度是"等"**（等样点 + 等车道 + 交棒/提交/出手）。⇒ **单车道优化的标的全部在"等的结构"里，不在算力里**（与 §6.65–§6.69 的结论一致）。
 
+#### 7.6.0c ★ 那 ~830 µs 的第一版分解（用现有腿数据）+ 验证腿 `p42-n78-hostgap` 的预登记
+
+**可测的三个锚**（`p39`，全部中位）：
+
+| 锚 | 读数 | 含义 |
+|---|---|---|
+| **本跳自己的设备窗口** | `merged_hop` **533.7 µs** | 含"等本槽样点" ~467 + 真执行 ~75（§6.65/§6.69）|
+| **同伴窗口（串行化等待）** | ≈ **533.7 µs**（= 一次窗口）| 车道上同一时刻只有一个跳在执行（`busy≈residency`、`burst max_in_flight=1`）⇒ 一跳的跨度里约一半是**等同伴占着 GPU** |
+| **队列延迟** | `queue: weights commit → weights start` **40.4 µs**（p95 316.5）| 后端队列把这块缓冲排到队的时间 |
+
+⇒ **V1 1364.2 ≈ 533.7（自己）+ 533.7（同伴）+ 40.4（队列）+ 残差 ≈ 256 µs**。
+**残差 256 µs 的候选**（现在**分不开**，正是要补的尺子）：宿主从"跳入口→交出 lane"（今天的 `handover_us`，按引擎已有相位表预估 **~15–40 µs**：wrap 0.8 + cb 4.5 + encode 6.5–8.2）、
+适配器在引擎前后的部分、"等网格就绪"（前端交棒）、LLR 出手、以及收包侧抖动（`[ul_rx_timing] recv over 1ms=996`）。
+
+**★ 验证腿 `p42-n78-hostgap`（配方与 `p39` 完全相同，唯一变量 = 今天这处补丁）**：
+
+```bash
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p42-n78-hostgap \
+  --regime=stress OCUDU_UL_PHASE_SEGMENTS=1 \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+# 判读：p0_gate.sh p42-n78-hostgap ；leg_gate.sh --slot-ms=0.5 p42-n78-hostgap
+grep -a "stage entry -> extraction commit" <腿>.log.stderr     # ★ 必须不再是 "no samples"
+grep -aE "ul_gpu_pipeline|queue: weights commit|commit -> completion|ul_gpu_lane\] period" <腿>.log.stderr
+```
+
+| 判据 | 预登记 |
+|---|---|
+| `gap: stage entry -> extraction commit (host)` | ★ **出现样本**（这是本次补丁的唯一验收判据）；中位落在 **10–60 µs**（引擎相位表外推）；若 >100 µs 说明适配器侧还有宿主工作 |
+| V1 中位 | **≈1364 ± 20 µs**（补丁只加一次诊断时钟调用，**不应改变任何值**）；若偏离 >40 µs ⇒ 先怀疑它不只是诊断 |
+| `merged_hop` / `queue: weights commit→start` / `period` | 与 `p39` 同量级（534 / 40 / 435 µs）|
+| 契约 / `cbs/lane` / `gaps` / 池 | 8/8 / 2.00 (max=2) / 0 / `starved=0`、`dropped=0`（**不允许变**）|
+| `handover_us` 的份额 | 若它只有 ~20 µs，则那 256 µs 残差主要在**"等网格就绪"与 LLR 出手**上 ⇒ 下一步的尺子要往那两处加（而不是继续在 CE 里找）|
+
 #### 7.6.1 ★ 用户裁决：**先把"单车道"自己优化好，再动并发（S-E）** —— 数字支持这个顺序
 
 **① V1 可以近似写成 `2 × merged_hop + 常数`（并发 2 下）**：`p39` 的 V1 1364.2 ≈ **2 × 533.7 + 297**。
