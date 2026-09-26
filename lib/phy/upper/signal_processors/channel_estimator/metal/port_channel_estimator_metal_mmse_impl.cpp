@@ -1587,6 +1587,12 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // the y scatter (glue #2) is gated on, and the descriptors the staging records. Both are reset on
   // EVERY hop, before K0-a decides, so a hop that fails K0-a cannot inherit the previous hop's
   // descriptors - which would make the engine write y from a buffer that no longer holds its pilots.
+  // MUST BE READ BEFORE THE RESET BELOW. Written after it (the first version), it read the flag this
+  // very statement had just cleared, so it was false on every hop, every hop took the standalone edge
+  // form, and the lane fell back to the pre-fusion submission structure: measured on air (leg
+  // p56-n78-sigma2fix) cbs/lane 2.00 -> 3.74, V1 1359 -> 1888us. The value wanted here is the one the
+  // PREVIOUS call left - "the hop that wrote sigma2_prev_base_ actually produced a device sigma2".
+  sigma2_prev_valid_  = device_sigma2_valid;
   device_ls_valid     = false;
   device_sigma2_valid = false;
   // S13-P2: whether THIS hop's EPRE sum was reduced by the extraction's command buffer. Reset with
@@ -1596,9 +1602,6 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // S-7g-20: and the device ratio of the previous hop, for the same reason - it addresses the
   // extraction's own output slot, which this hop has not filled yet.
   device_sigma2_rel   = nullptr;
-  // Still describes the PREVIOUS hop here (this hop's staging sets it below): whether the block
-  // sigma2_prev_base_ names has actually been written by a completed hop.
-  sigma2_prev_valid_  = device_sigma2_valid;
   nof_device_y_stage  = 0;
   if (device_builds_pilots) {
     const resource_grid_device_view dv         = args.grid.get_device_view();

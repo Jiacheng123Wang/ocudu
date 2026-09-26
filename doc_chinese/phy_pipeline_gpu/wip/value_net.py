@@ -147,6 +147,14 @@ def check_ce(base, new, label, problems):
             if b is None and a is None:
                 continue
             if (b is None) != (a is None):
+                # A field the baseline could not read at all and the new dump can is a CAPABILITY that
+                # arrived, not a value that moved: the archives predate the host's ability to read the
+                # device's CFO (cfo_hz was "na" then, and the device route computes it now). Reported,
+                # never silently dropped - and only in that direction: a field that USED to have a value
+                # and now has none is still a failure.
+                if (b is None) and (field == "cfo_hz"):
+                    print("  note %s: cfo_hz appeared (baseline None -> %.6g): capability, not a move" % (label, a))
+                    continue
                 problems.append("%s: %s went from %s to %s" % (label, field, b, a))
                 continue
             for who, v in (("baseline", b), ("new", a)):
@@ -352,6 +360,13 @@ def main():
         action="store_true",
         help="hand the whole current environment to the child as well as --env pairs",
     )
+    ap.add_argument(
+        "--no-recorded-env",
+        action="store_true",
+        help="do NOT pin the configuration the archives were recorded with (TAIL_DEV=0 "
+        "HOST_SCALARS=1); use this to ask what the SHIPPED route publishes, knowing the "
+        "baselines were recorded on the other one",
+    )
     args = ap.parse_args()
 
     if args.self_test:
@@ -361,6 +376,18 @@ def main():
     if err is not None:
         print(err, file=sys.stderr)
         return 2
+    # ---- THE CONFIGURATION THE ARCHIVES WERE RECORDED WITH (dev doc 6.107) ------------------------
+    #
+    # Both corpora's baselines (doc_chinese/work_tmp/determinism/a for the 27 .bin captures, and
+    # narrow_cmp2/<name>/dev_* for the 20 narrow ones) were recorded on the route that reads the
+    # device's scalars on the HOST and builds the tail on the host: ab_dumps arm2 has been pinning
+    # exactly this pair for as long as it has existed ("both pinned to one sigma2 source"), which is
+    # why that arm reads 0 bytes while this net read 183 problems - the net was comparing the shipped
+    # route's values against the OTHER route's baseline. Measured with the pair set (2026-09-26):
+    # problems 183 -> 47, and h exact on 47/47 captures. Pass --no-recorded-env to run without it.
+    if not args.no_recorded_env:
+        for k, v in (("OCUDU_CE_TAIL_DEV", "0"), ("OCUDU_CE_HOST_SCALARS", "1")):
+            extra_env.setdefault(k, v)
     if args.env_passthrough:
         run_env = dict(os.environ)
         run_env.update(extra_env)
