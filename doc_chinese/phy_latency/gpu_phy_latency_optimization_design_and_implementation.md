@@ -6221,6 +6221,62 @@ else if (!wait_per_slot || last_symbol_of_slot) { dft->wait_slot(slot); }   // �
 * ⇒ 因此：**当前的 2.00 是"两个首要目标"下的最优形态**（一跳一提交 + 一跳一必需边界），那 ~50 µs 是**平台的正确性税**，应记入 §3.1.1 的固定开销，而不是当作可优化项。
 
 
+### 6.91 ★★ 用户裁定的"测量分支"规划：**可行，而且 `event` 那条今天已经是一条"无 CPU 中途参与"的 3.00 分支**（2026-09-26）
+
+> 用户裁定（三点）：**(1)** S-E 结构是**最后**的选择（它与当前工作**不同维度、可以同时得到**收益）；
+> **(2)** 为了测量，暂时放宽到 `cbs/lane=3.00` **可以**，但**规划解决方案时必须记住最终目标——不能"放宽到中途再把 CPU 叫回来"**；
+> **(3)** `3.00` 与 `2.00` **可以做成条件分支**：3.00 只对**测量分支**开放（测量不是目的，是手段），**生产路径仍是 2.00**。
+
+#### ① ★ 关键新事实：`event` 路的"宿主 CFO 读回"**今天已经不存在了**
+
+`port_channel_estimator_metal_mmse_impl.cpp:2434-2442`：
+
+```cpp
+// Where K4's rotation takes its CFO from (see noise_stage_t). The extraction wrote this hop's
+// own estimate into the slot reserved for it, and the kernel reads it there - which is what
+// keeps the scalar out of the host's hands and lets the weights command buffer be encoded
+// without waiting for the extraction first. …
+reformat.noise.cfo_dev         = &gpu_ls_cfo[cfo_slot_];
+reformat.noise.cfo_from_device = device_ls_valid;
+```
+
+⇒ 空口走的是**设备 LSE 路**（`device_ls_valid = true`）⇒ **CFO 在设备上取** ⇒ **宿主不必读回、weights 那条 cb 可以"不等抽取"就编码** ✓
+⇒ §6.89① 引用的那条 `hole_to_weights_us = 125.3 µs` 是**旧时代**（宿主读回 CFO）的读数，**在今天这条路上不成立**。
+⇒ 因此 **`OCUDU_CE_LANE_ORDER=event` 今天就是一条：3 条 cb/跳 + 无宿主等待 + 无宿主回合** 的结构 ✓✓（抽取→权重的次序由**设备侧 fence** 保证，D1 仍武装 ⇒ 也没有 `wait_slot`）。
+
+#### ② 于是"条件分支"的可行性：**已经具备，且生产路零改动**
+
+| 分支 | 怎么开 | `cbs/lane` | 数据路径 | CPU |
+|---|---|---|---|---|
+| **生产（默认）** | 不设旋钮 | **2.00** | 全程 GPU | 一次提交后靠边站 |
+| **测量 A：多 cb 结构** | `OCUDU_CE_LANE_ORDER=event` | **3.00** | 全程 GPU（同样核、零拷贝、设备网格）| **无宿主等待、无回合**（① 证明）|
+| **测量 B：无交棒结构** | `OCUDU_DFT_RELEASE_BLOCK=0` **＋**跳过那次多余的宿主 `wait_slot` | 3.00 | 全程 GPU | 需要那个小旋钮（见③）|
+
+**测量 A 不需要任何新代码**（旋钮已有、默认关、生产路不受影响），并且**同时满足两个目标** ⇒ 它测的是"**单缓冲融合**在空口上值不值那 ~450 µs"，而**不是**用一个"CPU 回来的世界"去测。
+
+#### ③ 测量 B 需要的一小步（要不要做由你定）
+
+关 D1 会把 `finish_symbol` 推到 `dft->wait_slot(slot)`（**阻塞宿主**）那一支。
+但那个等待按代码自己的说法是**多余的**："waiting here would name a buffer this engine does not own"——次序已由 burst 的设备侧 fence（`backend_stage_wait`）保证。
+⇒ 可加一个**只对测量分支开放**的旋钮（例如 `OCUDU_DFT_SKIP_SLOT_WAIT=1`，默认关）跳过它 ⇒ **3.00 且无宿主等待**。
+**风险与验收**：若那个等待并非多余，网格会出现错误值 ⇒ 由**离线 dump 逐字节 + 契约 + CRC/SINR** 兜住（离线可先证；空口腿上 SINR/CRC 变差就立即停手）。
+
+#### ④ 两条臂的预登记（都只作读数；生产路不变）
+
+| 读数 | 测量 A（`event`）| 测量 B（`noD1`+跳过等待）| 判读 |
+|---|---|---|---|
+| ★ `busy split` / `merged_hop` / lane `residency` | 记录 | 记录 | **若显著下降** ⇒ 单缓冲融合/交棒**在空口上**确实是那 ~450 µs 的一部分（且**可以不改数据路径地拿回来**，只需裁 V4）；**不变** ⇒ 与本平台硬性开销有关 |
+| `cbs/lane` | **3.00（预登记）** | 3.00 | 生产判据（≤2.00）**不适用于测量分支**，只登记 |
+| **`[ul_dft_wait]`** | 必须仍是 **no samples** | **no samples**（③ 的旋钮生效的直接证据）| **"CPU 没有回来"的判据** |
+| `[mmse_time_sum] gpu_wait` / `[ul_gpu_lane] gap: … (host)` | 仍为 0 / 与 `p42`（45.8 µs）同量级 | 同 | 同上 |
+| 契约 / `gaps` / 池 / crossings | 8/8 / 0 / 绿 / `0.00+0.00` | 同 | **不允许变**（数据路径不动的证据）|
+
+#### ⑤ 决策规则（测量之后）
+
+* 若 **A 或 B 明显更短** 且上表"CPU 没回来"的判据全绿 ⇒ **产出一条"交付形态候选"**：把该结构做成生产路（`cbs/lane=3.00`），此时**只需你裁 V4 阈值**——而两个首要目标（全程 GPU + CPU 靠边站）**都仍然成立**。
+* 若 **都不变** ⇒ 那 ~450 µs 与本平台/空口硬性开销有关，**单车道内部收口**，届时再谈 S-E（用户已定为最后选择，且与当前工作不同维度、可叠加）。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
