@@ -539,5 +539,82 @@ int main()
       }
     }
   }
+  // --- CONCURRENCY: does a command buffer's window stretch because the device is shared? ----------
+  //
+  // The air reading this arm exists for: a hop's command buffer shows ~500us of window while the same
+  // shape runs in ~50-150us here, and the lane probe's own numbers say the windows OVERLAP - the sum of
+  // them per slot (47 + 548 + the front end's) exceeds the 500us slot, while the union of the probed
+  // queues is busy only 27-30% of the wall time (Q9-F3). A window is wall time, not work: if the device
+  // time-slices several buffers, every one of them reads longer than it executes. Every arm above ran
+  // ALONE (the "contention" arms used a 4096-thread busy kernel, which is not what the air mixes in),
+  // so this arm supplies the missing shape: the SAME kernel on the other queue, submitted continuously
+  // for as long as the measured arm runs, one 14-transform dispatch per command buffer - i.e. the front
+  // end of another slot, over and over.
+  std::printf("\n--- concurrency: the same kernel streaming on the other queue while the arm runs ---\n");
+  {
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> background_cbs{0};
+    const auto stream_background = [&](unsigned transforms_per_cb, unsigned dispatches_per_cb) {
+      stop.store(false, std::memory_order_relaxed);
+      background_cbs.store(0, std::memory_order_relaxed);
+      std::thread worker([&]() {
+        while (!stop.load(std::memory_order_relaxed)) {
+          id<MTLCommandBuffer>         cb  = [other commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:pipeline];
+          [enc setBuffer:in offset:0 atIndex:0];
+          [enc setBuffer:out offset:0 atIndex:1];
+          [enc setBuffer:twiddle offset:0 atIndex:2];
+          [enc setBuffer:perm offset:0 atIndex:3];
+          const uint32_t radix2  = 8;
+          const uint32_t radix3  = 1;
+          const uint32_t inverse = 0;
+          const uint32_t base    = 0;
+          [enc setBytes:&radix2 length:sizeof(uint32_t) atIndex:4];
+          [enc setBytes:&radix3 length:sizeof(uint32_t) atIndex:5];
+          [enc setBytes:&inverse length:sizeof(uint32_t) atIndex:6];
+          [enc setBytes:&base length:sizeof(uint32_t) atIndex:7];
+          [enc setBuffer:grid offset:0 atIndex:8];
+          [enc setBuffer:window offset:0 atIndex:9];
+          [enc setBuffer:gw offset:0 atIndex:10];
+          [enc setBuffer:in16 offset:0 atIndex:11];
+          [enc setBuffer:ip offset:0 atIndex:12];
+          for (unsigned d = 0; d != dispatches_per_cb; ++d) {
+            [enc dispatchThreadgroups:MTLSizeMake(transforms_per_cb, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(std::min<unsigned>(fft_n, 1024u), 1, 1)];
+          }
+          [enc endEncoding];
+          [cb commit];
+          [cb waitUntilCompleted];
+          background_cbs.fetch_add(1, std::memory_order_relaxed);
+        }
+      });
+      return worker;
+    };
+
+    fill_tables(14, true, true);
+    const arm_result alone = run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1);
+    std::printf("%-52s window=%9.1fus\n", "14 in 1 dispatch, device otherwise IDLE", alone.window_us);
+
+    for (unsigned transforms : { 14u, 56u }) {
+      std::thread worker = stream_background(transforms, 1);
+      // Let the stream saturate the device before the measured arm starts.
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      fill_tables(14, true, true);
+      const arm_result shared = run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1);
+      stop.store(true, std::memory_order_relaxed);
+      worker.join();
+      char label[96];
+      std::snprintf(label,
+                    sizeof(label),
+                    "14 in 1 dispatch, %u transforms/cb streaming elsewhere",
+                    transforms);
+      std::printf("%-52s window=%9.1fus  (background cbs=%llu)\n",
+                  label,
+                  shared.window_us,
+                  static_cast<unsigned long long>(background_cbs.load(std::memory_order_relaxed)));
+    }
+  }
+
   return 0;
 }
