@@ -102,6 +102,14 @@ bool load_kernel_source(const std::string& dir, std::string& out)
       "  float acc = float(gid);\n"
       "  for (uint i = 0; i < iters; ++i) { acc = fma(acc, 1.000001f, 0.5f); }\n"
       "  out[gid] = acc;\n"
+      "}\n"
+      // Cache thrash: sweeps a buffer far larger than any cache, so the NEXT measured command buffer
+      // meets the same cold state every hop meets on air (where the working set is evicted by whatever
+      // else the device ran in between, and the harness's tight loop keeps everything hot instead).
+      "\nkernel void thrash(device uint* buf [[buffer(0)]], constant uint& n [[buffer(1)]],\n"
+      "                   uint gid [[thread_position_in_grid]], uint stride [[threads_per_grid]]) {\n"
+      "  uint acc = gid;\n"
+      "  for (uint i = gid; i < n; i += stride) { acc = acc * 1664525u + buf[i]; buf[i] = acc; }\n"
       "}\n";
   out = source;
   return true;
@@ -144,11 +152,28 @@ arm_result run_arm(id<MTLCommandQueue>          queue,
                    size_t                       wrap_len      = 0,
                    bool                         fresh_wrap    = false,
                    unsigned                     open_hold_us  = 0,
-                   bool                         commit_off_thread = false)
+                   bool                         commit_off_thread = false,
+                   id<MTLComputePipelineState>  thrash_pipeline = nil,
+                   id<MTLBuffer>                thrash_buf = nil,
+                   uint32_t                     thrash_n = 0,
+                   id<MTLSharedEvent>           signal_event = nil)
 {
   std::vector<double> windows;
   windows.reserve(nof_runs);
   for (unsigned run = 0; run != nof_runs + nof_warmup; ++run) {
+    if (thrash_pipeline != nil) {
+      // Cold the caches: sweep a buffer much larger than L2 and wait for it, so the measured buffer below
+      // cannot be found warm. Nothing else about the measured run changes.
+      id<MTLCommandBuffer>         tcb  = [queue commandBuffer];
+      id<MTLComputeCommandEncoder> tenc = [tcb computeCommandEncoder];
+      [tenc setComputePipelineState:thrash_pipeline];
+      [tenc setBuffer:thrash_buf offset:0 atIndex:0];
+      [tenc setBytes:&thrash_n length:sizeof(uint32_t) atIndex:1];
+      [tenc dispatchThreads:MTLSizeMake(1u << 16, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+      [tenc endEncoding];
+      [tcb commit];
+      [tcb waitUntilCompleted];
+    }
     id<MTLBuffer> bound_in16 = in16;
     if (fresh_wrap && (wrap_region != nullptr)) {
       // A fresh OBJECT over the SAME pages: what a re-wrap does (newBufferWithBytesNoCopy, no copy).
@@ -192,6 +217,12 @@ arm_result run_arm(id<MTLCommandQueue>          queue,
           threadsPerThreadgroup:MTLSizeMake(std::min<unsigned>(fft_n, 1024u), 1, 1)];
     }
     [enc endEncoding];
+    if (signal_event != nil) {
+      // The D1 hand-over signals a shared event on the block it releases (the replacement waits on it),
+      // which every plain-route buffer - the PRACH ones that read 47.8us on air - does not do.
+      static std::atomic<uint64_t> gen{0};
+      [cb encodeSignalEvent:signal_event value:gen.fetch_add(1, std::memory_order_relaxed) + 1];
+    }
     if (commit_off_thread) {
       // The hand-over commits the block on the LANE's thread - the encoder ran on the receiving one.
       std::thread committer([&]() {
@@ -355,6 +386,41 @@ int main()
   std::printf("\n--- contention: the same batched arm while ANOTHER queue is busy ---\n");
   report("14 in 1 dispatch, 8 background cbs", 14, 1, true, true, 8);
   report("14 in 1 dispatch, 32 background cbs", 14, 1, true, true, 32);
+
+  // --- the one thing the PRACH buffers (47.8us on air, like the harness) do NOT do: signal an event --
+  std::printf("\n--- the hand-over's signal on the released block ---\n");
+  {
+    id<MTLSharedEvent> ev = [device newSharedEvent];
+    fill_tables(14, true, true);
+    const arm_result plain = run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1);
+    const arm_result signalled = run_arm(
+        queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1, nullptr, 0, false, 0, false, nil, nil, 0, ev);
+    std::printf("%-52s window=%9.1fus\n", "14 in 1 dispatch, no signal (harness default)", plain.window_us);
+    std::printf("%-52s window=%9.1fus\n", "14 in 1 dispatch, signals a shared event (D1 shape)", signalled.window_us);
+  }
+
+  // --- cold caches: the shape air has and a tight benchmark loop does not --------------------------
+  std::printf("\n--- cold caches: a cache-sweeping command buffer before every measured run ---\n");
+  {
+    id<MTLComputePipelineState> thrash_pipeline =
+        [device newComputePipelineStateWithFunction:[[device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()]
+                                                                           options:nil
+                                                                             error:&error] newFunctionWithName:@"thrash"]
+                                              error:&error];
+    if (thrash_pipeline == nil) {
+      std::printf("thrash pipeline failed: %s\n", error.localizedDescription.UTF8String);
+    } else {
+      const uint32_t sweep_words = 64u << 20; // 256 MiB, far beyond any cache
+      id<MTLBuffer>  thrash_buf  = [device newBufferWithLength:sweep_words * sizeof(uint32_t)
+                                                      options:MTLResourceStorageModePrivate];
+      fill_tables(14, true, true);
+      const arm_result warm = run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1);
+      const arm_result cold = run_arm(
+          queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1, nullptr, 0, false, 0, false, thrash_pipeline, thrash_buf, sweep_words);
+      std::printf("%-52s window=%9.1fus\n", "14 in 1 dispatch, warm caches (harness default)", warm.window_us);
+      std::printf("%-52s window=%9.1fus\n", "14 in 1 dispatch, caches swept before every run", cold.window_us);
+    }
+  }
 
   // --- two code-shape differences that only air has (both need no new mechanism, only an order) ----
   std::printf("\n--- shape: the front end's encoder is open for a slot, and the lane commits it ---\n");

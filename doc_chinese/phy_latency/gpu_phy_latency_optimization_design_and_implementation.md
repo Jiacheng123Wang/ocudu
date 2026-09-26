@@ -5975,6 +5975,59 @@ D1 武装 ⇒ 前端块**在后端队列**（①）⇒ 一跳的 cb（`merged_ho
 ⚠ 该工具**只碰电台与 GPU，不跑腿、不上手机**；按纪律**只能在没有腿在跑时使用**（当前：无腿无 gNB ✓）。
 
 
+### 6.86 ★★★ 452 µs 的机制猎捕**收口**：数据路径（含 DMA）**由代码排除**、冷缓存与交棒信号也否掉；并发现**后端队列上一个每跳 1 条的"隐形 cb"**（2026-09-26，离线）
+
+#### ① ★ 电台在环的 mini-probe **不必做了**——它的前提被代码推翻
+
+`radio_uhd_rx_stream.cpp` 的接收路径是**带宿主指针**调用 UHD 的：
+
+```cpp
+// receive_block()
+buffs_flat_ptr.emplace_back(reinterpret_cast<void*>(data[channel].subspan(offset, num_samples).data()));  // 我们的池缓冲
+uhd::rx_streamer::buffs_type buffs_cpp(buffs_flat_ptr.data(), nof_channels);
+nof_rxd_samples = stream->recv(buffs_cpp, num_samples, md, RECEIVE_TIMEOUT_S, ONE_PACKET);
+```
+
+⇒ **UHD 把 DMA 的数据*拷贝*进我们的池缓冲**；DMA 环形缓冲是 **UHD 自己的**，**GPU 从不读它**。
+⇒ GPU 读的是**普通、页对齐的主机内存**，由 UHD 的拷贝（宿主线程）写入——**这正是 harness 测过的形状**（复用 / 每 run 新建 wrap / 被并发写：20–60 µs）。
+⇒ **"GPU 读 DMA 正在写的页"这一类由构造排除**，§6.85 计划的那个工具**取消**（省下一次电台占用）。
+
+#### ② 另两条离线假设也否掉（harness，真实 kernel/几何）
+
+| 臂 | 窗口 |
+|---|---|
+| 热缓存（harness 默认）| 13.8 µs |
+| **每 run 之前用 256 MiB 扫描把缓存冲掉**（模拟空口每跳的冷工作集）| **16.5 µs**（+2.7）|
+| 不 signal | 21.8 µs |
+| **在释放的块上 signal 一个 shared event**（D1 交棒形状）| **21.8 µs**（+0.0）|
+
+#### ③ ★★ 最尖锐的剩余事实：**空口上"另一类 cb"与离线完全一致**（⇒ 不是环境整体变慢）
+
+`p47` 同一条腿、同一台设备：
+
+| cb 类 | 窗口 |
+|---|---|
+| `gpu busy (front_end) mean`（**394,429** 条：PRACH + plain 路，单变换、不交棒、不 signal）| **47.78 µs** ← **与离线 harness 的 47 µs 一致** |
+| FE/一跳那类 cb（承载整槽 14 变换 + D1 交棒/被 adopt）| **452–541 µs** |
+
+⇒ **"设备被节流"、"整机都冷"、"环境整体变慢"这一类全部排除**；那 ~10× 只发生在**承载整槽批量且走 D1 的那类 cb** 上——
+而它的**每一种可离线构造的属性**（批量、队列、输入来源、缓存冷热、signal、跨线程提交、编码器跨时隙、争用）**都已实测为 13–58 µs**。
+
+#### ④ ★ 会计洞：后端队列上有**每跳 ~1 条不可见的 cb**（很可能是 LDPC 解码）
+
+`p47`：`gpu busy (back_end): commits=**446,006**`，而可解释的只有 ~**295,000**（每跳 2 条 × 146,771 + 注册表）⇒ **多出 ~151,000 ≈ 每跳 1 条**。
+读码确认：`lib/phy/upper/channel_coding/ldpc/metal/ocudu_metal_decoder_engine.mm:823` **`[cmd_buf commit]` 之前没有 `arm_gpu_time()`、也没有 `register_commit()`**
+⇒ **LDPC 解码器的命令缓冲既不在 F3 时间线里、也不在 lane probe 的分段里**（`[ul_ldpc_decode]` 中位 54 µs 是**宿主**计时，不是设备窗口）。
+⇒ 后端队列的占用账**目前是不完整的**，而它正是承载那一跳的那条队列。
+
+#### ⑤ 结论与下一步（两条，都不需要先飞腿就能准备）
+
+1. ★ **补上那个洞（小、安全、离线可自证）**：在 `ocudu_metal_decoder_engine.mm` 的 commit 前加 `arm_gpu_time(cb, back_end, "ldpc_dec")` + `register_commit(cb, stage::other)`，
+   在**下一条腿**上读它的窗口与 `commits` 账 ⇒ 后端队列的占用账第一次完整（也许它本身就是那 ~400 µs 的邻居，或者揭示了它们如何互相排队）。
+2. **机制猎捕收口**：离线能构造的形状已经**全部**是 13–58 µs（约 20 种臂），而那 ~450 µs 只在空口出现在**特定那类 cb** 上；
+   按纪律**不再造判不了的仪器** ⇒ 要动它只剩**空口 A/B**：`noD1` / `event`（V4→3.00，**需用户裁决**）与电台侧旋钮。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
