@@ -445,9 +445,13 @@ fi
 # MET + mode=gpu, the crossing count, and gaps - because those are exactly the ones a heavy uplink
 # could break (s78 broke MET and gaps=1). Its regime-DEPENDENT numbers (stale, RF failures, the RX
 # pool) are REPORTED, not judged: the judgement for this regime is the pre-registered V1-V5 set
-# (5.9.130 (5): span <= 2150us, starved_events 0, RF <= 10 and gaps 0, cbs/lane <= 2.00, contract
-# 8/8), which is what the latency workstream is held to - and it is not met yet. That is the work,
-# not a finding of this gate, so this gate must not colour it red here.
+# (5.9.130 (5): span <= 2150us, starved_events 0, RF failures and gaps 0, cbs/lane <= 2.00,
+# contract 9/9), which is what the latency workstream is held to. RE-RULED 2026-09-26 (user, dev doc
+# 6.122): "RF <= 10" was written for a deterministic link and is unreachable on this USB-attached
+# B200, so V3 now reads "gaps == 0 AND the per-DL-transmission real-time failure rate within the
+# mode's band (gpu/cpu_gpu <= 0.25%, cpu <= 0.01%) over >= 2 same-load legs". The RF count stays
+# REPORTED here, never judged: it moves with the link (700-1700 on one recipe), and the band is what
+# the workstream is held to.
 SF=""
 if [ -n "$STRESSLEG" ]; then
   SF="$LOGDIR/gnb_gpu_${STRESSLEG}.log.stderr"

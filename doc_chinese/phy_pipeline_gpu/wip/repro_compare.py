@@ -91,10 +91,48 @@ def provenance(stderr_text):
     return out
 
 
+def table_row(name, log, err):
+    """One compact row of the V3 baseline table (dev doc 6.122)."""
+    stderr_text, log_text = read(err), read(log)
+    kinds = rf_failures(log_text)
+    total = sum(kinds.values())
+
+    def probe(pattern, group=1):
+        m = re.search(pattern, stderr_text)
+        return m.group(group).strip() if m else "-"
+
+    mode = probe(r"pipeline mode : (\S+)")
+    regime = probe(r"\[leg\] regime=(\S+)") if "[leg] regime=" in stderr_text else "n/a"
+    span = probe(r"\[ul_gpu_pipeline\] samples=\d+ mean=[\d.]+us median=([\d.]+)us")
+    if span == "-":
+        span = probe(r"\[ul_pipeline\] samples=\d+ mean=[\d.]+us median=([\d.]+)us")
+    tx = probe(r"\[dl_tx_call\] calls=\d+ median=[\d.]+us p95=[\d.]+us p99=[\d.]+us max=\d+us; over 1ms=(\d+), over 5ms=\d+")
+    tx_max = probe(r"\[dl_tx_call\] calls=\d+ median=[\d.]+us p95=[\d.]+us p99=[\d.]+us max=(\d+)us")
+    recv = probe(r"\[ul_rx_timing\] calls=\d+ recv\(max=(\d+)us")
+    late = probe(r"AT/BELOW 0=(\d+)")
+    tx_total = probe(r"\[dl_tx_slack\] transmissions=(\d+)")
+    gaps = probe(r"\[ul_rx\] blocks=\d+ samples=\d+ gaps=(\d+)")
+    contract = "MET" if re.search(r"contract MET", stderr_text) else ("NOT MET" if re.search(r"contract NOT MET", stderr_text) else "-")
+    rate = ("%.4f%%" % (100.0 * total / int(tx_total))) if (tx_total != "-" and total) else "-"
+    uf, lt = kinds.get("underflow", 0), kinds.get("late", 0)
+    return "| `%s` | %s | %s | **%d** | %d/%d | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+        name, mode, regime, total, uf, lt, rate, span, tx, tx_max, recv, late, gaps, contract)
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
         return 2
+    if argv[1] == "--table":
+        print("| leg | mode | regime | RF fail | uf/late | rate/DL tx | span med | tx>1ms | tx max | recv max | AT/BELOW 0 | gaps | contract |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        for arg in argv[2:]:
+            log, err = find(arg)
+            if log is None:
+                print("| `%s` | (no leg matched) |" % arg)
+                continue
+            print(table_row(arg, log, err))
+        return 0
 
     legs = []
     missing = 0
