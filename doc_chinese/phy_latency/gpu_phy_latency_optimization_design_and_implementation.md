@@ -5191,6 +5191,15 @@ if (!stage_gpu[f] || !stage_gpu[t]) { return; }   // ← 两个阶段的 GPU 时
 host_span.push_back(stage_host[t] - stage_host[f]); // ← host 跨度本不需要 GPU 戳，却被这个 return 一起挡掉
 ```
 而 **Metal 只给"每个命令缓冲"一个 GPU 窗口**，**融合路上整跳就是 ONE command buffer** ⇒ **分阶段的 GPU 戳根本不存在**（这正是 §6.19/P0-1 记的那件事）。
+⇒ **再更正（第二次读码，坐实）**：连"host 跨度"也**不是被误挡** —— 融合路的一条 lane**只注册一个命令缓冲**（`merged_hop`，占 busy 的 93%；只有 7% 的 busy 落在 `ch_wt` 那种非融合 lane 上），
+`entries_for_starts` 里因此**没有** `channel_estimator` / `channel_estimator_weights` 这两个 stage 的条目（它的 GPU 窗口与 host commit 都按**命令缓冲**记），
+而 `transition()` 要的正是"两个 stage 各自的边界"。⇒ **在交付（融合）路上，这五段"构造上就不存在"**，不是打点缺失、也不是闸门写错。
+**可选的两条路**：(a) 飞**诊断臂 `OCUDU_LANE_DIAG_SPLIT=1`**（把前端缓冲单独提交 ⇒ 有分阶段边界 ⇒ 五段亮，但结构变了、只作指示）；
+(b) **把 host 侧的尺子延伸到融合路**（lane clock 的 `stage_entry`/`extraction_commit` 已经是 host 打点，`handover_us` 本应可用 —— 它也是 "no samples"，**这一个是真的可疑**，下一步查它）。
+⇒ **结论**：拆那 ~830 µs 在交付路上**没有现成尺子**，必须先补（b）或借（a）。
+
+**（下面这段是第一次读码的中间结论，保留以记录推理过程）**
+
 ⇒ **尺子的施工内容（两件）**：
  (a) **把 host 跨度从 GPU 闸门里放出来**（`transition()` 里让 `host_span` 只要两侧 host 打点就 push）⇒ 五段里先亮两段
      （`host: extraction commit -> weights commit`、`host: weights commit -> burst commit`）；小、局部、离线可自证。
