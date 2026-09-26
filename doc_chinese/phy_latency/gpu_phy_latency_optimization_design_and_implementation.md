@@ -344,8 +344,8 @@ V4 ✅ `cbs/lane=2.00 (max=2)`、crossings `0.00+0.00`（`p47` 的诊断臂 3.00
 
 | 读数 | 出处 | 量什么 | 读法 / 坑 |
 |---|---|---|---|
-| `[ul_pipeline]` | `ul_pipeline_probe`（`include/ocudu/support/executors/ul_pipeline_probe.h`）| 一跳的端到端跨度（**与模式无关**）| 与 `[ul_gpu_pipeline]` **是两个口径**，不要混着比；`stale=` 数的是 >8000 µs 的样本 |
-| `[ul_gpu_pipeline]` | 同上 | **车道模式下的同一跨度** | 本工作流的 **V1 就用它**（重载基线中位 2675 µs）|
+| `[ul_pipeline]` | `ul_pipeline_probe`（`include/ocudu/support/executors/ul_pipeline_probe.h`）| 一跳的端到端跨度（**与模式无关**）| 与 `[ul_gpu_pipeline]` **是两个口径**，不要混着比；`stale=` 只数**配对成功**且 >8000 µs 的跨度 ⇒ **它有盲区，别当成"电台/传输打嗝"的计数器**（见 §4.1.1）|
+| `[ul_gpu_pipeline]` | 同上 | **车道模式下的同一跨度**（终点=第一个码块进 LDPC 解码器）| 本工作流的 **V1 就用它**（重载基线中位 2675 µs）；样本总体是"走到解码的跳"，与 `[ul_pipeline]`（只 CRC-OK）**不同**（§4.1.1）|
 | `[ul_time_frequency]` / `[ul_channel_estimation]` / `[ul_equalization_demod]` / `[ul_ldpc_decode]` | 同上的 staged probes，`OCUDU_UL_PHASE_SEGMENTS=1` **强制开启**（`gpu` 模式默认关）| 三段 + 解码段 | **三段之和应 ≈ `[ul_gpu_pipeline]`**（实测 2657 vs 2675 = 99.3%）；**它们在时间上顺序相接，不能理解为可重叠的三块**（§2.3.1）|
 | `[ul_gpu_lane] residency` | `lib/phy/metal/ocudu_metal_lane_probe.{h,mm}` | 车道那条命令缓冲的**寿命** | 与负载几乎无关（轻 1121 / 重 1125 µs）|
 | `[ul_gpu_lane] busy split` | 同上 | 按**组**分：`ch_wt`（权重）与 `merged_hop`（合并跳）；诊断拆分臂还多一个 `dft` | **`merged_hop` ≈ 1030 µs = 车道 busy 的 97%**（n78 加压）。⚠ **2026-09-25 更正**：`residency` 里"~95% 是 busy"**只在 n78 加压腿上成立**；n1 默认腿配对后是 **0.643** ⇒ 别把它当恒等式（§2.4/§6.3 ⑥）。**内部不可再分**（D1 把一跳做成一条缓冲，Metal 只给整条缓冲的时间）⇒ 见 §6.2 |
@@ -356,11 +356,53 @@ V4 ✅ `cbs/lane=2.00 (max=2)`、crossings `0.00+0.00`（`p47` 的诊断臂 3.00
 | `[mmse_time_sum] defer_wait distribution` | `port_channel_estimator_metal_mmse_impl.cpp` | 宿主**等延迟链**的时间分布 | **与 residency 是同一窗口的两个视角**（宿主视角 / 设备视角）⇒ **不可相加** |
 | `[mmse_time_sum]`（其它字段）| 同上 | 估计器宿主阶段：`pre/stage/submit/unpack/cpl_*/corr/gpu_path/cpu_blocks` | 全部**只有几十 µs** ⇒ 估计器的**宿主**工作不是时延主项 |
 | `[ul_rx_pool]` | `lower_phy_baseband_processor.cpp` | 接收缓冲池：`taken/returned/held_end/held_max/pool/free_min/starved_takes/starved_events` | **`held_max == pool` + `free_min == 0` + `starved_events > 0` = 池被抽干**（接收线程会被 `pop_blocking()` 阻塞）⇒ **这就是 underflow 的直接原因** |
-| `[ul_rx_wait]` | 收包侧（`ul_pipeline_probe`）| 接收线程**一次 `receive()`** 的阻塞时长 | 三段覆盖不到时的去处；**它是 `t2f` 的一部分**（§2.3）|
+| `[ul_rx_wait]` | 收包侧（`ul_pipeline_probe`）| 接收线程**一次 `receive()`**（收齐整块）的阻塞时长 | 三段覆盖不到时的去处；**它是 `t2f` 的一部分**（§2.3）。它的**尾部**（~101 ms 级）是**传输/驱动**现象，**只能在本序列与 `[ul_rx_timing]`/`[ul_rx]` 里看到**，不会出现在 `stale` 里（§4.1.1）；dry-pool drop 分支的那次 `receive()` 两条序列都不记（§4.1.1 盲区 3）|
 | `[metal_stats] burst dispatches` | `ocudu_metal_burst.mm` | 一跳里各模块的 dispatch **次数** | 次数 ≠ 时间；不要用它推断时延 |
 | `[metal_stats] gpu busy (front_end/back_end)` | `ocudu_metal_queue.mm` | **每队列**命令缓冲的 GPU 时间 | 只到"队列"这一层（`commits/busy/mean/window`），**不是 kernel 级** |
 | `[metal_stats] dft handover …` | `ocudu_dft_metal_engine.mm` | 交棒：`handed/taken/superseded/evicted/…`、`keepalives=released/attached (max in flight)`、`(armed=…)`、**P2-E 的 `tokens_early=signals:N,by_event:M,by_complete:K`** | `keepalives` 的差额=**在飞**（不是泄漏），判泄漏看 `max in flight`（§5.9.120）；**P2-E：`by_event == 0` 表示"开关开了但释放没搬到前端"**，此时池数字应读作**未变**（§6.4）|
 | **`[ul_lane_exec]`** | `apps/units/flexible_o_du/o_du_low/du_low_config_translator.cpp`（**推导值 + 输入**）与 `lib/du/du_low/du_low_executor_mapper.cpp`（**执行器形态**）| 车道的并发度：`max_pusch_and_srs_concurrency` 的生效值、`bw/layers/ul_ratio/cpus`、以及它是**串行 strand** 还是 **N 路 fork limiter** | **每次启动打两行，在电台打开之前**（短跑一次 `gnb -c <配置>` 就能离线读到，不必飞腿）。**实测**：n78 `bw=20MHz layers=1 ul_ratio=0.30` → **1**；n1 `bw=5MHz ul_ratio=1.00` → **1** ⇒ **都是串行 strand**；池上限定死这个值的上限（超过池子直接**报配置错误**，不夹取）|
+
+### 4.1.1 ★ `stale` 的口径与它的三个盲区（**2026-09-26 读法更正**）
+
+> 缘起：一份 n1 手机腿的 log 里 `[ul_rx_wait] max=101866 µs`（101 ms），而同一条腿的
+> **`[ul_pipeline] stale=0`、`[ul_gpu_pipeline] stale=0`**。此前的说法（"这类事件会被 stale 判据统计"）**不准确**：`stale`
+> 是**跳跨度**的过滤器，不是"电台/传输打嗝"的计数器。三条盲区如下。
+
+**口径**：`stale=` 数的是**该序列里配对成功、且跨度 > `stale_us()`** 的样点；`stale_us()` 默认 **8000 µs**（= 上行 HARQ 往返），
+可用 **`OCUDU_UL_STALE_US`** 覆盖。它**只**回答"这条序列里有没有跳跨度超过 8 ms"。
+
+**盲区 1 —— 三个序列的分母不同，不能互推。** 同一条 n1 手机腿实测：
+
+| 序列 | 一次样本 = | 本次运行 |
+|---|---|---|
+| `[ul_rx_wait]` | **一次 `receive()` 调用**（收包线程，每时隙块一次）| **300,407** |
+| `[ul_gpu_pipeline]` | 一次**走到"LLR 交给解码器"**的跳 | **200,924** |
+| `[ul_pipeline]` | 一次 **CRC-OK** 的跳 | **177,533** |
+
+⇒ 约 **10 万次接收调用根本没有对应的跨度样本**。用一条序列的 `max` 去推断另一条序列是否"应该"看见它，是**读法错误**。
+
+**盲区 2 —— 未配对 ≠ 样本。** 跨度只有"起点配到终点"才产生：起点由收包路径在 `receive()` **之前**记（每时隙一个），终点分别是
+"第一个码块进解码器"（`[ul_gpu_pipeline]`）与"CRC-OK"（`[ul_pipeline]`）。抬头原文：*"A start left behind by a CRC-failed TB
+or a retransmission that needed no decode is simply left unmatched (and eventually evicted)"*，逐出闸门 **`max_entry_age = 2 s`**。
+⇒ **电台/传输打嗝、而那一跳始终没有走到终点时，`stale` 什么都不会记。**
+
+**盲区 3 —— 收包侧自己还有一处洞。** dry-pool drop 分支（`lower_phy_baseband_processor.cpp` 里 `drop_samples` 那条）自己调用
+`receiver.receive(drop_writer)` 后**直接 `return`**，位置在 `record_start()`（≈1314 行）与 `record_rx_wait()`（1362 行，唯一一处）
+**之前** ⇒ 那一次接收的等待**两条序列都不记**。
+
+**判读规则（两条一起读，缺一个都会漏判）**：
+
+* `stale` ⇒ "**跳跨度**有没有超过 8 ms"（会话/流水线侧）；
+* 接收/传输侧的离群点 ⇒ `[ul_rx_wait]`（本条）、**`[ul_rx_timing]`**（`recv(max/over 1ms/over 5ms)` 与 **`loop(...)`**、`slip`、`load1`）、
+  **`[ul_rx]`**（`gaps` / `gap_samples` / **`timestamp-0 blocks`**）、**`[ul_rx_pool]`**（`pop_blocking` / `starved_events`）、
+  以及腿 `.log` 里电台自己的 `[RF] …` 与驱动错误行；
+* 一刀切的归因：**`recv` 大而 `loop` 不大 + 发送方向（`[dl_tx_call]`）同时也卡 ⇒ 传输/USB**；**`loop` 大 + `load1` 高 ⇒ macOS 调度**；
+  **只有 CRC/SINR 变差而两者正常 ⇒ 空口**。
+
+**为什么本次 `stale=0` 反而是信息**：若那一块只是"晚到但最终解出来了"，配成的跨度会 ≈100 ms ⇒ `stale ≥ 1`（两条序列都该有）。
+两条都读 0 ⇒ **那一次 101 ms 的等待没有跟一个完成的跳**，与"超时/错误返回（`ts=0`，没有可用样点）"这一类一致。同一现象在本账里早有先例：
+更早的三条 n1 腿也各读到 ~101 ms 的 `[ul_rx_wait]` 最大值（101591 / 101670 / 101319 µs），**其中有的腿 `gaps=0、stale=0`**
+（§6.40 ①：*"停顿时不时落在跳上"*——落在跳上才进 `gaps`/`stale`，落在空时隙上就只在接收侧留下一条 `max`）。
 
 ### 4.2 两个探针的**样本总体**：P0-5 之前不同、之后已配对
 
