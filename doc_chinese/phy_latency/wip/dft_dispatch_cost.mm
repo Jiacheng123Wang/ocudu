@@ -39,6 +39,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <atomic>
 #include <thread>
 #include <vector>
 
@@ -93,6 +94,15 @@ bool load_kernel_source(const std::string& dir, std::string& out)
     return false;
   }
   source.replace(at, include.size(), header);
+  // A second kernel, only for the contention arm: it occupies the device for a controlled while on
+  // ANOTHER queue, which is the one shape the harness has not yet reproduced (the air GPU is shared).
+  source +=
+      "\nkernel void busy(device float* out [[buffer(0)]], constant uint& iters [[buffer(1)]],\n"
+      "                 uint gid [[thread_position_in_grid]]) {\n"
+      "  float acc = float(gid);\n"
+      "  for (uint i = 0; i < iters; ++i) { acc = fma(acc, 1.000001f, 0.5f); }\n"
+      "  out[gid] = acc;\n"
+      "}\n";
   out = source;
   return true;
 }
@@ -193,6 +203,7 @@ int main()
     return 1;
   }
   id<MTLCommandQueue> queue = [device newCommandQueue];
+  id<MTLCommandQueue> other = [device newCommandQueue];
 
   // Buffers. The VALUES do not matter for a timing probe (twiddles are filled with the real roots, the
   // permutation with the identity: the kernel's memory traffic is the same either way).
@@ -248,8 +259,38 @@ int main()
     }
   };
 
-  const auto report = [&](const char* label, unsigned groups, unsigned dispatches, bool ci16, bool grid_write) {
+  id<MTLComputePipelineState> busy_pipeline =
+      [device newComputePipelineStateWithFunction:[[device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()]
+                                                                         options:nil
+                                                                           error:&error] newFunctionWithName:@"busy"]
+                                            error:&error];
+  if (busy_pipeline == nil) {
+    std::printf("busy pipeline failed: %s\n", error.localizedDescription.UTF8String);
+    return 1;
+  }
+  id<MTLBuffer> busy_out = [device newBufferWithLength:4096 * sizeof(float) options:MTLResourceStorageModeShared];
+  const uint32_t busy_iters = 200000;
+
+  /// Runs \p nof_cbs long dispatches on the OTHER queue, so the next measured arm is submitted while the
+  /// device is already busy with somebody else's work.
+  const auto start_background_load = [&](unsigned nof_cbs) {
+    for (unsigned c = 0; c != nof_cbs; ++c) {
+      id<MTLCommandBuffer>         cb  = [other commandBuffer];
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:busy_pipeline];
+      [enc setBuffer:busy_out offset:0 atIndex:0];
+      [enc setBytes:&busy_iters length:sizeof(uint32_t) atIndex:1];
+      [enc dispatchThreads:MTLSizeMake(4096, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+      [enc endEncoding];
+      [cb commit];
+    }
+  };
+
+  const auto report = [&](const char* label, unsigned groups, unsigned dispatches, bool ci16, bool grid_write, unsigned background_cbs = 0) {
     fill_tables(groups, ci16, grid_write);
+    if (background_cbs != 0) {
+      start_background_load(background_cbs);
+    }
     const arm_result r =
         run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, groups, dispatches);
     std::printf("%-52s window=%9.1fus  per-transform=%7.1fus\n", label, r.window_us, r.per_transform_us);
@@ -269,5 +310,63 @@ int main()
   report("1 transform,  1 dispatch  (int16 + grid write)", 1, 1, true, true);
   report("14 transforms, 1 dispatch  (int16 + grid write)", 14, 1, true, true);
   report("14 transforms, 14 dispatches (int16 + grid)", 1, 14, true, true);
+  std::printf("\n--- dispatch count, int16 + grid (the shape a command buffer's window follows) ---\n");
+  for (unsigned d : { 2u, 4u, 7u }) {
+    char label[64];
+    std::snprintf(label, sizeof(label), "%u transforms, %u dispatches", d, d);
+    report(label, 1, d, true, true);
+  }
+  std::printf("\n--- contention: the same batched arm while ANOTHER queue is busy ---\n");
+  report("14 in 1 dispatch, 8 background cbs", 14, 1, true, true, 8);
+  report("14 in 1 dispatch, 32 background cbs", 14, 1, true, true, 32);
+
+  // --- the last difference between this harness and air: the input is a LIVE page mapping ---------
+  //
+  // On air the transform reads the radio's samples through a zero-copy mapping of memory the USB DMA
+  // is still writing (the radio streams the NEXT slots into the same allocation while this one is
+  // transformed). Here the same shape is reproduced: a page-aligned region wrapped with
+  // newBufferWithBytesNoCopy, read as int16 by the kernel, with a host thread writing into it in a
+  // loop for as long as the arm runs. If the device's reads of a mapping somebody else is writing
+  // stall, the window grows; if it does not, the air number comes from somewhere else.
+  std::printf("\n--- live mapping: the input read zero-copy while a writer keeps touching it ---\n");
+  {
+    const size_t page = 16384;
+    void*        raw  = nullptr;
+    if (posix_memalign(&raw, page, 1u << 20) == 0) {
+      auto* samples = static_cast<int16_t*>(raw);
+      for (size_t k = 0; k != (1u << 19); ++k) {
+        samples[k] = static_cast<int16_t>((k % 251) - 125);
+      }
+      id<MTLBuffer> live = [device newBufferWithBytesNoCopy:raw
+                                                     length:(1u << 20)
+                                                    options:MTLResourceStorageModeShared
+                                                deallocator:nil];
+      if (live != nil) {
+        std::atomic<bool> stop{false};
+        std::thread       writer([&]() {
+          size_t at = 0;
+          while (!stop.load(std::memory_order_relaxed)) {
+            // ~4 KiB every iteration at the tail of the allocation: the same pages the transform reads,
+            // which is what a streaming radio does to the allocation the engine mapped.
+            for (size_t k = 0; k != 2048; ++k) {
+              samples[((at + k) & ((1u << 19) - 1))] = static_cast<int16_t>(k & 0x7ff);
+            }
+            at += 2048;
+          }
+        });
+        fill_tables(14, true, true);
+        const arm_result r =
+            run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, live, gw, ip, 14, 1);
+        stop.store(true, std::memory_order_relaxed);
+        writer.join();
+        std::printf("%-52s window=%9.1fus  per-transform=%7.1fus\n",
+                    "14 in 1 dispatch, input = LIVE mapped while written",
+                    r.window_us,
+                    r.per_transform_us);
+      } else {
+        std::printf("could not wrap the live region (posix_memalign page alignment)\n");
+      }
+    }
+  }
   return 0;
 }
