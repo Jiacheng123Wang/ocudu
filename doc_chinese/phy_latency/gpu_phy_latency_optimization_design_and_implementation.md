@@ -5389,6 +5389,67 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
 | 契约 / `cbs/lane` / `gaps` / 池 | 8/8 / **2.00 (max=2)** / 0 / `starved=0`、`dropped=0`（**不允许变**）|
 
 
+### 6.76 ★★ 腿 `p46-n78-conc1`：**预登记判据有答案了 —— 那 ~500 µs 是"本跳自己的驻留"，不是被同伴分时**；并把它**定位到前端那条 cb**（2026-09-26）
+
+> 腿：`logs/gnb_gpu_p46-n78-conc1_0926_1014.log*`（交付配方 + `OCUDU_METAL_GPU_TIME=1` +`max_pusch_and_srs_concurrency=1`，戳 `bc82dfb42a`）。
+> `[ul_lane_exec]` 两行都确认生效：**`max_concurrency=1` ⇒ serialising STRAND（一次只有一跳）** ✓。
+
+#### ① 预登记判据：**没有塌 ⇒ 窗口是本跳自己的驻留**
+
+| 读数（中位）| `p46`（**并发 1**）| `p45`（并发 2）| `p42`（并发 2，交付参照）| 差 |
+|---|---|---|---|---|
+| ★ **`merged_hop`** | **475.1 µs** | 551.4 | 541.8 | **−67…−76 µs（−13%）** |
+| `ch_wt` | 40.3 | 48.4 | 43.5 | −3…−8 |
+| lane `residency` | 520.2 | 544.5 | 543.9 | −24 |
+| lane `busy` | 494.3 | 566.1 | 565.2 | −71 |
+| `gap` | 31.1 | 7.5 | 3.2 | +24…+28（没有同伴来填）|
+| `queue: weights commit→start` | **57.4**（mean 91.9）| 39.5 | 39.5 | **+18** |
+| `period` | **710.1** | 425.0 | 425.7 | **+284** |
+| `[ul_gpu_pipeline]` 中位（V1）| **1599.4** | 1372.0 | 1366.8 | **+227** |
+| `cbs/lane` / 契约 / `gaps` / 池 | 2.00 (max=2) / **MET 8/8** / 0 / `starved=0`、`dropped=0`、`held_max=9` | 同 | 同 | **不允许变的都没变** ✓ |
+
+⇒ 判据读作：**并发 1 只让窗口降 13%（~70 µs），远不是"塌"** ⇒
+**那 ~475–540 µs 是这条 cb 自己的驻留**；同伴/同刻竞争只解释得了 **~70 µs**。
+⇒ 同时确认：**并发 2 是交付该有的设置**（并发 1 的 V1 +227 µs、`period` +284 µs、队列项 +18 µs）——与 §7.5 的旧结论一致。
+
+#### ② ★ Q24 与 Q24b **首次完全一致** ⇒ 栅栏读数（≈9–17 µs/跳）坐实
+
+| 仪器 | 读数 |
+|---|---|
+| Q24（id 配对）| `waits=145443 resolved=145443 inconsistent=0 ambiguous=0 unresolved=0 no-signal=0`；`38938 (26.8%) mean=34.9us median=33.9us p95=56.4us max=432.4us sum=1359383.8us` |
+| Q24b（按时间配对）| **`hops with both ends=145379`**（**每一跳都配上了**）、`38938 (26.8%) mean=34.9us median=33.9us max=432.4us sum=1359383.8us` |
+
+⇒ **两条独立配对给出同一个数**（连 `sum` 都相同）⇒ 栅栏代价 = **0.268 × 34.9 ≈ 9 µs/跳**（并发 2 时 17 µs）⇒ 占窗口 **~2%**。
+
+#### ③ ★★ 新线索：那 ~500 µs 挂在**前端那条 cb** 上（离线拆分臂，`OCUDU_LANE_DIAG_SPLIT=1`）
+
+| 臂（离线 `syn004_4`）| `busy split` |
+|---|---|
+| 默认（D1 合并）| `ch_wt=21.8 (7%) eq_demap=12.4 (4%) **merged_hop=261.1 (88%)**` |
+| **`OCUDU_LANE_DIAG_SPLIT=1`**（把前端单独成 cb）| **`dft=177.5 µs/lane (89%)`**、`ch_wt=14.6`、`eq_demap=7.0` |
+
+⇒ **一跳窗口里 ~2/3 是前端那条 cb**（177.5 / 261.1），而前端的**执行**账单只有 **10.6 µs/槽**（§6.65）
+⇒ **"窗口 ≫ 执行"这个形状在前端这条 cb 上离线就存在（17×）**，与"逐派发时间戳不可得"合起来看：
+**前端那条 cb 是唯一还能再切一刀的地方**。
+
+#### ④ `p47-n78-diagsplit`：预登记（**测量臂**；`cbs/lane` 会到 3.00 ⇒ 按 §7.4 只作读数、不交付）
+
+```bash
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p47-n78-diagsplit \
+  --regime=stress OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1 OCUDU_LANE_DIAG_SPLIT=1 \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+```
+
+| 读数 | 预登记 |
+|---|---|
+| ★ `[ul_gpu_lane] busy split` 的 **`dft=`** | **判据**：若 `dft` ≈ **400–500 µs** ⇒ 那 ~500 µs **就是前端那条 cb**（⇒ 靶子 = 前端派发形状/输入路径，可离线继续切）；若 `dft` 只有几十 µs ⇒ 窗口在 `ch_wt`/`eq_demap` 侧（⇒ 靶子换边）。⚠ 该臂**改变提交结构**（每跳 3 条 cb）⇒ 分段读数**只作指示**（§7.6.0b）|
+| `cbs/lane` | **预期 3.00**（测量臂；**不作交付判据**，只登记）|
+| Q24 / Q24b | 不变量应为 0；`per kind` 是否仍是 `stage` 独占 |
+| 契约 / `gaps` / 池 / `rx_overflows` | 8/8 / 0 / `starved=0`、`dropped=0` / 0（**不允许变**）|
+| V1 中位 | 参考（结构变了）|
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
