@@ -4,6 +4,7 @@
 #include "ocudu_metal_lane_clock.h"
 #include "ocudu_metal_lane_probe.h"
 
+#include "ocudu/phy/phy_pipeline_contract.h"
 #include "ocudu/phy/phy_pipeline_report.h"
 #include "ocudu_metal_queue.h"
 
@@ -123,6 +124,10 @@ struct lane_stats_t {
   /// follows it: the five phase segments are dark by construction there. This is the total span, entry to
   /// hand-over, and (entry_to_lane_commit - handover) is the tail the CPU spends after the extraction.
   std::vector<double> entry_to_lane_commit_us;
+  /// Lanes whose total span read SHORTER than its own head (see the collection in close_lane): impossible
+  /// by construction, so a non-zero count is an instrument defect, not a pipeline one. Reported by the
+  /// contract check below instead of hiding in a series nobody differences by hand.
+  uint64_t tail_shorter_than_head = 0;
 
   /// \brief How long the lane's first command buffer waited to be STARTED by the device, after the
   /// host had committed it: its GPUStartTime minus the GPUStartTime of the estimator command buffer
@@ -862,6 +867,14 @@ void gpu_lane_probe::close_lane()
   // entered its stage (see mark_lane_commit()), so the two series are read as a pair, not as two totals.
   if (metal::lane_clock.entry_to_lane_commit_us >= 0.0) {
     s.entry_to_lane_commit_us.push_back(metal::lane_clock.entry_to_lane_commit_us);
+    // Both numbers come from the same struct, read in the same instant, so this comparison needs no
+    // pairing: the total STARTS where the head starts and ends later, so a total that reads shorter is not
+    // a slow hop but a struct that was overwritten between the two marks - the defect the reset in
+    // mark_stage_entry() exists to prevent, and the one a reader of two independent series could not see.
+    if ((metal::lane_clock.handover_us >= 0.0) &&
+        (metal::lane_clock.entry_to_lane_commit_us < metal::lane_clock.handover_us)) {
+      ++s.tail_shorter_than_head;
+    }
   }
   // ---- When the DEVICE got to each of the lane's command buffers (the queue's share) -------------
   //
@@ -1320,6 +1333,58 @@ void gpu_lane_probe::report()
 
   print_pairing();
 }
+
+namespace {
+
+/// \brief Median of a copy, so the check can run before/independently of the report (which sorts in place).
+double median_copy(std::vector<double> v)
+{
+  if (v.empty()) {
+    return -1.0;
+  }
+  std::sort(v.begin(), v.end());
+  return percentile(v, 0.5);
+}
+
+/// \brief The host-participation requirement (dev doc 6.96): the CPU's whole share of a hop is MEASURED.
+///
+/// The tail mark exists because the head alone (`gap: stage entry -> extraction commit`) is half of the
+/// host's participation, and on the fused (production) route the five phase segments are dark by
+/// construction - so for two years of legs "how much CPU does one hop cost" had no end-to-end answer, and a
+/// mark that silently stops working would put the number back to unreadable without anyone noticing. Hence a
+/// check rather than another series: a route that measures the head and no tail is RED ("cannot read" is
+/// never "absent", the rule the leg runner enforces on its own reports), and a total shorter than its own
+/// head is an instrument defect. Not applicable only when nothing measured the host at all.
+const bool lane_host_participation_registered = []() {
+  register_phy_pipeline_check(
+      {"lane host participation", []() -> std::optional<bool> {
+         lane_stats_t&  s           = stats();
+         const uint64_t lanes       = s.lanes;
+         const uint64_t head        = static_cast<uint64_t>(s.handover_us.size());
+         const uint64_t tail        = static_cast<uint64_t>(s.entry_to_lane_commit_us.size());
+         const double   head_median = median_copy(s.handover_us);
+         const double   tail_median = median_copy(s.entry_to_lane_commit_us);
+         std::fprintf(stderr,
+                      "tail measured for %llu of %llu lanes (head median %.1fus, total median %.1fus, "
+                      "work after the extraction %.1fus; %llu lanes read shorter than their own head)",
+                      static_cast<unsigned long long>(tail),
+                      static_cast<unsigned long long>(lanes),
+                      head_median,
+                      tail_median,
+                      ((head_median >= 0.0) && (tail_median >= 0.0)) ? (tail_median - head_median) : -1.0,
+                      static_cast<unsigned long long>(s.tail_shorter_than_head));
+         if ((head == 0) && (tail == 0)) {
+           return std::nullopt; // nothing measured the host's side of a hop in this run
+         }
+         // (a) the head is measured but the tail is not: the instrument went dark on a route that claims to
+         //     measure the host (exactly the 7.6.0b state, which is why this is a check and not a comment);
+         // (b) a total shorter than its own head: the two marks describe different lanes.
+         return (tail > 0) && (s.tail_shorter_than_head == 0);
+       }});
+  return true;
+}();
+
+} // namespace
 
 #endif // OCUDU_METAL_STATS
 
