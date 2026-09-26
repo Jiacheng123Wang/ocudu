@@ -7214,6 +7214,31 @@ offline acceptance: GREEN
 * **仍未归属**：一跳窗口里的 ~450–570 µs（平台/空口固有；已从宿主、融合、队列、栅栏、算力、并发六个方向摘除，证据见 §6.88/§6.90/§6.94/§6.97/§6.101），它是**下一个独立项目**的入口，不影响本收口。
 
 
+### 6.112 Linux/GCC 构建修复：`[ul_rx]` 探针的调用点缺了它定义所在的守卫（2026-09-26，提交 `d35272a264`）
+
+用户报：Ubuntu（`jwang@192.168.31.211:~/work/ocudu`，Release、`ENABLE_FLOW_PROBES=ON`、`ENABLE_METAL_STATS=OFF`）编译失败：
+
+```
+lib/phy/lower/lower_phy_baseband_processor.cpp:1334: error: 'ul_rx_note_call' was not declared in this scope
+```
+
+**根因**：`ul_rx_note_call()` 与整个 `[ul_rx]` 探针块定义在 `#if defined(OCUDU_METAL_STATS)`（该文件 466 行起）里，而调用点在 `ul_process()` 里**没有守卫**。
+macOS 侧一直编译通过，因为**本机调试开关默认全开**（`ENABLE_METAL_STATS=ON`）——这正是审计里那句"Clang-green is not GCC-green"的实例。
+
+**修法（两半，同一处）**：
+1. 调用点加 `#if defined(OCUDU_METAL_STATS)`（与定义同守卫；探针的读者本来就是 Metal-stats 报告）；
+2. 修完暴露第二半：探针被编译掉后 `rx_call_begin` **只写不用**，GCC 的 `-Werror=unused-but-set-variable` 拦住 ⇒ 把**那一次读时钟**也放进同一守卫；`rx_call_end` **不能**动（`tx_slack_note_receive()` 不在任何开关后面，每次构建都要用它）。
+
+**验证**：
+* Ubuntu：应用补丁后 `cmake --build build -j16` **跑到 100%、`gnb` 与全部测试目标链接完成、exit 0**（用户的两个本地修改过的电台配置未被触碰）；
+* macOS：`gnb` 重建、`lower_phy_test` **576/576 PASSED**（就是这条接收路径）；
+* **该文件里 `OCUDU_METAL_STATS` 独有的四个符号全部核对过**，只有这一处是未守卫的使用（另两处出现在注释里）；
+* ★ **对空口构建是零行为变化（机械证明）**：在 macOS（`ENABLE_METAL_STATS=ON`）下，修改前后把同一个 TU 编成目标文件，**`cmp` 逐字节相同**（126024 B）——因为新增的两个 `#if` 在这个配置下都为真、被包住的记号一字未改。
+  ⇒ 收口腿对（`p59`/`p60`，跑在 `791864c7d7`）所依据的**空口代码与当前 HEAD 完全一致**；审计的"腿 == HEAD"机械比对会看到一次代码差异，其解释就是本条。
+
+**遗留**：Ubuntu 那棵树上补丁是**工作区未提交**状态（HEAD 仍是 `90a288c26a`，仅电台配置与这一个文件被改）。若要把机械判据也归位，跑一条当前 HEAD 的短腿即可；或在远端把这一个文件提交掉。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
