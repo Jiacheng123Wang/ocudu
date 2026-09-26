@@ -38,7 +38,7 @@ public:
     c.sib_cfg.si_window_len_slots = 5;
     c.sib_cfg.si_sched_info       = {{.sib_mapping_info = {2}, .si_period_rf = 16},
                                      {.sib_mapping_info = {19}, .si_period_rf = 16, .si_window_position = 2}};
-    c.sib_cfg.sib2_cfg.emplace();
+    c.sib_cfg.sib2_cfg            = du_high_unit_sib_config::sib2_config{};
 
     auto& serving                   = c.ntn_cfg.emplace().serving.emplace();
     serving.cell_specific_koffset   = koffset;
