@@ -463,8 +463,16 @@ void lower_phy_baseband_processor::rx_pool_note_return()
   rx_pool_accounts().returned.fetch_add(1, std::memory_order_relaxed);
 }
 
-#if defined(OCUDU_METAL_STATS)
 /// \brief Continuity of the sample stream the radio delivers (see ul_process).
+///
+/// NOT behind a build switch, deliberately (2026-09-26). This block used to sit inside
+/// `#if defined(OCUDU_METAL_STATS)`, which is a Metal debug aid - so a build with that aid off (the Linux
+/// default) compiled the probe OUT while its call site in ul_process() stayed in, and the build broke
+/// ("'ul_rx_note_call' was not declared in this scope"). Guarding the call instead only moved the damage:
+/// the `radio sample continuity` CHECK then never registered, and lower_phy_test fails 48 cases with "no
+/// 'radio sample continuity' check is registered" - the criterion the fixture exists to exercise. It is a
+/// data-path criterion (dev doc 0.1/Q9-D4: a gap means the radio lost or repeated samples, and p0_gate.sh
+/// parses this line on every platform), not a Metal statistic, so it is compiled in everywhere.
 ///
 /// Consecutive receive blocks must be adjacent in time: the second block starts exactly where the first
 /// ended. A gap means the radio lost (or repeated) samples, and it is the one measurement that says
@@ -753,7 +761,6 @@ const bool ul_rx_stats_registered = []() {
        }});
   return true;
 }();
-#endif // OCUDU_METAL_STATS
 
 lower_phy_baseband_processor::lower_phy_baseband_processor(const lower_phy_baseband_processor_configuration& config,
                                                            const lower_phy_baseband_processor_dependencies&  deps) :
@@ -1320,13 +1327,7 @@ void lower_phy_baseband_processor::ul_process()
   // [dl_tx_call]). Two clock reads and one relaxed-store block per slot, because the question - "is the host
   // late to ASK, or does the transport block INSIDE the call?" - cannot be answered from the timestamps alone,
   // and it is the question that decides whether the remaining millisecond discontinuities are ours to fix.
-  // The BEGIN read exists for ul_rx_note_call() alone, so it is guarded with it: with the probe off it is
-  // set and never used, which -Werror=unused-but-set-variable refuses (the second half of the same Linux
-  // build failure). rx_call_end stays unguarded: tx_slack_note_receive() below is not behind a switch and
-  // needs it on every build.
-#if defined(OCUDU_METAL_STATS)
   const auto rx_call_begin = std::chrono::steady_clock::now();
-#endif
   baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_writer);
   const auto rx_call_end = std::chrono::steady_clock::now();
   // dev doc 6.41: the clock map the transmit-side margin needs - the radio timestamp just delivered and the
@@ -1338,18 +1339,10 @@ void lower_phy_baseband_processor::ul_process()
   // The air time of the block the call asked for: the reference the receive timing is read against (see
   // ul_rx_note_call). `srate` is in kHz, so samples * 1000 / kHz is microseconds.
   //
-  // GUARDED LIKE ITS DEFINITION (the [ul_rx] probe block above, #if defined(OCUDU_METAL_STATS)). Leaving
-  // this call unguarded compiled on macOS - where the debug aids default ON - and broke every build that
-  // has ENABLE_FLOW_PROBES on with ENABLE_METAL_STATS off (the Linux default): "'ul_rx_note_call' was not
-  // declared in this scope". The probe's reader is the Metal-stats report, so the call belongs behind the
-  // same switch. The BEGIN clock read is guarded with it (it exists for this call alone); rx_call_end is
-  // not, because tx_slack_note_receive() needs it on every build.
-#if defined(OCUDU_METAL_STATS)
   ul_rx_note_call(std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_begin.time_since_epoch()).count(),
                   std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_end.time_since_epoch()).count(),
                   static_cast<int64_t>(nof_samples) * 1000 / static_cast<int64_t>(srate.to_kHz()),
                   rx_metadata.error);
-#endif
 #if defined(OCUDU_FLOW_PROBES)
   // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES), plus the [ul_rx_wait] series.
   //
@@ -1441,7 +1434,6 @@ void lower_phy_baseband_processor::ul_process()
 #endif
   ru_tracer << trace_event("receive_baseband", tp);
 
-#if defined(OCUDU_METAL_STATS)
   // Continuity of the stream (see ul_rx_stats): the first block of a stream may legitimately start
   // wherever the radio's timeline starts (the RU rounds its start time to a subframe, the radio does
   // not), so continuity is measured from the second block on.
@@ -1476,7 +1468,6 @@ void lower_phy_baseband_processor::ul_process()
     c.blocks.fetch_add(1, std::memory_order_relaxed);
     c.samples.fetch_add(nof_samples, std::memory_order_relaxed);
   }
-#endif
 
   // Update last timestamp: the timestamp of the next sample to be received, i.e. the end of the block
   // just received (\c nof_samples of them - the receiver fills the buffer it was given).
