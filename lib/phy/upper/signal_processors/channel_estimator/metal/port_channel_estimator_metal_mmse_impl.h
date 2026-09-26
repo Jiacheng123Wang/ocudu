@@ -1034,6 +1034,24 @@ private:
   /// Byte offset (in floats) of THIS hop's sigma2 block within \c gpu_ls_sigma2, which holds
   /// kSigma2Blocks of them. See kSigma2Blocks in the .cpp for why one block is not enough.
   unsigned                  sigma2_base_    = 0;
+  /// \brief Base of the PREVIOUS hop's sigma2 block, and whether that block has been written at all.
+  ///
+  /// WHY THE CONSUMERS READ THE PREVIOUS HOP'S BLOCK AND NOT THIS HOP'S (dev doc 6.106/6.107). This
+  /// hop's block is written by the extraction kernel and read by the correlation kernel, and on the
+  /// fused route both run in ONE command buffer. On this platform a barrier between two dispatches of
+  /// one encoder does not deliver the producer's writes (commit 5.9.89 - the same rule that puts the
+  /// correlation build and the weights in two command buffers). The read therefore raced the write:
+  /// measured, the fused route published h that differed on 27/27 corpus captures with |h| ~17x too
+  /// large (the zero-initialized slot = no diagonal loading), and a 20-hop repeat of one capture was
+  /// correct from hop 9 - the second ring pass, i.e. the raced read returning a one-ring-pass-old
+  /// value. Reading the PREVIOUS hop's block instead is ordered by that hop's own command-buffer
+  /// boundary (same queue, committed earlier) and is one hop old instead of one ring pass.
+  ///
+  /// The first hop of a process has no previous block: it runs the STANDALONE edge form instead (a
+  /// command-buffer boundary between the extraction and the correlation, see the edge fusion gate),
+  /// which orders this hop's own block - one extra commit, once per process, and no host read.
+  unsigned                  sigma2_prev_base_ = 0;
+  bool                      sigma2_prev_valid_ = false;
   std::array<float, 32>     fd_filter{};
   unsigned                  fd_filter_len = 0;
   /// Whether the host asks the device for sigma2 (OCUDU_CE_DEV_SIGMA2=0 keeps the host computation,

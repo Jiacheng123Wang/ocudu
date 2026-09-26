@@ -1596,6 +1596,9 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // S-7g-20: and the device ratio of the previous hop, for the same reason - it addresses the
   // extraction's own output slot, which this hop has not filled yet.
   device_sigma2_rel   = nullptr;
+  // Still describes the PREVIOUS hop here (this hop's staging sets it below): whether the block
+  // sigma2_prev_base_ names has actually been written by a completed hop.
+  sigma2_prev_valid_  = device_sigma2_valid;
   nof_device_y_stage  = 0;
   if (device_builds_pilots) {
     const resource_grid_device_view dv         = args.grid.get_device_view();
@@ -1655,6 +1658,10 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
       // it needs no carry-forward: every slot of the block is written unconditionally when the stage
       // runs at all, and when it does not the caller is told (pilots_stage::sigma2_done) and reads
       // neither the host's copy nor the device's.
+      // The block this advance leaves behind: the one the PREVIOUS hop's extraction command buffer
+      // has written AND completed, so the correlation stage can load A's diagonal from it without an
+      // ordering the platform does not provide inside a single command buffer (see the header).
+      sigma2_prev_base_           = sigma2_base_;
       sigma2_base_                = (sigma2_base_ + kSigma2Slots) % (kSigma2Blocks * kSigma2Slots);
 
       metal::mmse_engine::pilots_stage st{};
@@ -2003,7 +2010,14 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
   // The BASE, not the element: the kernel indexes it with corr_stage::sigma2_slot.
   // The base of THIS hop's block, not of the whole buffer: the kernel indexes it with
   // corr_stage::sigma2_slot, which is an offset within one block.
-  device_sigma2_rel = sigma2_from_device ? (gpu_ls_sigma2 + sigma2_base_) : nullptr;
+  // The PREVIOUS hop's block when it exists: this hop's is written by the extraction kernel in the
+  // SAME command buffer on the fused route, and a barrier between two dispatches of one encoder does
+  // not deliver that write on this platform (commit 5.9.89). The first hop of the process has no
+  // previous block and runs the standalone edge form instead, so its own block is ordered by a command
+  // buffer boundary - which is what the fallback below relies on.
+  device_sigma2_rel = sigma2_from_device
+                          ? (gpu_ls_sigma2 + (sigma2_prev_valid_ ? sigma2_prev_base_ : sigma2_base_))
+                          : nullptr;
   // OCUDU_CE_K0A_RATIO_CHECK=1: the two quotients, in bits, with every operand they were computed
   // from - the device's slot against the host's own two operations on the same two scalars. It is
   // what turned "same expression, same operands, so the same float" into the refutation above, and it
@@ -2584,8 +2598,13 @@ void port_channel_estimator_metal_mmse_impl::apply_fd_td_estimation_stage(fd_td_
                                 st.nout);
         // The place in the merged command buffer this group's correlation will be encoded into, when
         // the device is the one that inverts it (see build_slots_on_device and corr_stage::nof_systems).
+        // The fused form needs a device sigma2 whose write is already ordered against this hop's
+        // correlation: the PREVIOUS hop's block. A hop without one - the first hop of a process - takes
+        // the standalone form instead, whose second command buffer is the boundary that orders this
+        // hop's own block. One extra commit, once per process (dev doc 6.107).
+        const bool fused_edge_ordered = sigma2_prev_valid_ || !(device_sigma2_valid && device_sigma2_enabled);
         metal::mmse_engine::corr_stage* fused_edge =
-            (gpu_invert && edge_fuse_enabled()) ? &edge_corr.emplace() : nullptr;
+            (gpu_invert && edge_fuse_enabled() && fused_edge_ordered) ? &edge_corr.emplace() : nullptr;
         // See pending_corr_check: the fused edge build is dispatched inside the engine's command
         // buffer, so its comparison waits for the hop's completion. This is the route that had NO
         // instrument at all before (the older edge check ran before the prefix was dispatched).
