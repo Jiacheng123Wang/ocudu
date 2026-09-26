@@ -5360,6 +5360,26 @@ grep -aE "ul_gpu_pipeline|queue: weights commit|commit -> completion|ul_gpu_lane
 3. ★ **网格锚定（约束③ / H1/H3）**：**样点落进网格哪一行，必须仍按时间戳/时隙相位**，不能按 `rx_fill` 累加；具体是 1220–1240 的"退役并重开"路径**必须重锚到时隙的第一个符号**（它现在在新边界重开，而那个边界未必是符号 0）。
    **C3 = 修这条路径的相位锚定。** 只要 C1/C2 不碰 `rx_offset`/`rx_fill` 的**装填语义**、C3 把相位钉住，`p41` 那种"整槽按符号旋转"就不会重现。
 
+**★★ C3 不必要 + H1 被推翻（继续读码的结论，`uplink_processor_impl.cpp:419`）**：
+`process_symbol_boundary(samples, timestamp)` **是按时间戳算符号的**：
+```cpp
+i_sf        = (timestamp / nof_samples_per_subframe) % (NOF_SFNS*NOF_SUBFRAMES_PER_FRAME);
+i_sample_sf = timestamp % nof_samples_per_subframe;
+i_symbol_sf = 走 symbol_sizes[]（一整个子帧的符号图案）后的索引;
+i_slot      = i_sf * nof_slots_per_subframe + i_symbol_sf / nof_symbols_per_slot;
+i_symbol    = i_symbol_sf % nof_symbols_per_slot;
+```
+⇒ **符号索引来自时间戳（模一个子帧的符号图案），不是来自缓冲的填充偏移**；`rx_fill`/`rx_offset` 只决定"一块要多少样点"，
+不决定"落在网格哪一行"。**所以：(a) H1（整槽按符号旋转）不成立；(b) C3（给退役/重开路径重锚相位）不需要做** —— 锚定本来就在时间戳上。
+（这条正是"先读再写"省下来的一处改动。）另外注释里写明：**`symbol_sizes` 的图案周期是"一个子帧"**，而池缓冲是一**槽**（11520 样点），
+两者不整除 —— 这也是 1217 那个"窗口放不下整符号就退役"的由来，但它**不影响放置**（放置由时间戳锚定）。
+
+**⇒ 于是 `p41` 的 MCS 塌陷需要新解释（H4）**：样点既没丢（`gaps=0`）也没放错行（时间戳锚定），那最可能是
+**PHY 内部把某些符号丢掉了**：`process_symbol_boundary` 在时间戳**未对齐到符号起点**时会走 `process_alignment()`（对齐丢弃），
+`max_phase_blocks` 只是把它界在"至多一块"上；若符号级路径让流**周期性失去符号对齐**，这些被丢弃的样点是**网格里的洞**，
+而**`gaps` 数的是电台的连续性、看不见它们** ⇒ 质量塌陷 + 零丢样 + 契约绿，全部吻合。
+**判别读数**：`process_alignment` / `max_phase_blocks` 的触发计数（若不存在，需要加一个；这是 `p41` 那一族的复现判据）。
+
 **★ C1 已落地（2026-09-25，本会话）**：`ofdm_demodulator_impl.h` 的 `block_batching_enabled()` 去掉了 `OCUDU_UL_RX_SYMBOLS` 那条 `return`，改为**恒允许成批**（带注释说明"那条 return 就是 `p41` 的 `batched=0/0`/`released=0` 的成因，而**延迟回退来自批量化被关，不是来自更小的收包块**"）。
 * **验证性质**：**开关未设时它是逐字等价的重构**（旧表达式此时恒为 true）⇒ 默认路零行为变化；
 * **离线网**：`ctest -L phy -j 1` 全绿；⚠ **replay 验不了它**（实测：`ul_chain_replay` 的 dump 在 `OCUDU_UL_RX_SYMBOLS` 开/关下**逐字节相同** ⇒ **RX 策略是空口专属**，replay 不走收包路）⇒ **C1 的行为验证只能靠空口腿**（读 `batched=`/`released=` ≠ 0）；这也意味着 **H1（网格旋转）也无法离线复现**；
