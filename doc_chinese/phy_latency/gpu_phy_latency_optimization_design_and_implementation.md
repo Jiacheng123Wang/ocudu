@@ -6489,6 +6489,32 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
 * ⇒ 下一步回到**兼容 G1/G2 的杠杆**：**(i)** 那条 68.8 µs 的宿主 encode 段（生产路上被 merged 隐藏，值得单独量）；**(ii)** 跳内派发数（CE/eq/demap 4 次）；**(iii)** §0.1 的链条延长（LDPC 进 Metal，尺子已就位）；**(iv)** 最后才是 S-E。
 
 
+### 6.96 尾标记落地：`host: stage entry -> lane commit`（2026-09-26，离线实现完成）
+
+§6.95③ 的方案已实现（**只加一条打点，不改任何数据路径/提交结构/等待语义**）：
+
+| 代码点 | 内容 |
+|---|---|
+| `ocudu_metal_lane_clock.h` | `lane_host_clock` 新增 `lane_commit` / `entry_to_lane_commit_us` 与 `mark_lane_commit()`；`mark_stage_entry()` **同时清零**它（尾标记属于**一条** lane，新 lane 不许继承上一条的读数）|
+| `ocudu_metal_burst.mm`（`shared_burst::commit()`，`[cb commit]` 前一行）| `metal::lane_clock.mark_lane_commit();` —— 这是本跳**宿主最后一个动作**（此后 CPU 靠边站，即 G2 的时点）；放在 commit 前是为了把这段 encode 也包进去 |
+| `ocudu_metal_lane_probe.mm` | 采集 `entry_to_lane_commit_us >= 0.0` 进新序列，报告里紧挨着旧的宿主段打印：**`host: stage entry -> lane commit`** |
+
+**它和已有仪表的关系**（读法，别混）：
+
+```
+[ul_channel_estimation] 相位  ⊃  gap: stage entry -> extraction commit (host)   ← 前半（已有，p42 = 45.8）
+   （入口→抽取提交）                    ↓ 同一时点
+                                 host: stage entry -> lane commit (host)        ← 总额（新）
+                                        = 前半 + 后半（weights + burst 的 encode，直到 lane 交出）
+```
+
+* **判据**：生产路（merged，1 cb/跳）上该序列应 ≈ **45.8 + 后半**；`event` 路（3 cb）上"后半"可与 p50 的 `host: weights commit -> burst commit = 68.8` 相加对照 ⇒ **第一次把"CPU 每跳花了多少"夹住**（G2 的定量形式，§0.1）；
+* **`-1` / "no samples" 的含义**：提交这条 lane 的线程**从未**进入它的 stage（`mark_stage_entry` 没被调用）⇒ 按构造未测，不报部分值（若空口上真读到 −1，说明 lane 的提交与入口不在同一线程，那就要退到按 slot 配对 —— 见 §6.95② 的告警）；
+* **为什么值得**：它给第 (i) 条杠杆（宿主 encode 段）与 G2 各一个可验收数字，且**不需要**在 eq/demap 里加各自的相位计时器（那一步等这个数出来再决定）。
+
+**自证**：`gnb` 重建通过；探针默认关闭时行为不变（这条打点不在 `OCUDU_METAL_STATS` 里，但只是一次 `clock::now()`，与本工程其它 `lane_clock` 打点同风格）；`ctest -L phy -j 1` 193/193（独跑，无并发 GPU 作业）。**下一条腿**在交付配方上顺手带上它 ⇒ "生产路每跳宿主参与 X µs"直接可读。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

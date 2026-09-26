@@ -61,6 +61,18 @@ struct lane_host_clock {
   /// already published as the [ul_channel_estimation] phase (record_t2f_end -> record_ce_end, see
   /// ul_pipeline_probe.h), on a clock that pairs the readings by slot. Measure it there, not here.
   double handover_us = -1.0;  ///< this stage's entry -> the extraction's commit
+  /// When the LANE's own command buffer was committed - the hop's last host act before the CPU can stand
+  /// aside (the fused lane's single submission, see shared_burst::commit()).
+  clock::time_point lane_commit{};
+  /// This stage's entry -> the lane's commit, in microseconds (-1 = not measured).
+  ///
+  /// WHY IT EXISTS (dev doc 6.95). `handover_us` covers only the FIRST half of the host's participation in
+  /// a hop (entry -> extraction commit); the tail - encoding the weights and the burst up to the lane's own
+  /// commit - was invisible on the delivery route, because the fused route registers ONE command buffer and
+  /// the probe's five host segments are therefore dark by construction (7.6.0b). This is the total: what the
+  /// CPU spends on a hop from entering it to handing the whole thing over, which is the quantity G2 (the
+  /// high-level doc's second goal: one-shot host participation) is about.
+  double entry_to_lane_commit_us = -1.0;
 
   /// \brief Receiving slot of the lane being assembled on this thread, and whether it was ever told (P0-5).
   ///
@@ -82,8 +94,12 @@ struct lane_host_clock {
     stage_entry       = clock::now();
     extraction_commit = {};
     handover_us       = -1.0;
-    lane_slot         = slot;
-    has_lane_slot     = true;
+    // The tail belongs to ONE lane: a thread that starts a new lane must not inherit the previous one's
+    // commit (a route whose lane is committed elsewhere would otherwise report a stale span as this lane's).
+    lane_commit             = {};
+    entry_to_lane_commit_us = -1.0;
+    lane_slot               = slot;
+    has_lane_slot           = true;
   }
 
   void mark_extraction_commit()
@@ -92,7 +108,14 @@ struct lane_host_clock {
     handover_us       = delta_us(stage_entry, extraction_commit);
   }
 
-
+  /// Called by the lane's own commit (shared_burst::commit(), immediately before [cb commit]): the last
+  /// host act of the hop. Only a thread that entered this lane's stage can measure the total, so a thread
+  /// that never did leaves it at -1 (not measured) rather than reporting a partial span.
+  void mark_lane_commit()
+  {
+    lane_commit             = clock::now();
+    entry_to_lane_commit_us = delta_us(stage_entry, lane_commit);
+  }
 
   /// Microseconds between the stage entry and the extraction's commit, or -1 when either is unset.
   double entry_to_commit_us() const { return delta_us(stage_entry, extraction_commit); }

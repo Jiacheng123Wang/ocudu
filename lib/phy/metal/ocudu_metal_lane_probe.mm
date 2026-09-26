@@ -115,6 +115,15 @@ struct lane_stats_t {
   /// measured here.)
   std::vector<double> handover_us;
 
+  /// \brief The OTHER half of the host's participation: the stage entry -> the lane's own commit.
+  ///
+  /// The fused lane finishes the CPU's work with the commit of the burst that carries the hop (dev doc
+  /// 6.95), and that commit is where the CPU stands aside (G2). `handover_us` stops at the extraction's
+  /// commit, so on the delivery route - one command buffer per lane - nothing measured how much host work
+  /// follows it: the five phase segments are dark by construction there. This is the total span, entry to
+  /// hand-over, and (entry_to_lane_commit - handover) is the tail the CPU spends after the extraction.
+  std::vector<double> entry_to_lane_commit_us;
+
   /// \brief How long the lane's first command buffer waited to be STARTED by the device, after the
   /// host had committed it: its GPUStartTime minus the GPUStartTime of the estimator command buffer
   /// that carries this lane's work (the earliest one - the first command buffer of a lane, see
@@ -849,6 +858,11 @@ void gpu_lane_probe::close_lane()
   if (metal::lane_clock.handover_us >= 0.0) {
     s.handover_us.push_back(metal::lane_clock.handover_us);
   }
+  // The tail of the same span (dev doc 6.95): -1 when this lane was committed by a thread that never
+  // entered its stage (see mark_lane_commit()), so the two series are read as a pair, not as two totals.
+  if (metal::lane_clock.entry_to_lane_commit_us >= 0.0) {
+    s.entry_to_lane_commit_us.push_back(metal::lane_clock.entry_to_lane_commit_us);
+  }
   // ---- When the DEVICE got to each of the lane's command buffers (the queue's share) -------------
   //
   // This is the quantity the 'gap: commit -> first command buffer starts (queue)' series always
@@ -1232,6 +1246,10 @@ void gpu_lane_probe::report()
   // The host's share of that gap (see ocudu_metal_lane_clock.h): gap = this + (the fences and the
   // command queue). Printed next to the gap it belongs to instead of being inferred from it.
   print_series("gap: stage entry -> extraction commit (host)", s.handover_us);
+  // The whole host participation in the hop, not just its head (dev doc 6.95): entry -> the commit of the
+  // lane's OWN command buffer, i.e. up to the moment the CPU stands aside. The distance between the two
+  // series is the work the host still does AFTER the extraction on the route where the lane is one buffer.
+  print_series("host: stage entry -> lane commit", s.entry_to_lane_commit_us);
   print_series("gap: commit -> first command buffer starts (queue)", s.start_delay_us);
   // The same distance for the other two command buffers of the lane. The three together say whether
   // the gap is the device being busy when a buffer arrives (all three large) or one buffer being

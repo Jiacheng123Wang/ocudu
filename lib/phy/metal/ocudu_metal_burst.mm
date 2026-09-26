@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
 
 #include "ocudu_metal_burst.h"
+#include "ocudu_metal_lane_clock.h"
 #include "ocudu_metal_lane_probe.h"
 #include "ocudu_metal_queue.h"
 #include "ocudu/phy/phy_pipeline_report.h"
@@ -518,6 +519,11 @@ bool shared_burst::commit()
 #endif
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end, burst_label);
   metal::shared_queue::note_commit_order(cb);
+  // Dev doc 6.95, the tail mark: this is the hop's LAST host act - after it the CPU stands aside (G2). The
+  // lane clock turns it into the span from the stage entry that opened this lane, i.e. the CPU's whole
+  // participation in the hop (the head of it is handover_us, entry -> extraction commit). It must be taken
+  // with the buffer still open and immediately before the commit, so the span covers the encoding too.
+  metal::lane_clock.mark_lane_commit();
   [cb commit];
   // Dev doc 6.20: if this buffer is a handed-over block (the merged route adopts one), its commit is what a
   // consumer of that grid may order itself against - published here, AFTER the commit.
