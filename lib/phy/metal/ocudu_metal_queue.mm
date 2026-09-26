@@ -146,11 +146,10 @@ struct shared_queue_state {
     uint64_t    slot      = 0;
     bool        has_slot  = false;
     const char* label     = nullptr;
-    /// Identity of the command buffer (\c __bridge, so this neither retains nor owns it). Q24 matches a
-    /// fence's two ends - the waiter and its signaller - against these records to time the wait on the
-    /// DEVICE; it is the only pairing key both sides have, because the fence bookkeeping already keys its
-    /// pending entries by the same pointer (see note_fence_wait).
-    const void* key = nullptr;
+    /// Q24's identity of this command buffer: the id its fence notes handed out, consumed by arm_gpu_time()
+    /// (0 = the buffer carries no fence, or its notes came after this call). NOT its address - Metal recycles
+    /// command buffer objects, and pairing two fence ends by address produced impossible numbers on p44.
+    uint64_t fence_id = 0;
   };
   std::mutex                occupancy_mutex;
   std::vector<occupancy_record> occupancy;
@@ -171,24 +170,35 @@ struct shared_queue_state {
   ///     signaller's GPUEndTime  -  waiter's GPUStartTime
   ///
   /// Positive means the waiter's buffer was ALREADY RESIDENT while the buffer it waits for was still
-  /// running: that interval is the stall, and it is attributed to the fence that caused it. Both ends are
-  /// recorded here as they are encoded (one push each, no GPU work), and the report matches them against the
-  /// GPU-time probe's own records (occupancy_record::key) - so the reading needs OCUDU_METAL_GPU_TIME=1 and
-  /// costs nothing at all without it.
+  /// running: that interval is the stall, and it is attributed to the fence that caused it.
+  ///
+  /// ⚠ THE TWO ENDS ARE PAIRED BY A UNIQUE ID, NOT BY THE BUFFER'S ADDRESS. The first version keyed them by
+  /// the MTLCommandBuffer pointer and produced 771ms medians on leg `p44-n78-fencewait` - physically
+  /// impossible (no buffer of that leg was resident longer than 5.5ms, and the stalls summed to 1000x the
+  /// leg's wall time): Metal HANDS THE SAME COMMAND BUFFER OBJECT BACK OUT for later submissions, so a
+  /// pointer that named one buffer also names every later reuse of it. The id is handed out at the first
+  /// fence note on a buffer and CONSUMED by arm_gpu_time(), so a buffer with no fences can never inherit the
+  /// previous one's id; and the report still refuses to read a pair whose signaller ended after its waiter
+  /// (see `inconsistent`), which is the physical invariant that caught the defect in the first place.
   ///@{
   struct fence_time_sample {
     uint64_t                 generation = 0;
     shared_queue::fence_kind kind       = shared_queue::fence_kind::stage;
-    const void*              waiter     = nullptr;
+    uint64_t                 waiter_id  = 0;
     uint64_t                 slot       = 0;
     bool                     has_slot   = false;
   };
   std::mutex                     fence_time_mutex;
   std::vector<fence_time_sample> fence_time_waits;
-  /// One entry per signal: the generation and the buffer that will carry it. Per kind, because the stage and
-  /// grid events count their generations independently.
-  std::vector<std::pair<uint64_t, const void*>>
+  /// One entry per signal: the generation and the id of the buffer that will carry it. Per kind, because the
+  /// stage and grid events count their generations independently.
+  std::vector<std::pair<uint64_t, uint64_t>>
       fence_time_signals[static_cast<size_t>(shared_queue::fence_kind::count)];
+  /// The id of the buffer each pointer currently names, handed out on its first fence note (see above).
+  std::mutex                                    fence_id_mutex;
+  std::unordered_map<const void*, uint64_t>     fence_id_of_cb;
+  std::atomic<uint64_t>                         fence_id_next{0};
+  std::atomic<uint64_t>                         fence_id_lost{0};
   /// Fence ends the bound did not let the lists keep: counted, because a reading that silently drops what it
   /// cannot hold is how a zero gets believed.
   std::atomic<uint64_t> fence_time_dropped{0};
@@ -313,6 +323,43 @@ bool gpu_time_probe_enabled()
   return std::getenv("OCUDU_METAL_GPU_TIME") != nullptr;
 }
 
+/// The Q24 id of \p command_buffer, handed out on its first fence note and remembered until arm_gpu_time()
+/// consumes it. An ADDRESS is not an identity here: Metal recycles command buffer objects, so the same
+/// pointer names a later submission too (that defect produced the 771ms medians of leg p44).
+uint64_t fence_id_for(id<MTLCommandBuffer> command_buffer)
+{
+  shared_queue_state&         s = state();
+  std::lock_guard<std::mutex> lock(s.fence_id_mutex);
+  if (s.fence_id_of_cb.size() > 4096) {
+    // Buffers noted but never armed (an uncommitted deposit nobody claims): dropping the map costs those
+    // buffers their ids - their samples resolve as `unresolved` - and is counted rather than silent.
+    s.fence_id_of_cb.clear();
+    s.fence_id_lost.fetch_add(1, std::memory_order_relaxed);
+  }
+  const auto it = s.fence_id_of_cb.find((__bridge const void*)command_buffer);
+  if (it != s.fence_id_of_cb.end()) {
+    return it->second;
+  }
+  const uint64_t id = s.fence_id_next.fetch_add(1, std::memory_order_relaxed) + 1;
+  s.fence_id_of_cb.emplace((__bridge const void*)command_buffer, id);
+  return id;
+}
+
+/// Takes the id \p command_buffer was given by its fence notes, if any, and FORGETS it: the next buffer the
+/// device hands out at the same address - one with no fences of its own - must not inherit it.
+uint64_t fence_id_take(id<MTLCommandBuffer> command_buffer)
+{
+  shared_queue_state&         s = state();
+  std::lock_guard<std::mutex> lock(s.fence_id_mutex);
+  const auto                  it = s.fence_id_of_cb.find((__bridge const void*)command_buffer);
+  if (it == s.fence_id_of_cb.end()) {
+    return 0;
+  }
+  const uint64_t id = it->second;
+  s.fence_id_of_cb.erase(it);
+  return id;
+}
+
 /// The name of a fence kind, for the reports (Q9-D and Q9-F read it the same way).
 const char* fence_kind_name(shared_queue::fence_kind kind)
 {
@@ -387,9 +434,16 @@ void shared_queue_stats_report()
   // means the waiter's buffer was already resident while the buffer it waits for was still running, and that
   // interval is the stall. This is the reading that can tell "the device was busy elsewhere" from "our own
   // command buffer was held by a fence" for the ~575us a hop's buffer sits on the device (dev doc 6.72).
+  //
+  // It also CHECKS ITSELF, because its first version lied. `inconsistent` counts the pairs that violate the
+  // invariant every resolved wait must satisfy - a waiter cannot COMPLETE before the signal it waits for has
+  // fired, so its signaller's end must not be later than its own. On leg p44, whose pairs were keyed by the
+  // command buffer's ADDRESS (which Metal recycles), that count would have been in the tens of thousands
+  // while the stalls read as 771ms medians against a 5.5ms worst-case buffer. A stall reading is evidence
+  // only when `inconsistent` is 0.
   {
     std::vector<shared_queue_state::fence_time_sample> waits;
-    std::vector<std::pair<uint64_t, const void*>>      signals[static_cast<size_t>(shared_queue::fence_kind::count)];
+    std::vector<std::pair<uint64_t, uint64_t>>         signals[static_cast<size_t>(shared_queue::fence_kind::count)];
     uint64_t                                           dropped = 0;
     {
       std::lock_guard<std::mutex> lock(s.fence_time_mutex);
@@ -407,56 +461,67 @@ void shared_queue_stats_report()
                      "time\n");
       }
     } else {
-      // Generation -> the buffer carrying that signal, per kind. Sorted here rather than kept sorted on the
-      // submit path: two threads hand generations out concurrently, so append order is not generation order.
+      // Generation -> the id of the buffer carrying that signal, per kind. Sorted here rather than kept
+      // sorted on the submit path: two threads hand generations out concurrently, so append order is not
+      // generation order.
       for (auto& sig : signals) {
         std::sort(sig.begin(), sig.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
       }
-      std::vector<const void*> signaller_of(waits.size(), nullptr);
-      std::unordered_set<const void*> needed;
-      uint64_t                        no_signal = 0;
-      for (size_t i = 0; i != waits.size(); ++i) {
-        needed.insert(waits[i].waiter);
-        auto&      sig = signals[static_cast<size_t>(waits[i].kind)];
-        const auto it  = std::lower_bound(
-            sig.begin(), sig.end(), waits[i].generation, [](const auto& e, uint64_t g) { return e.first < g; });
-        if ((it == sig.end()) || (it->first != waits[i].generation)) {
-          ++no_signal;
-          continue;
-        }
-        signaller_of[i] = it->second;
-        needed.insert(it->second);
-      }
-      // The GPU window of every buffer that is one END of a fence, from the probe's own records. Collected in
-      // two passes so the map only holds the buffers that matter, and read in place (the probe's list is 2M
-      // records at its bound - copying it here would double the peak for nothing).
-      std::unordered_map<const void*, std::pair<uint64_t, uint64_t>> when;
-      when.reserve(needed.size() * 2);
+      // The GPU window of every buffer that carries a fence, by id. An id that shows up in TWO records is a
+      // buffer whose address was reused before the report could tell them apart: its window is ambiguous, so
+      // it is excluded (and counted) rather than guessed at.
+      std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> when;
+      uint64_t                                                    ambiguous = 0;
       {
         std::lock_guard<std::mutex> occ_lock(s.occupancy_mutex);
         for (const auto& r : s.occupancy) {
-          if ((r.key != nullptr) && (needed.count(r.key) != 0)) {
-            when[r.key] = {r.start_ns, r.end_ns};
+          if (r.fence_id == 0) {
+            continue;
+          }
+          const auto it = when.find(r.fence_id);
+          if (it == when.end()) {
+            when.emplace(r.fence_id, std::make_pair(r.start_ns, r.end_ns));
+          } else {
+            it->second = {0, 0};
+            ++ambiguous;
           }
         }
       }
       std::vector<double> stalls_us;
       uint64_t            by_kind[static_cast<size_t>(shared_queue::fence_kind::count)] = {};
       uint64_t            unresolved                                                    = 0;
+      uint64_t            no_signal                                                     = 0;
+      uint64_t            inconsistent                                                  = 0;
       double              worst_us                                                      = 0.0;
+      double              sum_us                                                        = 0.0;
       uint64_t            worst_slot                                                    = 0;
       const char*         worst_kind                                                    = "none";
-      for (size_t i = 0; i != waits.size(); ++i) {
-        const shared_queue_state::fence_time_sample& w = waits[i];
-        const auto                                   wi = when.find(w.waiter);
-        const auto                                   si = when.find(signaller_of[i]);
-        if ((signaller_of[i] == nullptr) || (wi == when.end()) || (si == when.end())) {
+      for (const shared_queue_state::fence_time_sample& w : waits) {
+        const auto sig = std::lower_bound(signals[static_cast<size_t>(w.kind)].begin(),
+                                         signals[static_cast<size_t>(w.kind)].end(),
+                                         w.generation,
+                                         [](const auto& e, uint64_t g) { return e.first < g; });
+        const auto& sigs = signals[static_cast<size_t>(w.kind)];
+        if ((sig == sigs.end()) || (sig->first != w.generation)) {
+          ++no_signal;
+          continue;
+        }
+        const auto wi = when.find(w.waiter_id);
+        const auto si = when.find(sig->second);
+        if ((w.waiter_id == 0) || (wi == when.end()) || (si == when.end()) || (wi->second.second == 0) ||
+            (si->second.second == 0)) {
           ++unresolved;
+          continue;
+        }
+        // The invariant: a waiter cannot COMPLETE before the signal it waits for has fired.
+        if (si->second.second > wi->second.second + 1000) {
+          ++inconsistent;
           continue;
         }
         if (si->second.second > wi->second.first) {
           const double us = static_cast<double>(si->second.second - wi->second.first) / 1e3;
           stalls_us.push_back(us);
+          sum_us += us;
           ++by_kind[static_cast<size_t>(w.kind)];
           if (us > worst_us) {
             worst_us   = us;
@@ -465,41 +530,131 @@ void shared_queue_stats_report()
           }
         }
       }
+      // Q24b: the same question asked WITHOUT any fence bookkeeping, so the answer cannot depend on the
+      // pairing above being right. The lane probe already labels both ends of the hop's stage fence and
+      // stamps them with the slot: `ce_weights` is the buffer that SIGNALS it (the estimator's weights stage
+      // commitment point) and `merged_hop` is the whole hop's buffer, which WAITS for it. Grouping the
+      // GPU-time records by slot therefore compares the two ends directly - no generation, no id, no
+      // address - and the physical invariant is the same one: the hop cannot COMPLETE before the estimator
+      // it depends on has finished.
+      struct slot_ends {
+        uint64_t hop_start = 0;
+        uint64_t hop_end   = 0;
+        uint64_t est_start = 0;
+        uint64_t est_end   = 0;
+        bool     has_hop   = false;
+        bool     has_est   = false;
+      };
+      std::unordered_map<uint64_t, slot_ends> slots;
+      {
+        std::lock_guard<std::mutex> occ_lock(s.occupancy_mutex);
+        for (const auto& r : s.occupancy) {
+          if (!r.has_slot || (r.label == nullptr)) {
+            continue;
+          }
+          const bool is_hop = (std::strcmp(r.label, "merged_hop") == 0);
+          const bool is_est = (std::strcmp(r.label, "ce_weights") == 0);
+          if (!is_hop && !is_est) {
+            continue;
+          }
+          slot_ends& p = slots[r.slot];
+          if (is_hop) {
+            p.has_hop  = true;
+            p.hop_end  = std::max(p.hop_end, r.end_ns);
+            p.hop_start = (p.hop_start == 0) ? r.start_ns : std::min(p.hop_start, r.start_ns);
+          } else {
+            p.has_est  = true;
+            p.est_end  = std::max(p.est_end, r.end_ns);
+            p.est_start = (p.est_start == 0) ? r.start_ns : std::min(p.est_start, r.start_ns);
+          }
+        }
+      }
+      size_t              n_pairs    = 0;
+      size_t              n_resident = 0;
+      size_t              n_bad      = 0;
+      std::vector<double> pf_us;
+      for (const auto& kv : slots) {
+        const slot_ends& p = kv.second;
+        if (!p.has_hop || !p.has_est) {
+          continue;
+        }
+        ++n_pairs;
+        if (p.est_end > p.hop_end + 1000) {
+          ++n_bad;
+          continue;
+        }
+        if (p.hop_start < p.est_end) {
+          ++n_resident;
+          pf_us.push_back(static_cast<double>(std::min(p.est_end, p.hop_end) - p.hop_start) / 1e3);
+        }
+      }
+      double pf_mean = 0.0;
+      double pf_p50  = 0.0;
+      double pf_p95  = 0.0;
+      double pf_max  = 0.0;
+      double pf_sum  = 0.0;
+      if (!pf_us.empty()) {
+        std::sort(pf_us.begin(), pf_us.end());
+        for (double v : pf_us) {
+          pf_sum += v;
+        }
+        pf_mean = pf_sum / static_cast<double>(pf_us.size());
+        pf_p50  = pf_us[(pf_us.size() - 1) / 2];
+        pf_p95  = pf_us[static_cast<size_t>(static_cast<double>(pf_us.size() - 1) * 0.95)];
+        pf_max  = pf_us.back();
+      }
+      std::fprintf(stderr,
+                   "[metal_stats] fence wait, pair-free cross-check (Q24b): slots with both ends=%zu | hop "
+                   "buffer resident while its estimator ran: %zu (%.1f%%) mean=%.1fus median=%.1fus p95=%.1fus "
+                   "max=%.1fus sum=%.1fus%s\n",
+                   n_pairs,
+                   n_resident,
+                   (n_pairs != 0) ? (100.0 * static_cast<double>(n_resident) / static_cast<double>(n_pairs)) : 0.0,
+                   pf_mean,
+                   pf_p50,
+                   pf_p95,
+                   pf_max,
+                   pf_sum,
+                   (n_bad == 0) ? ""
+                                : " <- IMPOSSIBLE PAIRS: the hop ended before its estimator did, so the two "
+                                  "labels do not name this hop's estimator and the numbers are NOT evidence");
+
       double mean = 0.0;
       double p50  = 0.0;
       double p95  = 0.0;
       if (!stalls_us.empty()) {
         std::sort(stalls_us.begin(), stalls_us.end());
-        double sum = 0.0;
-        for (double v : stalls_us) {
-          sum += v;
-        }
-        mean = sum / static_cast<double>(stalls_us.size());
+        mean = sum_us / static_cast<double>(stalls_us.size());
         p50  = stalls_us[(stalls_us.size() - 1) / 2];
         p95  = stalls_us[static_cast<size_t>(static_cast<double>(stalls_us.size() - 1) * 0.95)];
       }
       std::fprintf(stderr,
                    "[metal_stats] fence wait on the device (Q24): waits=%zu resolved=%zu no-signal=%llu "
-                   "unresolved=%llu dropped=%llu | waiter resident while its signaller ran: %zu (%.1f%%) "
-                   "mean=%.1fus median=%.1fus p95=%.1fus max=%.1fus worst kind=%s slot=%llu; per kind: "
-                   "stage=%llu corr=%llu grid=%llu\n",
+                   "unresolved=%llu inconsistent=%llu ambiguous=%llu dropped=%llu lost=%llu | waiter "
+                   "resident while its signaller ran: %zu (%.1f%%) mean=%.1fus median=%.1fus p95=%.1fus "
+                   "max=%.1fus sum=%.1fus worst kind=%s slot=%llu; per kind: stage=%llu corr=%llu grid=%llu%s\n",
                    waits.size(),
-                   waits.size() - static_cast<size_t>(unresolved),
+                   waits.size() - static_cast<size_t>(unresolved) - static_cast<size_t>(no_signal),
                    static_cast<unsigned long long>(no_signal),
                    static_cast<unsigned long long>(unresolved),
+                   static_cast<unsigned long long>(inconsistent),
+                   static_cast<unsigned long long>(ambiguous),
                    static_cast<unsigned long long>(dropped),
+                   static_cast<unsigned long long>(s.fence_id_lost.load(std::memory_order_relaxed)),
                    stalls_us.size(),
                    100.0 * static_cast<double>(stalls_us.size()) / static_cast<double>(waits.size()),
                    mean,
                    p50,
                    p95,
                    worst_us,
+                   sum_us,
                    worst_kind,
                    static_cast<unsigned long long>(worst_slot),
                    static_cast<unsigned long long>(by_kind[static_cast<size_t>(shared_queue::fence_kind::stage)]),
                    static_cast<unsigned long long>(
                        by_kind[static_cast<size_t>(shared_queue::fence_kind::correlation)]),
-                   static_cast<unsigned long long>(by_kind[static_cast<size_t>(shared_queue::fence_kind::grid)]));
+                   static_cast<unsigned long long>(by_kind[static_cast<size_t>(shared_queue::fence_kind::grid)]),
+                   (inconsistent == 0) ? "" : " <- INCONSISTENT PAIRS: the stalls above are NOT evidence");
     }
   }
   // Q9-F: the same questions as Q9-D, asked of the COMMIT order instead of the moment the generation was
@@ -938,9 +1093,9 @@ void shared_queue::arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind 
   // entry may be gone by the time the GPU is done.
   const uint64_t       resolved_slot = (slot != no_slot) ? slot : (lane_has_slot() ? lane_slot() : 0);
   const bool           has_slot      = (slot != no_slot) || lane_has_slot();
-  // Q24: the buffer's identity, taken BEFORE the block so the block captures a plain pointer (capturing the
-  // ObjC object would retain it until the record is dropped, which is a lifetime the probe must not create).
-  const void*          cb_key        = (__bridge const void*)command_buffer;
+  // Q24: the fence id this buffer was given by its own fence notes (0 when it carries none). Taken here,
+  // immediately before the commit, and CONSUMED so a later buffer reusing the same address cannot inherit it.
+  const uint64_t       cb_fence_id   = fence_id_take(command_buffer);
   const double         commit_s =
       std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
@@ -971,7 +1126,7 @@ void shared_queue::arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind 
       r.slot      = resolved_slot;
       r.has_slot  = has_slot;
       r.label     = (label != nullptr) ? label : "?";
-      r.key       = cb_key;
+      r.fence_id  = cb_fence_id;
       st.occupancy.push_back(r);
     } else {
       st.occupancy_dropped.fetch_add(1, std::memory_order_relaxed);
@@ -1134,11 +1289,12 @@ void shared_queue::note_fence_signal(uint64_t generation, fence_kind kind, id<MT
   // Kept per kind because the stage and grid events count their generations separately, and the report
   // matches a wait to the buffer carrying EXACTLY its generation.
   if (gpu_time_probe_enabled() && (command_buffer != nil)) {
+    const uint64_t              signaller_id = fence_id_for(command_buffer);
     std::lock_guard<std::mutex> time_lock(s.fence_time_mutex);
     constexpr size_t            max_fence_ends = 1u << 20;
     auto&                       signals        = s.fence_time_signals[static_cast<size_t>(kind)];
     if (signals.size() < max_fence_ends) {
-      signals.emplace_back(generation, (__bridge const void*)command_buffer);
+      signals.emplace_back(generation, signaller_id);
     } else {
       s.fence_time_dropped.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1196,13 +1352,14 @@ void shared_queue::note_fence_wait(uint64_t generation, fence_kind kind, id<MTLC
   // was committed first, but on air the signaller may still be RUNNING when the waiter's buffer starts
   // (dev doc 6.72), and that interval is what the report then measures on the device.
   if (gpu_time_probe_enabled() && (command_buffer != nil)) {
+    const uint64_t              waiter_id = fence_id_for(command_buffer);
     std::lock_guard<std::mutex> time_lock(s.fence_time_mutex);
     constexpr size_t            max_fence_ends = 1u << 20;
     if (s.fence_time_waits.size() < max_fence_ends) {
       shared_queue_state::fence_time_sample sample;
       sample.generation = generation;
       sample.kind       = kind;
-      sample.waiter     = (__bridge const void*)command_buffer;
+      sample.waiter_id  = waiter_id;
       sample.has_slot   = lane_has_slot();
       sample.slot       = sample.has_slot ? lane_slot() : 0;
       s.fence_time_waits.push_back(sample);

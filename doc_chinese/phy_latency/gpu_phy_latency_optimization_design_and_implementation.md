@@ -5239,10 +5239,10 @@ signaller 的 GPUEndTime  −  waiter 的 GPUStartTime
 
 | 臂 | Q24 读数 |
 |---|---|
-| `OCUDU_METAL_GPU_TIME=1` | `waits=40 resolved=40 no-signal=0 unresolved=0 dropped=0`；`waiter resident while its signaller ran: 20 (50.0%) mean=7.9us median=7.9us p95=7.9us max=7.9us worst kind=stage slot=10049; per kind: stage=20 corr=0 grid=0` |
-| 4 份并发 | 同一读数：`20 (50.0%) mean=7.0us max=7.0us`（负载↑ ⇒ 该等待**变小**，与 §6.72③ 一致）|
+| `OCUDU_METAL_GPU_TIME=1` | ⚠ **下表是"指针配对"版本的读数，已被 §6.74 证伪为仪器缺陷的产物**（当时读到 `20 (50.0%) mean=7.9us`）；**修好后（唯一 id 配对）读数是 `40/40 解析、0.0% 驻留、inconsistent=0`** |
+| 4 份并发 | 同上（同样受该缺陷污染）|
 | 不开探针 | `no GPU-time records - the probe is off (OCUDU_METAL_GPU_TIME=1 turns it on)…`（不误报 0）|
-| `ctest -L phy -j 1` | **193/193 全绿**（默认路与全部 dump 网不变）|
+| `ctest -L phy -j 1` | **193/193 全绿**（默认路与全部 dump 网不变；⚠ **不要与任何 GPU 工作并行跑**，见 §6.74④）|
 
 ⚠ **一条重要的负结论**：离线**两头对不上**——Q24 的栅栏等待只有 **7–20 µs**，而同一回放的 cb 窗口是 **500–750 µs**
 ⇒ **回放里那些大窗口也不是栅栏等待**（是回放自己的节拍/宿主结构）。**⇒ 这条读数只能上空口腿验证机制，离线只能验证"仪器本身工作"**（解析率、按种类归属、随负载单调）。
@@ -5254,6 +5254,64 @@ signaller 的 GPUEndTime  −  waiter 的 GPUStartTime
   * **≈100% 且 mean/p95 在几百 µs** ⇒ **那 575 µs 就是栅栏等待**，`per kind` 直接点名是哪一条（stage / corr / grid）⇒ 下一步是那条栅栏的**跨队列次序**；
   * **≈0%** ⇒ 不是这些栅栏：cb 是被**别的东西**按住（未探针化的队列/DL、或 D1 交棒的所有权），下一步转向队列侧；
 * V1 / 契约 / `cbs/lane` / `gaps` / 池**不允许变**（探针只加一个完成处理器）。
+
+
+### 6.74 ⚠⚠ 腿 `p44-n78-fencewait`：**Q24 第一版是坏仪器**（指针当身份）——被"物理上不可能"抓住；已修 + 加免配对交叉校验（2026-09-26）
+
+> 腿：`logs/gnb_gpu_p44-n78-fencewait_0926_0949.log*`（交付配方 + `OCUDU_METAL_GPU_TIME=1`，戳 `ef6c65fc3c`）。
+> **这一腿的设备侧读数一切正常**（这就是抓住缺陷的东西）：`merged_hop=541.0 µs/lane`（`p42` 541.8）、
+> `busy=584.8`、`residency=544.5`、`commit -> completion` 中位 439.8 **max 5542 µs**、F3 最慢表里最大的 `start->end` 只有 **707 µs**。
+
+#### ① 缺陷：`MTLCommandBuffer` 对象会被**池化复用**，地址不是身份
+
+Q24 第一版把"等待者/信号者"两头按**命令缓冲的地址**（`__bridge const void*`）配对。`p44` 的读数是：
+
+```
+fence wait on the device (Q24): waits=145395 resolved=145395 … | waiter resident while its signaller ran:
+73282 (50.4%) mean=3499661.5us median=771492.6us p95=29629599.9us max=31135186.4us worst kind=stage …
+```
+
+**物理上不可能**，两条独立的界都越了：
+* 该腿**没有任何** cb 驻留超过 **5.5 ms**（`commit->completion` max），而中位"停等"读到 **771 ms**；
+* Σ停等 = 73,282 × 3.5 s ≈ **25.6 万秒**，而整腿只有 **276 s**（车道最多 2 条 cb 在飞）。
+根因：Metal 会把**同一个 command buffer 对象**发给后来的提交 ⇒ 一个地址同时"是"很多条 cb，报告里 `id → 窗口` 的映射取到最后一次复用 ⇒ 配对跨越秒级。
+
+#### ② 修法（两件，都已落地）
+
+1. **唯一 id 配对**：栅栏端点第一次被记时给该 cb 发一个 id（`fence_id_of_cb`，按地址查、**被 `arm_gpu_time()` 取走并删除**——没有栅栏的后续复用者不会继承），F3 记录里存的是 **id 而不是地址**；报告对**同 id 出现两次**的记 `ambiguous` 并**排除**（不猜）。
+2. ★ **自我校验**：每个已解析的配对都查**物理不变量**——"等待者不可能在它等的信号发出**之前**完成" ⇒ `signaller_end ≤ waiter_end`；违反记 `inconsistent`，
+   并在行尾直接打 **`<- INCONSISTENT PAIRS: the stalls above are NOT evidence`**。**p44 那版如果带这个检查，会当场把自己否掉。**
+
+#### ③ ★ 再加一条**免配对**的交叉校验（`Q24b`），两条读数互证
+
+按 **slot** 把 F3 记录里的 `ce_weights`（**信号**端：估计器权重阶段/相关构建的提交点）与 `merged_hop`（**等待**端：整跳那条 cb）对上
+——这两个标签本来就是那条 stage fence 的两端，**不需要 generation、不需要 id、不需要地址**：
+
+```
+[metal_stats] fence wait, pair-free cross-check (Q24b): slots with both ends=N | hop buffer resident while its
+estimator ran: … | <- IMPOSSIBLE PAIRS: … NOT evidence   （`est_end > hop_end` 时打）
+```
+
+#### ④ 离线自证（修好之后）
+
+| 臂 | Q24 / Q24b |
+|---|---|
+| 回放 `syn004_4`（默认）| Q24：`40/40 解析、no-signal=0、unresolved=0、inconsistent=0、ambiguous=0` ⇒ **0.0% 驻留**；Q24b：`slots with both ends=20` ⇒ **0.0%** |
+| 另外 5 条结构臂（`diag-split` / `no-batch` / `noD1` / `event` / `burst`）| 全部 `0.0%`、`inconsistent=0`（`burst` 记到 59 次等待）|
+| **正对照**：`dft_release_adopt_metal_test`（含 Q9 的"signaller 落后"臂，`Q9-D signaller-after=2 max=26.4ms`）| 仪器**确实触发**（`waits=2 resolved=2`）且**抓出 `inconsistent=1` 并标注 NOT evidence** ⇒ **它会拒绝说话，而不是编数字** |
+| `ctest -L phy -j 1`（**单独**跑）| **193/193** |
+
+⚠ **纪律补充（本会话新踩）**：`ctest -L phy` **不能与任何 GPU 工作并行**——本次一边跑回放臂一边跑 ctest，得到 "2 tests failed"；隔离后连跑 **3 次 193/193**。
+（原来只记了"`-j 4` 会假红"；实际规则更强：**任何并发的 GPU 使用者都会**。）
+
+#### ⑤ 结论与下一步
+
+* **`p44` 的 Q24 读数作废**（仪器缺陷，不是机制证据）；`p44` 的其余读数（`merged_hop` 541.0、契约、V4、池）与 `p42` 一致 ⇒ **交付路无回归**，可留作对照。
+* **栅栏问题仍未回答**，需要**用修好的二进制重飞一条**（`p45`，配方与 `p44` 完全相同）：
+  * 先看 `inconsistent` / `ambiguous` / `unresolved` / `no-signal`：**不为 0 就不许读停等数字**；
+  * Q24 与 Q24b **两条都 0%** ⇒ **那 ~541 µs 不是这些栅栏** ⇒ 下一步转向队列/所有权侧（`Q9-F3` 的 hole 与 DL 是否共享设备）；
+  * 任一条 >0 且一致 ⇒ **就是那条栅栏**，`per kind`（stage / corr / grid）点名，再打它的跨队列次序。
+* 离线**永远给不出正例**（回放的 6 种结构全 0%）：这符合"同队列、signaller 先提交"的构造，**但也意味着机制只能靠空口腿判定**。
 
 
 ## 7. 杠杆与候选改动（技术账）
@@ -5665,7 +5723,7 @@ i_symbol    = i_symbol_sf % nof_symbols_per_slot;
 | **Q7** | 符号级收包（S-7g-13）在**负载下**对**跨度**的效果？ | **开放，且已成为唯一还有量级差的项**：§6.65③ 量出 `merged_hop` 533.7 µs 里 **~464 µs 是"等本槽样点到达"（零算力）**，与 §3.4 的 A 项 ≈473 µs 独立吻合；**只有它能动这一段**。⚠ 触 V4（提交数），需用户裁决，且其代码注释写明时延收益目前无法判读 |
 | **Q21**（`p41` 新增）| **为什么符号级收包（`OCUDU_UL_RX_SYMBOLS=1`）把 UL 的 MCS 打到最低**（TBS ~200 bit、吞吐 ↓17×）？ | ★ **已收口（2026-09-26，§6.71①）**：**不是丢符号**（`[ul_host] symbols` = 期望值 − 0.0028%，§6.71②；memo §3.1 的 H4 计数因此作废），**也不是接收线程被堵**。机制读数：**前端每符号一条命令缓冲**（`dft slots/cbs = 178,407/2,497,686` = **14.0/槽**，`p42` 是 0.39/槽）+ **`[ul_dft_wait]` 中位 577.6 µs**（`p42` 无样本）⇒ 前端抢不到车道 ⇒ 跳变慢 ⇒ **每跳 TB 塌 15× 而 CRC-OK *比率*不变**（是调度器的块变小，不是解码质量塌）。成因是 `block_batching_enabled()` 那条 `return`（**C1 已删**）⇒ **验收腿 = `p43-n78-halfslot`**（§6.71⑤）|
 | **Q22**（`p41` 新增）| **V4 的判据看不见"整跳提交数"**：`cbs/lane` 只数车道自己的提交（`p41` 仍是 2.00），而该腿的**前端提交从 ~1/跳 爆到 20.5/跳** | **判据缺口**：V4 的精神是"不许用提交数换时延"，需要一条**整跳**提交读数（`dft commits` + `cbs/lane` 的合计，或直接在腿启动/收尾打印合计）。⚠ 改判据要**先登记再改**（§5.2 第 2 条）|
-| **Q24**（本会话新增）| ★ **那 ~550 µs/跳的 cb 内驻留落在哪条设备侧栅栏上**？(Q23 的量化延续) | ✅ **仪器已落地（§6.73，提交见日志）**：`[metal_stats] fence wait on the device (Q24)` = `signaller GPUEndTime − waiter GPUStartTime`，按 `stage/corr/grid` 归属，随 `OCUDU_METAL_GPU_TIME=1` 开启；**离线自证**：解析率 100%、随负载单调、`ctest -L phy -j 1` 193/193。⚠ 离线**不能**验证机制（离线栅栏等待只有 7–20 µs 而离线窗口 500–750 µs ⇒ 回放的大窗口不是栅栏）⇒ **判据在空口腿 `p44`**：`waiter resident while its signaller ran` ≈100% 且几百 µs ⇒ 是栅栏；≈0% ⇒ 转向队列/所有权侧 |
+| **Q24**（本会话新增）| ★ **那 ~550 µs/跳的 cb 内驻留落在哪条设备侧栅栏上**？(Q23 的量化延续) | ⚠ **仪器已落地但第一版有缺陷（§6.74）**：按**地址**配对在 `p44` 上给出 771 ms 中位（物理不可能：该腿 cb 窗口最大 5.5 ms、Σ停等 = 腿长的 1000 倍）⇒ **已改为唯一 id 配对 + 免配对的 `Q24b`（按 slot 配 `ce_weights`↔`merged_hop`）+ 物理不变量自检（`inconsistent` 非 0 即打印 "NOT evidence"）**；离线 6 种结构全 0%、正对照证明它会拒绝说话。**判据在重飞腿 `p45`**。原描述：`[metal_stats] fence wait on the device (Q24)` = `signaller GPUEndTime − waiter GPUStartTime`，按 `stage/corr/grid` 归属，随 `OCUDU_METAL_GPU_TIME=1` 开启；**离线自证**：解析率 100%、随负载单调、`ctest -L phy -j 1` 193/193。⚠ 离线**不能**验证机制（离线栅栏等待只有 7–20 µs 而离线窗口 500–750 µs ⇒ 回放的大窗口不是栅栏）⇒ **判据在空口腿 `p44`**：`waiter resident while its signaller ran` ≈100% 且几百 µs ⇒ 是栅栏；≈0% ⇒ 转向队列/所有权侧 |
 | **Q23**（本会话新增）| ★ **`merged_hop` 的 541.8 µs 窗口里那 ~500 µs 到底是什么**（离线已证明一跳真执行只有 ~67 µs，§6.71④）？| **开放，但两个候选已可用一条读数分开**：(i) **车道被 DL/同伴瓜分**（`busy(union) ≈ window`）；(ii) **cb 内部的 fence 等待**（出现大量 hole；burst 的 cb 只有 stage fence 与 grid-ready 两种 cb 级等待，而 `Q9-F` 只证明 signaller 先**提交**）。**判据读数 = `p43` 上的 `OCUDU_METAL_GPU_TIME=1`**（`[metal_stats] queue occupancy (Q9-F3)` + `gpu busy (…)`；**所有 n78 腿到 `p42` 都是关的**，只有 n1 的 `p15` 给过 `busy(union)/window = 33%`、最大 hole 秒级）⇒ 若坐实 (ii)，再补一条 **并发 1 的对照臂**把"同伴占用"从残差里分出来（§7.6.0d 的候选 (a)）|
 | **Q19**（会话 #6 新增）| 腿 `p39`/`p40` 的**配对 V1 增量 −21.5 µs** 该记为"每次派发 10–14 µs"吗？ | **归因开放**（增量本身成立）：四个方向全量过——GPU 执行 1.5–13.2 µs、派发地板 1.3–1.4、四种边界 ≤0.3、宿主 encode 1.3–1.6（§6.65–§6.67）⇒ 加起来只有 ~3.5–5 µs。**预算一律用 §6.66③ 的 ≈5–20 µs**，不要用 10–14/派发。要坐实需**能看见并发/别的 lane**的仪器（lane 级 GPU 时间戳或 §6.24 的 P0 dump）|
 | **Q20**（会话 #6 新增）| 均衡 / 解映射的**算力**是多少（`merged_hop` 里除了 CE 38 µs 与 A 项 464 µs 的其余部分）？ | ✅ **已收口（§6.69）**：`equalize_mxn` 1.40–1.61 µs、`demod_soft` 1.25–1.37 µs（156→2184 RE，**与 RE 数几乎无关**，贴着 1.3–1.4 µs 派发地板）⇒ 两段合计 **≈2.8 µs/跳**。**一跳全部算力 ≈51 µs（~10%）** ⇒ "重写 kernel"这条杠杆死了；⚠ 附带一个仪器陷阱：两引擎用 `dispatchThreads`（非均匀），塞进 threadgroups 计时器会读出 **256 倍**大的假值 |
