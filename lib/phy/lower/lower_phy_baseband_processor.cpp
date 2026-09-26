@@ -1320,7 +1320,13 @@ void lower_phy_baseband_processor::ul_process()
   // [dl_tx_call]). Two clock reads and one relaxed-store block per slot, because the question - "is the host
   // late to ASK, or does the transport block INSIDE the call?" - cannot be answered from the timestamps alone,
   // and it is the question that decides whether the remaining millisecond discontinuities are ours to fix.
+  // The BEGIN read exists for ul_rx_note_call() alone, so it is guarded with it: with the probe off it is
+  // set and never used, which -Werror=unused-but-set-variable refuses (the second half of the same Linux
+  // build failure). rx_call_end stays unguarded: tx_slack_note_receive() below is not behind a switch and
+  // needs it on every build.
+#if defined(OCUDU_METAL_STATS)
   const auto rx_call_begin = std::chrono::steady_clock::now();
+#endif
   baseband_gateway_receiver::metadata rx_metadata = receiver.receive(rx_writer);
   const auto rx_call_end = std::chrono::steady_clock::now();
   // dev doc 6.41: the clock map the transmit-side margin needs - the radio timestamp just delivered and the
@@ -1331,10 +1337,19 @@ void lower_phy_baseband_processor::ul_process()
                             .count());
   // The air time of the block the call asked for: the reference the receive timing is read against (see
   // ul_rx_note_call). `srate` is in kHz, so samples * 1000 / kHz is microseconds.
+  //
+  // GUARDED LIKE ITS DEFINITION (the [ul_rx] probe block above, #if defined(OCUDU_METAL_STATS)). Leaving
+  // this call unguarded compiled on macOS - where the debug aids default ON - and broke every build that
+  // has ENABLE_FLOW_PROBES on with ENABLE_METAL_STATS off (the Linux default): "'ul_rx_note_call' was not
+  // declared in this scope". The probe's reader is the Metal-stats report, so the call belongs behind the
+  // same switch. The BEGIN clock read is guarded with it (it exists for this call alone); rx_call_end is
+  // not, because tx_slack_note_receive() needs it on every build.
+#if defined(OCUDU_METAL_STATS)
   ul_rx_note_call(std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_begin.time_since_epoch()).count(),
                   std::chrono::duration_cast<std::chrono::nanoseconds>(rx_call_end.time_since_epoch()).count(),
                   static_cast<int64_t>(nof_samples) * 1000 / static_cast<int64_t>(srate.to_kHz()),
                   rx_metadata.error);
+#endif
 #if defined(OCUDU_FLOW_PROBES)
   // [zmq-probe] instrumentation (compiled only with ENABLE_FLOW_PROBES), plus the [ul_rx_wait] series.
   //
