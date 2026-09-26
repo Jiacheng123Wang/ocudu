@@ -141,8 +141,16 @@ public:
     if ((env != nullptr) && (std::strtoul(env, nullptr, 10) == 0)) {
       return false;
     }
-    const char* rx = std::getenv("OCUDU_UL_RX_SYMBOLS");
-    return (rx == nullptr) || (std::strtoul(rx, nullptr, 10) == 0);
+    // S-B, C1 (dev doc 7.7): the receive GRANULARITY no longer decides whether the front end may batch.
+    // It used to: OCUDU_UL_RX_SYMBOLS > 0 returned false here, and that single `return` is what made a
+    // symbol-grained leg report `batched=0/0` and `released=0` (p41) - the batching and the whole-hop
+    // hand-over were switched off at once, and the leg's latency regression came from THAT, not from the
+    // smaller receive blocks. The two are independent questions: HOW MANY samples a receive call asks
+    // for (the policy) and HOW MANY arrived symbols a transform batch covers (this). Batches are
+    // therefore always allowed now; the batch boundary follows the arrived symbol groups (C2) and the
+    // sample placement keeps its slot-phase anchoring (C3), which is what keeps a partial-slot receive
+    // from rotating the grid (the p41 mechanism, dev doc 7.7).
+    return true;
   }
 
   void set_lane_slot(uint64_t slot_index) override

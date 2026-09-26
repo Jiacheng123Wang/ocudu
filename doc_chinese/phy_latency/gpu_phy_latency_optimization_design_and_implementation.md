@@ -5360,6 +5360,11 @@ grep -aE "ul_gpu_pipeline|queue: weights commit|commit -> completion|ul_gpu_lane
 3. ★ **网格锚定（约束③ / H1/H3）**：**样点落进网格哪一行，必须仍按时间戳/时隙相位**，不能按 `rx_fill` 累加；具体是 1220–1240 的"退役并重开"路径**必须重锚到时隙的第一个符号**（它现在在新边界重开，而那个边界未必是符号 0）。
    **C3 = 修这条路径的相位锚定。** 只要 C1/C2 不碰 `rx_offset`/`rx_fill` 的**装填语义**、C3 把相位钉住，`p41` 那种"整槽按符号旋转"就不会重现。
 
+**★ C1 已落地（2026-09-25，本会话）**：`ofdm_demodulator_impl.h` 的 `block_batching_enabled()` 去掉了 `OCUDU_UL_RX_SYMBOLS` 那条 `return`，改为**恒允许成批**（带注释说明"那条 return 就是 `p41` 的 `batched=0/0`/`released=0` 的成因，而**延迟回退来自批量化被关，不是来自更小的收包块**"）。
+* **验证性质**：**开关未设时它是逐字等价的重构**（旧表达式此时恒为 true）⇒ 默认路零行为变化；
+* **离线网**：`ctest -L phy -j 1` 全绿；⚠ **replay 验不了它**（实测：`ul_chain_replay` 的 dump 在 `OCUDU_UL_RX_SYMBOLS` 开/关下**逐字节相同** ⇒ **RX 策略是空口专属**，replay 不走收包路）⇒ **C1 的行为验证只能靠空口腿**（读 `batched=`/`released=` ≠ 0）；这也意味着 **H1（网格旋转）也无法离线复现**；
+* ⇒ **C1 之后的第一条腿就是"离线验不了"的那条**：配方同 `p42`，只加 `OCUDU_UL_RX_SYMBOLS=7`（半槽，比 N=1 温和），读 `batched=`/`released=`/整跳提交数/TBS-Thr；若 `batched≠0` 且吞吐不塌 ⇒ C1 成立、C2/C3 才值得做。
+
 **离线自证的网（C1–C3 的判据，先定死）**：
 * **网格 dump 与整槽路径逐字节相同**（`ul_chain_replay` 的 `.bin` 就是网格副本）——这是**约束③ 的直接判据**，也是本工作流最熟的那类网；
 * `dft` 计数器：`batched=` 与 `released=` 都**不为 0**、且 `batch_max` 仍为 14（分组后应为"每槽 k 批"）；
