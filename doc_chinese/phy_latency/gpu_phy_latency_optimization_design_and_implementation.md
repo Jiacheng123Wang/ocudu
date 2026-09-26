@@ -5102,6 +5102,13 @@ S-C 是 S-B 的顺带收益；**S-D/S-E 都要用户裁决**（V4）。
 3. **池把"收包时钟"与"处理车道"解耦**：池是 **32 个整时隙缓冲**；电台边收边填，车道还在处理更早的跳（`held_max` 10–18、`free_min` 14–22 就是这份弹性在被动用）。
    **收包侧不因为车道忙而停**——只有池见底才会停（§6.26 修复 B 之后是"丢弃并计数"，而不是停住电台）。
 
+**池里的缓冲在哪个节点（用户 2026-09-25 提问）**：**在 FFT 之前 —— 是时域 IQ 样本，一个缓冲 = 整个时隙**。
+证据：启动行 `[ul_rx_pool] size=32 buffers of 11520 samples (slot=11520, whole-slot buffers, the gpu pipeline mode)`（11520 = 23.04 MHz × 0.5 ms ✓）；
+以及代码注释（`lower_phy_baseband_processor.cpp`，符号级收包的分支）："**the transforms that still read it keep it alive and return it to the pool themselves**"
+—— 即**缓冲是被"变换（DFT）"读的**，读完才归还。
+⇒ **FFT 之后没有等价弹性的池**：时频网格是**前端在车道自己的命令缓冲里写出来**的（DFT 的 grid 写），再由 **D1 交棒（`shared_burst::deposit_released()`，按 `resource_grid_device_view::base` 配对）** 把**命令缓冲**交给估计器 —— 那是**顺序（ordering）**，不是**缓冲（elasticity）**。
+⇒ 这条对结构项（§7.6 的 S-A/S-B）很关键：**IQ 侧可以"多存几槽"来吸收抖动，网格侧不能**；要让估计器早开跑，必须让前端**产出并交棒"部分网格"**，而不只是改收包粒度。
+
 **塌的条件（三者之一，且本工作流都亲眼见过其反面）**：
 (a) **链 × 到达率 > 车道容量**（利用率越过 100% ⇒ 队列无界增长 ⇒ 丢 HARQ）；
 (b) **在飞缓冲 > 池**——**这正是 §6.34–§6.38 的历史**：池 = 8 而持有峰值 = 11 时，`starved_events=97`、`pop_blocking` 出现、**电台丢样点**（用户观察到的"塌"就是它）；定尺到 32 后消失（§6.39）；
