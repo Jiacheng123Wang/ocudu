@@ -388,6 +388,22 @@ int main()
   report("14 in 1 dispatch, 32 background cbs", 14, 1, true, true, 32);
 
   // --- the one thing the PRACH buffers (47.8us on air, like the harness) do NOT do: signal an event --
+  // --- how long the device sat IDLE before the buffer: the air steady state, or a clock state? --------
+  //
+  // Every offline arm here keeps the device busy (fifteen runs back to back after ten warm-up runs) and
+  // reads 13-58us. Air reads 452us for the same work while its device is mostly idle (busy(union)/window
+  // is 27-29% on the probed queues). If a command buffer's cost depends on how long the device has been
+  // idle, that whole family of air numbers is a CLOCK state rather than a structure.
+  std::printf("\n--- idle before the dispatch: 0 / 1ms / 50ms / 500ms / 2s ---\n");
+  fill_tables(14, true, true);
+  for (unsigned idle_us : { 0u, 1000u, 50000u, 500000u, 2000000u }) {
+    const arm_result r = run_arm(
+        queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1, nullptr, 0, false, idle_us, false);
+    char label[64];
+    std::snprintf(label, sizeof(label), "idle %u us before the commit", idle_us);
+    std::printf("%-52s window=%9.1fus\n", label, r.window_us);
+  }
+
   std::printf("\n--- the hand-over's signal on the released block ---\n");
   {
     id<MTLSharedEvent> ev = [device newSharedEvent];
