@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace ocudu;
@@ -145,11 +146,52 @@ struct shared_queue_state {
     uint64_t    slot      = 0;
     bool        has_slot  = false;
     const char* label     = nullptr;
+    /// Identity of the command buffer (\c __bridge, so this neither retains nor owns it). Q24 matches a
+    /// fence's two ends - the waiter and its signaller - against these records to time the wait on the
+    /// DEVICE; it is the only pairing key both sides have, because the fence bookkeeping already keys its
+    /// pending entries by the same pointer (see note_fence_wait).
+    const void* key = nullptr;
   };
   std::mutex                occupancy_mutex;
   std::vector<occupancy_record> occupancy;
   std::atomic<uint64_t>     occupancy_dropped{0};
   std::atomic<uint64_t>     occupancy_largest_idle_us{0};
+  ///@}
+
+  /// \name Q24 (dev doc 6.73): what a device-side fence wait costs ON THE DEVICE.
+  ///
+  /// WHY IT EXISTS. Q9-D and Q9-F answer "how often" and "in what order", and both rest on an argument that
+  /// holds only WITHIN one queue: a wait for a generation that has already been handed out "cannot block",
+  /// because its signaller was committed first and a queue's command buffers run in commit order. Neither
+  /// counter can see the case that argument does not cover - signaller and waiter on DIFFERENT queues, where
+  /// "committed first" says nothing about who finishes first - and on air one hop's own command buffer sits
+  /// on the device for ~575us while its dispatches cost ~67us (dev doc 6.72), which is exactly the shape of a
+  /// wait that resolves late. The measurement is the only one Metal's per-buffer timestamps allow:
+  ///
+  ///     signaller's GPUEndTime  -  waiter's GPUStartTime
+  ///
+  /// Positive means the waiter's buffer was ALREADY RESIDENT while the buffer it waits for was still
+  /// running: that interval is the stall, and it is attributed to the fence that caused it. Both ends are
+  /// recorded here as they are encoded (one push each, no GPU work), and the report matches them against the
+  /// GPU-time probe's own records (occupancy_record::key) - so the reading needs OCUDU_METAL_GPU_TIME=1 and
+  /// costs nothing at all without it.
+  ///@{
+  struct fence_time_sample {
+    uint64_t                 generation = 0;
+    shared_queue::fence_kind kind       = shared_queue::fence_kind::stage;
+    const void*              waiter     = nullptr;
+    uint64_t                 slot       = 0;
+    bool                     has_slot   = false;
+  };
+  std::mutex                     fence_time_mutex;
+  std::vector<fence_time_sample> fence_time_waits;
+  /// One entry per signal: the generation and the buffer that will carry it. Per kind, because the stage and
+  /// grid events count their generations independently.
+  std::vector<std::pair<uint64_t, const void*>>
+      fence_time_signals[static_cast<size_t>(shared_queue::fence_kind::count)];
+  /// Fence ends the bound did not let the lists keep: counted, because a reading that silently drops what it
+  /// cannot hold is how a zero gets believed.
+  std::atomic<uint64_t> fence_time_dropped{0};
   ///@}
 
   /// One no-copy wrap: the buffer, the host range it covers, and the allocation it was made for.
@@ -263,6 +305,14 @@ uint64_t lane_slot()
   return (lane_slot_fn != nullptr) ? lane_slot_fn() : 0;
 }
 
+/// Whether the GPU-time probe is on (OCUDU_METAL_GPU_TIME=1). Q24's reading is resolved against that probe's
+/// records, so both ends of a fence are only recorded when it is on; the check is the same one arm_gpu_time()
+/// makes, and it is read per call rather than cached so a tool can arm it around the arms it compares.
+bool gpu_time_probe_enabled()
+{
+  return std::getenv("OCUDU_METAL_GPU_TIME") != nullptr;
+}
+
 /// The name of a fence kind, for the reports (Q9-D and Q9-F read it the same way).
 const char* fence_kind_name(shared_queue::fence_kind kind)
 {
@@ -328,6 +378,129 @@ void shared_queue_stats_report()
                  worst_kind,
                  static_cast<unsigned long long>(worst_slot),
                  (s.fence_pending.empty()) ? "" : " (waits still open at exit: their signaller never came)");
+  }
+  // Q24 (dev doc 6.73): the same waits, timed ON THE DEVICE, and asked of the bucket Q9-D calls SAFE.
+  //
+  // "Safe" there means the signaller's generation had been handed out before the wait was encoded - an
+  // argument about ORDER, which only holds within one queue (see the state's fence_time_* note). The one
+  // number Metal's per-buffer timestamps allow is `signaller's GPUEndTime - waiter's GPUStartTime`: positive
+  // means the waiter's buffer was already resident while the buffer it waits for was still running, and that
+  // interval is the stall. This is the reading that can tell "the device was busy elsewhere" from "our own
+  // command buffer was held by a fence" for the ~575us a hop's buffer sits on the device (dev doc 6.72).
+  {
+    std::vector<shared_queue_state::fence_time_sample> waits;
+    std::vector<std::pair<uint64_t, const void*>>      signals[static_cast<size_t>(shared_queue::fence_kind::count)];
+    uint64_t                                           dropped = 0;
+    {
+      std::lock_guard<std::mutex> lock(s.fence_time_mutex);
+      waits = s.fence_time_waits;
+      for (size_t k = 0; k != static_cast<size_t>(shared_queue::fence_kind::count); ++k) {
+        signals[k] = s.fence_time_signals[k];
+      }
+      dropped = s.fence_time_dropped.load(std::memory_order_relaxed);
+    }
+    if (waits.empty()) {
+      if (!gpu_time_probe_enabled()) {
+        std::fprintf(stderr,
+                     "[metal_stats] fence wait on the device (Q24): no GPU-time records - the probe is off "
+                     "(OCUDU_METAL_GPU_TIME=1 turns it on), so nothing here says whether a wait cost device "
+                     "time\n");
+      }
+    } else {
+      // Generation -> the buffer carrying that signal, per kind. Sorted here rather than kept sorted on the
+      // submit path: two threads hand generations out concurrently, so append order is not generation order.
+      for (auto& sig : signals) {
+        std::sort(sig.begin(), sig.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+      }
+      std::vector<const void*> signaller_of(waits.size(), nullptr);
+      std::unordered_set<const void*> needed;
+      uint64_t                        no_signal = 0;
+      for (size_t i = 0; i != waits.size(); ++i) {
+        needed.insert(waits[i].waiter);
+        auto&      sig = signals[static_cast<size_t>(waits[i].kind)];
+        const auto it  = std::lower_bound(
+            sig.begin(), sig.end(), waits[i].generation, [](const auto& e, uint64_t g) { return e.first < g; });
+        if ((it == sig.end()) || (it->first != waits[i].generation)) {
+          ++no_signal;
+          continue;
+        }
+        signaller_of[i] = it->second;
+        needed.insert(it->second);
+      }
+      // The GPU window of every buffer that is one END of a fence, from the probe's own records. Collected in
+      // two passes so the map only holds the buffers that matter, and read in place (the probe's list is 2M
+      // records at its bound - copying it here would double the peak for nothing).
+      std::unordered_map<const void*, std::pair<uint64_t, uint64_t>> when;
+      when.reserve(needed.size() * 2);
+      {
+        std::lock_guard<std::mutex> occ_lock(s.occupancy_mutex);
+        for (const auto& r : s.occupancy) {
+          if ((r.key != nullptr) && (needed.count(r.key) != 0)) {
+            when[r.key] = {r.start_ns, r.end_ns};
+          }
+        }
+      }
+      std::vector<double> stalls_us;
+      uint64_t            by_kind[static_cast<size_t>(shared_queue::fence_kind::count)] = {};
+      uint64_t            unresolved                                                    = 0;
+      double              worst_us                                                      = 0.0;
+      uint64_t            worst_slot                                                    = 0;
+      const char*         worst_kind                                                    = "none";
+      for (size_t i = 0; i != waits.size(); ++i) {
+        const shared_queue_state::fence_time_sample& w = waits[i];
+        const auto                                   wi = when.find(w.waiter);
+        const auto                                   si = when.find(signaller_of[i]);
+        if ((signaller_of[i] == nullptr) || (wi == when.end()) || (si == when.end())) {
+          ++unresolved;
+          continue;
+        }
+        if (si->second.second > wi->second.first) {
+          const double us = static_cast<double>(si->second.second - wi->second.first) / 1e3;
+          stalls_us.push_back(us);
+          ++by_kind[static_cast<size_t>(w.kind)];
+          if (us > worst_us) {
+            worst_us   = us;
+            worst_slot = w.slot;
+            worst_kind = fence_kind_name(w.kind);
+          }
+        }
+      }
+      double mean = 0.0;
+      double p50  = 0.0;
+      double p95  = 0.0;
+      if (!stalls_us.empty()) {
+        std::sort(stalls_us.begin(), stalls_us.end());
+        double sum = 0.0;
+        for (double v : stalls_us) {
+          sum += v;
+        }
+        mean = sum / static_cast<double>(stalls_us.size());
+        p50  = stalls_us[(stalls_us.size() - 1) / 2];
+        p95  = stalls_us[static_cast<size_t>(static_cast<double>(stalls_us.size() - 1) * 0.95)];
+      }
+      std::fprintf(stderr,
+                   "[metal_stats] fence wait on the device (Q24): waits=%zu resolved=%zu no-signal=%llu "
+                   "unresolved=%llu dropped=%llu | waiter resident while its signaller ran: %zu (%.1f%%) "
+                   "mean=%.1fus median=%.1fus p95=%.1fus max=%.1fus worst kind=%s slot=%llu; per kind: "
+                   "stage=%llu corr=%llu grid=%llu\n",
+                   waits.size(),
+                   waits.size() - static_cast<size_t>(unresolved),
+                   static_cast<unsigned long long>(no_signal),
+                   static_cast<unsigned long long>(unresolved),
+                   static_cast<unsigned long long>(dropped),
+                   stalls_us.size(),
+                   100.0 * static_cast<double>(stalls_us.size()) / static_cast<double>(waits.size()),
+                   mean,
+                   p50,
+                   p95,
+                   worst_us,
+                   worst_kind,
+                   static_cast<unsigned long long>(worst_slot),
+                   static_cast<unsigned long long>(by_kind[static_cast<size_t>(shared_queue::fence_kind::stage)]),
+                   static_cast<unsigned long long>(
+                       by_kind[static_cast<size_t>(shared_queue::fence_kind::correlation)]),
+                   static_cast<unsigned long long>(by_kind[static_cast<size_t>(shared_queue::fence_kind::grid)]));
+    }
   }
   // Q9-F: the same questions as Q9-D, asked of the COMMIT order instead of the moment the generation was
   // handed out - the blind spot Q9-D documented (a signal handed out early can still be SUBMITTED late, and
@@ -765,6 +938,9 @@ void shared_queue::arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind 
   // entry may be gone by the time the GPU is done.
   const uint64_t       resolved_slot = (slot != no_slot) ? slot : (lane_has_slot() ? lane_slot() : 0);
   const bool           has_slot      = (slot != no_slot) || lane_has_slot();
+  // Q24: the buffer's identity, taken BEFORE the block so the block captures a plain pointer (capturing the
+  // ObjC object would retain it until the record is dropped, which is a lifetime the probe must not create).
+  const void*          cb_key        = (__bridge const void*)command_buffer;
   const double         commit_s =
       std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
@@ -795,6 +971,7 @@ void shared_queue::arm_gpu_time(id<MTLCommandBuffer> command_buffer, queue_kind 
       r.slot      = resolved_slot;
       r.has_slot  = has_slot;
       r.label     = (label != nullptr) ? label : "?";
+      r.key       = cb_key;
       st.occupancy.push_back(r);
     } else {
       st.occupancy_dropped.fetch_add(1, std::memory_order_relaxed);
@@ -953,6 +1130,19 @@ void shared_queue::note_fence_signal(uint64_t generation, fence_kind kind, id<MT
     return;
   }
   shared_queue_state& s = state();
+  // Q24: the signaller's end, recorded where the signal is encoded (the one call site both events share).
+  // Kept per kind because the stage and grid events count their generations separately, and the report
+  // matches a wait to the buffer carrying EXACTLY its generation.
+  if (gpu_time_probe_enabled() && (command_buffer != nil)) {
+    std::lock_guard<std::mutex> time_lock(s.fence_time_mutex);
+    constexpr size_t            max_fence_ends = 1u << 20;
+    auto&                       signals        = s.fence_time_signals[static_cast<size_t>(kind)];
+    if (signals.size() < max_fence_ends) {
+      signals.emplace_back(generation, (__bridge const void*)command_buffer);
+    } else {
+      s.fence_time_dropped.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
   // Q9-F: the signal is a fact for the COMMIT order only once the buffer carrying it is committed, so the
   // pending entry is what note_commit_order() resolves. Recorded before the Q9-D bookkeeping below, which may
   // take the same mutex: both live under `order_mutex`/`fence_mutex` respectively and are taken one at a time.
@@ -1001,6 +1191,25 @@ void shared_queue::note_fence_wait(uint64_t generation, fence_kind kind, id<MTLC
     return;
   }
   shared_queue_state& s = state();
+  // Q24: the waiter's end, recorded BEFORE the "safe shape" early return below - that bucket is the whole
+  // point of the reading. Q9-D calls a wait for an already-handed-out generation safe because its signaller
+  // was committed first, but on air the signaller may still be RUNNING when the waiter's buffer starts
+  // (dev doc 6.72), and that interval is what the report then measures on the device.
+  if (gpu_time_probe_enabled() && (command_buffer != nil)) {
+    std::lock_guard<std::mutex> time_lock(s.fence_time_mutex);
+    constexpr size_t            max_fence_ends = 1u << 20;
+    if (s.fence_time_waits.size() < max_fence_ends) {
+      shared_queue_state::fence_time_sample sample;
+      sample.generation = generation;
+      sample.kind       = kind;
+      sample.waiter     = (__bridge const void*)command_buffer;
+      sample.has_slot   = lane_has_slot();
+      sample.slot       = sample.has_slot ? lane_slot() : 0;
+      s.fence_time_waits.push_back(sample);
+    } else {
+      s.fence_time_dropped.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
   // Q9-F: the waiter's side of the record, kept on the buffer it was encoded into until that buffer commits -
   // which is the instant the question "was the signaller ahead of me?" can be answered at all.
   if (command_buffer != nil) {
@@ -1234,6 +1443,18 @@ uint64_t shared_queue::nof_occupancy_records()
 uint64_t shared_queue::occupancy_largest_idle_us()
 {
   return state().occupancy_largest_idle_us.load(std::memory_order_relaxed);
+}
+
+uint64_t shared_queue::nof_fence_time_waits()
+{
+  shared_queue_state&         s = state();
+  std::lock_guard<std::mutex> lock(s.fence_time_mutex);
+  return static_cast<uint64_t>(s.fence_time_waits.size());
+}
+
+uint64_t shared_queue::nof_fence_time_dropped()
+{
+  return state().fence_time_dropped.load(std::memory_order_relaxed);
 }
 
 void shared_queue::note_stage_fence_wait(bool own_generation, bool crossed)

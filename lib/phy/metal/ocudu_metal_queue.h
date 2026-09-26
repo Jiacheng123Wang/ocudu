@@ -318,6 +318,30 @@ public:
   static uint64_t occupancy_largest_idle_us();
   ///@}
 
+  /// \name Q24 (dev doc 6.73): what a device-side fence wait costs ON THE DEVICE.
+  ///
+  /// Q9-D and Q9-F count the waits and judge their ORDER, and both rest on an argument that only holds within
+  /// one queue: a wait for a generation that has already been handed out "cannot block", because its signaller
+  /// was committed first and a queue's command buffers run in commit order. Neither can see the case that
+  /// argument does not cover - signaller and waiter on DIFFERENT queues, where "committed first" says nothing
+  /// about who finishes first - and on air one hop's own command buffer sits on the device for ~575us while
+  /// its dispatches cost ~67us (dev doc 6.72), which is exactly the shape of a wait that resolves late.
+  ///
+  /// The measurement is the only one Metal's per-buffer timestamps allow:
+  ///
+  ///     signaller's GPUEndTime  -  waiter's GPUStartTime    (positive = the wait cost that much device time)
+  ///
+  /// Both ends are recorded as they are encoded (one vector push each, no GPU work), and the
+  /// `[metal_stats] fence wait on the device (Q24)` line resolves them against the GPU-time probe's own
+  /// records (occupancy_record::key) - so the reading needs OCUDU_METAL_GPU_TIME=1, and without it nothing is
+  /// recorded at all.
+  ///@{
+  /// Waits the Q24 instrument recorded (0 when the GPU-time probe is off).
+  static uint64_t nof_fence_time_waits();
+  /// Fence ends the instrument's bound did not let it keep.
+  static uint64_t nof_fence_time_dropped();
+  ///@}
+
   /// \brief Encodes a wait for ONE named estimator generation (not the newest).
   ///
   /// Needed when a stage is ordered against SEVERAL submissions that were committed one after another:
