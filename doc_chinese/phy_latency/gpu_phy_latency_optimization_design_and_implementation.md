@@ -5005,6 +5005,136 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
 * 腿尾 `gaps > 0` 或 `rx_overflows > 0` ⇒ 接收策略把余量吃掉了（§6.51 的 D19）。
 
 
+### 6.71 ★★ 腿 `p41-n78-rxsym` 的结果 + 两处前提更正 + 542 µs 窗口的离线新证据（2026-09-26，本会话；**零新代码**）
+
+> 本节是 §6.70 那条腿的**结果**（`p41-n78-rxsym`，`OCUDU_UL_RX_SYMBOLS=1`，配方同 `p39`；腿日志
+> `logs/gnb_gpu_p41-n78-rxsym_0926_0734.log*`），加上按 memo §3 的施工顺序做下去时**读码读出来的两处前提更正**。
+> memo §3.1（补 H4 计数）**被现有仪表证伪为不必要**；§3.2（C2）**前提不成立**（见③）。
+
+#### ① 结果：A 项（`P1-7` 符号级收包）**被证伪为交付路径** —— 伤害在"前端提交数"，不在符号
+
+| 读数 | `p41`（`RX_SYMBOLS=1`）| `p42`（整槽，同日、同二进制系）| 判读 |
+|---|---|---|---|
+| `[ul_gpu_pipeline]` 中位 | **2043.1** | 1366.8 | 跳变慢 +676（+49%）|
+| `[ul_pipeline]` 中位 | 2061.0 | —— | |
+| UL MAC PDU 中位 / **总量** | **217 B** / 18.2 MB | 3329 B / 333.5 MB | **15× / 18× 塌** |
+| `[ul_by_size]` CRC-OK 跳 / 总跳 | 97,978 / 152,666（64%）| 102,699 / 144,787（71%）| **比率接近**，塌的是*每跳的 TB* |
+| `[metal_stats] dft … batched=` / `released=` | **0/0** / **0** | 157,357/2,202,998 / 157,357 | C1 的靶子 |
+| ★ `[ul_gpu_lane] dft slots / cbs` | 178,407 / **2,497,686**（**14.0 cb/槽**）| 60,868 / **60,868**（0.39/槽）| **前端每符号一条命令缓冲** |
+| ★ `[ul_dft_wait]` | **中位 577.6 µs**（samples=178,397）| **no samples** | 前端拿不到车道 |
+| `[ul_gpu_lane] period` 中位 | 801.6 | 427.7 | 车道周转被拉长 |
+| `[ul_rx_wait]` 中位 | 0.0 | 473.0 | 收包侧确实更早拿到样点 |
+| 契约 / `gaps` / 池 / `cbs/lane` | 8/8 / 0 / 绿 / 2.00 | 同 | **不允许变的都没变** |
+
+**因果链（与所有读数一致）**：`RX_SYMBOLS=1` ⇒ `block_batching_enabled()` 那条 `return`（**C1 已删**）把"成批"与"D1 交棒"同时关掉
+⇒ **每个符号一条 cb**（2,497,686 = 14/槽 × 178,407）⇒ 前端与后端抢同一条车道 ⇒ `[ul_dft_wait]` 578 µs
+⇒ 跳变慢 ⇒ **UL 每跳 TB 塌 15×**（而 CRC-OK *比率*几乎不变 ⇒ 不是解码质量塌，是**调度器给的块变小**）。
+⇒ **A 项不是"交付路径"**（memo §2 第 8 条），但它的**用法**（C1 + 半槽收包）仍待一条腿验收：`p43`（见⑤）。
+
+#### ② ★ H4（"符号级路在丢符号"）**被三条独立现有读数证伪** ⇒ **不补 H4 计数**（memo §3.1 作废）
+
+| 读数（`p41`）| 值 | 说明 |
+|---|---|---|
+| `[ul_rx] blocks` / `samples` | 14,842,803 / 12,213,506,471 | **822.857 样点/块 = 恰好一个 OFDM 符号**（11520/14）⇒ 一块一符号，无混叠 |
+| 样点数推出的符号数 | 12,213,506,471 / 822.857 = **14,842,803** | = 块数（每块一符号）|
+| `[ul_host] symbols` | **14,842,392** | = 块数 − **411**（0.0028%；相位建立 2 + 收尾）⇒ **到达的每个符号都被处理了** |
+| `gaps` / `rx_overflows` / `[ul_rx_pool]` | 0 / 0 / `held_end=0 dropped=0 starved_events=0` | 电台与池都干净 |
+
+⇒ `process_alignment` / `max_phase_blocks` **一个符号也没丢**：任何"整块被丢"都会让 `[ul_host] symbols` **低于**上面的期望值
+（丢弃点在符号计数器**下游**：`process_alignment` 的"留在 alignment"分支与 `process_symbol_boundary` 的 `i_sample_symbol != 0` 递归都不产出符号）。
+⇒ 而且 memo §3.1 想让计数"随腿增长"是**不可能**的：两处 `++nof_phase_blocks` 都被 `nof_phase_blocks < max_phase_blocks`（=2/流，`start()` 复位）夹住
+⇒ 加那两行只能读到 **0/1/2**，改变不了任何结论。**免费判据**（任何腿、不需要新代码）：**`[ul_host] symbols` ≈ `[ul_rx] samples / 822.857`**（n78，误差 <0.01%）。
+
+#### ③ ★★ C2 的前提被读码推翻：**块不是在"下一个时隙开始时"关的**
+
+§7.7 第 2 条（以及 memo §3.2）写的是"现在块只在 `set_lane_slot()`（下一槽）关 ⇒ 一槽一批"。**读码结果：不是。**
+真正的关块触发器在 **`ofdm_demodulator_impl.cpp::finish_symbol()`（第 486 行）**：
+
+```cpp
+const bool last_symbol_of_slot =
+    ((pipeline_slots[slot].symbol_index % nof_symbols_per_slot) == (nof_symbols_per_slot - 1));
+...
+if (block_open && last_symbol_of_slot) {
+  released = wait_per_slot && handover_allowed() && dft->release_block(grid.get_device_view().base);
+  if (!released) { (void)dft->end_block(); }
+  block_open = false;
+}
+```
+
+`puxch_processor_impl::process_symbol()` 在**本槽最后一个符号**提交后立刻 `drain_pipeline()`（第 226–230 行）
+⇒ 那次 `finish_symbol()` 命中 `last_symbol_of_slot` ⇒ **块在本槽最后一个符号处关**，而 `set_lane_slot()` 里的 `end_block()` 只是**兜底**
+（该槽没有网格 / 网格提前释放 / 上一块没走完）。**⇒ 字面上的 C2（"按已到样点的最后一组关块"）就是现状**。
+
+**C2 的"有用版本"**（在每个**收包组**边界关块，让前 7 个符号的变换在半槽时就派发）的账：
+
+* 每跳**多一条 cb**（前端半槽一条）⇒ `cbs/lane` **2.00 → 3.00**，**直接触 V4 的 `cbs/lane ≤ 2.00`**（用户判据）；
+* 买到的是"前端**执行**前移"：前端执行 ≈**10.6 µs/槽**（§6.65）⇒ 半槽量级 **~5 µs**，与窗口里那 ~500 µs 无关（见④）；
+* 还要重定义 D1 的 `deposit/take` 契约（键 = 网格基址，现在隐含"一槽一块"）。
+⇒ **建议：C2 从 S-B 清单里划掉**；若要把"前端半槽就开跑"做成交付形态，先请用户裁决"**V4 是否放宽到 3.00**"（这是取舍，不是技术障碍）。
+**S-B 剩下的就是 C1（已落地）+ 它的空口验收。**
+
+#### ④ ★★ 那 ~500 µs 的窗口：**离线回放首次逐 cb 量到"一跳真执行 ≈67 µs"**（本会话新证据）
+
+`ce_kernel_cost.sh` 的基线跑（`ul_chain_replay syn004_4 --metal`，**0.12 s/次**）在 `OCUDU_METAL_GPU_TIME=1` 下逐 cb 打印
+`commit->start`（队列）与 `start->end`（**设备窗口**）：
+
+| cb（label）| commit→start | **start→end** | 是什么 |
+|---|---|---|---|
+| `ce_weights` slot=**10049**（真跳的估计器路）| 378.8 µs | **44.6 µs** | 前端变换（adopt 进来的整块）+ CE 全链 |
+| `lane_burst` slot=**10049**（真跳的融合跳）| 1050.0 µs | **22.2 µs** | 均衡 + 解映射 |
+| `ce_weights` slot=**0** ×**17**（该 capture 的其余 CE 调用；**不是本跳的**）| 355–453 µs | **744–890 µs** | ⚠ 成因未查（首次使用/等一条迟迟不就绪的 fence 都说得通），但**无论成因如何它们都不是热跳的读数** |
+
+⇒ **热起来以后一跳的两条 cb 合计执行 ≈ 67 µs**（与 §6.65/§6.69 的 ~51 µs 账单、与空口 `p42` 的 `ch_wt=43.5 µs` 三者互证）
+⇒ **空口 `merged_hop` 的 541.8 µs 里 ~500 µs 是"等"，不是算力**。"重写 kernel"这条杠杆的死亡结论**站得住**。
+⚠ **仪器陷阱（新增，别踩）**：`ce_kernel_cost.sh` 的**斜率法把上面那 17 条非本跳 cb 的窗口算进基线**（744–890 µs vs 真跳 44.6 µs，**17 倍**），
+本会话重跑因此得到 `invert K1=115 µs`、`reformat K3=93 µs`、`weights K1b=62 µs`——**与空口 `ch_wt` 的 43.5 µs 差 8 倍**，且两项为负。
+**判读那条脚本必须只看 `slot != 0` 的真跳 cb，不要用均值/斜率**；算力账单的载体是 `ce_kernel_cost.mm`（隔离、预热、min-of-3）。
+
+**⇒ 空口那 500 µs 归属仍然未定，但两个候选现在可以用一条读数分开**：
+
+* 若 `busy(union) ≈ window`（设备**一直在执行别人的活**）⇒ 是**车道被 DL / 同伴瓜分**（要动 DL 的 GPU 负载或调度）；
+* 若出现大量 hole（设备**闲着**而我们那条 cb 窗口很长）⇒ 是 **cb 内部的 fence 等待**：burst 的 cb 只有两种 cb 级等待
+  （`burst_ensure_open()` 里的 **stage fence** 与 **grid-ready**），而 `Q9-F` 只证明了"signaller 先**提交**"，**没有**证明"signaller 先**完成**"。
+* ⚠ **这条读数在所有 n78 腿上都是关的**（`gpu busy (front_end/back_end): commits=0` ⇒ "the probe is off"）：`p37`–`p42` 全关，
+  只有 n1 的 `p15` 开过，而它给的是 **`busy(union)=105.7 s / window=318 s` = 33%**（设备 2/3 时间是闲的、最大 hole 是**秒级**）
+  ⇒ **"长窗口 + 闲设备"这个形状已经在 n1 上出现过一次**（§7.6.0c 的 (a)/(b)/(c) 三候选正是要分开它）。
+  ⇒ **⇒ `p43` 上开 `OCUDU_METAL_GPU_TIME=1`**（纯仪器，见⑤）。
+
+**顺带排除掉的一个候选（读码 + 现成计数）**：**不是 burst 的 stage fence 在等**
+* 空口上 `[metal_stats] lane fence … own=0 newest=0 cross_lane=0`（`p37`/`p39`/`p42` 三腿一致），而**离线回放是 `own=1`**
+  ⇒ 空口的 burst **全部走回退路径** `backend_stage_wait()`（`ocudu_metal_queue.mm:919`）：它等的是**编码那一刻的最新代**
+  `generation = stage_fence_generation.load()` —— 该代的 signaller **早已提交**（`Q9-F` 的 `waiter-committed-first=0` 与此一致）⇒ **这条等待是立即满足的，不可能是那 500 µs**。
+* 成因（记下来，免得误读）：`set_stage_wait()` 是**逐线程**发布的"下一个 burst 消费"的（`ocudu_metal_burst.h:265`），
+  而空口的 burst 与估计器**不在同一条线程**（并发 2 的池）⇒ 每个 burst 创建时读到的都是 0 ⇒ `own=0`。**它不是缺陷**（同一条队列的提交顺序已经提供了顺序性），
+  但它说明：**在空口上不能靠"own 代"来解释或修复这条窗口**。
+
+#### ⑤ ★ 修正后的 `p43-n78-halfslot` 预登记（**与 memo §3.3 的差异都写在这里**）
+
+配方（memo §3.3 原样）+ **一个纯仪器**（`OCUDU_METAL_GPU_TIME=1`）：
+
+```bash
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p43-n78-halfslot \
+  --regime=stress OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_UL_RX_SYMBOLS=7 OCUDU_METAL_GPU_TIME=1 \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+```
+
+| 读数 | 预登记 | 出处 |
+|---|---|---|
+| `dft … batched=` / `released=` | **都 ≠ 0**（C1 在空口上的唯一验收；`batch_max` 只是上限）| §7.7 / §6.71① |
+| `[ul_rx] blocks` × 822.857 vs `[ul_host] symbols` | **相等（<0.01%）** ⇒ 没丢符号（H4 的免费判据）| §6.71② |
+| `[ul_gpu_lane] dft slots/cbs` | **`cbs/slots ≤0.5`（与 `p42` 同级；绝不是 `p41` 的 14/槽）**——两个半槽组会**并入同一个开着的块**（块在"本槽最后一个符号"才关，③）| §6.71①③ |
+| `[ul_dft_wait]` | **回到 "no samples" 或 ≪577 µs** | §6.71① |
+| TBS / 吞吐 | **不许塌**（`[ul_mac_pdu_size]` 中位应回到 ~3 kB 量级、总量同 `p42`）| §6.71① |
+| ★ `[metal_stats] queue occupancy (Q9-F3)` + `gpu busy (…)` | **新判据**：`busy(union)/window` 与 hole 数 ⇒ 把 ④ 的两个候选分开 | §6.71④ |
+| `[metal_stats] lane fence … own=` | **预期仍是 0**（空口逐线程发布失效）；若变成 ≠0 说明并发/线程布置变了 | §6.71④ |
+| `merged_hop` 中位 | **预期不变（541.8 ± 20）**——⚠ 与 memo §3.3 的"应 < 541.8（早开跑）"**不同**：块边界已在"本槽最后一个符号"（③），半槽收包**不改**关块时刻 | §6.71③ |
+| 契约 / `cbs/lane` / `gaps` / 池 | 8/8 / **2.00 (max=2)** / 0 / `starved=0`、`dropped=0`（**不允许变**；若 `cbs/lane=3.00` ⇒ 立刻停手并记录）| §3 |
+| V1 中位 | **口径不同，只作参考**（端点随收包窗移动）| §6.70① |
+
+⚠ **已知的外因**：该策略的 shutdown 会踩 DU teardown race（`[metal_stats]` 可能延迟几分钟才落地），**属预期**，别当丢失（§4 纪律 8）。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
@@ -5355,8 +5485,11 @@ grep -aE "ul_gpu_pipeline|queue: weights commit|commit -> completion|ul_gpu_lane
    return (rx == nullptr) || (std::strtoul(rx, nullptr, 10) == 0);   // ← N>0 ⇒ 批量化被直接关掉
    ```
    ⇒ `p41` 的 `batched=0/0`/`released=0` **是这条 `return` 造成的**（`OCUDU_DFT_OPEN_BLOCK=0` 是另一个独立开关）。**C1 = 去掉这条耦合**。
-2. **批的边界（`set_lane_slot()` 的关块时刻）**：现在块只在**下一个时隙开始**时关（"上一槽的样点都到了、变换都编码了"）⇒ 一槽一批。
+2. ⚠ **（前提已更正，见 §6.71③）** **批的边界（`set_lane_slot()` 的关块时刻）**：现在块只在**下一个时隙开始**时关（"上一槽的样点都到了、变换都编码了"）⇒ 一槽一批。
    **C2 = 把关块/派发/交棒的触发从"下一槽"改成"已到样点的最后一组"**（收包侧已经知道 `position.nof_symbols`）。
+   ⇒ **更正（2026-09-26）**：关块的真实触发器是 `ofdm_demodulator_impl.cpp::finish_symbol()` 第 486 行的 `last_symbol_of_slot`
+   （**本槽最后一个符号**），`set_lane_slot()` 的 `end_block()` 只是兜底 ⇒ **字面上的 C2 已是现状**；
+   "每个收包组边界关块"要多一条 cb/跳（`cbs/lane` 2.00→3.00，**触 V4**）而只买到前端 ~5 µs 的执行前移。**详见 §6.71③。**
 3. ★ **网格锚定（约束③ / H1/H3）**：**样点落进网格哪一行，必须仍按时间戳/时隙相位**，不能按 `rx_fill` 累加；具体是 1220–1240 的"退役并重开"路径**必须重锚到时隙的第一个符号**（它现在在新边界重开，而那个边界未必是符号 0）。
    **C3 = 修这条路径的相位锚定。** 只要 C1/C2 不碰 `rx_offset`/`rx_fill` 的**装填语义**、C3 把相位钉住，`p41` 那种"整槽按符号旋转"就不会重现。
 
@@ -5379,6 +5512,8 @@ i_symbol    = i_symbol_sf % nof_symbols_per_slot;
 `max_phase_blocks` 只是把它界在"至多一块"上；若符号级路径让流**周期性失去符号对齐**，这些被丢弃的样点是**网格里的洞**，
 而**`gaps` 数的是电台的连续性、看不见它们** ⇒ 质量塌陷 + 零丢样 + 契约绿，全部吻合。
 **判别读数**：`process_alignment` / `max_phase_blocks` 的触发计数（若不存在，需要加一个；这是 `p41` 那一族的复现判据）。
+⇒ **⚠ 已被证伪为不必要（2026-09-26，§6.71②）**：`p41` 上 `[ul_host] symbols = [ul_rx] samples / 822.857 − 411`（0.0028%）⇒ **一个符号也没丢**；
+且两处 `++nof_phase_blocks` 被 `max_phase_blocks = 2` 夹死 ⇒ 计数器只可能读 0/1/2。**免费判据 = `[ul_host] symbols` vs `[ul_rx] samples/822.857`。**
 
 **★ C1 已落地（2026-09-25，本会话）**：`ofdm_demodulator_impl.h` 的 `block_batching_enabled()` 去掉了 `OCUDU_UL_RX_SYMBOLS` 那条 `return`，改为**恒允许成批**（带注释说明"那条 return 就是 `p41` 的 `batched=0/0`/`released=0` 的成因，而**延迟回退来自批量化被关，不是来自更小的收包块**"）。
 * **验证性质**：**开关未设时它是逐字等价的重构**（旧表达式此时恒为 true）⇒ 默认路零行为变化；
@@ -5407,8 +5542,9 @@ i_symbol    = i_symbol_sf % nof_symbols_per_slot;
 | **Q5** | residency 里的 busy 是**必要工作**还是**低效执行**（占用率/线程组配置）？ | **开放**，依赖 Q1；另有已知的贵项（K1 197 µs/跳、抽取 117、重排 117）被"逐字节不变"钉住。⚠ **"~95% busy" 已作废**：n1 默认腿配对后 **0.643**、n78 加压腿 0.93，比值逐腿读（§6.3 ⑥）|
 | **Q6** | 把 `max_pusch_and_srs_concurrency` 改变能否把 `ce` 的排队项吃掉？代价是什么？ | ✅ **已回答（P1-8，§7.5）**：能（−58~64×），代价是那次 **5 秒收包停顿**（两次复现）⇒ 交付前必须查清 |
 | **Q7** | 符号级收包（S-7g-13）在**负载下**对**跨度**的效果？ | **开放，且已成为唯一还有量级差的项**：§6.65③ 量出 `merged_hop` 533.7 µs 里 **~464 µs 是"等本槽样点到达"（零算力）**，与 §3.4 的 A 项 ≈473 µs 独立吻合；**只有它能动这一段**。⚠ 触 V4（提交数），需用户裁决，且其代码注释写明时延收益目前无法判读 |
-| **Q21**（`p41` 新增）| **为什么符号级收包（`OCUDU_UL_RX_SYMBOLS=1`）把 UL 的 MCS 打到最低**（TBS ~200 bit、吞吐 ↓17×）？ | **开放**：电台干净（`gaps=0`/`rx_overflows=0`/`rx_lates=0`）、契约 8/8、池绿 ⇒ **不是丢样**。候选：宿主被 20× 的接收调用打满（`[ul_rx] calls` 743k→14.8M、`recv over 1ms=18`、`load1=7.64`）、逐符号的 UL 时序/网格装配参考、或接收策略与 PUSCH 窗口的对齐。**它是"结构项能不能做"的前提**（§6.71）|
+| **Q21**（`p41` 新增）| **为什么符号级收包（`OCUDU_UL_RX_SYMBOLS=1`）把 UL 的 MCS 打到最低**（TBS ~200 bit、吞吐 ↓17×）？ | ★ **已收口（2026-09-26，§6.71①）**：**不是丢符号**（`[ul_host] symbols` = 期望值 − 0.0028%，§6.71②；memo §3.1 的 H4 计数因此作废），**也不是接收线程被堵**。机制读数：**前端每符号一条命令缓冲**（`dft slots/cbs = 178,407/2,497,686` = **14.0/槽**，`p42` 是 0.39/槽）+ **`[ul_dft_wait]` 中位 577.6 µs**（`p42` 无样本）⇒ 前端抢不到车道 ⇒ 跳变慢 ⇒ **每跳 TB 塌 15× 而 CRC-OK *比率*不变**（是调度器的块变小，不是解码质量塌）。成因是 `block_batching_enabled()` 那条 `return`（**C1 已删**）⇒ **验收腿 = `p43-n78-halfslot`**（§6.71⑤）|
 | **Q22**（`p41` 新增）| **V4 的判据看不见"整跳提交数"**：`cbs/lane` 只数车道自己的提交（`p41` 仍是 2.00），而该腿的**前端提交从 ~1/跳 爆到 20.5/跳** | **判据缺口**：V4 的精神是"不许用提交数换时延"，需要一条**整跳**提交读数（`dft commits` + `cbs/lane` 的合计，或直接在腿启动/收尾打印合计）。⚠ 改判据要**先登记再改**（§5.2 第 2 条）|
+| **Q23**（本会话新增）| ★ **`merged_hop` 的 541.8 µs 窗口里那 ~500 µs 到底是什么**（离线已证明一跳真执行只有 ~67 µs，§6.71④）？| **开放，但两个候选已可用一条读数分开**：(i) **车道被 DL/同伴瓜分**（`busy(union) ≈ window`）；(ii) **cb 内部的 fence 等待**（出现大量 hole；burst 的 cb 只有 stage fence 与 grid-ready 两种 cb 级等待，而 `Q9-F` 只证明 signaller 先**提交**）。**判据读数 = `p43` 上的 `OCUDU_METAL_GPU_TIME=1`**（`[metal_stats] queue occupancy (Q9-F3)` + `gpu busy (…)`；**所有 n78 腿到 `p42` 都是关的**，只有 n1 的 `p15` 给过 `busy(union)/window = 33%`、最大 hole 秒级）⇒ 若坐实 (ii)，再补一条 **并发 1 的对照臂**把"同伴占用"从残差里分出来（§7.6.0d 的候选 (a)）|
 | **Q19**（会话 #6 新增）| 腿 `p39`/`p40` 的**配对 V1 增量 −21.5 µs** 该记为"每次派发 10–14 µs"吗？ | **归因开放**（增量本身成立）：四个方向全量过——GPU 执行 1.5–13.2 µs、派发地板 1.3–1.4、四种边界 ≤0.3、宿主 encode 1.3–1.6（§6.65–§6.67）⇒ 加起来只有 ~3.5–5 µs。**预算一律用 §6.66③ 的 ≈5–20 µs**，不要用 10–14/派发。要坐实需**能看见并发/别的 lane**的仪器（lane 级 GPU 时间戳或 §6.24 的 P0 dump）|
 | **Q20**（会话 #6 新增）| 均衡 / 解映射的**算力**是多少（`merged_hop` 里除了 CE 38 µs 与 A 项 464 µs 的其余部分）？ | ✅ **已收口（§6.69）**：`equalize_mxn` 1.40–1.61 µs、`demod_soft` 1.25–1.37 µs（156→2184 RE，**与 RE 数几乎无关**，贴着 1.3–1.4 µs 派发地板）⇒ 两段合计 **≈2.8 µs/跳**。**一跳全部算力 ≈51 µs（~10%）** ⇒ "重写 kernel"这条杠杆死了；⚠ 附带一个仪器陷阱：两引擎用 `dispatchThreads`（非均匀），塞进 threadgroups 计时器会读出 **256 倍**大的假值 |
 | **Q11**（重申）| `value_net` 归档基线陈旧、`ab_dumps` arm1 改前就红 | 仍待用户裁决（§6.5⑤）；会话 #6 又遇到一次同类偶发（§6.62③：旧 y 路臂首读 4546 字节、重跑与隔离复跑均 0）|
