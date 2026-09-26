@@ -368,21 +368,31 @@ check "the 3 formerly-mislabelled PHY tests are inside -L phy" "3" \
       "$([ "$n" = "3" ] && echo PASS || echo FAIL)" \
       "du_low_phy_pipeline_test / baseband_gateway_buffer_metal_smoke_test / pusch_processor_benchmark: $n of 3"
 
+# Judged by the NAMES the runner prints, not by a total: the totals are dynamic (pitfall 28 - this
+# script's own lesson) and the origin/main merge moved both of them (6->7 and 528->576 on 2026-09-26),
+# which made two green test binaries read FAIL. What must never happen is a FAILED case, and that is
+# what `[  FAILED  ]` says.
 ./build/tests/unittests/support/executors/ul_pipeline_probe_test >"$T/probe" 2>&1
-pl=$(grep -E "PASSED" "$T/probe" | tail -1)
-check "ul_pipeline_probe_test: 6/6" "6" \
-      "$(echo "$pl" | grep -q "6 tests" && echo PASS || echo "$([ -z "$pl" ] && echo RED || echo FAIL)")" "${pl:-<unreadable>}"
+pl=$(grep -E "PASSED|FAILED" "$T/probe" | tail -1)
+ppassed=$(grep -cE "^\[  PASSED  \]" "$T/probe")
+pfailed=$(grep -cE "^\[  FAILED  \]" "$T/probe")
+check "ul_pipeline_probe_test: a PASSED line and no FAILED case" "passed >= 1 / failed = 0" \
+      "$([ "$ppassed" -ge 1 ] && [ "$pfailed" -eq 0 ] && echo PASS || echo "$([ "$ppassed" -eq 0 ] && echo RED || echo FAIL)")" \
+      "${pl:-<unreadable>}"
 
 ./build/tests/unittests/phy/lower/lower_phy_test >"$T/lp" 2>&1
-ll=$(grep -E "PASSED" "$T/lp" | tail -1)
-check "lower_phy_test: 528/528" "528" \
-      "$(echo "$ll" | grep -q "528 tests" && echo PASS || echo "$([ -z "$ll" ] && echo RED || echo FAIL)")" "${ll:-<unreadable>}"
+ll=$(grep -E "PASSED|FAILED" "$T/lp" | tail -1)
+lpassed=$(grep -cE "^\[  PASSED  \]" "$T/lp")
+lfailed=$(grep -cE "^\[  FAILED  \]" "$T/lp")
+check "lower_phy_test: a PASSED line and no FAILED case" "passed >= 1 / failed = 0" \
+      "$([ "$lpassed" -ge 1 ] && [ "$lfailed" -eq 0 ] && echo PASS || echo "$([ "$lpassed" -eq 0 ] && echo RED || echo FAIL)")" \
+      "${ll:-<unreadable>}"
 
 check_rerun "port_channel_estimator_metal_mmse_unit_test (6.5 flake rule: rerun once if red)" \
             ./build/lib/phy/upper/signal_processors/channel_estimator/metal/port_channel_estimator_metal_mmse_unit_test
 
 # ---------------------------------------------------------------- 5. the newest DEFAULT leg: NAMES, then numbers
-NAMES="radio sample continuity|dft radio inputs|zero-copy wraps|ce device estimates|host device data crossings|cfo compensation|baseband metrics|host sample assembly"
+NAMES="radio sample continuity|dft radio inputs|zero-copy wraps|lane host participation|ce device estimates|host device data crossings|cfo compensation|baseband metrics|host sample assembly"
 got=0
 # An ARRAY, not `for n in $(echo ... | tr '|' '\n')`: the names contain spaces and command
 # substitution splits on every IFS character, so the newline trick still yields words - the check
@@ -398,12 +408,12 @@ if [ -n "${LEGF:-}" ] && [ -f "$LEGF" ]; then
   for n in "${NAMEARR[@]}"; do
     grep -qF "]   $n:" "$LEGF" && got=$((got+1))
   done
-  check "leg $LEG: the 8 contract NAMES are all present (pitfall 28: names, not the number)" "8" \
-        "$([ "$got" = "8" ] && echo PASS || echo FAIL)" "found $got of 8 in $(basename "$LEGF")"
+  check "leg $LEG: the 9 contract NAMES are all present (pitfall 28: names, not the number)" "9" \
+        "$([ "$got" = "9" ] && echo PASS || echo FAIL)" "found $got of 9 in $(basename "$LEGF")"
 
   ml=$(grep -aE "contract MET" "$LEGF" | tail -1)
-  check "leg $LEG: contract MET (8 of 8) and mode=gpu" "MET (8 of 8" \
-        "$(echo "$ml" | grep -q "MET (8 of 8" && grep -q "contract (mode=gpu)" "$LEGF" && echo PASS || echo "$([ -z "$ml" ] && echo RED || echo FAIL)")" \
+  check "leg $LEG: contract MET (9 of 9) and mode=gpu" "MET (9 of 9" \
+        "$(echo "$ml" | grep -q "MET (9 of 9" && grep -q "contract (mode=gpu)" "$LEGF" && echo PASS || echo "$([ -z "$ml" ] && echo RED || echo FAIL)")" \
         "${ml:-<unreadable>}"
 
   xl=$(grep -aE "= [0-9.]+ read\(s\)" "$LEGF" | tail -1)
@@ -419,7 +429,7 @@ if [ -n "${LEGF:-}" ] && [ -f "$LEGF" ]; then
   check "leg $LEG: stale = 0" "stale=0" \
         "$(echo "$sl" | grep -q "stale=0" && echo PASS || echo "$([ -z "$sl" ] && echo RED || echo FAIL)")" "${sl:-<unreadable>}"
 else
-  check "leg ${LEG:-<none>}: readable shutdown report (DEFAULT regime)" "8 names / 8 of 8 / 0.00+0.00" RED \
+  check "leg ${LEG:-<none>}: readable shutdown report (DEFAULT regime)" "9 names / 9 of 9 / 0.00+0.00" RED \
         "no DEFAULT-regime leg matched '${LEG:-<none>}' in $(basename "$LOGDIR") - a stress leg cannot stand in for one (5.9.127 R4)"
 fi
 
@@ -440,12 +450,12 @@ if [ -n "${SF:-}" ] && [ -f "$SF" ]; then
   leg_commit_check "$STRESSLEG" "$SF" "stress"
   sgot=0
   for n in "${NAMEARR[@]}"; do grep -qF "]   $n:" "$SF" && sgot=$((sgot+1)); done
-  check "stress leg $STRESSLEG: the 8 contract NAMES are all present" "8" \
+  check "stress leg $STRESSLEG: the 9 contract NAMES are all present" "9" \
         "$([ "$sgot" = "8" ] && echo PASS || echo FAIL)" "found $sgot of 8 in $(basename "$SF")"
 
   sml=$(grep -aE "contract MET" "$SF" | tail -1)
-  check "stress leg $STRESSLEG: contract MET (8 of 8) and mode=gpu" "MET (8 of 8" \
-        "$(echo "$sml" | grep -q "MET (8 of 8" && grep -q "contract (mode=gpu)" "$SF" && echo PASS || echo "$([ -z "$sml" ] && echo RED || echo FAIL)")" \
+  check "stress leg $STRESSLEG: contract MET (9 of 9) and mode=gpu" "MET (9 of 9" \
+        "$(echo "$sml" | grep -q "MET (9 of 9" && grep -q "contract (mode=gpu)" "$SF" && echo PASS || echo "$([ -z "$sml" ] && echo RED || echo FAIL)")" \
         "${sml:-<unreadable>}"
 
   sxl=$(grep -aE "= [0-9.]+ read\(s\)" "$SF" | tail -1)
@@ -464,7 +474,7 @@ if [ -n "${SF:-}" ] && [ -f "$SF" ]; then
         "reported; V1-V5 is the latency workstream's criterion" INFO \
         "${ssl:-stale <unreadable>}${spl:+  ||  $spl}"
 elif [ -n "$STRESSLEG" ]; then
-  check "stress leg $STRESSLEG: readable shutdown report" "8 names / MET / 0.00+0.00 / gaps=0" RED "no .log.stderr matched '$STRESSLEG'"
+  check "stress leg $STRESSLEG: readable shutdown report" "9 names / MET / 0.00+0.00 / gaps=0" RED "no .log.stderr matched '$STRESSLEG'"
 fi
 
 stage run "the two legs' criteria and the A1-2 attribution gate"

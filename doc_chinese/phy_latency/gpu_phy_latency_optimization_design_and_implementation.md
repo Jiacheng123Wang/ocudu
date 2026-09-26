@@ -6640,6 +6640,102 @@ cmake --build build --target ldpc_metal_bler_test -j 8
 1. **把"空口 vs 离线"的差额做成可判的实验**（当前唯一的大项）：离线同结构（2 cb/跳、4 派发）≈150 µs，空口 510–570 µs ⇒ 需要用 §6.90 的分支 A/B 那类**只改一个变量**的臂继续逼近（已排除：算力、栅栏、队列、宿主、融合、块大小、空闲态）。
 2. **若用户要把 G1 链条补齐**：先做 **in-lane LDPC 的离线原型**（`ul_chain_replay --metal`：读 LLR 网格 → 解码 → 只回 TB），用**单派发**形态，并用本节的 harness 顺手量它的边际（同 cb 内 +1 派发的价格）。
 3. **不要**飞 `dec_type=metal` 的腿（结论已由本节的 6 个臂钉死）；也不要按初稿的 H5 去"减少提交数"——那条假设已撤回。
+4. ⏸ **用户裁定（2026-09-26）：LDPC 是一个大项，先不动，需要单独规划**。本节到此为止：**没有改一行数据路径代码**，只做了核查与定价；
+   重启入口 = 本节 ③ 的形态要求（lane 内、设备直读 LLR 网格、派发最少的内核）+ ④.3 的离线原型。
+
+
+### 6.100 ★★★ IQ→LLR **收口核查**：第一次把 `milestone_audit.sh` 跑在当前树上——20 PASS / 5 FAIL / 0 RED，五条 FAIL 的定性（2026-09-26，离线）
+
+用户裁定（原文）：**"我们需要先把从IQ到LLR做好并收口，再开始新的项目"**。于是把"收口"变成可执行的清单：跑权威验收脚本，逐条定性。
+
+#### ① 命令与结果
+
+```bash
+bash doc_chinese/phy_pipeline_gpu/wip/milestone_audit.sh --leg p53-n78-tailmark --quick
+bash doc_chinese/phy_pipeline_gpu/wip/a12_attribution_gate.sh p53-n78-tailmark
+bash doc_chinese/phy_latency/wip/p0_gate.sh p53-n78-tailmark        # 29 of 29
+```
+
+| 时刻 | PASS / FAIL / RED |
+|---|---|
+| 第一次（原样）| **17 / 8 / 0** |
+| 修掉 3 条"脚本字面量过期"之后 | **20 / 5 / 0** |
+
+**修掉的三条（都是脚本自己的期望值过期，不是代码问题）**：
+* 契约条数：8 → **9**（§6.96 新增 `lane host participation`）。原判据 grep 字面量 `MET (8 of 8` ⇒ 新腿反而判红。现改为**按名字**要求 9 个检查名都在、且 `MET (n of n)` 正则匹配（`milestone_audit.sh` 与 `a12_attribution_gate.sh` 同步改；A1-2 门随即 **5 of 5**）。
+* `ul_pipeline_probe_test` 6 → **7** 个用例、`lower_phy_test` 528 → **576**（`origin/main` 合并带进来的用例；两者都是"全绿"）。**改法不是改数字，而是改判据**：要求有 `[  PASSED  ]` 且**没有** `[  FAILED  ]` 用例——这正是本脚本自己的第 28 条教训（"数字是动态的，按名字判"）。
+
+#### ② 剩下五条 FAIL 的定性
+
+| # | FAIL | 定性 | 处置 |
+|---|---|---|---|
+| 1 | `value_net.py` **183 problems** | **真问题，但不在链上**（见 ③）| **需要用户裁决**（Q11 升级）|
+| 2 | `ab_dumps` arm1（159068 字节差）| **已知偶发**（脚本自带 flake 规则："with no code change"）| 记录，不算收口项 |
+| 3 | `default leg p53: the commit it ran, vs HEAD` | 腿跑在 `f52d55ba0b`，HEAD 已前进（§6.96/§6.99 的探针提交）| **飞一条当前 HEAD 的收口腿** |
+| 4 | `stress leg p52: the commit it ran, vs HEAD` | 同上（p52 跑在 `98434ac4ea`）| **飞一条当前 HEAD 的加压收口腿** |
+| 5 | `stress leg p52: contract MET (9 of 9)` | p52 早于第 9 条检查 ⇒ 它**没有测过**那一条 | 同 #4（新腿自然读到 9/9）|
+
+⇒ **收口只剩两件实事**：**(A)** 搞清 `value_net`；**(B)** 在冻结的 HEAD 上飞一对（default + stress）收口腿。
+
+#### ③ ★ `value_net` 的 183 条：**归档基线跟的是 CPU 链，而 replayer 的 Metal 臂跑在"回退路线"上**
+
+三方差值（同一捕获、同一 HEAD）：
+
+| 捕获 | 归档基线 | `--cpu` 臂 | `--metal` 臂 |
+|---|---|---|---|
+| `syn001_3` | noise_var **0.1298**、rsrp 0.0163、ta −0.0392、cfo `na` | noise_var **0.1328**、rsrp 0.0342、ta −0.0381、cfo −941.9 | noise_var **13.00**、rsrp **12.40**、ta +0.0015、cfo `na` |
+| `syn022_18` | 0.1252 / 0.0063 / −0.585 / `na` | 0.1280 / 0.0219 / −0.582 / −1185.3 | **20.35 / 20.26 / +0.266 / `na`** |
+| `epre` | 1.3536 | 1.3536 | **1.3536（三者完全一致）** |
+
+* **归档 ≈ CPU 链**（同量级、同符号；差异来自 CPU 路自己的历史改动）⇒ 归档**不是**"随便一个旧版本"，它就是 CPU 参考；
+* **Metal 臂偏 20–100 倍**（`rsrp 0.0063 → 20.26`、`noise_var 0.125 → 20.35`）——正是本网存在的理由（P5 类"数量级"签名）；
+* **但机制不在链上，在 harness 里**：同一次 replay 的计数器写着
+  `lse_applies=1  refusals=y_direct_no_source=16`（**94% 的跳走了回退路线**），
+  而**空口**同一条读数是 `lse_applies=145291  refusals=y_direct_no_source=4`（**0.003%**）。
+  ⇒ `ul_chain_replay` 的整链模式不产生"设备侧导频源"，CE 因此拒绝 K2 直读并回退；**空口几乎从不走那条路**。
+  旁证：**比较设备 CE 与 CPU 的单元测试（`port_channel_estimator_metal_mmse_unit_test`）在同一棵树上 PASS**，
+  说明**出厂路径的 h/rsrp/noise 是被验证过的**，偏 100 倍的是 replay 的回退路线。
+* ⇒ **Q11 的旧说法（"183 条全是归档基线陈旧"）被更正为**：**"183 条 = 归档跟 CPU 链 + replay 的 Metal 臂落在回退路线"**，
+  两者不可比；**并且顺带暴露一个值得记账的边角**：空口上仍有 **4/145295** 跳走这条回退路线，而它在 replay 里算出的 h/rsrp 差 20–100 倍
+  ——这 4 跳的后果（那几跳的解调质量）目前**没有仪器**，属于"已知、罕见、未量化"。
+
+#### ④ 收口的账（冻结范围 = **IQ → LLR**）
+
+| 判据 | 状态 | 证据 |
+|---|---|---|
+| V1 `[ul_gpu_pipeline]` ≤ 2150 µs | ✅ 最好 1364.2；交付带 1366.8–1392.4 | `p39`/`p42`/`p43`/`p45`/`p49` |
+| V2 池压力 | ✅ `starved_events=0`、`held_max 9–18 < 32` | `p42`+ |
+| V3 电台 | ⏸ **用户已裁定另案暂停**（RF 是逐腿天气，宿主只解释 ~4%）| §6.40–§6.43 |
+| V4 提交数 | ✅ `cbs/lane=2.00 (max=2)`、`dropped=0` | 全场 |
+| V5 不回归 | ✅ 契约 **9/9**、`crossings 0.00+0.00`、`gaps=0`、`p0_gate` **29/29** | `p53` |
+| **G1**（全程 GPU、零拷贝、宿主不搬数据）| ✅ `host sample assembly 0 copied`、`ce device estimates host=0`、`wrap_copies=0` | `p53` 契约 |
+| **G2**（入口一次性参与）| ✅ **94.0 µs/跳**（头 47.2 + 尾 46.8）、覆盖 100%、`[ul_dft_wait]` 空、`gpu_wait=0` | §6.97 `p53` |
+| 未归属项 | ⚠ 一跳窗口 ~450–570 µs（平台/空口固有，四次从宿主/融合/队列/栅栏/算力上摘掉）| §6.88/§6.90/§6.94/§6.97 |
+| **范围外（冻结）** | ⏸ LDPC→Metal/链条延长（§6.98，**用户裁定单独规划**）、S-E 结构（最后选项）、V3 | —— |
+
+**收口需要的两条腿**（冻结 HEAD 上，判据同上表）：
+
+```bash
+# (1) default 收口腿（判 V1/V2/V4/V5 + G1/G2 + 契约 9/9 + 新的 per-label 表）
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p54-n78-close \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2 \
+  OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1
+# (2) stress 收口腿（同配方 + 负载发生器，判加压工况下的同一组性质）
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
+  bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p55-n78-close-stress --regime=stress \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2 \
+  OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1
+```
+
+跑完 `milestone_audit.sh --leg p54-n78-close --stress-leg p55-n78-close-stress`（去掉 `--quick` 是完整版）。
+
+#### ⑤ 待用户裁决（两条，都在收口路径上）
+
+* **Q11（升级版）**：`value_net` 怎么处理？——**(a)** 修 harness 让 Metal 臂走设备侧导频源（`lse_applies` 覆盖整条腿）后**重建基线**；
+  **(b)** 把该网从里程碑判据里**退役**并说明（用 CE 单元测试 + 空口证据替代）；**(c)** 保持红并在收口记录里解释（最弱）。
+  **我的建议：(a)**，因为它是唯一能看"数量级级值缺陷"的网（P0/P5 两次都是它抓到的），退役等于自断这一路。
+* **未归属的 ~450–570 µs**：是否**允许带着它收口**（记为"平台/空口固有、已四次摘除宿主，待独立项目"）？
 
 
 ## 7. 杠杆与候选改动（技术账）

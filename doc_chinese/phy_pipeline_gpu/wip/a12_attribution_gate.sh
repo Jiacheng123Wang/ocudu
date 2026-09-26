@@ -14,7 +14,8 @@
 #   C2  plain_without_lane_slot <= plain_without_block                    (it is a subset of it)
 #   C3  plain_block == 0 AND plain_no_slot/plain_none >= 0.999            (the third branch's prediction)
 #   C4  plain == 12*round(T/10ms) + 1, +-1 occasion                       (PRACH B4, index 159: 12/10ms)
-#   C5  the leg is valid at all: contract 8/8 mode=gpu, stale=0, crossings 0.00+0.00
+#   C5  the leg is valid at all: contract MET mode=gpu, stale=0, crossings 0.00+0.00
+#       (the count is dynamic - it was 8 before the lane-host-participation check landed on 2026-09-26)
 # "Cannot read" is RED, never absent - the lesson of 5.9.97 (a hard gate printed "None" and looked
 # exactly like a pass).
 #
@@ -67,7 +68,7 @@ if [ "$SELF_TEST" = 1 ]; then
       printf '   host device data crossings: 0 host read(s) (0 bytes) and 0 host write(s) (0 bytes) of device data over 9505 device hop(s) = 0.00 read(s) + 0.00 write(s) per hop\n'
       printf '   host sample assembly: 2598400 of 2598400 symbols read where the radio put them, 0 copied into a symbol buffer (mode=gpu) -> OK\n'
       printf '   radio sample continuity: 0 gaps over 185612 blocks (0 samples missing or repeated), 0 timestamp-0 blocks -> OK\n'
-      printf '   dft radio inputs: OK\ncontract (mode=gpu):\ncontract MET (8 of 8 checks applicable)\n'
+      printf '   dft radio inputs: OK\ncontract (mode=gpu):\ncontract MET (9 of 9 checks applicable)\n'
       printf '[ul_pipeline] stale=0\n'
       # The GEOMETRY PREMISE C4 needs (see the header): the registered n78 config, and PRACH actually on
       # the engine (commits > 1, i.e. more than the warm-up). Without these the gate must NOT judge C4 -
@@ -204,9 +205,9 @@ gaps     = f(err_txt, r"radio sample continuity: (\d+) gaps")
 # In the STRESS regime the stale condition is dropped, not relaxed: 5.9.127's R4 pre-registers
 # `stale > 0` as the expectation under load, so requiring 0 here would contradict the registration.
 stale_ok = (stale == "0") if regime == "default" else (stale is not None)
-check("C5 leg valid: contract 8/8 mode=gpu, crossings 0.00+0.00, 0 gaps"
+check("C5 leg valid: contract MET mode=gpu, crossings 0.00+0.00, 0 gaps"
       + (", stale=0" if regime == "default" else f"  [stress regime: stale={stale} is expected, 5.9.127 R4]"),
-      (contract is not None and contract.startswith("MET (8 of 8") and mode == "gpu"
+      (contract is not None and re.match(r"MET \([0-9]+ of [0-9]+", contract) is not None and mode == "gpu"
        and stale_ok and cross == ("0.00", "0.00") and gaps == "0"),
       f"{contract} mode={mode} stale={stale} crossings={cross} gaps={gaps}")
 
