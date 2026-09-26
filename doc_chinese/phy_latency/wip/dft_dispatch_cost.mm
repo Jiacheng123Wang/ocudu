@@ -122,6 +122,11 @@ struct arm_result {
   double per_transform_us = 0.0;
 };
 
+/// \param fresh_wrap When set, a NEW MTLBuffer object is created over \p wrap_region before every
+///        measured run and dropped after it - the shape of a per-hop re-wrap of the radio's samples,
+///        which the legs show happening ~1.7 times per hop (wrap creates=244k, purges=265k). Creating
+///        the object once and reusing it, as every other arm here does, is the shape the engine has when
+///        its cache HITS.
 arm_result run_arm(id<MTLCommandQueue>          queue,
                    id<MTLComputePipelineState>  pipeline,
                    id<MTLBuffer>                in,
@@ -134,13 +139,35 @@ arm_result run_arm(id<MTLCommandQueue>          queue,
                    id<MTLBuffer>                gw,
                    id<MTLBuffer>                ip,
                    unsigned                     groups_per_dispatch,
-                   unsigned                     nof_dispatches)
+                   unsigned                     nof_dispatches,
+                   void*                        wrap_region   = nullptr,
+                   size_t                       wrap_len      = 0,
+                   bool                         fresh_wrap    = false,
+                   unsigned                     open_hold_us  = 0,
+                   bool                         commit_off_thread = false)
 {
   std::vector<double> windows;
   windows.reserve(nof_runs);
   for (unsigned run = 0; run != nof_runs + nof_warmup; ++run) {
+    id<MTLBuffer> bound_in16 = in16;
+    if (fresh_wrap && (wrap_region != nullptr)) {
+      // A fresh OBJECT over the SAME pages: what a re-wrap does (newBufferWithBytesNoCopy, no copy).
+      bound_in16 = [queue.device newBufferWithBytesNoCopy:wrap_region
+                                             length:wrap_len
+                                            options:MTLResourceStorageModeShared
+                                        deallocator:nil];
+      if (bound_in16 == nil) {
+        std::printf("fresh wrap refused\n");
+        break;
+      }
+    }
     id<MTLCommandBuffer>         cb  = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    if (open_hold_us != 0) {
+      // The front end's block is opened at the slot's FIRST symbol and released at its last one, so the
+      // encoder is open for about a slot before the commit (see ofdm_demodulator_impl::finish_symbol).
+      std::this_thread::sleep_for(std::chrono::microseconds(open_hold_us));
+    }
     [enc setComputePipelineState:pipeline];
     [enc setBuffer:in offset:0 atIndex:0];
     [enc setBuffer:out offset:0 atIndex:1];
@@ -158,15 +185,24 @@ arm_result run_arm(id<MTLCommandQueue>          queue,
     [enc setBuffer:grid offset:0 atIndex:8];
     [enc setBuffer:window offset:0 atIndex:9];
     [enc setBuffer:gw offset:0 atIndex:10];
-    [enc setBuffer:in16 offset:0 atIndex:11];
+    [enc setBuffer:bound_in16 offset:0 atIndex:11];
     [enc setBuffer:ip offset:0 atIndex:12];
     for (unsigned d = 0; d != nof_dispatches; ++d) {
       [enc dispatchThreadgroups:MTLSizeMake(groups_per_dispatch, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(std::min<unsigned>(fft_n, 1024u), 1, 1)];
     }
     [enc endEncoding];
-    [cb commit];
-    [cb waitUntilCompleted];
+    if (commit_off_thread) {
+      // The hand-over commits the block on the LANE's thread - the encoder ran on the receiving one.
+      std::thread committer([&]() {
+        [cb commit];
+        [cb waitUntilCompleted];
+      });
+      committer.join();
+    } else {
+      [cb commit];
+      [cb waitUntilCompleted];
+    }
     const double start = cb.GPUStartTime;
     const double end   = cb.GPUEndTime;
     if ((run >= nof_warmup) && (end > start)) {
@@ -319,6 +355,59 @@ int main()
   std::printf("\n--- contention: the same batched arm while ANOTHER queue is busy ---\n");
   report("14 in 1 dispatch, 8 background cbs", 14, 1, true, true, 8);
   report("14 in 1 dispatch, 32 background cbs", 14, 1, true, true, 32);
+
+  // --- two code-shape differences that only air has (both need no new mechanism, only an order) ----
+  std::printf("\n--- shape: the front end's encoder is open for a slot, and the lane commits it ---\n");
+  fill_tables(14, true, true);
+  {
+    const arm_result plain = run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1);
+    const arm_result held =
+        run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1, nullptr, 0, false, 500, false);
+    const arm_result other =
+        run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1, nullptr, 0, false, 0, true);
+    const arm_result both =
+        run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, in16, gw, ip, 14, 1, nullptr, 0, false, 500, true);
+    std::printf("%-52s window=%9.1fus\n", "encode+commit immediately (the harness default)", plain.window_us);
+    std::printf("%-52s window=%9.1fus\n", "encoder open 500us before the commit", held.window_us);
+    std::printf("%-52s window=%9.1fus\n", "committed from ANOTHER thread (the lane)", other.window_us);
+    std::printf("%-52s window=%9.1fus\n", "both (open a slot, committed by the lane)", both.window_us);
+  }
+
+  // --- fresh wrap per run: a NEW MTLBuffer object over the SAME radio pages -----------------------
+  //
+  // The legs show the engine re-wrapping the radio's samples ~1.7 times per hop (244k creates against
+  // 3.8M hits, 265k purges), i.e. a new MTLBuffer object over pages the device has already seen. Every
+  // other arm here creates its buffers ONCE and reuses them. If the device charges for meeting a new
+  // object over old pages, this arm is where the air front end's ~452us comes from - and it would also
+  // explain why 6.79's staging arm (fourteen FRESH buffers a slot) came out at 1005us.
+  std::printf("\n--- fresh wrap per run: new MTLBuffer object over the same pages ---\n");
+  {
+    const size_t page = 16384;
+    void*        raw  = nullptr;
+    if (posix_memalign(&raw, page, 1u << 20) == 0) {
+      auto* samples = static_cast<int16_t*>(raw);
+      for (size_t k = 0; k != (1u << 19); ++k) {
+        samples[k] = static_cast<int16_t>((k % 251) - 125);
+      }
+      id<MTLBuffer> once = [device newBufferWithBytesNoCopy:raw
+                                                     length:(1u << 20)
+                                                    options:MTLResourceStorageModeShared
+                                                deallocator:nil];
+      fill_tables(14, true, true);
+      const arm_result reuse =
+          run_arm(queue, pipeline, in, out, twiddle, perm, grid, window, once, gw, ip, 14, 1);
+      const arm_result fresh = run_arm(
+          queue, pipeline, in, out, twiddle, perm, grid, window, once, gw, ip, 14, 1, raw, 1u << 20, true);
+      std::printf("%-52s window=%9.1fus  per-transform=%7.1fus\n",
+                  "14 in 1 dispatch, wrap created ONCE and reused",
+                  reuse.window_us,
+                  reuse.per_transform_us);
+      std::printf("%-52s window=%9.1fus  per-transform=%7.1fus\n",
+                  "14 in 1 dispatch, FRESH wrap object per run",
+                  fresh.window_us,
+                  fresh.per_transform_us);
+    }
+  }
 
   // --- the last difference between this harness and air: the input is a LIVE page mapping ---------
   //
