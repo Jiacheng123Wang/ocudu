@@ -5131,6 +5131,23 @@ S-C 是 S-B 的顺带收益；**S-D/S-E 都要用户裁决**（V4）。
 (c) **跨度 > HARQ 截止**（`stale` 那一族，8 ms 门限）。
 ⇒ 今天三者余量都 ≥3×，所以"链 > 时隙"只表现为 **cbs/队列的一点排队**，不表现为断流。
 
+#### 7.6.0b ★ 单车道优化的第一步（拆那 ~830 µs）**卡在尺子上**：五段宿主/队列分段在交付路是"no samples"
+
+**要拆的量**：V1 1364.2 − `merged_hop` 533.7 = **~830 µs** 不在本跳的设备窗口里。要拆它，需要 `[ul_gpu_lane]` 的五段：
+`gap: stage entry -> extraction commit (host)`、`queue: burst commit -> burst start`、`host: extraction commit -> weights commit`、
+`host: weights commit -> burst commit`、`gap: commit -> first command buffer starts (queue)`。
+
+**现状**：这五段在 `p37`–`p41` 上**全部打印 "no samples"**（`ocudu_metal_lane_probe.mm` 的 `print_series(..., "no samples")`）。
+读码：分段本身存在（`ocudu_metal_lane_clock.h` 的 `handover_us` / `host_to_weights_us` / `host_to_burst_us`，以及 probe 的 `queue_to_burst`），
+**缺的是给它们打点的调用**：`mark_stage_entry()`（由 adapter 带 slot 调）与 weights/burst 那两个 commit 的 mark。
+（`mark_extraction_commit()` 本身是在引擎里被调的：`ocudu_metal_mmse_engine.mm` 1126/1200/1227/1259。）
+
+⇒ **第一步的施工内容 = 把缺的 mark 打上**（小、局部、可用离线 replay 自证"有数"），然后才有尺子去判"单车道那 ~830 µs 归谁"。
+⚠ **在尺子补好之前，不要动 S-A/S-B**：否则改完只能说"V1 变了"，说不出"变在哪一段"。
+
+**同时已能确定的上界**（不依赖那五段）：一跳真正的 GPU 执行 ≈ **~75 µs**（前端 ~10.6/槽 + 算力 ~51 + 派发地板 ~13），
+而 V1 = 1364.2 ⇒ **~95% 的跨度是"等"**（等样点 + 等车道 + 交棒/提交/出手）。⇒ **单车道优化的标的全部在"等的结构"里，不在算力里**（与 §6.65–§6.69 的结论一致）。
+
 #### 7.6.1 ★ 用户裁决：**先把"单车道"自己优化好，再动并发（S-E）** —— 数字支持这个顺序
 
 **① V1 可以近似写成 `2 × merged_hop + 常数`（并发 2 下）**：`p39` 的 V1 1364.2 ≈ **2 × 533.7 + 297**。
