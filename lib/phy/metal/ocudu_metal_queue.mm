@@ -802,9 +802,13 @@ void shared_queue_stats_report()
           return static_cast<double>(v[static_cast<size_t>((v.size() - 1) * p)]) / 1e3;
         };
         // Most commits first: the labels that carry the pipeline's volume are the ones a budget is about.
+        // The count is the number of RECORDS (one per command buffer), so it is `wait_ns.size()` - every
+        // closed window pushes into BOTH vectors. The first version added the two sizes and printed twice
+        // the commit count (measured on p54: dft_front_end read n=716642 against the queue's own
+        // `gpu busy (front_end) commits=358321`); the wait/exec percentiles were right, the count was not.
         std::vector<std::pair<size_t, std::string>> order;
         for (const auto& kv : by_label) {
-          order.emplace_back(kv.second.wait_ns.size() + kv.second.exec_ns.size() + kv.second.open, kv.first);
+          order.emplace_back(kv.second.wait_ns.size() + kv.second.open, kv.first);
         }
         std::sort(order.begin(), order.end(), [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
         std::fprintf(stderr,

@@ -6792,6 +6792,71 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml \
 `[ul_gpu_lane] busy split` 与 `[ul_gpu_lane] residency/busy/gap`——由此决定上面三条路走哪条。
 
 
+### 6.102 ★★★ 收口腿对 `p54`/`p55` 与新仪器的判决：**那 ~510 µs 是"设备在执行"，不是排队**——两个工况读数逐位一致（2026-09-26）
+
+#### ① 腿对（都在冻结的 HEAD 上，`5c92de424a`）
+
+| 读数 | `p54-n78-close`（default）| `p55-n78-close-stress`（stress）|
+|---|---|---|
+| **V1 中位** | **1359.2 µs**（迄今最好）| **1365.7 µs** |
+| 契约 | **MET 9 of 9** | **MET 9 of 9** |
+| `lane host participation` | 146158/146158（头 42.1 + 尾 41.8 = 83.9）| 145294/145294（头 44.3 + 尾 43.6 = 87.9）|
+| `cbs/lane` / `dropped` | 2.00 (max=2) / 0 | 2.00 (max=2) / 0 |
+| `residency` / `busy` / `gap` 中位 | 545.0 / 567.0 / **0.0** | 549.5 / 567.9 / **0.0** |
+| V2 | `starved_events=0`、`held_max=12<32` | `starved_events=0`、`held_max=9<32` |
+| V5 | `gaps=0`（597210 块）、`rx_overflows=0`、`stale=0`、CRC-OK **88.2%**（128850/146158）| `gaps=0`（541152 块）、`stale=0`、CRC-OK **76.0%**（110365/145294）|
+| `p0_gate.sh` | **29 of 29** | **29 of 29** |
+
+#### ② ★ 判决：新仪器的 per-label 表（两条腿几乎逐位相同）
+
+```
+p54:  dft_front_end  wait p50=45.7 | exec p50= 46.6     p55:  45.7 | 46.6
+      ce_weights     wait p50=38.8 | exec p50= 42.5           39.4 | 43.9
+      merged_hop     wait p50=37.0 | exec p50=509.6          37.4 | 510.4
+      late_handed    wait p50=282.2| exec p50= 50.1          283.3| 50.1
+```
+
+* **`merged_hop` 排队 37 µs、执行 509.6 µs**，两条腿（default/stress、各 ~29 万个 cb）差 **<1 µs** ⇒ **高度可复现**；
+* ⇒ **残差不是排队/调度** ⇒ "减少提交数、改提交次序（S-E 类结构）"这条线**对它无效**；
+* 也不是"设备被共享拉长窗口"（§6.101 的 200+ 并发 cb 臂：+0.5~3.5 µs）；
+* 另一个方向上的对照：**前端自己的 cb（plain 路，1 transform/cb）执行 46.6 µs**，与离线 harness 记录值 **47.5 µs 吻合到 2%** ⇒ 平台/仪器本身没有整体性偏差。
+
+#### ③ 派发账：一跳 cb ≈ 5–6 次派发，每次 ~85–100 µs（而同一平台的小 cb 只要 ~14 µs/派发）
+
+| cb | 每跳派发数（来源）| exec 中位 | 每次派发 |
+|---|---|---|---|
+| `ce_weights`（相关矩阵）| ~3（`corr_a` 1.52 + `corr_rhp` 1.52）| **42.5–43.9 µs** | **~14 µs** ✓ 与离线标尺（12–38）一致 |
+| `dft_front_end`（plain 路）| 1（1 transform）| **46.6 µs** | 46.6（= 离线 47.5）|
+| **`merged_hop`** | **5–6**：hand-over FE 1（14 transforms/次）+ `ce_sites` reformat/pilots_lse/pilots_cfo 3 + `eq_batch` y_batch 1（`max_run=12`）+ demapper 1 | **509.6–510.4 µs** | **~85–102 µs** ✗ 离线的 2–7 倍 |
+
+⇒ **残差的形态定下来了**：一跳 cb 里那条**大网格 + 相互依赖**的派发链，每次派发约 85–100 µs；
+同一平台、同一条队列、同一条腿上的小派发只要 ~14 µs。这与本账的三个"怪"性质一致：
+**与结构无关**（任何结构都有这条链）、**与块大小无关**（链长固定）、**与工作量无关**（受每次派发/依赖延迟支配）。
+
+#### ④ 途中发现并修掉的两个仪器缺陷（都属"读数会撒谎"类）
+
+* **per-label 的 `n` 多算一倍**（我上一节新加的）：每条记录 `wait`/`exec` 两列都进，计数却按两列之和算 —— `p54` 的 `dft_front_end n=716642` 对不上队列自己的 `gpu busy (front_end) commits=358321`。**已修**（按 `wait_ns.size() + open`）；percentile 一直是对的。
+* **`milestone_audit.sh` 的空格型参数是坏的**：`for a in "$@"` 迭代的是展开后的固定列表，而 `shift` 移动的是位置参数 ⇒ `--leg X --stress-leg Y` 把 `STRESSLEG` 读成 `--stress-leg`，报 **RED（"no log matched --stress-leg"）**，而腿就在那儿。**已修**（改成按索引取），并用空格型重跑验证通过（`=` 型一直是好的，所以这个坑一直没被发现）。
+
+#### ⑤ 收口审计的当前状态（`milestone_audit.sh --leg p54-n78-close --stress-leg p55-n78-close-stress`）
+
+**23 PASS / 2 FAIL / 0 RED**（`--quick` 版 28 项；完整版 32 项 = 26 PASS / 3 FAIL / 0 RED，多出的那一条 FAIL 是同一批测试计数的另一处字面量，已随 ④ 一并修正）：
+
+| FAIL | 定性 | 处置 |
+|---|---|---|
+| `value_net` 183 条 | §6.100③ 已定性（归档跟 CPU 链；replay 的 Metal 臂落在 CE 回退路线）| **用户已裁决：修 harness 后重建基线**（待做）|
+| `ab_dumps` arm1 | 脚本自带 flake 规则（"no code change" 也会偶发红）| 记录，不算收口项 |
+
+⇒ **除这两条已定性的外，IQ→LLR 的收口判据全部通过**，而且是在**冻结 HEAD 上的一对腿**（default + stress）上通过的。
+
+#### ⑥ 还差什么
+
+1. **Q11 的修法与重建基线**（用户已裁决方向）：让 `ul_chain_replay` 的整链模式也产生"设备侧导频源"，使 `lse_applies` 覆盖整条腿（空口是 145291/145295 = 99.997%），再重录基线；
+2. **残差的下一步（用户裁定"先查清"）**：把 `merged_hop` 按阶段拆成独立 cb 的**诊断臂**（`OCUDU_LANE_DIAG_SPLIT=1` + 新 per-label 表）⇒ 一次读出**每个阶段自己的 exec**：
+   * 若均衡/解映射单独一个 cb 就 exec ≈ 300+ µs ⇒ 是**这两个内核本身**（大网格的访存/占用率问题）；
+   * 若各阶段都 ≈ 85 µs ⇒ 是**"依赖链上每次派发 ~85 µs"的平台延迟律**（下一步就是合并/减少依赖派发，而不是调单个内核）。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

@@ -29,11 +29,18 @@ LOGDIR=$W/logs
 LEG=""
 STRESSLEG=""
 QUICK=0
-for a in "$@"; do
+# Parsed with an explicit index, NOT `shift` inside `for a in "$@"`: that loop iterates the list as it
+# was when the loop started, so a second `shift` leaves $1 pointing at the word the loop is already
+# past - measured 2026-09-26: `--leg X --stress-leg Y` set STRESSLEG=--stress-leg and the audit read
+# RED ("no log matched --stress-leg") while the leg was sitting right there. The `=` forms were fine,
+# which is exactly how such a trap hides.
+ARGV=("$@")
+for ((i = 0; i < ${#ARGV[@]}; ++i)); do
+  a=${ARGV[i]}
   case "$a" in
-    --leg)          shift; LEG=${1:-} ;;
+    --leg)          LEG=${ARGV[i + 1]:-} ;;
     --leg=*)        LEG=${a#*=} ;;
-    --stress-leg)   shift; STRESSLEG=${1:-} ;;
+    --stress-leg)   STRESSLEG=${ARGV[i + 1]:-} ;;
     --stress-leg=*) STRESSLEG=${a#*=} ;;
     --quick) QUICK=1 ;;
   esac
@@ -451,7 +458,7 @@ if [ -n "${SF:-}" ] && [ -f "$SF" ]; then
   sgot=0
   for n in "${NAMEARR[@]}"; do grep -qF "]   $n:" "$SF" && sgot=$((sgot+1)); done
   check "stress leg $STRESSLEG: the 9 contract NAMES are all present" "9" \
-        "$([ "$sgot" = "8" ] && echo PASS || echo FAIL)" "found $sgot of 8 in $(basename "$SF")"
+        "$([ "$sgot" = "9" ] && echo PASS || echo FAIL)" "found $sgot of 9 in $(basename "$SF")"
 
   sml=$(grep -aE "contract MET" "$SF" | tail -1)
   check "stress leg $STRESSLEG: contract MET (9 of 9) and mode=gpu" "MET (9 of 9" \
