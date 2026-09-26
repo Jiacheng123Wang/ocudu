@@ -5183,7 +5183,20 @@ S-C 是 S-B 的顺带收益；**S-D/S-E 都要用户裁决**（V4）。
 **缺的是给它们打点的调用**：`mark_stage_entry()`（由 adapter 带 slot 调）与 weights/burst 那两个 commit 的 mark。
 （`mark_extraction_commit()` 本身是在引擎里被调的：`ocudu_metal_mmse_engine.mm` 1126/1200/1227/1259。）
 
-⇒ **第一步的施工内容 = 把缺的 mark 打上**（小、局部、可用离线 replay 自证"有数"），然后才有尺子去判"单车道那 ~830 µs 归谁"。
+⇒ **更正（读码后）**：**不是"缺 mark"** —— `mark_stage_entry()`（`port_channel_estimator_metal_mmse_impl.cpp:1481`）与 `mark_extraction_commit()` 都在被调。
+真正的闸门在 probe 的 `transition()`（`ocudu_metal_lane_probe.mm:826-844`）：
+```cpp
+if (!stage_gpu[f] || !stage_gpu[t]) { return; }   // ← 两个阶段的 GPU 时间戳缺一就整段丢掉
+...
+host_span.push_back(stage_host[t] - stage_host[f]); // ← host 跨度本不需要 GPU 戳，却被这个 return 一起挡掉
+```
+而 **Metal 只给"每个命令缓冲"一个 GPU 窗口**，**融合路上整跳就是 ONE command buffer** ⇒ **分阶段的 GPU 戳根本不存在**（这正是 §6.19/P0-1 记的那件事）。
+⇒ **尺子的施工内容（两件）**：
+ (a) **把 host 跨度从 GPU 闸门里放出来**（`transition()` 里让 `host_span` 只要两侧 host 打点就 push）⇒ 五段里先亮两段
+     （`host: extraction commit -> weights commit`、`host: weights commit -> burst commit`）；小、局部、离线可自证。
+ (b) `queue:`/`gap:` 那三段需要**分阶段 GPU 戳** ⇒ 只能用**现成的诊断臂 `OCUDU_LANE_DIAG_SPLIT=1`**（§6.2：它不再采纳前端的缓冲、把它单独提交，于是 `dft` 段可读）。
+     ⚠ 该臂**改变提交结构**（每车道 2 个命令缓冲）⇒ 它的分段读数**只作指示**，不能直接当作交付配置的分解。
+ (c) `handover_us`（stage entry → extraction commit）本应可用，需再查一处：adapter 的 `mark_stage_entry` 与引擎的 `mark_extraction_commit` 在融合路上是否**次序颠倒**（`mark_stage_entry` 会把 `handover_us` 重置为 −1）。
 ⚠ **在尺子补好之前，不要动 S-A/S-B**：否则改完只能说"V1 变了"，说不出"变在哪一段"。
 
 **同时已能确定的上界**（不依赖那五段）：一跳真正的 GPU 执行 ≈ **~75 µs**（前端 ~10.6/槽 + 算力 ~51 + 派发地板 ~13），
