@@ -7330,7 +7330,7 @@ lower_phy_test.cpp:999: Failure  ... "no 'radio sample continuity' check is regi
 | A1 | **gpu**（stress）| `run_leg.sh gpu p61-n78-repro-gpu --regime=stress --expert_execution…concurrency=2 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1` | `p42`/`p60` | RF 700–1700、underflow 占 ~80%、`gaps=0`、slack 中位 +1.5 ms & `AT/BELOW 0`≤50、`[dl_tx_call]` over-1ms 数百、`recv max≈100 ms` 而 `loop` 数 ms、V1 1360–1500、`cbs/lane=2.00`、契约 9/9 |
 | A2 | **cpu**（stress，**忠实**：不传任何 gNB 选项 ⇒ 派生并发=1）| `run_leg.sh cpu p62-n78-repro-cpu --regime=stress OCUDU_UL_PHASE_SEGMENTS=1` | `s79`/`s81` | RF 0–5、`gaps=0`、`[ul_pipeline]` 中位 **600–700 µs** |
 | A3 | **cpu + 并发 2**（**混杂对照**，见 ④.2）| 同 A2 但加 `--expert_execution…concurrency=2` | 无（历史 cpu 腿都是派生并发 1）| 若 cpu 在并发 2 下仍 ~0–50 ⇒"GPU 模式病"成立；若 cpu 也上千 ⇒ 归因改为**并发/负载** |
-| A4 | **cpu_gpu + 三个 metal backend**（复现你 profile 的第 1 段）| `run_leg.sh cpu_gpu p64-n78-repro-cpugpu --regime=stress --expert_phy.pusch_dft_type metal --expert_phy.pusch_channel_estimator_algo metal_mmse --expert_phy.pusch_channel_equalizer_backend metal OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1` | **无历史腿**（新基线）| 给出模块级路线的 RF/`crossings`/`cbs/lane`（回答 profile 第 1 段）|
+| A4 | **cpu_gpu**（模块级卸载；**三个 backend 旋钮一个都不要传**，见 ④.4）| `run_leg.sh cpu_gpu p64-n78-repro-cpugpu --regime=stress OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1` | **无历史腿**（新基线）| 给出模块级路线的 RF/`crossings`/`cbs/lane`（回答 profile 第 1 段）|
 | A5（可选）| **n1 bridge**（gpu + cpu，手机流量，default）| `LEG_CONFIG=configs/gnb_rf_b200_fdd_n1_5mhz_bridge.yml`，无其它选项 | 你的两条 console log | gpu `[ul_pipeline]` ≈1721、cpu ≈1200、两边 `[ul_rx_wait] max`≈101 ms |
 
 #### ③ 判读（跑完一条命令出对照表）
@@ -7349,7 +7349,13 @@ samples/中位/stale、`[ul_rx_wait]`、`[ul_rx_timing]`、`[dl_tx_slack]`、`[d
 2. **历史 cpu 腿与 gpu 腿的并发不同**：三条 cpu 腿**没有**传 `max_pusch_and_srs_concurrency` ⇒ 派生值是 **1**（§4.1 表：n78 → 1）；而所有 gpu 腿都用 **2**。
    ⇒ "cpu 0–1 vs gpu 700–1700"**混杂了并发**，所以必须有 **A3（cpu@conc2）**这条对照，否则不能把差别归给模式。
 3. **单条腿不是证据**：A1/A2（以及 A3）各飞 **≥2 条**、同日同负载；工况标签写清（`p27`–`p42` 是 stress，`p60` 是 default）。
-   另外：**`cpu_gpu` 单独用（全 auto）= 全 CPU**，要得到"模块级卸载"必须显式给三个 metal backend 旋钮（A4 就是这么写的）。
+   另外：**`cpu_gpu` 单独用（全 auto）= 全 CPU**，而 `run_leg.sh` 的 `cpu_gpu` 分支**自己就注入**了那三个 metal backend 旋钮
+   （`--expert_phy.pusch_dft_type metal --expert_phy.pusch_channel_estimator_algo metal_mmse --expert_phy.pusch_channel_equalizer_backend metal`，
+   外加 `--expert_phy.pusch_ldpc_decoder_type auto` 与 **`--expert_phy.device_resource_grid on`**，见脚本 224–235 行及其注释：
+   "a cpu_gpu arm that resolves to CPU backends would be comparing the CPU path with itself"）。
+   ⇒ **命令行里再传一遍会直接失败**：CLI11 报 `--pusch_channel_estimator_algo: At Most 1 required but received 2`
+   （实测于 2026-09-26 的第一次 A4）。A4 只需 `run_leg.sh cpu_gpu <label>` 后面跟探针旋钮即可。
+   ⚠ 与用户 profile 第 1 段的手写命令相比，脚本配方**多一项 `device_resource_grid on`**（设备写资源网格）——对照时要记这一笔。
 
 #### ⑤ 结果会导向什么
 
@@ -7391,8 +7397,9 @@ samples/中位/stale、`[ul_rx_wait]`、`[ul_rx_timing]`、`[dl_tx_slack]`、`[d
 
 #### ④ 下一步（等 A4 与判读）
 
-* **A4（模块级 `cpu_gpu` + 三个 metal backend）因参数写法被 `run_leg.sh` 拒绝**（它要求 `--option=value`，不接受空格分开的值；这是脚本**故意**的严格解析）。修正后的命令见 §6.113 ②，
-  关键是把三个旋钮写成 `--expert_phy.pusch_dft_type=metal --expert_phy.pusch_channel_estimator_algo=metal_mmse --expert_phy.pusch_channel_equalizer_backend=metal`。
+* **A4 被 `run_leg.sh` 拒绝过两次，两次都是配方的错**：第一次是"选项 + 空格 + 值"（脚本**故意**要求 `--option=value`）；
+  第二次是**重复传了脚本已经注入的三个 metal backend 旋钮**（CLI11: `At Most 1 required but received 2`）。
+  **正确写法：`run_leg.sh cpu_gpu <label> --regime=stress OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1`，不要传任何 backend 旋钮**（见 §6.113 ②/④.4）。
 * A4 落地后即可补齐三模式对照（profile 的第 1/2/3 段），并回答"模块级卸载落在哪一侧"。
 * 之后按 §6.113 ⑤ 分支：**现在证据已经把"模式"钉住**（不是并发），所以 S3 的选择变成
   **(a) 宿主亲和/优先级臂**（把 UHD 的 RX/TX 线程独占核，把上层 PHY 执行器挪开）或
