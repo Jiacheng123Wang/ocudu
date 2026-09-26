@@ -820,6 +820,14 @@ int decoder_engine::decode(const void* in_fp16, uint8_t* out_bits, int max_iter,
   }
 
   [enc endEncoding];
+  // Q26 (dev doc 6.86 (4)): this engine's buffers were INVISIBLE to both device-side instruments - it
+  // commits without arming the GPU-time probe and without registering with the lane probe - and the
+  // back-end queue's own accounting shows the hole: `gpu busy (back_end) commits` exceeds "two per hop
+  // plus the registry" by about one per hop. That queue is the one a hop rides, so the missing window is
+  // missing from the account of the very queue the ~450us lives on. Arming it costs nothing unless the
+  // probe is on (arm_gpu_time is a no-op without OCUDU_METAL_GPU_TIME=1) and turns the decode's device
+  // window into a reading instead of an inference.
+  metal::shared_queue::arm_gpu_time(cmd_buf, metal::shared_queue::queue_kind::back_end, "ldpc_dec");
   [cmd_buf commit];
   decoder_stats_commit();
   [cmd_buf waitUntilCompleted];

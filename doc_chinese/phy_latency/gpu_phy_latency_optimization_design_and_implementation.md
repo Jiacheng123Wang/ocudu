@@ -6022,8 +6022,10 @@ nof_rxd_samples = stream->recv(buffs_cpp, num_samples, md, RECEIVE_TIMEOUT_S, ON
 
 #### ⑤ 结论与下一步（两条，都不需要先飞腿就能准备）
 
-1. ★ **补上那个洞（小、安全、离线可自证）**：在 `ocudu_metal_decoder_engine.mm` 的 commit 前加 `arm_gpu_time(cb, back_end, "ldpc_dec")` + `register_commit(cb, stage::other)`，
-   在**下一条腿**上读它的窗口与 `commits` 账 ⇒ 后端队列的占用账第一次完整（也许它本身就是那 ~400 µs 的邻居，或者揭示了它们如何互相排队）。
+1. ✅ **洞已补（本节当天落地）**：`ocudu_metal_decoder_engine.mm` 的 commit 前加了
+   `arm_gpu_time(cmd_buf, back_end, "ldpc_dec")` ⇒ **LDPC 解码器的 cb 从此进 F3 时间线**（`OCUDU_METAL_GPU_TIME=1` 时才生效，默认路零变化）。
+   下一条腿要读：`[metal_stats] queue occupancy (Q9-F3) slowest commits` 里有没有 `ldpc_dec`、它的窗口多大、以及 `gpu busy (back_end) commits` 的账能否对上（"每跳 2 条 + 注册表 + ldpc"）。
+   ⚠ 它**不是** lane probe 的分段（那需要 `register_commit`，会改变 lane 的账），所以只进 F3 与 `commits` 计数——**刚好够把这个洞填上而不动任何分段口径**。
 2. **机制猎捕收口**：离线能构造的形状已经**全部**是 13–58 µs（约 20 种臂），而那 ~450 µs 只在空口出现在**特定那类 cb** 上；
    按纪律**不再造判不了的仪器** ⇒ 要动它只剩**空口 A/B**：`noD1` / `event`（V4→3.00，**需用户裁决**）与电台侧旋钮。
 
