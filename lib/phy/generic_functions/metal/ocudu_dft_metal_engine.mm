@@ -1444,6 +1444,27 @@ bool refuse_time_input(dft_engine_impl* engine, const dft_metal_engine::grid_wri
   return false;
 }
 
+/// \brief Whether this run forces the transform INPUT to be staged instead of wrapped zero-copy (Q25).
+///
+/// WHY IT EXISTS. The front end's transforms read the radio's samples through a zero-copy page mapping
+/// (\c newBufferWithBytesNoCopy), and on air that command buffer is resident ~452us while the whole
+/// front end's execution is 10.6us a slot (dev doc 6.77). The remaining candidates for that residency are
+/// the input path and what else rides the buffer, and the only way to separate them is to make the input
+/// arrive through ordinary device memory once: this switch does exactly that, at ONE call site
+/// (submit_slot_grid_write's \c in), so the GRID and the engine's output ring keep their zero-copy
+/// mappings - staging those would be the trap wrap_buffer()'s own note records (a copied grid is a grid
+/// the GPU writes and the host reads, i.e. garbage symbols).
+///
+/// It selects the route the engine ALREADY takes when a wrap is refused (the same \c newBufferWithBytes
+/// fallback, counted by \c staged in the "dft radio inputs" check), so it is a measurement arm and not a
+/// new mechanism: the bytes the kernels read are identical, the contract check that says "the input was
+/// not staged" is expected to FAIL on this arm, and that is the point of flying it.
+bool stage_input_requested()
+{
+  const char* env = std::getenv("OCUDU_DFT_STAGE_INPUT");
+  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+}
+
 id<MTLBuffer> wrap_buffer(dft_engine_impl* engine, const void* ptr, size_t length)
 {
   auto it = engine->buffer_cache.find(ptr);
@@ -2168,17 +2189,38 @@ bool dft_metal_engine::submit_slot_grid_write(const void* in, void* out, unsigne
     if (end_bytes > alloc_size) {
       return refuse_time_input(engine, write, "the symbol does not fit in the allocation");
     }
-    id<MTLBuffer> b = wrap_buffer(engine, alloc_base, alloc_size);
-    if (b == nil) {
-      return refuse_time_input(engine, write, "wrapping the radio buffer failed");
+    if (stage_input_requested()) {
+      // Q25 measurement arm (see stage_input_requested): the SAME samples, in device memory the engine
+      // owns, so the transform no longer reads the radio's zero-copy mapping. The slice starts at the
+      // symbol the caller named, so the kernel's element offset is the window start alone - the
+      // allocation-relative offset above is dropped with the allocation. Counted as staged, which is the
+      // counter the "dft radio inputs" contract check reports, so the arm says so in its own log.
+      const size_t slice_bytes =
+          (static_cast<size_t>(write.time_window_start) + engine->n) * 2 * sizeof(int16_t);
+      b_in16 = [dft_resources().device newBufferWithBytes:write.time_samples
+                                                   length:slice_bytes
+                                                  options:MTLResourceStorageModeShared];
+      if (b_in16 == nil) {
+        return refuse_time_input(engine, write, "staging the radio buffer failed");
+      }
+      dft_stats_wrap_copy();
+      dft_stats_radio_input();
+      input.is_ci16 = 1u;
+      input.offset  = write.time_window_start;
+      input.gain    = write.time_gain;
+    } else {
+      id<MTLBuffer> b = wrap_buffer(engine, alloc_base, alloc_size);
+      if (b == nil) {
+        return refuse_time_input(engine, write, "wrapping the radio buffer failed");
+      }
+      b_in16        = b;
+      input.is_ci16 = 1u;
+      dft_stats_radio_input();
+      // The kernel reads from the ALLOCATION base it was handed, so the offset is the slice's own
+      // offset plus the window start within it (the cyclic prefix the transform skips).
+      input.offset = static_cast<uint32_t>(offset_bytes / (2 * sizeof(int16_t))) + write.time_window_start;
+      input.gain   = write.time_gain;
     }
-    b_in16        = b;
-    input.is_ci16 = 1u;
-    dft_stats_radio_input();
-    // The kernel reads from the ALLOCATION base it was handed, so the offset is the slice's own
-    // offset plus the window start within it (the cyclic prefix the transform skips).
-    input.offset = static_cast<uint32_t>(offset_bytes / (2 * sizeof(int16_t))) + write.time_window_start;
-    input.gain   = write.time_gain;
   }
 
   const dft_grid_write_block params = {1u,

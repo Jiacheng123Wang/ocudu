@@ -5500,6 +5500,54 @@ sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
 4. 三者里**只有 (a) 或 (c) 被证实**才值得再飞腿；若都不成立，则这条 500 µs 是**该平台 command buffer 的固有驻留**，单车道内部已经没有可动的旋钮，杠杆回到"每跳提交数 / 在飞跳数"这类结构量（§7.6.1 的 S-E）。
 
 
+### 6.78 ★ Q25 落地：**"输入 staging"判决开关**（`OCUDU_DFT_STAGE_INPUT=1`）+ `p48` 预登记（2026-09-26，本会话）
+
+#### ① 先记两条**离线就把候选砍掉**的结果
+
+* **候选 (c)（派发内线程组被串行化，每组 ~37 µs）被现成测量否掉**：批量派发的**执行**账单是 **10.6 µs/槽**（14 个线程组，§6.65/§6.30 的隔离微基准）——若是"每组 37 µs"它应该是 ~518 µs。⇒ (c) 死。
+  （曾被"14 × 37 ≈ 518 ≈ 507"误导；那个巧合来自把**空 cb 的驻留下限**当成了每组的执行。）
+* ⚠ **离线载体在这条臂上不可信**：同一个拆分臂（`syn004_4`，默认批量）连跑两次，`cbs/lane` 在 **0.50 ↔ 2.00** 之间跳，`dft` 的 per-cb 值随之在 **78 ↔ 507 µs** 之间跳
+  ⇒ **拆分臂的分段数字只能用空口的**（空口 `cbs/lane=1.00` 稳定、账目闭合），离线只用"纯 DFT 路"的**单 cb** 读数（36.4–39.9 µs，稳定）。
+  ⇒ 这类"用 `us/lane ÷ cbs/lane` 反推 per-cb"的读法**必须先看 `cbs/lane` 是否稳定**。
+
+#### ② 开关：只作用于**电台输入**那一条路（`OCUDU_DFT_STAGE_INPUT=1`）
+
+* 位置：`ocudu_dft_metal_engine.mm` 的 `write.time_samples` 分支（电台 IQ 的 zero-copy 映射就在那一句 `wrap_buffer(engine, alloc_base, alloc_size)`）。
+* 做法：走**引擎已经在用的 staging 回退路**（同一句 `newBufferWithBytes`，并被 `staged` 计数）——**不是新机制**，只是强制选它；
+  绑定的缓冲从"整个 allocation"变成"该符号的切片"，因此 `input.offset` 从"allocation 内偏移 + 窗口起点"变成 **只有窗口起点**。
+* **绝不碰网格与输出环**（代码自己警告：对网格 staging 会得到"GPU 写副本、宿主读原件"的垃圾网格——`dft_release_adopt_metal_test` 里就有这条断言）。
+
+#### ③ 离线验证（**新路正确**，且失败项都是这支臂的定义）
+
+| 网 | 结果 |
+|---|---|
+| `[grid] size=512 window=0/1 subcarriers=300 **mismatching=0**`、`[ci16] … mismatching=0` | ✅ **staging 后的网格与零拷贝路逐 RE 相同** |
+| `dft radio inputs: … N buffer wrap(s) had to stage a host copy -> **FAILED**` | ✅ **预期**：这正是"输入被 staging 了"的证据（该契约检查就是钉这件事的）|
+| `FAIL: overwriting the samples of an in-flight transform did not corrupt its grid` | ✅ **预期**：staging 后变换读的是副本，覆写原件不再影响它（该测试钉的是**零拷贝别名**本身）|
+| 三个 DFT 相关测试**默认路** | ✅ 3/3、全量 `ctest -L phy -j 1` **193/193** |
+| 环境变量不开时 | **零行为变化**（只多一次 `getenv`/transform）|
+
+#### ④ `p48-n78-stageinput`：预登记（**测量臂**；契约会 7/8，只作读数）
+
+```bash
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p48-n78-stageinput \
+  --regime=stress OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1 OCUDU_DFT_STAGE_INPUT=1 \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+```
+
+**飞交付配方（不加 `LANE_DIAG_SPLIT`）**：这样判据就是 `merged_hop` 本身，且 `cbs/lane` 保持 2.00（不引入第三个变量）。
+
+| 读数 | 预登记 |
+|---|---|
+| `[phy_pipeline] dft radio inputs: … **N buffer wrap(s) had to stage a host copy**` | **N > 0 且该行 FAILED** ⇒ **臂已生效**（若 N=0 ⇒ 开关没进二进制/没生效，本腿作废）|
+| ★ **`[ul_gpu_lane] busy split merged_hop`** | **判据**：**塌到 ≲150 µs** ⇒ 那 ~500 µs **就是"前端读电台零拷贝映射"的代价**（⇒ 真杠杆，但要用户裁"破契约换时延"）；**仍在 541±40** ⇒ **不是输入路径**（⇒ 只剩"cb 里其它活"与平台固有驻留，单车道内部收口，杠杆回结构量）|
+| `wrap_copies` / `wraps creates` | `wrap_copies` 应 ≈ 每跳 1（staging 计数）；`creates` 应大幅下降 |
+| `cbs/lane` / `gaps` / 池 / `rx_overflows` | 2.00 / 0 / `starved=0`、`dropped=0` / 0（**不允许变**）|
+| 契约 | **预期 7/8**（`dft radio inputs` 红——这是臂的定义，不是缺陷）|
+| CRC / SINR / `[ul_by_size]` | **必须健康**（网格已离线证明逐 RE 相同；若 SINR 塌 ⇒ staging 路在空口上有问题，立即停手）|
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
