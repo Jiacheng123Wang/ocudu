@@ -12,7 +12,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <map>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -766,6 +768,66 @@ void shared_queue_stats_report()
                    holes.size(),
                    static_cast<double>(shared_queue::occupancy_largest_idle_us()) / 1000.0,
                    (dropped == 0) ? "" : " (records DROPPED over the bound)");
+      // ---- per LABEL: is a buffer's window QUEUE WAIT or DEVICE EXECUTION? -------------------------
+      //
+      // The aggregate above cannot answer the question this whole investigation turns on. A hop's command
+      // buffer reads ~500us of window while the same shape offline costs ~150us, and the two candidate
+      // explanations need OPPOSITE fixes: "the device had not got to it yet" is a queue/scheduling problem
+      // (fewer or better-ordered submissions), while "the device really takes that long" is a kernel and
+      // dependency problem (merge the dispatches, shorten the chain). The record already carries both
+      // halves - commit -> start is the queue, start -> end is the device - but only the slowest eight were
+      // printed, and a budget cannot be read off a tail. Medians and p95 per label, so the two are never
+      // confused again. (Records whose window never closed are counted, not silently dropped.)
+      {
+        struct label_split {
+          std::vector<uint64_t> wait_ns;
+          std::vector<uint64_t> exec_ns;
+          uint64_t              open = 0;
+        };
+        std::map<std::string, label_split> by_label;
+        for (const shared_queue_state::occupancy_record& r : records) {
+          label_split& ls = by_label[(r.label != nullptr) ? r.label : "?"];
+          if ((r.end_ns == 0) || (r.start_ns == 0)) {
+            ++ls.open;
+            continue;
+          }
+          ls.wait_ns.push_back((r.start_ns > r.commit_ns) ? (r.start_ns - r.commit_ns) : 0);
+          ls.exec_ns.push_back(r.end_ns - r.start_ns);
+        }
+        const auto pct = [](std::vector<uint64_t>& v, double p) {
+          if (v.empty()) {
+            return 0.0;
+          }
+          std::sort(v.begin(), v.end());
+          return static_cast<double>(v[static_cast<size_t>((v.size() - 1) * p)]) / 1e3;
+        };
+        // Most commits first: the labels that carry the pipeline's volume are the ones a budget is about.
+        std::vector<std::pair<size_t, std::string>> order;
+        for (const auto& kv : by_label) {
+          order.emplace_back(kv.second.wait_ns.size() + kv.second.exec_ns.size() + kv.second.open, kv.first);
+        }
+        std::sort(order.begin(), order.end(), [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
+        std::fprintf(stderr,
+                     "[metal_stats] queue occupancy (Q9-F3) per label: queue wait (commit -> GPU start) vs "
+                     "device execution (start -> end)\n");
+        size_t shown = 0;
+        for (const auto& kv : order) {
+          if ((shown++ == 8) || (kv.first == 0)) {
+            break;
+          }
+          label_split& ls = by_label[kv.second];
+          std::fprintf(stderr,
+                       "[metal_stats]   %-16s n=%7zu wait p50=%9.1fus p95=%9.1fus | exec p50=%9.1fus "
+                       "p95=%9.1fus%s\n",
+                       kv.second.c_str(),
+                       kv.first,
+                       pct(ls.wait_ns, 0.5),
+                       pct(ls.wait_ns, 0.95),
+                       pct(ls.exec_ns, 0.5),
+                       pct(ls.exec_ns, 0.95),
+                       (ls.open == 0) ? "" : " (some windows never closed)");
+        }
+      }
       std::fprintf(stderr,
                    "[metal_stats] queue occupancy (Q9-F3) slowest commits, by commit -> GPU start "
                    "(label = what the buffer carries):\n");
