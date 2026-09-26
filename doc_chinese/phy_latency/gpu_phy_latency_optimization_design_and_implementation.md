@@ -6127,6 +6127,57 @@ if (dec_type == "metal") { return std::make_unique<ldpc_decoder_metal>(…); }  
 若**不变** ⇒ 那 ~450 µs 与本平台/空口的某处硬性开销有关，单车道内部到此收口，主线交回 S-E 的结构量（每跳提交数 / 在飞跳数）。
 
 
+### 6.89 ★★★ 用户追问"这两条臂是否也改变**提交的时刻点**"：**是——两条都会把 CPU 拉回中途** ⇒ **两条都撤出候选**（2026-09-26）
+
+> 用户指出第二首要目标：**不只是"IQ→LLR 全程 GPU 一步到底"，还包括"CPU 全程靠边站"——开始时提交一次，然后只在出口等 LLR**。
+> 按此逐条查码，结论是**这两条臂都恢复"宿主中途参与"**，因此它们测的是一个**我们不要的**配置。
+
+#### ① `OCUDU_CE_LANE_ORDER=event`（旧 P2 结构）：**宿主在跳中途插一手**（有实测）
+
+`ocudu_metal_lane_probe.mm:147-154` 自己的记录：
+
+```
+/// * hole_to_weights_us is the HOST's. … measured at 125.3us, against a 238.3us
+///   extraction-commit-to-weights-commit distance and a 116.6us extraction. … the hole IS
+///   "the host had not handed the second command buffer over yet", and there is a real dependency
+///   behind it: the weights command buffer's parameters carry the CFO the host reads OUT of the
+///   extraction's buffer, so it cannot be encoded before that command buffer completed
+```
+
+⇒ `event` 路上**weights 那条 cb 必须等抽取 cb 完成、宿主把 CFO 读回来才能编码** ⇒ **CPU 中途参与**（实测缺口 **125.3 µs**）⇒ **与第二目标直接冲突**，**撤出候选**。
+
+#### ② `OCUDU_DFT_RELEASE_BLOCK=0`（关 D1）：**恢复一次阻塞宿主的 `wait_slot`**（有代码 + 历史读数）
+
+`ofdm_demodulator_impl.cpp:486-506`：
+
+```cpp
+released = wait_per_slot && handover_allowed() && dft->release_block(grid.get_device_view().base);
+if (!released) { (void)dft->end_block(); }
+…
+if (released) { /* … waiting here would name a buffer this engine does not own (wait_slot() refuses) */ }
+else if (!wait_per_slot || last_symbol_of_slot) { dft->wait_slot(slot); }   // ← 关掉交棒就走到这里
+```
+
+`wait_slot()` 内部是 **`[cmd_buf waitUntilCompleted]`（阻塞宿主）**（`ocudu_dft_metal_engine.mm` 的 `[ul_dft_wait]`："the host time this wait costs"）。
+⇒ 关掉 D1 ⇒ **宿主在"本槽最后一个符号"处阻塞等前端变换完成** ⇒ **CPU 中途参与**，**撤出候选**。
+（历史读数：`p41` 那条腿上 `[ul_dft_wait]` 中位 **577.6 µs** —— 那正是这个宿主阻塞的量级。）
+
+#### ③ ⇒ 结论：**融合（merged + D1）本身就是"CPU 靠边站"的实现**
+
+* `released=true` 那条分支的注释就是全部答案：**交棒之后"宿主等在这里会点到一个不属于本引擎的缓冲"** ⇒ **融合把那次宿主等待删掉了**，并把整跳并成**一次提交**。
+* 所以：**那 ~450 µs 不能用这两条臂去"测掉"而不付出目标的代价**；§6.88 ④ 的待飞清单**撤回**（`noD1`、`event` 两条都删）。
+* **~450 µs 的定位维持为**：**不是融合引入**（§6.88① 历史腿档案）、**不是数据路径/缓存/时钟（只解释 ~2.6–3.7× 且饱和在 ~50 µs）/队列/栅栏/算力/DL/同伴/隐藏流量**，
+  离线任何形状 13–58 µs ⇒ **本平台+空口的一个未归属量**，已按纪律收口记录。
+
+#### ④ 仍然**同时满足两个目标**的杠杆（下一批候选）
+
+| # | 候选 | 机制 | 代价/收益（预登记）|
+|---|---|---|---|
+| 1 | ★ **把 fenced 相关构建并进前端那条"开着的块"** ⇒ `cbs/lane` **2.00 → 1.00** | 相关构建只依赖**宿主参数**（与抽取无依赖）⇒ 可以编码进**前端从槽首就开着的那条 cb**，于是"每跳一次提交"成为字面事实 | **两个目标都前进**（提交更少、无宿主中途参与）；窗口侧预期是省掉那条约 43–48 µs 的独立 cb 驻留（`busy` 侧确定，residency 侧约 −20 µs）⇒ V1 预期 **−25…−50 µs** |
+| 2 | **S-E：并发/队列结构**（把驻留**遮住**而不是去掉）| 并发 2 已实测比 1 好 **227 µs** 的 V1；不改数据路径 | 触 V4 的是"每跳提交数"，并发不改它；需再裁 |
+| 3 | **减少跳内派发数**（CE/eq/demap 4 次）| 每次派发在空口有 ~38 µs（热）级驻留 | 与 §6.63/6.64 的 5–14 µs 口径需先对齐 |
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
