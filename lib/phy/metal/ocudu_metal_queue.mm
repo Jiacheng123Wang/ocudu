@@ -531,61 +531,49 @@ void shared_queue_stats_report()
         }
       }
       // Q24b: the same question asked WITHOUT any fence bookkeeping, so the answer cannot depend on the
-      // pairing above being right. The lane probe already labels both ends of the hop's stage fence and
-      // stamps them with the slot: `ce_weights` is the buffer that SIGNALS it (the estimator's weights stage
-      // commitment point) and `merged_hop` is the whole hop's buffer, which WAITS for it. Grouping the
-      // GPU-time records by slot therefore compares the two ends directly - no generation, no id, no
-      // address - and the physical invariant is the same one: the hop cannot COMPLETE before the estimator
-      // it depends on has finished.
-      struct slot_ends {
-        uint64_t hop_start = 0;
-        uint64_t hop_end   = 0;
-        uint64_t est_start = 0;
-        uint64_t est_end   = 0;
-        bool     has_hop   = false;
-        bool     has_est   = false;
-      };
-      std::unordered_map<uint64_t, slot_ends> slots;
+      // pairing above being right. The lane probe already labels both ends of the hop's stage fence:
+      // `ce_weights` is the buffer that SIGNALS it (the estimator's weights stage commitment point) and
+      // `merged_hop` is the whole hop's buffer, which WAITS for it. They are paired by TIME, not by slot:
+      // a slot NUMBER wraps every hyperframe (10.24 s), so grouping by it merges a leg's worth of different
+      // hops into one - the first version did exactly that and read 235-second "windows" (dev doc 6.75).
+      // The estimator is committed immediately before the hop (Q9-F), so the last ce_weights committed
+      // before a merged_hop IS that hop's estimator. The invariant is the same one: the hop cannot COMPLETE
+      // before the estimator it depends on has finished.
+      std::vector<const shared_queue_state::occupancy_record*> by_commit;
       {
         std::lock_guard<std::mutex> occ_lock(s.occupancy_mutex);
+        by_commit.reserve(s.occupancy.size());
         for (const auto& r : s.occupancy) {
-          if (!r.has_slot || (r.label == nullptr)) {
-            continue;
-          }
-          const bool is_hop = (std::strcmp(r.label, "merged_hop") == 0);
-          const bool is_est = (std::strcmp(r.label, "ce_weights") == 0);
-          if (!is_hop && !is_est) {
-            continue;
-          }
-          slot_ends& p = slots[r.slot];
-          if (is_hop) {
-            p.has_hop  = true;
-            p.hop_end  = std::max(p.hop_end, r.end_ns);
-            p.hop_start = (p.hop_start == 0) ? r.start_ns : std::min(p.hop_start, r.start_ns);
-          } else {
-            p.has_est  = true;
-            p.est_end  = std::max(p.est_end, r.end_ns);
-            p.est_start = (p.est_start == 0) ? r.start_ns : std::min(p.est_start, r.start_ns);
+          if ((r.label != nullptr) &&
+              ((std::strcmp(r.label, "merged_hop") == 0) || (std::strcmp(r.label, "ce_weights") == 0))) {
+            by_commit.push_back(&r);
           }
         }
       }
+      std::sort(by_commit.begin(), by_commit.end(), [](const auto* lhs, const auto* rhs) {
+        return lhs->commit_ns < rhs->commit_ns;
+      });
       size_t              n_pairs    = 0;
       size_t              n_resident = 0;
       size_t              n_bad      = 0;
       std::vector<double> pf_us;
-      for (const auto& kv : slots) {
-        const slot_ends& p = kv.second;
-        if (!p.has_hop || !p.has_est) {
+      const shared_queue_state::occupancy_record* last_est = nullptr;
+      for (const auto* r : by_commit) {
+        if (std::strcmp(r->label, "ce_weights") == 0) {
+          last_est = r;
+          continue;
+        }
+        if (last_est == nullptr) {
           continue;
         }
         ++n_pairs;
-        if (p.est_end > p.hop_end + 1000) {
+        if (last_est->end_ns > r->end_ns + 1000) {
           ++n_bad;
           continue;
         }
-        if (p.hop_start < p.est_end) {
+        if (r->start_ns < last_est->end_ns) {
           ++n_resident;
-          pf_us.push_back(static_cast<double>(std::min(p.est_end, p.hop_end) - p.hop_start) / 1e3);
+          pf_us.push_back(static_cast<double>(std::min(last_est->end_ns, r->end_ns) - r->start_ns) / 1e3);
         }
       }
       double pf_mean = 0.0;
@@ -604,7 +592,7 @@ void shared_queue_stats_report()
         pf_max  = pf_us.back();
       }
       std::fprintf(stderr,
-                   "[metal_stats] fence wait, pair-free cross-check (Q24b): slots with both ends=%zu | hop "
+                   "[metal_stats] fence wait, pair-free cross-check (Q24b): hops with both ends=%zu | hop "
                    "buffer resident while its estimator ran: %zu (%.1f%%) mean=%.1fus median=%.1fus p95=%.1fus "
                    "max=%.1fus sum=%.1fus%s\n",
                    n_pairs,

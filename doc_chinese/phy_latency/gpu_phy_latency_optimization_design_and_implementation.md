@@ -5314,6 +5314,81 @@ estimator ran: … | <- IMPOSSIBLE PAIRS: … NOT evidence   （`est_end > hop_e
 * 离线**永远给不出正例**（回放的 6 种结构全 0%）：这符合"同队列、signaller 先提交"的构造，**但也意味着机制只能靠空口腿判定**。
 
 
+### 6.75 ★★ 腿 `p45-n78-fencewait2`：**栅栏被量清了（≈17 µs/跳，不是那 ~551 µs）**；"窗口=算力"被离线扫描否掉；**逐派发时间戳在本平台不可得**（仪器路线的终点，2026-09-26）
+
+> 腿：`logs/gnb_gpu_p45-n78-fencewait2_0926_1003.log*`（配方同 `p44`，戳 `6bd6ae3b76` = 修好的 Q24）。
+> 腿的规模：`lanes=146,214`、`merged_hop=551.4 µs/lane`、`busy=584.8`、窗口 312.0 s（由 `gpu busy (back_end) window` 读出）。
+
+#### ① ★ Q24 判读：**不变量全 0 ⇒ 数字可信；而 FENCE 只值 ~17 µs/跳**
+
+```
+fence wait on the device (Q24): waits=146236 resolved=146236 no-signal=0 unresolved=0 inconsistent=0
+  ambiguous=0 dropped=0 lost=0 | waiter resident while its signaller ran: 42230 (28.9%) mean=59.0us
+  median=54.9us p95=144.6us max=892.9us sum=2493486.6us worst kind=stage slot=12137; per kind: stage=42230 corr=0 grid=0
+```
+
+* **配对可信**：`inconsistent=0`（物理不变量全部满足）、`ambiguous=0`（没有同 id 两记录）、`unresolved=0`/`no-signal=0`（两头都找到了）——**§6.74 的 id 修法在空口上成立**。
+* **量级物理可信**：Σ = **2.49 s** ≪ 腿长 312 s（`p44` 那版是 25.6 万秒 ⇒ 假）。
+* **结论**：**28.9% 的跳**有一条 stage fence 的停等，mean 59.0 / median 54.9 / p95 144.6 / max 892.9 µs
+  ⇒ 平均 **0.289 × 59 ≈ 17 µs/跳** ⇒ 只占 `merged_hop`（551.4）的 **~3%**。
+  ⇒ **那 ~551 µs 的 cb 内驻留不是栅栏**（栅栏那条杠杆到此关闭；`corr`/`grid` 两端为 0）。
+
+#### ② ⚠ Q24b（免配对交叉校验）**第一版也错了**：**slot 号每超帧回绕**
+
+`p45` 读到 `slots with both ends=6144 | … median=235520990.0us max=276481224.7us`——**235 秒的"窗口"**，且**没有**打 IMPOSSIBLE 警告。
+根因：我按 **`slot` 号**聚合 `ce_weights`/`merged_hop`，而 lane 的 slot 号**每 10.24 s（一个超帧）回绕一次**；
+276 s 的腿里同一个号出现 ~27 次 ⇒ `min(start)`/`max(end)` 跨了整腿 ⇒ 假窗口；而"est_end > hop_end"的不变量被我自己放在**聚合之后**，聚合已经把两端拉宽，所以它不会触发。
+（与 Q9 的 sweep 缺陷同族：**用模 10240 的 slot 号当身份**。）
+
+**修法（已落地）**：改成**按时间配对**——"**最后一条先于该跳提交的 `ce_weights` 就是它的估计器**"（依据 `Q9-F` 的 signaller-committed-first）；不变量仍在配对后检查。
+离线复核：`hops with both ends=20`（正好 20 跳，之前是 6144 个假 slot）、`0.0%`。
+
+#### ③ ★ "窗口 = 算力"被离线扫描否掉（语料本来就是 3→25 PRB 的扫描，空口是 51 PRB）
+
+| 语料 PRB | 3 | 4 | 6 | 8 | 10 | 12 | 14 | 18 | 25 |
+|---|---|---|---|---|---|---|---|---|---|
+| `merged_hop`（离线 µs/lane）| 245.1 | 210.0 | 130.4 | 122.1 | **92.0** | 103.1 | 92.6 | 108.5 | 117.8 |
+
+⇒ 窗口**不随分配增长，反而从 245 掉到 ~100 并封顶** ⇒ **它不是按 RE 计的算力**（若是，51 PRB 应比 4 PRB 大十几倍）。
+⇒ 顺带解决了一个隐患：离线载体是 **4 PRB**、空口是 **51 PRB** ⇒ **几何差异不改变上面这条结论**（窗口对尺寸不敏感）。
+
+#### ④ ★★ 逐派发 GPU 时间戳：**本平台不支持**（`wip/metal_counter_probe.mm`，离线 1 秒）
+
+```
+device: Apple M4 Pro (unified memory: YES)
+  AtDispatchBoundary   : no   <- the one a per-dispatch timeline needs
+  AtStageBoundary      : YES
+  counter sets: timestamp = present (GPUTimestamp); statistic = absent
+  usable per-dispatch timeline: no
+```
+
+⇒ **"那 551 µs 里哪一段是执行、哪一段是驻留"在本平台无法直接测量**（Metal 只给每 cb 的起止）。
+⇒ **仪器路线到此为止**：能建的三条（F3 队列时间线、Q24/Q24b 栅栏时长、离线算力账单）都已建好并互相印证，剩下的只能靠**结构 A/B**（改一处结构、看窗口动不动）。
+
+#### ⑤ 于是"剩下的解释"被逼到唯一一条：**设备被同一时刻的其它工作分时**
+
+已被排掉：**不是算力**（③）、**不是栅栏**（①，仅 17 µs）、**不是 DL 负载**（`s78-dlcap40` vs `s80-ulcap40` 的 `merged_hop` 1032.8 vs 1029.6 µs，**同窗口**）、
+**不是被探针队列自身占满**（`busy(union)/window = 84.7/312.0 = 27%`；`back_end` 自身 88.0 s/312 s = 28%）。
+⇒ 只剩"**同一条 GPU 上、同一时刻、别的队列的工作**"（同伴跳 / 未探针的队列 / 系统）⇒ **判据 = 并发 1 的对照臂**。
+
+#### ⑥ `p46-n78-conc1`：预登记（**测量臂，按 §7.4 放行；V4 不受影响**）
+
+```bash
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p46-n78-conc1 \
+  --regime=stress OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1 \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=1
+```
+
+| 读数 | 预登记 |
+|---|---|
+| ★ `[ul_gpu_lane] busy split merged_hop` | **判据**：若**塌到 ≪541**（比如 <200）⇒ 那 ~551 µs 是**被同伴/其它队列分时**（⇒ 结构上要减少同刻竞争，而不是改跳内）；若**仍在 541 ± 40** ⇒ 是**本跳自己的驻留**（⇒ 跳内无可改，杠杆只能落在"每跳提交数/在飞跳数"这类结构量上）|
+| `[ul_gpu_lane] lane fence … own=` / Q24 不变量 | 预期仍 `own=0`、不变量全 0（若 `inconsistent>0` 则该行照旧不可读）|
+| `[ul_gpu_lane] queue: weights commit -> weights start`、`period` | 并发 1 下队列项**预期变大**（§7.5）——记录，不作判据 |
+| V1 中位 / `[ul_gpu_pipeline]` | **口径仍是参考**；并发 1 的跨度**预期上升**（§7.5 的实测），**判据在上面的窗口** |
+| 契约 / `cbs/lane` / `gaps` / 池 | 8/8 / **2.00 (max=2)** / 0 / `starved=0`、`dropped=0`（**不允许变**）|
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
