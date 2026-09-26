@@ -7478,6 +7478,65 @@ samples/中位/stale、`[ul_rx_wait]`、`[ul_rx_timing]`、`[dl_tx_slack]`、`[d
 这是**容量/V2** 的账（池、`starved_events`、`stale`），不是 V3 的账。
 
 
+### 6.117 V3 的第一条修复臂：**传输参数扫描**（用户裁定"先改传输参数，比较容易"）——预登记（2026-09-26）
+
+#### ① 为什么这两个环深**值得一飞**（此前的"arm C 不飞"是**分析**结论，不是空口读数）
+
+一帧 ≈ 8200 B（sc12、2733 样点）⇒ 在 23.04 Msps 下：
+
+| 环 | 当前 | 折算时长 | 实测最坏停顿 | 覆盖？ |
+|---|---|---|---|---|
+| **TX `num_send_frames`** | **64** | **7.6 ms** | **84.7 ms**（`transmit()` max，两模式都读到） | ❌ **差 ~11 倍** |
+| RX `num_recv_frames` | 512 | 60.7 ms | **101.2 ms**（`recv` max） | ❌ 差 ~1.7 倍 |
+
+⇒ 两个方向的环都**短于**实测最坏停顿。RX 环 64→256→512 的历史 A/B 已经证明"深环把丢样点换成可容忍的积压"；TX 环 8 年没动过（配置注释说"TX 环不是杠杆"，依据是"环已满、样点不动"的**分析** + 台架复现不出）。
+**本条腿就是把这个分析放到空口上检验。**
+
+#### ② 命令（**不改配置文件**：`--ru_sdr.device_args=` 覆盖 YAML；一次只改一个变量）
+
+```bash
+cd /Users/jiachengwang/dev/ocudu
+COMMON="--expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1"
+
+# B0 对照（原样：recv 512 / send 64）
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml   bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p65-n78-txring64 --regime=stress $COMMON
+
+# B1 TX 环 4×（≈30 ms）
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml   bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p66-n78-txring256 --regime=stress   --ru_sdr.device_args=type=b200,num_recv_frames=512,num_send_frames=256 $COMMON
+
+# B2 TX 环 8×（≈61 ms，与 RX 环等量）
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml   bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p67-n78-txring512 --regime=stress   --ru_sdr.device_args=type=b200,num_recv_frames=512,num_send_frames=512 $COMMON
+
+# B3 RX 环 2×（≈121 ms，唯一能覆盖实测最坏 recv 停顿的深度）
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml   bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p68-n78-rxring1024 --regime=stress   --ru_sdr.device_args=type=b200,num_recv_frames=1024,num_send_frames=64 $COMMON
+
+# B4（可选）USB 传输尺寸 16 KiB（更少更大的传输）
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml   bash doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p69-n78-frames16k --regime=stress   --ru_sdr.device_args=type=b200,num_recv_frames=512,num_send_frames=64,recv_frame_size=16384,send_frame_size=16384 $COMMON
+```
+
+#### ③ 预登记判据（**先写死，跑完不追认**）
+
+| 臂 | 成功 = | 反例 = |
+|---|---|---|
+| B1 / B2 | RF 失败数与 `[dl_tx_call] over 1ms` **相对 B0 下降 ≥2×**，且 `gaps=0`、V1（`[ul_gpu_pipeline]` 中位）仍在 **1411–1490** 带内 | 落回腿间散布（700–1700、率 ~0.2%）⇒ **环深不是杠杆** |
+| B3 | `[ul_rx_timing]` 的 `over 1ms/over 5ms` 或 `recv` max 明显下降，`gaps` 保持 0 | 同样不动 ⇒ RX 环也已到位 |
+| B4 | 同上（失败数或传输阻塞次数下降）| —— |
+
+无论成败都要读：RF 失败的**分类**（underflow/late）、`[dl_tx_slack]`（`AT/BELOW 0`、min）、`[ul_rx_timing]`（recv/loop/slip）、`gaps/ts0/rx_overflows`、`[ul_rx_pool]`、契约、`cbs/lane`、`stale`。
+
+#### ④ 跑完一条命令出对照
+
+```bash
+python3 doc_chinese/phy_pipeline_gpu/wip/repro_compare.py p65-n78-txring64 p66-n78-txring256 p67-n78-txring512 p68-n78-rxring1024
+```
+
+#### ⑤ 结果会导向
+
+* **任一臂成功** ⇒ 传输缓冲就是杠杆 ⇒ 继续（把成功值写进交付配置，需要改 config，届时请你批准）；
+* **全部落回散布** ⇒ 环深/尺寸不是杠杆，坐实"USB 链路本身" ⇒ 转 **(a) 宿主亲和/优先级臂**，或按 §6.113 ⑤ 讨论判据重述；
+* ⚠ 若 UHD 拒绝某个值（帧尺寸/环数超出其允许范围），腿会在启动时报错 —— **那本身也是一条读数**（记下来，换一个值继续）。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
