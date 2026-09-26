@@ -6173,9 +6173,52 @@ else if (!wait_per_slot || last_symbol_of_slot) { dft->wait_slot(slot); }   // �
 
 | # | 候选 | 机制 | 代价/收益（预登记）|
 |---|---|---|---|
-| 1 | ★ **把 fenced 相关构建并进前端那条"开着的块"** ⇒ `cbs/lane` **2.00 → 1.00** | 相关构建只依赖**宿主参数**（与抽取无依赖）⇒ 可以编码进**前端从槽首就开着的那条 cb**，于是"每跳一次提交"成为字面事实 | **两个目标都前进**（提交更少、无宿主中途参与）；窗口侧预期是省掉那条约 43–48 µs 的独立 cb 驻留（`busy` 侧确定，residency 侧约 −20 µs）⇒ V1 预期 **−25…−50 µs** |
+| 1 | ⛔ **~~把 fenced 相关构建并进前端那条"开着的块"~~ ⇒ 撤回**，理由见 §6.90（那会重新引入 5.9.89 修掉的**平台正确性缺陷**）| —— | —— |
 | 2 | **S-E：并发/队列结构**（把驻留**遮住**而不是去掉）| 并发 2 已实测比 1 好 **227 µs** 的 V1；不改数据路径 | 触 V4 的是"每跳提交数"，并发不改它；需再裁 |
 | 3 | **减少跳内派发数**（CE/eq/demap 4 次）| 每次派发在空口有 ~38 µs（热）级驻留 | 与 §6.63/6.64 的 5–14 µs 口径需先对齐 |
+
+
+### 6.90 ★★★ 用户追问的确认：**融合后确实曾是 `cbs/lane=1.00`；今天的 2.00 是 2026-09-23 的一个"平台正确性修复"带来的，且不能退回**（2026-09-26）
+
+> 用户问：**目前的 2.00 是否已经破坏了"CPU 全程靠边站"？是否需要恢复到 1.00（他记得融合后就是 1.00）？**
+
+#### ① 历史确认：**用户记得没错**
+
+| 时代 | `cbs/lane`（车道总数）| `busy split` |
+|---|---|---|
+| 09-19（D1 之前）| **3.00–3.73** | `ch_est` 96–157 + `ch_wt` 296–434 + `eq_demap` 73–114 |
+| **09-21（D1 step 2 落地）** | **1.00** | 单条：`eq_demap=434–1034 µs (100% of busy)` |
+| **今天（交付）** | **2.00** | `ch_wt=43–48`（相关构建）+ `merged_hop=541.8` |
+
+⇒ 融合（D1）之后**确实是 1.00**（一跳一条 cb）。
+
+#### ② 2.00 是**修复**带来的，不是设计倒退：`5.9.89` 的原文
+
+```
+5.9.89 - a fenced correlation build fixes it and passes the gate, and the fix's real price is the extra submission
+… What is left is the measurement itself: on this GPU and driver a memory barrier between two
+  dispatches of one encoder does not deliver the producer's writes to the consumer, and a
+  command-buffer boundary does.
+… So the fix is landed … The correlation build opens its own command buffer directly … signals the
+  shared back-end fence, and commits. The weights buffer waits for that generation before its encoder
+  opens, so the GPU orders itself and THE HOST NEVER BLOCKS.
+… The price is the point of the commit. Paired on identical hop sets … the default sits at ~215us a
+  hop, the fenced form at ~275us and the host-wait form at ~285us. The extra COMMAND BUFFER costs ~50us;
+  the host's wait adds only ~10us more …
+```
+
+三点关键：
+1. **根因是平台缺陷**：**同一条 encoder 内、两个派发之间的内存屏障不能把生产者写的值传给消费者；命令缓冲边界可以** ⇒ 相关构建（产出 `A`/`R_hp`）与权重核（消费它）**必须在不同的命令缓冲里** ⇒ **2 条 cb 是这个跳在这台 GPU 上的下界**。
+2. **修复是刻意做到"宿主不阻塞"的**（"the GPU orders itself and the host never blocks"）⇒ 2.00 **不是**"CPU 中途参与"：两条 cb 背靠背提交完，CPU 就走开了；被实测并否决的是 `host_wait` 形式（285 vs 275 µs）。
+3. **它的价钱被明确记账**：**多出来的这条 cb ≈ 50 µs/跳**（配对同 hop 集）。
+
+#### ③ ⇒ 结论与更正
+
+* **2.00 没有破坏"靠边站"的实质**（无宿主等待、无中途回合）；它只是"CPU 每跳摸设备两次"。
+* **"恢复到 1.00"不可行**：那条被省掉的 cb 正是**平台缺陷的规避手段**；退回 1.00 = **重新引入 `A`/`R_hp` 的竞态**（5.9.89 之前那些腿就是 1.00，那时这个缺陷是存在的）。
+* ⇒ **§6.89④ 候选 1（把相关构建并进前端那条开着的块）撤回**：D1 之下前端块**会被并进跳的那条 cb** ⇒ 那正好把"生产者"和"消费者"放回**同一条命令缓冲** ⇒ **违背修复**。
+* ⇒ **"每跳一次提交"在本平台对这个跳不可达**：把相关构建与权重核放进**同一条 dispatch**（kernel 融合）才能既保序又省一条 cb，但 Metal **没有跨线程组的 dispatch 内同步**（除了逐线程组的 barrier）⇒ 两个不同几何的核无法在一次派发内串起来 ⇒ **也不可行**。
+* ⇒ 因此：**当前的 2.00 是"两个首要目标"下的最优形态**（一跳一提交 + 一跳一必需边界），那 ~50 µs 是**平台的正确性税**，应记入 §3.1.1 的固定开销，而不是当作可优化项。
 
 
 ## 7. 杠杆与候选改动（技术账）
