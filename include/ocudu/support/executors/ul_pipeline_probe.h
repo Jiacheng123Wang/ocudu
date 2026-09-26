@@ -80,7 +80,14 @@ inline bool ul_slot_completed_by_block(uint64_t  block_begin,
 
 /// \brief Measures the UL compute pipeline latency (IQ samples received -> LDPC decoded with CRC OK).
 ///
-/// - record_start() is called by the lower PHY baseband processor right after the IQ samples of a slot are received.
+/// - record_start() is called by the lower PHY baseband processor when the samples of a slot START ARRIVING, i.e.
+///   BEFORE receiver.receive() returns (lower_phy_baseband_processor::ul_process). It used to be recorded after the
+///   call returned, which excluded the wait for the samples - and with whole-slot blocks, whose hand-over happens at
+///   the slot's END, that made this series read "the transforms" rather than "the transforms plus a slot of waiting".
+///   The move was deliberate (it is what makes the series comparable across receive policies, S-7g-13), and the price
+///   is that the NAME no longer describes the CONTENT: [ul_time_frequency] = [ul_rx_wait] + the front end's own work
+///   (see the [ul_rx_wait] note below). Measured on an all-CPU n1 leg, 2026-09-26: 1111.7us median against
+///   [ul_rx_wait] 1054.0us, i.e. 57.7us of transforms - the "tens of microseconds" the pre-move series used to read.
 /// - record_end_crc_ok() is called by the PUSCH decoder notifier when the transport block CRC check passes.
 ///
 /// Starts and ends are matched in order (FIFO): with the light traffic of a single UE there is one PUSCH in flight
