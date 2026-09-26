@@ -5331,6 +5331,22 @@ grep -aE "ul_gpu_pipeline|queue: weights commit|commit -> completion|ul_gpu_lane
   是否**每个时隙都落在同一相位**——若不等长符号让相位逐槽漂移，网格就会逐槽偏移。**H1/H3 是同一个根的两种表现**。
 * （弱）**H2 — 宿主饱和**：接收调用 20×（14.8M vs 0.74M），但 `recv over 1ms` 更少 ⇒ 证据不支持，降级。
 
+**★★ 判别读码结果：H1/H3 坐实（机制已可判定，不需要腿）**
+
+`symbol_grid_position`（`include/ocudu/phy/lower/processors/uplink/uplink_processor_baseband.h:48`）**只有三个字段**：
+`nof_samples_to_boundary` / `nof_samples` / `nof_symbols` —— **没有任何"这是网格的第几个符号"的信息**。
+而 `locate_symbols()` 的实现（`lib/phy/lower/processors/uplink/uplink_processor_impl.cpp:362` 起）是**按时间戳在"子帧符号图案"里的位置**算出来的：
+`i_sample = timestamp % (一个子帧的样点数)` → 走 `symbol_sizes[]` 得到"距下一个符号边界多少样点"和"整符号有多少个"，**返回的只是样点计数**。
+
+⇒ **样点落进网格哪一行，是由填充偏移（`rx_fill`/`rx_offset`）决定的，不是由时间戳的符号索引决定的**（`lower_phy_baseband_processor.cpp` 1202–1242 的 `rx_fill` 累加）。
+于是只要**块边界与填充偏移在时隙交界处不一致**，整个时隙的样点就会被**按符号整体旋转**放进网格：
+**DM-RS 落到别的符号行上 ⇒ 估计器拿到的不是 DM-RS ⇒ MCS 落底、TBS ~200 bit、吞吐 ↓17×，而 `gaps=0`、契约 8/8、池绿** —— **与 `p41` 的全部观察逐条吻合**。
+两条已知能造成这种不一致的路径：
+① 1220–1240 的"窗口放不下一个整符号 ⇒ 退役缓冲、在当前边界重开"（重开后 `rx_offset=0`，但边界未必是**时隙**的第一符号）；
+② 块被 `nof_samples_per_slot - rx_offset` 截断（1217 的 while 循环）时，块的长度与时隙相位的关系。
+**⇒ S-B 的硬约束第 ③ 条就是它**：**收包粒度可以改，但"样点→网格行"的映射必须仍按时间戳/时隙相位来锚定**（而不是按填充偏移），否则就会重现 `p41` 的旋转。
+⇒ 这也解释了 §7.6.0b 里那个"符号级路径把 `released`/`batched` 也一起关掉"的现象：**那条路径与整槽路径在"网格怎么装"上是两套语义**，不是同一个语义的不同粒度。
+
 **下一步判别读码（不飞腿）**：`uplink_processor_baseband::locate_symbols()` 与 `symbol_grid_position` 的语义（符号索引相对哪个参考、`nof_samples_to_boundary` 怎么算），
 以及符号路径的 fill/retire 相位；对照整槽路径的 `phase = last_rx_timestamp % nof_samples_per_slot` 对齐。
 **S-B 必须保住的三件（现已明确）**：① `batched=` 不为 0（前端仍按"已到样点"成批）；② `released=` 不为 0（D1 交棒仍每槽一次）；
