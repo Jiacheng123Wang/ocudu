@@ -19,6 +19,12 @@ struct dtls_appconfig;
 ///
 /// \param[out] app CLI11 application to configure.
 /// \param[out] config DTLS configuration that stores the parameters.
-void configure_cli11_dtls_args(CLI::App& app, dtls_appconfig& config);
+void configure_cli11_dtls_peer_args(CLI::App& app, dtls_appconfig& config);
+
+/// TODO docs.
+void configure_cli11_dtls_client_args(CLI::App& app, dtls_appconfig& config);
+
+/// TODO docs.
+void configure_cli11_dtls_server_args(CLI::App& app, dtls_appconfig& config);
 
 } // namespace ocudu

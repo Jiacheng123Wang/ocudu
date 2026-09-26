@@ -5,6 +5,7 @@
 #include "cu_appconfig_cli11_schema.h"
 #include "apps/helpers/f1u/f1u_cli11_schema.h"
 #include "apps/helpers/logger/logger_appconfig_cli11_schema.h"
+#include "apps/helpers/network/dtls_cli11_schema.h"
 #include "apps/helpers/network/sctp_cli11_schema.h"
 #include "apps/helpers/tracing/tracer_appconfig_cli11_schema.h"
 #include "apps/services/app_execution_metrics/executor_metrics_config_cli11_schema.h"
@@ -28,6 +29,9 @@ static void configure_cli11_f1ap_args(CLI::App& app, ocu::cu_f1ap_appconfig& f1a
       "a deprecated alias and should not be used.")
       ->capture_default_str();
   configure_cli11_sctp_socket_args(app, f1ap_params.sctp);
+
+  CLI::App* dtls_subcmd = add_subcommand(app, "dtls", "DTLS configuration");
+  configure_cli11_dtls_server_args(*dtls_subcmd, f1ap_params.dtls);
 }
 
 void ocudu::configure_cli11_with_cu_appconfig_schema(CLI::App& app, cu_appconfig& cu_cfg)
