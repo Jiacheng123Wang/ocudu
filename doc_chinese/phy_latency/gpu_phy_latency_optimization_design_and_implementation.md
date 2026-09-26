@@ -5198,6 +5198,15 @@ host_span.push_back(stage_host[t] - stage_host[f]); // ← host 跨度本不需�
 (b) **把 host 侧的尺子延伸到融合路**（lane clock 的 `stage_entry`/`extraction_commit` 已经是 host 打点，`handover_us` 本应可用 —— 它也是 "no samples"，**这一个是真的可疑**，下一步查它）。
 ⇒ **结论**：拆那 ~830 µs 在交付路上**没有现成尺子**，必须先补（b）或借（a）。
 
+**★ 第三次读码：`handover_us` 为空的根因找到并已修（§7.6.0b 的收口）**：
+融合路上**没有任何地方打"抽取提交"这个点** —— `shared_burst` 模块里没有 `mark_extraction_commit()`，
+而 `merged` 分支的两个出口（`shared_burst::adopt()` 成功、以及 adopt 失败时的回退 `[st.cb commit]`）**也都没打**。
+其它 lane order（`event`/`burst`/`host_wait`）都经 `end_stage()`/`end_stage_async()`，那里有打点 ⇒ **所以离线（replay 全是 host_wait）看不见这个洞，只有空口腿上是 "no samples"**（`p37`–`p41` 全中）。
+**修法**：在 `merged` 分支的出口补一次 `lane_clock.mark_extraction_commit()`（引擎 `ocudu_metal_mmse_engine.mm`，带注释说明"为什么必须在这里"）。
+**语义**：融合路上"抽取提交"= **这条 lane 的第一个命令缓冲成为 lane 的**那一刻（adopt 或回退 commit）⇒ `handover_us` = **宿主从跳入口到交出 lane 的那一段**，正是它设计时要量的东西。
+**验证**：⚠ **离线验不了**（replay 的跳非延迟 ⇒ 适配器强制 `host_wait`，永远走不到 merged 分支）⇒ **只能靠一条腿**：应在 `[ul_gpu_lane] gap: stage entry -> extraction commit (host)` 上看到样本而不再是 "no samples"；
+**不变量**：改动只加一次诊断时钟调用（除 probe 报告外无人读它），`ctest -L phy -j 1` 193/193 通过（CE 单测的 Test 13 正是钉 lane order 的那条）。
+
 **（下面这段是第一次读码的中间结论，保留以记录推理过程）**
 
 ⇒ **尺子的施工内容（两件）**：

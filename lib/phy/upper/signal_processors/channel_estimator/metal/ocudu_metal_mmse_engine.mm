@@ -4039,6 +4039,15 @@ static bool encode_run(mmse_engine_impl*     e,
       // stages follow. Said HERE because this is where it becomes true (5.9.61/5.9.66).
       ocudu::metal::shared_burst::set_commit_label(ocudu::metal::gpu_lane_probe::stage::merged_hop);
     }
+    // Diagnostics (ocudu_metal_lane_clock.h): on THIS route the lane's first command buffer is the merged
+    // one, and it becomes the lane's either by adoption (above) or by the fallback commit - so this is
+    // where "the host has handed the lane over" is, and the mark has to be HERE. It used to be nowhere:
+    // the adopt path does not commit and the burst module never marks, so lane_clock.handover_us stayed
+    // at -1 for every fused hop and the probe printed "gap: stage entry -> extraction commit (host):
+    // no samples" on every air leg (measured p37-p41). The other orders reach end_stage()/
+    // end_stage_async(), which mark it, which is why this was invisible offline (the replay's
+    // non-deferred hops are host_wait).
+    ocudu::metal::lane_clock.mark_extraction_commit();
     phase.committed();
     return true;
   }
