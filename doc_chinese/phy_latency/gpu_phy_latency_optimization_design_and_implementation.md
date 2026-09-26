@@ -6318,6 +6318,46 @@ reformat.noise.cfo_from_device = device_ls_valid;
 3. 两条腿的结果一起判，再决定是否把某个多 cb 结构提升为**交付候选**并更新 V4 阈值。
 
 
+### 6.93 ✅ 测量 B 的旋钮落地：`OCUDU_DFT_SKIP_SLOT_WAIT=1`（默认关，构造上安全）（2026-09-26，本会话）
+
+`ofdm_demodulator_impl.cpp::finish_symbol()` 里，关掉 D1 后本槽**最后一个符号**会落到 `dft->wait_slot(slot)`（**阻塞宿主**）那一支。
+新增开关让它走一条**只在"网格由设备写、由设备消费"（`wait_per_slot`）时**才生效的新分支：
+
+```cpp
+} else if (skip_slot_wait_enabled() && wait_per_slot && last_symbol_of_slot) {
+  // 测量臂：消费者自身的设备侧 fence 就是次序，宿主不必在这里阻塞（只打印一次以标注这条腿是测量腿）
+} else if (!wait_per_slot || last_symbol_of_slot) {
+  dft->wait_slot(slot);
+}
+```
+
+* **构造上安全**：`wait_per_slot = device_write && grid_consumed_on_device` —— 这正是代码**本来**用来给"槽内其它符号"跳过等待的**同一个谓词**，
+  所以带宿主读者的配置（解调器自测、`cpu_gpu` 路）**永不跳过**，不可能读到 GPU 还没写的内存 ✓
+* **默认关**：生产路走 D1 交棒，**根本到不了这一支**；实测默认路**零变化**（回放日志里 0 次 "SKIPPED" 提示）✓
+* **判据**：`ctest -L phy -j 1` **193/193** ✓
+
+**两条测量臂现在都可飞**（都只作读数，生产路默认不变）：
+
+```bash
+# A：多 cb 结构（3.00，宿主仍背靠背；零代码改动）
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p50-n78-event3cb \
+  --regime=stress OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1 OCUDU_CE_LANE_ORDER=event \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+
+# B：无交棒结构（3.00，且跳过那次多余的宿主等待）
+sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p51-n78-nod1-nowait \
+  --regime=stress OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_METAL_GPU_TIME=1 \
+  OCUDU_DFT_RELEASE_BLOCK=0 OCUDU_DFT_SKIP_SLOT_WAIT=1 \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2
+```
+
+**判读**（§6.92③ 的表 + §6.91④）：`busy split`/`merged_hop`/`residency` 是否下降；**`[ul_dft_wait]` 必须 no samples**、`gpu_wait` 0.0、
+`host: extraction commit -> weights commit` 与 `host: weights commit -> burst commit` 应出现样本且是 **µs–几十 µs**（=背靠背）；
+契约 8/8、`crossings 0.00+0.00`、`gaps=0`、池绿**不许变**；`cbs/lane` 3.00 是预登记值（**不是**生产判据）。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

@@ -421,6 +421,29 @@ void ofdm_symbol_demodulator_impl::submit_symbol(resource_grid_writer& grid,
       .port_index = port_index, .symbol_index = symbol_index, .valid = true, .device_write = device_write};
 }
 
+/// \brief Q27 (dev doc 6.93): whether this process SKIPS the per-slot HOST wait for the front end's
+/// transforms (`OCUDU_DFT_SKIP_SLOT_WAIT=1`, **default off**).
+///
+/// WHY IT EXISTS. With the hand-over armed (the production path) the block is RELEASED uncommitted and
+/// the hop commits it, so no host wait happens at all - that is the hand-over's whole point. Disarm it
+/// (`OCUDU_DFT_RELEASE_BLOCK=0`) and the slot's last symbol falls back to `dft->wait_slot(slot)`, a
+/// blocking `waitUntilCompleted`: a measurement of "what does the no-hand-over structure cost" would then
+/// be measuring a world in which the CPU comes back into the hop, which is not the world this design is
+/// for (G1/G2, high-level doc 0.1). This switch lets that structure be measured with the CPU still out
+/// of it.
+///
+/// WHY IT IS SAFE. It only ever skips where the code ALREADY relies on the device-side ordering: the
+/// branch below skips the wait for every symbol but the last of a slot whenever `wait_per_slot` holds,
+/// i.e. whenever the deployment declared that the grid is written on the device AND consumed on the
+/// device. At the last symbol the same predicate is reused here, so a configuration with a host reader
+/// (the demodulator's own test, a `cpu_gpu` route) never skips and can never read memory the GPU has not
+/// written.
+static bool skip_slot_wait_enabled()
+{
+  const char* env = std::getenv("OCUDU_DFT_SKIP_SLOT_WAIT");
+  return (env != nullptr) && (std::strtoul(env, nullptr, 10) != 0);
+}
+
 void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, unsigned slot)
 {
   ocudu_assert(slot < max_pipeline_depth, "Invalid pipeline slot {}.", slot);
@@ -501,6 +524,17 @@ void ofdm_symbol_demodulator_impl::finish_symbol(resource_grid_writer& grid, uns
       ocudulog::fetch_basic_logger("PHY").info(
           "OFDM demodulator: the slot's transforms are handed over to the fused lane instead of being "
           "committed and waited for (D1 step 2) - the hop commits them once, with its own stages");
+    }
+  } else if (skip_slot_wait_enabled() && wait_per_slot && last_symbol_of_slot) {
+    // Measurement arm (see skip_slot_wait_enabled): the grid is written and consumed on the DEVICE, so
+    // the consumer's own device-side fence orders it and the host does not have to block here. Said once,
+    // because a run that took this branch is a measurement run and its readings must be labelled as one.
+    static bool reported_skip = false;
+    if (!reported_skip) {
+      reported_skip = true;
+      ocudulog::fetch_basic_logger("PHY").info(
+          "OFDM demodulator: the per-slot HOST wait is SKIPPED (OCUDU_DFT_SKIP_SLOT_WAIT=1, measurement "
+          "arm): the slot's consumers are ordered by the device fence instead");
     }
   } else if (!wait_per_slot || last_symbol_of_slot) {
     dft->wait_slot(slot);
