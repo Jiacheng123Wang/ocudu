@@ -5347,6 +5347,25 @@ grep -aE "ul_gpu_pipeline|queue: weights commit|commit -> completion|ul_gpu_lane
 **⇒ S-B 的硬约束第 ③ 条就是它**：**收包粒度可以改，但"样点→网格行"的映射必须仍按时间戳/时隙相位来锚定**（而不是按填充偏移），否则就会重现 `p41` 的旋转。
 ⇒ 这也解释了 §7.6.0b 里那个"符号级路径把 `released`/`batched` 也一起关掉"的现象：**那条路径与整槽路径在"网格怎么装"上是两套语义**，不是同一个语义的不同粒度。
 
+**★★★ S-B 的改动清单（读码落定，三处；`p41` 的"批量化被关"是显式开关，不是时序副作用）**
+
+1. **`ofdm_demodulator_impl.h` 的 `block_batching_enabled()` —— 这就是"收包粒度"与"批量化"的耦合点**：
+   ```cpp
+   const char* rx = std::getenv("OCUDU_UL_RX_SYMBOLS");
+   return (rx == nullptr) || (std::strtoul(rx, nullptr, 10) == 0);   // ← N>0 ⇒ 批量化被直接关掉
+   ```
+   ⇒ `p41` 的 `batched=0/0`/`released=0` **是这条 `return` 造成的**（`OCUDU_DFT_OPEN_BLOCK=0` 是另一个独立开关）。**C1 = 去掉这条耦合**。
+2. **批的边界（`set_lane_slot()` 的关块时刻）**：现在块只在**下一个时隙开始**时关（"上一槽的样点都到了、变换都编码了"）⇒ 一槽一批。
+   **C2 = 把关块/派发/交棒的触发从"下一槽"改成"已到样点的最后一组"**（收包侧已经知道 `position.nof_symbols`）。
+3. ★ **网格锚定（约束③ / H1/H3）**：**样点落进网格哪一行，必须仍按时间戳/时隙相位**，不能按 `rx_fill` 累加；具体是 1220–1240 的"退役并重开"路径**必须重锚到时隙的第一个符号**（它现在在新边界重开，而那个边界未必是符号 0）。
+   **C3 = 修这条路径的相位锚定。** 只要 C1/C2 不碰 `rx_offset`/`rx_fill` 的**装填语义**、C3 把相位钉住，`p41` 那种"整槽按符号旋转"就不会重现。
+
+**离线自证的网（C1–C3 的判据，先定死）**：
+* **网格 dump 与整槽路径逐字节相同**（`ul_chain_replay` 的 `.bin` 就是网格副本）——这是**约束③ 的直接判据**，也是本工作流最熟的那类网；
+* `dft` 计数器：`batched=` 与 `released=` 都**不为 0**、且 `batch_max` 仍为 14（分组后应为"每槽 k 批"）；
+* `ctest -L phy -j 1` 全绿 + `ab_dumps` 两组；
+* 空口腿（在读数达标后再飞）：`batched=`/`released=` ≠0、整跳提交数（§8 Q22）、TBS/吞吐不塌（Q21 的复发判据）。
+
 **下一步判别读码（不飞腿）**：`uplink_processor_baseband::locate_symbols()` 与 `symbol_grid_position` 的语义（符号索引相对哪个参考、`nof_samples_to_boundary` 怎么算），
 以及符号路径的 fill/retire 相位；对照整槽路径的 `phase = last_rx_timestamp % nof_samples_per_slot` 对齐。
 **S-B 必须保住的三件（现已明确）**：① `batched=` 不为 0（前端仍按"已到样点"成批）；② `released=` 不为 0（D1 交棒仍每槽一次）；
