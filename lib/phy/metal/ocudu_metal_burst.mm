@@ -153,6 +153,10 @@ struct burst_state {
   /// What the buffer this burst commits carries, for the lane probe's busy split (see set_commit_label()).
   ocudu::metal::gpu_lane_probe::stage commit_label = ocudu::metal::gpu_lane_probe::stage::equalizer_demapper;
 
+  /// True when THIS burst is an ablated one (see ablate_next_burst): its dispatches are bound to the
+  /// no-op pipeline and its buffer carries the "ablated" label, so the report keeps the two apart.
+  bool ablate_this_burst = false;
+
   ~burst_state()
   {
     // A thread that leaves with an open burst (an incomplete burst, or a stage that bailed out
@@ -179,6 +183,28 @@ burst_state& state()
 /// threads that actually encode the stages' dispatches. The first version of this knob did exactly that
 /// and would have ablated nothing; dev doc 6.132 records it next to the null leg it was found on.
 std::atomic<void*> g_ablation_pipeline{nullptr}; // __bridge'd: kept alive by g_ablation_owner below
+std::atomic<uint64_t> g_burst_index{0};          ///< how many bursts have been opened, for 1-in-N ablation
+
+/// \brief Whether the burst ABOUT TO BE OPENED is an ablated one.
+///
+/// 1-IN-N ON PURPOSE. Ablating every hop makes the uplink undecodable, and an undecodable uplink cannot be
+/// ATTACHED to at all - measured on p79: the phone never got in. Ablating one hop in N keeps the link
+/// alive (HARQ covers the lost ones) and the ablated buffers are told apart by their own label, so the two
+/// populations never mix in the report.
+bool ablate_next_burst()
+{
+  const char* env = std::getenv("OCUDU_LANE_ABLATE");
+  if ((env == nullptr) || (std::strtoul(env, nullptr, 10) == 0)) {
+    return false;
+  }
+  unsigned every = 1;
+  if (const char* e = std::getenv("OCUDU_LANE_ABLATE_EVERY")) {
+    const unsigned long v = std::strtoul(e, nullptr, 10);
+    every = (v == 0ul) ? 1u : static_cast<unsigned>(v);
+  }
+  const uint64_t index = g_burst_index.fetch_add(1, std::memory_order_relaxed);
+  return (every <= 1u) || ((index % every) == 0u);
+}
 id<MTLComputePipelineState> g_ablation_owner = nil; ///< the strong reference, so the __bridge'd pointer stays valid
 
 /// \brief The ABLATION pipeline, built lazily on first use (see shared_burst::set_ablation_pipeline).
@@ -349,8 +375,10 @@ static bool burst_ensure_open(burst_state& s)
   if (queue == nil) {
     return false;
   }
-  s.cb  = [queue commandBuffer];
+  s.ablate_this_burst = false;
+  s.cb                = [queue commandBuffer];
   if (s.cb != nil) {
+    s.ablate_this_burst = ablate_next_burst();
     // Back-end stage fence (S-7g-19, Step 1'): the lane burst reads what the ESTIMATOR wrote - the
     // weights, the per-symbol estimates and the noise variance - and the estimator wrote it into a
     // command buffer of its own, committed as soon as it was encoded so that its GPU work overlaps
@@ -427,7 +455,8 @@ id<MTLComputeCommandEncoder> shared_burst::encoder(id<MTLComputePipelineState> p
     // The ABLATION arm swaps only what the encoder BINDS: the bookkeeping (and therefore the stage
     // barriers, the fence structure and the dispatch grid each caller asks for) stays exactly what the
     // delivery path does, which is the whole point of the arm (dev doc 6.132).
-    const id<MTLComputePipelineState> ablate = ablation_pipeline_lazy();
+    const id<MTLComputePipelineState> ablate =
+        s.ablate_this_burst ? ablation_pipeline_lazy() : nil;
     [s.enc setComputePipelineState:((ablate != nil) ? ablate : pipeline)];
     s.pipeline = pipeline;
   }
@@ -606,6 +635,11 @@ bool shared_burst::commit()
   // taken immediately before it: this buffer can carry the stage fence's wait and the grid-production wait, so
   // the order between its commit and its signaller's is the reading that says whether the wait can resolve.
   const char* burst_label = "lane_burst";
+  if (s.ablate_this_burst) {
+    // The ABLATION arm's buffers must be readable on their own: this label is what the Q9-F3 per-label
+    // table prints them under, so an ablated hop never contaminates the delivery numbers (dev doc 6.133).
+    burst_label = "merged_hop_ablated";
+  }
 #if defined(OCUDU_METAL_STATS)
   if (s.commit_label == gpu_lane_probe::stage::merged_hop) {
     // The label names what the buffer CARRIES (Q9-F3's occupancy report reads it against the slots): on the

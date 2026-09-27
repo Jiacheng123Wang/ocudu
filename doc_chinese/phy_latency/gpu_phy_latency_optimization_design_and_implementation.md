@@ -8308,6 +8308,31 @@ cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n
 判据与 §6.131② 相同（对照 `p72` 的 `merged_hop` 468.7）：**40–80 µs ⇒ 那 ~450 是这些 kernel 的执行**；**400–470 µs ⇒ 与"活"无关**。
 
 
+### 6.133 `p79` 手机接不进来 ⇒ 消去法改成 **1-in-N**（每 N 跳消去一跳，并给消去的那条 cb 单独打标签）（2026-09-27）
+
+* **`p79` 的事实**：`OCUDU_LANE_ABLATE=1`（全消去）时**手机无法接入**。原因不是路径/构建，而是**设计**：消去法把估计/均衡/解映射的**执行**全部换成空 kernel ⇒ 上行**一个 TB 都解不出来**（LLR 全是垃圾），而**接入过程本身就需要上行能被解出**（Msg3/RRC）⇒ 链路根本建立不起来。
+  ⚠ 我在 §6.131② 写的"DL 不受影响、手机应能保持接入"**是错的**，这条更正以本节为准。
+* **改法（已实现）**：`OCUDU_LANE_ABLATE_EVERY=N` ⇒ **每 N 跳只消去一跳**（`ablate_next_burst()`，在 burst 打开时按进程级计数决定），HARQ 足以覆盖这 1/N 的损失 ⇒ 链路活着、能接入；
+  被消去的那条 cb 用**自己的 label `merged_hop_ablated`**（`commit()` 里换掉 `arm_gpu_time` 的 label）⇒ **两种总体在报告里永不混**。
+* **离线自证**：`OCUDU_LANE_ABLATE=1`（EVERY=1）⇒ `pusch_demodulator_deferred_chain_test` **5 个用例全 FAIL**（空链路必然）；`EVERY=8` ⇒ 只剩被命中的对拍失败；不设旋钮 ⇒ **5/5 PASS**（交付路径不变）。
+* ★ **这条腿的判读是"同腿两总体 A/B"**（比跨腿对照更干净）：同一条腿里 `merged_hop`（正常跳，对照）与 **`merged_hop_ablated`（消去跳）** 在**同一负载、同一分钟**下并存。
+  * `merged_hop_ablated` 落到 **40–80 µs** ⇒ 那 ~450 µs 就是这些 kernel 的**执行**；
+  * 它仍在 **400–470 µs** ⇒ 与"活"无关 ⇒ 平台给这条 cb 的账，本平台**无杠杆**，这一线收口。
+* **命令**（`OCUDU_LANE_ABLATE_EVERY=8`）：
+
+```bash
+cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p80-n78-ablate8 \
+  --regime=stress \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2 \
+  OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_DFT_BATCH_SYMBOLS=14 \
+  OCUDU_LANE_ABLATE=1 OCUDU_LANE_ABLATE_EVERY=8
+```
+
+  接手机**之前**先看：① `knob          : OCUDU_LANE_ABLATE=1` 与 `…_EVERY=8` 都在；② `[metal_ablate] ABLATION ON …`（出现即说明 no-op pipeline 已建成）。
+  跑完的判据行：`[metal_stats] … per label` 里要有 **`merged_hop_ablated`** 这一行（没有它 ⇒ 没命中，腿作废）。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
