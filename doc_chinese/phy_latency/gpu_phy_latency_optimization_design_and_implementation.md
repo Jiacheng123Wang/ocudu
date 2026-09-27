@@ -8262,6 +8262,52 @@ cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n
 | `cbs/lane` | 预期 **2.00**（结构没变）| 若变 ⇒ 说明某段因失败而退出了 burst，要读原因 |
 
 
+### 6.132 腿 `p78-n78-ablate` 是**空臂**（旋钮没传进去）——但它逼出两个真缺陷，已修好并**离线自证**（2026-09-27）
+
+#### ① 空臂的事实（先登记，别当成消去法的读数）
+
+`p78` 的 `knob` 登记行只有 `OCUDU_DFT_BATCH_SYMBOLS=14` / **`OCUDU_DFT_RELEASE_BLOCK=0`** / `OCUDU_METAL_GPU_TIME=1` / `OCUDU_UL_PHASE_SEGMENTS=1` —— **没有 `OCUDU_LANE_ABLATE`**（那条命令沿用了 `p77` 的行）。
+后果与读数一致：链路**正常工作**（`CRC-OK` 102273 跳）、`merged_hop` exec **457.4**、`dft_front_end` **47.0**、`cbs/lane=2.00 (max=5)`。
+⇒ ★ **`p78` 的真实身份是"关 D1 的第二次复现"**，而且它复现得非常好：对照 `p77`（`merged_hop` 459.1 / `dft_front_end` 46.9 / `cbs/lane` 2.00）——**逐项一致**（这是 `p77` 那条腿的第二数据点，价值在此）。
+⇒ ⚠ 同时记一条纪律：**飞之前先核对腿自己的 `knob` 登记行**（`run_leg.sh` 会把它打在 stderr 顶部）；一行之差就让一条腿换了身份。
+
+#### ② 但这条空臂逼出两个**我的**真缺陷（都已修）
+
+1. **作用域错**：`ablation_pipeline` 原本存在 `burst_state` 里，而 `state()` 是 `static thread_local`（burst 属于编码它的线程）
+   ⇒ 由"初始化 demod 引擎的那个线程"装上的 pipeline，对**真正编码各阶段派发的线程**不可见 ⇒ **即使旋钮传进去也会一点效果都没有**。
+   修法：改成**进程级**（`std::atomic<void*>` + 一份强引用保活；Objective-C 指针不能用 `std::atomic<id<…>>`，必须 `__bridge`）。
+2. **安装点选错**：原设计让 demod 引擎在 `init()` 里装，但**没有任何离线测试构造那个引擎** ⇒ 旋钮**无法离线自证**（而"先离线自证"正是 §6.129⑤ 立的规矩）。
+   修法：把安装搬进 `shared_burst::encoder()` 自己——**首次调用时惰性构建**（从 `ocudu_demod.metallib` 取 `lane_ablate_noop`），进程级、任何编码线程都生效。
+   顺带修好 metallib 的定位（原来只找 CWD 直下；现在**从 CWD 逐级向上**找 `lib/phy/upper/channel_modulation/metal/ocudu_demod.metallib`——测试在 build 目录里跑，正是这一条暴露了它）。
+
+#### ③ 离线自证（这次是真的）
+
+| 命令 | 结果 |
+|---|---|
+| `OCUDU_LANE_ABLATE=1 ./pusch_demodulator_deferred_chain_test`（重建后）| **`[metal_ablate] ABLATION ON …`** + **2 个用例 FAIL**（metal 后端不再等于 CPU 链 —— 空 demapper 必然如此）|
+| `./pusch_demodulator_deferred_chain_test`（不设旋钮）| **5/5 PASS** ⇒ 交付路径不变 |
+| `ctest -L phy`（串行，不设旋钮）| 全绿（全量重建后复核）|
+
+⇒ 旋钮现在有**行为证据**（不只是"代码在那儿"）：开着它，链路的数值结果就变了；关着它，一切照旧。
+
+#### ④ 重飞（同一条命令的**正确**形态，`p79-n78-ablate`）
+
+```bash
+cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p79-n78-ablate \
+  --regime=stress \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2 \
+  OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_DFT_BATCH_SYMBOLS=14 \
+  OCUDU_LANE_ABLATE=1
+```
+
+**飞之前先看两行**（各一秒，能省一次手机测试）：
+1. stderr 顶部的 `knob          : OCUDU_LANE_ABLATE=1`（**必须在**）；
+2. 启动后不久的 `[metal_ablate] ABLATION ON …`（**必须在**；若出现 `metallib was not found` 就是路径问题，停手告诉我）。
+
+判据与 §6.131② 相同（对照 `p72` 的 `merged_hop` 468.7）：**40–80 µs ⇒ 那 ~450 是这些 kernel 的执行**；**400–470 µs ⇒ 与"活"无关**。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

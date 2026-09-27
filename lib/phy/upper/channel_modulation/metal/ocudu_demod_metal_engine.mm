@@ -536,32 +536,6 @@ bool demod_metal_engine::init()
     ocudulog::fetch_basic_logger("PHY").debug("Metal demapper: loaded pre-compiled shader library {}",
                                               lib_path.UTF8String);
 
-    // ---- the ABLATION arm (dev doc 6.132): bind every deferred stage's dispatch to a no-op ----------
-    //
-    // OCUDU_LANE_ABLATE=1 makes the deferred chain measure a hop whose buffers carry the same command
-    // buffer, the same dispatch grids, the same bindings, the same fences and the same commit, with the
-    // stages' kernels replaced by `lane_ablate_noop`. THE LINK DOES NOT WORK ON THAT ARM (nothing writes
-    // the estimates or the LLRs, so every CRC fails) - it exists to price the hop's execution against its
-    // structure, which is the one question the ~450us of dev doc 6.131 has left.
-    const char* ablate_env = std::getenv("OCUDU_LANE_ABLATE");
-    if ((ablate_env != nullptr) && (std::strtoul(ablate_env, nullptr, 10) != 0)) {
-      id<MTLFunction> noop_fn = [library newFunctionWithName:@"lane_ablate_noop"];
-      if (noop_fn == nil) {
-        ocudulog::fetch_basic_logger("PHY").error("Metal demapper: kernel 'lane_ablate_noop' not found");
-        return false;
-      }
-      id<MTLComputePipelineState> noop = [res.device newComputePipelineStateWithFunction:noop_fn error:&error];
-      if (noop == nil) {
-        ocudulog::fetch_basic_logger("PHY").error("Metal demapper: ablation pipeline failed: {}",
-                                                  error != nil ? error.localizedDescription.UTF8String
-                                                               : "nil error");
-        return false;
-      }
-      metal::shared_burst::set_ablation_pipeline(noop);
-      ocudulog::fetch_basic_logger("PHY").warning(
-          "Metal: OCUDU_LANE_ABLATE=1 - every deferred stage's dispatch is bound to lane_ablate_noop. "
-          "This run measures structure, NOT a working link: expect every CRC to fail.");
-    }
   }
   return true;
 }

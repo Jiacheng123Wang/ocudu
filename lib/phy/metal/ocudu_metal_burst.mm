@@ -150,10 +150,6 @@ struct burst_state {
   /// next burst_ensure_open(); 0 = nothing published, which keeps the old "newest generation" rule.
   uint64_t                          stage_wait = 0;
   std::vector<id<MTLCommandBuffer>> outstanding; // committed through this thread, not waited yet
-  /// The ABLATION pipeline installed by set_ablation_pipeline(): when set, every stage's dispatch is
-  /// bound to it instead of its own, so a leg can measure a hop whose buffers carry no work at all.
-  id<MTLComputePipelineState> ablation_pipeline = nil;
-
   /// What the buffer this burst commits carries, for the lane probe's busy split (see set_commit_label()).
   ocudu::metal::gpu_lane_probe::stage commit_label = ocudu::metal::gpu_lane_probe::stage::equalizer_demapper;
 
@@ -174,6 +170,94 @@ burst_state& state()
 {
   static thread_local burst_state s;
   return s;
+}
+
+/// The ABLATION pipeline (see shared_burst::set_ablation_pipeline) - PROCESS-WIDE on purpose.
+///
+/// Why not in burst_state: that one is `thread_local` (the burst belongs to the thread that encodes it),
+/// so a pipeline installed by whichever thread initialised the demod engine would be invisible to the
+/// threads that actually encode the stages' dispatches. The first version of this knob did exactly that
+/// and would have ablated nothing; dev doc 6.132 records it next to the null leg it was found on.
+std::atomic<void*> g_ablation_pipeline{nullptr}; // __bridge'd: kept alive by g_ablation_owner below
+id<MTLComputePipelineState> g_ablation_owner = nil; ///< the strong reference, so the __bridge'd pointer stays valid
+
+/// \brief The ABLATION pipeline, built lazily on first use (see shared_burst::set_ablation_pipeline).
+///
+/// Self-installing ON PURPOSE. The first version had the demod engine install it during its own init, and
+/// that had two faults the offline tests caught before a leg did: burst_state is `thread_local`, so a
+/// pipeline installed by the initialising thread was invisible to the threads that encode the stages; and
+/// no offline test constructs that engine, so the knob could not be verified without a radio. Here the
+/// pipeline is process-wide, built once on the first encoder() call, and any test that opens a burst with
+/// OCUDU_LANE_ABLATE=1 exercises it.
+id<MTLComputePipelineState> ablation_pipeline_lazy()
+{
+  id<MTLComputePipelineState> existing =
+      (__bridge id<MTLComputePipelineState>)g_ablation_pipeline.load(std::memory_order_acquire);
+  if (existing != nil) {
+    return existing;
+  }
+  const char* env = std::getenv("OCUDU_LANE_ABLATE");
+  if ((env == nullptr) || (std::strtoul(env, nullptr, 10) == 0)) {
+    return nil;
+  }
+  static std::once_flag once;
+  std::call_once(once, []() {
+    id<MTLDevice> device = shared_queue::device();
+    if (device == nil) {
+      return;
+    }
+    NSMutableArray<NSString*>* candidates = [NSMutableArray arrayWithCapacity:3];
+    [candidates addObject:@"ocudu_demod.metallib"];
+    NSArray<NSString*>* args = [[NSProcessInfo processInfo] arguments];
+    if (args.count > 0) {
+      [candidates addObject:[[args[0] stringByDeletingLastPathComponent]
+                                stringByAppendingPathComponent:@"ocudu_demod.metallib"]];
+    }
+    [candidates addObject:[[[NSFileManager defaultManager] currentDirectoryPath]
+                              stringByAppendingPathComponent:@"ocudu_demod.metallib"]];
+    // Walk UP from the working directory as well: a leg runs from the repository root (where the
+    // generated metallib sits next to its .metal source), while a unit test runs from its own build
+    // directory - and the first version of this resolver only checked the former, which is exactly how
+    // the offline verification below found the plumbing was never reaching the pipeline.
+    NSString* up = [[NSFileManager defaultManager] currentDirectoryPath];
+    for (unsigned i = 0; i != 8; ++i) {
+      [candidates addObject:[up stringByAppendingPathComponent:
+                                   @"lib/phy/upper/channel_modulation/metal/ocudu_demod.metallib"]];
+      NSString* parent = [up stringByDeletingLastPathComponent];
+      if ([parent isEqualToString:up]) {
+        break;
+      }
+      up = parent;
+    }
+    NSString* found = nil;
+    for (NSString* path in candidates) {
+      if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        found = path;
+        break;
+      }
+    }
+    if (found == nil) {
+      std::fprintf(stderr, "[metal_ablate] OCUDU_LANE_ABLATE=1 but ocudu_demod.metallib was not found - "
+                           "the ablation is NOT in effect\n");
+      return;
+    }
+    NSError*       error   = nil;
+    id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:found] error:&error];
+    id<MTLFunction> fn     = (library != nil) ? [library newFunctionWithName:@"lane_ablate_noop"] : nil;
+    id<MTLComputePipelineState> pipeline =
+        (fn != nil) ? [device newComputePipelineStateWithFunction:fn error:&error] : nil;
+    if (pipeline == nil) {
+      std::fprintf(stderr, "[metal_ablate] OCUDU_LANE_ABLATE=1 but the no-op pipeline could not be built\n");
+      return;
+    }
+    g_ablation_owner = pipeline;
+    g_ablation_pipeline.store((__bridge void*)pipeline, std::memory_order_release);
+    std::fprintf(stderr,
+                 "[metal_ablate] ABLATION ON: every deferred stage's dispatch is bound to "
+                 "lane_ablate_noop. This run measures STRUCTURE, not a working link - expect every CRC to "
+                 "fail.\n");
+  });
+  return (__bridge id<MTLComputePipelineState>)g_ablation_pipeline.load(std::memory_order_acquire);
 }
 
 /// Process-wide counters, printed once at exit when the probe is compiled in.
@@ -343,7 +427,8 @@ id<MTLComputeCommandEncoder> shared_burst::encoder(id<MTLComputePipelineState> p
     // The ABLATION arm swaps only what the encoder BINDS: the bookkeeping (and therefore the stage
     // barriers, the fence structure and the dispatch grid each caller asks for) stays exactly what the
     // delivery path does, which is the whole point of the arm (dev doc 6.132).
-    [s.enc setComputePipelineState:((s.ablation_pipeline != nil) ? s.ablation_pipeline : pipeline)];
+    const id<MTLComputePipelineState> ablate = ablation_pipeline_lazy();
+    [s.enc setComputePipelineState:((ablate != nil) ? ablate : pipeline)];
     s.pipeline = pipeline;
   }
   return s.enc;
@@ -474,7 +559,7 @@ bool shared_burst::adopt(id<MTLCommandBuffer> cb)
 
 void shared_burst::set_ablation_pipeline(id<MTLComputePipelineState> pipeline)
 {
-  state().ablation_pipeline = pipeline;
+  g_ablation_pipeline.store((__bridge void*)pipeline, std::memory_order_release);
 }
 
 void shared_burst::set_commit_label(gpu_lane_probe::stage which)
