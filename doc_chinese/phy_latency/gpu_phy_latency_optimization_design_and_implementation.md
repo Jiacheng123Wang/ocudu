@@ -8438,6 +8438,8 @@ cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n
 | **主读数**：per-label 表里 `merged_hop_ablated`（预期 **n ≈ 1.8 万** = 145943/8）| **exec p50 ~20–80 µs** | ★ 那 ~450 µs **就是这些 kernel 的执行** ⇒ 下一轮用 `OCUDU_LANE_ABLATE_STAGE=…` 二分 eq / CE / demap（`p80` 的 18.1 与本节离线的 20.5 都已经指向这里）|
 | 同上 | **仍 ~450 µs（几乎不动）** | ★ 与"活"无关 ⇒ 平台给这条 cb 记的账，**本平台无杠杆** ⇒ 这一线以"已定价、不可动"收口（把 §6.124–§6.138 的全部否证整理成一页）|
 | **备用读数**（label 若再失败）：`merged_hop` 的 **`min`/`p5`** | 从 470 掉到 **~20** | 与主读数同义（消去样本藏在低尾）；两者一起读，互相交叉验证 |
+| ★ **阳性对照**（**与 label 前序完全无关**）：`dft_front_end` 的 **`min`/`p5`** | 从 **46.5** 掉到**个位数 µs**（p50/p95 仍 ~46.5，**不许动**）| 说明消去**真的把 kernel 换掉了**。理由：plain 路的 FE cb 由**引擎自己**提交（`ocudu_dft_metal_engine.mm` 自己 `arm_gpu_time(…, "dft_front_end")`，**不走** `shared_burst::commit()`），所以它**不在** ① 的前序里；但消去决策是在**共享的 `encoder()`** 里按 cb 建的 ⇒ **`dft_front_end` 总体里也有 1/8 被消去**，它们的执行塌到几 µs、**藏在低尾**。⇒ 这是"旋钮物理生效"的独立证据（比 `[metal_ablate] ABLATION ON` 那句强，那句只说明 pipeline 建成了）|
+| ★ **若阳性对照不动** | `dft_front_end` 的 min/p5 **仍是 ~46** | ⇒ 消去**根本没绑上**（或这条腿跑的是没带旋钮的二进制）⇒ **这条腿作废，别去解读 `merged_hop_ablated`**（无论它显示什么）|
 | 红线 | `ch_wt`（41.1）/ 契约 / `gaps=0` / `rx_overflows=0` / 池 `starved_events=0` **不许变**；`cbs/lane` 预期 **2.00** | 变了 ⇒ 说明某段因失败退出 burst，先读原因再解读窗口 |
 | CRC / 吞吐 | **预期显著变差**（1/8 跳的 LLR 是垃圾，靠 HARQ 兜）—— `p82` 已给出基线：**81892 CRC-OK / 145943 跳（56%）** | 登记为**预期**，不作判据 |
 

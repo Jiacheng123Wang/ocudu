@@ -80,6 +80,8 @@ cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n
 | **主**：`merged_hop_ablated`（预期 **n ≈ 1.8 万**）exec p50 | **~20–80 µs** | ★ 那 ~450 µs **就是这些 kernel 的执行** ⇒ 下一轮用 `OCUDU_LANE_ABLATE_STAGE=…` 二分 eq / CE / demap |
 | 同上 | **仍 ~450 µs** | ★ 与"活"无关 ⇒ 平台给这条 cb 记的账，**本平台无杠杆** ⇒ 这一线以"已定价、不可动"收口 |
 | **备用**（label 若再失败）：`merged_hop` 的 `min`/`p5` | 从 470 掉到 **~20** | 与主读数同义；**两行一起读，交叉验证** |
+| ★ **阳性对照**（**与 label 无关**）：`dft_front_end` 的 `min`/`p5` | 从 **46.5** 掉到**个位数 µs**（p50/p95 仍 ~46.5）| 说明消去**真的换了 kernel**：plain 路的 FE cb 由**引擎自己**提交（不走 `shared_burst::commit()`），但它也经过共享的 `encoder()` ⇒ 1/8 被消去、藏在低尾 |
+| ★ 若阳性对照**不动** | `dft_front_end` min/p5 仍 ~46 | ⇒ 消去没绑上 ⇒ **这条腿作废**，别解读 `merged_hop_ablated` |
 | 红线 | `ch_wt`（41.1）/ 契约 / `gaps=0` / `rx_overflows=0` / 池 `starved_events=0` 不许变；`cbs/lane` 预期 **2.00** | 变了 ⇒ 先读原因再解读窗口 |
 
 ### 3.2 飞之前的身份核对（三条，缺一不可）
