@@ -727,6 +727,9 @@ void commit_late_handed_block(void* command_buffer)
     return;
   }
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end, "late_handed");
+  // A handed-over block that the registry had to drop is committed HERE, under this label, so the ablation
+  // decision the front end asked for (dev doc 6.140) is this path's to drop too: the lane never sees it.
+  shared_burst::forget_ablation(cb);
   // Q9-F: this is the commit the header's blind spot is about - the registry claims a block under its lock and
   // commits it here, on whichever thread runs the sweep, while the hop that missed the hand-over may already be
   // encoding a wait for the grid this very buffer produces.
@@ -880,6 +883,12 @@ struct dft_engine_impl {
   id<MTLCommandBuffer>         open_cb  = nil;
   id<MTLComputeCommandEncoder> open_enc = nil;
   uint64_t                     open_transforms = 0;
+  /// Whether the OPEN block belongs to the ABLATION arm (OCUDU_LANE_ABLATE, dev doc 6.140): decided once,
+  /// when the buffer is created, and read at every dispatch of it. The front end owns its OWN encoder (it
+  /// hands the buffer over still open), so it cannot learn the answer from shared_burst::encoder() the way
+  /// the estimator, the equalizer and the demapper do - it has to ASK, and asking decides the buffer for
+  /// every other asker too (one process-wide, buffer-keyed table).
+  bool open_ablated = false;
   ///@}
 
   /// \name Q9-F4 (dev doc 6.30): the transforms of the open block, DEFERRED into one dispatch.
@@ -1018,7 +1027,16 @@ static void encode_grid_write_dispatch(dft_engine_impl*                       e,
     gw[i].batch = (nof_transforms > 1u) ? nof_transforms : 0u;
   }
 
-  [enc setComputePipelineState:dft_resources().pipeline];
+  // THE ABLATION ARM REACHES THE FRONT END HERE (dev doc 6.140), and this line is the whole reason the arm
+  // was extended: the front end's grid write is the ONE dispatch of a hop that does not pass through
+  // shared_burst::encoder() (this engine owns its encoder and hands the buffer over still open), so before
+  // it the arm's hops lost their equalizer and their demapper while their front end stayed REAL - measured
+  // on p83 (CRC-OK 87.5% -> 49.4%, so the arm did bite) with the buffer's window unmoved (470.5 ->
+  // 466.5us), which is exactly the reading that cannot be interpreted: the dispatch it was asking about was
+  // not ablated. Same grid, same threadgroup size, same bindings; only the kernel is a no-op.
+  const id<MTLComputePipelineState> ablate_pipe = shared_burst::ablation_noop();
+  [enc setComputePipelineState:((e->open_ablated && (ablate_pipe != nil)) ? ablate_pipe
+                                                                         : dft_resources().pipeline)];
   [enc setBuffer:b_in offset:0 atIndex:0];
   [enc setBuffer:b_out offset:0 atIndex:1];
   [enc setBuffer:e->buf_tw offset:0 atIndex:2];
@@ -1350,6 +1368,10 @@ static void discard_open_block(dft_engine_impl* e)
     [e->open_enc endEncoding];
   }
   if (e != nullptr) {
+    // The buffer is dropped, so its ablation decision is dropped with it (dev doc 6.140): nothing will
+    // commit this buffer under any label, and the entry would otherwise wait for an address to reappear.
+    shared_burst::forget_ablation(e->open_cb);
+    e->open_ablated     = false;
     e->open_enc         = nil;
     e->open_cb          = nil;
     e->open_transforms  = 0;
@@ -1390,6 +1412,11 @@ static bool encode_into(dft_engine_impl*                                 e,
   }
   *cb_out  = cmd_buf;
   *enc_out = enc;
+  // A buffer that is NOT part of a block still belongs to the ablation arm's question (dev doc 6.140): it is
+  // the same engine, the same grid write and the same `dft_front_end` label, so a buffer that skipped the
+  // question would make that label a mixture of ablated and delivery buffers. The answer is dropped again
+  // in commit_front_end(), which is the only place that commits a buffer this function created.
+  e->open_ablated = shared_burst::ablate_cb(cmd_buf);
   return true;
 }
 
@@ -1415,6 +1442,10 @@ static void commit_front_end(dft_engine_impl* e, id<MTLCommandBuffer> cb, uint64
   dft_handover_heartbeat("commit");
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::front_end, "dft_front_end");
   metal::shared_queue::note_commit_order(cb);
+  // The ablation decision dies with this buffer (dev doc 6.140): this engine names its OWN label, so
+  // shared_burst::commit() - the one place that normally drops the entry - never sees it. Left behind, the
+  // entry would be inherited by whichever buffer Metal allocates at the same address next.
+  shared_burst::forget_ablation(cb);
   [cb commit];
   dft_stats_commit(nof_transforms);
   if (e->has_lane_slot) {
@@ -1838,6 +1869,10 @@ bool dft_metal_engine::begin_block()
     return false;
   }
   engine->open_transforms = 0;
+  // The ABLATION arm's decision for this block (dev doc 6.140), taken as soon as the buffer exists: the
+  // front end encodes its grid write itself, so it has to ASK - and asking first is what makes the answer
+  // the same one the lane's commit will read for the same buffer.
+  engine->open_ablated = shared_burst::ablate_cb(engine->open_cb);
   // Q9-F4: a new block starts with an empty deferral. Nothing can be pending here (every end of a block
   // flushes or clears), and clearing anyway is what keeps a deferred transform from one block out of the
   // next one's encoder - the one way this mechanism could silently write a grid of the wrong slot.
@@ -1857,6 +1892,7 @@ bool dft_metal_engine::commit_open()
   id<MTLCommandBuffer>         cb  = engine->open_cb;
   id<MTLComputeCommandEncoder> enc = engine->open_enc;
   const uint64_t               nof = engine->open_transforms;
+  engine->open_ablated    = false;
   engine->open_cb         = nil;
   engine->open_enc        = nil;
   engine->open_transforms = 0;
@@ -1945,6 +1981,7 @@ void* dft_metal_engine::release_block(const void* grid_base)
   if (engine->open_enc != nil) {
     [engine->open_enc endEncoding];
   }
+  engine->open_ablated    = false;
   engine->open_enc        = nil;
   engine->open_cb         = nil;
   engine->open_transforms = 0;
@@ -2366,7 +2403,12 @@ bool dft_metal_engine::submit_at(
   if (!encode_into(engine, &cmd_buf, &enc)) {
     return false;
   }
-  [enc setComputePipelineState:dft_resources().pipeline];
+  // Same ablation arm as the grid write above (dev doc 6.140): this route carries no grid, but it is the
+  // same engine's own encoder and it commits under the same `dft_front_end` label, so an arm that covered
+  // one and not the other would split that label's population into two kinds of buffer.
+  const id<MTLComputePipelineState> ablate_pipe = shared_burst::ablation_noop();
+  [enc setComputePipelineState:((engine->open_ablated && (ablate_pipe != nil)) ? ablate_pipe
+                                                                              : dft_resources().pipeline)];
   [enc setBuffer:b_in offset:0 atIndex:0];
   [enc setBuffer:b_out offset:0 atIndex:1];
   [enc setBuffer:engine->buf_tw offset:0 atIndex:2];

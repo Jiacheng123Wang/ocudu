@@ -8454,6 +8454,75 @@ cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n
 * ▲ 本节**不含** `p83` 的读数：腿还没飞（需要 sudo + 手机）。读数与判据登记在 §6.138④，结果写在 §6.140。
 
 
+### 6.140 ★★★ 腿 `p83-n78-ablate8`：label 修好了（`merged_hop_ablated` **n=17583**），但那 ~450 µs **没动** —— **但前端的网格写根本没被消去**，所以这条腿**不作数**；仪器已补全并离线自证（2026-09-27）
+
+#### ① p83 的读数（腿本身有效：旋钮两行 ✓、`ABLATION ON` ✓、红线基本守住）
+
+| 项 | 值 |
+|---|---|
+| ★ **主读数** `merged_hop_ablated` | **n=17583**（= 140658/8，**正好 1/8**，label 修好了）、exec **p50 466.5** p95 486.7 min 159.9 p5 432.0、wait p50 208.2 |
+| 对照 `merged_hop` | n=123075、exec **p50 470.5** p95 491.8 min 147.6 p5 428.7、wait p50 214.9 |
+| ★ 预登记的**阳性对照** `dft_front_end` | n=361321、exec p50 46.6 **min 15.8 p5 46.1** ⇒ **低尾没有塌**（预登记说 12.5% 被消去时 p5 应落到个位数）|
+| `ce_weights` | n=140664、exec p50 40.4 min 8.8 p5 26.3 |
+| busy split / V1 / 结构 | `ch_wt=41.7` + `merged_hop=472.2`（92% of busy）、V1 中位 **1400.9**、`cbs/lane=2.00 (max=5)`、`stale=0`、池绿（`starved_events=0`、`dropped=0`、`held_max=9`）|
+| 契约 / 电台 | **8 of 9**：`radio sample continuity: 1 gaps / 160285 samples, 1 radio receive overflow -> FAILED`（**电台侧偶发**，V3 家族；本次改动碰不到这条路径，且 p82 同消去配方是 0 gaps）|
+| CRC | **69518 CRC-OK / 140659 跳 = 49.4%**（对照 `p72` **123945/141729 = 87.5%**；`p82` 同配方 56%）|
+
+* ★ **−4.0 µs**：把 eq+demap 的 kernel 整个换成空 kernel 之后，那条 cb 的窗口从 **470.5 → 466.5**（p5 反而 +3.3、min +12.3）。
+* ★ **CRC 49.4% 是"消去真的生效"的行为证据**（空解映射器 ⇒ LLR 是垃圾 ⇒ HARQ 兜不住的部分掉下来）：这一条不依赖任何窗口仪器。
+
+#### ② 判决：**这条腿不能定案**，原因是**仪器的漏洞**，不是平台的结论
+
+* 按 §6.138④ 的预登记，阳性对照（`dft_front_end` 的 `min`/`p5`）**必须塌**才算"消去真的换了 kernel"；它**没塌** ⇒ **腿作废**，`merged_hop_ablated` 的 466.5 **不能**读成"与活无关"。
+* **根因（读码即定案）**：`OCUDU_LANE_ABLATE` 的绑定点在 **`shared_burst::encoder()`** 里 —— 而**前端 DFT 引擎自己开 encoder**（`[cmd_buf computeCommandEncoder]`，它在缓冲**尚未提交**时就交棒），**从不经过 `shared_burst::encoder()`**。
+  ⇒ 那条 cb 里**唯一没被消去的 dispatch 就是前端的网格写**，而按 §6.129③ / `p75` 的分解，一跳 ~470 µs 里**它才是 ~445 µs 的那部分**（`p75` 拆分臂：`dft`（前端块、lane 提交）**445.8** + `ch_wt` 45.5 + `merged_hop` 24.4）。
+  ⇒ p83 真正消去的是 **eq+demap（~24 µs 那一档）**，所以"窗口没动"这件事**既可能是平台的账、也可能只是被消去的那段本来就小** —— 两者分不开。
+* ⚠ 同时更正我在 §6.138④ 写下的阳性对照的**机制**：`dft_front_end` 的总体里**没有** 1/8 的空 kernel（它的 dispatch 同样不过 `shared_burst::encoder()`），所以"p5 不塌"**不是**"消去没生效"，而是**我的对照选错了对象**。真正的阳性对照见 ⑤（离线）。
+
+#### ③ 仪器的缺口与补全（**默认关，交付路径逐字节不变**）
+
+| 改动 | 位置 |
+|---|---|
+| ★ 把"这条 cb 是否消去"变成**任何模块都能问**的一件事：`ablate_cb(cb)`（问一次即决定、全进程一份答案）、`ablation_noop()`（空 pipeline，旋钮关时 nil）、`forget_ablation(cb)`（**自带 label 的提交路径要归还决策**）| `ocudu_metal_burst.h/.mm` |
+| ★ **前端在建块时就问**（`begin_block()`）⇒ 这一问同时决定了"交棒后被 lane 提交"的那条 cb，与 lane 的 `commit()` 读到的是**同一个答案** | `ocudu_dft_metal_engine.mm` |
+| ★ **两处绑定按答案换 kernel**：`encode_grid_write_dispatch()`（网格写，交付路）与 `submit_at()`（plain 路，同一 label） —— **网格、线程组大小、绑定、屏障、提交结构全不变，只换 kernel** | 同上 |
+| ★ **三条自带 label 的提交/丢弃路径归还决策**：`commit_front_end()`（`dft_front_end`）、`commit_late_handed_block()`（`late_handed`）、`discard_open_block()`（丢弃）。不归还 = 表里留下一条按**地址**索引的旧决策，会被 Metal 复用的下一个 cb 继承 | 同上 |
+| ★ **决策表有界**（`ablate_table_max = 65536`，配 **ticket** 防止"删掉同地址的新决策"）：决策只需从"第一次编码"活到"提交"，两者是同一条跳的宿主动作；而 `ce_weights` 这类"经 `shared_burst::encoder()` 编码、却由引擎自己的 label 提交"的 cb 每腿会留下 ~14 万条永不归还的条目 | `ocudu_metal_burst.mm` |
+
+#### ④ 离线自证：**前端网格写现在真的被换掉了**（三臂，全部重建后）
+
+| 命令 | 不设旋钮 | `OCUDU_LANE_ABLATE=1 EVERY=1` |
+|---|---|---|
+| ★ `dft_release_adopt_metal_test`（**D1 交棒的离线 harness**，本跑 **96.3%** 走交棒路 = 与交付同结构）| **PASS** | ★ **`FAIL: the ordinary block path left 300 of 300 grid elements unwritten`**（exit 1）⇒ **交棒块的前端网格写被空 kernel 取代** |
+| `dft_processor_metal_unit_test` | **ALL OK** | **8 条数值 FAIL**（含 `the device grid write differs from the host reference`）|
+| `pusch_demodulator_deferred_chain_test` | **5 PASSED** | `ABLATION ON` + **2 FAILED**（metal ≠ CPU，空链路必然）|
+| `ctest -L phy`（**串行**）| **193/193 passed**（1 条 Disabled）| —— |
+
+⇒ ★ 第一条就是 p83 缺的那块拼图：**同一个 `OCUDU_LANE_ABLATE=1` 现在能把"交付结构里前端那条网格写"也拿掉**，而且拿掉之后交棒 harness 立刻读不到网格。
+
+#### ⑤ 预登记 `p84-n78-ablate8`（命令与 p83 **逐字相同**，只换腿名）
+
+```bash
+cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p84-n78-ablate8 \
+  --regime=stress \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2 \
+  OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_DFT_BATCH_SYMBOLS=14 \
+  OCUDU_LANE_ABLATE=1 OCUDU_LANE_ABLATE_EVERY=8
+```
+
+**这一次那条 cb 里已经没有真活了**（前端网格写 + eq + demap 全部空 kernel），所以判据是干净的：
+
+| 判据（对照 = 同腿 `merged_hop`，p83 = 470.5）| 若 | 则 |
+|---|---|---|
+| `merged_hop_ablated`（预期 n ≈ 1.7 万）exec p50 | ★ **塌到 ~20–80 µs** | **那 ~450 µs 就是这些 kernel 的执行**（下一轮二分：前端网格写 vs eq/demap —— 现在两者都能单独消去了）|
+| 同上 | ★ **仍 ~450–470 µs** | **这条 cb 的账与"活"无关**（同样的派发网格、同样的绑定、同样的屏障、同样的提交，里面什么都没干）⇒ 与 §6.131 的四族否证合起来，"本平台无杠杆"这一线可以收口 |
+| ★ 附带：`dft_front_end` 的 `min`/`p5` | 这次**应该**塌到个位数（它的 1/8 也被消去了）| 若**不塌** ⇒ 旋钮没进二进制/没建 pipeline ⇒ **腿作废**（这才是正确的阳性对照）|
+| 红线 | `ch_wt`（41.7）/ `cbs/lane=2.00` / 池 / `stale=0` 不许变；契约看 `gaps`（p83 有 1 次电台侧 gap，属 V3 家族偶发）| —— |
+
+★ **备选臂（若想同时把"结构"这一维也钉死）**：`p85` = p84 的配方 **+ `OCUDU_DFT_RELEASE_BLOCK=0`**（D1 关，**只作测量臂**）。那时最贵的那条 cb 是 lane 提交的 burst（`p77`：4 条派发合一条 = 516.7），而它的 4 条派发**全部**经 `shared_burst::encoder()` ⇒ 也被本次改动覆盖 ⇒ 该结构同样能问"里面什么都没干还贵不贵"。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

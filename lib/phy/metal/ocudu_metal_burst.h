@@ -87,6 +87,30 @@ public:
   /// \note A no-op when \p pipeline is nil, which is the default: the delivery path is untouched.
   static void set_ablation_pipeline(id<MTLComputePipelineState> pipeline);
 
+  /// \brief Whether THIS command buffer belongs to the ABLATION arm, deciding it if nobody has asked yet.
+  ///
+  /// WHY IT IS PUBLIC (dev doc 6.140). The arm's first version could only reach the stages that encode
+  /// through shared_burst::encoder() - the estimator, the equalizer and the demapper. The DFT engine owns
+  /// its OWN encoder (it hands the buffer over still open), so the front end's grid write was the ONE
+  /// dispatch of a hop the arm could not touch: on p83 the ablated hops did lose their equalizer and their
+  /// demapper (CRC-OK 87.5% -> 49.4%, so the arm bit) and their buffer's window did not move (470.5 ->
+  /// 466.5us) - but the front end's own dispatch was still REAL inside those buffers. A leg that cannot
+  /// ablate the dispatch it is asking about is not an answer, so the question is exposed here: ONE
+  /// process-wide, command-buffer-keyed decision that ANY module may ask, with the same answer for every
+  /// asker (whoever asks first decides the buffer, and that is the whole mechanism).
+  static bool ablate_cb(id<MTLCommandBuffer> cb);
+
+  /// \brief The no-op pipeline the ABLATION arm binds, or nil when the knob is off (the delivery default).
+  static id<MTLComputePipelineState> ablation_noop();
+
+  /// \brief Drops a command buffer's ablation decision, for the paths that commit their own buffers.
+  ///
+  /// \note Every commit path owes this call. The decision is keyed by the buffer's ADDRESS (dev doc 6.136),
+  ///       so an entry left behind can be inherited by whichever command buffer Metal allocates at that
+  ///       address next, which would ablate a buffer nobody decided to ablate. The table also evicts its
+  ///       OLDEST entries, so a missed call cannot corrupt a later hop - but it is still a missed call.
+  static void forget_ablation(id<MTLCommandBuffer> cb);
+
   /// \brief Waits for every command buffer committed by this thread's bursts.
   /// \return True when all of them completed successfully.
   static bool wait_committed();

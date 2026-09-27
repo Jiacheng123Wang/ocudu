@@ -192,7 +192,29 @@ burst_state& state()
 std::atomic<void*> g_ablation_pipeline{nullptr}; // __bridge'd: kept alive by g_ablation_owner below
 std::atomic<uint64_t> g_burst_index{0};          ///< how many bursts have been opened, for 1-in-N ablation
 std::mutex                                    g_ablate_mutex;   ///< guards the per-buffer decisions below
-std::unordered_map<void*, bool>               g_ablate_by_cb;   ///< cbuf -> ablated?
+
+/// One decision per command buffer, with the ticket that says WHICH insertion it is.
+///
+/// The ticket exists because the table is bounded (see ablate_table_max): an address is handed out again by
+/// Metal once a buffer is gone, so when the oldest entry is evicted, "erase this address" would erase the
+/// LIVE decision of a newer buffer that happens to sit at the same address. Comparing tickets makes the
+/// eviction erase only what it inserted.
+struct ablate_decision {
+  bool     ablated = false;
+  uint64_t ticket  = 0;
+};
+std::unordered_map<void*, ablate_decision> g_ablate_by_cb; ///< cbuf -> ablated?
+std::deque<std::pair<void*, uint64_t>>     g_ablate_order; ///< insertion order of the keys above
+uint64_t                                   g_ablate_ticket = 0;
+
+/// How many decisions are retained. A decision only has to survive from a buffer's FIRST encoder() call to
+/// its commit - two host-side acts of the same hop, microseconds to a couple of hundred microseconds apart -
+/// so anything older than tens of thousands of buffers is an entry whose commit never asked: the buffers
+/// that a stage encodes through shared_burst::encoder() and then commits under an engine's OWN label
+/// (the estimator's `ce_weights`, the front end's `dft_front_end` before dev doc 6.140 taught it to forget).
+/// Unbounded, those entries accumulate for a whole leg (~140k of them) and every one of them is a chance for
+/// a later buffer to inherit a decision nobody made for it.
+constexpr size_t ablate_table_max = 65536;
 
 /// \brief Whether the burst ABOUT TO BE OPENED is an ablated one.
 ///
@@ -225,16 +247,27 @@ bool ablation_for_cb(id<MTLCommandBuffer> cb, bool create)
   if (cb == nil) {
     return false;
   }
+  void* key = (__bridge void*)cb;
   std::lock_guard<std::mutex> lock(g_ablate_mutex);
-  auto it = g_ablate_by_cb.find((__bridge void*)cb);
+  auto it = g_ablate_by_cb.find(key);
   if (it != g_ablate_by_cb.end()) {
-    return it->second;
+    return it->second.ablated;
   }
   if (!create) {
     return false;
   }
-  const bool on = ablate_next_burst();
-  g_ablate_by_cb.emplace((__bridge void*)cb, on);
+  const bool     on     = ablate_next_burst();
+  const uint64_t ticket = ++g_ablate_ticket;
+  g_ablate_by_cb[key]   = ablate_decision{on, ticket};
+  g_ablate_order.emplace_back(key, ticket);
+  while (g_ablate_order.size() > ablate_table_max) {
+    const std::pair<void*, uint64_t> oldest = g_ablate_order.front();
+    g_ablate_order.pop_front();
+    auto stale = g_ablate_by_cb.find(oldest.first);
+    if ((stale != g_ablate_by_cb.end()) && (stale->second.ticket == oldest.second)) {
+      g_ablate_by_cb.erase(stale);
+    }
+  }
   return on;
 }
 
@@ -631,6 +664,21 @@ bool shared_burst::adopt(id<MTLCommandBuffer> cb)
 void shared_burst::set_ablation_pipeline(id<MTLComputePipelineState> pipeline)
 {
   g_ablation_pipeline.store((__bridge void*)pipeline, std::memory_order_release);
+}
+
+bool shared_burst::ablate_cb(id<MTLCommandBuffer> cb)
+{
+  return ablation_for_cb(cb, /*create=*/true);
+}
+
+id<MTLComputePipelineState> shared_burst::ablation_noop()
+{
+  return ablation_pipeline_lazy();
+}
+
+void shared_burst::forget_ablation(id<MTLCommandBuffer> cb)
+{
+  forget_ablation_for_cb(cb);
 }
 
 void shared_burst::set_commit_label(gpu_lane_probe::stage which)
