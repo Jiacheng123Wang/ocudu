@@ -37,6 +37,12 @@
 #     p0up          p0_nominal_with_grant: -70    raise the UL power-control target (default -76 dBm) to spend
 #                                                 the 11-17 dB of PHR the UE was measured to have in hand.
 #     p0up_rv_mcs19 the three above together       only after the single-variable arms have shown their own effect
+#     ulheavy       tdd_ul_dl_cfg: 4D+8S+5U        NOT link tuning: the TDD pattern's UL/DL split (600 -> 1000
+#                                                 UL slots/s, +67%) against the cell default's 3 UL slots per
+#                                                 5 ms. The measurement that motivates it: every run fills
+#                                                 97-100% of its UL slots, so throughput = slots x TB x (1-retx)
+#                                                 and n78 has a third of n1's slots. It also takes two full DL
+#                                                 slots away - a real cost, judged in both directions.
 #
 #   The templates: configs/gnb_rf_b200_tdd_n78_20mhz_ul_ab.yml  (n78, the cell under test)
 #                  configs/gnb_rf_b200_fdd_n1_5mhz_bridge_ul_ab.yml (n1, the matched control - mirror only the
@@ -48,7 +54,7 @@
 #        default output: doc_chinese/work_tmp/arm_<name>.yml   (git-ignored, like the other dev products)
 set -eu
 
-ARM=${1:?arm name: sc8, rv, mcs19, qam64, p0up, p0up_rv_mcs19}
+ARM=${1:?arm name: sc8, rv, mcs19, qam64, p0up, p0up_rv_mcs19, ulheavy}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
 # WHERE THE ARM'S SOURCE IS. The transport arms move a line of the DELIVERY config; the UL arms move one of
@@ -57,7 +63,7 @@ ROOT=$(cd "$HERE/../../.." && pwd)
 # below caught it, which is why the guard exists. ARM_SRC overrides either default (that is how the n1
 # mirror is generated from the n1 template).
 case "$ARM" in
-  rv|mcs19|qam64|p0up|p0up_rv_mcs19) DEF_SRC="$ROOT/configs/gnb_rf_b200_tdd_n78_20mhz_ul_ab.yml" ;;
+  rv|mcs19|qam64|p0up|p0up_rv_mcs19|ulheavy) DEF_SRC="$ROOT/configs/gnb_rf_b200_tdd_n78_20mhz_ul_ab.yml" ;;
   *)                                 DEF_SRC="$ROOT/configs/gnb_rf_b200_tdd_n78_20mhz.yml" ;;
 esac
 SRC=${ARM_SRC:-$DEF_SRC}
@@ -104,6 +110,20 @@ case "$ARM" in
     uncomment 'p0_nominal_with_grant: -70'
     WANT=("p0_nominal_with_grant: -70")
     ;;
+  ulheavy)
+    # The STRUCTURAL arm: moves the TDD pattern's UL/DL split (4D+8S+5U against the cell default 6D+8S+3U),
+    # i.e. 600 -> 1000 UL slots/s. Unlike the others it does not tune the link, it changes the cell's shape,
+    # and the DL loses two full slots - see the block's comment in the template.
+    sed -E \
+      -e 's/^#(  tdd_ul_dl_cfg:)/\1/' \
+      -e 's/^#(    dl_ul_tx_period: 10)/\1/' \
+      -e 's/^#(    nof_dl_slots: 4)/\1/' \
+      -e 's/^#(    nof_dl_symbols: 8)/\1/' \
+      -e 's/^#(    nof_ul_slots: 5)/\1/' \
+      -e 's/^#(    nof_ul_symbols: 0)/\1/' "$SRC" > "$OUT"
+    WANT=("tdd_ul_dl_cfg:" "dl_ul_tx_period: 10" "nof_dl_slots: 4" "nof_dl_symbols: 8" "nof_ul_slots: 5" "nof_ul_symbols: 0")
+    EXPECT_CHANGED=12
+    ;;
   p0up_rv_mcs19)
     sed -E \
       -e 's/^#(    p0_nominal_with_grant: -70)/\1/' \
@@ -113,7 +133,7 @@ case "$ARM" in
     EXPECT_CHANGED=6
     ;;
   *)
-    echo "unknown arm '$ARM': expected sc8 | rv | mcs19 | qam64 | p0up | p0up_rv_mcs19" >&2
+    echo "unknown arm '$ARM': expected sc8 | rv | mcs19 | qam64 | p0up | p0up_rv_mcs19 | ulheavy" >&2
     exit 2
     ;;
 esac

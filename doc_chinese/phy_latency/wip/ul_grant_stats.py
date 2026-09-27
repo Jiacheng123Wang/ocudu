@@ -15,13 +15,22 @@
 #   SCHED: Slot decisions pci=1 ... UL: ue=.. rnti=.. h_id=.. ss_id=.. rb=[a..b) newtx=true rv=0 tbs=N
 #   PHY:   PUSCH: rnti=.. harq_id=.. prb=[a, b) symb=[..) mod=256QAM rv=0 tbs=N crc=OK|KO iter=6.0 sinr=..dB
 #
-# WHAT IT PRINTS, per log: window and grants/s, granted Mbit/s (all grants) vs new-data Mbit/s (newtx only),
-# the retransmission share, and per modulation: hops, BLER, bytes successfully decoded per grant and the
-# EFFECTIVE bits/RE - success bytes divided by the REs of EVERY grant of that modulation (so a modulation
-# that is fast when it works and fails 80% of the time reads as the slow one it is).
+# WHAT IT PRINTS, per log: the window and rates two ways, and per modulation the hops, BLER, bytes
+# successfully decoded per grant and the EFFECTIVE bits/RE - success bytes divided by the REs of EVERY grant
+# of that modulation (so a modulation that is fast when it works and fails 80% of the time reads as the slow
+# one it is).
+#
+# ★ WHY THERE ARE TWO WINDOWS (learned the hard way, 2026-09-27). The first version measured from the first
+# to the last UL grant in the log. That window is NOT the test: a run whose phone kept a little background
+# uplink before and after iperf3 read "granted 6.24 Mbit/s" against another run's 16.42, which looks like a
+# 2.6x regression and is really a 476 s window holding a 240 s test. So both are printed now: the FULL
+# window (with its length, so dilution is visible) and the BUSIEST <window> s - the densest span of that
+# length, which is the test itself. Compare arms on the busiest window; use the ratio readings (retx share,
+# BLER, effective bit/RE) from either, since they do not depend on the window.
 #
 # usage: python3 ul_grant_stats.py /tmp/gnb_n78_ul_ab.log [/tmp/gnb_n1_ul_ab.log ...]
-#        The two runs must be kept apart by --log.filename; the default /tmp/gnb.log overwrites.
+#        python3 ul_grant_stats.py --window=120 <logs...>
+#        The runs must be kept apart by --log.filename; the default /tmp/gnb.log overwrites.
 
 import collections
 import datetime
@@ -29,6 +38,8 @@ import os
 import re
 import statistics
 import sys
+
+BUSY_WINDOW_S = 240.0   # the iperf3 test length used by every arm; override with --window=<s>
 
 SCHED_RX = re.compile(
     r"^(\S+) .*?Slot decisions pci=\d+ .*?UL: ue=\S+ rnti=\S+ h_id=(\d+) ss_id=(\d+) "
@@ -50,9 +61,10 @@ def analyse(path):
                 m = SCHED_RX.match(line)
                 if m:
                     ts, _hid, _ss, rb0, rb1, newtx, rv, tbs = m.groups()
-                    grants.append((ts, int(rb1) - int(rb0), newtx == "newtx=true", int(rv), int(tbs)))
-                    first = first or ts
-                    last = ts
+                    when = datetime.datetime.fromisoformat(ts)   # datetime, so the busy-window scan can subtract
+                    grants.append((when, int(rb1) - int(rb0), newtx == "newtx=true", int(rv), int(tbs)))
+                    first = first or when
+                    last = when
             elif "PUSCH: rnti=" in line:
                 m = PHY_RX.search(line)
                 if m:
@@ -73,18 +85,49 @@ def analyse(path):
     return grants, phy, first, last
 
 
+def busiest_window(grants, length_s):
+    """The densest span of `length_s` seconds: two pointers over the (time-ordered) grant list. Returns
+    (i, j, span_s) or None. This is what makes arms comparable when a log's own window is diluted by
+    background uplink before/after the test - see the header."""
+    if not grants:
+        return None
+    best = None
+    j = 0
+    for i in range(len(grants)):
+        while j < len(grants) and (grants[j][0] - grants[i][0]).total_seconds() <= length_s:
+            j += 1
+        if best is None or (j - i) > best[0]:
+            best = (j - i, i, j)
+    n, i, j = best
+    span = (grants[j - 1][0] - grants[i][0]).total_seconds()
+    return (i, j, span) if span > 0 else None
+
+
+def window_rates(grants, i, j, span):
+    seg = grants[i:j]
+    tot = sum(g[4] for g in seg)
+    newb = sum(g[4] for g in seg if g[2])
+    ntx = sum(1 for g in seg if g[2])
+    return dict(rate=len(seg) / span, granted_mbps=tot * 8 / span / 1e6,
+                newdata_mbps=newb * 8 / span / 1e6, retx_pct=100 * (len(seg) - ntx) / len(seg),
+                avg_tb=sum(g[4] for g in seg) / len(seg), span=span)
+
+
 def summarise(path):
     grants, phy, first, last = analyse(path)
     out = {"file": os.path.basename(path), "grants": len(grants), "phy": phy}
     if not grants or first is None:
         out["error"] = "no UL grant line found (is this the right log? does it carry SCHED at info level?)"
         return out
-    dur = (datetime.datetime.fromisoformat(last) - datetime.datetime.fromisoformat(first)).total_seconds()
+    dur = (last - first).total_seconds()
     tot = sum(g[4] for g in grants)
     newb = sum(g[4] for g in grants if g[2])
     newtx = sum(1 for g in grants if g[2])
     out.update(dur=dur, rate=len(grants) / dur, granted_mbps=tot * 8 / dur / 1e6,
                newdata_mbps=newb * 8 / dur / 1e6, retx_pct=100 * (len(grants) - newtx) / len(grants))
+    bw = busiest_window(grants, BUSY_WINDOW_S)
+    if bw is not None:
+        out["busy"] = window_rates(grants, *bw)
     all_re = sum(d["re"] for d in phy.values())
     ok_b = sum(d["okbytes"] for d in phy.values())
     out["eff_bit_re"] = (ok_b * 8 / all_re) if all_re else float("nan")
@@ -94,6 +137,13 @@ def summarise(path):
 
 
 def main(argv):
+    global BUSY_WINDOW_S
+    argv = list(argv)
+    args = [a for a in argv[1:] if not a.startswith("--")]
+    for a in argv[1:]:
+        if a.startswith("--window="):
+            BUSY_WINDOW_S = float(a.split("=", 1)[1])
+    argv = [argv[0]] + args
     if len(argv) < 2:
         print(__doc__ or "usage: ul_grant_stats.py <gnb log> [more logs...]", file=sys.stderr)
         return 2
@@ -103,10 +153,15 @@ def main(argv):
         if "error" in r:
             print(f"    {r['error']}")
             continue
-        print(f"    window {r['dur']:.1f} s, {r['grants']} UL grants = {r['rate']:.1f} grants/s")
-        print(f"    granted {r['granted_mbps']:.2f} Mbit/s | new data {r['newdata_mbps']:.2f} Mbit/s | "
-              f"retransmissions {r['retx_pct']:.1f}% | CRC BLER {r['bler_pct']:.1f}% | "
-              f"effective {r['eff_bit_re']:.2f} bit/RE")
+        print(f"    full window {r['dur']:.1f} s, {r['grants']} UL grants = {r['rate']:.1f} grants/s")
+        print(f"      granted {r['granted_mbps']:.2f} Mbit/s | new data {r['newdata_mbps']:.2f} Mbit/s | "
+              f"retransmissions {r['retx_pct']:.1f}%  (diluted if the window is longer than the test)")
+        if "busy" in r:
+            b = r["busy"]
+            print(f"    ★ busiest {b['span']:.0f} s (the test): {b['rate']:.1f} grants/s | "
+                  f"granted {b['granted_mbps']:.2f} Mbit/s | new data {b['newdata_mbps']:.2f} Mbit/s | "
+                  f"retx {b['retx_pct']:.1f}% | avg TB {b['avg_tb']:.0f} B/grant")
+        print(f"    CRC BLER {r['bler_pct']:.1f}% | effective {r['eff_bit_re']:.2f} bit/RE")
         print(f"    {'mod':>7} {'hops':>7} {'BLER%':>6} {'ok bytes/grant':>15} {'eff bit/RE':>11} {'SINR p50':>9}")
         for mod, d in sorted(r["phy"].items(), key=lambda kv: -kv[1]["n"]):
             if d["n"] == 0:
@@ -117,12 +172,15 @@ def main(argv):
                   f"{d['okbytes']/d['n']:>15.0f} {eff:>11.2f} {p50:>9.1f}")
     if len(results) > 1:
         print("\n=== comparison (the whole point: same ruler for every arm)")
-        print(f"    {'log':>34} {'grants/s':>9} {'granted':>8} {'newdata':>8} {'retx%':>6} {'BLER%':>6} {'bit/RE':>7}")
+        print(f"    (busiest {BUSY_WINDOW_S:.0f} s = the test; ratios are window-independent)")
+        print(f"    {'log':>34} {'grants/s':>9} {'granted':>8} {'newdata':>8} {'TB B':>6} {'retx%':>6} "
+              f"{'BLER%':>6} {'bit/RE':>7}")
         for r in results:
             if "error" in r:
                 continue
-            print(f"    {r['file']:>34} {r['rate']:>9.1f} {r['granted_mbps']:>8.2f} {r['newdata_mbps']:>8.2f} "
-                  f"{r['retx_pct']:>6.1f} {r['bler_pct']:>6.1f} {r['eff_bit_re']:>7.2f}")
+            b = r.get("busy", r)
+            print(f"    {r['file']:>34} {b['rate']:>9.1f} {b['granted_mbps']:>8.2f} {b['newdata_mbps']:>8.2f} "
+                  f"{b['avg_tb']:>6.0f} {r['retx_pct']:>6.1f} {r['bler_pct']:>6.1f} {r['eff_bit_re']:>7.2f}")
     return 0
 
 
