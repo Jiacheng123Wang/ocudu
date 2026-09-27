@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+# SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+#
+# =====================================================================================================
+# n78 20 MHz TDD - **上行吞吐 A/B 模板**（2026-09-27）
+# =====================================================================================================
+#
+# 这份文件 = `gnb_rf_b200_tdd_n78_20mhz.yml`（交付配置，注释逐字保留）
+#            + `expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency: 2`
+#            + 独立的 `log.filename`（两次跑不再互相覆盖）
+#            + `cell_cfg.pusch` 下 **四个 A/B 旋钮（全部注释掉）**。
+# 要跑的四个臂由 `wip/mk_arm_cfg.sh` 生成（它只改一行并**打印 diff**），不要手改本文件。
+#
+# -----------------------------------------------------------------------------------------------------
+# 为什么要做这组 A/B（数据来自 2026-09-27 15:26 那次 n78 直跑的日志，commit edd84fea7b）
+# -----------------------------------------------------------------------------------------------------
+#   同一部手机、同一条 iperf3 配方（-R -b 40M -P 4 -t 240）：
+#     n78 20 MHz：SUM 接收 **7.24 Mbit/s**      n1 5 MHz：SUM 接收 **16.7 Mbit/s**
+#   5 MHz 反而快 2.3 倍。逐项拆开，原因**不是带宽**：
+#
+#   n78 那次的调度/PHY 读数（106,294 个 PUSCH 跳）：
+#     * CRC **BLER 44.8%**；按调制：**256QAM 80.4%** / 64QAM 10.0% / 16QAM 1.7% / QPSK 3.8%
+#     * 有效产出（成功字节 ÷ 全部 grant 占用的 RE）：**256QAM 0.87 bit/RE**、64QAM 2.89、16QAM 1.93
+#       ⇒ 最激进的档位产出最低；且 256QAM 内部 5.5-6.0 bit/RE 那一档 **失败 90-91%**
+#     * SINR 中位 **19.0 dB**（p5 14.2 / p95 24.5）—— 链路不差；256QAM 顶部要 ~28 dB
+#     * **PHR 11-17 dB**、P_cmax 21-22 dBm ⇒ **手机还有大量功率余量，不是功率受限**
+#     * 146,754 条 UL grant 里 **52,792 条（36%）是重传**，而**重传全部 rv=0**
+#       （`cell_cfg.pusch.rv_sequence` 默认 `[0]`；DL 侧默认是 `[0,2,3,1]`）
+#     * granted 16.42 Mbit/s → 新数据 8.87 → TCP 收到 7.24（差额 = 重传 + 协议头，算术闭合）
+#
+#   为什么 n1 不受这个罪（两条，都是"每个 RE"层面的）：
+#     * 同样一部手机的总功率摊到 25 PRB（4.5 MHz）比摊到 51 PRB（18.36 MHz）**每 RE 高 ~6 dB**
+#       ⇒ n1 能跑在它撑得住的调制上；
+#     * n1 是 FDD（每个时隙都能上行），n78 是 TDD：5 ms 周期 = 6D + 8S + 3U ⇒ **只有 30% 的时隙能上行**
+#       ⇒ n78 的**平均**上行容量只有 n1 的 ~1.2-1.6×（不是 4×），而它只交出 **0.43×** ⇒ 差的是效率。
+#
+# -----------------------------------------------------------------------------------------------------
+# 四个臂（一次只开一个；`bash doc_chinese/phy_latency/wip/mk_arm_cfg.sh <name>` 生成并打印 diff）
+# -----------------------------------------------------------------------------------------------------
+#   名字        改的那一行                                   为什么 / 预期
+#   ---------   ------------------------------------------   --------------------------------------------
+#   rv          rv_sequence: [0, 2, 3, 1]                    让 36% 的重传真的有用（RV 循环合并增益）。
+#   mcs19       max_ue_mcs: 19                               关掉"90% 失败"的 256QAM 高档位（默认 28）。
+#                                                            保守估计有效速率 1.80 → 2.57 bit/RE（1.4×），
+#                                                            若高 SINR 的 grant 能跑满 64QAM 顶部则 ~2×。
+#   qam64       mcs_table: qam64                             mcs19 的"另一种关法"（整张表换成 64QAM）。
+#   p0up        p0_nominal_with_grant: -70                   用掉手机那 11-17 dB 余量把 SINR 抬 3-6 dB
+#                                                            （默认 -76 dBm；这是"让 256QAM 真可用"的正路）。
+#   p0up_rv_mcs19  p0up + rv + mcs19（三行，只在单项都有收益时用）  组合臂。
+#
+#   ★ 建议顺序：先 `rv`（最便宜）→ 再 `mcs19`；两条都读出收益后再考虑 `p0up` 和组合。
+#   ★ 每个臂 **4 分钟**同一条 iperf3 命令，跑完**等进程退出**（`[metal_stats]` 是 atexit 打的）。
+#   ★ 判读用同一套读数：grants/s、重传比例、按调制的 BLER、有效 bit/RE、iperf3 接收 Mbit/s
+#     （`--log.filename` 已单独命名，四个臂的日志不会再互相覆盖）。
+#
+#   另有一个与吞吐无关、但与验收对齐的改动（已写进本文件）：
+#     `max_pusch_and_srs_concurrency: 2`
+#   交付验收腿一直是用**命令行** `--expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2`
+#   带的；不显式给定时它是 `auto`，对 20 MHz/1 层/ul_ratio 0.3 推导为 **1**（车道变成串行 strand）。
+#   写进配置后，"交付形态"不再依赖命令行（开发文档 §5 的 P2-F 待裁决项即此）。
+#
+#   运行方式不变：
+#     sudo ./build/apps/gnb/gnb -c configs/gnb_rf_b200_tdd_n78_20mhz_ul_ab.yml --expert_phy.phy_pipeline gpu
+#   （`--expert_phy.phy_pipeline gpu` 仍走命令行；配置文件里不重复它。）
+#
+# ⚠ 本文件是**实验模板**，不是交付配置。任何要写进交付形态的改动，先在这里量出来，再动
+#   `configs/gnb_rf_b200_tdd_n78_20mhz.yml` —— 那条路径上还挂着一对验收腿（`p85`/`p86`），
+#   改它等于让那对腿的证据指向另一份配置。
+# =====================================================================================================
+
+cu_cp:
+  amf:
+    addrs: 192.168.64.3
+    port: 38412
+    bind_addrs: 192.168.64.1
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+
+ru_sdr:
+  device_driver: uhd
+  # num_recv_frames is the radio's RECEIVE RING DEPTH, i.e. how long a stall the transport may take before the
+  # B200 drops samples. Measured A/B (dev doc 6.53), same binary, this line the only difference:
+  #   64 frames  -> 5 discontinuities (max 35.3 ms of lost uplink samples), pool holds 11/16, starved_events 0
+  #   256 frames -> 0 discontinuities (a 19.5 ms backlog absorbed),        pool holds 16/16, starved_events 2
+  # So the ring converts a LOST SAMPLE into a DELIVERED BACKLOG; the backlog arrives as a burst, which is why
+  # the pool it feeds was re-sized with it (lower_phy_factory: peak 16 + rx path 2 + margin 3 -> 32, dev doc
+  # 6.53). What it does NOT do is remove the stall: the stalls are inside receive() itself (dev doc 6.53 (2),
+  # the `[ul_rx_timing] overflow_ctx` of every overflow), i.e. the host/USB path - the root cause still open.
+  #
+  # 512 frames (dev doc 6.56, ruling B): the margin was sitting ON the worst stall ever measured. At 8200
+  # bytes/frame and sc12 (3 bytes/sample) one frame is 2733 samples, so the ring absorbs
+  #   64 frames = 7.6 ms   256 = 30.4 ms   512 = 60.7 ms
+  # while the measured worst drifts are 33.9 ms (p34, which lost 35.3 ms of samples at 64 frames) and
+  # 28.1 ms (bench, CPU pinned). 256 therefore covers the observed range with ~0 headroom - one 34 ms stall
+  # eats the whole ring - and 512 doubles it. Measured healthy on the bench with RX and TX streaming at once
+  # (wip/uhd_rx_health: 100% duty, 0 radio errors); 1024 is healthy too, for whoever wants 121 ms.
+  # num_send_frames stays 64 ON PURPOSE: the transmit ring is NOT the lever for the RF underflows. They occur
+  # with the hand-over ~1.5 ms EARLY and the host's send ring FULL (p35: transmit() blocked >1 ms 447 times,
+  # `AT/BELOW 0` only 23, against 649 underflows) - i.e. the samples are queued and not moving over the wire,
+  # which no ring depth can fix, and the bench cannot reproduce it either (0 underflows at 64 or 512 frames,
+  # even with 20 ms feeder stalls). See dev doc 6.56 (2) for why arm C was retired rather than flown.
+  device_args: type=b200,num_recv_frames=512,num_send_frames=64
+  srate: 23.04
+  otw_format: sc12
+  tx_gain: 80
+  rx_gain: 70
+
+cell_cfg:
+#  dl_arfcn: 632628         # 20M BW, onePlus8T only
+#  dl_arfcn: 625920         # 10M BW, iPhone17 only
+#  dl_arfcn: 624000         # 20M BW
+#  dl_arfcn: 621600         # 20M BW 
+  dl_arfcn: 627264         # 20M BW
+
+  band: 78
+  channel_bandwidth_MHz: 20
+  common_scs: 30
+  plmn: "00101"
+  tac: 7
+  pci: 1
+
+  # ---------------------------------------------------------------------------------------------------
+  # 上行调度 / 链路自适应：A/B 旋钮（默认值写在每行的注释里；mk_arm_cfg.sh 只解开其中一行）
+  # ---------------------------------------------------------------------------------------------------
+  # 行首的 `#  ` 是**故意**的：本文件默认 = 交付配置 + concurrency 2，四个臂由生成器逐个解开。
+  # 生成器依赖下面的**字面形状**（键名与缩进），改这些行请同时改 mk_arm_cfg.sh。
+  pusch:
+#    max_ue_mcs: 19              # 臂 mcs19：C-RNTI PUSCH 的 MCS 上限（默认 28 = 256QAM 表顶）
+#    mcs_table: qam64            # 臂 qam64：整张 MCS 表换成 64QAM（默认 qam256）
+#    rv_sequence: [0, 2, 3, 1]   # 臂 rv：HARQ 冗余版本序列（默认 [0] ⇒ 每次重传都是 rv=0，没有循环增益）
+#    p0_nominal_with_grant: -70  # 臂 p0up：上行功控目标，dBm，必须是 2 的倍数（默认 -76）
+
+# The USRP clock may introduce some CFO: configure the channel estimator to compensate for it.
+# With good clocks (e.g., external ones), the default setup may provide better performance.
+expert_phy:
+#  pusch_channel_estimator_td_strategy: average
+#  pusch_channel_estimator_cfo_compensation: true
+  pusch_ldpc_decoder_type:  auto
+  pusch_dec_max_iterations: 6
+
+# 交付验收腿一直用命令行带的那个选项，写进配置 = 不再依赖命令行（开发文档 §5 P2-F）。
+# 不写时的默认是 `auto`，对 20 MHz / 1 层 / ul_ratio 0.30 推导为 1（车道退化成串行 strand）。
+expert_execution:
+  threads:
+    upper_phy:
+      max_pusch_and_srs_concurrency: 2
+
+log:
+  # 每个臂/每个小区一个独立的文件名：2026-09-27 那两次直跑都写默认的 /tmp/gnb.log，n1 那次的日志被覆盖了。
+  filename: /tmp/gnb_n78_ul_ab.log
+  all_level: info
+
+pcap:
+  mac_enable: false
+  mac_filename: /tmp/gnb_mac.pcap
+  ngap_enable: false
+  ngap_filename: /tmp/gnb_ngap.pcap

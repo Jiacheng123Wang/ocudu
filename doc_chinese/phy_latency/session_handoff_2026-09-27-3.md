@@ -81,6 +81,15 @@
 | 2 | ★ **两个门禁都不看 `knob`、不看 CRC ⇒ 臂腿能冒充验收腿** | ✅ **修好**：`milestone_audit.sh`/`leg_gate.sh` 各加 **①knob 白名单（fail-closed）②`CRC-OK/lanes ≥ 60%`**（60 是量出来的：臂 43.7–58.8%、修复后的交付腿 79.9–95.6%）。审计 **23/2/0（of 28）→ 27/2/0（of 32）**，仅剩两条 FAIL = 同一条"腿的提交 ≠ HEAD"；`--leg=p84`（臂）**被两条新检查当场拒掉**。`leg_gate.sh` 另修两处**字面量过期**（contract **9** 名、"`cbs/lane` 判**均值**"而非 `max<=2`）与两处**绑定错位**（`stale=0` 属默认工况；"UL grant ≥50% 槽"属 n1/FDD）⇒ 健康交付腿 `p72` 上 **5 of 9 → 9 of 9 judged** |
 | 3 | ★ **113 个 `OCUDU_*` 没有一张清单** | ✅ **`knob_inventory.md`**（生成物）+ `wip/gen_knob_inventory.py`。事实：**19 个默认 `ON`**（交付形态 = 这些默认值）、16 个有腿登记行（108 条 `s` 腿只有 3 条带登记行）、88 个只在记录里出现、**9 个两处都没有**（8 个在 `test/` = 离线臂；**1 个退役候选 `OCUDU_CE_PP_PERTURB`**）|
 
+### 3.2b ★ 新开的一条线：**上行吞吐**（n78 0.43× 于 n1；开发文档 §6.143）
+
+* 事实：同一部手机、同一条 iperf3，只换 config ⇒ n78 20 MHz **7.24 Mbit/s** vs n1 5 MHz **16.7 Mbit/s**。**不是带宽**：n78 那次 44.8% 的 PUSCH 传输 CRC 失败（**256QAM 档 80.4%**，5.5-6.0 bit/RE 档 90%），有效产出 256QAM **0.87 bit/RE** vs 64QAM 2.89；SINR 中位 19.0 dB 而 **PHR 还剩 11-17 dB**；**36% 的 grant 是重传且重传全 rv=0**（`pusch.rv_sequence` 默认 `[0]`）。
+  n1 快在**每 RE 高 ~6 dB**（功率摊到 25 PRB 而非 51）+ **FDD 每时隙可上行**（n78 TDD 只 30% 时隙）。
+* **已备好的工具**（都不需要改代码）：`configs/…n78…_ul_ab.yml`（带注释模板 + concurrency 2 + 四个注释掉的旋钮）、`configs/…n1…_ul_ab.yml`（对照镜像，只需一份）、
+  `wip/mk_arm_cfg.sh`（`rv`/`mcs19`/`qam64`/`p0up`/`p0up_rv_mcs19` 五个臂，只解一行 + 护栏）、`wip/ul_grant_stats.py`（同一把尺子；已复现手算数字）。模板都过了真实 parser 的 round-trip。
+* **下一步**：按 `rv` → `mcs19` → `p0up` 的顺序各跑 4 分钟；n1 侧在选出赢家后只镜像 `rv`/`mcs19`/`qam64`。**交付配置本轮未改**（改它要重飞 `p85`/`p86`）。
+* ⚠ 用户那两次直跑都用默认 `/tmp/gnb.log`，**n1 那次的日志被覆盖了**；模板已给两个小区各自独立的 `log.filename`。
+
 ### 3.3 两条候选（**用户此前裁定：LDPC→Metal 单独规划**）
 
 | 候选 | 一句话 | 状态 |

@@ -8632,6 +8632,61 @@ cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n
 * 附：`leg_gate.sh` 现在在 `p85` 上 **8 of 8 judged**（NOT JUDGED 的四项各带理由：CRC 绑流量、`stale` 绑工况、duty 绑几何、载荷绑工况）、在 `p86`/`p72` 上 **9 of 9**，在 `p84`（臂）上**点名失败**。
 
 
+### 6.143 ★★★ 一次直跑的副产品：**n78 20 MHz 的上行只有 n1 5 MHz 的 0.43×** —— 不是带宽，是**256QAM 在高档位崩了**（2026-09-27）
+
+> 用户用手机跑了两次 `iperf3 -R -b 40M -P 4 -t 240`，**只换 gNB 的 config**：n78 20 MHz TDD 收到 **7.24 Mbit/s**，n1 5 MHz FDD 收到 **16.7 Mbit/s**（小的反而快 2.3×）。
+> 这不是本工作流的时延判据，但它是**同一套融合车道**的吞吐问题，而且日志里已经写明了原因。
+
+#### ① 证据（n78 那次的 gNB 日志；n1 那次的日志被默认路径覆盖，只剩 iperf3 数字）
+
+`bash doc_chinese/phy_latency/wip/ul_grant_stats.py /tmp/gnb_n78_baseline.log`（脚本本次新增，读 SCHED/PHY 两类日志行）：
+
+```
+window 267.6 s, 146754 UL grants = 548.3 grants/s
+granted 16.42 Mbit/s | new data 8.87 Mbit/s | retransmissions 36.0% | CRC BLER 44.8% | effective 1.80 bit/RE
+    mod    hops  BLER%  ok bytes/grant  eff bit/RE  SINR p50
+  256QAM  53804   80.4             750        0.87      22.2
+   64QAM  41773   10.0            2710        2.89      19.6
+   16QAM  10291    1.7            1964        1.93      17.5
+    QPSK    426    3.8             549        0.61      18.7
+```
+
+* ★ **44.8% 的 PUSCH 传输 CRC 失败**，而其中 **256QAM 档 80.4%**；按"成功字节 ÷ 全部 grant 的 RE"算，**256QAM 只有 0.87 bit/RE，比 16QAM（1.93）还差、只有 64QAM（2.89）的 30%** ⇒ **最激进的档位产出最低**。256QAM 内部按档位看：4.5 bit/RE 失败 62%、5.0 → 78%、**5.5 → 91%**、6.0 → 90% ⇒ 崩在**表顶**。
+* **SINR 中位 19.0 dB**（p5 14.2 / p95 24.5）—— 链路不差，但 256QAM 顶部要 ~28 dB；**同一条腿上 `PHR` 显示手机还有 11–17 dB 功率余量**（P_cmax 21–22 dBm）⇒ **不是功率受限**。
+* 调度侧后果：**36% 的 grant 是重传**（52,792/146,754），且**重传全部 `rv=0`** —— `cell_cfg.pusch.rv_sequence` 默认 **`[0]`**（DL 侧默认是 `[0,2,3,1]`）⇒ HARQ 只有"同样比特再合一次"的 ~3 dB，没有 RV 循环增益。
+* 算术闭合：granted **16.42** → 新数据 **8.87**（×0.54 = 新传占比）→ TCP 收到 **7.24**（×0.82 = 协议头/重传开销）。
+* **为什么 n1 不受这个罪**（两条都在"每个 RE"层面）：**同样的手机功率摊到 25 PRB 比摊到 51 PRB 每 RE 高 ~6 dB**；且 n1 是 **FDD**（每时隙都可上行）而 n78 是 **TDD**（5 ms 周期 = 6D+8S+3U ⇒ **只有 30% 的时隙能上行**）
+  ⇒ n78 的**平均**上行容量只有 n1 的 **~1.2–1.6×**（不是 4×），而它只交出 **0.43×** ⇒ 差的是**效率**，不是带宽。
+
+#### ② 交付物（本次新增，四件）
+
+| 文件 | 是什么 |
+|---|---|
+| `configs/gnb_rf_b200_tdd_n78_20mhz_ul_ab.yml` | ★ **n78 的 A/B 模板**（带注释）：交付配置 + **`max_pusch_and_srs_concurrency: 2`** + 独立 `log.filename` + `cell_cfg.pusch` 下**四个注释掉的旋钮**；文件头写全了"为什么做这组 A/B"与四条臂的预期 |
+| `configs/gnb_rf_b200_fdd_n1_5mhz_bridge_ul_ab.yml` | ★ **n1 的镜像（对照）**：同一套改动 + 同名旋钮。**n1 只需要这一份**（不是四份）：那四个旋钮治的是 n78 特有的病（256QAM 高档位崩），n1 的作用是把"设置差异"从"频段/几何差异"里摘出来；且 `p0` 是按频段定的，抄过去没有意义 |
+| `wip/mk_arm_cfg.sh`（扩展） | 加 `rv` / `mcs19` / `qam64` / `p0up` / `p0up_rv_mcs19` 五个臂：**只解开模板里对应的那一行**，并保留"必须是预期行数的改动 + 输出必须含目标字符串"的双重护栏（首次运行正是被它拦下：UL 臂错误地默认去交付配置里找注释行）。臂的默认源按族选择，`ARM_SRC=` 可指向 n1 镜像 |
+| `wip/ul_grant_stats.py` | ★ **同一把尺子**：从 gNB 日志读 grants/s、granted/new-data Mbit/s、重传比例、按调制的 BLER 与**有效 bit/RE**；多个日志一起给会打一张对比表 —— 四个臂必须用同一把尺子判 |
+
+#### ③ 校验（不飞腿、不碰电台）
+
+* 两个模板都进了 `tests/unittests/apps/yaml_roundtrip_gnb_test.cpp` 的清单 —— 那个测试用**真实 parser**（`allow_config_extras(error)`：未知键直接解析失败）+ leaf 保留对比。**n78 模板 OK（roundtrip/7）**。
+* ★ **n1 镜像不进清单**，原因**不是**新加的东西：它忠实保留了原文件的 `cu_cp.amf.addr` / `bind_addr`（单数），而 writer 输出复数 `addrs`/`bind_addrs` ⇒ leaf 对比差两条 —— 原 `gnb_rf_b200_fdd_n1_5mhz_bridge.yml` 也因此不在那份清单里。它的**解析**是证明过的（否则测试会解析失败），且它新加的键与 n78 模板完全相同（那份是绿的）。原因写在测试文件里。
+* **四个旋钮键的形状逐个过真实 parser**：把四行同时解开后临时装成模板跑 `roundtrip/7` ⇒ **OK**，随后从备份还原并对该文件 `git diff --exit-code` 确认干净。
+* `wip/ul_grant_stats.py` 在 n78 那次日志上**复现了手算的全部数字**（548.3 grants/s、16.42/8.87 Mbit/s、36.0%、44.8%、1.80 bit/RE）。
+
+#### ④ 怎么跑 / 怎么判（写进模板头部，此处只留摘要）
+
+```bash
+bash doc_chinese/phy_latency/wip/mk_arm_cfg.sh rv      # → doc_chinese/work_tmp/arm_rv.yml（打印 diff）
+sudo ./build/apps/gnb/gnb -c <arm>.yml --expert_phy.phy_pipeline gpu
+# 每个臂 4 分钟同一条 iperf3；跑完等进程退出
+python3 doc_chinese/phy_latency/wip/ul_grant_stats.py /tmp/gnb_n78_ul_ab.log
+```
+建议顺序 **`rv` → `mcs19`**（两条最便宜），有收益再考虑 `p0up` 与组合；n1 侧在 n78 选出赢家后**只镜像 `rv`/`mcs19`/`qam64`**。
+
+★ **与验收的关系**：这些是**实验配置**，交付配置（`configs/gnb_rf_b200_tdd_n78_20mhz.yml`）本轮**未改** —— 它上面挂着一对验收腿（`p85`/`p86`），改它等于让那对腿的证据指向另一份配置。要合并进交付形态，得在 A/B 有结论后单独做一次，并重新飞那对腿。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

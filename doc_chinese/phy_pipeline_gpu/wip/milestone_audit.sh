@@ -181,9 +181,15 @@ leg_commit_check() {   # <label> <leg .stderr path> <kind>
   paths=$(git diff --name-only "$legc"..HEAD 2>/dev/null)
   nfiles=$(printf '%s\n' "$paths" | grep -c .)
   ncode=$(printf '%s\n' "$paths" | grep -cE '^(lib/|include/|apps/|tests/)')
+  # NAME the changed code paths (2026-09-27). The row used to say only how many files moved, so a FAIL
+  # caused by a TEST-ONLY edit (adding a config to the YAML round-trip list, say) looked exactly like a
+  # FAIL caused by a change to the PHY: the reader had to run git diff themselves to find out which it
+  # was, and the whole point of this row is to be readable at a glance. The criterion is unchanged -
+  # `tests/` still counts as code - only the evidence behind the verdict is now on the line.
+  code_list=$(printf '%s\n' "$paths" | grep -E '^(lib/|include/|apps/|tests/)' | head -4 | tr '\n' ' ')
   check "$kind leg $label: the commit it ran, vs HEAD" "equal, or a diff that touches no code" \
         "$([ "${ncode:-0}" = "0" ] && echo PASS || echo FAIL)" \
-        "leg ran $legc; $legc..HEAD changes ${nfiles:-0} file(s), ${ncode:-0} of them under lib/include/apps/tests$([ "${ncode:-0}" != "0" ] && echo '  <- this leg is NOT evidence about HEAD')"
+        "leg ran $legc; $legc..HEAD changes ${nfiles:-0} file(s), ${ncode:-0} of them under lib/include/apps/tests${code_list:+ [$code_list]}$([ "${ncode:-0}" != "0" ] && echo '  <- this leg is NOT evidence about HEAD')"
 }
 
 # ---------------------------------------------------------------- 0c. A LEG MUST BE A DELIVERY LEG

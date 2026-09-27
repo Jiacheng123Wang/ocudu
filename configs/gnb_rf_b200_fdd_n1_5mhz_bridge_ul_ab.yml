@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+# SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+#
+# =====================================================================================================
+# n1 5 MHz FDD - **上行 A/B 的对照（镜像）配置**（2026-09-27）
+# =====================================================================================================
+#
+# 这份文件 = `gnb_rf_b200_fdd_n1_5mhz_bridge.yml`（原样，注释逐字保留）
+#            + `expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency: 2`
+#            + 独立的 `log.filename`（不再和 n78 的跑互相覆盖）
+#            + `cell_cfg.pusch` 下与 n78 模板**同名**的四个旋钮（全部注释掉）。
+#
+# -----------------------------------------------------------------------------------------------------
+# 为什么 n1 **只需要这一份**，不需要像 n78 那样四份一一对应
+# -----------------------------------------------------------------------------------------------------
+# 1) 那四个旋钮治的是 n78 特有的病：n78 那次的 UL 在 **256QAM 档失败 80.4%**（5.5-6.0 bit/RE 那档 90%），
+#    而 SINR 中位只有 19.0 dB（256QAM 顶部要 ~28 dB）、手机 PHR 还有 11-17 dB 余量。n1 那次交出了
+#    16.7 Mbit/s ≈ 它自己峰值的 **74%**（按 5 MHz / 1 ms 时隙 / 25 PRB 估），没有这个失败模式。
+# 2) 因此 n1 这一侧的作用是**对照**，不是再扫一遍：把"两个小区的设置差异"从"频段/几何/时延占比差异"里摘出来。
+#    n78 的四步跑完、选出赢家之后，**把同一个设置镜像到这份 n1 配置**上跑一次（4 分钟），看它是否伤害一条
+#    本来健康的链路 —— 不伤害才说明这个改动可以进交付形态。
+# 3) 其中**功控那条（p0_nominal_with_grant）本来就是按频段定的**：n78 与 n1 的路损/噪声完全不同，
+#    把 −70 抄到 n1 上没有意义（n1 可能已经接近饱和，抬功率只会更差）。所以镜像时只镜像
+#    `rv_sequence` / `max_ue_mcs` / `mcs_table` 这三类"与频段无关"的设置。
+#
+# 运行方式不变：
+#   sudo ./build/apps/gnb/gnb -c configs/gnb_rf_b200_fdd_n1_5mhz_bridge_ul_ab.yml --expert_phy.phy_pipeline gpu
+#
+# ⚠ 本文件**不在** `tests/unittests/apps/yaml_roundtrip_gnb_test.cpp` 的清单里，原因**不是**它新加的东西，
+#   而是它保留的原文件里两个键的写法：`cu_cp.amf.addr` / `bind_addr`（单数）能解析，但 gNB 的 writer 输出的是
+#   复数 `addrs` / `bind_addrs`，leaf 对比会差这两条 —— 原文件 `gnb_rf_b200_fdd_n1_5mhz_bridge.yml` 也因此不在那份
+#   清单里。它的**解析**是证明过的（未知键会让那个测试直接解析失败），而它新加的键（`expert_execution…concurrency`、
+#   `log.filename`、`cell_cfg.pusch` 节点）与 n78 模板完全相同，那份模板在清单里且是绿的。
+#
+# ⚠ 实验配置，不是交付配置。镜像用的臂由同一个生成器产出：
+#     ARM_SRC=configs/gnb_rf_b200_fdd_n1_5mhz_bridge_ul_ab.yml \
+#       bash doc_chinese/phy_latency/wip/mk_arm_cfg.sh rv
+# =====================================================================================================
+
+# OCUDU gNB, FDD cell in band n1, 5 MHz bandwidth, 15 kHz SCS - commercial UE / srsUE bridge test.
+#
+# Band n1 (FDD): UL 1920-1980 MHz, DL 2110-2170 MHz (UL = DL - 190 MHz, auto-derived).
+# OnePlus 8T hardware supports n1; this is a quick bridge check before deciding on SIM reprogramming.
+#
+# Frequency: DL 2152.5 MHz (ARFCN 430500), inside the only measured gap (2150-2155 MHz)
+# of the otherwise busy n1 block at this location (scan 2026-08-26).
+# SSB is derived automatically (printed at startup).
+# Change frequency: edit cell_cfg.dl_arfcn only (ARFCN = f_Hz / 5000 below 3 GHz).
+#
+# Antenna wiring (FDD - BOTH ports required):
+#   - TX antenna on the "TX/RX" SMA port.
+#   - RX antenna on the "RX2" SMA port.
+
+cu_cp:
+  amf:
+    addr: 192.168.64.3
+    port: 38412
+    bind_addr: 192.168.64.1
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+
+ru_sdr:
+  device_driver: uhd
+  #device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=gpsdo,time_source=gpsdo,gpsdo=1
+  device_args: type=b200,num_recv_frames=64,num_send_frames=64,clock_source=internal,time_source=internal,gpsdo=0
+  # 15.36 MHz is 2x oversampling of this 5 MHz cell. Its natural rate is 7.68 MHz, but a B210 cannot hold its
+  # master clock that low: with UHD 4.6 the AD9361 stops clocking the FPGA below ~9.6 MHz and every register write
+  # then times out (AssertionError: accum_timeout < _timeout). Measured on the lab B210: 5.0/5.76/7.68 MHz fail,
+  # 9.6 MHz and above work - reproducible without ocudu:
+  #   uhd_usrp_probe --args "type=b200,master_clock_rate=7.68e6"
+  srate: 15.36
+  otw_format: sc12
+  tx_gain: 80
+  rx_gain: 70
+  #clock: gpsdo
+  clock: internal
+  sync: internal
+
+cell_cfg:
+  dl_arfcn: 430500
+  band: 1
+  channel_bandwidth_MHz: 5
+  common_scs: 15
+  plmn: "00101"
+  tac: 7
+  pci: 1
+  # PUCCH, and one MAC/RLF threshold that lives in this section.
+  #
+  # Why the six resource values are spelled out here: on a 5 MHz cell the default PUCCH resource
+  # configuration occupies more than the 50% of the BWP PRBs the validator allows, so the translator
+  # substitutes a reduced profile - but ONLY while the PUCCH configuration is still
+  # du_high_unit_pucch_config{} (the "the user has not touched PUCCH" sentinel, which compares the
+  # whole struct field by field). Setting ANY pucch key, including max_consecutive_kos below, makes
+  # that sentinel false, and the cell is then refused with "the number of PRBs for PUCCH exceeds the
+  # 50% of the BWP PRBs" - which is exactly what a pucch block holding only max_consecutive_kos does.
+  # The values are the upstream narrow-bandwidth profile, verbatim and in full from
+  # configs/cell_cfg_pucch_narrow_bw.yml - keep them in step with that file.
+  pucch:
+    resource_set_size: 7
+    nof_cell_res_set_configs: 1
+    f1_nof_cyclic_shifts: 1
+    f1_enable_occ: true
+    nof_cell_sr_res: 7
+    nof_cell_csi_res: 7
+    # Maximum number of consecutive undecoded CSIs before the DU declares a radio link failure and
+    # starts its release timer. This key maps to the MAC's max_consecutive_csi_dtx
+    # (du_high_config_translators.cpp:1282); the counterpart DL and UL counters live under
+    # cell_cfg.pdsch / cell_cfg.pusch. The startup line
+    # "RLF thresholds (consecutive KOs) dl=.. ul=.. csi_dtx=.." prints what actually took effect.
+    max_consecutive_kos: 300
+
+  # ---------------------------------------------------------------------------------------------------
+  # 与 n78 模板**同名**的四个旋钮（默认值见注释；生成器只解开其中一行）。
+  # 镜像时只用 `rv` / `mcs19` / `qam64` 三个"与频段无关"的；`p0up` 是按频段定的，抄过来没有意义。
+  # ---------------------------------------------------------------------------------------------------
+  pusch:
+#    max_ue_mcs: 19              # 臂 mcs19：C-RNTI PUSCH 的 MCS 上限（默认 28 = 256QAM 表顶）
+#    mcs_table: qam64            # 臂 qam64：整张 MCS 表换成 64QAM（默认 qam256）
+#    rv_sequence: [0, 2, 3, 1]   # 臂 rv：HARQ 冗余版本序列（默认 [0] ⇒ 每次重传都是 rv=0）
+#    p0_nominal_with_grant: -70  # 臂 p0up：上行功控目标，dBm，必须是 2 的倍数（默认 -76）——**n1 上不建议抄**
+
+# 与 n78 模板同一个改动：把验收腿一直在命令行带的并发度写进配置（不再依赖命令行）。
+# 注意对 n1 这条尤其重要：AUTO 对本小区推导为 1，而记录里 n1+并发 1 就是"车道退化成串行 strand"
+# 的那个形状（ce ≈ 3.2 ms/跳，开发文档 §6.44 前后）。你 2026-09-27 那次 n1 直跑用的正是 AUTO=1。
+expert_execution:
+  threads:
+    upper_phy:
+      max_pusch_and_srs_concurrency: 2
+
+log:
+  # 独立文件名：n78 与 n1 的日志不再互相覆盖（2026-09-27 那两次都写了 /tmp/gnb.log，n1 那次丢了）。
+  filename: /tmp/gnb_n1_ul_ab.log
+  all_level: info
+
+pcap:
+  mac_enable: false
+  mac_filename: /tmp/gnb_mac.pcap
+  ngap_enable: false
+  ngap_filename: /tmp/gnb_ngap.pcap

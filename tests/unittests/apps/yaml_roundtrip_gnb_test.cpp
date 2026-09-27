@@ -93,7 +93,20 @@ INSTANTIATE_TEST_SUITE_P(,
                                            "gnb_custom_cell_properties.yml",
                                            "gnb_ru_picocom_scb_tdd_n78_20mhz.yml",
                                            "gnb_ru_ran550_tdd_n78_100mhz_4x2.yml",
-                                           "gnb_ru_rpqn4800e_tdd_n78_20mhz_2x2.yml"));
+                                           "gnb_ru_rpqn4800e_tdd_n78_20mhz_2x2.yml",
+                                           // The UL-throughput A/B template (2026-09-27). Listed here so the
+                                           // REAL parser checks it: `allow_config_extras(error)` turns an
+                                           // unknown key into a parse failure, which is the validation it needs,
+                                           // and the leaf-diff check runs over what it does set - including the
+                                           // `cell_cfg.pusch` node, whose A/B knob lines ship commented out.
+                                           "gnb_rf_b200_tdd_n78_20mhz_ul_ab.yml"));
+// NOT listed: the n1 mirror of that template
+// (gnb_rf_b200_fdd_n1_5mhz_bridge_ul_ab.yml). It PARSES (that is what `allow_config_extras(error)`
+// proves, and its new keys are identical to the n78 template's above), but its leaf comparison fails on
+// two keys that the ORIGINAL config carries and the writer does not emit in that form:
+// `cu_cp.amf.addr` and `cu_cp.amf.bind_addr` (the writer emits the plural `addrs`/`bind_addrs`). That
+// mismatch is why gnb_rf_b200_fdd_n1_5mhz_bridge.yml itself is not in this list either - it is inherited,
+// not introduced here, and the mirror stays a faithful copy of what the bench actually runs.
 
 TEST(gnb_default_config_test, roundtrip)
 {
