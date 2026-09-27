@@ -8360,6 +8360,15 @@ cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n
 * ⚠ 纪律沉淀（这条线已经三次）：**凡是"每 burst/每线程"的状态，都要问一句"读到它的线程是不是写它的线程"**；`burst_state` 是 `thread_local`，`adopt()` 路与 `commit()` 路都可能换线程。
 
 
+### 6.136 消去法的决策改成**进程级、以 cb 为键**（离线自证：EVERY=1 ⇒ 5 用例全 FAIL；不设旋钮 ⇒ 0 FAIL）（2026-09-27）
+
+* 修法：`ablation_for_cb(cb, create)` / `forget_ablation_for_cb(cb)`（`std::mutex` + `std::unordered_map<void*,bool>`），
+  **编码线程**在 `encoder()` 里建决策，**提交线程**在 `commit()` 里读它决定 label，再删除 ⇒ 跨线程对得上（`burst_state` 的 `thread_local` 陷阱不再参与）。
+* 离线复核：`EVERY=1` ⇒ 延迟链测试 **5/5 FAIL**（消去生效）；**不设旋钮 ⇒ 0 FAIL**（交付不变）。`EVERY=8` 在**短测试**里也全 FAIL 是正常的（每条用例的第一个 burst 恰好是 8 的倍数被命中），空口上 ~147k 跳不受影响。
+* **重飞命令**（`p82-n78-ablate8`）：与 `p80`/`p81` 相同，只需换腿名；判据仍是**同腿两总体**：
+  `merged_hop_ablated` 的 **n ≈ 1.8 万**（必须出现），其 exec p50 若 **~20–80 µs** ⇒ 那 ~450 µs 是这些 kernel 的**执行**；若仍 **~450 µs** ⇒ 与"活"无关，这一线收口。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）

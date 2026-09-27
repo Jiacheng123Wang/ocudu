@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
+#include <unordered_map>
 #include <chrono>
 #include <thread>
 #include <cstdio>
@@ -189,6 +191,8 @@ burst_state& state()
 /// and would have ablated nothing; dev doc 6.132 records it next to the null leg it was found on.
 std::atomic<void*> g_ablation_pipeline{nullptr}; // __bridge'd: kept alive by g_ablation_owner below
 std::atomic<uint64_t> g_burst_index{0};          ///< how many bursts have been opened, for 1-in-N ablation
+std::mutex                                    g_ablate_mutex;   ///< guards the per-buffer decisions below
+std::unordered_map<void*, bool>               g_ablate_by_cb;   ///< cbuf -> ablated?
 
 /// \brief Whether the burst ABOUT TO BE OPENED is an ablated one.
 ///
@@ -210,6 +214,36 @@ bool ablate_next_burst()
   const uint64_t index = g_burst_index.fetch_add(1, std::memory_order_relaxed);
   return (every <= 1u) || ((index % every) == 0u);
 }
+/// \brief The ablation decision for ONE command buffer, keyed by the buffer itself.
+///
+/// Keyed on the buffer because the decision is made where the dispatches are ENCODED and read where the
+/// buffer is COMMITTED, and on the merged route those are different threads (the estimator encodes the
+/// adopted buffer, the lane commits it). The first two versions kept it in thread-local burst state and
+/// measured one ablated hop instead of one in eight (p80), then none at all (p81) - dev doc 6.135.
+bool ablation_for_cb(id<MTLCommandBuffer> cb, bool create)
+{
+  if (cb == nil) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(g_ablate_mutex);
+  auto it = g_ablate_by_cb.find((__bridge void*)cb);
+  if (it != g_ablate_by_cb.end()) {
+    return it->second;
+  }
+  if (!create) {
+    return false;
+  }
+  const bool on = ablate_next_burst();
+  g_ablate_by_cb.emplace((__bridge void*)cb, on);
+  return on;
+}
+
+void forget_ablation_for_cb(id<MTLCommandBuffer> cb)
+{
+  std::lock_guard<std::mutex> lock(g_ablate_mutex);
+  g_ablate_by_cb.erase((__bridge void*)cb);
+}
+
 id<MTLComputePipelineState> g_ablation_owner = nil; ///< the strong reference, so the __bridge'd pointer stays valid
 
 /// \brief The ABLATION pipeline, built lazily on first use (see shared_burst::set_ablation_pipeline).
@@ -438,10 +472,6 @@ id<MTLComputeCommandEncoder> shared_burst::encoder(id<MTLComputePipelineState> p
 
   // The ablation decision belongs to the burst, and this is the one place every stage of it passes
   // through - whether the buffer was created here or adopted from the front end (dev doc 6.133).
-  if (!s.ablate_this_decided) {
-    s.ablate_this_burst   = ablate_next_burst();
-    s.ablate_this_decided = true;
-  }
 
   // A stage that accumulated dispatches (instead of encoding one per call) hands them over here,
   // before the pipeline comparison below decides whether a stage barrier is needed: the barrier
@@ -468,7 +498,7 @@ id<MTLComputeCommandEncoder> shared_burst::encoder(id<MTLComputePipelineState> p
     // barriers, the fence structure and the dispatch grid each caller asks for) stays exactly what the
     // delivery path does, which is the whole point of the arm (dev doc 6.132).
     const id<MTLComputePipelineState> ablate =
-        s.ablate_this_burst ? ablation_pipeline_lazy() : nil;
+        ablation_for_cb(s.cb, /*create=*/true) ? ablation_pipeline_lazy() : nil;
     [s.enc setComputePipelineState:((ablate != nil) ? ablate : pipeline)];
     s.pipeline = pipeline;
   }
@@ -647,7 +677,7 @@ bool shared_burst::commit()
   // taken immediately before it: this buffer can carry the stage fence's wait and the grid-production wait, so
   // the order between its commit and its signaller's is the reading that says whether the wait can resolve.
   const char* burst_label = "lane_burst";
-  if (s.ablate_this_burst) {
+  if (ablation_for_cb(cb, /*create=*/false)) {
     // The ABLATION arm's buffers must be readable on their own: this label is what the Q9-F3 per-label
     // table prints them under, so an ablated hop never contaminates the delivery numbers (dev doc 6.133).
     burst_label = "merged_hop_ablated";
@@ -660,6 +690,7 @@ bool shared_burst::commit()
     burst_label = "merged_hop";
   }
 #endif
+  forget_ablation_for_cb(cb);
   metal::shared_queue::arm_gpu_time(cb, metal::shared_queue::queue_kind::back_end, burst_label);
   metal::shared_queue::note_commit_order(cb);
   // Dev doc 6.95, the tail mark: this is the hop's LAST host act - after it the CPU stands aside (G2). The
