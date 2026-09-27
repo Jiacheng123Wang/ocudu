@@ -8068,6 +8068,39 @@ done
 * **prize 的量级**：前端块 ~430–445 µs 是 ~470 µs 窗口的九成；按 §7.6.1/本节的 **1.77–1.99×** 放大，若它能降到离线价（~47 µs），V1 大致 **−700…−800 µs**（即 ~600–700 µs V1）。**但机制在 ~30 条离线臂 + 12 条腿之后仍然未知**，这是要不要继续投入的分水岭。
 
 
+### 6.128 关 D1 的测量臂（`p77-n78-nod1`）—— **预登记**（用户 2026-09-27 裁决：先飞这一条）
+
+> **问题**：那 ~443 µs 到底是"**未提交交棒**（D1 的块 cb）"的属性，还是"**打包的 14 组派发**"本身的属性？
+> 已知的两个端点：**plain 路**（引擎自己提交、1 变换/cb、前端队列）= **46.7 µs**；**D1 块 cb**（未提交交棒、14 变换/派发）= **443.5 µs**。
+> 这条臂把 **D1 关掉**，让前端块回到"引擎自己提交"的形态，从而把这两个变量分开。
+
+**命令**（一条腿，独立跑）：
+
+```bash
+cd /Users/jiachengwang/dev/ocudu && sudo -E LEG_CONFIG=configs/gnb_rf_b200_tdd_n78_20mhz.yml bash \
+  doc_chinese/phy_pipeline_gpu/wip/run_leg.sh gpu p77-n78-nod1 \
+  --regime=stress \
+  --expert_execution.threads.upper_phy.max_pusch_and_srs_concurrency=2 \
+  OCUDU_METAL_GPU_TIME=1 OCUDU_UL_PHASE_SEGMENTS=1 OCUDU_DFT_BATCH_SYMBOLS=14 \
+  OCUDU_DFT_RELEASE_BLOCK=0
+```
+
+**这条臂会同时改动的东西**（不是单变量，登记在案）：① 关 D1 ⇒ 前端块由**引擎自己提交**（不再是 lane 提交的未提交块）；② `dft_queue()` 因此回到**前端队列**（§6.84①）；
+③ 估计器无法 adopt ⇒ 一跳变成 **3 条 cb**（前端 / ch_wt / merged_hop）⇒ `cbs/lane` **3.00**（V4 代理量，**测量臂**）；
+④ 契约里 `dft radio inputs` 的**路线分布会翻**（plain 路 ≈ 全部）——这是**预期**，不是缺陷。
+
+**判据（先写死，跑完不追认）**：
+
+| 读数 | 若 **≈47 µs**（像 plain 路）| 若 **≈440 µs**（不变）|
+|---|---|---|
+| `dft_front_end` 的 exec p50（新腿里前端块会带这个 label）| ★ **触发点 = 未提交交棒（D1）本身** ⇒ 下一步问"交棒的哪一部分"（提交线程/时刻、队列、以及是否存在 **G1/G2 兼容**的等价形态）| ★ **触发点 = 打包的 14 组派发本身** ⇒ "空口线程组不并行"成立为**平台属性**，杠杆只剩**改 kernel 形状**（一个线程组做多个变换）|
+| `[metal_stats] gpu busy (front_end)` 的 mean | 同上（前端块那时会被算进 front-end 队列）| 同上 |
+| `[ul_gpu_lane] dft busy` / 其 min | 若中位塌到 ~47 而 min 不变 ⇒ 同左 | 若仍 ~430 ⇒ 同右 |
+
+**不许变（G1/G2 的红线，这条臂必须保住）**：`host device data crossings` **0.00 + 0.00 / 跳**、`host sample assembly … 0 copied`、
+`radio sample continuity: 0 gaps`、`gaps=0`、`rx_overflows=0`；**允许变且要登记**：`cbs/lane`（2.00 → 3.00）、V1（预计变差，`p42`/`p52` 的历史同族读数在 +130…+150 µs 量级）、`merged_hop` 的窗口（若前端工作从跳内搬出去，它应回落到 ~100 µs 量级 = 1 派发 + 4 条 burst）。
+
+
 ## 7. 杠杆与候选改动（技术账）
 
 ### 7.1 归属式预算（优化对象的量化锚点，腿 `s82`，中位 µs）
