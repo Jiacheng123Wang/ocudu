@@ -8725,6 +8725,29 @@ python3 doc_chinese/phy_latency/wip/ul_grant_stats.py /tmp/gnb_n78_ul_ab.log
 * 附：`rv` 臂那次**没有优雅退出**（`Could not stop application after 5 seconds. Forcing exit.` ⇒ 日志以 `[APP] [E] Emergency flush of the logger` 结尾，`[metal_stats]` 那份停机报告没了）。
   对**本问题无影响**（grant 读数是 logger 行、实时落盘），但那次运行的**时延读数缺失**；这是记录里 `p14` 同族现象的再一次出现，值得单独留一眼。
 
+#### ⑥ 追问："那次没优雅退出"是偶发还是错误？—— **偶发（12/248 ≈ 5%）、不是运行错误，但确实吃掉一部分读数**（2026-09-27 量的）
+
+* **机制（读码）**：`lib/support/signal_handling.cpp`。第一次 SIGINT ⇒ 应用的 interrupt handler（`is_app_running=false`）+ **`::alarm(5)`**（`TERMINATION_TIMEOUT_S = 5`，编译期可由 `-DTERM_TIMEOUT_S=<n>` 覆盖）。
+  应用若 **5 s 内没退完**，SIGALRM 触发 ⇒ 打印 `Could not stop application after 5 seconds. Forcing exit.` ⇒ 跑 cleanup handler（**它打的就是 `[APP] [E] Emergency flush of the logger`**，顺带 flush 日志）⇒ **`std::raise(SIGKILL)`**（所以 shell 报 `Killed: 9`）。
+  ⇒ **这不是崩溃**：`raise(SIGKILL)` 会**跳过 atexit**，所以丢的是"停机报告"，不是数据。
+* **那一次卡在哪**：`rv` 臂日志的有序停机是走完的 —— `CU-UP stopped successfully` → `CU-CP stopped successfully` → `Closing PCAP files...` → `PCAP files successfully closed.`（08:23:59.632），**之后 4.8 s** 才是 Emergency flush（08:24:04.447）。
+  ⇒ 卡点在 **PCAP 关闭之后的最后一段 teardown**（DU/lower-PHY 停机、worker pool、UHD/电台关闭），**不在数据路径**；日志本身无法指出是哪一次阻塞调用。
+* **频率（量出来的）**：**248 条腿里 12 条**（≈5%）打印过 `Forcing exit`；横跨 09-20…09-27、跨多种配置（`p14-conc2`、`p28-txslack`、`p70-spp1024`、`p77/p78` 的**第一次**尝试、`s13p4-phases`、`s33*`、`s35-d1-keyed`、`s76-wall-premerge`）⇒ **与 `rv` 臂、与并发度都无关**，是这套停机路径的固有偶发。
+* ★ **代价（实测对比：p77 第一次【异常】vs `p86`【正常】）**：
+  | 报告行 | 异常退出 | 正常退出 |
+  |---|---|---|
+  | `[metal_stats] …`（含 **Q9-F3 per-label 表**、dft commits、fence wait）| **0** | 1 |
+  | `[ul_gpu_lane] …`（`residency`/`busy split`/`cbs/lane`）| **0** | 1 |
+  | `[ul_rx_pool] …` / `[ul_rx] blocks=…` | **0** | 1 |
+  | `[phy_pipeline] contract …` / `lane host participation` / `[ul_by_size]` / **`[ul_gpu_pipeline] samples`（V1）** | 1 | 1 |
+  ⇒ 丢的是**停机路径上还没打出来的那些**（顺序相关，不是固定集合）：`p14` 那次连契约都丢了，而 `p77`/`p70` 保住了契约与 V1。
+  ⇒ **对吞吐 A/B 无影响**（判读用的 SCHED/PHY grant 行是实时 logger 行）；但对**时延腿**，丢的正是审计要读的那几张表 ⇒ **这种腿必须重飞**（记录里 p77 就是这么做的：0931 那次被吃掉，被引用的是 0940 那次健康的）。
+* **三个可选处置**（按代价排序）：
+  1. **零成本（纪律）**：看到 `Forcing exit` 就按"报告不完整"登记；时延腿重飞，吞吐/调度类判读照用（本次即如此）。
+  2. **一行构建选项（治标、立竿见影）**：`TERMINATION_TIMEOUT_S` 支持 `-DTERM_TIMEOUT_S=<n>` 覆盖 ⇒ 给 teardown 20 s，这类丢失基本消失。
+  3. **定位根因（治本、低优先、另开一线）**：在 PCAP 关闭之后的每一步之间加 logger 行，把"卡在哪一步"变成读数。这是真实缺陷，但不属于吞吐/时延主线。
+
+
 
 ## 7. 杠杆与候选改动（技术账）
 
